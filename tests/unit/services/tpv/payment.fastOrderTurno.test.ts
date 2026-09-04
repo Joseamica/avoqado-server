@@ -55,6 +55,7 @@ jest.mock('@/services/inventory/inventoryPosting.service', () => ({
   applySalePosting: jest.fn(),
 }))
 
+import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { recordFastPayment } from '@/services/tpv/payment.tpv.service'
 
@@ -170,10 +171,117 @@ function installDistinctTransaction(candidate: { id: string; status: string } | 
   return { ops, shiftFindFirst, shiftUpdateMany, activityCreate }
 }
 
+function installStatefulFastP2002Rollback() {
+  const committed = {
+    shift: { totalSales: 0, totalTips: 0, totalOrders: 0 },
+    orders: [] as any[],
+    loserPayments: [] as any[],
+    activityLogs: [] as any[],
+  }
+  const attempted = { claims: 0, orders: 0 }
+  const ops: string[] = []
+
+  prismaMock.$transaction.mockImplementationOnce(async (callback: any) => {
+    const staged = {
+      shift: { ...committed.shift },
+      orders: [...committed.orders],
+      loserPayments: [...committed.loserPayments],
+      activityLogs: [...committed.activityLogs],
+    }
+    const tx = {
+      ...prismaMock,
+      shift: {
+        ...prismaMock.shift,
+        findFirst: jest.fn(async () => {
+          ops.push('shift.findFirst')
+          return { id: 'shift-open', status: 'OPEN' }
+        }),
+        updateMany: jest.fn(async ({ data }: any) => {
+          ops.push('shift.updateMany')
+          attempted.claims += 1
+          staged.shift.totalSales += Number(data.totalSales.increment)
+          staged.shift.totalTips += Number(data.totalTips.increment)
+          staged.shift.totalOrders += Number(data.totalOrders.increment)
+          return { count: 1 }
+        }),
+      },
+      order: {
+        ...prismaMock.order,
+        create: jest.fn(async ({ data }: any) => {
+          ops.push('order.create')
+          attempted.orders += 1
+          const created = { id: 'fast-order-loser', venueId: VENUE, ...data }
+          staged.orders.push(created)
+          return created
+        }),
+      },
+      payment: {
+        ...prismaMock.payment,
+        create: jest.fn(async () => {
+          ops.push('payment.create:P2002')
+          throw new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+            code: 'P2002',
+            clientVersion: 'test',
+            meta: { target: ['venueId', 'idempotencyKey'] },
+          })
+        }),
+      },
+      activityLog: {
+        ...prismaMock.activityLog,
+        create: jest.fn(async ({ data }: any) => {
+          ops.push('activityLog.create')
+          staged.activityLogs.push(data)
+          return data
+        }),
+      },
+    }
+
+    const result = await callback(tx)
+    committed.shift = { ...staged.shift }
+    committed.orders = [...staged.orders]
+    committed.loserPayments = [...staged.loserPayments]
+    committed.activityLogs = [...staged.activityLogs]
+    return result
+  })
+
+  return { committed, attempted, ops }
+}
+
 describe('recordFastPayment — la orden FAST cae en el turno de caja del NEGOCIO', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     installFakes()
+  })
+
+  it.each(['FAILED', 'PENDING'] as const)(
+    'un Payment %s no es dinero capturado: Order/Payment quedan sin turno, claim ni anomalía post-cierre',
+    async status => {
+      const tx = installDistinctTransaction({ id: 'shift-open', status: 'OPEN' })
+
+      await recordFastPayment(VENUE, cobroRapido({ status }), 'user-1')
+
+      expect(datosDeLaOrden().shiftId ?? null).toBeNull()
+      expect(datosDelCobro()).toMatchObject({ status, shiftId: null })
+      expect(tx.shiftFindFirst).not.toHaveBeenCalled()
+      expect(tx.shiftUpdateMany).not.toHaveBeenCalled()
+      expect(tx.activityCreate).not.toHaveBeenCalled()
+    },
+  )
+
+  it('snapshottea PENDING una vez aunque la Order mutile el body a COMPLETED antes de crear Payment', async () => {
+    const mutablePaymentData: any = cobroRapido({ status: 'PENDING' })
+    installDistinctTransaction({ id: 'shift-open', status: 'OPEN' })
+    prismaMock.order.create.mockImplementationOnce(async ({ data }: any) => {
+      mutablePaymentData.status = 'COMPLETED'
+      const created = { id: 'fast-order-mutating', venueId: VENUE, orderNumber: data.orderNumber, ...data }
+      orders.push(created)
+      return created
+    })
+
+    await recordFastPayment(VENUE, mutablePaymentData, 'user-1')
+
+    expect(datosDeLaOrden().shiftId ?? null).toBeNull()
+    expect(datosDelCobro()).toMatchObject({ status: 'PENDING', shiftId: null })
   })
 
   it('resuelve y reclama dentro de tx ANTES de crear; la orden y el cobro llevan el MISMO ganador', async () => {
@@ -218,14 +326,13 @@ describe('recordFastPayment — la orden FAST cae en el turno de caja del NEGOCI
     expect(datosDelCobro().shiftId ?? null).toBeNull()
     expect(tx.activityCreate).toHaveBeenCalledWith({
       data: expect.objectContaining({
-        action: 'PAYMENT_PENDING_POST_CLOSE_RECONCILIATION',
+        action: 'PAYMENT_WITHOUT_SHIFT',
         entity: 'Payment',
         entityId: 'pay-1',
         staffId: 'staff-1',
         venueId: VENUE,
         data: expect.objectContaining({
           reason: 'NO_SHIFT',
-          candidateShiftId: null,
           paymentId: 'pay-1',
           orderId: 'fast-order-1',
           channel: 'recordFastPayment',
@@ -273,5 +380,31 @@ describe('recordFastPayment — la orden FAST cae en el turno de caja del NEGOCI
     expect(prismaMock.$transaction).not.toHaveBeenCalled()
     expect(tx.shiftUpdateMany).not.toHaveBeenCalled()
     expect(tx.activityCreate).not.toHaveBeenCalled()
+  })
+
+  it('P2002 después de claim/Order revierte ambos y devuelve el Payment ganador sin anomalía del perdedor', async () => {
+    const winner = {
+      id: 'pay-winner',
+      orderId: 'fast-order-winner',
+      status: 'COMPLETED',
+      amount: new Prisma.Decimal(100),
+      tipAmount: new Prisma.Decimal(0),
+      method: 'CASH',
+      receipts: [],
+      idempotencyKey: 'fast-p2002',
+    }
+    prismaMock.payment.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(winner)
+    const rollback = installStatefulFastP2002Rollback()
+
+    const result: any = await recordFastPayment(VENUE, cobroRapido({ idempotencyKey: 'fast-p2002' }), 'user-1')
+
+    expect(result.id).toBe('pay-winner')
+    expect(rollback.attempted).toEqual({ claims: 1, orders: 1 })
+    expect(rollback.ops).toEqual(['shift.findFirst', 'shift.updateMany', 'order.create', 'payment.create:P2002'])
+    expect(rollback.committed.shift).toEqual({ totalSales: 0, totalTips: 0, totalOrders: 0 })
+    expect(rollback.committed.orders).toEqual([])
+    expect(rollback.committed.loserPayments).toEqual([])
+    expect(rollback.committed.activityLogs).toEqual([])
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
   })
 })

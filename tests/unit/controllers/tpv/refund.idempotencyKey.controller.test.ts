@@ -164,4 +164,13 @@ describe('refund.tpv.controller — la llave de idempotencia llega al servicio',
     expect(datosEntregados().venueId).toBe('venue-1')
     expect(recordRefundMock.mock.calls[0][0]).toBe('venue-1')
   })
+
+  it('descarta el staffId del body y entrega por separado al actor autenticado', async () => {
+    const req = mockReq({ ...cuerpoBase, staffId: 'staff-hostil-de-otro-tenant' })
+
+    await controller.recordRefund(req, mockRes(), jest.fn())
+
+    expect(datosEntregados().staffId).toBeUndefined()
+    expect(recordRefundMock.mock.calls[0][2]).toBe('staff-1')
+  })
 })

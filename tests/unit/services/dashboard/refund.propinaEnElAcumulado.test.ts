@@ -80,7 +80,22 @@ const acumuladoEscrito = () => prismaMock.payment.update.mock.calls[0][0].data.p
 describe('Task 5r — la propina ya devuelta cuenta en el acumulado del dashboard', () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
+    prismaMock.payment.findFirst.mockResolvedValue({ orderId: 'order-1' } as any)
+    prismaMock.$transaction.mockImplementation(async (callback: any) => {
+      const queryRaw = jest.fn(async (...args: any[]) => {
+        const query = args[0]
+        const sql = Array.isArray(query)
+          ? query.join('?')
+          : Array.isArray(query?.strings)
+            ? query.strings.join('?')
+            : Array.isArray(query?.sql)
+              ? query.sql.join('?')
+              : String(query)
+        if (sql.includes('FROM "Order"')) return [{ id: 'order-1' }]
+        return (prismaMock.$queryRaw as any)(...args)
+      })
+      return callback({ ...(prismaMock as any), $queryRaw: queryRaw })
+    })
     prismaMock.shift.findFirst.mockResolvedValue(null)
     prismaMock.venueTransaction.create.mockResolvedValue({ id: 'vtx-1' })
     prismaMock.payment.update.mockResolvedValue({ id: 'payment-original' })

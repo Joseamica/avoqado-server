@@ -14,6 +14,23 @@ interface MessageCache {
 // Cache for recently processed messages (last 5 minutes)
 const processedMessages: MessageCache = {}
 const MESSAGE_CACHE_TTL = 5 * 60 * 1000 // 5 minutes in milliseconds
+const TRANSIENT_REQUEUE_DELAY_MS = 1000
+
+const isTransientShiftConflict = (error: unknown): boolean => {
+  if (!error || typeof error !== 'object' || !('code' in error)) return false
+  const code = (error as { code?: unknown }).code
+  return code === 'SHIFT_CLOSE_IN_PROGRESS' || code === 'SHIFT_CONCURRENT_UPDATE'
+}
+
+const waitBeforeRequeue = () => new Promise<void>(resolve => setTimeout(resolve, TRANSIENT_REQUEUE_DELAY_MS))
+
+const warnWithoutThrow = (message: string, error: unknown): void => {
+  try {
+    logger.warn(message, error)
+  } catch {
+    // Un logger degradado no puede convertir una recuperación broker-owned en un rejection.
+  }
+}
 
 // Clean up expired messages from cache every minute
 setInterval(() => {
@@ -42,12 +59,13 @@ const handleMessage = async (msg: ConsumeMessage | null) => {
   if (!msg) return
 
   const channel = getRabbitMQChannel()
+  let messageId: string | undefined
   try {
     const payload = JSON.parse(msg.content.toString())
     const routingKey = msg.fields.routingKey
 
     // Generate message ID for deduplication
-    const messageId = getMessageId(msg, payload)
+    messageId = getMessageId(msg, payload)
     const externalId = payload?.orderData?.externalId || payload?.externalId
 
     // Check if we've already processed this message recently
@@ -72,6 +90,25 @@ const handleMessage = async (msg: ConsumeMessage | null) => {
     channel.ack(msg)
     logger.info(`👍 Mensaje [${routingKey}] procesado y confirmado.`)
   } catch (error) {
+    // La marca se escribió ANTES del dispatch; conservarla tras cualquier error absorbería el
+    // requeue o un replay manual como "duplicado" y haría ack sin volver a ejecutar el evento.
+    if (messageId) delete processedMessages[messageId]
+
+    if (isTransientShiftConflict(error)) {
+      warnWithoutThrow(`⏳ Conflicto transitorio al procesar [${msg.fields.routingKey}]. Reencolando con demora.`, error)
+      // Mientras esperamos el mensaje sigue broker-owned/unacked; si el proceso muere RabbitMQ
+      // lo devuelve solo. La pausa acotada evita un hot loop con prefetch(1).
+      await waitBeforeRequeue()
+      try {
+        channel.nack(msg, false, true)
+      } catch (nackError) {
+        // No buscar otro canal ni confirmar: al cerrarse el canal capturado, RabbitMQ ya recupera
+        // este mensaje no confirmado. Un segundo nack sobre otro canal sería inválido.
+        warnWithoutThrow('⚠️ El canal capturado cerró antes del nack de requeue; RabbitMQ recuperará el mensaje no confirmado.', nackError)
+      }
+      return
+    }
+
     logger.error(`🔥 Error al procesar mensaje [${msg.fields.routingKey}]. Enviando a Dead-Letter Queue.`, error)
     channel.nack(msg, false, false)
   }

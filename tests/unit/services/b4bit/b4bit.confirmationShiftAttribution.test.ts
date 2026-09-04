@@ -8,12 +8,14 @@
 
 jest.mock('@/utils/prismaClient', () => {
   const client: any = {
-    payment: { findUnique: jest.fn(), findMany: jest.fn(), update: jest.fn(), updateMany: jest.fn(), create: jest.fn() },
+    payment: { findUnique: jest.fn(), findMany: jest.fn(), count: jest.fn(), update: jest.fn(), updateMany: jest.fn(), create: jest.fn() },
     order: { findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn(), create: jest.fn() },
     orderItem: { findMany: jest.fn().mockResolvedValue([]) },
     venue: { findUnique: jest.fn() },
     venueCryptoConfig: { findUnique: jest.fn() },
+    venueSettings: { findUnique: jest.fn() },
     shift: { findFirst: jest.fn(), updateMany: jest.fn() },
+    activityLog: { create: jest.fn() },
     terminal: { findFirst: jest.fn() },
     $queryRaw: jest.fn(),
     $transaction: jest.fn(),
@@ -55,10 +57,12 @@ import type { B4BitWebhookPayload } from '@/services/b4bit/types'
 import prisma from '@/utils/prismaClient'
 
 const mockPrisma = prisma as unknown as {
-  payment: { findUnique: jest.Mock; findMany: jest.Mock; update: jest.Mock; updateMany: jest.Mock }
+  payment: { findUnique: jest.Mock; findMany: jest.Mock; count: jest.Mock; update: jest.Mock; updateMany: jest.Mock }
   order: { findUnique: jest.Mock; updateMany: jest.Mock }
   orderItem: { findMany: jest.Mock }
   shift: { findFirst: jest.Mock; updateMany: jest.Mock }
+  venueSettings: { findUnique: jest.Mock }
+  activityLog: { create: jest.Mock }
   $queryRaw: jest.Mock
   $transaction: jest.Mock
 }
@@ -131,6 +135,7 @@ beforeEach(() => {
   mockPrisma.order.updateMany.mockReset()
   mockPrisma.order.findUnique.mockReset()
   mockPrisma.payment.findMany.mockReset()
+  mockPrisma.payment.count.mockReset()
   mockPrisma.shift.findFirst.mockReset()
   mockPrisma.shift.updateMany.mockReset()
   mockPrisma.$queryRaw.mockReset()
@@ -140,10 +145,13 @@ beforeEach(() => {
   mockPrisma.payment.updateMany.mockResolvedValue({ count: 1 })
   mockPrisma.order.findUnique.mockResolvedValue(order())
   mockPrisma.payment.findMany.mockResolvedValue([{ amount: d('125.50'), tipAmount: d('7.25'), type: 'REGULAR' }])
+  mockPrisma.payment.count.mockResolvedValue(0)
   mockPrisma.order.updateMany.mockResolvedValue({ count: 1 })
   mockPrisma.orderItem.findMany.mockResolvedValue([])
-  mockPrisma.shift.findFirst.mockResolvedValue({ id: CONFIRMATION_SHIFT_B })
+  mockPrisma.shift.findFirst.mockResolvedValue({ id: CONFIRMATION_SHIFT_B, status: 'OPEN' })
   mockPrisma.shift.updateMany.mockResolvedValue({ count: 1 })
+  mockPrisma.venueSettings.findUnique.mockResolvedValue({ enableShifts: true })
+  mockPrisma.activityLog.create.mockResolvedValue({ id: 'audit-payment-without-shift' })
   mockPrisma.$queryRaw.mockResolvedValue([{ id: PAYMENT_ID }])
 })
 
@@ -155,15 +163,16 @@ describe('B4Bit — final shift attribution at confirmation', () => {
     await processWebhook(webhook())
 
     expect(mockPrisma.shift.findFirst).toHaveBeenCalledWith({
-      where: { venueId: VENUE_ID, status: 'OPEN', endTime: null },
+      where: { venueId: VENUE_ID, endTime: null },
       orderBy: { startTime: 'desc' },
-      select: { id: true },
+      select: { id: true, status: true },
     })
     expect(mockPrisma.shift.updateMany).toHaveBeenCalledWith({
       where: { id: CONFIRMATION_SHIFT_B, venueId: VENUE_ID, status: 'OPEN', endTime: null },
       data: {
         totalSales: { increment: pendingPayment.amount },
         totalTips: { increment: pendingPayment.tipAmount },
+        totalOrders: { increment: 1 },
       },
     })
     expect(mockPrisma.shift.updateMany).toHaveBeenCalledTimes(1)
@@ -174,6 +183,7 @@ describe('B4Bit — final shift attribution at confirmation', () => {
       }),
     )
     expect(mockPrisma.order.updateMany.mock.calls[0][0].data).not.toHaveProperty('shiftId')
+    expect(mockPrisma.activityLog.create).not.toHaveBeenCalled()
   })
 
   it('completes with no shift when none is open, never retaining provisional A', async () => {
@@ -185,6 +195,24 @@ describe('B4Bit — final shift attribution at confirmation', () => {
     expect(mockPrisma.shift.updateMany).not.toHaveBeenCalled()
     expect(finalAttributionWrite()?.data.status).toBe('COMPLETED')
     expect(finalAttributionWrite()?.data.shiftId).toBeNull()
+    expect(mockPrisma.activityLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: 'PAYMENT_WITHOUT_SHIFT',
+        entity: 'Payment',
+        entityId: PAYMENT_ID,
+        venueId: VENUE_ID,
+        staffId: 'cstaff000000000000000001',
+        data: expect.objectContaining({
+          reason: 'NO_SHIFT',
+          channel: 'b4bitWebhook',
+          paymentId: PAYMENT_ID,
+          orderId: ORDER_ID,
+          amountPesos: '125.50',
+          tipPesos: '7.25',
+          totalPesos: '132.75',
+        }),
+      }),
+    })
   })
 
   it('completes with no shift when B closes before its conditional claim', async () => {
@@ -194,6 +222,36 @@ describe('B4Bit — final shift attribution at confirmation', () => {
     await processWebhook(webhook())
 
     expect(finalAttributionWrite()?.data.shiftId).toBeNull()
+    expect(mockPrisma.activityLog.create.mock.calls[0][0].data.data).toMatchObject({
+      reason: 'CLAIM_LOST',
+      candidateShiftId: CONFIRMATION_SHIFT_B,
+      observedShiftStatus: 'OPEN',
+    })
+  })
+
+  it('a CLOSING shift keeps the payment and records SHIFT_NOT_OPEN exactly once', async () => {
+    mockPrisma.payment.findUnique.mockResolvedValue(payment())
+    mockPrisma.shift.findFirst.mockResolvedValue({ id: CONFIRMATION_SHIFT_B, status: 'CLOSING' })
+
+    await processWebhook(webhook())
+
+    expect(mockPrisma.shift.updateMany).not.toHaveBeenCalled()
+    expect(mockPrisma.activityLog.create).toHaveBeenCalledTimes(1)
+    expect(mockPrisma.activityLog.create.mock.calls[0][0].data.data).toMatchObject({
+      reason: 'SHIFT_NOT_OPEN',
+      candidateShiftId: CONFIRMATION_SHIFT_B,
+      observedShiftStatus: 'CLOSING',
+    })
+  })
+
+  it('does not alert when shifts are explicitly disabled', async () => {
+    mockPrisma.payment.findUnique.mockResolvedValue(payment())
+    mockPrisma.shift.findFirst.mockResolvedValue(null)
+    mockPrisma.venueSettings.findUnique.mockResolvedValue({ enableShifts: false })
+
+    await processWebhook(webhook())
+
+    expect(mockPrisma.activityLog.create).not.toHaveBeenCalled()
   })
 
   it('a redelivery preserves final B and never increments a shift again', async () => {
@@ -207,7 +265,44 @@ describe('B4Bit — final shift attribution at confirmation', () => {
     expect(mockPrisma.shift.findFirst).not.toHaveBeenCalled()
     expect(mockPrisma.shift.updateMany).not.toHaveBeenCalled()
     expect(paymentWrites().every(write => !Object.prototype.hasOwnProperty.call(write.data, 'shiftId'))).toBe(true)
+    expect(mockPrisma.activityLog.create).not.toHaveBeenCalled()
   })
+
+  it.each(['FAILED', 'PROCESSING'] as const)(
+    'a CO received for durable %s preserves that state and performs no money side effects',
+    async durableStatus => {
+      let durablePayment = payment({ status: durableStatus, shiftId: null })
+
+      mockPrisma.payment.findUnique.mockImplementation(async (args: any) => {
+        if (args.include) return { ...durablePayment }
+        return { status: durablePayment.status, processorData: durablePayment.processorData }
+      })
+      mockPrisma.payment.updateMany.mockImplementation(async ({ where, data }: any) => {
+        const statusMatches =
+          where.status === undefined ||
+          where.status === durablePayment.status ||
+          (where.status?.not !== undefined && durablePayment.status !== where.status.not)
+        if (!statusMatches) return { count: 0 }
+        durablePayment = { ...durablePayment, ...data }
+        return { count: 1 }
+      })
+      mockPrisma.payment.update.mockImplementation(async ({ data }: any) => {
+        durablePayment = { ...durablePayment, ...data }
+        return durablePayment
+      })
+
+      const result = await processWebhook(webhook())
+
+      expect(result.action).toBe('IGNORED')
+      expect(durablePayment.status).toBe(durableStatus)
+      expect(mockPrisma.shift.findFirst).not.toHaveBeenCalled()
+      expect(mockPrisma.shift.updateMany).not.toHaveBeenCalled()
+      expect(mockPrisma.order.findUnique).not.toHaveBeenCalled()
+      expect(mockPrisma.order.updateMany).not.toHaveBeenCalled()
+      expect(mockPrisma.activityLog.create).not.toHaveBeenCalled()
+      expect(mockPrisma.payment.updateMany).not.toHaveBeenCalled()
+    },
+  )
 
   it('a concurrent CAS loser neither moves the final shift nor increments totals', async () => {
     mockPrisma.payment.findUnique
@@ -219,7 +314,7 @@ describe('B4Bit — final shift attribution at confirmation', () => {
     await processWebhook(webhook())
 
     expect(mockPrisma.payment.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: PAYMENT_ID, venueId: VENUE_ID, status: { not: 'COMPLETED' } } }),
+      expect.objectContaining({ where: { id: PAYMENT_ID, venueId: VENUE_ID, status: 'PENDING' } }),
     )
     expect(mockPrisma.shift.updateMany).not.toHaveBeenCalled()
     expect(mockPrisma.payment.update.mock.calls.at(-1)?.[0].data).not.toHaveProperty('shiftId')
@@ -237,7 +332,7 @@ describe('B4Bit — final shift attribution at confirmation', () => {
         return { ...durablePayment }
       })
       mockPrisma.payment.updateMany.mockImplementation(async ({ where, data }: any) => {
-        if (where.status?.not === 'COMPLETED' && durablePayment.status === 'COMPLETED') return { count: 0 }
+        if (where.status === 'PENDING' && durablePayment.status !== 'PENDING') return { count: 0 }
         durablePayment = { ...durablePayment, ...data }
         return { count: 1 }
       })
@@ -259,8 +354,14 @@ describe('B4Bit — final shift attribution at confirmation', () => {
       expect(lateFailure.action).toBe('CONFIRMED')
       expect(durablePayment.processorData).toMatchObject({ lateFailureIgnored: true, lastStatus: 'CO' })
       for (const [sql, lockedPaymentId, lockedVenueId] of mockPrisma.$queryRaw.mock.calls) {
-        expect((sql as TemplateStringsArray).join('?')).toMatch(/FROM "Payment".*"venueId".*FOR UPDATE/s)
-        expect([lockedPaymentId, lockedVenueId]).toEqual([PAYMENT_ID, VENUE_ID])
+        const statement = (sql as TemplateStringsArray).join('?')
+        if (statement.includes('FROM "Payment"')) {
+          expect(statement).toMatch(/FROM "Payment".*"venueId".*FOR UPDATE/s)
+          expect([lockedPaymentId, lockedVenueId]).toEqual([PAYMENT_ID, VENUE_ID])
+        } else {
+          expect(statement).toMatch(/FROM "Order".*"venueId".*FOR UPDATE/s)
+          expect([lockedPaymentId, lockedVenueId]).toEqual([ORDER_ID, VENUE_ID])
+        }
       }
     },
   )
@@ -275,7 +376,7 @@ describe('B4Bit — final shift attribution at confirmation', () => {
       return { ...durablePayment }
     })
     mockPrisma.payment.updateMany.mockImplementation(async ({ where, data }: any) => {
-      if (where.status?.not === 'COMPLETED' && durablePayment.status === 'COMPLETED') return { count: 0 }
+      if (where.status === 'PENDING' && durablePayment.status !== 'PENDING') return { count: 0 }
       durablePayment = { ...durablePayment, ...data }
       return { count: 1 }
     })
@@ -333,6 +434,7 @@ describe('B4Bit — final shift attribution at confirmation', () => {
       data: {
         totalSales: { increment: expect.any(Prisma.Decimal) },
         totalTips: { increment: expect.any(Prisma.Decimal) },
+        totalOrders: { increment: 1 },
       },
     })
   })

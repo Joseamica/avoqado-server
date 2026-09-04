@@ -123,8 +123,9 @@ export async function settleOrder(
   try {
     const { venueId, orderId } = req.params
     const { notes } = req.body
+    const { userId } = (req as any).authContext
 
-    const result = await orderDashboardService.settleOrder(venueId, orderId, notes)
+    const result = await orderDashboardService.settleOrder(venueId, orderId, notes, userId)
 
     res.status(200).json(result)
   } catch (error) {

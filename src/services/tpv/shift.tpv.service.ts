@@ -17,6 +17,7 @@ import {
 import { SHIFT_CLOSE_STALE_MS } from './shiftCloseClaim.constants'
 import { abrirTurnoDeCaja, cerrarTurnoDeCaja, esperadoDelCajonAbierto } from '../shared/turnoDeCaja'
 import { asegurarLaLiga } from '../shared/parejaDeCierre'
+import { lockShiftLifecycleForVenue } from '../shared/shiftLifecycleLock'
 
 interface ShiftFilters {
   staffId?: string
@@ -215,23 +216,39 @@ function instanteDe(valor: unknown): number | null {
  *
  * Es el mismo patrón que `gavetaCerrable` (`shared/turnoDeCaja.ts:888`): ventana + `OR` sobre el id.
  *
- * 🔴 FALLA CERRADO, y `endTime === null` NO es lo mismo que `endTime` ausente. `null` significa
- * turno abierto (sin techo); `undefined` significa que el campo no se pidió, y de un dato que no
- * está no se puede afirmar pertenencia. Un renglón que se cae de la pantalla se ve y se investiga;
- * dinero que se cuenta en un turno que no lo cobró, no.
+ * 🔴 El techo depende del ESTADO, no sólo de `endTime`: OPEN real queda abierto; CLOSING usa
+ * `updatedAt`, que `claimShiftForClose` fija al `claimedAt` del CAS; CLOSED usa `endTime`. Durante
+ * CLOSING ese `updatedAt` es además el testigo que exigen el cierre final y el watchdog, por lo que
+ * ningún editor/cobro puede moverlo (los writers vecinos llevan CAS/guard de estado).
+ *
+ * FALLA CERRADO: un estado/cutoff ausente o ilegible nunca adopta un huérfano. Un renglón que se
+ * cae de la pantalla se ve y se investiga; dinero que se cuenta en un turno que no lo cobró, no.
  */
 export function cobroSinTurnoPerteneceAlTurno(
   cobro: { createdAt?: Date | string | null },
-  turno: { startTime?: Date | string | null; endTime?: Date | string | null },
+  turno: {
+    status?: ShiftStatus | string | null
+    startTime?: Date | string | null
+    endTime?: Date | string | null
+    updatedAt?: Date | string | null
+  },
 ): boolean {
   const ocurrio = instanteDe(cobro?.createdAt)
   const abre = instanteDe(turno?.startTime)
   if (ocurrio === null || abre === null) return false
   if (ocurrio < abre) return false
-  if (turno.endTime === null) return true
-  const cierra = instanteDe(turno.endTime)
-  if (cierra === null) return false
-  return ocurrio <= cierra
+
+  if (turno.status === ShiftStatus.OPEN) return turno.endTime === null
+  if (turno.status === ShiftStatus.CLOSING) {
+    if (turno.endTime !== null) return false
+    const claimedAt = instanteDe(turno.updatedAt)
+    return claimedAt !== null && ocurrio <= claimedAt
+  }
+  if (turno.status === ShiftStatus.CLOSED) {
+    const cierra = instanteDe(turno.endTime)
+    return cierra !== null && ocurrio <= cierra
+  }
+  return false
 }
 
 /**
@@ -338,6 +355,7 @@ export async function getShifts(
                 //
                 // NO se filtra por `type`: el reembolso llega con `amount` negativo y RESTA, igual
                 // que en `aggregateShiftPayments` («el cierre nunca ramificó por `type`»).
+                venueId,
                 status: 'COMPLETED',
                 ...(staffId ? { processedById: staffId } : {}),
                 // Filter payments by date range if provided
@@ -369,6 +387,7 @@ export async function getShifts(
         payments: {
           where: {
             // Misma regla que la rama por orden de arriba: sólo cobros COMPLETED.
+            venueId,
             status: 'COMPLETED',
             ...(staffId ? { processedById: staffId } : {}),
             // Filter payments by date range if provided
@@ -431,17 +450,12 @@ export async function getShifts(
     // Se conserva el orden actual (primero los de la orden) para no mover nada más.
     const allPayments = [...new Map([...orderPayments, ...shift.payments].map(payment => [payment.id, payment])).values()]
 
-    // Calculate tip sum from payment allocations and tipAmount
-    const tipSum = allPayments.reduce((sum, payment) => {
-      const tipAmount = Number(payment.tipAmount || 0)
-      return sum + tipAmount
-    }, 0)
-
-    // Calculate payment sum
-    const paymentSum = allPayments.reduce((sum, payment) => {
-      const paymentAmount = Number(payment.amount || 0)
-      return sum + paymentAmount
-    }, 0)
+    // La fila y el cierre usan la MISMA aritmética Decimal. Aunque la API siga entregando
+    // números por compatibilidad, 0.1 + 0.2 se convierte una sola vez DESPUÉS de sumar y nunca
+    // expone 0.30000000000000004 frente a un 0.30 firmado.
+    const totals = aggregateShiftPayments(allPayments)
+    const tipSum = totals.totalTips.toNumber()
+    const paymentSum = totals.totalSales.toNumber()
 
     // Calculate average tip percentage
     const avgTipPercentage = paymentSum > 0 ? (tipSum / paymentSum) * 100 : 0
@@ -1234,8 +1248,12 @@ function shiftCloseInProgress(): ConflictError {
   return new ConflictError('El cierre de turno ya está en proceso. Intenta de nuevo en unos momentos.', 'SHIFT_CLOSE_IN_PROGRESS')
 }
 
-async function findClosableShift(venueId: string, shiftId: string): Promise<ClosableShift | null> {
-  return prisma.shift.findFirst({
+async function findClosableShift(
+  db: Pick<Prisma.TransactionClient, 'shift'>,
+  venueId: string,
+  shiftId: string,
+): Promise<ClosableShift | null> {
+  return db.shift.findFirst({
     where: { id: shiftId, venueId },
     include: {
       venue: {
@@ -1253,69 +1271,79 @@ async function findClosableShift(venueId: string, shiftId: string): Promise<Clos
  * Claims a shift using OPEN -> CLOSING compare-and-set. A fresh claim is never stolen;
  * a process-abandoned claim older than five minutes can be recovered with a second CAS.
  */
-async function claimShiftForClose(venueId: string, shiftId: string, claimedAt: Date): Promise<ClosableShift> {
-  const shift = await findClosableShift(venueId, shiftId)
-  if (!shift) {
-    throw new NotFoundError('Shift not found or does not belong to this venue')
-  }
-  if (shift.endTime !== null || shift.status === ShiftStatus.CLOSED) {
-    throw new BadRequestError('Shift is already closed')
-  }
+async function claimShiftForClose(venueId: string, shiftId: string, now: () => Date): Promise<{ shift: ClosableShift; claimedAt: Date }> {
+  return prisma.$transaction(async tx => {
+    await lockShiftLifecycleForVenue(tx, venueId)
+    const shift = await findClosableShift(tx, venueId, shiftId)
+    if (!shift) {
+      throw new NotFoundError('Shift not found or does not belong to this venue')
+    }
+    if (shift.endTime !== null || shift.status === ShiftStatus.CLOSED) {
+      throw new BadRequestError('Shift is already closed')
+    }
+    // Esta muestra pertenece al estado autoritativo que acabamos de releer bajo el lock.
+    // Tomarla antes permitiría que un lifecycle writer moviera `startTime` mientras
+    // esperábamos y dejara un intervalo imposible (`startTime > claimedAt`).
+    const claimedAt = now()
 
-  const claim = await prisma.shift.updateMany({
-    where: {
-      id: shiftId,
-      venueId,
-      status: ShiftStatus.OPEN,
-      endTime: null,
-    },
-    data: {
-      status: ShiftStatus.CLOSING,
-      updatedAt: claimedAt,
-    },
-  })
-  if (claim.count === 1) return shift
-
-  const latest = await findClosableShift(venueId, shiftId)
-  if (!latest) {
-    throw new NotFoundError('Shift not found or does not belong to this venue')
-  }
-  if (latest.endTime !== null || latest.status === ShiftStatus.CLOSED) {
-    throw new BadRequestError('Shift is already closed')
-  }
-
-  const staleBefore = new Date(claimedAt.getTime() - SHIFT_CLOSE_STALE_MS)
-  if (latest.status === ShiftStatus.CLOSING && latest.updatedAt instanceof Date && latest.updatedAt.getTime() < staleBefore.getTime()) {
-    const recovered = await prisma.shift.updateMany({
+    const claim = await tx.shift.updateMany({
       where: {
         id: shiftId,
         venueId,
-        status: ShiftStatus.CLOSING,
+        status: ShiftStatus.OPEN,
         endTime: null,
-        updatedAt: latest.updatedAt,
       },
       data: {
         status: ShiftStatus.CLOSING,
         updatedAt: claimedAt,
       },
     })
-    if (recovered.count === 1) return latest
-  }
+    if (claim.count === 1) return { shift, claimedAt }
 
-  throw shiftCloseInProgress()
+    const latest = await findClosableShift(tx, venueId, shiftId)
+    if (!latest) {
+      throw new NotFoundError('Shift not found or does not belong to this venue')
+    }
+    if (latest.endTime !== null || latest.status === ShiftStatus.CLOSED) {
+      throw new BadRequestError('Shift is already closed')
+    }
+
+    const staleBefore = new Date(claimedAt.getTime() - SHIFT_CLOSE_STALE_MS)
+    if (latest.status === ShiftStatus.CLOSING && latest.updatedAt instanceof Date && latest.updatedAt.getTime() < staleBefore.getTime()) {
+      const recovered = await tx.shift.updateMany({
+        where: {
+          id: shiftId,
+          venueId,
+          status: ShiftStatus.CLOSING,
+          endTime: null,
+          updatedAt: latest.updatedAt,
+        },
+        data: {
+          status: ShiftStatus.CLOSING,
+          updatedAt: claimedAt,
+        },
+      })
+      if (recovered.count === 1) return { shift: latest, claimedAt }
+    }
+
+    throw shiftCloseInProgress()
+  })
 }
 
 async function releaseShiftCloseClaim(venueId: string, shiftId: string, claimedAt: Date): Promise<void> {
   try {
-    await prisma.shift.updateMany({
-      where: {
-        id: shiftId,
-        venueId,
-        status: ShiftStatus.CLOSING,
-        endTime: null,
-        updatedAt: claimedAt,
-      },
-      data: { status: ShiftStatus.OPEN },
+    await prisma.$transaction(async tx => {
+      await lockShiftLifecycleForVenue(tx, venueId)
+      await tx.shift.updateMany({
+        where: {
+          id: shiftId,
+          venueId,
+          status: ShiftStatus.CLOSING,
+          endTime: null,
+          updatedAt: claimedAt,
+        },
+        data: { status: ShiftStatus.OPEN },
+      })
     })
   } catch (releaseError) {
     logger.error('[Shift Close] Failed to release CLOSING claim after rollback', {
@@ -1517,32 +1545,90 @@ export function aggregateShiftPayments(payments: ShiftPaymentForTotals[]): Shift
   }
 }
 
+/**
+ * El cierre necesita el total completo, pero nunca hidrata una colección sin techo en una sola
+ * consulta. `id` es único e inmutable: sirve como orden y cursor deterministas aun cuando varios
+ * cobros compartan el mismo `createdAt`.
+ */
+const SHIFT_CLOSE_PAYMENT_PAGE_SIZE = 500
+
+const SHIFT_PAYMENT_TOTALS_SELECT = {
+  id: true,
+  amount: true,
+  tipAmount: true,
+  method: true,
+  // tenderSemantics inputs — un vale que cuenta como efectivo debe llegar al arqueo.
+  fundsFlow: true,
+  tenderTypeId: true,
+  tenderCountsAsCash: true,
+} satisfies Prisma.PaymentSelect
+
+export type ShiftPaymentPageRow = Prisma.PaymentGetPayload<{ select: typeof SHIFT_PAYMENT_TOTALS_SELECT }>
+
+/**
+ * La membresía canónica del snapshot firmado:
+ *
+ * 1. un cobro COMPLETED estampado con el turno cuenta siempre (su identidad gana a la fecha);
+ * 2. un huérfano COMPLETED sólo se adopta si pertenece al mismo venue, su Order pertenece al
+ *    turno y ocurrió dentro de `[startTime, claimedAt]`, ambos extremos inclusivos.
+ *
+ * `shiftId: null` es literal a propósito: un campo ausente/undefined nunca es evidencia de
+ * orfandad. El cierre sólo lee; no backfillea ni reescribe el Payment.
+ */
+function shiftPaymentsForCloseWhere(venueId: string, shiftId: string, startTime: Date, claimedAt: Date): Prisma.PaymentWhereInput {
+  return {
+    venueId,
+    status: 'COMPLETED',
+    OR: [
+      { shiftId },
+      {
+        shiftId: null,
+        createdAt: { gte: startTime, lte: claimedAt },
+        order: { venueId, shiftId },
+      },
+    ],
+  }
+}
+
+export async function readShiftPaymentsForClose(
+  venueId: string,
+  shiftId: string,
+  startTime: Date,
+  claimedAt: Date,
+): Promise<ShiftPaymentPageRow[]> {
+  const payments: ShiftPaymentPageRow[] = []
+  let cursorId: string | undefined
+
+  while (true) {
+    const page = await prisma.payment.findMany({
+      where: shiftPaymentsForCloseWhere(venueId, shiftId, startTime, claimedAt),
+      select: SHIFT_PAYMENT_TOTALS_SELECT,
+      orderBy: { id: 'asc' },
+      take: SHIFT_CLOSE_PAYMENT_PAGE_SIZE,
+      ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
+    })
+
+    payments.push(...page)
+    if (page.length < SHIFT_CLOSE_PAYMENT_PAGE_SIZE) return payments
+
+    const nextCursor = page[page.length - 1]?.id
+    if (!nextCursor || nextCursor === cursorId) {
+      throw new InternalServerError('No se pudo avanzar el cursor de cobros durante el cierre del turno')
+    }
+    cursorId = nextCursor
+  }
+}
+
 async function closeShiftUsingRequest(
   venueId: string,
   shiftId: string,
   request: EffectiveCloseRequest,
   context: ShiftCloseRequestContext,
 ): Promise<ShiftCloseExecutionResult> {
-  const claimedAt = context.now?.() ?? new Date()
-  const shift = await claimShiftForClose(venueId, shiftId, claimedAt)
+  const { shift, claimedAt } = await claimShiftForClose(venueId, shiftId, context.now ?? (() => new Date()))
 
   try {
-    const shiftPayments = await prisma.payment.findMany({
-      where: {
-        shiftId,
-        status: 'COMPLETED',
-      },
-      select: {
-        id: true,
-        amount: true,
-        tipAmount: true,
-        method: true,
-        // tenderSemantics inputs — a cash-counting voucher tender must reach the drawer math.
-        fundsFlow: true,
-        tenderTypeId: true,
-        tenderCountsAsCash: true,
-      },
-    })
+    const shiftPayments = await readShiftPaymentsForClose(venueId, shiftId, shift.startTime, claimedAt)
 
     // Los ocho totales salen de `aggregateShiftPayments` (arriba en este archivo). Vive fuera
     // para que el script de reatribución histórica recalcule un turno con LA MISMA regla; los
@@ -1792,6 +1878,7 @@ async function closeShiftUsingRequest(
     }
 
     const updatedShift = await prisma.$transaction(async tx => {
+      await lockShiftLifecycleForVenue(tx, venueId)
       const finalized = await tx.shift.updateMany({
         where: {
           id: shiftId,

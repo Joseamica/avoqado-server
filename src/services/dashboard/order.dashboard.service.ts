@@ -8,6 +8,12 @@ import { Order, OrderStatus, PaymentType, Prisma } from '@prisma/client'
 import { logAction } from './activity-log.service'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
 import { postCashSaleToDrawer } from '../shared/cashDrawerPosting'
+import {
+  claimShiftForCapturedPayment,
+  lockExistingOrderForPayment,
+  recordPendingPaymentShiftReconciliation,
+  resolvePaymentShiftReconciliationEnabled,
+} from '../shared/paymentShiftClaim'
 // La ÚNICA definición de "qué cuenta como pagado y cuánto se devolvió" — la
 // misma que usan los cuatro canales de cobro, para que la pantalla no pueda
 // contradecir al saldo persistido.
@@ -631,6 +637,7 @@ export async function settleOrder(
   venueId: string,
   orderId: string,
   notes?: string,
+  actorStaffId: string | null = null,
 ): Promise<{
   orderId: string
   orderNumber: string
@@ -681,7 +688,9 @@ export async function settleOrder(
   // cambio entre la relectura y la transición hace count=0 y no se cobra nada.
   let postingId: string | null = null
   let settlementPaymentId: string | null = null
+  const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
   const settledAmount = await prisma.$transaction(async tx => {
+    await lockExistingOrderForPayment(tx, { venueId, orderId })
     const fresh = await tx.order.findFirst({
       where: { id: orderId, venueId },
       select: { total: true, remainingBalance: true, tipAmount: true, paymentStatus: true, version: true },
@@ -704,6 +713,12 @@ export async function settleOrder(
       _sum: { amount: true, tipAmount: true },
     })
     const paidSum = Number(paidAgg._sum.amount ?? 0)
+    const priorCompletedPaymentCount =
+      typeof tx.payment.count === 'function'
+        ? ((await tx.payment.count({
+            where: { orderId, venueId, status: 'COMPLETED', type: { not: 'REFUND' } },
+          })) ?? 0)
+        : 0
     // `Order.total` incluye propinas acumuladas (así lo escribe el TPV); se
     // comparan peras con peras restando la propina de ambos lados.
     const orderTotalSansTips = Number(fresh.total) - Number(fresh.tipAmount ?? 0)
@@ -732,11 +747,21 @@ export async function settleOrder(
       return null
     }
 
+    const shiftAmount = new Prisma.Decimal(toSettle)
+    const shiftTip = new Prisma.Decimal(0)
+    const shiftClaim = await claimShiftForCapturedPayment(tx, {
+      venueId,
+      amountPesos: shiftAmount,
+      tipPesos: shiftTip,
+      incrementTotalOrders: priorCompletedPaymentCount === 0,
+    })
+
     // Create a payment record to track the settlement
     const settlementPayment = await tx.payment.create({
       data: {
         venueId,
         orderId,
+        ...(shiftClaim.shiftId ? { shiftId: shiftClaim.shiftId } : {}),
         amount: toSettle,
         tipAmount: 0,
         method: 'CASH', // Default to cash for manual settlements
@@ -750,6 +775,18 @@ export async function settleOrder(
         source: 'OTHER',
         processorData: notes ? { settlementNote: notes, settledViaDashboard: true } : { settledViaDashboard: true },
       },
+    })
+
+    await recordPendingPaymentShiftReconciliation(tx, {
+      claim: shiftClaim,
+      venueId,
+      paymentId: settlementPayment.id,
+      orderId,
+      staffId: actorStaffId,
+      channel: 'settleOrder',
+      amountPesos: shiftAmount,
+      tipPesos: shiftTip,
+      reconciliationEnabled,
     })
 
     // 🔴 El fiado liquidado TAMBIÉN descuenta (fase 5). Las órdenes pay-later

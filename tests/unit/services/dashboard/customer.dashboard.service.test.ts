@@ -874,6 +874,19 @@ describe('settleCustomerBalance — CAS por orden + vale de deducción', () => {
     ] as any)
     createSalePostingMasivoMock.mockResolvedValue({ id: 'posting-masivo-1' })
     prismaMock.payment.create.mockResolvedValue({ id: 'pay-1' } as any)
+    prismaMock.payment.aggregate.mockResolvedValue({ _sum: { amount: 0, tipAmount: 0 } } as any)
+    prismaMock.payment.count.mockResolvedValue(0 as any)
+    prismaMock.order.findFirst.mockImplementation(async ({ where }: any) => {
+      const amount = where.id === 'order-1' ? 100 : 300
+      return {
+        id: where.id,
+        total: new Decimal(amount),
+        tipAmount: new Decimal(0),
+        remainingBalance: new Decimal(amount),
+        paymentStatus: 'PENDING',
+        version: 1,
+      } as any
+    })
   })
 
   it('usa CAS por orden: la que ya fue liquidada por otro camino no genera segundo pago', async () => {

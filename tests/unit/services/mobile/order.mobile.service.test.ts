@@ -1232,7 +1232,7 @@ describe('cancelOrder — guard against live terminal charges', () => {
     expect(prismaMock.shift.update).not.toHaveBeenCalled()
     expect(activityCreate.mock.calls[0][0]).toEqual({
       data: expect.objectContaining({
-        action: 'PAYMENT_PENDING_POST_CLOSE_RECONCILIATION',
+        action: 'PAYMENT_WITHOUT_SHIFT',
         entity: 'Payment',
         entityId: 'payment-race',
         venueId: 'venue-1',

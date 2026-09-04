@@ -15,6 +15,12 @@ import { logAction } from './activity-log.service'
 import { decideCustomerApproval } from '@/services/public/customerBookingAccess.service'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
 import { postCashSaleToDrawer } from '../shared/cashDrawerPosting'
+import {
+  claimShiftForCapturedPayment,
+  lockExistingOrderForPayment,
+  recordPendingPaymentShiftReconciliation,
+  resolvePaymentShiftReconciliationEnabled,
+} from '../shared/paymentShiftClaim'
 import { grantMarketingConsent, revokeMarketingConsent } from '@/services/customer/consent.service'
 
 /**
@@ -747,6 +753,7 @@ export async function settleCustomerBalance(
   venueId: string,
   customerId: string,
   notes?: string,
+  actorStaffId: string | null = null,
 ): Promise<{
   settledOrderCount: number
   settledAmount: number
@@ -816,30 +823,77 @@ export async function settleCustomerBalance(
   // escribía un ActivityLog con 900 — la bitácora contando el dinero DOS veces,
   // justo el registro del que dependemos para investigar un incidente.
   const settled: Array<{ orderId: string; amount: number; paymentId?: string }> = []
+  const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
+  const targetOrderIds = [...new Set(pendingOrders.map(oc => oc.order.id))].sort()
   await prisma.$transaction(async tx => {
-    for (const oc of pendingOrders) {
-      const remainingBalance = Number(oc.order.remainingBalance)
+    // Orden global para writers de dinero sobre Orders EXISTENTES: primero se
+    // toma el conjunto completo de Orders en orden estable; sólo después puede
+    // tocarse Shift. Así un settle masivo nunca queda con Order A + Shift
+    // esperando Order B frente a un writer unitario que ya posee B.
+    for (const orderId of targetOrderIds) {
+      await lockExistingOrderForPayment(tx, { venueId, orderId })
+    }
+
+    for (const orderId of targetOrderIds) {
+      // `pendingOrders` es únicamente el conjunto candidato. Monto, estado y
+      // fencing se releen bajo lock y con alcance tenant+cliente.
+      const fresh = await tx.order.findFirst({
+        where: { id: orderId, venueId, orderCustomers: { some: { customerId } } },
+        select: { total: true, tipAmount: true, remainingBalance: true, paymentStatus: true, version: true },
+      })
+      if (!fresh || fresh.paymentStatus === 'PAID' || fresh.remainingBalance.lte(0)) continue
+
+      const paidAgg = await tx.payment.aggregate({
+        where: { orderId, venueId, status: 'COMPLETED' },
+        _sum: { amount: true, tipAmount: true },
+      })
+      const paidSum = new Prisma.Decimal(paidAgg._sum.amount ?? 0)
+      const orderTotalSansTips = new Prisma.Decimal(fresh.total).minus(fresh.tipAmount ?? 0)
+      const remainingByPayments = Prisma.Decimal.max(0, orderTotalSansTips.minus(paidSum)).toDecimalPlaces(2)
+      const remainingBalance = Prisma.Decimal.min(new Prisma.Decimal(fresh.remainingBalance), remainingByPayments).toDecimalPlaces(2)
+      if (remainingBalance.lte(0)) continue
 
       const transition = await tx.order.updateMany({
-        where: { id: oc.order.id, venueId, paymentStatus: { in: ['PENDING', 'PARTIAL'] } },
+        where: {
+          id: orderId,
+          venueId,
+          paymentStatus: { in: ['PENDING', 'PARTIAL'] },
+          version: fresh.version,
+          remainingBalance: fresh.remainingBalance as any,
+        },
         data: {
           paymentStatus: 'PAID',
-          paidAmount: oc.order.total,
+          paidAmount: fresh.total,
           remainingBalance: 0,
           version: { increment: 1 },
         },
       })
       if (transition.count === 0) continue
+      const priorCompletedPaymentCount =
+        (await tx.payment.count({
+          where: { orderId, venueId, status: 'COMPLETED', type: { not: 'REFUND' } },
+        })) ?? 0
       // Se registra el MISMO `remainingBalance` que va al Payment de abajo: el
       // monto reportado es la suma exacta de los pagos creados, no un recálculo
       // que pueda divergir de ellos.
-      settled.push({ orderId: oc.order.id, amount: remainingBalance })
+      const remainingBalancePesos = remainingBalance.toNumber()
+      settled.push({ orderId, amount: remainingBalancePesos })
+
+      const shiftAmount = remainingBalance
+      const shiftTip = new Prisma.Decimal(0)
+      const shiftClaim = await claimShiftForCapturedPayment(tx, {
+        venueId,
+        amountPesos: shiftAmount,
+        tipPesos: shiftTip,
+        incrementTotalOrders: priorCompletedPaymentCount === 0,
+      })
 
       // Create a payment record to track the settlement
       const settlementPayment = await tx.payment.create({
         data: {
           venueId,
-          orderId: oc.order.id,
+          orderId,
+          ...(shiftClaim.shiftId ? { shiftId: shiftClaim.shiftId } : {}),
           amount: remainingBalance,
           tipAmount: 0,
           method: 'CASH', // Default to cash for manual settlements
@@ -854,15 +908,27 @@ export async function settleCustomerBalance(
         },
       })
 
+      await recordPendingPaymentShiftReconciliation(tx, {
+        claim: shiftClaim,
+        venueId,
+        paymentId: settlementPayment.id,
+        orderId,
+        staffId: actorStaffId,
+        channel: 'settleCustomerBalance',
+        amountPesos: shiftAmount,
+        tipPesos: shiftTip,
+        reconciliationEnabled,
+      })
+
       settled[settled.length - 1].paymentId = settlementPayment.id
 
       const itemsParaPosting = await tx.orderItem.findMany({
-        where: { orderId: oc.order.id },
+        where: { orderId },
         include: { modifiers: { include: { modifier: true } } },
       })
       const posting = await createSalePostingInTx(tx, {
         venueId,
-        orderId: oc.order.id,
+        orderId,
         items: itemsParaPosting as any,
         staffId: null,
       })

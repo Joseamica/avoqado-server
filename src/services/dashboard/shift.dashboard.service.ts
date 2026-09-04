@@ -1,10 +1,11 @@
 import { calculateExpectedAmount } from '../mobile/cash-drawer.mobile.service'
 import logger from '../../config/logger'
-import { BadRequestError } from '../../errors/AppError'
+import { BadRequestError, ConflictError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { logAction } from './activity-log.service'
 import { lineRevenue } from './lineRevenue'
 import { calculateCashReconciliation, calculateCashReconciliationFromExpected } from '../shared/cashReconciliation.service'
+import { lockShiftLifecycleForVenue } from '../shared/shiftLifecycleLock'
 
 interface ShiftFilters {
   staffId?: string
@@ -176,21 +177,42 @@ export async function getShifts(
  * `Shift` calculaba su propio "efectivo esperado" a partir de sus pagos y el cajón (Android +
  * TPV) el suyo: dos números para el mismo dinero. Aquí el turno EXPONE el del cajón — campo
  * nuevo y opcional, nada de lo que ya devolvía cambia. Una PAX vieja lo ignora; la nueva lo
- * usa en vez de calcular aparte. Se elige la sesión del mismo venue cuya ventana
- * [openedAt, closedAt] cubre el inicio del turno; si no hay, `null` y el turno se ve como hoy.
+ * usa en vez de calcular aparte. La liga exacta manda; para legacy se elige la sesión única
+ * del mismo venue cuya ventana [openedAt, closedAt] cubre el cierre del turno y, si ninguna lo
+ * cubre, la única que se traslapó. Si no hay, `null` y el turno se ve como hoy.
  * `counted` es explícito: una caja cerrada sin conteo nunca se pinta como cuadrada.
  */
 // @param incluirEsperado ¿el llamante tiene `cash-drawer:view-expected`? Con `false` (el
 // default) el esperado y el fondo se omiten MIENTRAS el cajón siga abierto: es el mismo
 // conteo ciego que aplica el endpoint del cajón, y sin él bastaba abrir el detalle del turno
 // para leer la cifra. Un cajón ya CERRADO revela siempre: ese resultado ya está firmado.
-// @param shiftId el turno que se está resolviendo. Con él, la ventana deja de poder devolver la
-// gaveta de OTRO turno: es el espejo de `gavetaCerrable` (`shared/turnoDeCaja.ts`), cuyo comentario
-// dice exactamente por qué —«sin el `OR` sobre `shiftId` se le arrancaría la gaveta a un turno
-// ajeno»—. Turno A 07:00–15:00 con su gaveta cerrando a las 15:00 y la de relevo B abriendo 14:55:
-// las dos caben en la ventana y `openedAt desc` elige B. Una gaveta SIN ligar sigue siendo
-// elegible, que es lo único que se puede hacer con lo anterior a la migración; omitirlo conserva
-// el comportamiento de siempre para quien no tenga el turno a la mano.
+// @param shiftId el turno que se está resolviendo. Su liga exacta manda sin mirar fechas; sólo si
+// no existe se consideran sesiones legacy SIN liga. Una ventana con dos legacy plausibles es
+// ambigua: elegir la más nueva firmaría dinero contra un libro arbitrario.
+type ShiftCashDrawerWindowStage = 'ANCHOR' | 'OVERLAP'
+type ShiftCashDrawerLegacySelection =
+  | { kind: 'NONE' }
+  | { kind: 'ONE'; id: string }
+  | { kind: 'AMBIGUOUS'; stage: ShiftCashDrawerWindowStage }
+
+class AmbiguousShiftCashDrawerError extends Error {
+  readonly code = 'AMBIGUOUS_SHIFT_CASH_DRAWER'
+
+  constructor(readonly stage: ShiftCashDrawerWindowStage) {
+    super(`Más de una gaveta legacy coincide con la ventana del turno (${stage})`)
+    this.name = 'AmbiguousShiftCashDrawerError'
+  }
+}
+
+class SelectedShiftCashDrawerUnavailableError extends Error {
+  readonly code = 'SELECTED_SHIFT_CASH_DRAWER_UNAVAILABLE'
+
+  constructor() {
+    super('La gaveta legacy seleccionada cambió antes de poder hidratarla')
+    this.name = 'SelectedShiftCashDrawerUnavailableError'
+  }
+}
+
 export async function resolveShiftCashDrawer(
   venueId: string,
   startTime: Date | null,
@@ -198,29 +220,72 @@ export async function resolveShiftCashDrawer(
   incluirEsperado = false,
   shiftId?: string,
 ) {
-  if (!startTime) return null
-  // 🔴 Va en `AND` y no como segundo `OR` de primer nivel: un objeto sólo puede llevar una llave
-  // `OR`, así que escribirlo arriba SUSTITUIRÍA en silencio al filtro de `closedAt`.
-  const delTurno = shiftId ? { AND: [{ OR: [{ shiftId }, { shiftId: null }] }] } : {}
+  const include = { events: { orderBy: { createdAt: 'asc' as const } } }
+
+  // Identidad durable: no compite con una fila legacy más nueva ni depende de que la ventana
+  // histórica esté completa. `venueId` conserva el aislamiento aun cuando `shiftId` es único.
+  const findLinkedSession = () =>
+    shiftId ? prisma.cashDrawerSession.findFirst({ where: { venueId, shiftId }, include }) : Promise.resolve(null)
+  let session = await findLinkedSession()
+  if (!session && !startTime) {
+    // Incluso sin ventana temporal, una liga puede haber aparecido después de la primera
+    // lectura. Revalidarla evita convertir esa carrera en una ausencia financiera falsa.
+    session = await findLinkedSession()
+  }
+  if (!session && !startTime) return null
+
   // 🔴 P1 (Codex 27-ago): se ancla al CIERRE del turno (o a "ahora" si sigue abierto), no a su inicio.
   // Turno 08–20 con cajón A (07–12) y B (12–20): el que operó al cerrar es B; anclar al inicio
   // devolvía A y la PAX enseñaba el arqueo de otro cajón sin decirlo. El índice único parcial
   // (fase 4) garantiza UNA caja abierta por venue en cada instante, así que "la que cubre el
   // ancla" es única. Si ninguna cubre el ancla (la caja se cerró antes que el turno), se cae a la
-  // última que se traslapó con el turno.
+  // última que se traslapó con el turno. Cada etapa lee sólo dos identidades: 0 permite avanzar,
+  // 1 elige, 2 prueba ambigüedad. Los eventos se hidratan DESPUÉS y sólo para la ganadora.
   const anchor = endTime ?? new Date()
-  const include = { events: { orderBy: { createdAt: 'asc' as const } } }
-  const session =
-    (await prisma.cashDrawerSession.findFirst({
-      where: { venueId, openedAt: { lte: anchor }, OR: [{ closedAt: null }, { closedAt: { gte: anchor } }], ...delTurno },
-      include,
-      orderBy: { openedAt: 'desc' },
-    })) ??
-    (await prisma.cashDrawerSession.findFirst({
-      where: { venueId, openedAt: { lte: anchor }, OR: [{ closedAt: null }, { closedAt: { gte: startTime } }], ...delTurno },
-      include,
-      orderBy: { openedAt: 'desc' },
-    }))
+  if (!session) {
+    const selectLegacyCandidate = async (
+      where: Record<string, unknown>,
+      stage: ShiftCashDrawerWindowStage,
+    ): Promise<ShiftCashDrawerLegacySelection> => {
+      const candidates = await prisma.cashDrawerSession.findMany({
+        where: { ...where, venueId, shiftId: null },
+        select: { id: true },
+        orderBy: [{ openedAt: 'desc' }, { id: 'desc' }],
+        take: 2,
+      })
+      if (candidates.length > 1) return { kind: 'AMBIGUOUS', stage }
+      if (candidates.length === 1) return { kind: 'ONE', id: candidates[0].id }
+      return { kind: 'NONE' }
+    }
+
+    const anchorSelection = await selectLegacyCandidate(
+      { openedAt: { lte: anchor }, OR: [{ closedAt: null }, { closedAt: { gte: anchor } }] },
+      'ANCHOR',
+    )
+    const legacySelection =
+      anchorSelection.kind === 'NONE'
+        ? await selectLegacyCandidate({ openedAt: { lte: anchor }, OR: [{ closedAt: null }, { closedAt: { gte: startTime! } }] }, 'OVERLAP')
+        : anchorSelection
+
+    // La liga exacta tiene prioridad absoluta, también si nació después de la primera lectura.
+    // Se revalida después de los scans y antes de interpretar cero como ausencia, lanzar por
+    // ambigüedad o hidratar una legacy. Así una carrera con `asegurarLaLiga` no cae a TURNO ni
+    // carga eventos de dos candidatas.
+    session = await findLinkedSession()
+    if (!session && legacySelection.kind === 'AMBIGUOUS') {
+      throw new AmbiguousShiftCashDrawerError(legacySelection.stage)
+    }
+    if (!session && legacySelection.kind === 'ONE') {
+      session = await prisma.cashDrawerSession.findFirst({
+        // Mantener ambos filtros es deliberado: si la fila se ligó a otro turno durante la
+        // carrera, no podemos leer su libro. Pero tampoco es "ausencia": hubo una identidad
+        // elegida y perderla vuelve desconocida la autoridad financiera de este turno.
+        where: { id: legacySelection.id, venueId, shiftId: null },
+        include,
+      })
+      if (!session) throw new SelectedShiftCashDrawerUnavailableError()
+    }
+  }
   if (!session) return null
   const money = (v: unknown) => Number(Number(v).toFixed(2))
   const counted = session.actualAmount !== null && session.actualAmount !== undefined
@@ -1091,25 +1156,13 @@ export async function esperadoDeLaGavetaDelTurno(
   puedeVerEsperado: boolean,
 ): Promise<EsperadoDelTurno> {
   try {
-    const ligada = await prisma.cashDrawerSession.findFirst({
-      // `venueId` además del único: el aislamiento por tenant no se salta ni cuando la llave ya
-      // es única. Un `findUnique` por `shiftId` pelón no lo lleva.
-      where: { shiftId: shift.id, venueId },
-      select: { id: true, status: true, startingAmount: true, events: { select: { type: true, amount: true } } },
-    })
-    if (ligada) {
-      if (ligada.status === 'OPEN' && !puedeVerEsperado) return { esperado: null, sessionId: ligada.id, fuente: 'DESCONOCIDO' }
-      // La MISMA fórmula que ve el cajero en la tablet, no una copia.
-      return { esperado: calculateExpectedAmount(ligada), sessionId: ligada.id, fuente: 'CAJON' }
-    }
-
-    const porVentana = await resolveShiftCashDrawer(venueId, shift.startTime, shift.endTime, puedeVerEsperado, shift.id)
-    if (!porVentana) return { esperado: null, sessionId: null, fuente: 'TURNO' }
-    const esperado = 'expectedAmount' in porVentana ? porVentana.expectedAmount : null
+    const cashDrawer = await resolveShiftCashDrawer(venueId, shift.startTime, shift.endTime, puedeVerEsperado, shift.id)
+    if (!cashDrawer) return { esperado: null, sessionId: null, fuente: 'TURNO' }
+    const esperado = 'expectedAmount' in cashDrawer ? cashDrawer.expectedAmount : null
     // Hay gaveta, pero su esperado viene oculto por el conteo ciego: se sabe que la fórmula del
     // turno NO es la autoridad, así que tampoco se usa.
-    if (typeof esperado !== 'number') return { esperado: null, sessionId: porVentana.sessionId, fuente: 'DESCONOCIDO' }
-    return { esperado, sessionId: porVentana.sessionId, fuente: 'CAJON' }
+    if (typeof esperado !== 'number') return { esperado: null, sessionId: cashDrawer.sessionId, fuente: 'DESCONOCIDO' }
+    return { esperado, sessionId: cashDrawer.sessionId, fuente: 'CAJON' }
   } catch (error) {
     logger.warn('[Shift Update] No se pudo resolver la gaveta del turno; el descuadre guardado no se toca', {
       venueId,
@@ -1147,6 +1200,14 @@ export async function updateShift(
   if (!existingShift) {
     logger.warn('Shift not found for update', { venueId, shiftId })
     return null
+  }
+
+  // `updatedAt` es el cutoff durable del claim OPEN → CLOSING: el cierre final y el watchdog lo
+  // usan como testigo del mismo CAS. El editor debe detenerse ANTES de resolver gaveta, escribir
+  // dinero o auditar; moverlo ampliaría la membresía del reporte mientras el cierre ya calculó su
+  // snapshot con el instante anterior.
+  if (existingShift.status === 'CLOSING') {
+    throw new ConflictError('El cierre de turno ya está en proceso. Intenta de nuevo en unos momentos.', 'SHIFT_CLOSE_IN_PROGRESS')
   }
 
   // Build update data object, only including provided fields
@@ -1255,28 +1316,55 @@ export async function updateShift(
     updateData.cashDifference = difference
   }
 
-  // Update the shift
-  const updatedShift = await prisma.shift.update({
-    where: {
-      id: shiftId,
-    },
-    data: updateData,
-    include: {
-      staff: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-          email: true,
+  // El chequeo temprano evita trabajo inútil, pero no basta: el cierre puede reclamar el turno
+  // entre esa lectura y esta escritura. `updatedAt` + estado + `endTime` son el snapshot observado;
+  // sólo quien todavía lo ve idéntico puede editarlo. Así el claim conserva exactamente su cutoff.
+  const updatedShift = await prisma.$transaction(async tx => {
+    await lockShiftLifecycleForVenue(tx, venueId)
+    const wonUpdate = await tx.shift.updateMany({
+      where: {
+        id: shiftId,
+        venueId,
+        status: existingShift.status,
+        endTime: existingShift.endTime,
+        updatedAt: existingShift.updatedAt,
+      },
+      data: updateData,
+    })
+
+    if (wonUpdate.count !== 1) {
+      throw new ConflictError('El turno cambió mientras se estaba editando. Actualiza e intenta de nuevo.', 'SHIFT_CONCURRENT_UPDATE')
+    }
+
+    // `updateMany` es necesario para el CAS y no hidrata relaciones. Se relee únicamente DESPUÉS
+    // de ganar, todavía bajo la autoridad del lifecycle; si desaparece tampoco se audita.
+    const saved = await tx.shift.findFirst({
+      where: {
+        id: shiftId,
+        venueId,
+      },
+      include: {
+        staff: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+          },
+        },
+        venue: {
+          select: {
+            id: true,
+            name: true,
+          },
         },
       },
-      venue: {
-        select: {
-          id: true,
-          name: true,
-        },
-      },
-    },
+    })
+
+    if (!saved) {
+      throw new ConflictError('El turno cambió mientras se estaba editando. Actualiza e intenta de nuevo.', 'SHIFT_CONCURRENT_UPDATE')
+    }
+    return saved
   })
 
   // Determine effective status based on time logic

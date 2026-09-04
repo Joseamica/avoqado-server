@@ -193,8 +193,9 @@ export async function settleCustomerBalance(req: Request, res: Response, next: N
   try {
     const { venueId, customerId } = req.params
     const { notes } = req.body
+    const { userId } = (req as any).authContext
 
-    const result = await customerService.settleCustomerBalance(venueId, customerId, notes)
+    const result = await customerService.settleCustomerBalance(venueId, customerId, notes, userId)
 
     res.status(200).json(result)
   } catch (error) {

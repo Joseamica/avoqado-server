@@ -1,10 +1,33 @@
 import { createHash } from 'crypto'
-import { PaymentType, TransactionStatus, CardBrand, CardEntryMode, Prisma } from '@prisma/client'
+import {
+  PaymentFundsFlow,
+  PaymentMethod,
+  PaymentSource,
+  PaymentType,
+  TransactionStatus,
+  CardBrand,
+  CardEntryMode,
+  Prisma,
+} from '@prisma/client'
 import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
-import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
-import { acumuladoPersistido, centavosYaDevueltos } from '../shared/devueltoDeUnCobro'
+import {
+  claimShiftForRefund,
+  lockExistingOrderForPayment,
+  recordRefundAuthorityReconciliation,
+  recordPendingPaymentShiftReconciliation,
+  refundAuthorityReassignmentWasRecorded,
+  resolvePaymentShiftReconciliationEnabled,
+} from '../shared/paymentShiftClaim'
+import {
+  acumuladoPersistido,
+  ajustarRepartoAComponentesRestantes,
+  centavosDevueltosPorComponente,
+  centavosYaDevueltos,
+  esCantidadNoNegativaEnCentavos,
+  esCantidadPositivaEnCentavos,
+} from '../shared/devueltoDeUnCobro'
 import logger from '../../config/logger'
-import { BadRequestError, InternalServerError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, InternalServerError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
 import { Decimal } from '@prisma/client/runtime/library'
@@ -26,7 +49,8 @@ interface RefundRequestData {
   originalOrderId?: string | null
   amount: number // In cents (5000 = $50.00)
   reason: string // RefundReason.name (e.g., "CUSTOMER_REQUEST")
-  staffId: string
+  /** Legacy wire field. Never authoritative; the authenticated `userId` wins. */
+  staffId?: string
   // 🔴 NO hay `shiftId`: el turno lo resuelve el SERVIDOR (`../shared/turnoDeCaja.ts`).
   // El DTO de la PAX DECLARA el campo (`RefundRequest.kt` → `RefundRecorder.kt:265`), pero su
   // VALOR es siempre `null` y Gson omite los nulos: la llave no llega (medido el 3-sep-2026,
@@ -57,8 +81,10 @@ interface RefundRequestData {
   /**
    * Optional explicit tip portion of the refund, in cents. When omitted, TPV
    * splits proportional to the original sale/tip ratio. When set, the caller
-   * controls how much of the refund comes from tip vs sale (0 = keep staff
-   * tip intact, equal to amount = tip-only refund, etc.). Bounds are validated.
+   * requests how much of the refund comes from tip vs sale (0 = keep staff
+   * tip intact, equal to amount = tip-only refund, etc.). Under the row lock,
+   * impossible splits are rebalanced to the remaining components so money already
+   * returned by the processor is never left without a refund row.
    */
   tipRefundCents?: number
   /**
@@ -262,9 +288,16 @@ async function respuestaDeReembolsoExistente(
 export async function recordRefund(
   venueId: string,
   refundData: RefundRequestData,
-  _userId?: string,
+  userId: string,
   _orgId?: string,
 ): Promise<RefundResponse> {
+  if (!esCantidadPositivaEnCentavos(refundData.amount)) {
+    throw new BadRequestError('amount debe ser un entero seguro positivo expresado en centavos')
+  }
+  if (refundData.tipRefundCents !== undefined && !esCantidadNoNegativaEnCentavos(refundData.tipRefundCents)) {
+    throw new BadRequestError('tipRefundCents debe ser un entero seguro no negativo expresado en centavos')
+  }
+
   logger.info('Recording refund', {
     venueId,
     originalPaymentId: refundData.originalPaymentId,
@@ -275,8 +308,9 @@ export async function recordRefund(
   // ═══════════════════════════════════════════════════════════════════════════
   // STEP 1: Find and validate original payment
   // ═══════════════════════════════════════════════════════════════════════════
-  const originalPayment = await prisma.payment.findUnique({
-    where: { id: refundData.originalPaymentId },
+  const refundAuthorityObservedAt = new Date()
+  const originalPayment = await prisma.payment.findFirst({
+    where: { id: refundData.originalPaymentId, venueId },
     include: {
       order: true,
       receipts: true,
@@ -289,16 +323,6 @@ export async function recordRefund(
       venueId,
     })
     throw new NotFoundError(`Payment ${refundData.originalPaymentId} not found`)
-  }
-
-  // Validate payment belongs to this venue
-  if (originalPayment.venueId !== venueId) {
-    logger.error('Payment does not belong to venue', {
-      originalPaymentId: refundData.originalPaymentId,
-      paymentVenueId: originalPayment.venueId,
-      requestedVenueId: venueId,
-    })
-    throw new BadRequestError('Payment does not belong to this venue')
   }
 
   // Validate payment is completed
@@ -367,13 +391,6 @@ export async function recordRefund(
   // STEP 2: Validate refund amount
   // ═══════════════════════════════════════════════════════════════════════════
 
-  // Reject zero/negative refund amounts up-front — Blumon would accept the
-  // call but the resulting DB row is a $0 refund that only pollutes reports.
-  if (!Number.isFinite(refundData.amount) || refundData.amount <= 0) {
-    logger.error('Invalid refund amount (must be > 0)', { amount: refundData.amount })
-    throw new BadRequestError('Refund amount must be greater than zero')
-  }
-
   const refundAmountInPesos = refundData.amount / 100
   const originalAmountNumber = Number(originalPayment.amount)
   // 💸 FIX: Include tip in refundable amount - tip is part of the total transaction
@@ -424,20 +441,11 @@ export async function recordRefund(
 
   if (typeof refundData.tipRefundCents === 'number') {
     const overrideTip = refundData.tipRefundCents / 100
-    if (overrideTip < 0) {
-      throw new BadRequestError('tipRefundCents must be >= 0')
-    }
-    if (overrideTip > refundAmountInPesos + 0.001) {
-      throw new BadRequestError(`tipRefundCents ($${overrideTip}) exceeds total refund ($${refundAmountInPesos})`)
-    }
-    if (overrideTip > originalTipNumber + 0.001) {
-      throw new BadRequestError(`tipRefundCents ($${overrideTip}) exceeds original tip ($${originalTipNumber})`)
-    }
+    // This is the requested bookkeeping split, not yet the authorized split. The terminal
+    // processor has already returned the money; the row-locked block below clamps this value
+    // to the remaining sale/tip components instead of rejecting and orphaning the refund.
     tipRefund = Math.round(overrideTip * 100) / 100
     salesRefund = Math.round((refundAmountInPesos - tipRefund) * 100) / 100
-    if (salesRefund > originalAmountNumber + 0.001) {
-      throw new BadRequestError(`Sale portion of refund ($${salesRefund}) exceeds original sale amount ($${originalAmountNumber})`)
-    }
   } else if (originalTipNumber > 0 && totalOriginalAmount > 0) {
     // Default: proportional split.
     tipRefund = Math.round(((refundAmountInPesos * originalTipNumber) / totalOriginalAmount) * 100) / 100
@@ -485,20 +493,93 @@ export async function recordRefund(
   // ═══════════════════════════════════════════════════════════════════════════
   // STEP 4: Create refund payment and update original in transaction
   // ═══════════════════════════════════════════════════════════════════════════
+  const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
+  const authorityUnavailable = () =>
+    new ConflictError(
+      'El cobro cambió mientras iniciaba el reembolso. Verifica su asignación antes de continuar.',
+      'REFUND_AUTHORITY_UNAVAILABLE',
+    )
   const ejecutarTransaccionDelReembolso = () =>
     prisma.$transaction(async tx => {
+      if (originalPayment.orderId) {
+        const orderStillBelongsToVenue = await lockExistingOrderForPayment(tx, { venueId, orderId: originalPayment.orderId })
+        if (!orderStillBelongsToVenue) throw authorityUnavailable()
+      }
       // 🔒 Row-lock the original payment for the duration of this tx so
       // concurrent refund attempts cannot both pass the "remaining refundable"
       // check with stale data and each create their own refund (D8 race).
-      const lockedRows = await tx.$queryRaw<Array<{ id: string; amount: unknown; tipAmount: unknown; processorData: unknown }>>(Prisma.sql`
-      SELECT id, amount, "tipAmount", "processorData"
+      const expectedOrder = originalPayment.orderId ? Prisma.sql`"orderId" = ${originalPayment.orderId}` : Prisma.sql`"orderId" IS NULL`
+      const lockedRows = await tx.$queryRaw<
+        Array<{
+          id: string
+          venueId: string
+          orderId: string | null
+          status: string
+          type: PaymentType
+          method: PaymentMethod
+          source: PaymentSource
+          fundsFlow: PaymentFundsFlow | null
+          amount: unknown
+          tipAmount: unknown
+          processorData: unknown
+          merchantAccountId: string | null
+          terminalId: string | null
+          processedById: string | null
+          tenderTypeId: string | null
+          tenderRevision: number | null
+          tenderLabel: string | null
+          tenderCountsAsCash: boolean | null
+          tenderCaptureTip: boolean | null
+          tenderSatFormaPago: string | null
+          processor: string | null
+          cardBrand: CardBrand | null
+          maskedPan: string | null
+          entryMode: CardEntryMode | null
+        }>
+      >(Prisma.sql`
+      SELECT
+        id,
+        "venueId",
+        "orderId",
+        status,
+        type,
+        "method",
+        "source",
+        "fundsFlow",
+        amount,
+        "tipAmount",
+        "processorData",
+        "merchantAccountId",
+        "terminalId",
+        "processedById",
+        "tenderTypeId",
+        "tenderRevision",
+        "tenderLabel",
+        "tenderCountsAsCash",
+        "tenderCaptureTip",
+        "tenderSatFormaPago",
+        processor,
+        "cardBrand",
+        "maskedPan",
+        "entryMode"
       FROM "Payment"
       WHERE id = ${refundData.originalPaymentId}
+        AND "venueId" = ${venueId}
+        AND ${expectedOrder}
       FOR UPDATE
     `)
       const locked = lockedRows[0]
       if (!locked) {
-        throw new NotFoundError(`Payment ${refundData.originalPaymentId} disappeared`)
+        throw authorityUnavailable()
+      }
+      if (locked.venueId !== venueId || locked.orderId !== originalPayment.orderId) {
+        throw authorityUnavailable()
+      }
+      if (locked.status !== TransactionStatus.COMPLETED) {
+        throw new BadRequestError(`Cannot refund payment with status: ${locked.status}`)
+      }
+      if (locked.type === PaymentType.REFUND) {
+        throw new BadRequestError('Cannot refund a refund')
       }
       // 🔴 El `SELECT` de arriba declara su tipo A MANO, así que TypeScript NO comprueba que el
       // SQL devuelva de verdad estas columnas. Recortar una en una edición futura vuelve la
@@ -610,87 +691,85 @@ export async function recordRefund(
       }
 
       // ═══════════════════════════════════════════════════════════════════════
-      // El turno abierto del NEGOCIO: resolver → RECLAMAR → sellar, todo aquí dentro
+      // Turno del NEGOCIO: observar → reclamar OPEN o conciliar post-corte
       // ═══════════════════════════════════════════════════════════════════════
-      // 🔴 Plantilla de `mobile/refund.mobile.service.ts:65-88`, y las tres piezas cuentan:
-      //
-      // 1. Se resuelve con `tx` y DENTRO de la transacción. Resolverlo fuera dejaba una
-      //    ventana en la que el turno se cerraba en medio (otro aparato, o el cierre
-      //    automático) con el `Payment` ya sellado apuntando a él.
-      // 2. El claim ES el decremento: `updateMany` condicionado a `status: 'OPEN'` y acotado
-      //    por `venueId` — por id solo aceptaba el turno de OTRO negocio. Es `updateMany` y no
-      //    `update` porque un `where` que no encaja tiene que dar `count: 0`, no un P2025 que
-      //    tumbe la transacción entera: el dinero YA salió de la caja física.
-      // 3. 🔴 El `Payment` se sella con el turno SÓLO si el claim GANÓ. Sellar antes de
-      //    reclamar (y descartar el `count`) dejaba un REFUND colgando de un turno cerrado al
-      //    que nunca se le restó, y el cierre selecciona estrictamente por `shiftId`
-      //    (`shift.tpv.service.ts:1485-1489`): un recálculo desde los pagos discreparía de su
-      //    propio `totalSales` por el monto del reembolso.
-      //
-      // `shiftId` queda en null en DOS casos, y sólo en ésos: no hay ningún turno abierto, o el
-      // que había se cerró entre la lectura y el claim. En ambos el reembolso se registra igual
-      // y queda FUERA de todo turno de forma coherente (ni el contador denormalizado ni un
-      // recálculo desde los pagos lo cuentan). El efectivo físico no se pierde: el `PAY_OUT` al
-      // cajón se publica post-commit contra la `CashDrawerSession` abierta del venue
-      // (`shared/cashDrawerPosting.ts:334-336`), que no depende del `Shift`. Y un pago con
-      // `shiftId` nulo es REATRIBUIBLE después (`scripts/reatribuir-cobros-al-turno.ts`),
-      // mientras que uno estampado en un turno ya cerrado CON conteo es justo lo que ese script
-      // se niega a tocar.
+      // `claimedAt`/CLOSING es el corte. El lookup ve el candidato más reciente aunque esté
+      // CLOSING; sólo OPEN puede ganar un `updateMany` tenant-safe que decrementa venta/propina
+      // y autoriza `shiftId`. CLOSING y claim-lost jamás se esperan, reintentan o mutan: el
+      // Payment queda sin turno y, después de existir con su id real, se crea en esta misma
+      // transacción una conciliación con candidato, estado, razón, canal y montos. Sin candidato
+      // se conserva por ahora el comportamiento previo, excepto cuando el total histórico tiene
+      // un delta venta/propina sin clasificar: esa anomalía se concilia aun sin candidato.
       // The total guard cannot protect the two accounting components on its own.
       // Example: sale $100 + tip $20, with $90 of sale already refunded. Another $30
-      // sale-only refund fits the $30 total remainder, but would book $120 against a
-      // $100 sale. Measure both components from completed rows while the original is
-      // locked, before mutating the shift or creating the refund row.
-      let refundedSalesCents = 0
-      let refundedTipsCents = 0
-      for (const row of filasDeReembolso) {
-        if (row.status !== TransactionStatus.COMPLETED) continue
-        refundedSalesCents += Math.abs(Math.round(Number(row.amount ?? 0) * 100))
-        refundedTipsCents += Math.abs(Math.round(Number(row.tipAmount ?? 0) * 100))
-      }
-
-      const requestedSalesCents = Math.round(salesRefund * 100)
-      const requestedTipCents = Math.round(tipRefund * 100)
+      // sale-only refund fits the $30 total remainder, but cannot all be booked as sale.
+      //
+      // The processor has already returned the money when this endpoint runs. Rejecting an
+      // impossible requested split would therefore leave real money without a refund row.
+      // Clamp the requested tip portion to the feasible range instead: first consume the
+      // requested component, then spill only the unavoidable remainder into the other one.
+      // New TPVs prevent this combination in their UI; this branch keeps installed APKs and
+      // retries safe during rollout.
+      const { salesCents: refundedSalesCents, tipCents: refundedTipsCents } = centavosDevueltosPorComponente(filasDeReembolso)
+      const classifiedRefundedCents = refundedSalesCents + refundedTipsCents
+      const unclassifiedPriorRefundCents = Math.max(0, lockedAlreadyRefundedCents - classifiedRefundedCents)
       const originalSalesCents = Math.round(Number(locked.amount) * 100)
       const originalTipsCents = Math.round(Number(locked.tipAmount ?? 0) * 100)
+      const requestedTipCents = Math.round(tipRefund * 100)
+      const reparto = ajustarRepartoAComponentesRestantes({
+        originalSalesCents,
+        originalTipsCents,
+        // Si falta historia clasificable, estos ceros sólo validan que el split del EVENTO
+        // actual cabe en los componentes originales; no pretenden asignar el delta histórico.
+        refundedSalesCents: unclassifiedPriorRefundCents > 0 ? 0 : refundedSalesCents,
+        refundedTipsCents: unclassifiedPriorRefundCents > 0 ? 0 : refundedTipsCents,
+        refundCents: esteReembolsoCents,
+        requestedTipCents,
+      })
 
-      if (refundedSalesCents + requestedSalesCents > originalSalesCents) {
-        throw new BadRequestError('La parte de venta del reembolso excede la venta restante del cobro original')
-      }
-      if (refundedTipsCents + requestedTipCents > originalTipsCents) {
-        throw new BadRequestError('La parte de propina del reembolso excede la propina restante del cobro original')
-      }
-
-      let shiftId: string | null = null
-      const turnoDelNegocio = await turnoAbiertoDelNegocio(tx, venueId)
-      if (turnoDelNegocio) {
-        const reclamado = await tx.shift.updateMany({
-          where: { id: turnoDelNegocio.id, venueId, status: 'OPEN', endTime: null },
-          data: {
-            totalSales: { decrement: new Decimal(salesRefund) },
-            ...(tipRefund > 0 ? { totalTips: { decrement: new Decimal(tipRefund) } } : {}),
-          },
+      if (reparto.tipRefundCents !== requestedTipCents) {
+        logger.warn('Refund tip split adjusted to the remaining sale/tip balance', {
+          venueId,
+          originalPaymentId: refundData.originalPaymentId,
+          requestedTipCents,
+          feasibleTipCents: reparto.tipRefundCents,
+          remainingSalesCents: reparto.remainingSalesCents,
+          remainingTipsCents: reparto.remainingTipsCents,
+          refundCents: esteReembolsoCents,
         })
-        if (reclamado.count === 1) shiftId = turnoDelNegocio.id
       }
+
+      tipRefund = reparto.tipRefundCents / 100
+      salesRefund = reparto.salesRefundCents / 100
+
+      const salesRefundPesos = new Decimal(salesRefund)
+      const tipRefundPesos = new Decimal(tipRefund)
+      const shiftClaim = await claimShiftForRefund(tx, {
+        venueId,
+        salesRefundPesos,
+        tipRefundPesos,
+        ...(unclassifiedPriorRefundCents > 0 ? { forcePendingReason: 'UNCLASSIFIED_REFUND_COMPONENT_HISTORY' as const } : {}),
+      })
+      const shiftId = shiftClaim.shiftId
 
       // Create new Payment record with type=REFUND
       const refundPayment = await tx.payment.create({
         data: {
           venueId,
-          orderId: originalPayment.orderId, // Link to same order
+          orderId: locked.orderId, // Link to the Order proven by this locked row
           shiftId: shiftId || undefined,
-          processedById: refundData.staffId,
-          merchantAccountId: refundData.merchantAccountId || originalPayment.merchantAccountId,
-          // ⭐ Terminal that processed this refund (use provided tpvId or inherit from original payment)
-          terminalId: refundData.tpvId || originalPayment.terminalId || null,
+          processedById: userId,
+          // Merchant/terminal are tenant-bearing relations. The body is wire-compatible
+          // input only; neither can override the Payment row held FOR UPDATE.
+          merchantAccountId: locked.merchantAccountId,
+          terminalId: locked.terminalId,
 
           // Negative amount/tip mirror the original split.
-          amount: new Decimal(-salesRefund),
-          tipAmount: new Decimal(-tipRefund),
+          amount: new Decimal(salesRefund === 0 ? 0 : -salesRefund),
+          tipAmount: new Decimal(tipRefund === 0 ? 0 : -tipRefund),
 
           // Payment info
-          method: originalPayment.method,
+          method: locked.method,
           // 🔴 El reembolso hereda la IDENTIDAD y la SEMÁNTICA del tipo original, no sólo el
           // `method`. Un cobro del POS con un tipo del catálogo se puede devolver desde la
           // terminal: sin esto, devolver un vale que SÍ entraba al cajón caía al fallback
@@ -699,25 +778,25 @@ export async function recordRefund(
           //
           // La COMISIÓN no se hereda a propósito: que la plataforma devuelva su porcentaje
           // cuando el cliente cancela es un acuerdo comercial que no conocemos.
-          ...(originalPayment.tenderTypeId
+          ...(locked.tenderTypeId
             ? {
-                tenderTypeId: originalPayment.tenderTypeId,
-                ...(originalPayment.tenderRevision != null ? { tenderRevision: originalPayment.tenderRevision } : {}),
-                ...(originalPayment.tenderLabel != null ? { tenderLabel: originalPayment.tenderLabel } : {}),
-                ...(originalPayment.tenderCountsAsCash != null ? { tenderCountsAsCash: originalPayment.tenderCountsAsCash } : {}),
-                ...(originalPayment.tenderCaptureTip != null ? { tenderCaptureTip: originalPayment.tenderCaptureTip } : {}),
-                ...(originalPayment.tenderSatFormaPago != null ? { tenderSatFormaPago: originalPayment.tenderSatFormaPago } : {}),
+                tenderTypeId: locked.tenderTypeId,
+                ...(locked.tenderRevision != null ? { tenderRevision: locked.tenderRevision } : {}),
+                ...(locked.tenderLabel != null ? { tenderLabel: locked.tenderLabel } : {}),
+                ...(locked.tenderCountsAsCash != null ? { tenderCountsAsCash: locked.tenderCountsAsCash } : {}),
+                ...(locked.tenderCaptureTip != null ? { tenderCaptureTip: locked.tenderCaptureTip } : {}),
+                ...(locked.tenderSatFormaPago != null ? { tenderSatFormaPago: locked.tenderSatFormaPago } : {}),
               }
             : {}),
-          ...(originalPayment.fundsFlow ? { fundsFlow: originalPayment.fundsFlow } : {}),
-          source: originalPayment.source,
+          ...(locked.fundsFlow ? { fundsFlow: locked.fundsFlow } : {}),
+          source: locked.source,
           status: TransactionStatus.COMPLETED,
           type: PaymentType.REFUND,
 
           // Processor info — defaults to 'blumon' for backwards compat with
           // pre-2.31 TPVs that don't send the field. Newer TPVs send 'angelpay'
           // for Nexgo refunds so downstream reports can separate them.
-          processor: refundData.processor ?? 'blumon',
+          processor: locked.processor ?? 'blumon',
 
           // 🛡️ Sin esta línea el `@@unique([venueId, idempotencyKey])` del modelo no protege
           // NADA en los reembolsos: el índice existe desde siempre y nadie lo poblaba, así que
@@ -734,9 +813,15 @@ export async function recordRefund(
             // consumers (backfill script, reports) treat TPV refunds uniformly.
             amountCents: Math.round(refundAmountInPesos * 100),
             amount: refundAmountInPesos,
-            // Marker: shift totalSales decrement is applied in-line below.
-            // `scripts/backfill-refund-shift-totals.ts` skips rows with this flag.
-            shiftBackfilled: true,
+            // Sólo `true` cuando el decremento inline realmente ganó el claim. El backfill
+            // exige además `shiftId`, así que un pendiente sin turno no puede atribuirse dos veces.
+            shiftBackfilled: shiftId !== null,
+            ...(unclassifiedPriorRefundCents > 0
+              ? {
+                  shiftAttributionStatus: 'PENDING',
+                  shiftAttributionPendingReason: 'UNCLASSIFIED_REFUND_COMPONENT_HISTORY',
+                }
+              : {}),
           },
 
           // Authorization from Blumon SDK CancelIcc
@@ -744,9 +829,9 @@ export async function recordRefund(
           referenceNumber: refundData.referenceNumber,
 
           // Card details
-          cardBrand: mapCardBrand(refundData.cardBrand),
-          maskedPan: refundData.maskedPan,
-          entryMode: mapEntryMode(refundData.entryMode),
+          cardBrand: locked.cardBrand ?? mapCardBrand(refundData.cardBrand),
+          maskedPan: locked.maskedPan ?? refundData.maskedPan,
+          entryMode: locked.entryMode ?? mapEntryMode(refundData.entryMode),
 
           // Fee calculation (no fees on refunds typically)
           feePercentage: new Decimal(0),
@@ -754,6 +839,23 @@ export async function recordRefund(
           netAmount: new Decimal(-refundAmountInPesos),
         },
       })
+
+      if (shiftClaim.pendingReason) {
+        await recordPendingPaymentShiftReconciliation(tx, {
+          reconciliationEnabled,
+          claim: shiftClaim,
+          venueId,
+          paymentId: refundPayment.id,
+          orderId: locked.orderId,
+          // Actor de auditoría: identidad autenticada del request, nunca el staffId
+          // declarativo del body que controla el cliente.
+          staffId: userId,
+          channel: 'recordRefund',
+          amountPesos: salesRefundPesos.negated(),
+          tipPesos: tipRefundPesos.negated(),
+          ...(unclassifiedPriorRefundCents > 0 ? { unclassifiedPriorRefundPesos: new Decimal(unclassifiedPriorRefundCents).div(100) } : {}),
+        })
+      }
 
       // ═══════════════════════════════════════════════════════════════════════
       // Update original payment's processorData with refund tracking
@@ -820,7 +922,7 @@ export async function recordRefund(
         refundId: refundPayment.id,
         amount: refundAmountInPesos,
         reason: refundData.reason,
-        staffId: refundData.staffId,
+        staffId: userId,
         timestamp: new Date().toISOString(),
       }
 
@@ -851,7 +953,13 @@ export async function recordRefund(
       } as Prisma.InputJsonValue
 
       await tx.payment.update({
-        where: { id: refundData.originalPaymentId },
+        where: {
+          id: refundData.originalPaymentId,
+          venueId,
+          orderId: locked.orderId,
+          status: TransactionStatus.COMPLETED,
+          type: locked.type,
+        },
         data: {
           processorData: updatedProcessorData,
         },
@@ -875,13 +983,43 @@ export async function recordRefund(
       // «turno» de arriba, y tiene que ocurrir ANTES del `payment.create` para poder sellar el
       // pago sólo si ganó. Mismo split proporcional, una sola escritura.
 
-      return refundPayment
+      return {
+        refundPayment,
+        postCommitAuthority: Object.freeze({
+          orderId: locked.orderId,
+          method: locked.method,
+          fundsFlow: locked.fundsFlow,
+          tenderTypeId: locked.tenderTypeId,
+          tenderCountsAsCash: locked.tenderCountsAsCash,
+        }),
+      }
     })
 
-  let result: Awaited<ReturnType<typeof ejecutarTransaccionDelReembolso>>
+  let transactionResult: Awaited<ReturnType<typeof ejecutarTransaccionDelReembolso>>
   try {
-    result = await ejecutarTransaccionDelReembolso()
+    transactionResult = await ejecutarTransaccionDelReembolso()
   } catch (error) {
+    if (error instanceof ConflictError && error.code === 'REFUND_AUTHORITY_UNAVAILABLE') {
+      const reassignmentWasRecorded = await refundAuthorityReassignmentWasRecorded(prisma, {
+        venueId,
+        orderId: originalPayment.orderId,
+        observedAt: refundAuthorityObservedAt,
+      })
+      if (reassignmentWasRecorded) {
+        await recordRefundAuthorityReconciliation(prisma, {
+          venueId,
+          paymentId: refundData.originalPaymentId,
+          expectedOrderId: originalPayment.orderId,
+          staffId: userId ?? null,
+          channel: 'recordRefund',
+        })
+        throw new ConflictError(
+          'El cobro cambió mientras iniciaba el reembolso. Verifica su asignación antes de continuar.',
+          'REFUND_AUTHORITY_CHANGED',
+        )
+      }
+      throw error
+    }
     // 🔴 La carrera que el STEP 1.5 no puede cubrir: dos reintentos del MISMO reembolso
     // pueden leer ambos `null` allá arriba y llegar los dos al `create`. Lo único que los
     // separa es el índice único de la base. El perdedor NO puede devolver un 500: su cola
@@ -919,6 +1057,9 @@ export async function recordRefund(
     throw error
   }
 
+  const result = transactionResult.refundPayment
+  const postCommitAuthority = transactionResult.postCommitAuthority
+
   logger.info('Refund payment created', {
     refundPaymentId: result.id,
     originalPaymentId: refundData.originalPaymentId,
@@ -934,7 +1075,7 @@ export async function recordRefund(
     await postCashRefundToDrawer({
       venueId,
       refundPaymentId: result.id,
-      orderId: originalPayment.orderId ?? null,
+      orderId: postCommitAuthority.orderId,
       // 🔴 El cajón sólo ve BILLETES: sale la venta MÁS la propina devuelta. El Payment
       // del reembolso guarda el split contable (`amount` = venta, `tipAmount` = propina),
       // pero el CASH_SALE original entró como `amount + tipAmount`, así que pasar sólo la
@@ -942,11 +1083,11 @@ export async function recordRefund(
       // al cerrar. Misma convención que `refund.dashboard` (pasa el total) y `refund.mobile`.
       amount: new Decimal(result.amount).plus(new Decimal(result.tipAmount ?? 0)),
       reason: refundData.reason ?? null,
-      method: originalPayment.method,
-      fundsFlow: (originalPayment as any).fundsFlow ?? null,
-      tenderTypeId: (originalPayment as any).tenderTypeId ?? null,
-      tenderCountsAsCash: (originalPayment as any).tenderCountsAsCash ?? null,
-      staffId: refundData.staffId ?? null,
+      method: postCommitAuthority.method,
+      fundsFlow: postCommitAuthority.fundsFlow,
+      tenderTypeId: postCommitAuthority.tenderTypeId,
+      tenderCountsAsCash: postCommitAuthority.tenderCountsAsCash,
+      staffId: userId,
       staffName: null,
     })
   } catch (err) {
@@ -957,7 +1098,7 @@ export async function recordRefund(
   }
 
   void logAction({
-    staffId: refundData.staffId ?? null,
+    staffId: userId,
     venueId,
     action: 'REFUND_CREATED',
     entity: 'Payment',
@@ -965,19 +1106,19 @@ export async function recordRefund(
     data: {
       amount: Number(refundAmountInPesos),
       reason: refundData.reason,
-      method: originalPayment.method,
+      method: postCommitAuthority.method,
       source: 'TPV',
     },
   })
 
   // REFERRAL HOOK: trigger referral void if the original order had a QUALIFIED referral
   // (idempotent: no-ops if no QUALIFIED Referral matches this orderId)
-  if (originalPayment.orderId) {
+  if (postCommitAuthority.orderId) {
     try {
       const { onOrderRefunded } = await import('@/services/referrals/referralRefund.service')
-      await onOrderRefunded({ orderId: originalPayment.orderId, venueId })
+      await onOrderRefunded({ orderId: postCommitAuthority.orderId, venueId })
     } catch (err) {
-      console.error('[referral hook] onOrderRefunded failed for order', originalPayment.orderId, err)
+      console.error('[referral hook] onOrderRefunded failed for order', postCommitAuthority.orderId, err)
     }
   }
 
@@ -990,13 +1131,13 @@ export async function recordRefund(
   // only once the cumulative refunds reach the order total — i.e. the whole
   // order is reversed. Non-blocking (a restock failure must not fail the refund)
   // and processor-agnostic, so it covers both AngelPay and Blumon refunds.
-  if (originalPayment.orderId && originalPayment.order) {
+  if (postCommitAuthority.orderId && originalPayment.order) {
     try {
       const orderTotal = Number(originalPayment.order.total)
       if (orderTotal > 0) {
         // This refund row is already committed, so it's included in the sum.
         const orderRefunds = await prisma.payment.findMany({
-          where: { orderId: originalPayment.orderId, type: PaymentType.REFUND, status: TransactionStatus.COMPLETED },
+          where: { orderId: postCommitAuthority.orderId, type: PaymentType.REFUND, status: TransactionStatus.COMPLETED },
           select: { amount: true },
         })
         const totalRefundedSale = orderRefunds.reduce((sum, p) => sum + Math.abs(Number(p.amount)), 0)
@@ -1014,12 +1155,12 @@ export async function recordRefund(
         if (crossedToFullyRefunded) {
           const summary = await restockOrderItems({
             venueId,
-            orderId: originalPayment.orderId,
+            orderId: postCommitAuthority.orderId,
             refundPaymentId: result.id,
-            staffId: refundData.staffId,
+            staffId: userId,
           })
           logger.info('Order fully refunded — inventory restocked', {
-            orderId: originalPayment.orderId,
+            orderId: postCommitAuthority.orderId,
             refundPaymentId: result.id,
             ...summary,
           })
@@ -1029,7 +1170,7 @@ export async function recordRefund(
       // Never fail the refund because restock failed — the money movement already succeeded.
       logger.error('Failed to restock inventory on full refund', {
         refundPaymentId: result.id,
-        orderId: originalPayment.orderId,
+        orderId: postCommitAuthority.orderId,
         error: error instanceof Error ? error.message : String(error),
       })
     }
@@ -1071,11 +1212,11 @@ export async function recordRefund(
   // ═══════════════════════════════════════════════════════════════════════════
   try {
     const { reverseStampForOrder } = await import('../wallet/stampLedger.service')
-    await reverseStampForOrder(venueId, originalPayment.orderId)
+    await reverseStampForOrder(venueId, postCommitAuthority.orderId)
   } catch (error) {
     logger.error('No se pudo revertir el sello de una venta reembolsada', {
       venueId,
-      orderId: originalPayment.orderId,
+      orderId: postCommitAuthority.orderId,
       refundPaymentId: result.id,
       error: error instanceof Error ? error.message : String(error),
     })
@@ -1094,7 +1235,7 @@ export async function recordRefund(
       receiptUrl: `${process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'}/receipts/public/${receipt.accessKey}?refund=true`,
       // 🧾 Same "can this ticket self-invoice" check as the original payment/order receipt.
       // Hot payment path: resolveAutofacturaAvailable never throws — any lookup error → false.
-      autofacturaAvailable: await resolveAutofacturaAvailable(originalPayment.orderId),
+      autofacturaAvailable: await resolveAutofacturaAvailable(postCommitAuthority.orderId),
     }
     logger.info('Refund digital receipt generated', { receiptId: receipt.id })
   } catch (error) {

@@ -151,6 +151,77 @@ const escrito = () => (prismaMock as any).payment.update.mock.calls[0][0].data.p
 beforeEach(() => jest.clearAllMocks())
 
 describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»', () => {
+  it('acumulado largo sin filas: conserva el split explícito y fuerza conciliación sin reclamar OPEN', async () => {
+    armar({ refundedAmount: 60, refundedAmountCents: 6000 }, [])
+    ;(prismaMock as any).shift.findFirst.mockResolvedValue({ id: 'shift-open', status: 'OPEN' })
+    ;(prismaMock as any).shift.updateMany.mockResolvedValue({ count: 1 })
+    ;(prismaMock as any).activityLog.create.mockResolvedValue({ id: 'audit-history-1' })
+
+    await refundService.recordRefund(VENUE, { ...cuerpo(3000), tipRefundCents: 1000 } as never, 'staff-1')
+
+    const refund = (prismaMock as any).payment.create.mock.calls[0][0].data
+    expect(Number(refund.amount)).toBe(-20)
+    expect(Number(refund.tipAmount)).toBe(-10)
+    expect(Number(refund.netAmount)).toBe(-30)
+    expect(refund.shiftId ?? null).toBeNull()
+    expect(refund.processorData).toMatchObject({
+      amountCents: 3000,
+      shiftBackfilled: false,
+      shiftAttributionPendingReason: 'UNCLASSIFIED_REFUND_COMPONENT_HISTORY',
+    })
+    expect((prismaMock as any).shift.updateMany).not.toHaveBeenCalled()
+    expect((prismaMock as any).activityLog.create).toHaveBeenCalledTimes(1)
+    expect((prismaMock as any).activityLog.create).toHaveBeenCalledWith({
+      data: {
+        action: 'PAYMENT_WITHOUT_SHIFT',
+        entity: 'Payment',
+        entityId: 'pay-refund-nuevo',
+        staffId: 'staff-1',
+        venueId: VENUE,
+        data: {
+          status: 'PENDING',
+          reason: 'UNCLASSIFIED_REFUND_COMPONENT_HISTORY',
+          candidateShiftId: 'shift-open',
+          observedShiftStatus: 'OPEN',
+          paymentId: 'pay-refund-nuevo',
+          orderId: null,
+          channel: 'recordRefund',
+          amountPesos: '-20.00',
+          tipPesos: '-10.00',
+          totalPesos: '-30.00',
+          shiftAttributionStatus: 'PENDING',
+          unclassifiedPriorRefundPesos: '60.00',
+        },
+      },
+    })
+  })
+
+  it.each([0.5, Number.MAX_SAFE_INTEGER + 1, Number.POSITIVE_INFINITY, Number.NaN])(
+    'rechaza amount=%p si no es un entero positivo seguro antes de abrir transacción',
+    async amount => {
+      armar({})
+
+      await expect(refundService.recordRefund(VENUE, cuerpo(amount) as never)).rejects.toThrow(/amount.*entero seguro.*centavos/i)
+
+      expect((prismaMock as any).$transaction).not.toHaveBeenCalled()
+      expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each([-0.5, 0.5, Number.MAX_SAFE_INTEGER + 1, Number.POSITIVE_INFINITY, Number.NaN])(
+    'rechaza tipRefundCents=%p si no es un entero no negativo seguro antes de abrir transacción',
+    async tipRefundCents => {
+      armar({})
+
+      await expect(refundService.recordRefund(VENUE, { ...cuerpo(1000), tipRefundCents } as never)).rejects.toThrow(
+        /tipRefundCents.*entero seguro.*centavos/i,
+      )
+
+      expect((prismaMock as any).$transaction).not.toHaveBeenCalled()
+      expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
+    },
+  )
+
   it('🔴 lee el ACUMULADO EN CENTAVOS que el dashboard escribió, no sólo los pesos', async () => {
     // Es exactamente lo que el riel del dashboard persiste tras devolver los $120 completos.
     // Con la lectura vieja (`Number(processorData.refundedAmount ?? 0)`) una fila que sólo
@@ -279,31 +350,51 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
 
   // ─── Regresión: el camino de todos los días no cambia ────────────────────────────────
 
-  it('🔴 no permite agotar dos veces la VENTA conservando la propina', async () => {
+  it('🔴 reequilibra hacia PROPINA cuando la venta restante no alcanza', async () => {
     // Cobro original: $100 venta + $20 propina. Ya salieron $90 exclusivamente de venta.
     // Pedir otros $30 con `tipRefundCents=0` cabe en el TOTAL restante ($30), pero llevaría
-    // la venta devuelta a $120. El límite por componente debe mirarse bajo el mismo candado
-    // y usando las filas reales, no sólo el acumulado total.
+    // la venta devuelta a $120. Como el procesador ya movió el dinero, el backend no puede
+    // rechazar y dejarlo sin asiento: toma los $10 restantes de venta y los otros $20 de tip.
     armar({}, [filaDeReembolso(-90, 0)])
 
-    await expect(
-      refundService.recordRefund(VENUE, { ...cuerpo(3000), tipRefundCents: 0 } as never),
-    ).rejects.toThrow(/venta.*excede|sale portion.*exceeds/i)
+    await refundService.recordRefund(VENUE, { ...cuerpo(3000), tipRefundCents: 0 } as never)
 
-    expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
+    const data = (prismaMock as any).payment.create.mock.calls[0][0].data
+    expect(Number(data.amount)).toBe(-10)
+    expect(Number(data.tipAmount)).toBe(-20)
   })
 
-  it('🔴 no permite agotar dos veces la PROPINA aunque quede saldo total', async () => {
+  it('🔴 reequilibra hacia VENTA cuando la propina restante no alcanza', async () => {
     // Ya se devolvieron $15 de propina. Otros $10 caben holgadamente en el total, pero
-    // excederían los $20 de propina originales. El desglose explícito no puede transformar
-    // venta restante en propina devuelta.
+    // excederían los $20 de propina originales. Se usan los $5 restantes de propina y los
+    // otros $5 se registran como venta para no perder el asiento del dinero ya devuelto.
     armar({}, [filaDeReembolso(0, -15)])
 
-    await expect(
-      refundService.recordRefund(VENUE, { ...cuerpo(1000), tipRefundCents: 1000 } as never),
-    ).rejects.toThrow(/propina.*excede|tip portion.*exceeds/i)
+    await refundService.recordRefund(VENUE, { ...cuerpo(1000), tipRefundCents: 1000 } as never)
 
-    expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
+    const data = (prismaMock as any).payment.create.mock.calls[0][0].data
+    expect(Number(data.amount)).toBe(-5)
+    expect(Number(data.tipAmount)).toBe(-5)
+  })
+
+  it('honra tipRefundCents=0 cuando el monto cabe completo en la venta restante', async () => {
+    armar({})
+
+    await refundService.recordRefund(VENUE, { ...cuerpo(10000), tipRefundCents: 0 } as never)
+
+    const data = (prismaMock as any).payment.create.mock.calls[0][0].data
+    expect(Number(data.amount)).toBe(-100)
+    expect(Number(data.tipAmount)).toBe(0)
+  })
+
+  it('un APK viejo que pide el total sin propina conserva el asiento completo', async () => {
+    armar({})
+
+    await refundService.recordRefund(VENUE, { ...cuerpo(12000), tipRefundCents: 0 } as never)
+
+    const data = (prismaMock as any).payment.create.mock.calls[0][0].data
+    expect(Number(data.amount)).toBe(-100)
+    expect(Number(data.tipAmount)).toBe(-20)
   })
 
   it('un cobro sin reembolsos previos se comporta igual que siempre', async () => {
@@ -363,6 +454,7 @@ describe('Task 5r — lo que el dashboard escribe es lo que la terminal lee', ()
 
     ;(prismaMock as any).payment = {
       findUnique: jest.fn(),
+      findFirst: jest.fn().mockResolvedValue({ orderId: 'order-1' }),
       findMany: jest.fn().mockResolvedValue([]),
       create: jest.fn().mockResolvedValue({ id: 'refund-B' }),
       update: jest.fn().mockResolvedValue({ id: 'pay-orig' }),
@@ -372,7 +464,11 @@ describe('Task 5r — lo que el dashboard escribe es lo que la terminal lee', ()
     ;(prismaMock as any).cashDrawerSession = { findFirst: jest.fn().mockResolvedValue(null), updateMany: jest.fn(), update: jest.fn() }
     ;(prismaMock as any).cashDrawerEvent = { createMany: jest.fn() }
     ;(prismaMock as any).$transaction = jest.fn().mockImplementation(async (fn: any) => fn(prismaMock))
-    ;(prismaMock as any).$queryRaw = jest.fn().mockResolvedValueOnce([cobro]).mockResolvedValueOnce([reembolsoPrevio])
+    ;(prismaMock as any).$queryRaw = jest
+      .fn()
+      .mockResolvedValueOnce([{ id: 'order-1' }])
+      .mockResolvedValueOnce([cobro])
+      .mockResolvedValueOnce([reembolsoPrevio])
 
     await issueRefund({ venueId: VENUE, paymentId: 'pay-orig', amount: 6000, reason: 'RETURNED_GOODS', staffId: 'staff-9' })
 

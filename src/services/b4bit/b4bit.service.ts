@@ -20,9 +20,14 @@ import { SocketEventType } from '../../communication/sockets/types'
 import logger from '../../config/logger'
 import { BadRequestError, InternalServerError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
-import { logAction } from '../dashboard/activity-log.service'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
 import { computeOrderBalance } from '../shared/orderBalance'
+import {
+  claimShiftForCapturedPayment,
+  lockExistingOrderForPayment,
+  recordPendingPaymentShiftReconciliation,
+  resolvePaymentShiftReconciliationEnabled,
+} from '../shared/paymentShiftClaim'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { generateDigitalReceipt, generateReceiptUrl } from '../tpv/digitalReceipt.tpv.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
@@ -433,58 +438,6 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
     throw new InternalServerError(b4bitResponse.error?.message || 'Error al crear orden de pago crypto')
   }
 
-  // 🔴 Dinero FUERA de todo turno: es la anomalía que este proyecto existe para eliminar
-  // (Testarudo, 1-sep-2026: 78 de 92 cobros, $10,337 de $12,002, fuera de todo turno). No detiene
-  // el cobro —un negocio sin turno abierto sigue vendiendo— pero deja el rastro que hace falta
-  // para no tener que adivinar después por qué ese dinero no aparece en ningún corte.
-  //
-  // Va AQUÍ, después de que B4Bit aceptó la orden, y no junto a la escritura del `Payment`: hasta
-  // este punto no hay nada cobrable, y un venue con la configuración cripto rota escribiría una
-  // fila por CADA intento fallido — la bitácora acabaría llena de pagos que nunca ocurrieron.
-  //
-  // El camino normal NO se registra a propósito: la bitácora guarda las anomalías que un dueño
-  // audita, no un asiento por cada venta.
-  if (!turnoProvisional) {
-    // 🔴 Y tampoco es anomalía si el negocio APAGÓ los turnos: ahí «sin turno» no es un descuadre,
-    // es el ajuste, y sin este gate cada cobro dejaría una falsa alarma permanente.
-    //
-    // `?? true`, NUNCA `=== true`: la mayoría de los venues no tiene fila de `VenueSettings` (53 de
-    // 68 en local) y una fila ausente vale el default `true` del schema — con `=== true` el gate
-    // mataría la señal justo para casi todos. Es el defecto que ya se cazó dos veces con
-    // `attendanceEnabled`. La consulta vive DENTRO de esta rama: el camino feliz no la paga.
-    //
-    // Si leer la configuración falla, se registra igual: un error de lectura no puede silenciar una
-    // anomalía de dinero.
-    let turnosEncendidos = true
-    try {
-      const ajustes = await prisma.venueSettings.findUnique({ where: { venueId }, select: { enableShifts: true } })
-      turnosEncendidos = ajustes?.enableShifts ?? true
-    } catch (error) {
-      logger.warn('⚠️ No se pudo leer `enableShifts`; el cobro fuera de turno se registra igual', {
-        venueId,
-        error: error instanceof Error ? error.message : error,
-      })
-    }
-
-    if (turnosEncendidos) {
-      logger.warn('⚠️ Cobro cripto sin turno de caja abierto: queda fuera de todo corte', { venueId, paymentId: payment.id })
-      // `logAction` es best-effort y nunca lanza, así que la bitácora no puede tumbar un cobro.
-      void logAction({
-        staffId,
-        venueId,
-        action: 'CRYPTO_PAYMENT_WITHOUT_SHIFT',
-        entity: 'Payment',
-        entityId: payment.id,
-        // 🔴 PESOS, jamás centavos. Esto se pinta VERBATIM en la bitácora que ve el dueño
-        // (`VenueActivityLog.tsx` → `toDetailRows` → `formatDetailValue` → `String(value)`), así que
-        // un `5500` se leería como $5,500 encima de un cargo de $55 — y justo lo está mirando quien
-        // investiga por qué le falta dinero. Son los MISMOS valores que se escribieron en el
-        // `Payment`: los centavos mueren en la frontera del proveedor.
-        data: { amount: amount / 100, tip: tip / 100, total: fiatAmount, processor: 'B4BIT', orderId: orderId ?? null },
-      })
-    }
-  }
-
   // Update payment with B4Bit tracking info
   await prisma.payment.update({
     where: { id: payment.id },
@@ -796,7 +749,7 @@ export async function processWebhook(payload: B4BitWebhookPayload): Promise<Proc
   // Process based on status
   switch (status) {
     case 'CO': // Completed - Payment confirmed
-      return await handlePaymentConfirmed(payment, payload)
+      return await handlePaymentConfirmed(payment, payload, await resolvePaymentShiftReconciliationEnabled(prisma, venueId))
 
     case 'AC': // Awaiting Completion - Payment detected, waiting for confirmations
       // Update processorData and emit progress event
@@ -961,6 +914,8 @@ interface CryptoSettlementResult {
 
 interface IgnoredCryptoSettlementResult {
   webhookIgnored: true
+  reason: 'OUT_OF_ORDER' | 'PAYMENT_NOT_PENDING'
+  preservedStatus?: string
 }
 
 /**
@@ -1024,11 +979,17 @@ async function completeAndAttributeB4BitPaymentInTx(
   payment: {
     id: string
     venueId: string
+    orderId: string | null
     amount: Prisma.Decimal | number
     tipAmount: Prisma.Decimal | number
+    processedById: string | null
   },
   processorPatch: Prisma.InputJsonObject,
-): Promise<{ transitioned: boolean; ignoredAsOutOfOrder: boolean }> {
+  reconciliationEnabled: boolean,
+): Promise<{ transitioned: boolean; ignoredAsOutOfOrder: boolean; preservedStatus?: string }> {
+  if (payment.orderId) {
+    await lockExistingOrderForPayment(tx, { venueId: payment.venueId, orderId: payment.orderId })
+  }
   await lockB4BitPaymentRow(tx, payment.id, payment.venueId)
   const freshPayment = await tx.payment.findUnique({
     where: { id: payment.id, venueId: payment.venueId },
@@ -1052,8 +1013,20 @@ async function completeAndAttributeB4BitPaymentInTx(
     return { transitioned: false, ignoredAsOutOfOrder: false }
   }
 
+  if (freshPayment.status !== 'PENDING') {
+    return { transitioned: false, ignoredAsOutOfOrder: false, preservedStatus: freshPayment.status }
+  }
+
+  const priorCompletedPaymentCount = payment.orderId
+    ? typeof tx.payment.count === 'function'
+      ? ((await tx.payment.count({
+          where: { orderId: payment.orderId, venueId: payment.venueId, status: 'COMPLETED', type: { not: 'REFUND' } },
+        })) ?? 0)
+      : 0
+    : 0
+
   const transition = await tx.payment.updateMany({
-    where: { id: payment.id, venueId: payment.venueId, status: { not: 'COMPLETED' } },
+    where: { id: payment.id, venueId: payment.venueId, status: 'PENDING' },
     data: {
       status: 'COMPLETED',
       // The initiation-time value is provisional. Clearing it in the CAS makes
@@ -1070,10 +1043,9 @@ async function completeAndAttributeB4BitPaymentInTx(
       where: { id: payment.id, venueId: payment.venueId },
       select: { status: true, processorData: true },
     })
-    if (!winner || winner.status !== 'COMPLETED') {
-      const conflict: Error & { code?: string } = new Error('B4BIT_PAYMENT_CAS_LOST')
-      conflict.code = 'B4BIT_PAYMENT_CAS_LOST'
-      throw conflict
+    if (!winner) throw new Error(`B4Bit payment ${payment.id} no longer exists for venue ${payment.venueId}`)
+    if (winner.status !== 'COMPLETED') {
+      return { transitioned: false, ignoredAsOutOfOrder: false, preservedStatus: winner.status }
     }
 
     const winnerMerge = mergeB4BitProcessorData(winner.processorData, processorPatch)
@@ -1090,29 +1062,32 @@ async function completeAndAttributeB4BitPaymentInTx(
   }
 
   // Resolve only after winning the payment transition: a redelivery/concurrent
-  // loser must never even attempt to move shift totals.
-  const candidate = await turnoAbiertoDelNegocio(tx, payment.venueId)
-  if (!candidate) return { transitioned: true, ignoredAsOutOfOrder: false }
-
-  const claimed = await tx.shift.updateMany({
-    where: {
-      id: candidate.id,
-      venueId: payment.venueId,
-      status: 'OPEN',
-      endTime: null,
-    },
-    data: {
-      // Payment fields are already peso-valued Decimals. Provider centavos do
-      // not participate in this accounting write.
-      totalSales: { increment: payment.amount },
-      totalTips: { increment: payment.tipAmount },
-    },
+  // loser never reaches the common claim or its atomic anomaly row.
+  const amountPesos = new Prisma.Decimal(payment.amount)
+  const tipPesos = new Prisma.Decimal(payment.tipAmount)
+  const shiftClaim = await claimShiftForCapturedPayment(tx, {
+    venueId: payment.venueId,
+    amountPesos,
+    tipPesos,
+    incrementTotalOrders: Boolean(payment.orderId) && priorCompletedPaymentCount === 0,
   })
 
-  if (claimed.count === 1) {
+  if (shiftClaim.shiftId) {
     await tx.payment.update({
       where: { id: payment.id, venueId: payment.venueId },
-      data: { shiftId: candidate.id },
+      data: { shiftId: shiftClaim.shiftId },
+    })
+  } else {
+    await recordPendingPaymentShiftReconciliation(tx, {
+      claim: shiftClaim,
+      venueId: payment.venueId,
+      paymentId: payment.id,
+      orderId: payment.orderId,
+      staffId: payment.processedById,
+      channel: 'b4bitWebhook',
+      amountPesos,
+      tipPesos,
+      reconciliationEnabled,
     })
   }
 
@@ -1176,14 +1151,22 @@ async function settleOrderForConfirmedCryptoPayment(
     processedById: string | null
   },
   processorPatch: Prisma.InputJsonObject,
+  reconciliationEnabled: boolean,
 ): Promise<CryptoSettlementResult | IgnoredCryptoSettlementResult | null> {
   const MAX_SETTLEMENT_ATTEMPTS = 3
 
   for (let attempt = 1; attempt <= MAX_SETTLEMENT_ATTEMPTS; attempt++) {
     try {
       return await prisma.$transaction(async tx => {
-        const completion = await completeAndAttributeB4BitPaymentInTx(tx, payment, processorPatch)
-        if (completion.ignoredAsOutOfOrder) return { webhookIgnored: true as const }
+        const completion = await completeAndAttributeB4BitPaymentInTx(tx, payment, processorPatch, reconciliationEnabled)
+        if (completion.ignoredAsOutOfOrder) return { webhookIgnored: true as const, reason: 'OUT_OF_ORDER' as const }
+        if (completion.preservedStatus) {
+          return {
+            webhookIgnored: true as const,
+            reason: 'PAYMENT_NOT_PENDING' as const,
+            preservedStatus: completion.preservedStatus,
+          }
+        }
         const isRedelivery = !completion.transitioned
 
         if (!payment.orderId) return null
@@ -1402,11 +1385,16 @@ async function settleOrderForConfirmedCryptoPayment(
   // de perder el dinero en silencio.
   try {
     await prisma.$transaction(async tx => {
-      await completeAndAttributeB4BitPaymentInTx(tx, payment, {
-        ...processorPatch,
-        orderSettlementFailed: true,
-        orderSettlementFailedAt: new Date().toISOString(),
-      })
+      await completeAndAttributeB4BitPaymentInTx(
+        tx,
+        payment,
+        {
+          ...processorPatch,
+          orderSettlementFailed: true,
+          orderSettlementFailedAt: new Date().toISOString(),
+        },
+        reconciliationEnabled,
+      )
     })
   } catch (persistError: any) {
     logger.error('🚨 [B4Bit settlement] NO SE PUDO REGISTRAR EL COBRO CRIPTO — dinero cobrado sin Payment COMPLETED', {
@@ -1447,6 +1435,7 @@ async function handlePaymentConfirmed(
     venue: { id: string; name: string; organizationId: string } | null
   },
   payload: B4BitWebhookPayload,
+  reconciliationEnabled: boolean,
 ): Promise<ProcessWebhookResult> {
   if (!payment || !payment.venue) {
     return {
@@ -1466,18 +1455,6 @@ async function handlePaymentConfirmed(
     txHash: tx_hash,
   })
 
-  // Generate digital receipt
-  let receipt = null
-  let receiptUrl: string | null = null
-  const frontendUrl = process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'
-  try {
-    receipt = await generateDigitalReceipt(payment.id)
-    receiptUrl = generateReceiptUrl(receipt.accessKey, frontendUrl)
-    logger.info('📄 Digital receipt generated', { receiptUrl })
-  } catch (receiptError: any) {
-    logger.error('⚠️ Failed to generate receipt', { error: receiptError.message })
-  }
-
   // 🔴 MONEY — un abono PARCIAL no puede cerrar la cuenta.
   //
   // Esto escribía, sin mirar nada más: `status: COMPLETED`, `paymentStatus: PAID`,
@@ -1493,18 +1470,36 @@ async function handlePaymentConfirmed(
   // 🔑 Se recalcula desde los pagos durables, NUNCA con `paidAmount += amount`:
   // un `CO` reentregado por B4Bit relee el mismo conjunto y llega al mismo
   // resultado, en vez de duplicar el abono.
-  const settlement = await settleOrderForConfirmedCryptoPayment(payment, {
-    lastStatus: 'CO',
-    cryptoAmount: crypto_amount,
-    cryptoCurrency: currency,
-    txHash: tx_hash,
-    confirmations,
-    confirmedAt: new Date().toISOString(),
-    // Sólo si es una fecha válida — ver `parseEditedAtMs`.
-    ...(validEditedAt(payload) ? { lastEditedAt: validEditedAt(payload) } : {}),
-  })
+  const settlement = await settleOrderForConfirmedCryptoPayment(
+    payment,
+    {
+      lastStatus: 'CO',
+      cryptoAmount: crypto_amount,
+      cryptoCurrency: currency,
+      txHash: tx_hash,
+      confirmations,
+      confirmedAt: new Date().toISOString(),
+      // Sólo si es una fecha válida — ver `parseEditedAtMs`.
+      ...(validEditedAt(payload) ? { lastEditedAt: validEditedAt(payload) } : {}),
+    },
+    reconciliationEnabled,
+  )
 
   if (settlement && 'webhookIgnored' in settlement) {
+    if (settlement.reason === 'PAYMENT_NOT_PENDING') {
+      logger.warn('⚠️ [B4Bit] CO ignorado: el Payment durable ya no está PENDING', {
+        paymentId: payment.id,
+        venueId,
+        preservedStatus: settlement.preservedStatus,
+      })
+      return {
+        success: true,
+        action: 'IGNORED',
+        message: `CO ignorado: el Payment conserva estado ${settlement.preservedStatus}`,
+        paymentId: payment.id,
+        details: { status: 'CO' },
+      }
+    }
     logger.warn('⚠️ [B4Bit] CO FUERA DE ORDEN ignorado dentro de la transición terminal', {
       paymentId: payment.id,
       venueId,
@@ -1517,6 +1512,19 @@ async function handlePaymentConfirmed(
       paymentId: payment.id,
       details: { status: 'CO' },
     }
+  }
+
+  // El recibo sólo nace después de que la transición durable aceptó el CO. Un
+  // Payment FAILED/PROCESSING preservado no recibe efectos de confirmación.
+  let receipt = null
+  let receiptUrl: string | null = null
+  const frontendUrl = process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'
+  try {
+    receipt = await generateDigitalReceipt(payment.id)
+    receiptUrl = generateReceiptUrl(receipt.accessKey, frontendUrl)
+    logger.info('📄 Digital receipt generated', { receiptUrl })
+  } catch (receiptError: any) {
+    logger.error('⚠️ Failed to generate receipt', { error: receiptError.message })
   }
 
   if (payment.orderId && settlement) {

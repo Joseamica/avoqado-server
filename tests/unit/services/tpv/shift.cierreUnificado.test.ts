@@ -107,7 +107,9 @@ function mundo(over: Record<string, unknown> = {}) {
   const abierto = turnoAbierto(over)
   escrito = undefined
   const tx = {
+    $queryRaw: jest.fn().mockResolvedValue([{ pg_advisory_xact_lock: null }]),
     shift: {
+      findFirst: jest.fn(async () => abierto),
       updateMany: jest.fn(async (args: any) => {
         escrito = args.data
         return { count: 1 }
@@ -326,7 +328,10 @@ describe('cerrar el turno desde la PAX cierra también la gaveta ligada', () => 
     expect(mockLigar).toHaveBeenCalledWith(expect.anything(), VENUE, TURNO, CAJA)
     // ANTES: si la liga se escribiera después del commit del turno, un proceso que muere en medio
     // dejaría la pareja sin identificar y el barrido no podría cerrarla nunca.
-    expect(mockLigar.mock.invocationCallOrder[0]).toBeLessThan(m.$transaction.mock.invocationCallOrder[0])
+    // La primera transacción es ahora el claim OPEN→CLOSING. La segunda contiene la firma CLOSED:
+    // la liga debe existir antes de ESA finalización, que es el contrato reparable relevante.
+    expect(m.$transaction).toHaveBeenCalledTimes(2)
+    expect(mockLigar.mock.invocationCallOrder[0]).toBeLessThan(m.$transaction.mock.invocationCallOrder[1])
   })
 
   it('sin gaveta no hay pareja que ligar', async () => {

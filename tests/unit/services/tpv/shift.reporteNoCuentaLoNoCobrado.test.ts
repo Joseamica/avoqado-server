@@ -60,7 +60,18 @@ const ABRE = new Date('2026-09-03T14:00:00.000Z')
 const CIERRA = new Date('2026-09-03T22:00:00.000Z')
 
 function turnoCerrado(extra: Record<string, unknown> = {}) {
-  return { id: 'turno-A', venueId: 'venue-1', staff: null, startTime: ABRE, endTime: CIERRA, orders: [], payments: [], ...extra }
+  return {
+    id: 'turno-A',
+    venueId: 'venue-1',
+    staff: null,
+    status: 'CLOSED',
+    startTime: ABRE,
+    endTime: CIERRA,
+    updatedAt: CIERRA,
+    orders: [],
+    payments: [],
+    ...extra,
+  }
 }
 
 function cobro(extra: Record<string, unknown> = {}) {
@@ -164,7 +175,7 @@ describe('🔴 (b) el respaldo histórico se acota a [startTime, endTime]', () =
 
   it('en un turno ABIERTO (endTime null) no hay techo: el cobro posterior sí cuenta', async () => {
     const tardio = cobro({ amount: 500, createdAt: new Date('2026-09-05T02:00:00.000Z') })
-    const fila = await correr(turnoCerrado({ endTime: null, orders: [{ id: 'orden-1', payments: [tardio] }] }))
+    const fila = await correr(turnoCerrado({ status: 'OPEN', endTime: null, orders: [{ id: 'orden-1', payments: [tardio] }] }))
     expect(fila.paymentSum).toBe(500)
   })
 
@@ -205,27 +216,27 @@ describe('cobroSinTurnoPerteneceAlTurno', () => {
   const dentro = new Date('2026-09-03T18:00:00.000Z')
 
   it('acepta el instante exacto de apertura y el de cierre (ventana inclusiva)', () => {
-    expect(cobroSinTurnoPerteneceAlTurno({ createdAt: ABRE }, { startTime: ABRE, endTime: CIERRA })).toBe(true)
-    expect(cobroSinTurnoPerteneceAlTurno({ createdAt: CIERRA }, { startTime: ABRE, endTime: CIERRA })).toBe(true)
+    expect(cobroSinTurnoPerteneceAlTurno({ createdAt: ABRE }, { status: 'CLOSED', startTime: ABRE, endTime: CIERRA })).toBe(true)
+    expect(cobroSinTurnoPerteneceAlTurno({ createdAt: CIERRA }, { status: 'CLOSED', startTime: ABRE, endTime: CIERRA })).toBe(true)
   })
 
   it('rechaza un milisegundo antes de abrir y uno después de cerrar', () => {
     const justoAntes = new Date(ABRE.getTime() - 1)
     const justoDespues = new Date(CIERRA.getTime() + 1)
-    expect(cobroSinTurnoPerteneceAlTurno({ createdAt: justoAntes }, { startTime: ABRE, endTime: CIERRA })).toBe(false)
-    expect(cobroSinTurnoPerteneceAlTurno({ createdAt: justoDespues }, { startTime: ABRE, endTime: CIERRA })).toBe(false)
+    expect(cobroSinTurnoPerteneceAlTurno({ createdAt: justoAntes }, { status: 'CLOSED', startTime: ABRE, endTime: CIERRA })).toBe(false)
+    expect(cobroSinTurnoPerteneceAlTurno({ createdAt: justoDespues }, { status: 'CLOSED', startTime: ABRE, endTime: CIERRA })).toBe(false)
   })
 
   it('un turno abierto no tiene techo', () => {
     const muyDespues = new Date('2027-01-01T00:00:00.000Z')
-    expect(cobroSinTurnoPerteneceAlTurno({ createdAt: muyDespues }, { startTime: ABRE, endTime: null })).toBe(true)
+    expect(cobroSinTurnoPerteneceAlTurno({ createdAt: muyDespues }, { status: 'OPEN', startTime: ABRE, endTime: null })).toBe(true)
   })
 
   it('falla cerrado ante datos ausentes o ilegibles', () => {
-    expect(cobroSinTurnoPerteneceAlTurno({ createdAt: undefined }, { startTime: ABRE, endTime: CIERRA })).toBe(false)
-    expect(cobroSinTurnoPerteneceAlTurno({ createdAt: null }, { startTime: ABRE, endTime: CIERRA })).toBe(false)
-    expect(cobroSinTurnoPerteneceAlTurno({ createdAt: dentro }, { startTime: undefined, endTime: CIERRA })).toBe(false)
-    expect(cobroSinTurnoPerteneceAlTurno({ createdAt: dentro }, { startTime: ABRE, endTime: undefined })).toBe(false)
-    expect(cobroSinTurnoPerteneceAlTurno({ createdAt: 'no es fecha' }, { startTime: ABRE, endTime: CIERRA })).toBe(false)
+    expect(cobroSinTurnoPerteneceAlTurno({ createdAt: undefined }, { status: 'CLOSED', startTime: ABRE, endTime: CIERRA })).toBe(false)
+    expect(cobroSinTurnoPerteneceAlTurno({ createdAt: null }, { status: 'CLOSED', startTime: ABRE, endTime: CIERRA })).toBe(false)
+    expect(cobroSinTurnoPerteneceAlTurno({ createdAt: dentro }, { status: 'CLOSED', startTime: undefined, endTime: CIERRA })).toBe(false)
+    expect(cobroSinTurnoPerteneceAlTurno({ createdAt: dentro }, { status: 'CLOSED', startTime: ABRE, endTime: undefined })).toBe(false)
+    expect(cobroSinTurnoPerteneceAlTurno({ createdAt: 'no es fecha' }, { status: 'CLOSED', startTime: ABRE, endTime: CIERRA })).toBe(false)
   })
 })

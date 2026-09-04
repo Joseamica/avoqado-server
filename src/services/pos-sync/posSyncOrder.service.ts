@@ -9,6 +9,12 @@ import { RichPosPayload, PosPaymentMethod } from '@/types/pos.types'
 import { PaymentMethod } from '@prisma/client'
 import { socketManager } from '../../communication/sockets/managers/socketManager'
 import { SocketEventType } from '../../communication/sockets/types'
+import {
+  lockExistingOrderForPayment,
+  recordPendingPaymentShiftReconciliation,
+  resolvePaymentShiftReconciliationEnabled,
+  type CapturedPaymentShiftClaim,
+} from '../shared/paymentShiftClaim'
 
 // Cache to track recent payment commands to prevent double deduction
 interface RecentPayment {
@@ -83,9 +89,14 @@ function shouldIgnoreTotalUpdates(orderExternalId: string): boolean {
  * @param folio - Número de folio de la orden
  * @returns La orden existente o null si no existe
  */
-async function findExistingOrderWithSmartResolution(externalId: string, venueId: string, _folio: string): Promise<Order | null> {
+async function findExistingOrderWithSmartResolution(
+  db: Pick<Prisma.TransactionClient, 'order'>,
+  externalId: string,
+  venueId: string,
+  _folio: string,
+): Promise<Order | null> {
   // Paso 1: Buscar por el externalId exacto
-  const exactMatch = await prisma.order.findUnique({
+  const exactMatch = await db.order.findUnique({
     where: {
       venueId_externalId: {
         venueId: venueId,
@@ -110,7 +121,7 @@ async function findExistingOrderWithSmartResolution(externalId: string, venueId:
 
       logger.info(`[🔍 SmartResolution] Buscando orden huérfana con idturno=0: ${zeroTurnoExternalId}`)
 
-      const orphanOrder = await prisma.order.findUnique({
+      const orphanOrder = await db.order.findUnique({
         where: {
           venueId_externalId: {
             venueId: venueId,
@@ -120,20 +131,34 @@ async function findExistingOrderWithSmartResolution(externalId: string, venueId:
       })
 
       if (orphanOrder) {
-        logger.info(`[🎯 SmartResolution] ¡Orden huérfana encontrada! Actualizando externalId de ${zeroTurnoExternalId} a ${externalId}`)
-
-        // Actualizar el externalId de la orden huérfana para que coincida con el real
-        const updatedOrder = await prisma.order.update({
-          where: { id: orphanOrder.id },
-          data: { externalId: externalId },
-        })
-
-        return updatedOrder
+        // Sólo resolver aquí. La escritura ocurre dentro de la transacción DESPUÉS de intentar
+        // el lock OPEN del turno; hacerlo en esta lectura dejaba una Order modificada fuera del
+        // protocolo financiero aunque luego el cierre ganara.
+        logger.info(`[🎯 SmartResolution] ¡Orden huérfana encontrada! Se actualizará ${zeroTurnoExternalId} a ${externalId} en transacción`)
+        return orphanOrder
       }
     }
   }
 
   return null
+}
+
+async function lockPosOrderNaturalKey(
+  tx: Pick<Prisma.TransactionClient, '$queryRaw'>,
+  input: { venueId: string; externalId: string },
+): Promise<void> {
+  // Una Order aún inexistente no ofrece fila para FOR UPDATE. Este advisory
+  // xact lock serializa la clasificación/creación de la llave única natural;
+  // se libera automáticamente al commit/rollback.
+  const parts = input.externalId.split(':')
+  // SoftRestaurant cambia idturno 0 por el real durante el cobro, pero ambas
+  // formas nombran la misma comanda. Para su formato válido de tres partes la
+  // identidad excluye idturno; formatos ajenos/malformados conservan el ID
+  // completo y nunca se colapsan accidentalmente.
+  const canonicalExternalIdentity =
+    parts.length === 3 && parts[0] && /^\d+$/.test(parts[1]) && parts[2] ? `${parts[0]}:*:${parts[2]}` : input.externalId
+  const key = `pos-order:${input.venueId}:${canonicalExternalIdentity}`
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`
 }
 
 /**
@@ -159,14 +184,59 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
 
   const shiftId = await getOrCreatePosShift(shiftData, venue.id, staffId)
 
-  // 2. Buscar orden existente con lógica de resolución inteligente
-  const existingOrder = await findExistingOrderWithSmartResolution(externalId, venue.id, orderData.orderNumber)
+  const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venue.id)
 
-  // Track if this is a create or update for socket events
-  const isNewOrder = !existingOrder
+  // Se fija dentro de la transacción después de serializar la llave natural.
+  // Sólo se usa al emitir el socket post-commit.
+  let isNewOrder = false
 
   // 3. Ejecutar el upsert final de la Orden
   const order = await prisma.$transaction(async tx => {
+    await lockPosOrderNaturalKey(tx, { venueId: venue.id, externalId })
+    // La clasificación exterior era TOCTOU: un request podía observar null,
+    // otro crear la fila, y el primero tomar Shift antes de actualizar esa
+    // Order ya existente. Esta relectura bajo advisory es la autoritativa.
+    const existingOrder = await findExistingOrderWithSmartResolution(tx, externalId, venue.id, orderData.orderNumber)
+    isNewOrder = !existingOrder
+    if (existingOrder) {
+      await lockExistingOrderForPayment(tx, { venueId: venue.id, orderId: existingOrder.id })
+    }
+    // El id resuelto arriba es sólo CANDIDATO. Este update condicionado es también el lock de
+    // fila que serializa Order + Payments contra OPEN → CLOSING durante toda la transacción.
+    // Perderlo NO falla la venta: lo nuevo queda sin turno y una Order existente conserva su liga.
+    let shiftClaim: CapturedPaymentShiftClaim = {
+      shiftId: null,
+      candidateShiftId: null,
+      observedStatus: null,
+      pendingReason: 'NO_SHIFT',
+    }
+    if (shiftId) {
+      const locked = await tx.shift.updateMany({
+        where: { id: shiftId, venueId: venue.id, status: 'OPEN', endTime: null },
+        data: { updatedAt: new Date() },
+      })
+      if (locked.count === 1) {
+        shiftClaim = {
+          shiftId,
+          candidateShiftId: shiftId,
+          observedStatus: 'OPEN',
+          pendingReason: null,
+        }
+      } else {
+        const observed = await tx.shift.findFirst({
+          where: { id: shiftId, venueId: venue.id },
+          select: { id: true, status: true },
+        })
+        shiftClaim = {
+          shiftId: null,
+          candidateShiftId: shiftId,
+          observedStatus: observed?.status ?? null,
+          pendingReason: observed && observed.status !== 'OPEN' ? 'SHIFT_NOT_OPEN' : 'CLAIM_LOST',
+        }
+      }
+    }
+    const writableShiftId = shiftClaim.shiftId
+
     // Si encontramos una orden existente con resolución inteligente, actualizarla
     if (existingOrder && existingOrder.externalId !== externalId) {
       // La orden existe pero con un externalId diferente (caso idturno=0 → idturno real)
@@ -181,7 +251,9 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
         posRawData: orderData.posRawData as Prisma.InputJsonValue,
         syncedAt: new Date(),
         syncStatus: SyncStatus.SYNCED,
-        ...(shiftId && { shift: { connect: { id: shiftId } } }),
+      }
+      if (writableShiftId && !existingOrder.shiftId) {
+        updateData.shift = { connect: { id: writableShiftId } }
       }
 
       // Only update financial fields if not from recent payment command
@@ -206,7 +278,7 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
 
       // Procesar pagos si la orden está pagada
       if (order.paymentStatus === 'PAID' && payments && payments.length > 0) {
-        await processPaymentsForOrder(tx, order, payments, paymentMethodsCatalog, venue, shiftId, staffId)
+        await processPaymentsForOrder(tx, order, payments, paymentMethodsCatalog, venue, shiftClaim, staffId, reconciliationEnabled)
       }
 
       return order
@@ -223,6 +295,11 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
       posRawData: orderData.posRawData as Prisma.InputJsonValue,
       syncedAt: new Date(),
       syncStatus: SyncStatus.SYNCED,
+    }
+    // Una Order ya ligada conserva su asociación durable. Sólo adoptamos el turno cuando la
+    // fila observada era huérfana y este mismo tx ganó el lock OPEN que también cubre Payments.
+    if (existingOrder && !existingOrder.shiftId && writableShiftId) {
+      updateData.shift = { connect: { id: writableShiftId } }
     }
 
     // Only update financial fields if not from recent payment command
@@ -264,7 +341,7 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
         venue: { connect: { id: venue.id } },
         ...(staffId && { servedBy: { connect: { id: staffId } }, createdBy: { connect: { id: staffId } } }),
         ...(tableId && { table: { connect: { id: tableId } } }),
-        ...(shiftId && { shift: { connect: { id: shiftId } } }),
+        ...(writableShiftId && { shift: { connect: { id: writableShiftId } } }),
         syncStatus: SyncStatus.SYNCED,
       },
     })
@@ -273,7 +350,7 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
 
     // 2b. LÓGICA DE PAGOS MEJORADA
     if (order.paymentStatus === 'PAID' && payments && payments.length > 0) {
-      await processPaymentsForOrder(tx, order, payments, paymentMethodsCatalog, venue, shiftId, staffId)
+      await processPaymentsForOrder(tx, order, payments, paymentMethodsCatalog, venue, shiftClaim, staffId, reconciliationEnabled)
     }
 
     return order
@@ -343,8 +420,9 @@ async function processPaymentsForOrder(
   payments: any[],
   paymentMethodsCatalog: PosPaymentMethod[],
   venue: any,
-  shiftId: string | null,
+  shiftClaim: CapturedPaymentShiftClaim,
   staffId: string | null,
+  reconciliationEnabled: boolean,
 ) {
   logger.info(`[🥾 PosSyncOrder] La orden ${order.id} está pagada. Procesando ${payments.length} pago(s)...`)
 
@@ -359,6 +437,8 @@ async function processPaymentsForOrder(
   if (!paymentMethodsCatalog || paymentMethodsCatalog.length === 0) {
     throw new Error('No se proporcionó el catálogo de métodos de pago para procesar los pagos.')
   }
+
+  const shiftId = shiftClaim.shiftId
 
   for (const posPayment of payments) {
     const feePercentage = venue.feeValue
@@ -384,6 +464,18 @@ async function processPaymentsForOrder(
         ...(shiftId && { shift: { connect: { id: shiftId } } }),
         ...(staffId && { processedBy: { connect: { id: staffId } } }),
       },
+    })
+
+    await recordPendingPaymentShiftReconciliation(tx, {
+      reconciliationEnabled,
+      claim: shiftClaim,
+      venueId: venue.id,
+      paymentId: newPayment.id,
+      orderId: order.id,
+      staffId,
+      channel: 'posSyncOrder',
+      amountPesos: new Prisma.Decimal(posPayment.amount),
+      tipPesos: new Prisma.Decimal(posPayment.tipAmount ?? 0),
     })
 
     logger.info(`[🥾 PosSyncOrder] Pago ${newPayment.id} creado para la orden ${order.id}.`)
@@ -416,7 +508,7 @@ export async function processPosOrderDeleteEvent(payload: RichPosPayload): Promi
   const entityParts = externalId.split(':')
   const folio = entityParts.length === 3 ? entityParts[2] : externalId
 
-  const order = await findExistingOrderWithSmartResolution(externalId, venueId, folio)
+  const order = await findExistingOrderWithSmartResolution(prisma, externalId, venueId, folio)
 
   if (!order) {
     logger.warn(

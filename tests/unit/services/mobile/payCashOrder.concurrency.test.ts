@@ -45,6 +45,11 @@ jest.mock('@/services/tpv/payment.tpv.service', () => ({
   resolveAutofacturaAvailable: jest.fn().mockResolvedValue(false),
 }))
 
+jest.mock('@/services/referrals/referralQualification.service', () => ({
+  onOrderPaid: jest.fn().mockResolvedValue(undefined),
+}))
+
+import { Prisma } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 
 import { payCashOrder } from '@/services/mobile/order.mobile.service'
@@ -67,7 +72,7 @@ interface FakeOrderRow {
   areaTicketCode: string | null
 }
 
-function installFakeStore(initial: Partial<FakeOrderRow> = {}) {
+function installFakeStore(initial: Partial<FakeOrderRow> = {}, options: { openShift?: boolean } = {}) {
   const row: FakeOrderRow = {
     id: 'order-1',
     orderNumber: 'ORD-1',
@@ -86,6 +91,7 @@ function installFakeStore(initial: Partial<FakeOrderRow> = {}) {
   }
 
   const payments: Array<{ id: string; amount: number; tipAmount: number; idempotencyKey: string | null }> = []
+  const shift = { totalSales: 0, totalTips: 0, totalOrders: 0 }
 
   // Cada `await` cede el turno del event loop: es lo que hace que las dos llamadas
   // concurrentes se intercalen de verdad en vez de correr uña tras otra.
@@ -147,12 +153,139 @@ function installFakeStore(initial: Partial<FakeOrderRow> = {}) {
 
   prismaMock.venueTransaction.create.mockResolvedValue({ id: 'vtx-1' })
   prismaMock.paymentAllocation.create.mockResolvedValue({ id: 'alloc-1' })
-  prismaMock.shift.findFirst.mockResolvedValue(null)
+  prismaMock.shift.findFirst.mockResolvedValue(options.openShift ? { id: 'shift-open', status: 'OPEN' } : null)
+  prismaMock.shift.updateMany.mockImplementation(async ({ data }: any) => {
+    await yieldTurn()
+    shift.totalSales += Number(data.totalSales?.increment ?? 0)
+    shift.totalTips += Number(data.totalTips?.increment ?? 0)
+    shift.totalOrders += Number(data.totalOrders?.increment ?? 0)
+    return { count: 1 }
+  })
   prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1' })
   prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: 'venue-1', active: true })
   prismaMock.order.findUniqueOrThrow?.mockResolvedValue?.({ id: 'order-1', items: [] })
 
-  return { row, payments }
+  return { row, payments, shift }
+}
+
+function installStatefulP2002RollbackStore() {
+  const committed = {
+    order: {
+      id: 'order-1',
+      orderNumber: 'ORD-1',
+      venueId: 'venue-1',
+      paymentStatus: 'PENDING',
+      status: 'CONFIRMED',
+      subtotal: new Decimal(100),
+      discountAmount: new Decimal(0),
+      serviceChargeAmount: new Decimal(0),
+      total: new Decimal(100),
+      paidAmount: new Decimal(0),
+      remainingBalance: new Decimal(100),
+      version: 1,
+      areaTicketCode: null,
+    } satisfies FakeOrderRow,
+    shift: { totalSales: 0, totalTips: 0, totalOrders: 0 },
+    loserPayments: [] as any[],
+    activityLogs: [] as any[],
+  }
+  const attempted = { orderCas: 0, shiftClaims: 0 }
+  const ops: string[] = []
+  const winner = {
+    id: 'payment-winner',
+    orderId: 'order-1',
+    amount: new Decimal(100),
+    tipAmount: new Decimal(0),
+    method: 'CASH',
+    status: 'COMPLETED',
+    receipts: [],
+    idempotencyKey: 'mobile-p2002',
+  }
+
+  prismaMock.order.findUnique.mockImplementation(async () => ({
+    ...committed.order,
+    areaTicketCheckoutSession: null,
+    customerId: null,
+    customer: null,
+  }))
+  let paymentLookups = 0
+  prismaMock.payment.findUnique.mockImplementation(async () => {
+    paymentLookups += 1
+    return paymentLookups === 1 ? null : winner
+  })
+  prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1' })
+  prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: 'venue-1', active: true })
+
+  prismaMock.$transaction.mockImplementationOnce(async (callback: any) => {
+    const staged = {
+      order: { ...committed.order },
+      shift: { ...committed.shift },
+      loserPayments: [...committed.loserPayments],
+      activityLogs: [...committed.activityLogs],
+    }
+    const tx = {
+      ...prismaMock,
+      order: {
+        ...prismaMock.order,
+        findUnique: jest.fn(async () => ({ ...staged.order })),
+        updateMany: jest.fn(async ({ data }: any) => {
+          ops.push('order.updateMany')
+          attempted.orderCas += 1
+          staged.order.paymentStatus = data.paymentStatus
+          staged.order.status = data.status ?? staged.order.status
+          staged.order.paidAmount = new Decimal(data.paidAmount)
+          staged.order.remainingBalance = new Decimal(data.remainingBalance)
+          staged.order.total = new Decimal(data.total)
+          staged.order.version += Number(data.version.increment)
+          return { count: 1 }
+        }),
+      },
+      payment: {
+        ...prismaMock.payment,
+        findMany: jest.fn().mockResolvedValue([]),
+        create: jest.fn(async () => {
+          ops.push('payment.create:P2002')
+          throw new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+            code: 'P2002',
+            clientVersion: 'test',
+            meta: { target: ['venueId', 'idempotencyKey'] },
+          })
+        }),
+      },
+      shift: {
+        ...prismaMock.shift,
+        findFirst: jest.fn(async () => {
+          ops.push('shift.findFirst')
+          return { id: 'shift-open', status: 'OPEN' }
+        }),
+        updateMany: jest.fn(async ({ data }: any) => {
+          ops.push('shift.updateMany')
+          attempted.shiftClaims += 1
+          staged.shift.totalSales += Number(data.totalSales.increment)
+          staged.shift.totalTips += Number(data.totalTips.increment)
+          staged.shift.totalOrders += Number(data.totalOrders.increment)
+          return { count: 1 }
+        }),
+      },
+      activityLog: {
+        ...prismaMock.activityLog,
+        create: jest.fn(async ({ data }: any) => {
+          ops.push('activityLog.create')
+          staged.activityLogs.push(data)
+          return data
+        }),
+      },
+    }
+
+    const result = await callback(tx)
+    committed.order = { ...staged.order }
+    committed.shift = { ...staged.shift }
+    committed.loserPayments = [...staged.loserPayments]
+    committed.activityLogs = [...staged.activityLogs]
+    return result
+  })
+
+  return { committed, attempted, ops, winner }
 }
 
 describe('payCashOrder — cobro atómico (§5.4)', () => {
@@ -212,6 +345,39 @@ describe('payCashOrder — cobro atómico (§5.4)', () => {
     expect(retry.status).toBe('COMPLETED')
   })
 
+  it('P2002 después de CAS Order + claim revierte ambos y devuelve el Payment ganador según el contrato móvil', async () => {
+    const rollback = installStatefulP2002RollbackStore()
+
+    const result = await payCashOrder('venue-1', 'order-1', {
+      amount: 10000,
+      tip: 0,
+      staffId: 'staff-1',
+      idempotencyKey: 'mobile-p2002',
+    })
+
+    expect(result).toMatchObject({
+      paymentId: rollback.winner.id,
+      orderId: 'order-1',
+      amount: 10000,
+      tipAmount: 0,
+      method: 'CASH',
+      status: 'COMPLETED',
+    })
+    expect(rollback.attempted).toEqual({ orderCas: 1, shiftClaims: 1 })
+    expect(rollback.ops).toEqual(['order.updateMany', 'shift.findFirst', 'shift.updateMany', 'payment.create:P2002'])
+    expect(rollback.committed.order).toMatchObject({
+      paymentStatus: 'PENDING',
+      status: 'CONFIRMED',
+      paidAmount: new Decimal(0),
+      remainingBalance: new Decimal(100),
+      version: 1,
+    })
+    expect(rollback.committed.shift).toEqual({ totalSales: 0, totalTips: 0, totalOrders: 0 })
+    expect(rollback.committed.loserPayments).toEqual([])
+    expect(rollback.committed.activityLogs).toEqual([])
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+  })
+
   it('conserva el split de la cuenta: dos cobros CONCURRENTES de la mitad convergen a PAID con DOS pagos', async () => {
     // Es el caso que un 409 seco al perdedor habría roto: dos meseros cobrando mitad y
     // mitad a la vez. El perdedor de la CAS relee, ve el pago del ganador y cobra el
@@ -228,6 +394,20 @@ describe('payCashOrder — cobro atómico (§5.4)', () => {
     expect(row.paymentStatus).toBe('PAID')
     expect(Number(row.paidAmount)).toBe(100)
     expect(Number(row.remainingBalance)).toBe(0)
+  })
+
+  it('dos cobros de $50 sobre una orden de $100 cuentan una sola orden en el turno', async () => {
+    const { payments, shift } = installFakeStore({}, { openShift: true })
+
+    const results = await Promise.allSettled([
+      payCashOrder('venue-1', 'order-1', { amount: 5000, tip: 0, staffId: 'staff-1', idempotencyKey: 'half-shift-A' }),
+      payCashOrder('venue-1', 'order-1', { amount: 5000, tip: 0, staffId: 'staff-1', idempotencyKey: 'half-shift-B' }),
+    ])
+
+    expect(results.every(result => result.status === 'fulfilled')).toBe(true)
+    expect(payments).toHaveLength(2)
+    expect(shift.totalSales).toBe(100)
+    expect(shift.totalOrders).toBe(1)
   })
 
   it('rechaza cobrar una orden que YA estaba pagada antes de empezar', async () => {

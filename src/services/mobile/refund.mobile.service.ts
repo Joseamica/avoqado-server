@@ -9,7 +9,12 @@ import prisma from '../../utils/prismaClient'
 import { BadRequestError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
 import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
-import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
+import {
+  claimShiftForRefund,
+  recordPendingPaymentShiftReconciliation,
+  resolvePaymentShiftReconciliationEnabled,
+} from '../shared/paymentShiftClaim'
+import { esCantidadPositivaEnCentavos } from '../shared/devueltoDeUnCobro'
 import { Decimal } from '@prisma/client/runtime/library'
 
 // ============================================================================
@@ -48,8 +53,8 @@ interface CreateRefundParams {
 export async function createRefund(params: CreateRefundParams) {
   const { venueId, amount, reason, method, staffId, staffName } = params
 
-  if (!amount || amount <= 0) {
-    throw new BadRequestError('El monto debe ser mayor a 0')
+  if (!esCantidadPositivaEnCentavos(amount)) {
+    throw new BadRequestError('amount debe ser un entero seguro positivo expresado en centavos')
   }
 
   if (!reason || !reason.trim()) {
@@ -59,37 +64,22 @@ export async function createRefund(params: CreateRefundParams) {
   const amountDecimal = centsToDecimal(amount) // positive (e.g., 50.00)
   const negativeAmount = new Decimal((-Number(amountDecimal)).toFixed(2)) // negative (e.g., -50.00)
 
-  // Steps 1-3 + decremento del turno en UNA transacción: un reembolso a medias
-  // (Payment sin VenueTransaction, o turno sin decrementar) descuadra dinero.
+  // Steps 1-3 + claim/auditoría del turno en UNA transacción: un reembolso a medias
+  // (Payment sin VenueTransaction, o una conciliación huérfana) descuadra dinero.
   const orderNumber = `REF-${Date.now()}`
+  const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
   const { order, payment } = await prisma.$transaction(async tx => {
-    // 🔴 El turno abierto del NEGOCIO (`../shared/turnoDeCaja.ts`), resuelto IGUAL que el
-    // refund del TPV (`refund.tpv.service.ts`) y que el cobro (`order.mobile.service.ts`).
-    // Sin `shiftId` el Payment REFUND era invisible para el CIERRE DE TURNO, que
-    // selecciona por `{ shiftId, status: 'COMPLETED' }` (`shift.tpv.service.ts:1342`).
-    //
-    // Se resuelve y se RECLAMA DENTRO de la transacción (audit 2026-08-13): leerlo
-    // afuera dejaba una ventana en la que el turno cerraba en medio y el refund se
-    // estampaba en un turno YA CERRADO — con el decremento llegando después del
-    // reporte. El updateMany condicional (status OPEN) es el candado: si el turno
-    // cerró entre la lectura y el claim, count=0 y el refund entra SIN turno (lo
-    // recoge el cierre de caja por ventana de tiempo), nunca en uno cerrado.
-    let shiftId: string | null = null
-    const currentShift = await turnoAbiertoDelNegocio(tx, venueId)
-    if (currentShift) {
-      // El claim ES el decremento (espejo del refund TPV): el cierre usa también
-      // los contadores denormalizados; sin esto el reporte sobrestima ventas.
-      // 🔴 `venueId` en el `where` no es decorativo: por id solo, el claim aceptaba el turno de
-      // OTRO negocio. El riel de la TPV (`refund.tpv.service.ts`), del que éste se copió, ya lo
-      // llevaba — este quedó más laxo que su hermano. Los tres rieles usan ahora el mismo claim.
-      const claimed = await tx.shift.updateMany({
-        where: { id: currentShift.id, venueId, status: 'OPEN', endTime: null },
-        data: { totalSales: { decrement: amountDecimal } },
-      })
-      if (claimed.count === 1) {
-        shiftId = currentShift.id
-      }
-    }
+    // 🔴 `claimedAt`/CLOSING es el corte. Se observa el candidato más reciente del
+    // NEGOCIO dentro de esta transacción, aunque ya esté CLOSING. Sólo OPEN puede ganar
+    // el CAS tenant-safe que decrementa y autoriza `shiftId`; CLOSING y claim-lost dejan
+    // Order/Payment juntos sin turno y, después de crear el Payment real, una conciliación
+    // atómica. Nunca se espera, reintenta ni reescribe un cierre firmado.
+    const shiftClaim = await claimShiftForRefund(tx, {
+      venueId,
+      salesRefundPesos: amountDecimal,
+      tipRefundPesos: new Decimal('0.00'),
+    })
+    const shiftId = shiftClaim.shiftId
 
     // Step 1: Create a refund placeholder order
     const order = await tx.order.create({
@@ -147,15 +137,29 @@ export async function createRefund(params: CreateRefundParams) {
         feePercentage: new Decimal('0.0000'),
         feeAmount: new Decimal('0.00'),
         netAmount: negativeAmount,
-        // Paridad con el refund del TPV: el decremento del turno se aplica
-        // inline abajo; el marker evita que `scripts/backfill-refund-shift-totals.ts`
-        // lo aplique dos veces.
+        // Paridad con los refunds TPV/dashboard: sólo se marca aplicado cuando el
+        // claim OPEN realmente ganó y produjo `shiftId`. CLOSING, claim-lost y
+        // ausencia de turno quedan disponibles para conciliación posterior.
         processorData: {
           refundReason: reason,
-          shiftBackfilled: true,
+          shiftBackfilled: shiftId !== null,
         },
       },
     })
+
+    if (shiftClaim.pendingReason) {
+      await recordPendingPaymentShiftReconciliation(tx, {
+        reconciliationEnabled,
+        claim: shiftClaim,
+        venueId,
+        paymentId: payment.id,
+        orderId: order.id,
+        staffId,
+        channel: 'createRefund',
+        amountPesos: negativeAmount,
+        tipPesos: new Decimal('0.00'),
+      })
+    }
 
     // Step 3: Create VenueTransaction
     await tx.venueTransaction.create({

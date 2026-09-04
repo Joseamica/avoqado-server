@@ -51,6 +51,7 @@ jest.mock('@/services/wallet/stampLedger.service', () => ({ reverseStampForOrder
 jest.mock('@/services/referrals/referralRefund.service', () => ({ onOrderRefunded: jest.fn().mockResolvedValue(null) }))
 
 import { Prisma } from '@prisma/client'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import { postCashRefundToDrawer } from '@/services/shared/cashDrawerPosting'
 import * as refundService from '@/services/tpv/refund.tpv.service'
 import { prismaMock } from '../../../__helpers__/setup'
@@ -124,8 +125,8 @@ function armar(opts: { yaExiste?: typeof reembolsoExistente | null; yaReembolsad
   }
 
   ;(prismaMock as any).payment = {
-    // 🔑 El servicio hace DOS búsquedas distintas con findUnique: el pago ORIGINAL por id,
-    // y el reembolso previo por la llave compuesta. El mock despacha por la forma del `where`.
+    // 🔑 El servicio hace DOS búsquedas distintas: el pago ORIGINAL con `findFirst`
+    // tenant-scoped y el reembolso previo con `findUnique` por llave compuesta.
     findUnique: jest.fn().mockImplementation(async (args: any) => {
       const compuesta = args?.where?.venueId_idempotencyKey ?? args?.where?.Payment_venueId_idempotencyKey_key
       if (compuesta) {
@@ -143,7 +144,7 @@ function armar(opts: { yaExiste?: typeof reembolsoExistente | null; yaReembolsad
     update: jest.fn().mockResolvedValue(original),
   }
   ;(prismaMock as any).shift = {
-    findFirst: jest.fn().mockResolvedValue({ id: 'shift-negocio' }),
+    findFirst: jest.fn().mockResolvedValue({ id: 'shift-negocio', status: 'OPEN' }),
     update: jest.fn().mockResolvedValue({}),
     updateMany: jest.fn().mockResolvedValue({ count: 1 }),
   }
@@ -239,6 +240,86 @@ describe('el reembolso del TPV honra la llave de idempotencia', () => {
     const r = await refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE }) as never)
 
     expect(r.id).toBe('pay-refund-ya-existia')
+    // El P2002 ocurre en Payment.create: la conciliación usa el id REAL y vive después,
+    // por lo que el perdedor nunca deja una fila fantasma ni duplica la del ganador.
+    expect((prismaMock as any).activityLog.create).not.toHaveBeenCalled()
+  })
+
+  it('rollback stateful P2002: descarta el decremento perdedor, devuelve al ganador y no deja audit fantasma', async () => {
+    const original = armar()
+    const committed = { totalSales: 300, totalTips: 40, payments: [] as any[], audits: [] as any[] }
+    let stagedAlChocar: typeof committed | null = null
+    let p2002Raised = false
+
+    ;(prismaMock as any).payment.findUnique.mockImplementation(async (args: any) => {
+      if (args?.where?.venueId_idempotencyKey || args?.where?.Payment_venueId_idempotencyKey_key) {
+        return p2002Raised ? reembolsoExistente : null
+      }
+      return original
+    })
+    ;(prismaMock as any).$transaction.mockImplementationOnce(async (callback: any) => {
+      const staged = {
+        totalSales: committed.totalSales,
+        totalTips: committed.totalTips,
+        payments: [...committed.payments],
+        audits: [...committed.audits],
+      }
+      const tx = {
+        $queryRaw: jest.fn().mockResolvedValue([
+          {
+            id: original.id,
+            venueId: original.venueId,
+            orderId: original.orderId,
+            status: original.status,
+            type: original.type,
+            amount: original.amount,
+            tipAmount: original.tipAmount,
+            processorData: original.processorData,
+          },
+        ]),
+        shift: {
+          findFirst: jest.fn().mockResolvedValue({ id: 'shift-open', status: 'OPEN' }),
+          updateMany: jest.fn().mockImplementation(async ({ data }: any) => {
+            staged.totalSales -= Number(data.totalSales.decrement)
+            if (data.totalTips) staged.totalTips -= Number(data.totalTips.decrement)
+            return { count: 1 }
+          }),
+        },
+        payment: {
+          findMany: jest.fn().mockResolvedValue([]),
+          create: jest.fn().mockImplementation(async () => {
+            stagedAlChocar = { ...staged, payments: [...staged.payments], audits: [...staged.audits] }
+            p2002Raised = true
+            throw new Prisma.PrismaClientKnownRequestError('unique', {
+              code: 'P2002',
+              clientVersion: 'x',
+              meta: { target: ['venueId', 'idempotencyKey'] },
+            })
+          }),
+          update: jest.fn(),
+        },
+        activityLog: {
+          create: jest.fn().mockImplementation(async ({ data }: any) => {
+            staged.audits.push(data)
+            return { id: 'audit-staged' }
+          }),
+        },
+        venueTransaction: { create: jest.fn() },
+      }
+
+      const result = await callback(tx)
+      Object.assign(committed, staged)
+      return result
+    })
+
+    const result = await refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE }) as never)
+
+    expect(stagedAlChocar).toEqual({ totalSales: 250, totalTips: 40, payments: [], audits: [] })
+    expect(result.id).toBe('pay-refund-ya-existia')
+    expect(committed).toEqual({ totalSales: 300, totalTips: 40, payments: [], audits: [] })
+    expect((prismaMock as any).activityLog.create).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+    expect(postCashRefundToDrawer).not.toHaveBeenCalled()
   })
 
   // ─── Hallazgos de la auditoría de Codex (3-sep-2026) ────────────────────────
@@ -378,16 +459,17 @@ describe('el reembolso del TPV honra la llave de idempotencia', () => {
     expect(a).not.toBe(b)
   })
 
-  it('🔴 un monto con decimales de centavo NO abre una llave nueva', async () => {
-    // La ruta no valida este body. `100.4` y `100.49` son el MISMO dinero —las columnas son
-    // `Decimal(,2)`— pero producían huellas distintas: tecleando decimales se podía saltar la
-    // deduplicación y crear varios reembolsos del mismo importe.
-    const entero = await llaveGuardadaPara({ idempotencyKey: LLAVE, amount: 100 })
-    const conDecimales = await llaveGuardadaPara({ idempotencyKey: LLAVE, amount: 100.4 })
-    const conMas = await llaveGuardadaPara({ idempotencyKey: LLAVE, amount: 100.49 })
+  it('🔴 un monto con decimales de centavo se rechaza antes de abrir transacción o llave', async () => {
+    // El contrato vigente ya no redondea dos cantidades distintas a la misma huella: los
+    // centavos son la unidad autoritativa y cualquier fracción se rechaza en el servicio.
+    armar()
 
-    expect(conDecimales).toBe(entero)
-    expect(conMas).toBe(entero)
+    await expect(refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE, amount: 100.4 }) as never)).rejects.toThrow(
+      /amount.*entero seguro.*centavos/i,
+    )
+
+    expect((prismaMock as any).$transaction).not.toHaveBeenCalled()
+    expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
   })
 
   it('🔴 una llave larguísima ya no es un caso especial — cabe y es determinista', async () => {

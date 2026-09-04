@@ -75,11 +75,17 @@ describe('createOrderWithItems (TPV Cobrar) — la orden y su cobro comparten tu
   } as any
 
   beforeEach(() => {
+    // `prismaMock` enumera modelos; este flujo de cortesía usa OrderAction pero el helper global
+    // todavía no lo declara. Se añade sólo para esta prueba, sin ampliar el mock compartido.
+    ;(prismaMock as any).orderAction ??= { create: jest.fn() }
     prismaMock.staffVenue.findUnique.mockResolvedValue({ active: true, staff: { id: 'staff-1', active: true } } as any)
     prismaMock.product.findMany.mockResolvedValue([{ id: 'p1', name: 'Café', price: 100, category: { name: 'Bebidas' } }] as any)
     prismaMock.modifier.findMany.mockResolvedValue([])
     prismaMock.discount.findMany.mockResolvedValue([])
     prismaMock.orderItem.create.mockResolvedValue({ id: 'oi-1' } as any)
+    prismaMock.payment.create.mockResolvedValue({ id: 'payment-free' } as any)
+    prismaMock.paymentAllocation.create.mockResolvedValue({ id: 'allocation-free' } as any)
+    ;(prismaMock as any).orderAction.create.mockResolvedValue({ id: 'action-free' } as any)
     prismaMock.order.findUniqueOrThrow.mockResolvedValue({
       id: 'order-1',
       orderNumber: 'ORD-1',
@@ -109,6 +115,48 @@ describe('createOrderWithItems (TPV Cobrar) — la orden y su cobro comparten tu
 
     expect(prismaMock.order.create).toHaveBeenCalledTimes(1)
     expect(datosDeLaOrden().shiftId ?? null).toBeNull()
+  })
+
+  describe('carrito gratis — el claim de pertenencia no mueve un CLOSING', () => {
+    const gratis = {
+      ...input,
+      items: [{ productId: 'p1', quantity: 1, unitPrice: 100, isCortesia: true, cortesiaReason: 'Invitación' }],
+      total: 0,
+    } as any
+
+    it('si pierde el CAS contra CLOSING, crea Order y Payment sin turno y no toca updatedAt', async () => {
+      const claimedAt = new Date('2026-09-03T22:00:00.000Z')
+      const shift = { id: 'turno-negocio', status: 'OPEN', endTime: null, updatedAt: claimedAt }
+      prismaMock.shift.findFirst.mockResolvedValue(shift as any)
+      prismaMock.shift.updateMany.mockImplementation(async () => {
+        // Estado que ya dejó el cierre mientras esta transacción preparaba el carrito.
+        shift.status = 'CLOSING'
+        return { count: 0 } as any
+      })
+
+      await createOrderWithItems(VENUE, gratis)
+
+      expect(prismaMock.shift.updateMany).toHaveBeenCalledWith({
+        where: { id: 'turno-negocio', venueId: VENUE, status: 'OPEN', endTime: null },
+        data: { totalOrders: { increment: 1 } },
+      })
+      expect(datosDeLaOrden().shiftId ?? null).toBeNull()
+      expect(prismaMock.payment.create.mock.calls[0][0].data.shiftId ?? null).toBeNull()
+      expect(prismaMock.shift.update).not.toHaveBeenCalled()
+      expect(shift.updatedAt).toBe(claimedAt)
+    })
+
+    it('si gana el CAS, estampa el mismo turno en Order/Payment e incrementa una sola vez', async () => {
+      prismaMock.shift.findFirst.mockResolvedValue({ id: 'turno-negocio' } as any)
+      prismaMock.shift.updateMany.mockResolvedValue({ count: 1 } as any)
+
+      await createOrderWithItems(VENUE, gratis)
+
+      expect(datosDeLaOrden().shiftId).toBe('turno-negocio')
+      expect(prismaMock.payment.create.mock.calls[0][0].data.shiftId).toBe('turno-negocio')
+      expect(prismaMock.shift.updateMany).toHaveBeenCalledTimes(1)
+      expect(prismaMock.shift.update).not.toHaveBeenCalled()
+    })
   })
 })
 

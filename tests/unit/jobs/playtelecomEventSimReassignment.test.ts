@@ -6,7 +6,7 @@ jest.mock('@/utils/prismaClient', () => ({
     serializedItem: { findMany: jest.fn() },
     orderItem: { findMany: jest.fn() },
     order: { findUnique: jest.fn() },
-    activityLog: { findFirst: jest.fn() },
+    activityLog: { findFirst: jest.fn(), create: jest.fn() },
     $transaction: jest.fn(),
   },
 }))
@@ -65,12 +65,13 @@ describe('reassignEventSimSalesForRule', () => {
       // SerializedItem.category (ItemCategory), NUNCA en OrderItem.categoryName (que es de MenuCategory
       // y siempre es null en ventas serializadas).
       .mockResolvedValueOnce([{ serializedItem: { category: { name: 'SIM de Evento' } } }])
-    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue({ venueId: 'origin-venue-1' }) // venue ORIGEN, antes de mover
     const tx = {
-      order: { updateMany: jest.fn() },
+      $queryRaw: jest.fn().mockResolvedValue([{ id: 'order-1', venueId: 'origin-venue-1' }]),
+      order: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
       payment: { updateMany: jest.fn() },
       saleVerification: { updateMany: jest.fn() },
       serializedItem: { updateMany: jest.fn() },
+      activityLog: { create: jest.fn().mockResolvedValue({ id: 'atomic-marker' }) },
     }
     ;(prisma.$transaction as jest.Mock).mockImplementation(async (cb: any) => cb(tx))
 
@@ -78,7 +79,7 @@ describe('reassignEventSimSalesForRule', () => {
 
     expect(result).toEqual({ reassigned: 1, skippedMixed: 0 })
     expect(tx.order.updateMany).toHaveBeenCalledWith({
-      where: { id: 'order-1', NOT: { venueId: 'venue-activacion-slp' } },
+      where: { id: 'order-1', venueId: 'origin-venue-1' },
       data: { venueId: 'venue-activacion-slp' },
     })
     expect(tx.payment.updateMany).toHaveBeenCalledWith({
@@ -93,29 +94,56 @@ describe('reassignEventSimSalesForRule', () => {
       where: { orderItem: { orderId: 'order-1' } },
       data: { sellingVenueId: 'venue-activacion-slp' },
     })
-    // Auditoría BIDIRECCIONAL: la pantalla de bitácora filtra `where: { venueId }`, así que una sola
-    // fila en el destino deja la tienda de ORIGEN sin rastro de que le quitaron una venta.
-    expect(logAction).toHaveBeenCalledTimes(2)
-    expect(logAction).toHaveBeenCalledWith(
-      expect.objectContaining({
-        action: 'ORDER_VENUE_REASSIGNED',
-        entity: 'Order',
-        entityId: 'order-1',
-        staffId: null,
-        venueId: 'venue-activacion-slp',
-        data: expect.objectContaining({ fromVenueId: 'origin-venue-1', toVenueId: 'venue-activacion-slp' }),
-      }),
-    )
-    expect(logAction).toHaveBeenCalledWith(
-      expect.objectContaining({
-        action: 'ORDER_VENUE_REASSIGNED',
-        entity: 'Order',
-        entityId: 'order-1',
-        staffId: null,
-        venueId: 'origin-venue-1',
-        data: expect.objectContaining({ fromVenueId: 'origin-venue-1', toVenueId: 'venue-activacion-slp' }),
-      }),
-    )
+    expect(tx.$queryRaw).toHaveBeenCalledTimes(1)
+    // Auditoría BIDIRECCIONAL y marker comparten la MISMA transacción que mueve Order/Payment.
+    // Si una fila de audit falla, el movimiento tampoco puede quedar commiteado sin evidencia.
+    expect(tx.activityLog.create).toHaveBeenCalledTimes(2)
+    for (const venueId of ['venue-activacion-slp', 'origin-venue-1']) {
+      expect(tx.activityLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          action: 'ORDER_VENUE_REASSIGNED',
+          entity: 'Order',
+          entityId: 'order-1',
+          staffId: null,
+          venueId,
+          createdAt: expect.any(Date),
+          data: expect.objectContaining({
+            fromVenueId: 'origin-venue-1',
+            toVenueId: 'venue-activacion-slp',
+            reason: 'playtelecom_evento_sim',
+          }),
+        }),
+      })
+    }
+    expect(prisma.order.findUnique).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('si falla el marker bidireccional, la reasignación falla dentro de la misma transacción y no se cuenta como movida', async () => {
+    ;(prisma.organization.findFirst as jest.Mock).mockResolvedValue({ id: 'org1' })
+    ;(prisma.venue.findFirst as jest.Mock).mockResolvedValue({ id: 'venue-activacion-slp' })
+    ;(prisma.serializedItem.findMany as jest.Mock).mockResolvedValue([{ orderItemId: 'oi-1' }])
+    ;(prisma.orderItem.findMany as jest.Mock)
+      .mockResolvedValueOnce([{ orderId: 'order-1' }])
+      .mockResolvedValueOnce([{ serializedItem: { category: { name: 'SIM de Evento' } } }])
+    const tx = {
+      $queryRaw: jest.fn().mockResolvedValue([{ id: 'order-1', venueId: 'origin-venue-1' }]),
+      order: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+      payment: { updateMany: jest.fn() },
+      saleVerification: { updateMany: jest.fn() },
+      serializedItem: { updateMany: jest.fn() },
+      activityLog: {
+        create: jest.fn().mockResolvedValueOnce({ id: 'marker-destino' }).mockRejectedValueOnce(new Error('audit unavailable')),
+      },
+    }
+    ;(prisma.$transaction as jest.Mock).mockImplementation(async (cb: any) => cb(tx))
+
+    const result = await reassignEventSimSalesForRule(RULE)
+
+    expect(result).toEqual({ reassigned: 0, skippedMixed: 0 })
+    expect(tx.order.updateMany).toHaveBeenCalledTimes(1)
+    expect(tx.activityLog.create).toHaveBeenCalledTimes(2)
+    expect(logAction).not.toHaveBeenCalled()
   })
 
   it('salta una orden mixta (Evento + otra categoría) SIN tocar ninguna tabla, y la deja marcada para revisión manual', async () => {

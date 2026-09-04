@@ -86,7 +86,9 @@ describe('closeShiftForVenueWithResult cash reconciliation', () => {
     mockPrisma.staffVenue.findFirst.mockResolvedValue(null)
 
     tx = {
+      $queryRaw: jest.fn().mockResolvedValue([{ pg_advisory_xact_lock: null }]),
       shift: {
+        findFirst: jest.fn(async () => shift),
         updateMany: jest.fn(async (args: any) => {
           finalWrite = args
           return { count: 1 }
@@ -357,7 +359,9 @@ describe('closeShiftForVenueWithResult — propina en efectivo en el arqueo', ()
     mockPrisma.staffVenue.findFirst.mockResolvedValue(null)
 
     tx = {
+      $queryRaw: jest.fn().mockResolvedValue([{ pg_advisory_xact_lock: null }]),
       shift: {
+        findFirst: jest.fn(async () => shift),
         updateMany: jest.fn(async (args: any) => {
           finalWrite = args
           return { count: 1 }

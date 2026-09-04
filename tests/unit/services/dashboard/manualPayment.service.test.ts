@@ -6,6 +6,14 @@ jest.mock('@/services/venueSalesGuard', () => ({
   assertVenueSalesEnabled: jest.fn(),
 }))
 
+// La señal común tiene cobertura transaccional propia en
+// `manualPayment.turnoDeLaOrden.test.ts`; esta suite conserva aislados los demás
+// contratos históricos del servicio.
+jest.mock('@/services/shared/paymentShiftClaim', () => {
+  const actual = jest.requireActual('@/services/shared/paymentShiftClaim')
+  return { ...actual, recordPendingPaymentShiftReconciliation: jest.fn().mockResolvedValue(undefined) }
+})
+
 import { Prisma } from '@prisma/client'
 
 jest.mock('@/utils/prismaClient', () => ({
@@ -412,7 +420,7 @@ describe('manualPayment.service', () => {
     it('FIX: links manual payment to currently open shift (shiftId set from open Shift)', async () => {
       const paymentCreate = jest.fn().mockResolvedValue({ id: 'pay-shift' })
       const orderCreate = jest.fn().mockResolvedValue({ id: 'shadow-1' })
-      const shiftFindFirst = jest.fn().mockResolvedValue({ id: 'open-shift-123' })
+      const shiftFindFirst = jest.fn().mockResolvedValue({ id: 'open-shift-123', status: 'OPEN' })
       // El servicio RECLAMA el turno (`updateMany` condicional) en vez de actualizarlo por id.
       const shiftUpdate = jest.fn()
       ;(prismaMock.$transaction as jest.Mock).mockImplementation(
@@ -1267,15 +1275,18 @@ describe('manualPayment.service', () => {
     })
 
     it('FIX: Shift totals increment when shift is open (Mode 2 shadow → totalOrders++ too)', async () => {
-      // 🔴 Task 5: los incrementos salen del CLAIM (`updateMany` acotado por venue y estado), y el
-      // `totalOrders++` va en una segunda escritura porque `isShadow` no se conoce al reclamar.
+      // 🔴 Task 5: todos los incrementos salen del MISMO claim acotado.
       const shiftUpdate = jest.fn()
       const shiftUpdateMany = jest.fn().mockResolvedValue({ count: 1 })
       const orderCreate = jest.fn().mockResolvedValue({ id: 'shadow-shift' })
       ;(prismaMock.$transaction as jest.Mock).mockImplementation(
         txMock({
           order: { findFirst: jest.fn(), update: jest.fn(), create: orderCreate },
-          shift: { findFirst: jest.fn().mockResolvedValue({ id: 'open-shift' }), update: shiftUpdate, updateMany: shiftUpdateMany },
+          shift: {
+            findFirst: jest.fn().mockResolvedValue({ id: 'open-shift', status: 'OPEN' }),
+            update: shiftUpdate,
+            updateMany: shiftUpdateMany,
+          },
         }),
       )
 
@@ -1292,9 +1303,8 @@ describe('manualPayment.service', () => {
       expect(claim.where).toEqual({ id: 'open-shift', venueId: VENUE_ID, status: 'OPEN', endTime: null })
       expect(claim.data.totalSales.increment.toString()).toBe('300')
       expect(claim.data.totalTips.increment.toString()).toBe('20')
-      // El `totalOrders++` de la orden sombra, en su propia escritura bajo el mismo candado.
-      const orders = shiftUpdateMany.mock.calls[1][0]
-      expect(orders.data).toEqual({ totalOrders: { increment: 1 } })
+      expect(claim.data.totalOrders).toEqual({ increment: 1 })
+      expect(shiftUpdateMany).toHaveBeenCalledTimes(1)
     })
 
     it('FIX: Shift totals increment WITHOUT totalOrders++ for Mode 1 (order already counted)', async () => {
@@ -1315,7 +1325,12 @@ describe('manualPayment.service', () => {
       ;(prismaMock.$transaction as jest.Mock).mockImplementation(
         txMock({
           order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: jest.fn() },
-          shift: { findFirst: jest.fn().mockResolvedValue({ id: 'open-shift' }), update: shiftUpdate, updateMany: shiftUpdateMany },
+          payment: { create: jest.fn().mockResolvedValue({ id: 'pay-x' }), count: jest.fn().mockResolvedValue(1) },
+          shift: {
+            findFirst: jest.fn().mockResolvedValue({ id: 'open-shift', status: 'OPEN' }),
+            update: shiftUpdate,
+            updateMany: shiftUpdateMany,
+          },
         }),
       )
 
@@ -1909,7 +1924,7 @@ describe('manualPayment.service', () => {
       // `staffId` seguiría pasando y la prueba dejaría de guardar lo que dice guardar.
       expect(shiftFindFirst).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { venueId: VENUE_ID, status: 'OPEN', endTime: null },
+          where: { venueId: VENUE_ID, endTime: null },
         }),
       )
     })

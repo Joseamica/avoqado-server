@@ -17,6 +17,8 @@
  */
 import {
   acumuladoPersistido,
+  ajustarRepartoAComponentesRestantes,
+  centavosDevueltosPorComponente,
   centavosDevueltosDeFilas,
   centavosDevueltosDeclarados,
   centavosYaDevueltos,
@@ -69,6 +71,51 @@ describe('Task 5r — devueltoDeUnCobro: la propina devuelta CUENTA como devuelt
 
     it('🔴 una fila SIN la llave `amount` revienta', () => {
       expect(() => centavosDevueltosDeFilas([{ tipAmount: 0, status: 'COMPLETED' } as never])).toThrow(/amount/)
+    })
+  })
+
+  describe('componentes restantes del reembolso', () => {
+    it('mide venta y propina COMPLETED por separado sin contar filas pendientes', () => {
+      expect(centavosDevueltosPorComponente([reembolso(-50, -10), reembolso(-20, 0, 'PENDING'), reembolso(0, -5)])).toEqual({
+        salesCents: 5000,
+        tipCents: 1500,
+      })
+    })
+
+    it('si la propina está agotada, mueve a venta el override que ya no cabe', () => {
+      expect(
+        ajustarRepartoAComponentesRestantes({
+          originalSalesCents: 10000,
+          originalTipsCents: 2000,
+          refundedSalesCents: 0,
+          refundedTipsCents: 2000,
+          refundCents: 2000,
+          requestedTipCents: 2000,
+        }),
+      ).toEqual({
+        salesRefundCents: 2000,
+        tipRefundCents: 0,
+        remainingSalesCents: 10000,
+        remainingTipsCents: 0,
+      })
+    })
+
+    it('si la venta está agotada, mueve a propina el default que ya no cabe', () => {
+      expect(
+        ajustarRepartoAComponentesRestantes({
+          originalSalesCents: 10000,
+          originalTipsCents: 2000,
+          refundedSalesCents: 10000,
+          refundedTipsCents: 0,
+          refundCents: 2000,
+          requestedTipCents: 333,
+        }),
+      ).toEqual({
+        salesRefundCents: 0,
+        tipRefundCents: 2000,
+        remainingSalesCents: 0,
+        remainingTipsCents: 2000,
+      })
     })
   })
 

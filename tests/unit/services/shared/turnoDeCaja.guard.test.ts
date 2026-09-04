@@ -17,16 +17,16 @@ const esperado: Record<string, number> = {
   // la atribución provisional de la iniciación.
   'b4bit/b4bit.service.ts': 2,
   'tpv/payment.tpv.service.ts': 0,
-  'tpv/refund.tpv.service.ts': 1,
+  'tpv/refund.tpv.service.ts': 0,
   // 3 desde el 3-sep-2026 (task 2b): `createOrderWithItems` ya lo llamaba; se suman `createOrder`
   // (orden de mostrador) y `sellSerializedItem`, que ahora estampan `Order.shiftId`.
   'tpv/order.tpv.service.ts': 3,
   'tpv/table.tpv.service.ts': 1,
   'dashboard/manualPayment.service.ts': 1,
-  'dashboard/refund.dashboard.service.ts': 1,
+  'dashboard/refund.dashboard.service.ts': 0,
   // `payCashOrder` pasó al claim transaccional en Task 5f; éste es createOrderWithItems.
   'mobile/order.mobile.service.ts': 1,
-  'mobile/refund.mobile.service.ts': 1,
+  'mobile/refund.mobile.service.ts': 0,
   'mobile/areaTicket.mobile.service.ts': 1,
   'mobile/areaTicketV7.mobile.service.ts': 1,
   'mobile/estimate.mobile.service.ts': 1,
@@ -40,6 +40,16 @@ const esperado: Record<string, number> = {
 const claimsDeCobroEsperados: Record<string, number> = {
   'tpv/payment.tpv.service.ts': 2,
   'mobile/order.mobile.service.ts': 1,
+}
+
+/**
+ * Task 5j: los tres reembolsos comparten el claim que observa CLOSING y deja
+ * conciliación, en vez de esconder esa ventana detrás de un lookup sólo OPEN.
+ */
+const claimsDeReembolsoEsperados: Record<string, number> = {
+  'tpv/refund.tpv.service.ts': 1,
+  'dashboard/refund.dashboard.service.ts': 1,
+  'mobile/refund.mobile.service.ts': 1,
 }
 
 /**
@@ -119,6 +129,16 @@ describe('los cobros reclaman el turno dentro de su transacción', () => {
     it(`${rel} (${llamadas} claim${llamadas > 1 ? 's' : ''})`, () => {
       const src = sinComentarios(readFileSync(join(raiz, rel), 'utf8'))
       expect((src.match(/claimShiftForCapturedPayment\(tx,/g) ?? []).length).toBe(llamadas)
+    })
+  }
+})
+
+describe('los reembolsos reclaman u observan CLOSING dentro de su transacción', () => {
+  for (const [rel, llamadas] of Object.entries(claimsDeReembolsoEsperados)) {
+    it(`${rel} (${llamadas} claim)`, () => {
+      const src = sinComentarios(readFileSync(join(raiz, rel), 'utf8'))
+      expect((src.match(/claimShiftForRefund\(tx,/g) ?? []).length).toBe(llamadas)
+      expect(src).not.toMatch(/turnoAbiertoDelNegocio\(/)
     })
   }
 })

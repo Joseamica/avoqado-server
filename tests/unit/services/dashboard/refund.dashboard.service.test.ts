@@ -14,8 +14,27 @@ jest.mock('@/services/dashboard/rawMaterial.service', () => ({
 describe('refund.dashboard.service', () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
+    prismaMock.payment.findFirst.mockResolvedValue({ orderId: 'order-1' } as any)
+    prismaMock.$transaction.mockImplementation(async (callback: any) => {
+      // El lock de Order comparte `$queryRaw` con las dos lecturas Payment del servicio.
+      // Interceptarlo aquí mantiene las colas `.mockResolvedValueOnce` enfocadas en Payment.
+      const queryRaw = jest.fn(async (...args: any[]) => {
+        const query = args[0]
+        const sql = Array.isArray(query)
+          ? query.join('?')
+          : Array.isArray(query?.strings)
+            ? query.strings.join('?')
+            : Array.isArray(query?.sql)
+              ? query.sql.join('?')
+              : String(query)
+        if (sql.includes('FROM "Order"')) return [{ id: 'order-1' }]
+        return (prismaMock.$queryRaw as any)(...args)
+      })
+      return callback({ ...(prismaMock as any), $queryRaw: queryRaw })
+    })
     prismaMock.shift.findFirst.mockResolvedValue(null)
+    ;(prismaMock.activityLog.findFirst as jest.Mock).mockResolvedValue(null)
+    prismaMock.activityLog.create.mockResolvedValue({ id: 'audit-post-close-1' })
     prismaMock.venueTransaction.create.mockResolvedValue({ id: 'vtx-1' })
     prismaMock.payment.update.mockResolvedValue({ id: 'payment-original' })
     // El prismaMock compartido no declara los modelos del cajón. Se agregan aquí
@@ -28,6 +47,30 @@ describe('refund.dashboard.service', () => {
     }
     ;(prismaMock as any).cashDrawerEvent = { createMany: jest.fn().mockResolvedValue({ count: 1 }) }
   })
+
+  it.each([0.5, Number.MAX_SAFE_INTEGER + 1, Number.POSITIVE_INFINITY, Number.NaN])(
+    'rechaza amount=%p si no es un entero positivo seguro antes de abrir transacción',
+    async amount => {
+      await expect(issueRefund({ venueId: 'venue-1', paymentId: 'payment-original', amount, reason: 'RETURNED_GOODS' })).rejects.toThrow(
+        /amount.*entero seguro.*centavos/i,
+      )
+
+      expect(prismaMock.$transaction).not.toHaveBeenCalled()
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each([-0.5, 0.5, Number.MAX_SAFE_INTEGER + 1, Number.POSITIVE_INFINITY, Number.NaN])(
+    'rechaza tipRefundCents=%p si no es un entero no negativo seguro antes de abrir transacción',
+    async tipRefundCents => {
+      await expect(
+        issueRefund({ venueId: 'venue-1', paymentId: 'payment-original', amount: 1000, tipRefundCents, reason: 'RETURNED_GOODS' }),
+      ).rejects.toThrow(/tipRefundCents.*entero seguro.*centavos/i)
+
+      expect(prismaMock.$transaction).not.toHaveBeenCalled()
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    },
+  )
 
   it('rejects refund quantity that exceeds previously refunded quantity for the same order item', async () => {
     prismaMock.$queryRaw
@@ -238,6 +281,108 @@ describe('refund.dashboard.service', () => {
         }),
       }),
     )
+  })
+
+  it('reestablece paymentId + venueId + orderId bajo lock y conserva el mismo alcance al actualizar', async () => {
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([
+        {
+          id: 'payment-original',
+          venueId: 'venue-1',
+          status: TransactionStatus.COMPLETED,
+          type: PaymentType.REGULAR,
+          method: 'CASH',
+          source: 'APP',
+          amount: 10,
+          tipAmount: 0,
+          orderId: 'order-1',
+          shiftId: null,
+          merchantAccountId: null,
+          processorData: {},
+          fundsFlow: 'CASH_DRAWER',
+          tenderTypeId: null,
+          tenderCountsAsCash: null,
+          tenderRevision: null,
+          tenderLabel: null,
+          tenderCaptureTip: null,
+          tenderSatFormaPago: null,
+        },
+      ])
+      .mockResolvedValueOnce([])
+    prismaMock.payment.create.mockResolvedValue({ id: 'refund-tenant-scoped' } as any)
+
+    await issueRefund({
+      venueId: 'venue-1',
+      paymentId: 'payment-original',
+      amount: 500,
+      reason: 'ACCIDENTAL_CHARGE',
+      staffId: 'staff-1',
+    })
+
+    expect(prismaMock.payment.findFirst).toHaveBeenCalledWith({
+      where: { id: 'payment-original', venueId: 'venue-1' },
+      select: { orderId: true },
+    })
+    const lockedPaymentQuery = (prismaMock.$queryRaw as jest.Mock).mock.calls[0][0]
+    expect(String(lockedPaymentQuery.sql).replace(/\s+/g, ' ')).toMatch(/WHERE id = .*"venueId" = .*"orderId" =/)
+    expect(lockedPaymentQuery.values).toEqual(['payment-original', 'venue-1', 'order-1'])
+    expect(prismaMock.payment.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: 'payment-original',
+          venueId: 'venue-1',
+          orderId: 'order-1',
+          status: TransactionStatus.COMPLETED,
+        }),
+      }),
+    )
+  })
+
+  it('sólo emite REFUND_AUTHORITY_CHANGED cuando el marker atómico confirma la reasignación posterior', async () => {
+    prismaMock.$queryRaw.mockResolvedValueOnce([])
+    ;(prismaMock.activityLog.findFirst as jest.Mock).mockResolvedValue({ id: 'marker-order-1' })
+
+    await expect(
+      issueRefund({
+        venueId: 'venue-1',
+        paymentId: 'payment-original',
+        amount: 500,
+        reason: 'ACCIDENTAL_CHARGE',
+        staffId: 'staff-autenticado',
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'REFUND_AUTHORITY_CHANGED' })
+
+    expect(prismaMock.activityLog.findFirst).toHaveBeenCalledWith({
+      where: {
+        action: 'ORDER_VENUE_REASSIGNED',
+        entity: 'Order',
+        entityId: 'order-1',
+        venueId: 'venue-1',
+        createdAt: { gte: expect.any(Date) },
+        data: { path: ['fromVenueId'], equals: 'venue-1' },
+      },
+      select: { id: true },
+    })
+    expect(prismaMock.activityLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ action: 'REFUND_AUTHORITY_CHANGED', venueId: 'venue-1' }) }),
+    )
+  })
+
+  it('Payment desaparecido o relinked sin marker devuelve conflicto genérico y no fabrica audit de reasignación', async () => {
+    prismaMock.$queryRaw.mockResolvedValueOnce([])
+
+    await expect(
+      issueRefund({
+        venueId: 'venue-1',
+        paymentId: 'payment-original',
+        amount: 500,
+        reason: 'ACCIDENTAL_CHARGE',
+        staffId: 'staff-autenticado',
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'REFUND_AUTHORITY_UNAVAILABLE' })
+
+    expect(prismaMock.activityLog.findFirst).toHaveBeenCalledTimes(1)
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
   })
 
   /**
@@ -590,7 +735,7 @@ describe('refund.dashboard.service', () => {
 
     it('CON turno abierto: el reembolso nace en el turno del NEGOCIO y le descuenta a ÉSE, no al del cobro', async () => {
       prismaMock.$queryRaw.mockResolvedValueOnce([pagoConTurnoViejo()]).mockResolvedValueOnce([])
-      prismaMock.shift.findFirst.mockResolvedValue({ id: 'shift-negocio' } as never)
+      prismaMock.shift.findFirst.mockResolvedValue({ id: 'shift-negocio', status: 'OPEN' } as never)
 
       // 🔴 A propósito SIN `staffId`: antes de la fase 1, la guarda `if (input.staffId)`
       // se saltaba el lookup entero y este reembolso caía en 'shift-viejo'.
@@ -598,13 +743,14 @@ describe('refund.dashboard.service', () => {
 
       // (i) el turno se busca por NEGOCIO. Igualdad EXACTA del `where`, no `objectContaining`:
       //     con él, volver a colar `staffId` seguiría pasando.
-      expect(prismaMock.shift.findFirst).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { venueId: 'venue-1', status: 'OPEN', endTime: null } }),
-      )
+      expect(prismaMock.shift.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { venueId: 'venue-1', endTime: null } }))
 
       // (ii) el Payment del reembolso se ata al turno de HOY, no al del cobro original.
       const data = prismaMock.payment.create.mock.calls.at(-1)![0].data
       expect(data.shiftId).toBe('shift-negocio')
+      expect(data.processorData).toMatchObject({ shiftBackfilled: true })
+      expect(data.processorData.shiftAttributionStatus).toBeUndefined()
+      expect(data.processorData.shiftAttributionPendingReason).toBeUndefined()
 
       // (iii) y el descuento va a ESE turno: $50 fuera de la caja de hoy. Es un CLAIM condicional,
       //       no un `update` por id: acotado al venue y al estado OPEN, igual que los otros dos
@@ -616,6 +762,7 @@ describe('refund.dashboard.service', () => {
       expect(upd.data.totalSales.decrement.toString()).toBe('50')
       // Sin propina reembolsada, `totalTips` ni se toca (el código lo omite del `data`).
       expect(upd.data.totalTips).toBeUndefined()
+      expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
     })
 
     it('🔴 SIN turno abierto: el reembolso queda SIN turno y no se toca el turno CERRADO del cobro', async () => {
@@ -626,6 +773,9 @@ describe('refund.dashboard.service', () => {
 
       const data = prismaMock.payment.create.mock.calls.at(-1)![0].data
       expect(data.shiftId).toBeUndefined()
+      expect(data.processorData).toMatchObject({ shiftBackfilled: false })
+      expect(data.processorData.shiftAttributionStatus).toBeUndefined()
+      expect(data.processorData.shiftAttributionPendingReason).toBeUndefined()
 
       // Reescribir los totales de un corte que alguien ya firmó es lo único que no se puede hacer.
       expect(prismaMock.shift.updateMany).not.toHaveBeenCalled()
@@ -637,12 +787,392 @@ describe('refund.dashboard.service', () => {
       // turno al que nunca se le restó: un recálculo desde los pagos discreparía de su propio
       // `totalSales` por el monto del reembolso.
       prismaMock.$queryRaw.mockResolvedValueOnce([pagoConTurnoViejo()]).mockResolvedValueOnce([])
-      prismaMock.shift.findFirst.mockResolvedValue({ id: 'shift-negocio' } as never)
+      prismaMock.shift.findFirst.mockResolvedValue({ id: 'shift-negocio', status: 'OPEN' } as never)
       prismaMock.shift.updateMany.mockResolvedValue({ count: 0 } as never)
 
       await reembolsar()
 
-      expect(prismaMock.payment.create.mock.calls.at(-1)![0].data.shiftId).toBeUndefined()
+      const data = prismaMock.payment.create.mock.calls.at(-1)![0].data
+      expect(data.shiftId).toBeUndefined()
+      expect(data.processorData).toMatchObject({ shiftBackfilled: false })
+      expect(data.processorData.shiftAttributionStatus).toBeUndefined()
+      expect(data.processorData.shiftAttributionPendingReason).toBeUndefined()
+      expect(prismaMock.activityLog.create).toHaveBeenCalledTimes(1)
+      expect(prismaMock.activityLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            entityId: 'refund-turno-1',
+            venueId: 'venue-1',
+            data: expect.objectContaining({
+              reason: 'CLAIM_LOST',
+              candidateShiftId: 'shift-negocio',
+              observedShiftStatus: 'OPEN',
+              channel: 'issueRefund',
+              amountPesos: '-50.00',
+              tipPesos: '0.00',
+            }),
+          }),
+        }),
+      )
+    })
+
+    it('CLOSING: conserva venta+propina fuera del corte y deja una conciliación atómica exacta', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([pagoConTurnoViejo({ tipAmount: 20 })]).mockResolvedValueOnce([])
+      prismaMock.shift.findFirst.mockResolvedValue({ id: 'shift-closing', status: 'CLOSING' } as never)
+
+      await reembolsar({ amount: 6000, tipRefundCents: 1000, staffId: 'staff-9' })
+
+      expect(prismaMock.shift.updateMany).not.toHaveBeenCalled()
+      const data = prismaMock.payment.create.mock.calls.at(-1)![0].data
+      expect(data.shiftId).toBeUndefined()
+      expect(data.processorData).toMatchObject({ shiftBackfilled: false })
+      expect(data.processorData.shiftAttributionStatus).toBeUndefined()
+      expect(data.processorData.shiftAttributionPendingReason).toBeUndefined()
+      expect(prismaMock.activityLog.create).toHaveBeenCalledTimes(1)
+      expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
+        data: {
+          action: 'PAYMENT_WITHOUT_SHIFT',
+          entity: 'Payment',
+          entityId: 'refund-turno-1',
+          staffId: 'staff-9',
+          venueId: 'venue-1',
+          data: {
+            status: 'PENDING',
+            reason: 'SHIFT_NOT_OPEN',
+            candidateShiftId: 'shift-closing',
+            observedShiftStatus: 'CLOSING',
+            paymentId: 'refund-turno-1',
+            orderId: 'order-1',
+            channel: 'issueRefund',
+            amountPesos: '-50.00',
+            tipPesos: '-10.00',
+            totalPesos: '-60.00',
+          },
+        },
+      })
+      expect(prismaMock.payment.create.mock.invocationCallOrder.at(-1)).toBeLessThan(
+        prismaMock.activityLog.create.mock.invocationCallOrder[0],
+      )
+    })
+
+    it('sin candidato deja la señal común NO_SHIFT', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([pagoConTurnoViejo()]).mockResolvedValueOnce([])
+      prismaMock.shift.findFirst.mockResolvedValue(null)
+
+      await reembolsar()
+
+      expect(prismaMock.activityLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            action: 'PAYMENT_WITHOUT_SHIFT',
+            data: expect.objectContaining({ reason: 'NO_SHIFT', channel: 'issueRefund' }),
+          }),
+        }),
+      )
+    })
+
+    it('acumulado largo con filas incompletas: conserva el split default y fuerza pendiente aun con OPEN', async () => {
+      prismaMock.$queryRaw
+        .mockResolvedValueOnce([pagoConTurnoViejo({ tipAmount: 20, processorData: { refundedAmountCents: 6000 } })])
+        .mockResolvedValueOnce([
+          {
+            id: 'refund-clasificado-parcial',
+            amount: -20,
+            tipAmount: 0,
+            processorData: {},
+            createdAt: new Date('2026-09-03T10:00:00.000Z'),
+            status: TransactionStatus.COMPLETED,
+          },
+        ])
+      prismaMock.shift.findFirst.mockResolvedValue({ id: 'shift-negocio', status: 'OPEN' } as never)
+
+      await reembolsar({ amount: 3000 })
+
+      const refund = prismaMock.payment.create.mock.calls.at(-1)![0].data
+      expect(refund.amount.toFixed(2)).toBe('-25.00')
+      expect(refund.tipAmount.toFixed(2)).toBe('-5.00')
+      expect(refund.netAmount.toFixed(2)).toBe('-30.00')
+      expect(refund.shiftId ?? null).toBeNull()
+      expect(refund.processorData).toMatchObject({
+        amountCents: 3000,
+        shiftBackfilled: false,
+        shiftAttributionPendingReason: 'UNCLASSIFIED_REFUND_COMPONENT_HISTORY',
+      })
+      expect(prismaMock.shift.updateMany).not.toHaveBeenCalled()
+      expect(prismaMock.activityLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            entityId: 'refund-turno-1',
+            data: expect.objectContaining({
+              reason: 'UNCLASSIFIED_REFUND_COMPONENT_HISTORY',
+              candidateShiftId: 'shift-negocio',
+              observedShiftStatus: 'OPEN',
+              channel: 'issueRefund',
+              amountPesos: '-25.00',
+              tipPesos: '-5.00',
+              shiftAttributionStatus: 'PENDING',
+              unclassifiedPriorRefundPesos: '40.00',
+            }),
+          }),
+        }),
+      )
+    })
+
+    it('acumulado largo sin filas: item refund queda 100% venta, sin turno y con pendiente aunque no haya candidato', async () => {
+      prismaMock.$queryRaw
+        .mockResolvedValueOnce([pagoConTurnoViejo({ tipAmount: 20, processorData: { refundedAmountCents: 6000 } })])
+        .mockResolvedValueOnce([])
+      prismaMock.orderItem.findMany
+        .mockResolvedValueOnce([
+          {
+            id: 'oi-1',
+            productId: 'prod-1',
+            productName: 'Producto',
+            quantity: 1,
+            total: new Decimal(20),
+            orderPromotionId: null,
+          },
+        ])
+        .mockResolvedValueOnce([{ id: 'oi-1', orderPromotionId: null, total: new Decimal(20) }])
+      prismaMock.shift.findFirst.mockResolvedValue(null)
+
+      await issueRefund({
+        venueId: 'venue-1',
+        paymentId: 'payment-original',
+        items: [{ orderItemId: 'oi-1', quantity: 1 }],
+        reason: 'RETURNED_GOODS',
+      })
+
+      const refund = prismaMock.payment.create.mock.calls.at(-1)![0].data
+      expect(refund.amount.toFixed(2)).toBe('-20.00')
+      expect(refund.tipAmount.toFixed(2)).toBe('0.00')
+      expect(refund.netAmount.toFixed(2)).toBe('-20.00')
+      expect(refund.shiftId ?? null).toBeNull()
+      expect(refund.processorData).toMatchObject({
+        amountCents: 2000,
+        shiftBackfilled: false,
+        shiftAttributionPendingReason: 'UNCLASSIFIED_REFUND_COMPONENT_HISTORY',
+      })
+      expect(prismaMock.shift.updateMany).not.toHaveBeenCalled()
+      expect(prismaMock.activityLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            data: expect.objectContaining({
+              reason: 'UNCLASSIFIED_REFUND_COMPONENT_HISTORY',
+              amountPesos: '-20.00',
+              tipPesos: '0.00',
+              shiftAttributionStatus: 'PENDING',
+              unclassifiedPriorRefundPesos: '60.00',
+            }),
+          }),
+        }),
+      )
+    })
+
+    it('componente agotado: si la propina ya se devolvió, rebalancea el override a venta y decrementa sólo venta', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([pagoConTurnoViejo({ tipAmount: 20 })]).mockResolvedValueOnce([
+        {
+          id: 'refund-tip-previo',
+          amount: 0,
+          tipAmount: -20,
+          processorData: {},
+          createdAt: new Date('2026-09-03T10:00:00.000Z'),
+          status: TransactionStatus.COMPLETED,
+        },
+      ])
+      prismaMock.shift.findFirst.mockResolvedValue({ id: 'shift-negocio', status: 'OPEN' } as never)
+
+      await reembolsar({ amount: 2000, tipRefundCents: 2000 })
+
+      const refund = prismaMock.payment.create.mock.calls.at(-1)![0].data
+      expect(refund.amount.toFixed(2)).toBe('-20.00')
+      expect(refund.tipAmount.toFixed(2)).toBe('0.00')
+
+      const decremento = prismaMock.shift.updateMany.mock.calls.at(-1)![0].data
+      expect(decremento.totalSales.decrement.toFixed(2)).toBe('20.00')
+      expect(decremento.totalTips).toBeUndefined()
+      expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+    })
+
+    it('componente agotado: si la venta ya se devolvió, rebalancea el default a propina y audita ese split post-corte', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([pagoConTurnoViejo({ tipAmount: 20 })]).mockResolvedValueOnce([
+        {
+          id: 'refund-venta-previo',
+          amount: -100,
+          tipAmount: 0,
+          processorData: {},
+          createdAt: new Date('2026-09-03T10:00:00.000Z'),
+          status: TransactionStatus.COMPLETED,
+        },
+      ])
+      prismaMock.shift.findFirst.mockResolvedValue({ id: 'shift-closing', status: 'CLOSING' } as never)
+
+      await reembolsar({ amount: 2000 })
+
+      const refund = prismaMock.payment.create.mock.calls.at(-1)![0].data
+      expect(refund.amount.toFixed(2)).toBe('0.00')
+      expect(refund.tipAmount.toFixed(2)).toBe('-20.00')
+      expect(prismaMock.shift.updateMany).not.toHaveBeenCalled()
+      expect(prismaMock.activityLog.create).toHaveBeenCalledTimes(1)
+      expect(prismaMock.activityLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            entityId: 'refund-turno-1',
+            data: expect.objectContaining({
+              reason: 'SHIFT_NOT_OPEN',
+              channel: 'issueRefund',
+              amountPesos: '0.00',
+              tipPesos: '-20.00',
+            }),
+          }),
+        }),
+      )
+    })
+
+    it('componente agotado: un refund por artículo no convierte mercancía en propina', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([pagoConTurnoViejo({ tipAmount: 20 })]).mockResolvedValueOnce([
+        {
+          id: 'refund-venta-previo',
+          amount: -100,
+          tipAmount: 0,
+          processorData: {},
+          createdAt: new Date('2026-09-03T10:00:00.000Z'),
+          status: TransactionStatus.COMPLETED,
+        },
+      ])
+      prismaMock.orderItem.findMany
+        .mockResolvedValueOnce([
+          {
+            id: 'oi-1',
+            productId: 'prod-1',
+            productName: 'Producto',
+            quantity: 1,
+            total: new Decimal(20),
+            orderPromotionId: null,
+          },
+        ])
+        .mockResolvedValueOnce([{ id: 'oi-1', orderPromotionId: null, total: new Decimal(20) }])
+
+      await expect(
+        issueRefund({
+          venueId: 'venue-1',
+          paymentId: 'payment-original',
+          items: [{ orderItemId: 'oi-1', quantity: 1 }],
+          reason: 'RETURNED_GOODS',
+        }),
+      ).rejects.toThrow(/remaining refundable sale amount/i)
+
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
+      expect(prismaMock.shift.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('rollback stateful OPEN: un fallo después del Payment revierte decremento y refund sin audit global', async () => {
+      const committed = { totalSales: 300, totalTips: 40, payments: [] as any[], audits: [] as any[] }
+      let stagedAntesDelFallo: typeof committed | null = null
+
+      prismaMock.$transaction.mockImplementationOnce(async (callback: any) => {
+        const staged = {
+          totalSales: committed.totalSales,
+          totalTips: committed.totalTips,
+          payments: [...committed.payments],
+          audits: [...committed.audits],
+        }
+        const tx = {
+          $queryRaw: jest
+            .fn()
+            .mockResolvedValueOnce([{ id: 'order-1' }])
+            .mockResolvedValueOnce([pagoConTurnoViejo({ tipAmount: 20 })])
+            .mockResolvedValueOnce([]),
+          shift: {
+            findFirst: jest.fn().mockResolvedValue({ id: 'shift-open', status: 'OPEN' }),
+            updateMany: jest.fn().mockImplementation(async ({ data }: any) => {
+              staged.totalSales -= Number(data.totalSales.decrement)
+              staged.totalTips -= Number(data.totalTips.decrement)
+              return { count: 1 }
+            }),
+          },
+          payment: {
+            create: jest.fn().mockImplementation(async ({ data }: any) => {
+              const row = { id: 'refund-staged', ...data }
+              staged.payments.push(row)
+              return row
+            }),
+            update: jest.fn().mockImplementation(async () => {
+              stagedAntesDelFallo = { ...staged, payments: [...staged.payments], audits: [...staged.audits] }
+              throw new Error('fallo posterior al Payment OPEN')
+            }),
+          },
+          activityLog: {
+            create: jest.fn().mockImplementation(async ({ data }: any) => {
+              staged.audits.push(data)
+              return { id: 'audit-staged' }
+            }),
+          },
+          venueSettings: { findUnique: jest.fn().mockResolvedValue({ enableShifts: true }) },
+          venueTransaction: { create: jest.fn() },
+        }
+
+        const result = await callback(tx)
+        Object.assign(committed, staged)
+        return result
+      })
+
+      await expect(reembolsar({ amount: 6000, tipRefundCents: 1000 })).rejects.toThrow('fallo posterior al Payment OPEN')
+
+      expect(stagedAntesDelFallo).toEqual({ totalSales: 250, totalTips: 30, payments: [expect.any(Object)], audits: [] })
+      expect(committed).toEqual({ totalSales: 300, totalTips: 40, payments: [], audits: [] })
+      expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+      expect(logAction).not.toHaveBeenCalled()
+    })
+
+    it('rollback stateful CLOSING: un fallo después del audit revierte refund y conciliación sin audit global', async () => {
+      const committed = { payments: [] as any[], audits: [] as any[] }
+      let stagedAntesDelFallo: typeof committed | null = null
+
+      prismaMock.$transaction.mockImplementationOnce(async (callback: any) => {
+        const staged = { payments: [...committed.payments], audits: [...committed.audits] }
+        const tx = {
+          $queryRaw: jest
+            .fn()
+            .mockResolvedValueOnce([{ id: 'order-1' }])
+            .mockResolvedValueOnce([pagoConTurnoViejo({ tipAmount: 20 })])
+            .mockResolvedValueOnce([]),
+          shift: {
+            findFirst: jest.fn().mockResolvedValue({ id: 'shift-closing', status: 'CLOSING' }),
+            updateMany: jest.fn(),
+          },
+          payment: {
+            create: jest.fn().mockImplementation(async ({ data }: any) => {
+              const row = { id: 'refund-staged', ...data }
+              staged.payments.push(row)
+              return row
+            }),
+            update: jest.fn().mockImplementation(async () => {
+              stagedAntesDelFallo = { payments: [...staged.payments], audits: [...staged.audits] }
+              throw new Error('fallo posterior al audit CLOSING')
+            }),
+          },
+          activityLog: {
+            create: jest.fn().mockImplementation(async ({ data }: any) => {
+              staged.audits.push(data)
+              return { id: 'audit-staged' }
+            }),
+          },
+          venueSettings: { findUnique: jest.fn().mockResolvedValue({ enableShifts: true }) },
+          venueTransaction: { create: jest.fn() },
+        }
+
+        const result = await callback(tx)
+        Object.assign(committed, staged)
+        return result
+      })
+
+      await expect(reembolsar({ amount: 6000, tipRefundCents: 1000 })).rejects.toThrow('fallo posterior al audit CLOSING')
+
+      expect(stagedAntesDelFallo).toEqual({ payments: [expect.any(Object)], audits: [expect.any(Object)] })
+      expect(committed).toEqual({ payments: [], audits: [] })
+      expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+      expect(logAction).not.toHaveBeenCalled()
     })
   })
 })

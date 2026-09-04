@@ -15,6 +15,7 @@
  */
 
 import logger from '../config/logger'
+import { Prisma } from '@prisma/client'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { logAction } from '../services/dashboard/activity-log.service'
@@ -162,42 +163,58 @@ export async function reassignEventSimSalesForRule(
         continue
       }
 
-      const orderBefore = await prisma.order.findUnique({ where: { id: orderId }, select: { venueId: true } })
+      const movement = await prisma.$transaction(async tx => {
+        // El marker y las cuatro tablas parten de la MISMA fila bloqueada. El
+        // pre-read exterior no puede autorizar ni describir una reasignación.
+        const lockedOrders = await tx.$queryRaw<Array<{ id: string; venueId: string }>>(Prisma.sql`
+          SELECT id, "venueId"
+          FROM "Order"
+          WHERE id = ${orderId}
+          FOR UPDATE
+        `)
+        const lockedOrder = lockedOrders[0]
+        if (!lockedOrder || lockedOrder.venueId === targetVenue.id) return null
 
-      await prisma.$transaction(async tx => {
-        await tx.order.updateMany({ where: { id: orderId, NOT: { venueId: targetVenue.id } }, data: { venueId: targetVenue.id } })
+        const movedOrder = await tx.order.updateMany({
+          where: { id: orderId, venueId: lockedOrder.venueId },
+          data: { venueId: targetVenue.id },
+        })
+        if (movedOrder.count !== 1) {
+          throw new Error('La Order bloqueada no pudo reasignarse con su venue esperado')
+        }
         await tx.payment.updateMany({ where: { orderId, NOT: { venueId: targetVenue.id } }, data: { venueId: targetVenue.id } })
         await tx.saleVerification.updateMany({
           where: { payment: { orderId }, NOT: { venueId: targetVenue.id } },
           data: { venueId: targetVenue.id },
         })
         await tx.serializedItem.updateMany({ where: { orderItem: { orderId } }, data: { sellingVenueId: targetVenue.id } })
+        const reassignedAt = new Date()
+        const auditData = {
+          fromVenueId: lockedOrder.venueId,
+          toVenueId: targetVenue.id,
+          reason: 'playtelecom_evento_sim',
+          category: rule.categoryName,
+          reassignedAt: reassignedAt.toISOString(),
+        }
+        // Estas dos filas conservan la auditabilidad bidireccional histórica y
+        // además son el marker durable que una refund puede verificar sin leer B.
+        for (const venueId of [targetVenue.id, lockedOrder.venueId]) {
+          await tx.activityLog.create({
+            data: {
+              action: 'ORDER_VENUE_REASSIGNED',
+              entity: 'Order',
+              entityId: orderId,
+              venueId,
+              staffId: null,
+              data: auditData,
+              createdAt: reassignedAt,
+            },
+          })
+        }
+        return { fromVenueId: lockedOrder.venueId }
       })
 
-      const auditData = {
-        fromVenueId: orderBefore?.venueId ?? null,
-        toVenueId: targetVenue.id,
-        reason: 'playtelecom_evento_sim',
-        category: rule.categoryName,
-      }
-      await logAction({
-        action: 'ORDER_VENUE_REASSIGNED',
-        entity: 'Order',
-        entityId: orderId,
-        venueId: targetVenue.id,
-        staffId: null,
-        data: auditData,
-      })
-      if (orderBefore?.venueId) {
-        await logAction({
-          action: 'ORDER_VENUE_REASSIGNED',
-          entity: 'Order',
-          entityId: orderId,
-          venueId: orderBefore.venueId,
-          staffId: null,
-          data: auditData,
-        })
-      }
+      if (!movement) continue
       reassigned++
     } catch (err) {
       logger.error('[PlayTelecom Event SIM Reassignment] No se pudo reasignar una orden', {

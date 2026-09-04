@@ -115,6 +115,12 @@ describe('toda orden nueva decide explícitamente si cae en el turno de caja', (
         const fuente = readFileSync(join(raizServicios, rel), 'utf8')
         expect(fuente).toMatch(/NO se estampa `shiftId`, y es DELIBERADO/)
       })
+    } else if (rel === 'pos-sync/posSyncOrder.service.ts') {
+      it(`${rel} — estampa únicamente el turno que ganó el lock`, () => {
+        // En pos-sync, `shiftId` es sólo el candidato observado antes de la transacción.
+        // El create debe usar el id que ganó el CAS/lock OPEN dentro de esa transacción.
+        expect(cuerpo).toMatch(/\bwritableShiftId\b/)
+      })
     } else {
       it(`${rel} — estampa el turno`, () => {
         expect(cuerpo).toMatch(/\bshiftId\b/)
@@ -122,11 +128,11 @@ describe('toda orden nueva decide explícitamente si cae en el turno de caja', (
     }
   }
 
-  it('el upsert de pos-sync conecta el turno por RELACIÓN, no por campo plano', () => {
+  it('el upsert de pos-sync conecta por RELACIÓN sólo el turno que ganó el lock', () => {
     // El `grep` de arriba ya lo incluye, pero sólo comprueba que la palabra `shiftId` aparezca:
     // aquí se fija la FORMA, porque pos-sync es el único que lo ata por relación (SoftRestaurant
     // manda su propio `shiftId`, resuelto por `posSyncShift.service.ts`).
     const fuente = readFileSync(join(raizServicios, 'pos-sync/posSyncOrder.service.ts'), 'utf8')
-    expect(fuente).toMatch(/shift:\s*\{\s*connect:\s*\{\s*id:\s*shiftId\s*\}\s*\}/)
+    expect(fuente).toMatch(/shift:\s*\{\s*connect:\s*\{\s*id:\s*writableShiftId\s*\}\s*\}/)
   })
 })

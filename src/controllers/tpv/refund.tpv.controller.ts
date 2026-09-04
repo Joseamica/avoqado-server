@@ -1,5 +1,6 @@
 import { NextFunction, Request, Response } from 'express'
 import * as refundTpvService from '../../services/tpv/refund.tpv.service'
+import { esCantidadNoNegativaEnCentavos, esCantidadPositivaEnCentavos } from '../../services/shared/devueltoDeUnCobro'
 
 /**
  * Record a refund for an existing payment
@@ -46,8 +47,19 @@ import * as refundTpvService from '../../services/tpv/refund.tpv.service'
 export async function recordRefund(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const orgId = req.authContext?.orgId
-    const userId = req.authContext?.userId
+    // La ruta está detrás de authenticateTokenMiddleware; el actor autenticado es
+    // obligatorio para que el servicio nunca audite el staffId controlado por body.
+    const userId = req.authContext!.userId
     const venueId: string = req.params.venueId
+
+    if (!esCantidadPositivaEnCentavos(req.body.amount)) {
+      res.status(400).json({ success: false, message: 'amount debe ser un entero seguro positivo expresado en centavos' })
+      return
+    }
+    if (req.body.tipRefundCents !== undefined && !esCantidadNoNegativaEnCentavos(req.body.tipRefundCents)) {
+      res.status(400).json({ success: false, message: 'tipRefundCents debe ser un entero seguro no negativo expresado en centavos' })
+      return
+    }
 
     // Extract refund data from request body
     const refundData = {
@@ -56,7 +68,8 @@ export async function recordRefund(req: Request, res: Response, next: NextFuncti
       originalOrderId: req.body.originalOrderId,
       amount: req.body.amount, // In cents
       reason: req.body.reason,
-      staffId: req.body.staffId,
+      // `staffId` del body se tolera por compatibilidad de wire, pero no se
+      // propaga: la única autoridad de actor es `authContext.userId`.
       // 🔴 `req.body.shiftId` NO se lee: el turno de caja es del NEGOCIO y lo resuelve el
       // servidor (`services/shared/turnoDeCaja.ts`). Quitar la llave del contrato rompería a
       // las terminales que ya están en la calle, así que se tolera y se descarta.
@@ -76,7 +89,7 @@ export async function recordRefund(req: Request, res: Response, next: NextFuncti
       currency: req.body.currency || 'MXN',
       // Preserve zero: it means "refund sale only; keep the staff tip intact".
       // A truthiness check would silently restore the proportional default.
-      tipRefundCents: typeof req.body.tipRefundCents === 'number' ? req.body.tipRefundCents : undefined,
+      tipRefundCents: req.body.tipRefundCents,
       // Optional processor tag — 'blumon' (default for legacy TPVs) or
       // 'angelpay' (sent by TPV v2.31+ when refunding Nexgo payments).
       // Persisted into Payment.processor for downstream reconciliation.

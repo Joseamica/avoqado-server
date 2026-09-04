@@ -8,6 +8,7 @@ import { NextFunction, Request, Response } from 'express'
 import logger from '../../config/logger'
 import * as refundService from '../../services/mobile/refund.mobile.service'
 import * as refundDashboardService from '../../services/dashboard/refund.dashboard.service'
+import { esCantidadNoNegativaEnCentavos, esCantidadPositivaEnCentavos } from '../../services/shared/devueltoDeUnCobro'
 
 /**
  * Create unassociated refund
@@ -19,8 +20,8 @@ export const createRefund = async (req: Request, res: Response, next: NextFuncti
     const staffId = req.authContext?.userId || ''
     const { amount, reason, method, staffName } = req.body
 
-    if (!amount || amount <= 0) {
-      return res.status(400).json({ success: false, message: 'amount es requerido y debe ser mayor a 0' })
+    if (!esCantidadPositivaEnCentavos(amount)) {
+      return res.status(400).json({ success: false, message: 'amount debe ser un entero seguro positivo expresado en centavos' })
     }
 
     if (!reason) {
@@ -66,6 +67,12 @@ export const issueAssociatedRefund = async (req: Request, res: Response, next: N
     const { amount, items, restockItemIds, reason, note, tipRefundCents } = req.body ?? {}
 
     const hasItems = Array.isArray(items) && items.length > 0
+    if (amount !== undefined && !esCantidadPositivaEnCentavos(amount)) {
+      return res.status(400).json({ success: false, message: 'amount debe ser un entero seguro positivo expresado en centavos' })
+    }
+    if (tipRefundCents !== undefined && !esCantidadNoNegativaEnCentavos(tipRefundCents)) {
+      return res.status(400).json({ success: false, message: 'tipRefundCents debe ser un entero seguro no negativo expresado en centavos' })
+    }
     if (!hasItems && (typeof amount !== 'number' || amount <= 0)) {
       return res.status(400).json({
         success: false,

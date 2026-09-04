@@ -1,7 +1,7 @@
 // services/dashboard/payment.dashboard.service.ts
 
 import { TransactionStatus, PaymentMethod, CardBrand, CardEntryMode } from '@prisma/client'
-import { NotFoundError } from '../../errors/AppError'
+import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { PaginatedPaymentsResponse } from '../../schemas/dashboard/payment.schema'
 import { logAction } from './activity-log.service'
@@ -394,13 +394,33 @@ export async function updatePayment(venueId: string, paymentId: string, data: Up
     throw new NotFoundError(`Payment con ID ${paymentId} no encontrado en este venue`)
   }
 
+  // This endpoint corrects bookkeeping fields; it is not a capture rail. Letting
+  // a client promote PENDING/FAILED/PROCESSING to COMPLETED here would create
+  // real-looking money without the Order → Payment → Shift transaction, the
+  // authenticated shift attribution or its owner-facing reconciliation audit.
+  // A no-op COMPLETED → COMPLETED is kept so metadata on an already captured
+  // payment can still be corrected through the existing API.
+  if (data.status === TransactionStatus.COMPLETED && payment.status !== TransactionStatus.COMPLETED) {
+    throw new BadRequestError(
+      'Este endpoint sólo corrige datos del pago. Completa el cobro desde el flujo de captura correspondiente.',
+      'PAYMENT_COMPLETION_REQUIRES_CAPTURE_FLOW',
+    )
+  }
+
+  // `COMPLETED → COMPLETED` is permission to correct metadata, not permission
+  // to reassert the money state. The row can change after the read above; if a
+  // concurrent authority moves it to FAILED, including stale `COMPLETED` in
+  // this update would resurrect it. Omitting status makes this path a true
+  // status no-op while preserving the existing metadata-correction response.
+  const omitNoopCompletedStatus = data.status === TransactionStatus.COMPLETED && payment.status === TransactionStatus.COMPLETED
+
   // Update the payment
   const updatedPayment = await prisma.payment.update({
     where: { id: paymentId },
     data: {
       ...(data.amount !== undefined && { amount: data.amount }),
       ...(data.tipAmount !== undefined && { tipAmount: data.tipAmount }),
-      ...(data.status !== undefined && { status: data.status }),
+      ...(data.status !== undefined && !omitNoopCompletedStatus && { status: data.status }),
       ...(data.method !== undefined && { method: data.method }),
       ...(data.cardBrand !== undefined && { cardBrand: data.cardBrand }),
       ...(data.last4 !== undefined && { last4: data.last4 }),

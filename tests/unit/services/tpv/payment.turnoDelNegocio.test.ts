@@ -44,6 +44,7 @@ jest.mock('@/utils/prismaClient', () => ({
     rawMaterial: { findUnique: jest.fn() },
     orderCustomer: { findMany: jest.fn() },
     activityLog: { create: jest.fn().mockResolvedValue({}) },
+    venueSettings: { findUnique: jest.fn() },
     inventoryPosting: { findUnique: jest.fn(), create: jest.fn(), updateMany: jest.fn() },
     inventoryPostingLine: { findMany: jest.fn() },
     $transaction: jest.fn(),
@@ -145,10 +146,89 @@ const paymentData = {
 /** Transacciones abiertas durante la corrida, con las operaciones que vieron. */
 type TxRecord = { client: any; ops: string[] }
 let transacciones: TxRecord[] = []
+let durableOrderVenue = VENUE_ID
+let onTransactionStart: () => void = () => undefined
+
+function installStatefulP2002Rollback() {
+  const committed = {
+    shift: { totalSales: 0, totalTips: 0, totalOrders: 0 },
+    activityLogs: [] as any[],
+    loserPayments: [] as any[],
+  }
+  const attempted = { claims: 0 }
+  const ops: string[] = []
+
+  ;(prisma.$transaction as jest.Mock).mockImplementationOnce(async (callback: any) => {
+    // Snapshot aislado: sólo se copia a `committed` cuando el callback resuelve.
+    const staged = {
+      shift: { ...committed.shift },
+      activityLogs: [...committed.activityLogs],
+      loserPayments: [...committed.loserPayments],
+    }
+    const tx: any = {
+      payment: {
+        create: jest.fn(async () => {
+          ops.push('payment.create:P2002')
+          throw new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+            code: 'P2002',
+            clientVersion: 'test',
+            meta: { target: ['venueId', 'idempotencyKey'] },
+          })
+        }),
+      },
+      shift: {
+        findFirst: jest.fn(async () => {
+          ops.push('shift.findFirst')
+          return { id: 'shift-open', status: 'OPEN' }
+        }),
+        updateMany: jest.fn(async ({ data }: any) => {
+          ops.push('shift.updateMany')
+          attempted.claims += 1
+          staged.shift.totalSales += Number(data.totalSales.increment)
+          staged.shift.totalTips += Number(data.totalTips.increment)
+          staged.shift.totalOrders += Number(data.totalOrders.increment)
+          return { count: 1 }
+        }),
+      },
+      activityLog: {
+        create: jest.fn(async ({ data }: any) => {
+          ops.push('activityLog.create')
+          staged.activityLogs.push(data)
+          return data
+        }),
+      },
+      venueSettings: { findUnique: prisma.venueSettings.findUnique },
+      order: { update: prisma.order.update },
+      paymentAllocation: { create: prisma.paymentAllocation.create },
+      venueTransaction: { create: prisma.venueTransaction.create },
+      areaTicketCheckoutSession: {
+        findFirst: prisma.areaTicketCheckoutSession.findFirst,
+        updateMany: prisma.areaTicketCheckoutSession.updateMany,
+      },
+      areaTicketPaymentAttempt: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        findFirst: prisma.areaTicketPaymentAttempt.findFirst,
+        updateMany: prisma.areaTicketPaymentAttempt.updateMany,
+      },
+      inventoryPosting: prisma.inventoryPosting,
+      $queryRaw: jest.fn().mockResolvedValue([{ id: ORDER_ID }]),
+    }
+
+    const result = await callback(tx)
+    committed.shift = { ...staged.shift }
+    committed.activityLogs = [...staged.activityLogs]
+    committed.loserPayments = [...staged.loserPayments]
+    return result
+  })
+
+  return { committed, attempted, ops }
+}
 
 beforeEach(() => {
   jest.clearAllMocks()
   transacciones = []
+  durableOrderVenue = VENUE_ID
+  onTransactionStart = () => undefined
 
   const order = makeOrder()
   ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
@@ -167,6 +247,7 @@ beforeEach(() => {
   ;(prisma.areaTicketPaymentAttempt.findFirst as jest.Mock).mockResolvedValue(null)
   ;(prisma.inventoryPostingLine.findMany as jest.Mock).mockResolvedValue([])
   ;(prisma.inventoryPosting.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+  ;(prisma.venueSettings.findUnique as jest.Mock).mockResolvedValue({ enableShifts: true })
   lockAreaTicketCheckoutMock.mockResolvedValue(null)
   finalizeAreaTicketPaymentMock.mockResolvedValue({ areaTicketOrder: false })
   ;(productInventoryService.deductInventoryForProduct as jest.Mock).mockResolvedValue({ inventoryMethod: 'QUANTITY' })
@@ -177,6 +258,7 @@ beforeEach(() => {
   })
   createSalePostingInTxMock.mockResolvedValue({ id: 'posting-1', status: 'PENDING' })
   ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback: any) => {
+    onTransactionStart()
     const ops: string[] = []
     const record: TxRecord = { client: null, ops }
     const tx: any = {
@@ -214,6 +296,7 @@ beforeEach(() => {
           return (prisma.activityLog.create as jest.Mock)(args)
         }),
       },
+      venueSettings: { findUnique: prisma.venueSettings.findUnique },
       areaTicketCheckoutSession: {
         findFirst: prisma.areaTicketCheckoutSession.findFirst,
         updateMany: prisma.areaTicketCheckoutSession.updateMany,
@@ -224,7 +307,7 @@ beforeEach(() => {
         updateMany: prisma.areaTicketPaymentAttempt.updateMany,
       },
       inventoryPosting: prisma.inventoryPosting,
-      $queryRaw: jest.fn().mockResolvedValue([]),
+      $queryRaw: jest.fn().mockImplementation(async () => (durableOrderVenue === VENUE_ID ? [{ id: ORDER_ID }] : [])),
     }
     record.client = tx
     transacciones.push(record)
@@ -233,6 +316,76 @@ beforeEach(() => {
 })
 
 describe('fase 1 — el cobro cae en el turno abierto del NEGOCIO', () => {
+  it.each(['FAILED', 'PENDING'] as const)(
+    'un Payment %s no es dinero capturado: queda sin turno, claim ni anomalía post-cierre',
+    async status => {
+      ;(prisma.payment.create as jest.Mock).mockImplementationOnce(async ({ data }: any) => ({
+        id: `payment-${status.toLowerCase()}`,
+        feeAmount: 0,
+        netAmount: 100,
+        receipts: [],
+        ...data,
+      }))
+
+      await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, status }, 'user-1')
+
+      expect((prisma.payment.create as jest.Mock).mock.calls.at(-1)![0].data).toMatchObject({ status, shiftId: null })
+      expect(prisma.shift.findFirst).not.toHaveBeenCalled()
+      expect(prisma.shift.updateMany).not.toHaveBeenCalled()
+      expect(prisma.activityLog.create).not.toHaveBeenCalled()
+    },
+  )
+
+  it('usa un snapshot primitivo de status para claim y Payment aunque el body mutable cambie durante el claim', async () => {
+    const mutablePaymentData: any = { ...paymentData, status: 'COMPLETED' }
+    ;(prisma.shift.updateMany as jest.Mock).mockImplementationOnce(async () => {
+      // Simula una mutación observable entre evaluar el argumento del wrapper y crear Payment.
+      mutablePaymentData.status = 'PENDING'
+      return { count: 1 }
+    })
+
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, mutablePaymentData, 'user-1')
+
+    expect((prisma.payment.create as jest.Mock).mock.calls.at(-1)![0].data).toMatchObject({
+      status: 'COMPLETED',
+      shiftId: 'shift-1',
+    })
+  })
+
+  it('si la Order pasa de A a B antes del lock aborta sin Payment, Shift ni mutación de B y deja conciliación en A', async () => {
+    // La lectura exterior ya devolvió la foto de A. Al abrir la tx, el job gana y la
+    // fila durable queda en B; el SELECT id+venue de A debe volver cero filas.
+    onTransactionStart = () => {
+      durableOrderVenue = 'venue-b'
+    }
+
+    await expect(
+      (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData }, 'user-autenticado'),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'PAYMENT_ORDER_AUTHORITY_UNAVAILABLE' })
+
+    expect(prisma.payment.create).not.toHaveBeenCalled()
+    expect(prisma.shift.findFirst).not.toHaveBeenCalled()
+    expect(prisma.shift.updateMany).not.toHaveBeenCalled()
+    expect(prisma.order.update).not.toHaveBeenCalled()
+    expect(prisma.activityLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: 'PAYMENT_WITHOUT_SHIFT',
+        entity: 'Order',
+        entityId: ORDER_ID,
+        staffId: 'user-autenticado',
+        venueId: VENUE_ID,
+        data: expect.objectContaining({
+          status: 'PENDING',
+          reason: 'ORDER_AUTHORITY_UNAVAILABLE',
+          channel: 'recordOrderPayment',
+          orderId: ORDER_ID,
+          amountPesos: '100.00',
+          tipPesos: '0.00',
+        }),
+      }),
+    })
+  })
+
   it('dos cobros resuelven y reclaman dentro de tx; conservan el mismo turno y quién cobró', async () => {
     ;(prisma.shift.findFirst as jest.Mock).mockResolvedValue({ id: 'shift-negocio', status: 'OPEN' })
     ;(prisma.staffVenue.findFirst as jest.Mock).mockImplementation(async ({ where }: any) => ({
@@ -256,6 +409,9 @@ describe('fase 1 — el cobro cae en el turno abierto del NEGOCIO', () => {
     }
     for (const call of (prisma.shift.updateMany as jest.Mock).mock.calls) {
       expect(call[0].where).toEqual({ id: 'shift-negocio', venueId: VENUE_ID, status: 'OPEN', endTime: null })
+    }
+    for (const call of (prisma.order.update as jest.Mock).mock.calls) {
+      expect(call[0].where).toEqual({ id: ORDER_ID, venueId: VENUE_ID })
     }
     expect(prisma.shift.update).not.toHaveBeenCalled()
     const txsDelCobro = transacciones.filter(tx => tx.ops.includes('payment.create'))
@@ -282,7 +438,7 @@ describe('fase 1 — el cobro cae en el turno abierto del NEGOCIO', () => {
     expect(prisma.shift.update).not.toHaveBeenCalled()
     expect(prisma.activityLog.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
-        action: 'PAYMENT_PENDING_POST_CLOSE_RECONCILIATION',
+        action: 'PAYMENT_WITHOUT_SHIFT',
         entity: 'Payment',
         entityId: 'payment-1',
         staffId: 'staff-1',
@@ -303,23 +459,16 @@ describe('fase 1 — el cobro cae en el turno abierto del NEGOCIO', () => {
     expect(tx.ops.indexOf('payment.create')).toBeLessThan(tx.ops.indexOf('activityLog.create'))
   })
 
-  it('si pierde por P2002, devuelve al ganador sin duplicar la conciliación dentro de la tx perdedora', async () => {
+  it('P2002 después del claim revierte el incremento y devuelve al ganador sin conciliación del perdedor', async () => {
     const winner = {
       id: 'payment-winner',
       orderId: ORDER_ID,
-      status: 'PENDING',
+      status: 'COMPLETED',
       receipts: [],
       idempotencyKey: 'claim-race-p2002',
     }
     ;(prisma.payment.findUnique as jest.Mock).mockResolvedValueOnce(null).mockResolvedValueOnce(winner)
-    ;(prisma.shift.findFirst as jest.Mock).mockResolvedValue({ id: 'shift-candidato', status: 'OPEN' })
-    ;(prisma.payment.create as jest.Mock).mockRejectedValueOnce(
-      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
-        code: 'P2002',
-        clientVersion: 'test',
-        meta: { target: ['venueId', 'idempotencyKey'] },
-      }),
-    )
+    const rollback = installStatefulP2002Rollback()
 
     const result = await (paymentService as any).recordOrderPayment(
       VENUE_ID,
@@ -329,10 +478,11 @@ describe('fase 1 — el cobro cae en el turno abierto del NEGOCIO', () => {
     )
 
     expect(result.id).toBe('payment-winner')
-    expect(prisma.shift.updateMany).toHaveBeenCalledTimes(1)
+    expect(rollback.attempted.claims).toBe(1)
+    expect(rollback.ops).toEqual(['shift.findFirst', 'shift.updateMany', 'payment.create:P2002'])
+    expect(rollback.committed.shift).toEqual({ totalSales: 0, totalTips: 0, totalOrders: 0 })
+    expect(rollback.committed.loserPayments).toEqual([])
+    expect(rollback.committed.activityLogs).toEqual([])
     expect(prisma.activityLog.create).not.toHaveBeenCalled()
-    const loserTx = transacciones.find(tx => tx.ops.includes('payment.create'))!
-    expect(loserTx.ops).toEqual(expect.arrayContaining(['shift.findFirst', 'shift.updateMany', 'payment.create']))
-    expect(loserTx.ops).not.toContain('activityLog.create')
   })
 })

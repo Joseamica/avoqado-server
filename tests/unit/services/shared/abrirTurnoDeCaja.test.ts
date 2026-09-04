@@ -38,6 +38,7 @@ const m = prisma as unknown as {
   cashDrawerSession: { findFirst: jest.Mock; findUnique: jest.Mock; create: jest.Mock; updateMany: jest.Mock }
   posCommand: { create: jest.Mock }
   $transaction: jest.Mock
+  $queryRaw: jest.Mock
 }
 
 const VENUE = 'venue-1'
@@ -414,6 +415,14 @@ describe('abrirTurnoDeCaja — relevo al abrir, NUNCA cierre por reloj', () => {
 // ============================================================================
 
 describe('abrirTurnoDeCaja — dos aperturas simultáneas: una gana, la otra recibe ConflictError', () => {
+  it('toma el lock DB del venue antes de observar o crear el Shift', async () => {
+    await abrirTurnoDeCaja(params())
+
+    expect(m.$queryRaw).toHaveBeenCalledTimes(1)
+    expect(m.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(m.shift.findFirst.mock.invocationCallOrder[0])
+    expect(m.$queryRaw.mock.calls[0][0].values).toEqual(expect.arrayContaining([expect.stringContaining(VENUE)]))
+  })
+
   it('🔴 el índice único parcial del TURNO (P2002) se traduce a ConflictError, nunca a un 500', async () => {
     m.shift.create.mockRejectedValue(p2002())
 

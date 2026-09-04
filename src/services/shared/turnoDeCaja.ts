@@ -8,6 +8,7 @@ import prisma from '../../utils/prismaClient'
 import { deliverPosCommand } from '../../communication/rabbitmq/commandListener'
 import { logAction } from '../dashboard/activity-log.service'
 import { AUTO_CLOSED_BY_NAME, businessDayStart } from './cashDrawerAutoClose'
+import { lockShiftLifecycleForVenue } from './shiftLifecycleLock'
 
 /** Acepta el cliente de Prisma o un `tx`: los sitios que atan dinero llaman desde ambos. */
 export type ShiftReader = Pick<PrismaClient, 'shift'> | Pick<Prisma.TransactionClient, 'shift'>
@@ -285,6 +286,10 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
   const posIntegrado = venue.posType === 'SOFTRESTAURANT' && venue.posStatus === 'CONNECTED'
 
   const resultadoConOutbox = await prisma.$transaction(async tx => {
+    // Orden global: advisory del venue → fila Shift → gaveta. Quien cierra o recupera un Shift
+    // usa la misma autoridad; nadie puede observar ausencia y crear mientras otro queda CLOSING.
+    await lockShiftLifecycleForVenue(tx, venueId)
+
     // ── El turno ──────────────────────────────────────────────────────────────────────────
     //
     // `endTime: null` y no `status: 'OPEN'`: un turno en CLOSING sigue con `endTime` nulo y su

@@ -38,6 +38,7 @@ jest.mock('@/utils/prismaClient', () => {
     venueCryptoConfig: { findUnique: jest.fn() },
     venueSettings: { findUnique: jest.fn() },
     shift: { findUnique: jest.fn(), findFirst: jest.fn(), updateMany: jest.fn() },
+    activityLog: { create: jest.fn().mockResolvedValue({ id: 'audit-without-shift' }) },
     terminal: { findFirst: jest.fn() },
     $queryRaw: jest.fn(),
     $transaction: jest.fn(),
@@ -161,6 +162,7 @@ beforeEach(() => {
   mockPrisma.payment.updateMany.mockResolvedValue({ count: 1 })
   mockPrisma.shift.findFirst.mockResolvedValue(null)
   mockPrisma.shift.updateMany.mockResolvedValue({ count: 1 })
+  ;(prisma as any).venueSettings.findUnique.mockResolvedValue({ enableShifts: true })
   mockPrisma.$queryRaw.mockResolvedValue([{ id: PAYMENT_ID }])
   mockPrisma.order.updateMany.mockResolvedValue({ count: 1 })
   mockPrisma.orderItem.findMany.mockResolvedValue(ITEMS)
@@ -203,6 +205,8 @@ describe('b4bit — el vale de inventario de la venta saldada', () => {
       order: mockPrisma.order,
       orderItem: { findMany: txOrderItemFindMany },
       shift: mockPrisma.shift,
+      venueSettings: (prisma as any).venueSettings,
+      activityLog: (prisma as any).activityLog,
       $queryRaw: mockPrisma.$queryRaw,
     }
     mockPrisma.$transaction.mockImplementation((cb: any) => cb(txClient))

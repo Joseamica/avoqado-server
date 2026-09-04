@@ -1,5 +1,15 @@
 import { InternalServerError } from '../../errors/AppError'
 
+/** Un monto recibido por API ya expresado en centavos: exacto, positivo y representable sin pérdida. */
+export function esCantidadPositivaEnCentavos(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+}
+
+/** Una parte opcional del monto en centavos: exacta, no negativa y representable sin pérdida. */
+export function esCantidadNoNegativaEnCentavos(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
 /**
  * ══════════════════════════════════════════════════════════════════════════════════════════
  * ¿CUÁNTO SE HA DEVUELTO YA DE ESTE COBRO?  ·  DEFINICIÓN ÚNICA
@@ -45,6 +55,12 @@ import { InternalServerError } from '../../errors/AppError'
  * deja salir de más, y quedarse con el número más alto sólo puede rechazar de más — un
  * rechazo se nota en minutos, un peso de más no se nota nunca.
  *
+ * 🔴 La mayor autoriza el TOTAL, pero no inventa cómo se repartió entre venta y propina. Si
+ * supera `salesCents + tipCents` de las filas clasificables, ese delta histórico queda
+ * explícitamente PENDIENTE: el reembolso nuevo conserva el split del evento actual, no reclama
+ * ningún Shift y deja conciliación. Asignar el delta a cualquiera de los dos componentes
+ * decrementaría un turno con una historia que el servidor no puede demostrar.
+ *
  * 🔴 Y por eso **LOS DOS RIELES QUE AUTORIZAN DINERO PASAN LAS FILAS**, no sólo el del
  * dashboard. Es una consulta más dentro de una transacción que ya está abierta, y sin ella la
  * promesa de arriba sería falsa justo donde termina la fuga: un cobro de $100 + $20 con el
@@ -55,7 +71,8 @@ import { InternalServerError } from '../../errors/AppError'
  *
  * Consecuencia práctica, y por eso NO hace falta migrar ninguna fila: un acumulado corto
  * escrito con la regla vieja se corrige solo la próxima vez que alguien lea este cobro con
- * sus filas a la mano, y se reescribe correcto en el siguiente reembolso.
+ * sus filas a la mano. Un acumulado largo sin filas suficientes sigue autorizando el total de
+ * forma conservadora, pero su reparto queda pendiente en vez de fingirse.
  *
  * ── QUIÉN LO USA ─────────────────────────────────────────────────────────────────────────
  *
@@ -93,7 +110,8 @@ function aCentavos(pesos: unknown): number {
 }
 
 /**
- * Lo devuelto según las FILAS de reembolso: `Σ (|amount| + |tipAmount|)`, en centavos.
+ * Lo devuelto según las FILAS, separado por venta y propina en centavos. El total
+ * `Σ (|amount| + |tipAmount|)` de `centavosDevueltosDeFilas` sale de este mismo recorrido.
  *
  * 🔴 Exige que cada fila TRAIGA las dos llaves, y revienta si falta alguna. No es paranoia:
  * estas filas suelen llegar de un `$queryRaw` cuyo tipo se declara a mano, así que TypeScript
@@ -103,8 +121,9 @@ function aCentavos(pesos: unknown): number {
  * `null` es una fila legítima; una columna que no se pidió simplemente no aparece.
  * Es la misma guarda que ya protege el candado de `refund.tpv.service.ts` (commit 4a52652b).
  */
-export function centavosDevueltosDeFilas(filas: readonly FilaDeReembolso[]): number {
-  let centavos = 0
+export function centavosDevueltosPorComponente(filas: readonly FilaDeReembolso[]): { salesCents: number; tipCents: number } {
+  let salesCents = 0
+  let tipCents = 0
   for (const fila of filas) {
     for (const columna of ['amount', 'tipAmount', 'status'] as const) {
       if (!fila || typeof fila !== 'object' || !(columna in fila)) {
@@ -127,9 +146,51 @@ export function centavosDevueltosDeFilas(filas: readonly FilaDeReembolso[]): num
           'No se registró ningún reembolso.',
       )
     }
-    centavos += Math.abs(venta) + Math.abs(propina)
+    salesCents += Math.abs(venta)
+    tipCents += Math.abs(propina)
   }
-  return centavos
+  return { salesCents, tipCents }
+}
+
+export function centavosDevueltosDeFilas(filas: readonly FilaDeReembolso[]): number {
+  const { salesCents, tipCents } = centavosDevueltosPorComponente(filas)
+  return salesCents + tipCents
+}
+
+interface AjustarRepartoInput {
+  originalSalesCents: number
+  originalTipsCents: number
+  refundedSalesCents: number
+  refundedTipsCents: number
+  refundCents: number
+  requestedTipCents: number
+}
+
+/**
+ * Conserva el total autorizado y encaja su split en los componentes que aún existen.
+ *
+ * El intervalo factible de propina es [refund - venta restante, propina restante].
+ * Acotar ahí la intención del cliente evita devolver dos veces el mismo componente sin
+ * rechazar un total que sí está autorizado y todavía cabe en el otro componente.
+ */
+export function ajustarRepartoAComponentesRestantes(input: AjustarRepartoInput): {
+  salesRefundCents: number
+  tipRefundCents: number
+  remainingSalesCents: number
+  remainingTipsCents: number
+} {
+  const remainingSalesCents = Math.max(0, input.originalSalesCents - input.refundedSalesCents)
+  const remainingTipsCents = Math.max(0, input.originalTipsCents - input.refundedTipsCents)
+  const minimumTipCents = Math.max(0, input.refundCents - remainingSalesCents)
+  const maximumTipCents = Math.min(input.refundCents, remainingTipsCents)
+  const tipRefundCents = Math.min(maximumTipCents, Math.max(minimumTipCents, input.requestedTipCents))
+
+  return {
+    salesRefundCents: input.refundCents - tipRefundCents,
+    tipRefundCents,
+    remainingSalesCents,
+    remainingTipsCents,
+  }
 }
 
 /**

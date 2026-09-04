@@ -11,7 +11,7 @@
 
 import { PaymentFundsFlow, PaymentMethod, PaymentSource, PaymentType, Prisma, TransactionStatus } from '@prisma/client'
 import logger from '../../config/logger'
-import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { restockItem } from './inventoryRestock.service'
 import { generateAndStoreReceipt } from './receipt.dashboard.service'
@@ -19,8 +19,22 @@ import { createRefundCommission } from './commission/commission-calculation.serv
 import { createRefundTransactionCost } from '../payments/transactionCost.service'
 import { logAction } from './activity-log.service'
 import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
-import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
-import { acumuladoPersistido, centavosYaDevueltos } from '../shared/devueltoDeUnCobro'
+import {
+  claimShiftForRefund,
+  lockExistingOrderForPayment,
+  recordRefundAuthorityReconciliation,
+  recordPendingPaymentShiftReconciliation,
+  refundAuthorityReassignmentWasRecorded,
+  resolvePaymentShiftReconciliationEnabled,
+} from '../shared/paymentShiftClaim'
+import {
+  acumuladoPersistido,
+  ajustarRepartoAComponentesRestantes,
+  centavosDevueltosPorComponente,
+  centavosYaDevueltos,
+  esCantidadNoNegativaEnCentavos,
+  esCantidadPositivaEnCentavos,
+} from '../shared/devueltoDeUnCobro'
 
 export type RefundReason = 'RETURNED_GOODS' | 'ACCIDENTAL_CHARGE' | 'CANCELLED_ORDER' | 'FRAUDULENT_CHARGE' | 'OTHER'
 
@@ -58,9 +72,10 @@ export interface IssueRefundInput {
    * Explicit tip-side of the refund, in cents. When omitted, amount-only
    * refunds split proportionally to the original's sale/tip ratio. When set,
    * the full `amount` is split as: tipRefund = tipRefundCents,
-   * salesRefund = amount - tipRefundCents. Must be >= 0 and not exceed the
-   * remaining refundable tip. Item-refunds ignore this override (items never
-   * carry tip).
+   * salesRefund = amount - tipRefundCents. Must be >= 0 and within the original
+   * payment. Under the original-payment lock, the requested/default split is
+   * rebalanced to the remaining sale/tip components. Item-refunds ignore this
+   * override and remain 100% sale.
    *
    * Use cases:
    *   - `tipRefundCents = 0`: refund only the sale portion, leave the staff tip intact.
@@ -136,6 +151,21 @@ interface RefundedItemSnapshot {
   amount: number
   productName: string | null
   productId: string | null
+}
+
+interface RefundTransactionResult {
+  refundPaymentId: string
+  originalPaymentId: string
+  originalOrderId: string
+  refundedItems: RefundedItemSnapshot[]
+  remainingAfterCents: number
+  refundAmountCents: number
+  originalTender: {
+    method: string
+    fundsFlow: string | null
+    tenderTypeId: string | null
+    tenderCountsAsCash: boolean | null
+  }
 }
 
 function toCents(value: unknown): number {
@@ -237,6 +267,13 @@ export function assertRefundableLines(lines: RefundableLine[], selectedIds: stri
 }
 
 export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundResult> {
+  if (input.amount !== undefined && !esCantidadPositivaEnCentavos(input.amount)) {
+    throw new BadRequestError('amount debe ser un entero seguro positivo expresado en centavos')
+  }
+  if (input.tipRefundCents !== undefined && !esCantidadNoNegativaEnCentavos(input.tipRefundCents)) {
+    throw new BadRequestError('tipRefundCents debe ser un entero seguro no negativo expresado en centavos')
+  }
+
   logger.info('[REFUND.DASHBOARD] Issuing refund', {
     venueId: input.venueId,
     paymentId: input.paymentId,
@@ -256,8 +293,33 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
     throw new BadRequestError('Either amount (cents) or items[] is required')
   }
 
-  const result = await prisma.$transaction(async tx => {
-    const lockedOriginalRows = await tx.$queryRaw<LockedPaymentRow[]>(Prisma.sql`
+  const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, input.venueId)
+  // El pago original sólo revela la Order que debe tomar el primer candado. La
+  // fila Payment se vuelve a leer y valida bajo FOR UPDATE dentro de la tx.
+  const refundAuthorityObservedAt = new Date()
+  const originalOrder = await prisma.payment.findFirst({
+    where: { id: input.paymentId, venueId: input.venueId },
+    select: { orderId: true },
+  })
+  if (!originalOrder) throw new NotFoundError('Payment not found')
+
+  const authorityUnavailable = () =>
+    new ConflictError(
+      'El cobro cambió mientras iniciaba el reembolso. Verifica su asignación antes de continuar.',
+      'REFUND_AUTHORITY_UNAVAILABLE',
+    )
+  const expectedOrder = originalOrder.orderId ? Prisma.sql`"orderId" = ${originalOrder.orderId}` : Prisma.sql`"orderId" IS NULL`
+  let result: RefundTransactionResult
+  try {
+    result = await prisma.$transaction(async tx => {
+      if (originalOrder?.orderId) {
+        const orderStillBelongsToVenue = await lockExistingOrderForPayment(tx, {
+          venueId: input.venueId,
+          orderId: originalOrder.orderId,
+        })
+        if (!orderStillBelongsToVenue) throw authorityUnavailable()
+      }
+      const lockedOriginalRows = await tx.$queryRaw<LockedPaymentRow[]>(Prisma.sql`
       SELECT
         id,
         "venueId",
@@ -280,27 +342,29 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         "tenderSatFormaPago"
       FROM "Payment"
       WHERE id = ${input.paymentId}
+        AND "venueId" = ${input.venueId}
+        AND ${expectedOrder}
       FOR UPDATE
     `)
 
-    const original = lockedOriginalRows[0]
-    if (!original) {
-      throw new NotFoundError(`Payment ${input.paymentId} not found`)
-    }
-    if (original.venueId !== input.venueId) {
-      throw new BadRequestError('Payment does not belong to this venue')
-    }
-    if (original.status !== 'COMPLETED') {
-      throw new BadRequestError(`Cannot refund payment with status: ${original.status}`)
-    }
-    if (original.type === PaymentType.REFUND) {
-      throw new BadRequestError('Cannot refund a refund')
-    }
-    if (!original.orderId) {
-      throw new BadRequestError('Original payment is missing an associated order')
-    }
+      const original = lockedOriginalRows[0]
+      if (!original) {
+        throw authorityUnavailable()
+      }
+      if (original.venueId !== input.venueId || original.orderId !== originalOrder.orderId) {
+        throw authorityUnavailable()
+      }
+      if (original.status !== 'COMPLETED') {
+        throw new BadRequestError(`Cannot refund payment with status: ${original.status}`)
+      }
+      if (original.type === PaymentType.REFUND) {
+        throw new BadRequestError('Cannot refund a refund')
+      }
+      if (!original.orderId) {
+        throw new BadRequestError('Original payment is missing an associated order')
+      }
 
-    const existingRefunds = await tx.$queryRaw<RefundPaymentRow[]>(Prisma.sql`
+      const existingRefunds = await tx.$queryRaw<RefundPaymentRow[]>(Prisma.sql`
       SELECT id, amount, "tipAmount", "processorData", "createdAt", status
       FROM "Payment"
       WHERE
@@ -310,287 +374,376 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
       ORDER BY "createdAt" ASC, id ASC
     `)
 
-    // ¿Cuánto se ha devuelto ya de este cobro? La definición vive UNA sola vez, en
-    // `shared/devueltoDeUnCobro.ts`, y es la misma que usa el riel de la terminal:
-    // **venta + propina**. Aquí se le pasan las DOS evidencias —el acumulado persistido y
-    // las filas de reembolso, que este camino ya tenía a la mano— y gana la mayor; el
-    // porqué está en la cabecera de ese archivo. La cuenta se hace en CENTAVOS enteros.
-    //
-    // ⚠️ El `SELECT` de arriba NO filtra por `status` a propósito, y no es un descuido: sus
-    // filas alimentan también a `collectExistingRefundedItems`, que lleva las CANTIDADES ya
-    // devueltas por artículo. Restringirlo ahí dejaría re-reembolsar los artículos de un
-    // reembolso no completado — un aflojamiento, y en la dirección que cuesta dinero. Del
-    // lado del DINERO el filtro sí aplica, y vive dentro de `centavosDevueltosDeFilas`: sólo
-    // cuentan los `COMPLETED`, igual que `summarizeRefunds`.
-    //
-    // 🔴 Esto sustituye a un `reduce` que sumaba sólo `Math.abs(refund.amount)`: la propina
-    // ya devuelta no contaba, así que un cobro de $100 + $20 admitía dos reembolsos de $60
-    // ($120 entregados) y todavía declaraba $10 reembolsables. Prueba:
-    // `tests/unit/services/dashboard/refund.propinaEnElAcumulado.test.ts`, donde el cobro
-    // lleva propina a propósito — con `tipAmount = 0` las dos semánticas coinciden y una
-    // prueba así pasaría con el defecto vivo.
-    const alreadyRefundedCents = centavosYaDevueltos({ processorData: original.processorData, filas: existingRefunds })
-    const totalOriginalCents = toCents(original.amount) + toCents(original.tipAmount)
-    const remainingBeforeCents = Math.max(0, totalOriginalCents - alreadyRefundedCents)
-    const refundedItemsByOrderItemId = collectExistingRefundedItems(existingRefunds)
+      // ¿Cuánto se ha devuelto ya de este cobro? La definición vive UNA sola vez, en
+      // `shared/devueltoDeUnCobro.ts`, y es la misma que usa el riel de la terminal:
+      // **venta + propina**. Aquí se le pasan las DOS evidencias —el acumulado persistido y
+      // las filas de reembolso, que este camino ya tenía a la mano— y gana la mayor; el
+      // porqué está en la cabecera de ese archivo. La cuenta se hace en CENTAVOS enteros.
+      //
+      // ⚠️ El `SELECT` de arriba NO filtra por `status` a propósito, y no es un descuido: sus
+      // filas alimentan también a `collectExistingRefundedItems`, que lleva las CANTIDADES ya
+      // devueltas por artículo. Restringirlo ahí dejaría re-reembolsar los artículos de un
+      // reembolso no completado — un aflojamiento, y en la dirección que cuesta dinero. Del
+      // lado del DINERO el filtro sí aplica, y vive dentro de `centavosDevueltosDeFilas`: sólo
+      // cuentan los `COMPLETED`, igual que `summarizeRefunds`.
+      //
+      // 🔴 Esto sustituye a un `reduce` que sumaba sólo `Math.abs(refund.amount)`: la propina
+      // ya devuelta no contaba, así que un cobro de $100 + $20 admitía dos reembolsos de $60
+      // ($120 entregados) y todavía declaraba $10 reembolsables. Prueba:
+      // `tests/unit/services/dashboard/refund.propinaEnElAcumulado.test.ts`, donde el cobro
+      // lleva propina a propósito — con `tipAmount = 0` las dos semánticas coinciden y una
+      // prueba así pasaría con el defecto vivo.
+      const alreadyRefundedCents = centavosYaDevueltos({ processorData: original.processorData, filas: existingRefunds })
+      const { salesCents: refundedSalesCents, tipCents: refundedTipsCents } = centavosDevueltosPorComponente(existingRefunds)
+      const classifiedRefundedCents = refundedSalesCents + refundedTipsCents
+      const unclassifiedPriorRefundCents = Math.max(0, alreadyRefundedCents - classifiedRefundedCents)
+      const totalOriginalCents = toCents(original.amount) + toCents(original.tipAmount)
+      const remainingBeforeCents = Math.max(0, totalOriginalCents - alreadyRefundedCents)
+      const refundedItemsByOrderItemId = collectExistingRefundedItems(existingRefunds)
 
-    let refundCents = 0
-    const refundedItems: RefundedItemSnapshot[] = []
+      let refundCents = 0
+      const refundedItems: RefundedItemSnapshot[] = []
 
-    if (hasItems) {
-      const orderItemIds = input.items!.map(i => i.orderItemId)
-      const orderItems = await tx.orderItem.findMany({
-        where: { id: { in: orderItemIds }, orderId: original.orderId },
-        select: { id: true, productId: true, productName: true, quantity: true, total: true, orderPromotionId: true },
-      })
+      if (hasItems) {
+        const orderItemIds = input.items!.map(i => i.orderItemId)
+        const orderItems = await tx.orderItem.findMany({
+          where: { id: { in: orderItemIds }, orderId: original.orderId },
+          select: { id: true, productId: true, productName: true, quantity: true, total: true, orderPromotionId: true },
+        })
 
-      if (orderItems.length !== orderItemIds.length) {
-        throw new BadRequestError('One or more orderItemIds do not belong to this payment order')
+        if (orderItems.length !== orderItemIds.length) {
+          throw new BadRequestError('One or more orderItemIds do not belong to this payment order')
+        }
+
+        // Una promoción se reembolsa completa o nada: se evalúa contra TODAS las
+        // líneas de la orden, no sólo las seleccionadas.
+        const allOrderLines = await tx.orderItem.findMany({
+          where: { orderId: original.orderId },
+          select: { id: true, orderPromotionId: true, total: true },
+        })
+        assertRefundableLines(allOrderLines, orderItemIds)
+
+        for (const req of input.items!) {
+          const orderItem = orderItems.find(o => o.id === req.orderItemId)!
+          const refundQty = req.quantity ?? orderItem.quantity
+          const alreadyRefundedItem = refundedItemsByOrderItemId.get(orderItem.id)
+          const alreadyRefundedQty = alreadyRefundedItem?.quantity ?? 0
+
+          if (refundQty <= 0) {
+            throw new BadRequestError(`Invalid refund quantity ${refundQty} for item ${orderItem.id}`)
+          }
+          if (refundQty > orderItem.quantity) {
+            throw new BadRequestError(`Invalid refund quantity ${refundQty} for item ${orderItem.id} (ordered ${orderItem.quantity})`)
+          }
+          assertPromotionLineFullQuantity(orderItem as any, refundQty)
+          if (alreadyRefundedQty + refundQty > orderItem.quantity) {
+            throw new BadRequestError(
+              `Refund quantity ${refundQty} for item ${orderItem.id} exceeds remaining refundable quantity (${orderItem.quantity - alreadyRefundedQty})`,
+            )
+          }
+
+          const lineTotalCents = toCents(orderItem.total)
+          const lineRefundCents = getUnitRefundCents(lineTotalCents, orderItem.quantity, alreadyRefundedQty, refundQty)
+          refundCents += lineRefundCents
+          refundedItems.push({
+            orderItemId: orderItem.id,
+            quantity: refundQty,
+            amountCents: lineRefundCents,
+            amount: centsToNumber(lineRefundCents),
+            productName: orderItem.productName,
+            productId: orderItem.productId,
+          })
+        }
+      } else {
+        refundCents = input.amount!
       }
 
-      // Una promoción se reembolsa completa o nada: se evalúa contra TODAS las
-      // líneas de la orden, no sólo las seleccionadas.
-      const allOrderLines = await tx.orderItem.findMany({
-        where: { orderId: original.orderId },
-        select: { id: true, orderPromotionId: true, total: true },
-      })
-      assertRefundableLines(allOrderLines, orderItemIds)
+      if (refundCents <= 0) {
+        throw new BadRequestError('Refund amount must be greater than zero')
+      }
+      if (refundCents > remainingBeforeCents) {
+        throw new BadRequestError(
+          `Refund (${centsToNumber(refundCents).toFixed(2)}) exceeds remaining refundable (${centsToNumber(remainingBeforeCents).toFixed(2)})`,
+        )
+      }
 
-      for (const req of input.items!) {
-        const orderItem = orderItems.find(o => o.id === req.orderItemId)!
-        const refundQty = req.quantity ?? orderItem.quantity
-        const alreadyRefundedItem = refundedItemsByOrderItemId.get(orderItem.id)
-        const alreadyRefundedQty = alreadyRefundedItem?.quantity ?? 0
+      // Split the refund between the original's sale portion (amount) and tip
+      // (tipAmount).
+      //   - Item-refunds are always 100% sale (items have no tip component).
+      //   - Amount-refunds with an explicit `tipRefundCents` start from the caller's
+      //     split (e.g. caller wants "refund only the sale, keep staff tip") and then
+      //     fit it into the components still available under this row lock.
+      //   - Otherwise, split proportionally to the original's sale/tip ratio so
+      //     shift reports and staff-tip balances stay consistent by default.
+      const originalAmountCents = toCents(original.amount)
+      const originalTipCents = toCents(original.tipAmount)
+      let tipRefundCents = 0
+      let salesRefundCents = refundCents
 
-        if (refundQty <= 0) {
-          throw new BadRequestError(`Invalid refund quantity ${refundQty} for item ${orderItem.id}`)
+      if (hasItems) {
+        if (unclassifiedPriorRefundCents === 0) {
+          const remainingSalesCents = Math.max(0, originalAmountCents - refundedSalesCents)
+          if (salesRefundCents > remainingSalesCents) {
+            throw new BadRequestError(
+              `Item refund sale portion (${salesRefundCents}) exceeds remaining refundable sale amount (${remainingSalesCents})`,
+            )
+          }
         }
-        if (refundQty > orderItem.quantity) {
-          throw new BadRequestError(`Invalid refund quantity ${refundQty} for item ${orderItem.id} (ordered ${orderItem.quantity})`)
+      } else {
+        if (typeof input.tipRefundCents === 'number') {
+          // Explicit caller override.
+          if (input.tipRefundCents < 0) {
+            throw new BadRequestError('tipRefundCents must be >= 0')
+          }
+          if (input.tipRefundCents > refundCents) {
+            throw new BadRequestError(`tipRefundCents (${input.tipRefundCents}) exceeds total refund (${refundCents})`)
+          }
+          if (input.tipRefundCents > originalTipCents) {
+            throw new BadRequestError(`tipRefundCents (${input.tipRefundCents}) exceeds original tip (${originalTipCents})`)
+          }
+          tipRefundCents = input.tipRefundCents
+          salesRefundCents = refundCents - tipRefundCents
+          if (salesRefundCents > originalAmountCents) {
+            throw new BadRequestError(`Sale portion of refund (${salesRefundCents}) exceeds original sale amount (${originalAmountCents})`)
+          }
+        } else if (originalTipCents > 0 && totalOriginalCents > 0) {
+          // Default: proportional split.
+          tipRefundCents = Math.round((refundCents * originalTipCents) / totalOriginalCents)
+          tipRefundCents = Math.min(tipRefundCents, originalTipCents)
+          salesRefundCents = refundCents - tipRefundCents
         }
-        assertPromotionLineFullQuantity(orderItem as any, refundQty)
-        if (alreadyRefundedQty + refundQty > orderItem.quantity) {
-          throw new BadRequestError(
-            `Refund quantity ${refundQty} for item ${orderItem.id} exceeds remaining refundable quantity (${orderItem.quantity - alreadyRefundedQty})`,
-          )
+      }
+
+      // Defensive (proportional path): sales side must also not exceed the
+      // original amount portion. Re-balance by pushing the excess to tip.
+      if (salesRefundCents > originalAmountCents && typeof input.tipRefundCents !== 'number') {
+        const excess = salesRefundCents - originalAmountCents
+        salesRefundCents -= excess
+        tipRefundCents += excess
+      }
+
+      if (!hasItems && unclassifiedPriorRefundCents === 0) {
+        const requestedTipCents = tipRefundCents
+        const reparto = ajustarRepartoAComponentesRestantes({
+          originalSalesCents: originalAmountCents,
+          originalTipsCents: originalTipCents,
+          refundedSalesCents,
+          refundedTipsCents,
+          refundCents,
+          requestedTipCents,
+        })
+
+        if (reparto.tipRefundCents !== requestedTipCents) {
+          logger.warn('[REFUND.DASHBOARD] Refund split adjusted to remaining sale/tip components', {
+            venueId: input.venueId,
+            originalPaymentId: input.paymentId,
+            requestedTipCents,
+            feasibleTipCents: reparto.tipRefundCents,
+            remainingSalesCents: reparto.remainingSalesCents,
+            remainingTipsCents: reparto.remainingTipsCents,
+            refundCents,
+          })
         }
 
-        const lineTotalCents = toCents(orderItem.total)
-        const lineRefundCents = getUnitRefundCents(lineTotalCents, orderItem.quantity, alreadyRefundedQty, refundQty)
-        refundCents += lineRefundCents
-        refundedItems.push({
-          orderItemId: orderItem.id,
-          quantity: refundQty,
-          amountCents: lineRefundCents,
-          amount: centsToNumber(lineRefundCents),
-          productName: orderItem.productName,
-          productId: orderItem.productId,
+        salesRefundCents = reparto.salesRefundCents
+        tipRefundCents = reparto.tipRefundCents
+      }
+
+      if (unclassifiedPriorRefundCents > 0) {
+        logger.warn('[REFUND.DASHBOARD] Prior refund total has an unclassified sale/tip component; Shift attribution is pending', {
+          venueId: input.venueId,
+          originalPaymentId: input.paymentId,
+          alreadyRefundedCents,
+          classifiedRefundedCents,
+          unclassifiedPriorRefundCents,
+          refundCents,
         })
       }
-    } else {
-      refundCents = input.amount!
-    }
 
-    if (refundCents <= 0) {
-      throw new BadRequestError('Refund amount must be greater than zero')
-    }
-    if (refundCents > remainingBeforeCents) {
-      throw new BadRequestError(
-        `Refund (${centsToNumber(refundCents).toFixed(2)}) exceeds remaining refundable (${centsToNumber(remainingBeforeCents).toFixed(2)})`,
-      )
-    }
+      // ── ¿DE QUÉ TURNO SALE ESTE REEMBOLSO? ────────────────────────────────────────────────
+      //
+      // `claimedAt`/CLOSING es el corte. Se observa el candidato más reciente del NEGOCIO,
+      // aunque ya esté CLOSING, dentro de la misma transacción. Sólo OPEN puede ganar el CAS
+      // tenant-safe que decrementa venta/propina y autoriza `shiftId`; nunca se cae al turno
+      // histórico de `original`, ni se espera/reintenta para reescribir un cierre firmado.
+      // CLOSING y claim-lost quedan sin turno y se explican con una conciliación atómica creada
+      // después del Payment real. Sin candidato se conserva por ahora el comportamiento previo,
+      // salvo que el total histórico tenga un delta venta/propina sin clasificar: esa anomalía
+      // exige conciliación aun sin candidato y nunca puede tocar un Shift.
+      //
+      // El efectivo físico no se pierde en ningún caso: el `PAY_OUT` al cajón se publica post-commit
+      // contra la `CashDrawerSession` abierta del venue, que no depende del `Shift`.
+      const salesRefundPesos = centsToDecimal(salesRefundCents)
+      const tipRefundPesos = centsToDecimal(tipRefundCents)
+      const shiftClaim = await claimShiftForRefund(tx, {
+        venueId: input.venueId,
+        salesRefundPesos,
+        tipRefundPesos,
+        ...(unclassifiedPriorRefundCents > 0 ? { forcePendingReason: 'UNCLASSIFIED_REFUND_COMPONENT_HISTORY' as const } : {}),
+      })
+      const shiftId = shiftClaim.shiftId
 
-    // Split the refund between the original's sale portion (amount) and tip
-    // (tipAmount).
-    //   - Item-refunds are always 100% sale (items have no tip component).
-    //   - Amount-refunds with an explicit `tipRefundCents` use the caller's
-    //     split (e.g. caller wants "refund only the sale, keep staff tip").
-    //   - Otherwise, split proportionally to the original's sale/tip ratio so
-    //     shift reports and staff-tip balances stay consistent by default.
-    const originalAmountCents = toCents(original.amount)
-    const originalTipCents = toCents(original.tipAmount)
-    let tipRefundCents = 0
-    let salesRefundCents = refundCents
-
-    if (!hasItems) {
-      if (typeof input.tipRefundCents === 'number') {
-        // Explicit caller override.
-        if (input.tipRefundCents < 0) {
-          throw new BadRequestError('tipRefundCents must be >= 0')
-        }
-        if (input.tipRefundCents > refundCents) {
-          throw new BadRequestError(`tipRefundCents (${input.tipRefundCents}) exceeds total refund (${refundCents})`)
-        }
-        if (input.tipRefundCents > originalTipCents) {
-          throw new BadRequestError(`tipRefundCents (${input.tipRefundCents}) exceeds original tip (${originalTipCents})`)
-        }
-        tipRefundCents = input.tipRefundCents
-        salesRefundCents = refundCents - tipRefundCents
-        if (salesRefundCents > originalAmountCents) {
-          throw new BadRequestError(`Sale portion of refund (${salesRefundCents}) exceeds original sale amount (${originalAmountCents})`)
-        }
-      } else if (originalTipCents > 0 && totalOriginalCents > 0) {
-        // Default: proportional split.
-        tipRefundCents = Math.round((refundCents * originalTipCents) / totalOriginalCents)
-        tipRefundCents = Math.min(tipRefundCents, originalTipCents)
-        salesRefundCents = refundCents - tipRefundCents
-      }
-    }
-
-    // Defensive (proportional path): sales side must also not exceed the
-    // original amount portion. Re-balance by pushing the excess to tip.
-    if (salesRefundCents > originalAmountCents && typeof input.tipRefundCents !== 'number') {
-      const excess = salesRefundCents - originalAmountCents
-      salesRefundCents -= excess
-      tipRefundCents += excess
-    }
-
-    // ── ¿DE QUÉ TURNO SALE ESTE REEMBOLSO? ────────────────────────────────────────────────
-    //
-    // El turno abierto del NEGOCIO (`../shared/turnoDeCaja.ts`), resuelto y RECLAMADO **dentro** de
-    // la transacción, igual que los otros dos rieles (`refund.tpv`, `refund.mobile`). El claim ES
-    // el decremento: un `updateMany` condicionado a `{ venueId, status: 'OPEN', endTime: null }`.
-    //
-    // 🔴 Tres cosas cambian respecto de la versión anterior, y las tres son de dinero:
-    //
-    //   · **Ya no se cae a `original.shiftId`.** Ese turno normalmente está CERRADO, y
-    //     decrementarle sus totales reescribe hacia atrás un corte que una persona ya firmó,
-    //     imprimió y cuadró. Sin turno abierto el reembolso queda con `shiftId` nulo, que es
-    //     REATRIBUIBLE después (`scripts/reatribuir-cobros-al-turno.ts`); uno estampado en un turno
-    //     cerrado con conteo es justo lo que ese script se niega a tocar.
-    //   · **El `where` lleva `venueId` y `status`.** Era un `update({ where: { id } })` pelón, que
-    //     aceptaba el turno de otro negocio y uno ya cerrado.
-    //   · **El `Payment` se sella con el turno SÓLO si el claim GANÓ.** Sellar antes de reclamar
-    //     dejaba un REFUND colgando de un turno al que nunca se le restó, y el cierre selecciona
-    //     estrictamente por `shiftId`: un recálculo desde los pagos discreparía de su propio
-    //     `totalSales` por el monto del reembolso.
-    //
-    // El efectivo físico no se pierde en ningún caso: el `PAY_OUT` al cajón se publica post-commit
-    // contra la `CashDrawerSession` abierta del venue, que no depende del `Shift`.
-    let shiftId: string | null = null
-    const turnoDelNegocio = await turnoAbiertoDelNegocio(tx, input.venueId)
-    if (turnoDelNegocio) {
-      const reclamado = await tx.shift.updateMany({
-        where: { id: turnoDelNegocio.id, venueId: input.venueId, status: 'OPEN', endTime: null },
+      const originalProcessorData = asRecord(original.processorData)
+      const refundPayment = await tx.payment.create({
         data: {
-          totalSales: { decrement: centsToDecimal(salesRefundCents) },
-          ...(tipRefundCents > 0 ? { totalTips: { decrement: centsToDecimal(tipRefundCents) } } : {}),
+          venueId: input.venueId,
+          orderId: original.orderId,
+          ...(shiftId ? { shiftId } : {}),
+          ...(input.staffId ? { processedById: input.staffId } : {}),
+          ...(original.merchantAccountId ? { merchantAccountId: original.merchantAccountId } : {}),
+
+          // Negative amount/tip so that sum(refunds) mirrors the original split.
+          amount: centsToDecimal(-salesRefundCents),
+          tipAmount: centsToDecimal(-tipRefundCents),
+          netAmount: centsToDecimal(-refundCents),
+          feeAmount: new Prisma.Decimal(0),
+          feePercentage: 0,
+
+          method: original.method as PaymentMethod,
+          // 🔴 El reembolso hereda la IDENTIDAD y la SEMÁNTICA del tipo original, no sólo el
+          // `method`. Sin esto, devolver un vale que SÍ entraba al cajón caía al fallback
+          // legacy (`method === 'CASH'` = false) y el arqueo seguía exigiendo un efectivo que
+          // YA salió — un faltante inventado, en la dirección que acusa al cajero.
+          //
+          // La COMISIÓN no se hereda a propósito: que Uber devuelva su 30% cuando el cliente
+          // cancela es un acuerdo comercial que no conocemos, e inventarlo daría un costo o un
+          // ingreso falso. Queda vacía hasta que haya una decisión.
+          ...(original.tenderTypeId
+            ? {
+                tenderTypeId: original.tenderTypeId,
+                ...(original.tenderRevision != null ? { tenderRevision: original.tenderRevision } : {}),
+                ...(original.tenderLabel != null ? { tenderLabel: original.tenderLabel } : {}),
+                ...(original.tenderCountsAsCash != null ? { tenderCountsAsCash: original.tenderCountsAsCash } : {}),
+                ...(original.tenderCaptureTip != null ? { tenderCaptureTip: original.tenderCaptureTip } : {}),
+                ...(original.tenderSatFormaPago != null ? { tenderSatFormaPago: original.tenderSatFormaPago } : {}),
+              }
+            : {}),
+          // `fundsFlow` va aparte del bloque de arriba: un pago SIN tender también lo tiene
+          // (lo estampa su punto de entrada), y es la autoridad de "¿esto estaba en el cajón?".
+          ...(original.fundsFlow ? { fundsFlow: original.fundsFlow as PaymentFundsFlow } : {}),
+          ...(original.source || undefined ? { source: original.source as PaymentSource } : {}),
+          status: TransactionStatus.COMPLETED,
+          type: PaymentType.REFUND,
+
+          processor: 'dashboard',
+          processorData: {
+            originalPaymentId: original.id,
+            refundReason: input.reason,
+            note: input.note ?? null,
+            amountCents: refundCents,
+            amount: centsToNumber(refundCents),
+            refundedItems: refundedItems.length > 0 ? refundedItems : undefined,
+            // Sólo `true` cuando el decremento inline realmente ganó el claim. El backfill
+            // exige además `shiftId`, así que un pendiente sin turno no puede atribuirse dos veces.
+            shiftBackfilled: shiftId !== null,
+            ...(unclassifiedPriorRefundCents > 0
+              ? {
+                  shiftAttributionStatus: 'PENDING',
+                  shiftAttributionPendingReason: 'UNCLASSIFIED_REFUND_COMPONENT_HISTORY',
+                }
+              : {}),
+          } as Prisma.InputJsonValue,
         },
       })
-      if (reclamado.count === 1) shiftId = turnoDelNegocio.id
-    }
 
-    const originalProcessorData = asRecord(original.processorData)
-    const refundPayment = await tx.payment.create({
-      data: {
-        venueId: input.venueId,
-        orderId: original.orderId,
-        ...(shiftId ? { shiftId } : {}),
-        ...(input.staffId ? { processedById: input.staffId } : {}),
-        ...(original.merchantAccountId ? { merchantAccountId: original.merchantAccountId } : {}),
+      if (shiftClaim.pendingReason) {
+        await recordPendingPaymentShiftReconciliation(tx, {
+          reconciliationEnabled,
+          claim: shiftClaim,
+          venueId: input.venueId,
+          paymentId: refundPayment.id,
+          orderId: original.orderId,
+          staffId: input.staffId ?? null,
+          channel: 'issueRefund',
+          amountPesos: salesRefundPesos.negated(),
+          tipPesos: tipRefundPesos.negated(),
+          ...(unclassifiedPriorRefundCents > 0 ? { unclassifiedPriorRefundPesos: centsToDecimal(unclassifiedPriorRefundCents) } : {}),
+        })
+      }
 
-        // Negative amount/tip so that sum(refunds) mirrors the original split.
-        amount: centsToDecimal(-salesRefundCents),
-        tipAmount: centsToDecimal(-tipRefundCents),
-        netAmount: centsToDecimal(-refundCents),
-        feeAmount: new Prisma.Decimal(0),
-        feePercentage: 0,
-
-        method: original.method as PaymentMethod,
-        // 🔴 El reembolso hereda la IDENTIDAD y la SEMÁNTICA del tipo original, no sólo el
-        // `method`. Sin esto, devolver un vale que SÍ entraba al cajón caía al fallback
-        // legacy (`method === 'CASH'` = false) y el arqueo seguía exigiendo un efectivo que
-        // YA salió — un faltante inventado, en la dirección que acusa al cajero.
-        //
-        // La COMISIÓN no se hereda a propósito: que Uber devuelva su 30% cuando el cliente
-        // cancela es un acuerdo comercial que no conocemos, e inventarlo daría un costo o un
-        // ingreso falso. Queda vacía hasta que haya una decisión.
-        ...(original.tenderTypeId
-          ? {
-              tenderTypeId: original.tenderTypeId,
-              ...(original.tenderRevision != null ? { tenderRevision: original.tenderRevision } : {}),
-              ...(original.tenderLabel != null ? { tenderLabel: original.tenderLabel } : {}),
-              ...(original.tenderCountsAsCash != null ? { tenderCountsAsCash: original.tenderCountsAsCash } : {}),
-              ...(original.tenderCaptureTip != null ? { tenderCaptureTip: original.tenderCaptureTip } : {}),
-              ...(original.tenderSatFormaPago != null ? { tenderSatFormaPago: original.tenderSatFormaPago } : {}),
-            }
-          : {}),
-        // `fundsFlow` va aparte del bloque de arriba: un pago SIN tender también lo tiene
-        // (lo estampa su punto de entrada), y es la autoridad de "¿esto estaba en el cajón?".
-        ...(original.fundsFlow ? { fundsFlow: original.fundsFlow as PaymentFundsFlow } : {}),
-        ...(original.source || undefined ? { source: original.source as PaymentSource } : {}),
-        status: TransactionStatus.COMPLETED,
-        type: PaymentType.REFUND,
-
-        processor: 'dashboard',
-        processorData: {
-          originalPaymentId: original.id,
-          refundReason: input.reason,
-          note: input.note ?? null,
-          amountCents: refundCents,
-          amount: centsToNumber(refundCents),
-          refundedItems: refundedItems.length > 0 ? refundedItems : undefined,
-          // Marker so `scripts/backfill-refund-shift-totals.ts` skips this row —
-          // shift decrement is applied in-line below when a shift is resolved.
-          shiftBackfilled: true,
-        } as Prisma.InputJsonValue,
-      },
-    })
-
-    // Bump refundedAmount on the original payment's processorData.
-    // Los dos campos salen del MISMO entero de centavos (`acumuladoPersistido`): derivarlos
-    // por separado es cómo empiezan a divergir. Semántica: venta + propina.
-    const updatedProcessorData = {
-      ...originalProcessorData,
-      ...acumuladoPersistido(alreadyRefundedCents + refundCents),
-      refunds: [
-        ...((Array.isArray(originalProcessorData.refunds) ? originalProcessorData.refunds : []) as any[]),
-        {
-          refundPaymentId: refundPayment.id,
-          amount: centsToNumber(refundCents),
-          amountCents: refundCents,
-          reason: input.reason,
-          at: new Date().toISOString(),
+      // Bump refundedAmount on the original payment's processorData.
+      // Los dos campos salen del MISMO entero de centavos (`acumuladoPersistido`): derivarlos
+      // por separado es cómo empiezan a divergir. Semántica: venta + propina.
+      const updatedProcessorData = {
+        ...originalProcessorData,
+        ...acumuladoPersistido(alreadyRefundedCents + refundCents),
+        refunds: [
+          ...((Array.isArray(originalProcessorData.refunds) ? originalProcessorData.refunds : []) as any[]),
+          {
+            refundPaymentId: refundPayment.id,
+            amount: centsToNumber(refundCents),
+            amountCents: refundCents,
+            reason: input.reason,
+            at: new Date().toISOString(),
+          },
+        ],
+      }
+      await tx.payment.update({
+        where: {
+          id: original.id,
+          venueId: input.venueId,
+          orderId: originalOrder.orderId,
+          status: TransactionStatus.COMPLETED,
+          type: original.type,
         },
-      ],
-    }
-    await tx.payment.update({
-      where: { id: original.id },
-      data: { processorData: updatedProcessorData as any },
-    })
+        data: { processorData: updatedProcessorData as any },
+      })
 
-    // Venue transaction for financial tracking
-    await tx.venueTransaction.create({
-      data: {
+      // Venue transaction for financial tracking
+      await tx.venueTransaction.create({
+        data: {
+          venueId: input.venueId,
+          paymentId: refundPayment.id,
+          type: 'REFUND',
+          grossAmount: centsToDecimal(-refundCents),
+          feeAmount: new Prisma.Decimal(0),
+          netAmount: centsToDecimal(-refundCents),
+          status: 'SETTLED',
+        },
+      })
+
+      // El decremento del turno YA ocurrió arriba: el claim ES el decremento, y sellar el `Payment`
+      // después es lo que garantiza que nunca haya un REFUND en un turno al que no se le restó.
+
+      return {
+        refundPaymentId: refundPayment.id,
+        originalPaymentId: original.id,
+        originalOrderId: original.orderId,
+        refundedItems,
+        remainingAfterCents: Math.max(0, remainingBeforeCents - refundCents),
+        refundAmountCents: refundCents,
+        // Semántica del pago ORIGINAL, para el movimiento de caja de abajo.
+        originalTender: {
+          method: original.method,
+          fundsFlow: original.fundsFlow,
+          tenderTypeId: original.tenderTypeId,
+          tenderCountsAsCash: original.tenderCountsAsCash,
+        },
+      }
+    })
+  } catch (error) {
+    if (error instanceof ConflictError && error.code === 'REFUND_AUTHORITY_UNAVAILABLE') {
+      const reassignmentWasRecorded = await refundAuthorityReassignmentWasRecorded(prisma, {
         venueId: input.venueId,
-        paymentId: refundPayment.id,
-        type: 'REFUND',
-        grossAmount: centsToDecimal(-refundCents),
-        feeAmount: new Prisma.Decimal(0),
-        netAmount: centsToDecimal(-refundCents),
-        status: 'SETTLED',
-      },
-    })
-
-    // El decremento del turno YA ocurrió arriba: el claim ES el decremento, y sellar el `Payment`
-    // después es lo que garantiza que nunca haya un REFUND en un turno al que no se le restó.
-
-    return {
-      refundPaymentId: refundPayment.id,
-      originalPaymentId: original.id,
-      originalOrderId: original.orderId,
-      refundedItems,
-      remainingAfterCents: Math.max(0, remainingBeforeCents - refundCents),
-      refundAmountCents: refundCents,
-      // Semántica del pago ORIGINAL, para el movimiento de caja de abajo.
-      originalTender: {
-        method: original.method,
-        fundsFlow: original.fundsFlow,
-        tenderTypeId: original.tenderTypeId,
-        tenderCountsAsCash: original.tenderCountsAsCash,
-      },
+        orderId: originalOrder.orderId,
+        observedAt: refundAuthorityObservedAt,
+      })
+      if (reassignmentWasRecorded) {
+        await recordRefundAuthorityReconciliation(prisma, {
+          venueId: input.venueId,
+          paymentId: input.paymentId,
+          expectedOrderId: originalOrder.orderId,
+          staffId: input.staffId ?? null,
+          channel: 'issueRefund',
+        })
+        throw new ConflictError(
+          'El cobro cambió mientras iniciaba el reembolso. Verifica su asignación antes de continuar.',
+          'REFUND_AUTHORITY_CHANGED',
+        )
+      }
     }
-  })
+    throw error
+  }
 
   // 🔴 EL CAJÓN RESTA EL REEMBOLSO (el defecto medido en hardware el 2026-08-16).
   //

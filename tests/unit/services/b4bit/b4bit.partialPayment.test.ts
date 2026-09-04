@@ -35,7 +35,9 @@ jest.mock('@/utils/prismaClient', () => {
     orderItem: { findMany: jest.fn().mockResolvedValue([]) },
     venue: { findUnique: jest.fn() },
     venueCryptoConfig: { findUnique: jest.fn() },
+    venueSettings: { findUnique: jest.fn().mockResolvedValue({ enableShifts: true }) },
     shift: { findUnique: jest.fn(), findFirst: jest.fn(), updateMany: jest.fn() },
+    activityLog: { create: jest.fn().mockResolvedValue({ id: 'audit-without-shift' }) },
     terminal: { findFirst: jest.fn() },
     $queryRaw: jest.fn(),
     $transaction: jest.fn(),
@@ -350,7 +352,9 @@ describe('b4bit — CAS: qué pasa si otro cobro gana la carrera', () => {
     // una transacción NUEVA, los $50 quedarían en la blockchain sin ningún
     // `Payment` COMPLETED — y el controlador ya le dijo 200 a B4Bit.
     const rescue = mockPrisma.payment.updateMany.mock.calls.at(-1)![0]
-    expect(rescue.where).toEqual({ id: PAYMENT_ID, venueId: VENUE_ID, status: { not: 'COMPLETED' } })
+    // Ni siquiera el rescate puede resucitar FAILED/PROCESSING: la transición
+    // durable autorizada por CO sigue siendo exactamente PENDING → COMPLETED.
+    expect(rescue.where).toEqual({ id: PAYMENT_ID, venueId: VENUE_ID, status: 'PENDING' })
     expect(rescue.data.status).toBe('COMPLETED')
     expect(rescue.data.processorData.orderSettlementFailed).toBe(true)
 

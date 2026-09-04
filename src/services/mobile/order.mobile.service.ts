@@ -30,7 +30,12 @@ import { applyPromotionToOrder, removeIntentPromotions } from '../promotions/pro
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
-import { claimShiftForCapturedPayment, recordPendingPaymentShiftReconciliation } from '../shared/paymentShiftClaim'
+import {
+  claimShiftForCapturedPayment,
+  lockExistingOrderForPayment,
+  recordPendingPaymentShiftReconciliation,
+  resolvePaymentShiftReconciliationEnabled,
+} from '../shared/paymentShiftClaim'
 // La aritmética canónica del saldo: UNA sola definición de "cuánto se lleva
 // pagado y cuánto falta" para los cuatro caminos de cobro. Se extrajo de este
 // mismo archivo; volver a llamarla es lo que impide que se separen otra vez.
@@ -2316,6 +2321,9 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     resolved: null,
   }
   const effectiveStaffId = await validateStaffVenue(input.staffId, venueId)
+  // El gate se resuelve una sola vez y FUERA de la transacción monetaria: una
+  // caída de settings jamás revierte un Payment real.
+  const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
 
   // Convert cents to decimal for database. `amount` es lo SOLICITADO; lo que se
   // registra como pago se decide dentro de la transacción (ver `aplicadoCents`).
@@ -2380,6 +2388,10 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
           amount: new Prisma.Decimal(amountSolicitadoDecimal),
           method: paymentMethod,
         })
+        // Vales ya tomaron Order bajo su jerarquía session → tickets → Order;
+        // para una orden normal este helper toma el primer lock. En ambos casos
+        // lo siguiente conserva Order → Payment (si aplica) → Shift.
+        await lockExistingOrderForPayment(tx, { venueId, orderId })
 
         // 1️⃣ RELECTURA DENTRO DE LA TRANSACCIÓN. Esta es la lectura que manda: la de
         //    arriba pudo quedar vieja mientras validábamos staff y turno.
@@ -2548,6 +2560,9 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
           venueId,
           amountPesos: shiftAmount,
           tipPesos: shiftTip,
+          // La Order cuenta al primer cobro canónico; dos abonos del mismo
+          // ticket nunca cuentan dos órdenes.
+          incrementTotalOrders: !previousPayments.some(payment => payment.type !== 'REFUND'),
         })
 
         // 5️⃣ El Payment se crea DESPUÉS de ganar la transición. Si la CAS falla, este
@@ -2601,6 +2616,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         })
 
         await recordPendingPaymentShiftReconciliation(tx, {
+          reconciliationEnabled,
           claim: shiftClaim,
           venueId,
           paymentId: newPayment.id,

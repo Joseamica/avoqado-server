@@ -1,6 +1,6 @@
 import { Payment, PaymentMethod, SplitType, OrderSource, PaymentSource, Prisma } from '@prisma/client'
 import logger from '../../config/logger'
-import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
 import { publishCommand } from '../../communication/rabbitmq/publisher'
@@ -13,7 +13,13 @@ import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service
 import { parseDateRange } from '@/utils/datetime'
 import { PhaseTimer } from '@/utils/phaseTimer'
 import { awardLoyaltyForPaidOrder } from '../shared/loyaltyOnPaidOrder'
-import { claimShiftForCapturedPayment, recordPendingPaymentShiftReconciliation } from '../shared/paymentShiftClaim'
+import {
+  claimShiftForCompletedPayment,
+  lockExistingOrderForPayment,
+  recordCapturedPaymentOrderReconciliation,
+  recordPendingPaymentShiftReconciliation,
+  resolvePaymentShiftReconciliationEnabled,
+} from '../shared/paymentShiftClaim'
 import { createCommissionForPayment } from '../dashboard/commission/commission-calculation.service'
 import { runAutoReorderForVenue } from '../dashboard/autoReorder.service'
 import { serializedInventoryService } from '../serialized-inventory/serializedInventory.service'
@@ -431,11 +437,11 @@ async function updateOrderTotalsForStandalonePayment(
   tipAmount: number, // ✅ FIX: Pass tip separately to update order.tipAmount
   currentPaymentId?: string,
   staffId?: string,
-  options?: { areaTicketAlreadyFinalized?: boolean },
+  options?: { areaTicketAlreadyFinalized?: boolean; venueId?: string },
 ): Promise<OrderInventoryWarning | null> {
   // Get current order with payment information
   const order = await prisma.order.findUnique({
-    where: { id: orderId },
+    where: { id: orderId, ...(options?.venueId ? { venueId: options.venueId } : {}) },
     include: {
       payments: {
         where: {
@@ -785,7 +791,7 @@ async function updateOrderTotalsForStandalonePayment(
     ? order
     : await prisma.$transaction(async tx => {
         const updated = await tx.order.update({
-          where: { id: orderId },
+          where: { id: orderId, ...(options?.venueId ? { venueId: options.venueId } : {}) },
           data: {
             paymentStatus: newPaymentStatus,
             // ⭐ Partial payment tracking: Persist paidAmount and remainingBalance
@@ -2114,6 +2120,10 @@ export async function recordOrderPayment(
   // but keep every pricing and settlement consumer on the legacy path for now.
   const internationalityShadow = classifyPaymentInternationalityShadow(paymentData)
   const internationalityClassifiedAt = internationalityShadow ? new Date() : undefined
+  // The request object is shared/mutable. Claim and persistence must observe one
+  // primitive snapshot, even if an awaited hook mutates the wrapper in between.
+  const paymentStatusSnapshot = paymentData.status
+  const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
 
   // ⭐ ATOMICITY: Wrap critical payment creation in transaction (all or nothing)
   // This prevents orphaned records if any operation fails
@@ -2128,9 +2138,11 @@ export async function recordOrderPayment(
   // Faltante de inventario detectado con el cobro YA registrado. Viaja como aviso
   // en la respuesta — nunca como error, o el cajero vuelve a pasar la tarjeta.
   let inventoryWarning: OrderInventoryWarning | null = null
+  const shiftAmount = new Prisma.Decimal(totalAmount)
+  const shiftTip = new Prisma.Decimal(tipAmount)
   try {
     payment = await prisma.$transaction(async tx => {
-      if (paymentData.status === 'COMPLETED') {
+      if (paymentStatusSnapshot === 'COMPLETED') {
         const areaTicketPayment = await import('../mobile/areaTicketV7.mobile.service')
         lockedAreaCheckout = await areaTicketPayment.lockAreaTicketCheckoutForPayment(tx, {
           venueId,
@@ -2140,16 +2152,33 @@ export async function recordOrderPayment(
           method: classicMethod as PaymentMethod,
         })
       }
+      // El submódulo de vales conserva session → tickets → Order. Si no hay
+      // vales, este helper toma Order aquí; si los hay, el lock es reentrante.
+      // Desde este punto todos los carriles siguen Order → Payment → Shift.
+      const orderStillBelongsToVenue = await lockExistingOrderForPayment(tx, { venueId, orderId: activeOrder.id })
+      if (!orderStillBelongsToVenue) {
+        throw new ConflictError(
+          'La orden cambió mientras se registraba el cobro. Se requiere conciliación manual.',
+          'PAYMENT_ORDER_AUTHORITY_UNAVAILABLE',
+        )
+      }
 
-      // El claim ES el incremento y ocurre dentro de esta misma tx, antes del
-      // Payment. Sólo el id que gana el CAS puede quedar estampado; si el cierre
-      // ganó, el cobro se conserva sin reescribir el corte firmado.
-      const shiftAmount = new Prisma.Decimal(totalAmount)
-      const shiftTip = new Prisma.Decimal(tipAmount)
-      const shiftClaim = await claimShiftForCapturedPayment(tx, {
+      // Sólo COMPLETED representa dinero capturado. FAILED/PENDING/PROCESSING/
+      // REFUNDED conservan `null`: no reclaman turno ni generan una falsa
+      // conciliación post-cierre. Para COMPLETED, el claim ES el incremento y
+      // ocurre dentro de esta misma tx, antes del Payment.
+      const priorCompletedPaymentCount =
+        typeof tx.payment.count === 'function'
+          ? ((await tx.payment.count({
+              where: { venueId, orderId: activeOrder.id, status: 'COMPLETED', type: { not: 'REFUND' } },
+            })) ?? 0)
+          : 0
+      const shiftClaim = await claimShiftForCompletedPayment(tx, {
+        paymentStatus: paymentStatusSnapshot,
         venueId,
         amountPesos: shiftAmount,
         tipPesos: shiftTip,
+        incrementTotalOrders: priorCompletedPaymentCount === 0,
       })
 
       // Create the payment record
@@ -2163,7 +2192,7 @@ export async function recordOrderPayment(
           // Mismo criterio que la venta rápida: el detalle declarado a mano sólo se
           // guarda cuando el dinero NO pasó por Avoqado.
           externalSource: classicMethod === 'CASH' ? null : paymentData.externalSource?.trim()?.slice(0, 50) || null,
-          status: paymentData.status as any, // Direct enum mapping since frontend sends correct values
+          status: paymentStatusSnapshot as any, // Direct enum mapping since frontend sends correct values
           splitType: paymentData.splitType as SplitType, // Cast to SplitType enum
           source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
           processor: 'TBD',
@@ -2210,7 +2239,7 @@ export async function recordOrderPayment(
           // ⭐ Terminal that processed this payment (resolved from deviceSerialNumber)
           terminalId,
           processedById: validatedStaffId, // ✅ CORRECTED: Use validated staff ID
-          shiftId: shiftClaim.shiftId,
+          shiftId: shiftClaim?.shiftId ?? null,
           feePercentage: 0, // TODO: Calculate based on payment processor
           feeAmount: 0, // TODO: Calculate based on amount and percentage
           netAmount: totalAmount + tipAmount, // For now, net amount = total
@@ -2235,16 +2264,19 @@ export async function recordOrderPayment(
         },
       })
 
-      await recordPendingPaymentShiftReconciliation(tx, {
-        claim: shiftClaim,
-        venueId,
-        paymentId: newPayment.id,
-        orderId: activeOrder.id,
-        staffId: validatedStaffId ?? null,
-        channel: 'recordOrderPayment',
-        amountPesos: shiftAmount,
-        tipPesos: shiftTip,
-      })
+      if (shiftClaim) {
+        await recordPendingPaymentShiftReconciliation(tx, {
+          reconciliationEnabled,
+          claim: shiftClaim,
+          venueId,
+          paymentId: newPayment.id,
+          orderId: activeOrder.id,
+          staffId: validatedStaffId ?? null,
+          channel: 'recordOrderPayment',
+          amountPesos: shiftAmount,
+          tipPesos: shiftTip,
+        })
+      }
 
       // Create VenueTransaction for financial tracking and settlement
       //
@@ -2282,7 +2314,7 @@ export async function recordOrderPayment(
       // Update Order.splitType if this is the first payment
       if (!activeOrder.splitType) {
         await tx.order.update({
-          where: { id: activeOrder.id },
+          where: { id: activeOrder.id, venueId },
           data: { splitType: paymentData.splitType as any },
         })
       }
@@ -2316,6 +2348,18 @@ export async function recordOrderPayment(
       return newPayment
     })
   } catch (error) {
+    if (error instanceof ConflictError && error.code === 'PAYMENT_ORDER_AUTHORITY_UNAVAILABLE') {
+      if (paymentStatusSnapshot === 'COMPLETED') {
+        await recordCapturedPaymentOrderReconciliation(prisma, {
+          venueId,
+          orderId: activeOrder.id,
+          staffId: userId ?? null,
+          amountPesos: shiftAmount,
+          tipPesos: shiftTip,
+        })
+      }
+      throw error
+    }
     // 🛡️ P2002 safety net: unique constraint violation on (venueId, idempotencyKey)
     // means another concurrent request already created this payment. Return the
     // winner as if this was a normal idempotent retry.
@@ -2652,6 +2696,7 @@ export async function recordOrderPayment(
             // inventory. Re-enter only the coupon/referral/loyalty side effects.
             await updateOrderTotalsForStandalonePayment(activeOrder.id, totalAmount + tipAmount, tipAmount, payment.id, validatedStaffId, {
               areaTicketAlreadyFinalized: true,
+              venueId,
             })
           } catch (sideEffectError) {
             logger.error('[AREA TICKETS v7] El pago finalizó, pero fallaron efectos secundarios no monetarios', {
@@ -2672,6 +2717,7 @@ export async function recordOrderPayment(
           tipAmount,
           payment.id,
           validatedStaffId,
+          { venueId },
         )
       }
 
@@ -3313,6 +3359,9 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   // these fields yet, so old cost/settlement behavior remains byte-for-byte intact.
   const internationalityShadow = classifyPaymentInternationalityShadow(paymentData)
   const internationalityClassifiedAt = internationalityShadow ? new Date() : undefined
+  // Snapshot once: the nullable Shift claim and the Payment row must classify
+  // the same state even if an awaited Order/tender hook mutates the request.
+  const paymentStatusSnapshot = paymentData.status
 
   // 🔴 EL CLIENTE DE LA VENTA. Se resuelve ANTES de abrir la transacción (para no tener
   // una consulta de lectura dentro del bloqueo del cobro) y su resultado se escribe
@@ -3325,6 +3374,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   const { link: customerLink, orderData: customerOrderData } = await t.time('resolveFastOrderCustomer', () =>
     resolveFastOrderCustomer(venueId, effectiveCustomerId),
   )
+  const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
 
   // ⭐ ATOMICITY: Wrap critical fast payment creation in transaction (all or nothing)
   // This prevents orphaned records if any operation fails
@@ -3343,14 +3393,18 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   try {
     t.mark('turnoMerchantYTerminal')
     const result = await prisma.$transaction(async tx => {
-      // En venta rápida la Order y el Payment nacen juntos: el claim debe ganar
-      // antes de crear cualquiera de los dos para que compartan el mismo id seguro.
+      // En venta rápida la Order y el Payment nacen juntos. Sólo COMPLETED es
+      // dinero capturado y puede reclamar; los demás estados nacen sin turno y
+      // sin anomalía post-cierre. Cuando aplica, el claim debe ganar antes de
+      // crear cualquiera de los dos para que compartan el mismo id seguro.
       const shiftAmount = new Prisma.Decimal(totalAmount)
       const shiftTip = new Prisma.Decimal(tipAmount)
-      const shiftClaim = await claimShiftForCapturedPayment(tx, {
+      const shiftClaim = await claimShiftForCompletedPayment(tx, {
+        paymentStatus: paymentStatusSnapshot,
         venueId,
         amountPesos: shiftAmount,
         tipPesos: shiftTip,
+        incrementTotalOrders: true,
       })
 
       // 🔧 FIX: Use orderReference from Android if provided (ensures photos match order number)
@@ -3379,7 +3433,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           //
           // Sólo el ganador del CAS transaccional se estampa. Sin turno (o si el
           // cierre ganó) la venta sigue, pero queda pendiente explícita abajo.
-          shiftId: shiftClaim.shiftId,
+          shiftId: shiftClaim?.shiftId ?? null,
           subtotal: totalAmount, // Base amount (without tip)
           taxAmount: 0, // No tax for fast payments
           total: totalAmount + tipAmount, // ✅ FIX: Total = subtotal + tax + tip
@@ -3454,7 +3508,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
                 fundsFlow: resolvedTender.fundsFlow,
               }
             : {}),
-          status: paymentData.status as any, // Direct enum mapping since frontend sends correct values
+          status: paymentStatusSnapshot as any, // Direct enum mapping since frontend sends correct values
           splitType: 'FULLPAYMENT' as SplitType, // Fast payments are always full payments
           source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
           processor: 'TBD',
@@ -3502,7 +3556,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           // ⭐ Terminal that processed this payment (resolved from deviceSerialNumber)
           terminalId,
           processedById: validatedStaffId, // ✅ CORRECTED: Use validated staff ID
-          shiftId: shiftClaim.shiftId,
+          shiftId: shiftClaim?.shiftId ?? null,
           feePercentage: 0, // TODO: Calculate based on payment processor
           feeAmount: 0, // TODO: Calculate based on amount and percentage
           netAmount: totalAmount + tipAmount, // For now, net amount = total
@@ -3519,16 +3573,19 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         },
       })
 
-      await recordPendingPaymentShiftReconciliation(tx, {
-        claim: shiftClaim,
-        venueId,
-        paymentId: newPayment.id,
-        orderId: order.id,
-        staffId: validatedStaffId ?? null,
-        channel: 'recordFastPayment',
-        amountPesos: shiftAmount,
-        tipPesos: shiftTip,
-      })
+      if (shiftClaim) {
+        await recordPendingPaymentShiftReconciliation(tx, {
+          reconciliationEnabled,
+          claim: shiftClaim,
+          venueId,
+          paymentId: newPayment.id,
+          orderId: order.id,
+          staffId: validatedStaffId ?? null,
+          channel: 'recordFastPayment',
+          amountPesos: shiftAmount,
+          tipPesos: shiftTip,
+        })
+      }
 
       // Create VenueTransaction for financial tracking and settlement
       //

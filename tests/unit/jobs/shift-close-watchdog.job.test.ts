@@ -19,21 +19,36 @@ async function retryConnectionFailureOnce<T>(
 }
 
 function harness(counts: number[] = [1]) {
+  const updateMany = jest.fn().mockImplementation(async () => ({ count: counts.shift() ?? 0 }))
+  const tx = {
+    $queryRaw: jest.fn().mockResolvedValue([{ pg_advisory_xact_lock: null }]),
+    shift: { updateMany },
+  }
   const prisma = {
     shift: {
       findMany: jest.fn().mockResolvedValue([candidate]),
-      updateMany: jest.fn().mockImplementation(async () => ({ count: counts.shift() ?? 0 })),
+      updateMany,
     },
+    $transaction: jest.fn(async (callback: (client: typeof tx) => unknown) => callback(tx)),
   }
   const job = new ShiftCloseWatchdogJob({
     prisma: prisma as never,
     cron: { start: jest.fn(), stop: jest.fn() } as never,
     now: () => NOW,
   })
-  return { job, prisma }
+  return { job, prisma, tx }
 }
 
 describe('shift-close-watchdog.job', () => {
+  it('toma el lock DB del venue antes del recovery CLOSING→OPEN', async () => {
+    const h = harness()
+
+    await h.job.runNow()
+
+    expect(h.tx.$queryRaw).toHaveBeenCalledTimes(1)
+    expect(h.tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(h.prisma.shift.updateMany.mock.invocationCallOrder[0])
+  })
+
   it('CAS-reopens only the exact stale CLOSING tuple', async () => {
     const h = harness()
 

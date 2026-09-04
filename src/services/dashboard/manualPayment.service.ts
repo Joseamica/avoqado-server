@@ -11,7 +11,12 @@ import type { CreateManualPaymentInput } from '@/schemas/dashboard/manualPayment
 import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 import { applySalePosting, createSalePostingInTx } from '@/services/inventory/inventoryPosting.service'
 import { postCashSaleToDrawer } from '@/services/shared/cashDrawerPosting'
-import { turnoAbiertoDelNegocio } from '@/services/shared/turnoDeCaja'
+import {
+  claimShiftForCapturedPayment,
+  lockExistingOrderForPayment,
+  recordPendingPaymentShiftReconciliation,
+  resolvePaymentShiftReconciliationEnabled,
+} from '@/services/shared/paymentShiftClaim'
 
 /**
  * Record a manual payment (admin-only). Two modes:
@@ -105,6 +110,7 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
   // Mismo motivo que metricsState: un holder evita que TS estreche la
   // asignación dentro del callback async de la transacción a `never`.
   const postingState: { id: string | null } = { id: null }
+  const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
 
   const result = await prisma.$transaction(
     async tx => {
@@ -121,6 +127,20 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
       // para nacer en ESTA misma transacción cuando el pago la salda.
       let orderItems: unknown[] = []
       let yaEstabaPagada = false
+
+      // Disciplina global de locks para dinero sobre una orden durable:
+      // Order → Payment (si aplica) → Shift. Una sombra todavía no tiene fila
+      // Order, así que conserva el camino seguro Shift → INSERT Order.
+      if (input.orderId) {
+        await lockExistingOrderForPayment(tx, { venueId, orderId: input.orderId })
+      }
+      const priorCompletedPaymentCount = input.orderId
+        ? typeof tx.payment.count === 'function'
+          ? ((await tx.payment.count({
+              where: { orderId: input.orderId, venueId, status: 'COMPLETED', type: { not: 'REFUND' } },
+            })) ?? 0)
+          : 0
+        : 0
 
       // ── ¿A QUÉ TURNO SE LE SUMA ESTE PAGO? ──────────────────────────────────────────────
       //
@@ -146,15 +166,15 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
       // claim no ganó— pero convierte el turno en un punto de serialización. Si aparece contención,
       // la salida NO es soltar el candado: es acortar la transacción (sacar de ella lo que no es
       // dinero), porque mover el claim al final devuelve el agujero que este cambio cerró.
-      let shiftId: string | null = null
-      const turnoDelNegocio = await turnoAbiertoDelNegocio(tx, venueId)
-      if (turnoDelNegocio) {
-        const reclamado = await tx.shift.updateMany({
-          where: { id: turnoDelNegocio.id, venueId, status: 'OPEN', endTime: null },
-          data: { totalSales: { increment: amount }, totalTips: { increment: tipAmount } },
-        })
-        if (reclamado.count === 1) shiftId = turnoDelNegocio.id
-      }
+      const shiftClaim = await claimShiftForCapturedPayment(tx, {
+        venueId,
+        amountPesos: amount,
+        tipPesos: tipAmount,
+        // Una Order se cuenta al primer cobro durable; abonos posteriores no la
+        // vuelven a contar. La sombra nace y se salda con este primer cobro.
+        incrementTotalOrders: !input.orderId || priorCompletedPaymentCount === 0,
+      })
+      const shiftId = shiftClaim.shiftId
 
       if (input.orderId) {
         // Mode 1 — attach to existing order
@@ -377,6 +397,18 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
         },
       })
 
+      await recordPendingPaymentShiftReconciliation(tx, {
+        claim: shiftClaim,
+        venueId,
+        paymentId: payment.id,
+        orderId: anchorOrderId,
+        staffId,
+        channel: 'manualPayment',
+        amountPesos: amount,
+        tipPesos: tipAmount,
+        reconciliationEnabled,
+      })
+
       // Mirror the TPV recordFastPayment side effects so financial reports stay
       // aligned. These three writes used to be skipped for manual payments,
       // causing settlement / shift / payment-allocation reports to under-count
@@ -406,15 +438,6 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
           amount,
         },
       })
-
-      // 3. `totalOrders` — lo único del turno que no se pudo reclamar arriba, porque `isShadow`
-      //    todavía no se conocía. `totalOrders++` sólo para órdenes sombra: en el Modo 1 el pago se
-      //    engancha a una orden que ya contó cuando se creó.
-      //    Va sin CAS de estado a propósito: `shiftId` sólo tiene valor si el claim de arriba GANÓ,
-      //    y ese UPDATE dejó la fila bloqueada por esta transacción — nadie pudo cerrarla en medio.
-      if (shiftId && isShadow) {
-        await tx.shift.updateMany({ where: { id: shiftId, venueId }, data: { totalOrders: { increment: 1 } } })
-      }
 
       // Only update existing-order totals in Mode 1; shadow orders were
       // already created with final values and don't need a second update.

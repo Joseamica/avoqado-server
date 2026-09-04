@@ -1121,6 +1121,19 @@ export async function createOrderWithItems(
       // New Cobrar V1 keeps total/subtotal gross-net semantics explicit:
       // OrderItem.total and Order.subtotal are gross, reductions live in discountAmount.
       const isFreeCart = totalPesos === 0
+      // Un carrito gratis termina y crea su Payment en esta misma transacción, así que su
+      // pertenencia debe GANARSE antes de estampar ambas filas. Si el cierre tomó OPEN → CLOSING
+      // entre la lectura y este CAS, el carrito sigue siendo válido pero queda sin turno: monto
+      // cero, sin falsa anomalía monetaria y, sobre todo, sin mover `updatedAt=claimedAt`.
+      let freeCartShiftId: string | null = null
+      if (isFreeCart && currentShift) {
+        const claimed = await tx.shift.updateMany({
+          where: { id: currentShift.id, venueId, status: 'OPEN', endTime: null },
+          data: { totalOrders: { increment: 1 } },
+        })
+        if (claimed.count === 1) freeCartShiftId = currentShift.id
+      }
+      const orderShiftId = isFreeCart ? freeCartShiftId : (currentShift?.id ?? null)
       const order = await tx.order.create({
         data: {
           venueId,
@@ -1135,11 +1148,12 @@ export async function createOrderWithItems(
           createdById: input.staffId,
           terminalId: resolvedTerminalId,
           // 🔴 La orden nace en el turno de caja abierto AHORA: se toma en el mostrador, con
-          // el cajero enfrente. Se reusa el `currentShift` de arriba (que ya se estampa en el
-          // `Payment` del carrito gratis), nunca una segunda consulta: si el turno cerrara
-          // entre las dos lecturas, la orden y su cobro caerían en turnos distintos.
+          // el cajero enfrente. Para una orden pendiente se reusa el `currentShift`; para el
+          // carrito gratis se usa el id que GANÓ el CAS de arriba, que es el mismo que se estampa
+          // en el Payment. Nunca una segunda consulta: si el turno cerrara entre las dos lecturas,
+          // la orden y su cobro podrían caer en turnos distintos.
           // Opcional a propósito — un negocio que no abrió caja sigue vendiendo.
-          shiftId: currentShift?.id ?? null,
+          shiftId: orderShiftId,
           status: isFreeCart ? 'COMPLETED' : 'PENDING',
           paymentStatus: isFreeCart ? 'PAID' : 'PENDING',
           kitchenStatus: 'PENDING',
@@ -1290,7 +1304,7 @@ export async function createOrderWithItems(
           data: {
             venueId,
             orderId: order.id,
-            shiftId: currentShift?.id,
+            shiftId: freeCartShiftId,
             processedById: input.staffId,
             amount: 0,
             tipAmount: 0,
@@ -1320,15 +1334,6 @@ export async function createOrderWithItems(
             amount: 0,
           },
         })
-
-        if (currentShift) {
-          await tx.shift.update({
-            where: { id: currentShift.id },
-            data: {
-              totalOrders: { increment: 1 },
-            },
-          })
-        }
       }
 
       return order

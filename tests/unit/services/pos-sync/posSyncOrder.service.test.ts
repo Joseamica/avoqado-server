@@ -19,11 +19,13 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
       findUnique: jest.fn(),
       upsert: jest.fn(),
     },
+    venueSettings: { findUnique: jest.fn().mockResolvedValue({ enableShifts: true }) },
     $transaction: jest.fn(),
   },
 }))
 jest.mock('../../../../src/config/logger', () => ({
   info: jest.fn(),
+  warn: jest.fn(),
   error: jest.fn(), // Though not directly used in success path of processPosOrderEvent
 }))
 jest.mock('../../../../src/services/pos-sync/posSyncStaff.service')
@@ -35,6 +37,7 @@ describe('POS Sync Order Service (posSyncOrder.service.ts)', () => {
   const mockPrismaOrderFindUnique = prisma.order.findUnique as jest.Mock
   const mockPrismaOrderUpsert = prisma.order.upsert as jest.Mock
   const mockPrismaTransaction = prisma.$transaction as jest.Mock
+  const mockShiftUpdateMany = jest.fn()
   const mockSyncPosStaff = posSyncStaffService.syncPosStaff as jest.Mock
   const mockGetOrCreatePosTable = getOrCreatePosTable as jest.Mock
   const mockGetOrCreatePosShift = getOrCreatePosShift as jest.Mock
@@ -47,12 +50,18 @@ describe('POS Sync Order Service (posSyncOrder.service.ts)', () => {
     mockPrismaOrderFindUnique.mockResolvedValue(null) // No existing order by default
     mockPrismaTransaction.mockImplementation(async callback => {
       const mockTx = {
+        $queryRaw: jest.fn().mockResolvedValue([]),
+        shift: {
+          updateMany: mockShiftUpdateMany,
+        },
         order: {
+          findUnique: mockPrismaOrderFindUnique,
           upsert: mockPrismaOrderUpsert,
         },
       }
       return await callback(mockTx)
     })
+    mockShiftUpdateMany.mockResolvedValue({ count: 1 })
   })
 
   afterAll(() => {

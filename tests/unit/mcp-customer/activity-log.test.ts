@@ -26,6 +26,7 @@ jest.mock('@/utils/prismaClient', () => ({
 }))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
+const descriptions = new Map<string, string>()
 // v1 has activity:read; v2 is in scope but LACKS it (canRead:false).
 const scope = {
   staffId: 's1',
@@ -40,11 +41,29 @@ const call = (args: Record<string, unknown>) => handlers.get('get_activity_log')
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
 
 beforeAll(() => {
-  registerActivityLogTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
+  registerActivityLogTools(
+    {
+      tool: (...a: unknown[]) => {
+        descriptions.set(a[0] as string, a[1] as string)
+        handlers.set(a[0] as string, a[a.length - 1] as never)
+      },
+    } as never,
+    scope,
+  )
 })
 beforeEach(() => jest.clearAllMocks())
 
 describe('get_activity_log', () => {
+  it('documents the canonical orphan-payment action and its reconciliation reasons', () => {
+    const description = descriptions.get('get_activity_log')
+
+    expect(description).toContain('PAYMENT_WITHOUT_SHIFT')
+    expect(description).toContain('NO_SHIFT')
+    expect(description).toContain('ORDER_AUTHORITY_UNAVAILABLE')
+    expect(description).toContain('SHIFT_NOT_OPEN')
+    expect(description).toContain('CLAIM_LOST')
+  })
+
   it('returns logs scoped to the requested venue (caller has activity:read)', async () => {
     mockFindMany.mockResolvedValueOnce([
       {

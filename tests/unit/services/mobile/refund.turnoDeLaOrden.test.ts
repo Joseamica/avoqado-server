@@ -45,7 +45,7 @@ describe('createRefund (móvil) — la orden testigo comparte turno con su cobro
   const reembolso = () => createRefund({ venueId: VENUE, amount: 5000, reason: 'Producto defectuoso', method: 'CASH', staffId: STAFF })
 
   it('con el turno RECLAMADO, la orden y el cobro llevan el MISMO turno', async () => {
-    prismaMock.shift.findFirst.mockResolvedValue({ id: 'turno-negocio' } as any)
+    prismaMock.shift.findFirst.mockResolvedValue({ id: 'turno-negocio', status: 'OPEN' } as any)
 
     await reembolso()
 
@@ -56,7 +56,7 @@ describe('createRefund (móvil) — la orden testigo comparte turno con su cobro
   it('si el turno cerró entre la lectura y el claim, NINGUNO de los dos lleva turno', async () => {
     // El claim (`updateMany` con `status: OPEN`) devuelve 0: el turno se cerró en medio. Lo que
     // no puede pasar es que la orden quede en un turno cerrado mientras el cobro queda fuera.
-    prismaMock.shift.findFirst.mockResolvedValue({ id: 'turno-que-ya-cerro' } as any)
+    prismaMock.shift.findFirst.mockResolvedValue({ id: 'turno-que-ya-cerro', status: 'OPEN' } as any)
     prismaMock.shift.updateMany.mockResolvedValue({ count: 0 } as any)
 
     await reembolso()
@@ -68,7 +68,7 @@ describe('createRefund (móvil) — la orden testigo comparte turno con su cobro
   it('🔴 el claim va acotado al VENUE: por id solo aceptaba el turno de otro negocio', async () => {
     // El riel de la TPV (`refund.tpv.service.ts`) ya lo llevaba; éste, del que se copió, no —
     // quedó más laxo que su hermano. Los tres rieles usan ahora el MISMO claim condicional.
-    prismaMock.shift.findFirst.mockResolvedValue({ id: 'turno-negocio' } as any)
+    prismaMock.shift.findFirst.mockResolvedValue({ id: 'turno-negocio', status: 'OPEN' } as any)
 
     await reembolso()
 

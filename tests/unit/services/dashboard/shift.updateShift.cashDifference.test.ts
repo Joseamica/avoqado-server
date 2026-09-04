@@ -35,6 +35,7 @@ const AUTOR = 'staff-dueno'
 
 const INICIO = new Date('2026-09-03T14:00:00.000Z')
 const FIN = new Date('2026-09-04T02:00:00.000Z')
+const CLAIMED_AT = new Date('2026-09-03T22:00:00.000Z')
 
 /** El turno del relevo de mostrador, ya cerrado y firmado por el cierre con la gaveta. */
 function turnoCerrado(over: Record<string, unknown> = {}) {
@@ -66,16 +67,40 @@ const GAVETA_DE_LA_TARDE = {
   events: [{ type: 'CASH_SALE', amount: '800.00' }],
 }
 
+const DATOS_DE_SESION = {
+  status: 'CLOSED',
+  deviceName: null,
+  openedByName: 'Cajero',
+  closedByName: 'Cajero',
+  openedAt: INICIO,
+  closedAt: FIN,
+  actualAmount: '1300.00',
+  overShort: '0.00',
+}
+
 /** Lo que `prisma.shift.update` acabó escribiendo, para poder afirmar sobre el dinero. */
 let escrito: any
 
 /** El dueño editando, con permiso para ver el esperado (MANAGER+ lo trae por default). */
 const DUENO = { performedBy: AUTOR, puedeVerEsperado: true }
 
-function mundo(opciones: { turno?: Record<string, unknown>; gaveta?: any | null; porVentana?: any | null } = {}) {
+function mundo(
+  opciones: {
+    turno?: Record<string, unknown>
+    gaveta?: any | null
+    gavetaTrasScans?: any | null
+    porVentana?: any | null
+    hidratacionPerdida?: boolean
+  } = {},
+) {
   const turno = turnoCerrado(opciones.turno)
   escrito = undefined
   prismaMock.shift.findFirst.mockResolvedValue(turno)
+  prismaMock.shift.updateMany.mockImplementation(async (args: any) => {
+    escrito = args.data
+    Object.assign(turno, args.data)
+    return { count: 1 }
+  })
   prismaMock.shift.update.mockImplementation(async (args: any) => {
     escrito = args.data
     return { ...turno, ...args.data, staff: null, venue: { id: VENUE, name: 'Testarudo Cafe' } }
@@ -83,16 +108,29 @@ function mundo(opciones: { turno?: Record<string, unknown>; gaveta?: any | null;
   // Dos caminos distintos: la gaveta LIGADA por `CashDrawerSession.shiftId` (columna de esta
   // fase, con `shiftId` en el `where`) y el respaldo por VENTANA de tiempo, que es el único
   // que corre hoy en producción porque allá ninguna gaveta está ligada todavía.
-  const ligada = opciones.gaveta === undefined ? GAVETA_DE_LA_TARDE : opciones.gaveta
-  prismaMock.cashDrawerSession.findFirst.mockImplementation(async (args: any) =>
-    args?.where?.shiftId !== undefined ? ligada : (opciones.porVentana ?? null),
-  )
+  const gavetaSolicitada = opciones.gaveta === undefined ? GAVETA_DE_LA_TARDE : opciones.gaveta
+  const ligada = gavetaSolicitada == null ? null : { ...DATOS_DE_SESION, ...gavetaSolicitada }
+  const ligadaTrasScans = opciones.gavetaTrasScans == null ? null : { ...DATOS_DE_SESION, ...opciones.gavetaTrasScans }
+  let consultasExactas = 0
+  const porVentana = opciones.porVentana ?? null
+  prismaMock.cashDrawerSession.findFirst.mockImplementation(async (args: any) => {
+    if (args?.where?.id !== undefined) {
+      if (opciones.hidratacionPerdida) return null
+      return args.where.id === porVentana?.id ? porVentana : null
+    }
+    if (args?.where?.shiftId !== undefined) {
+      consultasExactas += 1
+      return consultasExactas === 1 ? ligada : (ligadaTrasScans ?? ligada)
+    }
+    return porVentana
+  })
+  prismaMock.cashDrawerSession.findMany.mockImplementation(async () => (porVentana ? [{ id: porVentana.id }] : []))
   return turno
 }
 
 /** Las consultas que se hicieron por VENTANA de tiempo (el respaldo), no por liga. */
 function consultasPorVentana() {
-  return prismaMock.cashDrawerSession.findFirst.mock.calls.map((c: any[]) => c[0]?.where ?? {}).filter((w: any) => w.shiftId === undefined)
+  return prismaMock.cashDrawerSession.findMany.mock.calls.map((c: any[]) => c[0]?.where ?? {})
 }
 
 beforeEach(() => {
@@ -273,9 +311,76 @@ describe('la gaveta se resuelve como la resuelve el cierre', () => {
     const ventanas = consultasPorVentana()
     expect(ventanas.length).toBeGreaterThan(0)
     for (const donde of ventanas) {
-      // La gaveta de este turno, o una sin ligar (todo lo anterior a la migración).
-      expect(JSON.stringify(donde)).toContain(JSON.stringify([{ shiftId: TURNO }, { shiftId: null }]))
+      // Sólo una gaveta sin ligar entra a la heurística temporal. La ligada ya tuvo prioridad
+      // absoluta en la consulta anterior.
+      expect(donde).toEqual(expect.objectContaining({ venueId: VENUE, shiftId: null }))
     }
+  })
+
+  it('dos gavetas legacy plausibles dejan la autoridad DESCONOCIDA y la edición no toca cashDifference', async () => {
+    mundo({
+      gaveta: null,
+      porVentana: {
+        id: 'caja-a',
+        status: 'CLOSED',
+        startingAmount: '500.00',
+        events: [{ type: 'CASH_SALE', amount: '800.00', createdAt: FIN }],
+        actualAmount: '1300.00',
+        overShort: '0.00',
+        deviceName: null,
+        openedByName: 'Cajero A',
+        closedByName: 'Cajero A',
+        openedAt: INICIO,
+        closedAt: FIN,
+      },
+    })
+    prismaMock.cashDrawerSession.findMany.mockResolvedValue([{ id: 'caja-a' }, { id: 'caja-b' }] as any)
+
+    await updateShift(VENUE, TURNO, { totalSales: 1900 }, DUENO)
+
+    expect(escrito).not.toHaveProperty('cashDifference')
+    const registro = (logAction as jest.Mock).mock.calls.at(-1)![0]
+    expect(registro.data.expectedSource).toBe('DESCONOCIDO')
+    expect(registro.data).not.toHaveProperty('cashDrawerSessionId')
+  })
+
+  it('si la candidata cambia de liga entre selección e hidratación, no reescribe con la fórmula ciega', async () => {
+    mundo({
+      gaveta: null,
+      hidratacionPerdida: true,
+      porVentana: {
+        id: 'caja-movida',
+        status: 'CLOSED',
+        startingAmount: '500.00',
+        events: [{ type: 'CASH_SALE', amount: '800.00', createdAt: FIN }],
+        actualAmount: '1300.00',
+        overShort: '0.00',
+        deviceName: null,
+        openedByName: 'Cajero',
+        closedByName: 'Cajero',
+        openedAt: INICIO,
+        closedAt: FIN,
+      },
+    })
+
+    await updateShift(VENUE, TURNO, { totalSales: 1900 }, DUENO)
+
+    expect(escrito).not.toHaveProperty('cashDifference')
+    const registro = (logAction as jest.Mock).mock.calls.at(-1)![0]
+    expect(registro.data.expectedSource).toBe('DESCONOCIDO')
+  })
+
+  it('si una legacy queda ligada al turno durante los scans, la revalidación exacta evita la fórmula ciega', async () => {
+    mundo({
+      gaveta: null,
+      gavetaTrasScans: { ...GAVETA_DE_LA_TARDE, shiftId: TURNO },
+    })
+
+    await updateShift(VENUE, TURNO, { totalSales: 1900 }, DUENO)
+
+    expect(escrito.cashDifference).toBe(0)
+    const registro = (logAction as jest.Mock).mock.calls.at(-1)![0]
+    expect(registro.data).toMatchObject({ expectedSource: 'CAJON', cashDrawerSessionId: CAJA })
   })
 
   it('🔴 si la gaveta no se puede leer, el descuadre NO se toca — pero la edición sí se guarda', async () => {
@@ -402,5 +507,54 @@ describe('la bitácora dice de dónde salió el número', () => {
     expect(registro.data.expectedSource).toBe('TURNO')
     expect(registro.data.expectedCash).toBe('3800.00')
     expect(registro.data).not.toHaveProperty('cashDrawerSessionId')
+  })
+})
+
+describe('un claim CLOSING es inmutable para el editor', () => {
+  it('serializa en DB por venue antes del CAS que puede cambiar OPEN/CLOSED', async () => {
+    await updateShift(VENUE, TURNO, { status: 'OPEN' }, DUENO)
+
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1)
+    expect(prismaMock.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.shift.updateMany.mock.invocationCallOrder[0])
+    expect(prismaMock.$queryRaw.mock.calls[0][0].values).toEqual(expect.arrayContaining([expect.stringContaining(VENUE)]))
+  })
+
+  it('rechaza antes de consultar gaveta, actualizar Shift o escribir auditoría', async () => {
+    const closing = mundo({ turno: { status: 'CLOSING', endTime: null, updatedAt: CLAIMED_AT } })
+
+    await expect(updateShift(VENUE, TURNO, { totalSales: 1900 }, DUENO)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'SHIFT_CLOSE_IN_PROGRESS',
+    })
+
+    expect(prismaMock.cashDrawerSession.findFirst).not.toHaveBeenCalled()
+    expect(prismaMock.cashDrawerSession.findMany).not.toHaveBeenCalled()
+    expect(prismaMock.shift.update).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+    expect(closing.updatedAt).toBe(CLAIMED_AT)
+  })
+
+  it('si leyó OPEN pero el cierre gana antes de escribir, pierde el CAS sin mover cutoff ni auditar', async () => {
+    const observado = new Date('2026-09-03T21:59:00.000Z')
+    const turno = mundo({ turno: { status: 'OPEN', endTime: null, updatedAt: observado } })
+    prismaMock.shift.updateMany.mockImplementationOnce(async () => {
+      turno.status = 'CLOSING'
+      turno.updatedAt = CLAIMED_AT
+      return { count: 0 }
+    })
+
+    await expect(updateShift(VENUE, TURNO, { totalSales: 1900 }, DUENO)).rejects.toMatchObject({
+      statusCode: 409,
+    })
+
+    expect(prismaMock.shift.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: TURNO, venueId: VENUE, status: 'OPEN', endTime: null, updatedAt: observado },
+      }),
+    )
+    expect(prismaMock.shift.findFirst).toHaveBeenCalledTimes(1)
+    expect(prismaMock.shift.update).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+    expect(turno).toMatchObject({ status: 'CLOSING', endTime: null, updatedAt: CLAIMED_AT })
   })
 })

@@ -195,14 +195,14 @@ describe('initiateCryptoPayment — la respuesta conserva el turno PROVISIONAL',
 })
 
 /**
- * La bitácora del dinero fuera de turno.
+ * La iniciación todavía NO representa dinero confirmado.
  *
  * 🔴 Corre sobre el camino COMPLETO —con B4Bit contestando que sí—, no sobre uno que revienta a
  * media función. Un `not.toHaveBeenCalled()` medido sobre una llamada que muere antes de llegar a
  * la rama pasa por el motivo equivocado: no dice «no registró», dice «nunca llegó». Por eso cada
  * caso comprueba además que la función TERMINÓ (`resultado.paymentId`).
  */
-describe('initiateCryptoPayment — la bitácora del cobro fuera de turno', () => {
+describe('initiateCryptoPayment — no audita dinero antes de la confirmación', () => {
   const respuestaDeB4Bit = () => ({
     ok: true,
     status: 200,
@@ -231,20 +231,12 @@ describe('initiateCryptoPayment — la bitácora del cobro fuera de turno', () =
     global.fetch = jest.fn().mockResolvedValue(respuestaDeB4Bit()) as any
   })
 
-  it('🔴 el monto va en PESOS, nunca en centavos: la bitácora se pinta verbatim al dueño', async () => {
+  it('no emite la señal al iniciar aunque todavía no exista turno', async () => {
     const resultado = await initiateCryptoPayment(cobroConPropina() as any)
 
     expect(resultado.paymentId).toBe('pay-cripto-1')
-    const registro = mockLogAction.mock.calls[0][0]
-    expect(registro).toMatchObject({
-      action: 'CRYPTO_PAYMENT_WITHOUT_SHIFT',
-      venueId: VENUE_A,
-      staffId: STAFF_ID,
-      entity: 'Payment',
-      entityId: 'pay-cripto-1',
-    })
-    // $55.00 y $5.00, no 5500 y 500 — que se leerían como $5,500 y $500.
-    expect(registro.data).toMatchObject({ amount: 55, tip: 5, total: 60, processor: 'B4BIT' })
+    expect(mockLogAction).not.toHaveBeenCalled()
+    expect(mockPrisma.venueSettings.findUnique).not.toHaveBeenCalled()
   })
 
   it('con turno abierto NO ensucia la bitácora (el camino normal no es una anomalía)', async () => {
@@ -266,24 +258,24 @@ describe('initiateCryptoPayment — la bitácora del cobro fuera de turno', () =
     expect(mockLogAction).not.toHaveBeenCalled()
   })
 
-  it('🔴 un negocio SIN fila de `VenueSettings` SÍ se registra: la fila ausente vale el default `true`', async () => {
-    // 53 de 68 venues locales no tienen fila. Con `=== true` en vez de `?? true`, el gate mataría
-    // la señal justo para casi todos.
+  it('una fila ausente de VenueSettings tampoco se consulta hasta confirmar', async () => {
     mockPrisma.venueSettings.findUnique.mockResolvedValue(null)
 
     const resultado = await initiateCryptoPayment(cobroConPropina() as any)
 
     expect(resultado.paymentId).toBe('pay-cripto-1')
-    expect(mockLogAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'CRYPTO_PAYMENT_WITHOUT_SHIFT' }))
+    expect(mockPrisma.venueSettings.findUnique).not.toHaveBeenCalled()
+    expect(mockLogAction).not.toHaveBeenCalled()
   })
 
-  it('si leer la configuración falla, se registra igual: un error de lectura no silencia dinero', async () => {
+  it('un error preparado en la lectura del gate no afecta la iniciación porque aún no se lee', async () => {
     mockPrisma.venueSettings.findUnique.mockRejectedValue(new Error('db caída'))
 
     const resultado = await initiateCryptoPayment(cobroConPropina() as any)
 
     expect(resultado.paymentId).toBe('pay-cripto-1')
-    expect(mockLogAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'CRYPTO_PAYMENT_WITHOUT_SHIFT' }))
+    expect(mockPrisma.venueSettings.findUnique).not.toHaveBeenCalled()
+    expect(mockLogAction).not.toHaveBeenCalled()
   })
 
   it('🔴 si B4Bit rechaza la orden no queda rastro de un cobro que nunca ocurrió', async () => {

@@ -3,6 +3,7 @@ import type { CronJob } from 'cron'
 import logger from '../config/logger'
 import { scheduleJob } from '../observability/jobContext'
 import { SHIFT_CLOSE_STALE_MS } from '../services/tpv/shiftCloseClaim.constants'
+import { lockShiftLifecycleForVenue } from '../services/shared/shiftLifecycleLock'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
@@ -86,15 +87,18 @@ export class ShiftCloseWatchdogJob {
       let errors = 0
       for (const candidate of candidates) {
         try {
-          const result = await this.dependencies.prisma.shift.updateMany({
-            where: {
-              id: candidate.id,
-              venueId: candidate.venueId,
-              status: ShiftStatus.CLOSING,
-              endTime: null,
-              updatedAt: candidate.updatedAt,
-            },
-            data: { status: ShiftStatus.OPEN, updatedAt: now },
+          const result = await this.dependencies.prisma.$transaction(async tx => {
+            await lockShiftLifecycleForVenue(tx, candidate.venueId)
+            return tx.shift.updateMany({
+              where: {
+                id: candidate.id,
+                venueId: candidate.venueId,
+                status: ShiftStatus.CLOSING,
+                endTime: null,
+                updatedAt: candidate.updatedAt,
+              },
+              data: { status: ShiftStatus.OPEN, updatedAt: now },
+            })
           })
           if (result.count === 1) {
             reopened += 1
