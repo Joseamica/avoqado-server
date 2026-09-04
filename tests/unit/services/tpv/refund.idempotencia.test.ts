@@ -90,7 +90,7 @@ const armarReintentoDe = async (
   opciones: Record<string, unknown> = {},
 ) => {
   armar()
-  await refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE, ...extra }) as never)
+  await refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE, ...extra }) as never, 'staff-1')
   const llavePersistida = datosDelPagoCreado().idempotencyKey
   jest.clearAllMocks()
   armar({ ...opciones, yaExiste: { ...reembolsoExistente, idempotencyKey: llavePersistida, ...fila } })
@@ -175,7 +175,7 @@ describe('el reembolso del TPV honra la llave de idempotencia', () => {
   it('🔴 persiste la llave en la fila creada — sin esto el @@unique no protege nada', async () => {
     armar()
 
-    await refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE }) as never)
+    await refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE }) as never, 'staff-1')
 
     // Lo persistido NO es la llave del cliente: es la huella de (llave, pago original, monto).
     const guardada = datosDelPagoCreado().idempotencyKey
@@ -186,7 +186,7 @@ describe('el reembolso del TPV honra la llave de idempotencia', () => {
   it('🔴 un reintento con la MISMA llave devuelve el existente y NO crea otra fila', async () => {
     await armarReintentoDe()
 
-    const r = await refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE }) as never)
+    const r = await refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE }) as never, 'staff-1')
 
     expect(r.id).toBe('pay-refund-ya-existia')
     expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
@@ -195,7 +195,7 @@ describe('el reembolso del TPV honra la llave de idempotencia', () => {
   it('🔴 el reintento NO vuelve a decrementar el turno', async () => {
     await armarReintentoDe()
 
-    await refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE }) as never)
+    await refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE }) as never, 'staff-1')
 
     // Decrementar dos veces le firmaría al cajero un faltante que no existe.
     expect((prismaMock as any).shift.updateMany).not.toHaveBeenCalled()
@@ -212,7 +212,11 @@ describe('el reembolso del TPV honra la llave de idempotencia', () => {
     // monto dentro de la huella, aprenderla con otro importe daría una llave distinta.
     await armarReintentoDe({ amount: 10000, isPartialRefund: false }, {}, { yaReembolsado: 100 })
 
-    const r = await refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE, amount: 10000, isPartialRefund: false }) as never)
+    const r = await refundService.recordRefund(
+      VENUE,
+      cuerpo({ idempotencyKey: LLAVE, amount: 10000, isPartialRefund: false }) as never,
+      'staff-1',
+    )
 
     expect(r.id).toBe('pay-refund-ya-existia')
   })
@@ -237,7 +241,7 @@ describe('el reembolso del TPV honra la llave de idempotencia', () => {
       return { ...armarOriginal() }
     })
 
-    const r = await refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE }) as never)
+    const r = await refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE }) as never, 'staff-1')
 
     expect(r.id).toBe('pay-refund-ya-existia')
     // El P2002 ocurre en Payment.create: la conciliación usa el id REAL y vive después,
@@ -312,7 +316,7 @@ describe('el reembolso del TPV honra la llave de idempotencia', () => {
       return result
     })
 
-    const result = await refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE }) as never)
+    const result = await refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE }) as never, 'staff-1')
 
     expect(stagedAlChocar).toEqual({ totalSales: 250, totalTips: 40, payments: [], audits: [] })
     expect(result.id).toBe('pay-refund-ya-existia')
@@ -335,7 +339,7 @@ describe('el reembolso del TPV honra la llave de idempotencia', () => {
     // se registra el reembolso SIN llave, ruidosamente. Nunca se pierde el dinero.
     await armarReintentoDe({}, { type: 'REGULAR' })
 
-    const r = await refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE }) as never)
+    const r = await refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE }) as never, 'staff-1')
 
     expect(r.id).toBe('pay-refund-nuevo')
     expect(datosDelPagoCreado().idempotencyKey).toBeUndefined()
@@ -344,7 +348,7 @@ describe('el reembolso del TPV honra la llave de idempotencia', () => {
   it('🔴 Q2: la llave reusada sobre OTRO pago original tampoco se devuelve', async () => {
     await armarReintentoDe({}, { processorData: { originalPaymentId: 'pay-de-otra-venta' } })
 
-    const r = await refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE }) as never)
+    const r = await refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE }) as never, 'staff-1')
 
     expect(r.id).toBe('pay-refund-nuevo')
     expect(datosDelPagoCreado().idempotencyKey).toBeUndefined()
@@ -370,7 +374,7 @@ describe('el reembolso del TPV honra la llave de idempotencia', () => {
       return armarOriginal()
     })
 
-    await expect(refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE }) as never)).rejects.toThrow()
+    await expect(refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE }) as never, 'staff-1')).rejects.toThrow()
   })
 
   it('🔴 Q3: un P2002 de OTRA restricción se relanza, no se traga como carrera ganada', async () => {
@@ -396,7 +400,7 @@ describe('el reembolso del TPV honra la llave de idempotencia', () => {
       return armarOriginal()
     })
 
-    await expect(refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE }) as never)).rejects.toThrow()
+    await expect(refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE }) as never, 'staff-1')).rejects.toThrow()
   })
 
   it('🔴 Q6: una llave VACÍA se trata como ausente y NO se persiste', async () => {
@@ -405,7 +409,7 @@ describe('el reembolso del TPV honra la llave de idempotencia', () => {
     // (su condición también es falsy) ⇒ reembolso real SIN registro contable.
     armar()
 
-    await refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: '   ' }) as never)
+    await refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: '   ' }) as never, 'staff-1')
 
     expect(datosDelPagoCreado().idempotencyKey).toBeUndefined()
   })
@@ -413,7 +417,7 @@ describe('el reembolso del TPV honra la llave de idempotencia', () => {
   const llaveGuardadaPara = async (cuerpoDelPost: Record<string, unknown>) => {
     jest.clearAllMocks()
     armar()
-    await refundService.recordRefund(VENUE, cuerpo(cuerpoDelPost) as never)
+    await refundService.recordRefund(VENUE, cuerpo(cuerpoDelPost) as never, 'staff-1')
     return datosDelPagoCreado().idempotencyKey
   }
 
@@ -464,7 +468,7 @@ describe('el reembolso del TPV honra la llave de idempotencia', () => {
     // centavos son la unidad autoritativa y cualquier fracción se rechaza en el servicio.
     armar()
 
-    await expect(refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE, amount: 100.4 }) as never)).rejects.toThrow(
+    await expect(refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE, amount: 100.4 }) as never, 'staff-1')).rejects.toThrow(
       /amount.*entero seguro.*centavos/i,
     )
 
@@ -494,7 +498,7 @@ describe('el reembolso del TPV honra la llave de idempotencia', () => {
     // lo que cae fuera lo reporta como `outsideDrawer` en vez de esconderlo.
     await armarReintentoDe()
 
-    await refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE }) as never)
+    await refundService.recordRefund(VENUE, cuerpo({ idempotencyKey: LLAVE }) as never, 'staff-1')
 
     expect(postCashRefundToDrawer).not.toHaveBeenCalled()
   })
@@ -504,7 +508,7 @@ describe('el reembolso del TPV honra la llave de idempotencia', () => {
   it('sin llave (el APK que hay hoy en la calle) el comportamiento NO cambia', async () => {
     armar()
 
-    const r = await refundService.recordRefund(VENUE, cuerpo() as never)
+    const r = await refundService.recordRefund(VENUE, cuerpo() as never, 'staff-1')
 
     expect(r.id).toBe('pay-refund-nuevo')
     expect((prismaMock as any).payment.create).toHaveBeenCalledTimes(1)

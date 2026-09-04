@@ -399,7 +399,7 @@ describe('fase 2 — el reembolso se ata al turno del NEGOCIO, no al que manda l
   it('🔴 ignora el shiftId del cuerpo y resuelve el turno abierto del negocio', async () => {
     armar()
 
-    await refundService.recordRefund(VENUE, cuerpo({ shiftId: 'shift-de-otro-lado' }) as never)
+    await refundService.recordRefund(VENUE, cuerpo({ shiftId: 'shift-de-otro-lado' }) as never, 'staff-1')
 
     expect(datosDelPagoCreado().shiftId).toBe('shift-negocio')
     // …y el turno se resolvió por NEGOCIO, nunca por persona ni por el cuerpo.
@@ -412,7 +412,7 @@ describe('fase 2 — el reembolso se ata al turno del NEGOCIO, no al que manda l
   it('🔴 el decremento de totalSales sólo toca un turno ABIERTO del MISMO venue', async () => {
     armar()
 
-    await refundService.recordRefund(VENUE, cuerpo({ shiftId: 'shift-de-otro-lado' }) as never)
+    await refundService.recordRefund(VENUE, cuerpo({ shiftId: 'shift-de-otro-lado' }) as never, 'staff-1')
 
     const upd = decremento()
     expect(upd).toBeDefined()
@@ -426,7 +426,7 @@ describe('fase 2 — el reembolso se ata al turno del NEGOCIO, no al que manda l
     // El turno existía al leerlo y ya no estaba OPEN al reclamarlo: `count: 0`.
     ;(prismaMock as any).shift.updateMany.mockResolvedValue({ count: 0 })
 
-    await expect(refundService.recordRefund(VENUE, cuerpo() as never)).resolves.toMatchObject({ id: 'pay-refund' })
+    await expect(refundService.recordRefund(VENUE, cuerpo() as never, 'staff-1')).resolves.toMatchObject({ id: 'pay-refund' })
 
     // 1) El dinero ya salió de la caja física: que el turno se moviera no tumba el registro.
     expect((prismaMock as any).payment.create).toHaveBeenCalledTimes(1)
@@ -478,7 +478,7 @@ describe('fase 2 — el reembolso se ata al turno del NEGOCIO, no al que manda l
     armar()
     ;(prismaMock as any).shift.updateMany.mockResolvedValue({ count: 0 })
 
-    await refundService.recordRefund(VENUE, cuerpo() as never)
+    await refundService.recordRefund(VENUE, cuerpo() as never, 'staff-1')
 
     expect(datosDelPagoCreado().shiftId).toBeUndefined()
     expect((prismaMock as any).activityLog.create).toHaveBeenCalledTimes(1)
@@ -548,7 +548,7 @@ describe('fase 2 — el reembolso se ata al turno del NEGOCIO, no al que manda l
       return result
     })
 
-    await expect(refundService.recordRefund(VENUE, cuerpo() as never)).rejects.toThrow('fallo posterior al audit TPV')
+    await expect(refundService.recordRefund(VENUE, cuerpo() as never, 'staff-1')).rejects.toThrow('fallo posterior al audit TPV')
 
     expect(stagedAntesDelFallo).toEqual({ payments: [expect.any(Object)], audits: [expect.any(Object)] })
     expect(committed).toEqual({ payments: [], audits: [] })
@@ -561,7 +561,7 @@ describe('fase 2 — el reembolso se ata al turno del NEGOCIO, no al que manda l
     armar()
     ;(prismaMock as any).shift.findFirst.mockResolvedValue(null)
 
-    await refundService.recordRefund(VENUE, cuerpo({ shiftId: 'shift-de-otro-lado' }) as never)
+    await refundService.recordRefund(VENUE, cuerpo({ shiftId: 'shift-de-otro-lado' }) as never, 'staff-1')
 
     expect(datosDelPagoCreado().shiftId).toBeUndefined()
     expect((prismaMock as any).shift.updateMany).not.toHaveBeenCalled()

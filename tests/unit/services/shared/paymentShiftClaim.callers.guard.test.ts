@@ -169,7 +169,7 @@ const PARSED_CONTEXTS = new WeakMap<AstCall[], { file: string; sourceFile: ts.So
 
 const PAYMENT_WRITE_METHODS = new Set(['create', 'createMany', 'upsert', 'update', 'updateMany'])
 
-function staticPropertyName(expression: ts.Expression): string | undefined {
+function staticPropertyName(expression: ts.Expression | ts.PropertyName): string | undefined {
   if (ts.isComputedPropertyName(expression)) return staticPropertyName(expression.expression)
   if (ts.isIdentifier(expression) || ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression))
     return expression.text
@@ -194,7 +194,16 @@ function directPaymentDelegateRoot(expression: ts.Expression): ts.Expression | u
 
 function enclosingFunction(node: ts.Node): ts.FunctionLikeDeclaration | undefined {
   for (let cursor = node.parent; cursor; cursor = cursor.parent) {
-    if (ts.isFunctionLike(cursor)) return cursor
+    if (
+      ts.isFunctionDeclaration(cursor) ||
+      ts.isFunctionExpression(cursor) ||
+      ts.isArrowFunction(cursor) ||
+      ts.isMethodDeclaration(cursor) ||
+      ts.isGetAccessorDeclaration(cursor) ||
+      ts.isSetAccessorDeclaration(cursor) ||
+      ts.isConstructorDeclaration(cursor)
+    )
+      return cursor
   }
   return undefined
 }
@@ -611,7 +620,7 @@ function paymentReferenceIssues(calls: AstCall[]): UnresolvedPaymentReference[] 
   }
   const visit = (node: ts.Node) => {
     if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
-      const member = unwrapExpression(node)
+      const member = node
       const receiver = receiverOf(member)
       const method = staticPropertyName(member)
       if (receiver && method && PAYMENT_WRITE_METHODS.has(method) && expressionMayYieldPaymentDelegate(receiver, sourceFile)) {
@@ -1373,7 +1382,7 @@ function canonicalOriginFromParameter(
   seenParameters = new Set<string>(),
 ): CanonicalAwaitedCall | undefined {
   const owner = parameter.parent
-  if (!ts.isFunctionLike(owner)) return undefined
+  if (!ts.isFunctionDeclaration(owner)) return undefined
   const ownerName = functionLocalName(owner)
   const parameterIndex = owner.parameters.indexOf(parameter)
   if (!ownerName || parameterIndex < 0) return undefined
@@ -1505,7 +1514,7 @@ function canonicalTransactionCallbackOwns(parameter: ts.ParameterDeclaration, co
   if (staticPropertyName(callee) !== '$transaction') return false
   const receiver = receiverOf(callee)
   const prismaIdentifier = receiver && unwrapExpression(receiver)
-  return Boolean(ts.isIdentifier(prismaIdentifier) && isCanonicalPrismaDefaultImport(prismaIdentifier, context))
+  return Boolean(prismaIdentifier && ts.isIdentifier(prismaIdentifier) && isCanonicalPrismaDefaultImport(prismaIdentifier, context))
 }
 
 function transactionPathFromParameter(

@@ -45,6 +45,7 @@ function turnoCerrado(over: Record<string, unknown> = {}) {
     staffId: 'staff-1',
     startTime: INICIO,
     endTime: FIN,
+    updatedAt: FIN,
     status: 'CLOSED',
     startingCash: '2000.00',
     // Lo que el cierre firmó: contó 1,300 contra el esperado de la GAVETA (1,300) ⇒ cuadró.

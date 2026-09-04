@@ -79,7 +79,7 @@ describe('reembolso desde la TPV', () => {
 
   it('🔴 un reembolso en EFECTIVO publica PAY_OUT al cajón con el monto devuelto', async () => {
     armar('CASH')
-    await fn(VENUE, cuerpo(200)).catch(() => {})
+    await fn(VENUE, cuerpo(200), 'staff-1').catch(() => {})
     expect(postCashRefundToDrawer).toHaveBeenCalledTimes(1)
     expect(postCashRefundToDrawer).toHaveBeenCalledWith(
       expect.objectContaining({ venueId: VENUE, refundPaymentId: 'pay-refund', method: 'CASH', fundsFlow: 'CASH_DRAWER' }),
@@ -94,7 +94,7 @@ describe('reembolso desde la TPV', () => {
     // TOTAL con un comentario explícito. Con el split a medias el esperado queda $20
     // arriba y el cierre le inventa un faltante de $20 al cajero.
     armar('CASH', 20)
-    await fn(VENUE, cuerpo(32000)).catch(() => {}) // el body de la PAX viene en CENTAVOS
+    await fn(VENUE, cuerpo(32000), 'staff-1').catch(() => {}) // el body de la PAX viene en CENTAVOS
     expect(postCashRefundToDrawer).toHaveBeenCalledTimes(1)
     const arg = (postCashRefundToDrawer as jest.Mock).mock.calls[0][0]
     expect(Math.abs(Number(arg.amount))).toBeCloseTo(320, 2)
@@ -102,7 +102,7 @@ describe('reembolso desde la TPV', () => {
 
   it('🔴 un reembolso de TARJETA no toca el cajón', async () => {
     armar('CREDIT_CARD')
-    await fn(VENUE, cuerpo(200)).catch(() => {})
+    await fn(VENUE, cuerpo(200), 'staff-1').catch(() => {})
     // El helper decide con paymentCountsAsDrawerCash; aquí basta con que reciba el fundsFlow real
     if ((postCashRefundToDrawer as jest.Mock).mock.calls.length) {
       expect(postCashRefundToDrawer).toHaveBeenCalledWith(expect.objectContaining({ fundsFlow: 'AVOQADO_PROCESSED' }))

@@ -163,7 +163,7 @@ describe('Task 5k — el acumulado del reembolso se construye con la foto BLOQUE
   it('🔴 acumula sobre lo que ya había bajo el candado ($60 + $40 = $100), no sobre la lectura vieja', async () => {
     armarCarrera()
 
-    await refundService.recordRefund(VENUE, cuerpo() as never)
+    await refundService.recordRefund(VENUE, cuerpo() as never, 'staff-1')
 
     const pd = escrito()
     // Con el defecto vivo esto valía 40: los $60 de A quedaban borrados y el pago volvía a
@@ -175,7 +175,7 @@ describe('Task 5k — el acumulado del reembolso se construye con la foto BLOQUE
   it('🔴 el HISTORIAL no se borra: conserva la entrada del reembolso que ganó la carrera', async () => {
     armarCarrera()
 
-    await refundService.recordRefund(VENUE, cuerpo() as never)
+    await refundService.recordRefund(VENUE, cuerpo() as never, 'staff-1')
 
     const pd = escrito()
     // Un acumulado correcto con el historial borrado sigue siendo un libro que miente:
@@ -192,7 +192,7 @@ describe('Task 5k — el acumulado del reembolso se construye con la foto BLOQUE
   it('🔴 la BASE del spread es la foto bloqueada: no resucita lo que otro escribió en medio', async () => {
     armarCarrera()
 
-    await refundService.recordRefund(VENUE, cuerpo() as never)
+    await refundService.recordRefund(VENUE, cuerpo() as never, 'staff-1')
 
     // `angelpayWebhook` no existía en la foto vieja; con `...processorData` (la vieja) el
     // reembolso lo borraba de la fila, deshaciendo la conciliación del webhook.
@@ -202,7 +202,7 @@ describe('Task 5k — el acumulado del reembolso se construye con la foto BLOQUE
   it('marca el pago como totalmente reembolsado cuando el acumulado real lo alcanza', async () => {
     armarCarrera()
 
-    await refundService.recordRefund(VENUE, cuerpo() as never)
+    await refundService.recordRefund(VENUE, cuerpo() as never, 'staff-1')
 
     // Con la foto vieja daba `false` (40 >= 100), así que un cobro ya devuelto por completo
     // se seguía anunciando como reembolsable.
@@ -212,7 +212,7 @@ describe('Task 5k — el acumulado del reembolso se construye con la foto BLOQUE
   it('deja dicho en el log que hubo un reembolso concurrente, con los dos números', async () => {
     armarCarrera()
 
-    await refundService.recordRefund(VENUE, cuerpo() as never)
+    await refundService.recordRefund(VENUE, cuerpo() as never, 'staff-1')
 
     // Con el defecto vivo la carrera era INVISIBLE: el acumulado salía mal y nada la nombraba.
     const avisos = (logger.warn as jest.Mock).mock.calls.filter(([msg]) => String(msg).includes('Reembolso concurrente'))
@@ -252,7 +252,7 @@ describe('Task 5k — el acumulado del reembolso se construye con la foto BLOQUE
     ;(prismaMock as any).payment.findUnique.mockResolvedValue(limpia)
     ;(prismaMock as any).$queryRaw.mockResolvedValue([limpia])
 
-    await refundService.recordRefund(VENUE, cuerpo() as never)
+    await refundService.recordRefund(VENUE, cuerpo() as never, 'staff-1')
 
     const pd = escrito()
     expect(pd.refundedAmount).toBe(40)
@@ -302,7 +302,7 @@ describe('Ronda 1 — un SELECT recortado no puede volver inofensiva la guarda d
     async columna => {
       sinColumna(columna)
 
-      await expect(refundService.recordRefund(VENUE, cuerpo() as never)).rejects.toThrow(/columna|SELECT/i)
+      await expect(refundService.recordRefund(VENUE, cuerpo() as never, 'staff-1')).rejects.toThrow(/columna|SELECT/i)
 
       // Y no se registró nada: rechazar ruidosamente es lo único mejor que devolver de más.
       noSeEscribioNada()
@@ -314,7 +314,7 @@ describe('Ronda 1 — un SELECT recortado no puede volver inofensiva la guarda d
 
     // Sin la guarda esto NO fallaba: `?? {}` dejaba el acumulado en 0 y el reembolso pasaba
     // tan campante, reiniciando el total devuelto en cada llamada.
-    await expect(refundService.recordRefund(VENUE, cuerpo() as never)).rejects.toThrow()
+    await expect(refundService.recordRefund(VENUE, cuerpo() as never, 'staff-1')).rejects.toThrow()
     noSeEscribioNada()
   })
 
@@ -325,7 +325,7 @@ describe('Ronda 1 — un SELECT recortado no puede volver inofensiva la guarda d
     // rechazaría reembolsos buenos — que es peor que el defecto que viene a cerrar.
     ;(prismaMock as any).$queryRaw.mockResolvedValue([{ ...fotoBloqueada, tipAmount: null }])
 
-    await expect(refundService.recordRefund(VENUE, cuerpo() as never)).resolves.toMatchObject({ id: 'pay-refund-B' })
+    await expect(refundService.recordRefund(VENUE, cuerpo() as never, 'staff-1')).resolves.toMatchObject({ id: 'pay-refund-B' })
   })
 
   it('🔴 un importe que no es número tampoco pasa (el cinturón, además de los tirantes)', async () => {
@@ -333,14 +333,14 @@ describe('Ronda 1 — un SELECT recortado no puede volver inofensiva la guarda d
     // La llave está, así que la comprobación de presencia no lo ve. Lo caza `Number.isFinite`.
     ;(prismaMock as any).$queryRaw.mockResolvedValue([{ ...fotoBloqueada, amount: 'no-es-un-numero' }])
 
-    await expect(refundService.recordRefund(VENUE, cuerpo() as never)).rejects.toThrow()
+    await expect(refundService.recordRefund(VENUE, cuerpo() as never, 'staff-1')).rejects.toThrow()
     noSeEscribioNada()
   })
 
   it('el SQL del candado nombra las tres columnas (aviso temprano, en CI y no en la caja)', async () => {
     armarCarrera()
 
-    await refundService.recordRefund(VENUE, cuerpo() as never)
+    await refundService.recordRefund(VENUE, cuerpo() as never, 'staff-1')
 
     const sql = (prismaMock as any).$queryRaw.mock.calls[0][0]
     const texto: string = typeof sql === 'string' ? sql : (sql.sql ?? sql.strings?.join(' ') ?? String(sql))

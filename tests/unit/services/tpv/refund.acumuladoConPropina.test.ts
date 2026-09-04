@@ -201,7 +201,9 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
     async amount => {
       armar({})
 
-      await expect(refundService.recordRefund(VENUE, cuerpo(amount) as never)).rejects.toThrow(/amount.*entero seguro.*centavos/i)
+      await expect(refundService.recordRefund(VENUE, cuerpo(amount) as never, 'staff-1')).rejects.toThrow(
+        /amount.*entero seguro.*centavos/i,
+      )
 
       expect((prismaMock as any).$transaction).not.toHaveBeenCalled()
       expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
@@ -213,7 +215,7 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
     async tipRefundCents => {
       armar({})
 
-      await expect(refundService.recordRefund(VENUE, { ...cuerpo(1000), tipRefundCents } as never)).rejects.toThrow(
+      await expect(refundService.recordRefund(VENUE, { ...cuerpo(1000), tipRefundCents } as never, 'staff-1')).rejects.toThrow(
         /tipRefundCents.*entero seguro.*centavos/i,
       )
 
@@ -228,7 +230,7 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
     // trae los centavos se leía como 0 y la terminal volvía a ofrecer el cobro entero.
     armar({ refundedAmountCents: 12000 })
 
-    await expect(refundService.recordRefund(VENUE, cuerpo(1000) as never)).rejects.toThrow(/exceeds remaining refundable/i)
+    await expect(refundService.recordRefund(VENUE, cuerpo(1000) as never, 'staff-1')).rejects.toThrow(/exceeds remaining refundable/i)
     expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
     // 🔴 Y lo rechaza el PRE-VUELO, antes de abrir la transacción. Sin esta línea la prueba
     // pasaría también con el pre-vuelo roto (lo atraparía el candado) y no guardaría nada de
@@ -243,7 +245,7 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
     // $20 de propina. Con la comparación vieja (`>= locked.amount`) esto se persistía como
     // `true` mientras el historial de la terminal —que recalcula contra el total— seguía
     // diciendo `false`: el mismo cobro, dos respuestas.
-    await refundService.recordRefund(VENUE, cuerpo(10000) as never)
+    await refundService.recordRefund(VENUE, cuerpo(10000) as never, 'staff-1')
 
     const pd = escrito()
     expect(pd.refundedAmount).toBe(100)
@@ -254,7 +256,7 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
   it('devolver los $120 completos SÍ marca el cobro como totalmente reembolsado', async () => {
     armar({})
 
-    await refundService.recordRefund(VENUE, cuerpo(12000) as never)
+    await refundService.recordRefund(VENUE, cuerpo(12000) as never, 'staff-1')
 
     const pd = escrito()
     expect(pd.refundedAmount).toBe(120)
@@ -267,14 +269,14 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
     // corrupto dejaba pasar TODOS los reembolsos, sin un solo aviso.
     armar({ refundedAmount: 'vaya' })
 
-    await expect(refundService.recordRefund(VENUE, cuerpo(1000) as never)).rejects.toThrow(/no es un número/i)
+    await expect(refundService.recordRefund(VENUE, cuerpo(1000) as never, 'staff-1')).rejects.toThrow(/no es un número/i)
     expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
   })
 
   it('acumula en CENTAVOS enteros: dos parciales de $40.33 no arrastran flotantes', async () => {
     armar({ refundedAmount: 40.33, refundedAmountCents: 4033 })
 
-    await refundService.recordRefund(VENUE, cuerpo(4033) as never)
+    await refundService.recordRefund(VENUE, cuerpo(4033) as never, 'staff-1')
 
     const pd = escrito()
     expect(pd.refundedAmountCents).toBe(8066)
@@ -287,7 +289,7 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
     // se saltaba `refundedAmountCents`.
     armarDosFotos({}, { refundedAmountCents: 12000 })
 
-    await expect(refundService.recordRefund(VENUE, cuerpo(1000) as never)).rejects.toThrow(/exceeds remaining refundable/i)
+    await expect(refundService.recordRefund(VENUE, cuerpo(1000) as never, 'staff-1')).rejects.toThrow(/exceeds remaining refundable/i)
     expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
   })
 
@@ -296,7 +298,7 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
     // previo); bajo el candado ya están los 12000 correctos. Gana el candado.
     armarDosFotos({ refundedAmount: 110, refundedAmountCents: 11000 }, { refundedAmount: 120, refundedAmountCents: 12000 })
 
-    await expect(refundService.recordRefund(VENUE, cuerpo(500) as never)).rejects.toThrow(/exceeds remaining refundable/i)
+    await expect(refundService.recordRefund(VENUE, cuerpo(500) as never, 'staff-1')).rejects.toThrow(/exceeds remaining refundable/i)
     expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
   })
 
@@ -309,7 +311,7 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
     // cobro vivo tiene dos reembolsos»), no el código.
     armar({ refundedAmount: 110, refundedAmountCents: 11000 }, [filaDeReembolso(-50, -10), filaDeReembolso(-50, -10)])
 
-    await expect(refundService.recordRefund(VENUE, cuerpo(1000) as never)).rejects.toThrow(/exceeds remaining refundable/i)
+    await expect(refundService.recordRefund(VENUE, cuerpo(1000) as never, 'staff-1')).rejects.toThrow(/exceeds remaining refundable/i)
     expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
     // Y lo rechaza el CANDADO, no el pre-vuelo: el pre-vuelo sólo ve el acumulado (110) y
     // cree que quedan $10. Sin esta línea la prueba no distinguiría los dos caminos.
@@ -319,7 +321,7 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
   it('las filas se consultan DENTRO de la transacción, acotadas a este cobro y a este negocio', async () => {
     armar({}, [filaDeReembolso(-50, -10)])
 
-    await refundService.recordRefund(VENUE, cuerpo(1000) as never)
+    await refundService.recordRefund(VENUE, cuerpo(1000) as never, 'staff-1')
 
     const args = (prismaMock as any).payment.findMany.mock.calls[0][0]
     expect(args.where).toMatchObject({ venueId: VENUE, type: 'REFUND' })
@@ -332,7 +334,7 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
   it('falla ruidosamente si un cobro rebasa el máximo verificable de reembolsos', async () => {
     armar({}, Array(1_001).fill(filaDeReembolso(-0.01, 0)))
 
-    await expect(refundService.recordRefund(VENUE, cuerpo(1) as never)).rejects.toThrow(/más de 1000 reembolsos/i)
+    await expect(refundService.recordRefund(VENUE, cuerpo(1) as never, 'staff-1')).rejects.toThrow(/más de 1000 reembolsos/i)
 
     expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
     expect((prismaMock as any).payment.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 1_001 }))
@@ -343,7 +345,7 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
     // `summarizeRefunds` (`orderBalance.ts`), el precedente que cita el módulo compartido.
     armar({}, [filaDeReembolso(-50, -10, 'PENDING')])
 
-    await refundService.recordRefund(VENUE, cuerpo(12000) as never)
+    await refundService.recordRefund(VENUE, cuerpo(12000) as never, 'staff-1')
 
     expect(escrito().refundedAmountCents).toBe(12000)
   })
@@ -357,7 +359,7 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
     // rechazar y dejarlo sin asiento: toma los $10 restantes de venta y los otros $20 de tip.
     armar({}, [filaDeReembolso(-90, 0)])
 
-    await refundService.recordRefund(VENUE, { ...cuerpo(3000), tipRefundCents: 0 } as never)
+    await refundService.recordRefund(VENUE, { ...cuerpo(3000), tipRefundCents: 0 } as never, 'staff-1')
 
     const data = (prismaMock as any).payment.create.mock.calls[0][0].data
     expect(Number(data.amount)).toBe(-10)
@@ -370,7 +372,7 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
     // otros $5 se registran como venta para no perder el asiento del dinero ya devuelto.
     armar({}, [filaDeReembolso(0, -15)])
 
-    await refundService.recordRefund(VENUE, { ...cuerpo(1000), tipRefundCents: 1000 } as never)
+    await refundService.recordRefund(VENUE, { ...cuerpo(1000), tipRefundCents: 1000 } as never, 'staff-1')
 
     const data = (prismaMock as any).payment.create.mock.calls[0][0].data
     expect(Number(data.amount)).toBe(-5)
@@ -380,7 +382,7 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
   it('honra tipRefundCents=0 cuando el monto cabe completo en la venta restante', async () => {
     armar({})
 
-    await refundService.recordRefund(VENUE, { ...cuerpo(10000), tipRefundCents: 0 } as never)
+    await refundService.recordRefund(VENUE, { ...cuerpo(10000), tipRefundCents: 0 } as never, 'staff-1')
 
     const data = (prismaMock as any).payment.create.mock.calls[0][0].data
     expect(Number(data.amount)).toBe(-100)
@@ -390,7 +392,7 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
   it('un APK viejo que pide el total sin propina conserva el asiento completo', async () => {
     armar({})
 
-    await refundService.recordRefund(VENUE, { ...cuerpo(12000), tipRefundCents: 0 } as never)
+    await refundService.recordRefund(VENUE, { ...cuerpo(12000), tipRefundCents: 0 } as never, 'staff-1')
 
     const data = (prismaMock as any).payment.create.mock.calls[0][0].data
     expect(Number(data.amount)).toBe(-100)
@@ -400,7 +402,7 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
   it('un cobro sin reembolsos previos se comporta igual que siempre', async () => {
     armar({})
 
-    await refundService.recordRefund(VENUE, cuerpo(4000) as never)
+    await refundService.recordRefund(VENUE, cuerpo(4000) as never, 'staff-1')
 
     const pd = escrito()
     expect(pd.refundedAmount).toBe(40)
@@ -480,7 +482,7 @@ describe('Task 5r — lo que el dashboard escribe es lo que la terminal lee', ()
     jest.clearAllMocks()
     armar(persistido)
 
-    await expect(refundService.recordRefund(VENUE, cuerpo(1000) as never)).rejects.toThrow(/exceeds remaining refundable/i)
+    await expect(refundService.recordRefund(VENUE, cuerpo(1000) as never, 'staff-1')).rejects.toThrow(/exceeds remaining refundable/i)
     expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
   })
 })

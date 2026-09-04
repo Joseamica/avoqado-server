@@ -60,7 +60,7 @@ describe('dashboard payment correction status boundary', () => {
   })
 
   it('never reasserts an already-COMPLETED status while correcting metadata', async () => {
-    let durablePayment = {
+    let durablePayment: Omit<typeof pendingPayment, 'status'> & { status: TransactionStatus; referenceNumber: string } = {
       ...pendingPayment,
       status: TransactionStatus.COMPLETED,
       referenceNumber: 'REF-OLD',
