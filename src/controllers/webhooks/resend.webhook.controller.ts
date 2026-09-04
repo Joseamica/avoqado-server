@@ -13,6 +13,7 @@ import { Request, Response, NextFunction } from 'express'
 import { Webhook } from 'svix'
 import logger from '@/config/logger'
 import * as marketingService from '../../services/superadmin/marketing.superadmin.service'
+import { procesarAvisoDeResend } from '../../services/marketing/campaignWebhook.service'
 
 // Resend webhook signing secret from environment
 const RESEND_WEBHOOK_SECRET = process.env.RESEND_WEBHOOK_SECRET
@@ -78,8 +79,30 @@ export async function handleResendWebhook(req: Request, res: Response, _next: Ne
 
     logger.info(`📧 [Resend Webhook] Received event: ${event.type}, email_id: ${event.data?.email_id}`)
 
-    // Handle the event
+    // Handle the event — DOS carriles distintos comparten este webhook:
+    //   1. Marketing de superadmin (Avoqado → los venues), que es el que ya estaba.
+    //   2. Campañas de un negocio a SUS clientes (fase 1B).
+    // Se prueba primero el de superadmin para no cambiar en nada su comportamiento; sólo
+    // cuando dice que la entrega no es suya se intenta el nuestro.
     const result = await marketingService.handleResendWebhook(event)
+
+    if (!result?.handled) {
+      try {
+        const propio = await procesarAvisoDeResend(event as any)
+        if (propio.manejado) {
+          return res.status(200).json({ success: true, handled: true, reason: propio.motivo })
+        }
+      } catch (error) {
+        // 🔴 Aquí SÍ se devuelve 500, al revés que el resto de esta función. El 200-siempre
+        // de abajo existe para que Resend no reintente eventos que no nos interesan — pero
+        // un fallo procesando un REBOTE es distinto: si lo tragamos, ese correo muerto se
+        // queda sin suprimir y lo seguimos intentando, quemando la reputación del subdominio
+        // que comparten todos los negocios. Un 500 hace que Resend reintente, que es
+        // exactamente lo que queremos.
+        logger.error('📧 [Resend Webhook] Falló el procesamiento de una campaña a clientes:', error)
+        return res.status(500).json({ success: false, error: 'Error procesando el aviso de campaña' })
+      }
+    }
 
     // Always return 200 to acknowledge receipt (prevent retries)
     return res.status(200).json({
