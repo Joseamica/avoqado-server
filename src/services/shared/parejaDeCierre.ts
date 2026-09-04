@@ -250,10 +250,7 @@ export type LectorDeParejas = Pick<PrismaClient, 'cashDrawerSession' | 'shift'>
  * ⚠️ La ventana `since` acota el barrido: el criterio no tiene índice que sirva y sin tope cada
  * pasada recorrería la historia entera de cajones. Es el mismo recurso de `paid-order-reconciler`.
  */
-export async function buscarParejasAMedias(
-  db: LectorDeParejas,
-  opciones: { limit: number; since: Date },
-): Promise<{ parejas: ReparacionDelCierre[]; bloqueadas: ParejaBloqueada[] }> {
+export async function buscarParejasAMedias(db: LectorDeParejas, opciones: { limit: number; since: Date }): Promise<ParejasAMedias> {
   const filas = (await db.cashDrawerSession.findMany({
     where: {
       shiftId: { not: null },
@@ -291,17 +288,24 @@ export async function buscarParejasAMedias(
     take: opciones.limit,
   })) as (GavetaDeLaPareja & { shift: TurnoDeLaPareja | null })[]
 
-  if (filas.length === 0) return { parejas: [], bloqueadas: [] }
+  if (filas.length === 0) return { escaneadas: 0, parejas: [], bloqueadas: [] }
 
   // 🔴 «¿El negocio siguió?» se PREGUNTA, no se deduce de las filas de arriba: el turno nuevo que
   // reusa la gaveta huérfana no aparece en ellas (no está ligado a ninguna). `endTime: null` es la
   // definición de turno vivo de la casa —cubre OPEN y CLOSING— y es la misma con la que
   // `abrirTurnoDeCaja` decide si puede abrir otro.
   const venues = [...new Set(filas.map(f => f.venueId))]
-  const vivos = await db.shift.findMany({
+  //
+  // 🔴 `groupBy` y no el `distinct` de Prisma: sin `previewFeatures = ["nativeDistinct"]` —que este
+  // schema NO activa— el `distinct` se resuelve **en memoria del cliente**, así que traería una fila
+  // por turno vivo y las deduplicaría en Node. Es el mismo defecto que ya se corrigió en el outbox
+  // de anuncios. El `take` que otra sesión añadió aquí se conserva y queda mejor justificado: no
+  // puede haber más grupos que negocios preguntados, así que acota sin poder esconder ninguno.
+  const vivos = await db.shift.groupBy({
+    by: ['venueId'],
     where: { venueId: { in: venues }, endTime: null },
-    select: { venueId: true },
-    distinct: ['venueId'],
+    orderBy: { venueId: 'asc' },
+    take: venues.length,
   })
   const conTurnoVivo = new Set(vivos.map(v => v.venueId))
 
@@ -315,7 +319,7 @@ export async function buscarParejasAMedias(
       bloqueadas.push({ venueId: fila.venueId, shiftId: fila.shift.id, cashDrawerSessionId: fila.id, motivo: decision.motivo })
     }
   }
-  return { parejas, bloqueadas }
+  return { escaneadas: filas.length, parejas, bloqueadas }
 }
 
 /**

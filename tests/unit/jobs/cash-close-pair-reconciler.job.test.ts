@@ -42,15 +42,18 @@ const faltaElTurno = {
 
 const faltaLaGaveta = { ...faltaElTurno, falta: 'GAVETA' as const, actorStaffId: 'staff-2' }
 
-function job(over: Partial<{ parejas: unknown[]; bloqueadas: unknown[]; cerrar: jest.Mock }> = {}) {
-  const buscar = jest.fn().mockResolvedValue({ parejas: over.parejas ?? [], bloqueadas: over.bloqueadas ?? [] })
-  const cerrar = over.cerrar ?? jest.fn().mockResolvedValue({ conConteo: true, shiftCerradoId: TURNO })
+function job(over: Partial<{ parejas: unknown[]; bloqueadas: unknown[]; cerrar: jest.Mock; medirLoTardio: jest.Mock }> = {}) {
+  const parejas = over.parejas ?? []
+  const bloqueadas = over.bloqueadas ?? []
+  const buscar = jest.fn().mockResolvedValue({ escaneadas: parejas.length + bloqueadas.length, parejas, bloqueadas })
+  const cerrar = over.cerrar ?? jest.fn().mockResolvedValue({ conConteo: true, shiftCerradoId: TURNO, cajaCerradaId: CAJA })
   const j = new CashClosePairReconcilerJob({
     cron: { start: jest.fn(), stop: jest.fn() },
     now: () => AHORA,
     retryEntry: (fn: any) => fn(),
     buscar,
     cerrar,
+    medirLoTardio: over.medirLoTardio ?? jest.fn().mockResolvedValue({ cobros: 0, importe: 0 }),
   } as never)
   return { j, buscar, cerrar }
 }
@@ -144,7 +147,7 @@ describe('reparar la mitad que falta', () => {
 
     const enVuelo = j.runNow()
     const segundo = await j.runNow()
-    soltar({ conConteo: true })
+    soltar({ conConteo: true, shiftCerradoId: TURNO })
     await enVuelo
 
     expect(segundo.skipped).toBe(1)
@@ -168,6 +171,14 @@ describe('lo que NO se repara se DICE', () => {
     )
   })
 
+  it('🔴 `scanned` cuenta las FILAS miradas: un tic que sólo encuentra bloqueadas no reporta cero', async () => {
+    const { j } = job({ bloqueadas: [bloqueada] })
+
+    const r = await j.runNow()
+
+    expect(r.scanned).toBe(1)
+  })
+
   it('🔴 el aviso se limita en el tiempo: una pareja atorada un día no puede escribir un renglón por minuto', async () => {
     const { j } = job({ bloqueadas: [bloqueada] })
 
@@ -175,5 +186,109 @@ describe('lo que NO se repara se DICE', () => {
     await j.runNow()
 
     expect((logger.warn as jest.Mock).mock.calls.filter(c => String(c[0]).includes('no se pudieron cerrar solas'))).toHaveLength(1)
+  })
+})
+
+/**
+ * 🔴 `cerrarTurnoDeCaja` NO LANZA cuando no cierra nada: devuelve un `motivo`
+ * (`SIN_PAREJA`, `CIERRE_EN_CURSO`, `YA_CERRADO`). Descartar ese valor de retorno hacía que el
+ * barrido se anotara como reparado algo que no reparó **y escribiera una fila en la bitácora de
+ * dinero nombrando un conteo y un esperado de un cierre que nunca ocurrió** — cada minuto, para
+ * siempre, y sin un solo aviso.
+ */
+describe('sólo se anota lo que de verdad cerró', () => {
+  const motivos = [
+    ['CIERRE_EN_CURSO', 'el cierre interno tronó y se lo tragó'],
+    ['SIN_PAREJA', 'la otra mitad ya no está donde se esperaba'],
+  ] as const
+
+  it.each(motivos)('%s: cuenta como FALLO, no escribe bitácora y se reporta', async motivo => {
+    const cerrar = jest.fn().mockResolvedValue({ conConteo: false, motivo })
+    const { j } = job({ parejas: [faltaElTurno], cerrar })
+
+    const r = await j.runNow()
+
+    expect(r.repaired).toBe(0)
+    expect(r.failed).toBe(1)
+    expect(logAction).not.toHaveBeenCalled()
+    expect(r.blocked).toEqual([expect.objectContaining({ shiftId: TURNO, motivo })])
+  })
+
+  it('🔴 `YA_CERRADO` es benigno y SILENCIOSO: el aparato se adelantó y el barrido no se lleva el crédito', async () => {
+    const cerrar = jest.fn().mockResolvedValue({ conConteo: false, motivo: 'YA_CERRADO' })
+    const { j } = job({ parejas: [faltaElTurno], cerrar })
+
+    const r = await j.runNow()
+
+    expect(r.repaired).toBe(0)
+    expect(r.failed).toBe(0)
+    expect(r.blocked).toEqual([])
+    expect(logAction).not.toHaveBeenCalled()
+    expect(logger.warn).not.toHaveBeenCalled()
+  })
+
+  it('un cierre de verdad SÍ se anota', async () => {
+    const { j } = job({ parejas: [faltaElTurno] })
+
+    const r = await j.runNow()
+
+    expect(r.repaired).toBe(1)
+    expect(r.failed).toBe(0)
+    expect(logAction).toHaveBeenCalledTimes(1)
+  })
+
+  it('🔴 un fallo persistente también se AVISA: contradecía «lo tardío nunca se descarta en silencio»', async () => {
+    const cerrar = jest.fn().mockResolvedValue({ conConteo: false, motivo: 'CIERRE_EN_CURSO' })
+    const { j } = job({ parejas: [faltaElTurno], cerrar })
+
+    await j.runNow()
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('no se pudieron cerrar solas'),
+      expect.objectContaining({ bloqueadas: [expect.objectContaining({ motivo: 'CIERRE_EN_CURSO' })] }),
+    )
+  })
+
+  it('una EXCEPCIÓN conserva su mensaje dentro del mismo aviso', async () => {
+    const cerrar = jest.fn().mockRejectedValue(new Error('la base se cayó'))
+    const { j } = job({ parejas: [faltaElTurno], cerrar })
+
+    const r = await j.runNow()
+
+    expect(r.failed).toBe(1)
+    expect(r.blocked).toEqual([expect.objectContaining({ motivo: 'CIERRE_EN_CURSO', detalle: 'la base se cayó' })])
+  })
+})
+
+describe('lo que el barrido NO puede arreglar, lo deja MEDIDO', () => {
+  it('🔴 los cobros que entraron entre el conteo y la reparación quedan escritos con su importe', async () => {
+    // El turno se cierra con la hora del barrido y sus totales salen por `shiftId`, así que una
+    // venta posterior al conteo entra al reporte y no al arqueo. No se puede evitar (ver el
+    // comentario de `gestoQueFalta`), pero sí se puede DECIR con el número.
+    const medirLoTardio = jest.fn().mockResolvedValue({ cobros: 1, importe: 120.5 })
+    const { j } = job({ parejas: [faltaElTurno], medirLoTardio })
+
+    await j.runNow()
+
+    expect(medirLoTardio).toHaveBeenCalledWith(faltaElTurno)
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ cobrosDespuesDelConteo: 1, importeDespuesDelConteo: 120.5 }) }),
+    )
+  })
+
+  it('🔴 medir no puede tumbar una reparación que ya ocurrió, ni dejarla sin asiento', async () => {
+    const medirLoTardio = jest.fn().mockRejectedValue(new Error('timeout'))
+    const { j } = job({ parejas: [faltaElTurno], medirLoTardio })
+
+    const r = await j.runNow()
+
+    expect(r.repaired).toBe(1)
+    // Sin el `catch`, la excepción sale por el try/catch del bucle: la pareja quedaría contada como
+    // reparada Y como fallida a la vez, y —lo que de verdad duele— el asiento de la bitácora nunca
+    // se escribiría, porque va DESPUÉS de medir. Un cierre real sin rastro es peor que no medir.
+    expect(r.failed).toBe(0)
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ cobrosDespuesDelConteo: null, importeDespuesDelConteo: null }) }),
+    )
   })
 })

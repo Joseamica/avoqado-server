@@ -12,7 +12,7 @@ function db(over: { gavetas?: unknown[]; turnosVivos?: unknown[] } = {}) {
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       findUnique: jest.fn().mockResolvedValue(null),
     },
-    shift: { findMany: jest.fn().mockResolvedValue(over.turnosVivos ?? []) },
+    shift: { groupBy: jest.fn().mockResolvedValue(over.turnosVivos ?? []) },
   } as any
 }
 
@@ -66,6 +66,32 @@ describe('buscarParejasAMedias — a quién se le pregunta y qué se descarta', 
     expect(p.cashDrawerSession.findMany.mock.calls[0][0].take).toBe(25)
   })
 
+  it('🔴 la segunda consulta también va acotada, y agrupa en Postgres — el `distinct` de Prisma agrupa en Node', async () => {
+    const p = db({ gavetas: [gavetaCerrada] })
+    await buscarParejasAMedias(p, { limit: 25, since: DESDE })
+
+    expect(p.shift.groupBy).toHaveBeenCalledWith(expect.objectContaining({ by: ['venueId'], orderBy: { venueId: 'asc' }, take: 1 }))
+    expect(p.shift.groupBy.mock.calls[0][0].distinct).toBeUndefined()
+  })
+
+  it('🔴 `escaneadas` cuenta las FILAS miradas, no las reparables: un tic con sólo bloqueadas trabajó igual', async () => {
+    const bloqueante = {
+      ...gavetaCerrada,
+      status: 'OPEN',
+      closedAt: null,
+      actualAmount: null,
+      overShort: null,
+      closedByStaffId: null,
+      shift: { ...gavetaCerrada.shift, status: 'CLOSED', endTime: CERRADO_A_LAS, closedById: 'staff-2' },
+    }
+    const p = db({ gavetas: [bloqueante], turnosVivos: [{ venueId: VENUE }] })
+
+    const r = await buscarParejasAMedias(p, { limit: 25, since: DESDE })
+
+    expect(r.parejas).toHaveLength(0)
+    expect(r.escaneadas).toBe(1)
+  })
+
   it('devuelve la reparación ya decidida, con los números de la mitad que firmó', async () => {
     const p = db({ gavetas: [gavetaCerrada] })
 
@@ -93,7 +119,14 @@ describe('buscarParejasAMedias — a quién se le pregunta y qué se descarta', 
 
     // `endTime: null` es la definición de la casa de «turno vivo»: cubre OPEN y CLOSING, que es lo
     // que usa `abrirTurnoDeCaja` para decidir si puede abrir otro.
-    expect(p.shift.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { venueId: { in: [VENUE] }, endTime: null } }))
+    expect(p.shift.groupBy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        by: ['venueId'],
+        where: { venueId: { in: [VENUE] }, endTime: null },
+        orderBy: { venueId: 'asc' },
+        take: 1,
+      }),
+    )
     expect(parejas).toEqual([])
     // 🔴 Y no se descarta en silencio: ese efectivo se está mezclando y alguien tiene que enterarse.
     expect(bloqueadas).toEqual([{ venueId: VENUE, shiftId: 'shift-1', cashDrawerSessionId: 'caja-1', motivo: 'EL_NEGOCIO_SIGUIO' }])
@@ -134,7 +167,7 @@ describe('buscarParejasAMedias — a quién se le pregunta y qué se descarta', 
     const p = db()
     await buscarParejasAMedias(p, { limit: 25, since: DESDE })
 
-    expect(p.shift.findMany).not.toHaveBeenCalled()
+    expect(p.shift.groupBy).not.toHaveBeenCalled()
   })
 })
 

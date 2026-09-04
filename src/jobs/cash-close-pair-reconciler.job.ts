@@ -2,8 +2,13 @@ import type { CronJob } from 'cron'
 import logger from '../config/logger'
 import { scheduleJob } from '../observability/jobContext'
 import { logAction } from '../services/dashboard/activity-log.service'
-import { buscarParejasAMedias, type ParejaBloqueada, type ReparacionDelCierre } from '../services/shared/parejaDeCierre'
-import { cerrarTurnoDeCaja } from '../services/shared/turnoDeCaja'
+import {
+  buscarParejasAMedias,
+  type ParejaBloqueada,
+  type ParejasAMedias,
+  type ReparacionDelCierre,
+} from '../services/shared/parejaDeCierre'
+import { cerrarTurnoDeCaja, type CerrarTurnoDeCajaResult } from '../services/shared/turnoDeCaja'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
@@ -55,16 +60,53 @@ export interface ResultadoDelBarridoDeParejas {
   failed: number
   skipped: number
   dryRun: boolean
-  blocked: ParejaBloqueada[]
+  /** Lo que se encontró y NO se cerró: las bloqueadas por la búsqueda MÁS las que fallaron aquí. */
+  blocked: ParejaAtorada[]
   candidates: ReparacionDelCierre[]
+}
+
+/**
+ * Una pareja que se encontró y NO se cerró — por la búsqueda o por el cierre.
+ *
+ * 🔴 El `motivo` acepta los DOS vocabularios sin traducir uno al otro: el de la búsqueda
+ * (`MotivoNoReparable`) y el que devuelve `cerrarTurnoDeCaja`. Inventar un tercer nombre para
+ * «`SIN_PAREJA`, pero al reparar» haría que el log no se pudiera cruzar con el del cierre, que es
+ * exactamente lo que uno quiere hacer al investigar.
+ */
+export type ParejaAtorada = Omit<ParejaBloqueada, 'motivo'> & {
+  motivo: ParejaBloqueada['motivo'] | NonNullable<CerrarTurnoDeCajaResult['motivo']>
+  /** El mensaje, cuando lo que falló fue una EXCEPCIÓN y no un `motivo` del cierre. */
+  detalle?: string
 }
 
 interface Dependencias {
   cron?: CronHandle
   now: () => Date
   retryEntry: typeof retry
-  buscar: (opts: { limit: number; since: Date }) => Promise<{ parejas: ReparacionDelCierre[]; bloqueadas: ParejaBloqueada[] }>
+  buscar: (opts: { limit: number; since: Date }) => Promise<ParejasAMedias>
   cerrar: typeof cerrarTurnoDeCaja
+  medirLoTardio: (pareja: ReparacionDelCierre) => Promise<{ cobros: number; importe: number }>
+}
+
+/**
+ * Lo que entró DESPUÉS de que se firmó el conteo y antes de que el barrido cerrara la otra mitad.
+ *
+ * 🔴 No se puede evitar (ver `gestoQueFalta`), así que se MIDE: sin esto, la única huella de que el
+ * reporte y el arqueo dicen cosas distintas sería restarlos a mano meses después.
+ *
+ * Sólo se mide en la dirección TURNO, que es donde hay algo que atribuir: los cobros siguen naciendo
+ * con el `shiftId` del turno que quedó abierto. En la dirección contraria el turno ya está cerrado,
+ * así que lo que entra después no pertenece a ningún turno — es el hueco de «cobros sin turno», que
+ * ya tiene dueño y no es éste.
+ */
+async function medirCobrosTardios(pareja: ReparacionDelCierre): Promise<{ cobros: number; importe: number }> {
+  if (pareja.falta !== 'TURNO') return { cobros: 0, importe: 0 }
+  const tardios = await prisma.payment.aggregate({
+    where: { shiftId: pareja.shiftId, status: 'COMPLETED', createdAt: { gt: pareja.momento } },
+    _count: { _all: true },
+    _sum: { amount: true },
+  })
+  return { cobros: tardios._count._all, importe: Number(tardios._sum.amount ?? 0) }
 }
 
 export const defaults: Dependencias = {
@@ -72,6 +114,7 @@ export const defaults: Dependencias = {
   retryEntry: retry,
   buscar: opts => buscarParejasAMedias(prisma, opts),
   cerrar: cerrarTurnoDeCaja,
+  medirLoTardio: medirCobrosTardios,
 }
 
 export class CashClosePairReconcilerJob {
@@ -116,21 +159,56 @@ export class CashClosePairReconcilerJob {
       const now = this.d.now()
       const since = opts.since ?? new Date(now.getTime() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000)
       // La lectura de entrada va con retry: es la que muere en la estampida de crons (regla del repo).
-      const { parejas, bloqueadas } = await this.d.retryEntry(() => this.d.buscar({ limit: BATCH_LIMIT, since }), {
+      const { escaneadas, parejas, bloqueadas } = await this.d.retryEntry(() => this.d.buscar({ limit: BATCH_LIMIT, since }), {
         retries: 2,
         initialDelay: 1500,
         shouldRetry: shouldRetryDbConnectionError,
         context: 'cash-close-pair-reconciler.find',
       })
-      const resultado: ResultadoDelBarridoDeParejas = { ...vacio, scanned: parejas.length, blocked: bloqueadas, candidates: parejas }
+      const atoradas: ParejaAtorada[] = [...bloqueadas]
+      const resultado: ResultadoDelBarridoDeParejas = {
+        ...vacio,
+        // FILAS miradas, no candidatas: un tic que sólo encuentra bloqueadas trabajó igual.
+        scanned: escaneadas,
+        blocked: atoradas,
+        candidates: parejas,
+      }
 
-      this.avisarDeLasAtoradas(bloqueadas, now)
-      if (dryRun) return resultado
+      if (dryRun) {
+        this.avisarDeLasAtoradas(atoradas, now)
+        return resultado
+      }
 
       for (const pareja of parejas) {
         try {
-          await this.d.cerrar(this.gestoQueFalta(pareja))
+          // 🔴 `cerrarTurnoDeCaja` NO LANZA cuando no cierra nada: devuelve un `motivo`. Descartar
+          // este valor hacía que el barrido se anotara como reparado algo que no reparó Y escribiera
+          // una fila en la bitácora de dinero nombrando un conteo y un esperado de un cierre que
+          // nunca ocurrió — cada minuto, para siempre, y sin un solo aviso.
+          const cierre = await this.d.cerrar(this.gestoQueFalta(pareja))
+          if (cierre.motivo) {
+            // `YA_CERRADO` es la carrera BENIGNA: el aparato cerró primero, que es el estado que
+            // queríamos. No es un fallo, no se avisa, y el barrido no se lleva un crédito ajeno.
+            if (cierre.motivo === 'YA_CERRADO') continue
+            resultado.failed += 1
+            atoradas.push({
+              venueId: pareja.venueId,
+              shiftId: pareja.shiftId,
+              cashDrawerSessionId: pareja.cashDrawerSessionId,
+              motivo: cierre.motivo,
+            })
+            continue
+          }
           resultado.repaired += 1
+          // Lo que no se pudo evitar, queda MEDIDO. Nunca puede tumbar una reparación ya ocurrida.
+          const tardio = await this.d.medirLoTardio(pareja).catch(error => {
+            logger.warn('💵 [cash-close-pair-reconciler] no se pudieron medir los cobros posteriores al conteo', {
+              venueId: pareja.venueId,
+              shiftId: pareja.shiftId,
+              error: error instanceof Error ? error.message : String(error),
+            })
+            return null
+          })
           // `logAction` nunca lanza (su contrato), así que esperarla no puede convertir una pareja
           // ya cerrada en un `failed`; y esperarla deja el asiento escrito antes de que el tic acabe.
           await logAction({
@@ -151,20 +229,29 @@ export class CashClosePairReconcilerJob {
               esperado: pareja.esperado != null ? Number(pareja.esperado) : null,
               sinConteo: pareja.conteo == null,
               firmadoALas: pareja.momento.toISOString(),
+              // 🔴 Lo que entró entre el conteo y esta reparación: el reporte del turno lo incluye
+              // y el arqueo no. `null` = no se pudo medir, que NO es lo mismo que cero.
+              cobrosDespuesDelConteo: tardio?.cobros ?? null,
+              importeDespuesDelConteo: tardio?.importe ?? null,
               sweep: 'cash-close-pair-reconciler',
             },
           })
         } catch (error) {
+          // Una EXCEPCIÓN es otra cosa que un `motivo` —un fallo de base, un defecto—, así que
+          // conserva su mensaje; pero sale por el MISMO aviso, o un fallo persistente escribiría
+          // un renglón por minuto para siempre.
           resultado.failed += 1
-          logger.warn('💵 [cash-close-pair-reconciler] no se pudo cerrar la mitad que faltaba; se reintenta en el siguiente tic', {
+          atoradas.push({
             venueId: pareja.venueId,
             shiftId: pareja.shiftId,
             cashDrawerSessionId: pareja.cashDrawerSessionId,
-            falta: pareja.falta,
-            error: error instanceof Error ? error.message : String(error),
+            motivo: 'CIERRE_EN_CURSO',
+            detalle: error instanceof Error ? error.message : String(error),
           })
         }
       }
+
+      this.avisarDeLasAtoradas(atoradas, now)
 
       if (resultado.scanned > 0) {
         logger.info('💵 [cash-close-pair-reconciler] barrido', { ...resultado, candidates: undefined, blocked: undefined })
@@ -178,10 +265,33 @@ export class CashClosePairReconcilerJob {
   /**
    * El gesto que falta, con los números de la mitad que ya firmó.
    *
-   * 🔴 Los dos detalles que impiden mezclar jornadas: `shiftIdDeLaGaveta` viaja siempre —sin él,
-   * `cerrarElTurnoDeLaGaveta` podría cerrar un turno abierto DESPUÉS con el conteo de esta gaveta—,
-   * y el reloj del cierre de la gaveta es el instante que el turno firmó, no el del barrido, para
-   * que la gaveta no absorba hacia atrás las ventas que entraron después del cierre.
+   * 🔴 `shiftIdDeLaGaveta` viaja siempre: sin él, `cerrarElTurnoDeLaGaveta` podría cerrar un turno
+   * abierto DESPUÉS con el conteo de esta gaveta, que es exactamente mezclar jornadas.
+   *
+   * 🔴 **El reloj sólo se inyecta en la dirección GAVETA, y la asimetría NO es un descuido — es que
+   * en la otra dirección inyectarlo sería peor que el problema que arregla.** Medido, no supuesto:
+   *
+   *   · `cerrarLaGavetaDelTurno` usa `p.now` para dos cosas suyas y de nadie más (el filtro
+   *     `openedAt <= momento` y el `closedAt` que escribe), así que darle el instante que el turno
+   *     firmó es gratis y correcto: la gaveta no absorbe hacia atrás las ventas posteriores.
+   *   · En la dirección TURNO, el cierre pasa por `claimShiftForClose`, que **escribe
+   *     `updatedAt: claimedAt` como testigo del CAS**. Inyectar un instante pasado dejaría el
+   *     reclamo naciendo ya vencido: `SHIFT_CLOSE_STALE_MS` son **5 minutos**, y
+   *     `shift-close-watchdog` corre **cada minuto** devolviendo a `OPEN` todo `CLOSING` más viejo
+   *     que eso. Cualquier pareja de más de 5 minutos —justo las que estuvieron bloqueadas y por fin
+   *     se pueden reparar— vería su reclamo revertido a media reparación y el CAS final fallaría,
+   *     **para siempre**. Y de paso encogería la ventana `lte: claimedAt` del consumo de inventario.
+   *
+   * ⚠️ **El límite que eso deja, declarado y MEDIDO en cada reparación:** el turno se cierra con
+   * `endTime` = la hora del barrido, así que un cobro en efectivo entre el conteo de la gaveta y la
+   * reparación (≤ ~1 min en el caso normal) nace con el `shiftId` del turno todavía abierto y entra
+   * a `totalCashPayments`, mientras que su `CASH_SALE` cae fuera de la gaveta ya cerrada. Reporte y
+   * arqueo discrepan por ese importe. 🔑 Inyectar el reloj **tampoco lo arreglaría**: los cobros del
+   * turno se agregan por `where: { shiftId }`, **sin filtro de fecha**, así que mover `endTime` no
+   * saca ni una fila de la suma. Lo que sí se puede hacer —y se hace— es que el importe quede
+   * escrito: `cobrosDespuesDelConteo` e `importeDespuesDelConteo` en el asiento de la bitácora.
+   * La firma del DINERO, en cambio, no diverge: `cashDifference` se calcula contra el
+   * `esperadoDelCajon` que se pasa aquí, que es el de la gaveta.
    */
   private gestoQueFalta(pareja: ReparacionDelCierre): Parameters<typeof cerrarTurnoDeCaja>[0] {
     const comun = {
@@ -213,7 +323,7 @@ export class CashClosePairReconcilerJob {
    * enterarse aunque tocarlo fuera peor. Se limita a un aviso por hora: una pareja atorada un día
    * entero escribiría 1,440 renglones y ahogaría justo la señal que quiere dar.
    */
-  private avisarDeLasAtoradas(bloqueadas: ParejaBloqueada[], now: Date): void {
+  private avisarDeLasAtoradas(bloqueadas: ParejaAtorada[], now: Date): void {
     if (bloqueadas.length === 0) return
     if (now.getTime() - this.ultimoAviso < AVISO_CADA_MS) return
     this.ultimoAviso = now.getTime()
