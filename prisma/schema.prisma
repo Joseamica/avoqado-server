@@ -6991,6 +6991,10 @@ enum CustomerCampaignDeliveryStatus {
   DEAD
   SKIPPED
   UNKNOWN
+  /// El correo SI se envio y el servidor del destinatario lo rechazo despues (rebote),
+  /// o el destinatario lo marco como spam. Es distinto de DEAD, que significa "se
+  /// agotaron los intentos de ENVIO": un FAILED ya paso por SENT.
+  FAILED
 }
 
 enum CustomerCampaignAudience {

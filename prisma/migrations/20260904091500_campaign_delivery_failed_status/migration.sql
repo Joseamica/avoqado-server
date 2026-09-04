@@ -1,0 +1,13 @@
+-- El código del webhook de campañas (y sus pruebas) ya escribía
+-- `CustomerCampaignDeliveryStatus.FAILED` desde el commit 3080fcac, pero ese valor
+-- nunca se agregó al enum: el cambio aterrizó a medias y dejó el typecheck roto.
+--
+-- FAILED no es lo mismo que DEAD. DEAD significa "se agotaron los intentos de ENVÍO"
+-- y lo escribe `campaignSender` tras `MAX_INTENTOS_ANTES_DE_DEAD`. FAILED es lo
+-- contrario: el correo SÍ salió (pasó por SENT) y el servidor del destinatario lo
+-- rechazó después, o el destinatario lo marcó como spam.
+--
+-- Es puramente aditivo: no toca ninguna fila existente ni cambia ningún default.
+-- `IF NOT EXISTS` lo hace idempotente — en PostgreSQL 12+ `ADD VALUE` puede correr
+-- dentro de la transacción de la migración mientras el valor nuevo no se USE aquí.
+ALTER TYPE "CustomerCampaignDeliveryStatus" ADD VALUE IF NOT EXISTS 'FAILED';
