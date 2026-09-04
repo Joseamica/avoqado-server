@@ -76,11 +76,11 @@ const VENUES_SIN_ID: Record<string, string> = {
   // René. Cada uno vive ahora en su tienda de zona (`separar-cubre-descanso-zonas.ts`).
   BSCBJOSE04: 'CUBRE DESCANSO ZONA SUR1', // José Lopes → Juan Nájera
   BESDICC9701: 'CUBRE DESCANSO ZONA NORTE1', // Carlos Vicente Díaz → René Cubos
+  BSCLOXH0405: 'CUBRE DESCANSO ZONA NORTE2', // Heavan Leigh López → René Cubos
 
-  // Respaldo para un relevo sin entrada propia. Apunta a SUR1 —la tienda que ya existía, sólo
-  // renombrada— a propósito: es donde están hoy, así que nadie se queda sin tienda mientras
-  // falte crear la ZONA NORTE2 de Heavan Leigh (BSCLOXH0405), que espera decisión sobre sus
-  // 140 ventas históricas. Cuando exista, se le añade su entrada propia aquí.
+  // Respaldo para un relevo NUEVO que todavía no tiene su zona. Apunta a SUR1 a propósito: es
+  // una tienda que existe y opera, así que nadie se queda sin tienda —y sin tienda no se puede
+  // cobrar—. Al alta de un relevo nuevo se le crea su zona y se le añade su entrada aquí.
   CUBRE_DESCANSO: 'CUBRE DESCANSO ZONA SUR1',
 }
 

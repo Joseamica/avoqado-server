@@ -16,12 +16,22 @@
  * Renombrarla a la zona de José deja quieto al que más vende: conserva sus ventas y su
  * terminal sin tocar nada. Carlos nace limpio (0 ventas, sin terminal).
  *
- * ⚠️ ALCANCE DE ESTE SCRIPT — sólo lo que NO depende de una respuesta pendiente de Isaac:
+ * ALCANCE:
  *   1. RENOMBRA "Cubre Descanso" → "CUBRE DESCANSO ZONA SUR1"
- *   2. CREA "CUBRE DESCANSO ZONA NORTE1" clonando el molde (VenuePaymentConfig + VenueModule)
+ *   2. CREA "ZONA NORTE1" y "ZONA NORTE2" clonando el molde (VenuePaymentConfig + VenueModule)
+ *   3. MUEVE la terminal de Heavan a su ZONA NORTE2
  *
- * NO hace la ZONA NORTE2 de Heavan: mover su terminal implica decidir antes qué pasa con sus
- * 140 ventas históricas, y esa respuesta todavía no llega. Se hace en una segunda pasada.
+ * 🔴 LAS VENTAS HISTÓRICAS NO SE TOCAN, y no es una omisión — lo contestó Isaac el 4-sep:
+ * «son 2 cosas distintas, las ventas por promotor y las ventas a nivel tienda». Medido contra
+ * la base: las 183 SIMs vendidas de Heavan conservan su `assignedPromoterId` en el 100% de los
+ * casos, repartidas en 8 tiendas. O sea que el eje PROMOTOR ya la sigue a donde vaya, sin mover
+ * un solo registro; el eje TIENDA se queda donde ocurrió la venta, que es lo correcto. Reasignar
+ * ventas entre tiendas es el proceso aparte que el propio Isaac reconoce pendiente.
+ *
+ * 🔴 LA TERMINAL SÍ se mueve, y es lo único que de verdad hacía falta: mientras siga parentada
+ * en SUR1, las ventas NUEVAS de Heavan seguirían cayendo en la tienda de José — el problema que
+ * ella reportó, repitiéndose mañana. Sólo cambia `Terminal.venueId`: las órdenes ya creadas
+ * llevan su propio `venueId` y no se recalculan.
  *
  * 🔴 Las ASIGNACIONES de personal NO se hacen aquí: las hace `conciliar-estructura-bait.ts`
  * a partir del Excel, con su mapa `VENUES_SIN_ID` por número de empleado. Este script sólo
@@ -47,6 +57,14 @@ const VENUE_COMPARTIDO_ID = 'cmnv_cubredescanso_playtelecom'
 const NOMBRE_SUR1 = 'CUBRE DESCANSO ZONA SUR1'
 const NOMBRE_NORTE1 = 'CUBRE DESCANSO ZONA NORTE1'
 const SLUG_NORTE1 = 'cubre-descanso-zona-norte1'
+const NOMBRE_NORTE2 = 'CUBRE DESCANSO ZONA NORTE2'
+const SLUG_NORTE2 = 'cubre-descanso-zona-norte2'
+
+// La terminal de Heavan Leigh (BSCLOXH0405). Identificada por sus ventas, no por su nombre:
+// las dos terminales de la tienda compartida se llaman igual que su serial, y confundirlas
+// mandaría las ventas de José a la zona equivocada. Medido el 4-sep: 148 ventas suyas con
+// ésta y 233 de José con AVQD-2841653399, sin un solo cruce.
+const TERMINAL_HEAVAN = 'AVQD-2840744203'
 const ACTOR_STAFF_ID = 'cmi9cku0c0005pr2d50egxd42' // quien ejecuta (auditoría)
 
 const strip = (o: any, keys: string[]) => {
@@ -71,6 +89,15 @@ async function main() {
     where: { organizationId: molde.organizationId, name: NOMBRE_NORTE1 },
     select: { id: true, name: true },
   })
+  const norte2Existente = await prisma.venue.findFirst({
+    where: { organizationId: molde.organizationId, name: NOMBRE_NORTE2 },
+    select: { id: true, name: true },
+  })
+  const terminalHeavan = await prisma.terminal.findFirst({
+    where: { serialNumber: TERMINAL_HEAVAN },
+    select: { id: true, venueId: true, serialNumber: true },
+  })
+  const terminalYaMovida = terminalHeavan !== null && terminalHeavan.venueId !== VENUE_COMPARTIDO_ID
 
   const pc = await prisma.venuePaymentConfig.findUnique({ where: { venueId: VENUE_COMPARTIDO_ID } })
   const mods = await prisma.venueModule.findMany({ where: { venueId: VENUE_COMPARTIDO_ID } })
@@ -91,11 +118,23 @@ async function main() {
       ? `  2. (ya hecho) "${NOMBRE_NORTE1}" ya existe [${norte1Existente.id}]`
       : `  2. CREAR "${NOMBRE_NORTE1}" (slug ${SLUG_NORTE1}) clonando config de pago y ${mods.length} módulos`,
   )
-  console.log(`  3. ActivityLog por cada mutación (actor ${ACTOR_STAFF_ID})`)
-  console.log(`  4. NO se toca la ZONA NORTE2 de Heavan — espera respuesta sobre sus 140 ventas`)
-  console.log(`  5. NO se asigna personal — eso lo hace el conciliador desde el Excel\n`)
+  console.log(
+    norte2Existente
+      ? `  3. (ya hecho) "${NOMBRE_NORTE2}" ya existe [${norte2Existente.id}]`
+      : `  3. CREAR "${NOMBRE_NORTE2}" (slug ${SLUG_NORTE2}) clonando config de pago y ${mods.length} módulos`,
+  )
+  console.log(
+    !terminalHeavan
+      ? `  4. ⚠️ NO encontré la terminal ${TERMINAL_HEAVAN} — se omite el traslado`
+      : terminalYaMovida
+        ? `  4. (ya hecho) la terminal ${TERMINAL_HEAVAN} ya salió de la tienda compartida`
+        : `  4. MOVER la terminal ${TERMINAL_HEAVAN} → "${NOMBRE_NORTE2}" (las ventas ya creadas no se recalculan)`,
+  )
+  console.log(`  5. ActivityLog por cada mutación (actor ${ACTOR_STAFF_ID})`)
+  console.log(`  6. NO se tocan las ventas históricas — decisión de Isaac (4-sep): promotor y tienda son ejes distintos`)
+  console.log(`  7. NO se asigna personal — eso lo hace el conciliador desde el Excel\n`)
 
-  if (yaRenombrado && norte1Existente) {
+  if (yaRenombrado && norte1Existente && norte2Existente && (terminalYaMovida || !terminalHeavan)) {
     console.log('✅ Nada que hacer: ya está aplicado.')
     return
   }
@@ -107,6 +146,7 @@ async function main() {
 
   const result = await prisma.$transaction(async tx => {
     let norte1Id = norte1Existente?.id ?? null
+    let norte2Id = norte2Existente?.id ?? null
 
     if (!yaRenombrado) {
       await tx.venue.update({ where: { id: VENUE_COMPARTIDO_ID }, data: { name: NOMBRE_SUR1 } })
@@ -127,12 +167,14 @@ async function main() {
       })
     }
 
-    if (!norte1Id) {
+    // Crear una zona clonando el molde. Se extrajo para que NORTE1 y NORTE2 nazcan
+    // idénticas: dos copias del mismo bloque divergen en cuanto alguien toca una sola.
+    const crearZona = async (nombre: string, slug: string, quien: string): Promise<string> => {
       const nuevo = await tx.venue.create({
         data: {
           organizationId: molde.organizationId,
-          name: NOMBRE_NORTE1,
-          slug: SLUG_NORTE1,
+          name: nombre,
+          slug,
           type: molde.type,
           timezone: molde.timezone,
           currency: molde.currency,
@@ -143,7 +185,6 @@ async function main() {
           active: true,
         },
       })
-      norte1Id = nuevo.id
 
       if (pc) {
         await tx.venuePaymentConfig.create({
@@ -170,22 +211,51 @@ async function main() {
           staffId: ACTOR_STAFF_ID,
           venueId: nuevo.id,
           data: {
-            name: NOMBRE_NORTE1,
-            slug: SLUG_NORTE1,
+            name: nombre,
+            slug,
             molde: VENUE_COMPARTIDO_ID,
             modulos: mods.length,
-            motivo: 'Cubre descanso por zona — Carlos Vicente Díaz (Asana 1217743599033214)',
+            motivo: `Cubre descanso por zona — ${quien} (Asana 1217743599033214)`,
+          },
+        },
+      })
+
+      return nuevo.id
+    }
+
+    if (!norte1Id) norte1Id = await crearZona(NOMBRE_NORTE1, SLUG_NORTE1, 'Carlos Vicente Díaz')
+    if (!norte2Id) norte2Id = await crearZona(NOMBRE_NORTE2, SLUG_NORTE2, 'Heavan Leigh López')
+
+    // 🔴 La terminal es lo que decide en qué tienda cae una venta NUEVA. Sin moverla, las
+    // ventas futuras de Heavan seguirían contándose en la tienda de José.
+    if (terminalHeavan && !terminalYaMovida) {
+      await tx.terminal.update({ where: { id: terminalHeavan.id }, data: { venueId: norte2Id } })
+      await tx.activityLog.create({
+        data: {
+          action: 'TERMINAL_VENUE_CHANGED',
+          entity: 'Terminal',
+          entityId: terminalHeavan.id,
+          staffId: ACTOR_STAFF_ID,
+          venueId: norte2Id,
+          data: {
+            serialNumber: terminalHeavan.serialNumber,
+            de: VENUE_COMPARTIDO_ID,
+            a: norte2Id,
+            promotor: 'Heavan Leigh López (BSCLOXH0405)',
+            motivo: 'Cubre descanso por zona: sus ventas nuevas deben caer en SU tienda (Asana 1217743599033214)',
+            ventasHistoricas: 'no se recalculan — conservan el venueId con el que se crearon',
           },
         },
       })
     }
 
-    return { norte1Id }
+    return { norte1Id, norte2Id }
   })
 
   console.log(`✅ HECHO.`)
   console.log(`   "${NOMBRE_SUR1}" → ${VENUE_COMPARTIDO_ID}`)
   console.log(`   "${NOMBRE_NORTE1}" → ${result.norte1Id}`)
+  console.log(`   "${NOMBRE_NORTE2}" → ${result.norte2Id}`)
   console.log(`\n🔴 SIGUIENTE: actualizar VENUES_SIN_ID en scripts/conciliar-estructura-bait.ts y correr el conciliador.`)
 }
 
