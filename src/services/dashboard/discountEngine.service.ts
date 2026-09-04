@@ -16,6 +16,7 @@ import { DEFAULT_TIMEZONE, isWithinVenueSchedule } from '@/utils/datetime'
 import { DiscountScope, DiscountType } from '@prisma/client'
 import { logAction } from './activity-log.service'
 import { computeStoredOrderTotal } from '../shared/orderBalance'
+import { baseDeCargos, recalcularCargosPorServicio } from '../shared/serviceCharges'
 
 // ==========================================
 // TYPES & INTERFACES
@@ -821,11 +822,16 @@ export async function applyDiscountToOrder(
     // y no de una suma escrita aquí. Escrita aquí OMITÍA `serviceChargeAmount`, que el schema
     // define como ingreso gravable que SUMA al total y entra al corte y al CFDI: descontar
     // borraba el cargo del total guardado hasta que un cobro posterior lo recalculaba.
+    // 🔴 MONEY: un cargo por servicio PORCENTUAL se mueve CON la base (subtotal − descuentos),
+    // y `order.serviceChargeAmount` es el snapshot CONGELADO. Regla compartida en
+    // `shared/serviceCharges.ts`; se persiste abajo porque `computeOrderBalance` —lo que de
+    // verdad se cobra— lee el snapshot y no las filas.
+    const newServiceChargeAmount = await recalcularCargosPorServicio(tx, orderId, baseDeCargos(subtotal, newDiscountAmount))
     const newTotal = computeStoredOrderTotal({
       subtotal,
       discountAmount: newDiscountAmount,
       taxAmount: newTaxAmount,
-      serviceChargeAmount: order.serviceChargeAmount,
+      serviceChargeAmount: newServiceChargeAmount,
       tipAmount: order.tipAmount,
     }).toNumber()
 
@@ -834,6 +840,7 @@ export async function applyDiscountToOrder(
       data: {
         discountAmount: newDiscountAmount,
         taxAmount: newTaxAmount,
+        serviceChargeAmount: newServiceChargeAmount,
         total: newTotal,
         remainingBalance: Math.max(0, newTotal - Number(order.paidAmount)),
       },
@@ -917,11 +924,15 @@ export async function removeDiscountFromOrder(orderId: string, orderDiscountId: 
     // Misma función que los caminos de APLICAR: era la última copia a mano de la regla, y
     // conservarla aparte es justo lo que dejó a los otros tres sin el cargo por servicio.
     // Gana además el clamp de la mercancía, que aquí faltaba.
+    // 🔴 MONEY: aquí la base SUBE (se quita un descuento), así que un cargo PORCENTUAL sube
+    // con ella y el error va en la dirección contraria a los demás caminos: con el snapshot
+    // congelado el total sale BAJO y el NEGOCIO cobra de menos. Confirmado por Codex.
+    const newServiceChargeAmount = await recalcularCargosPorServicio(tx, orderId, baseDeCargos(order.subtotal, newDiscountAmount))
     const newTotal = computeStoredOrderTotal({
       subtotal: order.subtotal,
       discountAmount: newDiscountAmount,
       taxAmount: newTaxAmount,
-      serviceChargeAmount: order.serviceChargeAmount,
+      serviceChargeAmount: newServiceChargeAmount,
       tipAmount: order.tipAmount,
     }).toNumber()
 
@@ -930,6 +941,7 @@ export async function removeDiscountFromOrder(orderId: string, orderDiscountId: 
       data: {
         discountAmount: newDiscountAmount,
         taxAmount: newTaxAmount,
+        serviceChargeAmount: newServiceChargeAmount,
         total: newTotal,
         remainingBalance: Math.max(0, newTotal - Number(order.paidAmount)),
       },
@@ -1093,11 +1105,16 @@ export async function applyManualDiscount(
     // cambia el cálculo de arriba.
     const newDiscountAmount = alreadyDiscounted + amount
     // 🔴 MONEY: misma regla compartida — sin ella este camino omitía `serviceChargeAmount`.
+    // 🔴 MONEY: un cargo por servicio PORCENTUAL se mueve CON la base (subtotal − descuentos),
+    // y `order.serviceChargeAmount` es el snapshot CONGELADO. Regla compartida en
+    // `shared/serviceCharges.ts`; se persiste abajo porque `computeOrderBalance` —lo que de
+    // verdad se cobra— lee el snapshot y no las filas.
+    const newServiceChargeAmount = await recalcularCargosPorServicio(tx, orderId, baseDeCargos(subtotal, newDiscountAmount))
     const newTotal = computeStoredOrderTotal({
       subtotal,
       discountAmount: newDiscountAmount,
       taxAmount: order.taxAmount,
-      serviceChargeAmount: order.serviceChargeAmount,
+      serviceChargeAmount: newServiceChargeAmount,
       tipAmount: order.tipAmount,
     }).toNumber()
 
@@ -1105,6 +1122,7 @@ export async function applyManualDiscount(
       where: { id: orderId },
       data: {
         discountAmount: newDiscountAmount,
+        serviceChargeAmount: newServiceChargeAmount,
         total: newTotal,
         remainingBalance: Math.max(0, newTotal - Number(order.paidAmount)),
       },

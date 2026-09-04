@@ -66,12 +66,43 @@ const totalGuardado = (): number => {
   return calls[calls.length - 1][0].data.total
 }
 
+/** El cargo por servicio que quedó guardado en la orden (el snapshot que lee el cobro). */
+const cargoGuardado = (): number => {
+  const calls = prismaMock.order.update.mock.calls
+  return calls[calls.length - 1][0].data.serviceChargeAmount
+}
+
+/** Un cargo de MONTO FIJO: no depende de la base, se respeta tal cual. */
+const filaFija = (amount: number) => ({
+  id: 'sc-fijo',
+  orderId: 'order-sc',
+  name: 'Descorche',
+  type: 'FIXED_AMOUNT',
+  value: new Decimal(amount),
+  amount: new Decimal(amount),
+})
+
+/** Un cargo PORCENTUAL: se recalcula sobre la base (subtotal − descuentos). */
+const filaPorcentual = (value: number, amount: number) => ({
+  id: 'sc-pct',
+  orderId: 'order-sc',
+  name: 'Servicio',
+  type: 'PERCENTAGE',
+  value: new Decimal(value),
+  amount: new Decimal(amount),
+})
+
 beforeEach(() => {
   jest.clearAllMocks()
   prismaMock.$transaction.mockImplementation(async (cb: (tx: typeof prismaMock) => Promise<any>) => cb(prismaMock))
   prismaMock.orderDiscount.create.mockResolvedValue({ id: 'od-1' } as never)
   prismaMock.order.update.mockResolvedValue({} as never)
   prismaMock.discount.update.mockResolvedValue({} as never)
+  // 🔴 Las FILAS son la verdad del cargo; el snapshot de la orden es una copia derivada.
+  // El default trae una fila de monto fijo que coincide con `ordenConCargo()`: un cargo que
+  // existe, existe como fila. Las pruebas del recálculo montan una fila PORCENTUAL.
+  prismaMock.orderServiceCharge.findMany.mockResolvedValue([filaFija(15)] as never)
+  prismaMock.orderServiceCharge.update.mockResolvedValue({} as never)
 })
 
 describe('Aplicar un descuento conserva el cargo por servicio en el total guardado', () => {
@@ -229,6 +260,12 @@ describe('🔴 Un impuesto NEGATIVO nunca resta de la cuenta (regresión de esta
    * impuesto inventado que el cliente nunca pagó. Qué significa un `taxAmount` negativo
    * guardado es una raíz PREEXISTENTE y va en su propia tarea.
    */
+  // Estas órdenes son sobre el IMPUESTO, no sobre el cargo: la mayoría no tiene cargo, así
+  // que tampoco tiene filas. La que sí lo tiene monta la suya.
+  beforeEach(() => {
+    prismaMock.orderServiceCharge.findMany.mockResolvedValue([] as never)
+  })
+
   it('🔴 cortesía de $253 sobre una cuenta con impuesto 0: total 0, NUNCA −40.48', async () => {
     prismaMock.order.findUnique.mockResolvedValue(
       ordenConCargo({ subtotal: new Decimal(253), serviceChargeAmount: new Decimal(0), total: new Decimal(253) }) as never,
@@ -257,9 +294,12 @@ describe('🔴 Un impuesto NEGATIVO nunca resta de la cuenta (regresión de esta
         subtotal: new Decimal(253),
         serviceChargeAmount: new Decimal(100),
         tipAmount: new Decimal(20),
+        // (su fila va justo debajo)
         total: new Decimal(373),
       }) as never,
     )
+    // Esta orden SÍ trae cargo ($100), así que trae su fila.
+    prismaMock.orderServiceCharge.findMany.mockResolvedValue([filaFija(100)] as never)
 
     const result = await applyDiscountToOrder('order-sc', {
       discountId: 'd-comp',
@@ -304,5 +344,119 @@ describe('🔴 Un impuesto NEGATIVO nunca resta de la cuenta (regresión de esta
   it('la contribución del impuesto se clampa por separado, sin tocar la mercancía', () => {
     // 100 de mercancía + 0 (no −30) = 100. Combinar los dos clamps daría 70.
     expect(computeStoredOrderTotal({ subtotal: 100, discountAmount: 0, taxAmount: -30 }).toNumber()).toBe(100)
+  })
+})
+
+// ── El defecto que quedaba vivo en los CUATRO caminos de descuento ────────────
+/**
+ * 🔴 MONEY — un cargo por servicio PORCENTUAL se mueve CON la base (subtotal − descuentos).
+ *
+ * Estos cuatro caminos pasaban a `computeStoredOrderTotal` el SNAPSHOT congelado
+ * `Order.serviceChargeAmount`, así que al mover el descuento el cargo se quedaba con el
+ * importe viejo. Es el mismo defecto que se cerró el 2026-09-03 en los tres caminos de la
+ * TPV (`compItems`, `applyDiscount`, `voidItems`), confirmado aquí por una auditoría de Codex.
+ *
+ * Las pruebas de arriba no lo veían porque TODAS usan un cargo de monto fijo: el recálculo
+ * sólo se observa con una fila PORCENTUAL de por medio.
+ */
+describe('🔴 cargo por servicio PORCENTUAL: se recalcula sobre la base nueva', () => {
+  it('applyCouponCode: $100 con 15% y cupón de $20 deja total $92, no $95', async () => {
+    prismaMock.order.findUnique.mockResolvedValue(ordenConCargo() as never)
+    prismaMock.orderServiceCharge.findMany.mockResolvedValue([filaPorcentual(15, 15)] as never)
+    validateCouponCode.mockResolvedValue({
+      valid: true,
+      coupon: {
+        id: 'cc-1',
+        code: 'PROMO20',
+        discount: { id: 'd-1', name: 'Promo', type: 'FIXED_AMOUNT' as DiscountType, value: 20, scope: 'ORDER', maxDiscountAmount: null },
+      },
+    })
+
+    const result = await applyCouponCode('venue-1', 'order-sc', 'PROMO20', 'sv-1')
+
+    // base = 100 − 20 = 80 → 15% = 12 → total 92. Con el snapshot congelado: 95.
+    expect(result.success).toBe(true)
+    expect(cargoGuardado()).toBe(12)
+    expect(totalGuardado()).toBe(92)
+  })
+
+  it('applyDiscountToOrder: el nuevo cargo se PERSISTE en la orden, no sólo en el total', async () => {
+    prismaMock.order.findUnique.mockResolvedValue(ordenConCargo() as never)
+    prismaMock.orderServiceCharge.findMany.mockResolvedValue([filaPorcentual(15, 15)] as never)
+
+    const result = await applyDiscountToOrder('order-sc', {
+      discountId: 'd-1',
+      name: 'Promo',
+      type: 'FIXED_AMOUNT' as DiscountType,
+      value: 20,
+      amount: 20,
+      taxReduction: 0,
+      applicableItems: [],
+      isAutomatic: false,
+      requiresApproval: false,
+    } as never)
+
+    // Sin persistir el snapshot el arreglo sería cosmético: `computeOrderBalance` —lo que de
+    // verdad se cobra— lee `Order.serviceChargeAmount`, no las filas.
+    expect(result.success).toBe(true)
+    expect(cargoGuardado()).toBe(12)
+    expect(totalGuardado()).toBe(92)
+  })
+
+  it('applyManualDiscount: un descuento manual también mueve el cargo', async () => {
+    prismaMock.order.findUnique.mockResolvedValue(ordenConCargo() as never)
+    prismaMock.orderServiceCharge.findMany.mockResolvedValue([filaPorcentual(15, 15)] as never)
+
+    const result = await applyManualDiscount('order-sc', 'FIXED_AMOUNT' as DiscountType, 20, 'Cortesía parcial', 'staff-1')
+
+    expect(result.success).toBe(true)
+    expect(cargoGuardado()).toBe(12)
+    expect(totalGuardado()).toBe(92)
+  })
+
+  it('🔴 removeDiscountFromOrder: al QUITAR el descuento la base sube y el cargo SUBE con ella', async () => {
+    // La dirección contraria a los otros tres: aquí el snapshot congelado dejaba el total
+    // BAJO y el negocio cobraba de MENOS.
+    prismaMock.orderDiscount.findFirst.mockResolvedValue({
+      id: 'od-1',
+      orderId: 'order-sc',
+      discountId: null,
+      amount: new Decimal(20),
+      taxReduction: new Decimal(0),
+      name: 'Promo',
+    } as never)
+    prismaMock.order.findUnique.mockResolvedValue(
+      ordenConCargo({ discountAmount: new Decimal(20), serviceChargeAmount: new Decimal(12), total: new Decimal(92) }) as never,
+    )
+    prismaMock.orderDiscount.delete.mockResolvedValue({} as never)
+    prismaMock.orderServiceCharge.findMany.mockResolvedValue([filaPorcentual(15, 12)] as never)
+
+    const result = await removeDiscountFromOrder('order-sc', 'od-1')
+
+    // base vuelve a 100 → 15% = 15 → total 115. Con el snapshot congelado: 112.
+    expect(result.success).toBe(true)
+    expect(cargoGuardado()).toBe(15)
+    expect(totalGuardado()).toBe(115)
+  })
+
+  it('un cargo de MONTO FIJO no se toca aunque cambie la base', async () => {
+    prismaMock.order.findUnique.mockResolvedValue(ordenConCargo({ serviceChargeAmount: new Decimal(50) }) as never)
+    prismaMock.orderServiceCharge.findMany.mockResolvedValue([filaFija(50)] as never)
+
+    await applyManualDiscount('order-sc', 'FIXED_AMOUNT' as DiscountType, 20, 'Promo', 'staff-1')
+
+    expect(cargoGuardado()).toBe(50)
+    expect(totalGuardado()).toBe(130) // 80 de mercancía + 50 de descorche
+    expect(prismaMock.orderServiceCharge.update).not.toHaveBeenCalled()
+  })
+
+  it('🔴 SIN filas el cargo es 0: un snapshot huérfano no se conserva', async () => {
+    prismaMock.order.findUnique.mockResolvedValue(ordenConCargo() as never)
+    prismaMock.orderServiceCharge.findMany.mockResolvedValue([] as never)
+
+    await applyManualDiscount('order-sc', 'FIXED_AMOUNT' as DiscountType, 20, 'Promo', 'staff-1')
+
+    expect(cargoGuardado()).toBe(0)
+    expect(totalGuardado()).toBe(80)
   })
 })

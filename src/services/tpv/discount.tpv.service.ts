@@ -14,6 +14,7 @@ import { DiscountType } from '@prisma/client'
 import * as discountEngine from '@/services/dashboard/discountEngine.service'
 import * as couponService from '@/services/dashboard/coupon.dashboard.service'
 import { computeStoredOrderTotal } from '@/services/shared/orderBalance'
+import { baseDeCargos, recalcularCargosPorServicio } from '../shared/serviceCharges'
 
 // ==========================================
 // TYPES & INTERFACES
@@ -444,11 +445,16 @@ export async function applyCouponCode(
     // Escrita a mano OMITÍA `serviceChargeAmount` —ingreso gravable que SUMA al total y entra
     // al corte y al CFDI—, así que aplicar un cupón borraba el cargo del total guardado.
     const newDiscountAmount = alreadyDiscounted + discountAmount
+    // 🔴 MONEY: un cargo por servicio PORCENTUAL se mueve CON la base (subtotal − descuentos),
+    // y `order.serviceChargeAmount` es el snapshot CONGELADO. Regla compartida en
+    // `shared/serviceCharges.ts`; se persiste abajo porque `computeOrderBalance` —lo que de
+    // verdad se cobra— lee el snapshot y no las filas.
+    const newServiceChargeAmount = await recalcularCargosPorServicio(tx, orderId, baseDeCargos(subtotal, newDiscountAmount))
     const newTotal = computeStoredOrderTotal({
       subtotal,
       discountAmount: newDiscountAmount,
       taxAmount: order.taxAmount,
-      serviceChargeAmount: order.serviceChargeAmount,
+      serviceChargeAmount: newServiceChargeAmount,
       tipAmount: order.tipAmount,
     }).toNumber()
 
@@ -456,6 +462,7 @@ export async function applyCouponCode(
       where: { id: orderId },
       data: {
         discountAmount: newDiscountAmount,
+        serviceChargeAmount: newServiceChargeAmount,
         total: newTotal,
         remainingBalance: Math.max(0, newTotal - Number(order.paidAmount)),
       },
