@@ -127,9 +127,7 @@ describe('campañas — gate de plan (CUSTOMER_CAMPAIGNS)', () => {
   it('🔴 el gate cubre también PUBLICAR, que es lo que manda los correos', async () => {
     venueFindUnique.mockResolvedValue({ seatCapExempt: false, status: 'ACTIVE' })
 
-    const res = await request(server)
-      .post(`${LISTA}/clv2000000000000000000000/publish`)
-      .send({ token: 'x' })
+    const res = await request(server).post(`${LISTA}/clv2000000000000000000000/publish`).send({ token: 'x' })
 
     expect(res.status).toBe(403)
     expect(res.body.featureCode).toBe('CUSTOMER_CAMPAIGNS')
