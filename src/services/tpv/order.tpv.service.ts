@@ -2461,39 +2461,62 @@ interface CompItemsInput {
  * `recalcOrderTotals` (`comp-item.mobile.service.ts`); aquí vive UNA vez para que los tres
  * caminos que la llaman no puedan volver a divergir.
  *
- * 🔴 SIN filas se conserva el SNAPSHOT, no se pone 0. Un `Order.serviceChargeAmount` > 0
- * sin filas es un estado defensivo —hoy nadie lo produce por el camino de la TPV, donde
- * las filas nacen en `service-charge.mobile.service.ts`— y ponerlo en 0 regalaría el
- * ingreso: exactamente el defecto que este archivo acababa de cerrar. Mismo criterio que el
- * respaldo del DESCUENTO en `removeOrderItem` («sin filas, conserva lo que la orden traía»).
+ * 🔴 Las FILAS son la verdad; `Order.serviceChargeAmount` es una copia derivada de ellas.
+ * Sin filas el importe es 0 — NO se conserva el snapshot. Lo contrario (conservarlo) fue la
+ * primera versión de esta función y lo tumbó la auditoría de Codex del 2026-09-03 con dos
+ * argumentos mejores que el mío:
+ *
+ * 1. La MISMA orden cobraría distinto según qué mutador corra: `removeOrderItem` y
+ *    `addItemsToOrder` (este archivo) y `recalcOrderTotals` (`comp-item.mobile.service.ts`)
+ *    suman sólo las filas y dan 0 cuando no hay ninguna.
+ * 2. Un snapshot > 0 sin filas no es un estado «defensivo»: es un estado ROTO con causa
+ *    conocida. `removeServiceCharge` (`service-charge.mobile.service.ts`) borra la fila y
+ *    recalcula DESPUÉS, fuera de transacción; si ese recálculo falla, conservar el snapshot
+ *    cobra para siempre un cargo que ya se borró. Calcular 0 sana el estado.
+ *
+ * ⚠️ Y la justificación que tenía escrita aquí era FALSA: decía que el campo puede llegar
+ * nulo, cuando el schema lo declara `Decimal @default(0)`, obligatorio.
+ *
+ * 🔴 La aritmética va en `Prisma.Decimal`, no en `Number`. Con punto flotante,
+ * `Math.round(((10.05 * 10) / 100) * 100) / 100` da **1.00** cuando corresponde **1.01**
+ * (10.05 × 10% cae en 1.00499… en binario). Un centavo por cobro. Los otros tres sitios del
+ * repo siguen con la versión de `Number`: divergencia deliberada, y la dirección correcta.
  *
  * @param db la transacción de quien llama: el recálculo y el `order.update` que lo consume
  *           tienen que caer o persistir JUNTOS, o queda la fila nueva con el total viejo.
  * @param base `max(0, subtotal − descuentos)` YA calculada por quien llama.
  */
-async function recalcServiceChargesOnBase(
-  db: Prisma.TransactionClient,
-  orderId: string,
-  base: number,
-  snapshotAmount: Prisma.Decimal | number | null | undefined,
-): Promise<number> {
-  const charges = await db.orderServiceCharge.findMany({ where: { orderId } })
-  // `?? 0` NO es cosmético: una orden sin cargo trae el campo nulo, y `Number(undefined)` es
-  // NaN — que escrito en `Order.total` es dinero ilegible, no un total equivocado. Misma
-  // semántica que el `dec()` de `computeStoredOrderTotal` (`value == null ? 0 : …`).
-  if (charges.length === 0) return Number(snapshotAmount ?? 0)
+/**
+ * La base de los cargos por servicio: `max(0, subtotal − descuentos)`, en `Prisma.Decimal`.
+ *
+ * 🔴 Calcularla con `Number` es donde nace la deriva del centavo, ANTES de llegar al
+ * porcentaje: `100 - 89.95` da `10.049999999999997` en punto flotante, y el 10% de eso
+ * redondea a 1.00 cuando corresponde 1.01. `Decimal` construye desde la representación
+ * decimal del número, así que la resta da 10.05 exacto.
+ */
+function baseDeCargos(subtotal: Prisma.Decimal | number, descuento: Prisma.Decimal | number): Prisma.Decimal {
+  const base = new Prisma.Decimal(subtotal).minus(descuento)
+  return base.isNegative() ? new Prisma.Decimal(0) : base
+}
 
-  let total = 0
+async function recalcServiceChargesOnBase(db: Prisma.TransactionClient, orderId: string, base: Prisma.Decimal | number): Promise<number> {
+  const charges = await db.orderServiceCharge.findMany({ where: { orderId } })
+  const baseDec = new Prisma.Decimal(base)
+
+  let total = new Prisma.Decimal(0)
   for (const charge of charges) {
     // Un % se re-calcula cuando cambia la cuenta; un MONTO FIJO (descorche, entrega) se
     // respeta tal cual — no depende de cuánto se consumió.
-    const amount = charge.type === 'PERCENTAGE' ? Math.round(((base * Number(charge.value)) / 100) * 100) / 100 : Number(charge.amount)
-    if (charge.type === 'PERCENTAGE' && amount !== Number(charge.amount)) {
+    const amount =
+      charge.type === 'PERCENTAGE'
+        ? baseDec.mul(charge.value).div(100).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
+        : new Prisma.Decimal(charge.amount)
+    if (charge.type === 'PERCENTAGE' && !amount.equals(charge.amount)) {
       await db.orderServiceCharge.update({ where: { id: charge.id }, data: { amount } })
     }
-    total += amount
+    total = total.plus(amount)
   }
-  return Math.round(total * 100) / 100
+  return total.toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP).toNumber()
 }
 
 /**
@@ -2588,12 +2611,7 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
     // 🔴 MONEY: la cortesía baja la base, así que un cargo por servicio PORCENTUAL baja con
     // ella (auditoría 2026-09-03). El snapshot `order.serviceChargeAmount` está congelado:
     // usarlo dejaba el total alto y el cliente pagaba de más.
-    const newServiceChargeAmount = await recalcServiceChargesOnBase(
-      tx,
-      orderId,
-      Math.max(0, Number(order.subtotal) - newDiscountAmount),
-      order.serviceChargeAmount,
-    )
+    const newServiceChargeAmount = await recalcServiceChargesOnBase(tx, orderId, baseDeCargos(order.subtotal, newDiscountAmount))
 
     // 🔴 MONEY: el total sale de `computeStoredOrderTotal` —la ÚNICA definición de la regla—
     // y no de una resta escrita aquí. Escrita aquí OMITÍA `serviceChargeAmount` y `tipAmount`:
@@ -2849,11 +2867,17 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
     // él (auditoría 2026-09-03). El descuento acumulado entra a la base, igual que en
     // `removeOrderItem`.
     //
-    // Anular TODO cancela la orden: no se cobra nada, el total va a 0 y los cargos NO se
-    // tocan — escribir un cargo en una orden muerta sólo podría confundir. Declarado.
-    const newServiceChargeAmount = isVoidingAllItems
-      ? Number(order.serviceChargeAmount)
-      : await recalcServiceChargesOnBase(tx, orderId, Math.max(0, newSubtotal - Number(order.discountAmount)), order.serviceChargeAmount)
+    // 🔴 Anular TODO cancela la orden, y ahí no basta con `total = 0` (auditoría de Codex,
+    // 2026-09-03): el cobro móvil selecciona `paymentStatus` y NI SIQUIERA lee `status`, así
+    // que una orden CANCELLED no se rechaza; después reconstruye el saldo con
+    // `computeOrderBalance`, que suma `Order.serviceChargeAmount`. Un snapshot superviviente
+    // de $15 vuelve a presentar $15 por cobrar sobre una cuenta cancelada.
+    //
+    // Con la base en 0 los cargos porcentuales se recalculan a 0, y el snapshot se guarda en
+    // 0: la orden queda en CERO COBRABLE, no sólo con el total en 0.
+    const baseParaCargos = isVoidingAllItems ? new Prisma.Decimal(0) : baseDeCargos(newSubtotal, order.discountAmount)
+    const cargosRecalculados = await recalcServiceChargesOnBase(tx, orderId, baseParaCargos)
+    const newServiceChargeAmount = isVoidingAllItems ? 0 : cargosRecalculados
 
     newTotal = isVoidingAllItems
       ? 0
@@ -2869,8 +2893,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       where: { id: orderId },
       data: {
         subtotal: newSubtotal,
-        // Anular TODO no toca el snapshot del cargo (ver arriba): el total ya va a 0.
-        ...(isVoidingAllItems ? {} : { serviceChargeAmount: newServiceChargeAmount }),
+        serviceChargeAmount: newServiceChargeAmount,
         total: newTotal,
         remainingBalance: newRemainingBalance,
         // ⭐ If voiding all items, auto-close order (Toast/Square pattern)
@@ -3136,12 +3159,7 @@ export async function applyDiscount(
     // 🔴 MONEY: el descuento baja la base, así que un cargo por servicio PORCENTUAL baja con
     // ella (auditoría 2026-09-03). El snapshot `order.serviceChargeAmount` está congelado:
     // usarlo dejaba el total alto y el cliente pagaba de más ($95 donde correspondían $92).
-    const newServiceChargeAmount = await recalcServiceChargesOnBase(
-      tx,
-      orderId,
-      Math.max(0, Number(order.subtotal) - newDiscountAmount),
-      order.serviceChargeAmount,
-    )
+    const newServiceChargeAmount = await recalcServiceChargesOnBase(tx, orderId, baseDeCargos(order.subtotal, newDiscountAmount))
 
     // 🔴 MONEY: misma regla compartida que la cortesía de arriba y que los caminos de descuento
     // del dashboard. La resta escrita a mano se dejaba fuera el cargo por servicio y la propina.

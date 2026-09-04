@@ -145,6 +145,16 @@ function ordenActualizada(overrides: Record<string, unknown> = {}) {
   }
 }
 
+/** Una fila de cargo de MONTO FIJO: no depende de la base, se respeta tal cual. */
+function filaFija(amount: number, id = 'sc-fijo') {
+  return { id, orderId: ORDER_ID, name: 'Descorche', type: 'FIXED_AMOUNT', value: new Decimal(amount), amount: new Decimal(amount) }
+}
+
+/** Una fila de cargo PORCENTUAL: se recalcula sobre la base (subtotal − descuentos). */
+function filaPorcentual(value: number, amount: number, id = 'sc-pct') {
+  return { id, orderId: ORDER_ID, name: 'Servicio', type: 'PERCENTAGE', value: new Decimal(value), amount: new Decimal(amount) }
+}
+
 /** Lo último que se escribió en `Order` — donde vive el total guardado. */
 function datosGuardados(): Record<string, any> {
   const calls = mockPrisma.order.update.mock.calls
@@ -157,9 +167,11 @@ beforeEach(() => {
   mockPrisma.orderItem.update.mockResolvedValue({})
   mockPrisma.staff.findUnique.mockResolvedValue({ id: STAFF_ID })
   mockPrisma.order.update.mockResolvedValue(ordenActualizada())
-  // Por default NO hay filas de cargo: el importe sale del snapshot `Order.serviceChargeAmount`,
-  // que es justo el estado que ejercitan las pruebas de arriba.
-  mockPrisma.orderServiceCharge.findMany.mockResolvedValue([])
+  // 🔴 Las FILAS son la representación canónica del cargo (auditoría de Codex, 2026-09-03):
+  // el importe se calcula SIEMPRE desde ellas, nunca desde el snapshot de la orden. Por eso
+  // el default trae una fila de monto fijo que coincide con `ordenConCargo().serviceChargeAmount`
+  // — un cargo que existe, existe como fila. Las pruebas que necesitan otro importe montan la suya.
+  mockPrisma.orderServiceCharge.findMany.mockResolvedValue([filaFija(15)])
   mockPrisma.orderServiceCharge.update.mockResolvedValue({})
 })
 
@@ -203,6 +215,7 @@ describe('compItems — la cortesía se come la mercancía, NUNCA el cargo ni la
         items: [{ id: 'item-1', productName: 'Mesa', product: { name: 'Mesa' }, sentToKitchenAt: null, total: new Decimal(253) }],
       }),
     )
+    mockPrisma.orderServiceCharge.findMany.mockResolvedValue([filaFija(30)])
 
     await compItems(VENUE_ID, ORDER_ID, { itemIds: [], reason: 'Cortesía', staffId: STAFF_ID })
 
@@ -261,6 +274,7 @@ describe('applyDiscount — descontar conserva el cargo por servicio y la propin
         serviceChargeAmount: new Decimal(30),
       }),
     )
+    mockPrisma.orderServiceCharge.findMany.mockResolvedValue([filaFija(30)])
 
     await applyDiscount(VENUE_ID, ORDER_ID, descuentoFijo(253))
 
@@ -369,6 +383,7 @@ describe('voidItems — anular platos no puede dejar la cuenta en NEGATIVO ni bo
 
   it('regresión: sin cargos ni descuento, anular deja el subtotal restante', async () => {
     mockPrisma.order.findUnique.mockResolvedValue(ordenConCargo({ serviceChargeAmount: new Decimal(0) }))
+    mockPrisma.orderServiceCharge.findMany.mockResolvedValue([])
 
     await voidItems(VENUE_ID, ORDER_ID, anular(['item-1']))
 
@@ -408,23 +423,8 @@ describe('voidItems — anular platos no puede dejar la cuenta en NEGATIVO ni bo
  * respetan tal cual.
  */
 describe('🔴 cargo por servicio PORCENTUAL: se recalcula sobre la base nueva', () => {
-  const cargoPorcentual = (value: number, amount: number, id = 'sc-pct') => ({
-    id,
-    orderId: ORDER_ID,
-    name: 'Servicio',
-    type: 'PERCENTAGE',
-    value: new Decimal(value),
-    amount: new Decimal(amount),
-  })
-
-  const cargoFijo = (amount: number, id = 'sc-fijo') => ({
-    id,
-    orderId: ORDER_ID,
-    name: 'Descorche',
-    type: 'FIXED_AMOUNT',
-    value: new Decimal(amount),
-    amount: new Decimal(amount),
-  })
+  const cargoPorcentual = filaPorcentual
+  const cargoFijo = filaFija
 
   /** Lo que se escribió en la fila de cargo (o `undefined` si nadie la tocó). */
   function cargoGuardado(): Record<string, any> | undefined {
@@ -459,7 +459,11 @@ describe('🔴 cargo por servicio PORCENTUAL: se recalcula sobre la base nueva',
       await applyDiscount(VENUE_ID, ORDER_ID, descuentoFijo(20))
 
       // Sin persistir la fila, el siguiente recálculo parte de un 15 que ya no es cierto.
-      expect(cargoGuardado()).toEqual({ where: { id: 'sc-pct' }, data: { amount: 12 } })
+      // El importe viaja como `Prisma.Decimal` (la aritmética del helper), así que se compara
+      // por valor y no por identidad de objeto.
+      const guardadoEnLaFila = cargoGuardado()!
+      expect(guardadoEnLaFila.where).toEqual({ id: 'sc-pct' })
+      expect(Number(guardadoEnLaFila.data.amount)).toBe(12)
       // 🔴 Y sin persistir el snapshot el arreglo sería COSMÉTICO: `computeOrderBalance`
       // —lo que de verdad se cobra— lee `Order.serviceChargeAmount`, no las filas.
       expect(datosGuardados().serviceChargeAmount).toBe(12)
@@ -513,18 +517,41 @@ describe('🔴 cargo por servicio PORCENTUAL: se recalcula sobre la base nueva',
       expect(datosGuardados().total).toBe(76.67)
     })
 
-    it('🔴 SIN filas de cargo se conserva el snapshot: un cargo no puede evaporarse', async () => {
-      // Estado defensivo: `Order.serviceChargeAmount` > 0 sin filas. Recalcular «desde las
-      // filas» a secas lo pondría en 0 y regalaría el ingreso — exactamente el defecto que
-      // el commit anterior acababa de cerrar. Mismo criterio que el respaldo del DESCUENTO
-      // en `removeOrderItem` («si no hay filas, conserva lo que la orden ya traía»).
+    it('🔴 SIN filas el cargo es 0: un snapshot huérfano NO se conserva', async () => {
+      // Auditoría de Codex (2026-09-03), y me hizo cambiar de opinión. Yo conservaba el
+      // snapshot «para que un cargo no se evapore». Dos argumentos lo tumban:
+      //
+      // 1. La MISMA orden cobraría distinto según qué función corra: `removeOrderItem` y
+      //    `addItemsToOrder` (este archivo) y `recalcOrderTotals` (móvil) calculan sólo desde
+      //    las filas y dan 0 cuando no hay.
+      // 2. Un snapshot sin filas es un estado ROTO con causa conocida: `removeServiceCharge`
+      //    (`service-charge.mobile.service.ts`) borra la fila y recalcula DESPUÉS, fuera de
+      //    transacción. Si el recálculo falla, conservar el snapshot cobra para siempre un
+      //    cargo que ya se borró. Calcular 0 sana ese estado en la siguiente operación.
+      //
+      // Las filas son la verdad. El snapshot es una copia derivada de ellas.
       mockPrisma.order.findUnique.mockResolvedValue(ordenConCargo())
       mockPrisma.orderServiceCharge.findMany.mockResolvedValue([])
 
       await applyDiscount(VENUE_ID, ORDER_ID, descuentoFijo(20))
 
-      expect(datosGuardados().total).toBe(95) // 80 + los 15 del snapshot
+      expect(datosGuardados().serviceChargeAmount).toBe(0)
+      expect(datosGuardados().total).toBe(80) // sólo la mercancía
       expect(mockPrisma.orderServiceCharge.update).not.toHaveBeenCalled()
+    })
+
+    it('🔴 redondeo al centavo: 10% de 10.05 son 1.01, no 1.00', async () => {
+      // Con aritmética de punto flotante `Math.round(((10.05 * 10) / 100) * 100) / 100` da
+      // 1.00, porque 10.05 × 10% cae en 1.00499999… en binario. Un centavo por cobro, en el
+      // camino del dinero. El helper usa `Prisma.Decimal`, que no tiene esa deriva.
+      mockPrisma.order.findUnique.mockResolvedValue(ordenConCargo())
+      mockPrisma.orderServiceCharge.findMany.mockResolvedValue([cargoPorcentual(10, 15)])
+
+      await applyDiscount(VENUE_ID, ORDER_ID, descuentoFijo(89.95))
+
+      // base = 100 − 89.95 = 10.05 → 10% = 1.005 → 1.01 (medio hacia arriba)
+      expect(datosGuardados().serviceChargeAmount).toBe(1.01)
+      expect(datosGuardados().total).toBe(11.06)
     })
 
     it('la fila y la orden se escriben DENTRO de la misma transacción', async () => {
@@ -622,18 +649,26 @@ describe('🔴 cargo por servicio PORCENTUAL: se recalcula sobre la base nueva',
       expect(datosGuardados().total).toBe(17.25)
     })
 
-    it('anular TODOS los platos cancela la orden en 0 y NO toca las filas de cargo', async () => {
-      // Decisión declarada: la orden se CANCELA, no se cobra nada y el camino queda
-      // idéntico al de hoy. Recalcular ahí sólo podría escribir un cargo en una orden
-      // que nadie va a pagar.
+    it('🔴 anular TODOS los platos deja la orden en CERO COBRABLE, no sólo con total 0', async () => {
+      // Auditoría de Codex (2026-09-03): yo declaré «la orden se cancela, no se cobra nada»
+      // como decisión. Era un HUECO, y la premisa estaba mal.
+      //
+      // El cobro móvil (`order.mobile.service.ts`) selecciona `paymentStatus` y NI SIQUIERA
+      // lee `status`: sólo rechaza si la orden ya está pagada. Después reconstruye el saldo
+      // con `computeOrderBalance`, que suma `Order.serviceChargeAmount` — el SNAPSHOT. Una
+      // orden cancelada que conserva su snapshot en $15 vuelve a presentar $15 por cobrar.
+      //
+      // Por eso no basta con `total = 0`: el snapshot tiene que ir a 0 también.
       mockPrisma.order.findUnique.mockResolvedValue(ordenConCargo())
       mockPrisma.orderServiceCharge.findMany.mockResolvedValue([cargoPorcentual(15, 15)])
 
       await voidItems(VENUE_ID, ORDER_ID, anular(['item-1', 'item-2']))
 
-      expect(datosGuardados().status).toBe('CANCELLED')
-      expect(datosGuardados().total).toBe(0)
-      expect(mockPrisma.orderServiceCharge.update).not.toHaveBeenCalled()
+      const guardado = datosGuardados()
+      expect(guardado.status).toBe('CANCELLED')
+      expect(guardado.total).toBe(0)
+      expect(guardado.serviceChargeAmount).toBe(0) // ← lo que faltaba
+      expect(guardado.remainingBalance).toBe(0)
     })
 
     it('la fila y la orden se escriben DENTRO de la misma transacción', async () => {
