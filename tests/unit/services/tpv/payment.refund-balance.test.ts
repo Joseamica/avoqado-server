@@ -159,7 +159,7 @@ describe('recordOrderPayment (TPV) — un reembolso previo no reabre saldo', () 
         activityLog: { create: prisma.activityLog.create },
         areaTicketCheckoutSession: { findFirst: jest.fn().mockResolvedValue(null) },
         areaTicketPaymentAttempt: { findUnique: jest.fn().mockResolvedValue(null) },
-        $queryRaw: jest.fn().mockResolvedValue([]),
+        $queryRaw: jest.fn().mockResolvedValue([{ id: ORDER_ID }]),
       }),
     )
   })

@@ -163,7 +163,7 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
         areaTicketPaymentAttempt: {
           findUnique: jest.fn().mockResolvedValue(null),
         },
-        $queryRaw: jest.fn().mockResolvedValue([]),
+        $queryRaw: jest.fn().mockResolvedValue([{ id: mockOrderId }]),
       }
       return callback(tx)
     })

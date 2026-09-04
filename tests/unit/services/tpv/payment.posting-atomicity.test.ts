@@ -207,7 +207,7 @@ beforeEach(() => {
         updateMany: prisma.areaTicketPaymentAttempt.updateMany,
       },
       inventoryPosting: prisma.inventoryPosting,
-      $queryRaw: jest.fn().mockResolvedValue([]),
+      $queryRaw: jest.fn().mockResolvedValue([{ id: ORDER_ID }]),
     }
     record.client = tx
     transacciones.push(record)

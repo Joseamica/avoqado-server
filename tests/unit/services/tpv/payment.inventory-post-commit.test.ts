@@ -224,7 +224,7 @@ beforeEach(() => {
         findFirst: prisma.areaTicketPaymentAttempt.findFirst,
         updateMany: prisma.areaTicketPaymentAttempt.updateMany,
       },
-      $queryRaw: jest.fn().mockResolvedValue([]),
+      $queryRaw: jest.fn().mockResolvedValue([{ id: ORDER_ID }]),
     }
     return callback(tx)
   })
