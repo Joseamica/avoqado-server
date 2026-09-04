@@ -63,6 +63,8 @@ describe('discountEngine.applyDiscountToOrder — audit capture', () => {
     prismaMock.orderDiscount.create.mockResolvedValue({ id: 'od-new' })
     prismaMock.order.update.mockResolvedValue(makeOrder())
     prismaMock.discount.update.mockResolvedValue({})
+    // Los caminos de descuento ahora recalculan los cargos por servicio: sin filas, 0.
+    prismaMock.orderServiceCharge.findMany.mockResolvedValue([])
   })
 
   it('fires DISCOUNT_APPLIED with correct fields on successful apply', async () => {

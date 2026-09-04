@@ -136,6 +136,8 @@ const createMockDbDiscount = (overrides: Record<string, any> = {}) => ({
 
 describe('Discount Engine Service', () => {
   beforeEach(() => {
+    // Los caminos de descuento ahora recalculan los cargos por servicio: sin filas, 0.
+    prismaMock.orderServiceCharge.findMany.mockResolvedValue([])
     jest.clearAllMocks()
   })
 
@@ -1119,6 +1121,11 @@ describe('Discount Engine Service', () => {
       prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<any>) => callback(prismaMock))
       prismaMock.orderDiscount.findFirst.mockResolvedValue(mockOrderDiscount)
       prismaMock.order.findUnique.mockResolvedValue(mockOrder)
+      // El cargo de $20 de esta orden existe como FILA: las filas son la verdad del cargo,
+      // y el snapshot de la orden es la copia derivada que este camino recalcula y persiste.
+      prismaMock.orderServiceCharge.findMany.mockResolvedValue([
+        { id: 'sc-1', orderId: mockOrder.id, name: 'Servicio', type: 'FIXED_AMOUNT', value: new Decimal(20), amount: new Decimal(20) },
+      ])
       prismaMock.orderDiscount.delete.mockResolvedValue(mockOrderDiscount)
       prismaMock.order.update.mockResolvedValue(mockOrder)
 
