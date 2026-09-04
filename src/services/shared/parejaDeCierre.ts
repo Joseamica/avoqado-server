@@ -243,9 +243,21 @@ export type LectorDeParejas = Pick<PrismaClient, 'cashDrawerSession' | 'shift'>
  * abierto que empezó antes de que la gaveta cerrara»— parece más generosa y es justo la que puede
  * MEZCLAR JORNADAS, que es el daño que este barrido existe para evitar: la forma real de producción
  * (Testarudo, 1-sep) es una caja abierta a las 07:38 y un turno a las 08:12, así que ningún filtro
- * por tiempo distingue con seguridad «su turno» de «el turno de después». Una pareja sin ligar no se
- * repara y se reporta; la liga la pone `asegurarLaLiga` antes del primer commit, así que la
- * población sin ligar es la histórica y no crece.
+ * por tiempo distingue con seguridad «su turno» de «el turno de después».
+ *
+ * 🔴 **Y el precio de esa decisión hay que decirlo entero: una pareja sin ligar no se repara Y NO SE
+ * VE** — este filtro la deja fuera, así que ni siquiera sale en `bloqueadas`. `asegurarLaLiga`
+ * reduce la población, pero **NO la congela**, y afirmar lo contrario sería el mismo error de
+ * escribir la garantía en el comentario en vez de en el código:
+ *
+ *   · `asegurarLaLiga` es **best-effort a propósito** (nunca lanza, para no tumbar un cierre bueno),
+ *     así que un cierre puede commitear con la liga sin escribir;
+ *   · y `abrirTurnoDeCaja` deja **deliberadamente** sin ligar la segunda gaveta de un turno reusado
+ *     («nunca se roba una liga»), que es exactamente la gaveta que nace después de una pareja
+ *     partida.
+ *
+ * O sea que el caso que más necesita reparación es también el que puede quedar invisible. Cerrar ese
+ * hueco pide otra cosa —una liga que admita el historial, o una tabla de trabajo—, y no está hecho.
  *
  * ⚠️ La ventana `since` acota el barrido: el criterio no tiene índice que sirva y sin tope cada
  * pasada recorrería la historia entera de cajones. Es el mismo recurso de `paid-order-reconciler`.
