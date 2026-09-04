@@ -23,6 +23,19 @@ const OPENED_B = new Date('2026-09-02T08:00:00.000Z')
 
 type Drawer = ReturnType<typeof drawer>
 
+/**
+ * El `overShort` que se escribió en la gaveta.
+ *
+ * `find` devuelve `T | undefined` y los tres sitios lo indexaban directo: TypeScript lo
+ * marca, y en ejecución habría reventado con un `TypeError` ilegible. Aquí falla diciendo
+ * lo que faltó. No cambia qué comprueba la prueba, sólo cómo se queja cuando no se cumple.
+ */
+function overShortEscrito(calls: any[][]): any {
+  const call = calls.find((c: any) => c[0].data?.overShort !== undefined)
+  if (!call) throw new Error('se esperaba una escritura con `overShort` en la gaveta, y no hubo ninguna')
+  return call[0].data.overShort
+}
+
 function drawer(over: Record<string, unknown> = {}) {
   return {
     id: 'drawer-a',
@@ -34,7 +47,9 @@ function drawer(over: Record<string, unknown> = {}) {
     actualAmount: null,
     overShort: null,
     shiftId: null,
-    events: [],
+    // Sin el tipo, `[]` se infiere `never[]` y `row.type` / `row.amount` no existen:
+    // el archivo dejaba de compilar aunque jest (transpile-only) lo diera por verde.
+    events: [] as Array<{ type: string; amount: Prisma.Decimal }>,
     ...over,
   }
 }
@@ -432,7 +447,7 @@ describe('syncEvents — durable drawer identity', () => {
 
     await syncEvents(VENUE, [event()] as any, null, STAFF)
 
-    const drawerRepair = w.lockUpdateMany.mock.calls.find((c: any) => c[0].data?.overShort !== undefined)[0].data.overShort
+    const drawerRepair = overShortEscrito(w.lockUpdateMany.mock.calls)
     const shiftRepair = w.shiftUpdateMany.mock.calls[0][0].data.cashDifference
     expect(drawerRepair).toBeInstanceOf(Prisma.Decimal)
     expect(drawerRepair.toFixed(2)).toBe('50.00')
@@ -525,7 +540,7 @@ describe('syncEvents — durable drawer identity', () => {
 
     expect((await syncEvents(VENUE, [event()] as any, null, STAFF)).syncedCount).toBe(1)
 
-    expect(w.lockUpdateMany.mock.calls.find((c: any) => c[0].data?.overShort !== undefined)[0].data.overShort.toFixed(2)).toBe('50.00')
+    expect(overShortEscrito(w.lockUpdateMany.mock.calls).toFixed(2)).toBe('50.00')
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringContaining('LATE_SHIFT_RECONCILIATION_PENDING'),
       expect.objectContaining({ reason: 'SHIFT_CONCURRENT_WRITE_LOST' }),
@@ -557,7 +572,7 @@ describe('syncEvents — durable drawer identity', () => {
 
     await syncEvents(VENUE, [event({ amount: 0.01 })] as any, null, STAFF)
 
-    expect(w.lockUpdateMany.mock.calls.find((c: any) => c[0].data?.overShort !== undefined)[0].data.overShort.toFixed(2)).toBe(
+    expect(overShortEscrito(w.lockUpdateMany.mock.calls).toFixed(2)).toBe(
       '100000000.00',
     )
     expect(w.shiftUpdateMany).not.toHaveBeenCalled()
