@@ -65,7 +65,7 @@ describe('POST /cash-drawer/open — cajaCreada / shiftCreado en la respuesta (P
 
   it('P1 — cuando el servidor LIGÓ una caja ya abierta, la respuesta trae cajaCreada:false (el POS no puede leer «abriste»)', async () => {
     abrirDevuelve({ cajaCreada: false, shiftCreado: true })
-    const r = await openSession({ venueId: VENUE, staffId: 'staff-yo', startingAmount: 2000, deviceName: 'Tablet-2' })
+    const r = await openSession({ venueId: VENUE, staffId: 'staff-yo', staffName: 'Yo Cajero', startingAmount: 2000, deviceName: 'Tablet-2' })
     expect(r.cajaCreada).toBe(false)
     expect(r.shiftCreado).toBe(true)
     // Y devuelve la caja EXISTENTE, no una con el fondo que se tecleó: es lo que el aparato debe mostrar.
@@ -76,14 +76,14 @@ describe('POST /cash-drawer/open — cajaCreada / shiftCreado en la respuesta (P
 
   it('P1 — cuando la caja es nueva, cajaCreada:true (y el turno puede haberse ligado a uno ya abierto)', async () => {
     abrirDevuelve({ cajaCreada: true, shiftCreado: false })
-    const r = await openSession({ venueId: VENUE, staffId: 'staff-yo', startingAmount: 500, deviceName: 'SM-X133' })
+    const r = await openSession({ venueId: VENUE, staffId: 'staff-yo', staffName: 'Yo Cajero', startingAmount: 500, deviceName: 'SM-X133' })
     expect(r.cajaCreada).toBe(true)
     expect(r.shiftCreado).toBe(false)
   })
 
   it('REGRESIÓN — el contrato anterior se conserva: shiftId y los campos de la sesión siguen ahí, sin renombrar', async () => {
     abrirDevuelve({ cajaCreada: true, shiftCreado: true })
-    const r = await openSession({ venueId: VENUE, staffId: 'staff-yo', startingAmount: 500, deviceName: 'SM-X133' })
+    const r = await openSession({ venueId: VENUE, staffId: 'staff-yo', staffName: 'Yo Cajero', startingAmount: 500, deviceName: 'SM-X133' })
     expect(r.shiftId).toBe('shift-1')
     expect(r).toEqual(
       expect.objectContaining({
@@ -97,7 +97,7 @@ describe('POST /cash-drawer/open — cajaCreada / shiftCreado en la respuesta (P
   })
 
   it('REGRESIÓN — un fondo negativo sigue rechazándose ANTES de llamar a abrirTurnoDeCaja', async () => {
-    await expect(openSession({ venueId: VENUE, staffId: 'staff-yo', startingAmount: -1, deviceName: 'x' })).rejects.toThrow(
+    await expect(openSession({ venueId: VENUE, staffId: 'staff-yo', staffName: 'Yo Cajero', startingAmount: -1, deviceName: 'x' })).rejects.toThrow(
       'El monto inicial no puede ser negativo',
     )
     expect(abrirTurnoDeCaja).not.toHaveBeenCalled()
