@@ -24,6 +24,9 @@ jest.mock('@/utils/prismaClient', () => ({
     venue: { findUnique: jest.fn() },
     shift: {
       findFirst: jest.fn(),
+      // Ronda de arreglo 1 (P1.2): la apertura barre las anomalías «CLOSED con `endTime` nulo»
+      // antes de leer el turno vivo. Sin este modelo la lectura devuelve `undefined` y revienta.
+      findMany: jest.fn(),
       // Fase 2: la ruta RELEE el turno recién abierto para devolver la fila completa.
       findUnique: jest.fn(),
       create: jest.fn(),
@@ -171,6 +174,7 @@ function sembrarAperturaUnificada(shiftCreado = makeCreatedShift()) {
     posType: 'NONE',
     posStatus: 'DISCONNECTED',
   })
+  mockPrisma.shift.findMany.mockResolvedValue([]) // ni anomalías «CLOSED sin endTime» que sanar
   mockPrisma.shift.findFirst.mockResolvedValue(null) // no hay turno abierto
   mockPrisma.staffVenue.findFirst.mockResolvedValue({
     staffId: STAFF_ID,

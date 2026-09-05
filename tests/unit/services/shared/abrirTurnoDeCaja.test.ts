@@ -34,7 +34,7 @@ const mockLogger = logger as unknown as { warn: jest.Mock }
 const m = prisma as unknown as {
   venue: { findUnique: jest.Mock }
   staffVenue: { findFirst: jest.Mock }
-  shift: { findFirst: jest.Mock; findUnique: jest.Mock; create: jest.Mock; updateMany: jest.Mock }
+  shift: { findFirst: jest.Mock; findMany: jest.Mock; findUnique: jest.Mock; create: jest.Mock; updateMany: jest.Mock }
   cashDrawerSession: { findFirst: jest.Mock; findUnique: jest.Mock; create: jest.Mock; updateMany: jest.Mock }
   posCommand: { create: jest.Mock }
   $transaction: jest.Mock
@@ -67,6 +67,9 @@ function sembrarVenue(over: Record<string, unknown> = {}) {
 /** Ni turno ni caja abiertos: el caso «no hay nada». */
 function sinNada() {
   m.shift.findFirst.mockResolvedValue(null)
+  // Ronda de arreglo 1 (P1.2): la apertura barre las anomalías «CLOSED con `endTime` nulo» antes de
+  // leer el turno vivo. Sin este mock la lectura devuelve `undefined` y revienta al contarla.
+  m.shift.findMany.mockResolvedValue([])
   m.cashDrawerSession.findFirst.mockResolvedValue(null)
   m.cashDrawerSession.findUnique.mockResolvedValue(null)
   m.shift.create.mockImplementation(({ data }: any) => Promise.resolve({ id: 'turno-nuevo', ...data }))

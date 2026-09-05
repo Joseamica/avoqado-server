@@ -165,3 +165,45 @@ describe('nadie toma el turno del INPUT DEL CLIENTE (hueco del 3-sep-2026)', () 
     })
   }
 })
+
+/**
+ * 🔴 «TURNO VIVO» SE DEFINE UNA SOLA VEZ (P1.2 de la auditoría del 4-sep-2026).
+ *
+ * El defecto nació de que la apertura y el claim del dinero tenían predicados DISTINTOS:
+ * `abrirTurnoDeCaja` buscaba `{ venueId, endTime: null }` sin filtrar por estado, así que un turno
+ * **CERRADO con `endTime` nulo** se reusaba como el turno abierto del negocio mientras
+ * `turnoAbiertoDelNegocio` —que sí exigía `status`— seguía devolviendo `null`: cada cobro del día
+ * nacía sin turno. Ahora los dos parten de `turnoVivoWhere` y el claim sólo lo ESTRECHA a OPEN.
+ *
+ * Esta prueba cuenta los sitios. Es deliberadamente tonta: no demuestra que el predicado sea
+ * correcto (eso lo hacen las pruebas de comportamiento de `abrirTurnoDeCaja.turnoVivo.test.ts`),
+ * sino que no vuelvan a existir DOS.
+ */
+describe('«turno vivo» se resuelve por un solo predicado', () => {
+  const archivo = join(raiz, 'shared/turnoDeCaja.ts')
+  const codigo = () => sinComentarios(readFileSync(archivo, 'utf8'))
+
+  it('`turnoVivoWhere` tiene exactamente DOS consumidores: el claim y la apertura', () => {
+    // Definición + 2 llamadas. Si aparece una tercera lectura del turno vivo, que pase por aquí.
+    expect((codigo().match(/turnoVivoWhere\(/g) ?? []).length).toBe(3)
+  })
+
+  it('🔴 ningún `where` con `endTime: null` se queda SIN filtrar por estado', () => {
+    // Es la forma exacta del defecto: `{ venueId, endTime: null }` a secas, que deja pasar un
+    // CLOSED. Fuera de `turnoVivoWhere` sí puede haber `endTime: null` —los CAS del relevo y de la
+    // sanación lo llevan—, pero SIEMPRE acompañado de un `status` explícito; si no, es un segundo
+    // predicado de «vivo» naciendo. (El `endTime: null` del `data` de una creación no es un
+    // `where` y por eso no lo mira este patrón.)
+    const src = codigo()
+    const dentroDelHelper = /export function turnoVivoWhere[\s\S]*?\n}/.exec(src)?.[0] ?? ''
+    const fuera = src.replace(dentroDelHelper, '')
+    const sinEstado = (fuera.match(/where:\s*\{[^}]*endTime:\s*null[^}]*\}/g) ?? []).filter(w => !/status:/.test(w))
+    expect(sinEstado).toEqual([])
+  })
+
+  it('la sanación de anomalías es lo ÚNICO que mira un `CLOSED` sin `endTime`', () => {
+    const src = codigo()
+    expect((src.match(/status:\s*ShiftStatus\.CLOSED,\s*endTime:\s*null/g) ?? []).length).toBeGreaterThan(0)
+    expect(src).toContain('sanarTurnosCerradosSinCierre')
+  })
+})

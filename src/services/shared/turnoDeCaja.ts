@@ -44,11 +44,93 @@ export type ShiftReader = Pick<PrismaClient, 'shift'> | Pick<Prisma.TransactionC
  */
 export async function turnoAbiertoDelNegocio(db: ShiftReader, venueId: string): Promise<{ id: string } | null> {
   const shift = await db.shift.findFirst({
-    where: { venueId, status: 'OPEN', endTime: null },
+    // Parte del MISMO «vivo» que la apertura y lo estrecha a OPEN: un CLOSING no puede recibir
+    // dinero (ver el comentario de `turnoVivoWhere`).
+    where: { ...turnoVivoWhere(venueId), status: ShiftStatus.OPEN },
     orderBy: { startTime: 'desc' },
     select: { id: true },
   })
   return shift ? { id: shift.id } : null
+}
+
+/**
+ * Los estados en los que el turno de un negocio sigue VIVO. `CLOSED` NO está, y ésa es la
+ * definición entera.
+ */
+export const ESTADOS_DE_TURNO_VIVO = [ShiftStatus.OPEN, ShiftStatus.CLOSING] as const
+
+/**
+ * 🔴 «¿HAY UN TURNO VIVO EN ESTE NEGOCIO?» — UNA sola definición, dos consumidores.
+ *
+ * La apertura y el claim del dinero divergían, y esa divergencia ERA el defecto (P1.2 de la
+ * auditoría del 4-sep-2026): `abrirTurnoDeCaja` buscaba `{ venueId, endTime: null }` a secas, sin
+ * filtrar por estado, así que un turno **CERRADO con `endTime` nulo** —lo que produce una
+ * corrección a mano en Postgres, o el P1.1 antes de cerrarse— se REUSABA como el turno abierto del
+ * negocio: la app decía «ya hay turno» y `turnoAbiertoDelNegocio` seguía devolviendo `null`, así
+ * que cada cobro del día nacía sin turno, sin un solo error.
+ *
+ * Las dos piezas del predicado, y por qué ninguna sobra:
+ *
+ *   · **`endTime: null`** — la razón original, que se conserva: un turno en `CLOSING` sigue con
+ *     `endTime` nulo y su cierre puede REVERTIRSE a OPEN (`releaseShiftCloseClaim`). Abrir otro
+ *     encima dejaría al venue con dos abiertos en cuanto ese cierre falle, y el índice único haría
+ *     fallar la reversión dejando el turno atorado en CLOSING. Mientras hay cierre en curso, se espera.
+ *   · **`status IN (OPEN, CLOSING)`** — lo que faltaba. Un `CLOSED` con `endTime` nulo no es un
+ *     turno vivo: es una ANOMALÍA DE DATOS, y se trata como tal (`sanarTurnosCerradosSinCierre`).
+ *
+ * `turnoAbiertoDelNegocio` parte de aquí y **estrecha** a `OPEN` porque un CLOSING no puede recibir
+ * dinero. Es un estrechamiento visible, no un segundo predicado.
+ */
+export function turnoVivoWhere(venueId: string): Prisma.ShiftWhereInput {
+  return { venueId, endTime: null, status: { in: [...ESTADOS_DE_TURNO_VIVO] } }
+}
+
+/** Tope de anomalías que una sola apertura sana. Con una ya es raro; veinte es un incidente. */
+const TOPE_DE_ANOMALIAS_POR_APERTURA = 20
+
+/**
+ * 🔴 SANA el estado imposible: un turno `CLOSED` con `endTime` nulo.
+ *
+ * La app no puede producirlo (el cierre siempre escribe los dos campos juntos), así que su
+ * existencia significa que alguien escribió a mano en Postgres — que es exactamente la salida
+ * obligada del P1.1 y del preflight de la migración del índice único parcial. Dejarlo tal cual
+ * mantiene viva una fila que `cobroSinTurnoPerteneceAlTurno` no sabe leer y que confunde a
+ * cualquiera que la mire.
+ *
+ * ⚠️ Consecuencia declarada de poner `endTime = ahora`: para un turno CLOSED el techo de adopción
+ * de cobros huérfanos ES su `endTime`, y con `endTime` nulo ese turno no adoptaba NINGUNO. Al
+ * sanarlo pasa a poder adoptar los huérfanos de sus propias órdenes ocurridos en `[startTime,
+ * ahora]`. Se acepta a propósito: el `endTime` original ya se perdió, `ahora` es el único instante
+ * que podemos afirmar, y una fila legible con su rastro en la bitácora vale más que una ilegible.
+ *
+ * Corre DENTRO del advisory lock del venue y ANTES de leer el turno vivo, para que la lectura vea
+ * un mundo consistente. Devuelve los ids que ESTA llamada sanó (los que ganó el CAS), para que la
+ * bitácora se escriba después del commit y fuera de la transacción.
+ */
+async function sanarTurnosCerradosSinCierre(tx: Prisma.TransactionClient, venueId: string, ahora: Date): Promise<string[]> {
+  const anomalias = await tx.shift.findMany({
+    where: { venueId, status: ShiftStatus.CLOSED, endTime: null },
+    select: { id: true },
+    orderBy: { startTime: 'asc' },
+    take: TOPE_DE_ANOMALIAS_POR_APERTURA,
+  })
+  if (anomalias.length === 0) return []
+
+  const ids = anomalias.map(a => a.id)
+  // CAS: sólo se sana lo que SIGUE siendo la anomalía. Si otro aparato ganó, su `count` baja y no
+  // se audita un arreglo que no hicimos nosotros.
+  const sanadas = await tx.shift.updateMany({
+    where: { id: { in: ids }, venueId, status: ShiftStatus.CLOSED, endTime: null },
+    data: { endTime: ahora, updatedAt: ahora },
+  })
+  if (sanadas.count === 0) return []
+
+  logger.error('[TURNO DE CAJA] Turno CERRADO con `endTime` nulo: estado que la app no produce, se sana al abrir', {
+    venueId,
+    ids,
+    sanados: sanadas.count,
+  })
+  return ids
 }
 
 // ============================================================================
@@ -290,14 +372,18 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
     // usa la misma autoridad; nadie puede observar ausencia y crear mientras otro queda CLOSING.
     await lockShiftLifecycleForVenue(tx, venueId)
 
+    // 🔴 ANTES de leer el turno vivo: un `CLOSED` con `endTime` nulo es una anomalía de datos que
+    // la app no produce, y hasta el 4-sep-2026 se REUSABA como el turno abierto del negocio (P1.2).
+    // Ahora ni siquiera es visible para la lectura de abajo; aquí se sana y se deja constancia.
+    const anomaliasSanadas = await sanarTurnosCerradosSinCierre(tx, venueId, ahora)
+
     // ── El turno ──────────────────────────────────────────────────────────────────────────
     //
-    // `endTime: null` y no `status: 'OPEN'`: un turno en CLOSING sigue con `endTime` nulo y su
-    // cierre puede REVERTIRSE a OPEN (`releaseShiftCloseClaim`). Abrir otro encima dejaría al
-    // venue con dos abiertos en cuanto ese cierre falle —y el índice único haría fallar la
-    // reversión, dejando el turno atorado en CLOSING—. Mientras hay un cierre en curso, se espera.
+    // El predicado de «vivo» vive en UN solo sitio (`turnoVivoWhere`), compartido con el claim del
+    // dinero: por qué `endTime: null` y por qué además `status IN (OPEN, CLOSING)` está explicado
+    // ahí, junto con el defecto que produjo tenerlos divergentes.
     const turno = await tx.shift.findFirst({
-      where: { venueId, endTime: null },
+      where: turnoVivoWhere(venueId),
       orderBy: { startTime: 'desc' },
       // `startingCash` se lee porque es EL FONDO cuando este gesto sólo crea la caja: ver
       // `fondoEfectivo` más abajo.
@@ -661,10 +747,11 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
       ...(turnoAlineadoDesde !== undefined ? { turnoAlineadoDesde } : {}),
       ...(relevo ? { relevo } : {}),
       ...(posCommandId ? { posCommandId } : {}),
-    } as AbrirTurnoDeCajaResult & { posCommandId?: string }
+      ...(anomaliasSanadas.length > 0 ? { anomaliasSanadas } : {}),
+    } as AbrirTurnoDeCajaResult & { posCommandId?: string; anomaliasSanadas?: string[] }
   })
 
-  const { posCommandId, ...resultado } = resultadoConOutbox
+  const { posCommandId, anomaliasSanadas, ...resultado } = resultadoConOutbox
 
   // Best effort DESPUÉS del commit. LISTEN/NOTIFY puede ganar esta carrera; el
   // claim CAS de deliverPosCommand hace que sólo uno publique. Un fallo deja la
@@ -681,6 +768,22 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
 
   // ── Bitácora: fuera de la transacción y fire-and-forget ───────────────────────────────────
   // Si la bitácora truena, la apertura NO se deshace (mismo patrón que el resto del repo).
+  // Un estado que la app no produce merece su renglón: sin él, «alguien tocó Postgres a mano» se
+  // pierde en un log rotado y nadie sabe cuántas veces pasó.
+  for (const id of anomaliasSanadas ?? []) {
+    void logAction({
+      staffId,
+      venueId,
+      action: 'SHIFT_ANOMALY_HEALED',
+      entity: 'Shift',
+      entityId: id,
+      data: {
+        motivo: 'turno CERRADO con endTime nulo: la app no produce ese estado',
+        endTimeAplicado: ahora.toISOString(),
+        source,
+      },
+    })
+  }
   if (resultado.relevo?.shiftCerradoId) {
     void logAction({
       staffId,

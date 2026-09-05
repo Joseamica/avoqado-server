@@ -65,6 +65,9 @@ beforeEach(() => {
     posStaffId: 'SR-STAFF-7',
     staff: { id: STAFF, firstName: 'Vir', lastName: 'Gomez' },
   })
+  // Ronda de arreglo 1 (P1.2): la apertura barre las anomalías «CLOSED con `endTime` nulo» antes
+  // de leer el turno vivo. Sin este mock la lectura devuelve `undefined` y revienta al contarla.
+  m.shift.findMany.mockResolvedValue([])
   m.shift.findFirst.mockResolvedValue(null)
   m.shift.findUnique.mockResolvedValue(null)
   m.shift.updateMany.mockResolvedValue({ count: 1 })

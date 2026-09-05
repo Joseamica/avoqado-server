@@ -150,6 +150,9 @@ function mundo({ turno = null as any, caja = null as any, cajonDelTurno = null a
     staff: { id: STAFF, firstName: 'Héctor', lastName: 'Ruiz' },
   })
 
+  // Ronda de arreglo 1 (P1.2): la apertura barre las anomalías «CLOSED con `endTime` nulo» antes
+  // de leer el turno vivo. Sin este mock la lectura devuelve `undefined` y revienta al contarla.
+  m.shift.findMany.mockResolvedValue([])
   m.shift.findFirst.mockResolvedValue(turno)
   m.shift.updateMany.mockResolvedValue({ count: 1 })
   m.shift.create.mockImplementation(({ data }: any) => {

@@ -178,6 +178,9 @@ function armarAperturaUnificada() {
     .mockResolvedValue({ staffId: CAJERO, venueId: VENUE, posStaffId: null, staff: { id: CAJERO, firstName: 'Cajero', lastName: null } })
   ;(prismaMock as any).shift = {
     findFirst: jest.fn().mockResolvedValue(null),
+    // Ronda de arreglo 1 (P1.2): la apertura barre las anomalías «CLOSED con `endTime` nulo» antes
+    // de leer el turno vivo. Sin este modelo la lectura devuelve `undefined` y revienta al contarla.
+    findMany: jest.fn().mockResolvedValue([]),
     findUnique: jest.fn().mockResolvedValue(null),
     create: jest.fn().mockResolvedValue({ id: 'turno-nuevo' }),
     updateMany: jest.fn().mockResolvedValue({ count: 1 }),
