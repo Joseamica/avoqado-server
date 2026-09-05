@@ -183,3 +183,33 @@ describe('Ningún router puede AFIRMAR «SUPERADMIN only» sobre un permiso que 
     expect(permisoAfirmadoComoSuperadmin(conEstorbo, 2)).toBeNull()
   })
 })
+
+/**
+ * 🔴 P1.1 (4-sep-2026): la MISMA ruta era de las poquísimas del router sin `validateRequest`, y su
+ * servicio copiaba `status`/`endTime`/`startTime` verbatim. Esta prueba es estática a propósito:
+ * lo que hay que garantizar es que el esquema esté MONTADO, y eso no se ve ejercitando el
+ * servicio (que tiene su propia guarda) ni introspeccionando el stack de Express, donde
+ * `validateRequest` devuelve una función anónima indistinguible de cualquier otra.
+ */
+describe('PUT /dashboard/venues/:venueId/shifts/:shiftId — el cuerpo pasa por Zod', () => {
+  const router = fs.readFileSync(path.join(__dirname, '../../../src/routes/dashboard.routes.ts'), 'utf-8')
+
+  /** El bloque `router.put(...)` de ESTA ruta, para no leer el de una vecina. */
+  function bloqueDeLaRuta(): string {
+    const inicio = router.indexOf(`router.put(\n  '${SHIFT_PATH}'`)
+    expect(inicio).toBeGreaterThan(-1)
+    const fin = router.indexOf('\n)', inicio)
+    expect(fin).toBeGreaterThan(inicio)
+    return router.slice(inicio, fin)
+  }
+
+  it('monta `validateRequest(UpdateShiftSchema)`', () => {
+    expect(bloqueDeLaRuta()).toContain('validateRequest(UpdateShiftSchema)')
+    expect(router).toContain("import { UpdateShiftSchema } from '../schemas/dashboard/shift.schema'")
+  })
+
+  it('el esquema corre DESPUÉS del permiso: un no autorizado recibe 403, no una pista del contrato', () => {
+    const bloque = bloqueDeLaRuta()
+    expect(bloque.indexOf("checkPermission('shifts:update')")).toBeLessThan(bloque.indexOf('validateRequest(UpdateShiftSchema)'))
+  })
+})

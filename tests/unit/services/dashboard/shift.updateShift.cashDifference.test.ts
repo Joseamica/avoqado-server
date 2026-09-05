@@ -288,15 +288,32 @@ describe('la gaveta se resuelve como la resuelve el cierre', () => {
     // único donde la fecha del cuerpo podría colarse. Con la ligada, esta prueba pasaría sin
     // ejercitar nada — y antes del arreglo pasaba justo así, porque no se consultaba ninguna
     // gaveta y comparar sobre cero llamadas siempre da verde.
+    //
+    // ⚠️ Desde el 4-sep-2026 (P1.1) esta prueba ya NO puede mandar `endTime` en el cuerpo: el
+    // servicio lo rechaza antes de leer nada. La afirmación se conserva porque sigue siendo cierta
+    // y sigue midiendo algo — que la ventana sale de la fila GUARDADA— y la imposibilidad de que
+    // la fecha del cuerpo se cuele la fija la prueba de abajo, que es más fuerte que ésta.
     mundo({ gaveta: null })
 
-    await updateShift(VENUE, TURNO, { endTime: new Date('2026-09-10T02:00:00.000Z') }, DUENO)
+    await updateShift(VENUE, TURNO, { totalSales: 1900 }, DUENO)
 
     const ventanas = consultasPorVentana()
     expect(ventanas.length).toBeGreaterThan(0)
     const texto = ventanas.map((w: any) => JSON.stringify(w)).join(' ')
     expect(texto).toContain('2026-09-04') // el `endTime` GUARDADO
-    expect(texto).not.toContain('2026-09-10') // nunca el del cuerpo
+  })
+
+  it('🔴 y la fecha del cuerpo ya no puede colarse: `endTime` se rechaza antes de leer la gaveta', async () => {
+    // El candado estructural del P1.1. No es la misma afirmación que la de arriba: aquélla dice
+    // «se usa la guardada», ésta dice «la otra no existe».
+    mundo({ gaveta: null })
+
+    await expect(updateShift(VENUE, TURNO, { endTime: new Date('2026-09-10T02:00:00.000Z') } as any, DUENO)).rejects.toMatchObject({
+      statusCode: 400,
+    })
+
+    expect(consultasPorVentana()).toHaveLength(0)
+    expect(prismaMock.shift.updateMany).not.toHaveBeenCalled()
   })
 
   it('🔴 el respaldo por VENTANA también se acota al turno: no le arranca la gaveta a otro', async () => {
@@ -513,7 +530,12 @@ describe('la bitácora dice de dónde salió el número', () => {
 
 describe('un claim CLOSING es inmutable para el editor', () => {
   it('serializa en DB por venue antes del CAS que puede cambiar OPEN/CLOSED', async () => {
-    await updateShift(VENUE, TURNO, { status: 'OPEN' }, DUENO)
+    // ⚠️ Se edita `totalSales` y no `status`: desde el P1.1 (4-sep-2026) el ciclo de vida NO se
+    // puede tocar desde aquí, y la versión anterior de esta prueba **llamaba a la reapertura y
+    // miraba hacia otro lado** — ejercitaba el camino peligroso para afirmar sólo el orden del
+    // advisory lock. El orden es el mismo con cualquier campo; que reabrir esté PROHIBIDO lo
+    // fija `shift.updateShift.cicloDeVida.test.ts`.
+    await updateShift(VENUE, TURNO, { totalSales: 1900 }, DUENO)
 
     expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1)
     expect(prismaMock.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.shift.updateMany.mock.invocationCallOrder[0])

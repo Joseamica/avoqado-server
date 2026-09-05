@@ -205,6 +205,7 @@ import {
 } from '../schemas/dashboard/customer.schema'
 import { GetPrivacyNoticeSchema, UpsertPrivacyNoticeSchema } from '../schemas/dashboard/privacyNotice.schema'
 import { SettleOrderSchema } from '../schemas/dashboard/order.schema'
+import { UpdateShiftSchema } from '../schemas/dashboard/shift.schema'
 import {
   CreateCustomerGroupSchema,
   UpdateCustomerGroupSchema,
@@ -8447,6 +8448,14 @@ router.put(
   // sobre el permiso de abajo y la comprueba contra los roles. Es intencionalmente tonto — negarla
   // en prosa no lo convencería, y prefiero que grite de más a que se le escape una mentira.
   checkPermission('shifts:update'),
+  // 🔴 CORREGIR UN TURNO NO ES CAMBIARLE EL CICLO DE VIDA (auditoría del 4-sep-2026, P1.1). Esta
+  // ruta era de las poquísimas sin `validateRequest`, y el servicio copiaba `status`, `endTime`,
+  // `startTime` y `staffId` verbatim: un `PUT {"status":"OPEN"}` sobre un turno cerrado dejaba un
+  // OPEN con `endTime` puesto — invisible para las tres lecturas del turno vivo, visible para el
+  // único parcial `Shift(venueId) WHERE status='OPEN'` — y el negocio se quedaba con un 409
+  // `CASH_SHIFT_ALREADY_OPEN` PERMANENTE al abrir turno o caja. El porqué de cada campo, y por qué
+  // se responde 400 en vez de descartarlo en silencio, vive en el esquema.
+  validateRequest(UpdateShiftSchema),
   // `marcarPermiso` NO bloquea: etiqueta si quien edita puede ver el efectivo esperado. Sin esa
   // marca, una gaveta todavía ABIERTA no revela su esperado ni siquiera para recalcular el
   // descuadre — el mismo conteo ciego del detalle del turno. Sin él bastaba un rol propio con

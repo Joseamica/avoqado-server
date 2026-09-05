@@ -881,15 +881,55 @@ export async function deleteShift(venueId: string, shiftId: string, performedBy?
  * Update shift data interface
  */
 export interface UpdateShiftData {
-  startTime?: Date
-  endTime?: Date | null
   startingCash?: number
   endingCash?: number | null
   totalSales?: number
   totalTips?: number
   totalOrders?: number
-  status?: 'OPEN' | 'CLOSED'
   staffId?: string
+
+  /**
+   * 🔴 EL CICLO DE VIDA NO SE EDITA DESDE AQUÍ — y por eso siguen declarados: para que
+   * `rechazarCambioDeCicloDeVida` pueda mirarlos con tipos y no con `any`. Escribir cualquiera
+   * de los tres produce un par incoherente que el resto del sistema no sabe leer:
+   *
+   *   · `status='OPEN'` con `endTime` puesto ⇒ nadie lo ve (las tres lecturas del turno vivo
+   *     exigen `endTime: null`) pero el único parcial `Shift(venueId) WHERE status='OPEN'` sí:
+   *     abrir turno o caja da **409 `CASH_SHIFT_ALREADY_OPEN` para siempre**, y `claimShiftForClose`
+   *     tampoco lo cierra. Sólo lo destraba un UPDATE a mano en Postgres.
+   *   · `endTime: null` sobre un turno cerrado lo hace pasar por abierto ante la PAX mientras
+   *     `turnoAbiertoDelNegocio` sigue devolviendo `null` ⇒ el día entero cobra sin turno.
+   *   · `startTime` mueve la ventana con la que se resuelven la gaveta y los cobros huérfanos
+   *     del turno: cambia el descuadre YA firmado sin tocar un solo cobro.
+   *
+   * El turno se abre y se cierra por su propio carril (`shared/turnoDeCaja.ts`), que es el único
+   * que sostiene el candado de «uno abierto por negocio».
+   */
+  status?: never
+  endTime?: never
+  startTime?: never
+}
+
+/** Los tres campos de arriba, con el porqué que se le devuelve a quien los mande. */
+const CAMPOS_DE_CICLO_DE_VIDA: ReadonlyArray<[string, string]> = [
+  ['status', 'No se puede cambiar el estado del turno desde aquí: ciérralo o ábrelo desde la caja'],
+  ['endTime', 'No se puede cambiar la hora de cierre del turno desde aquí'],
+  ['startTime', 'No se puede cambiar la hora de apertura del turno desde aquí'],
+]
+
+/**
+ * 🔴 La REGLA, no la forma. Zod ya acota el cuerpo en la ruta (`schemas/dashboard/shift.schema.ts`),
+ * pero a un servicio se le llama sin pasar por Express —scripts, otro servicio, una ruta futura—,
+ * y este defecto deja al negocio sin poder abrir caja. Se comprueba ANTES de resolver la gaveta,
+ * de escribir y de auditar: nada se toca.
+ */
+function rechazarCambioDeCicloDeVida(data: UpdateShiftData): void {
+  const cuerpo = data as Record<string, unknown>
+  for (const [campo, mensaje] of CAMPOS_DE_CICLO_DE_VIDA) {
+    // `in`, no truthiness ni `!== undefined`: `{"endTime": null}` es exactamente la variante que
+    // deja el día entero sin turno, y es la que un `!= null` dejaría pasar.
+    if (campo in cuerpo && cuerpo[campo] !== undefined) throw new BadRequestError(mensaje)
+  }
 }
 
 /**
@@ -1189,6 +1229,9 @@ export async function updateShift(
   const { performedBy, puedeVerEsperado = false } = contexto
   logger.info('Updating shift', { venueId, shiftId, fields: Object.keys(data) })
 
+  // ANTES de cualquier lectura: corregir un turno no es cambiarle el ciclo de vida.
+  rechazarCambioDeCicloDeVida(data)
+
   // First check if shift exists and belongs to the venue
   const existingShift = await prisma.shift.findFirst({
     where: {
@@ -1213,12 +1256,6 @@ export async function updateShift(
   // Build update data object, only including provided fields
   const updateData: any = {}
 
-  if (data.startTime !== undefined) {
-    updateData.startTime = data.startTime
-  }
-  if (data.endTime !== undefined) {
-    updateData.endTime = data.endTime
-  }
   if (data.startingCash !== undefined) {
     updateData.startingCash = data.startingCash
   }
@@ -1236,10 +1273,18 @@ export async function updateShift(
   if (data.totalOrders !== undefined) {
     updateData.totalOrders = data.totalOrders
   }
-  if (data.status !== undefined) {
-    updateData.status = data.status
-  }
   if (data.staffId !== undefined) {
+    // 🔴 AISLAMIENTO POR TENANT (P2.3). La FK de `Shift.staffId` sólo exige que el `Staff` exista,
+    // así que sin esta comprobación un MANAGER del venue A podía reasignarle la autoría de un
+    // corte a un empleado del venue B. Se pregunta por el venue DE LA RUTA, que es el que el
+    // permiso ya autorizó — no por el del turno.
+    const perteneceAlNegocio = await prisma.staffVenue.findFirst({
+      where: { staffId: data.staffId, venueId },
+      select: { id: true },
+    })
+    if (!perteneceAlNegocio) {
+      throw new BadRequestError('Ese empleado no pertenece a este negocio')
+    }
     updateData.staffId = data.staffId
   }
 
@@ -1251,11 +1296,12 @@ export async function updateShift(
   // La ventana es la GUARDADA, nunca la del cuerpo: qué gaveta operó es un hecho histórico, y
   // resolverla contra una fecha que alguien está editando en este mismo request podría cambiar de
   // gaveta y con ella el número firmado.
-  // 🔴 `Number(...)` sobre lo que llegó en el cuerpo, y no es paranoia: esta ruta no lleva
-  // `validateRequest`, así que un `startingCash: "500"` entra tal cual. Prisma lo acepta (string →
-  // Decimal), pero en JS `"500" + 1800` es la CONCATENACIÓN `"5001800"` y el `.toFixed` de la
-  // bitácora reventaría con el `update` YA commiteado: un 500 sobre una edición que sí se guardó,
-  // y sin fila de auditoría.
+  // 🔴 `Number(...)` sobre lo que llegó en el cuerpo, y no es paranoia: la ruta ya lleva
+  // `validateRequest(UpdateShiftSchema)` desde el 4-sep-2026, pero a este SERVICIO se le llama sin
+  // pasar por Express (scripts, otros servicios), así que un `startingCash: "500"` sigue pudiendo
+  // entrar tal cual. Prisma lo acepta (string → Decimal), pero en JS `"500" + 1800` es la
+  // CONCATENACIÓN `"5001800"` y el `.toFixed` de la bitácora reventaría con el `update` YA
+  // commiteado: un 500 sobre una edición que sí se guardó, y sin fila de auditoría.
   const effectiveStartingCash = data.startingCash !== undefined ? Number(data.startingCash) : Number(existingShift.startingCash)
 
   // 🔴 EL CONTEO ES `cashDeclared`, NUNCA `endingCash`. `endingCash` no es lo que alguien contó:
@@ -1384,8 +1430,9 @@ export async function updateShift(
     entityId: shiftId,
     staffId: performedBy,
     data: {
-      // Acotado: esta ruta no lleva Zod, así que el cuerpo es del que llama. Registrar QUÉ se
-      // intentó tocar es útil; copiar mil llaves inventadas a la tabla de auditoría, no.
+      // Acotado: Zod descarta lo desconocido en la ruta, pero al servicio se le puede llamar sin
+      // pasar por ella. Registrar QUÉ se intentó tocar es útil; copiar mil llaves inventadas a la
+      // tabla de auditoría, no.
       fields: Object.keys(data).slice(0, 20),
       ...(gaveta ? { expectedSource: gaveta.fuente } : {}),
       ...(gaveta?.sessionId ? { cashDrawerSessionId: gaveta.sessionId } : {}),
