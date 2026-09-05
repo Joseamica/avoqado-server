@@ -242,6 +242,22 @@ export interface AbrirTurnoDeCajaParams {
   stationId?: string
   /** Reloj inyectable: el relevo depende de la fecha y las pruebas no pueden depender de «hoy». */
   now?: () => Date
+  /**
+   * 🔴 LLAVE IDEMPOTENTE de la apertura (Task 8b N1, 5-sep-2026). OPCIONAL y ADITIVA.
+   *
+   * La apertura sin red vive en una cola durable y se reproduce al volver la red; si la respuesta se
+   * pierde, el aparato la reenvía. Con la misma llave el servidor devuelve la MISMA caja
+   * (`reintento: true`) en vez de ligar «la caja de otro» sobre la propia. Vive en el evento `OPEN`
+   * (`CashDrawerEvent.localId`, único por venue): la misma columna con la que ya se deduplican los
+   * ingresos y retiros. Ya normalizada (la frontera del servicio móvil la valida: 400 si es basura).
+   */
+  localId?: string | null
+  /**
+   * 🔴 La hora REAL a la que el aparato abrió la caja, para una apertura reproducida desde la cola.
+   * Sólo cuenta al CREAR (caja y turno nacen con ella); una caja que ya estaba conserva la suya. Se
+   * acota con `acotarOpenedAt` — nunca futuro, nunca más de 24 h atrás — y el ajuste va a la bitácora.
+   */
+  openedAt?: Date | null
 }
 
 export interface AbrirTurnoDeCajaResult {
@@ -271,6 +287,16 @@ export interface AbrirTurnoDeCajaResult {
   fondoAplicado: string
   /** Presente sólo si esta llamada subió el `startingCash` del turno (era cero y sin gaveta). */
   turnoAlineadoDesde?: string
+  /**
+   * La llave con la que quedó guardada la apertura de la caja que se devuelve, o `null`: sin llave, o
+   * porque la caja ya existía y sólo se LIGÓ (su llave, si la tiene, vive en su propio evento `OPEN`).
+   */
+  localId: string | null
+  /**
+   * `true` = esta llamada NO abrió nada: la misma `localId` ya había aterrizado y se devuelve la caja y
+   * el turno de ENTONCES, sin relevo y sin bitácora nueva. La ruta móvil contesta 200 en vez de 201.
+   */
+  reintento: boolean
 }
 
 /** Marca legible del relevo. Va en `Shift.notes`: quien lo lea tiene que saber que NADIE contó. */
@@ -293,6 +319,70 @@ export interface UnicoParcial {
 /** Los dos índices únicos PARCIALES que garantizan «uno abierto por negocio». Se crean en SQL. */
 export const UNICO_TURNO_ABIERTO: UnicoParcial = { indice: 'Shift_venueId_open_key', columnas: ['venueId'] }
 export const UNICO_CAJA_ABIERTA: UnicoParcial = { indice: 'CashDrawerSession_venueId_open_key', columnas: ['venueId'] }
+
+/**
+ * El único de la LLAVE de los eventos (`CashDrawerEvent @@unique([venueId, localId])`). No es parcial
+ * —Prisma lo conoce— pero la apertura lo puede chocar igual: si la app manda como `localId` de la
+ * apertura una llave que ya usó un `PAY_IN`, la creación anidada del evento `OPEN` revienta con P2002.
+ * Se discrimina para contestar un 400 legible y no un 500 (ver `abrirTurnoDeCaja`).
+ */
+export const UNICO_LLAVE_DEL_EVENTO: UnicoParcial = { indice: 'CashDrawerEvent_venueId_localId_key', columnas: ['venueId', 'localId'] }
+
+// ============================================================================
+// LA HORA REAL DE LA APERTURA — acotada, porque un reloj de tablet miente
+// ============================================================================
+
+/**
+ * 🔴 Cuánto puede quedar ATRÁS la hora que manda el aparato: 24 horas, y ni un minuto más.
+ *
+ * Es la duración de la sesión offline de Square («after 24 hours, your offline payments session
+ * will end», Square Support, buscado en vivo el 5-sep-2026) y coincide con nuestro propio ciclo
+ * del día de negocio (corte a las 04:00): una apertura más vieja que eso pertenece a un día que el
+ * relevo cerraría de todos modos. Y acota el daño de un reloj roto: una tablet en 2020 abriría una
+ * ventana de años sobre la que el barrido `cash-drawer-reconciler` repondría en ESTA caja todos los
+ * cobros huérfanos del venue desde entonces — con 24 h, lo peor que puede pasar es un día.
+ */
+export const TOPE_DE_ANTIGUEDAD_DE_LA_APERTURA_MS = 24 * 60 * 60 * 1000
+
+/** Por qué la hora del aparato NO se escribió tal cual. Va a la bitácora: un ajuste nunca es silencioso. */
+export type AjusteDeReloj = 'FUTURO' | 'DEMASIADO_VIEJO'
+
+export interface OpenedAtAcotado {
+  /** El instante que de verdad se escribe en `CashDrawerSession.openedAt` y `Shift.startTime`. */
+  aplicado: Date
+  ajuste: AjusteDeReloj | null
+  /** `solicitado − aplicado`, en ms: positivo si el reloj iba adelantado, negativo si la apertura era muy vieja. 0 sin ajuste. */
+  desfaseMs: number
+}
+
+/**
+ * 🔴 FUNCIÓN PURA: qué hora se estampa como apertura cuando el aparato manda la suya (Task 8b N1).
+ *
+ * Medido en una Samsung SM-X133 el 5-sep-2026: la caja se abrió sin red a las 10:22 y el servidor la
+ * registró a las 10:31, la hora del REPLAY. La venta de las 10:25 quedaba fuera de la ventana
+ * `[openedAt, closedAt]` de la caja: la tablet la dejaba en su sesión provisional (pantalla en $0 de
+ * ventas, ticket contradiciéndose) y el barrido del servidor tampoco la repondría ahí.
+ *
+ * | Hora del aparato | Qué se estampa | Ajuste |
+ * |---|---|---|
+ * | ausente (app vieja) | `ahora` | ninguno — contrato viejo intacto |
+ * | dentro de las últimas 24 h | la del aparato, TAL CUAL | ninguno |
+ * | en el futuro | `ahora` | `FUTURO` — una caja no puede abrirse antes de que exista |
+ * | más de 24 h atrás | `ahora − 24 h` | `DEMASIADO_VIEJO` — ver [TOPE_DE_ANTIGUEDAD_DE_LA_APERTURA_MS] |
+ *
+ * Se ACOTA en vez de rechazar (400) a propósito: un 400 en la apertura es RECHAZO PERMANENTE para las
+ * apps (la caja queda marcada en rojo y su cierre no puede mandarse), y un reloj desfasado es un
+ * problema del entorno, no del cajero. Lo que sí es rechazo es una hora ILEGIBLE, y de eso se encarga
+ * la frontera del servicio móvil antes de llegar aquí.
+ */
+export function acotarOpenedAt(solicitado: Date | null | undefined, ahora: Date): OpenedAtAcotado {
+  if (!solicitado || Number.isNaN(solicitado.getTime())) return { aplicado: ahora, ajuste: null, desfaseMs: 0 }
+  const pedido = solicitado.getTime()
+  if (pedido > ahora.getTime()) return { aplicado: ahora, ajuste: 'FUTURO', desfaseMs: pedido - ahora.getTime() }
+  const tope = ahora.getTime() - TOPE_DE_ANTIGUEDAD_DE_LA_APERTURA_MS
+  if (pedido < tope) return { aplicado: new Date(tope), ajuste: 'DEMASIADO_VIEJO', desfaseMs: pedido - tope }
+  return { aplicado: solicitado, ajuste: null, desfaseMs: 0 }
+}
 
 function conflictoDeApertura(): ConflictError {
   return new ConflictError('Ya hay un turno de caja abierto en este negocio. Ciérralo antes de abrir otro.', 'CASH_SHIFT_ALREADY_OPEN')
@@ -384,6 +474,12 @@ async function nombreDeQuienCierra(staffId: string | null, dado?: string | null)
 export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Promise<AbrirTurnoDeCajaResult> {
   const { venueId, staffId, startingCash, deviceName, source, stationId } = parametros
   const ahora = (parametros.now ?? (() => new Date()))()
+  const localId = parametros.localId ?? null
+  // La hora del aparato, acotada. Sin ella es `ahora`, así que todo lo de abajo sigue igual para una
+  // app vieja. Y `ahora` sigue mandando en lo que es del SERVIDOR: el corte del día de negocio y la
+  // hora a la que se firma un relevo.
+  const hora = acotarOpenedAt(parametros.openedAt, ahora)
+  const momentoDeApertura = hora.aplicado
 
   if (!Number.isFinite(startingCash) || startingCash < 0) {
     throw new BadRequestError('El fondo inicial no puede ser negativo')
@@ -411,6 +507,52 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
     // Orden global: advisory del venue → fila Shift → gaveta. Quien cierra o recupera un Shift
     // usa la misma autoridad; nadie puede observar ausencia y crear mientras otro queda CLOSING.
     await lockShiftLifecycleForVenue(tx, venueId)
+
+    // ── El reintento de una apertura que YA aterrizó ──────────────────────────────────────
+    //
+    // 🔴 La llave se busca en el evento OPEN (`CashDrawerEvent.localId`, único por venue): es la MISMA
+    // columna y el MISMO índice con los que `pay-in`/`pay-out` ya deduplican, así que no hay una
+    // segunda forma de identificar un movimiento. Si está, esta apertura ya ocurrió: se devuelve SU
+    // caja y SU turno, sin crear, sin relevar y sin un segundo renglón en la bitácora. Y con
+    // `cajaCreada: true`, porque esa caja SÍ es la de esta apertura — la app no debe avisarle al
+    // cajero «se adoptó la caja abierta por …» sobre la suya (residuo N1 de las dos apps).
+    //
+    // Va bajo el candado y ANTES de sanar nada: un reintento no toca el estado del negocio.
+    if (localId) {
+      const previa = await tx.cashDrawerEvent.findFirst({
+        where: { venueId, localId, type: 'OPEN' },
+        select: { sessionId: true, session: { select: { id: true, shiftId: true, startingAmount: true } } },
+      })
+      if (previa) {
+        const shiftDeLaCaja = previa.session.shiftId ?? (await turnoAbiertoDelNegocio(tx, venueId))?.id
+        if (!shiftDeLaCaja) {
+          // Prácticamente inalcanzable (la apertura siempre liga, o el negocio tiene turno vivo), pero
+          // inventar un turno aquí sería peor: crear una SEGUNDA caja para la misma apertura. El 409
+          // lo tratan las apps preguntando por `/current` y adoptando lo que haya.
+          throw new ConflictError(
+            'La apertura ya se registró pero su turno no se pudo resolver; vuelve a intentar en unos segundos.',
+            'SHIFT_HANDOVER_RETRY',
+          )
+        }
+        logger.info('[TURNO DE CAJA] Apertura ya registrada (reintento) — se devuelve la original, no se duplica', {
+          venueId,
+          source,
+          localId,
+          cashDrawerSessionId: previa.session.id,
+          shiftId: shiftDeLaCaja,
+        })
+        return {
+          shiftId: shiftDeLaCaja,
+          cashDrawerSessionId: previa.session.id,
+          shiftCreado: false,
+          cajaCreada: true,
+          reintento: true,
+          localId,
+          staffName,
+          fondoAplicado: new Prisma.Decimal(previa.session.startingAmount).toString(),
+        } as AbrirTurnoDeCajaResult & { posCommandId?: string; anomaliasSanadas?: string[]; turnosAbiertosSanados?: string[] }
+      }
+    }
 
     // 🔴 ANTES de leer el turno vivo: un `CLOSED` con `endTime` nulo es una anomalía de datos que
     // la app no produce, y hasta el 4-sep-2026 se REUSABA como el turno abierto del negocio (P1.2).
@@ -597,7 +739,8 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
           data: {
             venueId,
             staffId,
-            startTime: ahora,
+            // La hora REAL del aparato si la mandó (acotada); si no, `ahora`, como siempre.
+            startTime: momentoDeApertura,
             endTime: null,
             status: ShiftStatus.OPEN,
             startingCash: fondoEfectivo,
@@ -637,7 +780,7 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
             venueId,
             openedByStaffId: staffId,
             openedByName: staffName,
-            openedAt: ahora,
+            openedAt: momentoDeApertura,
             startingAmount: fondoEfectivo,
             deviceName: deviceName || null,
             status: 'OPEN',
@@ -649,15 +792,25 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
                 staffId,
                 staffName,
                 note: `Caja abierta con $${fondoEfectivo}`,
+                // Las dos llaves de arriba son ADITIVAS: sin ellas la fila nace byte a byte como antes.
+                // La llave es lo que vuelve idempotente el reintento (ver arriba); la hora es la del
+                // aparato para que el evento OPEN no quede DESPUÉS de las ventas hechas sin red.
+                ...(localId ? { localId } : {}),
+                ...(parametros.openedAt ? { createdAt: momentoDeApertura } : {}),
               },
             },
           },
           select: { id: true },
         })
         .catch((error: unknown) => {
-          // SÓLO el índice de cajas abiertas. Un choque de `CashDrawerSession_shiftId_key` o del
-          // `localId` del evento no significa «ya hay una caja abierta» y sube tal cual.
+          // SÓLO el índice de cajas abiertas se traduce a «ya hay una caja abierta». Un choque de
+          // `CashDrawerSession_shiftId_key` sube tal cual.
           if (esChoqueDelUnico(error, UNICO_CAJA_ABIERTA)) throw conflictoDeApertura()
+          // 🔴 La LLAVE de la apertura ya la usó otro movimiento (un PAY_IN, un PAY_OUT): defecto del
+          // cliente, y se le dice con un 400 legible. Un 500 lo dejaría reintentando para siempre.
+          if (esChoqueDelUnico(error, UNICO_LLAVE_DEL_EVENTO)) {
+            throw new BadRequestError('Esa llave de apertura ya se usó en otro movimiento de caja', 'CASH_DRAWER_OPEN_LOCAL_ID_REUSED')
+          }
           throw error
         })
       cashDrawerSessionId = nueva.id
@@ -785,6 +938,9 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
       cashDrawerSessionId,
       shiftCreado,
       cajaCreada,
+      reintento: false,
+      // La llave sólo queda guardada si la caja NACIÓ aquí: una caja ligada conserva la suya.
+      localId: cajaCreada ? localId : null,
       staffName,
       fondoAplicado: fondoEfectivo.toString(),
       ...(turnoAlineadoDesde !== undefined ? { turnoAlineadoDesde } : {}),
@@ -796,6 +952,24 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
   })
 
   const { posCommandId, anomaliasSanadas, turnosAbiertosSanados, ...resultado } = resultadoConOutbox
+
+  // Un reintento no abrió nada: ni outbox del POS ni bitácora — todo eso ya pasó la primera vez.
+  if (resultado.reintento) return resultado
+
+  // 🔴 Un ajuste de reloj NUNCA es silencioso. Se avisa sólo si la hora acotada se ESCRIBIÓ en algo
+  // (caja o turno nuevos); ligar a lo que ya existía no usó la hora del aparato para nada.
+  if (hora.ajuste && (resultado.cajaCreada || resultado.shiftCreado)) {
+    logger.warn('[TURNO DE CAJA] La hora de apertura del aparato se acotó: no se escribe tal cual', {
+      venueId,
+      source,
+      ajusteDeReloj: hora.ajuste,
+      desfaseMs: hora.desfaseMs,
+      openedAtDelAparato: parametros.openedAt?.toISOString() ?? null,
+      openedAtAplicado: momentoDeApertura.toISOString(),
+      cashDrawerSessionId: resultado.cashDrawerSessionId,
+      shiftId: resultado.shiftId,
+    })
+  }
 
   // Best effort DESPUÉS del commit. LISTEN/NOTIFY puede ganar esta carrera; el
   // claim CAS de deliverPosCommand hace que sólo uno publique. Un fallo deja la
@@ -887,7 +1061,13 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
       action: 'SHIFT_OPENED',
       entity: 'Shift',
       entityId: resultado.shiftId,
-      data: { startingCash: Number(resultado.fondoAplicado), stationId: stationId ?? undefined, isIntegratedPOS: posIntegrado, source },
+      data: {
+        startingCash: Number(resultado.fondoAplicado),
+        stationId: stationId ?? undefined,
+        isIntegratedPOS: posIntegrado,
+        source,
+        startTime: momentoDeApertura.toISOString(),
+      },
     })
   }
   if (resultado.cajaCreada) {
@@ -897,7 +1077,18 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
       action: 'CASH_DRAWER_OPENED',
       entity: 'CashDrawerSession',
       entityId: resultado.cashDrawerSessionId,
-      data: { startingAmount: Number(resultado.fondoAplicado), deviceName, source },
+      // La hora ESCRITA siempre; la del aparato y el ajuste sólo cuando existen. Un dueño que lea
+      // «abierta 10:22, el aparato dijo 10:22» no necesita explicación; uno que lea «abierta 10:31,
+      // el aparato dijo 10:41, FUTURO +10 min» sabe que esa tablet tiene el reloj adelantado.
+      data: {
+        startingAmount: Number(resultado.fondoAplicado),
+        deviceName,
+        source,
+        openedAt: momentoDeApertura.toISOString(),
+        ...(parametros.openedAt ? { openedAtDelAparato: parametros.openedAt.toISOString() } : {}),
+        ...(hora.ajuste ? { ajusteDeReloj: hora.ajuste, desfaseMs: hora.desfaseMs } : {}),
+        ...(localId ? { localId } : {}),
+      },
     })
   }
 
@@ -909,6 +1100,9 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
     shiftCreado: resultado.shiftCreado,
     cajaCreada: resultado.cajaCreada,
     fondoAplicado: resultado.fondoAplicado,
+    localId,
+    openedAt: momentoDeApertura.toISOString(),
+    ajusteDeReloj: hora.ajuste,
     turnoAlineadoDesde: resultado.turnoAlineadoDesde ?? null,
     turnoRelevado: resultado.relevo?.shiftCerradoId ?? null,
     cajaRelevada: resultado.relevo?.cajaCerradaId ?? null,

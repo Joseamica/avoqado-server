@@ -26,37 +26,6 @@ export const getCurrent = async (req: Request, res: Response, next: NextFunction
 }
 
 /**
- * Open a new cash drawer session
- * @route POST /api/v1/mobile/venues/:venueId/cash-drawer/open
- */
-export const openSession = async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const { venueId } = req.params
-    const staffId = req.authContext?.userId || ''
-    const { startingAmount, deviceName, staffName } = req.body
-
-    if (startingAmount === undefined || startingAmount === null) {
-      return res.status(400).json({ success: false, message: 'startingAmount es requerido' })
-    }
-
-    const session = await cashDrawerService.openSession(
-      {
-        venueId,
-        staffId,
-        staffName: staffName || 'Staff',
-        startingAmount: Number(startingAmount),
-        deviceName,
-      },
-      (req as any).puedeVerEsperado === true,
-    )
-
-    return res.status(201).json({ success: true, data: session })
-  } catch (error) {
-    next(error)
-  }
-}
-
-/**
  * 🔴 EL CÓDIGO DE UN MOVIMIENTO IDEMPOTENTE: 201 si se creó, 200 si YA ESTABA.
  *
  * Cuando el POS manda `localId` y la respuesta anterior se perdió, el reintento no crea
@@ -75,9 +44,46 @@ export const openSession = async (req: Request, res: Response, next: NextFunctio
  * Referencia: Stripe reproduce el código original de una petición idempotente porque
  * almacena la respuesta entera; nosotros no guardamos respuestas, así que el estado es la
  * forma barata y honesta de distinguir "lo creé" de "ya estaba". Square responde 200 a todo.
- * La regla es la MISMA en `pay-in` y `pay-out`.
+ * La regla es la MISMA en `pay-in`, `pay-out` y —desde la Task 8b N1— en `open`: un reintento con la
+ * misma `localId` devuelve la caja que YA estaba, con 200.
  */
 const idempotentStatus = (created: boolean) => (created ? 201 : 200)
+
+/**
+ * Open a new cash drawer session
+ * @route POST /api/v1/mobile/venues/:venueId/cash-drawer/open
+ */
+export const openSession = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId } = req.params
+    const staffId = req.authContext?.userId || ''
+    // `localId` y `openedAt` son ADITIVOS (Task 8b N1): llave idempotente de la apertura y hora REAL del
+    // aparato. Van crudos al servicio, que los valida (400) — igual que `localId` en pay-in/pay-out.
+    const { startingAmount, deviceName, staffName, localId, openedAt } = req.body
+
+    if (startingAmount === undefined || startingAmount === null) {
+      return res.status(400).json({ success: false, message: 'startingAmount es requerido' })
+    }
+
+    const session = await cashDrawerService.openSession(
+      {
+        venueId,
+        staffId,
+        staffName: staffName || 'Staff',
+        startingAmount: Number(startingAmount),
+        deviceName,
+        localId,
+        openedAt,
+      },
+      (req as any).puedeVerEsperado === true,
+    )
+
+    // 201 si esta apertura creó la caja; 200 si era un reintento y la caja YA estaba (ver `idempotentStatus`).
+    return res.status(idempotentStatus(!session.reintento)).json({ success: true, data: session })
+  } catch (error) {
+    next(error)
+  }
+}
 
 /**
  * Add pay-in event

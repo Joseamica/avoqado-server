@@ -86,6 +86,40 @@ interface OpenSessionParams {
   staffName: string
   startingAmount: number // dollars (e.g. 10.50 = $10.50)
   deviceName?: string
+  /**
+   * 🔴 LLAVE IDEMPOTENTE de la apertura (Task 8b N1, 5-sep-2026). OPCIONAL y ADITIVA: una app ya
+   * distribuida que no la mande se comporta EXACTAMENTE como hoy. Es el id con el que la app guardó
+   * la apertura en su cola durable (Android: el id del evento OPEN local; iOS: el de su sesión). Con
+   * ella, un reintento devuelve la MISMA caja (200) en vez de «ligar la caja de otro» sobre la propia.
+   * Llega cruda del cuerpo y se normaliza aquí: 400 si es basura, nunca un 500 desde el índice.
+   */
+  localId?: string | null
+  /**
+   * 🔴 La hora REAL a la que el aparato abrió la caja (ISO-8601 o epoch en ms), para una apertura
+   * reproducida desde la cola. Sin ella el servidor estampaba la hora del REPLAY (medido: abierta
+   * 10:22, registrada 10:31) y las ventas hechas sin red quedaban fuera de la ventana de la caja.
+   * Ilegible ⇒ 400 aquí; la ACOTACIÓN (futuro, más de 24 h) es dinero y vive en `acotarOpenedAt`.
+   */
+  openedAt?: string | number | null
+}
+
+/**
+ * La hora del aparato, o `null` si no viene. Una hora ILEGIBLE es 400 aquí —nunca un `Invalid Date`
+ * camino a Postgres— y la ACOTACIÓN (futuro, más de 24 h) vive en `acotarOpenedAt`
+ * (`shared/turnoDeCaja.ts`), que es quien decide dinero. Se acepta epoch en milisegundos además del
+ * ISO porque es lo que un reloj de Android tiene a mano (`System.currentTimeMillis()`).
+ */
+function parseOpenedAt(raw: unknown): Date | null {
+  const MENSAJE = 'openedAt debe ser una fecha ISO-8601 o un epoch en milisegundos'
+  if (raw === undefined || raw === null || raw === '') return null
+  if (typeof raw === 'number') {
+    if (!Number.isFinite(raw)) throw new BadRequestError(MENSAJE)
+    return new Date(raw)
+  }
+  if (typeof raw !== 'string') throw new BadRequestError(MENSAJE)
+  const parsed = new Date(raw)
+  if (Number.isNaN(parsed.getTime())) throw new BadRequestError(MENSAJE)
+  return parsed
 }
 
 /**
@@ -146,6 +180,11 @@ export async function openSession(params: OpenSessionParams, incluirEsperado = f
     throw new BadRequestError('El monto inicial no puede ser negativo')
   }
 
+  // Se validan ANTES de tocar la base, como en pay-in/pay-out: una llave basura no puede llegar al
+  // índice único y una hora ilegible no puede llegar a Postgres. Las dos son 400 legibles.
+  const localId = normalizeLocalId(params.localId)
+  const openedAt = parseOpenedAt(params.openedAt)
+
   const apertura = await abrirTurnoDeCaja({
     venueId,
     staffId,
@@ -155,6 +194,8 @@ export async function openSession(params: OpenSessionParams, incluirEsperado = f
     startingCash: startingAmount,
     deviceName,
     source: 'CAJA_MOVIL',
+    localId,
+    openedAt,
   })
 
   // Se relee con los eventos porque el POS calcula su esperado EN EL APARATO a partir de ellos: sin
@@ -176,11 +217,18 @@ export async function openSession(params: OpenSessionParams, incluirEsperado = f
   // negocio un 201 con la caja EXISTENTE es la respuesta normal a una segunda apertura, y sin
   // esta bandera el POS adoptaba la caja ajena como propia (revisión de 8b y auditoría de apps,
   // 2026-09-04): el fondo tecleado se perdía en silencio y los movimientos iban al arqueo ajeno.
+  // 🔴 El ECHO de la llave sale de lo GUARDADO —el evento OPEN de la caja que se devuelve—, no de lo que
+  // llegó en el request. Así, cuando el servidor LIGÓ a la caja de OTRO aparato, la app recibe la
+  // llave de ESA apertura y sabe que no es la suya aunque coincidan modelo, cuenta y fondo (era el
+  // residuo declarado en `esMiPropiaCaja` de las dos apps). `null` = caja sin llave (app o server viejos).
+  const aperturaGuardada = session.events.find((e: { type: string }) => e.type === 'OPEN')
   return {
     ...formatSession(session, incluirEsperado),
     shiftId: apertura.shiftId,
     cajaCreada: apertura.cajaCreada,
     shiftCreado: apertura.shiftCreado,
+    localId: aperturaGuardada?.localId ?? null,
+    reintento: apertura.reintento === true,
   }
 }
 
