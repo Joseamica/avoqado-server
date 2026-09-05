@@ -68,8 +68,6 @@ function turnoCerrado(extra: Record<string, unknown> = {}) {
     startTime: ABRE,
     endTime: CIERRA,
     updatedAt: CIERRA,
-    orders: [],
-    payments: [],
     ...extra,
   }
 }
@@ -83,7 +81,13 @@ function cobro(extra: Record<string, unknown> = {}) {
     tipAmount: 0,
     processedById: 'staff-1',
     createdAt: new Date('2026-09-03T18:00:00.000Z'),
-    allocations: [],
+    method: 'CASH',
+    fundsFlow: null,
+    tenderTypeId: null,
+    tenderCountsAsCash: null,
+    // El huérfano se alcanza SÓLO por su orden. Desde la ronda de arreglo 1 (P1.3) el barrido es
+    // una consulta plana de `Payment`, así que el turno de la orden viaja en el propio cobro.
+    order: { shiftId: 'turno-A' },
     ...extra,
   }
 }
@@ -98,24 +102,23 @@ function cobro(extra: Record<string, unknown> = {}) {
 describe('🔴 (a) el reporte pide sólo cobros COMPLETED', () => {
   beforeEach(() => jest.clearAllMocks())
 
-  it('getShifts: el `where` de los cobros del TURNO exige COMPLETED', async () => {
-    mockPrisma.$transaction.mockResolvedValue([[], 0])
-    ;(prisma as unknown as { shift: { count: jest.Mock } }).shift.count.mockResolvedValue(0)
+  it('getShifts: el barrido de cobros exige COMPLETED, y el filtro cubre las DOS ramas', async () => {
+    // ⚠️ Desde la ronda de arreglo 1 (P1.3) ya no hay `include` anidado que asertar: el reporte
+    // barre `Payment` con UNA consulta plana. Por eso el `status` está una sola vez, arriba del
+    // `OR`, y cubre por construcción tanto al cobro estampado como al huérfano de una orden — que
+    // era justo lo que las dos aserciones anteriores comprobaban por separado.
+    mockPrisma.$transaction.mockResolvedValue([[turnoCerrado()], 1])
+    ;(prisma as unknown as { shift: { count: jest.Mock } }).shift.count.mockResolvedValue(1)
     ;(prisma as unknown as { venue: { findUnique: jest.Mock } }).venue.findUnique.mockResolvedValue(null)
+    ;(prisma as unknown as { payment: { findMany: jest.Mock } }).payment.findMany.mockResolvedValue([])
 
     await getShifts('venue-1', 20, 1)
 
-    expect(turnosFindMany().mock.calls[0][0].include.payments.where.status).toBe('COMPLETED')
-  })
-
-  it('getShifts: el `where` de los cobros de la ORDEN exige COMPLETED', async () => {
-    mockPrisma.$transaction.mockResolvedValue([[], 0])
-    ;(prisma as unknown as { shift: { count: jest.Mock } }).shift.count.mockResolvedValue(0)
-    ;(prisma as unknown as { venue: { findUnique: jest.Mock } }).venue.findUnique.mockResolvedValue(null)
-
-    await getShifts('venue-1', 20, 1)
-
-    expect(turnosFindMany().mock.calls[0][0].include.orders.include.payments.where.status).toBe('COMPLETED')
+    const where = (prisma as unknown as { payment: { findMany: jest.Mock } }).payment.findMany.mock.calls[0][0].where
+    expect(where.status).toBe('COMPLETED')
+    // Las dos ramas de la membresía, bajo ese mismo `status`.
+    expect(where.OR).toHaveLength(2)
+    expect(where.OR[1]).toMatchObject({ shiftId: null })
   })
 
   it('getShiftsSummary: el `where` de los cobros del turno exige COMPLETED', async () => {
@@ -150,32 +153,33 @@ describe('🔴 (a) el reporte pide sólo cobros COMPLETED', () => {
 describe('🔴 (b) el respaldo histórico se acota a [startTime, endTime]', () => {
   beforeEach(() => jest.clearAllMocks())
 
-  const correr = async (turno: Record<string, unknown>) => {
+  const correr = async (turno: Record<string, unknown>, cobros: Array<Record<string, unknown>>) => {
     mockPrisma.$transaction.mockResolvedValue([[turno], 1])
+    ;(prisma as unknown as { payment: { findMany: jest.Mock } }).payment.findMany.mockResolvedValue(cobros)
     const { data } = await getShifts('venue-1', 20, 1)
     return data[0]
   }
 
   it('el cobro sin turno DENTRO de la ventana sigue contando (pos-sync histórico)', async () => {
-    const fila = await correr(turnoCerrado({ orders: [{ id: 'orden-pos', payments: [cobro({ amount: 80 })] }] }))
+    const fila = await correr(turnoCerrado(), [cobro({ amount: 80 })])
     expect(fila.paymentSum).toBe(80)
   })
 
   it('🔴 el cobro sin turno ocurrido DESPUÉS del cierre NO entra a un turno ya firmado', async () => {
     const tardio = cobro({ amount: 500, createdAt: new Date('2026-09-04T02:00:00.000Z') })
-    const fila = await correr(turnoCerrado({ orders: [{ id: 'orden-1', payments: [tardio] }] }))
+    const fila = await correr(turnoCerrado(), [tardio])
     expect(fila.paymentSum).toBe(0)
   })
 
   it('el cobro sin turno ocurrido ANTES de abrir tampoco entra', async () => {
     const temprano = cobro({ amount: 500, createdAt: new Date('2026-09-03T09:00:00.000Z') })
-    const fila = await correr(turnoCerrado({ orders: [{ id: 'orden-1', payments: [temprano] }] }))
+    const fila = await correr(turnoCerrado(), [temprano])
     expect(fila.paymentSum).toBe(0)
   })
 
   it('en un turno ABIERTO (endTime null) no hay techo: el cobro posterior sí cuenta', async () => {
     const tardio = cobro({ amount: 500, createdAt: new Date('2026-09-05T02:00:00.000Z') })
-    const fila = await correr(turnoCerrado({ status: 'OPEN', endTime: null, orders: [{ id: 'orden-1', payments: [tardio] }] }))
+    const fila = await correr(turnoCerrado({ status: 'OPEN', endTime: null }), [tardio])
     expect(fila.paymentSum).toBe(500)
   })
 
@@ -183,30 +187,30 @@ describe('🔴 (b) el respaldo histórico se acota a [startTime, endTime]', () =
     // Medido: 19 cobros de la base local están en esta situación ($6 874.06). `Payment.shiftId`
     // es la autoridad del servidor; acotarla borraría dinero bien atribuido.
     const propio = cobro({ shiftId: 'turno-A', amount: 700, createdAt: new Date('2026-09-04T02:00:00.000Z') })
-    const fila = await correr(turnoCerrado({ orders: [{ id: 'orden-1', payments: [propio] }] }))
+    const fila = await correr(turnoCerrado(), [propio])
     expect(fila.paymentSum).toBe(700)
   })
 
   it('FALLA CERRADO — un cobro sin `createdAt` (select estrechado) no se cuenta', async () => {
     const sinFecha = cobro({ amount: 500 })
     delete (sinFecha as Record<string, unknown>).createdAt
-    const fila = await correr(turnoCerrado({ orders: [{ id: 'orden-1', payments: [sinFecha] }] }))
+    const fila = await correr(turnoCerrado(), [sinFecha])
     expect(fila.paymentSum).toBe(0)
   })
 
   it('FALLA CERRADO — un turno sin `startTime` no adopta huérfanos', async () => {
-    const turno = turnoCerrado({ orders: [{ id: 'orden-1', payments: [cobro({ amount: 500 })] }] })
+    const turno = turnoCerrado()
     delete (turno as Record<string, unknown>).startTime
-    const fila = await correr(turno)
+    const fila = await correr(turno, [cobro({ amount: 500 })])
     expect(fila.paymentSum).toBe(0)
   })
 
   it('FALLA CERRADO — `endTime` ausente (no `null`) no se lee como turno abierto', async () => {
     // `null` = turno abierto. `undefined` = el campo no se pidió: no se puede afirmar nada,
     // así que no se adopta. Es el mismo `=== null` que ya protege el predicado del `shiftId`.
-    const turno = turnoCerrado({ orders: [{ id: 'orden-1', payments: [cobro({ amount: 500 })] }] })
+    const turno = turnoCerrado()
     delete (turno as Record<string, unknown>).endTime
-    const fila = await correr(turno)
+    const fila = await correr(turno, [cobro({ amount: 500 })])
     expect(fila.paymentSum).toBe(0)
   })
 })

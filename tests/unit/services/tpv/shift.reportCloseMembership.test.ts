@@ -85,6 +85,9 @@ const pago = (over: Record<string, unknown> = {}) => ({
   tenderCountsAsCash: null,
   processedById: 'staff-1',
   createdAt: new Date('2026-09-04T01:00:00.000Z'),
+  // Desde la ronda de arreglo 1 (P1.3) el reporte barre `Payment` en plano: el turno de la ORDEN
+  // viaja en el propio cobro, que es la única vía por la que se adopta un huérfano.
+  order: { shiftId: TURNO },
   allocations: [],
   ...over,
 })
@@ -249,31 +252,24 @@ describe('reporte — misma aritmética Decimal y tenant scope', () => {
   it('la fila no filtrada muestra los mismos $180: exacto + huérfano dentro de ventana', async () => {
     const exacto = pago({ id: 'exacto', amount: new Decimal('100.00') })
     const huerfano = pago({ id: 'huerfano', shiftId: null, amount: new Decimal('80.00'), createdAt: CLAIMED_AT })
-    prepararReporte({
-      ...turnoAbierto(),
-      endTime: CLAIMED_AT,
-      status: 'CLOSED',
-      staff: null,
-      orders: [{ id: 'orden-turno', payments: [huerfano] }],
-      payments: [exacto],
-    })
+    prepararReporte({ ...turnoAbierto(), endTime: CLAIMED_AT, status: 'CLOSED', staff: null })
+    m.payment.findMany.mockResolvedValue([exacto, huerfano])
 
     const { data } = await getShifts(VENUE, 20, 1)
 
     expect(data[0].paymentSum).toBe(180)
-    const query = m.shift.findMany.mock.calls[0][0]
-    expect(query.include.orders.include.payments.where).toMatchObject({ venueId: VENUE, status: 'COMPLETED' })
-    expect(query.include.payments.where).toMatchObject({ venueId: VENUE, status: 'COMPLETED' })
+    // ⚠️ Las dos aserciones que vivían aquí miraban el `include` anidado del turno, que la ronda de
+    // arreglo 1 retiró (P1.3). El tenant scope y el `COMPLETED` no se pierden: se afirman sobre el
+    // barrido plano, que es donde viven ahora, y en UN solo sitio en vez de dos.
+    expect(m.payment.findMany.mock.calls[0][0].where).toMatchObject({ venueId: VENUE, status: 'COMPLETED' })
   })
 
   it('no expone artefactos float: 0.1 + 0.2 se reporta como 0.3', async () => {
-    prepararReporte({
-      ...turnoAbierto(),
-      endTime: CLAIMED_AT,
-      staff: null,
-      orders: [],
-      payments: [pago({ id: 'decimal-1', amount: new Decimal('0.1') }), pago({ id: 'decimal-2', amount: new Decimal('0.2') })],
-    })
+    prepararReporte({ ...turnoAbierto(), endTime: CLAIMED_AT, staff: null })
+    m.payment.findMany.mockResolvedValue([
+      pago({ id: 'decimal-1', amount: new Decimal('0.1') }),
+      pago({ id: 'decimal-2', amount: new Decimal('0.2') }),
+    ])
 
     const { data } = await getShifts(VENUE, 20, 1)
 
@@ -296,15 +292,11 @@ describe('reporte — misma aritmética Decimal y tenant scope', () => {
       amount: new Decimal('90.00'),
       createdAt: new Date(CLAIMED_AT.getTime() + 1),
     })
-    const enCierre = {
-      ...turnoAbierto(),
-      status: 'CLOSING',
-      updatedAt: CLAIMED_AT,
-      staff: null,
-      orders: [{ id: 'orden-turno', payments: [enElClaim, despuesDelClaim] }],
-      payments: exactos,
-    }
+    const enCierre = { ...turnoAbierto(), status: 'CLOSING', updatedAt: CLAIMED_AT, staff: null }
     prepararReporte(enCierre)
+    // El reporte pagina con el MISMO cursor de 500 que el cierre: la primera página se llena y la
+    // segunda trae los dos huérfanos, de los que sólo uno cae dentro del claim.
+    m.payment.findMany.mockResolvedValueOnce(exactos).mockResolvedValueOnce([enElClaim, despuesDelClaim])
 
     const { data } = await getShifts(VENUE, 20, 1)
     const totalDelReporte = data[0].paymentSum
@@ -314,11 +306,14 @@ describe('reporte — misma aritmética Decimal y tenant scope', () => {
     expect(query.select).toBeUndefined()
 
     prepararCierre()
+    // El reporte ya consumió sus propias páginas (desde P1.3 usa el mismo delegado), así que lo
+    // que se mide aquí es el DELTA del cierre, no el total acumulado del archivo.
+    const llamadasAntesDelCierre = m.payment.findMany.mock.calls.length
     m.payment.findMany.mockResolvedValueOnce([...exactos.slice(0, 499), enElClaim]).mockResolvedValueOnce([exactos[499]])
 
     await closeShiftForVenueWithResult(VENUE, TURNO, {}, { now: () => CLAIMED_AT })
 
-    expect(m.payment.findMany).toHaveBeenCalledTimes(2)
+    expect(m.payment.findMany.mock.calls.length - llamadasAntesDelCierre).toBe(2)
     expect(totalDelReporte).toBe(580)
     expect((cierreEscrito.totalSales as Decimal).toFixed(2)).toBe('580.00')
     expect(totalDelReporte).toBe((cierreEscrito.totalSales as Decimal).toNumber())

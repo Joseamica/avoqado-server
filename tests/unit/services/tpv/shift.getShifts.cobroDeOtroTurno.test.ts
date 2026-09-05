@@ -70,8 +70,6 @@ const turno = (id: string, extra: Record<string, unknown> = {}) => ({
   startTime: ABRE,
   endTime: CIERRA,
   updatedAt: CIERRA,
-  orders: [],
-  payments: [],
   ...extra,
 })
 
@@ -82,19 +80,37 @@ const pago = (extra: Record<string, unknown> = {}) => ({
   tipAmount: 15,
   processedById: 'staff-1',
   createdAt: DURANTE,
-  allocations: [],
+  method: 'CASH',
+  fundsFlow: null,
+  tenderTypeId: null,
+  tenderCountsAsCash: null,
+  // El turno de la ORDEN. Desde la ronda de arreglo 1 (P1.3) el barrido es una consulta plana de
+  // `Payment`, así que este dato viaja en el propio cobro en vez de en un `include` anidado.
+  order: { shiftId: 'turno-A' },
   ...extra,
 })
+
+const pagoFindMany = () => (prisma as unknown as { payment: { findMany: jest.Mock } }).payment.findMany
+
+/** Una página con UN turno y los cobros que el barrido devuelve para él. */
+const correr = async (fila: Record<string, unknown>, cobros: Array<Record<string, unknown>>) => {
+  mockPrisma.$transaction.mockResolvedValue([[fila], 1])
+  pagoFindMany().mockResolvedValue(cobros)
+  const { data } = await getShifts('venue-1', 20, 1)
+  return data
+}
 
 describe('getShifts — un cobro de OTRO turno no suma en éste', () => {
   beforeEach(() => jest.clearAllMocks())
 
   it('🔴 la mesa abierta en A y pagada en B NO deja su dinero en A', async () => {
     // La orden se estampó con A (se abrió en A), pero su cobro se resolvió a B (se pagó en B).
+    // 🔴 Con el barrido nuevo este cobro ni siquiera se pediría (el `where` sólo trae los
+    // estampados con ESTOS turnos y los huérfanos de sus órdenes). Se le sirve igual al servicio
+    // para ejercitar la SEGUNDA línea de defensa: `turnoDelCobro` no adopta un cobro estampado con
+    // un turno que no está en la página.
     const cobroDeB = pago({ shiftId: 'turno-B' })
-    mockPrisma.$transaction.mockResolvedValue([[turno('turno-A', { orders: [{ id: 'orden-1', payments: [cobroDeB] }] })], 1])
-
-    const { data } = await getShifts('venue-1', 20, 1)
+    const data = await correr(turno('turno-A'), [cobroDeB])
 
     // 0, no 100: A no cobró nada. Sin el filtro, ese dinero salía en A **y** en B.
     expect(data[0].paymentSum).toBe(0)
@@ -104,10 +120,8 @@ describe('getShifts — un cobro de OTRO turno no suma en éste', () => {
 
   it('el mismo cobro SÍ suma en el turno donde entró el dinero', async () => {
     // La otra cara: el filtro no puede dejar a B sin su propio cobro.
-    const cobroDeB = pago({ shiftId: 'turno-B' })
-    mockPrisma.$transaction.mockResolvedValue([[turno('turno-B', { payments: [cobroDeB] })], 1])
-
-    const { data } = await getShifts('venue-1', 20, 1)
+    const cobroDeB = pago({ shiftId: 'turno-B', order: { shiftId: 'turno-B' } })
+    const data = await correr(turno('turno-B'), [cobroDeB])
 
     expect(data[0].paymentSum).toBe(100)
     expect(data[0].tipsSum).toBe(15)
@@ -118,9 +132,7 @@ describe('getShifts — un cobro de OTRO turno no suma en éste', () => {
     // borraría el dinero de la pantalla. Ocurrió DENTRO de la ventana del turno — el respaldo
     // tiene techo desde la task 5c, y el histórico legítimo cae de este lado del techo.
     const cobroSinTurno = pago({ shiftId: null, amount: 80, tipAmount: 0 })
-    mockPrisma.$transaction.mockResolvedValue([[turno('turno-A', { orders: [{ id: 'orden-pos', payments: [cobroSinTurno] }] })], 1])
-
-    const { data } = await getShifts('venue-1', 20, 1)
+    const data = await correr(turno('turno-A'), [cobroSinTurno])
 
     expect(data[0].paymentSum).toBe(80)
   })
@@ -128,12 +140,7 @@ describe('getShifts — un cobro de OTRO turno no suma en éste', () => {
   it('el cobro de ESTE turno alcanzable por los dos caminos sigue contando UNA vez', async () => {
     // Regresión de la deduplicación que ya existía: el filtro no la sustituye.
     const cobro = pago({ shiftId: 'turno-A' })
-    mockPrisma.$transaction.mockResolvedValue([
-      [turno('turno-A', { orders: [{ id: 'orden-1', payments: [cobro] }], payments: [cobro] })],
-      1,
-    ])
-
-    const { data } = await getShifts('venue-1', 20, 1)
+    const data = await correr(turno('turno-A'), [cobro])
 
     expect(data[0].paymentSum).toBe(100)
     expect(data[0].tipsCount).toBe(1)
@@ -144,49 +151,37 @@ describe('getShifts — un cobro de OTRO turno no suma en éste', () => {
  * 🔴 EL FILTRO DE ARRIBA PUEDE VOLVERSE NO-OP EN SILENCIO, Y ÉSTE ES SU CANDADO.
  *
  * Revisión de la task 2b (3-sep-2026): el predicado era `p.shiftId === shift.id || p.shiftId == null`
- * con `==` SUELTO, que además de `null` traga `undefined`. Si alguien estrecha el `include` de los
- * cobros de las órdenes a un `select` sin `shiftId`, TODOS los cobros llegan con `shiftId:
- * undefined`, el filtro deja pasar todo, y el mismo dinero vuelve a contarse en dos turnos — con
- * las cuatro pruebas de arriba EN VERDE, porque sus fixtures sí traen el campo. Es exactamente la
- * trampa que dejó ciega a la suite de dedup vieja.
+ * con `==` SUELTO, que además de `null` traga `undefined`. Si alguien estrecha el `select` de los
+ * cobros y deja fuera `shiftId`, TODOS llegan con `shiftId: undefined`, el filtro deja pasar todo,
+ * y el mismo dinero vuelve a contarse en dos turnos — con las pruebas de arriba EN VERDE, porque
+ * sus fixtures sí traen el campo.
  *
- * Se cierra por los dos lados: `=== null` en el predicado (un cobro sin el campo ya no pasa) y la
- * aserción de FORMA de aquí abajo, que es la que de verdad ve el estrechamiento del `include`.
+ * Se cierra por los dos lados: `turnoDelCobro` falla CERRADO ante un `shiftId` ausente, y la
+ * aserción de FORMA de aquí abajo es la que de verdad ve el estrechamiento del `select`.
  */
-describe('getShifts — la consulta tiene que TRAER `shiftId` de los cobros de la orden', () => {
+describe('getShifts — la consulta tiene que TRAER `shiftId` de los cobros', () => {
   beforeEach(() => jest.clearAllMocks())
 
-  const findManyDeTurnos = () => (prisma as unknown as { shift: { findMany: jest.Mock } }).shift.findMany
+  it('🔴 el `select` del barrido pide `shiftId` y el `shiftId` de la orden', async () => {
+    await correr(turno('turno-A'), [])
 
-  it('🔴 el `include` de los cobros de las órdenes no puede ser un `select` sin `shiftId`', async () => {
-    mockPrisma.$transaction.mockResolvedValue([[], 0])
-    ;(prisma as unknown as { shift: { count: jest.Mock } }).shift.count.mockResolvedValue(0)
-    ;(prisma as unknown as { venue: { findUnique: jest.Mock } }).venue.findUnique.mockResolvedValue(null)
-
-    await getShifts('venue-1', 20, 1)
-
-    const args = findManyDeTurnos().mock.calls[0][0]
-    const cobrosDeLaOrden = args.include.orders.include.payments
-    // Sin `select`, Prisma trae la fila entera y `shiftId` viene siempre. Con `select`, tiene que
-    // pedirlo explícitamente: si no, el filtro de arriba se queda sin el dato con el que decide.
-    if (cobrosDeLaOrden.select) {
-      expect(cobrosDeLaOrden.select.shiftId).toBe(true)
-    } else {
-      expect(cobrosDeLaOrden.select).toBeUndefined()
-    }
+    const select = pagoFindMany().mock.calls[0][0].select
+    // Sin estos dos no se puede decidir de quién es el cobro: uno da la rama estampada y el otro
+    // la del huérfano. Estrecharlos deja al filtro sin el dato con el que decide.
+    expect(select.shiftId).toBe(true)
+    expect(select.order).toEqual({ select: { shiftId: true } })
   })
 
   it('🔴 un cobro SIN el campo `shiftId` (select estrechado) NO se cuenta: nunca se duplica dinero', async () => {
     // La forma exacta que produciría un `select` sin `shiftId`. Con `==` este cobro pasaba el
-    // filtro y sumaba en un turno que no lo cobró; con `===` no pasa. Perder un renglón de la
-    // pantalla se nota y se investiga; contar dos veces el mismo dinero, no.
+    // filtro y sumaba en un turno que no lo cobró; ahora `turnoDelCobro` lo descarta. Perder un
+    // renglón de la pantalla se nota y se investiga; contar dos veces el mismo dinero, no.
     // 🔴 Trae `createdAt` DENTRO de la ventana a propósito: si el techo de la task 5c fuera el
-    // que lo excluye, esta prueba pasaría por el motivo equivocado y dejaría de vigilar el `===`.
+    // que lo excluye, esta prueba pasaría por el motivo equivocado y dejaría de vigilar el guard.
     const cobroSinCampo = pago({ amount: 100 })
     delete (cobroSinCampo as Record<string, unknown>).shiftId
-    mockPrisma.$transaction.mockResolvedValue([[turno('turno-A', { orders: [{ id: 'orden-1', payments: [cobroSinCampo] }] })], 1])
 
-    const { data } = await getShifts('venue-1', 20, 1)
+    const data = await correr(turno('turno-A'), [cobroSinCampo])
 
     expect(data[0].paymentSum).toBe(0)
   })

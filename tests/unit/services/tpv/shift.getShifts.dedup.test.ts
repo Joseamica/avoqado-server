@@ -42,34 +42,59 @@ import { getShifts } from '@/services/tpv/shift.tpv.service'
 
 const mockPrisma = prisma as unknown as { $transaction: jest.Mock }
 
+const pagoFindMany = () => (prisma as unknown as { payment: { findMany: jest.Mock } }).payment.findMany
+
+const ABRE = new Date('2026-09-03T14:00:00.000Z')
+const CIERRA = new Date('2026-09-03T22:00:00.000Z')
+
+const turno = (extra: Record<string, unknown> = {}) => ({
+  id: 'turno-1',
+  venueId: 'venue-1',
+  staff: { id: 'staff-1', firstName: 'Ana', lastName: 'P' },
+  status: 'CLOSED',
+  startTime: ABRE,
+  endTime: CIERRA,
+  updatedAt: CIERRA,
+  ...extra,
+})
+
 /**
- * Un turno donde el MISMO cobro llega por los dos caminos: por su orden y por `shiftId`.
- *
- * 🔴 `shiftId` es OBLIGATORIO en estos fixtures, y no es cosmético. La consulta real trae la fila
- * entera del `Payment`, así que ese campo SIEMPRE viene —con el id del turno o con `null`—; un
- * fixture sin él modela un estado que la base no puede producir. Cuando faltaba, estas tres pruebas
- * pasaban con el filtro «el cobro es de este turno o de ninguno» convertido en un no-op, que es
- * justo el defecto que ese filtro existe para impedir (ver
- * `shift.getShifts.cobroDeOtroTurno.test.ts`).
+ * 🔴 `shiftId` es OBLIGATORIO en estos fixtures, y no es cosmético. El `select` real lo pide
+ * SIEMPRE —con el id del turno o con `null`—; un fixture sin él modela un estado que la base no
+ * puede producir. Cuando faltaba, estas pruebas pasaban con el filtro «el cobro es de este turno o
+ * de ninguno» convertido en un no-op, que es justo el defecto que ese filtro existe para impedir
+ * (ver `shift.getShifts.cobroDeOtroTurno.test.ts`).
  */
-function turnoConElMismoCobroPorLosDosCaminos() {
-  const cobro = { id: 'pago-1', shiftId: 'turno-1', amount: 100, tipAmount: 15, processedById: 'staff-1', allocations: [] }
-  return {
-    id: 'turno-1',
-    venueId: 'venue-1',
-    staff: { id: 'staff-1', firstName: 'Ana', lastName: 'P' },
-    orders: [{ id: 'orden-1', payments: [cobro] }],
-    payments: [cobro],
-  }
+const cobro = (extra: Record<string, unknown> = {}) => ({
+  id: 'pago-1',
+  shiftId: 'turno-1',
+  amount: 100,
+  tipAmount: 15,
+  processedById: 'staff-1',
+  method: 'CASH',
+  fundsFlow: null,
+  tenderTypeId: null,
+  tenderCountsAsCash: null,
+  createdAt: new Date('2026-09-03T18:00:00.000Z'),
+  order: { shiftId: 'turno-1' },
+  ...extra,
+})
+
+const correr = async (cobros: Array<Record<string, unknown>>) => {
+  mockPrisma.$transaction.mockResolvedValue([[turno()], 1])
+  pagoFindMany().mockResolvedValue(cobros)
+  const { data } = await getShifts('venue-1', 20, 1)
+  return data
 }
 
 describe('getShifts — un cobro alcanzable por los dos caminos se cuenta UNA vez', () => {
   beforeEach(() => jest.clearAllMocks())
 
   it('no dobla el dinero cuando la orden y el cobro cuelgan del mismo turno', async () => {
-    mockPrisma.$transaction.mockResolvedValue([[turnoConElMismoCobroPorLosDosCaminos()], 1])
-
-    const { data } = await getShifts('venue-1', 20, 1)
+    // Desde la ronda de arreglo 1 (P1.3) el barrido devuelve UNA fila por cobro y `turnoDelCobro`
+    // le asigna EXACTAMENTE un turno, así que la duplicación ya no puede nacer — antes había que
+    // deduplicar dos ramas de un `include`. La afirmación de dinero se conserva igual.
+    const data = await correr([cobro()])
 
     expect(data).toHaveLength(1)
     // 100, no 200. Es el defecto que esta prueba guarda.
@@ -79,16 +104,12 @@ describe('getShifts — un cobro alcanzable por los dos caminos se cuenta UNA ve
     expect(data[0].avgTipPercentage).toBe(15)
   })
 
-  it('sigue sumando DOS cobros distintos que llegan por caminos distintos', async () => {
-    // Regresión: deduplicar por id no puede convertirse en «me quedo con uno».
-    const porLaOrden = { id: 'pago-1', shiftId: 'turno-1', amount: 100, tipAmount: 10, processedById: 'staff-1', allocations: [] }
-    const porElTurno = { id: 'pago-2', shiftId: 'turno-1', amount: 40, tipAmount: 0, processedById: 'staff-2', allocations: [] }
-    mockPrisma.$transaction.mockResolvedValue([
-      [{ id: 'turno-1', venueId: 'venue-1', staff: null, orders: [{ id: 'orden-1', payments: [porLaOrden] }], payments: [porElTurno] }],
-      1,
+  it('sigue sumando DOS cobros distintos del mismo turno', async () => {
+    // Regresión: agrupar por turno no puede convertirse en «me quedo con uno».
+    const data = await correr([
+      cobro({ id: 'pago-1', amount: 100, tipAmount: 10 }),
+      cobro({ id: 'pago-2', amount: 40, tipAmount: 0, processedById: 'staff-2' }),
     ])
-
-    const { data } = await getShifts('venue-1', 20, 1)
 
     expect(data[0].paymentSum).toBe(140)
     expect(data[0].tipsSum).toBe(10)
@@ -96,9 +117,7 @@ describe('getShifts — un cobro alcanzable por los dos caminos se cuenta UNA ve
   })
 
   it('un turno sin cobros no divide entre cero', async () => {
-    mockPrisma.$transaction.mockResolvedValue([[{ id: 'turno-1', venueId: 'venue-1', staff: null, orders: [], payments: [] }], 1])
-
-    const { data } = await getShifts('venue-1', 20, 1)
+    const data = await correr([])
 
     expect(data[0].paymentSum).toBe(0)
     expect(data[0].avgTipPercentage).toBe(0)

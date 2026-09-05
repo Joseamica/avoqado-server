@@ -104,17 +104,19 @@ export async function getCurrentShift(venueId: string, _orgId?: string, _posName
   // ✅ REAL-TIME CALCULATION: Calculate current shift totals from payments
   // This ensures TPV displays accurate totals before shift is closed
   // ============================================================
-  const shiftPayments = await prisma.payment.findMany({
+  // 🔴 AGREGA EN LA BASE, no en el hilo de Node (P2.5 de la auditoría del 4-sep-2026). Esto era un
+  // `findMany` sin `take` y sin `venueId`, y es el endpoint que la PAX SONDEA cada pocos segundos:
+  // antes leía los cobros de una persona y desde la Fase 1 lee los de todo el negocio durante todo
+  // el día. `groupBy` devuelve una fila por método —cinco como mucho— con la suma hecha en Postgres,
+  // en `Decimal` y por tanto exacta: el mismo número que salía del bucle, sin hidratar nada.
+  const porMetodo = await prisma.payment.groupBy({
+    by: ['method'],
     where: {
+      venueId,
       shiftId: shift.id,
       status: 'COMPLETED',
     },
-    select: {
-      id: true,
-      amount: true,
-      tipAmount: true,
-      method: true,
-    },
+    _sum: { amount: true, tipAmount: true },
   })
 
   let totalCashPayments = new Decimal(0)
@@ -124,15 +126,15 @@ export async function getCurrentShift(venueId: string, _orgId?: string, _posName
   let totalSales = new Decimal(0)
   let totalTips = new Decimal(0)
 
-  shiftPayments.forEach(payment => {
-    const amount = new Decimal(payment.amount || 0)
-    const tipAmount = new Decimal(payment.tipAmount || 0)
+  for (const fila of porMetodo) {
+    const amount = new Decimal(fila._sum?.amount ?? 0)
+    const tipAmount = new Decimal(fila._sum?.tipAmount ?? 0)
 
     totalSales = totalSales.add(amount)
     totalTips = totalTips.add(tipAmount)
 
-    // Group by payment method
-    switch (payment.method) {
+    // Group by payment method — el MISMO reparto de siempre, incluido el `default` a «otros».
+    switch (fila.method) {
       case 'CASH':
         totalCashPayments = totalCashPayments.add(amount)
         break
@@ -149,11 +151,12 @@ export async function getCurrentShift(venueId: string, _orgId?: string, _posName
         totalOtherPayments = totalOtherPayments.add(amount)
         break
     }
-  })
+  }
 
   // Get order count
   const orderCount = await prisma.order.count({
     where: {
+      venueId,
       shiftId: shift.id,
       status: {
         in: ['CONFIRMED', 'COMPLETED'],
@@ -161,22 +164,22 @@ export async function getCurrentShift(venueId: string, _orgId?: string, _posName
     },
   })
 
-  // Get products sold count
-  const orderItems = await prisma.orderItem.findMany({
+  // Get products sold count — misma suma, hecha en la base. Era el segundo `findMany` sin `take`
+  // de este endpoint: traía una fila por RENGLÓN vendido en el día sólo para sumarle la cantidad.
+  const renglones = await prisma.orderItem.aggregate({
     where: {
       order: {
+        venueId,
         shiftId: shift.id,
         status: {
           in: ['CONFIRMED', 'COMPLETED'],
         },
       },
     },
-    select: {
-      quantity: true,
-    },
+    _sum: { quantity: true },
   })
 
-  const totalProductsSold = orderItems.reduce((sum, item) => sum + item.quantity, 0)
+  const totalProductsSold = renglones._sum?.quantity ?? 0
 
   // Return shift with calculated totals
   return {
@@ -252,6 +255,177 @@ export function cobroSinTurnoPerteneceAlTurno(
 }
 
 /**
+ * 🔴 TECHO DEL SERVIDOR para la lista de turnos. Nunca se confía en el `pageSize` del cliente
+ * (`.claude/rules/bounded-queries-and-server-load.md`). Se RECORTA, no se rechaza: un 400 rompería
+ * a una PAX vieja que pidiera de más, y lo que se quiere es acotar el trabajo, no negar la pantalla.
+ *
+ * 50 y no 100 porque desde la Fase 1 **un turno = un día entero del negocio**: el ledger reporta
+ * 128 órdenes y $18,206.75 en UN turno de Testarudo. `meta.pageSize` devuelve el valor ya
+ * recortado, así que el cliente ve lo que de verdad se aplicó.
+ */
+export const TOPE_DE_TURNOS_POR_PAGINA = 50
+
+/** Páginas del barrido de cobros. Mismo tamaño que el cursor del cierre, por la misma razón. */
+const COBROS_POR_PAGINA = 500
+
+/** Lo único que la pantalla de Turnos necesita de los cobros: tres números, no la lista. */
+interface RollupDelTurno {
+  totalSales: Decimal
+  totalTips: Decimal
+  tipsCount: number
+}
+
+const ROLLUP_VACIO = (): RollupDelTurno => ({ totalSales: new Decimal(0), totalTips: new Decimal(0), tipsCount: 0 })
+
+/**
+ * La proyección MÍNIMA de un `Payment` con la que se pueden calcular los totales de un turno —
+ * exactamente lo que selecciona el cierre. Vive aquí arriba porque la usan DOS: el cursor del
+ * cierre (`readShiftPaymentsForClose`) y el rollup de la lista de turnos, que es el de más arriba
+ * en el archivo.
+ *
+ * 🔴 Los tres campos de `tenderSemantics` son OBLIGATORIOS (aunque nulos) a propósito: si fueran
+ * opcionales, un `select` que olvide `tenderCountsAsCash` compilaría y el vale de despensa dejaría
+ * de contar en el cajón sin que nada avise. Es la trampa del mock que ya costó una vez («el mock
+ * pasa el campo gratis, el `select` real no»).
+ */
+const SHIFT_PAYMENT_TOTALS_SELECT = {
+  id: true,
+  amount: true,
+  tipAmount: true,
+  method: true,
+  fundsFlow: true,
+  tenderTypeId: true,
+  tenderCountsAsCash: true,
+} satisfies Prisma.PaymentSelect
+
+/** La proyección del cobro que el rollup necesita: los totales + con qué decidir de quién es. */
+const COBRO_DEL_ROLLUP_SELECT = {
+  ...SHIFT_PAYMENT_TOTALS_SELECT,
+  // 🔴 Los tres de abajo NO son opcionales. `shiftId` decide la rama; `createdAt` es el techo del
+  // respaldo histórico; `order.shiftId` es la única vía del huérfano. Si alguien los quita del
+  // `select`, `turnoDelCobro` FALLA CERRADO (devuelve null) en vez de adivinar — un renglón que se
+  // cae de la pantalla se ve y se investiga; dinero contado en dos turnos, no.
+  shiftId: true,
+  createdAt: true,
+  order: { select: { shiftId: true } },
+} satisfies Prisma.PaymentSelect
+
+type CobroDelRollup = Prisma.PaymentGetPayload<{ select: typeof COBRO_DEL_ROLLUP_SELECT }>
+
+/** El turno al que pertenece un cobro, o `null` si no es de ninguno de los de esta página. */
+function turnoDelCobro(cobro: CobroDelRollup, turnos: Map<string, TurnoParaRollup>): string | null {
+  // 🔴 Falla CERRADO ante un `select` estrechado: sin el campo no se adivina. Con `!== null` a
+  // secas, un cobro que llegara sin `shiftId` caería a la rama del huérfano y podría sumarse a un
+  // turno que no lo cobró — el mismo dinero contado dos veces, con las pruebas en verde porque sus
+  // fixtures sí traen el campo.
+  if (cobro.shiftId === undefined) return null
+
+  // (1) Estampado por el servidor: su identidad gana a la fecha, sin condiciones.
+  if (cobro.shiftId !== null) return turnos.has(cobro.shiftId) ? cobro.shiftId : null
+
+  // (2) Respaldo histórico: el huérfano de una orden CON turno (pos-sync). Con techo — un cobro
+  // posterior al cierre no entra retrospectivamente a un turno ya firmado.
+  const delaOrden = cobro.order?.shiftId
+  if (!delaOrden) return null
+  const turno = turnos.get(delaOrden)
+  if (!turno) return null
+  return cobroSinTurnoPerteneceAlTurno(cobro, turno) ? delaOrden : null
+}
+
+type TurnoParaRollup = Pick<Shift, 'id' | 'status' | 'startTime' | 'endTime' | 'updatedAt'>
+
+/**
+ * 🔴 LOS TOTALES DE LA LISTA DE TURNOS, SIN HIDRATAR EL DÍA ENTERO.
+ *
+ * Hasta el 4-sep-2026 esto salía de un `include` anidado sin un solo `take`:
+ * `shift.orders → payments → allocations` más `shift.payments`. Antes de la Fase 1 traía casi nada
+ * (78 de 92 cobros de Testarudo tenían `shiftId` nulo), pero desde que **un turno es un día entero
+ * del negocio** la MISMA consulta pasó a materializar todas las órdenes, todos sus cobros y todas
+ * sus asignaciones × `pageSize` turnos en el hilo de Node — la clase de defecto que tumbó
+ * producción el 1-sep (memoria `include-sin-tope-en-un-detalle`), en el camino que la PAX consulta
+ * a diario. Y `allocations` ni siquiera se leía nunca.
+ *
+ * Ahora es UNA consulta plana, paginada por cursor y **plegada página a página**: la memoria queda
+ * en 500 filas de 8 columnas pase lo que pase, en vez de crecer con la historia del negocio. Los
+ * totales los sigue calculando `aggregateShiftPayments` —la MISMA aritmética Decimal que el
+ * cierre—, así que la pantalla no puede divergir del corte firmado; sumar por páginas da lo mismo
+ * porque son sumas exactas de Decimal.
+ *
+ * La membresía es la misma de antes, escrita ahora en el `where` en vez de en un `filter` de JS:
+ * cobro COMPLETED del venue, estampado con uno de estos turnos **o** huérfano de una orden de uno
+ * de estos turnos. El techo del huérfano lo sigue poniendo `cobroSinTurnoPerteneceAlTurno`, que
+ * depende del estado de CADA turno y por eso no baja al SQL.
+ */
+async function rollupDeCobrosPorTurno(
+  venueId: string,
+  turnos: TurnoParaRollup[],
+  filtros: { staffId?: string; desde?: Date; hasta?: Date },
+): Promise<Map<string, RollupDelTurno>> {
+  const acumulado = new Map<string, RollupDelTurno>()
+  if (turnos.length === 0) return acumulado
+
+  const porId = new Map(turnos.map(t => [t.id, t]))
+  const ids = [...porId.keys()]
+  const { staffId, desde, hasta } = filtros
+  const rangoDeFechas = desde || hasta ? { createdAt: { ...(desde ? { gte: desde } : {}), ...(hasta ? { lte: hasta } : {}) } } : {}
+
+  const where: Prisma.PaymentWhereInput = {
+    venueId,
+    // 🔴 SÓLO lo que de verdad se cobró. `b4bit.service.ts` crea el `Payment` en PENDING con el
+    // turno ya estampado y lo pasa a FAILED al cancelarse: sin este filtro, un cobro cripto que
+    // nunca entró salía como venta del turno. Mismo predicado que `getCurrentShift` y el CIERRE.
+    // NO se filtra por `type`: el reembolso llega con `amount` negativo y RESTA solo.
+    status: 'COMPLETED',
+    ...(staffId ? { processedById: staffId } : {}),
+    ...rangoDeFechas,
+    OR: [
+      { shiftId: { in: ids } },
+      // El huérfano se alcanza sólo por su orden, y la orden respeta el mismo rango de fechas que
+      // respetaba el `include` de las órdenes.
+      { shiftId: null, order: { venueId, shiftId: { in: ids }, ...rangoDeFechas } },
+    ],
+  }
+
+  let cursor: string | undefined
+  for (;;) {
+    const pagina: CobroDelRollup[] = await prisma.payment.findMany({
+      where,
+      select: COBRO_DEL_ROLLUP_SELECT,
+      orderBy: { id: 'asc' },
+      take: COBROS_POR_PAGINA,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    })
+
+    const deEstaPagina = new Map<string, CobroDelRollup[]>()
+    for (const cobro of pagina) {
+      const turnoId = turnoDelCobro(cobro, porId)
+      if (!turnoId) continue
+      const lista = deEstaPagina.get(turnoId)
+      if (lista) lista.push(cobro)
+      else deEstaPagina.set(turnoId, [cobro])
+    }
+
+    for (const [turnoId, cobros] of deEstaPagina) {
+      const totales = aggregateShiftPayments(cobros)
+      const previo = acumulado.get(turnoId) ?? ROLLUP_VACIO()
+      acumulado.set(turnoId, {
+        totalSales: previo.totalSales.add(totales.totalSales),
+        totalTips: previo.totalTips.add(totales.totalTips),
+        tipsCount: previo.tipsCount + cobros.filter(p => Number(p.tipAmount || 0) > 0).length,
+      })
+    }
+
+    if (pagina.length < COBROS_POR_PAGINA) return acumulado
+
+    const siguiente = pagina[pagina.length - 1]?.id
+    if (!siguiente || siguiente === cursor) {
+      throw new InternalServerError('No se pudo avanzar el cursor de cobros de la lista de turnos')
+    }
+    cursor = siguiente
+  }
+}
+
+/**
  * Get shifts for a venue with pagination and filtering
  * @param orgId Organization ID (for future authorization)
  * @param venueId Venue ID
@@ -268,6 +442,8 @@ export async function getShifts(
   _orgId?: string,
 ): Promise<PaginationResponse<any>> {
   const { staffId, startTime, endTime } = filters
+  // 🔴 El techo lo pone el SERVIDOR, no el cliente. `meta.pageSize` devuelve el valor recortado.
+  pageSize = Math.min(Math.max(Math.trunc(pageSize) || 1, 1), TOPE_DE_TURNOS_POR_PAGINA)
 
   // Parse date filters once for reuse
   let parsedStartTime: Date | undefined
@@ -336,73 +512,15 @@ export async function getShifts(
   const skip = (pageNumber - 1) * pageSize
 
   // Get the shifts with related data
+  //
+  // 🔴 SIN `include` de órdenes ni de cobros. Aquí vivía un `orders → payments → allocations` sin
+  // un solo `take`, que desde la Fase 1 —un turno = un día entero del negocio— materializaba el día
+  // completo × `pageSize` turnos. Los totales salen ahora de `rollupDeCobrosPorTurno`, acotado por
+  // cursor. `staff` se queda: es una fila por turno y la respuesta la expone.
   const [shifts, totalCount] = await prisma.$transaction([
     prisma.shift.findMany({
       where: whereClause,
-      include: {
-        orders: {
-          include: {
-            payments: {
-              where: {
-                // 🔴 SÓLO lo que de verdad se cobró. `b4bit.service.ts` crea el `Payment` en
-                // PENDING con el turno ya estampado y lo pasa a FAILED al cancelarse o vencer:
-                // sin este filtro, un cobro cripto que nunca entró salía como venta del turno.
-                // Es el MISMO predicado que ya usan `getCurrentShift` y el CIERRE en este archivo
-                // — el reporte era el único de los tres que no lo aplicaba. Va en la CONSULTA, no
-                // en JavaScript: aprovecha `Payment_venueId_status_createdAt_idx` y no hidrata una
-                // fila para tirarla. Guardia de FORMA (que es el candado real de esto):
-                // `tests/unit/services/tpv/shift.reporteNoCuentaLoNoCobrado.test.ts`.
-                //
-                // NO se filtra por `type`: el reembolso llega con `amount` negativo y RESTA, igual
-                // que en `aggregateShiftPayments` («el cierre nunca ramificó por `type`»).
-                venueId,
-                status: 'COMPLETED',
-                ...(staffId ? { processedById: staffId } : {}),
-                // Filter payments by date range if provided
-                ...(parsedStartTime || parsedEndTime
-                  ? {
-                      createdAt: {
-                        ...(parsedStartTime ? { gte: parsedStartTime } : {}),
-                        ...(parsedEndTime ? { lte: parsedEndTime } : {}),
-                      },
-                    }
-                  : {}),
-              },
-              include: {
-                allocations: true,
-              },
-            },
-          },
-          // Filter orders by date if date range is provided
-          where:
-            parsedStartTime || parsedEndTime
-              ? {
-                  createdAt: {
-                    ...(parsedStartTime ? { gte: parsedStartTime } : {}),
-                    ...(parsedEndTime ? { lte: parsedEndTime } : {}),
-                  },
-                }
-              : undefined,
-        },
-        payments: {
-          where: {
-            // Misma regla que la rama por orden de arriba: sólo cobros COMPLETED.
-            venueId,
-            status: 'COMPLETED',
-            ...(staffId ? { processedById: staffId } : {}),
-            // Filter payments by date range if provided
-            ...(parsedStartTime || parsedEndTime
-              ? {
-                  createdAt: {
-                    ...(parsedStartTime ? { gte: parsedStartTime } : {}),
-                    ...(parsedEndTime ? { lte: parsedEndTime } : {}),
-                  },
-                }
-              : {}),
-          },
-        },
-        staff: true,
-      },
+      include: { staff: true },
       orderBy: {
         createdAt: 'desc',
       },
@@ -414,67 +532,36 @@ export async function getShifts(
     }),
   ])
 
-  // Calculate the sum of tips and payments for each shift
-  const shiftsWithCalculations = shifts.map(shift => {
-    // Calculate payment totals from orders
-    // 🔴 EL COBRO TIENE QUE SER DE ESTE TURNO — o de ninguno.
-    //
-    // La premisa que estaba escrita aquí («la orden y su cobro se atan al MISMO turno») dejó de
-    // ser cierta el 3-sep-2026: la orden se estampa al ABRIRSE y el cobro se resuelve al PAGARSE,
-    // y entre las dos cosas puede cambiar el turno. Mesa abierta 13:00 en el turno A → A cierra a
-    // las 15:00 → pagan 15:30 en B: A alcanzaba ese cobro por su orden y B por `Payment.shiftId`,
-    // y como el `Map` de abajo deduplica DENTRO de un turno y no ENTRE turnos, la pantalla sumaba
-    // el mismo dinero dos veces. El cobro pertenece a donde entró el dinero, que es B.
-    //
-    // 🔴 La rama por orden NO se borra, y ésa es la parte que no se ve: hay órdenes históricas de
-    // pos-sync con turno cuyo `Payment.shiftId` es NULO, y quitarla les borraría el dinero de la
-    // pantalla. Por eso el filtro deja pasar también el cobro sin turno: es de esta orden y no lo
-    // reclama nadie más.
-    //
-    // 🔴 `=== null`, NUNCA `== null`. El `==` suelto traga también `undefined`, y `undefined` es lo
-    // que llega si alguien estrecha el `include` de arriba a un `select` sin `shiftId`: entonces
-    // TODOS los cobros pasan el filtro y el mismo dinero vuelve a contarse en dos turnos, con las
-    // pruebas en verde porque sus fixtures sí traen el campo. Con `===`, un cobro sin el dato se
-    // cae del conteo — que se ve y se investiga— en vez de duplicarse en silencio. La otra mitad
-    // del candado es la aserción sobre la FORMA de la consulta en
-    // `tests/unit/services/tpv/shift.getShifts.cobroDeOtroTurno.test.ts`.
-    //
-    // 🔴 Y el respaldo lleva TECHO: un cobro sin turno sólo es de éste si ocurrió DENTRO de su
-    // ventana (`cobroSinTurnoPerteneceAlTurno`, arriba en este archivo). Sin él, un cobro
-    // posterior al cierre entraba retrospectivamente a un turno ya firmado. El techo NO se le
-    // aplica a la rama estampada: ese `shiftId` lo puso el servidor y es la autoridad.
-    const orderPayments = shift.orders
-      .flatMap(order => order.payments)
-      .filter(p => p.shiftId === shift.id || (p.shiftId === null && cobroSinTurnoPerteneceAlTurno(p, shift)))
-    // Deduplicar por id sigue haciendo falta: un cobro de ESTE turno llega por los dos caminos.
-    // Se conserva el orden actual (primero los de la orden) para no mover nada más.
-    const allPayments = [...new Map([...orderPayments, ...shift.payments].map(payment => [payment.id, payment])).values()]
+  // Los totales de cada turno, en UNA consulta plana y acotada por cursor. La membresía es la
+  // misma que antes (estampado, o huérfano de una orden del turno con techo por su ventana) y la
+  // aritmética la misma (`aggregateShiftPayments`); lo que cambia es que ya no se hidrata el día.
+  const rollup = await rollupDeCobrosPorTurno(venueId, shifts, { staffId, desde: parsedStartTime, hasta: parsedEndTime })
 
-    // La fila y el cierre usan la MISMA aritmética Decimal. Aunque la API siga entregando
-    // números por compatibilidad, 0.1 + 0.2 se convierte una sola vez DESPUÉS de sumar y nunca
-    // expone 0.30000000000000004 frente a un 0.30 firmado.
-    const totals = aggregateShiftPayments(allPayments)
-    const tipSum = totals.totalTips.toNumber()
-    const paymentSum = totals.totalSales.toNumber()
+  const shiftsWithCalculations = shifts.map(shift => {
+    const totales = rollup.get(shift.id) ?? ROLLUP_VACIO()
+    const tipSum = totales.totalTips.toNumber()
+    const paymentSum = totales.totalSales.toNumber()
+    const tipsCount = totales.tipsCount
 
     // Calculate average tip percentage
     const avgTipPercentage = paymentSum > 0 ? (tipSum / paymentSum) * 100 : 0
 
     return {
       ...shift,
-      // Remove the detailed data to make response cleaner
+      // Se conservan en `undefined` a propósito: el contrato de la respuesta no cambia (nunca
+      // llegaron al JSON) y así queda escrito que esas dos llaves NO se sirven desde aquí.
       orders: undefined,
       payments: undefined,
       // Add calculated values
       tipsSum: tipSum,
-      tipsCount: allPayments.filter(p => Number(p.tipAmount || 0) > 0).length,
+      tipsCount,
       paymentSum: paymentSum,
       avgTipPercentage: Number(avgTipPercentage.toFixed(2)),
       // Include staff information if filtered by staffId
       staffInfo: staffId
         ? {
             staffId: staffId,
-            tipsCount: allPayments.filter(p => Number(p.tipAmount || 0) > 0).length,
+            tipsCount,
             tipsSum: tipSum,
             avgTipPercentage: Number(avgTipPercentage.toFixed(2)),
           }
@@ -1552,16 +1639,7 @@ export function aggregateShiftPayments(payments: ShiftPaymentForTotals[]): Shift
  */
 const SHIFT_CLOSE_PAYMENT_PAGE_SIZE = 500
 
-const SHIFT_PAYMENT_TOTALS_SELECT = {
-  id: true,
-  amount: true,
-  tipAmount: true,
-  method: true,
-  // tenderSemantics inputs — un vale que cuenta como efectivo debe llegar al arqueo.
-  fundsFlow: true,
-  tenderTypeId: true,
-  tenderCountsAsCash: true,
-} satisfies Prisma.PaymentSelect
+// (`SHIFT_PAYMENT_TOTALS_SELECT` vive arriba, junto al rollup de la lista de turnos: los dos lo usan.)
 
 export type ShiftPaymentPageRow = Prisma.PaymentGetPayload<{ select: typeof SHIFT_PAYMENT_TOTALS_SELECT }>
 
