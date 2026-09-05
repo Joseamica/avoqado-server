@@ -1656,6 +1656,20 @@ router.post(
 )
 
 /**
+ * POST /api/v1/mobile/venues/:venueId/terminal-payment/:requestId/release
+ * Free a terminal stuck BUSY by a charge that never got an answer (UNKNOWN). Money-safe: if a
+ * card payment exists the request is closed as COMPLETED and NOT released. The watchdog also
+ * frees it on its own once the terminal is back + 2 min; this is the manager's shortcut.
+ * `tpv:update` (MANAGER+, managing the terminal) — NOT `payments:create`, which cashiers hold.
+ */
+router.post(
+  '/venues/:venueId/terminal-payment/:requestId/release',
+  authenticateTokenMiddleware,
+  checkPermission('tpv:update'),
+  terminalPaymentMobileController.releaseTerminalPayment,
+)
+
+/**
  * GET /api/v1/mobile/venues/:venueId/terminal-payment/:requestId
  * Status of a terminal payment request — recovery after a dropped long-poll /
  * timeout. Trichotomy: terminal status / IN_PROGRESS / 404 NOT_FOUND. Clients

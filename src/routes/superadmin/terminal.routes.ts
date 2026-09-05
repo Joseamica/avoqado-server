@@ -95,6 +95,26 @@ const terminalIdSchema = z.object({
  * @desc    Get all terminals (cross-venue) with optional filters
  * @access  Superadmin only
  */
+/**
+ * POST /api/v1/dashboard/superadmin/terminals/payment-requests/:requestId/release
+ * Free a terminal stuck BUSY by a POS→terminal charge that never got an answer (UNKNOWN).
+ * Money-safe: if a card payment exists the request is closed as COMPLETED and NOT released.
+ * Declared before the `/:terminalId` routes so the literal segment always wins.
+ */
+router.post(
+  '/payment-requests/:requestId/release',
+  validateRequest(
+    z.object({
+      params: z.object({ requestId: z.string().min(1) }),
+      body: z.object({
+        venueId: z.string().cuid('Invalid venue ID'),
+        reason: z.string().min(3).max(300),
+      }),
+    }),
+  ),
+  terminalController.releaseTerminalPaymentRequest,
+)
+
 router.get('/', validateRequest(terminalQuerySchema), terminalController.getAllTerminals)
 
 /**

@@ -60,6 +60,11 @@ export class TerminalPaymentWatchdogJob {
 
     try {
       await terminalPaymentService.reconcileStaleRequests()
+      // UNKNOWN is not a dead end anymore: a terminal that is back (and stays back) + 20 min with
+      // no card payment frees the slot; released rows are still swept for a late payment (see
+      // reconcileUnknownRequests). A row parked UNKNOWN by the sweep above is seen by this one in
+      // the same tick, which at most stamps "terminal returned" 30 s earlier — never frees it.
+      await terminalPaymentService.reconcileUnknownRequests()
     } catch (err) {
       logger.error('❌ [Terminal-payment watchdog] pass failed', {
         error: err instanceof Error ? err.message : String(err),

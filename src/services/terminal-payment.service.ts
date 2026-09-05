@@ -26,6 +26,8 @@ import logger from '../config/logger'
 import { BadRequestError, OrderAlreadyPaidError, TerminalBusyError } from '../errors/AppError'
 import { resolveTerminalRefundTarget } from './tpv/terminalRefundTarget'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
+import { logAction } from './dashboard/activity-log.service'
+import { sendOpsAlert } from './alerts/opsAlert.service'
 
 export interface TerminalPaymentRequest {
   terminalId: string
@@ -157,6 +159,23 @@ const RECEIPT_PRINT_TIMEOUT_MS = 30_000 // 30 seconds
 // Sólo se espera el ACK de "abrí la pantalla", no que alguien pase la tarjeta.
 const REFUND_OPEN_TIMEOUT_MS = 20_000 // 20 seconds
 const CANCEL_GRACE_MS = 30_000 // watchdog grace before a CANCEL_REQUESTED row is resolved
+// UNKNOWN is no longer a dead end (2026-09-04, Testarudo: a PAX sat locked for 3 h). Once the
+// terminal is BACK — an authenticated TPV API call bumps Terminal.lastHeartbeat past the
+// request's deadline — and this grace passes with no card payment, the slot is freed.
+// 🔴 Why 20 min and not 2: the TPV's offline payment queue is a PERIODIC worker every 15 min
+// (`avoqado-tpv` PaymentSyncScheduler, `PAYMENT_SYNC_INTERVAL_MINUTES = 15`); on the Blumon/PAX
+// path nothing triggers it at reconnect. A charge whose REST record got cut (8.5 s vs the PAX's
+// 10 s client timeout — a daily event) lands up to 15 min later. Freeing before that replays
+// would invite the cashier to charge again → double charge. The grace must cover the replay.
+const UNKNOWN_AUTO_RELEASE_GRACE_MS = 20 * 60_000
+// "Back" must mean back NOW: at release time the terminal has to have reported within this window,
+// otherwise the stamp is dropped and the wait restarts when it returns (a heartbeat per reboot in a
+// reboot loop, or one heartbeat then dark again, never frees the slot).
+const TERMINAL_ALIVE_WINDOW_MS = 5 * 60_000
+// After an automatic/manual release, a payment recorded WITHOUT the request id (old queues) still
+// has to reach the row: released rows are swept for this long.
+const RELEASED_LATE_RECONCILE_WINDOW_MS = 30 * 60_000
+const RELEASE_FAILURE_CODES = ['AUTO_RELEASED', 'MANUAL_RELEASE']
 
 // Statuses that HOLD the per-terminal slot (must match the partial UNIQUE index
 // in the migration). UNKNOWN holds the slot on purpose — a terminal whose
@@ -173,6 +192,25 @@ const IN_FLIGHT: TerminalPaymentRequestStatus[] = [
   TerminalPaymentRequestStatus.SENT,
   TerminalPaymentRequestStatus.CANCEL_REQUESTED,
 ]
+
+/**
+ * What the cashier reads on the tablet when the terminal is busy (Android shows this string as-is).
+ * "Ocupada" alone sent Testarudo into a reboot loop; the amount, the age and the sender let them
+ * tell a live charge from a stuck one — and a stuck one now says it frees itself.
+ */
+function busyMessage(
+  terminalId: string,
+  blocker: { status: TerminalPaymentRequestStatus; amountCents: number; senderDevice: string | null; createdAt: Date } | null,
+): string {
+  if (!blocker) return `La terminal ${terminalId} está ocupada procesando otro cobro`
+  const minutes = Math.max(0, Math.floor((Date.now() - blocker.createdAt.getTime()) / 60_000))
+  const amount = `$${(blocker.amountCents / 100).toFixed(2)}`
+  if (blocker.status === TerminalPaymentRequestStatus.UNKNOWN) {
+    return `La terminal ${terminalId} está ocupada por un cobro de ${amount} que quedó sin respuesta hace ${minutes} min; se liberará sola en cuanto la terminal reconecte`
+  }
+  const desde = blocker.senderDevice ? ` desde ${blocker.senderDevice}` : ''
+  return `La terminal ${terminalId} está ocupada por un cobro de ${amount} enviado hace ${minutes} min${desde}`
+}
 
 function isPrismaUniqueViolation(err: unknown): boolean {
   return (
@@ -371,18 +409,23 @@ class TerminalPaymentService {
         logger.info(`♻️ [TerminalPayment] Idempotent replay for requestId`, { requestId, status: mine.status })
         return resultFromRow(mine)
       }
-      // Slot held by another request
+      // Slot held by another request. Scoped by venue: the slot index is GLOBAL per terminal, so a
+      // migrated terminal can be held by a row of its OLD venue — that row's amount/device must not
+      // be described to the new venue's cashier (busyMessage stays generic when blocker is null).
       const blocker = await prisma.terminalPaymentRequest.findFirst({
-        where: { terminalId: lockKey, status: { in: SLOT_HELD } },
+        where: { terminalId: lockKey, venueId, status: { in: SLOT_HELD } },
         orderBy: { createdAt: 'desc' },
       })
+      if (!blocker) {
+        logger.warn(`🔒 [TerminalPayment] Slot held by a request of ANOTHER venue (migrated terminal?)`, { lockKey, venueId })
+      }
       if (this.isLockEnabled()) {
         logger.warn(`🔒 [TerminalPayment] Terminal busy, rejecting`, {
           lockKey,
           blockerRequestId: blocker?.requestId,
           incomingRequestId: requestId,
         })
-        throw new TerminalBusyError(`La terminal ${terminalId} está ocupada procesando otro cobro`, {
+        throw new TerminalBusyError(busyMessage(terminalId, blocker), {
           requestId: blocker?.requestId ?? 'unknown',
           amountCents: blocker?.amountCents,
           senderDevice: blocker?.senderDevice ?? undefined,
@@ -903,27 +946,9 @@ class TerminalPaymentService {
       // charge can differ from the requested amount. Guessing there would push good cases into
       // UNKNOWN and jam terminals. If exact binding is ever needed, it has to come from a
       // request↔payment reference, not from arithmetic.
-      let payment: { id: string } | null = null
-      if (row.orderId) {
-        const candidate = await prisma.payment.findFirst({
-          where: {
-            orderId: row.orderId,
-            venueId: row.venueId,
-            createdAt: { gte: row.createdAt },
-            status: TransactionStatus.COMPLETED,
-            method: { in: [PaymentMethod.CREDIT_CARD, PaymentMethod.DEBIT_CARD] },
-          },
-          select: { id: true },
-          orderBy: { createdAt: 'desc' },
-        })
-        if (candidate) {
-          const claimedByAnother = await prisma.terminalPaymentRequest.findFirst({
-            where: { paymentId: candidate.id, venueId: row.venueId, id: { not: row.id } },
-            select: { id: true },
-          })
-          if (!claimedByAnother) payment = candidate
-        }
-      }
+      // The 4 guards live in ONE place (findReconcilablePayment) — the UNKNOWN sweep and the
+      // manual release ask the exact same question, and a rule copied in N sites drifts.
+      const payment = await this.findReconcilablePayment(row)
 
       if (payment) {
         const r = await prisma.terminalPaymentRequest.updateMany({
@@ -976,12 +1001,384 @@ class TerminalPaymentService {
         data: { status: TerminalPaymentRequestStatus.UNKNOWN, failureCode: 'TIMED_OUT' },
       })
       unknown += r.count
+      if (r.count > 0) {
+        // Second channel, independent of the log pipeline (see opsAlert.service.ts). Outside
+        // any retry/transaction on purpose, and NOT awaited: a hung mail provider must never stall
+        // this tick (the job's isRunning latch would then skip every following sweep, including
+        // CANCEL_REQUESTED → CANCELLED). sendOpsAlert never throws.
+        void sendOpsAlert({
+          subject: `Terminal ${row.terminalId}: cobro sin respuesta (${row.venueId})`,
+          lines: [
+            `Un cobro de $${(row.amountCents / 100).toFixed(2)} enviado a la terminal ${row.terminalId} no obtuvo respuesta en 5 minutos (requestId ${row.requestId}, orden ${row.orderId ?? 'sin orden'}).`,
+            'La terminal queda reservada mientras no vuelva. Cuando reconecte y pasen 20 minutos sin ningún pago con tarjeta (lo que tarda su cola offline en subir), el servidor la liberará solo.',
+            'Si el negocio no puede esperar, se puede liberar a mano desde superadmin o el MCP (release_terminal_payment).',
+          ],
+        })
+      }
     }
 
     if (completed || unknown || cancelled) {
       logger.info(`🧹 [Terminal-payment watchdog] reconciled`, { completed, unknown, cancelled, scanned: stale.length })
     }
     return { completed, unknown, cancelled }
+  }
+
+  /**
+   * The ONLY question the recovery paths ask: "did a card payment land for THIS request?"
+   * Four guards, because an order legitimately carries several Payments (split/partial tender):
+   *   1) createdAt >= row.createdAt — a payment for this request cannot predate the request row,
+   *      so an unrelated PRIOR cash/split payment on the same order is never matched.
+   *   2) not already claimed by another TerminalPaymentRequest.paymentId (soft ref, no FK) —
+   *      so one payment can't reconcile (and free) multiple stale requests.
+   *   3) 🔴 status COMPLETED — a PENDING/PROCESSING/FAILED/REFUNDED Payment is NOT evidence
+   *      that money moved. Without this, a DECLINED card closed the request as "charged".
+   *   4) 🔴 card method — this row is a TERMINAL charge. A CASH (or transfer) payment landing
+   *      on the same order afterwards proves nothing about whether the CARD went through.
+   * NOT filtered on amount/tip on purpose: the tip is chosen ON the terminal.
+   */
+  private async findReconcilablePayment(row: {
+    id: string
+    orderId: string | null
+    venueId: string
+    createdAt: Date
+  }): Promise<{ id: string } | null> {
+    if (!row.orderId) return null
+    const candidate = await prisma.payment.findFirst({
+      where: {
+        orderId: row.orderId,
+        venueId: row.venueId,
+        createdAt: { gte: row.createdAt },
+        status: TransactionStatus.COMPLETED,
+        method: { in: [PaymentMethod.CREDIT_CARD, PaymentMethod.DEBIT_CARD] },
+      },
+      select: { id: true },
+      orderBy: { createdAt: 'desc' },
+    })
+    if (!candidate) return null
+    const claimedByAnother = await prisma.terminalPaymentRequest.findFirst({
+      where: { paymentId: candidate.id, venueId: row.venueId, id: { not: row.id } },
+      select: { id: true },
+    })
+    return claimedByAnother ? null : candidate
+  }
+
+  /**
+   * Terminal row for a normalized lock key (serial with or without AVQD-, case-insensitive — the
+   * serial rule of the heartbeat middleware). Deliberately NOT scoped by venue: `Terminal.serialNumber`
+   * is globally unique and a terminal migrated to another venue still has to be recognised as "back",
+   * or its old venue's UNKNOWN row would hold the global slot forever (the incident, again).
+   */
+  private async findTerminalForRow(row: { terminalId: string }): Promise<{ id: string; lastHeartbeat: Date | null } | null> {
+    return prisma.terminal.findFirst({
+      where: {
+        OR: [
+          { serialNumber: { equals: row.terminalId, mode: 'insensitive' } },
+          { serialNumber: { equals: `AVQD-${row.terminalId}`, mode: 'insensitive' } },
+        ],
+      },
+      select: { id: true, lastHeartbeat: true },
+    })
+  }
+
+  /**
+   * UNKNOWN is not a dead end (2026-09-04, Testarudo: a PAX sat locked 3 h waiting for a human).
+   * Every tick, for each UNKNOWN row, in this order:
+   *   1) a reconcilable card payment → COMPLETED (late). Money always wins over a release.
+   *   2) the terminal is BACK (Terminal.lastHeartbeat later than the request's deadline; any TPV
+   *      API call bumps it, including the offline-queue replay) → stamp terminalReturnedAt. Not freed yet.
+   *   3) UNKNOWN_AUTO_RELEASE_GRACE_MS after that stamp with still no payment → TIMED_OUT /
+   *      AUTO_RELEASED: audit row, 🚨 log (Better Stack) and ops email (independent channel).
+   * A terminal that never comes back keeps the slot: nobody can charge on it anyway, and a late
+   * payment recorded afterwards still reconciles the row through closeRowFromPaymentTx.
+   * Every write is a CAS on status = UNKNOWN so a late result that closes the row first wins.
+   */
+  async reconcileUnknownRequests(
+    now: Date = new Date(),
+  ): Promise<{ completed: number; marked: number; released: number; reset: number; lateReconciled: number }> {
+    const rows = await retry(
+      () =>
+        prisma.terminalPaymentRequest.findMany({
+          where: { status: TerminalPaymentRequestStatus.UNKNOWN },
+          orderBy: { createdAt: 'asc' },
+          take: 200,
+        }),
+      { retries: 3, shouldRetry: shouldRetryDbConnectionError, context: 'terminal-payment-watchdog:findUnknown' },
+    )
+
+    let completed = 0
+    let marked = 0
+    let released = 0
+    let reset = 0
+    let lateReconciled = 0
+
+    for (const row of rows) {
+      const payment = await this.findReconcilablePayment(row)
+      if (payment) {
+        const r = await prisma.terminalPaymentRequest.updateMany({
+          where: { id: row.id, status: TerminalPaymentRequestStatus.UNKNOWN },
+          data: { status: TerminalPaymentRequestStatus.COMPLETED, paymentId: payment.id, lateResult: true },
+        })
+        if (r.count > 0) {
+          completed += r.count
+          // 🚨 stable token for Better Stack — do NOT rename.
+          logger.error(
+            `🚨 [Terminal-payment watchdog] Payment recorded for an UNKNOWN request — reconciled to COMPLETED (money moved after the POS gave up)`,
+            {
+              requestId: row.requestId,
+              paymentId: payment.id,
+              terminalId: row.terminalId,
+              venueId: row.venueId,
+            },
+          )
+          await logAction({
+            venueId: row.venueId,
+            action: 'TERMINAL_PAYMENT_LATE_RECONCILED',
+            entity: 'TerminalPaymentRequest',
+            entityId: row.id,
+            data: { requestId: row.requestId, terminalId: row.terminalId, paymentId: payment.id, priorStatus: row.status },
+          })
+        }
+        continue
+      }
+
+      const terminal = await this.findTerminalForRow(row)
+      const lastHeartbeat = terminal?.lastHeartbeat ?? null
+
+      if (!row.terminalReturnedAt) {
+        if (lastHeartbeat && lastHeartbeat.getTime() > row.expiresAt.getTime()) {
+          // Stamped with the time we OBSERVED it, not the heartbeat's own time: after a server
+          // outage the heartbeat may be 10 min old and would otherwise satisfy the grace at once.
+          const r = await prisma.terminalPaymentRequest.updateMany({
+            where: { id: row.id, status: TerminalPaymentRequestStatus.UNKNOWN, terminalReturnedAt: null },
+            data: { terminalReturnedAt: now },
+          })
+          marked += r.count
+        }
+        continue
+      }
+
+      if (now.getTime() < row.terminalReturnedAt.getTime() + UNKNOWN_AUTO_RELEASE_GRACE_MS) continue
+
+      // The grace only counts if the terminal is STILL here: gone again (or one heartbeat per
+      // reboot) means its queue never had the chance to flush → drop the stamp and wait for it.
+      if (!lastHeartbeat || lastHeartbeat.getTime() < now.getTime() - TERMINAL_ALIVE_WINDOW_MS) {
+        const r = await prisma.terminalPaymentRequest.updateMany({
+          where: { id: row.id, status: TerminalPaymentRequestStatus.UNKNOWN, terminalReturnedAt: row.terminalReturnedAt },
+          data: { terminalReturnedAt: null },
+        })
+        reset += r.count
+        continue
+      }
+
+      const r = await prisma.terminalPaymentRequest.updateMany({
+        where: { id: row.id, status: TerminalPaymentRequestStatus.UNKNOWN },
+        data: { status: TerminalPaymentRequestStatus.TIMED_OUT, failureCode: 'AUTO_RELEASED' },
+      })
+      if (r.count === 0) continue // a late result closed it first — its answer wins
+      released += r.count
+
+      const ageMinutes = Math.floor((now.getTime() - row.createdAt.getTime()) / 60_000)
+      // 🚨 stable token for Better Stack — do NOT rename.
+      logger.error(`🚨 [Terminal-payment watchdog] UNKNOWN request auto-released — terminal came back with no card payment`, {
+        requestId: row.requestId,
+        terminalId: row.terminalId,
+        venueId: row.venueId,
+        orderId: row.orderId,
+        amountCents: row.amountCents,
+        terminalReturnedAt: row.terminalReturnedAt.toISOString(),
+        ageMinutes,
+      })
+      await logAction({
+        venueId: row.venueId,
+        action: 'TERMINAL_PAYMENT_AUTO_RELEASED',
+        entity: 'TerminalPaymentRequest',
+        entityId: row.id,
+        data: {
+          requestId: row.requestId,
+          terminalId: row.terminalId,
+          amountCents: row.amountCents,
+          orderId: row.orderId,
+          terminalReturnedAt: row.terminalReturnedAt.toISOString(),
+          graceMs: UNKNOWN_AUTO_RELEASE_GRACE_MS,
+          reason: 'La terminal volvió a reportar y pasaron 20 min sin ningún pago con tarjeta para este cobro',
+        },
+      })
+      void sendOpsAlert({
+        subject: `Terminal ${row.terminalId} liberada sola tras un cobro sin respuesta (${row.venueId})`,
+        lines: [
+          `El cobro de $${(row.amountCents / 100).toFixed(2)} (requestId ${row.requestId}, orden ${row.orderId ?? 'sin orden'}) quedó sin respuesta ${ageMinutes} min.`,
+          'La terminal volvió a reportar y en 20 minutos no apareció ningún pago con tarjeta, así que el servidor liberó la terminal. La tablet ya puede volver a cobrar en ella.',
+          'Si más tarde llegara un pago de ese cobro, el servidor lo reconcilia como cobrado y avisa con 🚨 (revisar que la orden no quede pagada dos veces).',
+        ],
+      })
+    }
+
+    // Released rows are not forgotten: a payment recorded afterwards WITHOUT the request id (old
+    // offline queues) never reaches closeRowFromPaymentTx, and the status endpoint would keep
+    // answering "timeout" — an invitation to charge again. Sweep them for a bounded window.
+    const releasedRows = await retry(
+      () =>
+        prisma.terminalPaymentRequest.findMany({
+          where: {
+            status: TerminalPaymentRequestStatus.TIMED_OUT,
+            failureCode: { in: RELEASE_FAILURE_CODES },
+            updatedAt: { gte: new Date(now.getTime() - RELEASED_LATE_RECONCILE_WINDOW_MS) },
+          },
+          orderBy: { updatedAt: 'asc' },
+          take: 200,
+        }),
+      { retries: 3, shouldRetry: shouldRetryDbConnectionError, context: 'terminal-payment-watchdog:findReleased' },
+    )
+    for (const row of releasedRows) {
+      const payment = await this.findReconcilablePayment(row)
+      if (!payment) continue
+      const r = await prisma.terminalPaymentRequest.updateMany({
+        where: { id: row.id, status: TerminalPaymentRequestStatus.TIMED_OUT },
+        data: { status: TerminalPaymentRequestStatus.COMPLETED, paymentId: payment.id, lateResult: true },
+      })
+      if (r.count === 0) continue
+      lateReconciled += r.count
+      // 🚨 stable token for Better Stack — do NOT rename. This is the double-charge alarm: the slot
+      // was freed and the money then showed up → someone must check the order is not paid twice.
+      logger.error(
+        `🚨 [Terminal-payment watchdog] Payment recorded for a RELEASED request — reconciled to COMPLETED (check the order for a double charge)`,
+        {
+          requestId: row.requestId,
+          paymentId: payment.id,
+          terminalId: row.terminalId,
+          venueId: row.venueId,
+          orderId: row.orderId,
+          failureCode: row.failureCode,
+        },
+      )
+      await logAction({
+        venueId: row.venueId,
+        action: 'TERMINAL_PAYMENT_LATE_RECONCILED',
+        entity: 'TerminalPaymentRequest',
+        entityId: row.id,
+        data: {
+          requestId: row.requestId,
+          terminalId: row.terminalId,
+          paymentId: payment.id,
+          priorStatus: row.status,
+          failureCode: row.failureCode,
+        },
+      })
+      void sendOpsAlert({
+        subject: `Terminal ${row.terminalId}: llegó el pago de un cobro YA liberado — revisar doble cobro (${row.venueId})`,
+        lines: [
+          `El cobro ${row.requestId} (orden ${row.orderId ?? 'sin orden'}) se había liberado como sin respuesta y ahora aparece un pago con tarjeta (${payment.id}).`,
+          'Revisa que la orden no haya quedado pagada dos veces; si sí, hay que devolver uno de los dos cobros.',
+        ],
+      })
+    }
+
+    if (completed || marked || released || reset || lateReconciled) {
+      logger.info(`🧹 [Terminal-payment watchdog] unknown sweep`, {
+        completed,
+        marked,
+        released,
+        reset,
+        lateReconciled,
+        scanned: rows.length,
+      })
+    }
+    return { completed, marked, released, reset, lateReconciled }
+  }
+
+  /**
+   * Manual release (MCP / superadmin / a manager on the tablet). Same money rule as the
+   * watchdog: if a reconcilable card payment exists the row is closed as COMPLETED and NOT
+   * released — nobody frees a slot on top of money. Tenant-scoped by venueId in every query.
+   */
+  async releaseUnknownRequest(input: {
+    requestId: string
+    venueId: string
+    actor: { staffId?: string | null; source: 'MCP' | 'SUPERADMIN' | 'MOBILE' }
+    reason: string
+  }): Promise<{ requestId: string; released: boolean; status: TerminalPaymentRequestStatus | null; paymentId?: string }> {
+    const { requestId, venueId, actor, reason } = input
+    const row = await prisma.terminalPaymentRequest.findFirst({ where: { requestId, venueId } })
+    if (!row) return { requestId, released: false, status: null }
+    if (row.status !== TerminalPaymentRequestStatus.UNKNOWN) {
+      return { requestId, released: false, status: row.status, paymentId: row.paymentId ?? undefined }
+    }
+
+    const payment = await this.findReconcilablePayment(row)
+    if (payment) {
+      const rc = await prisma.terminalPaymentRequest.updateMany({
+        where: { id: row.id, venueId, status: TerminalPaymentRequestStatus.UNKNOWN },
+        data: { status: TerminalPaymentRequestStatus.COMPLETED, paymentId: payment.id, lateResult: true },
+      })
+      if (rc.count === 0) {
+        // Someone else closed it first (late socket result / REST record): report what it became.
+        const fresh = await prisma.terminalPaymentRequest.findFirst({
+          where: { requestId, venueId },
+          select: { status: true, paymentId: true },
+        })
+        return { requestId, released: false, status: fresh?.status ?? null, paymentId: fresh?.paymentId ?? undefined }
+      }
+      logger.error(`🚨 [TerminalPayment] Manual release refused — a card payment exists for the UNKNOWN request; reconciled to COMPLETED`, {
+        requestId,
+        venueId,
+        paymentId: payment.id,
+        source: actor.source,
+      })
+      await logAction({
+        staffId: actor.staffId ?? null,
+        venueId,
+        action: 'TERMINAL_PAYMENT_LATE_RECONCILED',
+        entity: 'TerminalPaymentRequest',
+        entityId: row.id,
+        data: { requestId, terminalId: row.terminalId, paymentId: payment.id, priorStatus: row.status, source: actor.source, reason },
+      })
+      return { requestId, released: false, status: TerminalPaymentRequestStatus.COMPLETED, paymentId: payment.id }
+    }
+
+    const r = await prisma.terminalPaymentRequest.updateMany({
+      where: { id: row.id, venueId, status: TerminalPaymentRequestStatus.UNKNOWN },
+      data: { status: TerminalPaymentRequestStatus.TIMED_OUT, failureCode: 'MANUAL_RELEASE' },
+    })
+    if (r.count === 0) {
+      const fresh = await prisma.terminalPaymentRequest.findFirst({
+        where: { requestId, venueId },
+        select: { status: true, paymentId: true },
+      })
+      return { requestId, released: false, status: fresh?.status ?? null, paymentId: fresh?.paymentId ?? undefined }
+    }
+
+    await logAction({
+      staffId: actor.staffId ?? null,
+      venueId,
+      action: 'TERMINAL_PAYMENT_MANUAL_RELEASE',
+      entity: 'TerminalPaymentRequest',
+      entityId: row.id,
+      data: {
+        requestId,
+        terminalId: row.terminalId,
+        amountCents: row.amountCents,
+        orderId: row.orderId,
+        reason,
+        source: actor.source,
+      },
+    })
+    logger.error(`🚨 [TerminalPayment] UNKNOWN request released manually`, {
+      requestId,
+      venueId,
+      terminalId: row.terminalId,
+      amountCents: row.amountCents,
+      staffId: actor.staffId ?? null,
+      source: actor.source,
+      reason,
+    })
+    void sendOpsAlert({
+      subject: `Terminal ${row.terminalId} liberada a mano (${venueId})`,
+      lines: [
+        `Alguien (${actor.source}${actor.staffId ? `, staff ${actor.staffId}` : ''}) liberó el cobro sin respuesta de $${(row.amountCents / 100).toFixed(2)} (requestId ${requestId}). Motivo: ${reason}.`,
+        'No existía ningún pago con tarjeta para ese cobro al momento de liberar.',
+      ],
+    })
+    return { requestId, released: true, status: TerminalPaymentRequestStatus.TIMED_OUT }
   }
 
   /**

@@ -126,6 +126,10 @@ const envSchema = z.object({
   // jobs/weekly-new-customers-report.job.ts). Unset = job logs a warning and
   // skips sending — never silently emails nowhere or to a wrong address.
   WEEKLY_NEW_CUSTOMERS_REPORT_EMAIL: z.string().email().optional(),
+  // Recipient of ops alerts that must NOT depend on the log pipeline (Better Stack was blind
+  // for a day on 2026-09-03/04 and a locked PAX went unnoticed for 3 hours). Unset = the
+  // alert is log-only (warned once per process). See services/alerts/opsAlert.service.ts.
+  OPS_ALERT_EMAIL: z.string().email().optional(),
 
   // Blumon Payment SDK
   USE_BLUMON_MOCK: z

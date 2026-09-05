@@ -5053,6 +5053,11 @@ model TerminalPaymentRequest {
   deliveryAttempts   Int                          @default(0)
   lastDeliveredAt    DateTime?
   acknowledgedAt     DateTime?
+  // First terminal heartbeat observed AFTER expiresAt while the row sat in UNKNOWN. The
+  // watchdog frees the slot 2 min after this stamp if no card payment showed up (the
+  // terminal is back, its offline queue had its chance to flush, nothing landed). Null while
+  // the terminal is still gone — a gone terminal keeps the slot: nobody can charge on it.
+  terminalReturnedAt DateTime?
   expiresAt          DateTime
   createdAt          DateTime                     @default(now())
   updatedAt          DateTime                     @updatedAt

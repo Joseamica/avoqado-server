@@ -337,6 +337,44 @@ export async function requestRefundOnTerminal(req: Request, res: Response) {
  * Cancel a pending terminal payment and notify the terminal.
  * Includes requestId so TPV only cancels if it's still on THAT payment.
  */
+/**
+ * POST /venues/:venueId/terminal-payment/:requestId/release
+ * A manager frees a terminal stuck by an UNKNOWN charge. Tenant-scoped by the venueId in the
+ * URL (the service filters every query by it); money-safe (a card payment beats a release).
+ */
+export async function releaseTerminalPayment(req: Request, res: Response) {
+  try {
+    const { venueId, requestId } = req.params
+    const reason =
+      typeof req.body?.reason === 'string' && req.body.reason.trim() ? req.body.reason.trim().slice(0, 300) : 'Liberada desde el POS'
+    const staffId: string | undefined = (req as any).authContext?.userId
+
+    const r = await terminalPaymentService.releaseUnknownRequest({
+      requestId,
+      venueId,
+      actor: { staffId: staffId ?? null, source: 'MOBILE' },
+      reason,
+    })
+    if (r.status === null) {
+      return res.status(404).json({ success: false, message: 'No existe ese cobro en este establecimiento' })
+    }
+    return res.json({
+      success: r.released,
+      released: r.released,
+      status: r.status,
+      paymentId: r.paymentId ?? null,
+      message: r.released
+        ? 'Terminal liberada. Ya puedes volver a mandarle cobros.'
+        : r.status === 'COMPLETED'
+          ? 'No se liberó: ese cobro SÍ se registró con tarjeta. Revisa que la cuenta no quede pagada dos veces.'
+          : `No se liberó: el cobro ya no está atorado (estado ${r.status}).`,
+    })
+  } catch (error) {
+    logger.error('Error in releaseTerminalPayment', { error: error instanceof Error ? error.message : 'Error desconocido' })
+    return res.status(500).json({ success: false, message: 'Error interno del servidor' })
+  }
+}
+
 export async function cancelTerminalPayment(req: Request, res: Response) {
   try {
     const { venueId } = req.params

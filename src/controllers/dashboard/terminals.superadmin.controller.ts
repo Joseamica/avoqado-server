@@ -8,6 +8,44 @@ import {
   deleteTerminal as deleteTerminalService,
   sendRemoteActivation as sendRemoteActivationService,
 } from '../../services/dashboard/terminals.superadmin.service'
+import { terminalPaymentService } from '../../services/terminal-payment.service'
+
+/**
+ * Free a terminal stuck BUSY by an UNKNOWN POS→terminal charge (manual path; the watchdog
+ * also frees it on its own once the terminal is back — see reconcileUnknownRequests).
+ *
+ * @route POST /api/v1/dashboard/superadmin/terminals/payment-requests/:requestId/release
+ * @body { venueId, reason }
+ */
+export const releaseTerminalPaymentRequest = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { requestId } = req.params
+    const { venueId, reason } = req.body as { venueId: string; reason: string }
+    const staffId: string | undefined = (req as any).authContext?.userId
+    const r = await terminalPaymentService.releaseUnknownRequest({
+      requestId,
+      venueId,
+      actor: { staffId: staffId ?? null, source: 'SUPERADMIN' },
+      reason,
+    })
+    if (r.status === null) {
+      return res.status(404).json({ success: false, message: 'No existe ese cobro en ese establecimiento' })
+    }
+    return res.json({
+      success: r.released,
+      released: r.released,
+      status: r.status,
+      paymentId: r.paymentId ?? null,
+      message: r.released
+        ? 'Terminal liberada'
+        : r.status === 'COMPLETED'
+          ? 'No se liberó: existe un pago con tarjeta de ese cobro; se cerró como cobrado'
+          : `No se liberó: el cobro está en ${r.status}, no en UNKNOWN`,
+    })
+  } catch (error) {
+    next(error)
+  }
+}
 
 /**
  * Get all terminals (cross-venue)
