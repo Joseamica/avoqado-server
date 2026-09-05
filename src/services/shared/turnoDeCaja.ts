@@ -133,6 +133,46 @@ async function sanarTurnosCerradosSinCierre(tx: Prisma.TransactionClient, venueI
   return ids
 }
 
+/**
+ * 🔴 SANA el estado imposible ESPEJO: un turno `OPEN` que YA TIENE `endTime`.
+ *
+ * Tampoco lo produce la app (cerrar escribe `status` y `endTime` juntos): sale de una corrección a
+ * mano en Postgres —la base local traía dos, en dos venues— o de un UPDATE parcial. Y es PEOR que
+ * el zombi de arriba, porque no se reusa en silencio: **bloquea**. Para `turnoVivoWhere` no es
+ * vivo (tiene `endTime`), así que la apertura no lo reusa e intenta CREAR; el índice único parcial
+ * `Shift(venueId) WHERE status='OPEN'` lo rechaza, y el venue entero responde
+ * **409 `CASH_SHIFT_ALREADY_OPEN` para siempre**: nadie puede abrir caja hasta que alguien vuelva a
+ * tocar Postgres a mano. Lo cazó `/full-testing` el 5-sep-2026 en Venue 1 (`cmpe65bue063q9k92xu34sxq2`).
+ *
+ * La sanación va en la dirección que su propio `endTime` ya declara: el turno TERMINÓ, así que se
+ * pasa a `CLOSED` conservando ese `endTime` (es el único dato cierto). CAS: sólo casa si sigue
+ * siendo la anomalía. Mismo lugar y mismas reglas que `sanarTurnosCerradosSinCierre`: dentro del
+ * advisory lock, antes de leer el turno vivo, con rastro en la bitácora.
+ */
+async function sanarTurnosAbiertosConCierre(tx: Prisma.TransactionClient, venueId: string, ahora: Date): Promise<string[]> {
+  const anomalias = await tx.shift.findMany({
+    where: { venueId, status: ShiftStatus.OPEN, endTime: { not: null } },
+    select: { id: true },
+    orderBy: { startTime: 'asc' },
+    take: TOPE_DE_ANOMALIAS_POR_APERTURA,
+  })
+  if (anomalias.length === 0) return []
+
+  const ids = anomalias.map(a => a.id)
+  const sanadas = await tx.shift.updateMany({
+    where: { id: { in: ids }, venueId, status: ShiftStatus.OPEN, endTime: { not: null } },
+    data: { status: ShiftStatus.CLOSED, updatedAt: ahora },
+  })
+  if (sanadas.count === 0) return []
+
+  logger.error('[TURNO DE CAJA] Turno ABIERTO con `endTime`: estado que la app no produce y que bloquea toda apertura, se sana al abrir', {
+    venueId,
+    ids,
+    sanados: sanadas.count,
+  })
+  return ids
+}
+
 // ============================================================================
 // ABRIR EL TURNO DE CAJA DEL NEGOCIO — UN SOLO GESTO
 // ============================================================================
@@ -376,6 +416,9 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
     // la app no produce, y hasta el 4-sep-2026 se REUSABA como el turno abierto del negocio (P1.2).
     // Ahora ni siquiera es visible para la lectura de abajo; aquí se sana y se deja constancia.
     const anomaliasSanadas = await sanarTurnosCerradosSinCierre(tx, venueId, ahora)
+    // Y su espejo: un OPEN con `endTime` no es vivo para la lectura de abajo, pero el índice único
+    // parcial sí lo cuenta como abierto — sin sanarlo, la creación de abajo rebotaría con 409 para siempre.
+    const turnosAbiertosSanados = await sanarTurnosAbiertosConCierre(tx, venueId, ahora)
 
     // ── El turno ──────────────────────────────────────────────────────────────────────────
     //
@@ -748,10 +791,11 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
       ...(relevo ? { relevo } : {}),
       ...(posCommandId ? { posCommandId } : {}),
       ...(anomaliasSanadas.length > 0 ? { anomaliasSanadas } : {}),
-    } as AbrirTurnoDeCajaResult & { posCommandId?: string; anomaliasSanadas?: string[] }
+      ...(turnosAbiertosSanados.length > 0 ? { turnosAbiertosSanados } : {}),
+    } as AbrirTurnoDeCajaResult & { posCommandId?: string; anomaliasSanadas?: string[]; turnosAbiertosSanados?: string[] }
   })
 
-  const { posCommandId, anomaliasSanadas, ...resultado } = resultadoConOutbox
+  const { posCommandId, anomaliasSanadas, turnosAbiertosSanados, ...resultado } = resultadoConOutbox
 
   // Best effort DESPUÉS del commit. LISTEN/NOTIFY puede ganar esta carrera; el
   // claim CAS de deliverPosCommand hace que sólo uno publique. Un fallo deja la
@@ -780,6 +824,20 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
       data: {
         motivo: 'turno CERRADO con endTime nulo: la app no produce ese estado',
         endTimeAplicado: ahora.toISOString(),
+        source,
+      },
+    })
+  }
+  for (const id of turnosAbiertosSanados ?? []) {
+    void logAction({
+      staffId,
+      venueId,
+      action: 'SHIFT_ANOMALY_HEALED',
+      entity: 'Shift',
+      entityId: id,
+      data: {
+        motivo: 'turno ABIERTO con endTime: la app no produce ese estado y bloqueaba toda apertura del venue (409 permanente)',
+        statusAplicado: ShiftStatus.CLOSED,
         source,
       },
     })
