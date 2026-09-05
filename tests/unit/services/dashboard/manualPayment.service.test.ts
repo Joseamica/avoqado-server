@@ -28,6 +28,11 @@ jest.mock('@/utils/prismaClient', () => ({
   },
 }))
 
+// `lockExistingOrderForPayment` hace `SELECT … FOR UPDATE` por `$queryRaw` y exige UNA fila. Un
+// doble sin `$queryRaw` revienta a propósito (ya no devuelve `false` en silencio): cada tx a mano
+// de este archivo simula la fila de la orden bloqueada.
+const filaDeOrdenBloqueada = () => jest.fn().mockResolvedValue([{ id: 'orden-bloqueada' }])
+
 const earnPointsMock = jest.fn().mockResolvedValue({ pointsEarned: 0, newBalance: 0 })
 jest.mock('@/services/dashboard/loyalty.dashboard.service', () => ({
   __esModule: true,
@@ -98,6 +103,7 @@ describe('manualPayment.service', () => {
       }
       ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (cb: any) =>
         cb({
+          $queryRaw: filaDeOrdenBloqueada(),
           order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: jest.fn() },
           payment: { create: jest.fn().mockResolvedValue({ id: 'pay-1' }) },
           shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
@@ -123,6 +129,7 @@ describe('manualPayment.service', () => {
     it('throws NotFoundError when order does not belong to venue', async () => {
       ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (cb: any) =>
         cb({
+          $queryRaw: filaDeOrdenBloqueada(),
           order: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn() },
           payment: { create: jest.fn() },
           shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
@@ -158,6 +165,7 @@ describe('manualPayment.service', () => {
       }
       ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (cb: any) =>
         cb({
+          $queryRaw: filaDeOrdenBloqueada(),
           order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: jest.fn() },
           payment: { create: jest.fn() },
           shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
@@ -194,6 +202,7 @@ describe('manualPayment.service', () => {
       }
       ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (cb: any) =>
         cb({
+          $queryRaw: filaDeOrdenBloqueada(),
           order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: orderUpdate },
           payment: { create: jest.fn().mockResolvedValue({ id: 'pay-2' }) },
           shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
@@ -245,6 +254,7 @@ describe('manualPayment.service', () => {
 
     const armarTx = (order: any) => {
       const txClient: any = {
+        $queryRaw: filaDeOrdenBloqueada(),
         order: { findFirst: jest.fn().mockResolvedValue(order), update: jest.fn() },
         payment: { create: jest.fn().mockResolvedValue({ id: 'pay-2' }) },
         shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
@@ -279,6 +289,7 @@ describe('manualPayment.service', () => {
       const order = ordenConProductos()
       let aplicadoDentroDeLaTx = false
       const txClient: any = {
+        $queryRaw: filaDeOrdenBloqueada(),
         order: { findFirst: jest.fn().mockResolvedValue(order), update: jest.fn() },
         payment: { create: jest.fn().mockResolvedValue({ id: 'pay-2' }) },
         shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
@@ -306,6 +317,7 @@ describe('manualPayment.service', () => {
     it('saldar en EFECTIVO mete el billete al cajón, después del commit', async () => {
       let posteadoDentroDeLaTx = false
       const txClient: any = {
+        $queryRaw: filaDeOrdenBloqueada(),
         order: { findFirst: jest.fn().mockResolvedValue(ordenConProductos()), update: jest.fn() },
         payment: { create: jest.fn().mockResolvedValue({ id: 'pay-cash-1', method: 'CASH', orderId: ORDER_ID }) },
         shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
@@ -328,6 +340,7 @@ describe('manualPayment.service', () => {
 
     it('el helper decide si entró al cajón — el servicio no filtra por método', async () => {
       const txClient: any = {
+        $queryRaw: filaDeOrdenBloqueada(),
         order: { findFirst: jest.fn().mockResolvedValue(ordenConProductos()), update: jest.fn() },
         payment: { create: jest.fn().mockResolvedValue({ id: 'pay-card-1', method: 'CARD', orderId: ORDER_ID }) },
         shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
@@ -377,6 +390,7 @@ describe('manualPayment.service', () => {
       const findFirst = jest.fn().mockResolvedValue(null)
       ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (cb: any) =>
         cb({
+          $queryRaw: filaDeOrdenBloqueada(),
           order: { findFirst, update: jest.fn() },
           payment: { create: jest.fn() },
           shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
@@ -406,6 +420,7 @@ describe('manualPayment.service', () => {
     function txMock(handlers: any) {
       return async (cb: any) =>
         cb({
+          $queryRaw: filaDeOrdenBloqueada(),
           order: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), create: jest.fn() },
           payment: { create: jest.fn().mockResolvedValue({ id: 'pay-x' }) },
           shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
@@ -626,6 +641,7 @@ describe('manualPayment.service', () => {
       ;(prismaMock.$transaction as jest.Mock).mockImplementation((cb: any, opts?: any) => {
         txCallCapture.push(opts)
         return cb({
+          $queryRaw: filaDeOrdenBloqueada(),
           order: {
             findFirst: jest.fn().mockResolvedValue({
               id: ORDER_ID,
@@ -818,6 +834,7 @@ describe('manualPayment.service', () => {
     function txMock(handlers: any) {
       return async (cb: any) =>
         cb({
+          $queryRaw: filaDeOrdenBloqueada(),
           order: { findFirst: jest.fn(), update: jest.fn(), create: jest.fn() },
           payment: { create: jest.fn().mockResolvedValue({ id: 'pay-x' }) },
           shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
@@ -1470,6 +1487,7 @@ describe('manualPayment.service', () => {
     function txMock(handlers: any) {
       return async (cb: any) =>
         cb({
+          $queryRaw: filaDeOrdenBloqueada(),
           order: { findFirst: jest.fn(), update: jest.fn(), create: jest.fn() },
           payment: { create: jest.fn().mockResolvedValue({ id: 'pay-x' }) },
           shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },

@@ -4,6 +4,7 @@ import {
   claimShiftForCompletedPayment,
   claimShiftForCapturedPayment,
   claimShiftForRefund,
+  lockExistingOrderForPayment,
   recordPendingPaymentShiftReconciliation,
   resolvePaymentShiftReconciliationEnabled,
 } from '@/services/shared/paymentShiftClaim'
@@ -440,5 +441,32 @@ describe('paymentShiftClaim — claim transaccional del turno para reembolsos', 
     expect(tx.shift.updateMany.mock.calls[0][0].data).toEqual({
       totalSales: { decrement: new Prisma.Decimal('50.00') },
     })
+  })
+})
+
+describe('lockExistingOrderForPayment — el candado de la Order decide dinero y nunca contesta en silencio', () => {
+  const input = { venueId: VENUE_ID, orderId: 'order-1' }
+
+  it('una transacción sin $queryRaw revienta con un mensaje claro: false significaría «la orden no es de este venue»', async () => {
+    const txSinQueryRaw = makeTx({ id: 'shift-open', status: 'OPEN' })
+
+    await expect(lockExistingOrderForPayment(txSinQueryRaw as never, input)).rejects.toThrow(
+      'lockExistingOrderForPayment requiere una transacción con $queryRaw',
+    )
+    expect(txSinQueryRaw.shift.findFirst).not.toHaveBeenCalled()
+  })
+
+  // Regresión: el contrato del SELECT … FOR UPDATE no cambia.
+  it('devuelve true sólo cuando el SELECT … FOR UPDATE trae exactamente la fila de la orden del venue', async () => {
+    const tx = { $queryRaw: jest.fn().mockResolvedValue([{ id: 'order-1' }]) }
+
+    await expect(lockExistingOrderForPayment(tx as never, input)).resolves.toBe(true)
+    expect(tx.$queryRaw).toHaveBeenCalledTimes(1)
+  })
+
+  it('devuelve false cuando ninguna fila se bloquea: la orden ya no pertenece a este venue', async () => {
+    const tx = { $queryRaw: jest.fn().mockResolvedValue([]) }
+
+    await expect(lockExistingOrderForPayment(tx as never, input)).resolves.toBe(false)
   })
 })

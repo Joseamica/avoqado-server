@@ -48,11 +48,13 @@ export async function lockExistingOrderForPayment(
   tx: ExistingOrderLockTransaction,
   input: { venueId: string; orderId: string },
 ): Promise<boolean> {
-  // Algunos dobles unitarios históricos sólo implementan los modelos que usa
-  // su escenario. El Prisma TransactionClient real siempre expone $queryRaw;
-  // los tests de disciplina de locks usan un doble que sí lo implementa y
-  // prueban el bloqueo/interleaving de manera explícita.
-  if (typeof tx.$queryRaw !== 'function') return false
+  // `false` significa «la orden ya no es de este venue» y decide dinero: un
+  // doble sin `$queryRaw` no puede contestar eso en silencio. El Prisma
+  // TransactionClient real siempre lo expone; un test que llega aquí sin él
+  // está mal armado y debe enterarse en esta línea, no tres capas más abajo.
+  if (typeof tx.$queryRaw !== 'function') {
+    throw new Error('lockExistingOrderForPayment requiere una transacción con $queryRaw')
+  }
   const rows = await tx.$queryRaw<Array<{ id: string }>>`
     SELECT id
     FROM "Order"
