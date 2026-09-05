@@ -17,6 +17,7 @@ import {
   recordPendingPaymentShiftReconciliation,
   resolvePaymentShiftReconciliationEnabled,
 } from '@/services/shared/paymentShiftClaim'
+import { countPriorCompletedPayments } from '@/services/shared/priorCompletedPayments'
 
 /**
  * Record a manual payment (admin-only). Two modes:
@@ -134,13 +135,7 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
       if (input.orderId) {
         await lockExistingOrderForPayment(tx, { venueId, orderId: input.orderId })
       }
-      const priorCompletedPaymentCount = input.orderId
-        ? typeof tx.payment.count === 'function'
-          ? ((await tx.payment.count({
-              where: { orderId: input.orderId, venueId, status: 'COMPLETED', type: { not: 'REFUND' } },
-            })) ?? 0)
-          : 0
-        : 0
+      const priorCompletedPaymentCount = input.orderId ? await countPriorCompletedPayments(tx, { venueId, orderId: input.orderId }) : 0
 
       // ── ¿A QUÉ TURNO SE LE SUMA ESTE PAGO? ──────────────────────────────────────────────
       //

@@ -105,7 +105,7 @@ describe('manualPayment.service', () => {
         cb({
           $queryRaw: filaDeOrdenBloqueada(),
           order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: jest.fn() },
-          payment: { create: jest.fn().mockResolvedValue({ id: 'pay-1' }) },
+          payment: { count: jest.fn().mockResolvedValue(0), create: jest.fn().mockResolvedValue({ id: 'pay-1' }) },
           shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
           orderCustomer: { create: jest.fn() },
           venueTransaction: { create: jest.fn() },
@@ -131,7 +131,7 @@ describe('manualPayment.service', () => {
         cb({
           $queryRaw: filaDeOrdenBloqueada(),
           order: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn() },
-          payment: { create: jest.fn() },
+          payment: { count: jest.fn().mockResolvedValue(0), create: jest.fn() },
           shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
           orderCustomer: { create: jest.fn() },
           venueTransaction: { create: jest.fn() },
@@ -167,7 +167,7 @@ describe('manualPayment.service', () => {
         cb({
           $queryRaw: filaDeOrdenBloqueada(),
           order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: jest.fn() },
-          payment: { create: jest.fn() },
+          payment: { count: jest.fn().mockResolvedValue(0), create: jest.fn() },
           shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
           orderCustomer: { create: jest.fn() },
           venueTransaction: { create: jest.fn() },
@@ -204,7 +204,7 @@ describe('manualPayment.service', () => {
         cb({
           $queryRaw: filaDeOrdenBloqueada(),
           order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: orderUpdate },
-          payment: { create: jest.fn().mockResolvedValue({ id: 'pay-2' }) },
+          payment: { count: jest.fn().mockResolvedValue(0), create: jest.fn().mockResolvedValue({ id: 'pay-2' }) },
           shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
           orderCustomer: { create: jest.fn() },
           venueTransaction: { create: jest.fn() },
@@ -256,7 +256,7 @@ describe('manualPayment.service', () => {
       const txClient: any = {
         $queryRaw: filaDeOrdenBloqueada(),
         order: { findFirst: jest.fn().mockResolvedValue(order), update: jest.fn() },
-        payment: { create: jest.fn().mockResolvedValue({ id: 'pay-2' }) },
+        payment: { count: jest.fn().mockResolvedValue(0), create: jest.fn().mockResolvedValue({ id: 'pay-2' }) },
         shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
         orderCustomer: { create: jest.fn() },
         venueTransaction: { create: jest.fn() },
@@ -291,7 +291,7 @@ describe('manualPayment.service', () => {
       const txClient: any = {
         $queryRaw: filaDeOrdenBloqueada(),
         order: { findFirst: jest.fn().mockResolvedValue(order), update: jest.fn() },
-        payment: { create: jest.fn().mockResolvedValue({ id: 'pay-2' }) },
+        payment: { count: jest.fn().mockResolvedValue(0), create: jest.fn().mockResolvedValue({ id: 'pay-2' }) },
         shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
         orderCustomer: { create: jest.fn() },
         venueTransaction: { create: jest.fn() },
@@ -319,7 +319,10 @@ describe('manualPayment.service', () => {
       const txClient: any = {
         $queryRaw: filaDeOrdenBloqueada(),
         order: { findFirst: jest.fn().mockResolvedValue(ordenConProductos()), update: jest.fn() },
-        payment: { create: jest.fn().mockResolvedValue({ id: 'pay-cash-1', method: 'CASH', orderId: ORDER_ID }) },
+        payment: {
+          count: jest.fn().mockResolvedValue(0),
+          create: jest.fn().mockResolvedValue({ id: 'pay-cash-1', method: 'CASH', orderId: ORDER_ID }),
+        },
         shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
         orderCustomer: { create: jest.fn() },
         venueTransaction: { create: jest.fn() },
@@ -342,7 +345,10 @@ describe('manualPayment.service', () => {
       const txClient: any = {
         $queryRaw: filaDeOrdenBloqueada(),
         order: { findFirst: jest.fn().mockResolvedValue(ordenConProductos()), update: jest.fn() },
-        payment: { create: jest.fn().mockResolvedValue({ id: 'pay-card-1', method: 'CARD', orderId: ORDER_ID }) },
+        payment: {
+          count: jest.fn().mockResolvedValue(0),
+          create: jest.fn().mockResolvedValue({ id: 'pay-card-1', method: 'CARD', orderId: ORDER_ID }),
+        },
         shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
         orderCustomer: { create: jest.fn() },
         venueTransaction: { create: jest.fn() },
@@ -392,7 +398,7 @@ describe('manualPayment.service', () => {
         cb({
           $queryRaw: filaDeOrdenBloqueada(),
           order: { findFirst, update: jest.fn() },
-          payment: { create: jest.fn() },
+          payment: { count: jest.fn().mockResolvedValue(0), create: jest.fn() },
           shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
           orderCustomer: { create: jest.fn() },
           venueTransaction: { create: jest.fn() },
@@ -422,7 +428,7 @@ describe('manualPayment.service', () => {
         cb({
           $queryRaw: filaDeOrdenBloqueada(),
           order: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), create: jest.fn() },
-          payment: { create: jest.fn().mockResolvedValue({ id: 'pay-x' }) },
+          payment: { count: jest.fn().mockResolvedValue(0), create: jest.fn().mockResolvedValue({ id: 'pay-x' }) },
           shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
           staffVenue: { findFirst: jest.fn().mockResolvedValue({ staffId: 'w1' }) },
           orderCustomer: { create: jest.fn() },
@@ -441,7 +447,7 @@ describe('manualPayment.service', () => {
       ;(prismaMock.$transaction as jest.Mock).mockImplementation(
         txMock({
           order: { findFirst: jest.fn(), update: jest.fn(), create: orderCreate },
-          payment: { create: paymentCreate },
+          payment: { count: jest.fn().mockResolvedValue(0), create: paymentCreate },
           shift: { findFirst: shiftFindFirst, update: shiftUpdate, updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
         }),
       )
@@ -470,7 +476,7 @@ describe('manualPayment.service', () => {
       ;(prismaMock.$transaction as jest.Mock).mockImplementation(
         txMock({
           order: { findFirst: jest.fn(), update: jest.fn(), create: orderCreate },
-          payment: { create: paymentCreate },
+          payment: { count: jest.fn().mockResolvedValue(0), create: paymentCreate },
           shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
           orderCustomer: { create: jest.fn() },
           venueTransaction: { create: jest.fn() },
@@ -655,7 +661,7 @@ describe('manualPayment.service', () => {
             }),
             update: jest.fn(),
           },
-          payment: { create: jest.fn().mockResolvedValue({ id: 'p' }) },
+          payment: { count: jest.fn().mockResolvedValue(0), create: jest.fn().mockResolvedValue({ id: 'p' }) },
           staffVenue: { findFirst: jest.fn().mockResolvedValue(null) },
           shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
           orderCustomer: { create: jest.fn() },
@@ -836,7 +842,7 @@ describe('manualPayment.service', () => {
         cb({
           $queryRaw: filaDeOrdenBloqueada(),
           order: { findFirst: jest.fn(), update: jest.fn(), create: jest.fn() },
-          payment: { create: jest.fn().mockResolvedValue({ id: 'pay-x' }) },
+          payment: { count: jest.fn().mockResolvedValue(0), create: jest.fn().mockResolvedValue({ id: 'pay-x' }) },
           shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
           orderCustomer: { create: jest.fn() },
           venueTransaction: { create: jest.fn() },
@@ -1395,7 +1401,7 @@ describe('manualPayment.service', () => {
       ;(prismaMock.$transaction as jest.Mock).mockImplementation(
         txMock({
           order: { findFirst: jest.fn(), update: jest.fn(), create: orderCreate },
-          payment: { create: paymentCreate },
+          payment: { count: jest.fn().mockResolvedValue(0), create: paymentCreate },
         }),
       )
 
@@ -1489,7 +1495,7 @@ describe('manualPayment.service', () => {
         cb({
           $queryRaw: filaDeOrdenBloqueada(),
           order: { findFirst: jest.fn(), update: jest.fn(), create: jest.fn() },
-          payment: { create: jest.fn().mockResolvedValue({ id: 'pay-x' }) },
+          payment: { count: jest.fn().mockResolvedValue(0), create: jest.fn().mockResolvedValue({ id: 'pay-x' }) },
           shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
           orderCustomer: { create: jest.fn() },
           venueTransaction: { create: jest.fn() },
@@ -1697,7 +1703,7 @@ describe('manualPayment.service', () => {
       ;(prismaMock.$transaction as jest.Mock).mockImplementation(
         txMock({
           order: { findFirst: jest.fn(), update: jest.fn(), create: orderCreate },
-          payment: { create: paymentCreate },
+          payment: { count: jest.fn().mockResolvedValue(0), create: paymentCreate },
         }),
       )
 

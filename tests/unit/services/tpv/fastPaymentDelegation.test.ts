@@ -173,6 +173,8 @@ function installFakes() {
     return { count: 1 }
   })
 
+  // Ningún cobro previo sobre la orden delegada: el conteo ya no cae a 0 en silencio.
+  prismaMock.payment.count.mockResolvedValue(0)
   prismaMock.payment.create.mockImplementation(async ({ data }: any) => {
     const created = {
       id: `pay-${payments.length + 1}`,

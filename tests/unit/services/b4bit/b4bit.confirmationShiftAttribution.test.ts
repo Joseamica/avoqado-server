@@ -439,3 +439,24 @@ describe('B4Bit — final shift attribution at confirmation', () => {
     })
   })
 })
+
+/**
+ * The "is this the first completed payment on the order?" that decides `incrementTotalOrders`
+ * used to live here as `typeof tx.payment.count === 'function' ? (… ?? 0) : 0`. Neither fallback
+ * to `0` can run in production (the real TransactionClient always has `count`); their only effect
+ * was that an incomplete double counted the order as new, silently, with the suite green. The rule
+ * now lives in `countPriorCompletedPayments` and an incomplete double fails right there.
+ */
+describe('B4Bit — the prior-payment count never answers silently', () => {
+  it('🔴 a tx without payment.count throws naming the dependency, before the CAS and the shift claim', async () => {
+    mockPrisma.payment.findUnique.mockResolvedValue(payment())
+    const paymentSinCount: any = { ...mockPrisma.payment }
+    delete paymentSinCount.count
+    mockPrisma.$transaction.mockImplementation((cb: any) => cb({ ...(prisma as any), payment: paymentSinCount }))
+
+    await expect(processWebhook(webhook())).rejects.toThrow('countPriorCompletedPayments requiere una transacción con payment.count')
+
+    expect(mockPrisma.payment.updateMany).not.toHaveBeenCalled()
+    expect(mockPrisma.shift.updateMany).not.toHaveBeenCalled()
+  })
+})

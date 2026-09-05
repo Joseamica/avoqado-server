@@ -173,7 +173,7 @@ beforeEach(() => {
   finalizeAreaTicketPaymentMock.mockResolvedValue({ areaTicketOrder: false })
   ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback: any) => {
     const tx = {
-      payment: { create: prisma.payment.create },
+      payment: { count: jest.fn().mockResolvedValue(0), create: prisma.payment.create },
       paymentAllocation: { create: prisma.paymentAllocation.create },
       venueTransaction: { create: prisma.venueTransaction.create },
       order: { update: prisma.order.update },

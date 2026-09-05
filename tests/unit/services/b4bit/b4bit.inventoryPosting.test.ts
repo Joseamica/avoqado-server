@@ -31,7 +31,14 @@
 // ── Mocks ────────────────────────────────────────────────────────────────────
 jest.mock('@/utils/prismaClient', () => {
   const client: any = {
-    payment: { findUnique: jest.fn(), findMany: jest.fn(), update: jest.fn(), updateMany: jest.fn(), create: jest.fn() },
+    payment: {
+      findUnique: jest.fn(),
+      findMany: jest.fn(),
+      count: jest.fn().mockResolvedValue(0),
+      update: jest.fn(),
+      updateMany: jest.fn(),
+      create: jest.fn(),
+    },
     order: { findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn(), create: jest.fn() },
     orderItem: { findMany: jest.fn() },
     venue: { findUnique: jest.fn() },

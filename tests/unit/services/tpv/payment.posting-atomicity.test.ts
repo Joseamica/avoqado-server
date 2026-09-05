@@ -186,7 +186,7 @@ beforeEach(() => {
     const ops: string[] = []
     const record: TxRecord = { client: null, ops }
     const tx: any = {
-      payment: { create: prisma.payment.create },
+      payment: { count: jest.fn().mockResolvedValue(0), create: prisma.payment.create },
       paymentAllocation: { create: prisma.paymentAllocation.create },
       venueTransaction: { create: prisma.venueTransaction.create },
       order: {

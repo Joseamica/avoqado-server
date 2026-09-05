@@ -167,6 +167,7 @@ function installStatefulP2002Rollback() {
     }
     const tx: any = {
       payment: {
+        count: jest.fn().mockResolvedValue(0),
         create: jest.fn(async () => {
           ops.push('payment.create:P2002')
           throw new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
@@ -263,6 +264,8 @@ beforeEach(() => {
     const record: TxRecord = { client: null, ops }
     const tx: any = {
       payment: {
+        // El conteo de cobros previos ya no cae a 0 en silencio: el doble lo declara.
+        count: jest.fn().mockResolvedValue(0),
         create: jest.fn(async (args: any) => {
           ops.push('payment.create')
           return (prisma.payment.create as jest.Mock)(args)
@@ -484,5 +487,31 @@ describe('fase 1 — el cobro cae en el turno abierto del NEGOCIO', () => {
     expect(rollback.committed.loserPayments).toEqual([])
     expect(rollback.committed.activityLogs).toEqual([])
     expect(prisma.activityLog.create).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * El «¿es el primer cobro de la orden?» que decide `incrementTotalOrders` vivía aquí como
+ * `typeof tx.payment.count === 'function' ? … : 0`. La rama del `0` jamás corría en producción
+ * (el TransactionClient real siempre trae `count`); sólo servía para que un doble sin `count`
+ * contara CADA cobro como el primero — `totalOrders` de más — con la suite en verde. Ahora la
+ * regla vive en `countPriorCompletedPayments` y un doble incompleto revienta en esa línea.
+ */
+describe('recordOrderPayment — el conteo de cobros previos nunca contesta en silencio', () => {
+  it('🔴 un tx sin payment.count revienta nombrando la dependencia, sin crear el Payment ni reclamar turno', async () => {
+    const txSinCount: any = {
+      $queryRaw: jest.fn().mockResolvedValue([{ id: ORDER_ID }]),
+      payment: { create: jest.fn() },
+      shift: { findFirst: jest.fn(), updateMany: jest.fn(), update: jest.fn() },
+      activityLog: { create: jest.fn() },
+    }
+    ;(prisma.$transaction as jest.Mock).mockImplementationOnce(async (callback: any) => callback(txSinCount))
+
+    await expect((paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData, 'user-1')).rejects.toThrow(
+      'countPriorCompletedPayments requiere una transacción con payment.count',
+    )
+
+    expect(txSinCount.payment.create).not.toHaveBeenCalled()
+    expect(txSinCount.shift.updateMany).not.toHaveBeenCalled()
   })
 })

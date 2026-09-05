@@ -28,6 +28,7 @@ import {
   recordPendingPaymentShiftReconciliation,
   resolvePaymentShiftReconciliationEnabled,
 } from '../shared/paymentShiftClaim'
+import { countPriorCompletedPayments } from '../shared/priorCompletedPayments'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { generateDigitalReceipt, generateReceiptUrl } from '../tpv/digitalReceipt.tpv.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
@@ -1027,11 +1028,7 @@ async function completeAndAttributeB4BitPaymentInTx(
   }
 
   const priorCompletedPaymentCount = paymentOrderId
-    ? typeof tx.payment.count === 'function'
-      ? ((await tx.payment.count({
-          where: { orderId: paymentOrderId, venueId: paymentVenueId, status: 'COMPLETED', type: { not: 'REFUND' } },
-        })) ?? 0)
-      : 0
+    ? await countPriorCompletedPayments(tx, { venueId: paymentVenueId, orderId: paymentOrderId })
     : 0
 
   const transition = await tx.payment.updateMany({

@@ -136,6 +136,7 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
     ;(prisma.$transaction as jest.Mock).mockImplementation(async callback => {
       const tx = {
         payment: {
+          count: jest.fn().mockResolvedValue(0),
           create: prisma.payment.create,
         },
         paymentAllocation: {

@@ -20,6 +20,7 @@ import {
   recordPendingPaymentShiftReconciliation,
   resolvePaymentShiftReconciliationEnabled,
 } from '../shared/paymentShiftClaim'
+import { countPriorCompletedPayments } from '../shared/priorCompletedPayments'
 import { createCommissionForPayment } from '../dashboard/commission/commission-calculation.service'
 import { runAutoReorderForVenue } from '../dashboard/autoReorder.service'
 import { serializedInventoryService } from '../serialized-inventory/serializedInventory.service'
@@ -2167,12 +2168,7 @@ export async function recordOrderPayment(
       // REFUNDED conservan `null`: no reclaman turno ni generan una falsa
       // conciliación post-cierre. Para COMPLETED, el claim ES el incremento y
       // ocurre dentro de esta misma tx, antes del Payment.
-      const priorCompletedPaymentCount =
-        typeof tx.payment.count === 'function'
-          ? ((await tx.payment.count({
-              where: { venueId, orderId: activeOrder.id, status: 'COMPLETED', type: { not: 'REFUND' } },
-            })) ?? 0)
-          : 0
+      const priorCompletedPaymentCount = await countPriorCompletedPayments(tx, { venueId, orderId: activeOrder.id })
       const shiftClaim = await claimShiftForCompletedPayment(tx, {
         paymentStatus: paymentStatusSnapshot,
         venueId,

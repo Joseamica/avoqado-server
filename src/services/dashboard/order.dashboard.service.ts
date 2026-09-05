@@ -14,6 +14,7 @@ import {
   recordPendingPaymentShiftReconciliation,
   resolvePaymentShiftReconciliationEnabled,
 } from '../shared/paymentShiftClaim'
+import { countPriorCompletedPayments } from '../shared/priorCompletedPayments'
 // La ÚNICA definición de "qué cuenta como pagado y cuánto se devolvió" — la
 // misma que usan los cuatro canales de cobro, para que la pantalla no pueda
 // contradecir al saldo persistido.
@@ -713,12 +714,7 @@ export async function settleOrder(
       _sum: { amount: true, tipAmount: true },
     })
     const paidSum = Number(paidAgg._sum.amount ?? 0)
-    const priorCompletedPaymentCount =
-      typeof tx.payment.count === 'function'
-        ? ((await tx.payment.count({
-            where: { orderId, venueId, status: 'COMPLETED', type: { not: 'REFUND' } },
-          })) ?? 0)
-        : 0
+    const priorCompletedPaymentCount = await countPriorCompletedPayments(tx, { venueId, orderId })
     // `Order.total` incluye propinas acumuladas (así lo escribe el TPV); se
     // comparan peras con peras restando la propina de ambos lados.
     const orderTotalSansTips = Number(fresh.total) - Number(fresh.tipAmount ?? 0)

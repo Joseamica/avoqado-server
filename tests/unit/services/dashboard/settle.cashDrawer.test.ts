@@ -50,6 +50,8 @@ function armarOrden() {
   ;(prismaMock as any).payment = {
     // settleOrder recalcula lo YA pagado antes de liquidar: nada pagado ⇒ liquida los $500
     aggregate: jest.fn().mockResolvedValue({ _sum: { amount: 0, tipAmount: 0 } }),
+    // ningún cobro previo ⇒ este es el primero de la orden (antes el `: 0` mudo lo asumía)
+    count: jest.fn().mockResolvedValue(0),
     create: jest.fn().mockImplementation(async (args: any) => {
       const row = { id: 'pay-1', ...args.data }
       created.push(row)

@@ -529,3 +529,39 @@ describe('settleCustomerBalance — un claim por cada Payment ganador', () => {
     expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * El «¿es el primer cobro de la orden?» que decide `incrementTotalOrders` vivía aquí como
+ * `typeof tx.payment.count === 'function' ? (… ?? 0) : 0`. Ninguna de las dos caídas a `0`
+ * corre en producción; sólo hacían que un doble incompleto contara la orden como nueva en
+ * silencio. Ahora la regla vive en `countPriorCompletedPayments` y revienta en esa línea.
+ */
+describe('settleOrder — el conteo de cobros previos nunca contesta en silencio', () => {
+  it('🔴 un tx sin payment.count revienta nombrando la dependencia, sin Payment ni claim de turno', async () => {
+    arrangeOrderSettlement()
+    const paymentSinCount: any = { ...prismaMock.payment }
+    delete paymentSinCount.count
+    prismaMock.$transaction.mockImplementation(async (callback: any) => callback({ ...prismaMock, payment: paymentSinCount }))
+    prismaMock.shift.findFirst.mockResolvedValue({ id: 'shift-open', status: 'OPEN' } as any)
+
+    await expect(settleOrder(VENUE, 'order-1', undefined, ACTOR)).rejects.toThrow(
+      'countPriorCompletedPayments requiere una transacción con payment.count',
+    )
+
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(prismaMock.shift.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('🔴 un count que resuelve undefined también revienta: el `?? 0` lo volvía «primer cobro» y contaba la orden otra vez', async () => {
+    arrangeOrderSettlement()
+    prismaMock.payment.count.mockResolvedValue(undefined as any)
+    prismaMock.shift.findFirst.mockResolvedValue({ id: 'shift-open', status: 'OPEN' } as any)
+
+    await expect(settleOrder(VENUE, 'order-1', undefined, ACTOR)).rejects.toThrow(
+      'countPriorCompletedPayments: payment.count devolvió undefined en vez de un entero',
+    )
+
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(prismaMock.shift.updateMany).not.toHaveBeenCalled()
+  })
+})

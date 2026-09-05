@@ -122,6 +122,8 @@ function installFakes() {
   })
   prismaMock.payment.findUnique.mockResolvedValue(null)
   prismaMock.payment.findFirst.mockResolvedValue(null)
+  // Ningún cobro previo sobre la orden delegada: el conteo ya no cae a 0 en silencio.
+  prismaMock.payment.count.mockResolvedValue(0)
   prismaMock.venueTransaction.create.mockResolvedValue({ id: 'vt-1' })
   prismaMock.paymentAllocation.create.mockResolvedValue({ id: 'alloc-1' })
   prismaMock.shift.findFirst.mockResolvedValue(null)

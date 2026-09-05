@@ -190,3 +190,42 @@ describe('createManualPayment — la orden sombra comparte turno con su cobro', 
     expect(activityLogCreate).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * El «¿es el primer cobro de la orden?» que decide `incrementTotalOrders` sobre una orden
+ * EXISTENTE vivía aquí como `typeof tx.payment.count === 'function' ? (… ?? 0) : 0`. Ninguna
+ * de las dos caídas a `0` corre en producción; sólo hacían que un doble incompleto contara la
+ * orden como nueva en silencio. Ahora la regla vive en `countPriorCompletedPayments` y revienta
+ * en esa línea, antes de reclamar turno o crear el Payment.
+ */
+describe('createManualPayment — el conteo de cobros previos de una orden existente nunca contesta en silencio', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    ;(prismaMock.venueSettings.findUnique as jest.Mock).mockResolvedValue({ enableShifts: true })
+  })
+
+  it('🔴 un tx sin payment.count revienta nombrando la dependencia, sin Payment ni claim de turno', async () => {
+    const paymentCreate = jest.fn()
+    const shiftUpdateMany = jest.fn()
+    ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (cb: any) =>
+      cb({
+        $queryRaw: jest.fn().mockResolvedValue([{ id: 'order-1' }]),
+        order: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), create: jest.fn() },
+        payment: { create: paymentCreate },
+        shift: {
+          findFirst: jest.fn().mockResolvedValue({ id: 'turno-negocio', status: 'OPEN' }),
+          updateMany: shiftUpdateMany,
+          update: jest.fn(),
+        },
+        activityLog: { create: jest.fn() },
+      }),
+    )
+
+    await expect(manualPaymentService.createManualPayment(VENUE_ID, USER_ID, { ...pagoSuelto, orderId: 'order-1' })).rejects.toThrow(
+      'countPriorCompletedPayments requiere una transacción con payment.count',
+    )
+
+    expect(paymentCreate).not.toHaveBeenCalled()
+    expect(shiftUpdateMany).not.toHaveBeenCalled()
+  })
+})
