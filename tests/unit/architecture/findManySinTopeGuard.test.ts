@@ -151,7 +151,10 @@ const INVENTARIO: Record<string, number> = {
   'src/services/tpv/payment.tpv.service.ts': 2,
   'src/services/tpv/refund.tpv.service.ts': 1,
   'src/services/tpv/sale-verification.service.ts': 1,
-  'src/services/tpv/shift.tpv.service.ts': 7, // 2026-09-04: file == HEAD; scanner measured 7 (inventory-only correction).
+  // 2026-09-04, ronda de arreglo 1 (P1.3/P2.5): de 7 a 4. Se fueron el `include` anidado sin tope
+  // de `getShifts` (`orders → payments → allocations`) y los dos `findMany` de `getCurrentShift`,
+  // que ahora agregan en la base. Los 4 que quedan son P3.2/P3.3 y siguen abiertos.
+  'src/services/tpv/shift.tpv.service.ts': 4,
   'src/services/tpv/table.tpv.service.ts': 2,
   'src/services/tpv/time-entry.tpv.service.ts': 3,
   'src/services/wallet/redeemStampReward.service.ts': 1,
