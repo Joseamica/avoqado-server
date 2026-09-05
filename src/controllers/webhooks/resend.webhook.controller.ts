@@ -15,8 +15,18 @@ import logger from '@/config/logger'
 import * as marketingService from '../../services/superadmin/marketing.superadmin.service'
 import { procesarAvisoDeResend } from '../../services/marketing/campaignWebhook.service'
 
-// Resend webhook signing secret from environment
-const RESEND_WEBHOOK_SECRET = process.env.RESEND_WEBHOOK_SECRET
+/**
+ * Secreto de firma de Resend (Svix). Se lee en CADA llamada, nunca en una constante de módulo.
+ *
+ * 🔴 Con la constante, el valor quedaba congelado al importar — y en jest `process.env` es
+ * compartido por todas las suites de un worker: `config/env.ts` carga el `.env` real con
+ * `dotenv.config()`, así que la MISMA prueba pasaba sola y fallaba 4/4 en `pre-deploy` según qué
+ * suite hubiera corrido antes (2026-09-04). Leerlo aquí vuelve el comportamiento función del
+ * request, no del orden de importación.
+ */
+function resendWebhookSecret(): string | undefined {
+  return process.env.RESEND_WEBHOOK_SECRET
+}
 
 /**
  * Handle Resend webhook events
@@ -38,7 +48,8 @@ export async function handleResendWebhook(req: Request, res: Response, _next: Ne
     const svixSignature = req.headers['svix-signature'] as string
 
     // Verify signature if secret is configured
-    if (RESEND_WEBHOOK_SECRET) {
+    const secret = resendWebhookSecret()
+    if (secret) {
       if (!svixId || !svixTimestamp || !svixSignature) {
         logger.warn('📧 [Resend Webhook] Missing Svix headers')
         return res.status(400).json({
@@ -48,7 +59,7 @@ export async function handleResendWebhook(req: Request, res: Response, _next: Ne
       }
 
       try {
-        const wh = new Webhook(RESEND_WEBHOOK_SECRET)
+        const wh = new Webhook(secret)
         wh.verify(payload, {
           'svix-id': svixId,
           'svix-timestamp': svixTimestamp,
@@ -128,6 +139,6 @@ export function resendWebhookHealthCheck(req: Request, res: Response) {
     success: true,
     message: 'Resend webhook endpoint is healthy',
     timestamp: new Date().toISOString(),
-    configured: !!RESEND_WEBHOOK_SECRET,
+    configured: !!resendWebhookSecret(),
   })
 }
