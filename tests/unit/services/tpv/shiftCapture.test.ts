@@ -43,6 +43,8 @@ jest.mock('@/utils/prismaClient', () => ({
     orderItem: { findMany: jest.fn() },
     rawMaterialMovement: { findMany: jest.fn() },
     $transaction: jest.fn(),
+    // `lockShiftLifecycleForVenue` toma un advisory lock por `$queryRaw`; no devuelve filas.
+    $queryRaw: jest.fn().mockResolvedValue([]),
   },
 }))
 
@@ -261,7 +263,14 @@ describe('ActivityLog dual-write in shift.tpv.service', () => {
       mockTxActivityCreate.mockResolvedValue({ id: 'activity-shift-closed' })
       mockPrisma.$transaction.mockImplementation((callback: any) =>
         callback({
-          shift: { updateMany: mockTxShiftUpdateMany, findUnique: mockTxShiftFindUnique },
+          // `claimShiftForClose` relee el turno bajo el lock (`findClosableShift` → `shift.findFirst`)
+          // antes del CAS OPEN→CLOSING. Sin fila, el cierre muere con «Shift not found».
+          shift: {
+            updateMany: mockTxShiftUpdateMany,
+            findUnique: mockTxShiftFindUnique,
+            findFirst: jest.fn().mockResolvedValue(makeOpenShift()),
+          },
+          $queryRaw: jest.fn().mockResolvedValue([]), // advisory lock del ciclo de vida del turno
           activityLog: { create: mockTxActivityCreate },
         }),
       )

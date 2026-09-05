@@ -166,6 +166,10 @@ function datosDeLaOrdenFast() {
 describe('recordFastPayment — el CLIENTE de la venta rápida', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    // 5s: `lockExistingOrderForPayment` hace `SELECT … FOR UPDATE` por `$queryRaw` y exige UNA fila.
+    // Sin ella reporta la orden como ajena y la delegación cae a FAST — justo lo que estas
+    // pruebas afirman que NO debe pasar. La fila simula la orden bloqueada.
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 'orden-bloqueada' }])
     installFakes()
   })
 
@@ -617,6 +621,10 @@ describe('recordFastPayment — el CLIENTE de la venta rápida', () => {
 describe('recordFastPayment — el cliente SEMBRADO por la solicitud de la terminal', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    // 5s: `lockExistingOrderForPayment` hace `SELECT … FOR UPDATE` por `$queryRaw` y exige UNA fila.
+    // Sin ella reporta la orden como ajena y la delegación cae a FAST — justo lo que estas
+    // pruebas afirman que NO debe pasar. La fila simula la orden bloqueada.
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 'orden-bloqueada' }])
     installFakes()
   })
 

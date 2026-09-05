@@ -15,14 +15,16 @@ const esperado: Record<string, number> = {
   // por negocio y ese id va a la Order Y al Payment.
   // Task 5m añadió la atribución final al confirmar CO; la otra llamada conserva
   // la atribución provisional de la iniciación.
-  'b4bit/b4bit.service.ts': 2,
+  // 5i (4-sep): la confirmación pasó a `claimShiftForCapturedPayment`; queda la iniciación.
+  'b4bit/b4bit.service.ts': 1,
   'tpv/payment.tpv.service.ts': 0,
   'tpv/refund.tpv.service.ts': 0,
   // 3 desde el 3-sep-2026 (task 2b): `createOrderWithItems` ya lo llamaba; se suman `createOrder`
   // (orden de mostrador) y `sellSerializedItem`, que ahora estampan `Order.shiftId`.
   'tpv/order.tpv.service.ts': 3,
   'tpv/table.tpv.service.ts': 1,
-  'dashboard/manualPayment.service.ts': 1,
+  // 5i (4-sep): pasó al claim transaccional (`claimShiftForCapturedPayment`).
+  'dashboard/manualPayment.service.ts': 0,
   'dashboard/refund.dashboard.service.ts': 0,
   // `payCashOrder` pasó al claim transaccional en Task 5f; éste es createOrderWithItems.
   'mobile/order.mobile.service.ts': 1,
@@ -31,6 +33,10 @@ const esperado: Record<string, number> = {
   'mobile/areaTicketV7.mobile.service.ts': 1,
   'mobile/estimate.mobile.service.ts': 1,
   'reservation/createOrderFromReservation.ts': 1,
+  // 🔴 El chokepoint vive AQUÍ desde 5i. Entra a la tabla para que «ningún shift.findFirst
+  // filtra por staffId» lo vigile también. No llama a `turnoAbiertoDelNegocio`: hace su
+  // propio lookup por venue, sin persona.
+  'shared/paymentShiftClaim.ts': 0,
 }
 
 /**
@@ -128,7 +134,9 @@ describe('los cobros reclaman el turno dentro de su transacción', () => {
   for (const [rel, llamadas] of Object.entries(claimsDeCobroEsperados)) {
     it(`${rel} (${llamadas} claim${llamadas > 1 ? 's' : ''})`, () => {
       const src = sinComentarios(readFileSync(join(raiz, rel), 'utf8'))
-      expect((src.match(/claimShiftForCapturedPayment\(tx,/g) ?? []).length).toBe(llamadas)
+      // `claimShiftForCompletedPayment` es el wrapper que usa la PAX (sólo COMPLETED reclama) y
+      // delega en `claimShiftForCapturedPayment`: los dos son un claim dentro de la tx.
+      expect((src.match(/claimShiftFor(?:Captured|Completed)Payment\(tx,/g) ?? []).length).toBe(llamadas)
     })
   }
 })
