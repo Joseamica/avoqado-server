@@ -171,7 +171,17 @@ export async function openSession(params: OpenSessionParams, incluirEsperado = f
 
   // `logAction(CASH_DRAWER_OPENED)` ya lo escribe `abrirTurnoDeCaja` — aquí duplicarlo pondría dos
   // renglones por apertura en la bitácora que el dueño audita.
-  return { ...formatSession(session, incluirEsperado), shiftId: apertura.shiftId }
+  // `cajaCreada` / `shiftCreado` son ADITIVOS (los POS viejos los ignoran) y son lo único que le
+  // permite al aparato distinguir «abrí una caja» de «me ligaron a la de otro»: con el turno del
+  // negocio un 201 con la caja EXISTENTE es la respuesta normal a una segunda apertura, y sin
+  // esta bandera el POS adoptaba la caja ajena como propia (revisión de 8b y auditoría de apps,
+  // 2026-09-04): el fondo tecleado se perdía en silencio y los movimientos iban al arqueo ajeno.
+  return {
+    ...formatSession(session, incluirEsperado),
+    shiftId: apertura.shiftId,
+    cajaCreada: apertura.cajaCreada,
+    shiftCreado: apertura.shiftCreado,
+  }
 }
 
 // ============================================================================
