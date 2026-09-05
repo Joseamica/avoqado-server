@@ -2442,6 +2442,19 @@ interface CompItemsInput {
 }
 
 /**
+ * Traduce el «no encontré la fila» de un `update` con CAS (`where: { id, version }`) al MISMO
+ * 409 que las apps ya manejan. Cualquier otro error se propaga tal cual: disfrazar un P2002 o
+ * un fallo de conexión de «conflicto de versión» mandaría a la app a reintentar lo que no es
+ * reintentable.
+ */
+function conflictoSiLaMovieron(err: unknown): never {
+  if ((err as { code?: string } | null)?.code === 'P2025') {
+    throw new ConflictError('Order was modified by another request. Please refresh and try again.')
+  }
+  throw err
+}
+
+/**
  * Comp (complimentary) items or entire order
  * Removes cost from delivered items (for service recovery)
  * @param venueId Venue ID
@@ -2553,61 +2566,65 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
     }).toNumber()
     const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
 
-    const updated = await tx.order.update({
-      where: { id: orderId },
-      data: {
-        discountAmount: newDiscountAmount,
-        serviceChargeAmount: newServiceChargeAmount,
-        total: newTotal,
-        remainingBalance: newRemainingBalance,
-        version: {
-          increment: 1,
+    const updated = await tx.order
+      .update({
+        // 🔴 CAS: sólo se escribe si NADIE movió la orden desde que esta función la leyó. Sin la
+        // versión aquí, dos escrituras concurrentes sobre la misma mesa se pisaban en silencio.
+        where: { id: orderId, version: order.version },
+        data: {
+          discountAmount: newDiscountAmount,
+          serviceChargeAmount: newServiceChargeAmount,
+          total: newTotal,
+          remainingBalance: newRemainingBalance,
+          version: {
+            increment: 1,
+          },
         },
-      },
-      include: {
-        items: {
-          include: {
-            product: {
-              select: {
-                id: true,
-                name: true,
-                price: true,
+        include: {
+          items: {
+            include: {
+              product: {
+                select: {
+                  id: true,
+                  name: true,
+                  price: true,
+                },
+              },
+              modifiers: {
+                include: {
+                  modifier: true,
+                },
               },
             },
-            modifiers: {
-              include: {
-                modifier: true,
-              },
+          },
+          payments: {
+            include: {
+              allocations: true,
+            },
+          },
+          table: {
+            select: {
+              id: true,
+              number: true,
+            },
+          },
+          createdBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+            },
+          },
+          servedBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
             },
           },
         },
-        payments: {
-          include: {
-            allocations: true,
-          },
-        },
-        table: {
-          select: {
-            id: true,
-            number: true,
-          },
-        },
-        createdBy: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-          },
-        },
-        servedBy: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-          },
-        },
-      },
-    })
+      })
+      .catch(conflictoSiLaMovieron)
 
     // Create audit trail (siloed OrderAction; dual-written to ActivityLog below)
     await tx.orderAction.create({
@@ -2740,15 +2757,6 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
 
   logger.info(`  💰 Voiding ${itemsToVoid.length} items | total voided: $${voidAmount}`)
 
-  // Delete the items (Prisma cascades to OrderItemModifier)
-  await prisma.orderItem.deleteMany({
-    where: {
-      id: {
-        in: input.itemIds,
-      },
-    },
-  })
-
   // Calculate new totals
   const remainingItems = order.items.filter(item => !input.itemIds.includes(item.id))
   const newSubtotal = remainingItems.reduce((sum, item) => sum + Number(item.total), 0)
@@ -2785,6 +2793,17 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
   // orden con el total viejo — un estado a medias en el dinero.
   // ⚠️ El `orderItem.deleteMany` de más arriba sigue FUERA: límite PREEXISTENTE, no tocado.
   const updatedOrder = await prisma.$transaction(async tx => {
+    // Los platos se borran DENTRO de la transacción (antes corrían fuera): si el CAS de abajo
+    // falla porque alguien movió la orden, los platos se quedan donde estaban. Antes quedaban
+    // borrados con los totales viejos — un estado a medias en el dinero.
+    await tx.orderItem.deleteMany({
+      where: {
+        id: {
+          in: input.itemIds,
+        },
+      },
+    })
+
     // 🔴 MONEY: al anular baja el subtotal, así que un cargo por servicio PORCENTUAL baja con
     // él (auditoría 2026-09-03). El descuento acumulado entra a la base, igual que en
     // `removeOrderItem`.
@@ -2811,66 +2830,70 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
         }).toNumber()
     const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
 
-    return tx.order.update({
-      where: { id: orderId },
-      data: {
-        subtotal: newSubtotal,
-        serviceChargeAmount: newServiceChargeAmount,
-        total: newTotal,
-        remainingBalance: newRemainingBalance,
-        // ⭐ If voiding all items, auto-close order (Toast/Square pattern)
-        ...(isVoidingAllItems && {
-          status: 'CANCELLED',
-          paymentStatus: 'PENDING', // Keep PENDING (order was never paid)
-        }),
-        version: {
-          increment: 1,
+    return tx.order
+      .update({
+        // 🔴 CAS: sólo se escribe si NADIE movió la orden desde que esta función la leyó. Sin la
+        // versión aquí, dos escrituras concurrentes sobre la misma mesa se pisaban en silencio.
+        where: { id: orderId, version: order.version },
+        data: {
+          subtotal: newSubtotal,
+          serviceChargeAmount: newServiceChargeAmount,
+          total: newTotal,
+          remainingBalance: newRemainingBalance,
+          // ⭐ If voiding all items, auto-close order (Toast/Square pattern)
+          ...(isVoidingAllItems && {
+            status: 'CANCELLED',
+            paymentStatus: 'PENDING', // Keep PENDING (order was never paid)
+          }),
+          version: {
+            increment: 1,
+          },
         },
-      },
-      include: {
-        items: {
-          include: {
-            product: {
-              select: {
-                id: true,
-                name: true,
-                price: true,
+        include: {
+          items: {
+            include: {
+              product: {
+                select: {
+                  id: true,
+                  name: true,
+                  price: true,
+                },
+              },
+              modifiers: {
+                include: {
+                  modifier: true,
+                },
               },
             },
-            modifiers: {
-              include: {
-                modifier: true,
-              },
+          },
+          payments: {
+            include: {
+              allocations: true,
+            },
+          },
+          table: {
+            select: {
+              id: true,
+              number: true,
+            },
+          },
+          createdBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+            },
+          },
+          servedBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
             },
           },
         },
-        payments: {
-          include: {
-            allocations: true,
-          },
-        },
-        table: {
-          select: {
-            id: true,
-            number: true,
-          },
-        },
-        createdBy: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-          },
-        },
-        servedBy: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-          },
-        },
-      },
-    })
+      })
+      .catch(conflictoSiLaMovieron)
   })
 
   // ⭐ If voided all items, remove customer linkages (pay-later orders)
@@ -3094,63 +3117,67 @@ export async function applyDiscount(
     }).toNumber()
     const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
 
-    return tx.order.update({
-      where: { id: orderId },
-      data: {
-        discountAmount: newDiscountAmount,
-        // 🔴 Sin persistir el snapshot el arreglo sería COSMÉTICO: `computeOrderBalance`
-        // —lo que de verdad se cobra— lee `Order.serviceChargeAmount`, no las filas.
-        serviceChargeAmount: newServiceChargeAmount,
-        total: newTotal,
-        remainingBalance: newRemainingBalance,
-        version: {
-          increment: 1,
+    return tx.order
+      .update({
+        // 🔴 CAS: sólo se escribe si NADIE movió la orden desde que esta función la leyó. Sin la
+        // versión aquí, dos escrituras concurrentes sobre la misma mesa se pisaban en silencio.
+        where: { id: orderId, version: order.version },
+        data: {
+          discountAmount: newDiscountAmount,
+          // 🔴 Sin persistir el snapshot el arreglo sería COSMÉTICO: `computeOrderBalance`
+          // —lo que de verdad se cobra— lee `Order.serviceChargeAmount`, no las filas.
+          serviceChargeAmount: newServiceChargeAmount,
+          total: newTotal,
+          remainingBalance: newRemainingBalance,
+          version: {
+            increment: 1,
+          },
         },
-      },
-      include: {
-        items: {
-          include: {
-            product: {
-              select: {
-                id: true,
-                name: true,
-                price: true,
+        include: {
+          items: {
+            include: {
+              product: {
+                select: {
+                  id: true,
+                  name: true,
+                  price: true,
+                },
+              },
+              modifiers: {
+                include: {
+                  modifier: true,
+                },
               },
             },
-            modifiers: {
-              include: {
-                modifier: true,
-              },
+          },
+          payments: {
+            include: {
+              allocations: true,
+            },
+          },
+          table: {
+            select: {
+              id: true,
+              number: true,
+            },
+          },
+          createdBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+            },
+          },
+          servedBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
             },
           },
         },
-        payments: {
-          include: {
-            allocations: true,
-          },
-        },
-        table: {
-          select: {
-            id: true,
-            number: true,
-          },
-        },
-        createdBy: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-          },
-        },
-        servedBy: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-          },
-        },
-      },
-    })
+      })
+      .catch(conflictoSiLaMovieron)
   })
 
   // Create audit trail

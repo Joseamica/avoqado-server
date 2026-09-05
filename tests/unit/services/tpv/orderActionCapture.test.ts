@@ -297,7 +297,9 @@ describe('ActivityLog dual-write in order.tpv.service', () => {
       // item-1.total = 60; order.discountAmount 0 -> 60; order.total 100 -> 40
       expect(mockPrisma.order.update).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: ORDER_ID },
+          // El `where` lleva además la versión leída (CAS contra escrituras concurrentes,
+          // 2026-09-04); esta prueba guarda la ARITMÉTICA, no la forma del candado.
+          where: expect.objectContaining({ id: ORDER_ID }),
           data: expect.objectContaining({ discountAmount: 60, total: 40 }),
         }),
       )
