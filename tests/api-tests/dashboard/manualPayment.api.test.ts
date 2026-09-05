@@ -124,6 +124,12 @@ describe('POST /api/v1/dashboard/venues/:venueId/payments/manual', () => {
     })
     // No open shift for this cashier → the service skips shift totals update.
     prismaMock.shift.findFirst.mockResolvedValue(null)
+    // El doble de Prisma DEBE declarar payment.count: desde 116a9739 la regla «¿es el
+    // primer cobro de la orden?» vive en countPriorCompletedPayments, que LANZA si el tx
+    // no trae count o si resuelve algo que no es un entero — y el jest.fn() pelón de
+    // setup.ts resuelve undefined. 0 = ningún cobro COMPLETED previo, que es justo este
+    // escenario (payments: []) y el valor que el servicio tomaba en silencio antes.
+    prismaMock.payment.count.mockResolvedValue(0)
     prismaMock.payment.create.mockImplementation(async (args: any) => ({
       id: PAYMENT_ID,
       ...args.data,
