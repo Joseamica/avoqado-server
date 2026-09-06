@@ -822,7 +822,7 @@ export async function settleCustomerBalance(
   // Payment ($600) pero se le respondía al cajero "3 order(s) totaling 900" y se
   // escribía un ActivityLog con 900 — la bitácora contando el dinero DOS veces,
   // justo el registro del que dependemos para investigar un incidente.
-  const settled: Array<{ orderId: string; amount: number; paymentId?: string }> = []
+  const settled: Array<{ orderId: string; amount: number; paymentId?: string; baseParaLealtad: number }> = []
   const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
   const targetOrderIds = [...new Set(pendingOrders.map(oc => oc.order.id))].sort()
   await prisma.$transaction(async tx => {
@@ -866,6 +866,11 @@ export async function settleCustomerBalance(
           paidAmount: fresh.total,
           remainingBalance: 0,
           version: { increment: 1 },
+          // 🔴 Liquidar ES el momento en que la orden queda PAGADA: elegibilidad de lealtad como en
+          // la PAX y el efectivo móvil (revisión del 5-sep-2026). Todo lo que este camino liquida
+          // tiene cliente por construcción — era el sello que más seguro se perdía.
+          loyaltyEligibleAt: new Date(),
+          loyaltyStaffId: actorStaffId,
         },
       })
       if (transition.count === 0) continue
@@ -877,7 +882,7 @@ export async function settleCustomerBalance(
       // monto reportado es la suma exacta de los pagos creados, no un recálculo
       // que pueda divergir de ellos.
       const remainingBalancePesos = remainingBalance.toNumber()
-      settled.push({ orderId, amount: remainingBalancePesos })
+      settled.push({ orderId, amount: remainingBalancePesos, baseParaLealtad: Math.max(0, orderTotalSansTips.toNumber()) })
 
       const shiftAmount = remainingBalance
       const shiftTip = new Prisma.Decimal(0)
@@ -955,6 +960,28 @@ export async function settleCustomerBalance(
       })
     } catch (err) {
       logger.error('[CASH-DRAWER] Falló registrar la liquidación del cliente en el cajón (la liquidación NO se afecta)', {
+        customerId,
+        orderId: s.orderId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+
+  // 🔴 Lealtad por cada orden liquidada: la MISMA regla que todos los canales de cobro. El cliente
+  // es el de esta liquidación (todas sus órdenes lo llevan por construcción); `OrderCustomer` manda
+  // si existe y el cliente entra como respaldo. Import dinámico: el helper importa de este archivo.
+  for (const s of settled) {
+    try {
+      const { awardLoyaltyForPaidOrder } = await import('@/services/shared/loyaltyOnPaidOrder')
+      await awardLoyaltyForPaidOrder({
+        venueId,
+        orderId: s.orderId,
+        orderTotal: s.baseParaLealtad,
+        staffId: actorStaffId,
+        legacyCustomer: { id: customer.id, firstName: customer.firstName, lastName: customer.lastName },
+      })
+    } catch (err) {
+      logger.error('[LOYALTY] Falló acreditar la lealtad al liquidar el saldo del cliente (la liquidación NO se afecta)', {
         customerId,
         orderId: s.orderId,
         error: err instanceof Error ? err.message : String(err),

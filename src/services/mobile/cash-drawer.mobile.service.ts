@@ -624,7 +624,15 @@ export async function closeSession(params: CloseSessionParams) {
       // $2,950—, por eso viaja el `Decimal` tal cual y nunca detrás de un `&&`.
       conteo: new Prisma.Decimal(actualDecimal.toFixed(2)),
       esperadoDelCajon: new Prisma.Decimal(expectedAmount.toFixed(2)),
-      shiftIdDeLaGaveta: session.shiftId,
+      // 🔴 Se RELEE de la fila ya cerrada, no del `session` de arriba (revisión del 5-sep-2026):
+      // cuando la gaveta llegó SIN liga, `asegurarLaLiga` acaba de escribir `shiftId` en la base,
+      // pero `session.shiftId` en memoria seguía en null — y con null la guarda de pertenencia de
+      // `cerrarElTurnoDeLaGaveta` no dispara nunca: si entre el commit de la gaveta y este punto
+      // otro aparato relevó el turno, se le firmaba al turno NUEVO el conteo y el esperado del
+      // viejo. `closedSession` viene de un `findUnique` sin `select`, así que trae la liga real.
+      // (No `turno.id`: `asegurarLaLiga` devuelve false y NO escribe si otra gaveta ya tiene ese
+      // turno; sólo la relectura dice la verdad.)
+      shiftIdDeLaGaveta: closedSession.shiftId ?? session.shiftId,
       note: note || null,
     })
     shiftId = cierre.shiftCerradoId ?? null
@@ -690,40 +698,56 @@ export async function getHistory(venueId: string, page: number = 1, pageSize: nu
  * payments, so the signed sum auto-nets them). Window = the drawer session's
  * [openedAt, closedAt || now].
  */
+/**
+ * 🔴 Tope del rango (revisión del 5-sep-2026). Mientras el único consumidor fue el corte del
+ * día de Android/iOS, la ventana la acotaba la propia sesión de caja. El reporte de la PAX usa el
+ * MISMO endpoint con «últimos 90 días» o un rango libre, así que el rango se acota aquí y no se
+ * confía en el llamador: sin tope, un `CUSTOM` de un año materializaba cada cobro del venue.
+ * 92 días cubre el reporte de 90 con el margen de meses largos (mismo tope que asistencia).
+ */
+export const TENDER_BREAKDOWN_MAX_DIAS = 92
+
 export async function getTenderBreakdown(venueId: string, from: Date, to: Date) {
-  const payments = await prisma.payment.findMany({
+  if (to.getTime() < from.getTime()) {
+    throw new BadRequestError('`from` debe ser anterior a `to`')
+  }
+  if (to.getTime() - from.getTime() > TENDER_BREAKDOWN_MAX_DIAS * 24 * 60 * 60 * 1000) {
+    throw new BadRequestError(`El desglose por método cubre como máximo ${TENDER_BREAKDOWN_MAX_DIAS} días por consulta`)
+  }
+
+  // 🔴 Se agrega en SQL, no en memoria: antes era un `findMany` sin `take` que traía cada cobro
+  // del rango para sumarlo en un `Map` — la misma clase de consulta que tumbó producción el
+  // 1-sep-2026. `groupBy` devuelve una fila por método, cueste lo que cueste el rango.
+  const grupos = await prisma.payment.groupBy({
+    by: ['method'],
     where: {
       venueId,
       status: 'COMPLETED',
       createdAt: { gte: from, lte: to },
     },
-    select: { method: true, amount: true, tipAmount: true },
+    _sum: { amount: true, tipAmount: true },
+    _count: { _all: true },
   })
 
   // `total` sigue incluyendo la propina —es lo que entró por ese método y lo que
-  // el cajón tiene físicamente— pero ahora viaja aparte cuánto de eso fue propina.
+  // el cajón tiene físicamente— pero viaja aparte cuánto de eso fue propina.
   // Mezclarlas sin distinguirlas escondía dinero que NO es del negocio: la propina
   // se le entrega al mesero, así que un corte que la suma al efectivo hace que el
   // cajón "cuadre" con dinero que se va a repartir.
-  const byMethod = new Map<string, { total: number; tips: number }>()
-  for (const p of payments) {
-    const method = p.method || 'OTHER'
-    const tip = Number(p.tipAmount ?? 0)
-    const acc = byMethod.get(method) || { total: 0, tips: 0 }
-    acc.total += Number(p.amount) + tip
-    acc.tips += tip
-    byMethod.set(method, acc)
-  }
-
-  // Emit every method with activity, dollars major units (matches this API).
-  // `tips` es ADITIVO: los clientes viejos siguen leyendo `total` igual que antes.
-  const tenderBreakdown = Array.from(byMethod.entries())
-    .map(([method, v]) => ({
-      method,
-      total: Number(v.total.toFixed(2)),
-      tips: Number(v.tips.toFixed(2)),
-    }))
-    .filter(t => t.total !== 0 || t.tips !== 0)
+  //
+  // Se emite TODO método con actividad, incluido el que quedó en cero porque su venta y su
+  // reembolso se cancelan: antes se filtraba y el método desaparecía del corte como si no hubiera
+  // pasado nada. `tips` es ADITIVO: los clientes viejos siguen leyendo `total` igual que antes.
+  const tenderBreakdown = grupos
+    .map(g => {
+      const tips = Number(g._sum.tipAmount ?? 0)
+      const total = Number(g._sum.amount ?? 0) + tips
+      return {
+        method: g.method || 'OTHER',
+        total: Number(total.toFixed(2)),
+        tips: Number(tips.toFixed(2)),
+      }
+    })
     .sort((a, b) => b.total - a.total)
 
   const totalTips = Number(tenderBreakdown.reduce((sum, t) => sum + t.tips, 0).toFixed(2))

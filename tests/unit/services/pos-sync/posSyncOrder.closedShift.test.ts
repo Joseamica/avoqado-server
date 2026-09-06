@@ -21,6 +21,10 @@ jest.mock('@/config/logger', () => ({
 jest.mock('@/services/pos-sync/posSyncStaff.service', () => ({ posSyncStaffService: { syncPosStaff: jest.fn() } }))
 jest.mock('@/services/pos-sync/posSyncTable.service', () => ({ getOrCreatePosTable: jest.fn() }))
 jest.mock('@/services/shared/turnoDeCaja', () => ({
+  // `turnoVivoWhere` es la definición canónica de «turno vivo»; desde el 5-sep-2026 la usan también
+  // `paymentShiftClaim` y `posSyncShift`, así que un mock que enumera el módulo tiene que traerla.
+  turnoVivoWhere: (venueId: string) => ({ venueId, endTime: null, status: { in: ['OPEN', 'CLOSING'] } }),
+  ESTADOS_DE_TURNO_VIVO: ['OPEN', 'CLOSING'],
   UNICO_TURNO_ABIERTO: { indice: 'Shift_venueId_open_key', columnas: ['venueId'] },
   esChoqueDelUnico: (error: any, unico: any) => {
     if (error?.code !== 'P2002') return false

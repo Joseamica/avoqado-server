@@ -150,8 +150,12 @@ async function sanarTurnosCerradosSinCierre(tx: Prisma.TransactionClient, venueI
  * advisory lock, antes de leer el turno vivo, con rastro en la bitácora.
  */
 async function sanarTurnosAbiertosConCierre(tx: Prisma.TransactionClient, venueId: string, ahora: Date): Promise<string[]> {
+  // 🔴 Cubre las DOS direcciones vivas con `endTime` puesto: OPEN (bloquea la apertura) y CLOSING
+  // (no bloquea, pero nadie lo volvía a tocar: el vigilante, el release y el CAS del cierre exigen
+  // `endTime` nulo, y el MCP lo contaba como activo para siempre). El `endTime` ya declara que
+  // terminó: la sanación es la misma, a CLOSED.
   const anomalias = await tx.shift.findMany({
-    where: { venueId, status: ShiftStatus.OPEN, endTime: { not: null } },
+    where: { venueId, status: { in: [...ESTADOS_DE_TURNO_VIVO] }, endTime: { not: null } },
     select: { id: true },
     orderBy: { startTime: 'asc' },
     take: TOPE_DE_ANOMALIAS_POR_APERTURA,
@@ -160,16 +164,19 @@ async function sanarTurnosAbiertosConCierre(tx: Prisma.TransactionClient, venueI
 
   const ids = anomalias.map(a => a.id)
   const sanadas = await tx.shift.updateMany({
-    where: { id: { in: ids }, venueId, status: ShiftStatus.OPEN, endTime: { not: null } },
+    where: { id: { in: ids }, venueId, status: { in: [...ESTADOS_DE_TURNO_VIVO] }, endTime: { not: null } },
     data: { status: ShiftStatus.CLOSED, updatedAt: ahora },
   })
   if (sanadas.count === 0) return []
 
-  logger.error('[TURNO DE CAJA] Turno ABIERTO con `endTime`: estado que la app no produce y que bloquea toda apertura, se sana al abrir', {
-    venueId,
-    ids,
-    sanados: sanadas.count,
-  })
+  logger.error(
+    '[TURNO DE CAJA] Turno VIVO (OPEN/CLOSING) con `endTime`: estado que la app no produce y que bloquea o deja huérfano, se sana al abrir',
+    {
+      venueId,
+      ids,
+      sanados: sanadas.count,
+    },
+  )
   return ids
 }
 

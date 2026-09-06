@@ -63,14 +63,21 @@ export function registerSerializedTools(server: McpServer, scope: McpScope) {
     throw new ScopeError('Missing permission sim-custody:approve-registration in this organization')
   }
 
-  /** Mirrors organizationStockControl.routes.ts: OWNER/MANAGER (or platform SUPERADMIN) may read the org-wide custody table. */
+  /**
+   * Mirrors organizationStockControl.routes.ts (`ORG_STOCK_READER_ROLES`): OWNER/ADMIN/MANAGER —or
+   * platform SUPERADMIN— may read the org-wide custody table. 🔴 Es un gate de ROL a propósito, no
+   * de permiso: `inventory:read` lo resuelven también CASHIER/WAITER/KITCHEN por dependencia.
+   */
   function requireOrgInventoryReader(): string {
     if (!scope.activeOrg) {
       throw new ScopeError('No hay una organización activa en esta conexión — reconéctate eligiendo una organización.')
     }
     if (scope.isSuperAdmin) return scope.activeOrg
     for (const access of scope.perVenueAccess.values()) {
-      if (access.organizationId === scope.activeOrg && (access.role === StaffRole.OWNER || access.role === StaffRole.MANAGER)) {
+      if (
+        access.organizationId === scope.activeOrg &&
+        (access.role === StaffRole.OWNER || access.role === StaffRole.ADMIN || access.role === StaffRole.MANAGER)
+      ) {
         return scope.activeOrg
       }
     }

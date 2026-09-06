@@ -230,9 +230,12 @@ describe('abrirTurnoDeCaja — un OPEN con `endTime` se SANA (pasa a CLOSED) en 
   // único parcial `Shift(venueId) WHERE status='OPEN'` la rechaza ⇒ 409 permanente para el venue.
   const ABIERTO_CON_FIN = { id: 'turno-abierto-con-fin' }
 
-  /** La consulta de anomalías OPEN lo encuentra; la de CLOSED sin `endTime` y la del turno vivo, no. */
-  function conAbiertoConFin() {
-    m.shift.findMany.mockImplementation(async (args: any) => (args?.where?.status === 'OPEN' ? [ABIERTO_CON_FIN] : []))
+  const VIVOS = { in: ['OPEN', 'CLOSING'] }
+  /** La consulta de anomalías VIVAS con `endTime` lo encuentra; la de CLOSED sin `endTime` y la del turno vivo, no. */
+  function conAbiertoConFin(fila = ABIERTO_CON_FIN) {
+    m.shift.findMany.mockImplementation(async (args: any) =>
+      Array.isArray(args?.where?.status?.in) && args.where.status.in.includes('OPEN') && args?.where?.endTime?.not === null ? [fila] : [],
+    )
     m.shift.updateMany.mockResolvedValue({ count: 1 })
   }
 
@@ -255,9 +258,26 @@ describe('abrirTurnoDeCaja — un OPEN con `endTime` se SANA (pasa a CLOSED) en 
 
     const sanacion = m.shift.updateMany.mock.calls.find(esLaSanacionAOpen)
     expect(sanacion).toBeDefined()
-    expect(sanacion![0].where).toMatchObject({ venueId: VENUE, status: 'OPEN', endTime: { not: null } })
+    expect(sanacion![0].where).toMatchObject({ venueId: VENUE, status: VIVOS, endTime: { not: null } })
     expect(sanacion![0].where.id).toEqual({ in: [ABIERTO_CON_FIN.id] })
     expect(sanacion![0].data).not.toHaveProperty('endTime')
+  })
+
+  it('🔴 un CLOSING con `endTime` también se sana a CLOSED: nadie más lo volvía a tocar', async () => {
+    // Revisión del 5-sep-2026: la sanación sólo miraba OPEN. Un CLOSING con `endTime` no bloquea la
+    // apertura (el índice parcial sólo cubre OPEN) pero queda huérfano para siempre — el vigilante,
+    // el release y el CAS del cierre exigen `endTime` nulo, y el MCP lo contaba como turno activo.
+    const CERRANDO_CON_FIN = { id: 'turno-cerrando-con-fin' }
+    conAbiertoConFin(CERRANDO_CON_FIN)
+
+    const r = await abrirTurnoDeCaja(params())
+
+    const sanacion = m.shift.updateMany.mock.calls.find(esLaSanacionAOpen)
+    expect(sanacion).toBeDefined()
+    expect(sanacion![0].where.id).toEqual({ in: [CERRANDO_CON_FIN.id] })
+    expect(sanacion![0].where.status).toEqual(VIVOS)
+    expect(r.shiftCreado).toBe(true)
+    expect(mockLogAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'SHIFT_ANOMALY_HEALED', entityId: CERRANDO_CON_FIN.id }))
   })
 
   it('la segunda consulta de anomalías va acotada por venue, por estado y con tope', async () => {
@@ -266,7 +286,7 @@ describe('abrirTurnoDeCaja — un OPEN con `endTime` se SANA (pasa a CLOSED) en 
     await abrirTurnoDeCaja(params())
 
     const args = m.shift.findMany.mock.calls[1][0]
-    expect(args.where).toEqual({ venueId: VENUE, status: 'OPEN', endTime: { not: null } })
+    expect(args.where).toEqual({ venueId: VENUE, status: VIVOS, endTime: { not: null } })
     expect(typeof args.take).toBe('number')
     expect(args.take).toBeGreaterThan(0)
   })

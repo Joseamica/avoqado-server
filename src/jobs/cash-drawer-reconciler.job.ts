@@ -46,6 +46,8 @@ export interface UnpostedCashPayment {
   id: string
   venueId: string
   orderId: string | null
+  /** El turno al que el cobro quedó atado al nacer: la liga EXACTA con su caja (`CashDrawerSession.shiftId`). */
+  shiftId?: string | null
   status: string
   type: string | null
   method: string
@@ -63,6 +65,8 @@ export interface SessionWindow {
   venueId: string
   openedAt: Date
   closedAt: Date | null
+  /** Turno ligado a esta caja (null en cajas anteriores a la apertura unificada). */
+  shiftId?: string | null
 }
 
 export interface ReconcilerResult {
@@ -71,8 +75,42 @@ export interface ReconcilerResult {
   alreadyPosted: number
   outsideDrawer: number
   notDrawerCash: number
+  /** Más de una caja cubría el instante y ninguna es la LIGADA al cobro: no se adivina, se reporta. */
+  ambiguous: number
   errors: number
   skipped: number
+}
+
+/**
+ * 🔴 A QUÉ CAJA se repone un cobro (revisión del 5-sep-2026). Antes se tomaba «la más nueva cuya
+ * ventana cubre el instante» — con la hora REAL del aparato (N1) dos cajas del mismo venue pueden
+ * traslaparse (cierre a mano a las 15:00, reapertura a las 15:05 con `openedAt` 14:00), y elegir
+ * la más nueva movía dinero histórico a un cierre ajeno. El resolutor del dashboard
+ * (`resolveShiftCashDrawer`) trata ese caso como AMBIGUO y no firma; aquí se hace lo mismo.
+ *
+ * Regla, en orden:
+ *   1. si el cobro trae `shiftId` y alguna caja que cubre el instante está LIGADA a ese turno, ésa;
+ *   2. si sólo hay una caja que cubre el instante, ésa — salvo que esté ligada a OTRO turno que el
+ *      del cobro (entonces es contradicción, no coincidencia);
+ *   3. si hay varias y ninguna es la ligada, AMBIGUO: no se repone y se cuenta;
+ *   4. si no hay ninguna, FUERA DE CAJA (regla original).
+ */
+export type DrawerChoice = { kind: 'SESSION'; id: string } | { kind: 'OUTSIDE' } | { kind: 'AMBIGUOUS'; candidates: string[] }
+
+export function elegirCajaParaReponer(p: Pick<UnpostedCashPayment, 'shiftId'>, windows: SessionWindow[]): DrawerChoice {
+  if (windows.length === 0) return { kind: 'OUTSIDE' }
+  if (p.shiftId) {
+    const ligada = windows.find(w => w.shiftId === p.shiftId)
+    if (ligada) return { kind: 'SESSION', id: ligada.id }
+  }
+  if (windows.length === 1) {
+    const unica = windows[0]
+    // Una caja ligada a OTRO turno no es «la única candidata»: es la contradicción que la liga
+    // existe para detectar.
+    if (p.shiftId && unica.shiftId && unica.shiftId !== p.shiftId) return { kind: 'AMBIGUOUS', candidates: [unica.id] }
+    return { kind: 'SESSION', id: unica.id }
+  }
+  return { kind: 'AMBIGUOUS', candidates: windows.map(w => w.id) }
 }
 
 interface Dependencies {
@@ -123,7 +161,12 @@ async function findUnpostedCashPaymentsDb(since: Date, until: Date, limit: numbe
         SELECT 1 FROM "CashDrawerSession" s
         WHERE s."venueId" = p."venueId"
           AND p."createdAt" >= s."openedAt"
-          AND p."createdAt" <= COALESCE(s."closedAt", NOW())
+          -- 🔴 Sin NOW(): las columnas son timestamp SIN zona con UTC dentro, y NOW() es timestamptz,
+          -- así que COALESCE(closedAt, NOW()) resolvía a timestamptz y Postgres reinterpretaba el
+          -- createdAt en la zona de la SESIÓN — en una sesión México, un pago de hace una hora
+          -- quedaba FUERA de la caja abierta (medido el 5-sep-2026). En prod (UTC) coincidía por
+          -- accidente. Misma forma que la consulta de reembolsos; el bind until ya acota por arriba.
+          AND (s."closedAt" IS NULL OR p."createdAt" <= s."closedAt")
       )
     ORDER BY p."createdAt" ASC
     LIMIT ${limit}
@@ -141,6 +184,7 @@ async function findUnpostedCashPaymentsDb(since: Date, until: Date, limit: numbe
       id: true,
       venueId: true,
       orderId: true,
+      shiftId: true,
       status: true,
       type: true,
       amount: true,
@@ -194,6 +238,7 @@ async function findUnpostedCashRefundsDb(since: Date, until: Date, limit: number
       id: true,
       venueId: true,
       orderId: true,
+      shiftId: true,
       status: true,
       type: true,
       amount: true,
@@ -214,7 +259,7 @@ async function findUnpostedCashRefundsDb(since: Date, until: Date, limit: number
 async function findSessionsCoveringDb(venueId: string, at: Date): Promise<SessionWindow[]> {
   return prisma.cashDrawerSession.findMany({
     where: { venueId, openedAt: { lte: at }, OR: [{ closedAt: null }, { closedAt: { gte: at } }] },
-    select: { id: true, venueId: true, openedAt: true, closedAt: true },
+    select: { id: true, venueId: true, openedAt: true, closedAt: true, shiftId: true },
     orderBy: { openedAt: 'desc' },
   })
 }
@@ -293,7 +338,16 @@ export class CashDrawerReconcilerJob {
   }
 
   async runNow(): Promise<ReconcilerResult> {
-    const empty: ReconcilerResult = { scanned: 0, reposted: 0, alreadyPosted: 0, outsideDrawer: 0, notDrawerCash: 0, errors: 0, skipped: 0 }
+    const empty: ReconcilerResult = {
+      scanned: 0,
+      reposted: 0,
+      alreadyPosted: 0,
+      outsideDrawer: 0,
+      notDrawerCash: 0,
+      ambiguous: 0,
+      errors: 0,
+      skipped: 0,
+    }
     if (this.running) return { ...empty, skipped: 1 }
     this.running = true
     try {
@@ -315,14 +369,14 @@ export class CashDrawerReconcilerJob {
       const repostedByVenue = new Map<string, number>()
       const sessionCache = new Map<string, SessionWindow[]>()
 
-      const resolveSession = async (p: UnpostedCashPayment): Promise<string | null> => {
+      const resolveSession = async (p: UnpostedCashPayment): Promise<DrawerChoice> => {
         const key = `${p.venueId}:${p.createdAt.toISOString()}`
         let windows = sessionCache.get(key)
         if (!windows) {
           windows = await this.d.findSessionsCovering(p.venueId, p.createdAt)
           sessionCache.set(key, windows)
         }
-        return windows[0]?.id ?? null
+        return elegirCajaParaReponer(p, windows)
       }
 
       const handle = async (p: UnpostedCashPayment, post: (p: UnpostedCashPayment, sid: string) => Promise<string>) => {
@@ -331,11 +385,22 @@ export class CashDrawerReconcilerJob {
             result.notDrawerCash += 1
             return
           }
-          const sessionId = await resolveSession(p)
-          if (!sessionId) {
+          const eleccion = await resolveSession(p)
+          if (eleccion.kind === 'OUTSIDE') {
             result.outsideDrawer += 1
             return
           }
+          if (eleccion.kind === 'AMBIGUOUS') {
+            result.ambiguous += 1
+            logger.warn('[CASH-DRAWER] reconcile: más de una caja cubre el cobro y ninguna es la ligada; no se adivina', {
+              paymentId: p.id,
+              venueId: p.venueId,
+              shiftId: p.shiftId ?? null,
+              candidates: eleccion.candidates,
+            })
+            return
+          }
+          const sessionId = eleccion.id
           const outcome = await post(p, sessionId)
           if (outcome === 'POSTED') {
             result.reposted += 1
@@ -372,7 +437,7 @@ export class CashDrawerReconcilerJob {
         })
       }
 
-      if (result.reposted || result.outsideDrawer || result.errors) {
+      if (result.reposted || result.outsideDrawer || result.ambiguous || result.errors) {
         logger.warn('💵 [CASH-DRAWER] reconcile', result)
       } else {
         logger.debug('💵 [CASH-DRAWER] reconcile: nada que reponer', result)

@@ -117,12 +117,14 @@ describe('buscarParejasAMedias — a quién se le pregunta y qué se descarta', 
 
     const { parejas, bloqueadas } = await buscarParejasAMedias(p, { limit: 25, since: DESDE })
 
-    // `endTime: null` es la definición de la casa de «turno vivo»: cubre OPEN y CLOSING, que es lo
-    // que usa `abrirTurnoDeCaja` para decidir si puede abrir otro.
+    // «Turno vivo» = `endTime: null` Y `status IN (OPEN, CLOSING)`: la MISMA definición que
+    // `turnoVivoWhere`, con la que `abrirTurnoDeCaja` decide si puede abrir otro. 🔴 Sin el filtro
+    // de estado (revisión del 5-sep-2026) un CLOSED con `endTime` nulo —anomalía de datos— contaba
+    // como «el negocio siguió» y la pareja se quedaba sin reparar y, tras el lookback, sin reportar.
     expect(p.shift.groupBy).toHaveBeenCalledWith(
       expect.objectContaining({
         by: ['venueId'],
-        where: { venueId: { in: [VENUE] }, endTime: null },
+        where: { venueId: { in: [VENUE] }, endTime: null, status: { in: ['OPEN', 'CLOSING'] } },
         orderBy: { venueId: 'asc' },
         take: 1,
       }),

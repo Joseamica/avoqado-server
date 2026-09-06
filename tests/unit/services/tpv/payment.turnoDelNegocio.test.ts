@@ -407,7 +407,8 @@ describe('fase 1 — el cobro cae en el turno abierto del NEGOCIO', () => {
 
     // El candidato se resuelve dentro de la misma tx que crea el Payment, por negocio.
     for (const call of (prisma.shift.findFirst as jest.Mock).mock.calls) {
-      expect(call[0].where).toEqual({ venueId: VENUE_ID, endTime: null })
+      // «Turno vivo» = `turnoVivoWhere`: `endTime` nulo Y estado OPEN/CLOSING (revisión 5-sep-2026).
+      expect(call[0].where).toEqual({ venueId: VENUE_ID, endTime: null, status: { in: ['OPEN', 'CLOSING'] } })
       expect(call[0].where).not.toHaveProperty('staffId')
     }
     for (const call of (prisma.shift.updateMany as jest.Mock).mock.calls) {

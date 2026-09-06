@@ -19,6 +19,10 @@ jest.mock('@/communication/sockets', () => ({
   emitToVenue: jest.fn(),
 }))
 jest.mock('@/services/shared/turnoDeCaja', () => ({
+  // `turnoVivoWhere` es la definición canónica de «turno vivo»; desde el 5-sep-2026 la usan también
+  // `paymentShiftClaim` y `posSyncShift`, así que un mock que enumera el módulo tiene que traerla.
+  turnoVivoWhere: (venueId: string) => ({ venueId, endTime: null, status: { in: ['OPEN', 'CLOSING'] } }),
+  ESTADOS_DE_TURNO_VIVO: ['OPEN', 'CLOSING'],
   abrirTurnoDeCaja: jest.fn(),
   cerrarTurnoDeCaja: jest.fn(),
   turnoAbiertoDelNegocio: jest.fn(),

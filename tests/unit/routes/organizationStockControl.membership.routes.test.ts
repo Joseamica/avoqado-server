@@ -45,9 +45,10 @@ function makeApp() {
 describe('organization stock-control active venue boundary', () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    // No es SUPERADMIN: debe probar el venue activo y después pasar por el
-    // middleware canónico `inventory:read` de la ruta.
-    prismaMock.staffVenue.findFirst.mockResolvedValue(null)
+    // No es SUPERADMIN (la primera consulta, `role: SUPERADMIN`, no encuentra nada): debe probar
+    // el venue activo, después el gate de ROL (`role: { in: [OWNER, ADMIN, MANAGER] }`, donde SÍ
+    // tiene membresía) y al final el middleware canónico `inventory:read` de la ruta.
+    prismaMock.staffVenue.findFirst.mockImplementation(async (args: any) => (args?.where?.role?.in ? ({ id: 'sv-owner' } as any) : null))
     prismaMock.venue.findUnique.mockResolvedValue({ organizationId: ORG_ID } as any)
   })
 

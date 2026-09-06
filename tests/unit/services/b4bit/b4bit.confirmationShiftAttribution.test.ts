@@ -163,7 +163,7 @@ describe('B4Bit — final shift attribution at confirmation', () => {
     await processWebhook(webhook())
 
     expect(mockPrisma.shift.findFirst).toHaveBeenCalledWith({
-      where: { venueId: VENUE_ID, endTime: null },
+      where: { venueId: VENUE_ID, endTime: null, status: { in: ['OPEN', 'CLOSING'] } },
       orderBy: { startTime: 'desc' },
       select: { id: true, status: true },
     })

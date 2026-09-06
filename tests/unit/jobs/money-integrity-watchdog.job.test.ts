@@ -67,6 +67,16 @@ describe('money-integrity-watchdog · la forma de las consultas', () => {
     expect(propinaSql).not.toMatch(/LEFT JOIN \(\s*SELECT "orderId"/)
   })
 
+  it('🔴 «sobrepago» compara contra la BASE CANÓNICA: max(0, subtotal − descuento) + cargo, sin IVA', () => {
+    // La fórmula a mano (subtotal − descuento + IVA + cargo, sin clamp) alertaba una cortesía total
+    // como SOBREPAGO de $300 con $0 cobrados y escondía sobrepagos reales hasta el importe del IVA.
+    // En México el precio ya trae el IVA: `taxAmount` no suma a lo que la cuenta debe.
+    const r = regla('SOBREPAGO')
+    expect(r).toContain(baseQueDebeCubrirseSql('o'))
+    expect(r).not.toMatch(/"taxAmount"/)
+    expect(r).not.toMatch(/o\.subtotal - o\."discountAmount"/)
+  })
+
   it('🔴 «orden pagada sin cobro» existe, exige dinero y sólo mira lo creado después de la limpieza', () => {
     const huerfanas = regla('ORDEN PAGADA SIN COBRO')
     expect(huerfanas).toContain(`o."createdAt" >= '${HUERFANAS_DESDE}'`)

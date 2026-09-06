@@ -3,6 +3,7 @@ import { Prisma, ShiftStatus } from '@prisma/client'
 
 import logger from '../../config/logger'
 import { isAutoClosedSession } from './cashDrawerAutoClose'
+import { ESTADOS_DE_TURNO_VIVO } from './turnoDeCaja'
 
 /**
  * LA PAREJA DEL CIERRE — cómo se repara un «gesto único» que murió a media operación.
@@ -310,9 +311,12 @@ export async function buscarParejasAMedias(db: LectorDeParejas, opciones: { limi
   if (filas.length === 0) return { escaneadas: 0, parejas: [], bloqueadas: [] }
 
   // 🔴 «¿El negocio siguió?» se PREGUNTA, no se deduce de las filas de arriba: el turno nuevo que
-  // reusa la gaveta huérfana no aparece en ellas (no está ligado a ninguna). `endTime: null` es la
-  // definición de turno vivo de la casa —cubre OPEN y CLOSING— y es la misma con la que
-  // `abrirTurnoDeCaja` decide si puede abrir otro.
+  // reusa la gaveta huérfana no aparece en ellas (no está ligado a ninguna). «Turno vivo» es
+  // `endTime: null` **Y** `status IN (OPEN, CLOSING)` — la MISMA definición que `turnoVivoWhere`,
+  // con la que `abrirTurnoDeCaja` decide si puede abrir otro. Sólo `endTime: null` (como estuvo
+  // hasta el 5-sep-2026) contaba también un CLOSED con `endTime` nulo —la anomalía que
+  // `sanarTurnosCerradosSinCierre` existe para curar— y marcaba EL_NEGOCIO_SIGUIO con un motivo
+  // falso: la pareja no se reparaba y, pasado el lookback, tampoco se reportaba.
   const venues = [...new Set(filas.map(f => f.venueId))]
   //
   // 🔴 `groupBy` y no el `distinct` de Prisma: sin `previewFeatures = ["nativeDistinct"]` —que este
@@ -322,7 +326,7 @@ export async function buscarParejasAMedias(db: LectorDeParejas, opciones: { limi
   // puede haber más grupos que negocios preguntados, así que acota sin poder esconder ninguno.
   const vivos = await db.shift.groupBy({
     by: ['venueId'],
-    where: { venueId: { in: venues }, endTime: null },
+    where: { venueId: { in: venues }, endTime: null, status: { in: [...ESTADOS_DE_TURNO_VIVO] } },
     orderBy: { venueId: 'asc' },
     take: venues.length,
   })

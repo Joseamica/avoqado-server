@@ -657,6 +657,8 @@ export async function settleOrder(
       total: true,
       remainingBalance: true,
       paymentStatus: true,
+      // Respaldo para la lealtad de una orden sin `OrderCustomer`: el cliente que la orden ya trae.
+      customer: { select: { id: true, firstName: true, lastName: true } },
     },
   })
 
@@ -689,6 +691,9 @@ export async function settleOrder(
   // cambio entre la relectura y la transición hace count=0 y no se cobra nada.
   let postingId: string | null = null
   let settlementPaymentId: string | null = null
+  // Base de venta SIN propina para la lealtad, leída DENTRO de la transacción: es la misma base
+  // que entregan los demás canales (`Math.max(0, total − propina)`).
+  let baseParaLealtad = 0
   const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
   const settledAmount = await prisma.$transaction(async tx => {
     await lockExistingOrderForPayment(tx, { venueId, orderId })
@@ -721,6 +726,7 @@ export async function settleOrder(
     const remainingByPayments = Math.max(0, Number((orderTotalSansTips - paidSum).toFixed(2)))
     const toSettle = Math.min(freshRemaining, remainingByPayments)
     if (toSettle <= 0) return null
+    baseParaLealtad = Math.max(0, orderTotalSansTips)
 
     // El CAS va amarrado a `version` Y a `remainingBalance`: cerca a los
     // escritores que sí incrementan version y a cualquier update ya visible.
@@ -737,6 +743,12 @@ export async function settleOrder(
         paidAmount: fresh.total,
         remainingBalance: 0,
         version: { increment: 1 },
+        // 🔴 Liquidar ES el momento en que la orden queda PAGADA: marca la elegibilidad de lealtad
+        // igual que la PAX y el efectivo móvil (revisión del 5-sep-2026). Sin esta columna el
+        // reconciliador (`loyalty-reconciliation.job`) nunca vería esta orden, y si la acreditación
+        // de abajo falla el sello se perdía para siempre — sin un solo error.
+        loyaltyEligibleAt: new Date(),
+        loyaltyStaffId: actorStaffId,
       },
     })
     if (transition.count === 0) {
@@ -840,6 +852,29 @@ export async function settleOrder(
       settledAmount: 0,
       message: 'Order has no pending balance to settle',
     }
+  }
+
+  // 🔴 Lealtad: la MISMA regla que todos los canales de cobro (`awardLoyaltyForPaidOrder`), después
+  // del commit y sin poder tumbar la liquidación. Este camino y `settleCustomerBalance` eran los dos
+  // que marcaban PAID sin sellar ni dar puntos: el fiado liquidado desde el dashboard —justo el
+  // cliente con más probabilidad de estar inscrito en la tarjeta— se quedaba sin su café gratis.
+  // Import dinámico como en `payCashOrder`: el helper importa de `customer.dashboard.service`.
+  try {
+    const { awardLoyaltyForPaidOrder } = await import('@/services/shared/loyaltyOnPaidOrder')
+    await awardLoyaltyForPaidOrder({
+      venueId,
+      orderId,
+      orderTotal: baseParaLealtad,
+      staffId: actorStaffId,
+      legacyCustomer: order.customer
+        ? { id: order.customer.id, firstName: order.customer.firstName, lastName: order.customer.lastName }
+        : null,
+    })
+  } catch (err) {
+    logger.error('[LOYALTY] Falló acreditar la lealtad al liquidar (la liquidación NO se afecta; el reconciliador reintenta)', {
+      orderId,
+      error: err instanceof Error ? err.message : String(err),
+    })
   }
 
   // Aplicar el vale ya commiteado. Nunca lanza hacia arriba: la liquidación

@@ -297,7 +297,7 @@ describe('recordFastPayment — la orden FAST cae en el turno de caja del NEGOCI
     expect(datosDelCobro().shiftId).toBe('shift-negocio')
     expect(prismaMock.shift.findFirst).not.toHaveBeenCalled()
     expect(tx.shiftFindFirst).toHaveBeenCalledWith({
-      where: { venueId: VENUE, endTime: null },
+      where: { venueId: VENUE, endTime: null, status: { in: ['OPEN', 'CLOSING'] } },
       orderBy: { startTime: 'desc' },
       select: { id: true, status: true },
     })

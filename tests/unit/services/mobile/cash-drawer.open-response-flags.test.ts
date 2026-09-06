@@ -19,6 +19,10 @@ jest.mock('@/communication/sockets', () => ({
   emitToVenue: jest.fn(),
 }))
 jest.mock('@/services/shared/turnoDeCaja', () => ({
+  // `turnoVivoWhere` es la definición canónica de «turno vivo»; desde el 5-sep-2026 la usan también
+  // `paymentShiftClaim` y `posSyncShift`, así que un mock que enumera el módulo tiene que traerla.
+  turnoVivoWhere: (venueId: string) => ({ venueId, endTime: null, status: { in: ['OPEN', 'CLOSING'] } }),
+  ESTADOS_DE_TURNO_VIVO: ['OPEN', 'CLOSING'],
   abrirTurnoDeCaja: jest.fn(),
   cerrarTurnoDeCaja: jest.fn(),
   turnoAbiertoDelNegocio: jest.fn(),
@@ -65,7 +69,13 @@ describe('POST /cash-drawer/open — cajaCreada / shiftCreado en la respuesta (P
 
   it('P1 — cuando el servidor LIGÓ una caja ya abierta, la respuesta trae cajaCreada:false (el POS no puede leer «abriste»)', async () => {
     abrirDevuelve({ cajaCreada: false, shiftCreado: true })
-    const r = await openSession({ venueId: VENUE, staffId: 'staff-yo', staffName: 'Yo Cajero', startingAmount: 2000, deviceName: 'Tablet-2' })
+    const r = await openSession({
+      venueId: VENUE,
+      staffId: 'staff-yo',
+      staffName: 'Yo Cajero',
+      startingAmount: 2000,
+      deviceName: 'Tablet-2',
+    })
     expect(r.cajaCreada).toBe(false)
     expect(r.shiftCreado).toBe(true)
     // Y devuelve la caja EXISTENTE, no una con el fondo que se tecleó: es lo que el aparato debe mostrar.
@@ -97,9 +107,9 @@ describe('POST /cash-drawer/open — cajaCreada / shiftCreado en la respuesta (P
   })
 
   it('REGRESIÓN — un fondo negativo sigue rechazándose ANTES de llamar a abrirTurnoDeCaja', async () => {
-    await expect(openSession({ venueId: VENUE, staffId: 'staff-yo', staffName: 'Yo Cajero', startingAmount: -1, deviceName: 'x' })).rejects.toThrow(
-      'El monto inicial no puede ser negativo',
-    )
+    await expect(
+      openSession({ venueId: VENUE, staffId: 'staff-yo', staffName: 'Yo Cajero', startingAmount: -1, deviceName: 'x' }),
+    ).rejects.toThrow('El monto inicial no puede ser negativo')
     expect(abrirTurnoDeCaja).not.toHaveBeenCalled()
   })
 })

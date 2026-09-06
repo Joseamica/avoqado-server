@@ -111,7 +111,9 @@ describe('Equipo de la organización — la respuesta no puede mentir', () => {
         staffOrgFixture(false, [{ id: VENUE_A, name: 'BAE CANDILES', active: true, pin: '1292' }]),
       ] as any)
 
-      const res = await request(server).get(`/dashboard/organizations/${ORG_ID}/team`).set(...header)
+      const res = await request(server)
+        .get(`/dashboard/organizations/${ORG_ID}/team`)
+        .set(...header)
 
       expect(res.status).toBe(200)
       const miembro = res.body.data[0]
@@ -126,7 +128,9 @@ describe('Equipo de la organización — la respuesta no puede mentir', () => {
         staffOrgFixture(true, [{ id: VENUE_A, name: 'BAE CANDILES', active: true, pin: '1292' }]),
       ] as any)
 
-      const res = await request(server).get(`/dashboard/organizations/${ORG_ID}/team`).set(...header)
+      const res = await request(server)
+        .get(`/dashboard/organizations/${ORG_ID}/team`)
+        .set(...header)
 
       expect(res.status).toBe(200)
       expect(res.body.data[0].status).toBe('ACTIVE')
@@ -141,7 +145,9 @@ describe('Equipo de la organización — la respuesta no puede mentir', () => {
         ]),
       ] as any)
 
-      const res = await request(server).get(`/dashboard/organizations/${ORG_ID}/team`).set(...header)
+      const res = await request(server)
+        .get(`/dashboard/organizations/${ORG_ID}/team`)
+        .set(...header)
 
       const venues = res.body.data[0].venues
       expect(venues).toHaveLength(2)
@@ -321,9 +327,7 @@ describe('Equipo de la organización — la respuesta no puede mentir', () => {
 
       expect(res.status).toBe(200)
       expect(res.body.data.removed).toBe(1)
-      expect(prismaMock.staffVenue.update).toHaveBeenCalledWith(
-        expect.objectContaining({ data: { active: false, pin: null } }),
-      )
+      expect(prismaMock.staffVenue.update).toHaveBeenCalledWith(expect.objectContaining({ data: { active: false, pin: null } }))
     })
   })
 })

@@ -86,8 +86,11 @@ describe('paymentShiftClaim — claim transaccional del turno para dinero captur
       incrementTotalOrders: true,
     })
 
+    // 🔴 El candidato es el turno VIVO (`turnoVivoWhere`): `endTime` nulo Y estado OPEN/CLOSING.
+    // Sin el filtro de estado un CLOSED con `endTime` nulo ganaba el `orderBy` y el cobro nacía
+    // sin turno (revisión del 5-sep-2026).
     expect(tx.shift.findFirst).toHaveBeenCalledWith({
-      where: { venueId: VENUE_ID, endTime: null },
+      where: { venueId: VENUE_ID, endTime: null, status: { in: ['OPEN', 'CLOSING'] } },
       orderBy: { startTime: 'desc' },
       select: { id: true, status: true },
     })
@@ -375,7 +378,7 @@ describe('paymentShiftClaim — claim transaccional del turno para reembolsos', 
     })
 
     expect(tx.shift.findFirst).toHaveBeenCalledWith({
-      where: { venueId: VENUE_ID, endTime: null },
+      where: { venueId: VENUE_ID, endTime: null, status: { in: ['OPEN', 'CLOSING'] } },
       orderBy: { startTime: 'desc' },
       select: { id: true, status: true },
     })

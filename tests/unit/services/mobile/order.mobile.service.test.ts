@@ -1153,7 +1153,7 @@ describe('cancelOrder — guard against live terminal charges', () => {
 
     expect(prismaMock.shift.findFirst).not.toHaveBeenCalled()
     expect(shiftFindFirst).toHaveBeenCalledWith({
-      where: { venueId: 'venue-1', endTime: null },
+      where: { venueId: 'venue-1', endTime: null, status: { in: ['OPEN', 'CLOSING'] } },
       orderBy: { startTime: 'desc' },
       select: { id: true, status: true },
     })

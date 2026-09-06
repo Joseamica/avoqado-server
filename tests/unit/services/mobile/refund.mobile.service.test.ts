@@ -164,7 +164,9 @@ describe('createRefund (móvil) — convención canónica de reembolso', () => {
       // 🔴 Fase 1 (2-sep-2026): el turno es del NEGOCIO. `staffId` YA NO va en el `where`
       // — filtrarlo sacaba de todo turno a quien no había abierto uno. Igualdad EXACTA,
       // no `objectContaining`: con él, volver a colar `staffId` seguiría pasando.
-      expect(prismaMock.shift.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { venueId: VENUE, endTime: null } }))
+      expect(prismaMock.shift.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { venueId: VENUE, endTime: null, status: { in: ['OPEN', 'CLOSING'] } } }),
+      )
       expect(createdPayment.shiftId).toBe('shift-1')
       expect(createdPayment.processorData).toMatchObject({ shiftBackfilled: true })
       expect(createdPayment.processorData.shiftAttributionStatus).toBeUndefined()

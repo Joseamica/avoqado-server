@@ -199,6 +199,11 @@ export function buildWatchdogSql(): { counts: string; details: string } {
         --    aceptando cobros — y remainingBalance = Math.max(0,...) los vuelve invisibles. Caso real:
         --    Mindform 2026-06-21/22, cuenta de $380 con $734 cobrados en 3 tarjetazos (2026-08-04).
         --    Se compara contra Payment.amount (SIN propina): la propina es dinero extra legítimo.
+        --    🔴 La «cuenta» es la BASE CANÓNICA (baseQueDebeCubrirseSql): max(0, subtotal − descuento)
+        --    + cargo por servicio, SIN impuesto — en México el precio ya lo trae, y taxAmount es
+        --    informativo. La fórmula a mano que vivió aquí hasta el 5-sep-2026 sumaba el IVA y no
+        --    clampaba: una cortesía total (descuento > subtotal, taxAmount negativo) salía como
+        --    SOBREPAGO de $300 con $0 cobrados, y un sobrepago real hasta el importe del IVA no se veía.
         SELECT 'SOBREPAGO', v.name, o.id,
                'cobrado=' || ROUND(pg.cobrado::numeric, 2) || ' cuenta=' || ROUND(pg.cuenta::numeric, 2) ||
                ' exceso=' || ROUND((pg.cobrado - pg.cuenta)::numeric, 2) || ' cobros=' || pg.n
@@ -206,7 +211,7 @@ export function buildWatchdogSql(): { counts: string; details: string } {
         JOIN "Venue" v ON v.id = o."venueId"
         JOIN LATERAL (
           SELECT SUM(p.amount) AS cobrado, COUNT(*) AS n,
-                 (o.subtotal - o."discountAmount" + o."taxAmount" + COALESCE(o."serviceChargeAmount", 0)) AS cuenta
+                 (${baseQueDebeCubrirseSql('o')}) AS cuenta
           FROM "Payment" p
           WHERE p."orderId" = o.id AND p.status = 'COMPLETED' AND p.type <> 'REFUND'
         ) pg ON TRUE

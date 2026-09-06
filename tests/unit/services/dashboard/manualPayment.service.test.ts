@@ -463,7 +463,7 @@ describe('manualPayment.service', () => {
       // Verifies the open-shift query is scoped by venue + endTime null
       expect(shiftFindFirst).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: expect.objectContaining({ venueId: VENUE_ID, endTime: null }),
+          where: expect.objectContaining({ venueId: VENUE_ID, endTime: null, status: { in: ['OPEN', 'CLOSING'] } }),
         }),
       )
       // Verifies payment is linked to that shift
@@ -1948,7 +1948,7 @@ describe('manualPayment.service', () => {
       // `staffId` seguiría pasando y la prueba dejaría de guardar lo que dice guardar.
       expect(shiftFindFirst).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { venueId: VENUE_ID, endTime: null },
+          where: { venueId: VENUE_ID, endTime: null, status: { in: ['OPEN', 'CLOSING'] } },
         }),
       )
     })

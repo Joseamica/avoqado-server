@@ -572,9 +572,7 @@ describe('syncEvents — durable drawer identity', () => {
 
     await syncEvents(VENUE, [event({ amount: 0.01 })] as any, null, STAFF)
 
-    expect(overShortEscrito(w.lockUpdateMany.mock.calls).toFixed(2)).toBe(
-      '100000000.00',
-    )
+    expect(overShortEscrito(w.lockUpdateMany.mock.calls).toFixed(2)).toBe('100000000.00')
     expect(w.shiftUpdateMany).not.toHaveBeenCalled()
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringContaining('LATE_SHIFT_RECONCILIATION_PENDING'),

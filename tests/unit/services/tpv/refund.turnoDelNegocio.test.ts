@@ -404,7 +404,7 @@ describe('fase 2 — el reembolso se ata al turno del NEGOCIO, no al que manda l
     expect(datosDelPagoCreado().shiftId).toBe('shift-negocio')
     // …y el turno se resolvió por NEGOCIO, nunca por persona ni por el cuerpo.
     for (const call of (prismaMock as any).shift.findFirst.mock.calls) {
-      expect(call[0].where).toEqual({ venueId: VENUE, endTime: null })
+      expect(call[0].where).toEqual({ venueId: VENUE, endTime: null, status: { in: ['OPEN', 'CLOSING'] } })
     }
     expect((prismaMock as any).activityLog.create).not.toHaveBeenCalled()
   })

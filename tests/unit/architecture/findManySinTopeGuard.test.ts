@@ -118,7 +118,6 @@ const INVENTARIO: Record<string, number> = {
   'src/services/legacy/mergedPayments.service.ts': 2,
   'src/services/mobile/areaTicket.mobile.service.ts': 1,
   'src/services/mobile/areaTicketV7.mobile.service.ts': 2,
-  'src/services/mobile/cash-drawer.mobile.service.ts': 1,
   'src/services/mobile/comp-item.mobile.service.ts': 2,
   'src/services/mobile/end-of-day.mobile.service.ts': 3,
   'src/services/mobile/kds.mobile.service.ts': 1,

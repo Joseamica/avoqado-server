@@ -1,6 +1,6 @@
 import prisma from '../../utils/prismaClient'
 import { ConflictError, NotFoundError } from '../../errors/AppError'
-import { UNICO_TURNO_ABIERTO, esChoqueDelUnico, type UnicoParcial } from '../shared/turnoDeCaja'
+import { UNICO_TURNO_ABIERTO, esChoqueDelUnico, turnoVivoWhere, type UnicoParcial } from '../shared/turnoDeCaja'
 import { lockShiftLifecycleForVenue } from '../shared/shiftLifecycleLock'
 import { Prisma, Shift, ShiftStatus, OriginSystem } from '@prisma/client'
 import logger from '../../config/logger'
@@ -58,8 +58,10 @@ async function findExactShift(db: ShiftLifecycleDb, venueId: string, externalId:
 }
 
 async function findActiveShiftForVenue(db: ShiftLifecycleDb, venueId: string): Promise<Pick<Shift, 'id' | 'status'> | null> {
+  // La definición de «turno vivo» vive UNA vez (`turnoVivoWhere`); aquí antes había una copia
+  // literal que el guard de `turnoDeCaja.guard.test.ts` no veía (sólo lee ese archivo).
   return db.shift.findFirst({
-    where: { venueId, endTime: null, status: { in: [ShiftStatus.OPEN, ShiftStatus.CLOSING] } },
+    where: turnoVivoWhere(venueId),
     orderBy: { startTime: 'desc' },
     select: { id: true, status: true },
   })
@@ -226,7 +228,13 @@ async function preparePosShiftLifecycle(
           },
           data: {
             startTime: finiteDateOr(mapped.startTime, current.startTime),
-            endTime: mapped.endTime ? finiteDateOr(mapped.endTime, current.endTime ?? capturedNow) : null,
+            // 🔴 Un turno OPEN NUNCA lleva `endTime` (revisión del 5-sep-2026). Antes se copiaba el
+            // `endTime` que mandara SoftRestaurant en un evento no-`closed`, y eso producía OPEN +
+            // `endTime`: el estado que ocupa el índice único parcial pero que `turnoVivoWhere` no ve,
+            // así que la siguiente creación chocaba (P2002) y el venue quedaba en 409 permanente hasta
+            // que alguien abriera caja desde una app. El `endTime` real lo pone SOLO el cierre
+            // (`finalizeClaimedPosShift`); el valor que vino del POS queda en `posRawData`.
+            endTime: null,
             startingCash: moneyOrZero(mapped.startingCash),
             endingCash: optionalMoney(mapped.endingCash),
             status: ShiftStatus.OPEN,

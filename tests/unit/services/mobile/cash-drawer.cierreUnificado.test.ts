@@ -21,6 +21,10 @@ jest.mock('@/config/logger', () => ({
 }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 jest.mock('@/services/shared/turnoDeCaja', () => ({
+  // `turnoVivoWhere` es la definición canónica de «turno vivo»; desde el 5-sep-2026 la usan también
+  // `paymentShiftClaim` y `posSyncShift`, así que un mock que enumera el módulo tiene que traerla.
+  turnoVivoWhere: (venueId: string) => ({ venueId, endTime: null, status: { in: ['OPEN', 'CLOSING'] } }),
+  ESTADOS_DE_TURNO_VIVO: ['OPEN', 'CLOSING'],
   __esModule: true,
   abrirTurnoDeCaja: jest.fn(),
   cerrarTurnoDeCaja: jest.fn(),
@@ -239,6 +243,33 @@ describe('cerrar la caja desde la tablet cierra el turno del negocio', () => {
     // Y se LEE de la sesión: si el `select` no lo trae, el servicio no puede saberlo.
     const select = (prismaMock as any).cashDrawerSession.findFirst.mock.calls[0][0].select
     expect(select).toMatchObject({ shiftId: true })
+  })
+
+  it('🔴 con la gaveta SIN liga, el turno que se manda es el que `asegurarLaLiga` acaba de escribir, no el null en memoria', async () => {
+    // Revisión del 5-sep-2026: `session` se lee ANTES de ligar y su `shiftId` se quedaba en null
+    // aunque la base ya dijera TURNO. Con null, la guarda «esta gaveta era de A y el abierto ahora
+    // es B» de `cerrarElTurnoDeLaGaveta` no dispara, y un relevo entre el commit de la gaveta y el
+    // cierre del turno le firmaba a B el conteo y el esperado de A.
+    mundo({ shiftId: TURNO }) // la fila RELEÍDA tras el cierre ya trae la liga
+    ;(prismaMock as any).cashDrawerSession.findFirst.mockResolvedValue(abierta({ shiftId: null }))
+
+    await cerrar()
+
+    expect(mockLigar).toHaveBeenCalledWith(expect.anything(), VENUE, TURNO, CAJA)
+    expect(mockCerrar.mock.calls[0][0].shiftIdDeLaGaveta).toBe(TURNO)
+  })
+
+  it('si la liga no se pudo escribir (otra gaveta ya tenía ese turno), viaja lo que la base diga: null', async () => {
+    // `asegurarLaLiga` devuelve false y NO escribe cuando el turno ya tiene otra gaveta; la fila
+    // releída sigue sin liga y el cierre no puede inventarle un turno. `null` aquí es honesto: deja
+    // a `cerrarTurnoDeCaja` sin pareja que cerrar, en vez de cerrar el de otro.
+    mundo({ shiftId: null })
+    ;(prismaMock as any).cashDrawerSession.findFirst.mockResolvedValue(abierta({ shiftId: null }))
+    mockLigar.mockResolvedValue(false as never)
+
+    await cerrar()
+
+    expect(mockCerrar.mock.calls[0][0].shiftIdDeLaGaveta).toBeNull()
   })
 
   it('🔴 un cierre encolado que llega tarde sigue recibiendo su 404 y NO cierra ningún turno', async () => {

@@ -2,6 +2,7 @@ import type { PrismaClient } from '@prisma/client'
 import { Prisma, ShiftStatus } from '@prisma/client'
 
 import logger from '../../config/logger'
+import { turnoVivoWhere } from './turnoDeCaja'
 
 export type CapturedPaymentChannel = 'recordOrderPayment' | 'recordFastPayment' | 'payCashOrder'
 export type RefundPaymentChannel = 'recordRefund' | 'issueRefund' | 'createRefund'
@@ -205,8 +206,13 @@ export async function claimShiftForCapturedPayment(
   tx: PaymentShiftTransaction,
   input: ClaimCapturedPaymentShiftInput,
 ): Promise<CapturedPaymentShiftClaim> {
+  // 🔴 El candidato es el turno VIVO de la casa (`turnoVivoWhere`: `endTime` nulo Y estado OPEN o
+  // CLOSING), no cualquier fila con `endTime` nulo. Con el predicado a secas (hasta el 5-sep-2026)
+  // un CLOSED con `endTime` nulo más reciente que el OPEN —anomalía que sólo se sana al ABRIR caja—
+  // ganaba el `orderBy` y este claim devolvía SHIFT_NOT_OPEN: el Payment nacía sin turno mientras
+  // la Order sí lo recibía por `turnoAbiertoDelNegocio`, y nadie re-estampa ese `shiftId` después.
   const candidate = await tx.shift.findFirst({
-    where: { venueId: input.venueId, endTime: null },
+    where: turnoVivoWhere(input.venueId),
     orderBy: { startTime: 'desc' },
     select: { id: true, status: true },
   })
@@ -286,8 +292,10 @@ interface ClaimRefundShiftInput {
  * decremento ocurre en ese mismo CAS y nunca reescribe un turno firmado.
  */
 export async function claimShiftForRefund(tx: PaymentShiftTransaction, input: ClaimRefundShiftInput): Promise<CapturedPaymentShiftClaim> {
+  // Mismo predicado que el cobro: el turno VIVO (OPEN o CLOSING, `endTime` nulo). CLOSING sigue
+  // entrando a propósito para poder explicar por qué el dinero quedó fuera del corte; CLOSED no.
   const candidate = await tx.shift.findFirst({
-    where: { venueId: input.venueId, endTime: null },
+    where: turnoVivoWhere(input.venueId),
     orderBy: { startTime: 'desc' },
     select: { id: true, status: true },
   })

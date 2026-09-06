@@ -29,8 +29,10 @@ jest.mock('@/services/shared/cashDrawerPosting', () => ({
   cashRefundDrawerLocalId: jest.fn((paymentId: string) => `srv-refund:${paymentId}`),
 }))
 
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { logAction } from '@/services/dashboard/activity-log.service'
-import { CashDrawerReconcilerJob, defaults } from '@/jobs/cash-drawer-reconciler.job'
+import { CashDrawerReconcilerJob, defaults, elegirCajaParaReponer } from '@/jobs/cash-drawer-reconciler.job'
 import { prismaMock } from '../../__helpers__/setup'
 import { postCashRefundToDrawer } from '@/services/shared/cashDrawerPosting'
 
@@ -78,7 +80,82 @@ function makeJob(over: Record<string, unknown> = {}) {
 
 beforeEach(() => jest.clearAllMocks())
 
+describe('CashDrawerReconcilerJob — la forma del SQL', () => {
+  const fuente = readFileSync(join(__dirname, '../../../src/jobs/cash-drawer-reconciler.job.ts'), 'utf8')
+
+  it('🔴 ningún NOW() pelado: las columnas son timestamp sin zona con UTC dentro y NOW() es timestamptz', () => {
+    // `COALESCE(s."closedAt", NOW())` resolvía a timestamptz y Postgres reinterpretaba `createdAt`
+    // en la zona de la SESIÓN: en local (México) un pago de hace una hora quedaba FUERA de la caja
+    // abierta, y la consulta de ventas dejó de decir lo mismo que la de reembolsos (5-sep-2026).
+    // Regla del repo (critical-warnings.md): `(NOW() AT TIME ZONE 'UTC')` o, mejor, sin NOW().
+    const sinComentarios = fuente
+      .replace(/^\s*--.*$/gm, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '')
+    expect(sinComentarios).not.toMatch(/\bNOW\(\)/)
+  })
+
+  it('la ventana de VENTAS y la de REEMBOLSOS acotan la caja abierta con la misma forma', () => {
+    const formas = fuente.match(/\(s\."closedAt" IS NULL OR p\."createdAt" <= s\."closedAt"\)/g) ?? []
+    expect(formas).toHaveLength(2)
+  })
+})
+
+describe('elegirCajaParaReponer — a qué caja va un cobro cuando más de una cubre el instante', () => {
+  // Con la hora REAL del aparato (N1) dos cajas del mismo venue pueden traslaparse: cierre a mano a
+  // las 15:00 y reapertura a las 15:05 con `openedAt` 14:00. La vieja regla «la más nueva» movía un
+  // cobro de las 14:30 a la caja nueva aunque su `shiftId` apuntara al turno de la vieja.
+  const vieja = sesion({ id: 's-vieja', openedAt: t('2026-08-20T08:00:00Z'), closedAt: t('2026-08-20T15:00:00Z'), shiftId: 'turno-viejo' })
+  const nueva = sesion({ id: 's-nueva', openedAt: t('2026-08-20T14:00:00Z'), closedAt: null, shiftId: 'turno-nuevo' })
+
+  it('🔴 con dos cajas traslapadas gana la LIGADA al turno del cobro, no la más nueva', () => {
+    expect(elegirCajaParaReponer({ shiftId: 'turno-viejo' }, [nueva, vieja])).toEqual({ kind: 'SESSION', id: 's-vieja' })
+  })
+
+  it('🔴 con dos cajas traslapadas y un cobro SIN turno no se adivina: es ambiguo', () => {
+    expect(elegirCajaParaReponer({ shiftId: null }, [nueva, vieja])).toEqual({ kind: 'AMBIGUOUS', candidates: ['s-nueva', 's-vieja'] })
+  })
+
+  it('una sola caja sin liga (anterior a la apertura unificada) sí recibe el cobro, traiga turno o no', () => {
+    const legacy = sesion({ id: 's-legacy', shiftId: null })
+    expect(elegirCajaParaReponer({ shiftId: 'turno-x' }, [legacy])).toEqual({ kind: 'SESSION', id: 's-legacy' })
+    expect(elegirCajaParaReponer({ shiftId: null }, [legacy])).toEqual({ kind: 'SESSION', id: 's-legacy' })
+  })
+
+  it('🔴 una sola caja ligada a OTRO turno es una contradicción, no «la única candidata»', () => {
+    expect(elegirCajaParaReponer({ shiftId: 'turno-viejo' }, [nueva])).toEqual({ kind: 'AMBIGUOUS', candidates: ['s-nueva'] })
+  })
+
+  it('sin ninguna caja que cubra el instante, sigue siendo «fuera de caja»', () => {
+    expect(elegirCajaParaReponer({ shiftId: 'turno-viejo' }, [])).toEqual({ kind: 'OUTSIDE' })
+  })
+})
+
 describe('CashDrawerReconcilerJob.runNow', () => {
+  it('🔴 un cobro ambiguo NO se repone y se cuenta aparte de «fuera de caja»', async () => {
+    const { job, deps } = makeJob({
+      findUnpostedCashPayments: jest.fn().mockResolvedValue([pago({ shiftId: null })]),
+      findSessionsCovering: jest
+        .fn()
+        .mockResolvedValue([sesion({ id: 's-nueva', shiftId: 'turno-nuevo' }), sesion({ id: 's-vieja', shiftId: 'turno-viejo' })]),
+    })
+    const r = await job.runNow()
+    expect(deps.postSale).not.toHaveBeenCalled()
+    expect(r).toMatchObject({ scanned: 1, reposted: 0, outsideDrawer: 0, ambiguous: 1 })
+  })
+
+  it('🔴 el cobro con turno se repone en la caja LIGADA aunque no sea la más nueva', async () => {
+    const { job, deps } = makeJob({
+      findUnpostedCashPayments: jest.fn().mockResolvedValue([pago({ shiftId: 'turno-viejo' })]),
+      findSessionsCovering: jest
+        .fn()
+        .mockResolvedValue([sesion({ id: 's-nueva', shiftId: 'turno-nuevo' }), sesion({ id: 's-vieja', shiftId: 'turno-viejo' })]),
+    })
+    const r = await job.runNow()
+    expect(deps.postSale).toHaveBeenCalledWith(expect.objectContaining({ id: 'pay-1' }), 's-vieja')
+    expect(r).toMatchObject({ reposted: 1, ambiguous: 0 })
+  })
+
   it('🔴 repone una venta en efectivo sin evento que ocurrió DENTRO de una sesión', async () => {
     const { job, deps } = makeJob({
       findUnpostedCashPayments: jest.fn().mockResolvedValue([pago()]),
