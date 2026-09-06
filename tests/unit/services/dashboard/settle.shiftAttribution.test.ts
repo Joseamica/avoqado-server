@@ -13,7 +13,9 @@ jest.mock('@/services/inventory/inventoryPosting.service', () => ({
   applySalePosting: jest.fn().mockResolvedValue(undefined),
 }))
 jest.mock('@/services/referrals/referralQualification.service', () => ({ onOrderPaid: jest.fn() }))
-jest.mock('@/services/shared/loyaltyOnPaidOrder', () => ({ awardLoyaltyForPaidOrder: jest.fn().mockResolvedValue({ complete: true, errors: [] }) }))
+jest.mock('@/services/shared/loyaltyOnPaidOrder', () => ({
+  awardLoyaltyForPaidOrder: jest.fn().mockResolvedValue({ complete: true, errors: [] }),
+}))
 jest.mock('@/services/shared/cashDrawerPosting', () => ({
   postCashSaleToDrawer: jest.fn().mockResolvedValue('POSTED'),
   cashSaleDrawerLocalId: (id: string) => `pay:${id}`,

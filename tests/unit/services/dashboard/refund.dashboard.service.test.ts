@@ -772,7 +772,9 @@ describe('refund.dashboard.service', () => {
 
       // (i) el turno se busca por NEGOCIO. Igualdad EXACTA del `where`, no `objectContaining`:
       //     con él, volver a colar `staffId` seguiría pasando.
-      expect(prismaMock.shift.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { venueId: 'venue-1', endTime: null, status: { in: ['OPEN', 'CLOSING'] } } }))
+      expect(prismaMock.shift.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { venueId: 'venue-1', endTime: null, status: { in: ['OPEN', 'CLOSING'] } } }),
+      )
 
       // (ii) el Payment del reembolso se ata al turno de HOY, no al del cobro original.
       const data = prismaMock.payment.create.mock.calls.at(-1)![0].data
