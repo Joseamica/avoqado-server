@@ -159,7 +159,12 @@ describe('live-demo cleanup venue-status serialization', () => {
       const updating = updater.query(`UPDATE "Venue" SET status = 'ACTIVE' WHERE id = $1`, [cleanupFirstVenueId])
       await waitForBlockedActivity(observer, { applicationName: updaterName })
       releaseLock()
-      await expect(deleting).resolves.toBeUndefined()
+      // El borrado devuelve CUÁNTAS filas se llevó, ya no `undefined`: la limpieza de demos
+      // estuvo días fallando en producción y su log decía «Cleaned 0 sessions» sin revelar
+      // nunca si había borrado 3 filas o 3 000 — esa cifra era la que faltaba para
+      // diagnosticarla. Exigir `> 0` conserva lo que esta línea siempre guardó (que la
+      // limpieza no lanzó) y encima atrapa una que diga haber terminado sin borrar nada.
+      await expect(deleting).resolves.toBeGreaterThan(0)
       await expect(updating).resolves.toMatchObject({ rowCount: 0 })
       await expect(observer.query(`SELECT id FROM "Venue" WHERE id = $1`, [cleanupFirstVenueId])).resolves.toMatchObject({ rowCount: 0 })
       await expect(observer.query(`SELECT id FROM "Staff" WHERE id = $1`, [cleanupFirstStaffId])).resolves.toMatchObject({ rowCount: 0 })
