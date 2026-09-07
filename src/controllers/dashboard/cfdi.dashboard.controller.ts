@@ -17,6 +17,7 @@ import prisma from '@/utils/prismaClient'
 import { issueCfdiForOrder, cancelCfdi, getCfdiStatus, listCfdisForVenue } from '@/services/fiscal/cfdi.service'
 import { emitRefundCreditNote, getRefundCreditNoteStatus } from '@/services/fiscal/cfdiCreditNote.service'
 import { searchSatCatalog } from '@/services/fiscal/satCatalogLookup.service'
+import { SatCatalogUnavailableError } from '@/errors/AppError'
 import { issueGlobalForEmisor } from '@/services/fiscal/cfdiGlobal.service'
 import { upsertEmisor, upsertMerchantFiscalConfig, getFiscalConfig } from '@/services/fiscal/fiscalConfig.service'
 import { provisionEmisor, uploadEmisorCsd, getEmisorProviderStatus } from '@/services/fiscal/fiscalOnboarding.service'
@@ -693,16 +694,33 @@ export async function getEmisorProviderStatusController(req: Request, res: Respo
  * permission, no new permission required (spec §20.3 add-on #2).
  */
 export async function searchSatCatalogController(req: Request, res: Response): Promise<void> {
-  const { type, q } = req.query as { type: 'product' | 'unit'; q?: string }
+  const { venueId } = req.params as { venueId: string }
+  const { type, q = '' } = req.query as { type: 'product' | 'unit'; q?: string }
 
   try {
-    const result = await searchSatCatalog({ type, q })
+    // `q` vacía = el picker recién abierto, no una búsqueda por cadena vacía: se manda
+    // `undefined` para que el servicio pida la primera página del catálogo.
+    const result = await searchSatCatalog({ type, q: q || undefined, venueId })
     res.status(200).json(result)
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
-    logger.error(`[cfdi.controller] searchSatCatalog failed type=${type} q="${q}": ${message}`)
+    logger.error(`[cfdi.controller] searchSatCatalog failed venue=${venueId} type=${type} q="${q}": ${message}`)
 
-    // Surface facturapi / catalog provider errors as 502 so the client knows it's upstream
+    // La clasificación la hace el SERVICIO, que es quien sabe a quién llamó y con qué llave.
+    // El status viene del error (400 falta configuración · 502 falló el proveedor); el texto
+    // que ve el usuario lo pone aquí, para no filtrarle el mensaje crudo de Facturapi.
+    if (err instanceof SatCatalogUnavailableError) {
+      const mensaje =
+        err.reason === 'NO_KEY'
+          ? err.message // ya está escrito para el usuario y dice qué configurar
+          : 'No se pudo consultar el catálogo del SAT. Vuelve a intentarlo en unos minutos.'
+      res.status(err.statusCode).json({ error: mensaje, code: err.code })
+      return
+    }
+
+    // Red heredada: sólo puede SUBIR un 500 a 502, nunca al revés. Clasificar por el texto del
+    // error es justo lo que produjo el incidente del 2026-09-07 («La API key proporcionada no es
+    // válida» no casa /facturapi|catalog/i y salía como 500) — lo nuevo va por el error tipado.
     if (/facturapi|catalog/i.test(message)) {
       res.status(502).json({ error: 'No se pudo consultar el catálogo SAT' })
       return

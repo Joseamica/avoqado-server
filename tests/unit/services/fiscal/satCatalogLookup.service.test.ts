@@ -2,7 +2,26 @@
 //
 // Unit tests for searchSatCatalog — always use injected DI deps (no real HTTP calls).
 
-import { searchSatCatalog, SatCatalogDeps } from '../../../../src/services/fiscal/satCatalogLookup.service'
+import {
+  searchSatCatalog,
+  resolveCatalogApiKey,
+  defaultKeyDeps,
+  SatCatalogUnavailableError,
+  SatCatalogDeps,
+  SatCatalogKeyDeps,
+} from '../../../../src/services/fiscal/satCatalogLookup.service'
+import prisma from '../../../../src/utils/prismaClient'
+import { decryptProviderKey } from '../../../../src/services/fiscal/fiscalKey.service'
+import { env } from '../../../../src/config/env'
+
+jest.mock('../../../../src/utils/prismaClient', () => ({
+  __esModule: true,
+  default: { fiscalEmisor: { findFirst: jest.fn() } },
+}))
+
+jest.mock('../../../../src/services/fiscal/fiscalKey.service', () => ({
+  decryptProviderKey: jest.fn(),
+}))
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -22,7 +41,7 @@ describe('searchSatCatalog — type=product', () => {
       searchProducts: jest.fn().mockResolvedValue({ data: [{ key: '90101500', description: 'Servicio de restaurante' }] }),
     })
 
-    await searchSatCatalog({ type: 'product', q: 'restaurante' }, deps)
+    await searchSatCatalog({ type: 'product', q: 'restaurante', venueId: 'v1' }, deps)
 
     expect(deps.searchProducts).toHaveBeenCalledWith('restaurante')
     expect(deps.searchUnits).not.toHaveBeenCalled()
@@ -38,7 +57,7 @@ describe('searchSatCatalog — type=product', () => {
       }),
     })
 
-    const result = await searchSatCatalog({ type: 'product', q: 'servicio' }, deps)
+    const result = await searchSatCatalog({ type: 'product', q: 'servicio', venueId: 'v1' }, deps)
 
     expect(result).toEqual({
       results: [
@@ -53,7 +72,7 @@ describe('searchSatCatalog — type=product', () => {
       searchProducts: jest.fn().mockResolvedValue([{ key: '90101500', description: 'Restaurante' }]),
     })
 
-    const result = await searchSatCatalog({ type: 'product', q: 'res' }, deps)
+    const result = await searchSatCatalog({ type: 'product', q: 'res', venueId: 'v1' }, deps)
 
     expect(result.results).toHaveLength(1)
     expect(result.results[0]).toEqual({ key: '90101500', description: 'Restaurante' })
@@ -64,7 +83,7 @@ describe('searchSatCatalog — type=product', () => {
       searchProducts: jest.fn().mockResolvedValue({ data: [] }),
     })
 
-    const result = await searchSatCatalog({ type: 'product', q: 'zzznomatch' }, deps)
+    const result = await searchSatCatalog({ type: 'product', q: 'zzznomatch', venueId: 'v1' }, deps)
 
     expect(result).toEqual({ results: [] })
   })
@@ -78,7 +97,7 @@ describe('searchSatCatalog — type=unit', () => {
       searchUnits: jest.fn().mockResolvedValue({ data: [{ key: 'E48', name: 'Unidad de servicio' }] }),
     })
 
-    await searchSatCatalog({ type: 'unit', q: 'servicio' }, deps)
+    await searchSatCatalog({ type: 'unit', q: 'servicio', venueId: 'v1' }, deps)
 
     expect(deps.searchUnits).toHaveBeenCalledWith('servicio')
     expect(deps.searchProducts).not.toHaveBeenCalled()
@@ -94,7 +113,7 @@ describe('searchSatCatalog — type=unit', () => {
       }),
     })
 
-    const result = await searchSatCatalog({ type: 'unit', q: 'pieza' }, deps)
+    const result = await searchSatCatalog({ type: 'unit', q: 'pieza', venueId: 'v1' }, deps)
 
     expect(result).toEqual({
       results: [
@@ -109,7 +128,7 @@ describe('searchSatCatalog — type=unit', () => {
       searchUnits: jest.fn().mockResolvedValue([{ key: 'H87', name: 'Pieza' }]),
     })
 
-    const result = await searchSatCatalog({ type: 'unit', q: 'p' }, deps)
+    const result = await searchSatCatalog({ type: 'unit', q: 'p', venueId: 'v1' }, deps)
 
     expect(result.results).toHaveLength(1)
     expect(result.results[0]).toEqual({ key: 'H87', description: 'Pieza' })
@@ -120,7 +139,7 @@ describe('searchSatCatalog — type=unit', () => {
       searchUnits: jest.fn().mockResolvedValue({ data: [{ key: 'H87', description: 'Pieza (fallback)' }] }),
     })
 
-    const result = await searchSatCatalog({ type: 'unit', q: 'pieza' }, deps)
+    const result = await searchSatCatalog({ type: 'unit', q: 'pieza', venueId: 'v1' }, deps)
 
     expect(result.results[0]).toEqual({ key: 'H87', description: 'Pieza (fallback)' })
   })
@@ -130,7 +149,7 @@ describe('searchSatCatalog — type=unit', () => {
       searchUnits: jest.fn().mockResolvedValue({ data: [] }),
     })
 
-    const result = await searchSatCatalog({ type: 'unit', q: 'zzz' }, deps)
+    const result = await searchSatCatalog({ type: 'unit', q: 'zzz', venueId: 'v1' }, deps)
 
     expect(result).toEqual({ results: [] })
   })
@@ -147,7 +166,7 @@ describe('searchSatCatalog — q omitted (default first page)', () => {
       searchProducts: jest.fn().mockResolvedValue({ data: [{ key: '01010101', description: 'Genérico' }] }),
     })
 
-    const result = await searchSatCatalog({ type: 'product' }, deps)
+    const result = await searchSatCatalog({ type: 'product', venueId: 'v1' }, deps)
 
     expect(deps.searchProducts).toHaveBeenCalledWith(undefined)
     expect(result.results).toEqual([{ key: '01010101', description: 'Genérico' }])
@@ -158,7 +177,7 @@ describe('searchSatCatalog — q omitted (default first page)', () => {
       searchUnits: jest.fn().mockResolvedValue({ data: [{ key: 'H87', name: 'Pieza' }] }),
     })
 
-    const result = await searchSatCatalog({ type: 'unit' }, deps)
+    const result = await searchSatCatalog({ type: 'unit', venueId: 'v1' }, deps)
 
     expect(deps.searchUnits).toHaveBeenCalledWith(undefined)
     expect(result.results).toEqual([{ key: 'H87', description: 'Pieza' }])
@@ -193,7 +212,7 @@ describe('searchSatCatalog — error handling', () => {
       searchProducts: jest.fn().mockRejectedValue(new Error('facturapi network timeout')),
     })
 
-    await expect(searchSatCatalog({ type: 'product', q: 'any' }, deps)).rejects.toThrow('facturapi network timeout')
+    await expect(searchSatCatalog({ type: 'product', q: 'any', venueId: 'v1' }, deps)).rejects.toThrow('facturapi network timeout')
   })
 
   it('propagates errors thrown by searchUnits', async () => {
@@ -201,6 +220,171 @@ describe('searchSatCatalog — error handling', () => {
       searchUnits: jest.fn().mockRejectedValue(new Error('catalog service unavailable')),
     })
 
-    await expect(searchSatCatalog({ type: 'unit', q: 'any' }, deps)).rejects.toThrow('catalog service unavailable')
+    await expect(searchSatCatalog({ type: 'unit', q: 'any', venueId: 'v1' }, deps)).rejects.toThrow('catalog service unavailable')
+  })
+})
+
+// ─── Tests: resolución de la llave (regresión de producción, 2026-09-07) ──────
+//
+// El picker de claves SAT respondía 500 «La API key proporcionada no es válida»
+// en producción (Testarudo Cafe, OWNER). Causa: el servicio construía el cliente
+// con FACTURAPI_USER_KEY, que es la llave de CUENTA (sk_user_) — sirve para crear
+// organizaciones y administrar llaves, NO para consultar recursos. Los endpoints
+// de catálogo de Facturapi sólo aceptan SecretLiveKey / SecretTestKey, o sea llaves
+// de ORGANIZACIÓN. La llave test (sk_test_) también es de organización, así que sí
+// autoriza catálogos y sirve de respaldo.
+
+function makeKeyDeps(overrides: Partial<SatCatalogKeyDeps> = {}): SatCatalogKeyDeps {
+  return {
+    findVenueOrgKeyEnc: jest.fn().mockResolvedValue(null),
+    decrypt: jest.fn((enc: string) => `descifrada:${enc}`),
+    testKey: jest.fn().mockReturnValue(undefined),
+    ...overrides,
+  }
+}
+
+describe('resolveCatalogApiKey — orden de resolución', () => {
+  it('usa la llave de ORGANIZACIÓN del emisor del venue cuando existe', async () => {
+    const deps = makeKeyDeps({
+      findVenueOrgKeyEnc: jest.fn().mockResolvedValue('ENC_DEL_VENUE'),
+      testKey: jest.fn().mockReturnValue('sk_test_de_respaldo'),
+    })
+
+    const key = await resolveCatalogApiKey('venue-1', deps)
+
+    expect(key).toBe('descifrada:ENC_DEL_VENUE')
+    expect(deps.findVenueOrgKeyEnc).toHaveBeenCalledWith('venue-1')
+    expect(deps.testKey).not.toHaveBeenCalled()
+  })
+
+  it('cae a la llave de PRUEBAS cuando el venue no tiene emisor FACTURAPI con llave', async () => {
+    const deps = makeKeyDeps({
+      findVenueOrgKeyEnc: jest.fn().mockResolvedValue(null),
+      testKey: jest.fn().mockReturnValue('sk_test_de_respaldo'),
+    })
+
+    await expect(resolveCatalogApiKey('venue-1', deps)).resolves.toBe('sk_test_de_respaldo')
+  })
+
+  it('cae a la llave de PRUEBAS cuando el descifrado truena (llave de cifrado rotada)', async () => {
+    const deps = makeKeyDeps({
+      findVenueOrgKeyEnc: jest.fn().mockResolvedValue('ENC_CORRUPTA'),
+      decrypt: jest.fn(() => {
+        throw new Error('bad decrypt')
+      }),
+      testKey: jest.fn().mockReturnValue('sk_test_de_respaldo'),
+    })
+
+    await expect(resolveCatalogApiKey('venue-1', deps)).resolves.toBe('sk_test_de_respaldo')
+  })
+
+  it('sin llave del venue y sin llave de pruebas lanza NO_KEY con un mensaje que dice qué falta', async () => {
+    const deps = makeKeyDeps()
+
+    const err = await resolveCatalogApiKey('venue-1', deps).catch(e => e)
+
+    expect(err).toBeInstanceOf(SatCatalogUnavailableError)
+    expect(err.reason).toBe('NO_KEY')
+    expect(err.message).toMatch(/emisor fiscal/i)
+  })
+
+  it('NUNCA devuelve la llave de CUENTA (FACTURAPI_USER_KEY) — los catálogos la rechazan', async () => {
+    const anterior = { user: env.FACTURAPI_USER_KEY, test: env.FACTURAPI_TEST_KEY }
+    try {
+      env.FACTURAPI_USER_KEY = 'sk_user_NO_DEBE_USARSE'
+      env.FACTURAPI_TEST_KEY = undefined
+      ;(prisma.fiscalEmisor.findFirst as jest.Mock).mockResolvedValue(null)
+
+      // Con las deps REALES: sin emisor y sin llave de pruebas debe FALLAR,
+      // nunca caer en la llave de cuenta.
+      const err = await resolveCatalogApiKey('venue-1', defaultKeyDeps()).catch(e => e)
+      expect(err).toBeInstanceOf(SatCatalogUnavailableError)
+      expect(err.reason).toBe('NO_KEY')
+      expect(String(err.message)).not.toContain('sk_user_')
+
+      // Y con llave de pruebas disponible, gana la de pruebas (de organización).
+      env.FACTURAPI_TEST_KEY = 'sk_test_de_respaldo'
+      await expect(resolveCatalogApiKey('venue-1', defaultKeyDeps())).resolves.toBe('sk_test_de_respaldo')
+    } finally {
+      env.FACTURAPI_USER_KEY = anterior.user
+      env.FACTURAPI_TEST_KEY = anterior.test
+    }
+  })
+})
+
+describe('defaultKeyDeps — FORMA de la consulta del emisor', () => {
+  it('pide el emisor FACTURAPI del venue QUE YA TIENE llave, el más antiguo', async () => {
+    ;(prisma.fiscalEmisor.findFirst as jest.Mock).mockResolvedValue({ providerKeyEnc: 'ENC' })
+
+    await defaultKeyDeps().findVenueOrgKeyEnc('venue-1')
+
+    expect(prisma.fiscalEmisor.findFirst).toHaveBeenCalledWith({
+      where: { venueId: 'venue-1', provider: 'FACTURAPI', providerKeyEnc: { not: null } },
+      orderBy: { createdAt: 'asc' },
+      select: { providerKeyEnc: true },
+    })
+  })
+
+  it('devuelve null cuando el venue no tiene emisor FACTURAPI con llave', async () => {
+    ;(prisma.fiscalEmisor.findFirst as jest.Mock).mockResolvedValue(null)
+
+    await expect(defaultKeyDeps().findVenueOrgKeyEnc('venue-1')).resolves.toBeNull()
+  })
+
+  it('descifra con el MISMO helper que usa el resto del carril fiscal', () => {
+    ;(decryptProviderKey as jest.Mock).mockReturnValue('sk_live_org')
+
+    expect(defaultKeyDeps().decrypt('ENC')).toBe('sk_live_org')
+    expect(decryptProviderKey).toHaveBeenCalledWith('ENC')
+  })
+})
+
+// ─── Tests: el fallo del proveedor sale TIPADO, no adivinado por su texto ─────
+//
+// El 500 de producción salió porque el controlador clasificaba por expresión
+// regular sobre el mensaje (/facturapi|catalog/i) y «La API key proporcionada no
+// es válida» no la casa. La clasificación vive ahora en el servicio, que es quien
+// sabe a quién llamó.
+
+describe('searchSatCatalog — clasifica los fallos del proveedor', () => {
+  it('envuelve el rechazo de llave de Facturapi como PROVIDER_ERROR, conservando el mensaje original', async () => {
+    const deps = makeDeps({
+      searchProducts: jest.fn().mockRejectedValue(new Error('La API key proporcionada no es válida')),
+    })
+
+    const err = await searchSatCatalog({ type: 'product', q: 'cafe', venueId: 'v1' }, deps).catch(e => e)
+
+    expect(err).toBeInstanceOf(SatCatalogUnavailableError)
+    expect(err.reason).toBe('PROVIDER_ERROR')
+    expect(err.message).toContain('La API key proporcionada no es válida')
+  })
+
+  it('envuelve también los fallos de unidades', async () => {
+    const deps = makeDeps({
+      searchUnits: jest.fn().mockRejectedValue(new Error('socket hang up')),
+    })
+
+    const err = await searchSatCatalog({ type: 'unit', q: 'pieza', venueId: 'v1' }, deps).catch(e => e)
+
+    expect(err).toBeInstanceOf(SatCatalogUnavailableError)
+    expect(err.reason).toBe('PROVIDER_ERROR')
+  })
+})
+
+// ─── Guarda estática ──────────────────────────────────────────────────────────
+
+describe('guarda: el catálogo no puede volver a la llave de cuenta', () => {
+  it('el servicio NO menciona FACTURAPI_USER_KEY', () => {
+    const fuente = require('fs').readFileSync(
+      require('path').join(__dirname, '../../../../src/services/fiscal/satCatalogLookup.service.ts'),
+      'utf8',
+    )
+
+    // Aparece sólo en el comentario que explica por qué NO se usa; nunca leída.
+    const lineasQueLaLeen = fuente
+      .split('\n')
+      .filter((l: string) => l.includes('FACTURAPI_USER_KEY') && !l.trimStart().startsWith('*') && !l.trimStart().startsWith('//'))
+
+    expect(lineasQueLaLeen).toEqual([])
   })
 })

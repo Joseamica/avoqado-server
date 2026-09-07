@@ -89,6 +89,31 @@ export class PaymentOutcomeUnknownError extends AppError {
   }
 }
 
+/**
+ * El catálogo del SAT (ClaveProdServ / ClaveUnidad) no se pudo consultar. Dos causas
+ * con DOS códigos distintos, porque el arreglo de cada una es distinto:
+ *
+ *  - `PROVIDER_ERROR` → **502**: Facturapi falló o rechazó la llamada. Reintentar puede servir.
+ *  - `NO_KEY` → **400**: a este negocio le falta el emisor fiscal (o su llave de organización).
+ *    Reintentar NO sirve: hay que configurar la facturación. Mismo criterio que la exportación
+ *    de gastos (`accounting.export.controller.ts`), que responde 400 cuando falta el RFC —
+ *    un 500, o una lista vacía, esconderían una causa que el usuario SÍ puede arreglar.
+ *
+ * Existe porque el controlador clasificaba por expresión regular sobre el texto del error
+ * (`/facturapi|catalog/i`), y el mensaje real de Facturapi al rechazar una llave —
+ * «La API key proporcionada no es válida» — no casa ninguna de las dos palabras: un fallo
+ * del proveedor salía como 500 (incidente de producción, 2026-09-07). Quien sabe a quién
+ * llamó es el servicio; la clasificación viaja desde ahí, no se adivina aquí.
+ */
+export class SatCatalogUnavailableError extends AppError {
+  public readonly reason: 'NO_KEY' | 'PROVIDER_ERROR'
+
+  constructor(reason: 'NO_KEY' | 'PROVIDER_ERROR', message: string) {
+    super(message, reason === 'NO_KEY' ? 400 : 502, true, `SAT_CATALOG_${reason}`)
+    this.reason = reason
+  }
+}
+
 // Consider re-adding other specific error classes if they were used elsewhere and are now missing:
 export class AuthenticationError extends AppError {
   constructor(message: string = 'No autenticado') {

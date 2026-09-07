@@ -24,6 +24,8 @@ jest.mock('../../../../src/middlewares/checkPermission.middleware', () => ({
   },
 }))
 
+import { SatCatalogUnavailableError } from '../../../../src/errors/AppError'
+
 const mockSearchSatCatalog = jest.fn()
 jest.mock('../../../../src/services/fiscal/satCatalogLookup.service', () => ({
   searchSatCatalog: (...a: any[]) => mockSearchSatCatalog(...a),
@@ -1031,7 +1033,7 @@ describe('searchSatCatalogController', () => {
     expect(res.json).toHaveBeenCalledWith({
       results: [{ key: '90101500', description: 'Servicio de restaurante' }],
     })
-    expect(mockSearchSatCatalog).toHaveBeenCalledWith({ type: 'product', q: 'restaurante' })
+    expect(mockSearchSatCatalog).toHaveBeenCalledWith({ type: 'product', q: 'restaurante', venueId: 'v1' })
   })
 
   it('returns 200 with { results } for type=unit', async () => {
@@ -1095,6 +1097,77 @@ describe('searchSatCatalogController', () => {
 
     expect(res.status).toHaveBeenCalledWith(500)
     expect(res.json).toHaveBeenCalledWith({ error: 'Error interno al consultar el catálogo SAT' })
+  })
+
+  // ── Regresión de producción (2026-09-07, Testarudo Cafe, OWNER) ─────────────
+  // El picker respondía 500 «La API key proporcionada no es válida»: el servicio usaba
+  // la llave de CUENTA de Facturapi, que los catálogos rechazan, y el controlador
+  // clasificaba por el texto del error, que no casaba /facturapi|catalog/i.
+
+  it('pasa el venueId al servicio — la llave del catálogo es la del emisor de ESE negocio', async () => {
+    mockSearchSatCatalog.mockResolvedValue({ results: [] })
+
+    const res = mockRes()
+    await searchSatCatalogController(satReq({ params: { venueId: 'venue-testarudo' }, query: { type: 'unit', q: 'pieza' } }), res)
+
+    expect(mockSearchSatCatalog).toHaveBeenCalledWith({ type: 'unit', q: 'pieza', venueId: 'venue-testarudo' })
+  })
+
+  it('con q ausente pide la PRIMERA PÁGINA (q undefined), no una búsqueda por cadena vacía', async () => {
+    mockSearchSatCatalog.mockResolvedValue({ results: [] })
+
+    const res = mockRes()
+    await searchSatCatalogController(satReq({ query: { type: 'product' } }), res)
+
+    expect(mockSearchSatCatalog).toHaveBeenCalledWith({ type: 'product', q: undefined, venueId: 'v1' })
+    expect(res.status).toHaveBeenCalledWith(200)
+  })
+
+  it('returns 502 cuando Facturapi RECHAZA LA LLAVE — el mensaje no casa ninguna palabra clave', async () => {
+    mockSearchSatCatalog.mockRejectedValue(
+      new SatCatalogUnavailableError(
+        'PROVIDER_ERROR',
+        'Facturapi no pudo devolver el catálogo de productos y servicios del SAT: La API key proporcionada no es válida',
+      ),
+    )
+
+    const res = mockRes()
+    await searchSatCatalogController(satReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(502)
+    expect(res.json).toHaveBeenCalledWith({
+      error: 'No se pudo consultar el catálogo del SAT. Vuelve a intentarlo en unos minutos.',
+      code: 'SAT_CATALOG_PROVIDER_ERROR',
+    })
+  })
+
+  it('NO le filtra al usuario el mensaje crudo del proveedor', async () => {
+    mockSearchSatCatalog.mockRejectedValue(new SatCatalogUnavailableError('PROVIDER_ERROR', 'La API key proporcionada no es válida'))
+
+    const res = mockRes()
+    await searchSatCatalogController(satReq(), res)
+
+    expect(JSON.stringify(res.json.mock.calls[0][0])).not.toContain('API key')
+  })
+
+  it('returns 400 accionable cuando al negocio le falta el emisor fiscal (NO_KEY)', async () => {
+    mockSearchSatCatalog.mockRejectedValue(
+      new SatCatalogUnavailableError(
+        'NO_KEY',
+        'El catálogo del SAT no está disponible para este negocio: falta configurar su emisor fiscal (Facturapi).',
+      ),
+    )
+
+    const res = mockRes()
+    await searchSatCatalogController(satReq(), res)
+
+    // 400 y no 5xx: reintentar no sirve, y un 5xx dispararía alertas por un estado normal
+    // (negocio a medio configurar). Mismo criterio que la exportación de gastos sin RFC.
+    expect(res.status).toHaveBeenCalledWith(400)
+    expect(res.json).toHaveBeenCalledWith({
+      error: 'El catálogo del SAT no está disponible para este negocio: falta configurar su emisor fiscal (Facturapi).',
+      code: 'SAT_CATALOG_NO_KEY',
+    })
   })
 })
 
