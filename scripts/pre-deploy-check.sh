@@ -133,7 +133,12 @@ echo ""
 
 # 6. Run unit tests
 echo "🧪 Step 6/10: Running unit tests..."
-if npm run test:unit; then
+# Misma forma que CI (4 shards × 2 workers, ci-cd.yml): workers con reinicio por memoria en vez de
+# UN solo proceso para los 1,368 archivos. Con --runInBand un test puede ensuciar a los siguientes
+# (módulos core de Node compartidos) y el 7-sep-2026 produjo un 404 falso en migrate-discard que no
+# reproduce ni solo, ni con vecinas, ni en CI, ni replicando el mismo orden. Memoria:
+# suite-unit-falla-por-carga-no-por-codigo.
+if npm run test:unit:ci; then
   echo -e "${GREEN}✅ Unit tests passed!${NC}"
 else
   echo -e "${RED}❌ Unit tests failed!${NC}"

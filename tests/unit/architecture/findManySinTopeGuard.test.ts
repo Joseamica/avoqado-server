@@ -73,7 +73,8 @@ const INVENTARIO: Record<string, number> = {
   // una excepción vacía.
   'src/services/dashboard/bankReconciliation.service.ts': 1,
   'src/services/dashboard/cash-out/cash-out.ledger.service.ts': 2,
-  'src/services/dashboard/cashCloseout.dashboard.service.ts': 1,
+  // 2026-09-07: cashCloseout 1 → 0. El efectivo esperado del corte se suma en Postgres
+  // (`aggregate` + `DRAWER_CASH_WHERE`); ya no hidrata el efectivo desde el último corte.
   'src/services/dashboard/commission/commission-attendance.ts': 1,
   'src/services/dashboard/commission/commission-utils.ts': 1,
   'src/services/dashboard/cost-management.service.ts': 1,
@@ -99,7 +100,8 @@ const INVENTARIO: Record<string, number> = {
   'src/services/dashboard/review.dashboard.service.ts': 1,
   'src/services/dashboard/sale-verification.dashboard.service.ts': 2,
   'src/services/dashboard/sales-summary.dashboard.service.ts': 3,
-  'src/services/dashboard/settlementCalendar.dashboard.service.ts': 1,
+  // 2026-09-07: settlementCalendar 1 → 0. La semana de liquidación recorre los pagos por
+  // páginas de 500 con cursor (mismo patrón que availableBalance).
   'src/services/dashboard/settlementIncident.service.ts': 1,
   // 4 → 3 el 2026-09-02: `getActiveShifts` dejó de traer una fila por ORDEN para contarlas en
   // memoria y ahora las cuenta con `groupBy` en Postgres (una fila por turno). Con un turno abierto

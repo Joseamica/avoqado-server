@@ -9,6 +9,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Changed
 
+- **«Saldo disponible» ya no materializa miles de pagos por apertura (query-guard 2026-09-07)**: la alerta «Consulta
+  gigante» siguió disparando después de los arreglos del 1 y 2-sep porque dos caminos de esa pantalla quedaron fuera de la
+  reescritura. (1) El efectivo esperado del corte de caja (`GET …/cash-closeouts/expected`) traía TODOS los pagos en
+  efectivo desde el último corte para sumarlos en Node; un negocio que nunca ha cortado caja cargaba su historia completa
+  (Testarudo: 5,449 filas, una más por cada venta). Ahora Postgres suma y cuenta (`payment.aggregate`) con el veredicto de
+  cajón expresado en el `where`: `DRAWER_CASH_WHERE` en `tenderSemantics`, tres ramas excluyentes con la MISMA precedencia
+  que `paymentCountsAsDrawerCash` (fundsFlow → snapshot → legacy), y una prueba que cruza las 80 combinaciones posibles
+  contra el predicado. (2) La semana de liquidación (`GET …/available-balance/settlement-week`) cargaba 28 días de pagos
+  con tarjeta y sus costos en un solo `findMany` (5,451 filas); ahora los recorre por páginas de 500 con cursor, cargando
+  las reglas de cada comercio una sola vez conforme aparece, con el mismo motor y el mismo resultado. Ningún número ni
+  campo de la respuesta cambia; el inventario de `findMany` sin tope baja en dos. Queda documentado, y NO se toca, el
+  puente legacy de `pageSize=10000` en los listados: siguen llegando pestañas abiertas desde antes del 2-sep y cerrarlo
+  les mostraría totales parciales hasta recargar.
 - **MCP `sales_by_payment_method` y `staff_tips` suman en Postgres, no en Node (query-guard 2026-09-01)**: las dos
   herramientas pasaban por `fetchPaymentsForAnalytics`, que trae TODAS las filas del rango sólo para sumarlas — un agente que pide
   «ventas de este año» materializaba 24 mil pagos (el mismo camino que cazó el query-guard en `basic-metrics`). Ahora

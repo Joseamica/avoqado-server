@@ -128,8 +128,14 @@ describe('POST /dashboard/organizations/:orgId/terminals/:terminalId/migrate-dis
       .set(authHeader(superadminCtx))
       .send({})
 
-    expect(res.status).toBe(200)
-    expect(res.body.data).toEqual({ discarded: 1, commandIds: ['cmd-1'] })
+    // Status y cuerpo en UNA aserción: el 7-sep-2026 esta prueba dio un 404 aislado en una corrida
+    // completa `--runInBand` (no reprodujo ni sola, ni con sus vecinas, ni en CI, ni repitiendo el
+    // mismo orden de archivos) y el reporte sólo decía «Expected 200, Received 404» — sin el cuerpo
+    // no se puede saber si fue el 404 de Express (ruta no montada) o un NotFoundError del service.
+    expect({ status: res.status, body: res.body }).toEqual({
+      status: 200,
+      body: expect.objectContaining({ success: true, data: { discarded: 1, commandIds: ['cmd-1'] } }),
+    })
     expect(mockMigrateDiscardForOrg).toHaveBeenCalledWith(ORG_ID, TERMINAL_ID, expect.objectContaining({ staffId: 'staff-1' }))
   })
 

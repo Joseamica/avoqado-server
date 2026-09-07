@@ -19,7 +19,7 @@
  *     created before fundsFlow existed never change their classification.
  */
 
-import { PaymentFundsFlow, PaymentMethod } from '@prisma/client'
+import { PaymentFundsFlow, PaymentMethod, Prisma } from '@prisma/client'
 
 /** The minimal projection a caller must select to answer both questions. */
 export interface TenderSemanticsPayment {
@@ -46,6 +46,26 @@ export function paymentCountsAsDrawerCash(payment: TenderSemanticsPayment): bool
   if (payment.fundsFlow != null) return payment.fundsFlow === PaymentFundsFlow.CASH_DRAWER
   if (payment.tenderCountsAsCash != null) return payment.tenderCountsAsCash
   return payment.method === PaymentMethod.CASH
+}
+
+/**
+ * El MISMO veredicto que `paymentCountsAsDrawerCash`, como fragmento de `where` para
+ * sumar o contar en Postgres sin hidratar filas. Nació con el query-guard del 7-sep-2026:
+ * el efectivo esperado del corte cargaba los 5,449 pagos en efectivo de un negocio que
+ * nunca ha cortado caja, por cada apertura de «Saldo disponible». Las tres ramas son
+ * excluyentes y reproducen la precedencia del predicado fila por fila:
+ *   fundsFlow estampado                → sólo CASH_DRAWER entra
+ *   sin fundsFlow, snapshot presente   → manda el snapshot
+ *   sin fundsFlow ni snapshot          → legacy: method = CASH
+ * La paridad exhaustiva (80 combinaciones) contra el predicado vive en tenderSemantics.test.ts:
+ * si alguien cambia uno sin el otro, esa prueba lo delata.
+ */
+export const DRAWER_CASH_WHERE: Readonly<{ OR: Prisma.PaymentWhereInput[] }> = {
+  OR: [
+    { fundsFlow: PaymentFundsFlow.CASH_DRAWER },
+    { fundsFlow: null, tenderCountsAsCash: true },
+    { fundsFlow: null, tenderCountsAsCash: null, method: PaymentMethod.CASH },
+  ],
 }
 
 /**

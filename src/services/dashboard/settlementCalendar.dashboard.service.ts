@@ -127,6 +127,52 @@ export function venueWeekBounds(anchorDateKey: string | undefined, venueTimezone
 // far before the week can still settle inside it.
 const LOOKBACK_DAYS = 21
 
+// Página del recorrido de pagos: el mismo tamaño que usa el saldo disponible. Con 5,000+
+// pagos de tarjeta en la ventana de 28 días (Testarudo, 7-sep-2026) un solo findMany
+// disparaba el query-guard y materializaba todo en la única vCPU por cada apertura de
+// «Saldo disponible». Por páginas el resultado es idéntico y la memoria queda acotada por lote.
+const SETTLEMENT_WEEK_PAGE_SIZE = 500
+
+const SETTLEMENT_CONFIG_SELECT = {
+  merchantAccountId: true,
+  cardType: true,
+  settlementDays: true,
+  settlementDayType: true,
+  cutoffTime: true,
+  cutoffTimezone: true,
+  effectiveFrom: true,
+  effectiveTo: true,
+} as const
+
+/**
+ * Carga las reglas de los comercios que aún no se han visto, conforme aparecen en cada
+ * página. Cada comercio se consulta UNA vez; el orden `effectiveFrom desc` se conserva
+ * por comercio, que es lo único que `projectPaymentSettlement` compara.
+ */
+async function cargarReglasFaltantes(
+  merchantAccountIds: Array<string | null>,
+  comerciosCargados: Set<string>,
+  configs: ActiveConfig[],
+): Promise<void> {
+  const faltantes: string[] = []
+  for (const id of merchantAccountIds) {
+    if (!id || comerciosCargados.has(id)) continue
+    comerciosCargados.add(id)
+    faltantes.push(id)
+  }
+  if (faltantes.length === 0) return
+  const filas = await prisma.settlementConfiguration.findMany({
+    where: { merchantAccountId: { in: faltantes } },
+    select: SETTLEMENT_CONFIG_SELECT,
+    orderBy: { effectiveFrom: 'desc' },
+  })
+  configs.push(...filas)
+}
+
+function cederElEventLoop(): Promise<void> {
+  return new Promise(resolve => setImmediate(resolve))
+}
+
 interface WeekAgg {
   gross: number
   commission: number
@@ -170,41 +216,8 @@ export async function getSettlementsLandingInWeek(
   venueTimezone: string,
 ): Promise<SettlementWeek> {
   const from = new Date(weekStart.getTime() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000)
-  const payments = await prisma.payment.findMany({
-    where: {
-      venueId,
-      status: 'COMPLETED',
-      merchantAccountId: { not: null },
-      method: { not: PaymentMethod.CASH },
-      createdAt: { gte: from, lte: weekEnd },
-    },
-    select: {
-      amount: true,
-      tipAmount: true,
-      createdAt: true,
-      merchantAccountId: true,
-      transactionCost: { select: { transactionType: true, venueChargeAmount: true, venueFixedFee: true } },
-      merchantAccount: { select: { displayName: true, alias: true, provider: { select: { name: true } } } },
-    },
-  })
-
-  const merchantIds = Array.from(new Set(payments.map(p => p.merchantAccountId).filter((x): x is string => Boolean(x))))
-  const configs: ActiveConfig[] = merchantIds.length
-    ? await prisma.settlementConfiguration.findMany({
-        where: { merchantAccountId: { in: merchantIds } },
-        select: {
-          merchantAccountId: true,
-          cardType: true,
-          settlementDays: true,
-          settlementDayType: true,
-          cutoffTime: true,
-          cutoffTimezone: true,
-          effectiveFrom: true,
-          effectiveTo: true,
-        },
-        orderBy: { effectiveFrom: 'desc' },
-      })
-    : []
+  const configs: ActiveConfig[] = []
+  const comerciosCargados = new Set<string>()
 
   const startKey = formatInTimeZone(weekStart, venueTimezone, 'yyyy-MM-dd')
   const endKey = formatInTimeZone(weekEnd, venueTimezone, 'yyyy-MM-dd')
@@ -226,38 +239,75 @@ export async function getSettlementsLandingInWeek(
     }
   >()
 
-  for (const p of payments) {
-    const merchantId = p.merchantAccountId
-    if (!merchantId || !p.transactionCost) continue
-    const projected = projectPaymentSettlement(
-      {
-        amount: p.amount,
-        tipAmount: p.tipAmount,
-        createdAt: p.createdAt,
-        merchantAccountId: merchantId,
-        transactionCost: p.transactionCost,
+  let cursorId: string | undefined
+  while (true) {
+    const pagina = await prisma.payment.findMany({
+      where: {
+        venueId,
+        status: 'COMPLETED',
+        merchantAccountId: { not: null },
+        method: { not: PaymentMethod.CASH },
+        createdAt: { gte: from, lte: weekEnd },
       },
-      configs,
-      venueTimezone,
-    )
-    if (!projected) continue
-    const key = projected.settlementDateKey
-    if (key < startKey || key > endKey) continue // lands outside this week
+      select: {
+        id: true,
+        amount: true,
+        tipAmount: true,
+        createdAt: true,
+        merchantAccountId: true,
+        transactionCost: { select: { transactionType: true, venueChargeAmount: true, venueFixedFee: true } },
+        merchantAccount: { select: { displayName: true, alias: true, provider: { select: { name: true } } } },
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: SETTLEMENT_WEEK_PAGE_SIZE,
+      ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
+    })
+    if (pagina.length === 0) break
 
-    if (!dayMap.has(key)) dayMap.set(key, { total: newAgg(), byMerchant: new Map(), byCardType: new Map() })
-    const day = dayMap.get(key)!
-    bump(day.total, projected)
-    if (!day.byMerchant.has(merchantId)) {
-      day.byMerchant.set(merchantId, {
-        ...newAgg(),
-        displayName: p.merchantAccount?.displayName || p.merchantAccount?.alias || 'Comercio',
-        provider: p.merchantAccount?.provider?.name ?? '',
-      })
+    await cargarReglasFaltantes(
+      pagina.map(p => p.merchantAccountId),
+      comerciosCargados,
+      configs,
+    )
+
+    for (const p of pagina) {
+      const merchantId = p.merchantAccountId
+      if (!merchantId || !p.transactionCost) continue
+      const projected = projectPaymentSettlement(
+        {
+          amount: p.amount,
+          tipAmount: p.tipAmount,
+          createdAt: p.createdAt,
+          merchantAccountId: merchantId,
+          transactionCost: p.transactionCost,
+        },
+        configs,
+        venueTimezone,
+      )
+      if (!projected) continue
+      const key = projected.settlementDateKey
+      if (key < startKey || key > endKey) continue // lands outside this week
+
+      if (!dayMap.has(key)) dayMap.set(key, { total: newAgg(), byMerchant: new Map(), byCardType: new Map() })
+      const day = dayMap.get(key)!
+      bump(day.total, projected)
+      if (!day.byMerchant.has(merchantId)) {
+        day.byMerchant.set(merchantId, {
+          ...newAgg(),
+          displayName: p.merchantAccount?.displayName || p.merchantAccount?.alias || 'Comercio',
+          provider: p.merchantAccount?.provider?.name ?? '',
+        })
+      }
+      bump(day.byMerchant.get(merchantId)!, projected)
+      const ct = p.transactionCost.transactionType
+      if (!day.byCardType.has(ct)) day.byCardType.set(ct, newAgg())
+      bump(day.byCardType.get(ct)!, projected)
     }
-    bump(day.byMerchant.get(merchantId)!, projected)
-    const ct = p.transactionCost.transactionType
-    if (!day.byCardType.has(ct)) day.byCardType.set(ct, newAgg())
-    bump(day.byCardType.get(ct)!, projected)
+
+    // Una página corta es la última: no se pide otra (y un mock constante no cicla).
+    if (pagina.length < SETTLEMENT_WEEK_PAGE_SIZE) break
+    cursorId = pagina[pagina.length - 1].id
+    await cederElEventLoop()
   }
 
   const roundAgg = (a: WeekAgg): WeekAgg => ({

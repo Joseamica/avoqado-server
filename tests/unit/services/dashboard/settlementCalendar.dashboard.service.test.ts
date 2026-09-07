@@ -204,3 +204,74 @@ describe('venueWeekBounds', () => {
     expect(now).toBeLessThanOrEqual(weekEnd.getTime())
   })
 })
+
+describe('getSettlementsLandingInWeek — recorre los pagos por páginas de 500 con cursor (query-guard 2026-09-07)', () => {
+  const merchant = { displayName: 'Amaena - B', alias: null, provider: { name: 'AngelPay (Nexgo)' } }
+  const weekStart = new Date('2026-07-06T06:00:00Z') // Mon 00:00 MX
+  const weekEnd = new Date('2026-07-13T05:59:59Z') // Sun 23:59 MX
+  const regla = (merchantAccountId: string) => ({
+    merchantAccountId,
+    cardType: 'CREDIT',
+    settlementDays: 1,
+    settlementDayType: 'BUSINESS_DAYS',
+    cutoffTime: '23:00',
+    cutoffTimezone: TZ,
+    effectiveFrom: new Date('2026-01-01'),
+    effectiveTo: null,
+  })
+  // Vendido lunes 06-jul 12:00 MX → 1 día hábil → cae martes 07-jul, dentro de la semana.
+  const fila = (i: number, merchantAccountId = 'm1') => ({
+    id: `p${String(i).padStart(4, '0')}`,
+    amount: 100,
+    tipAmount: 0,
+    createdAt: new Date('2026-07-06T18:00:00Z'),
+    merchantAccountId,
+    transactionCost: { transactionType: 'CREDIT', venueChargeAmount: 3, venueFixedFee: 0 },
+    merchantAccount: merchant,
+  })
+
+  it('una página llena pide la siguiente con cursor en el último id; una corta termina — y el total es el de las 503 filas', async () => {
+    const pagina1 = Array.from({ length: 500 }, (_, i) => fila(i))
+    const pagina2 = [fila(500), fila(501), fila(502)]
+    ;(prismaMock.payment.findMany as jest.Mock).mockResolvedValueOnce(pagina1).mockResolvedValueOnce(pagina2)
+    ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockResolvedValue([regla('m1')])
+
+    const r = await getSettlementsLandingInWeek('v1', weekStart, weekEnd, TZ)
+
+    expect(prismaMock.payment.findMany).toHaveBeenCalledTimes(2)
+    const [primera, segunda] = (prismaMock.payment.findMany as jest.Mock).mock.calls.map(c => c[0])
+    expect(primera).toMatchObject({ take: 500, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
+    expect(primera.cursor).toBeUndefined()
+    expect(segunda).toMatchObject({ take: 500, cursor: { id: 'p0499' }, skip: 1 })
+    expect(segunda.select.id).toBe(true)
+    // El where no cambió: mismo venue, COMPLETED, con comercio, sin efectivo, misma ventana.
+    expect(primera.where).toEqual(segunda.where)
+    expect(primera.where).toMatchObject({ venueId: 'v1', status: 'COMPLETED', merchantAccountId: { not: null }, method: { not: 'CASH' } })
+
+    expect(r.days).toHaveLength(1)
+    expect(r.days[0]).toMatchObject({ date: '2026-07-07', gross: 50300, commission: 1509, net: 48791, count: 503 })
+    expect(r.weekTotal).toEqual({ gross: 50300, commission: 1509, net: 48791, count: 503 })
+  })
+
+  it('las reglas de un comercio se cargan UNA vez aunque aparezca en varias páginas; un comercio nuevo en la 2ª página carga las suyas ahí', async () => {
+    const pagina1 = Array.from({ length: 500 }, (_, i) => fila(i, 'm1'))
+    const pagina2 = [fila(500, 'm1'), fila(501, 'm2')]
+    ;(prismaMock.payment.findMany as jest.Mock).mockResolvedValueOnce(pagina1).mockResolvedValueOnce(pagina2)
+    ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockResolvedValueOnce([regla('m1')]).mockResolvedValueOnce([regla('m2')])
+
+    const r = await getSettlementsLandingInWeek('v1', weekStart, weekEnd, TZ)
+
+    const llamadas = (prismaMock.settlementConfiguration.findMany as jest.Mock).mock.calls.map(c => c[0].where.merchantAccountId.in)
+    expect(llamadas).toEqual([['m1'], ['m2']])
+    expect(r.days[0].count).toBe(502)
+    expect(r.days[0].byMerchant.map(m => m.merchantAccountId).sort()).toEqual(['m1', 'm2'])
+  })
+
+  it('regresión: menos de 500 filas es una sola consulta (los mocks con mockResolvedValue no ciclan)', async () => {
+    ;(prismaMock.payment.findMany as jest.Mock).mockResolvedValue([fila(0), fila(1)])
+    ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockResolvedValue([regla('m1')])
+    const r = await getSettlementsLandingInWeek('v1', weekStart, weekEnd, TZ)
+    expect(prismaMock.payment.findMany).toHaveBeenCalledTimes(1)
+    expect(r.weekTotal.count).toBe(2)
+  })
+})

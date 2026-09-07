@@ -1,6 +1,6 @@
 import prisma from '../../utils/prismaClient'
-import { PaymentMethod, DepositMethod } from '@prisma/client'
-import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
+import { DepositMethod } from '@prisma/client'
+import { DRAWER_CASH_WHERE } from '../shared/tenderSemantics'
 import logger from '../../config/logger'
 import { logAction } from './activity-log.service'
 
@@ -70,35 +70,41 @@ export async function getExpectedCashAmount(venueId: string): Promise<{
   // naturally subtracts refunds from the expected cash in the drawer. Since
   // 2026-04-19 refunds split across `amount` (sale) and `tipAmount` (tip), so
   // we must sum both fields to capture the full cash impact.
-  // Drawer membership is decided by the SHARED predicate (tenderSemantics), never a
+  // Drawer membership is decided by the SHARED rule (tenderSemantics), never a
   // local method check: a cash-counting voucher tender (method=OTHER,
-  // tenderCountsAsCash=true) sits in the drawer too. With no tender snapshots in
-  // existing data this matches the old `method === CASH` filter exactly.
-  const cashPayments = (
-    await prisma.payment.findMany({
-      where: {
-        venueId,
-        OR: [{ method: PaymentMethod.CASH }, { tenderCountsAsCash: true }, { fundsFlow: 'CASH_DRAWER' }],
-        status: 'COMPLETED',
-        createdAt: { gt: periodStart },
-      },
-      select: { amount: true, tipAmount: true, method: true, fundsFlow: true, tenderTypeId: true, tenderCountsAsCash: true },
-    })
-  ).filter(paymentCountsAsDrawerCash)
+  // tenderCountsAsCash=true) sits in the drawer too.
+  //
+  // La suma la hace Postgres (query-guard 2026-09-07): antes se hidrataban TODAS las filas
+  // de efectivo desde el último corte para sumarlas en Node, y un negocio que nunca ha
+  // cortado caja cargaba su historia completa en cada apertura de «Saldo disponible»
+  // (Testarudo: 5,449 filas, una más por cada venta). `DRAWER_CASH_WHERE` es el mismo
+  // veredicto que `paymentCountsAsDrawerCash`, expresado en el `where`; la paridad
+  // exhaustiva entre ambos vive en tenderSemantics.test.ts.
+  const efectivo = await prisma.payment.aggregate({
+    where: {
+      venueId,
+      status: 'COMPLETED',
+      createdAt: { gt: periodStart },
+      OR: DRAWER_CASH_WHERE.OR,
+    },
+    _sum: { amount: true, tipAmount: true },
+    _count: { _all: true },
+  })
 
-  const expectedAmount = cashPayments.reduce((sum, p) => sum + Number(p.amount) + Number(p.tipAmount ?? 0), 0)
+  const expectedAmount = Number(efectivo._sum.amount ?? 0) + Number(efectivo._sum.tipAmount ?? 0)
+  const transactionCount = efectivo._count._all
   const daysSinceLastCloseout = Math.floor((Date.now() - periodStart.getTime()) / (1000 * 60 * 60 * 24))
 
   // Only prompt for a cash cut when there's actually cash to cut. A card-only
   // venue (e.g. no efectivo) was getting "Han pasado N días desde el último
   // corte" forever even though there's nothing to close out — the reminder
   // must be gated on real cash activity, not just elapsed days.
-  const needsCloseout = cashPayments.length > 0
+  const needsCloseout = transactionCount > 0
 
   return {
     expectedAmount,
     periodStart,
-    transactionCount: cashPayments.length,
+    transactionCount,
     daysSinceLastCloseout,
     hasCloseouts,
     needsCloseout,

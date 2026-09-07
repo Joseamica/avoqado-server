@@ -1,4 +1,4 @@
-import { paymentCountsAsDrawerCash, paymentIsAvoqadoSettled } from '@/services/shared/tenderSemantics'
+import { DRAWER_CASH_WHERE, paymentCountsAsDrawerCash, paymentIsAvoqadoSettled } from '@/services/shared/tenderSemantics'
 
 /**
  * The two predicates every closeout/settlement path must share (audit v4).
@@ -68,5 +68,42 @@ describe('tenderSemantics', () => {
       expect(paymentCountsAsDrawerCash(efectivoManual)).toBe(true)
       expect(paymentIsAvoqadoSettled(efectivoManual)).toBe(false)
     })
+  })
+})
+
+/**
+ * Evaluador mínimo del fragmento Prisma que usa la suma en Postgres: un OR de ramas,
+ * cada rama un AND de igualdades donde `null` significa IS NULL. Cubre la forma exacta
+ * de DRAWER_CASH_WHERE; si el fragmento cambia de forma, esta prueba lo delata.
+ */
+function cumpleWhere(row: Record<string, unknown>, where: { OR: ReadonlyArray<Record<string, unknown>> }): boolean {
+  return where.OR.some(rama => Object.entries(rama).every(([campo, valor]) => (valor === null ? row[campo] == null : row[campo] === valor)))
+}
+
+describe('DRAWER_CASH_WHERE — el veredicto de paymentCountsAsDrawerCash, expresado en SQL (query-guard 2026-09-07)', () => {
+  // Todas las combinaciones que una fila real puede tener. `undefined` cubre un select que
+  // no trajo la columna: el predicado lo trata como nulo y el where debe coincidir.
+  const flows = ['CASH_DRAWER', 'AVOQADO_PROCESSED', 'EXTERNAL_RECORDED', null, undefined] as const
+  const snapshots = [true, false, null, undefined] as const
+  const methods = ['CASH', 'OTHER', 'CREDIT_CARD', 'BANK_TRANSFER'] as const
+
+  it('coincide con el predicado en las 80 combinaciones de fundsFlow × snapshot × método', () => {
+    let combinaciones = 0
+    for (const fundsFlow of flows) {
+      for (const tenderCountsAsCash of snapshots) {
+        for (const method of methods) {
+          const fila = { method, fundsFlow, tenderCountsAsCash }
+          expect({ fila, sql: cumpleWhere(fila, DRAWER_CASH_WHERE) }).toEqual({ fila, sql: paymentCountsAsDrawerCash(fila) })
+          combinaciones += 1
+        }
+      }
+    }
+    expect(combinaciones).toBe(80)
+  })
+
+  it('la rama legacy (method = CASH) sólo aplica con fundsFlow Y snapshot nulos: un CASH con fundsFlow ajeno no entra al cajón', () => {
+    expect(cumpleWhere({ method: 'CASH', fundsFlow: 'EXTERNAL_RECORDED', tenderCountsAsCash: null }, DRAWER_CASH_WHERE)).toBe(false)
+    expect(cumpleWhere({ method: 'CASH', fundsFlow: null, tenderCountsAsCash: false }, DRAWER_CASH_WHERE)).toBe(false)
+    expect(cumpleWhere({ method: 'CASH', fundsFlow: null, tenderCountsAsCash: null }, DRAWER_CASH_WHERE)).toBe(true)
   })
 })
