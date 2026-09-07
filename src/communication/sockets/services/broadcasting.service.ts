@@ -25,6 +25,8 @@ import {
   TPVStatusUpdatePayload,
 } from '../types'
 import { RoomManagerService } from './roomManager.service'
+import { terminalRegistry } from '../terminal-registry'
+import { sameTerminalSerial } from '../../../utils/terminalSerial'
 
 /**
  * Broadcasting Service
@@ -69,6 +71,78 @@ export class BroadcastingService {
       logger.error('Error broadcasting to venue', {
         correlationId,
         venueId,
+        event,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined,
+      })
+    }
+  }
+
+  /**
+   * Entrega a UNA terminal del venue — y a nadie más.
+   *
+   * 🔴 Por qué existe (7-sep-2026, Testarudo): un SUPERADMIN mandó FACTORY_RESET a la PAX WHITE
+   * y quien contestó «Factory reset completed» fue la NEXGO BLACK. `tpv_command` se repartía al
+   * venue ENTERO (`broadcastToVenue`) confiando en que cada aparato se filtrara solo, y el filtro
+   * del cliente llegó a la app apenas el 6-sep, en un APK que la flota no tiene. El único control
+   * del servidor vivía en el ACK — DESPUÉS del borrado.
+   *
+   * Quién es «la terminal»: el serial FIRMADO en el JWT del socket (`authContext.terminalSerialNumber`,
+   * lo estampa el login de la TPV). Sólo si el token no trae serial se admite el registro de
+   * sockets (`terminalRegistry`, alimentado por el `terminalId` que el cliente reclama en el
+   * handshake) — respaldo para tokens legacy, nunca por encima del JWT.
+   *
+   * 🔴 Si NADIE coincide, no se entrega a NADIE. Jamás se cae al venue: el heartbeat es el canal
+   * primario de comandos y ya va por serial (`getPendingCommands`), así que a lo sumo el comando
+   * tarda un ciclo de heartbeat en llegar. Entregar a todos «por si acaso» es exactamente el
+   * defecto que esto corrige.
+   */
+  public broadcastToTerminal(
+    venueId: string,
+    terminalSerialNumber: string,
+    event: SocketEventType,
+    payload: any,
+    options: BroadcastOptions = {},
+  ): void {
+    const correlationId = uuidv4()
+
+    try {
+      const sockets = this.roomManager.getVenueSockets(venueId)
+      const registrySocketId = terminalRegistry.getSocketId(terminalSerialNumber)
+      const targets = this.roomManager.filterSocketsByOptions(sockets, options).filter(socket => {
+        const firmado = socket.authContext?.terminalSerialNumber
+        if (firmado) return sameTerminalSerial(firmado, terminalSerialNumber)
+        return registrySocketId !== null && socket.id === registrySocketId
+      })
+
+      const enrichedPayload = this.enrichPayload(payload, correlationId, venueId)
+      targets.forEach(socket => {
+        socket.emit(event, enrichedPayload)
+      })
+
+      if (targets.length === 0) {
+        logger.info('Broadcast to terminal: no socket for the target terminal — the heartbeat will deliver it', {
+          correlationId,
+          venueId,
+          terminalSerialNumber,
+          event,
+          venueSockets: sockets.length,
+        })
+      } else {
+        logger.debug('Broadcast to terminal completed', {
+          correlationId,
+          venueId,
+          terminalSerialNumber,
+          event,
+          venueSockets: sockets.length,
+          targetSockets: targets.length,
+        })
+      }
+    } catch (error) {
+      logger.error('Error broadcasting to terminal', {
+        correlationId,
+        venueId,
+        terminalSerialNumber,
         event,
         error: error instanceof Error ? error.message : 'Unknown error',
         stack: error instanceof Error ? error.stack : undefined,

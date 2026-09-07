@@ -17,7 +17,7 @@ import { utcTs } from '../../utils/sqlDates'
 export const COBRO_QUE_CUBRE = `p.status = 'COMPLETED' AND p.type IS DISTINCT FROM 'REFUND'`
 
 /**
- * Lo que la cuenta DEBE: `max(0, subtotal − descuento) + cargo por servicio`.
+ * Lo que la cuenta DEBE: `max(0, subtotal − descuento) + cargo por servicio + max(0, IVA)`.
  *
  * Vive una sola vez por el mismo motivo que `COBRO_QUE_CUBRE` —es el OTRO lado de la misma
  * comparación— y lo usan tres sitios que no pueden divergir: el criterio, la columna `base`
@@ -31,9 +31,22 @@ export const COBRO_QUE_CUBRE = `p.status = 'COMPLETED' AND p.type IS DISTINCT FR
  * lados (entra al total y entra a lo pagado), de modo que se cancela y la comparación se
  * reduce exactamente a ésta. El cargo va DESPUÉS del clamp: un descuento excedente se come
  * la mercancía, nunca los cargos.
+ *
+ * 🔴 El IVA entra SÓLO cuando va separado, y `Order.taxAmount` es el que lo dice — el mismo
+ * discriminador que lee el CFDI (memoria `iva-el-precio-de-catalogo-es-final`): `0` ⇒ «el
+ * precio ya trae el IVA» (convención mexicana, los 8 caminos de venta nativos; no suma nada);
+ * `> 0` ⇒ «el IVA va separado y SUMA al total» (así nacen las órdenes de SoftRestaurant —
+ * Testarudo—, y `total = subtotal − descuento + cargo + IVA`). El arreglo del 5-sep-2026 quitó
+ * el IVA de aquí por la primera convención y se llevó la segunda por delante: el 7-sep el
+ * vigilante pasó de 41 a 31,283 alarmas, 31,241 de Testarudo con el «exceso» igual al IVA al
+ * centavo — clientes que pagaron exactamente lo que decía la cuenta. Y por esta misma base el
+ * barrido habría elegido como «pagada» una cuenta de Testarudo con sólo el subtotal cobrado.
+ * Va CLAMPADO: un `taxAmount` negativo (`estimateAverageTaxRate` lo deja así sobre una orden
+ * con IVA incluido) nunca baja lo que la cuenta debe — ésa era la cortesía total que salía
+ * como SOBREPAGO de $300 con $0 cobrados.
  */
 export function baseQueDebeCubrirseSql(alias = 'o'): string {
-  return `GREATEST(0, ${alias}.subtotal - COALESCE(${alias}."discountAmount", 0)) + COALESCE(${alias}."serviceChargeAmount", 0)`
+  return `GREATEST(0, ${alias}.subtotal - COALESCE(${alias}."discountAmount", 0)) + COALESCE(${alias}."serviceChargeAmount", 0) + GREATEST(0, COALESCE(${alias}."taxAmount", 0))`
 }
 
 /**
@@ -44,7 +57,9 @@ export function baseQueDebeCubrirseSql(alias = 'o'): string {
  * Reglas:
  *  - la orden no está en estado terminal;
  *  - la suma de sus cobros que cuentan (ver `COBRO_QUE_CUBRE`) cubre lo que la cuenta DEBE,
- *    `max(0, subtotal − descuento) + cargo por servicio`, con un centavo de tolerancia;
+ *    `max(0, subtotal − descuento) + cargo por servicio + max(0, IVA)` (`baseQueDebeCubrirseSql`;
+ *    el IVA sólo pesa cuando `taxAmount > 0`, o sea cuando va separado), con un centavo de
+ *    tolerancia;
  *  - 🔴 el CARGO POR SERVICIO entra y la PROPINA no, y no es una asimetría arbitraria: el
  *    schema define `Order.serviceChargeAmount` como «INGRESO GRAVABLE del negocio: SUMA al
  *    total y entra al corte y al CFDI», mientras la propina pasa al mesero. Es exactamente

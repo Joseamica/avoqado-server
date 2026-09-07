@@ -1,5 +1,5 @@
 import { Prisma } from '@prisma/client'
-import { criterioPagadaPeroAbiertaSql, findPaidButOpenOrders } from '@/services/shared/pagadaPeroAbierta'
+import { baseQueDebeCubrirseSql, criterioPagadaPeroAbiertaSql, findPaidButOpenOrders } from '@/services/shared/pagadaPeroAbierta'
 
 describe('criterio SQL «pagada pero abierta»', () => {
   const sql = criterioPagadaPeroAbiertaSql('o')
@@ -41,7 +41,7 @@ describe('criterio SQL «pagada pero abierta»', () => {
    */
   it('lo que la cuenta debe INCLUYE el cargo por servicio y EXCLUYE la propina', () => {
     expect(sql).toMatch(
-      /GREATEST\(0, o\.subtotal - COALESCE\(o\."discountAmount", 0\)\) \+ COALESCE\(o\."serviceChargeAmount", 0\) - 0\.01/,
+      /GREATEST\(0, o\.subtotal - COALESCE\(o\."discountAmount", 0\)\) \+ COALESCE\(o\."serviceChargeAmount", 0\) \+ GREATEST\(0, COALESCE\(o\."taxAmount", 0\)\) - 0\.01/,
     )
 
     // El alias manda también aquí: el cargo se lee de la MISMA tabla que el subtotal.
@@ -53,6 +53,37 @@ describe('criterio SQL «pagada pero abierta»', () => {
 
     // La propina NUNCA entra: sumarla haría que una cuenta saldada pareciera deber la propina.
     expect(sql).not.toContain('tipAmount')
+  })
+
+  /**
+   * 🔴 EL IVA ENTRA CUANDO VA SEPARADO, Y NO CAMBIA NADA CUANDO EL PRECIO YA LO TRAE (7-sep-2026).
+   *
+   * `Order.taxAmount` carga dos significados (memoria `iva-el-precio-de-catalogo-es-final`,
+   * y es el MISMO discriminador que lee el CFDI): `0` ⇒ «el precio ya trae el IVA», la
+   * convención mexicana que escriben los 8 caminos de venta nativos; `> 0` ⇒ «el IVA va
+   * separado y SUMA al total», que es como nacen las órdenes de SoftRestaurant (Testarudo).
+   *
+   * El arreglo del 5-sep quitó el IVA de la base por la primera convención y se llevó la
+   * segunda por delante: la corrida del vigilante del 7-sep pasó de 41 a 31,283 alarmas, y
+   * 31,241 eran clientes de Testarudo que pagaron EXACTAMENTE `Order.total` — el «exceso»
+   * era el IVA, al centavo, en el 99.96 % de los casos. Con 30 ranuras por invariante, los
+   * ~13 sobrepagos reales de Amaena, BAE y Mindform quedaban enterrados.
+   *
+   * Y el barrido comparte esta base: sin el IVA, una cuenta de Testarudo con sólo el
+   * subtotal cobrado salía elegida como «pagada» y el reconciliador la cerraba.
+   */
+  it('🔴 lo que la cuenta debe INCLUYE el IVA cuando va separado (taxAmount > 0) y lo ignora cuando el precio ya lo trae (taxAmount = 0)', () => {
+    // La base canónica, verbatim: mercancía clampada + cargo + IVA clampado.
+    expect(baseQueDebeCubrirseSql('o')).toBe(
+      'GREATEST(0, o.subtotal - COALESCE(o."discountAmount", 0)) + COALESCE(o."serviceChargeAmount", 0) + GREATEST(0, COALESCE(o."taxAmount", 0))',
+    )
+    // El criterio la usa tal cual, con el alias que le pasen.
+    expect(criterioPagadaPeroAbiertaSql('x')).toContain('GREATEST(0, COALESCE(x."taxAmount", 0))')
+
+    // 🔴 El IVA va CLAMPADO: un `taxAmount` negativo (el que dejaría `estimateAverageTaxRate`
+    // sobre una orden con IVA incluido) nunca BAJA lo que la cuenta debe — ésa era la
+    // cortesía total que salía como SOBREPAGO de $300 con $0 cobrados.
+    expect(baseQueDebeCubrirseSql('o')).not.toMatch(/\+ COALESCE\(o\."taxAmount", 0\)(?!\))/)
   })
 })
 

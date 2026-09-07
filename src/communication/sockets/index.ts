@@ -281,9 +281,13 @@ export function broadcastTpvCommand(
       const correlationId = command.correlationId || require('uuid').v4()
       const timestamp = new Date().toISOString()
 
-      // Broadcast to venue - structure matches Android SocketManager.kt:732-755
-      socketManager.broadcastToVenue(
+      // 🔴 SÓLO a la terminal destinataria — nunca al venue (7-sep-2026: un FACTORY_RESET
+      // repartido al venue entero lo ejecutó la terminal equivocada). Si no tiene socket, no
+      // se entrega a nadie: el heartbeat lo lleva. Estructura del payload: Android
+      // SocketManager.kt (onTPVCommand).
+      socketManager.broadcastToTerminal(
         venueId,
+        terminalId,
         'tpv_command' as any,
         {
           terminalId,

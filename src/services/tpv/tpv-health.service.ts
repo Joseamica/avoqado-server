@@ -3,8 +3,8 @@
 import { TerminalStatus, TerminalType, TpvCommandType } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { NotFoundError, UnauthorizedError } from '../../errors/AppError'
-import { looksLikeAndroidIdFallback } from '../../utils/terminalSerial'
+import { ForbiddenError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
+import { looksLikeAndroidIdFallback, sameTerminalSerial } from '../../utils/terminalSerial'
 import { broadcastTpvStatusUpdate, broadcastTpvCommandStatusChanged } from '../../communication/sockets'
 // import { tpvCommandExecutionService } from './command-execution.service'
 import { tpvCommandQueueService } from './command-queue.service'
@@ -662,7 +662,7 @@ export class TpvHealthService {
    * @param resultStatus - The execution result status
    * @param resultMessage - Optional message describing the result
    * @param resultPayload - Optional payload with additional result data
-   * @throws BadRequestError if terminal doesn't own the command
+   * @throws ForbiddenError (403) if terminal doesn't own the command
    */
   async acknowledgeCommand(
     commandId: string,
@@ -697,17 +697,18 @@ export class TpvHealthService {
       }
 
       // Security: Validate terminal ownership
-      // The terminal sending the ACK must be the one that owns the command
-      const terminalMatches =
-        command.terminal.serialNumber?.toLowerCase() === terminalSerialNumber.toLowerCase() ||
-        command.terminal.serialNumber?.toLowerCase() === terminalSerialNumber.replace(/^AVQD-/i, '').toLowerCase() ||
-        `AVQD-${command.terminal.serialNumber}`.toLowerCase() === terminalSerialNumber.toLowerCase()
-
-      if (!terminalMatches) {
+      // The terminal sending the ACK must be the one that owns the command. Misma definición
+      // de «misma terminal» que el carril de sockets (`sameTerminalSerial`): con o sin AVQD-,
+      // en cualquier caja, en las DOS direcciones — la comparación a tres vías que vivía aquí
+      // rechazaba un acuse sin prefijo cuando la base guarda el serial con él.
+      if (!sameTerminalSerial(command.terminal.serialNumber, terminalSerialNumber)) {
         logger.warn(
           `Security: Terminal ${terminalSerialNumber} attempted to ACK command ${commandId} owned by terminal ${command.terminal.serialNumber}`,
         )
-        throw new Error(`Unauthorized: Terminal does not own this command`)
+        // 🔴 403, no un Error pelón (que salía como 500 con isOperational:false): para la cola
+        // offline de la TPV un 5xx es TRANSITORIO y la invitaba a reintentar para siempre un
+        // acuse que jamás va a aceptarse. Un 403 es definitivo y se descarta.
+        throw new ForbiddenError('La terminal no es dueña de este comando', 'TPV_COMMAND_NOT_OWNED')
       }
 
       // Map result status to command status

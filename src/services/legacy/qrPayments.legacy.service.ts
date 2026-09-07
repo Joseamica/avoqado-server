@@ -156,7 +156,7 @@ export async function getLegacyPaymentFacets(): Promise<LegacyPaymentFacets> {
   try {
     const result = await legacyPool.query(
       `SELECT
-         COALESCE(array_agg(DISTINCT CASE WHEN UPPER(COALESCE(p.method, '')) = 'CASH' THEN 'CASH' ELSE 'CARD' END), '{}') AS methods,
+         COALESCE(array_agg(DISTINCT CASE WHEN UPPER(COALESCE(p.method::text, '')) = 'CASH' THEN 'CASH' ELSE 'CARD' END), '{}') AS methods,
          COALESCE(array_agg(DISTINCT UPPER(p."cardBrand")) FILTER (WHERE p."cardBrand" IS NOT NULL AND p."cardBrand" <> ''), '{}') AS brands
        FROM "Payment" p
        WHERE p."venueId" = $1 AND p.status = 'ACCEPTED'`,
@@ -227,12 +227,26 @@ export function filterLegacyRowsByMethodSource<T extends { method: string; sourc
  * Fetch legacy QR payments for MindForm.
  * Returns { rows, total } to support pagination merge.
  */
-export async function getLegacyPayments(
-  filters?: LegacyPaymentFilters,
-): Promise<{ rows: ReturnType<typeof mapToPaymentShape>[]; total: number }> {
+export interface LegacyPaymentsPage {
+  rows: ReturnType<typeof mapToPaymentShape>[]
+  total: number
+  /**
+   * `true` SÓLO cuando el puente no pudo contestar (base legacy caída, consulta rota, pool
+   * sin configurar). Ausente cuando simplemente no hay filas. 🔴 Es lo que separa «cero
+   * pagos QR» de «la consulta reventó»: durante semanas un `COALESCE` sobre la columna
+   * enum `method` reventó SIEMPRE y estas funciones devolvían vacío — la lista filtrada por
+   * método decía «0 pagos» y el reporte de ventas subestimaba la recaudación de Mindform sin
+   * un solo aviso. Devolver vacío sigue siendo correcto (una caída del puente no puede tumbar
+   * la pantalla de pagos); disfrazarlo de vacío, no. Quien consume esto lo propaga como
+   * `legacyUnavailable` para que la pantalla lo diga.
+   */
+  unavailable?: true
+}
+
+export async function getLegacyPayments(filters?: LegacyPaymentFilters): Promise<LegacyPaymentsPage> {
   if (!legacyPool) {
     logger.warn('[LegacyQRPayments] Skipping fetch — legacyPool is null (LEGACY_DATABASE_URL not configured)')
-    return { rows: [], total: 0 }
+    return { rows: [], total: 0, unavailable: true }
   }
 
   try {
@@ -263,8 +277,8 @@ export async function getLegacyPayments(
       const wantsCash = filters.methods.includes('CASH')
       const wantsCard = filters.methods.includes('CARD')
       if (!wantsCash && !wantsCard) conditions.push('FALSE')
-      else if (wantsCash && !wantsCard) conditions.push(`UPPER(COALESCE(p.method, '')) = 'CASH'`)
-      else if (wantsCard && !wantsCash) conditions.push(`UPPER(COALESCE(p.method, '')) <> 'CASH'`)
+      else if (wantsCash && !wantsCard) conditions.push(`UPPER(COALESCE(p.method::text, '')) = 'CASH'`)
+      else if (wantsCard && !wantsCash) conditions.push(`UPPER(COALESCE(p.method::text, '')) <> 'CASH'`)
     }
     if (filters?.before) {
       const beforeIso = new Date(filters.before.createdAt).toISOString()
@@ -326,7 +340,7 @@ export async function getLegacyPayments(
       stack: err instanceof Error ? err.stack : undefined,
       filters,
     })
-    return { rows: [], total: 0 }
+    return { rows: [], total: 0, unavailable: true }
   }
 }
 
@@ -359,6 +373,12 @@ export interface LegacyPeriodMetric {
   count: number
 }
 
+export interface LegacyPeriodMetricsResult {
+  rows: LegacyPeriodMetric[]
+  /** `true` cuando el puente no pudo contestar. Ver `LegacyPaymentsPage.unavailable`. */
+  unavailable: boolean
+}
+
 /**
  * Aggregate MindForm legacy QR payments grouped by the SAME time-period
  * expression the native sales-summary uses, so the buckets align 1:1 with the
@@ -377,10 +397,10 @@ export async function getLegacyPeriodMetrics(
   reportType: LegacyPeriodReportType,
   timezone: string,
   methodFilter?: 'CARD' | 'CASH',
-): Promise<LegacyPeriodMetric[]> {
+): Promise<LegacyPeriodMetricsResult> {
   if (!legacyPool) {
     logger.warn('[LegacyQRPayments] getLegacyPeriodMetrics skipped — legacyPool is null')
-    return []
+    return { rows: [], unavailable: true }
   }
   const tz = sanitizeTimezone(timezone)
 
@@ -412,13 +432,14 @@ export async function getLegacyPeriodMetrics(
       periodExpr = `EXTRACT(DOW FROM ${wall})::int`
       break
     default:
-      return []
+      // Un tipo de reporte que no se agrupa por periodo: no hay filas que dar, y no es una caída.
+      return { rows: [], unavailable: false }
   }
 
   // Legacy method values: 'STRIPE'/null → CARD, 'CASH' → CASH (see mapMethod).
   const conditions = [`p."venueId" = $1`, `p.status = 'ACCEPTED'`, `p."createdAt" >= $2`, `p."createdAt" <= $3`]
-  if (methodFilter === 'CASH') conditions.push(`UPPER(COALESCE(p.method, '')) = 'CASH'`)
-  if (methodFilter === 'CARD') conditions.push(`UPPER(COALESCE(p.method, '')) <> 'CASH'`)
+  if (methodFilter === 'CASH') conditions.push(`UPPER(COALESCE(p.method::text, '')) = 'CASH'`)
+  if (methodFilter === 'CARD') conditions.push(`UPPER(COALESCE(p.method::text, '')) <> 'CASH'`)
   const where = conditions.join(' AND ')
 
   // Tips are aggregated in a subquery (≤1 row per payment) so that SUM(p.amount)
@@ -439,14 +460,15 @@ export async function getLegacyPeriodMetrics(
     // offset, and Postgres drops the offset when it casts the text to the `timestamp` column —
     // correct on a UTC host, six hours off on a Mexico City one. The `Z` text is host-independent.
     const res = await legacyPool.query(sql, [LEGACY_MINDFORM_VENUE_ID, new Date(startDate).toISOString(), new Date(endDate).toISOString()])
-    return res.rows.map((r: any) => ({
+    const rows = res.rows.map((r: any) => ({
       periodKey: String(Number(r.period)),
       amount: Number(r.amount_centavos) / 100,
       tips: Number(r.tip_centavos) / 100,
       count: Number(r.count),
     }))
+    return { rows, unavailable: false }
   } catch (err) {
     logger.error('[LegacyQRPayments] getLegacyPeriodMetrics failed', { error: err instanceof Error ? err.message : String(err) })
-    return []
+    return { rows: [], unavailable: true }
   }
 }

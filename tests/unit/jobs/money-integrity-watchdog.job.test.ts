@@ -67,13 +67,18 @@ describe('money-integrity-watchdog · la forma de las consultas', () => {
     expect(propinaSql).not.toMatch(/LEFT JOIN \(\s*SELECT "orderId"/)
   })
 
-  it('🔴 «sobrepago» compara contra la BASE CANÓNICA: max(0, subtotal − descuento) + cargo, sin IVA', () => {
+  it('🔴 «sobrepago» compara contra la BASE CANÓNICA: max(0, subtotal − descuento) + cargo + IVA sólo si va separado', () => {
     // La fórmula a mano (subtotal − descuento + IVA + cargo, sin clamp) alertaba una cortesía total
-    // como SOBREPAGO de $300 con $0 cobrados y escondía sobrepagos reales hasta el importe del IVA.
-    // En México el precio ya trae el IVA: `taxAmount` no suma a lo que la cuenta debe.
+    // como SOBREPAGO de $300 con $0 cobrados. El arreglo del 5-sep la cambió por la base canónica
+    // SIN IVA («en México el precio ya lo trae») y se llevó por delante la OTRA convención de
+    // `taxAmount` (> 0 ⇒ el IVA va separado y suma, como nacen las órdenes de SoftRestaurant):
+    // el 7-sep el vigilante pasó de 41 a 31,283 alarmas, 31,241 de Testarudo con el «exceso»
+    // igual al IVA al centavo. La base vuelve a incluirlo, CLAMPADO, y sólo vía el helper
+    // compartido — nunca escrito a mano aquí.
     const r = regla('SOBREPAGO')
     expect(r).toContain(baseQueDebeCubrirseSql('o'))
-    expect(r).not.toMatch(/"taxAmount"/)
+    expect(baseQueDebeCubrirseSql('o')).toContain('GREATEST(0, COALESCE(o."taxAmount", 0))')
+    expect(r).not.toMatch(/\+ o\."taxAmount"/)
     expect(r).not.toMatch(/o\.subtotal - o\."discountAmount"/)
   })
 

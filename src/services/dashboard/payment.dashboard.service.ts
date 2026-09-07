@@ -126,7 +126,7 @@ export async function getPaymentsData(
             methods: methodFilterValues,
             limit: requestedEnd,
           })
-        : Promise.resolve({ rows: [] as Awaited<ReturnType<typeof getLegacyPayments>>['rows'], total: 0 }),
+        : Promise.resolve({ rows: [], total: 0 } as Awaited<ReturnType<typeof getLegacyPayments>>),
     ])
 
     // Post-fetch: drop any legacy row that doesn't match method/source. The
@@ -156,6 +156,9 @@ export async function getPaymentsData(
         page,
         pageSize,
         pageCount: Math.ceil(combinedTotal / pageSize),
+        // 🔴 Aditivo: sólo aparece cuando el puente QR legacy NO pudo contestar. Sin esto, «la
+        // base legacy reventó» y «no hay pagos QR» se ven idénticos en la pantalla de pagos.
+        ...(legacy.unavailable ? { legacyUnavailable: true as const } : {}),
       },
     }
   }

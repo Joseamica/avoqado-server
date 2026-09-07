@@ -555,6 +555,21 @@ export class SocketManager implements ISocketManager {
     this.broadcastingService.broadcastToVenue(venueId, event, payload, options)
   }
 
+  /** Ver `BroadcastingService.broadcastToTerminal`: sólo la terminal destinataria, o nadie. */
+  public broadcastToTerminal(
+    venueId: string,
+    terminalSerialNumber: string,
+    event: SocketEventType,
+    payload: any,
+    options?: BroadcastOptions,
+  ): void {
+    if (!this.broadcastingService) {
+      logger.warn('Broadcasting service not initialized')
+      return
+    }
+    this.broadcastingService.broadcastToTerminal(venueId, terminalSerialNumber, event, payload, options)
+  }
+
   public broadcastToTable(venueId: string, tableId: string, event: SocketEventType, payload: any, options?: BroadcastOptions): void {
     if (!this.broadcastingService) {
       logger.error('📡 Broadcasting service not initialized')

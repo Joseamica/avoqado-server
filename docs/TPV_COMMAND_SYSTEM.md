@@ -235,6 +235,31 @@ if (terminal.status === TerminalStatus.INACTIVE && status === 'ACTIVE') {
 - Follows Square Terminal API pattern
 - Reliable on login screen
 
+### 6. The Socket.IO push goes ONLY to the target terminal (2026-09-07)
+
+**Problem Solved:** `broadcastTpvCommand` emitted `tpv_command` to the WHOLE venue and trusted
+each device to filter by `terminalId`. On 2026-09-07 a SUPERADMIN sent `FACTORY_RESET` to
+Testarudo's PAX WHITE (`AVQD-2841653112`) and the NEXGO BLACK (`AVQD-N860W173400`) answered
+"Factory reset completed": the client-side filter (`CommandTarget.kt`) only shipped in
+`nexgo-v2.8.6`, which the fleet does not have. The only server-side check lived in the ACK —
+after the wipe.
+
+**Design:**
+
+- `BroadcastingService.broadcastToTerminal(venueId, serial, event, payload)` emits to the venue
+  sockets whose **JWT** carries that `terminalSerialNumber` (stamped by the TPV login; the socket
+  auth middleware copies it into `authContext`). A socket whose token has no serial only counts
+  if the terminal registry (fed by the client-claimed handshake `terminalId`) maps the target to
+  it — a fallback for legacy tokens, never above the JWT.
+- **No match ⇒ nobody receives the push.** It never falls back to the venue: the heartbeat is
+  the primary channel and is already per-serial (`getPendingCommands`), so the command arrives
+  on the next heartbeat at worst.
+- `tpv_command_sent` (informational, consumed by the dashboard) still goes to the venue.
+- The ACK ownership guard now throws `ForbiddenError` (403) instead of a bare `Error` (500): a
+  5xx is *transient* for the TPV offline queue and invited endless retries of an ACK that can
+  never be accepted. Serial comparison is `sameTerminalSerial()` (`utils/terminalSerial.ts`) on
+  both paths — with or without `AVQD-`, any case, both directions.
+
 ## Key File Locations
 
 ```
@@ -342,4 +367,5 @@ tail -f logs/development*.log | grep -E "(command|heartbeat|ACK|MAINTENANCE)"
 ### Room Structure
 
 - Dashboard clients join: `venue_{venueId}`
-- Events broadcast to venue room for real-time updates
+- Status/response events broadcast to the venue room for real-time updates
+- `tpv_command` is delivered ONLY to the target terminal's socket (see Decision 6) — never to the venue

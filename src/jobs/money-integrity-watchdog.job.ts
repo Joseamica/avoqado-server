@@ -200,10 +200,12 @@ export function buildWatchdogSql(): { counts: string; details: string } {
         --    Mindform 2026-06-21/22, cuenta de $380 con $734 cobrados en 3 tarjetazos (2026-08-04).
         --    Se compara contra Payment.amount (SIN propina): la propina es dinero extra legítimo.
         --    🔴 La «cuenta» es la BASE CANÓNICA (baseQueDebeCubrirseSql): max(0, subtotal − descuento)
-        --    + cargo por servicio, SIN impuesto — en México el precio ya lo trae, y taxAmount es
-        --    informativo. La fórmula a mano que vivió aquí hasta el 5-sep-2026 sumaba el IVA y no
-        --    clampaba: una cortesía total (descuento > subtotal, taxAmount negativo) salía como
-        --    SOBREPAGO de $300 con $0 cobrados, y un sobrepago real hasta el importe del IVA no se veía.
+        --    + cargo por servicio + max(0, IVA). El IVA sólo pesa cuando taxAmount > 0, que es la
+        --    convención «va separado y suma al total» (SoftRestaurant/Testarudo); con taxAmount = 0
+        --    el precio ya lo trae y no suma nada. La fórmula a mano que vivió aquí hasta el 5-sep-2026
+        --    sumaba el IVA sin clampar (una cortesía total salía como SOBREPAGO de $300 con $0
+        --    cobrados); la del 5 al 7-sep lo quitó del todo y marcó como sobrepago a 31,241 clientes
+        --    de Testarudo que pagaron exactamente su cuenta. La base vive en el helper, no aquí.
         SELECT 'SOBREPAGO', v.name, o.id,
                'cobrado=' || ROUND(pg.cobrado::numeric, 2) || ' cuenta=' || ROUND(pg.cuenta::numeric, 2) ||
                ' exceso=' || ROUND((pg.cobrado - pg.cuenta)::numeric, 2) || ' cobros=' || pg.n

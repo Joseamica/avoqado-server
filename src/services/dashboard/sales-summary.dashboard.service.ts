@@ -161,6 +161,13 @@ export interface SalesSummaryResponse {
   byMerchantAccount?: MerchantAccountBreakdown[] // additive; present only when includeMerchantBreakdown=true
   settlementCalendar?: SettlementCalendarDay[] // additive; present only when includeSettlementProjection=true
   filtered: boolean
+  /**
+   * Additive; present ONLY when the MindForm legacy QR bridge could not answer (legacy DB down,
+   * broken query, pool not configured). Without it, "legacy rows are zero" and "the legacy query
+   * failed" are indistinguishable — a COALESCE on the enum `method` column failed for weeks and the
+   * report silently under-counted Mindform's QR revenue whenever a method filter was applied.
+   */
+  legacyUnavailable?: true
 }
 
 export type ReportType = 'summary' | 'hours' | 'days' | 'weeks' | 'months' | 'hourlySum' | 'dailySum'
@@ -713,13 +720,16 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     // the period bars match this legacy-only headline total. Order-derived
     // metrics are null; payment-derived metrics come from the legacy aggregate.
     let byPeriod: TimePeriodMetrics[] | undefined
+    let legacyUnavailable = false
     if ((reportType as string) !== 'summary') {
-      const legacyRowsByPeriod = await getLegacyPeriodMetrics(
+      const legacyPeriod = await getLegacyPeriodMetrics(
         parsedStartDate.toISOString(),
         parsedEndDate.toISOString(),
         reportType as LegacyPeriodReportType,
         timezone, // no methodFilter — all legacy
       )
+      legacyUnavailable = legacyPeriod.unavailable
+      const legacyRowsByPeriod = legacyPeriod.rows
       const legacyMap = new Map(legacyRowsByPeriod.map(r => [r.periodKey, r]))
       const allPeriods = generateAllPeriods(reportType)
       if (allPeriods.length > 0) {
@@ -752,6 +762,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       summary,
       byPeriod,
       filtered: true,
+      ...(legacyUnavailable ? { legacyUnavailable: true as const } : {}),
     }
   }
 
@@ -1258,9 +1269,10 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // ============================================================
 
   let byPeriod: TimePeriodMetrics[] | undefined
+  let legacyUnavailable = false
 
   if (reportType !== 'summary') {
-    byPeriod = await calculateTimePeriodMetrics(
+    const periodos = await calculateTimePeriodMetrics(
       venueId,
       parsedStartDate,
       parsedEndDate,
@@ -1270,6 +1282,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       paymentMethod,
       cardType,
     )
+    byPeriod = periodos.periods
+    legacyUnavailable = periodos.legacyUnavailable
   }
 
   // Per-merchant card breakdown for the reconciliation view (additive; opt-in).
@@ -1319,6 +1333,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     byMerchantAccount,
     settlementCalendar,
     filtered: isFiltered,
+    ...(legacyUnavailable ? { legacyUnavailable: true as const } : {}),
   }
 }
 
@@ -1497,7 +1512,7 @@ async function calculateTimePeriodMetrics(
   merchantAccountId?: string,
   paymentMethod?: PaymentMethodFilter,
   cardType?: CardTypeFilter,
-): Promise<TimePeriodMetrics[]> {
+): Promise<{ periods: TimePeriodMetrics[]; legacyUnavailable: boolean }> {
   // When a payment-method filter is active, order-derived metrics (gross/items/
   // discounts/taxes/deferred) become null and the corresponding raw queries are
   // skipped. Payment-derived queries get the SQL clause appended.
@@ -1547,7 +1562,7 @@ async function calculateTimePeriodMetrics(
       orderByExpression = 'period'
       break
     default:
-      return []
+      return { periods: [], legacyUnavailable: false }
   }
 
   // Optional merchant filter clause for raw SQL queries
@@ -1768,19 +1783,21 @@ async function calculateTimePeriodMetrics(
   // period bars sum to the legacy-inclusive headline total. Delete with the
   // rest of the MindForm QR bridge when native QR ships.
   let legacyPeriodMap = new Map<string, LegacyPeriodMetric>()
+  let legacyUnavailable = false
   if (venueId === MINDFORM_NEW_VENUE_ID && (reportType as string) !== 'summary') {
     // Single source of truth for which legacy rows the active filter admits.
     // QR_LEGACY never reaches here (getSalesSummary short-circuits it).
     const admission = legacyAdmission(paymentMethod, cardType)
     if (admission.include) {
-      const legacyRows = await getLegacyPeriodMetrics(
+      const legacyPeriod = await getLegacyPeriodMetrics(
         startDate.toISOString(),
         endDate.toISOString(),
         reportType as LegacyPeriodReportType,
         timezone,
         admission.method,
       )
-      legacyPeriodMap = new Map(legacyRows.map(r => [r.periodKey, r]))
+      legacyPeriodMap = new Map(legacyPeriod.rows.map(r => [r.periodKey, r]))
+      legacyUnavailable = legacyPeriod.unavailable
     }
   }
 
@@ -1902,7 +1919,7 @@ async function calculateTimePeriodMetrics(
     }
   })
 
-  return result
+  return { periods: result, legacyUnavailable }
 }
 
 /**

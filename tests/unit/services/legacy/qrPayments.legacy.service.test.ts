@@ -20,6 +20,7 @@ import {
   filterLegacyRowsByMethodSource,
   getLegacyPaymentFacets,
   getLegacyPayments,
+  getLegacyPeriodMetrics,
   LEGACY_METHOD_VALUES,
   LEGACY_SOURCE_VALUE,
 } from '@/services/legacy/qrPayments.legacy.service'
@@ -62,7 +63,7 @@ describe('qrPayments.legacy.service — páginas estables', () => {
     ).resolves.toEqual({ rows: [], total: 12 })
 
     const [dataSql, dataParams] = mockLegacyQuery.mock.calls[0]
-    expect(dataSql).toContain("UPPER(COALESCE(p.method, '')) = 'CASH'")
+    expect(dataSql).toContain("UPPER(COALESCE(p.method::text, '')) = 'CASH'")
     expect(dataSql).toContain('ORDER BY p."createdAt" DESC, p.id DESC LIMIT')
     expect(dataParams.at(-1)).toBe(25)
     expect(dataParams.slice(1, 3)).toEqual(['2026-08-01T00:00:00.000Z', '2026-08-31T23:59:59.999Z'])
@@ -170,5 +171,75 @@ describe('qrPayments.legacy.service — filterLegacyRowsByMethodSource', () => {
     // methods=['CREDIT_CARD'] excludes every legacy row (legacy is CASH/CARD).
     const result = filterLegacyRowsByMethodSource(baseRows, { methods: ['CREDIT_CARD'] })
     expect(result).toEqual([])
+  })
+})
+
+/**
+ * 🔴 `Payment.method` es un ENUM (`PaymentMethod`) en la base legacy (7-sep-2026).
+ *
+ * `COALESCE(p.method, '')` obliga a Postgres a convertir `''` al enum y revienta SIEMPRE:
+ * «invalid input value for enum "PaymentMethod": ""». No es intermitente ni depende de los
+ * datos, y las tres funciones que lo tenían se tragaban el error y devolvían VACÍO:
+ *   · las facetas del puente nunca aparecían;
+ *   · la lista filtrada por Efectivo/Tarjeta daba `{rows: [], total: 0}` sin aviso;
+ *   · el reporte de ventas filtrado por método dejaba fuera, en silencio, toda la
+ *     recaudación QR legacy de Mindform — esconder datos sin decirlo, justo lo que prohíbe
+ *     `bounded-queries-and-server-load.md`.
+ * Verificado en el Postgres local, que tiene el MISMO enum: la versión con `::text` cuenta
+ * 737 filas; la versión sin cast falla al parsear.
+ */
+describe('qrPayments.legacy.service — la columna method se compara como TEXTO (es un enum)', () => {
+  const RANGO = ['2026-08-01T00:00:00.000Z', '2026-08-31T23:59:59.999Z'] as const
+  const sinCoalesceSobreElEnum = (sql: string) => {
+    expect(sql).not.toContain("COALESCE(p.method, '')")
+    expect(sql).toContain("COALESCE(p.method::text, '')")
+  }
+
+  it('facetas', async () => {
+    mockLegacyQuery.mockResolvedValueOnce({ rows: [{ methods: ['CASH'], brands: [] }] })
+    await getLegacyPaymentFacets()
+    sinCoalesceSobreElEnum(mockLegacyQuery.mock.calls.at(-1)![0])
+  })
+
+  it.each([['CASH'], ['CARD']])('lista filtrada por %s', async metodo => {
+    mockLegacyQuery.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{ total: 0 }] })
+    await getLegacyPayments({ methods: [metodo], limit: 10 })
+    sinCoalesceSobreElEnum(mockLegacyQuery.mock.calls.at(-2)![0])
+  })
+
+  it.each(['CASH', 'CARD'] as const)('métricas por periodo filtradas por %s', async metodo => {
+    mockLegacyQuery.mockResolvedValueOnce({ rows: [] })
+    await getLegacyPeriodMetrics(RANGO[0], RANGO[1], 'days', 'America/Mexico_City', metodo)
+    sinCoalesceSobreElEnum(mockLegacyQuery.mock.calls.at(-1)![0])
+  })
+})
+
+/**
+ * Cuando la base legacy FALLA, la respuesta lo DICE. Seguir devolviendo vacío es correcto
+ * (una caída del puente no puede tumbar la pantalla de pagos de Mindform), pero «cero filas»
+ * y «la consulta reventó» no pueden ser indistinguibles: es lo que volvió invisible durante
+ * semanas la pérdida de arriba.
+ */
+describe('qrPayments.legacy.service — una caída del puente se DECLARA, no se disfraza de vacío', () => {
+  it('la lista marca `unavailable` cuando la consulta revienta; y NO lo marca cuando simplemente no hay filas', async () => {
+    mockLegacyQuery.mockRejectedValueOnce(new Error('invalid input value for enum "PaymentMethod": ""'))
+    await expect(getLegacyPayments({ methods: ['CASH'], limit: 10 })).resolves.toEqual({ rows: [], total: 0, unavailable: true })
+
+    mockLegacyQuery.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{ total: 0 }] })
+    const vacia = await getLegacyPayments({ methods: ['CASH'], limit: 10 })
+    expect(vacia).toEqual({ rows: [], total: 0 })
+    expect(vacia).not.toHaveProperty('unavailable')
+  })
+
+  it('las métricas por periodo devuelven `{rows, unavailable}` — vacío-por-error ≠ vacío-por-datos', async () => {
+    mockLegacyQuery.mockRejectedValueOnce(new Error('boom'))
+    await expect(
+      getLegacyPeriodMetrics('2026-08-01T00:00:00.000Z', '2026-08-31T23:59:59.999Z', 'days', 'America/Mexico_City'),
+    ).resolves.toEqual({ rows: [], unavailable: true })
+
+    mockLegacyQuery.mockResolvedValueOnce({ rows: [{ period: '1756684800000', amount_centavos: '12345', tip_centavos: '100', count: 2 }] })
+    await expect(
+      getLegacyPeriodMetrics('2026-08-01T00:00:00.000Z', '2026-08-31T23:59:59.999Z', 'days', 'America/Mexico_City'),
+    ).resolves.toEqual({ rows: [{ periodKey: '1756684800000', amount: 123.45, tips: 1, count: 2 }], unavailable: false })
   })
 })

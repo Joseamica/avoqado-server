@@ -89,7 +89,10 @@ services:
   - type: web
     name: avoqado-server
     env: node
-    plan: standard
+    # 🔴 El plan lo APLICA el sync del blueprint (medido 7-sep-2026: un `plan_changed` silencioso). Tiene
+    # que decir lo que hay en el panel. Decisión del founder (7-sep-2026): 1 CPU / 2 GB ($25/mes) — la
+    # lentitud era la URL externa de la base, no la máquina (uso real: ~400 MB, CPU ~0).
+    plan: 1c-2g
     region: oregon
     autoDeploy: false
     branch: main

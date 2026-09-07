@@ -41,3 +41,33 @@ export function looksLikeAndroidIdFallback(terminalId: string): boolean {
     .replace(/^AVQD-/, '')
   return /^[0-9A-F]{16}$/.test(bare) && /[A-F]/.test(bare)
 }
+
+/**
+ * Llave de identidad de una terminal para COMPARAR: sin `AVQD-`, sin espacios, en minúsculas.
+ *
+ * El mismo serial circula en producción como `AVQD-N860W173570`, `N860W173570` y
+ * `n860w173570` (la base lo guarda con prefijo — `normalizeTerminalSerialNumber` —, la app lo
+ * manda como lo lee del hardware, y el dashboard lo teclea como puede). Es la MISMA regla que
+ * usa el registro de sockets (`terminal-registry.ts`), que delega aquí.
+ */
+export function terminalIdentityKey(serial: string): string {
+  return serial
+    .trim()
+    .replace(/^AVQD-/i, '')
+    .toLowerCase()
+}
+
+/**
+ * ¿`a` y `b` nombran la MISMA terminal? Única definición — la usan el guardia de propiedad del
+ * ACK (`tpv-health.service.ts`) y el carril de sockets que entrega un comando SÓLO a su
+ * destinataria (`broadcasting.service.ts`). Antes cada uno comparaba a su manera: el guardia
+ * del ACK tenía una comparación a tres vías que aceptaba «base sin prefijo, acuse con prefijo»
+ * pero rechazaba la dirección contraria.
+ *
+ * Un serial vacío nunca coincide con nada: un aparato sin identidad no es dueño de ningún comando.
+ */
+export function sameTerminalSerial(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false
+  const ka = terminalIdentityKey(a)
+  return ka.length > 0 && ka === terminalIdentityKey(b)
+}

@@ -9,6 +9,7 @@
  */
 
 import logger from '../../config/logger'
+import { terminalIdentityKey } from '../../utils/terminalSerial'
 
 interface TerminalEntry {
   socketId: string | null // null if registered via HTTP heartbeat (no socket known yet)
@@ -28,7 +29,7 @@ interface TerminalEntry {
  * exact same normalized id the registry uses (AVQD-ABC and abc = one slot).
  */
 export function normalizeTerminalId(terminalId: string): string {
-  return terminalId.replace(/^AVQD-/i, '').toLowerCase()
+  return terminalIdentityKey(terminalId)
 }
 
 class TerminalRegistry {
