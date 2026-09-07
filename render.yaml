@@ -21,11 +21,11 @@ services:
     region: oregon
     autoDeploy: false
     branch: develop
+    # 🔴 Staging es plan FREE y Render NO admite preDeployCommand en free ("pre-deploy command is
+    # not supported for free tier services" — el sync del blueprint entero se rechaza por esa línea,
+    # medido el 7-sep-2026). Aquí las migraciones se quedan en el build, con la DATABASE_URL externa.
     buildCommand: >-
-      npm ci --include=dev && npx prisma generate && NODE_OPTIONS=--max-old-space-size=4096 npm run build
-    # Migraciones en el pre-deploy (instancia aparte, misma red privada que el servicio): así la
-    # DATABASE_URL puede ser la INTERNA de Render, que el build no alcanza. Render lo recomienda.
-    preDeployCommand: npm run migrate:deploy:bounded
+      npm ci --include=dev && npx prisma generate && NODE_OPTIONS=--max-old-space-size=4096 npm run build && npm run migrate:deploy:bounded
     startCommand: npm start
     healthCheckPath: /health
     envVars:
