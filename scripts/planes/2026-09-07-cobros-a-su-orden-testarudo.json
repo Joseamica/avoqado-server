@@ -1,0 +1,20 @@
+{
+  "descripcion": "Cobro con tarjeta que aterrizó en la orden vecina ya cobrada (Testarudo, 2-sep-2026 08:59). Verificado en producción el 6-sep con la bitácora y las solicitudes de cobro de la tablet: la tablet pidió cobrar ORD-1788361176197 a la terminal y falló al instante (TPV_ERROR 08:59:38); tres segundos después se cobró $145 (VISA …995F, otra tarjeta que la de ORD-1788360938530) directo en la terminal, que aún mostraba la orden anterior; la cancelación vino DESPUÉS (08:59:52). Productos distintos en cada orden. Dos clientes, nadie pagó dos veces.",
+  "casos": [
+    {
+      "paymentId": "cmtk82mu706l4ml29wm51w4vm",
+      "deOrden": "ORD-1788360938530",
+      "aOrden": "ORD-1788361176197",
+      "motivo": "CREDIT $145.00 de las 08:59:41 (2-sep) cayó en ORD-1788360938530, que ya tenía su DEBIT $145.00 de las 08:57. La orden real ORD-1788361176197 (cuenta $145 + $14.50 de propina = $159.50) quedó CANCELLED a las 08:59. El cobro trae propina 0: la propina de $14.50 no consta en ningún Payment."
+    }
+  ],
+  "noAplicar": [
+    {
+      "paymentId": "cmtki3joh012bqr2bwkyrqopt",
+      "deOrden": "ORD-1788378009269",
+      "aOrden": "ORD-1788377979686",
+      "motivo": "DEBIT $46.75 + $7.01 de propina de las 13:40:19 (2-sep) = exactamente los $53.76 de ORD-1788377979686, cancelada a las 13:39. Cayó en ORD-1788378009269, que a las 13:40:59 recibió su propio CREDIT por lo mismo.",
+      "porQue": "PROBABLE DOBLE CARGO, no un cobro mal puesto. Daniel creó ORD-1788377979686 (13:39:39), canceló su solicitud a la terminal (13:39:42), la segunda falló (TPV_ERROR 13:39:47), canceló la orden (13:39:49) y la re-creó idéntica como ORD-1788378009269 (13:40:09). La terminal cobró B con Mastercard …000F por el camino normal (solicitud 13:40:10 → COMPLETED 13:40:20). A las 13:40:59 entró un AMEX …000F por el mismo monto y la misma propina SIN ninguna solicitud nueva de la tablet y sin orden para un segundo cliente. Remedio si Testarudo lo confirma: reembolsar los $53.76 del AMEX (pago cmtki4edy012uqr2bfp5jkods); la orden A se queda cancelada."
+    }
+  ]
+}
