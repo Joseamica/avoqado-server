@@ -75,8 +75,22 @@ export interface OrgSaleListFilters {
 }
 
 export interface OrgSaleListRow {
+  /**
+   * 🔴 AMBIGUO A PROPÓSITO, y por eso existe `hasVerification`: es el id de la
+   * `SaleVerification` cuando existe, y el del `Payment` cuando no. Sólo el primero
+   * sirve para aprobar/rechazar/revisar/editar — mandar el segundo devuelve 404
+   * «Sale verification not found» (Asana 1218158516825558).
+   */
   id: string
   paymentId: string
+  /**
+   * True si el pago tiene `SaleVerification`. Mismo campo y misma semántica que el
+   * contrato venue-scoped (`sale-verification.dashboard.service.ts`), que es de donde
+   * faltaba: sin él, `status` es indistinguible entre una verificación realmente
+   * pendiente y el 'PENDING' fabricado de un pago huérfano, y la UI ofrece acciones
+   * que el servidor rechaza siempre.
+   */
+  hasVerification: boolean
   status: SaleVerificationStatus
   isPortabilidad: boolean
   photos: string[]
@@ -294,6 +308,7 @@ export async function listOrgSaleVerifications(orgId: string, filters: OrgSaleLi
     return {
       id: v?.id ?? p.id,
       paymentId: p.id,
+      hasVerification: v !== null && v !== undefined,
       status: v?.status ?? 'PENDING',
       isPortabilidad: isPort,
       photos: v?.photos ?? [],

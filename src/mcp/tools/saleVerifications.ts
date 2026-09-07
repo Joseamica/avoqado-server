@@ -114,7 +114,7 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
 
   server.tool(
     'list_sale_verifications',
-    'List INDIVIDUAL sale verifications (the back-office approval queue) for your organization — the per-sale detail behind the confirmed-sales counters. Each row is one sale with its status (PENDING/COMPLETED/FAILED/REJECTED), the promoter, the store, the SIM(s), and — when not approved — WHY. Filter by status (e.g. FAILED = las que el promotor debe corregir; REJECTED = rechazadas), by promoter (staffId), by portabilidad, or free `search` (ICCID / promoter name). Answers "muéstrame las ventas en revisión / rechazadas y por qué", "¿qué tiene pendiente de corregir el promotor X?". Paginated. Serialized-inventory / PlayTelecom back-office.',
+    'List INDIVIDUAL sale verifications (the back-office approval queue) for your organization — the per-sale detail behind the confirmed-sales counters. Each row is one sale with its status (PENDING/COMPLETED/FAILED/REJECTED), the promoter, the store, the SIM(s), and — when not approved — WHY. Filter by status (e.g. FAILED = las que el promotor debe corregir; REJECTED = rechazadas), by promoter (staffId), by portabilidad, or free `search` (ICCID / promoter name). Answers "muéstrame las ventas en revisión / rechazadas y por qué", "¿qué tiene pendiente de corregir el promotor X?". Paginated. Serialized-inventory / PlayTelecom back-office. IMPORTANT: a row with hasVerification:false is a payment that was recorded WITHOUT its sale verification (no SIM, no promoter, no photos) — its `id` is the PAYMENT id, not a verification id, so it CANNOT be approved, rejected or edited. Report those rows as incomplete sales that need support; never pass their id to review_sale_verification.',
     {
       status: z.enum(['PENDING', 'COMPLETED', 'FAILED', 'REJECTED']).optional().describe('Filter by verification status'),
       staffId: z.string().optional().describe('Only sales by this promoter (staffId)'),
@@ -169,7 +169,12 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
     'review_sale_verification',
     'Approve or reject ONE PENDING sale verification (back-office documentation review — approving is what makes Walmart pay PlayTelecom for a sale). decision: "approve" → COMPLETED ("venta correcta"); "reject" → FAILED (the promoter re-uploads/corrects it on the TPV); "reject_final" → REJECTED (terminal loss). Only PENDING sales can be reviewed — if it is already COMPLETED, reopen it first; to fix data use edit_sale_verification. For "reject" you MUST give reviewNotes (min 5 chars) telling the promoter WHAT to fix; rejectionReasons are optional. Find the id with list_sale_verifications (it searches by ICCID / promoter). By DEFAULT this only PREVIEWS; call again with confirm:true. This WRITES — requires sale-verifications:review.',
     {
-      saleVerificationId: z.string().min(1).describe('The verification id (from list_sale_verifications)'),
+      saleVerificationId: z
+        .string()
+        .min(1)
+        .describe(
+          'The verification id (from a list_sale_verifications row with hasVerification:true — a row with false carries a payment id and will 404)',
+        ),
       decision: z
         .enum(['approve', 'reject', 'reject_final'])
         .describe('approve → COMPLETED; reject → FAILED (promoter fixes on TPV); reject_final → REJECTED (terminal)'),
