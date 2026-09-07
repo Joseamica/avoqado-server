@@ -208,14 +208,15 @@ const prismaMock: any = {
     updateMany: jest.fn(),
     findUnique: jest.fn(),
   },
+  // 🔴 Parte de `createMockModel()` y sólo DESPUÉS fija sus defaults. Escrito a mano enumeraba
+  // 7 operaciones y le faltaba `deleteMany`, así que la limpieza de demos —que borra estas
+  // filas antes del venue— reventaba con un TypeError tres capas abajo, en una suite que no
+  // habla de referidos. Es la trampa de [[mock-de-modulo-con-lista-fija]]: lo que el doble
+  // ENUMERA se rompe en cuanto producción usa una operación más.
   referralRewardGrant: {
+    ...createMockModel(),
     findMany: jest.fn().mockResolvedValue([]),
-    create: jest.fn(),
     createMany: jest.fn().mockResolvedValue({ count: 1 }),
-    update: jest.fn(),
-    updateMany: jest.fn(),
-    findUnique: jest.fn(),
-    findFirst: jest.fn(),
   },
   referralTierUnlock: { createMany: jest.fn().mockResolvedValue({ count: 1 }), findUnique: jest.fn(), delete: jest.fn() },
   // Venue Role Config (custom role display names)
