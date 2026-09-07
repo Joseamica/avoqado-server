@@ -5,7 +5,14 @@ import { Decimal } from '@prisma/client/runtime/library'
 import AppError from '@/errors/AppError'
 import { logAction } from './activity-log.service'
 import { areUnitsCompatible } from '../../utils/unitConversion'
-import { calculateRecipeCostV1, RecipeCostCalculationError } from './recipe-cost-calculator'
+import {
+  calculateRecipeCostV1,
+  describeRecipeCostErrorV1,
+  MIN_STORABLE_RECIPE_QUANTITY,
+  RecipeCostCalculationError,
+  storesAsNonzeroRecipeQuantityV1,
+  type RecipeCostLineDescriptionV1,
+} from './recipe-cost-calculator'
 import {
   acquireRecipeCostGraphVenueLockV1,
   lockRecipeCostGraphRowsV1,
@@ -13,20 +20,48 @@ import {
   lockRecipeCostRawMaterialsForShareV1,
 } from './recipe-cost-graph-lock'
 
-function calculateRecipeCostForMutationV1(input: Parameters<typeof calculateRecipeCostV1>[0]) {
+function calculateRecipeCostForMutationV1(
+  input: Parameters<typeof calculateRecipeCostV1>[0],
+  describedLines: readonly RecipeCostLineDescriptionV1[] = [],
+) {
   try {
     return calculateRecipeCostV1(input)
   } catch (error) {
     // WHY: Invalid historical graph data is actionable 422 state, never an
     // unexpected 500 leaking calculator internals from a mutation endpoint.
+    // The message names the offending ingredient because the dashboard prints
+    // it verbatim and the culprit is usually a line the user did not touch.
     if (error instanceof RecipeCostCalculationError) {
-      throw new AppError('Recipe cost inputs are invalid', 422, true, 'RECIPE_COST_INPUT_INVALID', {
+      throw new AppError(describeRecipeCostErrorV1(error, describedLines), 422, true, 'RECIPE_COST_INPUT_INVALID', {
         reason: error.code,
         lineId: error.lineId,
       })
     }
     throw error
   }
+}
+
+/**
+ * Reject a quantity the database would round away to 0 before it is written.
+ * Zod already guards the HTTP boundary; this guards every other caller (the
+ * chatbot action engine today), so a recipe can never be born uneditable.
+ */
+function assertRecipeLineQuantitiesAreStorable(lines: ReadonlyArray<{ quantity: number; ingredientName?: string }>): void {
+  for (const line of lines) {
+    if (storesAsNonzeroRecipeQuantityV1(line.quantity)) continue
+    const subject = line.ingredientName ? `de "${line.ingredientName}" ` : ''
+    throw new AppError(
+      `La cantidad ${subject}es demasiado pequeña: se guarda con 3 decimales, así que debe ser al menos ${MIN_STORABLE_RECIPE_QUANTITY}.`,
+      400,
+      true,
+      'RECIPE_QUANTITY_TOO_SMALL',
+    )
+  }
+}
+
+/** Line id → ingredient name, so a 422 can name the row the operator must fix. */
+function describeRecipeLinesV1(lines: ReadonlyArray<{ id: string; rawMaterial: { name: string } }>): RecipeCostLineDescriptionV1[] {
+  return lines.map(line => ({ id: line.id, ingredientName: line.rawMaterial.name }))
 }
 
 async function findAndLockRecipeGraphByProductV1(
@@ -157,16 +192,28 @@ export async function createRecipe(venueId: string, productId: string, data: Cre
       )
     }
     assertRecipeLinesUnitsAreValid(data.lines, rawMaterials)
-
-    const calculated = calculateRecipeCostForMutationV1({
-      portionYield: data.portionYield,
-      lines: data.lines.map((line, index) => ({
-        id: `new:${index}`,
-        quantity: new Decimal(line.quantity),
-        unit: line.unit as Unit,
-        rawMaterial: rawMaterials.find(rawMaterial => rawMaterial.id === line.rawMaterialId)!,
+    assertRecipeLineQuantitiesAreStorable(
+      data.lines.map(line => ({
+        quantity: line.quantity,
+        ingredientName: rawMaterials.find(rawMaterial => rawMaterial.id === line.rawMaterialId)?.name,
       })),
-    })
+    )
+
+    const calculated = calculateRecipeCostForMutationV1(
+      {
+        portionYield: data.portionYield,
+        lines: data.lines.map((line, index) => ({
+          id: `new:${index}`,
+          quantity: new Decimal(line.quantity),
+          unit: line.unit as Unit,
+          rawMaterial: rawMaterials.find(rawMaterial => rawMaterial.id === line.rawMaterialId)!,
+        })),
+      },
+      data.lines.map((line, index) => ({
+        id: `new:${index}`,
+        ingredientName: rawMaterials.find(rawMaterial => rawMaterial.id === line.rawMaterialId)!.name,
+      })),
+    )
     const costsByIndex = new Map(calculated.lines.map(line => [Number(line.id.slice(4)), line.costPerServing]))
 
     const created = await tx.recipe.create({
@@ -243,17 +290,29 @@ export async function updateRecipe(venueId: string, productId: string, data: Upd
             )
           }
           assertRecipeLinesUnitsAreValid(data.lines, rawMaterials)
+          assertRecipeLineQuantitiesAreStorable(
+            data.lines.map(line => ({
+              quantity: line.quantity,
+              ingredientName: rawMaterials.find(rawMaterial => rawMaterial.id === line.rawMaterialId)?.name,
+            })),
+          )
 
           const portionYield = data.portionYield ?? existingRecipe.portionYield
-          const calculated = calculateRecipeCostForMutationV1({
-            portionYield,
-            lines: data.lines.map((line, index) => ({
+          const calculated = calculateRecipeCostForMutationV1(
+            {
+              portionYield,
+              lines: data.lines.map((line, index) => ({
+                id: `new:${index}`,
+                quantity: new Decimal(line.quantity),
+                unit: line.unit as Unit,
+                rawMaterial: rawMaterials.find(rawMaterial => rawMaterial.id === line.rawMaterialId)!,
+              })),
+            },
+            data.lines.map((line, index) => ({
               id: `new:${index}`,
-              quantity: new Decimal(line.quantity),
-              unit: line.unit as Unit,
-              rawMaterial: rawMaterials.find(rawMaterial => rawMaterial.id === line.rawMaterialId)!,
+              ingredientName: rawMaterials.find(rawMaterial => rawMaterial.id === line.rawMaterialId)!.name,
             })),
-          })
+          )
           const costsByIndex = new Map(calculated.lines.map(line => [Number(line.id.slice(4)), line.costPerServing]))
 
           await tx.recipeLine.deleteMany({ where: { recipeId: existingRecipe.id } })
@@ -283,10 +342,13 @@ export async function updateRecipe(venueId: string, productId: string, data: Upd
 
         // WHY: Yield is the denominator for aggregate and line costs; the
         // calculation uses only the graph reread after every row lock.
-        const calculated = calculateRecipeCostForMutationV1({
-          portionYield: data.portionYield as number,
-          lines: existingRecipe.lines,
-        })
+        const calculated = calculateRecipeCostForMutationV1(
+          {
+            portionYield: data.portionYield as number,
+            lines: existingRecipe.lines,
+          },
+          describeRecipeLinesV1(existingRecipe.lines),
+        )
         for (const line of calculated.lines) {
           await tx.recipeLine.update({ where: { id: line.id }, data: { costPerServing: line.costPerServing } })
         }
@@ -375,21 +437,25 @@ export async function addRecipeLine(
       throw new AppError(`Ingredient is inactive, deleted, or not found. ` + `Please reactivate it or choose an alternative.`, 400)
     }
     assertRecipeLinesUnitsAreValid([{ rawMaterialId: data.rawMaterialId, unit: data.unit }], [rawMaterial])
+    assertRecipeLineQuantitiesAreStorable([{ quantity: data.quantity, ingredientName: rawMaterial.name }])
 
     // WHY: Recomputing the entire locked graph makes add-line atomic even when
     // historical derived columns were already stale before this mutation.
-    const calculated = calculateRecipeCostForMutationV1({
-      portionYield: recipe.portionYield,
-      lines: [
-        ...recipe.lines,
-        {
-          id: 'new-line',
-          quantity: new Decimal(data.quantity),
-          unit: data.unit as Unit,
-          rawMaterial,
-        },
-      ],
-    })
+    const calculated = calculateRecipeCostForMutationV1(
+      {
+        portionYield: recipe.portionYield,
+        lines: [
+          ...recipe.lines,
+          {
+            id: 'new-line',
+            quantity: new Decimal(data.quantity),
+            unit: data.unit as Unit,
+            rawMaterial,
+          },
+        ],
+      },
+      [...describeRecipeLinesV1(recipe.lines), { id: 'new-line', ingredientName: rawMaterial.name }],
+    )
     for (const lineCost of calculated.lines.filter(line => line.id !== 'new-line')) {
       await tx.recipeLine.update({ where: { id: lineCost.id }, data: { costPerServing: lineCost.costPerServing } })
     }
@@ -456,15 +522,19 @@ export async function updateRecipeLine(
     const nextUnit = (data.unit ?? line.unit) as Unit
     const nextQuantity = data.quantity ?? line.quantity.toNumber()
     assertRecipeLinesUnitsAreValid([{ rawMaterialId: line.rawMaterialId, unit: nextUnit }], [line.rawMaterial])
+    assertRecipeLineQuantitiesAreStorable([{ quantity: nextQuantity, ingredientName: line.rawMaterial.name }])
 
     // WHY: The modified input and every untouched line share one post-lock
     // calculation, so aggregate and derived rows commit from the same snapshot.
-    const calculated = calculateRecipeCostForMutationV1({
-      portionYield: recipe.portionYield,
-      lines: recipe.lines.map(candidate =>
-        candidate.id === recipeLineId ? { ...candidate, quantity: new Decimal(nextQuantity), unit: nextUnit } : candidate,
-      ),
-    })
+    const calculated = calculateRecipeCostForMutationV1(
+      {
+        portionYield: recipe.portionYield,
+        lines: recipe.lines.map(candidate =>
+          candidate.id === recipeLineId ? { ...candidate, quantity: new Decimal(nextQuantity), unit: nextUnit } : candidate,
+        ),
+      },
+      describeRecipeLinesV1(recipe.lines),
+    )
     let updatedLine: any = null
     for (const lineCost of calculated.lines) {
       if (lineCost.id === recipeLineId) {
@@ -529,10 +599,13 @@ export async function removeRecipeLine(venueId: string, productId: string, recip
 
     const line = recipe.lines.find(candidate => candidate.id === recipeLineId)
     if (!line) throw new AppError(`Recipe line not found`, 404)
-    const calculated = calculateRecipeCostForMutationV1({
-      portionYield: recipe.portionYield,
-      lines: recipe.lines.filter(candidate => candidate.id !== recipeLineId),
-    })
+    const calculated = calculateRecipeCostForMutationV1(
+      {
+        portionYield: recipe.portionYield,
+        lines: recipe.lines.filter(candidate => candidate.id !== recipeLineId),
+      },
+      describeRecipeLinesV1(recipe.lines),
+    )
 
     // WHY: Empty remaining graphs are valid zero-cost mutations; readiness
     // separately reports EMPTY_LINES without turning this delete into a 500.
@@ -602,7 +675,10 @@ export async function recalculateRecipeCost(recipeId: string): Promise<Recipe> {
 
     // WHY: Legacy mutation and H1 read share this neutral Decimal truth, using
     // only post-lock inputs so totalCost remains cost per portion at commit.
-    const calculated = calculateRecipeCostForMutationV1({ lines: recipe.lines, portionYield: recipe.portionYield })
+    const calculated = calculateRecipeCostForMutationV1(
+      { lines: recipe.lines, portionYield: recipe.portionYield },
+      describeRecipeLinesV1(recipe.lines),
+    )
     for (const lc of calculated.lines) {
       await tx.recipeLine.update({ where: { id: lc.id }, data: { costPerServing: lc.costPerServing } })
     }

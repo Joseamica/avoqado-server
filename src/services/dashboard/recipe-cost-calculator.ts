@@ -18,6 +18,55 @@ export class RecipeCostCalculationError extends Error {
   }
 }
 
+/** Smallest quantity RecipeLine.quantity Decimal(12,3) can still store. */
+export const MIN_STORABLE_RECIPE_QUANTITY = '0.001'
+
+const RECIPE_QUANTITY_SCALE = 3
+
+/**
+ * Would Postgres still hold this quantity once it lands in Decimal(12,3)?
+ *
+ * A value below 0.0005 is accepted by every "positive number" check and then
+ * stored as 0, after which this calculator rejects the line on EVERY later
+ * mutation and the recipe can no longer be edited (Testarudo Cafe,
+ * 2026-09-04). The Zod schema is the friendly boundary check; this one exists
+ * because recipe lines are also written by callers that never see it — the
+ * chatbot action engine today, an import or MCP tool tomorrow.
+ */
+export function storesAsNonzeroRecipeQuantityV1(quantity: Decimal | number | string): boolean {
+  const value = new Decimal(quantity)
+  return value.isFinite() && value.toDecimalPlaces(RECIPE_QUANTITY_SCALE, Decimal.ROUND_HALF_UP).gt(0)
+}
+
+export interface RecipeCostLineDescriptionV1 {
+  id: string
+  ingredientName: string
+}
+
+/**
+ * Spanish, actionable text for a cost error raised by an already-persisted
+ * graph. The dashboard prints the AppError message verbatim, so a generic
+ * "Recipe cost inputs are invalid" left the operator with no way to know which
+ * of the existing lines was blocking the save (Testarudo Cafe, 2026-09-04).
+ */
+export function describeRecipeCostErrorV1(error: RecipeCostCalculationError, lines: readonly RecipeCostLineDescriptionV1[]): string {
+  // WHY: A missing name must never degrade into a printed line id — that is
+  // noise to the operator and leaks an internal identifier into the UI.
+  const ingredient = lines.find(line => line.id === error.lineId)?.ingredientName
+  const subject = ingredient ? `"${ingredient}"` : 'uno de los ingredientes'
+
+  switch (error.code) {
+    case 'INVALID_PORTION_YIELD':
+      return 'El rendimiento de la receta (cuántas porciones salen) debe ser un número entero mayor a 0. Corrígelo en la receta para poder guardar.'
+    case 'INVALID_LINE_QUANTITY':
+      return `La cantidad de ${subject} en esta receta quedó en 0. Edita ese renglón y ponle al menos ${MIN_STORABLE_RECIPE_QUANTITY}, o quítalo de la receta.`
+    case 'INVALID_LINE_COST':
+      return `El costo de ${subject} es negativo. Corrígelo en Inventario → Ingredientes para poder guardar la receta.`
+    case 'INCOMPATIBLE_LINE_UNIT':
+      return `La unidad de ${subject} en la receta no es compatible con la unidad en la que se almacena ese ingrediente (peso con peso, volumen con volumen). Corrige la unidad de ese renglón.`
+  }
+}
+
 export interface RecipeCostLineV1 {
   id: string
   quantity: Decimal

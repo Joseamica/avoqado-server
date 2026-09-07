@@ -22,7 +22,10 @@ services:
     autoDeploy: false
     branch: develop
     buildCommand: >-
-      npm ci --include=dev && npx prisma generate && NODE_OPTIONS=--max-old-space-size=4096 npm run build && npm run migrate:deploy:bounded
+      npm ci --include=dev && npx prisma generate && NODE_OPTIONS=--max-old-space-size=4096 npm run build
+    # Migraciones en el pre-deploy (instancia aparte, misma red privada que el servicio): así la
+    # DATABASE_URL puede ser la INTERNA de Render, que el build no alcanza. Render lo recomienda.
+    preDeployCommand: npm run migrate:deploy:bounded
     startCommand: npm start
     healthCheckPath: /health
     envVars:
@@ -91,7 +94,10 @@ services:
     autoDeploy: false
     branch: main
     buildCommand: >-
-      npm ci --include=dev && npx prisma generate && NODE_OPTIONS=--max-old-space-size=4096 npm run build && npm run migrate:deploy:bounded
+      npm ci --include=dev && npx prisma generate && NODE_OPTIONS=--max-old-space-size=4096 npm run build
+    # Migraciones en el pre-deploy (instancia aparte, misma red privada que el servicio): así la
+    # DATABASE_URL puede ser la INTERNA de Render, que el build no alcanza. Render lo recomienda.
+    preDeployCommand: npm run migrate:deploy:bounded
     startCommand: npm start
     healthCheckPath: /health
     envVars:

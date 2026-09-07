@@ -382,6 +382,16 @@ const prismaMock: any = {
   saleVerification: createMockModel(),
   // Live demo sessions (demo.dashboard.avoqado.io)
   liveDemoSession: createMockModel(),
+  // Ledger de consentimiento (campañas de correo, Fase 0). La limpieza de demos los borra
+  // explícitamente: `ConsentEvent.noticeVersionId` es RESTRICT contra `PrivacyNoticeVersion`,
+  // que sí cascadea desde el venue — el borrado del venue truena si quedan filas.
+  consentEvent: createMockModel(),
+  privacyNoticeVersion: createMockModel(),
+  customerCaptureToken: createMockModel(),
+  // Lo demás que BLOQUEA el borrado de un venue desechable (ver liveDemoCleanup.service).
+  commissionClawback: createMockModel(),
+  referralRewardGrant: createMockModel(),
+  merchantFiscalConfig: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),

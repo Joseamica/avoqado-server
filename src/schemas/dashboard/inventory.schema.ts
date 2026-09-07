@@ -10,12 +10,26 @@ import {
   AlertStatus,
   Unit,
 } from '@prisma/client'
+import { Decimal } from '@prisma/client/runtime/library'
 
 // Some legacy products and raw materials in production use non-cuid-v1 IDs
 // (e.g. "rb44l0fgk30kp0soskrlys5c", "prod_ad_blanq_003"). Strict z.cuid()
 // rejects them with 400 before the controller can 404. Use cuidLikeId() for
 // productId and rawMaterialId only — venueId/supplierId/etc. remain cuid.
 const cuidLikeId = () => z.string().regex(/^[a-z][a-z0-9_-]{0,49}$/, { message: 'Invalid ID format' })
+
+// RecipeLine.quantity persists as Decimal(12,3). A value below 0.0005 passes
+// `.positive()` here and is then stored as 0 by Postgres, which makes the cost
+// calculator reject the line on EVERY later recipe mutation — the recipe becomes
+// permanently uneditable the moment it is created (Testarudo Cafe, 2026-09-04:
+// POST /recipe 201, then six POST /recipe/lines 422 in a row). Reject at the
+// boundary using the same rounding the database applies.
+const RECIPE_QUANTITY_SCALE = 3
+const storesAsNonzeroQuantity = (value: number) => new Decimal(value).toDecimalPlaces(RECIPE_QUANTITY_SCALE, Decimal.ROUND_HALF_UP).gt(0)
+const recipeLineQuantity = () =>
+  z.number().positive().refine(storesAsNonzeroQuantity, {
+    message: 'La cantidad se guarda con 3 decimales: usa al menos 0.001 (o cambia la unidad del renglón, por ejemplo de kg a g)',
+  })
 
 // ==========================================
 // RAW MATERIAL SCHEMAS
@@ -210,7 +224,7 @@ export const CreateRecipeSchema = z.object({
     lines: z.array(
       z.object({
         rawMaterialId: cuidLikeId(),
-        quantity: z.number().positive(),
+        quantity: recipeLineQuantity(),
         unit: z.nativeEnum(Unit),
         isOptional: z.boolean().default(false),
         substituteNotes: z.string().nullish(), // Accept null, undefined, or string
@@ -236,7 +250,7 @@ export const UpdateRecipeSchema = z.object({
       .array(
         z.object({
           rawMaterialId: cuidLikeId(),
-          quantity: z.number().positive(),
+          quantity: recipeLineQuantity(),
           unit: z.nativeEnum(Unit),
           isOptional: z.boolean().default(false),
           substituteNotes: z.string().nullish(), // Accept null, undefined, or string
@@ -253,7 +267,7 @@ export const AddRecipeLineSchema = z.object({
   }),
   body: z.object({
     rawMaterialId: cuidLikeId(),
-    quantity: z.number().positive(),
+    quantity: recipeLineQuantity(),
     unit: z.nativeEnum(Unit),
     isOptional: z.boolean().default(false),
     substituteNotes: z.string().nullish(), // Accept null, undefined, or string
@@ -268,7 +282,7 @@ export const UpdateRecipeLineSchema = z.object({
   }),
   body: z
     .object({
-      quantity: z.number().positive().optional(),
+      quantity: recipeLineQuantity().optional(),
       unit: z.nativeEnum(Unit).optional(),
       isOptional: z.boolean().optional(),
       substituteNotes: z.string().nullish().optional(),

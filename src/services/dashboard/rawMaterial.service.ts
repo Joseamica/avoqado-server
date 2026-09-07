@@ -8,20 +8,32 @@ import { withSerializableRetry } from '../../utils/serializableRetry'
 import { sendLowStockAlertNotification } from './notification.service'
 import { logAction } from './activity-log.service'
 import { areUnitsCompatible, convertUnit } from '../../utils/unitConversion'
-import { calculateRecipeCostV1, RecipeCostCalculationError } from './recipe-cost-calculator'
+import { calculateRecipeCostV1, describeRecipeCostErrorV1, RecipeCostCalculationError } from './recipe-cost-calculator'
 import { acquireRecipeCostGraphVenueLockV1, lockRecipeCostGraphsForRawMaterialUpdateV1 } from './recipe-cost-graph-lock'
 
-function calculateRawMaterialRecipeCostV1(input: Parameters<typeof calculateRecipeCostV1>[0]) {
+function calculateRawMaterialRecipeCostV1(
+  input: Parameters<typeof calculateRecipeCostV1>[0],
+  recipe: { productName: string; lines: ReadonlyArray<{ id: string; rawMaterial: { name: string } }> },
+) {
   try {
     return calculateRecipeCostV1(input)
   } catch (error) {
     // WHY: A cost edit must roll back cleanly when historical Recipe inputs are
     // invalid; exposing a stable 422 avoids committing a partially fresh graph.
+    // The blocking recipe belongs to a DIFFERENT product than the one being
+    // edited, so the message must name it or the operator cannot find it.
     if (error instanceof RecipeCostCalculationError) {
-      throw new AppError('Recipe cost inputs are invalid', 422, true, 'RECIPE_COST_INPUT_INVALID', {
-        reason: error.code,
-        lineId: error.lineId,
-      })
+      const detail = describeRecipeCostErrorV1(
+        error,
+        recipe.lines.map(line => ({ id: line.id, ingredientName: line.rawMaterial.name })),
+      )
+      throw new AppError(
+        `No se pudo guardar el ingrediente porque afecta a la receta de "${recipe.productName}". ${detail}`,
+        422,
+        true,
+        'RECIPE_COST_INPUT_INVALID',
+        { reason: error.code, lineId: error.lineId },
+      )
     }
     throw error
   }
@@ -411,7 +423,10 @@ async function recomputeRecipesUsingRawMaterial(
     if (recipe.lines.some(line => line.rawMaterial.venueId !== venueId)) {
       throw new AppError('Recipe contains an ingredient from another venue', 422, true, 'RECIPE_COST_INPUT_INVALID')
     }
-    const calculated = calculateRawMaterialRecipeCostV1({ portionYield: recipe.portionYield, lines: recipe.lines })
+    const calculated = calculateRawMaterialRecipeCostV1(
+      { portionYield: recipe.portionYield, lines: recipe.lines },
+      { productName: recipe.product.name, lines: recipe.lines },
+    )
     for (const line of calculated.lines) {
       await tx.recipeLine.update({ where: { id: line.id }, data: { costPerServing: line.costPerServing } })
     }
