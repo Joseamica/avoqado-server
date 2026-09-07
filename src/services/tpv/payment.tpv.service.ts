@@ -51,9 +51,15 @@ import { resolveFastPaymentTarget } from './fastPaymentTarget'
 import { linkCustomerToExistingOrder, normalizeRequestedCustomerId, resolveFastOrderCustomer } from './fastPaymentCustomer'
 
 /**
- * Se lanza DENTRO de la transacción para abortarla sin escribir nada; el `catch` la convierte
+ * Se lanza DENTRO de la transacción para abortarla sin escribir DINERO; el `catch` la convierte
  * en la respuesta idempotente con el cobro que ya existía. No hereda de `AppError` a propósito:
- * NO es un error que deba salir por HTTP — es un desvío interno hacia una respuesta 200.
+ * NO es un error que deba salir por HTTP — es un desvío interno hacia una respuesta 2xx (el
+ * controlador responde 201 en todas las ramas de este servicio).
+ *
+ * ⚠️ «Sin escribir nada» sería falso: la transacción se revierte entera, pero FUERA de ella el
+ * recibo digital del cobro existente sí puede crearse (`ensureDigitalReceiptResponse`) y la
+ * bitácora recibe su `CASH_PAYMENT_DEDUPLICATED`. Lo que no se escribe es un segundo `Payment`,
+ * su `VenueTransaction` ni el incremento del turno.
  */
 class CobroDuplicadoEnEfectivo extends Error {
   constructor(readonly existingPaymentId: string) {
@@ -2181,33 +2187,64 @@ export async function recordOrderPayment(
       // 🔴 Toque repetido en «Efectivo» sobre una orden ya cubierta (SN00396, BAE MEZQUITAL,
       // 2026-09-04: 5 cobros en 1.7 s, referencias distintas, sin llave). Va DESPUÉS del
       // `FOR UPDATE` de la orden —lo que serializa la ráfaga— y ANTES de reclamar el turno,
-      // que ya suma dinero. Sólo efectivo, sólo con un cobro previo, sólo con saldo cubierto:
-      // ver `cobroEnEfectivoDuplicado.ts`. Se responde con el cobro existente, nunca 4xx.
+      // que ya suma dinero. No basta con «la orden está saldada»: se exige la FIRMA de la
+      // ráfaga —mismo dinero, misma terminal, dentro de la ventana— porque «saldada» a secas
+      // confunde dos entregas físicas distintas y hace desaparecer una (ver
+      // `cobroEnEfectivoDuplicado.ts`). Se responde con el cobro existente y un 2xx —el
+      // controlador responde 201 en todas las ramas—, nunca con un 4xx: un rechazo delante
+      // del cliente empuja al cajero a volver a cobrar.
       //
       // La consulta se hace SÓLO cuando el candado puede aplicar (`aplicaCandadoDeEfectivo`):
       // este camino lo abandona la TPV a los 10 s y un viaje de más por cada cobro con tarjeta
       // es justo lo que produce el reintento que se está evitando.
-      const candidatoDeEfectivo = { method: classicMethod, status: paymentStatusSnapshot, hasAreaTicketLines }
+      const candidatoDeEfectivo = {
+        method: classicMethod,
+        status: paymentStatusSnapshot,
+        hasAreaTicketLines,
+        amount: totalAmount,
+        tip: tipAmount,
+        terminalId,
+      }
       if (aplicaCandadoDeEfectivo(candidatoDeEfectivo)) {
         const pagosCompletadosDeLaOrden = await tx.payment.findMany({
           where: { venueId, orderId: activeOrder.id, status: 'COMPLETED' },
-          select: { id: true, amount: true, tipAmount: true, type: true, method: true, createdAt: true },
-          orderBy: { createdAt: 'desc' },
+          select: { id: true, amount: true, tipAmount: true, type: true, method: true, createdAt: true, terminalId: true },
+          // 🔑 Desempate estable por `id`: con `createdAt` a secas, filas empatadas al
+          // milisegundo (un backfill, una importación) pueden dejar dentro del corte un cobro
+          // y fuera su reembolso — y entonces una orden devuelta se leería como saldada.
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
           // Tope explícito: una orden con más cobros que esto quedaría con el saldo
           // SUBESTIMADO ⇒ la regla ve «todavía falta» y NO deduplica. El lado seguro.
           take: 200,
         })
-        const cobroPrevio = cobroEnEfectivoSobreOrdenSaldada(
-          candidatoDeEfectivo,
-          {
-            subtotal: activeOrder.subtotal,
-            discountAmount: activeOrder.discountAmount,
-            serviceChargeAmount: activeOrder.serviceChargeAmount,
-          },
-          pagosCompletadosDeLaOrden,
-        )
-        if (cobroPrevio) {
-          throw new CobroDuplicadoEnEfectivo(cobroPrevio.id)
+        // Sólo si hay un cobro previo vale la pena releer la orden: con la fila BLOQUEADA, no
+        // la copia leída antes de la transacción. Entre aquella lectura y este `FOR UPDATE`
+        // alguien pudo añadirle $50 a la cuenta, y con el subtotal viejo la regla vería
+        // «saldada» una orden que ya no lo está.
+        if (pagosCompletadosDeLaOrden.some(p => p.type !== 'REFUND')) {
+          const ordenBloqueada = await tx.order.findUnique({
+            where: { id: activeOrder.id },
+            select: {
+              subtotal: true,
+              discountAmount: true,
+              serviceChargeAmount: true,
+              items: { select: { areaTicketLineId: true } },
+            },
+          })
+          if (ordenBloqueada) {
+            const cobroPrevio = cobroEnEfectivoSobreOrdenSaldada(
+              { ...candidatoDeEfectivo, hasAreaTicketLines: ordenBloqueada.items.some(i => i.areaTicketLineId != null) },
+              {
+                subtotal: ordenBloqueada.subtotal,
+                discountAmount: ordenBloqueada.discountAmount,
+                serviceChargeAmount: ordenBloqueada.serviceChargeAmount,
+              },
+              pagosCompletadosDeLaOrden,
+            )
+            if (cobroPrevio) {
+              throw new CobroDuplicadoEnEfectivo(cobroPrevio.id)
+            }
+          }
         }
       }
 
@@ -2401,8 +2438,34 @@ export async function recordOrderPayment(
           incomingReferenceNumber: paymentData.referenceNumber ?? null,
           incomingIdempotencyKey: paymentData.idempotencyKey ?? null,
           incomingAmount: totalAmount,
+          incomingTip: tipAmount,
+          terminalId,
           elapsedMs: elapsedMs(),
         })
+        // 🔴 Rastro DURABLE: el `logger.warn` vive en Better Stack 30 días y no lo ve el dueño.
+        // Un cobro que el servidor decide no registrar tiene que poder explicarse después —
+        // «entregué el dinero y no aparece»— desde la bitácora del negocio.
+        // Best-effort, sin `await` y en `try/catch`: la respuesta del cobro nunca depende de esto.
+        try {
+          logAction({
+            staffId: userId ?? paymentData.staffId,
+            venueId,
+            action: 'CASH_PAYMENT_DEDUPLICATED',
+            entity: 'Payment',
+            entityId: existente.id,
+            data: {
+              orderId,
+              incomingReferenceNumber: paymentData.referenceNumber ?? null,
+              incomingIdempotencyKey: paymentData.idempotencyKey ?? null,
+              incomingAmount: totalAmount,
+              incomingTip: tipAmount,
+              terminalId,
+              source: 'TPV',
+            },
+          })
+        } catch {
+          logger.warn('[recordOrderPayment] No se pudo escribir CASH_PAYMENT_DEDUPLICATED en la bitácora', { venueId, orderId })
+        }
         return {
           ...existente,
           digitalReceipt: await ensureDigitalReceiptResponse(existente.id, existente.receipts[0]),

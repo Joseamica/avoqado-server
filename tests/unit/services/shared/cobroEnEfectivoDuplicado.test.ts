@@ -1,8 +1,11 @@
 import { Decimal } from '@prisma/client/runtime/library'
-import { cobroEnEfectivoSobreOrdenSaldada, type PagoPrevio } from '@/services/shared/cobroEnEfectivoDuplicado'
+import { cobroEnEfectivoSobreOrdenSaldada, VENTANA_DE_RAFAGA_MS, type PagoPrevio } from '@/services/shared/cobroEnEfectivoDuplicado'
 
 const ORDEN_CERO = { subtotal: new Decimal(0), discountAmount: null, serviceChargeAmount: null }
 const ORDEN_100 = { subtotal: new Decimal(100), discountAmount: null, serviceChargeAmount: null }
+
+/** El instante en que llega el cobro entrante. Fijo: la regla recibe el reloj por parámetro. */
+const AHORA = new Date('2026-09-04T00:18:10Z')
 
 function pago(id: string, amount: number, extra: Partial<PagoPrevio> = {}): PagoPrevio {
   return {
@@ -11,56 +14,59 @@ function pago(id: string, amount: number, extra: Partial<PagoPrevio> = {}): Pago
     tipAmount: new Decimal(0),
     type: 'REGULAR',
     method: 'CASH',
+    terminalId: 'term-A',
     createdAt: new Date('2026-09-04T00:18:08Z'),
     ...extra,
   }
 }
-const CANDIDATO_CASH = { method: 'CASH', status: 'COMPLETED', hasAreaTicketLines: false }
+
+/** El cobro entrante de la evidencia: efectivo de $0 sin propina, desde la MISMA PAX. */
+const CANDIDATO_CASH = { method: 'CASH', status: 'COMPLETED', hasAreaTicketLines: false, amount: 0, tip: 0, terminalId: 'term-A' }
 
 describe('cobroEnEfectivoSobreOrdenSaldada — la regla que separa un toque repetido de un cobro legítimo', () => {
   it('orden de $0 SIN cobros previos: el primer cobro de una línea gratis se registra (null)', () => {
-    expect(cobroEnEfectivoSobreOrdenSaldada(CANDIDATO_CASH, ORDEN_CERO, [])).toBeNull()
+    expect(cobroEnEfectivoSobreOrdenSaldada(CANDIDATO_CASH, ORDEN_CERO, [], AHORA)).toBeNull()
   })
 
   it('orden de $0 con UN cobro previo en efectivo: el segundo es el toque repetido → devuelve el previo', () => {
     const previo = pago('pay-prev', 0)
-    expect(cobroEnEfectivoSobreOrdenSaldada(CANDIDATO_CASH, ORDEN_CERO, [previo])).toBe(previo)
+    expect(cobroEnEfectivoSobreOrdenSaldada(CANDIDATO_CASH, ORDEN_CERO, [previo], AHORA)).toBe(previo)
   })
 
-  it('orden de $100 ya cubierta con $100 en efectivo: otro efectivo devuelve el previo', () => {
+  it('orden de $100 ya cubierta con $100 en efectivo: otro efectivo del MISMO monto devuelve el previo', () => {
     const previo = pago('pay-prev', 100)
-    expect(cobroEnEfectivoSobreOrdenSaldada(CANDIDATO_CASH, ORDEN_100, [previo])).toBe(previo)
+    expect(cobroEnEfectivoSobreOrdenSaldada({ ...CANDIDATO_CASH, amount: 100 }, ORDEN_100, [previo], AHORA)).toBe(previo)
   })
 
   it('partes iguales: $50 de $100 pagados, el segundo $50 en efectivo es legítimo (null)', () => {
-    expect(cobroEnEfectivoSobreOrdenSaldada(CANDIDATO_CASH, ORDEN_100, [pago('p1', 50)])).toBeNull()
+    expect(cobroEnEfectivoSobreOrdenSaldada({ ...CANDIDATO_CASH, amount: 50 }, ORDEN_100, [pago('p1', 50)], AHORA)).toBeNull()
   })
 
   it('TARJETA sobre una orden saldada NUNCA se deduplica: el dinero ya se movió en el banco (null)', () => {
-    const candidatoTarjeta = { method: 'CREDIT_CARD', status: 'COMPLETED', hasAreaTicketLines: false }
-    expect(cobroEnEfectivoSobreOrdenSaldada(candidatoTarjeta, ORDEN_100, [pago('p1', 100, { method: 'CREDIT_CARD' })])).toBeNull()
+    const candidatoTarjeta = { ...CANDIDATO_CASH, method: 'CREDIT_CARD', amount: 100 }
+    expect(cobroEnEfectivoSobreOrdenSaldada(candidatoTarjeta, ORDEN_100, [pago('p1', 100, { method: 'CREDIT_CARD' })], AHORA)).toBeNull()
   })
 
   it('tras un REEMBOLSO total, volver a cobrar en efectivo es legítimo (null)', () => {
     const cobro = pago('p1', 100)
     const reembolso = pago('r1', -100, { type: 'REFUND' })
-    expect(cobroEnEfectivoSobreOrdenSaldada(CANDIDATO_CASH, ORDEN_100, [cobro, reembolso])).toBeNull()
+    expect(cobroEnEfectivoSobreOrdenSaldada({ ...CANDIDATO_CASH, amount: 100 }, ORDEN_100, [cobro, reembolso], AHORA)).toBeNull()
   })
 
   it('con vales por área (areaTicketLines) no interviene: ese submódulo tiene su propio candado (null)', () => {
-    const candidato = { method: 'CASH', status: 'COMPLETED', hasAreaTicketLines: true }
-    expect(cobroEnEfectivoSobreOrdenSaldada(candidato, ORDEN_CERO, [pago('p1', 0)])).toBeNull()
+    const candidato = { ...CANDIDATO_CASH, hasAreaTicketLines: true }
+    expect(cobroEnEfectivoSobreOrdenSaldada(candidato, ORDEN_CERO, [pago('p1', 0)], AHORA)).toBeNull()
   })
 
   it('un cobro que no es COMPLETED no se deduplica (null)', () => {
-    const candidato = { method: 'CASH', status: 'PENDING', hasAreaTicketLines: false }
-    expect(cobroEnEfectivoSobreOrdenSaldada(candidato, ORDEN_CERO, [pago('p1', 0)])).toBeNull()
+    const candidato = { ...CANDIDATO_CASH, status: 'PENDING' }
+    expect(cobroEnEfectivoSobreOrdenSaldada(candidato, ORDEN_CERO, [pago('p1', 0)], AHORA)).toBeNull()
   })
 
   it('devuelve el cobro en EFECTIVO más reciente, no un cobro con tarjeta de la misma orden', () => {
     const tarjeta = pago('tarjeta', 100, { method: 'CREDIT_CARD', createdAt: new Date('2026-09-04T00:18:10Z') })
     const efectivo = pago('efectivo', 0, { createdAt: new Date('2026-09-04T00:18:08Z') })
-    expect(cobroEnEfectivoSobreOrdenSaldada(CANDIDATO_CASH, ORDEN_100, [tarjeta, efectivo])).toBe(efectivo)
+    expect(cobroEnEfectivoSobreOrdenSaldada(CANDIDATO_CASH, ORDEN_100, [tarjeta, efectivo], AHORA)).toBe(efectivo)
   })
 
   // ── Regresión propia: un reembolso PARCIAL también reabre la puerta ─────────
@@ -71,6 +77,61 @@ describe('cobroEnEfectivoSobreOrdenSaldada — la regla que separa un toque repe
   it('tras un reembolso PARCIAL, cobrar de nuevo en efectivo es legítimo (null)', () => {
     const cobro = pago('p1', 100)
     const reembolso = pago('r1', -40, { type: 'REFUND' })
-    expect(cobroEnEfectivoSobreOrdenSaldada(CANDIDATO_CASH, ORDEN_100, [cobro, reembolso])).toBeNull()
+    expect(cobroEnEfectivoSobreOrdenSaldada({ ...CANDIDATO_CASH, amount: 100 }, ORDEN_100, [cobro, reembolso], AHORA)).toBeNull()
+  })
+
+  // ── RONDA 2 — «firma de ráfaga» (auditoría de Codex, P1-1) ────────────────────────
+  // «Saldo cubierto» a secas confunde DOS entregas físicas de efectivo distintas: una fila
+  // encolada que se reproduce horas después, sobre una orden que OTRA terminal ya cobró,
+  // se leería como un toque repetido y esos $100 desaparecerían del turno y del cajón. La
+  // regla ahora exige la firma completa de una ráfaga: mismo dinero, misma terminal y
+  // dentro de la ventana. Fuera de eso el cobro SE REGISTRA y el sobrepago lo vigila el
+  // watchdog — visible y reparable, en vez de invisible.
+  describe('firma de ráfaga: mismo dinero, misma terminal, dentro de la ventana', () => {
+    it('misma terminal, mismo monto y propina, hace 30 s: es la ráfaga → devuelve el previo', () => {
+      const previo = pago('p1', 0, { terminalId: 'term-A', createdAt: new Date('2026-09-04T00:17:40Z') })
+      expect(cobroEnEfectivoSobreOrdenSaldada(CANDIDATO_CASH, ORDEN_CERO, [previo], AHORA)).toBe(previo)
+    })
+
+    it('el cobro previo tiene 16 minutos: ya no es un toque repetido, se registra (null)', () => {
+      const previo = pago('p1', 0, { terminalId: 'term-A', createdAt: new Date('2026-09-04T00:02:00Z') })
+      expect(cobroEnEfectivoSobreOrdenSaldada(CANDIDATO_CASH, ORDEN_CERO, [previo], AHORA)).toBeNull()
+    })
+
+    it('otra terminal cobró la misma orden: no se deduplica (el sobrepago lo vigila el watchdog) (null)', () => {
+      const previo = pago('p1', 0, { terminalId: 'term-B', createdAt: new Date('2026-09-04T00:18:00Z') })
+      expect(cobroEnEfectivoSobreOrdenSaldada(CANDIDATO_CASH, ORDEN_CERO, [previo], AHORA)).toBeNull()
+    })
+
+    it('si alguno de los dos no trae terminal (APK viejo sin serial), la terminal no descalifica', () => {
+      const previo = pago('p1', 0, { terminalId: null, createdAt: new Date('2026-09-04T00:18:00Z') })
+      expect(cobroEnEfectivoSobreOrdenSaldada(CANDIDATO_CASH, ORDEN_CERO, [previo], AHORA)).toBe(previo)
+    })
+
+    it('monto distinto al del efectivo previo: no es el mismo toque (null)', () => {
+      const previo = pago('p1', 100, { terminalId: 'term-A', createdAt: new Date('2026-09-04T00:18:00Z') })
+      expect(cobroEnEfectivoSobreOrdenSaldada({ ...CANDIDATO_CASH, amount: 60 }, ORDEN_100, [previo], AHORA)).toBeNull()
+    })
+
+    it('propina sola (amount 0, tip 20) sobre una orden saldada con 100/0: no se deduplica (null)', () => {
+      const previo = pago('p1', 100, { terminalId: 'term-A', createdAt: new Date('2026-09-04T00:18:00Z') })
+      expect(cobroEnEfectivoSobreOrdenSaldada({ ...CANDIDATO_CASH, amount: 0, tip: 20 }, ORDEN_100, [previo], AHORA)).toBeNull()
+    })
+
+    it('la propina también entra en la firma: mismo importe pero propina distinta NO es el mismo toque (null)', () => {
+      const previo = pago('p1', 100, { tipAmount: new Decimal(10), createdAt: new Date('2026-09-04T00:18:00Z') })
+      // total = 100 de mercancía + 10 de propina cobrada = 110; pagado = 110 ⇒ saldada.
+      expect(cobroEnEfectivoSobreOrdenSaldada({ ...CANDIDATO_CASH, amount: 100, tip: 25 }, ORDEN_100, [previo], AHORA)).toBeNull()
+    })
+
+    it('el borde de la ventana (exactamente 15 min) todavía cuenta como ráfaga', () => {
+      const previo = pago('p1', 0, { createdAt: new Date(AHORA.getTime() - VENTANA_DE_RAFAGA_MS) })
+      expect(cobroEnEfectivoSobreOrdenSaldada(CANDIDATO_CASH, ORDEN_CERO, [previo], AHORA)).toBe(previo)
+    })
+
+    it('un cobro previo SIN fecha no puede demostrar la ventana: no se deduplica (null)', () => {
+      const previo = pago('p1', 0, { createdAt: undefined })
+      expect(cobroEnEfectivoSobreOrdenSaldada(CANDIDATO_CASH, ORDEN_CERO, [previo], AHORA)).toBeNull()
+    })
   })
 })

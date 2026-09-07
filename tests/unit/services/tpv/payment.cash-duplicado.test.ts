@@ -62,6 +62,7 @@ jest.mock('@/utils/prismaClient', () => ({
     areaTicketCheckoutSession: { findFirst: jest.fn(), updateMany: jest.fn() },
     areaTicketPaymentAttempt: { findFirst: jest.fn(), updateMany: jest.fn() },
     rawMaterial: { findUnique: jest.fn() },
+    terminal: { findFirst: jest.fn() },
     orderCustomer: { findMany: jest.fn() },
     activityLog: { create: jest.fn().mockResolvedValue({}) },
     inventoryPosting: { findUnique: jest.fn(), create: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
@@ -72,7 +73,10 @@ jest.mock('@/utils/prismaClient', () => ({
 
 jest.mock('@/config/logger', () => ({
   __esModule: true,
-  default: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
+  // `debug` NO es decorativo: `resolveTerminalIdFromSerial` lo llama al resolver el serial y su
+  // try/catch se traga el TypeError, así que sin este doble la terminal salía SIEMPRE null y la
+  // condición «misma terminal» de la firma quedaba sin ejercitar.
+  default: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }))
 
 jest.mock('@/services/dashboard/productInventoryIntegration.service', () => ({
@@ -84,6 +88,14 @@ jest.mock('@/services/dashboard/inventoryRestock.service', () => ({
   restockItem: jest.fn(),
   restockOrderItems: jest.fn(),
 }))
+
+/**
+ * 🔴 La orden que la regla lee DENTRO de la transacción, con la fila ya bloqueada. Es un mock
+ * DISTINTO del `prisma.order.findUnique` de fuera a propósito: la única forma de demostrar que
+ * el candado usa la lectura bloqueada y no la copia previa es hacer que las dos digan cosas
+ * distintas.
+ */
+const txOrderFindUniqueMock = jest.fn()
 
 const logActionMock = jest.fn()
 jest.mock('@/services/dashboard/activity-log.service', () => ({
@@ -114,6 +126,9 @@ jest.mock('@/services/shared/loyaltyOnPaidOrder', () => ({
 
 const VENUE_ID = 'venue-123'
 const ORDER_ID = 'order-123'
+/** La PAX del incidente. La firma de la ráfaga exige que previo y entrante vengan de la misma. */
+const TERMINAL_ID = 'terminal-pax-1'
+const SERIAL_PAX = 'AVQD-2840744206'
 
 /** Orden estándar: $100 de subtotal, un solo producto, modo standalone (externalId null). */
 function makeOrder(overrides: Record<string, unknown> = {}) {
@@ -173,6 +188,10 @@ const STOCK_OK = { inventoryMethod: 'QUANTITY' as const, available: true, curren
 beforeEach(() => {
   jest.clearAllMocks()
   logActionMock.mockReset()
+  txOrderFindUniqueMock.mockReset()
+  // Por default la orden bloqueada dice lo MISMO que la copia previa ($0, sin vales).
+  txOrderFindUniqueMock.mockResolvedValue({ subtotal: new Decimal(0), discountAmount: null, serviceChargeAmount: null, items: [] })
+  ;(prisma.terminal.findFirst as jest.Mock).mockResolvedValue({ id: TERMINAL_ID })
   ;(prisma.shift.findFirst as jest.Mock).mockResolvedValue({ id: 'shift-1', status: 'OPEN' })
   ;(prisma.shift.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
   ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: VENUE_ID })
@@ -194,7 +213,7 @@ beforeEach(() => {
       payment: { count: jest.fn().mockResolvedValue(0), create: prisma.payment.create, findMany: prisma.payment.findMany },
       paymentAllocation: { create: prisma.paymentAllocation.create },
       venueTransaction: { create: prisma.venueTransaction.create },
-      order: { update: prisma.order.update },
+      order: { update: prisma.order.update, findUnique: txOrderFindUniqueMock },
       shift: { findFirst: prisma.shift.findFirst, updateMany: prisma.shift.updateMany, update: prisma.shift.update },
       activityLog: { create: prisma.activityLog.create },
       areaTicketCheckoutSession: {
@@ -227,6 +246,7 @@ const COBRO_CASH_CERO = {
   isInternational: false,
   referenceNumber: 'CASH-1788481077703',
   authorizationNumber: 'EFECTIVO',
+  deviceSerialNumber: SERIAL_PAX,
   // sin idempotencyKey a propósito: es la forma exacta de la evidencia de producción
 }
 
@@ -242,7 +262,15 @@ describe('recordOrderPayment — toque repetido en Efectivo sobre una orden ya s
     ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
     ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null) // no hay match por referencia
     ;(prisma.payment.findMany as jest.Mock).mockResolvedValue([
-      { id: 'pay-prev', amount: new Decimal(0), tipAmount: new Decimal(0), type: 'REGULAR', method: 'CASH', createdAt: new Date() },
+      {
+        id: 'pay-prev',
+        amount: new Decimal(0),
+        tipAmount: new Decimal(0),
+        type: 'REGULAR',
+        method: 'CASH',
+        terminalId: TERMINAL_ID,
+        createdAt: new Date(),
+      },
     ])
     ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue({ id: 'pay-prev', status: 'COMPLETED', receipts: [] })
 
@@ -283,7 +311,15 @@ describe('recordOrderPayment — toque repetido en Efectivo sobre una orden ya s
     ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
     ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
     ;(prisma.payment.findMany as jest.Mock).mockResolvedValue([
-      { id: 'pay-prev', amount: new Decimal(0), tipAmount: new Decimal(0), type: 'REGULAR', method: 'CASH', createdAt: new Date() },
+      {
+        id: 'pay-prev',
+        amount: new Decimal(0),
+        tipAmount: new Decimal(0),
+        type: 'REGULAR',
+        method: 'CASH',
+        terminalId: TERMINAL_ID,
+        createdAt: new Date(),
+      },
     ])
     ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue({ id: 'pay-prev', status: 'COMPLETED', receipts: [] })
 
@@ -292,9 +328,15 @@ describe('recordOrderPayment — toque repetido en Efectivo sobre una orden ya s
     const llamada = (prisma.payment.findMany as jest.Mock).mock.calls[0][0]
     expect(llamada.where).toMatchObject({ venueId: VENUE_ID, orderId: ORDER_ID, status: 'COMPLETED' })
     expect(llamada.select).toMatchObject({ id: true, amount: true, tipAmount: true, type: true, method: true, createdAt: true })
+    expect(llamada.select.terminalId).toBe(true)
     // 🔴 Acotado: un findMany sin tope sobre Payment es la clase de consulta que tumbó
-    // producción el 2026-09-01, y aquí corre DENTRO de la transacción del cobro.
-    expect(typeof llamada.take).toBe('number')
+    // producción el 2026-09-01, y aquí corre DENTRO de la transacción del cobro. El número
+    // EXACTO importa: `typeof === 'number'` dejaba pasar `take: 1`, que subestimaría el saldo
+    // de cualquier cuenta con dos cobros (auditoría de Codex, P3).
+    expect(llamada.take).toBe(200)
+    // 🔑 Desempate estable: sin el `id`, filas empatadas al milisegundo pueden dejar dentro
+    // del corte un cobro y fuera su reembolso, y una orden devuelta se leería como saldada.
+    expect(llamada.orderBy).toEqual([{ createdAt: 'desc' }, { id: 'desc' }])
   })
 
   // ── Regresión: lo que NUNCA debe deduplicarse ──────────────────────────────────────
@@ -311,6 +353,7 @@ describe('recordOrderPayment — toque repetido en Efectivo sobre una orden ya s
         tipAmount: new Decimal(0),
         type: 'REGULAR',
         method: 'CREDIT_CARD',
+        terminalId: TERMINAL_ID,
         createdAt: new Date(),
       },
     ])
@@ -330,5 +373,119 @@ describe('recordOrderPayment — toque repetido en Efectivo sobre una orden ya s
     expect(prisma.payment.create).toHaveBeenCalledTimes(1)
     expect(result.id).toBe('pay-tarjeta')
     expect(huboAvisoDeDuplicado()).toBe(false)
+  })
+  // ── RONDA 2 — la firma de la ráfaga y la orden RELEÍDA (auditoría de Codex) ──────────
+  it('la orden BLOQUEADA vale más que la copia previa: con $100 pagados y subtotal releído 150, se crea', async () => {
+    // La copia leída ANTES de la transacción dice $100 (y con ella la orden se vería saldada);
+    // la fila BLOQUEADA dice $150 porque alguien le añadió un artículo entre las dos lecturas.
+    const order = makeOrder()
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+    ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
+    ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
+    ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
+    ;(prisma.payment.findMany as jest.Mock).mockResolvedValue([
+      {
+        id: 'pay-prev',
+        amount: new Decimal(100),
+        tipAmount: new Decimal(0),
+        type: 'REGULAR',
+        method: 'CASH',
+        terminalId: TERMINAL_ID,
+        createdAt: new Date(),
+      },
+    ])
+    txOrderFindUniqueMock.mockResolvedValue({
+      subtotal: new Decimal(150),
+      discountAmount: null,
+      serviceChargeAmount: null,
+      items: [],
+    })
+    ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+      id: 'pay-nuevo',
+      status: 'COMPLETED',
+      amount: new Decimal(100),
+      tipAmount: new Decimal(0),
+      feeAmount: 0,
+      netAmount: 100,
+      order: { ...order, items: order.items, venue: {} },
+      processedBy: null,
+    })
+
+    const result: any = await (paymentService as any).recordOrderPayment(
+      VENUE_ID,
+      ORDER_ID,
+      { ...COBRO_CASH_CERO, amount: 10000 },
+      'user-1',
+    )
+
+    expect(txOrderFindUniqueMock).toHaveBeenCalled()
+    expect(prisma.payment.create).toHaveBeenCalledTimes(1)
+    expect(result.id).toBe('pay-nuevo')
+    expect(huboAvisoDeDuplicado()).toBe(false)
+  })
+
+  it('un cobro previo desde OTRA terminal no es la ráfaga: el efectivo se registra', async () => {
+    // $100 en el cajón de esta PAX y $100 en el de la otra son dos entregas físicas distintas.
+    // Deduplicar aquí hace desaparecer una; registrar deja un sobrepago que el watchdog VE.
+    const order = makeOrder({ total: new Decimal(0), subtotal: new Decimal(0) })
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+    ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
+    ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
+    ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
+    ;(prisma.payment.findMany as jest.Mock).mockResolvedValue([
+      {
+        id: 'pay-prev',
+        amount: new Decimal(0),
+        tipAmount: new Decimal(0),
+        type: 'REGULAR',
+        method: 'CASH',
+        terminalId: 'otra-terminal',
+        createdAt: new Date(),
+      },
+    ])
+    ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+      id: 'pay-otra',
+      status: 'COMPLETED',
+      amount: new Decimal(0),
+      tipAmount: new Decimal(0),
+      feeAmount: 0,
+      netAmount: 0,
+      order: { ...order, items: order.items, venue: {} },
+      processedBy: null,
+    })
+
+    const result: any = await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, COBRO_CASH_CERO, 'user-1')
+
+    expect(prisma.payment.create).toHaveBeenCalledTimes(1)
+    expect(result.id).toBe('pay-otra')
+  })
+
+  it('se escribe CASH_PAYMENT_DEDUPLICATED en la bitácora con el id del cobro existente', async () => {
+    // El `logger.warn` vive 30 días en Better Stack y el dueño no lo ve. Un cobro que el
+    // servidor decide NO registrar tiene que poder explicarse desde la bitácora del negocio.
+    const order = makeOrder({ total: new Decimal(0), subtotal: new Decimal(0) })
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+    ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
+    ;(prisma.payment.findMany as jest.Mock).mockResolvedValue([
+      {
+        id: 'pay-prev',
+        amount: new Decimal(0),
+        tipAmount: new Decimal(0),
+        type: 'REGULAR',
+        method: 'CASH',
+        terminalId: TERMINAL_ID,
+        createdAt: new Date(),
+      },
+    ])
+    ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue({ id: 'pay-prev', status: 'COMPLETED', receipts: [] })
+
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, COBRO_CASH_CERO, 'user-1')
+
+    const asiento = logActionMock.mock.calls.map(([arg]) => arg).find(arg => arg?.action === 'CASH_PAYMENT_DEDUPLICATED')
+    expect(asiento).toBeDefined()
+    expect(asiento.entity).toBe('Payment')
+    expect(asiento.entityId).toBe('pay-prev')
+    expect(asiento.venueId).toBe(VENUE_ID)
+    expect(asiento.data).toMatchObject({ orderId: ORDER_ID, incomingReferenceNumber: 'CASH-1788481077703', terminalId: TERMINAL_ID })
   })
 })
