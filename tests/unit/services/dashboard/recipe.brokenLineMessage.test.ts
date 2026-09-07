@@ -135,7 +135,7 @@ describe('Recipe with an already-broken line', () => {
       (caught: Error) => caught,
     )
 
-    expect(error.message).not.toContain('Limón Amarillo')
+    expect((error as Error).message).not.toContain('Limón Amarillo')
   })
 
   // 2. THE WAY OUT: the user must be able to repair the recipe
@@ -191,7 +191,7 @@ describe('Recipe line quantity guard in the service layer', () => {
 
     expect((error as AppError).code).toBe('RECIPE_QUANTITY_TOO_SMALL')
     expect((error as AppError).statusCode).toBe(400)
-    expect(error.message).toContain('Limón Amarillo')
+    expect((error as AppError).message).toContain('Limón Amarillo')
   })
 
   it('never writes the unstorable line', async () => {

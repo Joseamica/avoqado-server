@@ -319,7 +319,7 @@ jobs:
                 fi
                 echo "❌ Live deploy is a DIFFERENT commit ($COMMIT) — the trigger did not take."
                 exit 1;;
-              build_failed|update_failed|canceled|deactivated)
+              build_failed|update_failed|canceled|deactivated|pre_deploy_failed)
                 echo "❌ Deploy ended in: $STATUS"; exit 1;;
             esac
             sleep 20
