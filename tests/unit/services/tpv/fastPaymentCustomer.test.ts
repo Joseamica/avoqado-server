@@ -124,6 +124,10 @@ function installFakes() {
   prismaMock.payment.findFirst.mockResolvedValue(null)
   // Ningún cobro previo sobre la orden delegada: el conteo ya no cae a 0 en silencio.
   prismaMock.payment.count.mockResolvedValue(0)
+  // Y la MISMA respuesta para la relectura del candado de efectivo duplicado: sin ella el
+  // `findMany` del mock global resuelve `undefined`, la delegación truena con un TypeError y
+  // la venta cae a FAST — que es justo lo contrario de lo que esta suite afirma.
+  prismaMock.payment.findMany.mockResolvedValue([])
   prismaMock.venueTransaction.create.mockResolvedValue({ id: 'vt-1' })
   prismaMock.paymentAllocation.create.mockResolvedValue({ id: 'alloc-1' })
   prismaMock.shift.findFirst.mockResolvedValue(null)

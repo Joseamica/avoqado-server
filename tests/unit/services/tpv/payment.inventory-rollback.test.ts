@@ -173,7 +173,10 @@ beforeEach(() => {
   finalizeAreaTicketPaymentMock.mockResolvedValue({ areaTicketOrder: false })
   ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback: any) => {
     const tx = {
-      payment: { count: jest.fn().mockResolvedValue(0), create: prisma.payment.create },
+      // `findMany`: el candado del toque repetido en efectivo relee los cobros COMPLETED de la
+      // orden DENTRO de la tx. `[]` queda COHERENTE con el `count: 0` de al lado —contestan la
+      // misma pregunta— y deja el candado inerte aquí; se prueba en `payment.cash-duplicado`.
+      payment: { count: jest.fn().mockResolvedValue(0), create: prisma.payment.create, findMany: jest.fn().mockResolvedValue([]) },
       paymentAllocation: { create: prisma.paymentAllocation.create },
       venueTransaction: { create: prisma.venueTransaction.create },
       order: { update: prisma.order.update },

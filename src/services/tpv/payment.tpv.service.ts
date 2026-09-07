@@ -30,6 +30,8 @@ import { paymentIsAvoqadoSettled } from '../shared/tenderSemantics'
 // La ÚNICA definición de "qué cuenta como pagado" — la comparten los cuatro
 // caminos de cobro, para que un reembolso no reabra saldo en ninguno.
 import { summarizeRefunds } from '../shared/orderBalance'
+// El candado del toque repetido en «Efectivo». La regla vive AHÍ, pura y probada aparte.
+import { aplicaCandadoDeEfectivo, cobroEnEfectivoSobreOrdenSaldada } from '../shared/cobroEnEfectivoDuplicado'
 import { resolveTenderForCharge, computeTenderCommission, type ResolvedTenderCharge } from '../dashboard/tenderType.dashboard.service'
 import { validateStaffVenue as validateStaffVenueShared } from '../../utils/staff-venue.util'
 import { isRetryableDbError } from '../../utils/serializableRetry'
@@ -47,6 +49,18 @@ import {
 import { getAreaTicketLineIdsCoveredByInventoryReservations } from './order.tpv.service'
 import { resolveFastPaymentTarget } from './fastPaymentTarget'
 import { linkCustomerToExistingOrder, normalizeRequestedCustomerId, resolveFastOrderCustomer } from './fastPaymentCustomer'
+
+/**
+ * Se lanza DENTRO de la transacción para abortarla sin escribir nada; el `catch` la convierte
+ * en la respuesta idempotente con el cobro que ya existía. No hereda de `AppError` a propósito:
+ * NO es un error que deba salir por HTTP — es un desvío interno hacia una respuesta 200.
+ */
+class CobroDuplicadoEnEfectivo extends Error {
+  constructor(readonly existingPaymentId: string) {
+    super('cobro en efectivo duplicado')
+    this.name = 'CobroDuplicadoEnEfectivo'
+  }
+}
 
 /**
  * Build the slim digitalReceipt response shape with a constructed `receiptUrl`.
@@ -2164,6 +2178,39 @@ export async function recordOrderPayment(
         )
       }
 
+      // 🔴 Toque repetido en «Efectivo» sobre una orden ya cubierta (SN00396, BAE MEZQUITAL,
+      // 2026-09-04: 5 cobros en 1.7 s, referencias distintas, sin llave). Va DESPUÉS del
+      // `FOR UPDATE` de la orden —lo que serializa la ráfaga— y ANTES de reclamar el turno,
+      // que ya suma dinero. Sólo efectivo, sólo con un cobro previo, sólo con saldo cubierto:
+      // ver `cobroEnEfectivoDuplicado.ts`. Se responde con el cobro existente, nunca 4xx.
+      //
+      // La consulta se hace SÓLO cuando el candado puede aplicar (`aplicaCandadoDeEfectivo`):
+      // este camino lo abandona la TPV a los 10 s y un viaje de más por cada cobro con tarjeta
+      // es justo lo que produce el reintento que se está evitando.
+      const candidatoDeEfectivo = { method: classicMethod, status: paymentStatusSnapshot, hasAreaTicketLines }
+      if (aplicaCandadoDeEfectivo(candidatoDeEfectivo)) {
+        const pagosCompletadosDeLaOrden = await tx.payment.findMany({
+          where: { venueId, orderId: activeOrder.id, status: 'COMPLETED' },
+          select: { id: true, amount: true, tipAmount: true, type: true, method: true, createdAt: true },
+          orderBy: { createdAt: 'desc' },
+          // Tope explícito: una orden con más cobros que esto quedaría con el saldo
+          // SUBESTIMADO ⇒ la regla ve «todavía falta» y NO deduplica. El lado seguro.
+          take: 200,
+        })
+        const cobroPrevio = cobroEnEfectivoSobreOrdenSaldada(
+          candidatoDeEfectivo,
+          {
+            subtotal: activeOrder.subtotal,
+            discountAmount: activeOrder.discountAmount,
+            serviceChargeAmount: activeOrder.serviceChargeAmount,
+          },
+          pagosCompletadosDeLaOrden,
+        )
+        if (cobroPrevio) {
+          throw new CobroDuplicadoEnEfectivo(cobroPrevio.id)
+        }
+      }
+
       // Sólo COMPLETED representa dinero capturado. FAILED/PENDING/PROCESSING/
       // REFUNDED conservan `null`: no reclaman turno ni generan una falsa
       // conciliación post-cierre. Para COMPLETED, el claim ES el incremento y
@@ -2344,6 +2391,30 @@ export async function recordOrderPayment(
       return newPayment
     })
   } catch (error) {
+    if (error instanceof CobroDuplicadoEnEfectivo) {
+      const existente = await prisma.payment.findUnique({ where: { id: error.existingPaymentId }, include: { receipts: true } })
+      if (existente) {
+        logger.warn('🔄 [recordOrderPayment] Cobro en EFECTIVO sobre una orden ya saldada — se devuelve el existente', {
+          venueId,
+          orderId,
+          existingPaymentId: existente.id,
+          incomingReferenceNumber: paymentData.referenceNumber ?? null,
+          incomingIdempotencyKey: paymentData.idempotencyKey ?? null,
+          incomingAmount: totalAmount,
+          elapsedMs: elapsedMs(),
+        })
+        return {
+          ...existente,
+          digitalReceipt: await ensureDigitalReceiptResponse(existente.id, existente.receipts[0]),
+        }
+      }
+      logger.error('🚨 [recordOrderPayment] Duplicado en efectivo detectado pero el cobro existente ya no está — imposible', {
+        venueId,
+        orderId,
+        existingPaymentId: error.existingPaymentId,
+      })
+      throw new ConflictError('La orden ya está cobrada. Revisa el historial de cobros.', 'ORDER_ALREADY_PAID_CASH')
+    }
     if (error instanceof ConflictError && error.code === 'PAYMENT_ORDER_AUTHORITY_UNAVAILABLE') {
       if (paymentStatusSnapshot === 'COMPLETED') {
         await recordCapturedPaymentOrderReconciliation(prisma, {

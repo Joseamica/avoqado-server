@@ -12,6 +12,7 @@ import { registerOrderTools } from './tools/orders'
 import { registerTerminalTools } from './tools/terminals'
 import { registerReservationTools } from './tools/reservations'
 import { registerInventoryTools } from './tools/inventory'
+import { registerRecipeTools } from './tools/recipes'
 import { registerSerializedTools } from './tools/serialized'
 import { registerProcurementTools } from './tools/procurement'
 import { registerCfdiTools } from './tools/cfdi'
@@ -87,6 +88,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerTerminalTools(server, scope)
   registerReservationTools(server, scope)
   registerInventoryTools(server, scope)
+  registerRecipeTools(server, scope)
   registerInterVenueTransferTools(server, scope)
   registerProcurementTools(server, scope)
   registerCfdiTools(server, scope)

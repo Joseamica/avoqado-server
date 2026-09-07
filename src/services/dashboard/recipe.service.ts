@@ -155,7 +155,18 @@ export async function getRecipe(venueId: string, productId: string) {
 /**
  * Create a new recipe for a product
  */
-export async function createRecipe(venueId: string, productId: string, data: CreateRecipeDto): Promise<Recipe> {
+/**
+ * Who is writing this recipe, for the audit trail. The dashboard omits it (the HTTP layer
+ * already attributes the request); the MCP passes it so an AI-driven write is told apart
+ * from a human one. It rides the RECIPE_CREATED entry this function ALREADY writes instead
+ * of adding a second one — two entries for one recipe is a corrupted trail, not a richer one.
+ */
+export interface RecipeWriteActorV1 {
+  staffId?: string
+  source?: string
+}
+
+export async function createRecipe(venueId: string, productId: string, data: CreateRecipeDto, actor?: RecipeWriteActorV1): Promise<Recipe> {
   const requestedLineRawMaterialIds = data.lines.map(line => line.rawMaterialId)
   if (new Set(requestedLineRawMaterialIds).size !== requestedLineRawMaterialIds.length) {
     // WHY: RecipeLine is unique by recipe+RM; rejecting duplicates explicitly
@@ -246,7 +257,8 @@ export async function createRecipe(venueId: string, productId: string, data: Cre
     action: 'RECIPE_CREATED',
     entity: 'Recipe',
     entityId: recipe.id,
-    data: { productId, productName },
+    ...(actor?.staffId ? { staffId: actor.staffId } : {}),
+    data: { productId, productName, ...(actor?.source ? { source: actor.source } : {}) },
   })
 
   return recipe as any

@@ -151,7 +151,12 @@ describe('recordOrderPayment (TPV) — un reembolso previo no reabre saldo', () 
     ;(prisma.paymentAllocation.create as jest.Mock).mockResolvedValue({})
     ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback: any) =>
       callback({
-        payment: { count: jest.fn().mockResolvedValue(0), create: prisma.payment.create },
+        // `findMany`: el candado del toque repetido en efectivo (`cobroEnEfectivoDuplicado.ts`)
+        // relee los cobros COMPLETED de la orden DENTRO de la tx. Devuelve `[]` para quedar
+        // COHERENTE con el `count: 0` de arriba —los dos contestan la misma pregunta— y así el
+        // candado queda inerte en esta suite, que no es su objeto: se prueba en
+        // `payment.cash-duplicado.test.ts` y en la integración `cobro-efectivo-duplicado`.
+        payment: { count: jest.fn().mockResolvedValue(0), create: prisma.payment.create, findMany: jest.fn().mockResolvedValue([]) },
         paymentAllocation: { create: prisma.paymentAllocation.create },
         venueTransaction: { create: prisma.venueTransaction.create },
         order: { update: prisma.order.update },
