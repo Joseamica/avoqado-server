@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import type { McpScope } from '../scope'
+import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
@@ -128,6 +129,18 @@ export function registerCampaignTools(server: McpServer, scope: McpScope) {
       // encender autoriza envíos recurrentes; pausar es parar, y parar nunca puede ser más
       // difícil que arrancar.
       guard.requirePermission(activa ? 'marketing:send' : 'marketing:manage', venueId)
+      // 🔴 Y el scope OAuth de ESCRITURA, sin depender del interruptor de despliegue. El guard
+      // general (`enforceWriteScope`) es observar-y-permitir a propósito, así que sin esta línea
+      // un token de SÓLO LECTURA podía encender la felicitación —o apagarla en silencio—: medido
+      // en el /full-testing del 2026-09-07. Encenderla autoriza correos recurrentes que paga
+      // Avoqado y que gastan la reputación del subdominio de marketing, COMPARTIDO entre todos
+      // los negocios; eso no es un riesgo de despliegue, es un agujero. Mismo criterio que la
+      // nómina en `staff.ts` y las sesiones de terminal en `terminals.ts`.
+      requireWriteScopeAlways(
+        scope,
+        activa ? 'marketing:send' : 'marketing:manage',
+        activa ? 'enciende correos recurrentes a los clientes del negocio' : 'apaga los correos automáticos del negocio',
+      )
 
       const actual = await obtenerAutomatizacion(venueId)
       if (!actual) {

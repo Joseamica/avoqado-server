@@ -4,6 +4,8 @@ import { Prisma, BirthdayAutomationStatus, CustomerCampaignDeliveryStatus } from
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
+import { periodoDeEnvio, reservarCuota } from '@/services/marketing/emailQuota.service'
+import { env } from '@/config/env'
 import { fechasPendientes, cumpleanosAFelicitar, diasDeNacimientoQueCumplenEl } from './birthdaySchedule'
 
 /**
@@ -11,8 +13,13 @@ import { fechasPendientes, cumpleanosAFelicitar, diasDeNacimientoQueCumplenEl } 
  *
  * NO manda correos — sólo pone deliveries `PENDING` en la MISMA cola que las campañas
  * puntuales. El carril de envío (scheduler + sender de la fase 1A) las recoge igual,
- * con su reparto justo, su cuota y su backoff. Reusar esa cola es lo que hace que el
- * cumpleaños herede toda la robustez que ya se probó ahí.
+ * con su reparto justo y su backoff. Reusar esa cola es lo que hace que el cumpleaños
+ * herede toda la robustez que ya se probó ahí.
+ *
+ * 🔴 La CUOTA MENSUAL, en cambio, NO se hereda de la cola: se reserva AQUÍ, al encolar,
+ * igual que en `campaignEnqueue`. Hasta el 7-sep-2026 este comentario afirmaba que la
+ * cuota venía incluida y era falso — la felicitación era ilimitada, y un venue que agotaba
+ * su cuota con campañas puntuales seguía mandando cumpleaños todos los días.
  *
  * 🔴 Tres candados, y ninguno es opcional:
  *
@@ -97,8 +104,9 @@ async function procesarUna(auto: AutomatizacionDelBarrido, ahora: Date, resultad
 
   if (auto.venue?.status !== 'ACTIVE') return saltar(`el venue no está ACTIVE (${auto.venue?.status ?? 'sin venue'})`)
 
-  const hoy = hoyEnElVenue(auto.venue?.timezone, ahora)
-  if (!hoy) return saltar('el venue no tiene una zona horaria utilizable')
+  const zona = auto.venue?.timezone
+  const hoy = hoyEnElVenue(zona, ahora)
+  if (!hoy || !zona) return saltar('el venue no tiene una zona horaria utilizable')
 
   // 🔴 El PLAN se revalida en CADA barrido, no sólo al encender: quien dejó de pagar deja
   // de mandar hoy mismo.
@@ -107,30 +115,57 @@ async function procesarUna(auto: AutomatizacionDelBarrido, ahora: Date, resultad
   const fechas = fechasPendientes({ desde: auto.lastEvaluatedLocalDate, hoy, daysBefore: auto.daysBefore })
   if (fechas.length === 0) return 0
 
-  return prisma.$transaction(async tx => {
-    // Candado 1: nadie más evalúa este venue a la vez.
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`h1a:birthday-sweep:${auto.venueId}`}, 0))`
+  // Se recuerda aparte para poder distinguir «no había cuota» de un fallo cualquiera: el
+  // primero es una decisión del sistema y merece un motivo legible, no un `error: …` opaco.
+  let motivoCuota: string | null = null
 
-    let encoladas = 0
-    for (const fecha of fechas) {
-      encoladas += await encolarFecha(tx, auto, fecha)
-    }
+  try {
+    return await prisma.$transaction(async tx => {
+      // Candado 1: nadie más evalúa este venue a la vez.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`h1a:birthday-sweep:${auto.venueId}`}, 0))`
 
-    // Candado 2: CAS — sólo avanza si el cursor sigue donde lo dejamos. El lock protege
-    // dentro de la transacción; esto protege de un proceso que murió a medias antes.
-    const ultima = fechas[fechas.length - 1]
-    const movido = await tx.birthdayAutomation.updateMany({
-      where: { id: auto.id, lastEvaluatedLocalDate: auto.lastEvaluatedLocalDate },
-      data: { lastEvaluatedLocalDate: ultima },
+      let encoladas = 0
+      for (const fecha of fechas) {
+        encoladas += await encolarFecha(tx, auto, fecha)
+      }
+
+      // Candado 3: la CUOTA MENSUAL. Va DENTRO de la transacción y ANTES del CAS, así que si
+      // no alcanza no se crea ninguna delivery Y el cursor no avanza — esas felicitaciones se
+      // reintentan mientras sigan dentro de la tolerancia de atraso, en vez de perderse en
+      // silencio. El período es el del ENVÍO en la zona del VENUE (ver `periodoDeEnvio`).
+      if (encoladas > 0) {
+        try {
+          await reservarCuota(tx, {
+            venueId: auto.venueId,
+            period: periodoDeEnvio(ahora, zona),
+            cantidad: encoladas,
+            topeMensual: env.MARKETING_MONTHLY_QUOTA,
+          })
+        } catch (error: any) {
+          motivoCuota = `no alcanzó la cuota mensual de correos: ${error?.message ?? 'sin detalle'}`
+          throw error
+        }
+      }
+
+      // Candado 2: CAS — sólo avanza si el cursor sigue donde lo dejamos. El lock protege
+      // dentro de la transacción; esto protege de un proceso que murió a medias antes.
+      const ultima = fechas[fechas.length - 1]
+      const movido = await tx.birthdayAutomation.updateMany({
+        where: { id: auto.id, lastEvaluatedLocalDate: auto.lastEvaluatedLocalDate },
+        data: { lastEvaluatedLocalDate: ultima },
+      })
+      if (movido.count === 0) {
+        // Otro worker ya lo avanzó: sus deliveries y las nuestras coinciden por dedupeKey,
+        // así que no hay duplicados — pero se reporta, porque significa que dos barridos
+        // corrieron juntos y eso conviene verlo.
+        logger.warn('El cursor del cumpleaños ya lo había movido otro barrido', { venueId: auto.venueId })
+      }
+      return encoladas
     })
-    if (movido.count === 0) {
-      // Otro worker ya lo avanzó: sus deliveries y las nuestras coinciden por dedupeKey,
-      // así que no hay duplicados — pero se reporta, porque significa que dos barridos
-      // corrieron juntos y eso conviene verlo.
-      logger.warn('El cursor del cumpleaños ya lo había movido otro barrido', { venueId: auto.venueId })
-    }
-    return encoladas
-  })
+  } catch (error) {
+    if (motivoCuota) return saltar(motivoCuota)
+    throw error
+  }
 }
 
 async function encolarFecha(tx: Prisma.TransactionClient, auto: AutomatizacionDelBarrido, fecha: string): Promise<number> {

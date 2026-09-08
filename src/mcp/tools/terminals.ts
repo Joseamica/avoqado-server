@@ -264,7 +264,7 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
       // that they cannot free from the POS.
       guard.requirePermission('tpv:update', venueId)
       // 🔴 Freeing a terminal lets the cashier charge again on it: a read-only token must never do it.
-      requireWriteScopeAlways(scope, 'tpv:update')
+      requireWriteScopeAlways(scope, 'tpv:update', 'cierra las sesiones abiertas de una terminal')
 
       const row = await prisma.terminalPaymentRequest.findFirst({
         where: { requestId, ...where },

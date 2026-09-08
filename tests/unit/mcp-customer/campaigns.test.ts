@@ -163,3 +163,76 @@ describe('set_birthday_automation', () => {
     expect(mockCambiar).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * 🔴 El scope OAuth de la CONEXIÓN, que es distinto del permiso del STAFF.
+ *
+ * El defecto que fija, medido en el /full-testing del 2026-09-07: con `scopes: ['mcp:read']`
+ * —un token emitido como de sólo lectura— `set_birthday_automation` ENCENDÍA la felicitación.
+ * `guard.requirePermission` valida lo que puede la PERSONA; el scope de escritura lo valida
+ * `enforceWriteScope`, que es observar-y-permitir de fábrica (`MCP_ENFORCE_WRITE_SCOPE` sin
+ * definir). Por eso existe `requireWriteScopeAlways`, que corta sin depender de esa bandera —
+ * lo usaban nómina y terminales, y campañas no.
+ *
+ * Aquí NO se mockea `requireWriteScopeAlways`: se ejercita el real, si no la prueba pasaría
+ * por el motivo equivocado.
+ */
+describe('set_birthday_automation — scope de escritura del token', () => {
+  const registrarCon = (scopes?: string[]) => {
+    const h = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
+    const s = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map(), scopes } as McpScope
+    registerCampaignTools({ tool: (...a: unknown[]) => h.set(a[0] as string, a[a.length - 1] as never) } as never, s)
+    return (tool: string, args: Record<string, unknown>) => h.get(tool)!(args, {})
+  }
+
+  beforeEach(() => {
+    mockObtener.mockResolvedValue({ id: 'b1', status: 'PAUSED', daysBefore: 3 })
+    mockCambiar.mockResolvedValue({ status: 'ACTIVE' })
+  })
+
+  it('🔴 un token de SÓLO LECTURA no puede ENCENDER la felicitación', async () => {
+    const soloLectura = registrarCon(['mcp:read'])
+    await expect(soloLectura('set_birthday_automation', { venueId: 'v1', activa: true, confirm: true })).rejects.toThrow(
+      /solo lectura|mcp:write/i,
+    )
+    expect(mockCambiar).not.toHaveBeenCalled()
+  })
+
+  it('🔴 tampoco puede APAGARLA: parar es más fácil de PERMISO, no de token', async () => {
+    mockObtener.mockResolvedValue({ id: 'b1', status: 'ACTIVE', daysBefore: 3 })
+    const soloLectura = registrarCon(['mcp:read'])
+    await expect(soloLectura('set_birthday_automation', { venueId: 'v1', activa: false, confirm: true })).rejects.toThrow(
+      /solo lectura|mcp:write/i,
+    )
+    expect(mockCambiar).not.toHaveBeenCalled()
+  })
+
+  it('🔴 el mensaje NO habla de nómina: dice lo que esta tool hace de verdad', async () => {
+    const soloLectura = registrarCon(['mcp:read'])
+    const error = await soloLectura('set_birthday_automation', { venueId: 'v1', activa: true, confirm: true }).catch(
+      (e: Error) => e,
+    )
+    expect((error as Error).message).toMatch(/correos recurrentes/i)
+    expect((error as Error).message).not.toMatch(/nómina/i)
+  })
+
+  it('con mcp:write sí pasa', async () => {
+    const escritura = registrarCon(['mcp:read', 'mcp:write'])
+    const r = JSON.parse((await escritura('set_birthday_automation', { venueId: 'v1', activa: true, confirm: true })).content[0].text)
+    expect(r.ok).toBe(true)
+    expect(mockCambiar).toHaveBeenCalled()
+  })
+
+  it('un token sin scopes declarados (desarrollo/legacy) conserva acceso, como el resto del catálogo', async () => {
+    const legacy = registrarCon(undefined)
+    const r = JSON.parse((await legacy('set_birthday_automation', { venueId: 'v1', activa: true, confirm: true })).content[0].text)
+    expect(r.ok).toBe(true)
+  })
+
+  it('LEER no exige el scope de escritura', async () => {
+    const soloLectura = registrarCon(['mcp:read'])
+    mockObtener.mockResolvedValue({ id: 'b1', status: 'ACTIVE', daysBefore: 3, subject: 'x', lastEvaluatedLocalDate: null })
+    const r = JSON.parse((await soloLectura('birthday_automation_status', { venueId: 'v1' })).content[0].text)
+    expect(r.encendida).toBe(true)
+  })
+})

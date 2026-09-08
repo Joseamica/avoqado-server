@@ -155,7 +155,7 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
       // general es observar-y-permitir a propósito (para no romper conexiones al desplegar),
       // pero un token de sólo lectura que firma nómina es un agujero, no un riesgo de rollout.
       // Hallazgo #6 de la auditoría de Codex (29-ago-2026).
-      requireWriteScopeAlways(scope, 'attendance:manage')
+      requireWriteScopeAlways(scope, 'attendance:manage', 'mueve dinero de nómina')
 
       const { approveOvertime } = await import('../../services/dashboard/overtimeApproval.service')
 

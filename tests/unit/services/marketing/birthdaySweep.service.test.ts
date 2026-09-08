@@ -20,9 +20,14 @@ jest.mock('@/config/logger', () => ({
   default: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }))
 jest.mock('@/services/access/basePlan.service', () => ({ venueHasFeatureAccess: jest.fn() }))
+jest.mock('@/services/marketing/emailQuota.service', () => ({
+  ...jest.requireActual('@/services/marketing/emailQuota.service'),
+  reservarCuota: jest.fn(),
+}))
 
 import prisma from '@/utils/prismaClient'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
+import { reservarCuota } from '@/services/marketing/emailQuota.service'
 import { barrerCumpleanos, hoyEnElVenue, claveDeDedupe } from '@/services/marketing/birthdaySweep.service'
 
 const automationFindMany = (prisma as any).birthdayAutomation.findMany as jest.Mock
@@ -32,6 +37,7 @@ const txMock = (prisma as any).$transaction as jest.Mock
 const execRaw = (prisma as any).$executeRaw as jest.Mock
 const queryRaw = (prisma as any).$queryRaw as jest.Mock
 const tieneFeature = venueHasFeatureAccess as jest.Mock
+const reservar = reservarCuota as jest.Mock
 
 /** El cliente de transacción que ve el servicio: los mismos mocks. */
 const tx = {
@@ -61,6 +67,7 @@ beforeEach(() => {
   deliveryCreateMany.mockResolvedValue({ count: 0 })
   automationUpdateMany.mockResolvedValue({ count: 1 })
   tieneFeature.mockResolvedValue(true)
+  reservar.mockResolvedValue(undefined)
 })
 
 describe('hoyEnElVenue', () => {
@@ -187,5 +194,87 @@ describe('barrerCumpleanos', () => {
     await barrerCumpleanos(AHORA)
 
     expect(txMock).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * 🔴 La CUOTA MENSUAL — el hueco que encontró el /full-testing del 2026-09-07.
+ *
+ * Medido entonces: 4 deliveries creadas (2 de una campaña puntual + 2 del cumpleaños) y el
+ * ledger marcando `reserved = 2`. `reservarCuota` se invocaba en UN solo sitio —el encolado de
+ * las campañas puntuales— así que la felicitación automática era ILIMITADA: un venue que agotara
+ * su cuota con campañas seguía mandando cumpleaños, todos los días del año.
+ *
+ * No es un tope de producto: `MARKETING_MONTHLY_QUOTA` protege la reputación del subdominio de
+ * marketing, que es COMPARTIDO entre todos los negocios. A la reputación le da igual si el
+ * volumen sale de golpe o goteando.
+ */
+describe('cuota mensual', () => {
+  const conCandidatos = (n: number) => {
+    queryRaw.mockResolvedValue(Array.from({ length: n }, (_, i) => ({ id: `c${i}`, birthDate: new Date('1990-07-17') })))
+    deliveryCreateMany.mockResolvedValue({ count: n })
+  }
+
+  it('🔴 encolar N felicitaciones reserva N de cuota', async () => {
+    automationFindMany.mockResolvedValue([auto()])
+    conCandidatos(3)
+
+    const r = await barrerCumpleanos(AHORA)
+
+    expect(r.encoladas).toBe(3)
+    expect(reservar).toHaveBeenCalledTimes(1)
+    expect(reservar).toHaveBeenCalledWith(tx, expect.objectContaining({ venueId: 'venue_1', cantidad: 3 }))
+  })
+
+  it('🔴 el período es el del ENVÍO en la zona del VENUE, no en UTC', async () => {
+    // 04:00 UTC del 1-ago es todavía el 31-JUL en México: cobrarlo a agosto le resta cuota
+    // al mes que no es. (El cursor se deja al día previo para que haya una fecha pendiente.)
+    automationFindMany.mockResolvedValue([auto({ lastEvaluatedLocalDate: '2026-07-30' })])
+    conCandidatos(1)
+
+    await barrerCumpleanos(new Date('2026-08-01T04:00:00Z'))
+
+    expect(reservar).toHaveBeenCalledWith(tx, expect.objectContaining({ period: '2026-07' }))
+  })
+
+  it('si no se encoló nada NO se reserva: un 0 escondería un llamador con la audiencia vacía', async () => {
+    automationFindMany.mockResolvedValue([auto()])
+    queryRaw.mockResolvedValue([])
+
+    await barrerCumpleanos(AHORA)
+
+    expect(reservar).not.toHaveBeenCalled()
+  })
+
+  it('🔴 con la cuota agotada NO se felicita a nadie y el cursor NO avanza', async () => {
+    automationFindMany.mockResolvedValue([auto()])
+    conCandidatos(2)
+    reservar.mockRejectedValue(new Error('Se alcanzó el tope de 2000 correos de campaña para este período (se pedían 2).'))
+
+    const r = await barrerCumpleanos(AHORA)
+
+    expect(r.encoladas).toBe(0)
+    // 🔴 El cursor NO se mueve: si avanzara, esos cumpleaños quedarían saltados PARA SIEMPRE
+    // aunque el mes siguiente hubiera cuota de sobra.
+    expect(automationUpdateMany).not.toHaveBeenCalled()
+    expect(r.saltados).toHaveLength(1)
+    expect(r.saltados[0].motivo).toMatch(/cuota|tope/i)
+  })
+
+  it('la cuota se reserva ANTES de mover el cursor', async () => {
+    automationFindMany.mockResolvedValue([auto()])
+    conCandidatos(1)
+    const orden: string[] = []
+    reservar.mockImplementation(async () => {
+      orden.push('reserva')
+    })
+    automationUpdateMany.mockImplementation(async () => {
+      orden.push('cursor')
+      return { count: 1 }
+    })
+
+    await barrerCumpleanos(AHORA)
+
+    expect(orden).toEqual(['reserva', 'cursor'])
   })
 })
