@@ -103,7 +103,12 @@ async function readLine(id: string): Promise<StoredLine> {
   return rows[0]
 }
 
-function fulfilled<T>(result: PromiseSettledResult<T>): result is PromiseFulfilledResult<T> {
+// 🔴 NO es genérica a propósito. `Promise.allSettled([put, cancel])` produce una tupla de
+// resultados con tipos de valor DISTINTOS, y ahí TypeScript no puede inferir una sola `T`:
+// el typecheck reventaba con TS2769 sobre `settled.filter(fulfilled)`. Ningún sitio de
+// llamada usa el valor ya estrechado —sólo cuenta cuántos ganaron—, así que `unknown`
+// alcanza, y deja esta guarda igual que `revisionConflict` y `staleOrApplying`.
+function fulfilled(result: PromiseSettledResult<unknown>): result is PromiseFulfilledResult<unknown> {
   return result.status === 'fulfilled'
 }
 

@@ -65,6 +65,20 @@ const CONCESION_INVENTARIO = {
   feature: { code: 'INVENTORY_TRACKING', name: 'Inventario' },
 }
 
+/** Revisión que trae la fila bloqueada en el estado base de cada caso. */
+const REVISION_ACTUAL = 4
+
+/**
+ * 🔴 El servicio ya NO decide con un `findFirst`: abre transacción y BLOQUEA la fila
+ * (`SELECT … FOR UPDATE` vía `$queryRaw`, inventory.mobile.service.ts → `lockStockCount`).
+ * Sin simular ese bloqueo, `rows[0]` se evalúa sobre `undefined` y TODO caso contesta 500 —
+ * que es exactamente como se puso rojo el CI el 2026-09-08. El reclamo `updateMany` se
+ * condiciona a la revisión LEÍDA, así que la fila que devuelve esta función es la que manda.
+ */
+function bloqueoDe(status: 'IN_PROGRESS' | 'COMPLETED' | 'CANCELLED' | 'APPLYING', revision = REVISION_ACTUAL) {
+  return [{ id: countId, status, revision, applyingAt: null }]
+}
+
 function makeToken(role: string, tokenVenueId: string = venueId) {
   mirrorTokenRoleOnStaffVenue(role, tokenVenueId)
   return jwt.sign({ sub: 'user_test', orgId: 'org_test', venueId: tokenVenueId, role }, process.env.ACCESS_TOKEN_SECRET as string, {
@@ -82,8 +96,9 @@ beforeEach(() => {
   prismaMock.venueFeature.findFirst.mockResolvedValue(CONCESION_INVENTARIO as never)
   prismaMock.stockCount.updateMany.mockResolvedValue({ count: 1 })
   // Sin esta línea, el caso del 409 deja sembrado un conteo COMPLETED y los tests que
-  // corran DESPUÉS lo heredan: pasarían o fallarían según el orden, no según el código.
-  prismaMock.stockCount.findFirst.mockResolvedValue(null)
+  // corran DESPUÉS lo heredan — `jest.clearAllMocks()` borra las LLAMADAS, no las
+  // implementaciones: pasarían o fallarían según el orden, no según el código.
+  prismaMock.$queryRaw.mockResolvedValue(bloqueoDe('IN_PROGRESS') as never)
   prismaMock.activityLog.create.mockResolvedValue({} as never)
 })
 
@@ -116,32 +131,38 @@ describe('POST …/stock-counts/:countId/cancel', () => {
       .post(RUTA)
       .set('Authorization', `Bearer ${makeToken(role)}`)
     expect(res.status).toBe(200)
-    expect(res.body).toMatchObject({ success: true, data: { id: countId, status: 'CANCELLED' } })
+    // La revisión que sale es la de la fila BLOQUEADA + 1: prueba que el conteo cancelado
+    // se construyó sobre lo que el lock leyó, y no sobre un valor inventado por el servicio.
+    expect(res.body).toMatchObject({ success: true, data: { id: countId, status: 'CANCELLED', revision: REVISION_ACTUAL + 1 } })
     expect(prismaMock.stockCount.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: countId, venueId, status: 'IN_PROGRESS' } }),
+      expect.objectContaining({ where: { id: countId, venueId, status: 'IN_PROGRESS', revision: REVISION_ACTUAL } }),
     )
   })
 
   it('409 con motivo cuando el conteo ya se completó', async () => {
-    prismaMock.stockCount.updateMany.mockResolvedValue({ count: 0 })
-    prismaMock.stockCount.findFirst.mockResolvedValue({ id: countId, status: 'COMPLETED' } as never)
+    prismaMock.$queryRaw.mockResolvedValue(bloqueoDe('COMPLETED') as never)
     const res = await request(app)
       .post(RUTA)
       .set('Authorization', `Bearer ${makeToken('OWNER')}`)
     expect(res.status).toBe(409)
     expect(res.body.message ?? res.body.error).toMatch(/completado/i)
+    // Un conteo completado YA ajustó el inventario: el servicio lo decide sobre la fila
+    // bloqueada y ni siquiera intenta el reclamo. Sin esta línea, un reclamo que escribiera
+    // y luego explicara el 409 pasaría igual de verde.
+    expect(prismaMock.stockCount.updateMany).not.toHaveBeenCalled()
   })
 
   it('404 cuando no existe en este negocio', async () => {
-    prismaMock.stockCount.updateMany.mockResolvedValue({ count: 0 })
-    prismaMock.stockCount.findFirst.mockResolvedValue(null)
+    prismaMock.$queryRaw.mockResolvedValue([] as never)
     const res = await request(app)
       .post(RUTA)
       .set('Authorization', `Bearer ${makeToken('OWNER')}`)
     expect(res.status).toBe(404)
     // 🔴 Una ruta AUSENTE también contesta 404: sin esto, borrar el `router.post` dejaría esta
-    // prueba en verde (pasó exactamente así en la corrida roja). Exigir que el reclamo se haya
-    // intentado es lo que distingue «el servicio no lo encontró» de «nadie atendió la petición».
-    expect(prismaMock.stockCount.updateMany).toHaveBeenCalled()
+    // prueba en verde (pasó exactamente así en la corrida roja). Lo que distingue «el servicio
+    // no lo encontró» de «nadie atendió la petición» es que el BLOQUEO se haya intentado; el
+    // testigo era `updateMany`, y con el reclamo bajo lock ya no se llega a él en este caso.
+    expect(prismaMock.$queryRaw).toHaveBeenCalled()
+    expect(prismaMock.stockCount.updateMany).not.toHaveBeenCalled()
   })
 })
