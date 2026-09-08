@@ -26,9 +26,18 @@ import {
  * Por eso hacen falta las tres condiciones juntas, que son las que sólo se dan a la vez en
  * una ráfaga de toques del mismo intento:
  *
- *   1. **Mismo dinero** — importe y propina iguales (con la tolerancia de un centavo). Dos
- *      entregas legítimas casi nunca coinciden al centavo, y una propina distinta es dinero
- *      distinto.
+ *   0. **A alguno de los dos lados le falta la llave de idempotencia.** Dos cobros que traen
+ *      `idempotencyKey` son dos intentos LÓGICOS distintos y su identidad ya es exacta: la
+ *      resuelve `@@unique([venueId, idempotencyKey])`, y deduplicarlos por parecido borraría
+ *      una entrega física reproducida horas después desde la misma PAX. Pero apagar la
+ *      heurística mirando SÓLO el cobro entrante —como hacía la ronda 3— deja abierta la
+ *      *ráfaga mixta*: una sola entrega de $100 que produce dos peticiones, A sin llave y B
+ *      con llave, deja DOS cobros, porque la llave de B no existe todavía en la base y B se
+ *      salta la heurística (3ª auditoría de Codex, P2). Con la llave puesta en la FIRMA, el
+ *      par (A sin llave, B con llave) sí se reconoce.
+ *   1. **Mismo dinero** — importe y propina **exactamente** iguales. Aquí no vale la
+ *      tolerancia de un centavo con la que se decide «la cuenta quedó cubierta»: como
+ *      identidad del dinero convertiría $100.00 y $100.01 en el mismo cobro.
  *   2. **Misma terminal** — la ráfaga sale de un solo aparato. Si el cobro previo vino de
  *      otra terminal, es otra persona cobrando: se registra. (Si a alguno de los dos le falta
  *      el serial —APK viejo— la terminal no descalifica: sería el lado inseguro exigirla.)
@@ -60,7 +69,10 @@ import {
  *
  * 🔑 Quien lea los pagos de la base DEBE seleccionar `type`: sin él un reembolso es
  * indistinguible de un cobro negativo. Y `terminalId` y `createdAt`: sin ellos ningún cobro
- * previo puede demostrar la firma, y la regla se vuelve inerte (que es el lado seguro).
+ * previo puede demostrar la firma, y la regla se vuelve inerte (que es el lado seguro). Y
+ * `idempotencyKey`, que es la excepción peligrosa: olvidarla NO vuelve la regla inerte sino
+ * más agresiva — todos los previos parecerían «sin llave» y dos intentos lógicos distintos se
+ * deduplicarían entre sí.
  */
 
 /**
@@ -83,6 +95,13 @@ export interface CobroCandidato {
   tip: number
   /** Terminal que manda el cobro; `null` cuando el aparato no envió serial. */
   terminalId: string | null
+  /**
+   * Llave de idempotencia del cobro entrante. NO apaga la heurística por sí sola: entra en la
+   * FIRMA, junto al dinero, la terminal y la ventana (`alMenosUnoSinLlave`). Obligatoria en el
+   * tipo (aunque su valor pueda ser nulo) para que ningún llamador nuevo la olvide y deje la
+   * comparación creyendo que los dos lados vienen sin llave.
+   */
+  idempotencyKey: string | null | undefined
 }
 
 export interface PagoPrevio extends CompletedPaymentForBalance {
@@ -90,6 +109,13 @@ export interface PagoPrevio extends CompletedPaymentForBalance {
   method?: string | null
   createdAt?: Date
   terminalId?: string | null
+  /**
+   * Llave del cobro YA registrado. Ausente ⇒ APK viejo (o llave vaciada), que es justo el lado
+   * en el que la heurística tiene algo que hacer. Quien lea los pagos de la base DEBE
+   * seleccionarla: sin ella todos los previos parecen «sin llave» y dos intentos lógicos
+   * distintos se deduplicarían entre sí.
+   */
+  idempotencyKey?: string | null
 }
 
 /**
@@ -102,6 +128,16 @@ export interface PagoPrevio extends CompletedPaymentForBalance {
  * 🔑 Vive AQUÍ y no en el llamador para que no existan dos definiciones del candado.
  */
 export function aplicaCandadoDeEfectivo(candidato: CobroCandidato): boolean {
+  // 🔴 La llave NO se mira aquí, a propósito. La ronda 3 apagaba el candado entero cuando el
+  // cobro entrante la traía, y eso dejaba pasar la ráfaga MIXTA (A sin llave crea el cobro; B
+  // con llave no la encuentra en la base, se salta la heurística y crea otro: $100 en el cajón
+  // y $200 en la base — 3ª auditoría de Codex, P2). La condición correcta compara los DOS
+  // lados y por eso vive en la firma (`alMenosUnoSinLlave`), no en este atajo.
+  //
+  // 🔴 El precio, declarado: un cobro en EFECTIVO con llave paga ahora la consulta de los
+  // cobros previos y la relectura de la orden dentro de la transacción. Se acepta porque el
+  // efectivo es una fracción del tráfico; lo que este atajo sigue evitando —y es lo que de
+  // verdad costaba— es ese viaje en cada cobro con TARJETA.
   if (candidato.method !== 'CASH') return false
   if (candidato.status !== 'COMPLETED') return false
   if (candidato.hasAreaTicketLines) return false
@@ -128,22 +164,44 @@ export function cobroEnEfectivoSobreOrdenSaldada(
   const restante = saldo.total.minus(saldo.paidAmount).plus(saldo.refundedAmount)
   if (restante.greaterThan(FULL_PAYMENT_TOLERANCE)) return null
 
+  // 🔴 Identidad EXACTA, no la tolerancia del saldo. `FULL_PAYMENT_TOLERANCE` ($0.01) existe
+  // para decidir «la cuenta quedó cubierta» pese al redondeo de un reparto; usarla como
+  // identidad del dinero convierte $100.00 y $100.01 en el mismo cobro, y entonces una
+  // entrega física de $100.01 no genera ni Payment ni movimiento de turno (2ª auditoría de
+  // Codex, P2). Los importes viven en la base con dos decimales: aquí se comparan iguales.
   const mismoDinero = (p: PagoPrevio) =>
-    decimal(p.amount).minus(candidato.amount).abs().lessThanOrEqualTo(FULL_PAYMENT_TOLERANCE) &&
-    decimal(p.tipAmount).minus(candidato.tip).abs().lessThanOrEqualTo(FULL_PAYMENT_TOLERANCE)
+    decimal(p.amount).equals(decimal(candidato.amount)) && decimal(p.tipAmount).equals(decimal(candidato.tip))
 
-  // Sin fecha no se puede demostrar la ventana ⇒ no se deduplica.
-  const dentroDeLaVentana = (p: PagoPrevio) => p.createdAt != null && ahora.getTime() - p.createdAt.getTime() <= VENTANA_DE_RAFAGA_MS
+  // Sin fecha no se puede demostrar la ventana ⇒ no se deduplica. Y la edad tiene que ser
+  // NO NEGATIVA: un `createdAt` en el futuro (backfill, importación, reloj corrido) dejaría
+  // «dentro de la ventana» a cualquier efectivo compatible de hoy, para siempre — un cobro
+  // real se descartaría sin dejar rastro (2ª auditoría de Codex, P3). Fecha futura ⇒ se
+  // registra, que es el lado del que alguien se entera.
+  const dentroDeLaVentana = (p: PagoPrevio) => {
+    if (p.createdAt == null) return false
+    const edad = ahora.getTime() - p.createdAt.getTime()
+    return edad >= 0 && edad <= VENTANA_DE_RAFAGA_MS
+  }
 
   // Un serial ausente en cualquiera de los dos lados NO descalifica: exigirlo dejaría fuera a
   // los APKs que no mandan `deviceSerialNumber` y el candado no protegería a nadie ahí.
   const mismaTerminal = (p: PagoPrevio) => p.terminalId == null || candidato.terminalId == null || p.terminalId === candidato.terminalId
+
+  // 🔴 Dos llaves presentes ⇒ dos intentos LÓGICOS distintos: su identidad ya es exacta y la
+  // resuelve el índice único, así que deduplicarlos por parecido es la única forma de borrar
+  // dinero real (una fila encolada a las 10:00 que se reproduce a las 14:01 casaría la firma
+  // de un cobro AJENO de la misma PAX — 2ª auditoría, P1 residual). En cuanto a UNO de los dos
+  // le falta la llave, esa identidad exacta no existe y la firma vuelve a ser la única defensa
+  // — que es el caso de la ráfaga mixta (3ª auditoría, P2).
+  const alMenosUnoSinLlave = (p: PagoPrevio) => !candidato.idempotencyKey || !p.idempotencyKey
 
   const masReciente = (a: PagoPrevio, b: PagoPrevio) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0)
 
   // 🔴 Sin fallback a «el cobro más reciente aunque no sea efectivo»: la versión anterior podía
   // responder con un cobro de TARJETA cuando no había efectivo que casara, y eso ata un cobro
   // en efectivo a un movimiento que no lo es.
-  const enEfectivo = cobros.filter(p => p.method === 'CASH' && mismoDinero(p) && dentroDeLaVentana(p) && mismaTerminal(p)).sort(masReciente)
+  const enEfectivo = cobros
+    .filter(p => p.method === 'CASH' && mismoDinero(p) && dentroDeLaVentana(p) && mismaTerminal(p) && alMenosUnoSinLlave(p))
+    .sort(masReciente)
   return enEfectivo[0] ?? null
 }

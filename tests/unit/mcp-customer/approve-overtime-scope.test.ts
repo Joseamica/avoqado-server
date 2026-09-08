@@ -40,7 +40,18 @@ describe('requireWriteScopeAlways', () => {
 
   it('el mensaje dice POR QUÉ, no un código', () => {
     expect(() => requireWriteScopeAlways(scopeCon(['mcp:read']), 'attendance:manage')).toThrow(/solo lectura/i)
-    expect(() => requireWriteScopeAlways(scopeCon(['mcp:read']), 'attendance:manage')).toThrow(/nómina/i)
+    // El motivo lo pone QUIEN LLAMA (7-sep-2026). Antes era un texto fijo sobre nómina dentro del
+    // guard, y eso mentía en cuanto lo reusó otra tool: `terminals.ts` ya recibía "mueve dinero de
+    // nómina" al cerrar sesiones de una terminal, y campañas iba a recibirlo al pausar una
+    // felicitación de cumpleaños. Aquí se fija el mensaje REAL que produce la tool de nómina.
+    expect(() => requireWriteScopeAlways(scopeCon(['mcp:read']), 'attendance:manage', 'mueve dinero de nómina')).toThrow(/nómina/i)
+  })
+
+  it('🔴 sin motivo el mensaje sigue explicando, no cae a un código — pero NO inventa que es nómina', () => {
+    // El default es genérico A PROPÓSITO: un default que hablara de nómina volvería a mentirle al
+    // siguiente que use este guard, que es exactamente el defecto que se corrigió.
+    expect(() => requireWriteScopeAlways(scopeCon(['mcp:read']), 'tpv:update')).toThrow(/escritura sensible/i)
+    expect(() => requireWriteScopeAlways(scopeCon(['mcp:read']), 'tpv:update')).not.toThrow(/nómina/i)
   })
 
   it('con mcp:write pasa', () => {

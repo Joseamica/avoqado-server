@@ -1,5 +1,10 @@
 import { Decimal } from '@prisma/client/runtime/library'
-import { cobroEnEfectivoSobreOrdenSaldada, VENTANA_DE_RAFAGA_MS, type PagoPrevio } from '@/services/shared/cobroEnEfectivoDuplicado'
+import {
+  aplicaCandadoDeEfectivo,
+  cobroEnEfectivoSobreOrdenSaldada,
+  VENTANA_DE_RAFAGA_MS,
+  type PagoPrevio,
+} from '@/services/shared/cobroEnEfectivoDuplicado'
 
 const ORDEN_CERO = { subtotal: new Decimal(0), discountAmount: null, serviceChargeAmount: null }
 const ORDEN_100 = { subtotal: new Decimal(100), discountAmount: null, serviceChargeAmount: null }
@@ -16,12 +21,27 @@ function pago(id: string, amount: number, extra: Partial<PagoPrevio> = {}): Pago
     method: 'CASH',
     terminalId: 'term-A',
     createdAt: new Date('2026-09-04T00:18:08Z'),
+    // Por default el cobro previo es de un APK viejo: SIN llave. Es el lado en el que la
+    // heurística tiene algo que hacer; los casos con llave la ponen explícita.
+    idempotencyKey: null,
     ...extra,
   }
 }
 
-/** El cobro entrante de la evidencia: efectivo de $0 sin propina, desde la MISMA PAX. */
-const CANDIDATO_CASH = { method: 'CASH', status: 'COMPLETED', hasAreaTicketLines: false, amount: 0, tip: 0, terminalId: 'term-A' }
+/**
+ * El cobro entrante de la evidencia: efectivo de $0 sin propina, desde la MISMA PAX y **sin
+ * llave de idempotencia** — así llegaban los cinco cobros de SN00396, y es la única forma en
+ * la que esta heurística tiene algo que hacer (con llave manda la identidad exacta).
+ */
+const CANDIDATO_CASH = {
+  method: 'CASH',
+  status: 'COMPLETED',
+  hasAreaTicketLines: false,
+  amount: 0,
+  tip: 0,
+  terminalId: 'term-A',
+  idempotencyKey: null,
+}
 
 describe('cobroEnEfectivoSobreOrdenSaldada — la regla que separa un toque repetido de un cobro legítimo', () => {
   it('orden de $0 SIN cobros previos: el primer cobro de una línea gratis se registra (null)', () => {
@@ -131,6 +151,65 @@ describe('cobroEnEfectivoSobreOrdenSaldada — la regla que separa un toque repe
 
     it('un cobro previo SIN fecha no puede demostrar la ventana: no se deduplica (null)', () => {
       const previo = pago('p1', 0, { createdAt: undefined })
+      expect(cobroEnEfectivoSobreOrdenSaldada(CANDIDATO_CASH, ORDEN_CERO, [previo], AHORA)).toBeNull()
+    })
+  })
+
+  // ── RONDA 3 + 4 — identidad exacta del dinero, ventana sin futuro, y la LLAVE ────────────
+  // La ronda 3 apagaba la heurística entera en cuanto el cobro entrante traía `idempotencyKey`.
+  // La 3ª auditoría de Codex mostró que ese gate abre una ráfaga MIXTA: una sola entrega de
+  // $100 que produce dos peticiones —A sin llave, B con llave— deja DOS cobros, porque B salta
+  // la heurística y su llave no existe todavía en la base. La regla de la ronda 4 no mira si el
+  // ENTRANTE trae llave, sino si los DOS lados la traen: dos cobros con llave son dos intentos
+  // lógicos distintos y nunca se deduplican por heurística (ahí manda `@@unique([venueId,
+  // idempotencyKey])`); en cuanto a uno de los dos le falta, la identidad exacta no existe y la
+  // firma de la ráfaga vuelve a ser la única defensa.
+  describe('la llave: se deduplica sólo si a alguno de los dos lados le falta', () => {
+    it('entrante CON llave contra un previo CON llave: son dos intentos lógicos distintos (null)', () => {
+      const previo = pago('p1', 0, { idempotencyKey: 'k-previa', createdAt: new Date('2026-09-04T00:18:00Z') })
+      expect(cobroEnEfectivoSobreOrdenSaldada({ ...CANDIDATO_CASH, idempotencyKey: 'k-nueva' }, ORDEN_CERO, [previo], AHORA)).toBeNull()
+    })
+
+    it('entrante CON llave contra un previo SIN llave, misma firma a 30 s: es la ráfaga mixta → devuelve el previo', () => {
+      const previo = pago('p1', 0, { idempotencyKey: null, createdAt: new Date('2026-09-04T00:17:40Z') })
+      expect(cobroEnEfectivoSobreOrdenSaldada({ ...CANDIDATO_CASH, idempotencyKey: 'k-nueva' }, ORDEN_CERO, [previo], AHORA)).toBe(previo)
+    })
+
+    it('entrante SIN llave contra un previo CON llave, misma firma: también es la ráfaga mixta → devuelve el previo', () => {
+      const previo = pago('p1', 0, { idempotencyKey: 'k-previa', createdAt: new Date('2026-09-04T00:17:40Z') })
+      expect(cobroEnEfectivoSobreOrdenSaldada(CANDIDATO_CASH, ORDEN_CERO, [previo], AHORA)).toBe(previo)
+    })
+
+    it('entre varios previos elige el que puede deduplicarse: el de la llave queda fuera', () => {
+      const conLlave = pago('con-llave', 0, { idempotencyKey: 'k-previa', createdAt: new Date('2026-09-04T00:18:05Z') })
+      const sinLlave = pago('sin-llave', 0, { idempotencyKey: null, createdAt: new Date('2026-09-04T00:17:40Z') })
+      const entrante = { ...CANDIDATO_CASH, idempotencyKey: 'k-nueva' }
+      expect(cobroEnEfectivoSobreOrdenSaldada(entrante, ORDEN_CERO, [conLlave, sinLlave], AHORA)).toBe(sinLlave)
+    })
+
+    it('el candado APLICA aunque el cobro traiga llave: el filtro por llave vive en la firma, no aquí', () => {
+      // 🔴 El precio de esta decisión, declarado: un cobro en efectivo CON llave paga ahora la
+      // consulta de los cobros previos y la relectura de la orden dentro de la transacción. Se
+      // acepta porque es sólo efectivo; la TARJETA sigue saliendo antes de tocar la base.
+      expect(aplicaCandadoDeEfectivo({ ...CANDIDATO_CASH, idempotencyKey: 'k-nueva' })).toBe(true)
+      expect(aplicaCandadoDeEfectivo(CANDIDATO_CASH)).toBe(true)
+      expect(aplicaCandadoDeEfectivo({ ...CANDIDATO_CASH, method: 'CREDIT_CARD' })).toBe(false)
+    })
+  })
+
+  describe('identidad exacta del dinero y ventana sin futuro', () => {
+    it('un centavo de diferencia NO es el mismo dinero (null)', () => {
+      const previo = pago('p1', 100, { terminalId: 'term-A', createdAt: new Date('2026-09-04T00:18:00Z') })
+      expect(cobroEnEfectivoSobreOrdenSaldada({ ...CANDIDATO_CASH, amount: 100.01 }, ORDEN_100, [previo], AHORA)).toBeNull()
+    })
+
+    it('un centavo de diferencia en la PROPINA tampoco es el mismo dinero (null)', () => {
+      const previo = pago('p1', 100, { tipAmount: new Decimal(10), terminalId: 'term-A', createdAt: new Date('2026-09-04T00:18:00Z') })
+      expect(cobroEnEfectivoSobreOrdenSaldada({ ...CANDIDATO_CASH, amount: 100, tip: 10.01 }, ORDEN_100, [previo], AHORA)).toBeNull()
+    })
+
+    it('un cobro previo con fecha FUTURA no demuestra la ventana (null)', () => {
+      const previo = pago('p1', 0, { terminalId: 'term-A', createdAt: new Date('2026-09-05T00:00:00Z') })
       expect(cobroEnEfectivoSobreOrdenSaldada(CANDIDATO_CASH, ORDEN_CERO, [previo], AHORA)).toBeNull()
     })
   })

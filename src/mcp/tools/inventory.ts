@@ -10,6 +10,8 @@ import { createRawMaterial } from '@/services/dashboard/rawMaterial.service'
 import { listPresentations, setPresentations } from '@/services/dashboard/rawMaterialPresentation.service'
 import { getReorderSuggestions, getAutoReorderConfig, setAutoReorderConfig } from '@/services/dashboard/autoReorder.service'
 import { getBatchesForRawMaterial, quarantineBatch, releaseBatchFromQuarantine } from '@/services/dashboard/fifoBatch.service'
+import { resumirConteo } from '@/services/shared/stockCountSummary'
+import { cancelStockCount } from '@/services/mobile/inventory.mobile.service'
 import { planGateMessage } from '../planGate'
 import { venuesWithFeatureAccess } from '@/services/access/basePlan.service'
 import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
@@ -494,10 +496,10 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'stock_counts',
-    'Physical inventory counts (conteos de existencia) of a venue: each count with its status (IN_PROGRESS/COMPLETED), who created it, when, and every line — QUANTITY products AND raw materials/ingredients (RECIPE products are never counted; their stock derives from ingredients) — with expected vs physically-counted quantity and the variance. Answers "¿cuándo fue el último conteo?", "¿qué diferencias salieron?", "¿qué insumos faltaron contra sistema?". Newest first. Pass venueId. PREMIUM (INVENTORY_TRACKING).',
+    'Physical inventory counts (conteos de existencia) of a venue: each count with its status (IN_PROGRESS/COMPLETED/CANCELLED), who created it, when, and every line — QUANTITY products AND raw materials/ingredients (RECIPE products are never counted; their stock derives from ingredients) — with expected vs physically-counted quantity and the variance. Answers "¿cuándo fue el último conteo?", "¿qué diferencias salieron?", "¿qué insumos faltaron contra sistema?". Newest first. Pass venueId. Each count also carries `summary` (how many lines were actually counted, matches, mismatches, and the difference per unit — only counted lines) and `cancelledAt` when it was discarded. PREMIUM (INVENTORY_TRACKING).',
     {
       venueId: z.string().describe('Venue whose stock counts to read (must be in your scope)'),
-      status: z.enum(['IN_PROGRESS', 'COMPLETED']).optional().describe('Only counts in this status. Omit for all.'),
+      status: z.enum(['IN_PROGRESS', 'COMPLETED', 'CANCELLED']).optional().describe('Only counts in this status. Omit for all.'),
       limit: z.number().int().positive().max(50).optional().describe('Max counts to return (default 10)'),
     },
     async ({ venueId, status, limit }) => {
@@ -523,27 +525,101 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
 
       return text({
         ok: true,
-        counts: counts.map(c => ({
-          id: c.id,
-          type: c.type,
-          status: c.status,
-          note: c.note,
-          createdAt: c.createdAt.toISOString(),
-          completedAt: c.completedAt?.toISOString() ?? null,
-          createdBy: c.createdByUser ? `${c.createdByUser.firstName} ${c.createdByUser.lastName}` : null,
-          itemCount: c.items.length,
-          countedLines: c.items.filter(i => i.countedAt !== null).length,
-          items: c.items.map(i => ({
-            kind: i.rawMaterialId ? 'INGREDIENT' : 'PRODUCT',
-            name: i.product?.name ?? i.rawMaterial?.name ?? '',
-            sku: i.product?.sku ?? i.rawMaterial?.sku ?? null,
-            unit: i.rawMaterial?.unit ?? null,
-            expected: Number(i.expected),
-            counted: i.countedAt ? Number(i.counted) : null,
-            variance: i.countedAt ? round2(Number(i.counted) - Number(i.expected)) : null,
-          })),
-        })),
+        counts: counts.map(c => {
+          // La misma regla que el dashboard y las apps: sólo líneas contadas, diferencia por unidad.
+          const summary = resumirConteo(
+            c.items.map(i => ({ expected: i.expected, counted: i.counted, countedAt: i.countedAt, unit: i.rawMaterial?.unit ?? null })),
+          )
+          return {
+            id: c.id,
+            type: c.type,
+            status: c.status,
+            note: c.note,
+            createdAt: c.createdAt.toISOString(),
+            completedAt: c.completedAt?.toISOString() ?? null,
+            cancelledAt: c.cancelledAt?.toISOString() ?? null,
+            createdBy: c.createdByUser ? `${c.createdByUser.firstName} ${c.createdByUser.lastName}` : null,
+            itemCount: c.items.length,
+            // Back-compat: el MISMO número que `summary.countedCount`. La regla de «qué línea cuenta
+            // como contada» vive una sola vez, en resumirConteo; aquí sólo se reexpone.
+            countedLines: summary.countedCount,
+            summary,
+            items: c.items.map(i => ({
+              kind: i.rawMaterialId ? 'INGREDIENT' : 'PRODUCT',
+              name: i.product?.name ?? i.rawMaterial?.name ?? '',
+              sku: i.product?.sku ?? i.rawMaterial?.sku ?? null,
+              unit: i.rawMaterial?.unit ?? null,
+              expected: Number(i.expected),
+              counted: i.countedAt ? Number(i.counted) : null,
+              variance: i.countedAt ? round2(Number(i.counted) - Number(i.expected)) : null,
+            })),
+          }
+        }),
       })
+    },
+  )
+
+  server.tool(
+    'cancel_stock_count',
+    'Cancel (discard) a physical inventory count that is still IN_PROGRESS and will never be finished — "dejarlo ir". It never touches stock: only a confirmed (COMPLETED) count adjusts inventory. Completed or currently-applying counts cannot be cancelled. By DEFAULT this only PREVIEWS (shows the count and what will change); call again with confirm:true to actually cancel. This WRITES — requires inventory:update. Cannot be undone. PREMIUM (INVENTORY_TRACKING).',
+    {
+      venueId: z.string().describe('Venue that owns the count (must be in your scope)'),
+      countId: z.string().describe('Id of the count, from stock_counts'),
+      confirm: z.boolean().optional().describe('Must be true to actually cancel; without it you get a preview'),
+    },
+    async ({ venueId, countId, confirm }) => {
+      const where = guard.venueFilter(venueId)
+      guard.requirePermission('inventory:update', venueId)
+      const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario')
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+
+      const count = await prisma.stockCount.findFirst({
+        where: { ...where, id: countId },
+        select: { id: true, status: true, type: true, createdAt: true, _count: { select: { items: true } } },
+      })
+      // Resolve-don't-guess: fuera del alcance no se toca, y no se ofrece otro conteo en su lugar.
+      if (!count) return text({ ok: false, error: 'No encontré ese conteo en este negocio.' })
+      if (count.status === 'COMPLETED')
+        return text({ ok: false, error: 'Ese conteo ya está completado: ya ajustó el inventario y no se puede cancelar.' })
+      if (count.status === 'CANCELLED') return text({ ok: false, error: 'Ese conteo ya estaba cancelado.' })
+      if (count.status === 'APPLYING')
+        return text({ ok: false, error: 'Ese conteo se está aplicando al inventario; espera a que termine.' })
+
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          change: {
+            count: count.id,
+            type: count.type,
+            createdAt: count.createdAt.toISOString(),
+            lines: count._count.items,
+            label: 'Estado',
+            from: 'IN_PROGRESS',
+            to: 'CANCELLED',
+          },
+          // Timestamp completo, no el día cortado del ISO: `slice(0, 10)` es el día en UTC y una
+          // tarde de CDMX ya cayó en el día siguiente ahí — le diría al operador una fecha equivocada.
+          message: `Esto cancelará el conteo ${count.type === 'FULL' ? 'completo' : 'cíclico'} del ${count.createdAt.toISOString()} (${
+            count._count.items
+          } artículos). No toca el inventario y no se puede deshacer. Confirma con el operador; luego vuelve a llamar con confirm:true.`,
+        })
+      }
+
+      try {
+        const result = await cancelStockCount(count.id, venueId, scope.staffId)
+        // El servicio ya escribe STOCK_COUNT_CANCELLED; este asiento marca que la escritura vino por IA.
+        await auditMcpWrite(scope, {
+          action: 'STOCK_COUNT_CANCELLED_MCP',
+          entity: 'StockCount',
+          entityId: count.id,
+          venueId,
+          data: { type: count.type, lines: count._count.items, cancelledAt: result.cancelledAt },
+        })
+        return text({ ok: true, count: result })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
     },
   )
 

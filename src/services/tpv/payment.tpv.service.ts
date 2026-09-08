@@ -61,6 +61,15 @@ import { linkCustomerToExistingOrder, normalizeRequestedCustomerId, resolveFastO
  * bitácora recibe su `CASH_PAYMENT_DEDUPLICATED`. Lo que no se escribe es un segundo `Payment`,
  * su `VenueTransaction` ni el incremento del turno.
  */
+/**
+ * Cuánto puede retener la bitácora del descarte la respuesta de un cobro deduplicado.
+ *
+ * 1.5 s deja escribir el asiento en el caso normal (milisegundos) y corta muy por debajo de
+ * los 12 s en que la TPV abandona la petición: pasado ese punto la terminal reintentaría un
+ * cobro que el servidor ya resolvió, que es peor que perder el rastro auxiliar.
+ */
+const TOPE_BITACORA_DEDUPLICACION_MS = 1500
+
 class CobroDuplicadoEnEfectivo extends Error {
   constructor(readonly existingPaymentId: string) {
     super('cobro en efectivo duplicado')
@@ -1996,7 +2005,29 @@ export async function recordOrderPayment(
   })
 
   if (!activeOrder) {
-    throw new NotFoundError(`Order ${orderId} not found in venue ${venueId}`)
+    // 🔴 El código es parte del contrato con la TPV, no decoración: al reproducir su cola,
+    // `ORDER_NOT_FOUND` es el ÚNICO 404 en el que puede caer a venta rápida. Un 404 por venue
+    // equivocado o por una ruta caída se parece byte a byte, y sin distinguirlos la TPV
+    // convierte una orden VIVA en una venta suelta —perdiendo su SaleVerification— y otra
+    // terminal la vuelve a cobrar (2ª auditoría de Codex, P1 nuevo).
+    //
+    // 🔴 Y por eso la consulta de arriba NO basta para emitirlo: está acotada al venue, así que
+    // una fila heredada con el `venueId` equivocado —o un supervisor autorizado en dos
+    // sucursales, que la ruta permite: `checkPermission`, no un candado de venue— produce el
+    // mismo `null` que una orden borrada. Se pregunta una segunda vez SIN el venue, y sólo si
+    // la orden no existe en ninguna parte se firma «ya no existe» (3ª auditoría de Codex, P1).
+    // Esta consulta cuesta un viaje y corre únicamente en el camino que ya iba a fallar.
+    const ordenEnOtraSucursal = await prisma.order.findUnique({ where: { id: orderId }, select: { id: true, venueId: true } })
+    if (ordenEnOtraSucursal) {
+      // No se filtra nada del otro negocio —ni su id, ni su nombre—: sólo el código, que es lo
+      // que la TPV necesita para dejar la fila en revisión humana en vez de recobrarla.
+      logger.warn('🚧 [recordOrderPayment] La orden existe pero pertenece a otra sucursal — no se puede cobrar aquí', {
+        venueId,
+        orderId,
+      })
+      throw new NotFoundError('La orden pertenece a otra sucursal', 'ORDER_NOT_IN_VENUE')
+    }
+    throw new NotFoundError(`Order ${orderId} not found in venue ${venueId}`, 'ORDER_NOT_FOUND')
   }
 
   // Validate splitType business logic
@@ -2194,9 +2225,11 @@ export async function recordOrderPayment(
       // controlador responde 201 en todas las ramas—, nunca con un 4xx: un rechazo delante
       // del cliente empuja al cajero a volver a cobrar.
       //
-      // La consulta se hace SÓLO cuando el candado puede aplicar (`aplicaCandadoDeEfectivo`):
-      // este camino lo abandona la TPV a los 10 s y un viaje de más por cada cobro con tarjeta
-      // es justo lo que produce el reintento que se está evitando.
+      // La consulta se hace SÓLO cuando el candado puede aplicar (`aplicaCandadoDeEfectivo`),
+      // que hoy quiere decir «es efectivo COMPLETED sin vales»: este camino lo abandona la TPV
+      // a los 10 s y un viaje de más por cada cobro con TARJETA es justo lo que produce el
+      // reintento que se está evitando. El efectivo con llave sí paga la consulta desde la
+      // ronda 4 — es el precio de cerrar la ráfaga mixta, y se paga sólo en efectivo.
       const candidatoDeEfectivo = {
         method: classicMethod,
         status: paymentStatusSnapshot,
@@ -2204,11 +2237,29 @@ export async function recordOrderPayment(
         amount: totalAmount,
         tip: tipAmount,
         terminalId,
+        // 🔴 La llave entra a la FIRMA, no apaga el candado. Dos cobros que la traen son dos
+        // intentos lógicos distintos y no se deduplican (los resuelve el índice único de
+        // arriba); pero si a uno de los dos le falta —la ráfaga MIXTA de la 3ª auditoría de
+        // Codex, P2: una entrega que sale dos veces, una sin llave y otra con ella— la firma
+        // vuelve a ser la única defensa. Ver `cobroEnEfectivoDuplicado.ts`.
+        idempotencyKey: paymentData.idempotencyKey ?? null,
       }
       if (aplicaCandadoDeEfectivo(candidatoDeEfectivo)) {
         const pagosCompletadosDeLaOrden = await tx.payment.findMany({
           where: { venueId, orderId: activeOrder.id, status: 'COMPLETED' },
-          select: { id: true, amount: true, tipAmount: true, type: true, method: true, createdAt: true, terminalId: true },
+          // 🔴 `idempotencyKey` no es opcional en este select: sin ella todos los cobros previos
+          // parecerían «sin llave» y dos intentos lógicos distintos se deduplicarían entre sí
+          // — el único olvido de esta lista que vuelve la regla MÁS agresiva, no inerte.
+          select: {
+            id: true,
+            amount: true,
+            tipAmount: true,
+            type: true,
+            method: true,
+            createdAt: true,
+            terminalId: true,
+            idempotencyKey: true,
+          },
           // 🔑 Desempate estable por `id`: con `createdAt` a secas, filas empatadas al
           // milisegundo (un backfill, una importación) pueden dejar dentro del corte un cobro
           // y fuera su reembolso — y entonces una orden devuelta se leería como saldada.
@@ -2445,26 +2496,62 @@ export async function recordOrderPayment(
         // 🔴 Rastro DURABLE: el `logger.warn` vive en Better Stack 30 días y no lo ve el dueño.
         // Un cobro que el servidor decide no registrar tiene que poder explicarse después —
         // «entregué el dinero y no aparece»— desde la bitácora del negocio.
-        // Best-effort, sin `await` y en `try/catch`: la respuesta del cobro nunca depende de esto.
+        //
+        // 🔴 Y aquí SÍ se espera (`await`), en contra del «fire-and-forget» que la regla del
+        // repo pide para `logAction` en general. La diferencia: en el resto de los casos la
+        // bitácora ACOMPAÑA a un dato que ya quedó guardado; aquí ES el dato, porque el
+        // `Payment` entrante no se guarda. Sin el `await`, la respuesta 2xx sale antes de que
+        // exista la fila y un reinicio entre medias borra el único rastro del intento
+        // descartado —referencia, llave, monto, propina y terminal— (2ª auditoría de Codex,
+        // P3); además, un `logAction` que rechaza deja una promesa sin manejar. El `try/catch`
+        // sigue: esperar la bitácora no puede convertirla en un punto de falla del cobro.
+        //
+        // 🔴 Pero el `await` va ACOTADO. Sin tope convierte una escritura auxiliar en
+        // disponibilidad del cobro: con el pool agotado Prisma puede esperar 10 s sólo por la
+        // conexión y la TPV abandona a los 12 s, así que la terminal vería un timeout y
+        // volvería a encolar un cobro que el servidor YA decidió devolver — justo el reintento
+        // que todo esto evita (3ª auditoría de Codex, P3). El rastro importa; la respuesta al
+        // cajero, más. Vencido el tope se responde y queda el `logger.warn` como aviso.
+        let temporizadorDeLaBitacora: NodeJS.Timeout | undefined
+        let vencioLaBitacora = false
         try {
-          logAction({
-            staffId: userId ?? paymentData.staffId,
-            venueId,
-            action: 'CASH_PAYMENT_DEDUPLICATED',
-            entity: 'Payment',
-            entityId: existente.id,
-            data: {
+          await Promise.race([
+            logAction({
+              staffId: userId ?? paymentData.staffId,
+              venueId,
+              action: 'CASH_PAYMENT_DEDUPLICATED',
+              entity: 'Payment',
+              entityId: existente.id,
+              data: {
+                orderId,
+                incomingReferenceNumber: paymentData.referenceNumber ?? null,
+                incomingIdempotencyKey: paymentData.idempotencyKey ?? null,
+                incomingAmount: totalAmount,
+                incomingTip: tipAmount,
+                terminalId,
+                source: 'TPV',
+              },
+            }),
+            new Promise<void>(resolve => {
+              temporizadorDeLaBitacora = setTimeout(() => {
+                vencioLaBitacora = true
+                resolve()
+              }, TOPE_BITACORA_DEDUPLICACION_MS)
+            }),
+          ])
+          if (vencioLaBitacora) {
+            logger.warn('[recordOrderPayment] La bitácora de deduplicación tardó >1.5 s; se responde sin esperarla', {
+              venueId,
               orderId,
-              incomingReferenceNumber: paymentData.referenceNumber ?? null,
-              incomingIdempotencyKey: paymentData.idempotencyKey ?? null,
-              incomingAmount: totalAmount,
-              incomingTip: tipAmount,
-              terminalId,
-              source: 'TPV',
-            },
-          })
+              existingPaymentId: existente.id,
+            })
+          }
         } catch {
           logger.warn('[recordOrderPayment] No se pudo escribir CASH_PAYMENT_DEDUPLICATED en la bitácora', { venueId, orderId })
+        } finally {
+          // Se limpia SIEMPRE —también cuando la bitácora rechaza— para no dejar vivo un
+          // temporizador de 1.5 s por cada cobro deduplicado.
+          if (temporizadorDeLaBitacora) clearTimeout(temporizadorDeLaBitacora)
         }
         return {
           ...existente,

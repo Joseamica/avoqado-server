@@ -329,6 +329,10 @@ describe('recordOrderPayment — toque repetido en Efectivo sobre una orden ya s
     expect(llamada.where).toMatchObject({ venueId: VENUE_ID, orderId: ORDER_ID, status: 'COMPLETED' })
     expect(llamada.select).toMatchObject({ id: true, amount: true, tipAmount: true, type: true, method: true, createdAt: true })
     expect(llamada.select.terminalId).toBe(true)
+    // 🔴 Sin `idempotencyKey` todos los cobros previos parecerían «sin llave» y dos intentos
+    // lógicos distintos se deduplicarían entre sí: es el único olvido de este `select` que
+    // vuelve la regla MÁS agresiva en vez de inerte.
+    expect(llamada.select.idempotencyKey).toBe(true)
     // 🔴 Acotado: un findMany sin tope sobre Payment es la clase de consulta que tumbó
     // producción el 2026-09-01, y aquí corre DENTRO de la transacción del cobro. El número
     // EXACTO importa: `typeof === 'number'` dejaba pasar `take: 1`, que subestimaría el saldo
@@ -460,6 +464,170 @@ describe('recordOrderPayment — toque repetido en Efectivo sobre una orden ya s
     expect(result.id).toBe('pay-otra')
   })
 
+  // ── RONDA 4 — la ráfaga MIXTA: con llave y sin llave (3ª auditoría de Codex, P2) ────────
+  // La ronda 3 apagaba la heurística entera en cuanto el cuerpo traía `idempotencyKey`, y eso
+  // dejaba pasar una entrega única que sale dos veces —A sin llave, B con llave—: la llave de B
+  // no existe todavía en la base, así que el atajo exacto no dispara y B se saltaba el candado.
+  // Ahora la llave entra a la FIRMA: se deduplica sólo si a alguno de los DOS lados le falta.
+
+  /**
+   * `prisma.payment.findUnique` sirve a DOS sitios distintos del servicio: el atajo exacto por
+   * `venueId_idempotencyKey` (arriba de todo) y la relectura del cobro existente al deduplicar.
+   * Un `mockResolvedValue` plano los confunde y deja pasar por bueno un resultado que llegó por
+   * el atajo, sin haber ejercitado la heurística. Aquí el atajo devuelve SIEMPRE `null` —esa
+   * llave no está en la base, que es la premisa de la ráfaga mixta— y sólo la búsqueda por `id`
+   * devuelve el cobro.
+   */
+  function cobroSoloPorId(cobro: unknown) {
+    ;(prisma.payment.findUnique as jest.Mock).mockImplementation(async (args: any) => (args?.where?.id ? cobro : null))
+  }
+
+  /** Un cobro previo en efectivo de la MISMA PAX, hace un instante. `llave` decide el caso. */
+  function previoEnEfectivo(llave: string | null) {
+    return {
+      id: 'pay-prev',
+      amount: new Decimal(0),
+      tipAmount: new Decimal(0),
+      type: 'REGULAR',
+      method: 'CASH',
+      terminalId: TERMINAL_ID,
+      createdAt: new Date(),
+      idempotencyKey: llave,
+    }
+  }
+
+  it('con llave en el cuerpo y un previo TAMBIÉN con llave: son dos intentos lógicos distintos, se registra', async () => {
+    const order = makeOrder({ total: new Decimal(0), subtotal: new Decimal(0) })
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+    ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
+    ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
+    ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
+    // Ningún cobro previo con ESTA llave: el atajo exacto de arriba no dispara.
+    ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(null)
+    ;(prisma.payment.findMany as jest.Mock).mockResolvedValue([previoEnEfectivo('llave-previa')])
+    ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+      id: 'pay-con-llave',
+      status: 'COMPLETED',
+      amount: new Decimal(0),
+      tipAmount: new Decimal(0),
+      feeAmount: 0,
+      netAmount: 0,
+      order: { ...order, items: order.items, venue: {} },
+      processedBy: null,
+    })
+
+    const result: any = await (paymentService as any).recordOrderPayment(
+      VENUE_ID,
+      ORDER_ID,
+      { ...COBRO_CASH_CERO, idempotencyKey: 'llave-nueva' },
+      'user-1',
+    )
+
+    expect(prisma.payment.create).toHaveBeenCalledTimes(1)
+    expect(result.id).toBe('pay-con-llave')
+    expect(huboAvisoDeDuplicado()).toBe(false)
+  })
+
+  it('con llave en el cuerpo pero un previo SIN llave de la misma firma: es la ráfaga mixta, se devuelve el existente', async () => {
+    const order = makeOrder({ total: new Decimal(0), subtotal: new Decimal(0) })
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+    ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
+    ;(prisma.payment.findMany as jest.Mock).mockResolvedValue([previoEnEfectivo(null)])
+    cobroSoloPorId({ id: 'pay-prev', status: 'COMPLETED', receipts: [] })
+
+    const result: any = await (paymentService as any).recordOrderPayment(
+      VENUE_ID,
+      ORDER_ID,
+      { ...COBRO_CASH_CERO, idempotencyKey: 'llave-nueva' },
+      'user-1',
+    )
+
+    expect(result.id).toBe('pay-prev')
+    expect(prisma.payment.create).not.toHaveBeenCalled()
+    expect(huboAvisoDeDuplicado()).toBe(true)
+  })
+
+  it('el efectivo CON llave paga la consulta de los previos: es el precio declarado de cerrar la ráfaga mixta', async () => {
+    const order = makeOrder({ total: new Decimal(0), subtotal: new Decimal(0) })
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+    ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
+    ;(prisma.payment.findMany as jest.Mock).mockResolvedValue([previoEnEfectivo(null)])
+    cobroSoloPorId({ id: 'pay-prev', status: 'COMPLETED', receipts: [] })
+
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...COBRO_CASH_CERO, idempotencyKey: 'llave-nueva' }, 'user-1')
+
+    expect(prisma.payment.findMany).toHaveBeenCalled()
+  })
+
+  it('con TARJETA no se consultan los cobros previos: el atajo que evita el viaje de más sigue en pie', async () => {
+    // 🔴 Este es el gate que NO se quitó. Un viaje extra dentro de la transacción por cada
+    // cobro con tarjeta es justo lo que produce el timeout de 12 s de la TPV y el reintento
+    // que todo este trabajo está evitando.
+    const order = makeOrder()
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+    ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
+    ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
+    ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
+    ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+      id: 'pay-tarjeta',
+      status: 'COMPLETED',
+      amount: new Decimal(100),
+      tipAmount: new Decimal(0),
+      feeAmount: 0,
+      netAmount: 100,
+      order: { ...order, items: order.items, venue: {} },
+      processedBy: null,
+    })
+
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData, 'user-1')
+
+    expect(prisma.payment.findMany).not.toHaveBeenCalled()
+  })
+
+  // ── RONDA 4 — «no existe» ≠ «existe en otro venue» (3ª auditoría de Codex, P1) ──────────
+  // `ORDER_NOT_FOUND` es el ÚNICO 404 en el que la TPV puede reproducir su fila como venta
+  // rápida. Emitirlo para una orden VIVA de otra sucursal —una fila heredada con el venue
+  // equivocado, un supervisor con acceso a los dos— convierte esa orden en una venta suelta en
+  // el venue A mientras sigue pendiente en B, y otra terminal la vuelve a cobrar.
+
+  /**
+   * `prisma.order.findUnique` con DOS respuestas según el `where`: la consulta acotada al venue
+   * (la del cobro) y la global (la que decide el código del 404). Es la única forma de fijar la
+   * diferencia: un mock que devuelve `null` pase lo que pase aprueba las dos implementaciones.
+   */
+  function ordenSegunElWhere(globalDevuelve: unknown) {
+    ;(prisma.order.findUnique as jest.Mock).mockImplementation(async (args: any) =>
+      args?.where?.venueId === undefined ? globalDevuelve : null,
+    )
+  }
+
+  it('una orden VIVA en otro venue da 404 ORDER_NOT_IN_VENUE: la TPV no puede convertirla en venta rápida', async () => {
+    ordenSegunElWhere({ id: ORDER_ID, venueId: 'venue-de-otra-sucursal' })
+    ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
+    ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(null)
+
+    await expect((paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, COBRO_CASH_CERO, 'user-1')).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'ORDER_NOT_IN_VENUE',
+    })
+  })
+
+  it('la orden inexistente lanza NotFoundError con el código ORDER_NOT_FOUND', async () => {
+    // La TPV necesita distinguir «esta orden ya no existe» —el único 404 en el que puede caer
+    // a venta rápida al reproducir su cola— de cualquier otro 404 (venue equivocado, ruta
+    // caída). Sin el código, un 404 ajeno convierte una orden viva en venta suelta y otra
+    // terminal la vuelve a cobrar (2ª auditoría de Codex, P1 nuevo del lado TPV).
+    // La orden no existe EN NINGUNA PARTE: ni acotada al venue ni globalmente.
+    ordenSegunElWhere(null)
+    ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
+    ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(null)
+
+    await expect((paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, COBRO_CASH_CERO, 'user-1')).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'ORDER_NOT_FOUND',
+    })
+  })
+
   it('se escribe CASH_PAYMENT_DEDUPLICATED en la bitácora con el id del cobro existente', async () => {
     // El `logger.warn` vive 30 días en Better Stack y el dueño no lo ve. Un cobro que el
     // servidor decide NO registrar tiene que poder explicarse desde la bitácora del negocio.
@@ -487,5 +655,87 @@ describe('recordOrderPayment — toque repetido en Efectivo sobre una orden ya s
     expect(asiento.entityId).toBe('pay-prev')
     expect(asiento.venueId).toBe(VENUE_ID)
     expect(asiento.data).toMatchObject({ orderId: ORDER_ID, incomingReferenceNumber: 'CASH-1788481077703', terminalId: TERMINAL_ID })
+  })
+
+  // ── RONDA 3 — la bitácora del descarte es DURABLE, no fire-and-forget ────────────────
+  // `logAction` es una promesa: llamarla sin `await` deja salir el 201 antes de que la fila
+  // exista, y un reinicio o un corte entre medias borra el ÚNICO rastro de un cobro que el
+  // servidor decidió no registrar (2ª auditoría de Codex, P3). La regla general del repo dice
+  // «fire-and-forget»; ésta es la excepción razonada: aquí la bitácora no acompaña a un dato
+  // que ya quedó guardado — ES el dato, porque el `Payment` entrante no se guarda.
+
+  /** Deja el escenario de la ráfaga listo: un efectivo previo de la misma PAX que sí deduplica. */
+  function sembrarRafagaQueDeduplica() {
+    const order = makeOrder({ total: new Decimal(0), subtotal: new Decimal(0) })
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+    ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
+    ;(prisma.payment.findMany as jest.Mock).mockResolvedValue([
+      {
+        id: 'pay-prev',
+        amount: new Decimal(0),
+        tipAmount: new Decimal(0),
+        type: 'REGULAR',
+        method: 'CASH',
+        terminalId: TERMINAL_ID,
+        createdAt: new Date(),
+      },
+    ])
+    ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue({ id: 'pay-prev', status: 'COMPLETED', receipts: [] })
+  }
+
+  it('la bitácora se ESPERA antes de responder: el 2xx no sale antes que el asiento', async () => {
+    let asientoEscrito = false
+    logActionMock.mockImplementation(
+      () =>
+        new Promise<void>(resolve => {
+          setTimeout(() => {
+            asientoEscrito = true
+            resolve()
+          }, 20)
+        }),
+    )
+    sembrarRafagaQueDeduplica()
+
+    const result: any = await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, COBRO_CASH_CERO, 'user-1')
+
+    expect(result.id).toBe('pay-prev')
+    expect(asientoEscrito).toBe(true)
+  })
+
+  it('una bitácora que NUNCA resuelve no retiene la respuesta del cobro: vence el tope y se responde', async () => {
+    // 🔴 3ª auditoría de Codex, P3: el `await` de la ronda 3 convirtió una escritura auxiliar en
+    // disponibilidad del cobro. Con el pool agotado, Prisma puede esperar 10 s sólo por
+    // conexión y la TPV abandona a los 12 s: la terminal ve timeout y vuelve a encolar un cobro
+    // que el servidor YA decidió devolver. El rastro importa, pero no más que la respuesta.
+    logActionMock.mockImplementation(() => new Promise(() => {}))
+    sembrarRafagaQueDeduplica()
+
+    const VENCIO = Symbol('la respuesta se quedó esperando la bitácora')
+    let guardia: NodeJS.Timeout | undefined
+    const resultado: any = await Promise.race([
+      (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, COBRO_CASH_CERO, 'user-1'),
+      new Promise(resolve => {
+        guardia = setTimeout(() => resolve(VENCIO), 4000)
+      }),
+    ])
+    if (guardia) clearTimeout(guardia)
+
+    expect(resultado).not.toBe(VENCIO)
+    expect(resultado.id).toBe('pay-prev')
+    expect((logger.warn as jest.Mock).mock.calls.some(([msg]) => String(msg).includes('La bitácora de deduplicación tardó'))).toBe(true)
+  })
+
+  it('si la bitácora RECHAZA, el cobro existente se devuelve igual y el fallo se avisa', async () => {
+    // Esperar la bitácora no puede convertirla en un punto de falla del cobro: un `logAction`
+    // caído tiene que dejar la respuesta intacta y quedar como aviso, no como 500.
+    logActionMock.mockRejectedValue(new Error('bitácora caída'))
+    sembrarRafagaQueDeduplica()
+
+    const result: any = await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, COBRO_CASH_CERO, 'user-1')
+
+    expect(result.id).toBe('pay-prev')
+    expect(
+      (logger.warn as jest.Mock).mock.calls.some(([msg]) => String(msg).includes('No se pudo escribir CASH_PAYMENT_DEDUPLICATED')),
+    ).toBe(true)
   })
 })

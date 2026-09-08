@@ -2206,6 +2206,17 @@ router.post(
   inventoryMobileController.confirmStockCount,
 )
 
+/**
+ * POST /api/v1/mobile/venues/:venueId/inventory/stock-counts/:countId/cancel
+ * Cancel an IN_PROGRESS stock count ("dejarlo ir"). Never touches inventory.
+ */
+router.post(
+  '/venues/:venueId/inventory/stock-counts/:countId/cancel',
+  authenticateTokenMiddleware,
+  checkPermission('inventory:update'),
+  inventoryMobileController.cancelStockCount,
+)
+
 // ============================================================================
 // RECEIPTS (Digital Receipt Sending)
 // Authenticated endpoints - requires valid JWT

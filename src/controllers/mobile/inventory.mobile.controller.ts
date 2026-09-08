@@ -102,3 +102,18 @@ export const confirmStockCount = async (req: Request, res: Response, next: NextF
     next(error)
   }
 }
+
+/**
+ * Cancel a stock count that will never be finished ("dejarlo ir").
+ * @route POST /api/v1/mobile/venues/:venueId/inventory/stock-counts/:countId/cancel
+ */
+export const cancelStockCount = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, countId } = req.params
+    const userId = req.authContext?.userId || ''
+    const count = await inventoryService.cancelStockCount(countId, venueId, userId)
+    return res.json({ success: true, count })
+  } catch (error) {
+    next(error)
+  }
+}

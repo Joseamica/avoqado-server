@@ -209,9 +209,7 @@ describe('set_birthday_automation — scope de escritura del token', () => {
 
   it('🔴 el mensaje NO habla de nómina: dice lo que esta tool hace de verdad', async () => {
     const soloLectura = registrarCon(['mcp:read'])
-    const error = await soloLectura('set_birthday_automation', { venueId: 'v1', activa: true, confirm: true }).catch(
-      (e: Error) => e,
-    )
+    const error = await soloLectura('set_birthday_automation', { venueId: 'v1', activa: true, confirm: true }).catch((e: Error) => e)
     expect((error as Error).message).toMatch(/correos recurrentes/i)
     expect((error as Error).message).not.toMatch(/nómina/i)
   })

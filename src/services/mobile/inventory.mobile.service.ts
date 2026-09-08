@@ -13,6 +13,7 @@ import { createStockBatch, deductStockFIFOInTx } from '../dashboard/fifoBatch.se
 import { withSerializableRetry } from '../../utils/serializableRetry'
 import { logAction } from '../dashboard/activity-log.service'
 import { computeInventoryAvailability } from '../dashboard/product.dashboard.service'
+import { resumirConteo, estadoParaClientes } from '../shared/stockCountSummary'
 
 // NOTE: When full inventory management is implemented in mobile (iOS/Android),
 // all CRUD operations (products, raw materials, recipes, suppliers, POs) must
@@ -152,20 +153,25 @@ export async function getStockOverview(venueId: string, page: number, pageSize: 
   }
 }
 
-/**
- * APPLYING es un estado interno del server (claim del confirm). Las apps
- * distribuidas solo conocen IN_PROGRESS/COMPLETED — mandarles un valor nuevo
- * rompe sus decoders (contrato /mobile: nunca cambiar valores de respuesta).
- * Para el cliente, un conteo aplicándose sigue "en progreso".
- */
-const clientStockCountStatus = (status: string): string => (status === 'APPLYING' ? 'IN_PROGRESS' : status)
+// Alias: la regla vive en shared/stockCountSummary.ts (la usan /dashboard y el MCP).
+const clientStockCountStatus = estadoParaClientes
 
 /**
  * Get stock counts for a venue.
  */
 export async function getStockCounts(venueId: string) {
   const counts = await prisma.stockCount.findMany({
-    where: { venueId },
+    // 🔴 Un conteo CANCELLED no viaja a las apps, y quien lo obliga es iOS:
+    // `enum StockCountStatus: String, Codable` sólo declara IN_PROGRESS y
+    // COMPLETED, y `StockCount.status` no es opcional — UNA fila cancelada
+    // tumba el decode del ARRAY entero (avoqado-ios
+    // `Inventory/Models/InventoryModels.swift`). Android NO se rompe: allá
+    // `status` es un `String` con rama `else -> status`
+    // (`inventory/data/model/InventoryModels.kt`). La exclusión sigue siendo
+    // obligatoria por iOS. El MCP y el dashboard sí los enseñan: los dos leen
+    // por su cuenta (`services/dashboard/stockCountAudit.service.ts`), sin
+    // este filtro.
+    where: { venueId, status: { not: 'CANCELLED' } },
     include: {
       items: {
         include: {
@@ -186,6 +192,10 @@ export async function getStockCounts(venueId: string) {
     createdAt: c.createdAt.toISOString(),
     createdBy: c.createdByUser ? `${c.createdByUser.firstName} ${c.createdByUser.lastName}` : null,
     itemCount: c.items.length,
+    // Aditivo: qué se contó de verdad. Sólo líneas con countedAt.
+    summary: resumirConteo(
+      c.items.map(i => ({ expected: i.expected, counted: i.counted, countedAt: i.countedAt, unit: i.rawMaterial?.unit ?? null })),
+    ),
     items: c.items.map(mapCountItem),
   }))
 }
@@ -197,12 +207,13 @@ export async function getStockCounts(venueId: string) {
  * still count the line because updates go by item.id. New clients switch
  * on `itemType` / `rawMaterialId`.
  */
-function mapCountItem(item: {
+export function mapCountItem(item: {
   id: string
   productId: string | null
   rawMaterialId: string | null
   expected: unknown
   counted: unknown
+  countedAt: Date | null
   product: { name: string; sku: string | null; gtin: string | null; imageUrl: string | null } | null
   rawMaterial: { name: string; sku: string | null; gtin: string | null; unit: string } | null
 }) {
@@ -217,8 +228,13 @@ function mapCountItem(item: {
     imageUrl: item.product?.imageUrl ?? null,
     unit: item.rawMaterial?.unit ?? null,
     expected: Number(item.expected),
+    // Se conserva como número aunque la línea no esté contada: un null aquí
+    // revienta el Double no nulable de Android. La verdad de «¿se contó?» es
+    // countedAt, no este número.
     counted: Number(item.counted),
     difference: Number(item.counted) - Number(item.expected),
+    // null = todavía no se ha contado. Las apps lo leen como `yaSeConto`.
+    countedAt: item.countedAt ? item.countedAt.toISOString() : null,
   }
 }
 
@@ -359,6 +375,9 @@ export async function createStockCount(
     createdAt: count.createdAt.toISOString(),
     createdBy: null,
     itemCount: count.items.length,
+    summary: resumirConteo(
+      count.items.map(i => ({ expected: i.expected, counted: i.counted, countedAt: i.countedAt, unit: i.rawMaterial?.unit ?? null })),
+    ),
     items: count.items.map(mapCountItem),
   }
 }
@@ -417,6 +436,41 @@ export async function updateStockCount(countId: string, venueId: string, items: 
   }
 
   return { success: true }
+}
+
+/**
+ * «Dejarlo ir»: un borrador que nadie va a terminar. Sólo desde IN_PROGRESS.
+ *
+ * Reclamo atómico (updateMany condicional), igual que el claim del confirm:
+ * dos cancelaciones, o una cancelación contra un confirm en vuelo, no se
+ * pisan — quien pierde el reclamo recibe el motivo real. Un conteo cancelado
+ * nunca ajustó el inventario; se conserva para consulta.
+ */
+export async function cancelStockCount(countId: string, venueId: string, userId: string) {
+  const cancelledAt = new Date()
+  const claim = await prisma.stockCount.updateMany({
+    where: { id: countId, venueId, status: 'IN_PROGRESS' },
+    data: { status: 'CANCELLED', cancelledAt },
+  })
+
+  if (claim.count === 0) {
+    const existing = await prisma.stockCount.findFirst({ where: { id: countId, venueId }, select: { id: true, status: true } })
+    if (!existing) throw new NotFoundError('Conteo no encontrado')
+    if (existing.status === 'CANCELLED') throw new ConflictError('Este conteo ya estaba cancelado')
+    if (existing.status === 'APPLYING') throw new ConflictError('Este conteo se está aplicando al inventario; espera a que termine')
+    throw new ConflictError('Un conteo completado no se puede cancelar: ya ajustó el inventario')
+  }
+
+  logAction({
+    staffId: userId,
+    venueId,
+    action: 'STOCK_COUNT_CANCELLED',
+    entity: 'StockCount',
+    entityId: countId,
+    data: { cancelledAt: cancelledAt.toISOString() },
+  })
+
+  return { id: countId, status: 'CANCELLED' as const, cancelledAt: cancelledAt.toISOString() }
 }
 
 /**

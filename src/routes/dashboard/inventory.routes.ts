@@ -1535,7 +1535,8 @@ router.get(
  *     parameters:
  *       - in: query
  *         name: status
- *         schema: { type: string, enum: [IN_PROGRESS, COMPLETED] }
+ *         description: APPLYING no se expone — se mapea a IN_PROGRESS para los clientes.
+ *         schema: { type: string, enum: [IN_PROGRESS, COMPLETED, CANCELLED] }
  *       - in: query
  *         name: type
  *         schema: { type: string, enum: [CYCLE, FULL] }
@@ -1550,7 +1551,8 @@ router.get(
  *         schema: { type: integer, default: 1 }
  *       - in: query
  *         name: pageSize
- *         schema: { type: integer, default: 50 }
+ *         description: El servidor RECORTA a 100 (STOCK_COUNT_PAGE_MAX); pedir más no falla, devuelve 100.
+ *         schema: { type: integer, default: 50, maximum: 100 }
  */
 router.get('/stock-counts', checkPermission('inventory:read'), stockCountController.listStockCounts)
 
@@ -1562,6 +1564,20 @@ router.get('/stock-counts', checkPermission('inventory:read'), stockCountControl
  *     summary: Get a single stock count with its items (read-only audit)
  */
 router.get('/stock-counts/:countId', checkPermission('inventory:read'), stockCountController.getStockCount)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/stock-counts/{countId}/cancel:
+ *   post:
+ *     tags: [Inventory - Stock Counts]
+ *     summary: Cancel an in-progress stock count ("dejarlo ir"). Never touches inventory.
+ *     description: Only IN_PROGRESS counts can be cancelled. A completed count already adjusted stock (409); a count being applied must finish first (409).
+ *     responses:
+ *       200: { description: Count cancelled }
+ *       404: { description: Not found in this venue }
+ *       409: { description: Not cancellable in its current status }
+ */
+router.post('/stock-counts/:countId/cancel', checkPermission('inventory:update'), stockCountController.cancelStockCount)
 
 // ===========================================
 // INTER-VENUE RAW-MATERIAL TRANSFERS

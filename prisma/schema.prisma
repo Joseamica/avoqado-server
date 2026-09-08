@@ -2754,6 +2754,9 @@ model StockCount {
   // Sello del claim APPLYING: permite re-reclamar un conteo cuyo worker murió
   // a media aplicación (lease vencido) en vez de dejarlo atorado para siempre.
   applyingAt    DateTime?
+  // «Dejarlo ir»: un borrador que nadie va a terminar. Sólo desde IN_PROGRESS.
+  // Un conteo cancelado nunca ajustó el inventario; se conserva para consulta.
+  cancelledAt   DateTime?
 
   @@index([venueId])
   @@index([status])
@@ -2805,6 +2808,9 @@ enum StockCountStatus {
   // IN_PROGRESS — las apps distribuidas no conocen este valor.
   APPLYING
   COMPLETED
+  // Borrador abandonado a propósito. 🔴 La lista /mobile lo EXCLUYE por iOS: su
+  // `enum StockCountStatus: Codable` estricto tira el ARRAY entero (Android no).
+  CANCELLED
 }
 
 // ==========================================

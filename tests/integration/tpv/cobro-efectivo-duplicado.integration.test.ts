@@ -31,6 +31,8 @@ describe('cobro en efectivo: 5 toques concurrentes sobre una orden de $0 dejan U
   let ordenCienId: string
   let ordenViejaId: string
   let ordenRafagaId: string
+  let ordenLlaveId: string
+  let ordenMixtaId: string
   let terminalId: string
   let terminalSerial: string
 
@@ -146,6 +148,40 @@ describe('cobro en efectivo: 5 toques concurrentes sobre una orden de $0 dejan U
       },
     })
     ordenRafagaId = ordenRafaga.id
+
+    const ordenLlave = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: `SN-LLAVE-${sufijo}`,
+        type: 'TAKEOUT',
+        source: 'TPV',
+        status: 'PENDING',
+        paymentStatus: 'PENDING',
+        subtotal: 0,
+        taxAmount: 0,
+        total: 0,
+        createdById: staffId,
+        items: { create: [{ quantity: 1, unitPrice: 0, taxAmount: 0, total: 0, productName: 'Línea Bait $0' }] },
+      },
+    })
+    ordenLlaveId = ordenLlave.id
+
+    const ordenMixta = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: `SN-MIXTA-${sufijo}`,
+        type: 'TAKEOUT',
+        source: 'TPV',
+        status: 'PENDING',
+        paymentStatus: 'PENDING',
+        subtotal: 0,
+        taxAmount: 0,
+        total: 0,
+        createdById: staffId,
+        items: { create: [{ quantity: 1, unitPrice: 0, taxAmount: 0, total: 0, productName: 'Línea Bait $0' }] },
+      },
+    })
+    ordenMixtaId = ordenMixta.id
   })
 
   afterAll(async () => {
@@ -332,5 +368,116 @@ describe('cobro en efectivo: 5 toques concurrentes sobre una orden de $0 dejan U
         venueId,
       }),
     )
+  })
+
+  // ── RONDA 3 — la heurística NO toca los cobros CON llave (2ª auditoría de Codex) ────────
+  // Este caso es, punto por punto, la firma completa de la ráfaga —misma terminal, mismo
+  // monto, 30 segundos— y aun así tienen que quedar DOS filas: el cobro entrante trae su
+  // propia `idempotencyKey`, distinta de la del previo, y eso significa que son dos intentos
+  // lógicos distintos. Con llave la identidad la resuelve el `@@unique([venueId,
+  // idempotencyKey])`; aplicar además la heurística es lo que borraría una entrega física
+  // reproducida horas después desde la misma PAX.
+  it('misma terminal, mismo monto y 30 s, pero con `idempotencyKey` distinta: quedan DOS filas', async () => {
+    await prisma.payment.create({
+      data: {
+        venueId,
+        orderId: ordenLlaveId,
+        amount: 0,
+        tipAmount: 0,
+        feeAmount: 0,
+        feePercentage: 0,
+        netAmount: 0,
+        method: 'CASH',
+        source: 'TPV',
+        status: 'COMPLETED',
+        type: 'REGULAR',
+        splitType: 'FULLPAYMENT',
+        terminalId,
+        referenceNumber: `CASH-LLAVE-A-${sufijo}`,
+        idempotencyKey: `llave-A-${sufijo}`,
+        createdAt: new Date(Date.now() - 30_000),
+      },
+    })
+
+    await recordOrderPayment(
+      venueId,
+      ordenLlaveId,
+      {
+        venueId,
+        amount: 0,
+        tip: 0,
+        status: 'COMPLETED',
+        method: 'CASH',
+        source: 'TPV',
+        splitType: 'FULLPAYMENT',
+        staffId,
+        authorizationNumber: 'EFECTIVO',
+        paidProductsId: [],
+        currency: 'MXN',
+        isInternational: false,
+        deviceSerialNumber: terminalSerial,
+        referenceNumber: `CASH-LLAVE-B-${sufijo}`,
+        idempotencyKey: `llave-B-${sufijo}`,
+      } as any,
+      staffId,
+    )
+
+    const filas = await prisma.payment.count({ where: { venueId, orderId: ordenLlaveId, status: 'COMPLETED' } })
+    expect(filas).toBe(2)
+  })
+
+  // ── RONDA 4 — la ráfaga MIXTA contra Postgres (3ª auditoría de Codex, P2) ───────────────
+  // Una SOLA entrega de $0 que sale dos veces: la primera petición se fue sin llave (APK viejo,
+  // o la sesión se la vació) y la segunda con ella. La llave de la segunda no existe todavía en
+  // la base, así que el atajo por `venueId_idempotencyKey` no dispara; si la heurística además
+  // se apagara por traer llave —como en la ronda 3— quedarían DOS cobros para un solo billete.
+  it('previo SIN llave + entrante CON llave, misma firma: se devuelve el existente y queda UNA fila', async () => {
+    const previo = await prisma.payment.create({
+      data: {
+        venueId,
+        orderId: ordenMixtaId,
+        amount: 0,
+        tipAmount: 0,
+        feeAmount: 0,
+        feePercentage: 0,
+        netAmount: 0,
+        method: 'CASH',
+        source: 'TPV',
+        status: 'COMPLETED',
+        type: 'REGULAR',
+        splitType: 'FULLPAYMENT',
+        terminalId,
+        referenceNumber: `CASH-MIXTA-A-${sufijo}`,
+        // sin `idempotencyKey`: es el intento defectuoso que salió sin ella
+        createdAt: new Date(Date.now() - 30_000),
+      },
+    })
+
+    const respuesta: any = await recordOrderPayment(
+      venueId,
+      ordenMixtaId,
+      {
+        venueId,
+        amount: 0,
+        tip: 0,
+        status: 'COMPLETED',
+        method: 'CASH',
+        source: 'TPV',
+        splitType: 'FULLPAYMENT',
+        staffId,
+        authorizationNumber: 'EFECTIVO',
+        paidProductsId: [],
+        currency: 'MXN',
+        isInternational: false,
+        deviceSerialNumber: terminalSerial,
+        referenceNumber: `CASH-MIXTA-B-${sufijo}`,
+        idempotencyKey: `llave-mixta-${sufijo}`,
+      } as any,
+      staffId,
+    )
+
+    expect(respuesta.id).toBe(previo.id)
+    const filas = await prisma.payment.count({ where: { venueId, orderId: ordenMixtaId, status: 'COMPLETED' } })
+    expect(filas).toBe(1)
   })
 })
