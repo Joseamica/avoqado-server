@@ -160,9 +160,6 @@ export interface EarningsTimePoint {
  */
 const EARNINGS_PAGE_SIZE = 500
 
-/** Ordena por una clave única y estable; sin desempate por `id` una página podría repetir u omitir filas. */
-const EARNINGS_ORDER_BY = [{ createdAt: 'asc' as const }, { id: 'asc' as const }]
-
 function cederElEventLoop(): Promise<void> {
   return new Promise(resolve => setImmediate(resolve))
 }
@@ -296,7 +293,7 @@ export async function getEarningsSummary(range?: DateRange, filter?: EarningsFil
       prisma.transactionCost.findMany({
         where: terminalWhere,
         include: TX_INCLUDE,
-        orderBy: EARNINGS_ORDER_BY,
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], // el `id` va AL FINAL: sin desempate único una página puede perder filas
         take: EARNINGS_PAGE_SIZE,
         ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
       }),
@@ -484,7 +481,7 @@ export async function getEarningsTimeSeries(
       prisma.transactionCost.findMany({
         where: terminalWhere,
         include: TX_INCLUDE,
-        orderBy: EARNINGS_ORDER_BY,
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], // el `id` va AL FINAL: sin desempate único una página puede perder filas
         take: EARNINGS_PAGE_SIZE,
         ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
       }),
@@ -516,7 +513,7 @@ export async function getEarningsTimeSeries(
             ...(filter?.venueId ? { ecommerceMerchant: { venueId: filter.venueId } } : {}),
           },
           select: { id: true, createdAt: true, applicationFeeCents: true },
-          orderBy: EARNINGS_ORDER_BY,
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], // el `id` va AL FINAL: sin desempate único una página puede perder filas
           take: EARNINGS_PAGE_SIZE,
           ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
         }),
