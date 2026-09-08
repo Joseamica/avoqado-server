@@ -70,12 +70,14 @@ const ingredientItem = (opts: { counted: number; snapshotStock: number }) => ({
 })
 
 const armarConteo = (items: any[]) => {
+  prismaMock.$queryRaw.mockResolvedValueOnce([{ id: COUNT_ID, status: 'IN_PROGRESS', revision: 0, applyingAt: null }])
   prismaMock.stockCount.findFirst.mockResolvedValue({ id: COUNT_ID, venueId: VENUE_ID, status: 'IN_PROGRESS', items } as any)
 }
 
 describe('confirmStockCount — claim atómico y relectura en tx', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    prismaMock.$queryRaw.mockReset()
     prismaMock.$transaction.mockImplementation(async (arg: any) => (typeof arg === 'function' ? arg(prismaMock) : Promise.all(arg)))
     prismaMock.stockCount.updateMany.mockResolvedValue({ count: 1 })
     prismaMock.stockCount.update.mockResolvedValue({})
@@ -191,6 +193,9 @@ describe('confirmStockCount — claim atómico y relectura en tx', () => {
       status: 'APPLYING',
       items: [productItem({ counted: 32, snapshotStock: 32 })],
     } as any)
+    prismaMock.$queryRaw.mockResolvedValueOnce([
+      { id: COUNT_ID, status: 'APPLYING', revision: 0, applyingAt: new Date(Date.now() - 3 * 60 * 1000) },
+    ])
     prismaMock.$queryRaw.mockResolvedValue([{ currentStock: 32 }])
 
     await confirmStockCount(COUNT_ID, VENUE_ID, USER_ID)

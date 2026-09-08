@@ -78,9 +78,9 @@ export const createStockCount = async (req: Request, res: Response, next: NextFu
 export const updateStockCount = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId, countId } = req.params
-    const { items, note } = req.body
+    const { items, note, expectedRevision } = req.body
 
-    const result = await inventoryService.updateStockCount(countId, venueId, items, note)
+    const result = await inventoryService.updateStockCount(countId, venueId, items, note, expectedRevision)
     return res.json(result)
   } catch (error) {
     next(error)
@@ -95,8 +95,9 @@ export const confirmStockCount = async (req: Request, res: Response, next: NextF
   try {
     const { venueId, countId } = req.params
     const userId = req.authContext?.userId || ''
+    const { expectedRevision } = req.body ?? {}
 
-    const result = await inventoryService.confirmStockCount(countId, venueId, userId)
+    const result = await inventoryService.confirmStockCount(countId, venueId, userId, expectedRevision)
     return res.json(result)
   } catch (error) {
     next(error)
@@ -111,7 +112,8 @@ export const cancelStockCount = async (req: Request, res: Response, next: NextFu
   try {
     const { venueId, countId } = req.params
     const userId = req.authContext?.userId || ''
-    const count = await inventoryService.cancelStockCount(countId, venueId, userId)
+    const { expectedRevision } = req.body ?? {}
+    const count = await inventoryService.cancelStockCount(countId, venueId, userId, expectedRevision)
     return res.json({ success: true, count })
   } catch (error) {
     next(error)

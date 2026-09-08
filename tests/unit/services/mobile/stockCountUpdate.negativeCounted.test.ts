@@ -17,11 +17,14 @@ describe('updateStockCount — lo contado nunca es negativo', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
+    prismaMock.$queryRaw.mockReset()
+    prismaMock.$queryRaw.mockResolvedValue([{ id: COUNT, status: 'IN_PROGRESS', revision: 0, applyingAt: null }])
+    prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
     prismaMock.stockCount.findFirst.mockResolvedValue({ id: COUNT, venueId: VENUE, status: 'IN_PROGRESS' } as any)
     // Las líneas que SÍ pertenecen al conteo (para el guard de tenant).
     prismaMock.stockCountItem.findMany.mockResolvedValue([{ id: 'item-1' }, { id: 'item-2' }] as any)
     prismaMock.stockCountItem.update.mockResolvedValue({} as any)
-    prismaMock.stockCount.update.mockResolvedValue({} as any)
+    prismaMock.stockCount.update.mockResolvedValue({ revision: 1 } as any)
   })
 
   it('rechaza un counted negativo con mensaje en español', async () => {
@@ -41,7 +44,7 @@ describe('updateStockCount — lo contado nunca es negativo', () => {
 
   // ── Regresión ────────────────────────────────────────────────────────────
   it('contar CERO sigue siendo válido: es un dato, no un error', async () => {
-    await expect(updateStockCount(COUNT, VENUE, [{ id: 'item-1', counted: 0 }])).resolves.toEqual({ success: true })
+    await expect(updateStockCount(COUNT, VENUE, [{ id: 'item-1', counted: 0 }])).resolves.toEqual({ success: true, revision: 1 })
     expect(prismaMock.stockCountItem.update).toHaveBeenCalledTimes(1)
   })
 
@@ -51,7 +54,7 @@ describe('updateStockCount — lo contado nunca es negativo', () => {
         { id: 'item-1', counted: 12 },
         { id: 'item-2', counted: 0.75 },
       ]),
-    ).resolves.toEqual({ success: true })
+    ).resolves.toEqual({ success: true, revision: 1 })
     expect(prismaMock.stockCountItem.update).toHaveBeenCalledTimes(2)
   })
 
@@ -82,6 +85,8 @@ describe('confirmStockCount — un negativo almacenado no se aplica', () => {
   const VENUE = 'venue-1'
 
   it('rechaza confirmar si alguna línea contada quedó negativa', async () => {
+    prismaMock.$queryRaw.mockReset()
+    prismaMock.$queryRaw.mockResolvedValueOnce([{ id: COUNT, status: 'IN_PROGRESS', revision: 0, applyingAt: null }])
     prismaMock.stockCount.findFirst.mockResolvedValue({
       id: COUNT,
       venueId: VENUE,

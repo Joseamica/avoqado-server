@@ -7,7 +7,7 @@
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
-import { MovementType, RawMaterialMovementType } from '@prisma/client'
+import { MovementType, Prisma, RawMaterialMovementType, StockCountStatus } from '@prisma/client'
 import { checkAndCreateLowStockAlert } from '../dashboard/rawMaterial.service'
 import { createStockBatch, deductStockFIFOInTx } from '../dashboard/fifoBatch.service'
 import { withSerializableRetry } from '../../utils/serializableRetry'
@@ -156,6 +156,57 @@ export async function getStockOverview(venueId: string, page: number, pageSize: 
 // Alias: la regla vive en shared/stockCountSummary.ts (la usan /dashboard y el MCP).
 const clientStockCountStatus = estadoParaClientes
 
+type LockedStockCount = {
+  id: string
+  status: StockCountStatus
+  revision: number
+  applyingAt: Date | null
+}
+
+const STOCK_COUNT_REVISION_CONFLICT_MESSAGE = 'El conteo cambió desde que lo viste. Revisa el estado actual antes de continuar.'
+const STOCK_COUNT_APPLYING_MESSAGE = 'Este conteo se está aplicando al inventario. Espera unos segundos y vuelve a intentarlo.'
+
+function validateExpectedRevision(expectedRevision: number | undefined): void {
+  if (expectedRevision !== undefined && (!Number.isInteger(expectedRevision) || expectedRevision < 0)) {
+    throw new BadRequestError('La revisión esperada debe ser un entero mayor o igual a cero')
+  }
+}
+
+async function lockStockCount(tx: Prisma.TransactionClient, countId: string, venueId: string): Promise<LockedStockCount | null> {
+  const rows = await tx.$queryRaw<LockedStockCount[]>`
+    SELECT id, status, revision, "applyingAt"
+    FROM "StockCount"
+    WHERE id = ${countId} AND "venueId" = ${venueId}
+    FOR UPDATE
+  `
+  return rows[0] ?? null
+}
+
+function throwRevisionConflict(locked: LockedStockCount, countId: string, venueId: string, expectedRevision: number): never {
+  throw new ConflictError(STOCK_COUNT_REVISION_CONFLICT_MESSAGE, 'INVENTORY_COUNT_REVISION_CONFLICT', {
+    venueId,
+    countId,
+    expectedRevision,
+    currentRevision: locked.revision,
+    status: locked.status,
+  })
+}
+
+function assertExpectedRevision(locked: LockedStockCount, countId: string, venueId: string, expectedRevision?: number): void {
+  if (expectedRevision !== undefined && locked.revision !== expectedRevision) {
+    throwRevisionConflict(locked, countId, venueId, expectedRevision)
+  }
+}
+
+function throwStockCountApplying(locked: LockedStockCount, countId: string, venueId: string): never {
+  throw new ConflictError(STOCK_COUNT_APPLYING_MESSAGE, 'STOCK_COUNT_APPLYING', {
+    venueId,
+    countId,
+    currentRevision: locked.revision,
+    status: locked.status,
+  })
+}
+
 /**
  * Get stock counts for a venue.
  */
@@ -186,6 +237,7 @@ export async function getStockCounts(venueId: string) {
 
   return counts.map(c => ({
     id: c.id,
+    revision: c.revision,
     type: c.type,
     status: clientStockCountStatus(c.status),
     note: c.note,
@@ -369,6 +421,7 @@ export async function createStockCount(
 
   return {
     id: count.id,
+    revision: count.revision,
     type: count.type,
     status: clientStockCountStatus(count.status),
     note: count.note,
@@ -385,15 +438,14 @@ export async function createStockCount(
 /**
  * Update stock count items (set counted quantities).
  */
-export async function updateStockCount(countId: string, venueId: string, items: { id: string; counted: number }[], note?: string) {
-  const count = await prisma.stockCount.findFirst({
-    where: { id: countId, venueId, status: 'IN_PROGRESS' },
-  })
-
-  if (!count) {
-    throw new NotFoundError('Conteo no encontrado o ya completado')
-  }
-
+export async function updateStockCount(
+  countId: string,
+  venueId: string,
+  items: { id: string; counted: number }[],
+  note?: string,
+  expectedRevision?: number,
+) {
+  validateExpectedRevision(expectedRevision)
   // Un conteo físico no puede ser negativo: nadie cuenta "menos siete
   // cervezas" en el anaquel. (El DELTA del ajuste sí puede serlo — contaste
   // menos de lo que el sistema creía; lo CONTADO, no.) Sin este guard, una
@@ -405,37 +457,46 @@ export async function updateStockCount(countId: string, venueId: string, items: 
     throw new BadRequestError('La cantidad contada no puede ser negativa')
   }
 
-  // 🔴 Tenant isolation (audit Codex 2026-08-12): el conteo ya se validó contra
-  // el venue, pero las LÍNEAS llegaban por id pelón — un usuario del venue A
-  // podía mutar líneas de un conteo del venue B mandando sus ids en el body.
-  // Todo-o-nada, ANTES de escribir nada.
-  const lineasDelConteo = new Set(
-    (await prisma.stockCountItem.findMany({ where: { stockCountId: countId }, select: { id: true } })).map(item => item.id),
-  )
-  const ajena = items.find(item => !lineasDelConteo.has(item.id))
-  if (ajena) {
-    throw new BadRequestError('Una de las líneas no pertenece a este conteo')
-  }
+  return prisma.$transaction(async tx => {
+    const locked = await lockStockCount(tx, countId, venueId)
+    if (!locked) throw new NotFoundError('Conteo no encontrado o ya completado')
+    assertExpectedRevision(locked, countId, venueId, expectedRevision)
+    if (locked.status === 'APPLYING' && expectedRevision !== undefined) {
+      throwStockCountApplying(locked, countId, venueId)
+    }
+    if (locked.status !== 'IN_PROGRESS') throw new NotFoundError('Conteo no encontrado o ya completado')
 
-  // Update each item's counted quantity
-  await Promise.all(
-    items.map(item =>
-      prisma.stockCountItem.update({
-        where: { id: item.id },
-        data: { counted: item.counted, countedAt: new Date() },
-      }),
-    ),
-  )
+    // Tenant isolation: only fetch the requested ids, under the locked parent,
+    // instead of hydrating every line in a potentially large FULL count.
+    const requestedIds = [...new Set(items.map(item => item.id))]
+    const ownedLines =
+      requestedIds.length === 0
+        ? []
+        : await tx.stockCountItem.findMany({
+            where: { stockCountId: countId, id: { in: requestedIds } },
+            select: { id: true },
+          })
+    const ownedIds = new Set(ownedLines.map(item => item.id))
+    if (requestedIds.some(id => !ownedIds.has(id))) {
+      throw new BadRequestError('Una de las líneas no pertenece a este conteo')
+    }
 
-  // Optionally update note
-  if (note !== undefined) {
-    await prisma.stockCount.update({
+    await Promise.all(
+      items.map(item =>
+        tx.stockCountItem.update({
+          where: { id: item.id },
+          data: { counted: item.counted, countedAt: new Date() },
+        }),
+      ),
+    )
+
+    const updated = await tx.stockCount.update({
       where: { id: countId },
-      data: { note },
+      data: { ...(note !== undefined ? { note } : {}), revision: { increment: 1 } },
+      select: { revision: true },
     })
-  }
-
-  return { success: true }
+    return { success: true, revision: updated.revision }
+  })
 }
 
 /**
@@ -446,20 +507,29 @@ export async function updateStockCount(countId: string, venueId: string, items: 
  * pisan — quien pierde el reclamo recibe el motivo real. Un conteo cancelado
  * nunca ajustó el inventario; se conserva para consulta.
  */
-export async function cancelStockCount(countId: string, venueId: string, userId: string) {
-  const cancelledAt = new Date()
-  const claim = await prisma.stockCount.updateMany({
-    where: { id: countId, venueId, status: 'IN_PROGRESS' },
-    data: { status: 'CANCELLED', cancelledAt },
-  })
+export async function cancelStockCount(countId: string, venueId: string, userId: string, expectedRevision?: number) {
+  validateExpectedRevision(expectedRevision)
+  const result = await prisma.$transaction(async tx => {
+    const locked = await lockStockCount(tx, countId, venueId)
+    if (!locked) throw new NotFoundError('Conteo no encontrado')
+    assertExpectedRevision(locked, countId, venueId, expectedRevision)
+    if (locked.status === 'CANCELLED') throw new ConflictError('Este conteo ya estaba cancelado')
+    if (locked.status === 'APPLYING') {
+      if (expectedRevision !== undefined) throwStockCountApplying(locked, countId, venueId)
+      throw new ConflictError('Este conteo se está aplicando al inventario; espera a que termine')
+    }
+    if (locked.status === 'COMPLETED') throw new ConflictError('Un conteo completado no se puede cancelar: ya ajustó el inventario')
 
-  if (claim.count === 0) {
-    const existing = await prisma.stockCount.findFirst({ where: { id: countId, venueId }, select: { id: true, status: true } })
-    if (!existing) throw new NotFoundError('Conteo no encontrado')
-    if (existing.status === 'CANCELLED') throw new ConflictError('Este conteo ya estaba cancelado')
-    if (existing.status === 'APPLYING') throw new ConflictError('Este conteo se está aplicando al inventario; espera a que termine')
-    throw new ConflictError('Un conteo completado no se puede cancelar: ya ajustó el inventario')
-  }
+    const cancelledAt = new Date()
+    const claim = await tx.stockCount.updateMany({
+      where: { id: countId, venueId, status: 'IN_PROGRESS', revision: locked.revision },
+      data: { status: 'CANCELLED', cancelledAt, revision: { increment: 1 } },
+    })
+    if (claim.count === 0) {
+      throw new ConflictError('El conteo cambió mientras intentabas cancelarlo. Revisa su estado actual.')
+    }
+    return { id: countId, status: 'CANCELLED' as const, cancelledAt: cancelledAt.toISOString(), revision: locked.revision + 1 }
+  })
 
   logAction({
     staffId: userId,
@@ -467,10 +537,10 @@ export async function cancelStockCount(countId: string, venueId: string, userId:
     action: 'STOCK_COUNT_CANCELLED',
     entity: 'StockCount',
     entityId: countId,
-    data: { cancelledAt: cancelledAt.toISOString() },
+    data: { cancelledAt: result.cancelledAt, revision: result.revision },
   })
 
-  return { id: countId, status: 'CANCELLED' as const, cancelledAt: cancelledAt.toISOString() }
+  return result
 }
 
 /**
@@ -501,58 +571,65 @@ export async function cancelStockCount(countId: string, venueId: string, userId:
 /** Un APPLYING más viejo que esto es un worker muerto: el conteo se re-reclama. */
 const STOCK_COUNT_APPLYING_LEASE_MS = 2 * 60 * 1000
 
-export async function confirmStockCount(countId: string, venueId: string, userId: string) {
-  const count = await prisma.stockCount.findFirst({
-    // APPLYING entra al pre-read para que el reintento tras un crash pueda
-    // cargar el conteo; el claim de abajo decide si de verdad puede aplicarlo.
-    where: { id: countId, venueId, status: { in: ['IN_PROGRESS', 'APPLYING'] } },
-    include: {
-      items: {
-        include: {
-          product: { include: { inventory: true } },
-          rawMaterial: { select: { id: true, name: true, currentStock: true, unit: true } },
+export async function confirmStockCount(countId: string, venueId: string, userId: string, expectedRevision?: number) {
+  validateExpectedRevision(expectedRevision)
+  const claimResult = await prisma.$transaction(async tx => {
+    const locked = await lockStockCount(tx, countId, venueId)
+    if (!locked) throw new NotFoundError('Conteo no encontrado o ya completado')
+
+    if (locked.status === 'COMPLETED' && expectedRevision !== undefined && locked.revision === expectedRevision + 1) {
+      return { alreadyCompleted: true as const, revision: locked.revision }
+    }
+    assertExpectedRevision(locked, countId, venueId, expectedRevision)
+    if (locked.status === 'COMPLETED' || locked.status === 'CANCELLED') {
+      throw new NotFoundError('Conteo no encontrado o ya completado')
+    }
+
+    const staleBefore = new Date(Date.now() - STOCK_COUNT_APPLYING_LEASE_MS)
+    const staleApplying = locked.status === 'APPLYING' && locked.applyingAt !== null && locked.applyingAt < staleBefore
+    if (locked.status === 'APPLYING' && !staleApplying) {
+      if (expectedRevision !== undefined) throwStockCountApplying(locked, countId, venueId)
+      throw new NotFoundError('Conteo no encontrado, en proceso o ya completado')
+    }
+
+    // The parent lock is held before this coherent snapshot is loaded. PUT and
+    // cancel use the same lock, so neither can mutate the aggregate between
+    // the snapshot and the APPLYING claim.
+    const count = await tx.stockCount.findFirst({
+      where: { id: countId, venueId },
+      include: {
+        items: {
+          include: {
+            product: { include: { inventory: true } },
+            rawMaterial: { select: { id: true, name: true, currentStock: true, unit: true } },
+          },
         },
       },
-    },
+    })
+    if (!count) throw new NotFoundError('Conteo no encontrado o ya completado')
+
+    const countedItems = count.items.filter(item => item.countedAt !== null)
+    if (countedItems.some(item => Number(item.counted) < 0)) {
+      throw new BadRequestError('La cantidad contada no puede ser negativa. Corrige la línea y vuelve a confirmar.')
+    }
+
+    const claimStamp = new Date()
+    const claim = await tx.stockCount.updateMany({
+      where: {
+        id: countId,
+        venueId,
+        revision: locked.revision,
+        OR: [{ status: 'IN_PROGRESS' }, { status: 'APPLYING', applyingAt: { lt: staleBefore } }],
+      },
+      data: { status: 'APPLYING', applyingAt: claimStamp },
+    })
+    if (claim.count === 0) throw new NotFoundError('Conteo no encontrado, en proceso o ya completado')
+
+    return { alreadyCompleted: false as const, revision: locked.revision, claimStamp, countedItems }
   })
 
-  if (!count) {
-    throw new NotFoundError('Conteo no encontrado o ya completado')
-  }
-
-  // Only lines the cashier actually counted are applied: an untouched line
-  // sits at the default counted=0, and applying it would zero out real stock
-  // (this bit the E2E test — 46 untouched ingredients started wiping stock).
-  const countedItems = count.items.filter(item => item.countedAt !== null)
-
-  // Defensa en la frontera del EFECTO (audit Codex 2026-08-12): un negativo
-  // ALMACENADO antes del deploy —o colado por otra vía— no debe aplicarse
-  // jamás al inventario. Un conteo físico no puede ser negativo.
-  if (countedItems.some(item => Number(item.counted) < 0)) {
-    throw new BadRequestError('La cantidad contada no puede ser negativa. Corrige la línea y vuelve a confirmar.')
-  }
-
-  // Claim atómico ANTES de aplicar: mata el doble-confirm en la raíz. El claim
-  // es APPLYING (no COMPLETED): completar se gana aplicando, no reclamando.
-  // El sello es también la CERCA del padre: el revert y el COMPLETED de este
-  // worker solo proceden si su applyingAt sigue siendo el dueño del claim.
-  const claimStamp = new Date()
-  const claim = await prisma.stockCount.updateMany({
-    where: {
-      id: countId,
-      venueId,
-      OR: [
-        { status: 'IN_PROGRESS' },
-        // Rescate: un worker que murió a media aplicación dejó APPLYING; tras
-        // el lease, el reintento del cajero puede volver a reclamarlo.
-        { status: 'APPLYING', applyingAt: { lt: new Date(Date.now() - STOCK_COUNT_APPLYING_LEASE_MS) } },
-      ],
-    },
-    data: { status: 'APPLYING', applyingAt: claimStamp },
-  })
-  if (claim.count === 0) {
-    throw new NotFoundError('Conteo no encontrado, en proceso o ya completado')
-  }
+  if (claimResult.alreadyCompleted) return { success: true, revision: claimResult.revision }
+  const { claimStamp, countedItems, revision: baseRevision } = claimResult
 
   // Ajustes realmente aplicados (con el stock fresco de cada tx) — es lo que
   // se audita; el resumen contra `expected` mentía e incluía líneas no contadas.
@@ -813,7 +890,7 @@ export async function confirmStockCount(countId: string, venueId: string, userId
     // de un conteo cuyas líneas selladas ya no se re-aplican.
     await prisma.stockCount
       .updateMany({
-        where: { id: countId, status: 'APPLYING', applyingAt: claimStamp },
+        where: { id: countId, venueId, status: 'APPLYING', applyingAt: claimStamp, revision: baseRevision },
         data: { status: 'IN_PROGRESS', completedAt: null, applyingAt: null },
       })
       .catch(() => undefined)
@@ -824,8 +901,8 @@ export async function confirmStockCount(countId: string, venueId: string, userId
   // de esta línea, el conteo queda APPLYING (recuperable), no "completado".
   // 🛡️ También cercado por el sello: si otro worker re-reclamó, él decide.
   const completed = await prisma.stockCount.updateMany({
-    where: { id: countId, status: 'APPLYING', applyingAt: claimStamp },
-    data: { status: 'COMPLETED', completedAt: new Date(), applyingAt: null },
+    where: { id: countId, venueId, status: 'APPLYING', applyingAt: claimStamp, revision: baseRevision },
+    data: { status: 'COMPLETED', completedAt: new Date(), applyingAt: null, revision: { increment: 1 } },
   })
   if (completed.count === 0) {
     logger.warn('🛡️ [StockCount] Cierre perdido: otro worker re-reclamó el conteo — el nuevo dueño decide el estado final', {
@@ -845,8 +922,8 @@ export async function confirmStockCount(countId: string, venueId: string, userId
     action: 'STOCK_COUNT_CONFIRMED',
     entity: 'StockCount',
     entityId: countId,
-    data: { adjustmentsCount: appliedAdjustments.length, adjustments: appliedAdjustments, source: 'MOBILE' },
+    data: { adjustmentsCount: appliedAdjustments.length, adjustments: appliedAdjustments, revision: baseRevision + 1, source: 'MOBILE' },
   })
 
-  return { success: true }
+  return { success: true, revision: baseRevision + 1 }
 }

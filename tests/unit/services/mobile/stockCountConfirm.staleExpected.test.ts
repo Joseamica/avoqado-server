@@ -24,6 +24,7 @@ describe('confirmStockCount — el ajuste se mide contra el stock ACTUAL, no con
 
   beforeEach(() => {
     jest.clearAllMocks()
+    prismaMock.$queryRaw.mockReset()
     prismaMock.stockCount.update.mockResolvedValue({ id: countId } as any)
     // Claim atómico (fase 3): quien gana el updateMany condicional aplica.
     prismaMock.stockCount.updateMany.mockResolvedValue({ count: 1 } as any)
@@ -34,6 +35,7 @@ describe('confirmStockCount — el ajuste se mide contra el stock ACTUAL, no con
 
   /** Arma un conteo de UN producto ya contado. */
   const armarConteo = (opciones: { expected: number; counted: number; currentStock: number }) => {
+    prismaMock.$queryRaw.mockResolvedValueOnce([{ id: countId, status: 'IN_PROGRESS', revision: 0, applyingAt: null }])
     prismaMock.stockCount.findFirst.mockResolvedValue({
       id: countId,
       venueId,

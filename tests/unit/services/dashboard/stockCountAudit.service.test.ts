@@ -9,6 +9,7 @@ import { listStockCountsForAudit, getStockCountForAudit, STOCK_COUNT_PAGE_MAX } 
  */
 const cabecera = (o: Record<string, unknown>) => ({
   id: 'c1',
+  revision: 3,
   type: 'FULL',
   status: 'IN_PROGRESS',
   note: null,
@@ -128,7 +129,14 @@ describe('listStockCountsForAudit — acotada', () => {
     prismaMock.stockCount.count.mockResolvedValue(250)
     const r = await listStockCountsForAudit('v1', { page: 1, pageSize: 50 })
     expect(r.pagination).toEqual({ page: 1, pageSize: 50, total: 250, totalPages: 5 })
-    expect(r.rows[0]).toMatchObject({ id: 'c1', status: 'IN_PROGRESS', createdBy: 'Fatima Flores', itemCount: 2, cancelledAt: null })
+    expect(r.rows[0]).toMatchObject({
+      id: 'c1',
+      revision: 3,
+      status: 'IN_PROGRESS',
+      createdBy: 'Fatima Flores',
+      itemCount: 2,
+      cancelledAt: null,
+    })
   })
 
   it('un conteo cancelado sí aparece, con su fecha', async () => {
@@ -162,6 +170,7 @@ describe('getStockCountForAudit', () => {
     const d = await getStockCountForAudit('v1', 'c1')
     expect(prismaMock.stockCount.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'c1', venueId: 'v1' } }))
     expect(d?.items[0]).toMatchObject({ id: 'i1', countedAt: null, expected: 20, counted: 0 })
+    expect(d?.revision).toBe(3)
     expect(d?.summary.countedCount).toBe(0)
   })
 

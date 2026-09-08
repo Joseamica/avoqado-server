@@ -9,6 +9,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Changed
 
+- **El panel de ganancias del superadmin recorre los costos por páginas (query-guard 2026-09-08)**: `GET
+  /superadmin/earnings/summary` y `/time-series` cargaban de un jalón TODOS los `TransactionCost` del rango, cada uno con su
+  pago→negocio y su comercio→proveedor→reparto (un `include` anidado). Medido en producción el 7-sep: **3,772 filas por
+  llamada** con el rango por defecto (el mes en curso), y crece con cada cobro con tarjeta; las dos pantallas se piden
+  juntas, así que eran dos cargas gigantes por visita. Ahora ambas recorren por páginas de 500 con cursor
+  (`createdAt asc, id asc`), y los cobros en línea (`CheckoutSession`) igual. **Se eligió paginar y NO agregar en SQL a
+  propósito**: `computeRevenueSplit` redondea a dos decimales POR TRANSACCIÓN, así que sumar los montos antes de repartir
+  cambia el dinero — medido en la prueba: 870.19 fila por fila contra 867.24 agrupado, sobre sólo 503 transacciones.
+  Verificación: paridad viejo contra nuevo en la base de desarrollo (691 costos, 144 comparaciones sobre 4 rangos × 9
+  filtros × 3 granularidades) con **cero diferencias de dinero** en totales, series, `byVenue`, `byMerchant` y `byProvider`.
+- **Las tablas del resumen de ganancias tienen orden definido (mismo cambio)**: `byCardType` no se ordenaba y las otras tres
+  desempataban por orden de llegada de las filas, que sin `ORDER BY` lo decide Postgres y puede cambiar entre dos peticiones
+  idénticas — dos negocios con la misma ganancia se intercambiaban solos. Ahora `byCardType` va por ganancia descendente y
+  las cuatro desempatan por id. **Es el único cambio visible en pantalla**: mismas filas y mismos números, orden distinto y
+  ya estable. (`totals.averageMargin`, que no se redondea, se mueve por debajo de 1e-9 al cambiar el orden de la suma.)
+- **El candado estático de `findMany` sin tope ya mira `TransactionCost` y `CheckoutSession` (mismo cambio)**: el barrido
+  sólo cubría 18 modelos y ninguno de estos dos, que crecen una fila por cobro — por eso este camino nunca apareció en el
+  inventario. Al ampliarlo salieron a la luz 5 `findMany` sin tope más (`cost-management`, `revenueShareReport`,
+  `paymentAnalytics`, `rateCorrectionApply`, `rateCorrectionPreview`): quedan **registrados** en el inventario congelado para
+  que no crezcan; su arreglo es trabajo aparte.
 - **«Saldo disponible» ya no materializa miles de pagos por apertura (query-guard 2026-09-07)**: la alerta «Consulta
   gigante» siguió disparando después de los arreglos del 1 y 2-sep porque dos caminos de esa pantalla quedaron fuera de la
   reescritura. (1) El efectivo esperado del corte de caja (`GET …/cash-closeouts/expected`) traía TODOS los pagos en

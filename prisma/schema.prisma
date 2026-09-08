@@ -2743,6 +2743,7 @@ model StockCount {
 
   type   StockCountType // CYCLE or FULL
   status StockCountStatus @default(IN_PROGRESS)
+  revision Int @default(0)
   note   String?
 
   items StockCountItem[]

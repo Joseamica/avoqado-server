@@ -35,6 +35,7 @@ export interface StockCountAuditFilters {
 
 export interface StockCountAuditRow {
   id: string
+  revision: number
   type: string
   status: EstadoParaClientes
   note: string | null
@@ -70,6 +71,7 @@ function aLinea(l: {
 function cabeceraAlWire(
   c: {
     id: string
+    revision: number
     type: string
     status: string
     note: string | null
@@ -82,6 +84,7 @@ function cabeceraAlWire(
 ): StockCountAuditRow {
   return {
     id: c.id,
+    revision: c.revision,
     type: c.type,
     status: estadoParaClientes(c.status),
     note: c.note,
@@ -138,6 +141,7 @@ export async function listStockCountsForAudit(venueId: string, filters: StockCou
       take: pageSize,
       select: {
         id: true,
+        revision: true,
         type: true,
         status: true,
         note: true,

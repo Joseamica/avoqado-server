@@ -144,6 +144,48 @@ export interface EarningsTimePoint {
   net: number
 }
 
+/**
+ * Página del recorrido de costos y cobros en línea (query-guard 2026-09-08).
+ *
+ * Estas dos pantallas cargaban de un jalón TODOS los `TransactionCost` del rango, cada uno
+ * con su pago→negocio y su comercio→proveedor→reparto. Medido en producción: 3,772 filas
+ * por llamada con el rango por defecto (el mes en curso), y crece con cada cobro con
+ * tarjeta. Se recorre por páginas para acotar la memoria del proceso —una sola vCPU, ver
+ * `.claude/rules/una-sola-instancia.md`— sin mover ningún número.
+ *
+ * ⚠️ Por qué páginas y NO una agregación en SQL: `computeRevenueSplit` redondea a dos
+ * decimales en varios puntos POR TRANSACCIÓN, así que sumar montos antes de repartir
+ * cambiaría centavos. Agrupar aquí sería una diferencia de dinero disfrazada de
+ * optimización.
+ */
+const EARNINGS_PAGE_SIZE = 500
+
+/** Ordena por una clave única y estable; sin desempate por `id` una página podría repetir u omitir filas. */
+const EARNINGS_ORDER_BY = [{ createdAt: 'asc' as const }, { id: 'asc' as const }]
+
+function cederElEventLoop(): Promise<void> {
+  return new Promise(resolve => setImmediate(resolve))
+}
+
+/**
+ * Recorre un modelo por páginas con cursor y procesa fila por fila. La página corta
+ * termina el recorrido: nunca pide una consulta de más.
+ */
+async function porPaginas<T extends { id: string }>(
+  traerPagina: (cursorId: string | undefined) => Promise<T[]>,
+  procesar: (fila: T) => void,
+): Promise<void> {
+  let cursorId: string | undefined
+  while (true) {
+    const pagina = await traerPagina(cursorId)
+    if (pagina.length === 0) break
+    for (const fila of pagina) procesar(fila)
+    if (pagina.length < EARNINGS_PAGE_SIZE) break
+    cursorId = pagina[pagina.length - 1].id
+    await cederElEventLoop()
+  }
+}
+
 const TX_INCLUDE = {
   payment: { select: { venue: { select: { id: true, name: true } } } },
   merchantAccount: {
@@ -170,8 +212,6 @@ export async function getEarningsSummary(range?: DateRange, filter?: EarningsFil
   // E-commerce is never tied to a POS merchant account → skip online when merchant-scoped.
   const includeOnline = !filter?.merchantAccountId
   const onlineVenueClause = filter?.venueId ? Prisma.sql`AND em."venueId" = ${filter.venueId}` : Prisma.empty
-
-  const txs = await prisma.transactionCost.findMany({ where: terminalWhere, include: TX_INCLUDE })
 
   let onlineByVenue: Array<{ venueId: string; venueName: string; fees: bigint; volume: unknown; transactions: bigint }> = []
   let onlineFees = 0
@@ -251,85 +291,95 @@ export async function getEarningsSummary(range?: DateRange, filter?: EarningsFil
   let terminalVolume = 0
   let terminalTxns = 0
 
-  for (const tc of txs) {
-    const m = tc.merchantAccount
-    const cardType = toCardType(tc.transactionType)
-    const share = mapShare(m.merchantRevenueShare)
-    const split = computeRevenueSplit({
-      amount: Number(tc.amount),
-      cardType,
-      providerCostRate: Number(tc.providerRate),
-      providerCostIncludesTax: true,
-      venueChargeRate: Number(tc.venueRate),
-      venueChargeIncludesTax: true,
-      share,
-    })
-    const amount = Number(tc.amount)
-    const net = split.avoqadoNet
+  await porPaginas(
+    cursorId =>
+      prisma.transactionCost.findMany({
+        where: terminalWhere,
+        include: TX_INCLUDE,
+        orderBy: EARNINGS_ORDER_BY,
+        take: EARNINGS_PAGE_SIZE,
+        ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
+      }),
+    tc => {
+      const m = tc.merchantAccount
+      const cardType = toCardType(tc.transactionType)
+      const share = mapShare(m.merchantRevenueShare)
+      const split = computeRevenueSplit({
+        amount: Number(tc.amount),
+        cardType,
+        providerCostRate: Number(tc.providerRate),
+        providerCostIncludesTax: true,
+        venueChargeRate: Number(tc.venueRate),
+        venueChargeIncludesTax: true,
+        share,
+      })
+      const amount = Number(tc.amount)
+      const net = split.avoqadoNet
 
-    terminalNet += net
-    tramoProvider += split.avoqadoFromProviderMargin
-    tramoAggregator += split.avoqadoFromAggregatorMargin
-    aggregatorKept += split.aggregatorNet
-    terminalVolume += amount
-    terminalTxns += 1
+      terminalNet += net
+      tramoProvider += split.avoqadoFromProviderMargin
+      tramoAggregator += split.avoqadoFromAggregatorMargin
+      aggregatorKept += split.aggregatorNet
+      terminalVolume += amount
+      terminalTxns += 1
 
-    const v = tc.payment.venue
-    const ve = venueMap.get(v.id) ?? {
-      venueId: v.id,
-      venueName: v.name,
-      netProfit: 0,
-      terminalNet: 0,
-      onlineFees: 0,
-      volume: 0,
-      transactions: 0,
-      hasRevenueShare: false,
-    }
-    ve.terminalNet += net
-    ve.netProfit += net
-    ve.volume += amount
-    ve.transactions += 1
-    if (share) ve.hasRevenueShare = true
-    venueMap.set(v.id, ve)
+      const v = tc.payment.venue
+      const ve = venueMap.get(v.id) ?? {
+        venueId: v.id,
+        venueName: v.name,
+        netProfit: 0,
+        terminalNet: 0,
+        onlineFees: 0,
+        volume: 0,
+        transactions: 0,
+        hasRevenueShare: false,
+      }
+      ve.terminalNet += net
+      ve.netProfit += net
+      ve.volume += amount
+      ve.transactions += 1
+      if (share) ve.hasRevenueShare = true
+      venueMap.set(v.id, ve)
 
-    const me = merchantMap.get(m.id) ?? {
-      merchantAccountId: m.id,
-      label: m.displayName || m.alias || m.externalMerchantId,
-      providerCode: m.provider.code,
-      hasAggregator: !!share?.aggregatorPrice,
-      hasRevenueShare: !!share,
-      netProfit: 0,
-      tramoProvider: 0,
-      tramoAggregator: 0,
-      volume: 0,
-      transactions: 0,
-    }
-    me.netProfit += net
-    me.tramoProvider += split.avoqadoFromProviderMargin
-    me.tramoAggregator += split.avoqadoFromAggregatorMargin
-    me.volume += amount
-    me.transactions += 1
-    merchantMap.set(m.id, me)
+      const me = merchantMap.get(m.id) ?? {
+        merchantAccountId: m.id,
+        label: m.displayName || m.alias || m.externalMerchantId,
+        providerCode: m.provider.code,
+        hasAggregator: !!share?.aggregatorPrice,
+        hasRevenueShare: !!share,
+        netProfit: 0,
+        tramoProvider: 0,
+        tramoAggregator: 0,
+        volume: 0,
+        transactions: 0,
+      }
+      me.netProfit += net
+      me.tramoProvider += split.avoqadoFromProviderMargin
+      me.tramoAggregator += split.avoqadoFromAggregatorMargin
+      me.volume += amount
+      me.transactions += 1
+      merchantMap.set(m.id, me)
 
-    const pe = providerMap.get(m.provider.id) ?? {
-      providerId: m.provider.id,
-      providerCode: m.provider.code,
-      providerName: m.provider.name,
-      volume: 0,
-      netProfit: 0,
-      transactions: 0,
-    }
-    pe.netProfit += net
-    pe.volume += amount
-    pe.transactions += 1
-    providerMap.set(m.provider.id, pe)
+      const pe = providerMap.get(m.provider.id) ?? {
+        providerId: m.provider.id,
+        providerCode: m.provider.code,
+        providerName: m.provider.name,
+        volume: 0,
+        netProfit: 0,
+        transactions: 0,
+      }
+      pe.netProfit += net
+      pe.volume += amount
+      pe.transactions += 1
+      providerMap.set(m.provider.id, pe)
 
-    const ce = cardMap.get(cardType) ?? { type: cardType, transactions: 0, volume: 0, netProfit: 0 }
-    ce.netProfit += net
-    ce.volume += amount
-    ce.transactions += 1
-    cardMap.set(cardType, ce)
-  }
+      const ce = cardMap.get(cardType) ?? { type: cardType, transactions: 0, volume: 0, netProfit: 0 }
+      ce.netProfit += net
+      ce.volume += amount
+      ce.transactions += 1
+      cardMap.set(cardType, ce)
+    },
+  )
 
   for (const o of onlineByVenue) {
     const fees = centsToMxn(o.fees)
@@ -367,6 +417,10 @@ export async function getEarningsSummary(range?: DateRange, filter?: EarningsFil
   return {
     range: { startDate: startDate.toISOString(), endDate: endDate.toISOString() },
     totals,
+    // Orden DETERMINISTA en las cuatro tablas (query-guard 2026-09-08). Antes el desempate
+    // caía en el orden de llegada de las filas, que sin `ORDER BY` lo decide Postgres y puede
+    // cambiar entre dos peticiones idénticas: dos negocios con la misma ganancia se
+    // intercambiaban solos. `byCardType` ni siquiera se ordenaba. Se desempata por id.
     byVenue: Array.from(venueMap.values())
       .map(r => ({
         ...r,
@@ -375,7 +429,7 @@ export async function getEarningsSummary(range?: DateRange, filter?: EarningsFil
         onlineFees: round2(r.onlineFees),
         volume: round2(r.volume),
       }))
-      .sort((a, b) => b.netProfit - a.netProfit),
+      .sort((a, b) => b.netProfit - a.netProfit || a.venueId.localeCompare(b.venueId)),
     byMerchant: Array.from(merchantMap.values())
       .map(r => ({
         ...r,
@@ -384,11 +438,13 @@ export async function getEarningsSummary(range?: DateRange, filter?: EarningsFil
         tramoAggregator: round2(r.tramoAggregator),
         volume: round2(r.volume),
       }))
-      .sort((a, b) => b.netProfit - a.netProfit),
+      .sort((a, b) => b.netProfit - a.netProfit || a.merchantAccountId.localeCompare(b.merchantAccountId)),
     byProvider: Array.from(providerMap.values())
       .map(r => ({ ...r, netProfit: round2(r.netProfit), volume: round2(r.volume) }))
-      .sort((a, b) => b.volume - a.volume),
-    byCardType: Array.from(cardMap.values()).map(r => ({ ...r, netProfit: round2(r.netProfit), volume: round2(r.volume) })),
+      .sort((a, b) => b.volume - a.volume || a.providerId.localeCompare(b.providerId)),
+    byCardType: Array.from(cardMap.values())
+      .map(r => ({ ...r, netProfit: round2(r.netProfit), volume: round2(r.volume) }))
+      .sort((a, b) => b.netProfit - a.netProfit || a.type.localeCompare(b.type)),
     byChannel: channelRows.map(r => ({
       ecommerceMerchantId: r.ecommerceMerchantId,
       label: r.channelName || r.businessName || r.ecommerceMerchantId,
@@ -407,24 +463,11 @@ export async function getEarningsTimeSeries(
 ): Promise<EarningsTimePoint[]> {
   const { startDate, endDate } = resolveRange(range)
 
-  const txs = await prisma.transactionCost.findMany({
-    where: {
-      createdAt: { gte: startDate, lte: endDate },
-      ...(filter?.venueId ? { payment: { venueId: filter.venueId } } : {}),
-      ...(filter?.merchantAccountId ? { merchantAccountId: filter.merchantAccountId } : {}),
-    },
-    include: TX_INCLUDE,
-  })
-  const onlineSessions = filter?.merchantAccountId
-    ? []
-    : await prisma.checkoutSession.findMany({
-        where: {
-          status: 'COMPLETED',
-          createdAt: { gte: startDate, lte: endDate },
-          ...(filter?.venueId ? { ecommerceMerchant: { venueId: filter.venueId } } : {}),
-        },
-        select: { createdAt: true, applicationFeeCents: true },
-      })
+  const terminalWhere: Prisma.TransactionCostWhereInput = {
+    createdAt: { gte: startDate, lte: endDate },
+    ...(filter?.venueId ? { payment: { venueId: filter.venueId } } : {}),
+    ...(filter?.merchantAccountId ? { merchantAccountId: filter.merchantAccountId } : {}),
+  }
 
   const map = new Map<string, EarningsTimePoint>()
   const at = (k: string): EarningsTimePoint => {
@@ -436,26 +479,54 @@ export async function getEarningsTimeSeries(
     return p
   }
 
-  for (const tc of txs) {
-    const m = tc.merchantAccount
-    const split = computeRevenueSplit({
-      amount: Number(tc.amount),
-      cardType: toCardType(tc.transactionType),
-      providerCostRate: Number(tc.providerRate),
-      providerCostIncludesTax: true,
-      venueChargeRate: Number(tc.venueRate),
-      venueChargeIncludesTax: true,
-      share: mapShare(m.merchantRevenueShare),
-    })
-    const p = at(bucketKey(tc.createdAt, granularity))
-    p.terminalNet += split.avoqadoNet
-    p.net += split.avoqadoNet
-  }
-  for (const cs of onlineSessions) {
-    const fees = centsToMxn(cs.applicationFeeCents)
-    const p = at(bucketKey(cs.createdAt, granularity))
-    p.onlineFees += fees
-    p.net += fees
+  await porPaginas(
+    cursorId =>
+      prisma.transactionCost.findMany({
+        where: terminalWhere,
+        include: TX_INCLUDE,
+        orderBy: EARNINGS_ORDER_BY,
+        take: EARNINGS_PAGE_SIZE,
+        ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
+      }),
+    tc => {
+      const m = tc.merchantAccount
+      const split = computeRevenueSplit({
+        amount: Number(tc.amount),
+        cardType: toCardType(tc.transactionType),
+        providerCostRate: Number(tc.providerRate),
+        providerCostIncludesTax: true,
+        venueChargeRate: Number(tc.venueRate),
+        venueChargeIncludesTax: true,
+        share: mapShare(m.merchantRevenueShare),
+      })
+      const p = at(bucketKey(tc.createdAt, granularity))
+      p.terminalNet += split.avoqadoNet
+      p.net += split.avoqadoNet
+    },
+  )
+
+  // El dinero en línea no cuelga de un comercio POS: con filtro por comercio no aplica.
+  if (!filter?.merchantAccountId) {
+    await porPaginas(
+      cursorId =>
+        prisma.checkoutSession.findMany({
+          where: {
+            status: 'COMPLETED',
+            createdAt: { gte: startDate, lte: endDate },
+            ...(filter?.venueId ? { ecommerceMerchant: { venueId: filter.venueId } } : {}),
+          },
+          select: { id: true, createdAt: true, applicationFeeCents: true },
+          orderBy: EARNINGS_ORDER_BY,
+          take: EARNINGS_PAGE_SIZE,
+          ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
+        }),
+      cs => {
+        const fees = centsToMxn(cs.applicationFeeCents)
+        const p = at(bucketKey(cs.createdAt, granularity))
+        p.onlineFees += fees
+        p.net += fees
+      },
+    )
   }
 
   return Array.from(map.values())

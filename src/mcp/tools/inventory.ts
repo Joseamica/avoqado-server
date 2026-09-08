@@ -532,6 +532,7 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
           )
           return {
             id: c.id,
+            revision: c.revision,
             type: c.type,
             status: c.status,
             note: c.note,
@@ -565,9 +566,15 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
     {
       venueId: z.string().describe('Venue that owns the count (must be in your scope)'),
       countId: z.string().describe('Id of the count, from stock_counts'),
+      expectedRevision: z
+        .number()
+        .int()
+        .nonnegative()
+        .optional()
+        .describe('Revisión exacta recibida en la vista previa; repítela sin cambios al confirmar'),
       confirm: z.boolean().optional().describe('Must be true to actually cancel; without it you get a preview'),
     },
-    async ({ venueId, countId, confirm }) => {
+    async ({ venueId, countId, expectedRevision, confirm }) => {
       const where = guard.venueFilter(venueId)
       guard.requirePermission('inventory:update', venueId)
       const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario')
@@ -575,20 +582,21 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
 
       const count = await prisma.stockCount.findFirst({
         where: { ...where, id: countId },
-        select: { id: true, status: true, type: true, createdAt: true, _count: { select: { items: true } } },
+        select: { id: true, revision: true, status: true, type: true, createdAt: true, _count: { select: { items: true } } },
       })
       // Resolve-don't-guess: fuera del alcance no se toca, y no se ofrece otro conteo en su lugar.
       if (!count) return text({ ok: false, error: 'No encontré ese conteo en este negocio.' })
-      if (count.status === 'COMPLETED')
-        return text({ ok: false, error: 'Ese conteo ya está completado: ya ajustó el inventario y no se puede cancelar.' })
-      if (count.status === 'CANCELLED') return text({ ok: false, error: 'Ese conteo ya estaba cancelado.' })
-      if (count.status === 'APPLYING')
-        return text({ ok: false, error: 'Ese conteo se está aplicando al inventario; espera a que termine.' })
 
-      if (!confirm) {
+      if (!confirm || expectedRevision === undefined) {
+        if (count.status === 'COMPLETED')
+          return text({ ok: false, error: 'Ese conteo ya está completado: ya ajustó el inventario y no se puede cancelar.' })
+        if (count.status === 'CANCELLED') return text({ ok: false, error: 'Ese conteo ya estaba cancelado.' })
+        if (count.status === 'APPLYING')
+          return text({ ok: false, error: 'Ese conteo se está aplicando al inventario; espera a que termine.' })
         return text({
           ok: false,
           requiresConfirmation: true,
+          expectedRevision: count.revision,
           change: {
             count: count.id,
             type: count.type,
@@ -602,23 +610,35 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
           // tarde de CDMX ya cayó en el día siguiente ahí — le diría al operador una fecha equivocada.
           message: `Esto cancelará el conteo ${count.type === 'FULL' ? 'completo' : 'cíclico'} del ${count.createdAt.toISOString()} (${
             count._count.items
-          } artículos). No toca el inventario y no se puede deshacer. Confirma con el operador; luego vuelve a llamar con confirm:true.`,
+          } artículos). No toca el inventario y no se puede deshacer. Confirma con el operador; luego vuelve a llamar con confirm:true y expectedRevision:${count.revision}.`,
         })
       }
 
       try {
-        const result = await cancelStockCount(count.id, venueId, scope.staffId)
+        const result = await cancelStockCount(count.id, venueId, scope.staffId, expectedRevision)
         // El servicio ya escribe STOCK_COUNT_CANCELLED; este asiento marca que la escritura vino por IA.
         await auditMcpWrite(scope, {
           action: 'STOCK_COUNT_CANCELLED_MCP',
           entity: 'StockCount',
           entityId: count.id,
           venueId,
-          data: { type: count.type, lines: count._count.items, cancelledAt: result.cancelledAt },
+          data: {
+            type: count.type,
+            lines: count._count.items,
+            expectedRevision,
+            revision: result.revision,
+            cancelledAt: result.cancelledAt,
+          },
         })
         return text({ ok: true, count: result })
       } catch (err) {
-        return text({ ok: false, error: (err as Error).message })
+        const error = err as Error & { code?: string; details?: unknown }
+        return text({
+          ok: false,
+          error: error.message,
+          ...(error.code ? { code: error.code } : {}),
+          ...(error.details !== undefined ? { details: error.details } : {}),
+        })
       }
     },
   )

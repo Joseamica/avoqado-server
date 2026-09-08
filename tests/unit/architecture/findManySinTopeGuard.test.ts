@@ -40,6 +40,12 @@ const MODELOS_GRANDES = [
   'idempotencyRequest',
   'saleVerification',
   'providerEventLog',
+  // 2026-09-08: el query-guard cazó `/superadmin/earnings/*` cargando 3,772 `TransactionCost`
+  // con su `include` anidado. El modelo crece una fila por cobro con tarjeta y NO estaba en
+  // esta lista, así que el barrido estático nunca lo miró. `CheckoutSession` entra por lo
+  // mismo: una fila por cobro en línea.
+  'transactionCost',
+  'checkoutSession',
 ]
 
 // Ventana de búsqueda del `take` tras el findMany — idéntica al barrido que produjo
@@ -77,7 +83,9 @@ const INVENTARIO: Record<string, number> = {
   // (`aggregate` + `DRAWER_CASH_WHERE`); ya no hidrata el efectivo desde el último corte.
   'src/services/dashboard/commission/commission-attendance.ts': 1,
   'src/services/dashboard/commission/commission-utils.ts': 1,
-  'src/services/dashboard/cost-management.service.ts': 1,
+  // 2026-09-08: +1 al ampliar la lista a transactionCost/checkoutSession (no es código nuevo,
+  // es un findMany que el barrido no miraba). Registrado para que no crezca; su arreglo va aparte.
+  'src/services/dashboard/cost-management.service.ts': 2,
   'src/services/dashboard/customer.dashboard.service.ts': 1,
   // 2026-09-01: 19 → 3. Las 16 agregaciones se reescribieron a GROUP BY en
   // Postgres (golden snapshots al centavo + integración con base real). Los 3
@@ -134,6 +142,7 @@ const INVENTARIO: Record<string, number> = {
   // devuelven FILAS al dashboard o corren un motor por fila (GPS de hoy, personal en línea,
   // checadas del día, calendario, reporte de cierre) y llevan select quirúrgico.
   'src/services/organization-dashboard/organizationDashboard.service.ts': 5,
+  'src/services/payments/revenueShareReport.service.ts': 1,
   'src/services/promoters/promoters.service.ts': 3,
   'src/services/promoters/terminalLocation.service.ts': 1,
   'src/services/referrals/referralRefund.service.ts': 1,
@@ -143,8 +152,13 @@ const INVENTARIO: Record<string, number> = {
   'src/services/serialized-inventory/simRegistration.service.ts': 2,
   'src/services/stock-dashboard/stockDashboard.service.ts': 2,
   'src/services/superadmin/creditAssessment.service.ts': 1,
-  'src/services/superadmin/rateCorrection/rateCorrectionApply.ts': 2,
-  'src/services/superadmin/rateCorrection/rateCorrectionPreview.ts': 1,
+  // 2026-09-08: +1 al ampliar la lista a transactionCost/checkoutSession (no es código nuevo,
+  // es un findMany que el barrido no miraba). Registrado para que no crezca; su arreglo va aparte.
+  'src/services/superadmin/rateCorrection/rateCorrectionApply.ts': 3,
+  // 2026-09-08: +1 al ampliar la lista a transactionCost/checkoutSession (no es código nuevo,
+  // es un findMany que el barrido no miraba). Registrado para que no crezca; su arreglo va aparte.
+  'src/services/superadmin/rateCorrection/rateCorrectionPreview.ts': 2,
+  'src/services/superadmin/paymentAnalytics.service.ts': 1,
   'src/services/superadmin/settlementCalendar.superadmin.service.ts': 1,
   'src/services/tpv/angelpay-webhook.service.ts': 1,
   'src/services/tpv/blumon-webhook.service.ts': 1,

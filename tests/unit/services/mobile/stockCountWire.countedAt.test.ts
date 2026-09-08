@@ -42,6 +42,7 @@ describe('getStockCounts — summary y cancelados', () => {
     prismaMock.stockCount.findMany.mockResolvedValue([
       {
         id: 'c1',
+        revision: 7,
         type: 'FULL',
         status: 'APPLYING',
         note: null,
@@ -78,6 +79,11 @@ describe('getStockCounts — summary y cancelados', () => {
   it('APPLYING se sigue mapeando a IN_PROGRESS para las apps', async () => {
     const [c] = await getStockCounts('v1')
     expect(c.status).toBe('IN_PROGRESS')
+  })
+
+  it('expone la revisión del agregado en cada conteo', async () => {
+    const [c] = await getStockCounts('v1')
+    expect(c.revision).toBe(7)
   })
 
   it('🔴 la consulta EXCLUYE los cancelados: un status desconocido tira el decoder de las apps', async () => {
