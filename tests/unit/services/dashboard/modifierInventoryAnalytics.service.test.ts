@@ -451,3 +451,88 @@ describe('Modifier Inventory Analytics Service', () => {
     })
   })
 })
+
+/**
+ * Recorrido por páginas con cursor (query-guard 2026-09-10).
+ *
+ * `GET /venues/:id/modifiers/inventory/summary` cargaba TODOS los `OrderItemModifier` del
+ * rango —cada uno con su modificador, su grupo, su materia prima y la cantidad del
+ * platillo— para quedarse al final con los 10 más caros. Medido en producción: 2,568 filas
+ * en una llamada de 30 días, y el rango de fechas es OPCIONAL: sin fechas no hay filtro y
+ * carga el histórico completo del negocio.
+ *
+ * Se recorre por páginas en vez de agregar en SQL porque el impacto en costo se calcula
+ * fila por fila (cantidad del platillo × cantidad del modificador × receta × costo) y el
+ * resultado debe quedar idéntico al centavo.
+ */
+describe('getModifierUsageStats — páginas de 500 con cursor', () => {
+  const VENUE = 'venue-1'
+
+  const fila = (i: number, modId = 'mod-1') => ({
+    id: `oim${String(i).padStart(4, '0')}`,
+    quantity: 1,
+    modifier: {
+      id: modId,
+      name: 'Queso extra',
+      group: { id: 'group-1', name: 'Toppings' },
+      rawMaterial: null,
+      quantityPerUnit: null,
+      inventoryMode: 'ADDITION' as ModifierInventoryMode,
+    },
+    orderItem: { quantity: 1 },
+  })
+
+  beforeEach(() => {
+    ;(prisma.orderItemModifier.findMany as jest.Mock).mockReset()
+  })
+
+  it('una página llena pide la siguiente con cursor en el último id; el conteo cubre las 503 filas', async () => {
+    const pagina1 = Array.from({ length: 500 }, (_, i) => fila(i))
+    const pagina2 = [fila(500), fila(501), fila(502)]
+    ;(prisma.orderItemModifier.findMany as jest.Mock).mockResolvedValueOnce(pagina1).mockResolvedValueOnce(pagina2)
+
+    const r = await getModifierUsageStats(VENUE)
+
+    expect(prisma.orderItemModifier.findMany).toHaveBeenCalledTimes(2)
+    const [primera, segunda] = (prisma.orderItemModifier.findMany as jest.Mock).mock.calls.map(c => c[0])
+    expect(primera).toMatchObject({ take: 500, orderBy: [{ id: 'asc' }] })
+    expect(primera.cursor).toBeUndefined()
+    expect(segunda).toMatchObject({ take: 500, cursor: { id: 'oim0499' }, skip: 1 })
+    // El filtro no cambia entre páginas: las mismas filas, sólo repartidas.
+    expect(primera.where).toEqual(segunda.where)
+
+    expect(r).toHaveLength(1)
+    expect(r[0]).toMatchObject({ modifierId: 'mod-1', timesUsed: 503, totalQuantityUsed: 503 })
+  })
+
+  it('regresión: menos de 500 filas es UNA consulta (un mock constante no puede ciclar)', async () => {
+    ;(prisma.orderItemModifier.findMany as jest.Mock).mockResolvedValue([fila(0), fila(1)])
+    const r = await getModifierUsageStats(VENUE)
+    expect(prisma.orderItemModifier.findMany).toHaveBeenCalledTimes(1)
+    expect(r[0].timesUsed).toBe(2)
+  })
+
+  it('el tope se aplica DESPUÉS de sumar todas las páginas, no a las filas leídas', async () => {
+    // 500 usos de mod-a + 3 de mod-b, repartidos en dos páginas.
+    const pagina1 = Array.from({ length: 500 }, (_, i) => fila(i, 'mod-a'))
+    const pagina2 = [fila(500, 'mod-b'), fila(501, 'mod-b'), fila(502, 'mod-b')]
+    ;(prisma.orderItemModifier.findMany as jest.Mock).mockResolvedValueOnce(pagina1).mockResolvedValueOnce(pagina2)
+
+    const r = await getModifierUsageStats(VENUE, { limit: 1 })
+
+    // Devuelve 1, pero el más usado sale de haber leído AMBAS páginas.
+    expect(r).toHaveLength(1)
+    expect(r[0]).toMatchObject({ modifierId: 'mod-a', timesUsed: 500 })
+  })
+
+  it('los empates salen SIEMPRE en el mismo orden, venga como venga la base', async () => {
+    const filas = [fila(0, 'mod-z'), fila(1, 'mod-a')]
+    ;(prisma.orderItemModifier.findMany as jest.Mock).mockResolvedValue(filas)
+    const enOrden = await getModifierUsageStats(VENUE)
+    ;(prisma.orderItemModifier.findMany as jest.Mock).mockResolvedValue([...filas].reverse())
+    const alReves = await getModifierUsageStats(VENUE)
+
+    expect(alReves.map(x => x.modifierId)).toEqual(enOrden.map(x => x.modifierId))
+    expect(enOrden.map(x => x.modifierId)).toEqual(['mod-a', 'mod-z']) // empate a 1 uso → desempata el id
+  })
+})

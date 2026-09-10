@@ -9,6 +9,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Changed
 
+- **El resumen de inventario de modificadores recorre los usos por páginas (query-guard 2026-09-10)**: `GET
+  /venues/:id/modifiers/inventory/summary` cargaba TODOS los `OrderItemModifier` del rango —cada uno con su modificador, su
+  grupo, su materia prima y la cantidad del platillo— para quedarse al final con los 10 de mayor costo. Medido en producción:
+  **2,568 filas en una llamada de 30 días**, y el rango de fechas es **opcional**, así que una llamada sin fechas no filtra
+  nada y carga el histórico completo del negocio. Ahora `getModifierUsageStats` recorre por páginas de 500 con cursor
+  (`orderBy id`), agregando en el mismo mapa; el `limit` se sigue aplicando al final, sobre el agregado COMPLETO, así que el
+  resultado no cambia. **Se eligió paginar y NO agregar en SQL a propósito**: el impacto en costo se calcula fila por fila
+  (cantidad del platillo × cantidad del modificador × receta × costo por unidad) y `timesUsed` cuenta filas, no unidades.
+- **Los empates del resumen de modificadores tienen orden definido (mismo cambio)**: las listas por uso y por costo
+  desempataban con el orden en que la base devolvía las filas, que sin `ORDER BY` puede cambiar entre dos peticiones
+  idénticas. Ahora desempatan por id. Mismas filas y mismos números; el orden de los empates deja de moverse solo.
 - **El panel de ganancias del superadmin recorre los costos por páginas (query-guard 2026-09-08)**: `GET
   /superadmin/earnings/summary` y `/time-series` cargaban de un jalón TODOS los `TransactionCost` del rango, cada uno con su
   pago→negocio y su comercio→proveedor→reparto (un `include` anidado). Medido en producción el 7-sep: **3,772 filas por
