@@ -1,0 +1,64 @@
+MM docs/SCHEMA_MAP.md
+A  docs/investigations/money-watchdog-2026-09-09-codex.md
+A  docs/investigations/pax-chip-2026-09-09-resultados.md
+A  docs/investigations/pax-sandbox-2026-09-08-preparacion.md
+A  docs/investigations/pax-sandbox-2026-09-08-resultados.md
+A  docs/investigations/testarudo-2026-09-08-codex.md
+A  docs/investigations/testarudo-2026-09-08-latency.sql
+A  docs/investigations/testarudo-2026-09-09-android-tpv-relay.md
+A  docs/investigations/testarudo-2026-09-09-conciliacion-portales.md
+A  docs/investigations/testarudo-2026-09-09-implementation.md
+A  docs/investigations/testarudo-2026-09-09-plan-correccion.md
+A  docs/investigations/testarudo-2026-09-09-relay.sql
+A  prisma/migrations/20260909181000_terminal_payment_cancel_disposition/migration.sql
+MM prisma/schema.prisma
+ M scripts/generate-schema-map.ts
+MM src/communication/sockets/managers/socketManager.ts
+MM src/communication/sockets/terminal-registry.ts
+ M src/controllers/dashboard/terminals.superadmin.controller.ts
+MM src/controllers/mobile/terminal-payment.mobile.controller.ts
+ M src/jobs/jobSchedules.ts
+ M src/jobs/loyalty-reconciliation.job.ts
+A  src/jobs/money-integrity-watchdog-legacy.ts
+M  src/jobs/money-integrity-watchdog.job.ts
+ M src/mcp/server.ts
+ M src/mcp/tools/terminals.ts
+ M src/server.ts
+ M src/services/dashboard/commission/commission-attendance.ts
+ M src/services/dashboard/commission/commission-calculation.service.ts
+ M src/services/dashboard/commission/commission-tier.service.ts
+ M src/services/dashboard/commission/commission-utils.ts
+ M src/services/dashboard/commission/goal-resolution.service.ts
+ M src/services/dashboard/commission/sales-goal.service.ts
+ M src/services/referrals/referralQualification.service.ts
+ M src/services/referrals/referralRefund.service.ts
+MM src/services/terminal-payment.service.ts
+ M src/services/tpv/digitalReceipt.tpv.service.ts
+ M src/services/tpv/payment.tpv.service.ts
+ M src/services/tpv/refund.tpv.service.ts
+A  tests/integration/jobs/money-watchdog-legacy.integration.test.ts
+AM tests/integration/payments/terminalPaymentRecovery.integration.test.ts
+ M tests/unit/jobs/loyalty-reconciliation.job.test.ts
+M  tests/unit/jobs/money-integrity-watchdog.job.test.ts
+MM tests/unit/services/terminal-payment.autoRelease.test.ts
+MM tests/unit/services/terminal-payment.service.test.ts
+?? docs/investigations/testarudo-2026-09-09-query-plans.json
+?? docs/investigations/testarudo-2026-09-09-query-plans.md
+?? docs/investigations/testarudo-checkpoint-2026-09-09/
+?? prisma/migrations/20260909210000_payment_effects_outbox/
+?? prisma/migrations/20260909213000_terminal_payment_recovery_indexes/
+?? prisma/migrations/20260909220000_payment_effect_lookup_indexes/
+?? prisma/migrations/20260909223000_terminal_recovery_attribution_cursor/
+?? src/jobs/payment-effects.job.ts
+?? src/mcp/tools/paymentEffects.ts
+?? src/services/referrals/referralReversalPolicy.service.ts
+?? src/services/tpv/paymentEffects.service.ts
+?? src/services/tpv/paymentEffectsRead.service.ts
+?? tests/integration/payments/paymentEffectsBoundary.integration.test.ts
+?? tests/integration/payments/paymentEffectsOutbox.integration.test.ts
+?? tests/integration/payments/paymentEffectsRead.integration.test.ts
+?? tests/integration/payments/paymentEffectsReview.integration.test.ts
+?? tests/integration/payments/paymentEffectsTimezone.integration.test.ts
+?? tests/unit/communication/sockets/terminalPayment.registrationProof.test.ts
+?? tests/unit/jobs/payment-effects.job.test.ts
+?? tests/unit/mcp-customer/payment-effects.test.ts

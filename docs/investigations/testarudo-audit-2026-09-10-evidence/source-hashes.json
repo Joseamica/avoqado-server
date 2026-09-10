@@ -1,0 +1,38 @@
+{
+  "capturedAt": "2026-09-10T15:45:39.849732+00:00",
+  "avqWarning": "Both runs reported workspace fingerprint changed. Results describe snapshots; compare exact reviewed source hashes, not global green.",
+  "files": {
+    "avoqado-server/src/services/terminal-payment.service.ts": {
+      "sha256": "3df9678400910652077d868a58dbb0a31f6ed31ccb8ae21d87b67ade411feb41",
+      "matchesSnapshot": true
+    },
+    "avoqado-server/tests/unit/services/terminal-payment.autoRelease.test.ts": {
+      "sha256": "b49954e9b0b05c4e9ad39a680678a99e3057a68609e9d7ceff52d69802e00c45",
+      "matchesSnapshot": true
+    },
+    "avoqado-tpv/app/src/sandbox/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt": {
+      "sha256": "6ef7b019884d35f62bc2cfd1596bb2d6442fd7ac1e22bfe3757497357bb96816",
+      "matchesSnapshot": true
+    },
+    "avoqado-tpv/app/src/production/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt": {
+      "sha256": "97a43642d6e6ab53c49b1fbf5ea5097af35b5085288840d7c1d094ec13667298",
+      "matchesSnapshot": true
+    },
+    "avoqado-tpv/app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentViewModel.kt": {
+      "sha256": "f7c673fca7708a5f8ba821f894ce4d7411dd7605f54315bb1ec706374823be6c",
+      "matchesSnapshot": true
+    },
+    "avoqado-tpv/app/src/test/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentReviewRoomTest.kt": {
+      "sha256": "7e5532a4f3d8f7311c0b379ddc83c317a8e5b994c54e19690f09273f27a6a790",
+      "matchesSnapshot": true
+    },
+    "avoqado-tpv/app/src/test/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModelKernelDurabilityTest.kt": {
+      "sha256": "74867db0ac6bab45b7860001010752e1fbbe411b6c389cb0590d7e66420fb43e",
+      "matchesSnapshot": true
+    },
+    "avoqado-tpv/app/src/test/java/com/jaac/avoqado_tpv/features/payment/presentation/RechazoContactlessLiberaLaTerminalTest.kt": {
+      "sha256": "5f1f8173fad0d03d843680b7d2f4fb320fc44603b077b040273483ec5e224434",
+      "matchesSnapshot": true
+    }
+  }
+}

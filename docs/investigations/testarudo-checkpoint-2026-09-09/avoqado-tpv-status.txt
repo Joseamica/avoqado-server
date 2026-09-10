@@ -1,0 +1,48 @@
+ M CHANGELOG.md
+ M app/src/main/java/com/jaac/avoqado_tpv/core/data/realtime/SocketManager.kt
+ M app/src/main/java/com/jaac/avoqado_tpv/core/observability/CrashlyticsContext.kt
+ M app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt
+ M app/src/main/java/com/jaac/avoqado_tpv/core/presentation/viewmodels/HomeViewModel.kt
+ M app/src/main/java/com/jaac/avoqado_tpv/core/remotepayment/RemotePaymentCoordinator.kt
+ M app/src/main/java/com/jaac/avoqado_tpv/core/remotepayment/RemotePaymentInbox.kt
+ M app/src/main/java/com/jaac/avoqado_tpv/core/remotepayment/RemotePaymentRequestDao.kt
+ M app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/LedgerShadowSweepWorker.kt
+ M app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/LedgerSweepScheduler.kt
+ M app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/PaymentAttemptDao.kt
+ M app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/PaymentAttemptEntity.kt
+ M app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/PaymentAttemptLedger.kt
+ M app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/processor/angelpay/AngelPayResultParser.kt
+ M app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/processor/angelpay/AngelPaySdkPostOperationsAdapter.kt
+ M app/src/main/java/com/jaac/avoqado_tpv/features/payment/domain/processor/PostOperationsAdapter.kt
+ M app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt
+ M app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt
+ M app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentState.kt
+ M app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentViewModel.kt
+ M app/src/production/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt
+ M app/src/sandbox/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt
+ M app/src/test/java/com/jaac/avoqado_tpv/core/data/realtime/SocketManagerTest.kt
+ M app/src/test/java/com/jaac/avoqado_tpv/core/remotepayment/RemotePaymentInboxTest.kt
+ M app/src/test/java/com/jaac/avoqado_tpv/features/payment/data/ledger/PaymentAttemptLedgerTest.kt
+ M app/src/test/java/com/jaac/avoqado_tpv/features/payment/presentation/BlumonSaleReferenceTest.kt
+ M app/src/test/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModelTest.kt
+ M app/src/test/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModelWatchdogTest.kt
+ M app/src/test/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentViewModelTest.kt
+ M app/src/test/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayWatchdogTest.kt
+?? app/src/main/java/com/jaac/avoqado_tpv/core/remotepayment/RemotePaymentPreAuthorizationFailure.kt
+?? app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/LedgerApprovalRecovery.kt
+?? app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/LedgerUnknownRecovery.kt
+?? app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/processor/angelpay/AngelPayChargeVerifier.kt
+?? app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/processor/angelpay/AngelPayOutcomeClassifier.kt
+?? app/src/main/java/com/jaac/avoqado_tpv/features/payment/domain/PaymentPhaseTracker.kt
+?? app/src/test/java/com/jaac/avoqado_tpv/core/remotepayment/RemotePaymentCoordinatorTest.kt
+?? app/src/test/java/com/jaac/avoqado_tpv/core/remotepayment/RemotePaymentInboxRoomTest.kt
+?? app/src/test/java/com/jaac/avoqado_tpv/core/remotepayment/RemotePaymentOutcomeEvidenceTest.kt
+?? app/src/test/java/com/jaac/avoqado_tpv/features/payment/data/ledger/LedgerApprovalRecoveryTest.kt
+?? app/src/test/java/com/jaac/avoqado_tpv/features/payment/data/ledger/LedgerRecoveryLeaseRoomTest.kt
+?? app/src/test/java/com/jaac/avoqado_tpv/features/payment/data/ledger/LedgerUnknownRecoveryTest.kt
+?? app/src/test/java/com/jaac/avoqado_tpv/features/payment/data/ledger/PaymentAttemptRoomTest.kt
+?? app/src/test/java/com/jaac/avoqado_tpv/features/payment/data/processor/angelpay/AngelPayChargeVerifierTest.kt
+?? app/src/test/java/com/jaac/avoqado_tpv/features/payment/data/processor/angelpay/AngelPayOutcomeClassifierTest.kt
+?? app/src/test/java/com/jaac/avoqado_tpv/features/payment/data/processor/angelpay/AngelPayResultParserTest.kt
+?? app/src/test/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModelKernelDurabilityTest.kt
+?? app/src/test/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentReviewRoomTest.kt

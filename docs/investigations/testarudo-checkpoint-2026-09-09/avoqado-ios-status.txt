@@ -1,0 +1,46 @@
+ M avoqado-ios/CashDrawer/Services/CashDrawerRepository.swift
+ M avoqado-ios/CashDrawer/Views/CloseDrawerSheet.swift
+ M avoqado-ios/Inventory/Models/InventoryModels.swift
+ M avoqado-ios/Inventory/Services/InventoryRepository.swift
+ M avoqado-ios/Inventory/ViewModels/InventoryViewModel.swift
+ M avoqado-ios/Inventory/Views/InventoryView.swift
+ M avoqado-ios/Inventory/Views/StockCountDetailView.swift
+ M avoqado-ios/Inventory/Views/StockCountReviewView.swift
+ M avoqado-ios/Inventory/Views/StockCountingView.swift
+ M avoqado-ios/Inventory/Views/StockCountsView.swift
+ M avoqado-ios/POS/Views/MainTabView.swift
+ M avoqado-ios/Payment/CardChargeOutcome.swift
+ M avoqado-ios/Payment/PaymentFlowViewModel.swift
+ M avoqado-ios/Payment/PaymentResultViews.swift
+ M avoqado-ios/Printing/Models/PrinterModels.swift
+ M avoqado-ios/Printing/Services/ReceiptLogoCache.swift
+ M avoqado-ios/Printing/Views/PrinterConfigSheet.swift
+ M avoqado-ios/Services/APIClient.swift
+ M avoqado-ios/Services/CashPaymentRepository.swift
+ M avoqado-ios/Services/SecureStorage.swift
+ M avoqado-ios/Services/TerminalPaymentService.swift
+ M avoqado-ios/Transactions/Services/RefundRepository.swift
+ M avoqado-ios/Transactions/Views/IssueRefundSheet.swift
+ M avoqado-ios/avoqado_iosApp.swift
+ M avoqado-iosTests/CardChargeDecisionTests.swift
+ M avoqado-iosTests/CashDrawerHoraRealYLlaveTests.swift
+ M avoqado-iosTests/FastTarjetaClienteTests.swift
+ M avoqado-iosTests/MesaProvisionalOfflineTests.swift
+ M avoqado-iosTests/PaymentFlowUndeterminedTests.swift
+ M avoqado-iosTests/SplitMostradorContinuidadTests.swift
+?? avoqado-ios/CashDrawer/Services/ConteoSospechoso.swift
+?? avoqado-ios/Inventory/Services/ConteoEnCurso.swift
+?? avoqado-ios/Inventory/Services/ConteoEnCursoStore.swift
+?? avoqado-ios/Inventory/Services/InventoryCountSyncCoordinator.swift
+?? avoqado-ios/Models/Money.swift
+?? avoqado-iosTests/ComandaPosInternalTests.swift
+?? avoqado-iosTests/ConteoEnCursoStoreTests.swift
+?? avoqado-iosTests/ConteoEnCursoTests.swift
+?? avoqado-iosTests/ConteoSospechosoTests.swift
+?? avoqado-iosTests/InventoryRepositoryConteoTests.swift
+?? avoqado-iosTests/InventorySyncCoordinatorTests.swift
+?? avoqado-iosTests/InventoryViewModelConteoTests.swift
+?? avoqado-iosTests/PoliticaDeReintentoTests.swift
+?? avoqado-iosTests/ReceiptLogoCacheTests.swift
+?? avoqado-iosTests/RespuestaHttpTests.swift
+?? avoqado-iosTests/WarningsUxTests.swift

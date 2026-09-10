@@ -1,0 +1,22 @@
+ app/build.gradle.kts                               |   4 +-
+ .../avoqado/pos/core/data/local/SecureStorage.kt   |  15 +-
+ .../pos/inventory/data/BorradorDeConteoStore.kt    |  93 +++++
+ .../data/InventoryCountSyncCoordinator.kt          | 428 +++++++++++++++++++--
+ .../inventory/presentation/InventoryViewModel.kt   | 262 +++++++++++--
+ .../inventory/presentation/StockCountingView.kt    |  68 +++-
+ .../com/avoqado/pos/navigation/AvoqadoNavGraph.kt  |  36 +-
+ .../pos/navigation/TerminalStartDestination.kt     |  47 +++
+ .../pos/payment/data/TerminalPaymentService.kt     | 179 ++++++---
+ .../pos/payment/domain/CardChargeOutcome.kt        |  57 +--
+ .../payment/presentation/PaymentFlowViewModel.kt   |  44 +--
+ .../payment/presentation/PaymentResultScreen.kt    |  51 +--
+ .../pos/inventory/BorradorDeConteoPrefsTest.kt     | 114 ++++++
+ .../pos/inventory/InventoryCountRefreshTest.kt     |   9 +
+ .../inventory/InventoryCountSyncCoordinatorTest.kt | 292 ++++++++++++++
+ .../pos/inventory/InventoryViewModelConteoTest.kt  | 214 ++++++++++-
+ .../com/avoqado/pos/inventory/WarningsUxTest.kt    | 127 +++++-
+ .../pos/navigation/TerminalStartDestinationTest.kt |  74 ++++
+ .../avoqado/pos/payment/CardChargeDecisionTest.kt  |  28 +-
+ .../pos/payment/PaymentFlowViewModelTest.kt        | 161 +++++++-
+ .../pos/payment/TerminalPaymentServiceHttpTest.kt  | 215 ++++++++++-
+ 21 files changed, 2241 insertions(+), 277 deletions(-)

@@ -1,0 +1,42 @@
+[
+  {
+    "suite": "com.jaac.avoqado_tpv.features.payment.presentation.PaymentViewModelKernelDurabilityTest",
+    "tests": "1",
+    "failures": "1",
+    "timestamp": "2026-09-10T15:39:19.656Z",
+    "cases": [
+      {
+        "name": "offline approval write failure keeps durable obligation and cannot publish success or cancellation",
+        "failure": "java.lang.AssertionError: Verification failed: call 1 of 1: StartCtlssTransUseCase(#48).run(any(), any())) was not called"
+      }
+    ]
+  },
+  {
+    "suite": "com.jaac.avoqado_tpv.features.payment.presentation.angelpay.AngelPayPaymentReviewRoomTest",
+    "tests": "5",
+    "failures": "0",
+    "timestamp": "2026-09-10T15:39:26.683Z",
+    "cases": [
+      {
+        "name": "review staggered SDK entry cannot validate a second launch after Room CAS loses",
+        "failure": null
+      },
+      {
+        "name": "review parsed contradictory issuer and timeout callback never emits processor decline proof",
+        "failure": null
+      },
+      {
+        "name": "review una declinacion tras recrear el ViewModel cierra la fila en vez de retener la terminal",
+        "failure": null
+      },
+      {
+        "name": "review Room attempt survives VM recreation and empty callback cannot claim PRE",
+        "failure": null
+      },
+      {
+        "name": "review persisted affiliation belongs to authenticated session that will charge",
+        "failure": null
+      }
+    ]
+  }
+]

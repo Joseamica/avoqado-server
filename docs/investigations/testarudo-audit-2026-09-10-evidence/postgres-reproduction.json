@@ -1,0 +1,19 @@
+{
+  "methodSourceSha256": "3df9678400910652077d868a58dbb0a31f6ed31ccb8ae21d87b67ade411feb41",
+  "database": "owned local PostgreSQL",
+  "results": [
+    {
+      "origin": "REST",
+      "state": "COMPLETED",
+      "linkedToOtherTerminalPayment": true
+    },
+    {
+      "origin": "SOCKET",
+      "state": "SENT",
+      "linkedToOtherTerminalPayment": false
+    }
+  ],
+  "fixtureOrganizationsRemaining": 0,
+  "caughtMethodErrors": [],
+  "auditedFileStillMatches": true
+}
