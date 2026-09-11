@@ -36,6 +36,7 @@ jest.mock('@/config/logger', () => ({
 
 const raw = prisma.$queryRawUnsafe as unknown as jest.Mock
 const info = logger.info as jest.Mock
+const warn = logger.warn as jest.Mock
 const error = logger.error as jest.Mock
 
 const NOW = new Date('2026-09-02T18:17:00Z')
@@ -49,6 +50,7 @@ function arm(counts: Array<{ check: string; n: number }>, rows: unknown[]) {
 
 beforeEach(() => {
   info.mockReset()
+  warn.mockReset()
   error.mockReset()
 })
 
@@ -189,6 +191,57 @@ describe('money-integrity-watchdog · la forma de las consultas', () => {
 })
 
 describe('money-integrity-watchdog · lo que reporta', () => {
+  it('groups historical stock notices without hiding an overpayment on the same order', async () => {
+    const historical = 'VALE HISTÓRICO AUSENTE CON MOVIMIENTOS'
+    arm(
+      [
+        { check: historical, n: 300 },
+        { check: 'SOBREPAGO', n: 1 },
+      ],
+      [
+        ...Array.from({ length: DETAIL_LIMIT_POR_CHECK }, (_, i) => ({
+          check: historical,
+          venue: 'Mindform',
+          order_id: `legacy-${i}`,
+          detalle: 'movimiento antiguo; cobertura pendiente de revisión',
+        })),
+        { check: 'SOBREPAGO', venue: 'Mindform', order_id: 'legacy-0', detalle: 'cobrado=200 cuenta=100' },
+      ],
+    )
+
+    const result = await new MoneyIntegrityWatchdogJob().runNow(NOW)
+
+    expect(result).toMatchObject({ total: 1, mostrados: 1, porTipo: { SOBREPAGO: 1 }, historicalInventory: { total: 300, mostrados: 30 } })
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn.mock.calls[0][1]).toMatchObject({ total: 300, mostrados: 30, topePorCheck: 30 })
+    expect(warn.mock.calls[0][1].casos).toHaveLength(30)
+    expect(warn.mock.calls[0][1].casos[0]).toMatchObject({ venueName: 'Mindform', orderId: 'legacy-0' })
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('SOBREPAGO'), expect.objectContaining({ orderId: 'legacy-0' }))
+    expect(error.mock.calls.some(([message]) => String(message).includes(historical))).toBe(false)
+  })
+
+  it('does not claim everything reconciles when only historical inventory reviews remain', async () => {
+    arm(
+      [{ check: 'VALE HISTÓRICO AUSENTE CON MOVIMIENTOS', n: 1 }],
+      [{ check: 'VALE HISTÓRICO AUSENTE CON MOVIMIENTOS', venue: 'Mindform', order_id: 'legacy', detalle: 'venta histórica' }],
+    )
+
+    const result = await new MoneyIntegrityWatchdogJob().runNow(NOW)
+
+    expect(result).toMatchObject({ total: 0, mostrados: 0, porTipo: {}, historicalInventory: { total: 1, mostrados: 1 } })
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(error).not.toHaveBeenCalled()
+    expect(info.mock.calls.some(([message]) => String(message).includes('Todo cuadra'))).toBe(false)
+  })
+
+  it('keeps a historical review counted even when its bounded detail is empty', async () => {
+    arm([{ check: 'VALE HISTÓRICO AUSENTE CON MOVIMIENTOS', n: 2 }], [])
+    const result = await new MoneyIntegrityWatchdogJob().runNow(NOW)
+    expect(result).toMatchObject({ total: 0, historicalInventory: { total: 2, mostrados: 0 } })
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(info.mock.calls.some(([message]) => String(message).includes('Todo cuadra'))).toBe(false)
+  })
+
   it('🔴 el resumen dice el total REAL aunque el detalle esté acotado', async () => {
     arm(
       [{ check: 'PROPINA NO CUADRA', n: 672 }],

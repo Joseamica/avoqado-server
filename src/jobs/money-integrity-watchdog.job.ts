@@ -7,6 +7,7 @@ import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { scheduleJob } from '../observability/jobContext'
 import { baseQueDebeCubrirseSql, COBRO_QUE_CUBRE, criterioPagadaPeroAbiertaSql } from '../services/shared/pagadaPeroAbierta'
 import { ordenDescuentaInventarioSql } from '../services/inventory/inventoryPosting.service'
+import { historicalStockMovementSql, LEGACY_INVENTORY_NOTICE } from './money-integrity-watchdog-legacy'
 
 /**
  * Vigilante de integridad del dinero — PRUEBA TEMPORAL DE 4 DÍAS.
@@ -64,9 +65,9 @@ export const HUERFANAS_DESDE = '2026-08-31'
  * `orderId` que alguien necesita para investigar dinero cobrado de más, no. Con el tope por
  * invariante cada una tiene sus líneas garantizadas.
  *
- * 30 y no 200: siete invariantes × 30 = 210 líneas en el peor caso, o sea el mismo volumen de
- * log que antes; y nadie triando UNA invariante lee 200 ids. El total real siempre va en el
- * resumen, así que acotar el detalle no esconde el tamaño del problema.
+ * 30 y no 200: siete invariantes × 30 = 210 errores como máximo. El grupo histórico de
+ * inventario tiene otros 30 detalles, agrupados en UN aviso (hasta 240 filas consultadas).
+ * El total real siempre va en el resumen, así que el tope no esconde el tamaño del problema.
  */
 export const DETAIL_LIMIT_POR_CHECK = 30
 
@@ -80,13 +81,11 @@ export const VENTANA_DEL_BARRIDO_MIN = 15
 
 /**
  * Corte de la invariante «orden sin vale de inventario»: sólo órdenes creadas desde este día.
- * Es cuando el outbox durable de `InventoryPosting` llegó a `main` —y con él a producción—
- * (630e917f el 13-ago-2026, a6e34471 el 14). ANTES de esa fecha ninguna orden pudo tener vale,
- * así que sin este piso el vigilante gritaría por la historia entera de cada venue con recetas y
- * entrenaría a todos a ignorarlo, que es justo lo que este job existe para evitar. No es una
- * precaución teórica: medido el 3-sep-2026 contra la base local, el check pasa de **0** alertas
- * a **774** al quitarlo. Va inline en el SQL como literal, igual que HUERFANAS_DESDE: es una
- * fecha civil fija, no un instante.
+ * La migración del outbox se aplicó en producción el 14-ago-2026 a las 17:45 UTC. Eso NO
+ * certifica cuándo cada camino empezó a crear vales. Se conserva este piso conservador y
+ * se distingue la evidencia de deducciones históricas mediante historicalStockMovementSql.
+ * Quitar el piso haría vigilar toda la historia anterior al outbox: medido el 3-sep-2026
+ * contra la base local, el check pasaba de 0 a 774 alertas. Literal UTC de Prisma, sin bind.
  */
 export const VALES_DESDE = '2026-08-14'
 
@@ -146,6 +145,8 @@ export interface WatchdogRun {
   /** Cuántas se escribieron al log (acotado por DETAIL_LIMIT_POR_CHECK, por invariante). */
   mostrados: number
   porTipo: Record<string, number>
+  /** Faltan vales históricos, pero hay deducciones: revisión pendiente, agrupada como WARN. */
+  historicalInventory?: { total: number; mostrados: number }
 }
 
 /**
@@ -183,6 +184,7 @@ export function buildWatchdogSql(): { counts: string; details: string } {
         JOIN "Venue" v ON v.id = o."venueId"
         JOIN (
           SELECT "orderId", COUNT(*) AS n,
+                 COUNT(*) FILTER (WHERE status = 'REFUNDED' AND "originSystem" = 'POS_SOFTRESTAURANT') AS refunded_imports,
                  COALESCE(SUM("tipAmount") FILTER (WHERE status = 'COMPLETED' AND type <> 'REFUND'), 0) AS propina
           FROM "Payment" GROUP BY "orderId"
         ) pp ON pp."orderId" = o.id
@@ -190,6 +192,9 @@ export function buildWatchdogSql(): { counts: string; details: string } {
           AND ROUND(o."tipAmount"::numeric, 2) <> ROUND(pp.propina::numeric, 2)
           -- Los reembolsos descuadran por diseño: el cobro original permanece registrado.
           AND NOT EXISTS (SELECT 1 FROM "Payment" r WHERE r."orderId" = o.id AND r.type = 'REFUND')
+          -- SoftRestaurant también representa la cancelación con status REFUNDED en el cobro
+          -- original. Sólo excluimos la orden cancelada e importada con TODOS sus cobros así.
+          AND NOT (o.status = 'CANCELLED' AND o."originSystem" = 'POS_SOFTRESTAURANT' AND pp.refunded_imports = pp.n)
           AND ${REAL_VENUES}
 
         UNION ALL
@@ -304,7 +309,10 @@ export function buildWatchdogSql(): { counts: string; details: string } {
         --    silenciaría esa orden en las SIETE invariantes, sobrepago incluido). Lo que sí se
         --    hace es arreglar el camino; lo que NO se hace nunca es ensanchar el criterio para
         --    que deje de sonar.
-        SELECT 'ORDEN SIN VALE DE INVENTARIO', v.name, o.id,
+        -- Las deducciones antiguas verificadas se agrupan como WARN. Tener movimientos NO
+        -- prueba cobertura completa del stock: el faltante sigue visible y no se repara aquí.
+        SELECT CASE WHEN ${historicalStockMovementSql('o')}
+                    THEN '${LEGACY_INVENTORY_NOTICE}' ELSE 'ORDEN SIN VALE DE INVENTARIO' END, v.name, o.id,
                'orden=' || o."orderNumber" || ' via=' || o.source || ' cerrada=' ||
                COALESCE(o."completedAt"::date::text, 'sin fecha') || ' total=' || o.total
         FROM "Order" o JOIN "Venue" v ON v.id = o."venueId"
@@ -378,13 +386,20 @@ export class MoneyIntegrityWatchdogJob {
     try {
       const { counts, rows } = await this.check()
 
-      const violations = rows.filter(v => !TRIAGED_AWAITING_THIRD_PARTY[v.orderId])
-      const silenced = rows.filter(v => TRIAGED_AWAITING_THIRD_PARTY[v.orderId])
+      const historicalRows = rows.filter(v => v.check === LEGACY_INVENTORY_NOTICE)
+      const errorRows = rows.filter(v => v.check !== LEGACY_INVENTORY_NOTICE)
+      const violations = errorRows.filter(v => !TRIAGED_AWAITING_THIRD_PARTY[v.orderId])
+      const silenced = errorRows.filter(v => TRIAGED_AWAITING_THIRD_PARTY[v.orderId])
+      const historicalTotal = counts.find(c => c.check === LEGACY_INVENTORY_NOTICE)?.n ?? 0
+      const historicalResult =
+        historicalTotal > 0 || historicalRows.length > 0
+          ? { historicalInventory: { total: historicalTotal, mostrados: historicalRows.length } }
+          : {}
 
       // Totales REALES (sin tope) menos lo triado. Si un caso triado quedara fuera del tope del
       // detalle, el total lo contaría de más en 1 — el sesgo aceptable va en esa dirección.
       const porTipo: Record<string, number> = {}
-      for (const c of counts) porTipo[c.check] = c.n
+      for (const c of counts) if (c.check !== LEGACY_INVENTORY_NOTICE) porTipo[c.check] = c.n
       for (const s of silenced) porTipo[s.check] = (porTipo[s.check] ?? 0) - 1
       for (const k of Object.keys(porTipo)) if (porTipo[k] <= 0) delete porTipo[k]
       const total = Object.values(porTipo).reduce((a, b) => a + b, 0)
@@ -396,9 +411,17 @@ export class MoneyIntegrityWatchdogJob {
         })
       }
 
+      if (historicalResult.historicalInventory) {
+        logger.warn('💰 [Money watchdog] Vales históricos ausentes con movimientos — cobertura de inventario pendiente de revisión', {
+          ...historicalResult.historicalInventory,
+          topePorCheck: DETAIL_LIMIT_POR_CHECK,
+          casos: historicalRows.map(v => ({ venueName: v.venue, orderId: v.orderId, detalle: v.detalle })),
+        })
+      }
+
       if (total === 0) {
-        logger.info('💰 [Money watchdog] Todo cuadra ✅')
-        return quiet
+        if (!historicalResult.historicalInventory) logger.info('💰 [Money watchdog] Todo cuadra ✅')
+        return { ...quiet, ...historicalResult }
       }
 
       // BetterStack debe alertar sobre '🚨 [Money watchdog]'.
@@ -412,7 +435,7 @@ export class MoneyIntegrityWatchdogJob {
         mostrados: violations.length,
         topePorCheck: DETAIL_LIMIT_POR_CHECK,
       })
-      return { expired: false, total, mostrados: violations.length, porTipo }
+      return { expired: false, total, mostrados: violations.length, porTipo, ...historicalResult }
     } catch (err) {
       logger.error('❌ [Money watchdog] La revisión falló', { error: err instanceof Error ? err.message : err })
       return quiet
