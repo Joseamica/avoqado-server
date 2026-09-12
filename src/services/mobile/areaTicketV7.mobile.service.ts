@@ -52,6 +52,7 @@ import { assertVenueSalesEnabled } from '../venueSalesGuard'
 // pagado y cuánto falta" para los cuatro caminos de cobro.
 import { computeOrderBalance } from '../shared/orderBalance'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
+import { assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared/orderCancelGuard'
 import { buildOrderItemsData, CreateOrderItemInput } from './order.mobile.service'
 
 const DEFAULT_CLAIM_TTL_SECONDS = 300
@@ -1742,50 +1743,64 @@ export async function cancelAreaTicketCheckout(venueId: string, sessionId: strin
   }
   const staffId = await validateStaffVenue(input.staffId ?? undefined, venueId)
 
-  const cancelled = await prisma.$transaction(async tx => {
-    await tx.$queryRaw`SELECT id FROM "AreaTicketCheckoutSession" WHERE id = ${sessionId} AND "venueId" = ${venueId} FOR UPDATE`
-    const fresh = await tx.areaTicketCheckoutSession.findFirst({
-      where: { id: sessionId, venueId },
-      include: { order: { include: { payments: { where: { status: 'COMPLETED' }, select: { id: true } } } } },
-    })
-    if (!fresh) throw new NotFoundError('La sesión de caja no existe.')
-    if (fresh.status === AreaTicketCheckoutStatus.CANCELLED) {
-      return tx.areaTicketCheckoutSession.findUniqueOrThrow({ where: { id: fresh.id }, include: checkoutInclude })
-    }
-    if (fresh.order?.payments.length) {
-      throw domainError(409, 'CHECKOUT_HAS_PAYMENT', 'La venta ya tiene abonos; no puede cancelarse directamente.')
-    }
-    if (!checkoutStatusIn(fresh.status, [AreaTicketCheckoutStatus.OPEN, AreaTicketCheckoutStatus.MATERIALIZED])) {
-      throw domainError(409, 'CHECKOUT_CANNOT_CANCEL', `La sesión está en estado ${fresh.status}.`)
-    }
-    if (fresh.orderId) {
-      await tx.order.updateMany({
-        where: { id: fresh.orderId, venueId, paymentStatus: 'PENDING' },
-        data: { status: 'CANCELLED', version: { increment: 1 } },
+  let ordenCancelada: string | null = null
+  const cancelled = await prisma.$transaction(
+    async tx => {
+      await tx.$queryRaw`SELECT id FROM "AreaTicketCheckoutSession" WHERE id = ${sessionId} AND "venueId" = ${venueId} FOR UPDATE`
+      const fresh = await tx.areaTicketCheckoutSession.findFirst({
+        where: { id: sessionId, venueId },
+        include: { order: { include: { payments: { where: { status: 'COMPLETED' }, select: { id: true } } } } },
       })
-    }
-    await tx.areaTicket.updateMany({
-      where: { venueId, checkoutSessionId: fresh.id, status: AreaTicketStatus.CLAIMED },
-      data: {
-        status: AreaTicketStatus.ISSUED,
-        checkoutSessionId: null,
-        orderId: null,
-        claimedAt: null,
-        claimExpiresAt: null,
-        version: { increment: 1 },
-      },
-    })
-    await tx.areaTicketCheckoutSession.update({
-      where: { id: fresh.id },
-      data: {
-        status: AreaTicketCheckoutStatus.CANCELLED,
-        cancelIdempotencyKey: idempotencyKey,
-        activePaymentAttemptId: null,
-        version: { increment: 1 },
-      },
-    })
-    return tx.areaTicketCheckoutSession.findUniqueOrThrow({ where: { id: fresh.id }, include: checkoutInclude })
-  })
+      if (!fresh) throw new NotFoundError('La sesión de caja no existe.')
+      if (fresh.status === AreaTicketCheckoutStatus.CANCELLED) {
+        return tx.areaTicketCheckoutSession.findUniqueOrThrow({ where: { id: fresh.id }, include: checkoutInclude })
+      }
+      if (fresh.order?.payments.length) {
+        throw domainError(409, 'CHECKOUT_HAS_PAYMENT', 'La venta ya tiene abonos; no puede cancelarse directamente.')
+      }
+      if (!checkoutStatusIn(fresh.status, [AreaTicketCheckoutStatus.OPEN, AreaTicketCheckoutStatus.MATERIALIZED])) {
+        throw domainError(409, 'CHECKOUT_CANNOT_CANCEL', `La sesión está en estado ${fresh.status}.`)
+      }
+      // 🔴 Diseño §C.6: cancelar la venta CANCELA su orden, así que va bajo el MISMO candado de `Order` que la admisión de
+      // un cobro de terminal y el registro del dinero, respetando la jerarquía de vales: sesión (arriba) → tickets
+      // ORDER BY id → Order. Ya con el candado: relectura, sin dinero y sin cobro de terminal vivo (409 del contrato).
+      await tx.$queryRaw`SELECT id FROM "AreaTicket" WHERE "venueId" = ${venueId} AND "checkoutSessionId" = ${fresh.id} ORDER BY id FOR UPDATE`
+      if (fresh.orderId) {
+        await assertOrderCancellableUnderLock(tx, { venueId, orderId: fresh.orderId })
+        const cancelacion = await tx.order.updateMany({
+          where: { id: fresh.orderId, venueId, paymentStatus: 'PENDING' },
+          data: { status: 'CANCELLED', version: { increment: 1 } },
+        })
+        if (cancelacion.count > 0) ordenCancelada = fresh.orderId
+      }
+      await tx.areaTicket.updateMany({
+        where: { venueId, checkoutSessionId: fresh.id, status: AreaTicketStatus.CLAIMED },
+        data: {
+          status: AreaTicketStatus.ISSUED,
+          checkoutSessionId: null,
+          orderId: null,
+          claimedAt: null,
+          claimExpiresAt: null,
+          version: { increment: 1 },
+        },
+      })
+      await tx.areaTicketCheckoutSession.update({
+        where: { id: fresh.id },
+        data: {
+          status: AreaTicketCheckoutStatus.CANCELLED,
+          cancelIdempotencyKey: idempotencyKey,
+          activePaymentAttemptId: null,
+          version: { increment: 1 },
+        },
+      })
+      return tx.areaTicketCheckoutSession.findUniqueOrThrow({ where: { id: fresh.id }, include: checkoutInclude })
+    },
+    { timeout: 15_000, maxWait: 5_000 },
+  )
+
+  // Las pantallas abiertas se enteran de que la orden de la venta ya no es una cuenta viva (auditoría Fable 11-sep,
+  // P3-7). Sólo si ESTA llamada la canceló: un reintento idempotente sobre una venta ya cancelada no vuelve a avisar.
+  if (ordenCancelada) await avisarOrdenCancelada(venueId, ordenCancelada, 'CANCELLED')
 
   void logAction({
     staffId,

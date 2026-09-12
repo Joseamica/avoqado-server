@@ -3,6 +3,7 @@ import * as orderMobileService from '../../services/mobile/order.mobile.service'
 import * as serviceChargeMobileService from '../../services/mobile/service-charge.mobile.service'
 import * as tableTpvService from '../../services/tpv/table.tpv.service'
 import logger from '../../config/logger'
+import AppError from '../../errors/AppError'
 
 /**
  * Ciclo de orden de mesa bajo `/tpv` (Plan B Task 4, 2026-07-27).
@@ -45,6 +46,22 @@ import logger from '../../config/logger'
  */
 
 /**
+ * Cuerpo de error de este archivo: `{ success: false, message }` de siempre, más `code` y `details` SÓLO cuando el error
+ * los trae (aditivo, diseño §C.6). Así la TPV recibe `ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE` con el `requestId` que
+ * bloquea en vez de un 409 mudo; un error sin código sigue saliendo byte a byte igual que antes.
+ */
+function cuerpoDeError(error: any): { success: false; message: string; code?: string; details?: unknown } {
+  // Sólo los errores de dominio (`AppError`): el `code` de un error de Prisma (P2025, P2028…) no es contrato.
+  const deDominio = error instanceof AppError
+  return {
+    success: false,
+    message: error?.message || 'Internal server error',
+    ...(deDominio && error.code ? { code: error.code } : {}),
+    ...(deDominio && error.details !== undefined ? { details: error.details } : {}),
+  }
+}
+
+/**
  * POST /tpv/venues/:venueId/orders/:orderId/split
  * "Separar cuenta": mueve los artículos seleccionados a una cuenta NUEVA en la
  * misma mesa. La cuenta origen conserva el resto. Body: { itemIds: string[] }
@@ -64,7 +81,7 @@ export async function splitOrder(req: Request, res: Response): Promise<void> {
     res.status(200).json({ success: true, data: result })
   } catch (error: any) {
     logger.error(`[ORDER-TABLE TPV] split: ${error.message}`)
-    res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Internal server error' })
+    res.status(error.statusCode || 500).json(cuerpoDeError(error))
   }
 }
 
@@ -83,7 +100,7 @@ export async function splitOrderBySeat(req: Request, res: Response): Promise<voi
     res.status(200).json({ success: true, data: result })
   } catch (error: any) {
     logger.error(`[ORDER-TABLE TPV] split-by-seat: ${error.message}`)
-    res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Internal server error' })
+    res.status(error.statusCode || 500).json(cuerpoDeError(error))
   }
 }
 
@@ -131,7 +148,7 @@ export async function mergeOrders(req: Request, res: Response): Promise<void> {
     res.status(200).json({ success: true, data: { ...result, tableFreed } })
   } catch (error: any) {
     logger.error(`[ORDER-TABLE TPV] merge: ${error.message}`)
-    res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Internal server error' })
+    res.status(error.statusCode || 500).json(cuerpoDeError(error))
   }
 }
 
@@ -177,7 +194,7 @@ export async function cancelOrder(req: Request, res: Response): Promise<void> {
     res.status(200).json({ success: true, data: { tableFreed } })
   } catch (error: any) {
     logger.error(`[ORDER-TABLE TPV] cancel: ${error.message}`)
-    res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Internal server error' })
+    res.status(error.statusCode || 500).json(cuerpoDeError(error))
   }
 }
 
@@ -207,7 +224,7 @@ export async function applyServiceCharge(req: Request, res: Response): Promise<v
     res.status(200).json({ success: true, data: result })
   } catch (error: any) {
     logger.error(`[ORDER-TABLE TPV] service-charges: ${error.message}`)
-    res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Internal server error' })
+    res.status(error.statusCode || 500).json(cuerpoDeError(error))
   }
 }
 
@@ -239,7 +256,7 @@ export async function removeServiceCharge(req: Request, res: Response): Promise<
     res.status(200).json({ success: true, data: result })
   } catch (error: any) {
     logger.error(`[ORDER-TABLE TPV] remove service-charge: ${error.message}`)
-    res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Internal server error' })
+    res.status(error.statusCode || 500).json(cuerpoDeError(error))
   }
 }
 
@@ -269,6 +286,6 @@ export async function listServiceCharges(req: Request, res: Response): Promise<v
     res.status(200).json({ success: true, data })
   } catch (error: any) {
     logger.error(`[ORDER-TABLE TPV] service-charges (list): ${error.message}`)
-    res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Internal server error' })
+    res.status(error.statusCode || 500).json(cuerpoDeError(error))
   }
 }

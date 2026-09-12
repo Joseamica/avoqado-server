@@ -8,7 +8,14 @@ import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { resolveTerminalRefundTarget } from '@/services/tpv/terminalRefundTarget'
-import { terminalPaymentService } from '@/services/terminal-payment.service'
+import {
+  SOLO_BLOQUEA_EN_ESTRICTO,
+  UNRESOLVED_FINANCIAL_OUTCOME,
+  desenlaceCanonico,
+  proyectarEstado,
+  terminalPaymentService,
+} from '@/services/terminal-payment.service'
+import { invalidarVenuesEstrictos } from '@/services/terminal-payment-strictness'
 import { assertDeviceActionSupported, DEVICE_CAPABILITY_SELECT, toDeviceManagementDto } from '@/services/device-capabilities.service'
 
 /**
@@ -17,13 +24,6 @@ import { assertDeviceActionSupported, DEVICE_CAPABILITY_SELECT, toDeviceManageme
  * para que el MCP y la pantalla nunca se contradigan.
  */
 const ONLINE_WINDOW_MS = 5 * 60 * 1000
-
-const TPR_ACTIVE: TerminalPaymentRequestStatus[] = [
-  TerminalPaymentRequestStatus.PENDING,
-  TerminalPaymentRequestStatus.SENT,
-  TerminalPaymentRequestStatus.CANCEL_REQUESTED,
-  TerminalPaymentRequestStatus.UNKNOWN,
-]
 
 export interface TerminalInput {
   name: string
@@ -207,7 +207,7 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'terminal_payment_requests',
-    'See POS→terminal charge requests for your venues: which terminals are currently BUSY (an active charge in flight) and recent charges from the last 24h with their outcome (completed/failed/cancelled/timed_out/unknown). Use it to tell whether a terminal is stuck (status UNKNOWN holds the terminal; the server frees it on its own once the terminal is back and 2 minutes pass with no card payment, and `release_terminal_payment` frees it earlier) or to check what happened to one charge. Each row also carries the customer the POS attached to that charge (customerId, null when the sale was anonymous). Amounts are in pesos.',
+    'See POS→terminal charge requests for your venues: which terminals are currently BUSY (an active charge in flight) and recent charges from the last 24h with their outcome (completed/failed/cancelled/timed_out/unknown). Use it to tell whether a terminal is stuck (an UNKNOWN result protects the sale until its outcome is confirmed; a reconnect or elapsed time does not prove no charge) or to check what happened to one charge. Read `outcome` to answer "was the card charged?": CHARGED (a Payment exists), NOT_CHARGED (the terminal or the server proved no charge — see `outcomeEvidence` and `evidenceClass`) or UNRESOLVED (nobody proved anything: the charge still reserves the terminal, which is what `busy` means). `status` is the same value the POS sees, so a failed/cancelled charge with no evidence is reported as UNKNOWN on purpose. Each row also carries the customer the POS attached to that charge (customerId, null when the sale was anonymous). A charge the server refused before it ever reached the terminal (terminal offline, busy or from another location; sale cancelled, already paid or missing) is listed as failed with rejectedAtAdmission:true and its reason in failureCode: nothing reached the terminal, so no card was charged. Amounts are in pesos.',
     {
       venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues'),
       requestId: z.string().optional().describe('Look up one specific charge request by its requestId'),
@@ -218,31 +218,49 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
       const rows = await prisma.terminalPaymentRequest.findMany({
         where: {
           ...where,
-          ...(requestId ? { requestId } : { OR: [{ status: { in: TPR_ACTIVE } }, { createdAt: { gte: since } }] }),
+          // 🔴 El primer brazo es el PREDICADO DEL SERVICIO, no una lista de estados escrita aquí: una fila vieja que
+          // sigue ocupando la terminal tiene que aparecer aunque tenga más de 24 h — es justo la que hay que ver.
+          ...(requestId ? { requestId } : { OR: [UNRESOLVED_FINANCIAL_OUTCOME, { createdAt: { gte: since } }] }),
         },
         orderBy: { createdAt: 'desc' },
         take: 100,
       })
-      const requests = rows.map(r => ({
-        requestId: r.requestId,
-        terminalId: r.terminalId,
-        status: r.status,
-        busy: TPR_ACTIVE.includes(r.status),
-        amount: r.amountCents / 100, // PESOS
-        tip: r.tipCents / 100,
-        orderId: r.orderId,
-        paymentId: r.paymentId,
-        // El cliente que el POS adjuntó al cobro (null en una venta anónima). Sin esto,
-        // "¿a qué cliente iba este cobro?" no es contestable desde el MCP.
-        customerId: r.customerId,
-        senderDevice: r.senderDevice,
-        lateResult: r.lateResult,
-        createdAt: r.createdAt.toISOString(),
-      }))
+      // La MISMA proyección que lee el POS (§8 C.1): el operador y el cajero no pueden ver dos verdades distintas.
+      const requests = rows.map(r => {
+        const estado = proyectarEstado(r)
+        return {
+          requestId: estado.requestId,
+          terminalId: estado.terminalId,
+          // Traducido igual que para el POS: un FAILED/CANCELLED sin desenlace acreditado se ve UNKNOWN.
+          status: estado.status,
+          // El desenlace canónico: «se cobró / no se cobró / no se sabe», con QUIÉN lo acredita.
+          outcome: estado.outcome,
+          outcomeEvidence: estado.outcomeEvidence,
+          evidenceClass: estado.evidenceClass,
+          ...(estado.reconciliationRequired ? { reconciliationRequired: true } : {}),
+          busy: estado.outcome === 'UNRESOLVED',
+          amount: estado.amount, // PESOS
+          tip: estado.tip,
+          orderId: estado.orderId,
+          paymentId: estado.paymentId,
+          // El cliente que el POS adjuntó al cobro (null en una venta anónima). Sin esto,
+          // "¿a qué cliente iba este cobro?" no es contestable desde el MCP.
+          customerId: r.customerId,
+          senderDevice: estado.senderDevice,
+          lateResult: estado.lateResult,
+          cancelDisposition: estado.cancelDisposition,
+          // Una LÁPIDA de admisión (FAILED con `REJECTED_…`): el servidor rechazó el cobro ANTES de que llegara a la
+          // terminal. No es un «rechazo del banco»: ninguna tarjeta se tocó. Sin esto el operador lo leería como declinada.
+          failureCode: estado.failureCode,
+          rejectedAtAdmission: estado.outcomeEvidence === 'REJECTED_AT_ADMISSION',
+          createdAt: r.createdAt.toISOString(),
+        }
+      })
       return text({
         count: requests.length,
-        busyTerminals: [...new Set(rows.filter(r => TPR_ACTIVE.includes(r.status)).map(r => r.terminalId))],
-        unknownCount: rows.filter(r => r.status === TerminalPaymentRequestStatus.UNKNOWN).length,
+        busyTerminals: [...new Set(requests.filter(r => r.busy).map(r => r.terminalId))],
+        // Cuenta lo que el operador VE como UNKNOWN (el status ya traducido), no el valor crudo de la columna.
+        unknownCount: requests.filter(r => r.status === TerminalPaymentRequestStatus.UNKNOWN).length,
         requests,
       })
     },
@@ -250,7 +268,7 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'release_terminal_payment',
-    'Free a payment terminal that is stuck BUSY because a POS→terminal charge never got an answer (status UNKNOWN in terminal_payment_requests). The server already frees it on its own once the terminal reports again and 20 minutes pass with no card payment (the time its offline queue needs to upload); use this when the business cannot wait AND someone confirmed on the terminal that the charge did not go through. It is money-safe on the server side: if a card payment for that charge exists, the request is closed as COMPLETED instead and NOT released. By DEFAULT it only PREVIEWS (amount, age, order); call again with confirm:true to release. Leaves an audit trail with your identity and reason. Requires tpv:update (manager and above) and a write-capable connection.',
+    'Review a terminal charge that has an UNKNOWN result and reconcile it with its exact recorded payment when available. A reconnect, elapsed time, or missing payment does not establish that the card was not charged. Without confirmed completion the terminal remains protected. By DEFAULT only PREVIEWS amount, age and order; confirm:true requests reconciliation. Requires tpv:update and a write-capable connection.',
     {
       venueId: z.string().describe('Venue that owns the terminal (must be in your scope)'),
       requestId: z.string().min(1).describe('The stuck charge (status UNKNOWN) from terminal_payment_requests'),
@@ -278,14 +296,25 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
           senderDevice: true,
           createdAt: true,
           terminalReturnedAt: true,
+          // 🔴 Los cuatro que `desenlaceCanonico` necesita. Sin ellos COMPILA igual (son opcionales en su tipo) y
+          // clasifica MAL: una lápida se leería como «sin desenlace». Hay prueba de la FORMA de esta consulta.
+          failureCode: true,
+          cancelDisposition: true,
+          paymentId: true,
+          resultJson: true,
         },
       })
       if (!row) return text({ ok: false, error: 'No encontré ese cobro en tus locales.' })
       if (row.status !== TerminalPaymentRequestStatus.UNKNOWN) {
+        // Se informa TAMBIÉN el desenlace canónico: `terminal_payment_requests` muestra el status ya traducido, así
+        // que sin esto una fila que ahí se ve «UNKNOWN» rebotaría aquí con «su estado es FAILED» y nadie entendería.
+        const desenlace = desenlaceCanonico(row)
         return text({
           ok: false,
           status: row.status,
-          error: `Ese cobro no está atorado: su estado es ${row.status}. Sólo se libera un cobro en UNKNOWN.`,
+          outcome: desenlace.outcome,
+          outcomeEvidence: desenlace.outcomeEvidence,
+          error: `Ese cobro no está atorado: su estado es ${row.status} (${desenlace.outcome}). Sólo se libera un cobro en UNKNOWN.`,
         })
       }
 
@@ -302,11 +331,8 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
           ageMinutes,
           terminalReturnedAt: row.terminalReturnedAt?.toISOString() ?? null,
           message:
-            `Vas a liberar la terminal ${row.terminalId}, reservada por un cobro de $${(row.amountCents / 100).toFixed(2)} sin respuesta desde hace ${ageMinutes} min` +
-            (row.terminalReturnedAt
-              ? ' (la terminal ya volvió a reportar; el servidor la liberará sola en breve).'
-              : ' (la terminal todavía no vuelve a reportar).') +
-            '\nSi existe un pago con tarjeta de ese cobro NO se libera: se cierra como cobrado. Confirma con el operador que la terminal no está a media venta; luego vuelve a llamar con confirm:true.',
+            `La terminal ${row.terminalId} tiene un cobro de $${(row.amountCents / 100).toFixed(2)} sin confirmar desde hace ${ageMinutes} min. ` +
+            'Se buscará el pago exacto de esta solicitud. Si su resultado sigue pendiente, la terminal conservará la protección. Confirma para consultar y conciliar; no vuelvas a pasar la tarjeta.',
         })
       }
 
@@ -346,7 +372,130 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         ok: false,
         released: false,
         status: r.status,
-        message: 'No se liberó: el cobro cambió de estado antes de que pudiéramos liberarlo. Vuelve a consultar terminal_payment_requests.',
+        message:
+          'No se liberó: todavía falta confirmar el resultado y que la terminal haya terminado. Consulta el cobro en la terminal o solicita su conciliación.',
+      })
+    },
+  )
+
+  server.tool(
+    'set_terminal_payment_strict_mode',
+    'Enciende o apaga, en UN local, el régimen estricto de desenlaces del cobro remoto (la tablet manda el cobro a la terminal). Apagado —el valor de fábrica— una terminal sólo queda reservada mientras el cobro está en vuelo o su resultado es desconocido. Encendido, además queda reservada cuando la terminal contestó algo que NO acredita si cobró o no. Se enciende SÓLO cuando todas las terminales de ese local ya tienen la versión que manda esa evidencia: encenderlo antes deja terminales reservadas sin forma de liberarlas. Las solicitudes anteriores al momento de encenderlo NUNCA se ven afectadas. Apagar revierte al instante. Por DEFECTO sólo muestra una vista previa; confirm:true aplica. Requiere tpv:update y una conexión con permiso de escritura.',
+    {
+      venueId: z.string().describe('Local a encender o apagar (debe estar en tu alcance)'),
+      enabled: z.boolean().describe('true = encender el régimen estricto desde ahora; false = apagarlo'),
+      reason: z.string().min(3).max(300).optional().describe('Por qué (p. ej. "las 3 terminales ya están en 2.9.3")'),
+      confirm: z.boolean().optional().describe('Debe ser true para aplicarlo; sin esto sólo obtienes una vista previa'),
+    },
+    async ({ venueId, enabled, reason, confirm }) => {
+      // 🔴 `venueFilter` se llama por su EFECTO (lanza `ScopeError` si el venue no es tuyo), NO por su valor:
+      // devuelve `{ venueId: { in: [...] } }`, que sirve para las tablas que tienen columna `venueId` — y `Venue`
+      // no la tiene, su llave es `id`. Pasárselo a `prisma.venue.findFirst` lanzaba un error de validación de
+      // Prisma SIEMPRE: la tool no habría funcionado ni una vez. Lo encontró el QA end-to-end del 11-sep, no las
+      // pruebas, porque esta tool no tenía ninguna. Mismo patrón que el resto del MCP (`venues.ts:64`).
+      guard.venueFilter(venueId)
+      // 🔴 SUPERADMIN, no `tpv:update` (P2 de la auditoría de Codex, 11-sep). `tpv:update` lo tiene MANAGER
+      // (`permissions.ts:1019`), y esto NO es una operación del venue: es la palanca con la que Avoqado migra
+      // terminal por terminal. La comparación con `release_terminal_payment` era mía y era mala — aquélla exige
+      // EVIDENCIA de un cobro concreto; apagar el interruptor no exige ninguna y retira protección de golpe.
+      if (!scope.isSuperAdmin) {
+        return text({
+          ok: false,
+          error: 'Sólo Avoqado puede cambiar el régimen de desenlaces del cobro remoto. Es parte de la migración de las terminales, no un ajuste del negocio.',
+        })
+      }
+      guard.requirePermission('tpv:update', venueId)
+      // 🔴 Cambia si una terminal puede cobrar: un token de sólo lectura no puede tocarlo.
+      requireWriteScopeAlways(scope, 'tpv:update', 'cambia el régimen de desenlaces del cobro remoto')
+
+      const venue = await prisma.venue.findFirst({
+        where: { id: venueId },
+        select: { id: true, name: true, terminalPaymentStrictSince: true, terminalPaymentStrictEnabled: true },
+      })
+      if (!venue) return text({ ok: false, error: 'No encontré ese local en tu alcance.' })
+
+      const estabaEncendido = venue.terminalPaymentStrictEnabled
+      if (estabaEncendido === enabled) {
+        return text({
+          ok: true,
+          changed: false,
+          enabled: estabaEncendido,
+          since: venue.terminalPaymentStrictSince?.toISOString() ?? null,
+          message: enabled
+            ? `${venue.name} ya está en régimen estricto desde ${venue.terminalPaymentStrictSince?.toISOString()}. No cambié nada.`
+            : `${venue.name} ya está en el régimen de fábrica. No cambié nada.`,
+        })
+      }
+
+      // 🔴 El corte se CONSERVA al apagar, así que reencender no desplaza la frontera ni deja descubierto el
+      // periodo que ya estaba protegido (P1-3 de Codex). Sólo la PRIMERA vez se fija en `ahora`.
+      // 🔴 `esPrimeraVez` importa para no MENTIR en la vista previa (P3-5 de la auditoría de Fable, 11-sep):
+      // cuando no hay corte previo, el de verdad es el instante del `confirm`, no el de la vista previa. Anunciar
+      // una fecha concreta que luego cambia es la misma familia de defecto que la vista previa que contaba mal.
+      const esPrimeraVez = venue.terminalPaymentStrictSince === null
+      const corte = venue.terminalPaymentStrictSince ?? new Date()
+
+      // 🔴 La vista previa dice la verdad, que no es la que yo había escrito (P2-6 de Codex). Mi versión contaba
+      // la diferencia entre regímenes SIN aplicar el corte, así que anunciaba cientos de reservas nuevas que el
+      // propio corte excluye. Los dos números que de verdad importan:
+      //  · `quedaranReservadas`  — las que SÍ van a bloquear: sin desenlace Y nacidas desde el corte.
+      //  · `sinCubrirPorElCorte` — las que NO va a cubrir por ser anteriores; encender no protege el pasado, y
+      //    ésas siguen necesitando conciliación (B). Callarlo daba una sensación falsa de «ya está protegido».
+      const [quedaranReservadas, sinCubrirPorElCorte] = enabled
+        ? await Promise.all([
+            prisma.terminalPaymentRequest.count({ where: { venueId, createdAt: { gte: corte }, ...SOLO_BLOQUEA_EN_ESTRICTO } }),
+            prisma.terminalPaymentRequest.count({ where: { venueId, createdAt: { lt: corte }, ...SOLO_BLOQUEA_EN_ESTRICTO } }),
+          ])
+        : [0, 0]
+      // Al APAGAR, el número honesto es cuántas protecciones se RETIRAN (mi versión forzaba 0 y no decía nada).
+      const protegidasQueSeRetiran =
+        !enabled && venue.terminalPaymentStrictSince
+          ? await prisma.terminalPaymentRequest.count({
+              where: { venueId, createdAt: { gte: venue.terminalPaymentStrictSince }, ...SOLO_BLOQUEA_EN_ESTRICTO },
+            })
+          : 0
+
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          venue: venue.name,
+          current: estabaEncendido ? 'estricto' : 'de fábrica',
+          next: enabled ? 'estricto' : 'de fábrica',
+          ...(esPrimeraVez ? { corte: 'se fija al confirmar' } : { corte: corte.toISOString() }),
+          message: enabled
+            ? `Vas a encender el régimen estricto en ${venue.name}, con corte ${esPrimeraVez ? 'en el momento en que confirmes' : `en ${corte.toISOString()} (el que ya tenía)`}. Desde ese momento, un cobro cuya terminal conteste algo que no acredite si cobró dejará esa terminal reservada hasta conciliarlo. Enciéndelo sólo si TODAS las terminales del local ya tienen la versión que manda esa evidencia. Confirma para aplicar.`
+            : `Vas a apagar el régimen estricto en ${venue.name} y volver al de fábrica (reserva sólo en vuelo o resultado desconocido). El corte ${venue.terminalPaymentStrictSince?.toISOString()} se conserva, así que reencender no moverá la frontera. Confirma para aplicar.`,
+          ...(enabled ? { quedaranReservadas, sinCubrirPorElCorte } : { protegidasQueSeRetiran }),
+        })
+      }
+
+      // El corte de una PRIMERA activación se fija AQUÍ, al confirmar — es lo que la vista previa anunció.
+      const since = enabled ? (esPrimeraVez ? new Date() : corte) : venue.terminalPaymentStrictSince
+      await prisma.venue.update({
+        where: { id: venueId },
+        data: { terminalPaymentStrictEnabled: enabled, terminalPaymentStrictSince: since },
+      })
+      // Que surta efecto YA, sin esperar el refresco: apagar es la marcha atrás, y una marcha atrás
+      // que tarda un minuto no sirve cuando hay terminales bloqueadas.
+      await invalidarVenuesEstrictos()
+
+      await auditMcpWrite(scope, {
+        action: enabled ? 'TERMINAL_PAYMENT_STRICT_MODE_ON' : 'TERMINAL_PAYMENT_STRICT_MODE_OFF',
+        entity: 'Venue',
+        entityId: venueId,
+        venueId,
+        data: { since: since?.toISOString() ?? null, previous: venue.terminalPaymentStrictSince?.toISOString() ?? null, reason: reason ?? null },
+      })
+
+      return text({
+        ok: true,
+        changed: true,
+        enabled,
+        since: since?.toISOString() ?? null,
+        message: enabled
+          ? `Régimen estricto ENCENDIDO en ${venue.name}, con corte en ${since?.toISOString()}. Los cobros anteriores a ese corte siguen rigiéndose por el de fábrica y necesitan conciliación aparte.`
+          : `Régimen estricto APAGADO en ${venue.name}. Vuelve a reservar sólo en vuelo o con resultado desconocido; el corte se conserva para cuando lo reenciendas.`,
       })
     },
   )

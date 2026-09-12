@@ -57,6 +57,10 @@ describe('mergeOrders frees the source table even when the source order came fro
   beforeEach(() => {
     jest.clearAllMocks()
     prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
+    // Diseño §C.6: la fusión toma el candado de LAS DOS órdenes (`$queryRaw … FOR UPDATE`, 2 filas) y consulta el
+    // cobro de terminal vivo del origen DENTRO de la tx.
+    prismaMock.$queryRaw.mockResolvedValue([{ id: SPLIT_CHILD_SOURCE_ID }, { id: TARGET_ID }])
+    prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue(null)
 
     // order.findFirst is called for: target lookup, source lookup, freshSource,
     // freshTarget (all keyed by `where.id`), and — in a correct fix — the

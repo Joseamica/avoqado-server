@@ -15,6 +15,8 @@ import {
   resolvePaymentShiftReconciliationEnabled,
   type CapturedPaymentShiftClaim,
 } from '../shared/paymentShiftClaim'
+import { findLiveTerminalCharge } from '../shared/orderCancelGuard'
+import { logAction } from '../dashboard/activity-log.service'
 
 // Cache to track recent payment commands to prevent double deduction
 interface RecentPayment {
@@ -548,16 +550,54 @@ export async function processPosOrderDeleteEvent(payload: RichPosPayload): Promi
     return null
   }
 
-  const updatedOrder = await prisma.order.update({
-    where: {
-      id: order.id,
+  // 🔴 Diseño §C.6: el POS externo YA borró esta orden — es verdad externa y no se puede rechazar. Pero se marca bajo el
+  // MISMO candado de `Order` que la admisión de un cobro de terminal y el registro del dinero, y DENTRO de él se mira
+  // si quedaba un cobro de terminal sin desenlace acreditado: si lo había, ese dinero puede aterrizar sobre una orden
+  // DELETED y alguien tiene que conciliarlo. No se oculta: 🚨 en el log y rastro en ActivityLog. (Con la orden ya
+  // DELETED, la admisión rechaza cualquier cobro NUEVO con `ORDER_CANCELLED_NO_NEW_CHARGE`.)
+  const { updatedOrder, cobroVivo } = await prisma.$transaction(
+    async tx => {
+      await lockExistingOrderForPayment(tx, { venueId, orderId: order.id })
+      const cobroVivo = await findLiveTerminalCharge(tx, { venueId, orderId: order.id })
+      const updatedOrder = await tx.order.update({
+        where: {
+          id: order.id,
+        },
+        data: {
+          status: OrderStatus.DELETED,
+          syncedAt: new Date(),
+          syncStatus: SyncStatus.SYNCED,
+        },
+      })
+      return { updatedOrder, cobroVivo }
     },
-    data: {
-      status: OrderStatus.DELETED,
-      syncedAt: new Date(),
-      syncStatus: SyncStatus.SYNCED,
-    },
-  })
+    { timeout: 15_000, maxWait: 5_000 },
+  )
+
+  if (cobroVivo) {
+    logger.error(
+      '🚨 [PosSyncOrder] El POS borró una orden con un cobro de terminal sin desenlace acreditado — queda DELETED y hay que conciliar el cobro',
+      {
+        venueId,
+        orderId: updatedOrder.id,
+        orderNumber: updatedOrder.orderNumber,
+        externalId: updatedOrder.externalId,
+        requestId: cobroVivo.requestId,
+      },
+    )
+    void logAction({
+      venueId,
+      action: 'ORDER_DELETED_WITH_LIVE_TERMINAL_CHARGE',
+      entity: 'Order',
+      entityId: updatedOrder.id,
+      data: {
+        requestId: cobroVivo.requestId,
+        externalId: updatedOrder.externalId,
+        orderNumber: updatedOrder.orderNumber,
+        source: 'POS_SYNC',
+      },
+    })
+  }
 
   // Emit socket event for real-time updates to POS devices
   try {

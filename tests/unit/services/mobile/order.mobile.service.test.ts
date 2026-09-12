@@ -1042,14 +1042,14 @@ describe('cancelOrder — guard against live terminal charges', () => {
     prismaMock.order.update.mockResolvedValue({ id: 'order-1', status: 'CANCELLED' })
   })
 
-  it('409s when the order has a LIVE terminal charge (PENDING/SENT/UNKNOWN) — the order must stay open', async () => {
+  it('409s when the order has a terminal charge without an accredited outcome (incl. CANCEL_REQUESTED) — the order must stay open', async () => {
     prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue({ requestId: 'REQ-LIVE' })
 
     await expect(cancelOrder('venue-1', 'order-1', 'cliente se fue', 'staff-1')).rejects.toMatchObject({ statusCode: 409 })
     expect(prismaMock.order.update).not.toHaveBeenCalled()
   })
 
-  it('cancels normally when no live charge exists (a CANCEL_REQUESTED row does not match the guard query) and audits ORDER_CANCELLED', async () => {
+  it('cancels normally when the guard query finds no unresolved terminal charge and audits ORDER_CANCELLED', async () => {
     prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue(null)
 
     await cancelOrder('venue-1', 'order-1', 'cliente se fue', 'staff-1')
@@ -1060,6 +1060,12 @@ describe('cancelOrder — guard against live terminal charges', () => {
     expect(logAction).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'ORDER_CANCELLED', entity: 'Order', entityId: 'order-1', staffId: 'staff-1', venueId: 'venue-1' }),
     )
+  })
+
+  it('cancelling WITHOUT a reason leaves the customer notes untouched (it used to overwrite them with the order status)', async () => {
+    prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue(null)
+    await cancelOrder('venue-1', 'order-1')
+    expect(prismaMock.order.update).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'CANCELLED' } }))
   })
 
   it('regression: still rejects cancelling a PAID order before ever consulting the terminal guard', async () => {

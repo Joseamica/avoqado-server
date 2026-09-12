@@ -28,6 +28,7 @@
 import prisma from '../../utils/prismaClient'
 import { Prisma } from '@prisma/client'
 import logger from '../../config/logger'
+import AppError from '../../errors/AppError'
 import { hasFeatureAccess } from '../../middlewares/checkFeatureAccess.middleware'
 import {
   DEFAULT_OWNERSHIP_OVERRIDES,
@@ -89,6 +90,12 @@ export interface SyncIntentAck {
   message?: string
   /** Resultado del efecto (ids de server, versión) cuando ACKED. */
   result?: Record<string, unknown>
+  /**
+   * Datos estructurados del rechazo, cuando el error de dominio los trae (aditivo; auditoría Fable 11-sep, P3-4).
+   * P. ej. `ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE` lleva `{ requestId }` del cobro de terminal que bloquea: sin él,
+   * la cola ponía el intent en cuarentena sin decir qué cobro había que esperar.
+   */
+  details?: unknown
 }
 
 /** Códigos que son TRANSITORIOS → el intent se reintenta, nunca se pierde. */
@@ -100,6 +107,7 @@ const RETRYABLE_ERROR_CODES = new Set([
   'P1008', // operation timeout
   'P1017', // connection closed
   'P2024', // connection pool timeout
+  'P2028', // interactive transaction timeout (p. ej. `cancelOrder` esperando el lock de la orden con el pool saturado)
   'P2034', // transaction conflict / deadlock
   'ECONNRESET',
   'ECONNREFUSED',
@@ -569,12 +577,14 @@ async function applyIntent(ctx: {
     }
   } catch (error: any) {
     const errorCode = error?.errorCode ?? error?.code ?? 'BUSINESS_RULE'
+    // Sólo los errores de dominio (`AppError`) llevan `details` de contrato; el de Prisma no es contrato.
+    const details = error instanceof AppError && error.details !== undefined ? { details: error.details } : {}
     // TRANSITORIO (conflicto de versión, etc.) → RETRY: el cliente lo deja
     // PENDING y reintenta; NUNCA se pierde. PERMANENTE (regla de negocio) →
     // REJECTED terminal → cuarentena visible.
     if (RETRYABLE_ERROR_CODES.has(errorCode)) {
       logger.info(`🔁 [POS SYNC] Intent ${intent.type} ${intent.id} transitorio (${errorCode}) — reintentar`)
-      return { id: intent.id, status: 'RETRY', errorCode, message: error?.message ?? 'Condición transitoria — reintentar' }
+      return { id: intent.id, status: 'RETRY', errorCode, message: error?.message ?? 'Condición transitoria — reintentar', ...details }
     }
     logger.warn(`⚠️ [POS SYNC] Intent ${intent.type} ${intent.id} rechazado: ${error?.message}`)
     return {
@@ -582,6 +592,7 @@ async function applyIntent(ctx: {
       status: 'REJECTED',
       errorCode,
       message: error?.message ?? 'Regla de negocio rechazó el intent',
+      ...details,
     }
   }
 }

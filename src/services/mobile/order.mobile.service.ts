@@ -30,6 +30,7 @@ import { applyPromotionToOrder, removeIntentPromotions } from '../promotions/pro
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
+import { assertNoLiveTerminalCharge, assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared/orderCancelGuard'
 import {
   claimShiftForCapturedPayment,
   lockExistingOrderForPayment,
@@ -1035,6 +1036,12 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
       // dejaría una cuenta viva de $0 en el piso; sólo anularla dejaría la
       // llave tomada y el reintento chocaría contra el corto igual.
       // Best-effort: nada de esto puede sustituir al error de negocio original.
+      //
+      // EXENTA de §C.6 (rutas que cancelan órdenes; auditoría Fable 11-sep, P2-7): esta anulación NO pasa por
+      // `orderCancelGuard` a propósito. La orden nace y muere en ESTA misma llamada — se creó arriba, falló su
+      // promoción y se anula antes de devolver su id y antes del aviso por socket—, así que ningún cobro de terminal
+      // pudo apuntarle todavía. Tomar el candado aquí sólo añadiría una espera en el camino del error. La
+      // clasificación vive en `tests/unit/architecture/orderCancelWriters.test.ts`.
       try {
         await prisma.order.update({
           where: { id: orderId },
@@ -1877,73 +1884,110 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
   }
 
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
-  const mergedTotals = await prisma.$transaction(async tx => {
-    // 🔴 Revalidar DENTRO de la tx (auditoría): entre el guard y la tx pudo
-    // entrar un pago, un descuento, o una fusión cruzada A→B / B→A. Sin esto,
-    // dos merges concurrentes pueden cancelar AMBAS cuentas con los items
-    // varados en una cuenta cancelada.
-    const freshSource = await tx.order.findFirst({
-      where: {
-        id: source.id,
-        venueId,
-        status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
-        paymentStatus: { notIn: ['PAID', 'PARTIAL'] },
-      },
-      select: {
-        id: true,
-        specialRequests: true,
-        orderDiscounts: { select: { id: true } },
-        serviceCharges: { select: { id: true, isAutomatic: true } },
-      },
-    })
-    const freshTarget = await tx.order.findFirst({
-      where: {
-        id: target.id,
-        venueId,
-        status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
-        paymentStatus: { notIn: ['PAID', 'PARTIAL'] },
-      },
-      select: { id: true, specialRequests: true },
-    })
-    if (!freshSource || !freshTarget) {
-      throw new BadRequestError('La cuenta cambió mientras se fusionaba — vuelve a intentar')
-    }
-    if (freshSource.orderDiscounts.length > 0 || freshSource.serviceCharges.some(sc => !sc.isAutomatic)) {
-      throw new BadRequestError('La cuenta origen recibió descuentos o cobros durante la fusión — vuelve a intentar')
-    }
-
-    await tx.orderItem.updateMany({
-      where: { orderId: source.id },
-      data: { orderId: target.id },
-    })
-    // Los cobros automáticos del origen se van con él: el destino re-evalúa
-    // los suyos por comensales en el recálculo.
-    await tx.orderServiceCharge.deleteMany({ where: { orderId: source.id } })
-
-    // Las notas de cocina del origen NO se pierden: se anexan al destino.
-    if (freshSource.specialRequests?.trim()) {
-      await tx.order.update({
-        where: { id: target.id },
-        data: {
-          specialRequests: [freshTarget.specialRequests, freshSource.specialRequests].filter(Boolean).join(' · '),
+  const mergedTotals = await prisma.$transaction(
+    async tx => {
+      // 🔴 Diseño §C.6: el candado de LAS DOS órdenes, ordenado por id y en UNA sentencia (mismo patrón que
+      // areaTicketV7 y commission-calculation), ANTES de releer y de tocar un solo renglón. Es lo que serializa esta
+      // fusión con la admisión de un cobro y con el registro del dinero (los dos toman `Order FOR UPDATE`), y lo que hace
+      // que dos fusiones cruzadas A→B / B→A se formen en fila en vez de interbloquearse (40P01 → P2034, un 500): la
+      // segunda despierta con su destino ya CANCELLED y la relectura de abajo la rechaza con 400. Sin candado, las
+      // relecturas de READ COMMITTED no bloqueaban nada y el orden era renglón → orden, el inverso del registro de un
+      // pago por producto (Order → PaymentAllocation → OrderItem).
+      const bloqueadas = await tx.$queryRaw<Array<{ id: string }>>(
+        Prisma.sql`SELECT id FROM "Order" WHERE "venueId" = ${venueId} AND id IN (${Prisma.join([source.id, target.id])}) ORDER BY id FOR UPDATE`,
+      )
+      if (!Array.isArray(bloqueadas) || bloqueadas.length !== 2) {
+        throw new BadRequestError('La cuenta cambió mientras se fusionaba — vuelve a intentar')
+      }
+      // 🔴 Revalidar DENTRO de la tx y BAJO el candado: entre el guard y la tx pudo entrar un pago, un descuento, o una
+      // fusión cruzada A→B / B→A. Sin esto, dos merges concurrentes pueden cancelar AMBAS cuentas con los items varados
+      // en una cuenta cancelada.
+      const freshSource = await tx.order.findFirst({
+        where: {
+          id: source.id,
+          venueId,
+          status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
+          paymentStatus: { notIn: ['PAID', 'PARTIAL'] },
+        },
+        select: {
+          id: true,
+          specialRequests: true,
+          orderDiscounts: { select: { id: true } },
+          serviceCharges: { select: { id: true, isAutomatic: true } },
         },
       })
-    }
+      const freshTarget = await tx.order.findFirst({
+        where: {
+          id: target.id,
+          venueId,
+          status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
+          paymentStatus: { notIn: ['PAID', 'PARTIAL'] },
+        },
+        select: { id: true, specialRequests: true },
+      })
+      if (!freshSource || !freshTarget) {
+        throw new BadRequestError('La cuenta cambió mientras se fusionaba — vuelve a intentar')
+      }
+      if (freshSource.orderDiscounts.length > 0 || freshSource.serviceCharges.some(sc => !sc.isAutomatic)) {
+        throw new BadRequestError('La cuenta origen recibió descuentos o cobros durante la fusión — vuelve a intentar')
+      }
+      // Fusionar CANCELA el origen: un cobro de terminal sin desenlace acreditado sobre él aterrizaría en una orden
+      // cancelada. Mismo 409 que `cancelOrder`, con `orderId` aditivo para decir cuál cuenta lo tiene. El DESTINO no se
+      // bloquea (decisión G3): sumarle renglones no crea sobrepago.
+      await assertNoLiveTerminalCharge(
+        tx,
+        { venueId, orderId: source.id },
+        {
+          mensaje: 'La cuenta origen tiene un cobro en curso en la terminal. Cancela o espera el resultado del cobro antes de fusionarla.',
+          detallesExtra: { orderId: source.id },
+        },
+      )
 
-    await tx.order.update({
-      where: { id: source.id },
-      data: {
-        status: 'CANCELLED',
-        specialRequests: `Fusionada en ${target.orderNumber}`,
-        subtotal: 0,
-        discountAmount: 0,
-        serviceChargeAmount: 0,
-        total: 0,
-      },
-    })
+      await tx.orderItem.updateMany({
+        where: { orderId: source.id },
+        data: { orderId: target.id },
+      })
+      // Los cobros automáticos del origen se van con él: el destino re-evalúa
+      // los suyos por comensales en el recálculo.
+      await tx.orderServiceCharge.deleteMany({ where: { orderId: source.id } })
 
-    return recalculateOrderTotals(target.id, 0, Number(target.paidAmount || 0), tx)
-  })
+      // Las notas de cocina del origen NO se pierden: se anexan al destino.
+      if (freshSource.specialRequests?.trim()) {
+        await tx.order.update({
+          where: { id: target.id },
+          data: {
+            specialRequests: [freshTarget.specialRequests, freshSource.specialRequests].filter(Boolean).join(' · '),
+          },
+        })
+      }
+
+      await tx.order.update({
+        where: { id: source.id },
+        data: {
+          status: 'CANCELLED',
+          specialRequests: `Fusionada en ${target.orderNumber}`,
+          subtotal: 0,
+          discountAmount: 0,
+          serviceChargeAmount: 0,
+          total: 0,
+          // Los escritores con CAS de versión (anular, descontar, rondas) se enteran de que el origen cambió.
+          version: { increment: 1 },
+        },
+      })
+
+      return recalculateOrderTotals(target.id, 0, Number(target.paidAmount || 0), tx)
+    },
+    { timeout: 15_000, maxWait: 5_000 },
+  )
+
+  // El origen quedó CANCELLED: sus referidos PENDING se anulan como en cualquier cancelación. Después del commit —
+  // `onOrderCancelled` abre su propia transacción con `Order FOR UPDATE`. Nunca lanza.
+  {
+    const { onOrderCancelled } = await import('@/services/referrals/referralRefund.service')
+    await onOrderCancelled({ orderId: source.id, venueId })
+  }
+  // Y las pantallas abiertas se enteran de que el origen ya no es una cuenta viva (auditoría Fable 11-sep, P3-7).
+  await avisarOrdenCancelada(venueId, source.id, 'CANCELLED')
 
   // La mesa del origen: re-apuntar a otra cuenta abierta, o liberarla.
   const boundTable = await prisma.table.findFirst({
@@ -3188,47 +3232,33 @@ export async function attachCustomerToOrder(venueId: string, orderId: string, cu
 export async function cancelOrder(venueId: string, orderId: string, reason?: string, performedBy?: string): Promise<void> {
   logger.info(`📱 [ORDER.MOBILE] Cancelling order ${orderId} | venue=${venueId} | reason=${reason || 'none'}`)
 
-  const order = await prisma.order.findUnique({
-    where: { id: orderId, venueId },
-    select: { id: true, paymentStatus: true, status: true },
-  })
+  // Codex 11-sep (409 al cancelar, P1): comprobar y cancelar bajo el MISMO lock de la orden que toman la admisión de un
+  // cobro (`terminal-payment.service`, `FOR UPDATE` de Order) y el registro del dinero (`payment.tpv.service`). Antes eran
+  // tres pasos sueltos (leer `paymentStatus`, consultar la reserva, UPDATE): una admisión o un pago podía colarse entre la
+  // lectura y el UPDATE y la orden terminaba CANCELLED con un cobro vivo o ya pagada. Todo se relee DENTRO del lock.
+  // La regla (candado → relectura → PAID/PARTIAL → cobro vivo) vive UNA vez en `shared/orderCancelGuard` y la usan
+  // todas las rutas que cancelan o anulan una orden (diseño §C.6). Aquí se conserva la semántica de siempre:
+  //  - 🔴 Ninguna orden CON DINERO ENCIMA se cancela por aquí — ni PAID ni PARTIAL. Es lo que hace honesto al permiso
+  //    acotado `orders:cancel-unpaid` que gatea esta ruta: "sin cobrar" tiene que ser una propiedad del código, no una
+  //    promesa del nombre. Con pagos hechos el camino es reembolsar y después cancelar, igual que en Square.
+  //  - Un cobro de terminal cuyo desenlace no está ACREDITADO puede mover dinero todavía (también un CANCEL_REQUESTED:
+  //    pedir la cancelación es una intención, no un resultado) ⇒ 409 `ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE` con el
+  //    `requestId` que bloquea, para que la app no lo confunda con otro 409 (contrato aditivo).
+  await prisma.$transaction(
+    async tx => {
+      await assertOrderCancellableUnderLock(tx, { venueId, orderId })
 
-  if (!order) {
-    throw new NotFoundError('Order not found')
-  }
-
-  // 🔴 Ninguna orden CON DINERO ENCIMA se cancela por aquí — ni PAID ni PARTIAL. Antes
-  // sólo se rechazaba PAID, así que una cuenta a medio pagar se podía cancelar y se
-  // llevaba el registro del dinero ya cobrado. Es además lo que hace honesto al permiso
-  // acotado `orders:cancel-unpaid` que gatea esta ruta: "sin cobrar" tiene que ser una
-  // propiedad del código, no una promesa del nombre. Con pagos hechos el camino es
-  // reembolsar y después cancelar, igual que en Square.
-  if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
-    throw new BadRequestError(
-      order.paymentStatus === 'PAID'
-        ? 'Cannot cancel a paid order'
-        : 'Esta cuenta ya tiene pagos registrados. Reembólsalos antes de cancelarla.',
-    )
-  }
-
-  // A live/unknown terminal charge means money can still move: cancelling the order
-  // now would let that charge land on a CANCELLED order (recorded & settled, but
-  // excluded from reports). The POS must cancel or resolve the charge first.
-  // CANCEL_REQUESTED does NOT block (see hasChargeBlockingOrderCancel).
-  const { terminalPaymentService } = await import('../terminal-payment.service')
-  if (await terminalPaymentService.hasChargeBlockingOrderCancel(venueId, orderId)) {
-    throw new ConflictError(
-      'Hay un cobro en curso en la terminal para esta orden. Cancela o espera el resultado del cobro antes de cancelar la orden.',
-    )
-  }
-
-  await prisma.order.update({
-    where: { id: orderId },
-    data: {
-      status: 'CANCELLED',
-      specialRequests: reason ? `Cancelled: ${reason}` : order.status,
+      await tx.order.update({
+        where: { id: orderId },
+        // Sin motivo NO se tocan las notas del cliente: antes se sobrescribían con el estado de la orden («PENDING»).
+        data: {
+          status: 'CANCELLED',
+          ...(reason ? { specialRequests: `Cancelled: ${reason}` } : {}),
+        },
+      })
     },
-  })
+    { timeout: 15_000, maxWait: 5_000 },
+  )
 
   logger.info(`✅ [ORDER.MOBILE] Order ${orderId} cancelled`)
 

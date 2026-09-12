@@ -51,6 +51,11 @@ jest.mock('@/utils/prismaClient', () => {
     staff: {
       findUnique: jest.fn(),
     },
+    // Diseño §C.6: voidItems toma el candado de la orden y consulta el cobro de terminal vivo DENTRO de la tx.
+    $queryRaw: jest.fn(async () => [{ id: 'order-bajo-candado' }]),
+    terminalPaymentRequest: { findFirst: jest.fn(async () => null) },
+    // Auditoría Fable 11-sep (P2-8): voidItems relee lo cobrado (Payment registrados) bajo el candado.
+    payment: { aggregate: jest.fn(async () => ({ _sum: { amount: null, tipAmount: null } })) },
   }
   mockPrismaObj.$transaction = jest.fn((callback: any) => callback(mockPrismaObj))
   return { __esModule: true, default: mockPrismaObj }

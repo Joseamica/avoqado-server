@@ -537,6 +537,50 @@ describe('sync.mobile.service processIntents', () => {
     expect(tableOwnership.staffCanManageAllTables).toHaveBeenCalledWith(STAFF, VENUE, undefined, undefined, ['tables:manage-all'])
   })
 
+  it('CANCEL_ORDER cuya transacción agota su tiempo (P2028) → RETRY: un lock ocupado es transitorio, no cuarentena', async () => {
+    // Revisión 11-sep: `cancelOrder` ahora corre en una transacción interactiva bajo el lock de la orden; si el pool está
+    // saturado al reproducir la cola, Prisma lanza P2028. Antes el mismo caso era P2024 y se reintentaba.
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, tableId: 't1', servedById: STAFF })
+    ;(orderMobileService.cancelOrder as jest.Mock).mockRejectedValueOnce(
+      Object.assign(new Error('Transaction API error: Unable to start a transaction in the given time.'), { code: 'P2028' }),
+    )
+    const acks = await processIntents(
+      baseParams([{ id: 'i-cancel-p2028', type: 'CANCEL_ORDER', payload: { orderId: 'order-12', reason: 'x' } }]),
+    )
+    expect(acks[0]).toMatchObject({ status: 'RETRY', errorCode: 'P2028' })
+  })
+
+  // Auditoría Fable 11-sep (P3-4): un CANCEL_ORDER o MERGE_ORDERS bloqueado por un cobro de terminal vivo va a
+  // cuarentena CON el `requestId` que lo bloquea (aditivo). Sin `details`, el POS no sabía qué cobro esperar.
+  it('CANCEL_ORDER bloqueado por un cobro vivo → REJECTED con errorCode y details (requestId)', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, tableId: 't1', servedById: STAFF })
+    const { ConflictError } = jest.requireActual('@/errors/AppError')
+    ;(orderMobileService.cancelOrder as jest.Mock).mockRejectedValueOnce(
+      new ConflictError('Hay un cobro en curso', 'ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE', { requestId: 'REQ-VIVO' }),
+    )
+    const acks = await processIntents(baseParams([{ id: 'i-cancel-vivo', type: 'CANCEL_ORDER', payload: { orderId: 'order-12' } }]))
+    expect(acks[0]).toEqual({
+      id: 'i-cancel-vivo',
+      status: 'REJECTED',
+      errorCode: 'ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE',
+      message: 'Hay un cobro en curso',
+      details: { requestId: 'REQ-VIVO' },
+    })
+  })
+
+  it('un rechazo SIN details sale como antes (sin la llave `details`)', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, tableId: 't1', servedById: STAFF })
+    const { BadRequestError } = jest.requireActual('@/errors/AppError')
+    ;(orderMobileService.cancelOrder as jest.Mock).mockRejectedValueOnce(new BadRequestError('Cannot cancel a paid order'))
+    const acks = await processIntents(baseParams([{ id: 'i-cancel-pagada', type: 'CANCEL_ORDER', payload: { orderId: 'order-12' } }]))
+    expect(acks[0]).toEqual({
+      id: 'i-cancel-pagada',
+      status: 'REJECTED',
+      errorCode: 'BUSINESS_RULE',
+      message: 'Cannot cancel a paid order',
+    })
+  })
+
   it('UPDATE_DETAILS y CANCEL_ORDER delegan en el mismo servicio que online', async () => {
     ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, tableId: 't1', servedById: STAFF })
     const acks = await processIntents(

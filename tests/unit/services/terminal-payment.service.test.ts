@@ -11,11 +11,18 @@
  * 2. REGRESSION TESTS — single charge, not-connected, independent terminals
  */
 
+import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import socketManager from '@/communication/sockets/managers/socketManager'
 import { terminalRegistry } from '@/communication/sockets/terminal-registry'
-import { terminalPaymentService } from '@/services/terminal-payment.service'
-import { OrderAlreadyPaidError, TerminalBusyError } from '@/errors/AppError'
+import { leerProcedencia, terminalPaymentService } from '@/services/terminal-payment.service'
+import {
+  BadRequestError,
+  OrderAlreadyPaidError,
+  TerminalBusyError,
+  TerminalPaymentAdmissionRetryError,
+  TerminalUnavailableError,
+} from '@/errors/AppError'
 
 jest.mock('@/communication/sockets/managers/socketManager', () => ({
   __esModule: true,
@@ -43,6 +50,22 @@ const tpr = () => prismaMock.terminalPaymentRequest
 
 const P2002 = Object.assign(new Error('Unique constraint failed'), { code: 'P2002' })
 const flush = () => new Promise(resolve => setImmediate(resolve))
+
+// Socket success references an already committed Payment. The real PostgreSQL
+// suite exercises creation, transaction rollback and conflicting associations.
+function committedRequests(payments: Record<string, string>) {
+  tpr().findFirst.mockImplementation(async ({ where }: any) =>
+    payments[where.requestId]
+      ? {
+          requestId: where.requestId,
+          venueId: 'venue-1',
+          status: 'COMPLETED',
+          paymentId: payments[where.requestId],
+          resultJson: null,
+        }
+      : null,
+  )
+}
 
 let emit: jest.Mock
 let directEmit: jest.Mock
@@ -96,21 +119,218 @@ beforeEach(() => {
   }))
 
   // Durable-row mock defaults: INSERT succeeds, nothing pre-existing, CAS updates 1 row.
-  tpr().create.mockResolvedValue({})
-  tpr().findUnique.mockResolvedValue(null)
-  tpr().findFirst.mockResolvedValue(null)
-  tpr().findMany.mockResolvedValue([])
-  tpr().updateMany.mockResolvedValue({ count: 1 })
+  tpr().create.mockReset().mockResolvedValue({})
+  tpr().findUnique.mockReset().mockResolvedValue(null)
+  tpr().findFirst.mockReset().mockResolvedValue(null)
+  tpr().findMany.mockReset().mockResolvedValue([])
+  tpr().updateMany.mockReset().mockResolvedValue({ count: 1 })
   prismaMock.payment.findFirst.mockResolvedValue(null)
+  prismaMock.order.findFirst.mockReset().mockResolvedValue({ paymentStatus: 'PENDING', orderNumber: 'TEST-ORDER' })
+  // La procedencia de la entrega se graba con $executeRaw ANTES de emitir: 1 fila = grabada. (El mock global
+  // resuelve 0, que el servicio lee —a propósito— como «no se pudo grabar» y entonces NO emite.)
+  prismaMock.$executeRaw.mockReset().mockResolvedValue(1)
+  prismaMock.activityLog.findFirst.mockReset().mockResolvedValue(null)
+})
+
+describe('leerProcedencia — qué dice la fila sobre sus entregas', () => {
+  // Auditoría 11-sep (P3-4): filtrar las entradas malformadas convertía «hubo algo que no sé leer» en «nunca se
+  // entregó» ([]), que es justo lo que autoriza a la sonda a liberar y al replay a reenviar. Lo que no se sabe leer
+  // es procedencia DESCONOCIDA (null), igual que una fila anterior a la columna.
+  const valida = { protocol: 'DURABLE', ackVersion: 1, cancelDispositionVersion: 1, probeVersion: 1, socketId: 's', at: '2026-09-11T10:00:00.000Z', replay: false }
+  it('sin columna, sin objeto o sin arreglo ⇒ desconocida', () => {
+    expect(leerProcedencia(null)).toBeNull()
+    expect(leerProcedencia('x')).toBeNull()
+    expect(leerProcedencia({})).toBeNull()
+    expect(leerProcedencia({ deliveries: 'x' })).toBeNull()
+  })
+  it('arreglo vacío ⇒ nunca entregada; entradas válidas ⇒ se devuelven tal cual', () => {
+    expect(leerProcedencia({ deliveries: [] })).toEqual([])
+    expect(leerProcedencia({ deliveries: [valida, { ...valida, protocol: 'LEGACY', ackVersion: 0 }] })).toHaveLength(2)
+  })
+  it('una sola entrada malformada o con protocolo desconocido vuelve DESCONOCIDA toda la procedencia', () => {
+    expect(leerProcedencia({ deliveries: [{ foo: 1 }] })).toBeNull()
+    expect(leerProcedencia({ deliveries: [valida, null] })).toBeNull()
+    expect(leerProcedencia({ deliveries: [{ ...valida, protocol: 'OTRO' }] })).toBeNull()
+  })
 })
 
 describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () => {
-  it('rejects a second concurrent charge (P2002 on the slot index) with a busy error naming the blocker', async () => {
-    tpr().create.mockRejectedValueOnce(P2002) // slot already held
+  it.each(['ACK_TIMEOUT', 'ACK_REJECTED'])('legacy FAILED %s is UNKNOWN on recovery GET', async failureCode => {
+    tpr().findFirst.mockResolvedValueOnce({
+      requestId: 'REQ-OLD',
+      venueId: 'venue-1',
+      terminalId: 't-default',
+      status: 'FAILED',
+      failureCode,
+      paymentId: null,
+      amountCents: 10000,
+      tipCents: 0,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    })
+    expect(await terminalPaymentService.getPaymentStatus('REQ-OLD', 'venue-1')).toMatchObject({ status: 'UNKNOWN' })
+  })
+
+  it('a cancelled socket result cannot contradict an already committed payment in the HTTP response', async () => {
+    const pending = terminalPaymentService.sendPaymentToTerminal(baseRequest({ requestId: 'REQ-RACE' }))
+    await flush()
+    tpr().findFirst.mockResolvedValue({ requestId: 'REQ-RACE', status: 'COMPLETED', paymentId: 'pay-committed', resultJson: null })
+    tpr().updateMany.mockResolvedValue({ count: 0 })
+    await terminalPaymentService.handlePaymentResultFromSocket(
+      { requestId: 'REQ-RACE', status: 'cancelled' },
+      { terminalId: 't-default', venueId: 'venue-1', socketId: 'sock-t-default' },
+    )
+    expect(await pending).toMatchObject({ status: 'success', paymentId: 'pay-committed' })
+  })
+
+  it('a result whose durable close failed stays uncertain in the HTTP response', async () => {
+    const pending = terminalPaymentService.sendPaymentToTerminal(baseRequest({ requestId: 'REQ-DB-FAIL' }))
+    await flush()
+    tpr().findFirst.mockResolvedValue({ requestId: 'REQ-DB-FAIL' })
+    tpr().updateMany.mockRejectedValue(new Error('database offline'))
+    await terminalPaymentService.handlePaymentResultFromSocket(
+      { requestId: 'REQ-DB-FAIL', status: 'cancelled' },
+      { terminalId: 't-default', venueId: 'venue-1', socketId: 'sock-t-default' },
+    )
+    expect(await pending).toMatchObject({ status: 'timeout' })
+  })
+
+  it('a cancellation without a request identity never reaches the native terminal', async () => {
+    expect(await terminalPaymentService.cancelPayment('t-default', undefined, undefined, 'venue-1')).toEqual({
+      cancelIntent: 'MISSING_REQUEST_ID',
+      cancelEmitted: false,
+      payment: null,
+    })
+    expect(emit).not.toHaveBeenCalled()
+  })
+
+  it.each(['ACK_TIMEOUT', 'ACK_REJECTED'])('legacy FAILED %s replays uncertainty instead of permitting a charge', async failureCode => {
+    tpr().create.mockRejectedValueOnce(P2002)
+    tpr().findFirst.mockResolvedValueOnce({
+      venueId: 'venue-1',
+      terminalId: 't-default',
+      tipCents: 0,
+      orderId: null,
+      requestId: 'REQ-LEGACY-ACK',
+      status: 'FAILED',
+      failureCode,
+      paymentId: null,
+      resultJson: { requestId: 'REQ-LEGACY-ACK', status: 'failed', errorMessage: 'No se inició ningún cargo' },
+      amountCents: 10000,
+      createdAt: new Date(),
+    })
+    expect(await terminalPaymentService.sendPaymentToTerminal(baseRequest({ requestId: 'REQ-LEGACY-ACK' }))).toMatchObject({
+      status: 'timeout',
+    })
+    expect(directEmit).not.toHaveBeenCalled()
+  })
+
+  it('cancel cannot emit or unblock a different terminal request when its scoped CAS matched nothing', async () => {
+    tpr().updateMany.mockResolvedValueOnce({ count: 0 })
+    expect(await terminalPaymentService.cancelPayment('t-foreign', 'REQ-OTHER', undefined, 'venue-1')).toEqual({
+      cancelIntent: 'NOT_FOUND',
+      cancelEmitted: false,
+      payment: null,
+    })
+    expect(emit).not.toHaveBeenCalled()
+  })
+
+  it('committed Payment beats an older cancelled resultJson during idempotent replay', async () => {
+    tpr().create.mockRejectedValueOnce(P2002)
+    tpr().findFirst.mockResolvedValueOnce({
+      venueId: 'venue-1',
+      terminalId: 't-default',
+      tipCents: 0,
+      orderId: null,
+      requestId: 'REQ-MONEY',
+      status: 'COMPLETED',
+      paymentId: 'pay-committed',
+      resultJson: { requestId: 'REQ-MONEY', status: 'cancelled' },
+      amountCents: 10000,
+      createdAt: new Date(),
+    })
+    expect(await terminalPaymentService.sendPaymentToTerminal(baseRequest({ requestId: 'REQ-MONEY' }))).toMatchObject({
+      status: 'success',
+      paymentId: 'pay-committed',
+    })
+    expect(directEmit).not.toHaveBeenCalled()
+  })
+
+  it('terminal timeout leaves the execution protected instead of releasing the slot', async () => {
+    const pending = terminalPaymentService.sendPaymentToTerminal(baseRequest({ requestId: 'REQ-UNKNOWN-RESULT' }))
+    await flush()
+    terminalPaymentService.handlePaymentResult({ requestId: 'REQ-UNKNOWN-RESULT', status: 'timeout' })
+    await pending
+    await flush()
+    expect(tpr().updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ requestId: 'REQ-UNKNOWN-RESULT' }),
+        data: expect.objectContaining({ status: 'UNKNOWN' }),
+      }),
+    )
+  })
+
+  it('cancel intent is durable before the terminal can synchronously acknowledge it', async () => {
+    let persisted = false
+    tpr().updateMany.mockImplementation(async ({ data }: any) => {
+      if (data.status === 'CANCEL_REQUESTED') persisted = true
+      return { count: 1 }
+    })
+    emit.mockImplementation(() => {
+      expect(persisted).toBe(true)
+    })
+    await terminalPaymentService.cancelPayment('T-CANCEL', 'REQ-CANCEL-ORDER', undefined, 'venue-1')
+  })
+
+  it('cancel admission refused by the terminal persists ACTIVE without a financial close', async () => {
+    tpr().findFirst.mockResolvedValueOnce({ id: 'row-active', requestId: 'REQ-ACTIVE', status: 'CANCEL_REQUESTED' })
+    const accepted = await (terminalPaymentService as any).handleCancelDispositionFromSocket(
+      { requestId: 'REQ-ACTIVE', disposition: 'ACTIVE' },
+      { socketId: 'socket-1', terminalId: 'T-ACTIVE', venueId: 'venue-1' },
+    )
+    expect(accepted).toBe(true)
+    expect(tpr().updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ requestId: 'REQ-ACTIVE', venueId: 'venue-1', terminalId: 't-active' }),
+        data: expect.objectContaining({ cancelDisposition: 'ACTIVE' }),
+      }),
+    )
+    expect((tpr().updateMany as jest.Mock).mock.calls.some(([arg]) => ['CANCELLED', 'FAILED'].includes(arg.data.status))).toBe(false)
+  })
+
+  it('another terminal cannot report cancellation disposition for someone else’s charge', async () => {
+    tpr().findFirst.mockResolvedValueOnce(null)
+    expect(
+      await (terminalPaymentService as any).handleCancelDispositionFromSocket(
+        { requestId: 'REQ-FOREIGN', disposition: 'ACCEPTED' },
+        { socketId: 'attacker', terminalId: 'attacker', venueId: 'venue-2' },
+      ),
+    ).toBe(false)
+    expect(tpr().updateMany).not.toHaveBeenCalled()
+  })
+
+  it('a confirmed pre-execution cancellation is durable and explicitly safe for new POS clients', async () => {
+    tpr().findFirst.mockResolvedValueOnce({ id: 'row-accepted', requestId: 'REQ-ACCEPTED', status: 'CANCEL_REQUESTED' })
+    expect(
+      await (terminalPaymentService as any).handleCancelDispositionFromSocket(
+        { requestId: 'REQ-ACCEPTED', disposition: 'ACCEPTED' },
+        { socketId: 'socket', terminalId: 't-accepted', venueId: 'venue-1' },
+      ),
+    ).toBe(true)
+    expect(tpr().updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'CANCELLED', cancelDisposition: 'ACCEPTED' }),
+      }),
+    )
+  })
+
+  it('rejects a second concurrent charge during physical admission with a busy error naming the blocker (and leaves its tombstone)', async () => {
+    // El bloqueador se ve BAJO el candado de la terminal: la decisión es el rechazo, no un choque del índice.
     tpr()
-      .findFirst.mockResolvedValueOnce(null) // my requestId not in table → slot conflict
+      .findFirst.mockResolvedValueOnce(null) // my requestId not in table
       .mockResolvedValueOnce({
         requestId: 'REQ-A',
+        venueId: 'venue-1',
         amountCents: 35000,
         senderDevice: 'iPad Caja 1',
         createdAt: new Date(Date.now() - 12_000),
@@ -130,12 +350,27 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
     expect(busy.details.blockingRequest.requestId).toBe('REQ-A')
     expect(busy.details.blockingRequest.amountCents).toBe(35000)
     expect(busy.details.blockingRequest.senderDevice).toBe('iPad Caja 1')
+    expect(busy.details.requestId).toBe('REQ-B') // correlación: el POS sabe que ESTE cobro no se creó
+    // La ÚNICA escritura es la LÁPIDA (FAILED, fuera de la ranura): nunca una fila que ocupe la terminal.
+    expect(tpr().create).toHaveBeenCalledTimes(1)
+    expect(tpr().create.mock.calls[0][0].data).toMatchObject({
+      requestId: 'REQ-B',
+      terminalId: 't-lock',
+      status: 'FAILED',
+      failureCode: 'REJECTED_TERMINAL_BUSY',
+      deliveryProvenance: { deliveries: [] },
+      resultJson: { httpStatus: 409, code: 'TERMINAL_BUSY', message: busy.message, details: busy.details },
+    })
     expect(directEmit).not.toHaveBeenCalled() // never reached the terminal
   })
 
   it('idempotent replay: same requestId on an already-COMPLETED row returns the stored result, no re-emit', async () => {
     tpr().create.mockRejectedValueOnce(P2002)
     tpr().findFirst.mockResolvedValueOnce({
+      venueId: 'venue-1',
+      terminalId: 't-replay',
+      tipCents: 0,
+      orderId: null,
       requestId: 'REQ-A',
       status: 'COMPLETED',
       paymentId: 'pay-1',
@@ -150,9 +385,13 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
     expect(directEmit).not.toHaveBeenCalled()
   })
 
-  it('same requestId still in flight → busy (no double emit)', async () => {
+  it('same requestId still in flight replays uncertainty without a negative response or second emit', async () => {
     tpr().create.mockRejectedValueOnce(P2002)
     tpr().findFirst.mockResolvedValueOnce({
+      venueId: 'venue-1',
+      terminalId: 't-dup',
+      tipCents: 0,
+      orderId: null,
       requestId: 'REQ-A',
       status: 'PENDING',
       amountCents: 10000,
@@ -162,11 +401,11 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
 
     await expect(
       terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-DUP', requestId: 'REQ-A' })),
-    ).rejects.toBeInstanceOf(TerminalBusyError)
+    ).resolves.toMatchObject({ status: 'timeout' })
     expect(directEmit).not.toHaveBeenCalled()
   })
 
-  it('happy path: INSERT succeeds → emits → result closes the row via in-flight CAS', async () => {
+  it('happy path: INSERT succeeds → emits → recorded payment produces the canonical result', async () => {
     const p1 = terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-OK', requestId: 'REQ-1' }))
     // give the async create a tick, then assert the emit happened
     await flush()
@@ -177,6 +416,7 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
       expect.any(Function),
     )
 
+    committedRequests({ 'REQ-1': 'pay-9' })
     terminalPaymentService.handlePaymentResult({ requestId: 'REQ-1', status: 'success', paymentId: 'pay-9' })
     const result = await p1
     expect(result.status).toBe('success')
@@ -184,7 +424,7 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
     await flush() // let the fire-and-forget closeRow run
     expect(tpr().updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({ requestId: 'REQ-1', status: { in: expect.arrayContaining(['PENDING']) } }),
+        where: expect.objectContaining({ requestId: 'REQ-1', status: 'COMPLETED', paymentId: 'pay-9' }),
       }),
     )
   })
@@ -242,20 +482,20 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
     await p1
   })
 
-  it('si la TPV nueva no confirma persistencia, falla sin dejar el cobro activo', async () => {
+  it('un ACK perdido conserva resultado desconocido aunque la terminal ya haya iniciado el cobro', async () => {
     directEmit.mockImplementationOnce((_event: string, _payload: unknown, callback: (error: Error) => void) =>
       callback(new Error('operation has timed out')),
     )
 
     await expect(
       terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-NO-ACK', requestId: 'REQ-NO-ACK' })),
-    ).rejects.toThrow('no confirmó que guardó el cobro')
+    ).resolves.toMatchObject({ requestId: 'REQ-NO-ACK', status: 'timeout' })
     await flush()
 
     expect(tpr().updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { requestId: 'REQ-NO-ACK', venueId: 'venue-1', status: 'PENDING' },
-        data: expect.objectContaining({ status: 'FAILED', failureCode: 'ACK_TIMEOUT' }),
+        data: expect.objectContaining({ status: 'UNKNOWN', failureCode: 'ACK_TIMEOUT' }),
       }),
     )
   })
@@ -299,7 +539,7 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
   it('acepta el resultado sólo desde el socket registrado para esa solicitud', async () => {
     const p1 = terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-AUTH', requestId: 'REQ-AUTH' }))
     await flush()
-    tpr().findFirst.mockResolvedValueOnce({ requestId: 'REQ-AUTH' })
+    committedRequests({ 'REQ-AUTH': 'pay-auth' })
 
     const handled = await (terminalPaymentService as any).handlePaymentResultFromSocket(
       { requestId: 'REQ-AUTH', status: 'success', paymentId: 'pay-auth' },
@@ -325,6 +565,8 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
         senderDevice: 'iPad',
         processedByStaffId: 'staff-pos',
         expiresAt: new Date(Date.now() + 60_000),
+        // Una SENT fue ACK-eada por un socket durable: su procedencia lo dice, y es lo que autoriza el replay.
+        deliveryProvenance: { deliveries: [{ protocol: 'DURABLE', ackVersion: 1, socketId: 'sock-old', at: new Date().toISOString(), replay: false }] },
       },
     ])
 
@@ -346,9 +588,24 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
     )
   })
 
-  it('rollback flag OFF: a busy-slot INSERT is swallowed and the charge proceeds (old behavior)', async () => {
+  it('al reconectar NO reentrega una fila de procedencia desconocida ni una entregada a un socket legacy', async () => {
+    // Codex 11-sep (3): la fila pudo llegar a una app SIN bandeja; reentregarla a una bandeja que no la conoce la ejecuta otra vez.
+    tpr().findMany.mockResolvedValueOnce([
+      { requestId: 'REQ-SIN-PROCEDENCIA', id: 'row-1', terminalId: 't-reconnect', venueId: 'venue-1', status: 'SENT', amountCents: 10000, tipCents: 0, orderId: null, expiresAt: new Date(Date.now() + 60_000) },
+      { requestId: 'REQ-LEGACY', id: 'row-2', terminalId: 't-reconnect', venueId: 'venue-1', status: 'PENDING', amountCents: 10000, tipCents: 0, orderId: null, expiresAt: new Date(Date.now() + 60_000),
+        deliveryProvenance: { deliveries: [{ protocol: 'LEGACY', ackVersion: 0, socketId: 'sock-old', at: new Date().toISOString(), replay: false }] } },
+    ])
+
+    await (terminalPaymentService as any).replayPendingForTerminal('T-RECONNECT', 'venue-1', 'sock-t-reconnect')
+
+    expect(directEmit).not.toHaveBeenCalled()
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
+  })
+
+  it('a legacy rollback flag cannot bypass the durable authorization barrier', async () => {
     process.env.TERMINAL_PAYMENT_LOCK_ENABLED = 'false'
-    tpr().create.mockRejectedValueOnce(P2002)
+    // La barrera es el candado de la terminal + el bloqueador visto BAJO él (ya no un choque del índice, que el
+    // flujo viejo simulaba con un P2002 en el `create` del cobro). Con el flag puesto, igual rechaza y no emite.
     tpr().findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce({
       requestId: 'REQ-A',
       amountCents: 10000,
@@ -356,13 +613,19 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
       createdAt: new Date(),
       status: 'PENDING',
     })
-
-    const p1 = terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-FLAG', requestId: 'REQ-B' }))
+    const result = terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-FLAG', requestId: 'REQ-B' }))
+    const settled = result.then(
+      value => value,
+      error => error,
+    )
     await flush()
-    expect(directEmit).toHaveBeenCalledTimes(1) // proceeded despite the busy slot
-
-    terminalPaymentService.handlePaymentResult({ requestId: 'REQ-B', status: 'success' })
-    await p1
+    const emitted = directEmit.mock.calls.length
+    if (emitted) terminalPaymentService.handlePaymentResult({ requestId: 'REQ-B', status: 'timeout' })
+    expect(await settled).toBeInstanceOf(TerminalBusyError)
+    expect(emitted).toBe(0)
+    // Ninguna fila que ocupe la terminal: la única escritura es la lápida del rechazo.
+    for (const [{ data }] of tpr().create.mock.calls)
+      expect(data).toMatchObject({ status: 'FAILED', failureCode: 'REJECTED_TERMINAL_BUSY' })
   })
 
   it('isTerminalBusy / getBusyTerminalIds read the durable rows', async () => {
@@ -371,8 +634,8 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
     tpr().findFirst.mockResolvedValueOnce(null)
     expect(await terminalPaymentService.isTerminalBusy('AVQD-ABC', 'venue-1')).toBe(false)
 
-    tpr().findMany.mockResolvedValueOnce([{ terminalId: 'a' }, { terminalId: 'b' }])
-    const set = await terminalPaymentService.getBusyTerminalIds('venue-1')
+    tpr().groupBy.mockResolvedValueOnce([{ terminalId: 'a' }, { terminalId: 'b' }])
+    const set = await terminalPaymentService.getBusyTerminalIds('venue-1', ['a', 'b'])
     expect(set).toEqual(new Set(['a', 'b']))
   })
 
@@ -382,7 +645,7 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
 
     await terminalPaymentService.cancelPayment('T-CANCEL', 'REQ-C', undefined, 'venue-1')
     const result = await p1
-    expect(result.status).toBe('cancelled')
+    expect(result.status).toBe('timeout')
     expect(tpr().updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ status: 'CANCEL_REQUESTED' }) }),
     )
@@ -410,14 +673,16 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
     await flush()
     mockedGetTerminal.mockReturnValue(null) // terminal dropped off after dispatch
 
-    const emitted = await terminalPaymentService.cancelPayment('T-OFF', 'REQ-OFF', 'user cancel', 'venue-1')
+    const resultado = await terminalPaymentService.cancelPayment('T-OFF', 'REQ-OFF', 'user cancel', 'venue-1')
 
-    expect(emitted).toBe(false) // could not notify the terminal…
+    // …y ahora lo DICE por separado (§8 C.2): la intención quedó guardada aunque no se pudiera emitir. Antes los dos
+    // casos salían como el mismo `false` y el POS no podía distinguirlos.
+    expect(resultado).toMatchObject({ cancelIntent: 'RECORDED', cancelEmitted: false }) // could not notify the terminal…
     expect(tpr().updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ status: 'CANCEL_REQUESTED' }) }),
     ) // …but the row IS cancelled
     const result = await p1
-    expect(result.status).toBe('cancelled') // and the POS long-poll unblocks
+    expect(result.status).toBe('timeout') // and the POS long-poll unblocks
   })
 
   it('getPaymentStatus returns a pesos projection and enforces tenant isolation', async () => {
@@ -450,6 +715,35 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
 describe('TerminalPaymentService — watchdog reconcile (Slice 1)', () => {
   const now = new Date('2026-07-11T12:00:00.000Z')
 
+  it('P1 la recuperación no cierra la petición con un cobro hecho en OTRA terminal', async () => {
+    // El Payment lleva la etiqueta del requestId, es del mismo venue y está COMPLETED, pero se
+    // cobró en OTRO aparato. El camino del socket ya exige que la terminal física coincida; la
+    // recuperación se lo saltaba, así que el barrido siguiente cerraba la petición con un cobro
+    // ajeno — y liberaba el slot de una terminal que quizá seguía ejecutando el suyo.
+    tpr().findMany.mockResolvedValueOnce([
+      {
+        id: 'row-otra',
+        requestId: 'REQ-OTRA-TERMINAL',
+        venueId: 'venue-1',
+        terminalId: 'abc',
+        orderId: 'o-otra',
+        status: 'PENDING',
+        createdAt: new Date(now.getTime() - 400_000),
+      },
+    ])
+    prismaMock.payment.findFirst.mockResolvedValueOnce({
+      id: 'pay-de-otra-terminal',
+      source: 'TPV',
+      terminal: { serialNumber: 'XYZ-999' },
+    })
+
+    const summary = await terminalPaymentService.reconcileStaleRequests(now)
+    expect(summary.completed).toBe(0)
+    expect(tpr().updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ paymentId: 'pay-de-otra-terminal' }) }),
+    )
+  })
+
   it('a stale row whose order now has a Payment → COMPLETED (late)', async () => {
     tpr().findMany.mockResolvedValueOnce([
       {
@@ -462,13 +756,100 @@ describe('TerminalPaymentService — watchdog reconcile (Slice 1)', () => {
         createdAt: new Date(now.getTime() - 400_000),
       },
     ])
-    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-1' })
+    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-1', source: 'TPV', terminal: { serialNumber: 'abc' }, amount: new Prisma.Decimal(100), tipAmount: new Prisma.Decimal(0) })
 
     const summary = await terminalPaymentService.reconcileStaleRequests(now)
     expect(summary.completed).toBe(1)
     expect(tpr().updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ status: 'COMPLETED', paymentId: 'pay-1', lateResult: true }) }),
     )
+  })
+
+  it('🔴 P1 la recuperación cierra un cobro por un importe DISTINTO del pedido sin marcarlo ni avisar', async () => {
+    // El MISMO descuadre de dinero se descubre por DOS rutas y sólo una avisa: el cierre por
+    // socket/REST (`closeRowFromPaymentTx`) marca CONTRACT_MISMATCH y dispara el 🚨; el barrido
+    // que recupera un cobro tardío cierra la fila como si nada. Pedido $100.00, cobrado $150.00:
+    // la orden queda «pagada» y los $50 de diferencia no aparecen en ningún lado.
+    // No se puede rechazar el dinero — ya salió de la tarjeta. Lo mínimo es que quede MARCADO
+    // en la fila y que un humano se entere, igual que en la otra ruta.
+    const logger = require('@/config/logger').default
+    const errSpy = jest.spyOn(logger, 'error')
+    tpr().findMany.mockResolvedValueOnce([
+      {
+        id: 'row-descuadre',
+        requestId: 'REQ-DESCUADRE',
+        venueId: 'venue-1',
+        terminalId: 'abc',
+        orderId: 'o-descuadre',
+        status: 'PENDING',
+        amountCents: 10_000,
+        tipCents: 0,
+        createdAt: new Date(now.getTime() - 400_000),
+      },
+    ])
+    prismaMock.payment.findFirst.mockResolvedValueOnce({
+      id: 'pay-descuadre',
+      source: 'TPV',
+      terminal: { serialNumber: 'abc' },
+      amount: new Prisma.Decimal(150),
+      tipAmount: new Prisma.Decimal(0),
+    })
+
+    const summary = await terminalPaymentService.reconcileStaleRequests(now)
+    // El dinero se movió: la fila SE CIERRA igual. Lo que cambia es que queda marcada.
+    expect(summary.completed).toBe(1)
+    expect(tpr().updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'COMPLETED',
+          paymentId: 'pay-descuadre',
+          failureCode: 'CONTRACT_MISMATCH',
+          resultJson: expect.objectContaining({
+            reconciliationRequired: true,
+            requested: { amountCents: 10_000, tipCents: 0, totalCents: 10_000 },
+            reported: { amountCents: 15_000, tipCents: 0, totalCents: 15_000 },
+          }),
+        }),
+      }),
+    )
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining('🚨 [Terminal-payment contract mismatch]'),
+      expect.objectContaining({ requestId: 'REQ-DESCUADRE', paymentId: 'pay-descuadre' }),
+    )
+    errSpy.mockRestore()
+  })
+
+  it('un importe IGUAL al pedido se cierra limpio, sin marca ni alarma (el camino normal no cambia)', async () => {
+    const logger = require('@/config/logger').default
+    const errSpy = jest.spyOn(logger, 'error')
+    tpr().findMany.mockResolvedValueOnce([
+      {
+        id: 'row-cuadra',
+        requestId: 'REQ-CUADRA',
+        venueId: 'venue-1',
+        terminalId: 'abc',
+        orderId: 'o-cuadra',
+        status: 'PENDING',
+        amountCents: 10_000,
+        tipCents: 1_500,
+        createdAt: new Date(now.getTime() - 400_000),
+      },
+    ])
+    prismaMock.payment.findFirst.mockResolvedValueOnce({
+      id: 'pay-cuadra',
+      source: 'TPV',
+      terminal: { serialNumber: 'abc' },
+      amount: new Prisma.Decimal(100),
+      tipAmount: new Prisma.Decimal(15),
+    })
+
+    const summary = await terminalPaymentService.reconcileStaleRequests(now)
+    expect(summary.completed).toBe(1)
+    expect(tpr().updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ failureCode: 'CONTRACT_MISMATCH' }) }),
+    )
+    expect(errSpy).not.toHaveBeenCalledWith(expect.stringContaining('contract mismatch'), expect.anything())
+    errSpy.mockRestore()
   })
 
   it('a stale row with no reconcilable Payment → UNKNOWN + holds slot + alerts', async () => {
@@ -494,9 +875,29 @@ describe('TerminalPaymentService — watchdog reconcile (Slice 1)', () => {
     errSpy.mockRestore()
   })
 
-  it('only reconciles a Payment that does NOT predate the request row (createdAt >= row.createdAt)', async () => {
-    // A payment for THIS request cannot exist before the request row was created; the query
-    // must carry that temporal filter so an unrelated PRIOR cash/split payment is excluded.
+  it('cancel silence after the grace is UNKNOWN, never proof of no charge', async () => {
+    tpr().findMany.mockResolvedValueOnce([
+      {
+        id: 'row-cancel-silent',
+        requestId: 'REQ-CANCEL-SILENT',
+        venueId: 'venue-1',
+        terminalId: 'abc',
+        orderId: null,
+        status: 'CANCEL_REQUESTED',
+        createdAt: new Date(now.getTime() - 400_000),
+      },
+    ])
+    const summary = await terminalPaymentService.reconcileStaleRequests(now)
+    expect(summary.cancelled).toBe(0)
+    expect(summary.unknown).toBe(1)
+    expect(tpr().updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'UNKNOWN' }),
+      }),
+    )
+  })
+
+  it('requires the exact request identity rather than a similar payment on the same order', async () => {
     const rowCreatedAt = new Date(now.getTime() - 200_000)
     tpr().findMany.mockResolvedValueOnce([
       { id: 'row-1', requestId: 'REQ-A', venueId: 'venue-1', terminalId: 'abc', orderId: 'o1', status: 'PENDING', createdAt: rowCreatedAt },
@@ -505,7 +906,13 @@ describe('TerminalPaymentService — watchdog reconcile (Slice 1)', () => {
 
     const summary = await terminalPaymentService.reconcileStaleRequests(now)
     expect(prismaMock.payment.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ orderId: 'o1', venueId: 'venue-1', createdAt: { gte: rowCreatedAt } }) }),
+      expect.objectContaining({
+        where: expect.objectContaining({
+          orderId: 'o1',
+          venueId: 'venue-1',
+          processorData: { path: ['terminalPaymentRequestId'], equals: 'REQ-A' },
+        }),
+      }),
     )
     expect(summary.completed).toBe(0)
     expect(summary.unknown).toBe(1) // no qualifying payment → HELD, never falsely completed
@@ -526,7 +933,7 @@ describe('TerminalPaymentService — watchdog reconcile (Slice 1)', () => {
         createdAt: rowCreatedAt,
       },
     ])
-    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-other' }) // a payment exists on the order…
+    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-other', source: 'TPV', terminal: { serialNumber: 'abc' }, amount: new Prisma.Decimal(100), tipAmount: new Prisma.Decimal(0) }) // a payment exists on the order…
     tpr().findFirst.mockResolvedValueOnce({ id: 'row-owner' }) // …but it belongs to a DIFFERENT request
 
     const summary = await terminalPaymentService.reconcileStaleRequests(now)
@@ -547,30 +954,104 @@ describe('TerminalPaymentService — regression (existing behavior intact)', () 
     await flush()
     expect(directEmit).toHaveBeenCalledTimes(2)
 
-    terminalPaymentService.handlePaymentResult({ requestId: 'REQ-A', status: 'success' })
-    terminalPaymentService.handlePaymentResult({ requestId: 'REQ-B', status: 'success' })
+    committedRequests({ 'REQ-A': 'pay-a', 'REQ-B': 'pay-b' })
+    terminalPaymentService.handlePaymentResult({ requestId: 'REQ-A', status: 'success', paymentId: 'pay-a' })
+    terminalPaymentService.handlePaymentResult({ requestId: 'REQ-B', status: 'success', paymentId: 'pay-b' })
     const [rA, rB] = await Promise.all([pA, pB])
     expect(rA.status).toBe('success')
     expect(rB.status).toBe('success')
   })
 
-  it('still throws when the terminal is not connected, and never writes a row', async () => {
+  it('still throws when the terminal is not connected: with the POS requestId it writes ONLY its tombstone, never an admitted row', async () => {
     mockedGetTerminal.mockReturnValueOnce(null)
-    await expect(terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-GONE', requestId: 'REQ-X' }))).rejects.toThrow(
-      'no está conectada',
-    )
+    await expect(
+      terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-GONE', requestId: 'REQ-X' })),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining('no está conectada'),
+      statusCode: 404,
+      code: 'TERMINAL_NOT_CONNECTED',
+      details: { requestId: 'REQ-X' },
+    })
+    expect(tpr().create).toHaveBeenCalledTimes(1)
+    expect(tpr().create.mock.calls[0][0].data).toMatchObject({
+      requestId: 'REQ-X',
+      status: 'FAILED',
+      failureCode: 'REJECTED_TERMINAL_NOT_CONNECTED',
+    })
+    expect(directEmit).not.toHaveBeenCalled()
+  })
+
+  it('still throws when the terminal is not connected, and without a POS requestId never writes a row', async () => {
+    mockedGetTerminal.mockReturnValueOnce(null)
+    await expect(terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-GONE' }))).rejects.toThrow('no está conectada')
     expect(tpr().create).not.toHaveBeenCalled()
   })
 })
 
 describe('TerminalPaymentService — closeRowFromPaymentTx (money moved beats a prior close)', () => {
-  const txWith = (status: string) =>
+  // Un cobro de terminal SIEMPRE trae su procedencia: la fila conoce su terminal y el Payment la
+  // suya (resuelta del serial del token). Un fixture sin ninguna de las dos describe un estado que
+  // no existe — y desde la auditoría del 10-sep el cierre sin identidad acreditada se NIEGA.
+  const txWith = (status: string, payment: Record<string, unknown> = {}) =>
     ({
+      $queryRaw: jest.fn().mockResolvedValue([]),
+      payment: {
+        findFirst: jest.fn().mockResolvedValue({
+          processorData: {},
+          amount: new Prisma.Decimal(100),
+          tipAmount: new Prisma.Decimal(0),
+          source: 'TPV',
+          terminal: { serialNumber: 'AVQD-T-1' },
+          ...payment,
+        }),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
       terminalPaymentRequest: {
-        findFirst: jest.fn().mockResolvedValue({ status }),
+        findFirst: jest.fn().mockImplementation(({ where }: any) => Promise.resolve(where.paymentId ? null : { status, terminalId: 't-1' })),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
     }) as any
+
+  it('refuses to close when the Payment carries NO accredited identity (no FK, no caller serial, no persisted serial)', async () => {
+    const logger = require('@/config/logger').default
+    const errSpy = jest.spyOn(logger, 'error')
+    const tx = txWith('SENT', { terminal: null })
+    await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-SIN-ID', 'pay-sin-id', 'venue-1')
+    expect(tx.terminalPaymentRequest.updateMany).not.toHaveBeenCalled()
+    expect(tx.payment.updateMany).not.toHaveBeenCalled()
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('no accredited terminal identity'), expect.any(Object))
+    errSpy.mockRestore()
+  })
+
+  it('closes from the AUTHENTICATED serial when the FK did not resolve, and persists that provenance', async () => {
+    const tx = txWith('SENT', { terminal: null })
+    await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-FK', 'pay-fk', 'venue-1', undefined, 'REST', 'AVQD-T-1')
+    expect(tx.terminalPaymentRequest.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'COMPLETED', paymentId: 'pay-fk' }) }),
+    )
+    expect(tx.payment.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { processorData: expect.objectContaining({ deviceSerialNumber: 'AVQD-T-1' }) } }),
+    )
+  })
+
+  it('refuses to close when the authenticated serial contradicts the request terminal', async () => {
+    const tx = txWith('SENT', { terminal: null })
+    await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-OTRA', 'pay-otra', 'venue-1', undefined, 'REST', 'AVQD-T-2')
+    expect(tx.terminalPaymentRequest.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('a committed payment replaces stale cancel admission and response in the same transaction', async () => {
+    const tx = txWith('CANCEL_REQUESTED')
+    await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-PAID', 'pay-durable', 'venue-1')
+    expect(tx.terminalPaymentRequest.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          cancelDisposition: null,
+          resultJson: { requestId: 'REQ-PAID', status: 'success', paymentId: 'pay-durable' },
+        }),
+      }),
+    )
+  })
 
   it('reconciles an already-CANCELLED row to COMPLETED (a recorded Payment is money-moved ground truth) and alerts 🚨', async () => {
     const logger = require('@/config/logger').default
@@ -586,6 +1067,29 @@ describe('TerminalPaymentService — closeRowFromPaymentTx (money moved beats a 
       }),
     )
     expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('🚨 [Terminal-payment]'), expect.any(Object))
+    errSpy.mockRestore()
+  })
+
+  // 🔴 Hallazgo de la auditoría de Codex (12-sep): el 🚨 sólo cubría CANCELLED/FAILED/CANCEL_REQUESTED.
+  // Una fila SOLTADA POR TIEMPO queda TIMED_OUT/AUTO_RELEASED, y es justo el caso donde un cobro
+  // tardío es un DOBLE COBRO probable (la ranura ya se reutilizó): cerrarla en silencio es lo peor.
+  it('money landing on a TIMED_OUT row (auto-released by time) reconciles to COMPLETED AND alerts 🚨 — the release was by policy, not by evidence', async () => {
+    const logger = require('@/config/logger').default
+    const errSpy = jest.spyOn(logger, 'error')
+    const tx = txWith('TIMED_OUT')
+
+    await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-T', 'pay-late-t', 'venue-1')
+
+    expect(tx.terminalPaymentRequest.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { requestId: 'REQ-T', venueId: 'venue-1', status: { not: 'COMPLETED' } },
+        data: expect.objectContaining({ status: 'COMPLETED', paymentId: 'pay-late-t', lateResult: true }),
+      }),
+    )
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining('🚨 [Terminal-payment]'),
+      expect.objectContaining({ requestId: 'REQ-T', priorStatus: 'TIMED_OUT' }),
+    )
     errSpy.mockRestore()
   })
 
@@ -607,8 +1111,23 @@ describe('TerminalPaymentService — closeRowFromPaymentTx (money moved beats a 
     const logger = require('@/config/logger').default
     const errSpy = jest.spyOn(logger, 'error')
     const tx = {
+      $queryRaw: jest.fn().mockResolvedValue([]),
+      payment: {
+        findFirst: jest.fn().mockResolvedValue({
+          processorData: {},
+          amount: new Prisma.Decimal(100),
+          tipAmount: new Prisma.Decimal(0),
+          source: 'TPV',
+          terminal: { serialNumber: 'AVQD-T-1' },
+        }),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
       terminalPaymentRequest: {
-        findFirst: jest.fn().mockResolvedValue({ status: 'SENT', amountCents: 47_500, tipCents: 4_750 }),
+        findFirst: jest
+          .fn()
+          .mockImplementation(({ where }: any) =>
+            Promise.resolve(where.paymentId ? null : { status: 'SENT', terminalId: 't-1', amountCents: 47_500, tipCents: 4_750 }),
+          ),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
     } as any
@@ -664,7 +1183,7 @@ describe('TerminalPaymentService — closeRowFromPaymentTx (money moved beats a 
 })
 
 describe('TerminalPaymentService — hasChargeBlockingOrderCancel (guard for cancelOrder)', () => {
-  it('blocks on PENDING/SENT/UNKNOWN but deliberately EXCLUDES CANCEL_REQUESTED (normal POS cancel flow must not 409)', async () => {
+  it('blocks cancelling the order until a requested terminal cancellation is actually confirmed', async () => {
     tpr().findFirst.mockResolvedValueOnce({ requestId: 'REQ-LIVE' })
 
     const blocked = await terminalPaymentService.hasChargeBlockingOrderCancel('venue-1', 'order-1')
@@ -672,8 +1191,13 @@ describe('TerminalPaymentService — hasChargeBlockingOrderCancel (guard for can
     expect(blocked).toBe(true)
     const where = (tpr().findFirst as jest.Mock).mock.calls[0][0].where
     expect(where).toMatchObject({ venueId: 'venue-1', orderId: 'order-1' })
-    expect(where.status.in).toEqual(expect.arrayContaining(['PENDING', 'SENT', 'UNKNOWN']))
-    expect(where.status.in).not.toContain('CANCEL_REQUESTED')
+    expect(where.OR).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: { in: expect.arrayContaining(['PENDING', 'SENT', 'UNKNOWN', 'CANCEL_REQUESTED', 'TIMED_OUT']) },
+        }),
+      ]),
+    )
   })
 
   it('returns false when the order has no live/unknown terminal charge', async () => {
@@ -716,6 +1240,7 @@ describe('TerminalPaymentService — candado de sobrepago (orden YA pagada, caso
       expect.any(Function),
     )
 
+    committedRequests({ 'REQ-G1': 'pay-g1' })
     terminalPaymentService.handlePaymentResult({ requestId: 'REQ-G1', status: 'success', paymentId: 'pay-g1' })
     expect((await p1).status).toBe('success')
   })
@@ -729,19 +1254,25 @@ describe('TerminalPaymentService — candado de sobrepago (orden YA pagada, caso
     await flush()
     expect(tpr().create).toHaveBeenCalledTimes(1)
 
+    committedRequests({ 'REQ-G2': 'pay-g2' })
     terminalPaymentService.handlePaymentResult({ requestId: 'REQ-G2', status: 'success', paymentId: 'pay-g2' })
     expect((await p1).status).toBe('success')
   })
 
-  it('fail-open: si la verificación truena (DB caída), el cobro procede — un fallo de infra jamás bloquea un cobro legítimo', async () => {
+  it('a failed order read must not authorize a charge whose unpaid state cannot be verified', async () => {
     order().findFirst.mockRejectedValue(new Error('connection refused'))
-
-    const p1 = terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-FO', orderId: 'order-x', requestId: 'REQ-G3' }))
+    const pending = terminalPaymentService.sendPaymentToTerminal(
+      baseRequest({ terminalId: 'T-FO', orderId: 'order-x', requestId: 'REQ-G3' }),
+    )
+    const settled = pending.then(
+      value => value,
+      error => error,
+    )
     await flush()
-    expect(tpr().create).toHaveBeenCalledTimes(1)
-
-    terminalPaymentService.handlePaymentResult({ requestId: 'REQ-G3', status: 'success', paymentId: 'pay-g3' })
-    expect((await p1).status).toBe('success')
+    const emitted = directEmit.mock.calls.length
+    if (emitted) terminalPaymentService.handlePaymentResult({ requestId: 'REQ-G3', status: 'timeout' })
+    expect(await settled).toBeInstanceOf(Error)
+    expect(emitted).toBe(0)
   })
 
   it('cobro rápido SIN orden → ni siquiera consulta la orden (cero costo para el flujo Cobrar)', async () => {
@@ -749,6 +1280,7 @@ describe('TerminalPaymentService — candado de sobrepago (orden YA pagada, caso
     await flush()
     expect(order().findFirst).not.toHaveBeenCalled()
 
+    committedRequests({ 'REQ-G4': 'pay-g4' })
     terminalPaymentService.handlePaymentResult({ requestId: 'REQ-G4', status: 'success', paymentId: 'pay-g4' })
     expect((await p1).status).toBe('success')
   })
@@ -848,7 +1380,7 @@ describe('TerminalPaymentService — el watchdog no cierra con el pago de otro',
 
   it('un pago con TARJETA y COMPLETED sí la cierra — el camino bueno no se rompe', async () => {
     tpr().findMany.mockResolvedValueOnce([staleRow({ id: 'row-3', requestId: 'REQ-W3' })])
-    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-ok' })
+    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-ok', source: 'TPV', terminal: { serialNumber: 't-w1' }, amount: new Prisma.Decimal(100), tipAmount: new Prisma.Decimal(0) })
     tpr().findFirst.mockResolvedValueOnce(null) // no reclamado por otra solicitud
     tpr().updateMany.mockResolvedValueOnce({ count: 1 })
 
@@ -888,7 +1420,7 @@ describe('TerminalPaymentService — un cobro que pasó pese al cancel SIEMPRE a
         createdAt: new Date('2026-08-11T10:00:00Z'),
       },
     ])
-    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-c1' })
+    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-c1', source: 'TPV', terminal: { serialNumber: 't-c1' }, amount: new Prisma.Decimal(100), tipAmount: new Prisma.Decimal(0) })
     tpr().findFirst.mockResolvedValueOnce(null)
     tpr().updateMany.mockResolvedValueOnce({ count: 1 })
 
@@ -914,7 +1446,7 @@ describe('TerminalPaymentService — un cobro que pasó pese al cancel SIEMPRE a
         createdAt: new Date('2026-08-11T10:00:00Z'),
       },
     ])
-    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-c2' })
+    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-c2', source: 'TPV', terminal: { serialNumber: 't-c2' }, amount: new Prisma.Decimal(100), tipAmount: new Prisma.Decimal(0) })
     tpr().findFirst.mockResolvedValueOnce(null)
     tpr().updateMany.mockResolvedValueOnce({ count: 1 })
 
@@ -922,5 +1454,256 @@ describe('TerminalPaymentService — un cobro que pasó pese al cancel SIEMPRE a
 
     const alerted = errSpy.mock.calls.some(c => String(c[0]).includes('🚨'))
     expect(alerted).toBe(false)
+  })
+})
+
+describe('Audit round1 lost captured socket', () => {
+  it('post-reservation socket loss never claims no authorization started', async () => {
+    mockedGetServer().sockets.sockets.get.mockReturnValue(undefined)
+    // 🔴 Se EXIGE el desenlace canónico incierto, no «algún error». Antes se rechazaba, y un
+    // rechazo sale como HTTP 400: para un POS publicado eso significa «no se cobró» y le da
+    // permiso para volver a pasar la tarjeta. La afirmación que este test guarda —«nunca
+    // afirma que no se inició autorización»— sólo se cumple de verdad con `status:'timeout'`,
+    // que los clientes ya publicados leen como incierto (504).
+    await expect(
+      terminalPaymentService.sendPaymentToTerminal(baseRequest({ requestId: 'lost-captured-socket' })),
+    ).resolves.toMatchObject({ requestId: 'lost-captured-socket', status: 'timeout' })
+    await flush()
+    expect(tpr().updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'UNKNOWN' }),
+      }),
+    )
+    expect(tpr().updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'FAILED' }),
+      }),
+    )
+  })
+})
+
+describe('Busy picker query budget', () => {
+  it('P2 no anuncia libre una terminal cuya reserva viva quedó en otro venue', async () => {
+    // La terminal se movió de sucursal y su cobro sin resolver quedó en la anterior. La reserva
+    // es FÍSICA —del aparato, no del venue—, así que el picker de la sucursal nueva tiene que
+    // verla OCUPADA; si la anuncia libre, se manda un segundo cobro al mismo aparato.
+    // Se fija la FORMA de la consulta: acotarla por venue es exactamente lo que la ocultaba.
+    // El retorno sigue siendo sólo el flag de ocupado — ningún dato financiero ajeno cruza.
+    // 🔴 El mock SIMULA la base: devuelve la fila SÓLO si el `where` de verdad la alcanzaría.
+    // Un mock que la devuelve pase lo que pase no guarda nada — con el filtro por venue
+    // reintroducido seguiría diciendo «ocupada» y esta prueba pasaría por el motivo equivocado.
+    // Así, si alguien vuelve a acotar la consulta al venue, la fila no se encuentra y esto FALLA.
+    const filaViva = { terminalId: 't-movida', venueId: 'venue-viejo' }
+    tpr().groupBy.mockImplementation(async ({ where }: any) => {
+      const alcanzaElVenue = where.venueId === undefined || where.venueId === filaViva.venueId
+      const alcanzaLaTerminal = where.terminalId?.in?.includes(filaViva.terminalId) ?? false
+      return alcanzaElVenue && alcanzaLaTerminal ? [{ terminalId: filaViva.terminalId }] : []
+    })
+
+    // COMPORTAMIENTO: desde la sucursal NUEVA, la terminal se reporta OCUPADA.
+    const busy = await terminalPaymentService.getBusyTerminalIds('venue-nuevo', ['t-movida'])
+    expect(busy.has('t-movida')).toBe(true)
+    // Y no se filtra nada más que el hecho de estar ocupada.
+    expect([...busy]).toEqual(['t-movida'])
+    for (const [query] of tpr().groupBy.mock.calls) {
+      expect(query.where).not.toHaveProperty('venueId')
+    }
+  })
+
+
+  it('aggregates every candidate in bounded batches without dropping the last terminal', async () => {
+    const candidates = Array.from({ length: 201 }, (_, index) => 'terminal-' + index)
+    tpr().groupBy.mockImplementation(async ({ where }: any) => where.terminalId.in.map((terminalId: string) => ({ terminalId })))
+    const busy = await terminalPaymentService.getBusyTerminalIds('venue-1', candidates)
+    expect(busy.size).toBe(201)
+    expect(busy.has('terminal-200')).toBe(true)
+    expect(tpr().groupBy).toHaveBeenCalledTimes(3)
+    for (const [query] of tpr().groupBy.mock.calls) {
+      expect(query.take).toBe(100)
+      expect(query.where.terminalId.in.length).toBeLessThanOrEqual(100)
+      expect(query.by).toEqual(['terminalId'])
+    }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Lápida de admisión (H.5/H.6): contención de la transacción, choque de unicidad y réplica
+// ═══════════════════════════════════════════════════════════════════════════
+describe('TerminalPaymentService — lápida de admisión: contención, choque de unicidad y réplica', () => {
+  const send = (overrides: Record<string, unknown>) => terminalPaymentService.sendPaymentToTerminal(baseRequest(overrides))
+  const P2028 = Object.assign(new Error('Transaction already closed: A query cannot be executed on an expired transaction'), {
+    code: 'P2028',
+  })
+  const P2034 = Object.assign(new Error('Transaction failed due to a write conflict or a deadlock. Please retry your transaction'), {
+    code: 'P2034',
+  })
+  const errorDe = async (promesa: Promise<unknown>) =>
+    promesa.then(
+      () => {
+        throw new Error('se esperaba un rechazo')
+      },
+      (e: unknown) => e as any,
+    )
+
+  it.each([
+    ['P2028', P2028],
+    ['P2034', P2034],
+  ])(
+    '(h) %s en la admisión ⇒ 503 TERMINAL_PAYMENT_ADMISSION_RETRY con details.requestId: «reintenta con la MISMA solicitud; todavía no se sabe»',
+    async (_code, err) => {
+      prismaMock.$transaction.mockImplementationOnce(() => Promise.reject(err))
+      const error = await errorDe(send({ terminalId: 'T-TX', requestId: 'REQ-TX' }))
+      expect(error).toBeInstanceOf(TerminalPaymentAdmissionRetryError)
+      expect(error).toMatchObject({ statusCode: 503, code: 'TERMINAL_PAYMENT_ADMISSION_RETRY', details: { requestId: 'REQ-TX' } })
+      expect(tpr().create).not.toHaveBeenCalled()
+      expect(directEmit).not.toHaveBeenCalled()
+    },
+  )
+
+  it('la transacción de admisión espera hasta 15 s y hasta 5 s por una conexión', async () => {
+    const pending = send({ terminalId: 'T-OPTS', requestId: 'REQ-OPTS' })
+    await flush()
+    expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: 15_000, maxWait: 5_000 })
+    committedRequests({ 'REQ-OPTS': 'pay-opts' })
+    terminalPaymentService.handlePaymentResult({ requestId: 'REQ-OPTS', status: 'success', paymentId: 'pay-opts' })
+    expect((await pending).status).toBe('success')
+  })
+
+  it('P2002 al escribir la lápida (otra copia del MISMO requestId ganó) ⇒ relee y REPRODUCE su rechazo; nunca crea', async () => {
+    const lapidaGanadora = {
+      requestId: 'REQ-DUP',
+      venueId: 'venue-1',
+      terminalId: 't-dup',
+      amountCents: 10000,
+      tipCents: 0,
+      orderId: null,
+      status: 'FAILED',
+      failureCode: 'REJECTED_TERMINAL_BUSY',
+      resultJson: {
+        requestId: 'REQ-DUP',
+        status: 'failed',
+        httpStatus: 409,
+        code: 'TERMINAL_BUSY',
+        message: 'La terminal T-DUP está ocupada por un cobro de $350.00 enviado hace 0 min',
+        details: { requestId: 'REQ-DUP', blockingRequest: { requestId: 'REQ-A', amountCents: 35000, ageSeconds: 3 } },
+      },
+    }
+    tpr()
+      .findFirst.mockResolvedValueOnce(null) // la fila de esta solicitud todavía no se ve
+      .mockResolvedValueOnce({
+        requestId: 'REQ-A',
+        venueId: 'venue-1',
+        amountCents: 35000,
+        senderDevice: null,
+        createdAt: new Date(),
+        status: 'PENDING',
+      })
+      .mockResolvedValueOnce(lapidaGanadora) // relectura tras el choque
+    tpr().create.mockRejectedValueOnce(P2002)
+    const error = await errorDe(send({ terminalId: 'T-DUP', requestId: 'REQ-DUP' }))
+    expect(error).toBeInstanceOf(TerminalBusyError)
+    expect(error.message).toBe(lapidaGanadora.resultJson.message)
+    expect(error.details).toEqual(lapidaGanadora.resultJson.details)
+    expect(tpr().create).toHaveBeenCalledTimes(1) // sólo la lápida que chocó: ninguna fila que ocupe la terminal
+    expect(directEmit).not.toHaveBeenCalled()
+  })
+
+  it('P2002 al crear el cobro sin que aparezca la fila de esta solicitud ⇒ re-decide UNA vez bajo el candado y, si sigue sin poder, 503 — nunca un «no se creó» sin lápida', async () => {
+    tpr().create.mockRejectedValue(P2002) // la ranura choca siempre y nunca se ve quién la ocupa
+    const error = await errorDe(send({ terminalId: 'T-GHOST', requestId: 'REQ-GHOST' }))
+    expect(error).toBeInstanceOf(TerminalPaymentAdmissionRetryError)
+    expect(error).toMatchObject({ statusCode: 503, code: 'TERMINAL_PAYMENT_ADMISSION_RETRY', details: { requestId: 'REQ-GHOST' } })
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(2)
+    expect(tpr().create).toHaveBeenCalledTimes(2)
+    expect(directEmit).not.toHaveBeenCalled()
+  })
+
+  it('sin requestId del cliente, el choque de ranura sigue saliendo como TERMINAL_BUSY y no escribe lápida (nada podría reproducirla)', async () => {
+    tpr().create.mockRejectedValueOnce(P2002)
+    tpr()
+      .findFirst.mockResolvedValueOnce(null) // la fila propia antes del choque
+      .mockResolvedValueOnce(null) // bloqueador bajo el candado: no se ve
+      // Este cobro va SIN orden, así que la admisión comprueba además si la terminal arrastra una venta sin
+      // desenlace — el rastro del «rodeo del pago rápido» (P1-2 de Codex). Aquí no hay ninguna.
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null) // relectura tras el choque: la fila propia no existe
+      .mockResolvedValueOnce({
+        requestId: 'REQ-HOLD',
+        venueId: 'venue-1',
+        amountCents: 5000,
+        senderDevice: null,
+        createdAt: new Date(),
+        status: 'PENDING',
+      })
+    const error = await errorDe(send({ terminalId: 'T-LEGACY' }))
+    expect(error).toBeInstanceOf(TerminalBusyError)
+    expect(error.details.blockingRequest.requestId).toBe('REQ-HOLD')
+    expect(error.details.requestId).toBeUndefined()
+    expect(tpr().create).toHaveBeenCalledTimes(1)
+    expect(tpr().create.mock.calls[0][0].data.status).toBe('PENDING')
+    expect(directEmit).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { failureCode: 'REJECTED_TERMINAL_NOT_CONNECTED', httpStatus: 404, code: 'TERMINAL_NOT_CONNECTED', clase: TerminalUnavailableError },
+    { failureCode: 'REJECTED_TERMINAL_NO_SOCKET', httpStatus: 422, code: 'TERMINAL_NO_SOCKET', clase: TerminalUnavailableError },
+    { failureCode: 'REJECTED_TERMINAL_OTHER_VENUE', httpStatus: 403, code: 'TERMINAL_NOT_IN_VENUE', clase: TerminalUnavailableError },
+    { failureCode: 'REJECTED_TERMINAL_BUSY', httpStatus: 409, code: 'TERMINAL_BUSY', clase: TerminalBusyError },
+    { failureCode: 'REJECTED_ORDER_BUSY', httpStatus: 409, code: 'TERMINAL_BUSY', clase: TerminalBusyError },
+    { failureCode: 'REJECTED_ORDER_CANCELLED', httpStatus: 400, code: 'ORDER_CANCELLED_NO_NEW_CHARGE', clase: BadRequestError },
+    { failureCode: 'REJECTED_ORDER_PAID', httpStatus: 409, code: 'ORDER_ALREADY_PAID', clase: OrderAlreadyPaidError },
+    { failureCode: 'REJECTED_ORDER_NOT_FOUND', httpStatus: 400, code: 'ORDER_NOT_FOUND', clase: BadRequestError },
+  ])(
+    'la réplica de una lápida $failureCode reproduce el rechazo ($httpStatus $code) aunque su respuesta guardada no se pueda leer',
+    async ({ failureCode, httpStatus, code, clase }) => {
+      tpr().findFirst.mockResolvedValueOnce({
+        requestId: 'REQ-L',
+        venueId: 'venue-1',
+        terminalId: 't-l',
+        amountCents: 10000,
+        tipCents: 0,
+        orderId: null,
+        status: 'FAILED',
+        failureCode,
+        resultJson: null,
+      })
+      const error = await errorDe(send({ terminalId: 'T-L', requestId: 'REQ-L' }))
+      expect(error).toBeInstanceOf(clase)
+      expect(error).toMatchObject({ statusCode: httpStatus, code, details: { requestId: 'REQ-L' } })
+      expect(error.message).toEqual(expect.any(String))
+      expect(tpr().create).not.toHaveBeenCalled()
+      expect(directEmit).not.toHaveBeenCalled()
+    },
+  )
+
+  it('una copia con OTRO contrato sobre una lápida es conflicto de solicitud: no hereda el rechazo ajeno', async () => {
+    tpr().findFirst.mockResolvedValueOnce({
+      requestId: 'REQ-L2',
+      venueId: 'venue-1',
+      terminalId: 't-l2',
+      amountCents: 10000,
+      tipCents: 0,
+      orderId: null,
+      status: 'FAILED',
+      failureCode: 'REJECTED_TERMINAL_NOT_CONNECTED',
+      resultJson: null,
+    })
+    await expect(send({ terminalId: 'T-L2', requestId: 'REQ-L2', amountCents: 20000 })).rejects.toThrow(
+      'Esta solicitud ya pertenece a otro cobro',
+    )
+    expect(directEmit).not.toHaveBeenCalled()
+  })
+
+  it('la terminal de OTRO venue se rechaza en el servicio, bajo el candado y con su lápida (403 TERMINAL_NOT_IN_VENUE)', async () => {
+    mockedGetTerminal.mockReturnValueOnce({ socketId: 'sock-x', venueId: 'venue-OTRO', terminalId: 't-x', terminalPaymentAckVersion: 1 })
+    const error = await errorDe(send({ terminalId: 'T-X', requestId: 'REQ-X2' }))
+    expect(error).toBeInstanceOf(TerminalUnavailableError)
+    expect(error).toMatchObject({ statusCode: 403, code: 'TERMINAL_NOT_IN_VENUE', details: { requestId: 'REQ-X2' } })
+    expect(tpr().create.mock.calls[0][0].data).toMatchObject({
+      requestId: 'REQ-X2',
+      status: 'FAILED',
+      failureCode: 'REJECTED_TERMINAL_OTHER_VENUE',
+    })
+    expect(directEmit).not.toHaveBeenCalled()
   })
 })

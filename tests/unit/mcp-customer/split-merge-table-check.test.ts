@@ -175,4 +175,27 @@ describe('merge_table_check', () => {
     expect(out.ok).toBe(false)
     expect(mockAudit).not.toHaveBeenCalled()
   })
+
+  // Diseño §C.6: con un cobro de terminal vivo sobre la cuenta ORIGEN el agente recibe el código y el cobro que bloquea
+  // (aditivo), para no confundirlo con otro rechazo.
+  it('un cobro de terminal vivo en el origen llega con code y details (requestId + orderId)', async () => {
+    const { ConflictError } = jest.requireActual('@/errors/AppError')
+    mockTableFindFirst.mockResolvedValueOnce({ id: 't-target', currentOrderId: 'ord-target' })
+    mockTableFindFirst.mockResolvedValueOnce({ id: 't-source', currentOrderId: 'ord-source' })
+    mockMergeOrders.mockRejectedValueOnce(
+      new ConflictError('La cuenta origen tiene un cobro en curso', 'ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE', {
+        requestId: 'REQ-1',
+        orderId: 'ord-source',
+      }),
+    )
+
+    const out = parse(await call('merge_table_check', { venueId: 'v1', targetNumber: '12', sourceNumber: '8' }))
+    expect(out).toEqual({
+      ok: false,
+      error: 'La cuenta origen tiene un cobro en curso',
+      code: 'ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE',
+      details: { requestId: 'REQ-1', orderId: 'ord-source' },
+    })
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
 })

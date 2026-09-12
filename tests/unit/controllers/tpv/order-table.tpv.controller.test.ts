@@ -15,7 +15,7 @@
  *   3. La delegación pasa los argumentos en el orden EXACTO que esperan los
  *      servicios puros: (venueId, orderId, <input>, staffId).
  */
-import { BadRequestError } from '@/errors/AppError'
+import { BadRequestError, ConflictError } from '@/errors/AppError'
 import * as controller from '@/controllers/tpv/order-table.tpv.controller'
 import * as orderMobileService from '@/services/mobile/order.mobile.service'
 import * as serviceChargeMobileService from '@/services/mobile/service-charge.mobile.service'
@@ -314,6 +314,68 @@ describe('order-table.tpv.controller — cancelOrder', () => {
 
     expect(res.status).toHaveBeenCalledWith(200)
     expect(res.json).toHaveBeenCalledWith({ success: true, data: { tableFreed: false } })
+  })
+})
+
+// Diseño §C.6: las rutas /tpv devuelven `code` y `details` de forma ADITIVA cuando el error de dominio los trae. Antes
+// los descartaban y la TPV recibía un 409 mudo; un error sin código sigue saliendo byte a byte igual.
+describe('order-table.tpv.controller — code y details aditivos en el cuerpo de error', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  it('cancelOrder: el 409 de un cobro vivo llega con su código y el requestId que bloquea', async () => {
+    cancelOrderMock.mockRejectedValue(
+      new ConflictError('Hay un cobro en curso', 'ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE', { requestId: 'REQ-1' }),
+    )
+    const res = mockRes()
+
+    await controller.cancelOrder({ params: { venueId: 'v', orderId: 'o' }, body: {}, authContext: { userId: 's' } } as any, res)
+
+    expect(res.status).toHaveBeenCalledWith(409)
+    expect(res.json).toHaveBeenCalledWith({
+      success: false,
+      message: 'Hay un cobro en curso',
+      code: 'ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE',
+      details: { requestId: 'REQ-1' },
+    })
+  })
+
+  it('mergeOrders: el 409 del origen trae requestId y orderId', async () => {
+    mergeOrdersMock.mockRejectedValue(
+      new ConflictError('La cuenta origen tiene un cobro en curso', 'ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE', {
+        requestId: 'REQ-2',
+        orderId: 'origen',
+      }),
+    )
+    const res = mockRes()
+
+    await controller.mergeOrders(
+      { params: { venueId: 'v', orderId: 'destino' }, body: { sourceOrderId: 'origen' }, authContext: { userId: 's' } } as any,
+      res,
+    )
+
+    expect(res.status).toHaveBeenCalledWith(409)
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE', details: { requestId: 'REQ-2', orderId: 'origen' } }),
+    )
+  })
+
+  it('un error de dominio SIN código sale exactamente como antes: { success, message }', async () => {
+    cancelOrderMock.mockRejectedValue(new BadRequestError('Cannot cancel a paid order'))
+    const res = mockRes()
+
+    await controller.cancelOrder({ params: { venueId: 'v', orderId: 'o' }, body: {}, authContext: { userId: 's' } } as any, res)
+
+    expect(res.json).toHaveBeenCalledWith({ success: false, message: 'Cannot cancel a paid order' })
+  })
+
+  it('el `code` de un error de Prisma NO se filtra al cuerpo (no es contrato)', async () => {
+    cancelOrderMock.mockRejectedValue(Object.assign(new Error('Transaction already closed'), { code: 'P2028' }))
+    const res = mockRes()
+
+    await controller.cancelOrder({ params: { venueId: 'v', orderId: 'o' }, body: {}, authContext: { userId: 's' } } as any, res)
+
+    expect(res.status).toHaveBeenCalledWith(500)
+    expect(res.json).toHaveBeenCalledWith({ success: false, message: 'Transaction already closed' })
   })
 })
 

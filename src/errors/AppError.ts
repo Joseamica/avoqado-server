@@ -197,10 +197,14 @@ export interface TerminalBusyBlockingRequest {
 }
 
 export class TerminalBusyError extends AppError {
-  public details: { blockingRequest: TerminalBusyBlockingRequest }
-  constructor(message: string, blockingRequest: TerminalBusyBlockingRequest) {
+  public details: { blockingRequest: TerminalBusyBlockingRequest; requestId?: string }
+  /**
+   * `requestId` = la solicitud RECHAZADA (la del POS), no la que bloquea. Sólo viaja cuando el servidor dejó su
+   * lápida (H.5/H.6): es la correlación con la que el POS sabe que ESE cobro no se creó.
+   */
+  constructor(message: string, blockingRequest: TerminalBusyBlockingRequest, requestId?: string) {
     super(message, 409, true, 'TERMINAL_BUSY')
-    this.details = { blockingRequest }
+    this.details = requestId ? { blockingRequest, requestId } : { blockingRequest }
   }
 }
 
@@ -211,8 +215,38 @@ export class TerminalBusyError extends AppError {
  * (caso Mindform 2026-06-21: $354 de sobrecobro por una lista de órdenes rancia).
  */
 export class OrderAlreadyPaidError extends AppError {
-  constructor(message: string) {
-    super(message, 409, true, 'ORDER_ALREADY_PAID')
+  constructor(message: string, details?: unknown) {
+    super(message, 409, true, 'ORDER_ALREADY_PAID', details)
+  }
+}
+
+/**
+ * La terminal elegida no puede recibir ESTE cobro: no está en el registro (404 `TERMINAL_NOT_CONNECTED`), está
+ * registrada sin socket (422 `TERMINAL_NO_SOCKET`) o pertenece a otro establecimiento (403 `TERMINAL_NOT_IN_VENUE`).
+ * Los tres se deciden en la admisión del cobro remoto, bajo el candado de la terminal y con lápida
+ * (`terminal-payment.service.ts`), así que la misma solicitud repite el mismo rechazo.
+ */
+export type TerminalUnavailableCode = 'TERMINAL_NOT_CONNECTED' | 'TERMINAL_NO_SOCKET' | 'TERMINAL_NOT_IN_VENUE'
+export class TerminalUnavailableError extends AppError {
+  constructor(message: string, statusCode: 403 | 404 | 422, code: TerminalUnavailableCode, details?: unknown) {
+    super(message, statusCode, true, code, details)
+  }
+}
+
+/**
+ * La transacción de admisión del cobro remoto no pudo decidir (P2028 tiempo agotado / P2034 conflicto). NO afirma
+ * «no se creó»: significa «reintenta con el MISMO requestId; todavía no se sabe». Un reintento con la misma llave
+ * reproduce lo que haya quedado (cobro creado o lápida) y nunca cobra dos veces.
+ */
+export class TerminalPaymentAdmissionRetryError extends AppError {
+  constructor(details?: { requestId: string }) {
+    super(
+      'No pudimos confirmar si el cobro se creó. Consulta su estado antes de volver a pasar la tarjeta.',
+      503,
+      true,
+      'TERMINAL_PAYMENT_ADMISSION_RETRY',
+      details,
+    )
   }
 }
 

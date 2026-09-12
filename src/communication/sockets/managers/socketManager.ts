@@ -26,6 +26,7 @@ import { ConnectionController } from '../controllers/connection.controller'
 import { tpvCommandExecutionService } from '../../../services/tpv/command-execution.service'
 // Import terminal registry for tracking terminalId → socketId
 import { terminalRegistry } from '../terminal-registry'
+import { sameTerminalSerial } from '../../../utils/terminalSerial'
 // Import terminal payment service for handling payment results
 import { terminalPaymentService } from '../../../services/terminal-payment.service'
 // Import TPV message service for handling message ack/responses from terminals
@@ -185,7 +186,10 @@ export class SocketManager implements ISocketManager {
       const _correlationId = authenticatedSocket.correlationId || uuidv4()
 
       const user = authenticatedSocket.authContext?.userId || 'unauthenticated'
-      const terminalId = socket.handshake?.auth?.terminalId
+      const claimedTerminalId = socket.handshake?.auth?.terminalId
+      const signedSerial = authenticatedSocket.authContext?.terminalSerialNumber
+      const terminalId =
+        signedSerial && claimedTerminalId && !sameTerminalSerial(signedSerial, claimedTerminalId) ? undefined : claimedTerminalId
       logger.info(`📡 Socket connected: ${user} (${socket.id})`)
 
       // Register socket with room manager if authenticated
@@ -195,12 +199,17 @@ export class SocketManager implements ISocketManager {
         // Register terminal in registry if terminalId provided in auth handshake
         if (terminalId) {
           const ackVersion = Number(socket.handshake?.auth?.terminalPaymentAckVersion)
+          const cancelVersion = Number(socket.handshake?.auth?.terminalPaymentCancelDispositionVersion)
+          const probeVersion = Number(socket.handshake?.auth?.terminalPaymentProbeVersion)
           terminalRegistry.register(
             terminalId,
             socket.id,
             authenticatedSocket.authContext.venueId,
             undefined,
             Number.isInteger(ackVersion) && ackVersion > 0 ? ackVersion : undefined,
+            Number.isInteger(cancelVersion) && cancelVersion > 0 ? cancelVersion : undefined,
+            signedSerial,
+            Number.isInteger(probeVersion) && probeVersion > 0 ? probeVersion : undefined,
           )
         }
       }
@@ -216,7 +225,16 @@ export class SocketManager implements ISocketManager {
       // Sólo clientes que anunciaron inbox durable reciben reentregas. Mandar una
       // repetición a una APK vieja (sin dedupe local) podría cobrar dos veces.
       if (terminalId) {
-        void terminalPaymentService.replayPendingForTerminal(terminalId, authenticatedSocket.authContext?.venueId, socket.id)
+        // 🔴 Con `.catch`: un rechazo aquí (P2024 del pool en una tormenta de reconexiones) sería un
+        // `unhandledRejection`, y `server.ts` los convierte en gracefulShutdown a propósito.
+        terminalPaymentService
+          .replayPendingForTerminal(terminalId, authenticatedSocket.authContext?.venueId, socket.id)
+          .catch(error => logger.warn('⚠️ [Socket] replayPendingForTerminal failed on connect', { terminalId, error: error instanceof Error ? error.message : String(error) }))
+        // Y a las filas SIN desenlace acreditado se les pregunta: la evidencia viene de la bandeja
+        // durable de la terminal, nunca del reloj. Sólo si anunció la capacidad (APK viejo: silencio).
+        terminalPaymentService
+          .probeUnresolvedForTerminal(terminalId, authenticatedSocket.authContext?.venueId, socket.id)
+          .catch(error => logger.warn('⚠️ [Socket] probeUnresolvedForTerminal failed on connect', { terminalId, error: error instanceof Error ? error.message : String(error) }))
       }
     })
   }
@@ -350,10 +368,57 @@ export class SocketManager implements ISocketManager {
       }
     })
 
+    onWithContext(socket, 'terminal:payment_cancel_disposition', async (payload, callback) => {
+      try {
+        const terminal = terminalRegistry.getTerminalBySocketId(socket.id)
+        if (
+          !terminal ||
+          !terminal.identityVerified ||
+          terminal.venueId !== socket.authContext?.venueId ||
+          (terminal.terminalPaymentCancelDispositionVersion ?? 0) < 1
+        ) {
+          callback?.({ success: false })
+          return
+        }
+        const handled = await terminalPaymentService.handleCancelDispositionFromSocket(
+          { requestId: payload?.requestId, disposition: payload?.disposition },
+          terminal,
+        )
+        callback?.({ success: handled })
+      } catch (error) {
+        logger.error('Error persisting terminal cancellation disposition', { socketId: socket.id, error: String(error) })
+        callback?.({ success: false })
+      }
+    })
+
+    // Respuesta a la SONDA de conciliación (desde la bandeja durable de la terminal, sin entregar).
+    onWithContext(socket, 'terminal:payment_probe_result', async (payload, callback) => {
+      try {
+        const terminal = terminalRegistry.getTerminalBySocketId(socket.id)
+        if (
+          !terminal ||
+          !terminal.identityVerified ||
+          terminal.venueId !== socket.authContext?.venueId ||
+          (terminal.terminalPaymentProbeVersion ?? 0) < 1
+        ) {
+          callback?.({ success: false })
+          return
+        }
+        const handled = await terminalPaymentService.handleProbeResultFromSocket(
+          { requestId: payload?.requestId, disposition: payload?.disposition, finalResult: payload?.finalResult ?? null },
+          terminal,
+        )
+        callback?.({ success: handled })
+      } catch (error) {
+        logger.error('Error processing terminal payment probe result', { socketId: socket.id, error: String(error) })
+        callback?.({ success: false })
+      }
+    })
+
     // Terminal Payment Result (TPV → Server → iOS HTTP response)
     onWithContext(socket, 'terminal:payment_result', async (payload, callback) => {
       try {
-        const { requestId, status, paymentId, transactionId, cardDetails, errorMessage, receipt } = payload
+        const { requestId, status, paymentId, transactionId, cardDetails, errorMessage, receipt, outcomeEvidence } = payload
         logger.info('💳 Terminal payment result received', {
           requestId,
           status,
@@ -382,6 +447,7 @@ export class SocketManager implements ISocketManager {
             cardDetails,
             errorMessage,
             receipt,
+            outcomeEvidence: terminal.identityVerified ? outcomeEvidence : undefined,
           },
           terminal,
         )
@@ -497,14 +563,20 @@ export class SocketManager implements ISocketManager {
     })
 
     // Disconnection
-    onWithContext(socket, SocketEventType.DISCONNECT, _reason => {
+    onWithContext(socket, SocketEventType.DISCONNECT, reason => {
+      const terminal = terminalRegistry.getTerminalBySocketId(socket.id)
       if (socket.authContext) {
         this.roomManager.unregisterSocket(socket)
       }
       // Clean up terminal registry
       terminalRegistry.unregisterBySocketId(socket.id)
       const user = socket.authContext?.userId || 'unauthenticated'
-      logger.info(`📡 Socket disconnected: ${user} (${socket.id})`)
+      logger.info(`📡 Socket disconnected: ${user} (${socket.id})`, {
+        socketId: socket.id,
+        terminalId: terminal?.terminalId,
+        venueId: socket.authContext?.venueId,
+        reason: typeof reason === 'string' ? reason.slice(0, 120) : 'unknown',
+      })
     })
 
     // Error handling

@@ -6,6 +6,7 @@ import { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { TableStatus } from '@prisma/client'
+import AppError from '@/errors/AppError'
 import { moveOrderToTable, assignOrderWaiter } from '@/services/tpv/table.tpv.service'
 import { compWholeOrder } from '@/services/mobile/comp-item.mobile.service'
 import { updateOrderDetails, splitOrderItems, splitOrderBySeat, mergeOrders } from '@/services/mobile/order.mobile.service'
@@ -420,7 +421,7 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'merge_table_check',
-    "TABLE_SERVICE: merge two open checks into one (Square's \"Fusionar\") — every item from the SOURCE table's check moves onto the TARGET table's check, and the source check is cancelled and its table freed. Use when two tables' groups combine. Blocked if either check already has a payment, or if the source check has discounts/manual service charges (their amount was calculated over that check alone — remove them first, then merge). This WRITES; requires orders:merge (its OWN permission since 2026-08 — WAITER/CASHIER do not hold it, so the POS asks a manager for a PIN instead; there is no such prompt here). Pass venueId + the target table (whose check survives) + the source table (whose check disappears into it).",
+    "TABLE_SERVICE: merge two open checks into one (Square's \"Fusionar\") — every item from the SOURCE table's check moves onto the TARGET table's check, and the source check is cancelled and its table freed. Use when two tables' groups combine. Blocked if either check already has a payment, or if the source check has discounts/manual service charges (their amount was calculated over that check alone — remove them first, then merge). Also blocked (code ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE, details.requestId + details.orderId) while the SOURCE check has a card-terminal charge whose outcome is not yet confirmed — merging would cancel an order a charge can still land on; wait for or cancel that charge first. A live charge on the TARGET does not block. This WRITES; requires orders:merge (its OWN permission since 2026-08 — WAITER/CASHIER do not hold it, so the POS asks a manager for a PIN instead; there is no such prompt here). Pass venueId + the target table (whose check survives) + the source table (whose check disappears into it).",
     {
       venueId: z.string().describe('Venue that owns both tables (must be in your scope)'),
       targetNumber: z.string().min(1).describe('Table number whose check ABSORBS the other and survives, e.g. "12"'),
@@ -455,7 +456,15 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
         })
         return text({ ok: true, merged: result })
       } catch (err) {
-        return text({ ok: false, error: (err as Error).message })
+        // Diseño §C.6: `code`/`details` aditivos — p. ej. `ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE` con el `requestId`
+        // del cobro de terminal vivo sobre la cuenta origen, para que el agente no lo confunda con otro rechazo.
+        const dominio = err instanceof AppError ? err : null
+        return text({
+          ok: false,
+          error: (err as Error).message,
+          ...(dominio?.code ? { code: dominio.code } : {}),
+          ...(dominio && dominio.details !== undefined ? { details: dominio.details } : {}),
+        })
       }
     },
   )

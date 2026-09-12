@@ -12,6 +12,8 @@ import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { reverseSalePosting } from '@/services/inventory/reverseSalePosting.service'
+import { findLiveTerminalCharge } from '@/services/shared/orderCancelGuard'
+import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 
 export interface CancelResult {
   outcome: 'CANCELLED' | 'ORDER_NOT_FOUND' | 'ALREADY_CANCELLED'
@@ -43,7 +45,14 @@ export async function cancelDeliveryOrder(externalOrderId: string, provider: Del
     return { outcome: 'ALREADY_CANCELLED', orderId: order.id }
   }
 
-  await prisma.$transaction(async tx => {
+  // 🔴 Diseño §C.6 (auditoría Fable 11-sep, P2-7): el marketplace YA canceló el pedido — es verdad externa y no se
+  // rechaza. Pero se marca bajo el MISMO candado de `Order` que la admisión de un cobro de terminal y el registro del
+  // dinero, y DENTRO de él se mira si quedaba un cobro de terminal sin desenlace acreditado: ese dinero puede aterrizar
+  // sobre una orden CANCELLED y alguien tiene que conciliarlo. No se oculta: 🚨 en el log y rastro en ActivityLog.
+  const cobroVivo = await prisma.$transaction(async tx => {
+    await lockExistingOrderForPayment(tx, { venueId: order.venueId, orderId: order.id })
+    const cobroVivo = await findLiveTerminalCharge(tx, { venueId: order.venueId, orderId: order.id })
+
     // `OrderStatus.CANCELLED` es la señal CANÓNICA de "esto no fue una venta": la
     // contabilidad ya la honra (`autoPosting.service.ts` — "orden cancelada → sin ingreso"),
     // así que con esto sale de los libros sin tocar el Payment, que se conserva como
@@ -57,7 +66,28 @@ export async function cancelDeliveryOrder(externalOrderId: string, provider: Del
     // Order, en el ActivityLog y en el payload crudo del evento.
     await tx.kdsOrderItem.deleteMany({ where: { kdsOrder: { orderId: order.id } } })
     await tx.kdsOrder.deleteMany({ where: { orderId: order.id } })
+    return cobroVivo
   })
+
+  if (cobroVivo) {
+    logger.error(
+      '🚨 [DeliveryCancel] el proveedor canceló una orden con un cobro de terminal sin desenlace acreditado — conciliar ese cobro',
+      {
+        venueId: order.venueId,
+        orderId: order.id,
+        orderNumber: order.orderNumber,
+        externalId,
+        requestId: cobroVivo.requestId,
+      },
+    )
+    void logAction({
+      venueId: order.venueId,
+      action: 'ORDER_CANCELLED_WITH_LIVE_TERMINAL_CHARGE',
+      entity: 'Order',
+      entityId: order.id,
+      data: { requestId: cobroVivo.requestId, source: 'DELIVERY', provider, externalId, orderNumber: order.orderNumber },
+    })
+  }
 
   // Devolver el stock va DESPUÉS y fuera de la transacción de arriba, y el orden es
   // deliberado: lo urgente es sacar la comanda de la cocina —eso detiene el desperdicio en

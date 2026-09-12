@@ -21,6 +21,7 @@ import {
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
 import { computeStoredOrderTotal } from '../shared/orderBalance'
+import { assertNoLiveTerminalCharge, lockAndReadOrderForCancel } from '../shared/orderCancelGuard'
 import { baseDeCargos, recalcularCargosPorServicio } from '../shared/serviceCharges'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
@@ -2455,6 +2456,16 @@ function conflictoSiLaMovieron(err: unknown): never {
 }
 
 /**
+ * 🔴 Decisión G2 (diseño §C.6/§G, 11-sep — revertible por el founder): con un cobro de terminal VIVO sobre la orden se
+ * bloquea TODA anulación, no sólo la que la cancela. Anular una parte baja el total por debajo de lo que la terminal
+ * está cobrando y, cuando ese cobro aterriza, deja un SOBREPAGO. Si el founder decide relajarla a «sólo al anular
+ * todo», el cambio es esta función y nada más: devolver `isVoidingAllItems`.
+ */
+export function anulacionExigeOrdenSinCobroVivo(_input: { isVoidingAllItems: boolean }): boolean {
+  return true
+}
+
+/**
  * Comp (complimentary) items or entire order
  * Removes cost from delivered items (for service recovery)
  * @param venueId Venue ID
@@ -2779,7 +2790,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
   // calculado sobre $100 se queda en $30 aunque el subtotal baje a $40. Los CARGOS por
   // porcentaje sí se recalculan desde el 2026-09-03 (`recalcularCargosPorServicio`); el clamp
   // sigue impidiendo el daño contable de la desproporción que queda.
-  const currentPaidAmount = Number(order.paidAmount || 0)
+  // Lo cobrado ya NO se toma de esta prelectura: se relee bajo el candado dentro de la transacción (P2-8).
 
   if (isVoidingAllItems) {
     logger.info(`🚫 [ORDER SERVICE] Voiding ALL items - auto-closing order ${orderId}`)
@@ -2792,109 +2803,164 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
   // fuera de ella, un fallo entre las dos escrituras deja la fila con el importe nuevo y la
   // orden con el total viejo — un estado a medias en el dinero.
   // ⚠️ El `orderItem.deleteMany` de más arriba sigue FUERA: límite PREEXISTENTE, no tocado.
-  const updatedOrder = await prisma.$transaction(async tx => {
-    // Los platos se borran DENTRO de la transacción (antes corrían fuera): si el CAS de abajo
-    // falla porque alguien movió la orden, los platos se quedan donde estaban. Antes quedaban
-    // borrados con los totales viejos — un estado a medias en el dinero.
-    await tx.orderItem.deleteMany({
-      where: {
-        id: {
-          in: input.itemIds,
-        },
-      },
-    })
+  const updatedOrder = await prisma.$transaction(
+    async tx => {
+      // 🔴 Diseño §C.6: el candado de la orden AL INICIO, antes de tocar un solo renglón. Serializa esta anulación con la
+      // admisión de un cobro de terminal y con el registro del dinero (los dos toman `Order FOR UPDATE`), y deja el orden
+      // de candados en Order → OrderItem, el mismo del registro de un pago por producto (antes era el inverso). La
+      // relectura va DENTRO del candado porque el registro de un cobro con tarjeta NO sube `Order.version`: el CAS de
+      // abajo no ve un pago que aterrizó entre la prelectura y la escritura, y anular todo cancelaba una orden PAGADA.
+      const fresca = await lockAndReadOrderForCancel(tx, { venueId, orderId })
+      if (fresca.version !== input.expectedVersion) {
+        throw new ConflictError(
+          `Order was modified by another request. Please refresh and try again. (Expected version: ${input.expectedVersion}, Current: ${fresca.version})`,
+        )
+      }
+      if (fresca.paymentStatus === 'PAID') {
+        throw new BadRequestError('Cannot void items from a paid order')
+      }
+      // Anular TODO cancela la orden: con dinero ya cobrado (PARTIAL) se rechaza, igual que `cancelOrder`. Una anulación
+      // parcial sobre una PARTIAL sigue permitida (no cancela nada).
+      if (isVoidingAllItems && fresca.paymentStatus === 'PARTIAL') {
+        throw new BadRequestError('Esta cuenta ya tiene pagos registrados. Reembólsalos antes de anular todos sus artículos.')
+      }
+      if (anulacionExigeOrdenSinCobroVivo({ isVoidingAllItems })) {
+        await assertNoLiveTerminalCharge(
+          tx,
+          { venueId, orderId },
+          {
+            mensaje:
+              'Hay un cobro en curso en la terminal para esta orden. Cancela o espera el resultado del cobro antes de anular artículos.',
+          },
+        )
+      }
 
-    // 🔴 MONEY: al anular baja el subtotal, así que un cargo por servicio PORCENTUAL baja con
-    // él (auditoría 2026-09-03). El descuento acumulado entra a la base, igual que en
-    // `removeOrderItem`.
-    //
-    // 🔴 Anular TODO cancela la orden, y ahí no basta con `total = 0` (auditoría de Codex,
-    // 2026-09-03): el cobro móvil selecciona `paymentStatus` y NI SIQUIERA lee `status`, así
-    // que una orden CANCELLED no se rechaza; después reconstruye el saldo con
-    // `computeOrderBalance`, que suma `Order.serviceChargeAmount`. Un snapshot superviviente
-    // de $15 vuelve a presentar $15 por cobrar sobre una cuenta cancelada.
-    //
-    // Con la base en 0 los cargos porcentuales se recalculan a 0, y el snapshot se guarda en
-    // 0: la orden queda en CERO COBRABLE, no sólo con el total en 0.
-    const baseParaCargos = isVoidingAllItems ? new Prisma.Decimal(0) : baseDeCargos(newSubtotal, order.discountAmount)
-    const cargosRecalculados = await recalcularCargosPorServicio(tx, orderId, baseParaCargos)
-    const newServiceChargeAmount = isVoidingAllItems ? 0 : cargosRecalculados
-
-    newTotal = isVoidingAllItems
-      ? 0
-      : computeStoredOrderTotal({
-          subtotal: newSubtotal,
-          discountAmount: order.discountAmount,
-          serviceChargeAmount: newServiceChargeAmount,
-          tipAmount: order.tipAmount,
-        }).toNumber()
-    const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
-
-    return tx.order
-      .update({
-        // 🔴 CAS: sólo se escribe si NADIE movió la orden desde que esta función la leyó. Sin la
-        // versión aquí, dos escrituras concurrentes sobre la misma mesa se pisaban en silencio.
-        where: { id: orderId, version: order.version },
-        data: {
-          subtotal: newSubtotal,
-          serviceChargeAmount: newServiceChargeAmount,
-          total: newTotal,
-          remainingBalance: newRemainingBalance,
-          // ⭐ If voiding all items, auto-close order (Toast/Square pattern)
-          ...(isVoidingAllItems && {
-            status: 'CANCELLED',
-            paymentStatus: 'PENDING', // Keep PENDING (order was never paid)
-          }),
-          version: {
-            increment: 1,
-          },
-        },
-        include: {
-          items: {
-            include: {
-              product: {
-                select: {
-                  id: true,
-                  name: true,
-                  price: true,
-                },
-              },
-              modifiers: {
-                include: {
-                  modifier: true,
-                },
-              },
-            },
-          },
-          payments: {
-            include: {
-              allocations: true,
-            },
-          },
-          table: {
-            select: {
-              id: true,
-              number: true,
-            },
-          },
-          createdBy: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-            },
-          },
-          servedBy: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-            },
+      // Los platos se borran DENTRO de la transacción (antes corrían fuera): si el CAS de abajo
+      // falla porque alguien movió la orden, los platos se quedan donde estaban. Antes quedaban
+      // borrados con los totales viejos — un estado a medias en el dinero.
+      await tx.orderItem.deleteMany({
+        where: {
+          id: {
+            in: input.itemIds,
           },
         },
       })
-      .catch(conflictoSiLaMovieron)
-  })
+
+      // 🔴 MONEY: al anular baja el subtotal, así que un cargo por servicio PORCENTUAL baja con
+      // él (auditoría 2026-09-03). El descuento acumulado entra a la base, igual que en
+      // `removeOrderItem`.
+      //
+      // 🔴 Anular TODO cancela la orden, y ahí no basta con `total = 0` (auditoría de Codex,
+      // 2026-09-03): el cobro móvil selecciona `paymentStatus` y NI SIQUIERA lee `status`, así
+      // que una orden CANCELLED no se rechaza; después reconstruye el saldo con
+      // `computeOrderBalance`, que suma `Order.serviceChargeAmount`. Un snapshot superviviente
+      // de $15 vuelve a presentar $15 por cobrar sobre una cuenta cancelada.
+      //
+      // Con la base en 0 los cargos porcentuales se recalculan a 0, y el snapshot se guarda en
+      // 0: la orden queda en CERO COBRABLE, no sólo con el total en 0.
+      const baseParaCargos = isVoidingAllItems ? new Prisma.Decimal(0) : baseDeCargos(newSubtotal, order.discountAmount)
+      const cargosRecalculados = await recalcularCargosPorServicio(tx, orderId, baseParaCargos)
+      const newServiceChargeAmount = isVoidingAllItems ? 0 : cargosRecalculados
+
+      newTotal = isVoidingAllItems
+        ? 0
+        : computeStoredOrderTotal({
+            subtotal: newSubtotal,
+            discountAmount: order.discountAmount,
+            serviceChargeAmount: newServiceChargeAmount,
+            // La propina de la relectura bajo el candado, no la de la prelectura: el registro de un cobro con propina
+            // no sube la versión, así que la prelectura puede traer una propina vieja y el total perdería la ya cobrada.
+            tipAmount: fresca.tipAmount ?? order.tipAmount,
+          }).toNumber()
+
+      // 🔴 DINERO (auditoría Fable 11-sep, P2-8): con dinero YA cobrado, la anulación no puede dejar el total por debajo
+      // de lo pagado. Antes quedaba `remainingBalance = max(0, total − pagado)`: el cliente pagó de más y nadie se
+      // enteraba — sin reembolso ni alerta. Se RECHAZA (opción conservadora; crear una obligación de reembolso sería
+      // otra decisión). Lo cobrado se relee BAJO el candado: el de la orden y el de los `Payment` registrados, el mayor,
+      // porque hay órdenes históricas con pagos COMPLETED y `paidAmount` desfasado. Mismo filtro que el registro del
+      // dinero: pagos no-reembolso (`type` nulo incluido), importe + propina — igual que `newTotal`, que lleva la propina.
+      const pagosRegistrados = await tx.payment.aggregate({
+        where: { venueId, orderId, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
+        _sum: { amount: true, tipAmount: true },
+      })
+      const pagadoPorPagos = new Prisma.Decimal(pagosRegistrados?._sum?.amount ?? 0).plus(pagosRegistrados?._sum?.tipAmount ?? 0)
+      const pagado = Prisma.Decimal.max(new Prisma.Decimal(fresca.paidAmount ?? 0), pagadoPorPagos).toDecimalPlaces(2)
+      const totalNuevo = new Prisma.Decimal(newTotal).toDecimalPlaces(2)
+      if (totalNuevo.lessThan(pagado)) {
+        throw new BadRequestError(
+          `Anular estos artículos dejaría la cuenta en $${totalNuevo.toFixed(2)} y ya se cobraron $${pagado.toFixed(2)}. Reembolsa primero la diferencia o anula menos artículos.`,
+          'ORDER_VOID_BELOW_PAID',
+          { paidAmount: pagado.toFixed(2), newTotal: totalNuevo.toFixed(2) },
+        )
+      }
+      const newRemainingBalance = Math.max(0, newTotal - pagado.toNumber())
+
+      return tx.order
+        .update({
+          // 🔴 CAS: sólo se escribe si NADIE movió la orden desde que esta función la leyó. Sin la
+          // versión aquí, dos escrituras concurrentes sobre la misma mesa se pisaban en silencio.
+          where: { id: orderId, version: order.version },
+          data: {
+            subtotal: newSubtotal,
+            serviceChargeAmount: newServiceChargeAmount,
+            total: newTotal,
+            remainingBalance: newRemainingBalance,
+            // ⭐ If voiding all items, auto-close order (Toast/Square pattern)
+            // Sin tocar `paymentStatus`: la relectura bajo el candado ya garantizó que no hay dinero (ni PAID ni PARTIAL).
+            // Escribirlo a ciegas pisaba un PAID que había aterrizado sin subir la versión.
+            ...(isVoidingAllItems && { status: 'CANCELLED' }),
+            version: {
+              increment: 1,
+            },
+          },
+          include: {
+            items: {
+              include: {
+                product: {
+                  select: {
+                    id: true,
+                    name: true,
+                    price: true,
+                  },
+                },
+                modifiers: {
+                  include: {
+                    modifier: true,
+                  },
+                },
+              },
+            },
+            payments: {
+              include: {
+                allocations: true,
+              },
+            },
+            table: {
+              select: {
+                id: true,
+                number: true,
+              },
+            },
+            createdBy: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+              },
+            },
+            servedBy: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+              },
+            },
+          },
+        })
+        .catch(conflictoSiLaMovieron)
+    },
+    { timeout: 15_000, maxWait: 5_000 },
+  )
 
   // ⭐ If voided all items, remove customer linkages (pay-later orders)
   // No point keeping "cuenta por cobrar" for $0.00 order with 0 items (Toast/Square pattern)

@@ -11,6 +11,7 @@
  * 2. REGRESSION TESTS — in-flight rows untouched, existing close paths unchanged
  */
 
+import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import socketManager from '@/communication/sockets/managers/socketManager'
 import { terminalRegistry } from '@/communication/sockets/terminal-registry'
@@ -88,11 +89,11 @@ beforeEach(() => {
   delete process.env.TERMINAL_PAYMENT_LOCK_ENABLED
   mockedGetServer.mockReturnValue({ to: jest.fn(() => ({ emit: jest.fn() })), sockets: { sockets: { get: jest.fn() } } })
   mockedGetTerminal.mockReturnValue(null)
-  tpr().findMany.mockResolvedValue([])
-  tpr().findFirst.mockResolvedValue(null)
-  tpr().updateMany.mockResolvedValue({ count: 1 })
-  prismaMock.payment.findFirst.mockResolvedValue(null)
-  prismaMock.terminal.findFirst.mockResolvedValue(null)
+  tpr().findMany.mockReset().mockResolvedValue([])
+  tpr().findFirst.mockReset().mockResolvedValue(null)
+  tpr().updateMany.mockReset().mockResolvedValue({ count: 1 })
+  prismaMock.payment.findFirst.mockReset().mockResolvedValue(null)
+  prismaMock.terminal.findFirst.mockReset().mockResolvedValue(null)
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -103,7 +104,7 @@ describe('reconcileUnknownRequests — money first: a recorded card payment alwa
     const logger = require('@/config/logger').default
     const errSpy = jest.spyOn(logger, 'error')
     tpr().findMany.mockResolvedValueOnce([unknownRow()])
-    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-late' })
+    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-late', source: 'TPV', terminal: { serialNumber: '2841653112' }, amount: new Prisma.Decimal(135), tipAmount: new Prisma.Decimal(0) })
 
     const summary = await terminalPaymentService.reconcileUnknownRequests(NOW)
 
@@ -119,10 +120,61 @@ describe('reconcileUnknownRequests — money first: a recorded card payment alwa
     errSpy.mockRestore()
   })
 
+  // 🔴 El importe COBRADO puede no ser el que pidió el POS (el cajero tecleó otro en la terminal,
+  // la propina cambió). Esta ruta —el barrido de UNKNOWN— cerraba la fila como «pagada» SIN dejar
+  // rastro: la orden quedaba saldada y la diferencia no aparecía en ningún lado. El dinero no se
+  // rechaza, ya salió de la tarjeta; se cierra igual, pero MARCADO para que un humano lo concilie.
+  it('un cobro por OTRO importe se cierra MARCADO como CONTRACT_MISMATCH, no como si nada', async () => {
+    tpr().findMany.mockResolvedValueOnce([unknownRow()]) // pidió 13500 centavos
+    prismaMock.payment.findFirst.mockResolvedValueOnce({
+      id: 'pay-otro-importe',
+      source: 'TPV',
+      terminal: { serialNumber: '2841653112' },
+      amount: new Prisma.Decimal(200), // 20000 centavos: 65 pesos de más
+      tipAmount: new Prisma.Decimal(0),
+    })
+
+    await terminalPaymentService.reconcileUnknownRequests(NOW)
+
+    expect(tpr().updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'COMPLETED',
+          paymentId: 'pay-otro-importe',
+          failureCode: 'CONTRACT_MISMATCH',
+          resultJson: expect.objectContaining({
+            reconciliationRequired: true,
+            requested: expect.objectContaining({ amountCents: 13500, tipCents: 0, totalCents: 13500 }),
+            reported: expect.objectContaining({ amountCents: 20000, tipCents: 0, totalCents: 20000 }),
+          }),
+        }),
+      }),
+    )
+  })
+
+  // El caso normal NO puede quedar marcado: marcar de más volvería inútil la señal.
+  it('un cobro por el importe pedido se cierra SIN marca', async () => {
+    tpr().findMany.mockResolvedValueOnce([unknownRow()])
+    prismaMock.payment.findFirst.mockResolvedValueOnce({
+      id: 'pay-cuadra',
+      source: 'TPV',
+      terminal: { serialNumber: '2841653112' },
+      amount: new Prisma.Decimal(135),
+      tipAmount: new Prisma.Decimal(0),
+    })
+
+    await terminalPaymentService.reconcileUnknownRequests(NOW)
+
+    const escritura = tpr().updateMany.mock.calls.at(-1)?.[0]
+    expect(escritura.data.status).toBe('COMPLETED')
+    expect(escritura.data.failureCode).toBeUndefined()
+    expect(escritura.data.resultJson).toBeUndefined()
+  })
+
   it('the payment lookup carries the same 4 guards as the stale sweep (after the row, COMPLETED, card, not claimed)', async () => {
     const row = unknownRow()
     tpr().findMany.mockResolvedValueOnce([row])
-    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-x' })
+    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-x', source: 'TPV', terminal: { serialNumber: '2841653112' }, amount: new Prisma.Decimal(135), tipAmount: new Prisma.Decimal(0) })
     tpr().findFirst.mockResolvedValueOnce({ id: 'row-other' }) // already claimed by another request
 
     const summary = await terminalPaymentService.reconcileUnknownRequests(NOW)
@@ -132,7 +184,7 @@ describe('reconcileUnknownRequests — money first: a recorded card payment alwa
         where: expect.objectContaining({
           orderId: 'order-1',
           venueId: 'venue-1',
-          createdAt: { gte: row.createdAt },
+          processorData: { path: ['terminalPaymentRequestId'], equals: row.requestId },
           status: 'COMPLETED',
           method: { in: ['CREDIT_CARD', 'DEBIT_CARD'] },
         }),
@@ -217,48 +269,59 @@ describe('reconcileUnknownRequests — the terminal must be BACK before anything
     expect(tpr().updateMany).not.toHaveBeenCalled()
   })
 
-  it('marked, grace elapsed, no card payment → released as TIMED_OUT/AUTO_RELEASED with audit trail, 🚨 log and ops email', async () => {
-    const logger = require('@/config/logger').default
-    const errSpy = jest.spyOn(logger, 'error')
-    const returnedAt = new Date(NOW.getTime() - GRACE_MS)
-    tpr().findMany.mockResolvedValueOnce([unknownRow({ terminalReturnedAt: returnedAt })])
-    terminalWithHeartbeat(new Date(NOW.getTime() - 10_000))
-
+  // 🔴 CAMBIO DE POLÍTICA (12-sep). Estas dos pruebas fijaban «pasada la gracia NO se suelta nada»,
+  // y eran correctas para esa política. La política cambió porque su consecuencia era que una
+  // terminal cuya evidencia no llega NUNCA queda muerta para siempre — medido en hardware y vivido
+  // por el cliente (Testarudo, 4-sep, 3 h sin poder cobrar).
+  //
+  // 🔑 Lo que NO cambió, y es lo que estas pruebas siguen guardando: el latido y el plazo siguen sin
+  // probar que la autorización terminó. Por eso soltar libera CAPACIDAD y jamás acredita «no se
+  // cobró»: la fila se queda pendiente de desenlace (su venta sigue cerrada, la sonda sigue
+  // preguntando) y ningún mensaje puede insinuar que cobrar de nuevo esa venta sea seguro.
+  it('pasada la gracia suelta la RANURA con su código, pero NUNCA acredita que no se cobró', async () => {
+    tpr().findMany.mockResolvedValueOnce([unknownRow({ terminalReturnedAt: new Date(NOW.getTime() - GRACE_MS) })])
+    terminalWithHeartbeat(NOW)
     const summary = await terminalPaymentService.reconcileUnknownRequests(NOW)
 
     expect(summary.released).toBe(1)
+    // Se marca TIMED_OUT/AUTO_RELEASED: el código es lo que separa una liberación DELIBERADA (que
+    // suelta la ranura) de un TIMED_OUT histórico sin explicación (que la sigue reteniendo).
     expect(tpr().updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({ id: 'row-u', status: 'UNKNOWN' }), // CAS: only if still UNKNOWN
-        data: expect.objectContaining({ status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED' }),
+        where: expect.objectContaining({ id: 'row-u', status: 'UNKNOWN' }),
+        data: { status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED' },
       }),
     )
-    // resultJson stays untouched: resultFromRow must keep replaying "timeout" to a POS that retries the id
-    const releaseCall = tpr().updateMany.mock.calls.find((c: any[]) => c[0]?.data?.failureCode === 'AUTO_RELEASED')
-    expect(releaseCall[0].data).not.toHaveProperty('resultJson')
+    // 🔴 Y NO se escribe ningún código de la lista blanca: esos afirman «no hubo cobro», y el plazo
+    // no demuestra eso. Si alguien mete AUTO_RELEASED en `CODIGOS_SIN_COBRO`, esto cae.
+    const escritos = tpr().updateMany.mock.calls.map((c: any[]) => c[0].data?.failureCode)
+    expect(escritos.filter((f: string) => ['TPV_NEVER_RECEIVED', 'TPV_INBOX_NOT_FOUND', 'OPERATOR_RECONCILED_NO_CHARGE'].includes(f))).toEqual([])
+  })
 
+  it('al soltar deja rastro auditable y su aviso DICE que la venta sigue protegida (nunca que sea seguro recobrar)', async () => {
+    tpr().findMany.mockResolvedValueOnce([unknownRow({ terminalReturnedAt: new Date(NOW.getTime() - GRACE_MS) })])
+    terminalWithHeartbeat(NOW)
+    await terminalPaymentService.reconcileUnknownRequests(NOW)
+
+    // Soltar una terminal por política es exactamente lo que un dueño audita después.
     expect(mockedLogAction).toHaveBeenCalledWith(
-      expect.objectContaining({
-        venueId: 'venue-1',
-        action: 'TERMINAL_PAYMENT_AUTO_RELEASED',
-        entity: 'TerminalPaymentRequest',
-        entityId: 'row-u',
-        data: expect.objectContaining({ requestId: 'REQ-U', terminalId: '2841653112', amountCents: 13500, orderId: 'order-1' }),
-      }),
+      expect.objectContaining({ action: 'TERMINAL_PAYMENT_AUTO_RELEASED', entity: 'TerminalPaymentRequest' }),
     )
-    expect(errSpy).toHaveBeenCalledWith(
-      expect.stringContaining('🚨 [Terminal-payment watchdog] UNKNOWN request auto-released'),
-      expect.objectContaining({ requestId: 'REQ-U', terminalId: '2841653112' }),
-    )
-    expect(mockedSendOpsAlert).toHaveBeenCalledWith(expect.objectContaining({ subject: expect.stringContaining('2841653112') }))
-    errSpy.mockRestore()
+    expect(mockedSendOpsAlert).toHaveBeenCalled()
+
+    // 🔴 El aviso tiene que decir las DOS cosas. Con sólo la primera, quien lo lee concluye que la
+    // venta quedó libre y la cobra otra vez — que es el daño que este trabajo existe para evitar.
+    const aviso = mockedSendOpsAlert.mock.calls[0][0]
+    const texto = [aviso.subject, ...(aviso.lines ?? [])].join(' ')
+    expect(texto).toMatch(/liberad[ao]|liberó/i) // la TERMINAL se soltó
+    expect(texto).toMatch(/VENTA sigue protegida/i) // …y la VENTA no
   })
 
   it('marked and grace elapsed, but a card payment appeared meanwhile → COMPLETED wins, never released', async () => {
     const returnedAt = new Date(NOW.getTime() - GRACE_MS - 60_000)
     tpr().findMany.mockResolvedValueOnce([unknownRow({ terminalReturnedAt: returnedAt })])
     terminalWithHeartbeat(new Date(NOW.getTime() - 10_000))
-    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-late' })
+    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-late', source: 'TPV', terminal: { serialNumber: '2841653112' }, amount: new Prisma.Decimal(135), tipAmount: new Prisma.Decimal(0) })
 
     const summary = await terminalPaymentService.reconcileUnknownRequests(NOW)
 
@@ -313,41 +376,22 @@ describe('reconcileUnknownRequests — the terminal must be BACK before anything
 describe('releaseUnknownRequest — a human may free the slot, but never on top of money', () => {
   const actor = { staffId: 'staff-9', source: 'MOBILE' as const }
 
-  it('releases an UNKNOWN row with no card payment: TIMED_OUT / MANUAL_RELEASE, audited with actor and reason', async () => {
+  it('retains UNKNOWN without confirmed execution completion even when an operator requests release', async () => {
     tpr().findFirst.mockResolvedValueOnce(unknownRow())
-
-    const r = await terminalPaymentService.releaseUnknownRequest({
+    const result = await terminalPaymentService.releaseUnknownRequest({
       requestId: 'REQ-U',
       venueId: 'venue-1',
       actor,
       reason: 'PAX reiniciada',
     })
-
-    expect(r).toEqual(expect.objectContaining({ released: true, status: 'TIMED_OUT' }))
-    expect(tpr().findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ requestId: 'REQ-U', venueId: 'venue-1' }) }),
-    )
-    expect(tpr().updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ id: 'row-u', venueId: 'venue-1', status: 'UNKNOWN' }),
-        data: expect.objectContaining({ status: 'TIMED_OUT', failureCode: 'MANUAL_RELEASE' }),
-      }),
-    )
-    expect(mockedLogAction).toHaveBeenCalledWith(
-      expect.objectContaining({
-        staffId: 'staff-9',
-        venueId: 'venue-1',
-        action: 'TERMINAL_PAYMENT_MANUAL_RELEASE',
-        entityId: 'row-u',
-        data: expect.objectContaining({ requestId: 'REQ-U', reason: 'PAX reiniciada', source: 'MOBILE' }),
-      }),
-    )
-    expect(mockedSendOpsAlert).toHaveBeenCalled()
+    expect(result).toMatchObject({ released: false, status: 'UNKNOWN' })
+    expect(tpr().updateMany).not.toHaveBeenCalled()
+    expect(mockedLogAction).not.toHaveBeenCalled()
   })
 
   it('refuses to release when a reconcilable card payment exists → reconciles to COMPLETED instead', async () => {
     tpr().findFirst.mockResolvedValueOnce(unknownRow())
-    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-late' })
+    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-late', source: 'TPV', terminal: { serialNumber: '2841653112' }, amount: new Prisma.Decimal(135), tipAmount: new Prisma.Decimal(0) })
 
     const r = await terminalPaymentService.releaseUnknownRequest({ requestId: 'REQ-U', venueId: 'venue-1', actor, reason: 'x' })
 
@@ -361,7 +405,7 @@ describe('releaseUnknownRequest — a human may free the slot, but never on top 
       .findFirst.mockResolvedValueOnce(unknownRow()) // the row
       .mockResolvedValueOnce(null) // findReconcilablePayment: not claimed by another request
       .mockResolvedValueOnce({ status: 'COMPLETED', paymentId: 'pay-from-socket' }) // re-read after the lost CAS
-    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-late' })
+    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-late', source: 'TPV', terminal: { serialNumber: '2841653112' }, amount: new Prisma.Decimal(135), tipAmount: new Prisma.Decimal(0) })
     tpr().updateMany.mockResolvedValueOnce({ count: 0 })
 
     const r = await terminalPaymentService.releaseUnknownRequest({ requestId: 'REQ-U', venueId: 'venue-1', actor, reason: 'x' })
@@ -383,9 +427,9 @@ describe('releaseUnknownRequest — a human may free the slot, but never on top 
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
-// The busy rejection tells the cashier WHY (amount, age, sender) and, if stuck, that it self-heals
+// The busy rejection explains same-venue blockers and hides other venues’ financial details
 // ═══════════════════════════════════════════════════════════════════════════
-describe('busy message — says why and, for an UNKNOWN blocker, that it frees itself', () => {
+describe('busy message — explains unresolved outcomes without leaking another venue', () => {
   const P2002 = Object.assign(new Error('Unique constraint failed'), { code: 'P2002' })
 
   function primeBusy(blocker: Record<string, unknown>) {
@@ -396,8 +440,18 @@ describe('busy message — says why and, for an UNKNOWN blocker, that it frees i
       .mockResolvedValueOnce(blocker)
   }
 
-  it('looks the blocker up WITHIN the venue: a slot held by another venue (migrated terminal) gets the generic message, nothing leaks', async () => {
-    primeBusy(null as unknown as Record<string, unknown>) // no blocker visible from this venue
+  it('reserves a physical slot across venues while hiding the foreign blocker details', async () => {
+    const foreignCreatedAt = new Date('2026-09-01T12:34:56.000Z')
+    primeBusy({
+      venueId: 'venue-OTHER',
+      requestId: 'REQ-FOREIGN-PRIVATE',
+      status: 'UNKNOWN',
+      amountCents: 987654,
+      senderDevice: 'Private foreign cashier',
+      createdAt: foreignCreatedAt,
+    })
+    const emit = jest.fn()
+    mockedGetServer.mockReturnValue({ sockets: { sockets: new Map([['sock-a', { emit }]]) }, to: () => ({ emit }) })
     let busy: any
     try {
       await terminalPaymentService.sendPaymentToTerminal({ terminalId: '2841653112', amountCents: 5000, venueId: 'venue-1' } as any)
@@ -408,12 +462,30 @@ describe('busy message — says why and, for an UNKNOWN blocker, that it frees i
     expect(busy).toBeInstanceOf(TerminalBusyError)
     expect(busy.message).toBe('La terminal 2841653112 está ocupada procesando otro cobro')
     expect(busy.details.blockingRequest.amountCents).toBeUndefined()
-    // second findFirst = the blocker lookup → must carry the venue
-    expect(tpr().findFirst.mock.calls[1][0].where).toEqual(expect.objectContaining({ venueId: 'venue-1', terminalId: '2841653112' }))
+    expect(busy.details.blockingRequest.requestId).toBe('unknown')
+    expect(busy.details.blockingRequest.senderDevice).toBeUndefined()
+    expect(busy.details.blockingRequest.ageSeconds).toBe(0)
+    const serialized = JSON.stringify({ message: busy.message, details: busy.details })
+    for (const privateValue of [
+      'venue-OTHER',
+      'REQ-FOREIGN-PRIVATE',
+      '987654',
+      'Private foreign cashier',
+      foreignCreatedAt.toISOString(),
+    ]) {
+      expect(serialized).not.toContain(privateValue)
+    }
+    // Physical admission must see reservations from any venue; only its projection is tenant-scoped.
+    const blockerWhere = tpr().findFirst.mock.calls[1][0].where
+    expect(blockerWhere).toEqual(expect.objectContaining({ terminalId: '2841653112' }))
+    expect(blockerWhere).not.toHaveProperty('venueId')
+    expect(tpr().create).not.toHaveBeenCalled()
+    expect(emit).not.toHaveBeenCalled()
   })
 
   it('in-flight blocker: names amount, minutes and sender device', async () => {
     primeBusy({
+      venueId: 'venue-1',
       requestId: 'REQ-B',
       status: 'PENDING',
       amountCents: 13500,
@@ -428,8 +500,9 @@ describe('busy message — says why and, for an UNKNOWN blocker, that it frees i
     })
   })
 
-  it('UNKNOWN blocker: says it never answered and will free itself when the terminal reconnects', async () => {
+  it('UNKNOWN blocker: tells the cashier to confirm the unresolved outcome before another charge', async () => {
     primeBusy({
+      venueId: 'venue-1',
       requestId: 'REQ-U',
       status: 'UNKNOWN',
       amountCents: 13500,
@@ -444,7 +517,7 @@ describe('busy message — says why and, for an UNKNOWN blocker, that it frees i
       busy = e
     }
     expect(busy).toBeInstanceOf(TerminalBusyError)
-    expect((busy as Error).message).toMatch(/sin respuesta.*hace 40 min.*se liberará sola/)
+    expect((busy as Error).message).toMatch(/sin respuesta.*hace 40 min.*confirma el resultado/)
   })
 })
 
@@ -460,7 +533,7 @@ describe('reconcileUnknownRequests — a payment landing on an already-RELEASED 
     const logger = require('@/config/logger').default
     const errSpy = jest.spyOn(logger, 'error')
     tpr().findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([releasedRow()])
-    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-after-release' })
+    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-after-release', source: 'TPV', terminal: { serialNumber: '2841653112' } })
 
     const summary = await terminalPaymentService.reconcileUnknownRequests(NOW)
 
@@ -529,5 +602,16 @@ describe('regression — reconcileStaleRequests keeps parking UNKNOWN and still 
     ])
     await terminalPaymentService.reconcileStaleRequests(NOW)
     expect(mockedSendOpsAlert).toHaveBeenCalledWith(expect.objectContaining({ subject: expect.stringContaining('abc') }))
+  })
+})
+
+describe('Audit round1 truthful watchdog instructions', () => {
+  it('never promises elapsed-time release of a financially unknown request', async () => {
+    tpr().findMany.mockResolvedValueOnce([{ ...unknownRow(), status: 'PENDING', amountCents: 10000 }])
+    await terminalPaymentService.reconcileStaleRequests(NOW)
+    expect(mockedSendOpsAlert).toHaveBeenCalled()
+    const text = mockedSendOpsAlert.mock.calls[0][0].lines.join(' ')
+    expect(text).not.toMatch(/liberar[aá] solo|20 minutos/i)
+    expect(text).toMatch(/confirma|concilia/i)
   })
 })

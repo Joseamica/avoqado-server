@@ -6,10 +6,16 @@
  */
 
 import { Request, Response } from 'express'
-import { terminalPaymentService } from '../../services/terminal-payment.service'
+import { type CancelPaymentOutcome, terminalPaymentService } from '../../services/terminal-payment.service'
 import { terminalRegistry } from '../../communication/sockets/terminal-registry'
 import logger from '../../config/logger'
-import { BadRequestError, OrderAlreadyPaidError, TerminalBusyError } from '../../errors/AppError'
+import AppError, {
+  BadRequestError,
+  OrderAlreadyPaidError,
+  TerminalBusyError,
+  TerminalPaymentAdmissionRetryError,
+  TerminalUnavailableError,
+} from '../../errors/AppError'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
 import { normalizeRequestedCustomerId } from '../../services/tpv/fastPaymentCustomer'
 
@@ -82,14 +88,9 @@ export async function sendTerminalPayment(req: Request, res: Response) {
       return res.status(400).json({ success: false, message: 'skipReview debe ser booleano' })
     }
 
-    // Validate terminal belongs to this venue (registry normalizes AVQD- prefix)
-    const terminal = terminalRegistry.getTerminal(terminalId)
-    if (terminal && terminal.venueId !== venueId) {
-      return res.status(403).json({
-        success: false,
-        message: 'La terminal no pertenece a este establecimiento',
-      })
-    }
+    // 🔴 «La terminal no pertenece a este establecimiento» (403) ya NO se decide aquí: lo decide el servicio BAJO el
+    // candado de la terminal y deja su lápida (H.5), igual que «no conectada» o «sin socket». Cortarlo aquí, antes de
+    // la admisión, dejaba pasar una copia posterior del MISMO POST si la terminal cambiaba de estado entre las dos.
 
     // El POS manda al vendedor elegido. Clientes viejos (iOS publicado) no mandan
     // la llave: en ese caso se congela al usuario autenticado, no al usuario que por
@@ -132,6 +133,11 @@ export async function sendTerminalPayment(req: Request, res: Response) {
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Error desconocido'
 
+    // 🔑 Todo rechazo de admisión que el servicio decide bajo el candado deja lápida y sale con `code` + `details.requestId`
+    // (H.5/H.6): con eso el POS sabe que ESE cobro no se creó y que la misma solicitud repetirá el mismo rechazo. Aditivo:
+    // lo que ya leían las apps publicadas (`status`, `message`, `errorMessage`, `blockingRequest`) queda igual.
+    const conDetalles = (details: unknown) => (details ? { details } : {})
+
     // Terminal already processing another charge → 409 busy.
     // Body carries status:'failed' so OLD iOS/Desktop clients (which parse the
     // body `status` field, not the HTTP code) degrade safely; NEW clients read
@@ -144,6 +150,7 @@ export async function sendTerminalPayment(req: Request, res: Response) {
         errorMessage: message,
         message,
         blockingRequest: error.details.blockingRequest,
+        details: error.details,
       })
     }
 
@@ -157,6 +164,32 @@ export async function sendTerminalPayment(req: Request, res: Response) {
         code: 'ORDER_ALREADY_PAID',
         errorMessage: message,
         message,
+        ...conDetalles(error.details),
+      })
+    }
+
+    // La admisión no pudo decidir (tiempo agotado o conflicto de la transacción): «reintenta con la MISMA solicitud;
+    // todavía no se sabe». `status:'timeout'` es el desenlace incierto que las apps publicadas ya leen como «consulta
+    // antes de volver a cobrar». Nunca un 500 sin código.
+    if (error instanceof TerminalPaymentAdmissionRetryError) {
+      return res.status(503).json({
+        success: false,
+        status: 'timeout',
+        code: error.code,
+        errorMessage: message,
+        message,
+        ...conDetalles(error.details),
+      })
+    }
+
+    // Terminal no conectada (404), registrada sin socket (422) o de otro establecimiento (403): mismo cuerpo de
+    // siempre (`success` + `message`) más `code` y `details.requestId`.
+    if (error instanceof TerminalUnavailableError) {
+      return res.status(error.statusCode).json({
+        success: false,
+        code: error.code,
+        message,
+        ...conDetalles(error.details),
       })
     }
 
@@ -177,9 +210,13 @@ export async function sendTerminalPayment(req: Request, res: Response) {
     }
 
     if (error instanceof BadRequestError) {
+      // `ORDER_CANCELLED_NO_NEW_CHARGE` / `ORDER_NOT_FOUND` llevan código y `details.requestId` (antes se perdían aquí).
+      // Un conflicto de solicitud (sin código) sale como siempre: sólo su mensaje.
       return res.status(400).json({
         success: false,
         message,
+        ...(error.code ? { code: error.code } : {}),
+        ...conDetalles(error.details),
       })
     }
 
@@ -367,12 +404,26 @@ export async function releaseTerminalPayment(req: Request, res: Response) {
         ? 'Terminal liberada. Ya puedes volver a mandarle cobros.'
         : r.status === 'COMPLETED'
           ? 'No se liberó: ese cobro SÍ se registró con tarjeta. Revisa que la cuenta no quede pagada dos veces.'
-          : `No se liberó: el cobro ya no está atorado (estado ${r.status}).`,
+          : 'No se liberó: falta confirmar el resultado y que la terminal haya terminado. Consulta el cobro en la terminal.',
     })
   } catch (error) {
     logger.error('Error in releaseTerminalPayment', { error: error instanceof Error ? error.message : 'Error desconocido' })
     return res.status(500).json({ success: false, message: 'Error interno del servidor' })
   }
+}
+
+/**
+ * El texto por caso. Antes había DOS: «Cancelación enviada a la terminal» o «Terminal no conectada» — y el segundo
+ * salía también cuando la fila ya tenía desenlace o ni existía, que es información falsa para el cajero.
+ */
+const MENSAJE_DE_CANCELACION: Record<CancelPaymentOutcome['cancelIntent'], (emitido: boolean) => string> = {
+  RECORDED: emitido =>
+    emitido
+      ? 'Cancelación enviada a la terminal'
+      : 'Cancelación guardada. La terminal no está conectada: confirma en el aparato antes de volver a cobrar.',
+  ALREADY_FINAL: () => 'Ese cobro ya no se puede cancelar: consulta su resultado antes de volver a cobrar.',
+  NOT_FOUND: () => 'No existe una solicitud de cobro con ese identificador en este establecimiento',
+  MISSING_REQUEST_ID: () => 'Falta el identificador del cobro: sin él no se puede cancelar una venta en curso',
 }
 
 export async function cancelTerminalPayment(req: Request, res: Response) {
@@ -406,16 +457,34 @@ export async function cancelTerminalPayment(req: Request, res: Response) {
       reason,
     })
 
-    const cancelled = await terminalPaymentService.cancelPayment(terminalId, requestId, reason, venueId)
+    const resultado = await terminalPaymentService.cancelPayment(terminalId, requestId, reason, venueId)
 
+    // 🔴 ADITIVO (§8 C.2). `success` conserva EXACTAMENTE su significado de siempre —intención registrada Y emitida—
+    // porque las apps publicadas lo leen; lo que se agrega es con qué distinguir los cuatro casos que ese booleano
+    // mezclaba, y el estado durable del cobro (`payment`) releído tras el CAS. HTTP sigue siendo 200 en los cuatro.
+    const success = resultado.cancelIntent === 'RECORDED' && resultado.cancelEmitted
     return res.json({
-      success: cancelled,
-      message: cancelled ? 'Cancelación enviada a la terminal' : 'Terminal no conectada',
+      success,
+      message: MENSAJE_DE_CANCELACION[resultado.cancelIntent](resultado.cancelEmitted),
+      ...(requestId ? { requestId } : {}),
+      cancelIntent: resultado.cancelIntent,
+      cancelEmitted: resultado.cancelEmitted,
+      payment: resultado.payment,
     })
   } catch (error) {
-    logger.error('Error in cancelTerminalPayment', {
-      error: error instanceof Error ? error.message : 'Error desconocido',
-    })
+    const message = error instanceof Error ? error.message : 'Error desconocido'
+    logger.error('Error in cancelTerminalPayment', { error: message })
+
+    // P2-14 (auditoría 11-sep): un error TIPADO salía como 500 genérico y el POS perdía `code`, `details` y el
+    // estado HTTP — o sea, no podía distinguir «no se pudo cancelar porque X» de «el servidor se rompió».
+    if (error instanceof AppError) {
+      return res.status(error.statusCode).json({
+        success: false,
+        message,
+        ...(error.code ? { code: error.code } : {}),
+        ...(error.details ? { details: error.details } : {}),
+      })
+    }
 
     return res.status(500).json({
       success: false,
@@ -432,7 +501,8 @@ export async function cancelTerminalPayment(req: Request, res: Response) {
  *  - 200 + terminal status (COMPLETED/FAILED/CANCELLED/TIMED_OUT/UNKNOWN) → the
  *    real outcome; the client stops and acts on it (never blind-retries).
  *  - 200 + IN_PROGRESS → still running; client keeps polling.
- *  - 404 NOT_FOUND → never persisted → safe to retry with the SAME requestId.
+ *  - 404 NOT_FOUND → not visible at this instant; an earlier POST can still be
+ *    running. It is not permission to submit a new authorization.
  * Golden rule for clients: on timeout/NetworkError, GET status BEFORE retrying.
  */
 export async function getTerminalPaymentStatus(req: Request, res: Response) {
@@ -480,7 +550,10 @@ export async function getOnlineTerminals(req: Request, res: Response) {
     // only via HTTP heartbeat (socketId null) can't be charged, so hiding it
     // here prevents the POS from picking one that would 422.
     const terminals = terminalRegistry.getPaymentReadyTerminals(venueId)
-    const busySet = await terminalPaymentService.getBusyTerminalIds(venueId)
+    const busySet = await terminalPaymentService.getBusyTerminalIds(
+      venueId,
+      terminals.map(t => t.terminalId),
+    )
 
     logger.info(`📡 [API] getOnlineTerminals for venue ${venueId}: found ${terminals.length}`, {
       venueId,

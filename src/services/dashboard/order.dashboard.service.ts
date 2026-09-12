@@ -1,6 +1,6 @@
 // services/dashboard/order.dashboard.service.ts
 
-import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { NotFoundError } from '../../errors/AppError'
 import { PaginatedOrdersResponse } from '../../schemas/dashboard/order.schema'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
@@ -15,6 +15,7 @@ import {
   resolvePaymentShiftReconciliationEnabled,
 } from '../shared/paymentShiftClaim'
 import { countPriorCompletedPayments } from '../shared/priorCompletedPayments'
+import { assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared/orderCancelGuard'
 // La ÚNICA definición de "qué cuenta como pagado y cuánto se devolvió" — la
 // misma que usan los cuatro canales de cobro, para que la pantalla no pueda
 // contradecir al saldo persistido.
@@ -520,33 +521,58 @@ export async function updateOrder(venueId: string, orderId: string, data: Partia
     }
   }
 
-  const updatedOrder = await prisma.order.update({
-    where: { id: orderId },
-    data: {
-      ...(status !== undefined && { status }),
-      ...(customerId !== undefined && { customerId: customerId || null }),
-      ...(customerName !== undefined && { customerName }),
-      ...(tableId !== undefined && { tableId: tableId || null }),
-      ...(servedById !== undefined && { servedById: servedById || null }),
-      ...(createdAt !== undefined && { createdAt: new Date(createdAt) }),
-      ...(orderNumber !== undefined && { orderNumber }),
-      ...(type !== undefined && { type }),
-      ...(status === 'COMPLETED' && { completedAt: new Date() }),
-    },
-    include: {
-      items: {
-        include: {
-          product: true,
-          // ✅ FIX: Include modifiers so we can deduct their inventory
-          modifiers: {
-            include: {
-              modifier: true,
+  // 🔴 Diseño §C.6: pasar a CANCELLED / DELETED por este PUT ES cancelar la orden, y va por la MISMA cancelación
+  // protegida que el DELETE (candado de la orden → relectura → sin dinero → sin cobro de terminal vivo). Antes escribía
+  // cualquier `status` sin revisar nada, y `orders:update` lo traen roles de piso. Si el status NO cambia (el diálogo lo
+  // reenvía siempre) la guarda no se activa: editar el nombre de una orden ya cancelada no es cancelarla otra vez.
+  const cancelando = (status === 'CANCELLED' || status === 'DELETED') && status !== currentOrder.status
+  const escribir = (client: Prisma.TransactionClient) =>
+    client.order.update({
+      where: { id: orderId },
+      data: {
+        ...(status !== undefined && { status }),
+        ...(customerId !== undefined && { customerId: customerId || null }),
+        ...(customerName !== undefined && { customerName }),
+        ...(tableId !== undefined && { tableId: tableId || null }),
+        ...(servedById !== undefined && { servedById: servedById || null }),
+        ...(createdAt !== undefined && { createdAt: new Date(createdAt) }),
+        ...(orderNumber !== undefined && { orderNumber }),
+        ...(type !== undefined && { type }),
+        ...(status === 'COMPLETED' && { completedAt: new Date() }),
+        // Los escritores con CAS de versión se enteran de que la orden se canceló.
+        ...(cancelando && { version: { increment: 1 } }),
+      },
+      include: {
+        items: {
+          include: {
+            product: true,
+            // ✅ FIX: Include modifiers so we can deduct their inventory
+            modifiers: {
+              include: {
+                modifier: true,
+              },
             },
           },
         },
       },
-    },
-  })
+    })
+  const updatedOrder = cancelando
+    ? await prisma.$transaction(
+        async tx => {
+          await assertOrderCancellableUnderLock(
+            tx,
+            { venueId, orderId },
+            {
+              mensajeConDinero: MENSAJE_ORDEN_CON_DINERO,
+              contarPagosRegistrados: true,
+              notFoundMessage: `Order with ID ${orderId} not found in this venue`,
+            },
+          )
+          return escribir(tx)
+        },
+        { timeout: 15_000, maxWait: 5_000 },
+      )
+    : await escribir(prisma)
 
   // 🔥 INVENTORY DEDUCTION: Automatically deduct stock when order is completed
   // 🔴 La deducción por CAMBIO DE STATUS se retiró (audit Codex xhigh 2026-08-14).
@@ -566,46 +592,51 @@ export async function updateOrder(venueId: string, orderId: string, data: Partia
     data: { status: updatedOrder.status },
   })
 
+  // Cancelada por aquí, igual que por el DELETE: los referidos PENDING se anulan. Después del commit (abre su propia
+  // transacción con `Order FOR UPDATE`). Nunca lanza.
+  if (cancelando) {
+    const { onOrderCancelled } = await import('@/services/referrals/referralRefund.service')
+    await onOrderCancelled({ orderId: updatedOrder.id, venueId: updatedOrder.venueId })
+    // Las pantallas abiertas se enteran como con `cancelOrder` (auditoría Fable 11-sep, P3-7).
+    await avisarOrdenCancelada(updatedOrder.venueId, updatedOrder.id, updatedOrder.status === 'DELETED' ? 'DELETED' : 'CANCELLED')
+  }
+
   return updatedOrder
 }
+
+const MENSAJE_ORDEN_CON_DINERO = 'Esta orden tiene pagos registrados. Reembolsa primero; una orden pagada no se puede eliminar.'
 
 /**
  * Eliminar una orden.
  */
 export async function deleteOrder(venueId: string, orderId: string) {
-  const existingOrder = await prisma.order.findFirst({
-    where: {
-      id: orderId,
-      venueId,
+  // 🔴 Diseño §C.6: todo dentro de UNA transacción, bajo el MISMO candado de la orden que toman la admisión de un cobro
+  // y el registro del dinero. Antes la revisión de pagos corría fuera de toda transacción y no miraba la terminal: un
+  // pago o una admisión podía colarse entre la lectura y el UPDATE.
+  //
+  // 🔴 Una orden con dinero adentro NO se cancela por aquí (auditoría 2026-08-12): cancelarla la volvía invisible para
+  // reportes con el cobro registrado y el stock ya deducido — sin reembolso ni reposición. El camino correcto es
+  // reembolsar primero. Se revisan paymentStatus Y los Payments reales porque hay estados inconsistentes históricos
+  // (PENDING con pagos COMPLETED); un `Payment.type` nulo (legacy) cuenta como dinero.
+  const cancelledOrder = await prisma.$transaction(
+    async tx => {
+      await assertOrderCancellableUnderLock(
+        tx,
+        { venueId, orderId },
+        {
+          mensajeConDinero: MENSAJE_ORDEN_CON_DINERO,
+          contarPagosRegistrados: true,
+          notFoundMessage: `Order with ID ${orderId} not found in this venue`,
+        },
+      )
+      return tx.order.update({
+        where: { id: orderId },
+        // La versión sube para que los escritores con CAS (anular, descontar) se enteren de la cancelación.
+        data: { status: 'CANCELLED', version: { increment: 1 } },
+      })
     },
-    select: { id: true, paymentStatus: true },
-  })
-
-  if (!existingOrder) {
-    throw new NotFoundError(`Order with ID ${orderId} not found in this venue`)
-  }
-
-  // 🔴 Una orden con dinero adentro NO se cancela por aquí (auditoría 2026-08-12):
-  // cancelarla la volvía invisible para reportes con el cobro registrado y el
-  // stock ya deducido — sin reembolso ni reposición. El camino correcto es
-  // reembolsar primero. Se revisan paymentStatus Y los Payments reales porque
-  // hay estados inconsistentes históricos (PENDING con pagos COMPLETED).
-  if (existingOrder.paymentStatus === 'PAID' || existingOrder.paymentStatus === 'PARTIAL') {
-    throw new BadRequestError('Esta orden tiene pagos registrados. Reembolsa primero; una orden pagada no se puede eliminar.')
-  }
-  const completedPayments = await prisma.payment.count({
-    where: { orderId, venueId, status: 'COMPLETED', type: 'REGULAR' },
-  })
-  if (completedPayments > 0) {
-    throw new BadRequestError('Esta orden tiene pagos registrados. Reembolsa primero; una orden pagada no se puede eliminar.')
-  }
-
-  const cancelledOrder = await prisma.order.update({
-    where: { id: orderId },
-    data: {
-      status: 'CANCELLED',
-    },
-  })
+    { timeout: 15_000, maxWait: 5_000 },
+  )
 
   logAction({
     venueId: cancelledOrder.venueId,
@@ -621,6 +652,9 @@ export async function deleteOrder(venueId: string, orderId: string) {
     const { onOrderCancelled } = await import('@/services/referrals/referralRefund.service')
     await onOrderCancelled({ orderId: cancelledOrder.id, venueId: cancelledOrder.venueId })
   }
+
+  // Las pantallas abiertas se enteran como con `cancelOrder` (auditoría Fable 11-sep, P3-7).
+  await avisarOrdenCancelada(cancelledOrder.venueId, cancelledOrder.id, 'CANCELLED')
 
   return cancelledOrder
 }

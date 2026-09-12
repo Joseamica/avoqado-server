@@ -40,7 +40,7 @@ export const releaseTerminalPaymentRequest = async (req: Request, res: Response,
         ? 'Terminal liberada'
         : r.status === 'COMPLETED'
           ? 'No se liberó: existe un pago con tarjeta de ese cobro; se cerró como cobrado'
-          : `No se liberó: el cobro está en ${r.status}, no en UNKNOWN`,
+          : 'No se liberó: falta confirmar el resultado y que la terminal haya terminado. Consulta el cobro en la terminal.',
     })
   } catch (error) {
     next(error)

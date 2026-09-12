@@ -150,9 +150,15 @@ jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.
 describe('order.dashboard.service — deleteOrder guard de pagos', () => {
   beforeEach(() => jest.clearAllMocks())
 
+  // Diseño §C.6: el DELETE corre en una transacción, con el candado de la orden (`$queryRaw … FOR UPDATE`), la relectura
+  // bajo el candado (`findUnique`) y la consulta del cobro de terminal vivo (`terminalPaymentRequest.findFirst`).
   const arrange = (order: Record<string, unknown>, completedPayments = 0) => {
+    prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 'order-1' }] as any)
     prismaMock.order.findFirst.mockResolvedValue(order as any)
+    prismaMock.order.findUnique.mockResolvedValue(order as any)
     prismaMock.payment.count.mockResolvedValue(completedPayments as any)
+    prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue(null)
     prismaMock.order.update.mockResolvedValue({ id: 'order-1', venueId: 'venue-1', status: 'CANCELLED' } as any)
   }
 
@@ -184,6 +190,28 @@ describe('order.dashboard.service — deleteOrder guard de pagos', () => {
 
     expect(res.status).toBe('CANCELLED')
     expect(prismaMock.order.update).toHaveBeenCalled()
+  })
+
+  it('un cobro de terminal vivo sobre la orden la bloquea con el 409 del contrato y no escribe', async () => {
+    arrange({ id: 'order-1', paymentStatus: 'PENDING' }, 0)
+    prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue({ requestId: 'REQ-VIVO' } as any)
+
+    await expect(deleteOrder('venue-1', 'order-1')).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE',
+      details: { requestId: 'REQ-VIVO' },
+    })
+    expect(prismaMock.order.update).not.toHaveBeenCalled()
+  })
+
+  it('cuenta los pagos con `type` nulo (legacy) como dinero, no sólo los REGULAR', async () => {
+    arrange({ id: 'order-1', paymentStatus: 'PENDING' }, 0)
+
+    await deleteOrder('venue-1', 'order-1')
+
+    expect(prismaMock.payment.count).toHaveBeenCalledWith({
+      where: expect.objectContaining({ status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] }),
+    })
   })
 })
 
