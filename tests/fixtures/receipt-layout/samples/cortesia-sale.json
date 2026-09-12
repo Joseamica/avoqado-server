@@ -1,0 +1,8 @@
+{ "kind": "SALE", "orderNumber": "77", "orderType": "En mesa", "occurredAt": "2026-09-02T20:10:00.000Z", "timezone": "America/Mexico_City",
+  "items": [
+    { "name": "Agua mineral", "quantity": 1, "unitPriceCents": 2500, "totalPriceCents": 0, "isCortesia": true },
+    { "name": "Tacos al pastor", "quantity": 3, "unitPriceCents": 2200, "totalPriceCents": 6600 }
+  ],
+  "subtotalCents": 6600, "taxCents": 910, "discountCents": null, "tipCents": 1000, "totalCents": 7600,
+  "tender": { "kind": "OTHER", "label": "Transferencia" },
+  "staffName": "Sofía", "transactionId": "pay_0007", "receiptUrl": "https://r.avoqado.io/x/pqr" }

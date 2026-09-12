@@ -37,11 +37,41 @@ jest.mock('@/utils/prismaClient', () => ({
   default: {
     order: {
       findUnique: jest.fn(),
+      // `settleStandalonePaymentInTx` relee la orden con su snapshot de artículos
+      // (`payment.tpv.service.ts:522`). Sin esta entrada el TypeError sustituye a la aserción.
+      // Devuelve una orden MÍNIMA y coherente: este test mide la clasificación en la sombra,
+      // no la liquidación — pero la ruta la atraviesa y sin datos muere antes de su aserción.
+      findFirstOrThrow: jest
+        .fn()
+        .mockResolvedValue({ id: 'order-123', venueId: 'venue-1', subtotal: 0, total: 0, discountAmount: 0, tipAmount: 0, items: [] }),
+      findUniqueOrThrow: jest
+        .fn()
+        .mockResolvedValue({ id: 'order-123', venueId: 'venue-1', subtotal: 0, total: 0, discountAmount: 0, tipAmount: 0, items: [] }),
       update: jest.fn(),
     },
     payment: {
       create: jest.fn(),
-      findFirst: jest.fn(),
+      // El outbox relee el Payment fuente para comprobar que la orden coincide antes de encolar
+      // (`paymentEffects.service.ts:22-27`); sin esto lanza PAYMENT_EFFECT_SOURCE_MISMATCH y
+      // tumba la transacción del cobro entera.
+      findFirst: jest.fn().mockResolvedValue({ orderId: 'order-123' }),
+      // El camino post-cobro agrega los pagos de la orden y relee el Payment recién creado
+      // (outbox de efectos y conciliación). Enumerar métodos uno a uno es la fragilidad que
+      // este archivo ya documenta más abajo; se completan los que la ruta toca hoy.
+      aggregate: jest.fn().mockResolvedValue({ _sum: { amount: null, tipAmount: null } }),
+      findUniqueOrThrow: jest.fn(),
+      findMany: jest.fn().mockResolvedValue([]),
+      count: jest.fn().mockResolvedValue(0),
+      update: jest.fn(),
+      updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+    },
+    paymentEffect: {
+      createMany: jest.fn().mockResolvedValue({ count: 1 }),
+      findMany: jest.fn().mockResolvedValue([]),
+    },
+    commissionCalculation: {
+      findMany: jest.fn().mockResolvedValue([]),
+      create: jest.fn(),
     },
     merchantAccount: {
       findUnique: jest.fn(),
@@ -135,12 +165,23 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
     // Mock $transaction to execute the callback with a tx object
     ;(prisma.$transaction as jest.Mock).mockImplementation(async callback => {
       const tx = {
+        // 🔑 Base heredada del mock global: los modelos que la ruta del cobro toca y este `tx`
+        // no enumera (paymentEffect del outbox, order.findFirstOrThrow…) dejan de reventar con
+        // un TypeError críptico en vez de su aserción real. Los overrides de abajo mandan.
+        ...(prisma as any),
         // `findMany`: el candado del toque repetido en efectivo (`cobroEnEfectivoDuplicado.ts`)
         // relee los cobros COMPLETED de la orden DENTRO de la tx. Devuelve `[]` para quedar
         // COHERENTE con el `count: 0` de arriba —los dos contestan la misma pregunta— y así el
         // candado queda inerte en esta suite, que no es su objeto: se prueba en
         // `payment.cash-duplicado.test.ts` y en la integración `cobro-efectivo-duplicado`.
         payment: {
+          ...(prisma as any).payment,
+          // El rescate de la comisión relee el pago recién creado (bajo SAVEPOINT).
+          findUniqueOrThrow: jest.fn().mockImplementation(async () => {
+            const crear = (prisma as any).payment.create as jest.Mock
+            const ultimo = crear.mock.results[crear.mock.results.length - 1]
+            return ultimo ? await ultimo.value : null
+          }),
           count: jest.fn().mockResolvedValue(0),
           create: prisma.payment.create,
           findMany: jest.fn().mockResolvedValue([]),
@@ -152,6 +193,7 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
           create: prisma.venueTransaction.create,
         },
         order: {
+          ...(prisma as any).order,
           update: prisma.order.update,
         },
         shift: {
@@ -171,6 +213,18 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
           findUnique: jest.fn().mockResolvedValue(null),
         },
         $queryRaw: jest.fn().mockResolvedValue([{ id: mockOrderId }]),
+        // La comisión del cobro se encola bajo un SAVEPOINT para que su fallo NO tumbe el dinero.
+        $executeRawUnsafe: jest.fn().mockResolvedValue(0),
+        paymentEffect: {
+          createMany: jest.fn().mockResolvedValue({ count: 1 }),
+          findMany: jest.fn().mockResolvedValue([]),
+          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        },
+        commissionCalculation: {
+          findMany: jest.fn().mockResolvedValue([]),
+          create: jest.fn(),
+          aggregate: jest.fn().mockResolvedValue({ _sum: { baseAmount: null, tipAmount: null } }),
+        },
       }
       return callback(tx)
     })
@@ -224,7 +278,13 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
       ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(mockOrder)
       ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(mockInventoryStatus)
       ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...mockOrder, paymentStatus: 'PAID' })
-      ;(prisma.payment.create as jest.Mock).mockResolvedValue({ id: 'payment-1', feeAmount: 0, netAmount: 100 })
+      ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+        venueId: mockVenueId,
+        orderId: mockOrderId,
+        id: 'payment-1',
+        feeAmount: 0,
+        netAmount: 100,
+      })
       ;(prisma.venueTransaction.create as jest.Mock).mockResolvedValue({})
       ;(prisma.paymentAllocation.create as jest.Mock).mockResolvedValue({})
       ;(productInventoryService.deductInventoryForProduct as jest.Mock).mockResolvedValue({})
@@ -299,7 +359,13 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
       ;(prisma.order.update as jest.Mock).mockResolvedValue(mockOrder)
       ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(mockInventoryStatus)
       ;(productInventoryService.deductInventoryForProduct as jest.Mock).mockResolvedValue({ inventoryMethod: 'QUANTITY' })
-      ;(prisma.payment.create as jest.Mock).mockResolvedValue({ id: 'payment-1', feeAmount: 0, netAmount: 100 })
+      ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+        venueId: mockVenueId,
+        orderId: mockOrderId,
+        id: 'payment-1',
+        feeAmount: 0,
+        netAmount: 100,
+      })
 
       // (Square-parity 2026-08-12) Antes esto rechazaba con BadRequestError sin
       // cobrar. El dinero físico ya se movió cuando la app registra: el cobro
@@ -361,7 +427,13 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
       ;(prisma.order.update as jest.Mock).mockResolvedValue(mockOrder)
       ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(mockInventoryStatus)
       ;(productInventoryService.deductInventoryForProduct as jest.Mock).mockResolvedValue({ inventoryMethod: 'QUANTITY' })
-      ;(prisma.payment.create as jest.Mock).mockResolvedValue({ id: 'payment-1', feeAmount: 0, netAmount: 100 })
+      ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+        venueId: mockVenueId,
+        orderId: mockOrderId,
+        id: 'payment-1',
+        feeAmount: 0,
+        netAmount: 100,
+      })
 
       // (Square-parity 2026-08-12) Antes rechazaba con el detalle en el error.
       // El mismo detalle (producto, pedido, disponible) viaja ahora en el aviso
@@ -420,7 +492,13 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
       ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(mockOrder)
       ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(mockInventoryStatus)
       ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...mockOrder, paymentStatus: 'PAID' })
-      ;(prisma.payment.create as jest.Mock).mockResolvedValue({ id: 'payment-1', feeAmount: 0, netAmount: 100 })
+      ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+        venueId: mockVenueId,
+        orderId: mockOrderId,
+        id: 'payment-1',
+        feeAmount: 0,
+        netAmount: 100,
+      })
       ;(prisma.venueTransaction.create as jest.Mock).mockResolvedValue({})
       ;(prisma.paymentAllocation.create as jest.Mock).mockResolvedValue({})
 
@@ -468,7 +546,13 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
       }
 
       ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(mockOrder)
-      ;(prisma.payment.create as jest.Mock).mockResolvedValue({ id: 'payment-1', feeAmount: 0, netAmount: 50 })
+      ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+        venueId: mockVenueId,
+        orderId: mockOrderId,
+        id: 'payment-1',
+        feeAmount: 0,
+        netAmount: 50,
+      })
       ;(prisma.venueTransaction.create as jest.Mock).mockResolvedValue({})
       ;(prisma.paymentAllocation.create as jest.Mock).mockResolvedValue({})
       ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...mockOrder, paymentStatus: 'PARTIAL' })
@@ -515,6 +599,10 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
       ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(mockOrder)
       ;(prisma.merchantAccount.findUnique as jest.Mock).mockResolvedValue({ id: merchantAccountId, active: true })
       ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+        // Un Payment REAL trae venue y orden: el outbox los usa para comprobar que el efecto
+        // pertenece a la MISMA cuenta que el cobro.
+        venueId: mockVenueId,
+        orderId: mockOrderId,
         id: 'payment-1',
         feeAmount: 0,
         netAmount: 440,
@@ -586,7 +674,7 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
 
       ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(mockOrder)
       ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(mockInventoryStatus)
-      ;(prisma.payment.create as jest.Mock).mockResolvedValue({ id: 'payment-1' })
+      ;(prisma.payment.create as jest.Mock).mockResolvedValue({ venueId: mockVenueId, orderId: mockOrderId, id: 'payment-1' })
       ;(prisma.venueTransaction.create as jest.Mock).mockResolvedValue({})
       ;(prisma.paymentAllocation.create as jest.Mock).mockResolvedValue({})
       ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...mockOrder, paymentStatus: 'PAID' })
@@ -606,6 +694,83 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
           }),
         }),
       )
+    })
+
+    /**
+     * 🔴 CONTRATO DE LOS APK YA PUBLICADOS — no es un test de campos, es de VALORES.
+     *
+     * `PaymentResponse.kt` del TPV declara NO NULABLES en Kotlin: `data.id`, `data.amount` y
+     * `data.tipAmount`. Si el servidor deja de enviarlos, o los envía `null`,
+     * kotlinx.serialization LANZA al deserializar y el cobro se pierde en un aparato que YA está
+     * en la calle y que no se puede actualizar en el momento — el cajero volvería a pasar la
+     * tarjeta. `digitalReceipt` sí es nulable, pero cuando viaja, sus tres campos (`id`,
+     * `accessKey`, `receiptUrl`) son obligatorios DENTRO del objeto.
+     *
+     * Que los nombres sigan existiendo en el código NO demuestra compatibilidad: esto ejercita
+     * el servicio y comprueba lo que de verdad sale en `data`, que es lo que el APK parsea.
+     */
+    it('🔴 CONTRATO APK: el resultado del cobro trae con VALOR los campos no nulables que parsea el TPV', async () => {
+      const mockOrder = {
+        id: mockOrderId,
+        venueId: mockVenueId,
+        orderNumber: 'ORD-CONTRATO',
+        total: new Decimal(100),
+        subtotal: new Decimal(100),
+        discountAmount: new Decimal(0),
+        tipAmount: new Decimal(0),
+        paymentStatus: 'PENDING',
+        source: 'TPV',
+        items: [],
+        payments: [],
+      }
+      ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(mockOrder)
+      ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...mockOrder, paymentStatus: 'PAID' })
+      ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue({
+        inventoryMethod: 'RECIPE' as const,
+        available: true,
+        maxPortions: 5,
+      })
+      ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+        venueId: mockVenueId,
+        orderId: mockOrderId,
+        id: 'payment-contrato',
+        amount: new Decimal(100),
+        tipAmount: new Decimal(0),
+        status: 'COMPLETED',
+      })
+      ;(prisma.venueTransaction.create as jest.Mock).mockResolvedValue({})
+      ;(prisma.paymentAllocation.create as jest.Mock).mockResolvedValue({})
+
+      const result: any = await (paymentService as any).recordOrderPayment(
+        mockVenueId,
+        mockOrderId,
+        {
+          amount: 10000,
+          tipAmount: 0,
+          method: 'CREDIT_CARD',
+          staffId: 'staff-1',
+          paidProductsId: [],
+          currency: 'MXN',
+          isInternational: false,
+        },
+        'user-1',
+      )
+
+      // `data` del 201 es exactamente este objeto (payment.tpv.controller.ts:115-118).
+      expect(result).toBeDefined()
+      // NO NULABLES en el DTO Kotlin: si alguno llega null/undefined, el APK publicado revienta.
+      expect(typeof result.id).toBe('string')
+      expect(result.id.length).toBeGreaterThan(0)
+      expect(result.amount).not.toBeNull()
+      expect(result.amount).not.toBeUndefined()
+      expect(result.tipAmount).not.toBeNull()
+      expect(result.tipAmount).not.toBeUndefined()
+      // El recibo es opcional; si viaja, sus tres campos son obligatorios DENTRO del objeto.
+      if (result.digitalReceipt != null) {
+        expect(typeof result.digitalReceipt.id).toBe('string')
+        expect(typeof result.digitalReceipt.accessKey).toBe('string')
+        expect(typeof result.digitalReceipt.receiptUrl).toBe('string')
+      }
     })
 
     it('should still create VenueTransaction for financial tracking', async () => {
@@ -638,7 +803,13 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
       }
 
       ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(mockOrder)
-      ;(prisma.payment.create as jest.Mock).mockResolvedValue({ id: 'payment-1', feeAmount: 0, netAmount: 100 })
+      ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+        venueId: mockVenueId,
+        orderId: mockOrderId,
+        id: 'payment-1',
+        feeAmount: 0,
+        netAmount: 100,
+      })
       ;(prisma.venueTransaction.create as jest.Mock).mockResolvedValue({})
       ;(prisma.paymentAllocation.create as jest.Mock).mockResolvedValue({})
       ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...mockOrder, paymentStatus: 'PAID' })
@@ -711,7 +882,13 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
       const paidOrder = buildPaidOrder()
       ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(paidOrder)
       ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...paidOrder, items: [] })
-      ;(prisma.payment.create as jest.Mock).mockResolvedValue({ id: 'payment-2', feeAmount: 0, netAmount: 122 })
+      ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+        venueId: mockVenueId,
+        orderId: mockOrderId,
+        id: 'payment-2',
+        feeAmount: 0,
+        netAmount: 122,
+      })
       ;(prisma.venueTransaction.create as jest.Mock).mockResolvedValue({})
       ;(prisma.paymentAllocation.create as jest.Mock).mockResolvedValue({})
 
@@ -751,7 +928,13 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
       }
       ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(openOrder)
       ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...openOrder, paymentStatus: 'PAID', items: [] })
-      ;(prisma.payment.create as jest.Mock).mockResolvedValue({ id: 'payment-1', feeAmount: 0, netAmount: 380 })
+      ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+        venueId: mockVenueId,
+        orderId: mockOrderId,
+        id: 'payment-1',
+        feeAmount: 0,
+        netAmount: 380,
+      })
       ;(prisma.venueTransaction.create as jest.Mock).mockResolvedValue({})
       ;(prisma.paymentAllocation.create as jest.Mock).mockResolvedValue({})
 

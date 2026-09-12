@@ -2,6 +2,7 @@ import prisma from '../../utils/prismaClient'
 import { Venue, VenueSettings } from '@prisma/client'
 import { NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import logger from '@/config/logger'
+import { getDeviceReceiptPayload, type DeviceReceiptPayload } from '../dashboard/receiptLayout/devicePayload.service'
 // import { mentaApiService } from './menta.api.service' // 🚫 Disabled: Not using Menta integration
 
 /**
@@ -14,7 +15,10 @@ import logger from '@/config/logger'
  * @param venueId Venue ID
  * @returns Venue with staff, settings, and related data
  */
-export async function getVenueById(venueId: string, _orgId?: string): Promise<Venue & { settings: VenueSettings | null }> {
+export async function getVenueById(
+  venueId: string,
+  _orgId?: string,
+): Promise<Venue & { settings: VenueSettings | null } & DeviceReceiptPayload> {
   logger.info(`Getting venue by ID: ${venueId}`)
   const venue = await prisma.venue.findUnique({
     where: {
@@ -51,7 +55,18 @@ export async function getVenueById(venueId: string, _orgId?: string): Promise<Ve
     throw new NotFoundError(`Venue with ID ${venueId} not found`)
   }
 
-  return venue
+  // Encabezado y diseño del ticket (spec § 7.3). EL MISMO constructor que usa el endpoint de
+  // mobile: si cada lado armara lo suyo, la PAX y las tablets imprimirían distinto y los casos
+  // dorados no lo cazarían (prueban el intérprete, no el transporte).
+  //
+  // 🔴 Aditivo y tolerante: si falla, los campos se omiten y el venue sale igual. Gson ignora
+  // lo que no conoce, así que una PAX vieja no se entera de que existen.
+  const receiptPayload = await getDeviceReceiptPayload(venueId).catch(error => {
+    logger.error('No se pudo resolver el ticket para el venue de la PAX; se devuelve sin esos campos', { venueId, error })
+    return {} as DeviceReceiptPayload
+  })
+
+  return { ...venue, ...receiptPayload }
 }
 
 /**

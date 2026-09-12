@@ -1,0 +1,3 @@
+{ "name": "Testarudo Cafe", "address": "Nápoles 47", "city": "Cuauhtémoc", "state": "Ciudad de México", "zipCode": "06600", "phone": "55 1234 5678", "hasLogo": true,
+  "fiscalEmisors": [{ "id": "emA", "legalName": "TESTARUDO CAFE S.A.P.I. DE C.V.", "rfc": "TCA2501231A6", "lugarExpedicion": "06600", "merchantAccountIds": ["maA"] }],
+  "principalEmisorId": "emA", "legacy": { "legalName": null, "rfc": null } }

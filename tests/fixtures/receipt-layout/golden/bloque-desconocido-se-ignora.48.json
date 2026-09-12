@@ -1,0 +1,277 @@
+{
+  "case": "bloque-desconocido-se-ignora",
+  "width": 48,
+  "blocks": [
+    {
+      "type": "businessName",
+      "align": "center",
+      "emphasis": "double"
+    },
+    {
+      "type": "fiscal",
+      "align": "center"
+    },
+    {
+      "type": "orderInfo",
+      "showOrderType": true
+    },
+    {
+      "type": "items",
+      "showModifiers": true,
+      "showNotes": true
+    },
+    {
+      "type": "totals",
+      "showSubtotal": true,
+      "showTax": true,
+      "showDiscount": true,
+      "showTip": true
+    },
+    {
+      "type": "payment",
+      "showChange": true,
+      "showCardLastFour": true
+    },
+    {
+      "type": "areaDelivery"
+    },
+    {
+      "type": "signature"
+    }
+  ],
+  "input": {
+    "sale": {
+      "kind": "SALE",
+      "orderNumber": "1042",
+      "orderType": "En tienda",
+      "occurredAt": "2026-09-02T18:05:00.000Z",
+      "timezone": "America/Mexico_City",
+      "items": [
+        {
+          "name": "Galleta de avena",
+          "quantity": 2,
+          "unitPriceCents": 4500,
+          "totalPriceCents": 9000,
+          "modifiers": [
+            "Sin azúcar"
+          ],
+          "note": "Para llevar"
+        },
+        {
+          "name": "Café americano",
+          "quantity": 1,
+          "unitPriceCents": 3000,
+          "totalPriceCents": 3000
+        }
+      ],
+      "subtotalCents": 12000,
+      "taxCents": 1655,
+      "discountCents": null,
+      "tipCents": null,
+      "totalCents": 12000,
+      "tender": {
+        "kind": "CASH",
+        "label": "Efectivo",
+        "tenderedCents": 15000,
+        "changeCents": 3000
+      },
+      "staffName": "Ana",
+      "transactionId": "pay_0001",
+      "receiptUrl": "https://r.avoqado.io/x/abc"
+    },
+    "venue": {
+      "name": "Testarudo Cafe",
+      "address": "Nápoles 47",
+      "city": "Cuauhtémoc",
+      "state": "Ciudad de México",
+      "zipCode": "06600",
+      "phone": "55 1234 5678",
+      "hasLogo": true,
+      "fiscalEmisors": [
+        {
+          "id": "emA",
+          "legalName": "TESTARUDO CAFE S.A.P.I. DE C.V.",
+          "rfc": "TCA2501231A6",
+          "lugarExpedicion": "06600",
+          "merchantAccountIds": [
+            "maA"
+          ]
+        }
+      ],
+      "principalEmisorId": "emA",
+      "legacy": {
+        "legalName": null,
+        "rfc": null
+      }
+    }
+  },
+  "lines": [
+    {
+      "kind": "text",
+      "text": "Testarudo Cafe",
+      "align": "center",
+      "bold": false,
+      "double": true
+    },
+    {
+      "kind": "text",
+      "text": "TESTARUDO CAFE S.A.P.I. DE C.V.",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "RFC: TCA2501231A6",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Lugar de expedición: CP 06600",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Orden #:                                    1042",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Fecha:                          02/09/2026 12:05",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Tipo:                                  En tienda",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "CantArtículo                              Precio",
+      "align": "left",
+      "bold": true,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "------------------------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "2   Galleta de avena                      $90.00",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "  + Sin azúcar",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "  Nota: Para llevar",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "1   Café americano                        $30.00",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Subtotal:                                $120.00",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "IVA incluido:                             $16.55",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "------------------------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "TOTAL:           $120.00",
+      "align": "left",
+      "bold": true,
+      "double": true
+    },
+    {
+      "kind": "feed",
+      "lines": 1
+    },
+    {
+      "kind": "text",
+      "text": "Pago:                                   Efectivo",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Recibido:                                $150.00",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Cambio:                                   $30.00",
+      "align": "left",
+      "bold": true,
+      "double": false
+    },
+    {
+      "kind": "feed",
+      "lines": 1
+    },
+    {
+      "kind": "image",
+      "ref": "avoqadoMark",
+      "widthPct": 15
+    },
+    {
+      "kind": "feed",
+      "lines": 1
+    },
+    {
+      "kind": "text",
+      "text": "Powered by Avoqado",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "cut"
+    }
+  ]
+}

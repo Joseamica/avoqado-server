@@ -17,6 +17,7 @@ import * as menuTpvController from '../controllers/tpv/menu.tpv.controller'
 import * as orderController from '../controllers/tpv/order.tpv.controller'
 import * as orderTableController from '../controllers/tpv/order-table.tpv.controller'
 import * as paymentController from '../controllers/tpv/payment.tpv.controller'
+import * as receiptForPaymentController from '../controllers/shared/receiptForPayment.controller'
 import * as merchantRoutingController from '../controllers/tpv/merchantRouting.tpv.controller'
 import { merchantEligibilityRequestSchema } from '../schemas/dashboard/merchantRouting.schema'
 import { ValidateReferralCodeSchema, CaptureReferralSchema, ForceOverrideReferralSchema } from '../schemas/dashboard/referrals.schemas'
@@ -3407,6 +3408,46 @@ router.post(
   validateRequest(sendReceiptParamsSchema),
   validateRequest(sendReceiptBodySchema),
   paymentController.sendPaymentReceipt,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/payments/{paymentId}/receipt:
+ *   get:
+ *     tags:
+ *       - TPV - Payments
+ *     summary: Liga del recibo digital de un pago
+ *     description: >
+ *       Devuelve la liga del recibo digital para que la terminal dibuje el QR al REIMPRIMIR un
+ *       ticket desde el historial. Genera el recibo si el pago todavía no tenía uno (idempotente:
+ *       la misma llave siempre). `autofacturaAvailable` sólo decide la leyenda; el QR se imprime
+ *       igual. Es el MISMO handler que sirve a android/iOS en `/mobile`.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: paymentId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: "{ success, receipt: { accessKey, receiptUrl, autofacturaAvailable } }"
+ *       404:
+ *         description: El pago no existe o no pertenece a este venue
+ *       401:
+ *         description: Unauthorized
+ */
+router.get(
+  '/venues/:venueId/payments/:paymentId/receipt',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  receiptForPaymentController.getReceiptLink,
 )
 
 // ==========================================

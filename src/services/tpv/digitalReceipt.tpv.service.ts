@@ -89,173 +89,184 @@ export async function generateDigitalReceipt(paymentId: string): Promise<Digital
   logger.info('Generating digital receipt', { paymentId })
 
   try {
-    // Fetch complete payment data with all related information
-    const paymentData = await prisma.payment.findUnique({
-      where: { id: paymentId },
-      include: {
-        venue: {
-          select: {
-            id: true,
-            name: true,
-            address: true,
-            city: true,
-            state: true,
-            phone: true,
-            email: true,
-            logo: true,
-            primaryColor: true,
-            currency: true,
+    return await prisma.$transaction(async tx => {
+      // Serialize every creation/replay for this payment. Historical duplicate
+      // receipts remain valid; new callers consistently reuse the oldest one.
+      await tx.$queryRaw`SELECT id FROM "Payment" WHERE id = ${paymentId} FOR UPDATE`
+      const existing = await tx.digitalReceipt.findFirst({
+        where: { paymentId },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      })
+      if (existing) return existing
+
+      // Fetch complete payment data with all related information
+      const paymentData = await tx.payment.findUnique({
+        where: { id: paymentId },
+        include: {
+          venue: {
+            select: {
+              id: true,
+              name: true,
+              address: true,
+              city: true,
+              state: true,
+              phone: true,
+              email: true,
+              logo: true,
+              primaryColor: true,
+              currency: true,
+            },
           },
+          order: {
+            include: {
+              table: {
+                select: {
+                  number: true,
+                  area: {
+                    select: {
+                      name: true,
+                    },
+                  },
+                },
+              },
+              items: {
+                include: {
+                  product: {
+                    select: {
+                      name: true,
+                    },
+                  },
+                  modifiers: {
+                    include: {
+                      modifier: {
+                        select: {
+                          name: true,
+                        },
+                      },
+                    },
+                  },
+                  fulfillmentArea: {
+                    select: {
+                      name: true,
+                    },
+                  },
+                  areaTicketLine: {
+                    select: {
+                      areaTicket: {
+                        select: {
+                          code: true,
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          processedBy: {
+            select: {
+              firstName: true,
+              lastName: true,
+            },
+          },
+        },
+      })
+
+      if (!paymentData) {
+        throw new Error(`Payment ${paymentId} not found`)
+      }
+
+      // Create comprehensive data snapshot
+      const dataSnapshot: ReceiptDataSnapshot = {
+        payment: {
+          id: paymentData.id,
+          amount: Number(paymentData.amount),
+          tipAmount: Number(paymentData.tipAmount),
+          method: paymentData.method,
+          status: paymentData.status,
+          splitType: paymentData.splitType,
+          cardBrand: paymentData.cardBrand || undefined,
+          maskedPan: paymentData.maskedPan || undefined,
+          entryMode: paymentData.entryMode || undefined,
+          authorizationNumber: paymentData.authorizationNumber || undefined,
+          referenceNumber: paymentData.referenceNumber || undefined,
+          createdAt: paymentData.createdAt.toISOString(),
+        },
+        venue: {
+          id: paymentData.venue.id,
+          name: paymentData.venue.name,
+          address: paymentData.venue.address || undefined,
+          city: paymentData.venue.city || undefined,
+          state: paymentData.venue.state || undefined,
+          phone: paymentData.venue.phone || undefined,
+          email: paymentData.venue.email || undefined,
+          logo: paymentData.venue.logo || undefined,
+          primaryColor: paymentData.venue.primaryColor || undefined,
         },
         order: {
-          include: {
-            table: {
-              select: {
-                number: true,
-                area: {
-                  select: {
-                    name: true,
-                  },
-                },
-              },
-            },
-            items: {
-              include: {
-                product: {
-                  select: {
-                    name: true,
-                  },
-                },
-                modifiers: {
-                  include: {
-                    modifier: {
-                      select: {
-                        name: true,
-                      },
-                    },
-                  },
-                },
-                fulfillmentArea: {
-                  select: {
-                    name: true,
-                  },
-                },
-                areaTicketLine: {
-                  select: {
-                    areaTicket: {
-                      select: {
-                        code: true,
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          },
+          id: paymentData.order.id,
+          orderNumber: paymentData.order.orderNumber,
+          areaDeliveryCode: paymentData.order.areaDeliveryCode || undefined,
+          type: paymentData.order.type,
+          source: paymentData.order.source,
+          subtotal: Number(paymentData.order.subtotal),
+          taxAmount: Number(paymentData.order.taxAmount),
+          tipAmount: Number(paymentData.order.tipAmount),
+          total: Number(paymentData.order.total),
+          table: paymentData.order.table
+            ? {
+                number: paymentData.order.table.number,
+                area: paymentData.order.table.area?.name,
+              }
+            : undefined,
         },
-        processedBy: {
-          select: {
-            firstName: true,
-            lastName: true,
-          },
-        },
-      },
-    })
-
-    if (!paymentData) {
-      throw new Error(`Payment ${paymentId} not found`)
-    }
-
-    // Create comprehensive data snapshot
-    const dataSnapshot: ReceiptDataSnapshot = {
-      payment: {
-        id: paymentData.id,
-        amount: Number(paymentData.amount),
-        tipAmount: Number(paymentData.tipAmount),
-        method: paymentData.method,
-        status: paymentData.status,
-        splitType: paymentData.splitType,
-        cardBrand: paymentData.cardBrand || undefined,
-        maskedPan: paymentData.maskedPan || undefined,
-        entryMode: paymentData.entryMode || undefined,
-        authorizationNumber: paymentData.authorizationNumber || undefined,
-        referenceNumber: paymentData.referenceNumber || undefined,
-        createdAt: paymentData.createdAt.toISOString(),
-      },
-      venue: {
-        id: paymentData.venue.id,
-        name: paymentData.venue.name,
-        address: paymentData.venue.address || undefined,
-        city: paymentData.venue.city || undefined,
-        state: paymentData.venue.state || undefined,
-        phone: paymentData.venue.phone || undefined,
-        email: paymentData.venue.email || undefined,
-        logo: paymentData.venue.logo || undefined,
-        primaryColor: paymentData.venue.primaryColor || undefined,
-      },
-      order: {
-        id: paymentData.order.id,
-        orderNumber: paymentData.order.orderNumber,
-        areaDeliveryCode: paymentData.order.areaDeliveryCode || undefined,
-        type: paymentData.order.type,
-        source: paymentData.order.source,
-        subtotal: Number(paymentData.order.subtotal),
-        taxAmount: Number(paymentData.order.taxAmount),
-        tipAmount: Number(paymentData.order.tipAmount),
-        total: Number(paymentData.order.total),
-        table: paymentData.order.table
+        items: paymentData.order.items.map(item => ({
+          id: item.id,
+          productName: item.product?.name || item.productName || 'Item',
+          quantity: item.quantity,
+          unitPrice: Number(item.unitPrice),
+          total: Number(item.total),
+          weightKg: item.weightQuantity != null ? Number(item.weightQuantity) : null,
+          areaSourceLabel:
+            item.fulfillmentArea && item.areaTicketLine
+              ? `${item.fulfillmentArea.name} · Vale ${item.areaTicketLine.areaTicket.code}`
+              : undefined,
+          modifiers: item.modifiers.map(modifier => ({
+            name: modifier.modifier?.name || modifier.name || 'Modifier',
+            quantity: modifier.quantity,
+            price: Number(modifier.price),
+          })),
+        })),
+        processedBy: paymentData.processedBy
           ? {
-              number: paymentData.order.table.number,
-              area: paymentData.order.table.area?.name,
+              firstName: paymentData.processedBy.firstName,
+              lastName: paymentData.processedBy.lastName,
             }
           : undefined,
-      },
-      items: paymentData.order.items.map(item => ({
-        id: item.id,
-        productName: item.product?.name || item.productName || 'Item',
-        quantity: item.quantity,
-        unitPrice: Number(item.unitPrice),
-        total: Number(item.total),
-        weightKg: item.weightQuantity != null ? Number(item.weightQuantity) : null,
-        areaSourceLabel:
-          item.fulfillmentArea && item.areaTicketLine
-            ? `${item.fulfillmentArea.name} · Vale ${item.areaTicketLine.areaTicket.code}`
-            : undefined,
-        modifiers: item.modifiers.map(modifier => ({
-          name: modifier.modifier?.name || modifier.name || 'Modifier',
-          quantity: modifier.quantity,
-          price: Number(modifier.price),
-        })),
-      })),
-      processedBy: paymentData.processedBy
-        ? {
-            firstName: paymentData.processedBy.firstName,
-            lastName: paymentData.processedBy.lastName,
-          }
-        : undefined,
-      receiptInfo: {
-        generatedAt: new Date().toISOString(),
-        currency: paymentData.venue.currency || 'MXN',
-        taxRate: 0.16, // Default Mexican tax rate, could be venue-specific
-      },
-    }
+        receiptInfo: {
+          generatedAt: new Date().toISOString(),
+          currency: paymentData.venue.currency || 'MXN',
+          taxRate: 0.16, // Default Mexican tax rate, could be venue-specific
+        },
+      }
 
-    // Create the digital receipt record
-    const digitalReceipt = await prisma.digitalReceipt.create({
-      data: {
-        paymentId: paymentId,
-        dataSnapshot: dataSnapshot as any, // Prisma Json type
-        status: ReceiptStatus.PENDING,
-      },
+      // Create the digital receipt record
+      const digitalReceipt = await tx.digitalReceipt.create({
+        data: {
+          paymentId: paymentId,
+          dataSnapshot: dataSnapshot as any, // Prisma Json type
+          status: ReceiptStatus.PENDING,
+        },
+      })
+
+      logger.info('Digital receipt generated successfully', {
+        paymentId,
+        receiptId: digitalReceipt.id,
+        accessKey: digitalReceipt.accessKey,
+      })
+
+      return digitalReceipt
     })
-
-    logger.info('Digital receipt generated successfully', {
-      paymentId,
-      receiptId: digitalReceipt.id,
-      accessKey: digitalReceipt.accessKey,
-    })
-
-    return digitalReceipt
   } catch (error) {
     logger.error('Failed to generate digital receipt', { paymentId, error })
     throw error

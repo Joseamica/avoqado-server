@@ -23,6 +23,7 @@ import * as loyaltyMobileController from '../controllers/mobile/loyalty.mobile.c
 import * as serviceChargeMobileController from '../controllers/mobile/service-charge.mobile.controller'
 import * as menuMobileController from '../controllers/mobile/menu.mobile.controller'
 import * as receiptMobileController from '../controllers/mobile/receipt.mobile.controller'
+import * as receiptForPaymentController from '../controllers/shared/receiptForPayment.controller'
 import * as reportsMobileController from '../controllers/mobile/reports.mobile.controller'
 import * as customerController from '../controllers/dashboard/customer.dashboard.controller'
 import * as customerGroupController from '../controllers/dashboard/customerGroup.dashboard.controller'
@@ -1027,6 +1028,44 @@ router.get(
   authenticateTokenMiddleware,
   checkPermission('payments:read'),
   transactionMobileController.getTransaction,
+)
+
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/payments/{paymentId}/receipt:
+ *   get:
+ *     tags: [Mobile - Transactions]
+ *     summary: Liga del recibo digital de un pago
+ *     description: >
+ *       Devuelve la liga del recibo digital para que el POS dibuje el QR al REIMPRIMIR un ticket.
+ *       Genera el recibo si el pago todavía no tenía uno (idempotente: la misma llave siempre).
+ *       `autofacturaAvailable` sólo decide la leyenda del ticket; el QR se imprime igual.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: paymentId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: "{ success, receipt: { accessKey, receiptUrl, autofacturaAvailable } }"
+ *       404:
+ *         description: El pago no existe o no pertenece a este venue
+ *       401:
+ *         description: Not authenticated
+ */
+router.get(
+  '/venues/:venueId/payments/:paymentId/receipt',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  receiptForPaymentController.getReceiptLink,
 )
 
 // ============================================================================

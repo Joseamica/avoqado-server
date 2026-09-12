@@ -1,0 +1,6 @@
+{ "name": "Estética Amaena", "address": "Av. Reforma 100", "city": "Cuauhtémoc", "state": "Ciudad de México", "zipCode": "06600", "phone": "55 9876 5432", "hasLogo": true,
+  "fiscalEmisors": [
+    { "id": "emA", "legalName": "AMAENA BELLEZA S.A. DE C.V.", "rfc": "ABE180505AB1", "lugarExpedicion": "06600", "merchantAccountIds": ["maA"] },
+    { "id": "emB", "legalName": "MARÍA LÓPEZ GARCÍA", "rfc": "LOGM850101AB2", "lugarExpedicion": "06700", "merchantAccountIds": ["maB"] }
+  ],
+  "principalEmisorId": "emA", "legacy": { "legalName": null, "rfc": null } }

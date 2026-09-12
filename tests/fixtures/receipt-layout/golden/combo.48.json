@@ -1,0 +1,466 @@
+{
+  "case": "combo",
+  "width": 48,
+  "blocks": [
+    {
+      "type": "logo",
+      "size": "M",
+      "align": "center"
+    },
+    {
+      "type": "businessName",
+      "align": "center",
+      "emphasis": "double"
+    },
+    {
+      "type": "fiscal",
+      "align": "center"
+    },
+    {
+      "type": "address",
+      "align": "center"
+    },
+    {
+      "type": "phone",
+      "align": "center"
+    },
+    {
+      "type": "separator",
+      "style": "line"
+    },
+    {
+      "type": "orderInfo",
+      "showOrderType": true
+    },
+    {
+      "type": "staff"
+    },
+    {
+      "type": "separator",
+      "style": "line"
+    },
+    {
+      "type": "items",
+      "showModifiers": true,
+      "showNotes": true
+    },
+    {
+      "type": "separator",
+      "style": "line"
+    },
+    {
+      "type": "totals",
+      "showSubtotal": true,
+      "showTax": true,
+      "showDiscount": true,
+      "showTip": true
+    },
+    {
+      "type": "payment",
+      "showChange": true,
+      "showCardLastFour": true
+    },
+    {
+      "type": "areaDelivery"
+    },
+    {
+      "type": "qr",
+      "caption": "Escanea para tu recibo y factura"
+    },
+    {
+      "type": "fiscalNotice"
+    },
+    {
+      "type": "separator",
+      "style": "line"
+    },
+    {
+      "type": "text",
+      "lines": [
+        "Gracias por su compra"
+      ],
+      "align": "center",
+      "emphasis": "normal"
+    },
+    {
+      "type": "reference",
+      "showTransactionId": true,
+      "showAppVersion": false
+    },
+    {
+      "type": "signature"
+    }
+  ],
+  "input": {
+    "sale": {
+      "kind": "SALE",
+      "orderNumber": "88",
+      "orderType": "Para llevar",
+      "occurredAt": "2026-09-02T13:00:00.000Z",
+      "timezone": "America/Mexico_City",
+      "items": [
+        {
+          "name": "Combo desayuno",
+          "quantity": 1,
+          "unitPriceCents": 12000,
+          "totalPriceCents": 12000,
+          "isComboHeader": true
+        },
+        {
+          "name": "Café americano",
+          "quantity": 1,
+          "unitPriceCents": 0,
+          "totalPriceCents": 0,
+          "isComboComponent": true
+        },
+        {
+          "name": "Chilaquiles",
+          "quantity": 1,
+          "unitPriceCents": 0,
+          "totalPriceCents": 0,
+          "isComboComponent": true,
+          "modifiers": [
+            "Verdes"
+          ]
+        },
+        {
+          "name": "Jugo de naranja",
+          "quantity": 2,
+          "unitPriceCents": 4000,
+          "totalPriceCents": 8000
+        }
+      ],
+      "subtotalCents": 20000,
+      "taxCents": 2621,
+      "discountCents": 1000,
+      "tipCents": null,
+      "totalCents": 19000,
+      "tender": {
+        "kind": "CASH",
+        "label": "Efectivo",
+        "tenderedCents": 20000,
+        "changeCents": 1000
+      },
+      "staffName": null,
+      "transactionId": "pay_0005",
+      "receiptUrl": "https://r.avoqado.io/x/jkl"
+    },
+    "venue": {
+      "name": "Testarudo Cafe",
+      "address": "Nápoles 47",
+      "city": "Cuauhtémoc",
+      "state": "Ciudad de México",
+      "zipCode": "06600",
+      "phone": "55 1234 5678",
+      "hasLogo": true,
+      "fiscalEmisors": [
+        {
+          "id": "emA",
+          "legalName": "TESTARUDO CAFE S.A.P.I. DE C.V.",
+          "rfc": "TCA2501231A6",
+          "lugarExpedicion": "06600",
+          "merchantAccountIds": [
+            "maA"
+          ]
+        }
+      ],
+      "principalEmisorId": "emA",
+      "legacy": {
+        "legalName": null,
+        "rfc": null
+      }
+    }
+  },
+  "lines": [
+    {
+      "kind": "image",
+      "ref": "logo",
+      "widthPct": 60
+    },
+    {
+      "kind": "feed",
+      "lines": 1
+    },
+    {
+      "kind": "text",
+      "text": "Testarudo Cafe",
+      "align": "center",
+      "bold": false,
+      "double": true
+    },
+    {
+      "kind": "text",
+      "text": "TESTARUDO CAFE S.A.P.I. DE C.V.",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "RFC: TCA2501231A6",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Lugar de expedición: CP 06600",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Nápoles 47, Cuauhtémoc, Ciudad de México CP",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "06600",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Tel: 55 1234 5678",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "------------------------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Orden #:                                      88",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Fecha:                          02/09/2026 07:00",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Tipo:                                Para llevar",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "------------------------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "CantArtículo                              Precio",
+      "align": "left",
+      "bold": true,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "------------------------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "1   Combo desayuno                       $120.00",
+      "align": "left",
+      "bold": true,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "      1x Café americano                         ",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "      1x Chilaquiles                            ",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "  + Verdes",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "2   Jugo de naranja                       $80.00",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "------------------------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Subtotal:                                $200.00",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Descuento:                               -$10.00",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "IVA incluido:                             $26.21",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "------------------------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "TOTAL:           $190.00",
+      "align": "left",
+      "bold": true,
+      "double": true
+    },
+    {
+      "kind": "feed",
+      "lines": 1
+    },
+    {
+      "kind": "text",
+      "text": "Pago:                                   Efectivo",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Recibido:                                $200.00",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Cambio:                                   $10.00",
+      "align": "left",
+      "bold": true,
+      "double": false
+    },
+    {
+      "kind": "feed",
+      "lines": 1
+    },
+    {
+      "kind": "text",
+      "text": "------------------------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Escanea para tu recibo y factura",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "feed",
+      "lines": 1
+    },
+    {
+      "kind": "qr",
+      "data": "https://r.avoqado.io/x/jkl"
+    },
+    {
+      "kind": "feed",
+      "lines": 1
+    },
+    {
+      "kind": "text",
+      "text": "Este comprobante no es un CFDI",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "------------------------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Gracias por su compra",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "ID: pay_0005",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "feed",
+      "lines": 1
+    },
+    {
+      "kind": "image",
+      "ref": "avoqadoMark",
+      "widthPct": 15
+    },
+    {
+      "kind": "feed",
+      "lines": 1
+    },
+    {
+      "kind": "text",
+      "text": "Powered by Avoqado",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "cut"
+    }
+  ]
+}

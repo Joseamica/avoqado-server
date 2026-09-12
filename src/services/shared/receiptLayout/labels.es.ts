@@ -1,0 +1,38 @@
+/**
+ * Todas las etiquetas del ticket, congeladas (spec § 6). El idioma del ticket es el del
+ * venue; v1 sólo español. Cambiar una etiqueta aquí cambia los casos dorados — a propósito.
+ */
+export const LABELS = {
+  orden: 'Orden #:',
+  devolucion: 'Devolución #:',
+  devolucionTitulo: 'DEVOLUCIÓN',
+  fecha: 'Fecha:',
+  tipo: 'Tipo:',
+  reimpresion: 'Reimpresión:',
+  atendio: 'Atendió:',
+  cant: 'Cant',
+  articulo: 'Artículo',
+  precio: 'Precio',
+  nota: 'Nota:',
+  cortesia: 'CORTESÍA',
+  subtotal: 'Subtotal:',
+  descuento: 'Descuento:',
+  ivaIncluido: 'IVA incluido:',
+  propina: 'Propina:',
+  total: 'TOTAL:',
+  pago: 'Pago:',
+  tarjeta: 'Tarjeta:',
+  autorizacion: 'Autorización:',
+  referencia: 'Referencia:',
+  recibido: 'Recibido:',
+  cambio: 'Cambio:',
+  entregaPorArea: 'ENTREGA POR ÁREA',
+  presentaComprobante: 'Presenta este comprobante en el área',
+  fiscalNotice: 'Este comprobante no es un CFDI',
+  rfc: 'RFC:',
+  lugarExpedicion: 'Lugar de expedición: CP',
+  tel: 'Tel:',
+  id: 'ID:',
+  version: 'Avoqado v',
+  poweredBy: 'Powered by Avoqado',
+} as const

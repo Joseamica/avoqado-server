@@ -1,0 +1,5 @@
+{ "kind": "SALE", "orderNumber": "501", "orderType": "En tienda", "occurredAt": "2026-09-02T17:30:00.000Z", "timezone": "America/Mexico_City",
+  "items": [{ "name": "Queso manchego", "quantity": 1, "unitPriceCents": 42000, "totalPriceCents": 18270, "weightSummary": "0.435 kg × $420.00/kg" }],
+  "subtotalCents": 18270, "taxCents": 0, "discountCents": null, "tipCents": null, "totalCents": 18270,
+  "tender": { "kind": "CASH", "label": "Efectivo", "tenderedCents": 18270, "changeCents": 0 },
+  "staffName": "Ana", "transactionId": "pay_0006", "receiptUrl": "https://r.avoqado.io/x/mno" }

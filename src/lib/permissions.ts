@@ -360,6 +360,8 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // PRINT_STATIONS (impresoras, estaciones y ruteo de comandas — feature gratis/core)
   'printers:read': ['printers:read'],
   'printers:manage': ['printers:manage', 'printers:read'],
+  'receipt-layout:read': ['receipt-layout:read'],
+  'receipt-layout:manage': ['receipt-layout:manage', 'receipt-layout:read'],
 
   // ===========================
   // ACCOUNTING - Capa A (estado de resultados, incluido para todos los venues)
@@ -1143,6 +1145,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // explicito (mismo motivo que el resto de los permisos nuevos de esta lista).
     'estimates:create',
     'printers:*', // PRINT_STATIONS: impresoras, estaciones y ruteo de comandas (feature gratis/core)
+    'receipt-layout:*', // RECEIPT_LAYOUT: diseñar el ticket en papel — administrativo; MANAGER excluido a propósito
     'payments:*',
     'tender-types:*', // Tipos de pago personalizados: crear/editar/ordenar el catálogo
     'area-tickets:*', // Operate and configure multi-area retail tickets
@@ -1276,6 +1279,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'accounting:manage', // Capa B fiscal — catálogo de cuentas (editar/seed) — PREMIUM (bundle CFDI)
     'financialConnections:*', // Conectar/leer/desconectar cuentas bancarias del venue (self-connect)
     'printers:*', // PRINT_STATIONS: impresoras, estaciones y ruteo de comandas (feature gratis/core)
+    'receipt-layout:*', // RECEIPT_LAYOUT: diseñar el ticket en papel — administrativo; MANAGER excluido a propósito
     'commissions:*', // Commission system (full control including payout)
     'cash-out:*', // Cash Out (PlayTelecom same-day promoter commission) — full control
     'menu:*',
@@ -1874,6 +1878,7 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   // NO confundir con billing:payment-methods (tarjetas Stripe de facturación).
   'tender-types': ['tender-types:read', 'tender-types:manage'],
   printers: ['printers:read', 'printers:manage'],
+  'receipt-layout': ['receipt-layout:read', 'receipt-layout:manage'],
   // Singular `payment` namespace for admin-only, one-off payment actions.
   payment: ['payment:create-manual'],
   shifts: ['shifts:read', 'shifts:create', 'shifts:update', 'shifts:delete', 'shifts:close'],

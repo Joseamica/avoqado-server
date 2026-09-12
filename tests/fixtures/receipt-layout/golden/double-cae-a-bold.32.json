@@ -1,0 +1,445 @@
+{
+  "case": "double-cae-a-bold",
+  "width": 32,
+  "blocks": [
+    {
+      "type": "logo",
+      "size": "M",
+      "align": "center"
+    },
+    {
+      "type": "businessName",
+      "align": "center",
+      "emphasis": "double"
+    },
+    {
+      "type": "fiscal",
+      "align": "center"
+    },
+    {
+      "type": "address",
+      "align": "center"
+    },
+    {
+      "type": "phone",
+      "align": "center"
+    },
+    {
+      "type": "separator",
+      "style": "line"
+    },
+    {
+      "type": "orderInfo",
+      "showOrderType": true
+    },
+    {
+      "type": "staff"
+    },
+    {
+      "type": "separator",
+      "style": "line"
+    },
+    {
+      "type": "items",
+      "showModifiers": true,
+      "showNotes": true
+    },
+    {
+      "type": "separator",
+      "style": "line"
+    },
+    {
+      "type": "totals",
+      "showSubtotal": true,
+      "showTax": true,
+      "showDiscount": true,
+      "showTip": true
+    },
+    {
+      "type": "payment",
+      "showChange": true,
+      "showCardLastFour": true
+    },
+    {
+      "type": "areaDelivery"
+    },
+    {
+      "type": "qr",
+      "caption": "Escanea para tu recibo y factura"
+    },
+    {
+      "type": "fiscalNotice"
+    },
+    {
+      "type": "separator",
+      "style": "line"
+    },
+    {
+      "type": "text",
+      "lines": [
+        "Gracias por su compra"
+      ],
+      "align": "center",
+      "emphasis": "normal"
+    },
+    {
+      "type": "reference",
+      "showTransactionId": true,
+      "showAppVersion": false
+    },
+    {
+      "type": "signature"
+    }
+  ],
+  "input": {
+    "sale": {
+      "kind": "SALE",
+      "orderNumber": "1042",
+      "orderType": "En tienda",
+      "occurredAt": "2026-09-02T18:05:00.000Z",
+      "timezone": "America/Mexico_City",
+      "items": [
+        {
+          "name": "Galleta de avena",
+          "quantity": 2,
+          "unitPriceCents": 4500,
+          "totalPriceCents": 9000,
+          "modifiers": [
+            "Sin azúcar"
+          ],
+          "note": "Para llevar"
+        },
+        {
+          "name": "Café americano",
+          "quantity": 1,
+          "unitPriceCents": 3000,
+          "totalPriceCents": 3000
+        }
+      ],
+      "subtotalCents": 12000,
+      "taxCents": 1655,
+      "discountCents": null,
+      "tipCents": null,
+      "totalCents": 12000,
+      "tender": {
+        "kind": "CASH",
+        "label": "Efectivo",
+        "tenderedCents": 15000,
+        "changeCents": 3000
+      },
+      "staffName": "Ana",
+      "transactionId": "pay_0001",
+      "receiptUrl": "https://r.avoqado.io/x/abc"
+    },
+    "venue": {
+      "name": "Estética Amaena Polanco Norte",
+      "address": "Nápoles 47",
+      "city": "Cuauhtémoc",
+      "state": "Ciudad de México",
+      "zipCode": "06600",
+      "phone": "55 1234 5678",
+      "hasLogo": true,
+      "fiscalEmisors": [
+        {
+          "id": "emA",
+          "legalName": "TESTARUDO CAFE S.A.P.I. DE C.V.",
+          "rfc": "TCA2501231A6",
+          "lugarExpedicion": "06600",
+          "merchantAccountIds": [
+            "maA"
+          ]
+        }
+      ],
+      "principalEmisorId": "emA",
+      "legacy": {
+        "legalName": null,
+        "rfc": null
+      }
+    }
+  },
+  "lines": [
+    {
+      "kind": "image",
+      "ref": "logo",
+      "widthPct": 60
+    },
+    {
+      "kind": "feed",
+      "lines": 1
+    },
+    {
+      "kind": "text",
+      "text": "Estética Amaena Polanco Norte",
+      "align": "center",
+      "bold": true,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "TESTARUDO CAFE S.A.P.I. DE C.V.",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "RFC: TCA2501231A6",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Lugar de expedición: CP 06600",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Nápoles 47, Cuauhtémoc, Ciudad",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "de México CP 06600",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Tel: 55 1234 5678",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "--------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Orden #:                    1042",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Fecha:          02/09/2026 12:05",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Tipo:                  En tienda",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Atendió:                     Ana",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "--------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "CantArtículo              Precio",
+      "align": "left",
+      "bold": true,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "--------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "2   Galleta de avena      $90.00",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "  + Sin azúcar",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "  Nota: Para llevar",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "1   Café americano        $30.00",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "--------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Subtotal:                $120.00",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "IVA incluido:             $16.55",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "--------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "TOTAL:   $120.00",
+      "align": "left",
+      "bold": true,
+      "double": true
+    },
+    {
+      "kind": "feed",
+      "lines": 1
+    },
+    {
+      "kind": "text",
+      "text": "Pago:                   Efectivo",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Recibido:                $150.00",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Cambio:                   $30.00",
+      "align": "left",
+      "bold": true,
+      "double": false
+    },
+    {
+      "kind": "feed",
+      "lines": 1
+    },
+    {
+      "kind": "text",
+      "text": "--------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Escanea para tu recibo y factura",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "feed",
+      "lines": 1
+    },
+    {
+      "kind": "qr",
+      "data": "https://r.avoqado.io/x/abc"
+    },
+    {
+      "kind": "feed",
+      "lines": 1
+    },
+    {
+      "kind": "text",
+      "text": "Este comprobante no es un CFDI",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "--------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Gracias por su compra",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "ID: pay_0001",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "feed",
+      "lines": 1
+    },
+    {
+      "kind": "image",
+      "ref": "avoqadoMark",
+      "widthPct": 15
+    },
+    {
+      "kind": "feed",
+      "lines": 1
+    },
+    {
+      "kind": "text",
+      "text": "Powered by Avoqado",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "cut"
+    }
+  ]
+}

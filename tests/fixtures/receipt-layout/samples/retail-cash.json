@@ -1,0 +1,8 @@
+{ "kind": "SALE", "orderNumber": "1042", "orderType": "En tienda", "occurredAt": "2026-09-02T18:05:00.000Z", "timezone": "America/Mexico_City",
+  "items": [
+    { "name": "Galleta de avena", "quantity": 2, "unitPriceCents": 4500, "totalPriceCents": 9000, "modifiers": ["Sin azúcar"], "note": "Para llevar" },
+    { "name": "Café americano", "quantity": 1, "unitPriceCents": 3000, "totalPriceCents": 3000 }
+  ],
+  "subtotalCents": 12000, "taxCents": 1655, "discountCents": null, "tipCents": null, "totalCents": 12000,
+  "tender": { "kind": "CASH", "label": "Efectivo", "tenderedCents": 15000, "changeCents": 3000 },
+  "staffName": "Ana", "transactionId": "pay_0001", "receiptUrl": "https://r.avoqado.io/x/abc" }

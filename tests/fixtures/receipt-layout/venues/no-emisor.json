@@ -1,0 +1,2 @@
+{ "name": "Tienda Sin Emisor", "address": "Calle 1 #2", "city": "Querétaro", "state": "Querétaro", "zipCode": "76000", "phone": null, "hasLogo": false,
+  "fiscalEmisors": [], "principalEmisorId": null, "legacy": { "legalName": null, "rfc": null } }

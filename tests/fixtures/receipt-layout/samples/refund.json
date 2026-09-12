@@ -1,0 +1,5 @@
+{ "kind": "REFUND", "orderNumber": "D-7", "orderType": "En tienda", "occurredAt": "2026-09-03T16:00:00.000Z", "timezone": "America/Mexico_City",
+  "items": [{ "name": "Galleta de avena", "quantity": 1, "unitPriceCents": 4500, "totalPriceCents": 4500 }],
+  "subtotalCents": 4500, "taxCents": 621, "discountCents": null, "tipCents": null, "totalCents": 4500,
+  "tender": { "kind": "CARD", "label": "Tarjeta", "cardBrand": "MASTERCARD", "cardLastFour": "9876", "authCode": "R9X0", "referenceNumber": "000777", "merchantAccountId": "maA" },
+  "staffName": "Ana", "transactionId": "ref_0003", "receiptUrl": null }

@@ -1,0 +1,4 @@
+{ "layout": { "raw": [
+    { "type": "businessName" }, { "type": "hologram", "intensity": 9 }, { "type": "fiscal" }, { "type": "orderInfo" }, { "type": "items" },
+    { "type": "totals" }, { "type": "payment" }, { "type": "areaDelivery" }, { "type": "signature" }
+  ] }, "sale": "retail-cash", "venue": "one-emisor" }

@@ -1,0 +1,5 @@
+{ "kind": "SALE", "orderNumber": "3100", "orderType": "En tienda", "occurredAt": "2026-09-02T15:20:00.000Z", "timezone": "America/Mexico_City",
+  "items": [{ "name": "Queso Oaxaca", "quantity": 1, "unitPriceCents": 18270, "totalPriceCents": 18270, "areaSourceLabel": "Cremería · Vale 9016719357" }],
+  "subtotalCents": 18270, "taxCents": 0, "discountCents": null, "tipCents": null, "totalCents": 18270,
+  "tender": { "kind": "CASH", "label": "Efectivo", "tenderedCents": 20000, "changeCents": 1730 },
+  "staffName": "Pedro", "transactionId": "pay_0004", "receiptUrl": "https://r.avoqado.io/x/ghi", "areaDeliveryCode": "9016719357" }

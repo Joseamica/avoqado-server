@@ -1,0 +1,10 @@
+{ "kind": "SALE", "orderNumber": "88", "orderType": "Para llevar", "occurredAt": "2026-09-02T13:00:00.000Z", "timezone": "America/Mexico_City",
+  "items": [
+    { "name": "Combo desayuno", "quantity": 1, "unitPriceCents": 12000, "totalPriceCents": 12000, "isComboHeader": true },
+    { "name": "Café americano", "quantity": 1, "unitPriceCents": 0, "totalPriceCents": 0, "isComboComponent": true },
+    { "name": "Chilaquiles", "quantity": 1, "unitPriceCents": 0, "totalPriceCents": 0, "isComboComponent": true, "modifiers": ["Verdes"] },
+    { "name": "Jugo de naranja", "quantity": 2, "unitPriceCents": 4000, "totalPriceCents": 8000 }
+  ],
+  "subtotalCents": 20000, "taxCents": 2621, "discountCents": 1000, "tipCents": null, "totalCents": 19000,
+  "tender": { "kind": "CASH", "label": "Efectivo", "tenderedCents": 20000, "changeCents": 1000 },
+  "staffName": null, "transactionId": "pay_0005", "receiptUrl": "https://r.avoqado.io/x/jkl" }

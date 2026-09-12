@@ -1,0 +1,6 @@
+{ "layout": { "blocks": [
+    { "type": "businessName" }, { "type": "fiscal" }, { "type": "separator" },
+    { "type": "text", "lines": ["Gracias por su compra, esperamos verle de nuevo."] },
+    { "type": "text", "lines": ["Cambios con ticket en 30 días"], "emphasis": "double" },
+    { "type": "orderInfo" }, { "type": "items" }, { "type": "totals" }, { "type": "payment" }, { "type": "areaDelivery" }, { "type": "signature" }
+  ] }, "sale": "retail-cash", "venue": "one-emisor" }

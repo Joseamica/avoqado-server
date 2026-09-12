@@ -1,0 +1,5 @@
+{ "kind": "SALE", "orderNumber": "2077", "orderType": "Cita", "occurredAt": "2026-09-02T21:40:00.000Z", "timezone": "America/Mexico_City",
+  "items": [{ "name": "Corte de cabello", "quantity": 1, "unitPriceCents": 35000, "totalPriceCents": 35000 }],
+  "subtotalCents": 35000, "taxCents": 4828, "discountCents": null, "tipCents": 3500, "totalCents": 38500,
+  "tender": { "kind": "CARD", "label": "Tarjeta", "cardBrand": "VISA", "cardLastFour": "1234", "authCode": "A1B2C3", "referenceNumber": "000123", "merchantAccountId": "maA" },
+  "staffName": "Luis", "transactionId": "pay_0002", "receiptUrl": "https://r.avoqado.io/x/def", "reprint": { "printedAt": "2026-09-03T15:00:00.000Z" }, "appVersion": "3.1.0" }
