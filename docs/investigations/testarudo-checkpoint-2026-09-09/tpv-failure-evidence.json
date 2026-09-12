@@ -1,0 +1,116 @@
+[
+  {
+    "run": "vBUz5M",
+    "tests": 421,
+    "failures": [
+      {
+        "class": "com.jaac.avoqado_tpv.features.payment.data.ledger.PaymentAttemptRoomTest",
+        "test": "review recreated ledger rejects orderless authorization while terminal has unknown",
+        "failureType": "java.lang.AssertionError",
+        "message": "java.lang.AssertionError: An orderless sale must retain the terminal execution hold across recreation"
+      },
+      {
+        "class": "com.jaac.avoqado_tpv.features.payment.presentation.PaymentViewModelWatchdogTest",
+        "test": "review missing posId cannot publish PRE when durable discard did not commit",
+        "failureType": "java.lang.AssertionError",
+        "message": "java.lang.AssertionError: Verification failed: call 1 of 1: SocketManager(#9268).emitTerminalPaymentResult(any(), eq(failed), any(), any(), any(), any(), any(), any(), eq(PRE_AUTHORIZATION))) should not be called\n\nCalls:\n1) SocketManager(#9268).emitTerminalPaymentResult(missing-pos-id, failed, null, null, null, Missing posId, null, null, PRE_AUTHORIZATION)\n"
+      },
+      {
+        "class": "com.jaac.avoqado_tpv.features.payment.presentation.PaymentViewModelTest",
+        "test": "review actual offline kernel approval survives missing auth and cannot reset to PRE",
+        "failureType": "java.lang.AssertionError",
+        "message": "java.lang.AssertionError: Verification failed: call 1 of 1: PaymentAttemptLedger(#1095).markHostResponded(any(), eq(true), any(), any(), any(), any())) was not called.\n\nCalls to same mock:\n1) PaymentAttemptLedger(#1095).openAttempt(4746aaac-3e47-456c-b881-0538954f03ce, venue-test-001, BLUMON, 10000, 0, FAST, {\"venueId\":\"venue-test-001\",\"staffId\":\"staff-test-001\",\"shiftId\":\"shift-test-001\",\"amount\":100.00,\"tip\":0,\"blumonSerialNumber\":\"2841548417\",\"deviceSerialNumber\":\"TEST-SERIAL\",\"idempotencyKey\":\"4746aaac-3e47-456c-b881-0538954f03ce\",\"terminalPaymentRequestId\":\"offline-approved-request\",\"verificationPhotos\":[],\"verificationBarcodes\":[],\"isPortabilidad\":false,\"serialNumbers\":[],\"processorAffiliation\":\"376\"}, SALE, continuation {})\n"
+      },
+      {
+        "class": "com.jaac.avoqado_tpv.features.payment.presentation.PaymentViewModelTest",
+        "test": "review durable snapshot preserves kiosk attribution instead of logged in staff",
+        "failureType": "com.google.common.truth.ComparisonFailureWithFacts",
+        "message": "expected: original-kiosk-seller\nbut was : staff-test-001"
+      },
+      {
+        "class": "com.jaac.avoqado_tpv.features.payment.data.ledger.LedgerRecoveryLeaseRoomTest",
+        "test": "review expired owner cannot overwrite state after another worker acquires lease",
+        "failureType": "org.junit.ComparisonFailure",
+        "message": "org.junit.ComparisonFailure: Stale owner's failure cannot modify successor's state expected:<[HOST_RESPONDI]O> but was:<[REGISTRO_FALLID]O>"
+      },
+      {
+        "class": "com.jaac.avoqado_tpv.features.payment.data.ledger.LedgerRecoveryLeaseRoomTest",
+        "test": "review late acquisition cannot give reconnect worker an already expired lease",
+        "failureType": "java.lang.AssertionError",
+        "message": "java.lang.AssertionError: Only the current lease owner can start registration expected:<1> but was:<2>"
+      },
+      {
+        "class": "com.jaac.avoqado_tpv.features.payment.data.ledger.LedgerRecoveryLeaseRoomTest",
+        "test": "review delayed unknown sweep does not duplicate provider query on reconnect",
+        "failureType": "java.lang.AssertionError",
+        "message": "java.lang.AssertionError: A freshly acquired unknown-result lease cannot already be expired expected:<1> but was:<2>"
+      },
+      {
+        "class": "com.jaac.avoqado_tpv.features.payment.data.processor.angelpay.AngelPayResultParserTest",
+        "test": "review contradictory gateway timeout cannot become final issuer decline",
+        "failureType": "com.google.common.truth.ComparisonFailureWithFacts",
+        "message": "expected: UNKNOWN\nbut was : 05"
+      },
+      {
+        "class": "com.jaac.avoqado_tpv.features.payment.presentation.angelpay.AngelPayPaymentViewModelTest",
+        "test": "review duplicate barrier cannot authorize second SDK launch when durable CAS loses",
+        "failureType": "com.google.common.truth.AssertionErrorWithFacts",
+        "message": "expected to be false"
+      },
+      {
+        "class": "com.jaac.avoqado_tpv.features.payment.presentation.angelpay.AngelPayPaymentReviewRoomTest",
+        "test": "review staggered SDK entry cannot validate a second launch after Room CAS loses",
+        "failureType": "java.lang.AssertionError",
+        "message": "java.lang.AssertionError: Verification failed: call 1 of 1: AngelPaySdkGateway(#19).validatePaymentIntent-gIAlu-s(any(), any())). 2 matching calls found, but needs exactly 1 calls\nCalls:\n1) AngelPaySdkGateway(#19).ensureInitialized-gIAlu-s(Context(#11), QA)\n2) AngelPaySdkGateway(#19).isInitialized()\n3) AngelPaySdkGateway(#19).getSessionInfo()\n4) AngelPaySdkGateway(#19).logTipoDeComercio(antes de cobrar)\n5) AngelPaySdkGateway(#19).buildPaymentRequest(100.00, 0, , 03cb94ce-1c61-4d2c-be85-2e3d34858215)\n6) AngelPaySdkGateway(#19).validatePaymentIntent-gIAlu-s(Context(#11), PaymentRequest(child of #19#49))\n7) AngelPaySdkGateway(#19).ensureInitialized-gIAlu-s(Context(#11), QA)\n8) AngelPaySdkGateway(#19).isInitialized()\n9) AngelPaySdkGateway(#19).logTipoDeComercio(antes de cobrar)\n10) AngelPaySdkGateway(#19).buildPaymentRequest(100.00, 0, , 03cb94ce-1c61-4d2c-be85-2e3d34858215)\n11) AngelPaySdkGateway(#19).validatePaymentIntent-gIAlu-s(Context(#11), PaymentRequest(child of #19#49))\n"
+      },
+      {
+        "class": "com.jaac.avoqado_tpv.features.payment.presentation.angelpay.AngelPayPaymentReviewRoomTest",
+        "test": "review parsed contradictory issuer and timeout callback never emits processor decline proof",
+        "failureType": "com.google.common.truth.AssertionErrorWithFacts",
+        "message": "expected instance of: com.jaac.avoqado_tpv.features.payment.presentation.angelpay.AngelPayPaymentState$ResultadoIncierto\nbut was instance of : com.jaac.avoqado_tpv.features.payment.presentation.angelpay.AngelPayPaymentState$Error\nwith value          : Error(message=Transaccion declinada, canRetry=true, showOpenShiftButton=false)"
+      },
+      {
+        "class": "com.jaac.avoqado_tpv.features.payment.presentation.angelpay.AngelPayPaymentReviewRoomTest",
+        "test": "review persisted affiliation belongs to authenticated session that will charge",
+        "failureType": "com.google.common.truth.AssertionErrorWithFacts",
+        "message": "expected: effective-affiliation\nbut was : null"
+      }
+    ]
+  },
+  {
+    "run": "csYG8R",
+    "tests": 421,
+    "failures": [
+      {
+        "class": "com.jaac.avoqado_tpv.features.payment.data.ledger.PaymentAttemptLedgerTest",
+        "test": "openAttempt inserts PREPARANDO and returns true",
+        "failureType": "java.lang.AssertionError",
+        "message": "java.lang.AssertionError"
+      },
+      {
+        "class": "com.jaac.avoqado_tpv.features.payment.data.ledger.PaymentAttemptLedgerTest",
+        "test": "OFF observability mode still persists money barrier",
+        "failureType": "java.lang.AssertionError",
+        "message": "java.lang.AssertionError: Verification failed: call 1 of 1: PaymentAttemptDao(#140).insert(any(), any())) was not called.\n\nCalls to same mock:\n1) PaymentAttemptDao(#140).findTerminalHold(continuation {})\n"
+      },
+      {
+        "class": "com.jaac.avoqado_tpv.features.payment.data.ledger.LedgerRecoveryLeaseRoomTest",
+        "test": "review expired owner cannot overwrite state after another worker acquires lease",
+        "failureType": "kotlinx.coroutines.TimeoutCancellationException",
+        "message": "kotlinx.coroutines.TimeoutCancellationException: Timed out after 4m of _virtual_ (kotlinx.coroutines.test) time. To use the real time, wrap 'withTimeout' in 'withContext(Dispatchers.Default.limitedParallelism(1))'"
+      },
+      {
+        "class": "com.jaac.avoqado_tpv.features.payment.presentation.angelpay.AngelPayPaymentReviewRoomTest",
+        "test": "review parsed contradictory issuer and timeout callback never emits processor decline proof",
+        "failureType": "java.lang.ClassCastException",
+        "message": "java.lang.ClassCastException: class java.lang.Object cannot be cast to class com.jaac.avoqado_tpv.features.shift.domain.Shift (java.lang.Object is in module java.base of loader 'bootstrap'; com.jaac.avoqado_tpv.features.shift.domain.Shift is in unnamed module of loader org.robolectric.internal.AndroidSandbox$SdkSandboxClassLoader @7980cf2c)"
+      },
+      {
+        "class": "com.jaac.avoqado_tpv.features.payment.presentation.angelpay.AngelPayPaymentReviewRoomTest",
+        "test": "review Room attempt survives VM recreation and empty callback cannot claim PRE",
+        "failureType": "com.google.common.truth.AssertionErrorWithFacts",
+        "message": "expected instance of: com.jaac.avoqado_tpv.features.payment.presentation.angelpay.AngelPayPaymentState$ResultadoIncierto\nbut was instance of : com.jaac.avoqado_tpv.features.payment.presentation.angelpay.AngelPayPaymentState$Idle\nwith value          : Idle"
+      }
+    ]
+  }
+]

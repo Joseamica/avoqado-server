@@ -1,0 +1,151 @@
+{
+  "run": "67pCmc",
+  "freshExecution": true,
+  "summary": {
+    "tests": "6",
+    "failures": "0",
+    "errors": "0",
+    "timestamp": "2026-09-10T18:48:09.973Z"
+  },
+  "tests": [
+    {
+      "name": "offline approval write failure keeps durable obligation and cannot publish success or cancellation",
+      "passed": true
+    },
+    {
+      "name": "resolver la fila del kernel devuelve la terminal a la siguiente venta",
+      "passed": true
+    },
+    {
+      "name": "recreated VM cannot enter offline capable kernel while previous instance is preparing",
+      "passed": true
+    },
+    {
+      "name": "una fila con desenlace desconocido NO devuelve la terminal",
+      "passed": true
+    },
+    {
+      "name": "refund cannot enter the offline capable kernel while another attempt holds the terminal",
+      "passed": true
+    },
+    {
+      "name": "refund offline approval keeps the durable obligation and cannot publish success",
+      "passed": true
+    }
+  ],
+  "reviewedTestMatchesSnapshot": true,
+  "tpvProductionFilesRecorded": [
+    {
+      "file": "app/src/main/java/com/jaac/avoqado_tpv/core/data/realtime/SocketManager.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/main/java/com/jaac/avoqado_tpv/core/observability/CrashlyticsContext.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/main/java/com/jaac/avoqado_tpv/core/presentation/viewmodels/HomeViewModel.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/main/java/com/jaac/avoqado_tpv/core/remotepayment/RemotePaymentCoordinator.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/main/java/com/jaac/avoqado_tpv/core/remotepayment/RemotePaymentInbox.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/main/java/com/jaac/avoqado_tpv/core/remotepayment/RemotePaymentPreAuthorizationFailure.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/main/java/com/jaac/avoqado_tpv/core/remotepayment/RemotePaymentRequestDao.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/LedgerApprovalRecovery.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/LedgerShadowSweepWorker.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/LedgerSweepScheduler.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/LedgerUnknownRecovery.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/PaymentAttemptDao.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/PaymentAttemptEntity.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/PaymentAttemptLedger.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/processor/angelpay/AngelPayChargeVerifier.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/processor/angelpay/AngelPayOutcomeClassifier.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/processor/angelpay/AngelPayResultParser.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/processor/angelpay/AngelPaySdkPostOperationsAdapter.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/domain/PaymentPhaseTracker.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/domain/processor/PostOperationsAdapter.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/ContactlessKernelResult.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentScreen.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentState.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentViewModel.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/production/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt",
+      "matchesHandoff": true
+    },
+    {
+      "file": "app/src/sandbox/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModel.kt",
+      "matchesHandoff": true
+    }
+  ]
+}

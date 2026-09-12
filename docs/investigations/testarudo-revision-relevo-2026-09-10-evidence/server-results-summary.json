@@ -1,0 +1,103 @@
+{
+  "numTotalTests": 191,
+  "numPassedTests": 188,
+  "numFailedTests": 3,
+  "numPassedTestSuites": 10,
+  "numFailedTestSuites": 2,
+  "success": false,
+  "run": "ZpkgEO",
+  "suites": [
+    {
+      "file": "tests/unit/services/referrals/referralRefund.service.test.ts",
+      "status": "failed",
+      "tests": 26,
+      "failures": [
+        {
+          "name": "revertReferralRewardForOrder is idempotent — a second call finds no QUALIFIED referral and no-ops",
+          "messages": [
+            "Error: expect(jest.fn()).toHaveBeenCalledTimes(expected)\n\nExpected number of calls: 1\nReceived number of calls: 2\n    at Object.<anonymous> (/Users/amieva/.claude/avq-verify/snap-avoqado-server/tests/unit/services/referrals/referralRefund.service.test.ts:539:42)\n    at processTicksAndRejections (node:internal/process/task_queues:105:5)"
+          ]
+        },
+        {
+          "name": "onOrderCancelled además intenta la reversa del premio (defensa en profundidad): consulta el QUALIFIED de esa orden",
+          "messages": [
+            "Error: expect(jest.fn()).toHaveBeenCalledWith(...expected)\n\nExpected: ObjectContaining {\"where\": {\"qualifyingOrderId\": \"o-cancelada\", \"status\": \"QUALIFIED\", \"venueId\": \"v1\"}}\n\nNumber of calls: 0\n    at Object.<anonymous> (/Users/amieva/.claude/avq-verify/snap-avoqado-server/tests/unit/services/referrals/referralRefund.service.test.ts:582:45)\n    at processTicksAndRejections (node:internal/process/task_queues:105:5)"
+          ]
+        }
+      ]
+    },
+    {
+      "file": "tests/unit/services/referrals/onOrderPaid.test.ts",
+      "status": "failed",
+      "tests": 13,
+      "failures": [
+        {
+          "name": "onOrderPaid 🔴 tampoco califica con la orden en PENDING, ni con una orden que ya fue REFUNDED",
+          "messages": [
+            "TypeError: Cannot read properties of undefined (reading 'count')\n    at /Users/amieva/.claude/avq-verify/snap-avoqado-server/src/services/referrals/referralQualification.service.ts:454:15\n    at onOrderPaid (/Users/amieva/.claude/avq-verify/snap-avoqado-server/src/services/referrals/referralQualification.service.ts:389:20)\n    at Object.<anonymous> (/Users/amieva/.claude/avq-verify/snap-avoqado-server/tests/unit/services/referrals/onOrderPaid.test.ts:74:5)"
+          ]
+        }
+      ]
+    },
+    {
+      "file": "tests/unit/services/referrals/referralCard.service.test.ts",
+      "status": "passed",
+      "tests": 5,
+      "failures": []
+    },
+    {
+      "file": "tests/integration/payments/terminalPaymentRecovery.integration.test.ts",
+      "status": "passed",
+      "tests": 40,
+      "failures": []
+    },
+    {
+      "file": "tests/unit/services/referrals/referralProgram.service.test.ts",
+      "status": "passed",
+      "tests": 28,
+      "failures": []
+    },
+    {
+      "file": "tests/unit/services/referrals/referralQualification.service.test.ts",
+      "status": "passed",
+      "tests": 12,
+      "failures": []
+    },
+    {
+      "file": "tests/unit/services/referrals/regression.test.ts",
+      "status": "passed",
+      "tests": 5,
+      "failures": []
+    },
+    {
+      "file": "tests/unit/services/referrals/referralCapture.service.test.ts",
+      "status": "passed",
+      "tests": 24,
+      "failures": []
+    },
+    {
+      "file": "tests/unit/services/referrals/referralCode.service.test.ts",
+      "status": "passed",
+      "tests": 11,
+      "failures": []
+    },
+    {
+      "file": "tests/unit/services/referrals/fulfillGrant.test.ts",
+      "status": "passed",
+      "tests": 9,
+      "failures": []
+    },
+    {
+      "file": "tests/unit/services/referrals/referralWhatsApp.service.test.ts",
+      "status": "passed",
+      "tests": 9,
+      "failures": []
+    },
+    {
+      "file": "tests/unit/services/referrals/referralReads.service.test.ts",
+      "status": "passed",
+      "tests": 9,
+      "failures": []
+    }
+  ]
+}

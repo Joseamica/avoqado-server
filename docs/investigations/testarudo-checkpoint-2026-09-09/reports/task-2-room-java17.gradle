@@ -1,0 +1,5 @@
+allprojects {
+    tasks.withType(Test).configureEach {
+        executable = '/Library/Java/JavaVirtualMachines/zulu-17.jdk/Contents/Home/bin/java'
+    }
+}

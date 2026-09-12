@@ -1,0 +1,30 @@
+1. **P1 — Terminal identity is still self-declared.** [socketManager.ts:199](/Users/amieva/Documents/Programming/Avoqado/avoqado-server/src/communication/sockets/managers/socketManager.ts:199)  
+   **Pre-existing weakness reused by the new proof handler.** An authenticated venue user can supply another terminal’s handshake ID, advertise cancellation support, and submit `ACCEPTED`, releasing its live request. Registration never compares the ID with `authContext.terminalSerialNumber`. Bind proof-capable registration to the signed terminal identity or an independently verified legacy device credential.
+
+2. **P1 — A historical Payment can close two requests.** [terminal-payment.service.ts:852](/Users/amieva/Documents/Programming/Avoqado/avoqado-server/src/services/terminal-payment.service.ts:852)  
+   **Legacy-data gap in the new ownership check.** Before this change, completed requests could reference a Payment without stamping `processorData.terminalPaymentRequestId`. Presenting that Payment for another request passes the metadata check and completes both requests against one charge. Under the Payment lock, reject an existing association through another `TerminalPaymentRequest.paymentId`; index that lookup. The new PostgreSQL test covers conflicting metadata, not this historical association.
+
+3. **P1 — Payment validation does not establish terminal ownership.** [terminal-payment.service.ts:837](/Users/amieva/Documents/Programming/Avoqado/avoqado-server/src/services/terminal-payment.service.ts:837)  
+   **Remaining attribution gap.** A socket success can bind an untagged Payment from another terminal on the same order. For requests without an order, any completed card Payment in the venue qualifies. Validate the Payment’s terminal identity and authoritative request association before completing the request. Preserve the recorded money and retain uncertainty when attribution cannot be established.
+
+4. **P1 — Reusing a request ID with a different sale returns the previous sale’s success.** [terminal-payment.service.ts:351](/Users/amieva/Documents/Programming/Avoqado/avoqado-server/src/services/terminal-payment.service.ts:351)  
+   **Pre-existing gap repeated in the new reservation path.** After request R completes for order A, submitting R for order B or a different amount returns A’s Payment without validating the incoming contract. Validate supplied immutable authorization fields before both replay branches; reject conflicting reuse without emitting another charge, while preserving documented legacy defaults.
+
+5. **P1 — Historical uncertainty protects the order but leaves the terminal available.** [terminal-payment.service.ts:190](/Users/amieva/Documents/Programming/Avoqado/avoqado-server/src/services/terminal-payment.service.ts:190)  
+   **Incomplete new recovery handling.** Historical `FAILED/ACK_TIMEOUT`, `FAILED/TPV_ERROR`, or unconfirmed `CANCELLED` rows appear as UNKNOWN, but the terminal mutex and busy queries exclude their stored statuses. Another order—or an orderless charge—can therefore use the same terminal without execution completion evidence. Apply the unresolved predicate to terminal admission and availability as well, with serialized admission that accommodates existing historical rows.
+
+6. **P1 — “Socket not found” can release a request already delivered by reconnect replay.** [terminal-payment.service.ts:506](/Users/amieva/Documents/Programming/Avoqado/avoqado-server/src/services/terminal-payment.service.ts:506)  
+   **Relevant pre-existing race.** After the INSERT commits, a replacement socket can replay the PENDING request while the original sender discovers its captured socket has disappeared. `failUndelivered` then records FAILED and claims no charge started, although replay may be executing. Keep this outcome UNKNOWN unless a durable dispatch guard proves neither delivery path emitted it.
+
+7. **P2 — Socket success erases the contract-review envelope.** [terminal-payment.service.ts:753](/Users/amieva/Documents/Programming/Avoqado/avoqado-server/src/services/terminal-payment.service.ts:753)  
+   **Introduced.** REST recording can persist `CONTRACT_MISMATCH` with `reconciliationRequired`, requested values, and reported values. The subsequent normal socket success replaces `resultJson`, losing those details and returning ordinary success. Preserve server-owned reconciliation fields when merging socket details; derive mismatch evidence from the committed Payment when closing through the socket path.
+
+8. **P2 — Recovery permanently starves requests beyond the oldest 200.** [terminal-payment.service.ts:1135](/Users/amieva/Documents/Programming/Avoqado/avoqado-server/src/services/terminal-payment.service.ts:1135)  
+   **Pre-existing pagination gap worsened by indefinite retention.** Every sweep selects the same oldest UNKNOWN rows. Once 200 remain unresolved, later requests never receive financial reconciliation, even when their exact Payment exists. Rotate through bounded pages using a stable `(createdAt, id)` cursor; do not remove the query limit.
+
+9. **P2 — The watchdog still promises automatic release after 20 minutes.** [terminal-payment.service.ts:1066](/Users/amieva/Documents/Programming/Avoqado/avoqado-server/src/services/terminal-payment.service.ts:1066)  
+   **New behavior/copy mismatch.** Every stale-request alert tells operators the server will release the terminal after reconnect and elapsed grace, although that behavior was removed. Replace this sentence with the retained-reservation and reconciliation instructions.
+
+**Spec verdict:** Task4 does not yet satisfy attribution, terminal fencing, legacy reservation, and recovery requirements.
+
+**Quality verdict and limitations:** The PostgreSQL tests provide useful coverage but omit the cases above. The “crash” test injects a transaction exception; it does not demonstrate process termination/restart. The reported 21/21 result was not independently rerun, and the fresh unit run remains unverified here. Review was read-only; Task5 and hardware behavior were not audited.

@@ -1,0 +1,11 @@
+{
+  "avoqado-server/src/services/terminal-payment.service.ts": "0b2e663bcffdaa32b40ae29ad75c6f6e7235c5caa9e56661cf7437db5c0e3029",
+  "avoqado-server/tests/integration/payments/terminalPaymentRecovery.integration.test.ts": "995762f30e7aa9d07f196eee2c773ca6b9c815da9d08b24d3dc52f37a852ea5c",
+  "avoqado-server/tests/unit/services/referrals/onOrderPaid.test.ts": "1a24b5295511f7a4cf52c02bd35d55c6cf9ceea56a2c2bc67736d619387fd241",
+  "avoqado-server/tests/unit/services/referrals/referralRefund.service.test.ts": "9067d75488fe59b01ad95b44e5086b4149a088381d18b7e25d41cd8953b12cc8",
+  "avoqado-tpv/app/src/test/java/com/jaac/avoqado_tpv/features/payment/presentation/PaymentViewModelKernelDurabilityTest.kt": "1240f9cd4aec2ef3d5e6f18d2e109f7f9bc191f4b14c332da5d3b5a5726ecc41",
+  "avoqado-android/app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt": "7200cf79bbfd0d211f8c08f8ece507bb2ff8c69187a5765996ee62716d972a3d",
+  "avoqado-android/app/src/test/java/com/avoqado/pos/payment/PaymentFlowViewModelTest.kt": "196b02f31536b95057ac6bb7ae8066d7e3b6d4a7d8eca64fe82986188c410fe3",
+  "avoqado-ios/avoqado-ios/Payment/PaymentFlowViewModel.swift": "6156090421ec489ddc1f574edc8b353208904155fbe1f11c9bd12266a0165106",
+  "avoqado-ios/avoqado-iosTests/SplitMostradorContinuidadTests.swift": "ea9bf79b6bea233376cfb7187579c0a2efd312769f59abd4e871bdcd60574d42"
+}
