@@ -1,14 +1,14 @@
 # Assistant Endpoint Inventory
 
-Generated: 2026-09-07T18:23:01.709Z
+Generated: 2026-09-11T04:22:01.321Z
 
 ## Summary
 
-- Total endpoints: 2038
+- Total endpoints: 2040
 - Assistant tools registered: 80
-- Coverage: missing 864, partial 596, blocked 573, covered 5
-- Classifications: read 654, action 474, adminOnly 472, mutation 175, dangerousMutation 162, public 101
-- Scopes: venue 1080, superadmin 429, unknown 209, organization 177, public 143
+- Coverage: missing 864, partial 598, blocked 573, covered 5
+- Classifications: read 654, action 474, adminOnly 472, mutation 175, dangerousMutation 164, public 101
+- Scopes: venue 1082, superadmin 429, unknown 209, organization 177, public 143
 
 ## Top Missing Domains
 
@@ -1045,6 +1045,7 @@ Generated: 2026-09-07T18:23:01.709Z
 | GET | `/api/v1/dashboard/venues/:venueId/inventory/stale-recipes` | read | venue | partial | inventory:read | VenueIdParamsSchema | productWizardController.getStaleRecipes |
 | GET | `/api/v1/dashboard/venues/:venueId/inventory/stock-counts` | read | venue | partial | inventory:read | - | stockCountController.listStockCounts |
 | GET | `/api/v1/dashboard/venues/:venueId/inventory/stock-counts/:countId` | read | venue | partial | inventory:read | - | stockCountController.getStockCount |
+| POST | `/api/v1/dashboard/venues/:venueId/inventory/stock-counts/:countId/cancel` | dangerousMutation | venue | partial | inventory:update | - | stockCountController.cancelStockCount |
 | GET | `/api/v1/dashboard/venues/:venueId/inventory/supplier-invoices` | read | venue | partial | inventory:read | - | purchaseOrderInvoiceController.listAll |
 | POST | `/api/v1/dashboard/venues/:venueId/inventory/supplier-invoices` | action | venue | partial | inventory:update | - | purchaseOrderInvoiceController.registerStandalone |
 | GET | `/api/v1/dashboard/venues/:venueId/inventory/suppliers` | read | venue | partial | inventory:read | - | supplierController.getSuppliers |
@@ -1581,6 +1582,7 @@ Generated: 2026-09-07T18:23:01.709Z
 | GET | `/api/v1/mobile/venues/:venueId/inventory/stock-counts` | read | venue | partial | inventory:read | - | inventoryMobileController.getStockCounts |
 | POST | `/api/v1/mobile/venues/:venueId/inventory/stock-counts` | action | venue | partial | inventory:create | - | inventoryMobileController.createStockCount |
 | PUT | `/api/v1/mobile/venues/:venueId/inventory/stock-counts/:countId` | mutation | venue | partial | inventory:update | - | inventoryMobileController.updateStockCount |
+| POST | `/api/v1/mobile/venues/:venueId/inventory/stock-counts/:countId/cancel` | dangerousMutation | venue | partial | inventory:update | - | inventoryMobileController.cancelStockCount |
 | POST | `/api/v1/mobile/venues/:venueId/inventory/stock-counts/:countId/confirm` | action | venue | partial | inventory:adjust | - | inventoryMobileController.confirmStockCount |
 | GET | `/api/v1/mobile/venues/:venueId/inventory/stock-overview` | read | venue | partial | inventory:read | - | inventoryMobileController.getStockOverview |
 | GET | `/api/v1/mobile/venues/:venueId/kds/orders` | read | venue | partial | orders:read | - | kdsMobileController.listKdsOrders |

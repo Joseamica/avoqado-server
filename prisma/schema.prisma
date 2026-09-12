@@ -157,6 +157,7 @@ model Zone {
 }
 
 model Venue {
+  paymentEffects PaymentEffect[]
   id             String       @id @default(cuid())
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
@@ -175,6 +176,21 @@ model Venue {
   timezone        String               @default("America/Mexico_City")
   currency        String               @default("MXN")
   language        String               @default("es") // locale for transactional emails (es|en), set from onboarding wizard
+
+  /// Cobro remoto POS → terminal: desde cuándo rige en este venue la LISTA BLANCA estricta de desenlaces
+  /// (§8 C.1). `null` = apagado, y el venue se sigue rigiendo por el predicado heredado (en vuelo + UNKNOWN),
+  /// que es lo que corre hoy en producción. Una fecha = encendido desde ella; las solicitudes ANTERIORES a esa
+  /// fecha se siguen juzgando con el predicado heredado (la «migración acotada por fecha» de I.6), porque
+  /// bloquearlas dejaría las terminales muertas sin que exista todavía la conciliación B que las liberaría.
+  /// NO es un ajuste del cliente: lo opera Avoqado terminal por terminal durante la migración. Apagar es
+  /// volver a `null`, así que la marcha atrás no necesita despliegue.
+  terminalPaymentStrictSince DateTime?
+
+  /// ¿Está ENCENDIDO ahora mismo? Va aparte de la fecha a propósito (P1-3 de la auditoría de Codex, 11-sep):
+  /// apagar conserva `terminalPaymentStrictSince`, así que reencender NO desplaza el corte y el periodo que ya
+  /// estaba cubierto no queda descubierto. Apagar borrando la fecha convertía en «históricas» —y por tanto en
+  /// no protegidas— todas las solicitudes nacidas durante el régimen estricto anterior.
+  terminalPaymentStrictEnabled Boolean @default(false)
 
   // Location
   address   String?
@@ -641,6 +657,9 @@ model Venue {
 
   // Fase 2 — felicitación automática de cumpleaños
   birthdayAutomation BirthdayAutomation?
+
+  // Diseñador de tickets, fase 1 — la receta del ticket en papel (spec § 7.1)
+  receiptLayout ReceiptLayout?
 
   createdAt         DateTime           @default(now())
   updatedAt         DateTime           @updatedAt
@@ -3568,6 +3587,7 @@ enum PromoterLocationSource {
 }
 
 model Order {
+  paymentEffects PaymentEffect[]
   id      String @id @default(cuid())
   venueId String
   venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Restrict)
@@ -4097,6 +4117,7 @@ enum ActionType {
 // ==========================================
 
 model Payment {
+  paymentEffects PaymentEffect[]
   id      String  @id @default(cuid())
   venueId String
   venue   Venue   @relation(fields: [venueId], references: [id], onDelete: Restrict)
@@ -5026,7 +5047,7 @@ enum TerminalPaymentRequestStatus {
   FAILED
   CANCELLED
   CANCEL_REQUESTED // cancel sent, outcome still pending (may still COMPLETE)
-  TIMED_OUT // definitively closed by the watchdog (no charge happened)
+  TIMED_OUT // legacy terminal release; the financial outcome can still be unknown
   UNKNOWN // outcome unknowable — HOLDS the slot until manual reconcile
 }
 
@@ -5057,14 +5078,19 @@ model TerminalPaymentRequest {
   resultJson         Json? // full terminal result, for idempotent replay
   lateResult         Boolean                      @default(false) // result arrived after TIMED_OUT/UNKNOWN
   failureCode        String?
+  // A cancel request/timeout is not proof of no charge. Only a terminal's
+  // explicit pre-execution acceptance sets ACCEPTED.
+  cancelDisposition  String?
   deliveryAttempts   Int                          @default(0)
   lastDeliveredAt    DateTime?
   acknowledgedAt     DateTime?
-  // First terminal heartbeat observed AFTER expiresAt while the row sat in UNKNOWN. The
-  // watchdog frees the slot 2 min after this stamp if no card payment showed up (the
-  // terminal is back, its offline queue had its chance to flush, nothing landed). Null while
-  // the terminal is still gone — a gone terminal keeps the slot: nobody can charge on it.
+  // First observed return after expiresAt. Diagnostic only: connectivity and
+  // elapsed time cannot prove that execution or financial recovery has finished.
   terminalReturnedAt DateTime?
+  /// Procedencia de cada ENTREGA de esta solicitud, escrita ANTES de emitir: { deliveries: [{ protocol: 'LEGACY'|'DURABLE',
+  /// ackVersion, cancelDispositionVersion, probeVersion, socketId, at, replay }] }. `null` = procedencia DESCONOCIDA (fila
+  /// anterior a esta columna: nunca inferir «no entregada»); `[]` = creada y todavía no entregada a ningún socket.
+  deliveryProvenance Json?
   expiresAt          DateTime
   createdAt          DateTime                     @default(now())
   updatedAt          DateTime                     @updatedAt
@@ -5074,6 +5100,9 @@ model TerminalPaymentRequest {
 
   @@index([venueId, status])
   @@index([terminalId, status])
+  @@index([venueId, orderId, status, createdAt, id], map: "TerminalPaymentRequest_sale_recovery_idx")
+  @@index([paymentId], map: "TerminalPaymentRequest_payment_owner_idx")
+  @@index([status, createdAt, id], map: "TerminalPaymentRequest_recovery_cursor_idx")
 }
 
 enum LogLevel {
@@ -17439,4 +17468,56 @@ model RefreshGrant {
 
   @@index([familyId, revokedAt])
   @@index([successorEncExpiresAt])
+}
+
+/// Independently replayable post-payment obligations, committed with their source payment.
+model PaymentEffect {
+  id String @id @default(cuid())
+  venueId String
+  paymentId String
+  orderId String?
+  kind String
+  dedupeKey String
+  version Int @default(1)
+  payload Json
+  status String @default("PENDING")
+  attempts Int @default(0)
+  nextAttemptAt DateTime @default(now())
+  leaseUntil DateTime?
+  claimToken String?
+  completedAt DateTime?
+  lastError String? @db.VarChar(500)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  venue Venue @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  order Order? @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@unique([venueId, dedupeKey])
+  @@index([orderId, kind, status])
+  @@index([paymentId, kind])
+  @@index([status, nextAttemptAt, id])
+  @@index([status, leaseUntil, id])
+  @@index([venueId, status, createdAt, id])
+}
+
+/// La receta del ticket en papel de un venue (diseñador de tickets, spec § 7.1).
+/// UNA fila por venue como máximo: sin fila, el servidor sirve la canónica.
+/// `revision` es el control de concurrencia — se compara y se incrementa en la MISMA
+/// sentencia (CAS), nunca con un read-check-write.
+model ReceiptLayout {
+  id            String   @id @default(cuid())
+  venueId       String   @unique
+  venue         Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  /// Lista ordenada de bloques, validada con Zod + validateLayout AL ESCRIBIR, nunca al leer.
+  blocks        Json
+  /// Versión del FORMATO de la receta, no de su contenido.
+  schemaVersion Int      @default(1)
+  /// Sube 1 en cada escritura aceptada. Sin fila, el servidor reporta 0.
+  revision      Int      @default(1)
+  updatedById   String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([venueId])
 }

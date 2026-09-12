@@ -296,6 +296,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   Printer: 'Orders, KDS & Cash',
   PrintGateway: 'Orders, KDS & Cash',
   PrintStation: 'Orders, KDS & Cash',
+  ReceiptLayout: 'Orders, KDS & Cash',
   PrintJob: 'Orders, KDS & Cash',
   CashCloseout: 'Orders, KDS & Cash',
   CashDeposit: 'Orders, KDS & Cash',
@@ -324,6 +325,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
 
   // 10. Payments & Fees
   Payment: 'Payments & Fees',
+  PaymentEffect: 'Payments & Fees',
   PaymentAllocation: 'Payments & Fees',
   VenueTenderType: 'Payments & Fees',
   VenueTenderTypeRevision: 'Payments & Fees',

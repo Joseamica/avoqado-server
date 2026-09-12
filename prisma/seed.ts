@@ -3909,6 +3909,7 @@ async function main() {
               staffId: venueWaiters[0].staffId,
               startTime: shiftStart,
               endTime: shiftEnd,
+              status: 'CLOSED', // turno histórico: la base exige CLOSED ⇔ endTime (migración 20260906010000)
             },
           })
         }

@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-07T18:23:01.695Z",
+  "generatedAt": "2026-09-11T04:22:01.306Z",
   "assistantTools": [
     "activeShifts",
     "adHocAnalytics",
@@ -24569,7 +24569,7 @@
       "controller": "stockCountController.listStockCounts",
       "controllerFile": "src/controllers/dashboard/inventory/stockCount.controller.ts",
       "services": [
-        "src/services/mobile/inventory.mobile.service.ts"
+        "src/services/dashboard/stockCountAudit.service.ts"
       ],
       "permissions": [
         "inventory:read"
@@ -24601,7 +24601,7 @@
       "controller": "stockCountController.getStockCount",
       "controllerFile": "src/controllers/dashboard/inventory/stockCount.controller.ts",
       "services": [
-        "src/services/mobile/inventory.mobile.service.ts"
+        "src/services/dashboard/stockCountAudit.service.ts"
       ],
       "permissions": [
         "inventory:read"
@@ -24612,6 +24612,38 @@
       ],
       "schemas": [],
       "classification": "read",
+      "scope": "venue",
+      "assistantCoverage": "partial",
+      "assistantTools": [
+        "inventoryAlerts",
+        "recipeCount",
+        "recipeList",
+        "recipeUsage"
+      ],
+      "notes": [
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
+      ]
+    },
+    {
+      "method": "POST",
+      "fullPath": "/api/v1/dashboard/venues/:venueId/inventory/stock-counts/:countId/cancel",
+      "localPath": "/stock-counts/:countId/cancel",
+      "mountPrefix": "/api/v1/dashboard/venues/:venueId/inventory",
+      "routeFile": "src/routes/dashboard/inventory.routes.ts",
+      "controller": "stockCountController.cancelStockCount",
+      "controllerFile": "src/controllers/dashboard/inventory/stockCount.controller.ts",
+      "services": [
+        "src/services/mobile/inventory.mobile.service.ts"
+      ],
+      "permissions": [
+        "inventory:update"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [],
+      "classification": "dangerousMutation",
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
@@ -39930,6 +39962,38 @@
       ],
       "schemas": [],
       "classification": "mutation",
+      "scope": "venue",
+      "assistantCoverage": "partial",
+      "assistantTools": [
+        "inventoryAlerts",
+        "recipeCount",
+        "recipeList",
+        "recipeUsage"
+      ],
+      "notes": [
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
+      ]
+    },
+    {
+      "method": "POST",
+      "fullPath": "/api/v1/mobile/venues/:venueId/inventory/stock-counts/:countId/cancel",
+      "localPath": "/venues/:venueId/inventory/stock-counts/:countId/cancel",
+      "mountPrefix": "/api/v1/mobile",
+      "routeFile": "src/routes/mobile.routes.ts",
+      "controller": "inventoryMobileController.cancelStockCount",
+      "controllerFile": "src/controllers/mobile/inventory.mobile.controller.ts",
+      "services": [
+        "src/services/mobile/inventory.mobile.service.ts"
+      ],
+      "permissions": [
+        "inventory:update"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [],
+      "classification": "dangerousMutation",
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
