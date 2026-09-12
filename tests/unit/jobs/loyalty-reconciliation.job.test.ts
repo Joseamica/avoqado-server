@@ -63,6 +63,13 @@ describe('LoyaltyReconciliationJob', () => {
     expect(result).toEqual(expect.objectContaining({ scanned: 1, applied: 1, failed: 0 }))
   })
 
+  it('recovery awards the same net-of-tip amount as immediate settlement', async () => {
+    const { job, order, award } = setup()
+    order.findMany.mockResolvedValue([candidate({ total: new Decimal(110), tipAmount: new Decimal(20) })])
+    await job.runNow()
+    expect(award).toHaveBeenCalledWith(expect.objectContaining({ orderTotal: 90 }))
+  })
+
   it('keeps a failed order pending and releases the lease for a later retry', async () => {
     const { job, order, award } = setup()
     award.mockResolvedValue({ complete: false, errors: ['loyalty:cust-legacy'] })

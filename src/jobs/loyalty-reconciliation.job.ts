@@ -82,6 +82,7 @@ export class LoyaltyReconciliationJob {
               id: true,
               venueId: true,
               total: true,
+              tipAmount: true,
               loyaltyEligibleAt: true,
               loyaltyProcessingAt: true,
               loyaltyAttempts: true,
@@ -119,7 +120,7 @@ export class LoyaltyReconciliationJob {
           const result = await this.dependencies.award({
             venueId: order.venueId,
             orderId: order.id,
-            orderTotal: Number(order.total),
+            orderTotal: Math.max(0, Number(order.total) - Number(order.tipAmount ?? 0)),
             staffId: order.loyaltyStaffId,
             legacyCustomer: order.customer,
           })
