@@ -14,18 +14,23 @@ import { prismaMock } from '../../../__helpers__/setup'
 
 // Mock sales-goal.service
 jest.mock('../../../../src/services/dashboard/commission/sales-goal.service', () => ({
+  // `resolveGoalBasedTier` consume la variante *Policy* (lee la meta del VenueModule) desde
+  // Task 5; la anterior sigue exportada y se conserva aquí para no falsear el contrato.
   getStaffSalesGoal: jest.fn(),
+  getStaffSalesGoalPolicy: jest.fn(),
 }))
 
 // Mock goal-resolution.service
 jest.mock('../../../../src/services/dashboard/commission/goal-resolution.service', () => ({
   getEffectiveGoals: jest.fn(),
+  getVenueMonthlyGoalPolicy: jest.fn(),
 }))
 
-import { getStaffSalesGoal } from '../../../../src/services/dashboard/commission/sales-goal.service'
-import { getEffectiveGoals } from '../../../../src/services/dashboard/commission/goal-resolution.service'
+import { getStaffSalesGoalPolicy } from '../../../../src/services/dashboard/commission/sales-goal.service'
+import { getEffectiveGoals, getVenueMonthlyGoalPolicy } from '../../../../src/services/dashboard/commission/goal-resolution.service'
 
-const mockGetStaffSalesGoal = getStaffSalesGoal as jest.MockedFunction<typeof getStaffSalesGoal>
+const mockGetStaffSalesGoal = getStaffSalesGoalPolicy as jest.MockedFunction<typeof getStaffSalesGoalPolicy>
+const mockGetVenueGoal = getVenueMonthlyGoalPolicy as jest.MockedFunction<typeof getVenueMonthlyGoalPolicy>
 const mockGetEffectiveGoals = getEffectiveGoals as jest.MockedFunction<typeof getEffectiveGoals>
 
 // ============================================
@@ -146,7 +151,7 @@ describe('resolveGoalBasedTier', () => {
 
   it('should fallback to venue-wide goal when no staff-specific goal exists', async () => {
     mockGetStaffSalesGoal.mockResolvedValue(null) // No staff goal
-    mockGetEffectiveGoals.mockResolvedValue([mockResolvedGoal({ id: 'venue-goal-1', goal: 80000 })])
+    mockGetVenueGoal.mockResolvedValue(mockResolvedGoal({ id: 'venue-goal-1', goal: 80000 }))
 
     const config = createGoalConfig()
     const result = await resolveGoalBasedTier('staff-1', 'venue-1', config, 90000) // Above venue goal
@@ -160,7 +165,7 @@ describe('resolveGoalBasedTier', () => {
 
   it('should return base rate when below venue-wide goal', async () => {
     mockGetStaffSalesGoal.mockResolvedValue(null)
-    mockGetEffectiveGoals.mockResolvedValue([mockResolvedGoal({ id: 'venue-goal-1', goal: 80000 })])
+    mockGetVenueGoal.mockResolvedValue(mockResolvedGoal({ id: 'venue-goal-1', goal: 80000 }))
 
     const config = createGoalConfig()
     const result = await resolveGoalBasedTier('staff-1', 'venue-1', config, 50000) // Below venue goal
@@ -176,7 +181,7 @@ describe('resolveGoalBasedTier', () => {
 
   it('should return null when no goal exists (staff or venue)', async () => {
     mockGetStaffSalesGoal.mockResolvedValue(null)
-    mockGetEffectiveGoals.mockResolvedValue([]) // No goals at all
+    mockGetVenueGoal.mockResolvedValue(null) // No goals at all
 
     const config = createGoalConfig()
     const result = await resolveGoalBasedTier('staff-1', 'venue-1', config, 50000)
@@ -252,21 +257,21 @@ describe('getStaffTierProgress — STAFF_GOAL boundaries', () => {
   })
 
   it('puts a staff at 8% when current sales exceed their goal (40k goal, 45k sales)', async () => {
-    ;(getStaffSalesGoal as jest.MockedFunction<typeof getStaffSalesGoal>).mockResolvedValue({ goal: 40000 } as any)
+    ;(getStaffSalesGoalPolicy as jest.MockedFunction<typeof getStaffSalesGoalPolicy>).mockResolvedValue({ goal: 40000 } as any)
     prismaMock.commissionCalculation.aggregate.mockResolvedValue({ _sum: { baseAmount: new Decimal(45000) } })
     const progress = await getStaffTierProgress('cfg', 'staff-1', 'v')
     expect(progress?.currentTier).toBe(3)
   })
 
   it('puts a staff at 6% when between 30k and their goal (40k goal, 35k sales)', async () => {
-    ;(getStaffSalesGoal as jest.MockedFunction<typeof getStaffSalesGoal>).mockResolvedValue({ goal: 40000 } as any)
+    ;(getStaffSalesGoalPolicy as jest.MockedFunction<typeof getStaffSalesGoalPolicy>).mockResolvedValue({ goal: 40000 } as any)
     prismaMock.commissionCalculation.aggregate.mockResolvedValue({ _sum: { baseAmount: new Decimal(35000) } })
     const progress = await getStaffTierProgress('cfg', 'staff-1', 'v')
     expect(progress?.currentTier).toBe(2)
   })
 
   it('no goal → stays in 6% band, 8% unreachable (45k sales, no goal)', async () => {
-    ;(getStaffSalesGoal as jest.MockedFunction<typeof getStaffSalesGoal>).mockResolvedValue(null)
+    ;(getStaffSalesGoalPolicy as jest.MockedFunction<typeof getStaffSalesGoalPolicy>).mockResolvedValue(null)
     prismaMock.commissionCalculation.aggregate.mockResolvedValue({ _sum: { baseAmount: new Decimal(45000) } })
     const progress = await getStaffTierProgress('cfg', 'staff-1', 'v')
     expect(progress?.currentTier).toBe(2)

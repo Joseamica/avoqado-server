@@ -67,8 +67,8 @@ function getSalesGoalsFromConfig(config: Prisma.JsonValue): StoredSalesGoal[] {
 /**
  * Get timezone for a venue
  */
-async function getVenueTimezone(venueId: string): Promise<string> {
-  const venue = await prisma.venue.findUnique({
+async function getVenueTimezone(venueId: string, db: Prisma.TransactionClient = prisma): Promise<string> {
+  const venue = await db.venue.findUnique({
     where: { id: venueId },
     select: { timezone: true },
   })
@@ -80,8 +80,13 @@ async function getVenueTimezone(venueId: string): Promise<string> {
  *
  * CRITICAL: Uses venue timezone for date boundaries (not UTC).
  */
-async function calculateCurrentSales(venueId: string, period: SalesGoalPeriod, goalType: SalesGoalType = 'AMOUNT'): Promise<number> {
-  const timezone = await getVenueTimezone(venueId)
+async function calculateCurrentSales(
+  venueId: string,
+  period: SalesGoalPeriod,
+  goalType: SalesGoalType = 'AMOUNT',
+  db: Prisma.TransactionClient = prisma,
+): Promise<number> {
+  const timezone = await getVenueTimezone(venueId, db)
   let startDate: Date
 
   switch (period) {
@@ -100,7 +105,7 @@ async function calculateCurrentSales(venueId: string, period: SalesGoalPeriod, g
   }
 
   if (goalType === 'QUANTITY') {
-    const count = await prisma.orderItem.count({
+    const count = await db.orderItem.count({
       where: {
         order: {
           venueId,
@@ -113,7 +118,7 @@ async function calculateCurrentSales(venueId: string, period: SalesGoalPeriod, g
   }
 
   // AMOUNT: sum of payment amounts
-  const result = await prisma.payment.aggregate({
+  const result = await db.payment.aggregate({
     where: {
       venueId,
       status: 'COMPLETED',
@@ -128,8 +133,8 @@ async function calculateCurrentSales(venueId: string, period: SalesGoalPeriod, g
 /**
  * Get organizationId from venueId
  */
-async function getOrgIdFromVenue(venueId: string): Promise<string> {
-  const venue = await prisma.venue.findUnique({
+async function getOrgIdFromVenue(venueId: string, db: Prisma.TransactionClient = prisma): Promise<string> {
+  const venue = await db.venue.findUnique({
     where: { id: venueId },
     select: { organizationId: true },
   })
@@ -145,14 +150,14 @@ async function getOrgIdFromVenue(venueId: string): Promise<string> {
  * Get effective goals for a venue.
  * Returns venue goals if any exist, otherwise falls back to org-level goals.
  */
-export async function getEffectiveGoals(venueId: string): Promise<ResolvedGoal[]> {
+export async function getEffectiveGoals(venueId: string, db: Prisma.TransactionClient = prisma): Promise<ResolvedGoal[]> {
   // 1. Check venue-level goals
-  const module = await prisma.module.findUnique({
+  const module = await db.module.findUnique({
     where: { code: MODULE_CODES.COMMISSIONS },
   })
 
   if (module) {
-    const venueModule = await prisma.venueModule.findUnique({
+    const venueModule = await db.venueModule.findUnique({
       where: {
         venueId_moduleId: {
           venueId,
@@ -167,7 +172,7 @@ export async function getEffectiveGoals(venueId: string): Promise<ResolvedGoal[]
         // Venue has its own goals — use those (venue wins)
         const enriched = await Promise.all(
           venueGoals.map(async (g): Promise<ResolvedGoal> => {
-            const currentSales = await calculateCurrentSales(venueId, g.period, g.goalType || 'AMOUNT')
+            const currentSales = await calculateCurrentSales(venueId, g.period, g.goalType || 'AMOUNT', db)
             return {
               id: g.id,
               venueId,
@@ -189,9 +194,9 @@ export async function getEffectiveGoals(venueId: string): Promise<ResolvedGoal[]
   }
 
   // 2. Fallback: org-level goals
-  const organizationId = await getOrgIdFromVenue(venueId)
+  const organizationId = await getOrgIdFromVenue(venueId, db)
 
-  const orgGoals = await prisma.organizationSalesGoalConfig.findMany({
+  const orgGoals = await db.organizationSalesGoalConfig.findMany({
     where: {
       organizationId,
       active: true,
@@ -202,7 +207,7 @@ export async function getEffectiveGoals(venueId: string): Promise<ResolvedGoal[]
 
   const enriched = await Promise.all(
     orgGoals.map(async (g): Promise<ResolvedGoal> => {
-      const currentSales = await calculateCurrentSales(venueId, g.period as SalesGoalPeriod, g.goalType as SalesGoalType)
+      const currentSales = await calculateCurrentSales(venueId, g.period as SalesGoalPeriod, g.goalType as SalesGoalType, db)
       return {
         id: g.id,
         venueId,
@@ -387,4 +392,15 @@ export async function deleteOrgGoal(venueId: string, goalId: string): Promise<vo
     entity: 'OrganizationSalesGoalConfig',
     entityId: goalId,
   })
+}
+
+/** Read the effective monthly threshold without loading report aggregates. */
+export async function getVenueMonthlyGoalPolicy(venueId: string, db: Prisma.TransactionClient) {
+  const module = await db.module.findUnique({ where: { code: MODULE_CODES.COMMISSIONS }, select: { id: true } })
+  const venueModule = module ? await db.venueModule.findUnique({ where: { venueId_moduleId: { venueId, moduleId: module.id } }, select: { config: true } }) : null
+  const active = venueModule ? getSalesGoalsFromConfig(venueModule.config).filter(g => g.active) : []
+  if (active.length) return active.find(g => g.staffId === null && g.period === 'MONTHLY') ?? null
+  const organizationId = await getOrgIdFromVenue(venueId, db)
+  const goal = await db.organizationSalesGoalConfig.findFirst({ where: { organizationId, active: true, period: 'MONTHLY' }, select: { goal: true } })
+  return goal ? { goal: Number(goal.goal) } : null
 }

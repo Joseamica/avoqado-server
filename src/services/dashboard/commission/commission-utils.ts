@@ -13,10 +13,11 @@
 import prisma from '../../../utils/prismaClient'
 import logger from '../../../config/logger'
 import { Decimal } from '@prisma/client/runtime/library'
-import { CommissionRecipient, StaffRole, CommissionCalcType, TierType, TierPeriod, ThresholdType } from '@prisma/client'
+import { Prisma, CommissionRecipient, StaffRole, CommissionCalcType, TierType, TierPeriod, ThresholdType } from '@prisma/client'
 import { startOfDay, endOfDay, startOfWeek, endOfWeek, startOfMonth, endOfMonth } from 'date-fns'
 import { toZonedTime, fromZonedTime } from 'date-fns-tz'
 import { DEFAULT_TIMEZONE } from '../../../utils/datetime'
+import { utcTs } from '../../../utils/sqlDates'
 import {
   commissionableAmount,
   orderLevelDiscountOf,
@@ -213,8 +214,9 @@ export async function findActiveOverride(
   configId: string,
   staffId: string,
   effectiveDate: Date = new Date(),
+  db: Prisma.TransactionClient = prisma,
 ): Promise<CommissionOverrideData | null> {
-  const override = await prisma.commissionOverride.findFirst({
+  const override = await db.commissionOverride.findFirst({
     where: {
       configId,
       staffId,
@@ -314,9 +316,16 @@ export function calculateFinalRate(
     return rate
   }
 
-  // 2. Check tier rate (for TIERED calc type)
-  if (config.calcType === CommissionCalcType.TIERED && tierRate !== null) {
-    logger.debug('Using tier rate', { rate: tierRate })
+  // 2. Tasa de NIVEL — escalonado por tramos (TIERED) y META COMO NIVEL (`useGoalAsTier`).
+  // 🔴 DINERO: la meta como nivel es un mecanismo INDEPENDIENTE del `calcType`. Se resuelve en
+  // su propia rama de `createCalcForConfig` (`if (config.useGoalAsTier && config.goalBonusRate)
+  // … else if (calcType === TIERED)`) y llega aquí ya calculada. Al exigir TIERED, el bonus por
+  // meta superada se calculaba correctamente y se TIRABA: el vendedor que alcanzó su meta cobraba
+  // la tasa BASE. Medido contra PostgreSQL: meta 100, acumulado 110, bonus 0.2 resuelto — y se
+  // pagaba 0.1. No cambia nada para TIERED ni para quien no usa meta (ahí `tierRate` es null).
+  const usaMetaComoNivel = Boolean(config.useGoalAsTier && config.goalBonusRate)
+  if (tierRate !== null && (config.calcType === CommissionCalcType.TIERED || usaMetaComoNivel)) {
+    logger.debug('Using tier rate', { rate: tierRate, viaMeta: usaMetaComoNivel })
     return tierRate
   }
 
@@ -512,8 +521,8 @@ export function getPeriodDateRange(
  * @param venueId - Venue ID
  * @returns IANA timezone string (defaults to DEFAULT_TIMEZONE if not found)
  */
-export async function getVenueTimezone(venueId: string): Promise<string> {
-  const venue = await prisma.venue.findUnique({
+export async function getVenueTimezone(venueId: string, db: Prisma.TransactionClient = prisma): Promise<string> {
+  const venue = await db.venue.findUnique({
     where: { id: venueId },
     select: { timezone: true },
   })
@@ -531,8 +540,12 @@ export async function getVenueTimezone(venueId: string): Promise<string> {
  * @param venueId - Venue ID
  * @returns Staff data if active, null otherwise
  */
-export async function validateStaffForCommission(staffId: string, venueId: string): Promise<{ staffId: string; role: StaffRole } | null> {
-  const staffVenue = await prisma.staffVenue.findFirst({
+export async function validateStaffForCommission(
+  staffId: string,
+  venueId: string,
+  db: Prisma.TransactionClient = prisma,
+): Promise<{ staffId: string; role: StaffRole } | null> {
+  const staffVenue = await db.staffVenue.findFirst({
     where: {
       staffId,
       venueId,
@@ -614,6 +627,7 @@ export async function commissionExistsForOrder(orderId: string): Promise<boolean
 export async function findActiveCommissionConfigs(
   venueId: string,
   effectiveDate: Date = new Date(),
+  db: Prisma.TransactionClient = prisma,
 ): Promise<CommissionConfigWithRelations[]> {
   const includeTiers = { tiers: { where: { active: true }, orderBy: { tierLevel: 'asc' as const } } }
   const dateFilter = {
@@ -623,7 +637,7 @@ export async function findActiveCommissionConfigs(
     OR: [{ effectiveTo: null }, { effectiveTo: { gte: effectiveDate } }],
   }
 
-  const venueConfigs = await prisma.commissionConfig.findMany({
+  const venueConfigs = await db.commissionConfig.findMany({
     where: { venueId, ...dateFilter },
     include: includeTiers,
     orderBy: { priority: 'desc' },
@@ -632,10 +646,10 @@ export async function findActiveCommissionConfigs(
     return venueConfigs.map(c => ({ ...c, roleRates: c.roleRates as RoleRates | null, tiers: c.tiers as CommissionTierData[] }))
   }
 
-  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { organizationId: true } })
+  const venue = await db.venue.findUnique({ where: { id: venueId }, select: { organizationId: true } })
   if (!venue?.organizationId) return []
 
-  const orgConfigs = await prisma.commissionConfig.findMany({
+  const orgConfigs = await db.commissionConfig.findMany({
     where: { orgId: venue.organizationId, venueId: null, ...dateFilter },
     include: includeTiers,
     orderBy: { priority: 'desc' },
@@ -659,9 +673,12 @@ export async function findActiveCommissionConfigs(
  *    configuración por categoría. La selección ahora se hace en memoria, donde
  *    "sin categoría" es un caso explícito y no un accidente del filtro.
  */
-async function loadOrderCommissionLines(orderId: string): Promise<{ lines: OrderLineForCommission[]; orderLevelDiscount: number }> {
+async function loadOrderCommissionLines(
+  orderId: string,
+  db: Prisma.TransactionClient = prisma,
+): Promise<{ lines: OrderLineForCommission[]; orderLevelDiscount: number }> {
   const [orderItems, order] = await Promise.all([
-    prisma.orderItem.findMany({
+    db.orderItem.findMany({
       where: { orderId },
       select: {
         quantity: true,
@@ -671,7 +688,7 @@ async function loadOrderCommissionLines(orderId: string): Promise<{ lines: Order
         product: { select: { categoryId: true } },
       },
     }),
-    prisma.order.findUnique({ where: { id: orderId }, select: { discountAmount: true } }),
+    db.order.findUnique({ where: { id: orderId }, select: { discountAmount: true } }),
   ])
 
   const lines: OrderLineForCommission[] = orderItems.map(item => ({
@@ -707,8 +724,9 @@ export async function calculateCategoryFilteredAmount(
   orderId: string,
   categoryIds: string[],
   config: { includeTax: boolean; includeDiscount: boolean },
+  db: Prisma.TransactionClient = prisma,
 ): Promise<number> {
-  const { lines, orderLevelDiscount } = await loadOrderCommissionLines(orderId)
+  const { lines, orderLevelDiscount } = await loadOrderCommissionLines(orderId, db)
 
   const selected = selectCommissionableLines({
     orderLines: lines,
@@ -730,8 +748,9 @@ export async function calculateLeftoverAmount(
   orderId: string,
   claimedCategoryIds: string[],
   config: { includeTax: boolean; includeDiscount: boolean },
+  db: Prisma.TransactionClient = prisma,
 ): Promise<number> {
-  const { lines, orderLevelDiscount } = await loadOrderCommissionLines(orderId)
+  const { lines, orderLevelDiscount } = await loadOrderCommissionLines(orderId, db)
 
   const selected = selectCommissionableLines({
     orderLines: lines,
@@ -754,12 +773,66 @@ export async function calculateLeftoverAmount(
  * porción de ITEMS ya cobrada es `baseAmount − tipAmount`. La propina es dinero POR COBRO y
  * no debe consumir la base de la orden.
  */
-export async function alreadyCommissionedItemBase(orderId: string, configId: string): Promise<number> {
-  const prior = await prisma.commissionCalculation.findMany({
+export async function alreadyCommissionedItemBase(
+  orderId: string,
+  configId: string,
+  db: Prisma.TransactionClient = prisma,
+  includePending = false,
+): Promise<number> {
+  // Retain the legacy helper contract for non-outbox callers.
+  if (!includePending) {
+    const prior = await db.commissionCalculation.findMany({
+      where: { orderId, configId, voidedAt: null },
+      select: { baseAmount: true, tipAmount: true },
+    })
+    return (
+      Math.round(
+        Math.max(
+          0,
+          prior.reduce((sum, calc) => sum + decimalToNumber(calc.baseAmount) - decimalToNumber(calc.tipAmount), 0),
+        ) * 100,
+      ) / 100
+    )
+  }
+  const prior = await db.commissionCalculation.aggregate({
     where: { orderId, configId, voidedAt: null },
-    select: { baseAmount: true, tipAmount: true },
+    _sum: { baseAmount: true, tipAmount: true },
   })
-
-  const total = prior.reduce((sum, calc) => sum + (decimalToNumber(calc.baseAmount) - decimalToNumber(calc.tipAmount)), 0)
+  // DONE has a committed calculation above. Dead letters still reserve their obligation.
+  const [pending] = await db.$queryRaw<Array<{ base: Prisma.Decimal }>>(Prisma.sql`
+    SELECT COALESCE(SUM((payload->>'baseAmount')::numeric - COALESCE((payload->>'tipAmount')::numeric, 0)), 0) AS base
+    FROM "PaymentEffect" WHERE "orderId" = ${orderId} AND kind = 'COMMISSION'
+      AND status IN ('PENDING', 'PROCESSING', 'DEAD_LETTER') AND payload->>'configId' = ${configId}
+  `)
+  const total = decimalToNumber(prior._sum.baseAmount) - decimalToNumber(prior._sum.tipAmount) + decimalToNumber(pending.base)
   return Math.round(Math.max(0, total) * 100) / 100
+}
+
+/** One MVCC snapshot counts either the pending plan or its committed calculation, never both. */
+export async function committedAndPendingCommissionProgress(
+  db: Prisma.TransactionClient,
+  venueId: string,
+  staffId: string,
+  start: Date,
+  end?: Date,
+  configId?: string,
+): Promise<{ amount: number; count: number }> {
+  const [total] = await db.$queryRaw<Array<{ amount: Prisma.Decimal; count: bigint }>>(Prisma.sql`
+    SELECT COALESCE(SUM(base), 0) AS amount, COUNT(*) AS count FROM (
+      SELECT "baseAmount" AS base FROM "CommissionCalculation"
+      WHERE "venueId" = ${venueId} AND "staffId" = ${staffId} AND status <> 'VOIDED'
+        AND "calculatedAt" >= ${utcTs(start)}
+        ${end ? Prisma.sql`AND "calculatedAt" <= ${utcTs(end)}` : Prisma.empty}
+        ${configId ? Prisma.sql`AND "configId" = ${configId}` : Prisma.empty}
+      UNION ALL
+      SELECT (payload->>'baseAmount')::numeric AS base FROM "PaymentEffect"
+      WHERE "venueId" = ${venueId} AND kind = 'COMMISSION'
+        AND status IN ('PENDING', 'PROCESSING', 'DEAD_LETTER')
+        AND payload->>'staffId' = ${staffId} AND payload ? 'baseAmount'
+        AND payload->>'calculatedAt' >= ${start.toISOString()}
+        ${end ? Prisma.sql`AND payload->>'calculatedAt' <= ${end.toISOString()}` : Prisma.empty}
+        ${configId ? Prisma.sql`AND payload->>'configId' = ${configId}` : Prisma.empty}
+    ) obligations
+  `)
+  return { amount: decimalToNumber(total.amount), count: Number(total.count) }
 }

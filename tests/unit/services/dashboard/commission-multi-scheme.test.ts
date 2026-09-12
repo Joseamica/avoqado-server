@@ -102,6 +102,25 @@ function mockOrderItemsByCategory(map: Record<string, Array<{ unitPrice: number 
 beforeEach(() => {
   prismaMock.commissionCalculation.findFirst.mockResolvedValue(null) // idempotency: none yet
   prismaMock.commissionCalculation.findMany.mockResolvedValue([]) // no prior calcs on this order
+  // `alreadyCommissionedItemBase` descuenta lo YA comisionado de la orden — comprometido MÁS lo
+  // pendiente en la cola (`commission-utils.ts:802`). El SQL lleva COALESCE(...,0), así que
+  // SIEMPRE devuelve una fila: sin este default el destructuring revienta con «not iterable».
+  // `0` es el estado coherente con el `findMany` vacío de arriba: nada comisionado todavía.
+  prismaMock.$queryRaw.mockResolvedValue([{ base: new Decimal(0) }])
+  // La otra mitad del mismo cálculo: lo ya COMPROMETIDO de la orden. Task 5 lo lee con un
+  // `aggregate`; aquí se DERIVA del `findMany` que cada escenario siembra, con el MISMO `where`.
+  // Así un solo hecho alimenta las dos lecturas y no pueden contradecirse: si un test filtra por
+  // configId, el agregado lo respeta igual. `null` es el agregado real de un conjunto vacío.
+  prismaMock.commissionCalculation.aggregate.mockImplementation(async (args: any) => {
+    const filas = (await (prismaMock.commissionCalculation.findMany as any)(args)) ?? []
+    const suma = (campo: string) => filas.reduce((total: number, f: any) => total + Number(f?.[campo] ?? 0), 0)
+    return {
+      _sum: {
+        baseAmount: filas.length ? new Decimal(suma('baseAmount')) : null,
+        tipAmount: filas.length ? new Decimal(suma('tipAmount')) : null,
+      },
+    }
+  })
   prismaMock.staffVenue.findFirst.mockResolvedValue(ACTIVE_STAFF)
   prismaMock.commissionOverride.findFirst.mockResolvedValue(null)
   prismaMock.commissionCalculation.create.mockImplementation(async (args: any) => ({ id: 'calc', ...args.data }))
@@ -191,6 +210,11 @@ describe('commission base: order-level base with per-payment trigger', () => {
     prismaMock.commissionCalculation.findMany.mockResolvedValue(
       prior.map(p => ({ baseAmount: new Decimal(p.base), tipAmount: new Decimal(p.tip ?? 0) })),
     )
+    // 🔴 DINERO: Task 5 cambió CÓMO se lee lo ya comisionado — de `findMany` a un `aggregate`.
+    // No hace falta sembrarlo aparte: el agregado del `beforeEach` deriva de este mismo
+    // `findMany`. Sembrar sólo la lista dejaba de llegar a producción, el servicio creía que no
+    // había nada comisionado y el segundo cobro volvía a facturar la MISMA venta — el bug de
+    // Mindform que este bloque guarda.
   }
 
   it('MONEY: a second payment on the SAME order does not re-bill items already commissioned', async () => {

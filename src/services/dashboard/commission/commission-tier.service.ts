@@ -1,3 +1,4 @@
+import { committedAndPendingCommissionProgress } from './commission-utils'
 /**
  * Commission Tier Service
  *
@@ -17,8 +18,8 @@ import { Prisma, TierType, TierPeriod, CommissionCalcType, ThresholdType } from 
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
 import { validateRate, getPeriodDateRange, decimalToNumber, getVenueTimezone, CommissionConfigWithRelations } from './commission-utils'
 import { logAction } from '../activity-log.service'
-import { getStaffSalesGoal } from './sales-goal.service'
-import { getEffectiveGoals } from './goal-resolution.service'
+import { getStaffSalesGoalPolicy } from './sales-goal.service'
+import { getVenueMonthlyGoalPolicy } from './goal-resolution.service'
 
 // ============================================
 // Type Definitions
@@ -443,9 +444,14 @@ export async function deleteTier(tierId: string, venueId: string): Promise<void>
 /**
  * Get staff's current tier progress for a config
  */
-export async function getStaffTierProgress(configId: string, staffId: string, venueId: string): Promise<StaffTierProgress | null> {
+export async function getStaffTierProgress(
+  configId: string,
+  staffId: string,
+  venueId: string,
+  db: Prisma.TransactionClient = prisma,
+): Promise<StaffTierProgress | null> {
   // Get config with tiers
-  const config = await prisma.commissionConfig.findFirst({
+  const config = await db.commissionConfig.findFirst({
     where: { id: configId, venueId, deletedAt: null },
     include: {
       tiers: {
@@ -460,15 +466,18 @@ export async function getStaffTierProgress(configId: string, staffId: string, ve
   }
 
   const firstTier = config.tiers[0]
-  const timezone = await getVenueTimezone(venueId)
+  const timezone = await getVenueTimezone(venueId, db)
   const { start, end } = getPeriodDateRange(firstTier.tierPeriod, new Date(), timezone)
 
   // Calculate current period value
   let currentValue: number
 
-  if (firstTier.tierType === TierType.BY_QUANTITY) {
+  if (db !== prisma) {
+    const progress = await committedAndPendingCommissionProgress(db, venueId, staffId, start, end, configId)
+    currentValue = firstTier.tierType === TierType.BY_QUANTITY ? progress.count : progress.amount
+  } else if (firstTier.tierType === TierType.BY_QUANTITY) {
     // Count orders/payments
-    const count = await prisma.commissionCalculation.count({
+    const count = await db.commissionCalculation.count({
       where: {
         staffId,
         venueId,
@@ -480,7 +489,7 @@ export async function getStaffTierProgress(configId: string, staffId: string, ve
     currentValue = count
   } else {
     // Sum amounts
-    const sum = await prisma.commissionCalculation.aggregate({
+    const sum = await db.commissionCalculation.aggregate({
       where: {
         staffId,
         venueId,
@@ -496,7 +505,7 @@ export async function getStaffTierProgress(configId: string, staffId: string, ve
   }
 
   // Resolve STAFF_GOAL boundaries to the staff member's active goal (matching period).
-  const staffGoal = await getStaffSalesGoal(venueId, staffId)
+  const staffGoal = await getStaffSalesGoalPolicy(venueId, staffId, db)
   const goalValue = staffGoal?.goal ?? null
 
   const resolveBoundary = (threshold: Prisma.Decimal | null, type: ThresholdType, nullFallback: number): number => {
@@ -562,8 +571,9 @@ export async function getApplicableTierRate(
   configId: string,
   staffId: string,
   venueId: string,
+  db: Prisma.TransactionClient = prisma,
 ): Promise<{ tierLevel: number; tierName: string; rate: number } | null> {
-  const progress = await getStaffTierProgress(configId, staffId, venueId)
+  const progress = await getStaffTierProgress(configId, staffId, venueId, db)
 
   if (!progress || progress.currentTier === null) {
     return null
@@ -605,6 +615,7 @@ export async function resolveGoalBasedTier(
   venueId: string,
   config: CommissionConfigWithRelations,
   currentPeriodSales: number,
+  db: Prisma.TransactionClient = prisma,
 ): Promise<{ tierLevel: number; tierName: string; rate: number } | null> {
   if (!config.useGoalAsTier || !config.goalBonusRate) {
     return null
@@ -614,7 +625,7 @@ export async function resolveGoalBasedTier(
   const defaultRate = decimalToNumber(config.defaultRate)
 
   // Try staff-specific goal first
-  const staffGoal = await getStaffSalesGoal(venueId, staffId)
+  const staffGoal = await getStaffSalesGoalPolicy(venueId, staffId, db)
 
   if (staffGoal) {
     if (currentPeriodSales >= staffGoal.goal) {
@@ -638,8 +649,7 @@ export async function resolveGoalBasedTier(
   }
 
   // Try venue-wide goal
-  const effectiveGoals = await getEffectiveGoals(venueId)
-  const venueGoal = effectiveGoals.find(g => g.staffId === null && g.period === 'MONTHLY')
+  const venueGoal = await getVenueMonthlyGoalPolicy(venueId, db)
 
   if (venueGoal) {
     if (currentPeriodSales >= venueGoal.goal) {

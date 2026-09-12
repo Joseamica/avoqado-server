@@ -135,8 +135,8 @@ function getSalesGoalsFromConfig(config: Prisma.JsonValue): StoredSalesGoal[] {
 /**
  * Get timezone for a venue (cached per request via Prisma query cache)
  */
-async function getVenueTimezone(venueId: string): Promise<string> {
-  const venue = await prisma.venue.findUnique({
+async function getVenueTimezone(venueId: string, db: Prisma.TransactionClient = prisma): Promise<string> {
+  const venue = await db.venue.findUnique({
     where: { id: venueId },
     select: { timezone: true },
   })
@@ -156,8 +156,9 @@ async function calculateCurrentSales(
   staffId: string | null,
   period: SalesGoalPeriod,
   goalType: SalesGoalType = 'AMOUNT',
+  db: Prisma.TransactionClient = prisma,
 ): Promise<number> {
-  const timezone = await getVenueTimezone(venueId)
+  const timezone = await getVenueTimezone(venueId, db)
   let startDate: Date
 
   switch (period) {
@@ -191,7 +192,7 @@ async function calculateCurrentSales(
 
   if (goalType === 'QUANTITY') {
     // Count order items (units sold) from completed orders in this venue/period
-    const count = await prisma.orderItem.count({
+    const count = await db.orderItem.count({
       where: {
         order: {
           venueId,
@@ -205,7 +206,7 @@ async function calculateCurrentSales(
   }
 
   // AMOUNT: sum of payment amounts
-  const result = await prisma.payment.aggregate({
+  const result = await db.payment.aggregate({
     where: whereClause,
     _sum: {
       amount: true,
@@ -218,10 +219,10 @@ async function calculateCurrentSales(
 /**
  * Enrich stored goal with staff info and calculated currentSales
  */
-async function enrichGoal(venueId: string, storedGoal: StoredSalesGoal): Promise<SalesGoal> {
+async function enrichGoal(venueId: string, storedGoal: StoredSalesGoal, db: Prisma.TransactionClient = prisma): Promise<SalesGoal> {
   let staff = null
   if (storedGoal.staffId) {
-    const staffRecord = await prisma.staff.findUnique({
+    const staffRecord = await db.staff.findUnique({
       where: { id: storedGoal.staffId },
       select: { id: true, firstName: true, lastName: true },
     })
@@ -229,7 +230,7 @@ async function enrichGoal(venueId: string, storedGoal: StoredSalesGoal): Promise
   }
 
   const goalType = storedGoal.goalType || 'AMOUNT' // Backward compat: old goals default to AMOUNT
-  const currentSales = await calculateCurrentSales(venueId, storedGoal.staffId, storedGoal.period, goalType)
+  const currentSales = await calculateCurrentSales(venueId, storedGoal.staffId, storedGoal.period, goalType, db)
 
   return {
     ...storedGoal,
@@ -436,13 +437,27 @@ export async function getPrimarySalesGoal(venueId: string): Promise<SalesGoal | 
 /**
  * Get sales goal for a specific staff member
  */
-export async function getStaffSalesGoal(venueId: string, staffId: string): Promise<SalesGoal | null> {
-  const venueModule = await getOrCreateVenueModule(venueId)
+export async function getStaffSalesGoal(venueId: string, staffId: string, tx?: Prisma.TransactionClient): Promise<SalesGoal | null> {
+  const module = tx ? await tx.module.findUnique({ where: { code: MODULE_CODES.COMMISSIONS }, select: { id: true } }) : null
+  const venueModule = tx
+    ? module
+      ? await tx.venueModule.findUnique({ where: { venueId_moduleId: { venueId, moduleId: module.id } } })
+      : null
+    : await getOrCreateVenueModule(venueId)
+  if (!venueModule) return null
   const storedGoals = getSalesGoalsFromConfig(venueModule.config)
 
   // Find active goal for this staff
   const staffGoal = storedGoals.find(g => g.staffId === staffId && g.active)
   if (!staffGoal) return null
 
-  return enrichGoal(venueId, staffGoal)
+  return enrichGoal(venueId, staffGoal, tx ?? prisma)
+}
+
+/** Policy only: never creates module configuration or enriches reporting values. */
+export async function getStaffSalesGoalPolicy(venueId: string, staffId: string, db: Prisma.TransactionClient) {
+  const module = await db.module.findUnique({ where: { code: MODULE_CODES.COMMISSIONS }, select: { id: true } })
+  if (!module) return null
+  const venueModule = await db.venueModule.findUnique({ where: { venueId_moduleId: { venueId, moduleId: module.id } }, select: { config: true } })
+  return venueModule ? getSalesGoalsFromConfig(venueModule.config).find(g => g.staffId === staffId && g.active) ?? null : null
 }

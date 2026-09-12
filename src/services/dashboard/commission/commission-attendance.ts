@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client'
 import { DateTime } from 'luxon'
 
 import logger from '../../../config/logger'
@@ -47,14 +48,17 @@ export function applyAttendancePenalty(net: number, rate: number | null): number
  * Porcentaje de castigo que aplica a la comisión de este pago, o null si no aplica ninguno.
  * Sólo devuelve un valor cuando el día del pago quedó como LATE fuera de tolerancia.
  */
-export async function resolveAttendancePenaltyRate(params: ResolvePenaltyParams): Promise<number | null> {
+export async function resolveAttendancePenaltyRate(
+  params: ResolvePenaltyParams,
+  db: Prisma.TransactionClient = prisma,
+): Promise<number | null> {
   const { config, staffId, venueId, at } = params
   if (!config.attendanceLinked) return null
   const rate = Number(config.attendanceLatePenaltyRate ?? 0)
   if (!Number.isFinite(rate) || rate <= 0) return null
 
   try {
-    const venue = await prisma.venue.findUnique({
+    const venue = await db.venue.findUnique({
       where: { id: venueId },
       select: {
         timezone: true,
@@ -72,7 +76,7 @@ export async function resolveAttendancePenaltyRate(params: ResolvePenaltyParams)
 
     const rotating = (venue.settings as any)?.rotatingShiftsEnabled === true
     const prevIso = day.minus({ days: 1 }).toISODate()!
-    const membership = await prisma.staffVenue.findFirst({
+    const membership = await db.staffVenue.findFirst({
       where: { staffId, venueId },
       select: {
         workSchedule: { select: { weekly: true } },
@@ -118,7 +122,7 @@ export async function resolveAttendancePenaltyRate(params: ResolvePenaltyParams)
     if (expected.isDayOff || !expected.start || !expected.end) return null
     const shiftDay = DateTime.fromISO(scheduleDate, { zone: timezone })
     const overnight = expected.end <= expected.start
-    const entries = await prisma.timeEntry.findMany({
+    const entries = await db.timeEntry.findMany({
       where: {
         venueId,
         staffId,

@@ -22,11 +22,12 @@
 
 import prisma from '../../../utils/prismaClient'
 import logger from '../../../config/logger'
-import { Prisma, CommissionCalcType, CommissionCalcStatus, PaymentType } from '@prisma/client'
+import { PaymentEffect, Prisma, CommissionCalcType, CommissionCalcStatus, PaymentType } from '@prisma/client'
 import { NotFoundError, BadRequestError } from '../../../errors/AppError'
 import { logAction } from '../activity-log.service'
 import { applyAttendancePenalty, resolveAttendancePenaltyRate } from './commission-attendance'
 import {
+  committedAndPendingCommissionProgress,
   findActiveCommissionConfig,
   findActiveCommissionConfigs,
   findActiveOverride,
@@ -67,6 +68,9 @@ export interface CommissionCalculationResult {
 // Internal helpers
 // ============================================
 
+type CommissionSink = (data: Prisma.CommissionCalculationUncheckedCreateInput) => Promise<{ id: string }>
+type CommissionOptions = { db?: Prisma.TransactionClient; sink?: CommissionSink }
+
 type LoadedPayment = {
   id: string
   venueId: string
@@ -82,19 +86,21 @@ async function createCalcForConfig(
   payment: LoadedPayment,
   config: CommissionConfigWithRelations,
   amounts: { baseAmount: number; tipAmount: number; discountAmount: number; taxAmount: number },
+  options: CommissionOptions = {},
 ): Promise<CommissionCalculationResult | null> {
+  const db = options.db ?? prisma
   const recipientStaffId = getRecipientStaffId({ processedById: payment.processedById }, payment.order, config.recipient)
   if (!recipientStaffId) {
     logger.warn('Could not determine commission recipient', { paymentId: payment.id, configId: config.id })
     return null
   }
 
-  const staffInfo = await validateStaffForCommission(recipientStaffId, payment.venueId)
+  const staffInfo = await validateStaffForCommission(recipientStaffId, payment.venueId, db)
   if (!staffInfo) return null
 
   // Idempotency: one calc per (payment, config, staff). Lets webhook retries
   // run safely and lets multiple configs coexist on the same payment.
-  const existing = await prisma.commissionCalculation.findFirst({
+  const existing = await db.commissionCalculation.findFirst({
     where: { paymentId: payment.id, configId: config.id, staffId: recipientStaffId, status: { not: CommissionCalcStatus.VOIDED } },
     select: { id: true },
   })
@@ -107,7 +113,7 @@ async function createCalcForConfig(
     return null
   }
 
-  const override = await findActiveOverride(config.id, recipientStaffId, payment.createdAt)
+  const override = await findActiveOverride(config.id, recipientStaffId, payment.createdAt, db)
   if (override?.excludeFromCommissions) return null
 
   let tierLevel: number | undefined
@@ -115,25 +121,17 @@ async function createCalcForConfig(
   let tierRate: number | null = null
 
   if (config.useGoalAsTier && config.goalBonusRate) {
-    const timezone = await getVenueTimezone(payment.venueId)
+    const timezone = await getVenueTimezone(payment.venueId, db)
     const monthStart = fromZonedTime(startOfMonth(toZonedTime(new Date(), timezone)), timezone)
-    const monthlyStats = await prisma.commissionCalculation.aggregate({
-      where: { staffId: recipientStaffId, venueId: payment.venueId, status: { not: 'VOIDED' }, calculatedAt: { gte: monthStart } },
-      _sum: { baseAmount: true },
-    })
-    const goalTierInfo = await resolveGoalBasedTier(
-      recipientStaffId,
-      payment.venueId,
-      config,
-      decimalToNumber(monthlyStats._sum.baseAmount),
-    )
+    const periodBase = (await committedAndPendingCommissionProgress(db, payment.venueId, recipientStaffId, monthStart)).amount
+    const goalTierInfo = await resolveGoalBasedTier(recipientStaffId, payment.venueId, config, periodBase, db)
     if (goalTierInfo) {
       tierLevel = goalTierInfo.tierLevel
       tierName = goalTierInfo.tierName
       tierRate = goalTierInfo.rate
     }
   } else if (config.calcType === CommissionCalcType.TIERED) {
-    const tierInfo = await getApplicableTierRate(config.id, recipientStaffId, payment.venueId)
+    const tierInfo = await getApplicableTierRate(config.id, recipientStaffId, payment.venueId, db)
     if (tierInfo) {
       tierLevel = tierInfo.tierLevel
       tierName = tierInfo.tierName
@@ -151,37 +149,39 @@ async function createCalcForConfig(
   netCommission = Math.round(netCommission * 100) / 100
 
   // Asistencia → comisiones: sólo si el esquema la prendió; falla abierta (comisión completa).
-  const attendancePenaltyRate = await resolveAttendancePenaltyRate({
-    config,
-    staffId: recipientStaffId,
-    venueId: payment.venueId,
-    at: payment.createdAt,
-  })
+  const attendancePenaltyRate = await resolveAttendancePenaltyRate(
+    {
+      config,
+      staffId: recipientStaffId,
+      venueId: payment.venueId,
+      at: payment.createdAt,
+    },
+    db,
+  )
   netCommission = applyAttendancePenalty(netCommission, attendancePenaltyRate)
 
-  const calculation = await prisma.commissionCalculation.create({
-    data: {
-      venueId: payment.venueId,
-      staffId: recipientStaffId,
-      paymentId: payment.id,
-      orderId: payment.orderId,
-      shiftId: payment.shift?.id,
-      configId: config.id,
-      baseAmount: amounts.baseAmount,
-      tipAmount: amounts.tipAmount,
-      discountAmount: amounts.discountAmount,
-      taxAmount: amounts.taxAmount,
-      effectiveRate,
-      grossCommission,
-      netCommission,
-      calcType: config.calcType,
-      tier: tierLevel,
-      tierName,
-      attendancePenaltyRate,
-      status: CommissionCalcStatus.CALCULATED,
-      calculatedAt: new Date(),
-    },
-  })
+  const calculationData: Prisma.CommissionCalculationUncheckedCreateInput = {
+    venueId: payment.venueId,
+    staffId: recipientStaffId,
+    paymentId: payment.id,
+    orderId: payment.orderId,
+    shiftId: payment.shift?.id,
+    configId: config.id,
+    baseAmount: amounts.baseAmount,
+    tipAmount: amounts.tipAmount,
+    discountAmount: amounts.discountAmount,
+    taxAmount: amounts.taxAmount,
+    effectiveRate,
+    grossCommission,
+    netCommission,
+    calcType: config.calcType,
+    tier: tierLevel,
+    tierName,
+    attendancePenaltyRate,
+    status: CommissionCalcStatus.CALCULATED,
+    calculatedAt: options.sink ? payment.createdAt : new Date(),
+  }
+  const calculation = options.sink ? await options.sink(calculationData) : await db.commissionCalculation.create({ data: calculationData })
 
   return {
     calculationId: calculation.id,
@@ -211,10 +211,15 @@ async function createCalcForConfig(
  * @param paymentId - Payment ID that triggered this calculation
  * @returns Array of commission calculation results (one per config that fired)
  */
-export async function createCommissionForPayment(paymentId: string): Promise<CommissionCalculationResult[]> {
+export async function createCommissionForPayment(
+  paymentId: string,
+  options: CommissionOptions = {},
+): Promise<CommissionCalculationResult[]> {
+  if (!options.db) return prisma.$transaction(tx => createCommissionForPayment(paymentId, { ...options, db: tx }))
+  const db = options.db
   logger.info('Creating commission for payment', { paymentId })
 
-  const payment = await prisma.payment.findUnique({
+  const payment = await db.payment.findUnique({
     where: { id: paymentId },
     include: {
       order: { select: { id: true, createdById: true, servedById: true, subtotal: true, discountAmount: true, taxAmount: true } },
@@ -232,10 +237,25 @@ export async function createCommissionForPayment(paymentId: string): Promise<Com
     return []
   }
 
-  const configs = await findActiveCommissionConfigs(payment.venueId, payment.createdAt)
+  const configs = await findActiveCommissionConfigs(payment.venueId, payment.createdAt, db)
   if (configs.length === 0) {
     logger.info('No active commission config', { paymentId, venueId: payment.venueId })
     return []
+  }
+
+  {
+    if (payment.orderId) await db.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE id = ${payment.orderId} AND "venueId" = ${payment.venueId} FOR UPDATE`)
+    const recipients = [
+      ...new Set(
+        configs
+          .map(config => getRecipientStaffId({ processedById: payment.processedById }, payment.order, config.recipient))
+          .filter((id): id is string => !!id),
+      ),
+    ].sort()
+    if (recipients.length)
+      await db.$queryRaw(
+        Prisma.sql`SELECT id FROM "StaffVenue" WHERE "venueId" = ${payment.venueId} AND "staffId" IN (${Prisma.join(recipients)}) ORDER BY "staffId" FOR UPDATE`,
+      )
   }
 
   const categoryScoped = configs.filter(c => c.filterByCategories && c.categoryIds.length > 0)
@@ -247,19 +267,27 @@ export async function createCommissionForPayment(paymentId: string): Promise<Com
   // 1) Category-scoped configs — each bills its own categories.
   for (const config of categoryScoped) {
     if (!payment.orderId) continue
-    const orderBase = await calculateCategoryFilteredAmount(payment.orderId, config.categoryIds, {
-      includeTax: config.includeTax,
-      includeDiscount: config.includeDiscount,
-    })
+    const orderBase = await calculateCategoryFilteredAmount(
+      payment.orderId,
+      config.categoryIds,
+      {
+        includeTax: config.includeTax,
+        includeDiscount: config.includeDiscount,
+      },
+      db,
+    )
     // 🔴 MONEY: la base viene de los ITEMS DE LA ORDEN pero esto corre POR COBRO. Sin
     // descontar lo ya comisionado, una orden con N cobros paga la misma venta N veces
     // (bug real: Mindform, $34.20 sobre una venta de $380). Misma defensa del fix de
     // descuentos apilados (268c5fc6): cobrar contra el REMANENTE, no contra el total.
-    let base = Math.max(0, Math.round((orderBase - (await alreadyCommissionedItemBase(payment.orderId, config.id))) * 100) / 100)
+    let base = Math.max(
+      0,
+      Math.round((orderBase - (await alreadyCommissionedItemBase(payment.orderId, config.id, db, true))) * 100) / 100,
+    )
     const tip = config.includeTips ? decimalToNumber(payment.tipAmount) : 0
     if (config.includeTips) base += tip
     if (base <= 0) continue
-    const r = await createCalcForConfig(payment, config, { baseAmount: base, tipAmount: tip, discountAmount: 0, taxAmount: 0 })
+    const r = await createCalcForConfig(payment, config, { baseAmount: base, tipAmount: tip, discountAmount: 0, taxAmount: 0 }, options)
     if (r) results.push(r)
   }
 
@@ -280,22 +308,28 @@ export async function createCommissionForPayment(paymentId: string): Promise<Com
       )
       amounts = r
     } else if (payment.orderId) {
-      const orderLeftover = await calculateLeftoverAmount(payment.orderId, claimed, {
-        includeTax: generalConfig.includeTax,
-        includeDiscount: generalConfig.includeDiscount,
-      })
+      const orderLeftover = await calculateLeftoverAmount(
+        payment.orderId,
+        claimed,
+        {
+          includeTax: generalConfig.includeTax,
+          includeDiscount: generalConfig.includeDiscount,
+        },
+        db,
+      )
       // 🔴 MONEY: mismo defecto que la rama category-scoped — el sobrante también es
       // base DE ORDEN evaluada POR COBRO. Se descuenta lo que esta config ya cobró.
       let base = Math.max(
         0,
-        Math.round((orderLeftover - (await alreadyCommissionedItemBase(payment.orderId, generalConfig.id))) * 100) / 100,
+        Math.round((orderLeftover - (await alreadyCommissionedItemBase(payment.orderId, generalConfig.id, db, true))) * 100) /
+          100,
       )
       const tip = generalConfig.includeTips ? decimalToNumber(payment.tipAmount) : 0
       if (generalConfig.includeTips) base += tip
       amounts = { baseAmount: base, tipAmount: tip, discountAmount: 0, taxAmount: 0 }
     }
     if (amounts && amounts.baseAmount > 0) {
-      const r = await createCalcForConfig(payment, generalConfig, amounts)
+      const r = await createCalcForConfig(payment, generalConfig, amounts, options)
       if (r) results.push(r)
     }
   }
@@ -314,25 +348,26 @@ export async function createCommissionForPayment(paymentId: string): Promise<Com
  * @param originalPaymentId - The original Payment that was refunded
  * @returns Array of commission calculation results (one per original calc)
  */
-export async function createRefundCommission(refundPaymentId: string, originalPaymentId: string): Promise<CommissionCalculationResult[]> {
-  logger.info('Creating refund commission', { refundPaymentId, originalPaymentId })
-
-  const originalCalcs = await prisma.commissionCalculation.findMany({
-    where: { paymentId: originalPaymentId, status: { not: CommissionCalcStatus.VOIDED } },
-  })
-  if (originalCalcs.length === 0) {
-    logger.info('No commission for original payment, skipping refund commission', { refundPaymentId, originalPaymentId })
-    return []
-  }
-
-  const refundPayment = await prisma.payment.findUnique({ where: { id: refundPaymentId } })
+export async function createRefundCommission(refundPaymentId: string, originalPaymentId: string, options: CommissionOptions = {}): Promise<CommissionCalculationResult[]> {
+  if (!options.db) return prisma.$transaction(tx => createRefundCommission(refundPaymentId, originalPaymentId, { ...options, db: tx }))
+  const db = options.db
+  const refundPayment = await db.payment.findUnique({ where: { id: refundPaymentId } })
   if (!refundPayment) throw new NotFoundError(`Refund payment ${refundPaymentId} not found`)
+  if (refundPayment.orderId) await db.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE id = ${refundPayment.orderId} AND "venueId" = ${refundPayment.venueId} FOR UPDATE`)
+  const originalPayment = await db.payment.findFirst({ where: { id: originalPaymentId, venueId: refundPayment.venueId, orderId: refundPayment.orderId } })
+  if (!originalPayment) throw new Error('REFUND_COMMISSION_SOURCE_MISMATCH')
+  const originalCalcs = await db.commissionCalculation.findMany({ where: { paymentId: originalPaymentId, status: { not: CommissionCalcStatus.VOIDED } } })
+  const pending = await db.paymentEffect.findMany({ where: { venueId: refundPayment.venueId, paymentId: originalPaymentId, kind: 'COMMISSION', status: { in: ['PENDING', 'PROCESSING', 'DEAD_LETTER'] } } })
+  for (const effect of pending) {
+    const data = effect.payload as unknown as (typeof originalCalcs)[number]
+    if (data.configId && data.staffId && !originalCalcs.some(c => c.configId === data.configId && c.staffId === data.staffId)) originalCalcs.push(data)
+  }
 
   const refundAmount = Math.abs(decimalToNumber(refundPayment.amount)) + Math.abs(decimalToNumber(refundPayment.tipAmount ?? 0))
   const results: CommissionCalculationResult[] = []
 
   for (const originalCalc of originalCalcs) {
-    const existing = await prisma.commissionCalculation.findFirst({
+    const existing = await db.commissionCalculation.findFirst({
       where: {
         paymentId: refundPaymentId,
         configId: originalCalc.configId,
@@ -346,8 +381,7 @@ export async function createRefundCommission(refundPaymentId: string, originalPa
     const originalBaseAmount = decimalToNumber(originalCalc.baseAmount)
     const refundRatio = originalBaseAmount > 0 ? refundAmount / originalBaseAmount : 1
 
-    const calculation = await prisma.commissionCalculation.create({
-      data: {
+    const data: Prisma.CommissionCalculationUncheckedCreateInput = {
         venueId: originalCalc.venueId,
         staffId: originalCalc.staffId,
         paymentId: refundPaymentId,
@@ -365,17 +399,17 @@ export async function createRefundCommission(refundPaymentId: string, originalPa
         tier: originalCalc.tier,
         tierName: originalCalc.tierName,
         status: CommissionCalcStatus.CALCULATED,
-        calculatedAt: new Date(),
-      },
-    })
+        calculatedAt: refundPayment.createdAt,
+    }
+    const calculation = options.sink ? { ...data, ...(await options.sink(data)) } : await db.commissionCalculation.create({ data })
     results.push({
       calculationId: calculation.id,
       paymentId: refundPaymentId,
       staffId: originalCalc.staffId,
       baseAmount: -refundAmount,
       effectiveRate: decimalToNumber(originalCalc.effectiveRate),
-      grossCommission: decimalToNumber(calculation.grossCommission),
-      netCommission: decimalToNumber(calculation.netCommission),
+      grossCommission: Number(calculation.grossCommission),
+      netCommission: Number(calculation.netCommission),
     })
   }
   return results
@@ -1237,4 +1271,50 @@ export async function createSplitCommissionForPayment(paymentId: string, staffId
   }
 
   return results
+}
+
+/** Freeze the existing calculation rules at financial commit, before any asynchronous delivery. */
+export async function freezePaymentCommissionInTx(tx: Prisma.TransactionClient, paymentId: string, persist?: (plan: import('../../tpv/paymentEffects.service').PaymentEffectInput) => Promise<void>) {
+  const payment = await tx.payment.findUniqueOrThrow({ where: { id: paymentId }, select: { id: true, venueId: true, orderId: true } })
+  await tx.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE id = ${payment.orderId} AND "venueId" = ${payment.venueId} FOR UPDATE`)
+  if (await tx.paymentEffect.findFirst({ where: { venueId: payment.venueId, paymentId, kind: 'COMMISSION' }, select: { id: true } }))
+    return []
+  const plans: import('../../tpv/paymentEffects.service').PaymentEffectInput[] = []
+  await createCommissionForPayment(paymentId, {
+    db: tx,
+    sink: async data => {
+      const dedupeKey = `commission:${paymentId}:${data.configId}:${data.staffId}:v1`
+      const plan: import('../../tpv/paymentEffects.service').PaymentEffectInput = {
+        venueId: payment.venueId,
+        paymentId,
+        orderId: payment.orderId,
+        kind: 'COMMISSION',
+        dedupeKey,
+        payload: JSON.parse(JSON.stringify(data)) as Prisma.InputJsonValue,
+      }
+      if (persist) await persist(plan)
+      else plans.push(plan)
+      return { id: dedupeKey }
+    },
+  })
+  return plans
+}
+
+/** Effect and calculation are committed together by the caller holding the Order/effect locks. */
+export async function applyFrozenCommissionInTx(tx: Prisma.TransactionClient, effect: PaymentEffect): Promise<void> {
+  const data = effect.payload as unknown as Prisma.CommissionCalculationUncheckedCreateInput
+  if (
+    data.venueId !== effect.venueId ||
+    data.paymentId !== effect.paymentId ||
+    data.orderId !== effect.orderId ||
+    !data.configId ||
+    !data.staffId
+  ) {
+    throw new Error('INVALID_COMMISSION_SNAPSHOT')
+  }
+  const existing = await tx.commissionCalculation.findFirst({
+    where: { paymentId: effect.paymentId, configId: data.configId, staffId: data.staffId, status: { not: CommissionCalcStatus.VOIDED } },
+    select: { id: true },
+  })
+  if (!existing) await tx.commissionCalculation.create({ data })
 }
