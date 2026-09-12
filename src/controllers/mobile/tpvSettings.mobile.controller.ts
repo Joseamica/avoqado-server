@@ -12,6 +12,7 @@
 import { TerminalType } from '@prisma/client'
 import { NextFunction, Request, Response } from 'express'
 import logger from '../../config/logger'
+import { getDeviceReceiptPayload } from '../../services/dashboard/receiptLayout/devicePayload.service'
 import AppError, { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { VenuePlanInfo, getVenuePlanInfo } from '../../services/access/basePlan.service'
@@ -58,7 +59,7 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
     //    venue's plan-tier info (additive `plan` field — POS apps gate UI by plan).
     //    RESILIENT: a plan-lookup failure must NEVER break venue-select on the POS — log it
     //    and return the settings WITHOUT the plan field (apps fail open).
-    const [terminals, plan, venueSettings, receiptVenue] = await Promise.all([
+    const [terminals, plan, venueSettings, receiptPayload] = await Promise.all([
       prisma.terminal.findMany({
         where: { venueId },
         select: {
@@ -101,35 +102,14 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
           logger.error('Failed to resolve venue-level POS settings — returning defaults', { venueId, error })
           return null
         }),
-      // Encabezado del ticket impreso: logo del negocio + identidad fiscal (razón
-      // social, RFC, lugar de expedición), como el recibo de SoftRestaurant. El
-      // emisor es el PRIMERO por fecha de alta — el mismo criterio que ya usan
-      // nómina y contabilidad (`fiscalEmisor.findFirst orderBy createdAt asc`).
-      prisma.venue
-        .findUnique({
-          where: { id: venueId },
-          select: {
-            name: true,
-            logo: true,
-            phone: true,
-            address: true,
-            city: true,
-            state: true,
-            zipCode: true,
-            fiscalEmisors: {
-              orderBy: { createdAt: 'asc' },
-              take: 1,
-              select: { legalName: true, rfc: true, lugarExpedicion: true },
-            },
-          },
-        })
-        .catch(error => {
-          logger.error('Failed to resolve receipt header info for mobile venue settings — returning settings without receiptInfo', {
-            venueId,
-            error,
-          })
-          return null
-        }),
+      // Encabezado Y DISEÑO del ticket impreso (spec § 7.3). Un solo constructor compartido
+      // con el servicio de la PAX: si cada uno armara lo suyo, las tablets y la terminal
+      // imprimirían distinto y los casos dorados NO lo cazarían. Falla en blando: si algo no
+      // se resuelve, el campo se omite y los settings salen igual — un POS sin settings no cobra.
+      getDeviceReceiptPayload(venueId).catch(error => {
+        logger.error('Failed to resolve receipt payload for mobile venue settings — returning settings without it', { venueId, error })
+        return {}
+      }),
     ])
 
     // 2. Prefer the terminal that made this request. A venue can have an area
@@ -202,25 +182,10 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
         // es el comportamiento de hoy. Es de VENUE, no de terminal — por eso vive
         // aquí y no dentro de `settings`.
         managerPinOverrideEnabled: venueSettings?.managerPinOverrideEnabled ?? false,
-        // Encabezado del ticket impreso (aditivo y opcional, mismo contrato que
-        // `plan`): un POS viejo lo ignora; sin emisor fiscal los campos fiscales
-        // van null y el ticket sale como hoy. Si el lookup falló, se omite entero.
-        ...(receiptVenue
-          ? {
-              receiptInfo: {
-                name: receiptVenue.name ?? null,
-                logoUrl: receiptVenue.logo ?? null,
-                phone: receiptVenue.phone ?? null,
-                address: receiptVenue.address ?? null,
-                city: receiptVenue.city ?? null,
-                state: receiptVenue.state ?? null,
-                zipCode: receiptVenue.zipCode ?? null,
-                legalName: receiptVenue.fiscalEmisors?.[0]?.legalName ?? null,
-                rfc: receiptVenue.fiscalEmisors?.[0]?.rfc ?? null,
-                lugarExpedicion: receiptVenue.fiscalEmisors?.[0]?.lugarExpedicion ?? null,
-              },
-            }
-          : {}),
+        // Encabezado y diseño del ticket (aditivo y opcional, mismo contrato que `plan`):
+        // un POS viejo los ignora. `receiptInfo` conserva EXACTAMENTE sus campos de siempre
+        // y suma los emisores por venta; `receiptLayout` es nuevo (spec § 7.3).
+        ...receiptPayload,
       },
     })
   } catch (error) {

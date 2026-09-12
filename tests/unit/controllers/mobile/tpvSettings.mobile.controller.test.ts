@@ -315,7 +315,7 @@ describe('getVenueTpvSettings (mobile) — receiptInfo (encabezado del ticket im
     await getVenueTpvSettings(makeReq(), res, jest.fn() as NextFunction)
 
     expect(res.__json.success).toBe(true)
-    expect(res.__json.data.receiptInfo).toEqual({
+    expect(res.__json.data.receiptInfo).toMatchObject({
       name: 'Testarudo Cafe',
       logoUrl: 'https://cdn.avoqado.io/testarudo/logo.png',
       phone: '5512345678',
@@ -329,6 +329,42 @@ describe('getVenueTpvSettings (mobile) — receiptInfo (encabezado del ticket im
     })
   })
 
+  it('🔴 fase 1: además de los campos de siempre, llegan los emisores por venta y el diseño', async () => {
+    // El constructor tiene sus propias pruebas; ésta demuestra el CABLEADO: que lo nuevo
+    // atraviesa el controlador y sale en la respuesta HTTP.
+    mockVenueLookups({
+      name: 'Testarudo Cafe',
+      logo: null,
+      phone: null,
+      address: null,
+      city: null,
+      state: null,
+      zipCode: null,
+      rfc: 'VIE900101AAA',
+      legalName: 'VIEJO SA',
+      fiscalEmisors: [
+        { id: 'emA', legalName: 'A SA', rfc: 'AAA010101AAA', lugarExpedicion: '06600', merchantConfigs: [{ merchantAccountId: 'maA' }] },
+        { id: 'emB', legalName: 'B SA', rfc: 'BBB020202BBB', lugarExpedicion: '06700', merchantConfigs: [{ merchantAccountId: 'maB' }] },
+      ],
+    })
+
+    const res = makeRes()
+    await getVenueTpvSettings(makeReq(), res, jest.fn() as NextFunction)
+
+    const info = res.__json.data.receiptInfo
+    // Lo de siempre: el emisor PRINCIPAL, sin cambiar de nombre ni de valor.
+    expect(info.rfc).toBe('AAA010101AAA')
+    // Lo nuevo: todos los emisores con sus cuentas, para elegir el de la venta.
+    expect(info.fiscalEmisors).toHaveLength(2)
+    expect(info.fiscalEmisors[1].merchantAccountIds).toEqual(['maB'])
+    expect(info.principalEmisorId).toBe('emA')
+    // Y las columnas legacy de Venue, que son la tercera fuente del RFC.
+    expect(info.legacy).toEqual({ rfc: 'VIE900101AAA', legalName: 'VIEJO SA' })
+    // El diseño del ticket viaja con su revisión: sin fila, la canónica y revision 0.
+    expect(res.__json.data.receiptLayout).toMatchObject({ schemaVersion: 1, revision: 0 })
+    expect(Array.isArray(res.__json.data.receiptLayout.blocks)).toBe(true)
+  })
+
   it('queries the FIRST emisor by createdAt (the same rule nomina/accounting use) — shape of the query', async () => {
     // El mock contesta lo que sea; esta prueba fija la FORMA de la consulta,
     // que es lo que un mock deja pasar gratis.
@@ -340,10 +376,19 @@ describe('getVenueTpvSettings (mobile) — receiptInfo (encabezado del ticket im
       expect.objectContaining({
         where: { id: venueId },
         select: expect.objectContaining({
+          // 🔴 Cambió a propósito (fase 1 del diseñador de tickets): ya no basta el emisor
+          // principal — la app tiene que poder elegir el de la VENTA, así que viajan TODOS
+          // con sus cuentas de cobro y SIN `take: 1`. El `orderBy` se conserva porque es
+          // justo lo que define cuál es el principal.
           fiscalEmisors: {
             orderBy: { createdAt: 'asc' },
-            take: 1,
-            select: { legalName: true, rfc: true, lugarExpedicion: true },
+            select: {
+              id: true,
+              legalName: true,
+              rfc: true,
+              lugarExpedicion: true,
+              merchantConfigs: { select: { merchantAccountId: true } },
+            },
           },
         }),
       }),
@@ -365,7 +410,7 @@ describe('getVenueTpvSettings (mobile) — receiptInfo (encabezado del ticket im
     const res = makeRes()
     await getVenueTpvSettings(makeReq(), res, jest.fn() as NextFunction)
 
-    expect(res.__json.data.receiptInfo).toEqual({
+    expect(res.__json.data.receiptInfo).toMatchObject({
       name: 'Sin Factura',
       logoUrl: null,
       phone: null,
@@ -390,7 +435,7 @@ describe('getVenueTpvSettings (mobile) — receiptInfo (encabezado del ticket im
     expect(res.__json.success).toBe(true)
     expect(res.__json.data).not.toHaveProperty('receiptInfo')
     expect(res.__json.data.terminals).toEqual([])
-    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('receipt header info'), expect.objectContaining({ venueId }))
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('encabezado del ticket'), expect.objectContaining({ venueId }))
   })
 })
 

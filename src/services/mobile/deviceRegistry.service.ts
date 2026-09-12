@@ -36,6 +36,7 @@ import { DeviceFormFactor, Prisma, TerminalStatus, TerminalType } from '@prisma/
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { resolveDeviceModel } from '../../config/deviceCatalog'
+import { normalizeTerminalBrand } from '../../lib/providerDeviceCompatibility'
 import { logAction } from '../dashboard/activity-log.service'
 
 /** Plataformas que pueden auto-registrarse. Espeja `X-Device-Platform`. */
@@ -179,7 +180,7 @@ export async function ensureDeviceTerminal(params: {
         name,
         type: PLATFORM_TO_TERMINAL_TYPE[identity.platform] ?? TerminalType.POS_ANDROID,
         status: TerminalStatus.ACTIVE,
-        brand: resolved.brand,
+        brand: normalizeTerminalBrand(resolved.brand),
         model: resolved.model,
         modelIdentifier: identity.modelIdentifier ?? null,
         formFactor: resolved.formFactor,
@@ -211,7 +212,7 @@ export async function ensureDeviceTerminal(params: {
         name: created.name,
         deviceUid: identity.deviceUid,
         platform: identity.platform,
-        brand: resolved.brand,
+        brand: normalizeTerminalBrand(resolved.brand),
         model: resolved.model,
         formFactor: resolved.formFactor,
       },
