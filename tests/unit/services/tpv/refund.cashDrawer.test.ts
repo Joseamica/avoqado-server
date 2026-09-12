@@ -51,6 +51,10 @@ function armar(method: 'CASH' | 'CREDIT_CARD', tip = 0) {
     findMany: jest.fn().mockResolvedValue([]),
     create: jest.fn().mockImplementation(async (a: any) => ({ id: 'pay-refund', ...a.data })),
     update: jest.fn().mockResolvedValue(original),
+    // Task 5 (outbox de efectos del cobro): el reembolso encola COMMISSION y REFERRAL dentro de
+    // la MISMA transacción y para eso relee el Payment del reembolso. Sin esta entrada revienta
+    // con un TypeError que se lleva por delante el PAY_OUT al cajón — justo lo que mide este test.
+    findUniqueOrThrow: jest.fn().mockResolvedValue({ ...original, id: 'pay-refund' }),
   }
   ;(prismaMock as any).order = { findUnique: jest.fn().mockResolvedValue({ id: 'order-1', venueId: VENUE }), update: jest.fn() }
   ;(prismaMock as any).$transaction = jest.fn().mockImplementation(async (fn: any) => fn(prismaMock))

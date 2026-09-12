@@ -1000,7 +1000,21 @@ describe('refund.dashboard.service', () => {
       )
     })
 
-    it('componente agotado: si la propina ya se devolvió, rebalancea el override a venta y decrementa sólo venta', async () => {
+    /**
+     * 🔴 CAMBIÓ EL 2026-09-12, por decisión del founder con una auditoría independiente
+     * (Codex gpt-6-astra) enfrente. Esta prueba fijaba el REBALANCEO como correcto: si el
+     * cajero pedía «devuelve $20, todo de propina» y la propina ya se había devuelto, el
+     * servidor sacaba los $20 del CONSUMO y los devolvía igual.
+     *
+     * Era correcto para el mesero —nunca se le quita propina de más— e incorrecto para el
+     * NEGOCIO: «todo de propina» es una instrucción exacta, y sustituirla por consumo cambia
+     * en silencio lo que el cajero autorizó. El caso real es un reintento —pantalla lenta,
+     * red intermitente—: el cliente se lleva $40 y el negocio pierde $20 sin que nadie lo vea.
+     *
+     * Ahora se rechaza y se dice qué se devolvió antes. La prueba conserva su escenario; lo
+     * que cambia es el veredicto.
+     */
+    it('componente agotado: si la propina ya se devolvió, se RECHAZA en vez de cargarlo a la venta', async () => {
       prismaMock.$queryRaw.mockResolvedValueOnce([pagoConTurnoViejo({ tipAmount: 20 })]).mockResolvedValueOnce([
         {
           id: 'refund-tip-previo',
@@ -1013,16 +1027,12 @@ describe('refund.dashboard.service', () => {
       ])
       prismaMock.shift.findFirst.mockResolvedValue({ id: 'shift-negocio', status: 'OPEN' } as never)
 
-      await reembolsar({ amount: 2000, tipRefundCents: 2000 })
+      await expect(reembolsar({ amount: 2000, tipRefundCents: 2000 })).rejects.toThrow(/propina/i)
 
-      const refund = prismaMock.payment.create.mock.calls.at(-1)![0].data
-      expect(refund.amount.toFixed(2)).toBe('-20.00')
-      expect(refund.tipAmount.toFixed(2)).toBe('0.00')
-
-      const decremento = prismaMock.shift.updateMany.mock.calls.at(-1)![0].data
-      expect(decremento.totalSales.decrement.toFixed(2)).toBe('20.00')
-      expect(decremento.totalTips).toBeUndefined()
-      expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+      // Y lo que de verdad importa: no se escribió NADA. Ni el reembolso, ni el decremento
+      // del turno. El dinero del negocio se queda donde estaba.
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
+      expect(prismaMock.shift.updateMany).not.toHaveBeenCalled()
     })
 
     it('componente agotado: si la venta ya se devolvió, rebalancea el default a propina y audita ese split post-corte', async () => {

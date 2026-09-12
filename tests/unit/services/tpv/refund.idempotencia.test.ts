@@ -125,6 +125,11 @@ function armar(opts: { yaExiste?: typeof reembolsoExistente | null; yaReembolsad
   }
 
   ;(prismaMock as any).payment = {
+    // Task 5 (outbox de efectos): el reembolso relee su propio Payment para encolar los efectos
+    // diferidos DENTRO de la transacción (`enqueueRefundPaymentEffectsInTx`). Se delega en el
+    // `findFirst` que este fixture ya monta bien, para que el pago del reembolso herede venue y
+    // orden del original — devolver otros valores dispararía PAYMENT_EFFECT_SOURCE_MISMATCH.
+    findUniqueOrThrow: jest.fn().mockImplementation(async (a: any) => (prismaMock as any).payment.findFirst({ where: a?.where })),
     // 🔑 El servicio hace DOS búsquedas distintas: el pago ORIGINAL con `findFirst`
     // tenant-scoped y el reembolso previo con `findUnique` por llave compuesta.
     findUnique: jest.fn().mockImplementation(async (args: any) => {

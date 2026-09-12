@@ -532,6 +532,58 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
           requestedTipCents,
         })
 
+        // 🔴 UN REPARTO EXPLÍCITO ES UNA RESTRICCIÓN, NO UNA SUGERENCIA.
+        //
+        // Cuando el cajero desmarca «Incluir propina», Android e iOS mandan
+        // `tipRefundCents: 0` y la pantalla le promete que la propina del mesero queda
+        // intacta. Hasta el 2026-09-12 esa promesa se podía incumplir en silencio: el
+        // override se validaba contra el cobro ORIGINAL y luego se re-encajaba contra los
+        // componentes RESTANTES, que es lo correcto para el reparto proporcional y NO para
+        // uno pedido a mano. Con $100 + $20 de propina y $90 de venta ya devueltos, pedir
+        // $20 «sin tocar la propina» devolvía $10 de venta y **$10 de propina**, dejando
+        // sólo un `warn` que nadie lee. Lo encontró una auditoría (Codex gpt-6-astra).
+        //
+        // Ahora se rechaza y se dice cuánto SÍ cabe. Rechazar es ruidoso y se arregla en
+        // el mostrador; consumir una propina que alguien pidió respetar es silencioso y se
+        // descubre en la nómina del mesero.
+        //
+        // 🔴 EL RECHAZO ES DE LOS DOS LADOS — decisión del founder (2026-09-12) con la
+        // recomendación de una auditoría independiente (Codex gpt-6-astra) enfrente.
+        //
+        // La primera versión rechazaba sólo cuando el reparto factible tomaría MÁS propina de
+        // la pedida. El razonamiento era «tomar MENOS propina no puede perjudicar al mesero»,
+        // y era cierto — pero incompleto: perjudica al NEGOCIO. «Devuelve $20, todo de la
+        // propina» es una instrucción exacta, y sustituirla por consumo cambia en silencio lo
+        // que el cajero autorizó. El caso real es un reintento (pantalla lenta, red
+        // intermitente): el cliente se lleva $40 y el negocio pierde $20 sin que nadie lo vea.
+        //
+        // ⚠️ Lo que este guard NO cierra, para no prometer de más: si todavía queda propina
+        // suficiente, ese mismo reintento cabe y devuelve dos veces. Eso es falta de
+        // IDEMPOTENCIA —una llave por operación, como la que ya tiene el riel de la terminal—
+        // y es trabajo aparte. Aquí se cierra que el servidor mienta sobre el concepto.
+        if (typeof input.tipRefundCents === 'number' && reparto.tipRefundCents !== requestedTipCents) {
+          const enPesos = (centavos: number) => `$${(centavos / 100).toFixed(2)}`
+          // El mensaje termina en un toast de la tablet y lo acciona un cajero con el cliente
+          // enfrente: un «error» genérico lo único que consigue es que lo intente otra vez.
+          // Por eso dice qué se devolvió ya, cuándo, y qué SÍ cabe ahora.
+          const ultimo = existingRefunds
+            .filter(r => r.status === TransactionStatus.COMPLETED)
+            .at(-1)
+          const cuando = ultimo ? ` (el último, el ${ultimo.createdAt.toLocaleDateString('es-MX')})` : ''
+          const yaDevuelto =
+            refundedSalesCents + refundedTipsCents > 0
+              ? `De este cobro ya se devolvieron ${enPesos(refundedSalesCents)} de consumo y ` +
+                `${enPesos(refundedTipsCents)} de propina${cuando}. `
+              : ''
+          throw new BadRequestError(
+            yaDevuelto +
+              `Quedan ${enPesos(reparto.remainingSalesCents)} de consumo y ` +
+              `${enPesos(reparto.remainingTipsCents)} de propina sin devolver, así que no se ` +
+              `puede reembolsar ${enPesos(refundCents)} tomando ${enPesos(requestedTipCents)} ` +
+              `de propina. Revisa si ya lo devolviste antes; si no, ajusta el reparto.`,
+          )
+        }
+
         if (reparto.tipRefundCents !== requestedTipCents) {
           logger.warn('[REFUND.DASHBOARD] Refund split adjusted to remaining sale/tip components', {
             venueId: input.venueId,

@@ -1,6 +1,6 @@
 import { NextFunction, Request, Response } from 'express'
 import * as refundTpvService from '../../services/tpv/refund.tpv.service'
-import { esCantidadNoNegativaEnCentavos, esCantidadPositivaEnCentavos } from '../../services/shared/devueltoDeUnCobro'
+import { esCantidadNoNegativaEnCentavos, esCantidadPositivaEnCentavos, vieneAusente } from '../../services/shared/devueltoDeUnCobro'
 
 /**
  * Record a refund for an existing payment
@@ -56,7 +56,7 @@ export async function recordRefund(req: Request, res: Response, next: NextFuncti
       res.status(400).json({ success: false, message: 'amount debe ser un entero seguro positivo expresado en centavos' })
       return
     }
-    if (req.body.tipRefundCents !== undefined && !esCantidadNoNegativaEnCentavos(req.body.tipRefundCents)) {
+    if (!vieneAusente(req.body.tipRefundCents) && !esCantidadNoNegativaEnCentavos(req.body.tipRefundCents)) {
       res.status(400).json({ success: false, message: 'tipRefundCents debe ser un entero seguro no negativo expresado en centavos' })
       return
     }
@@ -89,7 +89,7 @@ export async function recordRefund(req: Request, res: Response, next: NextFuncti
       currency: req.body.currency || 'MXN',
       // Preserve zero: it means "refund sale only; keep the staff tip intact".
       // A truthiness check would silently restore the proportional default.
-      tipRefundCents: req.body.tipRefundCents,
+      tipRefundCents: typeof req.body.tipRefundCents === 'number' ? req.body.tipRefundCents : undefined,
       // Optional processor tag — 'blumon' (default for legacy TPVs) or
       // 'angelpay' (sent by TPV v2.31+ when refunding Nexgo payments).
       // Persisted into Payment.processor for downstream reconciliation.

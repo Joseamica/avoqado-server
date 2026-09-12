@@ -5,6 +5,22 @@ export function esCantidadPositivaEnCentavos(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
 }
 
+/**
+ * ¿El campo opcional llegó AUSENTE?
+ *
+ * 🔴 En JSON no existe `undefined`. Un cliente que serializa con kotlinx.serialization y
+ * `encodeDefaults = true` (el POS Android) manda `"amount": null` donde el dashboard web y
+ * iOS simplemente omiten la llave. Las tres formas significan lo mismo —«este campo no
+ * aplica a esta operación»— y preguntar sólo por `undefined` convirtió al POS Android en el
+ * único cliente que no podía reembolsar (Testarudo, 2026-09-11: 18 rechazos en 10 minutos).
+ *
+ * Ausente NO es lo mismo que inválido: un valor PRESENTE que no sea un entero seguro de
+ * centavos se sigue rechazando con su 400.
+ */
+export function vieneAusente(value: unknown): boolean {
+  return value === undefined || value === null
+}
+
 /** Una parte opcional del monto en centavos: exacta, no negativa y representable sin pérdida. */
 export function esCantidadNoNegativaEnCentavos(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0

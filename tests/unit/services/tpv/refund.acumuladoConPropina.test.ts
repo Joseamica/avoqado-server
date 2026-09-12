@@ -64,6 +64,11 @@ function armar(processorData: Record<string, unknown>, filas: Array<Record<strin
   }
 
   ;(prismaMock as any).payment = {
+    // Task 5 (outbox de efectos): el reembolso relee su propio Payment para encolar los efectos
+    // diferidos DENTRO de la transacción (`enqueueRefundPaymentEffectsInTx`). Se delega en el
+    // `findFirst` que este fixture ya monta bien, para que el pago del reembolso herede venue y
+    // orden del original — devolver otros valores dispararía PAYMENT_EFFECT_SOURCE_MISMATCH.
+    findUniqueOrThrow: jest.fn().mockImplementation(async (a: any) => (prismaMock as any).payment.findFirst({ where: a?.where })),
     findUnique: jest.fn().mockResolvedValue(pago),
     findFirst: jest.fn().mockResolvedValue(pago),
     findMany: jest.fn().mockResolvedValue(filas),
@@ -117,6 +122,11 @@ function armarDosFotos(pdVieja: Record<string, unknown>, pdBloqueada: Record<str
   const fotoBloqueada = { ...base, processorData: pdBloqueada }
 
   ;(prismaMock as any).payment = {
+    // Task 5 (outbox de efectos): el reembolso relee su propio Payment para encolar los efectos
+    // diferidos DENTRO de la transacción (`enqueueRefundPaymentEffectsInTx`). Se delega en el
+    // `findFirst` que este fixture ya monta bien, para que el pago del reembolso herede venue y
+    // orden del original — devolver otros valores dispararía PAYMENT_EFFECT_SOURCE_MISMATCH.
+    findUniqueOrThrow: jest.fn().mockImplementation(async (a: any) => (prismaMock as any).payment.findFirst({ where: a?.where })),
     findUnique: jest.fn().mockResolvedValue(fotoVieja),
     findFirst: jest.fn().mockResolvedValue(fotoVieja),
     findMany: jest.fn().mockResolvedValue([]),
@@ -379,6 +389,97 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
     expect(Number(data.tipAmount)).toBe(-5)
   })
 
+  // ─── El reparto que NO se pudo honrar deja rastro, no sólo un `warn` ─────────────────
+
+  /**
+   * 🔴 EN LA TERMINAL NO SE PUEDE RECHAZAR, ASÍ QUE HAY QUE DEJAR RASTRO.
+   *
+   * El riel del dashboard (`refund.dashboard.service.ts`) sí rechaza un reparto explícito que
+   * no se puede honrar, porque ahí el dinero todavía no se ha movido. Aquí es al revés: cuando
+   * este código corre, el procesador YA devolvió el dinero, y rechazar dejaría un reembolso
+   * real sin asiento — peor que el reparto torcido. Por eso los dos tests de arriba fijan el
+   * reequilibrio como correcto.
+   *
+   * Lo que faltaba es que alguien se entere. Hasta el 2026-09-12 la discrepancia sólo dejaba un
+   * `logger.warn`, que nadie lee: el cajero desmarcaba «Incluir propina», el servidor tomaba
+   * $20 de la propina del mesero igual, y eso no aparecía en ninguna parte que un dueño audite.
+   * Ahora queda en `ActivityLog`, que es exactamente el criterio de la casa — se registran las
+   * ANOMALÍAS que alguien revisa, no el ruido diario (por eso el camino normal NO escribe nada).
+   */
+  it('P1 deja rastro auditable cuando el reparto pedido no se pudo honrar', async () => {
+    const { logAction } = jest.requireMock('@/services/dashboard/activity-log.service')
+    armar({}, [filaDeReembolso(-90, 0)])
+
+    // Mismo escenario que «reequilibra hacia PROPINA»: se pidió no tocar la propina y se tomó.
+    await refundService.recordRefund(VENUE, { ...cuerpo(3000), tipRefundCents: 0 } as never, 'staff-1')
+
+    const asiento = (logAction as jest.Mock).mock.calls
+      .map(([a]: [any]) => a)
+      .find((a: any) => a.action === 'REFUND_SPLIT_NOT_HONORED')
+
+    expect(asiento).toBeDefined()
+    expect(asiento.venueId).toBe(VENUE)
+    expect(asiento.data).toEqual(
+      expect.objectContaining({
+        requestedTipPesos: '0.00',
+        // Los $20 de propina que el cajero pidió conservar y que el reequilibrio consumió.
+        appliedTipPesos: '20.00',
+        remainingSalesPesos: '10.00',
+        remainingTipsPesos: '20.00',
+        source: 'TPV',
+      }),
+    )
+  })
+
+  /**
+   * 🔴 LA INTENCIÓN DEL CAJERO VIAJA CON EL DINERO, NO SÓLO EN LA BITÁCORA.
+   *
+   * Lo señaló una auditoría adversarial (Codex gpt-6-astra, xhigh, 2026-09-12): el asiento
+   * `REFUND_SPLIT_NOT_HONORED` va post-commit y sin `await`, así que puede perderse —una
+   * excepción tragada, el proceso que muere— y entonces no queda NADA que diga que el cajero
+   * pidió respetar la propina. Ni el `Payment` ni su historial lo guardaban.
+   *
+   * Aquí se persiste dentro de la MISMA transacción que crea el reembolso: si el reembolso
+   * existe, la intención existe. La bitácora sigue estando (es lo que un dueño audita), pero
+   * ya no es la única copia.
+   */
+  it('P1 el reparto pedido queda GUARDADO junto al reembolso, no sólo en la bitácora', async () => {
+    armar({}, [filaDeReembolso(-90, 0)])
+
+    await refundService.recordRefund(VENUE, { ...cuerpo(3000), tipRefundCents: 0 } as never, 'staff-1')
+
+    const data = (prismaMock as any).payment.create.mock.calls[0][0].data
+    expect(data.processorData).toEqual(
+      expect.objectContaining({
+        requestedTipCents: 0,
+        appliedTipCents: 2000,
+        splitHonored: false,
+      }),
+    )
+  })
+
+  it('un reparto honrado no añade ruido al processorData', async () => {
+    armar({})
+
+    await refundService.recordRefund(VENUE, { ...cuerpo(10000), tipRefundCents: 0 } as never, 'staff-1')
+
+    const data = (prismaMock as any).payment.create.mock.calls[0][0].data
+    expect(data.processorData).not.toHaveProperty('splitHonored')
+    expect(data.processorData).not.toHaveProperty('requestedTipCents')
+  })
+
+  it('el reparto que SÍ se honra no ensucia la bitácora', async () => {
+    const { logAction } = jest.requireMock('@/services/dashboard/activity-log.service')
+    armar({})
+
+    await refundService.recordRefund(VENUE, { ...cuerpo(10000), tipRefundCents: 0 } as never, 'staff-1')
+
+    const asientos = (logAction as jest.Mock).mock.calls
+      .map(([a]: [any]) => a)
+      .filter((a: any) => a.action === 'REFUND_SPLIT_NOT_HONORED')
+    expect(asientos).toHaveLength(0)
+  })
+
   it('honra tipRefundCents=0 cuando el monto cabe completo en la venta restante', async () => {
     armar({})
 
@@ -455,6 +556,11 @@ describe('Task 5r — lo que el dashboard escribe es lo que la terminal lee', ()
     }
 
     ;(prismaMock as any).payment = {
+    // Task 5 (outbox de efectos): el reembolso relee su propio Payment para encolar los efectos
+    // diferidos DENTRO de la transacción (`enqueueRefundPaymentEffectsInTx`). Se delega en el
+    // `findFirst` que este fixture ya monta bien, para que el pago del reembolso herede venue y
+    // orden del original — devolver otros valores dispararía PAYMENT_EFFECT_SOURCE_MISMATCH.
+    findUniqueOrThrow: jest.fn().mockImplementation(async (a: any) => (prismaMock as any).payment.findFirst({ where: a?.where })),
       findUnique: jest.fn(),
       findFirst: jest.fn().mockResolvedValue({ orderId: 'order-1' }),
       findMany: jest.fn().mockResolvedValue([]),

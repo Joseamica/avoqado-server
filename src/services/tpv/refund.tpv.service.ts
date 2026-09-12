@@ -1,3 +1,4 @@
+import { enqueueRefundPaymentEffectsInTx } from './paymentEffects.service'
 import { createHash } from 'crypto'
 import {
   PaymentFundsFlow,
@@ -817,6 +818,28 @@ export async function recordRefund(
                   shiftAttributionPendingReason: 'UNCLASSIFIED_REFUND_COMPONENT_HISTORY',
                 }
               : {}),
+            // 🔴 LA INTENCIÓN DEL CAJERO VIAJA CON EL DINERO cuando no se pudo honrar.
+            //
+            // Aquí no se puede rechazar —el SDK ya devolvió el dinero, y rechazar dejaría un
+            // reembolso REAL sin fila—, así que el reparto se re-encaja. Lo que no puede pasar
+            // es que eso sea invisible: el asiento `REFUND_SPLIT_NOT_HONORED` va post-commit y
+            // sin `await`, o sea que puede perderse (excepción tragada, proceso que muere) y
+            // dejar cero rastro de que alguien pidió respetar la propina. Lo señaló una
+            // auditoría adversarial (Codex gpt-6-astra, xhigh, 2026-09-12).
+            //
+            // Esto se escribe DENTRO de la misma transacción que crea el reembolso: si el
+            // reembolso existe, la intención existe. La bitácora sigue —es lo que un dueño
+            // audita— pero ya no es la única copia. Y sólo aparece cuando hubo discrepancia:
+            // el camino normal no lleva estas llaves.
+            ...(reparto.tipRefundCents !== requestedTipCents
+              ? {
+                  splitHonored: false,
+                  requestedTipCents,
+                  appliedTipCents: reparto.tipRefundCents,
+                  remainingSalesCentsAtRefund: reparto.remainingSalesCents,
+                  remainingTipsCentsAtRefund: reparto.remainingTipsCents,
+                }
+              : {}),
           },
 
           // Authorization from Blumon SDK CancelIcc
@@ -980,6 +1003,8 @@ export async function recordRefund(
       // «turno» de arriba, y tiene que ocurrir ANTES del `payment.create` para poder sellar el
       // pago sólo si ganó. Mismo split proporcional, una sola escritura.
 
+      await enqueueRefundPaymentEffectsInTx(tx, refundPayment.id, originalPayment.id)
+
       return {
         refundPayment,
         postCommitAuthority: Object.freeze({
@@ -988,6 +1013,20 @@ export async function recordRefund(
           fundsFlow: locked.fundsFlow,
           tenderTypeId: locked.tenderTypeId,
           tenderCountsAsCash: locked.tenderCountsAsCash,
+          // 🔴 El reparto que NO se pudo honrar viaja fuera de la transacción para dejar rastro.
+          // Va aquí, y no como una escritura dentro de `tx`, por la misma razón que este riel no
+          // rechaza: cuando esto corre el procesador YA devolvió el dinero, así que un fallo de
+          // la bitácora no puede tumbar la transacción y dejar el reembolso sin asiento.
+          repartoNoHonrado:
+            reparto.tipRefundCents !== requestedTipCents
+              ? Object.freeze({
+                  requestedTipCents,
+                  appliedTipCents: reparto.tipRefundCents,
+                  remainingSalesCents: reparto.remainingSalesCents,
+                  remainingTipsCents: reparto.remainingTipsCents,
+                  refundCents: esteReembolsoCents,
+                })
+              : null,
         }),
       }
     })
@@ -1091,6 +1130,34 @@ export async function recordRefund(
     logger.error('[CASH-DRAWER] Falló registrar el reembolso en el cajón (el reembolso NO se afecta)', {
       refundPaymentId: result.id,
       error: err instanceof Error ? err.message : String(err),
+    })
+  }
+
+  // 🔴 EL REPARTO QUE NO SE PUDO HONRAR SE AUDITA, porque aquí no se puede rechazar.
+  //
+  // El riel del dashboard sí rechaza (ahí el dinero no se ha movido todavía); en la terminal
+  // rechazar dejaría un reembolso REAL sin fila. Pero que el reequilibrio sea inevitable no lo
+  // vuelve invisible: el cajero desmarcó «Incluir propina» y aun así se tomó propina del mesero.
+  // Hasta el 2026-09-12 eso sólo dejaba un `logger.warn`, que nadie lee. Se registra como
+  // ANOMALÍA —el criterio de la casa— y por eso el camino normal no escribe nada.
+  const repartoNoHonrado = postCommitAuthority.repartoNoHonrado
+  if (repartoNoHonrado) {
+    const enPesos = (centavos: number) => (centavos / 100).toFixed(2)
+    void logAction({
+      staffId: userId,
+      venueId,
+      action: 'REFUND_SPLIT_NOT_HONORED',
+      entity: 'Payment',
+      entityId: result.id,
+      data: {
+        originalPaymentId: refundData.originalPaymentId,
+        refundPesos: enPesos(repartoNoHonrado.refundCents),
+        requestedTipPesos: enPesos(repartoNoHonrado.requestedTipCents),
+        appliedTipPesos: enPesos(repartoNoHonrado.appliedTipCents),
+        remainingSalesPesos: enPesos(repartoNoHonrado.remainingSalesCents),
+        remainingTipsPesos: enPesos(repartoNoHonrado.remainingTipsCents),
+        source: 'TPV',
+      },
     })
   }
 
