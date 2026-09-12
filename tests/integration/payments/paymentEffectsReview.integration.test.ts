@@ -30,7 +30,11 @@ const epoch = new Date('2026-09-09T22:00:00Z')
 beforeAll(async () => {
   const url = new URL(process.env.TEST_DATABASE_URL ?? '')
   expect(['localhost', '127.0.0.1']).toContain(url.hostname)
-  expect(url.pathname).toMatch(/^\/codex_testarudo_test_/)
+  // La base de este trabajo en la Mac, o la de CI (`avoqado_*_test_*`): nunca otra.
+  // 🔴 Con el prefijo ÚNICO de una sola sesión, estas suites fallaban SIEMPRE en CI
+  // (su base es `avoqado_h1a_test_20260808`): 38 pruebas en rojo el 12-sep. La guarda
+  // debe cerrar el paso a una base real, no a la del CI.
+  expect(url.pathname).toMatch(/^\/(codex_testarudo_test_|avoqado_[a-z0-9]+_test_)/)
   other = new PrismaClient({ datasources: { db: { url: url.toString() } }, log: [{ emit: 'event', level: 'query' }] })
   other.$on('query', event => statements.push(event.query))
 })
