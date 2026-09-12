@@ -1,3 +1,4 @@
+import { isOrderFullyReversed } from './referralReversalPolicy.service'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { Prisma, ReferralRewardGrant, ReferralTier } from '@prisma/client'
@@ -112,26 +113,6 @@ export interface RevertReferralRewardInput extends OnOrderRefundedInput {
  * This is a STATE predicate, not the edge-crossing one restock uses: it must
  * answer the same way on a retry, because the caller may run twice.
  */
-async function isOrderFullyReversed(orderId: string, venueId: string): Promise<boolean> {
-  const order = await prisma.order.findUnique({
-    where: { id: orderId, venueId },
-    select: { status: true, paymentStatus: true, total: true, tipAmount: true },
-  })
-  if (!order) return false
-
-  if (order.status === 'CANCELLED' || order.status === 'DELETED') return true
-  if (order.paymentStatus === 'REFUNDED') return true
-
-  const merchandiseTotal = Math.max(0, Number(order.total) - Number(order.tipAmount ?? 0))
-  if (merchandiseTotal <= 0.01) return false
-
-  const refunds = await prisma.payment.findMany({
-    where: { orderId, venueId, type: 'REFUND', status: 'COMPLETED' },
-    select: { amount: true },
-  })
-  const totalRefundedSale = refunds.reduce((sum, p) => sum + Math.abs(Number(p.amount)), 0)
-  return totalRefundedSale >= merchandiseTotal - 0.01
-}
 
 /**
  * THE entrypoint for "this sale stopped counting — take the reward back".
@@ -155,25 +136,21 @@ async function isOrderFullyReversed(orderId: string, venueId: string): Promise<b
  */
 export async function revertReferralRewardForOrder(input: RevertReferralRewardInput): Promise<void> {
   try {
-    // Cheapest question first, and it is the common case by far: most orders
-    // never qualified a referral. Asking it here keeps the hook silent and
-    // costs one indexed read — logging a "referral" line on every ordinary
-    // refund would be exactly the noise the log rules warn about.
-    const qualified = await prisma.referral.findFirst({
-      where: { qualifyingOrderId: input.orderId, venueId: input.venueId, status: 'QUALIFIED' },
+    // La pregunta más barata primero, y es el caso común por mucho: casi ninguna venta califica un
+    // referido. Sin esto, CADA reembolso o cancelación abría una transacción y tomaba
+    // `SELECT … FOR UPDATE` sobre la orden para no encontrar nada (medido el 10-sep).
+    //
+    // 🔴 NO es la guarda anterior, que sólo miraba QUALIFIED: aquí cuenta también PENDING, porque
+    // dentro de la transacción se ANULA el PENDING — es la protección frente a un job de cobro que
+    // llega DESPUÉS del reembolso. La carrera está cubierta por construcción: la captura crea el
+    // PENDING alrededor del pago (nunca después de un reembolso posterior) y `onOrderPaid` relee
+    // `isOrderFullyReversed` dentro de su propia transacción con FOR UPDATE, así que un job tardío
+    // anula en vez de premiar (prueba: onOrderPaid › «ya fue REFUNDED»).
+    const candidato = await prisma.referral.findFirst({
+      where: { qualifyingOrderId: input.orderId, venueId: input.venueId, status: { in: ['PENDING', 'QUALIFIED'] } },
       select: { id: true },
     })
-    if (!qualified) return
-
-    if (!(await isOrderFullyReversed(input.orderId, input.venueId))) {
-      logger.info('[referral] reversión omitida: la venta calificadora no está revertida en su totalidad (reembolso parcial)', {
-        orderId: input.orderId,
-        venueId: input.venueId,
-        referralId: qualified.id,
-        reason: input.reason,
-      })
-      return
-    }
+    if (!candidato) return
     await revertQualifiedReferral(input)
   } catch (err) {
     logger.error('[referral] no se pudo revertir el premio de la venta calificadora', {
@@ -321,10 +298,13 @@ async function revokeFreeProductGrant(tx: TxClient, grant: ReferralRewardGrant, 
  *   7. Always emit a `REFERRAL_TIER_REVERSED` ActivityLog with old + new
  *      tier + the list of revoked grant ids so finance can reconcile.
  */
-async function revertQualifiedReferral(input: RevertReferralRewardInput): Promise<void> {
+export async function revertQualifiedReferral(input: RevertReferralRewardInput): Promise<void> {
   await prisma.$transaction(async tx => {
+    await tx.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE id = ${input.orderId} AND "venueId" = ${input.venueId} FOR UPDATE`)
+    if (!(await isOrderFullyReversed(input.orderId, input.venueId, tx))) return
+    await tx.referral.updateMany({ where: { qualifyingOrderId: input.orderId, venueId: input.venueId, status: 'PENDING' }, data: { status: 'VOID', voidedAt: new Date(), voidReason: input.reason } })
     const referral = await tx.referral.findFirst({
-      where: { qualifyingOrderId: input.orderId, status: 'QUALIFIED' },
+      where: { qualifyingOrderId: input.orderId, venueId: input.venueId, status: 'QUALIFIED' },
     })
     if (!referral) return
 

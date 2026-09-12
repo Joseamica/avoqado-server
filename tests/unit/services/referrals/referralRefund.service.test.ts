@@ -46,6 +46,11 @@ jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     $transaction: jest.fn(),
+    // El refactor de la reversión toma un candado de fila (`SELECT ... FOR UPDATE`)
+    // DENTRO de la transacción. Sin este miembro el mock lanza TypeError, el
+    // try/catch del hook se lo traga y las 13 pruebas fallan con "Number of calls: 0"
+    // — un fallo de FIXTURE que se leía como fallo de comportamiento.
+    $queryRaw: jest.fn(),
     order: { findUnique: jest.fn() },
     payment: { findMany: jest.fn() },
     referral: { findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
@@ -532,6 +537,17 @@ describe('revertReferralRewardForOrder', () => {
     await revertReferralRewardForOrder({ orderId: 'o1', venueId: 'v1', reason: 'ORDER_CANCELLED' })
 
     expect(mockedPrisma.referral.update).toHaveBeenCalledTimes(1)
+    // Contar actualizaciones no bastaba (Codex, 10-sep): la segunda pasada no debe ni ABRIR la
+    // transacción — sin referido vivo no hay nada que revertir ni candado que tomar.
+    expect(mockedPrisma.$transaction).toHaveBeenCalledTimes(1)
+  })
+
+  it('una venta SIN referido no abre transacción ni toma el candado de la orden', async () => {
+    mockedPrisma.referral.findFirst.mockResolvedValue(null)
+    await revertReferralRewardForOrder({ orderId: 'o-sin-referido', venueId: 'v1', reason: 'ORDER_REFUNDED' })
+    expect(mockedPrisma.$transaction).not.toHaveBeenCalled()
+    expect(mockedPrisma.$queryRaw).not.toHaveBeenCalled()
+    expect(mockedPrisma.referral.update).not.toHaveBeenCalled()
   })
 
   it('NEVER throws when the reversal fails — a refund/cancel must not die because of the referral hook', async () => {
@@ -572,6 +588,11 @@ describe('onOrderCancelled', () => {
   })
 
   it('además intenta la reversa del premio (defensa en profundidad): consulta el QUALIFIED de esa orden', async () => {
+    // Prepara el estado que pretende medir: la orden YA está cancelada (la política de reversión la
+    // relee dentro de la transacción) y hay un referido vivo que la pre-comprobación encuentra.
+    mockedPrisma.order.findUnique.mockResolvedValue({ id: 'o-cancelada', status: 'CANCELLED', paymentStatus: 'PENDING', total: 100, tipAmount: 0 })
+    mockedPrisma.referral.findFirst.mockResolvedValueOnce({ id: 'ref-viva', status: 'QUALIFIED' })
+    mockedPrisma.$transaction.mockImplementation(async (fn: any) => fn(mockedPrisma))
     await onOrderCancelled({ orderId: 'o-cancelada', venueId: 'v1' })
 
     expect(mockedPrisma.referral.findFirst).toHaveBeenCalledWith(

@@ -103,6 +103,11 @@ describe('referral rewards — golden regression (legacy 3-tier PERCENT_COUPON b
     // estado, 2026-08-17). Toda esta regresión describe el cobro que CIERRA la
     // cuenta y cruza el nivel, así que la orden se lee pagada.
     prismaMock.order.findUnique.mockResolvedValue({ paymentStatus: 'PAID' })
+    // La política de reversión (Task 5) suma los reembolsos de la orden para decidir si la venta
+    // quedó deshecha (`referralReversalPolicy.service.ts:16-20`). Esta regresión describe una
+    // cuenta que se cobra y NO se reembolsa, así que la lista va vacía — sin el default, el
+    // `reduce` sobre `undefined` revienta antes de llegar al premio que este archivo mide.
+    prismaMock.payment.findMany.mockResolvedValue([])
   })
 
   afterEach(() => {

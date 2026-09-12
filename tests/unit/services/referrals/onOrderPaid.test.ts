@@ -44,6 +44,11 @@ describe('onOrderPaid', () => {
     // cobro que SÍ cerró la cuenta, así que el default es PAID; los tests que
     // prueban la guardia lo sobreescriben.
     prismaMock.order.findUnique.mockResolvedValue({ paymentStatus: 'PAID' })
+    // El hook ahora pregunta ANTES si la venta ya está revertida, y esa política lee
+    // los reembolsos de la orden. Una venta recién cobrada no tiene ninguno: sin este
+    // default el mock devuelve `undefined` y el `.reduce` revienta dentro de la
+    // transacción. Es completar la fixture al contrato nuevo, no relajar un aserto.
+    prismaMock.payment.findMany.mockResolvedValue([])
   })
 
   // ---- GUARDIA DE ESTADO: el hook se llama "onOrderPaid", no "onPayment" ----
@@ -65,13 +70,26 @@ describe('onOrderPaid', () => {
   })
 
   it('🔴 tampoco califica con la orden en PENDING, ni con una orden que ya fue REFUNDED', async () => {
-    prismaMock.order.findUnique.mockResolvedValueOnce({ paymentStatus: 'PENDING' })
+    // La orden se relee DOS veces por llamada (política de reversión + guardia de estado): el fixture
+    // describe una orden COHERENTE durante toda la transacción, no una lectura suelta con `Once`.
+    prismaMock.order.findUnique.mockResolvedValue({ status: 'COMPLETED', paymentStatus: 'PENDING', total: 100, tipAmount: 0 })
     await onOrderPaid({ orderId: 'o_pending', venueId: 'v1' })
-
-    prismaMock.order.findUnique.mockResolvedValueOnce({ paymentStatus: 'REFUNDED' })
-    await onOrderPaid({ orderId: 'o_refunded', venueId: 'v1' })
-
     expect(prismaMock.referral.updateMany).not.toHaveBeenCalled()
+
+    prismaMock.order.findUnique.mockResolvedValue({ status: 'COMPLETED', paymentStatus: 'REFUNDED', total: 100, tipAmount: 0 })
+    await onOrderPaid({ orderId: 'o_refunded', venueId: 'v1' })
+    // Nunca se RECLAMA (PENDING → QUALIFIED)…
+    expect(prismaMock.referral.updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'QUALIFIED' }) }),
+    )
+    // …y el PENDING que quedara se ANULA: es la protección frente a un job de cobro que llega
+    // DESPUÉS del reembolso (una venta ya devuelta no puede premiar a nadie).
+    expect(prismaMock.referral.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { qualifyingOrderId: 'o_refunded', venueId: 'v1', status: 'PENDING' },
+        data: expect.objectContaining({ status: 'VOID', voidReason: 'ORDER_REFUNDED' }),
+      }),
+    )
   })
 
   it('🔴 una orden que no existe (o es de otro venue) no reclama nada', async () => {

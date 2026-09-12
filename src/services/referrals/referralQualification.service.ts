@@ -1,3 +1,4 @@
+import { isOrderFullyReversed } from './referralReversalPolicy.service'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import {
@@ -386,6 +387,11 @@ interface OnOrderPaidTxResult {
  */
 export async function onOrderPaid(input: OnOrderPaidInput): Promise<void> {
   const txResult = await prisma.$transaction(async tx => {
+    await tx.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE id = ${input.orderId} AND "venueId" = ${input.venueId} FOR UPDATE`)
+    if (await isOrderFullyReversed(input.orderId, input.venueId, tx)) {
+      await tx.referral.updateMany({ where: { qualifyingOrderId: input.orderId, venueId: input.venueId, status: 'PENDING' }, data: { status: 'VOID', voidedAt: new Date(), voidReason: 'ORDER_REFUNDED' } })
+      return null
+    }
     // Step 0 — GUARDIA DE ESTADO: la orden tiene que haber quedado PAGADA.
     //
     // 🔴 El hook se llama `onOrderPaid`, no `onPayment`. Los pasos de abajo

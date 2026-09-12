@@ -89,7 +89,14 @@ export const ValidateReferralCodeSchema = z.object({
     // not to /capture would get "no válido" from one endpoint and a successful
     // capture from the other for the SAME sale. The rule is "no PRIOR paid
     // sale", and the order of this very checkout is not prior.
-    intendedOrderId: z.string().optional(),
+    // 🔴 `.nullish()`, no `.optional()`: el POS Android serializa con kotlinx y
+    // `encodeDefaults = true`, así que un campo opcional que no aplica viaja como
+    // `"intendedOrderId": null` — en JSON no existe `undefined`. Con `.optional()` a secas
+    // ese nulo rebotaba con un 400 antes de llegar al servicio. Es el MISMO defecto que
+    // dejó a Testarudo sin poder reembolsar el 2026-09-11, latente en otro endpoint; lo
+    // encontró una auditoría adversarial (Codex gpt-6-astra, xhigh) el 2026-09-12.
+    // `resolveIntendedOrderId` ya trata ambos valores igual (`if (!candidate) return null`).
+    intendedOrderId: z.string().nullish(),
   }),
 })
 
@@ -101,7 +108,14 @@ export const CaptureReferralSchema = z.object({
     referralCode: z.string().min(3).max(64),
     newCustomerId: z.string().min(1),
     capturedByStaffVenueId: z.string().min(1),
-    intendedOrderId: z.string().optional(),
+    // 🔴 `.nullish()`, no `.optional()`: el POS Android serializa con kotlinx y
+    // `encodeDefaults = true`, así que un campo opcional que no aplica viaja como
+    // `"intendedOrderId": null` — en JSON no existe `undefined`. Con `.optional()` a secas
+    // ese nulo rebotaba con un 400 antes de llegar al servicio. Es el MISMO defecto que
+    // dejó a Testarudo sin poder reembolsar el 2026-09-11, latente en otro endpoint; lo
+    // encontró una auditoría adversarial (Codex gpt-6-astra, xhigh) el 2026-09-12.
+    // `resolveIntendedOrderId` ya trata ambos valores igual (`if (!candidate) return null`).
+    intendedOrderId: z.string().nullish(),
   }),
 })
 

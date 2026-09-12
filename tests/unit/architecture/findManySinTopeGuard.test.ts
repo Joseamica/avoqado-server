@@ -145,7 +145,12 @@ const INVENTARIO: Record<string, number> = {
   'src/services/payments/revenueShareReport.service.ts': 1,
   'src/services/promoters/promoters.service.ts': 3,
   'src/services/promoters/terminalLocation.service.ts': 1,
-  'src/services/referrals/referralRefund.service.ts': 1,
+  // 2026-09-09: la MISMA consulta se mudó aquí desde `referralRefund.service.ts` (1 → 0) al
+  // extraer `isOrderFullyReversed`. Es un TRASLADO, no un crecimiento: el total no sube.
+  // 🔴 Este cupo NO afirma que la consulta esté acotada por FILAS: sigue sin `take`, y se deja
+  // así a propósito — truncar la lista de reembolsos haría que una orden ya reembolsada por
+  // completo se leyera como parcial. Lo que la acota es su `where` por orden y venue.
+  'src/services/referrals/referralReversalPolicy.service.ts': 1,
   'src/services/reservation/checkIn.service.ts': 1,
   'src/services/serialized-inventory/custody.service.ts': 1,
   'src/services/serialized-inventory/serializedInventory.service.ts': 3,
