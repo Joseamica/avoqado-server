@@ -1,3 +1,13 @@
+// Reconoce ÚNICAMENTE la consulta con que el outbox relee su pago fuente
+// (`paymentEffects.service.ts:22-26`): id + venueId + status COMPLETED, y un select que pide
+// SOLO orderId. Ser preciso importa: un reflejo laxo intercepta búsquedas legítimas del
+// servicio y le cambia el comportamiento, que sería peor que el fallo que viene a evitar.
+const esConsultaDelOutbox = (a: any) =>
+  a?.where?.status === 'COMPLETED' &&
+  typeof a?.where?.id === 'string' &&
+  'venueId' in (a?.where ?? {}) &&
+  Object.keys(a?.select ?? {}).length === 1 &&
+  a?.select?.orderId === true
 // tests/__helpers__/setup.ts
 
 // This file is executed once per test file after the test framework is setup
@@ -91,6 +101,11 @@ const createMockModel = () => ({
 
 const prismaMock: any = {
   $queryRaw: jest.fn(),
+  // La comisión del cobro se encola bajo un SAVEPOINT para que su fallo NO tumbe el dinero ya
+  // capturado (`paymentEffects.service.ts:177`). Los tests que pasan este mock como `tx` lo
+  // necesitan; sin él, el TypeError sustituye a la aserción real.
+  $executeRawUnsafe: jest.fn().mockResolvedValue(0),
+  $executeRaw: jest.fn().mockResolvedValue(0),
   staff: createMockModel(),
   venue: createMockModel(),
   venueRolePermission: createMockModel(),
@@ -111,6 +126,12 @@ const prismaMock: any = {
   // verifyPasskeyAssertion sin conocer los grants revienta con "Cannot read properties of
   // undefined (reading 'create')" — misma clase de bug que session arriba.
   refreshGrant: createMockModel(),
+  // Outbox de efectos del cobro (Task 5) — `recordOrderPayment` encola RECEIPT/REVIEW/REFERRAL/
+  // COMMISSION DENTRO de la transacción financiera (`paymentEffects.service.ts:28`). Sin esta
+  // entrada, cualquier test que ejercite un cobro revienta con "Cannot read properties of
+  // undefined (reading 'createMany')" — la MISMA clase de fallo que `session` y `refreshGrant`
+  // arriba, y la tercera vez que muerde. Un `tx` armado a mano tiene que declararla aparte.
+  paymentEffect: createMockModel(),
   staffPasskey: createMockModel(),
   chatTrainingData: createMockModel(),
   chatFeedback: createMockModel(),
@@ -177,6 +198,7 @@ const prismaMock: any = {
   loyaltyConfig: createMockModel(),
   loyaltyTransaction: createMockModel(),
   walletPass: createMockModel(),
+  receiptLayout: createMockModel(),
   walletCardDesign: createMockModel(),
   walletPassRegistration: createMockModel(),
   stampCard: createMockModel(),
@@ -438,6 +460,25 @@ prismaMock.session.create.mockResolvedValue({ id: 'session-mock-default' })
 // Parte A (sesiones revocables) — Task 10: idem, para el primer RefreshGrant que el login
 // emite justo después (issueGrant). Mismo motivo que el default de session.create arriba.
 prismaMock.refreshGrant.create.mockResolvedValue({ id: 'refresh-grant-mock-default' })
+// Outbox de efectos del cobro (Task 5). `createRefundCommission` hace `for (const e of pending)`
+// sobre `paymentEffect.findMany` (commission-calculation.service.ts:360-361): sin un default, el
+// jest.fn() devuelve `undefined` y revienta con «pending is not iterable» DENTRO de la
+// transacción del reembolso — que se traga el error y deja el PAY_OUT al cajón sin publicar.
+// `[]` es el estado real de un cobro sin efectos previos; `createMany` cuenta lo encolado.
+prismaMock.paymentEffect.findMany.mockResolvedValue([])
+// El outbox comprueba que el Payment fuente pertenece a la MISMA orden antes de encolar y, si
+// no cuadra, LANZA y tumba la transacción del cobro (`paymentEffects.service.ts:22-27`). Este
+// default REFLEJA esa consulta concreta —id + status COMPLETED + select de orderId— en vez de
+// inventar otra orden. Cualquier otro uso de findFirst sigue devolviendo undefined como antes,
+// y un test que lo configure con mockResolvedValue lo sobreescribe igual.
+prismaMock.payment.findFirst.mockImplementation(async (a: any) =>
+  esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : undefined,
+)
+prismaMock.paymentEffect.createMany.mockResolvedValue({ count: 1 })
+// Misma familia: `createRefundCommission` recorre `commissionCalculation.findMany` en la misma
+// línea (`:359-369`). Sin default también revienta con «originalCalcs is not iterable» dentro de
+// la transacción del reembolso. Una lista vacía es el estado real de un cobro sin comisiones.
+prismaMock.commissionCalculation.findMany.mockResolvedValue([])
 
 function primeReservationStaffMocks() {
   prismaMock.staffSchedule.findUnique.mockResolvedValue(null)

@@ -1,3 +1,13 @@
+// Reconoce ÚNICAMENTE la consulta con que el outbox relee su pago fuente
+// (`paymentEffects.service.ts:22-26`): id + venueId + status COMPLETED, y un select que pide
+// SOLO orderId. Ser preciso importa: un reflejo laxo intercepta búsquedas legítimas del
+// servicio y le cambia el comportamiento, que sería peor que el fallo que viene a evitar.
+const esConsultaDelOutbox = (a: any) =>
+  a?.where?.status === 'COMPLETED' &&
+  typeof a?.where?.id === 'string' &&
+  'venueId' in (a?.where ?? {}) &&
+  Object.keys(a?.select ?? {}).length === 1 &&
+  a?.select?.orderId === true
 /**
  * Fase 1 del «turno de caja del negocio» (decisión del founder, 2-sep-2026).
  *
@@ -30,8 +40,44 @@ jest.mock('@/services/mobile/areaTicketV7.mobile.service', () => ({
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
-    order: { findUnique: jest.fn(), update: jest.fn() },
-    payment: { create: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn(), findMany: jest.fn() },
+    order: {
+      findUnique: jest.fn(),
+      update: jest.fn(),
+      // `settleStandalonePaymentInTx` relee la orden con su snapshot de artículos
+      // (`payment.tpv.service.ts:522`). Una orden MÍNIMA y coherente: estos tests miden otra
+      // cosa, pero la ruta la atraviesa y sin datos muere antes de su aserción.
+      // Se DELEGA en el `findUnique` que cada test ya monta: la orden que relee la liquidación
+      // es la MISMA que el resto del flujo, no una inventada aquí que no cuadre con sus totales.
+      findFirstOrThrow: jest.fn().mockImplementation(async (a: any) => (prisma as any).order.findUnique({ where: a?.where })),
+      findUniqueOrThrow: jest.fn().mockImplementation(async (a: any) => (prisma as any).order.findUnique({ where: a?.where })),
+    },
+    payment: {
+      create: jest.fn(),
+      // El outbox relee su pago fuente para comprobar que pertenece a la MISMA orden antes de
+      // encolar; devolverle undefined dispara PAYMENT_EFFECT_SOURCE_MISMATCH y tumba el cobro.
+      // Se REFLEJA esa consulta concreta; cualquier otra sigue devolviendo undefined como antes.
+      findFirst: jest.fn().mockImplementation(async (a: any) =>
+        esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : undefined,
+      ),
+      findUnique: jest.fn(),
+      findMany: jest.fn(),
+      // El camino post-cobro agrega los pagos de la orden y relee el Payment recién creado
+      // (conciliación y outbox de efectos). Sin estas entradas el TypeError sustituye a la
+      // aserción real — la fragilidad que este patrón de `tx` a mano ya documenta.
+      aggregate: jest.fn().mockResolvedValue({ _sum: { amount: null, tipAmount: null } }),
+      // El rescate de la comisión (bajo SAVEPOINT) relee el pago: se devuelve EL MISMO que
+      // acaba de crear el fixture, para que venue y orden coincidan solos.
+      // 🔴 Se LEE el último resultado de `create`, no se vuelve a llamar: invocarlo inflaría su
+      // contador de llamadas y rompería las aserciones que cuentan cuántos cobros se crearon.
+      findUniqueOrThrow: jest.fn().mockImplementation(async () => {
+        const crear = (prisma as any).payment.create as jest.Mock
+        const ultimo = crear.mock.results[crear.mock.results.length - 1]
+        return ultimo ? await ultimo.value : null
+      }),
+      count: jest.fn().mockResolvedValue(0),
+      update: jest.fn(),
+      updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+    },
     venueTransaction: { create: jest.fn() },
     shift: { findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
     staffVenue: { findFirst: jest.fn() },
@@ -166,7 +212,12 @@ function installStatefulP2002Rollback() {
       loserPayments: [...committed.loserPayments],
     }
     const tx: any = {
+      // Outbox de efectos del cobro (Task 5): se encola DENTRO de esta transacción.
+      paymentEffect: { createMany: jest.fn().mockResolvedValue({ count: 1 }), findMany: jest.fn().mockResolvedValue([]), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+      commissionCalculation: { findMany: jest.fn().mockResolvedValue([]), create: jest.fn(), aggregate: jest.fn().mockResolvedValue({ _sum: { baseAmount: null, tipAmount: null } }) },
+      $executeRawUnsafe: jest.fn().mockResolvedValue(0),
       payment: {
+        ...(prisma as any).payment,
         count: jest.fn().mockResolvedValue(0),
         create: jest.fn(async () => {
           ops.push('payment.create:P2002')
@@ -199,7 +250,7 @@ function installStatefulP2002Rollback() {
         }),
       },
       venueSettings: { findUnique: prisma.venueSettings.findUnique },
-      order: { update: prisma.order.update },
+      order: { ...(prisma as any).order, update: prisma.order.update },
       paymentAllocation: { create: prisma.paymentAllocation.create },
       venueTransaction: { create: prisma.venueTransaction.create },
       areaTicketCheckoutSession: {
@@ -237,8 +288,14 @@ beforeEach(() => {
   ;(prisma.shift.findFirst as jest.Mock).mockResolvedValue({ id: 'shift-1', status: 'OPEN' })
   ;(prisma.shift.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
   ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: VENUE_ID })
-  ;(prisma.payment.create as jest.Mock).mockResolvedValue({ id: 'payment-1', status: 'COMPLETED', feeAmount: 0, netAmount: 100 })
-  ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
+  // Un Payment REAL trae venue, orden e importes. Sin ellos, el outbox no reconoce su pago
+  // fuente y lanza PAYMENT_EFFECT_SOURCE_MISMATCH, que tumba la transacción del cobro entera.
+  ;(prisma.payment.create as jest.Mock).mockResolvedValue({ id: 'payment-1', status: 'COMPLETED', feeAmount: 0, netAmount: 100, amount: new Decimal(100), tipAmount: new Decimal(0), venueId: VENUE_ID, orderId: ORDER_ID })
+  // «Sin cobro previo» para todo… salvo la consulta con que el outbox relee SU pago fuente:
+  // devolverle null ahí dispara PAYMENT_EFFECT_SOURCE_MISMATCH y tumba la transacción del cobro.
+  ;(prisma.payment.findFirst as jest.Mock).mockImplementation(async (a: any) =>
+    esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : null,
+  )
   ;(prisma.venueTransaction.create as jest.Mock).mockResolvedValue({})
   ;(prisma.paymentAllocation.create as jest.Mock).mockResolvedValue({})
   ;(prisma.serializedItem.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
@@ -263,7 +320,12 @@ beforeEach(() => {
     const ops: string[] = []
     const record: TxRecord = { client: null, ops }
     const tx: any = {
+      // Outbox de efectos del cobro (Task 5): se encola DENTRO de esta transacción.
+      paymentEffect: { createMany: jest.fn().mockResolvedValue({ count: 1 }), findMany: jest.fn().mockResolvedValue([]), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+      commissionCalculation: { findMany: jest.fn().mockResolvedValue([]), create: jest.fn(), aggregate: jest.fn().mockResolvedValue({ _sum: { baseAmount: null, tipAmount: null } }) },
+      $executeRawUnsafe: jest.fn().mockResolvedValue(0),
       payment: {
+        ...(prisma as any).payment,
         // El conteo de cobros previos ya no cae a 0 en silencio: el doble lo declara.
         count: jest.fn().mockResolvedValue(0),
         create: jest.fn(async (args: any) => {
@@ -274,6 +336,7 @@ beforeEach(() => {
       paymentAllocation: { create: prisma.paymentAllocation.create },
       venueTransaction: { create: prisma.venueTransaction.create },
       order: {
+        ...(prisma as any).order,
         update: jest.fn(async (args: any) => {
           ops.push('order.update')
           return (prisma.order.update as jest.Mock)(args)
@@ -502,7 +565,7 @@ describe('recordOrderPayment — el conteo de cobros previos nunca contesta en s
   it('🔴 un tx sin payment.count revienta nombrando la dependencia, sin crear el Payment ni reclamar turno', async () => {
     const txSinCount: any = {
       $queryRaw: jest.fn().mockResolvedValue([{ id: ORDER_ID }]),
-      payment: { create: jest.fn() },
+      payment: { create: jest.fn() }, // 🔴 INCOMPLETO A PROPÓSITO: este test comprueba que un tx sin `count` reviente nombrando la dependencia. NO heredar del mock aquí.
       shift: { findFirst: jest.fn(), updateMany: jest.fn(), update: jest.fn() },
       activityLog: { create: jest.fn() },
     }

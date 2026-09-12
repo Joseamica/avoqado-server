@@ -1,3 +1,13 @@
+// Reconoce ÚNICAMENTE la consulta con que el outbox relee su pago fuente
+// (`paymentEffects.service.ts:22-26`): id + venueId + status COMPLETED, y un select que pide
+// SOLO orderId. Ser preciso importa: un reflejo laxo intercepta búsquedas legítimas del
+// servicio y le cambia el comportamiento, que sería peor que el fallo que viene a evitar.
+const esConsultaDelOutbox = (a: any) =>
+  a?.where?.status === 'COMPLETED' &&
+  typeof a?.where?.id === 'string' &&
+  'venueId' in (a?.where ?? {}) &&
+  Object.keys(a?.select ?? {}).length === 1 &&
+  a?.select?.orderId === true
 /**
  * El cobro rápido (`POST /fast`) debe ACEPTAR y PERSISTIR el cliente de la venta.
  *
@@ -121,9 +131,27 @@ function installFakes() {
     return created
   })
   prismaMock.payment.findUnique.mockResolvedValue(null)
-  prismaMock.payment.findFirst.mockResolvedValue(null)
+  // «No hay cobro previo» sigue siendo la respuesta a cualquier consulta… salvo a la del outbox,
+  // que relee SU pago fuente para comprobar que pertenece a la misma orden. Devolverle null ahí
+  // dispara PAYMENT_EFFECT_SOURCE_MISMATCH y tumba la transacción del cobro entera.
+  prismaMock.payment.findFirst.mockImplementation(async (a: any) =>
+    esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : null,
+  )
+  // El rescate de la comisión (bajo SAVEPOINT) relee el pago: se devuelve el que ESTE test
+  // acaba de crear, no uno inventado, para que venue y orden coincidan solos.
+  prismaMock.payment.findUniqueOrThrow.mockImplementation(async (a: any) =>
+    payments.find((p: any) => p.id === a?.where?.id) ?? payments[payments.length - 1],
+  )
   // Ningún cobro previo sobre la orden delegada: el conteo ya no cae a 0 en silencio.
   prismaMock.payment.count.mockResolvedValue(0)
+  // La liquidación agrega los cobros de la orden y la comisión agrega lo ya comisionado.
+  // `null` es el `_sum` REAL de un conjunto vacío — coherente con el `count: 0` de arriba.
+  prismaMock.payment.aggregate.mockResolvedValue({ _sum: { amount: null, tipAmount: null }, _count: 0 })
+  // La liquidación relee la orden con su snapshot de artículos: se DELEGA en el `findUnique` que
+  // cada escenario siembra, para que sea la MISMA orden del resto del flujo y no una inventada.
+  prismaMock.order.findFirstOrThrow.mockImplementation(async (a: any) => prismaMock.order.findUnique({ where: a?.where }))
+  prismaMock.order.findUniqueOrThrow.mockImplementation(async (a: any) => prismaMock.order.findUnique({ where: a?.where }))
+  prismaMock.commissionCalculation.aggregate.mockResolvedValue({ _sum: { baseAmount: null, tipAmount: null } })
   // Y la MISMA respuesta para la relectura del candado de efectivo duplicado: sin ella el
   // `findMany` del mock global resuelve `undefined`, la delegación truena con un TypeError y
   // la venta cae a FAST — que es justo lo contrario de lo que esta suite afirma.

@@ -190,6 +190,11 @@ function installFakes() {
     return created
   })
   prismaMock.payment.findFirst.mockImplementation(async ({ where }: any) => payments.find(p => whereMatches(p, where)) ?? null)
+  // El rescate de la comisión (bajo SAVEPOINT) relee el pago para encolar su efecto: se devuelve
+  // el que ESTE test acaba de crear, no uno inventado, y así venue y orden coinciden solos.
+  prismaMock.payment.findUniqueOrThrow.mockImplementation(async (a: any) =>
+    payments.find((p: any) => p.id === a?.where?.id) ?? payments[payments.length - 1],
+  )
   prismaMock.payment.findMany.mockImplementation(async ({ where }: any) => payments.filter(p => whereMatches(p, where)))
   prismaMock.payment.findUnique.mockImplementation(async ({ where }: any) => {
     // Check 1 de idempotencia de FAST usa la llave compuesta del índice único.
@@ -681,9 +686,19 @@ describe('recordFastPayment — un cobro con orden NO crea venta sintetica', () 
       'staff-tpv',
     )
 
-    expect(prismaMock.review.create).toHaveBeenCalledWith(
+    // 🔑 CAMBIO DELIBERADO de Task 5, no una regresión: con el cobro COMPLETED la reseña ya NO se
+    // crea suelta después del commit (donde un fallo la perdía en silencio) — se ENCOLA como
+    // efecto dentro de la MISMA transacción del dinero, y el job la materializa. Lo que hay que
+    // guardar es que la calificación congelada por el POS y su vendedor lleguen a esa cola.
+    // El camino directo `review.create` sigue vivo para los cobros NO completados.
+    expect(prismaMock.paymentEffect.createMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ overallRating: 5, servedById: 'staff-pos' }),
+        data: expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'REVIEW',
+            payload: expect.objectContaining({ rating: 5, servedById: 'staff-pos' }),
+          }),
+        ]),
       }),
     )
   })

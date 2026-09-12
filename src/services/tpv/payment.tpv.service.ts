@@ -1,3 +1,4 @@
+import { performance } from 'node:perf_hooks'
 import { Payment, PaymentMethod, SplitType, OrderSource, PaymentSource, Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
@@ -21,7 +22,7 @@ import {
   resolvePaymentShiftReconciliationEnabled,
 } from '../shared/paymentShiftClaim'
 import { countPriorCompletedPayments } from '../shared/priorCompletedPayments'
-import { createCommissionForPayment } from '../dashboard/commission/commission-calculation.service'
+import { enqueuePaymentEffect, enqueuePaymentCommissionInTx } from './paymentEffects.service'
 import { runAutoReorderForVenue } from '../dashboard/autoReorder.service'
 import { serializedInventoryService } from '../serialized-inventory/serializedInventory.service'
 import { getEffectivePaymentConfig } from '../organization-payment-config.service'
@@ -29,7 +30,7 @@ import { logAction } from '../dashboard/activity-log.service'
 import { paymentIsAvoqadoSettled } from '../shared/tenderSemantics'
 // La ÚNICA definición de "qué cuenta como pagado" — la comparten los cuatro
 // caminos de cobro, para que un reembolso no reabra saldo en ninguno.
-import { summarizeRefunds } from '../shared/orderBalance'
+import { summarizeRefunds, computeOrderBalance, REFUND_PAYMENT_TYPE } from '../shared/orderBalance'
 // El candado del toque repetido en «Efectivo». La regla vive AHÍ, pura y probada aparte.
 import { aplicaCandadoDeEfectivo, cobroEnEfectivoSobreOrdenSaldada } from '../shared/cobroEnEfectivoDuplicado'
 import { resolveTenderForCharge, computeTenderCommission, type ResolvedTenderCharge } from '../dashboard/tenderType.dashboard.service'
@@ -451,6 +452,105 @@ function mapPaymentSource(source?: string): PaymentSource {
   return validSources.includes(source as PaymentSource) ? (source as PaymentSource) : 'OTHER'
 }
 
+/** Measurements are monotonic, contain identifiers only, and never affect payment results. */
+function paymentStepTimer(venueId: string, requestId?: string) {
+  const started = performance.now()
+  const phases: Array<{ step: string; elapsedMs: number }> = []
+  return {
+    async time<T>(step: string, operation: () => Promise<T>): Promise<T> {
+      const start = performance.now()
+      try {
+        return await operation()
+      } finally {
+        try {
+          phases.push({ step, elapsedMs: Math.round(performance.now() - start) })
+        } catch {
+          /* observation only */
+        }
+      }
+    },
+    end(paymentId: string) {
+      try {
+        logger.info('Payment blocking steps', { venueId, requestId, paymentId, elapsedMs: Math.round(performance.now() - started), phases })
+      } catch {
+        /* observation only */
+      }
+    },
+  }
+}
+
+async function enqueueCommittedPaymentEffects(
+  tx: Prisma.TransactionClient,
+  payment: { id: string; venueId: string; orderId: string; status: string; type: string | null },
+  reviewRating: string | undefined,
+  staffId: string | undefined,
+  expectsSettlement: boolean,
+): Promise<void> {
+  if (payment.status !== 'COMPLETED') return
+  const source = { venueId: payment.venueId, paymentId: payment.id, orderId: payment.orderId }
+  await enqueuePaymentEffect(tx, { ...source, kind: 'RECEIPT', dedupeKey: 'receipt:' + payment.id + ':v1', payload: {} })
+  const rating = reviewRating ? mapTpvRatingToNumeric(reviewRating) : null
+  if (rating !== null)
+    await enqueuePaymentEffect(tx, {
+      ...source,
+      kind: 'REVIEW',
+      dedupeKey: 'review:' + payment.id + ':v1',
+      payload: { rating, servedById: staffId ?? null },
+    })
+  if (expectsSettlement)
+    await enqueuePaymentEffect(tx, {
+      ...source,
+      kind: 'REFERRAL',
+      dedupeKey: 'referral:' + payment.orderId + ':v1',
+      payload: { expectsSettlement: true },
+    })
+  if (payment.type !== 'TEST') await enqueuePaymentCommissionInTx(tx, payment.id)
+}
+
+type CommittedStandaloneSettlement = { firstSettlement: boolean; postingId: string | null }
+
+/** Caller holds the Order lock; money and its inventory/loyalty obligation share one commit. */
+async function settleStandalonePaymentInTx(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  orderId: string,
+  payment: { amount: Prisma.Decimal; tipAmount: Prisma.Decimal },
+  staffId?: string,
+): Promise<CommittedStandaloneSettlement> {
+  // One specific invoice, not a tenant list: its entire item snapshot is required
+  // to preserve the stock obligation without silently truncating a paid invoice.
+  const order = await tx.order.findFirstOrThrow({
+    where: { id: orderId, venueId },
+    include: { items: { include: { modifiers: { include: { modifier: true } } } } },
+  })
+  const paid = await tx.payment.aggregate({
+    where: { venueId, orderId, status: 'COMPLETED', OR: [{ type: null }, { type: { not: REFUND_PAYMENT_TYPE } }] },
+    _sum: { amount: true, tipAmount: true },
+    _count: true,
+  })
+  const amount = paid._sum.amount ?? new Prisma.Decimal(0)
+  const tipAmount = paid._sum.tipAmount ?? new Prisma.Decimal(0)
+  const balance = computeOrderBalance(order, [{ amount, tipAmount }])
+  const previous = computeOrderBalance(order, [{ amount: amount.minus(payment.amount), tipAmount: tipAmount.minus(payment.tipAmount) }])
+  const firstSettlement = balance.isFullyPaid && !(paid._count > 1 && previous.isFullyPaid)
+  await tx.order.update({
+    where: { id: orderId, venueId },
+    data: {
+      paidAmount: balance.paidAmount,
+      remainingBalance: balance.remainingBalance,
+      tipAmount: balance.tipAmount,
+      total: balance.total,
+      paymentStatus: balance.isFullyPaid ? 'PAID' : balance.paidAmount.greaterThan(0) ? 'PARTIAL' : order.paymentStatus,
+      ...(balance.isFullyPaid && { status: 'COMPLETED', completedAt: order.completedAt ?? new Date() }),
+      ...(!order.servedById && staffId && { servedById: staffId, createdById: order.createdById ?? staffId }),
+      ...(firstSettlement && { loyaltyEligibleAt: new Date(), loyaltyStaffId: staffId }),
+    },
+  })
+  const { createSalePostingInTx } = await import('@/services/inventory/inventoryPosting.service')
+  const posting = firstSettlement ? await createSalePostingInTx(tx, { venueId, orderId, items: order.items, staffId }) : null
+  return { firstSettlement, postingId: posting?.id ?? null }
+}
+
 /**
  * Update order totals directly in backend for standalone mode
  * @param orderId Order ID to update
@@ -467,7 +567,7 @@ async function updateOrderTotalsForStandalonePayment(
   tipAmount: number, // ✅ FIX: Pass tip separately to update order.tipAmount
   currentPaymentId?: string,
   staffId?: string,
-  options?: { areaTicketAlreadyFinalized?: boolean; venueId?: string },
+  options?: { areaTicketAlreadyFinalized?: boolean; venueId?: string; committedSettlement?: CommittedStandaloneSettlement },
 ): Promise<OrderInventoryWarning | null> {
   // Get current order with payment information
   const order = await prisma.order.findUnique({
@@ -619,8 +719,9 @@ async function updateOrderTotalsForStandalonePayment(
   // totalTip): la propina nueva no convierte una cuenta saldada en pendiente.
   // Y exige pagos PREVIOS: una orden 100% cortesía (total clampado a 0) sin
   // pagos aún NO está saldada — su primer cobro de $0 sí debe deducir.
-  const settledBeforeThisPayment =
-    order.payments.length > 0 && previousPayments >= Math.max(0, orderSubtotal - orderDiscount) + orderServiceCharge + previousTips - 0.01
+  const settledBeforeThisPayment = options?.committedSettlement
+    ? !options.committedSettlement.firstSettlement
+    : order.payments.length > 0 && previousPayments >= Math.max(0, orderSubtotal - orderDiscount) + orderServiceCharge + previousTips - 0.01
   const coveredAreaTicketLines = isFullyPaid
     ? await getAreaTicketLineIdsCoveredByInventoryReservations(order.venueId, order.items)
     : new Set<string>()
@@ -814,72 +915,73 @@ async function updateOrderTotalsForStandalonePayment(
   // están cerrados aguas arriba: el UNIQUE con pre-check y la clasificación en
   // lote (nada de N+1 dentro de la transacción del dinero).
   const { createSalePostingInTx } = await import('@/services/inventory/inventoryPosting.service')
-  let tpvPostingId: string | null = null
+  let tpvPostingId: string | null = options?.committedSettlement?.postingId ?? null
   const debeRegistrarPosting = isFullyPaid && !settledBeforeThisPayment && !options?.areaTicketAlreadyFinalized
 
-  const updatedOrder = options?.areaTicketAlreadyFinalized
-    ? order
-    : await prisma.$transaction(async tx => {
-        const updated = await tx.order.update({
-          where: { id: orderId, ...(options?.venueId ? { venueId: options.venueId } : {}) },
-          data: {
-            paymentStatus: newPaymentStatus,
-            // ⭐ Partial payment tracking: Persist paidAmount and remainingBalance
-            paidAmount: totalPaid,
-            remainingBalance: remainingAmount,
-            // ✅ FIX: Update order.tipAmount with cumulative tip from all payments
-            tipAmount: totalTip,
-            // ✅ FIX: Update order.total to include cumulative tips (consistent with fast payments)
-            total: newTotal,
-            // ⭐ KIOSK MODE: Assign payment processor as server if no server was assigned
-            ...(shouldAssignServer && {
-              servedById: staffId,
-              createdById: order.createdById || staffId, // Also set createdById if null
-            }),
-            ...(isFullyPaid && {
-              status: 'COMPLETED',
-              completedAt: new Date(),
-            }),
-            ...(debeRegistrarPosting && { loyaltyEligibleAt: new Date(), loyaltyStaffId: staffId }),
-          },
-          include: {
-            items: {
-              include: {
-                product: true,
-                // ✅ Include modifiers with inventory-related fields for stock deduction
-                modifiers: {
-                  include: {
-                    modifier: {
-                      select: {
-                        id: true,
-                        name: true,
-                        groupId: true,
-                        rawMaterialId: true,
-                        quantityPerUnit: true,
-                        unit: true,
-                        inventoryMode: true,
+  const updatedOrder =
+    options?.areaTicketAlreadyFinalized || options?.committedSettlement
+      ? order
+      : await prisma.$transaction(async tx => {
+          const updated = await tx.order.update({
+            where: { id: orderId, ...(options?.venueId ? { venueId: options.venueId } : {}) },
+            data: {
+              paymentStatus: newPaymentStatus,
+              // ⭐ Partial payment tracking: Persist paidAmount and remainingBalance
+              paidAmount: totalPaid,
+              remainingBalance: remainingAmount,
+              // ✅ FIX: Update order.tipAmount with cumulative tip from all payments
+              tipAmount: totalTip,
+              // ✅ FIX: Update order.total to include cumulative tips (consistent with fast payments)
+              total: newTotal,
+              // ⭐ KIOSK MODE: Assign payment processor as server if no server was assigned
+              ...(shouldAssignServer && {
+                servedById: staffId,
+                createdById: order.createdById || staffId, // Also set createdById if null
+              }),
+              ...(isFullyPaid && {
+                status: 'COMPLETED',
+                completedAt: new Date(),
+              }),
+              ...(debeRegistrarPosting && { loyaltyEligibleAt: new Date(), loyaltyStaffId: staffId }),
+            },
+            include: {
+              items: {
+                include: {
+                  product: true,
+                  // ✅ Include modifiers with inventory-related fields for stock deduction
+                  modifiers: {
+                    include: {
+                      modifier: {
+                        select: {
+                          id: true,
+                          name: true,
+                          groupId: true,
+                          rawMaterialId: true,
+                          quantityPerUnit: true,
+                          unit: true,
+                          inventoryMode: true,
+                        },
                       },
                     },
                   },
                 },
               },
             },
-          },
-        })
-
-        // El vale nace aquí dentro: mismo commit que la transición a PAID.
-        if (debeRegistrarPosting) {
-          const posting = await createSalePostingInTx(tx, {
-            venueId: updated.venueId,
-            orderId,
-            items: updated.items as any,
-            staffId,
           })
-          tpvPostingId = posting?.id ?? null
-        }
 
-        return updated
-      })
+          // El vale nace aquí dentro: mismo commit que la transición a PAID.
+          if (debeRegistrarPosting) {
+            const posting = await createSalePostingInTx(tx, {
+              venueId: updated.venueId,
+              orderId,
+              items: updated.items as any,
+              staffId,
+            })
+            tpvPostingId = posting?.id ?? null
+          }
+
+          return updated
+        })
 
   logger.info('Order totals updated for standalone payment', {
     orderId,
@@ -1219,11 +1321,13 @@ async function updateOrderTotalsForStandalonePayment(
       logger.error('⚠️ Failed to finalize coupons (payment still succeeded)', { orderId, error: couponError.message })
     }
 
-    try {
-      const { onOrderPaid } = await import('@/services/referrals/referralQualification.service')
-      await onOrderPaid({ orderId: updatedOrder.id, venueId: updatedOrder.venueId })
-    } catch (err) {
-      console.error('[referral hook] onOrderPaid failed for order', updatedOrder.id, err)
+    if (!options?.committedSettlement) {
+      try {
+        const { onOrderPaid } = await import('@/services/referrals/referralQualification.service')
+        await onOrderPaid({ orderId: updatedOrder.id, venueId: updatedOrder.venueId })
+      } catch (err) {
+        console.error('[referral hook] onOrderPaid failed for order', updatedOrder.id, err)
+      }
     }
 
     await awardLoyaltyForPaidOrder({
@@ -1898,6 +2002,7 @@ export async function recordOrderPayment(
   userId?: string,
   _orgId?: string,
 ) {
+  const timing = paymentStepTimer(venueId, paymentData.terminalPaymentRequestId)
   logger.info('Recording order payment', { venueId, orderId, splitType: paymentData.splitType })
   // Tiempo desde la entrada al servicio. La TPV abandona a los 10 s: cada hito lleva
   // `elapsedMs` para que un cobro lento se pueda atribuir a un tramo, no adivinar.
@@ -2187,297 +2292,340 @@ export async function recordOrderPayment(
   let payment: Awaited<ReturnType<typeof prisma.payment.create>>
   let lockedAreaCheckout: { sessionId: string; attemptId: string } | null = null
   let areaTicketCheckoutState: string | null = null
+  let committedStandaloneSettlement: CommittedStandaloneSettlement | undefined
   // Faltante de inventario detectado con el cobro YA registrado. Viaja como aviso
   // en la respuesta — nunca como error, o el cajero vuelve a pasar la tarjeta.
   let inventoryWarning: OrderInventoryWarning | null = null
   const shiftAmount = new Prisma.Decimal(totalAmount)
   const shiftTip = new Prisma.Decimal(tipAmount)
   try {
-    payment = await prisma.$transaction(async tx => {
-      if (paymentStatusSnapshot === 'COMPLETED') {
-        const areaTicketPayment = await import('../mobile/areaTicketV7.mobile.service')
-        lockedAreaCheckout = await areaTicketPayment.lockAreaTicketCheckoutForPayment(tx, {
-          venueId,
-          orderId: activeOrder.id,
-          idempotencyKey: paymentData.idempotencyKey,
-          amount: new Prisma.Decimal(totalAmount),
-          method: classicMethod as PaymentMethod,
-        })
-      }
-      // El submódulo de vales conserva session → tickets → Order. Si no hay
-      // vales, este helper toma Order aquí; si los hay, el lock es reentrante.
-      // Desde este punto todos los carriles siguen Order → Payment → Shift.
-      const orderStillBelongsToVenue = await lockExistingOrderForPayment(tx, { venueId, orderId: activeOrder.id })
-      if (!orderStillBelongsToVenue) {
-        throw new ConflictError(
-          'La orden cambió mientras se registraba el cobro. Se requiere conciliación manual.',
-          'PAYMENT_ORDER_AUTHORITY_UNAVAILABLE',
-        )
-      }
-
-      // 🔴 Toque repetido en «Efectivo» sobre una orden ya cubierta (SN00396, BAE MEZQUITAL,
-      // 2026-09-04: 5 cobros en 1.7 s, referencias distintas, sin llave). Va DESPUÉS del
-      // `FOR UPDATE` de la orden —lo que serializa la ráfaga— y ANTES de reclamar el turno,
-      // que ya suma dinero. No basta con «la orden está saldada»: se exige la FIRMA de la
-      // ráfaga —mismo dinero, misma terminal, dentro de la ventana— porque «saldada» a secas
-      // confunde dos entregas físicas distintas y hace desaparecer una (ver
-      // `cobroEnEfectivoDuplicado.ts`). Se responde con el cobro existente y un 2xx —el
-      // controlador responde 201 en todas las ramas—, nunca con un 4xx: un rechazo delante
-      // del cliente empuja al cajero a volver a cobrar.
-      //
-      // La consulta se hace SÓLO cuando el candado puede aplicar (`aplicaCandadoDeEfectivo`),
-      // que hoy quiere decir «es efectivo COMPLETED sin vales»: este camino lo abandona la TPV
-      // a los 10 s y un viaje de más por cada cobro con TARJETA es justo lo que produce el
-      // reintento que se está evitando. El efectivo con llave sí paga la consulta desde la
-      // ronda 4 — es el precio de cerrar la ráfaga mixta, y se paga sólo en efectivo.
-      const candidatoDeEfectivo = {
-        method: classicMethod,
-        status: paymentStatusSnapshot,
-        hasAreaTicketLines,
-        amount: totalAmount,
-        tip: tipAmount,
-        terminalId,
-        // 🔴 La llave entra a la FIRMA, no apaga el candado. Dos cobros que la traen son dos
-        // intentos lógicos distintos y no se deduplican (los resuelve el índice único de
-        // arriba); pero si a uno de los dos le falta —la ráfaga MIXTA de la 3ª auditoría de
-        // Codex, P2: una entrega que sale dos veces, una sin llave y otra con ella— la firma
-        // vuelve a ser la única defensa. Ver `cobroEnEfectivoDuplicado.ts`.
-        idempotencyKey: paymentData.idempotencyKey ?? null,
-      }
-      if (aplicaCandadoDeEfectivo(candidatoDeEfectivo)) {
-        const pagosCompletadosDeLaOrden = await tx.payment.findMany({
-          where: { venueId, orderId: activeOrder.id, status: 'COMPLETED' },
-          // 🔴 `idempotencyKey` no es opcional en este select: sin ella todos los cobros previos
-          // parecerían «sin llave» y dos intentos lógicos distintos se deduplicarían entre sí
-          // — el único olvido de esta lista que vuelve la regla MÁS agresiva, no inerte.
-          select: {
-            id: true,
-            amount: true,
-            tipAmount: true,
-            type: true,
-            method: true,
-            createdAt: true,
-            terminalId: true,
-            idempotencyKey: true,
-          },
-          // 🔑 Desempate estable por `id`: con `createdAt` a secas, filas empatadas al
-          // milisegundo (un backfill, una importación) pueden dejar dentro del corte un cobro
-          // y fuera su reembolso — y entonces una orden devuelta se leería como saldada.
-          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-          // Tope explícito: una orden con más cobros que esto quedaría con el saldo
-          // SUBESTIMADO ⇒ la regla ve «todavía falta» y NO deduplica. El lado seguro.
-          take: 200,
-        })
-        // Sólo si hay un cobro previo vale la pena releer la orden: con la fila BLOQUEADA, no
-        // la copia leída antes de la transacción. Entre aquella lectura y este `FOR UPDATE`
-        // alguien pudo añadirle $50 a la cuenta, y con el subtotal viejo la regla vería
-        // «saldada» una orden que ya no lo está.
-        if (pagosCompletadosDeLaOrden.some(p => p.type !== 'REFUND')) {
-          const ordenBloqueada = await tx.order.findUnique({
-            where: { id: activeOrder.id },
-            select: {
-              subtotal: true,
-              discountAmount: true,
-              serviceChargeAmount: true,
-              items: { select: { areaTicketLineId: true } },
-            },
+    payment = await timing.time('financial_commit', () =>
+      prisma.$transaction(async tx => {
+        if (paymentStatusSnapshot === 'COMPLETED') {
+          const areaTicketPayment = await import('../mobile/areaTicketV7.mobile.service')
+          lockedAreaCheckout = await areaTicketPayment.lockAreaTicketCheckoutForPayment(tx, {
+            venueId,
+            orderId: activeOrder.id,
+            idempotencyKey: paymentData.idempotencyKey,
+            amount: new Prisma.Decimal(totalAmount),
+            method: classicMethod as PaymentMethod,
           })
-          if (ordenBloqueada) {
-            const cobroPrevio = cobroEnEfectivoSobreOrdenSaldada(
-              { ...candidatoDeEfectivo, hasAreaTicketLines: ordenBloqueada.items.some(i => i.areaTicketLineId != null) },
-              {
-                subtotal: ordenBloqueada.subtotal,
-                discountAmount: ordenBloqueada.discountAmount,
-                serviceChargeAmount: ordenBloqueada.serviceChargeAmount,
+        }
+        // El submódulo de vales conserva session → tickets → Order. Si no hay
+        // vales, este helper toma Order aquí; si los hay, el lock es reentrante.
+        // Desde este punto todos los carriles siguen Order → Payment → Shift.
+        const orderStillBelongsToVenue = await lockExistingOrderForPayment(tx, { venueId, orderId: activeOrder.id })
+        if (!orderStillBelongsToVenue) {
+          throw new ConflictError(
+            'La orden cambió mientras se registraba el cobro. Se requiere conciliación manual.',
+            'PAYMENT_ORDER_AUTHORITY_UNAVAILABLE',
+          )
+        }
+
+        // 🔴 Toque repetido en «Efectivo» sobre una orden ya cubierta (SN00396, BAE MEZQUITAL,
+        // 2026-09-04: 5 cobros en 1.7 s, referencias distintas, sin llave). Va DESPUÉS del
+        // `FOR UPDATE` de la orden —lo que serializa la ráfaga— y ANTES de reclamar el turno,
+        // que ya suma dinero. No basta con «la orden está saldada»: se exige la FIRMA de la
+        // ráfaga —mismo dinero, misma terminal, dentro de la ventana— porque «saldada» a secas
+        // confunde dos entregas físicas distintas y hace desaparecer una (ver
+        // `cobroEnEfectivoDuplicado.ts`). Se responde con el cobro existente y un 2xx —el
+        // controlador responde 201 en todas las ramas—, nunca con un 4xx: un rechazo delante
+        // del cliente empuja al cajero a volver a cobrar.
+        //
+        // La consulta se hace SÓLO cuando el candado puede aplicar (`aplicaCandadoDeEfectivo`),
+        // que hoy quiere decir «es efectivo COMPLETED sin vales»: este camino lo abandona la TPV
+        // a los 10 s y un viaje de más por cada cobro con TARJETA es justo lo que produce el
+        // reintento que se está evitando. El efectivo con llave sí paga la consulta desde la
+        // ronda 4 — es el precio de cerrar la ráfaga mixta, y se paga sólo en efectivo.
+        const candidatoDeEfectivo = {
+          method: classicMethod,
+          status: paymentStatusSnapshot,
+          hasAreaTicketLines,
+          amount: totalAmount,
+          tip: tipAmount,
+          terminalId,
+          // 🔴 La llave entra a la FIRMA, no apaga el candado. Dos cobros que la traen son dos
+          // intentos lógicos distintos y no se deduplican (los resuelve el índice único de
+          // arriba); pero si a uno de los dos le falta —la ráfaga MIXTA de la 3ª auditoría de
+          // Codex, P2: una entrega que sale dos veces, una sin llave y otra con ella— la firma
+          // vuelve a ser la única defensa. Ver `cobroEnEfectivoDuplicado.ts`.
+          idempotencyKey: paymentData.idempotencyKey ?? null,
+        }
+        if (aplicaCandadoDeEfectivo(candidatoDeEfectivo)) {
+          const pagosCompletadosDeLaOrden = await tx.payment.findMany({
+            where: { venueId, orderId: activeOrder.id, status: 'COMPLETED' },
+            // 🔴 `idempotencyKey` no es opcional en este select: sin ella todos los cobros previos
+            // parecerían «sin llave» y dos intentos lógicos distintos se deduplicarían entre sí
+            // — el único olvido de esta lista que vuelve la regla MÁS agresiva, no inerte.
+            select: {
+              id: true,
+              amount: true,
+              tipAmount: true,
+              type: true,
+              method: true,
+              createdAt: true,
+              terminalId: true,
+              idempotencyKey: true,
+            },
+            // 🔑 Desempate estable por `id`: con `createdAt` a secas, filas empatadas al
+            // milisegundo (un backfill, una importación) pueden dejar dentro del corte un cobro
+            // y fuera su reembolso — y entonces una orden devuelta se leería como saldada.
+            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+            // Tope explícito: una orden con más cobros que esto quedaría con el saldo
+            // SUBESTIMADO ⇒ la regla ve «todavía falta» y NO deduplica. El lado seguro.
+            take: 200,
+          })
+          // Sólo si hay un cobro previo vale la pena releer la orden: con la fila BLOQUEADA, no
+          // la copia leída antes de la transacción. Entre aquella lectura y este `FOR UPDATE`
+          // alguien pudo añadirle $50 a la cuenta, y con el subtotal viejo la regla vería
+          // «saldada» una orden que ya no lo está.
+          if (pagosCompletadosDeLaOrden.some(p => p.type !== 'REFUND')) {
+            const ordenBloqueada = await tx.order.findUnique({
+              where: { id: activeOrder.id },
+              select: {
+                subtotal: true,
+                discountAmount: true,
+                serviceChargeAmount: true,
+                items: { select: { areaTicketLineId: true } },
               },
-              pagosCompletadosDeLaOrden,
-            )
-            if (cobroPrevio) {
-              throw new CobroDuplicadoEnEfectivo(cobroPrevio.id)
+            })
+            if (ordenBloqueada) {
+              const cobroPrevio = cobroEnEfectivoSobreOrdenSaldada(
+                { ...candidatoDeEfectivo, hasAreaTicketLines: ordenBloqueada.items.some(i => i.areaTicketLineId != null) },
+                {
+                  subtotal: ordenBloqueada.subtotal,
+                  discountAmount: ordenBloqueada.discountAmount,
+                  serviceChargeAmount: ordenBloqueada.serviceChargeAmount,
+                },
+                pagosCompletadosDeLaOrden,
+              )
+              if (cobroPrevio) {
+                throw new CobroDuplicadoEnEfectivo(cobroPrevio.id)
+              }
             }
           }
         }
-      }
 
-      // Sólo COMPLETED representa dinero capturado. FAILED/PENDING/PROCESSING/
-      // REFUNDED conservan `null`: no reclaman turno ni generan una falsa
-      // conciliación post-cierre. Para COMPLETED, el claim ES el incremento y
-      // ocurre dentro de esta misma tx, antes del Payment.
-      const priorCompletedPaymentCount = await countPriorCompletedPayments(tx, { venueId, orderId: activeOrder.id })
-      const shiftClaim = await claimShiftForCompletedPayment(tx, {
-        paymentStatus: paymentStatusSnapshot,
-        venueId,
-        amountPesos: shiftAmount,
-        tipPesos: shiftTip,
-        incrementTotalOrders: priorCompletedPaymentCount === 0,
-      })
-
-      // Create the payment record
-      const newPayment = await tx.payment.create({
-        data: {
+        // Sólo COMPLETED representa dinero capturado. FAILED/PENDING/PROCESSING/
+        // REFUNDED conservan `null`: no reclaman turno ni generan una falsa
+        // conciliación post-cierre. Para COMPLETED, el claim ES el incremento y
+        // ocurre dentro de esta misma tx, antes del Payment.
+        const priorCompletedPaymentCount = await countPriorCompletedPayments(tx, { venueId, orderId: activeOrder.id })
+        const shiftClaim = await claimShiftForCompletedPayment(tx, {
+          paymentStatus: paymentStatusSnapshot,
           venueId,
-          orderId: activeOrder.id,
-          amount: totalAmount,
-          tipAmount,
-          method: classicMethod as PaymentMethod, // Cast to PaymentMethod enum
-          // Mismo criterio que la venta rápida: el detalle declarado a mano sólo se
-          // guarda cuando el dinero NO pasó por Avoqado.
-          externalSource: classicMethod === 'CASH' ? null : paymentData.externalSource?.trim()?.slice(0, 50) || null,
-          status: paymentStatusSnapshot as any, // Direct enum mapping since frontend sends correct values
-          splitType: paymentData.splitType as SplitType, // Cast to SplitType enum
-          source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
-          processor: 'TBD',
-          // Snapshot de MERCHANT_ROUTING_RULES (por qué la TPV mostró/eligió este merchant)
-          routingEvaluation: paymentData.routingEvaluation ?? undefined,
-          processorId: paymentData.mentaOperationId,
-          processorData: {
-            cardBrand: paymentData.cardBrand,
-            last4: paymentData.last4,
-            typeOfCard: paymentData.typeOfCard,
-            bank: paymentData.bank,
-            currency: paymentData.currency,
-            mentaAuthorizationReference: paymentData.mentaAuthorizationReference,
-            mentaTicketId: paymentData.mentaTicketId,
-            isInternational: paymentData.isInternational,
-            ...(paymentData.issuerCountryCode && paymentData.issuerCountrySource
-              ? {
-                  issuerCountryEvidence: {
-                    code: paymentData.issuerCountryCode,
-                    source: paymentData.issuerCountrySource,
-                  },
-                }
-              : {}),
-            // ⭐ Blumon serial for reconciliation (matches dashboard de Blumon)
-            blumonSerialNumber: paymentData.blumonSerialNumber || null,
-            // 💸 Blumon Operation Number (2025-12-16) - For CancelIcc refunds without webhook
-            blumonOperationNumber: paymentData.blumonOperationNumber || null,
-          },
-          // New enhanced fields in the Payment table
-          authorizationNumber: paymentData.authorizationNumber,
-          referenceNumber: paymentData.referenceNumber,
-          // 🛡️ Idempotency key (2026-04-08) - Stripe/Square/Toast pattern
-          idempotencyKey: paymentData.idempotencyKey,
-          maskedPan: paymentData.maskedPan,
-          cardBrand: paymentData.cardBrand ? (paymentData.cardBrand.toUpperCase().replace(' ', '_') as any) : null,
-          entryMode: paymentData.entryMode ? (paymentData.entryMode.toUpperCase() as any) : null,
-          internationalityStatus: internationalityShadow?.status,
-          internationalitySource: internationalityShadow?.source,
-          issuerCountryCode: internationalityShadow?.issuerCountryCode,
-          internationalityClassificationVersion: internationalityShadow?.classificationVersion,
-          internationalityClassifiedAt,
-          // ⭐ Provider-agnostic merchant account tracking
-          merchantAccountId,
-          // ⭐ Terminal that processed this payment (resolved from deviceSerialNumber)
-          terminalId,
-          processedById: validatedStaffId, // ✅ CORRECTED: Use validated staff ID
-          shiftId: shiftClaim?.shiftId ?? null,
-          feePercentage: 0, // TODO: Calculate based on payment processor
-          feeAmount: 0, // TODO: Calculate based on amount and percentage
-          netAmount: totalAmount + tipAmount, // For now, net amount = total
-          posRawData: {
-            splitType: paymentData.splitType,
-            staffId: validatedStaffId, // identidad efectiva validada (POS en relay; TPV en cobro directo)
-            source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
-            paidProductsId: paymentData.paidProductsId || [],
-            ...(paymentData.equalPartsPartySize && { equalPartsPartySize: paymentData.equalPartsPartySize }),
-            ...(paymentData.equalPartsPayedFor && { equalPartsPayedFor: paymentData.equalPartsPayedFor }),
-            ...(paymentData.reviewRating && { reviewRating: paymentData.reviewRating }),
-          },
-        },
-        include: {
-          order: {
-            include: {
-              items: true,
-              venue: true,
-            },
-          },
-          processedBy: true,
-        },
-      })
-
-      if (shiftClaim) {
-        await recordPendingPaymentShiftReconciliation(tx, {
-          reconciliationEnabled,
-          claim: shiftClaim,
-          venueId,
-          paymentId: newPayment.id,
-          orderId: activeOrder.id,
-          staffId: validatedStaffId ?? null,
-          channel: 'recordOrderPayment',
           amountPesos: shiftAmount,
           tipPesos: shiftTip,
+          incrementTotalOrders: priorCompletedPaymentCount === 0,
         })
-      }
 
-      // Create VenueTransaction for financial tracking and settlement
-      //
-      // 🔴 `PENDING` significa "Avoqado todavía le debe este dinero al negocio". Estaba
-      // FIJO, así que el efectivo del cajón —y ahora un cobro de Uber Eats, que Avoqado
-      // jamás va a depositar— entraban a la cola de liquidación como saldo por depositar.
-      // El lado de lectura (`availableBalance`) ya filtra con este mismo predicado, o sea
-      // que el número que ve el dueño estaba bien; la FILA era la que mentía, y cualquier
-      // consumidor nuevo la leería mal. "¿Esto lo deposita Avoqado?" tiene UNA autoridad:
-      // `paymentIsAvoqadoSettled`. Sin tender reproduce el histórico para tarjeta
-      // (PENDING) y corrige el efectivo a SETTLED — que es justo lo que ya hace el cobro
-      // en efectivo del POS ("Cash is immediately settled").
-      await tx.venueTransaction.create({
-        data: {
-          venueId,
-          paymentId: newPayment.id,
-          type: 'PAYMENT',
-          grossAmount: totalAmount + tipAmount,
-          feeAmount: newPayment.feeAmount,
-          netAmount: newPayment.netAmount,
-          // Lo que no pasa por Avoqado no tiene nada pendiente: nace liquidado.
-          status: paymentIsAvoqadoSettled(newPayment) ? 'PENDING' : 'SETTLED',
-        },
-      })
-
-      // Close the POS→TPV arbitration row (frees the terminal slot) atomically
-      // with the Payment — the robust recovery path (survives socket loss/restart).
-      if (paymentData.terminalPaymentRequestId) {
-        await terminalPaymentService.closeRowFromPaymentTx(tx, paymentData.terminalPaymentRequestId, newPayment.id, venueId, {
-          amountCents: paymentData.amount,
-          tipCents: paymentData.tip,
+        // Create the payment record
+        const newPayment = await tx.payment.create({
+          data: {
+            venueId,
+            orderId: activeOrder.id,
+            amount: totalAmount,
+            tipAmount,
+            method: classicMethod as PaymentMethod, // Cast to PaymentMethod enum
+            // Mismo criterio que la venta rápida: el detalle declarado a mano sólo se
+            // guarda cuando el dinero NO pasó por Avoqado.
+            externalSource: classicMethod === 'CASH' ? null : paymentData.externalSource?.trim()?.slice(0, 50) || null,
+            status: paymentStatusSnapshot as any, // Direct enum mapping since frontend sends correct values
+            splitType: paymentData.splitType as SplitType, // Cast to SplitType enum
+            source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
+            processor: 'TBD',
+            // Snapshot de MERCHANT_ROUTING_RULES (por qué la TPV mostró/eligió este merchant)
+            routingEvaluation: paymentData.routingEvaluation ?? undefined,
+            processorId: paymentData.mentaOperationId,
+            processorData: {
+              cardBrand: paymentData.cardBrand,
+              last4: paymentData.last4,
+              typeOfCard: paymentData.typeOfCard,
+              bank: paymentData.bank,
+              currency: paymentData.currency,
+              mentaAuthorizationReference: paymentData.mentaAuthorizationReference,
+              mentaTicketId: paymentData.mentaTicketId,
+              isInternational: paymentData.isInternational,
+              ...(paymentData.issuerCountryCode && paymentData.issuerCountrySource
+                ? {
+                    issuerCountryEvidence: {
+                      code: paymentData.issuerCountryCode,
+                      source: paymentData.issuerCountrySource,
+                    },
+                  }
+                : {}),
+              // ⭐ Blumon serial for reconciliation (matches dashboard de Blumon)
+              blumonSerialNumber: paymentData.blumonSerialNumber || null,
+              // 💸 Blumon Operation Number (2025-12-16) - For CancelIcc refunds without webhook
+              blumonOperationNumber: paymentData.blumonOperationNumber || null,
+              // Procedencia AUTENTICADA del cobro (serial del token). Aditivo: conserva la identidad del
+              // aparato aunque `terminalId` no resuelva, para la atribución y la recuperación del
+              // arbitraje POS→terminal.
+              deviceSerialNumber: paymentData.deviceSerialNumber || null,
+            },
+            // New enhanced fields in the Payment table
+            authorizationNumber: paymentData.authorizationNumber,
+            referenceNumber: paymentData.referenceNumber,
+            // 🛡️ Idempotency key (2026-04-08) - Stripe/Square/Toast pattern
+            idempotencyKey: paymentData.idempotencyKey,
+            maskedPan: paymentData.maskedPan,
+            cardBrand: paymentData.cardBrand ? (paymentData.cardBrand.toUpperCase().replace(' ', '_') as any) : null,
+            entryMode: paymentData.entryMode ? (paymentData.entryMode.toUpperCase() as any) : null,
+            internationalityStatus: internationalityShadow?.status,
+            internationalitySource: internationalityShadow?.source,
+            issuerCountryCode: internationalityShadow?.issuerCountryCode,
+            internationalityClassificationVersion: internationalityShadow?.classificationVersion,
+            internationalityClassifiedAt,
+            // ⭐ Provider-agnostic merchant account tracking
+            merchantAccountId,
+            // ⭐ Terminal that processed this payment (resolved from deviceSerialNumber)
+            terminalId,
+            processedById: validatedStaffId, // ✅ CORRECTED: Use validated staff ID
+            shiftId: shiftClaim?.shiftId ?? null,
+            feePercentage: 0, // TODO: Calculate based on payment processor
+            feeAmount: 0, // TODO: Calculate based on amount and percentage
+            netAmount: totalAmount + tipAmount, // For now, net amount = total
+            posRawData: {
+              splitType: paymentData.splitType,
+              staffId: validatedStaffId, // identidad efectiva validada (POS en relay; TPV en cobro directo)
+              source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
+              paidProductsId: paymentData.paidProductsId || [],
+              ...(paymentData.equalPartsPartySize && { equalPartsPartySize: paymentData.equalPartsPartySize }),
+              ...(paymentData.equalPartsPayedFor && { equalPartsPayedFor: paymentData.equalPartsPayedFor }),
+              ...(paymentData.reviewRating && { reviewRating: paymentData.reviewRating }),
+            },
+          },
+          include: {
+            order: {
+              include: {
+                items: true,
+                venue: true,
+              },
+            },
+            processedBy: true,
+          },
         })
-      }
 
-      // Update Order.splitType if this is the first payment
-      if (!activeOrder.splitType) {
-        await tx.order.update({
-          where: { id: activeOrder.id, venueId },
-          data: { splitType: paymentData.splitType as any },
+        if (shiftClaim) {
+          await recordPendingPaymentShiftReconciliation(tx, {
+            reconciliationEnabled,
+            claim: shiftClaim,
+            venueId,
+            paymentId: newPayment.id,
+            orderId: activeOrder.id,
+            staffId: validatedStaffId ?? null,
+            channel: 'recordOrderPayment',
+            amountPesos: shiftAmount,
+            tipPesos: shiftTip,
+          })
+        }
+
+        // Create VenueTransaction for financial tracking and settlement
+        //
+        // 🔴 `PENDING` significa "Avoqado todavía le debe este dinero al negocio". Estaba
+        // FIJO, así que el efectivo del cajón —y ahora un cobro de Uber Eats, que Avoqado
+        // jamás va a depositar— entraban a la cola de liquidación como saldo por depositar.
+        // El lado de lectura (`availableBalance`) ya filtra con este mismo predicado, o sea
+        // que el número que ve el dueño estaba bien; la FILA era la que mentía, y cualquier
+        // consumidor nuevo la leería mal. "¿Esto lo deposita Avoqado?" tiene UNA autoridad:
+        // `paymentIsAvoqadoSettled`. Sin tender reproduce el histórico para tarjeta
+        // (PENDING) y corrige el efectivo a SETTLED — que es justo lo que ya hace el cobro
+        // en efectivo del POS ("Cash is immediately settled").
+        await tx.venueTransaction.create({
+          data: {
+            venueId,
+            paymentId: newPayment.id,
+            type: 'PAYMENT',
+            grossAmount: totalAmount + tipAmount,
+            feeAmount: newPayment.feeAmount,
+            netAmount: newPayment.netAmount,
+            // Lo que no pasa por Avoqado no tiene nada pendiente: nace liquidado.
+            status: paymentIsAvoqadoSettled(newPayment) ? 'PENDING' : 'SETTLED',
+          },
         })
-      }
 
-      // Handle split payment allocations based on splitType
-      if (paymentData.splitType === 'PERPRODUCT' && paymentData.paidProductsId.length > 0) {
-        // Create allocations for specific products
-        const orderItems = activeOrder.items.filter((item: any) => paymentData.paidProductsId.includes(item.id))
+        // Close the POS→TPV arbitration row (frees the terminal slot) atomically
+        // with the Payment — the robust recovery path (survives socket loss/restart).
+        if (paymentData.terminalPaymentRequestId) {
+          await terminalPaymentService.closeRowFromPaymentTx(
+            tx,
+            paymentData.terminalPaymentRequestId,
+            newPayment.id,
+            venueId,
+            { amountCents: paymentData.amount, tipCents: paymentData.tip },
+            'REST',
+            // Serial AUTENTICADO (inyectado por el controlador desde el token): es la identidad del
+            // aparato que cobró aunque la FK `terminalId` no haya resuelto en este venue.
+            paymentData.deviceSerialNumber ?? null,
+          )
+        }
 
-        for (const item of orderItems) {
+        // Update Order.splitType if this is the first payment
+        if (!activeOrder.splitType) {
+          await tx.order.update({
+            where: { id: activeOrder.id, venueId },
+            data: { splitType: paymentData.splitType as any },
+          })
+        }
+
+        // Handle split payment allocations based on splitType
+        if (paymentData.splitType === 'PERPRODUCT' && paymentData.paidProductsId.length > 0) {
+          // Create allocations for specific products
+          const orderItems = activeOrder.items.filter((item: any) => paymentData.paidProductsId.includes(item.id))
+
+          for (const item of orderItems) {
+            await tx.paymentAllocation.create({
+              data: {
+                paymentId: newPayment.id,
+                orderItemId: item.id,
+                orderId: activeOrder.id,
+                amount: item.total, // Allocate the full item amount
+              },
+            })
+          }
+        } else {
+          // For other split types, create a general allocation to the order
           await tx.paymentAllocation.create({
             data: {
               paymentId: newPayment.id,
-              orderItemId: item.id,
               orderId: activeOrder.id,
-              amount: item.total, // Allocate the full item amount
+              amount: totalAmount,
             },
           })
         }
-      } else {
-        // For other split types, create a general allocation to the order
-        await tx.paymentAllocation.create({
-          data: {
-            paymentId: newPayment.id,
-            orderId: activeOrder.id,
-            amount: totalAmount,
-          },
-        })
-      }
 
-      return newPayment
-    })
+        const integratedOrder = activeOrder.source === OrderSource.POS && !!activeOrder.externalId?.trim()
+        if (
+          newPayment.status === 'COMPLETED' &&
+          !integratedOrder &&
+          !lockedAreaCheckout &&
+          !activeOrder.items.some(item => item.areaTicketLineId != null)
+        ) {
+          committedStandaloneSettlement = await settleStandalonePaymentInTx(tx, venueId, activeOrder.id, newPayment, validatedStaffId)
+        }
+
+        if (newPayment.status === 'COMPLETED') {
+          const paidOrder = await tx.order.findUniqueOrThrow({ where: { id: activeOrder.id, venueId } })
+          let expectsSettlement = paidOrder.paymentStatus === 'PAID'
+          if (!expectsSettlement && !committedStandaloneSettlement) {
+            // SR and area-ticket flows retain their settlement owner. Freeze the
+            // expectation now so their referral survives a delayed settlement.
+            const sums = await tx.payment.aggregate({
+              where: {
+                venueId,
+                orderId: activeOrder.id,
+                status: 'COMPLETED',
+                OR: [{ type: null }, { type: { not: REFUND_PAYMENT_TYPE } }],
+              },
+              _sum: { amount: true, tipAmount: true },
+            })
+            expectsSettlement = computeOrderBalance(paidOrder, [{ amount: sums._sum.amount, tipAmount: sums._sum.tipAmount }]).isFullyPaid
+          }
+          await enqueueCommittedPaymentEffects(tx, newPayment, paymentData.reviewRating, validatedStaffId, expectsSettlement)
+        }
+        return newPayment
+      }),
+    )
   } catch (error) {
     if (error instanceof CobroDuplicadoEnEfectivo) {
       const existente = await prisma.payment.findUnique({ where: { id: error.existingPaymentId }, include: { receipts: true } })
@@ -2636,24 +2784,26 @@ export async function recordOrderPayment(
   // 🔴 EL CAJÓN SUMA LA VENTA EN EFECTIVO (simétrico con el PAY_OUT del reembolso).
   // Ver `services/shared/cashDrawerPosting.ts`: decide con `tenderSemantics` si el
   // dinero entró al cajón, no lanza nunca, y es idempotente por paymentId.
-  await postCashSaleToDrawer({
-    venueId,
-    paymentId: payment.id,
-    method: payment.method,
-    fundsFlow: payment.fundsFlow,
-    tenderTypeId: payment.tenderTypeId,
-    tenderCountsAsCash: payment.tenderCountsAsCash,
-    status: payment.status,
-    type: payment.type,
-    amount: payment.amount,
-    tipAmount: payment.tipAmount,
-    staffId: payment.processedById,
-    orderId: activeOrder.id,
-  })
+  await timing.time('drawer', () =>
+    postCashSaleToDrawer({
+      venueId,
+      paymentId: payment.id,
+      method: payment.method,
+      fundsFlow: payment.fundsFlow,
+      tenderTypeId: payment.tenderTypeId,
+      tenderCountsAsCash: payment.tenderCountsAsCash,
+      status: payment.status,
+      type: payment.type,
+      amount: payment.amount,
+      tipAmount: payment.tipAmount,
+      staffId: payment.processedById,
+      orderId: activeOrder.id,
+    }),
+  )
 
   // Create TransactionCost for financial tracking (only for Avoqado-processed non-cash payments)
   try {
-    const costResult = await createTransactionCost(payment.id)
+    const costResult = await timing.time('transaction_cost', () => createTransactionCost(payment.id))
 
     // Update Payment and VenueTransaction with calculated fee values
     if (costResult && costResult.feeAmount > 0) {
@@ -2689,7 +2839,7 @@ export async function recordOrderPayment(
   }
 
   // Create Review record if reviewRating is provided
-  if (paymentData.reviewRating) {
+  if (payment.status !== 'COMPLETED' && paymentData.reviewRating) {
     try {
       const rating = mapTpvRatingToNumeric(paymentData.reviewRating)
       if (rating !== null) {
@@ -2715,7 +2865,7 @@ export async function recordOrderPayment(
   // Generate digital receipt for TPV payments (AVOQADO origin)
   let digitalReceipt = null
   try {
-    digitalReceipt = await generateDigitalReceipt(payment.id)
+    digitalReceipt = await timing.time('canonical_receipt', () => generateDigitalReceipt(payment.id))
     logger.info('Digital receipt generated for payment', {
       paymentId: payment.id,
       receiptId: digitalReceipt.id,
@@ -2757,14 +2907,6 @@ export async function recordOrderPayment(
 
       // Create commission calculation for this payment (non-blocking)
       if (payment.type !== 'TEST') {
-        createCommissionForPayment(payment.id).catch(err => {
-          logger.error('Failed to create commission for payment', {
-            paymentId: payment.id,
-            orderId: activeOrder.id,
-            error: err instanceof Error ? err.message : String(err),
-          })
-        })
-
         // Real-time auto-reorder: if this sale left any ingredient at/below its
         // reorder point, create the PO + email the supplier right away instead of
         // waiting for the nightly job. Non-blocking (never affects the payment)
@@ -2839,20 +2981,22 @@ export async function recordOrderPayment(
     try {
       const isPartialPayment = totalAmount + tipAmount < parseFloat(activeOrder.total.toString())
 
-      await publishCommand(`command.softrestaurant.${venueId}`, {
-        entity: 'Payment',
-        action: 'APPLY',
-        payload: {
-          orderExternalId: activeOrder.externalId,
-          paymentData: {
-            amount: totalAmount,
-            tip: tipAmount,
-            posPaymentMethodId: mapPaymentMethodToPOS(classicMethod),
-            reference: paymentData.mentaOperationId || paymentData.authorizationNumber || '',
-            isPartial: isPartialPayment,
+      await timing.time('sr_apply', () =>
+        publishCommand(`command.softrestaurant.${venueId}`, {
+          entity: 'Payment',
+          action: 'APPLY',
+          payload: {
+            orderExternalId: activeOrder.externalId,
+            paymentData: {
+              amount: totalAmount,
+              tip: tipAmount,
+              posPaymentMethodId: mapPaymentMethodToPOS(classicMethod),
+              reference: paymentData.mentaOperationId || paymentData.authorizationNumber || '',
+              isPartial: isPartialPayment,
+            },
           },
-        },
-      })
+        }),
+      )
 
       // Track this payment command to prevent double deduction when POS sends back order.updated
       if (activeOrder.externalId) {
@@ -2934,7 +3078,7 @@ export async function recordOrderPayment(
           tipAmount,
           payment.id,
           validatedStaffId,
-          { venueId },
+          { venueId, committedSettlement: committedStandaloneSettlement },
         )
       }
 
@@ -3031,6 +3175,9 @@ export async function recordOrderPayment(
     }),
   )
 
+  const autofacturaAvailable = digitalReceipt ? await timing.time('autofactura', () => resolveAutofacturaAvailable(orderId)) : false
+  timing.end(payment.id)
+
   // Add digital receipt info to payment response
   return {
     ...payment,
@@ -3044,7 +3191,7 @@ export async function recordOrderPayment(
           id: digitalReceipt.id,
           accessKey: digitalReceipt.accessKey,
           receiptUrl: `${process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'}/receipts/public/${digitalReceipt.accessKey}`,
-          autofacturaAvailable: await resolveAutofacturaAvailable(orderId),
+          autofacturaAvailable,
         }
       : null,
   }
@@ -3163,6 +3310,7 @@ async function verifyDelegatedPaymentLanded(
  * @returns Created payment
  */
 export async function recordFastPayment(venueId: string, paymentData: PaymentCreationData, userId?: string, _orgId?: string) {
+  const timing = paymentStepTimer(venueId, paymentData.terminalPaymentRequestId)
   logger.info('Recording fast payment', { venueId, amount: paymentData.amount, paymentData })
 
   // 🔴 EL CLIENTE EFECTIVO de esta venta. Por defecto, el que mandó quien registra el
@@ -3609,273 +3757,290 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   const tenderState: { resolved: ResolvedTenderCharge | null } = { resolved: null }
   try {
     t.mark('turnoMerchantYTerminal')
-    const result = await prisma.$transaction(async tx => {
-      // En venta rápida la Order y el Payment nacen juntos. Sólo COMPLETED es
-      // dinero capturado y puede reclamar; los demás estados nacen sin turno y
-      // sin anomalía post-cierre. Cuando aplica, el claim debe ganar antes de
-      // crear cualquiera de los dos para que compartan el mismo id seguro.
-      const shiftAmount = new Prisma.Decimal(totalAmount)
-      const shiftTip = new Prisma.Decimal(tipAmount)
-      const shiftClaim = await claimShiftForCompletedPayment(tx, {
-        paymentStatus: paymentStatusSnapshot,
-        venueId,
-        amountPesos: shiftAmount,
-        tipPesos: shiftTip,
-        incrementTotalOrders: true,
-      })
-
-      // 🔧 FIX: Use orderReference from Android if provided (ensures photos match order number)
-      // Android generates "FAST-{timestamp}" ONCE when entering VerifyingPrePayment state
-      // Photos are uploaded to Firebase with this same reference
-      // This ensures photos at "venues/X/verifications/2024-01-01/FAST-123456_1.jpg" match the order
-      const orderNumber = paymentData.orderReference || `FAST-${Date.now()}`
-
-      // Create fast order
-      const order = await tx.order.create({
-        data: {
+    const result = await timing.time('financial_commit', () =>
+      prisma.$transaction(async tx => {
+        // En venta rápida la Order y el Payment nacen juntos. Sólo COMPLETED es
+        // dinero capturado y puede reclamar; los demás estados nacen sin turno y
+        // sin anomalía post-cierre. Cuando aplica, el claim debe ganar antes de
+        // crear cualquiera de los dos para que compartan el mismo id seguro.
+        const shiftAmount = new Prisma.Decimal(totalAmount)
+        const shiftTip = new Prisma.Decimal(tipAmount)
+        const shiftClaim = await claimShiftForCompletedPayment(tx, {
+          paymentStatus: paymentStatusSnapshot,
           venueId,
-          orderNumber,
-          type: 'TAKEOUT', // Fast payments are typically quick sales (para llevar)
-          source: 'TPV',
-          // ⭐ Terminal that created this order (resolved from deviceSerialNumber)
-          terminalId,
-          status: 'COMPLETED', // Fast payments are instantly paid, so order is completed
-          completedAt: new Date(),
-          // 🔴 La orden cae en el MISMO turno que su cobro (auditoría Codex, 2026-09-02).
-          //
-          // El `Payment` de abajo ya llevaba `shiftId`; la orden no. Y desde la fase 1 del
-          // turno del negocio, `getActiveShifts` cuenta las órdenes de un turno agrupando por
-          // `Order.shiftId`: un turno con diez ventas rápidas enseñaba el dinero correcto y
-          // «0 órdenes», y el cierre tampoco veía sus productos.
-          //
-          // Sólo el ganador del CAS transaccional se estampa. Sin turno (o si el
-          // cierre ganó) la venta sigue, pero queda pendiente explícita abajo.
-          shiftId: shiftClaim?.shiftId ?? null,
-          subtotal: totalAmount, // Base amount (without tip)
-          taxAmount: 0, // No tax for fast payments
-          total: totalAmount + tipAmount, // ✅ FIX: Total = subtotal + tax + tip
-          // ✅ FIX: Include tip and paid amounts for fast orders
-          tipAmount, // Tip amount from this payment
-          paidAmount: totalAmount + tipAmount, // Total paid (base + tip)
-          remainingBalance: 0, // Fast payments are always fully paid
-          paymentStatus: 'PAID',
-          splitType: paymentData.splitType as any, // Set splitType for fast orders
-          createdById: validatedStaffId, // Track which staff created the fast order
-          servedById: validatedStaffId, // ⭐ KIOSK MODE FIX: Also set server to payment processor
-          // 🔴 El cliente, en la MISMA transacción que el dinero: `Order.customerId`
-          // (vínculo legacy) + `OrderCustomer` primario (vínculo moderno) — exactamente
-          // lo que hace `POST /orders`. Sin cliente el objeto es vacío y la orden nace
-          // idéntica a como nacía antes de este cambio.
-          ...(customerOrderData ?? {}),
-        },
-      })
-
-      // 🔑 Semántica de dinero SERVER-OWNED: si el POS referenció un tipo de pago del
-      // catálogo, el método fiscal, la comisión, el cajón y la forma SAT salen de la
-      // revisión CONGELADA — nunca de lo que mandó el cliente. Editar el catálogo
-      // mañana no reinterpreta este cobro.
-      const resolvedTender =
-        paymentData.tenderTypeId != null && paymentData.tenderRevision != null
-          ? await resolveTenderForCharge(
-              venueId,
-              paymentData.tenderTypeId,
-              paymentData.tenderRevision,
-              tx,
-              paymentData.isOfflineReplay ? 'replay' : 'online',
-            )
-          : null
-      tenderState.resolved = resolvedTender
-
-      // Propina prohibida en un tipo configurado sin propina (Uber Eats ya la cobró en
-      // su app). El POS no debería ofrecerla, pero la frontera no confía en la UI.
-      if (resolvedTender && !resolvedTender.tenderCaptureTip && tipAmount > 0) {
-        throw new BadRequestError(`El tipo de pago "${resolvedTender.tenderLabel}" no acepta propina.`)
-      }
-
-      const effectiveMethod = (resolvedTender?.method ?? paymentData.method) as PaymentMethod
-
-      // Create the fast payment record
-      const newPayment = await tx.payment.create({
-        data: {
-          venueId,
-          orderId: order.id, // Fast payment - no order association
-          amount: totalAmount,
-          tipAmount,
-          method: effectiveMethod,
-          // El detalle del cobro declarado a mano sólo tiene sentido si el dinero NO
-          // pasó por Avoqado; en efectivo se guarda null para no ensuciar el arqueo.
-          // Con un tipo del catálogo el nombre vive en `tenderLabel`, no aquí: mezclarlos
-          // haría que el desglose del corte contara el mismo cobro dos veces.
-          externalSource: resolvedTender
-            ? null
-            : paymentData.method === 'CASH'
-              ? null
-              : paymentData.externalSource?.trim()?.slice(0, 50) || null,
-          // Snapshots inmutables del tender, todos resueltos por el server.
-          tenderTypeId: resolvedTender?.tenderTypeId,
-          tenderRevision: resolvedTender?.tenderRevision,
-          tenderLabel: resolvedTender?.tenderLabel,
-          tenderCountsAsCash: resolvedTender?.tenderCountsAsCash,
-          tenderCaptureTip: resolvedTender?.tenderCaptureTip,
-          tenderSatFormaPago: resolvedTender?.tenderSatFormaPago,
-          tenderCommissionPercent: resolvedTender?.tenderCommissionPercent,
-          tenderCommissionAmount: resolvedTender
-            ? computeTenderCommission(resolvedTender.tenderCommissionPercent, new Prisma.Decimal(totalAmount))
-            : undefined,
-          fundsFlow: resolvedTender?.fundsFlow,
-          status: paymentStatusSnapshot as any, // Direct enum mapping since frontend sends correct values
-          splitType: 'FULLPAYMENT' as SplitType, // Fast payments are always full payments
-          source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
-          processor: 'TBD',
-          type: 'FAST',
-          // Snapshot de MERCHANT_ROUTING_RULES (por qué la TPV mostró/eligió este merchant)
-          routingEvaluation: paymentData.routingEvaluation ?? undefined,
-          processorId: paymentData.mentaOperationId,
-          processorData: {
-            cardBrand: paymentData.cardBrand,
-            last4: paymentData.last4,
-            typeOfCard: paymentData.typeOfCard,
-            bank: paymentData.bank,
-            currency: paymentData.currency,
-            authorizationNumber: paymentData.authorizationNumber,
-            referenceNumber: paymentData.referenceNumber,
-            isInternational: paymentData.isInternational,
-            ...(paymentData.issuerCountryCode && paymentData.issuerCountrySource
-              ? {
-                  issuerCountryEvidence: {
-                    code: paymentData.issuerCountryCode,
-                    source: paymentData.issuerCountrySource,
-                  },
-                }
-              : {}),
-            // ⭐ Blumon serial for reconciliation (matches dashboard de Blumon)
-            blumonSerialNumber: paymentData.blumonSerialNumber || null,
-            // 💸 Blumon Operation Number (2025-12-16) - For CancelIcc refunds without webhook
-            blumonOperationNumber: paymentData.blumonOperationNumber || null,
-          },
-          // New enhanced fields in the Payment table
-          authorizationNumber: paymentData.authorizationNumber,
-          referenceNumber: paymentData.referenceNumber,
-          // 🛡️ Idempotency key (2026-04-08) - Stripe/Square/Toast pattern
-          idempotencyKey: paymentData.idempotencyKey,
-          maskedPan: paymentData.maskedPan,
-          cardBrand: paymentData.cardBrand ? (paymentData.cardBrand.toUpperCase().replace(' ', '_') as any) : null,
-          entryMode: paymentData.entryMode ? (paymentData.entryMode.toUpperCase() as any) : null,
-          internationalityStatus: internationalityShadow?.status,
-          internationalitySource: internationalityShadow?.source,
-          issuerCountryCode: internationalityShadow?.issuerCountryCode,
-          internationalityClassificationVersion: internationalityShadow?.classificationVersion,
-          internationalityClassifiedAt,
-          // ⭐ Provider-agnostic merchant account tracking
-          merchantAccountId,
-          // ⭐ Terminal that processed this payment (resolved from deviceSerialNumber)
-          terminalId,
-          processedById: validatedStaffId, // ✅ CORRECTED: Use validated staff ID
-          shiftId: shiftClaim?.shiftId ?? null,
-          feePercentage: 0, // TODO: Calculate based on payment processor
-          feeAmount: 0, // TODO: Calculate based on amount and percentage
-          netAmount: totalAmount + tipAmount, // For now, net amount = total
-          posRawData: {
-            splitType: 'FULLPAYMENT',
-            staffId: validatedStaffId, // identidad efectiva validada (POS en relay; TPV en cobro directo)
-            source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
-            paymentType: 'FAST',
-            ...(effectiveReviewRating && { reviewRating: effectiveReviewRating }),
-          },
-        },
-        include: {
-          processedBy: true,
-        },
-      })
-
-      if (shiftClaim) {
-        await recordPendingPaymentShiftReconciliation(tx, {
-          reconciliationEnabled,
-          claim: shiftClaim,
-          venueId,
-          paymentId: newPayment.id,
-          orderId: order.id,
-          staffId: validatedStaffId ?? null,
-          channel: 'recordFastPayment',
           amountPesos: shiftAmount,
           tipPesos: shiftTip,
+          incrementTotalOrders: true,
         })
-      }
 
-      // Create VenueTransaction for financial tracking and settlement
-      //
-      // 🔴 `PENDING` significa "Avoqado todavía le debe este dinero al negocio". Estaba
-      // FIJO, así que el efectivo del cajón —y ahora un cobro de Uber Eats, que Avoqado
-      // jamás va a depositar— entraban a la cola de liquidación como saldo por depositar.
-      // El lado de lectura (`availableBalance`) ya filtra con este mismo predicado, o sea
-      // que el número que ve el dueño estaba bien; la FILA era la que mentía, y cualquier
-      // consumidor nuevo la leería mal. "¿Esto lo deposita Avoqado?" tiene UNA autoridad:
-      // `paymentIsAvoqadoSettled`. Sin tender reproduce el histórico para tarjeta
-      // (PENDING) y corrige el efectivo a SETTLED — que es justo lo que ya hace el cobro
-      // en efectivo del POS ("Cash is immediately settled").
-      await tx.venueTransaction.create({
-        data: {
-          venueId,
-          paymentId: newPayment.id,
-          type: 'PAYMENT',
-          grossAmount: totalAmount + tipAmount,
-          feeAmount: newPayment.feeAmount,
-          netAmount: newPayment.netAmount,
-          // Lo que no pasa por Avoqado no tiene nada pendiente: nace liquidado.
-          status: paymentIsAvoqadoSettled(newPayment) ? 'PENDING' : 'SETTLED',
-        },
-      })
+        // 🔧 FIX: Use orderReference from Android if provided (ensures photos match order number)
+        // Android generates "FAST-{timestamp}" ONCE when entering VerifyingPrePayment state
+        // Photos are uploaded to Firebase with this same reference
+        // This ensures photos at "venues/X/verifications/2024-01-01/FAST-123456_1.jpg" match the order
+        const orderNumber = paymentData.orderReference || `FAST-${Date.now()}`
 
-      // Create a general allocation for the fast payment
-      await tx.paymentAllocation.create({
-        data: {
-          paymentId: newPayment.id,
-          orderId: order.id,
-          amount: totalAmount,
-        },
-      })
+        // Create fast order
+        const order = await tx.order.create({
+          data: {
+            venueId,
+            orderNumber,
+            type: 'TAKEOUT', // Fast payments are typically quick sales (para llevar)
+            source: 'TPV',
+            // ⭐ Terminal that created this order (resolved from deviceSerialNumber)
+            terminalId,
+            status: 'COMPLETED', // Fast payments are instantly paid, so order is completed
+            completedAt: new Date(),
+            // 🔴 La orden cae en el MISMO turno que su cobro (auditoría Codex, 2026-09-02).
+            //
+            // El `Payment` de abajo ya llevaba `shiftId`; la orden no. Y desde la fase 1 del
+            // turno del negocio, `getActiveShifts` cuenta las órdenes de un turno agrupando por
+            // `Order.shiftId`: un turno con diez ventas rápidas enseñaba el dinero correcto y
+            // «0 órdenes», y el cierre tampoco veía sus productos.
+            //
+            // Sólo el ganador del CAS transaccional se estampa. Sin turno (o si el
+            // cierre ganó) la venta sigue, pero queda pendiente explícita abajo.
+            shiftId: shiftClaim?.shiftId ?? null,
+            subtotal: totalAmount, // Base amount (without tip)
+            taxAmount: 0, // No tax for fast payments
+            total: totalAmount + tipAmount, // ✅ FIX: Total = subtotal + tax + tip
+            // ✅ FIX: Include tip and paid amounts for fast orders
+            tipAmount, // Tip amount from this payment
+            paidAmount: totalAmount + tipAmount, // Total paid (base + tip)
+            remainingBalance: 0, // Fast payments are always fully paid
+            paymentStatus: 'PAID',
+            splitType: paymentData.splitType as any, // Set splitType for fast orders
+            createdById: validatedStaffId, // Track which staff created the fast order
+            servedById: validatedStaffId, // ⭐ KIOSK MODE FIX: Also set server to payment processor
+            // 🔴 El cliente, en la MISMA transacción que el dinero: `Order.customerId`
+            // (vínculo legacy) + `OrderCustomer` primario (vínculo moderno) — exactamente
+            // lo que hace `POST /orders`. Sin cliente el objeto es vacío y la orden nace
+            // idéntica a como nacía antes de este cambio.
+            ...(customerOrderData ?? {}),
+          },
+        })
 
-      // 📸 Create SaleVerification if verification photos or barcodes were provided
-      // This links the pre-uploaded Firebase photos to the payment record
-      if (
-        validatedStaffId &&
-        ((paymentData.verificationPhotos && paymentData.verificationPhotos.length > 0) ||
-          (paymentData.verificationBarcodes && paymentData.verificationBarcodes.length > 0))
-      ) {
-        await tx.saleVerification.create({
+        // 🔑 Semántica de dinero SERVER-OWNED: si el POS referenció un tipo de pago del
+        // catálogo, el método fiscal, la comisión, el cajón y la forma SAT salen de la
+        // revisión CONGELADA — nunca de lo que mandó el cliente. Editar el catálogo
+        // mañana no reinterpreta este cobro.
+        const resolvedTender =
+          paymentData.tenderTypeId != null && paymentData.tenderRevision != null
+            ? await resolveTenderForCharge(
+                venueId,
+                paymentData.tenderTypeId,
+                paymentData.tenderRevision,
+                tx,
+                paymentData.isOfflineReplay ? 'replay' : 'online',
+              )
+            : null
+        tenderState.resolved = resolvedTender
+
+        // Propina prohibida en un tipo configurado sin propina (Uber Eats ya la cobró en
+        // su app). El POS no debería ofrecerla, pero la frontera no confía en la UI.
+        if (resolvedTender && !resolvedTender.tenderCaptureTip && tipAmount > 0) {
+          throw new BadRequestError(`El tipo de pago "${resolvedTender.tenderLabel}" no acepta propina.`)
+        }
+
+        const effectiveMethod = (resolvedTender?.method ?? paymentData.method) as PaymentMethod
+
+        // Create the fast payment record
+        const newPayment = await tx.payment.create({
+          data: {
+            venueId,
+            orderId: order.id, // Fast payment - no order association
+            amount: totalAmount,
+            tipAmount,
+            method: effectiveMethod,
+            // El detalle del cobro declarado a mano sólo tiene sentido si el dinero NO
+            // pasó por Avoqado; en efectivo se guarda null para no ensuciar el arqueo.
+            // Con un tipo del catálogo el nombre vive en `tenderLabel`, no aquí: mezclarlos
+            // haría que el desglose del corte contara el mismo cobro dos veces.
+            externalSource: resolvedTender
+              ? null
+              : paymentData.method === 'CASH'
+                ? null
+                : paymentData.externalSource?.trim()?.slice(0, 50) || null,
+            // Snapshots inmutables del tender, todos resueltos por el server.
+            tenderTypeId: resolvedTender?.tenderTypeId,
+            tenderRevision: resolvedTender?.tenderRevision,
+            tenderLabel: resolvedTender?.tenderLabel,
+            tenderCountsAsCash: resolvedTender?.tenderCountsAsCash,
+            tenderCaptureTip: resolvedTender?.tenderCaptureTip,
+            tenderSatFormaPago: resolvedTender?.tenderSatFormaPago,
+            tenderCommissionPercent: resolvedTender?.tenderCommissionPercent,
+            tenderCommissionAmount: resolvedTender
+              ? computeTenderCommission(resolvedTender.tenderCommissionPercent, new Prisma.Decimal(totalAmount))
+              : undefined,
+            fundsFlow: resolvedTender?.fundsFlow,
+            status: paymentStatusSnapshot as any, // Direct enum mapping since frontend sends correct values
+            splitType: 'FULLPAYMENT' as SplitType, // Fast payments are always full payments
+            source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
+            processor: 'TBD',
+            type: 'FAST',
+            // Snapshot de MERCHANT_ROUTING_RULES (por qué la TPV mostró/eligió este merchant)
+            routingEvaluation: paymentData.routingEvaluation ?? undefined,
+            processorId: paymentData.mentaOperationId,
+            processorData: {
+              cardBrand: paymentData.cardBrand,
+              last4: paymentData.last4,
+              typeOfCard: paymentData.typeOfCard,
+              bank: paymentData.bank,
+              currency: paymentData.currency,
+              authorizationNumber: paymentData.authorizationNumber,
+              referenceNumber: paymentData.referenceNumber,
+              isInternational: paymentData.isInternational,
+              ...(paymentData.issuerCountryCode && paymentData.issuerCountrySource
+                ? {
+                    issuerCountryEvidence: {
+                      code: paymentData.issuerCountryCode,
+                      source: paymentData.issuerCountrySource,
+                    },
+                  }
+                : {}),
+              // ⭐ Blumon serial for reconciliation (matches dashboard de Blumon)
+              blumonSerialNumber: paymentData.blumonSerialNumber || null,
+              // 💸 Blumon Operation Number (2025-12-16) - For CancelIcc refunds without webhook
+              blumonOperationNumber: paymentData.blumonOperationNumber || null,
+              // Procedencia AUTENTICADA del cobro (serial del token). Aditivo: conserva la identidad del
+              // aparato aunque `terminalId` no resuelva, para la atribución y la recuperación del
+              // arbitraje POS→terminal.
+              deviceSerialNumber: paymentData.deviceSerialNumber || null,
+            },
+            // New enhanced fields in the Payment table
+            authorizationNumber: paymentData.authorizationNumber,
+            referenceNumber: paymentData.referenceNumber,
+            // 🛡️ Idempotency key (2026-04-08) - Stripe/Square/Toast pattern
+            idempotencyKey: paymentData.idempotencyKey,
+            maskedPan: paymentData.maskedPan,
+            cardBrand: paymentData.cardBrand ? (paymentData.cardBrand.toUpperCase().replace(' ', '_') as any) : null,
+            entryMode: paymentData.entryMode ? (paymentData.entryMode.toUpperCase() as any) : null,
+            internationalityStatus: internationalityShadow?.status,
+            internationalitySource: internationalityShadow?.source,
+            issuerCountryCode: internationalityShadow?.issuerCountryCode,
+            internationalityClassificationVersion: internationalityShadow?.classificationVersion,
+            internationalityClassifiedAt,
+            // ⭐ Provider-agnostic merchant account tracking
+            merchantAccountId,
+            // ⭐ Terminal that processed this payment (resolved from deviceSerialNumber)
+            terminalId,
+            processedById: validatedStaffId, // ✅ CORRECTED: Use validated staff ID
+            shiftId: shiftClaim?.shiftId ?? null,
+            feePercentage: 0, // TODO: Calculate based on payment processor
+            feeAmount: 0, // TODO: Calculate based on amount and percentage
+            netAmount: totalAmount + tipAmount, // For now, net amount = total
+            posRawData: {
+              splitType: 'FULLPAYMENT',
+              staffId: validatedStaffId, // identidad efectiva validada (POS en relay; TPV en cobro directo)
+              source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
+              paymentType: 'FAST',
+              ...(effectiveReviewRating && { reviewRating: effectiveReviewRating }),
+            },
+          },
+          include: {
+            processedBy: true,
+          },
+        })
+
+        if (shiftClaim) {
+          await recordPendingPaymentShiftReconciliation(tx, {
+            reconciliationEnabled,
+            claim: shiftClaim,
+            venueId,
+            paymentId: newPayment.id,
+            orderId: order.id,
+            staffId: validatedStaffId ?? null,
+            channel: 'recordFastPayment',
+            amountPesos: shiftAmount,
+            tipPesos: shiftTip,
+          })
+        }
+
+        // Create VenueTransaction for financial tracking and settlement
+        //
+        // 🔴 `PENDING` significa "Avoqado todavía le debe este dinero al negocio". Estaba
+        // FIJO, así que el efectivo del cajón —y ahora un cobro de Uber Eats, que Avoqado
+        // jamás va a depositar— entraban a la cola de liquidación como saldo por depositar.
+        // El lado de lectura (`availableBalance`) ya filtra con este mismo predicado, o sea
+        // que el número que ve el dueño estaba bien; la FILA era la que mentía, y cualquier
+        // consumidor nuevo la leería mal. "¿Esto lo deposita Avoqado?" tiene UNA autoridad:
+        // `paymentIsAvoqadoSettled`. Sin tender reproduce el histórico para tarjeta
+        // (PENDING) y corrige el efectivo a SETTLED — que es justo lo que ya hace el cobro
+        // en efectivo del POS ("Cash is immediately settled").
+        await tx.venueTransaction.create({
           data: {
             venueId,
             paymentId: newPayment.id,
-            staffId: validatedStaffId,
-            photos: paymentData.verificationPhotos || [],
-            scannedProducts: paymentData.verificationBarcodes
-              ? paymentData.verificationBarcodes.map((barcode: string) => ({
-                  barcode,
-                  format: 'UNKNOWN',
-                  inventoryDeducted: false,
-                }))
-              : [],
-            status: 'PENDING', // Will be processed for inventory deduction later
+            type: 'PAYMENT',
+            grossAmount: totalAmount + tipAmount,
+            feeAmount: newPayment.feeAmount,
+            netAmount: newPayment.netAmount,
+            // Lo que no pasa por Avoqado no tiene nada pendiente: nace liquidado.
+            status: paymentIsAvoqadoSettled(newPayment) ? 'PENDING' : 'SETTLED',
           },
         })
-        logger.info('📸 SaleVerification created for fast payment', {
-          paymentId: newPayment.id,
-          photosCount: paymentData.verificationPhotos?.length || 0,
-          barcodesCount: paymentData.verificationBarcodes?.length || 0,
-        })
-      }
 
-      // Close the POS→TPV arbitration row (frees the terminal slot) atomically
-      // with the Payment — the robust recovery path (survives socket loss/restart).
-      if (paymentData.terminalPaymentRequestId) {
-        await terminalPaymentService.closeRowFromPaymentTx(tx, paymentData.terminalPaymentRequestId, newPayment.id, venueId, {
-          amountCents: paymentData.amount,
-          tipCents: paymentData.tip,
+        // Create a general allocation for the fast payment
+        await tx.paymentAllocation.create({
+          data: {
+            paymentId: newPayment.id,
+            orderId: order.id,
+            amount: totalAmount,
+          },
         })
-      }
 
-      return { payment: newPayment, fastOrder: order }
-    })
+        // 📸 Create SaleVerification if verification photos or barcodes were provided
+        // This links the pre-uploaded Firebase photos to the payment record
+        if (
+          validatedStaffId &&
+          ((paymentData.verificationPhotos && paymentData.verificationPhotos.length > 0) ||
+            (paymentData.verificationBarcodes && paymentData.verificationBarcodes.length > 0))
+        ) {
+          await tx.saleVerification.create({
+            data: {
+              venueId,
+              paymentId: newPayment.id,
+              staffId: validatedStaffId,
+              photos: paymentData.verificationPhotos || [],
+              scannedProducts: paymentData.verificationBarcodes
+                ? paymentData.verificationBarcodes.map((barcode: string) => ({
+                    barcode,
+                    format: 'UNKNOWN',
+                    inventoryDeducted: false,
+                  }))
+                : [],
+              status: 'PENDING', // Will be processed for inventory deduction later
+            },
+          })
+          logger.info('📸 SaleVerification created for fast payment', {
+            paymentId: newPayment.id,
+            photosCount: paymentData.verificationPhotos?.length || 0,
+            barcodesCount: paymentData.verificationBarcodes?.length || 0,
+          })
+        }
+
+        // Close the POS→TPV arbitration row (frees the terminal slot) atomically
+        // with the Payment — the robust recovery path (survives socket loss/restart).
+        if (paymentData.terminalPaymentRequestId) {
+          await terminalPaymentService.closeRowFromPaymentTx(
+            tx,
+            paymentData.terminalPaymentRequestId,
+            newPayment.id,
+            venueId,
+            { amountCents: paymentData.amount, tipCents: paymentData.tip },
+            'REST',
+            // Serial AUTENTICADO (inyectado por el controlador desde el token): es la identidad del
+            // aparato que cobró aunque la FK `terminalId` no haya resuelto en este venue.
+            paymentData.deviceSerialNumber ?? null,
+          )
+        }
+
+        if (newPayment.status === 'COMPLETED') {
+          await tx.order.update({ where: { id: order.id }, data: { loyaltyEligibleAt: new Date(), loyaltyStaffId: validatedStaffId } })
+          await enqueueCommittedPaymentEffects(tx, newPayment, effectiveReviewRating, validatedStaffId, true)
+        }
+        return { payment: newPayment, fastOrder: order }
+      }),
+    )
     payment = result.payment
     fastOrder = result.fastOrder
   } catch (error) {
@@ -3934,24 +4099,26 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   // 🔴 EL CAJÓN SUMA LA VENTA EN EFECTIVO. Esta función NO es sólo de la TPV: el POS
   // móvil también cobra la venta rápida por aquí (`POST /mobile/venues/:venueId/fast`),
   // así que sin este enganche la venta sin cuenta se quedaba fuera del arqueo.
-  await postCashSaleToDrawer({
-    venueId,
-    paymentId: payment.id,
-    method: payment.method,
-    fundsFlow: payment.fundsFlow,
-    tenderTypeId: payment.tenderTypeId,
-    tenderCountsAsCash: payment.tenderCountsAsCash,
-    status: payment.status,
-    type: payment.type,
-    amount: payment.amount,
-    tipAmount: payment.tipAmount,
-    staffId: payment.processedById,
-    orderId: fastOrder.id,
-  })
+  await timing.time('drawer', () =>
+    postCashSaleToDrawer({
+      venueId,
+      paymentId: payment.id,
+      method: payment.method,
+      fundsFlow: payment.fundsFlow,
+      tenderTypeId: payment.tenderTypeId,
+      tenderCountsAsCash: payment.tenderCountsAsCash,
+      status: payment.status,
+      type: payment.type,
+      amount: payment.amount,
+      tipAmount: payment.tipAmount,
+      staffId: payment.processedById,
+      orderId: fastOrder.id,
+    }),
+  )
 
   // Create TransactionCost for financial tracking (only for Avoqado-processed non-cash payments)
   try {
-    await t.time('createTransactionCost', () => createTransactionCost(payment.id))
+    await timing.time('transaction_cost', () => createTransactionCost(payment.id))
   } catch (transactionCostError) {
     logger.error('Failed to create TransactionCost for fast payment', {
       paymentId: payment.id,
@@ -3961,7 +4128,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   }
 
   // Create Review record if reviewRating is provided
-  if (effectiveReviewRating) {
+  if (payment.status !== 'COMPLETED' && effectiveReviewRating) {
     try {
       const rating = mapTpvRatingToNumeric(effectiveReviewRating)
       if (rating !== null) {
@@ -3991,7 +4158,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   // Generate digital receipt for fast TPV payments (AVOQADO origin)
   let digitalReceipt = null
   try {
-    digitalReceipt = await t.time('generateDigitalReceipt', () => generateDigitalReceipt(payment.id))
+    digitalReceipt = await timing.time('canonical_receipt', () => generateDigitalReceipt(payment.id))
     logger.info('Digital receipt generated for fast payment', {
       paymentId: payment.id,
       receiptId: digitalReceipt.id,
@@ -4000,14 +4167,6 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   } catch (error) {
     logger.error('Failed to generate digital receipt for fast payment', { paymentId: payment.id, error })
     // Don't fail the payment if receipt generation fails
-  }
-
-  // REFERRAL HOOK: trigger referral qualification if this fast order has a pending referral
-  try {
-    const { onOrderPaid } = await import('@/services/referrals/referralQualification.service')
-    await t.time('referralOnOrderPaid', () => onOrderPaid({ orderId: fastOrder.id, venueId: fastOrder.venueId }))
-  } catch (err) {
-    console.error('[referral hook] onOrderPaid failed for order', fastOrder.id, err)
   }
 
   // 🔌 REAL-TIME: Emit socket events based on payment status (fast payment)
@@ -4040,14 +4199,6 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
 
       // Create commission calculation for this fast payment (non-blocking)
       if (payment.type !== 'TEST') {
-        createCommissionForPayment(payment.id).catch(err => {
-          logger.error('Failed to create commission for fast payment', {
-            paymentId: payment.id,
-            orderId: fastOrder.id,
-            error: err instanceof Error ? err.message : String(err),
-          })
-        })
-
         // Real-time auto-reorder (see recordOrderPayment for rationale). Non-blocking + self-gated.
         runAutoReorderForVenue(venueId).catch(err => {
           logger.error('Failed to run real-time auto-reorder after fast payment', {
@@ -4145,10 +4296,9 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   )
 
   // Add digital receipt info to payment response
-  const autofacturaAvailable = digitalReceipt
-    ? await t.time('resolveAutofacturaAvailable', () => resolveAutofacturaAvailable(fastOrder?.id))
-    : false
+  const autofacturaAvailable = digitalReceipt ? await timing.time('autofactura', () => resolveAutofacturaAvailable(fastOrder?.id)) : false
   t.end({ paymentId: payment.id })
+  timing.end(payment.id)
 
   return {
     ...payment,

@@ -24,6 +24,7 @@ import { registerReviewTools } from './tools/reviews'
 import { registerCustomerTools } from './tools/customers'
 import { registerCustomerGroupTools } from './tools/customerGroups'
 import { registerCampaignTools } from './tools/campaigns'
+import { registerReceiptLayoutTools } from './tools/receiptLayout'
 import { registerCreditPackTools } from './tools/creditPacks'
 import { registerShiftTools } from './tools/shifts'
 import { registerDiscountTools } from './tools/discounts'
@@ -31,6 +32,7 @@ import { registerUpsellTools } from './tools/upsell'
 import { registerPromotionTools } from './tools/promotions'
 import { registerServiceChargeTools } from './tools/service-charges'
 import { registerPaymentTools } from './tools/payments'
+import { registerPaymentEffectTools } from './tools/paymentEffects'
 import { registerOverviewTools } from './tools/overview'
 import { registerTableTools } from './tools/tables'
 import { registerFeatureTools } from './tools/features'
@@ -100,6 +102,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerCustomerTools(server, scope)
   registerCustomerGroupTools(server, scope)
   registerCampaignTools(server, scope)
+  registerReceiptLayoutTools(server, scope)
   registerCreditPackTools(server, scope)
   registerShiftTools(server, scope)
   registerDiscountTools(server, scope)
@@ -107,6 +110,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerPromotionTools(server, scope)
   registerServiceChargeTools(server, scope)
   registerPaymentTools(server, scope)
+  registerPaymentEffectTools(server, scope)
   registerOverviewTools(server, scope)
   registerTableTools(server, scope)
   registerFeatureTools(server, scope)

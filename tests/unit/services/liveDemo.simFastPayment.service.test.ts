@@ -82,7 +82,26 @@ function mockHappyPathPrisma() {
 
   // recordFastPayment idempotency fast-paths → no existing payment
   prismaMock.payment.findUnique.mockResolvedValue(null)
-  prismaMock.payment.findFirst.mockResolvedValue(null)
+  // «No hay cobro previo» sigue siendo la respuesta… salvo a la consulta con que el outbox relee
+  // SU pago fuente (id + venueId + status COMPLETED + select de sólo orderId). Devolverle null ahí
+  // dispara PAYMENT_EFFECT_SOURCE_MISMATCH y tumba la transacción del cobro entera.
+  // El rescate de la comisión (bajo SAVEPOINT) relee el pago: se devuelve el MISMO que crea este
+  // fixture, para que venue y orden coincidan solos.
+  // Se devuelve un objeto plano: llamar a `payment.create` desde aquí inflaría su contador de
+  // llamadas y rompería las aserciones que cuentan cuántos cobros se crearon.
+  prismaMock.payment.findUniqueOrThrow.mockImplementation(async () => ({
+    id: 'pay-sim-1',
+    venueId: VENUE_ID,
+    orderId: 'order-sim-1',
+  }))
+  prismaMock.payment.findFirst.mockImplementation(async (a: any) =>
+    a?.where?.status === 'COMPLETED' &&
+    typeof a?.where?.id === 'string' &&
+    Object.keys(a?.select ?? {}).length === 1 &&
+    a?.select?.orderId === true
+      ? { orderId: a.where.orderId ?? null }
+      : null,
+  )
 
   // validateStaffVenue — the demo venue's seeded OWNER staff
   prismaMock.staffVenue.findFirst.mockResolvedValue({
@@ -107,6 +126,9 @@ function mockHappyPathPrisma() {
     Promise.resolve({
       id: 'pay-sim-1',
       venueId: VENUE_ID,
+      // Un Payment REAL trae su orden: el outbox la usa para comprobar que el efecto que encola
+      // pertenece a la MISMA cuenta que el cobro. Sin ella lanza y tumba la transacción.
+      orderId: data.orderId ?? data.order?.connect?.id ?? 'order-sim-1',
       amount: data.amount,
       tipAmount: data.tipAmount,
       method: data.method,

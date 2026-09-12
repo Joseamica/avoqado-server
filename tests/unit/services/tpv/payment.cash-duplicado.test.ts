@@ -1,3 +1,13 @@
+// Reconoce ÚNICAMENTE la consulta con que el outbox relee su pago fuente
+// (`paymentEffects.service.ts:22-26`): id + venueId + status COMPLETED, y un select que pide
+// SOLO orderId. Ser preciso importa: un reflejo laxo intercepta búsquedas legítimas del
+// servicio y le cambia el comportamiento, que sería peor que el fallo que viene a evitar.
+const esConsultaDelOutbox = (a: any) =>
+  a?.where?.status === 'COMPLETED' &&
+  typeof a?.where?.id === 'string' &&
+  'venueId' in (a?.where ?? {}) &&
+  Object.keys(a?.select ?? {}).length === 1 &&
+  a?.select?.orderId === true
 /**
  * 🔴 DINERO — El toque repetido en «Efectivo» sobre una orden que YA quedó cubierta.
  *
@@ -50,8 +60,44 @@ import { Decimal } from '@prisma/client/runtime/library'
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
-    order: { findUnique: jest.fn(), update: jest.fn() },
-    payment: { create: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn(), findMany: jest.fn() },
+    order: {
+      findUnique: jest.fn(),
+      update: jest.fn(),
+      // `settleStandalonePaymentInTx` relee la orden con su snapshot de artículos
+      // (`payment.tpv.service.ts:522`). Una orden MÍNIMA y coherente: estos tests miden otra
+      // cosa, pero la ruta la atraviesa y sin datos muere antes de su aserción.
+      // Se DELEGA en el `findUnique` que cada test ya monta: la orden que relee la liquidación
+      // es la MISMA que el resto del flujo, no una inventada aquí que no cuadre con sus totales.
+      findFirstOrThrow: jest.fn().mockImplementation(async (a: any) => (prisma as any).order.findUnique({ where: a?.where })),
+      findUniqueOrThrow: jest.fn().mockImplementation(async (a: any) => (prisma as any).order.findUnique({ where: a?.where })),
+    },
+    payment: {
+      create: jest.fn(),
+      // El outbox relee su pago fuente para comprobar que pertenece a la MISMA orden antes de
+      // encolar; devolverle undefined dispara PAYMENT_EFFECT_SOURCE_MISMATCH y tumba el cobro.
+      // Se REFLEJA esa consulta concreta; cualquier otra sigue devolviendo undefined como antes.
+      findFirst: jest.fn().mockImplementation(async (a: any) =>
+        esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : undefined,
+      ),
+      findUnique: jest.fn(),
+      findMany: jest.fn(),
+      // El camino post-cobro agrega los pagos de la orden y relee el Payment recién creado
+      // (conciliación y outbox de efectos). Sin estas entradas el TypeError sustituye a la
+      // aserción real — la fragilidad que este patrón de `tx` a mano ya documenta.
+      aggregate: jest.fn().mockResolvedValue({ _sum: { amount: null, tipAmount: null } }),
+      // El rescate de la comisión (bajo SAVEPOINT) relee el pago: se devuelve EL MISMO que
+      // acaba de crear el fixture, para que venue y orden coincidan solos.
+      // 🔴 Se LEE el último resultado de `create`, no se vuelve a llamar: invocarlo inflaría su
+      // contador de llamadas y rompería las aserciones que cuentan cuántos cobros se crearon.
+      findUniqueOrThrow: jest.fn().mockImplementation(async () => {
+        const crear = (prisma as any).payment.create as jest.Mock
+        const ultimo = crear.mock.results[crear.mock.results.length - 1]
+        return ultimo ? await ultimo.value : null
+      }),
+      count: jest.fn().mockResolvedValue(0),
+      update: jest.fn(),
+      updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+    },
     venueTransaction: { create: jest.fn() },
     shift: { findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
     staffVenue: { findFirst: jest.fn() },
@@ -195,8 +241,12 @@ beforeEach(() => {
   ;(prisma.shift.findFirst as jest.Mock).mockResolvedValue({ id: 'shift-1', status: 'OPEN' })
   ;(prisma.shift.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
   ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: VENUE_ID })
-  ;(prisma.payment.create as jest.Mock).mockResolvedValue({ id: 'payment-1', status: 'COMPLETED', feeAmount: 0, netAmount: 100 })
-  ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
+  ;(prisma.payment.create as jest.Mock).mockResolvedValue({ venueId: VENUE_ID, orderId: ORDER_ID, id: 'payment-1', status: 'COMPLETED', feeAmount: 0, netAmount: 100 }) // un Payment REAL siempre trae venue y orden; sin ellos el outbox no reconoce su fuente
+  // «Sin cobro previo» para todo… salvo la consulta con que el outbox relee SU pago fuente:
+  // devolverle null ahí dispara PAYMENT_EFFECT_SOURCE_MISMATCH y tumba la transacción del cobro.
+  ;(prisma.payment.findFirst as jest.Mock).mockImplementation(async (a: any) =>
+    esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : null,
+  )
   ;(prisma.venueTransaction.create as jest.Mock).mockResolvedValue({})
   ;(prisma.paymentAllocation.create as jest.Mock).mockResolvedValue({})
   ;(prisma.serializedItem.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
@@ -210,10 +260,39 @@ beforeEach(() => {
   ;(productInventoryService.deductInventoryForProduct as jest.Mock).mockResolvedValue({ inventoryMethod: 'QUANTITY' })
   ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback: any) => {
     const tx = {
-      payment: { count: jest.fn().mockResolvedValue(0), create: prisma.payment.create, findMany: prisma.payment.findMany },
+      // Outbox de efectos del cobro (Task 5): `recordOrderPayment` encola RECEIPT/REVIEW/
+      // REFERRAL/COMMISSION DENTRO de esta transacción. Sin la tabla, el TypeError sustituye
+      // a la aserción real del test.
+      paymentEffect: { createMany: jest.fn().mockResolvedValue({ count: 1 }), findMany: jest.fn().mockResolvedValue([]), updateMany: jest.fn().mockResolvedValue({ count: 1 }), update: jest.fn(), findFirst: jest.fn().mockResolvedValue(null) },
+      // La comisión se encola bajo un SAVEPOINT para que su fallo no tumbe el cobro.
+      $executeRawUnsafe: jest.fn().mockResolvedValue(0),
+      commissionCalculation: { findMany: jest.fn().mockResolvedValue([]), create: jest.fn() },
+      payment: {
+        ...(prisma as any).payment,
+        // El outbox de efectos (Task 5) comprueba que el Payment fuente pertenece a la MISMA
+        // orden antes de encolar (`paymentEffects.service.ts:22-27`) y, si no cuadra, LANZA y
+        // tumba la transacción del cobro entera. El mock REFLEJA el `where` en vez de inventar
+        // una orden distinta; cualquier otra consulta sigue su camino normal.
+        // 🔴 Reflejo ESTRICTO (auditoría Codex 2026-09-09): el amplio —sólo `id` + COMPLETED—
+        // también capturaba la consulta de `closeRowFromPaymentTx` (`terminal-payment.service.ts:967`),
+        // que pide importes, `source` y la terminal, y le devolvía sólo `{orderId}`. Un mock que
+        // intercepta una consulta legítima le cambia el comportamiento al servicio: peor que el
+        // fallo que evita. `esConsultaDelOutbox` exige un `select` de ÚNICAMENTE `orderId`.
+        findFirst: jest.fn().mockImplementation(async (a: any) =>
+          esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : (prisma as any).payment.findFirst(a),
+        ),
+        // El rescate de la comisión (bajo SAVEPOINT) relee el pago: se devuelve EL MISMO que
+        // acaba de crear el fixture, no uno inventado — así venue y orden coinciden solos.
+        // 🔴 Se LEE el último resultado de `create`, no se vuelve a llamar: invocarlo inflaría su
+      // contador de llamadas y rompería las aserciones que cuentan cuántos cobros se crearon.
+      findUniqueOrThrow: jest.fn().mockImplementation(async () => {
+        const crear = (prisma as any).payment.create as jest.Mock
+        const ultimo = crear.mock.results[crear.mock.results.length - 1]
+        return ultimo ? await ultimo.value : null
+      }), count: jest.fn().mockResolvedValue(0), create: prisma.payment.create, findMany: prisma.payment.findMany },
       paymentAllocation: { create: prisma.paymentAllocation.create },
       venueTransaction: { create: prisma.venueTransaction.create },
-      order: { update: prisma.order.update, findUnique: txOrderFindUniqueMock },
+      order: { ...(prisma as any).order, update: prisma.order.update, findUnique: txOrderFindUniqueMock },
       shift: { findFirst: prisma.shift.findFirst, updateMany: prisma.shift.updateMany, update: prisma.shift.update },
       activityLog: { create: prisma.activityLog.create },
       areaTicketCheckoutSession: {
@@ -260,7 +339,11 @@ describe('recordOrderPayment — toque repetido en Efectivo sobre una orden ya s
   it('devuelve el cobro existente y NO crea otro (orden de $0 con un cobro previo)', async () => {
     const order = makeOrder({ total: new Decimal(0), subtotal: new Decimal(0) })
     ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
-    ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null) // no hay match por referencia
+    // «Sin cobro previo» para todo… salvo la consulta con que el outbox relee SU pago fuente:
+  // devolverle null ahí dispara PAYMENT_EFFECT_SOURCE_MISMATCH y tumba la transacción del cobro.
+  ;(prisma.payment.findFirst as jest.Mock).mockImplementation(async (a: any) =>
+    esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : null,
+  ) // no hay match por referencia
     ;(prisma.payment.findMany as jest.Mock).mockResolvedValue([
       {
         id: 'pay-prev',
@@ -286,9 +369,15 @@ describe('recordOrderPayment — toque repetido en Efectivo sobre una orden ya s
     ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
     ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
     ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
-    ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
+    // «Sin cobro previo» para todo… salvo la consulta con que el outbox relee SU pago fuente:
+  // devolverle null ahí dispara PAYMENT_EFFECT_SOURCE_MISMATCH y tumba la transacción del cobro.
+  ;(prisma.payment.findFirst as jest.Mock).mockImplementation(async (a: any) =>
+    esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : null,
+  )
     ;(prisma.payment.findMany as jest.Mock).mockResolvedValue([])
     ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+      venueId: VENUE_ID,
+      orderId: ORDER_ID,
       id: 'pay-new',
       status: 'COMPLETED',
       amount: new Decimal(0),
@@ -309,7 +398,11 @@ describe('recordOrderPayment — toque repetido en Efectivo sobre una orden ya s
   it('la lectura de los cobros previos pide `type` y `method` (sin `type` un reembolso resta del saldo)', async () => {
     const order = makeOrder({ total: new Decimal(0), subtotal: new Decimal(0) })
     ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
-    ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
+    // «Sin cobro previo» para todo… salvo la consulta con que el outbox relee SU pago fuente:
+  // devolverle null ahí dispara PAYMENT_EFFECT_SOURCE_MISMATCH y tumba la transacción del cobro.
+  ;(prisma.payment.findFirst as jest.Mock).mockImplementation(async (a: any) =>
+    esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : null,
+  )
     ;(prisma.payment.findMany as jest.Mock).mockResolvedValue([
       {
         id: 'pay-prev',
@@ -349,7 +442,11 @@ describe('recordOrderPayment — toque repetido en Efectivo sobre una orden ya s
     ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
     ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
     ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
-    ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
+    // «Sin cobro previo» para todo… salvo la consulta con que el outbox relee SU pago fuente:
+  // devolverle null ahí dispara PAYMENT_EFFECT_SOURCE_MISMATCH y tumba la transacción del cobro.
+  ;(prisma.payment.findFirst as jest.Mock).mockImplementation(async (a: any) =>
+    esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : null,
+  )
     ;(prisma.payment.findMany as jest.Mock).mockResolvedValue([
       {
         id: 'pay-prev',
@@ -362,6 +459,8 @@ describe('recordOrderPayment — toque repetido en Efectivo sobre una orden ya s
       },
     ])
     ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+      venueId: VENUE_ID,
+      orderId: ORDER_ID,
       id: 'pay-tarjeta',
       status: 'COMPLETED',
       amount: new Decimal(100),
@@ -386,7 +485,11 @@ describe('recordOrderPayment — toque repetido en Efectivo sobre una orden ya s
     ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
     ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
     ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
-    ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
+    // «Sin cobro previo» para todo… salvo la consulta con que el outbox relee SU pago fuente:
+  // devolverle null ahí dispara PAYMENT_EFFECT_SOURCE_MISMATCH y tumba la transacción del cobro.
+  ;(prisma.payment.findFirst as jest.Mock).mockImplementation(async (a: any) =>
+    esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : null,
+  )
     ;(prisma.payment.findMany as jest.Mock).mockResolvedValue([
       {
         id: 'pay-prev',
@@ -405,6 +508,8 @@ describe('recordOrderPayment — toque repetido en Efectivo sobre una orden ya s
       items: [],
     })
     ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+      venueId: VENUE_ID,
+      orderId: ORDER_ID,
       id: 'pay-nuevo',
       status: 'COMPLETED',
       amount: new Decimal(100),
@@ -435,7 +540,11 @@ describe('recordOrderPayment — toque repetido en Efectivo sobre una orden ya s
     ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
     ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
     ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
-    ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
+    // «Sin cobro previo» para todo… salvo la consulta con que el outbox relee SU pago fuente:
+  // devolverle null ahí dispara PAYMENT_EFFECT_SOURCE_MISMATCH y tumba la transacción del cobro.
+  ;(prisma.payment.findFirst as jest.Mock).mockImplementation(async (a: any) =>
+    esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : null,
+  )
     ;(prisma.payment.findMany as jest.Mock).mockResolvedValue([
       {
         id: 'pay-prev',
@@ -448,6 +557,8 @@ describe('recordOrderPayment — toque repetido en Efectivo sobre una orden ya s
       },
     ])
     ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+      venueId: VENUE_ID,
+      orderId: ORDER_ID,
       id: 'pay-otra',
       status: 'COMPLETED',
       amount: new Decimal(0),
@@ -501,11 +612,19 @@ describe('recordOrderPayment — toque repetido en Efectivo sobre una orden ya s
     ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
     ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
     ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
-    ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
+    // «Sin cobro previo» para todo… salvo la consulta con que el outbox relee SU pago fuente:
+  // devolverle null ahí dispara PAYMENT_EFFECT_SOURCE_MISMATCH y tumba la transacción del cobro.
+  ;(prisma.payment.findFirst as jest.Mock).mockImplementation(async (a: any) =>
+    esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : null,
+  )
     // Ningún cobro previo con ESTA llave: el atajo exacto de arriba no dispara.
     ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(null)
     ;(prisma.payment.findMany as jest.Mock).mockResolvedValue([previoEnEfectivo('llave-previa')])
     ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+      // Un Payment REAL trae venue y orden: el outbox los usa para comprobar que el efecto
+      // pertenece a la MISMA cuenta que el cobro.
+      venueId: VENUE_ID,
+      orderId: ORDER_ID,
       id: 'pay-con-llave',
       status: 'COMPLETED',
       amount: new Decimal(0),
@@ -531,7 +650,11 @@ describe('recordOrderPayment — toque repetido en Efectivo sobre una orden ya s
   it('con llave en el cuerpo pero un previo SIN llave de la misma firma: es la ráfaga mixta, se devuelve el existente', async () => {
     const order = makeOrder({ total: new Decimal(0), subtotal: new Decimal(0) })
     ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
-    ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
+    // «Sin cobro previo» para todo… salvo la consulta con que el outbox relee SU pago fuente:
+  // devolverle null ahí dispara PAYMENT_EFFECT_SOURCE_MISMATCH y tumba la transacción del cobro.
+  ;(prisma.payment.findFirst as jest.Mock).mockImplementation(async (a: any) =>
+    esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : null,
+  )
     ;(prisma.payment.findMany as jest.Mock).mockResolvedValue([previoEnEfectivo(null)])
     cobroSoloPorId({ id: 'pay-prev', status: 'COMPLETED', receipts: [] })
 
@@ -550,7 +673,11 @@ describe('recordOrderPayment — toque repetido en Efectivo sobre una orden ya s
   it('el efectivo CON llave paga la consulta de los previos: es el precio declarado de cerrar la ráfaga mixta', async () => {
     const order = makeOrder({ total: new Decimal(0), subtotal: new Decimal(0) })
     ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
-    ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
+    // «Sin cobro previo» para todo… salvo la consulta con que el outbox relee SU pago fuente:
+  // devolverle null ahí dispara PAYMENT_EFFECT_SOURCE_MISMATCH y tumba la transacción del cobro.
+  ;(prisma.payment.findFirst as jest.Mock).mockImplementation(async (a: any) =>
+    esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : null,
+  )
     ;(prisma.payment.findMany as jest.Mock).mockResolvedValue([previoEnEfectivo(null)])
     cobroSoloPorId({ id: 'pay-prev', status: 'COMPLETED', receipts: [] })
 
@@ -567,8 +694,14 @@ describe('recordOrderPayment — toque repetido en Efectivo sobre una orden ya s
     ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
     ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
     ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
-    ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
+    // «Sin cobro previo» para todo… salvo la consulta con que el outbox relee SU pago fuente:
+  // devolverle null ahí dispara PAYMENT_EFFECT_SOURCE_MISMATCH y tumba la transacción del cobro.
+  ;(prisma.payment.findFirst as jest.Mock).mockImplementation(async (a: any) =>
+    esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : null,
+  )
     ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+      venueId: VENUE_ID,
+      orderId: ORDER_ID,
       id: 'pay-tarjeta',
       status: 'COMPLETED',
       amount: new Decimal(100),
@@ -603,7 +736,11 @@ describe('recordOrderPayment — toque repetido en Efectivo sobre una orden ya s
 
   it('una orden VIVA en otro venue da 404 ORDER_NOT_IN_VENUE: la TPV no puede convertirla en venta rápida', async () => {
     ordenSegunElWhere({ id: ORDER_ID, venueId: 'venue-de-otra-sucursal' })
-    ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
+    // «Sin cobro previo» para todo… salvo la consulta con que el outbox relee SU pago fuente:
+  // devolverle null ahí dispara PAYMENT_EFFECT_SOURCE_MISMATCH y tumba la transacción del cobro.
+  ;(prisma.payment.findFirst as jest.Mock).mockImplementation(async (a: any) =>
+    esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : null,
+  )
     ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(null)
 
     await expect((paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, COBRO_CASH_CERO, 'user-1')).rejects.toMatchObject({
@@ -619,7 +756,11 @@ describe('recordOrderPayment — toque repetido en Efectivo sobre una orden ya s
     // terminal la vuelve a cobrar (2ª auditoría de Codex, P1 nuevo del lado TPV).
     // La orden no existe EN NINGUNA PARTE: ni acotada al venue ni globalmente.
     ordenSegunElWhere(null)
-    ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
+    // «Sin cobro previo» para todo… salvo la consulta con que el outbox relee SU pago fuente:
+  // devolverle null ahí dispara PAYMENT_EFFECT_SOURCE_MISMATCH y tumba la transacción del cobro.
+  ;(prisma.payment.findFirst as jest.Mock).mockImplementation(async (a: any) =>
+    esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : null,
+  )
     ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(null)
 
     await expect((paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, COBRO_CASH_CERO, 'user-1')).rejects.toMatchObject({
@@ -633,7 +774,11 @@ describe('recordOrderPayment — toque repetido en Efectivo sobre una orden ya s
     // servidor decide NO registrar tiene que poder explicarse desde la bitácora del negocio.
     const order = makeOrder({ total: new Decimal(0), subtotal: new Decimal(0) })
     ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
-    ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
+    // «Sin cobro previo» para todo… salvo la consulta con que el outbox relee SU pago fuente:
+  // devolverle null ahí dispara PAYMENT_EFFECT_SOURCE_MISMATCH y tumba la transacción del cobro.
+  ;(prisma.payment.findFirst as jest.Mock).mockImplementation(async (a: any) =>
+    esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : null,
+  )
     ;(prisma.payment.findMany as jest.Mock).mockResolvedValue([
       {
         id: 'pay-prev',
@@ -668,7 +813,11 @@ describe('recordOrderPayment — toque repetido en Efectivo sobre una orden ya s
   function sembrarRafagaQueDeduplica() {
     const order = makeOrder({ total: new Decimal(0), subtotal: new Decimal(0) })
     ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
-    ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue(null)
+    // «Sin cobro previo» para todo… salvo la consulta con que el outbox relee SU pago fuente:
+  // devolverle null ahí dispara PAYMENT_EFFECT_SOURCE_MISMATCH y tumba la transacción del cobro.
+  ;(prisma.payment.findFirst as jest.Mock).mockImplementation(async (a: any) =>
+    esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : null,
+  )
     ;(prisma.payment.findMany as jest.Mock).mockResolvedValue([
       {
         id: 'pay-prev',

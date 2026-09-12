@@ -74,6 +74,7 @@ import { shiftCloseWatchdogJob } from './jobs/shift-close-watchdog.job'
 import { cashDrawerAutoCloseJob } from './jobs/cash-drawer-auto-close.job'
 import { inventoryPostingSweeperJob } from './jobs/inventory-posting-sweeper.job'
 import { loyaltyReconciliationJob } from './jobs/loyalty-reconciliation.job'
+import { paymentEffectsJob } from './jobs/payment-effects.job'
 import { cashDrawerReconcilerJob } from './jobs/cash-drawer-reconciler.job'
 import { paidOrderReconcilerJob } from './jobs/paid-order-reconciler.job'
 import { cashClosePairReconcilerJob } from './jobs/cash-close-pair-reconciler.job'
@@ -82,6 +83,7 @@ import { initializeSocketServer, shutdownSocketServer } from './communication/so
 // Import Firebase Admin initialization
 import { initializeFirebase } from './config/firebase'
 import { primeVenueNames } from './observability/venueNames'
+import { primeVenuesEstrictos } from './services/terminal-payment-strictness'
 // Import Stripe feature sync startup
 import { ensureFeaturesAreSyncedToStripe } from './startup/stripe-sync.startup'
 // Import live demo cleanup service (DEMO MODE only)
@@ -158,6 +160,7 @@ const gracefulShutdown = async (signal: string) => {
       cashDrawerAutoCloseJob.stop()
       inventoryPostingSweeperJob.stop()
       loyaltyReconciliationJob.stop()
+      paymentEffectsJob.stop()
       cashDrawerReconcilerJob.stop()
       paidOrderReconcilerJob.stop()
       cashClosePairReconcilerJob.stop()
@@ -372,6 +375,18 @@ const startApplication = async (retries = 3) => {
       if (count > 0) logger.info(`✅ Venue names cached for logging (${count})`)
     })
 
+    // Qué venues ya se rigen por la lista blanca estricta del cobro remoto (§8 C.1 / I.6). No bloquea el arranque:
+    // hasta que carga rige el predicado HEREDADO, que es exactamente el de producción — el lado seguro aquí es el
+    // permisivo, porque caer al estricto bloquearía las filas históricas y dejaría terminales muertas.
+    primeVenuesEstrictos().then(count => {
+      if (count === null) {
+        // 🚨 token estable para la regla de Better Stack — NO renombrar.
+        logger.error('🚨 Cobro remoto: NO se pudo leer qué venues están en modo estricto al arrancar — rige el predicado heredado')
+        return
+      }
+      logger.info(`✅ Cobro remoto: ${count} venue(s) en modo estricto de desenlaces`)
+    })
+
     // Sync features to Stripe (non-blocking)
     // Ensures all features have Stripe product/price IDs for subscriptions
     ensureFeaturesAreSyncedToStripe().catch(err => {
@@ -480,6 +495,7 @@ const startApplication = async (retries = 3) => {
       // PENDING/APPLYING — sin este job el posting durable es solo un registro.
       inventoryPostingSweeperJob.start()
       loyaltyReconciliationJob.start()
+      paymentEffectsJob.start()
       cashDrawerReconcilerJob.start()
       paidOrderReconcilerJob.start()
       // Completa el cierre unificado que murió entre sus dos commits: sin él, un turno sin su
