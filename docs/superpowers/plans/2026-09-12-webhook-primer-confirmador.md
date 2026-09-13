@@ -96,3 +96,74 @@ Respuesta íntegra en el scratchpad de la sesión (`codex-webhook-primer-confirm
 1. Servidor verificado + migraciones · 2. APK Nexgo verificado por el TMS · 3. APK PAX verificado con firma de Blumon · 4. Android verificado · 5. **Siguiente entrega**: servidor con vínculo por intento + recuperación durable → Nexgo compatible → piloto AngelPay → ampliación. AngelPay NO exige otra entrega PAX.
 
 **Cobertura barata para no perder un ciclo de Nexgo (propuesta mía, no de Codex, pendiente del founder):** meter en el APK Nexgo de ESTA entrega sólo el emit `terminal:payment_attempt_opened` (fire-and-forget; el servidor actual ignora eventos sin listener). Es el único cambio de terminal que la v2 necesita para AngelPay; si va ahora, la v2 del servidor entra después sin otro ciclo del TMS.
+
+---
+
+## Checkpoint 1 · Tareas de la v2, lado SERVIDOR (13-sep — propuesta para autorización de Codex ANTES de codear)
+
+Hechos re-verificados el 13-sep antes de escribir esto: `angelpay-webhook.service.ts` casa el Payment por
+`idempotencyKey` o `referenceNumber` = `integratorReference` (l.155-161) y guarda un `ProviderEventLog`
+PENDING con idempotencia por `eventId` (l.347-378, `DUPLICATE` en replay); el registrador TPV es idempotente
+por `venueId_idempotencyKey` (`payment.tpv.service.ts:2026`); `TerminalPaymentRequest` NO tiene ningún campo
+para el vínculo intento→solicitud; los handlers de socket de terminal viven en `terminal-payment.service.ts`;
+`reconcileUnknownRequests` corre cada 30 s desde `terminal-payment-watchdog.job.ts`.
+
+Reglas del checkpoint: TDD (prueba en rojo primero), sabotajes en copia aislada, contrato aditivo, nada de
+lo actual se debilita. Cada tarea nombra sus pruebas; ninguna toca la TPV.
+
+- **S1 · El vínculo intento → solicitud, guardado ANTES de autorizar (v2.2).** Evento nuevo
+  `terminal:payment_attempt_opened { requestId, attemptId }` que la terminal emitirá tras `openAttempt` y
+  antes de lanzar el SDK. Persistencia propuesta: **tabla hija** `TerminalPaymentAttemptLink
+  { id, requestId (FK), attemptId @unique, terminalId, createdAt }` y no una columna en la fila — porque un
+  reintento legítimo tras un rechazo produce un `attemptId` NUEVO para la MISMA solicitud (es justo lo que
+  tumbó a T8: `AngelPayPaymentViewModel.kt:3758` limpia la llave), así que una solicitud puede tener varios
+  vínculos y el webhook ata por cualquiera. Reglas: sólo se acepta si la fila es de la terminal del JWT del
+  socket y no está cerrada; `attemptId` repetido para otra solicitud ⇒ 🚨 y no se guarda. Sin vínculo
+  grabado, el webhook no ata nada y todo sigue como hoy (invariante 5, APK viejos). Sin `ActivityLog`
+  (alta frecuencia). Pruebas: guarda · rechaza terminal ajena · rechaza fila cerrada · dos intentos de una
+  solicitud conviven · idempotente por `attemptId` · `attemptId` reusado en otra solicitud ⇒ 🚨.
+- **S2 · El webhook `approved` ata por vínculo y confirma con el MISMO registrador (v2.1, v2.3).** En
+  `angelpay-webhook.service.ts`, sin Payment y con `integratorReference` que case con un vínculo ⇒ resolver la
+  solicitud (venue del `MerchantAccount` del secreto) y llamar al registrador idempotente del camino TPV con
+  `idempotencyKey = attemptId` — nunca un `payment.create` nuevo. **Importes en centavos**: `amount =
+  request.amountCents`, `tip = webhook − request.amountCents` si ≥ 0; si el webhook trae MENOS ⇒ el evento
+  queda PENDING con motivo `AMOUNT_MISMATCH`, no se cierra y no se inventa propina. `deviceSerialNumber` =
+  terminal de la fila; si el webhook trae serial y difiere ⇒ 🚨 y no cierra. Luego `closeRowFromPaymentTx`
+  (ya maneja reopened + 🚨). `shiftId` por `turnoAbiertoDelNegocio`. Un `approved` que contradice
+  CANCELLED/TIMED_OUT/FAILED ⇒ COMPLETED + la 🚨 existente (invariante 3). Pruebas: cierra SENT · cierra
+  UNKNOWN · TIMED_OUT/AUTO_RELEASED ⇒ COMPLETED + 🚨 · monto menor ⇒ PENDING sin cerrar · serial distinto
+  ⇒ no cierra · replay del mismo `eventId` ⇒ DUPLICATE · sin vínculo ⇒ camino de hoy (APK viejo).
+- **S3 · El registro REST posterior de la terminal ENRIQUECE, no duplica (v2.3).** Cuando el registro TPV
+  (order y fast) encuentra el Payment por llave y nació del webhook: fusiona lo que sólo la terminal sabe
+  (recibo, `authorizationCode`, `referenceNumber`, marca/últimos 4) **sin tocar `amount`/`tipAmount`** y
+  devuelve el Payment existente. En TODOS los retornos idempotentes. Pruebas: fast y order · no duplica ·
+  no cambia montos · llena campos vacíos · no pisa campos ya puestos.
+- **S4 · Eventos PENDING procesados de forma durable y reanudable (v2.5).** Un barrido (propuesta: el
+  `terminal-payment-watchdog` de 30 s, o job propio si Codex lo prefiere) retoma los `ProviderEventLog`
+  PENDING de AngelPay con vínculo resoluble y aplica S2. **Probado con caída tras guardar el evento y antes
+  del Payment**: al reanudar, cierra sin duplicar; el `DUPLICATE` por `eventId` no puede impedir el retome.
+  Un evento sin vínculo se queda PENDING y lo cierra el backfill actual cuando la terminal registra.
+- **S5 · `terminal:payment_confirmed` sólo acelera (v2.6, mitad servidor).** Emitir
+  `{ requestId, attemptId, paymentId, amountCents, tipCents, via:'webhook' }` a la terminal de la fila si
+  está conectada; sin ACK obligatorio. Prueba: se emite al cerrar por webhook; no al cerrar por REST. (Lo que
+  la terminal hace con él es del checkpoint 2, y NUNCA cierra una libreta en AUTORIZANDO con el SDK dentro.)
+- **S6 · Consulta durable para la terminal al reconectar (v2.6, mitad servidor).** Endpoint por el que la
+  terminal pregunta el desenlace de un intento (`GET /tpv/venues/:venueId/terminal-payment/attempts/:attemptId`):
+  `COMPLETED + paymentId` / `PENDING` / cerrada-sin-cobro con su desenlace canónico. Pruebas: cada estado ·
+  nunca contesta «no cobrado» sin desenlace canónico · sólo intentos de la terminal del JWT.
+- **S7 · NO se libera por rechazo + tiempo (v2.4).** Un `declined` se guarda como evidencia apuntando al
+  vínculo y NO transiciona la fila. Prueba negativa: `declined` + 120 s ⇒ la fila sigue como estaba. (Retira
+  T4 de la v1.)
+- **S8 · MCP + bitácora.** `terminal_payment_requests` muestra `closedVia` (`terminal`/`webhook`) y los
+  vínculos; `ActivityLog` `TERMINAL_PAYMENT_CONFIRMED_BY_WEBHOOK` sólo cuando cierra una fila que NO estaba
+  en vuelo.
+- **S9 · Migraciones aditivas + `npm run schema:map` + CHANGELOG**, en el mismo cambio.
+
+**Checkpoint 2 (terminal, Nexgo primero; después de que Codex autorice el 1):** N1 emitir
+`payment_attempt_opened` tras `openAttempt` (fire-and-forget); N2 recibir `payment_confirmed` y llevar a
+REGISTRADO **sólo** desde estados sin SDK dentro; N3 consultar S6 al reconectar; N4 `LedgerSweepScheduler.runOnceNow()`
+al nacer una incertidumbre.
+
+**Lo que este checkpoint NO hace, declarado:** Blumon (queda con su conciliación actual, v2.1); cobros LOCALES;
+la palanca manual clase B; los dos merchants sin webhook (registro en AngelPay, no código).
+
