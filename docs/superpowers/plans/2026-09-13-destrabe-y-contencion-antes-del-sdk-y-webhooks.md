@@ -221,6 +221,46 @@ salida).
 la terminal entera aunque traiga un `terminalPaymentRequestId` perfectamente identificable. Eso
 lo cierra F2.
 
+### 🟢 Los dos huecos que Codex dejó FUERA de la autorización, CERRADOS (13-sep)
+
+Codex autorizó el commit de F0 («Sí: autorizo el commit del diff auditado en `main` del TPV. No
+encontré P1 nuevos») y excluyó dos defectos **preexistentes**, no introducidos por ese diff. Los dos
+quedaron cerrados con TDD el mismo día, cada uno con su prueba en ROJO antes del arreglo.
+
+**(a) La recuperación EXITOSA de PAX soltaba el lector con `CompleteEmvTrans` pendiente** (confianza
+10/10). La PAX escribe `HOST_RESPONDIO` **antes** de `CompleteEmvTrans`, y `LedgerApprovalRecovery`
+reclama por ANTIGÜEDAD (120 s): al registrar bien dejaba la fila en `REGISTRADO`, que no aparta el
+aparato. La rama de FALLO ya era correcta desde F0 (`REGISTRO_FALLIDO` retiene) — esa asimetría era
+la pista. Arreglo: `LlamadasNativasEnVuelo` anota qué intentos tienen su llamada nativa viva **en
+este proceso** y la recuperación no toca esas filas; su dueño las registra al salir.
+
+🔑 **Por qué la memoria del proceso es el alcance correcto y no un atajo:** una llamada nativa no
+sobrevive a la muerte de su proceso, así que tras un reinicio —el caso normal, «quedó una fila a
+medias»— la recuperación procede igual que antes. Persistirlo en Room diría lo contrario de la
+verdad al reiniciar y volvería a bloquear la terminal, que es justo lo que F0 cerró.
+
+🔴 **Con tope de 10 min.** Sin él, una llamada que nunca vuelve dejaría el cobro sin registrar para
+siempre y el aparato apartado sin salida — la Nexgo inservible de Testarudo. Pasado el tope se
+vuelve al comportamiento anterior: es el suelo, nunca peor.
+
+Las dos fronteras viven SÓLO en la libreta (`markAuthorizing`/`markKernelEntered` encienden;
+registrar, fallar el registro, encolar, rechazo del kernel y descartar apagan) y
+**`markHostResponded` NO apaga la marca**, que es el punto entero del mecanismo.
+
+**(b) `onAngelPaySdkResult` de NEXGO no adoptaba por identidad** (9/10). Con el ViewModel recreado,
+`currentPaymentAttemptId` es null y TODAS las escrituras de la libreta van bajo `?.let`: una
+declinación limpia del emisor dejaba la fila `AUTORIZANDO` para siempre y la terminal retenida.
+`onAngelPayResult` (app-to-app) ya lo recuperaba; cuál de los dos caminos entrega el resultado
+depende de la versión del SDK, no del negocio, así que tener sólo uno recuperado dejaba el defecto
+vivo en media flota. La adopción es la misma: **sólo por identidad de la solicitud**.
+
+**Verificado:** 1,860 pruebas / 153 suites / 0 fallos (10 nuevas); `compileProductionDebugKotlin` y
+`compileNexgoDebugKotlin` en exit 0 con `LlamadasNativasEnVuelo` generada; **5 sabotajes en worktree
+aislado y cada uno tumba EXACTAMENTE la prueba que lo guarda** (control limpio antes y después).
+Commits en `main` del TPV: `149dcc3` (PAX) · `cd26e26` (Nexgo) · `5a4b5df` (changelog).
+
+⬜ Sigue sin QA en hardware, sin push y sin desplegar.
+
 ## Lo que Codex exige antes de implementar (todos verificados en el código)
 
 | # | Hallazgo | Qué cambia |
