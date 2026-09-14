@@ -1,4 +1,10 @@
-import { getReceiptDevices, getReceiptReadiness, minimoDeVersion } from '@/services/dashboard/receiptLayout/readiness.service'
+import {
+  getReceiptDevices,
+  getReceiptReadiness,
+  minimoDeVersion,
+  parseVersionName,
+  posSoportaDiseno,
+} from '@/services/dashboard/receiptLayout/readiness.service'
 import prisma from '@/utils/prismaClient'
 
 const mock = prisma as unknown as {
@@ -44,12 +50,12 @@ describe('getReceiptDevices', () => {
 
   it('una versión por debajo del mínimo no soporta; una por encima sí', async () => {
     mock.terminal.findMany.mockResolvedValue([
-      { name: 'Vieja', type: 'POS_ANDROID', brand: null, healthMetrics: salud(10, '2.8.7') },
-      { name: 'Nueva', type: 'POS_ANDROID', brand: null, healthMetrics: salud(Number.MAX_SAFE_INTEGER, '9.9.9') },
+      { name: 'Vieja', type: 'POS_DESKTOP', brand: null, healthMetrics: salud(10, '2.8.7') },
+      { name: 'Nueva', type: 'POS_DESKTOP', brand: null, healthMetrics: salud(Number.MAX_SAFE_INTEGER, '9.9.9') },
     ])
     const r = await getReceiptDevices('v1')
     expect(r.supporting).toBe(1)
-    expect(r.notSupporting).toEqual([{ name: 'Vieja', platform: 'POS_ANDROID', brand: null, appVersion: '2.8.7' }])
+    expect(r.notSupporting).toEqual([{ name: 'Vieja', platform: 'POS_DESKTOP', brand: null, appVersion: '2.8.7' }])
   })
 
   it('un venue sin aparatos no es un error: cero y lista vacía', async () => {
@@ -121,5 +127,39 @@ describe('minimoDeVersion', () => {
 
   it('un valor que no es número no abre la puerta', () => {
     expect(minimoDeVersion('POS_ANDROID', null, { RECEIPT_LAYOUT_MIN_POS_ANDROID: 'pronto' })).toBe(Number.MAX_SAFE_INTEGER)
+  })
+})
+
+describe('capacidad de las tablets por nombre de versión (Terminal.version)', () => {
+  const env = { RECEIPT_LAYOUT_MIN_POS_ANDROID_VERSION: '2.19.0', RECEIPT_LAYOUT_MIN_POS_IOS_VERSION: '1.11' }
+
+  it('lee «2.18.3-dev», «1.10» y rechaza lo que no es versión', () => {
+    expect(parseVersionName('2.18.3-dev')).toEqual([2, 18, 3])
+    expect(parseVersionName('1.10')).toEqual([1, 10, 0])
+    expect(parseVersionName('desconocida')).toBeNull()
+    expect(parseVersionName(null)).toBeNull()
+  })
+
+  it('P1 una tablet actualizada SÍ cuenta; una vieja o sin versión, no', () => {
+    expect(posSoportaDiseno('POS_ANDROID', '2.19.0-dev', env)).toBe(true)
+    expect(posSoportaDiseno('POS_ANDROID', '2.20.1', env)).toBe(true)
+    expect(posSoportaDiseno('POS_ANDROID', '2.18.3', env)).toBe(false)
+    expect(posSoportaDiseno('POS_IOS', '1.11.0', env)).toBe(true)
+    expect(posSoportaDiseno('POS_IOS', null, env)).toBe(false)
+  })
+
+  it('sin la variable de mínimo, ninguna tablet cuenta (el banner no miente antes de publicar)', () => {
+    expect(posSoportaDiseno('POS_ANDROID', '9.9.9', {})).toBe(false)
+  })
+
+  it('getReceiptDevices usa Terminal.version para las tablets y la enseña en la lista', async () => {
+    mock.terminal.findMany.mockResolvedValue([
+      { name: 'Sunmi', type: 'POS_ANDROID', brand: 'Sunmi', version: '2.19.0', healthMetrics: [] },
+      { name: 'iPad', type: 'POS_IOS', brand: null, version: '1.10.2', healthMetrics: [] },
+    ])
+    const r = await getReceiptDevices('v1', env)
+    expect(mock.terminal.findMany.mock.calls[0][0].select.version).toBe(true)
+    expect(r.supporting).toBe(1)
+    expect(r.notSupporting).toEqual([{ name: 'iPad', platform: 'POS_IOS', brand: null, appVersion: '1.10.2' }])
   })
 })

@@ -43,6 +43,31 @@ export function minimoDeVersion(type: string, brand: string | null | undefined, 
   return env[variable] !== undefined && Number.isInteger(valor) && valor >= 0 ? valor : Number.MAX_SAFE_INTEGER
 }
 
+/** «2.18.3-dev» → [2, 18, 3]. Lo que no empieza con número → null (versión desconocida = no soporta). */
+export function parseVersionName(v: string | null | undefined): [number, number, number] | null {
+  const m = v?.trim().match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?/)
+  if (!m) return null
+  return [Number(m[1]), Number(m[2] ?? 0), Number(m[3] ?? 0)]
+}
+
+/**
+ * Las tablets mandan `x-app-version` como NOMBRE de versión y el registro lo guarda en
+ * `Terminal.version` (deviceRegistry.service.ts). No escriben `TerminalHealth`, así que medirlas
+ * por `appVersionCode` las daba SIEMPRE por «versión desconocida», aun actualizadas.
+ * Sin la variable del mínimo, ninguna cuenta: la fase de cada app la pone al publicarse.
+ */
+export function posSoportaDiseno(
+  type: 'POS_ANDROID' | 'POS_IOS',
+  version: string | null | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const minimum = parseVersionName(env[`RECEIPT_LAYOUT_MIN_${type}_VERSION`])
+  const actual = parseVersionName(version)
+  if (!minimum || !actual) return false
+  for (let i = 0; i < 3; i++) if (actual[i] !== minimum[i]) return actual[i] > minimum[i]
+  return true
+}
+
 export interface ReceiptReadiness {
   fiscalEmisor: boolean
   logo: boolean
@@ -76,7 +101,7 @@ export interface ReceiptDevices {
  * 🔴 Versión desconocida = NO soporta. Es el lado conservador: decirle al negocio que su
  * diseño ya está vivo cuando no lo sabemos es peor que decirle que falta actualizar.
  */
-export async function getReceiptDevices(venueId: string): Promise<ReceiptDevices> {
+export async function getReceiptDevices(venueId: string, env: NodeJS.ProcessEnv = process.env): Promise<ReceiptDevices> {
   const terminales = await prisma.terminal.findMany({
     where: { venueId, type: { in: [...TIPOS_QUE_INTERPRETAN] }, status: { in: ['ACTIVE', 'INACTIVE'] } },
     // TerminalHealth es un HISTÓRICO (no hay una fila por aparato): se toma la más reciente,
@@ -85,6 +110,7 @@ export async function getReceiptDevices(venueId: string): Promise<ReceiptDevices
       name: true,
       type: true,
       brand: true,
+      version: true,
       healthMetrics: { take: 1, orderBy: { createdAt: 'desc' }, select: { appVersionCode: true, appVersion: true } },
     },
     take: 200,
@@ -93,14 +119,17 @@ export async function getReceiptDevices(venueId: string): Promise<ReceiptDevices
   const devices: ReceiptDevices = { supporting: 0, notSupporting: [] }
   for (const t of terminales) {
     const salud = t.healthMetrics[0]
-    const minimo = minimoDeVersion(t.type, t.brand)
-    if (typeof salud?.appVersionCode === 'number' && salud.appVersionCode >= minimo) devices.supporting += 1
+    const esTablet = t.type === 'POS_ANDROID' || t.type === 'POS_IOS'
+    const soporta = esTablet
+      ? posSoportaDiseno(t.type as 'POS_ANDROID' | 'POS_IOS', t.version, env)
+      : typeof salud?.appVersionCode === 'number' && salud.appVersionCode >= minimoDeVersion(t.type, t.brand, env)
+    if (soporta) devices.supporting += 1
     else
       devices.notSupporting.push({
         name: t.name,
         platform: t.type,
         brand: normalizeTerminalBrand(t.brand) ?? null,
-        appVersion: salud?.appVersion ?? null,
+        appVersion: (esTablet ? t.version : salud?.appVersion) ?? null,
       })
   }
   return devices
