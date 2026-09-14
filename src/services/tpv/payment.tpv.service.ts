@@ -3874,6 +3874,18 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         })
       }
 
+      // 🔴 La venta rápida también da lealtad (Amaena, 14-sep-2026). En el POS se escaneó la
+      // tarjeta de la clienta, la pantalla dijo «esta compra le suma otro», se cobró… y el sello
+      // nunca llegó: esta función no tocaba la lealtad por ningún lado. La marca va DENTRO de la
+      // transacción del dinero, igual que en `updateOrderTotalsForStandalonePayment`: si el
+      // proceso muere antes de dar la lealtad abajo, el job `loyalty-reconciliation` la reintenta.
+      if (newPayment.status === 'COMPLETED') {
+        await tx.order.update({
+          where: { id: order.id },
+          data: { loyaltyEligibleAt: new Date(), loyaltyStaffId: validatedStaffId },
+        })
+      }
+
       return { payment: newPayment, fastOrder: order }
     })
     payment = result.payment
@@ -4008,6 +4020,20 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     await t.time('referralOnOrderPaid', () => onOrderPaid({ orderId: fastOrder.id, venueId: fastOrder.venueId }))
   } catch (err) {
     console.error('[referral hook] onOrderPaid failed for order', fastOrder.id, err)
+  }
+
+  // 🔴 La lealtad de la venta rápida, al momento — es lo que el POS le promete a la clienta en
+  // pantalla («esta compra le suma otro»). Misma llamada que `updateOrderTotalsForStandalonePayment`.
+  // `awardLoyaltyForPaidOrder` nunca lanza, y marca `loyaltyProcessedAt` al terminar, así que el
+  // job no la repite; el sello además tiene índice único por orden. La propina no genera lealtad.
+  if (payment.status === 'COMPLETED') {
+    await awardLoyaltyForPaidOrder({
+      venueId: fastOrder.venueId,
+      orderId: fastOrder.id,
+      orderTotal: Math.max(0, Number(fastOrder.total) - Number(fastOrder.tipAmount ?? 0)),
+      staffId: validatedStaffId,
+      legacyCustomer: fastOrder.customerId ? { id: fastOrder.customerId, firstName: null, lastName: null } : null,
+    })
   }
 
   // 🔌 REAL-TIME: Emit socket events based on payment status (fast payment)
