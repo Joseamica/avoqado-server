@@ -1,3 +1,4 @@
+import { addressLine } from '../address'
 import { divider, wrap } from '../columns'
 import { LABELS } from '../labels.es'
 import { resolveEmisor } from '../resolveEmisor'
@@ -10,10 +11,10 @@ type Of<T extends Block['type']> = Extract<Block, { type: T }>
 
 const LOGO_WIDTH_PCT = { S: 40, M: 60, L: 80 } as const
 
-/** El logo siempre va centrado (`align` del bloque queda reservado). Sin logo cacheado no hay imagen NI hueco. */
+/** El logo va donde el negocio lo puso (D13). Sin un ráster utilizable el aparato manda `hasLogo = false`: ni imagen NI hueco. */
 export function renderLogo(block: Of<'logo'>, input: ReceiptInput, _width: PaperWidth): LogicalLine[] {
   if (!input.venue.hasLogo) return []
-  return [{ kind: 'image', ref: 'logo', widthPct: LOGO_WIDTH_PCT[block.size] }, feed()]
+  return [{ kind: 'image', ref: 'logo', widthPct: LOGO_WIDTH_PCT[block.size], align: block.align }, feed()]
 }
 
 export function renderBusinessName(block: Of<'businessName'>, input: ReceiptInput, width: PaperWidth): LogicalLine[] {
@@ -22,7 +23,7 @@ export function renderBusinessName(block: Of<'businessName'>, input: ReceiptInpu
 
 /** Nada de «RFC:» vacíos: sin emisor resuelto no se imprime nada (spec § 5.3). */
 export function renderFiscal(block: Of<'fiscal'>, input: ReceiptInput, width: PaperWidth): LogicalLine[] {
-  const emisor = resolveEmisor(input.venue, input.sale.tender.merchantAccountId)
+  const emisor = resolveEmisor(input.venue, input.sale.tender?.merchantAccountId)
   if (!emisor) return []
   const valores = [
     emisor.legalName,
@@ -33,10 +34,7 @@ export function renderFiscal(block: Of<'fiscal'>, input: ReceiptInput, width: Pa
 }
 
 export function renderAddress(block: Of<'address'>, input: ReceiptInput, width: PaperWidth): LogicalLine[] {
-  const { address, city, state, zipCode } = input.venue
-  const ciudad = [city, state].filter(Boolean).join(', ')
-  let texto = [address, ciudad].filter(Boolean).join(', ')
-  if (zipCode) texto = texto ? `${texto} CP ${zipCode}` : `CP ${zipCode}`
+  const texto = addressLine(input.venue)
   if (!texto) return []
   return wrap(forceReceiptText(texto), width).map(l => textLine(l, block.align))
 }

@@ -29,6 +29,7 @@ export const LABELS = {
   entregaPorArea: 'ENTREGA POR ÁREA',
   presentaComprobante: 'Presenta este comprobante en el área',
   fiscalNotice: 'Este comprobante no es un CFDI',
+  qrSinFactura: 'Escanea para tu recibo digital',
   rfc: 'RFC:',
   lugarExpedicion: 'Lugar de expedición: CP',
   tel: 'Tel:',

@@ -20,7 +20,7 @@ export function renderPlain(lines: LogicalLine[], width: PaperWidth): string {
         out.push(l.double ? place(l.text.toUpperCase(), l.align, Math.floor(width / 2)) : place(l.text, l.align, width))
         break
       case 'image':
-        out.push(place(l.ref === 'logo' ? '[LOGO]' : '[AVOQADO]', 'center', width))
+        out.push(place(l.ref === 'logo' ? '[LOGO]' : '[AVOQADO]', l.align, width))
         break
       case 'qr':
         out.push(place(`[QR ${l.data}]`, 'center', width))

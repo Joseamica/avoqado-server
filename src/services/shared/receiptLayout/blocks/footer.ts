@@ -1,8 +1,8 @@
-import { divider, twoColumns, wrap } from '../columns'
+import { divider, twoColumnLines, wrap } from '../columns'
 import { amountInWordsEs, formatMoney } from '../format'
 import { LABELS } from '../labels.es'
+import { QR_DEFAULT_CAPTION, type Block } from '../schema'
 import { forceReceiptText } from '../sanitizeText'
-import type { Block } from '../schema'
 import type { LogicalLine, PaperWidth, ReceiptInput } from '../types'
 import { feed, textLine } from './lines'
 
@@ -15,38 +15,41 @@ const AVOQADO_MARK_WIDTH_PCT = 15
 export function renderTotals(block: Of<'totals'>, input: ReceiptInput, width: PaperWidth): LogicalLine[] {
   const { sale } = input
   const money = (label: string, cents: number, opts: { bold?: boolean } = {}) =>
-    textLine(twoColumns(label, formatMoney(cents), width), 'left', opts)
+    twoColumnLines(label, formatMoney(cents), width).map(l => textLine(l, 'left', opts))
   const lines: LogicalLine[] = []
-  if (block.showSubtotal) lines.push(money(LABELS.subtotal, sale.subtotalCents))
-  if (block.showDiscount && sale.discountCents) lines.push(money(LABELS.descuento, -Math.abs(sale.discountCents)))
-  if (block.showTax) lines.push(money(LABELS.ivaIncluido, sale.taxCents))
-  if (block.showTip && sale.tipCents) lines.push(money(LABELS.propina, sale.tipCents))
+  if (block.showSubtotal) lines.push(...money(LABELS.subtotal, sale.subtotalCents))
+  if (block.showDiscount && sale.discountCents) lines.push(...money(LABELS.descuento, -Math.abs(sale.discountCents)))
+  if (block.showTax) lines.push(...money(LABELS.ivaIncluido, sale.taxCents))
+  if (block.showTip && sale.tipCents) lines.push(...money(LABELS.propina, sale.tipCents))
   lines.push(textLine(divider(width)))
   // En grande, el TOTAL gasta dos columnas por carácter: se acomoda a la MITAD del ancho.
-  // Si ni así cabe (totales de seis cifras en 58 mm), negritas a ancho completo — nunca partido.
+  // Si ni así cabe, negritas a ancho completo — y si tampoco, etiqueta arriba y valor abajo.
   const total = formatMoney(sale.totalCents)
   const half = Math.floor(width / 2)
   if (LABELS.total.length + 1 + total.length <= half)
-    lines.push(textLine(twoColumns(LABELS.total, total, half), 'left', { bold: true, double: true }))
-  else lines.push(textLine(twoColumns(LABELS.total, total, width), 'left', { bold: true }))
+    lines.push(...twoColumnLines(LABELS.total, total, half).map(l => textLine(l, 'left', { bold: true, double: true })))
+  else lines.push(...twoColumnLines(LABELS.total, total, width).map(l => textLine(l, 'left', { bold: true })))
   return lines
 }
 
-/** Pago: 🔒 operativo. En tarjeta, autorización y referencia van SIEMPRE: son lo que el cliente necesita ante un contracargo. */
+/** Pago: 🔒 operativo. En tarjeta, autorización y referencia van SIEMPRE que existan. Pre-cuenta (sin tender): nada. */
 export function renderPayment(block: Of<'payment'>, input: ReceiptInput, width: PaperWidth): LogicalLine[] {
   const t = input.sale.tender
-  const row = (label: string, value: string, opts: { bold?: boolean } = {}) => textLine(twoColumns(label, value, width), 'left', opts)
-  const lines: LogicalLine[] = [feed(), row(LABELS.pago, forceReceiptText(t.label))]
+  if (!t) return []
+  const row = (label: string, value: string, opts: { bold?: boolean } = {}) =>
+    twoColumnLines(label, value, width).map(l => textLine(l, 'left', opts))
+  const lines: LogicalLine[] = [feed(), ...row(LABELS.pago, forceReceiptText(t.label))]
   if (t.kind === 'CARD') {
     if (block.showCardLastFour && t.cardLastFour) {
-      lines.push(row(LABELS.tarjeta, t.cardBrand ? `${forceReceiptText(t.cardBrand)} **** ${t.cardLastFour}` : `**** ${t.cardLastFour}`))
+      lines.push(...row(LABELS.tarjeta, t.cardBrand ? `${forceReceiptText(t.cardBrand)} **** ${t.cardLastFour}` : `**** ${t.cardLastFour}`))
     }
-    if (t.authCode) lines.push(row(LABELS.autorizacion, forceReceiptText(t.authCode)))
-    if (t.referenceNumber) lines.push(row(LABELS.referencia, forceReceiptText(t.referenceNumber)))
+    if (t.authCode) lines.push(...row(LABELS.autorizacion, forceReceiptText(t.authCode)))
+    if (t.referenceNumber) lines.push(...row(LABELS.referencia, forceReceiptText(t.referenceNumber)))
   }
   if (t.kind === 'CASH') {
-    if (t.tenderedCents != null) lines.push(row(LABELS.recibido, formatMoney(t.tenderedCents)))
-    if (block.showChange && t.changeCents && t.changeCents > 0) lines.push(row(LABELS.cambio, formatMoney(t.changeCents), { bold: true }))
+    if (t.tenderedCents != null) lines.push(...row(LABELS.recibido, formatMoney(t.tenderedCents)))
+    if (block.showChange && t.changeCents && t.changeCents > 0)
+      lines.push(...row(LABELS.cambio, formatMoney(t.changeCents), { bold: true }))
   }
   return lines
 }
@@ -71,13 +74,15 @@ export function renderAreaDelivery(_block: Of<'areaDelivery'>, input: ReceiptInp
   ]
 }
 
+/** QR del recibo digital. Sólo con URL. La leyenda por defecto no promete factura donde el negocio no la tiene (arreglo del 11-sep). */
 export function renderQr(block: Of<'qr'>, input: ReceiptInput, width: PaperWidth): LogicalLine[] {
   const url = input.sale.receiptUrl?.trim()
   if (!url) return []
+  const caption = block.caption === QR_DEFAULT_CAPTION && input.sale.autofacturaAvailable === false ? LABELS.qrSinFactura : block.caption
   return [
     feed(),
     textLine(divider(width)),
-    ...wrap(forceReceiptText(block.caption), width).map(l => textLine(l, 'center')),
+    ...wrap(forceReceiptText(caption), width).map(l => textLine(l, 'center')),
     feed(),
     { kind: 'qr', data: url },
     feed(),
@@ -88,12 +93,12 @@ export function renderFiscalNotice(_block: Of<'fiscalNotice'>, _input: ReceiptIn
   return wrap(LABELS.fiscalNotice, width).map(l => textLine(l, 'center'))
 }
 
-export function renderReference(block: Of<'reference'>, input: ReceiptInput, _width: PaperWidth): LogicalLine[] {
+export function renderReference(block: Of<'reference'>, input: ReceiptInput, width: PaperWidth): LogicalLine[] {
   const lines: LogicalLine[] = []
+  const centered = (text: string) => wrap(text, width).map(l => textLine(l, 'center'))
   if (block.showTransactionId && input.sale.transactionId)
-    lines.push(textLine(`${LABELS.id} ${forceReceiptText(input.sale.transactionId)}`, 'center'))
-  if (block.showAppVersion && input.sale.appVersion)
-    lines.push(textLine(`${LABELS.version}${forceReceiptText(input.sale.appVersion)}`, 'center'))
+    lines.push(...centered(`${LABELS.id} ${forceReceiptText(input.sale.transactionId)}`))
+  if (block.showAppVersion && input.sale.appVersion) lines.push(...centered(`${LABELS.version}${forceReceiptText(input.sale.appVersion)}`))
   return lines
 }
 
@@ -101,7 +106,7 @@ export function renderReference(block: Of<'reference'>, input: ReceiptInput, _wi
 export function renderSignature(_block: Of<'signature'>, _input: ReceiptInput, _width: PaperWidth): LogicalLine[] {
   return [
     feed(),
-    { kind: 'image', ref: 'avoqadoMark', widthPct: AVOQADO_MARK_WIDTH_PCT },
+    { kind: 'image', ref: 'avoqadoMark', widthPct: AVOQADO_MARK_WIDTH_PCT, align: 'center' },
     feed(),
     textLine(LABELS.poweredBy, 'center'),
     { kind: 'cut' },

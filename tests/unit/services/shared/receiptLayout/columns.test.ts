@@ -1,27 +1,46 @@
-import { divider, threeColumns, twoColumns, wrap } from '@/services/shared/receiptLayout/columns'
+import { divider, indentedLines, itemLines, twoColumnLines, wrap } from '@/services/shared/receiptLayout/columns'
 
-describe('twoColumns (puerto de ESCPOSPrinter.printTwoColumns)', () => {
-  it('llena exactamente el ancho, con el valor pegado a la derecha', () => {
-    const l = twoColumns('Subtotal:', '$1,234.50', 48)
-    expect(l).toHaveLength(48)
-    expect(l.startsWith('Subtotal:')).toBe(true)
-    expect(l.endsWith('$1,234.50')).toBe(true)
+describe('twoColumnLines', () => {
+  it('si caben, una sola línea que llena exactamente el ancho', () => {
+    expect(twoColumnLines('Subtotal:', '$1,234.50', 48)).toEqual(['Subtotal:                              $1,234.50'])
   })
-  it('recorta la izquierda cuando no cabe, dejando SIEMPRE un espacio', () => {
-    expect(twoColumns('x'.repeat(60), '$5.00', 32)).toBe('x'.repeat(26) + ' ' + '$5.00')
+  it('P1 si no caben: la etiqueta arriba y el valor debajo a la derecha — nunca recorta ni se pasa', () => {
+    const r = twoColumnLines('Atendió:', 'María Guadalupe Fernández de la Garza Ortega', 32)
+    expect(r).toEqual(['Atendió:', ' María Guadalupe Fernández de la', '                    Garza Ortega'])
+    for (const l of r) expect(l.length).toBeLessThanOrEqual(32)
   })
 })
 
-describe('threeColumns (cantidad 4 · artículo · precio 10)', () => {
-  it('en 32 columnas el nombre se recorta a 17 y siempre queda un espacio antes del precio', () => {
-    const l = threeColumns('1', 'Café americano grande con leche', '$45.00', 32)
-    expect(l).toBe('1   ' + 'Café americano gr' + ' ' + '    $45.00')
-    expect(l).toHaveLength(32)
+describe('itemLines (cantidad 5 · artículo · precio 10)', () => {
+  it('P1 el nombre largo se ENVUELVE bajo su columna; no se recorta', () => {
+    expect(itemLines('1', 'Café americano grande con leche', '$45.00', 32)).toEqual([
+      '1    Café americano       $45.00',
+      '     grande con leche',
+    ])
   })
-  it('un precio más ancho que 10 empuja al nombre y nunca desborda el ancho', () => {
-    const l = threeColumns('2', 'Servicio', '$123,456.78', 32)
-    expect(l).toHaveLength(32)
-    expect(l.endsWith('$123,456.78')).toBe(true)
+  it('el encabezado ya no sale pegado: «Cant Artículo»', () => {
+    expect(itemLines('Cant', 'Artículo', 'Precio', 32)).toEqual(['Cant Artículo             Precio'])
+  })
+  it('un precio más ancho que 10 empuja al nombre y nunca desborda', () => {
+    const [l] = itemLines('2', 'Servicio', '$123,456.78', 32)
+    expect(l).toBe('2    Servicio        $123,456.78')
+  })
+  it('la sangría del componente de combo se conserva', () => {
+    expect(itemLines('', '1x Café', '', 32, 2)).toEqual(['       1x Café                  '])
+  })
+  it('P1 una cantidad de 5 o 6 dígitos ensancha su columna: ni se pega al nombre ni se pasa del papel', () => {
+    expect(itemLines('10000', 'Artículo', '$1.00', 32)).toEqual(['10000 Artículo             $1.00'])
+    expect(itemLines('123456', 'Artículo', '$1.00', 32)).toEqual(['123456 Artículo            $1.00'])
+    expect(itemLines('123456', 'Café americano grande', '$1.00', 32)).toEqual(['123456 Café americano      $1.00', '       grande'])
+  })
+})
+
+describe('indentedLines', () => {
+  it('sangra 2 y envuelve al ancho', () => {
+    expect(indentedLines('+ Leche de almendra orgánica sin azúcar añadida', 32)).toEqual([
+      '  + Leche de almendra orgánica',
+      '  sin azúcar añadida',
+    ])
   })
 })
 

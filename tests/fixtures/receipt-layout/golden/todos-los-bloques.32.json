@@ -180,7 +180,8 @@
     {
       "kind": "image",
       "ref": "logo",
-      "widthPct": 80
+      "widthPct": 80,
+      "align": "center"
     },
     {
       "kind": "feed",
@@ -223,7 +224,7 @@
     },
     {
       "kind": "text",
-      "text": "Ciudad de México CP 06600",
+      "text": "Ciudad de México, CP 06600",
       "align": "center",
       "bold": false,
       "double": false
@@ -293,7 +294,7 @@
     },
     {
       "kind": "text",
-      "text": "CantArtículo              Precio",
+      "text": "Cant Artículo             Precio",
       "align": "left",
       "bold": true,
       "double": false
@@ -307,7 +308,7 @@
     },
     {
       "kind": "text",
-      "text": "1   Corte de cabello     $350.00",
+      "text": "1    Corte de cabello    $350.00",
       "align": "left",
       "bold": false,
       "double": false
@@ -534,7 +535,8 @@
     {
       "kind": "image",
       "ref": "avoqadoMark",
-      "widthPct": 15
+      "widthPct": 15,
+      "align": "center"
     },
     {
       "kind": "feed",

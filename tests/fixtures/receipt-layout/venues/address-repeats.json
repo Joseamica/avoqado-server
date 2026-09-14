@@ -1,0 +1,3 @@
+{ "name": "Testarudo Cafe", "address": "Monte Himalaya 408, Lomas de Chapultepec, Miguel Hidalgo, 11000 Ciudad de México, CDMX, México", "city": "Ciudad de México", "state": "CDMX", "zipCode": "11000", "phone": "55 1234 5678", "hasLogo": true,
+  "fiscalEmisors": [{ "id": "emA", "legalName": "TESTARUDO CAFE S.A.P.I. DE C.V.", "rfc": "TCA2501231A6", "lugarExpedicion": "11000", "merchantAccountIds": ["maA"] }],
+  "principalEmisorId": "emA", "legacy": { "legalName": null, "rfc": null } }

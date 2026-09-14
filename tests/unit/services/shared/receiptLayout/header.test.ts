@@ -12,12 +12,26 @@ import { input } from './helpers'
 const t = (text: string, align = 'center', bold = false, double = false) => ({ kind: 'text', text, align, bold, double })
 
 describe('renderLogo', () => {
-  it('con logo: imagen al 60 % (M) y un salto; sin logo: nada, ni hueco', () => {
+  it('con logo: imagen al 60 % (M), centrada, y un salto; sin logo: nada, ni hueco', () => {
     expect(renderLogo({ type: 'logo', size: 'M', align: 'center' }, input(), 48)).toEqual([
-      { kind: 'image', ref: 'logo', widthPct: 60 },
+      { kind: 'image', ref: 'logo', widthPct: 60, align: 'center' },
       { kind: 'feed', lines: 1 },
     ])
     expect(renderLogo({ type: 'logo', size: 'L', align: 'center' }, input({}, { hasLogo: false }), 48)).toEqual([])
+  })
+  it('P1 la alineación que el negocio eligió llega a la línea: izquierda y derecha', () => {
+    expect(renderLogo({ type: 'logo', size: 'S', align: 'right' }, input(), 32)[0]).toEqual({
+      kind: 'image',
+      ref: 'logo',
+      widthPct: 40,
+      align: 'right',
+    })
+    expect(renderLogo({ type: 'logo', size: 'S', align: 'left' }, input(), 32)[0]).toEqual({
+      kind: 'image',
+      ref: 'logo',
+      widthPct: 40,
+      align: 'left',
+    })
   })
 })
 
@@ -52,13 +66,16 @@ describe('renderFiscal — el emisor resuelto por venta', () => {
     const i = input({}, { fiscalEmisors: [], principalEmisorId: null, legacy: { legalName: 'VIEJO SA', rfc: 'VIE900101AAA' } })
     expect(renderFiscal({ type: 'fiscal', align: 'center' }, i, 48)).toEqual([t('VIEJO SA'), t('RFC: VIE900101AAA')])
   })
+  it('pre-cuenta (sin tender) usa el emisor principal', () => {
+    expect(renderFiscal({ type: 'fiscal', align: 'center' }, input({ tender: null }), 48)[1]).toEqual(t('RFC: TCA2501231A6'))
+  })
 })
 
 describe('renderAddress y renderPhone', () => {
   it('compone dirección, ciudad, estado y CP, y la envuelve al ancho', () => {
     expect(renderAddress({ type: 'address', align: 'center' }, input(), 32)).toEqual([
       t('Nápoles 47, Cuauhtémoc, Ciudad'),
-      t('de México CP 06600'),
+      t('de México, CP 06600'),
     ])
     expect(
       renderAddress({ type: 'address', align: 'center' }, input({}, { address: null, city: null, state: null, zipCode: null }), 32),
@@ -72,7 +89,12 @@ describe('renderAddress y renderPhone', () => {
 
 describe('renderText — texto libre', () => {
   it('envuelve cada renglón; en double envuelve a la mitad; vuelve a sanear', () => {
-    const b = { type: 'text' as const, lines: ['Gracias por su compra vuelva pronto'], align: 'center' as const, emphasis: 'double' as const }
+    const b = {
+      type: 'text' as const,
+      lines: ['Gracias por su compra vuelva pronto'],
+      align: 'center' as const,
+      emphasis: 'double' as const,
+    }
     expect(renderText(b, input(), 32)).toEqual([
       t('Gracias por su', 'center', false, true),
       t('compra vuelva', 'center', false, true),

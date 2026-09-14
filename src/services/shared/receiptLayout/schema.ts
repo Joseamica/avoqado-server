@@ -10,6 +10,9 @@ const align = z.enum(['left', 'center', 'right'])
 const emphasis = z.enum(['normal', 'bold', 'double'])
 const textLine = z.string().max(MAX_TEXT_CHARS, `Cada renglón admite hasta ${MAX_TEXT_CHARS} caracteres`)
 
+/** La leyenda de fábrica del QR. Si el negocio no tiene autofactura, se cae a `LABELS.qrSinFactura` (D5). */
+export const QR_DEFAULT_CAPTION = 'Escanea para tu recibo y factura'
+
 /**
  * Catálogo de bloques del ticket (spec § 5.1). Sólo FORMA: los topes por tipo, los
  * obligatorios y el orden se validan en validateLayout.ts (regla del repo: Zod sin
@@ -46,7 +49,7 @@ export const blockSchema = z.discriminatedUnion(
     z.object({ type: z.literal('payment'), showChange: z.boolean().default(true), showCardLastFour: z.boolean().default(true) }),
     z.object({ type: z.literal('amountInWords') }),
     z.object({ type: z.literal('areaDelivery') }),
-    z.object({ type: z.literal('qr'), caption: textLine.default('Escanea para tu recibo y factura') }),
+    z.object({ type: z.literal('qr'), caption: textLine.default(QR_DEFAULT_CAPTION) }),
     z.object({ type: z.literal('fiscalNotice') }),
     z.object({ type: z.literal('reference'), showTransactionId: z.boolean().default(true), showAppVersion: z.boolean().default(false) }),
     z.object({ type: z.literal('separator'), style: z.enum(['line', 'double', 'blank']).default('line') }),

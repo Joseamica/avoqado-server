@@ -1,0 +1,460 @@
+{
+  "case": "renglones-largos",
+  "width": 48,
+  "blocks": [
+    {
+      "type": "logo",
+      "size": "M",
+      "align": "center"
+    },
+    {
+      "type": "businessName",
+      "align": "center",
+      "emphasis": "double"
+    },
+    {
+      "type": "fiscal",
+      "align": "center"
+    },
+    {
+      "type": "address",
+      "align": "center"
+    },
+    {
+      "type": "phone",
+      "align": "center"
+    },
+    {
+      "type": "separator",
+      "style": "line"
+    },
+    {
+      "type": "orderInfo",
+      "showOrderType": true
+    },
+    {
+      "type": "staff"
+    },
+    {
+      "type": "separator",
+      "style": "line"
+    },
+    {
+      "type": "items",
+      "showModifiers": true,
+      "showNotes": true
+    },
+    {
+      "type": "separator",
+      "style": "line"
+    },
+    {
+      "type": "totals",
+      "showSubtotal": true,
+      "showTax": true,
+      "showDiscount": true,
+      "showTip": true
+    },
+    {
+      "type": "payment",
+      "showChange": true,
+      "showCardLastFour": true
+    },
+    {
+      "type": "areaDelivery"
+    },
+    {
+      "type": "qr",
+      "caption": "Escanea para tu recibo y factura"
+    },
+    {
+      "type": "fiscalNotice"
+    },
+    {
+      "type": "separator",
+      "style": "line"
+    },
+    {
+      "type": "text",
+      "lines": [
+        "Gracias por su compra"
+      ],
+      "align": "center",
+      "emphasis": "normal"
+    },
+    {
+      "type": "reference",
+      "showTransactionId": true,
+      "showAppVersion": false
+    },
+    {
+      "type": "signature"
+    }
+  ],
+  "input": {
+    "sale": {
+      "kind": "SALE",
+      "orderNumber": "1043",
+      "orderType": "Para llevar con entrega a domicilio",
+      "occurredAt": "2026-09-02T18:05:00.000Z",
+      "timezone": "America/Mexico_City",
+      "items": [
+        {
+          "name": "Chilaquiles verdes con pollo deshebrado y crema",
+          "quantity": 1,
+          "unitPriceCents": 16500,
+          "totalPriceCents": 16500,
+          "modifiers": [
+            "Leche de almendra orgánica sin azúcar añadida"
+          ],
+          "note": "Sin cebolla y la salsa aparte por favor, alergia"
+        }
+      ],
+      "subtotalCents": 16500,
+      "taxCents": 2276,
+      "discountCents": null,
+      "tipCents": null,
+      "totalCents": 16500,
+      "tender": {
+        "kind": "OTHER",
+        "label": "Transferencia bancaria BBVA empresarial"
+      },
+      "staffName": "María Guadalupe Fernández de la Garza Ortega",
+      "transactionId": "pay_0002_con_un_identificador_muy_largo_de_prueba",
+      "receiptUrl": "https://r.avoqado.io/x/def"
+    },
+    "venue": {
+      "name": "Testarudo Cafe",
+      "address": "Nápoles 47",
+      "city": "Cuauhtémoc",
+      "state": "Ciudad de México",
+      "zipCode": "06600",
+      "phone": "55 1234 5678",
+      "hasLogo": true,
+      "fiscalEmisors": [
+        {
+          "id": "emA",
+          "legalName": "TESTARUDO CAFE S.A.P.I. DE C.V.",
+          "rfc": "TCA2501231A6",
+          "lugarExpedicion": "06600",
+          "merchantAccountIds": [
+            "maA"
+          ]
+        }
+      ],
+      "principalEmisorId": "emA",
+      "legacy": {
+        "legalName": null,
+        "rfc": null
+      }
+    }
+  },
+  "lines": [
+    {
+      "kind": "image",
+      "ref": "logo",
+      "widthPct": 60,
+      "align": "center"
+    },
+    {
+      "kind": "feed",
+      "lines": 1
+    },
+    {
+      "kind": "text",
+      "text": "Testarudo Cafe",
+      "align": "center",
+      "bold": false,
+      "double": true
+    },
+    {
+      "kind": "text",
+      "text": "TESTARUDO CAFE S.A.P.I. DE C.V.",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "RFC: TCA2501231A6",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Lugar de expedición: CP 06600",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Nápoles 47, Cuauhtémoc, Ciudad de México, CP",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "06600",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Tel: 55 1234 5678",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "------------------------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Orden #:                                    1043",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Fecha:                          02/09/2026 12:05",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Tipo:        Para llevar con entrega a domicilio",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Atendió:",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "    María Guadalupe Fernández de la Garza Ortega",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "------------------------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Cant Artículo                             Precio",
+      "align": "left",
+      "bold": true,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "------------------------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "1    Chilaquiles verdes con pollo        $165.00",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "     deshebrado y crema",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "  + Leche de almendra orgánica sin azúcar",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "  añadida",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "  Nota: Sin cebolla y la salsa aparte por favor,",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "  alergia",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "------------------------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Subtotal:                                $165.00",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "IVA incluido:                             $22.76",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "------------------------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "TOTAL:           $165.00",
+      "align": "left",
+      "bold": true,
+      "double": true
+    },
+    {
+      "kind": "feed",
+      "lines": 1
+    },
+    {
+      "kind": "text",
+      "text": "Pago:    Transferencia bancaria BBVA empresarial",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "feed",
+      "lines": 1
+    },
+    {
+      "kind": "text",
+      "text": "------------------------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Escanea para tu recibo y factura",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "feed",
+      "lines": 1
+    },
+    {
+      "kind": "qr",
+      "data": "https://r.avoqado.io/x/def"
+    },
+    {
+      "kind": "feed",
+      "lines": 1
+    },
+    {
+      "kind": "text",
+      "text": "Este comprobante no es un CFDI",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "------------------------------------------------",
+      "align": "left",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "Gracias por su compra",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "ID:",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "pay_0002_con_un_identificador_muy_largo_de_prueb",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "text",
+      "text": "a",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "feed",
+      "lines": 1
+    },
+    {
+      "kind": "image",
+      "ref": "avoqadoMark",
+      "widthPct": 15,
+      "align": "center"
+    },
+    {
+      "kind": "feed",
+      "lines": 1
+    },
+    {
+      "kind": "text",
+      "text": "Powered by Avoqado",
+      "align": "center",
+      "bold": false,
+      "double": false
+    },
+    {
+      "kind": "cut"
+    }
+  ]
+}

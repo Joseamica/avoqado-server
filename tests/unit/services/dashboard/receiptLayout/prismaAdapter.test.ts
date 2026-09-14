@@ -104,9 +104,9 @@ describe('buildReceiptInput', () => {
   it('🔴 el merchantAccountId del PAGO viaja al tender: es lo que elige el emisor', () => {
     const conTarjeta = { ...payment, method: 'CREDIT_CARD', merchantAccountId: 'maA', maskedPan: '411111******1234', cardBrand: 'VISA' }
     const input = buildReceiptInput({ order: order as never, payment: conTarjeta as never, venue: venue as never })
-    expect(input.sale.tender.merchantAccountId).toBe('maA')
-    expect(input.sale.tender.cardLastFour).toBe('1234')
-    expect(input.sale.tender.kind).toBe('CARD')
+    expect(input.sale.tender?.merchantAccountId).toBe('maA')
+    expect(input.sale.tender?.cardLastFour).toBe('1234')
+    expect(input.sale.tender?.kind).toBe('CARD')
   })
 
   it('🔴 las cuentas de cobro NULAS se filtran (merchantAccountId es nulable en el schema)', () => {

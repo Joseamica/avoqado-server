@@ -1,3 +1,4 @@
+export * from './address'
 export * from './schema'
 export * from './types'
 export * from './sanitizeText'

@@ -11,7 +11,7 @@ describe('interpret — la canónica de punta a punta', () => {
   })
   it('empieza con el logo y termina con la firma y el corte', () => {
     const lines = interpret(CANONICAL_LAYOUT, input(), 48)
-    expect(lines[0]).toEqual({ kind: 'image', ref: 'logo', widthPct: 60 })
+    expect(lines[0]).toEqual({ kind: 'image', ref: 'logo', widthPct: 60, align: 'center' })
     expect(lines[lines.length - 1]).toEqual({ kind: 'cut' })
     expect(lines[lines.length - 2]).toMatchObject({ kind: 'text', text: 'Powered by Avoqado' })
   })

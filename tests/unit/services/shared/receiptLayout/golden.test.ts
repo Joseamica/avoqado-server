@@ -42,7 +42,7 @@ const caseFiles = readdirSync(resolve(ROOT, 'cases'))
   .sort()
 
 describe('casos dorados — el intérprete de referencia', () => {
-  it('hay al menos 20 casos', () => expect(caseFiles.length).toBeGreaterThanOrEqual(20))
+  it('hay al menos 25 casos', () => expect(caseFiles.length).toBeGreaterThanOrEqual(25))
 
   describe.each(caseFiles)('%s', file => {
     const c: CaseFile = read(resolve(ROOT, 'cases', file))

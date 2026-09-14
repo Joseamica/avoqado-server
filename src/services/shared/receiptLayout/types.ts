@@ -6,7 +6,7 @@ export type Emphasis = 'normal' | 'bold' | 'double'
 /** Lo que el intérprete produce. El backend de cada app lo convierte a bytes o llamadas del SDK. */
 export type LogicalLine =
   | { kind: 'text'; text: string; align: Align; bold: boolean; double: boolean }
-  | { kind: 'image'; ref: 'logo' | 'avoqadoMark'; widthPct: number }
+  | { kind: 'image'; ref: 'logo' | 'avoqadoMark'; widthPct: number; align: Align }
   | { kind: 'qr'; data: string }
   | { kind: 'barcode'; data: string }
   | { kind: 'feed'; lines: number }
@@ -52,13 +52,16 @@ export interface ReceiptSale {
   discountCents: number | null
   tipCents: number | null
   totalCents: number
-  tender: ReceiptTender
+  /** null = pre-cuenta: todavía no hay pago, así que el bloque `payment` no imprime nada. */
+  tender: ReceiptTender | null
   staffName?: string | null
   transactionId?: string | null
   receiptUrl?: string | null
   areaDeliveryCode?: string | null
   reprint?: { printedAt: string } | null
   appVersion?: string | null
+  /** false = el negocio no tiene autofactura: la leyenda por defecto del QR no promete factura. */
+  autofacturaAvailable?: boolean | null
 }
 
 export interface ReceiptFiscalEmisor {

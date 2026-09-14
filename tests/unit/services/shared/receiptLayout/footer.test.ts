@@ -85,6 +85,17 @@ describe('renderPayment — el voucher de tarjeta SIEMPRE lleva autorización y 
     )
     expect(exacto).toHaveLength(3)
   })
+  it('P1 una etiqueta de pago larga no se pasa del ancho', () => {
+    const r = renderPayment(
+      { type: 'payment', showChange: true, showCardLastFour: true },
+      input({ tender: { kind: 'OTHER', label: 'Transferencia bancaria BBVA empresarial' } }),
+      W,
+    )
+    for (const l of r) if (l.kind === 'text') expect(l.text.length).toBeLessThanOrEqual(W)
+  })
+  it('P1 pre-cuenta: sin tender el bloque de pago no imprime nada', () => {
+    expect(renderPayment({ type: 'payment', showChange: true, showCardLastFour: true }, input({ tender: null }), W)).toEqual([])
+  })
 })
 
 describe('renderAreaDelivery', () => {
@@ -106,6 +117,20 @@ describe('renderQr, renderReference, renderSignature', () => {
     expect(r).toContainEqual({ kind: 'qr', data: 'https://r.avoqado.io/x/abc' })
     expect(r).toContainEqual({ kind: 'text', text: 'Escanea para tu recibo', align: 'center', bold: false, double: false })
   })
+  it('P1 sin autofactura la leyenda POR DEFECTO no promete factura; una leyenda propia se respeta', () => {
+    const def = renderQr({ type: 'qr', caption: 'Escanea para tu recibo y factura' }, input({ autofacturaAvailable: false }), W)
+    expect(def).toContainEqual({ kind: 'text', text: 'Escanea para tu recibo digital', align: 'center', bold: false, double: false })
+    const propia = renderQr({ type: 'qr', caption: 'Síguenos y factura' }, input({ autofacturaAvailable: false }), W)
+    expect(propia).toContainEqual({ kind: 'text', text: 'Síguenos y factura', align: 'center', bold: false, double: false })
+    const desconocido = renderQr({ type: 'qr', caption: 'Escanea para tu recibo y factura' }, input(), 48)
+    expect(desconocido).toContainEqual({
+      kind: 'text',
+      text: 'Escanea para tu recibo y factura',
+      align: 'center',
+      bold: false,
+      double: false,
+    })
+  })
   it('referencia: ID y versión según sus interruptores', () => {
     expect(
       renderReference({ type: 'reference', showTransactionId: true, showAppVersion: true }, input({ appVersion: '3.1.0' }), W),
@@ -118,7 +143,7 @@ describe('renderQr, renderReference, renderSignature', () => {
   it('🔴 la firma: isotipo, «Powered by Avoqado» y el corte — siempre igual', () => {
     expect(renderSignature({ type: 'signature' }, input(), W)).toEqual([
       { kind: 'feed', lines: 1 },
-      { kind: 'image', ref: 'avoqadoMark', widthPct: 15 },
+      { kind: 'image', ref: 'avoqadoMark', widthPct: 15, align: 'center' },
       { kind: 'feed', lines: 1 },
       { kind: 'text', text: 'Powered by Avoqado', align: 'center', bold: false, double: false },
       { kind: 'cut' },

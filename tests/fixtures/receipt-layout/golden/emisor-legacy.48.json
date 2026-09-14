@@ -171,7 +171,7 @@
     },
     {
       "kind": "text",
-      "text": "Morelos 12, Toluca, Estado de México CP 50000",
+      "text": "Morelos 12, Toluca, Estado de México, CP 50000",
       "align": "center",
       "bold": false,
       "double": false
@@ -227,7 +227,7 @@
     },
     {
       "kind": "text",
-      "text": "CantArtículo                              Precio",
+      "text": "Cant Artículo                             Precio",
       "align": "left",
       "bold": true,
       "double": false
@@ -241,7 +241,7 @@
     },
     {
       "kind": "text",
-      "text": "2   Galleta de avena                      $90.00",
+      "text": "2    Galleta de avena                     $90.00",
       "align": "left",
       "bold": false,
       "double": false
@@ -262,7 +262,7 @@
     },
     {
       "kind": "text",
-      "text": "1   Café americano                        $30.00",
+      "text": "1    Café americano                       $30.00",
       "align": "left",
       "bold": false,
       "double": false
@@ -392,7 +392,8 @@
     {
       "kind": "image",
       "ref": "avoqadoMark",
-      "widthPct": 15
+      "widthPct": 15,
+      "align": "center"
     },
     {
       "kind": "feed",

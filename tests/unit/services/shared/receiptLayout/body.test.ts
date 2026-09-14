@@ -44,12 +44,12 @@ describe('renderItems', () => {
       W,
     )
     expect(r).toEqual([
-      left('Cant' + 'Artículo'.padEnd(18) + '    Precio', true),
+      left('Cant Artículo             Precio', true),
       left('-'.repeat(32)),
-      left('2   ' + 'Galleta'.padEnd(18) + '    $90.00'),
+      left('2    Galleta              $90.00'),
       left('  + Sin azúcar'),
       left('  Nota: Para llevar'),
-      left('1   ' + 'Café de cortesía'.padEnd(18) + '  CORTESÍA'),
+      left('1    Café de cortesía   CORTESÍA'),
     ])
   })
   it('combos: el encabezado en negritas con su precio; el componente indentado y SIN precio', () => {
@@ -63,8 +63,8 @@ describe('renderItems', () => {
       }),
       W,
     )
-    expect(r[2]).toEqual(left('1   ' + 'Combo desayuno'.padEnd(18) + '   $120.00', true))
-    expect(r[3]).toEqual(left('    ' + '  1x Café'.padEnd(18) + ' '.repeat(10)))
+    expect(r[2]).toEqual(left('1    Combo desayuno      $120.00', true))
+    expect(r[3]).toEqual(left('       1x Café                  '))
   })
   it('peso y origen por área salen bajo el nombre; modificadores y notas se apagan con sus interruptores', () => {
     const r = renderItems(
@@ -85,10 +85,27 @@ describe('renderItems', () => {
       }),
       W,
     )
-    expect(texts(r.slice(2))).toEqual([
-      '1   ' + 'Queso'.padEnd(18) + '   $182.70',
-      '  0.435 kg × $420.00/kg',
-      '  Cremería · Vale 9016719357',
-    ])
+    expect(texts(r.slice(2))).toEqual(['1    Queso               $182.70', '  0.435 kg × $420.00/kg', '  Cremería · Vale 9016719357'])
+  })
+
+  it('P1 ningún renglón de artículos se pasa del ancho, ni con nombres, modificadores y notas largos', () => {
+    const r = renderItems(
+      { type: 'items', showModifiers: true, showNotes: true },
+      input({
+        items: [
+          {
+            name: 'Chilaquiles verdes con pollo deshebrado y crema',
+            quantity: 1,
+            unitPriceCents: 16500,
+            totalPriceCents: 16500,
+            modifiers: ['Leche de almendra orgánica sin azúcar añadida'],
+            note: 'Sin cebolla y la salsa aparte por favor, alergia',
+          },
+        ],
+      }),
+      W,
+    )
+    for (const l of texts(r)) expect(l.length).toBeLessThanOrEqual(W)
+    expect(texts(r).join(' ')).toContain('deshebrado')
   })
 })

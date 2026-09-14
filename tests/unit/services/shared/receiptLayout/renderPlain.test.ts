@@ -5,7 +5,7 @@ describe('renderPlain — el ticket en texto para mirarlo', () => {
   it('centra, alinea, marca imágenes y códigos, y escribe las líneas grandes en mayúsculas a su ancho lógico', () => {
     const out = renderPlain(
       [
-        { kind: 'image', ref: 'logo', widthPct: 60 },
+        { kind: 'image', ref: 'logo', widthPct: 60, align: 'center' },
         { kind: 'text', text: 'Cafe', align: 'center', bold: false, double: true },
         { kind: 'text', text: 'Orden #:  42', align: 'left', bold: false, double: false },
         { kind: 'feed', lines: 2 },
@@ -28,5 +28,17 @@ describe('renderPlain — el ticket en texto para mirarlo', () => {
       '             fin',
       '---------------- corte',
     ])
+  })
+
+  it('la imagen se coloca con SU alineación, no siempre al centro', () => {
+    const out = renderPlain(
+      [
+        { kind: 'image', ref: 'logo', widthPct: 40, align: 'right' },
+        { kind: 'image', ref: 'logo', widthPct: 40, align: 'left' },
+      ],
+      16 as unknown as PaperWidth,
+    )
+    // '[LOGO]' son 6 columnas: a la derecha en 16 lleva 10 espacios delante.
+    expect(out.split('\n')).toEqual(['          [LOGO]', '[LOGO]'])
   })
 })

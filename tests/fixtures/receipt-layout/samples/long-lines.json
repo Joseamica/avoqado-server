@@ -1,0 +1,7 @@
+{ "kind": "SALE", "orderNumber": "1043", "orderType": "Para llevar con entrega a domicilio", "occurredAt": "2026-09-02T18:05:00.000Z", "timezone": "America/Mexico_City",
+  "items": [
+    { "name": "Chilaquiles verdes con pollo deshebrado y crema", "quantity": 1, "unitPriceCents": 16500, "totalPriceCents": 16500, "modifiers": ["Leche de almendra orgánica sin azúcar añadida"], "note": "Sin cebolla y la salsa aparte por favor, alergia" }
+  ],
+  "subtotalCents": 16500, "taxCents": 2276, "discountCents": null, "tipCents": null, "totalCents": 16500,
+  "tender": { "kind": "OTHER", "label": "Transferencia bancaria BBVA empresarial" },
+  "staffName": "María Guadalupe Fernández de la Garza Ortega", "transactionId": "pay_0002_con_un_identificador_muy_largo_de_prueba", "receiptUrl": "https://r.avoqado.io/x/def" }

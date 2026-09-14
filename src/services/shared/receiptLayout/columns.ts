@@ -1,24 +1,37 @@
 /**
- * Puerto 1:1 de las primitivas de acomodo de avoqado-android
- * (`printing/data/ESCPOSPrinter.kt`: printTwoColumns, printThreeColumns, printDivider).
- * Los anchos (4 para cantidad, 10 para precio) son los del ticket actual: si cambian
- * aquí, cambian los casos dorados y por tanto las tres apps.
+ * Primitivas de acomodo del ticket. Nacieron como puerto de `ESCPOSPrinter.kt` (printTwoColumns,
+ * printThreeColumns, printDivider) y desde la Fase 3 garantizan además que NINGÚN renglón se pasa
+ * del ancho: un renglón largo lo parte la impresora donde quiere y sin alinear.
+ * Cambiar un ancho aquí cambia los casos dorados y, por tanto, las tres apps.
  */
-export const QTY_WIDTH = 4
+export const QTY_WIDTH = 5
 export const PRICE_WIDTH = 10
 
-export function twoColumns(left: string, right: string, width: number): string {
-  const rightLen = right.length
-  const leftLen = Math.max(0, Math.min(left.length, width - rightLen - 1))
-  const paddingLen = width - leftLen - rightLen
-  return left.slice(0, leftLen) + ' '.repeat(Math.max(paddingLen, 1)) + right
+/** Etiqueta a la izquierda y valor a la derecha. Si no caben juntos: la etiqueta arriba y el valor debajo, pegado a la derecha. Nunca recorta. */
+export function twoColumnLines(left: string, right: string, width: number): string[] {
+  if (left.length + 1 + right.length <= width) return [left + ' '.repeat(width - left.length - right.length) + right]
+  return [...wrap(left, width), ...wrap(right, width).map(l => l.padStart(width))]
 }
 
-export function threeColumns(qty: string, name: string, price: string, width: number): string {
+/**
+ * Cantidad · artículo · precio. El nombre NUNCA se recorta: se envuelve bajo su propia columna
+ * (la descripción es dato del comprobante). `indent` sangra el nombre (componentes de combo).
+ * La columna de cantidad mide 5 y CRECE con la cantidad (siempre un espacio detrás): una fija
+ * pegaba «10000Artículo» y con 123456 el renglón medía 33 en papel de 32.
+ */
+export function itemLines(qty: string, name: string, price: string, width: number, indent = 0): string[] {
+  const qtyWidth = Math.max(QTY_WIDTH, qty.length + 1)
   const priceWidth = Math.max(PRICE_WIDTH, price.length)
-  const nameWidth = width - QTY_WIDTH - priceWidth
-  const truncatedName = name.slice(0, Math.max(0, nameWidth - 1))
-  return qty.padEnd(QTY_WIDTH) + truncatedName.padEnd(nameWidth) + price.padStart(priceWidth)
+  const nameWidth = width - qtyWidth - priceWidth
+  const chunks = wrap(name, Math.max(1, nameWidth - 1 - indent)).map(c => ' '.repeat(indent) + c)
+  return chunks.map((chunk, i) =>
+    i === 0 ? qty.padEnd(qtyWidth) + chunk.padEnd(nameWidth) + price.padStart(priceWidth) : ' '.repeat(qtyWidth) + chunk,
+  )
+}
+
+/** Un renglón auxiliar bajo el artículo (peso, área, modificador, nota): sangría de 2 y envuelto al ancho. */
+export function indentedLines(text: string, width: number): string[] {
+  return wrap(text, width - 2).map(l => `  ${l}`)
 }
 
 export function divider(width: number, char = '-'): string {

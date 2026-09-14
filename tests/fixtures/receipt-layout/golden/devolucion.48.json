@@ -154,7 +154,8 @@
     {
       "kind": "image",
       "ref": "logo",
-      "widthPct": 60
+      "widthPct": 60,
+      "align": "center"
     },
     {
       "kind": "feed",
@@ -190,7 +191,7 @@
     },
     {
       "kind": "text",
-      "text": "Nápoles 47, Cuauhtémoc, Ciudad de México CP",
+      "text": "Nápoles 47, Cuauhtémoc, Ciudad de México, CP",
       "align": "center",
       "bold": false,
       "double": false
@@ -260,7 +261,7 @@
     },
     {
       "kind": "text",
-      "text": "CantArtículo                              Precio",
+      "text": "Cant Artículo                             Precio",
       "align": "left",
       "bold": true,
       "double": false
@@ -274,7 +275,7 @@
     },
     {
       "kind": "text",
-      "text": "1   Galleta de avena                      $45.00",
+      "text": "1    Galleta de avena                     $45.00",
       "align": "left",
       "bold": false,
       "double": false
@@ -381,7 +382,8 @@
     {
       "kind": "image",
       "ref": "avoqadoMark",
-      "widthPct": 15
+      "widthPct": 15,
+      "align": "center"
     },
     {
       "kind": "feed",
