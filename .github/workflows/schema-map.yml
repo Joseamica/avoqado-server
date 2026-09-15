@@ -77,7 +77,7 @@ jobs:
       # never re-triggers this workflow (which is gated on prisma/schema.prisma).
       - name: 💾 Commit updated schema map
         if: github.ref != 'refs/heads/main'
-        uses: stefanzweifel/git-auto-commit-action@v5
+        uses: stefanzweifel/git-auto-commit-action@v7
         with:
           commit_message: 'chore: regenerate schema map'
           file_pattern: 'docs/SCHEMA_MAP.md'
