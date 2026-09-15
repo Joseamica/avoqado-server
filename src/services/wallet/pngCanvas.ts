@@ -97,6 +97,67 @@ export function encodePng(width: number, height: number, pixels: Buffer): Buffer
   ])
 }
 
+/**
+ * Achica una imagen RGBA para que su lado mayor sea `maxLado`, conservando la proporción.
+ *
+ * 🔴 Existe porque el sello propio del negocio se pintaba desde su archivo ORIGINAL en cada
+ * descarga. El de Testarudo mide 2225×2550 y nunca se dibuja a más de ~156 px: `drawImage`
+ * recorría 5.6 millones de píxeles por cada uno de los 16 sellos de las dos franjas del pase, y
+ * eso —más abrirlo— congelaba el servidor 2.2–2.5 s por descarga (medido en producción).
+ *
+ * 🔴 Usa el MISMO promedio que `Canvas.drawImage`, ponderado por alfa y con las mismas fronteras
+ * de bloque, a propósito. Ese promedio se puede componer: reducir primero y dibujar después da
+ * prácticamente la misma franja que dibujar desde el original. Un reescalado distinto (vecino
+ * más cercano, bilineal) cambiaría el sello del negocio, y una optimización que altera el dibujo
+ * de un cliente no es una optimización.
+ *
+ * Guarda el color SIN premultiplicar y el alfa promedio, que es lo que `drawImage` espera leer.
+ * Una imagen que ya cabe se devuelve tal cual, sin copiarla.
+ */
+export function reducirImagen(img: { width: number; height: number; pixels: Buffer }, maxLado: number) {
+  if (img.width <= 0 || img.height <= 0 || Math.max(img.width, img.height) <= maxLado) return img
+
+  const escala = maxLado / Math.max(img.width, img.height)
+  const destW = Math.max(1, Math.round(img.width * escala))
+  const destH = Math.max(1, Math.round(img.height * escala))
+  const pixels = Buffer.alloc(destW * destH * 4)
+
+  for (let dy = 0; dy < destH; dy++) {
+    const sy0 = Math.floor((dy * img.height) / destH)
+    const sy1 = Math.max(sy0 + 1, Math.floor(((dy + 1) * img.height) / destH))
+    for (let dx = 0; dx < destW; dx++) {
+      const sx0 = Math.floor((dx * img.width) / destW)
+      const sx1 = Math.max(sx0 + 1, Math.floor(((dx + 1) * img.width) / destW))
+
+      let r = 0
+      let g = 0
+      let b = 0
+      let a = 0
+      let n = 0
+      for (let sy = sy0; sy < sy1; sy++) {
+        for (let sx = sx0; sx < sx1; sx++) {
+          const i = (sy * img.width + sx) * 4
+          const al = img.pixels[i + 3] / 255
+          r += img.pixels[i] * al
+          g += img.pixels[i + 1] * al
+          b += img.pixels[i + 2] * al
+          a += al
+          n++
+        }
+      }
+      // Un bloque totalmente transparente se queda en ceros: `drawImage` lo salta por su alfa.
+      if (!n || a <= 0) continue
+      const o = (dy * destW + dx) * 4
+      pixels[o] = Math.round(r / a)
+      pixels[o + 1] = Math.round(g / a)
+      pixels[o + 2] = Math.round(b / a)
+      pixels[o + 3] = Math.round((a / n) * 255)
+    }
+  }
+
+  return { width: destW, height: destH, pixels }
+}
+
 /** Lienzo de píxeles RGB con lo mínimo para dibujar una banda de sellos. */
 /** Luminosidad percibida, 0 a 1. Coeficientes de Rec. 709. */
 function luminosidad(c: Rgb): number {
