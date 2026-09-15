@@ -1,5 +1,7 @@
+import { createHash } from 'crypto'
 import logger from '../../config/logger'
 import { decodePng, type DecodedPng } from './pngDecode'
+import { reducirImagen } from './pngCanvas'
 
 /**
  * Trae una imagen que el negocio subió, para meterla en su pase.
@@ -86,16 +88,76 @@ export function readPngSize(buffer: Buffer): PngSize | null {
 }
 
 /**
- * Trae una imagen del negocio y la ABRE, lista para componerla.
+ * El lado mayor con el que se guarda el sello del negocio ya abierto.
+ *
+ * El sello nunca se pinta a más de ~156 px: es el caso de UN solo sello en la banda de 750×246,
+ * la más grande que existe (pase de Apple @2x, franja de Google y vista previa del dashboard).
+ * 480 es el triple. Medido con el sello REAL de Testarudo, la franja sale idéntica con 320, 480 o
+ * 640 (0.00% de canales cambian más de 16 niveles); se eligió 480 por margen para sellos con
+ * letras o líneas finas, que son los que más se alejan. Cuesta 13.5 ms dibujar las dos franjas
+ * del pase, contra ~600 ms desde el original.
+ */
+export const MAX_LADO_SELLO = 480
+
+/**
+ * Cuántos sellos distintos se recuerdan. Cada uno pesa como mucho 480×480×4 ≈ 920 KB, así que
+ * el tope son ~15 MB. Hoy hay dos negocios con sello propio; esto aguanta de sobra el crecimiento
+ * sin convertirse en una fuga de memoria.
+ */
+export const CACHE_SELLOS_MAX = 16
+
+/** Huella del archivo → sello ya abierto y reducido. El orden del `Map` es el de uso (LRU). */
+const cacheDeSellos = new Map<string, DecodedPng>()
+
+/** Sólo para las pruebas: cada una debe empezar sin nada recordado. */
+export function limpiarCacheDeSellos(): void {
+  cacheDeSellos.clear()
+}
+
+/**
+ * Trae una imagen del negocio y la ABRE, lista para componerla — ya reducida a
+ * `MAX_LADO_SELLO`, que es a lo que de verdad se pinta.
  *
  * Devuelve null ante cualquier tropiezo — red, formato, un PNG entrelazado — y el
  * dibujo cae a la forma del catálogo. La credencial de un cliente no puede depender
  * de que el archivo del negocio esté impecable.
+ *
+ * 🔴 Abrir y reducir se hace UNA vez por archivo, no en cada descarga. Antes, bajar la tarjeta de
+ * Apple de Testarudo congelaba el servidor 2.2–2.5 s (medido en producción): abrir su sello de
+ * 2225×2550 eran 358 ms y pegarlo 16 veces en las franjas otros 242 ms, todo en el hilo que
+ * atiende los cobros. Bajar el archivo sigue ocurriendo en cada llamada, pero eso es red y no
+ * congela nada.
+ *
+ * 🔴 La llave es la HUELLA DEL CONTENIDO, no la URL. El sello se guarda siempre en la misma
+ * dirección (`.../wallet/stamp.png`) y subir otro la sobrescribe: un caché por URL le seguiría
+ * mostrando al negocio —y a sus clientes— la imagen anterior para siempre.
+ *
+ * Un archivo que no abre NO se recuerda: la siguiente descarga lo vuelve a intentar.
  */
 export async function fetchDecodedPng(url: string | null | undefined): Promise<DecodedPng | null> {
   const buffer = await fetchPng(url)
   if (!buffer) return null
+
+  const huella = createHash('sha1').update(buffer).digest('hex')
+  const recordado = cacheDeSellos.get(huella)
+  if (recordado) {
+    // Se mueve al final: es el más recién usado.
+    cacheDeSellos.delete(huella)
+    cacheDeSellos.set(huella, recordado)
+    return recordado
+  }
+
   const abierto = decodePng(buffer)
-  if (!abierto) logger.warn('El PNG llegó pero no se pudo abrir; se usa la forma del catálogo', { url })
-  return abierto
+  if (!abierto) {
+    logger.warn('El PNG llegó pero no se pudo abrir; se usa la forma del catálogo', { url })
+    return null
+  }
+
+  const listo = reducirImagen(abierto, MAX_LADO_SELLO)
+  cacheDeSellos.set(huella, listo)
+  if (cacheDeSellos.size > CACHE_SELLOS_MAX) {
+    // El primero del `Map` es el que lleva más tiempo sin usarse.
+    cacheDeSellos.delete(cacheDeSellos.keys().next().value as string)
+  }
+  return listo
 }
