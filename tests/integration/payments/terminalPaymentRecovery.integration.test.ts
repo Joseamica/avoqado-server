@@ -2222,6 +2222,7 @@ describe('el predicado de bloqueo y el desenlace canónico no pueden divergir', 
     'TPV_NEVER_RECEIVED',
     'TPV_INBOX_NOT_FOUND',
     'OPERATOR_RECONCILED_NO_CHARGE',
+    'NO_EVIDENCE_AFTER_WINDOW',
     'REJECTED_TERMINAL_BUSY',
   ]
   const DISPOSICIONES = [null, 'ACTIVE', 'ACCEPTED', 'ALREADY_RESOLVED']

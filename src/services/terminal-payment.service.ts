@@ -333,6 +333,9 @@ const CODIGOS_SIN_COBRO: Record<string, { evidencia: TerminalOutcomeEvidence; cl
   TPV_NEVER_RECEIVED: { evidencia: 'NEVER_DELIVERED', clase: 'SERVER' },
   TPV_INBOX_NOT_FOUND: { evidencia: 'NOT_FOUND_CONTINUOUS_INBOX', clase: 'TERMINAL' },
   OPERATOR_RECONCILED_NO_CHARGE: { evidencia: 'OPERATOR_RECONCILED', clase: 'OPERATOR' },
+  // 🔴 Lo escribe SÓLO `releaseUnprovenNegative` (Task 2): una terminal que lo mande en su sobre se degrada igual que
+  // cualquier negativo sin evidencia (`closeRow` sólo acredita PRE_AUTHORIZATION / PROCESSOR_DECLINED).
+  NO_EVIDENCE_AFTER_WINDOW: { evidencia: 'NO_EVIDENCE_AFTER_WINDOW', clase: 'SERVER' },
 }
 
 /**
@@ -658,6 +661,8 @@ export type TerminalOutcomeEvidence =
   | 'REJECTED_AT_ADMISSION'
   | 'NOT_FOUND_CONTINUOUS_INBOX'
   | 'OPERATOR_RECONCILED'
+  /** La ventana de confirmación venció sin webhook, sin historial y sin cajero: el SERVIDOR libera y vigila 30 min (plan 16-sep). */
+  | 'NO_EVIDENCE_AFTER_WINDOW'
 /** Quién acredita el desenlace: la TERMINAL (lo dijo el aparato), el SERVIDOR (nunca salió de aquí) o un OPERADOR. */
 export type TerminalEvidenceClass = 'TERMINAL' | 'SERVER' | 'OPERATOR'
 

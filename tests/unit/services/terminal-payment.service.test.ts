@@ -11,11 +11,16 @@
  * 2. REGRESSION TESTS — single charge, not-connected, independent terminals
  */
 
-import { Prisma } from '@prisma/client'
+import { Prisma, TerminalPaymentRequestStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import socketManager from '@/communication/sockets/managers/socketManager'
 import { terminalRegistry } from '@/communication/sockets/terminal-registry'
-import { leerProcedencia, TERMINAL_ATTEMPT_LINK_VERSION, terminalPaymentService } from '@/services/terminal-payment.service'
+import {
+  desenlaceCanonico,
+  leerProcedencia,
+  TERMINAL_ATTEMPT_LINK_VERSION,
+  terminalPaymentService,
+} from '@/services/terminal-payment.service'
 import {
   BadRequestError,
   OrderAlreadyPaidError,
@@ -2163,5 +2168,21 @@ describe('Codex R1 (P2) · resolvePendingFromDurableState consulta por LOTES aco
     } finally {
       for (const id of ids) mapa.delete(id)
     }
+  })
+})
+
+describe('desenlaceCanonico — ventana de confirmación', () => {
+  it('FAILED/NO_EVIDENCE_AFTER_WINDOW acredita «no se cobró» con clase SERVER (la ventana venció sin webhook, historial ni cajero)', () => {
+    expect(desenlaceCanonico({ status: TerminalPaymentRequestStatus.FAILED, failureCode: 'NO_EVIDENCE_AFTER_WINDOW' })).toEqual({
+      outcome: 'NOT_CHARGED',
+      outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW',
+      evidenceClass: 'SERVER',
+    })
+  })
+
+  it('un TIMED_OUT con resultado de la terminal pero sin código sigue UNRESOLVED: la ventana todavía no venció', () => {
+    expect(
+      desenlaceCanonico({ status: TerminalPaymentRequestStatus.TIMED_OUT, failureCode: null, resultJson: { status: 'timeout' } }).outcome,
+    ).toBe('UNRESOLVED')
   })
 })
