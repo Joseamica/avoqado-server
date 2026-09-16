@@ -590,7 +590,13 @@ describe('onOrderCancelled', () => {
   it('además intenta la reversa del premio (defensa en profundidad): consulta el QUALIFIED de esa orden', async () => {
     // Prepara el estado que pretende medir: la orden YA está cancelada (la política de reversión la
     // relee dentro de la transacción) y hay un referido vivo que la pre-comprobación encuentra.
-    mockedPrisma.order.findUnique.mockResolvedValue({ id: 'o-cancelada', status: 'CANCELLED', paymentStatus: 'PENDING', total: 100, tipAmount: 0 })
+    mockedPrisma.order.findUnique.mockResolvedValue({
+      id: 'o-cancelada',
+      status: 'CANCELLED',
+      paymentStatus: 'PENDING',
+      total: 100,
+      tipAmount: 0,
+    })
     mockedPrisma.referral.findFirst.mockResolvedValueOnce({ id: 'ref-viva', status: 'QUALIFIED' })
     mockedPrisma.$transaction.mockImplementation(async (fn: any) => fn(mockedPrisma))
     await onOrderCancelled({ orderId: 'o-cancelada', venueId: 'v1' })

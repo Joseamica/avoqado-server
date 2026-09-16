@@ -413,9 +413,7 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
     // Mismo escenario que «reequilibra hacia PROPINA»: se pidió no tocar la propina y se tomó.
     await refundService.recordRefund(VENUE, { ...cuerpo(3000), tipRefundCents: 0 } as never, 'staff-1')
 
-    const asiento = (logAction as jest.Mock).mock.calls
-      .map(([a]: [any]) => a)
-      .find((a: any) => a.action === 'REFUND_SPLIT_NOT_HONORED')
+    const asiento = (logAction as jest.Mock).mock.calls.map(([a]: [any]) => a).find((a: any) => a.action === 'REFUND_SPLIT_NOT_HONORED')
 
     expect(asiento).toBeDefined()
     expect(asiento.venueId).toBe(VENUE)
@@ -474,9 +472,7 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
 
     await refundService.recordRefund(VENUE, { ...cuerpo(10000), tipRefundCents: 0 } as never, 'staff-1')
 
-    const asientos = (logAction as jest.Mock).mock.calls
-      .map(([a]: [any]) => a)
-      .filter((a: any) => a.action === 'REFUND_SPLIT_NOT_HONORED')
+    const asientos = (logAction as jest.Mock).mock.calls.map(([a]: [any]) => a).filter((a: any) => a.action === 'REFUND_SPLIT_NOT_HONORED')
     expect(asientos).toHaveLength(0)
   })
 
@@ -556,11 +552,11 @@ describe('Task 5r — lo que el dashboard escribe es lo que la terminal lee', ()
     }
 
     ;(prismaMock as any).payment = {
-    // Task 5 (outbox de efectos): el reembolso relee su propio Payment para encolar los efectos
-    // diferidos DENTRO de la transacción (`enqueueRefundPaymentEffectsInTx`). Se delega en el
-    // `findFirst` que este fixture ya monta bien, para que el pago del reembolso herede venue y
-    // orden del original — devolver otros valores dispararía PAYMENT_EFFECT_SOURCE_MISMATCH.
-    findUniqueOrThrow: jest.fn().mockImplementation(async (a: any) => (prismaMock as any).payment.findFirst({ where: a?.where })),
+      // Task 5 (outbox de efectos): el reembolso relee su propio Payment para encolar los efectos
+      // diferidos DENTRO de la transacción (`enqueueRefundPaymentEffectsInTx`). Se delega en el
+      // `findFirst` que este fixture ya monta bien, para que el pago del reembolso herede venue y
+      // orden del original — devolver otros valores dispararía PAYMENT_EFFECT_SOURCE_MISMATCH.
+      findUniqueOrThrow: jest.fn().mockImplementation(async (a: any) => (prismaMock as any).payment.findFirst({ where: a?.where })),
       findUnique: jest.fn(),
       findFirst: jest.fn().mockResolvedValue({ orderId: 'order-1' }),
       findMany: jest.fn().mockResolvedValue([]),

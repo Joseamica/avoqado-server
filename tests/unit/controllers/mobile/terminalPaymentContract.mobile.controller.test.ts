@@ -70,15 +70,35 @@ beforeEach(() => {
 
 describe('GET /terminal-payment/:requestId — aditivo', () => {
   it('devuelve los campos nuevos SIN tocar los que ya leían las apps publicadas', async () => {
-    getPaymentStatusMock.mockResolvedValue(estado({ status: 'COMPLETED', paymentId: 'pay-1', failureCode: null, outcome: 'CHARGED', outcomeEvidence: 'PAYMENT_RECORDED', evidenceClass: 'TERMINAL' }))
+    getPaymentStatusMock.mockResolvedValue(
+      estado({
+        status: 'COMPLETED',
+        paymentId: 'pay-1',
+        failureCode: null,
+        outcome: 'CHARGED',
+        outcomeEvidence: 'PAYMENT_RECORDED',
+        evidenceClass: 'TERMINAL',
+      }),
+    )
     const res = buildRes()
     await getTerminalPaymentStatus({ params: { venueId, requestId } } as unknown as Request, res)
 
     expect(res.statusCode).toBe(200)
     // Lo de siempre.
-    expect(res.payload).toMatchObject({ success: true, inProgress: false, status: 'COMPLETED', paymentId: 'pay-1', cancelDisposition: null })
+    expect(res.payload).toMatchObject({
+      success: true,
+      inProgress: false,
+      status: 'COMPLETED',
+      paymentId: 'pay-1',
+      cancelDisposition: null,
+    })
     // Lo nuevo.
-    expect(res.payload).toMatchObject({ outcome: 'CHARGED', outcomeEvidence: 'PAYMENT_RECORDED', evidenceClass: 'TERMINAL', failureCode: null })
+    expect(res.payload).toMatchObject({
+      outcome: 'CHARGED',
+      outcomeEvidence: 'PAYMENT_RECORDED',
+      evidenceClass: 'TERMINAL',
+      failureCode: null,
+    })
   })
 
   it('🔴 `inProgress` se calcula sobre el status YA traducido: una FAILED sin evidencia sale UNKNOWN y NO en curso', async () => {
@@ -105,7 +125,8 @@ describe('GET /terminal-payment/:requestId — aditivo', () => {
 })
 
 describe('POST /terminal-payment/cancel — estado durable (§8 C.2)', () => {
-  const reqCancel = () => ({ params: { venueId }, body: { terminalId: 'term-1', requestId, reason: 'el cajero canceló' } }) as unknown as Request
+  const reqCancel = () =>
+    ({ params: { venueId }, body: { terminalId: 'term-1', requestId, reason: 'el cajero canceló' } }) as unknown as Request
 
   it('intención registrada Y emitida: `success` true como siempre, más el estado durable releído', async () => {
     const payment = estado({ status: 'CANCEL_REQUESTED', failureCode: null })
@@ -125,7 +146,11 @@ describe('POST /terminal-payment/cancel — estado durable (§8 C.2)', () => {
   })
 
   it('🔴 terminal apagada: la intención SÍ quedó guardada, y ahora se puede distinguir (antes era un `false` mudo)', async () => {
-    cancelPaymentMock.mockResolvedValue({ cancelIntent: 'RECORDED', cancelEmitted: false, payment: estado({ status: 'CANCEL_REQUESTED', failureCode: null }) })
+    cancelPaymentMock.mockResolvedValue({
+      cancelIntent: 'RECORDED',
+      cancelEmitted: false,
+      payment: estado({ status: 'CANCEL_REQUESTED', failureCode: null }),
+    })
     const res = buildRes()
     await cancelTerminalPayment(reqCancel(), res)
 
@@ -140,13 +165,23 @@ describe('POST /terminal-payment/cancel — estado durable (§8 C.2)', () => {
     cancelPaymentMock.mockResolvedValue({
       cancelIntent: 'ALREADY_FINAL',
       cancelEmitted: false,
-      payment: estado({ status: 'COMPLETED', paymentId: 'pay-1', outcome: 'CHARGED', outcomeEvidence: 'PAYMENT_RECORDED', failureCode: null }),
+      payment: estado({
+        status: 'COMPLETED',
+        paymentId: 'pay-1',
+        outcome: 'CHARGED',
+        outcomeEvidence: 'PAYMENT_RECORDED',
+        failureCode: null,
+      }),
     })
     const res = buildRes()
     await cancelTerminalPayment(reqCancel(), res)
 
     expect(res.statusCode).toBe(200)
-    expect(res.payload).toMatchObject({ success: false, cancelIntent: 'ALREADY_FINAL', payment: { outcome: 'CHARGED', paymentId: 'pay-1' } })
+    expect(res.payload).toMatchObject({
+      success: false,
+      cancelIntent: 'ALREADY_FINAL',
+      payment: { outcome: 'CHARGED', paymentId: 'pay-1' },
+    })
   })
 
   it('no existe esa solicitud: NOT_FOUND con payment null (ya no se dice «Terminal no conectada»)', async () => {
@@ -181,7 +216,9 @@ describe('POST /terminal-payment/cancel — estado durable (§8 C.2)', () => {
   })
 
   it('🔴 P2-14: un error TIPADO conserva su código, sus detalles y su estado HTTP (antes: 500 genérico)', async () => {
-    cancelPaymentMock.mockRejectedValue(new ConflictError('La orden tiene un cobro vivo', 'ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE', { requestId }))
+    cancelPaymentMock.mockRejectedValue(
+      new ConflictError('La orden tiene un cobro vivo', 'ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE', { requestId }),
+    )
     const res = buildRes()
     await cancelTerminalPayment(reqCancel(), res)
 

@@ -397,10 +397,15 @@ export async function deleteOrgGoal(venueId: string, goalId: string): Promise<vo
 /** Read the effective monthly threshold without loading report aggregates. */
 export async function getVenueMonthlyGoalPolicy(venueId: string, db: Prisma.TransactionClient) {
   const module = await db.module.findUnique({ where: { code: MODULE_CODES.COMMISSIONS }, select: { id: true } })
-  const venueModule = module ? await db.venueModule.findUnique({ where: { venueId_moduleId: { venueId, moduleId: module.id } }, select: { config: true } }) : null
+  const venueModule = module
+    ? await db.venueModule.findUnique({ where: { venueId_moduleId: { venueId, moduleId: module.id } }, select: { config: true } })
+    : null
   const active = venueModule ? getSalesGoalsFromConfig(venueModule.config).filter(g => g.active) : []
   if (active.length) return active.find(g => g.staffId === null && g.period === 'MONTHLY') ?? null
   const organizationId = await getOrgIdFromVenue(venueId, db)
-  const goal = await db.organizationSalesGoalConfig.findFirst({ where: { organizationId, active: true, period: 'MONTHLY' }, select: { goal: true } })
+  const goal = await db.organizationSalesGoalConfig.findFirst({
+    where: { organizationId, active: true, period: 'MONTHLY' },
+    select: { goal: true },
+  })
   return goal ? { goal: Number(goal.goal) } : null
 }

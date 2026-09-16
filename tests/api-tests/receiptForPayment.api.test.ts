@@ -96,7 +96,9 @@ describe.each(RUTAS)('GET liga del recibo — namespace %s', (_namespace, RUTA) 
   })
 
   it('🔴 403 entre negocios: un token de otro venue no saca la liga de este ticket', async () => {
-    const res = await request(app).get(RUTA).set('Authorization', `Bearer ${makeToken('OWNER', otherVenueId)}`)
+    const res = await request(app)
+      .get(RUTA)
+      .set('Authorization', `Bearer ${makeToken('OWNER', otherVenueId)}`)
 
     expect(res.status).toBe(403)
     expect(mockGenerateDigitalReceipt).not.toHaveBeenCalled()
@@ -105,7 +107,9 @@ describe.each(RUTAS)('GET liga del recibo — namespace %s', (_namespace, RUTA) 
   it('🔴 404 cuando el pago es de OTRO negocio (el servicio filtra por venue)', async () => {
     prismaMock.payment.findFirst.mockResolvedValue(null as never)
 
-    const res = await request(app).get(RUTA).set('Authorization', `Bearer ${makeToken('ADMIN')}`)
+    const res = await request(app)
+      .get(RUTA)
+      .set('Authorization', `Bearer ${makeToken('ADMIN')}`)
 
     expect(res.status).toBe(404)
     expect(mockGenerateDigitalReceipt).not.toHaveBeenCalled()
@@ -113,7 +117,9 @@ describe.each(RUTAS)('GET liga del recibo — namespace %s', (_namespace, RUTA) 
 
   describe('roles que SÍ pueden reimprimir', () => {
     it.each([['CASHIER'], ['WAITER'], ['MANAGER'], ['ADMIN'], ['OWNER']])('%s recibe 200 con la liga', async role => {
-      const res = await request(app).get(RUTA).set('Authorization', `Bearer ${makeToken(role)}`)
+      const res = await request(app)
+        .get(RUTA)
+        .set('Authorization', `Bearer ${makeToken(role)}`)
 
       expect(res.status).toBe(200)
       expect(res.body.success).toBe(true)
@@ -124,7 +130,9 @@ describe.each(RUTAS)('GET liga del recibo — namespace %s', (_namespace, RUTA) 
   })
 
   it('🔴 el cuerpo NO lleva el dataSnapshot ni los datos personales del cliente', async () => {
-    const res = await request(app).get(RUTA).set('Authorization', `Bearer ${makeToken('CASHIER')}`)
+    const res = await request(app)
+      .get(RUTA)
+      .set('Authorization', `Bearer ${makeToken('CASHIER')}`)
 
     expect(Object.keys(res.body.receipt).sort()).toEqual(['accessKey', 'autofacturaAvailable', 'receiptUrl'])
     expect(JSON.stringify(res.body)).not.toContain('cliente@ejemplo.com')

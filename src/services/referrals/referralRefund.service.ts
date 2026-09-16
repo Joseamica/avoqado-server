@@ -302,7 +302,10 @@ export async function revertQualifiedReferral(input: RevertReferralRewardInput):
   await prisma.$transaction(async tx => {
     await tx.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE id = ${input.orderId} AND "venueId" = ${input.venueId} FOR UPDATE`)
     if (!(await isOrderFullyReversed(input.orderId, input.venueId, tx))) return
-    await tx.referral.updateMany({ where: { qualifyingOrderId: input.orderId, venueId: input.venueId, status: 'PENDING' }, data: { status: 'VOID', voidedAt: new Date(), voidReason: input.reason } })
+    await tx.referral.updateMany({
+      where: { qualifyingOrderId: input.orderId, venueId: input.venueId, status: 'PENDING' },
+      data: { status: 'VOID', voidedAt: new Date(), voidReason: input.reason },
+    })
     const referral = await tx.referral.findFirst({
       where: { qualifyingOrderId: input.orderId, venueId: input.venueId, status: 'QUALIFIED' },
     })

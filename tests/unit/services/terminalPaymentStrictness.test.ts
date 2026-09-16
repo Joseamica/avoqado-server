@@ -71,7 +71,10 @@ describe('la lectura NUNCA espera y NUNCA lanza', () => {
     const err = jest.spyOn(logger, 'error')
     venueFindMany.mockRejectedValueOnce(new Error('boom'))
     await primeVenuesEstrictos()
-    expect(err).toHaveBeenCalledWith(expect.stringContaining('🚨 [terminal-payment strictness]'), expect.objectContaining({ cargadoAlgunaVez: false }))
+    expect(err).toHaveBeenCalledWith(
+      expect.stringContaining('🚨 [terminal-payment strictness]'),
+      expect.objectContaining({ cargadoAlgunaVez: false }),
+    )
     err.mockRestore()
   })
 })

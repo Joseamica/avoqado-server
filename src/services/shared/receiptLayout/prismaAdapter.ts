@@ -136,9 +136,7 @@ function aTender(payment: PaymentParaTicket): ReceiptTender {
 
 function aItem(i: OrderItemParaTicket): ReceiptSaleItem {
   const resumenPeso =
-    i.weightQuantity && i.weightUnit
-      ? `${i.weightQuantity.toString()} ${i.weightUnit} × $${i.unitPrice.toFixed(2)}/${i.weightUnit}`
-      : null
+    i.weightQuantity && i.weightUnit ? `${i.weightQuantity.toString()} ${i.weightUnit} × $${i.unitPrice.toFixed(2)}/${i.weightUnit}` : null
   const modificadores = i.modifiers.map(m => m.name).filter((n): n is string => Boolean(n))
   return {
     // Sin nombre denormalizado NI producto, el ticket dice «Artículo» — nunca «undefined».

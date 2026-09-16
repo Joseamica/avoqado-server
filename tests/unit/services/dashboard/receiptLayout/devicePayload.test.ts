@@ -4,8 +4,20 @@ import prisma from '@/utils/prismaClient'
 
 const mock = prisma as unknown as { venue: { findUnique: jest.Mock }; receiptLayout: { findUnique: jest.Mock } }
 
-const EMISOR_A = { id: 'emA', legalName: 'CAFE A SA', rfc: 'CAA010101AAA', lugarExpedicion: '06600', merchantConfigs: [{ merchantAccountId: 'maA' }] }
-const EMISOR_B = { id: 'emB', legalName: 'CAFE B SA', rfc: 'CBB020202BBB', lugarExpedicion: '06700', merchantConfigs: [{ merchantAccountId: 'maB' }, { merchantAccountId: null }] }
+const EMISOR_A = {
+  id: 'emA',
+  legalName: 'CAFE A SA',
+  rfc: 'CAA010101AAA',
+  lugarExpedicion: '06600',
+  merchantConfigs: [{ merchantAccountId: 'maA' }],
+}
+const EMISOR_B = {
+  id: 'emB',
+  legalName: 'CAFE B SA',
+  rfc: 'CBB020202BBB',
+  lugarExpedicion: '06700',
+  merchantConfigs: [{ merchantAccountId: 'maB' }, { merchantAccountId: null }],
+}
 const venue = (over: Partial<Record<string, unknown>> = {}) => ({
   name: 'Testarudo Cafe',
   logo: 'https://x/l.jpg',

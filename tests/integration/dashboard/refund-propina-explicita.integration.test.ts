@@ -261,10 +261,7 @@ describe('Reembolso con propina excluida explícitamente', () => {
     const reembolsos = await prisma.payment.findMany({
       where: { venueId, type: 'REFUND', orderId: cobro.orderId },
     })
-    const total = reembolsos.reduce(
-      (suma, r) => suma + Math.abs(Number(r.amount)) + Math.abs(Number(r.tipAmount)),
-      0,
-    )
+    const total = reembolsos.reduce((suma, r) => suma + Math.abs(Number(r.amount)) + Math.abs(Number(r.tipAmount)), 0)
     expect(reembolsos).toHaveLength(2)
     expect(total).toBe(110)
   })

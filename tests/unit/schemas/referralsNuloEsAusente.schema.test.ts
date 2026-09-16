@@ -39,12 +39,8 @@ describe('Referidos · un `intendedOrderId` nulo es lo mismo que no mandarlo', (
   })
 
   it('la llave ausente sigue valiendo, como siempre', () => {
-    expect(
-      ValidateReferralCodeSchema.safeParse({ params: { venueId: 'venue-1' }, body: baseValidar }).success,
-    ).toBe(true)
-    expect(
-      CaptureReferralSchema.safeParse({ params: { venueId: 'venue-1' }, body: baseCapturar }).success,
-    ).toBe(true)
+    expect(ValidateReferralCodeSchema.safeParse({ params: { venueId: 'venue-1' }, body: baseValidar }).success).toBe(true)
+    expect(CaptureReferralSchema.safeParse({ params: { venueId: 'venue-1' }, body: baseCapturar }).success).toBe(true)
   })
 
   it('y un id de verdad sigue llegando entero', () => {

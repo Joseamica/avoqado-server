@@ -458,6 +458,9 @@ export async function getStaffSalesGoal(venueId: string, staffId: string, tx?: P
 export async function getStaffSalesGoalPolicy(venueId: string, staffId: string, db: Prisma.TransactionClient) {
   const module = await db.module.findUnique({ where: { code: MODULE_CODES.COMMISSIONS }, select: { id: true } })
   if (!module) return null
-  const venueModule = await db.venueModule.findUnique({ where: { venueId_moduleId: { venueId, moduleId: module.id } }, select: { config: true } })
-  return venueModule ? getSalesGoalsFromConfig(venueModule.config).find(g => g.staffId === staffId && g.active) ?? null : null
+  const venueModule = await db.venueModule.findUnique({
+    where: { venueId_moduleId: { venueId, moduleId: module.id } },
+    select: { config: true },
+  })
+  return venueModule ? (getSalesGoalsFromConfig(venueModule.config).find(g => g.staffId === staffId && g.active) ?? null) : null
 }

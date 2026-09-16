@@ -115,11 +115,7 @@ describe('móvil · POST /mobile/venues/:venueId/payments/:paymentId/refund', ()
   it('conserva tipRefundCents=0: es «devuelve sólo la venta», no «no me mandaste nada»', async () => {
     const res = hacerRes()
 
-    await mobileController.issueAssociatedRefund(
-      reqMovil({ amount: 6500, reason: 'ACCIDENTAL_CHARGE', tipRefundCents: 0 }),
-      res,
-      jest.fn(),
-    )
+    await mobileController.issueAssociatedRefund(reqMovil({ amount: 6500, reason: 'ACCIDENTAL_CHARGE', tipRefundCents: 0 }), res, jest.fn())
 
     expect(codigoDeRespuesta(res)).toBe(201)
     expect(issueRefundMock.mock.calls[0][0].tipRefundCents).toBe(0)
@@ -137,11 +133,7 @@ describe('móvil · POST /mobile/venues/:venueId/payments/:paymentId/refund', ()
   ])('rechaza `amount` cuando viene PRESENTE y es %s', async (_caso, amount) => {
     const res = hacerRes()
 
-    await mobileController.issueAssociatedRefund(
-      reqMovil({ amount, reason: 'ACCIDENTAL_CHARGE' }),
-      res,
-      jest.fn(),
-    )
+    await mobileController.issueAssociatedRefund(reqMovil({ amount, reason: 'ACCIDENTAL_CHARGE' }), res, jest.fn())
 
     expect(codigoDeRespuesta(res)).toBe(400)
     expect(mensajeDeRespuesta(res)).toContain('centavos')
@@ -155,11 +147,7 @@ describe('móvil · POST /mobile/venues/:venueId/payments/:paymentId/refund', ()
   ])('rechaza `tipRefundCents` cuando viene PRESENTE y es %s', async (_caso, tipRefundCents) => {
     const res = hacerRes()
 
-    await mobileController.issueAssociatedRefund(
-      reqMovil({ amount: 6500, reason: 'ACCIDENTAL_CHARGE', tipRefundCents }),
-      res,
-      jest.fn(),
-    )
+    await mobileController.issueAssociatedRefund(reqMovil({ amount: 6500, reason: 'ACCIDENTAL_CHARGE', tipRefundCents }), res, jest.fn())
 
     expect(codigoDeRespuesta(res)).toBe(400)
     expect(mensajeDeRespuesta(res)).toContain('tipRefundCents')
@@ -169,11 +157,7 @@ describe('móvil · POST /mobile/venues/:venueId/payments/:paymentId/refund', ()
   it('sigue exigiendo `amount` o `items`: ambos nulos no es un reembolso', async () => {
     const res = hacerRes()
 
-    await mobileController.issueAssociatedRefund(
-      reqMovil({ amount: null, items: null, reason: 'ACCIDENTAL_CHARGE' }),
-      res,
-      jest.fn(),
-    )
+    await mobileController.issueAssociatedRefund(reqMovil({ amount: null, items: null, reason: 'ACCIDENTAL_CHARGE' }), res, jest.fn())
 
     expect(codigoDeRespuesta(res)).toBe(400)
     expect(issueRefundMock).not.toHaveBeenCalled()

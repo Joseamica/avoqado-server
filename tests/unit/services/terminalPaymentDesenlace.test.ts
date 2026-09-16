@@ -13,12 +13,7 @@
 
 import { Prisma, TerminalPaymentRequestStatus as S } from '@prisma/client'
 
-import {
-  desenlaceCanonico,
-  proyectarCancelDisposition,
-  proyectarEstado,
-  type FilaDeDesenlace,
-} from '@/services/terminal-payment.service'
+import { desenlaceCanonico, proyectarCancelDisposition, proyectarEstado, type FilaDeDesenlace } from '@/services/terminal-payment.service'
 
 const EVIDENCIA_DECLINADA = { outcomeEvidence: 'PROCESSOR_DECLINED' } as Prisma.JsonValue
 const EVIDENCIA_PREAUTH = { outcomeEvidence: 'PRE_AUTHORIZATION' } as Prisma.JsonValue
@@ -32,7 +27,13 @@ type Caso = [string, FilaDeDesenlace, string, string | null, string | null]
 
 const CASOS: Caso[] = [
   // ── CHARGED ────────────────────────────────────────────────────────────────────────────────────
-  ['closeRowFromPaymentTx / vigía: COMPLETED con Payment', fila({ status: S.COMPLETED, paymentId: 'pay-1' }), 'CHARGED', 'PAYMENT_RECORDED', 'TERMINAL'],
+  [
+    'closeRowFromPaymentTx / vigía: COMPLETED con Payment',
+    fila({ status: S.COMPLETED, paymentId: 'pay-1' }),
+    'CHARGED',
+    'PAYMENT_RECORDED',
+    'TERMINAL',
+  ],
   [
     'marcaDeDescuadre: COMPLETED + CONTRACT_MISMATCH (el dinero salió; lo concilia un humano)',
     fila({ status: S.COMPLETED, paymentId: 'pay-1', failureCode: 'CONTRACT_MISMATCH' }),
@@ -43,14 +44,62 @@ const CASOS: Caso[] = [
   ['COMPLETED SIN Payment no prueba cobro', fila({ status: S.COMPLETED }), 'UNRESOLVED', null, null],
 
   // ── NOT_CHARGED: lápida de admisión (H.5/H.6) ──────────────────────────────────────────────────
-  ['lápida :707 REJECTED_TERMINAL_NOT_CONNECTED', fila({ status: S.FAILED, failureCode: 'REJECTED_TERMINAL_NOT_CONNECTED' }), 'NOT_CHARGED', 'REJECTED_AT_ADMISSION', 'SERVER'],
-  ['lápida :707 REJECTED_TERMINAL_NO_SOCKET', fila({ status: S.FAILED, failureCode: 'REJECTED_TERMINAL_NO_SOCKET' }), 'NOT_CHARGED', 'REJECTED_AT_ADMISSION', 'SERVER'],
-  ['lápida :707 REJECTED_TERMINAL_OTHER_VENUE', fila({ status: S.FAILED, failureCode: 'REJECTED_TERMINAL_OTHER_VENUE' }), 'NOT_CHARGED', 'REJECTED_AT_ADMISSION', 'SERVER'],
-  ['lápida :707 REJECTED_TERMINAL_BUSY', fila({ status: S.FAILED, failureCode: 'REJECTED_TERMINAL_BUSY' }), 'NOT_CHARGED', 'REJECTED_AT_ADMISSION', 'SERVER'],
-  ['lápida :707 REJECTED_ORDER_BUSY', fila({ status: S.FAILED, failureCode: 'REJECTED_ORDER_BUSY' }), 'NOT_CHARGED', 'REJECTED_AT_ADMISSION', 'SERVER'],
-  ['lápida :707 REJECTED_ORDER_CANCELLED', fila({ status: S.FAILED, failureCode: 'REJECTED_ORDER_CANCELLED' }), 'NOT_CHARGED', 'REJECTED_AT_ADMISSION', 'SERVER'],
-  ['lápida :707 REJECTED_ORDER_PAID', fila({ status: S.FAILED, failureCode: 'REJECTED_ORDER_PAID' }), 'NOT_CHARGED', 'REJECTED_AT_ADMISSION', 'SERVER'],
-  ['lápida :707 REJECTED_ORDER_NOT_FOUND', fila({ status: S.FAILED, failureCode: 'REJECTED_ORDER_NOT_FOUND' }), 'NOT_CHARGED', 'REJECTED_AT_ADMISSION', 'SERVER'],
+  [
+    'lápida :707 REJECTED_TERMINAL_NOT_CONNECTED',
+    fila({ status: S.FAILED, failureCode: 'REJECTED_TERMINAL_NOT_CONNECTED' }),
+    'NOT_CHARGED',
+    'REJECTED_AT_ADMISSION',
+    'SERVER',
+  ],
+  [
+    'lápida :707 REJECTED_TERMINAL_NO_SOCKET',
+    fila({ status: S.FAILED, failureCode: 'REJECTED_TERMINAL_NO_SOCKET' }),
+    'NOT_CHARGED',
+    'REJECTED_AT_ADMISSION',
+    'SERVER',
+  ],
+  [
+    'lápida :707 REJECTED_TERMINAL_OTHER_VENUE',
+    fila({ status: S.FAILED, failureCode: 'REJECTED_TERMINAL_OTHER_VENUE' }),
+    'NOT_CHARGED',
+    'REJECTED_AT_ADMISSION',
+    'SERVER',
+  ],
+  [
+    'lápida :707 REJECTED_TERMINAL_BUSY',
+    fila({ status: S.FAILED, failureCode: 'REJECTED_TERMINAL_BUSY' }),
+    'NOT_CHARGED',
+    'REJECTED_AT_ADMISSION',
+    'SERVER',
+  ],
+  [
+    'lápida :707 REJECTED_ORDER_BUSY',
+    fila({ status: S.FAILED, failureCode: 'REJECTED_ORDER_BUSY' }),
+    'NOT_CHARGED',
+    'REJECTED_AT_ADMISSION',
+    'SERVER',
+  ],
+  [
+    'lápida :707 REJECTED_ORDER_CANCELLED',
+    fila({ status: S.FAILED, failureCode: 'REJECTED_ORDER_CANCELLED' }),
+    'NOT_CHARGED',
+    'REJECTED_AT_ADMISSION',
+    'SERVER',
+  ],
+  [
+    'lápida :707 REJECTED_ORDER_PAID',
+    fila({ status: S.FAILED, failureCode: 'REJECTED_ORDER_PAID' }),
+    'NOT_CHARGED',
+    'REJECTED_AT_ADMISSION',
+    'SERVER',
+  ],
+  [
+    'lápida :707 REJECTED_ORDER_NOT_FOUND',
+    fila({ status: S.FAILED, failureCode: 'REJECTED_ORDER_NOT_FOUND' }),
+    'NOT_CHARGED',
+    'REJECTED_AT_ADMISSION',
+    'SERVER',
+  ],
 
   // ── NOT_CHARGED: evidencia de la terminal ──────────────────────────────────────────────────────
   [
@@ -67,8 +116,20 @@ const CASOS: Caso[] = [
     'PRE_AUTHORIZATION',
     'TERMINAL',
   ],
-  ['sonda :2662 FAILED/TPV_NEVER_RECEIVED', fila({ status: S.FAILED, failureCode: 'TPV_NEVER_RECEIVED' }), 'NOT_CHARGED', 'NEVER_DELIVERED', 'SERVER'],
-  ['preparado para A: FAILED/TPV_INBOX_NOT_FOUND', fila({ status: S.FAILED, failureCode: 'TPV_INBOX_NOT_FOUND' }), 'NOT_CHARGED', 'NOT_FOUND_CONTINUOUS_INBOX', 'TERMINAL'],
+  [
+    'sonda :2662 FAILED/TPV_NEVER_RECEIVED',
+    fila({ status: S.FAILED, failureCode: 'TPV_NEVER_RECEIVED' }),
+    'NOT_CHARGED',
+    'NEVER_DELIVERED',
+    'SERVER',
+  ],
+  [
+    'preparado para A: FAILED/TPV_INBOX_NOT_FOUND',
+    fila({ status: S.FAILED, failureCode: 'TPV_INBOX_NOT_FOUND' }),
+    'NOT_CHARGED',
+    'NOT_FOUND_CONTINUOUS_INBOX',
+    'TERMINAL',
+  ],
   [
     'preparado para B: FAILED/OPERATOR_RECONCILED_NO_CHARGE',
     fila({ status: S.FAILED, failureCode: 'OPERATOR_RECONCILED_NO_CHARGE' }),
@@ -106,8 +167,20 @@ const CASOS: Caso[] = [
   // ── UNRESOLVED: UNKNOWN, con cualquier código ──────────────────────────────────────────────────
   ['ACK perdido :1063 UNKNOWN/ACK_TIMEOUT', fila({ status: S.UNKNOWN, failureCode: 'ACK_TIMEOUT' }), 'UNRESOLVED', null, null],
   ['ACK rechazado :1063 UNKNOWN/ACK_REJECTED', fila({ status: S.UNKNOWN, failureCode: 'ACK_REJECTED' }), 'UNRESOLVED', null, null],
-  ['failUndelivered :1004 UNKNOWN/SOCKET_NOT_FOUND', fila({ status: S.UNKNOWN, failureCode: 'SOCKET_NOT_FOUND' }), 'UNRESOLVED', null, null],
-  ['failUndelivered :1029 UNKNOWN/DELIVERY_NOT_RECORDED', fila({ status: S.UNKNOWN, failureCode: 'DELIVERY_NOT_RECORDED' }), 'UNRESOLVED', null, null],
+  [
+    'failUndelivered :1004 UNKNOWN/SOCKET_NOT_FOUND',
+    fila({ status: S.UNKNOWN, failureCode: 'SOCKET_NOT_FOUND' }),
+    'UNRESOLVED',
+    null,
+    null,
+  ],
+  [
+    'failUndelivered :1029 UNKNOWN/DELIVERY_NOT_RECORDED',
+    fila({ status: S.UNKNOWN, failureCode: 'DELIVERY_NOT_RECORDED' }),
+    'UNRESOLVED',
+    null,
+    null,
+  ],
   ['vigía :1797 UNKNOWN/TIMED_OUT', fila({ status: S.UNKNOWN, failureCode: 'TIMED_OUT' }), 'UNRESOLVED', null, null],
   ['closeRow degradado a timeout :1424 UNKNOWN sin código', fila({ status: S.UNKNOWN }), 'UNRESOLVED', null, null],
 
@@ -118,14 +191,38 @@ const CASOS: Caso[] = [
   ['TIMED_OUT sin código', fila({ status: S.TIMED_OUT }), 'UNRESOLVED', null, null],
 
   // ── UNRESOLVED: FAILED que NO acredita nada ────────────────────────────────────────────────────
-  ['legacy FAILED/TPV_ERROR (6 filas reales en producción)', fila({ status: S.FAILED, failureCode: 'TPV_ERROR' }), 'UNRESOLVED', null, null],
+  [
+    'legacy FAILED/TPV_ERROR (6 filas reales en producción)',
+    fila({ status: S.FAILED, failureCode: 'TPV_ERROR' }),
+    'UNRESOLVED',
+    null,
+    null,
+  ],
   ['legacy FAILED/ACK_TIMEOUT', fila({ status: S.FAILED, failureCode: 'ACK_TIMEOUT' }), 'UNRESOLVED', null, null],
   ['legacy FAILED/ACK_REJECTED', fila({ status: S.FAILED, failureCode: 'ACK_REJECTED' }), 'UNRESOLVED', null, null],
-  ['legacy FAILED/SOCKET_NOT_FOUND (hoy salía FAILED: lista negra)', fila({ status: S.FAILED, failureCode: 'SOCKET_NOT_FOUND' }), 'UNRESOLVED', null, null],
+  [
+    'legacy FAILED/SOCKET_NOT_FOUND (hoy salía FAILED: lista negra)',
+    fila({ status: S.FAILED, failureCode: 'SOCKET_NOT_FOUND' }),
+    'UNRESOLVED',
+    null,
+    null,
+  ],
   ['legacy FAILED/DELIVERY_NOT_RECORDED', fila({ status: S.FAILED, failureCode: 'DELIVERY_NOT_RECORDED' }), 'UNRESOLVED', null, null],
-  ['puesto a mano FAILED/QA_MANUAL_RESOLVE_NO_MONEY', fila({ status: S.FAILED, failureCode: 'QA_MANUAL_RESOLVE_NO_MONEY' }), 'UNRESOLVED', null, null],
+  [
+    'puesto a mano FAILED/QA_MANUAL_RESOLVE_NO_MONEY',
+    fila({ status: S.FAILED, failureCode: 'QA_MANUAL_RESOLVE_NO_MONEY' }),
+    'UNRESOLVED',
+    null,
+    null,
+  ],
   ['FAILED sin código', fila({ status: S.FAILED }), 'UNRESOLVED', null, null],
-  ['FAILED con un código que nadie clasificó', fila({ status: S.FAILED, failureCode: 'CODIGO_QUE_NADIE_CLASIFICO' }), 'UNRESOLVED', null, null],
+  [
+    'FAILED con un código que nadie clasificó',
+    fila({ status: S.FAILED, failureCode: 'CODIGO_QUE_NADIE_CLASIFICO' }),
+    'UNRESOLVED',
+    null,
+    null,
+  ],
   [
     '🔴 FAILED/TPV_CONFIRMED_NO_CHARGE SIN evidencia en el sobre',
     fila({ status: S.FAILED, failureCode: 'TPV_CONFIRMED_NO_CHARGE' }),
@@ -157,7 +254,13 @@ const CASOS: Caso[] = [
 
   // ── UNRESOLVED: CANCELLED sin aceptación de la terminal ────────────────────────────────────────
   ['CANCELLED sin disposición (gracia del vigía en producción)', fila({ status: S.CANCELLED }), 'UNRESOLVED', null, null],
-  ['CANCELLED + ACTIVE (la terminal dijo que seguía vivo)', fila({ status: S.CANCELLED, cancelDisposition: 'ACTIVE' }), 'UNRESOLVED', null, null],
+  [
+    'CANCELLED + ACTIVE (la terminal dijo que seguía vivo)',
+    fila({ status: S.CANCELLED, cancelDisposition: 'ACTIVE' }),
+    'UNRESOLVED',
+    null,
+    null,
+  ],
   ['CANCELLED + ALREADY_RESOLVED', fila({ status: S.CANCELLED, cancelDisposition: 'ALREADY_RESOLVED' }), 'UNRESOLVED', null, null],
   ['CANCELLED + una disposición desconocida', fila({ status: S.CANCELLED, cancelDisposition: 'LO_QUE_SEA' }), 'UNRESOLVED', null, null],
 ]
@@ -168,7 +271,9 @@ describe('desenlaceCanonico — tabla por (status, failureCode), un caso por esc
   })
 
   it('CONTRACT_MISMATCH sobre un COMPLETED pide conciliación; un COMPLETED normal no', () => {
-    expect(desenlaceCanonico(fila({ status: S.COMPLETED, paymentId: 'pay-1', failureCode: 'CONTRACT_MISMATCH' })).reconciliationRequired).toBe(true)
+    expect(
+      desenlaceCanonico(fila({ status: S.COMPLETED, paymentId: 'pay-1', failureCode: 'CONTRACT_MISMATCH' })).reconciliationRequired,
+    ).toBe(true)
     expect(desenlaceCanonico(fila({ status: S.COMPLETED, paymentId: 'pay-1' })).reconciliationRequired).toBeUndefined()
   })
 
@@ -217,8 +322,7 @@ describe('invariantes de la lista blanca', () => {
       for (const failureCode of CODIGOS)
         for (const cancelDisposition of DISPOSICIONES)
           for (const resultJson of SOBRES)
-            for (const paymentId of [null, 'pay-1'])
-              filas.push({ status, failureCode, cancelDisposition, paymentId, resultJson })
+            for (const paymentId of [null, 'pay-1']) filas.push({ status, failureCode, cancelDisposition, paymentId, resultJson })
     return filas
   }
 
@@ -294,7 +398,12 @@ describe('proyectarEstado — lo que ven las apps', () => {
 
   it('🔴 una LÁPIDA de admisión NO se traduce: sale FAILED, que es lo que hace a las apps publicadas soltar su llave', () => {
     const p = proyectar({ status: S.FAILED, failureCode: 'REJECTED_TERMINAL_BUSY' })
-    expect(p).toMatchObject({ status: S.FAILED, outcome: 'NOT_CHARGED', outcomeEvidence: 'REJECTED_AT_ADMISSION', failureCode: 'REJECTED_TERMINAL_BUSY' })
+    expect(p).toMatchObject({
+      status: S.FAILED,
+      outcome: 'NOT_CHARGED',
+      outcomeEvidence: 'REJECTED_AT_ADMISSION',
+      failureCode: 'REJECTED_TERMINAL_BUSY',
+    })
   })
 
   it('un rechazo del banco CON evidencia sale FAILED (desenlace real), no UNKNOWN', () => {
@@ -316,13 +425,22 @@ describe('proyectarEstado — lo que ven las apps', () => {
       outcomeEvidence: 'CANCEL_ACCEPTED',
     })
     expect(proyectar({ status: S.CANCELLED, cancelDisposition: 'ACCEPTED' }).cancelDisposition).toBe('ACCEPTED')
-    expect(proyectarCancelDisposition('ACCEPTED', { outcome: 'NOT_CHARGED', outcomeEvidence: 'CANCEL_ACCEPTED', evidenceClass: 'TERMINAL' })).toBe('ACCEPTED')
-    expect(proyectarCancelDisposition('ACCEPTED', { outcome: 'CHARGED', outcomeEvidence: 'PAYMENT_RECORDED', evidenceClass: 'TERMINAL' })).toBe('ACCEPTED')
+    expect(
+      proyectarCancelDisposition('ACCEPTED', { outcome: 'NOT_CHARGED', outcomeEvidence: 'CANCEL_ACCEPTED', evidenceClass: 'TERMINAL' }),
+    ).toBe('ACCEPTED')
+    expect(
+      proyectarCancelDisposition('ACCEPTED', { outcome: 'CHARGED', outcomeEvidence: 'PAYMENT_RECORDED', evidenceClass: 'TERMINAL' }),
+    ).toBe('ACCEPTED')
   })
 
   it('🔴 un ACTIVE viejo encima de un desenlace final se proyecta null (si no, la app dice «sigue activo» PARA SIEMPRE)', () => {
     // Cancel rechazado por la terminal (ACTIVE) y luego rechazo del banco: el cobro ya terminó.
-    const rechazado = proyectar({ status: S.FAILED, failureCode: 'TPV_CONFIRMED_NO_CHARGE', resultJson: EVIDENCIA_DECLINADA, cancelDisposition: 'ACTIVE' })
+    const rechazado = proyectar({
+      status: S.FAILED,
+      failureCode: 'TPV_CONFIRMED_NO_CHARGE',
+      resultJson: EVIDENCIA_DECLINADA,
+      cancelDisposition: 'ACTIVE',
+    })
     expect(rechazado).toMatchObject({ status: S.FAILED, outcome: 'NOT_CHARGED', cancelDisposition: null })
     // Y con el cobro YA registrado, tampoco puede decir «sigue activo».
     expect(proyectar({ status: S.COMPLETED, paymentId: 'pay-1', cancelDisposition: 'ACTIVE' }).cancelDisposition).toBeNull()

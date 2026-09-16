@@ -31,7 +31,13 @@
 import { randomUUID } from 'crypto'
 import { Prisma, TerminalPaymentRequestStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import { bloqueaLaRanura, fueSoltadaPorPolitica, predicadoDeBloqueo, terminalPaymentService, UNRESOLVED_FINANCIAL_OUTCOME } from '@/services/terminal-payment.service'
+import {
+  bloqueaLaRanura,
+  fueSoltadaPorPolitica,
+  predicadoDeBloqueo,
+  terminalPaymentService,
+  UNRESOLVED_FINANCIAL_OUTCOME,
+} from '@/services/terminal-payment.service'
 import { __resetVenuesEstrictosParaPruebas, invalidarVenuesEstrictos } from '@/services/terminal-payment-strictness'
 
 const fixture = `strict-${randomUUID()}`
@@ -67,8 +73,18 @@ const CASOS: Caso[] = [
 
   // — Las históricas de producción: HOY no bloquean; con el estricto SÍ —
   { nombre: 'TIMED_OUT sin código', status: TerminalPaymentRequestStatus.TIMED_OUT, permisivo: false },
-  { nombre: 'TIMED_OUT/AUTO_RELEASED (lo que prod liberó por tiempo)', status: TerminalPaymentRequestStatus.TIMED_OUT, failureCode: 'AUTO_RELEASED', permisivo: false },
-  { nombre: 'CANCELLED sin disposición (la columna no existía en prod)', status: TerminalPaymentRequestStatus.CANCELLED, cancelDisposition: null, permisivo: false },
+  {
+    nombre: 'TIMED_OUT/AUTO_RELEASED (lo que prod liberó por tiempo)',
+    status: TerminalPaymentRequestStatus.TIMED_OUT,
+    failureCode: 'AUTO_RELEASED',
+    permisivo: false,
+  },
+  {
+    nombre: 'CANCELLED sin disposición (la columna no existía en prod)',
+    status: TerminalPaymentRequestStatus.CANCELLED,
+    cancelDisposition: null,
+    permisivo: false,
+  },
   { nombre: 'CANCELLED con ACTIVE', status: TerminalPaymentRequestStatus.CANCELLED, cancelDisposition: 'ACTIVE', permisivo: false },
   { nombre: 'FAILED/TPV_ERROR', status: TerminalPaymentRequestStatus.FAILED, failureCode: 'TPV_ERROR', permisivo: false },
   { nombre: 'FAILED/ACK_TIMEOUT', status: TerminalPaymentRequestStatus.FAILED, failureCode: 'ACK_TIMEOUT', permisivo: false },
@@ -94,7 +110,12 @@ const CASOS: Caso[] = [
   //   admitir y otra al consultar, y una divergencia silenciosa ahí se paga con dinero.
   //   `constructor` y `__proto__` encontraban una propiedad HEREDADA del objeto de códigos y acreditaban un
   //   «no se cobró» inexistente; la cadena vacía en `paymentId` la leía JS como ausente y el SQL no.
-  { nombre: 'FAILED con failureCode "constructor" (propiedad heredada)', status: TerminalPaymentRequestStatus.FAILED, failureCode: 'constructor', permisivo: false },
+  {
+    nombre: 'FAILED con failureCode "constructor" (propiedad heredada)',
+    status: TerminalPaymentRequestStatus.FAILED,
+    failureCode: 'constructor',
+    permisivo: false,
+  },
   { nombre: 'FAILED con failureCode "__proto__"', status: TerminalPaymentRequestStatus.FAILED, failureCode: '__proto__', permisivo: false },
   { nombre: 'FAILED con failureCode "toString"', status: TerminalPaymentRequestStatus.FAILED, failureCode: 'toString', permisivo: false },
   { nombre: 'COMPLETED con paymentId cadena VACÍA', status: TerminalPaymentRequestStatus.COMPLETED, paymentId: '', permisivo: false },
@@ -208,13 +229,32 @@ describe('interruptor por venue del predicado estricto', () => {
 
     // Y desde el corte sí rige la lista blanca: TIMED_OUT, CANCELLED sin ACCEPTED, FAILED sin
     // acreditar y COMPLETED sin Payment pasan a bloquear.
-    const debenBloquear = ['TIMED_OUT sin código', 'CANCELLED sin disposición (la columna no existía en prod)', 'CANCELLED con ACTIVE', 'FAILED/TPV_ERROR', 'FAILED/ACK_TIMEOUT', 'FAILED sin código', 'FAILED/CODIGO_DESCONOCIDO', 'COMPLETED sin Payment', 'COMPLETED con paymentId cadena VACÍA', 'FAILED con failureCode "constructor" (propiedad heredada)', 'FAILED con failureCode "__proto__"', 'FAILED con failureCode "toString"']
+    const debenBloquear = [
+      'TIMED_OUT sin código',
+      'CANCELLED sin disposición (la columna no existía en prod)',
+      'CANCELLED con ACTIVE',
+      'FAILED/TPV_ERROR',
+      'FAILED/ACK_TIMEOUT',
+      'FAILED sin código',
+      'FAILED/CODIGO_DESCONOCIDO',
+      'COMPLETED sin Payment',
+      'COMPLETED con paymentId cadena VACÍA',
+      'FAILED con failureCode "constructor" (propiedad heredada)',
+      'FAILED con failureCode "__proto__"',
+      'FAILED con failureCode "toString"',
+    ]
     const migradoDespues = sembradas.filter(f => f.venueId === venueMigrado && f.createdAt === DESPUES)
     expect(migradoDespues.filter(f => debenBloquear.includes(f.nombre) && !enSql.has(f.requestId)).map(f => f.nombre)).toEqual([])
 
     // Lo acreditado NO bloquea ni siquiera en estricto (si no, el flag mataría terminales sanas).
-    const acreditadas = ['COMPLETED con Payment', 'CANCELLED/ACCEPTED', 'lápida de admisión', 'FAILED/TPV_NEVER_RECEIVED', 'FAILED/TPV_CONFIRMED_NO_CHARGE con evidencia', // 🔴 Añadida el 12-sep: no ACREDITA el desenlace, pero SUELTA la ranura a propósito (ver `SOLTADA_POR_POLITICA`).
-        'TIMED_OUT/AUTO_RELEASED (lo que prod liberó por tiempo)']
+    const acreditadas = [
+      'COMPLETED con Payment',
+      'CANCELLED/ACCEPTED',
+      'lápida de admisión',
+      'FAILED/TPV_NEVER_RECEIVED',
+      'FAILED/TPV_CONFIRMED_NO_CHARGE con evidencia', // 🔴 Añadida el 12-sep: no ACREDITA el desenlace, pero SUELTA la ranura a propósito (ver `SOLTADA_POR_POLITICA`).
+      'TIMED_OUT/AUTO_RELEASED (lo que prod liberó por tiempo)',
+    ]
     expect(migradoDespues.filter(f => acreditadas.includes(f.nombre) && enSql.has(f.requestId)).map(f => f.nombre)).toEqual([])
 
     expect(comparar(SOLO_MIGRADO, enSql)).toEqual({ sqlDeMenos: [], sqlDeMas: [] })
@@ -341,8 +381,17 @@ describe('P1 régimen APAGADO a través de isTerminalBusy y getBusyTerminalIds',
     try {
       // Del venue migrado y NACIDAS DESPUÉS del corte: ésas sí entran a la lista blanca.
       const tras = sembradas.filter(f => f.venueId === venueMigrado && f.createdAt === DESPUES && !f.permisivo)
-      const deberian = tras.filter(f => !['COMPLETED con Payment', 'CANCELLED/ACCEPTED', 'lápida de admisión', 'FAILED/TPV_NEVER_RECEIVED', 'FAILED/TPV_CONFIRMED_NO_CHARGE con evidencia', // 🔴 Añadida el 12-sep: no ACREDITA el desenlace, pero SUELTA la ranura a propósito (ver `SOLTADA_POR_POLITICA`).
-        'TIMED_OUT/AUTO_RELEASED (lo que prod liberó por tiempo)'].includes(f.nombre))
+      const deberian = tras.filter(
+        f =>
+          ![
+            'COMPLETED con Payment',
+            'CANCELLED/ACCEPTED',
+            'lápida de admisión',
+            'FAILED/TPV_NEVER_RECEIVED',
+            'FAILED/TPV_CONFIRMED_NO_CHARGE con evidencia', // 🔴 Añadida el 12-sep: no ACREDITA el desenlace, pero SUELTA la ranura a propósito (ver `SOLTADA_POR_POLITICA`).
+            'TIMED_OUT/AUTO_RELEASED (lo que prod liberó por tiempo)',
+          ].includes(f.nombre),
+      )
       expect(deberian.length).toBeGreaterThan(0)
       for (const fila of deberian) {
         expect([fila.nombre, await terminalPaymentService.isTerminalBusy(fila.terminalId, venueMigrado)]).toEqual([fila.nombre, true])

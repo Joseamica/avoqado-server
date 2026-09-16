@@ -192,8 +192,8 @@ function installFakes() {
   prismaMock.payment.findFirst.mockImplementation(async ({ where }: any) => payments.find(p => whereMatches(p, where)) ?? null)
   // El rescate de la comisión (bajo SAVEPOINT) relee el pago para encolar su efecto: se devuelve
   // el que ESTE test acaba de crear, no uno inventado, y así venue y orden coinciden solos.
-  prismaMock.payment.findUniqueOrThrow.mockImplementation(async (a: any) =>
-    payments.find((p: any) => p.id === a?.where?.id) ?? payments[payments.length - 1],
+  prismaMock.payment.findUniqueOrThrow.mockImplementation(
+    async (a: any) => payments.find((p: any) => p.id === a?.where?.id) ?? payments[payments.length - 1],
   )
   prismaMock.payment.findMany.mockImplementation(async ({ where }: any) => payments.filter(p => whereMatches(p, where)))
   prismaMock.payment.findUnique.mockImplementation(async ({ where }: any) => {

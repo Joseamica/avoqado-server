@@ -74,57 +74,56 @@ describe('deviceRegistry.service', () => {
     })
   })
 
+  // ── La MARCA se guarda en su forma canónica (defecto medido el 2026-09-12) ────
+  //
+  // 🔴 El catálogo devuelve `brand: 'NexGo'` (camelCase) y el servidor decide si una
+  // terminal puede cobrar con AngelPay comparando `terminal.brand === 'NEXGO'` —
+  // igualdad EXACTA, en cuatro sitios de `terminal.tpv.controller.ts`. Guardada cruda,
+  // una Nexgo auto-registrada nunca recibe credenciales ni merchants de AngelPay, y lo
+  // único que ve el cajero es «AngelPay: faltan credenciales en el panel», que apunta
+  // al lugar equivocado. El alta por superadmin ya normalizaba (Zod, `terminal.routes`),
+  // por eso las 14 Nexgo de producción están bien: el auto-registro se quedó fuera.
+  describe('registerDeviceSeen — la marca se normaliza', () => {
+    const nexgoIdentity = {
+      deviceUid: 'device-n86',
+      platform: 'ANDROID' as const,
+      manufacturer: 'NEXGO',
+      modelIdentifier: 'N86',
+      osVersion: 'Android 11',
+      appVersion: '2.9.2',
+    }
 
-    // ── La MARCA se guarda en su forma canónica (defecto medido el 2026-09-12) ────
-    //
-    // 🔴 El catálogo devuelve `brand: 'NexGo'` (camelCase) y el servidor decide si una
-    // terminal puede cobrar con AngelPay comparando `terminal.brand === 'NEXGO'` —
-    // igualdad EXACTA, en cuatro sitios de `terminal.tpv.controller.ts`. Guardada cruda,
-    // una Nexgo auto-registrada nunca recibe credenciales ni merchants de AngelPay, y lo
-    // único que ve el cajero es «AngelPay: faltan credenciales en el panel», que apunta
-    // al lugar equivocado. El alta por superadmin ya normalizaba (Zod, `terminal.routes`),
-    // por eso las 14 Nexgo de producción están bien: el auto-registro se quedó fuera.
-    describe('registerDeviceSeen — la marca se normaliza', () => {
-      const nexgoIdentity = {
-        deviceUid: 'device-n86',
-        platform: 'ANDROID' as const,
-        manufacturer: 'NEXGO',
-        modelIdentifier: 'N86',
-        osVersion: 'Android 11',
-        appVersion: '2.9.2',
-      }
+    it('una Nexgo auto-registrada queda con brand NEXGO, no NexGo', async () => {
+      prismaMock.terminal.findFirst.mockResolvedValue(null)
+      prismaMock.terminal.count.mockResolvedValue(0)
+      prismaMock.terminal.create.mockResolvedValue({ id: 'term_n86', name: 'NexGo N86' })
 
-      it('una Nexgo auto-registrada queda con brand NEXGO, no NexGo', async () => {
-        prismaMock.terminal.findFirst.mockResolvedValue(null)
-        prismaMock.terminal.count.mockResolvedValue(0)
-        prismaMock.terminal.create.mockResolvedValue({ id: 'term_n86', name: 'NexGo N86' })
+      await registerDeviceSeen({ venueId: VENUE, staffId: STAFF, identity: nexgoIdentity })
 
-        await registerDeviceSeen({ venueId: VENUE, staffId: STAFF, identity: nexgoIdentity })
-
-        expect(prismaMock.terminal.create.mock.calls[0][0].data.brand).toBe('NEXGO')
-      })
-
-      it('el catálogo devuelve la marca CRUDA — por eso hace falta normalizar', () => {
-        // Fija la causa del defecto: si alguien quita el `normalizeTerminalBrand` del
-        // servicio, la prueba de arriba falla y ESTA explica por qué. Y si algún día el
-        // catálogo empieza a devolver 'NEXGO', esta prueba lo dice en vez de dejar una
-        // normalización que parece inútil.
-        expect(resolveDeviceModel('NEXGO', 'N86').brand).toBe('NexGo')
-        expect(normalizeTerminalBrand('NexGo')).toBe('NEXGO')
-      })
-
-      it('una marca que NO es de terminal de pago se deja intacta', async () => {
-        // Sólo se canoniza PAX/NEXGO/INGENICO/VERIFONE; «Apple» pasa tal cual porque es
-        // el nombre que el dueño ve en su lista de aparatos.
-        prismaMock.terminal.findFirst.mockResolvedValue(null)
-        prismaMock.terminal.count.mockResolvedValue(0)
-        prismaMock.terminal.create.mockResolvedValue({ id: 'term_1', name: 'iPhone 15 Pro' })
-
-        await registerDeviceSeen({ venueId: VENUE, staffId: STAFF, identity: iphoneIdentity })
-
-        expect(prismaMock.terminal.create.mock.calls[0][0].data.brand).toBe('Apple')
-      })
+      expect(prismaMock.terminal.create.mock.calls[0][0].data.brand).toBe('NEXGO')
     })
+
+    it('el catálogo devuelve la marca CRUDA — por eso hace falta normalizar', () => {
+      // Fija la causa del defecto: si alguien quita el `normalizeTerminalBrand` del
+      // servicio, la prueba de arriba falla y ESTA explica por qué. Y si algún día el
+      // catálogo empieza a devolver 'NEXGO', esta prueba lo dice en vez de dejar una
+      // normalización que parece inútil.
+      expect(resolveDeviceModel('NEXGO', 'N86').brand).toBe('NexGo')
+      expect(normalizeTerminalBrand('NexGo')).toBe('NEXGO')
+    })
+
+    it('una marca que NO es de terminal de pago se deja intacta', async () => {
+      // Sólo se canoniza PAX/NEXGO/INGENICO/VERIFONE; «Apple» pasa tal cual porque es
+      // el nombre que el dueño ve en su lista de aparatos.
+      prismaMock.terminal.findFirst.mockResolvedValue(null)
+      prismaMock.terminal.count.mockResolvedValue(0)
+      prismaMock.terminal.create.mockResolvedValue({ id: 'term_1', name: 'iPhone 15 Pro' })
+
+      await registerDeviceSeen({ venueId: VENUE, staffId: STAFF, identity: iphoneIdentity })
+
+      expect(prismaMock.terminal.create.mock.calls[0][0].data.brand).toBe('Apple')
+    })
+  })
 
   // ── FEATURE: alta de dispositivo nuevo ────────────────────────────────────────
   describe('registerDeviceSeen — alta', () => {

@@ -20,4 +20,3 @@ export async function isOrderFullyReversed(orderId: string, venueId: string, db:
   const totalRefundedSale = refunds.reduce((sum, p) => sum + Math.abs(Number(p.amount)), 0)
   return totalRefundedSale >= merchandiseTotal - 0.01
 }
-
