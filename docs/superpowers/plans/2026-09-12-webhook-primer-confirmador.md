@@ -2598,6 +2598,38 @@ los resultados de la certificación siguen vigentes para el código del protocol
 cambiados · el proyecto `api-tests` COMPLETO (toda ruta pasa por `globalErrorHandler`) · las 4 suites de integración que importan `@/app` o
 los módulos (`auth-signup-verification-flow`, `dashboard/angelpay-full-setup`, `public/customer-identity-fase0b`,
 `webhook/whatsapp.webhook`) sobre la base desechable de desarrollo. El CI vuelve a correr el resto al pushear.
+**Resultado v2:** lint 0 errores (66 warnings, los mismos) · typecheck 0 local y Alienware COINCIDEN · 8 suites 34/34 COINCIDEN ·
+api-tests 33 suites / 738 en local (el lado remoto reventó por heap con el flag por defecto ⇒ INCONCLUSO atribuido al Alienware;
+el CI lo corre con 4 GB) · integración 4 suites / 42. Publicado `develop` = `69dd9264` (`git diff 69dd9264 -- package.json src
+tests` en el árbol probado = 0 líneas); **CI de `develop` en VERDE** (run 35053033777: lint, typecheck, build, 111 suites de
+integración, 4 shards unitarios, api informativo). El workflow «Schema Map» sólo corre cuando cambia `schema.prisma`, así que
+el arreglo de `-T` lo ejercitará el siguiente cambio de esquema (verificado en local: 1.05 s, mapa idéntico).
+
+### 🔴 `main` llevaba un hotfix que `develop` no tenía — absorbido ANTES de proponer el fast-forward (16-sep, madrugada)
+
+`git log --no-merges origin/develop..origin/main` NO estaba vacío: `e00677cc` (PR #124, 14-sep, Amaena) hace que la venta
+rápida dé lealtad AL MOMENTO. En develop la marca `loyaltyEligibleAt` ya iba dentro de la transacción, pero la lealtad de la venta
+rápida sólo la daba el job `loyalty-reconciliation`. Conflicto en `recordFastPayment` resuelto conservando develop dentro de la
+transacción (outbox de efectos + obligación de costo) y tomando del hotfix SÓLO la llamada a `awardLoyaltyForPaidOrder` tras
+comitear (el hook de referidos en línea no vuelve: viaja como efecto REFERRAL del outbox); la prueba del hotfix
+(`payment.fastLealtad.test.ts`) se adaptó al cuerpo de develop sin tocar una aserción (4/4; sin la llamada caen las 2 que la
+guardan). **Versión v3 = `acfd3ba7`** (merge con padres `69dd9264` y `d389d707`), verificada sobre el worktree `cp1-v2`: lint 0 ·
+typecheck 0 COINCIDEN · las 43 suites unitarias que importan `payment.tpv.service`/`loyaltyOnPaidOrder` 590/590 COINCIDEN ·
+api-tests 737/738 con UN fallo en `masterCatalogCore.api.test.ts` («expected 200, got 404» en la primera petición) — archivos
+idénticos a v2 (donde pasó 33/33 dos veces), la suite exacta repetida en DUAL 90/90 COINCIDEN, y es la misma firma ya declarada
+el 12-sep ⇒ **intermitente sin causa confirmada, no atribuible al delta** (no se clasifica como carga) · integración 25 suites /
+669 (las 21 de pagos = los controles de la certificación, 3 de inventario y `tpv/cobro-efectivo-duplicado`) sobre la base
+desechable · `sab-r7.py --check` ANCLAS OK sobre el árbol fusionado. Qué invalida: el delta es un `await` tras el commit del
+cobro rápido, fuera de toda región saboteada y ya en producción desde el 14-sep; los controles de la certificación pasan sobre
+él ⇒ el manifiesto 203/203 sigue vigente, no se repite. Pushado a `develop` (`69dd9264..acfd3ba7`, fast-forward) y el árbol
+principal adelantado con `--ff-only`; `develop → main` queda como FAST-FORWARD puro (`acfd3ba7` desciende de `d389d707`).
+
+**Producción medida (sólo lectura, 16-sep) para el despliegue:** `Payment` 47 355 filas / 51 MB, `ProviderEventLog` 3 748,
+`TerminalPaymentRequest` 2 007, `VenuePaymentConfig` 70 (0 con slots repetidos), 196 cobros en 24 h; última migración aplicada
+`20260908120000_stock_count_revision` ⇒ entran las 11 migraciones del delta (aditivas: columnas nullable o con default
+constante —sin reescritura—, índices sobre tablas de ≤ 47 k filas —bloqueo de escritura de menos de un segundo cada uno—, dos
+tablas nuevas y los dos CHECK `NOT VALID`). Sin ensayo sobre un dump completo de producción (no hay uno local); el tamaño medido
+hace innecesario `CONCURRENTLY`.
 
 ### Diseño de S0 + S3 (13-sep, antes de codificar; revisión de Codex en curso)
 
