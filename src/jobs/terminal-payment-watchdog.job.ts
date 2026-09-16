@@ -65,6 +65,9 @@ export class TerminalPaymentWatchdogJob {
       // reconcileUnknownRequests). A row parked UNKNOWN by the sweep above is seen by this one in
       // the same tick, which at most stamps "terminal returned" 30 s earlier — never frees it.
       await terminalPaymentService.reconcileUnknownRequests()
+      // S5: un POS que sigue esperando en memoria mientras la fila ya quedó COMPLETED con Payment (el webhook
+      // confirmó desde otra instancia, o el aviso se perdió) recibe el resultado durable en vez de un 504.
+      await terminalPaymentService.resolvePendingFromDurableState()
     } catch (err) {
       logger.error('❌ [Terminal-payment watchdog] pass failed', {
         error: err instanceof Error ? err.message : String(err),

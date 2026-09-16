@@ -2,6 +2,7 @@ import { SaleVerificationStatus, SaleVerificationRejectionReason, PaymentMethod,
 import { fromZonedTime } from 'date-fns-tz'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
+import { MOTIVO_EXCLUSION_DEL_PROTOCOLO, bloquearConSuOriginal, cobrosDelProtocolo } from '../shared/cobroDelProtocolo'
 import {
   reviewSaleVerification as reviewSaleVerificationVenue,
   PROMOTER_FEEDBACK_MIN_CHARS,
@@ -1377,16 +1378,45 @@ export async function editOrgSaleVerification(
     // 1. Payment (monto / forma de pago). Only rewrite `method` when the user
     // actually changed the payment-form bucket — otherwise an unrelated edit would
     // silently flip e.g. DEBIT_CARD → CREDIT_CARD (both render as "Tarjeta").
-    const methodChanged =
-      params.paymentForm != null && existing.payment != null && derivePaymentForm(existing.payment.method) !== params.paymentForm
-    if (existing.payment && (params.amount != null || methodChanged)) {
-      await tx.payment.update({
-        where: { id: existing.payment.id },
-        data: {
-          ...(params.amount != null ? { amount: params.amount } : {}),
-          ...(methodChanged ? { method: PAYMENT_FORM_TO_METHOD[params.paymentForm!] } : {}),
-        },
-      })
+    //
+    // Codex R13-3 (checkpoint 1 del webhook): la decisión ECONÓMICA se toma bajo el MUTEX del Payment (el mismo que la
+    // convergencia y el PUT del dashboard), releyendo la fila VIGENTE: un cobro del protocolo de costo (tarifa congelada u
+    // obligación TRANSACTION_COST) conserva su importe y su método — la evidencia bancaria, el costo y la venta original
+    // quedarían referidos a otro cargo. Se rechaza con 409 y NADA se escribe (ni la verificación). Un no-op (el mismo importe,
+    // la misma forma de pago), la revisión, las notas y el tipo de venta pasan; un cobro anterior al protocolo se edita como
+    // siempre. El permiso OWNER y el `confirm:true` del MCP no acreditan otro importe bancario.
+    // Codex R16-1: un REFUND pertenece al protocolo POR SU ORIGINAL (R14-2), así que la fila que decide su clasificación es la del
+    // original, no sólo la propia: se toma el PAR en el orden de la unidad de costo (original → reembolso, con relectura del puntero
+    // y reinicio) ANTES de releer, clasificar y escribir, y los dos candados se conservan hasta commitear. Con el original libre, un
+    // segundo reembolso real podía meterlo al protocolo entre la clasificación «legacy» del reembolso y su UPDATE (R1 de −$40 a
+    // +$40 sin movimiento bancario). Un cobro que no es reembolso toma sólo su fila, como antes.
+    let methodChanged = false
+    if (existing.payment) {
+      const candado = await bloquearConSuOriginal(tx, { paymentId: existing.payment.id, venueId: existing.venueId }, 'proteccion')
+      if (!candado.existe) throw createServiceError('Venta no encontrada', 404)
+      const vigente = await tx.payment.findUniqueOrThrow({ where: { id: existing.payment.id }, select: { amount: true, method: true } })
+      methodChanged = params.paymentForm != null && derivePaymentForm(vigente.method) !== params.paymentForm
+      const amountChanged = params.amount != null && new Prisma.Decimal(params.amount).toDecimalPlaces(2).comparedTo(vigente.amount) !== 0
+      if (amountChanged || methodChanged) {
+        const esDelProtocolo = (await cobrosDelProtocolo(tx, [existing.payment.id])).has(existing.payment.id)
+        if (esDelProtocolo) {
+          const fields = [...(amountChanged ? ['amount'] : []), ...(methodChanged ? ['method'] : [])]
+          const err = createServiceError(
+            'Este cobro pertenece al protocolo de costo (tarifa congelada y obligación de costo): su importe y su forma de pago sólo cambian por reembolso, anulación o corrección acreditada, no desde la verificación de venta.',
+            409,
+          ) as ServiceError & { code?: string; details?: Record<string, unknown> }
+          err.code = 'PAYMENT_PROTECTED_BY_COST_PROTOCOL'
+          err.details = { paymentId: existing.payment.id, fields, reason: MOTIVO_EXCLUSION_DEL_PROTOCOLO }
+          throw err
+        }
+        await tx.payment.update({
+          where: { id: existing.payment.id },
+          data: {
+            ...(amountChanged ? { amount: params.amount } : {}),
+            ...(methodChanged ? { method: PAYMENT_FORM_TO_METHOD[params.paymentForm!] } : {}),
+          },
+        })
+      }
     }
 
     // 2. SaleVerification (tipo de venta + estado + metadata de revisión).

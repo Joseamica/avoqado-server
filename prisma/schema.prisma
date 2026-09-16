@@ -4170,6 +4170,11 @@ model Payment {
   // below. Nullable for backwards compatibility with TPV versions < v1.10.10 and
   // for non-TPV payment sources (dashboard manual settlements, POS sync, etc.).
   idempotencyKey String? @db.VarChar(64)
+  /// S0 (checkpoint 1 del webhook): la solicitud POS→terminal que este cobro resolvió, como COLUMNA. Lo que hoy
+  /// vive en `processorData.terminalPaymentRequestId` (se conserva para los lectores actuales). Índice único
+  /// PARCIAL en la migración 20260913170000: sólo UN COMPLETED (no REFUND) por solicitud = el ganador canónico;
+  /// una posible segunda captura cabe como PENDING.
+  terminalPaymentRequestId String?
 
   /// Free-text provider name for manual/external payments when `source = OTHER`
   /// (e.g. "BUQ", "Clip", "Mercado Pago manual"). NULL otherwise. Admin-annotated
@@ -4270,6 +4275,7 @@ model Payment {
   // settlements, POS sync, mobile) are unaffected. Scoped by venueId as defense in
   // depth — even a hypothetical UUID collision between venues would not interfere.
   @@unique([venueId, idempotencyKey], map: "Payment_venueId_idempotencyKey_key")
+  @@index([terminalPaymentRequestId])
   @@index([source])
   @@index([authorizationNumber]) // ✅ NUEVO ÍNDICE
   @@index([referenceNumber]) // ✅ NUEVO ÍNDICE
@@ -5091,6 +5097,7 @@ model TerminalPaymentRequest {
   /// ackVersion, cancelDispositionVersion, probeVersion, socketId, at, replay }] }. `null` = procedencia DESCONOCIDA (fila
   /// anterior a esta columna: nunca inferir «no entregada»); `[]` = creada y todavía no entregada a ningún socket.
   deliveryProvenance Json?
+  closedVia          String? // S8: 'terminal' | 'webhook'. Se escribe UNA vez: conserva quién ganó originalmente
   expiresAt          DateTime
   createdAt          DateTime                     @default(now())
   updatedAt          DateTime                     @updatedAt
@@ -5098,11 +5105,31 @@ model TerminalPaymentRequest {
   // migration SQL: UNIQUE(terminalId) WHERE status IN
   // ('PENDING','SENT','CANCEL_REQUESTED','UNKNOWN').
 
+  attemptLinks TerminalPaymentAttemptLink[] // S1: los intentos de la terminal ligados a esta solicitud
+
   @@index([venueId, status])
   @@index([terminalId, status])
   @@index([venueId, orderId, status, createdAt, id], map: "TerminalPaymentRequest_sale_recovery_idx")
   @@index([paymentId], map: "TerminalPaymentRequest_payment_owner_idx")
   @@index([status, createdAt, id], map: "TerminalPaymentRequest_recovery_cursor_idx")
+}
+
+/// Checkpoint 1 del webhook como primer confirmador (13-sep-2026), S1: vínculo intento → solicitud del cobro remoto.
+/// Una solicitud tiene VARIOS intentos (un reintento tras rechazo abre uno nuevo); un intento pertenece a UNA
+/// solicitud para siempre — `attemptId` es único GLOBAL y el dueño (solicitud, venue, terminal autenticada)
+/// nunca se reasigna. `attemptId` = `PaymentAttemptLedger.attemptId` de la terminal = `integratorReference`
+/// que viaja a AngelPay = `Payment.idempotencyKey` del registro.
+model TerminalPaymentAttemptLink {
+  id         String                 @id @default(cuid())
+  requestId  String
+  request    TerminalPaymentRequest @relation(fields: [requestId], references: [requestId], onDelete: Cascade)
+  attemptId  String                 @unique
+  venueId    String
+  terminalId String // llave normalizada (sin AVQD-, minúsculas), igual que TerminalPaymentRequest.terminalId
+  createdAt  DateTime               @default(now())
+
+  @@index([requestId, createdAt])
+  @@index([venueId, terminalId, createdAt])
 }
 
 enum LogLevel {
@@ -5991,6 +6018,15 @@ model ProviderEventLog {
   paymentId String?
   payment   Payment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
 
+  // S7 (checkpoint 1 del webhook): evidencia por INTENTO (`integratorReference` = attemptId de la terminal).
+  attemptId String?
+  // S4: lease del worker propio que procesa los PENDING, mismo vocabulario que PaymentEffect.
+  attempts      Int       @default(0)
+  nextAttemptAt DateTime?
+  leaseUntil    DateTime?
+  claimToken    String?
+  lastError     String?   @db.VarChar(500)
+
   createdAt   DateTime  @default(now())
   processedAt DateTime?
 
@@ -6006,6 +6042,9 @@ model ProviderEventLog {
   @@index([paymentId])
   @@index([status, createdAt]) // worker scans pending events ordered by age
   @@index([type, createdAt]) // dashboard queries by event type
+  @@index([attemptId])
+  @@index([status, nextAttemptAt, id])
+  @@index([status, leaseUntil, id])
 }
 
 // NOTE: DELIVERY CHANNELS

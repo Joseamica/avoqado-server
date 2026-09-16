@@ -29,6 +29,7 @@ import * as shiftController from '../controllers/tpv/shift.tpv.controller'
 import * as syncTpvController from '../controllers/tpv/sync.tpv.controller'
 import * as tableController from '../controllers/tpv/table.tpv.controller'
 import * as terminalController from '../controllers/tpv/terminal.tpv.controller'
+import * as terminalPaymentTpvController from '../controllers/tpv/terminal-payment.tpv.controller'
 import * as timeEntryController from '../controllers/tpv/time-entry.tpv.controller'
 import * as tpvMessageController from '../controllers/tpv/tpv-message.tpv.controller'
 import * as trainingController from '../controllers/tpv/training.tpv.controller'
@@ -3448,6 +3449,49 @@ router.get(
   authenticateTokenMiddleware,
   checkPermission('payments:read'),
   receiptForPaymentController.getReceiptLink,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/terminal-payment/attempts/{attemptId}:
+ *   get:
+ *     tags: [TPV]
+ *     summary: Consulta durable POR INTENTO de un cobro remoto (S6, webhook como primer confirmador)
+ *     description: |
+ *       Lo que la TERMINAL puede saber de SU intento al reconectar. Contesta por separado el resultado del intento
+ *       (`attempt`: el Payment cuya llave es ESTE attemptId — nunca el de otro intento — con `outcome`
+ *       RECORDED / SECOND_CAPTURE_EVIDENCE / REFERENCE_COLLISION_EVIDENCE / NOT_RECORDED y la evidencia del procesador) y el estado de la solicitud
+ *       (`request`: la misma proyección que ve el POS y el MCP, más `closedVia` y `winnerAttemptId`).
+ *       Sólo intentos de la terminal del JWT. Un intento desconocido, de otra terminal o de otro venue responde 404 con
+ *       `outcome: NO_EVIDENCE` — NUNCA equivale a «no cobrado»; tampoco un timeout ni un rechazo aislado.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: attemptId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: "{ success, attemptId, requestId, attempt: { outcome, paymentId, paymentStatus, recordedVia, amountCents, tipCents, isWinner, winnerPaymentId, processorEvidence, processorEvidenceAt, linkedAt }, request: { …estado de la solicitud, closedVia, winnerAttemptId } }"
+ *       403:
+ *         description: El token no lleva identidad de terminal (TERMINAL_IDENTITY_REQUIRED) o el venue no es el del token
+ *       404:
+ *         description: "Sin evidencia para esta terminal: { status: ATTEMPT_NOT_FOUND, outcome: NO_EVIDENCE } — no acredita ausencia de cobro"
+ *       401:
+ *         description: Unauthorized
+ */
+router.get(
+  '/venues/:venueId/terminal-payment/attempts/:attemptId',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  terminalPaymentTpvController.getAttemptStatus,
 )
 
 // ==========================================

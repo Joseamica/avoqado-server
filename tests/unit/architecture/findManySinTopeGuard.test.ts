@@ -165,7 +165,6 @@ const INVENTARIO: Record<string, number> = {
   'src/services/superadmin/rateCorrection/rateCorrectionPreview.ts': 2,
   'src/services/superadmin/paymentAnalytics.service.ts': 1,
   'src/services/superadmin/settlementCalendar.superadmin.service.ts': 1,
-  'src/services/tpv/angelpay-webhook.service.ts': 1,
   'src/services/tpv/blumon-webhook.service.ts': 1,
   'src/services/tpv/order.tpv.service.ts': 3,
   'src/services/tpv/payment.tpv.service.ts': 2,

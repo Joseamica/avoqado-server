@@ -31,6 +31,8 @@ jest.mock('@/services/venueSalesGuard', () => ({
 const lockAreaTicketCheckoutMock = jest.fn()
 const finalizeAreaTicketPaymentMock = jest.fn()
 jest.mock('@/services/mobile/areaTicketV7.mobile.service', () => ({
+  // S0 (13-sep): el registrador toma la jerarquía de vales ANTES de arbitrar; aquí no hay sesión (null).
+  lockAreaTicketCheckoutHierarchy: jest.fn().mockResolvedValue(null),
   __esModule: true,
   lockAreaTicketCheckoutForPayment: (...a: unknown[]) => lockAreaTicketCheckoutMock(...a),
   finalizeAreaTicketPaymentInTransaction: (...a: unknown[]) => finalizeAreaTicketPaymentMock(...a),
@@ -56,9 +58,9 @@ jest.mock('@/utils/prismaClient', () => ({
       // El outbox relee su pago fuente para comprobar que pertenece a la MISMA orden antes de
       // encolar; devolverle undefined dispara PAYMENT_EFFECT_SOURCE_MISMATCH y tumba el cobro.
       // Se REFLEJA esa consulta concreta; cualquier otra sigue devolviendo undefined como antes.
-      findFirst: jest.fn().mockImplementation(async (a: any) =>
-        esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : undefined,
-      ),
+      findFirst: jest
+        .fn()
+        .mockImplementation(async (a: any) => (esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : undefined)),
       findUnique: jest.fn(),
       findMany: jest.fn(),
       // El camino post-cobro agrega los pagos de la orden y relee el Payment recién creado
@@ -213,8 +215,16 @@ function installStatefulP2002Rollback() {
     }
     const tx: any = {
       // Outbox de efectos del cobro (Task 5): se encola DENTRO de esta transacción.
-      paymentEffect: { createMany: jest.fn().mockResolvedValue({ count: 1 }), findMany: jest.fn().mockResolvedValue([]), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
-      commissionCalculation: { findMany: jest.fn().mockResolvedValue([]), create: jest.fn(), aggregate: jest.fn().mockResolvedValue({ _sum: { baseAmount: null, tipAmount: null } }) },
+      paymentEffect: {
+        createMany: jest.fn().mockResolvedValue({ count: 1 }),
+        findMany: jest.fn().mockResolvedValue([]),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
+      commissionCalculation: {
+        findMany: jest.fn().mockResolvedValue([]),
+        create: jest.fn(),
+        aggregate: jest.fn().mockResolvedValue({ _sum: { baseAmount: null, tipAmount: null } }),
+      },
       $executeRawUnsafe: jest.fn().mockResolvedValue(0),
       payment: {
         ...(prisma as any).payment,
@@ -290,7 +300,16 @@ beforeEach(() => {
   ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: VENUE_ID })
   // Un Payment REAL trae venue, orden e importes. Sin ellos, el outbox no reconoce su pago
   // fuente y lanza PAYMENT_EFFECT_SOURCE_MISMATCH, que tumba la transacción del cobro entera.
-  ;(prisma.payment.create as jest.Mock).mockResolvedValue({ id: 'payment-1', status: 'COMPLETED', feeAmount: 0, netAmount: 100, amount: new Decimal(100), tipAmount: new Decimal(0), venueId: VENUE_ID, orderId: ORDER_ID })
+  ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+    id: 'payment-1',
+    status: 'COMPLETED',
+    feeAmount: 0,
+    netAmount: 100,
+    amount: new Decimal(100),
+    tipAmount: new Decimal(0),
+    venueId: VENUE_ID,
+    orderId: ORDER_ID,
+  })
   // «Sin cobro previo» para todo… salvo la consulta con que el outbox relee SU pago fuente:
   // devolverle null ahí dispara PAYMENT_EFFECT_SOURCE_MISMATCH y tumba la transacción del cobro.
   ;(prisma.payment.findFirst as jest.Mock).mockImplementation(async (a: any) =>
@@ -321,8 +340,16 @@ beforeEach(() => {
     const record: TxRecord = { client: null, ops }
     const tx: any = {
       // Outbox de efectos del cobro (Task 5): se encola DENTRO de esta transacción.
-      paymentEffect: { createMany: jest.fn().mockResolvedValue({ count: 1 }), findMany: jest.fn().mockResolvedValue([]), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
-      commissionCalculation: { findMany: jest.fn().mockResolvedValue([]), create: jest.fn(), aggregate: jest.fn().mockResolvedValue({ _sum: { baseAmount: null, tipAmount: null } }) },
+      paymentEffect: {
+        createMany: jest.fn().mockResolvedValue({ count: 1 }),
+        findMany: jest.fn().mockResolvedValue([]),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
+      commissionCalculation: {
+        findMany: jest.fn().mockResolvedValue([]),
+        create: jest.fn(),
+        aggregate: jest.fn().mockResolvedValue({ _sum: { baseAmount: null, tipAmount: null } }),
+      },
       $executeRawUnsafe: jest.fn().mockResolvedValue(0),
       payment: {
         ...(prisma as any).payment,

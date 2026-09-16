@@ -491,6 +491,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   TerminalLog: 'Terminals / TPV Fleet',
   TerminalOrder: 'Terminals / TPV Fleet',
   TerminalPaymentRequest: 'Terminals / TPV Fleet',
+  TerminalPaymentAttemptLink: 'Terminals / TPV Fleet',
   TerminalOrderItem: 'Terminals / TPV Fleet',
   AppUpdate: 'Terminals / TPV Fleet',
   TpvCommandHistory: 'Terminals / TPV Fleet',

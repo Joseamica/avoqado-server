@@ -137,6 +137,18 @@ const INVENTORY: Record<string, InventoryDecision> = {
     auditFunction: 'recordFastPayment',
     transactionPath: [],
   },
+  'src/services/tpv/payment.tpv.service.ts#crearEvidenciaDeSegundaCaptura#create': {
+    decision: 'exclude',
+    lane: 'recordOrderPayment',
+    reason:
+      'S0 (13-sep): evidencia PENDING de una POSIBLE SEGUNDA CAPTURA de una solicitud POS→terminal que ya tiene ganador; nunca COMPLETED, nunca reclama turno, fuera de ventas y liquidación',
+  },
+  'src/services/tpv/payment.tpv.service.ts#crearEvidenciaDeColisionDeReferencia#create': {
+    decision: 'exclude',
+    lane: 'recordOrderPayment',
+    reason:
+      'Codex R4-6 (13-sep): evidencia PENDING de una POSIBLE COLISIÓN DE REFERENCIA (misma referencia/importe/terminal que un Payment que contradice al entrante); nunca COMPLETED, nunca reclama turno, fuera de ventas, liquidación, costo y lealtad',
+  },
   'src/services/tpv/refund.tpv.service.ts#ejecutarTransaccionDelReembolso#create': {
     decision: 'include',
     lane: 'recordRefund',
@@ -3200,12 +3212,14 @@ describe('paymentShiftClaim — inventario AST de carriles de caja', () => {
   })
 
   it('mobile/TPV preservan session → tickets → Order → Shift para vales por área', () => {
-    for (const [file, functionName] of [
-      ['src/services/mobile/order.mobile.service.ts', 'payCashOrder'],
-      ['src/services/tpv/payment.tpv.service.ts', 'recordOrderPayment'],
+    for (const [file, functionName, areaLockCallee] of [
+      ['src/services/mobile/order.mobile.service.ts', 'payCashOrder', 'areaTicketPayment.lockAreaTicketCheckoutForPayment'],
+      // S0 (13-sep): en la TPV el CANDADO de vales es la jerarquía (session → tickets → Order); la PREPARACIÓN del
+      // intento (`lockAreaTicketCheckoutForPayment`) va después del arbitraje de la solicitud — ver la prueba siguiente.
+      ['src/services/tpv/payment.tpv.service.ts', 'recordOrderPayment', 'areaTicketPayment.lockAreaTicketCheckoutHierarchy'],
     ] as const) {
       const calls = parseCalls(file)
-      const areaLock = callsForFunction(calls, functionName, 'areaTicketPayment.lockAreaTicketCheckoutForPayment')[0]
+      const areaLock = callsForFunction(calls, functionName, areaLockCallee)[0]
       const orderLock = callsForFunction(calls, functionName, 'lockExistingOrderForPayment')[0]
       const shiftLock = callsForFunction(
         calls,
@@ -3218,5 +3232,23 @@ describe('paymentShiftClaim — inventario AST de carriles de caja', () => {
         orderBeforeShift: Boolean(orderLock && shiftLock && orderLock.position < shiftLock.position),
       }).toEqual({ file, areaBeforeOrder: true, orderBeforeShift: true })
     }
+  })
+
+  // S0 (Codex P1-3, 13-sep): sólo el GANADOR prepara el intento de vales. `lockAreaTicketCheckoutForPayment` rechaza
+  // una sesión ya pagada (409): si corriera antes del arbitraje, el segundo intento acreditado quedaría fuera sin
+  // evidencia. Orden obligatorio en la TPV: jerarquía de vales → Order → arbitraje → preparación → turno.
+  it('TPV: la preparación de vales va DESPUÉS del arbitraje de la solicitud y ANTES del turno', () => {
+    const file = 'src/services/tpv/payment.tpv.service.ts'
+    const calls = parseCalls(file)
+    const jerarquia = callsForFunction(calls, 'recordOrderPayment', 'areaTicketPayment.lockAreaTicketCheckoutHierarchy')[0]
+    // El registrador entra al arbitraje por su envoltura fail-open (`arbitrarSinPerderElCobro`), nunca directo.
+    const arbitraje = callsForFunction(calls, 'recordOrderPayment', 'arbitrarSinPerderElCobro')[0]
+    const preparacion = callsForFunction(calls, 'recordOrderPayment', 'areaTicketPayment.lockAreaTicketCheckoutForPayment')[0]
+    const turno = callsForFunction(calls, 'recordOrderPayment', 'claimShiftForCompletedPayment')[0]
+    expect({
+      jerarquiaAntesDelArbitraje: Boolean(jerarquia && arbitraje && jerarquia.position < arbitraje.position),
+      preparacionDespuesDelArbitraje: Boolean(arbitraje && preparacion && arbitraje.position < preparacion.position),
+      preparacionAntesDelTurno: Boolean(preparacion && turno && preparacion.position < turno.position),
+    }).toEqual({ jerarquiaAntesDelArbitraje: true, preparacionDespuesDelArbitraje: true, preparacionAntesDelTurno: true })
   })
 })

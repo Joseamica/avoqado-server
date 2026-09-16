@@ -10,7 +10,17 @@ import prisma from '@/utils/prismaClient'
 
 jest.mock('@/utils/prismaClient', () => {
   const tx = {
-    payment: { update: jest.fn() },
+    // Codex R13-3: la decisión económica va bajo el mutex del Payment (`$queryRaw`: candado y `cobrosDelProtocolo`, que aquí no
+    // devuelve filas ⇒ cobro anterior al protocolo) y relee importe y método VIGENTES (`findUniqueOrThrow`).
+    // Codex R16-1: el candado toma el PAR original → reembolso (`bloquearConSuOriginal`): lee la foto del Payment (`findFirst`: id, tipo,
+    // puntero) antes y después de bloquear, entre savepoints (`$executeRaw`). Aquí el cobro NO es un reembolso.
+    $queryRaw: jest.fn(async () => []),
+    $executeRaw: jest.fn(async () => 0),
+    payment: {
+      update: jest.fn(),
+      findUniqueOrThrow: jest.fn(async () => ({ amount: 100, method: 'CASH' })),
+      findFirst: jest.fn(async () => ({ id: 'pay-1', type: 'CASH', processorData: {} })),
+    },
     saleVerification: { update: jest.fn() },
     activityLog: { create: jest.fn() },
   }

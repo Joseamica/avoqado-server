@@ -64,6 +64,18 @@ jest.mock('@/services/referrals/referralQualification.service', () => ({
   __esModule: true,
   onOrderPaid: jest.fn().mockResolvedValue(undefined),
 }))
+// Codex R4-2 (13-sep): la consolidación por referencia ya no devuelve «el existente» cuando el candado falla (eso era
+// INCIERTO y ahora rechaza con 503). Sobre este Prisma simulado el candado no existe, así que se declara CONSOLIDADO con
+// el candidato: lo que mide esta suite es el customerLink de cada SALIDA, no la consolidación (probada en integración).
+jest.mock('@/services/tpv/registroRepetido', () => {
+  const real = jest.requireActual('@/services/tpv/registroRepetido')
+  return {
+    ...real,
+    consolidarRegistroRepetidoDetallado: jest.fn(async (existente: unknown) => ({ estado: 'CONSOLIDADO', registro: existente })),
+    consolidarRegistroRepetido: jest.fn(async (existente: unknown) => existente),
+  }
+})
+
 jest.mock('@/services/inventory/inventoryPosting.service', () => ({
   __esModule: true,
   createSalePostingInTx: jest.fn().mockResolvedValue({ id: 'posting-test', status: 'PENDING' }),
@@ -134,13 +146,11 @@ function installFakes() {
   // «No hay cobro previo» sigue siendo la respuesta a cualquier consulta… salvo a la del outbox,
   // que relee SU pago fuente para comprobar que pertenece a la misma orden. Devolverle null ahí
   // dispara PAYMENT_EFFECT_SOURCE_MISMATCH y tumba la transacción del cobro entera.
-  prismaMock.payment.findFirst.mockImplementation(async (a: any) =>
-    esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : null,
-  )
+  prismaMock.payment.findFirst.mockImplementation(async (a: any) => (esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : null))
   // El rescate de la comisión (bajo SAVEPOINT) relee el pago: se devuelve el que ESTE test
   // acaba de crear, no uno inventado, para que venue y orden coincidan solos.
-  prismaMock.payment.findUniqueOrThrow.mockImplementation(async (a: any) =>
-    payments.find((p: any) => p.id === a?.where?.id) ?? payments[payments.length - 1],
+  prismaMock.payment.findUniqueOrThrow.mockImplementation(
+    async (a: any) => payments.find((p: any) => p.id === a?.where?.id) ?? payments[payments.length - 1],
   )
   // Ningún cobro previo sobre la orden delegada: el conteo ya no cae a 0 en silencio.
   prismaMock.payment.count.mockResolvedValue(0)
@@ -359,6 +369,29 @@ describe('recordFastPayment — el CLIENTE de la venta rápida', () => {
     expect(result.customerLink.status).toBe('LINKED')
   })
 
+  it('Codex R5 (P2): si lo que devuelve la llave es EVIDENCIA (PENDING con reconciliation), el cliente NO se liga a la orden del candidato — esa orden es de OTRA venta', async () => {
+    const evidencia = {
+      id: 'pay-evidencia',
+      orderId: 'orden-del-candidato',
+      receipts: [],
+      idempotencyKey: 'idem-1',
+      status: 'PENDING',
+      processorData: { reconciliation: { kind: 'POSSIBLE_REFERENCE_COLLISION', candidates: [] } },
+    }
+    prismaMock.payment.findUnique.mockResolvedValue(evidencia)
+    prismaMock.customer.findUnique.mockResolvedValue(CLIENTE)
+    prismaMock.order.findFirst.mockResolvedValue({ id: 'orden-del-candidato', venueId: VENUE, customerId: null })
+
+    const result: any = await recordFastPayment(VENUE, cobroRapido({ customerId: 'cust-1', idempotencyKey: 'idem-1' }), 'user-1')
+
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(result.id).toBe('pay-evidencia')
+    expect(prismaMock.order.update).not.toHaveBeenCalled()
+    expect(prismaMock.orderCustomer.create).not.toHaveBeenCalled()
+    expect(result.customerLink.status).not.toBe('LINKED')
+    expect(result.customerLink.customerId).toBeNull()
+  })
+
   it('reintento idempotente NUNCA reasigna una venta que ya tenía OTRO cliente', async () => {
     // Reatribuir una venta ya cerrada por un payload reenviado sería mover el
     // historial (y el CFDI) de un cliente a otro sin que nadie lo pida.
@@ -573,12 +606,23 @@ describe('recordFastPayment — el CLIENTE de la venta rápida', () => {
   })
 
   it('SALIDA referenceNumber (reintento legacy sin idempotencyKey): trae customerLink', async () => {
-    prismaMock.payment.findFirst.mockResolvedValue({
+    // S0-a (13-sep): la referencia sola ya no identifica un cobro — el reintento legacy tiene que coincidir en dinero
+    // (importe y propina). Un existente SIN importe se leería como colisión de referencia y se registraría de nuevo.
+    // Codex R2 (P1-1): los candidatos por referencia se leen con `findMany` (varios por referencia, acotados).
+    const legacy = {
       id: 'pay-legacy',
       orderId: 'fast-order-legacy',
       receipts: [],
       referenceNumber: 'REF-123',
-    })
+      amount: 100,
+      tipAmount: 0,
+      merchantAccountId: null,
+      idempotencyKey: null,
+      terminalPaymentRequestId: null,
+      processorData: null,
+    }
+    prismaMock.payment.findFirst.mockResolvedValue(legacy)
+    prismaMock.payment.findMany.mockResolvedValue([legacy])
     prismaMock.customer.findUnique.mockResolvedValue(CLIENTE)
     prismaMock.order.findFirst.mockResolvedValue({ id: 'fast-order-legacy', venueId: VENUE, customerId: null })
 

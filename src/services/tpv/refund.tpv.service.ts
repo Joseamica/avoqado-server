@@ -32,7 +32,7 @@ import { BadRequestError, ConflictError, InternalServerError, NotFoundError } fr
 import prisma from '../../utils/prismaClient'
 import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
 import { Decimal } from '@prisma/client/runtime/library'
-import { createRefundTransactionCost } from '../payments/transactionCost.service'
+import { asegurarObligacionDeCostoNegativo, costearYProyectarReembolso } from '../payments/deferredTransactionCost.service'
 import { createRefundCommission } from '../dashboard/commission/commission-calculation.service'
 import { restockOrderItems } from '../dashboard/inventoryRestock.service'
 import { logAction } from '../dashboard/activity-log.service'
@@ -1004,6 +1004,8 @@ export async function recordRefund(
       // pago sólo si ganó. Mismo split proporcional, una sola escritura.
 
       await enqueueRefundPaymentEffectsInTx(tx, refundPayment.id, originalPayment.id)
+      // Codex R12-15: el costo negativo del reembolso es una obligación DURABLE (misma transacción, mutex del original).
+      await asegurarObligacionDeCostoNegativo(tx, originalPayment.id, refundPayment.id)
 
       return {
         refundPayment,
@@ -1244,7 +1246,8 @@ export async function recordRefund(
   // STEP 5: Create negative TransactionCost for refund (for accurate profit reporting)
   // ═══════════════════════════════════════════════════════════════════════════
   try {
-    await createRefundTransactionCost(result.id, refundData.originalPaymentId)
+    // Codex R13-5: crea el costo negativo si falta y PROYECTA el reembolso (Payment y VenueTransaction) desde el costo persistido.
+    await costearYProyectarReembolso(result.id, refundData.originalPaymentId)
     logger.info('Refund TransactionCost created', { refundPaymentId: result.id })
   } catch (error) {
     // Don't fail the refund if TransactionCost creation fails

@@ -9,6 +9,7 @@
 
 import { Request, Response, NextFunction } from 'express'
 import prisma from '@/utils/prismaClient'
+import { AFILIACION_EN_VARIOS_SLOTS, mensajeDeSlotsRepetidos } from '@/services/shared/slotsDeAfiliacion'
 import logger from '@/config/logger'
 import { getOrganizationPaymentConfig, getOrganizationPricing, getVenueConfigSources } from '@/services/organization-payment-config.service'
 
@@ -74,6 +75,12 @@ export async function setPaymentConfig(req: Request, res: Response, next: NextFu
       if (!acc || !acc.active) {
         return res.status(400).json({ error: 'Tertiary account not found or inactive' })
       }
+    }
+
+    // Codex R12-2: una afiliación no puede ocupar dos slots (tampoco en la configuración de la organización).
+    const repetidos = mensajeDeSlotsRepetidos({ primaryAccountId, secondaryAccountId, tertiaryAccountId })
+    if (repetidos) {
+      return res.status(400).json({ error: repetidos, code: AFILIACION_EN_VARIOS_SLOTS })
     }
 
     const config = await prisma.organizationPaymentConfig.upsert({

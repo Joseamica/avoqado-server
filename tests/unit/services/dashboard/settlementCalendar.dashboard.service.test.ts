@@ -37,6 +37,18 @@ describe('projectPaymentSettlement', () => {
     })
   })
 
+  it('Codex R4 (P2): usa la MISMA proyección monetaria que el costo — comisión a 2 decimales, neto = bruto − comisión', () => {
+    const p = {
+      amount: 1.11,
+      tipAmount: 0,
+      createdAt: new Date('2026-07-04T02:00:00Z'),
+      merchantAccountId: 'm1',
+      // 2.25 % de $1.11 se persiste como 0.0250 (escala 4) más $0.50 fijo: la comisión proyectada es $0.53, no 0.525.
+      transactionCost: { transactionType: 'CREDIT' as const, venueChargeAmount: 0.025, venueFixedFee: 0.5 },
+    }
+    expect(projectPaymentSettlement(p, [cfg], TZ)).toMatchObject({ gross: 1.11, commission: 0.53, net: 0.58 })
+  })
+
   it('returns null with no cost', () => {
     const p = {
       amount: 100,

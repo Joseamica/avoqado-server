@@ -58,6 +58,15 @@ export function terminalIdentityKey(serial: string): string {
 }
 
 /**
+ * Codex R5 (P3): la clase de espacios que `String.prototype.trim` quita (espacio, tab, LF, VT, FF, CR, NBSP, BOM y los
+ * separadores Unicode Zs/LS/PS), como patrón ARE de PostgreSQL, para que el SQL que normaliza el serial (S6) recorte con
+ * la MISMA regla que `terminalIdentityKey`. `trim()` de PostgreSQL sólo quita el espacio ASCII y `[[:space:]]` depende del
+ * locale: un serial con un tabulador o un NBSP pegado se leía como OTRA terminal en SQL y como la misma en JS.
+ */
+const ESPACIOS_COMO_TRIM_JS = '\\s\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff'
+export const PATRON_SQL_TRIM_COMO_JS = `^[${ESPACIOS_COMO_TRIM_JS}]+|[${ESPACIOS_COMO_TRIM_JS}]+$`
+
+/**
  * ¿`a` y `b` nombran la MISMA terminal? Única definición — la usan el guardia de propiedad del
  * ACK (`tpv-health.service.ts`) y el carril de sockets que entrega un comando SÓLO a su
  * destinataria (`broadcasting.service.ts`). Antes cada uno comparaba a su manera: el guardia

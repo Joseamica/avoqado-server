@@ -24,6 +24,7 @@
  */
 
 import { CronJob } from 'cron'
+import { parcharProcessorData } from '../services/shared/parcheDeProcessorData'
 import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
 import retry, { shouldRetryDbConnectionError } from '../utils/retry'
@@ -168,23 +169,10 @@ export class BlumonPaymentAuditJob {
       })
 
       try {
-        // MERGE, never replace: processorData holds the blumon* keys written
-        // by the webhook service. A bare update would wipe them.
-        const current = await prisma.payment.findUnique({
-          where: { id: row.id },
-          select: { processorData: true },
-        })
-        const existing = (current?.processorData as Record<string, unknown>) ?? {}
-
-        await prisma.payment.update({
-          where: { id: row.id },
-          data: {
-            processorData: {
-              ...existing,
-              webhookAuditAlertedAt: new Date().toISOString(),
-            } as never,
-          },
-        })
+        // MERGE, never replace: processorData holds the blumon* keys written by the webhook service, the tariff
+        // snapshot and `costPending`. Codex R12-10: the merge is an ATOMIC `||` patch in Postgres — a read-then-replace
+        // restored a stale `costPending: true` over an obligation that had converged in between.
+        await parcharProcessorData(prisma, row.id, { webhookAuditAlertedAt: new Date().toISOString() })
         alerted++
       } catch (error) {
         // The alert already fired — failing to stamp only risks a repeat alert,

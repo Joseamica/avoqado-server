@@ -146,7 +146,11 @@ jest.mock('@/communication/sockets/managers/socketManager', () => ({
   },
 }))
 
+// El módulo REAL con un solo reemplazo (no una lista fija de exports): el registrador también usa `tarifaCongeladaDeLaAfiliacion`
+// y `tarifaConCapturaFallida` (Codex R10-1) — con la lista fija, la captura de la tarifa fallaba por `undefined` y el cobro
+// «se registraba» con un snapshot que nunca existiría en producción (memoria: mock de módulo con lista fija).
 jest.mock('@/services/payments/transactionCost.service', () => ({
+  ...jest.requireActual('@/services/payments/transactionCost.service'),
   createTransactionCost: jest.fn(),
 }))
 

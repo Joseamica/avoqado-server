@@ -75,6 +75,7 @@ import { cashDrawerAutoCloseJob } from './jobs/cash-drawer-auto-close.job'
 import { inventoryPostingSweeperJob } from './jobs/inventory-posting-sweeper.job'
 import { loyaltyReconciliationJob } from './jobs/loyalty-reconciliation.job'
 import { paymentEffectsJob } from './jobs/payment-effects.job'
+import { angelpayEventWorkerJob } from './jobs/angelpay-event-worker.job'
 import { cashDrawerReconcilerJob } from './jobs/cash-drawer-reconciler.job'
 import { paidOrderReconcilerJob } from './jobs/paid-order-reconciler.job'
 import { cashClosePairReconcilerJob } from './jobs/cash-close-pair-reconciler.job'
@@ -161,6 +162,7 @@ const gracefulShutdown = async (signal: string) => {
       inventoryPostingSweeperJob.stop()
       loyaltyReconciliationJob.stop()
       paymentEffectsJob.stop()
+      angelpayEventWorkerJob.stop()
       cashDrawerReconcilerJob.stop()
       paidOrderReconcilerJob.stop()
       cashClosePairReconcilerJob.stop()
@@ -496,6 +498,9 @@ const startApplication = async (retries = 3) => {
       inventoryPostingSweeperJob.start()
       loyaltyReconciliationJob.start()
       paymentEffectsJob.start()
+      // S4: los eventos PENDING de AngelPay (webhook antes que el registro, vínculo tardío, caídas) los retoma un
+      // worker propio con claim atómico y lease — nunca el vigía de 30 s.
+      angelpayEventWorkerJob.start()
       cashDrawerReconcilerJob.start()
       paidOrderReconcilerJob.start()
       // Completa el cierre unificado que murió entre sus dos commits: sin él, un turno sin su

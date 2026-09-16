@@ -1,6 +1,8 @@
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { MOTIVO_EXCLUSION_DEL_PROTOCOLO, cobrosDelProtocolo } from '@/services/shared/cobroDelProtocolo'
+import { MOTIVO_EXCLUSION_ORIGINAL_OCUPADO, bloquearLoteConOriginales } from '@/services/shared/candadosDelLote'
 
 export async function reverseRateCorrection(batchId: string, ctx: { staffId: string | null }) {
   const batch = await prisma.rateCorrectionBatch.findUnique({
@@ -10,9 +12,26 @@ export async function reverseRateCorrection(batchId: string, ctx: { staffId: str
   if (!batch) throw new NotFoundError(`RateCorrectionBatch ${batchId} not found`)
   if (batch.status !== 'APPLIED') throw new BadRequestError(`Batch ${batchId} is ${batch.status}; only APPLIED batches can be reversed`)
 
+  // Codex R12-4: un cobro que ya pertenece al protocolo de costo (también uno que entró DESPUÉS de aplicarse el lote —
+  // acreditado y convergido) no se revierte: borrarle el costo o pisarle las proyecciones dejaría una obligación DONE sin
+  // costo. Se decide bajo el mutex de los Payments, y lo apartado se explica.
+  // Codex R15-2: los mismos candados que apply — ORIGINALES (NOWAIT, dentro y fuera del lote) → lote en `id ASC` → relectura —;
+  // lo apartado por un original ocupado se queda como el lote lo dejó (explicado), no se espera a la unidad de costo.
+  const excludedProtocolPaymentIds: string[] = []
+  const excludedBusyPaymentIds: string[] = []
   await prisma.$transaction(
     async tx => {
+      const ids = batch.entries.map(e => e.paymentId)
+      const candados = await bloquearLoteConOriginales(tx, { venueId: batch.venueId, paymentIds: ids })
+      excludedBusyPaymentIds.push(...candados.ocupados)
+      const protocolo = await cobrosDelProtocolo(tx, candados.bloqueados)
+      const reversibles = new Set(candados.bloqueados.filter(id => !protocolo.has(id)))
       for (const e of batch.entries) {
+        if (protocolo.has(e.paymentId)) {
+          excludedProtocolPaymentIds.push(e.paymentId)
+          continue
+        }
+        if (!reversibles.has(e.paymentId)) continue
         await tx.payment.update({
           where: { id: e.paymentId },
           data: {
@@ -70,8 +89,24 @@ export async function reverseRateCorrection(batchId: string, ctx: { staffId: str
     action: 'RATE_CORRECTION_REVERSED',
     entity: 'RateCorrectionBatch',
     entityId: batchId,
-    data: { paymentCount: batch.entries.length },
+    data: {
+      paymentCount: batch.entries.length - excludedProtocolPaymentIds.length - excludedBusyPaymentIds.length,
+      excludedProtocolCount: excludedProtocolPaymentIds.length,
+      excludedProtocolPaymentIds,
+      excludedProtocolReason: MOTIVO_EXCLUSION_DEL_PROTOCOLO,
+      excludedBusyCount: excludedBusyPaymentIds.length,
+      excludedBusyPaymentIds,
+      excludedBusyReason: MOTIVO_EXCLUSION_ORIGINAL_OCUPADO,
+    },
   })
 
-  return reversed
+  return {
+    ...reversed,
+    excludedProtocolCount: excludedProtocolPaymentIds.length,
+    excludedProtocolPaymentIds,
+    excludedProtocolReason: MOTIVO_EXCLUSION_DEL_PROTOCOLO,
+    excludedBusyCount: excludedBusyPaymentIds.length,
+    excludedBusyPaymentIds,
+    excludedBusyReason: MOTIVO_EXCLUSION_ORIGINAL_OCUPADO,
+  }
 }

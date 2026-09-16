@@ -9,6 +9,7 @@ import prisma from '@/utils/prismaClient'
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    $executeRaw: jest.fn().mockResolvedValue(1),
     payment: {
       findFirst: jest.fn(),
       findMany: jest.fn(),

@@ -62,7 +62,16 @@ export interface PaymentStatusGroup {
 export interface PaymentsSummary {
   count: number
   byStatus: Record<string, { count: number; amount: number; tips: number }>
-  completed: { count: number; gross: number; tips: number; processorFees: number; net: number }
+  completed: {
+    count: number
+    gross: number
+    tips: number
+    processorFees: number
+    net: number
+    /** Cobros COMPLETED cuyo costo aún no se calcula (nacidos del webhook, S2): su comisión y su neto son PROVISIONALES. */
+    costPendingCount?: number
+    netProvisional?: boolean
+  }
   // WHY: separate refund line so "¿qué se reembolsó?" is answerable and `completed.gross` is
   // TRUE sales revenue. `amount`/`tips` stay NEGATIVE (money out), as stored on the refund rows.
   refunds: { count: number; amount: number; tips: number }
@@ -115,6 +124,15 @@ export function buildPaymentsSummary(groups: PaymentStatusGroup[]): PaymentsSumm
   return out
 }
 
+/**
+ * Codex R1 (P2): `feeAmount`/`netAmount` de un cobro con el costo PENDIENTE son 0 / bruto y se publicaban como definitivos.
+ * Se declara cuántos hay y que el neto es provisional mientras alguno espere su costo.
+ */
+export function conCostoPendiente(summary: PaymentsSummary, costPendingCount: number): PaymentsSummary {
+  const pendientes = Number.isFinite(costPendingCount) ? Math.max(0, Math.trunc(costPendingCount)) : 0
+  return { ...summary, completed: { ...summary.completed, costPendingCount: pendientes, netProvisional: pendientes > 0 } }
+}
+
 const STATUS_MAP: Record<string, TransactionStatus> = {
   completed: TransactionStatus.COMPLETED,
   refunded: TransactionStatus.REFUNDED,
@@ -143,12 +161,22 @@ const METHOD_MAP: Record<string, PaymentMethod> = {
   other: PaymentMethod.OTHER,
 }
 
+/** Codex R12-16: la marca por pago, leída del JSON del procesador (sólo la marca sale del MCP; nunca el JSON entero). */
+export function costoPendienteDe(processorData: unknown): boolean {
+  return (
+    !!processorData &&
+    typeof processorData === 'object' &&
+    !Array.isArray(processorData) &&
+    (processorData as { costPending?: unknown }).costPending === true
+  )
+}
+
 export function registerPaymentTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
 
   server.tool(
     'list_payments',
-    'Individual payments/transactions for a venue you can access, over a date range (default last 7 days): each payment\'s amount, tip, method (cash/card/…), type (REGULAR/FAST/REFUND/…), card brand, status (completed/refunded/failed/…), processor fee & net deposited, who processed it, terminal, and order number. New card payments may include `internationalityShadow`: an OBSERVATIONAL issuer-country result being compared against legacy behavior; it is not yet the financial/settlement source of truth. The summary splits money three ways: `completed` = TRUE sales revenue (refunds excluded), `refunds` = money returned to customers (amount/tips are NEGATIVE), and `byStatus` (with a normalized REFUND bucket). Modern refunds carry status=COMPLETED + type=REFUND; legacy refunds carry status=REFUNDED. For total cash movement before processor fees, sum completed.gross + completed.tips + refunds.amount + refunds.tips. Answers "¿qué pagos se reembolsaron?", "¿hubo cobros fallidos hoy?", "¿cuánto pagué de comisión al procesador?". Pass venueId; optionally status, method, fromDate/toDate (YYYY-MM-DD).',
+    'Individual payments/transactions for a venue you can access, over a date range (default last 7 days): each payment\'s amount, tip, method (cash/card/…), type (REGULAR/FAST/REFUND/…), card brand, status (completed/refunded/failed/…), processor fee & net deposited, who processed it, terminal, and order number. Each row carries `costPending` / `feeProvisional`: a card payment whose transaction cost has not converged yet (its fee is still being accredited) shows `processorFee` 0 and `net` = gross PROVISIONALLY — do not read those two figures as final until `costPending` is false; the summary\'s `costPendingCount`/`netProvisional` say how many, the rows say WHICH. New card payments may include `internationalityShadow`: an OBSERVATIONAL issuer-country result being compared against legacy behavior; it is not yet the financial/settlement source of truth. The summary splits money three ways: `completed` = TRUE sales revenue (refunds excluded), `refunds` = money returned to customers (amount/tips are NEGATIVE), and `byStatus` (with a normalized REFUND bucket). Modern refunds carry status=COMPLETED + type=REFUND; legacy refunds carry status=REFUNDED. For total cash movement before processor fees, sum completed.gross + completed.tips + refunds.amount + refunds.tips. Answers "¿qué pagos se reembolsaron?", "¿hubo cobros fallidos hoy?", "¿cuánto pagué de comisión al procesador?". Pass venueId; optionally status, method, fromDate/toDate (YYYY-MM-DD).',
     {
       venueId: z.string().describe('Venue whose payments to read (must be in your scope)'),
       status: z
@@ -177,7 +205,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
         ...(method ? { method: METHOD_MAP[method] } : {}),
       }
 
-      const [groups, payments] = await Promise.all([
+      const [groups, payments, costPendingCount] = await Promise.all([
         prisma.payment.groupBy({
           // WHY by status AND type: refunds are type=REFUND under status=COMPLETED — grouping by
           // status alone folded them into `completed` invisibly. `type` lets us split them out.
@@ -204,6 +232,8 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
             issuerCountryCode: true,
             processor: true,
             createdAt: true,
+            // Codex R12-16: la marca `costPending` viaja POR PAGO (sale de aquí; el JSON entero no se expone).
+            processorData: true,
             processedBy: { select: { firstName: true, lastName: true } },
             terminal: { select: { name: true } },
             order: { select: { orderNumber: true } },
@@ -211,13 +241,18 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
           orderBy: { createdAt: 'desc' },
           take: limit ?? 25,
         }),
+        // Codex R1 (P2): un Payment nacido del webhook lleva el costo PENDIENTE (S2). Su comisión 0 / neto bruto son
+        // PROVISIONALES y así se dice: se cuentan aparte para no publicarlos como definitivos.
+        prisma.payment.count({
+          where: { ...where, status: TransactionStatus.COMPLETED, processorData: { path: ['costPending'], equals: true } },
+        }),
       ])
 
       return text({
         venueId,
         window: { start: start.toISOString(), end: end.toISOString() },
         timezone: tz,
-        summary: buildPaymentsSummary(groups as PaymentStatusGroup[]),
+        summary: conCostoPendiente(buildPaymentsSummary(groups as PaymentStatusGroup[]), costPendingCount),
         count: payments.length,
         payments: payments.map(p => ({
           id: p.id,
@@ -229,6 +264,9 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
           tip: num(p.tipAmount),
           processorFee: num(p.feeAmount),
           net: num(p.netAmount), // what actually lands after the processor fee
+          // Codex R12-16: POR PAGO — `true` = el costo todavía no converge: `processorFee` y `net` son PROVISIONALES.
+          costPending: costoPendienteDe(p.processorData),
+          feeProvisional: costoPendienteDe(p.processorData),
           cardBrand: p.cardBrand ?? null, // brand only — maskedPan/authorizationNumber are redacted (SENSITIVE_PAYMENT_FIELDS)
           internationalityShadow: p.internationalityStatus
             ? {

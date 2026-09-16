@@ -1,6 +1,7 @@
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { AFILIACION_EN_VARIOS_SLOTS, mensajeDeSlotsRepetidos } from '../shared/slotsDeAfiliacion'
 import { getEffectivePaymentConfig } from '@/services/organization-payment-config.service'
 import { AccountType } from '@prisma/client'
 
@@ -96,6 +97,9 @@ export async function createVenuePaymentConfig(data: CreateVenuePaymentConfigDat
   if (venue.paymentConfig) {
     throw new BadRequestError(`Venue ${data.venueId} already has a payment configuration`)
   }
+  // Codex R12-2: una afiliación en dos slots deja el cargo sin tarifa acreditable.
+  const repetidos = mensajeDeSlotsRepetidos(data)
+  if (repetidos) throw new BadRequestError(repetidos, AFILIACION_EN_VARIOS_SLOTS)
 
   // Validate primary account exists
   const primaryAccount = await prisma.merchantAccount.findUnique({
@@ -388,6 +392,16 @@ export async function updateVenuePaymentConfig(venueId: string, data: UpdateVenu
   if (data.preferredProcessor) {
     updateData.preferredProcessor = data.preferredProcessor
   }
+
+  // Codex R12-2: la configuración RESULTANTE (lo existente más la edición parcial) no puede repetir una afiliación en dos
+  // slots — el auto-limpiado de arriba no cubre una petición que manda la misma cuenta en dos campos.
+  const resultante = {
+    primaryAccountId: updateData.primaryAccountId ?? existingConfig.primaryAccountId,
+    secondaryAccountId: updateData.secondaryAccountId === undefined ? existingConfig.secondaryAccountId : updateData.secondaryAccountId,
+    tertiaryAccountId: updateData.tertiaryAccountId === undefined ? existingConfig.tertiaryAccountId : updateData.tertiaryAccountId,
+  }
+  const repetidos = mensajeDeSlotsRepetidos(resultante)
+  if (repetidos) throw new BadRequestError(repetidos, AFILIACION_EN_VARIOS_SLOTS)
 
   const config = await prisma.venuePaymentConfig.update({
     where: { venueId },

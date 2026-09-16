@@ -7,6 +7,247 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **El webhook de AngelPay como PRIMER confirmador del cobro remoto — checkpoint 1 (servidor), 13-sep-2026.** Plan y
+  bitácora: `docs/superpowers/plans/2026-09-12-webhook-primer-confirmador.md`. UNA llave por intento: la terminal anuncia
+  `attemptId → requestId` por su socket (`terminal:payment_attempt_opened`, tabla hija `TerminalPaymentAttemptLink` con el
+  índice único como único árbitro del dueño) y el `approved` del webhook crea el dinero **por el MISMO registrador** que el
+  REST (`recordOrderPayment` / `recordFastPayment` con `registradoVia: 'webhook'`), sólo con correlación EXACTA (vínculo,
+  venue del merchant del secreto, `status === 'approved'`, `amount == base + propina`). **Un solo ganador financiero por
+  solicitud** (índice único parcial `Payment_terminal_request_winner_key`); una segunda captura acreditada del mismo cobro
+  queda como EVIDENCIA (`Payment PENDING` + `processorData.reconciliation` + `ActivityLog
+  TERMINAL_PAYMENT_POSSIBLE_SECOND_CAPTURE`), nunca como otro cobro ni fusionada en silencio; el REST posterior con la misma
+  llave sólo ENRIQUECE (marca, PAN, modo, método real) y destraba el costo de transacción, que para un Payment nacido del
+  webhook queda PENDIENTE durable (`PaymentEffect TRANSACTION_COST`, plazo 2 h) en vez de presentarse como comisión cero.
+  `declined` es evidencia y nunca libera. Los eventos PENDING los retoma un worker propio (`angelpay-event-worker`, claim
+  atómico con `FOR UPDATE SKIP LOCKED`, lease de 2 min, token de dueño en cada escritura final, backoff exponencial,
+  agotamiento visible `ERROR/RETRIES_EXHAUSTED`); el receptor reserva sus primeros 60 s y el backfill del REST no pisa un
+  evento bajo lease. La terminal puede consultar SU intento (`GET /tpv/venues/:venueId/terminal-payment/attempts/:attemptId`:
+  resultado del intento y estado de la solicitud por separado; nunca atribuye a un intento el Payment de otro; un intento
+  desconocido responde `NO_EVIDENCE`, jamás «no cobrado»). Cuando el webhook confirma primero despierta al POS del
+  long-poll y avisa a la terminal (`terminal:payment_confirmed`); el long-poll relee la fila al vencer y el vigía recupera el
+  resultado durable si el aviso se perdió. El MCP `terminal_payment_requests` muestra `closedVia`, los intentos y cuál ganó;
+  `ActivityLog TERMINAL_PAYMENT_CONFIRMED_BY_WEBHOOK` sólo bajo la condición de alarma existente (dinero por webhook sobre
+  una solicitud ya cerrada o en cancelación). Migraciones aditivas `20260913170000` y `20260913180000`. Los APK publicados no
+  cambian: el vínculo, el aviso y la consulta son el checkpoint 2 (terminal).
+  **Ronda 1 de la auditoría final de Codex (13-sep, RECHAZADO 7 P1 · 8 P2, todos cerrados):** la identidad EXACTA manda
+  sobre la referencia débil (`yyMMddHHmmss` colisiona en el mismo segundo): con vínculo el evento va directo a la
+  confirmación, el matcher débil no contradice una llave fuerte, el backfill salta el evento de otro intento, y la
+  deduplicación por referencia exige la misma llave, la misma terminal y la misma solicitud cuando se conocen — un cobro
+  acreditado por vínculo nunca se deduplica contra un Payment sin llave; el serial del webhook se compara con la terminal del
+  vínculo (`ERROR/LINK_TERMINAL_MISMATCH`); la afiliación acreditada por el webhook se conserva aunque esté desactivada; el
+  REST que pierde la carrera bajo el candado consolida sobre el ganador y el webhook ya no inventa `isInternational`; el costo
+  diferido repara siempre sus proyecciones desde el costo persistido, crea el costo negativo de los reembolsos que llegaron
+  en la espera y sólo termina al converger; S6 valida la procedencia del Payment (`paymentContradiction`) y acota la evidencia
+  al venue del vínculo; receptor y backfill escriben como dueño (token / CAS), toda huella del webhook se fusiona en SQL sobre
+  el valor vigente, `executionAuthorized` se decide tras escribir y sólo en vuelo, el replay de una segunda captura no crea
+  SaleVerification, y `list_payments` declara `costPendingCount`/`netProvisional`.
+  **Ronda 2 (13-sep, RECHAZADO otra vez: 7 cerrados · 8 parciales · 4 P1 nuevos, todos cerrados):** el reintento por
+  referencia examina TODOS los candidatos de la referencia y elige el de identidad suficiente (descartar al primero nunca
+  es permiso para crear); el serial que se conserva en el Payment es el ACREDITADO por el JWT; la identidad por vínculo S1
+  manda también en el REST (un Payment sin llave nunca es el intento vinculado, y una transición legítima deja la llave
+  como asociación durable); el backfill respeta el vínculo aunque el candidato no tenga llave, reclama y estampa en UNA
+  transacción y estrena token de dueño; el método que trae el webhook nunca acredita (un webhook repetido no cierra la
+  provisionalidad) y el enriquecimiento se decide sobre la fila VIGENTE bloqueada; el webhook clasifica el replay de una
+  segunda captura por lo durable; el costo diferido repara también fecha y configuración de liquidación, cubre TODOS los
+  reembolsos por páginas, calcula el costo negativo sobre base + propina y propaga los fallos operativos (el efecto cuenta
+  intentos); el costo se atribuye a la afiliación ACREDITADA aunque ya no esté en la configuración; S6 exige procedencia
+  también a la evidencia (`evidenceContradiction`); el MCP encuentra al ganador aunque quede fuera del tope de vínculos
+  (`attemptsTruncated`).
+  **Ronda 3 (13-sep, RECHAZADO otra vez: 4 P1 · 7 P2 · 1 P3, todos cerrados):** la búsqueda por referencia lleva los
+  discriminadores en la consulta y pagina hasta resolver la identidad (el candidato número once ya no se vuelve otra venta);
+  bajo el candado de la consolidación se revalidan las anclas de identidad de la fila viva y una llave ya de otro Payment
+  devuelve a su dueño (dos escritores concurrentes nunca confirman el Payment equivocado); la TARIFA del negocio se congela al
+  cobrar (`processorData.pricingSlot`) y una afiliación retirada de la configuración cobra con ella o queda pendiente y
+  visible, nunca con la tarifa de otra; sin configuración de liquidación el efecto no termina (obligación durable con motivo
+  en `PaymentEffect.lastError`); S6 recorre la evidencia por páginas y cuenta aparte las contradicciones que S2 rechazó; el
+  MCP declara los intentos por solicitud (`attemptsTotal`, ventana por `requestId`); el receptor que perdió la propiedad
+  contesta el desenlace durable; una sola proyección monetaria (`proyeccionMonetaria.ts`) para comisión, neto y liquidación
+  (comisión + neto = importe en los tres escritores); la segunda captura del webhook conserva su provisionalidad; el margen
+  de un reembolso parcial sale de los componentes revertidos; y el techo de reembolsos continúa en el siguiente intento.
+  **Ronda 4 (13-sep, RECHAZADO otra vez: 6 P1 · 7 P2 · 1 P3, todos cerrados):** la resolución por referencia DEMUESTRA o no
+  demuestra — nunca crea a ciegas: keyset sobre columnas inmutables en dos pasadas (la llave que otro escritor acredita entre
+  páginas ya no salta candidatos), la búsqueda agotada, una consolidación incierta o el presupuesto agotado rechazan con 503
+  reintentable (la terminal reenvía el mismo cobro), la respuesta es siempre el Payment resuelto, y una contradicción con
+  identidad débil (misma referencia/importe/terminal, otra autorización) ya no se absorbe: queda como evidencia PENDING de
+  COLISIÓN DE REFERENCIA con bitácora; la tarifa se congela DE VERDAD (tasas del negocio y del proveedor en
+  `processorData.pricing`, y la vigencia se evalúa a la fecha del cobro), no sólo la etiqueta del slot; todo cobro con
+  tarjeta —también por REST— nace con una obligación durable de costo que el cálculo síncrono cierra o deja PENDIENTE y
+  visible; el matcher débil del webhook sella bajo el candado del evento tras volver a mirar el vínculo, y un vínculo que
+  llega después reabre los eventos sellados sobre otro Payment (huella revocada, el worker confirma por el vínculo); S6
+  resuelve la evidencia exacta en una sola consulta SQL; el MCP recorre todos los intentos de una solicitud y muestra los
+  motivos del costo pendiente; los reembolsos ya costeados salen de la consulta con presupuesto configurable.
+  **Ronda 5 (13-sep, RECHAZADO otra vez: 6 P1 · 5 P2 · 1 P3, todos cerrados):** una consolidación que CONTRADICE ya no
+  repara la solicitud con el candidato ajeno (el cargo real deja de nacer como segunda captura); la tarifa se congela sobre
+  la afiliación DEFINITIVA, después de la recuperación por serial (TIER-2/3), nunca sobre la que mandó el APK; UN solo
+  criterio de cumplimiento del costo, compartido por el worker y el cálculo síncrono de las dos rutas (costo persistido →
+  proyecciones → liquidación → reembolsos): la venta rápida por fin proyecta la comisión real y la obligación sólo cierra al
+  converger (sin liquidación queda pendiente y visible), con la marca `costPending` decidida en una sola sentencia; el
+  cruce de comercio, la discrepancia y el backfill escriben, como el sello débil, bajo el candado del evento y tras releer
+  el vínculo; el vínculo y la reapertura de los eventos débiles son una sola transacción (y el vínculo repetido vuelve a
+  mirar); los Payments legacy con `type` NULL vuelven a ser candidatos por referencia; la evidencia de colisión se reconoce
+  como tal en el webhook y en la consulta por intento; el cliente de un reintento no se liga a la venta de un candidato;
+  la revocación de la huella exige la identidad del evento y conserva historial; el validador del snapshot rechaza null y
+  booleanos; y el SQL de S6 recorta el serial con la misma clase de espacios que JS.
+  **Ronda 6 (13-sep, RECHAZADO: 3 P1 · 6 P2, todos cerrados; el mecanismo nuevo se diseñó CON Codex antes de codificar):** la
+  deduplicación por referencia usa la afiliación DEFINITIVA (resuelta ANTES, en las dos rutas; el valor del APK queda como
+  evidencia; una resolución incierta rechaza con 503 reintentable) — un replay legacy ya no crea una segunda venta; **exclusión
+  por intento** (`candadoDeIntento`: advisory transaccional de dos llaves, namespace reservado, espera acotada) tomada como
+  primera sentencia por la publicación del vínculo, la reapertura idempotente y todo escritor débil, con S1 leído después de
+  esperar y los Payments de la reapertura en `id ASC` con `FOR NO KEY UPDATE` (sin interbloqueo posible; orden fijado por una
+  guardia estática); la discrepancia DÉBIL también se reabre al llegar el vínculo (revocación por identidad, con historial);
+  la convergencia del costo es UNA transacción real por lote (fila del Payment `FOR NO KEY UPDATE NOWAIT` como mutex, todo con
+  el mismo `tx`, contención como desenlace propio, `costPending` nace con la obligación, sin VenueTransaction no converge);
+  validador decimal estricto (`"0x10"` fuera); la prueba del backfill espera la promesa real; y el runner de sabotajes
+  CERTIFICA (huella HEAD+WIP, resolución inequívoca de cada prueba declarada, inconclusos distinguidos, JSON + logs).
+  **Ronda 7 (14-sep, RECHAZADO: 2 P1 · 6 P2 parciales, todos cerrados):** la consolidación por referencia (registro repetido)
+  entra al protocolo del intento — advisory del intento → Payment `FOR UPDATE` → S1 releído bajo el candado en otra sentencia —
+  y el `exigeLlave` calculado FUERA de la transacción ya no viaja (un vínculo publicado entre la búsqueda y la consolidación ya
+  no convierte un legacy sin llave en «este cobro»); la afiliación es un CONJUNTO de identidades {definitiva, la que mandó el
+  APK} en la búsqueda (columna + evidencia `merchantAccountIdFromApk`), en la identidad y en el plan de consolidación — un cambio
+  de enrutamiento entre el registro y el replay ya no duplica la venta; conjuntos disjuntos sin autorización que lo desmienta
+  = `AFILIACION_INCIERTA` ⇒ evidencia de colisión (PENDING), nunca venta nueva; el snapshot de tarifa distingue AUSENTE /
+  VALIDO / SIN_TARIFA / INVALIDO (`includesTax` booleano o null; un snapshot ilegible o de OTRA afiliación deja la obligación
+  PENDIENTE con `INVALID_PRICING_SNAPSHOT`, nunca se cae a la configuración de hoy); READ COMMITTED EXPLÍCITO en toda transacción
+  del protocolo y en la unidad de costo; la unidad de costo lee configuración, tarifas y proveedor por el MISMO cliente
+  transaccional; `VENUE_TRANSACTION_MISSING` e `INVALID_PRICING_SNAPSHOT` son motivos públicos; las pruebas de intercalación
+  identifican a los actores por PID; el runner de sabotajes lee resultados ESTRUCTURADOS de Jest (una caída sólo cuenta si es
+  de aserción; hooks/timeouts ⇒ INCONCLUSO siempre; el conjunto ejecutado se compara con el control; mutación íntegra en el JSON).
+  **Ronda 8 (14-sep, RECHAZADO: 2 P1 · 4 P2, todos cerrados):** la AFILIACIÓN deja de filtrar en la consulta por referencia
+  (un replay legacy sin merchant NI autorización —el contrato los admite— quedaba fuera de la OR tras un cambio de
+  enrutamiento y nacía como venta nueva): todo candidato con la misma referencia, importe y propina llega a la regla ÚNICA de
+  identidad, que lo saca como `AFILIACION` (otro cargo, sólo con autorizaciones presentes y distintas) o `AFILIACION_INCIERTA`
+  (evidencia PENDING); un snapshot de tarifa `SIN_TARIFA` (legible, misma afiliación, `venue: null` explícito) se consume
+  conservando la afiliación y el slot HISTÓRICO y NUNCA se resuelve con PRIMARY ni con el slot que la afiliación ocupe hoy —
+  `AFFILIATION_PRICING_UNRESOLVED` hasta que el slot histórico tenga tarifa vigente A LA FECHA DEL COBRO (la recuperación R3/R4
+  se conserva; un `venue` OMITIDO es INVALIDO `VENUE_AUSENTE`, no «sin tarifa»); el fallback a PRIMARY existe SÓLO para un
+  Payment sin snapshot y lee por el cliente de la unidad (la guardia revisa TODAS las llamadas); las pruebas de carrera capturan
+  al lanzarlas las promesas en vuelo (`enVuelo`) y las asientan acotadas en el `finally`; el runner exige que TODOS los errores
+  de una prueba caída sean de aserción (una aserción + un 503 aterrizado después ⇒ INCONCLUSO; `--selftest` con el JSON real
+  que Codex objetó); la prueba del snapshot ilegible edita la tarifa de hoy al 8 % ANTES de reparar y sigue cobrando 2.5 %.
+  **Ronda 9 (14-sep, RECHAZADO: 1 P1 · 3 P2 · 1 P3, todos cerrados):** un snapshot `SIN_TARIFA` NUNCA converge solo — «sin
+  tarifa contratada al cobrar» es un hecho histórico que ninguna configuración posterior cambia (ni PRIMARY, ni el slot que la
+  afiliación ocupe hoy, ni una estructura creada después y retrodatada, ni una antigua reactivada o editada en sitio): la
+  obligación queda PENDIENTE y visible hasta una acreditación EXPLÍCITA del cargo (fuera del checkpoint 1), y la recuperación
+  «al devolver la afiliación a la configuración» que las rondas 3–8 aceptaron queda retirada; la consolidación quita SÓLO los
+  nulos de primer nivel del `processorData` existente (`jsonb_strip_nulls` borraba `pricing.venue: null` en cada replay y volvía
+  el snapshot «inválido»); una tarifa heredada de la organización conserva su origen y nunca pone su id en la FK
+  `venuePricingStructureId` (revientaba el costo de todo Payment sin snapshot en un venue que hereda la tarifa); las pruebas de
+  carrera recogen lo observado y afirman DESPUÉS de asentar a todos sus actores (`actores.ts`: un actor sin asentar o un rechazo
+  que nadie examinó ⇒ INCONCLUSO con el fallo original conservado); el selftest del runner usa un fixture inmutable y exige el
+  caso mixto.
+  **Ronda 10 (14-sep, RECHAZADO: 1 P1 · 2 P2 · 1 P3, todos cerrados):** una lectura que FALLA al congelar la tarifa (proveedor,
+  tarifa del negocio o configuración) ya no convierte el cobro en «sin snapshot» — cada lectura se captura por separado y la
+  evidencia obtenida se conserva (`capturaFallida` con el motivo; sólo el proveedor fallido ⇒ la tarifa congelada manda), una
+  captura fallida del lado del negocio queda PENDIENTE con `PRICING_CAPTURE_FAILED` (motivo público, sin consumir intentos) y no
+  se relee la tarifa «a la fecha del cobro» al recuperarse la base; `pricing: null` con afiliación registrada es INVALIDO (sólo
+  es «sin snapshot» sin afiliación: manual/QR); el snapshot se clasifica ANTES de exigir la configuración de pagos (sin
+  configuración, SIN_TARIFA conservaba su motivo en vez de morir en DEAD_LETTER); la fase de aserciones de las pruebas de carrera
+  corre dentro de `actores.afirmar` (una aserción caída a medias no deja actores sin examinar) y las carreras contra reloj usan
+  `actores.carrera` (el reloj no acredita examen); los textos del lector y del MCP ya no prometen una recuperación que no existe.
+  **Ronda 11 (14-sep, RECHAZADO: 1 P1 · 2 P2 · 2 P3, todos cerrados):** la configuración (qué slot ocupa la afiliación) y la
+  tarifa de ese slot se congelan desde UNA MISMA vista de la base (transacción `REPEATABLE READ` de sólo lectura) — dos lecturas
+  correctas por el cliente global podían congelar «M2 con el 8 %» si entre ambas un administrador ponía a M3 en SECONDARY y
+  editaba esa tarifa en sitio, una combinación que nunca existió y que cobraba $80 en vez de $25; si la transacción de captura
+  falla en sí, queda `capturaFallida.total` (nunca `pricing: null`); la consolidación de un registro repetido limpia SÓLO los nulos
+  de las llaves que ese relleno trae (un `pricing: null` con afiliación, dato viejo o alterado, sobrevive al replay como INVALIDO
+  pendiente en vez de volverse «sin snapshot»); el marcador de captura fallida nunca queda vacío y el lector decide por su
+  presencia; las pruebas de carrera afirman cada desenlace por separado (un agregado con `Promise.all` tiraba el segundo rechazo)
+  con una guardia estática que lo impide, y toda carrera en vuelo entra al protocolo de actores.
+  **Ronda 12 (14-sep, PASADA EXHAUSTIVA del checkpoint entero por decisión del founder — RECHAZADO: 7 P1 · 8 P2 bloqueantes ·
+  2 no bloqueantes · 1 P3 y una definición de hecho de 18 invariantes; TODO cerrado de una vez con TDD y sabotajes certificados):**
+  la tarifa de un cobro nacido del webhook se captura AL INGRESO del evento (la primera evidencia bancaria aceptada) y viaja en el
+  evento durable — S4 registra con ESA captura, nunca con la de horas después, y un evento sin ella queda pendiente en vez de
+  fabricar VALIDO; una afiliación en DOS slots ya no elige tarifa por orden (captura fallida por configuración ambigua, costo
+  pendiente y visible; los escritores de configuración lo rechazan con 400 y un CHECK `NOT VALID` en la base respalda contra dos
+  ediciones concurrentes, migración `20260914150000`); el PLAZO ya no acredita el tipo de tarjeta (un método provisional del webhook
+  sólo lo acredita el REST de la terminal; vencido el plazo la espera se ESCALA `AWAITING_ACCREDITED_CARD_DATA_OVERDUE`, dentro de
+  la unidad y bajo el mutex); la corrección administrativa de tarifas (preview, apply en sus dos modos y reverse) EXCLUYE y explica
+  los cobros del protocolo (snapshot presente, incluido `null`, u obligación TRANSACTION_COST), revalidando bajo el mutex del
+  Payment; editar o borrar desde el dashboard un cobro del protocolo responde **409 `PAYMENT_PROTECTED_BY_COST_PROTOCOL`** (los no-op
+  pasan; reembolso, anulación y corrección van por sus flujos); un resultado NO-success del socket (timeout / failed / cancelled)
+  nunca escribe ganador, el árbitro valida la procedencia del puntero histórico con el MISMO criterio compartido del cierre
+  (`procedenciaDelPagoDeSolicitud`) y un puntero contaminado se reemplaza por CAS con 🚨 y bitácora
+  `TERMINAL_PAYMENT_UNACCREDITED_WINNER_IGNORED`; dos replays SIMULTÁNEOS sin llave del mismo cargo crean UNA venta (candado
+  consultivo por venue + referencia como primera sentencia de la creación y relectura bajo el candado, sin `UNIQUE(referenceNumber)`);
+  un snapshot VALIDO converge sin la configuración de pagos de hoy; el lector exige la presencia de los campos monetarios y la forma
+  del marcador de captura fallida; los escritores de Blumon (webhook MATCHED / DISCREPANCY y el job de auditoría) parchan
+  `processorData` con un `||` ATÓMICO en Postgres (nunca reponen un `costPending` viejo ni pisan el snapshot); la llegada del vínculo
+  S1 adelanta un approved en backoff y rearma UNA sola vez uno agotado (nunca un rechazo bancario); el backfill del REST exige tipo
+  `send_transaction`, estado bancario aprobado e importe entero en centavos antes de sellar (un declined o un importe ilegible
+  quedan como evidencia con motivo); la captura resuelve el slot con una consulta ACOTADA (`getEffectivePricingForSlot`, también
+  la tarifa heredada de la organización dentro de la misma vista); el costo NEGATIVO de un reembolso posterior a DONE es una
+  obligación DURABLE registrada en la misma transacción del reembolso (TPV y dashboard) bajo el mutex del original; el MCP
+  `list_payments` marca POR PAGO `costPending` / `feeProvisional`; y las pruebas de pagos registran montajes y liberaciones en su
+  protocolo de finalización (un fallo de fixture es INCONCLUSO, nunca una aserción financiera caída).
+  **Ronda 13 (14-sep, la auditoría de AUTORIZACIÓN — RECHAZADO: 12 hallazgos de R12 cerrados, 6 parciales, 7 nuevos; TODO cerrado
+  de una vez con TDD, sabotajes certificados e inyecciones en los consumidores de las pruebas):** la tarifa se congela sobre la
+  PRIMERA evidencia bancaria durable del cargo con UN selector común a los orígenes — el REST de la terminal que crea el Payment
+  ANTES de S4 consume la captura del ingreso del evento durable del mismo intento (`evidenciaDeIngreso.ts`), nunca captura «ahora»
+  (2.5 % editado al 8 % ya no da $8.50 en vez de $3), un evento pertinente sin captura conserva la incertidumbre y uno recibido por
+  OTRA afiliación no acredita ésta; el PUT del dashboard clasifica, valida y ESCRIBE dentro de la misma transacción que posee el
+  mutex del Payment (antes escribía después de soltarlo y un reembolso real podía meter el cobro al protocolo en medio); el editor
+  de verificaciones de venta (PATCH de organización y MCP `edit_sale_verification`) aplica el mismo criterio bajo el mutex — importe y
+  forma de pago de un cobro del protocolo se rechazan con 409 `PAYMENT_PROTECTED_BY_COST_PROTOCOL` y nada se escribe; revisión,
+  notas, tipo de venta, no-op y cobros anteriores al protocolo siguen igual; el estado bancario de un evento de AngelPay se clasifica
+  EXPLÍCITAMENTE (`estadoBancario.ts`: aprobado · rechazado · ausente legacy · INVALIDO) y un estado presente pero ilegible (`123`,
+  `{}`, `""`) queda PENDING con `INVALID_STATUS` en vez de recibir MATCHED en el backfill; la recuperación del costo negativo de un
+  reembolso reactiva `costPending` al reabrir o encolar la obligación y PROYECTA el reembolso (fee y neto del Payment y de la
+  VenueTransaction del reembolso desde su costo negativo persistido, con la misma regla monetaria: fee −$3 / neto −$97 en un total,
+  −$1.00 / −$39 en un parcial de $40) — también cuando el costo negativo ya existía con proyecciones incompletas, y un reembolso sin
+  VenueTransaction impide converger; una reclamación de OTRA solicitud sobre un Payment sólo veta el cierre (y el barrido) si está
+  ACREDITADA por el criterio compartido, y un puntero sin procedencia (alias contaminado) se registra
+  (`TERMINAL_PAYMENT_CONTAMINATED_ALIAS_RESOLVED`) y se resuelve con CAS para que el cargo auténtico cierre su solicitud; y los
+  consumidores del protocolo de actores de las pruebas (dashboard, registrador, costo real, costo diferido) llegan siempre a `cerrar`
+  con la causa conservada, con un PENDING real nacido del webhook en la suite del dashboard. Autorrevisión previa a la certificación:
+  la página de reembolsos con trabajo pendiente ataba un `Date` crudo en `$queryRaw` (timestamptz corrido por la zona de la sesión: en
+  local repetía filas) — va por `utcTs`, como fija el guard estático de binds de fecha.
+  **Ronda 14 (14-sep, la segunda auditoría de AUTORIZACIÓN — RECHAZADO: 5 de los 7 hallazgos de R13 cerrados, 2 parciales, 5 nuevos;
+  TODO cerrado con TDD, sabotajes e inyecciones, y el diseño de los tres mecanismos nuevos consultado a Codex antes de codificar):** la
+  PRIMERA evidencia durable APROBADA del intento gobierna la tarifa — elegida EN SQL (`estadoBancarioSql` en el `WHERE`, orden durable
+  `createdAt, id`, sin recorte antes del filtro), el ingreso del evento toma el candado del intento y lo fecha estrictamente después del
+  último del intento, y las transacciones de dinero del REST toman ese mismo candado como primera sentencia (un segundo webhook del mismo
+  intento, S4 fuera de orden o la carrera REST ↔ ingreso ya no imponen una captura posterior); el REEMBOLSO de un cobro del protocolo
+  pertenece al protocolo por su original — PUT económico y DELETE del dashboard ⇒ 409 `PAYMENT_PROTECTED_BY_COST_PROTOCOL` (nombrando al
+  original), con candados original → reembolso, relectura del puntero bajo el candado y reinicio por savepoint si cambió, y también
+  excluido de la corrección genérica de tarifas; el estado bancario se clasifica IGUAL en JavaScript y en SQL (`undefined` ⇒ ausente,
+  `null` presente ⇒ inválido, recorte con la clase de espacios de `trim()`, aprobación normalizada) en captura, confirmación, rearme y S6;
+  la limpieza de aliases NUNCA espera a otra solicitud (`FOR UPDATE NOWAIT` dentro de un savepoint; 55P03 ⇒ alias diferido con bitácora
+  `TERMINAL_PAYMENT_CONTAMINATED_ALIAS_DEFERRED`; relectura y CAS bajo el candado; en transacción real también desde el barrido, que además
+  recupera el alias propio diferido aunque el cierre ya haya terminado COMPLETED y conserva un puntero acreditado); y el helper del
+  backfill de las pruebas del webhook llega SIEMPRE al cierre común con la causa conservada (INCONCLUSO con ambas causas si además rechaza).
+  **Ronda 15 (15-sep, la tercera auditoría de AUTORIZACIÓN — RECHAZADO: 4 de los 5 hallazgos de R14 cerrados, R14-1 parcial, R13-6
+  parcial, 3 nuevos; TODO cerrado con TDD, sabotajes e inyecciones, con el diseño de los dos mecanismos nuevos consultado a Codex antes de
+  codificar):** un ingreso que entra por el FALLBACK del webhook (la espera del candado del intento vence, 55P03) conserva la evidencia
+  del banco pero ya NO acredita ningún orden histórico — queda MARCADO en el evento (`_avoqado.ingresoSinCandado`), el selector de la
+  primera evidencia decide la marca y el primer aprobado en UNA sola sentencia y responde `ORDEN_NO_ACREDITADO` para todo el intento (el
+  cobro se registra con `capturaFallida.total: EVIDENCIA_DE_INGRESO_SIN_ORDEN`, pendiente y visible hasta una acreditación explícita —
+  nunca la tarifa de hoy ni la captura de un evento posterior), y la recuperación lo ORDENA bajo el candado (en el siguiente ingreso
+  normal del intento y desde S4, en transacción propia que revalida el claim) fechándolo estrictamente después de todo lo del intento
+  (`max(createdAt)+1 ms`, nunca con el reloj) y sellando `ordenadoEn` SIN quitar la marca; la corrección de tarifas por lote (apply y
+  reverse) protege el par ORIGINAL → reembolso durante la clasificación y la escritura — bloquea PRIMERO los originales de los reembolsos
+  del lote (dentro y fuera del lote, únicos y ordenados, `FOR NO KEY UPDATE NOWAIT` con savepoint interior: un original ocupado aparta a
+  sus reembolsos y a sí mismo en vez de esperar a la unidad de costo, explicado en `excludedBusyPaymentIds`), después el lote en `id ASC`,
+  relee tipo, venue y puntero bajo los candados y, si cambiaron, suelta TODOS los candados del intento y reinicia (≤3; después 409
+  `RATE_CORRECTION_LOCK_UNSTABLE`, que declara que la estructura de tarifas VIGENTE ya quedó actualizada y ningún cobro histórico se tocó);
+  y la prueba del timeout del candado vive en el protocolo de actores (montajes registrados al lanzarlos, esperas acotadas, barreras en
+  `finally`, `cerrar`/`afirmar`, la espera del candado restaurada en un `finally` exterior), certificada con cuatro inyecciones.
+  **Ronda 16 (15-sep, la cuarta auditoría de AUTORIZACIÓN — RECHAZADO: R15-1/2/3 cerrados «como se diseñaron», 3 nuevos; TODO cerrado
+  con TDD, sabotajes e inyecciones, sin mecanismo nuevo):** el editor de verificaciones de venta (back-office de PlayTelecom, HTTP y MCP)
+  sobre un REEMBOLSO toma también el candado de su ORIGINAL (orden original → reembolso, `bloquearConSuOriginal`, con relectura del
+  puntero) ANTES de releer, clasificar y escribir, y conserva los dos hasta commitear — con el original libre, un segundo reembolso real
+  podía meterlo al protocolo entre la clasificación «legacy» del reembolso y su UPDATE y el editor cambiaba R1 de −$40 a +$40 sin movimiento
+  bancario (reproducido en rojo con las APIs reales); las sondas de «el REST/el ingreso ESPERA el candado del intento» de las carreras de
+  tarifa ($3 frente a $8.50) se ATRIBUYEN al actor y al poseedor observados desde su propia conexión y a la llave del intento en `pg_locks`
+  (un waiter ajeno de otra llave ya no las satisface; contraprueba certificada); y la comprobación de que la prueba del timeout restaura la
+  espera del candado corre DESPUÉS del desenrollado excepcional, comparando con el valor previo y conservando la causa original (con dos
+  contrapruebas que omiten o rompen la restauración). De la certificación salieron dos arreglos más: el worker de AngelPay (S4) devuelve el
+  lote reclamado en orden determinista (lo más antiguo primero: el `RETURNING` de un `UPDATE … FROM` no conservaba el orden del `ORDER BY`
+  y con dos filas podía salir invertido), el fixture de integración purga los fixtures huérfanos de corridas matadas a medias (sus
+  obligaciones PENDING contaminaban otras suites de la misma base desechable), y la prueba N1 del webhook drena el backfill del webhook que
+  crea el Payment antes de leerlo (su detección del mutante del parche atómico dependía de una carrera).
+
 ### Changed
 
 - **El resumen de inventario de modificadores recorre los usos por páginas (query-guard 2026-09-10)**: `GET

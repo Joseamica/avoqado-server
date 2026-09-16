@@ -8,6 +8,8 @@ import { sendReceiptWhatsApp } from '../../services/whatsapp.service'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 
+import { esEvidenciaDeConciliacion } from '../../services/tpv/segundaCaptura'
+
 export async function getPayments(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const orgId = req.authContext?.orgId // 1. Extract from req (Controller)
@@ -72,13 +74,17 @@ export async function recordPayment(req: Request, res: Response, next: NextFunct
     if (!paymentData.deviceSerialNumber && req.authContext?.terminalSerialNumber) {
       paymentData.deviceSerialNumber = req.authContext.terminalSerialNumber
     }
+    // S0 (P1-2, Codex): el serial que ARBITRA a qué solicitud POS→terminal pertenece el registro es el del TOKEN,
+    // siempre — el body puede traer `deviceSerialNumber` y para esto no se le cree. Se sobreescribe sin condición.
+    paymentData.authenticatedTerminalSerial = req.authContext?.terminalSerialNumber ?? null
 
     // Call service to record the payment
     const result = await paymentTpvService.recordOrderPayment(venueId, orderId, paymentData, userId, orgId)
 
     // 📸 NON-BLOCKING VERIFICATION: Create PENDING SaleVerification for SERIALIZED_INVENTORY payments
     // Same logic as recordFastPayment — serialized sales can come through order payment route too
-    if (paymentData.serialNumbers?.length > 0 && userId) {
+    // S0: una posible segunda captura es evidencia, no una venta: no se le crea verificación.
+    if (paymentData.serialNumbers?.length > 0 && userId && !esEvidenciaDeConciliacion(result as Record<string, unknown>)) {
       try {
         const existingVerification = await prisma.saleVerification.findUnique({
           where: { paymentId: result.id },
@@ -149,6 +155,9 @@ export async function recordFastPayment(req: Request, res: Response, next: NextF
     if (!paymentData.deviceSerialNumber && req.authContext?.terminalSerialNumber) {
       paymentData.deviceSerialNumber = req.authContext.terminalSerialNumber
     }
+    // S0 (P1-2, Codex): el serial que ARBITRA a qué solicitud POS→terminal pertenece el registro es el del TOKEN,
+    // siempre — el body puede traer `deviceSerialNumber` y para esto no se le cree. Se sobreescribe sin condición.
+    paymentData.authenticatedTerminalSerial = req.authContext?.terminalSerialNumber ?? null
 
     // Call service to record the fast payment
     const result = await paymentTpvService.recordFastPayment(venueId, paymentData, userId, orgId)
@@ -156,7 +165,8 @@ export async function recordFastPayment(req: Request, res: Response, next: NextF
     // 📸 NON-BLOCKING VERIFICATION: Create PENDING SaleVerification for SERIALIZED_INVENTORY payments
     // When the TPV sends isPortabilidad/serialNumbers, it means this is a serialized sale
     // that needs proof-of-sale photos. Staff can upload them later from "Pendientes Verificacion"
-    if (paymentData.serialNumbers?.length > 0 && userId) {
+    // S0: una posible segunda captura es evidencia, no una venta: no se le crea verificación.
+    if (paymentData.serialNumbers?.length > 0 && userId && !esEvidenciaDeConciliacion(result as Record<string, unknown>)) {
       try {
         // Only create if no verification was already created in the transaction
         // (the existing flow creates one when verificationPhotos are provided)

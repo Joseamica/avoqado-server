@@ -1,7 +1,8 @@
 // services/dashboard/payment.dashboard.service.ts
 
 import { TransactionStatus, PaymentMethod, CardBrand, CardEntryMode } from '@prisma/client'
-import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
+import { MOTIVO_EXCLUSION_DEL_PROTOCOLO, bloquearConSuOriginal, cobrosDelProtocolo } from '../shared/cobroDelProtocolo'
 import prisma from '../../utils/prismaClient'
 import { PaginatedPaymentsResponse } from '../../schemas/dashboard/payment.schema'
 import { logAction } from './activity-log.service'
@@ -384,6 +385,72 @@ export interface UpdatePaymentData {
   entryMode?: CardEntryMode
 }
 
+/**
+ * Codex R12-5: los campos que una edición genérica NO puede cambiar en un cobro del protocolo de costo. Se compara contra la
+ * fila VIGENTE (bajo el mutex): un valor igual al actual es un no-op y pasa; uno distinto se rechaza con 409.
+ */
+const CAMPOS_PROTEGIDOS: (keyof UpdatePaymentData)[] = [
+  'amount',
+  'tipAmount',
+  'status',
+  'method',
+  'cardBrand',
+  'maskedPan',
+  'authorizationNumber',
+  'referenceNumber',
+  'entryMode',
+]
+function camposQueCambian(
+  actual: {
+    amount: unknown
+    tipAmount: unknown
+    status: string
+    method: string
+    cardBrand: string | null
+    maskedPan: string | null
+    authorizationNumber: string | null
+    referenceNumber: string | null
+    entryMode: string | null
+  },
+  data: UpdatePaymentData,
+): string[] {
+  const vigente: Record<string, unknown> = {
+    amount: Number(actual.amount),
+    tipAmount: Number(actual.tipAmount),
+    status: actual.status,
+    method: actual.method,
+    cardBrand: actual.cardBrand,
+    maskedPan: actual.maskedPan,
+    authorizationNumber: actual.authorizationNumber,
+    referenceNumber: actual.referenceNumber,
+    entryMode: actual.entryMode,
+  }
+  return CAMPOS_PROTEGIDOS.filter(campo => {
+    const nuevo = data[campo]
+    if (nuevo === undefined) return false
+    const valor = campo === 'amount' || campo === 'tipAmount' ? Number(nuevo) : nuevo
+    return valor !== vigente[campo]
+  })
+}
+// Codex R14-2: el REEMBOLSO de un cobro del protocolo se protege por su ORIGINAL; el 409 lo nombra (`originalPaymentId`) — mismo
+// código, detalle aditivo.
+const protegidoPorElProtocolo = (paymentId: string, fields: string[], originalPaymentId: string | null = null) =>
+  new ConflictError(
+    originalPaymentId
+      ? 'Este reembolso pertenece al protocolo de costo de su cobro original (tarifa congelada y obligación de costo): su importe, propina, estado, método e identidad sólo cambian por una corrección acreditada, no por edición directa.'
+      : 'Este cobro pertenece al protocolo de costo (tarifa congelada y obligación de costo): su importe, propina, estado, método e identidad sólo cambian por reembolso, anulación o corrección acreditada, no por edición directa.',
+    'PAYMENT_PROTECTED_BY_COST_PROTOCOL',
+    { paymentId, fields, reason: MOTIVO_EXCLUSION_DEL_PROTOCOLO, ...(originalPaymentId ? { originalPaymentId } : {}) },
+  )
+
+const PROYECCION_DEL_PAYMENT = {
+  processedBy: true,
+  shift: true,
+  order: { include: { table: true } },
+  merchantAccount: { include: { provider: { select: { id: true, code: true, name: true } } } },
+  transactionCost: true,
+} as const
+
 export async function updatePayment(venueId: string, paymentId: string, data: UpdatePaymentData) {
   // First verify the payment exists
   const payment = await prisma.payment.findFirst({
@@ -397,63 +464,72 @@ export async function updatePayment(venueId: string, paymentId: string, data: Up
     throw new NotFoundError(`Payment con ID ${paymentId} no encontrado en este venue`)
   }
 
-  // This endpoint corrects bookkeeping fields; it is not a capture rail. Letting
-  // a client promote PENDING/FAILED/PROCESSING to COMPLETED here would create
-  // real-looking money without the Order → Payment → Shift transaction, the
-  // authenticated shift attribution or its owner-facing reconciliation audit.
-  // A no-op COMPLETED → COMPLETED is kept so metadata on an already captured
-  // payment can still be corrected through the existing API.
-  if (data.status === TransactionStatus.COMPLETED && payment.status !== TransactionStatus.COMPLETED) {
-    throw new BadRequestError(
-      'Este endpoint sólo corrige datos del pago. Completa el cobro desde el flujo de captura correspondiente.',
-      'PAYMENT_COMPLETION_REQUIRES_CAPTURE_FLOW',
-    )
-  }
+  // Codex R12-5: un cobro del protocolo de costo (tarifa congelada u obligación TRANSACTION_COST) conserva su verdad
+  // financiera: importe, propina, estado, método e identidad del cargo no se editan aquí — reembolso, anulación y
+  // corrección económica van por sus flujos, bajo su mutex. Los no-op pasan. La decisión se toma bajo el mutex del Payment
+  // (el mismo que la convergencia), releyendo la fila: lo que el dashboard leyó antes puede haber cambiado.
+  // Codex R13-2: relectura, clasificación, validación y UPDATE viven en la MISMA transacción que posee el mutex — también
+  // cuando la clasificación es legacy. Clasificar bajo el mutex y escribir después de soltarlo dejaba una ventana en la que
+  // un reembolso real metía el cobro al protocolo (obligación TRANSACTION_COST) y el UPDATE ya clasificado cruzaba encima:
+  // importe original y saldo reembolsable alterados después de devolver un cargo real.
+  // Codex R14-2: un REFUND se clasifica por su original y se bloquea en el orden de la unidad de costo (original → reembolso).
+  const escritura = await prisma.$transaction(async tx => {
+    const candado = await bloquearConSuOriginal(tx, { paymentId, venueId }, 'proteccion')
+    if (!candado.existe) throw new NotFoundError(`Payment con ID ${paymentId} no encontrado en este venue`)
+    const vigente = await tx.payment.findFirst({ where: { id: paymentId, venueId } })
+    if (!vigente) throw new NotFoundError(`Payment con ID ${paymentId} no encontrado en este venue`)
+    const esDelProtocolo = (await cobrosDelProtocolo(tx, [paymentId])).has(paymentId)
+    if (esDelProtocolo) {
+      const fields = camposQueCambian(vigente, data)
+      if (fields.length > 0) throw protegidoPorElProtocolo(paymentId, fields, candado.originalPaymentId)
+      // No-op sobre un cobro del protocolo: nada que escribir; se devuelve la misma proyección de siempre.
+      return {
+        escrito: false as const,
+        payment: await tx.payment.findUniqueOrThrow({ where: { id: paymentId }, include: PROYECCION_DEL_PAYMENT }),
+      }
+    }
 
-  // `COMPLETED → COMPLETED` is permission to correct metadata, not permission
-  // to reassert the money state. The row can change after the read above; if a
-  // concurrent authority moves it to FAILED, including stale `COMPLETED` in
-  // this update would resurrect it. Omitting status makes this path a true
-  // status no-op while preserving the existing metadata-correction response.
-  const omitNoopCompletedStatus = data.status === TransactionStatus.COMPLETED && payment.status === TransactionStatus.COMPLETED
+    // This endpoint corrects bookkeeping fields; it is not a capture rail. Letting
+    // a client promote PENDING/FAILED/PROCESSING to COMPLETED here would create
+    // real-looking money without the Order → Payment → Shift transaction, the
+    // authenticated shift attribution or its owner-facing reconciliation audit.
+    // A no-op COMPLETED → COMPLETED is kept so metadata on an already captured
+    // payment can still be corrected through the existing API.
+    if (data.status === TransactionStatus.COMPLETED && vigente.status !== TransactionStatus.COMPLETED) {
+      throw new BadRequestError(
+        'Este endpoint sólo corrige datos del pago. Completa el cobro desde el flujo de captura correspondiente.',
+        'PAYMENT_COMPLETION_REQUIRES_CAPTURE_FLOW',
+      )
+    }
 
-  // Update the payment
-  const updatedPayment = await prisma.payment.update({
-    where: { id: paymentId },
-    data: {
-      ...(data.amount !== undefined && { amount: data.amount }),
-      ...(data.tipAmount !== undefined && { tipAmount: data.tipAmount }),
-      ...(data.status !== undefined && !omitNoopCompletedStatus && { status: data.status }),
-      ...(data.method !== undefined && { method: data.method }),
-      ...(data.cardBrand !== undefined && { cardBrand: data.cardBrand }),
-      ...(data.last4 !== undefined && { last4: data.last4 }),
-      ...(data.maskedPan !== undefined && { maskedPan: data.maskedPan }),
-      ...(data.authorizationNumber !== undefined && { authorizationNumber: data.authorizationNumber }),
-      ...(data.referenceNumber !== undefined && { referenceNumber: data.referenceNumber }),
-      ...(data.entryMode !== undefined && { entryMode: data.entryMode }),
-    },
-    include: {
-      processedBy: true,
-      shift: true,
-      order: {
-        include: {
-          table: true,
-        },
+    // `COMPLETED → COMPLETED` is permission to correct metadata, not permission
+    // to reassert the money state. The row is the one RELEÍDA under the mutex; if a
+    // concurrent authority moved it to FAILED, including stale `COMPLETED` in
+    // this update would resurrect it. Omitting status makes this path a true
+    // status no-op while preserving the existing metadata-correction response.
+    const omitNoopCompletedStatus = data.status === TransactionStatus.COMPLETED && vigente.status === TransactionStatus.COMPLETED
+
+    // Update the payment — dentro de la transacción que posee el mutex (Codex R13-2).
+    const updated = await tx.payment.update({
+      where: { id: paymentId },
+      data: {
+        ...(data.amount !== undefined && { amount: data.amount }),
+        ...(data.tipAmount !== undefined && { tipAmount: data.tipAmount }),
+        ...(data.status !== undefined && !omitNoopCompletedStatus && { status: data.status }),
+        ...(data.method !== undefined && { method: data.method }),
+        ...(data.cardBrand !== undefined && { cardBrand: data.cardBrand }),
+        ...(data.last4 !== undefined && { last4: data.last4 }),
+        ...(data.maskedPan !== undefined && { maskedPan: data.maskedPan }),
+        ...(data.authorizationNumber !== undefined && { authorizationNumber: data.authorizationNumber }),
+        ...(data.referenceNumber !== undefined && { referenceNumber: data.referenceNumber }),
+        ...(data.entryMode !== undefined && { entryMode: data.entryMode }),
       },
-      merchantAccount: {
-        include: {
-          provider: {
-            select: {
-              id: true,
-              code: true,
-              name: true,
-            },
-          },
-        },
-      },
-      transactionCost: true,
-    },
+      include: PROYECCION_DEL_PAYMENT,
+    })
+    return { escrito: true as const, payment: updated }
   })
+  if (!escritura.escrito) return escritura.payment
+  const updatedPayment = escritura.payment
 
   logAction({
     venueId: updatedPayment.venueId,
@@ -488,6 +564,15 @@ export async function deletePayment(venueId: string, paymentId: string): Promise
 
   // Delete related records first (cascading)
   await prisma.$transaction(async tx => {
+    // Codex R12-5: bajo el mutex del Payment, un cobro del protocolo de costo NO se borra — borrarlo se llevaría en cascada
+    // su venta financiera, su snapshot y su obligación, y dejaría la solicitud apuntando a un id inexistente.
+    // Codex R14-2: tampoco el REEMBOLSO de un cobro del protocolo — su costo negativo y su venta son la contrapartida de una
+    // devolución bancaria real. Candados en el orden de la unidad (original → reembolso).
+    const candado = await bloquearConSuOriginal(tx, { paymentId, venueId }, 'proteccion')
+    if (!candado.existe) throw new NotFoundError(`Payment con ID ${paymentId} no encontrado en este venue`)
+    if ((await cobrosDelProtocolo(tx, [paymentId])).has(paymentId)) {
+      throw protegidoPorElProtocolo(paymentId, ['delete'], candado.originalPaymentId)
+    }
     // Delete transaction cost if exists
     if (payment.transactionCost) {
       await tx.transactionCost.delete({

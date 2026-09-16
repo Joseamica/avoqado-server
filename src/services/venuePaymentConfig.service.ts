@@ -1,5 +1,7 @@
 import prisma from '@/utils/prismaClient'
 import { getEffectivePaymentConfig, getEffectivePricing } from '@/services/organization-payment-config.service'
+import { BadRequestError } from '@/errors/AppError'
+import { AFILIACION_EN_VARIOS_SLOTS, mensajeDeSlotsRepetidos } from '@/services/shared/slotsDeAfiliacion'
 import { logAction } from '@/services/dashboard/activity-log.service'
 
 interface VenuePaymentConfigCreateInput {
@@ -48,6 +50,9 @@ export async function createVenuePaymentConfig(data: VenuePaymentConfigCreateInp
   if (existingConfig) {
     throw new Error('Payment config already exists for this venue')
   }
+  // Codex R12-2: una afiliación no puede ocupar dos slots.
+  const repetidos = mensajeDeSlotsRepetidos(data)
+  if (repetidos) throw new BadRequestError(repetidos, AFILIACION_EN_VARIOS_SLOTS)
 
   // Verify merchant accounts exist and are active
   const primaryAccount = await prisma.merchantAccount.findUnique({
@@ -168,6 +173,18 @@ export async function updateVenuePaymentConfig(configId: string, data: VenuePaym
       throw new Error('Tertiary account not found or inactive')
     }
   }
+
+  // Codex R12-2: sobre la configuración RESULTANTE (edición parcial sobre lo existente).
+  const existente = await prisma.venuePaymentConfig.findUnique({
+    where: { id: configId },
+    select: { primaryAccountId: true, secondaryAccountId: true, tertiaryAccountId: true },
+  })
+  const repetidos = mensajeDeSlotsRepetidos({
+    primaryAccountId: data.primaryAccountId ?? existente?.primaryAccountId,
+    secondaryAccountId: data.secondaryAccountId === undefined ? existente?.secondaryAccountId : data.secondaryAccountId,
+    tertiaryAccountId: data.tertiaryAccountId === undefined ? existente?.tertiaryAccountId : data.tertiaryAccountId,
+  })
+  if (repetidos) throw new BadRequestError(repetidos, AFILIACION_EN_VARIOS_SLOTS)
 
   // Update payment config
   const config = await prisma.venuePaymentConfig.update({

@@ -75,8 +75,19 @@ function fila(overrides: Record<string, unknown>) {
   }
 }
 
+/** Codex R3 (P2): la ventana de vínculos es POR SOLICITUD (`$queryRaw` con ROW_NUMBER) y los conteos reales salen de un `groupBy`. */
+function vinculos(ventana: { requestId: string; attemptId: string; createdAt: Date }[], totales: Record<string, number> = {}) {
+  ;(prismaMock as any).$queryRaw.mockResolvedValue(ventana)
+  ;(prismaMock as any).terminalPaymentAttemptLink.groupBy.mockResolvedValue(
+    Object.entries(totales).map(([requestId, n]) => ({ requestId, _count: { _all: n } })),
+  )
+}
+
 async function listar(rows: ReturnType<typeof fila>[]) {
   ;(prismaMock as any).terminalPaymentRequest.findMany.mockResolvedValue(rows)
+  vinculos([])
+  ;(prismaMock as any).terminalPaymentAttemptLink.findMany.mockResolvedValue([])
+  ;(prismaMock as any).payment.findMany.mockResolvedValue([])
   const handler = capturarTool('terminal_payment_requests')
   return JSON.parse((await handler({ venueId: 'venue-1' })).content[0].text)
 }
@@ -192,5 +203,162 @@ describe('release_terminal_payment — no puede contradecir a la lista', () => {
       (await capturarTool('release_terminal_payment')({ venueId: 'venue-1', requestId: 'REQ', reason: 'prueba' })).content[0].text,
     )
     expect(salida).toMatchObject({ ok: false, status: 'FAILED', outcome: 'UNRESOLVED' })
+  })
+})
+
+describe('S8 · quién confirmó (closedVia) y los intentos de cada solicitud', () => {
+  it('muestra closedVia CONSERVANDO al ganador, los intentos vinculados y cuál de ellos ganó', async () => {
+    ;(prismaMock as any).terminalPaymentRequest.findMany.mockResolvedValue([
+      fila({ status: S.COMPLETED, paymentId: 'pay-A', closedVia: 'webhook' }),
+    ])
+    vinculos(
+      [
+        { requestId: 'REQ', attemptId: 'A', createdAt: new Date('2026-09-13T20:00:00Z') },
+        { requestId: 'REQ', attemptId: 'B', createdAt: new Date('2026-09-13T20:00:05Z') },
+      ],
+      { REQ: 2 },
+    )
+    ;(prismaMock as any).terminalPaymentAttemptLink.findMany.mockResolvedValue([
+      { requestId: 'REQ', attemptId: 'A', createdAt: new Date('2026-09-13T20:00:00Z') },
+    ])
+    ;(prismaMock as any).payment.findMany.mockResolvedValue([{ id: 'pay-A', idempotencyKey: 'A' }])
+    const salida = JSON.parse((await capturarTool('terminal_payment_requests')({ venueId: 'venue-1' })).content[0].text)
+    expect(salida.requests[0]).toMatchObject({
+      status: 'COMPLETED',
+      outcome: 'CHARGED',
+      paymentId: 'pay-A',
+      closedVia: 'webhook',
+      winnerAttemptId: 'A',
+      attempts: [
+        { attemptId: 'A', linkedAt: '2026-09-13T20:00:00.000Z' },
+        { attemptId: 'B', linkedAt: '2026-09-13T20:00:05.000Z' },
+      ],
+    })
+    expect(salida.requests[0]).toMatchObject({ attemptsTruncated: false, attemptsTotal: 2 })
+    // La ventana y los conteos se piden para las solicitudes listadas; el ganador se trae aparte por su llave.
+    expect((prismaMock as any).$queryRaw).toHaveBeenCalled()
+    expect((prismaMock as any).terminalPaymentAttemptLink.groupBy.mock.calls[0][0].where).toMatchObject({ requestId: { in: ['REQ'] } })
+    expect((prismaMock as any).terminalPaymentAttemptLink.findMany.mock.calls[0][0].where).toMatchObject({ attemptId: { in: ['A'] } })
+  })
+
+  it('sin vínculos ni ganador: closedVia null, attempts vacío y winnerAttemptId null (aditivo: el resto no cambia)', async () => {
+    const salida = await listar([fila({ status: S.SENT })])
+    expect(salida.requests[0]).toMatchObject({ closedVia: null, winnerAttemptId: null, attempts: [] })
+  })
+})
+
+describe('Codex R4 (P2): continuación por solicitud — así se llega a los intentos que la ventana de 25 recortó', () => {
+  const vinculo = (i: number) => ({
+    requestId: 'REQ',
+    attemptId: `A${String(i).padStart(2, '0')}`,
+    createdAt: new Date(2026, 8, 13, 20, 0, i),
+  })
+
+  it('attemptsRequestId devuelve SÓLO los intentos de esa solicitud, 25 por página, con attemptsNextCursor y el total real', async () => {
+    ;(prismaMock as any).terminalPaymentRequest.findFirst.mockResolvedValue({ requestId: 'REQ' })
+    ;(prismaMock as any).terminalPaymentAttemptLink.findMany.mockResolvedValue(Array.from({ length: 26 }, (_, i) => vinculo(i + 1)))
+    ;(prismaMock as any).terminalPaymentAttemptLink.count.mockResolvedValue(50)
+    const salida = JSON.parse(
+      (await capturarTool('terminal_payment_requests')({ venueId: 'venue-1', attemptsRequestId: 'REQ' })).content[0].text,
+    )
+    expect(salida.requestId).toBe('REQ')
+    expect(salida.attempts).toHaveLength(25)
+    expect(salida.attempts[0]).toEqual({ attemptId: 'A01', linkedAt: new Date(2026, 8, 13, 20, 0, 1).toISOString() })
+    expect(salida).toMatchObject({ attemptsTotal: 50, attemptsNextCursor: 'A25' })
+    // La solicitud se busca dentro del alcance del operador y la página es keyset (createdAt, attemptId), 25 + 1 de mirada.
+    expect((prismaMock as any).terminalPaymentRequest.findFirst.mock.calls[0][0].where).toMatchObject({ requestId: 'REQ' })
+    const consulta = (prismaMock as any).terminalPaymentAttemptLink.findMany.mock.calls[0][0]
+    expect(consulta).toMatchObject({ where: { requestId: 'REQ' }, take: 26, orderBy: [{ createdAt: 'asc' }, { attemptId: 'asc' }] })
+    // Sin la lista general: ni ventana ni conteos por groupBy.
+    expect((prismaMock as any).$queryRaw).not.toHaveBeenCalled()
+  })
+
+  it('attemptsAfter continúa DESPUÉS del cursor por (createdAt, attemptId); la última página no trae cursor', async () => {
+    ;(prismaMock as any).terminalPaymentRequest.findFirst.mockResolvedValue({ requestId: 'REQ' })
+    const ancla = vinculo(25)
+    ;(prismaMock as any).terminalPaymentAttemptLink.findUnique.mockResolvedValue(ancla)
+    ;(prismaMock as any).terminalPaymentAttemptLink.findMany.mockResolvedValue([vinculo(26), vinculo(27)])
+    ;(prismaMock as any).terminalPaymentAttemptLink.count.mockResolvedValue(27)
+    const salida = JSON.parse(
+      (await capturarTool('terminal_payment_requests')({ venueId: 'venue-1', attemptsRequestId: 'REQ', attemptsAfter: 'A25' })).content[0]
+        .text,
+    )
+    expect(salida.attempts.map((a: { attemptId: string }) => a.attemptId)).toEqual(['A26', 'A27'])
+    expect(salida.attemptsNextCursor).toBeNull()
+    const where = (prismaMock as any).terminalPaymentAttemptLink.findMany.mock.calls[0][0].where
+    expect(where).toEqual({
+      requestId: 'REQ',
+      OR: [{ createdAt: { gt: ancla.createdAt } }, { createdAt: ancla.createdAt, attemptId: { gt: 'A25' } }],
+    })
+  })
+
+  it('un cursor que pertenece a OTRA solicitud, o una solicitud fuera del alcance, se rechazan sin listar nada', async () => {
+    ;(prismaMock as any).terminalPaymentRequest.findFirst.mockResolvedValueOnce({ requestId: 'REQ' })
+    ;(prismaMock as any).terminalPaymentAttemptLink.findUnique.mockResolvedValue({
+      requestId: 'OTRA',
+      attemptId: 'X',
+      createdAt: new Date(),
+    })
+    const ajeno = JSON.parse(
+      (await capturarTool('terminal_payment_requests')({ venueId: 'venue-1', attemptsRequestId: 'REQ', attemptsAfter: 'X' })).content[0]
+        .text,
+    )
+    expect(ajeno).toMatchObject({ ok: false })
+    expect((prismaMock as any).terminalPaymentAttemptLink.findMany).not.toHaveBeenCalled()
+    ;(prismaMock as any).terminalPaymentRequest.findFirst.mockResolvedValueOnce(null)
+    const fuera = JSON.parse(
+      (await capturarTool('terminal_payment_requests')({ venueId: 'venue-1', attemptsRequestId: 'NO-EXISTE' })).content[0].text,
+    )
+    expect(fuera).toMatchObject({ ok: false })
+  })
+})
+
+describe('Codex R2 · P2-7: el ganador no se esconde detrás del tope de vínculos', () => {
+  it('con 26 intentos y el ganador fuera de los 25 listados, winnerAttemptId lo encuentra igual y la lista dice que está recortada', async () => {
+    ;(prismaMock as any).terminalPaymentRequest.findMany.mockResolvedValue([
+      fila({ status: S.COMPLETED, paymentId: 'pay-A26', closedVia: 'webhook' }),
+    ])
+    const primeros = Array.from({ length: 25 }, (_, i) => ({
+      requestId: 'REQ',
+      attemptId: `A${i + 1}`,
+      createdAt: new Date(2026, 8, 13, 20, 0, i),
+    }))
+    vinculos(primeros, { REQ: 26 })
+    ;(prismaMock as any).terminalPaymentAttemptLink.findMany.mockResolvedValue([
+      { requestId: 'REQ', attemptId: 'A26', createdAt: new Date(2026, 8, 13, 20, 0, 26) },
+    ])
+    ;(prismaMock as any).payment.findMany.mockResolvedValue([{ id: 'pay-A26', idempotencyKey: 'A26' }])
+    const salida = JSON.parse((await capturarTool('terminal_payment_requests')({ venueId: 'venue-1' })).content[0].text)
+    // Con el ganador fundido, los 26 están a la vista: la lista NO está recortada y lo dice con el conteo real.
+    expect(salida.requests[0]).toMatchObject({ winnerAttemptId: 'A26', attemptsTruncated: false, attemptsTotal: 26 })
+    expect(salida.requests[0].attempts).toHaveLength(26)
+    expect(salida.requests[0].attempts.some((a: { attemptId: string }) => a.attemptId === 'A26')).toBe(true)
+  })
+})
+
+describe('Codex R3 · P2: la ventana de vínculos es POR SOLICITUD y el recorte se declara con el conteo real', () => {
+  it('A con 50 intentos y B con 1: B muestra su intento (no queda vacío detrás de A), A se declara recortada (25 de 50) y B completa', async () => {
+    ;(prismaMock as any).terminalPaymentRequest.findMany.mockResolvedValue([
+      fila({ requestId: 'A', status: S.SENT }),
+      fila({ requestId: 'B', status: S.SENT, terminalId: 'term-2' }),
+    ])
+    const ventanaDeA = Array.from({ length: 25 }, (_, i) => ({
+      requestId: 'A',
+      attemptId: `A${i + 1}`,
+      createdAt: new Date(2026, 8, 13, 20, 0, i),
+    }))
+    vinculos([...ventanaDeA, { requestId: 'B', attemptId: 'B1', createdAt: new Date(2026, 8, 13, 21, 0, 0) }], { A: 50, B: 1 })
+    ;(prismaMock as any).terminalPaymentAttemptLink.findMany.mockResolvedValue([])
+    ;(prismaMock as any).payment.findMany.mockResolvedValue([])
+
+    const salida = JSON.parse((await capturarTool('terminal_payment_requests')({ venueId: 'venue-1' })).content[0].text)
+    const porId = Object.fromEntries(salida.requests.map((r: { requestId: string }) => [r.requestId, r]))
+    expect(porId.A.attempts).toHaveLength(25)
+    expect(porId.A).toMatchObject({ attemptsTruncated: true, attemptsTotal: 50 })
+    expect(porId.B.attempts).toEqual([{ attemptId: 'B1', linkedAt: new Date(2026, 8, 13, 21, 0, 0).toISOString() }])
+    expect(porId.B).toMatchObject({ attemptsTruncated: false, attemptsTotal: 1 })
+    // La ventana se pide con ROW_NUMBER por solicitud, nunca con un tope global.
+    const sql = ((prismaMock as any).$queryRaw.mock.calls[0][0] as TemplateStringsArray).join('?')
+    expect(sql).toContain('ROW_NUMBER() OVER (PARTITION BY "requestId"')
   })
 })

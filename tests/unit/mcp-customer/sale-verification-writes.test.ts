@@ -208,4 +208,23 @@ describe('edit_sale_verification', () => {
       expect.objectContaining({ status: 'FAILED', reviewNotes: 'Falta la imagen de vinculación' }),
     )
   })
+  it('Codex R13-3 · el cobro es del protocolo de costo: el servicio rechaza con 409 y la tool contesta ok:false con el código, sin auditar como escritura — `confirm:true` no acredita otro importe', async () => {
+    mockFindFirst.mockResolvedValue(PENDING)
+    const rechazo = Object.assign(
+      new Error('Este cobro pertenece al protocolo de costo: su importe y su forma de pago sólo cambian por reembolso'),
+      {
+        statusCode: 409,
+        code: 'PAYMENT_PROTECTED_BY_COST_PROTOCOL',
+        details: { fields: ['amount'] },
+      },
+    )
+    mockEdit.mockRejectedValue(rechazo)
+    const out = parse(
+      await call('edit_sale_verification', { saleVerificationId: 'sv1', amount: 300, reason: 'ajuste monto', confirm: true }),
+    )
+    expect(out).toMatchObject({ ok: false, code: 'PAYMENT_PROTECTED_BY_COST_PROTOCOL' })
+    expect(out.error).toMatch(/protocolo de costo/)
+    expect(mockEdit).toHaveBeenCalledTimes(1)
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
 })

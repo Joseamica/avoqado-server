@@ -3,6 +3,8 @@ import { PaymentMethod, CardBrand } from '@prisma/client'
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    // Codex R12-4: la partición «¿es un cobro del protocolo?» es UNA consulta SQL (`cobrosDelProtocolo`); sin protocolo ⇒ [].
+    $queryRaw: jest.fn(async () => []),
     venuePaymentConfig: { findUnique: jest.fn() },
     payment: { findMany: jest.fn() },
     transactionCost: { findMany: jest.fn() },

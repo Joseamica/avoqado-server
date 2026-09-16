@@ -2264,22 +2264,19 @@ export interface LockedAreaTicketPayment {
  * Order. Mantiene la jerarquía session → tickets → order y prepara un intento
  * aunque un cliente viejo no haya llamado explícitamente `prepare-payment`.
  */
-export async function lockAreaTicketCheckoutForPayment(
-  tx: Prisma.TransactionClient,
-  input: {
-    venueId: string
-    orderId: string
-    idempotencyKey?: string | null
-    amount: Prisma.Decimal
-    method: PaymentMethod
-  },
-): Promise<LockedAreaTicketPayment | null> {
+/**
+ * SÓLO los candados de la jerarquía de vales (session → tickets → Order), sin preparar nada. Existe porque el
+ * registrador tiene que ARBITRAR (S0: ¿este intento es el ganador de la solicitud o una posible segunda captura?)
+ * DESPUÉS de tomar los candados y ANTES de preparar el intento de vales — `lockAreaTicketCheckoutForPayment`
+ * rechaza una sesión ya pagada, y eso dejaba fuera, sin evidencia, al segundo intento acreditado (Codex, P1-3).
+ * `null` = la orden no tiene sesión de vales.
+ */
+export async function lockAreaTicketCheckoutHierarchy(tx: Prisma.TransactionClient, input: { venueId: string; orderId: string }) {
   const candidate = await tx.areaTicketCheckoutSession.findFirst({
     where: { venueId: input.venueId, orderId: input.orderId },
     select: { id: true },
   })
   if (!candidate) return null
-  const idempotencyKey = requireIdempotencyKey(input.idempotencyKey)
 
   await tx.$queryRaw`SELECT id FROM "AreaTicketCheckoutSession" WHERE id = ${candidate.id} AND "venueId" = ${input.venueId} FOR UPDATE`
   const session = await tx.areaTicketCheckoutSession.findFirst({
@@ -2298,6 +2295,24 @@ export async function lockAreaTicketCheckoutForPayment(
     )
   }
   await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${input.orderId} AND "venueId" = ${input.venueId} FOR UPDATE`
+  return { session }
+}
+
+export async function lockAreaTicketCheckoutForPayment(
+  tx: Prisma.TransactionClient,
+  input: {
+    venueId: string
+    orderId: string
+    idempotencyKey?: string | null
+    amount: Prisma.Decimal
+    method: PaymentMethod
+  },
+): Promise<LockedAreaTicketPayment | null> {
+  // Los candados son reentrantes dentro de la misma transacción: si el registrador ya los tomó, aquí no cuestan.
+  const locked = await lockAreaTicketCheckoutHierarchy(tx, { venueId: input.venueId, orderId: input.orderId })
+  if (!locked) return null
+  const { session } = locked
+  const idempotencyKey = requireIdempotencyKey(input.idempotencyKey)
 
   const existing = await tx.areaTicketPaymentAttempt.findUnique({
     where: { checkoutSessionId_idempotencyKey: { checkoutSessionId: session.id, idempotencyKey } },

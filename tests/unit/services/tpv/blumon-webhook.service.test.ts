@@ -4,6 +4,7 @@ import prisma from '@/utils/prismaClient'
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    $executeRaw: jest.fn(),
     payment: {
       findFirst: jest.fn(),
       findMany: jest.fn(),
@@ -15,6 +16,11 @@ jest.mock('@/utils/prismaClient', () => ({
   },
 }))
 
+// Codex R12-10: los escritores de Blumon parchan `processorData` con un `||` ATÓMICO en Postgres, nunca con un `update` desde
+// una copia leída antes. Lo que se afirma es el SQL del parche (llaves propias) y que `payment.update` no se toca.
+const mockedExecuteRaw = prisma.$executeRaw as unknown as jest.Mock
+const sqlDelParche = () =>
+  mockedExecuteRaw.mock.calls.map(([strings, ...values]: [TemplateStringsArray, ...unknown[]]) => ({ sql: strings.join('?'), values }))
 const mockedPaymentFindFirst = prisma.payment.findFirst as jest.Mock
 // Matching resolves candidates per tier via findMany (deterministic tiered
 // matching, 2026-07-18) — the payload below is identified by operationNumber,
@@ -33,9 +39,12 @@ const mockedProviderEventLogUpdate = prisma.providerEventLog.update as jest.Mock
  */
 describe('reconcileBlumonEvent — tip is part of the charged amount', () => {
   beforeEach(() => {
-    ;[mockedPaymentFindFirst, mockedPaymentFindMany, mockedPaymentUpdate, mockedProviderEventLogUpdate].forEach(m => m.mockReset())
+    ;[mockedPaymentFindFirst, mockedPaymentFindMany, mockedPaymentUpdate, mockedProviderEventLogUpdate, mockedExecuteRaw].forEach(m =>
+      m.mockReset(),
+    )
     mockedPaymentUpdate.mockResolvedValue({})
     mockedProviderEventLogUpdate.mockResolvedValue({})
+    mockedExecuteRaw.mockResolvedValue(1)
   })
 
   const tippedPayload = {
@@ -63,6 +72,16 @@ describe('reconcileBlumonEvent — tip is part of the charged amount', () => {
 
     expect(result.action).toBe('MATCHED')
     expect(result.paymentId).toBe('pay_tip')
+    // R12-10: parche atómico con las llaves de Blumon, idempotente por `blumonWebhookReceived` en la MISMA sentencia.
+    expect(mockedPaymentUpdate).not.toHaveBeenCalled()
+    const [parche] = sqlDelParche()
+    expect(parche.sql).toMatch(/UPDATE "Payment"[\s\S]*END \|\| \?::jsonb[\s\S]*"processorData" \? \?/)
+    expect(parche.values).toEqual(expect.arrayContaining(['pay_tip', 'blumonWebhookReceived']))
+    expect(JSON.parse(parche.values[0] as string)).toMatchObject({
+      blumonOperationNumber: 20294305,
+      blumonAuthCode: 'AUTH123',
+      blumonMembership: 'MEMB1',
+    })
     expect(mockedProviderEventLogUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: 'evt_tip' },
@@ -85,6 +104,12 @@ describe('reconcileBlumonEvent — tip is part of the charged amount', () => {
     const result = await reconcileBlumonEvent('evt_bad', { ...tippedPayload, amount: '100.00' }, { scopeVenueIds: ['venue_1'] })
 
     expect(result.action).toBe('DISCREPANCY')
+    expect(mockedPaymentUpdate).not.toHaveBeenCalled()
+    const [parche] = sqlDelParche()
+    expect(parche.sql).toMatch(/UPDATE "Payment"[\s\S]*END \|\| \?::jsonb/)
+    expect(JSON.parse(parche.values[0] as string)).toMatchObject({
+      blumonDiscrepancy: expect.objectContaining({ blumonAmount: 100, recordedAmount: 77 }),
+    })
     expect(mockedProviderEventLogUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: 'evt_bad' },

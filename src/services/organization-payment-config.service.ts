@@ -9,7 +9,10 @@
  */
 
 import prisma from '@/utils/prismaClient'
-import { AccountType } from '@prisma/client'
+import { AccountType, type Prisma } from '@prisma/client'
+
+/** Codex R6 (g): las lecturas dentro de la unidad de convergencia del costo viajan con el MISMO cliente (`tx`). */
+type Cliente = Prisma.TransactionClient | typeof prisma
 
 type ConfigSource = 'venue' | 'organization'
 
@@ -27,9 +30,9 @@ const merchantAccountInclude = {
  * Resolve the effective payment config for a venue.
  * Checks venue-level first, then falls back to organization-level.
  */
-export async function getEffectivePaymentConfig(venueId: string) {
+export async function getEffectivePaymentConfig(venueId: string, db: Cliente = prisma) {
   // 1. Check venue-level config
-  const venueConfig = await prisma.venuePaymentConfig.findUnique({
+  const venueConfig = await db.venuePaymentConfig.findUnique({
     where: { venueId },
     include: {
       primaryAccount: { include: merchantAccountInclude },
@@ -43,14 +46,14 @@ export async function getEffectivePaymentConfig(venueId: string) {
   }
 
   // 2. Fallback to organization-level config
-  const venue = await prisma.venue.findUnique({
+  const venue = await db.venue.findUnique({
     where: { id: venueId },
     select: { organizationId: true },
   })
 
   if (!venue) return null
 
-  const orgConfig = await prisma.organizationPaymentConfig.findUnique({
+  const orgConfig = await db.organizationPaymentConfig.findUnique({
     where: { organizationId: venue.organizationId },
     include: {
       primaryAccount: { include: merchantAccountInclude },
@@ -70,8 +73,9 @@ export async function getEffectivePaymentConfig(venueId: string) {
  * Resolve the effective pricing structure for a venue + account type.
  * Checks venue-level first, then falls back to organization-level.
  */
-export async function getEffectivePricing(venueId: string, accountType?: AccountType) {
-  const now = new Date()
+export async function getEffectivePricing(venueId: string, accountType?: AccountType, at: Date = new Date(), db: Cliente = prisma) {
+  // Codex R4-3: la vigencia se evalúa A LA FECHA pedida (la del cobro cuando se calcula un costo), no siempre «hoy».
+  const now = at
   const baseWhere = {
     active: true,
     effectiveFrom: { lte: now },
@@ -80,7 +84,7 @@ export async function getEffectivePricing(venueId: string, accountType?: Account
   }
 
   // 1. Check venue-level pricing
-  const venuePricing = await prisma.venuePricingStructure.findMany({
+  const venuePricing = await db.venuePricingStructure.findMany({
     where: { venueId, ...baseWhere },
     orderBy: [{ accountType: 'asc' }, { effectiveFrom: 'desc' }],
   })
@@ -90,14 +94,14 @@ export async function getEffectivePricing(venueId: string, accountType?: Account
   }
 
   // 2. Fallback to organization-level pricing
-  const venue = await prisma.venue.findUnique({
+  const venue = await db.venue.findUnique({
     where: { id: venueId },
     select: { organizationId: true },
   })
 
   if (!venue) return null
 
-  const orgPricing = await prisma.organizationPricingStructure.findMany({
+  const orgPricing = await db.organizationPricingStructure.findMany({
     where: { organizationId: venue.organizationId, ...baseWhere },
     orderBy: [{ accountType: 'asc' }, { effectiveFrom: 'desc' }],
   })
@@ -106,6 +110,36 @@ export async function getEffectivePricing(venueId: string, accountType?: Account
     return { pricing: orgPricing, source: 'organization' as ConfigSource }
   }
 
+  return null
+}
+
+/**
+ * Codex R12-14: resolver UN slot es una consulta ACOTADA — la estructura ganadora (`take: 1`, misma vigencia y mismo orden que
+ * `getEffectivePricing`, venue primero y organización de respaldo). La captura y la unidad de costo consumían `pricing[0]` de la
+ * lista completa: con muchas estructuras vigentes solapadas, cada cobro cargaba el historial entero dentro de la transacción de
+ * captura. Devuelve la MISMA forma (`pricing` con a lo sumo una estructura) para que el consumidor no cambie de contrato; los
+ * consumidores que de verdad LISTAN siguen usando `getEffectivePricing` (nada se recorta en silencio).
+ */
+export async function getEffectivePricingForSlot(venueId: string, accountType: AccountType, at: Date = new Date(), db: Cliente = prisma) {
+  const now = at
+  const baseWhere = {
+    active: true,
+    accountType,
+    effectiveFrom: { lte: now },
+    OR: [{ effectiveTo: null }, { effectiveTo: { gte: now } }],
+  }
+  const venuePricing = await db.venuePricingStructure.findFirst({
+    where: { venueId, ...baseWhere },
+    orderBy: [{ effectiveFrom: 'desc' }],
+  })
+  if (venuePricing) return { pricing: [venuePricing], source: 'venue' as ConfigSource }
+  const venue = await db.venue.findUnique({ where: { id: venueId }, select: { organizationId: true } })
+  if (!venue) return null
+  const orgPricing = await db.organizationPricingStructure.findFirst({
+    where: { organizationId: venue.organizationId, ...baseWhere },
+    orderBy: [{ effectiveFrom: 'desc' }],
+  })
+  if (orgPricing) return { pricing: [orgPricing], source: 'organization' as ConfigSource }
   return null
 }
 

@@ -104,7 +104,13 @@ describe('reconcileUnknownRequests — money first: a recorded card payment alwa
     const logger = require('@/config/logger').default
     const errSpy = jest.spyOn(logger, 'error')
     tpr().findMany.mockResolvedValueOnce([unknownRow()])
-    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-late', source: 'TPV', terminal: { serialNumber: '2841653112' }, amount: new Prisma.Decimal(135), tipAmount: new Prisma.Decimal(0) })
+    prismaMock.payment.findFirst.mockResolvedValueOnce({
+      id: 'pay-late',
+      source: 'TPV',
+      terminal: { serialNumber: '2841653112' },
+      amount: new Prisma.Decimal(135),
+      tipAmount: new Prisma.Decimal(0),
+    })
 
     const summary = await terminalPaymentService.reconcileUnknownRequests(NOW)
 
@@ -171,11 +177,21 @@ describe('reconcileUnknownRequests — money first: a recorded card payment alwa
     expect(escritura.data.resultJson).toBeUndefined()
   })
 
-  it('the payment lookup carries the same 4 guards as the stale sweep (after the row, COMPLETED, card, not claimed)', async () => {
+  it('the payment lookup carries the same 4 guards as the stale sweep (after the row, COMPLETED, card, not claimed by an ACCREDITED owner)', async () => {
     const row = unknownRow()
     tpr().findMany.mockResolvedValueOnce([row])
-    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-x', source: 'TPV', terminal: { serialNumber: '2841653112' }, amount: new Prisma.Decimal(135), tipAmount: new Prisma.Decimal(0) })
-    tpr().findFirst.mockResolvedValueOnce({ id: 'row-other' }) // already claimed by another request
+    prismaMock.payment.findFirst.mockResolvedValueOnce({
+      id: 'pay-x',
+      source: 'TPV',
+      orderId: 'order-1',
+      processorData: { terminalPaymentRequestId: row.requestId },
+      terminalPaymentRequestId: 'REQ-OWNER',
+      terminal: { serialNumber: '2841653112' },
+      amount: new Prisma.Decimal(135),
+      tipAmount: new Prisma.Decimal(0),
+    })
+    // Codex R13-7: ya reclamado por otra solicitud CON procedencia (la columna la acredita y se cobró en su terminal): veta.
+    tpr().findMany.mockResolvedValueOnce([{ id: 'row-other', requestId: 'REQ-OWNER', orderId: 'order-1', terminalId: '2841653112', status: 'COMPLETED' }])
 
     const summary = await terminalPaymentService.reconcileUnknownRequests(NOW)
 
@@ -295,7 +311,9 @@ describe('reconcileUnknownRequests — the terminal must be BACK before anything
     // 🔴 Y NO se escribe ningún código de la lista blanca: esos afirman «no hubo cobro», y el plazo
     // no demuestra eso. Si alguien mete AUTO_RELEASED en `CODIGOS_SIN_COBRO`, esto cae.
     const escritos = tpr().updateMany.mock.calls.map((c: any[]) => c[0].data?.failureCode)
-    expect(escritos.filter((f: string) => ['TPV_NEVER_RECEIVED', 'TPV_INBOX_NOT_FOUND', 'OPERATOR_RECONCILED_NO_CHARGE'].includes(f))).toEqual([])
+    expect(
+      escritos.filter((f: string) => ['TPV_NEVER_RECEIVED', 'TPV_INBOX_NOT_FOUND', 'OPERATOR_RECONCILED_NO_CHARGE'].includes(f)),
+    ).toEqual([])
   })
 
   it('al soltar deja rastro auditable y su aviso DICE que la venta sigue protegida (nunca que sea seguro recobrar)', async () => {
@@ -321,7 +339,13 @@ describe('reconcileUnknownRequests — the terminal must be BACK before anything
     const returnedAt = new Date(NOW.getTime() - GRACE_MS - 60_000)
     tpr().findMany.mockResolvedValueOnce([unknownRow({ terminalReturnedAt: returnedAt })])
     terminalWithHeartbeat(new Date(NOW.getTime() - 10_000))
-    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-late', source: 'TPV', terminal: { serialNumber: '2841653112' }, amount: new Prisma.Decimal(135), tipAmount: new Prisma.Decimal(0) })
+    prismaMock.payment.findFirst.mockResolvedValueOnce({
+      id: 'pay-late',
+      source: 'TPV',
+      terminal: { serialNumber: '2841653112' },
+      amount: new Prisma.Decimal(135),
+      tipAmount: new Prisma.Decimal(0),
+    })
 
     const summary = await terminalPaymentService.reconcileUnknownRequests(NOW)
 
@@ -391,7 +415,13 @@ describe('releaseUnknownRequest — a human may free the slot, but never on top 
 
   it('refuses to release when a reconcilable card payment exists → reconciles to COMPLETED instead', async () => {
     tpr().findFirst.mockResolvedValueOnce(unknownRow())
-    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-late', source: 'TPV', terminal: { serialNumber: '2841653112' }, amount: new Prisma.Decimal(135), tipAmount: new Prisma.Decimal(0) })
+    prismaMock.payment.findFirst.mockResolvedValueOnce({
+      id: 'pay-late',
+      source: 'TPV',
+      terminal: { serialNumber: '2841653112' },
+      amount: new Prisma.Decimal(135),
+      tipAmount: new Prisma.Decimal(0),
+    })
 
     const r = await terminalPaymentService.releaseUnknownRequest({ requestId: 'REQ-U', venueId: 'venue-1', actor, reason: 'x' })
 
@@ -403,9 +433,16 @@ describe('releaseUnknownRequest — a human may free the slot, but never on top 
   it('payment exists but another path closed the row first (CAS count 0) → reports the fresh status, never claims its own paymentId', async () => {
     tpr()
       .findFirst.mockResolvedValueOnce(unknownRow()) // the row
-      .mockResolvedValueOnce(null) // findReconcilablePayment: not claimed by another request
       .mockResolvedValueOnce({ status: 'COMPLETED', paymentId: 'pay-from-socket' }) // re-read after the lost CAS
-    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-late', source: 'TPV', terminal: { serialNumber: '2841653112' }, amount: new Prisma.Decimal(135), tipAmount: new Prisma.Decimal(0) })
+    // Codex R13-7: las reclamaciones ajenas se consultan con `findMany` (ninguna aquí).
+    tpr().findMany.mockResolvedValueOnce([])
+    prismaMock.payment.findFirst.mockResolvedValueOnce({
+      id: 'pay-late',
+      source: 'TPV',
+      terminal: { serialNumber: '2841653112' },
+      amount: new Prisma.Decimal(135),
+      tipAmount: new Prisma.Decimal(0),
+    })
     tpr().updateMany.mockResolvedValueOnce({ count: 0 })
 
     const r = await terminalPaymentService.releaseUnknownRequest({ requestId: 'REQ-U', venueId: 'venue-1', actor, reason: 'x' })

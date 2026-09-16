@@ -227,14 +227,20 @@ export class SocketManager implements ISocketManager {
       if (terminalId) {
         // 🔴 Con `.catch`: un rechazo aquí (P2024 del pool en una tormenta de reconexiones) sería un
         // `unhandledRejection`, y `server.ts` los convierte en gracefulShutdown a propósito.
-        terminalPaymentService
-          .replayPendingForTerminal(terminalId, authenticatedSocket.authContext?.venueId, socket.id)
-          .catch(error => logger.warn('⚠️ [Socket] replayPendingForTerminal failed on connect', { terminalId, error: error instanceof Error ? error.message : String(error) }))
+        terminalPaymentService.replayPendingForTerminal(terminalId, authenticatedSocket.authContext?.venueId, socket.id).catch(error =>
+          logger.warn('⚠️ [Socket] replayPendingForTerminal failed on connect', {
+            terminalId,
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        )
         // Y a las filas SIN desenlace acreditado se les pregunta: la evidencia viene de la bandeja
         // durable de la terminal, nunca del reloj. Sólo si anunció la capacidad (APK viejo: silencio).
-        terminalPaymentService
-          .probeUnresolvedForTerminal(terminalId, authenticatedSocket.authContext?.venueId, socket.id)
-          .catch(error => logger.warn('⚠️ [Socket] probeUnresolvedForTerminal failed on connect', { terminalId, error: error instanceof Error ? error.message : String(error) }))
+        terminalPaymentService.probeUnresolvedForTerminal(terminalId, authenticatedSocket.authContext?.venueId, socket.id).catch(error =>
+          logger.warn('⚠️ [Socket] probeUnresolvedForTerminal failed on connect', {
+            terminalId,
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        )
       }
     })
   }
@@ -412,6 +418,27 @@ export class SocketManager implements ISocketManager {
       } catch (error) {
         logger.error('Error processing terminal payment probe result', { socketId: socket.id, error: String(error) })
         callback?.({ success: false })
+      }
+    })
+
+    // S1 (checkpoint 1 del webhook): la terminal anuncia el intento que abrió en su libreta. Sólo una terminal
+    // IDENTIFICADA del mismo venue puede vincular; el veredicto viaja ENTERO en el ack (LINKED / ALREADY_LINKED /
+    // LATE_EVIDENCE, o el motivo del rechazo) y se contesta DESPUÉS de que el vínculo quedó escrito.
+    onWithContext(socket, 'terminal:payment_attempt_opened', async (payload, callback) => {
+      try {
+        const terminal = terminalRegistry.getTerminalBySocketId(socket.id)
+        if (!terminal || !terminal.identityVerified || terminal.venueId !== socket.authContext?.venueId) {
+          callback?.({ success: false, reason: 'NOT_OWNER' })
+          return
+        }
+        const ack = await terminalPaymentService.handleAttemptOpenedFromSocket(
+          { requestId: payload?.requestId, attemptId: payload?.attemptId },
+          terminal,
+        )
+        callback?.(ack)
+      } catch (error) {
+        logger.error('Error linking terminal payment attempt to its request', { socketId: socket.id, error: String(error) })
+        callback?.({ success: false, reason: 'ERROR' })
       }
     })
 

@@ -1,12 +1,14 @@
 import prisma from '@/utils/prismaClient'
-import { BadRequestError } from '@/errors/AppError'
+import { BadRequestError, ConflictError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import {
   getActivePricingStructure,
   updateVenuePricingStructure,
   createVenuePricingStructure,
 } from '@/services/superadmin/venuePricing.service'
-import { previewRateCorrection, recomputePaymentEconomics, PreviewArgs } from './rateCorrectionPreview'
+import { previewRateCorrection, recomputePaymentEconomics, partirPorProtocolo, PreviewArgs } from './rateCorrectionPreview'
+import { MOTIVO_EXCLUSION_DEL_PROTOCOLO, cobrosDelProtocolo } from '../../shared/cobroDelProtocolo'
+import { MOTIVO_EXCLUSION_ORIGINAL_OCUPADO, bloquearLoteConOriginales } from '../../shared/candadosDelLote'
 import { buildScopeWhere } from './rateCorrectionScope'
 import { RateStructureLike } from './rateRecompute'
 
@@ -141,7 +143,7 @@ export async function applyRateCorrection(args: ApplyArgs, ctx: ApplyContext) {
     //    and VenueTransaction rows. Reading in 2 findMany (instead of 2 findUnique
     //    PER payment inside the transaction) keeps the interactive transaction short:
     //    long transactions time out against a remote DB. Same data, fewer round-trips.
-    const payments = await prisma.payment.findMany({
+    const enAlcance = await prisma.payment.findMany({
       where: buildScopeWhere({ venueId: args.venueId, merchantAccountId, dateFrom: args.dateFrom, dateTo: args.dateTo }),
       select: {
         id: true,
@@ -155,6 +157,9 @@ export async function applyRateCorrection(args: ApplyArgs, ctx: ApplyContext) {
         feePercentage: true,
       },
     })
+    // Codex R12-4: la MISMA partición que el preview — los cobros del protocolo de costo no se corrigen aquí. Se
+    // revalida más abajo, bajo el mutex de cada Payment, antes de escribir nada.
+    const { corregibles: payments, excluidos: excluidosPrevios } = await partirPorProtocolo(enAlcance)
 
     const paymentIds = payments.map(p => p.id)
     const [existingCosts, existingVts] = await Promise.all([
@@ -249,23 +254,43 @@ export async function applyRateCorrection(args: ApplyArgs, ctx: ApplyContext) {
     //    batch into a single createMany each; the 3 snapshot tables need per-row
     //    values so they stay per-row updates — but with reads pre-fetched and entries
     //    batched, the transaction is far shorter. Timeout raised for safety.
+    // Codex R12-4: revalidación BAJO EL MUTEX. Entre la lectura de arriba y la escritura, un cobro puede haber entrado al
+    // protocolo (una obligación encolada, un snapshot acreditado): con sus filas bloqueadas (`FOR NO KEY UPDATE`, el
+    // mismo mutex que la convergencia) se vuelve a preguntar y lo que ya es del protocolo se aparta, sin efectos.
+    // Codex R15-2: los candados del lote en el orden de la unidad de costo — ORIGINALES de los reembolsos (dentro y fuera del
+    // lote, NOWAIT: un original ocupado aparta a sus reembolsos en vez de esperar) → lote en `id ASC` → relectura de tipo/venue/
+    // puntero bajo los candados (si cambiaron, se sueltan todos y se reintenta; al tercer cambio, 409). Se clasifica y se escribe
+    // con TODOS esos candados puestos: la pertenencia de un reembolso (por su original) no puede cambiar entre las dos cosas.
+    const excluidosTarde: string[] = []
+    const ocupados: string[] = []
     await prisma.$transaction(
       async tx => {
-        if (entryRows.length) await tx.rateCorrectionEntry.createMany({ data: entryRows as never })
-        if (costCreates.length) await tx.transactionCost.createMany({ data: costCreates as never })
+        const candados = await bloquearLoteConOriginales(tx, { venueId: args.venueId, paymentIds })
+        ocupados.push(...candados.ocupados)
+        const protocoloAhora = await cobrosDelProtocolo(tx, candados.bloqueados)
+        excluidosTarde.push(...candados.bloqueados.filter(id => protocoloAhora.has(id)))
+        const corregibles = new Set(candados.bloqueados.filter(id => !protocoloAhora.has(id)))
+        const apartado = (id: string) => !corregibles.has(id)
+        const entradas = entryRows.filter(e => !apartado(e.paymentId as string))
+        const costosNuevos = costCreates.filter(c => !apartado(c.paymentId as string))
+        if (entradas.length) await tx.rateCorrectionEntry.createMany({ data: entradas as never })
+        if (costosNuevos.length) await tx.transactionCost.createMany({ data: costosNuevos as never })
         for (const u of paymentUpdates) {
+          if (apartado(u.id)) continue
           await tx.payment.update({
             where: { id: u.id },
             data: { feeAmount: u.feeAmount, netAmount: u.netAmount, feePercentage: u.feePercentage },
           })
         }
         for (const u of vtUpdates) {
+          if (apartado(u.paymentId)) continue
           await tx.venueTransaction.update({
             where: { paymentId: u.paymentId },
             data: { feeAmount: u.feeAmount, netAmount: u.netAmount, netSettlementAmount: u.netSettlementAmount },
           })
         }
         for (const u of costUpdates) {
+          if (apartado(u.paymentId)) continue
           await tx.transactionCost.update({ where: { paymentId: u.paymentId }, data: u.data })
         }
       },
@@ -273,12 +298,22 @@ export async function applyRateCorrection(args: ApplyArgs, ctx: ApplyContext) {
       { timeout: 120_000, maxWait: 10_000 },
     )
 
-    // 10. Finalize the batch.
+    // 10. Finalize the batch. Lo apartado bajo el mutex (protocolo u original ocupado) no cuenta ni en pagos ni en costos
+    //     creados ni en impacto.
+    const apartadoTarde = new Set([...excluidosTarde, ...ocupados])
+    const excludedProtocolPaymentIds = [...excluidosPrevios, ...excluidosTarde]
+    const corregidos = payments.filter(p => !apartadoTarde.has(p.id))
+    if (apartadoTarde.size > 0) {
+      costCreatedCount = costCreates.filter(c => !apartadoTarde.has(c.paymentId as string)).length
+      estimatedImpact = entryRows
+        .filter(e => !apartadoTarde.has(e.paymentId as string))
+        .reduce((acc, e) => acc + (Number(e.afterFeeAmount) - Number(e.beforeFeeAmount)), 0)
+    }
     const applied = await prisma.rateCorrectionBatch.update({
       where: { id: batch.id },
       data: {
         status: 'APPLIED',
-        paymentCount: payments.length,
+        paymentCount: corregidos.length,
         costCreatedCount,
         estimatedImpact,
         appliedById: ctx.staffId,
@@ -299,19 +334,45 @@ export async function applyRateCorrection(args: ApplyArgs, ctx: ApplyContext) {
         // Json input types: snapshots are plain JSON built above.
         oldRates: oldRates as any,
         newRates: newRates as any,
-        paymentCount: payments.length,
+        paymentCount: corregidos.length,
         costCreatedCount,
         estimatedImpact,
+        // Codex R12-4: lo que la corrección NO tocó, y por qué.
+        excludedProtocolCount: excludedProtocolPaymentIds.length,
+        excludedProtocolPaymentIds,
+        excludedProtocolReason: MOTIVO_EXCLUSION_DEL_PROTOCOLO,
+        // Codex R15-2: lo apartado porque su original estaba tomado (no se esperó), y por qué.
+        excludedBusyCount: ocupados.length,
+        excludedBusyPaymentIds: ocupados,
+        excludedBusyReason: MOTIVO_EXCLUSION_ORIGINAL_OCUPADO,
       },
     })
 
-    // 12.
-    return applied
+    // 12. Aditivo: el lote tal cual, más lo excluido (explicado).
+    return {
+      ...applied,
+      excludedProtocolCount: excludedProtocolPaymentIds.length,
+      excludedProtocolPaymentIds,
+      excludedProtocolReason: MOTIVO_EXCLUSION_DEL_PROTOCOLO,
+      excludedBusyCount: ocupados.length,
+      excludedBusyPaymentIds: ocupados,
+      excludedBusyReason: MOTIVO_EXCLUSION_ORIGINAL_OCUPADO,
+    }
   } catch (err) {
     await prisma.rateCorrectionBatch.update({
       where: { id: batch.id },
       data: { status: 'FAILED', failureReason: err instanceof Error ? err.message : 'Unknown error' },
     })
+    // Codex R15-2: el 409 de candados inestables llega DESPUÉS del paso 5 (la estructura vigente ya se actualizó): «ningún cobro
+    // histórico se tocó» no es «no se escribió nada», y el mensaje lo dice.
+    if (err instanceof ConflictError && err.code === 'RATE_CORRECTION_LOCK_UNSTABLE') {
+      const liveRatesUpdated = !!(args.newVenueRates || args.newProviderRates)
+      throw new ConflictError(
+        `${err.message}${liveRatesUpdated ? ' La estructura de tarifas VIGENTE ya quedó actualizada (los cobros nuevos cobran con ella); ningún cobro histórico se tocó.' : ' Ningún cobro histórico se tocó.'}`,
+        err.code,
+        { ...(typeof err.details === 'object' && err.details ? err.details : {}), batchId: batch.id, liveRatesUpdated },
+      )
+    }
     throw err
   }
 }

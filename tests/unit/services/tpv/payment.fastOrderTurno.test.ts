@@ -118,13 +118,11 @@ function installFakes() {
   // «No hay cobro previo» sigue siendo la respuesta a cualquier consulta… salvo a la del outbox,
   // que relee SU pago fuente para comprobar que pertenece a la misma orden. Devolverle null ahí
   // dispara PAYMENT_EFFECT_SOURCE_MISMATCH y tumba la transacción del cobro entera.
-  prismaMock.payment.findFirst.mockImplementation(async (a: any) =>
-    esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : null,
-  )
+  prismaMock.payment.findFirst.mockImplementation(async (a: any) => (esConsultaDelOutbox(a) ? { orderId: a.where.orderId ?? null } : null))
   // El rescate de la comisión (bajo SAVEPOINT) relee el pago: se devuelve el que ESTE test
   // acaba de crear, no uno inventado, para que venue y orden coincidan solos.
-  prismaMock.payment.findUniqueOrThrow.mockImplementation(async (a: any) =>
-    payments.find((p: any) => p.id === a?.where?.id) ?? payments[payments.length - 1],
+  prismaMock.payment.findUniqueOrThrow.mockImplementation(
+    async (a: any) => payments.find((p: any) => p.id === a?.where?.id) ?? payments[payments.length - 1],
   )
   prismaMock.venueTransaction.create.mockResolvedValue({ id: 'vt-1' })
   prismaMock.paymentAllocation.create.mockResolvedValue({ id: 'alloc-1' })
@@ -397,7 +395,10 @@ describe('recordFastPayment — la orden FAST cae en el turno de caja del NEGOCI
     const result: any = await recordFastPayment(VENUE, cobroRapido({ idempotencyKey: 'same-key' }), 'user-1')
 
     expect(result.id).toBe('pay-winner')
-    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    // Codex R2 (P2-2): el retorno idempotente ENRIQUECE sobre la fila bloqueada (su propia transacción de lectura +
+    // `FOR UPDATE`, sin dinero). Lo que NO puede pasar es la transacción del cobro: ni crear Payment, ni reclamar turno,
+    // ni escribir bitácora.
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
     expect(tx.shiftUpdateMany).not.toHaveBeenCalled()
     expect(tx.activityCreate).not.toHaveBeenCalled()
   })

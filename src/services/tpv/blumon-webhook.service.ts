@@ -16,6 +16,7 @@
  * - Detect discrepancies for investigation
  */
 
+import { parcharProcessorData } from '../shared/parcheDeProcessorData'
 import prisma from '../../utils/prismaClient'
 import { Prisma, ProviderType, EventStatus } from '@prisma/client'
 import logger from '../../config/logger'
@@ -1061,22 +1062,21 @@ async function attemptPaymentMatch(
           authCode: payload.authorizationCode,
         })
 
-        // Update payment with Blumon operation data if not already received
-        const existingProcessorData = (payment.processorData as Record<string, unknown>) || {}
-        if (!existingProcessorData.blumonWebhookReceived) {
-          await prisma.payment.update({
-            where: { id: payment.id },
-            data: {
-              processorData: {
-                ...existingProcessorData,
-                blumonOperationNumber: payload.operationNumber,
-                blumonWebhookReceived: new Date().toISOString(),
-                blumonAuthCode: payload.authorizationCode,
-                blumonMembership: payload.membership,
-              },
-            },
-          })
-        }
+        // Update payment with Blumon operation data if not already received.
+        // Codex R12-10: parche ATÓMICO sobre el JSON vigente, sólo con las llaves de este escritor, y el «si no lo tenía
+        // ya» decidido en la misma sentencia — nunca un reemplazo desde la copia leída arriba (reponía un `costPending`
+        // viejo sobre una obligación ya convergida y pisaba enriquecimientos concurrentes).
+        await parcharProcessorData(
+          prisma,
+          payment.id,
+          {
+            blumonOperationNumber: payload.operationNumber,
+            blumonWebhookReceived: new Date().toISOString(),
+            blumonAuthCode: payload.authorizationCode,
+            blumonMembership: payload.membership,
+          },
+          { soloSiFalta: 'blumonWebhookReceived' },
+        )
 
         return {
           success: true,
@@ -1099,21 +1099,14 @@ async function attemptPaymentMatch(
           difference,
         })
 
-        // Create discrepancy alert (could trigger notification to admin)
-        const discrepancyProcessorData = (payment.processorData as Record<string, unknown>) || {}
-        await prisma.payment.update({
-          where: { id: payment.id },
-          data: {
-            processorData: {
-              ...discrepancyProcessorData,
-              blumonDiscrepancy: {
-                detectedAt: new Date().toISOString(),
-                blumonAmount,
-                recordedAmount,
-                difference,
-                operationNumber: payload.operationNumber,
-              },
-            },
+        // Create discrepancy alert (could trigger notification to admin). Codex R12-10: parche atómico (ver arriba).
+        await parcharProcessorData(prisma, payment.id, {
+          blumonDiscrepancy: {
+            detectedAt: new Date().toISOString(),
+            blumonAmount,
+            recordedAmount,
+            difference,
+            operationNumber: payload.operationNumber,
           },
         })
 

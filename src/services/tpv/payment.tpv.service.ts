@@ -1,14 +1,353 @@
 import { performance } from 'node:perf_hooks'
-import { Payment, PaymentMethod, SplitType, OrderSource, PaymentSource, Prisma } from '@prisma/client'
+import { Payment, PaymentMethod, SplitType, OrderSource, PaymentSource, Prisma, type DigitalReceipt } from '@prisma/client'
 import logger from '../../config/logger'
-import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError, ServiceUnavailableError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
 import { publishCommand } from '../../communication/rabbitmq/publisher'
 import { trackRecentPaymentCommand } from '../pos-sync/posSyncOrder.service'
 import { socketManager } from '../../communication/sockets/managers/socketManager'
 import { SocketEventType } from '../../communication/sockets/types'
-import { createTransactionCost } from '../payments/transactionCost.service'
+import { tarifaCongeladaDeLaAfiliacion, tarifaConCapturaFallida, type TarifaCongelada } from '../payments/transactionCost.service'
+import { elegirRegistroPorReferencia, huellaDelRegistro, type HuellaDelCobro } from './identidadDelCobro'
+import {
+  evidenciaDurableDelIngreso,
+  MOTIVO_EVIDENCIA_DE_OTRA_AFILIACION,
+  MOTIVO_SIN_CAPTURA_AL_INGRESO,
+  MOTIVO_EVIDENCIA_DE_INGRESO_NO_VISIBLE,
+  MOTIVO_EVIDENCIA_DE_INGRESO_SIN_ORDEN,
+} from './evidenciaDeIngreso'
+import { OPCIONES_DE_TRANSACCION_DEL_INTENTO, candadoDeIntento, llaveDeIntento } from './candadoDeIntento'
+
+/**
+ * Codex R3 (P1-3) + R4 (R4-3): el slot que ocupa HOY una afiliación en la configuración efectiva del venue (venue →
+ * organización) Y las TARIFAS vigentes de ese slot y de esa afiliación, congeladas juntas en el registro. Una etiqueta de
+ * slot no congela nada: si el negocio sustituye la afiliación del slot y le pone otra tarifa, «SECONDARY» apunta a la tarifa
+ * nueva. Lo que se guarda es la tarifa contratada AL COBRAR (`processorData.pricing`). Nunca lanza: un fallo aquí no puede
+ * interrumpir el cobro; sin slot ni tarifa, el costo queda pendiente y visible.
+ */
+/**
+ * Codex R5-6: «no reembolsos» SIN perder las filas legacy. `Payment.type` es NULLABLE (anteriores al default REGULAR): un
+ * `type: { not: 'REFUND' }` a secas es `type <> 'REFUND'` en SQL y NULL no lo cumple — esos Payments desaparecían de la
+ * búsqueda por referencia y su replay nacía como venta nueva (cobro doble).
+ */
+const SIN_REEMBOLSOS: Prisma.PaymentWhereInput = { OR: [{ type: null }, { type: { not: 'REFUND' } }] }
+
+/**
+ * Codex R5 (P2): la venta a la que puede ligarse el cliente de un retorno idempotente. Si lo que devuelve la llave es
+ * EVIDENCIA de conciliación (segunda captura o colisión de referencia, R4-6), su `orderId` es el de la venta del CANDIDATO
+ * — otra venta —: no hay venta propia, y ligar ahí al cliente sería atribuirlo a un cobro ajeno.
+ */
+const ordenPropia = (registro: { orderId: string | null; status?: unknown; processorData?: unknown }): string | null =>
+  esEvidenciaDeConciliacion(registro) ? null : registro.orderId
+
+/**
+ * Codex R12-1 / R13-1 / R14-1: UN solo selector de tarifa para TODOS los orígenes que crean el Payment, sin retorno anticipado
+ * por origen. La tarifa se congela sobre la PRIMERA evidencia bancaria aceptada del cargo (`evidenciaDurableDelIngreso`: el
+ * primer evento aprobado del intento, en orden durable, elegido en SQL antes de cualquier límite): la consume el registrador del
+ * webhook —también cuando el evento que lo disparó es POSTERIOR y trae otra captura (R14-1: E1 al 2.5 % cuyo registrador murió,
+ * edición al 8 %, E2 creaba con la suya)—, S4 y el REST de la terminal que llega con la misma llave. Sólo captura «ahora» quien
+ * es de verdad la primera evidencia: un REST sin evento aprobado previo del intento. Un evento pertinente SIN captura (anterior a
+ * la regla) conserva la incertidumbre (marcador TOTAL, pendiente hasta una acreditación explícita); un evento del intento recibido
+ * por OTRA afiliación tampoco acredita ésta ni autoriza capturar la de hoy; y un cobro nacido del webhook para el que no se ve
+ * NINGÚN aprobado (ni el suyo) conserva la incertidumbre — nunca captura «ahora». La captura persistida es la única que se
+ * consume: nunca una enviada por el cliente.
+ *
+ * Serialización (R14-1): se llama DENTRO de la transacción del dinero, con el candado del intento ya tomado y con SU cliente
+ * (`tx`): la lectura de la evidencia y la creación del Payment son una sola decisión frente al ingreso de un evento del mismo
+ * intento (que toma el mismo candado). La captura «ahora» abre su propia vista REPEATABLE READ (sólo lee configuración).
+ */
+async function tarifaDeLaAfiliacion(
+  db: Pick<Prisma.TransactionClient, '$queryRaw'>,
+  venueId: string,
+  merchantAccountId: string,
+  origen: { registradoVia?: string; idempotencyKey?: string } = {},
+): Promise<{ slot: 'PRIMARY' | 'SECONDARY' | 'TERTIARY' | null; pricing: TarifaCongelada | null }> {
+  const ahora = new Date()
+  try {
+    // Codex R13-1 / R14-1: TODO origen resuelve PRIMERO la primera evidencia durable del cargo (primer evento aprobado del
+    // intento, en este venue, recibido por esta afiliación), con el cliente de la transacción que tiene el candado del intento.
+    // Un fallo al consultarla NO autoriza capturar «ahora»: cae al `catch` como captura fallida (pendiente y visible).
+    const llave = llaveDeIntento(origen.idempotencyKey)
+    const evidencia = llave ? await evidenciaDurableDelIngreso(db, venueId, merchantAccountId, llave) : null
+    if (evidencia?.tipo === 'ORDEN_NO_ACREDITADO') {
+      // Codex R15-1: algún ingreso del intento entró SIN candado (55P03): el orden histórico de la evidencia no es demostrable
+      // —tampoco tras la recuperación—, así que ninguna captura acredita la tarifa ni se captura «ahora»: pendiente hasta acreditar.
+      logger.error(
+        '🚨 [Terminal-payment] Un ingreso del intento entró SIN candado: el orden histórico de la evidencia no está acreditado — el costo queda pendiente hasta una acreditación explícita, nunca la tarifa de hoy',
+        {
+          venueId,
+          merchantAccountId,
+          llave,
+          registradoVia: origen.registradoVia ?? 'terminal',
+        },
+      )
+      return { slot: null, pricing: tarifaConCapturaFallida(merchantAccountId, ahora, new Error(MOTIVO_EVIDENCIA_DE_INGRESO_SIN_ORDEN)) }
+    }
+    if (evidencia?.tipo === 'CON_CAPTURA') {
+      logger.info('🧾 [Terminal-payment] El Payment nace con la tarifa capturada al INGRESO de la PRIMERA evidencia durable del intento', {
+        venueId,
+        merchantAccountId,
+        eventLogId: evidencia.eventLogId,
+        registradoVia: origen.registradoVia ?? 'terminal',
+      })
+      return evidencia.captura
+    }
+    if (evidencia?.tipo === 'SIN_CAPTURA') {
+      logger.warn('⚠️ [Terminal-payment] REST antes de S4 sobre un evento durable SIN captura al ingreso: pendiente hasta acreditar', {
+        venueId,
+        merchantAccountId,
+        eventLogId: evidencia.eventLogId,
+      })
+      return { slot: null, pricing: tarifaConCapturaFallida(merchantAccountId, ahora, new Error(MOTIVO_SIN_CAPTURA_AL_INGRESO)) }
+    }
+    if (evidencia?.tipo === 'OTRA_AFILIACION') {
+      logger.error(
+        '🚨 [Terminal-payment] La evidencia durable del intento la recibió OTRA afiliación: la tarifa no se acredita ni se captura «ahora»',
+        {
+          venueId,
+          merchantAccountId,
+          eventLogId: evidencia.eventLogId,
+          receivedByMerchantAccountId: evidencia.receivedByMerchantAccountId,
+        },
+      )
+      return {
+        slot: null,
+        pricing: tarifaConCapturaFallida(merchantAccountId, ahora, new Error(MOTIVO_EVIDENCIA_DE_OTRA_AFILIACION)),
+      }
+    }
+    if (origen.registradoVia === 'webhook') {
+      // Codex R14-1: el registrador del webhook SIEMPRE tiene su propio evento aprobado persistido; si no se ve ninguno, algo
+      // no cuadra (llave distinta, clasificación) — se conserva la incertidumbre, nunca la tarifa de hoy.
+      logger.error('🚨 [Terminal-payment] Cobro nacido del webhook sin NINGÚN aprobado visible del intento: pendiente hasta acreditar', {
+        venueId,
+        merchantAccountId,
+        llave,
+      })
+      return { slot: null, pricing: tarifaConCapturaFallida(merchantAccountId, ahora, new Error(MOTIVO_EVIDENCIA_DE_INGRESO_NO_VISIBLE)) }
+    }
+    return await tarifaCongeladaDeLaAfiliacion(venueId, merchantAccountId, ahora)
+  } catch (error) {
+    // Codex R10-1: una captura fallida se guarda como tal (DURABLE) — `pricing: null` se leía como «sin snapshot» y abría el
+    // fallback a PRIMARY; el cobro se registra igual (nunca se interrumpe) y su costo queda pendiente con motivo visible.
+    logger.warn('⚠️ [Terminal-payment] No se pudo congelar la tarifa de la afiliación al cobrar', {
+      venueId,
+      merchantAccountId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return { slot: null, pricing: tarifaConCapturaFallida(merchantAccountId, ahora, error) }
+  }
+}
+
+/**
+ * Codex R2 (N2): la identidad acreditada por el vínculo S1 manda en los DOS caminos (REST y webhook), no sólo cuando llega
+ * primero el webhook. Con vínculo para la llave del entrante, un Payment SIN llave (legacy del mismo segundo) nunca es este
+ * intento. Sin vínculo se conserva el reintento de la transición APK viejo → nuevo. Se consulta sólo si hay candidatos.
+ */
+async function identidadAcreditadaPorVinculo(paymentData: { registradoVia?: string; idempotencyKey?: string }): Promise<boolean> {
+  if (paymentData.registradoVia === 'webhook') return true
+  if (!paymentData.idempotencyKey) return false
+  const vinculo = await prisma.terminalPaymentAttemptLink.findUnique({
+    where: { attemptId: paymentData.idempotencyKey },
+    select: { requestId: true },
+  })
+  return !!vinculo
+}
+
+/**
+ * Codex R3 (R3-1) + R4 (R4-1): la búsqueda por referencia lleva los DISCRIMINADORES en la consulta (venue, referencia,
+ * importe, propina, orden objetivo y afiliación) y recorre TODAS las páginas hasta resolver la identidad o agotar el
+ * conjunto: un subconjunto agotado nunca acredita ausencia.
+ *  · Dos PASADAS: primero los candidatos SIN llave (legacy ↔ legacy) y después los que tienen llave. Dentro de cada
+ *    pasada la paginación es KEYSET sobre columnas INMUTABLES (`createdAt desc, id desc`), nunca un cursor de Prisma sobre
+ *    un orden que incluya `idempotencyKey` — esa columna la ESCRIBE la propia consolidación (un candidato sin llave puede
+ *    ganar su llave entre dos páginas) y un cursor sobre ella saltaba candidatos (Codex R4-1: el 11º nunca se examinaba).
+ *  · `excluir`: candidatos que YA contradijeron bajo el candado en este mismo registro (Codex R4-6) — no se vuelven a
+ *    elegir, se sigue con el resto.
+ *  · Agotar el presupuesto de páginas devuelve `agotado: true`: el llamador NUNCA crea con eso (R4-1) — rechaza con un
+ *    error REINTENTABLE, para que la terminal vuelva a mandar el mismo cobro y no nazca un duplicado.
+ */
+export async function buscarRegistroPorReferencia(
+  venueId: string,
+  referenceNumber: string,
+  targetOrderId: string | null,
+  huella: HuellaDelCobro,
+  paymentData: { registradoVia?: string; idempotencyKey?: string },
+  excluir: readonly string[] = [],
+): Promise<{
+  registro: (Payment & { receipts: DigitalReceipt[] }) | null
+  descartes: { id: string; motivo: string; orderId: string | null }[]
+  candidatos: number
+  agotado: boolean
+  /** La regla de identidad con la que se eligió (vínculo S1 ⇒ un Payment sin llave nunca es este intento). */
+  exigeLlave: boolean
+}> {
+  const PAGINA = 10
+  const MAX_PAGINAS = 1000
+  const base: Prisma.PaymentWhereInput = {
+    venueId,
+    referenceNumber,
+    amount: new Prisma.Decimal(String(huella.amountPesos)),
+    tipAmount: new Prisma.Decimal(String(huella.tipPesos ?? 0)),
+    ...(targetOrderId ? { orderId: targetOrderId } : {}),
+    ...(excluir.length > 0 ? { id: { notIn: [...excluir] } } : {}),
+    // Codex R7-2 / R8-1: la AFILIACIÓN NO filtra en la consulta. La configuración de enrutamiento de hoy no puede excluir un
+    // cargo histórico, y un candidato de otra afiliación sólo demuestra ser OTRO cargo si las dos autorizaciones existen y
+    // difieren — un replay legacy sin merchant ni autorización (el contrato los admite) quedaba fuera de la OR y nacía como
+    // venta nueva. La única regla de identidad (conjunto {definitiva, la del APK} en los dos lados + autorización) vive en
+    // `esElMismoCobroPorReferencia`: los candidatos de otra afiliación LLEGAN ahí y salen como `AFILIACION` (otro cargo)
+    // o `AFILIACION_INCIERTA` (evidencia PENDING), nunca se esconden en SQL con un criterio paralelo.
+    AND: [
+      // Refunds share refNumber with originals — don't match against them (`SIN_REEMBOLSOS` conserva los `type` NULL legacy).
+      SIN_REEMBOLSOS,
+    ],
+  }
+  const descartes: { id: string; motivo: string; orderId: string | null }[] = []
+  let exigeLlave: boolean | null = null
+  let candidatos = 0
+  let paginas = 0
+  // Sin llave primero (legacy ↔ legacy): con un entrante CON llave los candidatos con otra llave se descartan igual
+  // (LLAVE), así que el orden de las pasadas sólo acorta el recorrido, nunca cambia la elección.
+  for (const pasada of [{ idempotencyKey: null }, { idempotencyKey: { not: null } }] as Prisma.PaymentWhereInput[]) {
+    let ultimo: { createdAt: Date; id: string } | null = null
+    for (;;) {
+      if (paginas >= MAX_PAGINAS) {
+        logger.error(
+          '🚨 [Terminal-payment] Demasiados candidatos por referencia sin resolver la identidad — NO se registra como cobro nuevo',
+          {
+            venueId,
+            referenceNumber,
+            candidatos,
+          },
+        )
+        return { registro: null, descartes, candidatos, agotado: true, exigeLlave: exigeLlave ?? false }
+      }
+      paginas++
+      const lote: (Payment & { receipts: DigitalReceipt[] })[] = await prisma.payment.findMany({
+        where: {
+          AND: [
+            base,
+            pasada,
+            ...(ultimo ? [{ OR: [{ createdAt: { lt: ultimo.createdAt } }, { createdAt: ultimo.createdAt, id: { lt: ultimo.id } }] }] : []),
+          ],
+        },
+        include: { receipts: true }, // Include receipt data for idempotent response
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: PAGINA,
+      })
+      candidatos += lote.length
+      if (lote.length > 0 && exigeLlave === null) exigeLlave = await identidadAcreditadaPorVinculo(paymentData)
+      const eleccion = elegirRegistroPorReferencia(lote.map(huellaDelRegistro), { ...huella, exigeLlave: exigeLlave ?? false })
+      descartes.push(...eleccion.descartes.map(d => ({ ...d, orderId: lote.find(p => p.id === d.id)?.orderId ?? null })))
+      if (eleccion.elegido)
+        return { registro: eleccion.elegido.registro, descartes, candidatos, agotado: false, exigeLlave: exigeLlave ?? false }
+      if (lote.length < PAGINA) break
+      const cola = lote[lote.length - 1]
+      ultimo = { createdAt: cola.createdAt, id: cola.id }
+    }
+  }
+  return { registro: null, descartes, candidatos, agotado: false, exigeLlave: exigeLlave ?? false }
+}
+
+/**
+ * Codex R4 (R4-1, R4-2, R4-6): la resolución por referencia no puede terminar en «se crea» sin haber DEMOSTRADO que ningún
+ * candidato es este cobro. Desenlaces:
+ *  · `EXISTENTE`   — un candidato quedó CONSOLIDADO bajo el candado (o la llave ya tiene dueño durable): ése es el cobro.
+ *  · `NUEVO`       — no hay candidatos (o todos se descartaron por identidad ANTES del candado): se registra un cobro nuevo.
+ *  · `COLISION`    — hubo candidatos con identidad suficiente que bajo el candado CONTRADICEN al entrante (dinero, orden,
+ *                    afiliación o un dato acreditado distinto) y no quedó ninguno: la referencia es una colisión con
+ *                    identidad débil. NO se crea un COMPLETED a ciegas: el llamador guarda EVIDENCIA PENDING.
+ *  · lanza 503     — la búsqueda se agotó, la consolidación fue INCIERTA o se acabó el presupuesto de intentos: el
+ *                    desenlace no se conoce y el único movimiento seguro es que la terminal REINTENTE el mismo cobro.
+ */
+type ResolucionPorReferencia =
+  | { kind: 'EXISTENTE'; registro: Payment & { receipts: DigitalReceipt[] } }
+  | { kind: 'NUEVO' }
+  | { kind: 'COLISION'; contradicciones: { paymentId: string; orderId: string; campos: string[] }[] }
+
+class RegistroNoResuelto extends ServiceUnavailableError {
+  constructor(motivo: string) {
+    super(
+      'No se pudo confirmar si este cobro ya estaba registrado. Vuelve a enviar el mismo cobro: no se cobró dos veces.',
+      `PAYMENT_REGISTRATION_UNRESOLVED_${motivo}`,
+    )
+  }
+}
+
+async function resolverPorReferencia(args: {
+  etiqueta: string
+  venueId: string
+  referenceNumber: string
+  targetOrderId: string | null
+  huella: HuellaDelCobro
+  paymentData: RegistroEntrante & { registradoVia?: string }
+}): Promise<ResolucionPorReferencia> {
+  const PRESUPUESTO = 5
+  const excluidos: string[] = []
+  const contradicciones: { paymentId: string; orderId: string; campos: string[] }[] = []
+  for (let intento = 0; intento < PRESUPUESTO; intento++) {
+    const busqueda = await buscarRegistroPorReferencia(
+      args.venueId,
+      args.referenceNumber,
+      args.targetOrderId,
+      args.huella,
+      args.paymentData,
+      excluidos,
+    )
+    if (busqueda.agotado) throw new RegistroNoResuelto('SEARCH_EXHAUSTED')
+    if (!busqueda.registro) {
+      // Codex R7-2: un candidato que coincide en TODO salvo la afiliación —y cuya autorización no demuestra que sea otro
+      // cargo— es una identidad INCIERTA (el enrutamiento pudo cambiar entre el registro y el replay): queda como evidencia
+      // de colisión, nunca como venta nueva.
+      for (const inciertos of busqueda.descartes.filter(d => d.motivo === 'AFILIACION_INCIERTA')) {
+        contradicciones.push({ paymentId: inciertos.id, orderId: inciertos.orderId ?? '', campos: ['merchantAccountId'] })
+      }
+      if (contradicciones.length > 0) return { kind: 'COLISION', contradicciones }
+      if (busqueda.candidatos > 0) {
+        logger.warn(
+          `🔁 [${args.etiqueta}] Misma referencia pero NO es el mismo cobro (colisión de referencia) — se registra como cobro nuevo`,
+          {
+            venueId: args.venueId,
+            orderId: args.targetOrderId,
+            referenceNumber: args.referenceNumber,
+            descartes: busqueda.descartes,
+          },
+        )
+      }
+      return { kind: 'NUEVO' }
+    }
+    // Codex R7-1: la consolidación NO recibe el `exigeLlave` de la búsqueda (se calculó fuera de toda transacción): lo
+    // vuelve a decidir ella misma bajo el candado del intento, releyendo S1.
+    const resultado = await consolidarRegistroRepetidoDetallado(busqueda.registro, args.paymentData, args.venueId, args.targetOrderId)
+    switch (resultado.estado) {
+      case 'CONSOLIDADO':
+      case 'DUENO':
+        return { kind: 'EXISTENTE', registro: resultado.registro }
+      case 'PERDIDO':
+        logger.warn(`🔁 [${args.etiqueta}] El candidato por referencia dejó de ser este cobro bajo el candado — se vuelve a resolver`, {
+          venueId: args.venueId,
+          existingPaymentId: busqueda.registro.id,
+          motivo: resultado.motivo,
+        })
+        continue
+      case 'CONTRADICE':
+        // Codex R4-6: con identidad DÉBIL, una contradicción bajo el candado no es «el mismo cobro»: ese candidato queda
+        // excluido y se sigue con el resto. Si no queda ninguno, es una COLISIÓN de referencia: evidencia, no venta.
+        excluidos.push(busqueda.registro.id)
+        contradicciones.push({
+          paymentId: busqueda.registro.id,
+          orderId: busqueda.registro.orderId,
+          campos: resultado.contradicciones.map(c => c.campo),
+        })
+        continue
+      case 'INCIERTO':
+        throw new RegistroNoResuelto('CONSOLIDATION_UNCERTAIN')
+    }
+  }
+  throw new RegistroNoResuelto('RETRY_BUDGET_EXHAUSTED')
+}
+import { consolidarRegistroRepetido, consolidarRegistroRepetidoDetallado, type RegistroEntrante } from './registroRepetido'
+import { candadoDeReferencia, esVencimientoDeCandado } from './candadoDeReferencia'
 import { deductInventoryForProduct, getProductInventoryStatus } from '../dashboard/productInventoryIntegration.service'
 import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service'
 import { parseDateRange } from '@/utils/datetime'
@@ -23,6 +362,8 @@ import {
 } from '../shared/paymentShiftClaim'
 import { countPriorCompletedPayments } from '../shared/priorCompletedPayments'
 import { enqueuePaymentEffect, enqueuePaymentCommissionInTx } from './paymentEffects.service'
+import { COSTO_PENDIENTE_PLAZO_MS, asegurarCostoSincrono } from '../payments/deferredTransactionCost.service'
+import { esEvidenciaDeConciliacion } from './segundaCaptura'
 import { runAutoReorderForVenue } from '../dashboard/autoReorder.service'
 import { serializedInventoryService } from '../serialized-inventory/serializedInventory.service'
 import { getEffectivePaymentConfig } from '../organization-payment-config.service'
@@ -37,7 +378,7 @@ import { resolveTenderForCharge, computeTenderCommission, type ResolvedTenderCha
 import { validateStaffVenue as validateStaffVenueShared } from '../../utils/staff-venue.util'
 import { isRetryableDbError } from '../../utils/serializableRetry'
 import { loadOrderForCfdiFromDb } from '../fiscal/cfdi.service'
-import { terminalPaymentService } from '../terminal-payment.service'
+import { terminalPaymentService, type ArbitrajeDeRegistro, CloseRowOutcome } from '../terminal-payment.service'
 // Sin ciclo: table.tpv.service NO importa este archivo (verificado 2026-08-03).
 import * as tableService from './table.tpv.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
@@ -75,6 +416,411 @@ class CobroDuplicadoEnEfectivo extends Error {
   constructor(readonly existingPaymentId: string) {
     super('cobro en efectivo duplicado')
     this.name = 'CobroDuplicadoEnEfectivo'
+  }
+}
+
+/** S0: bajo el candado de la solicitud resultó que el ganador YA es este mismo intento (misma llave): reintento idempotente. */
+/**
+ * S8: bitácora del webhook como confirmador SÓLO bajo la condición de alarma de `closeRowFromPaymentTx`
+ * (`alarmed` = `reopened || CANCEL_REQUESTED`): dinero que llegó por webhook a una solicitud que ya dábamos por cerrada o
+ * en cancelación — lo que un dueño audita. La confirmación normal es tráfico de cada cobro y NO se registra. Corre
+ * DESPUÉS del commit y sin `await` encadenado: si la bitácora truena, el cobro ya quedó.
+ */
+function registrarConfirmacionAnomalaPorWebhook(
+  cierre: CloseRowOutcome | null,
+  ctx: {
+    venueId: string
+    requestId: string | null
+    paymentId: string
+    attemptId: string | null
+    staffId: string | null
+    amountCents: number
+    tipCents: number
+  },
+): void {
+  if (!cierre?.bound || !cierre.alarmed || !ctx.requestId) return
+  void logAction({
+    action: 'TERMINAL_PAYMENT_CONFIRMED_BY_WEBHOOK',
+    entity: 'TerminalPaymentRequest',
+    entityId: ctx.requestId,
+    venueId: ctx.venueId,
+    staffId: ctx.staffId,
+    data: JSON.parse(
+      JSON.stringify({
+        requestId: ctx.requestId,
+        paymentId: ctx.paymentId,
+        attemptId: ctx.attemptId,
+        previousStatus: cierre.previousStatus,
+        reopened: cierre.reopened,
+        amountCents: ctx.amountCents,
+        tipCents: ctx.tipCents,
+        via: 'webhook',
+      }),
+    ),
+  })
+}
+
+class ReintentoDelGanadorDeLaSolicitud extends Error {
+  constructor(readonly winnerPaymentId: string) {
+    super('reintento del ganador de la solicitud')
+    this.name = 'ReintentoDelGanadorDeLaSolicitud'
+  }
+}
+
+/**
+ * Codex R12-7: bajo el candado de la referencia, la RELECTURA encontró el cargo que otro replay acababa de commitear. Aborta
+ * la transacción de creación (todavía sin escribir nada) y el llamador devuelve el existente por la misma rama que la
+ * resolución previa a la transacción.
+ */
+class RegistroYaExistentePorReferencia extends Error {
+  constructor(readonly registro: Payment & { receipts: DigitalReceipt[] }) {
+    super('el cargo ya estaba registrado (relectura bajo el candado de la referencia)')
+    this.name = 'RegistroYaExistentePorReferencia'
+  }
+}
+
+/**
+ * Codex R12-7: primera sentencia de la transacción de creación de un registro SIN llave — exclusión por (venue, referencia) y
+ * RELECTURA de la referencia ya con el candado (fotografía nueva: quien llega segundo ve lo que el primero commiteó). Devuelve
+ * la colisión vigente (o null) para que la creación la registre como evidencia; lanza `RegistroYaExistentePorReferencia` si el
+ * cargo ya existe, y un error REINTENTABLE si el candado no se pudo adquirir en el plazo (la terminal vuelve a mandar el
+ * mismo cobro; nunca nace un duplicado). Con llave no aplica: la protege el índice único `(venueId, idempotencyKey)`.
+ */
+async function exclusionPorReferencia(
+  tx: Prisma.TransactionClient,
+  args: Parameters<typeof resolverPorReferencia>[0],
+): Promise<ColisionDeReferenciaRegistrada['candidates'] | null> {
+  try {
+    await candadoDeReferencia(tx, args.venueId, args.referenceNumber)
+  } catch (error) {
+    if (esVencimientoDeCandado(error)) throw new RegistroNoResuelto('REFERENCE_LOCK_TIMEOUT')
+    throw error
+  }
+  const relectura = await resolverPorReferencia(args)
+  if (relectura.kind === 'EXISTENTE') throw new RegistroYaExistentePorReferencia(relectura.registro)
+  return relectura.kind === 'COLISION' ? relectura.contradicciones : null
+}
+
+type SegundaCapturaRegistrada = { requestId: string; winnerPaymentId: string; winnerIdempotencyKey: string | null }
+/** El snapshot de tarifa es dato plano; Prisma exige `InputJsonValue` (con índice de cadena) para el JSON. */
+const tarifaComoJson = (t: TarifaCongelada | null | undefined): Prisma.InputJsonValue | null =>
+  t ? (JSON.parse(JSON.stringify(t)) as Prisma.InputJsonValue) : null
+/** Codex R4-6: candidatos de la misma referencia que bajo el candado CONTRADIJERON al entrante (identidad débil). */
+type ColisionDeReferenciaRegistrada = { referenceNumber: string; candidates: { paymentId: string; orderId: string; campos: string[] }[] }
+
+const fuenteDelPago = (source?: string): PaymentSource => {
+  if (!source) return 'OTHER'
+  if (source === 'AVOQADO_TPV') return 'TPV'
+  return ['TPV', 'DASHBOARD_TEST', 'QR', 'WEB', 'APP', 'PHONE', 'POS', 'OTHER'].includes(source) ? (source as PaymentSource) : 'OTHER'
+}
+
+/**
+ * S0 · POSIBLE SEGUNDA CAPTURA (Codex, 13-sep-2026). La solicitud POS→terminal ya tiene ganador y llega OTRO intento
+ * acreditado. Desde aquí no se puede saber si el banco cobró dos veces o si es el mismo cobro con otra llave: se
+ * GUARDA como evidencia durable —ligada a la solicitud y a la venta VALIDADA del ganador— y se deja a conciliación.
+ *  · NUNCA COMPLETED: fuera de ventas, turno, liquidación, lealtad, costos, allocations y efectos.
+ *  · NUNCA una venta nueva: cuelga de la orden del ganador (`Payment.orderId` es obligatorio).
+ *  · La respuesta a la terminal es 2xx con ESTE Payment (nunca el del ganador): así el intento queda REGISTRADO en su
+ *    libreta y no vuelve a intentarlo; el índice único parcial del ganador no lo alcanza porque no es COMPLETED.
+ */
+async function crearEvidenciaDeSegundaCaptura(
+  tx: Prisma.TransactionClient,
+  args: {
+    venueId: string
+    orderId: string
+    arbitraje: Extract<ArbitrajeDeRegistro, { kind: 'SECOND_CAPTURE' }>
+    paymentData: PaymentCreationData
+    totalAmount: number
+    tipAmount: number
+    method: PaymentMethod
+    merchantAccountId: string | undefined
+    terminalId: string | null
+    staffId: string | null | undefined
+  },
+) {
+  const { paymentData, arbitraje } = args
+  return tx.payment.create({
+    data: {
+      venueId: args.venueId,
+      orderId: args.orderId,
+      amount: args.totalAmount,
+      tipAmount: args.tipAmount,
+      method: args.method,
+      status: 'PENDING',
+      splitType: paymentData.splitType as SplitType,
+      source: fuenteDelPago(paymentData.source),
+      processor: 'TBD',
+      terminalPaymentRequestId: arbitraje.row.requestId,
+      processorData: {
+        cardBrand: paymentData.cardBrand,
+        last4: paymentData.last4,
+        typeOfCard: paymentData.typeOfCard,
+        bank: paymentData.bank,
+        currency: paymentData.currency,
+        isInternational: paymentData.isInternational,
+        blumonSerialNumber: paymentData.blumonSerialNumber || null,
+        blumonOperationNumber: paymentData.blumonOperationNumber || null,
+        deviceSerialNumber: paymentData.authenticatedTerminalSerial ?? paymentData.deviceSerialNumber ?? null,
+        pricingSlot: paymentData.pricingSlot ?? null,
+        pricing: tarifaComoJson(paymentData.pricing),
+        // Codex R3 (P2): la evidencia nacida del webhook conserva su origen y la provisionalidad del método — el REST
+        // posterior con el método REAL enriquece sin contradicción. Sigue PENDING y sin costo.
+        ...(paymentData.registradoVia === 'webhook' ? { registradoVia: 'webhook', methodProvisional: true } : {}),
+        terminalPaymentRequestId: arbitraje.row.requestId,
+        reconciliation: {
+          kind: 'POSSIBLE_SECOND_CAPTURE',
+          requestId: arbitraje.row.requestId,
+          winnerPaymentId: arbitraje.winnerPaymentId,
+          winnerIdempotencyKey: arbitraje.winnerIdempotencyKey,
+          requested: { amountCents: arbitraje.row.amountCents, tipCents: arbitraje.row.tipCents },
+          detectedAt: new Date().toISOString(),
+          via: paymentData.registradoVia === 'webhook' ? 'webhook' : 'REST',
+        },
+      },
+      authorizationNumber: paymentData.authorizationNumber,
+      referenceNumber: paymentData.referenceNumber,
+      idempotencyKey: paymentData.idempotencyKey,
+      maskedPan: paymentData.maskedPan,
+      cardBrand: paymentData.cardBrand ? (paymentData.cardBrand.toUpperCase().replace(' ', '_') as any) : null,
+      entryMode: paymentData.entryMode ? (paymentData.entryMode.toUpperCase() as any) : null,
+      merchantAccountId: args.merchantAccountId,
+      terminalId: args.terminalId,
+      processedById: args.staffId ?? null,
+      shiftId: null,
+      feePercentage: 0,
+      feeAmount: 0,
+      netAmount: args.totalAmount + args.tipAmount,
+      posRawData: {
+        splitType: paymentData.splitType,
+        staffId: args.staffId ?? null,
+        source: fuenteDelPago(paymentData.source),
+        paidProductsId: paymentData.paidProductsId || [],
+        possibleSecondCapture: true,
+      },
+    },
+  })
+}
+
+/**
+ * S0 · Fail-open a propósito, igual que la lectura de la fila de arbitraje antes de la transacción: si el arbitraje
+ * no puede DECIDIR (la consulta truena), el cobro —que YA ocurrió en el banco— se registra como cobro normal, sin
+ * ligar ni clasificar, con 🚨 para conciliar. Un fallo de infraestructura jamás puede impedir registrar dinero
+ * cobrado; dentro de una transacción real de Postgres un fallo de conexión aborta todo de todos modos, así que
+ * esto sólo cambia el desenlace de un fallo LÓGICO en la decisión. Nunca «adivina» ganador: no ligar es lo seguro.
+ */
+async function arbitrarSinPerderElCobro(
+  tx: Prisma.TransactionClient,
+  input: Parameters<typeof terminalPaymentService.arbitrarRegistroDeSolicitud>[1],
+): Promise<ArbitrajeDeRegistro> {
+  try {
+    return await terminalPaymentService.arbitrarRegistroDeSolicitud(tx, input)
+  } catch (error) {
+    logger.error('🚨 [Terminal-payment] El arbitraje de la solicitud no pudo decidir — el cobro se registra sin ligar, para conciliar', {
+      venueId: input.venueId,
+      requestId: input.requestId,
+      attemptKey: input.attemptKey,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return { kind: 'INVALID_ASSOCIATION', reason: 'NO_TERMINAL_IDENTITY' }
+  }
+}
+
+/**
+ * S2 + Codex R4-4: la OBLIGACIÓN de costo se encola DENTRO de la transacción financiera (durable aunque el proceso muera)
+ * para TODO cobro COMPLETED que no sea efectivo — no sólo el nacido del webhook. Para el REST de la terminal el costo se
+ * calcula enseguida y cierra la obligación; si ese cálculo falla (tarifa no acreditable, configuración incompleta, fallo
+ * operativo) la obligación sigue PENDIENTE y visible en la cola, en vez de un `log.error` que nadie retoma.
+ */
+async function encolarObligacionDeCosto(
+  tx: Prisma.TransactionClient,
+  payment: { id: string; venueId: string; orderId: string; status: string; method: string },
+  via: 'webhook' | 'terminal',
+): Promise<void> {
+  if (payment.status !== 'COMPLETED' || payment.method === 'CASH') return
+  await enqueuePaymentEffect(tx, {
+    venueId: payment.venueId,
+    paymentId: payment.id,
+    orderId: payment.orderId,
+    kind: 'TRANSACTION_COST',
+    dedupeKey: `transaction-cost:${payment.id}:v1`,
+    payload:
+      via === 'webhook'
+        ? { reason: 'AWAITING_ACCREDITED_CARD_DATA', deadlineAt: new Date(Date.now() + COSTO_PENDIENTE_PLAZO_MS).toISOString() }
+        : { reason: 'ASSURE_COST', deadlineAt: new Date().toISOString() },
+    // El cálculo síncrono de ESTA petición cierra la obligación en cuanto termina; el worker sólo la toma si no lo hizo. Con el
+    // primer intento un minuto después no compiten los dos por crear el mismo costo (índice único de `paymentId`) en el segundo
+    // que dura el registro.
+    ...(via === 'terminal' ? { nextAttemptAt: new Date(Date.now() + 60_000) } : {}),
+  })
+}
+
+/**
+ * Codex R4-6 · COLISIÓN DE REFERENCIA con identidad débil. La misma referencia (mismo segundo), mismo importe, misma
+ * terminal y misma orden que un Payment ya registrado, pero bajo el candado ese Payment CONTRADICE al entrante en un dato
+ * acreditado (autorización, tarjeta, modo de entrada, afiliación…): no es el mismo cobro y tampoco se puede afirmar que
+ * sea una segunda venta. Se guarda como EVIDENCIA PENDING —ligada a la venta del candidato— y se deja a conciliación:
+ *  · NUNCA COMPLETED: fuera de ventas, turno, liquidación, lealtad, costos, allocations y efectos.
+ *  · NUNCA se absorbe devolviendo el existente (eso hacía desaparecer un cobro real).
+ *  · La respuesta a la terminal es 2xx con ESTE Payment: el intento queda REGISTRADO en su libreta y no se reintenta.
+ */
+async function crearEvidenciaDeColisionDeReferencia(
+  tx: Prisma.TransactionClient,
+  args: {
+    venueId: string
+    orderId: string
+    colision: ColisionDeReferenciaRegistrada
+    paymentData: PaymentCreationData
+    totalAmount: number
+    tipAmount: number
+    method: PaymentMethod
+    merchantAccountId: string | undefined
+    terminalId: string | null
+    staffId: string | null | undefined
+  },
+) {
+  const { paymentData, colision } = args
+  return tx.payment.create({
+    data: {
+      venueId: args.venueId,
+      orderId: args.orderId,
+      amount: args.totalAmount,
+      tipAmount: args.tipAmount,
+      method: args.method,
+      status: 'PENDING',
+      splitType: paymentData.splitType as SplitType,
+      source: fuenteDelPago(paymentData.source),
+      processor: 'TBD',
+      terminalPaymentRequestId: paymentData.terminalPaymentRequestId ?? null,
+      processorData: {
+        cardBrand: paymentData.cardBrand,
+        last4: paymentData.last4,
+        typeOfCard: paymentData.typeOfCard,
+        bank: paymentData.bank,
+        currency: paymentData.currency,
+        isInternational: paymentData.isInternational,
+        blumonSerialNumber: paymentData.blumonSerialNumber || null,
+        blumonOperationNumber: paymentData.blumonOperationNumber || null,
+        deviceSerialNumber: paymentData.authenticatedTerminalSerial ?? paymentData.deviceSerialNumber ?? null,
+        pricingSlot: paymentData.pricingSlot ?? null,
+        pricing: tarifaComoJson(paymentData.pricing),
+        ...(paymentData.registradoVia === 'webhook' ? { registradoVia: 'webhook', methodProvisional: true } : {}),
+        ...(paymentData.terminalPaymentRequestId ? { terminalPaymentRequestId: paymentData.terminalPaymentRequestId } : {}),
+        reconciliation: {
+          kind: 'POSSIBLE_REFERENCE_COLLISION',
+          referenceNumber: colision.referenceNumber,
+          candidates: colision.candidates,
+          detectedAt: new Date().toISOString(),
+          via: paymentData.registradoVia === 'webhook' ? 'webhook' : 'REST',
+        },
+      },
+      authorizationNumber: paymentData.authorizationNumber,
+      referenceNumber: paymentData.referenceNumber,
+      idempotencyKey: paymentData.idempotencyKey,
+      maskedPan: paymentData.maskedPan,
+      cardBrand: paymentData.cardBrand ? (paymentData.cardBrand.toUpperCase().replace(' ', '_') as any) : null,
+      entryMode: paymentData.entryMode ? (paymentData.entryMode.toUpperCase() as any) : null,
+      merchantAccountId: args.merchantAccountId,
+      terminalId: args.terminalId,
+      processedById: args.staffId ?? null,
+      shiftId: null,
+      feePercentage: 0,
+      feeAmount: 0,
+      netAmount: args.totalAmount + args.tipAmount,
+      posRawData: {
+        splitType: paymentData.splitType,
+        staffId: args.staffId ?? null,
+        source: fuenteDelPago(paymentData.source),
+        paidProductsId: paymentData.paidProductsId || [],
+        possibleReferenceCollision: true,
+      },
+    },
+  })
+}
+
+/** Respuesta específica de la colisión de referencia: 🚨, bitácora durable para el dueño, y recibo (la terminal lo exige). */
+async function responderColisionDeReferencia(
+  venueId: string,
+  payment: Awaited<ReturnType<typeof prisma.payment.create>>,
+  ctx: ColisionDeReferenciaRegistrada,
+) {
+  logger.error(
+    '🚨 [Terminal-payment] POSIBLE COLISIÓN DE REFERENCIA: misma referencia, importe y terminal que un Payment que CONTRADICE al entrante — guardado como evidencia PENDING, fuera de ventas, para conciliar',
+    {
+      venueId,
+      paymentId: payment.id,
+      referenceNumber: ctx.referenceNumber,
+      candidates: ctx.candidates,
+      amount: Number(payment.amount),
+      tip: Number(payment.tipAmount),
+      idempotencyKey: payment.idempotencyKey,
+      authorizationNumber: payment.authorizationNumber,
+    },
+  )
+  await logAction({
+    action: 'TERMINAL_PAYMENT_POSSIBLE_REFERENCE_COLLISION',
+    entity: 'Payment',
+    entityId: payment.id,
+    venueId,
+    staffId: payment.processedById ?? undefined,
+    data: {
+      referenceNumber: ctx.referenceNumber,
+      candidates: ctx.candidates,
+      amount: Number(payment.amount),
+      tip: Number(payment.tipAmount),
+      idempotencyKey: payment.idempotencyKey,
+      authorizationNumber: payment.authorizationNumber,
+      resolution:
+        'Confirma en el portal del procesador si hubo un segundo cargo con esta referencia. Si es un cobro real distinto, regístralo sobre su venta; si es el mismo cobro, descarta esta evidencia.',
+    },
+  })
+  return {
+    ...payment,
+    digitalReceipt: await ensureDigitalReceiptResponse(payment.id, undefined),
+    possibleReferenceCollision: { referenceNumber: ctx.referenceNumber, candidates: ctx.candidates.map(c => c.paymentId) },
+  }
+}
+
+/** Respuesta específica de la segunda captura: 🚨, bitácora durable para el dueño, y recibo (la terminal lo exige). */
+async function responderSegundaCaptura(
+  venueId: string,
+  payment: Awaited<ReturnType<typeof prisma.payment.create>>,
+  ctx: SegundaCapturaRegistrada,
+) {
+  logger.error(
+    '🚨 [Terminal-payment] POSIBLE SEGUNDA CAPTURA: la solicitud ya tenía ganador y llegó OTRO intento acreditado — guardado como evidencia PENDING, fuera de ventas, para conciliar',
+    {
+      venueId,
+      paymentId: payment.id,
+      ...ctx,
+      amount: Number(payment.amount),
+      tip: Number(payment.tipAmount),
+      idempotencyKey: payment.idempotencyKey,
+      referenceNumber: payment.referenceNumber,
+    },
+  )
+  await logAction({
+    action: 'TERMINAL_PAYMENT_POSSIBLE_SECOND_CAPTURE',
+    entity: 'Payment',
+    entityId: payment.id,
+    venueId,
+    staffId: payment.processedById ?? undefined,
+    data: {
+      requestId: ctx.requestId,
+      winnerPaymentId: ctx.winnerPaymentId,
+      winnerIdempotencyKey: ctx.winnerIdempotencyKey,
+      amount: Number(payment.amount),
+      tip: Number(payment.tipAmount),
+      idempotencyKey: payment.idempotencyKey,
+      referenceNumber: payment.referenceNumber,
+      authorizationNumber: payment.authorizationNumber,
+      resolution:
+        'Confirma en el portal del procesador si el cliente pagó dos veces. Si sí, devuelve esta captura; si no, descártala. La venta ya está cobrada por el ganador.',
+    },
+  })
+  return {
+    ...payment,
+    digitalReceipt: await ensureDigitalReceiptResponse(payment.id, undefined),
+    possibleSecondCapture: { requestId: ctx.requestId, winnerPaymentId: ctx.winnerPaymentId },
   }
 }
 
@@ -1715,6 +2461,16 @@ interface PaymentCreationData {
   // Links payment to the Terminal that processed it (for device-based reporting)
   // This is the Terminal.serialNumber (e.g., "AVQD-2841548417"), NOT blumonSerialNumber
   deviceSerialNumber?: string
+  /**
+   * S0 (P1-2, Codex): serial de la terminal AUTENTICADA (JWT). Lo pone SIEMPRE el controlador de la TPV; el body no
+   * puede decidirlo. Es el que arbitra a qué solicitud POS→terminal pertenece este registro.
+   */
+  authenticatedTerminalSerial?: string | null
+  /**
+   * S2: quién registra. 'webhook' = el Payment nace del webhook de AngelPay por el vínculo S1: método PROVISIONAL
+   * (el REST lo cierra, S3) y costo PENDIENTE durable (efecto TRANSACTION_COST). Sólo lo pone el servidor.
+   */
+  registradoVia?: 'terminal' | 'webhook'
 
   // 🛡️ Idempotency key (2026-04-08) - Stripe/Square/Toast pattern
   // Client-generated UUID v4 sent ONCE per logical payment attempt and reused
@@ -1728,6 +2484,14 @@ interface PaymentCreationData {
   // Payment's creation closes the TerminalPaymentRequest row + frees the
   // terminal slot atomically. Optional/additive; old TPVs omit it.
   terminalPaymentRequestId?: string
+  /**
+   * Codex R3 (P1-3): el slot (PRIMARY/SECONDARY/TERTIARY) que la afiliación acreditada ocupa HOY en la configuración del
+   * venue, CONGELADO al cobrar. Si mañana retiran esa afiliación de la configuración, el costo se calcula con la tarifa
+   * contratada entonces, no con la de otra afiliación. Lo resuelve el registrador; el cuerpo no lo decide.
+   */
+  pricingSlot?: 'PRIMARY' | 'SECONDARY' | 'TERTIARY' | null
+  /** Codex R4-3: las tarifas (proveedor y negocio) vigentes al cobrar para la afiliación acreditada — congeladas en `processorData.pricing`. */
+  pricing?: TarifaCongelada | null
 }
 
 /**
@@ -1787,6 +2551,19 @@ function logPaymentInternationalityShadow(
  */
 async function resolveBlumonSerialToMerchantId(venueId: string, blumonSerialNumber: string): Promise<string | undefined> {
   try {
+    return await buscarAfiliacionPorSerial(venueId, blumonSerialNumber)
+  } catch (error) {
+    logger.error(`Error resolving blumonSerialNumber ${blumonSerialNumber}:`, error)
+    return undefined
+  }
+}
+
+/**
+ * Codex R6-1: la búsqueda por serial que PROPAGA los errores. Un fallo de la base no es «no hay afiliación»: leído así, el
+ * registrador deduplicaba y registraba con otra identidad y un replay podía nacer como segunda venta.
+ */
+async function buscarAfiliacionPorSerial(venueId: string, blumonSerialNumber: string): Promise<string | undefined> {
+  {
     // 1. Check venue-level configs
     const merchant = await prisma.merchantAccount.findFirst({
       where: {
@@ -1830,9 +2607,113 @@ async function resolveBlumonSerialToMerchantId(venueId: string, blumonSerialNumb
 
     logger.warn(`Could not resolve blumonSerialNumber ${blumonSerialNumber} for venue ${venueId}`)
     return undefined
+  }
+}
+
+/** Codex R6-1: la afiliación con la que se deduplica, se consolida y se registra — UNA sola, resuelta ANTES de todo. */
+type AfiliacionDelCobro = {
+  /** La afiliación DEFINITIVA (undefined = sin afiliación resoluble: TIER-3, o cobro sin afiliación). */
+  merchantAccountId: string | undefined
+  /** Lo que mandó el APK, conservado como evidencia cuando difiere de la definitiva. */
+  merchantAccountIdDelApk: string | undefined
+  via: 'DIRECTA' | 'POR_SERIAL' | 'RECUPERADA_POR_SERIAL' | 'INACTIVA_ACREDITADA_POR_WEBHOOK' | 'SIN_RESOLVER' | 'SIN_AFILIACION'
+}
+
+/**
+ * Codex R6-1: la identidad de afiliación se resuelve UNA vez y ANTES de la deduplicación por referencia — no después.
+ * Antes, la búsqueda del duplicado filtraba con el `merchantAccountId` que mandó el APK mientras el registro se guardaba con
+ * el recuperado por serial (TIER-2): el replay legacy (misma referencia, sin llave) no encontraba su propio Payment y nacía
+ * una SEGUNDA venta por la misma autorización. Prioridad: (1) el id del APK si existe y está activo; (2) el serial del
+ * procesador (`blumonSerialNumber`), fuente de verdad, para un id inexistente o inactivo; (3) sin resolver ⇒ sin afiliación,
+ * con contexto para conciliar. Una afiliación inactiva la conserva SÓLO el webhook firmado del propio merchant (Codex R1 P1-3).
+ * Un fallo de la base al resolver NO es ausencia: es incierto ⇒ 503 reintentable (la terminal reenvía el mismo cobro).
+ */
+async function resolverAfiliacionDelCobro(
+  etiqueta: string,
+  venueId: string,
+  orderId: string | null,
+  paymentData: {
+    merchantAccountId?: string
+    blumonSerialNumber?: string
+    registradoVia?: string
+    authorizationNumber?: string
+    referenceNumber?: string
+  },
+): Promise<AfiliacionDelCobro> {
+  const delApk = paymentData.merchantAccountId || undefined
+  const serial = paymentData.blumonSerialNumber || undefined
+  const contexto = { venueId, orderId, providedMerchantId: delApk, blumonSerialNumber: serial }
+  try {
+    let merchantAccountId = delApk
+    let via: AfiliacionDelCobro['via'] = delApk ? 'DIRECTA' : 'SIN_AFILIACION'
+    if (!merchantAccountId && serial) {
+      logger.info(`🔄 [${etiqueta}] Resolving legacy blumonSerialNumber: ${serial}`)
+      merchantAccountId = await buscarAfiliacionPorSerial(venueId, serial)
+      via = merchantAccountId ? 'POR_SERIAL' : 'SIN_RESOLVER'
+    }
+    if (merchantAccountId) {
+      const merchantExists = await prisma.merchantAccount.findUnique({
+        where: { id: merchantAccountId },
+        select: { id: true, active: true },
+      })
+      if (!merchantExists) {
+        logger.error(`❌ [${etiqueta}] MerchantAccount not found: ${merchantAccountId}`, {
+          ...contexto,
+          hint: 'Android may have stale config. Attempting TIER 2 recovery from blumonSerialNumber.',
+        })
+        const recuperada = serial ? await buscarAfiliacionPorSerial(venueId, serial) : undefined
+        if (recuperada) {
+          logger.info(`✅ [${etiqueta}] TIER 2 Recovery SUCCESS: Inferred merchant from blumonSerialNumber`, {
+            ...contexto,
+            recoveredMerchantId: recuperada,
+          })
+          merchantAccountId = recuperada
+          via = 'RECUPERADA_POR_SERIAL'
+        } else {
+          logger.error(`❌ [${etiqueta}] TIER 3: Cannot resolve merchant - reconciliation required`, {
+            ...contexto,
+            authorizationNumber: paymentData.authorizationNumber,
+            referenceNumber: paymentData.referenceNumber,
+          })
+          merchantAccountId = undefined
+          via = 'SIN_RESOLVER'
+        }
+      } else if (!merchantExists.active && paymentData.registradoVia === 'webhook') {
+        // Codex R1 (P1-3): la afiliación la acredita el webhook FIRMADO del propio merchant (así lo resolvió el secreto).
+        // Desactivarla después no cambia por dónde pasó el dinero: se conserva para que costo y liquidación la respeten.
+        logger.warn(
+          `⚠️ [${etiqueta}] MerchantAccount ${merchantAccountId} está inactivo pero lo acredita el webhook — se conserva la afiliación`,
+          contexto,
+        )
+        via = 'INACTIVA_ACREDITADA_POR_WEBHOOK'
+      } else if (!merchantExists.active) {
+        logger.warn(`⚠️ [${etiqueta}] MerchantAccount ${merchantAccountId} is inactive`, contexto)
+        const recuperada = serial ? await buscarAfiliacionPorSerial(venueId, serial) : undefined
+        if (recuperada && recuperada !== merchantAccountId) {
+          logger.info(`✅ [${etiqueta}] TIER 2 Recovery: Found active merchant with same serial`, {
+            ...contexto,
+            recoveredMerchantId: recuperada,
+          })
+          merchantAccountId = recuperada
+          via = 'RECUPERADA_POR_SERIAL'
+        } else {
+          merchantAccountId = undefined
+          via = 'SIN_RESOLVER'
+        }
+      }
+    }
+    if (merchantAccountId) logger.info(`✅ [${etiqueta}] Payment will be attributed to merchantAccountId: ${merchantAccountId}`)
+    else logger.warn(`⚠️ [${etiqueta}] No merchantAccountId - payment will have null merchant (legacy mode)`)
+    return { merchantAccountId, merchantAccountIdDelApk: delApk, via }
   } catch (error) {
-    logger.error(`Error resolving blumonSerialNumber ${blumonSerialNumber}:`, error)
-    return undefined
+    logger.error(
+      `🚨 [${etiqueta}] No se pudo resolver la afiliación del cobro — se rechaza con reintento, nunca se registra con otra identidad`,
+      {
+        ...contexto,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    )
+    throw new RegistroNoResuelto('AFFILIATION_RESOLUTION_UNCERTAIN')
   }
 }
 
@@ -2020,6 +2901,13 @@ export async function recordOrderPayment(
     throw new BadRequestError('Esta ruta de cobro no acepta tipos de pago del catálogo. Usa el punto de venta.')
   }
 
+  // Codex R6-1: la afiliación DEFINITIVA se resuelve ANTES de deduplicar (por llave o por referencia) y es la que viaja en
+  // `paymentData` desde aquí: filtro de candidatos, consolidación y registro usan la MISMA identidad.
+  const afiliacion = await resolverAfiliacionDelCobro('OrderPayment', venueId, orderId, paymentData)
+  paymentData.merchantAccountId = afiliacion.merchantAccountId
+  // Codex R7-2: la identidad de afiliación que mandó el APK viaja con el entrante (consolidación y huella la contrastan como conjunto).
+  ;(paymentData as RegistroEntrante).merchantAccountIdDelApk = afiliacion.merchantAccountIdDelApk ?? null
+
   // 🛡️ IDEMPOTENCY CHECK - Layered defense (Stripe/Square/Toast pattern)
   // See recordFastPayment for full explanation. Both checks run in sequence to
   // handle the legacy→new TPV transition correctly.
@@ -2046,53 +2934,75 @@ export async function recordOrderPayment(
           ? await resumeCapturedAreaTicketPayment(venueId, orderId, existingByKey, paymentData.idempotencyKey)
           : null
       return {
-        ...existingByKey,
+        ...((await consolidarRegistroRepetido(existingByKey, paymentData as RegistroEntrante, venueId, orderId)) ?? existingByKey),
         ...(areaTicketCheckoutState ? { areaTicketCheckoutState } : {}),
         digitalReceipt: await ensureDigitalReceiptResponse(existingByKey.id, existingByKey.receipts[0]),
       }
     }
   }
 
-  if (paymentData.referenceNumber) {
-    // Always-on referenceNumber check (catches legacy retries and legacy→new transition races)
-    const existingPayment = await prisma.payment.findFirst({
-      where: {
-        venueId,
-        referenceNumber: paymentData.referenceNumber,
-        type: { not: 'REFUND' }, // Refunds share refNumber with originals — don't match against them
-      },
-      include: {
-        receipts: true, // Include receipt data for idempotent response
-      },
+  let colisionDeReferencia: ColisionDeReferenciaRegistrada['candidates'] | null = null
+  /** Codex R4 (P2): la respuesta se arma con el Payment RESUELTO (consolidado o dueño durable), nunca con el candidato con el que se entró. */
+  const devolverExistentePorReferencia = async (existingPayment: Payment & { receipts: DigitalReceipt[] }) => {
+    logger.warn('🔄 Duplicate order payment attempt detected (referenceNumber check)', {
+      venueId,
+      orderId,
+      referenceNumber: paymentData.referenceNumber,
+      existingPaymentId: existingPayment.id,
+      incomingIdempotencyKey: paymentData.idempotencyKey || null,
+      existingIdempotencyKey: existingPayment.idempotencyKey || null,
+      message: 'Returning existing payment (safe retry / legacy→new TPV transition)',
     })
 
-    if (existingPayment) {
-      logger.warn('🔄 Duplicate order payment attempt detected (referenceNumber check)', {
-        venueId,
-        orderId,
-        referenceNumber: paymentData.referenceNumber,
-        existingPaymentId: existingPayment.id,
-        incomingIdempotencyKey: paymentData.idempotencyKey || null,
-        existingIdempotencyKey: existingPayment.idempotencyKey || null,
-        message: 'Returning existing payment (safe retry / legacy→new TPV transition)',
-      })
-
-      // Return existing payment with receipt (safe retry - client gets same response)
-      const areaTicketCheckoutState =
-        existingPayment.status === 'COMPLETED'
-          ? await resumeCapturedAreaTicketPayment(
-              venueId,
-              orderId,
-              existingPayment,
-              paymentData.idempotencyKey ?? existingPayment.idempotencyKey,
-            )
-          : null
-      return {
-        ...existingPayment,
-        ...(areaTicketCheckoutState ? { areaTicketCheckoutState } : {}),
-        digitalReceipt: await ensureDigitalReceiptResponse(existingPayment.id, existingPayment.receipts[0]),
-      }
+    // Return existing payment with receipt (safe retry - client gets same response)
+    const areaTicketCheckoutState =
+      existingPayment.status === 'COMPLETED'
+        ? await resumeCapturedAreaTicketPayment(
+            venueId,
+            orderId,
+            existingPayment,
+            paymentData.idempotencyKey ?? existingPayment.idempotencyKey,
+          )
+        : null
+    return {
+      ...existingPayment,
+      ...(areaTicketCheckoutState ? { areaTicketCheckoutState } : {}),
+      digitalReceipt: await ensureDigitalReceiptResponse(existingPayment.id, existingPayment.receipts[0]),
     }
+  }
+  /** Los argumentos de la resolución por referencia: los MISMOS antes de la transacción y en la relectura bajo el candado (R12-7). */
+  let argumentosDeReferencia: Parameters<typeof resolverPorReferencia>[0] | null = null
+  if (paymentData.referenceNumber) {
+    // Always-on referenceNumber check (catches legacy retries and legacy→new transition races)
+    // S0-a (checkpoint 1 del webhook): la referencia sola no identifica un cobro — Blumon y AngelPay usan
+    // `yyMMddHHmmss` y dos terminales del mismo negocio colisionan en el mismo segundo. Un reintento legítimo coincide
+    // en importe, propina, orden y afiliación; una colisión difiere en alguna y se registra como cobro NUEVO.
+    // Codex R2 (P1-1): se examinan TODOS los candidatos de la referencia (acotados) y se elige el que tiene identidad
+    // suficiente; descartar al primero nunca es permiso para crear.
+    const huellaEntrante: HuellaDelCobro = {
+      orderId,
+      amountPesos: paymentData.amount / 100,
+      tipPesos: (paymentData.tip ?? 0) / 100,
+      merchantAccountId: afiliacion.merchantAccountId ?? null,
+      merchantAccountIdDelApk: afiliacion.merchantAccountIdDelApk ?? null,
+      authorizationNumber: paymentData.authorizationNumber ?? null,
+      idempotencyKey: paymentData.idempotencyKey ?? null,
+      terminalSerial: paymentData.authenticatedTerminalSerial ?? paymentData.deviceSerialNumber ?? null,
+      terminalPaymentRequestId: paymentData.terminalPaymentRequestId ?? null,
+    }
+    argumentosDeReferencia = {
+      etiqueta: 'recordOrderPayment',
+      venueId,
+      referenceNumber: paymentData.referenceNumber,
+      targetOrderId: orderId,
+      huella: huellaEntrante,
+      paymentData: paymentData as RegistroEntrante,
+    }
+    // Codex R4 (R4-1/R4-2/R4-6): la resolución demuestra o no demuestra — nunca crea con la búsqueda agotada ni sobre una
+    // consolidación incierta, y una colisión con identidad débil queda como EVIDENCIA (más abajo, en la transacción).
+    const resolucion = await resolverPorReferencia(argumentosDeReferencia)
+    if (resolucion.kind === 'EXISTENTE') return devolverExistentePorReferencia(resolucion.registro)
+    if (resolucion.kind === 'COLISION') colisionDeReferencia = resolucion.contradicciones
   }
 
   // Find the order directly by ID. Only scalar item fields are used from here on
@@ -2175,96 +3085,14 @@ export async function recordOrderPayment(
   // ✅ CORRECTED: Use validateStaffVenue helper for proper staffId validation
   const validatedStaffId = await validateStaffVenue(paymentData.staffId, venueId, userId)
 
-  // ⭐ PROVIDER-AGNOSTIC MERCHANT TRACKING: Resolve merchantAccountId
-  // Priority 1: Use merchantAccountId if provided by modern Android client
-  // Priority 2: Resolve blumonSerialNumber → merchantAccountId for backward compatibility
-  // Priority 3: Leave undefined (legacy payments before this feature)
-  let merchantAccountId = paymentData.merchantAccountId
+  // Codex R6-1: la afiliación ya está resuelta (arriba, antes de deduplicar); aquí sólo se lee.
+  const merchantAccountId = afiliacion.merchantAccountId
 
-  if (!merchantAccountId && paymentData.blumonSerialNumber) {
-    logger.info(`🔄 Resolving legacy blumonSerialNumber: ${paymentData.blumonSerialNumber}`)
-    merchantAccountId = await resolveBlumonSerialToMerchantId(venueId, paymentData.blumonSerialNumber)
-  }
-
-  if (merchantAccountId) {
-    logger.info(`✅ Payment will be attributed to merchantAccountId: ${merchantAccountId}`)
-  } else {
-    logger.warn(`⚠️ No merchantAccountId - payment will have null merchant (legacy mode)`)
-  }
-
-  // ⭐ 3-TIER MERCHANT RESOLUTION (Stripe-inspired pattern)
-  // TIER 1: Direct Attribution - Use provided merchantAccountId if valid + active
-  // TIER 2: Inference Recovery - Infer from blumonSerialNumber (SOURCE OF TRUTH from processor)
-  // TIER 3: Reconciliation Flag - Null with full context for manual resolution
-  if (merchantAccountId) {
-    const merchantExists = await prisma.merchantAccount.findUnique({
-      where: { id: merchantAccountId },
-      select: { id: true, active: true },
-    })
-
-    if (!merchantExists) {
-      logger.error(`❌ MerchantAccount not found: ${merchantAccountId}`, {
-        venueId,
-        orderId,
-        paymentMethod: classicMethod,
-        providedId: merchantAccountId,
-        blumonSerialNumber: paymentData.blumonSerialNumber,
-        hint: 'Android may have stale config. Attempting TIER 2 recovery from blumonSerialNumber.',
-      })
-
-      // TIER 2: Attempt recovery from blumonSerialNumber (the actual serial Blumon used)
-      if (paymentData.blumonSerialNumber) {
-        const recoveredMerchantId = await resolveBlumonSerialToMerchantId(venueId, paymentData.blumonSerialNumber)
-        if (recoveredMerchantId) {
-          logger.info(`✅ TIER 2 Recovery SUCCESS: Inferred merchant from blumonSerialNumber`, {
-            providedMerchantId: merchantAccountId,
-            blumonSerialNumber: paymentData.blumonSerialNumber,
-            recoveredMerchantId,
-          })
-          merchantAccountId = recoveredMerchantId
-        } else {
-          // TIER 3: Cannot resolve - flag for reconciliation
-          logger.error(`❌ TIER 3: Cannot resolve merchant - reconciliation required`, {
-            providedMerchantId: merchantAccountId,
-            blumonSerialNumber: paymentData.blumonSerialNumber,
-            authorizationNumber: paymentData.authorizationNumber,
-            referenceNumber: paymentData.referenceNumber,
-            venueId,
-            orderId,
-          })
-          merchantAccountId = undefined
-        }
-      } else {
-        // No blumonSerialNumber for recovery - fall back to null
-        logger.warn(`⚠️ No blumonSerialNumber for TIER 2 recovery - falling back to null`)
-        merchantAccountId = undefined
-      }
-    } else if (!merchantExists.active) {
-      logger.warn(`⚠️ MerchantAccount ${merchantAccountId} is inactive`, {
-        venueId,
-        orderId,
-        paymentMethod: classicMethod,
-        blumonSerialNumber: paymentData.blumonSerialNumber,
-      })
-
-      // TIER 2: Attempt recovery for inactive merchant (find another active one with same serial)
-      if (paymentData.blumonSerialNumber) {
-        const recoveredMerchantId = await resolveBlumonSerialToMerchantId(venueId, paymentData.blumonSerialNumber)
-        if (recoveredMerchantId && recoveredMerchantId !== merchantAccountId) {
-          logger.info(`✅ TIER 2 Recovery: Found active merchant with same serial`, {
-            inactiveMerchantId: merchantAccountId,
-            blumonSerialNumber: paymentData.blumonSerialNumber,
-            recoveredMerchantId,
-          })
-          merchantAccountId = recoveredMerchantId
-        } else {
-          merchantAccountId = undefined
-        }
-      } else {
-        merchantAccountId = undefined
-      }
-    }
-  }
+  // Codex R3 (P1-3) / R5-2: la TARIFA se congela al cobrar — sobre la afiliación DEFINITIVA, la que queda tras TIER-2/3 —,
+  // nunca sobre la que mandó el APK. Congelarla antes de la recuperación dejaba el snapshot (slot y tasas) de M1 en un
+  // Payment atribuido a M2; sin snapshot de M2, el costo diferido caía al slot de M1 en cuanto M2 saliera de la configuración.
+  // Codex R14-1: la tarifa se congela DENTRO de la transacción del dinero, con el candado del intento tomado (ver abajo).
+  const llaveDelIntento = llaveDeIntento(paymentData.idempotencyKey)
 
   // ⭐ TERMINAL ATTRIBUTION: Resolve terminalId from device serial number
   // Links payment to the Terminal that processed it (for device-based reporting)
@@ -2296,13 +3124,105 @@ export async function recordOrderPayment(
   // Faltante de inventario detectado con el cobro YA registrado. Viaja como aviso
   // en la respuesta — nunca como error, o el cajero vuelve a pasar la tarjeta.
   let inventoryWarning: OrderInventoryWarning | null = null
+  // S0: se llena DENTRO de la transacción (por eso un holder y no un `let`: TS no ve asignaciones en closures).
+  const s0 = {
+    segundaCaptura: null as SegundaCapturaRegistrada | null,
+    colision: null as ColisionDeReferenciaRegistrada | null,
+    cierre: null as CloseRowOutcome | null,
+  }
   const shiftAmount = new Prisma.Decimal(totalAmount)
   const shiftTip = new Prisma.Decimal(tipAmount)
   try {
     payment = await timing.time('financial_commit', () =>
       prisma.$transaction(async tx => {
+        // Codex R14-1: PRIMERA sentencia — el candado del intento (el mismo del ingreso del webhook, de S1 y de la consolidación):
+        // la lectura de la primera evidencia y la creación del Payment quedan serializadas con la llegada de cualquier evento del
+        // intento. Orden de candados: intento → referencia → sesión de vales → tickets → Order → TerminalPaymentRequest → Payment → Shift.
+        if (llaveDelIntento) await candadoDeIntento(tx, llaveDelIntento)
+        // Codex R12-7: un registro SIN llave se serializa por (venue, referencia) como PRIMERA sentencia y vuelve a resolver
+        // ya con el candado — la resolución de arriba corrió fuera de esta transacción y dos replays simultáneos veían
+        // «ausencia» los dos. Con llave no aplica (índice único del intento).
+        if (!paymentData.idempotencyKey && argumentosDeReferencia) {
+          colisionDeReferencia = await exclusionPorReferencia(tx, argumentosDeReferencia)
+        }
+        // Codex R3 (P1-3) / R5-2 / R14-1: la TARIFA se congela aquí, bajo el candado, sobre la afiliación DEFINITIVA y sobre la
+        // PRIMERA evidencia durable del intento (o «ahora» si el REST es esa primera evidencia).
+        const tarifa = merchantAccountId
+          ? await tarifaDeLaAfiliacion(tx, venueId, merchantAccountId, paymentData)
+          : { slot: null, pricing: null }
+        paymentData.pricingSlot = tarifa.slot
+        paymentData.pricing = tarifa.pricing
+        const areaTicketPayment = await import('../mobile/areaTicketV7.mobile.service')
+        // P1-3 (Codex, S0): PRIMERO los candados (sesión de vales → tickets → Order), DESPUÉS el arbitraje, y sólo el
+        // ganador prepara el intento de vales — `lockAreaTicketCheckoutForPayment` rechaza una sesión ya pagada, y eso
+        // dejaba al segundo intento acreditado fuera, sin evidencia.
         if (paymentStatusSnapshot === 'COMPLETED') {
-          const areaTicketPayment = await import('../mobile/areaTicketV7.mobile.service')
+          await areaTicketPayment.lockAreaTicketCheckoutHierarchy(tx, { venueId, orderId: activeOrder.id })
+        }
+        // El submódulo de vales conserva session → tickets → Order. Si no hay
+        // vales, este helper toma Order aquí; si los hay, el lock es reentrante.
+        // Desde este punto todos los carriles siguen Order → TerminalPaymentRequest → Payment → Shift.
+        const orderStillBelongsToVenue = await lockExistingOrderForPayment(tx, { venueId, orderId: activeOrder.id })
+        if (!orderStillBelongsToVenue) {
+          throw new ConflictError(
+            'La orden cambió mientras se registraba el cobro. Se requiere conciliación manual.',
+            'PAYMENT_ORDER_AUTHORITY_UNAVAILABLE',
+          )
+        }
+
+        // S0 (Codex, 13-sep): UN ganador por solicitud POS→terminal, decidido AQUÍ — bajo el candado de la fila, antes
+        // de reclamar turno y antes de crear cualquier Payment. Ver `arbitrarRegistroDeSolicitud`.
+        let ligarSolicitud = false
+        if (paymentData.terminalPaymentRequestId) {
+          const arbitraje = await arbitrarSinPerderElCobro(tx, {
+            requestId: paymentData.terminalPaymentRequestId,
+            venueId,
+            attemptKey: paymentData.idempotencyKey ?? null,
+            targetOrderId: activeOrder.id,
+            authenticatedSerial: paymentData.authenticatedTerminalSerial ?? null,
+          })
+          if (arbitraje.kind === 'RETRY_OF_WINNER') throw new ReintentoDelGanadorDeLaSolicitud(arbitraje.winnerPaymentId)
+          if (arbitraje.kind === 'SECOND_CAPTURE') {
+            s0.segundaCaptura = {
+              requestId: arbitraje.row.requestId,
+              winnerPaymentId: arbitraje.winnerPaymentId,
+              winnerIdempotencyKey: arbitraje.winnerIdempotencyKey,
+            }
+            return crearEvidenciaDeSegundaCaptura(tx, {
+              venueId,
+              orderId: activeOrder.id,
+              arbitraje,
+              paymentData,
+              totalAmount,
+              tipAmount,
+              method: classicMethod as PaymentMethod,
+              merchantAccountId,
+              terminalId,
+              staffId: validatedStaffId,
+            })
+          }
+          ligarSolicitud = arbitraje.kind === 'WINNER'
+        }
+        // Codex R4-6: la colisión de referencia (decidida ANTES de la transacción, bajo el candado del candidato) se
+        // guarda como evidencia PENDING sobre ESTA venta — nunca como una segunda venta ni como el existente.
+        if (colisionDeReferencia && paymentData.referenceNumber) {
+          s0.colision = { referenceNumber: paymentData.referenceNumber, candidates: colisionDeReferencia }
+          return crearEvidenciaDeColisionDeReferencia(tx, {
+            venueId,
+            orderId: activeOrder.id,
+            colision: s0.colision,
+            paymentData,
+            totalAmount,
+            tipAmount,
+            method: classicMethod as PaymentMethod,
+            merchantAccountId,
+            terminalId,
+            staffId: validatedStaffId,
+          })
+        }
+        // La PREPARACIÓN del intento de vales va después del arbitraje y sólo para quien sigue (ganador, cobro sin
+        // solicitud o asociación inválida): una segunda captura ya salió arriba. Sin sesión de vales devuelve `null`.
+        if (paymentStatusSnapshot === 'COMPLETED') {
           lockedAreaCheckout = await areaTicketPayment.lockAreaTicketCheckoutForPayment(tx, {
             venueId,
             orderId: activeOrder.id,
@@ -2310,16 +3230,6 @@ export async function recordOrderPayment(
             amount: new Prisma.Decimal(totalAmount),
             method: classicMethod as PaymentMethod,
           })
-        }
-        // El submódulo de vales conserva session → tickets → Order. Si no hay
-        // vales, este helper toma Order aquí; si los hay, el lock es reentrante.
-        // Desde este punto todos los carriles siguen Order → Payment → Shift.
-        const orderStillBelongsToVenue = await lockExistingOrderForPayment(tx, { venueId, orderId: activeOrder.id })
-        if (!orderStillBelongsToVenue) {
-          throw new ConflictError(
-            'La orden cambió mientras se registraba el cobro. Se requiere conciliación manual.',
-            'PAYMENT_ORDER_AUTHORITY_UNAVAILABLE',
-          )
         }
 
         // 🔴 Toque repetido en «Efectivo» sobre una orden ya cubierta (SN00396, BAE MEZQUITAL,
@@ -2461,7 +3371,18 @@ export async function recordOrderPayment(
               // Procedencia AUTENTICADA del cobro (serial del token). Aditivo: conserva la identidad del
               // aparato aunque `terminalId` no resuelva, para la atribución y la recuperación del
               // arbitraje POS→terminal.
-              deviceSerialNumber: paymentData.deviceSerialNumber || null,
+              // Codex R2 (P1-1): el serial que se conserva es el ACREDITADO por el JWT (T10); el del cuerpo sólo cuando no hay otro.
+              deviceSerialNumber: paymentData.authenticatedTerminalSerial ?? (paymentData.deviceSerialNumber || null),
+              pricingSlot: paymentData.pricingSlot ?? null,
+              pricing: tarifaComoJson(paymentData.pricing),
+              // S2: nacido del webhook ⇒ método provisional y costo pendiente hasta acreditar la marca (o vencer el plazo).
+              ...(paymentData.registradoVia === 'webhook' ? { registradoVia: 'webhook', methodProvisional: true } : {}),
+              // Codex R6 (diseño B): `costPending` = «la obligación de costo todavía no ha convergido» — nace con la obligación
+              // (todo cobro COMPLETED que no es efectivo, por REST o por webhook) y sólo la convergencia lo pone en false.
+              ...(paymentStatusSnapshot === 'COMPLETED' && paymentData.method !== 'CASH' ? { costPending: true } : {}),
+              ...(afiliacion.merchantAccountIdDelApk !== afiliacion.merchantAccountId
+                ? { merchantAccountIdFromApk: afiliacion.merchantAccountIdDelApk ?? null, merchantResolvedVia: afiliacion.via }
+                : {}),
             },
             // New enhanced fields in the Payment table
             authorizationNumber: paymentData.authorizationNumber,
@@ -2546,18 +3467,33 @@ export async function recordOrderPayment(
 
         // Close the POS→TPV arbitration row (frees the terminal slot) atomically
         // with the Payment — the robust recovery path (survives socket loss/restart).
-        if (paymentData.terminalPaymentRequestId) {
-          await terminalPaymentService.closeRowFromPaymentTx(
+        // S0: sólo el GANADOR liga la fila (el arbitraje ya excluyó las asociaciones inválidas), y se comprueba el
+        // desenlace: «no lanzó» no es «ligó». Un ganador sin vínculo queda registrado y la fila, recuperable.
+        if (ligarSolicitud && paymentData.terminalPaymentRequestId) {
+          const cierre = await terminalPaymentService.closeRowFromPaymentTx(
             tx,
             paymentData.terminalPaymentRequestId,
             newPayment.id,
             venueId,
             { amountCents: paymentData.amount, tipCents: paymentData.tip },
             'REST',
-            // Serial AUTENTICADO (inyectado por el controlador desde el token): es la identidad del
-            // aparato que cobró aunque la FK `terminalId` no haya resuelto en este venue.
-            paymentData.deviceSerialNumber ?? null,
+            // Serial AUTENTICADO (el controlador lo toma del token): la identidad del aparato que cobró aunque la FK
+            // `terminalId` no haya resuelto en este venue. `deviceSerialNumber` del body sólo como respaldo legacy.
+            paymentData.authenticatedTerminalSerial ?? paymentData.deviceSerialNumber ?? null,
+            paymentData.registradoVia === 'webhook' ? 'webhook' : 'terminal',
           )
+          s0.cierre = cierre
+          if (!cierre.bound) {
+            logger.error(
+              '🚨 [Terminal-payment] El ganador quedó REGISTRADO pero la solicitud NO se ligó — la fila queda para recuperación',
+              {
+                venueId,
+                requestId: paymentData.terminalPaymentRequestId,
+                paymentId: newPayment.id,
+                reason: cierre.reason,
+              },
+            )
+          }
         }
 
         // Update Order.splitType if this is the first payment
@@ -2622,11 +3558,13 @@ export async function recordOrderPayment(
             expectsSettlement = computeOrderBalance(paidOrder, [{ amount: sums._sum.amount, tipAmount: sums._sum.tipAmount }]).isFullyPaid
           }
           await enqueueCommittedPaymentEffects(tx, newPayment, paymentData.reviewRating, validatedStaffId, expectsSettlement)
+          await encolarObligacionDeCosto(tx, newPayment, paymentData.registradoVia === 'webhook' ? 'webhook' : 'terminal')
         }
         return newPayment
-      }),
+      }, OPCIONES_DE_TRANSACCION_DEL_INTENTO),
     )
   } catch (error) {
+    if (error instanceof RegistroYaExistentePorReferencia) return devolverExistentePorReferencia(error.registro)
     if (error instanceof CobroDuplicadoEnEfectivo) {
       const existente = await prisma.payment.findUnique({ where: { id: error.existingPaymentId }, include: { receipts: true } })
       if (existente) {
@@ -2725,6 +3663,22 @@ export async function recordOrderPayment(
       }
       throw error
     }
+    if (error instanceof ReintentoDelGanadorDeLaSolicitud) {
+      const ganador = await prisma.payment.findUnique({ where: { id: error.winnerPaymentId }, include: { receipts: true } })
+      if (ganador) {
+        logger.info('🔄 [S0] Bajo el candado de la solicitud, el ganador ya era este mismo intento — se devuelve el existente', {
+          venueId,
+          winnerPaymentId: ganador.id,
+        })
+        // Codex R1 (P1-4): el REST que perdió la carrera bajo el candado trae marca, PAN, modo y método REALES — se
+        // consolidan sobre el ganador (S3) igual que en los retornos idempotentes; devolverlo tal cual los perdía.
+        return {
+          ...((await consolidarRegistroRepetido(ganador, paymentData as RegistroEntrante, venueId, activeOrder.id)) ?? ganador),
+          digitalReceipt: await ensureDigitalReceiptResponse(ganador.id, ganador.receipts[0]),
+        }
+      }
+      throw error
+    }
     // 🛡️ P2002 safety net: unique constraint violation on (venueId, idempotencyKey)
     // means another concurrent request already created this payment. Return the
     // winner as if this was a normal idempotent retry.
@@ -2756,7 +3710,7 @@ export async function recordOrderPayment(
               ? await resumeCapturedAreaTicketPayment(venueId, orderId, winner, paymentData.idempotencyKey)
               : null
           return {
-            ...winner,
+            ...((await consolidarRegistroRepetido(winner, paymentData as RegistroEntrante, venueId, orderId)) ?? winner),
             ...(winnerAreaTicketCheckoutState ? { areaTicketCheckoutState: winnerAreaTicketCheckoutState } : {}),
             digitalReceipt: await ensureDigitalReceiptResponse(winner.id, winner.receipts[0]),
           }
@@ -2771,6 +3725,9 @@ export async function recordOrderPayment(
     }
     throw error
   }
+
+  if (s0.segundaCaptura) return await responderSegundaCaptura(venueId, payment, s0.segundaCaptura)
+  if (s0.colision) return await responderColisionDeReferencia(venueId, payment, s0.colision)
 
   logger.info('VenueTransaction created for payment', {
     paymentId: payment.id,
@@ -2802,40 +3759,24 @@ export async function recordOrderPayment(
   )
 
   // Create TransactionCost for financial tracking (only for Avoqado-processed non-cash payments)
-  try {
-    const costResult = await timing.time('transaction_cost', () => createTransactionCost(payment.id))
-
-    // Update Payment and VenueTransaction with calculated fee values
-    if (costResult && costResult.feeAmount > 0) {
-      await prisma.payment.update({
-        where: { id: payment.id },
-        data: {
-          feeAmount: costResult.feeAmount,
-          netAmount: costResult.netAmount,
-        },
-      })
-
-      await prisma.venueTransaction.update({
-        where: { paymentId: payment.id },
-        data: {
-          feeAmount: costResult.feeAmount,
-          netAmount: costResult.netAmount,
-          netSettlementAmount: costResult.netAmount,
-        },
-      })
-
-      logger.info('Payment and VenueTransaction updated with fee values', {
-        paymentId: payment.id,
-        feeAmount: costResult.feeAmount,
-        netAmount: costResult.netAmount,
-      })
-    }
-  } catch (transactionCostError) {
-    logger.error('Failed to create TransactionCost', {
+  // S2 (Codex P2): un Payment nacido del webhook NO calcula costo aquí — queda PENDIENTE durable (efecto TRANSACTION_COST)
+  // hasta acreditar la marca o vencer el plazo. «Sin costo» nunca se presenta como comisión cero.
+  if (paymentData.registradoVia === 'webhook') {
+    logger.info('⏳ [S2] Costo de transacción PENDIENTE (Payment nacido del webhook, sin marca acreditada)', { paymentId: payment.id })
+    registrarConfirmacionAnomalaPorWebhook(s0.cierre, {
+      venueId,
+      requestId: paymentData.terminalPaymentRequestId ?? null,
       paymentId: payment.id,
-      error: transactionCostError,
+      attemptId: paymentData.idempotencyKey ?? null,
+      staffId: payment.processedById ?? null,
+      amountCents: paymentData.amount,
+      tipCents: paymentData.tip ?? 0,
     })
-    // Don't fail the payment if TransactionCost creation fails
+  } else {
+    // Codex R4-4 / R5-3: UN solo criterio de cumplimiento para el costo síncrono — el MISMO del worker (costo persistido →
+    // proyecciones en Payment y VenueTransaction → liquidación → reembolsos). La obligación se cierra SÓLO al converger; si
+    // falta la liquidación o la tarifa no es acreditable, queda PENDIENTE y visible con su motivo. Nunca interrumpe el cobro.
+    await timing.time('transaction_cost', () => asegurarCostoSincrono(payment.id))
   }
 
   // Create Review record if reviewRating is provided
@@ -3287,7 +4228,7 @@ async function verifyDelegatedPaymentLanded(
   // `referenceNumber` con el original, por eso se excluyen.
   if (paymentData.referenceNumber) {
     const mine = await prisma.payment.findFirst({
-      where: { venueId, orderId, referenceNumber: paymentData.referenceNumber, type: { not: 'REFUND' } },
+      where: { venueId, orderId, referenceNumber: paymentData.referenceNumber, ...SIN_REEMBOLSOS },
       select: { id: true },
     })
     return mine ? 'landed' : 'not-landed'
@@ -3536,6 +4477,12 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   // If a concurrent request races past BOTH fast-path checks, the @@unique
   // constraint on (venueId, idempotencyKey) in the Payment table will throw
   // P2002 and we catch that below as the atomic safety net.
+  // Codex R6-1: la afiliación DEFINITIVA se resuelve ANTES de deduplicar (misma regla que en la ruta de orden).
+  const afiliacion = await resolverAfiliacionDelCobro('FastPayment', venueId, null, paymentData)
+  paymentData.merchantAccountId = afiliacion.merchantAccountId
+  // Codex R7-2: la identidad de afiliación que mandó el APK viaja con el entrante (consolidación y huella la contrastan como conjunto).
+  ;(paymentData as RegistroEntrante).merchantAccountIdDelApk = afiliacion.merchantAccountIdDelApk ?? null
+
   if (paymentData.idempotencyKey) {
     const existingByKey = await prisma.payment.findUnique({
       where: {
@@ -3557,51 +4504,69 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       // si el primer intento entró anónimo, sin esto la venta se quedaba sin cliente para
       // siempre (la idempotencia devuelve el pago y nadie vuelve a mirar). Rellenar es
       // aditivo y no toca dinero; reasignar está prohibido (ver `fastPaymentCustomer.ts`).
-      const customerLink = await linkCustomerToExistingOrder(venueId, existingByKey.orderId, effectiveCustomerId)
+      const customerLink = await linkCustomerToExistingOrder(venueId, ordenPropia(existingByKey), effectiveCustomerId)
       return {
-        ...existingByKey,
+        ...((await consolidarRegistroRepetido(existingByKey, paymentData as RegistroEntrante, venueId, null)) ?? existingByKey),
         digitalReceipt: await ensureDigitalReceiptResponse(existingByKey.id, existingByKey.receipts[0]),
         customerLink,
       }
     }
   }
 
+  let colisionDeReferencia: ColisionDeReferenciaRegistrada['candidates'] | null = null
+  /** Codex R4 (P2): recibo y cliente del Payment RESUELTO, nunca del candidato con el que se entró. */
+  const devolverExistentePorReferencia = async (existingPayment: Payment & { receipts: DigitalReceipt[] }) => {
+    logger.warn('🔄 Duplicate payment attempt detected (referenceNumber check)', {
+      venueId,
+      referenceNumber: paymentData.referenceNumber,
+      existingPaymentId: existingPayment.id,
+      incomingIdempotencyKey: paymentData.idempotencyKey || null,
+      existingIdempotencyKey: existingPayment.idempotencyKey || null,
+      message: 'Returning existing payment (safe retry / legacy→new TPV transition)',
+    })
+
+    // Return existing payment with receipt (safe retry - client gets same response)
+    // Mismo relleno de cliente que el check por `idempotencyKey`: un reintento legacy
+    // (TPV < v1.10.10, sin llave) también puede traer el cliente que faltaba.
+    const customerLink = await linkCustomerToExistingOrder(venueId, ordenPropia(existingPayment), effectiveCustomerId)
+    return {
+      ...existingPayment,
+      digitalReceipt: await ensureDigitalReceiptResponse(existingPayment.id, existingPayment.receipts[0]),
+      customerLink,
+    }
+  }
+  /** Los argumentos de la resolución por referencia: los MISMOS antes de la transacción y en la relectura bajo el candado (R12-7). */
+  let argumentosDeReferencia: Parameters<typeof resolverPorReferencia>[0] | null = null
   if (paymentData.referenceNumber) {
     // Always-on referenceNumber check — catches:
     //   (a) Legacy TPV retries (no idempotencyKey sent)
     //   (b) Transition-period retries (new TPV sends a fresh key, but the payment
     //       was already created by the legacy client with no key)
-    const existingPayment = await prisma.payment.findFirst({
-      where: {
-        venueId,
-        referenceNumber: paymentData.referenceNumber,
-        type: { not: 'REFUND' }, // Refunds share referenceNumber with originals — don't match against them
-      },
-      include: {
-        receipts: true, // Include receipt data for idempotent response
-      },
-    })
-
-    if (existingPayment) {
-      logger.warn('🔄 Duplicate payment attempt detected (referenceNumber check)', {
-        venueId,
-        referenceNumber: paymentData.referenceNumber,
-        existingPaymentId: existingPayment.id,
-        incomingIdempotencyKey: paymentData.idempotencyKey || null,
-        existingIdempotencyKey: existingPayment.idempotencyKey || null,
-        message: 'Returning existing payment (safe retry / legacy→new TPV transition)',
-      })
-
-      // Return existing payment with receipt (safe retry - client gets same response)
-      // Mismo relleno de cliente que el check por `idempotencyKey`: un reintento legacy
-      // (TPV < v1.10.10, sin llave) también puede traer el cliente que faltaba.
-      const customerLink = await linkCustomerToExistingOrder(venueId, existingPayment.orderId, effectiveCustomerId)
-      return {
-        ...existingPayment,
-        digitalReceipt: await ensureDigitalReceiptResponse(existingPayment.id, existingPayment.receipts[0]),
-        customerLink,
-      }
+    // S0-a: misma regla que en la ruta de orden; en venta rápida no hay orden objetivo (queda fuera de la comparación).
+    // Codex R2 (P1-1): todos los candidatos de la referencia, acotados; se elige el de identidad suficiente.
+    const huellaEntrante: HuellaDelCobro = {
+      orderId: null,
+      amountPesos: paymentData.amount / 100,
+      tipPesos: (paymentData.tip ?? 0) / 100,
+      merchantAccountId: afiliacion.merchantAccountId ?? null,
+      merchantAccountIdDelApk: afiliacion.merchantAccountIdDelApk ?? null,
+      authorizationNumber: paymentData.authorizationNumber ?? null,
+      idempotencyKey: paymentData.idempotencyKey ?? null,
+      terminalSerial: paymentData.authenticatedTerminalSerial ?? paymentData.deviceSerialNumber ?? null,
+      terminalPaymentRequestId: paymentData.terminalPaymentRequestId ?? null,
     }
+    argumentosDeReferencia = {
+      etiqueta: 'FastPayment',
+      venueId,
+      referenceNumber: paymentData.referenceNumber,
+      targetOrderId: null,
+      huella: huellaEntrante,
+      paymentData: paymentData as RegistroEntrante,
+    }
+    // Codex R4 (R4-1/R4-2/R4-6): misma resolución que en la ruta de orden (demostrar o no demostrar; nunca crear a ciegas).
+    const resolucion = await resolverPorReferencia(argumentosDeReferencia)
+    if (resolucion.kind === 'EXISTENTE') return devolverExistentePorReferencia(resolucion.registro)
+    if (resolucion.kind === 'COLISION') colisionDeReferencia = resolucion.contradicciones
   }
 
   await t.time('assertVenueSalesEnabled', () => assertVenueSalesEnabled(venueId))
@@ -3627,91 +4592,14 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     return validSources.includes(source) ? (source as PaymentSource) : 'OTHER'
   }
 
-  // ⭐ PROVIDER-AGNOSTIC MERCHANT TRACKING: Resolve merchantAccountId
-  // Priority 1: Use merchantAccountId if provided by modern Android client
-  // Priority 2: Resolve blumonSerialNumber → merchantAccountId for backward compatibility
-  // Priority 3: Leave undefined (legacy payments before this feature)
-  let merchantAccountId = paymentData.merchantAccountId
+  // Codex R6-1: la afiliación ya está resuelta (arriba, antes de deduplicar); aquí sólo se lee.
+  const merchantAccountId = afiliacion.merchantAccountId
 
-  if (!merchantAccountId && paymentData.blumonSerialNumber) {
-    logger.info(`🔄 Resolving legacy blumonSerialNumber: ${paymentData.blumonSerialNumber}`)
-    merchantAccountId = await resolveBlumonSerialToMerchantId(venueId, paymentData.blumonSerialNumber)
-  }
-
-  if (merchantAccountId) {
-    logger.info(`✅ Payment will be attributed to merchantAccountId: ${merchantAccountId}`)
-  } else {
-    logger.warn(`⚠️ No merchantAccountId - payment will have null merchant (legacy mode)`)
-  }
-
-  // ⭐ 3-TIER MERCHANT RESOLUTION (Stripe-inspired pattern) - Fast Payments
-  // TIER 1: Direct Attribution - Use provided merchantAccountId if valid + active
-  // TIER 2: Inference Recovery - Infer from blumonSerialNumber (SOURCE OF TRUTH from processor)
-  // TIER 3: Reconciliation Flag - Null with full context for manual resolution
-  if (merchantAccountId) {
-    const merchantExists = await prisma.merchantAccount.findUnique({
-      where: { id: merchantAccountId },
-      select: { id: true, active: true },
-    })
-
-    if (!merchantExists) {
-      logger.error(`❌ [FastPayment] MerchantAccount not found: ${merchantAccountId}`, {
-        venueId,
-        paymentMethod: paymentData.method,
-        providedId: merchantAccountId,
-        blumonSerialNumber: paymentData.blumonSerialNumber,
-        hint: 'Android may have stale config. Attempting TIER 2 recovery from blumonSerialNumber.',
-      })
-
-      // TIER 2: Attempt recovery from blumonSerialNumber
-      if (paymentData.blumonSerialNumber) {
-        const recoveredMerchantId = await resolveBlumonSerialToMerchantId(venueId, paymentData.blumonSerialNumber)
-        if (recoveredMerchantId) {
-          logger.info(`✅ [FastPayment] TIER 2 Recovery SUCCESS: Inferred merchant from blumonSerialNumber`, {
-            providedMerchantId: merchantAccountId,
-            blumonSerialNumber: paymentData.blumonSerialNumber,
-            recoveredMerchantId,
-          })
-          merchantAccountId = recoveredMerchantId
-        } else {
-          logger.error(`❌ [FastPayment] TIER 3: Cannot resolve merchant - reconciliation required`, {
-            providedMerchantId: merchantAccountId,
-            blumonSerialNumber: paymentData.blumonSerialNumber,
-            authorizationNumber: paymentData.authorizationNumber,
-            referenceNumber: paymentData.referenceNumber,
-            venueId,
-          })
-          merchantAccountId = undefined
-        }
-      } else {
-        logger.warn(`⚠️ [FastPayment] No blumonSerialNumber for TIER 2 recovery - falling back to null`)
-        merchantAccountId = undefined
-      }
-    } else if (!merchantExists.active) {
-      logger.warn(`⚠️ [FastPayment] MerchantAccount ${merchantAccountId} is inactive`, {
-        venueId,
-        paymentMethod: paymentData.method,
-        blumonSerialNumber: paymentData.blumonSerialNumber,
-      })
-
-      // TIER 2: Attempt recovery for inactive merchant
-      if (paymentData.blumonSerialNumber) {
-        const recoveredMerchantId = await resolveBlumonSerialToMerchantId(venueId, paymentData.blumonSerialNumber)
-        if (recoveredMerchantId && recoveredMerchantId !== merchantAccountId) {
-          logger.info(`✅ [FastPayment] TIER 2 Recovery: Found active merchant with same serial`, {
-            inactiveMerchantId: merchantAccountId,
-            blumonSerialNumber: paymentData.blumonSerialNumber,
-            recoveredMerchantId,
-          })
-          merchantAccountId = recoveredMerchantId
-        } else {
-          merchantAccountId = undefined
-        }
-      } else {
-        merchantAccountId = undefined
-      }
-    }
-  }
+  // Codex R3 (P1-3) / R5-2: la TARIFA se congela al cobrar — sobre la afiliación DEFINITIVA, la que queda tras TIER-2/3 —,
+  // nunca sobre la que mandó el APK. Congelarla antes de la recuperación dejaba el snapshot (slot y tasas) de M1 en un
+  // Payment atribuido a M2; sin snapshot de M2, el costo diferido caía al slot de M1 en cuanto M2 saliera de la configuración.
+  // Codex R14-1: la tarifa se congela DENTRO de la transacción del dinero, con el candado del intento tomado (ver abajo).
+  const llaveDelIntento = llaveDeIntento(paymentData.idempotencyKey)
 
   // ⭐ TERMINAL ATTRIBUTION: Resolve terminalId from device serial number
   // Links order and payment to the Terminal that processed them (for device-based reporting)
@@ -3750,6 +4638,11 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   // the concurrent retry behave exactly like an idempotent success.
   let payment: Awaited<ReturnType<typeof prisma.payment.create>> & { processedBy: any }
   let fastOrder: Awaited<ReturnType<typeof prisma.order.create>>
+  const s0 = {
+    segundaCaptura: null as SegundaCapturaRegistrada | null,
+    colision: null as ColisionDeReferenciaRegistrada | null,
+    cierre: null as CloseRowOutcome | null,
+  }
   // 🔑 El tender resuelto se saca de la transacción a propósito: la respuesta al POS y
   // todo lo posterior tienen que ver el método REAL del cobro, no el que mandó el
   // cliente. (Aquí no hace falta para `payment.method` —ya viene del registro creado—
@@ -3759,12 +4652,101 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     t.mark('turnoMerchantYTerminal')
     const result = await timing.time('financial_commit', () =>
       prisma.$transaction(async tx => {
+        // Codex R14-1: PRIMERA sentencia — el candado del intento (ver la ruta de orden). Orden: intento → referencia →
+        // TerminalPaymentRequest → Payment → Shift.
+        if (llaveDelIntento) await candadoDeIntento(tx, llaveDelIntento)
+        // Codex R12-7: un registro SIN llave se serializa por (venue, referencia) y vuelve a resolver ya con el candado.
+        if (!paymentData.idempotencyKey && argumentosDeReferencia) {
+          colisionDeReferencia = await exclusionPorReferencia(tx, argumentosDeReferencia)
+        }
+        // Codex R3 (P1-3) / R5-2 / R14-1: la TARIFA se congela aquí, bajo el candado (primera evidencia durable o «ahora»).
+        const tarifa = merchantAccountId
+          ? await tarifaDeLaAfiliacion(tx, venueId, merchantAccountId, paymentData)
+          : { slot: null, pricing: null }
+        paymentData.pricingSlot = tarifa.slot
+        paymentData.pricing = tarifa.pricing
         // En venta rápida la Order y el Payment nacen juntos. Sólo COMPLETED es
         // dinero capturado y puede reclamar; los demás estados nacen sin turno y
         // sin anomalía post-cierre. Cuando aplica, el claim debe ganar antes de
         // crear cualquiera de los dos para que compartan el mismo id seguro.
         const shiftAmount = new Prisma.Decimal(totalAmount)
         const shiftTip = new Prisma.Decimal(tipAmount)
+        // S0 (Codex): en venta rápida no hay Order previa — el arbitraje empieza en la solicitud, ANTES del turno y de
+        // crear cualquier cosa. Una segunda captura cuelga de la venta materializada por el GANADOR: nunca otra venta.
+        let ligarSolicitud = false
+        if (paymentData.terminalPaymentRequestId) {
+          const arbitraje = await arbitrarSinPerderElCobro(tx, {
+            requestId: paymentData.terminalPaymentRequestId,
+            venueId,
+            attemptKey: paymentData.idempotencyKey ?? null,
+            targetOrderId: null,
+            authenticatedSerial: paymentData.authenticatedTerminalSerial ?? null,
+          })
+          if (arbitraje.kind === 'RETRY_OF_WINNER') throw new ReintentoDelGanadorDeLaSolicitud(arbitraje.winnerPaymentId)
+          if (arbitraje.kind === 'SECOND_CAPTURE') {
+            const ventaDelGanador = await tx.order.findFirst({ where: { id: arbitraje.winnerOrderId, venueId } })
+            if (ventaDelGanador) {
+              s0.segundaCaptura = {
+                requestId: arbitraje.row.requestId,
+                winnerPaymentId: arbitraje.winnerPaymentId,
+                winnerIdempotencyKey: arbitraje.winnerIdempotencyKey,
+              }
+              const evidencia = await crearEvidenciaDeSegundaCaptura(tx, {
+                venueId,
+                orderId: ventaDelGanador.id,
+                arbitraje,
+                paymentData,
+                totalAmount,
+                tipAmount,
+                method: paymentData.method as PaymentMethod,
+                merchantAccountId,
+                terminalId,
+                staffId: validatedStaffId,
+              })
+              // Sale por la respuesta específica de la segunda captura: nada de lo que sigue la usa.
+              return { payment: { ...evidencia, processedBy: null }, fastOrder: ventaDelGanador }
+            }
+            logger.error(
+              '🚨 [FastPayment] La venta del ganador de la solicitud no existe — se registra como venta rápida normal, sin ligar',
+              {
+                venueId,
+                requestId: arbitraje.row.requestId,
+                winnerPaymentId: arbitraje.winnerPaymentId,
+              },
+            )
+          } else {
+            ligarSolicitud = arbitraje.kind === 'WINNER'
+          }
+        }
+        // Codex R4-6: en venta rápida la colisión de referencia cuelga de la venta del candidato que CONTRADIJO (misma
+        // referencia, importe y terminal): nunca nace otra venta por una referencia repetida.
+        if (colisionDeReferencia && paymentData.referenceNumber) {
+          const ventaDelCandidato = await tx.order.findFirst({ where: { id: colisionDeReferencia[0].orderId, venueId } })
+          if (ventaDelCandidato) {
+            s0.colision = { referenceNumber: paymentData.referenceNumber, candidates: colisionDeReferencia }
+            const evidencia = await crearEvidenciaDeColisionDeReferencia(tx, {
+              venueId,
+              orderId: ventaDelCandidato.id,
+              colision: s0.colision,
+              paymentData,
+              totalAmount,
+              tipAmount,
+              method: paymentData.method as PaymentMethod,
+              merchantAccountId,
+              terminalId,
+              staffId: validatedStaffId,
+            })
+            return { payment: { ...evidencia, processedBy: null }, fastOrder: ventaDelCandidato }
+          }
+          logger.error(
+            '🚨 [FastPayment] La venta del candidato que contradijo la referencia no existe — se registra como venta rápida normal',
+            {
+              venueId,
+              referenceNumber: paymentData.referenceNumber,
+              candidates: colisionDeReferencia,
+            },
+          )
+        }
         const shiftClaim = await claimShiftForCompletedPayment(tx, {
           paymentStatus: paymentStatusSnapshot,
           venueId,
@@ -3904,7 +4886,18 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
               // Procedencia AUTENTICADA del cobro (serial del token). Aditivo: conserva la identidad del
               // aparato aunque `terminalId` no resuelva, para la atribución y la recuperación del
               // arbitraje POS→terminal.
-              deviceSerialNumber: paymentData.deviceSerialNumber || null,
+              // Codex R2 (P1-1): el serial que se conserva es el ACREDITADO por el JWT (T10); el del cuerpo sólo cuando no hay otro.
+              deviceSerialNumber: paymentData.authenticatedTerminalSerial ?? (paymentData.deviceSerialNumber || null),
+              pricingSlot: paymentData.pricingSlot ?? null,
+              pricing: tarifaComoJson(paymentData.pricing),
+              // S2: nacido del webhook ⇒ método provisional y costo pendiente hasta acreditar la marca (o vencer el plazo).
+              ...(paymentData.registradoVia === 'webhook' ? { registradoVia: 'webhook', methodProvisional: true } : {}),
+              // Codex R6 (diseño B): `costPending` = «la obligación de costo todavía no ha convergido» — nace con la obligación
+              // (todo cobro COMPLETED que no es efectivo, por REST o por webhook) y sólo la convergencia lo pone en false.
+              ...(paymentStatusSnapshot === 'COMPLETED' && paymentData.method !== 'CASH' ? { costPending: true } : {}),
+              ...(afiliacion.merchantAccountIdDelApk !== afiliacion.merchantAccountId
+                ? { merchantAccountIdFromApk: afiliacion.merchantAccountIdDelApk ?? null, merchantResolvedVia: afiliacion.via }
+                : {}),
             },
             // New enhanced fields in the Payment table
             authorizationNumber: paymentData.authorizationNumber,
@@ -4020,30 +5013,63 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
 
         // Close the POS→TPV arbitration row (frees the terminal slot) atomically
         // with the Payment — the robust recovery path (survives socket loss/restart).
-        if (paymentData.terminalPaymentRequestId) {
-          await terminalPaymentService.closeRowFromPaymentTx(
+        // S0: sólo el GANADOR liga la fila (el arbitraje ya excluyó las asociaciones inválidas), y se comprueba el
+        // desenlace: «no lanzó» no es «ligó». Un ganador sin vínculo queda registrado y la fila, recuperable.
+        if (ligarSolicitud && paymentData.terminalPaymentRequestId) {
+          const cierre = await terminalPaymentService.closeRowFromPaymentTx(
             tx,
             paymentData.terminalPaymentRequestId,
             newPayment.id,
             venueId,
             { amountCents: paymentData.amount, tipCents: paymentData.tip },
             'REST',
-            // Serial AUTENTICADO (inyectado por el controlador desde el token): es la identidad del
-            // aparato que cobró aunque la FK `terminalId` no haya resuelto en este venue.
-            paymentData.deviceSerialNumber ?? null,
+            // Serial AUTENTICADO (el controlador lo toma del token): la identidad del aparato que cobró aunque la FK
+            // `terminalId` no haya resuelto en este venue. `deviceSerialNumber` del body sólo como respaldo legacy.
+            paymentData.authenticatedTerminalSerial ?? paymentData.deviceSerialNumber ?? null,
+            paymentData.registradoVia === 'webhook' ? 'webhook' : 'terminal',
           )
+          s0.cierre = cierre
+          if (!cierre.bound) {
+            logger.error(
+              '🚨 [Terminal-payment] El ganador quedó REGISTRADO pero la solicitud NO se ligó — la fila queda para recuperación',
+              {
+                venueId,
+                requestId: paymentData.terminalPaymentRequestId,
+                paymentId: newPayment.id,
+                reason: cierre.reason,
+              },
+            )
+          }
         }
 
         if (newPayment.status === 'COMPLETED') {
           await tx.order.update({ where: { id: order.id }, data: { loyaltyEligibleAt: new Date(), loyaltyStaffId: validatedStaffId } })
           await enqueueCommittedPaymentEffects(tx, newPayment, effectiveReviewRating, validatedStaffId, true)
+          await encolarObligacionDeCosto(tx, newPayment, paymentData.registradoVia === 'webhook' ? 'webhook' : 'terminal')
         }
         return { payment: newPayment, fastOrder: order }
-      }),
+      }, OPCIONES_DE_TRANSACCION_DEL_INTENTO),
     )
     payment = result.payment
     fastOrder = result.fastOrder
   } catch (error) {
+    if (error instanceof RegistroYaExistentePorReferencia) return devolverExistentePorReferencia(error.registro)
+    if (error instanceof ReintentoDelGanadorDeLaSolicitud) {
+      const ganador = await prisma.payment.findUnique({ where: { id: error.winnerPaymentId }, include: { receipts: true } })
+      if (ganador) {
+        logger.info('🔄 [S0] Bajo el candado de la solicitud, el ganador ya era este mismo intento — se devuelve el existente', {
+          venueId,
+          winnerPaymentId: ganador.id,
+        })
+        // Codex R1 (P1-4): el REST que perdió la carrera bajo el candado trae marca, PAN, modo y método REALES — se
+        // consolidan sobre el ganador (S3) igual que en los retornos idempotentes; devolverlo tal cual los perdía.
+        return {
+          ...((await consolidarRegistroRepetido(ganador, paymentData as RegistroEntrante, venueId, null)) ?? ganador),
+          digitalReceipt: await ensureDigitalReceiptResponse(ganador.id, ganador.receipts[0]),
+        }
+      }
+      throw error
+    }
     // 🛡️ P2002 safety net: unique constraint violation on (venueId, idempotencyKey)
     // means another concurrent request already created this payment. Return the
     // winner as if this was a normal idempotent retry.
@@ -4071,9 +5097,9 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         if (winner) {
           // La carrera la ganó otra petición: su orden ya existe, así que el cliente se
           // rellena (nunca se reasigna) igual que en cualquier reintento idempotente.
-          const winnerCustomerLink = await linkCustomerToExistingOrder(venueId, winner.orderId, effectiveCustomerId)
+          const winnerCustomerLink = await linkCustomerToExistingOrder(venueId, ordenPropia(winner), effectiveCustomerId)
           return {
-            ...winner,
+            ...((await consolidarRegistroRepetido(winner, paymentData as RegistroEntrante, venueId, null)) ?? winner),
             digitalReceipt: await ensureDigitalReceiptResponse(winner.id, winner.receipts[0]),
             customerLink: winnerCustomerLink,
           }
@@ -4087,6 +5113,9 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     }
     throw error
   }
+
+  if (s0.segundaCaptura) return await responderSegundaCaptura(venueId, payment, s0.segundaCaptura)
+  if (s0.colision) return await responderColisionDeReferencia(venueId, payment, s0.colision)
 
   logger.info('VenueTransaction created for fast payment', {
     paymentId: payment.id,
@@ -4117,14 +5146,22 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   )
 
   // Create TransactionCost for financial tracking (only for Avoqado-processed non-cash payments)
-  try {
-    await timing.time('transaction_cost', () => createTransactionCost(payment.id))
-  } catch (transactionCostError) {
-    logger.error('Failed to create TransactionCost for fast payment', {
+  if (paymentData.registradoVia === 'webhook') {
+    logger.info('⏳ [S2] Costo de transacción PENDIENTE (Payment nacido del webhook, sin marca acreditada)', { paymentId: payment.id })
+    registrarConfirmacionAnomalaPorWebhook(s0.cierre, {
+      venueId,
+      requestId: paymentData.terminalPaymentRequestId ?? null,
       paymentId: payment.id,
-      error: transactionCostError,
+      attemptId: paymentData.idempotencyKey ?? null,
+      staffId: payment.processedById ?? null,
+      amountCents: paymentData.amount,
+      tipCents: paymentData.tip ?? 0,
     })
-    // Don't fail the payment if TransactionCost creation fails
+  } else {
+    // Codex R4-4 / R5-3: UN solo criterio de cumplimiento para el costo síncrono — el MISMO del worker (costo persistido →
+    // proyecciones en Payment y VenueTransaction → liquidación → reembolsos). La obligación se cierra SÓLO al converger; si
+    // falta la liquidación o la tarifa no es acreditable, queda PENDIENTE y visible con su motivo. Nunca interrumpe el cobro.
+    await timing.time('transaction_cost', () => asegurarCostoSincrono(payment.id))
   }
 
   // Create Review record if reviewRating is provided

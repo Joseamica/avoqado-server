@@ -4,7 +4,7 @@ import prisma from '@/utils/prismaClient'
 import { utcTs } from '@/utils/sqlDates'
 import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 
-export type PaymentEffectKind = 'REVIEW' | 'RECEIPT' | 'REFERRAL' | 'COMMISSION'
+export type PaymentEffectKind = 'REVIEW' | 'RECEIPT' | 'REFERRAL' | 'COMMISSION' | 'TRANSACTION_COST'
 export type PaymentEffectInput = {
   venueId: string
   paymentId: string
@@ -12,6 +12,8 @@ export type PaymentEffectInput = {
   kind: PaymentEffectKind
   dedupeKey: string
   payload: Prisma.InputJsonValue
+  /** Codex R4-4: una obligación que su propio registrador va a cumplir en la misma petición puede nacer con el primer intento diferido. */
+  nextAttemptAt?: Date
 }
 export type PaymentEffectClaim = PaymentEffectInput & { id: string; attempts: number; claimToken: string; leaseUntil: Date }
 const COMMISSION_REVIEW_REASON = 'COMMISSION_SNAPSHOT_REQUIRES_REVIEW'
@@ -80,7 +82,7 @@ export async function claimPaymentEffects(input: { now: Date; limit?: number; db
 /** DB side effects and completion share a transaction. A reclaimed token cannot mutate either. */
 export async function runClaimedPaymentEffect(claim: PaymentEffectClaim, db: PrismaClient = prisma): Promise<boolean> {
   const external = await db.paymentEffect.findFirst({
-    where: { id: claim.id, claimToken: claim.claimToken, status: 'PROCESSING', kind: { in: ['RECEIPT', 'REFERRAL'] } },
+    where: { id: claim.id, claimToken: claim.claimToken, status: 'PROCESSING', kind: { in: ['RECEIPT', 'REFERRAL', 'TRANSACTION_COST'] } },
   })
   if (external) {
     // These existing consumers own their transaction and dedupe. In particular,
@@ -88,6 +90,24 @@ export async function runClaimedPaymentEffect(claim: PaymentEffectClaim, db: Pri
     if (external.kind === 'RECEIPT') {
       const { generateDigitalReceipt } = await import('./digitalReceipt.tpv.service')
       await generateDigitalReceipt(external.paymentId)
+    } else if (external.kind === 'TRANSACTION_COST') {
+      // S2 (Codex P2): costo PENDIENTE de un Payment nacido del webhook. Esperar la marca NO es un fallo: se reprograma
+      // sin consumir intentos; el plazo del payload acota la espera y un error REAL sí cuenta y llega a DEAD_LETTER.
+      const { settleDeferredTransactionCost } = await import('../payments/deferredTransactionCost.service')
+      // Codex R6 (diseño B): la transición a DONE la hace la propia unidad de convergencia, con ESTE token, bajo la fila del
+      // Payment; el CAS de abajo la encuentra hecha (count 0 con la fila DONE) y no la repite.
+      const listo = await settleDeferredTransactionCost(external.paymentId, external.payload as Record<string, unknown>, new Date(), {
+        tipo: 'WORKER',
+        effectId: external.id,
+        claimToken: claim.claimToken,
+      })
+      if (!listo) {
+        await db.paymentEffect.updateMany({
+          where: { id: external.id, claimToken: claim.claimToken, status: 'PROCESSING' },
+          data: { status: 'PENDING', nextAttemptAt: new Date(Date.now() + 5 * 60_000), claimToken: null, leaseUntil: null, attempts: 0 },
+        })
+        return false
+      }
     } else if ((external.payload as { operation?: string }).operation === 'REFUND') {
       const { revertQualifiedReferral } = await import('../referrals/referralRefund.service')
       await revertQualifiedReferral({ orderId: external.orderId!, venueId: external.venueId, reason: 'ORDER_REFUNDED' })
@@ -105,7 +125,14 @@ export async function runClaimedPaymentEffect(claim: PaymentEffectClaim, db: Pri
       where: { id: external.id, claimToken: claim.claimToken, status: 'PROCESSING' },
       data: { status: 'DONE', completedAt: new Date(), claimToken: null, leaseUntil: null, lastError: null },
     })
-    return completed.count === 1
+    if (completed.count === 1) return true
+    // Codex R6: el costo cierra DONE dentro de su unidad de convergencia (con este mismo token). Sólo cuenta como terminado
+    // si la fila quedó DONE de verdad; un lease perdido (otro token) sigue sin poder marcar nada.
+    if (external.kind === 'TRANSACTION_COST') {
+      const fila = await db.paymentEffect.findUnique({ where: { id: external.id }, select: { status: true } })
+      return fila?.status === 'DONE'
+    }
+    return false
   }
   return db.$transaction(async tx => {
     // Use the same lock order as financial producers (Order before its effect rows).
@@ -198,13 +225,34 @@ export async function enqueuePaymentCommissionInTx(tx: Prisma.TransactionClient,
 }
 
 /** Refund money and its deferred reversals commit together under the original Order lock. */
-export async function enqueueRefundPaymentEffectsInTx(tx: Prisma.TransactionClient, refundPaymentId: string, originalPaymentId: string): Promise<void> {
+export async function enqueueRefundPaymentEffectsInTx(
+  tx: Prisma.TransactionClient,
+  refundPaymentId: string,
+  originalPaymentId: string,
+): Promise<void> {
   const { createRefundCommission } = await import('../dashboard/commission/commission-calculation.service')
-  await createRefundCommission(refundPaymentId, originalPaymentId, { db: tx, sink: async data => {
-    const dedupeKey = `commission:${refundPaymentId}:${data.configId}:${data.staffId}:v1`
-    await enqueuePaymentEffect(tx, { venueId: data.venueId, paymentId: refundPaymentId, orderId: data.orderId ?? null, kind: 'COMMISSION', dedupeKey, payload: JSON.parse(JSON.stringify(data)) })
-    return { id: dedupeKey }
-  } })
+  await createRefundCommission(refundPaymentId, originalPaymentId, {
+    db: tx,
+    sink: async data => {
+      const dedupeKey = `commission:${refundPaymentId}:${data.configId}:${data.staffId}:v1`
+      await enqueuePaymentEffect(tx, {
+        venueId: data.venueId,
+        paymentId: refundPaymentId,
+        orderId: data.orderId ?? null,
+        kind: 'COMMISSION',
+        dedupeKey,
+        payload: JSON.parse(JSON.stringify(data)),
+      })
+      return { id: dedupeKey }
+    },
+  })
   const payment = await tx.payment.findUniqueOrThrow({ where: { id: refundPaymentId }, select: { venueId: true, orderId: true } })
-  await enqueuePaymentEffect(tx, { venueId: payment.venueId, paymentId: refundPaymentId, orderId: payment.orderId, kind: 'REFERRAL', dedupeKey: `referral-refund:${refundPaymentId}:v1`, payload: { operation: 'REFUND' } })
+  await enqueuePaymentEffect(tx, {
+    venueId: payment.venueId,
+    paymentId: refundPaymentId,
+    orderId: payment.orderId,
+    kind: 'REFERRAL',
+    dedupeKey: `referral-refund:${refundPaymentId}:v1`,
+    payload: { operation: 'REFUND' },
+  })
 }

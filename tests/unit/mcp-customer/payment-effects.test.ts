@@ -15,12 +15,16 @@ jest.mock('@/mcp/guard', () => ({
 }))
 
 const scope = { staffId: 'staff', activeOrg: 'org', allowedVenueIds: ['own'], perVenueAccess: new Map() } as McpScope
+let esquema: Record<string, { safeParse: (v: unknown) => { success: boolean } }> | undefined
 const handler = () => {
   let call: ((input: Record<string, unknown>) => Promise<any>) | undefined
   registerPaymentEffectTools(
     {
-      tool: (name: string, _description: string, _schema: unknown, fn: typeof call) => {
-        if (name === 'list_payment_effects') call = fn
+      tool: (name: string, _description: string, schema: unknown, fn: typeof call) => {
+        if (name === 'list_payment_effects') {
+          call = fn
+          esquema = schema as typeof esquema
+        }
       },
     } as never,
     scope,
@@ -44,6 +48,13 @@ describe('payment effect operator tool', () => {
     await expect(call({ venueId: 'own' })).rejects.toThrow('permission denied')
     expect(mockPermission).toHaveBeenCalledWith('payments:read', 'own')
     expect(listPaymentEffects).not.toHaveBeenCalled()
+  })
+  it('Codex R4 (P2): TRANSACTION_COST es un tipo consultable (la obligación de costo pendiente se ve en la cola)', async () => {
+    const call = handler()
+    expect(esquema!.kind.safeParse('TRANSACTION_COST').success).toBe(true)
+    expect(esquema!.kind.safeParse('OTRA').success).toBe(false)
+    await call({ venueId: 'own', kind: 'TRANSACTION_COST' })
+    expect(listPaymentEffects).toHaveBeenCalledWith({ venueId: 'own', kind: 'TRANSACTION_COST' })
   })
   it('exposes page metadata and passes the exact status, payment and cursor filters to the bounded service', async () => {
     const input = { venueId: 'own', status: 'DEAD_LETTER', paymentId: 'payment', limit: 1000000, cursor: 'cursor' }

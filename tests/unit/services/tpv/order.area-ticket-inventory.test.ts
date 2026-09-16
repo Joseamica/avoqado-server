@@ -21,6 +21,8 @@ jest.mock('@/services/tpv/payment.tpv.service', () => ({
 }))
 
 jest.mock('@/services/mobile/areaTicketV7.mobile.service', () => ({
+  // S0 (13-sep): el registrador toma la jerarquía de vales ANTES de arbitrar; aquí no hay sesión (null).
+  lockAreaTicketCheckoutHierarchy: jest.fn().mockResolvedValue(null),
   lockAreaTicketCheckoutForPayment: jest.fn().mockResolvedValue({ sessionId: 'session-1', attemptId: 'attempt-1' }),
   finalizeAreaTicketPaymentInTransaction: (...args: unknown[]) => finalizeAreaTicketPaymentMock(...args),
 }))

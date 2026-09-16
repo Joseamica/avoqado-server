@@ -380,7 +380,10 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
           status: (result as { status?: string })?.status ?? null,
         })
       } catch (err) {
-        return text({ ok: false, error: (err as Error).message })
+        // Codex R13-3: un cobro del protocolo de costo no cambia de dinero desde aquí (409 `PAYMENT_PROTECTED_BY_COST_PROTOCOL`):
+        // el rechazo viaja con su código para que el operador sepa que va por reembolso/anulación, no por otra edición.
+        const code = (err as { code?: unknown }).code
+        return text({ ok: false, error: (err as Error).message, ...(typeof code === 'string' ? { code } : {}) })
       }
     },
   )

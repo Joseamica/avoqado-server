@@ -21,6 +21,55 @@ describe('dashboard payment correction status boundary', () => {
   beforeEach(() => {
     prismaMock.payment.findFirst.mockResolvedValue(pendingPayment as any)
     prismaMock.payment.update.mockResolvedValue({ ...pendingPayment, status: TransactionStatus.COMPLETED } as any)
+    // Codex R12-5: bajo el mutex del Payment se pregunta `cobrosDelProtocolo` (SQL): [] = un cobro anterior al protocolo.
+    prismaMock.$queryRaw.mockResolvedValue([])
+  })
+
+  // Codex R12-5: un cobro del protocolo de costo (tarifa congelada u obligación TRANSACTION_COST) no admite cambios genéricos
+  // de importe, propina, estado, método ni identidad — 409 con código, sin escribir. Los no-op pasan. Detalle y carrera con la
+  // convergencia contra Postgres real: `tests/integration/payments/paymentDashboard.protocolo.integration.test.ts`.
+  describe('Codex R12-5 · cobro del protocolo de costo', () => {
+    const durable = {
+      ...pendingPayment,
+      status: TransactionStatus.COMPLETED,
+      method: 'CREDIT_CARD',
+      cardBrand: 'VISA',
+      authorizationNumber: 'A1',
+      referenceNumber: 'R1',
+      maskedPan: null,
+      entryMode: null,
+    }
+    beforeEach(() => {
+      prismaMock.payment.findFirst.mockResolvedValue(durable as any)
+      prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray) =>
+        strings.join('?').includes('FROM "Payment" p') ? [{ id: PAYMENT_ID }] : [],
+      )
+    })
+
+    it.each([
+      ['amount', { amount: 120 }],
+      ['tipAmount', { tipAmount: 5 }],
+      ['status', { status: TransactionStatus.FAILED }],
+      ['method', { method: 'DEBIT_CARD' as any }],
+      ['cardBrand', { cardBrand: 'MASTERCARD' as any }],
+      ['authorizationNumber', { authorizationNumber: 'A2' }],
+      ['referenceNumber', { referenceNumber: 'R2' }],
+    ])('rechaza el cambio de %s con 409 PAYMENT_PROTECTED_BY_COST_PROTOCOL sin escribir', async (campo, cambio) => {
+      await expect(updatePayment(VENUE_ID, PAYMENT_ID, cambio as any)).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'PAYMENT_PROTECTED_BY_COST_PROTOCOL',
+        details: expect.objectContaining({ fields: [campo] }),
+      })
+      expect(prismaMock.payment.update).not.toHaveBeenCalled()
+    })
+
+    it('un no-op (los mismos valores) pasa sin escribir', async () => {
+      prismaMock.payment.findUniqueOrThrow.mockResolvedValue(durable as any)
+      await expect(
+        updatePayment(VENUE_ID, PAYMENT_ID, { amount: 100, status: TransactionStatus.COMPLETED, referenceNumber: 'R1' }),
+      ).resolves.toMatchObject({ id: PAYMENT_ID })
+      expect(prismaMock.payment.update).not.toHaveBeenCalled()
+    })
   })
 
   it('rejects a direct service transition into COMPLETED before writing money state', async () => {

@@ -12,6 +12,7 @@
  */
 
 import { PaymentMethod, SettlementDayType, TransactionCardType } from '@prisma/client'
+import { proyectarComisionYNeto } from '../payments/proyeccionMonetaria'
 import { formatInTimeZone, fromZonedTime } from 'date-fns-tz'
 
 import { calculateSettlementDate } from '@/services/payments/settlementCalculation.service'
@@ -81,13 +82,15 @@ export function projectPaymentSettlement(
   })
 
   const gross = Number(p.amount) + Number(p.tipAmount ?? 0)
-  const commission = Number(tc.venueChargeAmount) + Number(tc.venueFixedFee)
+  // Codex R4 (P2): la MISMA proyección monetaria que el costo y la liquidación (`proyectarComisionYNeto`): comisión a 2
+  // decimales y neto = bruto − comisión, en vez de una suma cruda a 4 decimales que no cuadra con lo persistido.
+  const { fee: commission, net } = proyectarComisionYNeto(gross, tc.venueChargeAmount, tc.venueFixedFee)
 
   return {
     settlementDateKey: formatInTimeZone(settlementDate, venueTimezone, 'yyyy-MM-dd'),
     gross,
     commission,
-    net: gross - commission,
+    net,
     settlementDays: config.settlementDays,
   }
 }

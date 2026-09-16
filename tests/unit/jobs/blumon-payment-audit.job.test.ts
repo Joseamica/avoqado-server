@@ -6,11 +6,13 @@ jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     $queryRaw: jest.fn(),
+    $executeRaw: jest.fn(),
     payment: { update: jest.fn(), findUnique: jest.fn() },
   },
 }))
 
 const mockedRaw = prisma.$queryRaw as unknown as jest.Mock
+const mockedExecuteRaw = prisma.$executeRaw as unknown as jest.Mock
 const mockedUpdate = prisma.payment.update as jest.Mock
 const mockedFindUnique = prisma.payment.findUnique as jest.Mock
 
@@ -29,28 +31,32 @@ const row = {
  */
 describe('BlumonPaymentAuditJob', () => {
   beforeEach(() => {
-    ;[mockedRaw, mockedUpdate, mockedFindUnique].forEach(m => m.mockReset())
+    ;[mockedRaw, mockedExecuteRaw, mockedUpdate, mockedFindUnique].forEach(m => m.mockReset())
     mockedUpdate.mockResolvedValue({})
+    mockedExecuteRaw.mockResolvedValue(1)
   })
 
-  it('alerts once per webhook-less card payment and MERGES the antispam marker', async () => {
+  it('alerts once per webhook-less card payment and MERGES the antispam marker with an ATOMIC patch (Codex R12-10: never read-then-replace)', async () => {
     mockedRaw.mockResolvedValue([row])
-    mockedFindUnique.mockResolvedValue({ processorData: { existingKey: 'keep-me' } })
 
     const alerted = await new BlumonPaymentAuditJob().runOnce()
 
     expect(alerted).toBe(1)
-    const written = mockedUpdate.mock.calls[0][0].data.processorData
-    // processorData carries blumon* keys written by the webhook service —
-    // a bare overwrite would wipe them.
-    expect(written.existingKey).toBe('keep-me')
-    expect(written.webhookAuditAlertedAt).toBeDefined()
+    // processorData carries blumon* keys, the tariff snapshot and `costPending` written by OTHER writers — a replace from
+    // a prior read restored a stale `costPending: true` over a converged obligation. The merge is `||` in Postgres.
+    expect(mockedFindUnique).not.toHaveBeenCalled()
+    expect(mockedUpdate).not.toHaveBeenCalled()
+    const [strings, ...values] = mockedExecuteRaw.mock.calls[0] as [TemplateStringsArray, ...unknown[]]
+    expect(strings.join('?')).toMatch(/UPDATE "Payment"[\s\S]*END \|\| \?::jsonb[\s\S]*WHERE "id" = \?/)
+    expect(JSON.parse(values[0] as string)).toEqual({ webhookAuditAlertedAt: expect.any(String) })
+    expect(values[1]).toBe('pay_x')
   })
 
   it('quiet pass when nothing is missing', async () => {
     mockedRaw.mockResolvedValue([])
 
     expect(await new BlumonPaymentAuditJob().runOnce()).toBe(0)
+    expect(mockedExecuteRaw).not.toHaveBeenCalled()
     expect(mockedUpdate).not.toHaveBeenCalled()
   })
 

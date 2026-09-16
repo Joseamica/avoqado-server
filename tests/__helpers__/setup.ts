@@ -158,6 +158,9 @@ const prismaMock: any = {
   deliveryActivationRequest: createMockModel(),
   payment: createMockModel(),
   terminalPaymentRequest: createMockModel(),
+  // S1 (checkpoint 1 del webhook, 13-sep): vínculo intento → solicitud; lo consulta el webhook y el arbitraje.
+  terminalPaymentAttemptLink: createMockModel(),
+  providerEventLog: createMockModel(),
   paymentAllocation: createMockModel(),
   posCommand: createMockModel(),
   shift: createMockModel(),

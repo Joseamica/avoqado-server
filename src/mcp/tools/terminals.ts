@@ -1,6 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
-import { DeviceFormFactor, TerminalPaymentRequestStatus, TerminalStatus, TerminalType } from '@prisma/client'
+import { DeviceFormFactor, Prisma, TerminalPaymentRequestStatus, TerminalStatus, TerminalType } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
@@ -207,13 +207,60 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'terminal_payment_requests',
-    'See POS→terminal charge requests for your venues: which terminals are currently BUSY (an active charge in flight) and recent charges from the last 24h with their outcome (completed/failed/cancelled/timed_out/unknown). Use it to tell whether a terminal is stuck (an UNKNOWN result protects the sale until its outcome is confirmed; a reconnect or elapsed time does not prove no charge) or to check what happened to one charge. Read `outcome` to answer "was the card charged?": CHARGED (a Payment exists), NOT_CHARGED (the terminal or the server proved no charge — see `outcomeEvidence` and `evidenceClass`) or UNRESOLVED (nobody proved anything: the charge still reserves the terminal, which is what `busy` means). `status` is the same value the POS sees, so a failed/cancelled charge with no evidence is reported as UNKNOWN on purpose. Each row also carries the customer the POS attached to that charge (customerId, null when the sale was anonymous). A charge the server refused before it ever reached the terminal (terminal offline, busy or from another location; sale cancelled, already paid or missing) is listed as failed with rejectedAtAdmission:true and its reason in failureCode: nothing reached the terminal, so no card was charged. Amounts are in pesos.',
+    'See POS→terminal charge requests for your venues: which terminals are currently BUSY (an active charge in flight) and recent charges from the last 24h with their outcome (completed/failed/cancelled/timed_out/unknown). Use it to tell whether a terminal is stuck (an UNKNOWN result protects the sale until its outcome is confirmed; a reconnect or elapsed time does not prove no charge) or to check what happened to one charge. Read `outcome` to answer "was the card charged?": CHARGED (a Payment exists), NOT_CHARGED (the terminal or the server proved no charge — see `outcomeEvidence` and `evidenceClass`) or UNRESOLVED (nobody proved anything: the charge still reserves the terminal, which is what `busy` means). `status` is the same value the POS sees, so a failed/cancelled charge with no evidence is reported as UNKNOWN on purpose. Each row also carries the customer the POS attached to that charge (customerId, null when the sale was anonymous). A charge the server refused before it ever reached the terminal (terminal offline, busy or from another location; sale cancelled, already paid or missing) is listed as failed with rejectedAtAdmission:true and its reason in failureCode: nothing reached the terminal, so no card was charged. Amounts are in pesos. The processor webhook can confirm a charge before the terminal reports it: each row also says who confirmed it first (`closedVia`: terminal or webhook, keeping the same winning payment), lists the attempts the terminal opened for it (`attempts`, at most 25 per charge; `attemptsTruncated`/`attemptsTotal` say when there are more) and which one won (`winnerAttemptId`). To page through ALL the attempts of one charge, call again with `attemptsRequestId` (that requestId) and, from the second page on, `attemptsAfter` = the `attemptsNextCursor` returned by the previous page.',
     {
       venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues'),
       requestId: z.string().optional().describe('Look up one specific charge request by its requestId'),
+      attemptsRequestId: z
+        .string()
+        .optional()
+        .describe('Page through ALL the attempts of ONE charge (its requestId): returns only `attempts` for it, 25 per page'),
+      attemptsAfter: z
+        .string()
+        .max(64)
+        .optional()
+        .describe('With attemptsRequestId: the `attemptsNextCursor` of the previous page (an attemptId); omit for the first page'),
     },
-    async ({ venueId, requestId }) => {
+    async ({ venueId, requestId, attemptsRequestId, attemptsAfter }) => {
       const where = guard.venueFilter(venueId) // throws if out of scope
+      // Codex R4 (P2): CONTINUACIÓN por solicitud — la ventana de 25 por solicitud dice que está recortada; esto es cómo se
+      // llega al resto. Keyset sobre (createdAt, attemptId), sin tope global que otra solicitud pueda agotar.
+      if (attemptsRequestId) {
+        const fila = await prisma.terminalPaymentRequest.findFirst({
+          where: { ...where, requestId: attemptsRequestId },
+          select: { requestId: true },
+        })
+        if (!fila) return text({ ok: false, error: 'No existe ese cobro en tu alcance' })
+        const TOPE = 25
+        let despues: Prisma.TerminalPaymentAttemptLinkWhereInput = {}
+        if (attemptsAfter) {
+          const ancla = await prisma.terminalPaymentAttemptLink.findUnique({
+            where: { attemptId: attemptsAfter },
+            select: { requestId: true, attemptId: true, createdAt: true },
+          })
+          if (!ancla || ancla.requestId !== fila.requestId) {
+            return text({ ok: false, error: 'El cursor de intentos no pertenece a ese cobro. Vuelve a consultar desde el inicio.' })
+          }
+          despues = { OR: [{ createdAt: { gt: ancla.createdAt } }, { createdAt: ancla.createdAt, attemptId: { gt: ancla.attemptId } }] }
+        }
+        const [lote, attemptsTotal] = await Promise.all([
+          prisma.terminalPaymentAttemptLink.findMany({
+            where: { requestId: fila.requestId, ...despues },
+            orderBy: [{ createdAt: 'asc' }, { attemptId: 'asc' }],
+            take: TOPE + 1,
+            select: { attemptId: true, createdAt: true },
+          }),
+          prisma.terminalPaymentAttemptLink.count({ where: { requestId: fila.requestId } }),
+        ])
+        const hasMore = lote.length > TOPE
+        const attempts = lote.slice(0, TOPE).map(v => ({ attemptId: v.attemptId, linkedAt: new Date(v.createdAt).toISOString() }))
+        return text({
+          requestId: fila.requestId,
+          attempts,
+          attemptsTotal,
+          attemptsNextCursor: hasMore ? attempts[attempts.length - 1].attemptId : null,
+        })
+      }
       const since = new Date(Date.now() - 24 * 60 * 60 * 1000) // rolling 24h (duration, not a calendar date)
       const rows = await prisma.terminalPaymentRequest.findMany({
         where: {
@@ -225,9 +272,73 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         orderBy: { createdAt: 'desc' },
         take: 100,
       })
+      // S8 (webhook como primer confirmador): los intentos que la terminal abrió por solicitud y cuál ganó. `closedVia`
+      // dice QUIÉN confirmó primero (terminal o webhook) y conserva al ganador: el `paymentId` de la fila no cambia.
+      const requestIds = rows.map(r => r.requestId)
+      const winnerIds = rows.map(r => r.paymentId).filter((id): id is string => !!id)
+      const TOPE_POR_SOLICITUD = 25
+      // Codex R3 (P2): la ventana es POR SOLICITUD (`ROW_NUMBER` sobre cada `requestId`), no un tope global que una
+      // solicitud con muchos intentos podía agotar dejando a otra con `attempts: []` y «completa». El recorte se declara
+      // por solicitud con su conteo real (`attemptsTotal`), que sale de un `groupBy` y no de la ventana.
+      const [vinculos, conteos, ganadores] = await Promise.all([
+        requestIds.length
+          ? prisma.$queryRaw<{ requestId: string; attemptId: string; createdAt: Date }[]>`
+              SELECT "requestId", "attemptId", "createdAt" FROM (
+                SELECT "requestId", "attemptId", "createdAt",
+                  ROW_NUMBER() OVER (PARTITION BY "requestId" ORDER BY "createdAt" ASC, "attemptId" ASC) AS rn
+                FROM "TerminalPaymentAttemptLink"
+                WHERE "requestId" IN (${Prisma.join(requestIds)})
+              ) v WHERE rn <= ${TOPE_POR_SOLICITUD}
+              ORDER BY "createdAt" ASC, "attemptId" ASC`
+          : Promise.resolve([]),
+        requestIds.length
+          ? prisma.terminalPaymentAttemptLink.groupBy({
+              by: ['requestId'],
+              where: { requestId: { in: requestIds } },
+              _count: { _all: true },
+            })
+          : Promise.resolve([]),
+        winnerIds.length
+          ? // Acotado por construcción: un ganador por fila listada (≤ 100); el `take` lo deja explícito para el candado estático.
+            prisma.payment.findMany({
+              where: { id: { in: winnerIds } },
+              select: { id: true, idempotencyKey: true },
+              take: winnerIds.length,
+            })
+          : Promise.resolve([]),
+      ])
+      const llaveDelGanador = new Map((ganadores ?? []).map(g => [g.id, g.idempotencyKey ?? null]))
+      // Codex R2 (P2-7): el tope de vínculos por solicitud (25) no puede esconder al GANADOR — su vínculo se trae aparte
+      // por llave y se funde con la lista; si la lista tocó el tope se dice (`attemptsTruncated`).
+      const llavesGanadoras = [...new Set([...llaveDelGanador.values()].filter((k): k is string => !!k))]
+      const vinculosDelGanador =
+        llavesGanadoras.length > 0
+          ? await prisma.terminalPaymentAttemptLink.findMany({
+              where: { attemptId: { in: llavesGanadoras } },
+              select: { requestId: true, attemptId: true, createdAt: true },
+              take: llavesGanadoras.length,
+            })
+          : []
+      const vinculosPorSolicitud = new Map<string, { attemptId: string; linkedAt: string }[]>()
+      const totalPorSolicitud = new Map<string, number>()
+      for (const c of (conteos ?? []) as { requestId: string; _count: { _all: number } }[]) {
+        totalPorSolicitud.set(c.requestId, c._count._all)
+      }
+      for (const v of [...(vinculos ?? []), ...vinculosDelGanador]) {
+        const lista = vinculosPorSolicitud.get(v.requestId) ?? []
+        if (lista.some(x => x.attemptId === v.attemptId)) continue
+        lista.push({ attemptId: v.attemptId, linkedAt: new Date(v.createdAt).toISOString() })
+        vinculosPorSolicitud.set(v.requestId, lista)
+      }
+      const truncadas = new Set<string>()
+      for (const [requestId, total] of totalPorSolicitud) {
+        if (total > (vinculosPorSolicitud.get(requestId)?.length ?? 0)) truncadas.add(requestId)
+      }
       // La MISMA proyección que lee el POS (§8 C.1): el operador y el cajero no pueden ver dos verdades distintas.
       const requests = rows.map(r => {
         const estado = proyectarEstado(r)
+        const attempts = vinculosPorSolicitud.get(r.requestId) ?? []
+        const llaveGanadora = r.paymentId ? (llaveDelGanador.get(r.paymentId) ?? null) : null
         return {
           requestId: estado.requestId,
           terminalId: estado.terminalId,
@@ -253,6 +364,13 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
           // terminal. No es un «rechazo del banco»: ninguna tarjeta se tocó. Sin esto el operador lo leería como declinada.
           failureCode: estado.failureCode,
           rejectedAtAdmission: estado.outcomeEvidence === 'REJECTED_AT_ADMISSION',
+          // S8: quién confirmó primero (terminal | webhook | null si sigue abierta o es anterior al webhook), los intentos
+          // que la terminal abrió para esta solicitud y cuál de ellos ganó (sólo si su llave es uno de esos intentos).
+          closedVia: (r as { closedVia?: string | null }).closedVia ?? null,
+          attempts,
+          winnerAttemptId: llaveGanadora && attempts.some(a => a.attemptId === llaveGanadora) ? llaveGanadora : null,
+          attemptsTruncated: truncadas.has(r.requestId),
+          attemptsTotal: totalPorSolicitud.get(r.requestId) ?? attempts.length,
           createdAt: r.createdAt.toISOString(),
         }
       })
@@ -401,7 +519,8 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
       if (!scope.isSuperAdmin) {
         return text({
           ok: false,
-          error: 'Sólo Avoqado puede cambiar el régimen de desenlaces del cobro remoto. Es parte de la migración de las terminales, no un ajuste del negocio.',
+          error:
+            'Sólo Avoqado puede cambiar el régimen de desenlaces del cobro remoto. Es parte de la migración de las terminales, no un ajuste del negocio.',
         })
       }
       guard.requirePermission('tpv:update', venueId)
@@ -485,7 +604,11 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         entity: 'Venue',
         entityId: venueId,
         venueId,
-        data: { since: since?.toISOString() ?? null, previous: venue.terminalPaymentStrictSince?.toISOString() ?? null, reason: reason ?? null },
+        data: {
+          since: since?.toISOString() ?? null,
+          previous: venue.terminalPaymentStrictSince?.toISOString() ?? null,
+          reason: reason ?? null,
+        },
       })
 
       return text({

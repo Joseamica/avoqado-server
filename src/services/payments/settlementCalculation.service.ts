@@ -1,8 +1,9 @@
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { TransactionCardType, SettlementDayType, Payment } from '@prisma/client'
+import { TransactionCardType, SettlementDayType, Payment, Prisma } from '@prisma/client'
 import { addDays } from 'date-fns'
 import { fromZonedTime, toZonedTime } from 'date-fns-tz'
+import { proyectarComisionYNeto } from './proyeccionMonetaria'
 
 /**
  * Settlement Calculation Service
@@ -217,8 +218,9 @@ export async function findActiveSettlementConfig(
   merchantAccountId: string,
   cardType: TransactionCardType,
   effectiveDate: Date = new Date(),
+  db: Prisma.TransactionClient | typeof prisma = prisma,
 ) {
-  const config = await prisma.settlementConfiguration.findFirst({
+  const config = await db.settlementConfiguration.findFirst({
     where: {
       merchantAccountId,
       cardType,
@@ -308,10 +310,12 @@ export function calculateSettlementDate(
 export async function calculateNetSettlementAmount(
   payment: Payment,
   transactionCost?: { providerCostAmount: number; venueChargeAmount: number; venueFixedFee: number },
+  // Codex R6 (diseño B): dentro de la unidad de convergencia el costo recién creado sólo es visible por SU cliente (`tx`).
+  db: Prisma.TransactionClient | typeof prisma = prisma,
 ): Promise<number> {
   // If transaction cost not provided, fetch it
   if (!transactionCost) {
-    const cost = await prisma.transactionCost.findUnique({
+    const cost = await db.transactionCost.findUnique({
       where: { paymentId: payment.id },
       select: {
         providerCostAmount: true,
@@ -346,7 +350,10 @@ export async function calculateNetSettlementAmount(
   // Net = Gross - Total Venue Charge (percentage + fixed fee)
   // Note: Provider cost is Avoqado's expense, venue charge is what venue pays
   const totalVenueCharge = transactionCost.venueChargeAmount + transactionCost.venueFixedFee
-  const netAmount = grossAmount - totalVenueCharge
+  // Codex R3 (P2): el neto a liquidar sale de la MISMA proyección que `Payment.netAmount` y `VenueTransaction.netAmount`
+  // (comisión a 2 decimales desde los valores persistidos; neto = importe − comisión). Sin esto, $1.11 al 2.25 % liquidaba
+  // $1.09 mientras el Payment decía $1.08: dos verdades para el mismo peso.
+  const netAmount = proyectarComisionYNeto(grossAmount, transactionCost?.venueChargeAmount ?? 0, transactionCost?.venueFixedFee ?? 0).net
 
   logger.debug('Net settlement amount calculated', {
     paymentId: payment.id,
@@ -374,13 +381,14 @@ export async function calculatePaymentSettlement(
   payment: Payment,
   merchantAccountId: string,
   cardType: TransactionCardType,
+  db: Prisma.TransactionClient | typeof prisma = prisma,
 ): Promise<{
   estimatedSettlementDate: Date
   netSettlementAmount: number
   settlementConfigId: string
 } | null> {
   // Find active settlement configuration
-  const config = await findActiveSettlementConfig(merchantAccountId, cardType, payment.createdAt)
+  const config = await findActiveSettlementConfig(merchantAccountId, cardType, payment.createdAt, db)
 
   if (!config) {
     logger.warn('Cannot calculate settlement: no configuration found', {
@@ -395,7 +403,7 @@ export async function calculatePaymentSettlement(
   const estimatedSettlementDate = calculateSettlementDate(payment.createdAt, config)
 
   // Calculate net amount
-  const netSettlementAmount = await calculateNetSettlementAmount(payment)
+  const netSettlementAmount = await calculateNetSettlementAmount(payment, undefined, db)
 
   return {
     estimatedSettlementDate,

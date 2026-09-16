@@ -16,7 +16,7 @@ import prisma from '../../utils/prismaClient'
 import { restockItem } from './inventoryRestock.service'
 import { generateAndStoreReceipt } from './receipt.dashboard.service'
 import { createRefundCommission } from './commission/commission-calculation.service'
-import { createRefundTransactionCost } from '../payments/transactionCost.service'
+import { asegurarObligacionDeCostoNegativo, costearYProyectarReembolso } from '../payments/deferredTransactionCost.service'
 import { logAction } from './activity-log.service'
 import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
 import {
@@ -566,9 +566,7 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
           // El mensaje termina en un toast de la tablet y lo acciona un cajero con el cliente
           // enfrente: un «error» genérico lo único que consigue es que lo intente otra vez.
           // Por eso dice qué se devolvió ya, cuándo, y qué SÍ cabe ahora.
-          const ultimo = existingRefunds
-            .filter(r => r.status === TransactionStatus.COMPLETED)
-            .at(-1)
+          const ultimo = existingRefunds.filter(r => r.status === TransactionStatus.COMPLETED).at(-1)
           const cuando = ultimo ? ` (el último, el ${ultimo.createdAt.toLocaleDateString('es-MX')})` : ''
           const yaDevuelto =
             refundedSalesCents + refundedTipsCents > 0
@@ -752,6 +750,9 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
       // El decremento del turno YA ocurrió arriba: el claim ES el decremento, y sellar el `Payment`
       // después es lo que garantiza que nunca haya un REFUND en un turno al que no se le restó.
 
+      // Codex R12-15: el costo negativo del reembolso es una obligación DURABLE (misma transacción, mutex del original).
+      await asegurarObligacionDeCostoNegativo(tx, original.id, refundPayment.id)
+
       return {
         refundPaymentId: refundPayment.id,
         originalPaymentId: original.id,
@@ -894,7 +895,8 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
   // refund. TPV refunds already do this — mirror the pattern here so dashboard-
   // originated refunds aren't invisible to settlement and other reports that
   // INNER JOIN Payment with TransactionCost.
-  createRefundTransactionCost(result.refundPaymentId, result.originalPaymentId).catch(err => {
+  // Codex R13-5: crea el costo negativo si falta y PROYECTA el reembolso (Payment y VenueTransaction) desde el costo persistido.
+  costearYProyectarReembolso(result.refundPaymentId, result.originalPaymentId).catch(err => {
     logger.error('[REFUND.DASHBOARD] Failed to create refund TransactionCost', {
       refundPaymentId: result.refundPaymentId,
       originalPaymentId: result.originalPaymentId,

@@ -371,6 +371,12 @@ export async function editOrgSaleVerification(req: Request, res: Response): Prom
     res.status(200).json({ success: true, data: updated })
   } catch (error: any) {
     logger.error(`[ORG SALE VERIFICATION] edit error: ${error.message}`)
-    res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Internal server error' })
+    // Codex R13-3: un 409 del protocolo de costo viaja con su `code` y sus `details` (qué campos), como el PUT del dashboard.
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || 'Internal server error',
+      ...(error.code ? { code: error.code } : {}),
+      ...(error.details ? { details: error.details } : {}),
+    })
   }
 }

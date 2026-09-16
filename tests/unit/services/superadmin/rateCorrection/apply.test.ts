@@ -1,6 +1,18 @@
 import { PaymentMethod, CardBrand } from '@prisma/client'
 
+/**
+ * Codex R15-2: el lote toma sus candados con `bloquearLoteConOriginales` (savepoints por `$executeRaw`; la FOTOGRAFÍA de los
+ * candidatos —tipo, venue y puntero— por `$queryRaw`). El doble contesta ESA consulta con las filas de `p1` (REGULAR, del venue
+ * `v1`, sin original) y `[]` a todo lo demás (mutex y revalidación sin protocolo): se stubea la FILA, no un `undefined` mudo.
+ */
+const fotografia = (sql: unknown, ids: string[]) =>
+  Array.isArray(sql) && sql.join('?').includes('AS "original"')
+    ? ids.map(id => ({ id, type: 'REGULAR', venueId: 'v1', original: null }))
+    : []
 const tx = {
+  // Codex R12-4: bajo el mutex (`bloquearPayments`) se revalida `cobrosDelProtocolo` — sin protocolo ⇒ [].
+  $queryRaw: jest.fn(async (sql: unknown) => fotografia(sql, ['p1'])),
+  $executeRaw: jest.fn(),
   payment: { update: jest.fn() },
   venueTransaction: { update: jest.fn() },
   transactionCost: { update: jest.fn(), createMany: jest.fn() },
@@ -9,6 +21,7 @@ const tx = {
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    $queryRaw: jest.fn(async () => []),
     venuePaymentConfig: { findUnique: jest.fn() },
     payment: { findMany: jest.fn() },
     transactionCost: { findMany: jest.fn() },

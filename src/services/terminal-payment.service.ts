@@ -18,10 +18,12 @@
  */
 
 import { v4 as uuidv4 } from 'uuid'
-import { Prisma, TerminalPaymentRequestStatus, TransactionStatus, PaymentMethod } from '@prisma/client'
+import { Prisma, TerminalPaymentRequestStatus, TransactionStatus, PaymentMethod, PaymentType } from '@prisma/client'
 import type { TerminalPaymentRequest as FilaDeCobroRemoto } from '@prisma/client'
 import prisma from '../utils/prismaClient'
 import { terminalRegistry, normalizeTerminalId } from '../communication/sockets/terminal-registry'
+import { PATRON_SQL_TRIM_COMO_JS } from '../utils/terminalSerial'
+import { estadoBancarioSql } from './tpv/estadoBancario'
 import socketManager from '../communication/sockets/managers/socketManager'
 import logger from '../config/logger'
 import AppError, {
@@ -37,6 +39,11 @@ import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { logAction } from './dashboard/activity-log.service'
 import { sendOpsAlert } from './alerts/opsAlert.service'
 import { getVenuesEstrictos } from './terminal-payment-strictness'
+import {
+  procedenciaDelPagoDeSolicitud,
+  whereElegibleComoCobroDeSolicitud,
+  type PagoConProcedencia,
+} from './shared/procedenciaDelPagoDeSolicitud'
 
 export interface TerminalPaymentRequest {
   terminalId: string
@@ -106,6 +113,41 @@ export interface TerminalPaymentStatus {
   reconciliationRequired?: boolean
   createdAt: string // ISO
   updatedAt: string // ISO
+}
+
+/* S6 (checkpoint 1 del webhook): lo que la TERMINAL puede saber de SU intento. El resultado del INTENTO (el Payment
+ * cuya llave es este `attemptId`, nunca el de otro) va aparte del estado de la SOLICITUD (la proyección de siempre).
+ * Ningún valor de `AttemptOutcome` significa «no cobrado»: `NOT_RECORDED` es «este servidor no tiene dinero registrado
+ * para este intento», y la evidencia del procesador viaja aparte (`DECLINED` tampoco es final: S7 admite un `approved`
+ * posterior del mismo intento). */
+export type AttemptOutcome = 'RECORDED' | 'SECOND_CAPTURE_EVIDENCE' | 'REFERENCE_COLLISION_EVIDENCE' | 'NOT_RECORDED'
+export type AttemptProcessorEvidence = 'APPROVED' | 'DECLINED' | 'NONE'
+
+export interface TerminalAttemptStatus {
+  attemptId: string
+  requestId: string
+  attempt: {
+    attemptId: string
+    outcome: AttemptOutcome
+    /** El Payment de ESTE intento (`idempotencyKey === attemptId`), o null. Nunca el ganador de otro intento. */
+    paymentId: string | null
+    paymentStatus: TransactionStatus | null
+    recordedVia: 'terminal' | 'webhook' | null
+    amountCents: number | null
+    tipCents: number | null
+    /** `true` sólo si el Payment de este intento es el que cerró la solicitud. */
+    isWinner: boolean
+    /** En `SECOND_CAPTURE_EVIDENCE`: el Payment que sí ganó la solicitud (el dinero de este intento se concilia). */
+    winnerPaymentId: string | null
+    processorEvidence: AttemptProcessorEvidence
+    processorEvidenceAt: string | null
+    /** Existe un Payment con la llave del intento que NO es atribuible a esta solicitud/terminal: se conservó la incertidumbre. */
+    paymentContradiction: boolean
+    /** Existe evidencia del procesador para este intento con el serial de OTRA terminal: no cuenta, y se declara. */
+    evidenceContradiction: boolean
+    linkedAt: string
+  }
+  request: TerminalPaymentStatus & { closedVia: string | null; winnerAttemptId: string | null }
 }
 
 /**
@@ -193,6 +235,11 @@ interface PendingReceiptPrint {
 }
 
 const PAYMENT_TIMEOUT_MS = 300_000 // 5 minutes
+/** Codex R1 (P2): el vencimiento del long-poll se acota por entorno SÓLO fuera de producción, para PROBAR el vencimiento real. */
+function longPollMs(): number {
+  const override = Number(process.env.TERMINAL_PAYMENT_LONG_POLL_MS)
+  return Number.isFinite(override) && override >= 100 && process.env.NODE_ENV !== 'production' ? override : PAYMENT_TIMEOUT_MS
+}
 const PAYMENT_DELIVERY_ACK_TIMEOUT_MS = 5_000
 const RECEIPT_PRINT_TIMEOUT_MS = 30_000 // 30 seconds
 // Sólo se espera el ACK de "abrí la pantalla", no que alguien pase la tarjeta.
@@ -254,7 +301,10 @@ export function leerProcedencia(value: unknown): TerminalDeliveryRecord[] | null
   // Una sola entrada que no se sabe leer vuelve DESCONOCIDA toda la procedencia. Filtrarla la convertiría en
   // «nunca se entregó» ([]), que es justo lo que autoriza a la sonda a liberar y al replay a reenviar.
   const legibles = deliveries.every(
-    d => !!d && typeof d === 'object' && ((d as TerminalDeliveryRecord).protocol === 'LEGACY' || (d as TerminalDeliveryRecord).protocol === 'DURABLE'),
+    d =>
+      !!d &&
+      typeof d === 'object' &&
+      ((d as TerminalDeliveryRecord).protocol === 'LEGACY' || (d as TerminalDeliveryRecord).protocol === 'DURABLE'),
   )
   return legibles ? (deliveries as TerminalDeliveryRecord[]) : null
 }
@@ -561,9 +611,7 @@ function marcaDeDescuadre(
   const cobradoAmount = Number(payment.amount?.mul(100))
   const cobradoTip = Number(payment.tipAmount?.mul(100))
   const cobrado =
-    Number.isSafeInteger(cobradoAmount) && Number.isSafeInteger(cobradoTip)
-      ? { amountCents: cobradoAmount, tipCents: cobradoTip }
-      : null
+    Number.isSafeInteger(cobradoAmount) && Number.isSafeInteger(cobradoTip) ? { amountCents: cobradoAmount, tipCents: cobradoTip } : null
   const contrato = cobrado ? contratoDescuadrado(pedido, cobrado) : null
   return {
     contrato,
@@ -768,6 +816,27 @@ function busyMessage(
   const desde = blocker.senderDevice ? ` desde ${blocker.senderDevice}` : ''
   return `La terminal ${terminalId} está ocupada por un cobro de ${amount} enviado hace ${minutes} min${desde}`
 }
+
+/**
+ * Codex R14-4: `FOR UPDATE NOWAIT` sobre una fila tomada por otra transacción ⇒ `lock_not_available` (55P03). Prisma lo entrega
+ * como error de consulta cruda con `meta.code` o con el texto de Postgres («could not obtain lock on row»).
+ */
+function esFilaTomadaSinEsperar(error: unknown): boolean {
+  const texto = error instanceof Error ? error.message : String(error)
+  const codigo = (error as { meta?: { code?: unknown } } | null)?.meta?.code
+  return codigo === '55P03' || /55P03|could not obtain lock/i.test(texto)
+}
+
+/** La proyección de un Payment con la que se juzga su procedencia (`procedenciaDelPagoDeSolicitud`). */
+const SELECCION_DE_PROCEDENCIA = {
+  processorData: true,
+  amount: true,
+  tipAmount: true,
+  source: true,
+  orderId: true,
+  terminalPaymentRequestId: true,
+  terminal: { select: { serialNumber: true } },
+} as const
 
 function isPrismaUniqueViolation(err: unknown): boolean {
   return (
@@ -1017,6 +1086,67 @@ function esContencionDeTransaccion(err: unknown): boolean {
 function detallesDelCliente(idDelCliente: string | null): { requestId: string } | undefined {
   return idDelCliente ? { requestId: idDelCliente } : undefined
 }
+
+/** S0 (Codex, 13-sep-2026): el veredicto del ARBITRAJE de un registro que dice pertenecer a una solicitud POS→terminal. */
+export type FilaArbitrada = {
+  requestId: string
+  status: TerminalPaymentRequestStatus
+  orderId: string | null
+  amountCents: number
+  tipCents: number
+}
+export type ArbitrajeDeRegistro =
+  | { kind: 'NO_REQUEST' }
+  | {
+      kind: 'INVALID_ASSOCIATION'
+      reason: 'NO_TERMINAL_IDENTITY' | 'TERMINAL_MISMATCH' | 'ORDER_MISMATCH' | 'ATTEMPT_LINKED_ELSEWHERE'
+    }
+  | { kind: 'WINNER'; row: FilaArbitrada }
+  | { kind: 'RETRY_OF_WINNER'; winnerPaymentId: string }
+  | { kind: 'SECOND_CAPTURE'; winnerPaymentId: string; winnerOrderId: string; winnerIdempotencyKey: string | null; row: FilaArbitrada }
+
+/** S0: lo que `closeRowFromPaymentTx` hizo de verdad. «No lanzó» ≠ ligó. */
+export type CloseRowOutcome =
+  | {
+      bound: true
+      reopened: boolean
+      contractMismatch: boolean
+      /** El estado de la fila ANTES de ligar el Payment. */
+      previousStatus: TerminalPaymentRequestStatus
+      /** EXACTAMENTE la condición de la alarma 🚨 de abajo (`reopened || CANCEL_REQUESTED`): dinero sobre una fila que ya dábamos por cerrada o en cancelación. */
+      alarmed: boolean
+    }
+  | {
+      bound: false
+      reason:
+        | 'NO_REQUEST'
+        | 'ALREADY_BOUND'
+        | 'PAYMENT_NOT_ELIGIBLE'
+        | 'PAYMENT_BOUND_ELSEWHERE'
+        | 'PAYMENT_TAGGED_FOR_ANOTHER_REQUEST'
+        | 'NO_TERMINAL_IDENTITY'
+        | 'TERMINAL_MISMATCH'
+        | 'SOCKET_ATTRIBUTION_MISMATCH'
+        | 'ERROR'
+    }
+
+/**
+ * S1 (checkpoint 1 del webhook como primer confirmador, Codex 13-sep-2026): veredicto del vínculo intento → solicitud
+ * que anuncia la terminal. Viaja ENTERO en el ack del socket — un booleano no le diría a la terminal si puede ejecutar.
+ *  · `LINKED`          intento nuevo sobre una solicitud con la ranura retenida (en vuelo o UNKNOWN);
+ *  · `ALREADY_LINKED`  el mismo vínculo repetido (idempotente, aunque la solicitud ya haya terminado);
+ *  · `LATE_EVIDENCE`   intento nuevo sobre una solicitud ya cerrada: se guarda como evidencia para correlacionar un
+ *                      webhook o una consulta por intento, pero `executionAuthorized: false` — no autoriza el SDK.
+ *  `reason: 'ERROR'` sólo lo pone el cableado del socket cuando el handler revienta; el servicio nunca lo devuelve.
+ */
+export type AttemptLinkAck =
+  | {
+      success: true
+      outcome: 'LINKED' | 'ALREADY_LINKED' | 'LATE_EVIDENCE'
+      requestStatus: TerminalPaymentRequestStatus
+      executionAuthorized: boolean
+    }
+  | { success: false; reason: 'INVALID' | 'NOT_OWNER' | 'ATTEMPT_OWNED_BY_OTHER_REQUEST' | 'ERROR' }
 
 class TerminalPaymentService {
   private unknownCursor: { createdAt: Date; id: string } | null = null
@@ -1271,16 +1401,19 @@ class TerminalPaymentService {
         })
         if (sinIdentidad) {
           // 🚨 token estable para la regla de Better Stack — NO renombrar.
-          logger.error('🚨 [Terminal-payment] Cobro SIN orden admitido en una terminal con una venta sin desenlace — posible recobro de la misma venta', {
-            requestId,
-            venueId,
-            terminalId: lockKey,
-            amountCents: request.amountCents,
-            bloqueadorSinDesenlace: sinIdentidad.requestId,
-            ordenDelBloqueador: sinIdentidad.orderId,
-            montoDelBloqueador: sinIdentidad.amountCents,
-            desde: sinIdentidad.createdAt.toISOString(),
-          })
+          logger.error(
+            '🚨 [Terminal-payment] Cobro SIN orden admitido en una terminal con una venta sin desenlace — posible recobro de la misma venta',
+            {
+              requestId,
+              venueId,
+              terminalId: lockKey,
+              amountCents: request.amountCents,
+              bloqueadorSinDesenlace: sinIdentidad.requestId,
+              ordenDelBloqueador: sinIdentidad.orderId,
+              montoDelBloqueador: sinIdentidad.amountCents,
+              desde: sinIdentidad.createdAt.toISOString(),
+            },
+          )
         }
       }
       await tx.terminalPaymentRequest.create({
@@ -1396,14 +1529,29 @@ class TerminalPaymentService {
       // It does NOT close the DB row — the charge may still have happened, so
       // the watchdog owns the row's fate (reconcile vs Payment, else UNKNOWN).
       const timeout = setTimeout(() => {
+        if (!this.pendingPayments.has(requestId)) return
         this.pendingPayments.delete(requestId)
-        logger.warn(`⏰ [TerminalPayment] Long-poll timed out (row left for watchdog)`, { requestId, terminalId })
-        resolve({
-          requestId,
-          status: 'timeout',
-          errorMessage: 'La terminal no respondió en 5 minutos',
+        // S5: antes de contestar «timeout», la FILA manda. El webhook pudo cerrarla desde otra instancia, o el aviso
+        // en memoria perderse: contestar timeout con el Payment ya escrito manda al POS a consultar (o a un 504) por
+        // un cobro que ya consta. Si la lectura falla, se contesta como siempre: incierto, nunca «no se cobró».
+        void this.desenlaceDurableAlVencer(requestId, venueId).then(durable => {
+          if (durable) {
+            logger.info(`🔁 [TerminalPayment] Long-poll resolved from durable state at timeout`, {
+              requestId,
+              terminalId,
+              paymentId: durable.paymentId,
+            })
+            resolve(durable)
+            return
+          }
+          logger.warn(`⏰ [TerminalPayment] Long-poll timed out (row left for watchdog)`, { requestId, terminalId })
+          resolve({
+            requestId,
+            status: 'timeout',
+            errorMessage: 'La terminal no respondió en 5 minutos',
+          })
         })
-      }, PAYMENT_TIMEOUT_MS)
+      }, longPollMs())
 
       this.pendingPayments.set(requestId, {
         resolve,
@@ -1491,48 +1639,56 @@ class TerminalPaymentService {
         }
         directSocket
           .timeout(PAYMENT_DELIVERY_ACK_TIMEOUT_MS)
-          .emit('terminal:payment_request', paymentPayload, (error: Error | null, response?: { accepted?: boolean; requestId?: string }) => {
-            const stillPending = this.pendingPayments.has(requestId)
-            if (error || response?.accepted !== true || response.requestId !== requestId) {
-              if (!stillPending) return
-              clearTimeout(timeout)
-              this.pendingPayments.delete(requestId)
-              // The terminal may have persisted and executed the command before its ACK
-              // was lost. Resolve as timeout (HTTP 504 for released POS clients), never
-              // as a rejection that grants permission to authorize another charge.
-              const result: TerminalPaymentResult = {
-                requestId,
-                status: 'timeout',
-                errorMessage: 'No pudimos confirmar el cobro. Consulta su estado antes de volver a pasar la tarjeta.',
-              }
-              const persistUnknown = persisted
-                ? prisma.terminalPaymentRequest.updateMany({
-                    where: { requestId, venueId, status: TerminalPaymentRequestStatus.PENDING },
-                    data: {
-                      status: TerminalPaymentRequestStatus.UNKNOWN,
-                      failureCode: error ? 'ACK_TIMEOUT' : 'ACK_REJECTED',
-                    },
+          .emit(
+            'terminal:payment_request',
+            paymentPayload,
+            (error: Error | null, response?: { accepted?: boolean; requestId?: string }) => {
+              const stillPending = this.pendingPayments.has(requestId)
+              if (error || response?.accepted !== true || response.requestId !== requestId) {
+                if (!stillPending) return
+                clearTimeout(timeout)
+                this.pendingPayments.delete(requestId)
+                // The terminal may have persisted and executed the command before its ACK
+                // was lost. Resolve as timeout (HTTP 504 for released POS clients), never
+                // as a rejection that grants permission to authorize another charge.
+                const result: TerminalPaymentResult = {
+                  requestId,
+                  status: 'timeout',
+                  errorMessage: 'No pudimos confirmar el cobro. Consulta su estado antes de volver a pasar la tarjeta.',
+                }
+                const persistUnknown = persisted
+                  ? prisma.terminalPaymentRequest.updateMany({
+                      where: { requestId, venueId, status: TerminalPaymentRequestStatus.PENDING },
+                      data: {
+                        status: TerminalPaymentRequestStatus.UNKNOWN,
+                        failureCode: error ? 'ACK_TIMEOUT' : 'ACK_REJECTED',
+                      },
+                    })
+                  : Promise.resolve()
+                void persistUnknown
+                  .catch(err => {
+                    // PENDING remains a durable, protected obligation if this write fails.
+                    logger.error('❌ [TerminalPayment] Could not persist unknown delivery outcome', { requestId, error: String(err) })
                   })
-                : Promise.resolve()
-              void persistUnknown
-                .catch(err => {
-                  // PENDING remains a durable, protected obligation if this write fails.
-                  logger.error('❌ [TerminalPayment] Could not persist unknown delivery outcome', { requestId, error: String(err) })
-                })
-                .then(() => resolve(result))
-              return
-            }
+                  .then(() => resolve(result))
+                return
+              }
 
-            if (persisted) void this.markDelivered(requestId, venueId)
-            logger.info(`📡 [TerminalPayment] Durable ACK received from socket ${socketId}`, { requestId, terminalId })
-          })
+              if (persisted) void this.markDelivered(requestId, venueId)
+              logger.info(`📡 [TerminalPayment] Durable ACK received from socket ${socketId}`, { requestId, terminalId })
+            },
+          )
       }
       void entregar().catch(err => {
         logger.error('❌ [TerminalPayment] Delivery aborted before emit', { requestId, error: String(err) })
         if (!this.pendingPayments.has(requestId)) return
         clearTimeout(timeout)
         this.pendingPayments.delete(requestId)
-        resolve({ requestId, status: 'timeout', errorMessage: 'No pudimos confirmar el cobro. Consulta su estado antes de volver a pasar la tarjeta.' })
+        resolve({
+          requestId,
+          status: 'timeout',
+          errorMessage: 'No pudimos confirmar el cobro. Consulta su estado antes de volver a pasar la tarjeta.',
+        })
       })
     })
   }
@@ -1576,7 +1732,10 @@ class TerminalPaymentService {
     if (this.anomaliasAuditadas.size >= 10_000) this.anomaliasAuditadas.clear()
     this.anomaliasAuditadas.add(clave)
     try {
-      return !(await prisma.activityLog.findFirst({ where: { action, entity: 'TerminalPaymentRequest', entityId: rowId }, select: { id: true } }))
+      return !(await prisma.activityLog.findFirst({
+        where: { action, entity: 'TerminalPaymentRequest', entityId: rowId },
+        select: { id: true },
+      }))
     } catch (err) {
       this.anomaliasAuditadas.delete(clave)
       throw err
@@ -1592,7 +1751,13 @@ class TerminalPaymentService {
   private async auditReplaySkip(rowId: string, requestId: string, venueId: string, terminalId: string, reason: string): Promise<void> {
     if (!(await this.debeAuditar('TERMINAL_PAYMENT_REPLAY_SKIPPED', rowId))) return
     logger.warn('🔎 [TerminalPayment] Replay skipped: provenance does not allow re-delivery (operator)', { requestId, terminalId, reason })
-    void logAction({ venueId, action: 'TERMINAL_PAYMENT_REPLAY_SKIPPED', entity: 'TerminalPaymentRequest', entityId: rowId, data: { requestId, terminalId, reason } })
+    void logAction({
+      venueId,
+      action: 'TERMINAL_PAYMENT_REPLAY_SKIPPED',
+      entity: 'TerminalPaymentRequest',
+      entityId: rowId,
+      data: { requestId, terminalId, reason },
+    })
   }
 
   /**
@@ -1858,6 +2023,20 @@ class TerminalPaymentService {
         if (winner) return winner
         result = { requestId, status: 'timeout', errorMessage: 'El pago sigue pendiente de confirmar en Avoqado' }
       }
+      // Codex R12-6: un resultado NO-success no tiene ganador. Un `paymentId` que venga en un timeout/failed/cancelled
+      // no se escribe ni en la columna ni en `resultJson` ni viaja al POS: sólo el camino `success` (validado arriba
+      // contra el Payment real) decide quién ganó. El campo se admite en la interfaz para cualquier estado, así que
+      // aquí se descarta — y se deja rastro, porque un cliente que lo manda merece investigarse.
+      if (result.paymentId !== undefined) {
+        logger.error('🚨 [TerminalPayment] Non-success socket result carried a paymentId — ignored, a negative outcome has no winner', {
+          requestId,
+          venueId,
+          status: result.status,
+          ignoredPaymentId: result.paymentId,
+        })
+        const { paymentId: _ignorado, ...sinGanador } = result
+        result = sinGanador
+      }
     } catch (err) {
       logger.error('[TerminalPayment] Cannot verify socket payment evidence', {
         requestId,
@@ -1869,7 +2048,6 @@ class TerminalPaymentService {
     const newStatus = resultToStatus(result.status)
     const data: Prisma.TerminalPaymentRequestUpdateManyMutationInput = {
       status: newStatus,
-      paymentId: result.paymentId ?? undefined,
       resultJson: result as unknown as Prisma.InputJsonValue,
       failureCode: result.status === 'failed' ? 'TPV_CONFIRMED_NO_CHARGE' : null,
       ...(result.status === 'cancelled' ? { cancelDisposition: 'ACCEPTED' } : {}),
@@ -1910,13 +2088,179 @@ class TerminalPaymentService {
   }
 
   /**
-   * Close the arbitration row from the TPV's idempotent REST payment-record,
-   * INSIDE that record's transaction so it commits/rolls back with the Payment.
-   * This is the ROBUST close path (survives socket loss / server restart):
-   * once the TPV threads `terminalPaymentRequestId` (= the POS requestId), a
-   * recorded Payment always closes the row. Old TPVs don't send it → the socket
-   * result / watchdog close it instead. Best-effort: never throws (must not roll
-   * back a real money write).
+   * S0 (checkpoint 1 del webhook, Codex 13-sep-2026): el ARBITRAJE de un registro que dice pertenecer a una solicitud
+   * POS→terminal. Corre DENTRO de la transacción del registrador, con la fila de la solicitud bajo `FOR UPDATE`
+   * (orden de candados: [sesión de vales → tickets →] Order → TerminalPaymentRequest → Payment → Shift), ANTES de
+   * reclamar turno o de crear cualquier Payment. Decide una de cinco cosas:
+   *
+   *  · `NO_REQUEST`          la solicitud no existe en este venue: cobro normal, sin ligar (como hoy);
+   *  · `INVALID_ASSOCIATION` el payload nombra una solicitud que NO es de esta terminal AUTENTICADA, o de otra orden,
+   *                          o el intento ya está vinculado (S1) a otra solicitud: el cobro se registra NORMAL (el
+   *                          dinero es real y no se pierde) pero sin ligar ni tocar al ganador ajeno, con 🚨 — el
+   *                          `requestId` del payload no puede decidir qué cobro se excluye de ventas (P1-2);
+   *  · `WINNER`              todavía no hay ganador: este intento lo será (el vínculo lo escribe `closeRowFromPaymentTx`);
+   *  · `RETRY_OF_WINNER`     el ganador existe y es ESTE mismo intento (misma llave): reintento idempotente;
+   *  · `SECOND_CAPTURE`      el ganador existe y es OTRO intento: posible segunda captura — evidencia + conciliación.
+   *
+   * El ganador es `row.paymentId` (también en filas históricas ligadas sólo por `processorData`) o el Payment COMPLETED
+   * no-REFUND con `Payment.terminalPaymentRequestId` (el índice único parcial garantiza a lo sumo uno). Un ganador
+   * reembolsado después sigue siendo el ganador: la fila conserva su `paymentId`.
+   */
+  async arbitrarRegistroDeSolicitud(
+    tx: Prisma.TransactionClient,
+    input: {
+      requestId: string
+      venueId: string
+      attemptKey: string | null
+      targetOrderId: string | null
+      authenticatedSerial: string | null
+    },
+  ): Promise<ArbitrajeDeRegistro> {
+    await tx.$queryRaw`SELECT "id" FROM "TerminalPaymentRequest" /* arbitraje */ WHERE "requestId" = ${input.requestId} AND "venueId" = ${input.venueId} FOR UPDATE`
+    const row = await tx.terminalPaymentRequest.findFirst({
+      where: { requestId: input.requestId, venueId: input.venueId },
+      select: { requestId: true, status: true, orderId: true, terminalId: true, paymentId: true, amountCents: true, tipCents: true },
+    })
+    if (!row) return { kind: 'NO_REQUEST' }
+    const rechazo = (reason: Extract<ArbitrajeDeRegistro, { kind: 'INVALID_ASSOCIATION' }>['reason']): ArbitrajeDeRegistro => {
+      logger.error(
+        '🚨 [TerminalPayment] Registro con una solicitud que NO le corresponde — se registra como cobro normal, sin ligar ni tocar al ganador',
+        {
+          requestId: input.requestId,
+          venueId: input.venueId,
+          reason,
+          requestTerminalId: row.terminalId,
+          authenticatedSerial: input.authenticatedSerial,
+          requestOrderId: row.orderId,
+          targetOrderId: input.targetOrderId,
+          attemptKey: input.attemptKey,
+        },
+      )
+      return { kind: 'INVALID_ASSOCIATION', reason }
+    }
+    if (!input.authenticatedSerial) return rechazo('NO_TERMINAL_IDENTITY')
+    if (normalizeTerminalId(input.authenticatedSerial) !== normalizeTerminalId(row.terminalId)) return rechazo('TERMINAL_MISMATCH')
+    if (input.targetOrderId && row.orderId && input.targetOrderId !== row.orderId) return rechazo('ORDER_MISMATCH')
+    if (input.attemptKey) {
+      const link = await tx.terminalPaymentAttemptLink.findUnique({ where: { attemptId: input.attemptKey }, select: { requestId: true } })
+      if (link && link.requestId !== row.requestId) return rechazo('ATTEMPT_LINKED_ELSEWHERE')
+    }
+    const fila: FilaArbitrada = {
+      requestId: row.requestId,
+      status: row.status,
+      orderId: row.orderId,
+      amountCents: row.amountCents,
+      tipCents: row.tipCents,
+    }
+    const seleccion = {
+      id: true,
+      orderId: true,
+      idempotencyKey: true,
+      processorData: true,
+      terminalPaymentRequestId: true,
+      terminal: { select: { serialNumber: true } },
+    } as const
+    // Codex R12-6: el puntero de la fila NO decide por sí solo. Un ganador histórico tiene que ser un cobro de ESTA
+    // solicitud con el MISMO criterio que el cierre financiero (elegible, etiquetado con esta solicitud y cobrado en esta
+    // terminal). Un puntero sin procedencia —o a un Payment que ya no existe en este venue— se ignora con 🚨 y bitácora,
+    // y se cae a la columna del ganador (`Payment.terminalPaymentRequestId`, índice único parcial): así el cargo auténtico
+    // liga la fila en vez de quedar como «segunda captura» de una venta ajena.
+    let winner = row.paymentId
+      ? await tx.payment.findFirst({
+          where: { id: row.paymentId, venueId: input.venueId, ...whereElegibleComoCobroDeSolicitud(row, 'ganador') },
+          select: seleccion,
+        })
+      : null
+    let punteroIgnorado: { reason: string } | null = null
+    if (row.paymentId) {
+      const procedencia = winner ? procedenciaDelPagoDeSolicitud(winner, row, { fase: 'ganador' }) : null
+      if (!procedencia?.acreditada) {
+        punteroIgnorado = { reason: procedencia ? procedencia.reason : 'WINNER_MISSING' }
+        winner = null
+      }
+    }
+    if (!winner)
+      winner = await tx.payment.findFirst({
+        where: {
+          venueId: input.venueId,
+          terminalPaymentRequestId: row.requestId,
+          ...(row.paymentId ? { id: { not: row.paymentId } } : {}),
+          ...whereElegibleComoCobroDeSolicitud({ orderId: null }, 'ligar'),
+        },
+        select: seleccion,
+      })
+    if (punteroIgnorado && row.paymentId)
+      this.punteroSinProcedencia(
+        {
+          requestId: row.requestId,
+          venueId: input.venueId,
+          ignoredPaymentId: row.paymentId,
+          reason: punteroIgnorado.reason,
+          origen: 'arbitraje',
+        },
+        // Si este intento va a ser el ganador, el cierre reemplaza el puntero y deja la bitácora; si no, nadie más lo hará.
+        winner !== null,
+      )
+    if (!winner) return { kind: 'WINNER', row: fila }
+    if (input.attemptKey && winner.idempotencyKey === input.attemptKey) return { kind: 'RETRY_OF_WINNER', winnerPaymentId: winner.id }
+    return {
+      kind: 'SECOND_CAPTURE',
+      winnerPaymentId: winner.id,
+      winnerOrderId: winner.orderId,
+      winnerIdempotencyKey: winner.idempotencyKey,
+      row: fila,
+    }
+  }
+
+  /**
+   * Codex R12-6: la fila apunta a un Payment que NO es un cobro acreditado de esta solicitud (fila histórica contaminada
+   * por un resultado no-success del socket, o un ganador que ya no existe en este venue). Se deja rastro en el log (🚨) y en
+   * la bitácora — fuera de la transacción del llamador, best-effort — y el llamador sigue como si no hubiera puntero.
+   */
+  private punteroSinProcedencia(
+    ctx: {
+      requestId: string
+      venueId: string
+      ignoredPaymentId: string
+      reason: string
+      origen: 'arbitraje' | 'cierre'
+    },
+    /** UNA entrada de bitácora por puntero ignorado: la escribe quien lo REEMPLAZA (el cierre), o el árbitro cuando nadie lo va a reemplazar. */
+    bitacora: boolean,
+  ) {
+    logger.error('🚨 [TerminalPayment] The row points at a winner that is NOT an accredited charge of this request — pointer ignored', ctx)
+    if (!bitacora) return
+    void logAction({
+      action: 'TERMINAL_PAYMENT_UNACCREDITED_WINNER_IGNORED',
+      entity: 'TerminalPaymentRequest',
+      entityId: ctx.requestId,
+      venueId: ctx.venueId,
+      data: {
+        requestId: ctx.requestId,
+        ignoredPaymentId: ctx.ignoredPaymentId,
+        reason: ctx.reason,
+        origen: ctx.origen,
+        resolution:
+          'El puntero no era un cobro acreditado de esta solicitud y se ignoró; el cargo auténtico liga la fila. Revisa por qué la fila apuntaba ahí.',
+      },
+    })
+  }
+
+  /**
+   * Cierra la fila POS→terminal con un Payment REGISTRADO — la verdad de que el dinero se movió, que gana a
+   * cualquier cancel/fail/timeout previo (reconcilia cualquier fila no ligada a COMPLETED para que el estado nunca
+   * diga «cancelado» de un cobro que sí cayó, que es lo que invita al cajero a volver a cobrar). Camino ROBUSTO
+   * (sobrevive a la caída del socket / reinicio): cuando la TPV manda `terminalPaymentRequestId` (= el requestId
+   * del POS), un Payment registrado liga la fila; las TPV viejas no lo mandan → cierran por socket o por el vigía.
+   * Best-effort: nunca lanza (no puede revertir una escritura real de dinero).
+   *
+   * S0 (checkpoint 1 del webhook, 13-sep-2026): DEVUELVE lo que hizo — «no lanzó» ≠ ligó (Codex). Escribe
+   * `Payment.terminalPaymentRequestId` (la columna del ganador, con su índice único parcial) sólo si el CAS sobre la
+   * fila ganó, y PRIMERO la fila, DESPUÉS el Payment: al revés, el perdedor de una carrera estampaba su Payment con
+   * la columna y el índice reventaba DENTRO de la transacción del registrador, que en Postgres queda abortada — el
+   * dinero del perdedor no se registraba. Y una fila ya COMPLETED pero SIN `paymentId` (cerrada por el socket antes
+   * de que llegara el registro) SÍ liga: antes salía en falso y dejaba al primer registro sin vínculo, y al segundo
+   * sin nadie que le dijera que era el segundo. Una fila YA ligada nunca cambia de ganador (idempotente).
    */
   async closeRowFromPaymentTx(
     tx: Prisma.TransactionClient,
@@ -1931,49 +2275,74 @@ class TerminalPaymentService {
      * lo acepta del cuerpo). Es la procedencia cuando la FK `Payment.terminal` no resolvió.
      */
     capturedBySerial?: string | null,
-  ): Promise<void> {
+    /** S8: quién cerró. Se escribe UNA vez, junto con `paymentId`, y conserva al ganador original. */
+    closedVia: 'terminal' | 'webhook' = 'terminal',
+  ): Promise<CloseRowOutcome> {
     try {
-      // A recorded Payment is GROUND TRUTH that money moved — it beats any prior
-      // cancel/fail/timeout close. Reconcile ANY non-COMPLETED row to COMPLETED so the
-      // status endpoint can NEVER report cancelled/failed for a charge that actually
-      // landed (which would invite a cashier re-charge → double charge). This closes the
-      // window where a POS-cancelled row is moved to CANCELLED by the watchdog (30s grace)
-      // BEFORE the TPV records the Payment (AngelPay records "minutes later").
-      // Idempotent: an already-COMPLETED row is left untouched (never clobber its paymentId).
+      // P1-5 (Codex): el MISMO orden de candados que el registrador — la SOLICITUD antes que el Payment — también
+      // cuando se llega desde el socket. (Payment → Request) contra (Request → Payment) es un interbloqueo.
+      await tx.$queryRaw`SELECT "id" FROM "TerminalPaymentRequest" WHERE "requestId" = ${requestId} AND "venueId" = ${venueId} FOR UPDATE`
       const before = await tx.terminalPaymentRequest.findFirst({
         where: { requestId, venueId },
-        select: { status: true, amountCents: true, tipCents: true, orderId: true, terminalId: true },
+        select: { status: true, amountCents: true, tipCents: true, orderId: true, terminalId: true, paymentId: true },
       })
-      if (!before || before.status === TerminalPaymentRequestStatus.COMPLETED) return
+      if (!before) return { bound: false, reason: 'NO_REQUEST' }
+      const solicitud = { requestId, orderId: before.orderId, terminalId: before.terminalId }
+      const seleccionDeProcedencia = {
+        processorData: true,
+        amount: true,
+        tipAmount: true,
+        source: true,
+        orderId: true,
+        terminalPaymentRequestId: true,
+        terminal: { select: { serialNumber: true } },
+      } as const
+      // Codex R12-6: «ya ligada» sólo si el puntero es un cobro ACREDITADO de esta solicitud (el mismo criterio que el
+      // árbitro). Un puntero sin procedencia (una fila histórica contaminada por un resultado no-success del socket) no
+      // puede excluir al cargo auténtico: se reemplaza EXACTAMENTE ese puntero (CAS sobre su valor), con 🚨 y bitácora.
+      let punteroAReemplazar: string | null = null
+      if (before.paymentId) {
+        if (before.paymentId === paymentId) return { bound: false, reason: 'ALREADY_BOUND' }
+        const actual = await tx.payment.findFirst({
+          where: { id: before.paymentId, venueId, ...whereElegibleComoCobroDeSolicitud(before, 'ganador') },
+          select: seleccionDeProcedencia,
+        })
+        const procedencia = actual ? procedenciaDelPagoDeSolicitud(actual, solicitud, { fase: 'ganador' }) : null
+        if (procedencia?.acreditada) return { bound: false, reason: 'ALREADY_BOUND' }
+        this.punteroSinProcedencia(
+          {
+            requestId,
+            venueId,
+            ignoredPaymentId: before.paymentId,
+            reason: procedencia ? procedencia.reason : 'WINNER_MISSING',
+            origen: 'cierre',
+          },
+          true,
+        )
+        punteroAReemplazar = before.paymentId
+      }
 
       // Concurrent callbacks cannot bind the same Payment to two requests.
       await tx.$queryRaw`SELECT "id" FROM "Payment" WHERE "id" = ${paymentId} AND "venueId" = ${venueId} FOR UPDATE`
       const payment = await tx.payment.findFirst({
-        where: {
-          id: paymentId,
-          venueId,
-          status: TransactionStatus.COMPLETED,
-          method: { in: [PaymentMethod.CREDIT_CARD, PaymentMethod.DEBIT_CARD] },
-          ...(before.orderId ? { orderId: before.orderId } : {}),
-        },
-        select: { processorData: true, amount: true, tipAmount: true, source: true, terminal: { select: { serialNumber: true } } },
+        where: { id: paymentId, venueId, ...whereElegibleComoCobroDeSolicitud(before, 'ligar') },
+        select: seleccionDeProcedencia,
       })
-      if (!payment) return
-      const claimed = await tx.terminalPaymentRequest.findFirst({
-        where: { paymentId, requestId: { not: requestId } },
-        select: { id: true },
-      })
-      if (claimed) return
-      const metadata =
-        payment.processorData && typeof payment.processorData === 'object' && !Array.isArray(payment.processorData)
-          ? payment.processorData
-          : {}
-      if (metadata.terminalPaymentRequestId && metadata.terminalPaymentRequestId !== requestId) {
+      if (!payment) return { bound: false, reason: 'PAYMENT_NOT_ELIGIBLE' }
+      // Codex R13-7: una reclamación de OTRA solicitud sobre este Payment sólo veta el cierre si está ACREDITADA por el mismo
+      // criterio (elegible para ella, etiquetado con ella y cobrado en su terminal). Un puntero sin procedencia es un ALIAS
+      // contaminado: se registra y se resuelve (CAS sobre su valor), y el cargo auténtico sigue cerrando ESTA solicitud.
+      const ajenas = await this.reclamacionesAjenas(tx, { paymentId, venueId, requestId, origen: 'cierre' }, payment)
+      if (ajenas.vetada) return { bound: false, reason: 'PAYMENT_BOUND_ELSEWHERE' }
+      // El MISMO criterio de procedencia que el árbitro (`procedenciaDelPagoDeSolicitud`, fase «ligar»): la etiqueta de
+      // OTRA solicitud rechaza; la de ésta la escribe este mismo cierre más abajo.
+      const procedencia = procedenciaDelPagoDeSolicitud(payment, solicitud, { fase: 'ligar', capturedBySerial })
+      if (!procedencia.acreditada && procedencia.reason === 'PAYMENT_TAGGED_FOR_ANOTHER_REQUEST') {
         logger.error('[TerminalPayment] Refused to bind one payment to a different request', { requestId, paymentId, venueId })
-        return
+        return { bound: false, reason: 'PAYMENT_TAGGED_FOR_ANOTHER_REQUEST' }
       }
       // 🔴 ATRIBUCIÓN FÍSICA, en CUALQUIER origen. La estrictez de abajo estaba condicionada a
-      // `source === 'SOCKET'`, y las dos llamadas reales (`payment.tpv.service.ts:2546` y `:4009`)
+      // `source === 'SOCKET'`, y las dos llamadas reales (`payment.tpv.service.ts`, orden y venta rápida)
       // entran por el valor por DEFECTO, que es REST: un Payment cobrado en OTRO aparato cerraba
       // esta solicitud, liberaba el slot de una terminal que quizá seguía ejecutando el suyo y daba
       // por cobrado un importe que no salió de ahí. El Payment NO se toca ni se le estampa la
@@ -1986,28 +2355,27 @@ class TerminalPaymentService {
       // de las tres no es un cliente viejo: es una llamada sin procedencia, y NO cierra (auditoría del
       // 10-sep: «la ausencia no prueba que el Payment sea del aparato reservado»). El Payment se
       // conserva y la fila queda para la recuperación.
-      const serialPersistido = typeof metadata.deviceSerialNumber === 'string' ? metadata.deviceSerialNumber : null
-      const serialDelPago = payment.terminal?.serialNumber ?? capturedBySerial ?? serialPersistido
-      if (!serialDelPago) {
-        logger.error('🚨 [Terminal-payment] Refused to close a request: the Payment carries no accredited terminal identity', {
-          requestId,
-          paymentId,
-          venueId,
-          requestTerminalId: before.terminalId,
-          source,
-        })
-        return
-      }
-      if (before.terminalId && normalizeTerminalId(serialDelPago) !== normalizeTerminalId(before.terminalId)) {
+      if (!procedencia.acreditada) {
+        if (procedencia.reason === 'NO_TERMINAL_IDENTITY') {
+          logger.error('🚨 [Terminal-payment] Refused to close a request: the Payment carries no accredited terminal identity', {
+            requestId,
+            paymentId,
+            venueId,
+            requestTerminalId: before.terminalId,
+            source,
+          })
+          return { bound: false, reason: 'NO_TERMINAL_IDENTITY' }
+        }
         logger.error('🚨 [Terminal-payment] Refused to close a request with a Payment captured by another terminal', {
           requestId,
           paymentId,
           venueId,
           requestTerminalId: before.terminalId,
-          paymentTerminalSerial: serialDelPago,
+          reason: procedencia.reason,
         })
-        return
+        return { bound: false, reason: 'TERMINAL_MISMATCH' }
       }
+      const { serial: serialDelPago, serialPersistido, metadata } = procedencia
       if (
         source === 'SOCKET' &&
         (metadata.terminalPaymentRequestId !== requestId ||
@@ -2015,35 +2383,28 @@ class TerminalPaymentService {
           !payment.terminal?.serialNumber ||
           normalizeTerminalId(payment.terminal.serialNumber) !== normalizeTerminalId(before.terminalId))
       )
-        return
+        return { bound: false, reason: 'SOCKET_ATTRIBUTION_MISMATCH' }
       reported ??= { amountCents: Number(payment.amount.mul(100)), tipCents: Number(payment.tipAmount.mul(100)) }
-      await tx.payment.updateMany({
-        where: { id: paymentId, venueId },
-        data: {
-          processorData: {
-            ...metadata,
-            terminalPaymentRequestId: requestId,
-            // La procedencia se CONSERVA aunque la FK no haya resuelto: es lo que permite a la
-            // recuperación acreditar este Payment después.
-            ...(serialPersistido ? {} : { deviceSerialNumber: serialDelPago }),
-          } as Prisma.InputJsonObject,
-        },
-      })
 
       // `lateResult` = this row had already been closed/timed-out when the money truth
-      // arrived (reopened), vs a normal in-flight close.
-      const reopened = !IN_FLIGHT.includes(before.status)
+      // arrived (reopened), vs a normal in-flight close. Una fila COMPLETED sin `paymentId` la cerró la TERMINAL con
+      // éxito antes de que llegara el registro (la secuencia normal de AngelPay): ligarla no es reabrirla.
+      const cerradaConExitoSinPago = before.status === TerminalPaymentRequestStatus.COMPLETED
+      const reopened = !IN_FLIGHT.includes(before.status) && !cerradaConExitoSinPago
       // La MISMA regla que aplica el barrido de recuperación, en un solo sitio.
       const descuadre = contratoDescuadrado(before, reported)
       const requested = descuadre?.requested
       const reportedContract = descuadre?.reported
       const contractMismatch = descuadre !== null
 
-      await tx.terminalPaymentRequest.updateMany({
-        where: { requestId, venueId, status: { not: TerminalPaymentRequestStatus.COMPLETED } },
+      // PRIMERO la fila: el CAS es «todavía sin ganador» (`paymentId: null`), no «todavía no COMPLETED» — o, Codex R12-6,
+      // «todavía con el puntero sin procedencia que se va a reemplazar» (nunca un ganador acreditado escrito en medio).
+      const ganada = await tx.terminalPaymentRequest.updateMany({
+        where: { requestId, venueId, paymentId: punteroAReemplazar },
         data: {
           status: TerminalPaymentRequestStatus.COMPLETED,
           paymentId,
+          closedVia,
           lateResult: reopened,
           cancelDisposition: null,
           resultJson: { requestId, status: 'success', paymentId },
@@ -2060,6 +2421,22 @@ class TerminalPaymentService {
                 },
               }
             : {}),
+        },
+      })
+      if (ganada.count !== 1) return { bound: false, reason: 'ALREADY_BOUND' }
+
+      // DESPUÉS el Payment: la columna del ganador y la procedencia, en la misma transacción que la fila.
+      await tx.payment.updateMany({
+        where: { id: paymentId, venueId },
+        data: {
+          terminalPaymentRequestId: requestId,
+          processorData: {
+            ...metadata,
+            terminalPaymentRequestId: requestId,
+            // La procedencia se CONSERVA aunque la FK no haya resuelto: es lo que permite a la
+            // recuperación acreditar este Payment después.
+            ...(serialPersistido ? {} : { deviceSerialNumber: serialDelPago }),
+          } as Prisma.InputJsonObject,
         },
       })
 
@@ -2084,7 +2461,8 @@ class TerminalPaymentService {
       // con más probabilidad de ser un DOBLE COBRO, y era el único que se cerraba en silencio.
       // Colgarlo de `reopened` lo vuelve exhaustivo por construcción: un estado nuevo del enum
       // queda cubierto salvo que alguien lo declare explícitamente en IN_FLIGHT.
-      if (reopened || before.status === TerminalPaymentRequestStatus.CANCEL_REQUESTED) {
+      const alarmed = reopened || before.status === TerminalPaymentRequestStatus.CANCEL_REQUESTED
+      if (alarmed) {
         logger.error(
           `🚨 [Terminal-payment] Payment recorded for an already-${before.status} request — reconciled to COMPLETED (money moved despite cancel/close/release)`,
           {
@@ -2092,15 +2470,19 @@ class TerminalPaymentService {
             paymentId,
             venueId,
             priorStatus: before.status,
+            closedVia,
           },
         )
       }
+      // `alarmed` viaja en el desenlace para que quien cierra por WEBHOOK deje bitácora con la MISMA condición (S8), no con otra lista.
+      return { bound: true, reopened, contractMismatch, previousStatus: before.status, alarmed }
     } catch (err) {
       logger.error(`❌ [TerminalPayment] closeRowFromPaymentTx failed (non-fatal)`, {
         requestId,
         paymentId,
         error: err instanceof Error ? err.message : String(err),
       })
+      return { bound: false, reason: 'ERROR' }
     }
   }
 
@@ -2275,7 +2657,16 @@ class TerminalPaymentService {
         status: TransactionStatus.COMPLETED,
         method: { in: [PaymentMethod.CREDIT_CARD, PaymentMethod.DEBIT_CARD] },
       },
-      select: { id: true, source: true, amount: true, tipAmount: true, processorData: true, terminal: { select: { serialNumber: true } } },
+      select: {
+        id: true,
+        source: true,
+        amount: true,
+        tipAmount: true,
+        orderId: true,
+        processorData: true,
+        terminalPaymentRequestId: true,
+        terminal: { select: { serialNumber: true } },
+      },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     })
     if (!candidate) return null
@@ -2297,11 +2688,203 @@ class TerminalPaymentService {
       })
       return null
     }
-    const claimedByAnother = await prisma.terminalPaymentRequest.findFirst({
-      where: { paymentId: candidate.id, venueId: row.venueId, id: { not: row.id } },
-      select: { id: true },
+    // Codex R13-7: el barrido aplica el MISMO criterio que el cierre — sólo una reclamación ajena ACREDITADA descarta al candidato;
+    // un alias contaminado se registra, se resuelve y el cargo auténtico cierra la fila.
+    // Codex R14-4: la limpieza ESCRIBE (CAS por alias con NOWAIT + SAVEPOINT), así que corre en una transacción REAL y con el
+    // MISMO orden de candados que el cierre — la solicitud propia, después el Payment, y las ajenas sólo sin esperar.
+    const ajenas = await prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT "id" FROM "TerminalPaymentRequest" WHERE "id" = ${row.id} FOR UPDATE`
+      await tx.$queryRaw`SELECT "id" FROM "Payment" WHERE "id" = ${candidate.id} AND "venueId" = ${row.venueId} FOR UPDATE`
+      return this.reclamacionesAjenas(
+        tx,
+        { paymentId: candidate.id, venueId: row.venueId, requestId: row.requestId, origen: 'barrido' },
+        candidate,
+      )
     })
-    return claimedByAnother ? null : candidate
+    return ajenas.vetada ? null : candidate
+  }
+
+  /**
+   * Codex R14-4: una fila UNKNOWN cuyo puntero NO es un cobro acreditado suyo — un alias que un cierre ajeno DIFIRIÓ (la fila
+   * estaba tomada en ese instante) o una contaminación histórica — lo suelta en el barrido, aunque el cierre que lo difirió ya
+   * haya terminado COMPLETED: el diferido queda recuperable por el propio barrido, no por una bitácora sin consumidor. Bajo el
+   * candado de la fila (el primero del orden del cierre), releyendo el puntero y revalidando la procedencia antes del CAS. Un
+   * puntero ACREDITADO (un cobro real suyo que todavía no cierra la fila) se conserva.
+   */
+  private async retirarAliasPropio(row: {
+    id: string
+    requestId: string
+    orderId: string | null
+    terminalId: string
+    venueId: string
+    paymentId: string | null
+  }): Promise<boolean> {
+    if (!row.paymentId) return false
+    return prisma.$transaction(async tx => {
+      const [vigente] = await tx.$queryRaw<{ paymentId: string | null }[]>`
+        SELECT "paymentId" FROM "TerminalPaymentRequest" WHERE "id" = ${row.id} AND "status" = 'UNKNOWN' FOR UPDATE`
+      if (!vigente?.paymentId) return false
+      const pago = await tx.payment.findFirst({
+        where: { id: vigente.paymentId, venueId: row.venueId, ...whereElegibleComoCobroDeSolicitud(row, 'ganador') },
+        select: SELECCION_DE_PROCEDENCIA,
+      })
+      const procedencia = pago ? procedenciaDelPagoDeSolicitud(pago, row, { fase: 'ganador' }) : null
+      if (procedencia?.acreditada) return false
+      const retirado = await tx.terminalPaymentRequest.updateMany({
+        where: { id: row.id, paymentId: vigente.paymentId },
+        data: { paymentId: null },
+      })
+      if (retirado.count !== 1) return false
+      const contexto = {
+        requestId: row.requestId,
+        paymentId: vigente.paymentId,
+        venueId: row.venueId,
+        reason: procedencia ? procedencia.reason : 'WINNER_MISSING',
+        origen: 'barrido' as const,
+      }
+      logger.error('🚨 [TerminalPayment] UNKNOWN row pointed at a Payment WITHOUT provenance — stale alias retired by the sweep', contexto)
+      void logAction({
+        action: 'TERMINAL_PAYMENT_CONTAMINATED_ALIAS_RESOLVED',
+        entity: 'TerminalPaymentRequest',
+        entityId: row.requestId,
+        venueId: row.venueId,
+        data: {
+          ...contexto,
+          resolution:
+            'La solicitud apuntaba a un Payment que no es un cobro acreditado suyo (alias diferido o contaminado); el barrido retiró ese puntero. Revisa por qué la fila apuntaba ahí.',
+        },
+      })
+      return true
+    })
+  }
+
+  /**
+   * Codex R13-7: las reclamaciones de OTRAS solicitudes (del mismo venue) sobre un Payment que va a cerrar `requestId`. R12-6
+   * corrigió «mi solicitud apunta a un Payment ajeno»; quedaba la inversa: «otra solicitud apunta a MI Payment», que vetaba el
+   * cierre por MERA EXISTENCIA del puntero (`PAYMENT_BOUND_ELSEWHERE`), también en el barrido — una fila UNKNOWN contaminada por el
+   * antiguo productor no-success podía dejar a la solicitud auténtica reteniendo la terminal con su cobro demostrado.
+   *  · Una reclamación ACREDITADA por el criterio compartido (`procedenciaDelPagoDeSolicitud`, fase «ganador»: elegible para ESA
+   *    solicitud —misma orden si la tiene—, etiquetado con ella y cobrado en su terminal) VETA: el dueño auténtico se conserva.
+   *  · Un puntero sin procedencia es un ALIAS contaminado: 🚨, bitácora `TERMINAL_PAYMENT_CONTAMINATED_ALIAS_RESOLVED` y se
+   *    retira EXACTAMENTE ese puntero (CAS sobre su valor) — nunca se sobrescribe una reclamación acreditada concurrente (si el
+   *    valor ya cambió, el CAS no toca nada). Acotado: un Payment tiene una o dos reclamaciones; más es corrupción visible.
+   */
+  private async reclamacionesAjenas(
+    db: Pick<Prisma.TransactionClient, 'terminalPaymentRequest' | '$queryRaw' | '$executeRaw'>,
+    ctx: { paymentId: string; venueId: string; requestId: string; origen: 'cierre' | 'barrido' },
+    pago: PagoConProcedencia & { orderId: string | null },
+  ): Promise<{ vetada: true; por: string } | { vetada: false; aliasResueltos: number; aliasDiferidos: number }> {
+    const otras = await db.terminalPaymentRequest.findMany({
+      where: { paymentId: ctx.paymentId, venueId: ctx.venueId, requestId: { not: ctx.requestId } },
+      select: { id: true, requestId: true, orderId: true, terminalId: true, status: true },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: 10,
+    })
+    let aliasResueltos = 0
+    let aliasDiferidos = 0
+    for (const otra of otras) {
+      const elegible = !otra.orderId || pago.orderId === otra.orderId
+      const procedencia = elegible ? procedenciaDelPagoDeSolicitud(pago, otra, { fase: 'ganador' }) : null
+      if (procedencia?.acreditada) return { vetada: true, por: otra.requestId }
+      const desenlace = await this.retirarAliasAjeno(db, ctx, pago, otra, procedencia ? procedencia.reason : 'ORDER_MISMATCH')
+      if (desenlace === 'VETADA') return { vetada: true, por: otra.requestId }
+      if (desenlace === 'RETIRADO') aliasResueltos++
+      if (desenlace === 'DIFERIDO') aliasDiferidos++
+    }
+    return { vetada: false, aliasResueltos, aliasDiferidos }
+  }
+
+  /**
+   * Codex R14-4: retira UN alias ajeno sin esperar jamás a otra solicitud. El cierre ya posee su solicitud y su Payment; esperar
+   * aquí la fila de OTRA solicitud —que a su vez puede estar cerrando y esperando la nuestra— es la espera circular
+   * (Q1→P2 / Q2→P1 con dos replays simultáneos). Por eso la fila ajena se toma con `FOR UPDATE NOWAIT` dentro de un SAVEPOINT:
+   *  · tomada por otra transacción (55P03) ⇒ se revierte al savepoint (la transacción propia sigue sana) y el alias se DIFIERE
+   *    con bitácora `TERMINAL_PAYMENT_CONTAMINATED_ALIAS_DEFERRED`; lo recupera el barrido (`retirarAliasPropio`) o el propio
+   *    cierre de esa otra solicitud, que reemplaza su puntero sin procedencia;
+   *  · cualquier otro error se propaga;
+   *  · tomada ⇒ se RELEE el puntero bajo el candado (el `findMany` de arriba fue sin candado): si ya no apunta aquí, no hay nada
+   *    que retirar; si sigue apuntando y ahora está ACREDITADA para ella, veta; si no, CAS exacto sobre su valor.
+   */
+  private async retirarAliasAjeno(
+    db: Pick<Prisma.TransactionClient, 'terminalPaymentRequest' | '$queryRaw' | '$executeRaw'>,
+    ctx: { paymentId: string; venueId: string; requestId: string; origen: 'cierre' | 'barrido' },
+    pago: PagoConProcedencia & { orderId: string | null },
+    otra: { id: string; requestId: string; status: TerminalPaymentRequestStatus },
+    reason: string,
+  ): Promise<'RETIRADO' | 'DIFERIDO' | 'VETADA' | 'SIN_CAMBIO'> {
+    const base = {
+      requestId: otra.requestId,
+      paymentId: ctx.paymentId,
+      authenticRequestId: ctx.requestId,
+      venueId: ctx.venueId,
+      origen: ctx.origen,
+    }
+    await db.$executeRaw`SAVEPOINT alias_ajeno`
+    let vigente: { paymentId: string | null; orderId: string | null; terminalId: string; status: TerminalPaymentRequestStatus } | undefined
+    try {
+      ;[vigente] = await db.$queryRaw<NonNullable<typeof vigente>[]>`
+        SELECT "paymentId", "orderId", "terminalId", "status" FROM "TerminalPaymentRequest" /* alias ajeno */ WHERE "id" = ${otra.id} FOR UPDATE NOWAIT`
+    } catch (error) {
+      if (!esFilaTomadaSinEsperar(error)) throw error
+      await db.$executeRaw`ROLLBACK TO SAVEPOINT alias_ajeno`
+      logger.error(
+        '🚨 [TerminalPayment] Another request pointed at this Payment WITHOUT provenance — its row is held elsewhere: alias DEFERRED',
+        {
+          ...base,
+          reason,
+          priorStatus: otra.status,
+        },
+      )
+      void logAction({
+        action: 'TERMINAL_PAYMENT_CONTAMINATED_ALIAS_DEFERRED',
+        entity: 'TerminalPaymentRequest',
+        entityId: otra.requestId,
+        venueId: ctx.venueId,
+        data: {
+          ...base,
+          reason,
+          priorStatus: otra.status,
+          resolution:
+            'La solicitud apuntaba a un Payment que no es un cobro acreditado suyo, pero su fila estaba tomada por otra transacción: no se esperó (evitaría una espera circular). El barrido o su propio cierre retiran el puntero.',
+        },
+      })
+      return 'DIFERIDO'
+    }
+    await db.$executeRaw`RELEASE SAVEPOINT alias_ajeno`
+    if (!vigente || vigente.paymentId !== ctx.paymentId) return 'SIN_CAMBIO'
+    // Relectura: la fila pudo cambiar de orden/terminal/estado entre el `findMany` y el candado — se revalida con lo vigente.
+    const elegibleAhora = !vigente.orderId || pago.orderId === vigente.orderId
+    const procedenciaAhora = elegibleAhora
+      ? procedenciaDelPagoDeSolicitud(
+          pago,
+          { requestId: otra.requestId, orderId: vigente.orderId, terminalId: vigente.terminalId },
+          { fase: 'ganador' },
+        )
+      : null
+    if (procedenciaAhora?.acreditada) return 'VETADA'
+    const retirado = await db.terminalPaymentRequest.updateMany({
+      where: { id: otra.id, paymentId: ctx.paymentId },
+      data: { paymentId: null },
+    })
+    const contexto = {
+      ...base,
+      reason: procedenciaAhora ? procedenciaAhora.reason : 'ORDER_MISMATCH',
+      priorStatus: vigente.status,
+      retirado: retirado.count === 1,
+    }
+    logger.error('🚨 [TerminalPayment] Another request pointed at this Payment WITHOUT provenance — contaminated alias resolved', contexto)
+    void logAction({
+      action: 'TERMINAL_PAYMENT_CONTAMINATED_ALIAS_RESOLVED',
+      entity: 'TerminalPaymentRequest',
+      entityId: otra.requestId,
+      venueId: ctx.venueId,
+      data: {
+        ...contexto,
+        resolution:
+          'La solicitud apuntaba a un Payment que no es un cobro acreditado suyo; se retiró ese puntero y el cargo cierra su solicitud auténtica. Revisa por qué la fila apuntaba ahí.',
+      },
+    })
+    return retirado.count === 1 ? 'RETIRADO' : 'SIN_CAMBIO'
   }
 
   /**
@@ -2329,7 +2912,7 @@ class TerminalPaymentService {
    */
   async reconcileUnknownRequests(
     now: Date = new Date(),
-  ): Promise<{ completed: number; marked: number; released: number; reset: number; lateReconciled: number }> {
+  ): Promise<{ completed: number; marked: number; released: number; reset: number; lateReconciled: number; aliasesRetirados: number }> {
     const rows = await retry(
       () =>
         prisma.terminalPaymentRequest.findMany({
@@ -2365,20 +2948,30 @@ class TerminalPaymentService {
         sondasEnviadas += await this.probeUnresolvedForTerminal(row.terminalId, row.venueId, entry.socketId).catch(() => 0)
       }
     }
-    if (sondasEnviadas > 0) logger.info('🔎 [TerminalPayment watchdog] probes sent', { terminals: terminalesVistas.size, rows: sondasEnviadas })
+    if (sondasEnviadas > 0)
+      logger.info('🔎 [TerminalPayment watchdog] probes sent', { terminals: terminalesVistas.size, rows: sondasEnviadas })
 
     let completed = 0
     let marked = 0
     let released = 0
     let reset = 0
     let lateReconciled = 0
+    let aliasesRetirados = 0
 
     for (const row of rows) {
       const payment = await this.findReconcilablePayment(row)
+      // Codex R14-4: sin cobro propio que la cierre, una fila UNKNOWN que apunta a un Payment SIN procedencia suelta ese alias
+      // (diferido por un cierre ajeno, o contaminación histórica): recuperable desde el barrido, no sólo desde una bitácora.
+      if (!payment && row.paymentId && (await this.retirarAliasPropio(row))) aliasesRetirados++
       if (payment) {
         const r = await prisma.terminalPaymentRequest.updateMany({
           where: { id: row.id, status: TerminalPaymentRequestStatus.UNKNOWN },
-          data: { status: TerminalPaymentRequestStatus.COMPLETED, paymentId: payment.id, lateResult: true, ...marcaDeDescuadre(row, payment).campos },
+          data: {
+            status: TerminalPaymentRequestStatus.COMPLETED,
+            paymentId: payment.id,
+            lateResult: true,
+            ...marcaDeDescuadre(row, payment).campos,
+          },
         })
         if (r.count > 0) {
           completed += r.count
@@ -2510,7 +3103,12 @@ class TerminalPaymentService {
       if (!payment) continue
       const r = await prisma.terminalPaymentRequest.updateMany({
         where: { id: row.id, status: TerminalPaymentRequestStatus.TIMED_OUT },
-        data: { status: TerminalPaymentRequestStatus.COMPLETED, paymentId: payment.id, lateResult: true, ...marcaDeDescuadre(row, payment).campos },
+        data: {
+          status: TerminalPaymentRequestStatus.COMPLETED,
+          paymentId: payment.id,
+          lateResult: true,
+          ...marcaDeDescuadre(row, payment).campos,
+        },
       })
       if (r.count === 0) continue
       lateReconciled += r.count
@@ -2559,7 +3157,7 @@ class TerminalPaymentService {
         scanned: rows.length,
       })
     }
-    return { completed, marked, released, reset, lateReconciled }
+    return { completed, marked, released, reset, lateReconciled, aliasesRetirados }
   }
 
   /**
@@ -2584,7 +3182,12 @@ class TerminalPaymentService {
     if (payment) {
       const rc = await prisma.terminalPaymentRequest.updateMany({
         where: { id: row.id, venueId, status: TerminalPaymentRequestStatus.UNKNOWN },
-        data: { status: TerminalPaymentRequestStatus.COMPLETED, paymentId: payment.id, lateResult: true, ...marcaDeDescuadre(row, payment).campos },
+        data: {
+          status: TerminalPaymentRequestStatus.COMPLETED,
+          paymentId: payment.id,
+          lateResult: true,
+          ...marcaDeDescuadre(row, payment).campos,
+        },
       })
       if (rc.count === 0) {
         // Someone else closed it first (late socket result / REST record): report what it became.
@@ -2911,6 +3514,437 @@ class TerminalPaymentService {
     return { cancelIntent: 'RECORDED', cancelEmitted, payment: fila ? proyectarEstado(fila) : null }
   }
 
+  /**
+   * S1 (checkpoint 1 del webhook como primer confirmador, Codex 13-sep-2026). La terminal anuncia
+   * `terminal:payment_attempt_opened { requestId, attemptId }` tras abrir un intento en su libreta, y aquí se decide
+   * el DUEÑO de ese intento una sola vez y para siempre:
+   *
+   *  · sólo la terminal AUTENTICADA dueña de la solicitud (mismo venue, misma llave de terminal) puede vincular —
+   *    la identidad sale del socket, nunca del payload;
+   *  · `attemptId` es único global: el mismo intento sobre OTRA solicitud es 🚨 y NO se guarda;
+   *  · repetir el mismo vínculo es idempotente, aunque la solicitud ya haya terminado;
+   *  · sobre una solicitud cerrada, un intento NUEVO se guarda como EVIDENCIA TARDÍA: correlaciona un webhook o una
+   *    consulta por intento, pero no autoriza volver a ejecutar el SDK. Con la ranura retenida (UNKNOWN) el intento
+   *    sigue siendo en vuelo: es justo la evidencia que a esa fila le faltaba.
+   *
+   * El ack sale DESPUÉS de que la fila quedó escrita (la escritura se espera antes de contestar); un timeout de ese
+   * ack en la terminal no bloquea el cobro ni autoriza otro intento — el registro y la recuperación siguen su camino
+   * actual. Dos entregas simultáneas del mismo vínculo las resuelve el índice único: el perdedor relee al dueño.
+   * Sin `ActivityLog`: es tráfico de cada cobro, no una anomalía.
+   */
+  async handleAttemptOpenedFromSocket(
+    event: { requestId?: unknown; attemptId?: unknown },
+    terminal: { socketId: string | null; terminalId: string; venueId: string },
+  ): Promise<AttemptLinkAck> {
+    const requestId = typeof event.requestId === 'string' ? event.requestId.trim() : ''
+    const attemptId = typeof event.attemptId === 'string' ? event.attemptId.trim() : ''
+    if (!requestId || !attemptId || requestId.length > 64 || attemptId.length > 64) return { success: false, reason: 'INVALID' }
+
+    const terminalKey = normalizeTerminalId(terminal.terminalId)
+    const row = await prisma.terminalPaymentRequest.findFirst({
+      where: { requestId, venueId: terminal.venueId, terminalId: terminalKey },
+      select: { requestId: true, venueId: true, status: true },
+    })
+    if (!row) {
+      logger.warn('🛑 [TerminalPayment] Attempt link rejected: request is not owned by authenticated terminal socket', {
+        requestId,
+        attemptId,
+        terminalId: terminal.terminalId,
+        venueId: terminal.venueId,
+        socketId: terminal.socketId,
+      })
+      return { success: false, reason: 'NOT_OWNER' }
+    }
+    // Codex R1 (P2): el permiso de EJECUTAR se contesta con el estado VIGENTE tras escribir el vínculo (una cancelación o
+    // confirmación entre la lectura y la escritura no puede colarse como «autorizado»), y sólo lo da una solicitud en
+    // vuelo de verdad (PENDING/SENT): CANCEL_REQUESTED y UNKNOWN retienen la ranura y conservan la evidencia, pero no
+    // autorizan otra ejecución.
+    const AUTORIZA_EJECUCION: TerminalPaymentRequestStatus[] = [TerminalPaymentRequestStatus.PENDING, TerminalPaymentRequestStatus.SENT]
+    const veredicto = async (outcome: 'LINKED' | 'ALREADY_LINKED' | 'LATE_EVIDENCE'): Promise<AttemptLinkAck> => {
+      const vigente = await prisma.terminalPaymentRequest.findFirst({
+        where: { requestId, venueId: terminal.venueId },
+        select: { status: true },
+      })
+      const status = vigente?.status ?? row.status
+      return {
+        success: true,
+        outcome: outcome === 'ALREADY_LINKED' ? outcome : SLOT_HELD.includes(status) ? 'LINKED' : 'LATE_EVIDENCE',
+        requestStatus: status,
+        executionAuthorized: AUTORIZA_EJECUCION.includes(status),
+      }
+    }
+    const otroDueno = (requestIdDueno: string): AttemptLinkAck => {
+      logger.error('🚨 [TerminalPayment] attemptId already belongs to ANOTHER request — link refused, nothing written', {
+        attemptId,
+        requestId,
+        ownerRequestId: requestIdDueno,
+        terminalId: terminal.terminalId,
+        venueId: terminal.venueId,
+      })
+      return { success: false, reason: 'ATTEMPT_OWNED_BY_OTHER_REQUEST' }
+    }
+
+    // 🔴 El índice único de `attemptId` es el ÚNICO árbitro del dueño: no hay pre-lectura. Una lectura previa
+    // «para ahorrarse la excepción» esconde la carrera entre entregas simultáneas y deja este `catch` como código
+    // muerto — el sabotaje de quitarlo no tumbaba ninguna prueba (13-sep). Un vínculo repetido o un intento de
+    // otra solicitud llegan aquí como P2002 y se contestan por lo que quedó ESCRITO, nunca por lo que se leyó antes.
+    // Codex R4-5 / R5-5: un approved de ESTE intento que llegó ANTES del vínculo pudo caer en el matcher débil y quedar
+    // PROCESSED sobre el Payment de OTRO cobro del mismo segundo. El vínculo y la REAPERTURA de esos eventos son UNA
+    // transacción: no existe vínculo sin que se hayan reabierto (el worker los confirma después por el vínculo, S2). Si la
+    // reapertura falla, el vínculo no se escribe y la terminal reintenta el anuncio — el ACK sólo llega con lo durable.
+    const { recuperarEventosDebilesPorVinculo } = await import('./tpv/angelpay-webhook.service')
+    const { OPCIONES_DE_TRANSACCION_DEL_INTENTO, candadoDeIntento } = await import('./tpv/candadoDeIntento')
+    try {
+      await prisma.$transaction(async tx => {
+        // Codex R6-2: la EXCLUSIÓN por intento va PRIMERO — antes del INSERT y de consultar eventos. Un escritor débil que
+        // conozca esta llave espera aquí; cuando este commit lo suelte, verá el vínculo publicado y decidirá por él.
+        await candadoDeIntento(tx, attemptId)
+        await tx.terminalPaymentAttemptLink.create({ data: { requestId, attemptId, venueId: row.venueId, terminalId: terminalKey } })
+        await recuperarEventosDebilesPorVinculo(attemptId, requestId, tx)
+      }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        const dueno = await prisma.terminalPaymentAttemptLink.findUnique({ where: { attemptId }, select: { requestId: true } })
+        if (dueno?.requestId === requestId) {
+          // Codex R5-5: el vínculo REPETIDO también vuelve a mirar los eventos débiles (idempotente y barato). Aquí va fuera
+          // de la transacción del vínculo, que ya es durable: un fallo se registra y no cambia el ACK.
+          try {
+            await recuperarEventosDebilesPorVinculo(attemptId, requestId)
+          } catch (reaperturaError) {
+            logger.error('⚠️ [TerminalPayment] No se pudieron reabrir los eventos débiles al repetir el vínculo', {
+              attemptId,
+              requestId,
+              error: reaperturaError instanceof Error ? reaperturaError.message : String(reaperturaError),
+            })
+          }
+          return await veredicto('ALREADY_LINKED')
+        }
+        return otroDueno(dueno?.requestId ?? 'desconocido')
+      }
+      throw error
+    }
+    return await veredicto(SLOT_HELD.includes(row.status) ? 'LINKED' : 'LATE_EVIDENCE')
+  }
+
+  /**
+   * S5 (checkpoint 1): el webhook fue el PRIMER confirmador de la solicitud. Despierta al POS que sigue esperando en el
+   * long-poll (hoy cerrar la fila no lo resolvía: 5 min y un 504) y avisa a la terminal por su socket, sin ACK
+   * obligatorio — la terminal decide qué hacer con su libreta (checkpoint 2: nunca cierra AUTORIZANDO con el SDK
+   * dentro). Si el aviso se pierde o el POS vive en otra instancia, el resultado durable ya está en la fila.
+   */
+  async confirmFromWebhook(input: {
+    requestId: string
+    venueId: string
+    paymentId: string
+    attemptId: string
+    amountCents: number
+    tipCents: number
+  }): Promise<{ posAwakened: boolean; terminalNotified: boolean }> {
+    let posAwakened = false
+    const pending = this.pendingPayments.get(input.requestId)
+    if (pending && pending.venueId === input.venueId) {
+      clearTimeout(pending.timeout)
+      this.pendingPayments.delete(input.requestId)
+      pending.resolve({ requestId: input.requestId, status: 'success', paymentId: input.paymentId })
+      posAwakened = true
+    }
+    let terminalNotified = false
+    const row = await prisma.terminalPaymentRequest.findFirst({
+      where: { requestId: input.requestId, venueId: input.venueId },
+      select: { terminalId: true },
+    })
+    const entry = row ? terminalRegistry.getTerminal(row.terminalId) : undefined
+    const socket = entry?.socketId ? socketManager.getServer()?.sockets.sockets.get(entry.socketId) : undefined
+    if (socket && entry?.venueId === input.venueId) {
+      socket.emit('terminal:payment_confirmed', {
+        requestId: input.requestId,
+        attemptId: input.attemptId,
+        paymentId: input.paymentId,
+        amountCents: input.amountCents,
+        tipCents: input.tipCents,
+        via: 'webhook',
+        timestamp: new Date().toISOString(),
+      })
+      terminalNotified = true
+    }
+    logger.info('📣 [TerminalPayment] Confirmado por webhook', {
+      requestId: input.requestId,
+      venueId: input.venueId,
+      paymentId: input.paymentId,
+      posAwakened,
+      terminalNotified,
+    })
+    return { posAwakened, terminalNotified }
+  }
+
+  /** El dueño de un intento (S1), para el webhook (S2) y la consulta por intento (S6). `null` = intento desconocido. */
+  async findAttemptLink(attemptId: string): Promise<{ requestId: string; venueId: string; terminalId: string; createdAt: Date } | null> {
+    if (!attemptId) return null
+    return prisma.terminalPaymentAttemptLink.findUnique({
+      where: { attemptId },
+      select: { requestId: true, venueId: true, terminalId: true, createdAt: true },
+    })
+  }
+
+  /**
+   * S6: la consulta durable POR INTENTO que hace la terminal al reconectar (checkpoint 2, N3). Contesta dos cosas por
+   * separado —qué pasó con ESTE intento y en qué está la solicitud— y sólo para intentos de la terminal autenticada y
+   * del venue del token. Un intento desconocido, de otra terminal o de otro venue se contesta IGUAL (`null`): sin
+   * evidencia. 🔴 Nunca se traduce a «no cobrado»: la ausencia de Payment, un timeout de la solicitud o un rechazo
+   * aislado no acreditan ausencia de cargo (S7 admite un `approved` posterior del mismo intento).
+   * Nunca atribuye a A el Payment de B: el Payment del intento es el de SU llave (`idempotencyKey === attemptId`);
+   * el ganador de la solicitud viaja aparte, en `request`.
+   */
+  async consultarIntentoDeTerminal(input: {
+    attemptId: string
+    venueId: string
+    terminalSerial: string
+  }): Promise<TerminalAttemptStatus | null> {
+    const attemptId = typeof input.attemptId === 'string' ? input.attemptId.trim() : ''
+    const terminalKey = typeof input.terminalSerial === 'string' ? normalizeTerminalId(input.terminalSerial) : ''
+    if (!attemptId || attemptId.length > 64 || !terminalKey || !input.venueId) return null
+
+    const link = await this.findAttemptLink(attemptId)
+    if (!link || link.venueId !== input.venueId || normalizeTerminalId(link.terminalId) !== terminalKey) return null
+    const row = await prisma.terminalPaymentRequest.findFirst({ where: { requestId: link.requestId, venueId: input.venueId } })
+    if (!row) return null
+
+    // Codex R1 (P1-7 / P2): la EVIDENCIA se acota al venue del vínculo (un approved recibido por el merchant de OTRO venue
+    // —LINK_VENUE_MISMATCH— no es evidencia de este intento — ver la consulta SQL de evidencia más abajo); y un Payment
+    // con `type` NULL (fila vieja) cuenta igual que uno REGULAR.
+    const [candidato, ganador] = await Promise.all([
+      prisma.payment.findFirst({
+        where: { venueId: input.venueId, idempotencyKey: attemptId, OR: [{ type: null }, { type: { not: PaymentType.REFUND } }] },
+        select: {
+          id: true,
+          status: true,
+          amount: true,
+          tipAmount: true,
+          idempotencyKey: true,
+          terminalPaymentRequestId: true,
+          processorData: true,
+          terminal: { select: { serialNumber: true } },
+        },
+      }),
+      row.paymentId
+        ? prisma.payment.findUnique({ where: { id: row.paymentId }, select: { id: true, idempotencyKey: true } })
+        : Promise.resolve(null),
+    ])
+
+    // Codex R1 (P1-7): el Payment con la llave del intento sólo es de ESTE intento si su procedencia lo ata a esta
+    // solicitud (columna, huella o conciliación de segunda captura) o, sin solicitud, a esta terminal. Un Payment con
+    // la misma llave pero de otra solicitud u otra terminal es una CONTRADICCIÓN: se conserva la incertidumbre
+    // (NOT_RECORDED) y se declara, nunca se presenta como dinero propio.
+    const datosCandidato =
+      candidato?.processorData && typeof candidato.processorData === 'object' && !Array.isArray(candidato.processorData)
+        ? (candidato.processorData as Record<string, unknown>)
+        : null
+    const reconciliacionCandidato =
+      datosCandidato?.reconciliation && typeof datosCandidato.reconciliation === 'object'
+        ? (datosCandidato.reconciliation as Record<string, unknown>)
+        : null
+    const serialKey = (valor: unknown): string | null => (typeof valor === 'string' && valor.trim() ? normalizeTerminalId(valor) : null)
+    const atribuible =
+      !!candidato &&
+      (candidato.terminalPaymentRequestId === row.requestId ||
+        datosCandidato?.terminalPaymentRequestId === row.requestId ||
+        reconciliacionCandidato?.requestId === row.requestId ||
+        (candidato.terminalPaymentRequestId == null &&
+          datosCandidato?.terminalPaymentRequestId == null &&
+          (serialKey(datosCandidato?.deviceSerialNumber) === terminalKey || serialKey(candidato.terminal?.serialNumber) === terminalKey)))
+    const paymentContradiction = !!candidato && !atribuible
+    if (paymentContradiction && candidato) {
+      logger.error(
+        '🚨 [TerminalPayment] Un Payment con la llave del intento NO es atribuible a esta solicitud/terminal — se conserva la incertidumbre',
+        {
+          attemptId,
+          requestId: row.requestId,
+          terminalKey,
+          paymentId: candidato.id,
+          paymentRequestId: candidato.terminalPaymentRequestId,
+        },
+      )
+    }
+    const pago = atribuible ? candidato : null
+
+    // Evidencia del procesador SOBRE ESTE INTENTO: un `approved` cuenta aunque no haya creado dinero (importe distinto ⇒
+    // conciliación); un veredicto distinto de approved es DECLINED; un evento sin `status` legible no es veredicto.
+    // Codex R2/R3/R4 (P1-7 / P2): la evidencia también exige PROCEDENCIA, y se resuelve EXACTA en una sola consulta —
+    // sin presupuesto de páginas que un intento con miles de eventos pudiera agotar. Un webhook firmado del mismo venue cuyo
+    // serial es de otra terminal (S2 lo rechazó: `LINK_TERMINAL_MISMATCH`, o su serial normalizado no es el de esta
+    // terminal) no es evidencia — es una CONTRADICCIÓN que se declara (`evidenceContradiction`), sin descartar un approved
+    // legítimo de esta terminal con importe discrepante. El serial se normaliza en SQL con la MISMA regla que
+    // `terminalIdentityKey` (trim, sin prefijo AVQD-, minúsculas). Codex R14-3: el estado bancario se clasifica con la MISMA regla
+    // que el receptor y el backfill (`estadoBancarioSql`: tipo JSON + trim como JS): sólo APROBADO cuenta como aprobación y sólo
+    // RECHAZADO como rechazo; `null` presente, un número, un objeto o una cadena vacía NO son veredicto (antes `->>` volvía texto
+    // un `123` o un `{}` y S6 publicaba DECLINED sin rechazo bancario acreditado).
+    // Lógica trivalente de SQL: un `errorReason` NULL (evento sano) no puede volver NULL la contradicción entera — por eso
+    // `IS NOT DISTINCT FROM` y no `=`; sin eso, el approved propio del evento CONFIRMADO desaparecía de la evidencia.
+    const evidencia = await prisma.$queryRaw<{ contradicciones: bigint | number; aprobadoAt: Date | null; veredictoAt: Date | null }[]>`
+      WITH eventos AS (
+        SELECT
+          e."createdAt",
+          e."errorReason",
+          ${estadoBancarioSql(Prisma.sql`coalesce(e."payload"->'payload'->'status', e."payload"->'status')`)} AS estado,
+          nullif(regexp_replace(coalesce(e."payload"->'payload'->>'terminalSerial', ''), ${PATRON_SQL_TRIM_COMO_JS}, '', 'g'), '') AS serial
+        FROM "ProviderEventLog" e
+        WHERE e."provider" = 'PAYMENT_PROCESSOR'
+          AND e."attemptId" = ${attemptId}
+          AND e."venueId" = ${link.venueId}
+          AND e."eventId" LIKE 'angelpay-%'
+      ), clasificados AS (
+        SELECT
+          "createdAt",
+          estado,
+          (
+            "errorReason" IS NOT DISTINCT FROM 'LINK_TERMINAL_MISMATCH'
+            OR (serial IS NOT NULL AND lower(regexp_replace(serial, '^AVQD-', '', 'i')) <> ${terminalKey})
+          ) AS contradice
+        FROM eventos
+      )
+      SELECT
+        (SELECT count(*) FROM clasificados WHERE contradice) AS contradicciones,
+        (SELECT max("createdAt") FROM clasificados WHERE NOT contradice AND estado = 'APROBADO') AS "aprobadoAt",
+        (SELECT max("createdAt") FROM clasificados WHERE NOT contradice AND estado = 'RECHAZADO') AS "veredictoAt"`
+    const resumen = evidencia[0] ?? { contradicciones: 0, aprobadoAt: null, veredictoAt: null }
+    const evidenceContradiction = Number(resumen.contradicciones) > 0
+    const propioAprobado = resumen.aprobadoAt ? { createdAt: new Date(resumen.aprobadoAt) } : null
+    const propioConVeredicto = resumen.veredictoAt ? { createdAt: new Date(resumen.veredictoAt) } : null
+    if (evidenceContradiction) {
+      logger.error(
+        '🚨 [TerminalPayment] Evidencia del procesador con el serial de OTRA terminal para este intento — no cuenta como evidencia',
+        {
+          attemptId,
+          requestId: row.requestId,
+          terminalKey,
+        },
+      )
+    }
+    const conVeredicto = propioAprobado ?? propioConVeredicto
+    const processorEvidence: AttemptProcessorEvidence = propioAprobado ? 'APPROVED' : conVeredicto ? 'DECLINED' : 'NONE'
+
+    const datos = pago ? datosCandidato : null
+    const reconciliacion =
+      datos?.reconciliation && typeof datos.reconciliation === 'object' && !Array.isArray(datos.reconciliation)
+        ? (datos.reconciliation as Record<string, unknown>)
+        : null
+    // Codex R5 (P2): la evidencia PENDING puede ser de dos tipos (segunda captura o COLISIÓN de referencia, R4-6); ninguna
+    // es «cobrado» ni «no cobrado» — la terminal las ve como lo que son.
+    const evidenciaPendiente = !!pago && pago.status !== TransactionStatus.COMPLETED ? reconciliacion?.kind : null
+    const esSegundaCaptura = evidenciaPendiente === 'POSSIBLE_SECOND_CAPTURE'
+    const outcome: AttemptOutcome =
+      pago?.status === TransactionStatus.COMPLETED
+        ? 'RECORDED'
+        : esSegundaCaptura
+          ? 'SECOND_CAPTURE_EVIDENCE'
+          : evidenciaPendiente === 'POSSIBLE_REFERENCE_COLLISION'
+            ? 'REFERENCE_COLLISION_EVIDENCE'
+            : 'NOT_RECORDED'
+    const centavos = (valor: Prisma.Decimal | number | string | null | undefined) =>
+      valor === null || valor === undefined ? null : new Prisma.Decimal(valor).mul(100).round().toNumber()
+
+    let winnerAttemptId: string | null = null
+    if (ganador?.idempotencyKey) {
+      if (ganador.idempotencyKey === attemptId) winnerAttemptId = attemptId
+      else {
+        const vinculoDelGanador = await this.findAttemptLink(ganador.idempotencyKey)
+        winnerAttemptId = vinculoDelGanador?.requestId === row.requestId ? ganador.idempotencyKey : null
+      }
+    }
+
+    return {
+      attemptId,
+      requestId: row.requestId,
+      attempt: {
+        attemptId,
+        outcome,
+        paymentId: pago?.id ?? null,
+        paymentStatus: pago?.status ?? null,
+        recordedVia: pago ? (datos?.registradoVia === 'webhook' ? 'webhook' : 'terminal') : null,
+        amountCents: pago ? centavos(pago.amount) : null,
+        tipCents: pago ? centavos(pago.tipAmount) : null,
+        isWinner: !!pago && row.paymentId === pago.id,
+        winnerPaymentId: esSegundaCaptura
+          ? ((typeof reconciliacion?.winnerPaymentId === 'string' ? reconciliacion.winnerPaymentId : null) ?? row.paymentId ?? null)
+          : null,
+        processorEvidence,
+        processorEvidenceAt: conVeredicto?.createdAt.toISOString() ?? null,
+        paymentContradiction,
+        evidenceContradiction,
+        linkedAt: link.createdAt.toISOString(),
+      },
+      request: { ...proyectarEstado(row), closedVia: row.closedVia ?? null, winnerAttemptId },
+    }
+  }
+
+  /**
+   * S5: recuperación del long-poll desde la FILA. Un POS que sigue esperando en memoria mientras la solicitud ya quedó
+   * COMPLETED con Payment (el webhook confirmó desde otra instancia, o el aviso —socket o webhook— se perdió) recibe
+   * el resultado durable en vez de un 504 a los 5 min. Sólo despierta con dinero acreditado (`CHARGED`); un desenlace
+   * negativo o incierto sigue su camino de siempre (nunca se inventa). La llama el vigía cada tick, en un solo lote.
+   */
+  async resolvePendingFromDurableState(): Promise<{ resolved: number; checked: number }> {
+    const esperando = [...this.pendingPayments.values()]
+    if (esperando.length === 0) return { resolved: 0, checked: 0 }
+    // Codex R1 (P2): por LOTES acotados — el mapa en memoria no tiene tope y una consulta con cientos de ids no es una consulta.
+    const LOTE = 100
+    const seleccion = {
+      requestId: true,
+      venueId: true,
+      status: true,
+      paymentId: true,
+      resultJson: true,
+      failureCode: true,
+      cancelDisposition: true,
+    } as const
+    const rows: Prisma.TerminalPaymentRequestGetPayload<{ select: typeof seleccion }>[] = []
+    for (let i = 0; i < esperando.length; i += LOTE) {
+      const lote = esperando.slice(i, i + LOTE)
+      rows.push(
+        ...(await prisma.terminalPaymentRequest.findMany({
+          where: {
+            requestId: { in: lote.map(p => p.requestId) },
+            status: TerminalPaymentRequestStatus.COMPLETED,
+            paymentId: { not: null },
+          },
+          take: lote.length,
+          select: seleccion,
+        })),
+      )
+    }
+    let resolved = 0
+    for (const row of rows) {
+      const pending = this.pendingPayments.get(row.requestId)
+      if (!pending || pending.venueId !== row.venueId) continue
+      if (desenlaceCanonico(row).outcome !== 'CHARGED') continue
+      clearTimeout(pending.timeout)
+      this.pendingPayments.delete(row.requestId)
+      pending.resolve(resultFromRow(row))
+      resolved++
+      logger.info('🔁 [TerminalPayment] Long-poll resolved from durable state (notice lost or confirmed elsewhere)', {
+        requestId: row.requestId,
+        venueId: row.venueId,
+        paymentId: row.paymentId,
+      })
+    }
+    return { resolved, checked: esperando.length }
+  }
+
+  /** La fila al vencer el long-poll: el resultado durable si ya hay dinero acreditado, o `null` (incierto, como siempre). */
+  private async desenlaceDurableAlVencer(requestId: string, venueId: string): Promise<TerminalPaymentResult | null> {
+    try {
+      const row = await prisma.terminalPaymentRequest.findFirst({
+        where: { requestId, venueId },
+        select: { requestId: true, status: true, paymentId: true, resultJson: true, failureCode: true, cancelDisposition: true },
+      })
+      if (!row || desenlaceCanonico(row).outcome !== 'CHARGED') return null
+      return resultFromRow(row)
+    } catch (error) {
+      logger.error('❌ [TerminalPayment] Could not read durable state at long-poll timeout', { requestId, error: String(error) })
+      return null
+    }
+  }
+
   /** Authenticated cancellation admission; this is distinct from a payment result. */
   async handleCancelDispositionFromSocket(
     event: { requestId: string; disposition: string },
@@ -2983,12 +4017,24 @@ class TerminalPaymentService {
     for (const row of candidatas) {
       directSocket.timeout(PAYMENT_DELIVERY_ACK_TIMEOUT_MS).emit(
         'terminal:payment_probe',
-        { requestId: row.requestId, terminalId, venueId, amountCents: row.amountCents, tipCents: row.tipCents, timestamp: new Date().toISOString() },
+        {
+          requestId: row.requestId,
+          terminalId,
+          venueId,
+          amountCents: row.amountCents,
+          tipCents: row.tipCents,
+          timestamp: new Date().toISOString(),
+        },
         () => undefined, // la respuesta viaja por su propio evento; el ack sólo evita colgar el emit
       )
     }
     if (candidatas.length > 0) {
-      logger.info('🔎 [TerminalPayment] Probe sent for unresolved rows', { terminalId, venueId, count: candidatas.length, enEspera: rows.length - candidatas.length })
+      logger.info('🔎 [TerminalPayment] Probe sent for unresolved rows', {
+        terminalId,
+        venueId,
+        count: candidatas.length,
+        enEspera: rows.length - candidatas.length,
+      })
     }
     return candidatas.length
   }
@@ -3015,7 +4061,15 @@ class TerminalPaymentService {
     const where = { requestId, venueId: terminal.venueId, terminalId: normalizeTerminalId(terminal.terminalId) }
     const row = await prisma.terminalPaymentRequest.findFirst({
       where,
-      select: { id: true, status: true, acknowledgedAt: true, lastDeliveredAt: true, deliveryProvenance: true, expiresAt: true, terminalId: true },
+      select: {
+        id: true,
+        status: true,
+        acknowledgedAt: true,
+        lastDeliveredAt: true,
+        deliveryProvenance: true,
+        expiresAt: true,
+        terminalId: true,
+      },
     })
     if (!row) {
       logger.warn('🛑 [TerminalPayment] Probe answer rejected: request is not owned by the authenticated terminal', {
@@ -3034,11 +4088,14 @@ class TerminalPaymentService {
 
     if (disposition === 'RESOLVED' || disposition === 'RECEIVED_CANCELLED') {
       const fr = event.finalResult
-      if (!fr || fr.requestId !== requestId || !fr.status || !['success', 'failed', 'cancelled', 'timeout'].includes(fr.status)) return false
+      if (!fr || fr.requestId !== requestId || !fr.status || !['success', 'failed', 'cancelled', 'timeout'].includes(fr.status))
+        return false
       const result: TerminalPaymentResult = {
         requestId,
         status: fr.status,
-        ...(fr.outcomeEvidence === 'PRE_AUTHORIZATION' || fr.outcomeEvidence === 'PROCESSOR_DECLINED' ? { outcomeEvidence: fr.outcomeEvidence } : {}),
+        ...(fr.outcomeEvidence === 'PRE_AUTHORIZATION' || fr.outcomeEvidence === 'PROCESSOR_DECLINED'
+          ? { outcomeEvidence: fr.outcomeEvidence }
+          : {}),
         ...(typeof fr.paymentId === 'string' ? { paymentId: fr.paymentId } : {}),
         ...(typeof fr.errorMessage === 'string' ? { errorMessage: fr.errorMessage } : {}),
       }
@@ -3074,7 +4131,11 @@ class TerminalPaymentService {
               terminalId: row.terminalId,
               status: row.status,
               disposition,
-              terminalOutcome: { status: fr.status, errorMessage: fr.errorMessage ?? null, completedAt: typeof completedAt === 'string' ? completedAt : null },
+              terminalOutcome: {
+                status: fr.status,
+                errorMessage: fr.errorMessage ?? null,
+                completedAt: typeof completedAt === 'string' ? completedAt : null,
+              },
             },
           })
         }
@@ -3082,7 +4143,10 @@ class TerminalPaymentService {
       }
       this.unaccreditedProbeAnswers.delete(requestId)
       const outcome = await this.closeRow(requestId, terminal.venueId, result)
-      const after = await prisma.terminalPaymentRequest.findFirst({ where, select: { status: true, failureCode: true, cancelDisposition: true } })
+      const after = await prisma.terminalPaymentRequest.findFirst({
+        where,
+        select: { status: true, failureCode: true, cancelDisposition: true },
+      })
       const resuelta =
         !!after &&
         (after.status === TerminalPaymentRequestStatus.COMPLETED ||
@@ -3094,7 +4158,14 @@ class TerminalPaymentService {
           action: 'TERMINAL_PAYMENT_PROBE_RESOLVED',
           entity: 'TerminalPaymentRequest',
           entityId: row.id,
-          data: { requestId, terminalId: row.terminalId, priorStatus: row.status, status: after?.status, outcome: outcome.status, evidence: result.outcomeEvidence ?? null },
+          data: {
+            requestId,
+            terminalId: row.terminalId,
+            priorStatus: row.status,
+            status: after?.status,
+            outcome: outcome.status,
+            evidence: result.outcomeEvidence ?? null,
+          },
         })
       }
       // Un `success` que no logró ligar su Payment tampoco produce evidencia nueva en el siguiente
@@ -3116,21 +4187,25 @@ class TerminalPaymentService {
       // preguntar y escribía otro 🚨 y otro asiento (≈2 880 al día por fila).
       this.marcarEsperaDeSonda(requestId)
       const auditar = await this.debeAuditar('TERMINAL_PAYMENT_PROBE_CONTRADICTION', row.id)
-      logger.error('🚨 [Terminal-payment] Probe contradiction: the terminal acknowledged this request but no longer has it — reservation kept', {
-        requestId,
-        terminalId: row.terminalId,
-        venueId: terminal.venueId,
-        status: row.status,
-        acknowledgedAt: row.acknowledgedAt,
-        audited: auditar,
-      })
-      if (auditar) void logAction({
-        venueId: terminal.venueId,
-        action: 'TERMINAL_PAYMENT_PROBE_CONTRADICTION',
-        entity: 'TerminalPaymentRequest',
-        entityId: row.id,
-        data: { requestId, terminalId: row.terminalId, status: row.status, acknowledgedAt: row.acknowledgedAt },
-      })
+      logger.error(
+        '🚨 [Terminal-payment] Probe contradiction: the terminal acknowledged this request but no longer has it — reservation kept',
+        {
+          requestId,
+          terminalId: row.terminalId,
+          venueId: terminal.venueId,
+          status: row.status,
+          acknowledgedAt: row.acknowledgedAt,
+          audited: auditar,
+        },
+      )
+      if (auditar)
+        void logAction({
+          venueId: terminal.venueId,
+          action: 'TERMINAL_PAYMENT_PROBE_CONTRADICTION',
+          entity: 'TerminalPaymentRequest',
+          entityId: row.id,
+          data: { requestId, terminalId: row.terminalId, status: row.status, acknowledgedAt: row.acknowledgedAt },
+        })
       return true
     }
     // Codex 11-sep (3, 4): NOT_FOUND sólo acredita «nunca recibida» si la fila NUNCA se entregó a ningún socket
@@ -3169,7 +4244,13 @@ class TerminalPaymentService {
     // lectura de arriba: así la liberación es atómica frente a cualquier entrega que se grabe entre ambas, y una fila
     // con procedencia desconocida (`null`) nunca puede liberarse por esta vía aunque la lectura se equivoque.
     const r = await prisma.terminalPaymentRequest.updateMany({
-      where: { id: row.id, acknowledgedAt: null, lastDeliveredAt: null, deliveryProvenance: { equals: { deliveries: [] } }, ...SIN_DESENLACE_ACREDITADO },
+      where: {
+        id: row.id,
+        acknowledgedAt: null,
+        lastDeliveredAt: null,
+        deliveryProvenance: { equals: { deliveries: [] } },
+        ...SIN_DESENLACE_ACREDITADO,
+      },
       data: {
         status: TerminalPaymentRequestStatus.FAILED,
         failureCode: 'TPV_NEVER_RECEIVED',
@@ -3179,7 +4260,11 @@ class TerminalPaymentService {
       },
     })
     if (r.count > 0) {
-      logger.warn('🔎 [TerminalPayment] Probe released a never-acknowledged request', { requestId, terminalId: row.terminalId, priorStatus: row.status })
+      logger.warn('🔎 [TerminalPayment] Probe released a never-acknowledged request', {
+        requestId,
+        terminalId: row.terminalId,
+        priorStatus: row.status,
+      })
       void logAction({
         venueId: terminal.venueId,
         action: 'TERMINAL_PAYMENT_PROBE_RELEASED',

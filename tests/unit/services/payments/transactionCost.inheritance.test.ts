@@ -20,10 +20,14 @@ import { prismaMock } from '@tests/__helpers__/setup'
 // Mock the organization-payment-config service (the inheritance layer)
 const mockGetEffectivePaymentConfig = jest.fn()
 const mockGetEffectivePricing = jest.fn()
+// Codex R12-14: la unidad de costo resuelve UN slot con la consulta ACOTADA (`getEffectivePricingForSlot`, misma forma de
+// respuesta); `getEffectivePricing` (la lista) queda para los consumidores que listan y aquí se afirma que NO se llama.
+const mockGetEffectivePricingForSlot = jest.fn()
 
 jest.mock('@/services/organization-payment-config.service', () => ({
   getEffectivePaymentConfig: (...args: any[]) => mockGetEffectivePaymentConfig(...args),
   getEffectivePricing: (...args: any[]) => mockGetEffectivePricing(...args),
+  getEffectivePricingForSlot: (...args: any[]) => mockGetEffectivePricingForSlot(...args),
 }))
 
 // ===== Test Data Factories =====
@@ -111,13 +115,14 @@ describe('TransactionCost Service — Org Inheritance', () => {
       prismaMock.payment.findUnique.mockResolvedValue(createMockPayment())
       mockGetEffectivePaymentConfig.mockResolvedValue(createMockPaymentConfig('organization'))
       prismaMock.providerCostStructure.findFirst.mockResolvedValue(createMockProviderCostStructure())
-      mockGetEffectivePricing.mockResolvedValue(createMockPricingStructure('organization'))
+      mockGetEffectivePricingForSlot.mockResolvedValue(createMockPricingStructure('organization'))
       prismaMock.transactionCost.create.mockResolvedValue({ id: 'tc-001' })
 
       const result = await createTransactionCost(PAYMENT_ID)
 
       // Verify it called getEffectivePaymentConfig (inheritance service)
-      expect(mockGetEffectivePaymentConfig).toHaveBeenCalledWith(VENUE_ID)
+      // Codex R7 (g): la configuración se lee por el cliente que recibe la unidad (el global aquí), nunca sin él.
+      expect(mockGetEffectivePaymentConfig).toHaveBeenCalledWith(VENUE_ID, expect.anything())
 
       // Verify it used the org merchant account
       expect(prismaMock.transactionCost.create).toHaveBeenCalledWith(
@@ -148,7 +153,7 @@ describe('TransactionCost Service — Org Inheritance', () => {
         ...createMockProviderCostStructure(),
         merchantAccountId: venueSpecificMerchantId,
       })
-      mockGetEffectivePricing.mockResolvedValue(createMockPricingStructure('venue'))
+      mockGetEffectivePricingForSlot.mockResolvedValue(createMockPricingStructure('venue'))
       prismaMock.transactionCost.create.mockResolvedValue({ id: 'tc-002' })
 
       await createTransactionCost(PAYMENT_ID)
@@ -189,7 +194,7 @@ describe('TransactionCost Service — Org Inheritance', () => {
       prismaMock.payment.findUnique.mockResolvedValue(createMockPayment())
       mockGetEffectivePaymentConfig.mockResolvedValue(createMockPaymentConfig('organization'))
       prismaMock.providerCostStructure.findFirst.mockResolvedValue(createMockProviderCostStructure())
-      mockGetEffectivePricing.mockResolvedValue(createMockPricingStructure('organization'))
+      mockGetEffectivePricingForSlot.mockResolvedValue(createMockPricingStructure('organization'))
       prismaMock.transactionCost.create.mockResolvedValue({ id: 'tc-003' })
 
       await createTransactionCost(PAYMENT_ID)
@@ -201,17 +206,18 @@ describe('TransactionCost Service — Org Inheritance', () => {
 
   describe('findActiveVenuePricingStructure', () => {
     it('should return org pricing when venue has no VenuePricingStructure', async () => {
-      mockGetEffectivePricing.mockResolvedValue(createMockPricingStructure('organization'))
+      mockGetEffectivePricingForSlot.mockResolvedValue(createMockPricingStructure('organization'))
 
       const result = await findActiveVenuePricingStructure(VENUE_ID, 'PRIMARY')
 
-      expect(mockGetEffectivePricing).toHaveBeenCalledWith(VENUE_ID, 'PRIMARY')
+      expect(mockGetEffectivePricingForSlot).toHaveBeenCalledWith(VENUE_ID, 'PRIMARY', expect.any(Date), expect.anything())
+      expect(mockGetEffectivePricing).not.toHaveBeenCalled()
       expect(result).not.toBeNull()
       expect(result!.id).toBe('pricing-organization-001')
     })
 
     it('should return venue pricing when venue has VenuePricingStructure', async () => {
-      mockGetEffectivePricing.mockResolvedValue(createMockPricingStructure('venue'))
+      mockGetEffectivePricingForSlot.mockResolvedValue(createMockPricingStructure('venue'))
 
       const result = await findActiveVenuePricingStructure(VENUE_ID, 'PRIMARY')
 
@@ -220,7 +226,7 @@ describe('TransactionCost Service — Org Inheritance', () => {
     })
 
     it('should return null when no pricing exists at any level', async () => {
-      mockGetEffectivePricing.mockResolvedValue(null)
+      mockGetEffectivePricingForSlot.mockResolvedValue(null)
 
       const result = await findActiveVenuePricingStructure(VENUE_ID, 'PRIMARY')
 
@@ -228,7 +234,7 @@ describe('TransactionCost Service — Org Inheritance', () => {
     })
 
     it('should return null when pricing array is empty', async () => {
-      mockGetEffectivePricing.mockResolvedValue({ pricing: [], source: 'organization' })
+      mockGetEffectivePricingForSlot.mockResolvedValue({ pricing: [], source: 'organization' })
 
       const result = await findActiveVenuePricingStructure(VENUE_ID, 'PRIMARY')
 
@@ -329,13 +335,13 @@ describe('TransactionCost Service — Account Routing', () => {
       ...createMockProviderCostStructure(),
       merchantAccountId: SECONDARY_ID,
     })
-    mockGetEffectivePricing.mockImplementation((venueId: string, accountType: any) => pricingByAccountType(venueId, accountType))
+    mockGetEffectivePricingForSlot.mockImplementation((venueId: string, accountType: any) => pricingByAccountType(venueId, accountType))
     prismaMock.transactionCost.create.mockResolvedValue({ id: 'tc-sec' })
 
     await createTransactionCost(PAYMENT_ID)
 
     // Venue pricing resolved for the SECONDARY slot, not PRIMARY
-    expect(mockGetEffectivePricing).toHaveBeenCalledWith(VENUE_ID, 'SECONDARY')
+    expect(mockGetEffectivePricingForSlot).toHaveBeenCalledWith(VENUE_ID, 'SECONDARY', expect.any(Date), expect.anything())
     // Provider cost looked up against the SECONDARY merchant account
     expect(prismaMock.providerCostStructure.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({ where: expect.objectContaining({ merchantAccountId: SECONDARY_ID }) }),
@@ -359,12 +365,12 @@ describe('TransactionCost Service — Account Routing', () => {
       ...createMockProviderCostStructure(),
       merchantAccountId: PRIMARY_ID,
     })
-    mockGetEffectivePricing.mockImplementation((venueId: string, accountType: any) => pricingByAccountType(venueId, accountType))
+    mockGetEffectivePricingForSlot.mockImplementation((venueId: string, accountType: any) => pricingByAccountType(venueId, accountType))
     prismaMock.transactionCost.create.mockResolvedValue({ id: 'tc-pri' })
 
     await createTransactionCost(PAYMENT_ID)
 
-    expect(mockGetEffectivePricing).toHaveBeenCalledWith(VENUE_ID, 'PRIMARY')
+    expect(mockGetEffectivePricingForSlot).toHaveBeenCalledWith(VENUE_ID, 'PRIMARY', expect.any(Date), expect.anything())
     expect(prismaMock.transactionCost.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ merchantAccountId: PRIMARY_ID }) }),
     )
@@ -385,7 +391,7 @@ describe('TransactionCost Service — Account Routing', () => {
       merchantAccountId: SECONDARY_ID,
     })
     // SECONDARY slot has NO pricing (empty array → resolves to null); PRIMARY does.
-    mockGetEffectivePricing.mockImplementation((venueId: string, accountType: any) =>
+    mockGetEffectivePricingForSlot.mockImplementation((venueId: string, accountType: any) =>
       accountType === 'PRIMARY' ? pricingByAccountType(venueId, 'PRIMARY') : { pricing: [], source: 'venue' },
     )
     prismaMock.transactionCost.create.mockResolvedValue({ id: 'tc-fallback' })
@@ -394,8 +400,8 @@ describe('TransactionCost Service — Account Routing', () => {
 
     // Did NOT throw; tried the slot first, then fell back to PRIMARY pricing
     expect(result).not.toBeNull()
-    expect(mockGetEffectivePricing).toHaveBeenCalledWith(VENUE_ID, 'SECONDARY')
-    expect(mockGetEffectivePricing).toHaveBeenCalledWith(VENUE_ID, 'PRIMARY')
+    expect(mockGetEffectivePricingForSlot).toHaveBeenCalledWith(VENUE_ID, 'SECONDARY', expect.any(Date), expect.anything())
+    expect(mockGetEffectivePricingForSlot).toHaveBeenCalledWith(VENUE_ID, 'PRIMARY', expect.any(Date), expect.anything())
     // Cost still recorded against the account that processed it, priced at PRIMARY's rate
     expect(prismaMock.transactionCost.create).toHaveBeenCalledWith(
       expect.objectContaining({

@@ -136,7 +136,15 @@ describe('leerProcedencia — qué dice la fila sobre sus entregas', () => {
   // Auditoría 11-sep (P3-4): filtrar las entradas malformadas convertía «hubo algo que no sé leer» en «nunca se
   // entregó» ([]), que es justo lo que autoriza a la sonda a liberar y al replay a reenviar. Lo que no se sabe leer
   // es procedencia DESCONOCIDA (null), igual que una fila anterior a la columna.
-  const valida = { protocol: 'DURABLE', ackVersion: 1, cancelDispositionVersion: 1, probeVersion: 1, socketId: 's', at: '2026-09-11T10:00:00.000Z', replay: false }
+  const valida = {
+    protocol: 'DURABLE',
+    ackVersion: 1,
+    cancelDispositionVersion: 1,
+    probeVersion: 1,
+    socketId: 's',
+    at: '2026-09-11T10:00:00.000Z',
+    replay: false,
+  }
   it('sin columna, sin objeto o sin arreglo ⇒ desconocida', () => {
     expect(leerProcedencia(null)).toBeNull()
     expect(leerProcedencia('x')).toBeNull()
@@ -566,7 +574,9 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
         processedByStaffId: 'staff-pos',
         expiresAt: new Date(Date.now() + 60_000),
         // Una SENT fue ACK-eada por un socket durable: su procedencia lo dice, y es lo que autoriza el replay.
-        deliveryProvenance: { deliveries: [{ protocol: 'DURABLE', ackVersion: 1, socketId: 'sock-old', at: new Date().toISOString(), replay: false }] },
+        deliveryProvenance: {
+          deliveries: [{ protocol: 'DURABLE', ackVersion: 1, socketId: 'sock-old', at: new Date().toISOString(), replay: false }],
+        },
       },
     ])
 
@@ -591,9 +601,31 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
   it('al reconectar NO reentrega una fila de procedencia desconocida ni una entregada a un socket legacy', async () => {
     // Codex 11-sep (3): la fila pudo llegar a una app SIN bandeja; reentregarla a una bandeja que no la conoce la ejecuta otra vez.
     tpr().findMany.mockResolvedValueOnce([
-      { requestId: 'REQ-SIN-PROCEDENCIA', id: 'row-1', terminalId: 't-reconnect', venueId: 'venue-1', status: 'SENT', amountCents: 10000, tipCents: 0, orderId: null, expiresAt: new Date(Date.now() + 60_000) },
-      { requestId: 'REQ-LEGACY', id: 'row-2', terminalId: 't-reconnect', venueId: 'venue-1', status: 'PENDING', amountCents: 10000, tipCents: 0, orderId: null, expiresAt: new Date(Date.now() + 60_000),
-        deliveryProvenance: { deliveries: [{ protocol: 'LEGACY', ackVersion: 0, socketId: 'sock-old', at: new Date().toISOString(), replay: false }] } },
+      {
+        requestId: 'REQ-SIN-PROCEDENCIA',
+        id: 'row-1',
+        terminalId: 't-reconnect',
+        venueId: 'venue-1',
+        status: 'SENT',
+        amountCents: 10000,
+        tipCents: 0,
+        orderId: null,
+        expiresAt: new Date(Date.now() + 60_000),
+      },
+      {
+        requestId: 'REQ-LEGACY',
+        id: 'row-2',
+        terminalId: 't-reconnect',
+        venueId: 'venue-1',
+        status: 'PENDING',
+        amountCents: 10000,
+        tipCents: 0,
+        orderId: null,
+        expiresAt: new Date(Date.now() + 60_000),
+        deliveryProvenance: {
+          deliveries: [{ protocol: 'LEGACY', ackVersion: 0, socketId: 'sock-old', at: new Date().toISOString(), replay: false }],
+        },
+      },
     ])
 
     await (terminalPaymentService as any).replayPendingForTerminal('T-RECONNECT', 'venue-1', 'sock-t-reconnect')
@@ -714,6 +746,13 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
 
 describe('TerminalPaymentService — watchdog reconcile (Slice 1)', () => {
   const now = new Date('2026-07-11T12:00:00.000Z')
+  // Codex R14-4: la limpieza de aliases corre en `prisma.$transaction` (el mock entrega el propio `prismaMock`) con SAVEPOINT y una
+  // relectura NOWAIT por `$queryRaw`; por defecto ninguna fila ajena queda tomada ni releída (`[]`) — así un mutante que llegue a la
+  // limpieza donde no debía cae por ASERCIÓN (lo que afirma cada prueba) y no por un TypeError sobre `undefined`.
+  beforeEach(() => {
+    prismaMock.$executeRaw = jest.fn().mockResolvedValue(0)
+    prismaMock.$queryRaw.mockResolvedValue([])
+  })
 
   it('P1 la recuperación no cierra la petición con un cobro hecho en OTRA terminal', async () => {
     // El Payment lleva la etiqueta del requestId, es del mismo venue y está COMPLETED, pero se
@@ -756,7 +795,13 @@ describe('TerminalPaymentService — watchdog reconcile (Slice 1)', () => {
         createdAt: new Date(now.getTime() - 400_000),
       },
     ])
-    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-1', source: 'TPV', terminal: { serialNumber: 'abc' }, amount: new Prisma.Decimal(100), tipAmount: new Prisma.Decimal(0) })
+    prismaMock.payment.findFirst.mockResolvedValueOnce({
+      id: 'pay-1',
+      source: 'TPV',
+      terminal: { serialNumber: 'abc' },
+      amount: new Prisma.Decimal(100),
+      tipAmount: new Prisma.Decimal(0),
+    })
 
     const summary = await terminalPaymentService.reconcileStaleRequests(now)
     expect(summary.completed).toBe(1)
@@ -918,9 +963,9 @@ describe('TerminalPaymentService — watchdog reconcile (Slice 1)', () => {
     expect(summary.unknown).toBe(1) // no qualifying payment → HELD, never falsely completed
   })
 
-  it('does NOT complete against a Payment already claimed by ANOTHER request → UNKNOWN (never free blind)', async () => {
-    // Split/multi-card orders record several payments; a payment already linked to a different
-    // terminal request is not ours. Stealing it would free the slot on a mis-linked payment.
+  it('does NOT complete against a Payment whose ACCREDITED owner is ANOTHER request (tagged for it, charged on its terminal) → UNKNOWN (never free blind)', async () => {
+    // Split/multi-card orders record several payments; a payment ACCREDITED to a different terminal request is not ours.
+    // Stealing it would free the slot on a mis-linked payment. Codex R13-7: el veto exige procedencia, no mera existencia.
     const rowCreatedAt = new Date(now.getTime() - 400_000)
     tpr().findMany.mockResolvedValueOnce([
       {
@@ -933,17 +978,107 @@ describe('TerminalPaymentService — watchdog reconcile (Slice 1)', () => {
         createdAt: rowCreatedAt,
       },
     ])
-    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-other', source: 'TPV', terminal: { serialNumber: 'abc' }, amount: new Prisma.Decimal(100), tipAmount: new Prisma.Decimal(0) }) // a payment exists on the order…
-    tpr().findFirst.mockResolvedValueOnce({ id: 'row-owner' }) // …but it belongs to a DIFFERENT request
+    prismaMock.payment.findFirst.mockResolvedValueOnce({
+      id: 'pay-other',
+      source: 'TPV',
+      orderId: 'o1',
+      processorData: { terminalPaymentRequestId: 'REQ-STALE' },
+      terminalPaymentRequestId: 'REQ-OWNER',
+      terminal: { serialNumber: 'abc' },
+      amount: new Prisma.Decimal(100),
+      tipAmount: new Prisma.Decimal(0),
+    }) // a payment exists on the order… (la COLUMNA acredita a REQ-OWNER)
+    // …y REQ-OWNER lo reclama con procedencia: etiquetado con ella (columna) y cobrado en su terminal.
+    tpr().findMany.mockResolvedValueOnce([
+      { id: 'row-owner', requestId: 'REQ-OWNER', orderId: 'o1', terminalId: 'abc', status: 'COMPLETED' },
+    ])
 
     const summary = await terminalPaymentService.reconcileStaleRequests(now)
-    expect(prismaMock.terminalPaymentRequest.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ paymentId: 'pay-other', id: { not: 'row-stale' } }) }),
+    expect(tpr().findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ paymentId: 'pay-other', requestId: { not: 'REQ-STALE' } }) }),
     )
     expect(summary.completed).toBe(0)
     expect(tpr().updateMany).not.toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'COMPLETED' }) }))
+    // El dueño acreditado se conserva: ningún puntero ajeno se retira.
+    expect(tpr().updateMany).not.toHaveBeenCalledWith(expect.objectContaining({ data: { paymentId: null } }))
     expect(summary.unknown).toBe(1)
     expect(tpr().updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'UNKNOWN' }) }))
+  })
+
+  // Codex R13-7: la pregunta inversa de R12-6 — «otra solicitud apunta a MI Payment» sin procedencia (alias contaminado por el
+  // antiguo productor no-success) NO veta al cargo auténtico: el alias se retira (CAS sobre su valor), con 🚨 y bitácora.
+  it('a contaminated alias (another request pointing at the Payment WITHOUT provenance) does not veto: the alias is resolved (CAS), audited, and the authentic row completes', async () => {
+    const logger = require('@/config/logger').default
+    const errSpy = jest.spyOn(logger, 'error')
+    const rowCreatedAt = new Date(now.getTime() - 400_000)
+    tpr().findMany.mockResolvedValueOnce([
+      {
+        id: 'row-real',
+        requestId: 'REQ-REAL',
+        venueId: 'venue-1',
+        terminalId: 'abc',
+        orderId: 'o1',
+        status: 'PENDING',
+        createdAt: rowCreatedAt,
+      },
+    ])
+    prismaMock.payment.findFirst.mockResolvedValueOnce({
+      id: 'pay-real',
+      source: 'TPV',
+      orderId: 'o1',
+      processorData: { terminalPaymentRequestId: 'REQ-REAL', deviceSerialNumber: 'abc' },
+      terminalPaymentRequestId: 'REQ-REAL',
+      terminal: { serialNumber: 'abc' },
+      amount: new Prisma.Decimal(100),
+      tipAmount: new Prisma.Decimal(0),
+    })
+    // REQ-AJENA apunta a pay-real, pero pay-real está etiquetado con REQ-REAL: sin procedencia para REQ-AJENA.
+    tpr().findMany.mockResolvedValueOnce([{ id: 'row-ajena', requestId: 'REQ-AJENA', orderId: null, terminalId: 'xyz', status: 'UNKNOWN' }])
+    // Codex R14-4: la limpieza corre en una transacción real (aquí `$transaction` entrega el propio mock); la relectura NOWAIT del
+    // alias ajeno devuelve la fila apuntando a pay-real.
+    prismaMock.$executeRaw = jest.fn().mockResolvedValue(0)
+    prismaMock.$queryRaw.mockImplementation((strings: TemplateStringsArray) =>
+      Promise.resolve(
+        strings.join('').includes('alias ajeno') ? [{ paymentId: 'pay-real', orderId: null, terminalId: 'xyz', status: 'UNKNOWN' }] : [],
+      ),
+    )
+
+    const summary = await terminalPaymentService.reconcileStaleRequests(now)
+    expect(prismaMock.$transaction).toHaveBeenCalled()
+    expect(tpr().updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'row-ajena', paymentId: 'pay-real' }, data: { paymentId: null } }),
+    )
+    expect(summary.completed).toBe(1)
+    expect(tpr().updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: 'row-real' }),
+        data: expect.objectContaining({ status: 'COMPLETED', paymentId: 'pay-real' }),
+      }),
+    )
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining('contaminated alias resolved'),
+      expect.objectContaining({
+        requestId: 'REQ-AJENA',
+        paymentId: 'pay-real',
+        authenticRequestId: 'REQ-REAL',
+        reason: 'PAYMENT_TAGGED_FOR_ANOTHER_REQUEST',
+        origen: 'barrido',
+      }),
+    )
+    const { logAction } = require('@/services/dashboard/activity-log.service')
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'TERMINAL_PAYMENT_CONTAMINATED_ALIAS_RESOLVED',
+        entityId: 'REQ-AJENA',
+        venueId: 'venue-1',
+        data: expect.objectContaining({
+          paymentId: 'pay-real',
+          authenticRequestId: 'REQ-REAL',
+          reason: 'PAYMENT_TAGGED_FOR_ANOTHER_REQUEST',
+        }),
+      }),
+    )
+    errSpy.mockRestore()
   })
 })
 
@@ -992,9 +1127,18 @@ describe('TerminalPaymentService — closeRowFromPaymentTx (money moved beats a 
   // Un cobro de terminal SIEMPRE trae su procedencia: la fila conoce su terminal y el Payment la
   // suya (resuelta del serial del token). Un fixture sin ninguna de las dos describe un estado que
   // no existe — y desde la auditoría del 10-sep el cierre sin identidad acreditada se NIEGA.
-  const txWith = (status: string, payment: Record<string, unknown> = {}) =>
+  /**
+   * Codex R14-4: el alias ajeno se toma con `FOR UPDATE NOWAIT` (marcador `alias ajeno`) y se RELEE bajo el candado; el mock
+   * contesta esa relectura con la fila que la prueba declare en `aliasAjeno` (por defecto ninguna).
+   */
+  const txWith = (status: string, payment: Record<string, unknown> = {}, aliasAjeno: Record<string, unknown> | null = null) =>
     ({
-      $queryRaw: jest.fn().mockResolvedValue([]),
+      $executeRaw: jest.fn().mockResolvedValue(0),
+      $queryRaw: jest
+        .fn()
+        .mockImplementation((strings: TemplateStringsArray) =>
+          Promise.resolve(strings.join('').includes('alias ajeno') && aliasAjeno ? [aliasAjeno] : []),
+        ),
       payment: {
         findFirst: jest.fn().mockResolvedValue({
           processorData: {},
@@ -1007,7 +1151,11 @@ describe('TerminalPaymentService — closeRowFromPaymentTx (money moved beats a 
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
       terminalPaymentRequest: {
-        findFirst: jest.fn().mockImplementation(({ where }: any) => Promise.resolve(where.paymentId ? null : { status, terminalId: 't-1' })),
+        findFirst: jest
+          .fn()
+          .mockImplementation(({ where }: any) => Promise.resolve(where.paymentId ? null : { status, terminalId: 't-1' })),
+        // Codex R13-7: las reclamaciones de OTRAS solicitudes sobre el Payment (ninguna, por defecto).
+        findMany: jest.fn().mockResolvedValue([]),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
     }) as any
@@ -1029,8 +1177,14 @@ describe('TerminalPaymentService — closeRowFromPaymentTx (money moved beats a 
     expect(tx.terminalPaymentRequest.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ status: 'COMPLETED', paymentId: 'pay-fk' }) }),
     )
+    // S0: la columna del ganador viaja en la MISMA escritura que la procedencia.
     expect(tx.payment.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ data: { processorData: expect.objectContaining({ deviceSerialNumber: 'AVQD-T-1' }) } }),
+      expect.objectContaining({
+        data: expect.objectContaining({
+          terminalPaymentRequestId: 'REQ-FK',
+          processorData: expect.objectContaining({ deviceSerialNumber: 'AVQD-T-1' }),
+        }),
+      }),
     )
   })
 
@@ -1062,7 +1216,8 @@ describe('TerminalPaymentService — closeRowFromPaymentTx (money moved beats a 
 
     expect(tx.terminalPaymentRequest.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { requestId: 'REQ-Z', venueId: 'venue-1', status: { not: 'COMPLETED' } },
+        // S0: el CAS es «todavía sin ganador», no «todavía no COMPLETED» (una COMPLETED sin paymentId también liga).
+        where: { requestId: 'REQ-Z', venueId: 'venue-1', paymentId: null },
         data: expect.objectContaining({ status: 'COMPLETED', paymentId: 'pay-late', lateResult: true }),
       }),
     )
@@ -1082,7 +1237,7 @@ describe('TerminalPaymentService — closeRowFromPaymentTx (money moved beats a 
 
     expect(tx.terminalPaymentRequest.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { requestId: 'REQ-T', venueId: 'venue-1', status: { not: 'COMPLETED' } },
+        where: { requestId: 'REQ-T', venueId: 'venue-1', paymentId: null },
         data: expect.objectContaining({ status: 'COMPLETED', paymentId: 'pay-late-t', lateResult: true }),
       }),
     )
@@ -1128,6 +1283,7 @@ describe('TerminalPaymentService — closeRowFromPaymentTx (money moved beats a 
           .mockImplementation(({ where }: any) =>
             Promise.resolve(where.paymentId ? null : { status: 'SENT', terminalId: 't-1', amountCents: 47_500, tipCents: 4_750 }),
           ),
+        findMany: jest.fn().mockResolvedValue([]),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
     } as any
@@ -1157,10 +1313,220 @@ describe('TerminalPaymentService — closeRowFromPaymentTx (money moved beats a 
     errSpy.mockRestore()
   })
 
-  it('is a no-op on an already-COMPLETED row (idempotent — never clobbers the stored paymentId)', async () => {
-    const tx = txWith('COMPLETED')
-    await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-DONE', 'pay-2', 'venue-1')
+  it('is a no-op on a row that ALREADY has its ACCREDITED winner (idempotent — never clobbers a stored paymentId that is a charge of this request)', async () => {
+    // Codex R12-6: «ya ligada» exige que el puntero sea un cobro acreditado de ESTA solicitud (etiquetado con ella y de
+    // esta terminal) — el mismo criterio que el árbitro. El ganador `pay-1` lo es.
+    const tx = txWith('COMPLETED', { terminalPaymentRequestId: 'REQ-DONE' })
+    tx.terminalPaymentRequest.findFirst = jest.fn().mockResolvedValue({ status: 'COMPLETED', terminalId: 't-1', paymentId: 'pay-1' })
+    expect(await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-DONE', 'pay-2', 'venue-1')).toEqual({
+      bound: false,
+      reason: 'ALREADY_BOUND',
+    })
+    expect(tx.payment.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: 'pay-1', venueId: 'venue-1', status: { in: ['COMPLETED', 'REFUNDED'] } }),
+      }),
+    )
     expect(tx.terminalPaymentRequest.updateMany).not.toHaveBeenCalled()
+    expect(tx.payment.updateMany).not.toHaveBeenCalled()
+  })
+
+  // Codex R12-6: un resultado no-success del socket podía escribir en `paymentId` una venta AJENA; el cierre la trataba
+  // como «ya ligada» y el cargo auténtico quedaba fuera. Un puntero sin procedencia se reemplaza — con CAS sobre SU valor
+  // (nunca sobre un ganador acreditado escrito en medio), 🚨 y bitácora.
+  it('a stored pointer WITHOUT provenance (not tagged for this request) is replaced by the authentic charge: CAS on the old pointer, 🚨 and audit trail', async () => {
+    const logger = require('@/config/logger').default
+    const errSpy = jest.spyOn(logger, 'error')
+    const tx = txWith('TIMED_OUT')
+    // `pay-ajeno` es un cobro real del mismo venue, pero de OTRA venta (sin la etiqueta de REQ-CONTAMINADA) y de otra terminal.
+    tx.payment.findFirst = jest.fn().mockImplementation(({ where }: any) =>
+      Promise.resolve(
+        where.id === 'pay-ajeno'
+          ? {
+              processorData: {},
+              amount: new Prisma.Decimal(100),
+              tipAmount: new Prisma.Decimal(0),
+              source: 'TPV',
+              terminalPaymentRequestId: null,
+              terminal: { serialNumber: 'AVQD-T-9' },
+            }
+          : {
+              processorData: {},
+              amount: new Prisma.Decimal(100),
+              tipAmount: new Prisma.Decimal(0),
+              source: 'TPV',
+              terminalPaymentRequestId: null,
+              terminal: { serialNumber: 'AVQD-T-1' },
+            },
+      ),
+    )
+    tx.terminalPaymentRequest.findFirst = jest
+      .fn()
+      .mockImplementation(({ where }: any) =>
+        Promise.resolve(where.paymentId ? null : { status: 'TIMED_OUT', terminalId: 't-1', paymentId: 'pay-ajeno' }),
+      )
+    tx.terminalPaymentRequest.findMany = jest.fn().mockResolvedValue([])
+
+    const outcome = await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-CONTAMINADA', 'pay-autentico', 'venue-1')
+
+    expect(outcome).toMatchObject({ bound: true, reopened: true, previousStatus: 'TIMED_OUT' })
+    expect(tx.terminalPaymentRequest.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { requestId: 'REQ-CONTAMINADA', venueId: 'venue-1', paymentId: 'pay-ajeno' },
+        data: expect.objectContaining({ status: 'COMPLETED', paymentId: 'pay-autentico', lateResult: true }),
+      }),
+    )
+    expect(tx.payment.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'pay-autentico', venueId: 'venue-1' },
+        data: expect.objectContaining({ terminalPaymentRequestId: 'REQ-CONTAMINADA' }),
+      }),
+    )
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining('NOT an accredited charge of this request'),
+      expect.objectContaining({
+        requestId: 'REQ-CONTAMINADA',
+        ignoredPaymentId: 'pay-ajeno',
+        reason: 'NOT_TAGGED_FOR_THIS_REQUEST',
+        origen: 'cierre',
+      }),
+    )
+    const { logAction } = require('@/services/dashboard/activity-log.service') // mock global del setup
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'TERMINAL_PAYMENT_UNACCREDITED_WINNER_IGNORED',
+        entityId: 'REQ-CONTAMINADA',
+        venueId: 'venue-1',
+        data: expect.objectContaining({ ignoredPaymentId: 'pay-ajeno', reason: 'NOT_TAGGED_FOR_THIS_REQUEST', origen: 'cierre' }),
+      }),
+    )
+    errSpy.mockRestore()
+  })
+
+  // Codex R13-7: la reclamación de OTRA solicitud sobre el Payment sólo veta el cierre si está acreditada por el mismo criterio.
+  it('Codex R13-7 · another request that claims the Payment WITH provenance (tagged for it, charged on its terminal) vetoes: PAYMENT_BOUND_ELSEWHERE, nothing written', async () => {
+    const tx = txWith('UNKNOWN', { terminalPaymentRequestId: 'REQ-DUENA', orderId: null })
+    tx.terminalPaymentRequest.findMany = jest
+      .fn()
+      .mockResolvedValue([{ id: 'row-duena', requestId: 'REQ-DUENA', orderId: null, terminalId: 't-1', status: 'COMPLETED' }])
+    expect(await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-OTRA', 'pay-1', 'venue-1')).toEqual({
+      bound: false,
+      reason: 'PAYMENT_BOUND_ELSEWHERE',
+    })
+    expect(tx.terminalPaymentRequest.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ paymentId: 'pay-1', venueId: 'venue-1', requestId: { not: 'REQ-OTRA' } }),
+      }),
+    )
+    expect(tx.terminalPaymentRequest.updateMany).not.toHaveBeenCalled()
+    expect(tx.payment.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('Codex R13-7 · another request pointing at the Payment WITHOUT provenance (contaminated alias) does not veto: the alias is resolved by CAS, 🚨 + audit, and this request binds', async () => {
+    const logger = require('@/config/logger').default
+    const errSpy = jest.spyOn(logger, 'error')
+    const tx = txWith(
+      'UNKNOWN',
+      { terminalPaymentRequestId: null, orderId: null },
+      { paymentId: 'pay-1', orderId: null, terminalId: 't-9', status: 'UNKNOWN' },
+    )
+    tx.terminalPaymentRequest.findMany = jest
+      .fn()
+      .mockResolvedValue([{ id: 'row-ajena', requestId: 'REQ-AJENA', orderId: null, terminalId: 't-9', status: 'UNKNOWN' }])
+    const outcome = await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-REAL', 'pay-1', 'venue-1')
+    expect(outcome).toMatchObject({ bound: true, previousStatus: 'UNKNOWN' })
+    // Codex R14-4: la fila ajena se tomó SIN esperar (NOWAIT) dentro de un savepoint, y se releyó antes del CAS.
+    expect(tx.$executeRaw.mock.calls.map((c: TemplateStringsArray[]) => c[0].join(''))).toEqual([
+      expect.stringContaining('SAVEPOINT alias_ajeno'),
+      expect.stringContaining('RELEASE SAVEPOINT alias_ajeno'),
+    ])
+    expect(
+      tx.$queryRaw.mock.calls.map((c: TemplateStringsArray[]) => c[0].join('')).filter((q: string) => q.includes('alias ajeno')),
+    ).toEqual([expect.stringContaining('FOR UPDATE NOWAIT')])
+    expect(tx.terminalPaymentRequest.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'row-ajena', paymentId: 'pay-1' }, data: { paymentId: null } }),
+    )
+    expect(tx.terminalPaymentRequest.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { requestId: 'REQ-REAL', venueId: 'venue-1', paymentId: null },
+        data: expect.objectContaining({ status: 'COMPLETED', paymentId: 'pay-1' }),
+      }),
+    )
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining('contaminated alias resolved'),
+      expect.objectContaining({
+        requestId: 'REQ-AJENA',
+        paymentId: 'pay-1',
+        authenticRequestId: 'REQ-REAL',
+        reason: 'NOT_TAGGED_FOR_THIS_REQUEST',
+        origen: 'cierre',
+      }),
+    )
+    const { logAction } = require('@/services/dashboard/activity-log.service')
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'TERMINAL_PAYMENT_CONTAMINATED_ALIAS_RESOLVED', entityId: 'REQ-AJENA', venueId: 'venue-1' }),
+    )
+    errSpy.mockRestore()
+  })
+
+  it('a stored pointer that is the SAME payment being bound is idempotent (ALREADY_BOUND) without re-reading it', async () => {
+    const tx = txWith('COMPLETED')
+    tx.terminalPaymentRequest.findFirst = jest.fn().mockResolvedValue({ status: 'COMPLETED', terminalId: 't-1', paymentId: 'pay-1' })
+    expect(await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-MISMO', 'pay-1', 'venue-1')).toEqual({
+      bound: false,
+      reason: 'ALREADY_BOUND',
+    })
+    expect(tx.payment.findFirst).not.toHaveBeenCalled()
+    expect(tx.terminalPaymentRequest.updateMany).not.toHaveBeenCalled()
+  })
+
+  // S0 (Codex, 13-sep): cerrada por el SOCKET antes de que llegara el registro ⇒ COMPLETED sin paymentId. Antes salía
+  // en falso y dejaba al primer registro sin vínculo — y al segundo sin nadie que le dijera que era el segundo.
+  // No es un «reopen» (la terminal la cerró con éxito): sin lateResult y sin 🚨.
+  it('a COMPLETED row WITHOUT paymentId (closed by socket before the REST registration) binds the first recorded Payment', async () => {
+    const logger = require('@/config/logger').default
+    const errSpy = jest.spyOn(logger, 'error')
+    const tx = txWith('COMPLETED')
+    expect(await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-SOCKET-FIRST', 'pay-2', 'venue-1')).toEqual({
+      bound: true,
+      reopened: false,
+      contractMismatch: false,
+      previousStatus: 'COMPLETED',
+      alarmed: false,
+    })
+    expect(tx.terminalPaymentRequest.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { requestId: 'REQ-SOCKET-FIRST', venueId: 'venue-1', paymentId: null },
+        data: expect.objectContaining({ paymentId: 'pay-2', closedVia: 'terminal', lateResult: false }),
+      }),
+    )
+    expect(tx.payment.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ terminalPaymentRequestId: 'REQ-SOCKET-FIRST' }) }),
+    )
+    expect(errSpy).not.toHaveBeenCalledWith(expect.stringContaining('🚨 [Terminal-payment] Payment recorded'), expect.anything())
+    errSpy.mockRestore()
+  })
+
+  // P1-5 (Codex): la SOLICITUD se bloquea antes que el Payment, también cuando se llega desde el socket.
+  it('locks the request row BEFORE the Payment row (same lock protocol as the registrar)', async () => {
+    const tx = txWith('SENT')
+    await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-LOCKS', 'pay-1', 'venue-1')
+    const sqls = (tx.$queryRaw as jest.Mock).mock.calls.map(([strings]: [unknown]) =>
+      Array.isArray(strings) ? strings.join('?') : String(strings),
+    )
+    expect(sqls[0]).toContain('"TerminalPaymentRequest"')
+    expect(sqls[1]).toContain('"Payment"')
+  })
+
+  // El perdedor de la carrera por la fila NO estampa su Payment: la fila primero, el Payment después.
+  it('when the row CAS loses (already bound by a concurrent close), the Payment is left untouched', async () => {
+    const tx = txWith('SENT')
+    tx.terminalPaymentRequest.updateMany = jest.fn().mockResolvedValue({ count: 0 })
+    expect(await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-RACE', 'pay-9', 'venue-1')).toEqual({
+      bound: false,
+      reason: 'ALREADY_BOUND',
+    })
+    expect(tx.payment.updateMany).not.toHaveBeenCalled()
   })
 
   it('money landing on a CANCEL_REQUESTED row reconciles to COMPLETED AND alerts 🚨 (cancel lost the race — a human must know)', async () => {
@@ -1380,7 +1746,13 @@ describe('TerminalPaymentService — el watchdog no cierra con el pago de otro',
 
   it('un pago con TARJETA y COMPLETED sí la cierra — el camino bueno no se rompe', async () => {
     tpr().findMany.mockResolvedValueOnce([staleRow({ id: 'row-3', requestId: 'REQ-W3' })])
-    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-ok', source: 'TPV', terminal: { serialNumber: 't-w1' }, amount: new Prisma.Decimal(100), tipAmount: new Prisma.Decimal(0) })
+    prismaMock.payment.findFirst.mockResolvedValueOnce({
+      id: 'pay-ok',
+      source: 'TPV',
+      terminal: { serialNumber: 't-w1' },
+      amount: new Prisma.Decimal(100),
+      tipAmount: new Prisma.Decimal(0),
+    })
     tpr().findFirst.mockResolvedValueOnce(null) // no reclamado por otra solicitud
     tpr().updateMany.mockResolvedValueOnce({ count: 1 })
 
@@ -1420,7 +1792,13 @@ describe('TerminalPaymentService — un cobro que pasó pese al cancel SIEMPRE a
         createdAt: new Date('2026-08-11T10:00:00Z'),
       },
     ])
-    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-c1', source: 'TPV', terminal: { serialNumber: 't-c1' }, amount: new Prisma.Decimal(100), tipAmount: new Prisma.Decimal(0) })
+    prismaMock.payment.findFirst.mockResolvedValueOnce({
+      id: 'pay-c1',
+      source: 'TPV',
+      terminal: { serialNumber: 't-c1' },
+      amount: new Prisma.Decimal(100),
+      tipAmount: new Prisma.Decimal(0),
+    })
     tpr().findFirst.mockResolvedValueOnce(null)
     tpr().updateMany.mockResolvedValueOnce({ count: 1 })
 
@@ -1446,7 +1824,13 @@ describe('TerminalPaymentService — un cobro que pasó pese al cancel SIEMPRE a
         createdAt: new Date('2026-08-11T10:00:00Z'),
       },
     ])
-    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-c2', source: 'TPV', terminal: { serialNumber: 't-c2' }, amount: new Prisma.Decimal(100), tipAmount: new Prisma.Decimal(0) })
+    prismaMock.payment.findFirst.mockResolvedValueOnce({
+      id: 'pay-c2',
+      source: 'TPV',
+      terminal: { serialNumber: 't-c2' },
+      amount: new Prisma.Decimal(100),
+      tipAmount: new Prisma.Decimal(0),
+    })
     tpr().findFirst.mockResolvedValueOnce(null)
     tpr().updateMany.mockResolvedValueOnce({ count: 1 })
 
@@ -1465,9 +1849,10 @@ describe('Audit round1 lost captured socket', () => {
     // permiso para volver a pasar la tarjeta. La afirmación que este test guarda —«nunca
     // afirma que no se inició autorización»— sólo se cumple de verdad con `status:'timeout'`,
     // que los clientes ya publicados leen como incierto (504).
-    await expect(
-      terminalPaymentService.sendPaymentToTerminal(baseRequest({ requestId: 'lost-captured-socket' })),
-    ).resolves.toMatchObject({ requestId: 'lost-captured-socket', status: 'timeout' })
+    await expect(terminalPaymentService.sendPaymentToTerminal(baseRequest({ requestId: 'lost-captured-socket' }))).resolves.toMatchObject({
+      requestId: 'lost-captured-socket',
+      status: 'timeout',
+    })
     await flush()
     expect(tpr().updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1509,7 +1894,6 @@ describe('Busy picker query budget', () => {
       expect(query.where).not.toHaveProperty('venueId')
     }
   })
-
 
   it('aggregates every candidate in bounded batches without dropping the last terminal', async () => {
     const candidates = Array.from({ length: 201 }, (_, index) => 'terminal-' + index)
@@ -1705,5 +2089,27 @@ describe('TerminalPaymentService — lápida de admisión: contención, choque d
       failureCode: 'REJECTED_TERMINAL_OTHER_VENUE',
     })
     expect(directEmit).not.toHaveBeenCalled()
+  })
+})
+
+describe('Codex R1 (P2) · resolvePendingFromDurableState consulta por LOTES acotados', () => {
+  it('con 250 esperas en memoria hace 3 consultas de a lo sumo 100 ids, nunca una sola con todos', async () => {
+    const { terminalPaymentService } = await import('../../../src/services/terminal-payment.service')
+    const mapa = (terminalPaymentService as unknown as { pendingPayments: Map<string, { requestId: string }> }).pendingPayments
+    const ids = Array.from({ length: 250 }, (_, i) => `lote-${i}`)
+    for (const id of ids) mapa.set(id, { requestId: id })
+    const findMany = prismaMock.terminalPaymentRequest.findMany as jest.Mock
+    findMany.mockReset()
+    findMany.mockResolvedValue([])
+    try {
+      const r = await terminalPaymentService.resolvePendingFromDurableState()
+      expect(r).toEqual({ resolved: 0, checked: 250 })
+      expect(findMany).toHaveBeenCalledTimes(3)
+      const tamanos = findMany.mock.calls.map(([args]) => (args.where.requestId.in as string[]).length)
+      expect(tamanos).toEqual([100, 100, 50])
+      for (const [args] of findMany.mock.calls) expect(args.take).toBe((args.where.requestId.in as string[]).length)
+    } finally {
+      for (const id of ids) mapa.delete(id)
+    }
   })
 })

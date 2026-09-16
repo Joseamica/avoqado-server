@@ -27,6 +27,8 @@ jest.mock('@/services/venueSalesGuard', () => ({
 const lockAreaTicketCheckoutMock = jest.fn()
 const finalizeAreaTicketPaymentMock = jest.fn()
 jest.mock('@/services/mobile/areaTicketV7.mobile.service', () => ({
+  // S0 (13-sep): el registrador toma la jerarquía de vales ANTES de arbitrar; aquí no hay sesión (null).
+  lockAreaTicketCheckoutHierarchy: jest.fn().mockResolvedValue(null),
   __esModule: true,
   lockAreaTicketCheckoutForPayment: (...a: unknown[]) => lockAreaTicketCheckoutMock(...a),
   finalizeAreaTicketPaymentInTransaction: (...a: unknown[]) => finalizeAreaTicketPaymentMock(...a),

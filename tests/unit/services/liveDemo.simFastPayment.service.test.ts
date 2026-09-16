@@ -102,6 +102,8 @@ function mockHappyPathPrisma() {
       ? { orderId: a.where.orderId ?? null }
       : null,
   )
+  // Codex R2 (P1-1): la deduplicación por referencia lee sus candidatos con `findMany` (lista, acotada): sin cobro previo.
+  prismaMock.payment.findMany.mockResolvedValue([])
 
   // validateStaffVenue — the demo venue's seeded OWNER staff
   prismaMock.staffVenue.findFirst.mockResolvedValue({

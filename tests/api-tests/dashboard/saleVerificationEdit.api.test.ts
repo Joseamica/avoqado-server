@@ -122,6 +122,33 @@ function seedFailedSale() {
     payment: { id: PAYMENT_ID, amount: '100', method: 'CASH', status: 'COMPLETED', createdAt: new Date() },
   }))
   prismaMock.activityLog.create.mockResolvedValue({ id: 'log-1' })
+  // Codex R13-3: la decisión económica relee la fila VIGENTE bajo el mutex; por defecto el cobro NO es del protocolo.
+  prismaMock.payment.findUniqueOrThrow.mockResolvedValue({ amount: '0', method: 'OTHER' } as any)
+  prismaMock.$queryRaw.mockResolvedValue([])
+  // Codex R16-1: el candado toma el PAR original → reembolso (`bloquearConSuOriginal`): lee la foto del Payment (id, tipo, puntero)
+  // antes y después de bloquear, entre savepoints. Por defecto el cobro NO es un reembolso (sin original que tomar).
+  prismaMock.payment.findFirst.mockResolvedValue({ id: PAYMENT_ID, type: 'CREDIT', processorData: {} } as any)
+  prismaMock.$executeRaw.mockResolvedValue(0)
+}
+/** Un cobro DEL PROTOCOLO de costo ($100 con tarjeta): `cobrosDelProtocolo` (SQL sobre "Payment" p) lo devuelve; el candado no devuelve filas útiles. */
+function seedProtocolSale() {
+  seedFailedSale()
+  prismaMock.saleVerification.findUnique.mockResolvedValue({
+    id: SALE_ID,
+    venueId: VENUE_ID,
+    staffId: PROMOTER_ID,
+    paymentId: PAYMENT_ID,
+    status: 'PENDING',
+    isPortabilidad: false,
+    reviewNotes: null,
+    rejectionReasons: [],
+    payment: { id: PAYMENT_ID, amount: '100', method: 'CREDIT_CARD' },
+    venue: { organizationId: ORG_ID },
+  })
+  prismaMock.payment.findUniqueOrThrow.mockResolvedValue({ amount: '100', method: 'CREDIT_CARD' } as any)
+  prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray) =>
+    strings.join('?').includes('FROM "Payment" p') ? [{ id: PAYMENT_ID }] : [],
+  )
 }
 
 describe('PATCH /api/v1/dashboard/organizations/:orgId/sale-verifications/:id (edit)', () => {
@@ -212,5 +239,54 @@ describe('PATCH /api/v1/dashboard/organizations/:orgId/sale-verifications/:id (e
     // No financial write may happen on a cross-org sale.
     expect(prismaMock.payment.update).not.toHaveBeenCalled()
     expect(prismaMock.saleVerification.update).not.toHaveBeenCalled()
+  })
+
+  describe('Codex R13-3 · un cobro del protocolo de costo no cambia de dinero desde la verificación de venta', () => {
+    it('OWNER: PATCH que cambia el importe ⇒ 409 PAYMENT_PROTECTED_BY_COST_PROTOCOL con los campos, y NO escribe (ni Payment, ni verificación, ni bitácora)', async () => {
+      seedProtocolSale()
+      const res = await request(app)
+        .patch(`${BASE}/${SALE_ID}`)
+        .set('Authorization', `Bearer ${makeToken('OWNER')}`)
+        .send({ amount: 120, reason: 'corrección de monto' })
+      expect(res.status).toBe(409)
+      expect(res.body).toMatchObject({ success: false, code: 'PAYMENT_PROTECTED_BY_COST_PROTOCOL', details: { fields: ['amount'] } })
+      expect(prismaMock.payment.update).not.toHaveBeenCalled()
+      expect(prismaMock.saleVerification.update).not.toHaveBeenCalled()
+      expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+    })
+
+    it('OWNER: PATCH que cambia la forma de pago (CARD → CASH) ⇒ 409 con `method` en los campos, y NO escribe', async () => {
+      seedProtocolSale()
+      const res = await request(app)
+        .patch(`${BASE}/${SALE_ID}`)
+        .set('Authorization', `Bearer ${makeToken('OWNER')}`)
+        .send({ paymentForm: 'CASH', reason: 'corrección de forma de pago' })
+      expect(res.status).toBe(409)
+      expect(res.body).toMatchObject({ code: 'PAYMENT_PROTECTED_BY_COST_PROTOCOL', details: { fields: ['method'] } })
+      expect(prismaMock.payment.update).not.toHaveBeenCalled()
+      expect(prismaMock.saleVerification.update).not.toHaveBeenCalled()
+    })
+
+    it('OWNER: revisión sin dinero (estado FAILED con notas) sobre un cobro del protocolo ⇒ 200, escribe la verificación y la bitácora, nunca el Payment', async () => {
+      seedProtocolSale()
+      const res = await request(app)
+        .patch(`${BASE}/${SALE_ID}`)
+        .set('Authorization', `Bearer ${makeToken('OWNER')}`)
+        .send({ status: 'FAILED', reviewNotes: 'Falta la foto de la vinculación', reason: 'revisión de documentación' })
+      expect(res.status).toBe(200)
+      expect(prismaMock.payment.update).not.toHaveBeenCalled()
+      expect(prismaMock.saleVerification.update).toHaveBeenCalledTimes(1)
+      expect(prismaMock.activityLog.create).toHaveBeenCalledTimes(1)
+    })
+
+    it('OWNER: un NO-OP económico (el mismo importe y la misma forma) sobre un cobro del protocolo ⇒ 200 sin tocar el Payment', async () => {
+      seedProtocolSale()
+      const res = await request(app)
+        .patch(`${BASE}/${SALE_ID}`)
+        .set('Authorization', `Bearer ${makeToken('OWNER')}`)
+        .send({ amount: 100, paymentForm: 'CARD', reason: 'sin cambio económico' })
+      expect(res.status).toBe(200)
+      expect(prismaMock.payment.update).not.toHaveBeenCalled()
+    })
   })
 })

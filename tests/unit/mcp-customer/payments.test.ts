@@ -1,9 +1,10 @@
-import { registerPaymentTools, buildPaymentsSummary } from '../../../src/mcp/tools/payments'
+import { registerPaymentTools, buildPaymentsSummary, conCostoPendiente } from '../../../src/mcp/tools/payments'
 import type { McpScope } from '../../../src/mcp/scope'
 
 const mockVenueFind = jest.fn()
 const mockGroupBy = jest.fn()
 const mockFindMany = jest.fn()
+const mockCount = jest.fn()
 
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
@@ -21,6 +22,7 @@ jest.mock('@/utils/prismaClient', () => ({
     payment: {
       groupBy: (...a: unknown[]) => mockGroupBy(...(a as [])),
       findMany: (...a: unknown[]) => mockFindMany(...(a as [])),
+      count: (...a: unknown[]) => mockCount(...(a as [])),
     },
   },
 }))
@@ -33,7 +35,10 @@ const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[
 beforeAll(() => {
   registerPaymentTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
 })
-beforeEach(() => jest.clearAllMocks())
+beforeEach(() => {
+  jest.clearAllMocks()
+  mockCount.mockResolvedValue(0)
+})
 
 describe('buildPaymentsSummary (pure)', () => {
   it('splits modern refunds (COMPLETED+REFUND, negative) out of completed instead of netting them in', () => {
@@ -197,5 +202,85 @@ describe('list_payments', () => {
 
     expect(mockGroupBy.mock.calls[0][0].where).toMatchObject({ status: 'COMPLETED', type: { not: 'REFUND' } })
     expect(mockFindMany.mock.calls[0][0].where).toMatchObject({ status: 'COMPLETED', type: { not: 'REFUND' } })
+  })
+})
+
+describe('Codex R1 · P2: el costo PENDIENTE (Payment nacido del webhook) se declara, no se publica como definitivo', () => {
+  it('conCostoPendiente (pura): cuenta los pendientes y marca el neto como provisional sólo si hay alguno', () => {
+    const base = buildPaymentsSummary([
+      { status: 'COMPLETED', type: 'REGULAR', _count: { _all: 2 }, _sum: { amount: 200, tipAmount: 0, feeAmount: 3, netAmount: 197 } },
+    ] as never)
+    expect(conCostoPendiente(base, 0).completed).toMatchObject({ count: 2, net: 197, costPendingCount: 0, netProvisional: false })
+    expect(conCostoPendiente(base, 1).completed).toMatchObject({ count: 2, net: 197, costPendingCount: 1, netProvisional: true })
+    // Un conteo ilegible (mock viejo, NaN) nunca se publica como número: cae a 0 y no provisional.
+    expect(conCostoPendiente(base, Number.NaN).completed).toMatchObject({ costPendingCount: 0, netProvisional: false })
+  })
+
+  it('list_payments cuenta los COMPLETED con `costPending` en la base (mismo `where` del listado) y lo expone en el resumen', async () => {
+    mockVenueFind.mockResolvedValue({ id: 'v1', timezone: 'America/Mexico_City' })
+    mockGroupBy.mockResolvedValueOnce([
+      { status: 'COMPLETED', type: 'REGULAR', _count: { _all: 3 }, _sum: { amount: 300, tipAmount: 0, feeAmount: 0, netAmount: 300 } },
+    ])
+    mockFindMany.mockResolvedValueOnce([])
+    mockCount.mockResolvedValueOnce(2)
+
+    const r = parse(await call({ venueId: 'v1', from: '2026-09-01', to: '2026-09-13' }))
+
+    expect(mockCount).toHaveBeenCalledTimes(1)
+    const countWhere = mockCount.mock.calls[0][0].where
+    expect(countWhere).toMatchObject({
+      venueId: { in: ['v1'] },
+      status: 'COMPLETED',
+      processorData: { path: ['costPending'], equals: true },
+    })
+    // El conteo acota por la MISMA ventana que el listado: sin eso contaría pendientes de otros días.
+    expect(countWhere.createdAt).toEqual(mockGroupBy.mock.calls[0][0].where.createdAt)
+    expect(r.summary.completed).toMatchObject({ count: 3, net: 300, costPendingCount: 2, netProvisional: true })
+  })
+
+  // Codex R12-16: el agregado dice cuántos netos son provisionales, pero no CUÁLES. Cada fila lleva su propio `costPending`
+  // (y `feeProvisional`): una fila «$100 / fee $0» convergida y otra que sigue esperando se distinguen una por una.
+  it('list_payments marca POR PAGO cuál sigue con el costo pendiente (fee/net provisionales) y cuál ya convergió', async () => {
+    mockVenueFind.mockResolvedValue({ id: 'v1', timezone: 'America/Mexico_City' })
+    mockGroupBy.mockResolvedValueOnce([
+      { status: 'COMPLETED', type: 'REGULAR', _count: { _all: 2 }, _sum: { amount: 200, tipAmount: 0, feeAmount: 3, netAmount: 197 } },
+    ])
+    const fila = (id: string, feeAmount: number, netAmount: number, processorData: unknown) => ({
+      id,
+      status: 'COMPLETED',
+      type: 'REGULAR',
+      method: 'CREDIT_CARD',
+      source: 'TPV',
+      amount: 100,
+      tipAmount: 0,
+      feeAmount,
+      netAmount,
+      cardBrand: 'VISA',
+      internationalityStatus: null,
+      internationalitySource: null,
+      issuerCountryCode: null,
+      processor: 'angelpay',
+      createdAt: new Date('2026-09-13T12:00:00Z'),
+      processedBy: null,
+      terminal: null,
+      order: { orderNumber: 'ORD-1' },
+      processorData,
+    })
+    mockFindMany.mockResolvedValueOnce([
+      fila('pendiente', 0, 100, { costPending: true, pricing: {} }),
+      fila('convergido', 3, 97, { costPending: false, pricing: {} }),
+      fila('legacy', 0, 100, null),
+    ])
+    mockCount.mockResolvedValueOnce(1)
+
+    const r = parse(await call({ venueId: 'v1', from: '2026-09-01', to: '2026-09-13' }))
+
+    // La selección pide `processorData` (de ahí sale la marca), pero la salida NO lo expone entero: sólo la marca.
+    expect(mockFindMany.mock.calls[0][0].select).toMatchObject({ processorData: true })
+    const porId = Object.fromEntries(r.payments.map((p: { id: string }) => [p.id, p]))
+    expect(porId.pendiente).toMatchObject({ processorFee: 0, net: 100, costPending: true, feeProvisional: true })
+    expect(porId.convergido).toMatchObject({ processorFee: 3, net: 97, costPending: false, feeProvisional: false })
+    expect(porId.legacy).toMatchObject({ processorFee: 0, net: 100, costPending: false, feeProvisional: false })
+    expect(porId.pendiente).not.toHaveProperty('processorData')
   })
 })
