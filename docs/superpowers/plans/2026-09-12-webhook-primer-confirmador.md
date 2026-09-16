@@ -3109,6 +3109,12 @@ COMPLETO (la caché incremental de la copia estaba fría) ⇒ control previo obl
 compilar). `main` queda 3 por delante de `origin/main` (25d7368 ajeno + 99faf71): **SIN pushear** — decidir con el founder, porque
 el push arrastra el commit ajeno del QR de reimpresión y dispara «Signed builds» en GitHub.
 
+**Rondas 3 y 4 de Codex (16-sep 03:0x–03:2x, mínimas, sólo los dos cierres exigidos):** la 3ª dio NO AUTORIZADO por UNA prueba —
+`cancel()` + `await()` sobre el `Deferred` lanza SIEMPRE, aunque `doWork()` se trague la cancelación y devuelva `success`, así que no
+demostraba la propagación—; corregida capturando el desenlace de `doWork()` DENTRO de la corrutina y exigiendo `CancellationException`
+(nunca un `Result`), con sabotaje S20 (el worker contesta `success` ante la cancelación ⇒ cae) y commit `ea5fa9a` (sólo pruebas). La 4ª:
+**«AUTORIZADO — P2-1 cerrado»**. Estado final: `avoqado-tpv` `main` = `ea5fa9a` (sobre `99faf71`), 20/20 sabotajes, sin push.
+
 Codex confirmó además, contra el código: la barrera normal de `NOT_OWNER` corta antes de `markAuthorizing` y sin SDK (`:955`, llamadores
 `:1955`/`:2092`); H.3 sin bypass; el predicado NULL-seguro dio **0 NULL en 1,485 combinaciones**; el lote de S6 avanza (30 → 25 → 5),
 espaciado 10…1280 min (tope efectivo 21 h 20 min < 24 h); sin `NULLS FIRST` ni sintaxis > SQLite 3.19; la migración v34→v35 correcta sobre
