@@ -12,7 +12,7 @@ import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import { orderAngelPayAccountsForTerminal, orderMerchantsBySlot } from '@/services/tpv/angelpayPrimaryAccount'
 import prisma from '@/utils/prismaClient'
 import logger from '../../config/logger'
-import { NotFoundError } from '../../errors/AppError'
+import { NotFoundError, UnauthorizedError } from '../../errors/AppError'
 
 /**
  * Terminal TPV Controller
@@ -664,7 +664,7 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
  *
  * **Security:**
  * - Requires TPV JWT authentication
- * - Only updates settings for the specified terminal
+ * - Only updates settings for the specified terminal, and ONLY inside the session's venue
  *
  * @param req.params.serialNumber - Terminal serial number
  * @param req.body - Partial TpvSettings to update
@@ -674,6 +674,15 @@ export async function updateTpvSettings(req: Request, res: Response, next: NextF
     const { serialNumber } = req.params
     const settingsUpdate = req.body
 
+    // 🔴 La ruta sólo exige sesión, sin permiso: la terminal se busca DENTRO del venue de esa
+    // sesión. Antes se buscaba en toda la base y una sesión del negocio A cambiaba los ajustes de
+    // cobro —y el `enableShifts`— del negocio B sabiendo sólo la serie (IDOR, 2026-09-16). La
+    // terminal manda su propia serie y su sesión es del venue donde está asignada.
+    const sessionVenueId = req.authContext?.venueId
+    if (!sessionVenueId) {
+      throw new UnauthorizedError('Sesión requerida')
+    }
+
     logger.info('[TPV Settings] Updating settings for terminal', {
       serialNumber,
       settingsUpdate,
@@ -681,7 +690,7 @@ export async function updateTpvSettings(req: Request, res: Response, next: NextF
 
     // Step 1: Find terminal by serial number (include venue → org for cascade)
     const terminal = await prisma.terminal.findFirst({
-      where: { serialNumber },
+      where: { serialNumber, venueId: sessionVenueId },
       select: { id: true, config: true, configOverrides: true, venueId: true, venue: { select: { organizationId: true } } },
     })
 

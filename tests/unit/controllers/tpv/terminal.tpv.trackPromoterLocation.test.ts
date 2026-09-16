@@ -150,7 +150,10 @@ describe('PUT /tpv/terminals/:serialNumber/settings — trackPromoterLocation ov
     venue: { organizationId: null },
   }
 
-  const makePutReq = (body: Record<string, any>) => ({ params: { serialNumber }, body }) as unknown as Request
+  // La ruta real siempre trae la sesión (y la terminal se busca dentro de su venue desde el
+  // cierre del IDOR del 2026-09-16).
+  const makePutReq = (body: Record<string, any>) =>
+    ({ params: { serialNumber }, body, authContext: { userId: 'staff-1', venueId, role: 'MANAGER' } }) as unknown as Request
 
   beforeEach(() => {
     prismaMock.terminal.update.mockResolvedValue({})

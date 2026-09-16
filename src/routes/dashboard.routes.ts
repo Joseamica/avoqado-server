@@ -85,6 +85,7 @@ import * as textToSqlAssistantController from '../controllers/dashboard/text-to-
 import * as tokenBudgetController from '../controllers/dashboard/token-budget.dashboard.controller'
 import * as tpvController from '../controllers/dashboard/tpv.dashboard.controller'
 import { bindTpvCommandTarget } from '../middlewares/bindTpvCommandTarget.middleware'
+import { bindTpvSettingsTarget } from '../middlewares/bindTpvSettingsTarget.middleware'
 import * as displayModeRequestController from '../controllers/dashboard/displayModeRequest.dashboard.controller'
 import * as tpvCommandController from '../controllers/dashboard/tpv-command.dashboard.controller'
 import * as terminalOrderController from '../controllers/dashboard/terminalOrder.controller'
@@ -4998,7 +4999,15 @@ router.post(
  *       404:
  *         description: Terminal not found
  */
-router.get('/tpv/:tpvId/settings', authenticateTokenMiddleware, checkPermission('tpv-settings:read'), tpvController.getTpvSettings)
+// 🔴 `bindTpvSettingsTarget` va ANTES de `checkPermission`: amarra la terminal a su venue real
+// para que el permiso no se evalúe en el venue del header (IDOR cerrado el 2026-09-16).
+router.get(
+  '/tpv/:tpvId/settings',
+  authenticateTokenMiddleware,
+  bindTpvSettingsTarget,
+  checkPermission('tpv-settings:read'),
+  tpvController.getTpvSettings,
+)
 
 /**
  * @openapi
@@ -5068,7 +5077,13 @@ router.get('/tpv/:tpvId/settings', authenticateTokenMiddleware, checkPermission(
  *       404:
  *         description: Terminal not found
  */
-router.put('/tpv/:tpvId/settings', authenticateTokenMiddleware, checkPermission('tpv-settings:update'), tpvController.updateTpvSettings)
+router.put(
+  '/tpv/:tpvId/settings',
+  authenticateTokenMiddleware,
+  bindTpvSettingsTarget,
+  checkPermission('tpv-settings:update'),
+  tpvController.updateTpvSettings,
+)
 
 // ---------------------------------------------------------------------------
 // TPV Shop — TerminalOrder endpoints (Plan 1 · Tasks 9 + 10)
@@ -5118,6 +5133,7 @@ router.post(
 router.post(
   '/tpv/:tpvId/reset-to-defaults',
   authenticateTokenMiddleware,
+  bindTpvSettingsTarget,
   checkPermission('tpv-settings:update'),
   tpvController.resetTpvToDefaults,
 )
@@ -5166,7 +5182,13 @@ router.post(
  *       404:
  *         description: Terminal not found
  */
-router.get('/tpv/:tpvId/merchants', authenticateTokenMiddleware, checkPermission('tpv-settings:read'), tpvController.getTerminalMerchants)
+router.get(
+  '/tpv/:tpvId/merchants',
+  authenticateTokenMiddleware,
+  bindTpvSettingsTarget,
+  checkPermission('tpv-settings:read'),
+  tpvController.getTerminalMerchants,
+)
 
 // Heartbeat endpoint moved to tpv.routes.ts (unauthenticated endpoint for terminal health monitoring)
 

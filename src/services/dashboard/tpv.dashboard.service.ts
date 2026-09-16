@@ -639,12 +639,32 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
 }
 
 /**
+ * Acota una operación de ajustes a UNA terminal de UN venue.
+ *
+ * `venueId` llega de las rutas del dashboard (el venue real de la terminal, ya autorizado): con él,
+ * lecturas y escrituras filtran por `{ id, venueId }` y una terminal ajena es indistinguible de una
+ * inexistente. Los llamadores internos que ya resolvieron la terminal dentro de su venue (el POS
+ * móvil, el alta de superadmin) lo omiten. `staffId` es el autor para la bitácora.
+ */
+export interface TerminalSettingsScope {
+  venueId?: string
+  staffId?: string
+}
+
+function terminalWhere(tpvId: string, scope: TerminalSettingsScope): { id: string; venueId?: string } {
+  return scope.venueId ? { id: tpvId, venueId: scope.venueId } : { id: tpvId }
+}
+
+/**
  * Get TPV settings for a specific terminal
  * Returns default settings if none exist
  */
-export async function getTpvSettings(tpvId: string): Promise<TpvSettings & { trackPromoterLocationOverride: boolean | null }> {
+export async function getTpvSettings(
+  tpvId: string,
+  scope: TerminalSettingsScope = {},
+): Promise<TpvSettings & { trackPromoterLocationOverride: boolean | null }> {
   const terminal = await prisma.terminal.findUnique({
-    where: { id: tpvId },
+    where: terminalWhere(tpvId, scope),
     select: { config: true, configOverrides: true },
   })
 
@@ -683,10 +703,11 @@ export async function getTpvSettings(tpvId: string): Promise<TpvSettings & { tra
 export async function updateTpvSettings(
   tpvId: string,
   settingsUpdate: Partial<TpvSettings> & { trackPromoterLocation?: boolean | null },
+  scope: TerminalSettingsScope = {},
 ): Promise<TpvSettings> {
   // 1. Get terminal with venue → org relationship for org defaults lookup
   const terminal = await prisma.terminal.findUnique({
-    where: { id: tpvId },
+    where: terminalWhere(tpvId, scope),
     select: {
       venueId: true,
       config: true,
@@ -734,7 +755,7 @@ export async function updateTpvSettings(
 
   // 5. Save full merged config.settings (TPV Android compat) + configOverrides (diff only)
   await prisma.terminal.update({
-    where: { id: tpvId },
+    where: terminalWhere(tpvId, scope),
     data: {
       config: { ...existingConfig, settings: newSettings },
       configOverrides: Object.keys(overrides).length > 0 ? overrides : Prisma.JsonNull,
@@ -743,6 +764,7 @@ export async function updateTpvSettings(
   })
 
   logAction({
+    staffId: scope.staffId,
     venueId: terminal.venueId,
     action: 'TPV_SETTINGS_UPDATED',
     entity: 'Terminal',
@@ -795,10 +817,10 @@ export function computeOverrides(terminalSettings: Record<string, any>, baseSett
  * Reset a terminal's settings to org defaults.
  * Clears configOverrides and recomputes config.settings from org defaults.
  */
-export async function resetTerminalToDefaults(tpvId: string): Promise<TpvSettings> {
+export async function resetTerminalToDefaults(tpvId: string, scope: TerminalSettingsScope = {}): Promise<TpvSettings> {
   const terminal = await prisma.terminal.findUnique({
-    where: { id: tpvId },
-    select: { config: true, venue: { select: { organizationId: true } } },
+    where: terminalWhere(tpvId, scope),
+    select: { venueId: true, config: true, venue: { select: { organizationId: true } } },
   })
 
   if (!terminal) {
@@ -817,12 +839,22 @@ export async function resetTerminalToDefaults(tpvId: string): Promise<TpvSetting
   }
 
   await prisma.terminal.update({
-    where: { id: tpvId },
+    where: terminalWhere(tpvId, scope),
     data: {
       config: { ...existingConfig, settings: resetSettings },
       configOverrides: Prisma.JsonNull,
       updatedAt: new Date(),
     },
+  })
+
+  // Restablecer borra de golpe todas las excepciones de la terminal: el dueño tiene que poder ver
+  // quién lo hizo. Antes esta mutación no dejaba ningún rastro.
+  logAction({
+    staffId: scope.staffId,
+    venueId: terminal.venueId,
+    action: 'TPV_SETTINGS_RESET',
+    entity: 'Terminal',
+    entityId: tpvId,
   })
 
   logger.info(`Terminal ${tpvId} reset to org defaults`)
@@ -909,10 +941,14 @@ export interface TerminalMerchant {
  * @param tpvId - The terminal ID
  * @returns Array of merchants assigned to this terminal (active ones only by default)
  */
-export async function getTerminalMerchants(tpvId: string, includeInactive = false): Promise<TerminalMerchant[]> {
+export async function getTerminalMerchants(
+  tpvId: string,
+  includeInactive = false,
+  scope: TerminalSettingsScope = {},
+): Promise<TerminalMerchant[]> {
   // 1. Get terminal with assigned merchant IDs
   const terminal = await prisma.terminal.findUnique({
-    where: { id: tpvId },
+    where: terminalWhere(tpvId, scope),
     select: { assignedMerchantIds: true },
   })
 

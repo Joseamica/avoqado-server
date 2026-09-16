@@ -343,14 +343,28 @@ export async function deactivateTpv(req: Request<{ venueId: string; tpvId: strin
 }
 
 /**
+ * La terminal que `bindTpvSettingsTarget` amarró a su venue real.
+ *
+ * 🔴 Si la ruta no pasó por el amarrador, NO se opera: sin él, el permiso se evaluó en el venue del
+ * header y la terminal podría ser de otro negocio (IDOR cerrado el 2026-09-16). Falla cerrado.
+ */
+function boundTpvSettingsTarget(req: Request): { id: string; venueId: string } {
+  const target = req.tpvSettingsTarget
+  if (!target || target.id !== req.params.tpvId) {
+    throw new NotFoundError('Terminal no encontrada')
+  }
+  return target
+}
+
+/**
  * Get TPV settings for a specific terminal
  * @permission tpv-settings:read (MANAGER+)
  */
 export async function getTpvSettings(req: Request<{ tpvId: string }>, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { tpvId } = req.params
+    const target = boundTpvSettingsTarget(req)
 
-    const settings = await tpvDashboardService.getTpvSettings(tpvId)
+    const settings = await tpvDashboardService.getTpvSettings(target.id, { venueId: target.venueId })
 
     res.status(200).json(settings)
   } catch (error) {
@@ -364,10 +378,13 @@ export async function getTpvSettings(req: Request<{ tpvId: string }>, res: Respo
  */
 export async function updateTpvSettings(req: Request<{ tpvId: string }>, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { tpvId } = req.params
+    const target = boundTpvSettingsTarget(req)
     const settingsUpdate = req.body
 
-    const updatedSettings = await tpvDashboardService.updateTpvSettings(tpvId, settingsUpdate)
+    const updatedSettings = await tpvDashboardService.updateTpvSettings(target.id, settingsUpdate, {
+      venueId: target.venueId,
+      staffId: req.authContext?.userId,
+    })
 
     res.status(200).json(updatedSettings)
   } catch (error) {
@@ -382,9 +399,12 @@ export async function updateTpvSettings(req: Request<{ tpvId: string }>, res: Re
  */
 export async function resetTpvToDefaults(req: Request<{ tpvId: string }>, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { tpvId } = req.params
+    const target = boundTpvSettingsTarget(req)
 
-    const resetSettings = await tpvDashboardService.resetTerminalToDefaults(tpvId)
+    const resetSettings = await tpvDashboardService.resetTerminalToDefaults(target.id, {
+      venueId: target.venueId,
+      staffId: req.authContext?.userId,
+    })
 
     res.status(200).json(resetSettings)
   } catch (error) {
@@ -424,9 +444,9 @@ export async function activateTerminal(
  */
 export async function getTerminalMerchants(req: Request<{ tpvId: string }>, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { tpvId } = req.params
+    const target = boundTpvSettingsTarget(req)
 
-    const merchants = await tpvDashboardService.getTerminalMerchants(tpvId)
+    const merchants = await tpvDashboardService.getTerminalMerchants(target.id, false, { venueId: target.venueId })
 
     res.status(200).json({ data: merchants })
   } catch (error) {

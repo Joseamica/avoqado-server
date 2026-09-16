@@ -121,6 +121,8 @@ describe('terminal cash reconciliation contract', () => {
       {
         params: { serialNumber },
         body: { showTipScreen: false, cashReconciliationEnabled: true },
+        // La ruta real siempre trae la sesión; la terminal se busca dentro de su venue.
+        authContext: { userId: 'staff-1', venueId, role: 'MANAGER' },
       } as unknown as Request,
       res,
       next,
