@@ -2624,12 +2624,433 @@ cobro rápido, fuera de toda región saboteada y ya en producción desde el 14-s
 él ⇒ el manifiesto 203/203 sigue vigente, no se repite. Pushado a `develop` (`69dd9264..acfd3ba7`, fast-forward) y el árbol
 principal adelantado con `--ff-only`; `develop → main` queda como FAST-FORWARD puro (`acfd3ba7` desciende de `d389d707`).
 
-**Producción medida (sólo lectura, 16-sep) para el despliegue:** `Payment` 47 355 filas / 51 MB, `ProviderEventLog` 3 748,
-`TerminalPaymentRequest` 2 007, `VenuePaymentConfig` 70 (0 con slots repetidos), 196 cobros en 24 h; última migración aplicada
-`20260908120000_stock_count_revision` ⇒ entran las 11 migraciones del delta (aditivas: columnas nullable o con default
-constante —sin reescritura—, índices sobre tablas de ≤ 47 k filas —bloqueo de escritura de menos de un segundo cada uno—, dos
-tablas nuevas y los dos CHECK `NOT VALID`). Sin ensayo sobre un dump completo de producción (no hay uno local); el tamaño medido
-hace innecesario `CONCURRENTLY`.
+**Riesgo de las migraciones para el despliegue — MEDIDO vs ESTIMADO (16-sep):**
+- MEDIDO en producción (sólo lectura, `render psql` con `default_transaction_read_only=on`): `Payment` 47 355 filas vivas / 51 MB,
+  `ProviderEventLog` 3 748 / 4.9 MB, `TerminalPaymentRequest` 2 007 / 1.1 MB, `VenuePaymentConfig` 70 (0 filas con slots repetidos),
+  `OrganizationPaymentConfig` 0, 196 cobros en las últimas 24 h; última migración aplicada `20260908120000_stock_count_revision` ⇒
+  entran exactamente las 11 migraciones del delta. Su contenido (leído): columnas nullable o con default constante (metadata-only en
+  Postgres ≥ 11, sin reescritura), índices B-tree sobre esas tablas (sin `CONCURRENTLY`, dentro de la transacción de `migrate deploy`),
+  dos tablas nuevas y dos CHECK `NOT VALID`.
+- ESTIMADO (no medido): la duración de cada `CREATE INDEX` sobre `Payment` (47 k filas) y del bloqueo de escritura que implica —del orden
+  de décimas de segundo a ~1 s por índice, por el tamaño—, y el tiempo total de `migrate deploy`. No hubo ensayo sobre un dump completo
+  de producción (no existe uno local); la única corrida real de estas migraciones fue sobre bases locales/desechables, más chicas.
+  Mitigación propuesta: desplegar en horario de baja actividad; si el founder quiere la medición, se hace con un `pg_dump` de prod
+  restaurado en una base desechable (requiere acceso al DSN, que hoy está fuera de alcance de estas sesiones).
+- CI del commit destino final `b71a5d8a`: VERDE (run 35055683586).
+
+### 🟡 Checkpoint 2 (terminal, Nexgo/AngelPay) — DISEÑO v1 (16-sep, madrugada), para revisión ACOTADA de Codex antes de codear
+
+**Alcance:** `avoqado-tpv`, variante Nexgo (`AngelPayPaymentViewModel`, `main/`), + UN cambio aditivo en el servidor (la bandera de
+capacidad en el payload de la solicitud). La PAX/Blumon (`PaymentViewModel` sandbox/production) queda como port posterior, declarado:
+su QA está bloqueado hasta subir `main` al SDK 1.7.0.0. **No es una auditoría general**: Codex revisa N1–N4 y la compatibilidad; no se
+persiguen huecos preexistentes ya excluidos (bloqueo de libreta, cancel sobre ejecución reclamada, efectivo en remoto…).
+
+**Inventario (verificado en el árbol de la TPV, `main` = `1994612`):**
+- Libreta: `PaymentAttemptLedger.openAttempt` (PREPARANDO, reserva atómica con cerca de la solicitud) → `markAuthorizing` (AUTORIZANDO)
+  → `markKernelEntered` (KERNEL_ACTIVO) → `markHostResponded`/`markAuthorized` → `markRecorded` (REGISTRADO) / `markRecordFailed`
+  (REGISTRO_FALLIDO) → `markDeliveredToQueue` (ENTREGADA_A_COLA) · `markIndeterminate` (INDETERMINADO) · `markDiscardedBeforeCharge`
+  (DESCARTADA, sólo desde PREPARANDO/AUTORIZANDO sin kernel). Ancla de N1: `AngelPayPaymentViewModel.openLedgerAttemptAndMarkAuthorizing`
+  (`:782`), llamado por `startCardPayment` (SDK, `:1791`) y `startAppToAppCardPayment` (`:1922`), ANTES de `validatePaymentIntent`/
+  `launchSdkRequest`. `_socketRequestId` (`:284`) identifica el cobro remoto; `context.idempotencyKey = paymentAttemptId` es la llave.
+- Bandeja: `RemotePaymentInbox` — `receive` (RECEIVED, antes del ACK), `markProcessingForVenue` (claim), `persistResult` (un desenlace
+  NEGATIVO sólo se escribe si la libreta del último intento acredita «no se cobró», H.3; un `success` reemplaza a un negativo previo, nunca
+  al revés), `probe` (lápida), `cancel` (CAS). `SocketManager.emitTerminalPaymentResult` persiste ANTES de emitir.
+- Socket: handshake con `terminalPaymentAckVersion=1`, `terminalPaymentCancelDispositionVersion=2`, `terminalPaymentProbeVersion=1`;
+  handlers `terminal:payment_request|payment_cancel|payment_probe|print_receipt_request|refund_request`; `_events` (replay=1) hacia los
+  ViewModels; `socket.emit(evento, payload, Ack)` disponible (socket.io-client Java).
+- Recuperación: `LedgerSweepScheduler` (periódico 6 h · `runOnceNow` con 2 min de retraso, KEEP) → `LedgerShadowSweepWorker` →
+  `LedgerUnknownRecovery` (pregunta al HISTORIAL de AngelPay por filas AUTORIZANDO/INDETERMINADO de más de 120 s, con lease y backoff) y
+  `LedgerApprovalRecovery` (registra por REST las aprobadas sin registro). `runOnceNow` se pide hoy al login/arranque y al reconectar
+  (`AppNavigation.kt:339/1051/2642`), no al nacer una incertidumbre.
+- Servidor (develop `b71a5d8a`): S1 `terminal:payment_attempt_opened {requestId, attemptId}` → ack `{success:true, outcome: LINKED |
+  ALREADY_LINKED | LATE_EVIDENCE, requestStatus, executionAuthorized}` (sólo PENDING/SENT autorizan) o `{success:false, reason: INVALID |
+  NOT_OWNER | ATTEMPT_OWNED_BY_OTHER_REQUEST | ERROR}`; S5 `terminal:payment_confirmed {requestId, attemptId, paymentId, amountCents,
+  tipCents, via:'webhook', timestamp}` (sin ACK, sólo cuando el webhook fue el primer confirmador); S6 `GET
+  tpv/venues/:venueId/terminal-payment/attempts/:attemptId` → `{attempt:{outcome: RECORDED | SECOND_CAPTURE_EVIDENCE | NOT_RECORDED,
+  paymentId, paymentStatus, recordedVia, amountCents, tipCents, isWinner, winnerPaymentId, processorEvidence, paymentContradiction,
+  evidenceContradiction}, request:{…, closedVia, winnerAttemptId}}`; 404 `ATTEMPT_NOT_FOUND` con `outcome: NO_EVIDENCE` para intento
+  desconocido / de otra terminal / de otro venue. El payload de `terminal:payment_request` NO lleva hoy ninguna bandera de capacidad del
+  servidor.
+
+**N0 (servidor, aditivo) · la capacidad viaja EN la solicitud.** `paymentPayload` de `terminal:payment_request` (y el del replay) llevan
+`attemptLinkVersion: 1`. La TPV sólo espera el ACK del vínculo si la solicitud que está cobrando lo trae; contra un servidor anterior (o una
+solicitud reentregada por un servidor anterior) NO espera nada y sigue como hoy. Sin esto, el APK nuevo pagaría el tope de espera en CADA
+cobro remoto durante la ventana en la que el servidor viejo siga en producción — y el orden «backend primero» no lo garantiza para siempre
+(rollback, staging). Prueba en el servidor: el payload de entrega y el de replay llevan la bandera; ningún campo se quita.
+
+**N1 · anunciar el intento ANTES de tocar el SDK, y decidir con el ACK.** En `openLedgerAttemptAndMarkAuthorizing`, entre `openAttempt`
+(fila PREPARANDO commiteada) y `markAuthorizing`, si `_socketRequestId != null` y la solicitud trae `attemptLinkVersion ≥ 1`:
+`socketManager.emitAttemptOpened(requestId, attemptId)` con ACK y **tope de 4 s** (`withTimeoutOrNull` sobre un `CompletableDeferred`; el
+cliente espera al POS hasta 330 s, y 4 s sólo se pagan si el servidor no contesta). Decisión, por ACK — es la parte que el founder pidió
+resolver explícitamente:
+
+| ACK | Decisión (antes del SDK) | Libreta | Bandeja / servidor | Pantalla |
+|---|---|---|---|---|
+| `success:true, executionAuthorized:true` (LINKED / ALREADY_LINKED con PENDING/SENT) | **Cobrar**: `markAuthorizing` y SDK, como hoy | AUTORIZANDO | — | «Acerca o inserta la tarjeta» |
+| `success:true, executionAuthorized:false` (LATE_EVIDENCE, o ALREADY_LINKED con CANCEL_REQUESTED / UNKNOWN / COMPLETED / CANCELLED / FAILED / TIMED_OUT) | **No cobrar.** El servidor dice que ESA solicitud ya no es ejecutable | `markDiscardedBeforeCharge(attemptId, "REQUEST_NOT_EXECUTABLE:<requestStatus>")` (PREPARANDO → DESCARTADA: acredita «no se cobró») | `persistResult(cancelled o failed + PRE_AUTHORIZATION, errorMessage con el estado)` y `emit terminal:payment_result` — `cancelled` si `CANCEL_REQUESTED`/`CANCELLED`, `failed` en los demás. El servidor ya sabe aplicar un negativo acreditado tarde (CANCELLED/ACCEPTED libera la ranura; un COMPLETED no se toca) | «El POS canceló este cobro» / «Este cobro ya no está activo (estado X). No se cobró.» Vuelve al estado anterior sin tocar carrito ni monto |
+| `success:false, reason: NOT_OWNER` | 🔴 **No cobrar, nunca.** Significa que el servidor NO reconoce esta solicitud como de ESTA terminal (identidad no verificada, solicitud de otra terminal —migración, replay a un socket que no era el dueño—, o venue distinto). Cobrar produciría un Payment que el servidor no puede atribuir a la solicitud (T10 exige identidad acreditada) ⇒ fila UNKNOWN, ranura reservada y posible doble cobro si el dueño real también cobra | `markDiscardedBeforeCharge(attemptId, "NOT_OWNER")` | `persistResult(failed + PRE_AUTHORIZATION, errorMessage 'NOT_OWNER: esta terminal no es la dueña de la solicitud')` + emit (el servidor lo rechazará si de verdad no es el dueño — está bien: la bandeja local queda RESOLVED y no reproduce nada) + 🚨 log + Crashlytics no fatal con requestId/terminalId/venue | «Este cobro no pertenece a esta terminal. No se cobró. Pídelo desde el POS a la terminal correcta.» |
+| `success:false, reason: ATTEMPT_OWNED_BY_OTHER_REQUEST` | 🔴 **No cobrar.** El `attemptId` ya pertenece a OTRA solicitud: reutilizar la llave cobraría un dinero que el servidor deduplicaría contra el registro de la otra solicitud | `markDiscardedBeforeCharge(attemptId, "ATTEMPT_REUSE")` y **se regenera el `attemptId`** para cualquier intento posterior de esta pantalla (`ensurePaymentAttemptId` sin reuso) | `persistResult(failed + PRE_AUTHORIZATION, 'ATTEMPT_REUSE')` + emit + 🚨 | «No se pudo iniciar el cobro (llave reutilizada). Inténtalo de nuevo.» con reintento que abre un intento NUEVO |
+| `success:false, reason: INVALID` | Defecto del cliente (ids vacíos o > 64). 🚨 log. **Seguir como hoy** (sin vínculo): el REST registra igual; el webhook queda PENDING y el worker/REST lo consolidan (S-LEGACY) | AUTORIZANDO | — | como hoy |
+| `success:false, reason: ERROR`, o **sin ACK en 4 s** (servidor viejo que sí mandó la bandera, red, servidor caído) | **Seguir como hoy**, sin vínculo. Un timeout no bloquea el cobro ni autoriza otro intento (regla de S1). Puede que el servidor SÍ haya escrito el vínculo y el ACK se perdiera: entonces el webhook será el primer confirmador y el REST posterior enriquece (S0/S3 idempotentes por `attemptId`) — es exactamente el diseño del checkpoint 1 | AUTORIZANDO | — | como hoy |
+
+Reglas: (a) el ACK se procesa por `attemptId` y `requestId` (un ACK tardío de otra solicitud se ignora); (b) si el usuario cancela en
+pantalla durante los ≤ 4 s de espera se conserva el camino actual (PREPARANDO → DESCARTADA por cancel local, sin SDK); (c) la espera NO
+aplica a cobros locales (`_socketRequestId == null`) ni a solicitudes sin `attemptLinkVersion`; (d) el emit va DESPUÉS del commit de
+`openAttempt` y nunca antes: el servidor sólo acepta vínculos de intentos durables (S1) y un vínculo sin fila local sería una obligación sin
+responsable.
+
+**N2 · `terminal:payment_confirmed` sólo desde estados sin SDK dentro.** Handler nuevo en `SocketManager` → `RemotePaymentCoordinator
+.confirmFromServer(evento)` (durable primero, pantalla después):
+1. Fila de libreta por `attemptId` (mismo venue): estado ∈ {HOST_RESPONDIO, AUTORIZADO, REGISTRO_FALLIDO, ENTREGADA_A_COLA, INDETERMINADO}
+   ⇒ comparar `amountCents`/`tipCents` con la fila; iguales ⇒ CAS a **REGISTRADO** (`recordedVia = webhook`, `server_payment_id`),
+   distintos ⇒ NO marcar, `markIndeterminate(attemptId, "AMOUNT_MISMATCH:<server>")` + 🚨. Estado ∈ {PREPARANDO, KERNEL_ACTIVO,
+   AUTORIZANDO} (el SDK puede estar dentro) ⇒ **no tocar la libreta**: se guarda el aviso en la bandeja (paso 2) y el propio camino del
+   SDK, al registrar por REST, recibe el Payment existente (idempotente por llave) y marca REGISTRADO por su cuenta. REGISTRADO/CERRADA ⇒
+   no-op idempotente. DESCARTADA ⇒ 🚨 contradicción (dinero acreditado para un intento que nunca entró al SDK): no se marca REGISTRADO, se
+   deja la fila y se reporta (Crashlytics no fatal) — la decisión de conciliación es humana.
+2. Bandeja por `requestId`: si la fila está PROCESSING y el `attemptId` es el del intento en curso o uno de la libreta de esa solicitud ⇒
+   `persistResult(success + paymentId + via:webhook)` y `emit terminal:payment_result` (el servidor lo trata como enriquecimiento; la fila ya
+   está COMPLETED). Así la sonda y la reentrega contestan RESOLVED. Una fila RESOLVED con `success` previo ⇒ no-op; con negativo previo ⇒
+   `persistResult` lo reemplaza (regla existente: un éxito nunca se degrada).
+3. Cola offline (`pending_payments`) con esa `idempotencyKey`: NO se borra; su replay pega al REST idempotente y recibe el Payment del
+   webhook (cierra sola). Si la fila está en ENTREGADA_A_COLA se acepta que el worker la cierre; el CAS a REGISTRADO del paso 1 no la
+   estorba (`markDeliveredToQueue` desde REGISTRADO es no-op).
+4. Pantalla: `_events` emite `SocketEvent.TerminalPaymentConfirmed`; el ViewModel que esté en `Queued` / `ResultadoIncierto` / error de
+   registro para ESE `attemptId` pasa a `Success` (mismo `Success` que el REST); el aviso F0 (`AvisoDeCobrosPendientes`) cae solo porque lee
+   la libreta.
+
+**N3 · consultar S6 al reconectar, por intento.** Recuperación nueva `LedgerServerRecovery.recover(venueId)`: candidatas = filas de la
+libreta con `terminal_payment_request_id` no nulo, `processor = ANGELPAY`, estado ∈ {HOST_RESPONDIO, AUTORIZADO, REGISTRO_FALLIDO,
+ENTREGADA_A_COLA, INDETERMINADO} (las AUTORIZANDO viejas siguen siendo de `LedgerUnknownRecovery`, que pregunta al procesador —el único que
+puede acreditar un cobro cuyo registro nunca llegó a Avoqado). Por cada candidata (tope 25 por pasada, más antiguas primero): `GET
+tpv/venues/{venueId}/terminal-payment/attempts/{attemptId}` con el token de la terminal ⇒ `RECORDED` ⇒ los pasos 1–4 de N2 con
+`amountCents/tipCents` del servidor; `SECOND_CAPTURE_EVIDENCE` ⇒ `markIndeterminate("SECOND_CAPTURE_EVIDENCE:<winnerPaymentId>")` + 🚨 (nunca
+REGISTRADO: el dinero de este intento se concilia); `NOT_RECORDED`, `NO_EVIDENCE` (404), 401/403/5xx o sin red ⇒ la fila queda igual (la
+ausencia nunca es «no cobrado»). Disparadores: `EVENT_CONNECT` del socket (tras la reproducción de la bandeja, en `socketScope`), el arranque
+tras login, y el barrido (N4). Idempotente y sin lease propio: S6 es de sólo lectura y las transiciones son CAS.
+
+**N4 · el barrido se pide al nacer una incertidumbre.** `PaymentAttemptLedger` recibe `@ApplicationContext` y llama
+`LedgerSweepScheduler.runOnceNow(context)` al final de `markIndeterminate` y `markRecordFailed` (un solo sitio para todos los caminos, en
+vez de en cada ViewModel). `runOnceNow` conserva sus 2 min de retraso y KEEP (deja terminar el registro en vivo; no apila). El worker
+ejecuta `LedgerServerRecovery` (N3) ANTES de `LedgerUnknownRecovery` (lo barato y de Avoqado primero, el procesador después) y después
+`LedgerApprovalRecovery`.
+
+**Compatibilidad y despliegue:** servidor primero (ya en develop; el N0 es aditivo). APK nuevo + servidor viejo: no espera (sin bandera),
+no recibe `payment_confirmed`, S6 contesta 404 ⇒ comportamiento idéntico al de hoy. APK viejo + servidor nuevo: sin vínculo ⇒ el webhook
+queda PENDING y el REST cierra como siempre (S-LEGACY, ya certificado). Nada se quita de ningún payload; los APK en la calle no cambian.
+Room: `payment_attempts` gana `server_payment_id TEXT NULL` y `recorded_via TEXT NULL` (migración aditiva vN→vN+1, `IF NOT EXISTS`);
+`remote_payment_requests` no cambia de forma.
+
+**Pruebas (TDD, rojo primero) y sabotajes:** `AngelPayPaymentViewModelTest` (N1: cada fila de la tabla de ACK — cobrar / no cobrar por
+`executionAuthorized:false` / NOT_OWNER / ATTEMPT_REUSE con llave nueva / INVALID y ERROR y timeout siguen como hoy; sin bandera no espera;
+cobro local no emite; el emit va después de `openAttempt`); `RemotePaymentInboxTest` + `RemotePaymentCoordinatorTest` (N2: cada estado de la
+libreta, montos distintos, DESCARTADA + confirmado, fila RESOLVED negativa reemplazada); `LedgerServerRecoveryTest` (N3: RECORDED / SECOND_CAPTURE
+/ NOT_RECORDED / 404 / 5xx / sin red; tope 25; no toca AUTORIZANDO); `PaymentAttemptLedgerTest` (N4: `runOnceNow` al marcar
+INDETERMINADO y REGISTRO_FALLIDO, no al marcar REGISTRADO); `SocketManagerTest` (handler N2 y emit con ACK de N1). Sabotajes en worktree
+aislado: quitar la espera del ACK, cobrar con NOT_OWNER, marcar REGISTRADO desde AUTORIZANDO, marcar con montos distintos, S6 404 leído
+como «no cobrado», sin `runOnceNow`. Verificación por `avq-verify` (`testNexgoDebugUnitTest` o la variante que compile el VM de AngelPay,
+`compileNexgoDebugKotlin`, `compileProductionDebugKotlin`), CHANGELOG `[Unreleased]`. Después: QA en la N86 real (cobro remoto con
+webhook primero: el banner cae por `payment_confirmed`; matar la app tras aprobar y ver N3 al reconectar; NOT_OWNER forzado apuntando la
+solicitud a otra terminal en la base de QA) — pide al founder tarjeta y aparato.
+
+**Fuera de este checkpoint, declarado:** el port a PAX/Blumon (`PaymentViewModel` ×2 variantes, mismo diseño; bloqueado por el SDK
+1.7.0.0 en la PAX de pruebas); el cancel remoto sobre una ejecución reclamada (celda 4 × cancel); efectivo en un cobro remoto; la
+liberación manual clase B; el ciclo del TMS de AngelPay para publicar el APK.
+
+### 🔴 Codex sobre el DISEÑO v1 del checkpoint 2 (16-sep 05:0x, gpt-6-astra xhigh, 3.9 M tokens, sólo lectura + SQL en SQLite en memoria): NO AUTORIZADO — 5 P1 de diseño · 9 P2 · 2 P3 — los 16 verificados contra el código real ANTES de aceptarlos
+
+Veredicto completo: `~/.claude/jobs/b1e1a1b3/tmp/codex-cp2-diseno-veredicto.md`. Lo que confirmó: «`NOT_OWNER ⇒ nunca SDK` sí es la decisión
+correcta, incluso cuando el aparato legítimo recibe ese rechazo por falta de identidad verificada»; la ubicación de N1 (entre `openAttempt` y
+`markAuthorizing`, ambos caminos de lanzamiento pasan por el helper); la bandera N0 en el payload (los dos payloads, conservando las restricciones
+del replay); la lista de estados de N2/N3 enumera todos los actuales — el problema es su SIGNIFICADO. Lo que tumbó, verificado línea por línea:
+
+| # | Hallazgo | Verificado en |
+|---|---|---|
+| P1-1 | `markIndeterminate` sólo acepta PREPARANDO/KERNEL_ACTIVO/AUTORIZANDO ⇒ desde los cinco estados candidatos de N3 (INDETERMINADO incluido) **no hace nada** (0 filas en SQLite): la contradicción de montos de N2/N3 NO quedaba durable. DESCARTADA también la escribe un rechazo explícito del host (`approved=false`), no sólo «nunca entró al SDK», y se poda a los 7 días: una DESCARTADA con dinero acreditado por el servidor perdería la evidencia contradictoria. Un no-op en REGISTRADO/CERRADA sólo es idempotente si coinciden identidad y datos | `PaymentAttemptLedger.kt:337-353`, `:231`, `PaymentAttemptDao.kt:427` |
+| P1-2 | La segunda captura llega a la terminal como **Payment PENDING en un HTTP 2xx** (`payment.tpv.service.ts:549-598`, `reconciliation.kind = POSSIBLE_SECOND_CAPTURE`, `posRawData.possibleSecondCapture`); los registradores de la TPV leen 2xx como `Result.success` y el DTO no conserva `status` ni `processorData` ⇒ `markRecorded`/`LedgerApprovalRecovery.completeRecovery` la marcan REGISTRADO como venta normal. Falta además `REFERENCE_COLLISION_EVIDENCE`, que S6 ya devuelve | `PaymentResponse.kt:46`, `FastPaymentRecorder.kt:128`, `LedgerApprovalRecovery.kt:46-49`, `terminal-payment.service.ts:3831-3842` |
+| P1-3 | «Sin SDK dentro» no está demostrado por el nombre del estado: INDETERMINADO con `last_error = cuarentena_por_antiguedad` viene del RELOJ y hoy **retiene la terminal** (`findTerminalHold`); N2/N3 → REGISTRADO retiraría esa retención sin prueba. HOST_RESPONDIO también lo escribe `completeUnknownRecovery` desde el historial del procesador (AUTORIZANDO/INDETERMINADO → HOST_RESPONDIO) sin que ningún callback probara la salida | `PaymentAttemptDao.kt:79-91`, `:278-283`, `:380-384`, `:393-398` |
+| P1-4 | N2 marca REGISTRADO (libreta) y persiste el resultado en la bandeja con **dos escrituras independientes**: muerte entre ambas ⇒ al arrancar N3 excluye REGISTRADO y la bandeja sigue PROCESSING (la sonda contesta ACTIVE para siempre) | `PaymentAttemptLedger.kt:281`, `RemotePaymentInbox.kt:186`, `:245` |
+| P1-5 | N3 «las 25 más antiguas primero» sin avance: 25 intentos históricos con 404/NOT_RECORDED ocupan el lote para siempre y el 26.º, ya registrado por webhook, no se consulta nunca. Y ENTREGADA_A_COLA nunca se cierra: `PaymentSyncWorker` marca su fila sincronizada sin tocar la libreta | `PaymentSyncWorker.kt:294` |
+| P2 N1 | `LINKED + executionAuthorized:false` existe (CANCEL_REQUESTED/UNKNOWN retienen la ranura: LINKED, no autorizado) · ATTEMPT_REUSE ofrecía un reintento que sus propias acciones impiden (persistir el negativo escribe `final_emitted_at` ⇒ `reserveTerminal` rechaza y el VM bloquea el botón) · «se conserva el camino actual» durante la espera no cancela nada: el VM ya muestra `Charging` y `sinDineroEnVuelo` lo trata como dinero en vuelo · INVALID no puede seguir incondicionalmente · ACK malformado sin definir · `markDiscardedBeforeCharge` sólo desde PREPARANDO (no AUTORIZANDO) · el ACK no lleva ids: la correlación vive en la operación que espera · S1 no puede comprobar que Room tenga fila · mensaje NOT_OWNER: «no se pudo verificar esta terminal», y no prometer liberación del servidor (con identidad no verificada `payment_result` pierde `outcomeEvidence`) | `terminal-payment.service.ts:3562-3575`, `RemotePaymentRequestDao.kt:105-110`, `PaymentAttemptDao.kt:200-215`, `AngelPayPaymentViewModel.kt:1464`, `:3749`, `:4145`, `socketManager.ts:189/477`, `terminal-registry.ts:62`, `auth.tpv.service.ts:297` |
+| P2 N0 | La bandera hay que transportarla y **persistirla**: no existe en la entidad de bandeja ni en `RemotePaymentRequest`; un duplicado RECEIVED entrega la entidad existente, no el evento nuevo; la libreta no tiene columna `terminal_payment_request_id` (vive en `payment_context_json`) | `RemotePaymentInbox.kt:54-70`, `RemotePaymentRequestEntity.kt:14`, `PaymentAttemptLedger.kt:65` |
+| P2 N2/N3 | Validar venue/requestId/attemptId/procesador/tipo ANTES de escribir la libreta · no confundir el resultado del intento con el ganador de la solicitud ni convertir un registro REST en `recordedVia=webhook` · un `success` previo en bandeja puede venir SIN `paymentId` (`handleRecordFailure`) y `persistResult` no lo enriquece · AUTORIZANDO se puede CONSULTAR y guardar el resultado financiero sin liberar la ejecución · `EVENT_CONNECT` no tiene barrera de «replay terminado» | `AngelPayPaymentViewModel.kt:646`, `RemotePaymentInbox.kt:245`, `SocketManager.kt:564`, `terminal-payment.service.ts:3855-3866` |
+| P2 N4 | Los 2 min son retraso mínimo, no plazo; sin constraints; KEEP descarta la petición si el trabajo homónimo sigue corriendo (una incertidumbre nacida a media corrida espera al periódico de 6 h); el worker devuelve success ante errores generales. Separar la recuperación de RED del mantenimiento local que debe funcionar offline | `LedgerSweepScheduler.kt:50-56`, `LedgerShadowSweepWorker.kt:73-78` |
+| P2 Room | SQLite NO admite `ADD COLUMN IF NOT EXISTS`: usar la guarda `PRAGMA table_info` que el repo ya usa | `AvoqadoDatabase.kt:1915` |
+| P3 | Un 404 de la ruta antigua (servidor sin S6) conserva la incertidumbre aunque no traiga `NO_EVIDENCE`; las filas `legacy_shadow` conservan su semántica histórica; ninguna garantía del árbol se atribuye a 2.8.7/2.9.2 | `PaymentAttemptEntity.kt:60`, `SocketManager.kt:206` |
+
+Pruebas que Codex exige además de las de v1: contradicción conservada tras reinicio y poda · segunda captura/colisión compitiendo con REST y
+ambos recuperadores · confirmación sobre cuarentena con ejecución viva · muerte entre las dos proyecciones · 25 intentos sin vínculo delante de
+uno recuperable · cancelación durante el ACK · replay con cambio de capacidad · incertidumbre nacida mientras KEEP conserva un worker activo.
+
+### 🟡 Checkpoint 2 — DISEÑO v2 (16-sep, mañana) = v1 + estos deltas, para la segunda revisión ACOTADA de Codex antes de codear
+
+Todo lo de v1 que Codex no objetó se conserva tal cual (alcance, inventario, N0 en los dos payloads, N1 entre `openAttempt` y
+`markAuthorizing`, NOT_OWNER ⇒ nunca SDK, compatibilidad). Los deltas, uno por hallazgo:
+
+**D1 · UNA operación durable de conciliación con el servidor (cierra P1-1, P1-3, P1-4 y los P2 de N2/N3).**
+`payment_attempts` gana columnas ADITIVAS (Room v34 → v35, con la guarda `PRAGMA table_info` del repo, nunca `IF NOT EXISTS`):
+`terminal_payment_request_id TEXT NULL` (escrita por `openAttempt` desde el contexto y **backfilled** en la migración con `substr`/`instr`
+sobre `payment_context_json` para las filas existentes), `server_payment_id TEXT NULL`, `server_outcome TEXT NULL` (`RECORDED` |
+`SECOND_CAPTURE_EVIDENCE` | `REFERENCE_COLLISION_EVIDENCE` | `PENDING_EVIDENCE` para un PENDING sin `reconciliation.kind` conocido),
+`server_recorded_via TEXT NULL` (`webhook` | `terminal`, **tal como lo diga el servidor**, nunca inferido del canal por el que llegó),
+`server_amount_cents INTEGER NULL`, `server_tip_cents INTEGER NULL`, `server_verdict_at INTEGER NULL`, `server_checked_at INTEGER NULL`,
+`server_check_count INTEGER NOT NULL DEFAULT 0`, `execution_unproven INTEGER NOT NULL DEFAULT 0`.
+
+- **`execution_unproven = 1`** lo estampan las TRES escrituras que hoy cambian de estado SIN que un callback del SDK haya corrido:
+  `quarantineStaleAuthorizing`, `quarantineStaleKernel` (las dos ya escriben el marcador `cuarentena_por_antiguedad`) y
+  **`completeUnknownRecovery`** (historial del procesador → HOST_RESPONDIO). Nada lo pone a 0 automáticamente: la única salida es la
+  terminación/restablecimiento confirmado del dueño del SDK, que es el hueco preexistente que Codex excluyó y sigue fuera. `findTerminalHold`
+  (F0, 180 combinaciones certificadas) **no se toca**: la nueva columna sólo la leen las transiciones nuevas.
+- **`ServerVerdictReconciler.aplicar(veredicto)`** (clase nueva, Room `withTransaction` sobre `AvoqadoDatabase`, que ya contiene las dos tablas):
+  entrada `{venueId, attemptId, requestId?, outcome, paymentId, recordedVia, amountCents, tipCents, winnerPaymentId?, fuente: WEBHOOK_EVENT |
+  S6 | REST}`. Pasos, dentro de la MISMA transacción: (1) **pertenencia antes de escribir**: la fila existe, `venue_id` coincide,
+  `processor = ANGELPAY`, `kind = SALE`, y si el veredicto trae `requestId`, `terminal_payment_request_id` coincide; cualquier desacuerdo ⇒
+  `RECHAZADO_PERTENENCIA`, sin escritura, 🚨. (2) **Evidencia previa se preserva**: si `server_payment_id` ya está y es OTRO ⇒
+  `RECHAZADO_OTRO_PAYMENT` (no se sobreescribe, 🚨); si es el mismo ⇒ sólo se actualizan `server_checked_at`/`count` (idempotente por
+  identidad Y datos). (3) Se escriben `server_*` **en cualquier estado** (también PREPARANDO/KERNEL_ACTIVO/AUTORIZANDO: «consultar y guardar el
+  resultado financiero sin liberar la ejecución»). (4) La transición a **REGISTRADO** sólo si TODO: `outcome = RECORDED` ∧ montos iguales a los
+  de la fila ∧ `state ∈ {HOST_RESPONDIO, AUTORIZADO, REGISTRO_FALLIDO, ENTREGADA_A_COLA, INDETERMINADO}` ∧ `execution_unproven = 0` ∧
+  `COALESCE(last_error,'') ≠ 'cuarentena_por_antiguedad'` ∧ `host_approved IS NOT 0`. Si falta alguna: la fila conserva su estado (y por tanto
+  la retención de F0, si la tiene) y el resultado es `VEREDICTO_GUARDADO_SIN_LIBERAR`. (5) La **bandeja, en la misma transacción**, por
+  `requestId` (el del veredicto o el de la fila): `PROCESSING` ⇒ `markResolved(success + paymentId + via)`; `RESOLVED` con negativo previo ⇒
+  `replaceResolvedResult` (un éxito nunca se degrada — regla existente); `RESOLVED` con `success` previo SIN `paymentId` (el caso de
+  `handleRecordFailure`) ⇒ se **enriquece** con `paymentId` (`replaceResolvedResult` con el mismo status); `RESOLVED` con `success` y el mismo
+  `paymentId` ⇒ no-op; `RECEIVED` (sin intento) con `RECORDED` ⇒ contradicción, no se resuelve; lápida ⇒ no se toca. El `paymentId` que va a la
+  bandeja es el **ganador de la solicitud** (`winnerPaymentId` si el servidor lo da, si no el del intento) — la bandeja responde por la
+  SOLICITUD, la libreta por el INTENTO. (6) Commit. (7) DESPUÉS del commit: emisión de `terminal:payment_result` (si la bandeja pasó a RESOLVED
+  en este paso, `SocketManager.emitTerminalPaymentResult` persiste-antes-de-emitir como hoy; aquí el persist ya ocurrió) y pantalla.
+  Resultado verificable (enum) para pruebas y para la pantalla.
+- **Contradicción = predicado DERIVADO, no columna** (no puede desincronizarse): `server_outcome ∈ {SECOND_CAPTURE_EVIDENCE,
+  REFERENCE_COLLISION_EVIDENCE, PENDING_EVIDENCE}` ∨ (`server_outcome = RECORDED` ∧ (`state = DESCARTADA` ∨ `host_approved = 0` ∨
+  `server_amount_cents ≠ amount_cents` ∨ `server_tip_cents ≠ tip_cents`)). Lo consumen: (a) **la poda**: `pruneTerminalOlderThan` y
+  `closeRecordedOlderThan` excluyen toda fila con `server_payment_id IS NOT NULL OR server_outcome IS NOT NULL` (la evidencia del servidor nunca
+  se borra por tiempo; declarado: crece acotado por el número de contradicciones, que es ~0); (b) **los negativos**: `contarIntentosBloqueadores`
+  añade `OR server_payment_id IS NOT NULL` — una DESCARTADA con dinero acreditado por el servidor veta cualquier `cancelled/failed` de esa
+  solicitud (H.3 se conserva y se endurece); (c) **el aviso F0** (`AvisoDeCobrosPendientes`): las filas con contradicción entran al aviso con
+  su propio texto («El servidor registró dinero de este cobro que la terminal dio por no cobrado / como posible cobro doble: no lo vuelvas a
+  cobrar, Avoqado lo concilia»); (d) 🚨 log + Crashlytics no fatal en CADA aplicación de veredicto que resulte contradictoria (sin
+  deduplicación durable: es raro y es evidencia, no ruido).
+- **Segunda captura y colisión por REST (P1-2)**: el DTO `PaymentData` gana `status: String?` y `processorData: JsonObject?` (Gson, aditivos,
+  nulos si no vienen); `PaymentReceipt` gana `serverStatus: String? = null` y `reconciliationKind: String? = null`
+  (`processorData.reconciliation.kind`) y `winnerPaymentId: String? = null`. Función PURA `veredictoDelRegistro(receipt)`: `status = COMPLETED` ⇒
+  `RECORDED`; `status ≠ COMPLETED` ∧ kind `POSSIBLE_SECOND_CAPTURE` ⇒ `SECOND_CAPTURE_EVIDENCE`; kind `POSSIBLE_REFERENCE_COLLISION` ⇒
+  `REFERENCE_COLLISION_EVIDENCE`; otro PENDING ⇒ `PENDING_EVIDENCE`; `status` ausente (servidor viejo) ⇒ `RECORDED` (comportamiento de hoy,
+  declarado). Consumidores del 2xx: el VM en vivo (`:3040`, `:3153`) y `LedgerApprovalRecovery.completeRecovery` **pasan por
+  `ServerVerdictReconciler.aplicar(fuente=REST)`** en vez de `markRecorded`/`completeRecovery(REGISTRADO)`: con `RECORDED` la transición es la
+  de hoy; con evidencia la fila va a **REGISTRADO con `server_outcome` = evidencia** (el SDK salió, el dinero se movió y el servidor lo tiene
+  durable — como evidencia, no como venta; la contradicción derivada la mantiene fuera de la poda y dentro del aviso) y la pantalla NO es el
+  `Success` normal: `Success.copy(aviso = …)` (campo aditivo) con «Este cobro quedó registrado como posible cobro doble; Avoqado lo concilia. No
+  lo vuelvas a cobrar.» — el POS recibe `success` con el `winnerPaymentId` (la solicitud sí está cobrada, por el ganador). `PaymentSyncWorker`
+  no cambia: su fila queda sincronizada y la de libreta (ENTREGADA_A_COLA) la cierra N3 por S6 (que ya clasifica las dos evidencias).
+
+**D2 · N3 con avance y espaciado (cierra P1-5) y su propio worker con red (cierra P2 N4).** Candidatas: `legacy_shadow = 0` ∧ `processor =
+ANGELPAY` ∧ `kind = SALE` ∧ `terminal_payment_request_id IS NOT NULL` ∧ `state ∉ {CERRADA}` ∧ (`state ∉ {PREPARANDO, KERNEL_ACTIVO, AUTORIZANDO}`
+∨ `updated_at < now − 120 s`) ∧ (`server_outcome IS NULL` ∨ predicado de contradicción sin 🚨 reciente — no: las contradicciones se reportan en
+cada pasada, es raro) ∧ (`server_checked_at IS NULL` ∨ `server_checked_at < now − espaciado(server_check_count)`), con `espaciado = min(10 min ×
+2^count, 24 h)`; **orden `server_checked_at ASC NULLS FIRST, created_at ASC, attempt_id ASC`, `LIMIT 25`**; cada consulta (con o sin
+respuesta útil) estampa `server_checked_at = now, server_check_count + 1` ⇒ las consultadas van al final, ninguna fila puede monopolizar el
+lote, y una incertidumbre nueva (`server_checked_at NULL`) va primero. Respuestas: 2xx ⇒ `aplicar(fuente = S6)` con `outcome` tal cual (`RECORDED`,
+`SECOND_CAPTURE_EVIDENCE`, `REFERENCE_COLLISION_EVIDENCE`; `NOT_RECORDED` ⇒ sólo estampa la consulta); 404 (`ATTEMPT_NOT_FOUND` **o ruta
+inexistente en un servidor viejo**), 401/403/5xx, sin red ⇒ sólo estampa (o ni eso si no hubo respuesta HTTP: sin red no se gasta el turno). Las
+filas REGISTRADO/DESCARTADA con `server_outcome` ya puesto salen de las candidatas (`server_outcome IS NULL` en el WHERE, salvo… ninguna
+excepción: una contradicción ya estampada no se reconsulta; su 🚨 lo da el aviso F0 mientras exista). AUTORIZANDO/KERNEL_ACTIVO/PREPARANDO
+viejas SÍ se consultan (Codex): el veredicto se guarda sin liberar (`execution_unproven` no las toca, pero el paso 4 de D1 las excluye por
+estado). `LedgerUnknownRecovery` (procesador) y `LedgerApprovalRecovery` (REST) siguen como hoy y corren DESPUÉS. **Worker propio**
+`LedgerServerRecoveryWorker` (`NetworkType.CONNECTED`, unique name, `ExistingWorkPolicy.APPEND_OR_REPLACE` — una petición nacida a media
+corrida encadena una corrida después, en vez de perderse como con KEEP; `Result.retry()` con el backoff por defecto de WorkManager ante fallo
+de red, `success()` en lo demás); `LedgerShadowSweepWorker` (cuarentena, poda, historial) **no cambia** y sigue sin constraints porque debe
+correr offline; al terminar sólo ENCOLA el worker de red.
+
+**D3 · N4: pedido al nacer, ejecutado en cuanto hay red (cierra P2 N4).** `PaymentAttemptLedger` expone un hook `onUncertaintyBorn:
+((attemptId) -> Unit)?` (lo cablea el módulo DI; sin contexto Android dentro de la libreta) que se invoca al final de `markIndeterminate` y
+`markRecordFailed` (nunca en `markRecorded`). El hook hace DOS cosas: (a) si el socket está conectado, `appScope.launch {
+serverRecovery.recoverOne(attemptId) }` — una consulta S6 inmediata y acotada a ESE intento (S6 es de sólo lectura; un fallo es no-op); (b)
+`LedgerSweepScheduler.runServerRecoveryNow(context, initialDelay = 2 min)` con `APPEND_OR_REPLACE` como respaldo durable. Disparadores del
+worker de red además: `EVENT_CONNECT` del socket (delay 0) y el arranque tras login; sin barrera de «replay terminado» porque N3 lee la libreta,
+no la bandeja, y toda transición es CAS.
+
+**D4 · N1: la tabla de ACK, corregida (cierra los P2/P3 de N1).**
+- La decisión se toma **estrictamente** sobre el contrato: `success === true ∧ executionAuthorized === true` ⇒ cobrar (CAS a AUTORIZANDO; SDK
+  sólo si gana). `success === true ∧ executionAuthorized === false` (**cualquier `outcome`, LINKED incluido**) ⇒ no cobrar. `success === false ∧
+  reason ∈ {NOT_OWNER, ATTEMPT_OWNED_BY_OTHER_REQUEST, INVALID}` ⇒ por tabla. **Cualquier otra forma** (campos ausentes o de otro tipo, `reason`
+  desconocido, `ERROR`, sin ACK en 4 s) ⇒ camino legacy (cobrar sin vínculo, S-LEGACY certificado). Nunca se infiere autorización de `success`
+  solo.
+- `executionAuthorized:false` ⇒ **no SDK** y el negativo se resuelve SÓLO por la vía transaccional de H.3 (`persistResult(cancelled|failed +
+  PRE_AUTHORIZATION)` → `resolverDesenlaceNegativo`, que descarta la PREPARANDO de la solicitud y escribe el final en la misma transacción, o
+  devuelve `null` si otro intento de la solicitud bloquea — entonces **no se emite un negativo inventado, PROCESSING permanece** y la pantalla
+  dice «Este cobro ya no está activo en el POS (estado X). No se inició otro cobro.»). `cancelled` si `requestStatus ∈ {CANCEL_REQUESTED,
+  CANCELLED}`, `failed` en los demás; con `COMPLETED` el texto es «No se inició otro cobro» (nunca «No se cobró»).
+- `NOT_OWNER` ⇒ **no SDK, siempre**; `markDiscardedBeforeCharge(attemptId, "NOT_OWNER")` (la fila está en PREPARANDO: la espera va ANTES de
+  `markAuthorizing`, así que el límite del helper no estorba); `persistResult(failed + PRE_AUTHORIZATION)` por H.3 (si `null`, PROCESSING
+  permanece); 🚨 + Crashlytics con `requestId/attemptId/terminalId/venueId`. Pantalla: «No se pudo verificar que esta terminal sea la dueña de
+  este cobro. No se inició ningún cobro. Vuelve a enviarlo desde el POS; si se repite, cierra sesión y vuelve a entrar en la terminal.» Sin
+  prometer que el servidor libere nada. Declarado: el caso admitido por el servidor (socket autenticado sin `terminalSerialNumber` firmado) deja a
+  esa terminal sin poder cobrar remotos hasta reautenticarse — es lo seguro, y es del checkpoint 1 certificado.
+- `ATTEMPT_OWNED_BY_OTHER_REQUEST` ⇒ no SDK; `markDiscardedBeforeCharge(attemptId, "ATTEMPT_REUSE")`; **NO se emite negativo** (la solicitud
+  sigue PROCESSING); se regenera el `attemptId` (`ensurePaymentAttemptId` sin reuso) y la pantalla ofrece reintentar con la llave nueva; 🚨.
+  Coherente con la cerca: sin `final_emitted_at` no hay bloqueo de `reserveTerminal` ni del botón.
+- `INVALID` ⇒ no SDK (un `attemptId` que S1 rechaza lo rechazaría también el REST); `markDiscardedBeforeCharge(attemptId, "INVALID_LINK")`; sin
+  negativo; llave nueva y reintento; 🚨. Si el inválido era el `requestId`, el reintento vuelve a fallar con INVALID y el cajero va al POS.
+- **Cancelar durante la espera**: la espera corre en un estado NUEVO del VM, `AngelPayPaymentState.LinkingAttempt` (pre-dinero para
+  `sinDineroEnVuelo`), dentro de un `Job` cancelable. Un cancel del POS o local durante ≤ 4 s cancela el `Job` (la continuación nunca lanza el
+  SDK), cierra la PREPARANDO por el camino durable de H.3 (`persistResult(cancelled + PRE_AUTHORIZATION)` → `descartarPreparandoDeSolicitud`) y
+  emite; un ACK que llegue después cae en un `CompletableDeferred` cuyo consumidor ya no existe (correlación por instancia, no por ids en el
+  ACK) y se ignora.
+- El emit S1 sólo va en una **apertura nueva** (`!alreadyOpened`) o cuando el intento actual no obtuvo todavía un ACK autorizador
+  (`linkedAttemptId ≠ paymentAttemptId`): el fallback SDK→app-to-app con la misma llave no repite la espera.
+
+**D5 · N0 transportada y persistida (cierra P2 N0).** `SocketEvent.TerminalPaymentRequest` gana `attemptLinkVersion: Int` (0 si el payload no lo
+trae); `remote_payment_requests` gana `attempt_link_version INTEGER NOT NULL DEFAULT 0` (misma migración v35) escrita en `receive`; un duplicado
+RECEIVED/PROCESSING con versión MAYOR actualiza la columna (`UPDATE … SET attempt_link_version = MAX(attempt_link_version, :v)`); el VM lee la
+versión de la entidad entregada (`toRemoteRequest()`), nunca del evento suelto. Rollback del servidor: la columna conserva 1, S1 no recibe ACK,
+4 s y camino legacy — declarado y acotado a las solicitudes ya guardadas.
+
+**Compatibilidad, sin cambios respecto a v1 salvo lo dicho:** 2.8.7 y 2.9.2 no cambian; el árbol nuevo declara además `terminalAttemptLinkVersion=1`
+en el handshake sólo como INFORMACIÓN (el servidor no la necesita: S5 se emite al socket de la terminal y un APK viejo ignora el evento). Un 404
+de la ruta S6 en un servidor viejo conserva la incertidumbre (D2). Las filas `legacy_shadow` nunca son candidatas de N3 ni reciben veredictos.
+
+**Pruebas (TDD, rojo primero), añadidas a las de v1 con las ocho que exige Codex:** `ServerVerdictReconcilerTest` (Room en memoria: pertenencia
+rechazada · otro `paymentId` rechazado · idempotencia por identidad y datos · REGISTRADO desde cada estado permitido · **no libera** con
+`execution_unproven`/cuarentena/`host_approved=0`/montos distintos/DESCARTADA · evidencia guardada en AUTORIZANDO sin transición · segunda
+captura y colisión desde REST, S6 y evento · bandeja enriquecida sin `paymentId` · negativo previo reemplazado · RECEIVED no se resuelve · lápida
+intacta · **muerte entre proyecciones = imposible: una transacción** (prueba: forzar excepción tras la escritura de libreta ⇒ nada commiteado) ·
+contradicción sobrevive a `pruneTerminalOlderThan`/`closeRecordedOlderThan` y a un reinicio); `PaymentAttemptDaoTest` (`execution_unproven` lo
+estampan las tres escrituras; `contarIntentosBloqueadores` cuenta la DESCARTADA con dinero del servidor; backfill de `terminal_payment_request_id`
+en la migración 34→35 con filas reales); `LedgerServerRecoveryTest` (25 sin vínculo delante de una recuperable ⇒ la recuperable se consulta en la
+segunda pasada y las 25 esperan su espaciado · 404 de ruta vieja · ENTREGADA_A_COLA cerrada por S6 · AUTORIZANDO vieja consultada sin liberar);
+`AngelPayPaymentViewModelTest` (la tabla D4 completa incl. LINKED+false, malformado ⇒ legacy, cancel durante `LinkingAttempt` cierra PREPARANDO por
+H.3 y el ACK tardío se ignora, ATTEMPT_REUSE/INVALID reintentan con llave nueva sin negativo, fallback con la misma llave no re-espera, REST con
+PENDING ⇒ `Success(aviso)` y `server_outcome`); `RemotePaymentInboxTest` (versión persistida, duplicado con versión mayor); `LedgerSweepSchedulerTest`
+(APPEND_OR_REPLACE: una petición durante una corrida produce otra corrida; el worker de red exige CONNECTED; el shadow sweep sigue sin
+constraints); `SocketManagerTest` (handler `payment_confirmed` → reconciler; emit S1 con ACK y timeout). Sabotajes en worktree aislado, uno por
+regla de D1 §4 y por fila de D4.
+
+**Fuera, declarado (sin cambios):** el port a PAX/Blumon; el «dueño del SDK» que ponga `execution_unproven` a 0; el cancel remoto sobre ejecución
+reclamada; efectivo en un cobro remoto; la liberación manual clase B; el ciclo del TMS.
+
+### 🔴 Codex sobre el DISEÑO v2 (16-sep 00:0x, gpt-6-astra xhigh, 3.4 M tokens, SQL en SQLite 3.53 en memoria sobre el esquema v34 y las consultas de `1994612`): NO AUTORIZADO — P1-4 y P1-5 CERRADOS · P1-1, P1-2, P1-3 PARCIALES · 5 cambios mínimos bloqueantes (1–5) · 2 precisiones (poda · promesa del fallback) · N0 parcial — los 8 verificados contra el código
+
+Veredicto completo: `~/.claude/jobs/b1e1a1b3/tmp/codex-cp2-diseno-v2-veredicto.md`. Lo que confirmó en SQL: la transacción libreta/bandeja revierte
+las dos proyecciones ante un fallo (P1-4 cerrado); el lote con avance selecciona el intento 26 en la segunda pasada (P1-5 cerrado); D1 §4
+respeta sus guardas en 1 584 combinaciones; `contarIntentosBloqueadores` ampliado pasa de 0 a 1 bloqueador con una DESCARTADA con dinero del
+servidor. Lo que tumbó, verificado línea por línea:
+
+| # | Hallazgo | Verificado en |
+|---|---|---|
+| 1 | **Evidencia guardada ≠ conciliación aplicada.** Aviso en AUTORIZANDO ⇒ `server_outcome=RECORDED` sin transición; el SDK vuelve INCIERTO ⇒ INDETERMINADO; D2 excluye la fila (`server_outcome` no NULL) y D1 §2 sólo sube contadores al recibir el mismo Payment: la obligación queda pendiente teniendo ya la respuesta. Comparar sólo `paymentId` tampoco acredita igualdad de datos | `AngelPayPaymentViewModel.kt:2333`, `:3034` |
+| 2 | **Una evidencia PENDING no acredita un ganador.** La colisión de referencia guarda `candidates`, no ganador; S6 devuelve `winnerPaymentId` sólo en segunda captura ⇒ el fallback «si no hay ganador, el Payment del intento» convertiría una colisión PENDING en el pago canónico de la solicitud | `payment.tpv.service.ts:570`, `:708`, `terminal-payment.service.ts:3866` |
+| 3 | **`execution_unproven` mal atribuida y sin ciclo.** (a) `completeUnknownRecovery` también recupera incertidumbres nacidas DESPUÉS de un callback (SDK ⇒ INDETERMINADO con motivo): marcarlas ⇒ HOST_RESPONDIO que REST registra pero D1 nunca libera — bloqueo NUEVO, hoy ese recuperador termina en REGISTRADO; (b) `DEFAULT 0` atribuye ejecución demostrada a filas v34 HOST_RESPONDIO escritas por el historial; (c) la excepción REST («REGISTRADO para evidencias») elude las guardas y `findTerminalHold` no lee la columna | `PaymentAttemptDao.kt:278`, `LedgerUnknownRecovery.kt:44`, `LedgerApprovalRecovery.kt:46`, `PaymentAttemptDao.kt:79` |
+| 4 | **La cola no consume su veredicto.** Fallback autorizado por N1: S1 no vinculó → SDK cobra → REST falla → cola → el 2xx del replay trae evidencia PENDING; el worker marca sincronizada su fila y descarta el recibo; S6 exige `TerminalPaymentAttemptLink` (no lo hay) ⇒ NO_EVIDENCE; la libreta queda ENTREGADA_A_COLA sin `server_outcome` y fuera del aviso | `PaymentSyncWorker.kt:294`, `terminal-payment.service.ts:3707`, `RemotePaymentRequestDao.kt:47` |
+| 5 | **`NULLS FIRST` exige SQLite 3.30**; minSdk 27 corre 3.19 (API 27), 3.22 (28/29), 3.28 (30) ⇒ N3 podría no ejecutarse nunca | `build.gradle.kts:17`, `DatabaseModule.kt:84` |
+| P2 poda | Excluir toda fila con `server_payment_id`/`server_outcome` conserva también TODOS los cobros normales (la frase «crece ~0» era falsa) | `PaymentAttemptDao.kt:419` |
+| P3 fallback | «El fallback no repite la espera» sólo es cierto tras un ACK autorizador; tras un timeout vuelve a esperar (no hubo ACK) | — |
+| N0 parcial | Subir la columna no actualiza el `RemotePaymentRequest` ya encolado/entregado (el coordinador descarta duplicados en memoria; PROCESSING recibe AckOnly): leer la capacidad durable por `requestId` al decidir N1 | `RemotePaymentCoordinator.kt:106`, `RemotePaymentInbox.kt:70` |
+| P2 origen | `PaymentReceipt` no transporta `registradoVia`: añadirlo desde `processorData`, nunca inferirlo de `fuente=REST` | `FastPaymentRecorder.kt:141`, `OrderPaymentRecorder.kt:130` |
+
+Cerrados en v2 sin objeción: P2 N1 (LINKED+false, INVALID, malformado, ATTEMPT_REUSE sin negativo, `LinkingAttempt`, mensaje NOT_OWNER), P2 N2
+(pertenencia antes de escribir, enriquecimiento del `success` sin `paymentId` — sujeto al cambio 2), P2 N3 (consultar AUTORIZANDO; sin barrera de
+replay), P2 N4 (consulta inmediata + respaldo durable con `APPEND_OR_REPLACE` y CONNECTED), P2 Room, P3 (PREPARANDO/correlación/404/generaciones).
+
+### 🟡 Checkpoint 2 — DISEÑO v3 (16-sep, madrugada) = v2 + estos deltas, para la tercera revisión ACOTADA de Codex antes de codear
+
+**E1 · Una sola regla de liberación, con la prueba de salida DECLARADA (cierra el cambio 3 y la precisión de poda; retira `execution_unproven`).**
+La retención de F0 existe para que una llamada nativa que TODAVÍA pueda autorizar no conviva con otra venta. Una autorización ya
+APROBADA por el host no puede volver a autorizar: por eso hoy la cadena `historial del procesador → HOST_RESPONDIO → REST → REGISTRADO`
+libera una fila que la cuarentena por reloj tenía retenida, y Codex confirmó en v2 que esa salida debe conservarse. v3 escribe esa misma
+prueba UNA vez y la aplica a los tres orígenes (socket S5, S6, REST — incluido el REST de `LedgerApprovalRecovery` y el de la cola):
+
+> **REGISTRADO** sólo si TODO: `legacy_shadow = 0` ∧ `state ∈ {HOST_RESPONDIO, AUTORIZADO, REGISTRO_FALLIDO, ENTREGADA_A_COLA, INDETERMINADO}` ∧
+> `host_approved IS NOT 0` ∧ el veredicto es **final y aprobado para ESTE intento**: `RECORDED` con `server_amount_cents = amount_cents` ∧
+> `server_tip_cents = tip_cents`, o `SECOND_CAPTURE_EVIDENCE` con `winnerPaymentId` acreditado y los mismos montos. Un veredicto final aprobado
+> ES la prueba de salida: el servidor sólo lo emite con la autorización de este intento aprobada por el host (webhook `approved` o REST con
+> referencia/autorización del callback), y una autorización aprobada no puede autorizar otra vez. Ningún otro veredicto (`NOT_RECORDED`,
+> `REFERENCE_COLLISION_EVIDENCE`, `PENDING_EVIDENCE`, 404) libera nada: se guarda y la fila conserva su estado y su retención.
+
+Consecuencias: (a) la columna `execution_unproven` **desaparece** — no gobernaba nada que la regla no gobierne, y su ciclo era el
+problema; el marcador `cuarentena_por_antiguedad` y `findTerminalHold` quedan exactamente como F0 los dejó (una fila cuarentenada SIN
+veredicto final aprobado sigue retenida: hueco excluido, sin regresión); (b) la excepción REST de v2 («REGISTRADO para evidencias») se
+retira: una colisión o un PENDING sin clasificar dejan la fila en su estado (HOST_RESPONDIO/AUTORIZADO tras el REST ⇒ retenida por
+estado: dinero movido sin venta canónica), con la evidencia guardada, en el aviso, y **reconsultada** por N3 (E3) porque el servidor puede
+convertirla en RECORDED al conciliar; (c) las filas migradas no necesitan tratamiento: sin veredicto final aprobado nada las libera por
+esta vía, y la cadena de hoy sigue igual; (d) **poda y cierre**: la exclusión es SÓLO el predicado de contradicción —
+`server_outcome ∈ {SECOND_CAPTURE_EVIDENCE, REFERENCE_COLLISION_EVIDENCE, PENDING_EVIDENCE}` ∨ (`server_outcome = RECORDED` ∧ (`state = DESCARTADA` ∨
+`host_approved = 0` ∨ montos distintos))— y un RECORDED normal con datos iguales se cierra y se poda como hoy.
+
+**E2 · Evidencia guardada ≠ aplicada: el veredicto se REAPLICA cuando cambia el estado local, sin otro GET (cierra el cambio 1).**
+«Pendiente de aplicar» es un PREDICADO, no una columna: `server_outcome ∈ {RECORDED, SECOND_CAPTURE_EVIDENCE}` ∧ `state ∉ {REGISTRADO, CERRADA}`
+∧ `legacy_shadow = 0` ∧ sin contradicción. Tres consumidores lo reaplican con `ServerVerdictReconciler.reaplicar(attemptId)` (misma
+transacción libreta+bandeja, misma regla E1, lee las columnas `server_*` y no la red): (1) el hook `onUncertaintyBorn` de D3, ANTES de la
+consulta S6 (el caso exacto de Codex: aviso en AUTORIZANDO → INDETERMINADO por el callback → REGISTRADO en el acto); (2) `LedgerServerRecovery`
+como paso 0 de cada pasada (arranque, reconexión, worker), antes de gastar consultas; (3) el propio `aplicar` cuando recibe el MISMO
+`paymentId`: compara `outcome`, `recordedVia`, `amountCents`, `tipCents` con lo guardado — iguales ⇒ reevalúa la transición y la bandeja
+(idempotente por identidad Y datos); distintos ⇒ `RECHAZADO_DATOS_DISTINTOS`, sin escritura salvo contadores, 🚨. El REST posterior del
+camino aprobado (`:3034`) entra por (3) con el `paymentId` que S5 ya guardó y completa la transición.
+
+**E3 · N3 con SQL portable y dos colas (cierra el cambio 5 y el re-query de evidencias no finales).** `ORDER BY server_checked_at ASC,
+created_at ASC, attempt_id ASC` (NULL primero por defecto en SQLite; nada de `NULLS FIRST`). Candidatas de CONSULTA: sin veredicto
+(`server_outcome IS NULL`) **o** con veredicto no final (`REFERENCE_COLLISION_EVIDENCE`, `PENDING_EVIDENCE` — el servidor puede
+convertirlas en RECORDED), con el mismo espaciado `min(10 min × 2^count, 24 h)`; las finales (`RECORDED`, `SECOND_CAPTURE_EVIDENCE`) no se
+reconsultan: se REAPLICAN (E2). Resto de D2 igual (25 por pasada, 120 s para los estados con SDK, estampa por respuesta HTTP, worker propio
+con CONNECTED y `APPEND_OR_REPLACE`).
+
+**E4 · La bandeja sólo se resuelve con un GANADOR acreditado de la solicitud (cierra el cambio 2).** Ganador acreditado, por origen:
+S5 ⇒ el `paymentId` del evento (el servidor sólo emite S5 cuando su Payment cerró la solicitud: `primerConfirmador` exige
+`closedVia = 'webhook'` y `paymentId` igual, `angelpay-webhook.service.ts:588`); S6 ⇒ `attempt.paymentId` si `isWinner = true`, o
+`attempt.winnerPaymentId` en `SECOND_CAPTURE_EVIDENCE`; REST ⇒ el Payment si `status = COMPLETED` (un COMPLETED con la llave del intento sólo
+existe si cerró su solicitud: cualquier captura posterior nace PENDING), o `processorData.reconciliation.winnerPaymentId` en segunda captura.
+Sin ganador acreditado (colisión, PENDING sin clasificar, `isWinner=false` sin `winnerPaymentId`): se guarda la evidencia, la bandeja
+**conserva** su estado (PROCESSING sigue siendo una obligación) y no se enriquece ningún `success` previo. Con ganador: PROCESSING ⇒
+`markResolved(success + winnerPaymentId + via)`; RESOLVED con negativo ⇒ `replaceResolvedResult`; RESOLVED `success` sin `paymentId` ⇒ se
+enriquece con el ganador; con el mismo ganador ⇒ no-op. Pantalla por veredicto: RECORDED ⇒ `Success`; SECOND_CAPTURE con ganador ⇒
+`Success(aviso = «posible cobro doble; Avoqado lo concilia; no lo vuelvas a cobrar»)`; colisión/PENDING ⇒ `ResultadoIncierto`-like con
+texto propio («El banco aprobó; Avoqado conserva el cobro como evidencia y lo concilia. No lo vuelvas a cobrar.») — sin `Success` y sin
+`failed`.
+
+**E5 · La cola aplica su veredicto REST (cierra el cambio 4).** `PaymentSyncWorker`, tras un REST 2xx y ANTES de `markSyncedChecked`, llama
+`ServerVerdictReconciler.aplicar(fuente = REST, attemptId = idempotencyKey de la fila, receipt)`; si la libreta no tiene fila para esa
+llave (cola anterior a la libreta) es no-op. Funciona sin vínculo S1 porque el veredicto va en el 2xx, no en S6. Un fallo del reconciliador
+no revierte el consumo de la cola (el dinero ya es durable en el servidor): se registra 🚨 y N3 lo reintenta por reaplicación/consulta.
+Igual en `LedgerApprovalRecovery`: `completeRecovery(REGISTRADO)` se sustituye por `aplicar(fuente = REST)` (y `REGISTRO_FALLIDO` como hoy
+si el REST falló).
+
+**E6 · Origen y capacidad durables (cierra P2 origen y N0 parcial).** `PaymentReceipt.serverRecordedVia` = `processorData.registradoVia`
+(`'webhook'` si viene así; ausente ⇒ `'terminal'`), y `server_recorded_via` se escribe desde ahí en REST, desde `attempt.recordedVia` en S6 y
+desde `via` en S5 — nunca del canal. Al decidir N1 el VM lee la capacidad DURABLE por `requestId`
+(`RemotePaymentInbox.attemptLinkVersionDe(requestId)`), no la copia en memoria del `RemotePaymentRequest`: la ventana entre la entrega y
+la subida de la columna desaparece.
+
+**E7 · Precisión del fallback (cierra P3).** El emit S1 se salta sólo cuando ESTE `attemptId` ya recibió un ACK autorizador
+(`linkAutorizado == paymentAttemptId`); tras un timeout/ERROR el fallback SDK→app-to-app con la misma llave **vuelve a esperar** (≤ 4 s, y
+es deseable: segunda oportunidad de vincular). Se retira la promesa «no repite la espera».
+
+**Pruebas añadidas a v2:** reaplicación sin GET desde INDETERMINADO tras un aviso guardado en AUTORIZANDO (con y sin reinicio) ·
+mismo `paymentId` con datos distintos ⇒ rechazado · colisión/PENDING no resuelve la bandeja ni enriquece · segunda captura resuelve con el
+ganador · REST COMPLETED resuelve como ganador · la cola aplica el veredicto (segunda captura tras replay sin vínculo S1) y la fila de cola
+se marca sincronizada aunque el reconciliador falle · RECORDED normal se cierra y poda como hoy, la contradicción no · N3 reconsulta una
+colisión y la cierra cuando el servidor la vuelve RECORDED · `ORDER BY` sin `NULLS FIRST` sobre Robolectric (SQLite del JVM) y revisión del SQL
+generado · capacidad leída por `requestId` en N1.
+
+### 🟡 Codex sobre el DISEÑO v3 (16-sep 01:0x, gpt-6-astra xhigh, 2.7 M tokens, SQL en SQLite 3.53 en memoria): NO AUTORIZADO — **E1 aceptada** («no encontré un contraejemplo… donde una aprobación final correctamente atribuida a este intento conviva con otra autorización todavía habilitada para esa misma llave»), 3 de 5 cambios y las 3 precisiones CERRADOS · 4 cambios mínimos (1–4) → DISEÑO v4 = v3 + los cuatro, sin otra ronda de diseño («No hace falta otra auditoría general: quedan cuatro correcciones concretas»)
+
+Veredicto completo: `~/.claude/jobs/b1e1a1b3/tmp/codex-cp2-diseno-v3-veredicto.md`. Cerrados en v3: `execution_unproven` (E1), `NULLS FIRST` (E3), poda (E1), promesa del fallback (E7), N0 durable y origen del registro (E6). Los cuatro, verificados contra el código:
+
+| # | Hallazgo | Verificado en | Delta v4 |
+|---|---|---|---|
+| 1 | E2 excluía la segunda captura de la reaplicación («sin contradicción» y E1 la define como contradicción), y las columnas no guardaban al GANADOR para reconstruirla tras reiniciar | `terminal-payment.service.ts:3866` | `server_winner_payment_id` (Room v35) y `veredictosPendientesDeAplicar` incluye `SECOND_CAPTURE_EVIDENCE`; la reaplicación reconstruye el veredicto con su ganador durable |
+| 2 | E2 rechazaba el cambio de outcome del MISMO Payment ⇒ una colisión/PENDING nunca podría promoverse a RECORDED aunque E3 la reconsulte; S6 calcula el outcome sobre el estado vigente del Payment | `terminal-payment.service.ts:3833` | «datos distintos» = origen o importes; un outcome no final → final del mismo Payment se ACEPTA y reevalúa; un no final sobre un final guardado (respuesta antigua) no degrada: se reevalúa lo guardado |
+| 3 | **«COMPLETED no basta para acreditar al ganador»**: el árbitro registra normalmente una asociación inválida (sin identidad de terminal) y sólo `WINNER` liga; `bound:false` conserva el Payment y deja la solicitud pendiente. E4 habría escrito RESOLVED con un ganador que el servidor no reconoció | `terminal-payment.service.ts:2124`, `payment.tpv.service.ts:3204`, `:3486` | **N0b (servidor, aditivo):** el 2xx refleja la COLUMNA `Payment.terminalPaymentRequestId` que sólo escribe `closeRowFromPaymentTx` al ligar (el objeto del `create` nacía sin ella); la TPV acredita ganador por REST sólo con `status = COMPLETED` **y** esa columna (`PaymentReceipt.solicitudLigada`); sin ella, evidencia guardada y la bandeja conserva su obligación (el VM en vivo sigue reportando SU desenlace al POS como hoy: el servidor decide si liga) |
+| 4 | E5 consumía la cola aunque `aplicar` fallara antes del commit: sin vínculo S1, S6 devuelve ausencia y ese recibo se perdía | `PaymentSyncWorker.kt:294`, `terminal-payment.service.ts:3707` | El worker aplica el veredicto ANTES de `markSynced`; si NO queda durable (excepción) la fila se conserva reintentable con la MISMA llave (`release`, sin volver al SDK); una cola anterior a la libreta (sin fila) sigue siendo no-op |
+
+Precisión de Codex sobre E1 que queda declarada: la pantalla del SDK puede seguir abierta ~3 s tras aprobar (`AngelPaySdkGateway.kt:22`) — E1
+acredita el desenlace de la AUTORIZACIÓN, no que la Activity haya retornado; el dueño general del SDK sigue excluido.
+
+**Implementación (16-sep, madrugada-mañana), TDD con rojo primero, en `avoqado-tpv` `main` (sin commitear) y `avoqado-server` `develop`:**
+N0 (servidor `7e86da91`, CI verde run 35061216827) · N0b (servidor, sin commitear: `payment.tpv.service.ts` refleja la columna en el objeto
+devuelto tras `closeRowFromPaymentTx`; integración `webhookPrimerConfirmador.terminal` + `.registrador` 106/106) · TPV: Room v35
+(`MigracionV35RoomTest`), `DecisionDelVinculo`, `SocketManager.emitAttemptOpened` (4 s), `LinkingAttempt`, `vincularIntentoAntesDelSdk`
+en el VM, `VeredictoDeIntento` + `PaymentAttemptDao.aplicarVeredictoDelServidor`/`reaplicarVeredictoGuardado` (transacción),
+`LedgerServerRecovery` + worker + `LedgerRecoveryTrigger`, consumidores (VM REST, `LedgerApprovalRecovery`, `PaymentSyncWorker`, S5),
+contradicción derivada en poda/cierre/H.3/aviso. Verificación y sabotajes: abajo.
 
 ### Diseño de S0 + S3 (13-sep, antes de codificar; revisión de Codex en curso)
 
