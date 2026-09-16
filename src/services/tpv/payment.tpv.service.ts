@@ -5206,6 +5206,22 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     // Don't fail the payment if receipt generation fails
   }
 
+  // 🔴 La lealtad de la venta rápida, al momento — es lo que el POS le promete a la clienta en
+  // pantalla («esta compra le suma otro»). Misma llamada que `updateOrderTotalsForStandalonePayment`.
+  // `awardLoyaltyForPaidOrder` nunca lanza, y marca `loyaltyProcessedAt` al terminar, así que el
+  // job `loyalty-reconciliation` no la repite; el sello además tiene índice único por orden. La propina
+  // no genera lealtad. (Hotfix e00677cc de `main`, 14-sep-2026 — Amaena; el referido de la venta rápida
+  // ya NO va aquí: viaja como efecto REFERRAL del outbox encolado dentro de la transacción del dinero.)
+  if (payment.status === 'COMPLETED') {
+    await awardLoyaltyForPaidOrder({
+      venueId: fastOrder.venueId,
+      orderId: fastOrder.id,
+      orderTotal: Math.max(0, Number(fastOrder.total) - Number(fastOrder.tipAmount ?? 0)),
+      staffId: validatedStaffId,
+      legacyCustomer: fastOrder.customerId ? { id: fastOrder.customerId, firstName: null, lastName: null } : null,
+    })
+  }
+
   // 🔌 REAL-TIME: Emit socket events based on payment status (fast payment)
   try {
     const paymentPayload = {
