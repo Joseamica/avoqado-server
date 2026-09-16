@@ -15,7 +15,7 @@ import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import socketManager from '@/communication/sockets/managers/socketManager'
 import { terminalRegistry } from '@/communication/sockets/terminal-registry'
-import { leerProcedencia, terminalPaymentService } from '@/services/terminal-payment.service'
+import { leerProcedencia, TERMINAL_ATTEMPT_LINK_VERSION, terminalPaymentService } from '@/services/terminal-payment.service'
 import {
   BadRequestError,
   OrderAlreadyPaidError,
@@ -594,6 +594,58 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
     expect(directEmit).toHaveBeenCalledWith(
       'terminal:payment_request',
       expect.objectContaining({ requestId: 'REQ-RECONNECT', processedByStaffId: 'staff-pos' }),
+      expect.any(Function),
+    )
+  })
+
+  // Checkpoint 2 · N0 (Codex sobre el diseño v1, 16-sep): la capacidad del servidor viaja EN la solicitud, en los DOS payloads.
+  // La TPV sólo espera el ACK del vínculo (S1) si la solicitud que está cobrando trae la bandera; contra un servidor anterior —o una
+  // solicitud reentregada por uno— no espera nada. Aditivo: ningún campo desaparece.
+  it('N0 · la entrega fresca lleva `attemptLinkVersion: 1` además de todos los campos de siempre', async () => {
+    const p1 = terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-OK', requestId: 'REQ-N0' }))
+    await flush()
+    expect(directEmit).toHaveBeenCalledWith(
+      'terminal:payment_request',
+      expect.objectContaining({
+        requestId: 'REQ-N0',
+        amountCents: expect.any(Number),
+        tipCents: expect.any(Number),
+        venueId: expect.any(String),
+        timestamp: expect.any(String),
+        attemptLinkVersion: TERMINAL_ATTEMPT_LINK_VERSION,
+      }),
+      expect.any(Function),
+    )
+    expect(TERMINAL_ATTEMPT_LINK_VERSION).toBe(1)
+    committedRequests({ 'REQ-N0': 'pay-n0' })
+    terminalPaymentService.handlePaymentResult({ requestId: 'REQ-N0', status: 'success', paymentId: 'pay-n0' })
+    await p1
+  })
+
+  it('N0 · el replay al reconectar lleva la MISMA bandera, conservando la restricción de procedencia durable', async () => {
+    tpr().findMany.mockResolvedValueOnce([
+      {
+        requestId: 'REQ-N0-REPLAY',
+        terminalId: 't-reconnect',
+        venueId: 'venue-1',
+        status: 'SENT',
+        amountCents: 10000,
+        tipCents: 0,
+        rating: null,
+        skipReview: true,
+        orderId: null,
+        senderDevice: 'iPad',
+        processedByStaffId: 'staff-pos',
+        expiresAt: new Date(Date.now() + 60_000),
+        deliveryProvenance: {
+          deliveries: [{ protocol: 'DURABLE', ackVersion: 1, socketId: 'sock-old', at: new Date().toISOString(), replay: false }],
+        },
+      },
+    ])
+    await (terminalPaymentService as any).replayPendingForTerminal('T-RECONNECT', 'venue-1', 'sock-t-reconnect')
+    expect(directEmit).toHaveBeenCalledWith(
+      'terminal:payment_request',
+      expect.objectContaining({ requestId: 'REQ-N0-REPLAY', attemptLinkVersion: TERMINAL_ATTEMPT_LINK_VERSION }),
       expect.any(Function),
     )
   })

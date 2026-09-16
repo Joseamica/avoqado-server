@@ -120,6 +120,14 @@ export interface TerminalPaymentStatus {
  * Ningún valor de `AttemptOutcome` significa «no cobrado»: `NOT_RECORDED` es «este servidor no tiene dinero registrado
  * para este intento», y la evidencia del procesador viaja aparte (`DECLINED` tampoco es final: S7 admite un `approved`
  * posterior del mismo intento). */
+/**
+ * Checkpoint 2 · N0: la capacidad del servidor viaja EN la solicitud. La TPV sólo espera el ACK del vínculo intento→solicitud (S1,
+ * `terminal:payment_attempt_opened`) si la solicitud que está cobrando trae `attemptLinkVersion ≥ 1`; una solicitud entregada o
+ * reentregada por un servidor anterior (rollback, staging) no la trae y la terminal sigue por el camino legacy sin pagar la espera.
+ * Va en los DOS payloads (entrega fresca y replay). Aditivo: ningún campo se quita.
+ */
+export const TERMINAL_ATTEMPT_LINK_VERSION = 1
+
 export type AttemptOutcome = 'RECORDED' | 'SECOND_CAPTURE_EVIDENCE' | 'REFERENCE_COLLISION_EVIDENCE' | 'NOT_RECORDED'
 export type AttemptProcessorEvidence = 'APPROVED' | 'DECLINED' | 'NONE'
 
@@ -1579,6 +1587,7 @@ class TerminalPaymentService {
         processedByStaffId: request.processedByStaffId,
         venueId,
         timestamp: new Date().toISOString(),
+        attemptLinkVersion: TERMINAL_ATTEMPT_LINK_VERSION,
       }
 
       const directSocket = io.sockets.sockets.get(socketId)
@@ -1905,6 +1914,7 @@ class TerminalPaymentService {
         processedByStaffId: row.processedByStaffId ?? undefined,
         venueId,
         timestamp: new Date().toISOString(),
+        attemptLinkVersion: TERMINAL_ATTEMPT_LINK_VERSION,
       }
       const grabada = await this.recordDelivery(row.requestId, venueId, entry, socketId, true)
       if (!grabada) continue

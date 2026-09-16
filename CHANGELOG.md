@@ -9,6 +9,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **Checkpoint 2 del webhook como primer confirmador · N0 (servidor, 16-sep-2026): la capacidad viaja EN la solicitud.**
+  `terminal:payment_request` lleva `attemptLinkVersion: 1` en los DOS payloads (entrega fresca y replay al reconectar,
+  `TERMINAL_ATTEMPT_LINK_VERSION`), sin quitar ningún campo. La TPV sólo espera el ACK del vínculo intento→solicitud (S1) si
+  la solicitud que cobra trae la bandera: contra un servidor anterior —o una solicitud reentregada por uno (rollback,
+  staging)— no espera nada y sigue por el camino legacy. Codex (revisión acotada del diseño, 16-sep) lo aprobó así y pidió
+  que la TPV la persista con la solicitud (Room v35 en `avoqado-tpv`). Pruebas: `terminal-payment.service.test.ts` (fresca
+  y replay con la bandera, conservando la restricción de procedencia durable).
+
 - **El webhook de AngelPay como PRIMER confirmador del cobro remoto — checkpoint 1 (servidor), 13-sep-2026.** Plan y
   bitácora: `docs/superpowers/plans/2026-09-12-webhook-primer-confirmador.md`. UNA llave por intento: la terminal anuncia
   `attemptId → requestId` por su socket (`terminal:payment_attempt_opened`, tabla hija `TerminalPaymentAttemptLink` con el
