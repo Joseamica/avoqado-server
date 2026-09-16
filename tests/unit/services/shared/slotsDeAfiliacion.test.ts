@@ -4,7 +4,12 @@
  * (`payment_config_slots_distintos`) es el respaldo contra dos ediciones concurrentes (probado en integración).
  */
 import { prismaMock } from '@tests/__helpers__/setup'
-import { mensajeDeSlotsRepetidos, slotsRepetidos, AFILIACION_EN_VARIOS_SLOTS } from '@/services/shared/slotsDeAfiliacion'
+import {
+  mensajeDeSlotsRepetidos,
+  slotsRepetidos,
+  esViolacionDeSlotsDistintos,
+  AFILIACION_EN_VARIOS_SLOTS,
+} from '@/services/shared/slotsDeAfiliacion'
 import {
   updateVenuePaymentConfig as superadminUpdate,
   createVenuePaymentConfig as superadminCreate,
@@ -23,6 +28,27 @@ describe('slotsDeAfiliacion (puro)', () => {
     expect(slotsRepetidos({ primaryAccountId: 'M2', secondaryAccountId: 'M2', tertiaryAccountId: 'M2' })).toHaveLength(3)
     expect(mensajeDeSlotsRepetidos({ primaryAccountId: 'M2', secondaryAccountId: 'M2' })).toMatch(/PRIMARY y SECONDARY/)
     expect(mensajeDeSlotsRepetidos({ primaryAccountId: 'M1', secondaryAccountId: 'M2' })).toBeNull()
+  })
+
+  // Texto REAL que Prisma envolvió en el CI del 16-sep-2026 (run 35049481120) al disparar el CHECK; la forma se ancla además
+  // contra Postgres real en `tests/integration/dashboard/angelpay-full-setup.test.ts`.
+  const textoDePrisma = (tabla: string) =>
+    `\nInvalid \`prisma.venuePaymentConfig.update()\` invocation:\n\n\nError occurred during query execution:\nConnectorError(ConnectorError { user_facing_error: None, kind: QueryError(PostgresError { code: "23514", message: "new row for relation \\"${tabla}\\" violates check constraint \\"${tabla}_slots_distintos\\"", severity: "ERROR", detail: Some("Failing row contains (x, y, m, m, null, {}, AUTO, 2026-09-16 03:04:11.422, 2026-09-16 03:04:11.567)."), column: None, hint: None }), transient: false })`
+
+  it('reconoce la violación del CHECK de slots distintos (venue y organización) tal como la envuelve Prisma, y nada más', () => {
+    expect(esViolacionDeSlotsDistintos(new Error(textoDePrisma('VenuePaymentConfig')))).toBe(true)
+    expect(esViolacionDeSlotsDistintos(new Error(textoDePrisma('OrganizationPaymentConfig')))).toBe(true)
+    // Otro CHECK, otra restricción, otro 23514 u otro error: NO es esta violación.
+    expect(esViolacionDeSlotsDistintos(new Error(textoDePrisma('Shift').replace('Shift_slots_distintos', 'Shift_status_endTime')))).toBe(
+      false,
+    )
+    expect(esViolacionDeSlotsDistintos(new Error('duplicate key value violates unique constraint "VenuePaymentConfig_venueId_key"'))).toBe(
+      false,
+    )
+    expect(esViolacionDeSlotsDistintos(new Error('VenuePaymentConfig_slots_distintos'))).toBe(false) // sin «violates check constraint»
+    expect(esViolacionDeSlotsDistintos(null)).toBe(false)
+    expect(esViolacionDeSlotsDistintos(undefined)).toBe(false)
+    expect(esViolacionDeSlotsDistintos({ message: 42 })).toBe(false)
   })
 })
 

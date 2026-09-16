@@ -2547,7 +2547,57 @@ reales y presupuesto de conexiones/esperas de los workers. Cierre textual: «Los
 
 **Integración en `develop` (15-sep, noche):** el contenido certificado y auditado (`2d31922d` sin `snap-page.yml`) entra en DOS commits por
 rutas sobre `03e7ac38`: el checkpoint (129 rutas, este mensaje) y el WIP ajeno arrastrado (20 rutas, mensaje propio que cita la revisión
-acotada de R17). Demostración previa al push (`integrar-cp1.sh`): `git diff 2d31922d develop -- src tests prisma` vacío.
+acotada de R17). Demostración previa al push (`integrar-cp1.sh`): `git diff 2d31922d develop -- src tests prisma` vacío. Publicado:
+`develop` = `091f3480` (`8460f663` checkpoint + `091f3480` ajeno).
+
+### 🔴 El CI de `develop` sobre `091f3480` (16-sep 02:49) salió ROJO en dos workflows — los dos cerrados el mismo día
+
+**(1) Pipeline · «Run integration tests»: 1 fallo de 1552** — `tests/integration/dashboard/angelpay-full-setup.test.ts › reuses an existing
+merchant (mode: existing)`: `PrismaClientUnknownRequestError … PostgresError { code: "23514" … violates check constraint
+"VenuePaymentConfig_slots_distintos" }` en `angelpayFullSetup.service.ts:218`. Clasificación (regla del founder: producto / prueba / entorno):
+
+- **Defecto de PRUEBA (el escenario era inválido POR DISEÑO desde R12-2):** esa prueba metía en SECONDARY el MISMO merchant que el happy path
+  había puesto en PRIMARY — exactamente la configuración ambigua que R12-2 prohíbe y que el CHECK ahora rechaza. La intención de la prueba
+  («reusar un merchant existente no crea una fila duplicada») sigue siendo válida; el escenario cambió a un segundo merchant de la MISMA
+  cuenta AngelPay (`7000003`, inactivo como lo deja el descubrimiento) que entra a SECONDARY, y se comprueba además que se activa.
+- **Defecto de PRODUCTO (omisión de R12-2, no de dinero):** `fullSetupAngelPayMerchant` (superadmin) es un ESCRITOR más de los slots y R12-2
+  sólo cubrió tres (`venuePaymentConfig.service`, `venuePricing.service`, el controlador de organización). Con `merchant.mode: 'existing'`
+  el merchant puede estar ya en otro slot, y el servicio llegaba al CHECK ⇒ un 23514 crudo ⇒ 500 anónimo en vez del 400 con código que
+  devuelven los demás escritores. El dinero NO estaba en riesgo (el CHECK es precisamente lo que impide la ambigüedad); lo roto era el
+  contrato HTTP. Cierre, con TDD (RED visto primero en las 4 pruebas nuevas):
+  1. `angelpayFullSetup.service.ts` valida la configuración RESULTANTE (lo existente + este cambio, incluido el slot de origen y el
+     reemplazado de un `swap`) con `mensajeDeSlotsRepetidos` ANTES del `update` ⇒ `BadRequestError` 400 `AFFILIATION_IN_SEVERAL_SLOTS`,
+     el mismo patrón que `venuePricing.service.ts:395-404`.
+  2. **La raíz, UNA vez para TODOS los escritores HTTP** (hay 20 sitios que escriben `VenuePaymentConfig`/`OrganizationPaymentConfig`; una
+     regla copiada en N sitios es una clase de bug conocida): `esViolacionDeSlotsDistintos(err)` en `slotsDeAfiliacion.ts` reconoce la
+     violación de los dos CHECK tal como Prisma la envuelve (Prisma no le da código propio: `PrismaClientUnknownRequestError` con el
+     `PostgresError` embebido, comillas escapadas), y `globalErrorHandler` (`app.ts`) la traduce al mismo 400 + código. Así un escritor que
+     no validó —o dos ediciones concurrentes que disparan el respaldo— nunca acaban en un 500 anónimo. Cualquier OTRO CHECK sigue siendo
+     500 con el sobre de producción (probado).
+  3. Pruebas: unit `slotsDeAfiliacion.test.ts` (reconocedor, con el texto real del CI de las dos tablas y cuatro negativos),
+     `AppError.details.test.ts` (traducción 400 + código con el sobre de producción; otro CHECK ⇒ 500), `angelpayFullSetup.service.test.ts`
+     (rechazo sin escribir; swap que deja al reemplazado en dos slots; el caso legítimo sí escribe); integración
+     `angelpay-full-setup.test.ts` (rechazo 400 con la configuración intacta; el CHECK REAL de Postgres disparado a propósito y reconocido
+     por el helper —ancla la forma del mensaje contra la base, no contra un texto de memoria—; reuso legítimo). Sabotajes en la copia
+     aislada (`sab-server`): quitar la validación del servicio ⇒ caen 2 unitarias + 1 de integración; el reconocedor siempre falso ⇒ caen
+     2 unitarias + 1 de integración; quitar la traducción del handler ⇒ cae 1; control restaurado 19/19 + 6/6.
+
+**(2) Workflow «🗺️ Schema Map»: `FATAL ERROR: Reached heap limit` (exit 134) en `npm run schema:map`** — defecto de ENTORNO/herramienta, no
+del mapa: el mapa commiteado es byte a byte el que genera el script (regenerado con `-T`: `git diff docs/SCHEMA_MAP.md` vacío). Causa:
+`tsconfig.json` trae `"ts-node": { "files": true }`, así que `ts-node` carga y TYPECHEA el programa entero (src + tests + scripts + el
+`index.d.ts` de Prisma de 1 M de líneas) para correr un script de 3 imports (`fs`, `path`, `prettier`). El commit `ae554900` («give the
+schema map generator enough heap») ya había subido el heap a 4 GB por lo mismo; con 368 modelos volvió a no caber. Cierre definitivo:
+`"schema:map": "ts-node -T scripts/generate-schema-map.ts"` (transpile-only: 1.05 s y 196 MB medidos, contra >4 GB). El script no pierde
+verificación de tipos que importe: `tsconfig.typecheck.json` nunca incluyó `scripts/`, y el propio workflow diffea el mapa generado.
+
+**Qué invalida esta versión (v2 = `091f3480` + 8 rutas) y qué no — decisión explícita (regla 3 del founder):** ninguno de los tres módulos
+cambiados es alcanzable desde las 32 suites certificadas de `tests/integration/payments` (no importan `@/app`, `slotsDeAfiliacion`,
+`angelpayFullSetup` ni sus consumidores — comprobado con grep), así que el manifiesto de sabotajes (203/203, huella `477a25c9b6e395b7`) y
+los resultados de la certificación siguen vigentes para el código del protocolo. Lo que SÍ se re-verifica sobre el árbol candidato
+`cp1-v2` (worktree de `091f3480` + las 8 rutas, `AVQ_TREE`): lint · typecheck · las 8 suites unitarias que importan `app.ts` o los módulos
+cambiados · el proyecto `api-tests` COMPLETO (toda ruta pasa por `globalErrorHandler`) · las 4 suites de integración que importan `@/app` o
+los módulos (`auth-signup-verification-flow`, `dashboard/angelpay-full-setup`, `public/customer-identity-fase0b`,
+`webhook/whatsapp.webhook`) sobre la base desechable de desarrollo. El CI vuelve a correr el resto al pushear.
 
 ### Diseño de S0 + S3 (13-sep, antes de codificar; revisión de Codex en curso)
 

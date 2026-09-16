@@ -20,7 +20,12 @@ import { NODE_ENV, ACCESS_TOKEN_SECRET } from './config/env'
 import logger from './config/logger'
 import { configureCoreMiddlewares } from './config/middleware'
 import { setupSwaggerUI } from './config/swagger'
-import AppError from './errors/AppError'
+import AppError, { BadRequestError } from './errors/AppError'
+import {
+  AFILIACION_EN_VARIOS_SLOTS,
+  MENSAJE_AFILIACION_EN_VARIOS_SLOTS,
+  esViolacionDeSlotsDistintos,
+} from './services/shared/slotsDeAfiliacion'
 import mainApiRouter from './routes' // Esto importa el 'router' exportado por defecto de 'src/routes/index.ts'
 import { getCorsConfig, Environment } from './config/corsOptions'
 import { handleMcpRequest } from './mcp/server'
@@ -373,6 +378,14 @@ export function globalErrorHandler(err: Error, req: ExpressRequest, res: Express
   }
 
   const correlationId = (req as any).correlationId || 'N/A'
+
+  // Codex R12-2: la violación del CHECK `*PaymentConfig_slots_distintos` (respaldo de concurrencia de los escritores de slots)
+  // llega como error crudo de Prisma; se traduce aquí, UNA vez para todos los escritores HTTP, al mismo 400 + código que
+  // devuelven los que validan antes de escribir — nunca un 500 anónimo (CI 16-sep-2026, `angelpay-full-setup`).
+  if (esViolacionDeSlotsDistintos(err)) {
+    err = new BadRequestError(MENSAJE_AFILIACION_EN_VARIOS_SLOTS, AFILIACION_EN_VARIOS_SLOTS)
+  }
+
   const bodyParseError = err as Error & { status?: number; type?: string; body?: unknown }
 
   if (isJsonBodyParseError(bodyParseError)) {

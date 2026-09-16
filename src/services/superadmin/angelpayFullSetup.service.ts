@@ -21,6 +21,7 @@ import { BadRequestError, ConflictError, NotFoundError, ValidationError } from '
 import logger from '../../config/logger'
 import { BASE_URL } from '../../config/env'
 import { isNumericMerchantId } from '../../lib/angelpayValidators'
+import { AFILIACION_EN_VARIOS_SLOTS, mensajeDeSlotsRepetidos } from '../shared/slotsDeAfiliacion'
 import { encryptCredentials } from './merchantAccount.service'
 import { angelPayIntegrationsApiClient, type AngelPayEnvironment } from '../integrations/angelpay-integrations-api.client'
 import type { FullSetupAngelPayInput } from '../../schemas/dashboard/angelpay-full-setup.schema'
@@ -215,6 +216,16 @@ export async function fullSetupAngelPayMerchant(input: FullSetupAngelPayInput, c
             const fromColumn = SLOT_COLUMN[input.slot.fromSlot]
             data[fromColumn] = input.slot.moveStrategy === 'swap' ? (input.slot.replacedAccountId ?? null) : null
           }
+          // Codex R12-2: una afiliación ocupa UN solo slot. Un merchant `existing` puede estar ya en otro slot (o el
+          // reemplazado de un swap seguir en un tercero): la configuración RESULTANTE se rechaza ANTES de escribir, con el
+          // mismo código que los demás escritores; el CHECK de la base queda como respaldo de concurrencia.
+          const repetidos = mensajeDeSlotsRepetidos({
+            primaryAccountId: existingConfig.primaryAccountId,
+            secondaryAccountId: existingConfig.secondaryAccountId,
+            tertiaryAccountId: existingConfig.tertiaryAccountId,
+            ...data,
+          })
+          if (repetidos) throw new BadRequestError(repetidos, AFILIACION_EN_VARIOS_SLOTS)
           await tx.venuePaymentConfig.update({ where: { venueId: input.venueId }, data })
         }
 

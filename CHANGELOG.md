@@ -247,6 +247,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   y con dos filas podía salir invertido), el fixture de integración purga los fixtures huérfanos de corridas matadas a medias (sus
   obligaciones PENDING contaminaban otras suites de la misma base desechable), y la prueba N1 del webhook drena el backfill del webhook que
   crea el Payment antes de leerlo (su detección del mutante del parche atómico dependía de una carrera).
+  **Cierre del CI de `develop` (16-sep):** el full setup de AngelPay (superadmin) es un escritor más de los slots que R12-2 no cubrió — con
+  `merchant.mode: 'existing'` un merchant ya colocado en otro slot llegaba al CHECK y salía un 500 anónimo (23514 crudo). Ahora valida la
+  configuración resultante ANTES de escribir (400 `AFFILIATION_IN_SEVERAL_SLOTS`, como los demás escritores) y, para TODOS los escritores
+  HTTP a la vez, el handler global traduce la violación de `*PaymentConfig_slots_distintos` al mismo 400 + código (`esViolacionDeSlotsDistintos`);
+  la prueba de integración que metía el mismo merchant en dos slots (escenario inválido por diseño desde R12-2) pasó a reusar un segundo
+  merchant de la misma cuenta. Y `npm run schema:map` corre en transpile-only (`ts-node -T`): con `"files": true` ts-node typecheaba el
+  programa entero (Prisma incluido) y ni 4 GB de heap alcanzaban en CI; el mapa commiteado era correcto (diff vacío).
 
 ### Changed
 

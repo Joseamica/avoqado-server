@@ -26,6 +26,7 @@ import prisma from '@/utils/prismaClient'
 import { fullSetupAngelPayMerchant } from '@/services/superadmin/angelpayFullSetup.service'
 import { angelPayIntegrationsApiClient } from '@/services/integrations/angelpay-integrations-api.client'
 import type { FullSetupAngelPayInput } from '@/schemas/dashboard/angelpay-full-setup.schema'
+import { AFILIACION_EN_VARIOS_SLOTS } from '@/services/shared/slotsDeAfiliacion'
 
 jest.mock('@/services/integrations/angelpay-integrations-api.client', () => ({
   angelPayIntegrationsApiClient: {
@@ -47,7 +48,7 @@ const mockedPrisma = prisma as unknown as {
   paymentProvider: { findUnique: jest.Mock }
   angelPayUserAccount: { findUnique: jest.Mock }
   merchantAccount: { findUnique: jest.Mock; update: jest.Mock }
-  venuePaymentConfig: { findUnique: jest.Mock; create: jest.Mock }
+  venuePaymentConfig: { findUnique: jest.Mock; create: jest.Mock; update: jest.Mock }
   $transaction: jest.Mock
 }
 const mockedAuth = angelPayIntegrationsApiClient.auth as jest.Mock
@@ -159,5 +160,71 @@ describe('fullSetupAngelPayMerchant — AngelPay webhook auto-registration', () 
 
     expect(result.merchantAccountId).toBe('merchant-1')
     expect(result.webhookRegistered).toBe(false)
+  })
+})
+
+// Codex R12-2: el full setup es un escritor más de los slots de `VenuePaymentConfig`. Con `merchant.mode: 'existing'` el merchant
+// puede estar YA en otro slot, y la configuración RESULTANTE (lo existente + este cambio, incluido el slot de origen de un
+// movimiento) se rechaza ANTES de escribir, con el mismo código que los demás escritores. El CHECK de la base es sólo el respaldo.
+describe('fullSetupAngelPayMerchant — una afiliación ocupa UN solo slot', () => {
+  const config = (slots: Record<string, string | null>) => ({
+    id: 'cfg-1',
+    venueId: 'venue-1',
+    primaryAccountId: null,
+    secondaryAccountId: null,
+    tertiaryAccountId: null,
+    ...slots,
+  })
+
+  it('rechaza con 400 AFFILIATION_IN_SEVERAL_SLOTS meter en SECONDARY el merchant que ya es PRIMARY, sin escribir', async () => {
+    mockedPrisma.venuePaymentConfig.findUnique.mockResolvedValue(config({ primaryAccountId: 'merchant-1' }))
+    mockedPrisma.venuePaymentConfig.update.mockResolvedValue({})
+
+    await expect(fullSetupAngelPayMerchant(baseInput({ slot: { accountType: 'SECONDARY', mode: 'fill' } }))).rejects.toMatchObject({
+      statusCode: 400,
+      code: AFILIACION_EN_VARIOS_SLOTS,
+      message: expect.stringMatching(/PRIMARY y SECONDARY/),
+    })
+    expect(mockedPrisma.venuePaymentConfig.update).not.toHaveBeenCalled()
+    expect(mockedPrisma.venuePaymentConfig.create).not.toHaveBeenCalled()
+  })
+
+  it('un movimiento con swap que deja la cuenta reemplazada en dos slots también se rechaza (la resultante incluye el slot de origen)', async () => {
+    // merchant-1 en SECONDARY, merchant-9 en PRIMARY y TERTIARY sería el resultado de: mover merchant-1 a PRIMARY con swap,
+    // dejando a merchant-9 (el reemplazado) en SECONDARY… mientras merchant-9 sigue en TERTIARY.
+    mockedPrisma.venuePaymentConfig.findUnique.mockResolvedValue(
+      config({ primaryAccountId: 'merchant-9', secondaryAccountId: 'merchant-1', tertiaryAccountId: 'merchant-9' }),
+    )
+    mockedPrisma.venuePaymentConfig.update.mockResolvedValue({})
+
+    await expect(
+      fullSetupAngelPayMerchant(
+        baseInput({
+          slot: { accountType: 'PRIMARY', mode: 'replace', replacedAccountId: 'merchant-9', fromSlot: 'SECONDARY', moveStrategy: 'swap' },
+          pricing: { debitRate: 1, creditRate: 1, amexRate: 1, internationalRate: 1 },
+        } as Partial<FullSetupAngelPayInput>),
+      ),
+    ).rejects.toMatchObject({ statusCode: 400, code: AFILIACION_EN_VARIOS_SLOTS, message: expect.stringMatching(/SECONDARY y TERTIARY/) })
+    expect(mockedPrisma.venuePaymentConfig.update).not.toHaveBeenCalled()
+  })
+
+  it('un merchant que no está en ningún slot sí entra a SECONDARY (la validación no estorba el caso legítimo)', async () => {
+    mockedPrisma.merchantAccount.findUnique.mockResolvedValue({
+      id: 'merchant-2',
+      angelpayUserAccountId: 'login-1',
+      active: true,
+      provider: { code: 'ANGELPAY' },
+    })
+    mockedPrisma.venuePaymentConfig.findUnique.mockResolvedValue(config({ primaryAccountId: 'merchant-1' }))
+    mockedPrisma.venuePaymentConfig.update.mockResolvedValue({})
+
+    const result = await fullSetupAngelPayMerchant(
+      baseInput({ merchant: { mode: 'existing', merchantAccountId: 'merchant-2' }, slot: { accountType: 'SECONDARY', mode: 'fill' } }),
+    )
+    expect(result.merchantAccountId).toBe('merchant-2')
+    expect(mockedPrisma.venuePaymentConfig.update).toHaveBeenCalledWith({
+      where: { venueId: 'venue-1' },
+      data: { secondaryAccountId: 'merchant-2' },
+    })
   })
 })

@@ -7,13 +7,14 @@
  */
 import prisma from '@/utils/prismaClient'
 import { fullSetupAngelPayMerchant } from '@/services/superadmin/angelpayFullSetup.service'
+import { AFILIACION_EN_VARIOS_SLOTS, esViolacionDeSlotsDistintos } from '@/services/shared/slotsDeAfiliacion'
 
 jest.setTimeout(60000)
 
 const ORG_ID = 'test_org_apfs_int'
 const VENUE_ID = 'test_venue_apfs_int_1'
 const VENUE_ID_2 = 'test_venue_apfs_int_2'
-const MERCHANT_IDS = ['7000001', '7000002']
+const MERCHANT_IDS = ['7000001', '7000002', '7000003']
 
 describe('fullSetupAngelPayMerchant (integration)', () => {
   // IDs produced by the happy-path test, reused by the existing-merchant test.
@@ -120,23 +121,79 @@ describe('fullSetupAngelPayMerchant (integration)', () => {
     ).rejects.toThrow(/pricing/i)
   })
 
-  it('reuses an existing merchant (mode: existing) instead of creating a duplicate', async () => {
-    expect(createdMerchantId).toBeTruthy() // depends on the happy-path test
+  // Codex R12-2 (CHECK `VenuePaymentConfig_slots_distintos`, 14-sep-2026): una afiliación ocupa UN solo slot. Antes del
+  // CHECK esta suite metía el merchant que ya era PRIMARY también en SECONDARY; hoy ese escenario es inválido POR DISEÑO y
+  // el servicio lo rechaza ANTES de escribir, con el mismo código que los demás escritores (400, no un 23514 crudo → 500).
+  it('rejects reusing a merchant that already occupies another slot — 400 AFFILIATION_IN_SEVERAL_SLOTS, nothing written', async () => {
+    expect(createdMerchantId).toBeTruthy() // depends on the happy-path test (merchant sits in PRIMARY)
 
+    const merchantsBefore = await prisma.merchantAccount.count()
+    const configBefore = await prisma.venuePaymentConfig.findUnique({ where: { venueId: VENUE_ID } })
+    expect(configBefore?.primaryAccountId).toBe(createdMerchantId)
+    expect(configBefore?.secondaryAccountId).toBeNull()
+
+    await expect(
+      fullSetupAngelPayMerchant({
+        venueId: VENUE_ID,
+        login: { mode: 'existing', angelpayUserAccountId: createdLoginId },
+        merchant: { mode: 'existing', merchantAccountId: createdMerchantId },
+        slot: { accountType: 'SECONDARY', mode: 'fill' },
+      }),
+    ).rejects.toMatchObject({ statusCode: 400, code: AFILIACION_EN_VARIOS_SLOTS, message: expect.stringMatching(/PRIMARY y SECONDARY/) })
+
+    expect(await prisma.merchantAccount.count()).toBe(merchantsBefore)
+    const configAfter = await prisma.venuePaymentConfig.findUnique({ where: { venueId: VENUE_ID } })
+    expect(configAfter).toEqual(configBefore)
+  })
+
+  it('the DB CHECK is the concurrency backstop: a write that dodges the service validation is rejected with a recognizable error', async () => {
+    expect(createdMerchantId).toBeTruthy()
+    let error: unknown
+    try {
+      await prisma.venuePaymentConfig.update({ where: { venueId: VENUE_ID }, data: { secondaryAccountId: createdMerchantId } })
+    } catch (e) {
+      error = e
+    }
+    expect(error).toBeDefined()
+    // El traductor del handler global se apoya en esta forma (nombre del CHECK dentro del mensaje que envuelve Prisma).
+    expect(esViolacionDeSlotsDistintos(error)).toBe(true)
+    const config = await prisma.venuePaymentConfig.findUnique({ where: { venueId: VENUE_ID } })
+    expect(config?.secondaryAccountId).toBeNull()
+  })
+
+  it('reuses an existing merchant (mode: existing) instead of creating a duplicate', async () => {
+    expect(createdLoginId).toBeTruthy() // depends on the happy-path test
+
+    // A second merchant of the SAME login (as discovery would leave it: inactive, PENDING_REVIEW) — not yet in any slot.
+    const angelpayProvider = await prisma.paymentProvider.findUniqueOrThrow({ where: { code: 'ANGELPAY' } })
+    const discovered = await prisma.merchantAccount.create({
+      data: {
+        providerId: angelpayProvider.id,
+        externalMerchantId: '7000003',
+        displayName: 'APFS Merchant 2',
+        angelpayMerchantName: 'APFS Merchant 2',
+        angelpayAffiliation: 'AF-2',
+        angelpayUserAccountId: createdLoginId,
+        active: false,
+        credentialsEncrypted: {},
+      },
+    })
     const merchantsBefore = await prisma.merchantAccount.count()
 
     const result = await fullSetupAngelPayMerchant({
       venueId: VENUE_ID,
       login: { mode: 'existing', angelpayUserAccountId: createdLoginId },
-      merchant: { mode: 'existing', merchantAccountId: createdMerchantId },
+      merchant: { mode: 'existing', merchantAccountId: discovered.id },
       slot: { accountType: 'SECONDARY', mode: 'fill' },
     })
 
-    expect(result.merchantAccountId).toBe(createdMerchantId)
-    // No new MerchantAccount row was created.
+    expect(result.merchantAccountId).toBe(discovered.id)
+    // No new MerchantAccount row was created; the reused one was activated.
     expect(await prisma.merchantAccount.count()).toBe(merchantsBefore)
+    expect((await prisma.merchantAccount.findUnique({ where: { id: discovered.id } }))?.active).toBe(true)
 
     const config = await prisma.venuePaymentConfig.findUnique({ where: { venueId: VENUE_ID } })
-    expect(config?.secondaryAccountId).toBe(createdMerchantId)
+    expect(config?.primaryAccountId).toBe(createdMerchantId)
+    expect(config?.secondaryAccountId).toBe(discovered.id)
   })
 })

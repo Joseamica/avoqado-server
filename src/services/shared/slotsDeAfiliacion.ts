@@ -25,10 +25,28 @@ export function slotsRepetidos(config: SlotsDeConfiguracion): Array<[string, str
 }
 
 export const AFILIACION_EN_VARIOS_SLOTS = 'AFFILIATION_IN_SEVERAL_SLOTS'
+export const MENSAJE_AFILIACION_EN_VARIOS_SLOTS = 'Una afiliación no puede ocupar dos slots a la vez.'
 
 /** Mensaje en español para el usuario (los esquemas y errores de este repo hablan español). */
 export function mensajeDeSlotsRepetidos(config: SlotsDeConfiguracion): string | null {
   const repetidos = slotsRepetidos(config)
   if (repetidos.length === 0) return null
   return `Una afiliación no puede ocupar dos slots a la vez (${repetidos.map(([a, b]) => `${a} y ${b}`).join('; ')}).`
+}
+
+/**
+ * Los CHECK de la migración `20260914150000_payment_config_slots_distintos`, uno por tabla de configuración, tal como Postgres
+ * los nombra al rechazar la fila (las comillas llegan escapadas dentro del `PostgresError` que Prisma embebe en el mensaje).
+ */
+const VIOLACION_DE_SLOTS_DISTINTOS = /violates check constraint \\?"(VenuePaymentConfig|OrganizationPaymentConfig)_slots_distintos\\?"/
+
+/**
+ * ¿Es este error la violación de uno de esos CHECK (Postgres 23514)? Prisma no la expone con un código propio: llega como
+ * `PrismaClientUnknownRequestError` con el `PostgresError` embebido en el mensaje (`… violates check constraint "<nombre>"`),
+ * y el nombre del CHECK es nuestro. El handler global la traduce al mismo 400 + código que devuelven los escritores que
+ * validan antes de escribir, para que un escritor que no validó —o dos ediciones concurrentes— no acaben en un 500 anónimo.
+ */
+export function esViolacionDeSlotsDistintos(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : typeof err === 'string' ? err : ''
+  return VIOLACION_DE_SLOTS_DISTINTOS.test(message)
 }
