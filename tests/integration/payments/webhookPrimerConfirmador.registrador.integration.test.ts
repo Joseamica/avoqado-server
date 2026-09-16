@@ -303,6 +303,8 @@ describe('S0 · asociación inválida: el requestId del payload no decide qué c
 
     expect(await pago(registrado.id)).toMatchObject({ status: 'COMPLETED', terminalPaymentRequestId: null })
     expect((await fila(solicitud.requestId)).paymentId).toBeNull()
+    // N0b: el 2xx tampoco acredita ganador — la terminal conserva su obligación de bandeja.
+    expect(registrado.terminalPaymentRequestId).toBeNull()
   })
 
   it('un intento ya vinculado (S1) a OTRA solicitud no se clasifica contra ésta', async () => {

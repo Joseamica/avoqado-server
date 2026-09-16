@@ -3483,6 +3483,10 @@ export async function recordOrderPayment(
             paymentData.registradoVia === 'webhook' ? 'webhook' : 'terminal',
           )
           s0.cierre = cierre
+          // Checkpoint 2 · N0b (Codex, diseño v3): la terminal acredita al GANADOR de la solicitud por la columna
+          // `Payment.terminalPaymentRequestId`, que sólo escribe `closeRowFromPaymentTx` al ligar. El objeto del `create` nació sin
+          // ella: se refleja aquí para que el 2xx la lleve (la relectura idempotente ya la trae de la fila). Sin ligar, va null.
+          if (cierre.bound) newPayment.terminalPaymentRequestId = paymentData.terminalPaymentRequestId ?? null
           if (!cierre.bound) {
             logger.error(
               '🚨 [Terminal-payment] El ganador quedó REGISTRADO pero la solicitud NO se ligó — la fila queda para recuperación',
@@ -5029,6 +5033,10 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
             paymentData.registradoVia === 'webhook' ? 'webhook' : 'terminal',
           )
           s0.cierre = cierre
+          // Checkpoint 2 · N0b (Codex, diseño v3): la terminal acredita al GANADOR de la solicitud por la columna
+          // `Payment.terminalPaymentRequestId`, que sólo escribe `closeRowFromPaymentTx` al ligar. El objeto del `create` nació sin
+          // ella: se refleja aquí para que el 2xx la lleve (la relectura idempotente ya la trae de la fila). Sin ligar, va null.
+          if (cierre.bound) newPayment.terminalPaymentRequestId = paymentData.terminalPaymentRequestId ?? null
           if (!cierre.bound) {
             logger.error(
               '🚨 [Terminal-payment] El ganador quedó REGISTRADO pero la solicitud NO se ligó — la fila queda para recuperación',

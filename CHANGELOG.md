@@ -17,6 +17,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   que la TPV la persista con la solicitud (Room v35 en `avoqado-tpv`). Pruebas: `terminal-payment.service.test.ts` (fresca
   y replay con la bandera, conservando la restricción de procedencia durable).
 
+- **Checkpoint 2 del webhook como primer confirmador · N0b (servidor, 16-sep-2026): el 2xx del REST del ganador trae la
+  solicitud ligada.** `recordOrderPayment` y `recordFastPayment` reflejan en la respuesta `Payment.terminalPaymentRequestId`
+  cuando `closeRowFromPaymentTx` ligó la solicitud (el objeto del `create` nacía sin la columna; la relectura idempotente ya
+  la traía). Es la prueba que Codex exigió en el diseño v3 del checkpoint 2 («COMPLETED no basta»): la terminal sólo acredita
+  al GANADOR de la solicitud —y sólo entonces libera la libreta y resuelve la bandeja— con `status: COMPLETED` **y** la
+  columna en el 2xx; una segunda captura por REST sigue llegando `PENDING` con `processorData.reconciliation` y
+  `winnerPaymentId`, y un cobro sin ligar la trae en `null`. Campo aditivo: nada se quita. Pruebas:
+  `webhookPrimerConfirmador.terminal.integration.test.ts` (ganador, relectura idempotente, segunda captura) y
+  `webhookPrimerConfirmador.registrador.integration.test.ts` (sin serial autenticado ⇒ `null`).
+
 - **El webhook de AngelPay como PRIMER confirmador del cobro remoto — checkpoint 1 (servidor), 13-sep-2026.** Plan y
   bitácora: `docs/superpowers/plans/2026-09-12-webhook-primer-confirmador.md`. UNA llave por intento: la terminal anuncia
   `attemptId → requestId` por su socket (`terminal:payment_attempt_opened`, tabla hija `TerminalPaymentAttemptLink` con el

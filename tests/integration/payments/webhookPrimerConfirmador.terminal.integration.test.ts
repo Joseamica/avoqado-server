@@ -165,6 +165,29 @@ describe('S6 · consulta durable POR INTENTO, sólo de la terminal del JWT', () 
     })
   })
 
+  // Checkpoint 2 · N0b (Codex sobre el diseño v3, cambio 3): «COMPLETED no basta para acreditar al ganador». La prueba durable
+  // de que ESTE Payment cerró la solicitud es la columna `Payment.terminalPaymentRequestId`, que sólo escribe
+  // `closeRowFromPaymentTx` al ligar — y el 2xx del REST tiene que devolverla YA en el mismo cuerpo (el objeto del
+  // `create` nace sin ella): con ella la terminal resuelve su bandeja; sin ella conserva la obligación.
+  it('N0b · el 2xx del REST del ganador trae la solicitud ligada; una segunda captura por REST la trae con status PENDING; sin ligar, null', async () => {
+    const solicitud = await f.solicitud({ amountCents: 10000 })
+    const A = await vincular(solicitud.requestId)
+    const B = await vincular(solicitud.requestId)
+    const ganador = await recordFastPayment(f.venueId, f.registroDeLaTerminal({ attemptId: A, requestId: solicitud.requestId }), f.staffId)
+    expect(ganador.status).toBe('COMPLETED')
+    expect(ganador.terminalPaymentRequestId).toBe(solicitud.requestId)
+    // La relectura idempotente (mismo intento) también la trae: es la fila.
+    const otraVez = await recordFastPayment(f.venueId, f.registroDeLaTerminal({ attemptId: A, requestId: solicitud.requestId }), f.staffId)
+    expect(otraVez.id).toBe(ganador.id)
+    expect(otraVez.terminalPaymentRequestId).toBe(solicitud.requestId)
+
+    const segunda = await recordFastPayment(f.venueId, f.registroDeLaTerminal({ attemptId: B, requestId: solicitud.requestId }), f.staffId)
+    expect(segunda.status).toBe('PENDING')
+    expect(segunda.id).not.toBe(ganador.id)
+    expect((segunda.processorData as any).reconciliation.kind).toBe('POSSIBLE_SECOND_CAPTURE')
+    expect((segunda.processorData as any).reconciliation.winnerPaymentId).toBe(ganador.id)
+  })
+
   it('vinculado sin dinero ni eventos: NOT_RECORDED / NONE, la solicitud sigue en vuelo — y en ningún lado dice «no cobrado»', async () => {
     const solicitud = await f.solicitud()
     const A = await vincular(solicitud.requestId)
