@@ -3052,6 +3052,69 @@ en el VM, `VeredictoDeIntento` + `PaymentAttemptDao.aplicarVeredictoDelServidor`
 `LedgerServerRecovery` + worker + `LedgerRecoveryTrigger`, consumidores (VM REST, `LedgerApprovalRecovery`, `PaymentSyncWorker`, S5),
 contradicción derivada en poda/cierre/H.3/aviso. Verificación y sabotajes: abajo.
 
+### 🟢 Checkpoint 2 — IMPLEMENTADO en `avoqado-tpv` (16-sep, madrugada) y 🔴 Codex sobre el CÓDIGO (16-sep 01:5x, gpt-6-astra xhigh, 4.4 M tokens, SQLite 3.53 en memoria sobre el esquema `35.json`): NO AUTORIZADO — 6 P1 del diff · 1 P2 · 1 P3 — los 8 verificados contra el código ANTES de aceptarlos, y cerrados con TDD (RED visto: 8/8 caen por el motivo de cada hallazgo)
+
+**Lo implementado (Nexgo/AngelPay, `main` de la TPV; base `2f5d4c1`; el commit ajeno `25d7368` arrastró el WIP a medio compilar):**
+N0/E6 persistido (Room v35, `attempt_link_version`, `capacidadDeVinculo` durable por `requestId`) · N1 `vincularIntentoAntesDelSdk` con
+`DecisionDelVinculo` estricto (**NOT_OWNER ⇒ nunca SDK**, descartar + `failed + PRE_AUTHORIZATION` por H.3 + 🚨) · N2 S5 en
+`SocketManager` (persistir → emitir → publicar) y `manejarConfirmacionDelServidor` en la VM · **una regla (E1–E4) en
+`PaymentAttemptDao.aplicarVeredictoDelServidor`** (libreta + bandeja en una transacción; `SQL_CONTRADICCION` derivado) · N3
+`LedgerServerRecovery` + `LedgerServerRecoveryWorker` (CONNECTED, `APPEND_OR_REPLACE`) · N4 `onUncertaintyBorn` → `LedgerRecoveryTrigger` ·
+REST como veredicto (`desdeRecibo`; el ganador exige `terminalPaymentRequestId` en el 2xx = N0b del servidor) en la VM, en
+`LedgerApprovalRecovery` y en `PaymentSyncWorker` (E5). Servidor: N0 `7e86da91`, N0b `5e549dde` (+docs `8693961b`) en `develop`, CI verde.
+
+**Antes de Codex, las pruebas ya habían cazado dos defectos de producto:** `SQL_CONTRADICCION` era TRIVALENTE (`NOT NULL` = NULL: toda
+fila sin veredicto quedaba fuera del aviso F0 y de la poda — lo vieron dos pruebas viejas del aviso y el control de la poda) ⇒
+NULL-seguro con `IS`/`IS NOT` + prueba de regresión + sabotaje S12; y `LedgerServerRecovery` estampaba con `System.currentTimeMillis()`
+en vez del reloj de la pasada ⇒ un `now` por pasada (sobrecargas en la libreta, no defaults: un stub de mockk no casaría).
+
+| # | Hallazgo de Codex (todos DEL DIFF) | Verificado | Cierre (TDD, RED→GREEN) | Guardia |
+|---|---|---|---|---|
+| P1-1 | `aplicarVeredictoDelRest` descartaba `ResultadoDelVeredicto` y decidía sólo con el recibo: libreta $100, REST RECORDED $90 ⇒ el DAO conserva la discrepancia sin liberar y la pantalla decía «cobrado» y reportaba `success` (también ante `RECHAZADO_*`) | ✅ `AngelPayPaymentViewModel.kt:683-693` | La pantalla consume la DECISIÓN: `RECHAZADO_*` o `GUARDADO_SIN_LIBERAR` con RECORDED ⇒ 🚨 + `Error(REGISTRADO_CON_DISCREPANCIA, canRetry=false)` y NINGÚN `success`; `APLICADO` sin transición (S5 llegó antes) sigue siendo éxito; segunda captura aplicada conserva su aviso y reporta al GANADOR | `AngelPayPaymentViewModelTest` «P1-1 …» (×3) · S18 |
+| P1-2 | La cola leía «el DAO contestó» como «quedó durable»: cualquier `Result.success`, incluidos los tres `RECHAZADO_*` (que no escriben `server_*`), consumía la fila | ✅ `PaymentSyncWorker.kt:454` | Decisión explícita: `APLICADO`/`GUARDADO_SIN_LIBERAR` ⇒ durable; `SIN_FILA`/`FUERA_DE_ALCANCE` ⇒ camino anterior; `RECHAZADO_*` ⇒ 🚨 + `release` con la MISMA llave (la cola la acota con su tope) | `PaymentSyncWorkerTest` «E5 un RECHAZO…» / «…FUERA del checkpoint…» · S16 |
+| P1-3 | `veredictosPendientesDeAplicar` tomaba los 50 más antiguos por `server_verdict_at`; 50 RECORDED con montos incompatibles nunca salen del conjunto y el intento 51 (reaplicable, ya con outcome final: S6 tampoco lo consulta) no se reaplicaba jamás. Reproducido por Codex en SQLite: 3 pasadas, 50/0/51 excluido | ✅ `PaymentAttemptDao.kt:508` | El lote sólo admite lo que la transición PUEDE aplicar (mismas condiciones que `registrarPorVeredictoDelServidor`: `host_approved IS NOT 0`, montos iguales, RECORDED o ganador) | `VeredictoDelServidorRoomTest` «P1-3 …» · S13 |
+| P1-4 | La guarda «no degradar» exigía que cambiara el NOMBRE del outcome: una segunda captura del MISMO Payment sin `winnerPaymentId` sobrescribía `server_winner_payment_id = NULL`; tras INDETERMINADO ya no había con qué liberar | ✅ `PaymentAttemptDao.kt:562` | Se decide por «final APROBADO» guardado (RECORDED, o segunda captura CON ganador) contra `esFinalAprobado` entrante, sin mirar el nombre | `VeredictoDelServidorRoomTest` «P1-4 …» · S14 |
+| P1-5 | `observePendingObligations` unía las tres familias antes de `LIMIT 50` y el formateador descartaba las contradicciones > 72 h: 50 contradicciones caducadas dejaban fuera a un INDETERMINADO más antiguo ⇒ aviso vacío con la obligación viva | ✅ `RemotePaymentRequestDao.kt:64` + `AvisoDeCobrosPendientes.kt:32` | Cupo de 50 POR FAMILIA (subconsultas con su propio `LIMIT`, sintaxis compuesta de SQLite) | `VeredictoDelServidorRoomTest` «P1-5 …» · S15 |
+| P1-6 | `LedgerApprovalRecovery` sustituyó `completeRecovery(REGISTRADO)` por el veredicto para TODA aprobación; el DAO rechaza `processor != ANGELPAY` ⇒ una aprobación Blumon con REST exitoso quedaba retenida hasta agotar sus 5 intentos (regresión del diff, independiente del port a PAX); la prueba existente usaba una fila BLUMON con el DAO mockeado en APLICADO | ✅ `LedgerApprovalRecovery.kt:52` + `PaymentAttemptDao.kt:546` | Fuera de ANGELPAY: la recuperación de ANTES (REST 2xx ⇒ REGISTRADO); ANGELPAY: el veredicto, y `FUERA_DE_ALCANCE` (devolución/heredada) también por el camino anterior. Nueva decisión `FUERA_DE_ALCANCE` (heredada/procesador/devolución) ≠ `RECHAZADO_PERTENENCIA` (venue/solicitud ajenos) | `LedgerApprovalRecoveryTest` (Blumon por `completeRecovery`, AngelPay por el veredicto) · pertenencia refinada en Room · S17 |
+| P2-1 | `LedgerServerRecovery` absorbía `IOException` (el `retry()` del worker nunca llegaba) y el `withTimeout` propio se relanzaba como cancelación (abortaba la pasada entera) | ✅ `LedgerServerRecovery.kt:67` / `LedgerServerRecoveryWorker.kt:37` | `TimeoutCancellationException` e `IOException` cuentan como `sinRespuesta` sin gastar el turno y la pasada sigue; `Resultado.sinRespuesta` y `LedgerServerRecoveryWorker.debeReintentar` ⇒ `retry()` | `LedgerServerRecoveryRoomTest` «P2-1 …» · S19 |
+| P3 | Falta el `terminalAttemptLinkVersion=1` informativo del handshake (v2); no gobierna N1 ni S5 | ✅ `SocketManager.kt:216` | Divergencia segura, declarada; no se toca | — |
+| Precisión N1 | La espera del ACK no vive en un Job que `resetPayment()` cancele; la prueba de abandono cancelaba la corrutina a mano | ✅ | Guarda tras el ACK: si la pantalla ya no está en `LinkingAttempt` para esa solicitud, el ACK es tardío y NO cobra (el CAS a AUTORIZANDO sigue exigiendo PREPARANDO) | `AngelPayPaymentViewModelTest` «N1 un ACK autorizador que llega DESPUÉS…» |
+
+**Ronda 2 de Codex (16-sep 02:4x, gpt-6-astra xhigh, 2.9 M tokens, SQLite sobre `35.json`): «AUTORIZADO A COMMITEAR — condicionado a
+completar los cambios obligatorios 1–2 antes del commit».** P1-1…P1-5 y la precisión N1 CERRADOS con `archivo:línea` de cierre y prueba;
+P1-6 y P2-1 PARCIALES sólo por la PRUEBA: (1) P1-6 exigía Room real ⇒ `LedgerApprovalRecoveryRoomTest` (Blumon a REGISTRADO por
+`completeRecovery` sin simular nada; AngelPay por el veredicto con `server_*` guardados; importes distintos ⇒ contradicción sin liberar);
+(2) P2-1 exigía distinguir el tope propio de una cancelación externa y probar el worker real ⇒ `withTimeoutOrNull` (una cancelación del
+padre se propaga; nunca se cuenta como «sin respuesta») y `LedgerServerRecoveryWorkerTest` (`doWork()`: retry sin respuesta/IOException,
+success con emisión de bandejas, cancelación externa propagada, sin venue no-op). Sus cinco riesgos (a–e) sin P1 nuevo: (a) el `Error` sin
+`success` no deja obligación sin responsable (la bandeja sigue PROCESSING; el servidor arbitra con `CONTRACT_MISMATCH`/conciliación,
+`terminal-payment.service.ts:2412`); (b) el `release` con la misma llave está acotado a 10 por ciclo pero `HomeViewModel.kt:939` reinicia
+los transitorios al reconectar — siempre por REST idempotente, nunca por el SDK, y FAILED se ve en `DeviceHealthViewModel` (declarado);
+(c) el cupo por familia sube el conteo del aviso hasta 150, sin decisión de dinero colgada del 50; (d) una fila ANGELPAY/SALE sólo cae en
+`FUERA_DE_ALCANCE` si es heredada; (e) sin transición legítima que sustituya `LinkingAttempt` y deba seguir cobrando. SQLite: 50
+inaplicables + 1 aplicable ⇒ sólo el aplicable; 50 contradicciones + 1 pendiente + 60 PROCESSING ⇒ 101 filas con el pendiente; tres
+familias saturadas ⇒ 150; orden global correcto.
+
+**Certificación final y commit (16-sep 02:50):** lote F sobre el árbol final (avq-verify, snapshot congelado, mis 51 archivos byte a
+byte iguales al snapshot): **27 clases / 350 pruebas / 0 fallos** (`AngelPayPaymentViewModelTest` 112 · `VeredictoDelServidorRoomTest` 18 ·
+`PaymentSyncWorkerTest` 23 · `SocketManagerTest` 31 · `RemotePaymentInboxRoomTest` 22 · `LedgerApprovalRecoveryRoomTest` 3 ·
+`LedgerServerRecoveryWorkerTest` 4 · …), `compileNexgoDebugKotlin` y `compileProductionDebugKotlin` exit 0. **Sabotajes S1–S19 en copia
+aislada (`$J/sab-tpv`, control previo por clase en verde, veredicto leído del cuerpo): 19/19 caen en su prueba** — S17 sólo como DOBLE
+ruptura (Blumon por el veredicto Y `FUERA_DE_ALCANCE` sin recuperar): las dos capas son defensa en profundidad, dicho en el script.
+🔴 Dos trampas del tooling que costaron una corrida cada una: la copia aislada no trae `local.properties`/`google-services.json`
+(Gradle muere en 1 s y un `exit=1` se leía como «cayó»: 9 falsos CAE) y el daemon de Kotlin global de 2 GB muere con un compile
+COMPLETO (la caché incremental de la copia estaba fría) ⇒ control previo obligatorio, veredicto por «N tests completed, M failed»,
+`-Pkotlin.daemon.jvmargs=-Xmx4g`, y `prepare()` + reversión también ante `pkill` (un mutante quedó aplicado y rompió el control).
+**Commit en `avoqado-tpv` `main`: `99faf71`** (23 archivos por rutas, sin Co-Authored-By; completa el WIP que `25d7368` dejó sin
+compilar). `main` queda 3 por delante de `origin/main` (25d7368 ajeno + 99faf71): **SIN pushear** — decidir con el founder, porque
+el push arrastra el commit ajeno del QR de reimpresión y dispara «Signed builds» en GitHub.
+
+Codex confirmó además, contra el código: la barrera normal de `NOT_OWNER` corta antes de `markAuthorizing` y sin SDK (`:955`, llamadores
+`:1955`/`:2092`); H.3 sin bypass; el predicado NULL-seguro dio **0 NULL en 1,485 combinaciones**; el lote de S6 avanza (30 → 25 → 5),
+espaciado 10…1280 min (tope efectivo 21 h 20 min < 24 h); sin `NULLS FIRST` ni sintaxis > SQLite 3.19; la migración v34→v35 correcta sobre
+datos (backfill sólo al crear la columna, segunda ejecución no rehace); compatibilidad de las tres generaciones de APK sin campos quitados;
+el emit REST en vivo sin `terminalPaymentRequestId` es la excepción explícita de v4 (no acredita ganador; el servidor decide).
+
 ### Diseño de S0 + S3 (13-sep, antes de codificar; revisión de Codex en curso)
 
 **Dónde se decide el ganador.** Dentro de la transacción de los DOS registradores actuales (`recordOrderPayment` y `recordFastPayment`),
