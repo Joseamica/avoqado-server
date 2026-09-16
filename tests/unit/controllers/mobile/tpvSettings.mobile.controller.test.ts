@@ -190,7 +190,7 @@ describe('getVenueTpvSettings (mobile) — plan-tier info', () => {
     const res = makeRes()
     await getVenueTpvSettings(makeReq('device-checkout'), res, jest.fn() as NextFunction)
 
-    expect(mockedGetTpvSettings).toHaveBeenCalledWith('terminal-checkout')
+    expect(mockedGetTpvSettings).toHaveBeenCalledWith('terminal-checkout', { venueId })
     expect(res.__json.data.activeTerminalId).toBe('terminal-checkout')
     expect(res.__json.data.deviceTerminal).toEqual({
       id: 'terminal-checkout',
@@ -240,7 +240,7 @@ describe('getVenueTpvSettings (mobile) — plan-tier info', () => {
     const res = makeRes()
     await getVenueTpvSettings(makeReq('device-cremeria'), res, jest.fn() as NextFunction)
 
-    expect(mockedGetTpvSettings).toHaveBeenCalledWith('terminal-cremeria')
+    expect(mockedGetTpvSettings).toHaveBeenCalledWith('terminal-cremeria', { venueId })
     expect(res.__json.data.activeTerminalId).toBe('terminal-cremeria')
     expect(res.__json.data.deviceTerminal).toEqual({
       id: 'terminal-cremeria',
@@ -274,7 +274,7 @@ describe('getVenueTpvSettings (mobile) — plan-tier info', () => {
     const res = makeRes()
     await getVenueTpvSettings(makeReq(), res, jest.fn() as NextFunction)
 
-    expect(mockedGetTpvSettings).toHaveBeenCalledWith('terminal-legacy')
+    expect(mockedGetTpvSettings).toHaveBeenCalledWith('terminal-legacy', { venueId })
     expect(res.__json.data.activeTerminalId).toBe('terminal-legacy')
     expect(res.__json.data.deviceTerminal).toBeNull()
   })
@@ -657,5 +657,25 @@ describe('mobile display-mode delivery and compatible ACK', () => {
       .send({ customerDisplayInverted: true, requestId: pendingRequest.requestId, outcome: 'APPLIED' })
     expect(superseded.status).toBe(409)
     expect(superseded.body).toMatchObject({ code: 'DEVICE_REQUEST_SUPERSEDED' })
+  })
+})
+
+describe('getVenueTpvSettings (mobile) — la lectura de ajustes queda acotada al venue', () => {
+  // 🔴 Auditoría de Codex (2026-09-16, C3): el controlador encuentra la terminal en la lista del
+  // venue, pero luego leía sus ajustes SÓLO por id. Si la terminal se reasigna entre las dos
+  // lecturas, la segunda devolvería la configuración del negocio nuevo.
+  it('pide los ajustes de la terminal del aparato con el venue de la ruta', async () => {
+    prismaMock.terminal.findMany.mockResolvedValue([
+      { id: 'term-device', status: 'ACTIVE', deviceUid: 'device-1', name: 'Caja 1', type: 'POS_ANDROID' },
+    ])
+    prismaMock.venueFeature.findMany.mockResolvedValue([])
+    prismaMock.venue.findUnique.mockResolvedValue({ seatCapExempt: false, status: 'ACTIVE' })
+    mockedGetTpvSettings.mockResolvedValue({} as Awaited<ReturnType<typeof getTpvSettings>>)
+
+    const res = makeRes()
+    await getVenueTpvSettings(makeReq('device-1'), res, jest.fn() as NextFunction)
+
+    expect(res.__json.success).toBe(true)
+    expect(mockedGetTpvSettings).toHaveBeenCalledWith('term-device', { venueId })
   })
 })

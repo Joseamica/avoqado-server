@@ -7,6 +7,7 @@
  * negocio B —y el `enableShifts` de ese negocio— con sólo saber su serie, que en una PAX es un
  * número consecutivo. La terminal ahora se busca DENTRO del venue de la sesión.
  */
+import { Prisma } from '@prisma/client'
 import type { NextFunction, Request, Response } from 'express'
 
 import { prismaMock } from '@tests/__helpers__/setup'
@@ -103,6 +104,40 @@ describe('PUT /tpv/terminals/:serialNumber/settings — sólo dentro del negocio
     expect(prismaMock.terminal.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({ where: { serialNumber: SERIAL_B, venueId: VENUE_B } }),
     )
-    expect(prismaMock.terminal.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'terminal-b' } }))
+    expect(prismaMock.terminal.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'terminal-b', venueId: VENUE_B } }))
+  })
+  it('si la terminal cambia de negocio entre la lectura y la escritura, no escribe ni toca los turnos', async () => {
+    // Codex C1 (2026-09-16): la lectura estaba acotada al venue de la sesión, pero la escritura iba
+    // sólo por id. Aquí la terminal se lee en B y, antes de escribir, un superadmin la mueve a C:
+    // la base rechaza la escritura acotada (P2025) y nada de B ni de C cambia.
+    prismaMock.terminal.update.mockImplementation((({ where }: { where: { id: string; venueId?: string } }) => {
+      const venueNow = 'venue-c'
+      if (where.venueId !== undefined && where.venueId !== venueNow) {
+        return Promise.reject(
+          new Prisma.PrismaClientKnownRequestError('No record was found for an update.', { code: 'P2025', clientVersion: 'test' }),
+        )
+      }
+      return Promise.resolve({})
+    }) as any)
+    const res = makeRes()
+    const next = jest.fn() as NextFunction
+
+    await updateTpvSettings(putReq(VENUE_B, { showTipScreen: false, enableShifts: false }), res, next)
+
+    expect(prismaMock.terminal.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'terminal-b', venueId: VENUE_B } }))
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 404 }))
+    expect(prismaMock.venueSettings.upsert).not.toHaveBeenCalled()
+    expect(res.json).not.toHaveBeenCalled()
+  })
+
+  it('el cambio de turnos del negocio viaja en la MISMA transacción que la terminal', async () => {
+    const res = makeRes()
+    const next = jest.fn() as NextFunction
+
+    await updateTpvSettings(putReq(VENUE_B, { showTipScreen: false, enableShifts: false }), res, next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    expect(prismaMock.venueSettings.upsert).toHaveBeenCalledWith(expect.objectContaining({ where: { venueId: VENUE_B } }))
   })
 })

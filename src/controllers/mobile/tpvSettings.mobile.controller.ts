@@ -130,7 +130,9 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
     // 3. If there is an active terminal, get its merged settings
     let settings: TpvSettings | null = null
     if (activeTerminal) {
-      settings = await getTpvSettings(activeTerminal.id)
+      // Acotado al venue de la ruta: la terminal salió de la lista de ESTE venue, pero una
+      // reasignación entre las dos lecturas no puede entregar ajustes de otro negocio.
+      settings = await getTpvSettings(activeTerminal.id, { venueId })
     }
 
     // 4. Strip private/internal fields from the terminal list. Per-device area

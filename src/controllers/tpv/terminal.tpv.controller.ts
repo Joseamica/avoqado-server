@@ -739,28 +739,44 @@ export async function updateTpvSettings(req: Request, res: Response, next: NextF
       overrides.trackPromoterLocation = prevOverrides.trackPromoterLocation
     }
 
-    // Step 5: Save full merged config.settings (TPV Android compat) + configOverrides (diff only)
-    await prisma.terminal.update({
-      where: { id: terminal.id },
-      data: {
-        config: { ...existingConfig, settings: newSettings },
-        configOverrides: Object.keys(overrides).length > 0 ? overrides : Prisma.JsonNull,
-        updatedAt: new Date(),
-      },
-    })
+    // Step 5 + 6, en UNA transacción: la terminal y el `enableShifts` de su venue.
+    // 🔴 La escritura también va acotada al venue de la sesión (Codex C1, 2026-09-16): si un
+    // superadmin mueve la terminal a otro negocio entre la lectura y la escritura, la base rechaza
+    // el update (P2025) y el cambio de turnos no llega a aplicarse sobre ningún negocio.
+    try {
+      await prisma.$transaction(async tx => {
+        // Save full merged config.settings (TPV Android compat) + configOverrides (diff only)
+        await tx.terminal.update({
+          where: { id: terminal.id, venueId: sessionVenueId },
+          data: {
+            config: { ...existingConfig, settings: newSettings },
+            configOverrides: Object.keys(overrides).length > 0 ? overrides : Prisma.JsonNull,
+            updatedAt: new Date(),
+          },
+        })
 
-    // Step 6: If enableShifts was passed, update VenueSettings (venue-level setting)
-    if (settingsUpdate.enableShifts !== undefined) {
-      await prisma.venueSettings.upsert({
-        where: { venueId: terminal.venueId },
-        update: { enableShifts: settingsUpdate.enableShifts },
-        create: {
-          venueId: terminal.venueId,
-          enableShifts: settingsUpdate.enableShifts,
-        },
+        // If enableShifts was passed, update VenueSettings (venue-level setting)
+        if (settingsUpdate.enableShifts !== undefined) {
+          await tx.venueSettings.upsert({
+            where: { venueId: sessionVenueId },
+            update: { enableShifts: settingsUpdate.enableShifts },
+            create: {
+              venueId: sessionVenueId,
+              enableShifts: settingsUpdate.enableShifts,
+            },
+          })
+        }
       })
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
+        throw new NotFoundError(`Terminal not found with serial number: ${serialNumber}`)
+      }
+      throw error
+    }
+
+    if (settingsUpdate.enableShifts !== undefined) {
       logger.info('[TPV Settings] VenueSettings.enableShifts updated', {
-        venueId: terminal.venueId,
+        venueId: sessionVenueId,
         enableShifts: settingsUpdate.enableShifts,
       })
     }

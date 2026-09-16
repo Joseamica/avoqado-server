@@ -656,6 +656,22 @@ function terminalWhere(tpvId: string, scope: TerminalSettingsScope): { id: strin
 }
 
 /**
+ * Escribe la terminal con la MISMA condición con la que se leyó. Si otro proceso la movió de
+ * venue (o la borró) entre la lectura y la escritura, la base rechaza el update con P2025: eso es
+ * «esta terminal ya no existe aquí» (404), no un error del servidor.
+ */
+async function updateScopedTerminal(tpvId: string, scope: TerminalSettingsScope, data: Prisma.TerminalUpdateInput): Promise<void> {
+  try {
+    await prisma.terminal.update({ where: terminalWhere(tpvId, scope), data })
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
+      throw new NotFoundError(`Terminal con ID ${tpvId} no encontrada.`)
+    }
+    throw error
+  }
+}
+
+/**
  * Get TPV settings for a specific terminal
  * Returns default settings if none exist
  */
@@ -754,13 +770,10 @@ export async function updateTpvSettings(
   }
 
   // 5. Save full merged config.settings (TPV Android compat) + configOverrides (diff only)
-  await prisma.terminal.update({
-    where: terminalWhere(tpvId, scope),
-    data: {
-      config: { ...existingConfig, settings: newSettings },
-      configOverrides: Object.keys(overrides).length > 0 ? overrides : Prisma.JsonNull,
-      updatedAt: new Date(),
-    },
+  await updateScopedTerminal(tpvId, scope, {
+    config: { ...existingConfig, settings: newSettings },
+    configOverrides: Object.keys(overrides).length > 0 ? overrides : Prisma.JsonNull,
+    updatedAt: new Date(),
   })
 
   logAction({
@@ -838,13 +851,10 @@ export async function resetTerminalToDefaults(tpvId: string, scope: TerminalSett
     kioskDefaultMerchantId: existingSettings.kioskDefaultMerchantId ?? null,
   }
 
-  await prisma.terminal.update({
-    where: terminalWhere(tpvId, scope),
-    data: {
-      config: { ...existingConfig, settings: resetSettings },
-      configOverrides: Prisma.JsonNull,
-      updatedAt: new Date(),
-    },
+  await updateScopedTerminal(tpvId, scope, {
+    config: { ...existingConfig, settings: resetSettings },
+    configOverrides: Prisma.JsonNull,
+    updatedAt: new Date(),
   })
 
   // Restablecer borra de golpe todas las excepciones de la terminal: el dueño tiene que poder ver

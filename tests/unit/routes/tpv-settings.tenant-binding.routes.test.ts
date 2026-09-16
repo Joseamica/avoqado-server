@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client'
 import express, { type NextFunction, type Request, type Response } from 'express'
 import request from 'supertest'
 
@@ -10,11 +11,11 @@ import { logAction } from '@/services/dashboard/activity-log.service'
  * usuario y después leían o escribían la terminal SÓLO por id. Con permiso en su negocio, un
  * usuario tocaba la terminal de otro negocio si conocía su id.
  *
- * Mismo molde que `tpv-command.tenant-binding.routes.test.ts`: la terminal se amarra a SU venue
- * antes de `checkPermission`, y el servicio acota lecturas y escrituras a ese venue.
+ * La autorización que se prueba aquí es la REAL: `checkPermission` no está simulado. Sólo se
+ * simula la capa de datos (membresías, roles personalizados, superadmins), así que un "200" de
+ * uso legítimo exige que el rol de verdad tenga el permiso (segunda ronda de Codex, C2: la
+ * primera versión simulaba el permiso y aprobaba a un ADMIN que en realidad recibiría 403).
  */
-
-const checkedVenues: Array<string | undefined> = []
 
 jest.mock('@/middlewares/authenticateToken.middleware', () => ({
   authenticateTokenMiddleware: (req: Request, res: Response, next: NextFunction) => {
@@ -28,25 +29,6 @@ jest.mock('@/middlewares/authenticateToken.middleware', () => ({
     next()
   },
 }))
-
-jest.mock('@/middlewares/checkPermission.middleware', () => {
-  // El ORDEN real (params → header x-venue-id → token): es justo lo que decide si un header
-  // puede desviar la autorización hacia el venue del atacante.
-  const actual = jest.requireActual('@/middlewares/checkPermission.middleware')
-  return {
-    ...actual,
-    checkPermission: () => (req: Request, res: Response, next: NextFunction) => {
-      const auth = (req as any).authContext
-      const effectiveVenueId = actual.resolveRequestVenueId(req, auth)
-      checkedVenues.push(effectiveVenueId)
-      if (auth?.role !== 'SUPERADMIN' && !auth?.authorizedVenueIds?.includes(effectiveVenueId)) {
-        res.status(403).json({ message: 'No tienes permiso' })
-        return
-      }
-      next()
-    },
-  }
-})
 
 import dashboardRoutes from '@/routes/dashboard.routes'
 
@@ -72,6 +54,16 @@ const TERMINALS = [
   },
 ]
 
+/**
+ * Membresías con los roles REALES. Con los defaults de `permissions.ts`, MANAGER tiene
+ * `tpv-settings:read/update` y CASHIER no.
+ */
+const MEMBERSHIPS: Record<string, { role: string; active: boolean }> = {
+  'manager-a:venue-a': { role: 'MANAGER', active: true },
+  'cashier-a:venue-a': { role: 'CASHIER', active: true },
+}
+const SUPERADMINS = new Set(['super-1'])
+
 /** Honra el `where` que le pasen: si el servicio acota por el venue equivocado, no encuentra nada. */
 function fakeTerminalLookup({ where }: { where: { id?: string; venueId?: string } }) {
   const found = TERMINALS.find(t => t.id === where.id && (where.venueId === undefined || t.venueId === where.venueId))
@@ -88,16 +80,10 @@ function makeApp() {
   return app
 }
 
-/** Staff con permiso SÓLO en el venue A. El dashboard real siempre manda su venue activo por header. */
-function staffA(overrides: Record<string, unknown> = {}) {
+/** Sesión de un usuario cuyo venue activo es A. El dashboard real siempre manda ese venue por header. */
+function as(userId: string, tokenRole: string) {
   return {
-    'x-test-auth-context': JSON.stringify({
-      userId: 'staff-a',
-      venueId: VENUE_A,
-      role: 'ADMIN',
-      authorizedVenueIds: [VENUE_A],
-      ...overrides,
-    }),
+    'x-test-auth-context': JSON.stringify({ userId, venueId: VENUE_A, orgId: 'org-a', role: tokenRole }),
     'x-venue-id': VENUE_A,
   }
 }
@@ -109,74 +95,104 @@ function send(method: 'GET' | 'PUT' | 'POST', path: string, headers: Record<stri
   return req.set(headers).send(body as any)
 }
 
+/** Venues en los que `checkPermission` buscó la membresía del usuario. */
+function venuesEvaluated(): string[] {
+  return prismaMock.staffVenue.findUnique.mock.calls.map((call: any[]) => call[0]?.where?.staffId_venueId?.venueId)
+}
+
+function settingsAuditCalls() {
+  return (logAction as jest.Mock).mock.calls.filter(([params]) => String(params?.action).startsWith('TPV_SETTINGS_'))
+}
+
 beforeEach(() => {
   jest.clearAllMocks()
-  checkedVenues.length = 0
   prismaMock.terminal.findUnique.mockImplementation(fakeTerminalLookup as any)
-  prismaMock.terminal.findFirst.mockImplementation(fakeTerminalLookup as any)
   prismaMock.terminal.update.mockResolvedValue({} as any)
   prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue(null)
   prismaMock.merchantAccount.findMany.mockResolvedValue([{ id: 'merchant-a', displayName: 'Comercio A', active: true }] as any)
+
+  // Capa de datos de la autorización real.
+  prismaMock.staffVenue.findFirst.mockImplementation((({ where }: any) =>
+    Promise.resolve(where?.role === 'SUPERADMIN' && SUPERADMINS.has(where?.staffId) ? { id: 'sv-super' } : null)) as any)
+  prismaMock.staffVenue.findUnique.mockImplementation((({ where }: any) => {
+    const key = `${where?.staffId_venueId?.staffId}:${where?.staffId_venueId?.venueId}`
+    const m = MEMBERSHIPS[key]
+    return Promise.resolve(m ? { role: m.role, active: m.active, permissionSetId: null, permissionSet: null } : null)
+  }) as any)
+  prismaMock.venue.findUnique.mockImplementation((({ where }: any) =>
+    Promise.resolve({ id: where?.id, organizationId: `org-${where?.id}` })) as any)
+  prismaMock.staffOrganization.findUnique.mockResolvedValue(null)
+  prismaMock.venueRolePermission.findUnique.mockResolvedValue(null)
 })
 
-describe('Ajustes de una terminal: la autorización se amarra al venue REAL de la terminal', () => {
+describe('Ajustes de una terminal: la autorización REAL se evalúa en el venue de la terminal', () => {
   it.each([
-    ['ver ajustes', 'GET', '/tpv/terminal-b/settings', undefined],
-    ['cambiar ajustes', 'PUT', '/tpv/terminal-b/settings', { showTipScreen: false }],
-    ['restablecer ajustes', 'POST', '/tpv/terminal-b/reset-to-defaults', {}],
-    ['ver comercios', 'GET', '/tpv/terminal-b/merchants', undefined],
-  ] as const)('staff del venue A NO puede %s de una terminal del venue B, aunque su header diga A', async (_label, method, path, body) => {
-    const response = await send(method, path, staffA(), body)
+    ['ver los ajustes', 'GET', '/tpv/terminal-b/settings', undefined],
+    ['cambiar los ajustes', 'PUT', '/tpv/terminal-b/settings', { showTipScreen: false }],
+    ['restablecer los ajustes', 'POST', '/tpv/terminal-b/reset-to-defaults', {}],
+    ['ver los comercios', 'GET', '/tpv/terminal-b/merchants', undefined],
+  ] as const)(
+    'el gerente del venue A NO puede %s de una terminal del venue B, aunque su header diga A',
+    async (_label, method, path, body) => {
+      const response = await send(method, path, as('manager-a', 'MANAGER'), body)
+
+      expect(response.status).toBe(403)
+      // La membresía se buscó en el venue de la TERMINAL, no en el del header ni en el del token.
+      expect(venuesEvaluated()).toEqual([VENUE_B])
+      expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'PERMISSION_DENIED', venueId: VENUE_B }))
+      // Nada del negocio B se leyó ni se escribió.
+      expect(response.body).not.toHaveProperty('tipSuggestions')
+      expect(prismaMock.terminal.update).not.toHaveBeenCalled()
+      expect(prismaMock.merchantAccount.findMany).not.toHaveBeenCalled()
+      expect(settingsAuditCalls()).toHaveLength(0)
+    },
+  )
+
+  it('el cajero del venue A no puede cambiar los ajustes ni de su propia terminal (permiso real)', async () => {
+    const response = await send('PUT', '/tpv/terminal-a/settings', as('cashier-a', 'CASHIER'), { showTipScreen: false })
 
     expect(response.status).toBe(403)
-    // El permiso se evaluó en el venue de la TERMINAL, no en el del header ni en el del token.
-    expect(checkedVenues).toEqual([VENUE_B])
-    // Nada del negocio B se leyó ni se escribió.
-    expect(response.body).not.toHaveProperty('tipSuggestions')
+    expect(venuesEvaluated()).toEqual([VENUE_A])
     expect(prismaMock.terminal.update).not.toHaveBeenCalled()
-    expect(prismaMock.merchantAccount.findMany).not.toHaveBeenCalled()
-    expect(logAction).not.toHaveBeenCalled()
   })
 
-  it('una terminal que no existe responde 404 sin escribir nada', async () => {
-    const response = await send('PUT', '/tpv/terminal-inexistente/settings', staffA(), { showTipScreen: false })
+  it('una terminal que no existe responde 404 sin evaluar permisos ni escribir', async () => {
+    const response = await send('PUT', '/tpv/terminal-inexistente/settings', as('manager-a', 'MANAGER'), { showTipScreen: false })
 
     expect(response.status).toBe(404)
+    expect(venuesEvaluated()).toEqual([])
     expect(prismaMock.terminal.update).not.toHaveBeenCalled()
-    expect(logAction).not.toHaveBeenCalled()
   })
 
-  it('uso legítimo: ver los ajustes de su propia terminal, con la lectura acotada a su venue', async () => {
-    const response = await send('GET', '/tpv/terminal-a/settings', staffA())
+  it('uso legítimo: el gerente ve los ajustes de su propia terminal, con la lectura acotada a su venue', async () => {
+    const response = await send('GET', '/tpv/terminal-a/settings', as('manager-a', 'MANAGER'))
 
     expect(response.status).toBe(200)
     expect(response.body.tipSuggestions).toEqual([10, 15, 20])
-    expect(checkedVenues).toEqual([VENUE_A])
     expect(prismaMock.terminal.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'terminal-a', venueId: VENUE_A } }))
   })
 
-  it('uso legítimo: cambiar ajustes escribe acotado a su venue y deja bitácora con autor', async () => {
-    const response = await send('PUT', '/tpv/terminal-a/settings', staffA(), { showTipScreen: false })
+  it('uso legítimo: el gerente cambia ajustes, escritura acotada a su venue y bitácora con autor', async () => {
+    const response = await send('PUT', '/tpv/terminal-a/settings', as('manager-a', 'MANAGER'), { showTipScreen: false })
 
     expect(response.status).toBe(200)
     expect(response.body.showTipScreen).toBe(false)
     expect(prismaMock.terminal.update).toHaveBeenCalledTimes(1)
     expect(prismaMock.terminal.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'terminal-a', venueId: VENUE_A } }))
-    // `logAction` es la frontera de la bitácora (el setup global la simula): se revisa lo que el
-    // servicio le entrega, que es lo que termina en ActivityLog.
+    // `logAction` es la frontera de la bitácora (el setup global la simula).
     expect(logAction).toHaveBeenCalledWith(
       expect.objectContaining({
         action: 'TPV_SETTINGS_UPDATED',
         entity: 'Terminal',
         entityId: 'terminal-a',
         venueId: VENUE_A,
-        staffId: 'staff-a',
+        staffId: 'manager-a',
       }),
     )
   })
 
-  it('uso legítimo: restablecer escribe acotado a su venue y deja bitácora con autor', async () => {
-    const response = await send('POST', '/tpv/terminal-a/reset-to-defaults', staffA(), {})
+  it('uso legítimo: el gerente restablece, escritura acotada a su venue y bitácora con autor', async () => {
+    const response = await send('POST', '/tpv/terminal-a/reset-to-defaults', as('manager-a', 'MANAGER'), {})
 
     expect(response.status).toBe(200)
     expect(prismaMock.terminal.update).toHaveBeenCalledTimes(1)
@@ -187,13 +203,13 @@ describe('Ajustes de una terminal: la autorización se amarra al venue REAL de l
         entity: 'Terminal',
         entityId: 'terminal-a',
         venueId: VENUE_A,
-        staffId: 'staff-a',
+        staffId: 'manager-a',
       }),
     )
   })
 
-  it('uso legítimo: ver los comercios de su propia terminal', async () => {
-    const response = await send('GET', '/tpv/terminal-a/merchants', staffA())
+  it('uso legítimo: el gerente ve los comercios de su propia terminal', async () => {
+    const response = await send('GET', '/tpv/terminal-a/merchants', as('manager-a', 'MANAGER'))
 
     expect(response.status).toBe(200)
     expect(response.body.data).toEqual([{ id: 'merchant-a', displayName: 'Comercio A', active: true }])
@@ -202,11 +218,29 @@ describe('Ajustes de una terminal: la autorización se amarra al venue REAL de l
     )
   })
 
-  it('SUPERADMIN (consola de superadmin) sigue pudiendo cambiar una terminal de otro venue, evaluado en ESE venue', async () => {
-    const response = await send('PUT', '/tpv/terminal-b/settings', staffA({ role: 'SUPERADMIN' }), { showTipScreen: false })
+  it.each([
+    ['cambiar', 'PUT', '/tpv/terminal-a/settings', { showTipScreen: false }],
+    ['restablecer', 'POST', '/tpv/terminal-a/reset-to-defaults', {}],
+  ] as const)(
+    'si la terminal se mueve de negocio a media operación, %s responde 404 y no deja bitácora',
+    async (_label, method, path, body) => {
+      // La escritura va acotada a { id, venueId }: si otro proceso movió la terminal, la base la
+      // rechaza con P2025. Eso es un "no existe aquí", no un error del servidor.
+      prismaMock.terminal.update.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('No record was found for an update.', { code: 'P2025', clientVersion: 'test' }),
+      )
+
+      const response = await send(method, path, as('manager-a', 'MANAGER'), body)
+
+      expect(response.status).toBe(404)
+      expect(settingsAuditCalls()).toHaveLength(0)
+    },
+  )
+
+  it('SUPERADMIN (consola de superadmin) sigue pudiendo cambiar una terminal de otro venue, escrita en ESE venue', async () => {
+    const response = await send('PUT', '/tpv/terminal-b/settings', as('super-1', 'SUPERADMIN'), { showTipScreen: false })
 
     expect(response.status).toBe(200)
-    expect(checkedVenues).toEqual([VENUE_B])
     expect(prismaMock.terminal.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'terminal-b', venueId: VENUE_B } }))
   })
 })
@@ -218,7 +252,7 @@ describe('Controladores de ajustes: sin terminal amarrada NO operan', () => {
     '%s responde 404 y no toca la base si la ruta no amarró la terminal',
     async controllerName => {
       const controllers = await import('@/controllers/dashboard/tpv.dashboard.controller')
-      const req = { params: { tpvId: 'terminal-b' }, body: { showTipScreen: false }, authContext: { userId: 'staff-a' } } as any
+      const req = { params: { tpvId: 'terminal-b' }, body: { showTipScreen: false }, authContext: { userId: 'manager-a' } } as any
       const res = { status: jest.fn().mockReturnThis(), json: jest.fn() } as any
       const next = jest.fn()
 
@@ -236,7 +270,7 @@ describe('Controladores de ajustes: sin terminal amarrada NO operan', () => {
     const req = {
       params: { tpvId: 'terminal-b' },
       body: { showTipScreen: false },
-      authContext: { userId: 'staff-a' },
+      authContext: { userId: 'manager-a' },
       tpvSettingsTarget: { id: 'terminal-a', venueId: VENUE_A },
     } as any
     const res = { status: jest.fn().mockReturnThis(), json: jest.fn() } as any
