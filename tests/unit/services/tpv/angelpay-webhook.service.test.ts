@@ -732,7 +732,12 @@ describe('reconcileAngelPayWebhookForPayment', () => {
     const parche = estampa('pay_backfill_1')
     expect(Object.keys(parche)).toEqual(['angelpayWebhook'])
     expect(parche.angelpayWebhook).toEqual(expect.objectContaining({ reconciledVia: 'payment-create-backfill' }))
-    expect(mockedPaymentFindUnique).not.toHaveBeenCalled()
+    // Ronda 3 (P1-A): desde el gancho de la re-retención el backfill SÍ lee el Payment antes de sellar, pero sólo para
+    // resolver QUÉ solicitud liberada re-retener. Lo que esta prueba guarda sigue intacto y ahora está fijado con más
+    // precisión: la ÚNICA lectura es esa (su `select` exacto), y la fusión de la huella no relee ni reescribe el JSON.
+    expect(mockedPaymentFindUnique.mock.calls.map(([a]: any[]) => Object.keys(a?.select ?? {}).sort())).toEqual([
+      ['id', 'idempotencyKey', 'method', 'processorData', 'status', 'terminalPaymentRequestId', 'type', 'venueId'],
+    ])
     expect(mockedPaymentUpdate).not.toHaveBeenCalled()
   })
 
@@ -1691,5 +1696,104 @@ describe('Ronda 2 · P1: el webhook que no fue el primer confirmador pide re-ret
     await webhook({ terminalSerial: 'N86OTRA0001' })
     expect(porAprobacion).toHaveBeenCalledTimes(3)
     expect(porPago).not.toHaveBeenCalled()
+  })
+})
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Ronda 3 (17-sep, P1-A): el BACKFILL pide la re-retención de una solicitud LIBERADA ANTES de sellar su evento.
+// Codex r8 (respuesta 1 y concern 3): este camino puede sellar el evento con la llave del Payment SIN pasar por
+// `confirmarPorVinculo`, así que el gancho de la ronda 2 no corría y el hueco quedaba abierto.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+describe('Ronda 3 · P1-A: el backfill pide la re-retención ANTES de sellar, y un DEFERRED no sella', () => {
+  const { terminalPaymentService } = require('@/services/terminal-payment.service')
+  const pago = {
+    id: 'pay_backfill_r3',
+    idempotencyKey: 'idem-r3',
+    referenceNumber: null,
+    venueId: 'venue_x',
+    amount: 100,
+    tipAmount: 0,
+  }
+  const evento = {
+    id: 'evt_r3',
+    payload: {
+      event_type: 'send_transaction',
+      payload: {
+        amount: '000000010000',
+        integratorReference: 'idem-r3',
+        transactionId: 'tx_r3',
+        terminalSerial: 'N860W175781',
+        timestamp: '2026-09-17T01:00:00Z',
+        status: 'approved',
+      },
+    },
+  }
+  let retener: jest.SpyInstance
+
+  beforeEach(() => {
+    ;[mockedProviderEventLogFindMany, mockedProviderEventLogUpdate, mockedPaymentFindUnique, mockedPaymentUpdate].forEach(m =>
+      m.mockReset(),
+    )
+    mockedPaymentFindUnique.mockResolvedValue({
+      id: 'pay_backfill_r3',
+      venueId: 'venue_x',
+      status: 'COMPLETED',
+      method: 'CREDIT_CARD',
+      type: null,
+      idempotencyKey: 'idem-r3',
+      terminalPaymentRequestId: 'REQ-BF',
+      processorData: null,
+    })
+    mockedProviderEventLogUpdate.mockResolvedValue({ count: 1 })
+    mockedPaymentUpdate.mockResolvedValue({})
+    mockedProviderEventLogFindMany.mockResolvedValue([evento])
+    retener = jest.spyOn(terminalPaymentService, 'retenerLiberadasPorPagoSinLigar').mockResolvedValue([])
+  })
+  afterEach(() => retener.mockRestore())
+
+  it('MATCHED: la re-retención se pide con origen BACKFILL y ANTES de reclamar el evento', async () => {
+    await reconcileAngelPayWebhookForPayment(pago)
+    expect(retener).toHaveBeenCalledWith(expect.objectContaining({ id: 'pay_backfill_r3', terminalPaymentRequestId: 'REQ-BF' }), 'BACKFILL')
+    expect(retener.mock.invocationCallOrder[0]).toBeLessThan(mockedProviderEventLogUpdate.mock.invocationCallOrder[0])
+    expect(mockedProviderEventLogUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'PROCESSED' }) }),
+    )
+  })
+
+  it('🔴 DEFERRED: no se sella nada — el evento sigue PENDING y el worker lo repite', async () => {
+    retener.mockResolvedValue([{ requestId: 'REQ-BF', resultado: 'DEFERRED' }])
+    await reconcileAngelPayWebhookForPayment(pago)
+    expect(retener).toHaveBeenCalled()
+    expect(mockedProviderEventLogUpdate).not.toHaveBeenCalled()
+    expect(mockedExecuteRaw).not.toHaveBeenCalled()
+  })
+
+  it('la discrepancia de importe (AMOUNT_MISMATCH) pasa por la MISMA puerta', async () => {
+    retener.mockResolvedValue([{ requestId: 'REQ-BF', resultado: 'DEFERRED' }])
+    await reconcileAngelPayWebhookForPayment({ ...pago, amount: 500 })
+    expect(retener).toHaveBeenCalled()
+    expect(mockedProviderEventLogUpdate).not.toHaveBeenCalled()
+  })
+
+  it('si la re-retención revienta, se trata como diferida: NO sella (mejor PENDING que sellado sobre una liberada)', async () => {
+    retener.mockRejectedValue(new Error('base caída'))
+    await expect(reconcileAngelPayWebhookForPayment(pago)).resolves.toBeUndefined()
+    expect(mockedProviderEventLogUpdate).not.toHaveBeenCalled()
+  })
+
+  it('se pide UNA sola vez aunque haya varios eventos que sellar', async () => {
+    mockedProviderEventLogFindMany.mockResolvedValue([evento, { ...evento, id: 'evt_r3_b' }])
+    await reconcileAngelPayWebhookForPayment(pago)
+    expect(retener).toHaveBeenCalledTimes(1)
+    expect(mockedProviderEventLogUpdate).toHaveBeenCalledTimes(2)
+  })
+
+  it('regresión: un evento que NO llega a sellar (estado bancario rechazado) no pide nada', async () => {
+    mockedProviderEventLogFindMany.mockResolvedValue([
+      { ...evento, payload: { ...evento.payload, payload: { ...evento.payload.payload, status: 'declined' } } },
+    ])
+    await reconcileAngelPayWebhookForPayment(pago)
+    expect(retener).not.toHaveBeenCalled()
   })
 })

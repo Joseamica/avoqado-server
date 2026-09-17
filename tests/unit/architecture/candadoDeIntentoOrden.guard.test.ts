@@ -164,6 +164,60 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
     }
   })
 
+  it('Ronda 3 (17-sep) · las DOS señales nuevas viven en el MISMO núcleo y bajo los MISMOS candados; sus llamadores la piden fuera de toda transacción', () => {
+    const s = leer('services/terminal-payment.service.ts')
+    const nucleo = indice(s, 'private async reRetenerSolicitudLiberada(')
+    const tx = indice(s, 'prisma.$transaction(', nucleo)
+    // La evidencia de CADA variante nueva se arma DESPUÉS de los candados y de la relectura, junto al CAS que la evalúa.
+    antes(
+      s,
+      'for (const attemptId of attemptIds) await candadoDeIntento(tx, attemptId)',
+      'hayEvidenciaDeConciliacionSql(requestId, venueId)',
+      tx,
+    )
+    antes(s, 'for (const attemptId of attemptIds) await candadoDeIntento(tx, attemptId)', 'NOT (${SIN_AFIRMACION_DE_LA_TERMINAL_SQL})', tx)
+    // 🔴 P1-B: la identidad (regla T10) se juzga BAJO los candados, sobre la evidencia leída por el SERVIDOR, y antes del CAS.
+    antes(s, "if (variante.tipo === 'COLISION_DE_REFERENCIA') {", 'procedenciaDelPagoDeSolicitud(', tx)
+    antes(s, 'procedenciaDelPagoDeSolicitud(', 'UPDATE "TerminalPaymentRequest"', tx)
+    // Las dos entradas públicas nuevas DELEGAN en el núcleo antes de cualquier transacción propia.
+    for (const fn of [
+      'async retenerSolicitudLiberadaPorColisionDeReferencia(',
+      'async retenerSolicitudLiberadaPorAfirmacionDeLaTerminal(',
+    ]) {
+      antes(s, 'this.reRetenerSolicitudLiberada(', 'prisma.$transaction(', indice(s, fn))
+    }
+    // P1-C: en `closeRow`, la afirmación se PERSISTE primero (`escribirSuccessDegradado`) y sólo entonces se pide la
+    // re-retención; el resultado se RELEE, porque el del escritor proyecta la fila anterior.
+    const cierre = indice(s, 'private async closeRow(')
+    antes(s, 'await this.escribirSuccessDegradado(', 'retenerSolicitudLiberadaPorAfirmacionDeLaTerminal(', cierre)
+    antes(s, 'retenerSolicitudLiberadaPorAfirmacionDeLaTerminal(', 'const fresca = await prisma.terminalPaymentRequest.findFirst(', cierre)
+    // P1-A: la red durable NO abre transacción propia ni pregunta fila por fila — una consulta correlacionada por lote.
+    const red = indice(s, 'private async retenerLiberadasConPagoLigado(')
+    const cuerpoDeLaRed = s.slice(red, indice(s, 'private async paginarLiberadas(', red))
+    expect(cuerpoDeLaRed).not.toMatch(/\$transaction/)
+    expect(cuerpoDeLaRed).toMatch(/JOIN LATERAL/)
+    expect(cuerpoDeLaRed).toMatch(/pagoLigadoDeLaFilaSql\('r'\)/)
+    expect(cuerpoDeLaRed).toMatch(/utcTs\(horizonte\)/)
+    // P1-B: el registrador la pide DESPUÉS de su transacción financiera y ANTES de responder la colisión al cajero.
+    const p = leer('services/tpv/payment.tpv.service.ts')
+    for (const fn of ['export async function recordOrderPayment(', 'export async function recordFastPayment(']) {
+      const avisoTardio = indice(p, 'avisarAprobacionTardiaTrasVentana(s0.cierre, {', indice(p, fn))
+      antes(p, 'await retenerSiHayColisionSobreUnaLiberada(', 'if (s0.colision) return', avisoTardio)
+    }
+    // Y la evidencia que viaja es la que el registrador CREÓ (la fila del Payment), nunca el `terminalPaymentRequestId` del cuerpo.
+    const inicioDeLaEnvoltura = indice(p, 'async function retenerSiHayColisionSobreUnaLiberada(')
+    const envoltura = p.slice(inicioDeLaEnvoltura, indice(p, '\n}', inicioDeLaEnvoltura))
+    expect(envoltura).toMatch(/evidencia\.terminalPaymentRequestId \?\? solicitudDelRegistro\(evidencia\.processorData\)/)
+    expect(envoltura).toMatch(/capturedBySerial/)
+    // Sólo el camino REST: el del webhook ya tiene la re-retención de la ronda 1, con un marcador más preciso.
+    expect(envoltura).toMatch(/if \(paymentData\.registradoVia === 'webhook'\) return/)
+    // P1-A: el BACKFILL la pide ANTES de sellar su evento; un `DEFERRED` no sella (el evento sigue PENDING para el worker).
+    const w = leer('services/tpv/angelpay-webhook.service.ts')
+    const reclamar = indice(w, 'const reclamarYEstampar = async')
+    antes(w, 'await pedirReRetencionDeLiberadas()', 'escribirPorIdentidadDebil({', reclamar)
+    expect(w).toMatch(/retenerLiberadasPorPagoSinLigar\(pago, 'BACKFILL'\)/)
+  })
+
   it('el escritor por identidad DÉBIL: candado del intento → candado del evento → lectura de S1 → escritura', () => {
     const s = leer('services/tpv/angelpay-webhook.service.ts')
     const desde = indice(s, 'async function escribirPorIdentidadDebil(')

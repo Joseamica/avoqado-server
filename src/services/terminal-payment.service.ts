@@ -28,6 +28,8 @@ import { candadoDeIntento, candadoDeSolicitud, llaveDeIntento, OPCIONES_DE_TRANS
 import { solicitudDelRegistro } from './tpv/identidadDelCobro'
 import {
   hayAprobadoVinculadoSql,
+  hayEvidenciaDeConciliacionSql,
+  pagoLigadoDeLaFilaSql,
   hayPagoLigadoSql,
   pagosLigados,
   porQueHayEvidenciaPositiva,
@@ -286,6 +288,12 @@ const TERMINAL_ALIVE_WINDOW_MS = 5 * 60_000
 // After an automatic/manual release, a payment recorded WITHOUT the request id (old queues) still
 // has to reach the row: released rows are swept for this long.
 const RELEASED_LATE_RECONCILE_WINDOW_MS = 30 * 60_000
+/**
+ * Ronda 3 (P1-A): el horizonte de la RED DURABLE — «¿hay un Payment LIGADO a una solicitud liberada?» ya no depende de los 30
+ * minutos de arriba. Se mide por `createdAt` (nunca por `updatedAt`, que la propia re-retención mueve) y son 7 días: acota el
+ * recorrido y cubre con holgura el peor registro tardío medido (65 s – 3 h). Más antiguo que eso es conciliación manual.
+ */
+const HORIZONTE_DE_LA_RED_DURABLE_MS = 7 * 24 * 60 * 60_000
 const RELEASE_FAILURE_CODES = ['AUTO_RELEASED', 'MANUAL_RELEASE']
 /**
  * Los MARCADORES con los que la ventana de confirmación RETIENE una fila TIMED_OUT (siguen UNRESOLVED: orden y ranura bloqueadas,
@@ -1302,7 +1310,11 @@ export type AttemptLinkAck =
  * Revisión final (17-sep): el desenlace de RE-RETENER una solicitud ya liberada sin evidencia del procesador (ventana o cajero).
  * `DEFERRED` = no se pudo decidir (candado ocupado, base caída) y nada se escribió: quien llama lo vuelve a pedir.
  */
-export type ResultadoDeReRetencion = 'HELD' | 'NOT_APPLICABLE' | 'DEFERRED'
+/**
+ * Ronda 3 (17-sep, P1-B): `IDENTITY_MISMATCH` = la señal existe pero la identidad ACREDITADA de quien la trae no es la
+ * terminal de esa solicitud (regla T10). No se tocó la fila y NO hay nada que reintentar — a diferencia de `DEFERRED`.
+ */
+export type ResultadoDeReRetencion = 'HELD' | 'NOT_APPLICABLE' | 'DEFERRED' | 'IDENTITY_MISMATCH'
 /** Revisión final (B): por qué el aviso APROBADO del banco no creó el Payment. */
 export type MotivoDeRetencionPorAprobacion =
   | 'AMOUNT_MISMATCH'
@@ -1320,10 +1332,68 @@ export type OrigenDeRetencionPorPago =
   | 'BARRIDO_SOLTADAS'
   | 'BARRIDO_LIBERADAS'
   | 'LIBERACION_MANUAL'
-/** Las dos variantes del núcleo `reRetenerSolicitudLiberada`: el banco aprobó sin Payment, o hay un Payment ligado sin ligar. */
+  /** Ronda 3 (P1-A): el backfill del webhook, ANTES de sellar el evento con la llave del Payment. */
+  | 'BACKFILL'
+  /** Ronda 3 (P1-A): la red durable — el barrido de liberadas CON un Payment ligado, sin la ventana de 30 min. */
+  | 'BARRIDO_LIGADOS'
+/**
+ * Las CUATRO variantes del núcleo `reRetenerSolicitudLiberada` — una por cada señal positiva que puede aparecer sobre una
+ * solicitud ya liberada sin evidencia del procesador:
+ *  · `APROBACION`               el banco aprobó un intento vinculado y no hay Payment       ⇒ `BANK_APPROVED_AWAITING_PAYMENT`
+ *  · `PAGO_SIN_LIGAR`           hay un Payment ligado que nadie pudo LIGAR                  ⇒ `PAYMENT_UNBOUND_AWAITING_REVIEW`
+ *  · `COLISION_DE_REFERENCIA`   hay EVIDENCIA PENDING de conciliación apuntada a la fila    ⇒ `PAYMENT_UNBOUND_AWAITING_REVIEW`
+ *  · `AFIRMACION_DE_LA_TERMINAL` la propia terminal AFIRMÓ haber cobrado, sin Payment       ⇒ `PAYMENT_UNBOUND_AWAITING_REVIEW`
+ */
 type VarianteDeReRetencion =
   | { tipo: 'APROBACION'; attemptId: string; eventLogId: string; motivo: MotivoDeRetencionPorAprobacion }
   | { tipo: 'PAGO_SIN_LIGAR'; paymentId: string | null; origen: OrigenDeRetencionPorPago }
+  | { tipo: 'COLISION_DE_REFERENCIA'; paymentId: string; capturedBySerial: string | null; origen: OrigenDeRetencionPorPago }
+  | { tipo: 'AFIRMACION_DE_LA_TERMINAL'; origen: OrigenDeRetencionPorPago }
+
+/**
+ * Lo único que cambia entre las cuatro variantes del núcleo: la llave del sobre, la acción del asiento, el texto que lee el
+ * POS, y los textos del 🚨 y del correo. Las dos primeras conservan su contrato EXACTO (la ronda 1 y la 2 tienen pruebas que
+ * fijan el asunto y la forma de `data`). `instante` es el nombre del campo con la hora de la retención: `heldAt` es el
+ * histórico de esas dos; las nuevas usan `at`, el del brief.
+ */
+const MARCA_DE_LA_RETENCION: Record<
+  VarianteDeReRetencion['tipo'],
+  { claveDelSobre: string; accion: string; mensaje: string; asunto: string; grito: string; instante: 'heldAt' | 'at' }
+> = {
+  APROBACION: {
+    claveDelSobre: 'bankApprovedAfterRelease',
+    accion: 'TERMINAL_PAYMENT_WINDOW_BANK_APPROVED_AWAITING_PAYMENT',
+    mensaje: 'El banco aprobó este cobro después de liberarlo y todavía no está registrado. No lo cobres otra vez: se está revisando.',
+    asunto: 'Aprobación del banco sobre un cobro ya liberado',
+    grito: '',
+    instante: 'heldAt',
+  },
+  PAGO_SIN_LIGAR: {
+    claveDelSobre: 'unboundPaymentAfterRelease',
+    accion: 'TERMINAL_PAYMENT_UNBOUND_PAYMENT_AFTER_RELEASE',
+    mensaje:
+      'Llegó un cobro con tarjeta de este intento después de liberarlo y no se pudo ligar. No lo cobres otra vez: se está revisando.',
+    asunto: 'Cobro con tarjeta sin ligar sobre un cobro ya liberado',
+    grito: '',
+    instante: 'heldAt',
+  },
+  COLISION_DE_REFERENCIA: {
+    claveDelSobre: 'referenceCollisionAfterRelease',
+    accion: 'TERMINAL_PAYMENT_REFERENCE_COLLISION_AFTER_RELEASE',
+    mensaje: 'Llegó un registro con la referencia de otro cobro después de liberar este intento. No lo cobres otra vez: se está revisando.',
+    asunto: 'Colisión de referencia sobre un cobro ya liberado',
+    grito: 'A reference-collision evidence landed on a request already RELEASED (window/cashier) — request held for review',
+    instante: 'at',
+  },
+  AFIRMACION_DE_LA_TERMINAL: {
+    claveDelSobre: 'terminalClaimedSuccessAfterRelease',
+    accion: 'TERMINAL_PAYMENT_TERMINAL_CLAIM_AFTER_RELEASE',
+    mensaje: 'La terminal afirmó haber cobrado este intento después de liberarlo. No lo cobres otra vez: se está revisando.',
+    asunto: 'La terminal afirmó haber cobrado un cobro ya liberado',
+    grito: 'The terminal CLAIMED it charged a request already RELEASED (window/cashier) and no Payment proves it — held for review',
+    instante: 'at',
+  },
+}
 
 /**
  * Correo ops de la aprobación tardía tras una liberación sin evidencia del procesador: la ventana o, desde la ronda 2 (17-sep), la
@@ -2368,7 +2438,18 @@ class TerminalPaymentService {
     // `success` simultáneos se serializan en el candado de fila de Postgres y cada uno funde sobre lo que dejó el otro. La
     // escritura NO depende de ninguna lectura previa en JS (una lectura + escritura separadas dejaba que el segundo borrara la
     // señal que el primero persistió en medio).
-    if (result.claimedSuccess) return this.escribirSuccessDegradado(requestId, venueId, result, newStatus)
+    if (result.claimedSuccess) {
+      const escrito = await this.escribirSuccessDegradado(requestId, venueId, result, newStatus)
+      // 🔴 Ronda 3 (P1-C): la afirmación ya está DURABLE en el sobre (la escribió la primera sentencia de arriba, que alcanza
+      // también a una fila ya liberada). Si la fila estaba LIBERADA, esa afirmación positiva la RE-RETIENE para revisión — con
+      // el marcador y la razón que la ventana usa un segundo antes de liberar— y eso recupera la ranura además de marcarla.
+      // Va DESPUÉS de la escritura (el CAS exige la afirmación durable) y el resultado que se devuelve se relee: `escrito`
+      // proyecta la fila ANTERIOR, que sobre una liberada dice «se puede volver a cobrar» — exactamente lo que ya no es cierto.
+      if ((await this.retenerSolicitudLiberadaPorAfirmacionDeLaTerminal({ requestId, venueId, origen: 'SOCKET' })) !== 'HELD')
+        return escrito
+      const fresca = await prisma.terminalPaymentRequest.findFirst({ where: { requestId, venueId } })
+      return fresca ? resultFromRow(fresca) : escrito
+    }
     const data: Prisma.TerminalPaymentRequestUpdateManyMutationInput = {
       status: newStatus,
       resultJson: result as unknown as Prisma.InputJsonValue,
@@ -4018,6 +4099,62 @@ class TerminalPaymentService {
   }
 
   /**
+   * Ronda 3 (17-sep, P1-B — dinero, preexistente: Codex r8 respuesta 6 concern 2): un registro legacy que SÍ nombra la
+   * solicitud pero sin llave de intento, con referencia ambigua y CONTRADICCIÓN acreditada, produce EVIDENCIA PENDING
+   * (`POSSIBLE_REFERENCE_COLLISION`), responde éxito al cajero… y dejaba la solicitud liberada INTACTA, diciéndole al POS
+   * «puedes volver a cobrar» con una posible segunda captura encima. El barrido no la veía: sólo busca Payments COMPLETED.
+   *
+   * Ahora esa evidencia RE-RETIENE la fila para REVISIÓN con el mismo marcador de la familia
+   * (`PAYMENT_UNBOUND_AWAITING_REVIEW`) y razón propia `REFERENCE_COLLISION_AFTER_RELEASE`. Tres reglas, todas del brief:
+   *
+   *  (a) La señal viene del REGISTRADOR, no del cuerpo del cliente: `paymentId` es la evidencia que el registrador acaba de
+   *      crear, y el CAS exige que esa evidencia CONSTE en la base apuntada a la solicitud (`hayEvidenciaDeConciliacionSql`)
+   *      — no puede apoyarse en `hayPagoLigadoSql`, porque una evidencia PENDING no liga por ninguna de las tres identidades.
+   *  (b) 🔴 Sólo re-retiene si la identidad ACREDITADA del llamador es la terminal de esa solicitud (misma precedencia T10
+   *      del cierre por REST: `Payment.terminal` → serial autenticado → `processorData.deviceSerialNumber`). La etiqueta de
+   *      la evidencia nace del cuerpo del cliente, así que sin esta comprobación una terminal podría retener la venta y la
+   *      ranura de OTRA. Si no corresponde: la fila NO se toca, 🚨 con la contradicción y `IDENTITY_MISMATCH`.
+   *  (c) UN asiento (`TERMINAL_PAYMENT_REFERENCE_COLLISION_AFTER_RELEASE`), 🚨 y correo, como el resto de las variantes.
+   */
+  async retenerSolicitudLiberadaPorColisionDeReferencia(input: {
+    requestId: string
+    venueId: string
+    paymentId: string
+    capturedBySerial?: string | null
+    origen: OrigenDeRetencionPorPago
+  }): Promise<ResultadoDeReRetencion> {
+    return this.reRetenerSolicitudLiberada(input.requestId, input.venueId, {
+      tipo: 'COLISION_DE_REFERENCIA',
+      paymentId: input.paymentId,
+      capturedBySerial: input.capturedBySerial ?? null,
+      origen: input.origen,
+    })
+  }
+
+  /**
+   * Ronda 3 (17-sep, P1-C — dinero, preexistente: Codex r8 respuesta 6 concern 4): un `success` TARDÍO de la propia terminal
+   * con `transactionId` pero SIN Payment acreditable funde su `claimedSuccess` sobre la fila FAILED ya liberada… y la fila
+   * seguía proyectando NOT_CHARGED con la ranura YA LIBRE. Es exactamente el caso que la ventana RETIENE un segundo antes de
+   * liberar (Codex r5 P1-N5: `retenerPorPagoSinLigar` con razón `TERMINAL_CLAIMED_SUCCESS`); esto lo hace DESPUÉS, con el
+   * MISMO marcador y la MISMA razón — y al volver a `TIMED_OUT` **recupera la ranura** además de marcar la fila.
+   *
+   * El CAS es el POSITIVO del veto de la ventana (`NOT (SIN_AFIRMACION_DE_LA_TERMINAL_SQL)`): la afirmación tiene que constar
+   * DURABLE en el sobre — la persiste `escribirSuccessDegradado` en su primera sentencia, antes de pelear por el estado. Lo
+   * que la ventana no habría vetado (una afirmación vacía: ninguna llave útil) tampoco se retiene aquí.
+   *
+   * La identidad ya la comprobó quien entrega el resultado (`handlePaymentResultFromSocket` y `handleProbeResultFromSocket`
+   * exigen que la solicitud sea de la terminal autenticada antes de llamar a `closeRow`): una afirmación de OTRA terminal no
+   * llega hasta aquí, y tampoco puede escribir el `claimedSuccess` que este CAS exige.
+   */
+  async retenerSolicitudLiberadaPorAfirmacionDeLaTerminal(input: {
+    requestId: string
+    venueId: string
+    origen: OrigenDeRetencionPorPago
+  }): Promise<ResultadoDeReRetencion> {
+    return this.reRetenerSolicitudLiberada(input.requestId, input.venueId, { tipo: 'AFIRMACION_DE_LA_TERMINAL', origen: input.origen })
+  }
+
+  /**
    * Ronda 2 (17-sep, P1): la misma re-retención, partiendo de un PAYMENT, para quien no sabe con certeza qué solicitud lo liga — el
    * registrador y su consolidación: un Payment del intento liga a la solicitud de SU vínculo aunque el payload nombre otra (asociación
    * inválida `ATTEMPT_LINKED_ELSEWHERE`). Las candidatas son EXACTAMENTE las tres identidades de `pagoLigadoSql`: el puntero
@@ -4101,12 +4238,24 @@ class TerminalPaymentService {
     const deLaVariante: Record<string, string | null> =
       variante.tipo === 'APROBACION'
         ? { eventLogId: variante.eventLogId, attemptId: variante.attemptId, reason: variante.motivo }
-        : { reportedPaymentId: variante.paymentId, origen: variante.origen }
+        : variante.tipo === 'COLISION_DE_REFERENCIA'
+          ? { paymentId: variante.paymentId, reason: 'REFERENCE_COLLISION_AFTER_RELEASE', origen: variante.origen }
+          : variante.tipo === 'AFIRMACION_DE_LA_TERMINAL'
+            ? { reason: 'TERMINAL_CLAIMED_SUCCESS', origen: variante.origen }
+            : { reportedPaymentId: variante.paymentId, origen: variante.origen }
+    // La marca de cada variante: el código que se escribe, la llave del sobre, la acción del asiento y los textos. Los dos de
+    // la ronda 1 y 2 conservan su contrato EXACTO (asunto, primera línea y forma de `data`).
+    const marca = MARCA_DE_LA_RETENCION[variante.tipo]
+    // Ronda 3 (P1-B): la contradicción de identidad se decide BAJO los candados y se grita DESPUÉS, sin escribir nada.
+    let contradiccion: string | null = null
     try {
       // Sólo una fila LIBERADA sin cobro es asunto de esta regla; las demás (en la ventana, retenidas, cerradas) ya tienen quien
       // las decida.
       const vista = await prisma.terminalPaymentRequest.findFirst({ where: { requestId, venueId } })
       if (!vista || !liberadaSinCobroReversible(vista)) return 'NOT_APPLICABLE'
+      // Ronda 3 (P1-C): sin afirmación en el sobre no hay nada que retener por esta variante — y no se abre transacción. Es el
+      // espejo del veto de la ventana (`afirmacionDeLaTerminal` / `SIN_AFIRMACION_DE_LA_TERMINAL_SQL`), que el CAS revalida.
+      if (variante.tipo === 'AFIRMACION_DE_LA_TERMINAL' && !afirmacionDeLaTerminal(vista.resultJson)) return 'NOT_APPLICABLE'
 
       type Retenida = {
         row: FilaDeCobroRemoto
@@ -4114,6 +4263,7 @@ class TerminalPaymentService {
         otros: number | null
         solicitudesSinDesenlace: number | null
         ligados: string[]
+        afirmacion: Record<string, unknown> | null
       }
       const retenida = await prisma.$transaction(async (tx): Promise<Retenida | null> => {
         await candadoDeSolicitud(tx, requestId)
@@ -4126,7 +4276,28 @@ class TerminalPaymentService {
         if (!row || !liberadaSinCobroReversible(row)) return null
         const previousFailureCode = row.failureCode as string
         // Los Payments ligados, leídos BAJO los candados: la misma pregunta que el CAS de la variante del cobro sin ligar.
-        const ligados = porAprobacion ? [] : (await pagosLigados(tx, requestId, venueId)).map(p => p.id)
+        const ligados = variante.tipo === 'PAGO_SIN_LIGAR' ? (await pagosLigados(tx, requestId, venueId)).map(p => p.id) : []
+        // La afirmación de la terminal, leída BAJO los candados: es lo que el CAS de su variante revalida en la escritura.
+        const afirmacion = variante.tipo === 'AFIRMACION_DE_LA_TERMINAL' ? afirmacionDeLaTerminal(row.resultJson) : null
+        // 🔴 Ronda 3 (P1-B), regla T10: la EVIDENCIA la lee el servidor —nunca se le cree al cuerpo del cliente— y su
+        // procedencia se juzga con la MISMA precedencia y la MISMA función que el cierre por REST. Sin evidencia en la base no
+        // hay señal (NOT_APPLICABLE); con identidad que no corresponde, la fila NO se toca.
+        if (variante.tipo === 'COLISION_DE_REFERENCIA') {
+          const evidencia = await tx.payment.findFirst({
+            where: { id: variante.paymentId, venueId },
+            select: { processorData: true, terminalPaymentRequestId: true, terminal: { select: { serialNumber: true } } },
+          })
+          if (!evidencia) return null
+          const procedencia = procedenciaDelPagoDeSolicitud(
+            evidencia as PagoConProcedencia,
+            { requestId, orderId: row.orderId, terminalId: row.terminalId },
+            { fase: 'ligar', capturedBySerial: variante.capturedBySerial },
+          )
+          if (!procedencia.acreditada) {
+            contradiccion = procedencia.reason
+            return null
+          }
+        }
         // Desde cuándo contar: el instante que dejó escrito QUIEN liberó (la ventana o la declaración del cajero, según el código);
         // `updatedAt` sólo de respaldo. Los conteos son informativos — puede haber abonos parciales legítimos; quien revisa decide.
         const liberadaEn =
@@ -4157,14 +4328,17 @@ class TerminalPaymentService {
               },
             })
           : null
+        const ahora = new Date().toISOString()
         const detalle = {
-          ...(porAprobacion ? {} : { paymentIds: ligados }),
+          ...(variante.tipo === 'PAGO_SIN_LIGAR' ? { paymentIds: ligados } : {}),
+          ...(afirmacion ? { claimedSuccess: afirmacion } : {}),
           ...deLaVariante,
           previousFailureCode,
           releasedAt: liberadaEn.toISOString(),
           otherCardPaymentsOnOrderAfterRelease: otros,
           otherUnresolvedRequestsOnOrderAfterRelease: solicitudesSinDesenlace,
-          heldAt: new Date().toISOString(),
+          // `heldAt` es el nombre histórico de las dos primeras variantes; las nuevas lo llaman `at` (el del brief).
+          ...(marca.instante === 'at' ? { at: ahora } : { heldAt: ahora }),
         }
         // El sobre se FUNDE (jsonb `||`) sobre el vigente: conserva la liberación, la declaración y el sobre de la terminal, y
         // deja de decir «se puede volver a cobrar» (la réplica y el GET leen `errorMessage` de un sobre `timeout`).
@@ -4172,12 +4346,17 @@ class TerminalPaymentService {
           requestId,
           status: 'timeout',
           outcomeEvidence: null,
-          errorMessage: porAprobacion
-            ? 'El banco aprobó este cobro después de liberarlo y todavía no está registrado. No lo cobres otra vez: se está revisando.'
-            : 'Llegó un cobro con tarjeta de este intento después de liberarlo y no se pudo ligar. No lo cobres otra vez: se está revisando.',
-          ...(porAprobacion ? { bankApprovedAfterRelease: detalle } : { unboundPaymentAfterRelease: detalle }),
+          errorMessage: marca.mensaje,
+          [marca.claveDelSobre]: detalle,
         }
-        // La evidencia de cada variante, evaluada EN la escritura: exactamente lo que el veto de la ventana habría visto.
+        // La evidencia de la variante NO-aprobación, evaluada EN la escritura: exactamente lo que el veto de la ventana habría
+        // visto un instante antes de liberar. Se arma AQUÍ, bajo los candados, junto al CAS que la usa.
+        const evidenciaDeLaRetencion =
+          variante.tipo === 'PAGO_SIN_LIGAR'
+            ? hayPagoLigadoSql(requestId, venueId)
+            : variante.tipo === 'COLISION_DE_REFERENCIA'
+              ? hayEvidenciaDeConciliacionSql(requestId, venueId)
+              : Prisma.sql`NOT (${SIN_AFIRMACION_DE_LA_TERMINAL_SQL})`
         const n = porAprobacion
           ? await tx.$executeRaw`
           UPDATE "TerminalPaymentRequest"
@@ -4193,20 +4372,19 @@ class TerminalPaymentService {
               "resultJson" = coalesce("resultJson", '{}'::jsonb) || ${JSON.stringify(sobreRetenido)}::jsonb,
               "updatedAt" = (NOW() AT TIME ZONE 'UTC')
           WHERE "id" = ${row.id} AND "status" = 'FAILED' AND "failureCode" = ${previousFailureCode} AND "paymentId" IS NULL
-            AND ${hayPagoLigadoSql(requestId, venueId)}`
+            AND ${evidenciaDeLaRetencion}`
         if (n !== 1) return null
         // Asiento DENTRO de la transacción: una re-retención = un asiento (`logAction` abriría su propia conexión).
         await tx.activityLog.create({
           data: {
-            action: porAprobacion
-              ? 'TERMINAL_PAYMENT_WINDOW_BANK_APPROVED_AWAITING_PAYMENT'
-              : 'TERMINAL_PAYMENT_UNBOUND_PAYMENT_AFTER_RELEASE',
+            action: marca.accion,
             entity: 'TerminalPaymentRequest',
             entityId: row.id,
             venueId,
             data: {
               requestId,
-              ...(porAprobacion ? {} : { paymentIds: ligados }),
+              ...(variante.tipo === 'PAGO_SIN_LIGAR' ? { paymentIds: ligados } : {}),
+              ...(afirmacion ? { claimedSuccess: afirmacion as Prisma.InputJsonValue } : {}),
               ...deLaVariante,
               previousFailureCode,
               otherCardPaymentsOnOrderAfterRelease: otros,
@@ -4218,11 +4396,27 @@ class TerminalPaymentService {
             },
           },
         })
-        return { row, previousFailureCode, otros, solicitudesSinDesenlace, ligados }
+        return { row, previousFailureCode, otros, solicitudesSinDesenlace, ligados, afirmacion }
       }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
-      if (!retenida) return 'NOT_APPLICABLE'
+      if (!retenida) {
+        // Ronda 3 (P1-B): la señal existe pero la trae quien no es la terminal de la solicitud. No se escribe nada y se grita:
+        // es una contradicción que alguien tiene que mirar, no un reintento.
+        if (contradiccion) {
+          logger.error(
+            '🚨 [TerminalPayment] A reconciliation evidence claims a RELEASED request from a terminal that does not own it — row untouched',
+            {
+              requestId,
+              venueId,
+              paymentId: variante.tipo === 'COLISION_DE_REFERENCIA' ? variante.paymentId : null,
+              reason: contradiccion,
+            },
+          )
+          return 'IDENTITY_MISMATCH'
+        }
+        return 'NOT_APPLICABLE'
+      }
 
-      const { row, previousFailureCode, otros, solicitudesSinDesenlace, ligados } = retenida
+      const { row, previousFailureCode, otros, solicitudesSinDesenlace, ligados, afirmacion } = retenida
       const monto = `$${(row.amountCents / 100).toFixed(2)}`
       const liberacion =
         previousFailureCode === 'OPERATOR_RECONCILED_NO_CHARGE'
@@ -4246,7 +4440,8 @@ class TerminalPaymentService {
       const contexto = {
         requestId,
         venueId,
-        ...(porAprobacion ? {} : { paymentIds: ligados }),
+        ...(variante.tipo === 'PAGO_SIN_LIGAR' ? { paymentIds: ligados } : {}),
+        ...(afirmacion ? { claimedSuccess: afirmacion } : {}),
         ...deLaVariante,
         previousFailureCode,
         terminalId: row.terminalId,
@@ -4254,6 +4449,23 @@ class TerminalPaymentService {
         amountCents: row.amountCents,
         otherCardPaymentsOnOrderAfterRelease: otros,
         otherUnresolvedRequestsOnOrderAfterRelease: solicitudesSinDesenlace,
+      }
+      // Ronda 3: las dos señales nuevas. Mismo cuerpo (monto, cobros posteriores, recobros en vuelo y qué hacer) y su propia
+      // primera línea: la del brief para la colisión, y la de la afirmación de la terminal.
+      if (variante.tipo === 'COLISION_DE_REFERENCIA' || variante.tipo === 'AFIRMACION_DE_LA_TERMINAL') {
+        logger.error(`🚨 [TerminalPayment] ${marca.grito}`, contexto)
+        void sendOpsAlert({
+          subject: `${marca.asunto} — ${row.terminalId}`,
+          lines: [
+            variante.tipo === 'COLISION_DE_REFERENCIA'
+              ? `Un registro con la referencia de otro cobro (evidencia ${variante.paymentId}) llegó sobre la solicitud ${requestId} de ${monto} (orden ${row.orderId ?? 'sin orden'}) después de que ${liberacion}, y quedó como evidencia pendiente (origen ${variante.origen}).`
+              : `La terminal AFIRMÓ haber cobrado la solicitud ${requestId} de ${monto} (orden ${row.orderId ?? 'sin orden'}) después de que ${liberacion}, y no hay Payment que lo acredite (${JSON.stringify(afirmacion ?? {})}).`,
+            lineaDeCobros,
+            ...lineasDeRecobro,
+            'La solicitud volvió a TIMED_OUT/PAYMENT_UNBOUND_AWAITING_REVIEW: la venta queda bloqueada y la terminal se suelta a los 20 min. Confirmar en el portal del procesador si hubo cargo y conciliar a mano.',
+          ],
+        })
+        return 'HELD'
       }
       if (variante.tipo === 'APROBACION') {
         logger.error(
@@ -4292,7 +4504,9 @@ class TerminalPaymentService {
       logger.warn(
         porAprobacion
           ? '⏱️ [TerminalPayment] re-hold of a released request after a bank approval deferred — the event retries it'
-          : '⏱️ [TerminalPayment] re-hold of a released request with an unbound card payment deferred — the next caller retries it',
+          : variante.tipo === 'PAGO_SIN_LIGAR'
+            ? '⏱️ [TerminalPayment] re-hold of a released request with an unbound card payment deferred — the next caller retries it'
+            : `⏱️ [TerminalPayment] re-hold of a released request (${variante.tipo}) deferred — the next caller retries it`,
         { requestId, venueId, ...deLaVariante, error: err instanceof Error ? err.message : String(err) },
       )
       return 'DEFERRED'
@@ -4419,6 +4633,108 @@ class TerminalPaymentService {
   }
 
   /**
+   * Qué se hace con UNA fila ya liberada sobre la que hay dinero: primero el cierre COMÚN (si el Payment es atribuible la
+   * fila se CONCILIA a COMPLETED, que es lo correcto y lo que ya hacía el barrido de 30 min), y sólo si no se pudo LIGAR —o
+   * si no hay Payment atribuible pero SÍ uno ligado (la guarda G1 tras liberar)— se RE-RETIENE para revisión.
+   *
+   * Ronda 3 (P1-A): vive en UN sitio porque ahora lo comparten el barrido de 30 min y la RED DURABLE. Si cada uno tuviera su
+   * copia, el de la red podría acabar reteniendo para revisión un cobro que el otro habría conciliado — dos veredictos
+   * distintos sobre el mismo dinero según quién llegara primero.
+   */
+  private async conciliarORetenerLiberada(
+    row: FilaDeCobroRemoto,
+    origen: OrigenDeRetencionPorPago,
+  ): Promise<'RECONCILED' | 'HELD' | 'NADA'> {
+    const retener = async (paymentId: string) =>
+      (await this.retenerSolicitudLiberadaPorPagoSinLigar({ requestId: row.requestId, venueId: row.venueId, paymentId, origen })) === 'HELD'
+        ? ('HELD' as const)
+        : ('NADA' as const)
+    const payment = await this.findReconcilablePayment(row)
+    if (payment) {
+      const cierre = await prisma.$transaction(tx =>
+        this.closeRowFromPaymentTx(tx, row.requestId, payment.id, row.venueId, undefined, 'REST'),
+      )
+      if (cierre.bound) {
+        avisarAprobacionTardiaTrasVentana(cierre, {
+          requestId: row.requestId,
+          venueId: row.venueId,
+          paymentId: payment.id,
+          terminalId: row.terminalId,
+          orderId: row.orderId,
+        })
+        return 'RECONCILED'
+      }
+      if (cierre.reason === 'ALREADY_BOUND') return 'NADA'
+      return retener(payment.id)
+    }
+    // G1 tras liberar: `findReconcilablePayment` descarta el Payment atribuido a otra terminal/origen, pero sigue LIGADO.
+    const [ligado] = await pagosLigados(prisma, row.requestId, row.venueId)
+    return ligado ? retener(ligado.id) : 'NADA'
+  }
+
+  /**
+   * 🔴 Ronda 3 (17-sep, P1-A — dinero, preexistente: Codex r8 respuestas 1 y 3). LA RED DURABLE.
+   *
+   * El barrido de liberadas de arriba filtra por `updatedAt` reciente (30 min), así que un Payment ligado que apareciera
+   * DESPUÉS no re-retenía nada: bastaba un registro encolado tardío sin socket ni webhook posteriores, o un intento previo
+   * que salió `DEFERRED`. Esto contesta la pregunta «¿hay un Payment ligado a una solicitud liberada?» sin depender de esa
+   * ventana ni de que algo vuelva a pasar por ahí: **para CUALQUIER Payment ligado a una solicitud liberada, la fila queda
+   * re-retenida en un tiempo acotado** (una pasada del watchdog, cada 30 s), sin importar cuándo llegue el Payment.
+   *
+   * Coste acotado por construcción: NO pregunta fila por fila. Es UNA consulta por lote que ya trae SÓLO las liberadas que
+   * tienen un Payment ligado (`hayPagoLigadoDeLaFilaSql`, correlacionada, con el `EXISTS` resuelto por Postgres sobre el
+   * índice alineado del P2), keyset por `(createdAt, id)` —el índice `TerminalPaymentRequest_recovery_cursor_idx`—, el mismo
+   * tamaño de lote y el mismo tope de lotes que el barrido de 30 min. En la pasada normal devuelve 0 filas y es UNA consulta.
+   *
+   * Horizonte de 7 días por `createdAt` (no por `updatedAt`, que la propia re-retención mueve): acota el recorrido y cubre con
+   * holgura el peor caso medido de registro tardío (65 s – 3 h). Una liberada más antigua que eso ya no es materia del
+   * barrido automático: queda para conciliación manual, y se declara.
+   */
+  private async retenerLiberadasConPagoLigado(now: Date = new Date()): Promise<number> {
+    type Fila = { requestId: string; venueId: string; createdAt: Date; id: string; paymentId: string | null }
+    const horizonte = new Date(now.getTime() - HORIZONTE_DE_LA_RED_DURABLE_MS)
+    let cursor: { createdAt: Date; id: string } | null = null
+    let retenidas = 0
+    for (let lote = 0; lote < LOTES_MAXIMOS_DE_LIBERADAS; lote++) {
+      const desde = cursor
+      // 🔴 `utcTs`, nunca un `Date` pelón: la columna guarda UTC sin zona y un bind crudo se compara con la zona de la SESIÓN.
+      const keyset = desde
+        ? Prisma.sql`AND (r."createdAt" > ${utcTs(desde.createdAt)} OR (r."createdAt" = ${utcTs(desde.createdAt)} AND r."id" > ${desde.id}))`
+        : Prisma.empty
+      // `JOIN LATERAL` y no `EXISTS`: filtra igual (sin cobro ligado no hay fila) y de paso trae el id del cobro para el aviso.
+      const filas = await retry(
+        () =>
+          prisma.$queryRaw<Fila[]>`
+            SELECT r."requestId", r."venueId", r."createdAt", r."id", ligado."id" AS "paymentId" /* liberadas-con-cobro */
+            FROM "TerminalPaymentRequest" r
+            JOIN LATERAL (${pagoLigadoDeLaFilaSql('r')} LIMIT 1) ligado ON true
+            WHERE r."status" = 'FAILED' AND r."failureCode" IN (${Prisma.join([...CODIGOS_DE_LIBERACION_REVERSIBLE])})
+              AND r."paymentId" IS NULL AND r."createdAt" >= ${utcTs(horizonte)}
+              ${keyset}
+            ORDER BY r."createdAt" ASC, r."id" ASC
+            LIMIT ${TAMANO_DEL_LOTE_LIBERADAS}`,
+        { retries: 3, shouldRetry: shouldRetryDbConnectionError, context: 'terminal-payment-watchdog:findReleasedWithLinkedPayment' },
+      )
+      for (const fila of filas) {
+        // La consulta es sólo el SELECTOR barato (por eso una por lote); el VEREDICTO lo da el mismo camino que el barrido de
+        // 30 min: conciliar si el cobro es atribuible, re-retener si está ligado y no se pudo ligar.
+        const row = await prisma.terminalPaymentRequest.findFirst({ where: { requestId: fila.requestId, venueId: fila.venueId } })
+        if (!row) continue
+        if ((await this.conciliarORetenerLiberada(row, 'BARRIDO_LIGADOS')) === 'HELD') retenidas += 1
+      }
+      if (filas.length < TAMANO_DEL_LOTE_LIBERADAS) return retenidas
+      const last = filas[filas.length - 1]
+      cursor = { createdAt: last.createdAt, id: last.id }
+      if (lote === LOTES_MAXIMOS_DE_LIBERADAS - 1)
+        logger.warn('⚠️ [Terminal-payment watchdog] released-with-payment sweep hit the batch cap — the rest waits for the next pass', {
+          lotes: LOTES_MAXIMOS_DE_LIBERADAS,
+          filas: LOTES_MAXIMOS_DE_LIBERADAS * TAMANO_DEL_LOTE_LIBERADAS,
+        })
+    }
+    return retenidas
+  }
+
+  /**
    * Codex r1 (P1-B): recorre TODAS las filas de `where` por keyset (`updatedAt`, `id`), en lotes de 200 y con tope de 25 lotes
    * por pasada (5 000 filas; si se alcanza se avisa y el resto espera a la siguiente pasada). Sin cursor, el barrido releía las
    * primeras 200 en cada pasada y las de atrás —cuyo Payment sólo está etiquetado en `processorData`— podían cumplir los 30
@@ -4462,9 +4778,16 @@ class TerminalPaymentService {
    * diagnostics, but elapsed time and heartbeats never release an execution.
    * Previously released rows remain eligible for late financial reconciliation.
    */
-  async reconcileUnknownRequests(
-    now: Date = new Date(),
-  ): Promise<{ completed: number; marked: number; released: number; reset: number; lateReconciled: number; aliasesRetirados: number }> {
+  async reconcileUnknownRequests(now: Date = new Date()): Promise<{
+    completed: number
+    marked: number
+    released: number
+    reset: number
+    lateReconciled: number
+    aliasesRetirados: number
+    /** Ronda 3 (P1-A): cuántas liberadas re-retuvo la RED DURABLE en esta pasada (independiente de la ventana de 30 min). */
+    heldWithLinkedPayment: number
+  }> {
     const rows = await retry(
       () =>
         prisma.terminalPaymentRequest.findMany({
@@ -4736,57 +5059,37 @@ class TerminalPaymentService {
           ? 'terminal-payment-watchdog:findReleasedByWindow'
           : 'terminal-payment-watchdog:findReleasedByOperator',
         async row => {
-          const payment = await this.findReconcilablePayment(row)
-          if (payment) {
-            const cierre = await prisma.$transaction(tx =>
-              this.closeRowFromPaymentTx(tx, row.requestId, payment.id, row.venueId, undefined, 'REST'),
-            )
-            if (cierre.bound) {
-              lateReconciled += 1
-              avisarAprobacionTardiaTrasVentana(cierre, {
-                requestId: row.requestId,
-                venueId: row.venueId,
-                paymentId: payment.id,
-                terminalId: row.terminalId,
-                orderId: row.orderId,
-              })
-              return
-            }
-            if (cierre.reason !== 'ALREADY_BOUND') {
-              await this.retenerSolicitudLiberadaPorPagoSinLigar({
-                requestId: row.requestId,
-                venueId: row.venueId,
-                paymentId: payment.id,
-                origen: 'BARRIDO_LIBERADAS',
-              })
-            }
-            return
-          }
-          // G1 tras liberar: `findReconcilablePayment` descarta el Payment atribuido a otra terminal/origen, pero sigue LIGADO.
-          const [ligado] = await pagosLigados(prisma, row.requestId, row.venueId)
-          if (ligado) {
-            await this.retenerSolicitudLiberadaPorPagoSinLigar({
-              requestId: row.requestId,
-              venueId: row.venueId,
-              paymentId: ligado.id,
-              origen: 'BARRIDO_LIBERADAS',
-            })
-          }
+          if ((await this.conciliarORetenerLiberada(row, 'BARRIDO_LIBERADAS')) === 'RECONCILED') lateReconciled += 1
         },
       )
     }
 
-    if (completed || marked || released || reset || lateReconciled) {
+    // 🔴 Ronda 3 (P1-A): la RED DURABLE, en su propio try/catch — un fallo aquí no puede tumbar lo ya conciliado en esta
+    // pasada (la siguiente vuelve a intentarlo, que es justamente la garantía que aporta).
+    let heldWithLinkedPayment = 0
+    try {
+      heldWithLinkedPayment = await this.retenerLiberadasConPagoLigado(now)
+    } catch (err) {
+      logger.warn(
+        '⚠️ [Terminal-payment watchdog] la red durable de las liberadas con cobro ligado falló — se repite en la siguiente pasada',
+        {
+          error: err instanceof Error ? err.message : String(err),
+        },
+      )
+    }
+
+    if (completed || marked || released || reset || lateReconciled || heldWithLinkedPayment) {
       logger.info(`🧹 [Terminal-payment watchdog] unknown sweep`, {
         completed,
         marked,
         released,
         reset,
         lateReconciled,
+        heldWithLinkedPayment,
         scanned: rows.length,
       })
     }
-    return { completed, marked, released, reset, lateReconciled, aliasesRetirados }
+    return { completed, marked, released, reset, lateReconciled, aliasesRetirados, heldWithLinkedPayment }
   }
 
   /**

@@ -271,7 +271,7 @@ describe('Revisión final · B: la aprobación tardía que NO crea dinero re-ret
     expect(await pagos()).toEqual([])
   })
 
-  it('POSSIBLE_REFERENCE_COLLISION (evidencia PENDING, no un cobro) sobre una liberada ⇒ la re-retiene; el evento queda PROCESSED sobre la evidencia', async () => {
+  it('POSSIBLE_REFERENCE_COLLISION (evidencia PENDING, no un cobro) sobre una liberada ⇒ la re-retiene YA en el registro REST (ronda 3, P1-B); el evento queda PROCESSED sobre la evidencia', async () => {
     const { solicitud } = await liberadaPorLaVentana({ conOrden: false })
     const R = `${Date.now()}`
     const pagoB = await recordFastPayment(
@@ -286,11 +286,37 @@ describe('Revisión final · B: la aprobación tardía que NO crea dinero re-ret
       f.staffId,
     )
     expect(evidencia.status).toBe('PENDING')
+    // 🔴 Ronda 3 (P1-B): la solicitud queda retenida ANTES del webhook — en el propio registro REST que creó la evidencia.
+    // Antes se quedaba liberada («puedes volver a cobrar») hasta que llegara el webhook; ahora el hueco no existe en medio.
+    const yaRetenida = await fila(solicitud.requestId)
+    expect(yaRetenida).toMatchObject({ status: 'TIMED_OUT', failureCode: 'PAYMENT_UNBOUND_AWAITING_REVIEW', paymentId: null })
+    expect(yaRetenida.resultJson).toMatchObject({
+      referenceCollisionAfterRelease: {
+        paymentId: evidencia.id,
+        reason: 'REFERENCE_COLLISION_AFTER_RELEASE',
+        previousFailureCode: 'NO_EVIDENCE_AFTER_WINDOW',
+      },
+    })
+    expect(await terminalPaymentService.isTerminalBusy(f.llaveTerminal, f.venueId)).toBe(true)
+    expect(await terminalPaymentService.getPaymentStatus(solicitud.requestId, f.venueId)).toMatchObject({
+      status: 'TIMED_OUT',
+      outcome: 'UNRESOLVED',
+      failureCode: 'PAYMENT_UNBOUND_AWAITING_REVIEW',
+    })
+    expect(
+      await prisma.activityLog.findMany({
+        where: { venueId: f.venueId, action: 'TERMINAL_PAYMENT_REFERENCE_COLLISION_AFTER_RELEASE', entityId: yaRetenida.id },
+      }),
+    ).toHaveLength(1)
+
     await vincular(solicitud.requestId, K1)
     const { result, evento } = await webhook(K1, { transactionId: R })
     expect(result).toMatchObject({ action: 'REFERENCE_COLLISION', paymentId: evidencia.id })
     expect(evento).toMatchObject({ status: 'PROCESSED', errorReason: 'POSSIBLE_REFERENCE_COLLISION', paymentId: evidencia.id })
-    await retenida(solicitud.requestId, null, 'NO_EVIDENCE_AFTER_WINDOW', 'POSSIBLE_REFERENCE_COLLISION')
+    // El webhook ya no tiene que retenerla (la fila no está liberada): su re-retención contesta NOT_APPLICABLE sin escribir,
+    // y la fila conserva la marca que puso el registro — misma protección, un solo asiento.
+    expect(await fila(solicitud.requestId)).toMatchObject({ status: 'TIMED_OUT', failureCode: 'PAYMENT_UNBOUND_AWAITING_REVIEW' })
+    expect(await asientos(yaRetenida.id)).toHaveLength(0)
     expect((await exigir(prisma.payment.findUnique({ where: { id: pagoB.id } }))).status).toBe('COMPLETED')
   })
 

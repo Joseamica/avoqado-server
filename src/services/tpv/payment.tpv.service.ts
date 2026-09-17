@@ -9,7 +9,7 @@ import { trackRecentPaymentCommand } from '../pos-sync/posSyncOrder.service'
 import { socketManager } from '../../communication/sockets/managers/socketManager'
 import { SocketEventType } from '../../communication/sockets/types'
 import { tarifaCongeladaDeLaAfiliacion, tarifaConCapturaFallida, type TarifaCongelada } from '../payments/transactionCost.service'
-import { elegirRegistroPorReferencia, huellaDelRegistro, type HuellaDelCobro } from './identidadDelCobro'
+import { elegirRegistroPorReferencia, huellaDelRegistro, solicitudDelRegistro, type HuellaDelCobro } from './identidadDelCobro'
 import {
   evidenciaDurableDelIngreso,
   MOTIVO_EVIDENCIA_DE_OTRA_AFILIACION,
@@ -438,6 +438,47 @@ class CobroDuplicadoEnEfectivo extends Error {
  */
 async function retenerSiQuedoSinLigar(payment: Payment, paymentData: PaymentCreationData): Promise<void> {
   await retenerSolicitudLiberadaDelRegistro(payment, paymentData as RegistroEntrante)
+}
+
+/**
+ * 🔴 Ronda 3 (17-sep, P1-B — Codex r8, preexistente): tras el COMMIT de una COLISIÓN DE REFERENCIA, la solicitud que el
+ * registro nombraba puede estar LIBERADA (ventana o cajero) y seguiría diciéndole al POS «puedes volver a cobrar» con una
+ * posible segunda captura encima — el barrido no la ve, porque sólo busca Payments COMPLETED y esto es evidencia PENDING.
+ *
+ * La solicitud sale de la EVIDENCIA que el registrador acaba de crear (su columna o su etiqueta), nunca del cuerpo del
+ * cliente, y viaja el serial ACREDITADO del llamador: el servicio sólo re-retiene si esa identidad es la terminal de la
+ * solicitud (regla T10) — si no, no toca la fila y grita. Fuera de la transacción financiera, y nunca lanza: la evidencia ya
+ * es durable y la terminal necesita su 2xx (un 500 aquí la haría reintentar el cobro).
+ *
+ * 🔴 Sólo el camino REST. Un registro nacido del WEBHOOK ya tiene su propia re-retención para este caso desde la ronda 1
+ * (`retenerSolicitudLiberadaPorAprobacion` con motivo `POSSIBLE_REFERENCE_COLLISION`), que marca con
+ * `BANK_APPROVED_AWAITING_PAYMENT` —más preciso: ahí CONSTA la aprobación del banco— y guarda además el evento que la trajo.
+ * Pedir las dos dejaría el marcador al azar de quién escribiera primero, con la misma protección. El hueco era el REST.
+ *
+ * La SEGUNDA CAPTURA no entra: exige que la solicitud ya tenga un ganador acreditado (`winnerPaymentId`), o sea `paymentId`
+ * puesto, y entonces no está liberada. El predicado SQL acepta las dos clases de evidencia de todos modos, por si algún día
+ * otro escritor la produce sobre una fila liberada.
+ */
+async function retenerSiHayColisionSobreUnaLiberada(evidencia: Payment, paymentData: PaymentCreationData): Promise<void> {
+  if (paymentData.registradoVia === 'webhook') return
+  const requestId = evidencia.terminalPaymentRequestId ?? solicitudDelRegistro(evidencia.processorData)
+  if (!requestId) return
+  try {
+    await terminalPaymentService.retenerSolicitudLiberadaPorColisionDeReferencia({
+      requestId,
+      venueId: evidencia.venueId,
+      paymentId: evidencia.id,
+      capturedBySerial: paymentData.authenticatedTerminalSerial ?? null,
+      origen: 'REST',
+    })
+  } catch (error) {
+    logger.warn('⚠️ [Terminal-payment] No se pudo pedir la re-retención por colisión de referencia — la red durable la reintenta', {
+      paymentId: evidencia.id,
+      venueId: evidencia.venueId,
+      requestId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
 }
 
 /** S0: bajo el candado de la solicitud resultó que el ganador YA es este mismo intento (misma llave): reintento idempotente. */
@@ -3768,6 +3809,9 @@ export async function recordOrderPayment(
   // ligado, se re-retiene. La evidencia PENDING (segunda captura, colisión) no es un cobro: no aplica.
   if (!s0.cierre?.bound && !s0.segundaCaptura && !s0.colision) await retenerSiQuedoSinLigar(payment, paymentData)
 
+  // Ronda 3 (P1-B): la colisión también es una señal positiva sobre la solicitud — si ésta ya estaba liberada, se re-retiene.
+  if (s0.colision) await retenerSiHayColisionSobreUnaLiberada(payment, paymentData)
+
   if (s0.segundaCaptura) return await responderSegundaCaptura(venueId, payment, s0.segundaCaptura)
   if (s0.colision) return await responderColisionDeReferencia(venueId, payment, s0.colision)
 
@@ -5174,6 +5218,9 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   }
   // Ronda 2 (P1): mismo punto que en el cobro con orden.
   if (!s0.cierre?.bound && !s0.segundaCaptura && !s0.colision) await retenerSiQuedoSinLigar(payment, paymentData)
+
+  // Ronda 3 (P1-B): la colisión también es una señal positiva sobre la solicitud — si ésta ya estaba liberada, se re-retiene.
+  if (s0.colision) await retenerSiHayColisionSobreUnaLiberada(payment, paymentData)
 
   if (s0.segundaCaptura) return await responderSegundaCaptura(venueId, payment, s0.segundaCaptura)
   if (s0.colision) return await responderColisionDeReferencia(venueId, payment, s0.colision)

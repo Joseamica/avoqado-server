@@ -181,7 +181,9 @@ describe('resolveNoInstrument — la declaración del cajero cierra el intento c
     expect(cas.anidado.match(/NOT EXISTS/g)).toHaveLength(2)
     expect(cas.anidado).toMatch(/"ProviderEventLog"[\s\S]*"TerminalPaymentAttemptLink"[\s\S]*= 'APROBADO'/)
     expect(cas.anidado).toMatch(
-      /"Payment"[\s\S]*"terminalPaymentRequestId" = \?[\s\S]*->>'terminalPaymentRequestId' = \?[\s\S]*"idempotencyKey" IN/,
+      // Ronda 3 (P2): la etiqueta legacy se compara ahora con la expresión INDEXADA (`#> … = to_jsonb(?::text)`); las TRES
+      // identidades y su orden siguen siendo lo que esta prueba guarda.
+      /"Payment"[\s\S]*"terminalPaymentRequestId" = \?[\s\S]*#> '\{terminalPaymentRequestId\}' = to_jsonb\(\?::text\)[\s\S]*"idempotencyKey" IN/,
     )
     expect(cas.sobre).toMatchObject({ status: 'failed', outcomeEvidence: 'OPERATOR_RECONCILED' })
     // El sobre ORIGINAL de la terminal no se pierde: se conserva dentro del resultJson nuevo.

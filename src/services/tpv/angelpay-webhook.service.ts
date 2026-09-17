@@ -1729,6 +1729,48 @@ export async function reconcileAngelPayWebhookForPayment(payment: {
         importe: typeof importe === 'string' ? importe.slice(0, 40) : typeof importe,
       })
     }
+    /**
+     * 🔴 Ronda 3 (17-sep, P1-A — Codex r8 respuesta 1 y concern 3): el backfill puede SELLAR el evento con la llave del
+     * Payment sin pasar por `confirmarPorVinculo`, así que el gancho de la ronda 2 no corría; y el barrido de liberadas
+     * filtra por `updatedAt` de 30 min, de modo que un Payment ligado que aparece después no re-retenía nada. Por eso este
+     * camino pide la re-retención por el Payment que tiene en mano ANTES de sellar, y si no se pudo decidir (`DEFERRED`) NO
+     * sella: el evento sigue PENDING y el worker lo repite — la misma regla del gancho del webhook.
+     *
+     * Se lee UNA vez por llamada (el backfill corre en cada cobro de la TPV, pero esto sólo se pide cuando de verdad hay un
+     * evento que sellar) y sólo los campos con los que `retenerLiberadasPorPagoSinLigar` resuelve las tres identidades.
+     */
+    let reRetencionPedida: 'HECHA' | 'DIFERIDA' | null = null
+    const pedirReRetencionDeLiberadas = async (): Promise<'HECHA' | 'DIFERIDA'> => {
+      if (reRetencionPedida) return reRetencionPedida
+      try {
+        const { terminalPaymentService } = await import('../terminal-payment.service')
+        const pago = await prisma.payment.findUnique({
+          where: { id: payment.id },
+          select: {
+            id: true,
+            venueId: true,
+            status: true,
+            method: true,
+            type: true,
+            idempotencyKey: true,
+            terminalPaymentRequestId: true,
+            processorData: true,
+          },
+        })
+        const resultados = pago ? await terminalPaymentService.retenerLiberadasPorPagoSinLigar(pago, 'BACKFILL') : []
+        reRetencionPedida = resultados.some(r => r.resultado === 'DEFERRED') ? 'DIFERIDA' : 'HECHA'
+      } catch (err) {
+        // El servicio no lanza; si algo aún así revienta, se trata como diferido: mejor dejar el evento PENDING que sellarlo
+        // encima de una solicitud liberada que nadie va a volver a mirar.
+        logger.warn('🪝 [AngelPay backfill] no se pudo pedir la re-retención de una solicitud liberada — el evento sigue PENDING', {
+          paymentId: payment.id,
+          error: err instanceof Error ? err.message : String(err),
+        })
+        reRetencionPedida = 'DIFERIDA'
+      }
+      return reRetencionPedida
+    }
+
     for (const event of pendingEvents) {
       const webhookPayload = event.payload as unknown as AngelPayWebhookPayload
       // Codex R1 (P1-1): un evento con llave FUERTE de OTRO intento no es de este Payment aunque la referencia coincida
@@ -1838,6 +1880,14 @@ export async function reconcileAngelPayWebhookForPayment(payment: {
         data: Prisma.ProviderEventLogUncheckedUpdateManyInput,
         parche: Record<string, unknown>,
       ): Promise<boolean> => {
+        // Ronda 3 (P1-A): ANTES de sellar. Un `DEFERRED` deja el evento PENDING para que el worker lo repita.
+        if ((await pedirReRetencionDeLiberadas()) === 'DIFERIDA') {
+          logger.info('🪝 [AngelPay backfill] la re-retención de una solicitud liberada quedó diferida — no se sella (el worker repite)', {
+            paymentId: payment.id,
+            eventLogId: event.id,
+          })
+          return false
+        }
         const decision = await escribirPorIdentidadDebil({
           eventLogId: event.id,
           llaveDelIntento: llaveDelEvento && llaveDelEvento !== payment.idempotencyKey ? llaveDelEvento : null,
