@@ -22,6 +22,13 @@ import { Prisma } from '@prisma/client'
 
 /** Namespace fijo y reservado del candado por intento (int4). No reutilizar en otro advisory de dos llaves. */
 export const NS_CANDADO_INTENTO = 7_310_113
+/**
+ * Codex r1 (P1-C, ventana de confirmación): namespace del candado por SOLICITUD (`hashtext(requestId)`). Lo toman la decisión
+ * de la ventana (`releaseUnprovenNegative`), la publicación del vínculo (`handleAttemptOpenedFromSocket`) y el fallback del
+ * ingreso del webhook — SIEMPRE antes que cualquier candado de intento (orden fijo: solicitud → intentos), para que quien
+ * publica un vínculo o persiste un APROBADO sin candado de intento no pueda colarse entre el veto y el CAS de la ventana.
+ */
+export const NS_CANDADO_SOLICITUD = 7_310_114
 /** Presupuesto de espera del candado, por debajo de los 10 s de la transacción de Prisma (queda margen para ejecutar y terminar). */
 export const ESPERA_DE_CANDADO_MS = 8_000
 export const LONGITUD_MAXIMA_DE_LLAVE = 64
@@ -56,4 +63,16 @@ export async function candadoDeIntento(
 ): Promise<void> {
   await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${esperaDeCandadoMs()}ms'`)
   await tx.$queryRaw`SELECT pg_advisory_xact_lock(${NS_CANDADO_INTENTO}::int, hashtext(${llave}))::text`
+}
+
+/**
+ * Codex r1 (P1-C): candado consultivo transaccional por SOLICITUD, con la misma espera acotada. Va ANTES de los candados de
+ * intento en toda transacción que tome los dos; una transacción que sólo lo toma a él (el fallback del webhook) no compite.
+ */
+export async function candadoDeSolicitud(
+  tx: Pick<Prisma.TransactionClient, '$queryRaw' | '$executeRawUnsafe'>,
+  requestId: string,
+): Promise<void> {
+  await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${esperaDeCandadoMs()}ms'`)
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(${NS_CANDADO_SOLICITUD}::int, hashtext(${requestId}))::text`
 }

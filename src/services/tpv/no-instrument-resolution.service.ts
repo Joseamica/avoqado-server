@@ -13,9 +13,10 @@
  * la sesión —nunca con el cuerpo— y el PIN de otra persona sólo ELEVA a un miembro válido del venue que no tiene el permiso.
  *
  * Lo que veta la declaración (la elegibilidad de Codex, sin la valla): un solo intento por solicitud; ningún Payment por las
- * tres identidades (llave del intento, solicitud, puntero de la fila); ninguna señal positiva en el sobre de la terminal;
+ * cuatro identidades (llave del intento, solicitud, etiqueta legacy en `processorData` —Codex r1, P1-E—, puntero de la fila);
+ * ninguna señal positiva en el sobre de la terminal (incluida la afirmación conservada de un `success` degradado —P1-D—);
  * ninguna evidencia bancaria o de procedencia que contradiga; y un desenlace todavía UNRESOLVED que no esté PENDING ni
- * retenido por el banco (`BANK_APPROVED_AWAITING_PAYMENT`).
+ * retenido por el banco (`BANK_APPROVED_AWAITING_PAYMENT`). El CAS final revalida el veto en la escritura (P1-C).
  */
 import { createHash } from 'crypto'
 import { z } from 'zod'
@@ -26,6 +27,7 @@ import { evaluatePermissionList, hasPermission } from '../../lib/permissions'
 import { PIN_REGEX } from '../../schemas/common/pin.schema'
 import { candadoDeIntento, llaveDeIntento, OPCIONES_DE_TRANSACCION_DEL_INTENTO } from './candadoDeIntento'
 import { estadoBancarioSql } from './estadoBancario'
+import { sinEvidenciaPositivaSql } from './evidenciaPositivaSql'
 import { PATRON_SQL_TRIM_COMO_JS } from '../../utils/terminalSerial'
 
 export const NO_INSTRUMENT_PERMISSION = 'payments:resolve-no-instrument'
@@ -125,6 +127,17 @@ async function evidenciaQueVetaLaDeclaracion(tx: Prisma.TransactionClient, attem
 
 const SENALES_POSITIVAS_DEL_SOBRE = ['paymentId', 'authorizationCode', 'transactionId', 'reference', 'readMode'] as const
 
+/**
+ * Codex r1 (P1-D): un `success` que `closeRow` no pudo acreditar queda UNKNOWN con su afirmación en `resultJson.claimedSuccess`
+ * (sólo las llaves que la terminal mandó). Cualquier campo NO vacío veta: la terminal dijo «cobré» y nadie lo ha desmentido.
+ * Un objeto con todos los campos vacíos no afirma nada. (Un negativo posterior de la terminal reemplaza el sobre entero y
+ * pierde `claimedSuccess`: coherente con el ruling (c) de la Task 2 — ese negativo entra en la ventana, no en la declaración.)
+ */
+function afirmaCobro(claimedSuccess: unknown): boolean {
+  if (!claimedSuccess || typeof claimedSuccess !== 'object' || Array.isArray(claimedSuccess)) return false
+  return Object.values(claimedSuccess as Record<string, unknown>).some(v => v !== undefined && v !== null && v !== '' && v !== false)
+}
+
 export async function resolveNoInstrument(
   identity: { venueId: string; terminalSerial: string; attemptId: string; actorStaffId: string | null },
   raw: unknown,
@@ -200,11 +213,14 @@ export async function resolveNoInstrument(
     // sin señal positiva en el sobre; sin evidencia bancaria/de procedencia que vete; desenlace no acreditado y no PENDING.
     if ((await tx.terminalPaymentAttemptLink.count({ where: { requestId: declaration.requestId } })) !== 1)
       throw new NoInstrumentResolutionError('OTHER_ATTEMPT_UNRESOLVED')
+    // Codex r1 (P1-E): la CUARTA identidad es la legacy — la etiqueta `processorData.terminalPaymentRequestId` que deja la cola
+    // vieja (sin puntero ni llave de intento); acotada al venue. Es la misma que retiene G1 en la ventana.
     const positivo = await tx.payment.findFirst({
       where: {
         OR: [
           { idempotencyKey: attemptId },
           { terminalPaymentRequestId: declaration.requestId },
+          { venueId: identity.venueId, processorData: { path: ['terminalPaymentRequestId'], equals: declaration.requestId } },
           ...(row.paymentId ? [{ id: row.paymentId }] : []),
         ],
       },
@@ -217,7 +233,8 @@ export async function resolveNoInstrument(
     const senalPositiva =
       sobre.status === 'success' ||
       sobre.approved === true ||
-      SENALES_POSITIVAS_DEL_SOBRE.some(f => typeof sobre[f] === 'string' && sobre[f] !== '')
+      SENALES_POSITIVAS_DEL_SOBRE.some(f => typeof sobre[f] === 'string' && sobre[f] !== '') ||
+      afirmaCobro(sobre.claimedSuccess)
     if (
       positivo ||
       row.paymentId ||
@@ -247,23 +264,26 @@ export async function resolveNoInstrument(
       previousRequest: { status: row.status, failureCode: row.failureCode },
     }
     // CAS sobre el estado LEÍDO y sin Payment: si otro escritor movió la fila entre la lectura y aquí, no se declara nada.
-    const cas = await tx.terminalPaymentRequest.updateMany({
-      where: { id: row.id, status: row.status, paymentId: null },
-      data: {
-        status: TerminalPaymentRequestStatus.FAILED,
-        failureCode: 'OPERATOR_RECONCILED_NO_CHARGE',
-        cancelDisposition: null,
-        resultJson: {
-          ...sobre,
-          requestId: declaration.requestId,
-          status: 'failed',
-          outcomeEvidence: 'OPERATOR_RECONCILED',
-          errorMessage: 'La terminal confirmó que no se presentó tarjeta. Se puede volver a cobrar.',
-          operatorResolution: saved,
-        } as Prisma.InputJsonObject,
-      },
-    })
-    if (cas.count !== 1) throw new NoInstrumentResolutionError('ATTEMPT_NOT_ELIGIBLE')
+    // Codex r1 (P1-C d): y REVALIDADO en la propia escritura con los dos `NOT EXISTS` (`sinEvidenciaPositivaSql`): un APROBADO
+    // del fallback o un Payment etiquetado que entren entre el veto y este UPDATE lo dejan en 0 — un 0 es ATTEMPT_NOT_ELIGIBLE
+    // (el CAS no distingue «la fila cambió» de «apareció evidencia»; el mensaje le dice al cajero que conserve el cobro y
+    // consulte, y la siguiente declaración ya lo ve como POSITIVE_EVIDENCE_EXISTS por el veto). `updatedAt` explícito: un UPDATE
+    // crudo no pasa por `@updatedAt`.
+    const sobreDeclarado = {
+      ...sobre,
+      requestId: declaration.requestId,
+      status: 'failed',
+      outcomeEvidence: 'OPERATOR_RECONCILED',
+      errorMessage: 'La terminal confirmó que no se presentó tarjeta. Se puede volver a cobrar.',
+      operatorResolution: saved,
+    }
+    const cas = await tx.$executeRaw`
+      UPDATE "TerminalPaymentRequest"
+      SET "status" = 'FAILED', "failureCode" = 'OPERATOR_RECONCILED_NO_CHARGE', "cancelDisposition" = NULL,
+          "resultJson" = ${JSON.stringify(sobreDeclarado)}::jsonb, "updatedAt" = (NOW() AT TIME ZONE 'UTC')
+      WHERE "id" = ${row.id} AND "status" = ${row.status}::"TerminalPaymentRequestStatus" AND "paymentId" IS NULL
+        AND ${sinEvidenciaPositivaSql(declaration.requestId, identity.venueId)}`
+    if (cas !== 1) throw new NoInstrumentResolutionError('ATTEMPT_NOT_ELIGIBLE')
     await tx.terminalPaymentAttemptLink.update({
       where: { attemptId },
       data: { operatorResolution: saved as unknown as Prisma.InputJsonValue },

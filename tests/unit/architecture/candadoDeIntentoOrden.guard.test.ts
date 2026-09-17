@@ -47,6 +47,41 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
     antes(s, 'terminalPaymentAttemptLink.create(', 'await recuperarEventosDebilesPorVinculo(attemptId, requestId, tx)', desde)
   })
 
+  it('Codex r1 (P1-C) · el candado por SOLICITUD: namespace propio, y orden fijo solicitud → intentos en la ventana y en la publicación del vínculo; el fallback del webhook inserta bajo el candado de la solicitud', () => {
+    const c = leer('services/tpv/candadoDeIntento.ts')
+    expect(c).toMatch(/export const NS_CANDADO_SOLICITUD = 7_310_114/)
+    expect(c).toMatch(/pg_advisory_xact_lock\(\$\{NS_CANDADO_SOLICITUD\}::int, hashtext\(\$\{requestId\}\)\)/)
+    const solicitud = indice(c, 'export async function candadoDeSolicitud(')
+    antes(c, 'SET LOCAL lock_timeout', 'pg_advisory_xact_lock(${NS_CANDADO_SOLICITUD}', solicitud)
+
+    const s = leer('services/terminal-payment.service.ts')
+    // La VENTANA: candado de la solicitud → vínculos enumerados DENTRO de la transacción → candado de cada intento → veto → CAS.
+    const ventana = indice(s, 'async releaseUnprovenNegative(')
+    antes(s, 'await candadoDeSolicitud(tx, requestId)', 'tx.terminalPaymentAttemptLink.findMany(', ventana)
+    antes(
+      s,
+      'tx.terminalPaymentAttemptLink.findMany(',
+      'for (const attemptId of attemptIds) await candadoDeIntento(tx, attemptId)',
+      ventana,
+    )
+    antes(
+      s,
+      'for (const attemptId of attemptIds) await candadoDeIntento(tx, attemptId)',
+      'await this.aprobacionBancariaConocida(tx, venueId, attemptIds)',
+      ventana,
+    )
+    // La PUBLICACIÓN del vínculo: candado de la solicitud → candado del intento → INSERT del vínculo.
+    const publicacion = indice(s, 'async handleAttemptOpenedFromSocket(')
+    antes(s, 'await candadoDeSolicitud(tx, requestId)', 'await candadoDeIntento(tx, attemptId)', publicacion)
+    antes(s, 'await candadoDeIntento(tx, attemptId)', 'terminalPaymentAttemptLink.create(', publicacion)
+    // El FALLBACK del webhook (55P03 sobre el candado del intento): resuelve la solicitud por el vínculo e inserta bajo SU candado.
+    const w = leer('services/tpv/angelpay-webhook.service.ts')
+    const ingreso = indice(w, 'async function ingresarEventoDelIntento(')
+    const fallback = indice(w, 'if (!esEsperaDeCandadoVencida(error)) throw error', ingreso)
+    antes(w, 'terminalPaymentAttemptLink.findUnique(', 'await candadoDeSolicitud(tx, ', fallback)
+    antes(w, 'await candadoDeSolicitud(tx, ', 'insertar(tx, marca)', fallback)
+  })
+
   it('el escritor por identidad DÉBIL: candado del intento → candado del evento → lectura de S1 → escritura', () => {
     const s = leer('services/tpv/angelpay-webhook.service.ts')
     const desde = indice(s, 'async function escribirPorIdentidadDebil(')
@@ -173,13 +208,16 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
       // Ventana de confirmación (Task 2, fix round 1 (e)): y CINCO con el TOQUE best-effort de la solicitud vinculada tras un
       // ingreso sin candado — transacción propia, con la misma espera acotada (`SET LOCAL lock_timeout`), DESPUÉS de persistir
       // el evento; no toma el candado del intento (el ingreso acaba de vencerlo) y un lock_timeout sólo salta el toque.
-      'services/tpv/angelpay-webhook.service.ts': 5,
+      // Codex r1 (P1-C): y SEIS con el INSERT del fallback bajo el candado de la SOLICITUD (transacción propia: candado de la
+      // solicitud → insertar), antes del toque; si ese candado también vence, se inserta sin candado como antes (residuo declarado).
+      'services/tpv/angelpay-webhook.service.ts': 6,
       'services/tpv/registroRepetido.ts': 1,
       // Plan 16-sep, Task 4: la declaración del cajero decide sobre un intento (candado del intento → Order → solicitud → CAS).
       'services/tpv/no-instrument-resolution.service.ts': 1,
     }
     for (const [rel, n] of Object.entries(usos)) {
-      const cuerpo = leer(rel)
+      // Sin los `import` (prettier los parte en varias líneas cuando crecen, y `OPCIONES…,\n` dentro de uno no es un uso).
+      const cuerpo = leer(rel).replace(/^import[\s\S]*?from '[^']+'\n/gm, '')
       // Usos como OPCIÓN de `$transaction` (no el import): `OPCIONES…,` al cierre de un callback o `, OPCIONES…)` en una línea.
       const apariciones = (cuerpo.match(/OPCIONES_DE_TRANSACCION_DEL_INTENTO(,\n|\))/g) ?? []).length
       expect({ rel, apariciones }).toEqual({ rel, apariciones: n })

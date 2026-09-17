@@ -24,7 +24,8 @@ import prisma from '../utils/prismaClient'
 import { terminalRegistry, normalizeTerminalId } from '../communication/sockets/terminal-registry'
 import { PATRON_SQL_TRIM_COMO_JS } from '../utils/terminalSerial'
 import { estadoBancarioSql } from './tpv/estadoBancario'
-import { candadoDeIntento, OPCIONES_DE_TRANSACCION_DEL_INTENTO } from './tpv/candadoDeIntento'
+import { candadoDeIntento, candadoDeSolicitud, OPCIONES_DE_TRANSACCION_DEL_INTENTO } from './tpv/candadoDeIntento'
+import { porQueHayEvidenciaPositiva, sinEvidenciaPositivaSql } from './tpv/evidenciaPositivaSql'
 import { utcTs } from '../utils/sqlDates'
 import socketManager from '../communication/sockets/managers/socketManager'
 import logger from '../config/logger'
@@ -83,6 +84,15 @@ export interface TerminalPaymentResult {
    * de UNKNOWN (nadie afirmó nada útil).
    */
   terminalResult?: { status: 'failed' | 'cancelled' | 'timeout'; errorMessage: string | null; outcomeEvidence: string | null }
+  /**
+   * Codex r1 (P1-D): lo que la TERMINAL AFIRMÓ en un `success` que el servidor no pudo acreditar (Payment inexistente o no
+   * elegible, o error verificando). Se conserva tal cual —sólo las llaves presentes— al degradar a `timeout` SIN `terminalResult`
+   * (la fila queda UNKNOWN, fuera de la ventana): la declaración del cajero lo lee como señal positiva y NO cierra encima. Un
+   * negativo posterior de la terminal (camino `late`) reemplaza el sobre entero y lo pierde — coherente con el ruling (c) de la
+   * Task 2: la terminal que contradice su propio `success` con un negativo sin evidencia entra en la ventana, y ahí el veto
+   * bancario y `findReconcilablePayment` protegen el dinero.
+   */
+  claimedSuccess?: Record<string, unknown>
   paymentId?: string
   transactionId?: string
   cardDetails?: {
@@ -268,6 +278,9 @@ const TERMINAL_ALIVE_WINDOW_MS = 5 * 60_000
 // has to reach the row: released rows are swept for this long.
 const RELEASED_LATE_RECONCILE_WINDOW_MS = 30 * 60_000
 const RELEASE_FAILURE_CODES = ['AUTO_RELEASED', 'MANUAL_RELEASE']
+/** Codex r1 (P1-B): el barrido de las filas liberadas avanza por keyset en lotes de 200, con tope de 25 lotes por pasada. */
+const TAMANO_DEL_LOTE_LIBERADAS = 200
+const LOTES_MAXIMOS_DE_LIBERADAS = 25
 
 /**
  * Cuánto se espera, DESDE QUE VIMOS VOLVER a la terminal, antes de soltar su ranura.
@@ -953,6 +966,15 @@ function instanteDeLiberacionPorVentana(resultJson: Prisma.JsonValue | null): Da
 }
 
 /** Reconstruct a client-facing result from a stored row (for idempotent replay). */
+/** Codex r1 (P1-D): las llaves con las que una terminal AFIRMA haber cobrado en un `success`. Sólo las presentes; nada se inventa. */
+const LLAVES_DE_LA_AFIRMACION = ['paymentId', 'authorizationCode', 'transactionId', 'reference', 'readMode', 'approved'] as const
+function claimedSuccessDe(result: TerminalPaymentResult): Record<string, unknown> {
+  const crudo = result as unknown as Record<string, unknown>
+  const afirmacion: Record<string, unknown> = {}
+  for (const llave of LLAVES_DE_LA_AFIRMACION) if (crudo[llave] !== undefined) afirmacion[llave] = crudo[llave]
+  return afirmacion
+}
+
 function resultFromRow(row: {
   requestId: string
   status: TerminalPaymentRequestStatus
@@ -2127,24 +2149,50 @@ class TerminalPaymentService {
    * - already terminal: no-op (log the conflict).
    */
   private async closeRow(requestId: string, venueId: string, result: TerminalPaymentResult): Promise<TerminalPaymentResult> {
+    // Codex r1 (P1-D): lo que la terminal AFIRMÓ en un `success` se conserva aunque el Payment no acredite (ver abajo).
+    const afirmacion = result.status === 'success' ? claimedSuccessDe(result) : undefined
     try {
       // La TERMINAL contestó sin veredicto del procesador: un failed/cancelled sin evidencia acreditada, o su propio
       // `timeout` («no pude verificar»). Se conserva su sobre en `terminalResult` (diagnóstico) y la fila entra en la
       // VENTANA DE CONFIRMACIÓN (TIMED_OUT). Un `success` que no acredite Payment se degrada más abajo SIN terminalResult y
       // queda UNKNOWN: hubo una afirmación positiva y la ventana no lo toca (Codex, Task 0, P1).
-      if (
-        (result.status === 'failed' || result.status === 'cancelled') &&
-        !(result.outcomeEvidence === 'PRE_AUTHORIZATION' || (result.status === 'failed' && result.outcomeEvidence === 'PROCESSOR_DECLINED'))
-      ) {
-        result = {
-          requestId,
-          status: 'timeout',
-          errorMessage: 'El resultado del cobro sigue pendiente de confirmar',
-          terminalResult: {
-            status: result.status,
-            errorMessage: result.errorMessage ?? null,
-            outcomeEvidence: result.outcomeEvidence ?? null,
-          },
+      if (result.status === 'failed' || result.status === 'cancelled') {
+        const acreditado =
+          result.outcomeEvidence === 'PRE_AUTHORIZATION' || (result.status === 'failed' && result.outcomeEvidence === 'PROCESSOR_DECLINED')
+        // Codex r1 (P1-A), UN mecanismo para TODO negativo (acreditado o no, en vuelo o tardío): ANTES de decidir el estado,
+        // ¿consta ya un `send_transaction` APROBADO de algún intento vinculado (el registrador falló o difirió el Payment)?
+        // Si consta, el negativo NO acredita «no se cobró» —el banco ya dijo que sí—: se degrada a `timeout` + sobre (con su
+        // `outcomeEvidence` dentro, para diagnóstico) y la fila entra en la VENTANA, cuyo veto la RETIENE
+        // (`BANK_APPROVED_AWAITING_PAYMENT` + asiento) a los 30 s; S4 la cierra con el Payment. G2 (abajo) se conserva como
+        // defensa en profundidad. Sin vínculos (APK legacy) no hay consulta que hacer.
+        const attemptIds = (
+          await prisma.terminalPaymentAttemptLink.findMany({ where: { requestId, venueId }, select: { attemptId: true } })
+        ).map(l => l.attemptId)
+        const aprobacion = attemptIds.length ? await this.aprobacionBancariaConocida(prisma, venueId, attemptIds) : null
+        if (aprobacion) {
+          logger.warn(
+            '🏦 [TerminalPayment] Negative terminal result degraded to the confirmation window: a bank approval of a linked attempt is already known',
+            {
+              requestId,
+              venueId,
+              terminalStatus: result.status,
+              outcomeEvidence: result.outcomeEvidence ?? null,
+              acreditado,
+              eventLogId: aprobacion.eventLogId,
+            },
+          )
+        }
+        if (!acreditado || aprobacion) {
+          result = {
+            requestId,
+            status: 'timeout',
+            errorMessage: 'El resultado del cobro sigue pendiente de confirmar',
+            terminalResult: {
+              status: result.status,
+              errorMessage: result.errorMessage ?? null,
+              outcomeEvidence: result.outcomeEvidence ?? null,
+            },
+          }
         }
       } else if (result.status === 'timeout' && !result.terminalResult) {
         result = { ...result, terminalResult: { status: 'timeout', errorMessage: result.errorMessage ?? null, outcomeEvidence: null } }
@@ -2184,7 +2232,13 @@ class TerminalPaymentService {
           })
         }
         if (winner) return winner
-        result = { requestId, status: 'timeout', errorMessage: 'El pago sigue pendiente de confirmar en Avoqado' }
+        // P1-D: la afirmación de la terminal viaja en el sobre (sin `terminalResult`: la fila queda UNKNOWN, fuera de la ventana).
+        result = {
+          requestId,
+          status: 'timeout',
+          errorMessage: 'El pago sigue pendiente de confirmar en Avoqado',
+          ...(afirmacion ? { claimedSuccess: afirmacion } : {}),
+        }
       }
       // Codex R12-6: un resultado NO-success no tiene ganador. Un `paymentId` que venga en un timeout/failed/cancelled
       // no se escribe ni en la columna ni en `resultJson` ni viaja al POS: sólo el camino `success` (validado arriba
@@ -2206,10 +2260,16 @@ class TerminalPaymentService {
         venueId,
         error: err instanceof Error ? err.message : String(err),
       })
-      // Hubo una AFIRMACIÓN positiva que no se pudo verificar: la fila pasa a UNKNOWN (sin terminalResult ⇒ fuera de la
-      // ventana) aunque antes fuera un negativo elegible. Nunca se libera una fila sobre la que alguien dijo «cobré».
-      // (Antes se RETORNABA sin escribir, y una fila TIMED_OUT elegible conservaba su negativo — Codex, Task 0 R2, P1.)
-      result = { requestId, status: 'timeout', errorMessage: 'El resultado sigue pendiente de confirmar' }
+      // No se pudo verificar la evidencia (un `success` cuyo Payment no se pudo leer, o el veto bancario de un negativo que no
+      // se pudo consultar): la fila pasa a UNKNOWN (sin terminalResult ⇒ fuera de la ventana) aunque antes fuera un negativo
+      // elegible. Nunca se libera una fila sobre la que no se pudo comprobar nada. (Antes se RETORNABA sin escribir, y una
+      // fila TIMED_OUT elegible conservaba su negativo — Codex, Task 0 R2, P1.) P1-D: si hubo un `success`, su afirmación se conserva.
+      result = {
+        requestId,
+        status: 'timeout',
+        errorMessage: 'El resultado sigue pendiente de confirmar',
+        ...(afirmacion ? { claimedSuccess: afirmacion } : {}),
+      }
     }
     // TIMED_OUT = «la terminal contestó y no hay veredicto» (entra en la ventana); UNKNOWN = «nadie afirmó nada útil»
     // (success sin Payment acreditable, error verificando evidencia, plazo del watchdog). `resultToStatus` no cambia.
@@ -3241,14 +3301,7 @@ class TerminalPaymentService {
     const row = await prisma.terminalPaymentRequest.findFirst({ where: { requestId, venueId } })
     if (!row || !this.esNegativoSinEvidencia(row)) return 'NOT_ELIGIBLE'
     if (row.updatedAt.getTime() > now.getTime() - UNPROVEN_NEGATIVE_WINDOW_MS) return 'NOT_ELIGIBLE'
-    // El CAS de abajo exige el updatedAt LEÍDO: un resultado que renueve el reloj entre la lectura y la escritura anula la liberación.
-    const cas = {
-      id: row.id,
-      status: TerminalPaymentRequestStatus.TIMED_OUT,
-      failureCode: null,
-      paymentId: null,
-      updatedAt: row.updatedAt,
-    } as const
+    // Los CAS de abajo exigen el updatedAt LEÍDO: un resultado que renueve el reloj entre la lectura y la escritura anula la liberación.
 
     // 1) El pago EXACTO de esta solicitud (misma regla que el barrido): si existe, se concilia — nunca se libera un cobro hecho.
     const payment = await this.findReconcilablePayment(row)
@@ -3304,24 +3357,36 @@ class TerminalPaymentService {
       }
     }
 
-    // 2+3) Bajo el candado de CADA intento vinculado (el ingreso del webhook toma el mismo, angelpay-webhook.service.ts):
-    // la consulta del veto, el CAS y el asiento son UNA fotografía. Un APROBADO que se persista después espera a que
-    // decidamos; uno que se persistió antes lo vemos (Codex, Task 0 R2, P3: insertar el evento no toca el updatedAt de la
-    // solicitud, así que el CAS solo NO bastaba). Sin vínculos (APK legacy) no hay webhook que pueda adelantarse.
-    const attemptIds = (await prisma.terminalPaymentAttemptLink.findMany({ where: { requestId, venueId }, select: { attemptId: true } }))
-      .map(l => l.attemptId)
-      .sort()
+    // 2+3) UNA fotografía bajo dos candados, revalidada en la ESCRITURA (Codex r1, P1-C):
+    //  · candado de la SOLICITUD primero (orden fijo solicitud → intentos; lo toman también la publicación del vínculo y el
+    //    fallback del webhook), y los vínculos se enumeran DENTRO, después de él: un vínculo que se publique mientras decidimos
+    //    espera, y uno publicado antes se ve;
+    //  · candado de CADA intento vinculado (el ingreso del webhook toma el mismo): un APROBADO que se persista después espera;
+    //    uno que se persistió antes lo vemos (insertar el evento no toca el updatedAt de la solicitud, así que el CAS solo NO
+    //    bastaba — Codex, Task 0 R2, P3);
+    //  · el CAS de liberación lleva además `NOT EXISTS` de APROBADO vinculado y de Payment ligado (`sinEvidenciaPositivaSql`)
+    //    sobre lo durable en ese instante: un escritor SIN candado (fallback vencido por lock_timeout, cola vieja etiquetando
+    //    sólo `processorData`) que entre entre el veto y la escritura no libera. Un `$executeRaw` que devuelve 0 es NOT_ELIGIBLE.
     const previo =
       row.resultJson && typeof row.resultJson === 'object' && !Array.isArray(row.resultJson) ? (row.resultJson as Prisma.JsonObject) : {}
     let decision: 'RELEASED' | 'HELD_BY_BANK_EVIDENCE' | 'NOT_ELIGIBLE'
     try {
       decision = await prisma.$transaction(async tx => {
+        await candadoDeSolicitud(tx, requestId)
+        const attemptIds = (await tx.terminalPaymentAttemptLink.findMany({ where: { requestId, venueId }, select: { attemptId: true } }))
+          .map(l => l.attemptId)
+          .sort()
         for (const attemptId of attemptIds) await candadoDeIntento(tx, attemptId)
         const aprobacion = await this.aprobacionBancariaConocida(tx, venueId, attemptIds)
         if (aprobacion) {
           // Evidencia bancaria conocida sin Payment: se RETIENE (sigue UNRESOLVED) y se marca UNA vez para no repetir el asiento.
-          const held = await tx.terminalPaymentRequest.updateMany({ where: cas, data: { failureCode: 'BANK_APPROVED_AWAITING_PAYMENT' } })
-          if (held.count === 0) return 'NOT_ELIGIBLE'
+          // (`updatedAt` explícito: un UPDATE crudo no pasa por `@updatedAt`, y el destrabe de la ranura a los 20 min lo lee.)
+          const held = await tx.$executeRaw`
+            UPDATE "TerminalPaymentRequest"
+            SET "failureCode" = 'BANK_APPROVED_AWAITING_PAYMENT', "updatedAt" = (NOW() AT TIME ZONE 'UTC')
+            WHERE "id" = ${row.id} AND "status" = 'TIMED_OUT' AND "failureCode" IS NULL AND "paymentId" IS NULL
+              AND "updatedAt" = ${utcTs(row.updatedAt)}`
+          if (held === 0) return 'NOT_ELIGIBLE'
           await tx.activityLog.create({
             data: {
               action: 'TERMINAL_PAYMENT_WINDOW_HELD_BY_BANK_EVIDENCE',
@@ -3348,23 +3413,33 @@ class TerminalPaymentService {
           })
           return 'HELD_BY_BANK_EVIDENCE'
         }
-        // CAS: sólo si sigue siendo exactamente el negativo sin evidencia (un cajero pudo adelantarse).
-        const r = await tx.terminalPaymentRequest.updateMany({
-          where: cas,
-          data: {
-            status: TerminalPaymentRequestStatus.FAILED,
-            failureCode: 'NO_EVIDENCE_AFTER_WINDOW',
-            resultJson: {
-              ...previo,
-              requestId,
-              status: 'failed',
-              outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW',
-              errorMessage: 'No se confirmó el cobro en la ventana de 30 s. Se puede volver a cobrar.',
-              releasedAfterWindow: { windowMs: UNPROVEN_NEGATIVE_WINDOW_MS, releasedAt: now.toISOString(), origen },
-            } as Prisma.InputJsonObject,
-          },
-        })
-        if (r.count === 0) return 'NOT_ELIGIBLE'
+        // CAS: sólo si sigue siendo exactamente el negativo sin evidencia (un cajero pudo adelantarse) Y sin evidencia positiva
+        // durable en este instante (la revalidación del veto en la escritura).
+        const sobreLiberado = {
+          ...previo,
+          requestId,
+          status: 'failed',
+          outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW',
+          errorMessage: 'No se confirmó el cobro en la ventana de 30 s. Se puede volver a cobrar.',
+          releasedAfterWindow: { windowMs: UNPROVEN_NEGATIVE_WINDOW_MS, releasedAt: now.toISOString(), origen },
+        }
+        const r = await tx.$executeRaw`
+          UPDATE "TerminalPaymentRequest"
+          SET "status" = 'FAILED', "failureCode" = 'NO_EVIDENCE_AFTER_WINDOW',
+              "resultJson" = ${JSON.stringify(sobreLiberado)}::jsonb, "updatedAt" = (NOW() AT TIME ZONE 'UTC')
+          WHERE "id" = ${row.id} AND "status" = 'TIMED_OUT' AND "failureCode" IS NULL AND "paymentId" IS NULL
+            AND "updatedAt" = ${utcTs(row.updatedAt)}
+            AND ${sinEvidenciaPositivaSql(requestId, venueId)}`
+        if (r === 0) {
+          const motivo = await porQueHayEvidenciaPositiva(tx, requestId, venueId)
+          logger.warn('⏱️ [TerminalPayment] window release CAS lost — the request stays in the window', {
+            requestId,
+            venueId,
+            origen,
+            motivoProbable: motivo === 'NINGUNA' ? 'LA_FILA_CAMBIO' : motivo,
+          })
+          return 'NOT_ELIGIBLE'
+        }
         await tx.activityLog.create({
           data: {
             action: 'TERMINAL_PAYMENT_RELEASED_AFTER_WINDOW',
@@ -3386,8 +3461,9 @@ class TerminalPaymentService {
         return 'RELEASED'
       }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
     } catch (err) {
-      // 55P03 (lock_timeout): el ingreso del webhook tiene el candado de este intento — esta pasada no decide; la siguiente
-      // (temporizador o watchdog a los 30 s) vuelve a intentar y verá el evento ya persistido.
+      // 55P03 (lock_timeout): el ingreso del webhook tiene el candado de este intento, o la publicación de un vínculo / el
+      // fallback tienen el de la solicitud — esta pasada no decide; la siguiente (temporizador o watchdog a los 30 s) vuelve a
+      // intentar y verá lo ya persistido.
       logger.warn('⏱️ [TerminalPayment] window release deferred — attempt lock busy or db error', {
         requestId,
         venueId,
@@ -3496,6 +3572,45 @@ class TerminalPaymentService {
       })
     }
     return { released, reconciled, held }
+  }
+
+  /**
+   * Codex r1 (P1-B): recorre TODAS las filas de `where` por keyset (`updatedAt`, `id`), en lotes de 200 y con tope de 25 lotes
+   * por pasada (5 000 filas; si se alcanza se avisa y el resto espera a la siguiente pasada). Sin cursor, el barrido releía las
+   * primeras 200 en cada pasada y las de atrás —cuyo Payment sólo está etiquetado en `processorData`— podían cumplir los 30
+   * minutos sin revisarse nunca.
+   */
+  private async paginarLiberadas(
+    where: Prisma.TerminalPaymentRequestWhereInput,
+    contexto: string,
+    fn: (row: FilaDeCobroRemoto) => Promise<void>,
+  ): Promise<void> {
+    type Cursor = { updatedAt: Date; id: string } | null
+    let cursor: Cursor = null
+    for (let lote = 0; lote < LOTES_MAXIMOS_DE_LIBERADAS; lote++) {
+      const desde: Cursor = cursor
+      const rows: FilaDeCobroRemoto[] = await retry(
+        () =>
+          prisma.terminalPaymentRequest.findMany({
+            where: desde
+              ? { ...where, OR: [{ updatedAt: { gt: desde.updatedAt } }, { updatedAt: desde.updatedAt, id: { gt: desde.id } }] }
+              : where,
+            orderBy: [{ updatedAt: 'asc' }, { id: 'asc' }],
+            take: TAMANO_DEL_LOTE_LIBERADAS,
+          }),
+        { retries: 3, shouldRetry: shouldRetryDbConnectionError, context: contexto },
+      )
+      for (const row of rows) await fn(row)
+      if (rows.length < TAMANO_DEL_LOTE_LIBERADAS) return
+      const last = rows[rows.length - 1]
+      cursor = { updatedAt: last.updatedAt, id: last.id }
+      if (lote === LOTES_MAXIMOS_DE_LIBERADAS - 1)
+        logger.warn('⚠️ [Terminal-payment watchdog] released-rows sweep hit the batch cap — the rest waits for the next pass', {
+          contexto,
+          lotes: LOTES_MAXIMOS_DE_LIBERADAS,
+          filas: LOTES_MAXIMOS_DE_LIBERADAS * TAMANO_DEL_LOTE_LIBERADAS,
+        })
+    }
   }
 
   /**
@@ -3678,101 +3793,91 @@ class TerminalPaymentService {
     // Released rows are not forgotten: a payment recorded afterwards WITHOUT the request id (old
     // offline queues) never reaches closeRowFromPaymentTx, and the status endpoint would keep
     // answering "timeout" — an invitation to charge again. Sweep them for a bounded window.
-    const releasedRows = await retry(
-      () =>
-        prisma.terminalPaymentRequest.findMany({
-          where: {
-            status: TerminalPaymentRequestStatus.TIMED_OUT,
-            failureCode: { in: RELEASE_FAILURE_CODES },
-            updatedAt: { gte: new Date(now.getTime() - RELEASED_LATE_RECONCILE_WINDOW_MS) },
+    await this.paginarLiberadas(
+      {
+        status: TerminalPaymentRequestStatus.TIMED_OUT,
+        failureCode: { in: RELEASE_FAILURE_CODES },
+        updatedAt: { gte: new Date(now.getTime() - RELEASED_LATE_RECONCILE_WINDOW_MS) },
+      },
+      'terminal-payment-watchdog:findReleased',
+      async row => {
+        const payment = await this.findReconcilablePayment(row)
+        if (!payment) return
+        const r = await prisma.terminalPaymentRequest.updateMany({
+          where: { id: row.id, status: TerminalPaymentRequestStatus.TIMED_OUT },
+          data: {
+            status: TerminalPaymentRequestStatus.COMPLETED,
+            paymentId: payment.id,
+            lateResult: true,
+            ...marcaDeDescuadre(row, payment).campos,
           },
-          orderBy: { updatedAt: 'asc' },
-          take: 200,
-        }),
-      { retries: 3, shouldRetry: shouldRetryDbConnectionError, context: 'terminal-payment-watchdog:findReleased' },
-    )
-    for (const row of releasedRows) {
-      const payment = await this.findReconcilablePayment(row)
-      if (!payment) continue
-      const r = await prisma.terminalPaymentRequest.updateMany({
-        where: { id: row.id, status: TerminalPaymentRequestStatus.TIMED_OUT },
-        data: {
-          status: TerminalPaymentRequestStatus.COMPLETED,
-          paymentId: payment.id,
-          lateResult: true,
-          ...marcaDeDescuadre(row, payment).campos,
-        },
-      })
-      if (r.count === 0) continue
-      lateReconciled += r.count
-      // 🚨 stable token for Better Stack — do NOT rename. This is the double-charge alarm: the slot
-      // was freed and the money then showed up → someone must check the order is not paid twice.
-      logger.error(
-        `🚨 [Terminal-payment watchdog] Payment recorded for a RELEASED request — reconciled to COMPLETED (check the order for a double charge)`,
-        {
-          requestId: row.requestId,
-          paymentId: payment.id,
-          terminalId: row.terminalId,
+        })
+        if (r.count === 0) return
+        lateReconciled += r.count
+        // 🚨 stable token for Better Stack — do NOT rename. This is the double-charge alarm: the slot
+        // was freed and the money then showed up → someone must check the order is not paid twice.
+        logger.error(
+          `🚨 [Terminal-payment watchdog] Payment recorded for a RELEASED request — reconciled to COMPLETED (check the order for a double charge)`,
+          {
+            requestId: row.requestId,
+            paymentId: payment.id,
+            terminalId: row.terminalId,
+            venueId: row.venueId,
+            orderId: row.orderId,
+            failureCode: row.failureCode,
+          },
+        )
+        await logAction({
           venueId: row.venueId,
-          orderId: row.orderId,
-          failureCode: row.failureCode,
-        },
-      )
-      await logAction({
-        venueId: row.venueId,
-        action: 'TERMINAL_PAYMENT_LATE_RECONCILED',
-        entity: 'TerminalPaymentRequest',
-        entityId: row.id,
-        data: {
-          requestId: row.requestId,
-          terminalId: row.terminalId,
-          paymentId: payment.id,
-          priorStatus: row.status,
-          failureCode: row.failureCode,
-        },
-      })
-      void sendOpsAlert({
-        subject: `Terminal ${row.terminalId}: llegó el pago de un cobro YA liberado — revisar doble cobro (${row.venueId})`,
-        lines: [
-          `El cobro ${row.requestId} (orden ${row.orderId ?? 'sin orden'}) se había liberado como sin respuesta y ahora aparece un pago con tarjeta (${payment.id}).`,
-          'Revisa que la orden no haya quedado pagada dos veces; si sí, hay que devolver uno de los dos cobros.',
-        ],
-      })
-    }
+          action: 'TERMINAL_PAYMENT_LATE_RECONCILED',
+          entity: 'TerminalPaymentRequest',
+          entityId: row.id,
+          data: {
+            requestId: row.requestId,
+            terminalId: row.terminalId,
+            paymentId: payment.id,
+            priorStatus: row.status,
+            failureCode: row.failureCode,
+          },
+        })
+        void sendOpsAlert({
+          subject: `Terminal ${row.terminalId}: llegó el pago de un cobro YA liberado — revisar doble cobro (${row.venueId})`,
+          lines: [
+            `El cobro ${row.requestId} (orden ${row.orderId ?? 'sin orden'}) se había liberado como sin respuesta y ahora aparece un pago con tarjeta (${payment.id}).`,
+            'Revisa que la orden no haya quedado pagada dos veces; si sí, hay que devolver uno de los dos cobros.',
+          ],
+        })
+      },
+    )
 
     // Ventana de confirmación (Task 3): una fila que la VENTANA liberó (`FAILED/NO_EVIDENCE_AFTER_WINDOW`) cuyo pago llega
     // después SIN pasar por el registrador con su requestId (cola vieja: la etiqueta viaja sólo en `processorData`) se
     // concilia por el cierre COMÚN, nunca por un `updateMany` propio: es `closeRowFromPaymentTx` quien cuenta los cobros
     // posteriores de la orden, deja el asiento único y devuelve `lateAfterWindow`; el correo sale después del commit.
-    const liberadasPorVentana = await retry(
-      () =>
-        prisma.terminalPaymentRequest.findMany({
-          where: {
-            status: TerminalPaymentRequestStatus.FAILED,
-            failureCode: 'NO_EVIDENCE_AFTER_WINDOW',
-            updatedAt: { gte: new Date(now.getTime() - RELEASED_LATE_RECONCILE_WINDOW_MS) },
-          },
-          orderBy: { updatedAt: 'asc' },
-          take: 200,
-        }),
-      { retries: 3, shouldRetry: shouldRetryDbConnectionError, context: 'terminal-payment-watchdog:findReleasedByWindow' },
+    await this.paginarLiberadas(
+      {
+        status: TerminalPaymentRequestStatus.FAILED,
+        failureCode: 'NO_EVIDENCE_AFTER_WINDOW',
+        updatedAt: { gte: new Date(now.getTime() - RELEASED_LATE_RECONCILE_WINDOW_MS) },
+      },
+      'terminal-payment-watchdog:findReleasedByWindow',
+      async row => {
+        const payment = await this.findReconcilablePayment(row)
+        if (!payment) return
+        const cierre = await prisma.$transaction(tx =>
+          this.closeRowFromPaymentTx(tx, row.requestId, payment.id, row.venueId, undefined, 'REST'),
+        )
+        if (!cierre.bound) return
+        lateReconciled += 1
+        avisarAprobacionTardiaTrasVentana(cierre, {
+          requestId: row.requestId,
+          venueId: row.venueId,
+          paymentId: payment.id,
+          terminalId: row.terminalId,
+          orderId: row.orderId,
+        })
+      },
     )
-    for (const row of liberadasPorVentana) {
-      const payment = await this.findReconcilablePayment(row)
-      if (!payment) continue
-      const cierre = await prisma.$transaction(tx =>
-        this.closeRowFromPaymentTx(tx, row.requestId, payment.id, row.venueId, undefined, 'REST'),
-      )
-      if (!cierre.bound) continue
-      lateReconciled += 1
-      avisarAprobacionTardiaTrasVentana(cierre, {
-        requestId: row.requestId,
-        venueId: row.venueId,
-        paymentId: payment.id,
-        terminalId: row.terminalId,
-        orderId: row.orderId,
-      })
-    }
 
     if (completed || marked || released || reset || lateReconciled) {
       logger.info(`🧹 [Terminal-payment watchdog] unknown sweep`, {
@@ -4220,10 +4325,14 @@ class TerminalPaymentService {
     // transacción: no existe vínculo sin que se hayan reabierto (el worker los confirma después por el vínculo, S2). Si la
     // reapertura falla, el vínculo no se escribe y la terminal reintenta el anuncio — el ACK sólo llega con lo durable.
     const { recuperarEventosDebilesPorVinculo } = await import('./tpv/angelpay-webhook.service')
-    const { OPCIONES_DE_TRANSACCION_DEL_INTENTO, candadoDeIntento } = await import('./tpv/candadoDeIntento')
+    const { OPCIONES_DE_TRANSACCION_DEL_INTENTO, candadoDeIntento, candadoDeSolicitud } = await import('./tpv/candadoDeIntento')
     try {
       await prisma.$transaction(async tx => {
-        // Codex R6-2: la EXCLUSIÓN por intento va PRIMERO — antes del INSERT y de consultar eventos. Un escritor débil que
+        // Codex r1 (P1-C): el candado de la SOLICITUD va antes que el del intento (orden fijo solicitud → intentos, el mismo de
+        // la ventana): un vínculo no se publica mientras la ventana decide sobre su solicitud, y la ventana que llegue después
+        // lo ve al enumerar los vínculos bajo ese mismo candado.
+        await candadoDeSolicitud(tx, requestId)
+        // Codex R6-2: la EXCLUSIÓN por intento va ANTES del INSERT y de consultar eventos. Un escritor débil que
         // conozca esta llave espera aquí; cuando este commit lo suelte, verá el vínculo publicado y decidirá por él.
         await candadoDeIntento(tx, attemptId)
         await tx.terminalPaymentAttemptLink.create({ data: { requestId, attemptId, venueId: row.venueId, terminalId: terminalKey } })
@@ -4726,12 +4835,13 @@ class TerminalPaymentService {
         ...(typeof fr.paymentId === 'string' ? { paymentId: fr.paymentId } : {}),
         ...(typeof fr.errorMessage === 'string' ? { errorMessage: fr.errorMessage } : {}),
       }
-      // 🔴 Sin evidencia acreditada no hay nada que «reconciliar». Un `cancelled`/`failed` pelón (lo que
-      // guardó un APK anterior a `outcomeEvidence`) o un `timeout` no dicen si la tarjeta se cobró. Pasarlo
-      // por `closeRow` sólo re-marcaba la fila como UNKNOWN en cada barrido de 30 s, con dos avisos
-      // engañosos y sin rastro (medido en la PAX 2841548417 el 10-sep). Se conserva la fila tal cual, se
-      // audita UNA vez lo que la terminal guardó —evidencia «clase B», que decide un operador con
-      // `releaseUnknownRequest`— y no se vuelve a preguntar en la ventana de espera. Un `success` sí entra:
+      // Un `cancelled`/`failed` pelón (lo que guardó un APK anterior a `outcomeEvidence`) o un `timeout` no dicen si la
+      // tarjeta se cobró: se audita UNA vez lo que la terminal guardó (evidencia «clase B») y no se vuelve a preguntar en la
+      // ventana de espera — PERO el resultado sigue a `closeRow` (Codex r1, P2): un negativo DURABLE sin evidencia se degrada
+      // a `timeout` + sobre ⇒ TIMED_OUT ⇒ la VENTANA DE CONFIRMACIÓN decide (webhook, Payment, cajero, o liberar a los 30 s).
+      // Antes se retornaba aquí y una fila UNKNOWN cuyo resultado original se perdió nunca entraba a la ventana. La razón
+      // histórica («closeRow re-marcaba UNKNOWN en cada barrido», medido en la PAX 2841548417 el 10-sep) ya no aplica:
+      // `closeRow` escribe una vez (CAS en vuelo / tardío) y el backoff evita la segunda sonda. Un `success` entra igual:
       // `closeRow` va a buscar el Payment, que es la evidencia de verdad.
       const acreditado = result.status === 'success' || result.outcomeEvidence !== undefined
       if (!acreditado) {
@@ -4739,7 +4849,7 @@ class TerminalPaymentService {
         // barrido o se pierde la única entrada al reiniciar. Y no se vuelve a preguntar en la ventana de espera.
         this.marcarEsperaDeSonda(requestId)
         const yaAuditada = !(await this.debeAuditar('TERMINAL_PAYMENT_PROBE_UNACCREDITED', row.id))
-        logger.warn('🔎 [TerminalPayment] Probe answer carries no accredited evidence: row kept for an operator', {
+        logger.warn('🔎 [TerminalPayment] Probe answer carries no accredited evidence: handed to the confirmation window', {
           requestId,
           terminalId: row.terminalId,
           status: row.status,
@@ -4766,9 +4876,9 @@ class TerminalPaymentService {
             },
           })
         }
-        return true
+      } else {
+        this.unaccreditedProbeAnswers.delete(requestId)
       }
-      this.unaccreditedProbeAnswers.delete(requestId)
       const outcome = await this.closeRow(requestId, terminal.venueId, result)
       const after = await prisma.terminalPaymentRequest.findFirst({
         where,

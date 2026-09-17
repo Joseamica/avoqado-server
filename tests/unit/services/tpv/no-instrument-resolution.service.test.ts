@@ -6,7 +6,9 @@
  *
  * Mockeo con el `prismaMock` global de `tests/__helpers__/setup.ts` (como `terminal-payment.service.test.ts`): la
  * transacción corre el callback con el propio mock; `$queryRaw` sirve al candado del intento, a los FOR UPDATE y a la
- * consulta de evidencia que veta (`[]` = sin veto, `[{ id }]` = veto).
+ * consulta de evidencia que veta (`[]` = sin veto, `[{ id }]` = veto); `$executeRaw` es el CAS de la declaración (Codex r1,
+ * P1-C d: un UPDATE crudo con los `NOT EXISTS` de evidencia positiva — el mock aplica la escritura a la fila y devuelve 1,
+ * o 0 si la fila ya no es la leída).
  *
  * 1. NEW FEATURE TESTS — autorización (sesión / elevación / negación / conjunto), identidad (404), replay, evidencia, elegibilidad
  * 2. REGRESSION TESTS — la identidad nunca sale del cuerpo; la fila acreditada o retenida no se pisa
@@ -92,10 +94,20 @@ function armar(filaOver: Record<string, unknown> = {}, linkOver: Record<string, 
       ? fila
       : null,
   )
-  prismaMock.terminalPaymentRequest.updateMany.mockImplementation(async ({ where, data }: any) => {
-    if (where.id !== fila.id || where.status !== fila.status || (where.paymentId === null && fila.paymentId !== null)) return { count: 0 }
-    Object.assign(fila, data)
-    return { count: 1 }
+  // El CAS de la declaración es un `$executeRaw` (UPDATE condicional + NOT EXISTS): el mock aplica a `fila` lo que el SQL escribe
+  // si la fila sigue siendo la leída (id, status, sin Payment); si no, 0 filas.
+  prismaMock.$executeRaw.mockImplementation(async (tpl: any, ...values: unknown[]) => {
+    const sql = sqlDe([tpl])
+    if (!sql.includes('UPDATE "TerminalPaymentRequest"')) return 0
+    const json = values.find(v => typeof v === 'string' && v.includes('"operatorResolution"')) as string | undefined
+    if (!json || !values.includes(fila.id) || !values.includes(fila.status) || fila.paymentId !== null) return 0
+    Object.assign(fila, {
+      status: 'FAILED',
+      failureCode: 'OPERATOR_RECONCILED_NO_CHARGE',
+      cancelDisposition: null,
+      resultJson: JSON.parse(json),
+    })
+    return 1
   })
   prismaMock.terminalPaymentAttemptLink.findUnique.mockImplementation(async ({ where }: any) =>
     where.attemptId === link.attemptId ? link : null,
@@ -132,9 +144,22 @@ const rechaza = async (promesa: Promise<unknown>, code: string, statusCode = 409
 }
 
 const nadaEscrito = () => {
+  expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
   expect(prismaMock.terminalPaymentRequest.updateMany).not.toHaveBeenCalled()
   expect(prismaMock.terminalPaymentAttemptLink.update).not.toHaveBeenCalled()
   expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+}
+/** El CAS escrito: SQL exterior, el fragmento anidado de los NOT EXISTS y el sobre que viaja como jsonb. */
+const casEscrito = () => {
+  const llamadas = prismaMock.$executeRaw.mock.calls.filter((c: any[]) => sqlDe(c).includes('UPDATE "TerminalPaymentRequest"'))
+  expect(llamadas).toHaveLength(1)
+  const [tpl, ...values] = llamadas[0]
+  // El fragmento anidado viaja como `Prisma.Sql` (objeto con `sql` y `values`); se reconoce por forma (el cliente está mockeado).
+  const anidado = values.find((v: unknown) => !!v && typeof v === 'object' && typeof (v as { sql?: unknown }).sql === 'string') as
+    | { sql: string }
+    | undefined
+  const json = values.find((v: unknown) => typeof v === 'string' && (v as string).includes('"operatorResolution"')) as string
+  return { sql: sqlDe([tpl]), anidado: anidado?.sql ?? '', values, sobre: JSON.parse(json) }
 }
 
 beforeEach(() => {
@@ -147,19 +172,20 @@ describe('resolveNoInstrument — la declaración del cajero cierra el intento c
     const r = await resolveNoInstrument(identidad, declaracion())
     expect(r.resolution).toMatchObject({ id: resolutionId, by: 'SESSION' })
     expect(typeof r.resolution.acceptedAt).toBe('string')
-    expect(prismaMock.terminalPaymentRequest.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ id: 'row-1', status: 'TIMED_OUT', paymentId: null }),
-        data: expect.objectContaining({
-          status: 'FAILED',
-          failureCode: 'OPERATOR_RECONCILED_NO_CHARGE',
-          cancelDisposition: null,
-          resultJson: expect.objectContaining({ status: 'failed', outcomeEvidence: 'OPERATOR_RECONCILED' }),
-        }),
-      }),
+    // El CAS es UN UPDATE crudo condicional (Codex r1, P1-C d): estado LEÍDO, sin Payment, y los dos NOT EXISTS de evidencia positiva.
+    const cas = casEscrito()
+    expect(cas.sql).toMatch(/SET "status" = 'FAILED', "failureCode" = 'OPERATOR_RECONCILED_NO_CHARGE', "cancelDisposition" = NULL/)
+    expect(cas.sql).toMatch(/"resultJson" = \?::jsonb, "updatedAt" = \(NOW\(\) AT TIME ZONE 'UTC'\)/)
+    expect(cas.sql).toMatch(/WHERE "id" = \? AND "status" = \?::"TerminalPaymentRequestStatus" AND "paymentId" IS NULL/)
+    expect(cas.values).toEqual(expect.arrayContaining(['row-1', 'TIMED_OUT']))
+    expect(cas.anidado.match(/NOT EXISTS/g)).toHaveLength(2)
+    expect(cas.anidado).toMatch(/"ProviderEventLog"[\s\S]*"TerminalPaymentAttemptLink"[\s\S]*= 'APROBADO'/)
+    expect(cas.anidado).toMatch(
+      /"Payment"[\s\S]*"terminalPaymentRequestId" = \?[\s\S]*->>'terminalPaymentRequestId' = \?[\s\S]*"idempotencyKey" IN/,
     )
+    expect(cas.sobre).toMatchObject({ status: 'failed', outcomeEvidence: 'OPERATOR_RECONCILED' })
     // El sobre ORIGINAL de la terminal no se pierde: se conserva dentro del resultJson nuevo.
-    const escrito = prismaMock.terminalPaymentRequest.updateMany.mock.calls[0][0].data.resultJson
+    const escrito = cas.sobre
     expect(escrito.terminalResult.errorMessage).toContain('SDK U100')
     expect(escrito.operatorResolution).toMatchObject({
       id: resolutionId,
@@ -254,7 +280,7 @@ describe('resolveNoInstrument — la declaración del cajero cierra el intento c
     // El PIN no se guarda ni se serializa en ningún lado.
     expect(JSON.stringify(prismaMock.terminalPaymentAttemptLink.update.mock.calls)).not.toContain('1234')
     expect(JSON.stringify(prismaMock.activityLog.create.mock.calls)).not.toContain('1234')
-    expect(JSON.stringify(prismaMock.terminalPaymentRequest.updateMany.mock.calls)).not.toContain('1234')
+    expect(JSON.stringify(prismaMock.$executeRaw.mock.calls)).not.toContain('1234')
   })
 
   it('4b. un PIN que no es de nadie, o de alguien SIN permiso, no eleva → 403 y nada escrito', async () => {
@@ -355,7 +381,7 @@ describe('resolveNoInstrument — la declaración del cajero cierra el intento c
     expect(replay.resolution).toEqual(primera.resolution)
     expect(prismaMock.activityLog.create).toHaveBeenCalledTimes(1)
     expect(prismaMock.terminalPaymentAttemptLink.update).toHaveBeenCalledTimes(1)
-    expect(prismaMock.terminalPaymentRequest.updateMany).toHaveBeenCalledTimes(1)
+    expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(1)
     // El replay tampoco vuelve a pedir autorización: lo que ya se declaró no se re-litiga con la sesión del momento.
     prismaMock.staffVenue.findFirst.mockClear()
     await resolveNoInstrument({ ...identidad, actorStaffId: 'staff-cashier' }, declaracion())
@@ -406,6 +432,52 @@ describe('resolveNoInstrument — la declaración del cajero cierra el intento c
       armar({ resultJson: { requestId, status: 'timeout', ...senal } })
       await rechaza(resolveNoInstrument(identidad, declaracion()), 'POSITIVE_EVIDENCE_EXISTS')
       nadaEscrito()
+    })
+
+    // Codex r1 · P1-D: el `success` inacreditable que `closeRow` degradó a UNKNOWN conserva su afirmación en `claimedSuccess`.
+    it.each([
+      ['paymentId', { paymentId: 'pay-inexistente' }],
+      ['authorizationCode', { authorizationCode: 'A1' }],
+      ['transactionId', { transactionId: 'tx-1' }],
+      ['reference', { reference: 'ref-1' }],
+      ['readMode', { readMode: 'CONTACTLESS' }],
+      ['approved', { approved: true }],
+    ])('P1-D · una fila UNKNOWN con claimedSuccess.%s (un `success` degradado) veta la declaración', async (_nombre, afirmacion) => {
+      armar({
+        status: 'UNKNOWN',
+        resultJson: {
+          requestId,
+          status: 'timeout',
+          errorMessage: 'El pago sigue pendiente de confirmar en Avoqado',
+          claimedSuccess: afirmacion,
+        },
+      })
+      await rechaza(resolveNoInstrument(identidad, declaracion()), 'POSITIVE_EVIDENCE_EXISTS')
+      nadaEscrito()
+    })
+
+    it('P1-D · un claimedSuccess con TODOS los campos vacíos no veta (no afirma nada): la declaración procede', async () => {
+      armar({
+        status: 'UNKNOWN',
+        resultJson: { requestId, status: 'timeout', claimedSuccess: { paymentId: '', reference: null, approved: false } },
+      })
+      expect((await resolveNoInstrument(identidad, declaracion())).resolution).toMatchObject({ by: 'SESSION' })
+    })
+
+    // Codex r1 · P1-E: la identidad LEGACY del Payment (etiqueta en processorData) también veta, acotada al venue.
+    it('P1-E · el veto de Payment pregunta también por processorData.terminalPaymentRequestId, acotado al venue', async () => {
+      await resolveNoInstrument(identidad, declaracion())
+      expect(prismaMock.payment.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            OR: expect.arrayContaining([
+              { idempotencyKey: attemptId },
+              { terminalPaymentRequestId: requestId },
+              { venueId, processorData: { path: ['terminalPaymentRequestId'], equals: requestId } },
+            ]),
+          },
+        }),
+      )
     })
 
     it('hay un ProviderEventLog del intento APROBADO por el banco, o con contradicción de procedencia', async () => {
@@ -493,9 +565,10 @@ describe('resolveNoInstrument — la declaración del cajero cierra el intento c
     nadaEscrito()
   })
 
-  it('el CAS que pierde (la fila cambió entre la lectura y la escritura) no escribe el vínculo ni la bitácora', async () => {
-    prismaMock.terminalPaymentRequest.updateMany.mockResolvedValue({ count: 0 })
+  it('el CAS que pierde (la fila cambió entre la lectura y la escritura, o apareció evidencia positiva: el UPDATE devuelve 0) no escribe el vínculo ni la bitácora', async () => {
+    prismaMock.$executeRaw.mockResolvedValue(0)
     await rechaza(resolveNoInstrument(identidad, declaracion()), 'ATTEMPT_NOT_ELIGIBLE')
+    expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(1)
     expect(prismaMock.terminalPaymentAttemptLink.update).not.toHaveBeenCalled()
     expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
   })

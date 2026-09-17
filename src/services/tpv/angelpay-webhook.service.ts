@@ -21,7 +21,13 @@ import logger from '@/config/logger'
 import { normalizeTerminalSerialNumber, terminalIdentityKey } from '@/utils/terminalSerial'
 import { randomUUID } from 'crypto'
 import { tipoDeEvidencia } from './segundaCaptura'
-import { OPCIONES_DE_TRANSACCION_DEL_INTENTO, candadoDeIntento, esperaDeCandadoMs, llaveDeIntento } from './candadoDeIntento'
+import {
+  OPCIONES_DE_TRANSACCION_DEL_INTENTO,
+  candadoDeIntento,
+  candadoDeSolicitud,
+  esperaDeCandadoMs,
+  llaveDeIntento,
+} from './candadoDeIntento'
 import { RETRIES_EXHAUSTED } from './angelpayEventWorker.service'
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -827,9 +833,35 @@ async function ingresarEventoDelIntento(
       },
     )
     // El evento PRIMERO, en su propia escritura durable: nada de lo que venga después puede perderlo (R15-1).
-    const creado = await insertar(prisma as unknown as Prisma.TransactionClient, {
-      [MARCA_INGRESO_SIN_CANDADO]: { en: new Date().toISOString() },
+    // Codex r1 (P1-C): si el intento ya tiene vínculo, el INSERT va bajo el candado de la SOLICITUD (el mismo que toma la
+    // ventana antes de decidir): un APROBADO del fallback ya no cabe entre el veto y el CAS de la ventana. Sin vínculo no hay
+    // solicitud con la que serializar. Si ese candado también vence, se inserta sin candado como antes, con 🚨 — residuo
+    // DECLARADO: ahí sólo protege el `NOT EXISTS` del CAS de la ventana.
+    const marca: MarcaDeIngresoSinCandado = { [MARCA_INGRESO_SIN_CANDADO]: { en: new Date().toISOString() } }
+    const vinculo = await prisma.terminalPaymentAttemptLink.findUnique({
+      where: { attemptId: llaveDelIntento },
+      select: { requestId: true },
     })
+    let creado: { id: string }
+    try {
+      creado = vinculo
+        ? await prisma.$transaction(async tx => {
+            await candadoDeSolicitud(tx, vinculo.requestId)
+            return insertar(tx, marca)
+          }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
+        : await insertar(prisma as unknown as Prisma.TransactionClient, marca)
+    } catch (solicitudError) {
+      if (!esEsperaDeCandadoVencida(solicitudError)) throw solicitudError
+      logger.error(
+        '🚨 [AngelPay webhook] La espera del candado de la SOLICITUD también venció al ingresar el evento sin candado de intento: se persiste SIN ningún candado — entre el veto y el CAS de la ventana sólo lo frena el NOT EXISTS de la escritura',
+        {
+          attemptId: llaveDelIntento,
+          requestId: vinculo?.requestId,
+          error: solicitudError instanceof Error ? solicitudError.message : String(solicitudError),
+        },
+      )
+      creado = await insertar(prisma as unknown as Prisma.TransactionClient, marca)
+    }
     // Ventana de confirmación (plan 16-sep, Codex R3-P3): un evento que entra SIN el candado del intento tiene que invalidar el
     // CAS de la ventana — que exige el `updatedAt` leído bajo ese candado —, así que se toca la solicitud vinculada. Se toca
     // para CUALQUIER evento del fallback (aprobado o no): un rechazo también es información, y lo peor que produce es que la

@@ -112,10 +112,20 @@ beforeEach(() => {
       ? fila
       : null,
   )
-  prismaMock.terminalPaymentRequest.updateMany.mockImplementation(async ({ where, data }: any) => {
-    if (where.id !== fila.id || where.status !== fila.status) return { count: 0 }
-    Object.assign(fila, data)
-    return { count: 1 }
+  // El CAS de la declaración es un `$executeRaw` (UPDATE condicional + NOT EXISTS de evidencia positiva — Codex r1, P1-C d): el
+  // mock aplica a `fila` lo que el SQL escribe si la fila sigue siendo la leída; si no, 0 filas.
+  prismaMock.$executeRaw.mockImplementation(async (tpl: any, ...values: unknown[]) => {
+    const sql = Array.isArray(tpl) ? tpl.join('?') : String(tpl)
+    if (!sql.includes('UPDATE "TerminalPaymentRequest"')) return 0
+    const json = values.find(v => typeof v === 'string' && v.includes('"operatorResolution"')) as string | undefined
+    if (!json || !values.includes(fila.id) || !values.includes(fila.status) || fila.paymentId !== null) return 0
+    Object.assign(fila, {
+      status: 'FAILED',
+      failureCode: 'OPERATOR_RECONCILED_NO_CHARGE',
+      cancelDisposition: null,
+      resultJson: JSON.parse(json),
+    })
+    return 1
   })
   prismaMock.venueRolePermission.findUnique.mockResolvedValue(null)
   prismaMock.payment.findFirst.mockResolvedValue(null)
@@ -127,6 +137,7 @@ beforeEach(() => {
 
 const nadaTocado = () => {
   expect(prismaMock.terminalPaymentAttemptLink.findUnique).not.toHaveBeenCalled()
+  expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
   expect(prismaMock.terminalPaymentRequest.updateMany).not.toHaveBeenCalled()
   expect(prismaMock.staffVenue.findFirst).not.toHaveBeenCalled()
 }
@@ -192,6 +203,7 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
     expect(res.status).toBe(403)
     expect(res.body).toMatchObject({ success: false, code: 'SUPERVISOR_AUTHORIZATION_REQUIRED' })
     expect(typeof res.body.message).toBe('string')
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
     expect(prismaMock.terminalPaymentRequest.updateMany).not.toHaveBeenCalled()
     expect(prismaMock.terminalPaymentAttemptLink.update).not.toHaveBeenCalled()
     expect(logAction).toHaveBeenCalledWith(
@@ -223,6 +235,7 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
       }),
     )
     const escrituras = [
+      ...prismaMock.$executeRaw.mock.calls,
       ...prismaMock.terminalPaymentRequest.updateMany.mock.calls,
       ...prismaMock.terminalPaymentAttemptLink.update.mock.calls,
       ...prismaMock.activityLog.create.mock.calls,
@@ -259,6 +272,7 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
     expect(res.status).toBe(403)
     expect(res.body).toMatchObject({ success: false, code: 'SESSION_NOT_IN_VENUE' })
     expect(prismaMock.staffVenue.findFirst.mock.calls.some(([a]: any[]) => a.where.pin !== undefined)).toBe(false)
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
     expect(prismaMock.terminalPaymentRequest.updateMany).not.toHaveBeenCalled()
     expect(logAction).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -277,6 +291,7 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
     expect(res.status).toBe(409)
     expect(res.body).toMatchObject({ success: false, code: 'ATTEMPT_NOT_ELIGIBLE' })
     expect(prismaMock.staffVenue.findFirst).not.toHaveBeenCalled()
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
     expect(prismaMock.terminalPaymentRequest.updateMany).not.toHaveBeenCalled()
   })
 
@@ -296,6 +311,7 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
       .send(cuerpo())
     expect(r409.status).toBe(409)
     expect(r409.body).toMatchObject({ success: false, code: 'POSITIVE_EVIDENCE_EXISTS' })
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
     expect(prismaMock.terminalPaymentRequest.updateMany).not.toHaveBeenCalled()
   })
 

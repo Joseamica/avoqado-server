@@ -4,10 +4,12 @@ import { Prisma, TerminalPaymentRequestStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import {
   SIN_DESENLACE_ACREDITADO,
+  UNPROVEN_NEGATIVE_WINDOW_MS,
   UNRESOLVED_FINANCIAL_OUTCOME,
   desenlaceCanonico,
   terminalPaymentService,
 } from '@/services/terminal-payment.service'
+import { utcTs } from '@/utils/sqlDates'
 import { invalidarVenuesEstrictos } from '@/services/terminal-payment-strictness'
 import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
 import socketManager from '@/communication/sockets/managers/socketManager'
@@ -1094,6 +1096,43 @@ describe('Sonda de conciliación: la terminal aporta la evidencia, nunca el relo
     expect(after.status).toBe('CANCELLED')
     expect(after.cancelDisposition).toBe('ACCEPTED')
     expect(after.lateResult).toBe(true)
+    expect(await terminalPaymentService.isTerminalBusy(fixture, venueId)).toBe(false)
+  })
+
+  // ── Codex r1 · P2: un negativo DURABLE sin evidencia recuperado por la sonda entra en la VENTANA (no se queda UNKNOWN para siempre) ──
+  it('P2 · un RESOLVED/cancelled SIN evidencia sobre una fila UNKNOWN pasa por closeRow: TIMED_OUT/null con el sobre, un solo asiento PROBE_UNACCREDITED, y a los 30 s la ventana la libera', async () => {
+    const row = await auditRequest({ status: 'UNKNOWN', acknowledgedAt: new Date(), orderId: null })
+    const respuesta = {
+      requestId: row.requestId,
+      disposition: 'RESOLVED',
+      finalResult: { requestId: row.requestId, status: 'cancelled', errorMessage: 'U100 en la bandeja' },
+    }
+    expect(await responder(respuesta)).toBe(true)
+    const enVentana = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    expect(enVentana).toMatchObject({ status: 'TIMED_OUT', failureCode: null, paymentId: null, lateResult: true })
+    expect((enVentana.resultJson as any).status).toBe('timeout')
+    expect((enVentana.resultJson as any).terminalResult).toMatchObject({
+      status: 'cancelled',
+      errorMessage: 'U100 en la bandeja',
+      outcomeEvidence: null,
+    })
+    // La misma respuesta repetida (el barrido insiste dentro del backoff) no reescribe ni re-audita: asiento ÚNICO.
+    expect(await responder(respuesta)).toBe(true)
+    const asientos = (logAction as jest.Mock).mock.calls
+      .map(([params]) => params as { action: string; entityId?: string })
+      .filter(p => p.action === 'TERMINAL_PAYMENT_PROBE_UNACCREDITED' && p.entityId === row.id)
+    expect(asientos).toHaveLength(1)
+    // El temporizador en proceso que `closeRow` programó no debe disparar sobre otra prueba.
+    const programadas = (terminalPaymentService as any).ventanasProgramadas as Map<string, NodeJS.Timeout>
+    clearTimeout(programadas.get(row.requestId)!)
+    programadas.delete(row.requestId)
+    // A los 30 s la ventana decide: sin webhook, sin Payment y sin cajero ⇒ se libera.
+    await prisma.$executeRaw`UPDATE "TerminalPaymentRequest" SET "updatedAt" = ${utcTs(new Date(Date.now() - UNPROVEN_NEGATIVE_WINDOW_MS - 1_000))} WHERE "id" = ${row.id}`
+    expect(await terminalPaymentService.releaseUnprovenNegative(row.requestId, venueId, 'WATCHDOG')).toBe('RELEASED')
+    expect(await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({
+      status: 'FAILED',
+      failureCode: 'NO_EVIDENCE_AFTER_WINDOW',
+    })
     expect(await terminalPaymentService.isTerminalBusy(fixture, venueId)).toBe(false)
   })
 

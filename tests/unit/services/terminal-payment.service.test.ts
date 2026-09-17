@@ -130,6 +130,9 @@ beforeEach(() => {
   tpr().findFirst.mockReset().mockResolvedValue(null)
   tpr().findMany.mockReset().mockResolvedValue([])
   tpr().updateMany.mockReset().mockResolvedValue({ count: 1 })
+  // Codex r1 (P1-A): `closeRow` enumera los vínculos de la solicitud ante TODO negativo; sin vínculos no consulta el veto bancario.
+  // Sin este default el mock devolvía `undefined` y el `.map` caía al `catch` (UNKNOWN) — un camino distinto del real.
+  prismaMock.terminalPaymentAttemptLink.findMany.mockReset().mockResolvedValue([])
   prismaMock.payment.findFirst.mockResolvedValue(null)
   prismaMock.order.findFirst.mockReset().mockResolvedValue({ paymentStatus: 'PENDING', orderNumber: 'TEST-ORDER' })
   // La procedencia de la entrega se graba con $executeRaw ANTES de emitir: 1 fila = grabada. (El mock global
@@ -2217,5 +2220,96 @@ describe('programarLiberacionPorVentana', () => {
     } finally {
       jest.useRealTimers()
     }
+  })
+})
+
+// ── Codex r1 · P1-B: el barrido de 30 min de las filas LIBERADAS avanza (keyset), no relee las mismas 200 ──
+describe('P1-B · reconcileUnknownRequests pagina las filas liberadas por keyset (updatedAt, id) con tope de lotes', () => {
+  const logger = require('@/config/logger').default
+  const now = new Date('2026-09-16T12:00:00.000Z')
+  const fila = (prefijo: string, i: number, extra: Record<string, unknown>) => ({
+    id: `${prefijo}-id-${String(i).padStart(5, '0')}`,
+    requestId: `${prefijo}-req-${i}`,
+    venueId: 'venue-1',
+    terminalId: 't-1',
+    orderId: `o-${i}`,
+    amountCents: 10_000,
+    tipCents: 0,
+    createdAt: new Date(now.getTime() - 25 * 60_000),
+    // Dos filas por instante: el desempate por `id` es lo que hace estable el cursor.
+    updatedAt: new Date(now.getTime() - 20 * 60_000 + Math.floor(i / 2) * 1000),
+    ...extra,
+  })
+  const liberada = (i: number) => fila('rel', i, { status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED' })
+  const porVentana = (i: number) => fila('win', i, { status: 'FAILED', failureCode: 'NO_EVIDENCE_AFTER_WINDOW' })
+  const esLiberadas = (where: any) => where?.status === 'TIMED_OUT' && !!where?.failureCode?.in
+  const esVentana = (where: any) => where?.status === 'FAILED' && where?.failureCode === 'NO_EVIDENCE_AFTER_WINDOW'
+
+  beforeEach(() => {
+    prismaMock.$queryRaw.mockResolvedValue([])
+    prismaMock.payment.findFirst.mockReset().mockResolvedValue(null)
+  })
+
+  it('con findMany devolviendo 200, 200 y 3 filas liberadas (y 200 + 1 por ventana) las recorre TODAS: tres/dos consultas con el cursor de la última fila del lote anterior', async () => {
+    const paginasLiberadas = [
+      Array.from({ length: 200 }, (_, i) => liberada(i)),
+      Array.from({ length: 200 }, (_, i) => liberada(200 + i)),
+      [400, 401, 402].map(liberada),
+    ]
+    const paginasVentana = [Array.from({ length: 200 }, (_, i) => porVentana(i)), [porVentana(200)]]
+    tpr().findMany.mockImplementation(async ({ where }: any) => {
+      if (esLiberadas(where)) return paginasLiberadas.shift() ?? []
+      if (esVentana(where)) return paginasVentana.shift() ?? []
+      return []
+    })
+    await terminalPaymentService.reconcileUnknownRequests(now)
+    const llamadas = tpr().findMany.mock.calls.map(([args]: any[]) => args)
+    const deLiberadas = llamadas.filter((a: any) => esLiberadas(a.where))
+    const deVentana = llamadas.filter((a: any) => esVentana(a.where))
+    expect(deLiberadas).toHaveLength(3)
+    expect(deVentana).toHaveLength(2)
+    for (const a of [...deLiberadas, ...deVentana]) {
+      expect(a.take).toBe(200)
+      expect(a.orderBy).toEqual([{ updatedAt: 'asc' }, { id: 'asc' }])
+    }
+    // Primera consulta SIN cursor; segunda y tercera con el cursor keyset de la última fila del lote anterior.
+    expect(deLiberadas[0].where.OR).toBeUndefined()
+    const ultima1 = liberada(199)
+    expect(deLiberadas[1].where.OR).toEqual([
+      { updatedAt: { gt: ultima1.updatedAt } },
+      { updatedAt: ultima1.updatedAt, id: { gt: ultima1.id } },
+    ])
+    const ultima2 = liberada(399)
+    expect(deLiberadas[2].where.OR).toEqual([
+      { updatedAt: { gt: ultima2.updatedAt } },
+      { updatedAt: ultima2.updatedAt, id: { gt: ultima2.id } },
+    ])
+    const ultimaV = porVentana(199)
+    expect(deVentana[1].where.OR).toEqual([
+      { updatedAt: { gt: ultimaV.updatedAt } },
+      { updatedAt: ultimaV.updatedAt, id: { gt: ultimaV.id } },
+    ])
+    // Y el filtro de la ventana de 30 min se conserva en TODAS las consultas (el cursor se le suma, no lo sustituye).
+    for (const a of [...deLiberadas, ...deVentana]) expect(a.where.updatedAt).toEqual({ gte: expect.any(Date) })
+    // Se procesaron las 403 + 201: cada fila buscó su Payment reconciliable.
+    const buscadas = prismaMock.payment.findFirst.mock.calls.map(([a]: any[]) => a.where.processorData?.equals)
+    expect(buscadas.filter((r: string) => r?.startsWith('rel-req-'))).toHaveLength(403)
+    expect(buscadas.filter((r: string) => r?.startsWith('win-req-'))).toHaveLength(201)
+    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('batch cap'), expect.anything())
+  })
+
+  it('el tope corta: con lotes de 200 sin fin se detiene en 25 (5 000 filas) y lo avisa con logger.warn', async () => {
+    let n = 0
+    tpr().findMany.mockImplementation(async ({ where }: any) => {
+      if (esLiberadas(where)) return Array.from({ length: 200 }, () => liberada(n++))
+      return []
+    })
+    await terminalPaymentService.reconcileUnknownRequests(now)
+    const deLiberadas = tpr().findMany.mock.calls.filter(([a]: any[]) => esLiberadas(a.where))
+    expect(deLiberadas).toHaveLength(25)
+    expect(
+      prismaMock.payment.findFirst.mock.calls.filter(([a]: any[]) => String(a.where.processorData?.equals).startsWith('rel-req-')),
+    ).toHaveLength(5000)
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('batch cap'), expect.objectContaining({ lotes: 25, filas: 5000 }))
   })
 })
