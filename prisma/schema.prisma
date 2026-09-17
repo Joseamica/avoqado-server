@@ -5120,13 +5120,17 @@ model TerminalPaymentRequest {
 /// nunca se reasigna. `attemptId` = `PaymentAttemptLedger.attemptId` de la terminal = `integratorReference`
 /// que viaja a AngelPay = `Payment.idempotencyKey` del registro.
 model TerminalPaymentAttemptLink {
-  id         String                 @id @default(cuid())
-  requestId  String
-  request    TerminalPaymentRequest @relation(fields: [requestId], references: [requestId], onDelete: Cascade)
-  attemptId  String                 @unique
-  venueId    String
-  terminalId String // llave normalizada (sin AVQD-, minúsculas), igual que TerminalPaymentRequest.terminalId
-  createdAt  DateTime               @default(now())
+  id                 String                 @id @default(cuid())
+  requestId          String
+  request            TerminalPaymentRequest @relation(fields: [requestId], references: [requestId], onDelete: Cascade)
+  attemptId          String                 @unique
+  venueId            String
+  terminalId         String // llave normalizada (sin AVQD-, minúsculas), igual que TerminalPaymentRequest.terminalId
+  createdAt          DateTime               @default(now())
+  /// La declaración del cajero «no se presentó tarjeta» (plan 16-sep, Task 4): testimonio de una PERSONA, nunca evidencia del
+  /// procesador. Se escribe UNA vez y un trigger (`preserve_no_instrument_resolution`) la vuelve inmutable: sobrevive a que una
+  /// aprobación tardía reemplace `TerminalPaymentRequest.resultJson`. `null` = nadie declaró.
+  operatorResolution Json?
 
   @@index([requestId, createdAt])
   @@index([venueId, terminalId, createdAt])

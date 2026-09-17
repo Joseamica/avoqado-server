@@ -357,9 +357,10 @@ const EVIDENCIA_ACREDITADA_DE_TERMINAL = ['PROCESSOR_DECLINED', 'PRE_AUTHORIZATI
  * Códigos de FAILED que acreditan «no se cobró» por sí solos. `TPV_CONFIRMED_NO_CHARGE` NO está aquí: ése exige
  * además la evidencia dentro del sobre (la escribe `closeRow`, que degrada a `timeout` cualquier failed/cancelled
  * sin ella). Ninguno de estos cuatro lo escribe la TERMINAL: `TPV_NEVER_RECEIVED` lo escribe la sonda (NOT_FOUND sobre
- * una fila nunca entregada), `NO_EVIDENCE_AFTER_WINDOW` la ventana de confirmación (`releaseUnprovenNegative`), y
- * `TPV_INBOX_NOT_FOUND` y `OPERATOR_RECONCILED_NO_CHARGE` todavía no tienen escritor — los escribirán A (identidad de
- * bandeja) y B (conciliación).
+ * una fila nunca entregada), `NO_EVIDENCE_AFTER_WINDOW` la ventana de confirmación (`releaseUnprovenNegative`),
+ * `OPERATOR_RECONCILED_NO_CHARGE` la declaración del cajero «no se presentó tarjeta» (`no-instrument-resolution.service`,
+ * plan 16-sep Task 4: testimonio de una PERSONA con permiso o elevada por PIN, nunca del procesador), y
+ * `TPV_INBOX_NOT_FOUND` todavía no tiene escritor — lo escribirá A (identidad de bandeja).
  */
 const CODIGOS_SIN_COBRO: Record<string, { evidencia: TerminalOutcomeEvidence; clase: TerminalEvidenceClass }> = {
   TPV_NEVER_RECEIVED: { evidencia: 'NEVER_DELIVERED', clase: 'SERVER' },

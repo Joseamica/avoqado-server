@@ -838,3 +838,231 @@ describe('G2 · la evidencia bancaria conocida gana a un negativo ACREDITADO tar
     expect(await terminalPaymentService.hasChargeBlockingOrderCancel(venueId, otraOrden.id)).toBe(false)
   })
 })
+
+// ── Task 4: la declaración del cajero «no se presentó tarjeta» ──
+describe('Declaración del cajero', () => {
+  const serialDelFixture = `AVQD-${fixture.toUpperCase()}`
+  const resolutionId = () => randomUUID()
+  const declaracion = (requestId: string, extra: Record<string, unknown> = {}) => ({
+    requestId,
+    resolutionId: resolutionId(),
+    statement: 'NO_INSTRUMENT_PRESENTED',
+    statementVersion: 1,
+    ...extra,
+  })
+  let owner: { id: string }
+  let cajero: { id: string }
+
+  beforeAll(async () => {
+    // El OWNER declara con su sesión; el CAJERO sólo con el PIN del OWNER. Los dos son miembros ACTIVOS del venue.
+    owner = await prisma.staff.create({
+      data: {
+        email: `${fixture}-owner@example.test`,
+        firstName: 'Dueño',
+        lastName: 'Fixture',
+        organizations: { create: { organizationId: fixture, role: 'OWNER', isPrimary: true, isActive: true } },
+        venues: { create: { venueId, role: 'OWNER', active: true, pin: '4321' } },
+      },
+      select: { id: true },
+    })
+    cajero = await prisma.staff.create({
+      data: {
+        email: `${fixture}-cajero@example.test`,
+        firstName: 'Cajero',
+        lastName: 'Fixture',
+        organizations: { create: { organizationId: fixture, role: 'MEMBER', isPrimary: true, isActive: true } },
+        venues: { create: { venueId, role: 'CASHIER', active: true, pin: '8765' } },
+      },
+      select: { id: true },
+    })
+  })
+
+  afterAll(async () => {
+    for (const s of [owner, cajero]) {
+      if (!s) continue
+      await prisma.staffVenue.deleteMany({ where: { staffId: s.id } })
+      await prisma.staffOrganization.deleteMany({ where: { staffId: s.id } })
+      await prisma.staff.deleteMany({ where: { id: s.id } })
+    }
+  })
+
+  /** Una fila de la ventana (negativo sin evidencia, 10 s: todavía DENTRO de los 30 s) con su vínculo del intento. */
+  async function filaConIntento() {
+    const row = await auditRequest({ ...negativoSinEvidencia(), updatedAt: new Date(Date.now() - 10_000) })
+    const attemptId = `att-${randomUUID()}`
+    await prisma.terminalPaymentAttemptLink.create({ data: { attemptId, requestId: row.requestId, venueId, terminalId: fixture } })
+    return { row, attemptId }
+  }
+  const declarar = async (attemptId: string, actorStaffId: string, body: Record<string, unknown>) => {
+    const { resolveNoInstrument } = await import('@/services/tpv/no-instrument-resolution.service')
+    return resolveNoInstrument({ venueId, terminalSerial: serialDelFixture, attemptId, actorStaffId }, body)
+  }
+
+  it('(a) la sesión OWNER declara dentro de la ventana: FAILED/OPERATOR_RECONCILED_NO_CHARGE, orden y ranura libres, el GET dice NOT_CHARGED/OPERATOR, y la ventana ya no la toca', async () => {
+    const { row, attemptId } = await filaConIntento()
+    expect(await terminalPaymentService.isTerminalBusy(fixture, venueId)).toBe(true)
+    const r = await declarar(attemptId, owner.id, declaracion(row.requestId))
+    expect(r.resolution).toMatchObject({ by: 'SESSION' })
+    expect(r.request).toMatchObject({
+      status: 'FAILED',
+      outcome: 'NOT_CHARGED',
+      outcomeEvidence: 'OPERATOR_RECONCILED',
+      evidenceClass: 'OPERATOR',
+    })
+    const fila = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    expect(fila).toMatchObject({ status: 'FAILED', failureCode: 'OPERATOR_RECONCILED_NO_CHARGE', paymentId: null, cancelDisposition: null })
+    expect(fila.resultJson as any).toMatchObject({ status: 'failed', outcomeEvidence: 'OPERATOR_RECONCILED' })
+    expect((fila.resultJson as any).terminalResult.errorMessage).toContain('SDK U100') // el sobre original sobrevive
+    const link = await prisma.terminalPaymentAttemptLink.findUniqueOrThrow({ where: { attemptId } })
+    expect(link.operatorResolution).toMatchObject({
+      id: r.resolution.id,
+      kind: 'NO_INSTRUMENT_PRESENTED',
+      staffId: owner.id,
+      by: 'SESSION',
+    })
+    expect(await terminalPaymentService.getPaymentStatus(row.requestId, venueId)).toMatchObject({
+      status: 'FAILED',
+      outcome: 'NOT_CHARGED',
+      outcomeEvidence: 'OPERATOR_RECONCILED',
+      evidenceClass: 'OPERATOR',
+    })
+    expect(await terminalPaymentService.hasChargeBlockingOrderCancel(venueId, orderId)).toBe(false)
+    expect(await terminalPaymentService.isTerminalBusy(fixture, venueId)).toBe(false)
+    // La ventana, después: NOT_ELIGIBLE — no pisa la evidencia del operador, ni aunque ya hayan pasado los 30 s.
+    await conUpdatedAt(fila, new Date(Date.now() - UNPROVEN_NEGATIVE_WINDOW_MS - 1_000))
+    expect(await terminalPaymentService.releaseUnprovenNegative(row.requestId, venueId, 'WATCHDOG')).toBe('NOT_ELIGIBLE')
+    expect(await terminalPaymentService.releaseUnprovenNegativesAfterWindow(new Date())).toEqual({ released: 0, reconciled: 0, held: 0 })
+    expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).failureCode).toBe(
+      'OPERATOR_RECONCILED_NO_CHARGE',
+    )
+    // Bitácora REAL (dentro de la transacción), con quién declaró.
+    const asiento = await prisma.activityLog.findFirst({
+      where: { venueId, action: 'TERMINAL_PAYMENT_NO_INSTRUMENT_RESOLVED', entityId: row.id },
+    })
+    expect(asiento).toMatchObject({ staffId: owner.id })
+    expect(asiento?.data).toMatchObject({ requestId: row.requestId, attemptId, by: 'SESSION', sessionStaffId: owner.id })
+  })
+
+  it('(a-bis) la sesión CASHIER no puede sola (403 real) y con el PIN del OWNER declara por SUPERVISOR_PIN con el staffId del OWNER', async () => {
+    const { row, attemptId } = await filaConIntento()
+    await expect(declarar(attemptId, cajero.id, declaracion(row.requestId))).rejects.toMatchObject({
+      code: 'SUPERVISOR_AUTHORIZATION_REQUIRED',
+      statusCode: 403,
+    })
+    expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).status).toBe('TIMED_OUT')
+    // El PIN de OTRO cajero no eleva.
+    await expect(declarar(attemptId, cajero.id, declaracion(row.requestId, { supervisorPin: '8765' }))).rejects.toMatchObject({
+      code: 'SUPERVISOR_AUTHORIZATION_REQUIRED',
+    })
+    const r = await declarar(attemptId, cajero.id, declaracion(row.requestId, { supervisorPin: '4321' }))
+    expect(r.resolution).toMatchObject({ by: 'SUPERVISOR_PIN' })
+    const link = await prisma.terminalPaymentAttemptLink.findUniqueOrThrow({ where: { attemptId } })
+    expect(link.operatorResolution).toMatchObject({ staffId: owner.id, by: 'SUPERVISOR_PIN' })
+    expect(JSON.stringify(link.operatorResolution)).not.toContain('4321')
+    const asiento = await prisma.activityLog.findFirst({
+      where: { venueId, action: 'TERMINAL_PAYMENT_NO_INSTRUMENT_RESOLVED', entityId: row.id },
+    })
+    expect(asiento).toMatchObject({ staffId: owner.id })
+    expect(asiento?.data).toMatchObject({ by: 'SUPERVISOR_PIN', sessionStaffId: cajero.id })
+    // Una sesión que NO es miembro del venue no se rescata ni con el PIN del OWNER.
+    const { row: otra, attemptId: otroIntento } = await filaConIntento()
+    await expect(
+      declarar(otroIntento, 'staff-que-no-existe', declaracion(otra.requestId, { supervisorPin: '4321' })),
+    ).rejects.toMatchObject({
+      code: 'SESSION_NOT_IN_VENUE',
+      statusCode: 403,
+    })
+    expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: otra.id } })).status).toBe('TIMED_OUT')
+  })
+
+  it('(b) carrera declaración/aprobación: el Payment tardío del intento reabre la fila a COMPLETED (reopened + alarmed), la declaración se CONSERVA (trigger) y el replay devuelve lo declarado sin escribir', async () => {
+    const { row, attemptId } = await filaConIntento()
+    const body = declaracion(row.requestId)
+    const primera = await declarar(attemptId, owner.id, body)
+    // Llega el dinero del MISMO intento por el cierre común (REST o webhook): el dinero manda sobre la palabra del cajero.
+    const tardio = await auditPayment({
+      idempotencyKey: attemptId,
+      processorData: { terminalPaymentRequestId: row.requestId, deviceSerialNumber: fixture },
+    })
+    const cierre = await prisma.$transaction(tx =>
+      terminalPaymentService.closeRowFromPaymentTx(tx, row.requestId, tardio.id, venueId, undefined, 'REST', undefined, 'webhook'),
+    )
+    expect(cierre).toMatchObject({ bound: true, reopened: true, alarmed: true, previousStatus: 'FAILED' })
+    const reabierta = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    expect(reabierta).toMatchObject({ status: 'COMPLETED', paymentId: tardio.id, lateResult: true })
+    // La declaración sobrevive intacta en el vínculo…
+    const link = await prisma.terminalPaymentAttemptLink.findUniqueOrThrow({ where: { attemptId } })
+    expect(link.operatorResolution).toMatchObject({ id: primera.resolution.id, staffId: owner.id })
+    // …y el trigger la vuelve INMUTABLE: ni borrarla ni reescribirla.
+    await expect(
+      prisma.terminalPaymentAttemptLink.update({ where: { attemptId }, data: { operatorResolution: Prisma.DbNull } }),
+    ).rejects.toThrow(/immutable/)
+    await expect(
+      prisma.terminalPaymentAttemptLink.update({
+        where: { attemptId },
+        data: { operatorResolution: { ...(link.operatorResolution as object), staffId: cajero.id } },
+      }),
+    ).rejects.toThrow(/immutable/)
+    // El replay con el MISMO resolutionId devuelve lo declarado (200) sin escribir: la fila COMPLETED no se toca y no hay segundo asiento.
+    const replay = await declarar(attemptId, owner.id, body)
+    expect(replay.resolution).toEqual(primera.resolution)
+    expect(replay.request).toMatchObject({ status: 'COMPLETED', outcome: 'CHARGED', paymentId: tardio.id })
+    expect(replay.attempt).toMatchObject({ outcome: 'RECORDED', paymentId: tardio.id, isWinner: true })
+    expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).status).toBe('COMPLETED')
+    expect(
+      await prisma.activityLog.count({ where: { venueId, action: 'TERMINAL_PAYMENT_NO_INSTRUMENT_RESOLVED', entityId: row.id } }),
+    ).toBe(1)
+    // Y una declaración NUEVA (otro resolutionId) sobre el intento ya declarado es conflicto, no una segunda verdad.
+    await expect(declarar(attemptId, owner.id, declaracion(row.requestId))).rejects.toMatchObject({ code: 'RESOLUTION_CONFLICT' })
+  })
+
+  it('(c) con un ProviderEventLog APROBADO del intento y sin Payment → 409 POSITIVE_EVIDENCE_EXISTS y la fila intacta', async () => {
+    const { row, attemptId } = await filaConIntento()
+    await prisma.providerEventLog.create({ data: eventoAprobado(attemptId, 'tx-veto') })
+    await expect(declarar(attemptId, owner.id, declaracion(row.requestId))).rejects.toMatchObject({
+      code: 'POSITIVE_EVIDENCE_EXISTS',
+      statusCode: 409,
+    })
+    const intacta = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    expect(intacta).toMatchObject({ status: 'TIMED_OUT', failureCode: null, paymentId: null })
+    expect(intacta.updatedAt.getTime()).toBe(row.updatedAt.getTime())
+    expect((await prisma.terminalPaymentAttemptLink.findUniqueOrThrow({ where: { attemptId } })).operatorResolution).toBeNull()
+    expect(
+      await prisma.activityLog.count({ where: { venueId, action: 'TERMINAL_PAYMENT_NO_INSTRUMENT_RESOLVED', entityId: row.id } }),
+    ).toBe(0)
+    expect(await terminalPaymentService.isTerminalBusy(fixture, venueId)).toBe(true)
+    // Un webhook RECHAZADO no veta: es la ausencia de cobro que el cajero está declarando.
+    const { row: otra, attemptId: otroIntento } = await filaConIntento()
+    const rechazado = eventoAprobado(otroIntento, 'tx-declined')
+    rechazado.payload.payload.status = 'declined'
+    await prisma.providerEventLog.create({ data: rechazado })
+    expect((await declarar(otroIntento, owner.id, declaracion(otra.requestId))).resolution).toMatchObject({ by: 'SESSION' })
+  })
+
+  it('(c-bis) dos intentos vinculados a la misma solicitud → 409 OTHER_ATTEMPT_UNRESOLVED; una fila RETENIDA por el banco → POSITIVE_EVIDENCE_EXISTS', async () => {
+    const { row, attemptId } = await filaConIntento()
+    await prisma.terminalPaymentAttemptLink.create({
+      data: { attemptId: `att-${randomUUID()}`, requestId: row.requestId, venueId, terminalId: fixture },
+    })
+    await expect(declarar(attemptId, owner.id, declaracion(row.requestId))).rejects.toMatchObject({ code: 'OTHER_ATTEMPT_UNRESOLVED' })
+    const retenida = await auditRequest({
+      ...negativoSinEvidencia(),
+      failureCode: 'BANK_APPROVED_AWAITING_PAYMENT',
+      terminalId: terminalDe('r'),
+    })
+    const intentoRetenido = `att-${randomUUID()}`
+    await prisma.terminalPaymentAttemptLink.create({
+      data: { attemptId: intentoRetenido, requestId: retenida.requestId, venueId, terminalId: terminalDe('r') },
+    })
+    const { resolveNoInstrument } = await import('@/services/tpv/no-instrument-resolution.service')
+    await expect(
+      resolveNoInstrument(
+        { venueId, terminalSerial: `AVQD-${terminalDe('r').toUpperCase()}`, attemptId: intentoRetenido, actorStaffId: owner.id },
+        declaracion(retenida.requestId),
+      ),
+    ).rejects.toMatchObject({ code: 'POSITIVE_EVIDENCE_EXISTS' })
+    expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: retenida.id } })).failureCode).toBe(
+      'BANK_APPROVED_AWAITING_PAYMENT',
+    )
+  })
+})

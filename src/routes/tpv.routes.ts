@@ -42,7 +42,7 @@ import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.mi
 import * as kioskCheckInController from '../controllers/kiosk/kioskCheckIn.controller'
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
-import { pinLoginRateLimiter } from '../middlewares/pin-login-rate-limit.middleware'
+import { pinLoginRateLimiter, pinOverrideRateLimiter } from '../middlewares/pin-login-rate-limit.middleware'
 import { touchTerminalHeartbeatMiddleware } from '../middlewares/touchTerminalHeartbeat.middleware'
 import { validateVenueAccess } from '../middlewares/validateVenueAccess.middleware'
 import { checkTableOwnership } from '../middlewares/checkTableOwnership.middleware'
@@ -3492,6 +3492,87 @@ router.get(
   authenticateTokenMiddleware,
   validateVenueAccess,
   terminalPaymentTpvController.getAttemptStatus,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/terminal-payment/attempts/{attemptId}/no-instrument-resolution:
+ *   post:
+ *     tags: [TPV]
+ *     summary: La declaración del cajero «no se presentó tarjeta» — cierra el intento en UN paso (plan 16-sep)
+ *     description: |
+ *       La TERMINAL declara que nadie presentó tarjeta, teléfono ni reloj para ESTE intento, y la solicitud queda
+ *       `FAILED / OPERATOR_RECONCILED_NO_CHARGE` (evidencia de clase OPERADOR: libera la orden y la ranura, el POS puede
+ *       volver a cobrar). Es testimonio de una persona, nunca evidencia del procesador: un Payment tardío reabre la fila
+ *       a COMPLETED y avisa; la declaración se conserva inmutable en el vínculo del intento.
+ *
+ *       La identidad sale del JWT de la terminal —`terminalSerialNumber` y `sub` (la sesión con la que entró el cajero)—,
+ *       nunca del cuerpo (esquema estricto: una llave extra es 409). Sin PIN si la sesión tiene el permiso efectivo
+ *       `payments:resolve-no-instrument` (OWNER/ADMIN/MANAGER de fábrica); `supervisorPin` sólo eleva a un miembro válido
+ *       del venue que no lo tiene. Una sesión que ya no es miembro activo del venue no se rescata con ningún PIN.
+ *
+ *       Veta la declaración cualquier evidencia positiva: un Payment del intento o de la solicitud, `paymentId` en la fila,
+ *       una señal positiva en el sobre de la terminal, un webhook APROBADO o con contradicción de procedencia, una fila
+ *       retenida por el banco (`BANK_APPROVED_AWAITING_PAYMENT`). Un replay con el mismo `resolutionId` y el mismo cuerpo
+ *       devuelve 200 sin escribir nada.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: attemptId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [requestId, resolutionId, statement, statementVersion]
+ *             properties:
+ *               requestId:
+ *                 type: string
+ *               resolutionId:
+ *                 type: string
+ *                 format: uuid
+ *                 description: Lo genera la terminal UNA vez por declaración; el replay con el mismo id es idempotente
+ *               statement:
+ *                 type: string
+ *                 enum: [NO_INSTRUMENT_PRESENTED]
+ *               statementVersion:
+ *                 type: integer
+ *                 enum: [1]
+ *               supervisorPin:
+ *                 type: string
+ *                 description: Sólo cuando la sesión NO tiene el permiso — el PIN de alguien que sí lo tiene. Nunca se guarda
+ *     responses:
+ *       200:
+ *         description: "{ success, …la respuesta del GET del intento (S6), resolution: { id, acceptedAt, by: SESSION | SUPERVISOR_PIN } }"
+ *       403:
+ *         description: "{ success: false, code: TERMINAL_IDENTITY_REQUIRED | SUPERVISOR_AUTHORIZATION_REQUIRED | SESSION_NOT_IN_VENUE }"
+ *       404:
+ *         description: "{ success: false, code: ATTEMPT_NOT_FOUND } — intento desconocido, de otra terminal o de otro venue"
+ *       409:
+ *         description: "{ success: false, code: ATTEMPT_NOT_ELIGIBLE | POSITIVE_EVIDENCE_EXISTS | RESOLUTION_CONFLICT | OTHER_ATTEMPT_UNRESOLVED }"
+ *       429:
+ *         description: Demasiados intentos de autorización (misma cubeta que el PIN de gerente)
+ *       503:
+ *         description: "{ success: false, code: RESOLUTION_UNAVAILABLE } — la terminal conserva el intento pendiente"
+ *       401:
+ *         description: Unauthorized
+ */
+router.post(
+  '/venues/:venueId/terminal-payment/attempts/:attemptId/no-instrument-resolution',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  ...pinOverrideRateLimiter,
+  terminalPaymentTpvController.resolveNoInstrument,
 )
 
 // ==========================================

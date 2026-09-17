@@ -1000,6 +1000,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'payments:read',
     'payments:create',
     'payments:refund',
+    'payments:resolve-no-instrument', // Cobro remoto: declarar «no se presentó tarjeta» libera la venta — decisión de gerencia
     'payment-link:read', // Can view and share existing payment links
     'payment-link:create', // Can create new payment links for collections
     'payment-link:update', // Can edit (pause / resume) payment links
@@ -1147,6 +1148,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'printers:*', // PRINT_STATIONS: impresoras, estaciones y ruteo de comandas (feature gratis/core)
     'receipt-layout:*', // RECEIPT_LAYOUT: diseñar el ticket en papel — administrativo; MANAGER excluido a propósito
     'payments:*',
+    'payments:resolve-no-instrument', // ya cabe en 'payments:*'; explícito para que la lista se lea sin expandir el comodín
     'tender-types:*', // Tipos de pago personalizados: crear/editar/ordenar el catálogo
     'area-tickets:*', // Operate and configure multi-area retail tickets
     'scale:*', // Use and configure connected scales
@@ -1288,6 +1290,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // explicito (mismo motivo que el resto de los permisos nuevos de esta lista).
     'estimates:create',
     'payments:*',
+    'payments:resolve-no-instrument', // ya cabe en 'payments:*'; explícito para que la lista se lea sin expandir el comodín
     'tender-types:*', // Tipos de pago personalizados: crear/editar/ordenar el catálogo
     'area-tickets:*', // Operate and configure multi-area retail tickets
     'scale:*', // Use and configure connected scales
@@ -1873,7 +1876,16 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
     'area-tickets:confirm-external', // Confirmar cobro en caja externa (ruta EXTERNAL — Avoqado nunca vio ese cobro)
   ],
   scale: ['scale:use', 'scale:configure'],
-  payments: ['payments:read', 'payments:create', 'payments:refund', 'payments:routing-read', 'payments:routing-manage'],
+  payments: [
+    'payments:read',
+    'payments:create',
+    'payments:refund',
+    'payments:routing-read',
+    'payments:routing-manage',
+    // Cobro remoto: confirmar en la terminal que NO se presentó tarjeta (cierra el intento como OPERATOR_RECONCILED_NO_CHARGE y
+    // libera la venta para recobrarla). Misma clase de decisión que un reembolso: MANAGER+, nunca roles de piso.
+    'payments:resolve-no-instrument',
+  ],
   // Tipos de pago personalizados (VenueTenderType) — catálogo de tenders del venue.
   // NO confundir con billing:payment-methods (tarjetas Stripe de facturación).
   'tender-types': ['tender-types:read', 'tender-types:manage'],

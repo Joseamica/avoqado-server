@@ -175,6 +175,8 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
       // el evento; no toma el candado del intento (el ingreso acaba de vencerlo) y un lock_timeout sólo salta el toque.
       'services/tpv/angelpay-webhook.service.ts': 5,
       'services/tpv/registroRepetido.ts': 1,
+      // Plan 16-sep, Task 4: la declaración del cajero decide sobre un intento (candado del intento → Order → solicitud → CAS).
+      'services/tpv/no-instrument-resolution.service.ts': 1,
     }
     for (const [rel, n] of Object.entries(usos)) {
       const cuerpo = leer(rel)
