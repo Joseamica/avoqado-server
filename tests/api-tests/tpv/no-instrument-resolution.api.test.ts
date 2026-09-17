@@ -28,8 +28,10 @@ jest.mock('../../../src/config/swagger', () => ({ __esModule: true, setupSwagger
 
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
+import { Prisma } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import logger from '@/config/logger'
 
 const app = require('../../../src/app').default
 
@@ -296,7 +298,34 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
     expect(prismaMock.terminalPaymentRequest.updateMany).not.toHaveBeenCalled()
   })
 
-  it('503 RESOLUTION_UNAVAILABLE si la base revienta: nunca se serializa el error (podría llevar el PIN)', async () => {
+  it('la cubeta del PIN sólo cuenta cuerpos CON supervisorPin: 105 declaraciones sin PIN desde la misma IP llegan todas al controlador (0 × 429, sin cabeceras RateLimit); una con PIN sí se cuenta', async () => {
+    // Sin PIN no hay nada que adivinar por fuerza bruta: contar esas llamadas sólo servía para que un cuarto de hora movido en un
+    // local (todas las terminales salen por la misma IP) dejara a la tienda sin poder declarar. DEV permite 100 por minuto por IP:
+    // 105 seguidas superan la cubeta compartida si la ruta la contara.
+    const estados: number[] = []
+    let sinCabecera = 0
+    for (let i = 0; i < 105; i++) {
+      const res = await request(app)
+        .post(RUTA)
+        .set('Authorization', `Bearer ${tokenDeTerminal('staff-owner', 'OWNER')}`)
+        .send(cuerpo())
+      estados.push(res.status)
+      if (res.headers['ratelimit-limit'] === undefined && res.headers['ratelimit-remaining'] === undefined) sinCabecera++
+    }
+    expect(estados.filter(s => s === 429)).toHaveLength(0)
+    expect(new Set(estados)).toEqual(new Set([200])) // la primera declara, el resto son replays idempotentes
+    expect(sinCabecera).toBe(105)
+    // Con PIN la cubeta SÍ se arma (cabeceras estándar presentes) — es lo que protege el PIN de la fuerza bruta.
+    const conPin = await request(app)
+      .post(RUTA)
+      .set('Authorization', `Bearer ${tokenDeTerminal('staff-cashier', 'CASHIER')}`)
+      .send(cuerpo({ supervisorPin: '1234' }))
+    expect(conPin.status).toBe(200) // replay: ya está declarada
+    expect(conPin.headers['ratelimit-limit']).toBeDefined()
+    expect(conPin.headers['ratelimit-remaining']).toBeDefined()
+  })
+
+  it('503 RESOLUTION_UNAVAILABLE si la base revienta: nunca se serializa el error (podría llevar el PIN); el log lleva nombre y código, nunca el mensaje', async () => {
     prismaMock.$transaction.mockRejectedValueOnce(new Error('db caída con supervisorPin=1234 adentro'))
     const res = await request(app)
       .post(RUTA)
@@ -306,5 +335,30 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
     expect(res.body).toMatchObject({ success: false, code: 'RESOLUTION_UNAVAILABLE' })
     expect(JSON.stringify(res.body)).not.toContain('1234')
     expect(JSON.stringify(res.body)).not.toContain('db caída')
+    expect(logger.error).toHaveBeenCalledWith(
+      'No-instrument resolution unavailable',
+      expect.objectContaining({ venueId, attemptId, errorName: 'Error' }),
+    )
+    expect(JSON.stringify((logger.error as jest.Mock).mock.calls)).not.toContain('1234')
+    expect(JSON.stringify((logger.error as jest.Mock).mock.calls)).not.toContain('db caída')
+    // Un error conocido de Prisma deja su código (P2034 = serialización/deadlock), que sí sirve para diagnosticar.
+    ;(logger.error as jest.Mock).mockClear()
+    prismaMock.$transaction.mockRejectedValueOnce(
+      new Prisma.PrismaClientKnownRequestError('Transaction failed due to a write conflict (pin 1234)', {
+        code: 'P2034',
+        clientVersion: 'test',
+      }),
+    )
+    const res2 = await request(app)
+      .post(RUTA)
+      .set('Authorization', `Bearer ${tokenDeTerminal('staff-cashier', 'CASHIER')}`)
+      .send(cuerpo({ supervisorPin: '1234' }))
+    expect(res2.status).toBe(503)
+    expect(logger.error).toHaveBeenCalledWith(
+      'No-instrument resolution unavailable',
+      expect.objectContaining({ errorName: 'PrismaClientKnownRequestError', errorCode: 'P2034' }),
+    )
+    expect(JSON.stringify((logger.error as jest.Mock).mock.calls)).not.toContain('1234')
+    expect(JSON.stringify((logger.error as jest.Mock).mock.calls)).not.toContain('write conflict')
   })
 })

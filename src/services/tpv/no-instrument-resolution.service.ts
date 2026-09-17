@@ -24,7 +24,7 @@ import prisma from '../../utils/prismaClient'
 import { normalizeTerminalId } from '../../communication/sockets/terminal-registry'
 import { evaluatePermissionList, hasPermission } from '../../lib/permissions'
 import { PIN_REGEX } from '../../schemas/common/pin.schema'
-import { candadoDeIntento, OPCIONES_DE_TRANSACCION_DEL_INTENTO } from './candadoDeIntento'
+import { candadoDeIntento, llaveDeIntento, OPCIONES_DE_TRANSACCION_DEL_INTENTO } from './candadoDeIntento'
 import { estadoBancarioSql } from './estadoBancario'
 import { PATRON_SQL_TRIM_COMO_JS } from '../../utils/terminalSerial'
 
@@ -38,7 +38,9 @@ const schema = z
     statement: z.literal('NO_INSTRUMENT_PRESENTED'),
     statementVersion: z.literal(1),
     // La MISMA regla de PIN del resto del repo (4-10 dígitos): un PIN legítimo de 9 dígitos no puede rebotar como cuerpo inválido.
-    supervisorPin: z.string().regex(PIN_REGEX).optional(),
+    // `nullish`, no `optional`: el DTO de la terminal es `String?` y un serializador con nulls mandaría `"supervisorPin": null` en
+    // TODA declaración — leído como inválido sería un 409 en cada una (la lección de `vieneAusente()` en los reembolsos, 11-12 sep).
+    supervisorPin: z.string().regex(PIN_REGEX).nullish(),
   })
   .strict()
 
@@ -129,23 +131,35 @@ export async function resolveNoInstrument(
 ) {
   const parsed = schema.safeParse(raw)
   if (!parsed.success) throw new NoInstrumentResolutionError('ATTEMPT_NOT_ELIGIBLE')
-  const { supervisorPin, ...declaration } = parsed.data
+  const { supervisorPin: pinCrudo, ...declaration } = parsed.data
+  const supervisorPin = pinCrudo ?? undefined // JSON `null` = ausente
   const bodyHash = createHash('sha256').update(JSON.stringify(declaration)).digest('hex')
   const terminalId = normalizeTerminalId(identity.terminalSerial)
+  // La MISMA normalización de la llave que el registrador y la publicación del vínculo (recortada, ≤ 64): el candado, la lectura
+  // del vínculo y lo que se escribe hablan del mismo intento aunque el param llegue con espacios. Una llave inaceptable es un
+  // intento que no existe.
+  const attemptId = llaveDeIntento(identity.attemptId)
+  if (!attemptId) throw new NoInstrumentResolutionError('ATTEMPT_NOT_FOUND', 404)
 
   const resolution = await prisma.$transaction(async tx => {
     // MISMO orden de candados que el registrador y la referencia de Codex: intento → orden → solicitud.
-    await candadoDeIntento(tx, identity.attemptId)
+    await candadoDeIntento(tx, attemptId)
     const inicial = await tx.terminalPaymentRequest.findFirst({
       where: { requestId: declaration.requestId, venueId: identity.venueId, terminalId },
     })
     if (!inicial) throw new NoInstrumentResolutionError('ATTEMPT_NOT_FOUND', 404)
-    if (inicial.orderId) await tx.$queryRaw`SELECT "id" FROM "Order" WHERE "id" = ${inicial.orderId} FOR UPDATE`
+    // El candado de la orden va acotado al venue y su resultado decide la pertenencia: una orden de OTRO venue no se bloquea ni se
+    // acepta (una sola sentencia, sin segunda lectura sin candado).
+    const ordenBloqueada = inicial.orderId
+      ? await tx.$queryRaw<
+          { id: string }[]
+        >`SELECT "id" FROM "Order" WHERE "id" = ${inicial.orderId} AND "venueId" = ${identity.venueId} FOR UPDATE`
+      : null
     await tx.$queryRaw`SELECT "id" FROM "TerminalPaymentRequest" WHERE "requestId" = ${declaration.requestId} AND "venueId" = ${identity.venueId} FOR UPDATE`
     const row = await tx.terminalPaymentRequest.findFirst({
       where: { requestId: declaration.requestId, venueId: identity.venueId, terminalId },
     })
-    const link = await tx.terminalPaymentAttemptLink.findUnique({ where: { attemptId: identity.attemptId } })
+    const link = await tx.terminalPaymentAttemptLink.findUnique({ where: { attemptId } })
     if (
       !row ||
       !link ||
@@ -154,7 +168,7 @@ export async function resolveNoInstrument(
       normalizeTerminalId(link.terminalId) !== terminalId
     )
       throw new NoInstrumentResolutionError('ATTEMPT_NOT_FOUND', 404)
-    if (row.orderId && !(await tx.order.findFirst({ where: { id: row.orderId, venueId: identity.venueId }, select: { id: true } })))
+    if (row.orderId && (row.orderId !== inicial.orderId || ordenBloqueada?.length !== 1))
       throw new NoInstrumentResolutionError('ATTEMPT_NOT_ELIGIBLE')
 
     const existing = readOperatorResolution(link.operatorResolution)
@@ -189,7 +203,7 @@ export async function resolveNoInstrument(
     const positivo = await tx.payment.findFirst({
       where: {
         OR: [
-          { idempotencyKey: identity.attemptId },
+          { idempotencyKey: attemptId },
           { terminalPaymentRequestId: declaration.requestId },
           ...(row.paymentId ? [{ id: row.paymentId }] : []),
         ],
@@ -208,7 +222,7 @@ export async function resolveNoInstrument(
       positivo ||
       row.paymentId ||
       senalPositiva ||
-      (await evidenciaQueVetaLaDeclaracion(tx, identity.attemptId, identity.venueId, terminalId)).length
+      (await evidenciaQueVetaLaDeclaracion(tx, attemptId, identity.venueId, terminalId)).length
     )
       throw new NoInstrumentResolutionError('POSITIVE_EVIDENCE_EXISTS')
     const { desenlaceCanonico } = await import('../terminal-payment.service')
@@ -251,7 +265,7 @@ export async function resolveNoInstrument(
     })
     if (cas.count !== 1) throw new NoInstrumentResolutionError('ATTEMPT_NOT_ELIGIBLE')
     await tx.terminalPaymentAttemptLink.update({
-      where: { attemptId: identity.attemptId },
+      where: { attemptId },
       data: { operatorResolution: saved as unknown as Prisma.InputJsonValue },
     })
     // Asiento DENTRO de la transacción (`logAction` abre su propia conexión): una declaración = un asiento.
@@ -264,7 +278,7 @@ export async function resolveNoInstrument(
         staffId: actor.staffId,
         data: {
           requestId: declaration.requestId,
-          attemptId: identity.attemptId,
+          attemptId,
           terminalId,
           by,
           sessionStaffId: identity.actorStaffId,
@@ -278,7 +292,7 @@ export async function resolveNoInstrument(
   // La respuesta es la MISMA proyección durable de S6 (contrato con las apps publicadas: nada se quita) más la resolución.
   const { terminalPaymentService } = await import('../terminal-payment.service')
   const current = await terminalPaymentService.consultarIntentoDeTerminal({
-    attemptId: identity.attemptId,
+    attemptId,
     venueId: identity.venueId,
     terminalSerial: identity.terminalSerial,
   })

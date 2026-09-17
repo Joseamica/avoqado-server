@@ -5,6 +5,7 @@
  * solicitud. La identidad es la de la terminal del JWT (`terminalSerialNumber`), no el rol del cajero.
  */
 import { Request, Response } from 'express'
+import { Prisma } from '@prisma/client'
 import { terminalPaymentService } from '../../services/terminal-payment.service'
 import { logAction } from '../../services/dashboard/activity-log.service'
 import logger from '../../config/logger'
@@ -89,8 +90,13 @@ export const resolveNoInstrument = async (req: Request, res: Response) => {
       }
       return res.status(error.statusCode).json({ success: false, code: error.code, message: error.message })
     }
-    // Nunca serializar un error de Prisma aquí: podría llevar el PIN.
-    logger.error('No-instrument resolution unavailable', { venueId: req.params.venueId, attemptId: req.params.attemptId })
+    // Nunca el mensaje ni el stack (podrían llevar el PIN): sólo el nombre del error y, si es de Prisma, su código.
+    logger.error('No-instrument resolution unavailable', {
+      venueId: req.params.venueId,
+      attemptId: req.params.attemptId,
+      errorName: error instanceof Error ? error.name : typeof error,
+      ...(error instanceof Prisma.PrismaClientKnownRequestError ? { errorCode: error.code } : {}),
+    })
     return res
       .status(503)
       .json({ success: false, code: 'RESOLUTION_UNAVAILABLE', message: 'No se pudo confirmar el cierre. Conserva el intento pendiente.' })

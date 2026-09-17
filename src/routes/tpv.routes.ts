@@ -42,7 +42,7 @@ import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.mi
 import * as kioskCheckInController from '../controllers/kiosk/kioskCheckIn.controller'
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
-import { pinLoginRateLimiter, pinOverrideRateLimiter } from '../middlewares/pin-login-rate-limit.middleware'
+import { noInstrumentPinRateLimiter, pinLoginRateLimiter } from '../middlewares/pin-login-rate-limit.middleware'
 import { touchTerminalHeartbeatMiddleware } from '../middlewares/touchTerminalHeartbeat.middleware'
 import { validateVenueAccess } from '../middlewares/validateVenueAccess.middleware'
 import { checkTableOwnership } from '../middlewares/checkTableOwnership.middleware'
@@ -3561,7 +3561,7 @@ router.get(
  *       409:
  *         description: "{ success: false, code: ATTEMPT_NOT_ELIGIBLE | POSITIVE_EVIDENCE_EXISTS | RESOLUTION_CONFLICT | OTHER_ATTEMPT_UNRESOLVED }"
  *       429:
- *         description: Demasiados intentos de autorización (misma cubeta que el PIN de gerente)
+ *         description: Demasiados intentos de autorización — sólo cuenta las llamadas CON supervisorPin (mismos topes que el PIN de gerente)
  *       503:
  *         description: "{ success: false, code: RESOLUTION_UNAVAILABLE } — la terminal conserva el intento pendiente"
  *       401:
@@ -3571,7 +3571,7 @@ router.post(
   '/venues/:venueId/terminal-payment/attempts/:attemptId/no-instrument-resolution',
   authenticateTokenMiddleware,
   validateVenueAccess,
-  ...pinOverrideRateLimiter,
+  ...noInstrumentPinRateLimiter, // sólo cuenta los cuerpos CON supervisorPin
   terminalPaymentTpvController.resolveNoInstrument,
 )
 

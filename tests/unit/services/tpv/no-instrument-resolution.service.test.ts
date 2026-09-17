@@ -109,8 +109,21 @@ function armar(filaOver: Record<string, unknown> = {}, linkOver: Record<string, 
   prismaMock.payment.findFirst.mockResolvedValue(null)
   prismaMock.payment.findUnique.mockResolvedValue(null)
   prismaMock.activityLog.create.mockResolvedValue({ id: 'log-1' })
-  prismaMock.$queryRaw.mockResolvedValue([])
+  // `$queryRaw` contesta por el TEXTO de la sentencia: el candado del intento, los FOR UPDATE y la consulta de evidencia que veta.
+  // El candado de la orden es VENUE-scoped y devuelve la fila bloqueada (o nada, si la orden no es del venue).
+  prismaMock.$queryRaw.mockImplementation(async (tpl: any) => {
+    const sql = Array.isArray(tpl) ? tpl.join('?') : String(tpl)
+    if (sql.includes('"Order"') && sql.includes('FOR UPDATE')) return fila.orderId ? [{ id: fila.orderId }] : []
+    return []
+  })
   conMiembros([OWNER, MANAGER, CASHIER])
+}
+const sqlDe = (call: any[]) => (Array.isArray(call[0]) ? call[0].join('?') : String(call[0]))
+
+/** Volver a armar A MEDIA prueba: limpia también los contadores, o `nadaEscrito()` vería las llamadas de la mitad anterior. */
+const rearmar = (filaOver: Record<string, unknown> = {}, linkOver: Record<string, unknown> = {}) => {
+  jest.clearAllMocks()
+  armar(filaOver, linkOver)
 }
 
 const rechaza = async (promesa: Promise<unknown>, code: string, statusCode = 409) => {
@@ -270,7 +283,7 @@ describe('resolveNoInstrument — la declaración del cajero cierra el intento c
     await rechaza(resolveNoInstrument(identidad, declaracion()), 'SUPERVISOR_AUTHORIZATION_REQUIRED', 403)
     nadaEscrito()
 
-    armar()
+    rearmar()
     conMiembros([{ ...CASHIER, permissionSetId: 'ps-2', permissionSet: { permissions: ['orders:read', NO_INSTRUMENT_PERMISSION] } }])
     const r = await resolveNoInstrument({ ...identidad, actorStaffId: 'staff-cashier' }, declaracion())
     expect(r.resolution).toMatchObject({ by: 'SESSION' })
@@ -328,7 +341,7 @@ describe('resolveNoInstrument — la declaración del cajero cierra el intento c
     await rechaza(resolveNoInstrument(identidad, declaracion()), 'ATTEMPT_NOT_FOUND', 404)
     nadaEscrito()
     // Un intento que nadie conoce se contesta igual.
-    armar()
+    rearmar()
     await rechaza(resolveNoInstrument({ ...identidad, attemptId: 'att-desconocido' }, declaracion()), 'ATTEMPT_NOT_FOUND', 404)
     nadaEscrito()
   })
@@ -396,7 +409,9 @@ describe('resolveNoInstrument — la declaración del cajero cierra el intento c
     })
 
     it('hay un ProviderEventLog del intento APROBADO por el banco, o con contradicción de procedencia', async () => {
-      prismaMock.$queryRaw.mockResolvedValue([{ id: 'e1' }])
+      prismaMock.$queryRaw.mockImplementation(async (tpl: any) =>
+        sqlDe([tpl]).includes('"ProviderEventLog"') ? [{ id: 'e1' }] : sqlDe([tpl]).includes('"Order"') ? [{ id: 'order-1' }] : [],
+      )
       await rechaza(resolveNoInstrument(identidad, declaracion()), 'POSITIVE_EVIDENCE_EXISTS')
       nadaEscrito()
     })
@@ -410,7 +425,7 @@ describe('resolveNoInstrument — la declaración del cajero cierra el intento c
     })
     await rechaza(resolveNoInstrument(identidad, declaracion()), 'ATTEMPT_NOT_ELIGIBLE')
     nadaEscrito()
-    armar({ status: 'PENDING', resultJson: null })
+    rearmar({ status: 'PENDING', resultJson: null })
     await rechaza(resolveNoInstrument(identidad, declaracion()), 'ATTEMPT_NOT_ELIGIBLE')
     nadaEscrito()
   })
@@ -419,16 +434,63 @@ describe('resolveNoInstrument — la declaración del cajero cierra el intento c
     armar({ status: 'FAILED', failureCode: 'NO_EVIDENCE_AFTER_WINDOW' })
     await rechaza(resolveNoInstrument(identidad, declaracion()), 'ATTEMPT_NOT_ELIGIBLE')
     nadaEscrito()
-    armar({ failureCode: 'BANK_APPROVED_AWAITING_PAYMENT' })
+    rearmar({ failureCode: 'BANK_APPROVED_AWAITING_PAYMENT' })
     await rechaza(resolveNoInstrument(identidad, declaracion()), 'POSITIVE_EVIDENCE_EXISTS')
     nadaEscrito()
   })
 
-  it('13. la orden de la fila no pertenece al venue → 409 ATTEMPT_NOT_ELIGIBLE', async () => {
-    prismaMock.order.findFirst.mockResolvedValue(null)
+  it('13. la orden de la fila no pertenece al venue → 409 ATTEMPT_NOT_ELIGIBLE (lo decide el propio FOR UPDATE, acotado al venue)', async () => {
+    prismaMock.$queryRaw.mockImplementation(async (tpl: any) => (sqlDe([tpl]).includes('"Order"') ? [] : []))
     await rechaza(resolveNoInstrument(identidad, declaracion()), 'ATTEMPT_NOT_ELIGIBLE')
     nadaEscrito()
-    expect(prismaMock.order.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'order-1', venueId } }))
+    const candadoDeOrden = prismaMock.$queryRaw.mock.calls.find((c: any[]) => sqlDe(c).includes('"Order"'))
+    expect(candadoDeOrden).toBeDefined()
+    expect(sqlDe(candadoDeOrden)).toMatch(/"Order" WHERE "id" = \? AND "venueId" = \? FOR UPDATE/)
+    expect(candadoDeOrden.slice(1)).toEqual(['order-1', venueId])
+    // Una sola consulta decide candado y pertenencia: no hay segunda lectura de la orden sin candado.
+    expect(prismaMock.order.findFirst).not.toHaveBeenCalled()
+  })
+
+  it('1b. `supervisorPin: null` es «ausente» (un DTO String? serializado con nulls no puede volverse 409): con permiso declara por SESSION; sin permiso → 403', async () => {
+    const r = await resolveNoInstrument(identidad, { ...declaracion(), supervisorPin: null })
+    expect(r.resolution).toMatchObject({ by: 'SESSION' })
+    rearmar()
+    await rechaza(
+      resolveNoInstrument({ ...identidad, actorStaffId: 'staff-cashier' }, { ...declaracion(), supervisorPin: null }),
+      'SUPERVISOR_AUTHORIZATION_REQUIRED',
+      403,
+    )
+    nadaEscrito()
+    // Y un PIN que no es cadena de dígitos sigue siendo cuerpo inválido.
+    await rechaza(
+      resolveNoInstrument({ ...identidad, actorStaffId: 'staff-cashier' }, { ...declaracion(), supervisorPin: 1234 }),
+      'ATTEMPT_NOT_ELIGIBLE',
+    )
+    await rechaza(
+      resolveNoInstrument({ ...identidad, actorStaffId: 'staff-cashier' }, { ...declaracion(), supervisorPin: '12' }),
+      'ATTEMPT_NOT_ELIGIBLE',
+    )
+  })
+
+  it('el candado del intento y el vínculo usan la llave NORMALIZADA (`llaveDeIntento`): un param con espacios alrededor es el mismo intento', async () => {
+    const r = await resolveNoInstrument({ ...identidad, attemptId: '  att-1  ' }, declaracion())
+    expect(r.resolution).toMatchObject({ by: 'SESSION' })
+    const candado = prismaMock.$queryRaw.mock.calls.find((c: any[]) => sqlDe(c).includes('pg_advisory_xact_lock'))
+    expect(candado).toBeDefined()
+    expect(candado[candado.length - 1]).toBe('att-1')
+    expect(prismaMock.terminalPaymentAttemptLink.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { attemptId: 'att-1' } }),
+    )
+    expect(prismaMock.terminalPaymentAttemptLink.update).toHaveBeenCalledWith(expect.objectContaining({ where: { attemptId: 'att-1' } }))
+    expect(prismaMock.activityLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ data: expect.objectContaining({ attemptId: 'att-1' }) }) }),
+    )
+    // Una llave que `llaveDeIntento` no acepta (vacía o de más de 64) es un intento que no existe: 404, sin candado.
+    rearmar()
+    await rechaza(resolveNoInstrument({ ...identidad, attemptId: '   ' }, declaracion()), 'ATTEMPT_NOT_FOUND', 404)
+    await rechaza(resolveNoInstrument({ ...identidad, attemptId: 'a'.repeat(65) }, declaracion()), 'ATTEMPT_NOT_FOUND', 404)
+    expect(prismaMock.$queryRaw.mock.calls.some((c: any[]) => sqlDe(c).includes('pg_advisory_xact_lock'))).toBe(false)
+    nadaEscrito()
   })
 
   it('el CAS que pierde (la fila cambió entre la lectura y la escritura) no escribe el vínculo ni la bitácora', async () => {
