@@ -30,6 +30,7 @@ import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import { Prisma } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
+import { mirrorTokenRoleOnStaffVenue } from '@tests/__helpers__/venueRoleMock'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import logger from '@/config/logger'
 
@@ -312,9 +313,9 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
       estados.push(res.status)
       if (res.headers['ratelimit-limit'] === undefined && res.headers['ratelimit-remaining'] === undefined) sinCabecera++
     }
-    expect(estados.filter(s => s === 429)).toHaveLength(0)
-    expect(new Set(estados)).toEqual(new Set([200])) // la primera declara, el resto son replays idempotentes
-    expect(sinCabecera).toBe(105)
+    // Un solo objeto en la aserción: si algún día falla, el reporte dice QUÉ estados volvieron, no sólo que algo no cuadró.
+    // La primera declara y el resto son replays idempotentes: todas 200, ninguna 429, ninguna con cabeceras de la cubeta.
+    expect({ estados: [...new Set(estados)], sinCabecera }).toEqual({ estados: [200], sinCabecera: 105 })
     // Con PIN la cubeta SÍ se arma (cabeceras estándar presentes) — es lo que protege el PIN de la fuerza bruta.
     const conPin = await request(app)
       .post(RUTA)
@@ -360,5 +361,35 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
     )
     expect(JSON.stringify((logger.error as jest.Mock).mock.calls)).not.toContain('1234')
     expect(JSON.stringify((logger.error as jest.Mock).mock.calls)).not.toContain('write conflict')
+  })
+
+  // 🔴 VA AL FINAL: agota la cubeta por IP del proceso entero; cualquier prueba CON PIN que corriera después recibiría 429.
+  it('con PIN la cubeta es LA MISMA que la del PIN de gerente: agotarla desde esta ruta deja en 429 a POST /mobile/venues/:venueId/permission-overrides desde la misma IP', async () => {
+    // DEV: 100 por minuto por IP (prod: 10 cada 15 min). Las de esta ruta con PIN cuentan; las respuestas del servicio dan igual.
+    const agotadas: number[] = []
+    for (let i = 0; i < 100; i++) {
+      const res = await request(app)
+        .post(RUTA)
+        .set('Authorization', `Bearer ${tokenDeTerminal('staff-cashier', 'CASHIER')}`)
+        .send(cuerpo({ supervisorPin: '1234' }))
+      agotadas.push(res.status)
+    }
+    expect(agotadas.some(s => s === 429)).toBe(true) // el tope de esta misma ruta ya se alcanzó
+    // La ruta del PIN de gerente, desde la MISMA IP, con un token válido y membresía real: el limitador corta ANTES de validar el cuerpo.
+    mirrorTokenRoleOnStaffVenue('CASHIER', venueId)
+    const override = await request(app)
+      .post(`/api/v1/mobile/venues/${venueId}/permission-overrides`)
+      .set('Authorization', `Bearer ${token({ sub: 'staff-cashier', role: 'CASHIER' })}`)
+      .send({ pin: '1234', permission: 'orders:cancel' })
+    expect({ status: override.status, body: override.body }).toEqual({
+      status: 429,
+      body: expect.objectContaining({ error: 'RATE_LIMIT_EXCEEDED' }),
+    })
+    // Y sin PIN esta ruta sigue pasando aunque la cubeta esté agotada: no la toca.
+    const sinPin = await request(app)
+      .post(RUTA)
+      .set('Authorization', `Bearer ${tokenDeTerminal('staff-owner', 'OWNER')}`)
+      .send(cuerpo())
+    expect(sinPin.status).toBe(200)
   })
 })

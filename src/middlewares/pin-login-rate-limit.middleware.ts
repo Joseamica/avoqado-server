@@ -23,7 +23,7 @@
  */
 
 import rateLimit, { RateLimitRequestHandler } from 'express-rate-limit'
-import { Request, Response } from 'express'
+import { NextFunction, Request, RequestHandler, Response } from 'express'
 import logger from '@/config/logger'
 
 /**
@@ -212,63 +212,24 @@ const overrideVenueRateLimiter: RateLimitRequestHandler = rateLimit({
 export const pinOverrideRateLimiter = [overrideIpRateLimiter, overrideVenueRateLimiter]
 
 /**
- * La declaración del cajero «no se presentó tarjeta» (plan 16-sep, Task 4) — MISMAS ventanas, llaves y mensajes que la
- * autorización por PIN, pero SÓLO cuando el cuerpo trae `supervisorPin`.
+ * La declaración del cajero «no se presentó tarjeta» (plan 16-sep, Task 4) — LA MISMA cubeta que la autorización por PIN
+ * de gerente, pero SÓLO cuando el cuerpo trae `supervisorPin`.
  *
  * 🔴 Sin PIN no hay nada que adivinar por fuerza bruta: una sesión con el permiso declara sola, y un replay o un 409 tampoco
  * prueban ningún secreto. Contarlos igual sólo servía para que un cuarto de hora movido en un local (todas las terminales
  * salen por la misma IP) dejara a la tienda sin poder declarar durante 15 minutos. Se decide leyendo `req.body`, que ya está
  * parseado: `express.json()` va en `configureCoreMiddlewares`, montado ANTES del router de `/api/v1`.
  *
- * Instancias PROPIAS (contador aparte de `pinOverrideRateLimiter`): `express-rate-limit` no admite compartir un `Store` entre
- * dos limitadores, y la protección del PIN por esta ruta queda con el MISMO tope (10/15 min por IP, 20 por venue en prod).
+ * El envoltorio reutiliza las INSTANCIAS del override (mismo `Store`): la cubeta física es UNA para las dos rutas — un PIN
+ * que se prueba por aquí gasta el mismo presupuesto (10/15 min por IP, 20 por venue en prod) que uno probado por el override,
+ * sin duplicar intentos entre rutas.
  */
 const sinSupervisorPin = (req: Request) => typeof (req.body as { supervisorPin?: unknown } | undefined)?.supervisorPin !== 'string'
 
-const noInstrumentIpRateLimiter: RateLimitRequestHandler = rateLimit({
-  windowMs: RATE_LIMIT_CONFIG.IP.windowMs,
-  max: RATE_LIMIT_CONFIG.IP.max,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req: Request) => `pin-override:ip:${req.ip || req.socket.remoteAddress || 'unknown'}`,
-  skip: sinSupervisorPin,
-  handler: (req: Request, res: Response) => {
-    logger.warn('🚨 Rate limit de autorización por PIN excedido (por IP)', {
-      ipAddress: req.ip || req.socket.remoteAddress || 'unknown',
-      venueId: req.params.venueId || 'unknown',
-      endpoint: req.path,
-      userAgent: req.get('user-agent'),
-    })
-    res.status(429).json({
-      error: 'RATE_LIMIT_EXCEEDED',
-      message: 'Demasiados intentos de autorización. Espera 15 minutos.',
-      retryAfter: 15 * 60,
-    })
-  },
-})
-
-const noInstrumentVenueRateLimiter: RateLimitRequestHandler = rateLimit({
-  windowMs: RATE_LIMIT_CONFIG.VENUE.windowMs,
-  max: RATE_LIMIT_CONFIG.VENUE.max,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req: Request) => `pin-override:venue:${req.params.venueId || 'unknown'}`,
-  skip: (req: Request) => !req.params.venueId || sinSupervisorPin(req),
-  handler: (req: Request, res: Response) => {
-    logger.warn('🚨 Rate limit de autorización por PIN excedido (por venue)', {
-      venueId: req.params.venueId || 'unknown',
-      ipAddress: req.ip || req.socket.remoteAddress || 'unknown',
-      endpoint: req.path,
-    })
-    res.status(429).json({
-      error: 'RATE_LIMIT_EXCEEDED',
-      message: 'Demasiados intentos de autorización. Espera 15 minutos.',
-      retryAfter: 15 * 60,
-    })
-  },
-})
-
-export const noInstrumentPinRateLimiter = [noInstrumentIpRateLimiter, noInstrumentVenueRateLimiter]
+/** La declaración sin PIN no toca la cubeta; con PIN comparte EXACTAMENTE la del override de gerente (mismas instancias ⇒ mismo Store). */
+export const noInstrumentPinRateLimiter: RequestHandler[] = pinOverrideRateLimiter.map(
+  limiter => (req: Request, res: Response, next: NextFunction) => (sinSupervisorPin(req) ? next() : limiter(req, res, next)),
+)
 
 /**
  * Cambiar de usuario por PIN — CUBETA PROPIA, contada por SESIÓN.
