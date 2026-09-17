@@ -126,7 +126,8 @@ export const ANGELPAY_WEBHOOK_ERROR_REASONS = {
 /**
  * Revisión final (17-sep, B): `message` del resultado cuando la RE-RETENCIÓN de una solicitud liberada no se pudo decidir
  * (candado ocupado, base caída) en una rama que normalmente CIERRA el evento (serial que contradice el vínculo, colisión de
- * referencia): el evento se deja PENDING, sin cerrarlo, para que el worker repita la rama completa. No es un motivo durable.
+ * referencia; desde la ronda 2, también el sello de un cobro que no fue el primer confirmador): el evento se deja PENDING, sin
+ * cerrarlo, para que el worker repita la rama completa. No es un motivo durable.
  */
 const RETENCION_DIFERIDA = 'HOLD_DEFERRED'
 
@@ -656,6 +657,35 @@ async function confirmarPorVinculo(args: {
     select: { paymentId: true, closedVia: true },
   })
   const primerConfirmador = evidencia === null && filaDespues?.paymentId === resultado.id && filaDespues?.closedVia === 'webhook'
+
+  // Ronda 2 (17-sep, P1 — Codex r7, preexistente): si el webhook NO fue el primer confirmador, el registrador pudo devolver un cobro
+  // del intento que el cierre común no logró LIGAR (atribuido a otra terminal, contradicción en la consolidación) — y la solicitud,
+  // si ya estaba LIBERADA (ventana o cajero), seguiría diciendo «puedes volver a cobrar» con ese cobro encima. El registrador ya pide
+  // la re-retención por las identidades del Payment; aquí se pide OTRA vez, por la solicitud de ESTE vínculo, ANTES de sellar: si se
+  // difiere (candado ocupado), el evento no se sella ni se estampa — sigue PENDING y el worker repite todo (el registro es idempotente).
+  // Con ganador (segunda captura) la fila no está liberada y el servicio contesta NOT_APPLICABLE sin abrir transacción; sin un
+  // cobro COMPLETED ligado (la evidencia PENDING de una colisión no lo es) su CAS no aplica y también contesta NOT_APPLICABLE.
+  if (!primerConfirmador) {
+    const retencion = await terminalPaymentService.retenerSolicitudLiberadaPorPagoSinLigar({
+      requestId: link.requestId,
+      venueId: link.venueId,
+      paymentId: resultado.id,
+      origen: 'WEBHOOK',
+    })
+    if (retencion === 'DEFERRED') {
+      return {
+        action: 'ORPHANED',
+        ...(esSegundaCaptura
+          ? { errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.POSSIBLE_SECOND_CAPTURE }
+          : esColision
+            ? { errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.POSSIBLE_REFERENCE_COLLISION }
+            : {}),
+        eventLogId,
+        paymentId: resultado.id,
+        message: RETENCION_DIFERIDA,
+      }
+    }
+  }
 
   // La misma huella del webhook que deja el camino MATCHED, fusionada sobre el JSON VIGENTE (nunca desde una lectura vieja).
   const huella = {

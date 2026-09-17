@@ -24,9 +24,11 @@ import prisma from '../utils/prismaClient'
 import { terminalRegistry, normalizeTerminalId } from '../communication/sockets/terminal-registry'
 import { PATRON_SQL_TRIM_COMO_JS } from '../utils/terminalSerial'
 import { estadoBancarioSql } from './tpv/estadoBancario'
-import { candadoDeIntento, candadoDeSolicitud, OPCIONES_DE_TRANSACCION_DEL_INTENTO } from './tpv/candadoDeIntento'
+import { candadoDeIntento, candadoDeSolicitud, llaveDeIntento, OPCIONES_DE_TRANSACCION_DEL_INTENTO } from './tpv/candadoDeIntento'
+import { solicitudDelRegistro } from './tpv/identidadDelCobro'
 import {
   hayAprobadoVinculadoSql,
+  hayPagoLigadoSql,
   pagosLigados,
   porQueHayEvidenciaPositiva,
   sinAprobadoVinculadoSql,
@@ -1257,11 +1259,12 @@ export type CloseRowOutcome =
       /** EXACTAMENTE la condición de la alarma 🚨 de abajo (`reopened || CANCEL_REQUESTED`): dinero sobre una fila que ya dábamos por cerrada o en cancelación. */
       alarmed: boolean
       /**
-       * Sólo cuando la fila venía `FAILED/NO_EVIDENCE_AFTER_WINDOW` (la ventana la liberó y el banco aprobó DESPUÉS): cuántos
-       * cobros con tarjeta recibió la orden desde la liberación, sin contar este Payment ni reembolsos. `null` = sin orden.
-       * Es «otros cobros registrados hasta ahora», no una prueba de doble cobro — quien revisa decide.
+       * Sólo cuando la fila venía LIBERADA sin evidencia del procesador — por la ventana (`FAILED/NO_EVIDENCE_AFTER_WINDOW`) o por el
+       * cajero (`FAILED/OPERATOR_RECONCILED_NO_CHARGE`, ronda 2 del 17-sep) — y el banco aprobó DESPUÉS: cuántos cobros con tarjeta
+       * recibió la orden desde la liberación, sin contar este Payment ni reembolsos (`null` = sin orden), y con qué código se había
+       * liberado. Es «otros cobros registrados hasta ahora», no una prueba de doble cobro — quien revisa decide.
        */
-      lateAfterWindow?: { otherCardPaymentsOnOrderAfterRelease: number | null }
+      lateAfterWindow?: { otherCardPaymentsOnOrderAfterRelease: number | null; previousFailureCode?: string }
     }
   | {
       bound: false
@@ -1296,7 +1299,35 @@ export type AttemptLinkAck =
   | { success: false; reason: 'INVALID' | 'NOT_OWNER' | 'ATTEMPT_OWNED_BY_OTHER_REQUEST' | 'ERROR' }
 
 /**
- * Correo ops de la aprobación tardía tras la ventana. Corre DESPUÉS del commit y sin `await` encadenado: dentro de la
+ * Revisión final (17-sep): el desenlace de RE-RETENER una solicitud ya liberada sin evidencia del procesador (ventana o cajero).
+ * `DEFERRED` = no se pudo decidir (candado ocupado, base caída) y nada se escribió: quien llama lo vuelve a pedir.
+ */
+export type ResultadoDeReRetencion = 'HELD' | 'NOT_APPLICABLE' | 'DEFERRED'
+/** Revisión final (B): por qué el aviso APROBADO del banco no creó el Payment. */
+export type MotivoDeRetencionPorAprobacion =
+  | 'AMOUNT_MISMATCH'
+  | 'PROCESSING_ERROR'
+  | 'LINK_TERMINAL_MISMATCH'
+  | 'POSSIBLE_REFERENCE_COLLISION'
+/** Ronda 2 (P1): quién intentó ligar un cobro ligado a una solicitud ya liberada y no pudo (queda en el sobre y en el asiento). */
+export type OrigenDeRetencionPorPago =
+  | 'REST'
+  | 'WEBHOOK'
+  | 'SOCKET'
+  | 'VENTANA'
+  | 'BARRIDO_VENCIDAS'
+  | 'BARRIDO_UNKNOWN'
+  | 'BARRIDO_SOLTADAS'
+  | 'BARRIDO_LIBERADAS'
+  | 'LIBERACION_MANUAL'
+/** Las dos variantes del núcleo `reRetenerSolicitudLiberada`: el banco aprobó sin Payment, o hay un Payment ligado sin ligar. */
+type VarianteDeReRetencion =
+  | { tipo: 'APROBACION'; attemptId: string; eventLogId: string; motivo: MotivoDeRetencionPorAprobacion }
+  | { tipo: 'PAGO_SIN_LIGAR'; paymentId: string | null; origen: OrigenDeRetencionPorPago }
+
+/**
+ * Correo ops de la aprobación tardía tras una liberación sin evidencia del procesador: la ventana o, desde la ronda 2 (17-sep), la
+ * declaración del cajero. Corre DESPUÉS del commit y sin `await` encadenado: dentro de la
  * transacción podría salir y luego revertirse, y repetirse al reintentar (Codex, Task 0, P2). El asiento durable y único es
  * el `ActivityLog` de `closeRowFromPaymentTx`; el correo es best-effort y NO se promete «exactamente una vez».
  * La llaman los llamadores de `closeRowFromPaymentTx` tras su commit — el registrador REST/webhook (orden y venta rápida),
@@ -1313,10 +1344,17 @@ export function avisarAprobacionTardiaTrasVentana(
 ): void {
   if (!cierre?.bound || !cierre.lateAfterWindow) return
   const otros = cierre.lateAfterWindow.otherCardPaymentsOnOrderAfterRelease
+  // Ronda 2 (17-sep, hermano): la DECLARACIÓN del cajero dispara la misma detección; el asunto y la primera línea dicen cuál de las
+  // dos liberaciones fue. Un desenlace sin código previo (construido antes de este cambio) es la ventana, como siempre.
+  const porCajero = cierre.lateAfterWindow.previousFailureCode === 'OPERATOR_RECONCILED_NO_CHARGE'
   void sendOpsAlert({
-    subject: `Cobro aprobado tarde tras la ventana — ${ctx.terminalId ?? 'terminal desconocida'}`,
+    subject: `${porCajero ? 'Cobro aprobado tarde tras la declaración del cajero' : 'Cobro aprobado tarde tras la ventana'} — ${
+      ctx.terminalId ?? 'terminal desconocida'
+    }`,
     lines: [
-      `El banco aprobó un cobro (${ctx.paymentId}) de la solicitud ${ctx.requestId} después de que la ventana de 30 s la liberara.`,
+      porCajero
+        ? `El banco aprobó un cobro (${ctx.paymentId}) de la solicitud ${ctx.requestId} después de que el cajero declarara que no se presentó tarjeta.`
+        : `El banco aprobó un cobro (${ctx.paymentId}) de la solicitud ${ctx.requestId} después de que la ventana de 30 s la liberara.`,
       otros === null
         ? 'Sin orden ligada: no se pudo contar otros cobros.'
         : otros > 0
@@ -2288,6 +2326,13 @@ class TerminalPaymentService {
             orderId: s0.fila?.orderId ?? null,
           })
         }
+        // Ronda 2 (17-sep, P1): un `success` cuyo Payment NO se pudo ligar sobre una solicitud ya LIBERADA (ventana o cajero) la
+        // re-retiene si ese Payment está ligado a ella — el `success` degradado de abajo no toca una FAILED liberada (ya tiene
+        // desenlace) y seguiría diciendo «puedes volver a cobrar». Después del commit y ANTES de fundir la afirmación: así la réplica
+        // al POS ya lee la fila retenida. `ALREADY_BOUND` = otro la cerró: no hay nada que retener.
+        if (socketResult.paymentId && s0.cierre && !s0.cierre.bound && s0.cierre.reason !== 'ALREADY_BOUND') {
+          await this.retenerSolicitudLiberadaPorPagoSinLigar({ requestId, venueId, paymentId: socketResult.paymentId, origen: 'SOCKET' })
+        }
         if (winner) return winner
         // P1-D: la afirmación de la terminal viaja en el sobre (sin `terminalResult`: la fila queda UNKNOWN, fuera de la ventana).
         // La FUSIÓN con la que la fila ya tenía la hace el propio UPDATE (`escribirSuccessDegradado`, jsonb): nunca encoge.
@@ -3025,16 +3070,21 @@ class TerminalPaymentService {
           },
         )
       }
-      let lateAfterWindow: { otherCardPaymentsOnOrderAfterRelease: number | null } | undefined
-      if (before.failureCode === 'NO_EVIDENCE_AFTER_WINDOW') {
-        // La ventana liberó esta venta y el banco la aprobó DESPUÉS: el caso que la ventana acota pero no elimina.
+      let lateAfterWindow: { otherCardPaymentsOnOrderAfterRelease: number | null; previousFailureCode: string } | undefined
+      if (before.failureCode && CODIGOS_DE_LIBERACION_REVERSIBLE.includes(before.failureCode)) {
+        // La ventana —o, desde la ronda 2 (17-sep, hermano), el CAJERO con su declaración «no se presentó tarjeta»— liberó esta
+        // venta y el banco la aprobó DESPUÉS: el caso que la liberación acota pero no elimina (riesgo aceptado por el founder el
+        // 16-sep: se ACOTA y se DETECTA). Las dos liberaciones disparan la MISMA detección.
         // Cuenta los cobros con tarjeta que la orden recibió DESDE la liberación hasta ahora: es «otros cobros registrados
         // hasta este momento», no una prueba de doble cobro — puede haber abonos parciales legítimos; quien lo revisa decide.
-        // El instante de la liberación es el que la propia liberación dejó escrito (`releasedAfterWindow.releasedAt`), leído
-        // bajo el candado ANTES de reabrir; `before.updatedAt` sólo de respaldo — el toque best-effort del ingreso sin candado
-        // (angelpay-webhook) puede haberlo movido DESPUÉS de liberar, y un recobro anterior a ese toque se quedaría sin contar.
+        // El instante de la liberación es el que la propia liberación dejó escrito (`releasedAfterWindow.releasedAt` de la
+        // ventana, `operatorResolution.acceptedAt` de la declaración), leído bajo el candado ANTES de reabrir; `before.updatedAt`
+        // sólo de respaldo — el toque best-effort del ingreso sin candado (angelpay-webhook) puede haberlo movido DESPUÉS de
+        // liberar, y un recobro anterior a ese toque se quedaría sin contar.
         // Reembolsos fuera, NULL-seguro sobre `Payment.type` (`COBRO_CON_TARJETA_SIN_REEMBOLSO`).
-        const liberadaEn = instanteDeLiberacionPorVentana(before.resultJson) ?? before.updatedAt
+        const porCajero = before.failureCode === 'OPERATOR_RECONCILED_NO_CHARGE'
+        const liberadaEn =
+          (porCajero ? instanteDeDeclaracion(before.resultJson) : instanteDeLiberacionPorVentana(before.resultJson)) ?? before.updatedAt
         const otros = before.orderId
           ? await tx.payment.count({
               where: {
@@ -3046,16 +3096,22 @@ class TerminalPaymentService {
               },
             })
           : null
-        lateAfterWindow = { otherCardPaymentsOnOrderAfterRelease: otros }
-        logger.error('🚨 [Terminal-payment late approval after window] The bank approved a charge the window had released', {
-          requestId,
-          paymentId,
-          venueId,
-          orderId: before.orderId,
-          terminalId: before.terminalId,
-          otherCardPaymentsOnOrderAfterRelease: otros,
-          closedVia,
-        })
+        lateAfterWindow = { otherCardPaymentsOnOrderAfterRelease: otros, previousFailureCode: before.failureCode }
+        logger.error(
+          porCajero
+            ? '🚨 [Terminal-payment late approval after window] The bank approved a charge the cashier had declared as not presented'
+            : '🚨 [Terminal-payment late approval after window] The bank approved a charge the window had released',
+          {
+            requestId,
+            paymentId,
+            venueId,
+            orderId: before.orderId,
+            terminalId: before.terminalId,
+            otherCardPaymentsOnOrderAfterRelease: otros,
+            previousFailureCode: before.failureCode,
+            closedVia,
+          },
+        )
         // Asiento DENTRO de la transacción y sólo en la rama ganadora: una reapertura = un asiento (replays y callbacks
         // concurrentes pierden el CAS y no llegan aquí). `tx.activityLog.create` directo: `logAction` abre su propia conexión.
         await tx.activityLog.create({
@@ -3070,6 +3126,8 @@ class TerminalPaymentService {
               orderId: before.orderId,
               terminalId: before.terminalId,
               otherCardPaymentsOnOrderAfterRelease: otros,
+              // Cuál de las dos liberaciones fue (la ventana o la declaración del cajero).
+              previousFailureCode: before.failureCode,
               releasedAt: liberadaEn.toISOString(),
               closedVia,
             },
@@ -3186,6 +3244,16 @@ class TerminalPaymentService {
           terminalId: row.terminalId,
           orderId: row.orderId,
         })
+        // Ronda 2 (P1): la misma carrera, cuando el cierre NO liga — la fila se liberó (ventana o cajero) entre la lectura y el
+        // cierre con un Payment ligado que no se puede ligar: se re-retiene en vez de quedar en «puedes volver a cobrar».
+        if (!cierre.bound && cierre.reason !== 'ALREADY_BOUND') {
+          await this.retenerSolicitudLiberadaPorPagoSinLigar({
+            requestId: row.requestId,
+            venueId: row.venueId,
+            paymentId: payment.id,
+            origen: 'BARRIDO_VENCIDAS',
+          })
+        }
         // 🔴 El MISMO evento de dinero se descubre por dos rutas y sólo una avisaba:
         // closeRowFromPaymentTx dispara el 🚨 cuando la fila venía cancelada, y esta no
         // disparaba nada. Si el hallazgo llegaba por aquí, nadie se enteraba de que el
@@ -3654,7 +3722,8 @@ class TerminalPaymentService {
           paymentId: payment.id,
           reason: cierre.reason,
         })
-        return this.retenerPorPagoSinLigar(row, { paymentId: payment.id, reason: cierre.reason }, origen)
+        const marcada = await this.retenerPorPagoSinLigar(row, { paymentId: payment.id, reason: cierre.reason }, origen)
+        return marcada === 'HELD_BY_UNBOUND_PAYMENT' ? marcada : this.retenerSiSeLiberoEnMedio(requestId, venueId, payment.id)
       }
     } else {
       // 🔴 G1 (re-revisión de la Task 2, hermano de IMPORTANT 2): `findReconcilablePayment` devuelve `null` también cuando el
@@ -3671,7 +3740,8 @@ class TerminalPaymentService {
           count: ligados.length,
           paymentId: ligados[0].id,
         })
-        return this.retenerPorPagoSinLigar(row, { paymentId: ligados[0].id, reason: 'PAYMENT_NOT_ATTRIBUTABLE' }, origen)
+        const marcada = await this.retenerPorPagoSinLigar(row, { paymentId: ligados[0].id, reason: 'PAYMENT_NOT_ATTRIBUTABLE' }, origen)
+        return marcada === 'HELD_BY_UNBOUND_PAYMENT' ? marcada : this.retenerSiSeLiberoEnMedio(requestId, venueId, ligados[0].id)
       }
     }
 
@@ -3817,6 +3887,21 @@ class TerminalPaymentService {
   }
 
   /**
+   * Ronda 2 (17-sep, P1): la marca de la ventana (`retenerPorPagoSinLigar`) exige la fila TIMED_OUT sin código y con el `updatedAt`
+   * leído. Si no aplicó porque la fila cambió debajo —el cajero la declaró, o la ventana de otra instancia la liberó, antes de que el
+   * Payment ligado apareciera—, la fila puede estar LIBERADA con ese Payment encima: se re-retiene por la regla post-liberación. Si
+   * tampoco aplica, es NOT_ELIGIBLE como siempre (la siguiente pasada vuelve a mirar).
+   */
+  private async retenerSiSeLiberoEnMedio(
+    requestId: string,
+    venueId: string,
+    paymentId: string,
+  ): Promise<'HELD_BY_UNBOUND_PAYMENT' | 'NOT_ELIGIBLE'> {
+    const r = await this.retenerSolicitudLiberadaPorPagoSinLigar({ requestId, venueId, paymentId, origen: 'VENTANA' })
+    return r === 'HELD' ? 'HELD_BY_UNBOUND_PAYMENT' : 'NOT_ELIGIBLE'
+  }
+
+  /**
    * Codex r2 (P2-N1): la ventana encontró un Payment ligado a la solicitud que NO puede ligar. Se marca UNA vez
    * (`failureCode = 'PAYMENT_UNBOUND_AWAITING_REVIEW'`, CAS sobre la fila leída) con UN asiento, y se devuelve
    * `HELD_BY_UNBOUND_PAYMENT`. La fila sigue UNRESOLVED (orden bloqueada) y retiene la ranura en los dos regímenes
@@ -3879,10 +3964,8 @@ class TerminalPaymentService {
    *
    * La regla es literalmente el veto de la ventana, revalidado EN LA ESCRITURA: el CAS exige la fila todavía liberada y sin
    * ganador, un APROBADO de un intento vinculado HOY del venue de la solicitud (`hayAprobadoVinculadoSql`) y ningún Payment ligado
-   * (`sinPagoLigadoSql`). Candados en el MISMO orden que la ventana y que el negativo de `closeRow` — solicitud → vínculos
-   * enumerados DENTRO → cada intento (ordenado) —, así que no puede interbloquearse con ellos, con la publicación del vínculo ni
-   * con el registrador (que no toma el de la solicitud). Quien lo llama (el webhook) ya no sostiene ningún candado: el ingreso
-   * commiteó en su propia transacción y el registrador terminó la suya.
+   * (`sinPagoLigadoSql`) — con un Payment ligado aplica la regla hermana (`retenerSolicitudLiberadaPorPagoSinLigar`). La decisión
+   * vive en el núcleo compartido (`reRetenerSolicitudLiberada`): candados, relectura, conteos, CAS, asiento, 🚨 y correo.
    *
    *  · `NOT_APPLICABLE` — la fila no está liberada así (o ya no lo está bajo el candado), o el CAS no aplicó: otra pasada ya la
    *    retuvo, apareció un Payment ligado o el aprobado no es de este venue.
@@ -3894,22 +3977,143 @@ class TerminalPaymentService {
     venueId: string
     attemptId: string
     eventLogId: string
-    motivo: 'AMOUNT_MISMATCH' | 'PROCESSING_ERROR' | 'LINK_TERMINAL_MISMATCH' | 'POSSIBLE_REFERENCE_COLLISION'
-  }): Promise<'HELD' | 'NOT_APPLICABLE' | 'DEFERRED'> {
-    const { requestId, venueId, eventLogId, motivo } = input
-    // El intento cuyo aviso aprobado motivó la retención (el candado de abajo recorre TODOS los vinculados).
-    const intentoDelAviso = input.attemptId
+    motivo: MotivoDeRetencionPorAprobacion
+  }): Promise<ResultadoDeReRetencion> {
+    return this.reRetenerSolicitudLiberada(input.requestId, input.venueId, {
+      tipo: 'APROBACION',
+      attemptId: input.attemptId,
+      eventLogId: input.eventLogId,
+      motivo: input.motivo,
+    })
+  }
+
+  /**
+   * Revisión final · ronda 2 (17-sep, P1 — dinero, preexistente: Codex r7): llegó un cobro con tarjeta COMPLETED LIGADO a una
+   * solicitud ya liberada (ventana o cajero) —por su puntero, su etiqueta legacy o la llave de uno de sus intentos— y el cierre común
+   * NO lo pudo LIGAR (atribuido a otra terminal, contradicción en la consolidación, token ajeno, reclamación ajena, error). Antes la
+   * fila seguía FAILED y el POS decía «puedes volver a cobrar» con un cobro encima. La guarda G1 de la ventana retiene ese caso ANTES
+   * de liberar (`PAYMENT_UNBOUND_AWAITING_REVIEW`); esto lo hace DESPUÉS: la fila vuelve a `TIMED_OUT` con ESE MISMO marcador —orden y
+   * ranura retenidas en los dos regímenes (`VENTANA_RETIENE_LA_RANURA`, cuyos predicados no dependen del sobre); la ventana, la
+   * declaración y un negativo tardío ya no la tocan (G2)—, UN asiento (`TERMINAL_PAYMENT_UNBOUND_PAYMENT_AFTER_RELEASE`), 🚨 y
+   * correo; la ranura se suelta a los 20 min como siempre y un cierre común posterior que SÍ pueda ligar la cierra.
+   *
+   * La llaman, DESPUÉS de su commit, todos los que intentan ligar un Payment y no pueden: el registrador (transacción principal,
+   * retornos idempotentes y resolución por referencia, por las identidades del Payment: `retenerLiberadasPorPagoSinLigar`), el webhook
+   * (antes de sellar), el `success` del socket, la ventana, los barridos y la liberación manual. Mismo núcleo, candados y contrato que
+   * la re-retención por aprobación: el CAS exige la fila todavía liberada y sin ganador, y `hayPagoLigadoSql` evaluado EN la escritura.
+   * `paymentId` es la pista de quien llama (qué cobro estaba procesando); el sobre y el asiento guardan además los Payments ligados
+   * leídos bajo los candados.
+   */
+  async retenerSolicitudLiberadaPorPagoSinLigar(input: {
+    requestId: string
+    venueId: string
+    paymentId?: string | null
+    origen: OrigenDeRetencionPorPago
+  }): Promise<ResultadoDeReRetencion> {
+    return this.reRetenerSolicitudLiberada(input.requestId, input.venueId, {
+      tipo: 'PAGO_SIN_LIGAR',
+      paymentId: input.paymentId ?? null,
+      origen: input.origen,
+    })
+  }
+
+  /**
+   * Ronda 2 (17-sep, P1): la misma re-retención, partiendo de un PAYMENT, para quien no sabe con certeza qué solicitud lo liga — el
+   * registrador y su consolidación: un Payment del intento liga a la solicitud de SU vínculo aunque el payload nombre otra (asociación
+   * inválida `ATTEMPT_LINKED_ELSEWHERE`). Las candidatas son EXACTAMENTE las tres identidades de `pagoLigadoSql`: el puntero
+   * `Payment.terminalPaymentRequestId`, la etiqueta legacy `processorData.terminalPaymentRequestId` y la solicitud del vínculo de su
+   * llave (del mismo venue); el CAS de cada una revalida todo lo demás. Sólo un cobro con tarjeta COMPLETED que no es reembolso puede
+   * estar ligado (la misma regla del SQL). Nunca lanza: una lectura fallida del vínculo se registra y se sigue con las otras identidades.
+   */
+  async retenerLiberadasPorPagoSinLigar(
+    pago: {
+      id: string
+      venueId: string
+      status: string
+      method: string | null
+      type?: string | null
+      idempotencyKey: string | null
+      terminalPaymentRequestId?: string | null
+      processorData?: unknown
+    },
+    origen: OrigenDeRetencionPorPago,
+  ): Promise<{ requestId: string; resultado: ResultadoDeReRetencion }[]> {
+    const esCobroConTarjeta =
+      pago.status === TransactionStatus.COMPLETED &&
+      (pago.method === PaymentMethod.CREDIT_CARD || pago.method === PaymentMethod.DEBIT_CARD) &&
+      pago.type !== PaymentType.REFUND
+    if (!esCobroConTarjeta) return []
+    const candidatas = new Set<string>()
+    if (pago.terminalPaymentRequestId) candidatas.add(pago.terminalPaymentRequestId)
+    const etiqueta = solicitudDelRegistro(pago.processorData)
+    if (etiqueta) candidatas.add(etiqueta)
+    const llave = llaveDeIntento(pago.idempotencyKey)
+    if (llave) {
+      try {
+        const vinculo = await prisma.terminalPaymentAttemptLink.findUnique({
+          where: { attemptId: llave },
+          select: { requestId: true, venueId: true },
+        })
+        if (vinculo && vinculo.venueId === pago.venueId) candidatas.add(vinculo.requestId)
+      } catch (err) {
+        logger.warn('⚠️ [TerminalPayment] Could not read the attempt link of a card payment to re-hold its released request', {
+          paymentId: pago.id,
+          venueId: pago.venueId,
+          origen,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
+    const resultados: { requestId: string; resultado: ResultadoDeReRetencion }[] = []
+    for (const requestId of candidatas) {
+      resultados.push({
+        requestId,
+        resultado: await this.retenerSolicitudLiberadaPorPagoSinLigar({ requestId, venueId: pago.venueId, paymentId: pago.id, origen }),
+      })
+    }
+    return resultados
+  }
+
+  /**
+   * El NÚCLEO de la re-retención de una solicitud LIBERADA sin evidencia del procesador (ventana o cajero): UNA transacción del
+   * protocolo para las dos variantes, sin duplicar SQL —
+   *  · `APROBACION`     — el banco aprobó un intento vinculado y no hay Payment ⇒ `BANK_APPROVED_AWAITING_PAYMENT`;
+   *  · `PAGO_SIN_LIGAR` — hay un Payment ligado que no se pudo ligar ⇒ `PAYMENT_UNBOUND_AWAITING_REVIEW`.
+   *
+   * (1) Lectura barata fuera de la transacción (la piden cada aviso sin dinero y cada cierre que no liga). (2) En
+   * `OPCIONES_DE_TRANSACCION_DEL_INTENTO`, el MISMO orden de candados que la ventana y que el negativo de `closeRow` —solicitud →
+   * vínculos enumerados DENTRO → cada intento (ordenado)—: no puede interbloquearse con ellos, con la publicación del vínculo ni con el
+   * registrador (que no toma el de la solicitud); quien llama ya no sostiene ningún candado (su transacción commiteó). (3) Relectura bajo
+   * los candados. (4) Conteos informativos desde el instante que dejó escrito QUIEN liberó (`releasedAt` de la ventana, `acceptedAt` de
+   * la declaración; respaldo `updatedAt`): los cobros con tarjeta de la orden (sin los Payments ligados) y, en un campo aparte, las
+   * solicitudes SIN desenlace de la misma orden admitidas después (un recobro en vuelo). (5) CAS con la evidencia de la variante evaluada
+   * EN la escritura y el sobre FUNDIDO (`||`: conserva la liberación, la declaración y el sobre de la terminal, y deja de decir «se puede
+   * volver a cobrar»). (6) CAS=1 ⇒ UN asiento dentro de la transacción; tras el commit 🚨 y `sendOpsAlert`. CAS=0 ⇒ nada. 55P03/error ⇒
+   * `DEFERRED` + `warn`. Nunca lanza.
+   */
+  private async reRetenerSolicitudLiberada(
+    requestId: string,
+    venueId: string,
+    variante: VarianteDeReRetencion,
+  ): Promise<ResultadoDeReRetencion> {
+    const porAprobacion = variante.tipo === 'APROBACION'
+    // Lo que cada variante deja escrito en el sobre y en el asiento, resuelto aquí (sin estrechar la variante dentro de closures).
+    const deLaVariante: Record<string, string | null> =
+      variante.tipo === 'APROBACION'
+        ? { eventLogId: variante.eventLogId, attemptId: variante.attemptId, reason: variante.motivo }
+        : { reportedPaymentId: variante.paymentId, origen: variante.origen }
     try {
       // Sólo una fila LIBERADA sin cobro es asunto de esta regla; las demás (en la ventana, retenidas, cerradas) ya tienen quien
-      // las decida. Lectura barata fuera de la transacción: el webhook la pide en cada aviso sin dinero.
+      // las decida.
       const vista = await prisma.terminalPaymentRequest.findFirst({ where: { requestId, venueId } })
       if (!vista || !liberadaSinCobroReversible(vista)) return 'NOT_APPLICABLE'
 
       type Retenida = {
         row: FilaDeCobroRemoto
         previousFailureCode: string
-        liberadaEn: Date
         otros: number | null
+        solicitudesSinDesenlace: number | null
+        ligados: string[]
       }
       const retenida = await prisma.$transaction(async (tx): Promise<Retenida | null> => {
         await candadoDeSolicitud(tx, requestId)
@@ -3921,37 +4125,61 @@ class TerminalPaymentService {
         const row = await tx.terminalPaymentRequest.findFirst({ where: { requestId, venueId } })
         if (!row || !liberadaSinCobroReversible(row)) return null
         const previousFailureCode = row.failureCode as string
-        // Desde cuándo contar «otros cobros con tarjeta» en la orden: el instante que dejó escrito QUIEN liberó (la ventana o la
-        // declaración del cajero, según el código); `updatedAt` sólo de respaldo. Es informativo — puede haber abonos parciales
-        // legítimos; quien lo revisa decide.
+        // Los Payments ligados, leídos BAJO los candados: la misma pregunta que el CAS de la variante del cobro sin ligar.
+        const ligados = porAprobacion ? [] : (await pagosLigados(tx, requestId, venueId)).map(p => p.id)
+        // Desde cuándo contar: el instante que dejó escrito QUIEN liberó (la ventana o la declaración del cajero, según el código);
+        // `updatedAt` sólo de respaldo. Los conteos son informativos — puede haber abonos parciales legítimos; quien revisa decide.
         const liberadaEn =
           (previousFailureCode === 'OPERATOR_RECONCILED_NO_CHARGE'
             ? instanteDeDeclaracion(row.resultJson)
             : instanteDeLiberacionPorVentana(row.resultJson)) ?? row.updatedAt
         const otros = row.orderId
           ? await tx.payment.count({
-              where: { ...COBRO_CON_TARJETA_SIN_REEMBOLSO, venueId, orderId: row.orderId, createdAt: { gt: liberadaEn } },
+              where: {
+                ...COBRO_CON_TARJETA_SIN_REEMBOLSO,
+                venueId,
+                orderId: row.orderId,
+                ...(ligados.length > 0 ? { id: { notIn: ligados } } : {}),
+                createdAt: { gt: liberadaEn },
+              },
             })
           : null
+        // Ronda 2 (minor): un recobro EN VUELO —otra solicitud de la misma orden, admitida después de liberar y todavía sin
+        // desenlace— es lo que más le importa a quien revisa: puede estar cobrándose ahora mismo. Campo aparte, aditivo.
+        const solicitudesSinDesenlace = row.orderId
+          ? await tx.terminalPaymentRequest.count({
+              where: {
+                ...UNRESOLVED_FINANCIAL_OUTCOME,
+                venueId,
+                orderId: row.orderId,
+                requestId: { not: requestId },
+                createdAt: { gt: liberadaEn },
+              },
+            })
+          : null
+        const detalle = {
+          ...(porAprobacion ? {} : { paymentIds: ligados }),
+          ...deLaVariante,
+          previousFailureCode,
+          releasedAt: liberadaEn.toISOString(),
+          otherCardPaymentsOnOrderAfterRelease: otros,
+          otherUnresolvedRequestsOnOrderAfterRelease: solicitudesSinDesenlace,
+          heldAt: new Date().toISOString(),
+        }
         // El sobre se FUNDE (jsonb `||`) sobre el vigente: conserva la liberación, la declaración y el sobre de la terminal, y
         // deja de decir «se puede volver a cobrar» (la réplica y el GET leen `errorMessage` de un sobre `timeout`).
         const sobreRetenido = {
           requestId,
           status: 'timeout',
           outcomeEvidence: null,
-          errorMessage:
-            'El banco aprobó este cobro después de liberarlo y todavía no está registrado. No lo cobres otra vez: se está revisando.',
-          bankApprovedAfterRelease: {
-            eventLogId,
-            attemptId: intentoDelAviso,
-            reason: motivo,
-            previousFailureCode,
-            releasedAt: liberadaEn.toISOString(),
-            otherCardPaymentsOnOrderAfterRelease: otros,
-            heldAt: new Date().toISOString(),
-          },
+          errorMessage: porAprobacion
+            ? 'El banco aprobó este cobro después de liberarlo y todavía no está registrado. No lo cobres otra vez: se está revisando.'
+            : 'Llegó un cobro con tarjeta de este intento después de liberarlo y no se pudo ligar. No lo cobres otra vez: se está revisando.',
+          ...(porAprobacion ? { bankApprovedAfterRelease: detalle } : { unboundPaymentAfterRelease: detalle }),
         }
-        const n = await tx.$executeRaw`
+        // La evidencia de cada variante, evaluada EN la escritura: exactamente lo que el veto de la ventana habría visto.
+        const n = porAprobacion
+          ? await tx.$executeRaw`
           UPDATE "TerminalPaymentRequest"
           SET "status" = 'TIMED_OUT', "failureCode" = 'BANK_APPROVED_AWAITING_PAYMENT',
               "resultJson" = coalesce("resultJson", '{}'::jsonb) || ${JSON.stringify(sobreRetenido)}::jsonb,
@@ -3959,21 +4187,30 @@ class TerminalPaymentService {
           WHERE "id" = ${row.id} AND "status" = 'FAILED' AND "failureCode" = ${previousFailureCode} AND "paymentId" IS NULL
             AND ${hayAprobadoVinculadoSql(requestId, venueId)}
             AND ${sinPagoLigadoSql(requestId, venueId)}`
+          : await tx.$executeRaw`
+          UPDATE "TerminalPaymentRequest"
+          SET "status" = 'TIMED_OUT', "failureCode" = 'PAYMENT_UNBOUND_AWAITING_REVIEW',
+              "resultJson" = coalesce("resultJson", '{}'::jsonb) || ${JSON.stringify(sobreRetenido)}::jsonb,
+              "updatedAt" = (NOW() AT TIME ZONE 'UTC')
+          WHERE "id" = ${row.id} AND "status" = 'FAILED' AND "failureCode" = ${previousFailureCode} AND "paymentId" IS NULL
+            AND ${hayPagoLigadoSql(requestId, venueId)}`
         if (n !== 1) return null
         // Asiento DENTRO de la transacción: una re-retención = un asiento (`logAction` abriría su propia conexión).
         await tx.activityLog.create({
           data: {
-            action: 'TERMINAL_PAYMENT_WINDOW_BANK_APPROVED_AWAITING_PAYMENT',
+            action: porAprobacion
+              ? 'TERMINAL_PAYMENT_WINDOW_BANK_APPROVED_AWAITING_PAYMENT'
+              : 'TERMINAL_PAYMENT_UNBOUND_PAYMENT_AFTER_RELEASE',
             entity: 'TerminalPaymentRequest',
             entityId: row.id,
             venueId,
             data: {
               requestId,
-              attemptId: intentoDelAviso,
-              eventLogId,
-              reason: motivo,
+              ...(porAprobacion ? {} : { paymentIds: ligados }),
+              ...deLaVariante,
               previousFailureCode,
               otherCardPaymentsOnOrderAfterRelease: otros,
+              otherUnresolvedRequestsOnOrderAfterRelease: solicitudesSinDesenlace,
               terminalId: row.terminalId,
               orderId: row.orderId,
               amountCents: row.amountCents,
@@ -3981,53 +4218,83 @@ class TerminalPaymentService {
             },
           },
         })
-        return { row, previousFailureCode, liberadaEn, otros }
+        return { row, previousFailureCode, otros, solicitudesSinDesenlace, ligados }
       }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
       if (!retenida) return 'NOT_APPLICABLE'
 
-      const { row, previousFailureCode, otros } = retenida
+      const { row, previousFailureCode, otros, solicitudesSinDesenlace, ligados } = retenida
+      const monto = `$${(row.amountCents / 100).toFixed(2)}`
+      const liberacion =
+        previousFailureCode === 'OPERATOR_RECONCILED_NO_CHARGE'
+          ? 'el cajero declarara que no se presentó tarjeta'
+          : 'la ventana de 30 s lo liberara'
+      const lineaDeCobros =
+        otros === null
+          ? 'Sin orden ligada: no se pudo contar otros cobros.'
+          : otros > 0
+            ? `🔴 La orden ${row.orderId} tiene ${otros} cobro(s) con tarjeta registrados después de liberarla: revisar si hay que devolver uno.`
+            : `La orden ${row.orderId} tiene ${otros} cobro(s) con tarjeta posteriores a la liberación.`
+      // `typeof` y no `!== null`: sin orden no hay línea (la de arriba ya lo dice).
+      const lineasDeRecobro =
+        typeof solicitudesSinDesenlace !== 'number'
+          ? []
+          : solicitudesSinDesenlace > 0
+            ? [
+                `🔴 La orden ${row.orderId} tiene ${solicitudesSinDesenlace} solicitud(es) de cobro sin desenlace admitida(s) después de liberarla (un recobro en vuelo): revisarla(s) antes de devolver o conciliar.`,
+              ]
+            : [`La orden ${row.orderId} tiene 0 solicitud(es) de cobro sin desenlace admitidas después de liberarla.`]
+      const contexto = {
+        requestId,
+        venueId,
+        ...(porAprobacion ? {} : { paymentIds: ligados }),
+        ...deLaVariante,
+        previousFailureCode,
+        terminalId: row.terminalId,
+        orderId: row.orderId,
+        amountCents: row.amountCents,
+        otherCardPaymentsOnOrderAfterRelease: otros,
+        otherUnresolvedRequestsOnOrderAfterRelease: solicitudesSinDesenlace,
+      }
+      if (variante.tipo === 'APROBACION') {
+        logger.error(
+          '🚨 [TerminalPayment] The bank approved a charge AFTER the request was released (window/cashier) and no Payment was created — request held again',
+          contexto,
+        )
+        // Correo DESPUÉS del commit y sin `await` encadenado (mismo idioma que la aprobación tardía): `sendOpsAlert` nunca rechaza.
+        void sendOpsAlert({
+          subject: `Aprobación del banco sobre un cobro ya liberado — ${row.terminalId}`,
+          lines: [
+            `El banco aprobó el cobro de ${monto} (requestId ${requestId}, orden ${row.orderId ?? 'sin orden'}) después de que ${liberacion}, y el Payment no se creó (${variante.motivo}).`,
+            lineaDeCobros,
+            ...lineasDeRecobro,
+            `La solicitud volvió a TIMED_OUT/BANK_APPROVED_AWAITING_PAYMENT: la venta queda bloqueada y la terminal se suelta a los 20 min. Revisar el evento ${variante.eventLogId} y conciliar a mano.`,
+          ],
+        })
+        return 'HELD'
+      }
       logger.error(
-        '🚨 [TerminalPayment] The bank approved a charge AFTER the request was released (window/cashier) and no Payment was created — request held again',
-        {
-          requestId,
-          venueId,
-          eventLogId,
-          attemptId: intentoDelAviso,
-          reason: motivo,
-          previousFailureCode,
-          terminalId: row.terminalId,
-          orderId: row.orderId,
-          amountCents: row.amountCents,
-          otherCardPaymentsOnOrderAfterRelease: otros,
-        },
+        '🚨 [TerminalPayment] A card Payment linked to the request arrived AFTER it was released (window/cashier) and could not be bound — request held for review',
+        contexto,
       )
-      // Correo DESPUÉS del commit y sin `await` encadenado (mismo idioma que la aprobación tardía): `sendOpsAlert` nunca rechaza.
       void sendOpsAlert({
-        subject: `Aprobación del banco sobre un cobro ya liberado — ${row.terminalId}`,
+        subject: `Cobro con tarjeta sin ligar sobre un cobro ya liberado — ${row.terminalId}`,
         lines: [
-          `El banco aprobó el cobro de $${(row.amountCents / 100).toFixed(2)} (requestId ${requestId}, orden ${row.orderId ?? 'sin orden'}) después de que ${
-            previousFailureCode === 'OPERATOR_RECONCILED_NO_CHARGE'
-              ? 'el cajero declarara que no se presentó tarjeta'
-              : 'la ventana de 30 s lo liberara'
-          }, y el Payment no se creó (${motivo}).`,
-          otros === null
-            ? 'Sin orden ligada: no se pudo contar otros cobros.'
-            : otros > 0
-              ? `🔴 La orden ${row.orderId} tiene ${otros} cobro(s) con tarjeta registrados después de liberarla: revisar si hay que devolver uno.`
-              : `La orden ${row.orderId} tiene ${otros} cobro(s) con tarjeta posteriores a la liberación.`,
-          `La solicitud volvió a TIMED_OUT/BANK_APPROVED_AWAITING_PAYMENT: la venta queda bloqueada y la terminal se suelta a los 20 min. Revisar el evento ${eventLogId} y conciliar a mano.`,
+          `Llegó un cobro con tarjeta (${ligados.join(', ') || variante.paymentId || 'sin id'}) ligado a la solicitud ${requestId} de ${monto} (orden ${row.orderId ?? 'sin orden'}) después de que ${liberacion}, y no se pudo ligar (origen ${variante.origen}).`,
+          lineaDeCobros,
+          ...lineasDeRecobro,
+          'La solicitud volvió a TIMED_OUT/PAYMENT_UNBOUND_AWAITING_REVIEW: la venta queda bloqueada y la terminal se suelta a los 20 min. Revisar el Payment (terminal, orden o contrato) y conciliar a mano.',
         ],
       })
       return 'HELD'
     } catch (err) {
-      // 55P03 (candado ocupado) o base caída: no se decide. Nada se escribió — el evento sigue PENDING y el worker lo repite.
-      logger.warn('⏱️ [TerminalPayment] re-hold of a released request after a bank approval deferred — the event retries it', {
-        requestId,
-        venueId,
-        eventLogId,
-        motivo,
-        error: err instanceof Error ? err.message : String(err),
-      })
+      // 55P03 (candado ocupado) o base caída: no se decide. Nada se escribió — quien llama reintenta (el evento sigue PENDING; el
+      // siguiente registro, el webhook repetido o el barrido la vuelven a pedir).
+      logger.warn(
+        porAprobacion
+          ? '⏱️ [TerminalPayment] re-hold of a released request after a bank approval deferred — the event retries it'
+          : '⏱️ [TerminalPayment] re-hold of a released request with an unbound card payment deferred — the next caller retries it',
+        { requestId, venueId, ...deLaVariante, error: err instanceof Error ? err.message : String(err) },
+      )
       return 'DEFERRED'
     }
   }
@@ -4284,6 +4551,15 @@ class TerminalPaymentService {
             data: { requestId: row.requestId, terminalId: row.terminalId, paymentId: payment.id, priorStatus: row.status },
           })
         }
+        // Ronda 2 (P1): la fila pudo liberarse (ventana o cajero) entre la lectura y un cierre que NO liga: se re-retiene.
+        if (!cierre.bound && cierre.reason !== 'ALREADY_BOUND') {
+          await this.retenerSolicitudLiberadaPorPagoSinLigar({
+            requestId: row.requestId,
+            venueId: row.venueId,
+            paymentId: payment.id,
+            origen: 'BARRIDO_UNKNOWN',
+          })
+        }
         continue
       }
 
@@ -4392,7 +4668,19 @@ class TerminalPaymentService {
         const cierre = await prisma.$transaction(tx =>
           this.closeRowFromPaymentTx(tx, row.requestId, payment.id, row.venueId, undefined, 'REST'),
         )
-        if (!cierre.bound) return
+        if (!cierre.bound) {
+          // Ronda 2 (P1): una soltada por política que el cajero declaró entre la lectura y un cierre que NO liga queda LIBERADA
+          // con un Payment ligado encima: se re-retiene (en una soltada que sigue soltada, el helper no aplica).
+          if (cierre.reason !== 'ALREADY_BOUND') {
+            await this.retenerSolicitudLiberadaPorPagoSinLigar({
+              requestId: row.requestId,
+              venueId: row.venueId,
+              paymentId: payment.id,
+              origen: 'BARRIDO_SOLTADAS',
+            })
+          }
+          return
+        }
         lateReconciled += 1
         // 🚨 stable token for Better Stack — do NOT rename. This is the double-charge alarm: the slot
         // was freed and the money then showed up → someone must check the order is not paid twice.
@@ -4434,30 +4722,59 @@ class TerminalPaymentService {
     // después SIN pasar por el registrador con su requestId (cola vieja: la etiqueta viaja sólo en `processorData`) se
     // concilia por el cierre COMÚN, nunca por un `updateMany` propio: es `closeRowFromPaymentTx` quien cuenta los cobros
     // posteriores de la orden, deja el asiento único y devuelve `lateAfterWindow`; el correo sale después del commit.
-    await this.paginarLiberadas(
-      {
-        status: TerminalPaymentRequestStatus.FAILED,
-        failureCode: 'NO_EVIDENCE_AFTER_WINDOW',
-        updatedAt: { gte: new Date(now.getTime() - RELEASED_LATE_RECONCILE_WINDOW_MS) },
-      },
-      'terminal-payment-watchdog:findReleasedByWindow',
-      async row => {
-        const payment = await this.findReconcilablePayment(row)
-        if (!payment) return
-        const cierre = await prisma.$transaction(tx =>
-          this.closeRowFromPaymentTx(tx, row.requestId, payment.id, row.venueId, undefined, 'REST'),
-        )
-        if (!cierre.bound) return
-        lateReconciled += 1
-        avisarAprobacionTardiaTrasVentana(cierre, {
-          requestId: row.requestId,
-          venueId: row.venueId,
-          paymentId: payment.id,
-          terminalId: row.terminalId,
-          orderId: row.orderId,
-        })
-      },
-    )
+    // Ronda 2 (17-sep): (hermano) las DECLARADAS por el cajero (`FAILED/OPERATOR_RECONCILED_NO_CHARGE`) tienen el MISMO barrido
+    // —una consulta por código, así el cursor keyset de cada una es el suyo—; y (P1) si el Payment ligado no se puede ligar, o no
+    // se puede atribuir pero está ligado (G1 tras liberar), la fila se RE-RETIENE en vez de quedar en «puedes volver a cobrar».
+    for (const failureCode of CODIGOS_DE_LIBERACION_REVERSIBLE) {
+      await this.paginarLiberadas(
+        {
+          status: TerminalPaymentRequestStatus.FAILED,
+          failureCode,
+          updatedAt: { gte: new Date(now.getTime() - RELEASED_LATE_RECONCILE_WINDOW_MS) },
+        },
+        failureCode === 'NO_EVIDENCE_AFTER_WINDOW'
+          ? 'terminal-payment-watchdog:findReleasedByWindow'
+          : 'terminal-payment-watchdog:findReleasedByOperator',
+        async row => {
+          const payment = await this.findReconcilablePayment(row)
+          if (payment) {
+            const cierre = await prisma.$transaction(tx =>
+              this.closeRowFromPaymentTx(tx, row.requestId, payment.id, row.venueId, undefined, 'REST'),
+            )
+            if (cierre.bound) {
+              lateReconciled += 1
+              avisarAprobacionTardiaTrasVentana(cierre, {
+                requestId: row.requestId,
+                venueId: row.venueId,
+                paymentId: payment.id,
+                terminalId: row.terminalId,
+                orderId: row.orderId,
+              })
+              return
+            }
+            if (cierre.reason !== 'ALREADY_BOUND') {
+              await this.retenerSolicitudLiberadaPorPagoSinLigar({
+                requestId: row.requestId,
+                venueId: row.venueId,
+                paymentId: payment.id,
+                origen: 'BARRIDO_LIBERADAS',
+              })
+            }
+            return
+          }
+          // G1 tras liberar: `findReconcilablePayment` descarta el Payment atribuido a otra terminal/origen, pero sigue LIGADO.
+          const [ligado] = await pagosLigados(prisma, row.requestId, row.venueId)
+          if (ligado) {
+            await this.retenerSolicitudLiberadaPorPagoSinLigar({
+              requestId: row.requestId,
+              venueId: row.venueId,
+              paymentId: ligado.id,
+              origen: 'BARRIDO_LIBERADAS',
+            })
+          }
+        },
+      )
+    }
 
     if (completed || marked || released || reset || lateReconciled) {
       logger.info(`🧹 [Terminal-payment watchdog] unknown sweep`, {
@@ -4495,6 +4812,10 @@ class TerminalPaymentService {
       // Codex r3 (P1-N2): por el cierre COMÚN (etiqueta al Payment, procedencia, CONTRACT_MISMATCH + 🚨), nunca por un `updateMany` propio.
       const cierre = await prisma.$transaction(tx => this.closeRowFromPaymentTx(tx, requestId, payment.id, venueId, undefined, 'REST'))
       if (!cierre.bound) {
+        // Ronda 2 (P1): la fila pudo liberarse (ventana o cajero) entre la lectura y un cierre que NO liga: se re-retiene.
+        if (cierre.reason !== 'ALREADY_BOUND') {
+          await this.retenerSolicitudLiberadaPorPagoSinLigar({ requestId, venueId, paymentId: payment.id, origen: 'LIBERACION_MANUAL' })
+        }
         // Someone else closed it first (late socket result / REST record): report what it became.
         const fresh = await prisma.terminalPaymentRequest.findFirst({
           where: { requestId, venueId },

@@ -17,7 +17,13 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { logAction } from '../dashboard/activity-log.service'
 import { avisarAprobacionTardiaTrasVentana, terminalPaymentService } from '../terminal-payment.service'
-import { afiliacionDelApkDelRegistro, afiliacionesDe, esElMismoCobroPorReferencia, huellaDelRegistro } from './identidadDelCobro'
+import {
+  afiliacionDelApkDelRegistro,
+  afiliacionesDe,
+  esElMismoCobroPorReferencia,
+  huellaDelRegistro,
+  solicitudDelRegistro,
+} from './identidadDelCobro'
 import { OPCIONES_DE_TRANSACCION_DEL_INTENTO, candadoDeIntento, llaveDeIntento } from './candadoDeIntento'
 
 export interface RegistroEntrante {
@@ -398,6 +404,9 @@ export async function consolidarRegistroRepetido<T extends Payment>(
   targetOrderId: string | null,
 ): Promise<T | null> {
   const resultado = await consolidarRegistroRepetidoDetallado(existente, entrante, venueId, targetOrderId)
+  // Ronda 2 (P1): el cobro que el llamador va a devolver — el consolidado, el dueño durable de la llave o, si la identidad se perdió
+  // o la consolidación fue incierta, el mismo existente con el que entró (`?? existente` en el registrador).
+  await retenerSolicitudLiberadaDelRegistro('registro' in resultado ? resultado.registro : existente, entrante)
   switch (resultado.estado) {
     case 'CONSOLIDADO':
     case 'CONTRADICE':
@@ -407,5 +416,29 @@ export async function consolidarRegistroRepetido<T extends Payment>(
       return null
     case 'INCIERTO':
       return existente
+  }
+}
+
+/**
+ * Ronda 2 (17-sep, P1 — Codex r7, preexistente): el cobro que un registro repetido devuelve puede estar LIGADO a una solicitud ya
+ * LIBERADA (ventana o cajero) sin haberla podido ligar: la reparación de arriba no se intenta con una contradicción, y el cierre común
+ * puede negarse (identidad de terminal, contrato, reclamación ajena). Antes la solicitud seguía en «puedes volver a cobrar» con ese
+ * cobro encima; ahora se pide su re-retención por las identidades del Payment (el servicio decide con su CAS). Sólo si el cobro PUEDE
+ * estar ligado a una solicitud —el entrante la nombra, o el Payment la trae en su columna o en su etiqueta—, y SIEMPRE fuera de toda
+ * transacción: por eso vive en la envoltura fuerte y no en la detallada, que la resolución por referencia sin llave ejecuta anidada en
+ * la transacción del registrador (`exclusionPorReferencia`). Nunca lanza.
+ */
+export async function retenerSolicitudLiberadaDelRegistro(pago: Payment, entrante: RegistroEntrante): Promise<void> {
+  const conSolicitud = !!entrante.terminalPaymentRequestId || !!pago.terminalPaymentRequestId || !!solicitudDelRegistro(pago.processorData)
+  if (!conSolicitud) return
+  try {
+    await terminalPaymentService.retenerLiberadasPorPagoSinLigar(pago, entrante.registradoVia === 'webhook' ? 'WEBHOOK' : 'REST')
+  } catch (error) {
+    // El servicio no lanza; si algo aún así revienta, el registro (ya durable) no puede volverse un error para la terminal.
+    logger.warn('⚠️ [Terminal-payment] No se pudo pedir la re-retención de la solicitud liberada del registro — el barrido la reintenta', {
+      paymentId: pago.id,
+      venueId: pago.venueId,
+      error: error instanceof Error ? error.message : String(error),
+    })
   }
 }

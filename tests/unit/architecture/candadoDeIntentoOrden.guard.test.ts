@@ -124,6 +124,46 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
     antes(w, 'await candadoDeSolicitud(tx, ', 'insertar(tx, marca)', fallback)
   })
 
+  it('Ronda 2 (17-sep, P1) · la re-retención de una solicitud LIBERADA (por aprobación o por un cobro sin ligar) vive en UN núcleo con el orden de la ventana, y nunca corre dentro de una transacción ajena', () => {
+    const s = leer('services/terminal-payment.service.ts')
+    // El núcleo: candado de la solicitud → vínculos enumerados DENTRO → candado de cada intento → los Payments ligados leídos BAJO
+    // los candados → CAS con el EXISTS de Payment ligado (variante del cobro sin ligar) o con EXISTS de aprobado + NOT EXISTS de Payment
+    // (variante de la aprobación), en su propia transacción del protocolo.
+    const nucleo = indice(s, 'private async reRetenerSolicitudLiberada(')
+    const tx = indice(s, 'prisma.$transaction(', nucleo)
+    antes(s, 'await candadoDeSolicitud(tx, requestId)', 'tx.terminalPaymentAttemptLink.findMany(', tx)
+    antes(s, 'tx.terminalPaymentAttemptLink.findMany(', 'for (const attemptId of attemptIds) await candadoDeIntento(tx, attemptId)', tx)
+    antes(s, 'for (const attemptId of attemptIds) await candadoDeIntento(tx, attemptId)', 'await pagosLigados(tx, requestId, venueId)', tx)
+    antes(s, 'await pagosLigados(tx, requestId, venueId)', 'hayPagoLigadoSql(requestId, venueId)', tx)
+    antes(s, 'for (const attemptId of attemptIds) await candadoDeIntento(tx, attemptId)', 'hayAprobadoVinculadoSql(requestId, venueId)', tx)
+    expect(s.slice(tx, indice(s, 'async releaseUnprovenNegativesAfterWindow(', nucleo))).toMatch(/OPCIONES_DE_TRANSACCION_DEL_INTENTO/)
+    // Las dos entradas públicas DELEGAN en el núcleo antes de cualquier transacción propia: una sola transacción para las dos variantes.
+    for (const fn of ['async retenerSolicitudLiberadaPorAprobacion(', 'async retenerSolicitudLiberadaPorPagoSinLigar(']) {
+      antes(s, 'this.reRetenerSolicitudLiberada(', 'prisma.$transaction(', indice(s, fn))
+    }
+    // La consolidación DETALLADA corre anidada dentro de la transacción del registrador (referencia sin llave, `exclusionPorReferencia`):
+    // ahí NO se re-retiene — lo hacen sus llamadores fuera de transacción (la envoltura fuerte y `devolverExistentePorReferencia`).
+    const r = leer('services/tpv/registroRepetido.ts')
+    const fuerte = indice(r, 'export async function consolidarRegistroRepetido<')
+    const detallada = r.slice(indice(r, 'export async function consolidarRegistroRepetidoDetallado'), fuerte)
+    expect(detallada).not.toMatch(/retenerLiberadasPorPagoSinLigar|retenerSolicitudLiberadaPorPagoSinLigar/)
+    expect(r.slice(fuerte)).toMatch(/terminalPaymentService\.retenerLiberadasPorPagoSinLigar\(/)
+    // El registrador la pide DESPUÉS de su transacción financiera (el mismo punto que el aviso de aprobación tardía), y la resolución
+    // por referencia la pide al DEVOLVER el existente, nunca dentro de `exclusionPorReferencia`.
+    const p = leer('services/tpv/payment.tpv.service.ts')
+    const exclusion = p.slice(indice(p, 'async function exclusionPorReferencia('), indice(p, 'type SegundaCapturaRegistrada'))
+    expect(exclusion).not.toMatch(/retener/)
+    for (const fn of ['export async function recordOrderPayment(', 'export async function recordFastPayment(']) {
+      const desde = indice(p, fn)
+      // Tras el commit: junto al aviso de aprobación tardía y antes de responder la evidencia (segunda captura / colisión).
+      const avisoTardio = indice(p, 'avisarAprobacionTardiaTrasVentana(s0.cierre, {', desde)
+      antes(p, 'await retenerSiQuedoSinLigar(', 'if (s0.segundaCaptura) return', avisoTardio)
+      // Al devolver el existente por referencia: antes de armar la respuesta.
+      const porReferencia = indice(p, 'const devolverExistentePorReferencia = async', desde)
+      antes(p, 'await retenerSiQuedoSinLigar(', 'return {', porReferencia)
+    }
+  })
+
   it('el escritor por identidad DÉBIL: candado del intento → candado del evento → lectura de S1 → escritura', () => {
     const s = leer('services/tpv/angelpay-webhook.service.ts')
     const desde = indice(s, 'async function escribirPorIdentidadDebil(')
@@ -244,7 +284,8 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
       // (`releaseUnprovenNegative`: candado de CADA intento vinculado → veto bancario → CAS → asiento, una sola fotografía).
       // Codex r2 (P1-A): y TRES con la transacción del NEGATIVO en `closeRow` (mismo orden de candados que la ventana).
       // Revisión final (17-sep, B): y CUATRO con la RE-RETENCIÓN de una solicitud liberada cuando el banco aprobó después
-      // (`retenerSolicitudLiberadaPorAprobacion`: el mismo orden que la ventana).
+      // (`retenerSolicitudLiberadaPorAprobacion`: el mismo orden que la ventana). Ronda 2 (P1): la re-retención por un cobro
+      // SIN LIGAR usa esa MISMA transacción (el núcleo `reRetenerSolicitudLiberada`), así que siguen siendo CUATRO.
       'services/terminal-payment.service.ts': 4,
       // Codex R14-1: el INGRESO del evento también es una transacción del protocolo (candado del intento → createdAt
       // monótono → INSERT), así que son TRES en el webhook: ingreso, publicación del vínculo y escritor por identidad débil.

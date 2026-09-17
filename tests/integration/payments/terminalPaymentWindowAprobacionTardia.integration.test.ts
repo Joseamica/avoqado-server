@@ -378,11 +378,65 @@ describe('Revisión final · B: el CAS decide con lo que el veto de la ventana v
 
   it('un APROBADO registrado con OTRO venue no cuenta (el veto es del venue de la solicitud) ⇒ NOT_APPLICABLE', async () => {
     const { solicitud, attemptId } = await liberadaPorLaVentana()
+    // Un venue REAL distinto (antes esta prueba sembraba `venueId: null`, que es el caso de abajo, no éste).
+    const otroVenue = `${f.fixture}-otro-venue`
+    await prisma.organization.create({ data: { id: otroVenue, name: otroVenue, email: `${otroVenue}@example.test`, phone: '5500000004' } })
+    await prisma.venue.create({ data: { id: otroVenue, organizationId: otroVenue, name: otroVenue, slug: otroVenue } })
+    try {
+      await eventoDelIntento(attemptId, {}, otroVenue)
+      expect(await terminalPaymentService.retenerSolicitudLiberadaPorAprobacion(entrada(solicitud.requestId, attemptId))).toBe(
+        'NOT_APPLICABLE',
+      )
+      expect(await fila(solicitud.requestId)).toMatchObject({ status: 'FAILED', failureCode: 'NO_EVIDENCE_AFTER_WINDOW' })
+    } finally {
+      await prisma.providerEventLog.deleteMany({ where: { venueId: otroVenue } })
+      await prisma.venue.deleteMany({ where: { id: otroVenue } })
+      await prisma.organization.deleteMany({ where: { id: otroVenue } })
+    }
+  })
+
+  it('un APROBADO registrado SIN venue (NULL) tampoco cuenta ⇒ NOT_APPLICABLE', async () => {
+    const { solicitud, attemptId } = await liberadaPorLaVentana()
     await eventoDelIntento(attemptId, {}, null as unknown as string)
     expect(await terminalPaymentService.retenerSolicitudLiberadaPorAprobacion(entrada(solicitud.requestId, attemptId))).toBe(
       'NOT_APPLICABLE',
     )
     expect(await fila(solicitud.requestId)).toMatchObject({ status: 'FAILED', failureCode: 'NO_EVIDENCE_AFTER_WINDOW' })
+  })
+
+  it('ronda 2 · el hermano con un Payment COMPLETED ligado: la regla de la aprobación NO aplica, la del cobro sin ligar SÍ la re-retiene', async () => {
+    const { solicitud, venta, attemptId } = await liberadaPorLaVentana()
+    await eventoDelIntento(attemptId)
+    const terminal = await exigir(prisma.terminal.findFirst({ where: { venueId: f.venueId } }))
+    const pago = await prisma.payment.create({
+      data: {
+        venueId: f.venueId,
+        orderId: venta!.id,
+        source: 'TPV',
+        terminalId: terminal.id,
+        amount: 99,
+        method: 'CREDIT_CARD',
+        status: 'COMPLETED',
+        feePercentage: 0,
+        feeAmount: 0,
+        netAmount: 99,
+        idempotencyKey: attemptId,
+      },
+    })
+    expect(await terminalPaymentService.retenerSolicitudLiberadaPorAprobacion(entrada(solicitud.requestId, attemptId))).toBe(
+      'NOT_APPLICABLE',
+    )
+    expect(
+      await terminalPaymentService.retenerSolicitudLiberadaPorPagoSinLigar({
+        requestId: solicitud.requestId,
+        venueId: f.venueId,
+        paymentId: pago.id,
+        origen: 'REST',
+      }),
+    ).toBe('HELD')
+    expect(await fila(solicitud.requestId)).toMatchObject({ status: 'TIMED_OUT', failureCode: 'PAYMENT_UNBOUND_AWAITING_REVIEW' })
+    expect(await asientos((await fila(solicitud.requestId)).id)).toEqual([])
+    expect(await asientos((await fila(solicitud.requestId)).id, 'TERMINAL_PAYMENT_UNBOUND_PAYMENT_AFTER_RELEASE')).toHaveLength(1)
   })
 
   it('con un Payment COMPLETED ligado a la solicitud (aunque no se haya podido ligar) ⇒ NOT_APPLICABLE: ya hay dinero registrado', async () => {

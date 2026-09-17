@@ -54,6 +54,16 @@ export function sinPagoLigadoSql(requestId: string, venueId: string): Prisma.Sql
   return Prisma.sql`NOT EXISTS (${pagoLigadoSql(requestId, venueId)})`
 }
 
+/**
+ * Revisión final · ronda 2 (17-sep, P1): el POSITIVO del veto por Payment — «hay un cobro con tarjeta COMPLETED ligado a la solicitud
+ * por puntero, etiqueta legacy o llave de intento». Lo exige el CAS que RE-RETIENE una solicitud ya liberada cuando ese Payment llegó
+ * DESPUÉS y el cierre común no lo pudo LIGAR: es exactamente lo que `sinPagoLigadoSql` (y la guarda G1 de la ventana) habría vetado un
+ * instante antes de liberar.
+ */
+export function hayPagoLigadoSql(requestId: string, venueId: string): Prisma.Sql {
+  return Prisma.sql`EXISTS (${pagoLigadoSql(requestId, venueId)})`
+}
+
 /** Las dos a la vez: el CAS de la LIBERACIÓN por ventana y el de la DECLARACIÓN del cajero. */
 export function sinEvidenciaPositivaSql(requestId: string, venueId: string): Prisma.Sql {
   return Prisma.sql`${sinAprobadoVinculadoSql(requestId, venueId)} AND ${sinPagoLigadoSql(requestId, venueId)}`

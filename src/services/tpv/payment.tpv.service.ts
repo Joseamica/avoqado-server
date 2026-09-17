@@ -346,7 +346,12 @@ async function resolverPorReferencia(args: {
   }
   throw new RegistroNoResuelto('RETRY_BUDGET_EXHAUSTED')
 }
-import { consolidarRegistroRepetido, consolidarRegistroRepetidoDetallado, type RegistroEntrante } from './registroRepetido'
+import {
+  consolidarRegistroRepetido,
+  consolidarRegistroRepetidoDetallado,
+  retenerSolicitudLiberadaDelRegistro,
+  type RegistroEntrante,
+} from './registroRepetido'
 import { candadoDeReferencia, esVencimientoDeCandado } from './candadoDeReferencia'
 import { deductInventoryForProduct, getProductInventoryStatus } from '../dashboard/productInventoryIntegration.service'
 import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service'
@@ -422,6 +427,17 @@ class CobroDuplicadoEnEfectivo extends Error {
     super('cobro en efectivo duplicado')
     this.name = 'CobroDuplicadoEnEfectivo'
   }
+}
+
+/**
+ * Revisión final · ronda 2 (17-sep, P1 — Codex r7, preexistente): tras el COMMIT, un cobro con tarjeta que no ligó su solicitud (el
+ * cierre común se negó, o el arbitraje lo registró como asociación inválida) puede estar LIGADO —por la llave del intento— a una
+ * solicitud ya LIBERADA (ventana o cajero) que seguiría en «puedes volver a cobrar». Se pide su re-retención por las identidades del
+ * Payment (`retenerSolicitudLiberadaDelRegistro`: sólo si el registro nombra una solicitud o el Payment la trae; un cobro local de la
+ * terminal no tiene vínculo). Fuera de la transacción financiera — nunca dentro — y nunca lanza.
+ */
+async function retenerSiQuedoSinLigar(payment: Payment, paymentData: PaymentCreationData): Promise<void> {
+  await retenerSolicitudLiberadaDelRegistro(payment, paymentData as RegistroEntrante)
 }
 
 /** S0: bajo el candado de la solicitud resultó que el ganador YA es este mismo intento (misma llave): reintento idempotente. */
@@ -2958,6 +2974,8 @@ export async function recordOrderPayment(
       existingIdempotencyKey: existingPayment.idempotencyKey || null,
       message: 'Returning existing payment (safe retry / legacy→new TPV transition)',
     })
+    // Ronda 2 (P1): el existente puede estar ligado a una solicitud ya liberada sin haberla podido ligar.
+    await retenerSiQuedoSinLigar(existingPayment, paymentData)
 
     // Return existing payment with receipt (safe retry - client gets same response)
     const areaTicketCheckoutState =
@@ -3746,6 +3764,9 @@ export async function recordOrderPayment(
       orderId: activeOrder.id,
     })
   }
+  // Ronda 2 (P1): el cobro no ligó su solicitud (cierre negado o asociación inválida) ⇒ si una solicitud ya liberada lo tiene
+  // ligado, se re-retiene. La evidencia PENDING (segunda captura, colisión) no es un cobro: no aplica.
+  if (!s0.cierre?.bound && !s0.segundaCaptura && !s0.colision) await retenerSiQuedoSinLigar(payment, paymentData)
 
   if (s0.segundaCaptura) return await responderSegundaCaptura(venueId, payment, s0.segundaCaptura)
   if (s0.colision) return await responderColisionDeReferencia(venueId, payment, s0.colision)
@@ -4545,6 +4566,8 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       existingIdempotencyKey: existingPayment.idempotencyKey || null,
       message: 'Returning existing payment (safe retry / legacy→new TPV transition)',
     })
+    // Ronda 2 (P1): el existente puede estar ligado a una solicitud ya liberada sin haberla podido ligar.
+    await retenerSiQuedoSinLigar(existingPayment, paymentData)
 
     // Return existing payment with receipt (safe retry - client gets same response)
     // Mismo relleno de cliente que el check por `idempotencyKey`: un reintento legacy
@@ -5149,6 +5172,8 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       orderId: fastOrder.id,
     })
   }
+  // Ronda 2 (P1): mismo punto que en el cobro con orden.
+  if (!s0.cierre?.bound && !s0.segundaCaptura && !s0.colision) await retenerSiQuedoSinLigar(payment, paymentData)
 
   if (s0.segundaCaptura) return await responderSegundaCaptura(venueId, payment, s0.segundaCaptura)
   if (s0.colision) return await responderColisionDeReferencia(venueId, payment, s0.colision)
