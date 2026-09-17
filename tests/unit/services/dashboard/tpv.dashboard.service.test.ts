@@ -1,5 +1,8 @@
+import { Prisma } from '@prisma/client'
+
 import { prismaMock } from '@tests/__helpers__/setup'
-import { getVenueTpvSettings, updateVenueTpvSettings, computeOverrides } from '@/services/dashboard/tpv.dashboard.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
+import { getVenueTpvSettings, updateVenueTpvSettings, computeOverrides, updateTpv } from '@/services/dashboard/tpv.dashboard.service'
 
 const venueId = 'venue-123'
 const orgId = 'org-456'
@@ -411,5 +414,106 @@ describe('computeOverrides — cascade diff computation', () => {
     const terminal = { ...base, tipSuggestions: [15, 18, 20, 25] }
     const overrides = computeOverrides(terminal, base)
     expect(overrides).toEqual({})
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 🔴 Auditoría de Codex del spec «pantalla del cliente», 3ª ronda (2026-09-16): D1 y sus hermanos.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+function p2025() {
+  return new Prisma.PrismaClientKnownRequestError('No record was found for an update.', { code: 'P2025', clientVersion: 'test' })
+}
+
+/** El `$transaction` global sólo entiende la forma de callback; estas funciones usan la de arreglo. */
+function transactionRunsBothForms() {
+  prismaMock.$transaction.mockImplementation(((ops: any) => (Array.isArray(ops) ? Promise.all(ops) : ops(prismaMock))) as any)
+}
+
+describe('updateTpv — el servicio sólo escribe los campos editables, venga de donde venga', () => {
+  const terminal = { id: 'terminal-1', venueId, type: 'TPV_ANDROID', name: 'Caja 1' }
+
+  beforeEach(() => {
+    prismaMock.terminal.findFirst.mockResolvedValue(terminal as any)
+    prismaMock.terminal.update.mockImplementation((({ data }: any) => Promise.resolve({ ...terminal, ...data })) as any)
+  })
+
+  it('descarta venueId, assignedMerchantIds, deviceUid y cualquier otra columna aunque se los pasen directo', async () => {
+    // Defensa en profundidad: la ruta ya valida, pero cualquier otro llamador (MCP, un job) entra aquí.
+    await updateTpv(venueId, 'terminal-1', {
+      name: 'Caja 2',
+      venueId: 'otro-venue',
+      assignedMerchantIds: ['merchant-ajeno'],
+      deviceUid: 'aparato-ajeno',
+      lastHeartbeat: new Date(),
+      customerDisplayRequest: { status: 'PENDING' },
+    } as any)
+
+    const { where, data } = prismaMock.terminal.update.mock.calls[0][0] as any
+    expect(where).toEqual({ id: 'terminal-1', venueId })
+    expect(Object.keys(data).sort()).toEqual(['name', 'updatedAt'])
+  })
+
+  it('una serie heredada sin prefijo que el formulario reenvía igual no se reescribe', async () => {
+    // La terminal se autentica con su serie: normalizar una serie vieja al renombrar la dejaría fuera.
+    prismaMock.terminal.findFirst.mockResolvedValue({ ...terminal, serialNumber: '2841548417' } as any)
+
+    await updateTpv(venueId, 'terminal-1', { name: 'Caja 2', serialNumber: '2841548417' })
+
+    const { data } = prismaMock.terminal.update.mock.calls[0][0] as any
+    expect(data).not.toHaveProperty('serialNumber')
+  })
+
+  it('una configuración que no es JSON se rechaza en vez de guardarse como texto', async () => {
+    await expect(updateTpv(venueId, 'terminal-1', { config: '{"settings": ' })).rejects.toMatchObject({ statusCode: 400 })
+    await expect(updateTpv(venueId, 'terminal-1', { config: '[1,2]' })).rejects.toMatchObject({ statusCode: 400 })
+    expect(prismaMock.terminal.update).not.toHaveBeenCalled()
+  })
+
+  it('si la terminal ya no es del negocio al escribir, responde 404', async () => {
+    prismaMock.terminal.update.mockRejectedValue(p2025())
+
+    await expect(updateTpv(venueId, 'terminal-1', { name: 'Caja 2' })).rejects.toMatchObject({ statusCode: 404 })
+  })
+
+  it('la bitácora lleva quién editó y los nombres de los campos, sin valores de la configuración', async () => {
+    await updateTpv(venueId, 'terminal-1', { name: 'Caja 2', config: { settings: { secreto: 'x' } } }, { staffId: 'staff-9' })
+
+    const audit = (logAction as jest.Mock).mock.calls.map(([params]) => params).find(params => params?.action === 'TPV_UPDATED')
+    expect(audit).toEqual(
+      expect.objectContaining({
+        staffId: 'staff-9',
+        venueId,
+        entityId: 'terminal-1',
+        data: { name: 'Caja 2', updatedFields: ['config', 'name'] },
+      }),
+    )
+    expect(JSON.stringify(audit)).not.toContain('secreto')
+  })
+})
+
+describe('updateVenueTpvSettings — cada terminal se escribe dentro de su negocio', () => {
+  beforeEach(() => {
+    transactionRunsBothForms()
+    prismaMock.terminal.findMany.mockResolvedValue([{ id: 't1', config: { settings: {} }, configOverrides: null }] as any)
+    prismaMock.terminal.findFirst.mockResolvedValue(null)
+    prismaMock.venueSettings.findFirst.mockResolvedValue(null)
+    prismaMock.venue.findUnique.mockResolvedValue({ organizationId: orgId } as any)
+    prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue(null)
+  })
+
+  it('acota cada escritura por el venue que escogió las terminales', async () => {
+    prismaMock.terminal.update.mockResolvedValue({} as any)
+
+    await updateVenueTpvSettings(venueId, { showTipScreen: false } as any)
+
+    expect(prismaMock.terminal.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 't1', venueId } }))
+  })
+
+  it('si una terminal se mudó mientras se guardaba, responde 409 y no reporta éxito', async () => {
+    prismaMock.terminal.update.mockRejectedValue(p2025())
+
+    await expect(updateVenueTpvSettings(venueId, { showTipScreen: false } as any)).rejects.toMatchObject({ statusCode: 409 })
+    expect((logAction as jest.Mock).mock.calls.some(([params]) => params?.action === 'VENUE_TPV_SETTINGS_UPDATED')).toBe(false)
   })
 })

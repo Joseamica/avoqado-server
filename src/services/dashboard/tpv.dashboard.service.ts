@@ -1,6 +1,8 @@
 import logger from '@/config/logger'
 import { DeviceFormFactor, Prisma, Terminal, TerminalStatus, TerminalType } from '@prisma/client'
-import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
+import { normalizeTerminalBrand } from '../../lib/providerDeviceCompatibility'
+import { runTerminalWritesOrConflict } from '../shared/terminalScopedWrites'
 import { CreateTpvBody, PaginatedTerminalsResponse, UpdateTpvBody } from '../../schemas/dashboard/tpv.schema'
 import { venueStartOfDay } from '../../utils/datetime'
 import { normalizeTerminalSerialNumber } from '../../utils/terminalSerial'
@@ -238,14 +240,36 @@ export async function getTpvById(venueId: string, tpvId: string): Promise<Device
   return toDeviceManagementDto(terminal)
 }
 
+export interface UpdateTpvActor {
+  staffId?: string
+}
+
+/** El formulario manda la configuración como texto JSON; se guarda como objeto o se rechaza. */
+function parseTerminalConfig(config: unknown): Prisma.InputJsonValue {
+  let parsed: unknown = config
+  if (typeof config === 'string') {
+    try {
+      parsed = JSON.parse(config)
+    } catch {
+      throw new BadRequestError('La configuración no es un JSON válido.')
+    }
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new BadRequestError('La configuración debe ser un objeto JSON.')
+  }
+  return parsed as Prisma.InputJsonValue
+}
+
 /**
- * Actualiza una terminal específica.
+ * Actualiza una terminal específica. Sólo escribe los campos de UPDATABLE_TPV_FIELDS y sólo si la
+ * terminal sigue perteneciendo al venue.
  * @param venueId - El ID del venue.
  * @param tpvId - El ID de la terminal.
- * @param updateData - Los datos a actualizar.
+ * @param updateData - Los datos a actualizar; cualquier otra llave se descarta.
+ * @param actor - Quién hace el cambio, para la bitácora.
  * @returns La terminal actualizada.
  */
-export async function updateTpv(venueId: string, tpvId: string, updateData: UpdateTpvBody): Promise<Terminal> {
+export async function updateTpv(venueId: string, tpvId: string, updateData: UpdateTpvBody, actor: UpdateTpvActor = {}): Promise<Terminal> {
   // 1. Validar parámetros de entrada
   if (!venueId) {
     throw new NotFoundError('El ID del Venue es requerido.')
@@ -260,40 +284,65 @@ export async function updateTpv(venueId: string, tpvId: string, updateData: Upda
       id: tpvId,
       venueId: venueId,
     },
+    select: { id: true, type: true, serialNumber: true },
   })
 
   if (!existingTerminal) {
     throw new NotFoundError(`Terminal con ID ${tpvId} no encontrada en el venue ${venueId}.`)
   }
 
-  // 3. Preparar los datos de actualización
-  const updatePayload: any = { ...updateData, updatedAt: new Date() }
-
-  // Si hay configuración como string, intentar parsearla como JSON
-  if (updateData.config && typeof updateData.config === 'string') {
-    try {
-      updatePayload.config = JSON.parse(updateData.config)
-    } catch (error) {
-      // Si no es JSON válido, guardarlo como string
-      logger.error('Error al parsear la configuración:', error)
-      updatePayload.config = updateData.config
+  // 3. 🔴 Sólo los campos editables llegan a Prisma, venga de donde venga la llamada (auditoría de
+  // Codex, 2026-09-16, D1). Antes se hacía `{ ...updateData }`: `venueId`, `assignedMerchantIds` o
+  // `deviceUid` viajaban tal cual. La lista es UPDATABLE_TPV_FIELDS (tpv.schema.ts).
+  const data: Prisma.TerminalUncheckedUpdateInput = {}
+  if (updateData.name !== undefined) data.name = updateData.name
+  if (updateData.type !== undefined) data.type = updateData.type
+  if (updateData.status !== undefined) data.status = updateData.status
+  if (updateData.model !== undefined) data.model = updateData.model
+  if (updateData.customerDisplayInverted !== undefined) data.customerDisplayInverted = updateData.customerDisplayInverted
+  // Una marca como «Nexgo» deja a la terminal sin AngelPay en silencio: se guarda la forma canónica.
+  if (updateData.brand !== undefined) data.brand = normalizeTerminalBrand(updateData.brand)
+  if (updateData.config !== undefined) data.config = parseTerminalConfig(updateData.config)
+  if (updateData.serialNumber !== undefined) {
+    // El formulario reenvía la serie que ya tenía: ésa no se toca, ni siquiera para normalizarla, porque
+    // la terminal se autentica con ella. Una serie NUEVA se normaliza igual que al crear la terminal.
+    const requested = updateData.serialNumber.trim()
+    if (requested !== existingTerminal.serialNumber) {
+      const normalized = normalizeTerminalSerialNumber(requested, updateData.type ?? existingTerminal.type)
+      if (normalized !== existingTerminal.serialNumber) data.serialNumber = normalized
     }
   }
+  const updatedFields = Object.keys(data).sort()
+  data.updatedAt = new Date()
 
-  // 4. Actualizar la terminal
-  const updatedTerminal = await prisma.terminal.update({
-    where: {
-      id: tpvId,
-    },
-    data: updatePayload,
-  })
+  // 4. Actualizar la terminal, acotada a su negocio: si se mudó entre la lectura y la escritura, no se escribe.
+  let updatedTerminal: Terminal
+  try {
+    updatedTerminal = await prisma.terminal.update({
+      where: {
+        id: tpvId,
+        venueId,
+      },
+      data,
+    })
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
+      throw new NotFoundError(`Terminal con ID ${tpvId} no encontrada en el venue ${venueId}.`)
+    }
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      throw new ConflictError('Ya existe otra terminal con esa serie.', 'TERMINAL_SERIAL_TAKEN')
+    }
+    throw error
+  }
 
   logAction({
     venueId,
+    staffId: actor.staffId,
     action: 'TPV_UPDATED',
     entity: 'Terminal',
     entityId: updatedTerminal.id,
-    data: { name: updatedTerminal.name },
+    // Sólo los nombres de los campos: la configuración puede traer datos que no van a la bitácora.
+    data: { name: updatedTerminal.name, updatedFields },
   })
 
   return updatedTerminal
@@ -1173,7 +1222,7 @@ export async function updateVenueTpvSettings(venueId: string, settingsUpdate: Pa
 
   // 4. Update all terminals in a transaction (cascade: venue settings + per-terminal overrides)
   if (Object.keys(settingsToMerge).length > 0) {
-    await prisma.$transaction(
+    await runTerminalWritesOrConflict(
       terminals.map(terminal => {
         const existingConfig = (terminal.config as any) || {}
         const existingSettings = existingConfig.settings || {}
@@ -1191,14 +1240,17 @@ export async function updateVenueTpvSettings(venueId: string, settingsUpdate: Pa
           },
         }
 
+        // Acotada al venue que escogió las terminales: una que se mudó a media operación no recibe
+        // los ajustes del dueño anterior (auditoría de Codex, 2026-09-16).
         return prisma.terminal.update({
-          where: { id: terminal.id },
+          where: { id: terminal.id, venueId },
           data: {
             config: updatedConfig,
             updatedAt: new Date(),
           },
         })
       }),
+      'Una terminal cambió de negocio mientras se guardaban los ajustes. Vuelve a intentarlo.',
     )
   }
 

@@ -1,5 +1,6 @@
 import { NextFunction, Request, Response } from 'express'
-import { GetTerminalsQuery, UpdateTpvBody, CreateTpvBody } from '../../schemas/dashboard/tpv.schema'
+import logger from '../../config/logger'
+import { GetTerminalsQuery, UpdateTpvBody, CreateTpvBody, UPDATABLE_TPV_FIELDS } from '../../schemas/dashboard/tpv.schema'
 import * as tpvDashboardService from '../../services/dashboard/tpv.dashboard.service'
 import { HeartbeatData, tpvHealthService } from '../../services/tpv/tpv-health.service'
 import { generateActivationCode as generateActivationCodeService } from '../../services/dashboard/terminal-activation.service'
@@ -99,7 +100,17 @@ export async function updateTpv(
     const { venueId, tpvId } = req.params
     const updateData = req.body
 
-    const updatedTpv = await tpvDashboardService.updateTpv(venueId, tpvId, updateData)
+    // El servicio descarta todo lo que no esté en la lista blanca; aquí sólo se deja constancia de
+    // qué llaves llegaron de más (los nombres, nunca los valores), por si alguien lo está intentando.
+    const editables: readonly string[] = UPDATABLE_TPV_FIELDS
+    const ignoredFields = Object.keys(updateData ?? {})
+      .filter(key => !editables.includes(key))
+      .sort()
+    if (ignoredFields.length > 0) {
+      logger.warn('Edición de terminal con campos no editables: se ignoraron', { terminalId: tpvId, venueId, ignoredFields })
+    }
+
+    const updatedTpv = await tpvDashboardService.updateTpv(venueId, tpvId, updateData, { staffId: req.authContext?.userId })
 
     if (Object.prototype.hasOwnProperty.call(updateData, 'customerDisplayInverted')) {
       const appVersion = sanitizeLegacyClientMetadata(req.headers['x-app-version'])

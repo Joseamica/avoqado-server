@@ -152,6 +152,7 @@ import {
   bulkConfirmIncidentSchema,
 } from '../schemas/dashboard/settlementIncident.schema'
 import { createCloseoutSchema, closeoutHistoryQuerySchema } from '../schemas/dashboard/cashCloseout.schema'
+import { updateTpvSchema } from '../schemas/dashboard/tpv.schema'
 import {
   loginSchema,
   requestPasswordResetSchema,
@@ -4630,6 +4631,10 @@ router.delete(
  *         schema:
  *           type: string
  *         description: The TPV ID
+ *     description: |
+ *       Sólo se escriben los campos listados. Cualquier otra llave del cuerpo (por ejemplo `venueId`,
+ *       `assignedMerchantIds` o `deviceUid`) se ignora y queda registrada en el log: mover una terminal
+ *       de negocio o asignarle comercios se hace desde la consola de superadmin.
  *     requestBody:
  *       required: true
  *       content:
@@ -4639,36 +4644,32 @@ router.delete(
  *             properties:
  *               name:
  *                 type: string
- *                 description: Terminal name
- *               version:
+ *                 description: Nombre de la terminal
+ *               serialNumber:
  *                 type: string
- *                 description: Terminal version
- *               serial:
- *                 type: string
- *                 description: Terminal serial number
- *               tradeMark:
- *                 type: string
- *                 description: Terminal brand/trademark
- *               model:
- *                 type: string
- *                 description: Terminal model
- *               idMenta:
- *                 type: string
- *                 description: Menta integration ID
- *               customerId:
- *                 type: string
- *                 description: Customer ID
- *               configuration:
- *                 type: string
- *                 description: Terminal configuration JSON
- *               status:
- *                 type: string
- *                 enum: [ACTIVE, INACTIVE, MAINTENANCE]
- *                 description: Terminal status
+ *                 description: Serie del aparato. Si cambia, se normaliza igual que al crear la terminal
  *               type:
  *                 type: string
- *                 enum: [TPV_ANDROID, TPV_IOS, PRINTER_RECEIPT, PRINTER_KITCHEN, KDS]
- *                 description: Terminal type
+ *                 enum: [TPV_ANDROID, TPV_IOS, PRINTER_RECEIPT, PRINTER_KITCHEN, KDS, POS_ANDROID, POS_IOS, POS_DESKTOP]
+ *                 description: Tipo de terminal. Vacío = sin cambio
+ *               status:
+ *                 type: string
+ *                 enum: [PENDING_ACTIVATION, ACTIVE, INACTIVE, MAINTENANCE, RETIRED]
+ *                 description: Estado de la terminal. Vacío = sin cambio
+ *               brand:
+ *                 type: string
+ *                 description: Marca del aparato (se normaliza, p. ej. «nexgo» → «NEXGO»)
+ *               model:
+ *                 type: string
+ *                 description: Modelo del aparato
+ *               config:
+ *                 oneOf:
+ *                   - type: object
+ *                   - type: string
+ *                 description: Configuración JSON (objeto o texto JSON). Vacío = sin cambio
+ *               customerDisplayInverted:
+ *                 type: boolean
+ *                 description: Compatibilidad con clientes viejos (mostrador invertido)
  *     responses:
  *       200:
  *         description: Terminal updated successfully
@@ -4685,7 +4686,13 @@ router.delete(
  *       403:
  *         description: Forbidden
  */
-router.put('/venues/:venueId/tpv/:tpvId', authenticateTokenMiddleware, checkPermission('tpv:update'), tpvController.updateTpv)
+router.put(
+  '/venues/:venueId/tpv/:tpvId',
+  authenticateTokenMiddleware,
+  checkPermission('tpv:update'),
+  validateRequest(updateTpvSchema),
+  tpvController.updateTpv,
+)
 
 /**
  * @openapi

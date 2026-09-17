@@ -130,14 +130,47 @@ describe('PUT /tpv/terminals/:serialNumber/settings — sólo dentro del negocio
     expect(res.json).not.toHaveBeenCalled()
   })
 
+  /**
+   * Codex, 3ª ronda (P2): con el `$transaction` global el cliente de la transacción ES `prismaMock`,
+   * así que escribir con el cliente global también pasaba la prueba. Aquí la transacción recibe un
+   * cliente PROPIO y se exige que las dos escrituras hayan usado ése.
+   */
+  function isolatedTransactionClient(upsert: jest.Mock = jest.fn().mockResolvedValue({})) {
+    const tx = {
+      terminal: { update: jest.fn().mockResolvedValue({}) },
+      venueSettings: { upsert },
+    }
+    prismaMock.$transaction.mockImplementationOnce(((callback: (client: typeof tx) => unknown) => callback(tx)) as any)
+    return tx
+  }
+
   it('el cambio de turnos del negocio viaja en la MISMA transacción que la terminal', async () => {
+    const tx = isolatedTransactionClient()
     const res = makeRes()
     const next = jest.fn() as NextFunction
 
     await updateTpvSettings(putReq(VENUE_B, { showTipScreen: false, enableShifts: false }), res, next)
 
     expect(next).not.toHaveBeenCalled()
+    expect(res.__status).toBe(200)
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
-    expect(prismaMock.venueSettings.upsert).toHaveBeenCalledWith(expect.objectContaining({ where: { venueId: VENUE_B } }))
+    expect(tx.terminal.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'terminal-b', venueId: VENUE_B } }))
+    expect(tx.venueSettings.upsert).toHaveBeenCalledWith(expect.objectContaining({ where: { venueId: VENUE_B } }))
+    // Nada se escribió por fuera de la transacción.
+    expect(prismaMock.terminal.update).not.toHaveBeenCalled()
+    expect(prismaMock.venueSettings.upsert).not.toHaveBeenCalled()
+  })
+
+  it('si falla el cambio de turnos, la operación entera falla y no se reporta éxito', async () => {
+    // El retroceso real lo hace Postgres; lo que esta prueba fija es que el fallo del segundo
+    // escritor sale de la transacción y el controlador no contesta 200.
+    isolatedTransactionClient(jest.fn().mockRejectedValue(new Error('upsert falló')))
+    const res = makeRes()
+    const next = jest.fn() as NextFunction
+
+    await updateTpvSettings(putReq(VENUE_B, { showTipScreen: false, enableShifts: false }), res, next)
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: 'upsert falló' }))
+    expect(res.json).not.toHaveBeenCalled()
   })
 })

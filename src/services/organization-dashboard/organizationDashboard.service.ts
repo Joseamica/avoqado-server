@@ -30,6 +30,7 @@ import {
 } from '../../utils/datetime'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
+import { runTerminalWritesOrConflict } from '../shared/terminalScopedWrites'
 import { computeTerminalMigration, type MigrationCommandLike } from '../dashboard/terminals.superadmin.service'
 import { cerrarSesionesNuevasPorCambioDeContrasena } from '../../utils/passwordChangeGuard'
 
@@ -3681,7 +3682,7 @@ class OrganizationDashboardService {
       const BATCH_SIZE = 50
       for (let i = 0; i < terminals.length; i += BATCH_SIZE) {
         const batch = terminals.slice(i, i + BATCH_SIZE)
-        await prisma.$transaction(
+        await runTerminalWritesOrConflict(
           batch.map(terminal => {
             const existingConfig = (terminal.config as Record<string, any>) || {}
             const overrides = (terminal.configOverrides as Record<string, any>) || {}
@@ -3697,14 +3698,17 @@ class OrganizationDashboardService {
                 overrides.kioskDefaultMerchantId ?? (existingConfig.settings as Record<string, any>)?.kioskDefaultMerchantId ?? null,
             }
 
+            // Acotada a la organización que escogió las terminales: una que se mudó a otra organización
+            // a media operación no recibe estos ajustes (auditoría de Codex, 2026-09-16).
             return prisma.terminal.update({
-              where: { id: terminal.id },
+              where: { id: terminal.id, venue: { organizationId: orgId } },
               data: {
                 config: { ...existingConfig, settings: pushSettings },
                 updatedAt: new Date(),
               },
             })
           }),
+          'Una terminal cambió de organización mientras se aplicaban los ajustes. Vuelve a intentarlo.',
         )
       }
     }

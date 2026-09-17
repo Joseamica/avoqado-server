@@ -50,7 +50,7 @@ describe('updateTpv legacy display-mode telemetry', () => {
     await updateTpv(req as any, res, next)
 
     expect(next).not.toHaveBeenCalled()
-    expect(updateTpvMock).toHaveBeenCalledWith('venue-1', 'terminal-1', req.body)
+    expect(updateTpvMock).toHaveBeenCalledWith('venue-1', 'terminal-1', req.body, { staffId: 'staff-1' })
     expect(res.statusCode).toBe(200)
     expect(res.body).toEqual({ id: 'terminal-1', customerDisplayInverted: true, name: 'Caja principal' })
     expect(logActionMock).toHaveBeenCalledWith({

@@ -1,3 +1,5 @@
+import { Prisma } from '@prisma/client'
+
 import { prismaMock } from '@tests/__helpers__/setup'
 import { organizationDashboardService } from '@/services/organization-dashboard/organizationDashboard.service'
 
@@ -560,6 +562,39 @@ describe('OrganizationDashboardService', () => {
       // Existing fields should be preserved
       expect(savedSettings.showTipScreen).toBe(false)
       expect(savedSettings.enableCashPayments).toBe(true)
+    })
+  })
+})
+
+// 🔴 Auditoría de Codex del spec «pantalla del cliente», 3ª ronda (2026-09-16): la cascada de
+// defaults escoge las terminales de la organización y luego escribía por `{ id }` a secas. Una
+// terminal que se muda a otra organización a media operación recibía los ajustes del dueño anterior.
+describe('upsertOrgTpvDefaults — cada terminal se escribe dentro de su organización', () => {
+  const p2025 = () =>
+    new Prisma.PrismaClientKnownRequestError('No record was found for an update.', { code: 'P2025', clientVersion: 'test' })
+
+  beforeEach(() => {
+    prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue(null)
+    prismaMock.organizationAttendanceConfig.upsert.mockResolvedValue({} as any)
+    prismaMock.terminal.findMany.mockResolvedValue([{ id: 't1', config: { settings: {} }, configOverrides: null }] as any)
+    prismaMock.$transaction.mockImplementation(((ops: any) => (Array.isArray(ops) ? Promise.all(ops) : ops(prismaMock))) as any)
+  })
+
+  it('acota cada escritura por la organización que escogió las terminales', async () => {
+    prismaMock.terminal.update.mockResolvedValue({} as any)
+
+    await organizationDashboardService.upsertOrgTpvDefaults(orgId, { showTipScreen: false })
+
+    expect(prismaMock.terminal.update).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 't1', venue: { organizationId: orgId } } }),
+    )
+  })
+
+  it('si una terminal se mudó de organización mientras se guardaba, responde 409', async () => {
+    prismaMock.terminal.update.mockRejectedValue(p2025())
+
+    await expect(organizationDashboardService.upsertOrgTpvDefaults(orgId, { showTipScreen: false })).rejects.toMatchObject({
+      statusCode: 409,
     })
   })
 })
