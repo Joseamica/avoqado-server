@@ -192,7 +192,7 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
     antes(s, 'await this.escribirSuccessDegradado(', 'retenerSolicitudLiberadaPorAfirmacionDeLaTerminal(', cierre)
     antes(s, 'retenerSolicitudLiberadaPorAfirmacionDeLaTerminal(', 'const fresca = await prisma.terminalPaymentRequest.findFirst(', cierre)
     // P1-A: la red durable NO abre transacción propia ni pregunta fila por fila — una consulta correlacionada por lote.
-    const red = indice(s, 'private async retenerLiberadasConPagoLigado(')
+    const red = indice(s, 'private async retenerLiberadasConSenalPositiva(')
     const cuerpoDeLaRed = s.slice(red, indice(s, 'private async paginarLiberadas(', red))
     expect(cuerpoDeLaRed).not.toMatch(/\$transaction/)
     expect(cuerpoDeLaRed).toMatch(/JOIN LATERAL/)
@@ -216,6 +216,34 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
     const reclamar = indice(w, 'const reclamarYEstampar = async')
     antes(w, 'await pedirReRetencionDeLiberadas()', 'escribirPorIdentidadDebil({', reclamar)
     expect(w).toMatch(/retenerLiberadasPorPagoSinLigar\(pago, 'BACKFILL'\)/)
+  })
+
+  it('Ronda 4 (17-sep) · la RED DURABLE recoge las TRES señales en el MISMO recorrido, y ninguna abre transacción propia', () => {
+    const s = leer('services/terminal-payment.service.ts')
+    const red = indice(s, 'private async retenerLiberadasConSenalPositiva(')
+    const cuerpo = s.slice(red, indice(s, 'private async paginarLiberadas(', red))
+    // Un solo SELECT: las dos correlacionadas como LATERAL y la afirmación como prueba de la propia fila, en UN `OR`.
+    expect(cuerpo.match(/prisma\.\$queryRaw/g) ?? []).toHaveLength(1)
+    expect(cuerpo).toMatch(/LEFT JOIN LATERAL \(\$\{pagoLigadoDeLaFilaSql\('r'\)\} LIMIT 1\) ligado/)
+    expect(cuerpo).toMatch(/LEFT JOIN LATERAL \(\$\{evidenciaDeConciliacionDeLaFilaSql\('r'\)\} LIMIT 1\) colision/)
+    expect(cuerpo).toMatch(/ligado\."id" IS NOT NULL OR colision\."id" IS NOT NULL OR \$\{hayAfirmacion\}/)
+    // El MISMO recorrido: un solo keyset, un solo tope de lotes, un solo horizonte.
+    expect(cuerpo).toMatch(/for \(let lote = 0; lote < LOTES_MAXIMOS_DE_LIBERADAS; lote\+\+\)/)
+    expect(cuerpo.match(/LIMIT \$\{TAMANO_DEL_LOTE_LIBERADAS\}/g) ?? []).toHaveLength(1)
+    // 🔴 El veredicto COMPARTIDO va ANTES que las variantes sin Payment (un cobro atribuible se concilia, no se retiene).
+    antes(s, "this.conciliarORetenerLiberada(row, 'BARRIDO_LIGADOS')", 'this.retenerPorSenalSinPago(row, fila)', red)
+    // Las dos variantes sin Payment reusan el núcleo (ningún CAS nuevo) y nunca dentro de una transacción.
+    const senal = indice(s, 'private async retenerPorSenalSinPago(')
+    const cuerpoSenal = s.slice(senal, indice(s, '\n  /**', senal))
+    expect(cuerpoSenal).not.toMatch(/\$transaction/)
+    expect(cuerpoSenal).toMatch(/retenerSolicitudLiberadaPorColisionDeReferencia\(/)
+    expect(cuerpoSenal).toMatch(/retenerSolicitudLiberadaPorAfirmacionDeLaTerminal\(/)
+    expect(cuerpoSenal).toMatch(/origen: 'BARRIDO_SENALES'/)
+    // P1-C(b): en `closeRow` la relectura ya NO depende de que gane MI llamada — no hay `return escrito` en medio.
+    const cierre = indice(s, 'private async closeRow(')
+    const bloque = s.slice(indice(s, 'await this.escribirSuccessDegradado(', cierre), indice(s, 'const data:', cierre))
+    expect(bloque).not.toMatch(/!== 'HELD'\)[\s\S]*return escrito/)
+    antes(s, 'retenerSolicitudLiberadaPorAfirmacionDeLaTerminal(', 'const fresca = await prisma.terminalPaymentRequest.findFirst(', cierre)
   })
 
   it('el escritor por identidad DÉBIL: candado del intento → candado del evento → lectura de S1 → escritura', () => {

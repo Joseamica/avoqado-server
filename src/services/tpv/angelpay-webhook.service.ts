@@ -1757,7 +1757,18 @@ export async function reconcileAngelPayWebhookForPayment(payment: {
             processorData: true,
           },
         })
-        const resultados = pago ? await terminalPaymentService.retenerLiberadasPorPagoSinLigar(pago, 'BACKFILL') : []
+        // 🔴 Ronda 4 (P2 de Codex r9): «no pude comprobar» NO es «comprobé y no había nada». Un Payment que ya no se puede
+        // releer deja la comprobación SIN hacer, igual que una lectura del vínculo que revienta (el servicio la devuelve
+        // ahora como `DEFERRED`): en los dos casos no se sella — mejor un evento PENDING que un sello encima de una
+        // solicitud liberada que nadie va a volver a mirar.
+        if (!pago) {
+          logger.warn('🪝 [AngelPay backfill] el Payment no se pudo releer para comprobar sus solicitudes liberadas — no se sella', {
+            paymentId: payment.id,
+          })
+          reRetencionPedida = 'DIFERIDA'
+          return reRetencionPedida
+        }
+        const resultados = await terminalPaymentService.retenerLiberadasPorPagoSinLigar(pago, 'BACKFILL')
         reRetencionPedida = resultados.some(r => r.resultado === 'DEFERRED') ? 'DIFERIDA' : 'HECHA'
       } catch (err) {
         // El servicio no lanza; si algo aún así revienta, se trata como diferido: mejor dejar el evento PENDING que sellarlo

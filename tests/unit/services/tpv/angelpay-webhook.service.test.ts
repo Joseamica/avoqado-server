@@ -1789,6 +1789,19 @@ describe('Ronda 3 · P1-A: el backfill pide la re-retención ANTES de sellar, y 
     expect(mockedProviderEventLogUpdate).toHaveBeenCalledTimes(2)
   })
 
+  it('🔴 ronda 4 (P2): si el Payment no se puede releer, la comprobación NO terminó — no se sella', async () => {
+    mockedPaymentFindUnique.mockResolvedValue(null)
+    await reconcileAngelPayWebhookForPayment(pago)
+    expect(retener).not.toHaveBeenCalled()
+    expect(mockedProviderEventLogUpdate).not.toHaveBeenCalled()
+  })
+
+  it('🔴 ronda 4 (P2): una lectura fallida del vínculo llega como `DEFERRED` y tampoco sella', async () => {
+    retener.mockResolvedValue([{ requestId: null, resultado: 'DEFERRED' }])
+    await reconcileAngelPayWebhookForPayment(pago)
+    expect(mockedProviderEventLogUpdate).not.toHaveBeenCalled()
+  })
+
   it('regresión: un evento que NO llega a sellar (estado bancario rechazado) no pide nada', async () => {
     mockedProviderEventLogFindMany.mockResolvedValue([
       { ...evento, payload: { ...evento.payload, payload: { ...evento.payload.payload, status: 'declined' } } },

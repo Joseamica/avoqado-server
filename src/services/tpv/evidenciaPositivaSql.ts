@@ -125,11 +125,24 @@ export function pagoLigadoDeLaFilaSql(alias: string): Prisma.Sql {
  * escribe el SERVIDOR dentro de la transacción del registro, así que es evidencia durable y no un dato del cuerpo del
  * cliente; quién puede usarla para re-retener lo decide aparte la identidad acreditada del llamador (regla T10).
  */
-export function hayEvidenciaDeConciliacionSql(requestId: string, venueId: string): Prisma.Sql {
-  return Prisma.sql`EXISTS (
+const evidenciaDeConciliacionSql = (requestId: Prisma.Sql, venueId: Prisma.Sql): Prisma.Sql => Prisma.sql`
       SELECT p."id" FROM "Payment" p
       WHERE p."venueId" = ${venueId} AND p."status" = 'PENDING' AND p."terminalPaymentRequestId" = ${requestId}
-        AND p."processorData"->'reconciliation'->>'kind' IN ('POSSIBLE_REFERENCE_COLLISION', 'POSSIBLE_SECOND_CAPTURE'))`
+        AND p."processorData"->'reconciliation'->>'kind' IN ('POSSIBLE_REFERENCE_COLLISION', 'POSSIBLE_SECOND_CAPTURE')`
+
+export function hayEvidenciaDeConciliacionSql(requestId: string, venueId: string): Prisma.Sql {
+  return Prisma.sql`EXISTS (${evidenciaDeConciliacionSql(bind(requestId), bind(venueId))})`
+}
+
+/**
+ * Ronda 4 (17-sep, P1-B): el MISMO cuerpo, CORRELACIONADO con las columnas de una fila de `TerminalPaymentRequest` de alias
+ * `alias` — lo que le permite a la RED DURABLE recoger en su recorrido, además de las liberadas con un cobro ligado, las que
+ * sólo tienen esta evidencia (una colisión de referencia cuya re-retención se difirió no producía ningún Payment COMPLETED,
+ * así que ningún barrido la volvía a mirar). Es EL de arriba, no una copia: si divergieran, el selector del barrido y el CAS
+ * dirían cosas distintas de la misma evidencia (hay una prueba que compara los textos).
+ */
+export function evidenciaDeConciliacionDeLaFilaSql(alias: string): Prisma.Sql {
+  return evidenciaDeConciliacionSql(columna(alias, 'requestId'), columna(alias, 'venueId'))
 }
 
 /** Las dos a la vez: el CAS de la LIBERACIÓN por ventana y el de la DECLARACIÓN del cajero. */

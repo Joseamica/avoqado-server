@@ -458,11 +458,17 @@ describe('Ronda 2 · P1: retenerLiberadasPorPagoSinLigar resuelve las solicitude
     expect(prismaMock.terminalPaymentAttemptLink.findUnique).toHaveBeenCalledTimes(1)
   })
 
-  it('si leer el vínculo revienta, sigue con las otras identidades y no lanza', async () => {
+  it('si leer el vínculo revienta, sigue con las otras identidades, no lanza — y REPORTA el diferimiento', async () => {
     prismaMock.terminalPaymentAttemptLink.findUnique.mockRejectedValue(new Error('pool agotado'))
+    // 🔴 Ronda 4 (P2 de Codex r9): la entrada `{ requestId: null, resultado: 'DEFERRED' }` es lo que distingue «no pude
+    // comprobar» de «comprobé y no había nada» — sin ella, la puerta del backfill leía la lista como comprobación
+    // terminada y sellaba encima de una solicitud liberada que nadie iba a volver a mirar.
     await expect(
       svc.retenerLiberadasPorPagoSinLigar(pago({ idempotencyKey: 'att-1', terminalPaymentRequestId: 'REQ-COL' }), 'REST'),
-    ).resolves.toEqual([{ requestId: 'REQ-COL', resultado: 'HELD' }])
+    ).resolves.toEqual([
+      { requestId: null, resultado: 'DEFERRED' },
+      { requestId: 'REQ-COL', resultado: 'HELD' },
+    ])
     expect(logger.warn).toHaveBeenCalled()
   })
 })

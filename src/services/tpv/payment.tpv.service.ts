@@ -464,15 +464,25 @@ async function retenerSiHayColisionSobreUnaLiberada(evidencia: Payment, paymentD
   const requestId = evidencia.terminalPaymentRequestId ?? solicitudDelRegistro(evidencia.processorData)
   if (!requestId) return
   try {
-    await terminalPaymentService.retenerSolicitudLiberadaPorColisionDeReferencia({
+    const resultado = await terminalPaymentService.retenerSolicitudLiberadaPorColisionDeReferencia({
       requestId,
       venueId: evidencia.venueId,
       paymentId: evidencia.id,
       capturedBySerial: paymentData.authenticatedTerminalSerial ?? null,
       origen: 'REST',
     })
+    // 🔴 Ronda 4 (P1-B, Codex r9): el resultado ya NO se descarta. Un `DEFERRED` (candado ocupado, base caída) dejaba la
+    // solicitud liberada diciéndole al POS «puedes volver a cobrar» PARA SIEMPRE: la respuesta al cajero es un éxito y
+    // nadie volvía a pasar por aquí. Ahora la recoge la RED DURABLE del watchdog, que desde esta ronda selecciona también
+    // por la EVIDENCIA PENDING (no sólo por un Payment COMPLETED ligado), así que la promesa de este mensaje es cierta.
+    if (resultado === 'DEFERRED')
+      logger.warn('⏱️ [Terminal-payment] la re-retención por colisión de referencia quedó diferida — la red durable la recoge', {
+        paymentId: evidencia.id,
+        venueId: evidencia.venueId,
+        requestId,
+      })
   } catch (error) {
-    logger.warn('⚠️ [Terminal-payment] No se pudo pedir la re-retención por colisión de referencia — la red durable la reintenta', {
+    logger.warn('⚠️ [Terminal-payment] No se pudo pedir la re-retención por colisión de referencia — la red durable la recoge', {
       paymentId: evidencia.id,
       venueId: evidencia.venueId,
       requestId,

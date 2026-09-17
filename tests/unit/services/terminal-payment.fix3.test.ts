@@ -401,7 +401,7 @@ describe('Ronda 3 · P1-C: el `success` degradado del socket pide la re-retenci�
 // ───────────────── P1-A · la red durable: el barrido ya no depende de la ventana de 30 min ─────────────────
 describe('Ronda 3 · P1-A: red durable — las liberadas CON un Payment ligado se re-retienen en un tiempo acotado', () => {
   let porSolicitud: jest.SpyInstance
-  const CONSULTA = 'liberadas-con-cobro'
+  const CONSULTA = 'liberadas-con-senal'
 
   beforeEach(() => {
     porSolicitud = jest.spyOn(svc, 'retenerSolicitudLiberadaPorPagoSinLigar').mockResolvedValue('HELD')
@@ -412,7 +412,7 @@ describe('Ronda 3 · P1-A: red durable — las liberadas CON un Payment ligado s
   const consultas = () => prismaMock.$queryRaw.mock.calls.filter((c: any[]) => (c[0] as string[]).join('?').includes(CONSULTA))
 
   it('UNA consulta correlacionada por lote: los dos códigos de liberación, sin pago, horizonte de 7 días, keyset y tope', async () => {
-    await svc.retenerLiberadasConPagoLigado(new Date('2026-09-17T12:00:00.000Z'))
+    await svc.retenerLiberadasConSenalPositiva(new Date('2026-09-17T12:00:00.000Z'))
     expect(consultas()).toHaveLength(1)
     const { texto, fragmentos, values } = sqlDe(consultas()[0])
     const completo = texto + ' ' + fragmentos.join(' ')
@@ -436,21 +436,37 @@ describe('Ronda 3 · P1-A: red durable — las liberadas CON un Payment ligado s
     prismaMock.$queryRaw.mockImplementation(async (strings: string[]) =>
       (strings as string[]).join('?').includes(CONSULTA)
         ? [
-            { requestId: 'REQ-1', venueId: 'venue-1', createdAt: new Date('2026-09-11T00:00:00Z'), id: 'row-1', paymentId: 'pay-1' },
-            { requestId: 'REQ-2', venueId: 'venue-2', createdAt: new Date('2026-09-12T00:00:00Z'), id: 'row-2', paymentId: null },
+            {
+              requestId: 'REQ-1',
+              venueId: 'venue-1',
+              createdAt: new Date('2026-09-11T00:00:00Z'),
+              id: 'row-1',
+              paymentId: 'pay-1',
+              evidenciaId: null,
+              afirmacion: false,
+            },
+            {
+              requestId: 'REQ-2',
+              venueId: 'venue-2',
+              createdAt: new Date('2026-09-12T00:00:00Z'),
+              id: 'row-2',
+              paymentId: 'pay-2',
+              evidenciaId: null,
+              afirmacion: false,
+            },
           ]
         : [],
     )
     tpr().findFirst.mockImplementation(async ({ where }: any) => ({ ...liberada(), requestId: where.requestId, venueId: where.venueId }))
     const veredicto = jest.spyOn(svc, 'conciliarORetenerLiberada').mockResolvedValueOnce('HELD').mockResolvedValueOnce('RECONCILED')
     try {
-      const retenidas = await svc.retenerLiberadasConPagoLigado(new Date('2026-09-17T12:00:00.000Z'))
+      const retenidas = await svc.retenerLiberadasConSenalPositiva(new Date('2026-09-17T12:00:00.000Z'))
       expect(veredicto).toHaveBeenCalledTimes(2)
       expect(veredicto.mock.calls[0][0]).toMatchObject({ requestId: 'REQ-1' })
       expect(veredicto.mock.calls[0][1]).toBe('BARRIDO_LIGADOS')
       expect(veredicto.mock.calls[1][0]).toMatchObject({ requestId: 'REQ-2' })
       // Sólo cuenta las RETENIDAS: un cobro atribuible se CONCILIA (COMPLETED), que es el desenlace correcto, no una retención.
-      expect(retenidas).toBe(1)
+      expect(retenidas).toEqual({ conPago: 1, sinPago: 0 })
     } finally {
       veredicto.mockRestore()
     }
@@ -459,13 +475,23 @@ describe('Ronda 3 · P1-A: red durable — las liberadas CON un Payment ligado s
   it('una fila que ya no está (otro la cerró entre la consulta y la relectura) se salta sin veredicto', async () => {
     prismaMock.$queryRaw.mockImplementation(async (strings: string[]) =>
       (strings as string[]).join('?').includes(CONSULTA)
-        ? [{ requestId: 'REQ-1', venueId: 'venue-1', createdAt: new Date(), id: 'row-1', paymentId: 'pay-1' }]
+        ? [
+            {
+              requestId: 'REQ-1',
+              venueId: 'venue-1',
+              createdAt: new Date(),
+              id: 'row-1',
+              paymentId: 'pay-1',
+              evidenciaId: null,
+              afirmacion: false,
+            },
+          ]
         : [],
     )
     tpr().findFirst.mockResolvedValue(null)
     const veredicto = jest.spyOn(svc, 'conciliarORetenerLiberada')
     try {
-      expect(await svc.retenerLiberadasConPagoLigado(new Date())).toBe(0)
+      expect(await svc.retenerLiberadasConSenalPositiva(new Date())).toEqual({ conPago: 0, sinPago: 0 })
       expect(veredicto).not.toHaveBeenCalled()
     } finally {
       veredicto.mockRestore()
@@ -526,13 +552,15 @@ describe('Ronda 3 · P1-A: red durable — las liberadas CON un Payment ligado s
         venueId: 'venue-1',
         createdAt: new Date(`2026-09-1${(n % 5) + 1}T00:00:00Z`),
         id: `row-${n}-${i}`,
-        paymentId: null,
+        paymentId: 'pay-x',
+        evidenciaId: null,
+        afirmacion: false,
       }))
     let pasada = 0
     prismaMock.$queryRaw.mockImplementation(async (strings: string[]) =>
       (strings as string[]).join('?').includes(CONSULTA) ? lote(pasada++) : [],
     )
-    await svc.retenerLiberadasConPagoLigado(new Date('2026-09-17T12:00:00.000Z'))
+    await svc.retenerLiberadasConSenalPositiva(new Date('2026-09-17T12:00:00.000Z'))
     expect(consultas().length).toBe(25)
     const segunda = sqlDe(consultas()[1])
     expect(segunda.texto + segunda.fragmentos.join(' ')).toContain('r."createdAt" >')
@@ -542,15 +570,25 @@ describe('Ronda 3 · P1-A: red durable — las liberadas CON un Payment ligado s
   it('un lote incompleto termina el recorrido (no vuelve a preguntar)', async () => {
     prismaMock.$queryRaw.mockImplementation(async (strings: string[]) =>
       (strings as string[]).join('?').includes(CONSULTA)
-        ? [{ requestId: 'REQ-1', venueId: 'venue-1', createdAt: new Date(), id: 'row-1', paymentId: null }]
+        ? [
+            {
+              requestId: 'REQ-1',
+              venueId: 'venue-1',
+              createdAt: new Date(),
+              id: 'row-1',
+              paymentId: 'pay-x',
+              evidenciaId: null,
+              afirmacion: false,
+            },
+          ]
         : [],
     )
-    await svc.retenerLiberadasConPagoLigado(new Date())
+    await svc.retenerLiberadasConSenalPositiva(new Date())
     expect(consultas()).toHaveLength(1)
   })
 
   it('la red corre en la pasada del watchdog (`reconcileUnknownRequests`) y reporta cuántas retuvo', async () => {
-    const red = jest.spyOn(svc, 'retenerLiberadasConPagoLigado').mockResolvedValue(3)
+    const red = jest.spyOn(svc, 'retenerLiberadasConSenalPositiva').mockResolvedValue({ conPago: 3, sinPago: 0 })
     const r = await svc.reconcileUnknownRequests(new Date())
     expect(red).toHaveBeenCalled()
     expect(r.heldWithLinkedPayment).toBe(3)

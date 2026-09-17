@@ -22,8 +22,9 @@ import { sendOpsAlert } from '@/services/alerts/opsAlert.service'
 import { reconcileAngelPayWebhookForPayment } from '@/services/tpv/angelpay-webhook.service'
 import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
 import { resolveNoInstrument } from '@/services/tpv/no-instrument-resolution.service'
-import { UNPROVEN_NEGATIVE_WINDOW_MS, terminalPaymentService } from '@/services/terminal-payment.service'
-import { pagoLigadoDeLaFilaSql } from '@/services/tpv/evidenciaPositivaSql'
+import { UNPROVEN_NEGATIVE_WINDOW_MS, sinAfirmacionDeLaTerminalSql, terminalPaymentService } from '@/services/terminal-payment.service'
+import { evidenciaDeConciliacionDeLaFilaSql, pagoLigadoDeLaFilaSql } from '@/services/tpv/evidenciaPositivaSql'
+import { Prisma } from '@prisma/client'
 import { utcTs } from '@/utils/sqlDates'
 import socketManager from '@/communication/sockets/managers/socketManager'
 import { terminalRegistry } from '@/communication/sockets/terminal-registry'
@@ -212,7 +213,7 @@ describe('Ronda 3 · P1-A: la red durable alcanza un Payment ligado que llega FU
     expect(await asientos(retenidaR.id, SIN_LIGAR)).toHaveLength(1)
   })
 
-  it('una liberada ANTIGUA sin ningún Payment ligado no se toca (la red sólo trae las que tienen cobro)', async () => {
+  it('una liberada ANTIGUA SIN NINGUNA señal (ni cobro, ni evidencia, ni afirmación) no se toca', async () => {
     const { solicitud, venta } = await liberadaPorLaVentana()
     await envejecer(solicitud.id, 180)
     await terminalPaymentService.reconcileUnknownRequests(new Date())
@@ -256,23 +257,49 @@ describe('Ronda 3 · P1-A: la red durable alcanza un Payment ligado que llega FU
 
 const terminalPrincipal = () => exigir(prisma.terminal.findFirst({ where: { venueId: f.venueId, serialNumber: f.serial } }))
 
+/** Un evento PENDING de AngelPay correlacionado con la llave del Payment (lo que el backfill busca). */
+async function eventoPendiente(attemptId: string) {
+  const eventId = `angelpay-${f.nuevoEventId()}`
+  return prisma.providerEventLog.create({
+    data: {
+      provider: 'PAYMENT_PROCESSOR',
+      type: 'send_transaction',
+      eventId,
+      status: 'PENDING',
+      venueId: f.venueId,
+      payload: f.eventoAngelPay(attemptId) as object,
+    },
+  })
+}
+
+/**
+ * El cobro previo con la MISMA referencia, mismo importe, misma orden y misma terminal, pero de OTRA afiliación y SIN
+ * autorización: la identidad queda INCIERTA (`AFILIACION_INCIERTA`) ⇒ el registro entrante nace como EVIDENCIA PENDING.
+ */
+async function cobroPrevioQueContradice(orderId: string, referencia: string) {
+  const otraAfiliacion = await f.afiliacionSecundaria()
+  return prisma.payment.create({
+    data: {
+      venueId: f.venueId,
+      orderId,
+      source: 'TPV',
+      terminalId: (await terminalPrincipal()).id,
+      merchantAccountId: otraAfiliacion.id,
+      amount: 100,
+      tipAmount: 0,
+      method: 'CREDIT_CARD',
+      status: 'COMPLETED',
+      referenceNumber: referencia,
+      authorizationNumber: null,
+      feePercentage: 0,
+      feeAmount: 0,
+      netAmount: 100,
+    },
+  })
+}
+
 // ═════════════════ P1-A · el BACKFILL pide antes de sellar ═════════════════
 describe('Ronda 3 · P1-A: el backfill del webhook pide la re-retención ANTES de sellar su evento', () => {
-  /** Un evento PENDING de AngelPay correlacionado con la llave del Payment (lo que el backfill busca). */
-  async function eventoPendiente(attemptId: string) {
-    const eventId = `angelpay-${f.nuevoEventId()}`
-    return prisma.providerEventLog.create({
-      data: {
-        provider: 'PAYMENT_PROCESSOR',
-        type: 'send_transaction',
-        eventId,
-        status: 'PENDING',
-        venueId: f.venueId,
-        payload: f.eventoAngelPay(attemptId) as object,
-      },
-    })
-  }
-
   it('re-retiene y sella: el evento queda PROCESSED y la solicitud liberada vuelve a estar retenida', async () => {
     const { solicitud, venta, attemptId } = await liberadaPorLaVentana()
     const pago = await pagoDelIntento({ attemptId, orderId: venta.id, terminalId: otra.id })
@@ -327,32 +354,6 @@ describe('Ronda 3 · P1-A: el backfill del webhook pide la re-retención ANTES d
 
 // ═════════════════ P1-B · la colisión de referencia por REST ═════════════════
 describe('Ronda 3 · P1-B: la colisión de referencia sobre una solicitud LIBERADA', () => {
-  /**
-   * El cobro previo con la MISMA referencia, mismo importe, misma orden y misma terminal, pero de OTRA afiliación y SIN
-   * autorización: la identidad queda INCIERTA (`AFILIACION_INCIERTA`) ⇒ el registro entrante nace como EVIDENCIA PENDING.
-   */
-  async function cobroPrevioQueContradice(orderId: string, referencia: string) {
-    const otraAfiliacion = await f.afiliacionSecundaria()
-    return prisma.payment.create({
-      data: {
-        venueId: f.venueId,
-        orderId,
-        source: 'TPV',
-        terminalId: (await terminalPrincipal()).id,
-        merchantAccountId: otraAfiliacion.id,
-        amount: 100,
-        tipAmount: 0,
-        method: 'CREDIT_CARD',
-        status: 'COMPLETED',
-        referenceNumber: referencia,
-        authorizationNumber: null,
-        feePercentage: 0,
-        feeAmount: 0,
-        netAmount: 100,
-      },
-    })
-  }
-
   it('🔴 la evidencia PENDING re-retiene la solicitud: razón propia, sin Payment ligado, UN asiento, 🚨 y correo', async () => {
     const { solicitud, venta } = await liberadaPorLaVentana()
     const referencia = `REF-${randomUUID().slice(0, 12)}`
@@ -631,16 +632,22 @@ describe('Ronda 3 · P2: el plan de la pregunta «hay un cobro ligado» usa el �
       SELECT count(*) AS candidatas FROM "TerminalPaymentRequest" r
       WHERE r."status" = 'FAILED' AND r."failureCode" IN ('NO_EVIDENCE_AFTER_WINDOW', 'OPERATOR_RECONCILED_NO_CHARGE')
         AND r."paymentId" IS NULL AND r."createdAt" >= (NOW() AT TIME ZONE 'UTC') - INTERVAL '7 days'`
-    // 🔴 NO se transcribe a mano el JOIN LATERAL: es la MISMA pieza que usa `retenerLiberadasConPagoLigado` en producción
-    // (`pagoLigadoDeLaFilaSql('r')`, de `evidenciaPositivaSql.ts`). Si el código cambiara el `UNION` por un `OR`
-    // equivalente —la forma 300× más lenta documentada ahí mismo— este EXPLAIN lo vería, no una copia hecha a mano.
+    // 🔴 NO se transcribe a mano NADA del selector: las TRES piezas son las MISMAS que usa
+    // `retenerLiberadasConSenalPositiva` en producción (`pagoLigadoDeLaFilaSql`, `evidenciaDeConciliacionDeLaFilaSql` y
+    // `sinAfirmacionDeLaTerminalSql`). Si el código cambiara el `UNION` por un `OR` equivalente —la forma 300× más lenta
+    // documentada en `evidenciaPositivaSql.ts`— este EXPLAIN lo vería, no una copia hecha a mano. Ronda 4: mide el selector
+    // COMPLETO, con el segundo LATERAL de la evidencia de colisión.
+    const hayAfirmacion = Prisma.sql`NOT (${sinAfirmacionDeLaTerminalSql(Prisma.raw('r."resultJson"'))})`
     const filas = await prisma.$queryRaw<{ 'QUERY PLAN': string }[]>`
       EXPLAIN (ANALYZE, BUFFERS)
-      SELECT r."requestId", r."venueId", r."createdAt", r."id", ligado."id" AS "paymentId"
+      SELECT r."requestId", r."venueId", r."createdAt", r."id",
+             ligado."id" AS "paymentId", colision."id" AS "evidenciaId", (${hayAfirmacion}) AS "afirmacion"
       FROM "TerminalPaymentRequest" r
-      JOIN LATERAL (${pagoLigadoDeLaFilaSql('r')} LIMIT 1) ligado ON true
+      LEFT JOIN LATERAL (${pagoLigadoDeLaFilaSql('r')} LIMIT 1) ligado ON true
+      LEFT JOIN LATERAL (${evidenciaDeConciliacionDeLaFilaSql('r')} LIMIT 1) colision ON true
       WHERE r."status" = 'FAILED' AND r."failureCode" IN ('NO_EVIDENCE_AFTER_WINDOW','OPERATOR_RECONCILED_NO_CHARGE')
         AND r."paymentId" IS NULL AND r."createdAt" >= (NOW() AT TIME ZONE 'UTC') - INTERVAL '7 days'
+        AND (ligado."id" IS NOT NULL OR colision."id" IS NOT NULL OR ${hayAfirmacion})
       ORDER BY r."createdAt" ASC, r."id" ASC LIMIT 200`
     console.log(`\n[P2] filas candidatas de la red durable: ${candidatas}\n` + filas.map(f2 => f2['QUERY PLAN']).join('\n') + '\n')
     expect(Number(candidatas)).toBeGreaterThanOrEqual(1)
@@ -649,5 +656,199 @@ describe('Ronda 3 · P2: el plan de la pregunta «hay un cobro ligado» usa el �
     const texto = filas.map(f2 => f2['QUERY PLAN']).join('\n')
     expect(texto).not.toMatch(/Seq Scan on "Payment"/)
     expect(texto).toContain('Payment_terminal_request_recovery_idx')
+  })
+})
+
+// ═══════════ RONDA 4 · la red durable recoge TODO lo que quedó a medias, no sólo lo que trae Payment ═══════════
+//
+// 🔑 La causa de fondo que Codex r9 nombró: `DEFERRED` no tenía quién lo reintentara. Las dos señales que NO producen un
+// `Payment` COMPLETED —la evidencia de colisión y la afirmación de la terminal— quedaban fuera del selector de la red, así
+// que un conflicto transitorio de candado dejaba la solicitud liberada PARA SIEMPRE diciendo «puedes volver a cobrar».
+describe('Ronda 4 · P1-B: la colisión cuya re-retención se DIFIRIÓ ya no se queda sin recuperación', () => {
+  it('🔴 el REST se difiere y la RED DURABLE la retiene en la pasada siguiente, con su propia razón', async () => {
+    const { solicitud, venta } = await liberadaPorLaVentana()
+    const referencia = `REF-${randomUUID().slice(0, 12)}`
+    await cobroPrevioQueContradice(venta.id, referencia)
+    // El candado ocupado del núcleo: `DEFERRED` sin escribir nada. El registrador responde su evidencia igual (2xx).
+    const diferida = jest
+      .spyOn(terminalPaymentService, 'retenerSolicitudLiberadaPorColisionDeReferencia')
+      .mockImplementationOnce(async () => 'DEFERRED')
+    let evidenciaId = ''
+    try {
+      const respuesta: any = await recordOrderPayment(
+        f.venueId,
+        venta.id,
+        {
+          ...f.registroDeLaTerminal({ attemptId: randomUUID(), sinLlave: true, ref: referencia, requestId: solicitud.requestId }),
+          authorizationNumber: null,
+        },
+        duena.id,
+      )
+      expect(respuesta.possibleReferenceCollision).toBeDefined()
+      evidenciaId = respuesta.id
+      // El hueco que Codex encontró: la fila sigue LIBERADA y nadie más iba a pasar por aquí.
+      expect(await fila(solicitud.requestId)).toMatchObject({ status: 'FAILED', failureCode: 'NO_EVIDENCE_AFTER_WINDOW' })
+    } finally {
+      diferida.mockRestore()
+    }
+
+    const r = await terminalPaymentService.reconcileUnknownRequests(new Date())
+    expect(r.heldWithoutPayment).toBeGreaterThanOrEqual(1)
+    const retenidaR = await retenida(solicitud.requestId, venta.id)
+    expect(retenidaR.resultJson).toMatchObject({
+      referenceCollisionAfterRelease: { paymentId: evidenciaId, reason: 'REFERENCE_COLLISION_AFTER_RELEASE', origen: 'BARRIDO_SENALES' },
+    })
+    // No hay ningún Payment COMPLETED ligado: es exactamente la señal que la red de la ronda 3 no podía ver.
+    expect(
+      await prisma.payment.count({ where: { venueId: f.venueId, status: 'COMPLETED', terminalPaymentRequestId: solicitud.requestId } }),
+    ).toBe(0)
+    expect(await asientos(retenidaR.id, COLISION)).toHaveLength(1)
+    // Idempotente: una segunda pasada no deja un segundo asiento.
+    await terminalPaymentService.reconcileUnknownRequests(new Date())
+    expect(await asientos(retenidaR.id, COLISION)).toHaveLength(1)
+  })
+
+  it('control: la evidencia de OTRA terminal no retiene la venta ajena, y la contradicción no se grita en cada pasada', async () => {
+    const { solicitud, venta } = await liberadaPorLaVentana()
+    const referencia = `REF-${randomUUID().slice(0, 12)}`
+    await cobroPrevioQueContradice(venta.id, referencia)
+    const diferida = jest
+      .spyOn(terminalPaymentService, 'retenerSolicitudLiberadaPorColisionDeReferencia')
+      .mockImplementationOnce(async () => 'DEFERRED')
+    try {
+      await recordOrderPayment(
+        f.venueId,
+        venta.id,
+        {
+          ...f.registroDeLaTerminal({ attemptId: randomUUID(), sinLlave: true, ref: referencia, requestId: solicitud.requestId }),
+          authorizationNumber: null,
+          deviceSerialNumber: otra.serialNumber,
+          authenticatedTerminalSerial: otra.serialNumber,
+        },
+        duena.id,
+      )
+    } finally {
+      diferida.mockRestore()
+    }
+
+    jest.clearAllMocks()
+    await terminalPaymentService.reconcileUnknownRequests(new Date())
+    expect(await fila(solicitud.requestId)).toMatchObject({ status: 'FAILED', failureCode: 'NO_EVIDENCE_AFTER_WINDOW' })
+    expect(await terminalPaymentService.isTerminalBusy(f.llaveTerminal, f.venueId)).toBe(false)
+    const contradicciones = () => (logger.error as jest.Mock).mock.calls.filter(c => String(c[0]).includes('does not own it'))
+    expect(contradicciones()).toHaveLength(1)
+    // 🔴 Y en la pasada siguiente NO se vuelve a gritar: la evidencia no cambió, así que repetirlo sólo taparía alarmas reales.
+    await terminalPaymentService.reconcileUnknownRequests(new Date())
+    expect(contradicciones()).toHaveLength(1)
+  })
+})
+
+describe('Ronda 4 · P1-C: la afirmación de la terminal, sin Payment y diferida, también tiene red', () => {
+  const unSuccess = (requestId: string) => ({ requestId, status: 'success' as const, transactionId: '260917120000' })
+
+  it('🔴 (a) la re-retención se DIFIERE: el POS no oye «puedes volver a cobrar» y la red la retiene en la pasada siguiente', async () => {
+    const { solicitud, venta } = await liberadaPorLaVentana()
+    const diferida = jest
+      .spyOn(terminalPaymentService as any, 'retenerSolicitudLiberadaPorAfirmacionDeLaTerminal')
+      .mockImplementationOnce(async () => 'DEFERRED')
+    try {
+      const resultado = await (terminalPaymentService as any).closeRow(solicitud.requestId, f.venueId, unSuccess(solicitud.requestId))
+      // El piso de seguridad: con una AFIRMACIÓN en la mano la respuesta nunca puede ser «no se cobró».
+      expect(resultado.status).toBe('timeout')
+      expect(String(resultado.errorMessage)).not.toMatch(/volver a cobrar/)
+      // La fila sigue liberada (eso es el diferimiento), pero la afirmación YA es durable: es lo que la red usa de selector.
+      const antes = await fila(solicitud.requestId)
+      expect(antes).toMatchObject({ status: 'FAILED', failureCode: 'NO_EVIDENCE_AFTER_WINDOW' })
+      expect(antes.resultJson).toMatchObject({ claimedSuccess: { transactionId: '260917120000' } })
+    } finally {
+      diferida.mockRestore()
+    }
+
+    const r = await terminalPaymentService.reconcileUnknownRequests(new Date())
+    expect(r.heldWithoutPayment).toBeGreaterThanOrEqual(1)
+    const retenidaR = await retenida(solicitud.requestId, venta.id)
+    expect(retenidaR.resultJson).toMatchObject({
+      terminalClaimedSuccessAfterRelease: { reason: 'TERMINAL_CLAIMED_SUCCESS', origen: 'BARRIDO_SENALES' },
+    })
+    expect(await asientos(retenidaR.id, AFIRMACION)).toHaveLength(1)
+    // Sin un solo Payment en toda la venta: la señal que la red de la ronda 3 no podía ver.
+    expect(await prisma.payment.count({ where: { venueId: f.venueId, orderId: venta.id } })).toBe(0)
+  })
+
+  it('🔴 (b) la CARRERA: otro proceso retiene entre las dos lecturas y el POS recibe la fila RETENIDA, no la anterior', async () => {
+    const { solicitud, venta } = await liberadaPorLaVentana()
+    const real = (terminalPaymentService as any).retenerSolicitudLiberadaPorAfirmacionDeLaTerminal.bind(terminalPaymentService)
+    const perdedor = jest
+      .spyOn(terminalPaymentService as any, 'retenerSolicitudLiberadaPorAfirmacionDeLaTerminal')
+      .mockImplementationOnce(async (input: any) => {
+        await real(input) // OTRO proceso gana la carrera y retiene la fila DE VERDAD
+        return 'NOT_APPLICABLE' // y el núcleo le contesta esto a ESTA llamada: ya no la ve liberada
+      })
+    try {
+      const resultado = await (terminalPaymentService as any).closeRow(solicitud.requestId, f.venueId, unSuccess(solicitud.requestId))
+      expect(resultado.status).toBe('timeout')
+      expect(String(resultado.errorMessage)).toMatch(/se está revisando/)
+      expect(String(resultado.errorMessage)).not.toMatch(/volver a cobrar/)
+    } finally {
+      perdedor.mockRestore()
+    }
+    await retenida(solicitud.requestId, venta.id)
+  })
+})
+
+describe('Ronda 4 · P2: una comprobación que no se pudo hacer no autoriza a sellar', () => {
+  it('🔴 si la lectura del vínculo revienta, el backfill NO sella (el evento sigue PENDING para el worker)', async () => {
+    const { solicitud, venta, attemptId } = await liberadaPorLaVentana()
+    const pago = await pagoDelIntento({ attemptId, orderId: venta.id, terminalId: otra.id })
+    const evento = await eventoPendiente(attemptId)
+    // Sólo la lectura del VÍNCULO que hace `retenerLiberadasPorPagoSinLigar` (su `select` la identifica); el resto normal.
+    const original = prisma.terminalPaymentAttemptLink.findUnique.bind(prisma.terminalPaymentAttemptLink)
+    const rota = jest
+      .spyOn(prisma.terminalPaymentAttemptLink, 'findUnique')
+      .mockImplementation((args: any) =>
+        args?.select?.requestId === true && args?.select?.venueId === true
+          ? (Promise.reject(new Error('pool agotado')) as any)
+          : original(args),
+      )
+    try {
+      await reconcileAngelPayWebhookForPayment({
+        id: pago.id,
+        idempotencyKey: attemptId,
+        referenceNumber: null,
+        venueId: f.venueId,
+        amount: 100,
+        tipAmount: 0,
+        merchantAccountId: f.merchantId,
+      })
+      expect(await exigir(prisma.providerEventLog.findUnique({ where: { id: evento.id } }))).toMatchObject({
+        status: 'PENDING',
+        paymentId: null,
+      })
+      expect(await fila(solicitud.requestId)).toMatchObject({ status: 'FAILED', failureCode: 'NO_EVIDENCE_AFTER_WINDOW' })
+    } finally {
+      rota.mockRestore()
+    }
+    // Y la red durable la recupera igual: el Payment ligado sigue ahí. Se envejece para que el barrido de 30 min NO la
+    // alcance y sea la RED —la que no depende de esa ventana— la que la retenga.
+    await envejecer(solicitud.id, 180)
+    expect((await terminalPaymentService.reconcileUnknownRequests(new Date())).heldWithLinkedPayment).toBeGreaterThanOrEqual(1)
+    await retenida(solicitud.requestId, venta.id)
+  })
+
+  it('control: con el vínculo legible y sin nada que retener, el backfill SÍ sella', async () => {
+    const venta = await f.nuevaVenta(100)
+    const attemptId = randomUUID()
+    const pago = await pagoDelIntento({ attemptId, orderId: venta.id, terminalId: (await terminalPrincipal()).id })
+    const evento = await eventoPendiente(attemptId)
+    await reconcileAngelPayWebhookForPayment({
+      id: pago.id,
+      idempotencyKey: attemptId,
+      referenceNumber: null,
+      venueId: f.venueId,
+      amount: 100,
+      tipAmount: 0,
+      merchantAccountId: f.merchantId,
+    })
+    expect(await exigir(prisma.providerEventLog.findUnique({ where: { id: evento.id } }))).toMatchObject({ status: 'PROCESSED' })
   })
 })
