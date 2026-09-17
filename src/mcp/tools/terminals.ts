@@ -8,6 +8,7 @@ import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { resolveTerminalRefundTarget } from '@/services/tpv/terminalRefundTarget'
+import { readOperatorResolution } from '@/services/tpv/no-instrument-resolution.service'
 import {
   SOLO_BLOQUEA_EN_ESTRICTO,
   UNRESOLVED_FINANCIAL_OUTCOME,
@@ -24,6 +25,32 @@ import { assertDeviceActionSupported, DEVICE_CAPABILITY_SELECT, toDeviceManageme
  * para que el MCP y la pantalla nunca se contradigan.
  */
 const ONLINE_WINDOW_MS = 5 * 60 * 1000
+
+/**
+ * Lo que la VENTANA DE CONFIRMACIÓN dejó escrito al liberar un negativo sin evidencia (`releaseUnprovenNegative` escribe
+ * `resultJson.releasedAfterWindow = { windowMs, releasedAt, origen }`). Cualquier otra forma ⇒ `null`: el operador nunca
+ * lee un instante inventado a partir de un sobre a medias.
+ */
+export function proyectarLiberacionPorVentana(resultJson: unknown): { windowMs: number; releasedAt: string; origen: string } | null {
+  const sobre = resultJson && typeof resultJson === 'object' && !Array.isArray(resultJson) ? (resultJson as Record<string, unknown>) : null
+  const l = sobre?.releasedAfterWindow
+  if (!l || typeof l !== 'object' || Array.isArray(l)) return null
+  const { windowMs, releasedAt, origen } = l as Record<string, unknown>
+  if (typeof windowMs !== 'number' || typeof releasedAt !== 'string' || typeof origen !== 'string') return null
+  return { windowMs, releasedAt, origen }
+}
+
+/**
+ * La declaración del cajero «no se presentó tarjeta» guardada en el vínculo del intento, reducida a lo que un operador
+ * necesita: quién (`staffId`), cómo se autorizó (`by`: la sesión de la terminal o el PIN de un supervisor) y cuándo.
+ * 🔴 Nunca el `bodyHash`, el `staffVenueId` ni el estado previo: son internos de la idempotencia, no información del cobro.
+ */
+export function proyectarDeclaracionDelCajero(
+  operatorResolution: unknown,
+): { by: 'SESSION' | 'SUPERVISOR_PIN'; staffId: string; acceptedAt: string } | null {
+  const r = readOperatorResolution(operatorResolution)
+  return r ? { by: r.by, staffId: r.staffId, acceptedAt: r.acceptedAt } : null
+}
 
 export interface TerminalInput {
   name: string
@@ -207,7 +234,7 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'terminal_payment_requests',
-    'See POS→terminal charge requests for your venues: which terminals are currently BUSY (an active charge in flight) and recent charges from the last 24h with their outcome (completed/failed/cancelled/timed_out/unknown). Use it to tell whether a terminal is stuck (an UNKNOWN result protects the sale until its outcome is confirmed; a reconnect or elapsed time does not prove no charge) or to check what happened to one charge. Read `outcome` to answer "was the card charged?": CHARGED (a Payment exists), NOT_CHARGED (the terminal or the server proved no charge — see `outcomeEvidence` and `evidenceClass`) or UNRESOLVED (nobody proved anything: the charge still reserves the terminal, which is what `busy` means). `status` is the same value the POS sees, so a failed/cancelled charge with no evidence is reported as UNKNOWN on purpose. Each row also carries the customer the POS attached to that charge (customerId, null when the sale was anonymous). A charge the server refused before it ever reached the terminal (terminal offline, busy or from another location; sale cancelled, already paid or missing) is listed as failed with rejectedAtAdmission:true and its reason in failureCode: nothing reached the terminal, so no card was charged. Amounts are in pesos. The processor webhook can confirm a charge before the terminal reports it: each row also says who confirmed it first (`closedVia`: terminal or webhook, keeping the same winning payment), lists the attempts the terminal opened for it (`attempts`, at most 25 per charge; `attemptsTruncated`/`attemptsTotal` say when there are more) and which one won (`winnerAttemptId`). To page through ALL the attempts of one charge, call again with `attemptsRequestId` (that requestId) and, from the second page on, `attemptsAfter` = the `attemptsNextCursor` returned by the previous page.',
+    'See POS→terminal charge requests for your venues: which terminals are currently BUSY (an active charge in flight) and recent charges from the last 24h with their outcome (completed/failed/cancelled/timed_out/unknown). Use it to tell whether a terminal is stuck (an UNKNOWN result protects the sale until its outcome is confirmed; a reconnect or elapsed time does not prove no charge) or to check what happened to one charge. Read `outcome` to answer "was the card charged?": CHARGED (a Payment exists), NOT_CHARGED (supported by terminal/server evidence or an explicit cashier declaration that no card was presented — see `outcomeEvidence` and `evidenceClass`; OPERATOR is human testimony, not a bank decline) or UNRESOLVED (nobody proved anything: the charge still reserves the terminal, which is what `busy` means). `status` is the same value the POS sees, so a failed/cancelled charge with no evidence is reported as UNKNOWN on purpose. Each row also carries the customer the POS attached to that charge (customerId, null when the sale was anonymous). A charge the server refused before it ever reached the terminal (terminal offline, busy or from another location; sale cancelled, already paid or missing) is listed as failed with rejectedAtAdmission:true and its reason in failureCode: nothing reached the terminal, so no card was charged. Amounts are in pesos. `releasedAfterWindow` (window, instant, origin) means the 30-s confirmation window released this charge for lack of evidence; a later bank approval reopens it and is flagged. Each attempt carries `operatorResolution` (who declared no card was presented, how it was authorized — the terminal session or a supervisor PIN — and when) or null. The processor webhook can confirm a charge before the terminal reports it: each row also says who confirmed it first (`closedVia`: terminal or webhook, keeping the same winning payment), lists the attempts the terminal opened for it (`attempts`, at most 25 per charge; `attemptsTruncated`/`attemptsTotal` say when there are more) and which one won (`winnerAttemptId`). To page through ALL the attempts of one charge, call again with `attemptsRequestId` (that requestId) and, from the second page on, `attemptsAfter` = the `attemptsNextCursor` returned by the previous page.',
     {
       venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues'),
       requestId: z.string().optional().describe('Look up one specific charge request by its requestId'),
@@ -248,12 +275,16 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
             where: { requestId: fila.requestId, ...despues },
             orderBy: [{ createdAt: 'asc' }, { attemptId: 'asc' }],
             take: TOPE + 1,
-            select: { attemptId: true, createdAt: true },
+            select: { attemptId: true, createdAt: true, operatorResolution: true },
           }),
           prisma.terminalPaymentAttemptLink.count({ where: { requestId: fila.requestId } }),
         ])
         const hasMore = lote.length > TOPE
-        const attempts = lote.slice(0, TOPE).map(v => ({ attemptId: v.attemptId, linkedAt: new Date(v.createdAt).toISOString() }))
+        const attempts = lote.slice(0, TOPE).map(v => ({
+          attemptId: v.attemptId,
+          linkedAt: new Date(v.createdAt).toISOString(),
+          operatorResolution: proyectarDeclaracionDelCajero(v.operatorResolution),
+        }))
         return text({
           requestId: fila.requestId,
           attempts,
@@ -282,9 +313,9 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
       // por solicitud con su conteo real (`attemptsTotal`), que sale de un `groupBy` y no de la ventana.
       const [vinculos, conteos, ganadores] = await Promise.all([
         requestIds.length
-          ? prisma.$queryRaw<{ requestId: string; attemptId: string; createdAt: Date }[]>`
-              SELECT "requestId", "attemptId", "createdAt" FROM (
-                SELECT "requestId", "attemptId", "createdAt",
+          ? prisma.$queryRaw<{ requestId: string; attemptId: string; createdAt: Date; operatorResolution: unknown }[]>`
+              SELECT "requestId", "attemptId", "createdAt", "operatorResolution" FROM (
+                SELECT "requestId", "attemptId", "createdAt", "operatorResolution",
                   ROW_NUMBER() OVER (PARTITION BY "requestId" ORDER BY "createdAt" ASC, "attemptId" ASC) AS rn
                 FROM "TerminalPaymentAttemptLink"
                 WHERE "requestId" IN (${Prisma.join(requestIds)})
@@ -315,11 +346,14 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         llavesGanadoras.length > 0
           ? await prisma.terminalPaymentAttemptLink.findMany({
               where: { attemptId: { in: llavesGanadoras } },
-              select: { requestId: true, attemptId: true, createdAt: true },
+              select: { requestId: true, attemptId: true, createdAt: true, operatorResolution: true },
               take: llavesGanadoras.length,
             })
           : []
-      const vinculosPorSolicitud = new Map<string, { attemptId: string; linkedAt: string }[]>()
+      const vinculosPorSolicitud = new Map<
+        string,
+        { attemptId: string; linkedAt: string; operatorResolution: ReturnType<typeof proyectarDeclaracionDelCajero> }[]
+      >()
       const totalPorSolicitud = new Map<string, number>()
       for (const c of (conteos ?? []) as { requestId: string; _count: { _all: number } }[]) {
         totalPorSolicitud.set(c.requestId, c._count._all)
@@ -327,7 +361,11 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
       for (const v of [...(vinculos ?? []), ...vinculosDelGanador]) {
         const lista = vinculosPorSolicitud.get(v.requestId) ?? []
         if (lista.some(x => x.attemptId === v.attemptId)) continue
-        lista.push({ attemptId: v.attemptId, linkedAt: new Date(v.createdAt).toISOString() })
+        lista.push({
+          attemptId: v.attemptId,
+          linkedAt: new Date(v.createdAt).toISOString(),
+          operatorResolution: proyectarDeclaracionDelCajero(v.operatorResolution),
+        })
         vinculosPorSolicitud.set(v.requestId, lista)
       }
       const truncadas = new Set<string>()
@@ -364,6 +402,9 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
           // terminal. No es un «rechazo del banco»: ninguna tarjeta se tocó. Sin esto el operador lo leería como declinada.
           failureCode: estado.failureCode,
           rejectedAtAdmission: estado.outcomeEvidence === 'REJECTED_AT_ADMISSION',
+          // Ventana de confirmación (plan 16-sep): un negativo sin evidencia que llevaba ≥ 30 s se liberó por falta de
+          // pruebas; queda escrito cuándo y quién lo decidió (temporizador o watchdog). Una aprobación tardía lo reabre.
+          releasedAfterWindow: proyectarLiberacionPorVentana(r.resultJson),
           // S8: quién confirmó primero (terminal | webhook | null si sigue abierta o es anterior al webhook), los intentos
           // que la terminal abrió para esta solicitud y cuál de ellos ganó (sólo si su llave es uno de esos intentos).
           closedVia: (r as { closedVia?: string | null }).closedVia ?? null,

@@ -9,6 +9,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **Ventana de confirmación de 30 s para negativos sin evidencia (`NO_EVIDENCE_AFTER_WINDOW`), aprobación tardía con alarma y
+  correo, declaración del cajero sin PIN con permiso (`payments:resolve-no-instrument`) — cobro remoto, 16-sep-2026.** Plan:
+  `docs/superpowers/plans/2026-09-16-ventana-de-confirmacion-cobro-sin-evidencia.md`. Origen: los dos cobros dobles de Testarudo
+  (11 y 16-sep) en los que el SDK dijo «cancelado» y el banco aprobó, y la cancelación sin tarjeta (2–17/día) que la regla
+  estricta dejaba «sin confirmar» sin salida. Nada se quita del contrato: `status` conserva sus valores y `outcomeEvidence` es
+  aditivo (las apps viejas leen `FAILED` como «no se cobró», que es lo que se quiere).
+  - **Ventana** (`releaseUnprovenNegative`, temporizador en proceso + respaldo durable del watchdog
+    `releaseUnprovenNegativesAfterWindow`): un negativo de la terminal SIN evidencia acreditada, o un `timeout` enviado por la
+    TPV, pasa a `TIMED_OUT` con el resultado de la terminal y, a los 30 s (`UNPROVEN_NEGATIVE_WINDOW_MS`, 4× el máximo medido del
+    webhook), si no existe el Payment exacto ni una aprobación bancaria conocida, se libera como `FAILED/NO_EVIDENCE_AFTER_WINDOW`
+    (evidencia de clase SERVER): orden y ranura quedan libres y el POS puede volver a cobrar. Si el pago exacto ya existe se
+    CONCILIA en vez de liberar; si consta un `send_transaction` aprobado sin Payment se RETIENE con `BANK_APPROVED_AWAITING_PAYMENT`
+    (sigue UNRESOLVED). `UNKNOWN` y `TIMED_OUT/AUTO_RELEASED` no se liberan por ventana; en régimen relajado la ventana sigue
+    reteniendo la ranura (`VENTANA_RETIENE_LA_RANURA`). El CAS exige el `updatedAt` leído y corre bajo el candado de cada intento
+    vinculado, así que un webhook que se adelante lo ve y uno que llegue después espera.
+  - **Aprobación tardía**: un Payment que llega DESPUÉS de la liberación reabre la fila a COMPLETED por el cierre común, cuenta
+    los cobros con tarjeta posteriores de la misma orden (`lateAfterWindow.otherCardPaymentsOnOrderAfterRelease`), deja
+    `ActivityLog TERMINAL_PAYMENT_LATE_APPROVAL_AFTER_WINDOW` (asiento único) y avisa a ops por correo
+    (`avisarAprobacionTardiaTrasVentana`). La ventana ACOTA y DETECTA el recobro; no lo impide (riesgo aceptado por el founder).
+  - **Declaración del cajero**: `POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-instrument-resolution` — la
+    SESIÓN de la terminal declara «no se presentó tarjeta» en UN paso, sin PIN, si tiene el permiso nuevo
+    `payments:resolve-no-instrument` (OWNER/ADMIN/MANAGER de fábrica; catálogo `payments`); si no lo tiene, el PIN de alguien con
+    el permiso la eleva (`noInstrumentPinRateLimiter`). La identidad sale SIEMPRE del JWT, nunca del cuerpo (esquema estricto:
+    una llave extra es 409). Vetan la declaración un Payment por cualquiera de las tres identidades, una señal positiva en el
+    sobre, un webhook aprobado o contradictorio y una fila retenida por el banco. Se guarda en
+    `TerminalPaymentAttemptLink.operatorResolution`, inmutable por trigger (`preserve_no_instrument_resolution`) —un cierre
+    posterior por dinero no la borra—, y la fila queda `FAILED/OPERATOR_RECONCILED_NO_CHARGE` (clase OPERATOR: testimonio de
+    una persona, no decisión del banco). Migración aditiva `20260916193000_no_instrument_resolution`.
+  - **MCP `terminal_payment_requests`**: cada fila trae `releasedAfterWindow` (`{ windowMs, releasedAt, origen }` o `null`) y
+    cada intento —en la lista y en la página `attemptsRequestId`— `operatorResolution` (`{ by, staffId, acceptedAt }` o
+    `null`; nunca el hash, el vínculo al venue ni el estado previo). La descripción explica que OPERATOR es testimonio humano.
+  - Pruebas: `terminalPaymentWindow.integration.test.ts` (ventana, veto bancario, conciliación, candado del intento, CAS),
+    `terminalPaymentRecovery` y `terminalPaymentStrictFlag` (cartesiana y régimen relajado), `no-instrument-resolution.service.test.ts`
+    + `no-instrument-resolution.api.test.ts` (identidad, elevación por PIN, vetos, replay, 409 del trigger),
+    `angelpay-webhook.service.test.ts` (aprobación tardía) y `mcp/terminalPaymentRequests.test.ts` (proyección).
+
 - **Checkpoint 2 del webhook como primer confirmador · N0 (servidor, 16-sep-2026): la capacidad viaja EN la solicitud.**
   `terminal:payment_request` lleva `attemptLinkVersion: 1` en los DOS payloads (entrega fresca y replay al reconectar,
   `TERMINAL_ATTEMPT_LINK_VERSION`), sin quitar ningún campo. La TPV sólo espera el ACK del vínculo intento→solicitud (S1) si

@@ -263,7 +263,11 @@ describe('Codex R4 (P2): continuación por solicitud — así se llega a los int
     )
     expect(salida.requestId).toBe('REQ')
     expect(salida.attempts).toHaveLength(25)
-    expect(salida.attempts[0]).toEqual({ attemptId: 'A01', linkedAt: new Date(2026, 8, 13, 20, 0, 1).toISOString() })
+    expect(salida.attempts[0]).toEqual({
+      attemptId: 'A01',
+      linkedAt: new Date(2026, 8, 13, 20, 0, 1).toISOString(),
+      operatorResolution: null,
+    })
     expect(salida).toMatchObject({ attemptsTotal: 50, attemptsNextCursor: 'A25' })
     // La solicitud se busca dentro del alcance del operador y la página es keyset (createdAt, attemptId), 25 + 1 de mirada.
     expect((prismaMock as any).terminalPaymentRequest.findFirst.mock.calls[0][0].where).toMatchObject({ requestId: 'REQ' })
@@ -355,10 +359,152 @@ describe('Codex R3 · P2: la ventana de vínculos es POR SOLICITUD y el recorte 
     const porId = Object.fromEntries(salida.requests.map((r: { requestId: string }) => [r.requestId, r]))
     expect(porId.A.attempts).toHaveLength(25)
     expect(porId.A).toMatchObject({ attemptsTruncated: true, attemptsTotal: 50 })
-    expect(porId.B.attempts).toEqual([{ attemptId: 'B1', linkedAt: new Date(2026, 8, 13, 21, 0, 0).toISOString() }])
+    expect(porId.B.attempts).toEqual([
+      { attemptId: 'B1', linkedAt: new Date(2026, 8, 13, 21, 0, 0).toISOString(), operatorResolution: null },
+    ])
     expect(porId.B).toMatchObject({ attemptsTruncated: false, attemptsTotal: 1 })
     // La ventana se pide con ROW_NUMBER por solicitud, nunca con un tope global.
     const sql = ((prismaMock as any).$queryRaw.mock.calls[0][0] as TemplateStringsArray).join('?')
     expect(sql).toContain('ROW_NUMBER() OVER (PARTITION BY "requestId"')
+  })
+})
+
+describe('Ventana de confirmación (Task 5): la liberación por ventana y la declaración del cajero se VEN en el MCP', () => {
+  const liberacion = { windowMs: 30_000, releasedAt: '2026-09-16T10:00:30.000Z', origen: 'TIMER' }
+  /** Lo que `resolveNoInstrument` guarda en el vínculo: los tres campos públicos MÁS los que nunca deben salir. */
+  const declaracion = {
+    id: 'res-1',
+    kind: 'NO_INSTRUMENT_PRESENTED',
+    acceptedAt: '2026-09-16T10:01:00.000Z',
+    bodyHash: 'sha256-secreto',
+    staffId: 'staff-7',
+    staffVenueId: 'sv-7',
+    by: 'SESSION',
+    statementVersion: 1,
+    previousRequest: { status: 'TIMED_OUT', failureCode: null },
+  }
+
+  it('🔴 una fila que la ventana liberó proyecta releasedAfterWindow con ventana, instante y origen — y sale NOT_CHARGED / SERVER', async () => {
+    const salida = await listar([
+      fila({
+        requestId: 'R-VENTANA',
+        status: S.FAILED,
+        failureCode: 'NO_EVIDENCE_AFTER_WINDOW',
+        resultJson: { status: 'failed', outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW', releasedAfterWindow: liberacion },
+      }),
+    ])
+    expect(salida.requests[0]).toMatchObject({
+      status: 'FAILED',
+      outcome: 'NOT_CHARGED',
+      outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW',
+      evidenceClass: 'SERVER',
+      busy: false,
+      releasedAfterWindow: liberacion,
+    })
+  })
+
+  it('sin liberación por ventana releasedAfterWindow es null (sobre nulo, sobre sin la llave, y llave con forma desconocida)', async () => {
+    const salida = await listar([
+      fila({ requestId: 'R-NULO', status: S.SENT, resultJson: null }),
+      fila({
+        requestId: 'R-SIN-LLAVE',
+        failureCode: 'TPV_CONFIRMED_NO_CHARGE',
+        resultJson: { status: 'failed', outcomeEvidence: 'PROCESSOR_DECLINED' },
+      }),
+      fila({ requestId: 'R-RARA', failureCode: 'NO_EVIDENCE_AFTER_WINDOW', resultJson: { releasedAfterWindow: 'ayer' } }),
+      fila({
+        requestId: 'R-INCOMPLETA',
+        failureCode: 'NO_EVIDENCE_AFTER_WINDOW',
+        resultJson: { releasedAfterWindow: { windowMs: 30_000 } },
+      }),
+    ])
+    for (const r of salida.requests) expect(r).toHaveProperty('releasedAfterWindow', null)
+  })
+
+  it('🔴 un intento con declaración del cajero proyecta SÓLO by/staffId/acceptedAt (nunca el hash, el vínculo al venue ni el estado previo)', async () => {
+    ;(prismaMock as any).terminalPaymentRequest.findMany.mockResolvedValue([
+      fila({ status: S.FAILED, failureCode: 'OPERATOR_RECONCILED_NO_CHARGE' }),
+    ])
+    vinculos(
+      [
+        { requestId: 'REQ', attemptId: 'A', createdAt: new Date('2026-09-16T10:00:00Z'), operatorResolution: declaracion },
+        { requestId: 'REQ', attemptId: 'B', createdAt: new Date('2026-09-16T10:00:05Z'), operatorResolution: null },
+      ],
+      { REQ: 2 },
+    )
+    ;(prismaMock as any).terminalPaymentAttemptLink.findMany.mockResolvedValue([])
+    ;(prismaMock as any).payment.findMany.mockResolvedValue([])
+    const salida = JSON.parse((await capturarTool('terminal_payment_requests')({ venueId: 'venue-1' })).content[0].text)
+    expect(salida.requests[0]).toMatchObject({ outcome: 'NOT_CHARGED', outcomeEvidence: 'OPERATOR_RECONCILED', evidenceClass: 'OPERATOR' })
+    expect(salida.requests[0].attempts).toEqual([
+      {
+        attemptId: 'A',
+        linkedAt: '2026-09-16T10:00:00.000Z',
+        operatorResolution: { by: 'SESSION', staffId: 'staff-7', acceptedAt: '2026-09-16T10:01:00.000Z' },
+      },
+      { attemptId: 'B', linkedAt: '2026-09-16T10:00:05.000Z', operatorResolution: null },
+    ])
+    // La ventana por solicitud PIDE la columna: sin ella la declaración nunca llegaría a la proyección.
+    const sql = ((prismaMock as any).$queryRaw.mock.calls[0][0] as TemplateStringsArray).join('?')
+    expect(sql).toContain('"operatorResolution"')
+  })
+
+  it('el vínculo del GANADOR traído aparte también proyecta la declaración (y su select la pide)', async () => {
+    ;(prismaMock as any).terminalPaymentRequest.findMany.mockResolvedValue([
+      fila({ status: S.COMPLETED, paymentId: 'pay-A', closedVia: 'webhook' }),
+    ])
+    vinculos([], { REQ: 1 })
+    ;(prismaMock as any).terminalPaymentAttemptLink.findMany.mockResolvedValue([
+      {
+        requestId: 'REQ',
+        attemptId: 'A',
+        createdAt: new Date('2026-09-16T10:00:00Z'),
+        operatorResolution: { ...declaracion, by: 'SUPERVISOR_PIN' },
+      },
+    ])
+    ;(prismaMock as any).payment.findMany.mockResolvedValue([{ id: 'pay-A', idempotencyKey: 'A' }])
+    const salida = JSON.parse((await capturarTool('terminal_payment_requests')({ venueId: 'venue-1' })).content[0].text)
+    expect(salida.requests[0].attempts).toEqual([
+      {
+        attemptId: 'A',
+        linkedAt: '2026-09-16T10:00:00.000Z',
+        operatorResolution: { by: 'SUPERVISOR_PIN', staffId: 'staff-7', acceptedAt: '2026-09-16T10:01:00.000Z' },
+      },
+    ])
+    expect((prismaMock as any).terminalPaymentAttemptLink.findMany.mock.calls[0][0].select).toMatchObject({ operatorResolution: true })
+  })
+
+  it('la página de intentos (attemptsRequestId) proyecta la declaración con la misma forma y pide la columna', async () => {
+    ;(prismaMock as any).terminalPaymentRequest.findFirst.mockResolvedValue({ requestId: 'REQ' })
+    ;(prismaMock as any).terminalPaymentAttemptLink.findMany.mockResolvedValue([
+      { attemptId: 'A', createdAt: new Date('2026-09-16T10:00:00Z'), operatorResolution: declaracion },
+      { attemptId: 'B', createdAt: new Date('2026-09-16T10:00:05Z'), operatorResolution: { kind: 'OTRA_COSA', id: 'x' } },
+    ])
+    ;(prismaMock as any).terminalPaymentAttemptLink.count.mockResolvedValue(2)
+    const salida = JSON.parse(
+      (await capturarTool('terminal_payment_requests')({ venueId: 'venue-1', attemptsRequestId: 'REQ' })).content[0].text,
+    )
+    expect(salida.attempts).toEqual([
+      {
+        attemptId: 'A',
+        linkedAt: '2026-09-16T10:00:00.000Z',
+        operatorResolution: { by: 'SESSION', staffId: 'staff-7', acceptedAt: '2026-09-16T10:01:00.000Z' },
+      },
+      { attemptId: 'B', linkedAt: '2026-09-16T10:00:05.000Z', operatorResolution: null },
+    ])
+    expect((prismaMock as any).terminalPaymentAttemptLink.findMany.mock.calls[0][0].select).toMatchObject({ operatorResolution: true })
+  })
+
+  it('la descripción de la tool explica la declaración del cajero y la ventana, sin nombrar internos', () => {
+    let descripcion = ''
+    const server = {
+      tool: (n: string, d: string) => {
+        if (n === 'terminal_payment_requests') descripcion = d
+      },
+    }
+    registerTerminalTools(server as any, ambito as any)
+    expect(descripcion).toMatch(/cashier declaration/i)
+    expect(descripcion).toMatch(/OPERATOR is human testimony/i)
+    expect(descripcion).toMatch(/releasedAfterWindow/)
   })
 })
