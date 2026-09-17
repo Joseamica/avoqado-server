@@ -161,6 +161,11 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   TokenPurchase: 'Modules, Features & Billing',
   TokenUsageRecord: 'Modules, Features & Billing',
   ChatbotTokenBudget: 'Modules, Features & Billing',
+  // Campañas ligeras de lanzamiento (spec 2026-09-17): anuncio → oferta de plan con cupón de
+  // Stripe. Van con billing y no con Onboarding porque lo que gobiernan es el PLAN y su cobro;
+  // el reclamo dentro del alta vive en OnboardingProgress, que ya está en su propio dominio.
+  LaunchCampaign: 'Modules, Features & Billing',
+  LaunchCampaignRedemption: 'Modules, Features & Billing',
 
   // 3. Staff, Auth, Permissions & Time
   Staff: 'Staff, Auth, Permissions & Time',
