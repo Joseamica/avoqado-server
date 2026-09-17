@@ -4696,14 +4696,15 @@ class TerminalPaymentService {
     let cursor: { createdAt: Date; id: string } | null = null
     let retenidas = 0
     for (let lote = 0; lote < LOTES_MAXIMOS_DE_LIBERADAS; lote++) {
-      const desde = cursor
+      const desde: { createdAt: Date; id: string } | null = cursor
       // 🔴 `utcTs`, nunca un `Date` pelón: la columna guarda UTC sin zona y un bind crudo se compara con la zona de la SESIÓN.
-      const keyset = desde
+      const keyset: Prisma.Sql = desde
         ? Prisma.sql`AND (r."createdAt" > ${utcTs(desde.createdAt)} OR (r."createdAt" = ${utcTs(desde.createdAt)} AND r."id" > ${desde.id}))`
         : Prisma.empty
       // `JOIN LATERAL` y no `EXISTS`: filtra igual (sin cobro ligado no hay fila) y de paso trae el id del cobro para el aviso.
-      const filas = await retry(
-        () =>
+      // `pagoLigadoDeLaFilaSql('r')` es la MISMA pieza que usa la prueba de integración para su EXPLAIN — nunca una copia.
+      const filas: Fila[] = await retry<Fila[]>(
+        (): Promise<Fila[]> =>
           prisma.$queryRaw<Fila[]>`
             SELECT r."requestId", r."venueId", r."createdAt", r."id", ligado."id" AS "paymentId" /* liberadas-con-cobro */
             FROM "TerminalPaymentRequest" r
@@ -4723,7 +4724,7 @@ class TerminalPaymentService {
         if ((await this.conciliarORetenerLiberada(row, 'BARRIDO_LIGADOS')) === 'HELD') retenidas += 1
       }
       if (filas.length < TAMANO_DEL_LOTE_LIBERADAS) return retenidas
-      const last = filas[filas.length - 1]
+      const last: Fila = filas[filas.length - 1]
       cursor = { createdAt: last.createdAt, id: last.id }
       if (lote === LOTES_MAXIMOS_DE_LIBERADAS - 1)
         logger.warn('⚠️ [Terminal-payment watchdog] released-with-payment sweep hit the batch cap — the rest waits for the next pass', {

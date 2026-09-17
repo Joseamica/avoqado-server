@@ -23,6 +23,7 @@ import { reconcileAngelPayWebhookForPayment } from '@/services/tpv/angelpay-webh
 import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
 import { resolveNoInstrument } from '@/services/tpv/no-instrument-resolution.service'
 import { UNPROVEN_NEGATIVE_WINDOW_MS, terminalPaymentService } from '@/services/terminal-payment.service'
+import { pagoLigadoDeLaFilaSql } from '@/services/tpv/evidenciaPositivaSql'
 import { utcTs } from '@/utils/sqlDates'
 import socketManager from '@/communication/sockets/managers/socketManager'
 import { terminalRegistry } from '@/communication/sockets/terminal-registry'
@@ -630,30 +631,17 @@ describe('Ronda 3 · P2: el plan de la pregunta «hay un cobro ligado» usa el �
       SELECT count(*) AS candidatas FROM "TerminalPaymentRequest" r
       WHERE r."status" = 'FAILED' AND r."failureCode" IN ('NO_EVIDENCE_AFTER_WINDOW', 'OPERATOR_RECONCILED_NO_CHARGE')
         AND r."paymentId" IS NULL AND r."createdAt" >= (NOW() AT TIME ZONE 'UTC') - INTERVAL '7 days'`
-    const filas = await prisma.$queryRawUnsafe<{ 'QUERY PLAN': string }[]>(
-      `EXPLAIN (ANALYZE, BUFFERS)
-       SELECT r."requestId", r."venueId", r."createdAt", r."id", ligado."id" AS "paymentId"
-       FROM "TerminalPaymentRequest" r
-       JOIN LATERAL (
-         SELECT p."id" FROM "Payment" p
-         WHERE p."venueId" = r."venueId" AND p."status" = 'COMPLETED' AND p."method" IN ('CREDIT_CARD','DEBIT_CARD')
-           AND (p."type" IS NULL OR p."type" <> 'REFUND') AND p."terminalPaymentRequestId" = r."requestId"
-         UNION
-         SELECT p."id" FROM "Payment" p
-         WHERE p."venueId" = r."venueId" AND p."status" = 'COMPLETED' AND p."method" IN ('CREDIT_CARD','DEBIT_CARD')
-           AND (p."type" IS NULL OR p."type" <> 'REFUND')
-           AND p."processorData" #> '{terminalPaymentRequestId}' = to_jsonb(r."requestId"::text)
-         UNION
-         SELECT p."id" FROM "Payment" p
-         WHERE p."venueId" = r."venueId" AND p."status" = 'COMPLETED' AND p."method" IN ('CREDIT_CARD','DEBIT_CARD')
-           AND (p."type" IS NULL OR p."type" <> 'REFUND')
-           AND p."idempotencyKey" IN (SELECT l."attemptId" FROM "TerminalPaymentAttemptLink" l WHERE l."requestId" = r."requestId" AND l."venueId" = r."venueId")
-         LIMIT 1
-       ) ligado ON true
-       WHERE r."status" = 'FAILED' AND r."failureCode" IN ('NO_EVIDENCE_AFTER_WINDOW','OPERATOR_RECONCILED_NO_CHARGE')
-         AND r."paymentId" IS NULL AND r."createdAt" >= (NOW() AT TIME ZONE 'UTC') - INTERVAL '7 days'
-       ORDER BY r."createdAt" ASC, r."id" ASC LIMIT 200`,
-    )
+    // 🔴 NO se transcribe a mano el JOIN LATERAL: es la MISMA pieza que usa `retenerLiberadasConPagoLigado` en producción
+    // (`pagoLigadoDeLaFilaSql('r')`, de `evidenciaPositivaSql.ts`). Si el código cambiara el `UNION` por un `OR`
+    // equivalente —la forma 300× más lenta documentada ahí mismo— este EXPLAIN lo vería, no una copia hecha a mano.
+    const filas = await prisma.$queryRaw<{ 'QUERY PLAN': string }[]>`
+      EXPLAIN (ANALYZE, BUFFERS)
+      SELECT r."requestId", r."venueId", r."createdAt", r."id", ligado."id" AS "paymentId"
+      FROM "TerminalPaymentRequest" r
+      JOIN LATERAL (${pagoLigadoDeLaFilaSql('r')} LIMIT 1) ligado ON true
+      WHERE r."status" = 'FAILED' AND r."failureCode" IN ('NO_EVIDENCE_AFTER_WINDOW','OPERATOR_RECONCILED_NO_CHARGE')
+        AND r."paymentId" IS NULL AND r."createdAt" >= (NOW() AT TIME ZONE 'UTC') - INTERVAL '7 days'
+      ORDER BY r."createdAt" ASC, r."id" ASC LIMIT 200`
     console.log(`\n[P2] filas candidatas de la red durable: ${candidatas}\n` + filas.map(f2 => f2['QUERY PLAN']).join('\n') + '\n')
     expect(Number(candidatas)).toBeGreaterThanOrEqual(1)
     // 🔴 Lo que de verdad importa del plan: ninguna rama recorre `Payment` entera (con el `OR` anterior eran 1 092 ms y
