@@ -929,6 +929,16 @@ function resultToStatus(status: TerminalPaymentResult['status']): TerminalPaymen
   }
 }
 
+/** El instante en que la VENTANA liberó la fila, tal como lo dejó escrito `releaseUnprovenNegative`; `null` si no está o no se lee. */
+function instanteDeLiberacionPorVentana(resultJson: Prisma.JsonValue | null): Date | null {
+  const sobre = resultJson && typeof resultJson === 'object' && !Array.isArray(resultJson) ? (resultJson as Record<string, unknown>) : null
+  const liberacion = sobre?.releasedAfterWindow
+  const releasedAt = liberacion && typeof liberacion === 'object' ? (liberacion as Record<string, unknown>).releasedAt : undefined
+  if (typeof releasedAt !== 'string') return null
+  const fecha = new Date(releasedAt)
+  return Number.isNaN(fecha.getTime()) ? null : fecha
+}
+
 /** Reconstruct a client-facing result from a stored row (for idempotent replay). */
 function resultFromRow(row: {
   requestId: string
@@ -1185,6 +1195,12 @@ export type CloseRowOutcome =
       previousStatus: TerminalPaymentRequestStatus
       /** EXACTAMENTE la condición de la alarma 🚨 de abajo (`reopened || CANCEL_REQUESTED`): dinero sobre una fila que ya dábamos por cerrada o en cancelación. */
       alarmed: boolean
+      /**
+       * Sólo cuando la fila venía `FAILED/NO_EVIDENCE_AFTER_WINDOW` (la ventana la liberó y el banco aprobó DESPUÉS): cuántos
+       * cobros con tarjeta recibió la orden desde la liberación, sin contar este Payment ni reembolsos. `null` = sin orden.
+       * Es «otros cobros registrados hasta ahora», no una prueba de doble cobro — quien revisa decide.
+       */
+      lateAfterWindow?: { otherCardPaymentsOnOrderAfterRelease: number | null }
     }
   | {
       bound: false
@@ -1219,14 +1235,27 @@ export type AttemptLinkAck =
   | { success: false; reason: 'INVALID' | 'NOT_OWNER' | 'ATTEMPT_OWNED_BY_OTHER_REQUEST' | 'ERROR' }
 
 /**
- * Aviso de una aprobación que llegó DESPUÉS de vencer la ventana (la Task 3 la llena: 🚨 + bitácora + correo + conteo de
- * cobros posteriores sobre la misma orden). Firma final; en la Task 2 la llama ya el camino RECONCILED de la ventana.
+ * Correo ops de la aprobación tardía tras la ventana. Corre DESPUÉS del commit y sin `await` encadenado: dentro de la
+ * transacción podría salir y luego revertirse, y repetirse al reintentar (Codex, Task 0, P2). El asiento durable y único es
+ * el `ActivityLog` de `closeRowFromPaymentTx`; el correo es best-effort y NO se promete «exactamente una vez».
+ * La llaman TODOS los llamadores de `closeRowFromPaymentTx` tras su commit (registrador REST/webhook, registro repetido, la
+ * ventana y el barrido de 30 min); sin `lateAfterWindow` en el desenlace no hace nada. `sendOpsAlert` nunca rechaza.
  */
 export function avisarAprobacionTardiaTrasVentana(
-  _cierre: CloseRowOutcome | null,
-  _ctx: { requestId: string; venueId: string; paymentId: string; terminalId: string | null; orderId: string | null },
+  cierre: CloseRowOutcome | null,
+  ctx: { requestId: string; venueId: string; paymentId: string; terminalId: string | null; orderId: string | null },
 ): void {
-  // la Task 3 la llena
+  if (!cierre?.bound || !cierre.lateAfterWindow) return
+  const otros = cierre.lateAfterWindow.otherCardPaymentsOnOrderAfterRelease
+  void sendOpsAlert({
+    subject: `Cobro aprobado tarde tras la ventana — ${ctx.terminalId ?? 'terminal desconocida'}`,
+    lines: [
+      `El banco aprobó un cobro (${ctx.paymentId}) de la solicitud ${ctx.requestId} después de que la ventana de 30 s la liberara.`,
+      otros
+        ? `🔴 La orden ${ctx.orderId} tiene ${otros} cobro(s) con tarjeta registrados después de liberarla: revisar si hay que devolver uno.`
+        : 'La orden no muestra otro cobro con tarjeta posterior: sólo confirmar que quedó registrado.',
+    ],
+  })
 }
 
 class TerminalPaymentService {
@@ -2191,7 +2220,22 @@ class TerminalPaymentService {
                   { status: TerminalPaymentRequestStatus.TIMED_OUT, failureCode: null },
                 ],
               }
-            : SIN_DESENLACE_ACREDITADO),
+            : {
+                // G2 (checkpoint 1: el webhook es el PRIMER confirmador): una fila RETENIDA por evidencia bancaria conocida
+                // (`BANK_APPROVED_AWAITING_PAYMENT`) no la cierra un negativo ACREDITADO tardío de la terminal — el banco ya
+                // aprobó; S4 la cerrará con el Payment. NULL-seguro como `NO_SOLTADA_POR_POLITICA` (un `NOT {…}` dejaría fuera
+                // la fila de la ventana, cuyo `failureCode` es NULL); AUTO_RELEASED / MANUAL_RELEASE siguen entrando.
+                AND: [
+                  SIN_DESENLACE_ACREDITADO,
+                  {
+                    OR: [
+                      { status: { not: TerminalPaymentRequestStatus.TIMED_OUT } },
+                      { failureCode: null },
+                      { failureCode: { not: 'BANK_APPROVED_AWAITING_PAYMENT' } },
+                    ],
+                  },
+                ],
+              }),
         },
         data: { ...data, lateResult: true },
       })
@@ -2407,7 +2451,18 @@ class TerminalPaymentService {
       await tx.$queryRaw`SELECT "id" FROM "TerminalPaymentRequest" WHERE "requestId" = ${requestId} AND "venueId" = ${venueId} FOR UPDATE`
       const before = await tx.terminalPaymentRequest.findFirst({
         where: { requestId, venueId },
-        select: { status: true, amountCents: true, tipCents: true, orderId: true, terminalId: true, paymentId: true },
+        select: {
+          id: true,
+          status: true,
+          amountCents: true,
+          tipCents: true,
+          orderId: true,
+          terminalId: true,
+          paymentId: true,
+          failureCode: true,
+          updatedAt: true,
+          resultJson: true,
+        },
       })
       if (!before) return { bound: false, reason: 'NO_REQUEST' }
       const solicitud = { requestId, orderId: before.orderId, terminalId: before.terminalId }
@@ -2597,8 +2652,69 @@ class TerminalPaymentService {
           },
         )
       }
+      let lateAfterWindow: { otherCardPaymentsOnOrderAfterRelease: number | null } | undefined
+      if (before.failureCode === 'NO_EVIDENCE_AFTER_WINDOW') {
+        // La ventana liberó esta venta y el banco la aprobó DESPUÉS: el caso que la ventana acota pero no elimina.
+        // Cuenta los cobros con tarjeta que la orden recibió DESDE la liberación hasta ahora: es «otros cobros registrados
+        // hasta este momento», no una prueba de doble cobro — puede haber abonos parciales legítimos; quien lo revisa decide.
+        // El instante de la liberación es el que la propia liberación dejó escrito (`releasedAfterWindow.releasedAt`), leído
+        // bajo el candado ANTES de reabrir; `before.updatedAt` sólo de respaldo — el toque best-effort del ingreso sin candado
+        // (angelpay-webhook) puede haberlo movido DESPUÉS de liberar, y un recobro anterior a ese toque se quedaría sin contar.
+        // Reembolsos fuera, NULL-seguro (`Payment.type` es nullable: `type <> 'REFUND'` a secas excluiría las filas legacy —
+        // mismo predicado que `SIN_REEMBOLSOS` en payment.tpv.service.ts:31, repetido aquí porque importarlo cerraría un ciclo).
+        const liberadaEn = instanteDeLiberacionPorVentana(before.resultJson) ?? before.updatedAt
+        const otros = before.orderId
+          ? await tx.payment.count({
+              where: {
+                venueId,
+                orderId: before.orderId,
+                id: { not: paymentId },
+                status: TransactionStatus.COMPLETED,
+                method: { in: [PaymentMethod.CREDIT_CARD, PaymentMethod.DEBIT_CARD] },
+                createdAt: { gt: liberadaEn },
+                OR: [{ type: null }, { type: { not: PaymentType.REFUND } }],
+              },
+            })
+          : null
+        lateAfterWindow = { otherCardPaymentsOnOrderAfterRelease: otros }
+        logger.error('🚨 [Terminal-payment late approval after window] The bank approved a charge the window had released', {
+          requestId,
+          paymentId,
+          venueId,
+          orderId: before.orderId,
+          terminalId: before.terminalId,
+          otherCardPaymentsOnOrderAfterRelease: otros,
+          closedVia,
+        })
+        // Asiento DENTRO de la transacción y sólo en la rama ganadora: una reapertura = un asiento (replays y callbacks
+        // concurrentes pierden el CAS y no llegan aquí). `tx.activityLog.create` directo: `logAction` abre su propia conexión.
+        await tx.activityLog.create({
+          data: {
+            action: 'TERMINAL_PAYMENT_LATE_APPROVAL_AFTER_WINDOW',
+            entity: 'TerminalPaymentRequest',
+            entityId: before.id,
+            venueId,
+            data: {
+              requestId,
+              paymentId,
+              orderId: before.orderId,
+              terminalId: before.terminalId,
+              otherCardPaymentsOnOrderAfterRelease: otros,
+              releasedAt: liberadaEn.toISOString(),
+              closedVia,
+            },
+          },
+        })
+      }
       // `alarmed` viaja en el desenlace para que quien cierra por WEBHOOK deje bitácora con la MISMA condición (S8), no con otra lista.
-      return { bound: true, reopened, contractMismatch, previousStatus: before.status, alarmed }
+      return {
+        bound: true,
+        reopened,
+        contractMismatch,
+        previousStatus: before.status,
+        alarmed,
+        ...(lateAfterWindow ? { lateAfterWindow } : {}),
+      }
     } catch (err) {
       logger.error(`❌ [TerminalPayment] closeRowFromPaymentTx failed (non-fatal)`, {
         requestId,
@@ -3135,6 +3251,29 @@ class TerminalPaymentService {
         })
         return 'NOT_ELIGIBLE'
       }
+    } else {
+      // 🔴 G1 (re-revisión de la Task 2, hermano de IMPORTANT 2): `findReconcilablePayment` devuelve `null` también cuando el
+      // ÚNICO Payment etiquetado con esta solicitud está atribuido a otra terminal/origen (lo filtra antes de encontrarlo),
+      // y la ventana liberaría orden y ranura con dinero de por medio. Regla: mientras exista un cobro con tarjeta COMPLETED
+      // (no reembolso, NULL-seguro sobre `type`) etiquetado con la solicitud —sea de quien sea y de la orden que sea— NO se
+      // libera: se retiene para revisión humana.
+      const etiquetados = await prisma.payment.count({
+        where: {
+          venueId,
+          processorData: { path: ['terminalPaymentRequestId'], equals: requestId },
+          status: TransactionStatus.COMPLETED,
+          method: { in: [PaymentMethod.CREDIT_CARD, PaymentMethod.DEBIT_CARD] },
+          OR: [{ type: null }, { type: { not: PaymentType.REFUND } }],
+        },
+      })
+      if (etiquetados > 0) {
+        logger.error('🚨 [TerminalPayment] window found a tagged payment it could not attribute — holding for human review', {
+          requestId,
+          venueId,
+          count: etiquetados,
+        })
+        return 'NOT_ELIGIBLE'
+      }
     }
 
     // 2+3) Bajo el candado de CADA intento vinculado (el ingreso del webhook toma el mismo, angelpay-webhook.service.ts):
@@ -3570,6 +3709,40 @@ class TerminalPaymentService {
           `El cobro ${row.requestId} (orden ${row.orderId ?? 'sin orden'}) se había liberado como sin respuesta y ahora aparece un pago con tarjeta (${payment.id}).`,
           'Revisa que la orden no haya quedado pagada dos veces; si sí, hay que devolver uno de los dos cobros.',
         ],
+      })
+    }
+
+    // Ventana de confirmación (Task 3): una fila que la VENTANA liberó (`FAILED/NO_EVIDENCE_AFTER_WINDOW`) cuyo pago llega
+    // después SIN pasar por el registrador con su requestId (cola vieja: la etiqueta viaja sólo en `processorData`) se
+    // concilia por el cierre COMÚN, nunca por un `updateMany` propio: es `closeRowFromPaymentTx` quien cuenta los cobros
+    // posteriores de la orden, deja el asiento único y devuelve `lateAfterWindow`; el correo sale después del commit.
+    const liberadasPorVentana = await retry(
+      () =>
+        prisma.terminalPaymentRequest.findMany({
+          where: {
+            status: TerminalPaymentRequestStatus.FAILED,
+            failureCode: 'NO_EVIDENCE_AFTER_WINDOW',
+            updatedAt: { gte: new Date(now.getTime() - RELEASED_LATE_RECONCILE_WINDOW_MS) },
+          },
+          orderBy: { updatedAt: 'asc' },
+          take: 200,
+        }),
+      { retries: 3, shouldRetry: shouldRetryDbConnectionError, context: 'terminal-payment-watchdog:findReleasedByWindow' },
+    )
+    for (const row of liberadasPorVentana) {
+      const payment = await this.findReconcilablePayment(row)
+      if (!payment) continue
+      const cierre = await prisma.$transaction(tx =>
+        this.closeRowFromPaymentTx(tx, row.requestId, payment.id, row.venueId, undefined, 'REST'),
+      )
+      if (!cierre.bound) continue
+      lateReconciled += 1
+      avisarAprobacionTardiaTrasVentana(cierre, {
+        requestId: row.requestId,
+        venueId: row.venueId,
+        paymentId: payment.id,
+        terminalId: row.terminalId,
+        orderId: row.orderId,
       })
     }
 

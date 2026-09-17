@@ -378,7 +378,12 @@ import { resolveTenderForCharge, computeTenderCommission, type ResolvedTenderCha
 import { validateStaffVenue as validateStaffVenueShared } from '../../utils/staff-venue.util'
 import { isRetryableDbError } from '../../utils/serializableRetry'
 import { loadOrderForCfdiFromDb } from '../fiscal/cfdi.service'
-import { terminalPaymentService, type ArbitrajeDeRegistro, CloseRowOutcome } from '../terminal-payment.service'
+import {
+  terminalPaymentService,
+  avisarAprobacionTardiaTrasVentana,
+  type ArbitrajeDeRegistro,
+  CloseRowOutcome,
+} from '../terminal-payment.service'
 // Sin ciclo: table.tpv.service NO importa este archivo (verificado 2026-08-03).
 import * as tableService from './table.tpv.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
@@ -3730,6 +3735,18 @@ export async function recordOrderPayment(
     throw error
   }
 
+  // Ventana de confirmación (Task 3): si el cierre reabrió una fila que la ventana ya había liberado, el correo ops sale
+  // DESPUÉS del commit — por REST o por webhook, los dos pueden reabrir. Sin `lateAfterWindow` no hace nada.
+  if (paymentData.terminalPaymentRequestId) {
+    avisarAprobacionTardiaTrasVentana(s0.cierre, {
+      requestId: paymentData.terminalPaymentRequestId,
+      venueId,
+      paymentId: payment.id,
+      terminalId: paymentData.authenticatedTerminalSerial ?? paymentData.deviceSerialNumber ?? null,
+      orderId: activeOrder.id,
+    })
+  }
+
   if (s0.segundaCaptura) return await responderSegundaCaptura(venueId, payment, s0.segundaCaptura)
   if (s0.colision) return await responderColisionDeReferencia(venueId, payment, s0.colision)
 
@@ -5120,6 +5137,17 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       }
     }
     throw error
+  }
+
+  // Ventana de confirmación (Task 3): mismo aviso post-commit que en el cobro con orden (REST o webhook).
+  if (paymentData.terminalPaymentRequestId) {
+    avisarAprobacionTardiaTrasVentana(s0.cierre, {
+      requestId: paymentData.terminalPaymentRequestId,
+      venueId,
+      paymentId: payment.id,
+      terminalId: paymentData.authenticatedTerminalSerial ?? paymentData.deviceSerialNumber ?? null,
+      orderId: fastOrder.id,
+    })
   }
 
   if (s0.segundaCaptura) return await responderSegundaCaptura(venueId, payment, s0.segundaCaptura)

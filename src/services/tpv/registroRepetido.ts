@@ -16,7 +16,7 @@ import { CardBrand, CardEntryMode, PaymentMethod, Prisma, type Payment } from '@
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { logAction } from '../dashboard/activity-log.service'
-import { terminalPaymentService } from '../terminal-payment.service'
+import { avisarAprobacionTardiaTrasVentana, terminalPaymentService } from '../terminal-payment.service'
 import { afiliacionDelApkDelRegistro, afiliacionesDe, esElMismoCobroPorReferencia, huellaDelRegistro } from './identidadDelCobro'
 import { OPCIONES_DE_TRANSACCION_DEL_INTENTO, candadoDeIntento, llaveDeIntento } from './candadoDeIntento'
 
@@ -343,6 +343,15 @@ export async function consolidarRegistroRepetidoDetallado<T extends Payment>(
           requestId: entrante.terminalPaymentRequestId,
         })
       }
+      // Ventana de confirmación (Task 3): la reparación también puede reabrir una fila que la ventana liberó — correo ops
+      // DESPUÉS del commit (sin `lateAfterWindow` no hace nada).
+      avisarAprobacionTardiaTrasVentana(cierre, {
+        requestId: entrante.terminalPaymentRequestId,
+        venueId,
+        paymentId: existente.id,
+        terminalId: entrante.authenticatedTerminalSerial ?? entrante.deviceSerialNumber ?? null,
+        orderId: existente.orderId,
+      })
     }
     const releido = await prisma.payment.findUnique({ where: { id: existente.id }, include: { receipts: true } })
     const registro = releido ? ({ ...existente, ...releido } as T) : existente
