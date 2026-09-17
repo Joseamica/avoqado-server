@@ -1342,6 +1342,103 @@ describe('P2-N1 · Payment con idempotencyKey del intento, sin etiqueta y sin we
   })
 })
 
+// ── Codex r3 · P1-N2: ningún barrido fabrica un ganador SIN etiqueta — todos cierran por el cierre común ──
+describe('P1-N2 · los barridos (vencidas, UNKNOWN) y la liberación manual cierran por closeRowFromPaymentTx: el Payment ganador queda ETIQUETADO', () => {
+  const conVinculo = async (over: Record<string, unknown>) => {
+    const row = await auditRequest(over)
+    const attemptId = `att-${randomUUID()}`
+    await prisma.terminalPaymentAttemptLink.create({ data: { attemptId, requestId: row.requestId, venueId, terminalId: fixture } })
+    return { row, attemptId }
+  }
+  /** S0: llega OTRO intento para la MISMA solicitud. Con el ganador etiquetado el veredicto es SECOND_CAPTURE, nunca WINNER. */
+  const arbitrajeDeOtroIntento = (requestId: string) =>
+    prisma.$transaction(tx =>
+      terminalPaymentService.arbitrarRegistroDeSolicitud(tx, {
+        requestId,
+        venueId,
+        attemptKey: `att-${randomUUID()}`,
+        targetOrderId: orderId,
+        authenticatedSerial: fixture,
+      }),
+    )
+  const etiquetado = async (paymentId: string, requestId: string) => {
+    const pago = await prisma.payment.findUniqueOrThrow({ where: { id: paymentId } })
+    expect(pago.terminalPaymentRequestId).toBe(requestId)
+    expect((pago.processorData as any).terminalPaymentRequestId).toBe(requestId)
+  }
+
+  it('(a) SENT vencida + Payment propio ligado sólo por intento ⇒ reconcileStaleRequests la cierra COMPLETED/lateResult, ETIQUETA el Payment, y el S0 de un intento nuevo dice SECOND_CAPTURE', async () => {
+    const { row, attemptId } = await conVinculo({ status: 'SENT', expiresAt: new Date(Date.now() - 60_000) })
+    const pago = await auditPayment({ idempotencyKey: attemptId, processorData: { deviceSerialNumber: fixture } })
+    const resumen = await terminalPaymentService.reconcileStaleRequests(new Date())
+    expect(resumen.completed).toBe(1)
+    expect(await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({
+      status: 'COMPLETED',
+      paymentId: pago.id,
+      lateResult: true,
+    })
+    await etiquetado(pago.id, row.requestId)
+    const veredicto = await arbitrajeDeOtroIntento(row.requestId)
+    expect(veredicto).toMatchObject({ kind: 'SECOND_CAPTURE', winnerPaymentId: pago.id })
+  })
+
+  it('(b) UNKNOWN + Payment propio ligado sólo por intento ⇒ reconcileUnknownRequests la cierra por el cierre común (🚨 + asiento LATE_RECONCILED), etiqueta, y el S0 dice SECOND_CAPTURE', async () => {
+    const { row, attemptId } = await conVinculo({ status: 'UNKNOWN', failureCode: 'TIMED_OUT' })
+    const pago = await auditPayment({ idempotencyKey: attemptId, processorData: { deviceSerialNumber: fixture } })
+    ;(logger.error as jest.Mock).mockClear()
+    ;(logAction as jest.Mock).mockClear()
+    const resumen = await terminalPaymentService.reconcileUnknownRequests(new Date())
+    expect(resumen.completed).toBe(1)
+    expect(await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({
+      status: 'COMPLETED',
+      paymentId: pago.id,
+      lateResult: true,
+    })
+    await etiquetado(pago.id, row.requestId)
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('Payment recorded for an UNKNOWN request'),
+      expect.objectContaining({ requestId: row.requestId, paymentId: pago.id }),
+    )
+    const asientos = (logAction as jest.Mock).mock.calls
+      .map(([p]) => p as { action: string; entityId?: string })
+      .filter(p => p.action === 'TERMINAL_PAYMENT_LATE_RECONCILED' && p.entityId === row.id)
+    expect(asientos).toHaveLength(1)
+    expect(await arbitrajeDeOtroIntento(row.requestId)).toMatchObject({ kind: 'SECOND_CAPTURE', winnerPaymentId: pago.id })
+  })
+
+  it('(d) la liberación MANUAL (releaseUnknownRequest) tampoco fabrica un ganador sin etiqueta: concilia por el cierre común y el S0 dice SECOND_CAPTURE', async () => {
+    const { row, attemptId } = await conVinculo({ status: 'UNKNOWN', failureCode: 'TIMED_OUT' })
+    const pago = await auditPayment({ idempotencyKey: attemptId, processorData: { deviceSerialNumber: fixture } })
+    const r = await terminalPaymentService.releaseUnknownRequest({
+      requestId: row.requestId,
+      venueId,
+      actor: { staffId: null, source: 'MCP' },
+      reason: 'prueba',
+    })
+    expect(r).toMatchObject({ released: false, status: 'COMPLETED', paymentId: pago.id })
+    await etiquetado(pago.id, row.requestId)
+    expect(await arbitrajeDeOtroIntento(row.requestId)).toMatchObject({ kind: 'SECOND_CAPTURE', winnerPaymentId: pago.id })
+  })
+
+  it('(c) regresión: un cobro por OTRO importe se cierra por el barrido MARCADO como CONTRACT_MISMATCH (la misma regla del cierre común)', async () => {
+    const { row, attemptId } = await conVinculo({ status: 'UNKNOWN', failureCode: 'TIMED_OUT' })
+    const pago = await auditPayment({
+      idempotencyKey: attemptId,
+      amount: new Prisma.Decimal(150),
+      netAmount: new Prisma.Decimal(150),
+      processorData: { deviceSerialNumber: fixture },
+    })
+    await terminalPaymentService.reconcileUnknownRequests(new Date())
+    const cerrada = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    expect(cerrada).toMatchObject({ status: 'COMPLETED', paymentId: pago.id, failureCode: 'CONTRACT_MISMATCH' })
+    expect(cerrada.resultJson).toMatchObject({
+      reconciliationRequired: true,
+      requested: { amountCents: 10000, tipCents: 0, totalCents: 10000 },
+      reported: { amountCents: 15000, tipCents: 0, totalCents: 15000 },
+    })
+  })
+})
+
 // ── Task 4: la declaración del cajero «no se presentó tarjeta» ──
 describe('Declaración del cajero', () => {
   const serialDelFixture = `AVQD-${fixture.toUpperCase()}`
@@ -1671,5 +1768,44 @@ describe('Declaración del cajero', () => {
       statusCode: 409,
     })
     expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).status).toBe('UNKNOWN')
+  })
+  // ── Codex r3 · P1-D: la fusión de claimedSuccess es ATÓMICA en el propio UPDATE (jsonb), no lectura + escritura ──
+  it('(P1-D · r3) dos `success` concurrentes sin Payment: el que escribe segundo NO borra la señal que el otro persistió entre su lectura y su escritura; la declaración ⇒ 409', async () => {
+    const row = await auditRequest({ status: 'SENT' })
+    const attemptId = `att-${randomUUID()}`
+    await prisma.terminalPaymentAttemptLink.create({ data: { attemptId, requestId: row.requestId, venueId, terminalId: fixture } })
+    const socket = { socketId: 'fixture-socket', terminalId: fixture, venueId }
+    // El «primer» success (readMode) lee la fila antes de escribir; en ese hueco OTRO success (transactionId) llega y se persiste.
+    const original = prisma.terminalPaymentRequest.findFirst.bind(prisma.terminalPaymentRequest)
+    let lecturas = 0
+    let intercalado = false
+    const spy = jest.spyOn(prisma.terminalPaymentRequest, 'findFirst').mockImplementation(async (args: any) => {
+      const r = await original(args)
+      if (args?.where?.requestId === row.requestId && !intercalado && ++lecturas === 2) {
+        intercalado = true // la primera lectura es la comprobación de propiedad; la segunda, la que precede a la escritura
+        await terminalPaymentService.handlePaymentResultFromSocket(
+          { requestId: row.requestId, status: 'success', transactionId: 'tx-otro' } as any,
+          socket,
+        )
+      }
+      return r
+    })
+    try {
+      await terminalPaymentService.handlePaymentResultFromSocket(
+        { requestId: row.requestId, status: 'success', readMode: 'CONTACTLESS' } as any,
+        socket,
+      )
+    } finally {
+      spy.mockRestore()
+    }
+    expect(intercalado).toBe(true)
+    const fila = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    expect(fila).toMatchObject({ status: 'UNKNOWN', paymentId: null, failureCode: null })
+    expect((fila.resultJson as any).terminalResult).toBeUndefined()
+    expect((fila.resultJson as any).claimedSuccess).toEqual({ transactionId: 'tx-otro', readMode: 'CONTACTLESS' })
+    await expect(declarar(attemptId, owner.id, declaracion(row.requestId))).rejects.toMatchObject({
+      code: 'POSITIVE_EVIDENCE_EXISTS',
+      statusCode: 409,
+    })
   })
 })

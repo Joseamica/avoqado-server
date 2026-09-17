@@ -93,8 +93,49 @@ beforeEach(() => {
   tpr().findFirst.mockReset().mockResolvedValue(null)
   tpr().updateMany.mockReset().mockResolvedValue({ count: 1 })
   prismaMock.payment.findFirst.mockReset().mockResolvedValue(null)
+  prismaMock.payment.updateMany.mockReset().mockResolvedValue({ count: 1 })
   prismaMock.terminal.findFirst.mockReset().mockResolvedValue(null)
+  // Codex r2 (P2-N1): `findReconcilablePayment` enumera los vínculos de la solicitud; sin default el mock devolvía `undefined` y
+  // el `.map` reventaba (la clase «mock de lista fija»: 22 pruebas cayeron por TypeError, no por lo que afirman).
+  prismaMock.terminalPaymentAttemptLink.findMany.mockReset().mockResolvedValue([])
+  prismaMock.$queryRaw.mockReset().mockResolvedValue([])
 })
+
+/**
+ * Codex r3 (P1-N2): los barridos y la liberación manual cierran por `closeRowFromPaymentTx` dentro de `prisma.$transaction` (el mock
+ * entrega el propio `prismaMock` como `tx`). Ese cierre RELEE la fila (`before`) y el Payment con su procedencia, escribe la fila con
+ * CAS `paymentId: null` y ETIQUETA al Payment como ganador. Arma esas lecturas.
+ */
+function cierreComunCon(row: Record<string, unknown>, payment: Record<string, unknown>) {
+  tpr().findFirst.mockResolvedValue(row)
+  prismaMock.payment.findFirst.mockResolvedValue({
+    processorData: {},
+    terminalPaymentRequestId: null,
+    orderId: row.orderId ?? null,
+    source: 'TPV',
+    amount: new Prisma.Decimal(135),
+    tipAmount: new Prisma.Decimal(0),
+    ...payment,
+  })
+}
+/** La escritura del cierre común: CAS «todavía sin ganador» sobre la solicitud, y la etiqueta del ganador en el Payment. */
+function cerradaPorElCierreComun(requestId: string, paymentId: string, data: Record<string, unknown> = {}) {
+  expect(tpr().updateMany).toHaveBeenCalledWith(
+    expect.objectContaining({
+      where: { requestId, venueId: 'venue-1', paymentId: null },
+      data: expect.objectContaining({ status: 'COMPLETED', paymentId, lateResult: true, ...data }),
+    }),
+  )
+  expect(prismaMock.payment.updateMany).toHaveBeenCalledWith(
+    expect.objectContaining({
+      where: { id: paymentId, venueId: 'venue-1' },
+      data: expect.objectContaining({
+        terminalPaymentRequestId: requestId,
+        processorData: expect.objectContaining({ terminalPaymentRequestId: requestId }),
+      }),
+    }),
+  )
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 1. reconcileUnknownRequests — the watchdog keeps asking until it can decide
@@ -104,25 +145,20 @@ describe('reconcileUnknownRequests — money first: a recorded card payment alwa
     const logger = require('@/config/logger').default
     const errSpy = jest.spyOn(logger, 'error')
     tpr().findMany.mockResolvedValueOnce([unknownRow()])
-    prismaMock.payment.findFirst.mockResolvedValueOnce({
-      id: 'pay-late',
-      source: 'TPV',
-      terminal: { serialNumber: '2841653112' },
-      amount: new Prisma.Decimal(135),
-      tipAmount: new Prisma.Decimal(0),
-    })
+    cierreComunCon(unknownRow(), { id: 'pay-late', terminal: { serialNumber: '2841653112' } })
 
     const summary = await terminalPaymentService.reconcileUnknownRequests(NOW)
 
     expect(summary.completed).toBe(1)
     expect(summary.released).toBe(0)
-    expect(tpr().updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ id: 'row-u', status: 'UNKNOWN' }),
-        data: expect.objectContaining({ status: 'COMPLETED', paymentId: 'pay-late', lateResult: true }),
-      }),
-    )
+    // Codex r3 (P1-N2): por el cierre común — CAS «sin ganador» + etiqueta del Payment — y el 🚨 propio del barrido de UNKNOWN.
+    cerradaPorElCierreComun('REQ-U', 'pay-late')
     expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('🚨'), expect.objectContaining({ requestId: 'REQ-U' }))
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining('UNKNOWN request'),
+      expect.objectContaining({ requestId: 'REQ-U', paymentId: 'pay-late' }),
+    )
+    expect(mockedLogAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'TERMINAL_PAYMENT_LATE_RECONCILED', entityId: 'row-u' }))
     errSpy.mockRestore()
   })
 
@@ -132,49 +168,38 @@ describe('reconcileUnknownRequests — money first: a recorded card payment alwa
   // rechaza, ya salió de la tarjeta; se cierra igual, pero MARCADO para que un humano lo concilie.
   it('un cobro por OTRO importe se cierra MARCADO como CONTRACT_MISMATCH, no como si nada', async () => {
     tpr().findMany.mockResolvedValueOnce([unknownRow()]) // pidió 13500 centavos
-    prismaMock.payment.findFirst.mockResolvedValueOnce({
+    cierreComunCon(unknownRow(), {
       id: 'pay-otro-importe',
-      source: 'TPV',
       terminal: { serialNumber: '2841653112' },
       amount: new Prisma.Decimal(200), // 20000 centavos: 65 pesos de más
-      tipAmount: new Prisma.Decimal(0),
     })
 
     await terminalPaymentService.reconcileUnknownRequests(NOW)
 
-    expect(tpr().updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          status: 'COMPLETED',
-          paymentId: 'pay-otro-importe',
-          failureCode: 'CONTRACT_MISMATCH',
-          resultJson: expect.objectContaining({
-            reconciliationRequired: true,
-            requested: expect.objectContaining({ amountCents: 13500, tipCents: 0, totalCents: 13500 }),
-            reported: expect.objectContaining({ amountCents: 20000, tipCents: 0, totalCents: 20000 }),
-          }),
-        }),
+    // Codex r3 (P1-N2): la marca la pone el cierre común (`contratoDescuadrado`), en la MISMA escritura que liga el ganador.
+    cerradaPorElCierreComun('REQ-U', 'pay-otro-importe', {
+      failureCode: 'CONTRACT_MISMATCH',
+      resultJson: expect.objectContaining({
+        reconciliationRequired: true,
+        requested: expect.objectContaining({ amountCents: 13500, tipCents: 0, totalCents: 13500 }),
+        reported: expect.objectContaining({ amountCents: 20000, tipCents: 0, totalCents: 20000 }),
       }),
-    )
+    })
   })
 
   // El caso normal NO puede quedar marcado: marcar de más volvería inútil la señal.
   it('un cobro por el importe pedido se cierra SIN marca', async () => {
     tpr().findMany.mockResolvedValueOnce([unknownRow()])
-    prismaMock.payment.findFirst.mockResolvedValueOnce({
-      id: 'pay-cuadra',
-      source: 'TPV',
-      terminal: { serialNumber: '2841653112' },
-      amount: new Prisma.Decimal(135),
-      tipAmount: new Prisma.Decimal(0),
-    })
+    cierreComunCon(unknownRow(), { id: 'pay-cuadra', terminal: { serialNumber: '2841653112' } })
 
     await terminalPaymentService.reconcileUnknownRequests(NOW)
 
+    cerradaPorElCierreComun('REQ-U', 'pay-cuadra')
     const escritura = tpr().updateMany.mock.calls.at(-1)?.[0]
     expect(escritura.data.status).toBe('COMPLETED')
     expect(escritura.data.failureCode).toBeUndefined()
-    expect(escritura.data.resultJson).toBeUndefined()
+    // El cierre común escribe el sobre canónico del ganador (`{requestId, status:'success', paymentId}`), sin `reconciliationRequired`.
+    expect(escritura.data.resultJson).toEqual({ requestId: 'REQ-U', status: 'success', paymentId: 'pay-cuadra' })
   })
 
   it('the payment lookup carries the same 4 guards as the stale sweep (after the row, COMPLETED, card, not claimed by an ACCREDITED owner)', async () => {
@@ -191,16 +216,19 @@ describe('reconcileUnknownRequests — money first: a recorded card payment alwa
       tipAmount: new Prisma.Decimal(0),
     })
     // Codex R13-7: ya reclamado por otra solicitud CON procedencia (la columna la acredita y se cobró en su terminal): veta.
-    tpr().findMany.mockResolvedValueOnce([{ id: 'row-other', requestId: 'REQ-OWNER', orderId: 'order-1', terminalId: '2841653112', status: 'COMPLETED' }])
+    tpr().findMany.mockResolvedValueOnce([
+      { id: 'row-other', requestId: 'REQ-OWNER', orderId: 'order-1', terminalId: '2841653112', status: 'COMPLETED' },
+    ])
 
     const summary = await terminalPaymentService.reconcileUnknownRequests(NOW)
 
+    // Codex r2 (P2-N1): la etiqueta de la solicitud es una rama del `OR` (la llave de intento sólo se suma con vínculos).
     expect(prismaMock.payment.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
           orderId: 'order-1',
           venueId: 'venue-1',
-          processorData: { path: ['terminalPaymentRequestId'], equals: row.requestId },
+          OR: [{ processorData: { path: ['terminalPaymentRequestId'], equals: row.requestId } }],
           status: 'COMPLETED',
           method: { in: ['CREDIT_CARD', 'DEBIT_CARD'] },
         }),
@@ -339,13 +367,7 @@ describe('reconcileUnknownRequests — the terminal must be BACK before anything
     const returnedAt = new Date(NOW.getTime() - GRACE_MS - 60_000)
     tpr().findMany.mockResolvedValueOnce([unknownRow({ terminalReturnedAt: returnedAt })])
     terminalWithHeartbeat(new Date(NOW.getTime() - 10_000))
-    prismaMock.payment.findFirst.mockResolvedValueOnce({
-      id: 'pay-late',
-      source: 'TPV',
-      terminal: { serialNumber: '2841653112' },
-      amount: new Prisma.Decimal(135),
-      tipAmount: new Prisma.Decimal(0),
-    })
+    cierreComunCon(unknownRow({ terminalReturnedAt: returnedAt }), { id: 'pay-late', terminal: { serialNumber: '2841653112' } })
 
     const summary = await terminalPaymentService.reconcileUnknownRequests(NOW)
 
@@ -353,6 +375,7 @@ describe('reconcileUnknownRequests — the terminal must be BACK before anything
     expect(summary.released).toBe(0)
     const calls = tpr().updateMany.mock.calls.map((c: any[]) => c[0].data.status)
     expect(calls).toEqual(['COMPLETED'])
+    cerradaPorElCierreComun('REQ-U', 'pay-late')
   })
 
   it('a release that loses the CAS (row already closed by a late result) is not counted and not alerted', async () => {
@@ -413,41 +436,43 @@ describe('releaseUnknownRequest — a human may free the slot, but never on top 
     expect(mockedLogAction).not.toHaveBeenCalled()
   })
 
-  it('refuses to release when a reconcilable card payment exists → reconciles to COMPLETED instead', async () => {
-    tpr().findFirst.mockResolvedValueOnce(unknownRow())
-    prismaMock.payment.findFirst.mockResolvedValueOnce({
-      id: 'pay-late',
-      source: 'TPV',
-      terminal: { serialNumber: '2841653112' },
-      amount: new Prisma.Decimal(135),
-      tipAmount: new Prisma.Decimal(0),
-    })
+  it('refuses to release when a reconcilable card payment exists → reconciles to COMPLETED instead (por el cierre común, con etiqueta)', async () => {
+    cierreComunCon(unknownRow(), { id: 'pay-late', terminal: { serialNumber: '2841653112' } })
 
     const r = await terminalPaymentService.releaseUnknownRequest({ requestId: 'REQ-U', venueId: 'venue-1', actor, reason: 'x' })
 
     expect(r).toEqual(expect.objectContaining({ released: false, status: 'COMPLETED', paymentId: 'pay-late' }))
     const statuses = tpr().updateMany.mock.calls.map((c: any[]) => c[0].data.status)
     expect(statuses).toEqual(['COMPLETED'])
+    cerradaPorElCierreComun('REQ-U', 'pay-late')
+    expect(mockedLogAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'TERMINAL_PAYMENT_LATE_RECONCILED', entityId: 'row-u' }))
   })
 
-  it('payment exists but another path closed the row first (CAS count 0) → reports the fresh status, never claims its own paymentId', async () => {
-    tpr()
-      .findFirst.mockResolvedValueOnce(unknownRow()) // the row
-      .mockResolvedValueOnce({ status: 'COMPLETED', paymentId: 'pay-from-socket' }) // re-read after the lost CAS
-    // Codex R13-7: las reclamaciones ajenas se consultan con `findMany` (ninguna aquí).
-    tpr().findMany.mockResolvedValueOnce([])
-    prismaMock.payment.findFirst.mockResolvedValueOnce({
-      id: 'pay-late',
+  it('payment exists but another path closed the row first (the common close finds it already bound to an ACCREDITED winner) → reports the fresh status, never claims its own paymentId', async () => {
+    // Codex r3 (P1-N2): el cierre común relee la fila y la encuentra COMPLETED con OTRO ganador acreditado (`pay-from-socket`,
+    // etiquetado y cobrado en esta terminal) ⇒ `ALREADY_BOUND`; la liberación manual relee y reporta lo que quedó.
+    tpr().findFirst.mockImplementation(async ({ select }: any) =>
+      select?.status && select?.paymentId && Object.keys(select).length === 2
+        ? { status: 'COMPLETED', paymentId: 'pay-from-socket' } // la relectura final de `releaseUnknownRequest`
+        : unknownRow({ status: 'COMPLETED', paymentId: 'pay-from-socket' }),
+    )
+    // La primera lectura de `releaseUnknownRequest` tiene que ver la fila UNKNOWN (si no, ni busca el Payment).
+    tpr().findFirst.mockResolvedValueOnce(unknownRow())
+    prismaMock.payment.findFirst.mockImplementation(async ({ where }: any) => ({
+      id: where.id ?? 'pay-late',
       source: 'TPV',
+      orderId: 'order-1',
+      processorData: where.id === 'pay-from-socket' ? { terminalPaymentRequestId: 'REQ-U' } : {},
+      terminalPaymentRequestId: where.id === 'pay-from-socket' ? 'REQ-U' : null,
       terminal: { serialNumber: '2841653112' },
       amount: new Prisma.Decimal(135),
       tipAmount: new Prisma.Decimal(0),
-    })
-    tpr().updateMany.mockResolvedValueOnce({ count: 0 })
+    }))
 
     const r = await terminalPaymentService.releaseUnknownRequest({ requestId: 'REQ-U', venueId: 'venue-1', actor, reason: 'x' })
 
     expect(r).toEqual(expect.objectContaining({ released: false, status: 'COMPLETED', paymentId: 'pay-from-socket' }))
+    expect(tpr().updateMany).not.toHaveBeenCalled() // nada se reescribió: el ganador ya estaba
     expect(mockedLogAction).not.toHaveBeenCalled()
   })
 
@@ -570,7 +595,7 @@ describe('reconcileUnknownRequests — a payment landing on an already-RELEASED 
     const logger = require('@/config/logger').default
     const errSpy = jest.spyOn(logger, 'error')
     tpr().findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([releasedRow()])
-    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-after-release', source: 'TPV', terminal: { serialNumber: '2841653112' } })
+    cierreComunCon(releasedRow(), { id: 'pay-after-release', terminal: { serialNumber: '2841653112' } })
 
     const summary = await terminalPaymentService.reconcileUnknownRequests(NOW)
 
@@ -581,12 +606,8 @@ describe('reconcileUnknownRequests — a payment landing on an already-RELEASED 
         where: expect.objectContaining({ status: 'TIMED_OUT', failureCode: { in: ['AUTO_RELEASED', 'MANUAL_RELEASE'] } }),
       }),
     )
-    expect(tpr().updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ id: 'row-r', status: 'TIMED_OUT' }),
-        data: expect.objectContaining({ status: 'COMPLETED', paymentId: 'pay-after-release', lateResult: true }),
-      }),
-    )
+    // Codex r2/r3: por el cierre común (CAS «sin ganador» + etiqueta), no por un `updateMany` propio.
+    cerradaPorElCierreComun('REQ-R', 'pay-after-release')
     expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('RELEASED request'), expect.objectContaining({ requestId: 'REQ-R' }))
     expect(mockedLogAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'TERMINAL_PAYMENT_LATE_RECONCILED', entityId: 'row-r' }))
     expect(mockedSendOpsAlert).toHaveBeenCalledWith(expect.objectContaining({ subject: expect.stringContaining('doble cobro') }))

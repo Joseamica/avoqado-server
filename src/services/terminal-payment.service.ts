@@ -657,11 +657,10 @@ type ContratoDelCobro = {
  * ¿El dinero cobrado coincide con el que pidió el POS? Devuelve el contrato SÓLO cuando
  * difieren; `null` cuando cuadra o cuando la fila no guarda importes comparables.
  *
- * 🔴 Vive en UNA sola función a propósito. El MISMO descuadre se descubre por DOS rutas —el
- * cierre dentro de la transacción del pago (`closeRowFromPaymentTx`) y el barrido que recupera
- * un cobro tardío (`reconcileStaleRequests`)— y tenerlo escrito una sola vez es lo que impide
- * que una avise y la otra no. Es exactamente el defecto que ya ocurrió con el aviso de
- * «cobro sobre una petición cancelada».
+ * 🔴 Vive en UNA sola función a propósito, y desde Codex r3 (P1-N2) la llama UN solo escritor: `closeRowFromPaymentTx`, el
+ * cierre COMÚN por el que pasan las cinco rutas que cierran una fila con un Payment (la transacción del pago, el barrido de
+ * vencidas, el de UNKNOWN, el de liberadas y la liberación manual). Antes cada barrido tenía su propio `updateMany` con su
+ * propia marca (`marcaDeDescuadre`), y eso es lo que dejaba ganadores sin etiqueta y avisos que una ruta daba y otra no.
  *
  * Sin importes pedidos utilizables devuelve `null`: no hay contrato que comparar, y afirmar un
  * descuadre a partir de un dato ausente sería inventarlo.
@@ -688,51 +687,6 @@ function contratoDescuadrado(
     reported.tipCents === requested.tipCents &&
     reported.totalCents === requested.totalCents
   return cuadra ? null : { requested, reported }
-}
-
-/**
- * La MARCA que deja una fila cerrada como COMPLETED cuando el importe cobrado no es el que pidió
- * el POS: los campos para esparcir dentro del `data:`, más el contrato para el 🚨.
- *
- * 🔴 Existe porque la comprobación vivía en DOS de las CINCO rutas que cierran una fila. El
- * cierre dentro de la transacción del pago y el barrido de peticiones viejas sí marcaban; el
- * barrido de UNKNOWN, el de RELEASED y la intervención manual la cerraban «pagada» sin dejar
- * rastro del descuadre — la orden quedaba saldada y la diferencia no aparecía en ningún lado.
- * Escrito una sola vez es lo único que impide que una ruta marque y otra no.
- *
- * El dinero NO se rechaza: ya salió de la tarjeta. Se cierra igual, pero MARCADO, para que un
- * humano lo concilie. Sin importes pedidos comparables no hay marca: inventar un descuadre a
- * partir de un dato ausente sería peor que no decir nada.
- */
-function marcaDeDescuadre(
-  pedido: { requestId: string; amountCents?: number | null; tipCents?: number | null },
-  payment: { id: string; amount?: Prisma.Decimal | null; tipAmount?: Prisma.Decimal | null },
-) {
-  // 🔴 Sin importes COBRADOS utilizables no hay marca — y, sobre todo, no hay excepción: esto
-  // corre dentro de un barrido de hasta 200 filas, y un `throw` aquí abortaría la conciliación
-  // de TODAS las demás por culpa de una. Mismo principio que `contratoDescuadrado`: un dato
-  // ausente no prueba un descuadre.
-  const cobradoAmount = Number(payment.amount?.mul(100))
-  const cobradoTip = Number(payment.tipAmount?.mul(100))
-  const cobrado =
-    Number.isSafeInteger(cobradoAmount) && Number.isSafeInteger(cobradoTip) ? { amountCents: cobradoAmount, tipCents: cobradoTip } : null
-  const contrato = cobrado ? contratoDescuadrado(pedido, cobrado) : null
-  return {
-    contrato,
-    campos: contrato
-      ? {
-          failureCode: 'CONTRACT_MISMATCH',
-          resultJson: {
-            requestId: pedido.requestId,
-            status: 'success',
-            paymentId: payment.id,
-            reconciliationRequired: true,
-            requested: contrato.requested,
-            reported: contrato.reported,
-          },
-        }
-      : {},
-  }
 }
 
 /* ────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -2223,15 +2177,13 @@ class TerminalPaymentService {
           })
         }
         if (winner) return winner
-        // P1-D: la afirmación de la terminal viaja en el sobre (sin `terminalResult`: la fila queda UNKNOWN, fuera de la ventana),
-        // FUSIONADA con la que la fila ya tenía (Codex r2): un `success` repetido por la sonda sin `paymentId`/`transactionId` no
-        // puede borrar el `transactionId` afirmado antes. Nunca encoge; sólo un NEGATIVO posterior de la terminal (camino `late`
-        // de un failed/cancelled, ruling (c) de la Task 2) reemplaza el sobre entero.
+        // P1-D: la afirmación de la terminal viaja en el sobre (sin `terminalResult`: la fila queda UNKNOWN, fuera de la ventana).
+        // La FUSIÓN con la que la fila ya tenía la hace el propio UPDATE (`escribirSuccessDegradado`, jsonb): nunca encoge.
         result = {
           requestId,
           status: 'timeout',
           errorMessage: 'El pago sigue pendiente de confirmar en Avoqado',
-          claimedSuccess: await this.afirmacionFusionada(requestId, venueId, afirmacion ?? {}),
+          claimedSuccess: afirmacion ?? {},
         }
       }
     } catch (err) {
@@ -2243,18 +2195,23 @@ class TerminalPaymentService {
       // Hubo una AFIRMACIÓN positiva que no se pudo verificar: la fila pasa a UNKNOWN (sin terminalResult ⇒ fuera de la
       // ventana) aunque antes fuera un negativo elegible. Nunca se libera una fila sobre la que alguien dijo «cobré».
       // (Antes se RETORNABA sin escribir, y una fila TIMED_OUT elegible conservaba su negativo — Codex, Task 0 R2, P1.)
-      // P1-D: la afirmación se conserva (fusionada con la previa si se puede leer; si no, la de este resultado).
+      // P1-D: si hubo un `success`, su afirmación se conserva (la fusión con la previa la hace el UPDATE).
       result = {
         requestId,
         status: 'timeout',
         errorMessage: 'El resultado sigue pendiente de confirmar',
-        ...(afirmacion ? { claimedSuccess: await this.afirmacionFusionada(requestId, venueId, afirmacion) } : {}),
+        ...(afirmacion ? { claimedSuccess: afirmacion } : {}),
       }
     }
     // TIMED_OUT = «la terminal contestó y no hay veredicto» (entra en la ventana); UNKNOWN = «nadie afirmó nada útil»
     // (success sin Payment acreditable, error verificando evidencia, plazo del watchdog). `resultToStatus` no cambia.
     const newStatus =
       result.status === 'timeout' && result.terminalResult ? TerminalPaymentRequestStatus.TIMED_OUT : resultToStatus(result.status)
+    // Codex r3 (P1-D): un `success` degradado escribe con la FUSIÓN de `claimedSuccess` dentro del propio UPDATE (jsonb): dos
+    // `success` simultáneos se serializan en el candado de fila de Postgres y cada uno funde sobre lo que dejó el otro. La
+    // escritura NO depende de ninguna lectura previa en JS (una lectura + escritura separadas dejaba que el segundo borrara la
+    // señal que el primero persistió en medio).
+    if (result.claimedSuccess) return this.escribirSuccessDegradado(requestId, venueId, result, newStatus)
     const data: Prisma.TerminalPaymentRequestUpdateManyMutationInput = {
       status: newStatus,
       resultJson: result as unknown as Prisma.InputJsonValue,
@@ -2289,28 +2246,59 @@ class TerminalPaymentService {
   }
 
   /**
-   * Codex r2 (P1-D): la afirmación de un `success` degradado se FUSIONA con la que la fila ya guarda (`resultJson.claimedSuccess`):
-   * las llaves NO vacías del resultado nuevo se suman a las previas; nada se borra. Si la fila no se puede leer, viaja la nueva.
+   * Codex r3 (P1-D): la escritura del `success` DEGRADADO (UNKNOWN, sin `terminalResult`) con la fusión de `claimedSuccess` ATÓMICA
+   * en el UPDATE: `jsonb_set(<sobre nuevo sin claimedSuccess>, '{claimedSuccess}', <previo de la fila> || <nuevo no vacío>)`. El
+   * brazo (en vuelo / tardío) es el mismo de la escritura normal (`brazoTardioDeCierre`); el CAS va por `id` + `status` +
+   * `failureCode` de la fila leída (no por `updatedAt`: otro `success` que sólo añada señales no debe hacernos perder la vuelta —
+   * la fusión ya lo absorbe); si pierde, se relee una vez. Nunca encoge; sólo un NEGATIVO posterior de la terminal (brazo tardío de
+   * un failed/cancelled, ruling (c) de la Task 2) reemplaza el sobre entero.
    */
-  private async afirmacionFusionada(requestId: string, venueId: string, nueva: Record<string, unknown>): Promise<Record<string, unknown>> {
-    let previa: Record<string, unknown> = {}
+  private async escribirSuccessDegradado(
+    requestId: string,
+    venueId: string,
+    result: TerminalPaymentResult,
+    newStatus: TerminalPaymentRequestStatus,
+  ): Promise<TerminalPaymentResult> {
+    const { claimedSuccess, ...sobre } = result
+    const nueva = Object.fromEntries(
+      Object.entries(claimedSuccess ?? {}).filter(([, v]) => v !== undefined && v !== null && v !== '' && v !== false),
+    )
     try {
-      const fila = await prisma.terminalPaymentRequest.findFirst({ where: { requestId, venueId }, select: { resultJson: true } })
-      const sobre =
-        fila?.resultJson && typeof fila.resultJson === 'object' && !Array.isArray(fila.resultJson)
-          ? (fila.resultJson as Record<string, unknown>)
-          : null
-      const cs = sobre?.claimedSuccess
-      if (cs && typeof cs === 'object' && !Array.isArray(cs)) previa = cs as Record<string, unknown>
+      for (let intento = 0; intento < 2; intento++) {
+        const fila = await prisma.terminalPaymentRequest.findFirst({
+          where: { requestId, venueId, OR: [{ status: { in: IN_FLIGHT } }, this.brazoTardioDeCierre(newStatus)] },
+          select: { id: true, status: true, failureCode: true },
+        })
+        if (!fila) break
+        const late = !IN_FLIGHT.includes(fila.status)
+        const n = await prisma.$executeRaw`
+          UPDATE "TerminalPaymentRequest"
+          SET "status" = ${newStatus}::"TerminalPaymentRequestStatus",
+              "failureCode" = NULL,
+              "resultJson" = jsonb_set(
+                ${JSON.stringify(sobre)}::jsonb,
+                '{claimedSuccess}',
+                (CASE WHEN jsonb_typeof("resultJson"->'claimedSuccess') = 'object' THEN "resultJson"->'claimedSuccess' ELSE '{}'::jsonb END)
+                  || ${JSON.stringify(nueva)}::jsonb,
+                true),
+              "updatedAt" = (NOW() AT TIME ZONE 'UTC')
+              ${late ? Prisma.sql`, "lateResult" = true` : Prisma.empty}
+          WHERE "id" = ${fila.id} AND "status" = ${fila.status}::"TerminalPaymentRequestStatus"
+            AND "failureCode" IS NOT DISTINCT FROM ${fila.failureCode}`
+        if (n === 1) {
+          if (late) logger.warn(`🕰️ [TerminalPayment] Late result reconciled a stale row`, { requestId, newStatus })
+          if (newStatus === TerminalPaymentRequestStatus.TIMED_OUT) this.programarLiberacionPorVentana(requestId, venueId)
+          return result
+        }
+      }
+      // Neither matched → row already in a final immutable state (or never existed).
+      logger.info(`ℹ️ [TerminalPayment] closeRow no-op (row absent or already final)`, { requestId, newStatus })
+      const winner = await prisma.terminalPaymentRequest.findFirst({ where: { requestId, venueId } })
+      if (winner) return resultFromRow(winner)
     } catch (err) {
-      logger.warn('[TerminalPayment] Could not read the previous claimedSuccess — keeping the new claim only', {
-        requestId,
-        venueId,
-        error: err instanceof Error ? err.message : String(err),
-      })
+      logger.error(`❌ [TerminalPayment] closeRow failed`, { requestId, error: err instanceof Error ? err.message : String(err) })
     }
-    const noVacia = Object.fromEntries(Object.entries(nueva).filter(([, v]) => v !== undefined && v !== null && v !== '' && v !== false))
-    return { ...previa, ...noVacia }
+    return { requestId, status: 'timeout', errorMessage: 'El resultado sigue pendiente de confirmar' }
   }
 
   /**
@@ -2666,6 +2654,12 @@ class TerminalPaymentService {
     capturedBySerial?: string | null,
     /** S8: quién cerró. Se escribe UNA vez, junto con `paymentId`, y conserva al ganador original. */
     closedVia: 'terminal' | 'webhook' = 'terminal',
+    /**
+     * Codex r3 (P1-N2): los BARRIDOS cierran por aquí (antes por un `updateMany` propio que no etiquetaba al Payment). Una fila
+     * en vuelo pero VENCIDA (el POS ya recibió su timeout) se marca `lateResult` aunque `reopened` sea falso — es lo que el
+     * barrido de vencidas escribía. No toca `alarmed` (una vencida en vuelo no es un cierre pisado).
+     */
+    opciones: { lateResult?: boolean } = {},
   ): Promise<CloseRowOutcome> {
     try {
       // P1-5 (Codex): el MISMO orden de candados que el registrador — la SOLICITUD antes que el Payment — también
@@ -2805,7 +2799,7 @@ class TerminalPaymentService {
           status: TerminalPaymentRequestStatus.COMPLETED,
           paymentId,
           closedVia,
-          lateResult: reopened,
+          lateResult: reopened || !!opciones.lateResult,
           cancelDisposition: null,
           resultJson: { requestId, status: 'success', paymentId },
           ...(contractMismatch
@@ -3012,35 +3006,19 @@ class TerminalPaymentService {
       const payment = await this.findReconcilablePayment(row)
 
       if (payment) {
-        // 🔴 El importe COBRADO puede no ser el que pidió el POS (el cajero tecleó otro en la
-        // terminal, la propina cambió). El cierre dentro de la transacción del pago ya lo marca
-        // como CONTRACT_MISMATCH y dispara el 🚨; esta ruta —el barrido que recupera un cobro
-        // tardío— lo cerraba como si nada, y la diferencia no aparecía en ningún lado: la orden
-        // quedaba «pagada» y el descuadre invisible. El dinero NO se rechaza (ya salió de la
-        // tarjeta): se cierra igual, pero MARCADO y con aviso, para que un humano lo concilie.
-        const marca = marcaDeDescuadre(row, payment)
-        const descuadre = marca.contrato
-        const r = await prisma.terminalPaymentRequest.updateMany({
-          where: { id: row.id, status: { in: IN_FLIGHT } },
-          data: {
-            status: TerminalPaymentRequestStatus.COMPLETED,
-            paymentId: payment.id,
+        // Codex r3 (P1-N2): por el cierre COMÚN, nunca por un `updateMany` propio. `closeRowFromPaymentTx` ETIQUETA al Payment
+        // como ganador (columna + `processorData`), corre la procedencia de la fase «ganador» sobre un puntero previo, marca el
+        // descuadre (CONTRACT_MISMATCH + su 🚨, el mismo token que el cierre en la transacción del pago) y respeta un ganador
+        // ajeno. Un ganador sin etiqueta —lo que escribía el `updateMany`— hacía que el S0 del siguiente intento lo descartara
+        // (`NOT_TAGGED_FOR_THIS_REQUEST`) y tratara la segunda captura como venta normal. `lateResult`: el POS ya recibió su
+        // timeout (la fila está vencida).
+        const cierre = await prisma.$transaction(tx =>
+          this.closeRowFromPaymentTx(tx, row.requestId, payment.id, row.venueId, undefined, 'REST', undefined, 'terminal', {
             lateResult: true,
-            ...marca.campos,
-          },
-        })
-        completed += r.count
-        if (r.count > 0 && descuadre) {
-          // 🚨 token estable que machea la regla de Better Stack — NO renombrar. Es el MISMO
-          // mensaje que emite el cierre por transacción: un solo hecho, una sola alarma.
-          logger.error('🚨 [Terminal-payment contract mismatch] Payment was recorded with values different from the POS request', {
-            requestId: row.requestId,
-            paymentId: payment.id,
-            venueId: row.venueId,
-            requested: descuadre.requested,
-            reported: descuadre.reported,
-          })
-        }
+          }),
+        )
+        // `ALREADY_BOUND` = otro camino la cerró con este mismo Payment: cuenta como cerrada, sin avisos propios.
+        if (cierre.bound || cierre.reason === 'ALREADY_BOUND') completed += 1
         // 🔴 El MISMO evento de dinero se descubre por dos rutas y sólo una avisaba:
         // closeRowFromPaymentTx dispara el 🚨 cuando la fila venía cancelada, y esta no
         // disparaba nada. Si el hallazgo llegaba por aquí, nadie se enteraba de que el
@@ -3053,7 +3031,7 @@ class TerminalPaymentService {
         // entere y pueda devolver el dinero.
         //
         // 🚨 token estable que machea la regla de Better Stack — NO renombrar.
-        if (r.count > 0 && row.status === TerminalPaymentRequestStatus.CANCEL_REQUESTED) {
+        if (cierre.bound && row.status === TerminalPaymentRequestStatus.CANCEL_REQUESTED) {
           logger.error(
             `🚨 [Terminal-payment watchdog] Payment recorded for an already-${row.status} request — reconciled to COMPLETED (money moved despite cancel)`,
             { requestId: row.requestId, paymentId: payment.id, priorStatus: row.status },
@@ -3884,17 +3862,14 @@ class TerminalPaymentService {
       // (diferido por un cierre ajeno, o contaminación histórica): recuperable desde el barrido, no sólo desde una bitácora.
       if (!payment && row.paymentId && (await this.retirarAliasPropio(row))) aliasesRetirados++
       if (payment) {
-        const r = await prisma.terminalPaymentRequest.updateMany({
-          where: { id: row.id, status: TerminalPaymentRequestStatus.UNKNOWN },
-          data: {
-            status: TerminalPaymentRequestStatus.COMPLETED,
-            paymentId: payment.id,
-            lateResult: true,
-            ...marcaDeDescuadre(row, payment).campos,
-          },
-        })
-        if (r.count > 0) {
-          completed += r.count
+        // Codex r3 (P1-N2): por el cierre COMÚN (etiqueta al Payment, procedencia del ganador, CONTRACT_MISMATCH + 🚨), nunca
+        // por un `updateMany` propio. `ALREADY_BOUND` = ya cerrada con este Payment: cuenta, sin avisos propios.
+        const cierre = await prisma.$transaction(tx =>
+          this.closeRowFromPaymentTx(tx, row.requestId, payment.id, row.venueId, undefined, 'REST'),
+        )
+        if (!cierre.bound && cierre.reason === 'ALREADY_BOUND') completed += 1
+        if (cierre.bound) {
+          completed += 1
           // 🚨 stable token for Better Stack — do NOT rename.
           logger.error(
             `🚨 [Terminal-payment watchdog] Payment recorded for an UNKNOWN request — reconciled to COMPLETED (money moved after the POS gave up)`,
@@ -4121,16 +4096,9 @@ class TerminalPaymentService {
 
     const payment = await this.findReconcilablePayment(row)
     if (payment) {
-      const rc = await prisma.terminalPaymentRequest.updateMany({
-        where: { id: row.id, venueId, status: TerminalPaymentRequestStatus.UNKNOWN },
-        data: {
-          status: TerminalPaymentRequestStatus.COMPLETED,
-          paymentId: payment.id,
-          lateResult: true,
-          ...marcaDeDescuadre(row, payment).campos,
-        },
-      })
-      if (rc.count === 0) {
+      // Codex r3 (P1-N2): por el cierre COMÚN (etiqueta al Payment, procedencia, CONTRACT_MISMATCH + 🚨), nunca por un `updateMany` propio.
+      const cierre = await prisma.$transaction(tx => this.closeRowFromPaymentTx(tx, requestId, payment.id, venueId, undefined, 'REST'))
+      if (!cierre.bound) {
         // Someone else closed it first (late socket result / REST record): report what it became.
         const fresh = await prisma.terminalPaymentRequest.findFirst({
           where: { requestId, venueId },

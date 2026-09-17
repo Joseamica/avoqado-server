@@ -35,7 +35,7 @@ const CASOS: Caso[] = [
     'TERMINAL',
   ],
   [
-    'marcaDeDescuadre: COMPLETED + CONTRACT_MISMATCH (el dinero salió; lo concilia un humano)',
+    'closeRowFromPaymentTx (contratoDescuadrado): COMPLETED + CONTRACT_MISMATCH (el dinero salió; lo concilia un humano)',
     fila({ status: S.COMPLETED, paymentId: 'pay-1', failureCode: 'CONTRACT_MISMATCH' }),
     'CHARGED',
     'PAYMENT_RECORDED',
