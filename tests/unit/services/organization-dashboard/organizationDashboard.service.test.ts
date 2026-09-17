@@ -1,5 +1,3 @@
-import { Prisma } from '@prisma/client'
-
 import { prismaMock } from '@tests/__helpers__/setup'
 import { organizationDashboardService } from '@/services/organization-dashboard/organizationDashboard.service'
 
@@ -416,16 +414,17 @@ describe('OrganizationDashboardService', () => {
         { id: 't3', config: { settings: { showTipScreen: true, kioskDefaultMerchantId: 'merchant-123' } } },
       ]
       prismaMock.terminal.findMany.mockResolvedValue(terminals as any)
-      prismaMock.$transaction.mockResolvedValue([{}, {}, {}])
+      // El primer lote lleva también el upsert de la configuración de la organización (4ª auditoría de Codex, C2).
+      prismaMock.$transaction.mockResolvedValue([{}, { count: 1 }, { count: 1 }, { count: 1 }])
 
       const result = await organizationDashboardService.upsertOrgTpvDefaults(orgId, { showTipScreen: false })
 
       expect(result.terminalsUpdated).toBe(3)
       expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
 
-      // Verify the transaction calls
+      // Verify the transaction calls: the org config upsert + the three terminals
       const transactionArg = prismaMock.$transaction.mock.calls[0][0]
-      expect(transactionArg).toHaveLength(3)
+      expect(transactionArg).toHaveLength(4)
     })
 
     it('should preserve kioskDefaultMerchantId per-terminal when pushing', async () => {
@@ -435,9 +434,9 @@ describe('OrganizationDashboardService', () => {
       const terminals = [{ id: 't1', config: { settings: { kioskDefaultMerchantId: 'merchant-abc' } } }]
       prismaMock.terminal.findMany.mockResolvedValue(terminals as any)
 
-      // Mock terminal.update to capture what gets written
+      // Mock terminal.updateMany to capture what gets written
       let capturedUpdate: any = null
-      prismaMock.terminal.update.mockImplementation((args: any) => {
+      prismaMock.terminal.updateMany.mockImplementation((args: any) => {
         capturedUpdate = args
         return Promise.resolve({} as any)
       })
@@ -570,31 +569,41 @@ describe('OrganizationDashboardService', () => {
 // defaults escoge las terminales de la organización y luego escribía por `{ id }` a secas. Una
 // terminal que se muda a otra organización a media operación recibía los ajustes del dueño anterior.
 describe('upsertOrgTpvDefaults — cada terminal se escribe dentro de su organización', () => {
-  const p2025 = () =>
-    new Prisma.PrismaClientKnownRequestError('No record was found for an update.', { code: 'P2025', clientVersion: 'test' })
-
   beforeEach(() => {
     prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue(null)
     prismaMock.organizationAttendanceConfig.upsert.mockResolvedValue({} as any)
-    prismaMock.terminal.findMany.mockResolvedValue([{ id: 't1', config: { settings: {} }, configOverrides: null }] as any)
+    prismaMock.terminal.findMany.mockResolvedValue([
+      { id: 't1', config: { settings: {} }, configOverrides: null },
+      { id: 't2', config: { settings: {} }, configOverrides: null },
+    ] as any)
+    prismaMock.terminal.updateMany.mockResolvedValue({ count: 1 } as any)
     prismaMock.$transaction.mockImplementation(((ops: any) => (Array.isArray(ops) ? Promise.all(ops) : ops(prismaMock))) as any)
   })
 
   it('acota cada escritura por la organización que escogió las terminales', async () => {
-    prismaMock.terminal.update.mockResolvedValue({} as any)
+    await organizationDashboardService.upsertOrgTpvDefaults(orgId, { showTipScreen: false })
+
+    expect(prismaMock.terminal.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 't1', venue: { organizationId: orgId } } }),
+    )
+    expect(prismaMock.terminal.update).not.toHaveBeenCalled()
+  })
+
+  it('la configuración de la organización viaja en la misma transacción que el primer lote', async () => {
+    const upsertOp = Promise.resolve({})
+    prismaMock.organizationAttendanceConfig.upsert.mockReturnValue(upsertOp as any)
 
     await organizationDashboardService.upsertOrgTpvDefaults(orgId, { showTipScreen: false })
 
-    expect(prismaMock.terminal.update).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: 't1', venue: { organizationId: orgId } } }),
-    )
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    expect(prismaMock.$transaction.mock.calls[0][0]).toContain(upsertOp)
   })
 
-  it('si una terminal se mudó de organización mientras se guardaba, responde 409', async () => {
-    prismaMock.terminal.update.mockRejectedValue(p2025())
+  it('una terminal que pasó a otra organización se omite y no cuenta como actualizada', async () => {
+    prismaMock.terminal.updateMany.mockResolvedValueOnce({ count: 1 } as any).mockResolvedValueOnce({ count: 0 } as any)
 
-    await expect(organizationDashboardService.upsertOrgTpvDefaults(orgId, { showTipScreen: false })).rejects.toMatchObject({
-      statusCode: 409,
-    })
+    const result = await organizationDashboardService.upsertOrgTpvDefaults(orgId, { showTipScreen: false })
+
+    expect(result.terminalsUpdated).toBe(1)
   })
 })

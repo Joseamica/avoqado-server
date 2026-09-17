@@ -8,6 +8,7 @@ import { updateTpvSettings, type TpvSettings } from './tpv.dashboard.service'
 import { assertMerchantsTerminalCompatible, isProviderCompatibleWithBrand } from '../../lib/providerDeviceCompatibility'
 import { logAction } from './activity-log.service'
 import { normalizeTerminalSerialNumber } from '../../utils/terminalSerial'
+import { type TerminalWriteScope, scopedTerminalWhere, writeScopedTerminal } from '../shared/terminalScopedWrites'
 
 /**
  * Audit actor — who triggered a terminal mutation. Threaded from the controller
@@ -492,6 +493,12 @@ export async function updateTerminal(
     venueId?: string
   },
   actor?: TerminalActor,
+  /**
+   * El dashboard de la ORGANIZACIÓN pasa `{ organizationId }`: las escrituras quedan acotadas a la organización del
+   * venue actual de la terminal, y si pasó a otra entre la validación y la escritura responden 404 (auditoría de Codex
+   * del spec «pantalla del cliente», 4ª ronda, 2026-09-17). El superadmin no lo pasa y escribe sólo por id.
+   */
+  scope?: TerminalWriteScope,
 ) {
   logger.info(`Updating terminal ${terminalId}:`, data)
 
@@ -564,21 +571,25 @@ export async function updateTerminal(
           `Brand change for terminal ${terminalId} confirmed with forceUnassign — pruning ${incompatible.length} incompatible merchant(s): ${[...incompatibleIds].join(', ')}`,
         )
 
-        const updated = await prisma.$transaction(async tx => {
-          return tx.terminal.update({
-            where: { id: terminalId },
-            data: {
-              ...(data.name && { name: data.name }),
-              ...(data.status && { status: data.status as any }),
-              brand: data.brand,
-              assignedMerchantIds: prunedAssignedMerchantIds!,
-              ...(data.model && { model: data.model }),
-            },
-            include: {
-              venue: { select: { id: true, name: true, slug: true } },
-            },
-          })
-        })
+        const updated = await writeScopedTerminal(
+          () =>
+            prisma.$transaction(async tx => {
+              return tx.terminal.update({
+                where: scopedTerminalWhere(terminalId, scope),
+                data: {
+                  ...(data.name && { name: data.name }),
+                  ...(data.status && { status: data.status as any }),
+                  brand: data.brand,
+                  assignedMerchantIds: prunedAssignedMerchantIds!,
+                  ...(data.model && { model: data.model }),
+                },
+                include: {
+                  venue: { select: { id: true, name: true, slug: true } },
+                },
+              })
+            }),
+          'Terminal not found',
+        )
         logger.info(`Terminal ${terminalId} brand changed atomically with merchant pruning`)
         await logAction({
           staffId: actor?.staffId ?? null,
@@ -630,39 +641,43 @@ export async function updateTerminal(
     await assertMerchantsTerminalCompatible(terminalId, data.assignedMerchantIds)
   }
 
-  // Update terminal
-  const updatedTerminal = await prisma.terminal.update({
-    where: { id: terminalId },
-    data: {
-      ...(data.name && { name: data.name }),
-      ...(data.status && { status: data.status as any }),
-      // A superadmin setting a terminal to ACTIVE that was never activated
-      // counts as activation — stamp activatedAt (and activatedBy) so the
-      // heartbeat/login/payment layers treat it as a real activated terminal.
-      // Without this the terminal logs "Heartbeat from unactivated terminal"
-      // and login/payment endpoints stay blocked even though status=ACTIVE.
-      ...(data.status === 'ACTIVE' && !terminal.activatedAt ? { activatedAt: new Date(), activatedBy: actor?.staffId ?? null } : {}),
-      // Task 54: clear assignedMerchantIds on venue change (cross-tenant
-      // assignments are never valid). When venue isn't changing, defer to
-      // explicit `assignedMerchantIds` from the caller.
-      ...(venueChanged
-        ? { venueId: data.venueId!, assignedMerchantIds: [] }
-        : data.assignedMerchantIds !== undefined
-          ? { assignedMerchantIds: data.assignedMerchantIds }
-          : {}),
-      ...(data.brand && { brand: data.brand }),
-      ...(data.model && { model: data.model }),
-    },
-    include: {
-      venue: {
-        select: {
-          id: true,
-          name: true,
-          slug: true,
+  // Update terminal (scoped to the organization when the org dashboard calls; see `scope`)
+  const updatedTerminal = await writeScopedTerminal(
+    () =>
+      prisma.terminal.update({
+        where: scopedTerminalWhere(terminalId, scope),
+        data: {
+          ...(data.name && { name: data.name }),
+          ...(data.status && { status: data.status as any }),
+          // A superadmin setting a terminal to ACTIVE that was never activated
+          // counts as activation — stamp activatedAt (and activatedBy) so the
+          // heartbeat/login/payment layers treat it as a real activated terminal.
+          // Without this the terminal logs "Heartbeat from unactivated terminal"
+          // and login/payment endpoints stay blocked even though status=ACTIVE.
+          ...(data.status === 'ACTIVE' && !terminal.activatedAt ? { activatedAt: new Date(), activatedBy: actor?.staffId ?? null } : {}),
+          // Task 54: clear assignedMerchantIds on venue change (cross-tenant
+          // assignments are never valid). When venue isn't changing, defer to
+          // explicit `assignedMerchantIds` from the caller.
+          ...(venueChanged
+            ? { venueId: data.venueId!, assignedMerchantIds: [] }
+            : data.assignedMerchantIds !== undefined
+              ? { assignedMerchantIds: data.assignedMerchantIds }
+              : {}),
+          ...(data.brand && { brand: data.brand }),
+          ...(data.model && { model: data.model }),
         },
-      },
-    },
-  })
+        include: {
+          venue: {
+            select: {
+              id: true,
+              name: true,
+              slug: true,
+            },
+          },
+        },
+      }),
+    'Terminal not found',
+  )
 
   const updatedFields: string[] = []
   for (const f of ['name', 'status', 'brand', 'model'] as const) {
@@ -759,10 +774,10 @@ export async function updateTerminal(
  * @param staffId Staff ID who is generating the code
  * @returns Activation code data
  */
-export async function generateActivationCodeForTerminal(terminalId: string, staffId: string) {
+export async function generateActivationCodeForTerminal(terminalId: string, staffId: string, scope?: TerminalWriteScope) {
   logger.info(`Generating activation code for terminal ${terminalId} by staff ${staffId}`)
 
-  return generateActivationCodeUtil(terminalId, staffId)
+  return generateActivationCodeUtil(terminalId, staffId, scope)
 }
 
 /**
@@ -772,7 +787,7 @@ export async function generateActivationCodeForTerminal(terminalId: string, staf
  *
  * @param terminalId Terminal ID (CUID)
  */
-export async function deleteTerminal(terminalId: string, actor?: TerminalActor) {
+export async function deleteTerminal(terminalId: string, actor?: TerminalActor, scope?: TerminalWriteScope) {
   logger.info(`Deleting terminal: ${terminalId}`)
 
   const terminal = await prisma.terminal.findUnique({
@@ -794,9 +809,8 @@ export async function deleteTerminal(terminalId: string, actor?: TerminalActor) 
     throw new BadRequestError('Cannot delete active terminal. Set status to RETIRED first.')
   }
 
-  await prisma.terminal.delete({
-    where: { id: terminalId },
-  })
+  // Acotado a la organización cuando llama su dashboard: si la terminal pasó a otra en medio, 404 (ver `updateTerminal`).
+  await writeScopedTerminal(() => prisma.terminal.delete({ where: scopedTerminalWhere(terminalId, scope) }), 'Terminal not found')
 
   logger.info(`Terminal ${terminalId} deleted successfully`)
 

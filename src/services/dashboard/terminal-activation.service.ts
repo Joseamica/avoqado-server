@@ -2,6 +2,7 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import crypto from 'crypto'
+import { type TerminalWriteScope, scopedTerminalWhere, writeScopedTerminal } from '../shared/terminalScopedWrites'
 
 /**
  * Toggle the "AVQD-" prefix the Android TPV client always sends (see
@@ -18,24 +19,23 @@ function toggleAvqdPrefix(serialNumber: string): string {
  * Similar to Square POS device activation flow.
  * Creates a 6-character alphanumeric code that expires in 7 days.
  *
- * Venue-scoped: `venueId` is required when called from the URL-scoped dashboard
- * route so a user cannot generate activation codes for terminals that belong
- * to a different venue. Legacy internal callers may omit it.
+ * Scoped: the URL-scoped dashboard route passes `{ venueId }` and the organization dashboard passes
+ * `{ organizationId }`, so a user cannot generate activation codes for terminals outside their scope. The
+ * terminal is read AND written with that scope: if it moves out of it in between, the write fails with a
+ * 404 instead of handing out a code for another business's terminal (Codex audit, round 4, 2026-09-17).
+ * The superadmin and internal callers omit it.
  *
  * @param terminalId Terminal ID (CUID)
  * @param staffId Staff ID who is generating the code
- * @param venueId Venue ID from the URL scope (optional for legacy callers)
+ * @param scope Venue or organization of the caller (optional for superadmin/internal callers)
  * @returns Activation code, expiry info
  */
-export async function generateActivationCode(terminalId: string, staffId: string, venueId?: string) {
+export async function generateActivationCode(terminalId: string, staffId: string, scope?: TerminalWriteScope) {
   logger.info(`Generating activation code for terminal ${terminalId} by staff ${staffId}`)
 
-  // Verify terminal exists (and belongs to venueId when scoped)
+  // Verify terminal exists (and belongs to the caller's scope)
   const terminal = await prisma.terminal.findFirst({
-    where: {
-      id: terminalId,
-      ...(venueId ? { venueId } : {}),
-    },
+    where: scopedTerminalWhere(terminalId, scope),
     include: {
       venue: {
         select: { id: true, name: true },
@@ -60,17 +60,21 @@ export async function generateActivationCode(terminalId: string, staffId: string
   const expiryDate = new Date()
   expiryDate.setDate(expiryDate.getDate() + 7)
 
-  // Update terminal with activation code
-  await prisma.terminal.update({
-    where: { id: terminalId },
-    data: {
-      activationCode: code,
-      activationCodeExpiry: expiryDate,
-      activatedBy: staffId,
-      activationAttempts: 0, // Reset attempts counter
-      lastActivationAttempt: null,
-    },
-  })
+  // Update terminal with activation code, under the same scope it was read with
+  await writeScopedTerminal(
+    () =>
+      prisma.terminal.update({
+        where: scopedTerminalWhere(terminalId, scope),
+        data: {
+          activationCode: code,
+          activationCodeExpiry: expiryDate,
+          activatedBy: staffId,
+          activationAttempts: 0, // Reset attempts counter
+          lastActivationAttempt: null,
+        },
+      }),
+    'Terminal not found in this venue',
+  )
 
   logger.info(`Activation code generated for terminal ${terminalId}: ${code} (expires: ${expiryDate.toISOString()})`)
 

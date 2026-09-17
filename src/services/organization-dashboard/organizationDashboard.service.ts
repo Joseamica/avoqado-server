@@ -28,9 +28,10 @@ import {
   venueStartOfDayOffset,
   venueStartOfMonth,
 } from '../../utils/datetime'
+import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
-import { runTerminalWritesOrConflict } from '../shared/terminalScopedWrites'
+import { countUpdatedTerminals, scopedTerminalWhere } from '../shared/terminalScopedWrites'
 import { computeTerminalMigration, type MigrationCommandLike } from '../dashboard/terminals.superadmin.service'
 import { cerrarSesionesNuevasPorCambioDeContrasena } from '../../utils/passwordChangeGuard'
 
@@ -3658,8 +3659,11 @@ class OrganizationDashboardService {
       columnSync.latenessThresholdMinutes = Number(mergedSettings.latenessThresholdMinutes)
     if (mergedSettings.geofenceRadiusMeters !== undefined) columnSync.geofenceRadiusMeters = Number(mergedSettings.geofenceRadiusMeters)
 
-    // 4. Upsert the org config
-    await prisma.organizationAttendanceConfig.upsert({
+    // 4. Upsert the org config. No se ejecuta todavía: viaja en la MISMA transacción que el primer lote de
+    //    terminales, para que un error no deje guardada la configuración con las terminales sin tocar (auditoría de
+    //    Codex del spec «pantalla del cliente», 4ª ronda, C2). Con más de un lote, los anteriores ya quedaron
+    //    confirmados si falla uno posterior; volver a guardar lo completa (el cascadeo es idempotente).
+    const upsertConfig = prisma.organizationAttendanceConfig.upsert({
       where: { organizationId: orgId },
       create: {
         organizationId: orgId,
@@ -3678,48 +3682,61 @@ class OrganizationDashboardService {
       select: { id: true, config: true, configOverrides: true },
     })
 
-    if (terminals.length > 0) {
+    let terminalsUpdated = 0
+    if (terminals.length === 0) {
+      await upsertConfig
+    } else {
       const BATCH_SIZE = 50
       for (let i = 0; i < terminals.length; i += BATCH_SIZE) {
         const batch = terminals.slice(i, i + BATCH_SIZE)
-        await runTerminalWritesOrConflict(
-          batch.map(terminal => {
-            const existingConfig = (terminal.config as Record<string, any>) || {}
-            const overrides = (terminal.configOverrides as Record<string, any>) || {}
+        const updates = batch.map(terminal => {
+          const existingConfig = (terminal.config as Record<string, any>) || {}
+          const overrides = (terminal.configOverrides as Record<string, any>) || {}
 
-            // Cascade merge: org defaults → per-terminal overrides
-            // Terminals with no overrides (null) get full org defaults
-            // Terminals with overrides keep their customized fields
-            const pushSettings = {
-              ...mergedSettings,
-              ...overrides,
-              // kioskDefaultMerchantId is always per-terminal (from overrides or existing)
-              kioskDefaultMerchantId:
-                overrides.kioskDefaultMerchantId ?? (existingConfig.settings as Record<string, any>)?.kioskDefaultMerchantId ?? null,
-            }
+          // Cascade merge: org defaults → per-terminal overrides
+          // Terminals with no overrides (null) get full org defaults
+          // Terminals with overrides keep their customized fields
+          const pushSettings = {
+            ...mergedSettings,
+            ...overrides,
+            // kioskDefaultMerchantId is always per-terminal (from overrides or existing)
+            kioskDefaultMerchantId:
+              overrides.kioskDefaultMerchantId ?? (existingConfig.settings as Record<string, any>)?.kioskDefaultMerchantId ?? null,
+          }
 
-            // Acotada a la organización que escogió las terminales: una que se mudó a otra organización
-            // a media operación no recibe estos ajustes (auditoría de Codex, 2026-09-16).
-            return prisma.terminal.update({
-              where: { id: terminal.id, venue: { organizationId: orgId } },
-              data: {
-                config: { ...existingConfig, settings: pushSettings },
-                updatedAt: new Date(),
-              },
-            })
-          }),
-          'Una terminal cambió de organización mientras se aplicaban los ajustes. Vuelve a intentarlo.',
-        )
+          // Acotada a la organización que escogió las terminales. Una que pasó a otra organización a media
+          // operación ya no es de ésta: cuenta cero y se omite (auditorías de Codex, 2026-09-16/17).
+          return prisma.terminal.updateMany({
+            where: scopedTerminalWhere(terminal.id, { organizationId: orgId }),
+            data: {
+              config: { ...existingConfig, settings: pushSettings },
+              updatedAt: new Date(),
+            },
+          })
+        })
+
+        const isFirstBatch = i === 0
+        const writes: Prisma.PrismaPromise<unknown>[] = isFirstBatch ? [upsertConfig, ...updates] : updates
+        const results = await prisma.$transaction(writes)
+        terminalsUpdated += countUpdatedTerminals(isFirstBatch ? results.slice(1) : results)
       }
+    }
+
+    const omittedTerminals = terminals.length - terminalsUpdated
+    if (omittedTerminals > 0) {
+      logger.info('Ajustes de la organización: se omitieron terminales que cambiaron de organización a media operación', {
+        orgId,
+        omittedTerminals,
+      })
     }
 
     logAction({
       action: 'ORG_TPV_DEFAULTS_UPDATED',
       entity: 'OrganizationAttendanceConfig',
-      data: { settingsKeys: Object.keys(settings), terminalsUpdated: terminals.length },
+      data: { settingsKeys: Object.keys(settings), terminalsUpdated },
     })
 
-    return { config: mergedSettings, terminalsUpdated: terminals.length }
+    return { config: mergedSettings, terminalsUpdated }
   }
 
   /**

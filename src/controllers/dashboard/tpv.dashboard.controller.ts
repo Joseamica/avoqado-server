@@ -307,7 +307,7 @@ export async function generateActivationCode(
       throw new BadRequestError('Staff ID required to generate activation code')
     }
 
-    const activationData = await generateActivationCodeService(terminalId, staffId, venueId)
+    const activationData = await generateActivationCodeService(terminalId, staffId, { venueId })
 
     res.status(200).json(activationData)
   } catch (error) {

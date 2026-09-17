@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client'
 
 import { prismaMock } from '@tests/__helpers__/setup'
+import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { getVenueTpvSettings, updateVenueTpvSettings, computeOverrides, updateTpv } from '@/services/dashboard/tpv.dashboard.service'
 
@@ -331,6 +332,8 @@ describe('trackPromoterLocation ("cambaceo") — venue-level flag', () => {
   // ─── NEW FEATURE: write ──────────────────────────────────────────────
 
   it('updateVenueTpvSettings writes the flag to VenueSettings (upsert) and NOT into terminal configs', async () => {
+    // El upsert del negocio viaja en la misma transacción que las terminales (4ª auditoría de Codex, C2).
+    transactionRunsBothForms()
     prismaMock.terminal.findMany.mockResolvedValue([{ id: 't1', config: {}, configOverrides: {} }] as any)
     prismaMock.venueSettings.upsert.mockResolvedValue({} as any)
     // return-path read (getVenueTpvSettings)
@@ -350,6 +353,7 @@ describe('trackPromoterLocation ("cambaceo") — venue-level flag', () => {
     )
     // Flag-only update must NOT cascade into Terminal.config
     expect(prismaMock.terminal.update).not.toHaveBeenCalled()
+    expect(prismaMock.terminal.updateMany).not.toHaveBeenCalled()
     expect(result.trackPromoterLocation).toBe(true)
   })
 })
@@ -492,28 +496,69 @@ describe('updateTpv — el servicio sólo escribe los campos editables, venga de
   })
 })
 
-describe('updateVenueTpvSettings — cada terminal se escribe dentro de su negocio', () => {
+// 🔴 Auditorías de Codex del spec «pantalla del cliente» (3ª y 4ª ronda, 2026-09-16/17). Escogía las terminales del
+// negocio y las escribía sólo por id; y el horario del negocio se guardaba ANTES, fuera de la transacción, así que un
+// error dejaba la mitad guardada. Ahora cada terminal va acotada al negocio, una que se mudó en medio simplemente ya no
+// es de este negocio y se omite, y todo lo demás se guarda junto o no se guarda.
+describe('updateVenueTpvSettings — el negocio y sus terminales se guardan juntos', () => {
+  const auditActions = () => (logAction as jest.Mock).mock.calls.map(([params]) => params?.action)
+
   beforeEach(() => {
     transactionRunsBothForms()
-    prismaMock.terminal.findMany.mockResolvedValue([{ id: 't1', config: { settings: {} }, configOverrides: null }] as any)
+    prismaMock.terminal.findMany.mockResolvedValue([
+      { id: 't1', config: { settings: {} }, configOverrides: null },
+      { id: 't2', config: { settings: {} }, configOverrides: null },
+    ] as any)
+    prismaMock.terminal.updateMany.mockResolvedValue({ count: 1 } as any)
+    prismaMock.venueSettings.upsert.mockResolvedValue({} as any)
     prismaMock.terminal.findFirst.mockResolvedValue(null)
     prismaMock.venueSettings.findFirst.mockResolvedValue(null)
     prismaMock.venue.findUnique.mockResolvedValue({ organizationId: orgId } as any)
     prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue(null)
   })
 
-  it('acota cada escritura por el venue que escogió las terminales', async () => {
-    prismaMock.terminal.update.mockResolvedValue({} as any)
-
+  it('acota cada terminal al negocio que la escogió', async () => {
     await updateVenueTpvSettings(venueId, { showTipScreen: false } as any)
 
-    expect(prismaMock.terminal.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 't1', venueId } }))
+    expect(prismaMock.terminal.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 't1', venueId } }))
+    expect(prismaMock.terminal.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 't2', venueId } }))
+    expect(prismaMock.terminal.update).not.toHaveBeenCalled()
   })
 
-  it('si una terminal se mudó mientras se guardaba, responde 409 y no reporta éxito', async () => {
-    prismaMock.terminal.update.mockRejectedValue(p2025())
+  it('el horario del negocio y las terminales van en UNA sola transacción', async () => {
+    const upsertOp = Promise.resolve({ venueId })
+    prismaMock.venueSettings.upsert.mockReturnValue(upsertOp as any)
+    let batch: unknown[] = []
+    prismaMock.$transaction.mockImplementation(((ops: any) => {
+      batch = ops
+      return Promise.all(ops)
+    }) as any)
 
-    await expect(updateVenueTpvSettings(venueId, { showTipScreen: false } as any)).rejects.toMatchObject({ statusCode: 409 })
-    expect((logAction as jest.Mock).mock.calls.some(([params]) => params?.action === 'VENUE_TPV_SETTINGS_UPDATED')).toBe(false)
+    await updateVenueTpvSettings(venueId, { showTipScreen: false, expectedCheckInTime: '09:30' } as any)
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    expect(batch).toHaveLength(3)
+    expect(batch).toContain(upsertOp)
+    expect(prismaMock.venueSettings.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { venueId }, update: expect.objectContaining({ expectedCheckInTime: '09:30' }) }),
+    )
+  })
+
+  it('si la transacción falla, el error sube y no se reporta éxito', async () => {
+    prismaMock.$transaction.mockRejectedValue(new Error('se cayó la base'))
+
+    await expect(updateVenueTpvSettings(venueId, { showTipScreen: false, expectedCheckInTime: '09:30' } as any)).rejects.toThrow(
+      'se cayó la base',
+    )
+    expect(auditActions()).not.toContain('VENUE_TPV_SETTINGS_UPDATED')
+  })
+
+  it('una terminal que se mudó a media operación se omite: no recibe los ajustes y el guardado no falla', async () => {
+    prismaMock.terminal.updateMany.mockResolvedValueOnce({ count: 1 } as any).mockResolvedValueOnce({ count: 0 } as any)
+
+    await expect(updateVenueTpvSettings(venueId, { showTipScreen: false } as any)).resolves.toBeDefined()
+
+    expect(logger.info).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ venueId, omittedTerminals: 1 }))
+    expect(auditActions()).toContain('VENUE_TPV_SETTINGS_UPDATED')
   })
 })

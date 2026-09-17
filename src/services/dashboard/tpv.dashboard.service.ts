@@ -2,7 +2,7 @@ import logger from '@/config/logger'
 import { DeviceFormFactor, Prisma, Terminal, TerminalStatus, TerminalType } from '@prisma/client'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { normalizeTerminalBrand } from '../../lib/providerDeviceCompatibility'
-import { runTerminalWritesOrConflict } from '../shared/terminalScopedWrites'
+import { countUpdatedTerminals, scopedTerminalWhere, writeScopedTerminal } from '../shared/terminalScopedWrites'
 import { CreateTpvBody, PaginatedTerminalsResponse, UpdateTpvBody } from '../../schemas/dashboard/tpv.schema'
 import { venueStartOfDay } from '../../utils/datetime'
 import { normalizeTerminalSerialNumber } from '../../utils/terminalSerial'
@@ -508,12 +508,12 @@ export async function deleteTpv(venueId: string, tpvId: string): Promise<void> {
     )
   }
 
-  // 4. Eliminar la terminal
-  await prisma.terminal.delete({
-    where: {
-      id: tpvId,
-    },
-  })
+  // 4. Eliminar la terminal, acotada al venue con el que se leyó: si se mudó a otro negocio entre la lectura y el
+  //    borrado, el negocio anterior ya no puede borrarla (auditoría de Codex, 4ª ronda, 2026-09-17).
+  await writeScopedTerminal(
+    () => prisma.terminal.delete({ where: scopedTerminalWhere(tpvId, { venueId }) }),
+    `Terminal con ID ${tpvId} no encontrada en el venue ${venueId}.`,
+  )
 
   logAction({
     venueId,
@@ -961,15 +961,20 @@ export async function activateTerminal(venueId: string, tpvId: string, serialNum
     throw new BadRequestError(`Serial number ${normalizedSerialNumber} is already registered to another terminal`)
   }
 
-  // 5. Update terminal with serial number and set status to ACTIVE
-  const updatedTerminal = await prisma.terminal.update({
-    where: { id: tpvId },
-    data: {
-      serialNumber: normalizedSerialNumber,
-      status: 'ACTIVE',
-      updatedAt: new Date(),
-    },
-  })
+  // 5. Update terminal with serial number and set status to ACTIVE — scoped to the venue it was read in: if the
+  //    terminal moved to another venue in between, this venue can no longer activate it (Codex audit, round 4).
+  const updatedTerminal = await writeScopedTerminal(
+    () =>
+      prisma.terminal.update({
+        where: scopedTerminalWhere(tpvId, { venueId }),
+        data: {
+          serialNumber: normalizedSerialNumber,
+          status: 'ACTIVE',
+          updatedAt: new Date(),
+        },
+      }),
+    `Terminal ${tpvId} not found in venue ${venueId}`,
+  )
 
   logAction({
     venueId,
@@ -1212,46 +1217,63 @@ export async function updateVenueTpvSettings(venueId: string, settingsUpdate: Pa
   if (geofenceRadiusMeters !== undefined) venueSettingsData.geofenceRadiusMeters = geofenceRadiusMeters
   if (trackPromoterLocation !== undefined) venueSettingsData.trackPromoterLocation = trackPromoterLocation
 
+  // 4. El horario del negocio y las terminales se guardan en UNA transacción: o se guarda todo o nada. Antes el
+  //    horario se confirmaba primero, y un error en las terminales dejaba la mitad guardada (auditoría de Codex, C2).
+  const writes: Prisma.PrismaPromise<unknown>[] = []
   if (Object.keys(venueSettingsData).length > 0) {
-    await prisma.venueSettings.upsert({
-      where: { venueId },
-      update: venueSettingsData,
-      create: { venueId, ...venueSettingsData },
-    })
+    writes.push(
+      prisma.venueSettings.upsert({
+        where: { venueId },
+        update: venueSettingsData,
+        create: { venueId, ...venueSettingsData },
+      }),
+    )
   }
+  const firstTerminalWrite = writes.length
 
-  // 4. Update all terminals in a transaction (cascade: venue settings + per-terminal overrides)
+  // Cascade: venue settings + per-terminal overrides
   if (Object.keys(settingsToMerge).length > 0) {
-    await runTerminalWritesOrConflict(
-      terminals.map(terminal => {
-        const existingConfig = (terminal.config as any) || {}
-        const existingSettings = existingConfig.settings || {}
-        const overrides = (terminal.configOverrides as Record<string, any>) || {}
+    for (const terminal of terminals) {
+      const existingConfig = (terminal.config as any) || {}
+      const existingSettings = existingConfig.settings || {}
+      const overrides = (terminal.configOverrides as Record<string, any>) || {}
 
-        // Cascade: existing base + venue update + per-terminal overrides
-        const updatedConfig = {
-          ...existingConfig,
-          settings: {
-            ...existingSettings,
-            ...settingsToMerge,
-            ...overrides,
-            // kioskDefaultMerchantId is always per-terminal
-            kioskDefaultMerchantId: overrides.kioskDefaultMerchantId ?? existingSettings.kioskDefaultMerchantId ?? null,
-          },
-        }
+      // Cascade: existing base + venue update + per-terminal overrides
+      const updatedConfig = {
+        ...existingConfig,
+        settings: {
+          ...existingSettings,
+          ...settingsToMerge,
+          ...overrides,
+          // kioskDefaultMerchantId is always per-terminal
+          kioskDefaultMerchantId: overrides.kioskDefaultMerchantId ?? existingSettings.kioskDefaultMerchantId ?? null,
+        },
+      }
 
-        // Acotada al venue que escogió las terminales: una que se mudó a media operación no recibe
-        // los ajustes del dueño anterior (auditoría de Codex, 2026-09-16).
-        return prisma.terminal.update({
-          where: { id: terminal.id, venueId },
+      // Acotada al venue que escogió las terminales. Una que se mudó a media operación ya no es de este negocio:
+      // cuenta cero y se omite, en vez de recibir los ajustes del dueño anterior (auditorías de Codex, 2026-09-16/17).
+      writes.push(
+        prisma.terminal.updateMany({
+          where: scopedTerminalWhere(terminal.id, { venueId }),
           data: {
             config: updatedConfig,
             updatedAt: new Date(),
           },
-        })
-      }),
-      'Una terminal cambió de negocio mientras se guardaban los ajustes. Vuelve a intentarlo.',
-    )
+        }),
+      )
+    }
+  }
+
+  if (writes.length > 0) {
+    const results = await prisma.$transaction(writes)
+    const terminalWrites = writes.length - firstTerminalWrite
+    const omittedTerminals = terminalWrites - countUpdatedTerminals(results.slice(firstTerminalWrite))
+    if (omittedTerminals > 0) {
+      logger.info('Ajustes del negocio: se omitieron terminales que cambiaron de negocio a media operación', {
+        venueId,
+        omittedTerminals,
+      })
+    }
   }
 
   logAction({

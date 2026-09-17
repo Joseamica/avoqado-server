@@ -4,6 +4,7 @@ import logger from '@/config/logger'
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '@/errors/AppError'
 import { deviceReboundAfter, updateTerminal, type TerminalActor } from '@/services/dashboard/terminals.superadmin.service'
 import { tpvCommandQueueService } from '@/services/tpv/command-queue.service'
+import type { TerminalWriteScope } from '@/services/shared/terminalScopedWrites'
 import { logAction } from '@/services/dashboard/activity-log.service'
 
 /**
@@ -428,6 +429,12 @@ export async function migrateExecute(
   actor: TerminalActor & { staffName?: string },
   assignedMerchantIds?: string[],
   migrateMerchant = false,
+  /**
+   * El dashboard de la organización pasa `{ organizationId }`: el traslado y la asignación de comercios se escriben
+   * acotados a esa organización, así que una terminal que pasó a otra en medio no se jala de regreso (auditoría de
+   * Codex del spec «pantalla del cliente», 4ª ronda, 2026-09-17). El superadmin no lo pasa.
+   */
+  scope?: TerminalWriteScope,
 ): Promise<MigrateExecuteResult> {
   // Re-validate at execute time — state may have changed since preflight.
   const pre = await migratePreflight(terminalId, toVenueId, migrateMerchant)
@@ -461,7 +468,7 @@ export async function migrateExecute(
   //    and — because the venue changed — queues the 7-day-TTL FACTORY_RESET with
   //    the migration payload ({ fromVenueId, previousMerchantIds, toVenueId }).
   //    We do NOT queue the wipe here ourselves: that would double-wipe.
-  await updateTerminal(terminalId, { venueId: toVenueId }, actor)
+  await updateTerminal(terminalId, { venueId: toVenueId }, actor, scope)
 
   // 2) Set the destination merchant(s) AFTER the re-parent. This is a SECOND
   //    updateTerminal call with the venue unchanged, so it does NOT re-queue a
@@ -494,7 +501,7 @@ export async function migrateExecute(
     }
   }
   if (merchantsToAssign && merchantsToAssign.length > 0) {
-    await updateTerminal(terminalId, { assignedMerchantIds: merchantsToAssign }, actor)
+    await updateTerminal(terminalId, { assignedMerchantIds: merchantsToAssign }, actor, scope)
   }
 
   // 2b) Dejar el venue destino cobrando de forma permanente.

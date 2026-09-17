@@ -388,7 +388,8 @@ describe('OrgTerminals Service', () => {
 
       const result = await updateTerminalForOrg(orgId, terminalId, { name: 'Updated' })
 
-      expect(superadminUpdateTerminal).toHaveBeenCalledWith(terminalId, { name: 'Updated' })
+      // La escritura va acotada a la organización (4ª auditoría de Codex, C1): si la terminal ya pasó a otra, 404.
+      expect(superadminUpdateTerminal).toHaveBeenCalledWith(terminalId, { name: 'Updated' }, undefined, { organizationId: orgId })
       expect(result.name).toBe('Updated')
     })
 
@@ -406,7 +407,7 @@ describe('OrgTerminals Service', () => {
 
       const result = await deleteTerminalForOrg(orgId, terminalId)
 
-      expect(superadminDeleteTerminal).toHaveBeenCalledWith(terminalId)
+      expect(superadminDeleteTerminal).toHaveBeenCalledWith(terminalId, undefined, { organizationId: orgId })
       expect(result.success).toBe(true)
     })
   })
@@ -425,7 +426,7 @@ describe('OrgTerminals Service', () => {
 
       const result = await generateActivationCodeForOrg(orgId, terminalId, staffId)
 
-      expect(generateActivationCodeForTerminal).toHaveBeenCalledWith(terminalId, staffId)
+      expect(generateActivationCodeForTerminal).toHaveBeenCalledWith(terminalId, staffId, { organizationId: orgId })
       expect(result.activationCode).toBe('A3F9K2')
     })
   })
@@ -504,7 +505,9 @@ describe('OrgTerminals Service', () => {
 
       const result = await assignMerchantsForOrg(orgId, terminalId, ['merch-1'])
 
-      expect(superadminUpdateTerminal).toHaveBeenCalledWith(terminalId, { assignedMerchantIds: ['merch-1'] })
+      expect(superadminUpdateTerminal).toHaveBeenCalledWith(terminalId, { assignedMerchantIds: ['merch-1'] }, undefined, {
+        organizationId: orgId,
+      })
       expect(result.assignedMerchantIds).toEqual(['merch-1'])
     })
 
@@ -525,7 +528,7 @@ describe('OrgTerminals Service', () => {
 
       const result = await assignMerchantsForOrg(orgId, terminalId, [])
 
-      expect(superadminUpdateTerminal).toHaveBeenCalledWith(terminalId, { assignedMerchantIds: [] })
+      expect(superadminUpdateTerminal).toHaveBeenCalledWith(terminalId, { assignedMerchantIds: [] }, undefined, { organizationId: orgId })
       expect(result.assignedMerchantIds).toEqual([])
     })
   })

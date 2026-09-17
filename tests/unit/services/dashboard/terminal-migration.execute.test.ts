@@ -67,7 +67,12 @@ describe('migrateExecute', () => {
 
     // Re-parent delegated to updateTerminal with ONLY { venueId } — the wipe is
     // queued INSIDE updateTerminal (blindar), not here, so no double-wipe.
-    expect(mockedUpdate).toHaveBeenCalledWith('term-1', { venueId: 'venue-new' }, expect.objectContaining({ staffId: 'admin-1' }))
+    expect(mockedUpdate).toHaveBeenCalledWith(
+      'term-1',
+      { venueId: 'venue-new' },
+      expect.objectContaining({ staffId: 'admin-1' }),
+      undefined,
+    )
     // migrateExecute must NOT have only one updateTerminal call (no merchant arg here)
     expect(mockedUpdate).toHaveBeenCalledTimes(1)
     // commandId recovered by re-querying the latest FACTORY_RESET for the terminal
@@ -83,12 +88,19 @@ describe('migrateExecute', () => {
   it('sets the optional destination merchant via a SECOND updateTerminal call (venue unchanged → no re-wipe)', async () => {
     await migrateExecute('term-1', 'venue-new', { staffId: 'admin-1' }, ['ma-1', 'ma-2'])
 
-    expect(mockedUpdate).toHaveBeenNthCalledWith(1, 'term-1', { venueId: 'venue-new' }, expect.objectContaining({ staffId: 'admin-1' }))
+    expect(mockedUpdate).toHaveBeenNthCalledWith(
+      1,
+      'term-1',
+      { venueId: 'venue-new' },
+      expect.objectContaining({ staffId: 'admin-1' }),
+      undefined,
+    )
     expect(mockedUpdate).toHaveBeenNthCalledWith(
       2,
       'term-1',
       { assignedMerchantIds: ['ma-1', 'ma-2'] },
       expect.objectContaining({ staffId: 'admin-1' }),
+      undefined,
     )
     expect(mockedUpdate).toHaveBeenCalledTimes(2)
   })
@@ -101,12 +113,19 @@ describe('migrateExecute', () => {
   it('falls back to the destination venue default merchant (primaryAccountId) when no merchants are provided', async () => {
     m.venuePaymentConfig.findFirst.mockResolvedValue({ id: 'vpc-1', primaryAccountId: 'ma-default' })
     await migrateExecute('term-1', 'venue-new', { staffId: 'admin-1' })
-    expect(mockedUpdate).toHaveBeenNthCalledWith(1, 'term-1', { venueId: 'venue-new' }, expect.objectContaining({ staffId: 'admin-1' }))
+    expect(mockedUpdate).toHaveBeenNthCalledWith(
+      1,
+      'term-1',
+      { venueId: 'venue-new' },
+      expect.objectContaining({ staffId: 'admin-1' }),
+      undefined,
+    )
     expect(mockedUpdate).toHaveBeenNthCalledWith(
       2,
       'term-1',
       { assignedMerchantIds: ['ma-default'] },
       expect.objectContaining({ staffId: 'admin-1' }),
+      undefined,
     )
     expect(mockedUpdate).toHaveBeenCalledTimes(2)
   })
@@ -114,8 +133,32 @@ describe('migrateExecute', () => {
   it('falls back to the venue default merchant for an empty merchant array too', async () => {
     m.venuePaymentConfig.findFirst.mockResolvedValue({ id: 'vpc-1', primaryAccountId: 'ma-default' })
     await migrateExecute('term-1', 'venue-new', { staffId: 'admin-1' }, [])
-    expect(mockedUpdate).toHaveBeenNthCalledWith(2, 'term-1', { assignedMerchantIds: ['ma-default'] }, expect.anything())
+    expect(mockedUpdate).toHaveBeenNthCalledWith(2, 'term-1', { assignedMerchantIds: ['ma-default'] }, expect.anything(), undefined)
     expect(mockedUpdate).toHaveBeenCalledTimes(2)
+  })
+
+  // 🔴 Auditoría de Codex del spec «pantalla del cliente», 4ª ronda (2026-09-17): la migración que inicia el dueño de
+  // una organización validaba el origen y el destino, y después escribía sólo por id. Si en medio la terminal pasaba a
+  // otra organización, la jalaba de regreso. Ahora las dos escrituras van acotadas; sin ámbito (superadmin), como antes.
+  it('con el ámbito de la organización, el traslado y la asignación de comercios van acotados', async () => {
+    const scope = { organizationId: 'org-1' }
+
+    await migrateExecute('term-1', 'venue-new', { staffId: 'owner-1' }, ['ma-1'], false, scope)
+
+    expect(mockedUpdate).toHaveBeenNthCalledWith(
+      1,
+      'term-1',
+      { venueId: 'venue-new' },
+      expect.objectContaining({ staffId: 'owner-1' }),
+      scope,
+    )
+    expect(mockedUpdate).toHaveBeenNthCalledWith(
+      2,
+      'term-1',
+      { assignedMerchantIds: ['ma-1'] },
+      expect.objectContaining({ staffId: 'owner-1' }),
+      scope,
+    )
   })
 
   it('does NOT make a second updateTerminal call when the venue has no default merchant configured', async () => {
@@ -146,7 +189,12 @@ describe('migrateExecute', () => {
     expect(message).toContain('reenvía')
 
     // the re-parent WAS performed even though the function ultimately threw
-    expect(mockedUpdate).toHaveBeenCalledWith('term-1', { venueId: 'venue-new' }, expect.objectContaining({ staffId: 'admin-1' }))
+    expect(mockedUpdate).toHaveBeenCalledWith(
+      'term-1',
+      { venueId: 'venue-new' },
+      expect.objectContaining({ staffId: 'admin-1' }),
+      undefined,
+    )
   })
 })
 
@@ -200,7 +248,7 @@ describe('migrateExecute — migrateMerchant', () => {
 
   it('la terminal conserva los merchants del origen', async () => {
     await migrateExecute('term-1', 'venue-new', actor, undefined, true)
-    expect(mockedUpdate).toHaveBeenCalledWith('term-1', { assignedMerchantIds: ['merch-p'] }, actor)
+    expect(mockedUpdate).toHaveBeenCalledWith('term-1', { assignedMerchantIds: ['merch-p'] }, actor, undefined)
   })
 
   it('crea la VenuePaymentConfig del destino copiada del origen', async () => {
@@ -262,7 +310,7 @@ describe('migrateExecute — migrateMerchant', () => {
     expect(m.tpvCommandQueue.update).not.toHaveBeenCalled()
     // The terminal's own re-parent + merchant assignment still went through — the race
     // only affects the optional config-copy, nothing else.
-    expect(mockedUpdate).toHaveBeenCalledWith('term-1', { assignedMerchantIds: ['merch-p'] }, actor)
+    expect(mockedUpdate).toHaveBeenCalledWith('term-1', { assignedMerchantIds: ['merch-p'] }, actor, undefined)
   })
 
   // Any OTHER database error during the create must still propagate — only P2002
@@ -290,7 +338,7 @@ describe('migrateExecute — migrateMerchant', () => {
 
   it('assignedMerchantIds explícitos ganan sobre el acarreo automático', async () => {
     await migrateExecute('term-1', 'venue-new', actor, ['merch-elegido'], true)
-    expect(mockedUpdate).toHaveBeenCalledWith('term-1', { assignedMerchantIds: ['merch-elegido'] }, actor)
+    expect(mockedUpdate).toHaveBeenCalledWith('term-1', { assignedMerchantIds: ['merch-elegido'] }, actor, undefined)
   })
 
   // Required addition (money-safety, review finding): `resolveOriginPayment`'s `copyable`
@@ -317,7 +365,7 @@ describe('migrateExecute — migrateMerchant', () => {
 
     expect(m.venuePaymentConfig.create).not.toHaveBeenCalled()
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('merch-inactivo'))
-    expect(mockedUpdate).toHaveBeenCalledWith('term-1', { assignedMerchantIds: ['merch-inactivo', 'merch-activo'] }, actor)
+    expect(mockedUpdate).toHaveBeenCalledWith('term-1', { assignedMerchantIds: ['merch-inactivo', 'merch-activo'] }, actor, undefined)
   })
 
   // Finding 1 (final whole-branch review, founder-confirmed): when the operator picks a

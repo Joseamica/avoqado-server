@@ -171,7 +171,9 @@ export async function updateTerminalForOrg(
 
   logger.info('[OrgTerminals] Updating terminal', { orgId, terminalId })
 
-  const result = await superadminUpdateTerminal(terminalId, data)
+  // Acotada a la organización: si la terminal pasó a otra entre la validación y la escritura, 404 (auditoría de
+  // Codex del spec «pantalla del cliente», 4ª ronda, 2026-09-17). Lo mismo en borrar, asignar comercios y el código.
+  const result = await superadminUpdateTerminal(terminalId, data, undefined, { organizationId: orgId })
 
   logAction({
     staffId,
@@ -193,7 +195,7 @@ export async function deleteTerminalForOrg(orgId: string, terminalId: string, st
 
   logger.info('[OrgTerminals] Deleting terminal', { orgId, terminalId })
 
-  const result = await superadminDeleteTerminal(terminalId)
+  const result = await superadminDeleteTerminal(terminalId, undefined, { organizationId: orgId })
 
   logAction({
     staffId,
@@ -215,7 +217,7 @@ export async function generateActivationCodeForOrg(orgId: string, terminalId: st
 
   logger.info('[OrgTerminals] Generating activation code', { orgId, terminalId, staffId })
 
-  const result = await generateActivationCodeForTerminal(terminalId, staffId)
+  const result = await generateActivationCodeForTerminal(terminalId, staffId, { organizationId: orgId })
 
   logAction({
     staffId,
@@ -462,7 +464,7 @@ export async function assignMerchantsForOrg(orgId: string, terminalId: string, m
 
   logger.info('[OrgTerminals] Assigning merchants', { orgId, terminalId, merchantCount: merchantIds.length })
 
-  const result = await superadminUpdateTerminal(terminalId, { assignedMerchantIds: merchantIds })
+  const result = await superadminUpdateTerminal(terminalId, { assignedMerchantIds: merchantIds }, undefined, { organizationId: orgId })
 
   logAction({
     staffId,
@@ -586,7 +588,7 @@ export async function migrateExecuteForOrg(
   if (assignedMerchantIds && assignedMerchantIds.length > 0) {
     await validateMerchantsInOrg(orgId, assignedMerchantIds)
   }
-  return migrateExecute(terminalId, toVenueId, actor, assignedMerchantIds, migrateMerchant)
+  return migrateExecute(terminalId, toVenueId, actor, assignedMerchantIds, migrateMerchant, { organizationId: orgId })
 }
 
 /**

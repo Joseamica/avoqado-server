@@ -33,6 +33,7 @@ import {
 import { DEFAULT_TIMEZONE } from '../../utils/datetime'
 import prisma from '../../utils/prismaClient'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
+import { scopedTerminalWhere, writeScopedTerminal } from '../shared/terminalScopedWrites'
 // Criterio de "ya se cobró en la otra caja" — la MISMA constante que usan la autoridad
 // del dominio y el guard de cancelación, no una copia (ver `getOperations`).
 import { YA_COBRADO_AFUERA } from '../mobile/areaTicketV7.mobile.service'
@@ -350,30 +351,36 @@ export async function updateTerminal(venueId: string, terminalId: string, input:
         : terminal.defaultWorkspace
     : undefined
 
-  const updated = await prisma.terminal.update({
-    where: { id: terminalId },
-    data: {
-      fulfillmentAreaId: input.fulfillmentAreaId,
-      canIssueAreaTickets: input.canIssueAreaTickets,
-      canCheckoutAreaTickets: input.canCheckoutAreaTickets,
-      canDeliverAreaTickets: input.canDeliverAreaTickets,
-      // El dashboard presenta capacidades, no una opción técnica de workspace.
-      // Mantenerlos sincronizados evita que una terminal de cremería vuelva a
-      // abrir Mesas/POS estándar después de configurarla correctamente.
-      defaultWorkspace: (input.defaultWorkspace as TerminalWorkspace | undefined) ?? inferredWorkspace,
-      scaleProfileId: input.scaleProfileId,
-    },
-    select: {
-      id: true,
-      name: true,
-      fulfillmentAreaId: true,
-      canIssueAreaTickets: true,
-      canCheckoutAreaTickets: true,
-      canDeliverAreaTickets: true,
-      defaultWorkspace: true,
-      scaleProfileId: true,
-    },
-  })
+  // Acotada al venue con el que se leyó: si la terminal se mudó en medio, no debe quedar en el otro negocio con el
+  // área y la báscula de éste (auditoría de Codex del spec «pantalla del cliente», 4ª ronda, 2026-09-17).
+  const updated = await writeScopedTerminal(
+    () =>
+      prisma.terminal.update({
+        where: scopedTerminalWhere(terminalId, { venueId }),
+        data: {
+          fulfillmentAreaId: input.fulfillmentAreaId,
+          canIssueAreaTickets: input.canIssueAreaTickets,
+          canCheckoutAreaTickets: input.canCheckoutAreaTickets,
+          canDeliverAreaTickets: input.canDeliverAreaTickets,
+          // El dashboard presenta capacidades, no una opción técnica de workspace.
+          // Mantenerlos sincronizados evita que una terminal de cremería vuelva a
+          // abrir Mesas/POS estándar después de configurarla correctamente.
+          defaultWorkspace: (input.defaultWorkspace as TerminalWorkspace | undefined) ?? inferredWorkspace,
+          scaleProfileId: input.scaleProfileId,
+        },
+        select: {
+          id: true,
+          name: true,
+          fulfillmentAreaId: true,
+          canIssueAreaTickets: true,
+          canCheckoutAreaTickets: true,
+          canDeliverAreaTickets: true,
+          defaultWorkspace: true,
+          scaleProfileId: true,
+        },
+      }),
+    'Terminal no encontrada',
+  )
   await logAction({
     staffId: performedBy ?? null,
     venueId,

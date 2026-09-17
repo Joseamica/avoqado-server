@@ -73,7 +73,8 @@ describe('deleteTpv — guardas contra pérdida de atribución de ventas', () =>
     prismaMock.terminal.findFirst.mockResolvedValue(terminal())
 
     await expect(deleteTpv(VENUE, TPV)).resolves.toBeUndefined()
-    expect(prismaMock.terminal.delete).toHaveBeenCalledWith({ where: { id: TPV } })
+    // Acotado al venue con el que se leyó (4ª auditoría de Codex del spec «pantalla del cliente», 2026-09-17).
+    expect(prismaMock.terminal.delete).toHaveBeenCalledWith({ where: { id: TPV, venueId: VENUE } })
   })
 
   it('el conteo de historial está acotado a ESA terminal', async () => {

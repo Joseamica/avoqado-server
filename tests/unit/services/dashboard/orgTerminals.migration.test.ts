@@ -141,8 +141,9 @@ describe('orgTerminals migration wrappers — ownership guards', () => {
       const migrateOrder = migrateExecuteMock.mock.invocationCallOrder[0]
       expect(terminalOrder).toBeLessThan(migrateOrder)
       expect(venueOrder).toBeLessThan(migrateOrder)
-      // trailing `undefined` = migrateMerchant, now threaded through positionally (Task 6)
-      expect(migrateExecuteMock).toHaveBeenCalledWith(TERMINAL_ID, TO_VENUE_ID, actor, undefined, undefined)
+      // trailing `undefined` = migrateMerchant, now threaded through positionally (Task 6). El último argumento acota
+      // el traslado a la organización: una terminal que ya pasó a otra no se jala de regreso (4ª auditoría de Codex).
+      expect(migrateExecuteMock).toHaveBeenCalledWith(TERMINAL_ID, TO_VENUE_ID, actor, undefined, undefined, { organizationId: ORG_ID })
     })
 
     it('validates assigned merchants ∈ org BEFORE calling migrateExecute', async () => {
@@ -159,7 +160,7 @@ describe('orgTerminals migration wrappers — ownership guards', () => {
       const migrateOrder = migrateExecuteMock.mock.invocationCallOrder[0]
       expect(merchantOrder).toBeLessThan(migrateOrder)
       // trailing `undefined` = migrateMerchant, now threaded through positionally (Task 6)
-      expect(migrateExecuteMock).toHaveBeenCalledWith(TERMINAL_ID, TO_VENUE_ID, actor, ['merch-1'], undefined)
+      expect(migrateExecuteMock).toHaveBeenCalledWith(TERMINAL_ID, TO_VENUE_ID, actor, ['merch-1'], undefined, { organizationId: ORG_ID })
     })
 
     it('throws ForbiddenError and does NOT call migrateExecute when a merchant is outside the org', async () => {
@@ -202,7 +203,7 @@ describe('orgTerminals migration wrappers — ownership guards', () => {
 
     it('pasa el flag al servicio compartido en execute', async () => {
       await orgTerminals.migrateExecuteForOrg(ORG_ID, TERMINAL_ID, TO_VENUE_ID, actor, undefined, true)
-      expect(migrateExecuteMock).toHaveBeenCalledWith(TERMINAL_ID, TO_VENUE_ID, actor, undefined, true)
+      expect(migrateExecuteMock).toHaveBeenCalledWith(TERMINAL_ID, TO_VENUE_ID, actor, undefined, true, { organizationId: ORG_ID })
     })
 
     it('I3: rechaza merchants explícitos fuera de la org', async () => {
@@ -217,7 +218,7 @@ describe('orgTerminals migration wrappers — ownership guards', () => {
 
     it('REGRESIÓN: sin flag, el servicio se llama como hoy', async () => {
       await orgTerminals.migrateExecuteForOrg(ORG_ID, TERMINAL_ID, TO_VENUE_ID, actor)
-      expect(migrateExecuteMock).toHaveBeenCalledWith(TERMINAL_ID, TO_VENUE_ID, actor, undefined, undefined)
+      expect(migrateExecuteMock).toHaveBeenCalledWith(TERMINAL_ID, TO_VENUE_ID, actor, undefined, undefined, { organizationId: ORG_ID })
     })
   })
 

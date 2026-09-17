@@ -2,6 +2,7 @@ import type { NextFunction, Request, Response } from 'express'
 
 const updateTpvMock = jest.fn()
 const logActionMock = jest.fn()
+const generateActivationCodeMock = jest.fn()
 
 jest.mock('@/services/dashboard/tpv.dashboard.service', () => ({
   updateTpv: (...args: unknown[]) => updateTpvMock(...args),
@@ -11,7 +12,11 @@ jest.mock('@/services/dashboard/activity-log.service', () => ({
   logAction: (...args: unknown[]) => logActionMock(...args),
 }))
 
-import { updateTpv } from '@/controllers/dashboard/tpv.dashboard.controller'
+jest.mock('@/services/dashboard/terminal-activation.service', () => ({
+  generateActivationCode: (...args: unknown[]) => generateActivationCodeMock(...args),
+}))
+
+import { generateActivationCode, updateTpv } from '@/controllers/dashboard/tpv.dashboard.controller'
 
 function makeReq(body: Record<string, unknown>, headers: Record<string, string> = {}): Request {
   return {
@@ -97,5 +102,27 @@ describe('updateTpv legacy display-mode telemetry', () => {
     expect(data).toEqual({ userAgent: expect.any(String) })
     expect(data.userAgent).not.toMatch(/[\r\n]/)
     expect(data.userAgent.length).toBeLessThanOrEqual(128)
+  })
+})
+
+// 🔴 Auditoría de Codex del spec «pantalla del cliente», 4ª ronda (2026-09-17): el código se lee y se escribe dentro del
+// negocio de la ruta. Si el controlador dejara de pasarlo, el servicio escribiría por id y un negocio podría generarle
+// el código a una terminal que ya es de otro.
+describe('generateActivationCode', () => {
+  it('pasa el negocio de la ruta como ámbito del código', async () => {
+    generateActivationCodeMock.mockResolvedValue({ activationCode: 'A3F9K2' })
+    const req = {
+      params: { venueId: 'venue-1', terminalId: 'terminal-1' },
+      body: {},
+      authContext: { userId: 'staff-1' },
+    } as unknown as Request
+    const res = makeRes()
+    const next = jest.fn() as NextFunction
+
+    await generateActivationCode(req as any, res, next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(generateActivationCodeMock).toHaveBeenCalledWith('terminal-1', 'staff-1', { venueId: 'venue-1' })
+    expect(res.statusCode).toBe(200)
   })
 })
