@@ -919,6 +919,23 @@ function resultToStatus(status: TerminalPaymentResult['status']): TerminalPaymen
   }
 }
 
+/**
+ * Codex r5 (P1-N5): «la terminal NO afirmó haber cobrado en este sobre». Fragmento SQL y espejo JS, que tienen que contestar lo
+ * MISMO (prueba de tabla contra Postgres en la suite de la ventana): la llave ausente, `{}` y el `null` JSON cuentan como «sin
+ * afirmación»; un objeto con cualquier llave (aunque su valor sea `""`) o un valor que no es objeto cuentan como afirmación.
+ * `nullif(…, 'null')` porque `->` devuelve el `null` JSON (no SQL NULL) cuando la llave existe con ese valor.
+ */
+const SIN_AFIRMACION_DE_LA_TERMINAL_SQL = Prisma.sql`coalesce(nullif("resultJson"->'claimedSuccess', 'null'::jsonb), '{}'::jsonb) = '{}'::jsonb`
+function afirmacionDeLaTerminal(resultJson: Prisma.JsonValue | null): Record<string, unknown> | null {
+  const sobre = resultJson && typeof resultJson === 'object' && !Array.isArray(resultJson) ? (resultJson as Record<string, unknown>) : null
+  const afirmacion = sobre?.claimedSuccess
+  if (afirmacion === undefined || afirmacion === null) return null
+  if (typeof afirmacion === 'object' && !Array.isArray(afirmacion)) {
+    return Object.keys(afirmacion as Record<string, unknown>).length === 0 ? null : (afirmacion as Record<string, unknown>)
+  }
+  return { valor: afirmacion }
+}
+
 /** El instante en que la VENTANA liberó la fila, tal como lo dejó escrito `releaseUnprovenNegative`; `null` si no está o no se lee. */
 function instanteDeLiberacionPorVentana(resultJson: Prisma.JsonValue | null): Date | null {
   const sobre = resultJson && typeof resultJson === 'object' && !Array.isArray(resultJson) ? (resultJson as Record<string, unknown>) : null
@@ -2252,8 +2269,8 @@ class TerminalPaymentService {
   /**
    * Codex r3 (P1-D) + r4 (P1-N3): la escritura del `success` DEGRADADO (UNKNOWN, sin `terminalResult`) en DOS sentencias:
    *  1. la AFIRMACIÓN, sola y SIN CAS de estado — `jsonb_set(resultJson, '{claimedSuccess}', <previo de la fila> || <nuevo no
-   *     vacío>)` sobre cualquier fila de la solicitud sin ganador (`paymentId IS NULL`, `status <> COMPLETED`). No toca `status`
-   *     ni `updatedAt`: no es una decisión de estado. Queda persistida ANTES de pelear por el estado, así que un CAS que se agote
+   *     vacío>)` sobre cualquier fila de la solicitud sin ganador (`paymentId IS NULL`, `status <> COMPLETED`). No toca `status`,
+   *     pero SÍ `updatedAt` (Codex r5, P1-N5: es lo que anula el CAS de la ventana). Queda persistida ANTES de pelear por el estado, así que un CAS que se agote
    *     ya no se la lleva (Codex r4: dos cambios de estado concurrentes —un `success` vacío que limpia el failureCode y el
    *     watchdog escribiendo AUTO_RELEASED— agotaban los dos intentos y la afirmación desaparecía con ellos: sin Payment ni
    *     webhook, era el único veto a la declaración «no se presentó tarjeta»).
@@ -2277,7 +2294,9 @@ class TerminalPaymentService {
     )
     let afirmacionPersistida = false
     try {
-      // (1) La afirmación, fuera del CAS de estado.
+      // (1) La afirmación, fuera del CAS de estado. Codex r5 (P1-N5): SÍ toca `updatedAt` — una afirmación positiva es un hecho
+      // relevante para el estado, y el CAS de la ventana (`updatedAt` leído) tiene que perderlo: sin el toque, la ventana ganaba su
+      // CAS entre esta sentencia y la (2) y reescribía el sobre desde su lectura previa, borrando la afirmación y liberando.
       if (Object.keys(nueva).length > 0) {
         const n = await prisma.$executeRaw`
           UPDATE "TerminalPaymentRequest"
@@ -2286,7 +2305,8 @@ class TerminalPaymentService {
                 '{claimedSuccess}',
                 (CASE WHEN jsonb_typeof("resultJson"->'claimedSuccess') = 'object' THEN "resultJson"->'claimedSuccess' ELSE '{}'::jsonb END)
                   || ${JSON.stringify(nueva)}::jsonb,
-                true)
+                true),
+              "updatedAt" = (NOW() AT TIME ZONE 'UTC')
           WHERE "requestId" = ${requestId} AND "venueId" = ${venueId} AND "paymentId" IS NULL AND "status" <> 'COMPLETED'`
         afirmacionPersistida = n === 1
       }
@@ -3433,6 +3453,9 @@ class TerminalPaymentService {
     resultJson: Prisma.JsonValue | null
   }): boolean {
     if (row.status !== TerminalPaymentRequestStatus.TIMED_OUT || row.failureCode !== null || row.paymentId) return false
+    // Codex r5 (P1-N5): con una afirmación de la terminal en el sobre NO es un negativo sin evidencia (espejo de
+    // `SIN_AFIRMACION_DE_LA_TERMINAL_SQL`, que el barrido y el CAS de liberación exigen).
+    if (afirmacionDeLaTerminal(row.resultJson)) return false
     const sobre =
       row.resultJson && typeof row.resultJson === 'object' && !Array.isArray(row.resultJson)
         ? (row.resultJson as Record<string, unknown>)
@@ -3477,7 +3500,28 @@ class TerminalPaymentService {
     now: Date = new Date(),
   ): Promise<'RELEASED' | 'RECONCILED' | 'HELD_BY_BANK_EVIDENCE' | 'HELD_BY_UNBOUND_PAYMENT' | 'NOT_ELIGIBLE'> {
     const row = await prisma.terminalPaymentRequest.findFirst({ where: { requestId, venueId } })
-    if (!row || !this.esNegativoSinEvidencia(row)) return 'NOT_ELIGIBLE'
+    if (!row) return 'NOT_ELIGIBLE'
+    // Codex r5 (P1-N5, parte 4) — ANTES de cualquier otra decisión, determinista: una fila de la ventana (TIMED_OUT/null, sin
+    // Payment) en cuyo sobre la terminal AFIRMÓ haber cobrado (`claimedSuccess` no vacío: queda así cuando el CAS de estado del
+    // `success` degradado se agotó) no se libera NUNCA — y tampoco se queda retenida sin salida: se marca UNA vez como retenida
+    // para revisión, con el MISMO marcador y asiento que el Payment sin ligar (motivo `TERMINAL_CLAIMED_SUCCESS`); la ranura se
+    // suelta a los 20 min, la VENTA sigue bloqueada y la declaración del cajero queda vetada por la afirmación.
+    const afirmacion =
+      row.status === TerminalPaymentRequestStatus.TIMED_OUT && row.failureCode === null && !row.paymentId
+        ? afirmacionDeLaTerminal(row.resultJson)
+        : null
+    if (afirmacion) {
+      logger.error('🚨 [TerminalPayment] window found a terminal success claim without a Payment — holding for human review', {
+        requestId,
+        venueId,
+        terminalId: row.terminalId,
+        orderId: row.orderId,
+        claimedSuccess: afirmacion,
+        origen,
+      })
+      return this.retenerPorPagoSinLigar(row, { paymentId: null, reason: 'TERMINAL_CLAIMED_SUCCESS', claimedSuccess: afirmacion }, origen)
+    }
+    if (!this.esNegativoSinEvidencia(row)) return 'NOT_ELIGIBLE'
     if (row.updatedAt.getTime() > now.getTime() - UNPROVEN_NEGATIVE_WINDOW_MS) return 'NOT_ELIGIBLE'
     // Los CAS de abajo exigen el updatedAt LEÍDO: un resultado que renueve el reloj entre la lectura y la escritura anula la liberación.
 
@@ -3588,9 +3632,10 @@ class TerminalPaymentService {
           return 'HELD_BY_BANK_EVIDENCE'
         }
         // CAS: sólo si sigue siendo exactamente el negativo sin evidencia (un cajero pudo adelantarse) Y sin evidencia positiva
-        // durable en este instante (la revalidación del veto en la escritura).
+        // durable en este instante (la revalidación del veto en la escritura). Codex r5 (P1-N5): el sobre liberado se FUNDE en
+        // SQL sobre el `resultJson` ACTUAL (`||`), nunca desde la lectura previa en JS, y el CAS exige además que la terminal no
+        // haya afirmado cobro en el sobre — una afirmación que aterrice entre la lectura y este UPDATE anula la liberación.
         const sobreLiberado = {
-          ...previo,
           requestId,
           status: 'failed',
           outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW',
@@ -3600,9 +3645,11 @@ class TerminalPaymentService {
         const r = await tx.$executeRaw`
           UPDATE "TerminalPaymentRequest"
           SET "status" = 'FAILED', "failureCode" = 'NO_EVIDENCE_AFTER_WINDOW',
-              "resultJson" = ${JSON.stringify(sobreLiberado)}::jsonb, "updatedAt" = (NOW() AT TIME ZONE 'UTC')
+              "resultJson" = coalesce("resultJson", '{}'::jsonb) || ${JSON.stringify(sobreLiberado)}::jsonb,
+              "updatedAt" = (NOW() AT TIME ZONE 'UTC')
           WHERE "id" = ${row.id} AND "status" = 'TIMED_OUT' AND "failureCode" IS NULL AND "paymentId" IS NULL
             AND "updatedAt" = ${utcTs(row.updatedAt)}
+            AND ${SIN_AFIRMACION_DE_LA_TERMINAL_SQL}
             AND ${sinEvidenciaPositivaSql(requestId, venueId)}`
         if (r === 0) {
           const motivo = await porQueHayEvidenciaPositiva(tx, requestId, venueId)
@@ -3676,7 +3723,8 @@ class TerminalPaymentService {
    */
   private async retenerPorPagoSinLigar(
     row: FilaDeCobroRemoto,
-    pago: { paymentId: string; reason: string },
+    /** Codex r5 (P1-N5): también la afirmación de la terminal sin Payment (`paymentId: null`, motivo `TERMINAL_CLAIMED_SUCCESS`). */
+    pago: { paymentId: string | null; reason: string; claimedSuccess?: Record<string, unknown> },
     origen: 'TIMER' | 'WATCHDOG',
   ): Promise<'HELD_BY_UNBOUND_PAYMENT' | 'NOT_ELIGIBLE'> {
     try {
@@ -3700,6 +3748,7 @@ class TerminalPaymentService {
               amountCents: row.amountCents,
               paymentId: pago.paymentId,
               reason: pago.reason,
+              ...(pago.claimedSuccess ? { claimedSuccess: pago.claimedSuccess as Prisma.InputJsonValue } : {}),
               origen,
             },
           },
@@ -3731,16 +3780,32 @@ class TerminalPaymentService {
           WHERE "status" = 'TIMED_OUT' AND "failureCode" IS NULL AND "paymentId" IS NULL
             AND "resultJson"->>'status' = 'timeout' AND jsonb_typeof("resultJson"->'terminalResult') = 'object'
             AND jsonb_typeof("resultJson"->'terminalResult'->'status') = 'string'
+            AND ${SIN_AFIRMACION_DE_LA_TERMINAL_SQL}
             AND "updatedAt" <= ${utcTs(cutoff)}
           ORDER BY "updatedAt" ASC
           LIMIT 200`,
       { retries: 3, shouldRetry: shouldRetryDbConnectionError, context: 'terminal-payment-watchdog:findUnprovenNegatives' },
     )
+    // Codex r5 (P1-N5, parte 4): las filas de la ventana en cuyo sobre la terminal AFIRMÓ cobrar (el CAS de estado del `success`
+    // degradado se agotó) no son negativos elegibles —el SQL de arriba las excluye, como `esNegativoSinEvidencia`— pero tampoco
+    // pueden quedarse sin salida cuando el temporizador en proceso ya no existe (reinicio): se les pasa por la misma decisión, que
+    // las marca UNA vez como retenidas para revisión; el destrabe de los 20 min de abajo las cubre.
+    const afirmadas = await retry(
+      () =>
+        prisma.$queryRaw<{ requestId: string; venueId: string }[]>`
+          SELECT "requestId", "venueId" FROM "TerminalPaymentRequest"
+          WHERE "status" = 'TIMED_OUT' AND "failureCode" IS NULL AND "paymentId" IS NULL
+            AND NOT (${SIN_AFIRMACION_DE_LA_TERMINAL_SQL})
+            AND "updatedAt" <= ${utcTs(cutoff)}
+          ORDER BY "updatedAt" ASC
+          LIMIT 200`,
+      { retries: 3, shouldRetry: shouldRetryDbConnectionError, context: 'terminal-payment-watchdog:findClaimedInWindow' },
+    )
     let released = 0
     let reconciled = 0
     let held = 0
     let heldUnbound = 0
-    for (const f of filas) {
+    for (const f of [...filas, ...afirmadas]) {
       const r = await this.releaseUnprovenNegative(f.requestId, f.venueId, 'WATCHDOG', now)
       if (r === 'RELEASED') released += 1
       if (r === 'RECONCILED') reconciled += 1
