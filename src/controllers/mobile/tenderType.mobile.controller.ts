@@ -15,7 +15,11 @@
  * v4: un POS con bug o alterado no puede inventar una comisión).
  *
  * Los campos que SÍ viajan son de presentación (`name`, `posSection`, `displayOrder`)
- * más `captureTip`, que la UI necesita para decidir si pide propina ANTES de cobrar.
+ * más `captureTip`, que la UI necesita para decidir si pide propina ANTES de cobrar, y
+ * `opensCashDrawer`, que la UI necesita para decidir si abre el cajón físico al cobrar
+ * (un vale de despensa que se guarda en caja sí; Uber Eats no). Ninguno de los dos se
+ * devuelve al server: el cobro sigue viajando como `{ id, revision }` y el "¿entra al
+ * cajón?" contable lo resuelve `tenderSemantics` desde la revisión.
  */
 
 import { Request, Response, NextFunction } from 'express'
@@ -44,6 +48,8 @@ export async function listTenderTypesForPos(req: Request, res: Response, next: N
         captureTip: t.captureTip,
         posSection: t.posSection,
         displayOrder: t.displayOrder,
+        // Aditivo (2026-09-17): los POS viejos lo ignoran. Sólo decide el pulso del cajón.
+        opensCashDrawer: t.countsAsPhysicalCash === true,
       }))
 
     res.json({ tenderTypes })
