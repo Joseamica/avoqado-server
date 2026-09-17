@@ -1298,3 +1298,68 @@ describe('Codex R5-4 · TODA escritura por identidad DÉBIL se decide bajo el ca
     expect(mockedProviderEventLogUpdate).not.toHaveBeenCalled()
   })
 })
+
+describe('Ventana de confirmación (plan 16-sep, fix round 1 (e)): el fallback del ingreso persiste el evento ANTES de tocar la solicitud vinculada', () => {
+  it('con el toque vencido por lock_timeout (55P03), el evento queda persistido y marcado, el toque se salta con aviso y el ingreso no falla', async () => {
+    const logger = require('@/config/logger').default as { warn: jest.Mock }
+    const queryRaw = (prisma as any).$queryRaw as jest.Mock
+    const executeRawUnsafe = (prisma as any).$executeRawUnsafe as jest.Mock
+    logger.warn.mockClear()
+    executeRawUnsafe.mockClear()
+    mockedProviderEventLogFindFirst.mockReset().mockResolvedValue(null)
+    mockedProviderEventLogCreate.mockReset().mockResolvedValue({ id: 'evt_fallback' })
+    mockedProviderEventLogUpdate.mockReset().mockResolvedValue({ count: 1 })
+    mockedPaymentFindFirst.mockReset().mockResolvedValue(null)
+    const lockTimeout = () => Object.assign(new Error('canceling statement due to lock timeout'), { meta: { code: '55P03' } })
+    // El candado del INGRESO vence (primera adquisición del advisory); las siguientes (el escritor débil) entran.
+    let adquisiciones = 0
+    queryRaw.mockReset().mockImplementation(async (strings: unknown) => {
+      const sql = Array.isArray(strings) ? strings.join('?') : ''
+      if (sql.includes('pg_advisory_xact_lock') && ++adquisiciones === 1) throw lockTimeout()
+      return []
+    })
+    // El TOQUE de la solicitud vinculada también vence: su fila está tomada (p. ej. por la transacción de la ventana).
+    mockedExecuteRaw.mockImplementation(async (strings: unknown) => {
+      const sql = Array.isArray(strings) ? strings.join('?') : ''
+      if (sql.includes('UPDATE "TerminalPaymentRequest"')) throw lockTimeout()
+      return 1
+    })
+
+    await expect(
+      processAngelPayWebhook({
+        payload: {
+          event_type: 'send_transaction',
+          payload: { integratorReference: 'ref-fallback', amount: '000000010000', status: 'approved', transactionId: 'tx_fb' },
+        } as any,
+        eventId: 'msg_fallback',
+        merchantAccount: TEST_MERCHANT,
+        retryDelaysMs: [0],
+      }),
+    ).resolves.toBeDefined()
+
+    // 1) El evento quedó persistido UNA vez y MARCADO como ingreso sin candado (Codex R15-1)…
+    expect(mockedProviderEventLogCreate).toHaveBeenCalledTimes(1)
+    expect(mockedProviderEventLogCreate.mock.calls[0][0].data.payload._avoqado).toMatchObject({
+      ingresoSinCandado: { en: expect.any(String) },
+    })
+    // 2) …ANTES del toque: la espera acotada del toque y su UPDATE ocurren después de la creación del evento.
+    const creacion = mockedProviderEventLogCreate.mock.invocationCallOrder[0]
+    const setLocalDelToque = executeRawUnsafe.mock.calls
+      .map((c, i) => ({ sql: String(c[0]), orden: executeRawUnsafe.mock.invocationCallOrder[i] }))
+      .filter(x => x.sql.includes('lock_timeout') && x.orden > creacion)
+    expect(setLocalDelToque.length).toBeGreaterThanOrEqual(1)
+    const toque = mockedExecuteRaw.mock.calls
+      .map((c, i) => ({
+        sql: Array.isArray(c[0]) ? (c[0] as string[]).join('?') : '',
+        orden: mockedExecuteRaw.mock.invocationCallOrder[i],
+      }))
+      .filter(x => x.sql.includes('UPDATE "TerminalPaymentRequest"'))
+    expect(toque).toHaveLength(1)
+    expect(toque[0].orden).toBeGreaterThan(creacion)
+    // 3) El toque vencido se saltó con aviso y no tumbó el ingreso (el evento ya es durable; el CAS de la ventana lo verá).
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('toque de la solicitud vinculada'),
+      expect.objectContaining({ attemptId: 'ref-fallback', eventLogId: 'evt_fallback' }),
+    )
+  })
+})

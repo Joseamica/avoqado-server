@@ -163,12 +163,17 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
     const candado = leer('services/tpv/candadoDeIntento.ts')
     expect(candado).toMatch(/isolationLevel: Prisma\.TransactionIsolationLevel\.ReadCommitted/)
     const usos = {
-      'services/terminal-payment.service.ts': 1,
+      // Ventana de confirmación (plan 16-sep, Task 2): DOS — la publicación del vínculo y la decisión de la ventana
+      // (`releaseUnprovenNegative`: candado de CADA intento vinculado → veto bancario → CAS → asiento, una sola fotografía).
+      'services/terminal-payment.service.ts': 2,
       // Codex R14-1: el INGRESO del evento también es una transacción del protocolo (candado del intento → createdAt
       // monótono → INSERT), así que son TRES en el webhook: ingreso, publicación del vínculo y escritor por identidad débil.
       // Codex R15-1: y CUATRO con la recuperación de los ingresos sin candado desde S4 (`ordenarIngresosSinCandado`, transacción
       // propia: candado del intento → revalidación del claim → orden de recuperación).
-      'services/tpv/angelpay-webhook.service.ts': 4,
+      // Ventana de confirmación (Task 2, fix round 1 (e)): y CINCO con el TOQUE best-effort de la solicitud vinculada tras un
+      // ingreso sin candado — transacción propia, con la misma espera acotada (`SET LOCAL lock_timeout`), DESPUÉS de persistir
+      // el evento; no toma el candado del intento (el ingreso acaba de vencerlo) y un lock_timeout sólo salta el toque.
+      'services/tpv/angelpay-webhook.service.ts': 5,
       'services/tpv/registroRepetido.ts': 1,
     }
     for (const [rel, n] of Object.entries(usos)) {

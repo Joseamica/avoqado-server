@@ -21,7 +21,7 @@ import logger from '@/config/logger'
 import { normalizeTerminalSerialNumber, terminalIdentityKey } from '@/utils/terminalSerial'
 import { randomUUID } from 'crypto'
 import { tipoDeEvidencia } from './segundaCaptura'
-import { OPCIONES_DE_TRANSACCION_DEL_INTENTO, candadoDeIntento, llaveDeIntento } from './candadoDeIntento'
+import { OPCIONES_DE_TRANSACCION_DEL_INTENTO, candadoDeIntento, esperaDeCandadoMs, llaveDeIntento } from './candadoDeIntento'
 import { RETRIES_EXHAUSTED } from './angelpayEventWorker.service'
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -826,21 +826,33 @@ async function ingresarEventoDelIntento(
         error: error instanceof Error ? error.message : String(error),
       },
     )
-    return (
+    // El evento PRIMERO, en su propia escritura durable: nada de lo que venga después puede perderlo (R15-1).
+    const creado = await insertar(prisma as unknown as Prisma.TransactionClient, {
+      [MARCA_INGRESO_SIN_CANDADO]: { en: new Date().toISOString() },
+    })
+    // Ventana de confirmación (plan 16-sep, Codex R3-P3): un evento que entra SIN el candado del intento tiene que invalidar el
+    // CAS de la ventana — que exige el `updatedAt` leído bajo ese candado —, así que se toca la solicitud vinculada. Se toca
+    // para CUALQUIER evento del fallback (aprobado o no): un rechazo también es información, y lo peor que produce es que la
+    // ventana espere otros 30 s. `timestamp(3)` sin zona ⇒ `NOW() AT TIME ZONE 'UTC'` (regla del repo). Sin vínculo no hay
+    // solicitud que tocar. El toque es BEST-EFFORT y con espera acotada (la misma del candado del intento): si la fila está
+    // tomada —p. ej. por la propia transacción de la ventana— se salta con aviso; el evento ya quedó, y la siguiente pasada de la
+    // ventana lo ve bajo el candado.
+    try {
       await prisma.$transaction(async tx => {
-        const creado = await insertar(tx, { [MARCA_INGRESO_SIN_CANDADO]: { en: new Date().toISOString() } })
-        // Ventana de confirmación (plan 16-sep, Codex R3-P3): un evento que entra SIN el candado del intento tiene que invalidar el
-        // CAS de la ventana — que exige el `updatedAt` leído bajo ese candado —, así que se toca la solicitud vinculada aquí mismo.
-        // `timestamp(3)` sin zona ⇒ `NOW() AT TIME ZONE 'UTC'` (regla del repo). Sin vínculo no hay solicitud que tocar. Se toca
-        // para CUALQUIER evento del fallback (aprobado o no): un rechazo también es información, y lo peor que produce es que la
-        // ventana espere otros 30 s.
+        await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${esperaDeCandadoMs()}ms'`)
         await tx.$executeRaw`
           UPDATE "TerminalPaymentRequest" r SET "updatedAt" = (NOW() AT TIME ZONE 'UTC')
           FROM "TerminalPaymentAttemptLink" l
           WHERE l."attemptId" = ${llaveDelIntento} AND r."requestId" = l."requestId" AND r."venueId" = l."venueId"`
-        return creado
-      })
-    ).id
+      }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
+    } catch (toqueError) {
+      if (!esEsperaDeCandadoVencida(toqueError)) throw toqueError
+      logger.warn(
+        '⚠️ [AngelPay webhook] El toque de la solicitud vinculada (ingreso sin candado) venció por lock_timeout y se saltó: el evento ya quedó persistido; la ventana lo verá en su siguiente pasada',
+        { attemptId: llaveDelIntento, eventLogId: creado.id, error: toqueError instanceof Error ? toqueError.message : String(toqueError) },
+      )
+    }
+    return creado.id
   }
 }
 

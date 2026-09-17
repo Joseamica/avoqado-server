@@ -445,10 +445,15 @@ export type EstrictoPorVenue = ReadonlyMap<string, Date>
  */
 const VENTANA_RETIENE_LA_RANURA: Prisma.TerminalPaymentRequestWhereInput = {
   status: TerminalPaymentRequestStatus.TIMED_OUT,
-  paymentId: null,
-  OR: [
-    { failureCode: 'BANK_APPROVED_AWAITING_PAYMENT' },
-    { failureCode: null, resultJson: { path: ['terminalResult', 'status'], string_contains: '' } },
+  AND: [
+    // P2-5: la cadena VACÍA cuenta como «sin pago», igual que en `UNRESOLVED_FINANCIAL_OUTCOME` y que `!row.paymentId` en el espejo.
+    { OR: [{ paymentId: null }, { paymentId: '' }] },
+    {
+      OR: [
+        { failureCode: 'BANK_APPROVED_AWAITING_PAYMENT' },
+        { failureCode: null, resultJson: { path: ['terminalResult', 'status'], string_contains: '' } },
+      ],
+    },
   ],
 }
 
@@ -2168,12 +2173,24 @@ class TerminalPaymentService {
       // `outcomeEvidence` se degradó a `timeout`) resuelve también las filas que quedaron FAILED por
       // un ACK perdido o CANCELLED sin confirmación de la terminal — antes sólo TIMED_OUT/UNKNOWN,
       // y esas otras dos quedaban ocupando la terminal para siempre (PAX 2841548417, 10-sep).
+      // 🔴 Un negativo tardío SIN evidencia (ya degradado a `timeout` + `terminalResult`) NO reabre una TIMED_OUT CON código:
+      // ésa está RETENIDA por evidencia bancaria (`BANK_APPROVED_AWAITING_PAYMENT`) o SOLTADA por política (`AUTO_RELEASED` /
+      // `MANUAL_RELEASE`), y devolverla a la ventana la re-retendría (segundo asiento) o re-tomaría una ranura soltada a
+      // sabiendas (fix round 1, IMPORTANT 1). Una UNKNOWN sí entra aunque lleve código de ENTREGA (`ACK_TIMEOUT`,
+      // `SOCKET_NOT_FOUND`…): la terminal que contesta demuestra que recibió el cobro, y su negativo es lo que la ventana decide.
+      // Declarado y aceptado (Task 2, ruling sobre el inciso (c)): una UNKNOWN nacida de un `success` inacreditable que la
+      // terminal contradice después con un negativo sin evidencia entra en la ventana; el veto bancario y `findReconcilablePayment` protegen el dinero.
       const late = await prisma.terminalPaymentRequest.updateMany({
         where: {
           requestId,
           venueId,
           ...(newStatus === TerminalPaymentRequestStatus.TIMED_OUT
-            ? { status: { in: [TerminalPaymentRequestStatus.TIMED_OUT, TerminalPaymentRequestStatus.UNKNOWN] } }
+            ? {
+                OR: [
+                  { status: TerminalPaymentRequestStatus.UNKNOWN },
+                  { status: TerminalPaymentRequestStatus.TIMED_OUT, failureCode: null },
+                ],
+              }
             : SIN_DESENLACE_ACREDITADO),
         },
         data: { ...data, lateResult: true },
@@ -3036,7 +3053,9 @@ class TerminalPaymentService {
       row.resultJson && typeof row.resultJson === 'object' && !Array.isArray(row.resultJson)
         ? (row.resultJson as Record<string, unknown>)
         : null
-    return sobre?.status === 'timeout' && !!sobre.terminalResult && typeof sobre.terminalResult === 'object'
+    // «Tiene sobre de la terminal» se define igual en las cuatro lecturas (espejo, predicado, barrido y aquí): `terminalResult.status` es una cadena.
+    const tr = sobre?.status === 'timeout' ? (sobre.terminalResult as Record<string, unknown> | null | undefined) : null
+    return !!tr && typeof tr === 'object' && typeof tr.status === 'string'
   }
 
   /**
@@ -3103,6 +3122,18 @@ class TerminalPaymentService {
           orderId: row.orderId,
         })
         return 'RECONCILED'
+      }
+      // 🔴 Un Payment etiquetado para ESTA solicitud que no se pudo ligar (identidad, contrato, error) RETIENE: liberar aquí
+      // sería soltar orden y ranura con dinero de por medio (fix round 1, IMPORTANT 2). `ALREADY_BOUND` = otro la cerró
+      // primero: la siguiente lectura / el CAS lo ven.
+      if (!cierre.bound && cierre.reason !== 'ALREADY_BOUND') {
+        logger.error('🚨 [TerminalPayment] window found a payment it could not bind — holding for human review', {
+          requestId,
+          venueId,
+          paymentId: payment.id,
+          reason: cierre.reason,
+        })
+        return 'NOT_ELIGIBLE'
       }
     }
 
@@ -3230,6 +3261,7 @@ class TerminalPaymentService {
           SELECT "requestId", "venueId" FROM "TerminalPaymentRequest"
           WHERE "status" = 'TIMED_OUT' AND "failureCode" IS NULL AND "paymentId" IS NULL
             AND "resultJson"->>'status' = 'timeout' AND jsonb_typeof("resultJson"->'terminalResult') = 'object'
+            AND jsonb_typeof("resultJson"->'terminalResult'->'status') = 'string'
             AND "updatedAt" <= ${utcTs(cutoff)}
           ORDER BY "updatedAt" ASC
           LIMIT 200`,

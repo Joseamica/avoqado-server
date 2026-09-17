@@ -88,6 +88,15 @@ const CASOS: Caso[] = [
     permisivo: true,
   },
   {
+    // P2-5: la cadena VACÍA en `paymentId` cuenta como ausente también aquí (JS: `!row.paymentId`; SQL: `OR` con '').
+    nombre: 'TIMED_OUT sin código CON terminalResult y paymentId cadena VACÍA (la ventana decide)',
+    status: TerminalPaymentRequestStatus.TIMED_OUT,
+    failureCode: null,
+    paymentId: '',
+    resultJson: { status: 'timeout', terminalResult: { status: 'cancelled', errorMessage: null, outcomeEvidence: null } },
+    permisivo: true,
+  },
+  {
     nombre: 'TIMED_OUT sin código con sobre timeout SIN terminalResult (histórica)',
     status: TerminalPaymentRequestStatus.TIMED_OUT,
     failureCode: null,
@@ -264,6 +273,7 @@ describe('interruptor por venue del predicado estricto', () => {
       'TIMED_OUT sin código',
       'TIMED_OUT sin código con sobre timeout SIN terminalResult (histórica)',
       'TIMED_OUT sin código CON terminalResult (la ventana decide)',
+      'TIMED_OUT sin código CON terminalResult y paymentId cadena VACÍA (la ventana decide)',
       'TIMED_OUT/BANK_APPROVED_AWAITING_PAYMENT (retenida por evidencia bancaria)',
       'CANCELLED sin disposición (la columna no existía en prod)',
       'CANCELLED con ACTIVE',
@@ -335,6 +345,7 @@ describe('interruptor por venue del predicado estricto', () => {
   it('P1 las filas de la VENTANA de confirmación retienen la ranura en los DOS regímenes; la histórica sin sobre y la soltada a los 20 min, no', async () => {
     const retienen = [
       'TIMED_OUT sin código CON terminalResult (la ventana decide)',
+      'TIMED_OUT sin código CON terminalResult y paymentId cadena VACÍA (la ventana decide)',
       'TIMED_OUT/BANK_APPROVED_AWAITING_PAYMENT (retenida por evidencia bancaria)',
     ]
     const noRetienen = [
