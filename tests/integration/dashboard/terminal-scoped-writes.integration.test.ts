@@ -25,6 +25,9 @@ import { organizationDashboardService } from '@/services/organization-dashboard/
 import prisma from '@/utils/prismaClient'
 
 const suffix = `tsw-${Date.now()}`
+// Postgres rechaza U+0000 dentro de un jsonb (22P05). Se construye así, sin secuencia de escape, para que ninguna
+// herramienta de edición lo convierta en un byte nulo dentro del archivo.
+const NULO = 'a' + String.fromCharCode(0) + 'b'
 
 let orgX: string
 let orgY: string
@@ -105,18 +108,24 @@ describe('ajustes por negocio (updateVenueTpvSettings)', () => {
     // Orden del lote: [horario, t3, t1]. t3 tiene su propio valor de `notaDePrueba`, así que su escritura es válida;
     // t1 hereda el valor del negocio, que lleva un carácter nulo (U+0000) que Postgres rechaza en jsonb. Si la base no deshiciera el
     // lote, quedarían guardados el horario nuevo y la escritura de t3.
+    await prisma.venueSettings.upsert({
+      where: { venueId: venueA },
+      update: { expectedCheckInTime: '07:45' },
+      create: { venueId: venueA, expectedCheckInTime: '07:45' },
+    })
     const lectura = [await readRow(t3), await readRow(t1)]
     jest.spyOn(prisma.terminal, 'findMany').mockResolvedValueOnce(lectura as never)
     const t3Antes = await settingsOf(t3)
+    const t1Antes = await settingsOf(t1)
 
     await expect(
-      updateVenueTpvSettings(venueA, { showReviewScreen: false, expectedCheckInTime: '06:15', notaDePrueba: 'a\u0000b' } as never),
+      updateVenueTpvSettings(venueA, { showReviewScreen: false, expectedCheckInTime: '06:15', notaDePrueba: NULO } as never),
     ).rejects.toThrow(/22P05|unsupported Unicode escape/) // lo rechaza POSTGRES al ejecutar, no una validación previa
 
     const horario = await prisma.venueSettings.findUnique({ where: { venueId: venueA }, select: { expectedCheckInTime: true } })
     expect(horario?.expectedCheckInTime).toBe('07:45')
     expect(await settingsOf(t3)).toEqual(t3Antes)
-    expect((await settingsOf(t1)).showReviewScreen).toBe(true)
+    expect(await settingsOf(t1)).toEqual(t1Antes)
   })
 })
 
@@ -132,6 +141,31 @@ describe('cascada de la organización (upsertOrgTpvDefaults)', () => {
     expect((await settingsOf(t2)).enableBarcodeScanner).toBeUndefined()
     const config = await prisma.organizationAttendanceConfig.findUnique({ where: { organizationId: orgX }, select: { settings: true } })
     expect((config?.settings as Record<string, unknown>).enableBarcodeScanner).toBe(false)
+  })
+
+  it('si una escritura del primer lote falla en la base, se deshace también la configuración de la organización', async () => {
+    // Mismo mecanismo: t3 trae su propio `notaDePrueba` y su escritura es válida; t1 hereda el de la organización, con
+    // el carácter nulo. El primer lote lleva la configuración de la organización, así que debe deshacerse con él.
+    const lectura = [await readRow(t3), await readRow(t1)]
+    jest.spyOn(prisma.terminal, 'findMany').mockResolvedValueOnce(lectura as never)
+    const configAntes = await prisma.organizationAttendanceConfig.findUnique({
+      where: { organizationId: orgX },
+      select: { settings: true },
+    })
+    const t3Antes = await settingsOf(t3)
+    const t1Antes = await settingsOf(t1)
+
+    await expect(
+      organizationDashboardService.upsertOrgTpvDefaults(orgX, { enableCardPayments: false, notaDePrueba: NULO }),
+    ).rejects.toThrow(/22P05|unsupported Unicode escape/)
+
+    const configDespues = await prisma.organizationAttendanceConfig.findUnique({
+      where: { organizationId: orgX },
+      select: { settings: true },
+    })
+    expect(configDespues?.settings ?? null).toEqual(configAntes?.settings ?? null)
+    expect(await settingsOf(t3)).toEqual(t3Antes)
+    expect(await settingsOf(t1)).toEqual(t1Antes)
   })
 })
 
