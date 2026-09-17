@@ -1237,9 +1237,13 @@ export type AttemptLinkAck =
  * Correo ops de la aprobación tardía tras la ventana. Corre DESPUÉS del commit y sin `await` encadenado: dentro de la
  * transacción podría salir y luego revertirse, y repetirse al reintentar (Codex, Task 0, P2). El asiento durable y único es
  * el `ActivityLog` de `closeRowFromPaymentTx`; el correo es best-effort y NO se promete «exactamente una vez».
- * La llaman TODOS los llamadores de `closeRowFromPaymentTx` tras su commit — el registrador REST/webhook (orden y venta
- * rápida), el registro repetido, el `success` de la terminal por SOCKET (`closeRow`), la ventana (`RECONCILED`) y el barrido
- * de 30 min —; sin `lateAfterWindow` en el desenlace no hace nada. `sendOpsAlert` nunca rechaza.
+ * La llaman los llamadores de `closeRowFromPaymentTx` tras su commit — el registrador REST/webhook (orden y venta rápida),
+ * el registro repetido, el `success` de la terminal por SOCKET (`closeRow`), la ventana (`RECONCILED`), el barrido de 30 min
+ * de las liberadas por la ventana y, desde Codex r4 (P2-N4), también el barrido de vencidas (`reconcileStaleRequests`), la
+ * rama UNKNOWN de `reconcileUnknownRequests` y la liberación manual (`releaseUnknownRequest`): en los tres la fila puede
+ * liberarse por la ventana y recibir su Payment ENTRE la lectura y el cierre, y reabierta ya no entra al barrido de 30 min.
+ * El único cierre que no la llama es el barrido de las soltadas por política (`AUTO_RELEASED`/`MANUAL_RELEASE`), que manda
+ * su propio correo de doble cobro en todo caso. Sin `lateAfterWindow` en el desenlace no hace nada. `sendOpsAlert` nunca rechaza.
  */
 export function avisarAprobacionTardiaTrasVentana(
   cierre: CloseRowOutcome | null,
@@ -2246,12 +2250,20 @@ class TerminalPaymentService {
   }
 
   /**
-   * Codex r3 (P1-D): la escritura del `success` DEGRADADO (UNKNOWN, sin `terminalResult`) con la fusión de `claimedSuccess` ATÓMICA
-   * en el UPDATE: `jsonb_set(<sobre nuevo sin claimedSuccess>, '{claimedSuccess}', <previo de la fila> || <nuevo no vacío>)`. El
-   * brazo (en vuelo / tardío) es el mismo de la escritura normal (`brazoTardioDeCierre`); el CAS va por `id` + `status` +
-   * `failureCode` de la fila leída (no por `updatedAt`: otro `success` que sólo añada señales no debe hacernos perder la vuelta —
-   * la fusión ya lo absorbe); si pierde, se relee una vez. Nunca encoge; sólo un NEGATIVO posterior de la terminal (brazo tardío de
-   * un failed/cancelled, ruling (c) de la Task 2) reemplaza el sobre entero.
+   * Codex r3 (P1-D) + r4 (P1-N3): la escritura del `success` DEGRADADO (UNKNOWN, sin `terminalResult`) en DOS sentencias:
+   *  1. la AFIRMACIÓN, sola y SIN CAS de estado — `jsonb_set(resultJson, '{claimedSuccess}', <previo de la fila> || <nuevo no
+   *     vacío>)` sobre cualquier fila de la solicitud sin ganador (`paymentId IS NULL`, `status <> COMPLETED`). No toca `status`
+   *     ni `updatedAt`: no es una decisión de estado. Queda persistida ANTES de pelear por el estado, así que un CAS que se agote
+   *     ya no se la lleva (Codex r4: dos cambios de estado concurrentes —un `success` vacío que limpia el failureCode y el
+   *     watchdog escribiendo AUTO_RELEASED— agotaban los dos intentos y la afirmación desaparecía con ellos: sin Payment ni
+   *     webhook, era el único veto a la declaración «no se presentó tarjeta»).
+   *  2. el ESTADO, con CAS por `id` + `status` + `failureCode` de la fila leída (no por `updatedAt`: otro `success` que sólo
+   *     añada señales no debe hacernos perder la vuelta), hasta 3 vueltas, SIN volver a fundir: el sobre nuevo se escribe
+   *     conservando el `claimedSuccess` ya persistido (`jsonb_set(sobre, '{claimedSuccess}', "resultJson"->'claimedSuccess')`).
+   *     Si se agota, `warn` «afirmación persistida, estado no reescrito» y se devuelve la fila fresca: el estado ajeno se respeta,
+   *     la afirmación no se pierde.
+   * El brazo (en vuelo / tardío) es el mismo de la escritura normal (`brazoTardioDeCierre`). Nunca encoge; sólo un NEGATIVO
+   * posterior de la terminal (brazo tardío de un failed/cancelled, ruling (c) de la Task 2) reemplaza el sobre entero.
    */
   private async escribirSuccessDegradado(
     requestId: string,
@@ -2263,8 +2275,24 @@ class TerminalPaymentService {
     const nueva = Object.fromEntries(
       Object.entries(claimedSuccess ?? {}).filter(([, v]) => v !== undefined && v !== null && v !== '' && v !== false),
     )
+    let afirmacionPersistida = false
     try {
-      for (let intento = 0; intento < 2; intento++) {
+      // (1) La afirmación, fuera del CAS de estado.
+      if (Object.keys(nueva).length > 0) {
+        const n = await prisma.$executeRaw`
+          UPDATE "TerminalPaymentRequest"
+          SET "resultJson" = jsonb_set(
+                coalesce("resultJson", '{}'::jsonb),
+                '{claimedSuccess}',
+                (CASE WHEN jsonb_typeof("resultJson"->'claimedSuccess') = 'object' THEN "resultJson"->'claimedSuccess' ELSE '{}'::jsonb END)
+                  || ${JSON.stringify(nueva)}::jsonb,
+                true)
+          WHERE "requestId" = ${requestId} AND "venueId" = ${venueId} AND "paymentId" IS NULL AND "status" <> 'COMPLETED'`
+        afirmacionPersistida = n === 1
+      }
+      // (2) El estado, con CAS y sin volver a fundir.
+      let vueltas = 0
+      for (; vueltas < 3; vueltas++) {
         const fila = await prisma.terminalPaymentRequest.findFirst({
           where: { requestId, venueId, OR: [{ status: { in: IN_FLIGHT } }, this.brazoTardioDeCierre(newStatus)] },
           select: { id: true, status: true, failureCode: true },
@@ -2275,12 +2303,9 @@ class TerminalPaymentService {
           UPDATE "TerminalPaymentRequest"
           SET "status" = ${newStatus}::"TerminalPaymentRequestStatus",
               "failureCode" = NULL,
-              "resultJson" = jsonb_set(
-                ${JSON.stringify(sobre)}::jsonb,
-                '{claimedSuccess}',
-                (CASE WHEN jsonb_typeof("resultJson"->'claimedSuccess') = 'object' THEN "resultJson"->'claimedSuccess' ELSE '{}'::jsonb END)
-                  || ${JSON.stringify(nueva)}::jsonb,
-                true),
+              "resultJson" = (CASE WHEN jsonb_typeof("resultJson"->'claimedSuccess') = 'object'
+                                THEN jsonb_set(${JSON.stringify(sobre)}::jsonb, '{claimedSuccess}', "resultJson"->'claimedSuccess', true)
+                                ELSE ${JSON.stringify(sobre)}::jsonb END),
               "updatedAt" = (NOW() AT TIME ZONE 'UTC')
               ${late ? Prisma.sql`, "lateResult" = true` : Prisma.empty}
           WHERE "id" = ${fila.id} AND "status" = ${fila.status}::"TerminalPaymentRequestStatus"
@@ -2291,8 +2316,18 @@ class TerminalPaymentService {
           return result
         }
       }
-      // Neither matched → row already in a final immutable state (or never existed).
-      logger.info(`ℹ️ [TerminalPayment] closeRow no-op (row absent or already final)`, { requestId, newStatus })
+      if (vueltas === 3) {
+        // El CAS perdió tres veces: otro escritor decide el estado; la afirmación (1) ya está en la fila. Se devuelve la fresca.
+        logger.warn(`⚠️ [TerminalPayment] closeRow: afirmación persistida, estado no reescrito (el CAS de estado se agotó)`, {
+          requestId,
+          venueId,
+          newStatus,
+          afirmacionPersistida,
+        })
+      } else {
+        // Neither matched → row already in a final immutable state (or never existed).
+        logger.info(`ℹ️ [TerminalPayment] closeRow no-op (row absent or already final)`, { requestId, newStatus })
+      }
       const winner = await prisma.terminalPaymentRequest.findFirst({ where: { requestId, venueId } })
       if (winner) return resultFromRow(winner)
     } catch (err) {
@@ -2694,9 +2729,16 @@ class TerminalPaymentService {
       // Codex R12-6: «ya ligada» sólo si el puntero es un cobro ACREDITADO de esta solicitud (el mismo criterio que el
       // árbitro). Un puntero sin procedencia (una fila histórica contaminada por un resultado no-success del socket) no
       // puede excluir al cargo auténtico: se reemplaza EXACTAMENTE ese puntero (CAS sobre su valor), con 🚨 y bitácora.
+      // Certificación de 2442818d (controlador): «ya ligada» es «ya CERRADA con este Payment» (COMPLETED + el mismo puntero).
+      // Una fila NO COMPLETED que ya apunta a este mismo Payment es un puntero SIN cierre (un cierre que escribió el ganador y
+      // no terminó, `closedVia` nulo): este cierre lo TERMINA — pasa por las mismas comprobaciones que un candidato nuevo
+      // (elegibilidad, reclamaciones ajenas, procedencia y atribución física), etiqueta al Payment si no lo estaba, escribe
+      // `closedVia` y devuelve `bound: true` con `reopened`/`alarmed` como cualquier otro cierre. Antes salía `ALREADY_BOUND`,
+      // el barrido la contaba como cerrada y la fila se quedaba UNKNOWN para siempre (regresión de Codex r3, P1-N2).
+      const punteroPropioSinCierre = before.paymentId === paymentId && before.status !== TerminalPaymentRequestStatus.COMPLETED
+      if (before.paymentId === paymentId && !punteroPropioSinCierre) return { bound: false, reason: 'ALREADY_BOUND' }
       let punteroAReemplazar: string | null = null
-      if (before.paymentId) {
-        if (before.paymentId === paymentId) return { bound: false, reason: 'ALREADY_BOUND' }
+      if (before.paymentId && !punteroPropioSinCierre) {
         const actual = await tx.payment.findFirst({
           where: { id: before.paymentId, venueId, ...whereElegibleComoCobroDeSolicitud(before, 'ganador') },
           select: seleccionDeProcedencia,
@@ -2792,9 +2834,13 @@ class TerminalPaymentService {
       const contractMismatch = descuadre !== null
 
       // PRIMERO la fila: el CAS es «todavía sin ganador» (`paymentId: null`), no «todavía no COMPLETED» — o, Codex R12-6,
-      // «todavía con el puntero sin procedencia que se va a reemplazar» (nunca un ganador acreditado escrito en medio).
+      // «todavía con el puntero sin procedencia que se va a reemplazar» (nunca un ganador acreditado escrito en medio) — o,
+      // para el puntero PROPIO sin cierre, «sin ganador o con ESTE mismo» (`paymentId IN (NULL, paymentId)`), acotado a la fila
+      // leída bajo el candado.
       const ganada = await tx.terminalPaymentRequest.updateMany({
-        where: { requestId, venueId, paymentId: punteroAReemplazar },
+        where: punteroPropioSinCierre
+          ? { id: before.id, requestId, venueId, OR: [{ paymentId: null }, { paymentId }] }
+          : { requestId, venueId, paymentId: punteroAReemplazar },
         data: {
           status: TerminalPaymentRequestStatus.COMPLETED,
           paymentId,
@@ -3019,6 +3065,16 @@ class TerminalPaymentService {
         )
         // `ALREADY_BOUND` = otro camino la cerró con este mismo Payment: cuenta como cerrada, sin avisos propios.
         if (cierre.bound || cierre.reason === 'ALREADY_BOUND') completed += 1
+        // Codex r4 (P2-N4): si entre la lectura del barrido y este cierre la ventana la liberó y el banco aprobó después, el
+        // cierre común reabrió con `lateAfterWindow` — y la fila ya no volverá a entrar al barrido de 30 min que manda ese
+        // correo: se avisa aquí, tras el commit (sin `lateAfterWindow` no hace nada).
+        avisarAprobacionTardiaTrasVentana(cierre, {
+          requestId: row.requestId,
+          venueId: row.venueId,
+          paymentId: payment.id,
+          terminalId: row.terminalId,
+          orderId: row.orderId,
+        })
         // 🔴 El MISMO evento de dinero se descubre por dos rutas y sólo una avisaba:
         // closeRowFromPaymentTx dispara el 🚨 cuando la fila venía cancelada, y esta no
         // disparaba nada. Si el hallazgo llegaba por aquí, nadie se enteraba de que el
@@ -3870,6 +3926,15 @@ class TerminalPaymentService {
         if (!cierre.bound && cierre.reason === 'ALREADY_BOUND') completed += 1
         if (cierre.bound) {
           completed += 1
+          // Codex r4 (P2-N4): la fila pudo liberarse por la ventana y recibir su Payment ENTRE la lectura de arriba y este
+          // cierre; reabierta aquí ya no entra al barrido de 30 min de abajo, así que el correo sale de este llamador.
+          avisarAprobacionTardiaTrasVentana(cierre, {
+            requestId: row.requestId,
+            venueId: row.venueId,
+            paymentId: payment.id,
+            terminalId: row.terminalId,
+            orderId: row.orderId,
+          })
           // 🚨 stable token for Better Stack — do NOT rename.
           logger.error(
             `🚨 [Terminal-payment watchdog] Payment recorded for an UNKNOWN request — reconciled to COMPLETED (money moved after the POS gave up)`,
@@ -4106,6 +4171,14 @@ class TerminalPaymentService {
         })
         return { requestId, released: false, status: fresh?.status ?? null, paymentId: fresh?.paymentId ?? undefined }
       }
+      // Codex r4 (P2-N4): misma carrera que los barridos — liberada por la ventana y pagada entre la lectura y el cierre.
+      avisarAprobacionTardiaTrasVentana(cierre, {
+        requestId,
+        venueId,
+        paymentId: payment.id,
+        terminalId: row.terminalId,
+        orderId: row.orderId,
+      })
       logger.error(`🚨 [TerminalPayment] Manual release refused — a card payment exists for the UNKNOWN request; reconciled to COMPLETED`, {
         requestId,
         venueId,

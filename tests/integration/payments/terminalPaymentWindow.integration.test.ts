@@ -1439,6 +1439,162 @@ describe('P1-N2 · los barridos (vencidas, UNKNOWN) y la liberación manual cier
   })
 })
 
+// ── Codex r4 · P2-N4: los tres cierres nuevos por el cierre común (vencidas, UNKNOWN, liberación manual) AVISAN la aprobación tardía ──
+describe('P2-N4 · un barrido o la liberación manual que reabre una fila liberada por la ventana manda el correo de aprobación tardía', () => {
+  /**
+   * La secuencia de Codex: el barrido LEE la fila (en vuelo o UNKNOWN) y, ANTES de buscar su Payment, la terminal contesta un
+   * `timeout`, la ventana vence y la libera (FAILED/NO_EVIDENCE_AFTER_WINDOW); entonces aparece el Payment legacy. El cierre
+   * común reabre con `lateAfterWindow` y el LLAMADOR tiene que avisar: la fila queda COMPLETED y ya no entra al barrido de
+   * 30 min que manda ese correo. Se reproduce interponiendo la liberación REAL entre la lectura del barrido y su búsqueda del pago.
+   */
+  const liberadaYPagadaAntesDeBuscarElPago = (row: { id: string; requestId: string }) => {
+    const svc = terminalPaymentService as any
+    const original = svc.findReconcilablePayment.bind(terminalPaymentService)
+    const estado = { intercalado: false, pagoId: '' }
+    const spy = jest.spyOn(svc, 'findReconcilablePayment').mockImplementation(async (fila: any) => {
+      if (fila?.requestId === row.requestId && !estado.intercalado) {
+        estado.intercalado = true
+        await prisma.terminalPaymentRequest.update({ where: { id: row.id }, data: negativoSinEvidencia() as any })
+        await conUpdatedAt(row, new Date(Date.now() - UNPROVEN_NEGATIVE_WINDOW_MS - 1_000))
+        expect(await terminalPaymentService.releaseUnprovenNegative(row.requestId, venueId, 'WATCHDOG')).toBe('RELEASED')
+        estado.pagoId = (await auditPayment({ processorData: { terminalPaymentRequestId: row.requestId, deviceSerialNumber: fixture } })).id
+      }
+      return original(fila)
+    })
+    return { spy, estado }
+  }
+  /** UN correo de aprobación tardía (nombra el Payment y la solicitud), la fila reabierta y su asiento único. */
+  const reabiertaYAvisada = async (row: { id: string; requestId: string }, estado: { intercalado: boolean; pagoId: string }) => {
+    expect(estado.intercalado).toBe(true)
+    expect(await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({
+      status: 'COMPLETED',
+      paymentId: estado.pagoId,
+      lateResult: true,
+    })
+    expect(
+      await prisma.activityLog.count({ where: { venueId, action: 'TERMINAL_PAYMENT_LATE_APPROVAL_AFTER_WINDOW', entityId: row.id } }),
+    ).toBe(1)
+    expect(sendOpsAlert).toHaveBeenCalledTimes(1)
+    expect(sendOpsAlert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        subject: `Cobro aprobado tarde tras la ventana — ${fixture}`,
+        lines: expect.arrayContaining([expect.stringContaining(estado.pagoId), expect.stringContaining(row.requestId)]),
+      }),
+    )
+    // La fila ya es COMPLETED: el barrido de 30 min no la ve, así que este correo era el único.
+    await terminalPaymentService.reconcileUnknownRequests(new Date())
+    expect(sendOpsAlert).toHaveBeenCalledTimes(1)
+  }
+
+  it('(a) reconcileStaleRequests: la SENT vencida se libera por la ventana y recibe su Payment antes de que el barrido lo busque ⇒ reabre y manda UN correo', async () => {
+    const row = await auditRequest({ status: 'SENT', expiresAt: new Date(Date.now() - 60_000) })
+    const { spy, estado } = liberadaYPagadaAntesDeBuscarElPago(row)
+    try {
+      expect((await terminalPaymentService.reconcileStaleRequests(new Date())).completed).toBe(1)
+    } finally {
+      spy.mockRestore()
+    }
+    await reabiertaYAvisada(row, estado)
+  })
+
+  it('(b) reconcileUnknownRequests (rama UNKNOWN): la UNKNOWN se libera por la ventana y recibe su Payment antes de que el barrido lo busque ⇒ reabre y manda UN correo', async () => {
+    const row = await auditRequest({ status: 'UNKNOWN', failureCode: 'TIMED_OUT' })
+    const { spy, estado } = liberadaYPagadaAntesDeBuscarElPago(row)
+    try {
+      expect((await terminalPaymentService.reconcileUnknownRequests(new Date())).completed).toBe(1)
+    } finally {
+      spy.mockRestore()
+    }
+    await reabiertaYAvisada(row, estado)
+  })
+
+  it('(c) releaseUnknownRequest: la UNKNOWN se libera por la ventana y recibe su Payment antes de que la liberación manual lo busque ⇒ reabre, contesta COMPLETED y manda UN correo', async () => {
+    const row = await auditRequest({ status: 'UNKNOWN', failureCode: 'TIMED_OUT' })
+    const { spy, estado } = liberadaYPagadaAntesDeBuscarElPago(row)
+    try {
+      expect(
+        await terminalPaymentService.releaseUnknownRequest({
+          requestId: row.requestId,
+          venueId,
+          actor: { staffId: null, source: 'MCP' },
+          reason: 'prueba',
+        }),
+      ).toMatchObject({ released: false, status: 'COMPLETED', paymentId: estado.pagoId })
+    } finally {
+      spy.mockRestore()
+    }
+    await reabiertaYAvisada(row, estado)
+  })
+})
+
+// ── Certificación de integración de 2442818d (controlador): `ALREADY_BOUND` es «ya CERRADA con este Payment», no «ya apunta a él» ──
+describe('Cierre común · un puntero PROPIO sin cierre (la fila apunta a su Payment acreditado pero no es COMPLETED) se TERMINA', () => {
+  const conVinculo = async (over: Record<string, unknown>) => {
+    const row = await auditRequest(over)
+    const attemptId = `att-${randomUUID()}`
+    await prisma.terminalPaymentAttemptLink.create({ data: { attemptId, requestId: row.requestId, venueId, terminalId: fixture } })
+    return { row, attemptId }
+  }
+  /** El Payment acreditado de la solicitud (etiquetado en columna y en `processorData`, cobrado en esta terminal). */
+  const pagoAcreditadoDe = (row: { requestId: string }, attemptId: string) =>
+    auditPayment({
+      idempotencyKey: attemptId,
+      terminalPaymentRequestId: row.requestId,
+      processorData: { terminalPaymentRequestId: row.requestId, deviceSerialNumber: fixture },
+    })
+  const cerrarCon = (requestId: string, paymentId: string) =>
+    prisma.$transaction(tx => terminalPaymentService.closeRowFromPaymentTx(tx, requestId, paymentId, venueId, undefined, 'REST'))
+
+  it('(a) UNKNOWN con paymentId = su propio Payment acreditado y closedVia null ⇒ reconcileUnknownRequests la cierra COMPLETED con closedVia, etiqueta, UN solo cierre; el replay dice ALREADY_BOUND', async () => {
+    const { row, attemptId } = await conVinculo({ status: 'UNKNOWN', failureCode: 'TIMED_OUT', closedVia: null })
+    const pago = await pagoAcreditadoDe(row, attemptId)
+    // El puntero sin cierre: un cierre que escribió el ganador y no terminó (o lo escribió otro camino sin cerrar).
+    await prisma.terminalPaymentRequest.update({ where: { id: row.id }, data: { paymentId: pago.id } })
+    const cierres = jest.spyOn(terminalPaymentService, 'closeRowFromPaymentTx')
+    try {
+      expect((await terminalPaymentService.reconcileUnknownRequests(new Date())).completed).toBe(1)
+      const desenlaces = await Promise.all(cierres.mock.results.map(r => r.value as Promise<{ bound: boolean }>))
+      expect(desenlaces.filter(d => d.bound)).toHaveLength(1)
+    } finally {
+      cierres.mockRestore()
+    }
+    expect(await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({
+      status: 'COMPLETED',
+      paymentId: pago.id,
+      closedVia: 'terminal',
+      lateResult: true,
+    })
+    expect(await prisma.payment.findUniqueOrThrow({ where: { id: pago.id } })).toMatchObject({ terminalPaymentRequestId: row.requestId })
+    expect(await cerrarCon(row.requestId, pago.id)).toEqual({ bound: false, reason: 'ALREADY_BOUND' })
+  })
+
+  it('(b) COMPLETED que ya apunta al mismo Payment ⇒ ALREADY_BOUND, sin tocar la fila ni el Payment', async () => {
+    const { row, attemptId } = await conVinculo({ status: 'COMPLETED', closedVia: 'terminal' })
+    const pago = await pagoAcreditadoDe(row, attemptId)
+    const cerrada = await prisma.terminalPaymentRequest.update({ where: { id: row.id }, data: { paymentId: pago.id } })
+    expect(await cerrarCon(row.requestId, pago.id)).toEqual({ bound: false, reason: 'ALREADY_BOUND' })
+    const despues = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    expect(despues).toMatchObject({ status: 'COMPLETED', paymentId: pago.id, closedVia: 'terminal' })
+    expect(despues.updatedAt.getTime()).toBe(cerrada.updatedAt.getTime())
+  })
+
+  it('(c) control: UNKNOWN que apunta a OTRO Payment acreditado ⇒ un cierre con un Payment distinto sigue diciendo ALREADY_BOUND y conserva el puntero', async () => {
+    const { row, attemptId } = await conVinculo({ status: 'UNKNOWN', failureCode: 'TIMED_OUT', closedVia: null })
+    const ganador = await pagoAcreditadoDe(row, attemptId)
+    await prisma.terminalPaymentRequest.update({ where: { id: row.id }, data: { paymentId: ganador.id } })
+    const otro = await auditPayment({
+      idempotencyKey: `otra-llave-${randomUUID().slice(0, 8)}`,
+      processorData: { deviceSerialNumber: fixture },
+    })
+    expect(await cerrarCon(row.requestId, otro.id)).toEqual({ bound: false, reason: 'ALREADY_BOUND' })
+    expect(await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({
+      status: 'UNKNOWN',
+      paymentId: ganador.id,
+    })
+    expect(await prisma.payment.findUniqueOrThrow({ where: { id: otro.id } })).toMatchObject({ terminalPaymentRequestId: null })
+  })
+})
+
 // ── Task 4: la declaración del cajero «no se presentó tarjeta» ──
 describe('Declaración del cajero', () => {
   const serialDelFixture = `AVQD-${fixture.toUpperCase()}`
@@ -1807,5 +1963,103 @@ describe('Declaración del cajero', () => {
       code: 'POSITIVE_EVIDENCE_EXISTS',
       statusCode: 409,
     })
+  })
+  // ── Codex r4 · P1-N3: la afirmación se persiste FUERA del CAS de estado — agotar el CAS ya no la pierde ──
+  /**
+   * La secuencia de Codex: fila UNKNOWN con código → llega un `success` con transactionId y sin Payment; entre cada lectura
+   * suya y su CAS otro escritor mueve el estado (un `success` VACÍO limpia el failureCode; el watchdog escribe
+   * TIMED_OUT/AUTO_RELEASED). Con la fusión DENTRO del CAS, dos pérdidas seguidas tiraban la afirmación junto con el estado.
+   */
+  const cambiosDeEstadoEntreLecturaYCas = (row: { id: string; requestId: string }, cambios: Array<Record<string, unknown>>) => {
+    const original = prisma.terminalPaymentRequest.findFirst.bind(prisma.terminalPaymentRequest)
+    const pendientes = [...cambios]
+    let lecturasDelCas = 0
+    const spy = jest.spyOn(prisma.terminalPaymentRequest, 'findFirst').mockImplementation(async (args: any) => {
+      const r = await original(args)
+      // Sólo las lecturas del CAS de estado de ESTA fila (id/status/failureCode); la comprobación de propiedad no cuenta.
+      if (args?.where?.requestId === row.requestId && args?.select?.failureCode === true) {
+        lecturasDelCas += 1
+        const cambio = pendientes.shift()
+        if (cambio) await prisma.terminalPaymentRequest.update({ where: { id: row.id }, data: cambio as any })
+      }
+      return r
+    })
+    return { spy, pendientes, lecturas: () => lecturasDelCas }
+  }
+  const successSinPago = (requestId: string) =>
+    terminalPaymentService.handlePaymentResultFromSocket({ requestId, status: 'success', transactionId: 'tx-afirmada' } as any, {
+      socketId: 'fixture-socket',
+      terminalId: fixture,
+      venueId,
+    })
+
+  it('(P1-N3 · r4 · a) el estado cambia DOS veces entre la lectura y el CAS (un success vacío limpia el failureCode; el watchdog escribe TIMED_OUT/AUTO_RELEASED): la fila conserva claimedSuccess.transactionId y la declaración ⇒ 409', async () => {
+    const row = await auditRequest({ status: 'UNKNOWN', failureCode: 'ACK_TIMEOUT' })
+    const attemptId = `att-${randomUUID()}`
+    await prisma.terminalPaymentAttemptLink.create({ data: { attemptId, requestId: row.requestId, venueId, terminalId: fixture } })
+    const { spy, pendientes } = cambiosDeEstadoEntreLecturaYCas(row, [
+      { status: 'UNKNOWN', failureCode: null },
+      { status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED' },
+    ])
+    try {
+      await successSinPago(row.requestId)
+    } finally {
+      spy.mockRestore()
+    }
+    expect(pendientes).toHaveLength(0)
+    const fila = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    expect((fila.resultJson as any)?.claimedSuccess).toEqual({ transactionId: 'tx-afirmada' })
+    expect((fila.resultJson as any).terminalResult).toBeUndefined()
+    // La tercera vuelta del CAS gana: quien afirmó «cobré» vuelve a retener la ranura (UNKNOWN, sin código, tardía).
+    expect(fila).toMatchObject({ status: 'UNKNOWN', failureCode: null, paymentId: null, lateResult: true })
+    await expect(declarar(attemptId, owner.id, declaracion(row.requestId))).rejects.toMatchObject({
+      code: 'POSITIVE_EVIDENCE_EXISTS',
+      statusCode: 409,
+    })
+  })
+
+  it('(P1-N3 · r4 · b) el CAS se AGOTA (tres cambios seguidos): el estado ajeno se respeta, la afirmación ya está persistida, se avisa con warn y la declaración ⇒ 409', async () => {
+    const row = await auditRequest({ status: 'UNKNOWN', failureCode: 'ACK_TIMEOUT' })
+    const attemptId = `att-${randomUUID()}`
+    await prisma.terminalPaymentAttemptLink.create({ data: { attemptId, requestId: row.requestId, venueId, terminalId: fixture } })
+    const { spy, pendientes, lecturas } = cambiosDeEstadoEntreLecturaYCas(row, [
+      { status: 'UNKNOWN', failureCode: null },
+      { status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED' },
+      { status: 'TIMED_OUT', failureCode: 'MANUAL_RELEASE' },
+    ])
+    ;(logger.warn as jest.Mock).mockClear()
+    try {
+      await successSinPago(row.requestId)
+    } finally {
+      spy.mockRestore()
+    }
+    const fila = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    expect((fila.resultJson as any)?.claimedSuccess).toEqual({ transactionId: 'tx-afirmada' })
+    expect(pendientes).toHaveLength(0)
+    expect(lecturas()).toBe(3)
+    expect(fila).toMatchObject({ status: 'TIMED_OUT', failureCode: 'MANUAL_RELEASE', paymentId: null })
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('afirmación persistida, estado no reescrito'),
+      expect.objectContaining({ requestId: row.requestId }),
+    )
+    await expect(declarar(attemptId, owner.id, declaracion(row.requestId))).rejects.toMatchObject({
+      code: 'POSITIVE_EVIDENCE_EXISTS',
+      statusCode: 409,
+    })
+  })
+
+  it('(P1-N3 · r4 · regresión) un `success` degradado sobre una fila EN VUELO sigue quedando UNKNOWN con su afirmación en UNA sola pasada del CAS', async () => {
+    const row = await auditRequest({ status: 'SENT' })
+    const { spy, lecturas } = cambiosDeEstadoEntreLecturaYCas(row, [])
+    try {
+      await successSinPago(row.requestId)
+    } finally {
+      spy.mockRestore()
+    }
+    expect(lecturas()).toBe(1)
+    const fila = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    expect(fila).toMatchObject({ status: 'UNKNOWN', failureCode: null, paymentId: null, lateResult: false })
+    expect((fila.resultJson as any).claimedSuccess).toEqual({ transactionId: 'tx-afirmada' })
+    expect((fila.resultJson as any).terminalResult).toBeUndefined()
   })
 })
