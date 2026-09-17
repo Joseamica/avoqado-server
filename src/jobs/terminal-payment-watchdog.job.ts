@@ -65,6 +65,9 @@ export class TerminalPaymentWatchdogJob {
       // reconcileUnknownRequests). A row parked UNKNOWN by the sweep above is seen by this one in
       // the same tick, which at most stamps "terminal returned" 30 s earlier — never frees it.
       await terminalPaymentService.reconcileUnknownRequests()
+      // Ventana de confirmación (plan 16-sep): un negativo de la terminal sin evidencia que lleve ≥ 30 s se libera
+      // aquí si el temporizador en proceso no llegó (reinicio, otra instancia). Idempotente por CAS.
+      await terminalPaymentService.releaseUnprovenNegativesAfterWindow()
       // S5: un POS que sigue esperando en memoria mientras la fila ya quedó COMPLETED con Payment (el webhook
       // confirmó desde otra instancia, o el aviso se perdió) recibe el resultado durable en vez de un 504.
       await terminalPaymentService.resolvePendingFromDurableState()

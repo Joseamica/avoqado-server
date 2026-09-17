@@ -71,6 +71,37 @@ const CASOS: Caso[] = [
   { nombre: 'en vuelo CANCEL_REQUESTED', status: TerminalPaymentRequestStatus.CANCEL_REQUESTED, permisivo: true },
   { nombre: 'UNKNOWN', status: TerminalPaymentRequestStatus.UNKNOWN, permisivo: true },
 
+  // — La VENTANA DE CONFIRMACIÓN (plan 16-sep): retiene la ranura en los DOS regímenes mientras decide (≤ 30 s), o
+  //   mientras el banco aprobó y el Payment aún no existe. Se exige `terminalResult` para NO alcanzar TIMED_OUT históricas. —
+  {
+    nombre: 'TIMED_OUT sin código CON terminalResult (la ventana decide)',
+    status: TerminalPaymentRequestStatus.TIMED_OUT,
+    failureCode: null,
+    resultJson: { status: 'timeout', terminalResult: { status: 'failed', errorMessage: 'SDK U100', outcomeEvidence: null } },
+    permisivo: true,
+  },
+  {
+    nombre: 'TIMED_OUT/BANK_APPROVED_AWAITING_PAYMENT (retenida por evidencia bancaria)',
+    status: TerminalPaymentRequestStatus.TIMED_OUT,
+    failureCode: 'BANK_APPROVED_AWAITING_PAYMENT',
+    resultJson: { status: 'timeout', terminalResult: { status: 'failed', errorMessage: 'SDK U100', outcomeEvidence: null } },
+    permisivo: true,
+  },
+  {
+    nombre: 'TIMED_OUT sin código con sobre timeout SIN terminalResult (histórica)',
+    status: TerminalPaymentRequestStatus.TIMED_OUT,
+    failureCode: null,
+    resultJson: { status: 'timeout', errorMessage: 'La terminal no respondió' },
+    permisivo: false,
+  },
+  {
+    nombre: 'TIMED_OUT/AUTO_RELEASED CON terminalResult (retenida que soltó la ranura a los 20 min)',
+    status: TerminalPaymentRequestStatus.TIMED_OUT,
+    failureCode: 'AUTO_RELEASED',
+    resultJson: { status: 'timeout', terminalResult: { status: 'failed', errorMessage: 'SDK U100', outcomeEvidence: null } },
+    permisivo: false,
+  },
+
   // — Las históricas de producción: HOY no bloquean; con el estricto SÍ —
   { nombre: 'TIMED_OUT sin código', status: TerminalPaymentRequestStatus.TIMED_OUT, permisivo: false },
   {
@@ -202,7 +233,7 @@ describe('interruptor por venue del predicado estricto', () => {
   const SIN_NADIE: ReadonlyMap<string, Date> = new Map()
   const SOLO_MIGRADO: ReadonlyMap<string, Date> = new Map([[venueMigrado, CORTE]])
 
-  it('P1 APAGADO: bloquea EXACTAMENTE lo que bloquea producción hoy — en vuelo y UNKNOWN, nada más', async () => {
+  it('P1 APAGADO: bloquea EXACTAMENTE lo que bloquea producción hoy — en vuelo y UNKNOWN — más las filas de la VENTANA de confirmación, nada más', async () => {
     const enSql = await bloqueadasEnSql(SIN_NADIE)
 
     const esperadas = new Set(sembradas.filter(f => f.permisivo).map(f => f.requestId))
@@ -231,6 +262,9 @@ describe('interruptor por venue del predicado estricto', () => {
     // acreditar y COMPLETED sin Payment pasan a bloquear.
     const debenBloquear = [
       'TIMED_OUT sin código',
+      'TIMED_OUT sin código con sobre timeout SIN terminalResult (histórica)',
+      'TIMED_OUT sin código CON terminalResult (la ventana decide)',
+      'TIMED_OUT/BANK_APPROVED_AWAITING_PAYMENT (retenida por evidencia bancaria)',
       'CANCELLED sin disposición (la columna no existía en prod)',
       'CANCELLED con ACTIVE',
       'FAILED/TPV_ERROR',
@@ -254,6 +288,7 @@ describe('interruptor por venue del predicado estricto', () => {
       'FAILED/TPV_NEVER_RECEIVED',
       'FAILED/TPV_CONFIRMED_NO_CHARGE con evidencia', // 🔴 Añadida el 12-sep: no ACREDITA el desenlace, pero SUELTA la ranura a propósito (ver `SOLTADA_POR_POLITICA`).
       'TIMED_OUT/AUTO_RELEASED (lo que prod liberó por tiempo)',
+      'TIMED_OUT/AUTO_RELEASED CON terminalResult (retenida que soltó la ranura a los 20 min)', // soltada por política: el sobre no la devuelve a la ventana
     ]
     expect(migradoDespues.filter(f => acreditadas.includes(f.nombre) && enSql.has(f.requestId)).map(f => f.nombre)).toEqual([])
 
@@ -295,6 +330,33 @@ describe('interruptor por venue del predicado estricto', () => {
       select: { requestId: true },
     })
     expect(siguenPendientes.map(f => f.requestId).sort()).toEqual([...requestIds].sort())
+  })
+
+  it('P1 las filas de la VENTANA de confirmación retienen la ranura en los DOS regímenes; la histórica sin sobre y la soltada a los 20 min, no', async () => {
+    const retienen = [
+      'TIMED_OUT sin código CON terminalResult (la ventana decide)',
+      'TIMED_OUT/BANK_APPROVED_AWAITING_PAYMENT (retenida por evidencia bancaria)',
+    ]
+    const noRetienen = [
+      'TIMED_OUT sin código con sobre timeout SIN terminalResult (histórica)',
+      'TIMED_OUT/AUTO_RELEASED CON terminalResult (retenida que soltó la ranura a los 20 min)',
+    ]
+    for (const estrictos of [SIN_NADIE, SOLO_MIGRADO]) {
+      const enSql = await bloqueadasEnSql(estrictos)
+      // Retienen en cualquier venue y a cualquier fecha (antes y después del corte): no dependen del interruptor.
+      const debieron = sembradas.filter(f => retienen.includes(f.nombre))
+      expect(debieron.length).toBe(2 * 2 * retienen.length)
+      expect(debieron.filter(f => !enSql.has(f.requestId)).map(f => `${f.venueId}/${f.nombre}`)).toEqual([])
+      // La histórica sin sobre NO retiene en relajado (venue viejo, y migrado antes del corte); la soltada, en ninguno.
+      const historicaEnRelajado = sembradas.filter(
+        f => f.nombre === noRetienen[0] && (f.venueId === venueViejo || estrictos === SIN_NADIE || f.createdAt === ANTES),
+      )
+      expect(historicaEnRelajado.length).toBeGreaterThan(0)
+      expect(historicaEnRelajado.filter(f => enSql.has(f.requestId)).map(f => `${f.venueId}/${f.nombre}`)).toEqual([])
+      expect(sembradas.filter(f => f.nombre === noRetienen[1] && enSql.has(f.requestId)).map(f => `${f.venueId}/${f.nombre}`)).toEqual([])
+      // Y la función espejo dice lo mismo que el SQL sobre las cuatro (si divergieran, admitir y proyectar mentirían distinto).
+      expect(comparar(estrictos, enSql)).toEqual({ sqlDeMenos: [], sqlDeMas: [] })
+    }
   })
 
   it('P1 encender NUNCA libera una fila que ya bloqueaba (el permisivo es subconjunto del estricto)', async () => {
@@ -390,6 +452,7 @@ describe('P1 régimen APAGADO a través de isTerminalBusy y getBusyTerminalIds',
             'FAILED/TPV_NEVER_RECEIVED',
             'FAILED/TPV_CONFIRMED_NO_CHARGE con evidencia', // 🔴 Añadida el 12-sep: no ACREDITA el desenlace, pero SUELTA la ranura a propósito (ver `SOLTADA_POR_POLITICA`).
             'TIMED_OUT/AUTO_RELEASED (lo que prod liberó por tiempo)',
+            'TIMED_OUT/AUTO_RELEASED CON terminalResult (retenida que soltó la ranura a los 20 min)',
           ].includes(f.nombre),
       )
       expect(deberian.length).toBeGreaterThan(0)

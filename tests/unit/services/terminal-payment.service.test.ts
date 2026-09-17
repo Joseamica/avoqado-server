@@ -20,6 +20,7 @@ import {
   leerProcedencia,
   TERMINAL_ATTEMPT_LINK_VERSION,
   terminalPaymentService,
+  UNPROVEN_NEGATIVE_WINDOW_MS,
 } from '@/services/terminal-payment.service'
 import {
   BadRequestError,
@@ -269,18 +270,29 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
     expect(directEmit).not.toHaveBeenCalled()
   })
 
-  it('terminal timeout leaves the execution protected instead of releasing the slot', async () => {
+  it('terminal timeout leaves the execution protected instead of releasing the slot (ventana: TIMED_OUT con el sobre de la terminal)', async () => {
     const pending = terminalPaymentService.sendPaymentToTerminal(baseRequest({ requestId: 'REQ-UNKNOWN-RESULT' }))
     await flush()
     terminalPaymentService.handlePaymentResult({ requestId: 'REQ-UNKNOWN-RESULT', status: 'timeout' })
     await pending
     await flush()
+    // Plan 16-sep: un `timeout` que MANDA LA TERMINAL entra en la ventana de confirmación — TIMED_OUT (no UNKNOWN), sin código
+    // y con el sobre original conservado en `terminalResult`. La ranura y la orden siguen bloqueadas mientras la ventana decide.
     expect(tpr().updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({ requestId: 'REQ-UNKNOWN-RESULT' }),
-        data: expect.objectContaining({ status: 'UNKNOWN' }),
+        data: expect.objectContaining({
+          status: 'TIMED_OUT',
+          failureCode: null,
+          resultJson: expect.objectContaining({ status: 'timeout', terminalResult: expect.objectContaining({ status: 'timeout' }) }),
+        }),
       }),
     )
+    expect(tpr().updateMany).not.toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'UNKNOWN' }) }))
+    const programadas = (terminalPaymentService as any).ventanasProgramadas as Map<string, NodeJS.Timeout>
+    expect(programadas.has('REQ-UNKNOWN-RESULT')).toBe(true)
+    clearTimeout(programadas.get('REQ-UNKNOWN-RESULT')!)
+    programadas.delete('REQ-UNKNOWN-RESULT')
   })
 
   it('cancel intent is durable before the terminal can synchronously acknowledge it', async () => {
@@ -2184,5 +2196,26 @@ describe('desenlaceCanonico — ventana de confirmación', () => {
     expect(
       desenlaceCanonico({ status: TerminalPaymentRequestStatus.TIMED_OUT, failureCode: null, resultJson: { status: 'timeout' } }).outcome,
     ).toBe('UNRESOLVED')
+  })
+})
+
+describe('programarLiberacionPorVentana', () => {
+  it('a los 30 s llama a releaseUnprovenNegative con origen TIMER, una sola vez por solicitud, y no retiene el proceso', () => {
+    jest.useFakeTimers()
+    try {
+      const spy = jest.spyOn(terminalPaymentService, 'releaseUnprovenNegative').mockResolvedValue('NOT_ELIGIBLE')
+      const svc = terminalPaymentService as any
+      svc.programarLiberacionPorVentana('req-t', 'venue-t')
+      svc.programarLiberacionPorVentana('req-t', 'venue-t') // idempotente: un solo temporizador
+      jest.advanceTimersByTime(UNPROVEN_NEGATIVE_WINDOW_MS - 1)
+      expect(spy).not.toHaveBeenCalled()
+      jest.advanceTimersByTime(2)
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect(spy).toHaveBeenCalledWith('req-t', 'venue-t', 'TIMER')
+      expect((svc.ventanasProgramadas as Map<string, unknown>).has('req-t')).toBe(false)
+      spy.mockRestore()
+    } finally {
+      jest.useRealTimers()
+    }
   })
 })

@@ -409,29 +409,53 @@ describe('Task4 audit round1 regressions', () => {
 })
 
 describe('Terminal relay uncertainty survives database commits', () => {
-  it.each(['failed', 'cancelled'] as const)('an unproven legacy socket %s result remains unknown', async status => {
-    const requestId = nextRequest()
-    await prisma.terminalPaymentRequest.create({
-      data: {
-        requestId,
-        venueId,
-        terminalId: fixture,
-        orderId,
-        amountCents: 10000,
-        expiresAt: new Date(0),
-      },
-    })
-    await terminalPaymentService.handlePaymentResultFromSocket(
-      { requestId, status },
-      {
-        socketId: 'fixture-socket',
-        terminalId: fixture,
-        venueId,
-      },
-    )
-    expect(await terminalPaymentService.getPaymentStatus(requestId, venueId)).toMatchObject({ status: 'UNKNOWN', paymentId: null })
-    expect(await terminalPaymentService.hasChargeBlockingOrderCancel(venueId, orderId)).toBe(true)
-  })
+  // Plan 16-sep (ventana de confirmación, Codex Task 0 P1): un negativo de la terminal SIN evidencia ya no queda UNKNOWN
+  // para siempre — entra en la VENTANA (TIMED_OUT, sin código, con el sobre de la terminal en `terminalResult`) y sigue
+  // UNRESOLVED: la orden y la ranura quedan bloqueadas hasta que la ventana decide (≤ 30 s). La liberación en sí se prueba
+  // en `terminalPaymentWindow.integration.test.ts`.
+  it.each(['failed', 'cancelled'] as const)(
+    'an unproven legacy socket %s result enters the confirmation window (TIMED_OUT, still UNRESOLVED)',
+    async status => {
+      const requestId = nextRequest()
+      await prisma.terminalPaymentRequest.create({
+        data: {
+          requestId,
+          venueId,
+          terminalId: fixture,
+          orderId,
+          amountCents: 10000,
+          expiresAt: new Date(0),
+        },
+      })
+      await terminalPaymentService.handlePaymentResultFromSocket(
+        { requestId, status, errorMessage: 'SDK U100' },
+        {
+          socketId: 'fixture-socket',
+          terminalId: fixture,
+          venueId,
+        },
+      )
+      expect(await terminalPaymentService.getPaymentStatus(requestId, venueId)).toMatchObject({
+        status: 'TIMED_OUT',
+        paymentId: null,
+        failureCode: null,
+        outcome: 'UNRESOLVED',
+      })
+      const fila = await prisma.terminalPaymentRequest.findFirstOrThrow({ where: { requestId, venueId } })
+      expect(fila).toMatchObject({ status: 'TIMED_OUT', failureCode: null, cancelDisposition: null })
+      expect(fila.resultJson).toMatchObject({
+        status: 'timeout',
+        terminalResult: { status, errorMessage: 'SDK U100', outcomeEvidence: null },
+      })
+      expect(await terminalPaymentService.hasChargeBlockingOrderCancel(venueId, orderId)).toBe(true)
+      // La RANURA también, y en el régimen relajado (el de producción): la fila de la ventana retiene el aparato.
+      expect(await terminalPaymentService.isTerminalBusy(fixture, venueId)).toBe(true)
+      const programadas = (terminalPaymentService as any).ventanasProgramadas as Map<string, NodeJS.Timeout>
+      expect(programadas.has(requestId)).toBe(true)
+      clearTimeout(programadas.get(requestId)!)
+      programadas.delete(requestId)
+    },
+  )
 
   it.each([
     { status: 'failed' as const, outcomeEvidence: 'PROCESSOR_DECLINED' as const, expected: 'FAILED' },
@@ -2223,6 +2247,9 @@ describe('el predicado de bloqueo y el desenlace canónico no pueden divergir', 
     'TPV_INBOX_NOT_FOUND',
     'OPERATOR_RECONCILED_NO_CHARGE',
     'NO_EVIDENCE_AFTER_WINDOW',
+    // Ventana de confirmación: la RETENCIÓN por evidencia bancaria no está en la lista blanca ⇒ TIMED_OUT con este código
+    // es UNRESOLVED en JS y en SQL (retiene la orden; la ranura la retiene aparte `VENTANA_RETIENE_LA_RANURA`).
+    'BANK_APPROVED_AWAITING_PAYMENT',
     'REJECTED_TERMINAL_BUSY',
   ]
   const DISPOSICIONES = [null, 'ACTIVE', 'ACCEPTED', 'ALREADY_RESOLVED']

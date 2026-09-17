@@ -1599,6 +1599,7 @@ describe('Codex R6 · R6-2: EXCLUSIÓN por intento — el vínculo y todo escrit
     const A = randomUUID()
     const pagoB = await legacyB(R)
     const webhookService = await import('@/services/tpv/angelpay-webhook.service')
+    const solicitudAntesDelIngreso = await fila(solicitud.requestId)
     const vencio = {
       estado: 'ASENTADA',
       ok: false,
@@ -1680,6 +1681,10 @@ describe('Codex R6 · R6-2: EXCLUSIÓN por intento — el vínculo y todo escrit
           ingresoSinCandado: { en: expect.any(String) },
         })
         expect((await exigir(prisma.payment.findUnique({ where: { id: pagoB.id } }))).processorData).not.toHaveProperty('angelpayWebhook')
+        // Ventana de confirmación (plan 16-sep): el fallback toca la solicitud VINCULADA — y aquí el vínculo NUNCA se escribió
+        // (la publicación venció), así que no hay solicitud que tocar: su `updatedAt` queda como estaba. El caso CON vínculo
+        // va en la prueba siguiente.
+        expect((await fila(solicitud.requestId)).updatedAt.getTime()).toBe(solicitudAntesDelIngreso.updatedAt.getTime())
       } catch (error) {
         fallo = { error }
       } finally {
@@ -1737,6 +1742,60 @@ describe('Codex R6 · R6-2: EXCLUSIÓN por intento — el vínculo y todo escrit
     expect(process.env.TERMINAL_ATTEMPT_LOCK_TIMEOUT_MS).toBeUndefined()
     expect(await publicar(solicitud.requestId, A)).toMatchObject({ success: true, outcome: 'ALREADY_LINKED' })
     expect(await webhookService.recuperarEventosDebilesPorVinculo(A, solicitud.requestId)).toEqual({ reabiertos: 0 })
+  })
+
+  it('Ventana de confirmación (plan 16-sep, Codex R3-P3): un evento que entra por el FALLBACK sin candado, con el vínculo YA publicado, toca la solicitud vinculada (su updatedAt avanza) en la MISMA transacción que persiste el evento', async () => {
+    const R = `${Date.now()}`
+    const solicitud = await f.solicitud()
+    const A = randomUUID()
+    expect(await publicar(solicitud.requestId, A)).toMatchObject({ success: true, outcome: 'LINKED' })
+    const antes = await fila(solicitud.requestId)
+    // Otra transacción sostiene el candado del intento hasta que la prueba lo suelta.
+    let soltar!: () => void
+    let pausado!: () => void
+    const liberada = new Promise<void>(r => (soltar = r))
+    const enPausa = new Promise<void>(r => (pausado = r))
+    const ajena = prisma.$transaction(
+      async tx => {
+        await tx.$queryRaw`SELECT pg_advisory_xact_lock(${NS_CANDADO_INTENTO}::int, hashtext(${A}))::text`
+        pausado()
+        await liberada
+      },
+      { timeout: 20_000 },
+    )
+    await enPausa
+    const previa = process.env.TERMINAL_ATTEMPT_LOCK_TIMEOUT_MS
+    process.env.TERMINAL_ATTEMPT_LOCK_TIMEOUT_MS = '300'
+    const eventId = f.nuevoEventId()
+    try {
+      // El ingreso vence (55P03) y entra por el fallback; lo que pase DESPUÉS (confirmar por el vínculo también espera el
+      // candado y vence) no es lo que se mide: se examina el estado DURABLE que dejó el ingreso.
+      const desenlace = await processAngelPayWebhook({
+        payload: f.eventoAngelPay(A, { transactionId: R }),
+        eventId,
+        merchantAccount: { id: f.merchantId, externalMerchantId: f.merchantExternalId },
+        retryDelaysMs: [0],
+      }).then(
+        v => ({ ok: true as const, v }),
+        e => ({ ok: false as const, e }),
+      )
+      expect(await evento(eventId)).toMatchObject({ status: 'PENDING', paymentId: null, attemptId: A })
+      expect(((await evento(eventId)).payload as Record<string, unknown>)._avoqado).toMatchObject({
+        ingresoSinCandado: { en: expect.any(String) },
+      })
+      // Con el candado ajeno puesto, nadie creó dinero: la solicitud sigue en vuelo…
+      const despues = await fila(solicitud.requestId)
+      expect(despues).toMatchObject({ status: 'SENT', paymentId: null })
+      expect(await prisma.payment.count({ where: { venueId: f.venueId, idempotencyKey: A } })).toBe(0)
+      // …pero su reloj AVANZÓ: el CAS de la ventana (que exige el `updatedAt` leído bajo el candado) ya no coincidiría.
+      expect(despues.updatedAt.getTime()).toBeGreaterThan(antes.updatedAt.getTime())
+      void desenlace
+    } finally {
+      if (previa === undefined) delete process.env.TERMINAL_ATTEMPT_LOCK_TIMEOUT_MS
+      else process.env.TERMINAL_ATTEMPT_LOCK_TIMEOUT_MS = previa
+      soltar()
+      await ajena
+    }
   })
 
   it('dos reaperturas de intentos DISTINTOS con Payments compartidos en orden inverso (A1 sobre B1 y B2; A2 sobre B2 y B1) corren a la vez sin interbloqueo: los cuatro eventos se reabren y cada Payment revoca EXACTAMENTE el sello vigente (R5 P2: por identidad — el otro evento reabre sin tocar una huella que ya no es suya)', async () => {

@@ -827,8 +827,18 @@ async function ingresarEventoDelIntento(
       },
     )
     return (
-      await insertar(prisma as unknown as Prisma.TransactionClient, {
-        [MARCA_INGRESO_SIN_CANDADO]: { en: new Date().toISOString() },
+      await prisma.$transaction(async tx => {
+        const creado = await insertar(tx, { [MARCA_INGRESO_SIN_CANDADO]: { en: new Date().toISOString() } })
+        // Ventana de confirmación (plan 16-sep, Codex R3-P3): un evento que entra SIN el candado del intento tiene que invalidar el
+        // CAS de la ventana — que exige el `updatedAt` leído bajo ese candado —, así que se toca la solicitud vinculada aquí mismo.
+        // `timestamp(3)` sin zona ⇒ `NOW() AT TIME ZONE 'UTC'` (regla del repo). Sin vínculo no hay solicitud que tocar. Se toca
+        // para CUALQUIER evento del fallback (aprobado o no): un rechazo también es información, y lo peor que produce es que la
+        // ventana espere otros 30 s.
+        await tx.$executeRaw`
+          UPDATE "TerminalPaymentRequest" r SET "updatedAt" = (NOW() AT TIME ZONE 'UTC')
+          FROM "TerminalPaymentAttemptLink" l
+          WHERE l."attemptId" = ${llaveDelIntento} AND r."requestId" = l."requestId" AND r."venueId" = l."venueId"`
+        return creado
       })
     ).id
   }
