@@ -144,26 +144,32 @@ describe('cascada de la organización (upsertOrgTpvDefaults)', () => {
   })
 
   it('si una escritura del primer lote falla en la base, se deshace también la configuración de la organización', async () => {
-    // Mismo mecanismo: t3 trae su propio `notaDePrueba` y su escritura es válida; t1 hereda el de la organización, con
-    // el carácter nulo. El primer lote lleva la configuración de la organización, así que debe deshacerse con él.
-    const lectura = [await readRow(t3), await readRow(t1)]
-    jest.spyOn(prisma.terminal, 'findMany').mockResolvedValueOnce(lectura as never)
+    // 🔴 El carácter nulo NO puede ir en los ajustes de la organización: ahí se guarda primero, así que el fallo
+    // ocurriría en la PRIMERA escritura y no habría nada que deshacer — la prueba pasaría sin demostrar el rollback
+    // (lo cazó Codex en su 6ª ronda). Va sólo en las anulaciones de la SEGUNDA terminal, que llegan por la lectura
+    // simulada: así el lote escribe la configuración, escribe t3 y revienta en t1.
+    // Siembra su propio estado inicial, sin lectura simulada, para no depender de otra prueba.
+    await organizationDashboardService.upsertOrgTpvDefaults(orgX, { requireFacadePhoto: true })
     const configAntes = await prisma.organizationAttendanceConfig.findUnique({
       where: { organizationId: orgX },
-      select: { settings: true },
+      select: { settings: true, requireFacadePhoto: true },
     })
     const t3Antes = await settingsOf(t3)
     const t1Antes = await settingsOf(t1)
+    const lectura = [await readRow(t3), { ...(await readRow(t1)), configOverrides: { notaDePrueba: NULO } }]
+    jest.spyOn(prisma.terminal, 'findMany').mockResolvedValueOnce(lectura as never)
 
-    await expect(
-      organizationDashboardService.upsertOrgTpvDefaults(orgX, { enableCardPayments: false, notaDePrueba: NULO }),
-    ).rejects.toThrow(/22P05|unsupported Unicode escape/)
+    await expect(organizationDashboardService.upsertOrgTpvDefaults(orgX, { enableCardPayments: false })).rejects.toThrow(
+      /22P05|unsupported Unicode escape/,
+    )
 
     const configDespues = await prisma.organizationAttendanceConfig.findUnique({
       where: { organizationId: orgX },
-      select: { settings: true },
+      select: { settings: true, requireFacadePhoto: true },
     })
-    expect(configDespues?.settings ?? null).toEqual(configAntes?.settings ?? null)
+    // Ni el JSON ni las columnas sincronizadas: la configuración quedó como estaba.
+    expect(configDespues).toEqual(configAntes)
+    expect((configDespues?.settings as Record<string, unknown>).enableCardPayments).not.toBe(false)
     expect(await settingsOf(t3)).toEqual(t3Antes)
     expect(await settingsOf(t1)).toEqual(t1Antes)
   })
