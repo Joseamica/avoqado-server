@@ -7,6 +7,9 @@ jest.mock('@/services/terminal-payment.service', () => ({
   terminalPaymentService: {
     reconcileStaleRequests: jest.fn().mockResolvedValue({ completed: 0, unknown: 0, cancelled: 0 }),
     reconcileUnknownRequests: jest.fn().mockResolvedValue(undefined),
+    // Ventana de confirmación (plan 16-sep, Task 2): el barrido de negativos sin evidencia va entre la conciliación de
+    // UNKNOWN y la recuperación del long-poll. Un mock de lista fija sin él convertía el tick en un TypeError silencioso.
+    releaseUnprovenNegativesAfterWindow: jest.fn().mockResolvedValue({ released: 0, reconciled: 0, held: 0 }),
     resolvePendingFromDurableState: jest.fn().mockResolvedValue({ resolved: 0, checked: 0 }),
   },
 }))
@@ -24,11 +27,22 @@ describe('S5 · el vigía recupera el long-poll desde la fila en cada tick', () 
     await new TerminalPaymentWatchdogJob().run()
     expect(s.reconcileStaleRequests).toHaveBeenCalledTimes(1)
     expect(s.reconcileUnknownRequests).toHaveBeenCalledTimes(1)
+    expect(s.releaseUnprovenNegativesAfterWindow).toHaveBeenCalledTimes(1)
     expect(s.resolvePendingFromDurableState).toHaveBeenCalledTimes(1)
-    const orden = [s.reconcileStaleRequests, s.reconcileUnknownRequests, s.resolvePendingFromDurableState].map(
-      m => m.mock.invocationCallOrder[0],
-    )
+    const orden = [
+      s.reconcileStaleRequests,
+      s.reconcileUnknownRequests,
+      s.releaseUnprovenNegativesAfterWindow,
+      s.resolvePendingFromDurableState,
+    ].map(m => m.mock.invocationCallOrder[0])
     expect(orden).toEqual([...orden].sort((a, b) => a - b))
+  })
+
+  it('un fallo del barrido de la ventana NO impide la recuperación del long-poll en el mismo tick', async () => {
+    s.releaseUnprovenNegativesAfterWindow.mockRejectedValueOnce(new Error('db down'))
+    await expect(new TerminalPaymentWatchdogJob().run()).resolves.toBeUndefined()
+    expect(s.releaseUnprovenNegativesAfterWindow).toHaveBeenCalledTimes(1)
+    expect(s.resolvePendingFromDurableState).toHaveBeenCalledTimes(1)
   })
 
   it('un fallo de la recuperación no tumba el tick ni deja el vigía marcado como «corriendo»', async () => {

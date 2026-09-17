@@ -66,8 +66,16 @@ export class TerminalPaymentWatchdogJob {
       // the same tick, which at most stamps "terminal returned" 30 s earlier — never frees it.
       await terminalPaymentService.reconcileUnknownRequests()
       // Ventana de confirmación (plan 16-sep): un negativo de la terminal sin evidencia que lleve ≥ 30 s se libera
-      // aquí si el temporizador en proceso no llegó (reinicio, otra instancia). Idempotente por CAS.
-      await terminalPaymentService.releaseUnprovenNegativesAfterWindow()
+      // aquí si el temporizador en proceso no llegó (reinicio, otra instancia). Idempotente por CAS. Va en su propio
+      // try/catch: un barrido que falle (base caída a media pasada) no puede dejar sin la recuperación del long-poll
+      // de S5 a un POS que ya tiene su fila COMPLETED — el barrido se repite en el siguiente tick, el 504 del POS no.
+      try {
+        await terminalPaymentService.releaseUnprovenNegativesAfterWindow()
+      } catch (err) {
+        logger.error('❌ [Terminal-payment watchdog] confirmation window sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
       // S5: un POS que sigue esperando en memoria mientras la fila ya quedó COMPLETED con Payment (el webhook
       // confirmó desde otra instancia, o el aviso se perdió) recibe el resultado durable en vez de un 504.
       await terminalPaymentService.resolvePendingFromDurableState()
