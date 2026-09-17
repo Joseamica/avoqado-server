@@ -243,14 +243,12 @@ export async function resolveNoInstrument(
     )
       throw new NoInstrumentResolutionError('POSITIVE_EVIDENCE_EXISTS')
     const { desenlaceCanonico } = await import('../terminal-payment.service')
-    if (
-      desenlaceCanonico(row).outcome !== 'UNRESOLVED' ||
-      row.status === TerminalPaymentRequestStatus.PENDING ||
-      row.failureCode === 'BANK_APPROVED_AWAITING_PAYMENT'
-    )
-      throw new NoInstrumentResolutionError(
-        row.failureCode === 'BANK_APPROVED_AWAITING_PAYMENT' ? 'POSITIVE_EVIDENCE_EXISTS' : 'ATTEMPT_NOT_ELIGIBLE',
-      )
+    // Una fila RETENIDA por la ventana (el banco aprobó, o hay un Payment ligado que no se pudo ligar — Codex r2, P2-N1) es
+    // evidencia positiva: el cajero no declara encima.
+    const retenidaPorLaVentana =
+      row.failureCode === 'BANK_APPROVED_AWAITING_PAYMENT' || row.failureCode === 'PAYMENT_UNBOUND_AWAITING_REVIEW'
+    if (desenlaceCanonico(row).outcome !== 'UNRESOLVED' || row.status === TerminalPaymentRequestStatus.PENDING || retenidaPorLaVentana)
+      throw new NoInstrumentResolutionError(retenidaPorLaVentana ? 'POSITIVE_EVIDENCE_EXISTS' : 'ATTEMPT_NOT_ELIGIBLE')
 
     const saved: OperatorResolution = {
       id: declaration.resolutionId,

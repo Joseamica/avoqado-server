@@ -70,6 +70,26 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
       'await this.aprobacionBancariaConocida(tx, venueId, attemptIds)',
       ventana,
     )
+    // Codex r2 (P1-A): el NEGATIVO de la terminal (`closeRow`) se decide y se escribe en UNA transacción con el mismo orden que la
+    // ventana — candado de la solicitud → vínculos enumerados DENTRO → candado de cada intento → veto bancario → UPDATE crudo con
+    // `NOT EXISTS` de APROBADO (`sinAprobadoVinculadoSql`) — y sólo el `success` se queda fuera de ella.
+    const cierre = indice(s, 'private async closeRow(')
+    const txDelNegativo = indice(s, 'prisma.$transaction(', cierre)
+    antes(s, 'await candadoDeSolicitud(tx, requestId)', 'tx.terminalPaymentAttemptLink.findMany(', txDelNegativo)
+    antes(
+      s,
+      'tx.terminalPaymentAttemptLink.findMany(',
+      'for (const attemptId of attemptIds) await candadoDeIntento(tx, attemptId)',
+      txDelNegativo,
+    )
+    antes(
+      s,
+      'for (const attemptId of attemptIds) await candadoDeIntento(tx, attemptId)',
+      'await this.aprobacionBancariaConocida(tx, venueId, attemptIds)',
+      txDelNegativo,
+    )
+    antes(s, 'await this.aprobacionBancariaConocida(tx, venueId, attemptIds)', 'sinAprobadoVinculadoSql(requestId, venueId)', txDelNegativo)
+    expect(s.slice(txDelNegativo, indice(s, 'async closeRowFromPaymentTx(', cierre))).toMatch(/OPCIONES_DE_TRANSACCION_DEL_INTENTO/)
     // La PUBLICACIÓN del vínculo: candado de la solicitud → candado del intento → INSERT del vínculo.
     const publicacion = indice(s, 'async handleAttemptOpenedFromSocket(')
     antes(s, 'await candadoDeSolicitud(tx, requestId)', 'await candadoDeIntento(tx, attemptId)', publicacion)
@@ -200,7 +220,8 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
     const usos = {
       // Ventana de confirmación (plan 16-sep, Task 2): DOS — la publicación del vínculo y la decisión de la ventana
       // (`releaseUnprovenNegative`: candado de CADA intento vinculado → veto bancario → CAS → asiento, una sola fotografía).
-      'services/terminal-payment.service.ts': 2,
+      // Codex r2 (P1-A): y TRES con la transacción del NEGATIVO en `closeRow` (mismo orden de candados que la ventana).
+      'services/terminal-payment.service.ts': 3,
       // Codex R14-1: el INGRESO del evento también es una transacción del protocolo (candado del intento → createdAt
       // monótono → INSERT), así que son TRES en el webhook: ingreso, publicación del vínculo y escritor por identidad débil.
       // Codex R15-1: y CUATRO con la recuperación de los ingresos sin candado desde S4 (`ordenarIngresosSinCandado`, transacción

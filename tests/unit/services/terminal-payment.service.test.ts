@@ -193,6 +193,8 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
     await flush()
     tpr().findFirst.mockResolvedValue({ requestId: 'REQ-RACE', status: 'COMPLETED', paymentId: 'pay-committed', resultJson: null })
     tpr().updateMany.mockResolvedValue({ count: 0 })
+    // Codex r2 (P1-A): el negativo se escribe con un UPDATE crudo condicional bajo candado; 0 filas = la fila ya no es la leída.
+    prismaMock.$executeRaw.mockResolvedValue(0)
     await terminalPaymentService.handlePaymentResultFromSocket(
       { requestId: 'REQ-RACE', status: 'cancelled' },
       { terminalId: 't-default', venueId: 'venue-1', socketId: 'sock-t-default' },
@@ -205,6 +207,7 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
     await flush()
     tpr().findFirst.mockResolvedValue({ requestId: 'REQ-DB-FAIL' })
     tpr().updateMany.mockRejectedValue(new Error('database offline'))
+    prismaMock.$executeRaw.mockRejectedValue(new Error('database offline')) // Codex r2 (P1-A): la escritura del negativo es cruda
     await terminalPaymentService.handlePaymentResultFromSocket(
       { requestId: 'REQ-DB-FAIL', status: 'cancelled' },
       { terminalId: 't-default', venueId: 'venue-1', socketId: 'sock-t-default' },
@@ -1022,12 +1025,14 @@ describe('TerminalPaymentService — watchdog reconcile (Slice 1)', () => {
     prismaMock.payment.findFirst.mockResolvedValueOnce(null) // DB filter leaves no qualifying payment
 
     const summary = await terminalPaymentService.reconcileStaleRequests(now)
+    // Codex r2 (P2-N1): la etiqueta de la solicitud es una rama del `OR` (la otra, la llave de intento, sólo existe con vínculos).
     expect(prismaMock.payment.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
           orderId: 'o1',
           venueId: 'venue-1',
-          processorData: { path: ['terminalPaymentRequestId'], equals: 'REQ-A' },
+          status: 'COMPLETED',
+          OR: [{ processorData: { path: ['terminalPaymentRequestId'], equals: 'REQ-A' } }],
         }),
       }),
     )
@@ -2244,6 +2249,8 @@ describe('P1-B · reconcileUnknownRequests pagina las filas liberadas por keyset
   const porVentana = (i: number) => fila('win', i, { status: 'FAILED', failureCode: 'NO_EVIDENCE_AFTER_WINDOW' })
   const esLiberadas = (where: any) => where?.status === 'TIMED_OUT' && !!where?.failureCode?.in
   const esVentana = (where: any) => where?.status === 'FAILED' && where?.failureCode === 'NO_EVIDENCE_AFTER_WINDOW'
+  /** La etiqueta que `findReconcilablePayment` busca (Codex r2, P2-N1: vive en la primera rama del `OR`). */
+  const etiquetaBuscada = (where: any) => where?.OR?.[0]?.processorData?.equals
 
   beforeEach(() => {
     prismaMock.$queryRaw.mockResolvedValue([])
@@ -2292,7 +2299,7 @@ describe('P1-B · reconcileUnknownRequests pagina las filas liberadas por keyset
     // Y el filtro de la ventana de 30 min se conserva en TODAS las consultas (el cursor se le suma, no lo sustituye).
     for (const a of [...deLiberadas, ...deVentana]) expect(a.where.updatedAt).toEqual({ gte: expect.any(Date) })
     // Se procesaron las 403 + 201: cada fila buscó su Payment reconciliable.
-    const buscadas = prismaMock.payment.findFirst.mock.calls.map(([a]: any[]) => a.where.processorData?.equals)
+    const buscadas = prismaMock.payment.findFirst.mock.calls.map(([a]: any[]) => etiquetaBuscada(a.where))
     expect(buscadas.filter((r: string) => r?.startsWith('rel-req-'))).toHaveLength(403)
     expect(buscadas.filter((r: string) => r?.startsWith('win-req-'))).toHaveLength(201)
     expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('batch cap'), expect.anything())
@@ -2308,8 +2315,88 @@ describe('P1-B · reconcileUnknownRequests pagina las filas liberadas por keyset
     const deLiberadas = tpr().findMany.mock.calls.filter(([a]: any[]) => esLiberadas(a.where))
     expect(deLiberadas).toHaveLength(25)
     expect(
-      prismaMock.payment.findFirst.mock.calls.filter(([a]: any[]) => String(a.where.processorData?.equals).startsWith('rel-req-')),
+      prismaMock.payment.findFirst.mock.calls.filter(([a]: any[]) => String(etiquetaBuscada(a.where)).startsWith('rel-req-')),
     ).toHaveLength(5000)
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('batch cap'), expect.objectContaining({ lotes: 25, filas: 5000 }))
+  })
+})
+
+// ── Codex r2 · P1-D: la sonda pasa TODAS las señales positivas del sobre de la bandeja a `closeRow`, no sólo paymentId ──
+describe('P1-D (r2) · handleProbeResultFromSocket conserva las señales positivas del finalResult', () => {
+  it('un RESOLVED/success con paymentId, transactionId, authorizationCode, reference, readMode y approved llega a closeRow con las seis', async () => {
+    const svc = terminalPaymentService as any
+    tpr().findFirst.mockResolvedValue({
+      id: 'row-p',
+      status: 'UNKNOWN',
+      acknowledgedAt: null,
+      lastDeliveredAt: null,
+      deliveryProvenance: null,
+      expiresAt: new Date(0),
+      terminalId: 't-probe',
+    })
+    const closeRow = jest.spyOn(svc, 'closeRow').mockResolvedValue({ requestId: 'REQ-PROBE', status: 'timeout' })
+    try {
+      const ok = await svc.handleProbeResultFromSocket(
+        {
+          requestId: 'REQ-PROBE',
+          disposition: 'RESOLVED',
+          finalResult: {
+            requestId: 'REQ-PROBE',
+            status: 'success',
+            paymentId: 'pay-p',
+            transactionId: 'tx-p',
+            authorizationCode: 'A1',
+            reference: 'ref-p',
+            readMode: 'CONTACTLESS',
+            approved: true,
+            errorMessage: 'ok',
+            completedAt: '2026-09-16T00:00:00.000Z', // NO es señal positiva: no viaja
+          },
+        },
+        { socketId: 'sock-t-probe', terminalId: 't-probe', venueId: 'venue-1' },
+      )
+      expect(ok).toBe(true)
+      expect(closeRow).toHaveBeenCalledTimes(1)
+      expect(closeRow.mock.calls[0][2]).toEqual({
+        requestId: 'REQ-PROBE',
+        status: 'success',
+        paymentId: 'pay-p',
+        transactionId: 'tx-p',
+        authorizationCode: 'A1',
+        reference: 'ref-p',
+        readMode: 'CONTACTLESS',
+        approved: true,
+        errorMessage: 'ok',
+      })
+    } finally {
+      closeRow.mockRestore()
+    }
+  })
+
+  it('las señales vacías o de tipo equivocado no viajan (una cadena vacía o un `approved: "yes"` no afirman nada)', async () => {
+    const svc = terminalPaymentService as any
+    tpr().findFirst.mockResolvedValue({
+      id: 'row-q',
+      status: 'UNKNOWN',
+      acknowledgedAt: null,
+      lastDeliveredAt: null,
+      deliveryProvenance: null,
+      expiresAt: new Date(0),
+      terminalId: 't-probe',
+    })
+    const closeRow = jest.spyOn(svc, 'closeRow').mockResolvedValue({ requestId: 'REQ-PROBE-2', status: 'timeout' })
+    try {
+      await svc.handleProbeResultFromSocket(
+        {
+          requestId: 'REQ-PROBE-2',
+          disposition: 'RESOLVED',
+          finalResult: { requestId: 'REQ-PROBE-2', status: 'success', transactionId: '', reference: 7, approved: 'yes', readMode: null },
+        },
+        { socketId: 'sock-t-probe', terminalId: 't-probe', venueId: 'venue-1' },
+      )
+      expect(closeRow.mock.calls[0][2]).toEqual({ requestId: 'REQ-PROBE-2', status: 'success' })
+    } finally {
+      closeRow.mockRestore()
+    }
   })
 })

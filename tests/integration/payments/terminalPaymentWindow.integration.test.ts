@@ -17,6 +17,7 @@ import { utcTs } from '@/utils/sqlDates'
 import socketManager from '@/communication/sockets/managers/socketManager'
 import { terminalRegistry } from '@/communication/sockets/terminal-registry'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { invalidarVenuesEstrictos } from '@/services/terminal-payment-strictness'
 import { sendOpsAlert } from '@/services/alerts/opsAlert.service'
 import logger from '@/config/logger'
 
@@ -308,7 +309,7 @@ describe('Ventana de confirmación: un negativo sin evidencia dura 30 s y se lib
       terminalId: `${fixture}-b`,
     })
     const resumen = await terminalPaymentService.releaseUnprovenNegativesAfterWindow(new Date())
-    expect(resumen).toEqual({ released: 0, reconciled: 0, held: 0 })
+    expect(resumen).toEqual({ released: 0, reconciled: 0, held: 0, heldUnbound: 0 })
     expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: unknown.id } })).status).toBe('UNKNOWN')
     expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: soltada.id } })).failureCode).toBe('AUTO_RELEASED')
     // Y por el camino directo tampoco: ninguna de las dos es «negativo de la terminal sin evidencia».
@@ -324,7 +325,12 @@ describe('Ventana de confirmación: un negativo sin evidencia dura 30 s y se lib
       resultJson: { requestId: 'x', status: 'timeout' },
       updatedAt: vencida,
     })
-    expect(await terminalPaymentService.releaseUnprovenNegativesAfterWindow(new Date())).toEqual({ released: 0, reconciled: 0, held: 0 })
+    expect(await terminalPaymentService.releaseUnprovenNegativesAfterWindow(new Date())).toEqual({
+      released: 0,
+      reconciled: 0,
+      held: 0,
+      heldUnbound: 0,
+    })
     expect(await terminalPaymentService.releaseUnprovenNegative(historica.requestId, venueId, 'WATCHDOG')).toBe('NOT_ELIGIBLE')
     expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: historica.id } })).status).toBe('TIMED_OUT')
   })
@@ -333,8 +339,18 @@ describe('Ventana de confirmación: un negativo sin evidencia dura 30 s y se lib
     const vencida = new Date(Date.now() - UNPROVEN_NEGATIVE_WINDOW_MS - 1_000)
     await auditRequest({ ...negativoSinEvidencia(), updatedAt: vencida })
     await auditRequest({ ...negativoSinEvidencia(), updatedAt: new Date(), terminalId: `${fixture}-c` })
-    expect(await terminalPaymentService.releaseUnprovenNegativesAfterWindow(new Date())).toEqual({ released: 1, reconciled: 0, held: 0 })
-    expect(await terminalPaymentService.releaseUnprovenNegativesAfterWindow(new Date())).toEqual({ released: 0, reconciled: 0, held: 0 })
+    expect(await terminalPaymentService.releaseUnprovenNegativesAfterWindow(new Date())).toEqual({
+      released: 1,
+      reconciled: 0,
+      held: 0,
+      heldUnbound: 0,
+    })
+    expect(await terminalPaymentService.releaseUnprovenNegativesAfterWindow(new Date())).toEqual({
+      released: 0,
+      reconciled: 0,
+      held: 0,
+      heldUnbound: 0,
+    })
     // La reciente sigue intacta y bloqueando su terminal.
     expect(await terminalPaymentService.isTerminalBusy(`${fixture}-c`, venueId)).toBe(true)
     expect(await terminalPaymentService.isTerminalBusy(fixture, venueId)).toBe(false)
@@ -620,7 +636,12 @@ describe('Ventana de confirmación: un negativo sin evidencia dura 30 s y se lib
     )
     // El barrido no la vuelve a retener ni a liberar: sigue con su único asiento.
     await conUpdatedAt(despues, new Date(Date.now() - UNPROVEN_NEGATIVE_WINDOW_MS - 1_000))
-    expect(await terminalPaymentService.releaseUnprovenNegativesAfterWindow(new Date())).toEqual({ released: 0, reconciled: 0, held: 0 })
+    expect(await terminalPaymentService.releaseUnprovenNegativesAfterWindow(new Date())).toEqual({
+      released: 0,
+      reconciled: 0,
+      held: 0,
+      heldUnbound: 0,
+    })
     expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).failureCode).toBe(
       'BANK_APPROVED_AWAITING_PAYMENT',
     )
@@ -661,7 +682,7 @@ describe('Ventana de confirmación: un negativo sin evidencia dura 30 s y se lib
   })
 
   // ── Fix round 1 · IMPORTANT 2: un Payment etiquetado que no se pudo ligar RETIENE, nunca libera ──
-  it('si el pago exacto existe pero no se pudo ligar (motivo ≠ ALREADY_BOUND), la ventana NO libera: 🚨 y NOT_ELIGIBLE, fila intacta', async () => {
+  it('si el pago exacto existe pero no se pudo ligar (motivo ≠ ALREADY_BOUND), la ventana NO libera: 🚨, la marca UNA vez PAYMENT_UNBOUND_AWAITING_REVIEW (Codex r2, P2-N1) y devuelve HELD_BY_UNBOUND_PAYMENT', async () => {
     const row = await auditRequest({ ...negativoSinEvidencia(), updatedAt: new Date(Date.now() - UNPROVEN_NEGATIVE_WINDOW_MS - 1_000) })
     const payment = await auditPayment({ processorData: { terminalPaymentRequestId: row.requestId, deviceSerialNumber: fixture } })
     ;(logger.error as jest.Mock).mockClear()
@@ -669,16 +690,27 @@ describe('Ventana de confirmación: un negativo sin evidencia dura 30 s y se lib
       .spyOn(terminalPaymentService, 'closeRowFromPaymentTx')
       .mockResolvedValueOnce({ bound: false, reason: 'TERMINAL_MISMATCH' })
     try {
-      expect(await terminalPaymentService.releaseUnprovenNegative(row.requestId, venueId, 'WATCHDOG')).toBe('NOT_ELIGIBLE')
+      expect(await terminalPaymentService.releaseUnprovenNegative(row.requestId, venueId, 'WATCHDOG')).toBe('HELD_BY_UNBOUND_PAYMENT')
     } finally {
       spy.mockRestore()
     }
-    const intacta = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
-    expect(intacta).toMatchObject({ status: 'TIMED_OUT', failureCode: null, paymentId: null })
-    expect(intacta.updatedAt.getTime()).toBe(row.updatedAt.getTime())
+    const retenida = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    expect(retenida).toMatchObject({ status: 'TIMED_OUT', failureCode: 'PAYMENT_UNBOUND_AWAITING_REVIEW', paymentId: null })
     expect(await prisma.activityLog.count({ where: { venueId, action: 'TERMINAL_PAYMENT_RELEASED_AFTER_WINDOW', entityId: row.id } })).toBe(
       0,
     )
+    const asientos = await prisma.activityLog.findMany({
+      where: { venueId, action: 'TERMINAL_PAYMENT_WINDOW_HELD_BY_UNBOUND_PAYMENT', entityId: row.id },
+    })
+    expect(asientos).toHaveLength(1)
+    expect(asientos[0].data).toMatchObject({
+      requestId: row.requestId,
+      terminalId: fixture,
+      orderId,
+      amountCents: 10000,
+      paymentId: payment.id,
+      reason: 'TERMINAL_MISMATCH',
+    })
     expect(logger.error).toHaveBeenCalledTimes(1)
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringContaining('🚨 [TerminalPayment] window found a payment it could not bind'),
@@ -687,6 +719,11 @@ describe('Ventana de confirmación: un negativo sin evidencia dura 30 s y se lib
     // Y sigue bloqueando orden y ranura hasta que una persona lo revise.
     expect(await terminalPaymentService.hasChargeBlockingOrderCancel(venueId, orderId)).toBe(true)
     expect(await terminalPaymentService.isTerminalBusy(fixture, venueId)).toBe(true)
+    // Segunda pasada: ya no es elegible (marcada) y no escribe un segundo asiento.
+    expect(await terminalPaymentService.releaseUnprovenNegative(row.requestId, venueId, 'WATCHDOG')).toBe('NOT_ELIGIBLE')
+    expect(
+      await prisma.activityLog.count({ where: { venueId, action: 'TERMINAL_PAYMENT_WINDOW_HELD_BY_UNBOUND_PAYMENT', entityId: row.id } }),
+    ).toBe(1)
   })
 })
 
@@ -802,22 +839,26 @@ describe('Aprobación tardía tras la ventana', () => {
 
 // ── Guardas extra (re-revisión de la Task 2, misma dirección del dinero) ──
 describe('G1 · la ventana NUNCA libera mientras exista un Payment etiquetado con la solicitud, aunque no lo pueda atribuir', () => {
-  it('un pago etiquetado pero cobrado en OTRA terminal (filtrado-antes-de-encontrado) retiene: NOT_ELIGIBLE, fila intacta, 🚨 una vez', async () => {
+  it('un pago etiquetado pero cobrado en OTRA terminal (filtrado-antes-de-encontrado) retiene: 🚨 una vez, marca PAYMENT_UNBOUND_AWAITING_REVIEW (Codex r2, P2-N1) y devuelve HELD_BY_UNBOUND_PAYMENT', async () => {
     const row = await auditRequest({ ...negativoSinEvidencia(), updatedAt: new Date(Date.now() - UNPROVEN_NEGATIVE_WINDOW_MS - 1_000) })
     // Etiquetado con ESTA solicitud, pero la FK `terminal` y el serial persistido apuntan a otro aparato: `findReconcilablePayment`
     // lo filtra («attributed to another terminal») y la ventana se quedaba sin nada que conciliar… y liberaba con dinero de por medio.
-    await auditPayment(
+    const ajeno = await auditPayment(
       { processorData: { terminalPaymentRequestId: row.requestId, deviceSerialNumber: terminalDe('otra') } },
       terminalDe('otra'),
     )
     ;(logger.error as jest.Mock).mockClear()
-    expect(await terminalPaymentService.releaseUnprovenNegative(row.requestId, venueId, 'WATCHDOG')).toBe('NOT_ELIGIBLE')
-    const intacta = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
-    expect(intacta).toMatchObject({ status: 'TIMED_OUT', failureCode: null, paymentId: null })
-    expect(intacta.updatedAt.getTime()).toBe(row.updatedAt.getTime())
+    expect(await terminalPaymentService.releaseUnprovenNegative(row.requestId, venueId, 'WATCHDOG')).toBe('HELD_BY_UNBOUND_PAYMENT')
+    const retenida = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    expect(retenida).toMatchObject({ status: 'TIMED_OUT', failureCode: 'PAYMENT_UNBOUND_AWAITING_REVIEW', paymentId: null })
     expect(await prisma.activityLog.count({ where: { venueId, action: 'TERMINAL_PAYMENT_RELEASED_AFTER_WINDOW', entityId: row.id } })).toBe(
       0,
     )
+    const asientos = await prisma.activityLog.findMany({
+      where: { venueId, action: 'TERMINAL_PAYMENT_WINDOW_HELD_BY_UNBOUND_PAYMENT', entityId: row.id },
+    })
+    expect(asientos).toHaveLength(1)
+    expect(asientos[0].data).toMatchObject({ requestId: row.requestId, paymentId: ajeno.id, reason: 'PAYMENT_NOT_ATTRIBUTABLE' })
     expect(logger.error).toHaveBeenCalledTimes(1)
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringContaining('🚨 [TerminalPayment] window found a tagged payment it could not attribute'),
@@ -1078,6 +1119,229 @@ describe('P1-C · la liberación se revalida EN la escritura: candado por solici
   })
 })
 
+// ── Codex r2 · P1-A: el negativo se decide y se ESCRIBE bajo los candados, con el veto revalidado en la escritura ──
+describe('P1-A (r2) · el negativo de la terminal se escribe bajo candado de solicitud → intentos, con NOT EXISTS de APROBADO en el UPDATE', () => {
+  const declinada = (requestId: string) =>
+    terminalPaymentService.handlePaymentResultFromSocket(
+      { requestId, status: 'failed', outcomeEvidence: 'PROCESSOR_DECLINED', errorMessage: 'Declinada por el banco' },
+      { socketId: 'fixture-socket', terminalId: fixture, venueId },
+    )
+  const limpiarTemporizador = (requestId: string) => {
+    const programadas = (terminalPaymentService as any).ventanasProgramadas as Map<string, NodeJS.Timeout>
+    clearTimeout(programadas.get(requestId)!)
+    programadas.delete(requestId)
+  }
+
+  it('(a) un APROBADO que se persiste ENTRE la consulta y la escritura (el ingreso normal aterrizando) no deja pasar el FAILED: la fila queda TIMED_OUT/null con el sobre y la ventana la RETIENE', async () => {
+    const row = await auditRequest({ status: 'SENT' })
+    const attemptId = `att-${randomUUID()}`
+    await prisma.terminalPaymentAttemptLink.create({ data: { attemptId, requestId: row.requestId, venueId, terminalId: fixture } })
+    const svc = terminalPaymentService as any
+    const original = svc.aprobacionBancariaConocida.bind(svc)
+    // La PRIMERA consulta (la de closeRow) contesta «sin aprobación» pero, antes de contestar, el APROBADO ya es durable.
+    const spy = jest.spyOn(svc, 'aprobacionBancariaConocida').mockImplementationOnce(async (...args: unknown[]) => {
+      const r = await original(...args)
+      expect(r).toBeNull()
+      await prisma.providerEventLog.create({ data: eventoAprobado(attemptId, 'tx-entre-consulta-y-escritura') })
+      return null
+    })
+    try {
+      await declinada(row.requestId)
+    } finally {
+      spy.mockRestore()
+    }
+    const fila = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    expect(fila).toMatchObject({ status: 'TIMED_OUT', failureCode: null, paymentId: null })
+    expect((fila.resultJson as any).status).toBe('timeout')
+    expect((fila.resultJson as any).terminalResult).toMatchObject({ status: 'failed', outcomeEvidence: 'PROCESSOR_DECLINED' })
+    expect(await terminalPaymentService.hasChargeBlockingOrderCancel(venueId, orderId)).toBe(true)
+    limpiarTemporizador(row.requestId)
+    await conUpdatedAt(fila, new Date(Date.now() - UNPROVEN_NEGATIVE_WINDOW_MS - 1_000))
+    expect(await terminalPaymentService.releaseUnprovenNegative(row.requestId, venueId, 'WATCHDOG')).toBe('HELD_BY_BANK_EVIDENCE')
+  })
+
+  it('(b) el negativo ESPERA al candado de la solicitud que sostiene la ventana (medido en pg_stat_activity) y sólo escribe cuando lo suelta', async () => {
+    const row = await auditRequest({ status: 'SENT' })
+    const attemptId = `att-${randomUUID()}`
+    await prisma.terminalPaymentAttemptLink.create({ data: { attemptId, requestId: row.requestId, venueId, terminalId: fixture } })
+    const base = await esperandoCandado()
+    const p = puerta()
+    const ventana = prisma.$transaction(
+      async tx => {
+        await candadoDeSolicitud(tx, row.requestId)
+        p.tomado()
+        await p.abierta
+      },
+      { timeout: 20_000, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
+    )
+    await Promise.race([p.tomada, ventana])
+    const cierre = declinada(row.requestId)
+    try {
+      expect(await esperar(async () => (await esperandoCandado()) > base)).toBe(true) // el negativo ESPERA
+      expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).status).toBe('SENT') // …sin escribir
+    } finally {
+      p.soltar()
+      await ventana
+    }
+    await cierre
+    expect(await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({
+      status: 'FAILED',
+      failureCode: 'TPV_CONFIRMED_NO_CHARGE',
+    })
+  })
+
+  it('(c) regresión: el negativo acreditado SIN aprobación sigue cerrando FAILED/TPV_CONFIRMED_NO_CHARGE en vuelo y tardío (sobre una UNKNOWN), y un cancelled/PRE_AUTHORIZATION cierra CANCELLED/ACCEPTED', async () => {
+    const enVuelo = await auditRequest({ status: 'SENT' })
+    const attemptId = `att-${randomUUID()}`
+    await prisma.terminalPaymentAttemptLink.create({ data: { attemptId, requestId: enVuelo.requestId, venueId, terminalId: fixture } })
+    await declinada(enVuelo.requestId)
+    expect(await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: enVuelo.id } })).toMatchObject({
+      status: 'FAILED',
+      failureCode: 'TPV_CONFIRMED_NO_CHARGE',
+      lateResult: false,
+    })
+    const otraOrden = await nuevaOrden()
+    const tardia = await auditRequest({ status: 'UNKNOWN', failureCode: 'ACK_TIMEOUT', orderId: otraOrden.id })
+    await declinada(tardia.requestId)
+    expect(await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: tardia.id } })).toMatchObject({
+      status: 'FAILED',
+      failureCode: 'TPV_CONFIRMED_NO_CHARGE',
+      lateResult: true,
+    })
+    expect(await terminalPaymentService.hasChargeBlockingOrderCancel(venueId, otraOrden.id)).toBe(false)
+    const cancelada = await auditRequest({ status: 'SENT', orderId: otraOrden.id })
+    await terminalPaymentService.handlePaymentResultFromSocket(
+      { requestId: cancelada.requestId, status: 'cancelled', outcomeEvidence: 'PRE_AUTHORIZATION' },
+      { socketId: 'fixture-socket', terminalId: fixture, venueId },
+    )
+    expect(await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: cancelada.id } })).toMatchObject({
+      status: 'CANCELLED',
+      cancelDisposition: 'ACCEPTED',
+      failureCode: null,
+    })
+    expect(await terminalPaymentService.isTerminalBusy(fixture, venueId)).toBe(false)
+  })
+})
+
+// ── Codex r2 · P2-N1: un Payment ligado SÓLO por la llave del intento se concilia o se retiene con MARCA, nunca en silencio ──
+describe('P2-N1 · Payment con idempotencyKey del intento, sin etiqueta y sin webhook', () => {
+  const vencida = () => new Date(Date.now() - UNPROVEN_NEGATIVE_WINDOW_MS - 1_000)
+  const conVinculo = async () => {
+    const row = await auditRequest({ ...negativoSinEvidencia(), updatedAt: vencida() })
+    const attemptId = `att-${randomUUID()}`
+    await prisma.terminalPaymentAttemptLink.create({ data: { attemptId, requestId: row.requestId, venueId, terminalId: fixture } })
+    return { row, attemptId }
+  }
+  const regimenEstricto = async (encendido: boolean) => {
+    await prisma.venue.update({
+      where: { id: venueId },
+      data: { terminalPaymentStrictEnabled: encendido, ...(encendido ? { terminalPaymentStrictSince: new Date(0) } : {}) },
+    })
+    await invalidarVenuesEstrictos()
+  }
+  afterEach(async () => regimenEstricto(false))
+
+  it('(a) cobrado en ESTA terminal ⇒ la ventana lo concilia por el cierre común: RECONCILED, fila COMPLETED ligada y el Payment etiquetado', async () => {
+    const { row, attemptId } = await conVinculo()
+    const pago = await auditPayment({ idempotencyKey: attemptId, processorData: { deviceSerialNumber: fixture } })
+    expect(await terminalPaymentService.releaseUnprovenNegative(row.requestId, venueId, 'WATCHDOG')).toBe('RECONCILED')
+    const cerrada = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    expect(cerrada).toMatchObject({ status: 'COMPLETED', paymentId: pago.id, lateResult: true })
+    expect(await prisma.payment.findUniqueOrThrow({ where: { id: pago.id } })).toMatchObject({ terminalPaymentRequestId: row.requestId })
+    expect(await terminalPaymentService.isTerminalBusy(fixture, venueId)).toBe(false)
+  })
+
+  it('(b) cobrado en OTRA terminal ⇒ HELD_BY_UNBOUND_PAYMENT: TIMED_OUT/PAYMENT_UNBOUND_AWAITING_REVIEW, un asiento, ranura ocupada en los DOS regímenes, orden bloqueada; segunda pasada NOT_ELIGIBLE sin segundo asiento', async () => {
+    const { row, attemptId } = await conVinculo()
+    const ajeno = await auditPayment(
+      { idempotencyKey: attemptId, processorData: { deviceSerialNumber: terminalDe('otra') } },
+      terminalDe('otra'),
+    )
+    ;(logger.error as jest.Mock).mockClear()
+    expect(await terminalPaymentService.releaseUnprovenNegative(row.requestId, venueId, 'WATCHDOG')).toBe('HELD_BY_UNBOUND_PAYMENT')
+    const retenida = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    expect(retenida).toMatchObject({ status: 'TIMED_OUT', failureCode: 'PAYMENT_UNBOUND_AWAITING_REVIEW', paymentId: null })
+    const asientos = await prisma.activityLog.findMany({
+      where: { venueId, action: 'TERMINAL_PAYMENT_WINDOW_HELD_BY_UNBOUND_PAYMENT', entityId: row.id },
+    })
+    expect(asientos).toHaveLength(1)
+    expect(asientos[0].data).toMatchObject({
+      requestId: row.requestId,
+      terminalId: fixture,
+      orderId,
+      amountCents: 10000,
+      paymentId: ajeno.id,
+    })
+    expect(logger.error).toHaveBeenCalledTimes(1)
+    expect(await terminalPaymentService.hasChargeBlockingOrderCancel(venueId, orderId)).toBe(true)
+    // La ranura en los DOS regímenes.
+    expect(await terminalPaymentService.isTerminalBusy(fixture, venueId)).toBe(true)
+    await regimenEstricto(true)
+    expect(await terminalPaymentService.isTerminalBusy(fixture, venueId)).toBe(true)
+    await regimenEstricto(false)
+    // Segunda pasada: ya marcada ⇒ NOT_ELIGIBLE y ningún asiento más.
+    expect(await terminalPaymentService.releaseUnprovenNegative(row.requestId, venueId, 'WATCHDOG')).toBe('NOT_ELIGIBLE')
+    expect(
+      await prisma.activityLog.count({ where: { venueId, action: 'TERMINAL_PAYMENT_WINDOW_HELD_BY_UNBOUND_PAYMENT', entityId: row.id } }),
+    ).toBe(1)
+    // El GET sigue diciendo «pendiente»: el marcador no está en la lista blanca.
+    expect(await terminalPaymentService.getPaymentStatus(row.requestId, venueId)).toMatchObject({
+      status: 'TIMED_OUT',
+      outcome: 'UNRESOLVED',
+    })
+  })
+
+  it('(c) a los 21 min el barrido la suelta como AUTO_RELEASED (ranura libre, orden bloqueada) con UN asiento y UN correo que nombra el marcador; y si el Payment se vuelve ligable, el barrido de 30 min la concilia', async () => {
+    const { row, attemptId } = await conVinculo()
+    const ajeno = await auditPayment(
+      { idempotencyKey: attemptId, processorData: { deviceSerialNumber: terminalDe('otra') } },
+      terminalDe('otra'),
+    )
+    expect(await terminalPaymentService.releaseUnprovenNegative(row.requestId, venueId, 'WATCHDOG')).toBe('HELD_BY_UNBOUND_PAYMENT')
+    const marcada = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    await conUpdatedAt(marcada, new Date(Date.now() - 21 * 60_000))
+    ;(logAction as jest.Mock).mockClear()
+    ;(sendOpsAlert as jest.Mock).mockClear()
+    expect(await terminalPaymentService.releaseUnprovenNegativesAfterWindow(new Date())).toEqual({
+      released: 0,
+      reconciled: 0,
+      held: 0,
+      heldUnbound: 0,
+    })
+    const soltada = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    expect(soltada).toMatchObject({ status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED', paymentId: null })
+    expect(await terminalPaymentService.isTerminalBusy(fixture, venueId)).toBe(false)
+    expect(await terminalPaymentService.hasChargeBlockingOrderCancel(venueId, orderId)).toBe(true)
+    const asientos = (logAction as jest.Mock).mock.calls
+      .map(([p]) => p as { action: string; entityId?: string; data?: Record<string, unknown> })
+      .filter(p => p.action === 'TERMINAL_PAYMENT_AUTO_RELEASED')
+    expect(asientos).toHaveLength(1)
+    expect(asientos[0]).toMatchObject({
+      entityId: row.id,
+      data: { requestId: row.requestId, reason: 'PAYMENT_UNBOUND_AWAITING_REVIEW_20MIN' },
+    })
+    expect(sendOpsAlert).toHaveBeenCalledTimes(1)
+    const correo = (sendOpsAlert as jest.Mock).mock.calls[0][0] as { subject: string; lines: string[] }
+    expect(`${correo.subject} ${correo.lines.join(' ')}`).toContain('PAYMENT_UNBOUND_AWAITING_REVIEW')
+    // Sigue en el barrido de 30 min: mientras el Payment siga siendo AJENO no se liga…
+    await terminalPaymentService.reconcileUnknownRequests(new Date())
+    expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).status).toBe('TIMED_OUT')
+    // …y cuando se vuelve ligable (atribuido a ESTA terminal), el barrido la concilia por el cierre común y etiqueta el Payment.
+    const propia = await terminalDelFixture()
+    await prisma.payment.update({
+      where: { id: ajeno.id },
+      data: { terminalId: propia.id, processorData: { deviceSerialNumber: fixture } },
+    })
+    await terminalPaymentService.reconcileUnknownRequests(new Date())
+    expect(await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({
+      status: 'COMPLETED',
+      paymentId: ajeno.id,
+      lateResult: true,
+    })
+    expect(await prisma.payment.findUniqueOrThrow({ where: { id: ajeno.id } })).toMatchObject({ terminalPaymentRequestId: row.requestId })
+  })
+})
+
 // ── Task 4: la declaración del cajero «no se presentó tarjeta» ──
 describe('Declaración del cajero', () => {
   const serialDelFixture = `AVQD-${fixture.toUpperCase()}`
@@ -1170,7 +1434,12 @@ describe('Declaración del cajero', () => {
     // La ventana, después: NOT_ELIGIBLE — no pisa la evidencia del operador, ni aunque ya hayan pasado los 30 s.
     await conUpdatedAt(fila, new Date(Date.now() - UNPROVEN_NEGATIVE_WINDOW_MS - 1_000))
     expect(await terminalPaymentService.releaseUnprovenNegative(row.requestId, venueId, 'WATCHDOG')).toBe('NOT_ELIGIBLE')
-    expect(await terminalPaymentService.releaseUnprovenNegativesAfterWindow(new Date())).toEqual({ released: 0, reconciled: 0, held: 0 })
+    expect(await terminalPaymentService.releaseUnprovenNegativesAfterWindow(new Date())).toEqual({
+      released: 0,
+      reconciled: 0,
+      held: 0,
+      heldUnbound: 0,
+    })
     expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).failureCode).toBe(
       'OPERATOR_RECONCILED_NO_CHARGE',
     )
@@ -1365,5 +1634,42 @@ describe('Declaración del cajero', () => {
     const intacta = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
     expect(intacta).toMatchObject({ status: 'TIMED_OUT', failureCode: null, paymentId: null })
     expect((await prisma.terminalPaymentAttemptLink.findUniqueOrThrow({ where: { attemptId } })).operatorResolution).toBeNull()
+  })
+  // ── Codex r2 · P1-D: la sonda pasa TODAS las señales positivas y la degradación FUSIONA claimedSuccess (nunca encoge) ──
+  it('(P1-D · r2) un `success` con transactionId y paymentId inexistente ⇒ UNKNOWN con claimedSuccess.transactionId; la SONDA repite el success SIN paymentId/transactionId y el transactionId sigue; la declaración ⇒ 409', async () => {
+    const row = await auditRequest({ status: 'SENT' })
+    const attemptId = `att-${randomUUID()}`
+    await prisma.terminalPaymentAttemptLink.create({ data: { attemptId, requestId: row.requestId, venueId, terminalId: fixture } })
+    await terminalPaymentService.handlePaymentResultFromSocket(
+      { requestId: row.requestId, status: 'success', paymentId: 'pay-inexistente', transactionId: 'tx-afirmada' } as any,
+      { socketId: 'fixture-socket', terminalId: fixture, venueId },
+    )
+    const primera = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    expect(primera).toMatchObject({ status: 'UNKNOWN', paymentId: null })
+    expect((primera.resultJson as any).claimedSuccess).toEqual({ paymentId: 'pay-inexistente', transactionId: 'tx-afirmada' })
+    // La bandeja de la terminal contesta la sonda con el mismo `success` pero sin paymentId ni transactionId.
+    expect(
+      await (terminalPaymentService as any).handleProbeResultFromSocket(
+        {
+          requestId: row.requestId,
+          disposition: 'RESOLVED',
+          finalResult: { requestId: row.requestId, status: 'success', readMode: 'CONTACTLESS' },
+        },
+        { socketId: 'fixture-socket', terminalId: fixture, venueId },
+      ),
+    ).toBe(true)
+    const segunda = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    expect(segunda).toMatchObject({ status: 'UNKNOWN', paymentId: null })
+    expect((segunda.resultJson as any).terminalResult).toBeUndefined()
+    expect((segunda.resultJson as any).claimedSuccess).toEqual({
+      paymentId: 'pay-inexistente',
+      transactionId: 'tx-afirmada',
+      readMode: 'CONTACTLESS',
+    })
+    await expect(declarar(attemptId, owner.id, declaracion(row.requestId))).rejects.toMatchObject({
+      code: 'POSITIVE_EVIDENCE_EXISTS',
+      statusCode: 409,
+    })
+    expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).status).toBe('UNKNOWN')
   })
 })

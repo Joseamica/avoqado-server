@@ -88,6 +88,15 @@ const CASOS: Caso[] = [
     permisivo: true,
   },
   {
+    // Codex r2 (P2-N1): un Payment ligado a la solicitud (etiqueta, puntero o llave de intento) que la ventana no pudo LIGAR
+    // retiene con marca — en los DOS regímenes, como el marcador bancario — hasta que una persona lo revise o el destrabe de 20 min.
+    nombre: 'TIMED_OUT/PAYMENT_UNBOUND_AWAITING_REVIEW (retenida por un Payment sin ligar)',
+    status: TerminalPaymentRequestStatus.TIMED_OUT,
+    failureCode: 'PAYMENT_UNBOUND_AWAITING_REVIEW',
+    resultJson: { status: 'timeout', terminalResult: { status: 'failed', errorMessage: 'SDK U100', outcomeEvidence: null } },
+    permisivo: true,
+  },
+  {
     // P2-5: la cadena VACÍA en `paymentId` cuenta como ausente también aquí (JS: `!row.paymentId`; SQL: `OR` con '').
     nombre: 'TIMED_OUT sin código CON terminalResult y paymentId cadena VACÍA (la ventana decide)',
     status: TerminalPaymentRequestStatus.TIMED_OUT,
@@ -275,6 +284,7 @@ describe('interruptor por venue del predicado estricto', () => {
       'TIMED_OUT sin código CON terminalResult (la ventana decide)',
       'TIMED_OUT sin código CON terminalResult y paymentId cadena VACÍA (la ventana decide)',
       'TIMED_OUT/BANK_APPROVED_AWAITING_PAYMENT (retenida por evidencia bancaria)',
+      'TIMED_OUT/PAYMENT_UNBOUND_AWAITING_REVIEW (retenida por un Payment sin ligar)',
       'CANCELLED sin disposición (la columna no existía en prod)',
       'CANCELLED con ACTIVE',
       'FAILED/TPV_ERROR',
@@ -347,6 +357,7 @@ describe('interruptor por venue del predicado estricto', () => {
       'TIMED_OUT sin código CON terminalResult (la ventana decide)',
       'TIMED_OUT sin código CON terminalResult y paymentId cadena VACÍA (la ventana decide)',
       'TIMED_OUT/BANK_APPROVED_AWAITING_PAYMENT (retenida por evidencia bancaria)',
+      'TIMED_OUT/PAYMENT_UNBOUND_AWAITING_REVIEW (retenida por un Payment sin ligar)',
     ]
     const noRetienen = [
       'TIMED_OUT sin código con sobre timeout SIN terminalResult (histórica)',
