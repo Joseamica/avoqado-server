@@ -106,6 +106,24 @@ const CASOS: Caso[] = [
     permisivo: true,
   },
   {
+    // Revisión final (17-sep, D): «fila de la ventana» se define IGUAL en las cuatro lecturas (espejo, predicado, barrido y
+    // `esNegativoSinEvidencia`): sobre con `status: 'timeout'` Y `terminalResult.status` cadena. Con el `status` del sobre AUSENTE
+    // la ventana nunca la liberaría (su elegibilidad exige `timeout`), así que tampoco puede retener la ranura por ella: en el
+    // régimen relajado se trata como una TIMED_OUT histórica. (En estricto sigue bloqueando: TIMED_OUT es UNRESOLVED.)
+    nombre: 'TIMED_OUT sin código CON terminalResult pero sobre SIN status (NULL-seguro)',
+    status: TerminalPaymentRequestStatus.TIMED_OUT,
+    failureCode: null,
+    resultJson: { terminalResult: { status: 'failed', errorMessage: 'SDK U100', outcomeEvidence: null } },
+    permisivo: false,
+  },
+  {
+    nombre: 'TIMED_OUT sin código CON terminalResult pero sobre con status distinto de timeout',
+    status: TerminalPaymentRequestStatus.TIMED_OUT,
+    failureCode: null,
+    resultJson: { status: 'failed', terminalResult: { status: 'failed', errorMessage: 'SDK U100', outcomeEvidence: null } },
+    permisivo: false,
+  },
+  {
     nombre: 'TIMED_OUT sin código con sobre timeout SIN terminalResult (histórica)',
     status: TerminalPaymentRequestStatus.TIMED_OUT,
     failureCode: null,
@@ -283,6 +301,8 @@ describe('interruptor por venue del predicado estricto', () => {
       'TIMED_OUT sin código con sobre timeout SIN terminalResult (histórica)',
       'TIMED_OUT sin código CON terminalResult (la ventana decide)',
       'TIMED_OUT sin código CON terminalResult y paymentId cadena VACÍA (la ventana decide)',
+      'TIMED_OUT sin código CON terminalResult pero sobre SIN status (NULL-seguro)',
+      'TIMED_OUT sin código CON terminalResult pero sobre con status distinto de timeout',
       'TIMED_OUT/BANK_APPROVED_AWAITING_PAYMENT (retenida por evidencia bancaria)',
       'TIMED_OUT/PAYMENT_UNBOUND_AWAITING_REVIEW (retenida por un Payment sin ligar)',
       'CANCELLED sin disposición (la columna no existía en prod)',
@@ -376,6 +396,15 @@ describe('interruptor por venue del predicado estricto', () => {
       expect(historicaEnRelajado.length).toBeGreaterThan(0)
       expect(historicaEnRelajado.filter(f => enSql.has(f.requestId)).map(f => `${f.venueId}/${f.nombre}`)).toEqual([])
       expect(sembradas.filter(f => f.nombre === noRetienen[1] && enSql.has(f.requestId)).map(f => `${f.venueId}/${f.nombre}`)).toEqual([])
+      // Revisión final (17-sep, D): con terminalResult pero SIN `status: 'timeout'` en el sobre (ausente o distinto) no es una fila
+      // de la ventana — en relajado no retiene la ranura (la ventana no podría liberarla nunca), igual que la histórica sin sobre.
+      const sinStatusDeVentana = sembradas.filter(
+        f =>
+          f.nombre.startsWith('TIMED_OUT sin código CON terminalResult pero sobre') &&
+          (f.venueId === venueViejo || estrictos === SIN_NADIE || f.createdAt === ANTES),
+      )
+      expect(sinStatusDeVentana.length).toBe(estrictos === SIN_NADIE ? 2 * 2 * 2 : 2 * 3)
+      expect(sinStatusDeVentana.filter(f => enSql.has(f.requestId)).map(f => `${f.venueId}/${f.nombre}`)).toEqual([])
       // Y la función espejo dice lo mismo que el SQL sobre las cuatro (si divergieran, admitir y proyectar mentirían distinto).
       expect(comparar(estrictos, enSql)).toEqual({ sqlDeMenos: [], sqlDeMas: [] })
     }

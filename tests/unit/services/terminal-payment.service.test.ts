@@ -2397,3 +2397,509 @@ describe('P1-D (r2) · handleProbeResultFromSocket conserva las señales positiv
     }
   })
 })
+
+// ── Revisión final de la rama (17-sep) · A: el POS se entera SOLO de la liberación y de la declaración (Important #1) ──
+//
+// Antes: `handlePaymentResultFromSocket` resolvía la espera del long-poll AL INSTANTE con el sobre degradado (`timeout` ⇒ 504).
+// El POS sondeaba tres veces, leía TIMED_OUT sin veredicto y se quedaba en «Estamos confirmando el cobro…» hasta un «Volver a
+// consultar» manual — y el `pending.resolve` de la liberación ya no encontraba a nadie. Ahora un `timeout` CON sobre de la
+// terminal (= la fila ENTRÓ a la ventana) deja la espera viva para que la resuelva la ventana, la declaración o el dinero.
+describe('Revisión final · A: el long-poll del POS no se rinde al entrar en la VENTANA', () => {
+  type Espera = { resolve: (r: unknown) => void; timeout: NodeJS.Timeout; venueId: string }
+  const esperas = () => (terminalPaymentService as any).pendingPayments as Map<string, Espera>
+  const programadas = () => (terminalPaymentService as any).ventanasProgramadas as Map<string, NodeJS.Timeout>
+  const socket = { terminalId: 't-default', venueId: 'venue-1', socketId: 'sock-t-default' }
+
+  /** Un cobro con su long-poll VIVO. `estado.valor` es lo que recibiría el POS. La fila le pertenece al socket de la terminal. */
+  async function cobroEnEspera(requestId: string) {
+    const estado: { resuelto: boolean; valor?: Record<string, unknown> } = { resuelto: false }
+    void terminalPaymentService.sendPaymentToTerminal(baseRequest({ requestId })).then(v => {
+      estado.resuelto = true
+      estado.valor = v as unknown as Record<string, unknown>
+    })
+    await flush()
+    expect(esperas().has(requestId)).toBe(true)
+    tpr().findFirst.mockResolvedValue({ id: `row-${requestId}`, requestId, status: 'SENT', failureCode: null, updatedAt: new Date() })
+    return estado
+  }
+
+  afterEach(() => {
+    for (const [id, p] of esperas()) {
+      clearTimeout(p.timeout)
+      esperas().delete(id)
+      p.resolve({ requestId: id, status: 'timeout' })
+    }
+    for (const t of programadas().values()) clearTimeout(t)
+    programadas().clear()
+  })
+
+  it('un `timeout` de la terminal escribe TIMED_OUT con su sobre y NO resuelve ni borra la espera: la ventana decide', async () => {
+    const estado = await cobroEnEspera('REQ-A-TIMEOUT')
+    const handled = await terminalPaymentService.handlePaymentResultFromSocket(
+      { requestId: 'REQ-A-TIMEOUT', status: 'timeout', errorMessage: 'No pude verificar el resultado' },
+      socket,
+    )
+    await flush()
+    await flush()
+    expect(tpr().updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'TIMED_OUT', resultJson: expect.objectContaining({ terminalResult: expect.any(Object) }) }),
+      }),
+    )
+    expect(estado.resuelto).toBe(false)
+    expect(esperas().has('REQ-A-TIMEOUT')).toBe(true)
+    // La espera sigue siendo de ESTE cobro: el resultado se aceptó y la ventana la contestará.
+    expect(handled).toBe(true)
+    expect(programadas().has('REQ-A-TIMEOUT')).toBe(true)
+  })
+
+  it('un `failed` SIN evidencia (degradado a la ventana) tampoco la resuelve', async () => {
+    const estado = await cobroEnEspera('REQ-A-FAILED')
+    await terminalPaymentService.handlePaymentResultFromSocket(
+      { requestId: 'REQ-A-FAILED', status: 'failed', errorMessage: 'SDK U100' },
+      socket,
+    )
+    await flush()
+    await flush()
+    expect(estado.resuelto).toBe(false)
+    expect(esperas().has('REQ-A-FAILED')).toBe(true)
+  })
+
+  it('regresión: un `failed` CON evidencia (PROCESSOR_DECLINED) la resuelve al instante con el FAILED de la terminal', async () => {
+    const estado = await cobroEnEspera('REQ-A-DECLINED')
+    await terminalPaymentService.handlePaymentResultFromSocket(
+      { requestId: 'REQ-A-DECLINED', status: 'failed', outcomeEvidence: 'PROCESSOR_DECLINED', errorMessage: 'Declinada' },
+      socket,
+    )
+    await flush()
+    expect(estado).toMatchObject({ resuelto: true, valor: { status: 'failed', outcomeEvidence: 'PROCESSOR_DECLINED' } })
+    expect(esperas().has('REQ-A-DECLINED')).toBe(false)
+  })
+
+  it('regresión: un `success` cuyo Payment no se acredita queda UNKNOWN (sin terminalResult) y resuelve la espera como hoy: `timeout`', async () => {
+    const estado = await cobroEnEspera('REQ-A-SIN-PAGO')
+    await terminalPaymentService.handlePaymentResultFromSocket(
+      { requestId: 'REQ-A-SIN-PAGO', status: 'success', paymentId: 'pay-inexistente', transactionId: 'tx-1' },
+      socket,
+    )
+    await flush()
+    expect(estado.resuelto).toBe(true)
+    expect(estado.valor).toMatchObject({ status: 'timeout', claimedSuccess: expect.objectContaining({ paymentId: 'pay-inexistente' }) })
+    expect(estado.valor).not.toHaveProperty('terminalResult')
+    expect(esperas().has('REQ-A-SIN-PAGO')).toBe(false)
+  })
+})
+
+describe('Revisión final · A: resolverEsperaDelPos despierta al POS SÓLO con un desenlace durable', () => {
+  type Espera = { resolve: (r: unknown) => void; timeout: NodeJS.Timeout; venueId: string }
+  const esperas = () => (terminalPaymentService as any).pendingPayments as Map<string, Espera>
+  async function cobroEnEspera(requestId: string) {
+    const estado: { resuelto: boolean; valor?: Record<string, unknown> } = { resuelto: false }
+    void terminalPaymentService.sendPaymentToTerminal(baseRequest({ requestId })).then(v => {
+      estado.resuelto = true
+      estado.valor = v as unknown as Record<string, unknown>
+    })
+    await flush()
+    expect(esperas().has(requestId)).toBe(true)
+    return estado
+  }
+  afterEach(() => {
+    for (const [id, p] of esperas()) {
+      clearTimeout(p.timeout)
+      esperas().delete(id)
+      p.resolve({ requestId: id, status: 'timeout' })
+    }
+  })
+  const fila = (requestId: string, extra: Record<string, unknown>) => ({
+    requestId,
+    venueId: 'venue-1',
+    paymentId: null,
+    cancelDisposition: null,
+    ...extra,
+  })
+
+  it('fila liberada por la ventana ⇒ el long-poll recibe el sobre de la liberación: FAILED con NO_EVIDENCE_AFTER_WINDOW', async () => {
+    const estado = await cobroEnEspera('REQ-R-LIBERADA')
+    const sobre = {
+      requestId: 'REQ-R-LIBERADA',
+      status: 'failed',
+      outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW',
+      errorMessage: 'No se confirmó el cobro en la ventana de 30 s. Se puede volver a cobrar.',
+    }
+    tpr().findFirst.mockResolvedValue(
+      fila('REQ-R-LIBERADA', { status: 'FAILED', failureCode: 'NO_EVIDENCE_AFTER_WINDOW', resultJson: sobre }),
+    )
+    expect(await terminalPaymentService.resolverEsperaDelPos('REQ-R-LIBERADA', 'venue-1')).toBe(true)
+    await flush()
+    expect(estado).toMatchObject({ resuelto: true, valor: sobre })
+    expect(esperas().has('REQ-R-LIBERADA')).toBe(false)
+    expect(tpr().findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { requestId: 'REQ-R-LIBERADA', venueId: 'venue-1' } }))
+  })
+
+  it('fila DECLARADA por el cajero ⇒ FAILED con OPERATOR_RECONCILED (la fila dice OPERATOR_RECONCILED_NO_CHARGE)', async () => {
+    const estado = await cobroEnEspera('REQ-R-DECLARADA')
+    const sobre = {
+      requestId: 'REQ-R-DECLARADA',
+      status: 'failed',
+      outcomeEvidence: 'OPERATOR_RECONCILED',
+      errorMessage: 'La terminal confirmó que no se presentó tarjeta. Se puede volver a cobrar.',
+    }
+    tpr().findFirst.mockResolvedValue(
+      fila('REQ-R-DECLARADA', { status: 'FAILED', failureCode: 'OPERATOR_RECONCILED_NO_CHARGE', resultJson: sobre }),
+    )
+    expect(await terminalPaymentService.resolverEsperaDelPos('REQ-R-DECLARADA', 'venue-1')).toBe(true)
+    await flush()
+    expect(estado).toMatchObject({ resuelto: true, valor: sobre })
+  })
+
+  it('fila COMPLETED con su Payment (la aprobación tardía reabrió la fila) ⇒ success con ese Payment', async () => {
+    const estado = await cobroEnEspera('REQ-R-COBRADA')
+    tpr().findFirst.mockResolvedValue(
+      fila('REQ-R-COBRADA', { status: 'COMPLETED', failureCode: null, paymentId: 'pay-tardio', resultJson: { status: 'success' } }),
+    )
+    expect(await terminalPaymentService.resolverEsperaDelPos('REQ-R-COBRADA', 'venue-1')).toBe(true)
+    await flush()
+    expect(estado).toMatchObject({ resuelto: true, valor: { status: 'success', paymentId: 'pay-tardio' } })
+  })
+
+  it('fila SIN desenlace (TIMED_OUT retenida por el banco) ⇒ NO la resuelve: el POS sigue esperando', async () => {
+    const estado = await cobroEnEspera('REQ-R-RETENIDA')
+    tpr().findFirst.mockResolvedValue(
+      fila('REQ-R-RETENIDA', {
+        status: 'TIMED_OUT',
+        failureCode: 'BANK_APPROVED_AWAITING_PAYMENT',
+        resultJson: { status: 'timeout', terminalResult: { status: 'failed' } },
+      }),
+    )
+    expect(await terminalPaymentService.resolverEsperaDelPos('REQ-R-RETENIDA', 'venue-1')).toBe(false)
+    await flush()
+    expect(estado.resuelto).toBe(false)
+    expect(esperas().has('REQ-R-RETENIDA')).toBe(true)
+  })
+
+  it('la espera de OTRA sucursal no se toca, y sin espera en memoria no se consulta la base', async () => {
+    const estado = await cobroEnEspera('REQ-R-AJENA')
+    tpr().findFirst.mockClear()
+    expect(await terminalPaymentService.resolverEsperaDelPos('REQ-R-AJENA', 'venue-2')).toBe(false)
+    expect(await terminalPaymentService.resolverEsperaDelPos('REQ-R-NADIE-ESPERA', 'venue-1')).toBe(false)
+    expect(tpr().findFirst).not.toHaveBeenCalled()
+    expect(estado.resuelto).toBe(false)
+  })
+})
+
+// ── Revisión final (17-sep) · C: el 🚨 de `paymentId` en un resultado no-success no grita por un `null` ──
+// La TPV publicada (2.9.2) manda `"paymentId": null` en TODO failed/cancelled: con `!== undefined` eran 2–17 alertas falsas al
+// día por terminal. Un id presente sigue gritando y se descarta (R12-6).
+describe('Revisión final · C: `paymentId` nulo en un negativo no es una anomalía', () => {
+  const logger = require('@/config/logger').default
+  const socket = { terminalId: 't-default', venueId: 'venue-1', socketId: 'sock-t-default' }
+  const gritos = () =>
+    (logger.error as jest.Mock).mock.calls.filter(c => String(c[0]).includes('Non-success socket result carried a paymentId'))
+  const sobreEscrito = () => {
+    const llamada = prismaMock.$executeRaw.mock.calls.find((c: any[]) =>
+      (c[0] as string[]).join('?').includes('UPDATE "TerminalPaymentRequest"'),
+    )
+    const json = llamada?.slice(1).find((v: unknown) => typeof v === 'string' && v.startsWith('{')) as string | undefined
+    return json ? (JSON.parse(json) as Record<string, unknown>) : null
+  }
+  beforeEach(() => {
+    tpr().findFirst.mockResolvedValue({ id: 'row-c', requestId: 'REQ-C', status: 'SENT', failureCode: null, updatedAt: new Date() })
+    ;(logger.error as jest.Mock).mockClear()
+  })
+
+  it.each(['failed', 'cancelled'] as const)('`%s` con `paymentId: null` ⇒ sin 🚨, y el sobre escrito no lleva la llave', async status => {
+    await terminalPaymentService.handlePaymentResultFromSocket(
+      { requestId: 'REQ-C', status, outcomeEvidence: 'PRE_AUTHORIZATION', paymentId: null as unknown as string },
+      socket,
+    )
+    expect(gritos()).toEqual([])
+    expect(sobreEscrito()).not.toBeNull()
+    expect(sobreEscrito()).not.toHaveProperty('paymentId')
+  })
+
+  it('`failed` con un `paymentId` REAL ⇒ 🚨 una vez y el id se descarta (no llega al sobre)', async () => {
+    await terminalPaymentService.handlePaymentResultFromSocket(
+      { requestId: 'REQ-C', status: 'failed', outcomeEvidence: 'PRE_AUTHORIZATION', paymentId: 'pay-ajeno' },
+      socket,
+    )
+    expect(gritos()).toHaveLength(1)
+    expect(gritos()[0][1]).toMatchObject({ requestId: 'REQ-C', ignoredPaymentId: 'pay-ajeno' })
+    expect(sobreEscrito()).not.toHaveProperty('paymentId')
+  })
+})
+
+// ── Revisión final (17-sep) · B: una aprobación del banco que llega DESPUÉS de liberar (ventana o cajero) re-retiene la solicitud ──
+//
+// Antes: el webhook APROBADO con importe distinto (y sus hermanos: fallo del registrador, serial que contradice el vínculo,
+// colisión de referencia) dejaba el evento como evidencia SIN crear Payment y NO tocaba la solicitud: si la ventana o el cajero ya
+// la habían liberado, el POS seguía diciendo «puedes volver a cobrar» con el banco habiendo aprobado. La regla es literalmente lo
+// que el veto de la ventana (`aprobacionBancariaConocida`) habría visto un segundo antes: aprobado vinculado y ningún Payment ligado.
+describe('Revisión final · B: retenerSolicitudLiberadaPorAprobacion', () => {
+  const svc = terminalPaymentService as any
+  const opsAlert = require('@/services/alerts/opsAlert.service')
+  const logger = require('@/config/logger').default
+  const entrada = {
+    requestId: 'REQ-B',
+    venueId: 'venue-1',
+    attemptId: 'att-b',
+    eventLogId: 'evt-b',
+    motivo: 'AMOUNT_MISMATCH' as const,
+  }
+  const liberadaEn = '2026-09-17T10:00:00.000Z'
+  const liberada = (extra: Record<string, unknown> = {}) => ({
+    id: 'row-b',
+    requestId: 'REQ-B',
+    venueId: 'venue-1',
+    terminalId: 't-b',
+    orderId: 'order-b',
+    amountCents: 10000,
+    tipCents: 0,
+    status: 'FAILED',
+    failureCode: 'NO_EVIDENCE_AFTER_WINDOW',
+    paymentId: null,
+    updatedAt: new Date('2026-09-17T10:05:00.000Z'),
+    resultJson: {
+      requestId: 'REQ-B',
+      status: 'failed',
+      outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW',
+      errorMessage: 'No se confirmó el cobro en la ventana de 30 s. Se puede volver a cobrar.',
+      releasedAfterWindow: { windowMs: 30_000, releasedAt: liberadaEn, origen: 'TIMER' },
+      terminalResult: { status: 'failed', errorMessage: 'SDK U100', outcomeEvidence: null },
+    },
+    ...extra,
+  })
+  /** El texto COMPLETO del UPDATE del CAS: las plantillas y los fragmentos `Prisma.sql` anidados. */
+  const casDe = (llamada: any[]) => {
+    const [strings, ...values] = llamada
+    const fragmentos = values.filter(v => v && typeof v === 'object' && typeof (v as { sql?: unknown }).sql === 'string')
+    return { texto: (strings as string[]).join('?'), fragmentos: fragmentos.map(f => (f as { sql: string }).sql), values }
+  }
+  const llamadasDelCas = () =>
+    prismaMock.$executeRaw.mock.calls.filter((c: any[]) => (c[0] as string[]).join('?').includes('UPDATE "TerminalPaymentRequest"'))
+  let alerta: jest.SpyInstance
+  let orden: string[]
+
+  beforeEach(() => {
+    orden = []
+    alerta = jest.spyOn(opsAlert, 'sendOpsAlert').mockImplementation(async () => {
+      orden.push('correo')
+      return true
+    })
+    prismaMock.$transaction.mockImplementation(async (callback: any) => {
+      orden.push('abre-tx')
+      const r = await callback(prismaMock)
+      orden.push('commit')
+      return r
+    })
+    prismaMock.$queryRaw.mockImplementation(async (strings: string[], ...values: unknown[]) => {
+      if (strings.join('?').includes('pg_advisory_xact_lock')) orden.push(`candado:${values[0]}:${values[1]}`)
+      return []
+    })
+    prismaMock.terminalPaymentAttemptLink.findMany.mockImplementation(async () => {
+      orden.push('vinculos')
+      return [{ attemptId: 'att-z' }, { attemptId: 'att-b' }]
+    })
+    prismaMock.$executeRaw.mockImplementation(async (strings: string[]) => {
+      if (strings.join('?').includes('UPDATE "TerminalPaymentRequest"')) orden.push('cas')
+      return 1
+    })
+    prismaMock.payment.count.mockResolvedValue(2)
+    prismaMock.activityLog.create.mockImplementation(async () => {
+      orden.push('asiento')
+      return { id: 'log-b' }
+    })
+    ;(logger.error as jest.Mock).mockClear()
+    ;(logger.warn as jest.Mock).mockClear()
+  })
+  afterEach(() => {
+    alerta.mockRestore()
+    prismaMock.$transaction.mockImplementation((callback: any) => callback(prismaMock))
+    prismaMock.$queryRaw.mockReset()
+    prismaMock.payment.count.mockReset()
+    prismaMock.activityLog.create.mockReset()
+  })
+
+  it.each([
+    ['sin fila', null],
+    ['FAILED con evidencia de la terminal (TPV_CONFIRMED_NO_CHARGE)', { failureCode: 'TPV_CONFIRMED_NO_CHARGE' }],
+    ['FAILED/NO_EVIDENCE_AFTER_WINDOW que ya tiene su Payment', { paymentId: 'pay-x' }],
+    ['todavía EN la ventana (TIMED_OUT sin código)', { status: 'TIMED_OUT', failureCode: null }],
+    ['ya retenida (TIMED_OUT/BANK_APPROVED_AWAITING_PAYMENT)', { status: 'TIMED_OUT', failureCode: 'BANK_APPROVED_AWAITING_PAYMENT' }],
+    ['COMPLETED', { status: 'COMPLETED', failureCode: null, paymentId: 'pay-y' }],
+  ])('%s ⇒ NOT_APPLICABLE sin abrir transacción ni escribir', async (_nombre, extra) => {
+    tpr().findFirst.mockResolvedValue(extra === null ? null : liberada(extra))
+    expect(await svc.retenerSolicitudLiberadaPorAprobacion(entrada)).toBe('NOT_APPLICABLE')
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(llamadasDelCas()).toEqual([])
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+    expect(alerta).not.toHaveBeenCalled()
+  })
+
+  it('liberada por la ventana ⇒ candado de la SOLICITUD, vínculos DENTRO, candado de CADA intento en orden, y el CAS exige lo que el veto de la ventana vería', async () => {
+    tpr().findFirst.mockResolvedValue(liberada())
+    expect(await svc.retenerSolicitudLiberadaPorAprobacion(entrada)).toBe('HELD')
+    expect(orden.slice(0, 6)).toEqual([
+      'abre-tx',
+      'candado:7310114:REQ-B',
+      'vinculos',
+      'candado:7310113:att-b',
+      'candado:7310113:att-z',
+      'cas',
+    ])
+    expect(prismaMock.terminalPaymentAttemptLink.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { requestId: 'REQ-B', venueId: 'venue-1' } }),
+    )
+    const [cas] = llamadasDelCas()
+    const { texto, fragmentos, values } = casDe(cas)
+    expect(texto).toMatch(/SET "status" = 'TIMED_OUT', "failureCode" = 'BANK_APPROVED_AWAITING_PAYMENT'/)
+    expect(texto).toMatch(/"resultJson" = coalesce\("resultJson", '\{\}'::jsonb\) \|\| /)
+    expect(texto).toMatch(/"updatedAt" = \(NOW\(\) AT TIME ZONE 'UTC'\)/)
+    expect(texto).toMatch(/WHERE "id" = \? AND "status" = 'FAILED' AND "failureCode" = \? AND "paymentId" IS NULL/)
+    expect(values).toEqual(expect.arrayContaining(['row-b', 'NO_EVIDENCE_AFTER_WINDOW']))
+    // EXISTS de APROBADO vinculado (el mismo SQL del veto) y NOT EXISTS de Payment ligado, evaluados EN la escritura.
+    expect(fragmentos.some(f => /^EXISTS \(/.test(f) && f.includes('"ProviderEventLog"') && f.includes("'send_transaction'"))).toBe(true)
+    expect(fragmentos.some(f => /^NOT EXISTS \(/.test(f) && f.includes('FROM "Payment" p'))).toBe(true)
+    // El sobre se FUNDE (jsonb `||`): conserva `releasedAfterWindow` y el sobre de la terminal, y ya no dice «puedes volver a cobrar».
+    const sobre = JSON.parse(values.find((v: unknown) => typeof v === 'string' && v.includes('bankApprovedAfterRelease')) as string)
+    expect(sobre).toMatchObject({
+      status: 'timeout',
+      outcomeEvidence: null,
+      bankApprovedAfterRelease: {
+        eventLogId: 'evt-b',
+        attemptId: 'att-b',
+        reason: 'AMOUNT_MISMATCH',
+        previousFailureCode: 'NO_EVIDENCE_AFTER_WINDOW',
+        releasedAt: liberadaEn,
+        otherCardPaymentsOnOrderAfterRelease: 2,
+      },
+    })
+    expect(sobre).not.toHaveProperty('releasedAfterWindow') // se conserva por la fusión, no se reescribe
+    expect(String(sobre.errorMessage)).not.toMatch(/volver a cobrar\./)
+  })
+
+  it('HELD ⇒ UN asiento DENTRO de la transacción, 🚨, y el correo DESPUÉS del commit con los otros cobros desde la liberación', async () => {
+    tpr().findFirst.mockResolvedValue(liberada())
+    expect(await svc.retenerSolicitudLiberadaPorAprobacion(entrada)).toBe('HELD')
+    expect(orden).toEqual([
+      'abre-tx',
+      'candado:7310114:REQ-B',
+      'vinculos',
+      'candado:7310113:att-b',
+      'candado:7310113:att-z',
+      'cas',
+      'asiento',
+      'commit',
+      'correo',
+    ])
+    expect(prismaMock.payment.count).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        venueId: 'venue-1',
+        orderId: 'order-b',
+        status: 'COMPLETED',
+        createdAt: { gt: new Date(liberadaEn) },
+      }),
+    })
+    expect(prismaMock.activityLog.create).toHaveBeenCalledTimes(1)
+    expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: 'TERMINAL_PAYMENT_WINDOW_BANK_APPROVED_AWAITING_PAYMENT',
+        entity: 'TerminalPaymentRequest',
+        entityId: 'row-b',
+        venueId: 'venue-1',
+        data: expect.objectContaining({
+          requestId: 'REQ-B',
+          attemptId: 'att-b',
+          eventLogId: 'evt-b',
+          reason: 'AMOUNT_MISMATCH',
+          previousFailureCode: 'NO_EVIDENCE_AFTER_WINDOW',
+          otherCardPaymentsOnOrderAfterRelease: 2,
+          terminalId: 't-b',
+          orderId: 'order-b',
+          amountCents: 10000,
+        }),
+      }),
+    })
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('🚨'),
+      expect.objectContaining({
+        requestId: 'REQ-B',
+        venueId: 'venue-1',
+        eventLogId: 'evt-b',
+        previousFailureCode: 'NO_EVIDENCE_AFTER_WINDOW',
+      }),
+    )
+    expect(alerta).toHaveBeenCalledTimes(1)
+    const correo = alerta.mock.calls[0][0] as { subject: string; lines: string[] }
+    expect(correo.subject).toContain('t-b')
+    expect(correo.lines.join(' ')).toContain('REQ-B')
+    expect(correo.lines.join(' ')).toMatch(/2 cobro\(s\) con tarjeta/)
+  })
+
+  it('DECLARADA por el cajero ⇒ cuenta los cobros desde la DECLARACIÓN (acceptedAt) y guarda el código previo', async () => {
+    const declaradaEn = '2026-09-17T11:00:00.000Z'
+    tpr().findFirst.mockResolvedValue(
+      liberada({
+        failureCode: 'OPERATOR_RECONCILED_NO_CHARGE',
+        resultJson: {
+          status: 'failed',
+          outcomeEvidence: 'OPERATOR_RECONCILED',
+          operatorResolution: { id: 'res-1', kind: 'NO_INSTRUMENT_PRESENTED', acceptedAt: declaradaEn, staffId: 's-1', by: 'SESSION' },
+        },
+      }),
+    )
+    expect(await svc.retenerSolicitudLiberadaPorAprobacion({ ...entrada, motivo: 'PROCESSING_ERROR' })).toBe('HELD')
+    expect(prismaMock.payment.count).toHaveBeenCalledWith({
+      where: expect.objectContaining({ createdAt: { gt: new Date(declaradaEn) } }),
+    })
+    const { values } = casDe(llamadasDelCas()[0])
+    expect(values).toEqual(expect.arrayContaining(['OPERATOR_RECONCILED_NO_CHARGE']))
+    expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        data: expect.objectContaining({
+          previousFailureCode: 'OPERATOR_RECONCILED_NO_CHARGE',
+          reason: 'PROCESSING_ERROR',
+          releasedAt: declaradaEn,
+        }),
+      }),
+    })
+  })
+
+  it('sin orden ligada ⇒ no cuenta cobros (null) y lo dice', async () => {
+    tpr().findFirst.mockResolvedValue(liberada({ orderId: null }))
+    expect(await svc.retenerSolicitudLiberadaPorAprobacion(entrada)).toBe('HELD')
+    expect(prismaMock.payment.count).not.toHaveBeenCalled()
+    expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ data: expect.objectContaining({ otherCardPaymentsOnOrderAfterRelease: null }) }),
+    })
+  })
+
+  it('CAS en 0 (otra pasada ya la retuvo, apareció un Payment ligado o el aprobado no es del venue) ⇒ NOT_APPLICABLE, sin asiento, sin 🚨 ni correo', async () => {
+    tpr().findFirst.mockResolvedValue(liberada())
+    prismaMock.$executeRaw.mockImplementation(async () => 0)
+    expect(await svc.retenerSolicitudLiberadaPorAprobacion(entrada)).toBe('NOT_APPLICABLE')
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+    expect((logger.error as jest.Mock).mock.calls.filter(c => String(c[0]).includes('🚨'))).toEqual([])
+    expect(alerta).not.toHaveBeenCalled()
+  })
+
+  it('la fila cambió BAJO el candado (relectura) ⇒ NOT_APPLICABLE sin intentar el CAS', async () => {
+    tpr()
+      .findFirst.mockResolvedValueOnce(liberada())
+      .mockResolvedValueOnce(liberada({ status: 'COMPLETED', paymentId: 'pay-z' }))
+    expect(await svc.retenerSolicitudLiberadaPorAprobacion(entrada)).toBe('NOT_APPLICABLE')
+    expect(llamadasDelCas()).toEqual([])
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['55P03 (candado ocupado)', Object.assign(new Error('canceling statement due to lock timeout'), { meta: { code: '55P03' } })],
+    ['la base cayó', new Error('Connection terminated')],
+  ])('%s ⇒ DEFERRED sin lanzar (el siguiente evento o el worker lo reintentan), sin asiento ni correo', async (_n, error) => {
+    tpr().findFirst.mockResolvedValue(liberada())
+    prismaMock.$transaction.mockRejectedValueOnce(error)
+    await expect(svc.retenerSolicitudLiberadaPorAprobacion(entrada)).resolves.toBe('DEFERRED')
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+    expect(alerta).not.toHaveBeenCalled()
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('deferred'), expect.objectContaining({ requestId: 'REQ-B' }))
+  })
+})

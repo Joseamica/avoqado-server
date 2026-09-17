@@ -22,6 +22,7 @@ import { createHash } from 'crypto'
 import { z } from 'zod'
 import { Prisma, TerminalPaymentRequestStatus } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
+import logger from '../../config/logger'
 import { normalizeTerminalId } from '../../communication/sockets/terminal-registry'
 import { evaluatePermissionList, hasPermission } from '../../lib/permissions'
 import { PIN_REGEX } from '../../schemas/common/pin.schema'
@@ -309,6 +310,21 @@ export async function resolveNoInstrument(
 
   // La respuesta es la MISMA proyección durable de S6 (contrato con las apps publicadas: nada se quita) más la resolución.
   const { terminalPaymentService } = await import('../terminal-payment.service')
+  // Revisión final (17-sep, A): DESPUÉS del commit, el POS que sigue esperando ese cobro (su long-poll quedó vivo al entrar la
+  // fila a la ventana) recibe el desenlace durable — FAILED / OPERATOR_RECONCILED — sin tener que volver a consultar. También en
+  // el replay idempotente: si el primer aviso se perdió, el reintento del cajero lo repite. Un fallo aquí no deshace ni oculta la
+  // declaración ya confirmada: el POS la lee por el GET. (El log lleva nombre y código, nunca el mensaje: misma regla que el
+  // controlador de esta ruta, cuyo cuerpo puede traer un PIN.)
+  try {
+    await terminalPaymentService.resolverEsperaDelPos(declaration.requestId, identity.venueId)
+  } catch (err) {
+    logger.warn('⚠️ [NoInstrument] could not answer the waiting POS after the declaration — it reads the result by GET', {
+      requestId: declaration.requestId,
+      venueId: identity.venueId,
+      errorName: err instanceof Error ? err.name : typeof err,
+      ...(err instanceof Prisma.PrismaClientKnownRequestError ? { errorCode: err.code } : {}),
+    })
+  }
   const current = await terminalPaymentService.consultarIntentoDeTerminal({
     attemptId,
     venueId: identity.venueId,

@@ -40,6 +40,15 @@ export function sinAprobadoVinculadoSql(requestId: string, venueId: string): Pri
   return Prisma.sql`NOT EXISTS (${aprobadoVinculadoSql(requestId, venueId)})`
 }
 
+/**
+ * Revisión final (17-sep, B): el POSITIVO del mismo veto — «consta un APROBADO de un intento vinculado HOY a la solicitud, del
+ * venue de la solicitud». Lo exige el CAS que RE-RETIENE una solicitud ya liberada (ventana o cajero) cuando el banco aprobó
+ * después sin que naciera el Payment: es exactamente lo que `sinAprobadoVinculadoSql` habría vetado un instante antes.
+ */
+export function hayAprobadoVinculadoSql(requestId: string, venueId: string): Prisma.Sql {
+  return Prisma.sql`EXISTS (${aprobadoVinculadoSql(requestId, venueId)})`
+}
+
 /** «No hay Payment con tarjeta COMPLETED ligado a la solicitud por puntero, etiqueta legacy o llave de intento». */
 export function sinPagoLigadoSql(requestId: string, venueId: string): Prisma.Sql {
   return Prisma.sql`NOT EXISTS (${pagoLigadoSql(requestId, venueId)})`

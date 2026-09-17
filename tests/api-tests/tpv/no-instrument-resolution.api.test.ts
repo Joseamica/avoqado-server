@@ -383,14 +383,24 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
   it('con PIN la cubeta es LA MISMA que la del PIN de gerente: agotarla desde esta ruta deja en 429 a POST /mobile/venues/:venueId/permission-overrides desde la misma IP', async () => {
     // DEV: 100 por minuto por IP (prod: 10 cada 15 min). Las de esta ruta con PIN cuentan; las respuestas del servicio dan igual.
     const agotadas: number[] = []
+    let primer429: request.Response | null = null
     for (let i = 0; i < 100; i++) {
       const res = await request(app)
         .post(RUTA)
         .set('Authorization', `Bearer ${tokenDeTerminal('staff-cashier', 'CASHIER')}`)
         .send(cuerpo({ supervisorPin: '1234' }))
       agotadas.push(res.status)
+      if (res.status === 429 && !primer429) primer429 = res
     }
     expect(agotadas.some(s => s === 429)).toBe(true) // el tope de esta misma ruta ya se alcanzó
+    // Revisión final (17-sep, D): el 429 lleva `code` (la terminal decide por él) SIN perder `retryAfter` ni `Retry-After`.
+    expect(primer429?.body).toEqual({
+      error: 'RATE_LIMIT_EXCEEDED',
+      code: 'RATE_LIMIT_EXCEEDED',
+      message: expect.any(String),
+      retryAfter: 15 * 60,
+    })
+    expect(Number(primer429?.headers['retry-after'])).toBeGreaterThan(0)
     // La ruta del PIN de gerente, desde la MISMA IP, con un token válido y membresía real: el limitador corta ANTES de validar el cuerpo.
     mirrorTokenRoleOnStaffVenue('CASHIER', venueId)
     const override = await request(app)
@@ -399,8 +409,9 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
       .send({ pin: '1234', permission: 'orders:cancel' })
     expect({ status: override.status, body: override.body }).toEqual({
       status: 429,
-      body: expect.objectContaining({ error: 'RATE_LIMIT_EXCEEDED' }),
+      body: { error: 'RATE_LIMIT_EXCEEDED', code: 'RATE_LIMIT_EXCEEDED', message: expect.any(String), retryAfter: 15 * 60 },
     })
+    expect(Number(override.headers['retry-after'])).toBeGreaterThan(0)
     // Y sin PIN esta ruta sigue pasando aunque la cubeta esté agotada: no la toca.
     const sinPin = await request(app)
       .post(RUTA)

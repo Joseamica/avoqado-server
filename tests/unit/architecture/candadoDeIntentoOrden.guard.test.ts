@@ -94,6 +94,28 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
     const publicacion = indice(s, 'async handleAttemptOpenedFromSocket(')
     antes(s, 'await candadoDeSolicitud(tx, requestId)', 'await candadoDeIntento(tx, attemptId)', publicacion)
     antes(s, 'await candadoDeIntento(tx, attemptId)', 'terminalPaymentAttemptLink.create(', publicacion)
+    // Revisión final (17-sep, B): la RE-RETENCIÓN de una solicitud liberada cuando el banco aprobó después usa el MISMO orden que la
+    // ventana — candado de la solicitud → vínculos enumerados DENTRO → candado de cada intento → relectura → CAS con el EXISTS de
+    // APROBADO y el NOT EXISTS de Payment ligado —, en su propia transacción del protocolo.
+    const reRetencion = indice(s, 'async retenerSolicitudLiberadaPorAprobacion(')
+    const txDeReRetencion = indice(s, 'prisma.$transaction(', reRetencion)
+    antes(s, 'await candadoDeSolicitud(tx, requestId)', 'tx.terminalPaymentAttemptLink.findMany(', txDeReRetencion)
+    antes(
+      s,
+      'tx.terminalPaymentAttemptLink.findMany(',
+      'for (const attemptId of attemptIds) await candadoDeIntento(tx, attemptId)',
+      txDeReRetencion,
+    )
+    antes(
+      s,
+      'for (const attemptId of attemptIds) await candadoDeIntento(tx, attemptId)',
+      'hayAprobadoVinculadoSql(requestId, venueId)',
+      txDeReRetencion,
+    )
+    antes(s, 'hayAprobadoVinculadoSql(requestId, venueId)', 'sinPagoLigadoSql(requestId, venueId)', txDeReRetencion)
+    expect(s.slice(txDeReRetencion, indice(s, 'async releaseUnprovenNegativesAfterWindow(', reRetencion))).toMatch(
+      /OPCIONES_DE_TRANSACCION_DEL_INTENTO/,
+    )
     // El FALLBACK del webhook (55P03 sobre el candado del intento): resuelve la solicitud por el vínculo e inserta bajo SU candado.
     const w = leer('services/tpv/angelpay-webhook.service.ts')
     const ingreso = indice(w, 'async function ingresarEventoDelIntento(')
@@ -221,7 +243,9 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
       // Ventana de confirmación (plan 16-sep, Task 2): DOS — la publicación del vínculo y la decisión de la ventana
       // (`releaseUnprovenNegative`: candado de CADA intento vinculado → veto bancario → CAS → asiento, una sola fotografía).
       // Codex r2 (P1-A): y TRES con la transacción del NEGATIVO en `closeRow` (mismo orden de candados que la ventana).
-      'services/terminal-payment.service.ts': 3,
+      // Revisión final (17-sep, B): y CUATRO con la RE-RETENCIÓN de una solicitud liberada cuando el banco aprobó después
+      // (`retenerSolicitudLiberadaPorAprobacion`: el mismo orden que la ventana).
+      'services/terminal-payment.service.ts': 4,
       // Codex R14-1: el INGRESO del evento también es una transacción del protocolo (candado del intento → createdAt
       // monótono → INSERT), así que son TRES en el webhook: ingreso, publicación del vínculo y escritor por identidad débil.
       // Codex R15-1: y CUATRO con la recuperación de los ingresos sin candado desde S4 (`ordenarIngresosSinCandado`, transacción

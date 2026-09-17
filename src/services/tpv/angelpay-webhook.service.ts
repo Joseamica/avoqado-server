@@ -123,6 +123,13 @@ export const ANGELPAY_WEBHOOK_ERROR_REASONS = {
   POSSIBLE_REFERENCE_COLLISION: 'POSSIBLE_REFERENCE_COLLISION',
 } as const
 
+/**
+ * Revisión final (17-sep, B): `message` del resultado cuando la RE-RETENCIÓN de una solicitud liberada no se pudo decidir
+ * (candado ocupado, base caída) en una rama que normalmente CIERRA el evento (serial que contradice el vínculo, colisión de
+ * referencia): el evento se deja PENDING, sin cerrarlo, para que el worker repita la rama completa. No es un motivo durable.
+ */
+const RETENCION_DIFERIDA = 'HOLD_DEFERRED'
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Payload validator
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -471,6 +478,23 @@ async function confirmarPorVinculo(args: {
         webhookTerminalSerial: serialDelWebhook,
       },
     )
+    // Revisión final (17-sep, B): el banco aprobó y no nace dinero — si la solicitud ya estaba LIBERADA, vuelve a retenerse ANTES
+    // de cerrar el evento. Diferida (candado ocupado) ⇒ el evento NO se cierra: sigue PENDING y el worker repite todo.
+    const retencion = await terminalPaymentService.retenerSolicitudLiberadaPorAprobacion({
+      requestId: link.requestId,
+      venueId: link.venueId,
+      attemptId,
+      eventLogId,
+      motivo: 'LINK_TERMINAL_MISMATCH',
+    })
+    if (retencion === 'DEFERRED') {
+      return {
+        action: 'ORPHANED',
+        errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.LINK_TERMINAL_MISMATCH,
+        eventLogId,
+        message: RETENCION_DIFERIDA,
+      }
+    }
     await prisma.providerEventLog.updateMany({
       where: { id: eventLogId, ...propietario },
       data: { status: EventStatus.ERROR, errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.LINK_TERMINAL_MISMATCH, processedAt: new Date() },
@@ -505,6 +529,15 @@ async function confirmarPorVinculo(args: {
         recibidoCents: recibido,
       },
     )
+    // Revisión final (17-sep, B): aprobado sin dinero sobre una solicitud quizá ya LIBERADA ⇒ se re-retiene antes de escribir. El
+    // evento queda PENDING igual (también si la retención se difiere): el worker lo repite y vuelve a pedirla.
+    await terminalPaymentService.retenerSolicitudLiberadaPorAprobacion({
+      requestId: link.requestId,
+      venueId: link.venueId,
+      attemptId,
+      eventLogId,
+      motivo: 'AMOUNT_MISMATCH',
+    })
     const escritura = await prisma.providerEventLog.updateMany({
       where: { id: eventLogId, ...propietario },
       data: { status: EventStatus.PENDING, errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.AMOUNT_MISMATCH },
@@ -570,6 +603,15 @@ async function confirmarPorVinculo(args: {
       requestId: request.requestId,
       error: mensaje,
     })
+    // Revisión final (17-sep, B): el registrador no creó el Payment — si la solicitud ya estaba LIBERADA, se re-retiene. El evento
+    // queda PENDING igual (también si la retención se difiere) y el worker la vuelve a pedir en su reintento.
+    await terminalPaymentService.retenerSolicitudLiberadaPorAprobacion({
+      requestId: link.requestId,
+      venueId: link.venueId,
+      attemptId,
+      eventLogId,
+      motivo: 'PROCESSING_ERROR',
+    })
     // Codex R4 (P2): también esta escritura es del DUEÑO — si perdió la propiedad, se contesta el desenlace durable.
     const escritura = await prisma.providerEventLog.updateMany({
       where: { id: eventLogId, ...propietario },
@@ -587,6 +629,28 @@ async function confirmarPorVinculo(args: {
   const evidencia = tipoDeEvidencia(resultado)
   const esSegundaCaptura = evidencia === 'POSSIBLE_SECOND_CAPTURE'
   const esColision = evidencia === 'POSSIBLE_REFERENCE_COLLISION'
+  // Revisión final (17-sep, B): una COLISIÓN de referencia deja evidencia PENDING, no un cobro — el banco aprobó y no nació
+  // dinero para esta solicitud. Si ya estaba LIBERADA se re-retiene ANTES de sellar el evento; diferida ⇒ ni huella ni sello: el
+  // evento sigue PENDING y el worker repite el registro (idempotente) y la retención. (La SEGUNDA captura no aplica: la
+  // solicitud ya tiene ganador y el CAS no podría tocarla.)
+  if (esColision) {
+    const retencion = await terminalPaymentService.retenerSolicitudLiberadaPorAprobacion({
+      requestId: link.requestId,
+      venueId: link.venueId,
+      attemptId,
+      eventLogId,
+      motivo: 'POSSIBLE_REFERENCE_COLLISION',
+    })
+    if (retencion === 'DEFERRED') {
+      return {
+        action: 'ORPHANED',
+        errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.POSSIBLE_REFERENCE_COLLISION,
+        eventLogId,
+        paymentId: resultado.id,
+        message: RETENCION_DIFERIDA,
+      }
+    }
+  }
   const filaDespues = await prisma.terminalPaymentRequest.findFirst({
     where: { requestId: request.requestId },
     select: { paymentId: true, closedVia: true },

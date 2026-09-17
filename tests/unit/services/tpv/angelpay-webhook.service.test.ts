@@ -1363,3 +1363,170 @@ describe('Ventana de confirmación (plan 16-sep, fix round 1 (e)): el fallback d
     )
   })
 })
+
+// ── Revisión final de la rama (17-sep) · B: toda rama que deja un APROBADO vinculado del MISMO venue SIN Payment pide re-retener ──
+// Una solicitud ya liberada (ventana o cajero) con el banco habiendo aprobado su intento: el POS no puede seguir diciendo «puedes
+// volver a cobrar». El servicio decide con el CAS (sólo filas liberadas, con el aprobado y sin Payment ligado); aquí se fija QUIÉN
+// lo pide, CUÁNDO (antes de la escritura final del evento) y que una retención DIFERIDA no cierre el evento (el worker reintenta).
+describe('Revisión final · B: las ramas del webhook que no crean dinero piden re-retener la solicitud liberada', () => {
+  const linkMock = () => (prisma as any).terminalPaymentAttemptLink.findUnique as jest.Mock
+  const solicitudMock = () => (prisma as any).terminalPaymentRequest.findFirst as jest.Mock
+  const vinculo = { requestId: 'req-b', venueId: 'venue_1', terminalId: 'n86aaa', createdAt: new Date() }
+  const solicitud = {
+    requestId: 'req-b',
+    orderId: null,
+    amountCents: 10000,
+    tipCents: 0,
+    processedByStaffId: null,
+    requestedById: null,
+    customerId: null,
+    rating: null,
+  }
+  let retener: jest.SpyInstance
+  let registrar: jest.SpyInstance
+  let n = 0
+  const webhook = (over: Record<string, unknown> = {}) =>
+    processAngelPayWebhook({
+      payload: {
+        event_type: 'send_transaction',
+        payload: {
+          integratorReference: 'att-b',
+          amount: '000000010000',
+          status: 'approved',
+          transactionId: 'tx_b',
+          terminalSerial: 'N86AAA',
+          ...over,
+        },
+      } as any,
+      eventId: `msg_b_${++n}`,
+      merchantAccount: TEST_MERCHANT,
+      retryDelaysMs: [0],
+    })
+  /** Las escrituras de DECISIÓN sobre el evento (el fechado del ingreso no cuenta). */
+  const decisiones = () =>
+    mockedProviderEventLogUpdate.mock.calls
+      .map((args, i) => ({
+        data: (args[0] as { data?: Record<string, unknown> })?.data ?? {},
+        orden: mockedProviderEventLogUpdate.mock.invocationCallOrder[i],
+      }))
+      .filter(({ data }) => !(Object.keys(data).length === 1 && 'createdAt' in data))
+  const pedida = (motivo: string) =>
+    expect(retener).toHaveBeenCalledWith({ requestId: 'req-b', venueId: 'venue_1', attemptId: 'att-b', eventLogId: 'evt_b', motivo })
+
+  beforeEach(async () => {
+    const { terminalPaymentService } = await import('@/services/terminal-payment.service')
+    const registrador = await import('@/services/tpv/payment.tpv.service')
+    retener = jest.spyOn(terminalPaymentService, 'retenerSolicitudLiberadaPorAprobacion').mockResolvedValue('HELD')
+    registrar = jest.spyOn(registrador, 'recordFastPayment')
+    ;[
+      mockedProviderEventLogCreate,
+      mockedProviderEventLogFindFirst,
+      mockedProviderEventLogUpdate,
+      mockedPaymentFindFirst,
+      mockedMerchantAccountUpdate,
+      mockedMerchantAccountFindUnique,
+      mockedActivityLogCreate,
+    ].forEach(m => m.mockReset())
+    ;((prisma as any).$queryRaw as jest.Mock).mockReset().mockResolvedValue([])
+    mockedProviderEventLogFindFirst.mockResolvedValue(null)
+    mockedProviderEventLogCreate.mockResolvedValue({ id: 'evt_b' })
+    mockedProviderEventLogUpdate.mockResolvedValue({ count: 1 })
+    mockedMerchantAccountUpdate.mockResolvedValue({})
+    mockedMerchantAccountFindUnique.mockResolvedValue({ angelpayUserAccount: { venueId: 'venue_1' } })
+    linkMock().mockReset().mockResolvedValue(vinculo)
+    solicitudMock()
+      .mockReset()
+      .mockImplementation(async ({ select }: { select?: Record<string, unknown> }) =>
+        select && 'amountCents' in select ? solicitud : { paymentId: null, closedVia: null, terminalId: 'n86aaa' },
+      )
+  })
+  afterEach(() => {
+    retener.mockRestore()
+    registrar.mockRestore()
+    linkMock().mockReset().mockResolvedValue(null)
+    solicitudMock().mockReset().mockResolvedValue(null)
+  })
+
+  it('AMOUNT_MISMATCH ⇒ pide la retención con su motivo ANTES de dejar el evento PENDING, y sin crear dinero', async () => {
+    const r = await webhook({ amount: '000000009900' })
+    expect(r).toMatchObject({ action: 'ORPHANED', errorReason: 'AMOUNT_MISMATCH' })
+    pedida('AMOUNT_MISMATCH')
+    const escritura = decisiones().find(d => d.data.errorReason === 'AMOUNT_MISMATCH')
+    expect(escritura?.data).toMatchObject({ status: 'PENDING' })
+    expect(retener.mock.invocationCallOrder[0]).toBeLessThan(escritura!.orden)
+    expect(registrar).not.toHaveBeenCalled()
+  })
+
+  it('LINK_TERMINAL_MISMATCH ⇒ pide la retención ANTES de cerrar el evento como ERROR', async () => {
+    const r = await webhook({ terminalSerial: 'N86OTRA0001' })
+    expect(r).toMatchObject({ action: 'ERROR', errorReason: 'LINK_TERMINAL_MISMATCH' })
+    pedida('LINK_TERMINAL_MISMATCH')
+    const cierre = decisiones().find(d => d.data.errorReason === 'LINK_TERMINAL_MISMATCH')
+    expect(cierre?.data).toMatchObject({ status: 'ERROR' })
+    expect(retener.mock.invocationCallOrder[0]).toBeLessThan(cierre!.orden)
+  })
+
+  it('LINK_TERMINAL_MISMATCH con la retención DIFERIDA (candado ocupado) ⇒ el evento NO se cierra: sigue PENDING para que el worker reintente', async () => {
+    retener.mockResolvedValue('DEFERRED')
+    const r = await webhook({ terminalSerial: 'N86OTRA0001' })
+    pedida('LINK_TERMINAL_MISMATCH')
+    expect(decisiones().filter(d => d.data.status === 'ERROR')).toEqual([])
+    expect(r).toMatchObject({ action: 'ORPHANED', errorReason: 'LINK_TERMINAL_MISMATCH', message: 'HOLD_DEFERRED' })
+  })
+
+  it('PROCESSING_ERROR (el registrador revienta) ⇒ pide la retención y deja el evento PENDING con el motivo', async () => {
+    registrar.mockRejectedValue(new Error('registrador caído'))
+    const r = await webhook()
+    expect(r).toMatchObject({ action: 'ERROR', errorReason: 'PROCESSING_ERROR' })
+    pedida('PROCESSING_ERROR')
+    const escritura = decisiones().find(d => d.data.errorReason === 'PROCESSING_ERROR')
+    expect(escritura?.data).toMatchObject({ status: 'PENDING' })
+    expect(retener.mock.invocationCallOrder[0]).toBeLessThan(escritura!.orden)
+  })
+
+  it('POSSIBLE_REFERENCE_COLLISION (evidencia PENDING, no un cobro) ⇒ pide la retención ANTES de sellar el evento', async () => {
+    registrar.mockResolvedValue({
+      id: 'pay_col',
+      status: 'PENDING',
+      possibleReferenceCollision: { referenceNumber: 'tx_b', candidates: [] },
+    })
+    const r = await webhook()
+    expect(r).toMatchObject({ action: 'REFERENCE_COLLISION', paymentId: 'pay_col' })
+    pedida('POSSIBLE_REFERENCE_COLLISION')
+    const sello = decisiones().find(d => d.data.errorReason === 'POSSIBLE_REFERENCE_COLLISION')
+    expect(sello?.data).toMatchObject({ status: 'PROCESSED', paymentId: 'pay_col' })
+    expect(retener.mock.invocationCallOrder[0]).toBeLessThan(sello!.orden)
+  })
+
+  it('POSSIBLE_REFERENCE_COLLISION con la retención DIFERIDA ⇒ el evento NO se sella ni se estampa la huella (el worker lo repite entero)', async () => {
+    retener.mockResolvedValue('DEFERRED')
+    registrar.mockResolvedValue({
+      id: 'pay_col',
+      status: 'PENDING',
+      possibleReferenceCollision: { referenceNumber: 'tx_b', candidates: [] },
+    })
+    const r = await webhook()
+    expect(r).toMatchObject({ action: 'ORPHANED', errorReason: 'POSSIBLE_REFERENCE_COLLISION', message: 'HOLD_DEFERRED' })
+    expect(decisiones().filter(d => d.data.status === 'PROCESSED')).toEqual([])
+    expect(estampas().filter(e => e.paymentId === 'pay_col')).toEqual([])
+  })
+
+  it('LINK_VENUE_MISMATCH (vínculo de OTRO venue) ⇒ NO toca la solicitud ajena', async () => {
+    mockedMerchantAccountFindUnique.mockResolvedValue({ angelpayUserAccount: { venueId: 'venue_otro' } })
+    const r = await webhook()
+    expect(r).toMatchObject({ action: 'ERROR', errorReason: 'LINK_VENUE_MISMATCH' })
+    expect(retener).not.toHaveBeenCalled()
+  })
+
+  it('regresión: el cobro CONFIRMADO y la POSIBLE SEGUNDA CAPTURA (la solicitud ya tiene ganador) no piden nada', async () => {
+    registrar.mockResolvedValueOnce({ id: 'pay_ok', status: 'COMPLETED' })
+    expect((await webhook()).paymentId).toBe('pay_ok')
+    registrar.mockResolvedValueOnce({
+      id: 'pay_2da',
+      status: 'PENDING',
+      possibleSecondCapture: { requestId: 'req-b', winnerPaymentId: 'pay_w' },
+    })
+    expect(await webhook()).toMatchObject({ action: 'SECOND_CAPTURE' })
+    expect(retener).not.toHaveBeenCalled()
+  })
+})

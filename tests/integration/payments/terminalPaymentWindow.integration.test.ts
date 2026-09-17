@@ -2238,3 +2238,228 @@ describe('Declaración del cajero', () => {
     expect(await terminalPaymentService.hasChargeBlockingOrderCancel(venueId, orderId)).toBe(false)
   })
 })
+
+// ── Revisión final de la rama (17-sep) · A: el POS se entera SOLO de la liberación y de la declaración (Important #1) ──
+//
+// La secuencia REAL, por el controlador móvil (el long-poll HTTP de la tablet): antes, el `timeout`/negativo sin evidencia de la
+// terminal le contestaba a la tablet un 504 AL INSTANTE; la tablet sondeaba, leía TIMED_OUT sin veredicto y se quedaba en
+// «Estamos confirmando el cobro…» hasta que alguien tocara «Volver a consultar». Ahora la espera sigue viva y la contesta quien
+// decide: la ventana (422 FAILED/NO_EVIDENCE_AFTER_WINDOW), la declaración (422 FAILED/OPERATOR_RECONCILED) o el dinero (200).
+describe('Revisión final · A: la tablet espera a la ventana y recibe su desenlace sin volver a consultar', () => {
+  const socket = () => ({ socketId: 'fixture-socket', terminalId: fixture, venueId })
+  type Espera = { timeout: NodeJS.Timeout; resolve: (r: unknown) => void }
+  const esperas = () => (terminalPaymentService as any).pendingPayments as Map<string, Espera>
+  const vencida = () => new Date(Date.now() - UNPROVEN_NEGATIVE_WINDOW_MS - 1_000)
+  const serialDelFixture = `AVQD-${fixture.toUpperCase()}`
+  let duena: { id: string }
+
+  beforeAll(async () => {
+    duena = await prisma.staff.create({
+      data: {
+        email: `${fixture}-duena-espera@example.test`,
+        firstName: 'Dueña',
+        lastName: 'Espera',
+        organizations: { create: { organizationId: fixture, role: 'OWNER', isPrimary: true, isActive: true } },
+        venues: { create: { venueId, role: 'OWNER', active: true, pin: '5678' } },
+      },
+      select: { id: true },
+    })
+  })
+  afterAll(async () => {
+    if (!duena) return
+    await prisma.staffVenue.deleteMany({ where: { staffId: duena.id } })
+    await prisma.staffOrganization.deleteMany({ where: { staffId: duena.id } })
+    await prisma.staff.deleteMany({ where: { id: duena.id } })
+  })
+  afterEach(() => {
+    // Una espera que la prueba no contestó no puede colgar el proceso 5 min.
+    for (const [id, p] of esperas()) {
+      clearTimeout(p.timeout)
+      esperas().delete(id)
+      p.resolve({ requestId: id, status: 'timeout' })
+    }
+  })
+
+  /** La tablet manda el cobro por el CONTROLADOR móvil real y la terminal da su ACK durable. `http` es lo que recibe la tablet. */
+  async function cobroDeLaTablet(ordenId: string) {
+    const requestId = nextRequest()
+    directEmit.mockImplementation((_e: string, payload: { requestId: string }, cb?: (e: Error | null, r?: unknown) => void) =>
+      cb?.(null, { accepted: true, requestId: payload.requestId }),
+    )
+    const { sendTerminalPayment } = await import('@/controllers/mobile/terminal-payment.mobile.controller')
+    const http: { status?: number; body?: Record<string, unknown> } = {}
+    const res = {
+      status(code: number) {
+        http.status = code
+        return {
+          json(body: Record<string, unknown>) {
+            http.body = body
+          },
+        }
+      },
+    }
+    const req = {
+      params: { venueId },
+      body: { terminalId: fixture, amountCents: 10000, orderId: ordenId, requestId },
+      headers: {},
+      authContext: {},
+    }
+    const enCurso = sendTerminalPayment(req as any, res as any)
+    const entregada = await esperar(async () => (await filasDe(requestId))[0]?.status === 'SENT')
+    expect(entregada).toBe(true)
+    return { requestId, http, enCurso }
+  }
+  /** La respuesta del long-poll, o `null` si no llegó en `ms` (nunca cuelga la prueba). */
+  const respuestaEn = async (enCurso: Promise<unknown>, http: { status?: number }, ms = 5_000) => {
+    await Promise.race([enCurso, new Promise(r => setTimeout(r, ms))])
+    return http.status ?? null
+  }
+  const sinRespuestaTodavia = async (http: { status?: number }, requestId: string) => {
+    await new Promise(r => setTimeout(r, 150))
+    expect(http.status).toBeUndefined()
+    expect(esperas().has(requestId)).toBe(true)
+  }
+
+  it('`timeout` de la terminal ⇒ la fila entra a la ventana y la tablet SIGUE esperando; al liberar, el long-poll recibe 422 FAILED/NO_EVIDENCE_AFTER_WINDOW', async () => {
+    const orden = await nuevaOrden()
+    const { requestId, http, enCurso } = await cobroDeLaTablet(orden.id)
+    await terminalPaymentService.handlePaymentResultFromSocket(
+      { requestId, status: 'timeout', errorMessage: 'No pude confirmar' },
+      socket(),
+    )
+    const enVentana = (await filasDe(requestId))[0]
+    expect(enVentana).toMatchObject({ status: 'TIMED_OUT', failureCode: null })
+    await sinRespuestaTodavia(http, requestId)
+    await conUpdatedAt(enVentana, vencida())
+    expect(await terminalPaymentService.releaseUnprovenNegative(requestId, venueId, 'WATCHDOG')).toBe('RELEASED')
+    expect(await respuestaEn(enCurso, http)).toBe(422)
+    expect(http.body).toMatchObject({
+      success: false,
+      requestId,
+      status: 'failed',
+      outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW',
+      errorMessage: expect.stringContaining('30 s'),
+    })
+    expect(esperas().has(requestId)).toBe(false)
+    // Y el GET con el que la tablet confirma dice lo mismo.
+    expect(await terminalPaymentService.getPaymentStatus(requestId, venueId)).toMatchObject({
+      status: 'FAILED',
+      outcome: 'NOT_CHARGED',
+      outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW',
+    })
+  })
+
+  it('un `failed` SIN evidencia (U100) igual: la tablet espera y la liberación por TEMPORIZADOR le contesta el 422', async () => {
+    const orden = await nuevaOrden()
+    const { requestId, http, enCurso } = await cobroDeLaTablet(orden.id)
+    await terminalPaymentService.handlePaymentResultFromSocket({ requestId, status: 'failed', errorMessage: 'SDK U100' }, socket())
+    await sinRespuestaTodavia(http, requestId)
+    await conUpdatedAt((await filasDe(requestId))[0], vencida())
+    expect(await terminalPaymentService.releaseUnprovenNegative(requestId, venueId, 'TIMER')).toBe('RELEASED')
+    expect(await respuestaEn(enCurso, http)).toBe(422)
+    expect(http.body).toMatchObject({ status: 'failed', outcomeEvidence: 'NO_EVIDENCE_AFTER_WINDOW', terminalResult: { status: 'failed' } })
+  })
+
+  it('la DECLARACIÓN del cajero despierta a la tablet: 422 FAILED/OPERATOR_RECONCILED, fila OPERATOR_RECONCILED_NO_CHARGE', async () => {
+    const orden = await nuevaOrden()
+    const { requestId, http, enCurso } = await cobroDeLaTablet(orden.id)
+    const attemptId = `att-${randomUUID()}`
+    await prisma.terminalPaymentAttemptLink.create({ data: { attemptId, requestId, venueId, terminalId: fixture } })
+    await terminalPaymentService.handlePaymentResultFromSocket(
+      { requestId, status: 'cancelled', errorMessage: 'Cancelado en la terminal' },
+      socket(),
+    )
+    await sinRespuestaTodavia(http, requestId)
+    const { resolveNoInstrument } = await import('@/services/tpv/no-instrument-resolution.service')
+    const r = await resolveNoInstrument(
+      { venueId, terminalSerial: serialDelFixture, attemptId, actorStaffId: duena.id },
+      { requestId, resolutionId: randomUUID(), statement: 'NO_INSTRUMENT_PRESENTED', statementVersion: 1 },
+    )
+    expect(r.resolution).toMatchObject({ by: 'SESSION' })
+    expect(await respuestaEn(enCurso, http)).toBe(422)
+    expect(http.body).toMatchObject({ success: false, requestId, status: 'failed', outcomeEvidence: 'OPERATOR_RECONCILED' })
+    expect((await filasDe(requestId))[0]).toMatchObject({ status: 'FAILED', failureCode: 'OPERATOR_RECONCILED_NO_CHARGE' })
+    expect(esperas().has(requestId)).toBe(false)
+  })
+
+  it('el banco confirma DENTRO de la ventana ⇒ S5 despierta a la tablet con el cobro (200) en vez de dejarla «confirmando»', async () => {
+    const orden = await nuevaOrden()
+    const { requestId, http, enCurso } = await cobroDeLaTablet(orden.id)
+    await terminalPaymentService.handlePaymentResultFromSocket({ requestId, status: 'failed', errorMessage: 'SDK U101' }, socket())
+    await sinRespuestaTodavia(http, requestId)
+    const pago = await auditPayment({
+      orderId: orden.id,
+      processorData: { terminalPaymentRequestId: requestId, deviceSerialNumber: fixture },
+    })
+    const cierre = await prisma.$transaction(tx =>
+      terminalPaymentService.closeRowFromPaymentTx(tx, requestId, pago.id, venueId, undefined, 'REST', undefined, 'webhook'),
+    )
+    expect(cierre).toMatchObject({ bound: true })
+    const aviso = await terminalPaymentService.confirmFromWebhook({
+      requestId,
+      venueId,
+      paymentId: pago.id,
+      attemptId: 'att-s5',
+      amountCents: 10000,
+      tipCents: 0,
+    })
+    expect(aviso.posAwakened).toBe(true)
+    expect(await respuestaEn(enCurso, http)).toBe(200)
+    expect(http.body).toMatchObject({ success: true, status: 'success', paymentId: pago.id })
+  })
+
+  it('la ventana CONCILIA con el pago exacto (RECONCILED) ⇒ la tablet recibe 200 con ese Payment, sin esperar al vigía', async () => {
+    const orden = await nuevaOrden()
+    const { requestId, http, enCurso } = await cobroDeLaTablet(orden.id)
+    await terminalPaymentService.handlePaymentResultFromSocket({ requestId, status: 'timeout' }, socket())
+    await sinRespuestaTodavia(http, requestId)
+    const pago = await auditPayment({
+      orderId: orden.id,
+      processorData: { terminalPaymentRequestId: requestId, deviceSerialNumber: fixture },
+    })
+    await conUpdatedAt((await filasDe(requestId))[0], vencida())
+    expect(await terminalPaymentService.releaseUnprovenNegative(requestId, venueId, 'WATCHDOG')).toBe('RECONCILED')
+    expect(await respuestaEn(enCurso, http)).toBe(200)
+    expect(http.body).toMatchObject({ success: true, status: 'success', paymentId: pago.id })
+  })
+
+  it('la retención por el BANCO (HELD_BY_BANK_EVIDENCE) NO contesta un FAILED: la espera sigue viva con su plazo de siempre', async () => {
+    const orden = await nuevaOrden()
+    const { requestId, http } = await cobroDeLaTablet(orden.id)
+    const attemptId = `att-${randomUUID()}`
+    await prisma.terminalPaymentAttemptLink.create({ data: { attemptId, requestId, venueId, terminalId: fixture } })
+    await prisma.providerEventLog.create({ data: eventoAprobado(attemptId, `tx-${attemptId}`) })
+    await terminalPaymentService.handlePaymentResultFromSocket({ requestId, status: 'failed', errorMessage: 'SDK U100' }, socket())
+    await sinRespuestaTodavia(http, requestId)
+    await conUpdatedAt((await filasDe(requestId))[0], vencida())
+    expect(await terminalPaymentService.releaseUnprovenNegative(requestId, venueId, 'WATCHDOG')).toBe('HELD_BY_BANK_EVIDENCE')
+    await sinRespuestaTodavia(http, requestId)
+    expect((await filasDe(requestId))[0]).toMatchObject({ status: 'TIMED_OUT', failureCode: 'BANK_APPROVED_AWAITING_PAYMENT' })
+  })
+
+  it('regresión: un `success` con su Payment contesta AL INSTANTE (200)', async () => {
+    const orden = await nuevaOrden()
+    const { requestId, http, enCurso } = await cobroDeLaTablet(orden.id)
+    const pago = await auditPayment({
+      orderId: orden.id,
+      processorData: { terminalPaymentRequestId: requestId, deviceSerialNumber: fixture },
+    })
+    await terminalPaymentService.handlePaymentResultFromSocket({ requestId, status: 'success', paymentId: pago.id }, socket())
+    expect(await respuestaEn(enCurso, http, 2_000)).toBe(200)
+    expect(http.body).toMatchObject({ success: true, status: 'success', paymentId: pago.id })
+  })
+
+  it('regresión: un `success` cuyo Payment no se acredita queda UNKNOWN (sin sobre de la terminal) y contesta AL INSTANTE como hoy (504)', async () => {
+    const orden = await nuevaOrden()
+    const { requestId, http, enCurso } = await cobroDeLaTablet(orden.id)
+    await terminalPaymentService.handlePaymentResultFromSocket(
+      { requestId, status: 'success', paymentId: 'pay-inexistente', transactionId: 'tx-fantasma' },
+      socket(),
+    )
+    expect(await respuestaEn(enCurso, http, 2_000)).toBe(504)
+    expect(http.body).toMatchObject({ success: false, status: 'timeout' })
+    expect(http.body).not.toHaveProperty('terminalResult')
+    expect((await filasDe(requestId))[0]).toMatchObject({ status: 'UNKNOWN' })
+    expect(esperas().has(requestId)).toBe(false)
+  })
+})

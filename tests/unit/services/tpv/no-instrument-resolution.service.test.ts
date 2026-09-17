@@ -586,3 +586,63 @@ describe('resolveNoInstrument — la declaración del cajero cierra el intento c
     expect(solicitud).toBeGreaterThan(orden)
   })
 })
+
+// ── Revisión final de la rama (17-sep) · A: la declaración DESPIERTA al POS que sigue esperando ese cobro ──
+// Antes `resolveNoInstrument` no tocaba el long-poll: el POS se quedaba en «Estamos confirmando el cobro…» hasta que el cajero
+// volviera a consultar. Ahora, DESPUÉS del commit, se le entrega el desenlace durable de la fila (FAILED / OPERATOR_RECONCILED).
+describe('Revisión final · A: la declaración despierta al POS (después del commit, nunca antes)', () => {
+  let despertar: jest.SpyInstance
+  let orden: string[]
+  beforeEach(async () => {
+    orden = []
+    const { terminalPaymentService } = await import('@/services/terminal-payment.service')
+    prismaMock.$transaction.mockImplementation(async (callback: any) => {
+      const r = await callback(prismaMock)
+      orden.push('commit')
+      return r
+    })
+    despertar = jest.spyOn(terminalPaymentService, 'resolverEsperaDelPos').mockImplementation(async () => {
+      orden.push('despertar')
+      return true
+    })
+  })
+  afterEach(() => {
+    despertar.mockRestore()
+    prismaMock.$transaction.mockImplementation((callback: any) => callback(prismaMock))
+  })
+
+  it('una declaración nueva: tras el commit se despierta la espera de ESA solicitud y de ESE venue', async () => {
+    await resolveNoInstrument(identidad, declaracion())
+    expect(despertar).toHaveBeenCalledTimes(1)
+    expect(despertar).toHaveBeenCalledWith(requestId, venueId)
+    expect(orden).toEqual(['commit', 'despertar'])
+  })
+
+  it('un replay idempotente también lo intenta: si el primer aviso se perdió, el reintento del cajero despierta al POS', async () => {
+    await resolveNoInstrument(identidad, declaracion())
+    await resolveNoInstrument(identidad, declaracion())
+    expect(despertar).toHaveBeenCalledTimes(2)
+    expect(prismaMock.activityLog.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('si despertar al POS revienta, la declaración ya confirmada responde igual (el POS lo lee por el GET)', async () => {
+    despertar.mockRejectedValueOnce(new Error('memoria corrupta'))
+    // `resolves`: si el fallo al despertar escapara, la prueba cae por ASERCIÓN (promesa rechazada), no por una excepción suelta.
+    await expect(resolveNoInstrument(identidad, declaracion())).resolves.toMatchObject({
+      resolution: { id: resolutionId, by: 'SESSION' },
+      request: { status: 'FAILED', failureCode: 'OPERATOR_RECONCILED_NO_CHARGE' },
+    })
+    expect(despertar).toHaveBeenCalledTimes(1)
+  })
+
+  it('un rechazo (403 sin permiso, 409 con evidencia) no despierta a nadie', async () => {
+    await rechaza(
+      resolveNoInstrument({ ...identidad, actorStaffId: 'staff-cashier' }, declaracion()),
+      'SUPERVISOR_AUTHORIZATION_REQUIRED',
+      403,
+    )
+    prismaMock.payment.findFirst.mockResolvedValue({ id: 'pay-1' })
+    await rechaza(resolveNoInstrument(identidad, declaracion()), 'POSITIVE_EVIDENCE_EXISTS')
+    expect(despertar).not.toHaveBeenCalled()
+  })
+})

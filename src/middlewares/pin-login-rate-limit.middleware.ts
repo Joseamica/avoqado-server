@@ -82,6 +82,7 @@ export const ipRateLimiter: RateLimitRequestHandler = rateLimit({
 
     res.status(429).json({
       error: 'RATE_LIMIT_EXCEEDED',
+      code: 'RATE_LIMIT_EXCEEDED',
       message: 'Demasiados intentos de inicio de sesión. Por favor intenta de nuevo en 15 minutos.',
       retryAfter: 15 * 60, // seconds
     })
@@ -123,6 +124,7 @@ export const venueRateLimiter: RateLimitRequestHandler = rateLimit({
 
     res.status(429).json({
       error: 'RATE_LIMIT_EXCEEDED',
+      code: 'RATE_LIMIT_EXCEEDED',
       message: 'Este local ha tenido demasiados intentos de inicio de sesión. Por favor intenta de nuevo en 15 minutos.',
       retryAfter: 15 * 60, // seconds
     })
@@ -182,6 +184,7 @@ const overrideIpRateLimiter: RateLimitRequestHandler = rateLimit({
     })
     res.status(429).json({
       error: 'RATE_LIMIT_EXCEEDED',
+      code: 'RATE_LIMIT_EXCEEDED',
       message: 'Demasiados intentos de autorización. Espera 15 minutos.',
       retryAfter: 15 * 60,
     })
@@ -203,6 +206,7 @@ const overrideVenueRateLimiter: RateLimitRequestHandler = rateLimit({
     })
     res.status(429).json({
       error: 'RATE_LIMIT_EXCEEDED',
+      code: 'RATE_LIMIT_EXCEEDED',
       message: 'Demasiados intentos de autorización. Espera 15 minutos.',
       retryAfter: 15 * 60,
     })
@@ -279,6 +283,7 @@ const switchUserDeviceRateLimiter: RateLimitRequestHandler = rateLimit({
     })
     res.status(429).json({
       error: 'RATE_LIMIT_EXCEEDED',
+      code: 'RATE_LIMIT_EXCEEDED',
       message: 'Demasiados intentos. Espera 15 minutos o inicia sesión con tu contraseña.',
       retryAfter: 15 * 60,
     })
@@ -300,6 +305,7 @@ const switchUserVenueRateLimiter: RateLimitRequestHandler = rateLimit({
     })
     res.status(429).json({
       error: 'RATE_LIMIT_EXCEEDED',
+      code: 'RATE_LIMIT_EXCEEDED',
       message: 'Demasiados intentos. Espera 15 minutos o inicia sesión con tu contraseña.',
       retryAfter: 15 * 60,
     })
