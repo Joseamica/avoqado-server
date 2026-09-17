@@ -726,6 +726,25 @@ describe('Aprobación tardía tras la ventana', () => {
       expect.objectContaining({ status: 'UNKNOWN', failureCode: 'ACK_TIMEOUT', orderId: orden.id }),
     ])
   })
+
+  // Fix round 1 · IMPORTANT 1: el camino del SOCKET también reabre («cola vieja»: el registro llega etiquetado sólo en
+  // `processorData`, el registrador no liga, y luego la terminal manda su `success` tardío con el paymentId).
+  it('un `success` tardío por SOCKET sobre una fila liberada por la ventana la reabre por el mismo cierre: un asiento y UN correo ops', async () => {
+    const row = await auditRequest({ ...negativoSinEvidencia(), updatedAt: new Date(Date.now() - UNPROVEN_NEGATIVE_WINDOW_MS - 1_000) })
+    expect(await terminalPaymentService.releaseUnprovenNegative(row.requestId, venueId, 'WATCHDOG')).toBe('RELEASED')
+    const tardio = await auditPayment({ processorData: { terminalPaymentRequestId: row.requestId, deviceSerialNumber: fixture } })
+    await terminalPaymentService.handlePaymentResultFromSocket(
+      { requestId: row.requestId, status: 'success', paymentId: tardio.id },
+      { socketId: 'fixture-socket', terminalId: fixture, venueId },
+    )
+    const reabierta = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    expect(reabierta).toMatchObject({ status: 'COMPLETED', paymentId: tardio.id, lateResult: true, closedVia: 'terminal' })
+    expect(
+      await prisma.activityLog.count({ where: { venueId, action: 'TERMINAL_PAYMENT_LATE_APPROVAL_AFTER_WINDOW', entityId: row.id } }),
+    ).toBe(1)
+    expect(sendOpsAlert).toHaveBeenCalledTimes(1)
+    expect(sendOpsAlert).toHaveBeenCalledWith(expect.objectContaining({ subject: expect.stringContaining(fixture) }))
+  })
 })
 
 // ── Guardas extra (re-revisión de la Task 2, misma dirección del dinero) ──
@@ -783,18 +802,26 @@ describe('G2 · la evidencia bancaria conocida gana a un negativo ACREDITADO tar
     )
   })
 
-  it('…pero un negativo ACREDITADO tardío SÍ sigue cerrando una fila SOLTADA por política (AUTO_RELEASED) y una de la ventana (failureCode NULL)', async () => {
+  it('…pero un negativo ACREDITADO tardío SÍ sigue cerrando una fila SOLTADA por política (AUTO_RELEASED / MANUAL_RELEASE) y una de la ventana (failureCode NULL)', async () => {
     const soltada = await auditRequest({
       ...negativoSinEvidencia(),
       failureCode: 'AUTO_RELEASED',
       updatedAt: new Date(Date.now() - 60_000),
     })
-    await declinadaTardia(soltada.requestId)
-    expect(await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: soltada.id } })).toMatchObject({
-      status: 'FAILED',
-      failureCode: 'TPV_CONFIRMED_NO_CHARGE',
-      lateResult: true,
+    const manual = await auditRequest({
+      ...negativoSinEvidencia(),
+      failureCode: 'MANUAL_RELEASE',
+      updatedAt: new Date(Date.now() - 60_000),
     })
+    await declinadaTardia(soltada.requestId)
+    await declinadaTardia(manual.requestId)
+    for (const id of [soltada.id, manual.id]) {
+      expect(await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id } })).toMatchObject({
+        status: 'FAILED',
+        failureCode: 'TPV_CONFIRMED_NO_CHARGE',
+        lateResult: true,
+      })
+    }
     // La fila de la VENTANA (TIMED_OUT sin código): la exclusión de G2 tiene que ser NULL-segura, o un `NOT {…}` la dejaría fuera
     // y la declinación acreditada —justo la evidencia que la ventana espera— se ignoraría hasta liberarla sin evidencia a los 30 s.
     const otraOrden = await nuevaOrden()

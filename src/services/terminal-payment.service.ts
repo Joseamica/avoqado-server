@@ -281,6 +281,18 @@ const RELEASE_FAILURE_CODES = ['AUTO_RELEASED', 'MANUAL_RELEASE']
 const UNKNOWN_AUTO_RELEASE_GRACE_MS = 20 * 60_000
 
 /**
+ * Un cobro con tarjeta que CUENTA como dinero movido: COMPLETED, tarjeta, y no un reembolso — NULL-seguro sobre `Payment.type`
+ * (nullable en las filas legacy: un `type <> 'REFUND'` a secas las excluiría). Mismo predicado que `SIN_REEMBOLSOS` en
+ * payment.tpv.service.ts, repetido aquí porque importarlo cerraría un ciclo. Lo usan el conteo de cobros posteriores a una
+ * liberación por ventana y la guarda G1; `findReconcilablePayment` conserva su propio filtro (sin `type`) a propósito.
+ */
+const COBRO_CON_TARJETA_SIN_REEMBOLSO: Prisma.PaymentWhereInput = {
+  status: TransactionStatus.COMPLETED,
+  method: { in: [PaymentMethod.CREDIT_CARD, PaymentMethod.DEBIT_CARD] },
+  OR: [{ type: null }, { type: { not: PaymentType.REFUND } }],
+}
+
+/**
  * Ventana de confirmación (plan 16-sep): un negativo de la terminal SIN evidencia del procesador (U100/U101/«Cancelled»/G505…)
  * se retiene este tiempo esperando al webhook (p99 3.5 s, máx 7 s medidos en 927 aprobaciones) y luego se libera con
  * evidencia `NO_EVIDENCE_AFTER_WINDOW`. Una aprobación posterior reabre la fila por `closeRowFromPaymentTx` y grita 🚨.
@@ -1238,8 +1250,9 @@ export type AttemptLinkAck =
  * Correo ops de la aprobación tardía tras la ventana. Corre DESPUÉS del commit y sin `await` encadenado: dentro de la
  * transacción podría salir y luego revertirse, y repetirse al reintentar (Codex, Task 0, P2). El asiento durable y único es
  * el `ActivityLog` de `closeRowFromPaymentTx`; el correo es best-effort y NO se promete «exactamente una vez».
- * La llaman TODOS los llamadores de `closeRowFromPaymentTx` tras su commit (registrador REST/webhook, registro repetido, la
- * ventana y el barrido de 30 min); sin `lateAfterWindow` en el desenlace no hace nada. `sendOpsAlert` nunca rechaza.
+ * La llaman TODOS los llamadores de `closeRowFromPaymentTx` tras su commit — el registrador REST/webhook (orden y venta
+ * rápida), el registro repetido, el `success` de la terminal por SOCKET (`closeRow`), la ventana (`RECONCILED`) y el barrido
+ * de 30 min —; sin `lateAfterWindow` en el desenlace no hace nada. `sendOpsAlert` nunca rechaza.
  */
 export function avisarAprobacionTardiaTrasVentana(
   cierre: CloseRowOutcome | null,
@@ -1251,9 +1264,11 @@ export function avisarAprobacionTardiaTrasVentana(
     subject: `Cobro aprobado tarde tras la ventana — ${ctx.terminalId ?? 'terminal desconocida'}`,
     lines: [
       `El banco aprobó un cobro (${ctx.paymentId}) de la solicitud ${ctx.requestId} después de que la ventana de 30 s la liberara.`,
-      otros
-        ? `🔴 La orden ${ctx.orderId} tiene ${otros} cobro(s) con tarjeta registrados después de liberarla: revisar si hay que devolver uno.`
-        : 'La orden no muestra otro cobro con tarjeta posterior: sólo confirmar que quedó registrado.',
+      otros === null
+        ? 'Sin orden ligada: no se pudo contar otros cobros.'
+        : otros > 0
+          ? `🔴 La orden ${ctx.orderId} tiene ${otros} cobro(s) con tarjeta registrados después de liberarla: revisar si hay que devolver uno.`
+          : 'La orden no muestra otro cobro con tarjeta posterior en esta orden: sólo confirmar que quedó registrado.',
     ],
   })
 }
@@ -2135,10 +2150,16 @@ class TerminalPaymentService {
       }
       if (result.status === 'success') {
         const socketResult = result
+        // El desenlace del cierre y la identidad de la fila salen de la transacción para avisar DESPUÉS del commit: el
+        // camino del socket también reabre una fila liberada por la ventana (cola vieja: el registro llegó etiquetado sólo
+        // en `processorData`, el registrador no ligó, y la terminal manda después su `success` con el paymentId).
+        // Holder y no `let`: TS no ve las asignaciones dentro del closure (mismo patrón que `s0` en el registrador).
+        const s0 = { cierre: null as CloseRowOutcome | null, fila: null as { terminalId: string; orderId: string | null } | null }
         const winner = socketResult.paymentId
           ? await prisma.$transaction(async tx => {
-              await this.closeRowFromPaymentTx(tx, requestId, socketResult.paymentId!, venueId, undefined, 'SOCKET')
+              s0.cierre = await this.closeRowFromPaymentTx(tx, requestId, socketResult.paymentId!, venueId, undefined, 'SOCKET')
               const row = await tx.terminalPaymentRequest.findFirst({ where: { requestId, venueId } })
+              if (row) s0.fila = { terminalId: row.terminalId, orderId: row.orderId }
               if (row?.status !== TerminalPaymentRequestStatus.COMPLETED || !row.paymentId) return null
               if (row.paymentId !== socketResult.paymentId) return resultFromRow(row)
               const stored = row.resultJson && typeof row.resultJson === 'object' && !Array.isArray(row.resultJson) ? row.resultJson : {}
@@ -2150,6 +2171,17 @@ class TerminalPaymentService {
               return canonical
             })
           : null
+        // Ya commiteado (una excepción de la transacción salta esto y cae al catch de abajo). `terminalId` es el de la FILA —
+        // la misma identidad que pasan la ventana y el barrido—, que la comprobación de propiedad ya emparejó con el socket.
+        if (socketResult.paymentId) {
+          avisarAprobacionTardiaTrasVentana(s0.cierre, {
+            requestId,
+            venueId,
+            paymentId: socketResult.paymentId,
+            terminalId: s0.fila?.terminalId ?? null,
+            orderId: s0.fila?.orderId ?? null,
+          })
+        }
         if (winner) return winner
         result = { requestId, status: 'timeout', errorMessage: 'El pago sigue pendiente de confirmar en Avoqado' }
       }
@@ -2660,19 +2692,16 @@ class TerminalPaymentService {
         // El instante de la liberación es el que la propia liberación dejó escrito (`releasedAfterWindow.releasedAt`), leído
         // bajo el candado ANTES de reabrir; `before.updatedAt` sólo de respaldo — el toque best-effort del ingreso sin candado
         // (angelpay-webhook) puede haberlo movido DESPUÉS de liberar, y un recobro anterior a ese toque se quedaría sin contar.
-        // Reembolsos fuera, NULL-seguro (`Payment.type` es nullable: `type <> 'REFUND'` a secas excluiría las filas legacy —
-        // mismo predicado que `SIN_REEMBOLSOS` en payment.tpv.service.ts:31, repetido aquí porque importarlo cerraría un ciclo).
+        // Reembolsos fuera, NULL-seguro sobre `Payment.type` (`COBRO_CON_TARJETA_SIN_REEMBOLSO`).
         const liberadaEn = instanteDeLiberacionPorVentana(before.resultJson) ?? before.updatedAt
         const otros = before.orderId
           ? await tx.payment.count({
               where: {
+                ...COBRO_CON_TARJETA_SIN_REEMBOLSO,
                 venueId,
                 orderId: before.orderId,
                 id: { not: paymentId },
-                status: TransactionStatus.COMPLETED,
-                method: { in: [PaymentMethod.CREDIT_CARD, PaymentMethod.DEBIT_CARD] },
                 createdAt: { gt: liberadaEn },
-                OR: [{ type: null }, { type: { not: PaymentType.REFUND } }],
               },
             })
           : null
@@ -3259,11 +3288,9 @@ class TerminalPaymentService {
       // libera: se retiene para revisión humana.
       const etiquetados = await prisma.payment.count({
         where: {
+          ...COBRO_CON_TARJETA_SIN_REEMBOLSO,
           venueId,
           processorData: { path: ['terminalPaymentRequestId'], equals: requestId },
-          status: TransactionStatus.COMPLETED,
-          method: { in: [PaymentMethod.CREDIT_CARD, PaymentMethod.DEBIT_CARD] },
-          OR: [{ type: null }, { type: { not: PaymentType.REFUND } }],
         },
       })
       if (etiquetados > 0) {
