@@ -442,7 +442,7 @@ describe('Ronda 3 · P1-A: red durable — las liberadas CON un Payment ligado s
               createdAt: new Date('2026-09-11T00:00:00Z'),
               id: 'row-1',
               paymentId: 'pay-1',
-              evidenciaId: null,
+              evidenciaIds: null,
               afirmacion: false,
             },
             {
@@ -451,7 +451,7 @@ describe('Ronda 3 · P1-A: red durable — las liberadas CON un Payment ligado s
               createdAt: new Date('2026-09-12T00:00:00Z'),
               id: 'row-2',
               paymentId: 'pay-2',
-              evidenciaId: null,
+              evidenciaIds: null,
               afirmacion: false,
             },
           ]
@@ -482,7 +482,7 @@ describe('Ronda 3 · P1-A: red durable — las liberadas CON un Payment ligado s
               createdAt: new Date(),
               id: 'row-1',
               paymentId: 'pay-1',
-              evidenciaId: null,
+              evidenciaIds: null,
               afirmacion: false,
             },
           ]
@@ -553,7 +553,7 @@ describe('Ronda 3 · P1-A: red durable — las liberadas CON un Payment ligado s
         createdAt: new Date(`2026-09-1${(n % 5) + 1}T00:00:00Z`),
         id: `row-${n}-${i}`,
         paymentId: 'pay-x',
-        evidenciaId: null,
+        evidenciaIds: null,
         afirmacion: false,
       }))
     let pasada = 0
@@ -577,7 +577,7 @@ describe('Ronda 3 · P1-A: red durable — las liberadas CON un Payment ligado s
               createdAt: new Date(),
               id: 'row-1',
               paymentId: 'pay-x',
-              evidenciaId: null,
+              evidenciaIds: null,
               afirmacion: false,
             },
           ]

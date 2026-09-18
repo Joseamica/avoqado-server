@@ -225,8 +225,9 @@ describe('Ronda 4 · la red durable: el selector recoge las TRES señales, no s�
     expect(completo).toContain(`p."status" = 'PENDING'`)
     // La tercera clase es una prueba sobre la propia fila (la afirmación vive en su sobre).
     expect(completo).toContain(`r."resultJson"->'claimedSuccess'`)
-    // Y las tres van en UN solo `OR`: el mismo recorrido, el mismo tope, el mismo cursor.
-    expect(completo).toMatch(/ligado\."id" IS NOT NULL OR .*colision\."id" IS NOT NULL/s)
+    // Y las tres van en UN solo `OR`: el mismo recorrido, el mismo tope, el mismo cursor. (Ronda 5: la evidencia viaja como
+    // conjunto acotado, y un conjunto vacío es `NULL` — el filtro es el MISMO `IS NOT NULL` de antes.)
+    expect(completo).toMatch(/ligado\."id" IS NOT NULL OR .*colision\."ids" IS NOT NULL/s)
     expect(completo).toMatch(/ORDER BY r\."createdAt" ASC, r\."id" ASC/)
     const { values } = sqlDe(consultas()[0])
     expect(values).toContain(200)
@@ -243,7 +244,7 @@ describe('Ronda 4 · la red durable: el selector recoge las TRES señales, no s�
               createdAt: new Date('2026-09-16T00:00:00Z'),
               id: 'row-d',
               paymentId: null,
-              evidenciaId: 'pay-evidencia',
+              evidenciaIds: ['pay-evidencia'],
               afirmacion: false,
             },
           ]
@@ -278,7 +279,7 @@ describe('Ronda 4 · la red durable: el selector recoge las TRES señales, no s�
               createdAt: new Date('2026-09-16T00:00:00Z'),
               id: 'row-d',
               paymentId: null,
-              evidenciaId: null,
+              evidenciaIds: null,
               afirmacion: true,
             },
           ]
@@ -307,7 +308,7 @@ describe('Ronda 4 · la red durable: el selector recoge las TRES señales, no s�
               createdAt: new Date('2026-09-16T00:00:00Z'),
               id: 'row-d',
               paymentId: 'pay-1',
-              evidenciaId: 'pay-evidencia',
+              evidenciaIds: ['pay-evidencia'],
               afirmacion: true,
             },
           ]
@@ -339,7 +340,7 @@ describe('Ronda 4 · la red durable: el selector recoge las TRES señales, no s�
               createdAt: new Date('2026-09-16T00:00:00Z'),
               id: 'row-d',
               paymentId: null,
-              evidenciaId: 'pay-evidencia',
+              evidenciaIds: ['pay-evidencia'],
               afirmacion: false,
             },
           ]

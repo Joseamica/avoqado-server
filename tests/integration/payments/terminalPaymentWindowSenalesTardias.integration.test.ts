@@ -641,13 +641,15 @@ describe('Ronda 3 · P2: el plan de la pregunta «hay un cobro ligado» usa el �
     const filas = await prisma.$queryRaw<{ 'QUERY PLAN': string }[]>`
       EXPLAIN (ANALYZE, BUFFERS)
       SELECT r."requestId", r."venueId", r."createdAt", r."id",
-             ligado."id" AS "paymentId", colision."id" AS "evidenciaId", (${hayAfirmacion}) AS "afirmacion"
+             ligado."id" AS "paymentId", colision."ids" AS "evidenciaIds", (${hayAfirmacion}) AS "afirmacion"
       FROM "TerminalPaymentRequest" r
       LEFT JOIN LATERAL (${pagoLigadoDeLaFilaSql('r')} LIMIT 1) ligado ON true
-      LEFT JOIN LATERAL (${evidenciaDeConciliacionDeLaFilaSql('r')} LIMIT 1) colision ON true
+      LEFT JOIN LATERAL (
+        SELECT array_agg(c."id") AS "ids" FROM (${evidenciaDeConciliacionDeLaFilaSql('r')} ORDER BY 1 LIMIT 5) c
+      ) colision ON true
       WHERE r."status" = 'FAILED' AND r."failureCode" IN ('NO_EVIDENCE_AFTER_WINDOW','OPERATOR_RECONCILED_NO_CHARGE')
         AND r."paymentId" IS NULL AND r."createdAt" >= (NOW() AT TIME ZONE 'UTC') - INTERVAL '7 days'
-        AND (ligado."id" IS NOT NULL OR colision."id" IS NOT NULL OR ${hayAfirmacion})
+        AND (ligado."id" IS NOT NULL OR colision."ids" IS NOT NULL OR ${hayAfirmacion})
       ORDER BY r."createdAt" ASC, r."id" ASC LIMIT 200`
     console.log(`\n[P2] filas candidatas de la red durable: ${candidatas}\n` + filas.map(f2 => f2['QUERY PLAN']).join('\n') + '\n')
     expect(Number(candidatas)).toBeGreaterThanOrEqual(1)
@@ -740,6 +742,110 @@ describe('Ronda 4 · P1-B: la colisión cuya re-retención se DIFIRIÓ ya no se 
     // 🔴 Y en la pasada siguiente NO se vuelve a gritar: la evidencia no cambió, así que repetirlo sólo taparía alarmas reales.
     await terminalPaymentService.reconcileUnknownRequests(new Date())
     expect(contradicciones()).toHaveLength(1)
+  })
+})
+
+// ═══════ RONDA 5 · una evidencia AJENA no puede tapar a una LEGÍTIMA (Codex r10, P1-B) ═══════
+//
+// 🔑 Contra Postgres REAL porque lo que estaba mal era la CONSULTA: el `LIMIT 1` del LATERAL acotaba el conjunto ANTES de
+// que nadie comprobara la identidad acreditada (regla T10), así que la evidencia de otra terminal —rechazada, con razón—
+// se devolvía en cada pasada y la legítima no se examinaba jamás. Un mock no puede demostrar qué devuelve el selector.
+describe('Ronda 5 · P1-B: el selector surfacea TODAS las evidencias acotadas, no sólo la primera', () => {
+  /**
+   * Una EVIDENCIA de conciliación tal como la escribe el registrador: Payment PENDING apuntado a la solicitud con su
+   * `reconciliation.kind`. El `terminalId` decide su procedencia acreditada (`Payment.terminal.serialNumber`), que es lo
+   * único que separa a la legítima de la ajena. El `id` es explícito para fijar el orden del conjunto (`ORDER BY 1`).
+   */
+  const evidencia = async (args: { id: string; orderId: string; requestId: string; terminalId: string }) =>
+    prisma.payment.create({
+      data: {
+        id: args.id,
+        venueId: f.venueId,
+        orderId: args.orderId,
+        source: 'TPV',
+        terminalId: args.terminalId,
+        terminalPaymentRequestId: args.requestId,
+        amount: 100,
+        method: 'CREDIT_CARD',
+        status: 'PENDING',
+        feePercentage: 0,
+        feeAmount: 0,
+        netAmount: 100,
+        processorData: { reconciliation: { kind: 'POSSIBLE_REFERENCE_COLLISION' } },
+      },
+      select: { id: true },
+    })
+
+  it('🔴 la secuencia de Codex: E1 ajena PRIMERO + E2 legítima ⇒ la red retiene por E2, y la ajena sigue gritando una vez', async () => {
+    const { solicitud, venta } = await liberadaPorLaVentana()
+    const principal = await terminalPrincipal()
+    // El orden importa: `ORDER BY 1` sobre el id pone la AJENA primero, que es exactamente el caso que tapaba a la otra.
+    const ajena = await evidencia({ id: `${f.fixture}-ev-1-ajena`, orderId: venta.id, requestId: solicitud.requestId, terminalId: otra.id })
+    const legitima = await evidencia({
+      id: `${f.fixture}-ev-2-legitima`,
+      orderId: venta.id,
+      requestId: solicitud.requestId,
+      terminalId: principal.id,
+    })
+
+    const r = await terminalPaymentService.reconcileUnknownRequests(new Date())
+
+    expect(r.heldWithoutPayment).toBeGreaterThanOrEqual(1)
+    const retenidaR = await retenida(solicitud.requestId, venta.id)
+    // Retenida por la LEGÍTIMA, nunca por la ajena.
+    expect(retenidaR.resultJson).toMatchObject({
+      referenceCollisionAfterRelease: { paymentId: legitima.id, reason: 'REFERENCE_COLLISION_AFTER_RELEASE', origen: 'BARRIDO_SENALES' },
+    })
+    const log = await asientos(retenidaR.id, COLISION)
+    expect(log).toHaveLength(1)
+    expect(log[0].data).toMatchObject({ paymentId: legitima.id })
+    // T10 intacta: la ajena NO retuvo nada y sí gritó su contradicción, una sola vez.
+    const contradicciones = () =>
+      (logger.error as jest.Mock).mock.calls.filter(c => String(c[0]).includes('does not own it') && c[1]?.paymentId === ajena.id)
+    expect(contradicciones()).toHaveLength(1)
+    // Idempotente: una segunda pasada no deja un segundo asiento ni repite el 🚨.
+    await terminalPaymentService.reconcileUnknownRequests(new Date())
+    expect(await asientos(retenidaR.id, COLISION)).toHaveLength(1)
+    expect(contradicciones()).toHaveLength(1)
+  })
+
+  it('el selector REAL devuelve el conjunto de evidencias (no una), acotado y ordenado', async () => {
+    const { solicitud, venta } = await liberadaPorLaVentana()
+    const principal = await terminalPrincipal()
+    const ids: string[] = []
+    for (let i = 0; i < 7; i++) {
+      const { id } = await evidencia({
+        id: `${f.fixture}-ev-${i}`,
+        orderId: venta.id,
+        requestId: solicitud.requestId,
+        terminalId: i === 6 ? principal.id : otra.id,
+      })
+      ids.push(id)
+    }
+    const filas = await prisma.$queryRaw<{ requestId: string; evidenciaIds: string[] | null }[]>`
+      SELECT r."requestId", colision."ids" AS "evidenciaIds"
+      FROM "TerminalPaymentRequest" r
+      LEFT JOIN LATERAL (
+        SELECT array_agg(c."id") AS "ids" FROM (${evidenciaDeConciliacionDeLaFilaSql('r')} ORDER BY 1 LIMIT 5) c
+      ) colision ON true
+      WHERE r."requestId" = ${solicitud.requestId} AND r."venueId" = ${f.venueId}`
+    // Prisma devuelve el `text[]` como arreglo de JS: es lo que el recorrido consume.
+    expect(Array.isArray(filas[0].evidenciaIds)).toBe(true)
+    // Acotado al tope y determinista: las 5 primeras por id, de las 7 que existen.
+    expect(filas[0].evidenciaIds).toEqual([...ids].sort().slice(0, 5))
+  })
+
+  it('control: sin ninguna evidencia el conjunto es NULL — el mismo filtro `IS NOT NULL` de antes', async () => {
+    const { solicitud } = await liberadaPorLaVentana()
+    const filas = await prisma.$queryRaw<{ evidenciaIds: string[] | null }[]>`
+      SELECT colision."ids" AS "evidenciaIds"
+      FROM "TerminalPaymentRequest" r
+      LEFT JOIN LATERAL (
+        SELECT array_agg(c."id") AS "ids" FROM (${evidenciaDeConciliacionDeLaFilaSql('r')} ORDER BY 1 LIMIT 5) c
+      ) colision ON true
+      WHERE r."requestId" = ${solicitud.requestId} AND r."venueId" = ${f.venueId}`
+    expect(filas).toHaveLength(1)
+    expect(filas[0].evidenciaIds).toBeNull()
   })
 })
 

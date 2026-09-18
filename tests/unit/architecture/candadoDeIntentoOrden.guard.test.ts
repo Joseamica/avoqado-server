@@ -225,8 +225,12 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
     // Un solo SELECT: las dos correlacionadas como LATERAL y la afirmación como prueba de la propia fila, en UN `OR`.
     expect(cuerpo.match(/prisma\.\$queryRaw/g) ?? []).toHaveLength(1)
     expect(cuerpo).toMatch(/LEFT JOIN LATERAL \(\$\{pagoLigadoDeLaFilaSql\('r'\)\} LIMIT 1\) ligado/)
-    expect(cuerpo).toMatch(/LEFT JOIN LATERAL \(\$\{evidenciaDeConciliacionDeLaFilaSql\('r'\)\} LIMIT 1\) colision/)
-    expect(cuerpo).toMatch(/ligado\."id" IS NOT NULL OR colision\."id" IS NOT NULL OR \$\{hayAfirmacion\}/)
+    // 🔴 Ronda 5 (P1-B): la evidencia NO se acota a «la primera» — viaja como conjunto agregado, ordenado y con su tope.
+    expect(cuerpo).toMatch(
+      /SELECT array_agg\(c\."id"\) AS "ids"\s+FROM \(\$\{evidenciaDeConciliacionDeLaFilaSql\('r'\)\} ORDER BY 1 LIMIT \$\{LIMITE_DE_EVIDENCIAS_DE_COLISION\}\) c/,
+    )
+    expect(cuerpo).not.toMatch(/\$\{evidenciaDeConciliacionDeLaFilaSql\('r'\)\} LIMIT 1/)
+    expect(cuerpo).toMatch(/ligado\."id" IS NOT NULL OR colision\."ids" IS NOT NULL OR \$\{hayAfirmacion\}/)
     // El MISMO recorrido: un solo keyset, un solo tope de lotes, un solo horizonte.
     expect(cuerpo).toMatch(/for \(let lote = 0; lote < LOTES_MAXIMOS_DE_LIBERADAS; lote\+\+\)/)
     expect(cuerpo.match(/LIMIT \$\{TAMANO_DEL_LOTE_LIBERADAS\}/g) ?? []).toHaveLength(1)
@@ -239,6 +243,12 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
     expect(cuerpoSenal).toMatch(/retenerSolicitudLiberadaPorColisionDeReferencia\(/)
     expect(cuerpoSenal).toMatch(/retenerSolicitudLiberadaPorAfirmacionDeLaTerminal\(/)
     expect(cuerpoSenal).toMatch(/origen: 'BARRIDO_SENALES'/)
+    // 🔴 Ronda 5 (P1-B): se RECORREN las candidatas —acotadas— y una identidad ajena NO corta el recorrido: si volviera a
+    // quedarse con la primera, una evidencia de otra terminal taparía a la legítima para siempre.
+    expect(cuerpoSenal).toMatch(
+      /for \(const evidenciaId of \(senal\.evidenciaIds \?\? \[\]\)\.slice\(0, LIMITE_DE_EVIDENCIAS_DE_COLISION\)\)/,
+    )
+    expect(cuerpoSenal).toMatch(/if \(resultado !== 'IDENTITY_MISMATCH'\) break/)
     // P1-C(b): en `closeRow` la relectura ya NO depende de que gane MI llamada — no hay `return escrito` en medio.
     const cierre = indice(s, 'private async closeRow(')
     const bloque = s.slice(indice(s, 'await this.escribirSuccessDegradado(', cierre), indice(s, 'const data:', cierre))

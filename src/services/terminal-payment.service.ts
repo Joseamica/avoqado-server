@@ -309,6 +309,20 @@ const MARCADORES_DE_RETENCION_DE_LA_VENTANA = ['BANK_APPROVED_AWAITING_PAYMENT',
 /** Codex r1 (P1-B): el barrido de las filas liberadas avanza por keyset en lotes de 200, con tope de 25 lotes por pasada. */
 const TAMANO_DEL_LOTE_LIBERADAS = 200
 const LOTES_MAXIMOS_DE_LIBERADAS = 25
+/**
+ * Ronda 5 (Codex r10, P1-B): cuántas EVIDENCIAS de colisión de una misma solicitud liberada mira la red durable por pasada.
+ *
+ * 🔴 El defecto que cierra: el selector traía la evidencia con un `LIMIT 1` y la identidad acreditada (regla T10) se
+ * comprobaba DESPUÉS, ya en el núcleo. Acotar ANTES de filtrar deja fuera para siempre a todas las demás: una evidencia de
+ * OTRA terminal —que el núcleo rechaza correctamente— tapaba indefinidamente a la legítima que llegara después, y la
+ * solicitud se quedaba liberada diciéndole al POS «Se puede volver a cobrar» con una posible segunda captura encima.
+ *
+ * Es un tope explícito y pequeño (el mismo de `pagosLigados`), y va en LOS DOS sitios a propósito: dentro del `LIMIT` del
+ * LATERAL —para que la consulta no traiga más de lo que se va a mirar— y en el recorrido, para que «acotado» sea cierto por
+ * construcción y no por confiar en la consulta. Varias evidencias sobre la MISMA solicitud ya es un caso patológico: 5 cubre
+ * con holgura lo que un humano va a tener que revisar a mano de todos modos.
+ */
+const LIMITE_DE_EVIDENCIAS_DE_COLISION = 5
 
 /**
  * Cuánto se espera, DESDE QUE VIMOS VOLVER a la terminal, antes de soltar su ranura.
@@ -4747,7 +4761,8 @@ class TerminalPaymentService {
       createdAt: Date
       id: string
       paymentId: string | null
-      evidenciaId: string | null
+      /** Ronda 5: el CONJUNTO acotado de evidencias de colisión, no «la primera» (`NULL` cuando no hay ninguna). */
+      evidenciaIds: string[] | null
       afirmacion: boolean
     }
     const horizonte = new Date(now.getTime() - HORIZONTE_DE_LA_RED_DURABLE_MS)
@@ -4762,19 +4777,30 @@ class TerminalPaymentService {
         ? Prisma.sql`AND (r."createdAt" > ${utcTs(desde.createdAt)} OR (r."createdAt" = ${utcTs(desde.createdAt)} AND r."id" > ${desde.id}))`
         : Prisma.empty
       // `LEFT JOIN LATERAL` y no `EXISTS`: filtra igual (el `OR` de abajo exige al menos una señal) y de paso trae el id del
-      // cobro y el de la evidencia para el aviso. Las dos piezas correlacionadas son LAS MISMAS que usan los CAS y el EXPLAIN
-      // de la prueba de integración — nunca una copia.
+      // cobro y los de las evidencias para el aviso. Las dos piezas correlacionadas son LAS MISMAS que usan los CAS y el
+      // EXPLAIN de la prueba de integración — nunca una copia.
+      //
+      // 🔴 Ronda 5 (Codex r10, P1-B): la evidencia viaja como CONJUNTO acotado (`array_agg` sobre las
+      // `LIMITE_DE_EVIDENCIAS_DE_COLISION` primeras, `ORDER BY 1` para que el conjunto sea determinista), no como el `LIMIT 1`
+      // de antes. La identidad acreditada de una evidencia NO se puede expresar aquí —la decide
+      // `procedenciaDelPagoDeSolicitud`, bajo los candados, y reescribirla en SQL sería una SEGUNDA definición que puede
+      // discrepar en los bordes (`deviceSerialNumber` no-cadena, serial vacío)—, así que lo que se arregla es la FORMA: se deja
+      // de acotar antes de filtrar, y el recorrido decide. El filtro no cambia: `array_agg` sobre cero filas es `NULL`, o sea
+      // exactamente el mismo `IS NOT NULL` que antes.
       const filas: Fila[] = await retry<Fila[]>(
         (): Promise<Fila[]> =>
           prisma.$queryRaw<Fila[]>`
             SELECT r."requestId", r."venueId", r."createdAt", r."id", /* liberadas-con-senal */
-                   ligado."id" AS "paymentId", colision."id" AS "evidenciaId", (${hayAfirmacion}) AS "afirmacion"
+                   ligado."id" AS "paymentId", colision."ids" AS "evidenciaIds", (${hayAfirmacion}) AS "afirmacion"
             FROM "TerminalPaymentRequest" r
             LEFT JOIN LATERAL (${pagoLigadoDeLaFilaSql('r')} LIMIT 1) ligado ON true
-            LEFT JOIN LATERAL (${evidenciaDeConciliacionDeLaFilaSql('r')} LIMIT 1) colision ON true
+            LEFT JOIN LATERAL (
+              SELECT array_agg(c."id") AS "ids"
+              FROM (${evidenciaDeConciliacionDeLaFilaSql('r')} ORDER BY 1 LIMIT ${LIMITE_DE_EVIDENCIAS_DE_COLISION}) c
+            ) colision ON true
             WHERE r."status" = 'FAILED' AND r."failureCode" IN (${Prisma.join([...CODIGOS_DE_LIBERACION_REVERSIBLE])})
               AND r."paymentId" IS NULL AND r."createdAt" >= ${utcTs(horizonte)}
-              AND (ligado."id" IS NOT NULL OR colision."id" IS NOT NULL OR ${hayAfirmacion})
+              AND (ligado."id" IS NOT NULL OR colision."ids" IS NOT NULL OR ${hayAfirmacion})
               ${keyset}
             ORDER BY r."createdAt" ASC, r."id" ASC
             LIMIT ${TAMANO_DEL_LOTE_LIBERADAS}`,
@@ -4812,26 +4838,41 @@ class TerminalPaymentService {
    * 🔴 La colisión pasa por la regla T10 igual que por REST, y aquí es más estricta: el barrido no aporta serial autenticado,
    * así que la identidad tiene que salir de lo DURABLE que escribió el servidor (`Payment.terminal` o
    * `processorData.deviceSerialNumber`, que el registrador siempre persiste). Si no corresponde, el núcleo no toca la fila y
-   * grita — y esa contradicción se recuerda EN EL PROCESO para que el 🚨 no se repita en cada pasada de 30 s: la evidencia no
-   * cambia, así que volver a gritarla no es información, es ruido que tapa alarmas reales.
+   * grita — y esa contradicción se recuerda EN EL PROCESO (por EVIDENCIA, no por solicitud) para que el 🚨 no se repita en
+   * cada pasada de 30 s: la evidencia no cambia, así que volver a gritarla no es información, es ruido que tapa alarmas
+   * reales.
+   *
+   * 🔴 Ronda 5 (Codex r10, P1-B): se RECORREN las candidatas en vez de quedarse con la primera. Una evidencia que no acredita
+   * identidad ya no puede tapar a otra que sí — antes la ajena se rechazaba (bien), se recordaba (bien) y el selector volvía a
+   * devolver LA MISMA en cada pasada, así que la legítima no se examinaba jamás. Qué hace cada desenlace:
+   *
+   *  · `HELD`              — hecho: se para (dos legítimas no se procesan dos veces).
+   *  · `IDENTITY_MISMATCH` — es de OTRA terminal: se recuerda y **se sigue buscando**. La fila ajena sigue intacta y el 🚨 se
+   *                          emitió una vez; lo que cambia es que ya no cierra la puerta.
+   *  · `DEFERRED`          — candado ocupado o base caída: no se recuerda (no es una contradicción) y se para, porque probar
+   *                          otra candidata AHORA va a chocar con lo mismo. La pasada siguiente empieza de nuevo.
+   *  · `NOT_APPLICABLE`    — o la fila dejó de estar liberada (ninguna candidata va a servir) o esa evidencia ya no consta en
+   *                          la base (y entonces el selector deja de devolverla, así que la siguiente pasada prueba otra).
+   *                          En los dos casos parar es correcto y se recupera solo.
    */
   private async retenerPorSenalSinPago(
     row: FilaDeCobroRemoto,
-    senal: { evidenciaId: string | null; afirmacion: boolean },
+    senal: { evidenciaIds: string[] | null; afirmacion: boolean },
   ): Promise<boolean> {
-    const clave = `${row.venueId}:${row.requestId}:${senal.evidenciaId ?? ''}`
-    if (senal.evidenciaId && !this.contradiccionesDeLaRed.has(clave)) {
+    // El tope, también aquí: «acotado» no puede depender de que la consulta lo respete (ni de cuántas evidencias haya).
+    for (const evidenciaId of (senal.evidenciaIds ?? []).slice(0, LIMITE_DE_EVIDENCIAS_DE_COLISION)) {
+      const clave = `${row.venueId}:${row.requestId}:${evidenciaId}`
+      if (this.contradiccionesDeLaRed.has(clave)) continue
       const resultado = await this.retenerSolicitudLiberadaPorColisionDeReferencia({
         requestId: row.requestId,
         venueId: row.venueId,
-        paymentId: senal.evidenciaId,
+        paymentId: evidenciaId,
         origen: 'BARRIDO_SENALES',
       })
       if (resultado === 'HELD') return true
-      if (resultado === 'IDENTITY_MISMATCH') {
-        if (this.contradiccionesDeLaRed.size >= 10_000) this.contradiccionesDeLaRed.clear()
-        this.contradiccionesDeLaRed.add(clave)
-      }
+      if (resultado !== 'IDENTITY_MISMATCH') break
+      if (this.contradiccionesDeLaRed.size >= 10_000) this.contradiccionesDeLaRed.clear()
+      this.contradiccionesDeLaRed.add(clave)
     }
     if (!senal.afirmacion) return false
     return (
