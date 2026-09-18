@@ -469,6 +469,23 @@ describe('Ronda 6 · una solicitud atascada por evidencias que no acreditan su t
     }
   })
 
+  it('no avisa cuando la página sale vacía porque lo que quedaba DESPUÉS del cursor desapareció: sólo reinicia', async () => {
+    conBase({ evidencias: ['E1-ajena', 'E2-ajena', 'E3-ajena', 'E4-ajena', 'E5-ajena', 'E6-ajena'] })
+    const colision = nucleo(() => 'IDENTITY_MISMATCH')
+    try {
+      await pasada() // E1–E5 ⇒ cursor en E5 (hay una sexta)
+      expect(solicitudes[0].cursor).toBe('E5-ajena')
+      // Alguien concilió E6 a mano: deja de ser evidencia PENDING y la página siguiente sale vacía.
+      solicitudes[0].evidencias = solicitudes[0].evidencias.filter(e => e !== 'E6-ajena')
+      await pasada(30)
+      expect(solicitudes[0].cursor).toBeNull() // la fila entró SÓLO por su cursor, y se reinició
+      // Una página vacía no prueba que la solicitud esté atascada: el aviso lo decide el recorrido completo siguiente.
+      expect(avisos()).toHaveLength(0)
+    } finally {
+      colision.mockRestore()
+    }
+  })
+
   it('no avisa mientras el recorrido NO ha agotado el conjunto (una página llena todavía puede traer la legítima detrás)', async () => {
     conBase({ evidencias: ['E1-ajena', 'E2-ajena', 'E3-ajena', 'E4-ajena', 'E5-ajena', 'E6-legitima'] })
     const colision = nucleo(id => (id === 'E6-legitima' ? 'DEFERRED' : 'IDENTITY_MISMATCH'))

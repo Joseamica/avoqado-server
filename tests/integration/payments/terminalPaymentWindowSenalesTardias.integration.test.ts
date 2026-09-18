@@ -931,6 +931,33 @@ describe('Ronda 6 · P1-B: el cursor persistido deja examinar la sexta evidencia
     expect(retenidaR.resultJson).toMatchObject({ referenceCollisionAfterRelease: { paymentId: legitima.id } })
   })
 
+  it('🔴 condición 4 cuando lo que quedaba DESPUÉS del cursor desaparece: la fila entra SÓLO por su cursor, se reinicia y encuentra la legítima', async () => {
+    const { solicitud, venta } = await liberadaPorLaVentana()
+    const principal = await terminalPrincipal()
+    await cincoAjenas(venta, solicitud, 'r6d')
+    const sexta = await evidencia({ id: `${f.fixture}-r6d-6`, orderId: venta.id, requestId: solicitud.requestId, terminalId: otra.id })
+    await terminalPaymentService.reconcileUnknownRequests(new Date())
+    expect(await cursorDe(solicitud.requestId)).toBe(`${f.fixture}-r6d-5`)
+
+    // Alguien concilió la sexta a mano (deja de ser evidencia PENDING) y llega una legítima con id DETRÁS del cursor. La página
+    // que sigue al cursor sale VACÍA y la fila no tiene ninguna otra señal: sólo su cursor la trae al recorrido.
+    await prisma.payment.update({ where: { id: sexta.id }, data: { status: 'FAILED' } })
+    const legitima = await evidencia({
+      id: `${f.fixture}-r6d-2b`,
+      orderId: venta.id,
+      requestId: solicitud.requestId,
+      terminalId: principal.id,
+    })
+    await terminalPaymentService.reconcileUnknownRequests(new Date())
+    expect(await cursorDe(solicitud.requestId)).toBeNull()
+    await terminalPaymentService.reconcileUnknownRequests(new Date())
+
+    const retenidaR = await retenida(solicitud.requestId, venta.id)
+    expect(retenidaR.resultJson).toMatchObject({ referenceCollisionAfterRelease: { paymentId: legitima.id } })
+    // Reiniciar por una página vacía no es «atascada»: no sale el aviso.
+    expect(correos('no acredita')).toHaveLength(0)
+  })
+
   it('🔴 el aviso: una solicitud atascada por evidencias ajenas manda UN correo y deja UN asiento — ni por pasada ni por reinicio', async () => {
     const { solicitud, venta } = await liberadaPorLaVentana()
     await evidencia({ id: `${f.fixture}-r6c-1`, orderId: venta.id, requestId: solicitud.requestId, terminalId: otra.id })
