@@ -91,7 +91,8 @@ export async function getVenueKycDetails(venueId: string) {
   })
 
   // Extract payment info from onboarding (temporary storage)
-  const paymentInfo = onboarding?.step8_paymentInfo as any
+  // Mismo respaldo que abajo: `v2SetupData.step7` es donde el asistente V2 dejó la CLABE.
+  const paymentInfo = (onboarding?.step8_paymentInfo as any) ?? (onboarding?.v2SetupData as any)?.step7 ?? null
 
   return {
     venue,
@@ -172,7 +173,11 @@ async function sendKycToBlumonAfterApproval(venueId: string, approvedById: strin
     })
 
     // Extract payment info from onboarding (temporary storage)
-    const paymentInfo = onboarding?.step8_paymentInfo as any
+    // 🔴 Respaldo a `v2SetupData.step7` (spec 2026-09-17 § 4.2): el asistente V2 guarda la CLABE
+    // ahí, y hasta hoy NUNCA llegaba a esta revisión — el revisor veía el banco vacío sobre un
+    // negocio que sí lo había capturado. El checklist «Activar cobros» ya escribe los dos, así
+    // que esto cubre a los locales que pasaron por V2 ANTES del cambio.
+    const paymentInfo = (onboarding?.step8_paymentInfo as any) ?? (onboarding?.v2SetupData as any)?.step7 ?? null
 
     // Get approver name
     const approver = await prisma.staff.findUnique({

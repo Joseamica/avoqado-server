@@ -40,6 +40,7 @@ import reportsRoutes from './superadmin/reports.routes'
 import deliveryActivationRoutes from './superadmin/deliveryActivation.routes'
 import masterCatalogRoutes from './superadmin/masterCatalog.routes'
 import announcementRoutes from './superadmin/announcement.routes'
+import launchCampaignRoutes from './superadmin/launchCampaign.routes'
 import systemConfigRoutes from './superadmin/systemConfig.routes'
 // NOTE: appUpdateRoutes are mounted EARLY in app.ts with 100MB body limit for APK uploads
 // Do NOT mount here to avoid duplicate route registration
@@ -52,6 +53,8 @@ router.use(authorizeRole([StaffRole.SUPERADMIN]))
 
 // Mount superadmin sub-routes
 router.use('/announcements', announcementRoutes)
+// Campañas ligeras de lanzamiento (spec 2026-09-17). Hereda el guardia de SUPERADMIN del padre.
+router.use('/launch-campaigns', launchCampaignRoutes)
 router.use('/kyc', kycReviewRoutes)
 router.use('/payment-providers', paymentProviderRoutes)
 router.use('/merchant-accounts', merchantAccountRoutes)

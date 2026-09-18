@@ -37,13 +37,27 @@ response.**
 
 **`* 100` (cents / minor units) is allowed ONLY at an external boundary, then immediately back to pesos:**
 
-| Boundary                        | Helper / field                                                                                                                    |
-| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| Stripe                          | `toStripeAmount` (`src/services/payments/providers/money.ts`) = `decimal.mul(100).round(0)`                                       |
-| Refund service (internal cents) | `toCents`                                                                                                                         |
-| CFDI / fiscal                   | `totalCents`                                                                                                                      |
-| MercadoPago · AngelPay · B4BIT  | all cents at the provider call                                                                                                    |
-| Accounting ledger               | `JournalEntry.totalDebitCents` / `JournalLine.debitCents` are cents **internally**; convert **÷100** for any display / MCP output |
+| Boundary                             | Helper / field                                                                                                                           |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Stripe                               | `toStripeAmount` (`src/services/payments/providers/money.ts`) = `decimal.mul(100).round(0)`                                              |
+| Refund service (internal cents)      | `toCents`                                                                                                                                |
+| CFDI / fiscal                        | `totalCents`                                                                                                                             |
+| MercadoPago · AngelPay · B4BIT       | all cents at the provider call                                                                                                           |
+| Accounting ledger                    | `JournalEntry.totalDebitCents` / `JournalLine.debitCents` are cents **internally**; convert **÷100** for any display / MCP output        |
+| **Launch campaigns** (Stripe-mirror) | `LaunchCampaign*` columns, `planPricing.constants.ts` and `launchOfferMath.ts` hold cents **internally** — see the named exception below |
+
+### 🔴 The ONE named exception where cents survive past the boundary: launch-campaign offers
+
+`LaunchCampaign.advertisedPriceCents`, `…discountAmountCents`, `…listPriceCentsSnapshot`, every `LaunchCampaignRedemption` amount, and the
+constants in `src/services/access/planPricing.constants.ts` are stored and computed in **integer cents**, because each one **is** a Stripe
+field (`price.unit_amount`, `coupon.amount_off`) — there is no peso value to round-trip to, and converting would reintroduce the float error
+the ledger rule exists to prevent. The public offer payload built by `buildLaunchOfferView` (`…Cents` keys) therefore also carries cents:
+**that is deliberate and reviewed — do not "fix" it to pesos.** Two things bound the exception:
+
+1. **The consumer converts for DISPLAY.** Landing, dashboard and superadmin divide by 100 to render. The `…Cents` suffix on every key is
+   what makes that impossible to get wrong by accident.
+2. 🔴 **MCP tools are NOT part of the exception.** Any launch-campaign MCP tool reports **pesos**, like every other tool — the LLM-facing
+   surface has one unit and it is the peso. Convert ÷100 at the tool boundary, exactly as the ledger tools do.
 
 If you find yourself writing `Math.round(amount * 100)` anywhere that is NOT one of those boundaries, it's a bug. Verify money to the cent
 with `scripts/mcp-money-reconcile.ts` (MCP totals == DB).

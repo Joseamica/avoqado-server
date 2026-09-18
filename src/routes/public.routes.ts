@@ -3,6 +3,7 @@ import { z } from 'zod'
 import cors from 'cors'
 import crypto from 'crypto'
 import rateLimit from 'express-rate-limit'
+import { ipDelCliente } from '../utils/clientIp'
 import { getPublicReceipt } from '../controllers/public/receipt.public.controller'
 import {
   autofacturaController,
@@ -82,6 +83,9 @@ import {
 } from '../schemas/public/venueCheckout.schema'
 
 import * as passkitController from '../controllers/public/passkit.public.controller'
+import { getLaunchOffer } from '../controllers/public/launchOffer.public.controller'
+import { optionalLaunchCampaignCode, utmSchema } from '../schemas/acquisition.schema'
+import { LANDING_SLUG_RE } from '../services/launchCampaigns/launchCampaign.schema'
 
 const router = Router()
 
@@ -89,18 +93,29 @@ const router = Router()
 router.use(cors({ origin: '*', credentials: false, methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }))
 
 // Rate limiting: read endpoints (60 req/min), write (5 req/min), cancel (10 req/min)
-const readLimit = rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true, legacyHeaders: false })
-const writeLimit = rateLimit({ windowMs: 60_000, max: 5, standardHeaders: true, legacyHeaders: false })
-const cancelLimit = rateLimit({ windowMs: 60_000, max: 10, standardHeaders: true, legacyHeaders: false })
-const authLimit = rateLimit({ windowMs: 60_000, max: 10, standardHeaders: true, legacyHeaders: false })
+//
+// 🔴 S14 (medido 2026-09-17): TODOS llaveaban por el `req.ip` por defecto, que en producción es
+// SIEMPRE un borde de Cloudflare compartido — el 100 % de ~22 000 peticiones medidas en 24 h. O sea
+// que «5 por minuto» eran 5 para TODOS los visitantes de esa región, no 5 por persona. Se llavean
+// por la IP REAL del visitante. Detalle y el límite declarado: `utils/clientIp`.
+const porVisitante = (req: Parameters<typeof ipDelCliente>[0]) => ipDelCliente(req) || 'desconocida'
+const readLimit = rateLimit({ windowMs: 60_000, max: 60, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
+const writeLimit = rateLimit({ windowMs: 60_000, max: 5, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
+const cancelLimit = rateLimit({ windowMs: 60_000, max: 10, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
+const authLimit = rateLimit({ windowMs: 60_000, max: 10, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
+// La oferta de lanzamiento la consulta la LANDING desde un servidor de Cloudflare, así que
+// muchísimas visitas comparten pocas IPs de salida. Con `readLimit` (60/min) el destino del
+// CTA pagado se apagaría solo en cuanto el anuncio funcionara — el peor momento posible.
+const offerReadLimit = rateLimit({ windowMs: 60_000, max: 600, standardHeaders: true, legacyHeaders: false })
+
 // CFDI stamping costs money — tight per-IP cap to prevent abuse
-const cfdiLimit = rateLimit({ windowMs: 60_000, max: 5, standardHeaders: true, legacyHeaders: false })
+const cfdiLimit = rateLimit({ windowMs: 60_000, max: 5, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
 // Second limiter keyed on the receipt accessKey: no single ticket can be hammered regardless of IP.
 // Mitigates wallet-drain + slot-denial velocity (e.g. a customer double-tapping the autofactura button).
 const cfdiPerKeyLimit = rateLimit({
   windowMs: 60_000,
   max: 3,
-  keyGenerator: req => (req.params as any).accessKey ?? req.ip ?? 'unknown',
+  keyGenerator: req => (req.params as any).accessKey ?? porVisitante(req),
   standardHeaders: true,
   legacyHeaders: false,
 })
@@ -447,36 +462,10 @@ router.get(
 // El correo se valida con Zod y no a mano: el controller solo comprobaba que el campo
 // existiera, asi que un "noesemail" respondia 200 y la confirmacion al prospecto se perdia
 // en silencio (nadie se enteraba de que el lead nunca recibio nada).
-// Llaves de campana que la landing propaga (mismo listado que `restaurants.astro`).
-// Se filtra con allowlist y con tope de largo en vez de aceptar el `record` abierto:
-// esto viene de internet SIN autenticar y desde ahora se guarda en la columna JSON
-// del ActivityLog del alta, asi que un `utm` sin limite deja escribir basura
-// arbitraria en el registro de un lead. Lo que no este aqui se descarta en silencio.
-const UTM_KEYS = [
-  'utm_source',
-  'utm_medium',
-  'utm_campaign',
-  'utm_content',
-  'utm_term',
-  'gclid',
-  'gbraid',
-  'wbraid',
-  'fbclid',
-  'msclkid',
-] as const
-
-const utmSchema = z
-  .record(z.string(), z.string())
-  .optional()
-  .transform(u => {
-    if (!u) return undefined
-    const limpio: Record<string, string> = {}
-    for (const k of UTM_KEYS) {
-      const v = u[k]
-      if (typeof v === 'string' && v.trim()) limpio[k] = v.trim().slice(0, 200)
-    }
-    return Object.keys(limpio).length > 0 ? limpio : undefined
-  })
+// Los UTMs se MOVIERON, sin cambios, a `src/schemas/acquisition.schema.ts` (spec 2026-09-17
+// § 3.5): el alta por el dashboard tiene que guardar EXACTAMENTE la misma lista permitida que el
+// formulario de la landing, y con dos copias eso dura hasta que alguien agrega una llave de un
+// solo lado. Hay una prueba que compara las dos listas.
 
 // El `hutk` es la cookie de HubSpot del visitante y es lo unico que le da
 // campana/origen al lead dentro del CRM. Se valida con la misma logica que los
@@ -513,12 +502,42 @@ const contactSchema = z.object({
     modules: z.string().optional(),
     source: z.string().optional(),
     utm: utmSchema,
+    // Campaña ligera reclamada desde la landing (spec § 3.5). Descarte SILENCIOSO si viene
+    // mal formado: la atribución vale mucho menos que el lead.
+    launchCampaignCode: optionalLaunchCampaignCode,
     // Contexto del visitante para el espejo en HubSpot (ver hubspot.client.ts).
     hutk: hutkSchema,
     pageUri: paginaSchema,
     pageName: z.string().trim().max(120).optional(),
   }),
 })
+/**
+ * @openapi
+ * /api/v1/public/launch-offers/{slug}:
+ *   get:
+ *     tags: [Public, LaunchCampaigns]
+ *     summary: La oferta de lanzamiento que pinta /oferta/<slug> en la landing
+ *     description: >
+ *       Sin autenticar. Nunca expone cupo, conteo, ids internos ni el cupón de Stripe.
+ *       Una ficha en DRAFT responde 404; una que existe pero no se puede vender responde 200
+ *       con `available:false` y SIN ninguna llave de precio.
+ *     parameters:
+ *       - in: path
+ *         name: slug
+ *         required: true
+ *         schema: { type: string, maxLength: 60 }
+ *     responses:
+ *       200: { description: LaunchOfferView o LaunchOfferUnavailableView }
+ *       400: { description: Slug con formato inválido }
+ *       404: { description: LAUNCH_OFFER_NOT_FOUND }
+ */
+router.get(
+  '/launch-offers/:slug',
+  offerReadLimit,
+  validateRequest(z.object({ params: z.object({ slug: z.string().regex(LANDING_SLUG_RE).max(60) }) })),
+  getLaunchOffer,
+)
+
 router.post('/contact', writeLimit, validateRequest(contactSchema), submitContact)
 
 // Salto medido del magic link del correo de bienvenida: cuenta el clic y redirige
@@ -621,7 +640,7 @@ const customerUnsubLimit = rateLimit({
   keyGenerator: req =>
     crypto
       .createHash('sha256')
-      .update(String(req.query.token ?? req.ip))
+      .update(String(req.query.token ?? porVisitante(req)))
       .digest('hex'),
 })
 router.get('/customers/unsubscribe', readLimit, customerEmailController.getCustomerUnsubscribePage)

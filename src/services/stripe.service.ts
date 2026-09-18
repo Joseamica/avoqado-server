@@ -16,6 +16,7 @@ import { retry, shouldRetryStripeError } from '@/utils/retry'
 import { addDays } from 'date-fns'
 import emailService from './email.service'
 import { resolvePlanNotificationTarget } from './access/planNotification.service'
+import AppError from '@/errors/AppError'
 
 // Initialize Stripe
 // Using default API version from SDK (automatically uses the latest compatible version)
@@ -577,6 +578,36 @@ export interface CreatePlanSubscriptionInput {
   coupon?: string // e.g. 'INTRO_PRO_3M' (PRO monthly pay-now only)
   venueName?: string
   venueSlug?: string
+  /**
+   * Llave de idempotencia de Stripe (spec 2026-09-17 § 3.6). Sin ella, el `retry(3)` de abajo
+   * puede crear DOS suscripciones cuando el primer intento se pierde en la red — hoy reintentar
+   * NO es seguro. Con la llave, el reintento devuelve la misma.
+   */
+  idempotencyKey?: string
+  /**
+   * 🔴 `error_if_incomplete` hace que Stripe responda 402 y **no cree** la suscripción cuando el
+   * primer cobro falla, en vez de crearla `incomplete`. Sin esto el `upsert` de abajo deja
+   * `VenueFeature.active = true` con una tarjeta rechazada: el plan de pago regalado.
+   * Sólo tiene sentido con `trialPeriodDays === 0`; con prueba no hay primer cobro.
+   */
+  paymentBehavior?: 'error_if_incomplete'
+  /** Metadatos extra (campaña, intento) para poder RECUPERAR un resultado desconocido. */
+  extraMetadata?: Record<string, string>
+}
+
+/**
+ * Lo que devuelve `createPlanSubscription`.
+ *
+ * 🔴 `reused` NO es cosmético, y por eso el tipo de retorno dejó de ser un `string`: cuando el
+ * venue ya tenía suscripción, esta función devuelve la VIEJA e ignora `coupon`, `interval`,
+ * `trialPeriodDays` y la llave de idempotencia. Quien cobra una oferta tiene que poder
+ * distinguir «cobré» de «te devolví una suscripción que ya existía»: sin esa distinción,
+ * `activate-plan` marcaría la redención APPLIED, consumiría un lugar del cupo y mandaría
+ * «recibimos tu pago de $22» con **cero pesos cobrados**.
+ */
+export interface CreatePlanSubscriptionResult {
+  subscriptionId: string
+  reused: boolean
 }
 
 /**
@@ -585,7 +616,7 @@ export interface CreatePlanSubscriptionInput {
  * pay-now (trialPeriodDays:0), an intro coupon, and Stripe Tax (16% IVA).
  * Idempotent: reuses an existing subscription for the venue+tier if one already exists.
  */
-export async function createPlanSubscription(input: CreatePlanSubscriptionInput): Promise<string> {
+export async function createPlanSubscription(input: CreatePlanSubscriptionInput): Promise<CreatePlanSubscriptionResult> {
   const feature = await prisma.feature.findFirst({ where: { code: input.tierCode, active: true } })
   if (!feature) throw new Error(`Feature ${input.tierCode} not found or inactive`)
 
@@ -596,7 +627,9 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
   })
   if (existing?.stripeSubscriptionId) {
     logger.info(`createPlanSubscription: reusing existing sub ${existing.stripeSubscriptionId} for venue ${input.venueId}`)
-    return existing.stripeSubscriptionId
+    // 🔴 Se DICE que se reusó. El llamador decide si eso es legítimo (un reintento idempotente
+    // del mismo cobro) o si tiene que negarse a cerrar (una oferta que nunca se cobró).
+    return { subscriptionId: existing.stripeSubscriptionId, reused: true }
   }
 
   const lookupKey = planLookupKey(input.tierCode, input.interval)
@@ -606,28 +639,36 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
 
   const subscription = await retry(
     () =>
-      stripe.subscriptions.create({
-        customer: input.customerId,
-        items: [{ price: price.id }],
-        trial_period_days: input.trialPeriodDays,
-        default_payment_method: input.paymentMethodId,
-        // No Stripe Tax: IVA is baked into the price (tax_behavior 'inclusive'), so we charge the
-        // price as-is and the merchant remits/itemizes the IVA on their own CFDI factura.
-        ...(input.coupon ? { discounts: [{ coupon: input.coupon }] } : {}),
-        description: input.venueName
-          ? `Plan Avoqado ${planLabel(input.tierCode)} - ${input.venueName}`
-          : `Plan Avoqado ${planLabel(input.tierCode)}`,
-        metadata: {
-          venueId: input.venueId,
-          featureId: feature.id,
-          featureCode: feature.code,
-          interval: input.interval,
-          ...(input.venueName ? { venueName: input.venueName } : {}),
-          ...(input.venueSlug ? { venueSlug: input.venueSlug } : {}),
+      stripe.subscriptions.create(
+        {
+          customer: input.customerId,
+          items: [{ price: price.id }],
+          trial_period_days: input.trialPeriodDays,
+          default_payment_method: input.paymentMethodId,
+          // No Stripe Tax: IVA is baked into the price (tax_behavior 'inclusive'), so we charge the
+          // price as-is and the merchant remits/itemizes the IVA on their own CFDI factura.
+          ...(input.coupon ? { discounts: [{ coupon: input.coupon }] } : {}),
+          description: input.venueName
+            ? `Plan Avoqado ${planLabel(input.tierCode)} - ${input.venueName}`
+            : `Plan Avoqado ${planLabel(input.tierCode)}`,
+          metadata: {
+            venueId: input.venueId,
+            featureId: feature.id,
+            featureCode: feature.code,
+            interval: input.interval,
+            ...(input.venueName ? { venueName: input.venueName } : {}),
+            ...(input.venueSlug ? { venueSlug: input.venueSlug } : {}),
+            ...(input.extraMetadata ?? {}),
+          },
+          // 🔴 Sólo se manda con trial 0: con prueba gratis no hay primer cobro que pueda fallar.
+          ...(input.paymentBehavior && input.trialPeriodDays === 0 ? { payment_behavior: input.paymentBehavior } : {}),
+          collection_method: 'charge_automatically',
+          payment_settings: { save_default_payment_method: 'on_subscription', payment_method_types: ['card'] },
         },
-        collection_method: 'charge_automatically',
-        payment_settings: { save_default_payment_method: 'on_subscription', payment_method_types: ['card'] },
-      }),
+        // La llave hace que el `retry(3)` de arriba sea seguro: sin ella, un intento perdido en
+        // la red y reintentado crea DOS suscripciones y DOS cobros.
+        input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : undefined,
+      ),
     { retries: 3, shouldRetry: shouldRetryStripeError, context: 'stripe.createPlanSubscription' },
   )
 
@@ -660,7 +701,25 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
   logger.info(
     `✅ createPlanSubscription: ${subscription.id} (${input.interval}, trial=${input.trialPeriodDays}d) for venue ${input.venueId}`,
   )
-  return subscription.id
+  return { subscriptionId: subscription.id, reused: false }
+}
+
+/**
+ * ¿Este método de pago pertenece al cliente de Stripe de ESTE local? (spec § 3.6, paso 4).
+ *
+ * 🔴 Sin esta comprobación, un `pm_` de otro cliente se manda como `default_payment_method` y
+ * Stripe lo rechaza con un error que no dice nada útil — o peor, si el `pm_` fuera de un cliente
+ * que sí controla el atacante, se le cobraría a la tarjeta equivocada.
+ */
+export async function assertPaymentMethodBelongsToCustomer(
+  paymentMethodId: string,
+  customerId: string,
+): Promise<{ fingerprint: string | null }> {
+  const pm = await stripe.paymentMethods.retrieve(paymentMethodId)
+  if (pm.customer !== customerId) {
+    throw new AppError('Ese método de pago no pertenece a este negocio', 400, true, 'PAYMENT_METHOD_MISMATCH')
+  }
+  return { fingerprint: pm.card?.fingerprint ?? null }
 }
 
 /** Base-plan tier code accepted by the plan checkout/subscription flows. */
@@ -671,7 +730,7 @@ export type PlanTierCode = 'PLAN_PRO' | 'PLAN_PREMIUM'
  * (PLAN_PRO, 'annual') → 'plan_pro_annual', (PLAN_PREMIUM, 'monthly') → 'plan_premium_monthly'.
  * Single source of truth so checkout (and any future flow) stay in lockstep.
  */
-function planLookupKey(tierCode: PlanTierCode, interval: 'monthly' | 'annual'): string {
+export function planLookupKey(tierCode: PlanTierCode, interval: 'monthly' | 'annual'): string {
   const prefix = tierCode === 'PLAN_PREMIUM' ? 'plan_premium' : 'plan_pro'
   const suffix = interval === 'annual' ? 'annual' : 'monthly'
   return `${prefix}_${suffix}`

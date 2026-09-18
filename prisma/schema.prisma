@@ -134,6 +134,10 @@ model Organization {
   // Operational raw-material transfers between venues in this organization.
   interVenueTransfers InterVenueTransfer[]
 
+  // Lanzamiento con campañas ligeras (spec 2026-09-17 § 2.2): los lugares de cupo que esta
+  // organización ha tomado. RESTRICT en la FK — una redención es evidencia de un cobro.
+  launchCampaignRedemptions LaunchCampaignRedemption[] @relation("LaunchCampaignRedemptionOrganization")
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -660,6 +664,10 @@ model Venue {
 
   // Diseñador de tickets, fase 1 — la receta del ticket en papel (spec § 7.1)
   receiptLayout ReceiptLayout?
+
+  // Lanzamiento con campañas ligeras (spec 2026-09-17 § 2.2). SET NULL: el local puede
+  // desaparecer sin que la historia del cobro deje de existir.
+  launchCampaignRedemptions LaunchCampaignRedemption[] @relation("LaunchCampaignRedemptionVenue")
 
   createdAt         DateTime           @default(now())
   updatedAt         DateTime           @updatedAt
@@ -1576,6 +1584,27 @@ model OnboardingProgress {
   termsVersion      String? // e.g. "2026-02-10"
   termsIpAddress    String?
 
+  // -- Lanzamiento con campanas ligeras (spec 2026-09-17 § 2.3) --------------------------
+  // Campaña ligera RECLAMADA (último toque antes de aceptar la oferta). Vive en el progreso y
+  // no en Organization porque el reclamo sólo importa mientras dura el alta; la atribución de
+  // quien SÍ pagó queda en LaunchCampaignRedemption.
+  launchCampaignId        String?
+  launchCampaign          LaunchCampaign? @relation(fields: [launchCampaignId], references: [id], onDelete: SetNull)
+  launchCampaignClaimedAt DateTime?
+  /// 'landing_oferta' | 'landing_contacto' | 'landing_restaurantes' | 'dashboard_signup' | 'dashboard_attach'
+  acquisitionSource       String?
+  /// UTMs y click IDs con la MISMA lista permitida que la landing (src/routes/public.routes.ts).
+  acquisitionUtm          Json?
+
+  // Cobro del plan ANTES de terminar el alta (endpoint activate-plan, spec § 3.6).
+  // El lease y el intento son el control de concurrencia: se comparan y se escriben en la MISMA
+  // sentencia (CAS), nunca con un read-check-write.
+  planActivationStatus     OnboardingPlanActivationStatus @default(NONE)
+  planActivationAttempt    Int                            @default(0)
+  planActivationLeaseUntil DateTime?
+  planActivatedAt          DateTime?
+  planStripeSubscriptionId String?
+
   // Metadata
   startedAt   DateTime  @default(now())
   completedAt DateTime?
@@ -1584,6 +1613,17 @@ model OnboardingProgress {
   @@index([organizationId])
   @@index([currentStep])
   @@index([completedAt])
+  @@index([launchCampaignId])
+}
+
+/// Estado del cobro del plan durante el alta (spec 2026-09-17 § 2.3).
+/// NONE = nadie lo ha intentado · IN_PROGRESS = hay un lease vivo · ACTIVE = Stripe cobró ·
+/// DECLINED = el banco rechazó y el lugar del cupo se liberó.
+enum OnboardingPlanActivationStatus {
+  NONE
+  IN_PROGRESS
+  ACTIVE
+  DECLINED
 }
 
 // ==========================================
@@ -17563,4 +17603,179 @@ model ReceiptLayout {
   updatedAt     DateTime @updatedAt
 
   @@index([venueId])
+}
+
+// ==========================================
+// NOTE: LANZAMIENTO CON CAMPAÑAS LIGERAS (spec 2026-09-17)
+//
+// 🔴 UNIDADES — excepción DECLARADA a la regla «la plataforma trabaja en PESOS 1:1»
+// (.claude/rules/critical-warnings.md). Todos los importes de estos dos modelos van en
+// CENTAVOS enteros CON IVA incluido, porque cada uno ES un campo de Stripe
+// (`price.unit_amount`, `coupon.amount_off`), que por contrato del proveedor son centavos.
+// No se convierten a pesos al leerlos: se mandan tal cual a Stripe. Para MOSTRARLOS se usa
+// `splitIvaInclusive` de src/services/launchCampaigns/launchOfferMath.ts.
+// ==========================================
+
+/// Campaña ligera de lanzamiento: anuncio → oferta de plan con cupón de Stripe.
+/// Fase 1 del lanzamiento con campañas manuales (spec 2026-09-17). Se migra a
+/// CommercialCampaign* (v2/v3) cuando la plataforma comercial nueva entre.
+///
+/// El nombre NO choca con lo que ya existe: CustomerCampaign, MarketingCampaign, CouponCode,
+/// Promotion ni los Commercial* del laboratorio.
+model LaunchCampaign {
+  id String @id @default(cuid())
+
+  /// Identificador canónico que VIAJA (formularios, MCP, atribución). Inmutable desde la creación.
+  code        String                 @unique
+  name        String
+  /// Segmento de URL de la landing (/oferta/<landingSlug>). Inmutable tras la 1ª activación.
+  landingSlug String                 @unique
+  vertical    LaunchCampaignVertical @default(ALL)
+  channel     LaunchCampaignChannel?
+
+  /// Sólo PRO | PREMIUM — lo impone un CHECK en la base (la migración), porque Prisma no sabe
+  /// restringir un enum a un subconjunto.
+  planTier        PlanTier
+  billingInterval LaunchCampaignInterval @default(MONTHLY)
+
+  /// Precio FINAL por ciclo CON IVA, en CENTAVOS (2200 = $22.00).
+  advertisedPriceCents Int
+  /// Ciclos a precio promocional (`duration_in_months` del cupón de Stripe).
+  discountMonths       Int
+  currency             String @default("MXN")
+
+  /// El cupón se llama LC_<code>_V<offerVersion>. En fase 1 SIEMPRE vale 1: una ficha activada
+  /// no cambia de oferta. Se conserva porque es lo que ata cada redención a lo que se consintió.
+  offerVersion Int @default(1)
+
+  /// Congelados al ACTIVAR (precio de lista de Stripe CON IVA, y el descuento derivado).
+  /// Un CHECK obliga a que listPriceCentsSnapshot - discountAmountCents = advertisedPriceCents.
+  listPriceCentsSnapshot Int?
+  discountAmountCents    Int?
+  stripePriceId          String?
+  stripeCouponId         String? @unique
+
+  /// Instantes UTC. La disponibilidad es [validFrom, validUntil): la zona no interviene.
+  /// El superadmin los captura y los muestra en America/Mexico_City.
+  validFrom  DateTime
+  validUntil DateTime
+
+  /// 🔴 El cupo NUNCA se lee antes de escribir: se reserva con un UPDATE condicional
+  /// (`WHERE redemptionCount < redemptionCap`). El CHECK `count <= cap` es el RESPALDO.
+  redemptionCap   Int
+  redemptionCount Int @default(0)
+
+  headline    String?
+  subheadline String?
+  bullets     String[] @default([])
+
+  status       LaunchCampaignStatus @default(DRAFT)
+  statusReason String?
+  activatedAt  DateTime?
+
+  /// Staff.id sin FK a propósito: no se toca el modelo Staff, que es el que más conflictos
+  /// genera con la plataforma comercial.
+  createdById String?
+  updatedById String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  claims      OnboardingProgress[]
+  redemptions LaunchCampaignRedemption[]
+
+  @@index([status, validFrom, validUntil])
+}
+
+enum LaunchCampaignStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  ENDED
+}
+
+/// Espejo de BusinessCategory (src/utils/businessCategory.ts) mas ALL.
+enum LaunchCampaignVertical {
+  ALL
+  FOOD_SERVICE
+  RETAIL
+  SERVICES
+  HOSPITALITY
+  ENTERTAINMENT
+}
+
+enum LaunchCampaignChannel {
+  GOOGLE_ADS
+  META
+  OPENAI_ADS
+  MULTI
+  OTHER
+}
+
+enum LaunchCampaignInterval {
+  MONTHLY
+}
+
+/// Un lugar del cupo de una LaunchCampaign. Una fila por INTENTO. RESERVED y APPLIED cuentan
+/// contra el cupo; RELEASED no, y RELEASED se CONSERVA como historia.
+///
+/// 🔴 El candado «un solo lugar vivo por organización» es un índice único PARCIAL que Prisma no
+/// sabe expresar, así que `organizationId` queda SIN @unique aquí y el índice vive escrito a mano
+/// en la migración 20260917120000_launch_campaigns:
+///   CREATE UNIQUE INDEX "LaunchCampaignRedemption_org_live_unique"
+///     ON "LaunchCampaignRedemption" ("organizationId") WHERE "status" <> 'RELEASED';
+/// ⚠️ Medido contra Prisma 6.19.3: un `prisma migrate diff` NO lo menciona — Prisma ignora los
+/// índices parciales en vez de reportarlos como deriva. Su ausencia en un diff no significa que
+/// sobre. Lo único que lo vigila es la prueba de integración de la migración. Sin él, dos
+/// intentos simultáneos de la misma organización cuentan DOS veces contra el cupo.
+model LaunchCampaignRedemption {
+  id String @id @default(cuid())
+
+  campaignId String
+  campaign   LaunchCampaign @relation(fields: [campaignId], references: [id], onDelete: Restrict)
+
+  organizationId String
+  organization   Organization @relation("LaunchCampaignRedemptionOrganization", fields: [organizationId], references: [id], onDelete: Restrict)
+
+  venueId String?
+  venue   Venue?  @relation("LaunchCampaignRedemptionVenue", fields: [venueId], references: [id], onDelete: SetNull)
+
+  /// Quien aceptó la oferta. Sin FK, por lo mismo que createdById en la ficha.
+  staffId String?
+
+  status LaunchCampaignRedemptionStatus @default(RESERVED)
+
+  // Snapshot de lo que el cliente CONSINTIÓ. Nunca se relee de la ficha: si la ficha cambia,
+  // lo cobrado y lo anunciado siguen siendo lo que esta persona aceptó. Un CHECK obliga a que
+  // listPriceCents - discountAmountCents = advertisedPriceCents.
+  offerVersion         Int
+  planTier             PlanTier
+  advertisedPriceCents Int
+  discountAmountCents  Int
+  discountMonths       Int
+  listPriceCents       Int
+  stripeCouponId       String
+
+  stripeSubscriptionId String? @unique
+  /// PaymentMethod.card.fingerprint — se REGISTRA; bloquear por tarjeta repetida es decisión
+  /// del founder (D11). Nunca sale del superadmin.
+  cardFingerprint String?
+
+  reservedAt DateTime  @default(now())
+  appliedAt  DateTime?
+  releasedAt DateTime?
+  lastError  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([campaignId, status, reservedAt])
+  @@index([organizationId, status])
+  @@index([cardFingerprint])
+}
+
+enum LaunchCampaignRedemptionStatus {
+  RESERVED
+  APPLIED
+  RELEASED
 }

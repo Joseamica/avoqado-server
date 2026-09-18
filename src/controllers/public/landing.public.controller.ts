@@ -166,6 +166,9 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
     // Campos opcionales que manda la landing de sector (restaurantes): tipo de
     // negocio, módulos marcados en el formulario, origen y UTMs de la campaña.
     const { businessType, modules, source, utm } = req.body || {}
+    // Campaña ligera reclamada (spec 2026-09-17 § 3.5). Ya viene normalizada o descartada por
+    // `contactSchema`: si venía mal formada llega `undefined` y el lead se crea sin campaña.
+    const { launchCampaignCode } = req.body || {}
     // Contexto del visitante para el espejo en HubSpot. Ya viene filtrado por
     // `contactSchema`: si el navegador no traía la cookie, llega undefined.
     const { hutk, pageUri, pageName } = req.body || {}
@@ -204,6 +207,7 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
         // correos a mano. En el ActivityLog del alta si se puede consultar.
         // Ya vienen filtrados por allowlist y recortados en `contactSchema`.
         utm: utm as Record<string, string> | undefined,
+        launchCampaignCode: launchCampaignCode ? String(launchCampaignCode) : undefined,
       })
       yaEsCliente = alta.yaEsCliente
       altaEstado = alta.yaEsCliente ? 'existente' : 'creada'

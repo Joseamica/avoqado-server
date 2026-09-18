@@ -164,6 +164,20 @@ export interface PlanConfirmationEmailData {
   firstChargeDate: Date // trial end (trial) OR next renewal (pay-now)
   firstChargeAmountCents: number // gross IVA-inclusive (115884 monthly / 1158840 annual)
   introAmountCents?: number // pay-now first charge (69484 = $694.84) when applicable
+  /**
+   * Cuántos ciclos dura el precio promocional (spec 2026-09-17 § 3.8). Con 3 por defecto para
+   * los llamadores anteriores, que hablaban de «los primeros 3 meses» escrito a mano.
+   * 🔴 Una campaña de lanzamiento puede tener 1, 6 o 12: el número sale de la redención.
+   */
+  introMonths?: number
+  /**
+   * Lo que se va a cobrar en la SIGUIENTE factura, en centavos con IVA.
+   *
+   * 🔴 Sin esto el correo decía «Próxima renovación $1,158.84» cuando el siguiente cobro real de
+   * un `INTRO_PRO_3M` son **$694.84** — el precio de lista se mostraba como si fuera el próximo
+   * cargo. Con una campaña de $22 la mentira sería de 50×.
+   */
+  nextChargeAmountCents?: number
   billingPortalUrl: string
 }
 
@@ -4446,6 +4460,13 @@ Servicios Tecnologicos Avo S.A. de C.V.`
 
     const firstAmount = fmt(data.firstChargeAmountCents)
     const introAmount = data.introAmountCents != null ? fmt(data.introAmountCents) : null
+    // 🔴 La renovación es un dato PROPIO, no el precio de lista: durante la promoción el
+    // siguiente cobro sigue siendo el promocional. Sin el campo se cae al comportamiento
+    // anterior, para que un llamador viejo no cambie de texto.
+    const nextAmount = fmt(data.nextChargeAmountCents ?? data.firstChargeAmountCents)
+    const introMonths = data.introMonths ?? 3
+    const mesesEs = introMonths === 1 ? 'el primer mes' : `los primeros ${introMonths} meses`
+    const monthsEn = introMonths === 1 ? 'the first month' : `the first ${introMonths} months`
     const planName = data.planName ?? 'Pro'
 
     let subject: string
@@ -4461,7 +4482,7 @@ Servicios Tecnologicos Avo S.A. de C.V.`
       if (data.locale === 'en') {
         greeting = 'Hi,'
         const introClause = introAmount
-          ? `We received your payment of <strong>${introAmount}</strong>. You'll keep paying ${introAmount} for the first 3 months, then ${firstAmount}/${intervalLabel}.`
+          ? `We received your payment of <strong>${introAmount}</strong>. You'll keep paying ${introAmount} for ${monthsEn}, then ${firstAmount}/${intervalLabel}.`
           : `We received your payment of <strong>${firstAmount}</strong>. Your plan renews at ${firstAmount}/${intervalLabel}.`
         bodyHtml = `
       <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${greeting}</p>
@@ -4469,17 +4490,17 @@ Servicios Tecnologicos Avo S.A. de C.V.`
         Your <strong>Avoqado ${planName}</strong> plan for ${data.venueName} is active. ${introClause}
       </p>
       <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin: 24px 0;">
-        <p style="font-size: 14px; margin: 0; color: #666;">Next renewal: <strong>${dateFormatted}</strong> · <strong>${firstAmount}</strong>/${intervalLabel}.</p>
+        <p style="font-size: 14px; margin: 0; color: #666;">Next renewal: <strong>${dateFormatted}</strong> · <strong>${nextAmount}</strong>/${intervalLabel}.</p>
       </div>`
         text = `Hi,
 
 Your Avoqado ${planName} plan for ${data.venueName} is active. ${
           introAmount
-            ? `We received your payment of ${introAmount}. You'll keep paying ${introAmount} for the first 3 months, then ${firstAmount}/${intervalLabel}.`
+            ? `We received your payment of ${introAmount}. You'll keep paying ${introAmount} for ${monthsEn}, then ${firstAmount}/${intervalLabel}.`
             : `We received your payment of ${firstAmount}. Your plan renews at ${firstAmount}/${intervalLabel}.`
         }
 
-Next renewal: ${dateFormatted} · ${firstAmount}/${intervalLabel}.
+Next renewal: ${dateFormatted} · ${nextAmount}/${intervalLabel}.
 
 View billing: ${data.billingPortalUrl}
 
@@ -4487,7 +4508,7 @@ Avoqado Team`
       } else {
         greeting = 'Hola,'
         const introClause = introAmount
-          ? `Recibimos tu pago de <strong>${introAmount}</strong>. Seguirás con ${introAmount} los primeros 3 meses, luego ${firstAmount}/${intervalLabel}.`
+          ? `Recibimos tu pago de <strong>${introAmount}</strong>. Seguirás con ${introAmount} ${mesesEs}, luego ${firstAmount}/${intervalLabel}.`
           : `Recibimos tu pago de <strong>${firstAmount}</strong>. Tu plan se renueva en ${firstAmount}/${intervalLabel}.`
         bodyHtml = `
       <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${greeting}</p>
@@ -4495,17 +4516,17 @@ Avoqado Team`
         Tu plan <strong>Avoqado ${planName}</strong> para ${data.venueName} está activo. ${introClause}
       </p>
       <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin: 24px 0;">
-        <p style="font-size: 14px; margin: 0; color: #666;">Próxima renovación: <strong>${dateFormatted}</strong> · <strong>${firstAmount}</strong>/${intervalLabel}.</p>
+        <p style="font-size: 14px; margin: 0; color: #666;">Próxima renovación: <strong>${dateFormatted}</strong> · <strong>${nextAmount}</strong>/${intervalLabel}.</p>
       </div>`
         text = `Hola,
 
 Tu plan Avoqado ${planName} para ${data.venueName} está activo. ${
           introAmount
-            ? `Recibimos tu pago de ${introAmount}. Seguirás con ${introAmount} los primeros 3 meses, luego ${firstAmount}/${intervalLabel}.`
+            ? `Recibimos tu pago de ${introAmount}. Seguirás con ${introAmount} ${mesesEs}, luego ${firstAmount}/${intervalLabel}.`
             : `Recibimos tu pago de ${firstAmount}. Tu plan se renueva en ${firstAmount}/${intervalLabel}.`
         }
 
-Próxima renovación: ${dateFormatted} · ${firstAmount}/${intervalLabel}.
+Próxima renovación: ${dateFormatted} · ${nextAmount}/${intervalLabel}.
 
 Ver facturación: ${data.billingPortalUrl}
 

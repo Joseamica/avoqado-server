@@ -97,7 +97,9 @@ describe('completeV2Onboarding — provisional venue rehydration', () => {
     // Plan gate off — this suite is only about the venue data.
     process.env.ENABLE_VENUE_BASE_SUBSCRIPTION = 'false'
     ;(onboardingProgressService.getV2SetupDataForCompletion as jest.Mock).mockResolvedValue({
-      progress: { v2SetupData: {} },
+      // Consentimiento firmado: sin él la finalización se rechaza por diseño (spec § 3.7), y
+      // estas pruebas miden la rehidratación del local provisional, no el candado legal.
+      progress: { v2SetupData: {}, termsAcceptedAt: new Date('2026-09-17T00:00:00Z'), planActivationStatus: 'NONE' },
       businessInfo: BUSINESS_INFO,
       bankInfo: null,
       identityInfo: null,
@@ -143,7 +145,9 @@ describe('completeV2Onboarding — provisional venue rehydration', () => {
 
   it('falls back to the placeholder name only when the wizard truly has none', async () => {
     ;(onboardingProgressService.getV2SetupDataForCompletion as jest.Mock).mockResolvedValue({
-      progress: { v2SetupData: {} },
+      // Consentimiento firmado: sin él la finalización se rechaza por diseño (spec § 3.7), y
+      // estas pruebas miden la rehidratación del local provisional, no el candado legal.
+      progress: { v2SetupData: {}, termsAcceptedAt: new Date('2026-09-17T00:00:00Z'), planActivationStatus: 'NONE' },
       businessInfo: { ...BUSINESS_INFO, name: '' },
       bankInfo: null,
       identityInfo: null,

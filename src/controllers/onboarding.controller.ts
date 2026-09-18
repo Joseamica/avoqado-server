@@ -6,6 +6,7 @@
  */
 
 import { Request, Response, NextFunction } from 'express'
+import { z } from 'zod'
 import { EntityType, VenueType } from '@prisma/client'
 import * as onboardingProgressService from '../services/onboarding/onboardingProgress.service'
 import * as venueCreationService from '../services/onboarding/venueCreation.service'
@@ -19,11 +20,27 @@ import {
   getOrCreateStripeCustomer,
 } from '../services/stripe.service'
 import { resolvePlanNotificationTarget } from '../services/access/planNotification.service'
+import {
+  LEGACY_INTRO_OFFER,
+  STANDARD_PLAN_GROSS_CENTS,
+  TRIAL_DAYS,
+  isLegacyIntroEligible,
+} from '../services/access/planPricing.constants'
 import emailService from '../services/email.service'
 import { generateMenuCSVTemplate, parseMenuCSV } from '../utils/menuCsvParser'
 import { validateCLABE } from '../utils/clabeValidator'
+import { isAcceptedLegalVersion, isLegacyDateVersion, legalConsentState, LEGAL_VERSIONS } from '../config/legal'
+import { buildLaunchOfferView } from '../services/launchCampaigns/launchOfferMath'
+import { toOfferRow } from '../services/launchCampaigns/launchCampaign.service'
+import { PLAN_ACTIVATION_STATUS } from '../services/launchCampaigns/launchCampaignEnums'
+import { standardPlanQuote } from '../services/access/planPricing.constants'
+import * as planActivationService from '../services/onboarding/planActivation.service'
+import * as launchCampaignService from '../services/launchCampaigns/launchCampaign.service'
+import { claimLaunchCampaign } from '../services/launchCampaigns/launchCampaignClaim.service'
+import { LANDING_SLUG_RE } from '../services/launchCampaigns/launchCampaign.schema'
+import { optionalLaunchCampaignCode, utmSchema } from '../schemas/acquisition.schema'
 import logger from '../config/logger'
-import { BadRequestError, NotFoundError } from '../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError } from '../errors/AppError'
 import prisma from '../utils/prismaClient'
 
 /**
@@ -33,9 +50,9 @@ import prisma from '../utils/prismaClient'
  */
 export async function signup(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const signupData = req.body
-
-    const result = await signupService.signupUser(signupData)
+    // La IP se toma del request, nunca del cuerpo: es la evidencia de DÓNDE se aceptaron los
+    // términos, y un cliente que la mandara podría escribir cualquier cosa.
+    const result = await signupService.signupUser({ ...req.body, ipAddress: req.ip })
 
     // FAANG Pattern (Approach B): Do NOT set cookies on signup
     // User must verify email first before getting authenticated
@@ -234,10 +251,46 @@ export async function getOnboardingProgress(req: Request, res: Response, next: N
         ? await onboardingProgressService.resolveTpvPurchaseForOnboarding(organizationId)
         : undefined
 
+    // Lanzamiento con campañas ligeras (spec § 4.5). Todo ADITIVO: un dashboard viejo ignora
+    // estas llaves y se comporta exactamente igual que antes.
+    //
+    // 🔴 La oferta se arma desde el RECLAMO guardado en el servidor, nunca de lo que mande el
+    // cliente: el `expectedFirstChargeCents` que el dashboard manda al pagar es evidencia de lo
+    // que la persona vio, no el precio con el que se cobra.
+    const campaign = progress.launchCampaignId ? await prisma.launchCampaign.findUnique({ where: { id: progress.launchCampaignId } }) : null
+    const launchOffer = campaign ? buildLaunchOfferView(toOfferRow(campaign as never), new Date()) : null
+    const quote = standardPlanQuote()
+
     res.status(200).json({
+      featureFlags: onboardingFeatureFlags(),
       progress: {
         id: progress.id,
         currentStep: progress.currentStep,
+        launchOffer,
+        planActivation: {
+          status: progress.planActivationStatus,
+          attempt: progress.planActivationAttempt,
+          activatedAt: progress.planActivatedAt,
+        },
+        legal: legalConsentState(progress.termsVersion),
+        planQuote: {
+          currency: 'MXN' as const,
+          ivaIncluded: true as const,
+          trialDays: TRIAL_DAYS,
+          tiers: {
+            PRO: {
+              monthlyCents: quote.grossCents.PRO.monthly,
+              annualCents: quote.grossCents.PRO.annual,
+              intro: {
+                monthlyCents: LEGACY_INTRO_OFFER.introMonthlyCents,
+                months: LEGACY_INTRO_OFFER.months,
+                interval: LEGACY_INTRO_OFFER.interval,
+                requiresPayNow: true as const,
+              },
+            },
+            PREMIUM: { monthlyCents: quote.grossCents.PREMIUM.monthly, annualCents: quote.grossCents.PREMIUM.annual, intro: null },
+          },
+        },
         completedSteps: progress.completedSteps,
         completionPercentage,
         startedAt: progress.startedAt,
@@ -791,6 +844,28 @@ export function requiresBaseSubscriptionPlan(): boolean {
 }
 
 /**
+ * S7 — el asistente corto (spec 2026-09-17 § 8.1).
+ *
+ * 🔴 Es un AND con el candado del plan, no un interruptor suelto: el asistente corto termina en
+ * la pantalla de oferta, que cobra. Con `ENABLE_VENUE_BASE_SUBSCRIPTION` apagado esa pantalla no
+ * tiene nada que cobrar y el alta quedaría sin final.
+ *
+ * 🔴 Y se publica DESDE EL SERVIDOR, nunca desde una variable de build del dashboard: es
+ * exactamente el desfase que dejó el embudo muerto dos meses (ver el comentario de arriba).
+ */
+export function shortOnboardingEnabled(): boolean {
+  return process.env.ONBOARDING_SHORT_FLOW === 'true' && requiresBaseSubscriptionPlan()
+}
+
+/** Las banderas que el dashboard lee para armar su lista de pasos. Una sola fuente. */
+export function onboardingFeatureFlags() {
+  return {
+    requiresBaseSubscriptionPlan: requiresBaseSubscriptionPlan(),
+    shortOnboarding: shortOnboardingEnabled(),
+  }
+}
+
+/**
  * GET /api/v1/onboarding/status
  *
  * Returns the current user's primary organization and onboarding progress.
@@ -834,9 +909,7 @@ export async function getOnboardingStatus(req: Request, res: Response, next: Nex
       paymentProviders,
       // Additive: lets the wizard build its step list from the backend gate
       // instead of its own build-time env var. Old clients ignore it.
-      featureFlags: {
-        requiresBaseSubscriptionPlan: requiresBaseSubscriptionPlan(),
-      },
+      featureFlags: onboardingFeatureFlags(),
     })
   } catch (error) {
     next(error)
@@ -934,6 +1007,29 @@ export async function acceptV2Terms(req: Request, res: Response, next: NextFunct
     const { termsVersion } = req.body
     const ipAddress = req.ip || req.headers['x-forwarded-for']?.toString() || 'unknown'
 
+    // 🔴 TRES caminos, y el segundo es lo que hace posible el despliegue escalonado (spec § 4.1):
+    //   1. una versión declarada → se guarda y el consentimiento queda cubierto;
+    //   2. una cadena con FORMA DE FECHA → se guarda, se registra, y `consentRequired` sigue en
+    //      true para que el dashboard nuevo vuelva a pedir la casilla;
+    //   3. cualquier otra cosa → 409.
+    //
+    // El punto 2 no es laxitud: el dashboard que está HOY en producción manda la fecha del día
+    // (`SetupWizard.tsx:332`). Rechazarla dejaría atrapada, sin mensaje, a toda el alta en vuelo
+    // de la ventana entre el deploy del servidor y el del dashboard.
+    if (!isAcceptedLegalVersion(termsVersion)) {
+      if (isLegacyDateVersion(termsVersion)) {
+        logger.info('accept-terms: versión legal heredada (forma de fecha) del dashboard viejo', {
+          organizationId,
+          termsVersion,
+          versionVigente: LEGAL_VERSIONS.current,
+        })
+      } else {
+        // 409 y no 400: el cuerpo está bien formado; lo que no coincide es el ESTADO del texto
+        // legal que el cliente cree vigente contra el que este servidor declara.
+        throw new ConflictError('La versión de los términos no es válida. Recarga la página e inténtalo de nuevo.', 'LEGAL_VERSION_UNKNOWN')
+      }
+    }
+
     const progress = await onboardingProgressService.acceptV2Terms(organizationId, termsVersion, ipAddress)
 
     logger.info(`V2 Terms accepted for organization: ${organizationId}`)
@@ -942,6 +1038,7 @@ export async function acceptV2Terms(req: Request, res: Response, next: NextFunct
       success: true,
       message: 'Terms accepted successfully',
       currentStep: progress.currentStep,
+      legal: legalConsentState(progress.termsVersion),
     })
   } catch (error) {
     logger.error('Error accepting V2 terms:', error)
@@ -999,6 +1096,25 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
     if (planEnabled && planData && planData.tier !== 'FREE' && !planData.paymentMethodId) {
       throw new BadRequestError('Falta el método de pago del plan. Completa el paso de plan para terminar.')
     }
+
+    // 🔴 CONSENTIMIENTO OBLIGATORIO (spec § 3.7). Hasta hoy la finalización NO lo verificaba:
+    // se podía terminar un alta sin haber aceptado términos ni aviso de privacidad, y entonces
+    // no queda evidencia de qué aceptó el cliente ni cuándo.
+    // Va ANTES del lock: rechazar después dejaría el alta marcada como completada.
+    if (!progress.termsAcceptedAt) {
+      throw new BadRequestError('Acepta los términos y el aviso de privacidad para terminar', 'TERMS_NOT_ACCEPTED')
+    }
+
+    // 🔴 COBRO EN CURSO. Si `activate-plan` tiene un lease vivo, terminar aquí tomaría el lock y
+    // el carril legacy de abajo intentaría cobrar EN PARALELO con el que ya está en vuelo.
+    // Tampoco se toma el lock: se responde 409 y el cliente reintenta.
+    if (progress.planActivationStatus === PLAN_ACTIVATION_STATUS.IN_PROGRESS) {
+      throw new ConflictError('Tu pago se está confirmando. Vuelve a intentar en unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
+    }
+
+    // Si `activate-plan` YA cobró, el bloque de Stripe y el correo de abajo se saltan: ese
+    // camino ya cobró, ya escribió el plan del local y ya mandó su propio correo.
+    const planYaCobrado = progress.planActivationStatus === PLAN_ACTIVATION_STATUS.ACTIVE
 
     // OPTIMISTIC LOCKING: Atomically mark as completing BEFORE creating venue
     // This prevents race condition where double-click creates 2 venues
@@ -1131,10 +1247,15 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
     // guaranteed a paymentMethodId for paid tiers when the feature is enabled.
     // Wrapped in try/catch so a Stripe hiccup never blocks onboarding completion
     // (the venue already exists at this point).
-    if (planEnabled && planData && planData.tier !== 'FREE' && planData.paymentMethodId) {
-      const tierCode = planData.tier === 'PREMIUM' ? ('PLAN_PREMIUM' as const) : ('PLAN_PRO' as const)
+    if (planEnabled && !planYaCobrado && planData && planData.tier !== 'FREE' && planData.paymentMethodId) {
+      // The guard above already excluded FREE; name the paid tier once so neither the coupon
+      // decision nor the price lookup below has to re-derive it.
+      const paidTier = planData.tier === 'PREMIUM' ? ('PREMIUM' as const) : ('PRO' as const)
+      const tierCode = paidTier === 'PREMIUM' ? ('PLAN_PREMIUM' as const) : ('PLAN_PRO' as const)
       // The $599×3 intro promo is a PRO-monthly-pay-now-only commercial offer.
-      const introPromo = planData.tier === 'PRO' && planData.payNow && planData.interval === 'monthly'
+      // Its shape lives in planPricing.constants.ts (LEGACY_INTRO_OFFER), the single source that
+      // mirrors the Stripe coupon seeded by scripts/seed-plan-pro.ts.
+      const introPromo = isLegacyIntroEligible(paidTier, planData.interval, planData.payNow)
       try {
         const venueRecord = await prisma.venue.findUnique({
           where: { id: result.venue.id },
@@ -1153,8 +1274,16 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
           paymentMethodId: planData.paymentMethodId,
           tierCode,
           interval: planData.interval,
-          trialPeriodDays: planData.payNow ? 0 : 30,
-          coupon: introPromo ? 'INTRO_PRO_3M' : undefined,
+          trialPeriodDays: planData.payNow ? 0 : TRIAL_DAYS,
+          coupon: introPromo ? LEGACY_INTRO_OFFER.couponId : undefined,
+          // 🔴 FUGA DE DINERO CERRADA (spec § 3.7). Sin esto, una tarjeta RECHAZADA crea la
+          // suscripción `incomplete` y el `upsert` de `createPlanSubscription` deja igualmente
+          // `VenueFeature.active = true`: el negocio se lleva el plan de pago sin haber pagado,
+          // hasta que llegue —o no— el webhook. Con `error_if_incomplete` Stripe responde 402
+          // y NO crea nada.
+          // Sólo aplica pagando hoy: con prueba gratis no hay primer cobro que pueda fallar, y
+          // mandarlo con `trial_period_days > 0` no tiene sentido.
+          ...(planData.payNow ? { paymentBehavior: 'error_if_incomplete' as const } : {}),
           venueName: result.venue.name,
           venueSlug: result.venue.slug,
         })
@@ -1167,28 +1296,29 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
           const target = await resolvePlanNotificationTarget(result.venue.id)
           if (target.email) {
             // IVA-inclusive gross amounts: PRO $999/mo · $9,990/yr — PREMIUM $1,699/mo · $16,990/yr.
-            const grossCents =
-              planData.tier === 'PREMIUM'
-                ? planData.interval === 'annual'
-                  ? 1970840
-                  : 197084
-                : planData.interval === 'annual'
-                  ? 1158840
-                  : 115884
+            // Single source: planPricing.constants.ts (mirrors the seeded Stripe prices).
+            const grossCents = STANDARD_PLAN_GROSS_CENTS[paidTier][planData.interval]
             const now = new Date()
+            // NOTE the two 30s below are NOT the same quantity and must not be merged: the first
+            // is the length of one MONTHLY billing period, the second is the free-trial length
+            // (TRIAL_DAYS). They happen to be equal today.
             const firstChargeDate = planData.payNow
               ? new Date(now.getTime() + (planData.interval === 'annual' ? 365 : 30) * 86400000)
-              : new Date(now.getTime() + 30 * 86400000) // trial end
+              : new Date(now.getTime() + TRIAL_DAYS * 86400000) // trial end
             const FRONTEND_URL = process.env.FRONTEND_URL || 'https://dashboard.avoqado.io'
             await emailService.sendPlanConfirmationEmail(target.email, {
               locale: target.locale,
               venueName: target.venueName,
-              planName: planData.tier === 'PREMIUM' ? 'Premium' : 'Pro',
+              planName: paidTier === 'PREMIUM' ? 'Premium' : 'Pro',
               payNow: planData.payNow,
               interval: planData.interval,
               firstChargeDate,
               firstChargeAmountCents: grossCents,
-              introAmountCents: introPromo ? 69484 : undefined,
+              introAmountCents: introPromo ? LEGACY_INTRO_OFFER.introMonthlyCents : undefined,
+              // 🔴 El siguiente cobro de un `INTRO_PRO_3M` son $694.84, no $1,158.84. Sin esta
+              // línea el correo del camino viejo seguiría prometiendo el precio de lista en la
+              // renovación, aunque §3.8 arregle el campo en la plantilla.
+              nextChargeAmountCents: introPromo ? LEGACY_INTRO_OFFER.introMonthlyCents : grossCents,
               billingPortalUrl: `${FRONTEND_URL}/dashboard/venues/${result.venue.slug}/billing`,
             })
           } else {
@@ -1266,6 +1396,107 @@ export async function planSetupIntent(req: Request, res: Response, next: NextFun
     // (the frontend reads `response.data.data.clientSecret`, like
     // StripePaymentMethod.tsx does for /venues/:id/setup-intent).
     res.status(200).json({ success: true, data: { clientSecret } })
+  } catch (error) {
+    next(error)
+  }
+}
+
+// =============================================
+// Lanzamiento con campañas ligeras (spec 2026-09-17)
+// =============================================
+
+/**
+ * Esquema de `POST …/v2/activate-plan` (§ 3.6).
+ *
+ * 🔴 `expectedFirstChargeCents` NO es el precio con el que se cobra: es la EVIDENCIA de lo que
+ * la persona vio en pantalla. El servidor calcula el suyo y, si no coinciden, responde 409.
+ */
+export const ActivatePlanSchema = z.object({
+  params: z.object({ organizationId: z.string().cuid() }),
+  body: z.object({
+    tier: z.enum(['PRO', 'PREMIUM']),
+    interval: z.enum(['monthly', 'annual']),
+    payNow: z.boolean(),
+    paymentMethodId: z.string().regex(/^pm_[A-Za-z0-9]+$/),
+    offer: z.discriminatedUnion('kind', [
+      z.object({
+        kind: z.literal('LAUNCH'),
+        code: z.string(),
+        offerVersion: z.number().int().min(1),
+        expectedFirstChargeCents: z.number().int().min(0),
+      }),
+      z.object({ kind: z.literal('STANDARD'), expectedFirstChargeCents: z.number().int().min(0) }),
+    ]),
+    language: z.enum(['es', 'en']).optional(),
+  }),
+})
+
+/** POST /api/v1/onboarding/organizations/:organizationId/v2/activate-plan */
+export async function activatePlanController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const authContext = (req as unknown as { authContext?: { userId?: string } }).authContext
+    if (!authContext?.userId) throw new BadRequestError('User authentication required')
+
+    const data = await planActivationService.activatePlan({
+      organizationId: req.params.organizationId,
+      staffId: authContext.userId,
+      tier: req.body.tier,
+      interval: req.body.interval,
+      payNow: req.body.payNow,
+      paymentMethodId: req.body.paymentMethodId,
+      offer: req.body.offer,
+      language: req.body.language,
+    })
+    res.status(200).json({ success: true, data })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Esquema de `PUT …/v2/launch-campaign` (§ 3.5): asociar una oferta a un alta que ya existe.
+ * Cubre a quien ya tenía cuenta y hace clic en un anuncio.
+ */
+export const AttachLaunchCampaignSchema = z.object({
+  params: z.object({ organizationId: z.string().cuid() }),
+  body: z
+    .object({
+      slug: z.string().regex(LANDING_SLUG_RE).max(60).optional(),
+      code: optionalLaunchCampaignCode,
+      utm: utmSchema,
+    })
+    .refine(b => Boolean(b.slug || b.code), { message: 'Manda slug o code' }),
+})
+
+/** PUT /api/v1/onboarding/organizations/:organizationId/v2/launch-campaign */
+export async function attachLaunchCampaign(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { organizationId } = req.params
+    const authContext = (req as unknown as { authContext?: { userId?: string } }).authContext
+
+    const progress = await prisma.onboardingProgress.findUnique({
+      where: { organizationId },
+      select: { completedAt: true, planActivationStatus: true },
+    })
+    if (!progress) throw new NotFoundError('No encontramos tu registro', 'ONBOARDING_NOT_FOUND')
+    if (progress.completedAt) throw new ConflictError('Este registro ya terminó', 'ONBOARDING_ALREADY_COMPLETED')
+    if (progress.planActivationStatus === PLAN_ACTIVATION_STATUS.ACTIVE) {
+      throw new ConflictError('Este negocio ya tiene un plan activo', 'PLAN_ALREADY_ACTIVATED')
+    }
+
+    // El `slug` es lo que trae la URL del anuncio; el `code` es lo que viaja en los formularios.
+    const campaign = req.body.slug
+      ? await launchCampaignService.findBySlug(req.body.slug)
+      : await launchCampaignService.findByCode(req.body.code)
+    if (!campaign) throw new NotFoundError('Esa oferta no existe', 'LAUNCH_OFFER_NOT_FOUND')
+
+    const vista = buildLaunchOfferView(toOfferRow(campaign), new Date())
+    if (!vista.available) {
+      throw new ConflictError('La oferta ya no está disponible', 'LAUNCH_OFFER_UNAVAILABLE', { reason: vista.unavailableReason })
+    }
+
+    await claimLaunchCampaign(organizationId, campaign.code, 'dashboard_attach', req.body.utm, authContext?.userId ?? null)
+    res.status(200).json({ success: true, data: { launchOffer: vista } })
   } catch (error) {
     next(error)
   }

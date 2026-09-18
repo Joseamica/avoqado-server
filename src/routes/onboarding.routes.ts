@@ -7,8 +7,10 @@
 import express from 'express'
 import multer from 'multer'
 import rateLimit from 'express-rate-limit'
+import { ipDelCliente, llavePorCorreoOIp } from '../utils/clientIp'
 import { validateRequest } from '../middlewares/validation'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
+import { requireOnboardingOrgOwner, requireOnboardingVenueOwner } from '../middlewares/requireOnboardingOrgOwner.middleware'
 import * as onboardingController from '../controllers/onboarding.controller'
 import { preserveContext } from '@/observability/preserveContext'
 import {
@@ -42,7 +44,9 @@ const signupRateLimiter = rateLimit({
   message: 'Too many signup attempts from this IP. Please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: req => req.ip || 'unknown',
+  // 🔴 S14: era `req.ip`, que en producción es SIEMPRE un borde de Cloudflare compartido por
+  // todos los visitantes de la región — o sea 3 altas por hora PARA TODOS. Ver `utils/clientIp`.
+  keyGenerator: llavePorCorreoOIp,
 })
 
 const verificationRateLimiter = rateLimit({
@@ -51,7 +55,7 @@ const verificationRateLimiter = rateLimit({
   message: 'Too many verification attempts. Please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: req => req.body.email || req.ip || 'unknown',
+  keyGenerator: llavePorCorreoOIp,
 })
 
 const resendRateLimiter = rateLimit({
@@ -60,7 +64,7 @@ const resendRateLimiter = rateLimit({
   message: 'Too many resend requests. Please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: req => req.body.email || req.ip || 'unknown',
+  keyGenerator: llavePorCorreoOIp,
 })
 
 const emailStatusRateLimiter = rateLimit({
@@ -69,7 +73,7 @@ const emailStatusRateLimiter = rateLimit({
   message: 'Too many email status checks. Please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: req => req.ip || 'unknown',
+  keyGenerator: req => ipDelCliente(req) || 'desconocida',
 })
 
 /**
@@ -325,9 +329,15 @@ router.post(
  *       404:
  *         description: Onboarding progress not found
  */
+// 🔴 GANA `authenticateTokenMiddleware` Y la guarda de pertenencia (spec § 7.7). Hasta hoy esta
+// ruta era PÚBLICA y devolvía `v2SetupData` entero, que incluye la CLABE del negocio: con un
+// cuid de organización, cualquiera en internet la leía. El dashboard ya manda el token (vive
+// dentro de `EmailVerifiedRoute`), así que el cambio no rompe al cliente desplegado.
 router.get(
   '/organizations/:organizationId/progress',
+  authenticateTokenMiddleware,
   validateRequest(GetOnboardingProgressSchema),
+  requireOnboardingOrgOwner,
   onboardingController.getOnboardingProgress,
 )
 
@@ -778,6 +788,7 @@ router.get('/status', authenticateTokenMiddleware, onboardingController.getOnboa
 router.put(
   '/organizations/:organizationId/v2/step/:stepNumber',
   authenticateTokenMiddleware,
+  requireOnboardingOrgOwner,
   validateRequest(V2StepParamsSchema),
   onboardingController.saveV2Step,
 )
@@ -789,6 +800,7 @@ router.put(
 router.post(
   '/organizations/:organizationId/v2/accept-terms',
   authenticateTokenMiddleware,
+  requireOnboardingOrgOwner,
   validateRequest(V2AcceptTermsSchema),
   onboardingController.acceptV2Terms,
 )
@@ -800,6 +812,7 @@ router.post(
 router.post(
   '/organizations/:organizationId/v2/complete',
   authenticateTokenMiddleware,
+  requireOnboardingOrgOwner,
   validateRequest(V2CompleteSchema),
   onboardingController.completeV2Onboarding,
 )
@@ -823,7 +836,66 @@ if (process.env.ENABLE_ONBOARDING_PAYMENT_PROVIDERS === 'true') {
  * registration time — if the flag is off, the endpoint simply doesn't exist (404).
  */
 if (onboardingController.requiresBaseSubscriptionPlan()) {
-  router.post('/venues/:venueId/plan-setup-intent', authenticateTokenMiddleware, onboardingController.planSetupIntent)
+  router.post(
+    '/venues/:venueId/plan-setup-intent',
+    authenticateTokenMiddleware,
+    requireOnboardingVenueOwner,
+    onboardingController.planSetupIntent,
+  )
+}
+
+/**
+ * @openapi
+ * /api/v1/onboarding/organizations/{organizationId}/v2/launch-campaign:
+ *   put:
+ *     tags: [Onboarding, LaunchCampaigns]
+ *     summary: Asocia una oferta de lanzamiento a un alta en curso (atribución)
+ *     description: >
+ *       Para quien ya tenía cuenta y llega por un anuncio (`/setup?oferta=…`), y como respaldo
+ *       del `sessionStorage` del dashboard. NO aparta un lugar del cupo ni cobra nada.
+ *     responses:
+ *       200: { description: "{ launchOffer }" }
+ *       403: { description: ORG_OWNER_REQUIRED }
+ *       404: { description: LAUNCH_OFFER_NOT_FOUND }
+ *       409: { description: LAUNCH_OFFER_UNAVAILABLE · ONBOARDING_ALREADY_COMPLETED · PLAN_ALREADY_ACTIVATED }
+ */
+router.put(
+  '/organizations/:organizationId/v2/launch-campaign',
+  authenticateTokenMiddleware,
+  requireOnboardingOrgOwner,
+  validateRequest(onboardingController.AttachLaunchCampaignSchema),
+  onboardingController.attachLaunchCampaign,
+)
+
+/**
+ * POST /api/v1/onboarding/organizations/:organizationId/v2/activate-plan
+ *
+ * Cobra el plan ANTES de terminar el alta (spec 2026-09-17 § 3.6).
+ *
+ * 🔴 Igual que `plan-setup-intent`, la ruta sólo EXISTE si el candado del plan está encendido:
+ * con él apagado no hay nada que cobrar y el endpoint responde 404, que es más honesto que
+ * aceptar la petición y no hacer nada.
+ *
+ * @openapi
+ * /api/v1/onboarding/organizations/{organizationId}/v2/activate-plan:
+ *   post:
+ *     tags: [Onboarding, LaunchCampaigns]
+ *     summary: Cobra el primer ciclo del plan (oferta de campaña o plan estándar)
+ *     responses:
+ *       200: { description: "{ status, alreadyActive, firstChargeCents, nextChargeAt, launchOffer? }" }
+ *       402: { description: PLAN_PAYMENT_DECLINED }
+ *       403: { description: ORG_OWNER_REQUIRED }
+ *       409: { description: OFFER_CHANGED · LAUNCH_OFFER_UNAVAILABLE · PLAN_ALREADY_ACTIVATED · PLAN_ACTIVE_WITHOUT_OFFER · PLAN_ACTIVATION_IN_PROGRESS · PLAN_PRICE_MISMATCH }
+ *       503: { description: PLAN_ACTIVATION_PENDING }
+ */
+if (onboardingController.requiresBaseSubscriptionPlan()) {
+  router.post(
+    '/organizations/:organizationId/v2/activate-plan',
+    authenticateTokenMiddleware,
+    requireOnboardingOrgOwner,
+    validateRequest(onboardingController.ActivatePlanSchema),
+    onboardingController.activatePlanController,
+  )
 }
 
 export default router

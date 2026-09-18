@@ -8,6 +8,9 @@
 import bcrypt from 'bcryptjs'
 import crypto from 'crypto'
 import prisma from '@/utils/prismaClient'
+import { claimLaunchCampaign } from '../launchCampaigns/launchCampaignClaim.service'
+import { findClaimableByCodeOrSlug } from '../launchCampaigns/launchCampaign.service'
+import { isAcceptedLegalVersion } from '../../config/legal'
 import { BadRequestError } from '@/errors/AppError'
 import * as jwtService from '@/jwt.service'
 import { StaffRole, OrgRole } from '@prisma/client'
@@ -21,6 +24,11 @@ export interface SignupInput {
   lastName?: string
   organizationName?: string
   wizardVersion?: number
+  /** Lanzamiento con campañas ligeras (spec 2026-09-17 § 3.5). Los cuatro son ADITIVOS. */
+  legalVersion?: string
+  launchCampaignCode?: string
+  utm?: Record<string, string>
+  ipAddress?: string
 }
 
 export interface SignupResult {
@@ -53,6 +61,8 @@ export interface LandingSignupInput {
    *  habia que abrir correos a mano. Guardarlos junto a `source` los vuelve
    *  parte del alta y hace comparable una campana contra otra. */
   utm?: Record<string, string>
+  /** Campaña ligera reclamada (spec 2026-09-17 § 3.5). Mal formado ⇒ el alta sigue sin campaña. */
+  launchCampaignCode?: string
 }
 
 export interface LandingSignupResult {
@@ -82,6 +92,7 @@ export interface VerifyEmailResult {
  */
 export async function signupUser(input: SignupInput): Promise<SignupResult> {
   const { email, password, firstName = '', lastName = '', organizationName = '', wizardVersion } = input
+  const { legalVersion, launchCampaignCode, utm, ipAddress } = input
 
   // 1. Check if email already exists
   const existingStaff = await prisma.staff.findUnique({
@@ -99,6 +110,15 @@ export async function signupUser(input: SignupInput): Promise<SignupResult> {
 
   // 3. Hash password
   const hashedPassword = await bcrypt.hash(password, 12)
+
+  // 🔴 La campaña se resuelve FUERA de la transacción, igual que en el alta por la landing: es
+  // una lectura de red que no puede alargar la transacción del alta. Si falla, el alta sigue.
+  const campanaReclamada = launchCampaignCode ? await findClaimableByCodeOrSlug(launchCampaignCode).catch(() => null) : null
+  const utmParaProgreso = utm && Object.keys(utm).length > 0 ? utm : undefined
+  // 🔴 Una versión legal DESCONOCIDA se ignora en silencio: el asistente vuelve a pedir la
+  // casilla. Guardarla dejaría un consentimiento firmado contra un texto que nadie puede
+  // identificar, que es peor que no tenerlo.
+  const consintio = isAcceptedLegalVersion(legalVersion)
 
   // 4. Create organization and staff in a transaction
   const result = await prisma.$transaction(async tx => {
@@ -142,6 +162,18 @@ export async function signupUser(input: SignupInput): Promise<SignupResult> {
         currentStep: 0,
         completedSteps: [],
         ...(wizardVersion ? { wizardVersion } : {}),
+        // Atribución y consentimiento, en la MISMA transacción que el alta (spec § 3.5).
+        acquisitionSource: 'dashboard_signup',
+        ...(utmParaProgreso ? { acquisitionUtm: utmParaProgreso } : {}),
+        ...(campanaReclamada ? { launchCampaignId: campanaReclamada.id, launchCampaignClaimedAt: new Date() } : {}),
+        ...(consintio
+          ? {
+              termsAcceptedAt: new Date(),
+              privacyAcceptedAt: new Date(),
+              termsVersion: legalVersion,
+              termsIpAddress: ipAddress ?? null,
+            }
+          : {}),
       },
     })
 
@@ -393,7 +425,7 @@ export async function checkEmailVerificationStatus(email: string): Promise<{ ema
  *     proteger todavia mas alla del acceso mismo.
  */
 export async function signupFromLanding(input: LandingSignupInput): Promise<LandingSignupResult> {
-  const { email, firstName = '', lastName = '', organizationName = '', phone, source, utm } = input
+  const { email, firstName = '', lastName = '', organizationName = '', phone, source, utm, launchCampaignCode } = input
   const normalizedEmail = email.toLowerCase().trim()
 
   // 1. Cuenta existente: hay DOS casos y tratarlos igual hace dano.
@@ -425,16 +457,27 @@ export async function signupFromLanding(input: LandingSignupInput): Promise<Land
       where: { id: existing.id },
       data: { resetToken: hashedToken, resetTokenExpiry: expiryTime, resetTokenUsedAt: null },
     })
+    const orgPrevia = await getPrimaryOrganizationId(existing.id)
+    // Alta previa sin terminar: vuelve por un anuncio, así que su campaña se ACTUALIZA (último
+    // toque). La rama «ya es cliente» de arriba, en cambio, ignora el código a propósito.
+    if (orgPrevia) await claimLaunchCampaign(orgPrevia, launchCampaignCode, source || 'landing_contacto', utm, existing.id)
     return {
       staff: { id: existing.id, email: existing.email },
-      organizationId: await getPrimaryOrganizationId(existing.id),
+      organizationId: orgPrevia,
       magicLinkToken: resetToken,
       alreadyExisted: true,
       yaEsCliente: false,
     }
   }
 
-  // 2. Crear organizacion + staff OWNER + progreso, igual que el signup normal
+  // 2. Crear organizacion + staff OWNER + progreso, igual que el signup normal.
+  //
+  // 🔴 La campaña se resuelve ANTES de abrir la transacción: es una lectura que puede tardar y
+  // meterla dentro alargaría la transacción del alta por un dato de marketing. Si no se puede
+  // resolver, el alta sigue sin campaña — nunca al revés.
+  const campanaReclamada = launchCampaignCode ? await findClaimableByCodeOrSlug(launchCampaignCode).catch(() => null) : null
+  const utmParaProgreso = utm && Object.keys(utm).length > 0 ? utm : undefined
+
   const result = await prisma.$transaction(async tx => {
     const organization = await tx.organization.create({
       data: {
@@ -470,8 +513,19 @@ export async function signupFromLanding(input: LandingSignupInput): Promise<Land
     })
 
     // wizardVersion 2 = el wizard vigente (/setup). Sin esto cae al legacy.
+    // La campaña y los UTMs se escriben en la MISMA transacción que el alta: si el progreso
+    // existe, su atribución existe. Dos escrituras dejarían altas sin atribuir cuando la segunda
+    // falla, que es justo la mitad del embudo que se quiere medir.
     await tx.onboardingProgress.create({
-      data: { organizationId: organization.id, currentStep: 0, completedSteps: [], wizardVersion: 2 },
+      data: {
+        organizationId: organization.id,
+        currentStep: 0,
+        completedSteps: [],
+        wizardVersion: 2,
+        acquisitionSource: source || 'landing_contacto',
+        ...(utmParaProgreso ? { acquisitionUtm: utmParaProgreso } : {}),
+        ...(campanaReclamada ? { launchCampaignId: campanaReclamada.id, launchCampaignClaimedAt: new Date() } : {}),
+      },
     })
 
     // 🔴 Marca PERMANENTE de que esta cuenta nacio en una landing.
@@ -492,7 +546,12 @@ export async function signupFromLanding(input: LandingSignupInput): Promise<Land
         action: 'LANDING_SIGNUP_CREATED',
         entity: 'Staff',
         entityId: staff.id,
-        data: { source: source || 'landing', organizationId: organization.id, ...(utmLimpio ? { utm: utmLimpio } : {}) },
+        data: {
+          source: source || 'landing',
+          organizationId: organization.id,
+          ...(utmLimpio ? { utm: utmLimpio } : {}),
+          ...(campanaReclamada ? { launchCampaignCode: campanaReclamada.code } : {}),
+        },
       },
     })
 

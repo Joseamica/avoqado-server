@@ -54,6 +54,7 @@ import { registerAccountingTools } from './tools/accounting'
 import { registerActivityLogTools } from './tools/activity-log'
 import { registerAnnouncementTools } from './tools/announcements'
 import { registerLandingLeadTools } from './tools/landingLeads'
+import { registerLaunchCampaignTools } from './tools/launchCampaigns'
 import { registerMerchantRoutingTools } from './tools/merchantRouting'
 import { registerPrinterTools } from './tools/printers'
 import { registerTenderTypeTools } from './tools/tenderTypes'
@@ -128,6 +129,10 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerActivityLogTools(server, scope)
   registerAnnouncementTools(server, scope)
   registerLandingLeadTools(server, scope)
+  // 🔴 Solo se REGISTRAN para Avoqado: son fichas de plataforma, no de un local. Cada handler
+  // vuelve a comprobarlo (defensa doble), y `catalog-no-internals.test.ts` recorre el catálogo
+  // de clientes para fijar que aquí no aparecen.
+  if (scope.isSuperAdmin) registerLaunchCampaignTools(server, scope)
   registerMerchantRoutingTools(server, scope)
   registerPrinterTools(server, scope)
   registerTenderTypeTools(server, scope)

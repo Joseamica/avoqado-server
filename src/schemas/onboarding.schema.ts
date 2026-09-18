@@ -7,6 +7,7 @@
 import { z } from 'zod'
 import { OnboardingType, ProductType } from '@prisma/client'
 import { zTimezone } from '@/utils/sanitizeTimezone'
+import { optionalLaunchCampaignCode, utmSchema } from './acquisition.schema'
 
 /**
  * Validates signup request (creates user + organization)
@@ -19,6 +20,14 @@ export const SignupSchema = z.object({
     lastName: z.string().optional().default(''),
     organizationName: z.string().optional().default(''),
     wizardVersion: z.number().optional(),
+    // Lanzamiento con campañas ligeras (spec 2026-09-17 § 3.5). Los tres son ADITIVOS: un
+    // dashboard viejo que no los mande se comporta exactamente igual que antes.
+    //
+    // 🔴 `legalVersion` presente ⇔ la persona marcó la casilla de consentimiento. Una versión
+    // desconocida se IGNORA (el asistente la vuelve a pedir) en vez de tumbar el alta.
+    legalVersion: z.string().trim().max(40).optional(),
+    launchCampaignCode: optionalLaunchCampaignCode,
+    utm: utmSchema,
   }),
 })
 

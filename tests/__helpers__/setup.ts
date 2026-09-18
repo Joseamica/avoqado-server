@@ -413,6 +413,17 @@ const prismaMock: any = {
   // que sí cascadea desde el venue — el borrado del venue truena si quedan filas.
   consentEvent: createMockModel(),
   privacyNoticeVersion: createMockModel(),
+  // Lanzamiento con campañas ligeras (spec 2026-09-17). El progreso del alta lo escriben el
+  // reclamo de campaña y `activate-plan`; sin estas tres entradas cualquier test que los toque
+  // revienta con «Cannot read properties of undefined» en vez de fallar por su aserción.
+  // 🔴 `fields` no es decorativo: la reserva del cupo compara columna contra columna
+  // (`redemptionCount < redemptionCap`) con una REFERENCIA DE CAMPO de Prisma. Sin esta entrada
+  // el servicio revienta con un TypeError y la prueba del cupo falla por el motivo equivocado.
+  launchCampaign: Object.assign(createMockModel(), {
+    fields: { redemptionCap: { name: 'redemptionCap' }, redemptionCount: { name: 'redemptionCount' } },
+  }),
+  launchCampaignRedemption: createMockModel(),
+  onboardingProgress: createMockModel(),
   customerCaptureToken: createMockModel(),
   // Lo demás que BLOQUEA el borrado de un venue desechable (ver liveDemoCleanup.service).
   commissionClawback: createMockModel(),

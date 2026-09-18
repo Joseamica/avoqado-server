@@ -18,6 +18,17 @@ import { normalizeLegacyActivityActor, preserveUnknownStaffId } from '../../lib/
 export interface LogActionParams {
   staffId?: string | null
   venueId?: string | null
+  /**
+   * S15 (spec 2026-09-17 § 9.1) — a qué ORGANIZACIÓN pertenece el asiento.
+   *
+   * 🔴 La columna existe desde hace tiempo en `ActivityLog` y NADIE la escribía. Importa para
+   * los asientos de PLATAFORMA (una ficha de campaña de lanzamiento, por ejemplo), que tienen
+   * `venueId` nulo por definición y sin esto quedan sin a quién atribuirlos.
+   *
+   * Aditivo: omitirlo guarda `null`, que es exactamente lo que guardaban los 200+ llamadores
+   * anteriores. Hay prueba de las dos cosas, y también de que el reintento sin actor lo conserva.
+   */
+  organizationId?: string | null
   action: string
   entity?: string
   entityId?: string
@@ -46,6 +57,7 @@ export async function logAction(params: LogActionParams): Promise<void> {
       data: {
         staffId,
         venueId: params.venueId ?? null,
+        organizationId: params.organizationId ?? null,
         action: params.action,
         entity: params.entity ?? null,
         entityId: params.entityId ?? null,
@@ -75,6 +87,9 @@ export async function logAction(params: LogActionParams): Promise<void> {
           data: {
             staffId: null,
             venueId: params.venueId ?? null,
+            // 🔴 La organización se conserva TAMBIÉN aquí: el asiento que más falta hace —un token
+            // de alguien ya borrado— es justo el que no puede quedarse sin a quién atribuirlo.
+            organizationId: params.organizationId ?? null,
             action: params.action,
             entity: params.entity ?? null,
             entityId: params.entityId ?? null,

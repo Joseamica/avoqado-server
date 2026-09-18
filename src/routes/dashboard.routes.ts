@@ -92,6 +92,7 @@ import * as terminalOrderController from '../controllers/dashboard/terminalOrder
 import * as venueController from '../controllers/dashboard/venue.dashboard.controller'
 import * as venueChatDashController from '../controllers/dashboard/venueChat.dashboard.controller'
 import * as venueKycController from '../controllers/dashboard/venueKyc.controller'
+import * as paymentActivationController from '../controllers/dashboard/paymentActivation.controller'
 import * as venueFeatureController from '../controllers/dashboard/venueFeature.dashboard.controller'
 import * as saleVerificationController from '../controllers/dashboard/sale-verification.dashboard.controller'
 import * as cryptoConfigController from '../controllers/dashboard/cryptoConfig.dashboard.controller'
@@ -2786,6 +2787,42 @@ router.put(
 
 // Venue KYC - Submit for review
 router.post('/venues/:venueId/kyc/submit', authenticateTokenMiddleware, venueKycController.submitKycForReview)
+
+/**
+ * «Activar cobros» — lo que el alta corta dejó de pedir (spec 2026-09-17 § 4.2).
+ *
+ * 🔴 `venueAddress` es la ÚNICA captura de la dirección del local que queda en el producto una
+ * vez que el alta corta la retira: sin este endpoint, ningún local nacido por el flujo corto
+ * tendría dirección jamás.
+ *
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/payment-activation:
+ *   get:
+ *     tags: [Dashboard, PaymentActivation]
+ *     summary: Estado del checklist para poder cobrar (datos fiscales, documentos, terminal)
+ *     description: RFC enmascarado, últimos 4 de la CLABE y la CURP como booleano. Nunca los valores completos.
+ *     responses:
+ *       200: { description: "{ kycStatus, profile, documents, terminalsCount, onlinePaymentsConnected }" }
+ *       403: { description: Sólo OWNER o ADMIN de ese negocio }
+ */
+router.get('/venues/:venueId/payment-activation', authenticateTokenMiddleware, paymentActivationController.getActivation)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/payment-activation/profile:
+ *   put:
+ *     tags: [Dashboard, PaymentActivation]
+ *     summary: Guarda los datos fiscales, la dirección del negocio y la cuenta para depósitos
+ *     description: >
+ *       Se guarda por SECCIONES y no mueve el puntero del asistente. La CLABE se espeja en el
+ *       campo que lee la revisión de KYC. La bitácora registra qué secciones se tocaron, nunca
+ *       los valores.
+ *     responses:
+ *       200: { description: El mismo estado que devuelve el GET, ya actualizado }
+ *       400: { description: INVALID_CLABE · INVALID_RFC · INVALID_CURP · INVALID_VENUE_ADDRESS }
+ *       403: { description: Sólo OWNER o ADMIN de ese negocio }
+ */
+router.put('/venues/:venueId/payment-activation/profile', authenticateTokenMiddleware, paymentActivationController.updateProfile)
 
 // Venue KYC Resubmission (after rejection) - LEGACY: kept for backwards compatibility
 router.post(

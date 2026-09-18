@@ -11,14 +11,18 @@
  */
 import {
   IVA_RATE,
+  LAUNCH_OFFER_UNAVAILABLE_REASONS,
   buildLaunchOfferView,
   computeCouponAmountOff,
   firstYearTotalCents,
+  isKnownUnavailableReason,
+  ivaBreakdownIsExact,
   launchOfferAvailability,
   promoPeriodTotalCents,
   splitIvaInclusive,
   standardFirstChargeCents,
   type LaunchOfferCampaignRow,
+  type LaunchOfferUnavailableView,
   type StandardPlanQuote,
 } from '@/services/launchCampaigns/launchOfferMath'
 
@@ -83,44 +87,44 @@ describe('splitIvaInclusive — el desglose que se MUESTRA', () => {
 
 describe('computeCouponAmountOff — lo que se le manda a Stripe', () => {
   it('115884 de lista y 2200 anunciados dan un cupón de 113684', () => {
-    expect(computeCouponAmountOff(115884, 2200)).toBe(113684)
+    expect(computeCouponAmountOff({ listPriceCents: 115884, advertisedPriceCents: 2200 })).toBe(113684)
   })
 
   it('el descuento aplicado devuelve exactamente el precio anunciado', () => {
-    expect(115884 - computeCouponAmountOff(115884, 2200)).toBe(2200)
+    expect(115884 - computeCouponAmountOff({ listPriceCents: 115884, advertisedPriceCents: 2200 })).toBe(2200)
   })
 
   it('🔴 lanza si el precio anunciado no baja de la lista — un cupón de $0 o negativo no existe', () => {
-    expect(() => computeCouponAmountOff(115884, 115884)).toThrow(/lista/i)
-    expect(() => computeCouponAmountOff(115884, 200000)).toThrow(/lista/i)
+    expect(() => computeCouponAmountOff({ listPriceCents: 115884, advertisedPriceCents: 115884 })).toThrow(/lista/i)
+    expect(() => computeCouponAmountOff({ listPriceCents: 115884, advertisedPriceCents: 200000 })).toThrow(/lista/i)
   })
 
   it('🔴 lanza por debajo del mínimo de Stripe ($10.00 MXN)', () => {
-    expect(() => computeCouponAmountOff(115884, 999)).toThrow(/10/)
-    expect(computeCouponAmountOff(115884, 1000)).toBe(114884)
+    expect(() => computeCouponAmountOff({ listPriceCents: 115884, advertisedPriceCents: 999 })).toThrow(/10/)
+    expect(computeCouponAmountOff({ listPriceCents: 115884, advertisedPriceCents: 1000 })).toBe(114884)
   })
 
   it('🔴 lanza si algún importe no es un entero de centavos', () => {
-    expect(() => computeCouponAmountOff(115884.4, 2200)).toThrow(/entero/i)
-    expect(() => computeCouponAmountOff(115884, 2200.4)).toThrow(/entero/i)
+    expect(() => computeCouponAmountOff({ listPriceCents: 115884.4, advertisedPriceCents: 2200 })).toThrow(/entero/i)
+    expect(() => computeCouponAmountOff({ listPriceCents: 115884, advertisedPriceCents: 2200.4 })).toThrow(/entero/i)
   })
 })
 
 describe('promoPeriodTotalCents y firstYearTotalCents — lo que de verdad paga el cliente', () => {
   it('3 meses promocionales a $22.00 son $66.00', () => {
-    expect(promoPeriodTotalCents(2200, 3)).toBe(6600)
+    expect(promoPeriodTotalCents({ advertisedPriceCents: 2200, discountMonths: 3 })).toBe(6600)
   })
 
   it('el primer año son $10,495.56 — 3 × $22.00 + 9 × $1,158.84', () => {
-    expect(firstYearTotalCents(2200, 3, 115884)).toBe(1049556)
+    expect(firstYearTotalCents({ advertisedPriceCents: 2200, discountMonths: 3, listPriceCents: 115884 })).toBe(1049556)
   })
 
   it('una promoción de 12 meses deja el primer año en 12 × el precio promocional', () => {
-    expect(firstYearTotalCents(2200, 12, 115884)).toBe(26400)
+    expect(firstYearTotalCents({ advertisedPriceCents: 2200, discountMonths: 12, listPriceCents: 115884 })).toBe(26400)
   })
 
   it('🔴 una promoción de más de 12 meses NO resta meses al primer año', () => {
-    expect(firstYearTotalCents(2200, 24, 115884)).toBe(26400)
+    expect(firstYearTotalCents({ advertisedPriceCents: 2200, discountMonths: 24, listPriceCents: 115884 })).toBe(26400)
   })
 })
 
@@ -201,8 +205,10 @@ describe('buildLaunchOfferView — exactamente lo que ven la landing y el dashbo
       currency: 'MXN',
       ivaIncluded: true,
       requiresCard: true,
-      promo: { monthlyCents: 2200, months: 3, subtotalCents: 1897, ivaCents: 303, periodTotalCents: 6600 },
-      renewal: { monthlyCents: 115884, subtotalCents: 99900, ivaCents: 15984 },
+      // 🔴 `ivaExact` es parte del contrato desde la revisión del 2026-09-17: false en la promo
+      // ($22.00 no se puede desglosar al 16 %), true en la renovación ($1,158.84 sí).
+      promo: { monthlyCents: 2200, months: 3, subtotalCents: 1897, ivaCents: 303, ivaExact: false, periodTotalCents: 6600 },
+      renewal: { monthlyCents: 115884, subtotalCents: 99900, ivaCents: 15984, ivaExact: true },
       firstChargeCents: 2200,
       validUntil: '2026-10-31T06:00:00.000Z',
       limited: true,
@@ -246,7 +252,10 @@ describe('buildLaunchOfferView — exactamente lo que ven la landing y el dashbo
   it('el cupo NUNCA se expone: sólo se dice que es limitada (D10)', () => {
     const v = buildLaunchOfferView(POS22, AHORA)
     expect(v.available && v.limited).toBe(true)
-    expect(JSON.stringify(v)).not.toContain('100')
+    // 🔴 Aquí vivía `expect(JSON.stringify(v)).not.toContain('100')`, que comprobaba un PROXY del
+    // cupo (el número 100) y no la propiedad: habría reventado con un `advertisedPriceCents = 1000`
+    // legítimo y no habría cazado un cupo de 42. Lo sustituye el recorrido de llaves PROFUNDAS del
+    // describe «P3-8», que sí afirma lo que este título promete.
     expect(Object.keys(v)).not.toContain('redemptionCap')
     expect(Object.keys(v)).not.toContain('redemptionCount')
   })
@@ -271,5 +280,134 @@ describe('standardFirstChargeCents — el camino SIN campaña', () => {
   it('sin promoción legacy vigente se cobra el precio de lista', () => {
     const sinLegacy: StandardPlanQuote = { ...COTIZACION_ESTANDAR, legacyIntro: null }
     expect(standardFirstChargeCents(sinLegacy, 'PRO', 'monthly', true)).toBe(115884)
+  })
+})
+
+// ============================================================================
+// Cierre de la revisión independiente del 2026-09-17 (P2-1, P2-3, P2-5, P3-8).
+// ============================================================================
+
+describe('🔴 P2-1 · el desglose de IVA se DECLARA exacto o no, porque no siempre lo es', () => {
+  /**
+   * `splitIvaInclusive` reparte el bruto con el IVA como RESIDUO, así que la suma SIEMPRE
+   * devuelve el bruto. Lo que NO siempre se cumple es la otra igualdad, la que el cliente lee:
+   * `iva === round(subtotal × 0.16)`. Para $22.00 el residuo es 303 y el 16 % de $18.97 es 304.
+   * Medido: 27,448 de 199,001 brutos entre $10 y $2,000 (13.8 %) están en ese caso.
+   *
+   * Un cliente que pinte «IVA (16 %)» sobre ese desglose enseña un centavo que no cuadra. Por eso
+   * el contrato lo DICE en vez de dejar que cada repo lo descubra en producción.
+   */
+  it('el precio estrella del lanzamiento, $22.00, NO admite desglose al 16 %', () => {
+    const { subtotalCents, ivaCents } = splitIvaInclusive(2200)
+    expect(ivaCents).toBe(303)
+    expect(Math.round(subtotalCents * IVA_RATE)).toBe(304) // ← la discrepancia, medida
+    expect(ivaBreakdownIsExact(2200)).toBe(false)
+  })
+
+  it('los cuatro precios de lista de Stripe SÍ lo admiten', () => {
+    for (const bruto of [115884, 1158840, 197084, 1970840, 69484]) {
+      expect(ivaBreakdownIsExact(bruto)).toBe(true)
+    }
+  })
+
+  it('🔴 el predicado es EXACTAMENTE «el residuo es el 16 % del subtotal», no una aproximación', () => {
+    for (let bruto = 1000; bruto <= 60000; bruto += 3) {
+      const { subtotalCents, ivaCents } = splitIvaInclusive(bruto)
+      expect(ivaBreakdownIsExact(bruto)).toBe(ivaCents === Math.round(subtotalCents * IVA_RATE))
+    }
+  })
+
+  it('🔴 la vista lo declara POR BLOQUE: en POS22 la promo no cuadra y la renovación sí', () => {
+    const v = buildLaunchOfferView(POS22, AHORA)
+    expect(v.available && v.promo.ivaExact).toBe(false) // $22.00
+    expect(v.available && v.renewal.ivaExact).toBe(true) // $1,158.84
+  })
+
+  it('una promo con precio limpio ($23.20 = $20.00 + $3.20) sí lo declara exacto', () => {
+    const v = buildLaunchOfferView(con({ advertisedPriceCents: 2320, discountAmountCents: 113564 }), AHORA)
+    expect(v.available && v.promo.subtotalCents).toBe(2000)
+    expect(v.available && v.promo.ivaCents).toBe(320)
+    expect(v.available && v.promo.ivaExact).toBe(true)
+  })
+})
+
+describe('🔴 P2-3 · las funciones de dinero se llaman por NOMBRE: un intercambio no puede pasar', () => {
+  /**
+   * Antes, `computeCouponAmountOff(lista, anunciado)` ponía la lista PRIMERO y
+   * `firstYearTotalCents(anunciado, meses, lista)` la ponía ÚLTIMA. Los tres argumentos son
+   * enteros de centavos y pasaban todas las validaciones: medido,
+   * `firstYearTotalCents(115884, 3, 2200)` devolvía 367452 — 3.5× mal — sin lanzar.
+   */
+  it('el primer año del lanzamiento: 3 × $22.00 + 9 × $1,158.84 = $10,495.56', () => {
+    expect(firstYearTotalCents({ advertisedPriceCents: 2200, discountMonths: 3, listPriceCents: 115884 })).toBe(1049556)
+  })
+
+  it('🔴 con la lista por debajo del anunciado LANZA, en vez de devolver un número 3.5× mal', () => {
+    expect(() => firstYearTotalCents({ advertisedPriceCents: 115884, discountMonths: 3, listPriceCents: 2200 })).toThrow(/lista/i)
+  })
+
+  it('🔴 el cupón y el primer año nombran sus importes IGUAL, así que no hay orden que recordar', () => {
+    const oferta = { advertisedPriceCents: 2200, listPriceCents: 115884 }
+    expect(computeCouponAmountOff(oferta)).toBe(113684)
+    expect(firstYearTotalCents({ ...oferta, discountMonths: 3 })).toBe(1049556)
+  })
+
+  it('el total de la promoción también se nombra: 3 × $22.00 = $66.00', () => {
+    expect(promoPeriodTotalCents({ advertisedPriceCents: 2200, discountMonths: 3 })).toBe(6600)
+  })
+})
+
+describe('🔴 P2-5 · un motivo de no-disponibilidad DESCONOCIDO es «no disponible» a secas', () => {
+  /**
+   * El guardián del precio de lista (P2-5) puede necesitar un motivo nuevo — `PRICE_DRIFT` — el
+   * día que Stripe mueva el precio debajo de una campaña viva. Si los tres repos consumidores
+   * escriben un `switch` exhaustivo HOY, ese motivo nuevo los rompe mañana. El contrato lo dice
+   * ahora, que es gratis, y el tipo de cable lo OBLIGA: `LaunchOfferUnavailableReasonWire` es
+   * abierto, así que un `switch` sin rama por defecto no compila en el consumidor.
+   */
+  it('los seis motivos de hoy, y ninguno más', () => {
+    expect(LAUNCH_OFFER_UNAVAILABLE_REASONS).toEqual(['NOT_STARTED', 'EXPIRED', 'PAUSED', 'ENDED', 'SOLD_OUT', 'NOT_PUBLISHED'])
+  })
+
+  it('🔴 el reconocedor dice si un motivo es de los conocidos — es lo que el cliente usa para caer al texto genérico', () => {
+    expect(isKnownUnavailableReason('SOLD_OUT')).toBe(true)
+    expect(isKnownUnavailableReason('PRICE_DRIFT')).toBe(false)
+    expect(isKnownUnavailableReason('')).toBe(false)
+  })
+
+  it('un motivo desconocido sigue siendo una vista NO disponible y sin un solo precio', () => {
+    const v: LaunchOfferUnavailableView = { code: 'POS22', slug: 'pos-22', available: false, unavailableReason: 'PRICE_DRIFT' }
+    expect(v.available).toBe(false)
+    expect(Object.keys(v).sort()).toEqual(['available', 'code', 'slug', 'unavailableReason'])
+  })
+})
+
+describe('🔴 P3-8 · el cupo no se filtra a NINGUNA profundidad', () => {
+  /**
+   * La aserción que había (`not.toContain('100')`) comprobaba un PROXY del cupo —el número 100—,
+   * no la propiedad: habría reventado con un `advertisedPriceCents = 1000` legítimo y no habría
+   * cazado un cupo de 42. Ahora se recorre el objeto y se exige que ninguna LLAVE, a ningún
+   * nivel, sea del cupo.
+   */
+  const llavesProfundas = (o: unknown, acc: string[] = []): string[] => {
+    if (o === null || typeof o !== 'object') return acc
+    for (const [k, v] of Object.entries(o as Record<string, unknown>)) {
+      acc.push(k)
+      llavesProfundas(v, acc)
+    }
+    return acc
+  }
+
+  it('ni redemptionCap ni redemptionCount aparecen en la vista disponible', () => {
+    const llaves = llavesProfundas(buildLaunchOfferView(POS22, AHORA))
+    expect(llaves).not.toContain('redemptionCap')
+    expect(llaves).not.toContain('redemptionCount')
+    expect(llaves).toContain('limited') // lo único que se dice del cupo
+  })
+
+  it('🔴 y un precio que CONTIENE el cupo como texto no la rompe: 1000 es un precio legítimo', () => {
+    const v = buildLaunchOfferView(con({ advertisedPriceCents: 1000, discountAmountCents: 114884 }), AHORA)
+    expect(v.available && v.promo.monthlyCents).toBe(1000)
+    expect(llavesProfundas(v)).not.toContain('redemptionCap')
   })
 })

@@ -92,7 +92,10 @@ function buildRes(): Partial<Response> {
 /** Wire up the happy path: plan enabled, venue created fresh, email recipient resolved. */
 function primeHappyPath(planOverrides: Record<string, any> = {}, targetOverrides: Record<string, any> = {}) {
   ;(onboardingProgressService.getV2SetupDataForCompletion as jest.Mock).mockResolvedValue({
-    progress: { v2SetupData: {} },
+    // El alta sólo se puede terminar con el consentimiento firmado (spec 2026-09-17 § 3.7),
+    // así que la base de estas pruebas —que miden el CORREO, no el candado legal— lo trae puesto.
+    // El candado tiene sus propias pruebas en `completeV2.launchGates.test.ts`.
+    progress: { v2SetupData: {}, termsAcceptedAt: new Date('2026-09-17T00:00:00Z'), planActivationStatus: 'NONE' },
     businessInfo: { businessName: 'Bar Test' },
     bankInfo: null,
     identityInfo: null,
