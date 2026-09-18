@@ -106,12 +106,69 @@ nulo) para no declarar sobre un cobro que sigue en curso.
 Lo que NO se hace: aceptar la declaración de una solicitud cuyo intento la terminal reporta `ACTIVE`
 en la sonda. Ahí se responde que el cobro sigue corriendo y se pide reintentar en unos segundos.
 
+## Lo que la declaración escribe, exactamente
+
+`status = FAILED`, `failureCode = OPERATOR_RECONCILED_NO_CHARGE`. **Confirmado por Codex contra los
+predicados reales**, no por el precedente del incidente: esa pareja sale del bloqueo heredado
+(`terminal-payment.service.ts:549`), del estricto —porque `OPERATOR_RECONCILED_NO_CHARGE` **está** en
+`CODIGOS_SIN_COBRO`, así que la rama de `FAILED` no entra (`:428`, `:474`, `:590`)— y del índice único,
+que sólo cubre `PENDING/SENT/CANCEL_REQUESTED/UNKNOWN`
+(`20260713161534_add_terminal_payment_request/migration.sql:41`). La proyección devuelve `NOT_CHARGED`,
+evidencia `OPERATOR_RECONCILED`, clase `OPERATOR` (`:822`).
+
+🔴 **No basta con tocar esas dos columnas:** hay que escribir un sobre de respuesta coherente y limpiar
+`cancelDisposition`, como hace el precedente (`no-instrument-resolution.service.ts:271`,
+`terminal-payment.service.ts:1070`). Si no, queda una respuesta vieja en `resultJson` contradiciendo el
+desenlace.
+
+## La excepción a «nunca impedirle cobrar», reconocida
+
+El recorte resuelve el caso normal, **no todos**. Caso concreto que Codex identificó: se declara A,
+el cajero cobra B, y después llega una aprobación tardía de A sin `Payment` registrable. El servidor
+devuelve A a `TIMED_OUT/BANK_APPROVED_AWAITING_PAYMENT` —o `PAYMENT_UNBOUND_AWAITING_REVIEW` si hay
+pago que no puede ligar— y **ambos vuelven a bloquear la terminal en los dos regímenes**
+(`terminal-payment.service.ts:4420`, `:523`, `:4622`).
+
+Se declara en vez de prometer lo contrario: la declaración destraba lo que se sabe hoy; si mañana
+aparece dinero de esa venta, la terminal vuelve a pedir conciliación. Y una declaración sobre A no
+resuelve otras solicitudes que bloqueen la misma orden (`:1678`).
+
+## El veto por `ACTIVE`, y por qué hoy no basta
+
+El spec rechaza la declaración si la sonda dice que el cobro sigue corriendo. 🔴 **Hoy eso no se puede
+consultar:** `ACTIVE` sólo se escribe en el log y la función retorna, sin dejar dato durable
+(`terminal-payment.service.ts:6321`). Hay que persistir esa respuesta autenticada para que la
+declaración la lea, y **no depender del barrido de las primeras 25 filas** (`:6243`), que además
+arrastra el problema de inanición ya conocido.
+
+## Elegibilidad: `terminalReturnedAt` no cubre todos los estados
+
+Hoy sólo se estampa sobre filas `UNKNOWN` (`terminal-payment.service.ts:5189`). Una `TIMED_OUT`
+todavía incierta puede quedar **inelegible para siempre** aunque la terminal esté conectada. Hay que
+definir cómo se observa el retorno para todos los estados admitidos, o la conciliación no alcanzará a
+las filas legacy — que son justo las que hoy hay que limpiar.
+
+⚠️ Y `terminalReturnedAt` **no prueba el cese**: se escribe al ver un latido posterior al vencimiento,
+o sea acredita conectividad, no que el SDK terminó (`:5184`, `schema.prisma:5093`). Es parte de la
+tensión asumida arriba.
+
+## Persistencia de la declaración con solicitudes legacy
+
+La declaración inmutable vive hoy en `TerminalPaymentAttemptLink` y el servicio **exige que exista el
+vínculo** (`schema.prisma:5135`, `no-instrument-resolution.service.ts:176`). Para solicitudes sin
+intento ligado hace falta guardarla y consultarla **por solicitud y `resolutionId`**, fuera del sobre
+mutable, sin fabricar vínculos.
+
 ## Sin red
 
 | | Sin conexión al servidor |
 |---|---|
 | Declarar «verifiqué que no se cobró» | **Online-only a propósito.** La pantalla lo dice: «Necesitas conexión para confirmar esta declaración». **No** libera en local ni encola la declaración para aceptarla sola después |
-| Seguir cobrando otras ventas | Funciona como hoy, con los medios disponibles sin red |
+| Seguir cobrando otras ventas | 🔴 **Hoy NO se puede prometer.** El pendiente local intercepta el flujo **antes** de elegir medio de pago en ambos POS (`PaymentFlowViewModel.kt:840`, `PaymentFlowViewModel.swift:246`), así que con un pendiente vivo el mismo aparato tampoco cobra en efectivo sin red. Es una limitación anterior a este trabajo, no introducida por el online-only, y queda declarada en vez de tapada |
+
+🔴 **El recorte NO elimina la navegación de salida existente.** «Un solo botón» describe la
+conciliación, no la pantalla: quitar la salida actual empeoraría el caso sin red
+(`PaymentResultScreen.kt:677`, `PaymentResultViews.swift:1417`).
 
 🔴 **Por qué no se encola:** una declaración reproducida tarde podría caer sobre una venta que
 entretanto sí se cobró. Se persiste el `resolutionId` **antes** del POST para poder recuperar el
@@ -125,6 +182,23 @@ el cajero afirmó, y su valor es justamente ése), el resultado se actualiza, se
 esa venta y queda 🚨 para conciliar. Ya existe tratamiento de aprobaciones posteriores a una
 declaración (`terminal-payment.service.ts:1439`); su texto presupone «no se presentó tarjeta» y se
 amplía.
+
+## Detalles de implementación que Codex exige concretar
+
+- **El veto no es una consulta ya hecha:** `sinEvidenciaPositivaSql` cubre aprobaciones vinculadas y
+  pagos con tarjeta `COMPLETED`, pero **no** todas las contradicciones ni los pagos `PENDING` de
+  conciliación (`evidenciaPositivaSql.ts:64`, `:128`, `:149`). El veto completo del spec hay que
+  construirlo.
+- **Candados en orden:** solicitud → intentos enumerados dentro y ordenados → orden/fila. No basta
+  copiar el candado de un único intento (`candadoDeIntento.ts:26`, `terminal-payment.service.ts:3893`).
+- **El MCP tiene su propio filtro de `UNKNOWN`** antes de llamar al servicio (`mcp/tools/terminals.ts:496`,
+  `:521`): hay que despachar allí la variante, conservando vista previa y confirmación humana.
+- **El permiso del cajero habilita esta operación concreta**, sin concederle `tpv:update` global
+  (`mobile.routes.ts:1704`).
+- **El aviso al cajero no existe:** el tratamiento de aprobación tardía manda `sendOpsAlert`, que es
+  correo a operaciones, no un aviso durable en el aparato (`terminal-payment.service.ts:1448`).
+- **Textos que mienten en etapa 2:** ambos POS tienen hardcodeado «no se presentó tarjeta» para
+  `OPERATOR_RECONCILED` (`CardChargeOutcome.kt:279`, `CardChargeOutcome.swift:379`).
 
 ## Lo que NO se toca
 
