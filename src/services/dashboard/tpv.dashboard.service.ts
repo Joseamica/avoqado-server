@@ -1183,7 +1183,19 @@ export async function getVenueTpvSettings(venueId: string): Promise<VenueTpvSett
  * Update venue-level TPV settings
  * Bulk updates ALL terminals in the venue atomically
  */
-export async function updateVenueTpvSettings(venueId: string, settingsUpdate: Partial<VenueTpvSettings>): Promise<VenueTpvSettings> {
+/**
+ * Lo que respondió el guardado por negocio: los ajustes vigentes y a cuántas terminales llegó.
+ *
+ * `terminalsOmitted` son las que cambiaron de negocio entre la lectura y la escritura: ya no son de este negocio, así
+ * que no reciben sus ajustes. Van en la respuesta porque omitirlas en silencio deja «guardado» un cambio que no tocó a
+ * nadie (condición de la 5ª ronda de Codex del spec «pantalla del cliente», 2026-09-17).
+ */
+export type VenueTpvSettingsSaved = VenueTpvSettings & {
+  terminalsUpdated: number
+  terminalsOmitted: number
+}
+
+export async function updateVenueTpvSettings(venueId: string, settingsUpdate: Partial<VenueTpvSettings>): Promise<VenueTpvSettingsSaved> {
   if (!venueId) {
     throw new NotFoundError('El ID del Venue es requerido.')
   }
@@ -1264,14 +1276,24 @@ export async function updateVenueTpvSettings(venueId: string, settingsUpdate: Pa
     }
   }
 
+  let terminalsUpdated = 0
+  let terminalsOmitted = 0
   if (writes.length > 0) {
     const results = await prisma.$transaction(writes)
     const terminalWrites = writes.length - firstTerminalWrite
-    const omittedTerminals = terminalWrites - countUpdatedTerminals(results.slice(firstTerminalWrite))
-    if (omittedTerminals > 0) {
+    terminalsUpdated = countUpdatedTerminals(results.slice(firstTerminalWrite))
+    terminalsOmitted = terminalWrites - terminalsUpdated
+    if (terminalsOmitted > 0) {
       logger.info('Ajustes del negocio: se omitieron terminales que cambiaron de negocio a media operación', {
         venueId,
-        omittedTerminals,
+        omittedTerminals: terminalsOmitted,
+      })
+    }
+    if (terminalWrites > 0 && terminalsUpdated === 0) {
+      // Ninguna terminal recibió los ajustes: se guardó lo del negocio y nada más. No puede pasar en silencio.
+      logger.warn('Ajustes del negocio: NINGUNA terminal recibió los ajustes; todas cambiaron de negocio a media operación', {
+        venueId,
+        omittedTerminals: terminalsOmitted,
       })
     }
   }
@@ -1287,6 +1309,6 @@ export async function updateVenueTpvSettings(venueId: string, settingsUpdate: Pa
     settings: settingsUpdate,
   })
 
-  // 4. Return the current full settings
-  return getVenueTpvSettings(venueId)
+  // 4. Return the current full settings, plus a cuántas terminales llegaron
+  return { ...(await getVenueTpvSettings(venueId)), terminalsUpdated, terminalsOmitted }
 }

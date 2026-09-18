@@ -556,9 +556,28 @@ describe('updateVenueTpvSettings — el negocio y sus terminales se guardan junt
   it('una terminal que se mudó a media operación se omite: no recibe los ajustes y el guardado no falla', async () => {
     prismaMock.terminal.updateMany.mockResolvedValueOnce({ count: 1 } as any).mockResolvedValueOnce({ count: 0 } as any)
 
-    await expect(updateVenueTpvSettings(venueId, { showTipScreen: false } as any)).resolves.toBeDefined()
+    const result = await updateVenueTpvSettings(venueId, { showTipScreen: false } as any)
 
     expect(logger.info).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ venueId, omittedTerminals: 1 }))
     expect(auditActions()).toContain('VENUE_TPV_SETTINGS_UPDATED')
+    // 🔴 Quien guardó tiene que poder saber a cuántas terminales llegó (5ª ronda de Codex, condición del commit):
+    // omitir en silencio deja «guardado» un cambio que no tocó a nadie.
+    expect(result).toMatchObject({ terminalsUpdated: 1, terminalsOmitted: 1 })
+  })
+
+  it('si TODAS las terminales se mudaron, lo dice: cero actualizadas y aviso', async () => {
+    prismaMock.terminal.updateMany.mockResolvedValue({ count: 0 } as any)
+
+    const result = await updateVenueTpvSettings(venueId, { showTipScreen: false } as any)
+
+    expect(result).toMatchObject({ terminalsUpdated: 0, terminalsOmitted: 2 })
+    expect(logger.warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ venueId, omittedTerminals: 2 }))
+  })
+
+  it('cuando no se piden ajustes de terminal, el conteo es cero y no avisa', async () => {
+    const result = await updateVenueTpvSettings(venueId, { expectedCheckInTime: '08:00' } as any)
+
+    expect(result).toMatchObject({ terminalsUpdated: 0, terminalsOmitted: 0 })
+    expect(logger.warn).not.toHaveBeenCalled()
   })
 })

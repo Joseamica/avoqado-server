@@ -5138,6 +5138,11 @@ model TerminalPaymentRequest {
   /// anterior a esta columna: nunca inferir «no entregada»); `[]` = creada y todavía no entregada a ningún socket.
   deliveryProvenance Json?
   closedVia          String? // S8: 'terminal' | 'webhook'. Se escribe UNA vez: conserva quién ganó originalmente
+  /// Ronda 6 (Codex r11, P1-B): la última EVIDENCIA de colisión (id de un Payment PENDING) que la red durable ya recorrió en
+  /// esta solicitud liberada. `NULL` = empezar por el principio. Contabilidad del barrido: nunca viaja al POS, no cambia el
+  /// estado y se escribe SIN tocar `updatedAt`. Columna propia y no una llave de `resultJson` porque ese sobre se devuelve
+  /// entero al POS (`resultFromRow`) y varios escritores lo reemplazan completo.
+  collisionEvidenceCursor String?
   expiresAt          DateTime
   createdAt          DateTime                     @default(now())
   updatedAt          DateTime                     @updatedAt
