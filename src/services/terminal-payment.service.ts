@@ -1460,6 +1460,20 @@ export function avisarAprobacionTardiaTrasVentana(
           : 'La orden no muestra otro cobro con tarjeta posterior en esta orden: sólo confirmar que quedó registrado.',
     ],
   })
+  // 18-sep: además del correo a operaciones, AVISAR AL CAJERO en su aparato. El correo llega a quien administra;
+  // quien puede cobrar otra vez por error es la persona que declaró, y hasta hoy no se enteraba de nada.
+  // Fire-and-forget y nunca lanza: un aviso no puede deshacer el registro de un cobro.
+  if (porCajero) {
+    void import('./tpv/avisoDeCobroTardio').then(m =>
+      m.avisarCobroTardioAlCajero({
+        requestId: ctx.requestId,
+        venueId: ctx.venueId,
+        paymentId: ctx.paymentId,
+        terminalId: ctx.terminalId,
+        orderId: ctx.orderId,
+      }),
+    )
+  }
 }
 
 class TerminalPaymentService {
