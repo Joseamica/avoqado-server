@@ -76,7 +76,10 @@ function fila(overrides: Record<string, unknown>) {
 }
 
 /** Codex R3 (P2): la ventana de vínculos es POR SOLICITUD (`$queryRaw` con ROW_NUMBER) y los conteos reales salen de un `groupBy`. */
-function vinculos(ventana: { requestId: string; attemptId: string; createdAt: Date }[], totales: Record<string, number> = {}) {
+function vinculos(
+  ventana: { requestId: string; attemptId: string; createdAt: Date; operatorResolution?: unknown }[],
+  totales: Record<string, number> = {},
+) {
   ;(prismaMock as any).$queryRaw.mockResolvedValue(ventana)
   ;(prismaMock as any).terminalPaymentAttemptLink.groupBy.mockResolvedValue(
     Object.entries(totales).map(([requestId, n]) => ({ requestId, _count: { _all: n } })),

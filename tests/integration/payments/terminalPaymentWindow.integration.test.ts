@@ -1935,7 +1935,7 @@ describe('Declaración del cajero', () => {
     const original = prisma.terminalPaymentRequest.findFirst.bind(prisma.terminalPaymentRequest)
     let lecturas = 0
     let intercalado = false
-    const spy = jest.spyOn(prisma.terminalPaymentRequest, 'findFirst').mockImplementation(async (args: any) => {
+    const spy = jest.spyOn(prisma.terminalPaymentRequest, 'findFirst').mockImplementation((async (args: any) => {
       const r = await original(args)
       if (args?.where?.requestId === row.requestId && !intercalado && ++lecturas === 2) {
         intercalado = true // la primera lectura es la comprobación de propiedad; la segunda, la que precede a la escritura
@@ -1945,7 +1945,7 @@ describe('Declaración del cajero', () => {
         )
       }
       return r
-    })
+    }) as never)
     try {
       await terminalPaymentService.handlePaymentResultFromSocket(
         { requestId: row.requestId, status: 'success', readMode: 'CONTACTLESS' } as any,
@@ -1974,7 +1974,7 @@ describe('Declaración del cajero', () => {
     const original = prisma.terminalPaymentRequest.findFirst.bind(prisma.terminalPaymentRequest)
     const pendientes = [...cambios]
     let lecturasDelCas = 0
-    const spy = jest.spyOn(prisma.terminalPaymentRequest, 'findFirst').mockImplementation(async (args: any) => {
+    const spy = jest.spyOn(prisma.terminalPaymentRequest, 'findFirst').mockImplementation((async (args: any) => {
       const r = await original(args)
       // Sólo las lecturas del CAS de estado de ESTA fila (id/status/failureCode); la comprobación de propiedad no cuenta.
       if (args?.where?.requestId === row.requestId && args?.select?.failureCode === true) {
@@ -1983,7 +1983,7 @@ describe('Declaración del cajero', () => {
         if (cambio) await prisma.terminalPaymentRequest.update({ where: { id: row.id }, data: cambio as any })
       }
       return r
-    })
+    }) as never)
     return { spy, pendientes, lecturas: () => lecturasDelCas }
   }
   const successSinPago = (requestId: string) =>
@@ -2083,14 +2083,14 @@ describe('Declaración del cajero', () => {
     const g = puerta()
     let detenido = false
     const leerOriginal = prisma.terminalPaymentRequest.findFirst.bind(prisma.terminalPaymentRequest)
-    const espiaLectura = jest.spyOn(prisma.terminalPaymentRequest, 'findFirst').mockImplementation(async (args: any) => {
+    const espiaLectura = jest.spyOn(prisma.terminalPaymentRequest, 'findFirst').mockImplementation((async (args: any) => {
       if (args?.where?.requestId === row.requestId && args?.select?.failureCode === true && !detenido) {
         detenido = true
         g.tomado()
         await g.abierta
       }
       return leerOriginal(args)
-    })
+    }) as never)
     // La ventana ya leyó la fila (`previo`, `updatedAt`) y va a buscar el Payment: ahí aterriza el `success` y la ventana sólo
     // sigue hacia su transacción y su CAS cuando la afirmación ya está en la fila (la puerta se toma después de la sentencia (1)).
     const buscarOriginal = svc.findReconcilablePayment.bind(terminalPaymentService)

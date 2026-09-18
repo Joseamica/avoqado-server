@@ -60,7 +60,7 @@ beforeAll(async () => {
     select: { id: true },
   })
   // Una SEGUNDA terminal del mismo negocio: un cobro atribuido a ella no puede cerrar una solicitud de la primera.
-  otra = await prisma.terminal.create({
+  const ajena = await prisma.terminal.create({
     data: {
       venueId: f.venueId,
       name: 'N86 ajena',
@@ -69,6 +69,9 @@ beforeAll(async () => {
     },
     select: { id: true, serialNumber: true },
   })
+  // `Terminal.serialNumber` es opcional en el esquema: se estrecha aquí en vez de mentirle al tipo con un cast.
+  if (!ajena.serialNumber) throw new Error('la terminal ajena nació sin serial')
+  otra = { id: ajena.id, serialNumber: ajena.serialNumber }
 })
 beforeEach(() => {
   jest.clearAllMocks()
