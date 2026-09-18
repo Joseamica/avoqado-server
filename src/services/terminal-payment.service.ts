@@ -6320,6 +6320,21 @@ class TerminalPaymentService {
 
     if (disposition === 'ACTIVE') {
       logger.info('🔎 [TerminalPayment] Probe: terminal still executing the attempt — reservation kept', { requestId })
+      // 18-sep: la respuesta ACTIVE deja CONSTANCIA DURABLE. Es lo que consulta la declaración del cajero
+      // («revisé la terminal y no se cobró») para no escribir encima de un cobro que sigue corriendo: antes
+      // esto sólo iba al log y el veto del diseño no tenía dato que mirar. Contabilidad, no desenlace — por
+      // eso NO toca `status`, `failureCode` ni `updatedAt`, y un fallo aquí no cambia la respuesta a la sonda.
+      try {
+        await prisma.$executeRaw`
+          UPDATE "TerminalPaymentRequest"
+          SET "resultJson" = coalesce("resultJson", '{}'::jsonb) || jsonb_build_object('probeActiveAt', ${new Date().toISOString()})
+          WHERE "id" = ${row.id}`
+      } catch (err) {
+        logger.warn('⚠️ [TerminalPayment] no se pudo sellar probeActiveAt — la reserva se conserva igual', {
+          requestId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
       return true
     }
 
