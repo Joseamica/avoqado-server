@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { DeviceFormFactor, Prisma, TerminalPaymentRequestStatus, TerminalStatus, TerminalType } from '@prisma/client'
@@ -487,13 +488,25 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
       requestId: z.string().min(1).describe('The stuck charge (status UNKNOWN) from terminal_payment_requests'),
       reason: z.string().min(3).max(300).optional().describe('Why you are releasing it (e.g. "la PAX se reinició y no cobró")'),
       confirm: z.boolean().optional().describe('Must be true to actually release; without it you get a preview'),
+      verifiedUncharged: z
+        .boolean()
+        .optional()
+        .describe(
+          'Una PERSONA miró la pantalla de la terminal y confirma que ese cobro NO pasó. Es testimonio de un operador, ' +
+            'nunca evidencia del procesador: libera la venta y la terminal, queda auditado con su nombre, y si el dinero ' +
+            'aparece después el registro manda sobre la declaración. Sólo úsalo si alguien lo revisó de verdad.',
+        ),
     },
-    async ({ venueId, requestId, reason, confirm }) => {
+    async ({ venueId, requestId, reason, confirm, verifiedUncharged }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       // Same bar as the tablet's manager button: `tpv:update` (MANAGER+). NOT `payments:create`,
       // which every cashier holds — a cashier must not be able to free a slot through the MCP
       // that they cannot free from the POS.
-      guard.requirePermission('tpv:update', venueId)
+      //
+      // 🔴 18-sep: la SIMETRÍA con el POS se conserva, y por eso el permiso ahora depende de la acción. Desde el
+      // POS el cajero ya puede DECLARAR que un cobro no pasó (`payments:reconcile-uncharged`), pero sigue sin poder
+      // liberar una terminal a secas. Aquí igual: la declaración pide su permiso, la liberación pide el de gerencia.
+      guard.requirePermission(verifiedUncharged ? 'payments:reconcile-uncharged' : 'tpv:update', venueId)
       // 🔴 Freeing a terminal lets the cashier charge again on it: a read-only token must never do it.
       requireWriteScopeAlways(scope, 'tpv:update', 'cierra las sesiones abiertas de una terminal')
 
@@ -518,7 +531,9 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         },
       })
       if (!row) return text({ ok: false, error: 'No encontré ese cobro en tus locales.' })
-      if (row.status !== TerminalPaymentRequestStatus.UNKNOWN) {
+      // 🔴 La variante declarada se salta ESTE filtro —no el del servicio, que revalida todo— porque una fila
+      // TIMED_OUT todavía incierta también aparta la terminal: son justo las legacy que hay que poder limpiar.
+      if (!verifiedUncharged && row.status !== TerminalPaymentRequestStatus.UNKNOWN) {
         // Se informa TAMBIÉN el desenlace canónico: `terminal_payment_requests` muestra el status ya traducido, así
         // que sin esto una fila que ahí se ve «UNKNOWN» rebotaría aquí con «su estado es FAILED» y nadie entendería.
         const desenlace = desenlaceCanonico(row)
@@ -543,9 +558,12 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
           senderDevice: row.senderDevice,
           ageMinutes,
           terminalReturnedAt: row.terminalReturnedAt?.toISOString() ?? null,
-          message:
-            `La terminal ${row.terminalId} tiene un cobro de $${(row.amountCents / 100).toFixed(2)} sin confirmar desde hace ${ageMinutes} min. ` +
-            'Se buscará el pago exacto de esta solicitud. Si su resultado sigue pendiente, la terminal conservará la protección. Confirma para consultar y conciliar; no vuelvas a pasar la tarjeta.',
+          message: verifiedUncharged
+            ? `Vas a DECLARAR que alguien miró la terminal ${row.terminalId} y el cobro de $${(row.amountCents / 100).toFixed(2)} ` +
+              `(hace ${ageMinutes} min) no pasó. Eso libera la venta y la terminal, y queda registrado a nombre de quien lo declara. ` +
+              'Si el servidor encuentra cualquier señal de que sí se cobró, lo rechaza. Confirma sólo si se revisó de verdad.'
+            : `La terminal ${row.terminalId} tiene un cobro de $${(row.amountCents / 100).toFixed(2)} sin confirmar desde hace ${ageMinutes} min. ` +
+              'Se buscará el pago exacto de esta solicitud. Si su resultado sigue pendiente, la terminal conservará la protección. Confirma para consultar y conciliar; no vuelvas a pasar la tarjeta.',
         })
       }
 
@@ -554,6 +572,16 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         venueId,
         actor: { staffId: scope.staffId, source: 'MCP' },
         reason: reason ?? 'Liberada desde el MCP',
+        ...(verifiedUncharged
+          ? {
+              declaration: {
+                requestId,
+                resolutionId: randomUUID(),
+                statement: 'UNCHARGED_VERIFIED' as const,
+                statementVersion: 1 as const,
+              },
+            }
+          : {}),
       })
       // The service writes its own ActivityLog; this adds the trace that it came through the MCP.
       await auditMcpWrite(scope, {
