@@ -143,12 +143,15 @@ beforeEach(() => {
   prismaMock.$queryRaw
     .mockReset()
     .mockImplementation(async (strings: string[]) => ((strings as string[]).join('?').includes(CONSULTA) ? filasDelSelector() : []))
-  // La escritura del cursor, con su CAS: sólo gana si el cursor sigue siendo el que se leyó.
+  // La escritura del cursor. La base sólo aplica el CAS si el `WHERE` lo PIDE — igual que Postgres: una escritura sin él
+  // pisaría el cursor de otra instancia, y esta emulación no se lo va a esconder.
   prismaMock.$executeRaw.mockReset().mockImplementation(async (strings: string[], ...values: unknown[]) => {
-    if (!(strings as string[]).join('?').includes('"collisionEvidenceCursor"')) return 1
+    const texto = (strings as string[]).join('?')
+    if (!texto.includes('"collisionEvidenceCursor"')) return 1
     const [nuevo, rowId, anterior] = values as [string | null, string, string | null]
     const s = solicitudes.find(x => x.rowId === rowId)
-    if (!s || s.cursor !== anterior) return 0
+    if (!s) return 0
+    if (texto.includes('"collisionEvidenceCursor" IS NOT DISTINCT FROM') && s.cursor !== anterior) return 0
     s.cursor = nuevo
     escrituras.push({ rowId, anterior, nuevo })
     return 1
@@ -333,7 +336,7 @@ describe('Ronda 6 · P1-B: el tope de cinco sin avance escondía la sexta eviden
       )
       expect(escritura).toBeDefined()
       const texto = (escritura[0] as string[]).join('?')
-      expect(texto).toMatch(/IS NOT DISTINCT FROM/)
+      expect(texto).toMatch(/"collisionEvidenceCursor" IS NOT DISTINCT FROM/)
       // `updatedAt` gobierna el barrido de 30 min y es la «última modificación real» de la fila: el cursor no la mueve.
       expect(texto).not.toContain('"updatedAt"')
       expect(texto).not.toMatch(/"status"|"failureCode"|"resultJson"/)
