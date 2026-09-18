@@ -33,7 +33,7 @@ import * as discountMobileController from '../controllers/mobile/discount.mobile
 import * as couponMobileController from '../controllers/mobile/coupon.mobile.controller'
 import * as upsellMobileController from '../controllers/mobile/upsell.mobile.controller'
 import { recordUpsellImpressionSchema, convertUpsellImpressionSchema } from '../schemas/dashboard/upsell.schema'
-import { updateDisplayModeSchema } from '../schemas/mobile/tpvSettings.mobile.schema'
+import { updateDisplayModeSchema, updateTerminalSettingsSchema } from '../schemas/mobile/tpvSettings.mobile.schema'
 import * as tpvSettingsMobileController from '../controllers/mobile/tpvSettings.mobile.controller'
 import { reportDeviceCapabilitiesSchema } from '../schemas/mobile/deviceCapabilities.mobile.schema'
 import * as deviceCapabilitiesMobileController from '../controllers/mobile/deviceCapabilities.mobile.controller'
@@ -2025,6 +2025,19 @@ router.patch(
   requireVenueMembership,
   validateRequest(updateDisplayModeSchema),
   tpvSettingsMobileController.updateDisplayMode,
+)
+
+// Ajustes de ESTE aparato desde la propia app (Más > Configuración). El binding por X-Device-ID
+// vive en el controlador: un POS sólo escribe su ficha, y sólo los ajustes que su tipo obedece
+// (`device-capabilities.service.ts`). La pestaña de Configuración del dashboard sigue siendo sólo
+// para las terminales de COBRO — de ahí que una tablet no tuviera dónde apagar la calificación.
+router.patch(
+  '/venues/:venueId/terminals/:terminalId/settings',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('tpv-settings:update'),
+  validateRequest(updateTerminalSettingsSchema),
+  tpvSettingsMobileController.updateTerminalSettings,
 )
 
 // ============================================================================

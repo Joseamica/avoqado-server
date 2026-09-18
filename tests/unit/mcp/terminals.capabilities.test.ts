@@ -163,6 +163,10 @@ describe('MCP list_devices capability projection', () => {
             stale: false,
           },
           supportedRemoteCommands: [],
+          // Qué ajustes puede cambiar este aparato desde su propia pantalla de Configuración.
+          // Un POS Android sólo obedece las pantallas del cobro; el catálogo completo es de las
+          // terminales de COBRO (`device-capabilities.service.ts`).
+          configurableSettings: ['showReviewScreen', 'showTipScreen', 'tipSuggestions'],
         },
       }),
     )
@@ -339,5 +343,87 @@ describe('MCP refund_card_on_terminal device action capability guard', () => {
       reason: 'Producto defectuoso',
     })
     expect(parseBody(response)).toMatchObject({ ok: true, status: 'opened', requestId: 'refund-request-1' })
+  })
+})
+
+/**
+ * `terminal_checkout_screens` — «¿esta tablet sigue pidiendo calificación?».
+ *
+ * 🔴 Lo que se fija aquí es la interpretación del dato, que es donde una lectura mentiría: un
+ * ajuste AUSENTE en `Terminal.config.settings` significa «el default del servidor», que está
+ * ENCENDIDO. Leerlo como apagado le diría a soporte que el negocio ya lo apagó cuando no lo hizo,
+ * y la búsqueda del problema arrancaría en el lugar equivocado.
+ */
+describe('MCP terminal_checkout_screens', () => {
+  function captureHandler() {
+    let handler: ((input: Record<string, unknown>) => Promise<any>) | undefined
+    const server = {
+      tool: (name: string, _description: string, _schema: unknown, candidate: typeof handler) => {
+        if (name === 'terminal_checkout_screens') handler = candidate
+      },
+    }
+    registerTerminalTools(server as any, { allowedVenueIds: ['venue-1'], staffId: 'staff-1' } as any)
+    if (!handler) throw new Error('terminal_checkout_screens handler was not registered')
+    return handler
+  }
+
+  function device(overrides: Record<string, unknown> = {}) {
+    return {
+      id: 'pos-1',
+      name: 'Tablet mostrador',
+      type: TerminalType.POS_ANDROID,
+      config: {},
+      venue: { name: 'Sucursal Centro' },
+      ...overrides,
+    }
+  }
+
+  it('un ajuste ausente se reporta ENCENDIDO: es el default del servidor, no un apagado', async () => {
+    prismaMock.terminal.findMany.mockResolvedValue([device({ config: {} })] as any)
+
+    const body = parseBody(await captureHandler()({ venueId: 'venue-1' }))
+
+    expect(body.devices[0].asksForRating.enabled).toBe(true)
+    expect(body.devices[0].asksForTip.enabled).toBe(true)
+  })
+
+  it('refleja lo que el negocio apagó, sin tocar el otro ajuste', async () => {
+    prismaMock.terminal.findMany.mockResolvedValue([
+      device({ config: { settings: { showReviewScreen: false } } }),
+    ] as any)
+
+    const body = parseBody(await captureHandler()({ venueId: 'venue-1' }))
+
+    expect(body.devices[0].asksForRating.enabled).toBe(false)
+    expect(body.devices[0].asksForTip.enabled).toBe(true)
+  })
+
+  it('dice si ese aparato lo puede cambiar desde su propia pantalla, y eso depende del TIPO', async () => {
+    prismaMock.terminal.findMany.mockResolvedValue([
+      device({ id: 'pos-1', type: TerminalType.POS_ANDROID }),
+      device({ id: 'pax-1', type: TerminalType.TPV_ANDROID }),
+      device({ id: 'kds-1', type: TerminalType.KDS }),
+    ] as any)
+
+    const body = parseBody(await captureHandler()({ venueId: 'venue-1' }))
+    const byId = Object.fromEntries(body.devices.map((d: any) => [d.id, d]))
+
+    expect(byId['pos-1'].asksForRating.configurable).toBe(true)
+    // La PAX lo tiene en su catálogo (lo edita el dashboard), una pantalla de cocina no.
+    expect(byId['pax-1'].asksForRating.configurable).toBe(true)
+    expect(byId['kds-1'].asksForRating.configurable).toBe(false)
+  })
+
+  it('está acotada: nunca trae más de 100 aparatos y excluye los retirados', async () => {
+    prismaMock.terminal.findMany.mockResolvedValue([device()] as any)
+
+    await captureHandler()({ venueId: 'venue-1' })
+
+    expect(prismaMock.terminal.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        take: 100,
+        where: expect.objectContaining({ status: { not: 'RETIRED' } }),
+      }),
+    )
   })
 })

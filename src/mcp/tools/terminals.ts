@@ -17,7 +17,12 @@ import {
   terminalPaymentService,
 } from '@/services/terminal-payment.service'
 import { invalidarVenuesEstrictos } from '@/services/terminal-payment-strictness'
-import { assertDeviceActionSupported, DEVICE_CAPABILITY_SELECT, toDeviceManagementDto } from '@/services/device-capabilities.service'
+import {
+  assertDeviceActionSupported,
+  DEVICE_CAPABILITY_SELECT,
+  resolveConfigurableSettings,
+  toDeviceManagementDto,
+} from '@/services/device-capabilities.service'
 
 /**
  * Un dispositivo cuenta como "en línea" si reportó en los últimos 5 minutos. Mismo
@@ -129,7 +134,7 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_devices',
-    'List the devices connected to your venues: PAX/NexGo payment terminals plus any phone, tablet or POS that installed Avoqado and signed in (Sunmi, iPhone, iPad, Android). Shows what kind of device it is, whether it is online right now, who used it last, and when it was first seen. Use it to answer "how many devices are running in my venue", "which device is offline", or to find the device behind a problem. Filter by formFactor (PHONE, TABLET, HANDHELD_POS, COUNTERTOP_POS, DESKTOP, UNKNOWN) or by onlyOnline. Retired devices are hidden unless includeRetired is true.',
+    'List the devices connected to your venues: PAX/NexGo payment terminals plus any phone, tablet or POS that installed Avoqado and signed in (Sunmi, iPhone, iPad, Android). Shows what kind of device it is, whether it is online right now, who used it last, and when it was first seen. Use it to answer "how many devices are running in my venue", "which device is offline", or to find the device behind a problem. Filter by formFactor (PHONE, TABLET, HANDHELD_POS, COUNTERTOP_POS, DESKTOP, UNKNOWN) or by onlyOnline. Retired devices are hidden unless includeRetired is true. Each device also reports `capabilities.configurableSettings`: which TPV settings THAT KIND of device can change from its own Settings screen (a POS tablet only obeys the checkout screens; a payment terminal has the full catalog; a printer or KDS none). Use `terminal_checkout_screens` to see what each device currently has turned on.',
     {
       venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues'),
       formFactor: z
@@ -227,6 +232,55 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         onlineCount: devices.filter(d => d.online).length,
         selfRegisteredCount: devices.filter(d => d.selfRegistered).length,
         byKind,
+        devices,
+      })
+    },
+  )
+
+  server.tool(
+    'terminal_checkout_screens',
+    'See what each device currently shows the customer during a charge: whether it asks for a star rating and whether it offers a tip. Use it to answer "why does this tablet still ask for stars?" or "is the tip screen off on the counter iPad?". `configurable` says whether that setting can be changed from the device\'s own Settings screen (POS phones/tablets) or only from the Avoqado dashboard (payment terminals). Read-only: to change it, the owner turns it off on the device (Más > Configuración) or in the dashboard.',
+    {
+      venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues'),
+      terminalId: z.string().optional().describe('Look up one specific device by its id'),
+    },
+    async ({ venueId, terminalId }) => {
+      const where = guard.venueFilter(venueId) // throws if out of scope
+
+      const rows = await prisma.terminal.findMany({
+        where: {
+          ...where,
+          ...(terminalId ? { id: terminalId } : {}),
+          status: { not: TerminalStatus.RETIRED },
+        },
+        // `config` es un JSON por terminal; el tope de 100 lo mantiene acotado igual que
+        // `list_devices` (regla `bounded-queries-and-server-load.md`).
+        select: { id: true, name: true, type: true, config: true, venue: { select: { name: true } } },
+        orderBy: [{ name: 'asc' }],
+        take: 100,
+      })
+
+      const devices = rows.map(row => {
+        const guardados = ((row.config as any)?.settings ?? {}) as Record<string, unknown>
+        const configurables = resolveConfigurableSettings(row.type)
+        const leer = (llave: 'showReviewScreen' | 'showTipScreen') => ({
+          // Ausente = el default del server (encendido), que es lo que el aparato obedece.
+          enabled: typeof guardados[llave] === 'boolean' ? (guardados[llave] as boolean) : true,
+          configurable: configurables.includes(llave),
+        })
+
+        return {
+          id: row.id,
+          venue: row.venue?.name,
+          name: row.name,
+          type: row.type,
+          asksForRating: leer('showReviewScreen'),
+          asksForTip: leer('showTipScreen'),
+        }
+      })
+
+      return text({
+        count: devices.length,
         devices,
       })
     },

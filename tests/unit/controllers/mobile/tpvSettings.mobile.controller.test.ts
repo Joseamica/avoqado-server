@@ -199,6 +199,8 @@ describe('getVenueTpvSettings (mobile) — plan-tier info', () => {
       canCheckoutAreaTickets: true,
       canDeliverAreaTickets: false,
       fulfillmentAreaId: null,
+  // Sin `type` en la fila simulada no hay tipo de aparato que resolver ⇒ ningún ajuste.
+      configurableSettings: [],
     })
     expect(res.__json.data.terminals[0]).not.toHaveProperty('deviceUid')
     expect(res.__json.data.terminals[0]).not.toHaveProperty('defaultWorkspace')
@@ -249,6 +251,8 @@ describe('getVenueTpvSettings (mobile) — plan-tier info', () => {
       canCheckoutAreaTickets: false,
       canDeliverAreaTickets: true,
       fulfillmentAreaId: 'area-cremeria',
+  // Sin `type` en la fila simulada no hay tipo de aparato que resolver ⇒ ningún ajuste.
+      configurableSettings: [],
     })
   })
 
@@ -677,5 +681,47 @@ describe('getVenueTpvSettings (mobile) — la lectura de ajustes queda acotada a
 
     expect(res.__json.success).toBe(true)
     expect(mockedGetTpvSettings).toHaveBeenCalledWith('term-device', { venueId })
+  })
+})
+
+describe('getVenueTpvSettings (mobile) — qué ajustes puede cambiar ESTE aparato', () => {
+  beforeEach(() => {
+    prismaMock.venueFeature.findMany.mockResolvedValue([])
+    prismaMock.venue.findUnique.mockResolvedValue({ seatCapExempt: false, status: 'ACTIVE' })
+    mockedGetTpvSettings.mockResolvedValue({} as Awaited<ReturnType<typeof getTpvSettings>>)
+  })
+
+  /**
+   * La lista viaja del servidor a la app para que Android/iOS NO la lleven codificada: si mañana un
+   * tipo de aparato gana o pierde un ajuste, no hace falta publicar un APK.
+   */
+  it.each([
+    ['POS_ANDROID', ['showReviewScreen', 'showTipScreen', 'tipSuggestions']],
+    ['POS_IOS', ['showReviewScreen', 'showTipScreen', 'tipSuggestions']],
+    ['KDS', []],
+  ] as const)('una ficha %s recibe exactamente sus ajustes configurables', async (type, expected) => {
+    prismaMock.terminal.findMany.mockResolvedValue([
+      { id: 'terminal-1', name: 'Tablet', status: 'ACTIVE', type, deviceUid: 'device-1', config: {}, configOverrides: {} },
+    ] as any)
+
+    const res = makeRes()
+    await getVenueTpvSettings(makeReq('device-1'), res, jest.fn() as NextFunction)
+
+    expect(res.__json.data.deviceTerminal.configurableSettings).toEqual(expected)
+    // El campo es interno del aparato: no se filtra a la lista pública de terminales.
+    expect(res.__json.data.terminals[0]).not.toHaveProperty('configurableSettings')
+  })
+
+  it('una terminal de COBRO conserva su catálogo completo (la app del TPV no se toca)', async () => {
+    prismaMock.terminal.findMany.mockResolvedValue([
+      { id: 'pax-1', name: 'PAX', status: 'ACTIVE', type: 'TPV_ANDROID', deviceUid: 'device-pax', config: {}, configOverrides: {} },
+    ] as any)
+
+    const res = makeRes()
+    await getVenueTpvSettings(makeReq('device-pax'), res, jest.fn() as NextFunction)
+
+    expect(res.__json.data.deviceTerminal.configurableSettings).toEqual(
+      expect.arrayContaining(['showReviewScreen', 'showTipScreen', 'kioskModeEnabled', 'requirePinLogin']),
+    )
   })
 })
