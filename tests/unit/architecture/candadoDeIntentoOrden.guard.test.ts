@@ -226,11 +226,17 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
     expect(cuerpo.match(/prisma\.\$queryRaw/g) ?? []).toHaveLength(1)
     expect(cuerpo).toMatch(/LEFT JOIN LATERAL \(\$\{pagoLigadoDeLaFilaSql\('r'\)\} LIMIT 1\) ligado/)
     // 🔴 Ronda 5 (P1-B): la evidencia NO se acota a «la primera» — viaja como conjunto agregado, ordenado y con su tope.
+    // 🔴 Ronda 6 (Codex r11, P1-B): y el conjunto es la PÁGINA que sigue al cursor persistido de la fila, ordenada por el
+    // AGREGADO (el orden decide qué candidata se conserva ante un DEFERRED), con UNA de más para saber si hay página siguiente.
     expect(cuerpo).toMatch(
-      /SELECT array_agg\(c\."id"\) AS "ids"\s+FROM \(\$\{evidenciaDeConciliacionDeLaFilaSql\('r'\)\} ORDER BY 1 LIMIT \$\{LIMITE_DE_EVIDENCIAS_DE_COLISION\}\) c/,
+      /SELECT array_agg\(c\."id" ORDER BY c\."id"\) AS "ids"\s+FROM \(\s+SELECT e\."id" FROM \(\$\{evidenciaDeConciliacionDeLaFilaSql\('r'\)\}\) e\s+WHERE r\."collisionEvidenceCursor" IS NULL OR e\."id" > r\."collisionEvidenceCursor"\s+ORDER BY 1 LIMIT \$\{LIMITE_DE_EVIDENCIAS_DE_COLISION \+ 1\}\s+\) c/,
     )
     expect(cuerpo).not.toMatch(/\$\{evidenciaDeConciliacionDeLaFilaSql\('r'\)\} LIMIT 1/)
-    expect(cuerpo).toMatch(/ligado\."id" IS NOT NULL OR colision\."ids" IS NOT NULL OR \$\{hayAfirmacion\}/)
+    expect(cuerpo).toMatch(/r\."collisionEvidenceCursor" AS "cursorDeEvidencias"/)
+    // La fila con cursor entra aunque su página venga vacía: es la única forma de REINICIARLO al agotar el conjunto.
+    expect(cuerpo).toMatch(
+      /ligado\."id" IS NOT NULL OR colision\."ids" IS NOT NULL OR \$\{hayAfirmacion\} OR r\."collisionEvidenceCursor" IS NOT NULL\)/,
+    )
     // El MISMO recorrido: un solo keyset, un solo tope de lotes, un solo horizonte.
     expect(cuerpo).toMatch(/for \(let lote = 0; lote < LOTES_MAXIMOS_DE_LIBERADAS; lote\+\+\)/)
     expect(cuerpo.match(/LIMIT \$\{TAMANO_DEL_LOTE_LIBERADAS\}/g) ?? []).toHaveLength(1)
@@ -245,10 +251,17 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
     expect(cuerpoSenal).toMatch(/origen: 'BARRIDO_SENALES'/)
     // 🔴 Ronda 5 (P1-B): se RECORREN las candidatas —acotadas— y una identidad ajena NO corta el recorrido: si volviera a
     // quedarse con la primera, una evidencia de otra terminal taparía a la legítima para siempre.
-    expect(cuerpoSenal).toMatch(
-      /for \(const evidenciaId of \(senal\.evidenciaIds \?\? \[\]\)\.slice\(0, LIMITE_DE_EVIDENCIAS_DE_COLISION\)\)/,
-    )
+    expect(cuerpoSenal).toMatch(/const pagina = traidas\.slice\(0, LIMITE_DE_EVIDENCIAS_DE_COLISION\)/)
+    expect(cuerpoSenal).toMatch(/for \(const evidenciaId of pagina\)/)
     expect(cuerpoSenal).toMatch(/if \(resultado !== 'IDENTITY_MISMATCH'\) break/)
+    // 🔴 Ronda 6: el cursor sólo pasa por encima DESPUÉS del corte — un DEFERRED o un NOT_APPLICABLE conservan la candidata.
+    antes(s, "if (resultado !== 'IDENTITY_MISMATCH') break", 'cursor = evidenciaId', senal)
+    // Y la escritura del cursor es contabilidad: fuera de toda transacción, sin `updatedAt`, con CAS sobre lo leído.
+    const escritor = indice(s, 'private async guardarCursorDeEvidencias(')
+    const cuerpoDelEscritor = s.slice(escritor, indice(s, '\n  /**', escritor))
+    expect(cuerpoDelEscritor).not.toMatch(/\$transaction/)
+    expect(cuerpoDelEscritor).not.toMatch(/"updatedAt"/)
+    expect(cuerpoDelEscritor).toMatch(/"collisionEvidenceCursor" IS NOT DISTINCT FROM/)
     // P1-C(b): en `closeRow` la relectura ya NO depende de que gane MI llamada — no hay `return escrito` en medio.
     const cierre = indice(s, 'private async closeRow(')
     const bloque = s.slice(indice(s, 'await this.escribirSuccessDegradado(', cierre), indice(s, 'const data:', cierre))

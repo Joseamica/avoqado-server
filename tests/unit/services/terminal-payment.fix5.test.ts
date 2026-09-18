@@ -270,7 +270,8 @@ describe('Ronda 5 · el selector surfacea un conjunto ACOTADO de evidencias, no 
     // Y el recorrido conserva sus límites: mismo keyset, mismo lote, mismo horizonte de 7 días.
     expect(completo).toMatch(/ORDER BY r\."createdAt" ASC, r\."id" ASC/)
     expect(values).toContain(200)
-    expect(values).toContain(5)
+    // Ronda 6: la consulta pide el tope + 1 (se examinan 5; la sexta sólo dice si hay página siguiente — ver fix6).
+    expect(values).toContain(5 + 1)
     expect(JSON.stringify(values)).toContain('2026-09-10T12:00:00')
   })
 })

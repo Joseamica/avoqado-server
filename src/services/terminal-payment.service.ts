@@ -319,8 +319,13 @@ const LOTES_MAXIMOS_DE_LIBERADAS = 25
  *
  * Es un tope explícito y pequeño (el mismo de `pagosLigados`), y va en LOS DOS sitios a propósito: dentro del `LIMIT` del
  * LATERAL —para que la consulta no traiga más de lo que se va a mirar— y en el recorrido, para que «acotado» sea cierto por
- * construcción y no por confiar en la consulta. Varias evidencias sobre la MISMA solicitud ya es un caso patológico: 5 cubre
- * con holgura lo que un humano va a tener que revisar a mano de todos modos.
+ * construcción y no por confiar en la consulta.
+ *
+ * 🔴 Ronda 6 (Codex r11, P1-B): el tope es POR PASADA, no un máximo de evidencias. Codex lo demostró alcanzable —cinco ajenas
+ * delante y una sexta legítima: cuatro barridos examinaron sólo E1–E5— y no existe invariante que limite a cinco (el registro
+ * crea la colisión aunque el arbitraje haya rechazado la asociación). Por eso el recorrido AVANZA con un cursor persistido en
+ * la fila (`TerminalPaymentRequest.collisionEvidenceCursor`), y la consulta trae UNA de más (`tope + 1`) sólo para saber si
+ * hay página siguiente: se examinan como mucho cinco por pasada.
  */
 const LIMITE_DE_EVIDENCIAS_DE_COLISION = 5
 
@@ -4761,9 +4766,14 @@ class TerminalPaymentService {
       createdAt: Date
       id: string
       paymentId: string | null
-      /** Ronda 5: el CONJUNTO acotado de evidencias de colisión, no «la primera» (`NULL` cuando no hay ninguna). */
+      /**
+       * Ronda 5: el CONJUNTO acotado de evidencias de colisión, no «la primera» (`NULL` cuando no hay ninguna). Ronda 6: es la
+       * PÁGINA que sigue al cursor, en el orden de la base, con UNA de más para saber si hay página siguiente.
+       */
       evidenciaIds: string[] | null
       afirmacion: boolean
+      /** Ronda 6: hasta qué evidencia recorrió ya la red esta solicitud (`NULL` = desde el principio). */
+      cursorDeEvidencias: string | null
     }
     const horizonte = new Date(now.getTime() - HORIZONTE_DE_LA_RED_DURABLE_MS)
     let cursor: { createdAt: Date; id: string } | null = null
@@ -4787,20 +4797,30 @@ class TerminalPaymentService {
       // discrepar en los bordes (`deviceSerialNumber` no-cadena, serial vacío)—, así que lo que se arregla es la FORMA: se deja
       // de acotar antes de filtrar, y el recorrido decide. El filtro no cambia: `array_agg` sobre cero filas es `NULL`, o sea
       // exactamente el mismo `IS NOT NULL` que antes.
+      //
+      // 🔴 Ronda 6 (Codex r11, P1-B): la página es la que SIGUE al cursor persistido de la fila (`id > cursor ORDER BY id`),
+      // con UNA de más para saber si hay página siguiente. El orden lo fija el AGREGADO (`array_agg(… ORDER BY …)`), no la
+      // suerte del subquery: con cursor, el orden decide qué candidata se conserva ante un `DEFERRED`. Y la fila entra aunque
+      // su página venga vacía si tiene cursor: es la única forma de REINICIARLO cuando el conjunto se agotó o cambió.
       const filas: Fila[] = await retry<Fila[]>(
         (): Promise<Fila[]> =>
           prisma.$queryRaw<Fila[]>`
             SELECT r."requestId", r."venueId", r."createdAt", r."id", /* liberadas-con-senal */
-                   ligado."id" AS "paymentId", colision."ids" AS "evidenciaIds", (${hayAfirmacion}) AS "afirmacion"
+                   ligado."id" AS "paymentId", colision."ids" AS "evidenciaIds", (${hayAfirmacion}) AS "afirmacion",
+                   r."collisionEvidenceCursor" AS "cursorDeEvidencias"
             FROM "TerminalPaymentRequest" r
             LEFT JOIN LATERAL (${pagoLigadoDeLaFilaSql('r')} LIMIT 1) ligado ON true
             LEFT JOIN LATERAL (
-              SELECT array_agg(c."id") AS "ids"
-              FROM (${evidenciaDeConciliacionDeLaFilaSql('r')} ORDER BY 1 LIMIT ${LIMITE_DE_EVIDENCIAS_DE_COLISION}) c
+              SELECT array_agg(c."id" ORDER BY c."id") AS "ids"
+              FROM (
+                SELECT e."id" FROM (${evidenciaDeConciliacionDeLaFilaSql('r')}) e
+                WHERE r."collisionEvidenceCursor" IS NULL OR e."id" > r."collisionEvidenceCursor"
+                ORDER BY 1 LIMIT ${LIMITE_DE_EVIDENCIAS_DE_COLISION + 1}
+              ) c
             ) colision ON true
             WHERE r."status" = 'FAILED' AND r."failureCode" IN (${Prisma.join([...CODIGOS_DE_LIBERACION_REVERSIBLE])})
               AND r."paymentId" IS NULL AND r."createdAt" >= ${utcTs(horizonte)}
-              AND (ligado."id" IS NOT NULL OR colision."ids" IS NOT NULL OR ${hayAfirmacion})
+              AND (ligado."id" IS NOT NULL OR colision."ids" IS NOT NULL OR ${hayAfirmacion} OR r."collisionEvidenceCursor" IS NOT NULL)
               ${keyset}
             ORDER BY r."createdAt" ASC, r."id" ASC
             LIMIT ${TAMANO_DEL_LOTE_LIBERADAS}`,
@@ -4854,34 +4874,154 @@ class TerminalPaymentService {
    *  · `NOT_APPLICABLE`    — o la fila dejó de estar liberada (ninguna candidata va a servir) o esa evidencia ya no consta en
    *                          la base (y entonces el selector deja de devolverla, así que la siguiente pasada prueba otra).
    *                          En los dos casos parar es correcto y se recupera solo.
+   *
+   * 🔴 Ronda 6 (Codex r11, P1-B): el recorrido AVANZA entre páginas con el cursor persistido de la fila, en los términos que
+   * prescribió Codex. **Avanza** sobre cada evidencia examinada que resultó ajena y sobre las que la caché ya recordaba como
+   * tales (una contradicción vieja no vuelve a gastar el cupo); ante `DEFERRED` o `NOT_APPLICABLE` **conserva** la candidata
+   * —«no pude ahora» no es «ésta no sirve»—; y al **agotar** el conjunto (se recorrió la página entera y no había siguiente)
+   * vuelve a `NULL`, para recoger evidencias con id anterior al punto donde quedó. La regla T10 sigue en el núcleo.
+   *
+   * Y si el conjunto se agota sin retener nada, la solicitud está ATASCADA por evidencias que no acreditan su terminal: ya no
+   * es sólo un 🚨 en el log (Codex midió cero correos) — se avisa UNA vez por solicitud (`avisarEvidenciaSinIdentidad`).
    */
   private async retenerPorSenalSinPago(
     row: FilaDeCobroRemoto,
-    senal: { evidenciaIds: string[] | null; afirmacion: boolean },
+    senal: { evidenciaIds: string[] | null; afirmacion: boolean; cursorDeEvidencias?: string | null },
   ): Promise<boolean> {
-    // El tope, también aquí: «acotado» no puede depender de que la consulta lo respete (ni de cuántas evidencias haya).
-    for (const evidenciaId of (senal.evidenciaIds ?? []).slice(0, LIMITE_DE_EVIDENCIAS_DE_COLISION)) {
+    // La consulta trae UNA de más sólo para saber si hay página siguiente; se EXAMINAN como mucho el tope. «Acotado» tampoco
+    // depende de que la consulta respete su `LIMIT`.
+    const traidas = senal.evidenciaIds ?? []
+    const pagina = traidas.slice(0, LIMITE_DE_EVIDENCIAS_DE_COLISION)
+    const cursorLeido = senal.cursorDeEvidencias ?? null
+    let cursor = cursorLeido
+    let recorridas = 0
+    for (const evidenciaId of pagina) {
       const clave = `${row.venueId}:${row.requestId}:${evidenciaId}`
-      if (this.contradiccionesDeLaRed.has(clave)) continue
-      const resultado = await this.retenerSolicitudLiberadaPorColisionDeReferencia({
-        requestId: row.requestId,
-        venueId: row.venueId,
-        paymentId: evidenciaId,
-        origen: 'BARRIDO_SENALES',
-      })
-      if (resultado === 'HELD') return true
-      if (resultado !== 'IDENTITY_MISMATCH') break
-      if (this.contradiccionesDeLaRed.size >= 10_000) this.contradiccionesDeLaRed.clear()
-      this.contradiccionesDeLaRed.add(clave)
+      if (!this.contradiccionesDeLaRed.has(clave)) {
+        const resultado = await this.retenerSolicitudLiberadaPorColisionDeReferencia({
+          requestId: row.requestId,
+          venueId: row.venueId,
+          paymentId: evidenciaId,
+          origen: 'BARRIDO_SENALES',
+        })
+        if (resultado === 'HELD') return true
+        // DEFERRED o NOT_APPLICABLE: se para SIN pasar por encima — la candidata queda para la pasada siguiente.
+        if (resultado !== 'IDENTITY_MISMATCH') break
+        if (this.contradiccionesDeLaRed.size >= 10_000) this.contradiccionesDeLaRed.clear()
+        this.contradiccionesDeLaRed.add(clave)
+      }
+      // Ajena, examinada ahora o recordada de antes: el cursor pasa por encima de ella.
+      cursor = evidenciaId
+      recorridas += 1
     }
-    if (!senal.afirmacion) return false
-    return (
+    // Agotado = se recorrió la página ENTERA y la consulta no trajo una de más. Entonces el cursor vuelve al principio.
+    const agotado = recorridas === pagina.length && traidas.length <= LIMITE_DE_EVIDENCIAS_DE_COLISION
+    const cursorNuevo = agotado ? null : cursor
+    if (cursorNuevo !== cursorLeido) await this.guardarCursorDeEvidencias(row, cursorLeido, cursorNuevo)
+    if (
+      senal.afirmacion &&
       (await this.retenerSolicitudLiberadaPorAfirmacionDeLaTerminal({
         requestId: row.requestId,
         venueId: row.venueId,
         origen: 'BARRIDO_SENALES',
       })) === 'HELD'
     )
+      return true
+    // `pagina.length > 0`: se examinaron evidencias en ESTA pasada. Una página vacía sólo llega aquí para reiniciar un cursor
+    // (evidencias que desaparecieron o quedaron detrás de él): eso no prueba que la solicitud esté atascada.
+    if (agotado && pagina.length > 0) await this.avisarEvidenciaSinIdentidad(row, pagina, cursorLeido !== null)
+    return false
+  }
+
+  /**
+   * Ronda 6: persiste hasta dónde recorrió la red durable las evidencias de una solicitud liberada. Es CONTABILIDAD del
+   * barrido, no un cambio de la solicitud:
+   *
+   *  · no toca `updatedAt` — gobierna el barrido de 30 min y es la «última modificación real» de la fila; moverlo en cada
+   *    pasada mantendría a una solicitud atascada dentro de ese barrido para siempre;
+   *  · CAS sobre el valor LEÍDO (`IS NOT DISTINCT FROM`): si otra instancia ya lo movió, no se pisa con un valor viejo;
+   *  · nunca lanza: un fallo aquí no puede tumbar la red para las demás solicitudes del lote. Perder una escritura sólo
+   *    repite la página en la pasada siguiente (el núcleo es idempotente bajo sus candados y la caché ahorra el 🚨).
+   */
+  private async guardarCursorDeEvidencias(row: FilaDeCobroRemoto, anterior: string | null, nuevo: string | null): Promise<void> {
+    try {
+      await prisma.$executeRaw`
+        UPDATE "TerminalPaymentRequest" SET "collisionEvidenceCursor" = ${nuevo}::text
+        WHERE "id" = ${row.id} AND "collisionEvidenceCursor" IS NOT DISTINCT FROM ${anterior}::text`
+    } catch (err) {
+      logger.warn('⚠️ [Terminal-payment watchdog] no se pudo guardar el cursor de evidencias — la pasada siguiente repite la página', {
+        requestId: row.requestId,
+        venueId: row.venueId,
+        anterior,
+        nuevo,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+
+  /**
+   * Ronda 6 (el segundo hallazgo de Codex r11): una solicitud LIBERADA cuyas evidencias de colisión NO acreditan su terminal
+   * se queda así —diciéndole al POS «Se puede volver a cobrar» con una posible segunda captura encima— y hasta ahora sólo lo
+   * decía un 🚨 por evidencia en el log: `IDENTITY_MISMATCH` retorna antes del `sendOpsAlert`, que sólo corre tras una
+   * retención efectiva. Codex midió cinco alarmas y cero correos.
+   *
+   * El equilibrio: **UN aviso por solicitud** (correo + asiento en la bitácora), cuando el recorrido AGOTA el conjunto sin
+   * retener nada — no por evidencia (serían hasta N correos por un solo cobro, y podría salir antes de que la legítima que
+   * viene detrás se examine) ni por pasada. El umbral es «se revisaron TODAS y ninguna acredita», no un conteo: una sola
+   * evidencia ajena ya deja la venta liberada con el mismo riesgo, y un umbral de N silenciaría justo el caso más común.
+   *
+   * «Una vez» es DURABLE: `debeAuditar` busca el asiento en la bitácora, así que ni un reinicio ni otra instancia lo repiten
+   * (salvo la carrera de dos instancias que ya aceptan los demás avisos de este archivo). Por eso el asiento se escribe
+   * DIRECTO y ANTES del correo —como el de la re-retención—, no con `logAction`: aquí el asiento ES la memoria de «ya se
+   * avisó», y `logAction` falla en silencio. Sin asiento no hay correo (un reinicio lo repetiría); se suelta la reserva en
+   * proceso y la pasada siguiente reintenta los dos. Nunca lanza.
+   */
+  private async avisarEvidenciaSinIdentidad(row: FilaDeCobroRemoto, evidencias: string[], hubo: boolean): Promise<void> {
+    const accion = 'TERMINAL_PAYMENT_EVIDENCE_NOT_ACCREDITED_AFTER_RELEASE'
+    let reservado = false
+    try {
+      if (!(await this.debeAuditar(accion, row.id))) return
+      reservado = true
+      await prisma.activityLog.create({
+        data: {
+          staffId: null,
+          venueId: row.venueId,
+          action: accion,
+          entity: 'TerminalPaymentRequest',
+          entityId: row.id,
+          data: {
+            requestId: row.requestId,
+            terminalId: row.terminalId,
+            orderId: row.orderId,
+            amountCents: row.amountCents,
+            evidencePaymentIds: evidencias,
+            previousPages: hubo,
+          },
+        },
+      })
+    } catch (err) {
+      // La MISMA llave que reserva `debeAuditar` (`acción:fila`): soltarla es lo que deja reintentar en la pasada siguiente.
+      if (reservado) this.anomaliasAuditadas.delete(`${accion}:${row.id}`)
+      logger.warn('⚠️ [Terminal-payment watchdog] no se pudo auditar el aviso de evidencia sin identidad — se reintenta', {
+        requestId: row.requestId,
+        venueId: row.venueId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+      return
+    }
+    logger.error(
+      '🚨 [TerminalPayment] A RELEASED request keeps collision evidence that never accredits its terminal — it stays released for review',
+      { requestId: row.requestId, venueId: row.venueId, terminalId: row.terminalId, orderId: row.orderId, evidencePaymentIds: evidencias },
+    )
+    // `sendOpsAlert` nunca rechaza (atrapa por dentro): mismo idioma que el resto de este archivo.
+    void sendOpsAlert({
+      subject: `Cobro liberado con evidencia que no acredita su terminal — ${row.terminalId}`,
+      lines: [
+        `La solicitud ${row.requestId} de $${(row.amountCents / 100).toFixed(2)} (orden ${row.orderId ?? 'sin orden'}) sigue LIBERADA: el POS puede estar diciendo «Se puede volver a cobrar». Tiene evidencia de colisión de referencia que no acredita la terminal ${row.terminalId}, así que el servidor no la retuvo.`,
+        `Evidencias revisadas en la última página (hasta ${LIMITE_DE_EVIDENCIAS_DE_COLISION}): ${evidencias.join(', ')}.${hubo ? ' Hubo más en páginas anteriores.' : ''}`,
+        'Confirmar en el portal del procesador si hubo cargo y conciliar a mano. Este aviso se manda una sola vez por solicitud.',
+      ],
+    })
   }
 
   /**

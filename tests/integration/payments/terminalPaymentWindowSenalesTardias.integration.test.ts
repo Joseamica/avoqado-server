@@ -641,15 +641,21 @@ describe('Ronda 3 · P2: el plan de la pregunta «hay un cobro ligado» usa el �
     const filas = await prisma.$queryRaw<{ 'QUERY PLAN': string }[]>`
       EXPLAIN (ANALYZE, BUFFERS)
       SELECT r."requestId", r."venueId", r."createdAt", r."id",
-             ligado."id" AS "paymentId", colision."ids" AS "evidenciaIds", (${hayAfirmacion}) AS "afirmacion"
+             ligado."id" AS "paymentId", colision."ids" AS "evidenciaIds", (${hayAfirmacion}) AS "afirmacion",
+             r."collisionEvidenceCursor" AS "cursorDeEvidencias"
       FROM "TerminalPaymentRequest" r
       LEFT JOIN LATERAL (${pagoLigadoDeLaFilaSql('r')} LIMIT 1) ligado ON true
       LEFT JOIN LATERAL (
-        SELECT array_agg(c."id") AS "ids" FROM (${evidenciaDeConciliacionDeLaFilaSql('r')} ORDER BY 1 LIMIT 5) c
+        SELECT array_agg(c."id" ORDER BY c."id") AS "ids"
+        FROM (
+          SELECT e."id" FROM (${evidenciaDeConciliacionDeLaFilaSql('r')}) e
+          WHERE r."collisionEvidenceCursor" IS NULL OR e."id" > r."collisionEvidenceCursor"
+          ORDER BY 1 LIMIT 6
+        ) c
       ) colision ON true
       WHERE r."status" = 'FAILED' AND r."failureCode" IN ('NO_EVIDENCE_AFTER_WINDOW','OPERATOR_RECONCILED_NO_CHARGE')
         AND r."paymentId" IS NULL AND r."createdAt" >= (NOW() AT TIME ZONE 'UTC') - INTERVAL '7 days'
-        AND (ligado."id" IS NOT NULL OR colision."ids" IS NOT NULL OR ${hayAfirmacion})
+        AND (ligado."id" IS NOT NULL OR colision."ids" IS NOT NULL OR ${hayAfirmacion} OR r."collisionEvidenceCursor" IS NOT NULL)
       ORDER BY r."createdAt" ASC, r."id" ASC LIMIT 200`
     console.log(`\n[P2] filas candidatas de la red durable: ${candidatas}\n` + filas.map(f2 => f2['QUERY PLAN']).join('\n') + '\n')
     expect(Number(candidatas)).toBeGreaterThanOrEqual(1)
@@ -750,32 +756,33 @@ describe('Ronda 4 · P1-B: la colisión cuya re-retención se DIFIRIÓ ya no se 
 // 🔑 Contra Postgres REAL porque lo que estaba mal era la CONSULTA: el `LIMIT 1` del LATERAL acotaba el conjunto ANTES de
 // que nadie comprobara la identidad acreditada (regla T10), así que la evidencia de otra terminal —rechazada, con razón—
 // se devolvía en cada pasada y la legítima no se examinaba jamás. Un mock no puede demostrar qué devuelve el selector.
-describe('Ronda 5 · P1-B: el selector surfacea TODAS las evidencias acotadas, no sólo la primera', () => {
-  /**
-   * Una EVIDENCIA de conciliación tal como la escribe el registrador: Payment PENDING apuntado a la solicitud con su
-   * `reconciliation.kind`. El `terminalId` decide su procedencia acreditada (`Payment.terminal.serialNumber`), que es lo
-   * único que separa a la legítima de la ajena. El `id` es explícito para fijar el orden del conjunto (`ORDER BY 1`).
-   */
-  const evidencia = async (args: { id: string; orderId: string; requestId: string; terminalId: string }) =>
-    prisma.payment.create({
-      data: {
-        id: args.id,
-        venueId: f.venueId,
-        orderId: args.orderId,
-        source: 'TPV',
-        terminalId: args.terminalId,
-        terminalPaymentRequestId: args.requestId,
-        amount: 100,
-        method: 'CREDIT_CARD',
-        status: 'PENDING',
-        feePercentage: 0,
-        feeAmount: 0,
-        netAmount: 100,
-        processorData: { reconciliation: { kind: 'POSSIBLE_REFERENCE_COLLISION' } },
-      },
-      select: { id: true },
-    })
+/**
+ * Una EVIDENCIA de conciliación tal como la escribe el registrador: Payment PENDING apuntado a la solicitud con su
+ * `reconciliation.kind`. El `terminalId` decide su procedencia acreditada (`Payment.terminal.serialNumber`), que es lo
+ * único que separa a la legítima de la ajena. El `id` es explícito para fijar el orden del conjunto (`ORDER BY 1`).
+ * (Rondas 5 y 6.)
+ */
+const evidencia = async (args: { id: string; orderId: string; requestId: string; terminalId: string }) =>
+  prisma.payment.create({
+    data: {
+      id: args.id,
+      venueId: f.venueId,
+      orderId: args.orderId,
+      source: 'TPV',
+      terminalId: args.terminalId,
+      terminalPaymentRequestId: args.requestId,
+      amount: 100,
+      method: 'CREDIT_CARD',
+      status: 'PENDING',
+      feePercentage: 0,
+      feeAmount: 0,
+      netAmount: 100,
+      processorData: { reconciliation: { kind: 'POSSIBLE_REFERENCE_COLLISION' } },
+    },
+    select: { id: true },
+  })
 
+describe('Ronda 5 · P1-B: el selector surfacea TODAS las evidencias acotadas, no sólo la primera', () => {
   it('🔴 la secuencia de Codex: E1 ajena PRIMERO + E2 legítima ⇒ la red retiene por E2, y la ajena sigue gritando una vez', async () => {
     const { solicitud, venta } = await liberadaPorLaVentana()
     const principal = await terminalPrincipal()
@@ -846,6 +853,111 @@ describe('Ronda 5 · P1-B: el selector surfacea TODAS las evidencias acotadas, n
       WHERE r."requestId" = ${solicitud.requestId} AND r."venueId" = ${f.venueId}`
     expect(filas).toHaveLength(1)
     expect(filas[0].evidenciaIds).toBeNull()
+  })
+})
+
+// ═══════ RONDA 6 · el tope de cinco necesita AVANCE entre páginas (Codex r11, P1-B) ═══════
+//
+// 🔑 Codex repitió la secuencia de la ronda 5 con CINCO ajenas delante y una SEXTA legítima: tras el `DEFERRED`, cuatro
+// barridos examinaron sólo E1–E5, E6 siguió PENDING y la solicitud respondió `failed / «Se puede volver a cobrar»`. No hay
+// invariante que limite a cinco: el registro crea la colisión aunque el arbitraje haya rechazado la asociación. Contra
+// Postgres REAL porque el defecto está en la CONSULTA (qué página devuelve) y en el cursor que ahora vive en la fila.
+describe('Ronda 6 · P1-B: el cursor persistido deja examinar la sexta evidencia y las que sigan', () => {
+  const ACCION_DEL_AVISO = 'TERMINAL_PAYMENT_EVIDENCE_NOT_ACCREDITED_AFTER_RELEASE'
+  const cursorDe = async (requestId: string) =>
+    (
+      await prisma.$queryRaw<{ cursor: string | null }[]>`
+      SELECT "collisionEvidenceCursor" AS "cursor" FROM "TerminalPaymentRequest" WHERE "requestId" = ${requestId}`
+    )[0]?.cursor ?? null
+  const cincoAjenas = async (venta: { id: string }, solicitud: { requestId: string }, prefijo: string) => {
+    for (let i = 1; i <= 5; i++)
+      await evidencia({ id: `${f.fixture}-${prefijo}-${i}`, orderId: venta.id, requestId: solicitud.requestId, terminalId: otra.id })
+  }
+
+  it('🔴 la secuencia de Codex con SEIS: cinco ajenas + una sexta legítima ⇒ la sexta se examina y la solicitud queda RETENIDA', async () => {
+    const { solicitud, venta } = await liberadaPorLaVentana()
+    const principal = await terminalPrincipal()
+    await cincoAjenas(venta, solicitud, 'r6a')
+    const legitima = await evidencia({
+      id: `${f.fixture}-r6a-6`,
+      orderId: venta.id,
+      requestId: solicitud.requestId,
+      terminalId: principal.id,
+    })
+
+    // Las cuatro pasadas que Codex corrió. Con el defecto, las cuatro examinaban sólo E1–E5.
+    for (let pasada = 0; pasada < 4; pasada++) await terminalPaymentService.reconcileUnknownRequests(new Date())
+
+    // `retenida` es lo que ve el POS: TIMED_OUT / UNRESOLVED y ningún «Se puede volver a cobrar».
+    const retenidaR = await retenida(solicitud.requestId, venta.id)
+    expect(retenidaR.resultJson).toMatchObject({
+      referenceCollisionAfterRelease: { paymentId: legitima.id, reason: 'REFERENCE_COLLISION_AFTER_RELEASE', origen: 'BARRIDO_SENALES' },
+    })
+    expect(await asientos(retenidaR.id, COLISION)).toHaveLength(1)
+    // Retenida por la legítima: el aviso de «atascada» no aplica (esa solicitud ya tiene quien la decida).
+    expect(correos('no acredita')).toHaveLength(0)
+    // T10 intacta: cada ajena gritó su contradicción UNA vez, sin retener nada.
+    const contradicciones = (logger.error as jest.Mock).mock.calls.filter(c => String(c[0]).includes('does not own it'))
+    expect(contradicciones).toHaveLength(5)
+  })
+
+  it('🔴 condición 4: al AGOTAR el conjunto el cursor vuelve a NULL y recoge una evidencia insertada ANTES de donde quedó', async () => {
+    const { solicitud, venta } = await liberadaPorLaVentana()
+    const principal = await terminalPrincipal()
+    await cincoAjenas(venta, solicitud, 'r6b')
+    await evidencia({ id: `${f.fixture}-r6b-6`, orderId: venta.id, requestId: solicitud.requestId, terminalId: otra.id })
+    const antes = await fila(solicitud.requestId)
+
+    await terminalPaymentService.reconcileUnknownRequests(new Date())
+    // Página llena (E1–E5 examinadas, hay una sexta): el cursor queda en E5, persistido en la fila.
+    expect(await cursorDe(solicitud.requestId)).toBe(`${f.fixture}-r6b-5`)
+    // Contabilidad del barrido, no un cambio de la solicitud: ni `updatedAt` ni el estado se movieron.
+    const despues = await fila(solicitud.requestId)
+    expect(despues.updatedAt.getTime()).toBe(antes.updatedAt.getTime())
+    expect(despues).toMatchObject({ status: 'FAILED', failureCode: 'NO_EVIDENCE_AFTER_WINDOW' })
+
+    // Una legítima cuyo id queda DETRÁS del cursor (ids que no crecen estrictamente: otro reloj, otra instancia).
+    const legitima = await evidencia({
+      id: `${f.fixture}-r6b-2b`,
+      orderId: venta.id,
+      requestId: solicitud.requestId,
+      terminalId: principal.id,
+    })
+    await terminalPaymentService.reconcileUnknownRequests(new Date()) // E6: el conjunto se agota ⇒ reinicio
+    expect(await cursorDe(solicitud.requestId)).toBeNull()
+    await terminalPaymentService.reconcileUnknownRequests(new Date()) // desde el principio: la legítima retiene
+
+    const retenidaR = await retenida(solicitud.requestId, venta.id)
+    expect(retenidaR.resultJson).toMatchObject({ referenceCollisionAfterRelease: { paymentId: legitima.id } })
+  })
+
+  it('🔴 el aviso: una solicitud atascada por evidencias ajenas manda UN correo y deja UN asiento — ni por pasada ni por reinicio', async () => {
+    const { solicitud, venta } = await liberadaPorLaVentana()
+    await evidencia({ id: `${f.fixture}-r6c-1`, orderId: venta.id, requestId: solicitud.requestId, terminalId: otra.id })
+    await evidencia({ id: `${f.fixture}-r6c-2`, orderId: venta.id, requestId: solicitud.requestId, terminalId: otra.id })
+    const liberadaR = await fila(solicitud.requestId)
+
+    for (let pasada = 0; pasada < 4; pasada++) await terminalPaymentService.reconcileUnknownRequests(new Date())
+    // Sigue liberada (ninguna evidencia acredita la terminal), pero YA NO es invisible: un correo y un asiento.
+    expect(await fila(solicitud.requestId)).toMatchObject({ status: 'FAILED', failureCode: 'NO_EVIDENCE_AFTER_WINDOW' })
+    expect(correos('no acredita')).toHaveLength(1)
+    const [aviso] = correos('no acredita')[0]
+    expect(aviso.lines.join(' ')).toContain(solicitud.requestId)
+    expect(aviso.lines.join(' ')).toContain(`${f.fixture}-r6c-1`)
+    const log = await asientos(liberadaR.id, ACCION_DEL_AVISO)
+    expect(log).toHaveLength(1)
+    expect(log[0].data).toMatchObject({
+      requestId: solicitud.requestId,
+      evidencePaymentIds: [`${f.fixture}-r6c-1`, `${f.fixture}-r6c-2`],
+    })
+
+    // Reinicio del proceso: se pierden las memorias en proceso. La bitácora es la que recuerda que ya se avisó.
+    ;(terminalPaymentService as any).anomaliasAuditadas.clear()
+    ;(terminalPaymentService as any).contradiccionesDeLaRed.clear()
+    await terminalPaymentService.reconcileUnknownRequests(new Date())
+    await terminalPaymentService.reconcileUnknownRequests(new Date())
+    expect(correos('no acredita')).toHaveLength(1)
+    expect(await asientos(liberadaR.id, ACCION_DEL_AVISO)).toHaveLength(1)
   })
 })
 
