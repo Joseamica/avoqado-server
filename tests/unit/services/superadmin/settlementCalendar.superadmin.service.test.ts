@@ -344,3 +344,74 @@ describe('resolveWindow', () => {
     }
   })
 })
+
+/**
+ * Recorrido por páginas con cursor (query-guard 2026-09-18).
+ *
+ * Este calendario es el ÚNICO camino del motor de liquidación que no filtra por negocio:
+ * recorre TODOS los negocios de la plataforma a la vez, con `venue` y `merchantAccount`
+ * (proveedor + agregador) colgando de cada pago. Medido en producción entre el 15 y el
+ * 18-sep: 2,207 a 2,462 filas por llamada con sólo dos negocios activos, y crece con cada
+ * cliente nuevo, no con el tiempo.
+ *
+ * Se pagina y NO se agrega en SQL porque la fecha de caída la calcula el motor en JS, por
+ * pago y en la zona horaria de SU negocio: no cabe en un GROUP BY.
+ */
+describe('getCrossVenueSettlementCalendar — páginas de 500 con cursor', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  const fila = (i: number, merchantAccountId = 'm1') => ({
+    id: `pay${String(i).padStart(4, '0')}`,
+    amount: 100,
+    tipAmount: 0,
+    createdAt: SOLD_FRI,
+    venueId: 'v1',
+    merchantAccountId,
+    transactionCost: cost(3),
+    venue: venue('v1', 'Mindform'),
+    merchantAccount: noAgg,
+  })
+
+  it('una página llena pide la siguiente con cursor en el último id; el total cubre las 503 filas', async () => {
+    const pagina1 = Array.from({ length: 500 }, (_, i) => fila(i))
+    const pagina2 = [fila(500), fila(501), fila(502)]
+    ;(prismaMock.payment.findMany as jest.Mock).mockResolvedValueOnce(pagina1).mockResolvedValueOnce(pagina2)
+    mockConfigs([cfg('m1')])
+
+    const r = await getCrossVenueSettlementCalendar('2026-07-01', '2026-07-31')
+
+    expect(prismaMock.payment.findMany).toHaveBeenCalledTimes(2)
+    const [primera, segunda] = (prismaMock.payment.findMany as jest.Mock).mock.calls.map(c => c[0])
+    expect(primera).toMatchObject({ take: 500, orderBy: [{ id: 'asc' }] })
+    expect(primera.select.id).toBe(true)
+    expect(primera.cursor).toBeUndefined()
+    expect(segunda).toMatchObject({ take: 500, cursor: { id: 'pay0499' }, skip: 1 })
+    // El filtro no cambia entre páginas: las mismas filas, sólo repartidas.
+    expect(primera.where).toEqual(segunda.where)
+
+    expect(r.days).toHaveLength(1)
+    expect(r.days[0]).toMatchObject({ date: '2026-07-06', count: 503, gross: 50300, commission: 1509, net: 48791 })
+    expect(r.total.count).toBe(503)
+  })
+
+  it('las reglas de un comercio se cargan UNA vez aunque aparezca en varias páginas', async () => {
+    const pagina1 = Array.from({ length: 500 }, (_, i) => fila(i, 'm1'))
+    const pagina2 = [fila(500, 'm1'), fila(501, 'm2')]
+    ;(prismaMock.payment.findMany as jest.Mock).mockResolvedValueOnce(pagina1).mockResolvedValueOnce(pagina2)
+    ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockResolvedValueOnce([cfg('m1')]).mockResolvedValueOnce([cfg('m2')])
+
+    const r = await getCrossVenueSettlementCalendar('2026-07-01', '2026-07-31')
+
+    const pedidos = (prismaMock.settlementConfiguration.findMany as jest.Mock).mock.calls.map(c => c[0].where.merchantAccountId.in)
+    expect(pedidos).toEqual([['m1'], ['m2']])
+    expect(r.days[0].count).toBe(502)
+  })
+
+  it('regresión: menos de 500 filas es UNA consulta (un mock constante no puede ciclar)', async () => {
+    mockPayments([fila(0), fila(1)])
+    mockConfigs([cfg('m1')])
+    const r = await getCrossVenueSettlementCalendar('2026-07-01', '2026-07-31')
+    expect(prismaMock.payment.findMany).toHaveBeenCalledTimes(1)
+    expect(r.days[0].count).toBe(2)
+  })
+})

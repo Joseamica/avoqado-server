@@ -32,7 +32,11 @@ import { localInstantRaw, localWallClockRaw, utcTs, utcTsParam } from '@/utils/s
 import logger from '@/config/logger'
 import { BadRequestError } from '@/errors/AppError'
 import { foldGiveawaysIntoSummary, HIDDEN_COMP_LINE_WHERE } from '@/services/dashboard/salesGiveaways'
-import { projectPaymentSettlement } from '@/services/dashboard/settlementCalendar.dashboard.service'
+import {
+  cargarReglasFaltantes,
+  projectPaymentSettlement,
+  type ActiveConfig,
+} from '@/services/dashboard/settlementCalendar.dashboard.service'
 import {
   MINDFORM_NEW_VENUE_ID,
   forEachLegacyPaymentPage,
@@ -522,6 +526,20 @@ export async function computeMerchantAccountBreakdown(
  * calendar plus, per merchant, the soonest upcoming settlement date for the
  * breakdown's "Cae" column.
  */
+/**
+ * Página del recorrido de pagos de la proyección (query-guard 2026-09-18).
+ *
+ * Este resumen sirve también a la TPV (`GET /mobile/venues/:id/reports/sales-summary`).
+ * Medido en producción el 15 y el 18-sep: 2,274 filas por llamada, pedidas desde una
+ * terminal en el mostrador. Es hermano de `getSettlementsLandingInWeek` (arreglado el
+ * 7-sep) y del calendario del superadmin: mismo motor, mismo patrón de traer-y-proyectar.
+ */
+const SETTLEMENT_PROJECTION_PAGE_SIZE = 500
+
+function cederElEventLoopProyeccion(): Promise<void> {
+  return new Promise(resolve => setImmediate(resolve))
+}
+
 export async function computeSettlementProjection(
   venueId: string,
   startDate: Date,
@@ -531,53 +549,35 @@ export async function computeSettlementProjection(
   calendar: SettlementCalendarDay[]
   nextByMerchant: Map<string, { nextDate: string | null; settlementDays: number | null }>
 }> {
-  const payments = await prisma.payment.findMany({
-    where: {
-      venueId,
-      status: 'COMPLETED',
-      merchantAccountId: { not: null },
-      transactionCost: { isNot: null },
-      createdAt: { gte: startDate, lte: endDate },
-    },
-    select: {
-      amount: true,
-      tipAmount: true,
-      createdAt: true,
-      merchantAccountId: true,
-      transactionCost: {
-        select: { transactionType: true, venueChargeAmount: true, venueFixedFee: true },
-      },
-    },
-  })
-
-  if (payments.length === 0) {
-    return { calendar: [], nextByMerchant: new Map() }
+  const paymentWhere = {
+    venueId,
+    status: 'COMPLETED' as const,
+    merchantAccountId: { not: null },
+    transactionCost: { isNot: null },
+    createdAt: { gte: startDate, lte: endDate },
   }
 
-  const merchantIds = Array.from(new Set(payments.map(p => p.merchantAccountId).filter(Boolean) as string[]))
+  // Las reglas y los nombres se cargan conforme APARECEN los comercios en cada página, una
+  // vez cada uno: antes se pedían de golpe con la lista completa de comercios, que sólo se
+  // conocía tras hidratar todos los pagos.
+  const configs: ActiveConfig[] = []
+  const comerciosCargados = new Set<string>()
+  const nameById = new Map<string, string>()
 
-  // All configs for these merchants — matched per payment by effective window so a
-  // historical range uses the rule that was in force then, not today's rule.
-  const configs = await prisma.settlementConfiguration.findMany({
-    where: { merchantAccountId: { in: merchantIds } },
-    select: {
-      merchantAccountId: true,
-      cardType: true,
-      settlementDays: true,
-      settlementDayType: true,
-      cutoffTime: true,
-      cutoffTimezone: true,
-      effectiveFrom: true,
-      effectiveTo: true,
-    },
-    orderBy: { effectiveFrom: 'desc' },
-  })
-
-  const accounts = await prisma.merchantAccount.findMany({
-    where: { id: { in: merchantIds } },
-    select: { id: true, displayName: true, alias: true },
-  })
-  const nameById = new Map(accounts.map(a => [a.id, a.displayName || a.alias || 'Comercio']))
+  async function cargarNombresFaltantes(ids: Array<string | null>): Promise<void> {
+    const faltantes: string[] = []
+    for (const id of ids) {
+      if (!id || nameById.has(id)) continue
+      nameById.set(id, 'Comercio') // reserva el hueco para no volver a pedirlo
+      faltantes.push(id)
+    }
+    if (faltantes.length === 0) return
+    const filas = await prisma.merchantAccount.findMany({
+      where: { id: { in: faltantes } },
+      select: { id: true, displayName: true, alias: true },
+    })
+    for (const a of filas) nameById.set(a.id, a.displayName || a.alias || 'Comercio')
+  }
 
   const todayKey = formatInTimeZone(new Date(), venueTimezone, 'yyyy-MM-dd')
 
@@ -586,43 +586,73 @@ export async function computeSettlementProjection(
   // merchantId -> { dates seen, settlementDays of the matched config }
   const datesByMerchant = new Map<string, { dates: Set<string>; settlementDays: number | null }>()
 
-  for (const p of payments) {
-    const merchantId = p.merchantAccountId
-    if (!merchantId) continue
+  let cursorId: string | undefined
+  while (true) {
+    const pagina = await prisma.payment.findMany({
+      where: paymentWhere,
+      select: {
+        id: true,
+        amount: true,
+        tipAmount: true,
+        createdAt: true,
+        merchantAccountId: true,
+        transactionCost: {
+          select: { transactionType: true, venueChargeAmount: true, venueFixedFee: true },
+        },
+      },
+      orderBy: [{ id: 'asc' }], // clave única: sin ella una página puede repetir u omitir filas
+      take: SETTLEMENT_PROJECTION_PAGE_SIZE,
+      ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
+    })
+    if (pagina.length === 0) break
 
-    // configs is ordered effectiveFrom desc, so projectPaymentSettlement's `find`
-    // picks the most recent config whose window contains the payment date.
-    const projection = projectPaymentSettlement({ ...p, merchantAccountId: merchantId }, configs, venueTimezone)
-    if (!projection) continue // no cost or no matching rule → can't project honestly; leave it out of the calendar
+    const idsDeLaPagina = pagina.map(p => p.merchantAccountId)
+    await cargarReglasFaltantes(idsDeLaPagina, comerciosCargados, configs)
+    await cargarNombresFaltantes(idsDeLaPagina)
 
-    const { settlementDateKey: dateKey, commission: fee, net, settlementDays } = projection
+    for (const p of pagina) {
+      const merchantId = p.merchantAccountId
+      if (!merchantId) continue
 
-    if (!days.has(dateKey)) days.set(dateKey, new Map())
-    const merchantsForDay = days.get(dateKey)!
-    if (!merchantsForDay.has(merchantId)) {
-      merchantsForDay.set(merchantId, {
-        merchantAccountId: merchantId,
-        displayName: nameById.get(merchantId) ?? 'Comercio',
-        platformFee: 0,
-        netToReceive: 0,
-        transactionCount: 0,
-      })
+      // configs is ordered effectiveFrom desc, so projectPaymentSettlement's `find`
+      // picks the most recent config whose window contains the payment date.
+      const projection = projectPaymentSettlement({ ...p, merchantAccountId: merchantId }, configs, venueTimezone)
+      if (!projection) continue // no cost or no matching rule → can't project honestly; leave it out of the calendar
+
+      const { settlementDateKey: dateKey, commission: fee, net, settlementDays } = projection
+
+      if (!days.has(dateKey)) days.set(dateKey, new Map())
+      const merchantsForDay = days.get(dateKey)!
+      if (!merchantsForDay.has(merchantId)) {
+        merchantsForDay.set(merchantId, {
+          merchantAccountId: merchantId,
+          displayName: nameById.get(merchantId) ?? 'Comercio',
+          platformFee: 0,
+          netToReceive: 0,
+          transactionCount: 0,
+        })
+      }
+      const slot = merchantsForDay.get(merchantId)!
+      slot.platformFee += fee
+      slot.netToReceive += net
+      slot.transactionCount += 1
+
+      const md = datesByMerchant.get(merchantId)
+      if (!md) {
+        datesByMerchant.set(merchantId, { dates: new Set([dateKey]), settlementDays })
+      } else {
+        md.dates.add(dateKey)
+        // Only report a rule when it is unambiguous: a merchant whose card types
+        // settle differently (e.g. debit 1 day, Amex 3) gets null instead of a
+        // last-write-wins value that depends on payment iteration order.
+        if (md.settlementDays !== settlementDays) md.settlementDays = null
+      }
     }
-    const slot = merchantsForDay.get(merchantId)!
-    slot.platformFee += fee
-    slot.netToReceive += net
-    slot.transactionCount += 1
 
-    const md = datesByMerchant.get(merchantId)
-    if (!md) {
-      datesByMerchant.set(merchantId, { dates: new Set([dateKey]), settlementDays })
-    } else {
-      md.dates.add(dateKey)
-      // Only report a rule when it is unambiguous: a merchant whose card types
-      // settle differently (e.g. debit 1 day, Amex 3) gets null instead of a
-      // last-write-wins value that depends on payment iteration order.
-      if (md.settlementDays !== settlementDays) md.settlementDays = null
-    }
+    // Una página corta es la última: no se pide una consulta de más.
+    if (pagina.length < SETTLEMENT_PROJECTION_PAGE_SIZE) break
+    cursorId = pagina[pagina.length - 1].id
+    await cederElEventLoopProyeccion()
   }
 
   const calendar: SettlementCalendarDay[] = Array.from(days.entries())

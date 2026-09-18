@@ -151,8 +151,12 @@ const SETTLEMENT_CONFIG_SELECT = {
  * Carga las reglas de los comercios que aún no se han visto, conforme aparecen en cada
  * página. Cada comercio se consulta UNA vez; el orden `effectiveFrom desc` se conserva
  * por comercio, que es lo único que `projectPaymentSettlement` compara.
+ *
+ * Exportada porque los TRES consumidores del motor que recorren pagos la necesitan igual
+ * (esta semana, el calendario del superadmin y el resumen de ventas): duplicar un bucle de
+ * cursor con carga perezosa en tres archivos es justo como se cuelan las diferencias.
  */
-async function cargarReglasFaltantes(
+export async function cargarReglasFaltantes(
   merchantAccountIds: Array<string | null>,
   comerciosCargados: Set<string>,
   configs: ActiveConfig[],
