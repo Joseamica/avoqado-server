@@ -42,6 +42,7 @@ function filaDelIncidente(over: Record<string, unknown> = {}) {
     closedVia: null,
     lateResult: false,
     terminalReturnedAt: ahora,
+    expiresAt: new Date(ahora.getTime() - 30 * 60 * 1000),
     operatorReconciliation: null,
     resultJson: { requestId, status: 'timeout' },
     createdAt: ahora,
@@ -53,7 +54,8 @@ function filaDelIncidente(over: Record<string, unknown> = {}) {
 const CAJERO = { id: 'sv-cashier', staffId: 'staff-cashier', role: 'CASHIER', permissionSetId: null, permissionSet: null }
 const MESERO = { id: 'sv-waiter', staffId: 'staff-waiter', role: 'WAITER', permissionSetId: null, permissionSet: null }
 
-function montar(fila = filaDelIncidente(), miembro: unknown = CAJERO) {
+/** `latidoHaceMs = null` ⇒ la terminal no aparece (nunca volvió). */
+function montar(fila = filaDelIncidente(), miembro: unknown = CAJERO, latidoHaceMs: number | null = null) {
   prismaMock.$transaction.mockImplementation((fn: any) => fn(prismaMock))
   prismaMock.$queryRaw.mockResolvedValue([{ id: 'order-1' }])
   prismaMock.$executeRaw.mockResolvedValue(1)
@@ -63,6 +65,9 @@ function montar(fila = filaDelIncidente(), miembro: unknown = CAJERO) {
   prismaMock.activityLog.create.mockResolvedValue({})
   prismaMock.staffVenue.findFirst.mockResolvedValue(miembro)
   prismaMock.venueRolePermission.findUnique.mockResolvedValue(null)
+  prismaMock.terminal.findFirst.mockResolvedValue(
+    latidoHaceMs === null ? null : { lastHeartbeat: new Date(Date.now() - latidoHaceMs) },
+  )
 }
 
 beforeEach(() => {
@@ -109,6 +114,13 @@ describe('reconcileUncharged — camino feliz', () => {
     montar(filaDelIncidente({ status: 'TIMED_OUT' }))
     await expect(reconcileUncharged(identidad, declaracion())).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
   })
+
+  it('🔴 una fila SIN la marca de retorno es elegible si la terminal está VIVA ahora', async () => {
+    // Es el caso de las filas legacy: el barrido sólo sella `terminalReturnedAt` sobre UNKNOWN, así que una
+    // TIMED_OUT vieja nunca la tendría — y sería inelegible para siempre justo la que hay que poder limpiar.
+    montar(filaDelIncidente({ status: 'TIMED_OUT', terminalReturnedAt: null }), CAJERO, 30 * 1000)
+    await expect(reconcileUncharged(identidad, declaracion())).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
+  })
 })
 
 describe('reconcileUncharged — lo que VETA la declaración', () => {
@@ -129,8 +141,13 @@ describe('reconcileUncharged — lo que VETA la declaración', () => {
     expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
   })
 
-  it('🔴 rechaza si la terminal TODAVÍA no ha vuelto', async () => {
-    montar(filaDelIncidente({ terminalReturnedAt: null }))
+  it('🔴 rechaza si la terminal TODAVÍA no ha vuelto ni está viva', async () => {
+    montar(filaDelIncidente({ terminalReturnedAt: null }), CAJERO, null)
+    await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'TERMINAL_NOT_BACK' })
+  })
+
+  it('🔴 rechaza si la terminal existe pero su latido es VIEJO: sigue sin volver', async () => {
+    montar(filaDelIncidente({ terminalReturnedAt: null }), CAJERO, 20 * 60 * 1000)
     await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'TERMINAL_NOT_BACK' })
   })
 

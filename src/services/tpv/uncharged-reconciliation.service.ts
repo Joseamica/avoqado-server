@@ -116,6 +116,42 @@ async function miembroConPermiso(
   return { id: sv.id, staffId: sv.staffId, permitido }
 }
 
+/** Igual que `TERMINAL_ALIVE_WINDOW_MS` del servicio: un latido de hace más de 5 min ya no dice nada del ahora. */
+const VENTANA_LATIDO_VIVO_MS = 5 * 60_000
+
+/**
+ * ¿La terminal VOLVIÓ? Dos caminos, y el segundo es el encargo de Codex («definir cómo se observa el retorno
+ * para todos los estados admitidos»):
+ *
+ *  1. `terminalReturnedAt` sellado — pero el barrido SÓLO lo sella sobre filas `UNKNOWN`, así que una `TIMED_OUT`
+ *     legacy nunca lo tendría y quedaría inelegible PARA SIEMPRE: justo las que hay que poder limpiar hoy.
+ *  2. La terminal está VIVA ahora (latido de los últimos 5 min) y ese latido es posterior al vencimiento de la
+ *     solicitud. Es la misma señal que usa el barrido, leída en vivo en vez de diferida.
+ *
+ * 🔴 Y como allá: esto acredita CONECTIVIDAD, nunca que la ejecución terminó. Es un requisito NECESARIO de la
+ * declaración, no la prueba — la prueba la pone la persona que miró la pantalla, y por eso se audita con su nombre.
+ * Ampliar el barrido para sellar también TIMED_OUT habría tocado el camino que ya corre en producción.
+ */
+async function terminalVolvio(
+  tx: Prisma.TransactionClient,
+  row: { terminalId: string; terminalReturnedAt: Date | null; expiresAt: Date },
+  ahora: Date,
+): Promise<boolean> {
+  if (row.terminalReturnedAt) return true
+  const terminal = await tx.terminal.findFirst({
+    where: {
+      OR: [
+        { serialNumber: { equals: row.terminalId, mode: 'insensitive' } },
+        { serialNumber: { equals: `AVQD-${row.terminalId}`, mode: 'insensitive' } },
+      ],
+    },
+    select: { lastHeartbeat: true },
+  })
+  const latido = terminal?.lastHeartbeat
+  if (!latido) return false
+  return latido.getTime() > ahora.getTime() - VENTANA_LATIDO_VIVO_MS && latido.getTime() > row.expiresAt.getTime()
+}
+
 /** Las señales del sobre de la terminal que, solas, ya afirman un cobro. */
 const SENALES_POSITIVAS_DEL_SOBRE = ['paymentId', 'authorizationCode', 'transactionId', 'reference', 'readMode'] as const
 
@@ -162,8 +198,9 @@ export async function reconcileUncharged(
     if (!actor || !actor.permitido) throw new UnchargedReconciliationError('NOT_ALLOWED', 403)
 
     // ELEGIBILIDAD
-    if (!row.terminalReturnedAt) throw new UnchargedReconciliationError('TERMINAL_NOT_BACK')
-    if (sondaReportoActiva(row, new Date())) throw new UnchargedReconciliationError('EXECUTION_STILL_ACTIVE')
+    const ahora = new Date()
+    if (!(await terminalVolvio(tx, row, ahora))) throw new UnchargedReconciliationError('TERMINAL_NOT_BACK')
+    if (sondaReportoActiva(row, ahora)) throw new UnchargedReconciliationError('EXECUTION_STILL_ACTIVE')
 
     const sobre =
       row.resultJson && typeof row.resultJson === 'object' && !Array.isArray(row.resultJson)
