@@ -5103,6 +5103,13 @@ model TerminalPaymentRequest {
   /// estado y se escribe SIN tocar `updatedAt`. Columna propia y no una llave de `resultJson` porque ese sobre se devuelve
   /// entero al POS (`resultFromRow`) y varios escritores lo reemplazan completo.
   collisionEvidenceCursor String?
+  /// La declaración del cajero «revisé la terminal y NO se cobró» (18-sep). Columna PROPIA y no una llave de
+  /// `resultJson` por la MISMA razón que `collisionEvidenceCursor`: ese sobre se devuelve entero al POS
+  /// (`resultFromRow`) y varios escritores lo reemplazan completo. Y no vive en `TerminalPaymentAttemptLink`
+  /// porque ese vínculo EXIGE un intento ligado, y las filas legacy —las que hay que poder limpiar hoy— no lo
+  /// tienen. Inmutable: se escribe una vez; un replay con el mismo `resolutionId` y el mismo cuerpo devuelve la
+  /// guardada sin reescribir nada.
+  operatorReconciliation Json?
   expiresAt          DateTime
   createdAt          DateTime                     @default(now())
   updatedAt          DateTime                     @updatedAt

@@ -1,0 +1,11 @@
+-- La declaración del cajero «revisé la terminal y no se cobró» (18-sep).
+--
+-- 🔴 Escrita a mano A PROPÓSITO. `prisma migrate dev --create-only` generó además tres sentencias que NO son
+-- de este cambio y que venían de DERIVA entre `av-db-25` (la base local compartida por ~20 worktrees) y el
+-- schema del árbol: un `DROP INDEX "Customer_tags_gin_idx"` (destructivo) y dos cambios de DEFAULT en
+-- `BirthdayAutomation` y `PaymentEffect`. Se retiraron: no son de este trabajo y habrían viajado a producción
+-- en el siguiente deploy. La deriva queda reportada aparte; el diagnóstico completo, en
+-- `~/.claude/jobs/e2ff49a9/tmp/migracion-con-deriva-ajena.sql`.
+--
+-- Aditiva y sin datos: la columna nace NULL en las filas existentes, que es exactamente «no hay declaración».
+ALTER TABLE "TerminalPaymentRequest" ADD COLUMN "operatorReconciliation" JSONB;
