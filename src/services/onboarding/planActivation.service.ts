@@ -78,7 +78,16 @@ export interface ActivatePlanResult {
 
 /** El 503 del resultado desconocido. NO es un fallo: es «no sé», y el cliente reintenta igual. */
 function pendiente(motivo: string): AppError {
-  return new AppError('Tu pago se está confirmando. Vuelve a intentar en unos segundos.', 503, true, 'PLAN_ACTIVATION_PENDING', { motivo })
+  return new AppError(
+    // Stripe recomienda prometer el aviso, no mandar al cliente a volver: «Payment processing.
+    // We'll update you when payment is received». Reintentar es SEGURO (la llave de idempotencia
+    // lo cubre), pero pedírselo a quien acaba de intentar pagarnos es pasarle a él nuestro trabajo.
+    'Estamos confirmando tu pago con el banco. Te avisamos por correo en cuanto quede; no se te cobrará dos veces.',
+    503,
+    true,
+    'PLAN_ACTIVATION_PENDING',
+    { motivo },
+  )
 }
 
 /** El 402 del banco. Lleva el mensaje de Stripe, que es el único que le sirve al cliente. */
@@ -177,6 +186,33 @@ async function cotizar(input: ActivatePlanInput, progress: { launchCampaignId: s
 }
 
 /** PASO 4 — el precio VIVO de Stripe tiene que coincidir con el que congelamos. */
+/**
+ * 🔴 El plan tiene que existir en NUESTRO catálogo ANTES de tocar Stripe.
+ *
+ * `createPlanSubscription` lo comprueba también, pero lanza DENTRO del try del cobro, donde
+ * cualquier excepción se clasifica como «resultado desconocido» y el cliente ve «estamos
+ * confirmando tu pago». Medido en vivo el 18-sep: con la Feature ausente, el cobro murió antes
+ * de la primera llamada a Stripe y aun así la pantalla prometía una confirmación que no existía,
+ * dejando además el lugar de la campaña apartado sin motivo.
+ *
+ * Un fallo aquí es DETERMINISTA — no hay ningún cobro a medias que proteger —, así que se dice
+ * lo que es. El 503 ambiguo se reserva para lo que de verdad no se sabe.
+ */
+async function verificarPlanConfigurado(tier: PaidPlanTier): Promise<void> {
+  const tierCode = tier === 'PREMIUM' ? ('PLAN_PREMIUM' as const) : ('PLAN_PRO' as const)
+  const feature = await prisma.feature.findFirst({ where: { code: tierCode, active: true }, select: { id: true } })
+  if (feature) return
+  // 🚨 a propósito: el alta está muerta para TODOS hasta que alguien siembre el plan.
+  logger.error('🚨 activate-plan: el plan no existe en el catálogo — NO se cobra', { tierCode })
+  throw new AppError(
+    'No pudimos activar tu plan por un problema nuestro de configuración. No se te cobró nada. Escríbenos y lo resolvemos.',
+    503,
+    true,
+    'PLAN_NOT_CONFIGURED',
+    { tierCode },
+  )
+}
+
 async function verificarPrecioDeStripe(tier: PaidPlanTier, interval: PlanBillingInterval, esperado: number): Promise<void> {
   const tierCode = tier === 'PREMIUM' ? ('PLAN_PREMIUM' as const) : ('PLAN_PRO' as const)
   const lookupKey = planLookupKey(tierCode, interval)
@@ -414,6 +450,7 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
 
   // ---- PASO 4: verificación contra Stripe (sólo lecturas) ----
   await verificarPrecioDeStripe(input.tier, input.interval, listPriceCents)
+  await verificarPlanConfigurado(input.tier)
   const venueRecord = await prisma.venue.findUnique({
     where: { id: venue.id },
     select: { id: true, name: true, slug: true, email: true, organization: { select: { email: true, name: true } } },

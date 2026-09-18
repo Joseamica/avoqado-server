@@ -577,3 +577,57 @@ describe('un lugar RESERVED de otra oferta no se reusa', () => {
     expect(mockSubCreate).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * 🔴 Medido EN VIVO el 18-sep durante el QA del lanzamiento, en un navegador real:
+ * la base de prueba no tenía sembrada la Feature `PLAN_PRO`, el cobro murió ANTES de tocar
+ * Stripe, y el cliente vio «Tu pago se está confirmando. Vuelve a intentar en unos segundos.».
+ *
+ * Un fallo que ocurre antes de la primera llamada a Stripe es DETERMINISTA: no existe ningún
+ * cobro que pueda haber quedado a medias, así que tratarlo como «no sé» le miente al cliente
+ * y deja el lugar de la campaña apartado sin motivo.
+ *
+ * El 503 de lo GENUINAMENTE ambiguo se conserva tal cual — es lo que impide el cobro doble —,
+ * pero su texto deja de mandar al cliente a reintentar (Stripe recomienda prometer el aviso:
+ * «Payment processing. We'll update you when payment is received»).
+ */
+type ErrorDeApp = { code?: string; statusCode?: number; message?: string }
+
+describe('🔴 un fallo de CONFIGURACIÓN no puede disfrazarse de «pago en confirmación»', () => {
+  beforeEach(() => {
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(progreso() as never)
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(campania() as never)
+  })
+
+  it('falta la Feature del plan ⇒ dice que es un problema de configuración, NO «se está confirmando»', async () => {
+    prismaMock.feature.findFirst.mockResolvedValue(null as never)
+
+    const err = await activatePlan({ ...BASE, offer: OFERTA_LAUNCH }).then<ErrorDeApp, ErrorDeApp>(
+      () => {
+        throw new Error('no debió resolver: activatePlan tenía que rechazar')
+      },
+      (e: unknown) => e as ErrorDeApp,
+    )
+
+    expect(err.code).toBe('PLAN_NOT_CONFIGURED')
+    expect(err.code).not.toBe('PLAN_ACTIVATION_PENDING')
+    expect(err.message).not.toMatch(/se está confirmando/i)
+    expect(mockSubCreate).not.toHaveBeenCalled()
+  })
+
+  it('el 503 de lo GENUINAMENTE desconocido sigue existiendo, pero promete aviso en vez de mandar a reintentar', async () => {
+    mockSubCreate.mockRejectedValue(new Error('socket hang up'))
+
+    const err = await activatePlan({ ...BASE, offer: OFERTA_LAUNCH }).then<ErrorDeApp, ErrorDeApp>(
+      () => {
+        throw new Error('no debió resolver: activatePlan tenía que rechazar')
+      },
+      (e: unknown) => e as ErrorDeApp,
+    )
+
+    expect(err.statusCode).toBe(503)
+    expect(err.code).toBe('PLAN_ACTIVATION_PENDING')
+    expect(err.message).not.toMatch(/vuelve a intentar|intenta de nuevo/i)
+    expect(err.message).toMatch(/te avisamos|avisaremos/i)
+  })
+})
