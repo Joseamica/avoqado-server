@@ -1701,10 +1701,24 @@ router.post(
  * frees it on its own once the terminal is back + 2 min; this is the manager's shortcut.
  * `tpv:update` (MANAGER+, managing the terminal) — NOT `payments:create`, which cashiers hold.
  */
+/**
+ * 🔴 DOS acciones por una ruta, y por eso el permiso NO puede ser fijo (patrón `checkCommandTypePermission` de
+ * `.claude/rules/permissions-policy.md`): liberar a secas sigue siendo de gerencia (`tpv:update`), pero DECLARAR
+ * que no se cobró es del CAJERO (`payments:reconcile-uncharged`) — en un mostrador a las 10 de la mañana puede no
+ * haber gerente, y esperar a uno es volver a estar parado (founder, 18-sep).
+ *
+ * Se decide por el `statement` EXACTO, nunca por un campo libre: `reason` y `confirm` ya existían y leerlos como
+ * una afirmación sobre dinero sería un contrato accidental. Un `statement` desconocido cae al permiso ALTO.
+ */
+export const permisoDeLiberacion = (req: Request, res: Response, next: NextFunction) => {
+  const declara = (req.body as { statement?: unknown } | undefined)?.statement === 'UNCHARGED_VERIFIED'
+  return checkPermission(declara ? 'payments:reconcile-uncharged' : 'tpv:update')(req, res, next)
+}
+
 router.post(
   '/venues/:venueId/terminal-payment/:requestId/release',
   authenticateTokenMiddleware,
-  checkPermission('tpv:update'),
+  permisoDeLiberacion,
   terminalPaymentMobileController.releaseTerminalPayment,
 )
 

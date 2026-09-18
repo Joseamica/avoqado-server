@@ -386,11 +386,16 @@ export async function releaseTerminalPayment(req: Request, res: Response) {
       typeof req.body?.reason === 'string' && req.body.reason.trim() ? req.body.reason.trim().slice(0, 300) : 'Liberada desde el POS'
     const staffId: string | undefined = (req as any).authContext?.userId
 
+    // La declaración viaja SÓLO si el cuerpo trae `statement`. Nunca se deriva de `reason` ni de `confirm`:
+    // son campos libres que ya existían, y leerlos como una afirmación sobre dinero sería un contrato accidental.
+    const declaration = req.body && typeof req.body === 'object' && 'statement' in req.body ? req.body : undefined
+
     const r = await terminalPaymentService.releaseUnknownRequest({
       requestId,
       venueId,
       actor: { staffId: staffId ?? null, source: 'MOBILE' },
       reason,
+      declaration,
     })
     if (r.status === null) {
       return res.status(404).json({ success: false, message: 'No existe ese cobro en este establecimiento' })
@@ -400,6 +405,7 @@ export async function releaseTerminalPayment(req: Request, res: Response) {
       released: r.released,
       status: r.status,
       paymentId: r.paymentId ?? null,
+      ...(r.resolution ? { resolution: r.resolution } : {}),
       message: r.released
         ? 'Terminal liberada. Ya puedes volver a mandarle cobros.'
         : r.status === 'COMPLETED'
@@ -407,6 +413,17 @@ export async function releaseTerminalPayment(req: Request, res: Response) {
           : 'No se liberó: falta confirmar el resultado y que la terminal haya terminado. Consulta el cobro en la terminal.',
     })
   } catch (error) {
+    // El error de la declaración YA trae un mensaje escrito para el cajero y su propio código HTTP: se respeta
+    // tal cual en vez de taparlo con un 500 genérico. El POS pinta ESTE texto (por eso no lo hardcodea).
+    const { UnchargedReconciliationError } = await import('../../services/tpv/uncharged-reconciliation.service')
+    if (error instanceof UnchargedReconciliationError) {
+      logger.warn('🧾 [TerminalPayment] declaración del operador rechazada', {
+        code: error.code,
+        requestId: req.params.requestId,
+        venueId: req.params.venueId,
+      })
+      return res.status(error.statusCode).json({ success: false, released: false, code: error.code, message: error.message })
+    }
     logger.error('Error in releaseTerminalPayment', { error: error instanceof Error ? error.message : 'Error desconocido' })
     return res.status(500).json({ success: false, message: 'Error interno del servidor' })
   }

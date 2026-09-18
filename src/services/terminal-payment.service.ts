@@ -5398,10 +5398,47 @@ class TerminalPaymentService {
     venueId: string
     actor: { staffId?: string | null; source: 'MCP' | 'SUPERADMIN' | 'MOBILE' }
     reason: string
-  }): Promise<{ requestId: string; released: boolean; status: TerminalPaymentRequestStatus | null; paymentId?: string }> {
+    /** La declaración del cajero «revisé la terminal y no se cobró». Sin ella, TODO sigue exactamente igual. */
+    declaration?: unknown
+  }): Promise<{
+    requestId: string
+    released: boolean
+    status: TerminalPaymentRequestStatus | null
+    paymentId?: string
+    resolution?: { id: string; acceptedAt: string }
+  }> {
     const { requestId, venueId, actor, reason } = input
     const row = await prisma.terminalPaymentRequest.findFirst({ where: { requestId, venueId } })
     if (!row) return { requestId, released: false, status: null }
+
+    // 🔴 La variante DECLARADA se despacha ANTES del filtro exclusivo de UNKNOWN: una fila TIMED_OUT todavía
+    // incierta también aparta la terminal, y es la que más abunda entre las legacy que hay que limpiar. Sin
+    // `declaration` no entra aquí y el comportamiento de siempre queda intacto — `reason` y un `confirm` NUNCA
+    // se leen como declaración implícita.
+    if (input.declaration !== undefined && input.declaration !== null) {
+      const { reconcileUncharged } = await import('./tpv/uncharged-reconciliation.service')
+      const resolution = await reconcileUncharged(
+        { venueId, requestId, actorStaffId: actor.staffId ?? null, source: actor.source },
+        input.declaration,
+      )
+      const fresh = await prisma.terminalPaymentRequest.findFirst({
+        where: { requestId, venueId },
+        select: { status: true },
+      })
+      logger.info('🧾 [TerminalPayment] Cobro conciliado por declaración del operador', {
+        requestId,
+        venueId,
+        staffId: actor.staffId,
+        source: actor.source,
+        resolutionId: resolution.id,
+      })
+      return {
+        requestId,
+        released: true,
+        status: fresh?.status ?? TerminalPaymentRequestStatus.FAILED,
+        resolution: { id: resolution.id, acceptedAt: resolution.acceptedAt },
+      }
+    }
     if (row.status !== TerminalPaymentRequestStatus.UNKNOWN) {
       return { requestId, released: false, status: row.status, paymentId: row.paymentId ?? undefined }
     }
