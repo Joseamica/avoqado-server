@@ -265,23 +265,25 @@ export async function verifyEmailCode(email: string, verificationCode: string): 
     }
   }
 
-  // 2. Check if already verified
+  // 2. Ya verificada: se RECHAZA. Nunca se emiten tokens por este camino.
+  //
+  // P1 (2026-09-19) — BYPASS DE AUTENTICACION. Este bloque devolvia accessToken + refreshToken
+  // de OWNER ANTES de los pasos 3/4/5 (existe codigo, no expirado, coincide), asi que el codigo
+  // recibido NO SE COMPARABA NUNCA. La ruta `POST /onboarding/verify-email` es publica y el
+  // controlador fija los dos tokens como cookies httpOnly (24 h / 7 dias): bastaba CONOCER EL
+  // CORREO de una cuenta ya verificada —el estado normal de toda cuenta real— para obtener
+  // credenciales suyas. Y como los tokens nacen sin `sid`, `authenticateTokenMiddleware` los
+  // acepta sin consultar sesion mientras `faseDelRolloutLegacy() < 4`.
+  //
+  // Estaba comentado «generate tokens for auto-login» y su prueba lo bendecia como «allow
+  // re-auth». Re-autenticar es lo que hace el LOGIN, con contraseña; esta ruta solo existe para
+  // ESTRENAR la verificacion. Su hermano `resendVerificationCode` (abajo) ya rechazaba el correo
+  // ya verificado: la asimetria entre los dos era el defecto.
+  //
+  // El mensaje DICE que hay que iniciar sesion — quien refresca la pantalla de verificacion no
+  // se queda parado sin saber que hacer.
   if (staff.emailVerified) {
-    // Already verified - generate tokens for auto-login
-    const orgId = await getPrimaryOrganizationId(staff.id)
-    const accessToken = jwtService.generateAccessToken(
-      staff.id,
-      orgId,
-      'pending', // Temporary placeholder until venue is created
-      StaffRole.OWNER,
-    )
-    const refreshToken = jwtService.generateRefreshToken(staff.id, orgId)
-
-    return {
-      emailVerified: true,
-      accessToken,
-      refreshToken,
-    }
+    throw new BadRequestError('Email is already verified. Please log in.')
   }
 
   // 3. Check if verification code exists

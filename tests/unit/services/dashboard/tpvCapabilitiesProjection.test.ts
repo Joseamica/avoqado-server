@@ -42,6 +42,11 @@ const supportedDisplayCapabilities = {
     stale: false,
   },
   supportedRemoteCommands: [],
+  // Qué ajustes puede cambiar este aparato desde su propia pantalla de Configuración. Un POS sólo
+  // obedece lo del momento del cobro; el catálogo completo es de las terminales de COBRO
+  // (`device-capabilities.service.ts`). Viaja dentro de `capabilities`, así que la proyección de la
+  // lista y la del detalle tienen que seguir coincidiendo — que es justo lo que fija esta prueba.
+  configurableSettings: ['showReviewScreen', 'showTipScreen', 'tipSuggestions'],
 }
 
 describe('venue device capability projections', () => {
