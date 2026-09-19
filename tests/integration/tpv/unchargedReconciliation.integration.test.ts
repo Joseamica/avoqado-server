@@ -86,6 +86,7 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
         amountCents: 6500,
         tipCents: 975,
         terminalReturnedAt: ahora,
+        acknowledgedAt: ahora,
         expiresAt: new Date(ahora.getTime() - 30 * 60 * 1000),
         ...over,
       },
@@ -284,6 +285,67 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
     expect(r.released).toBe(false)
     expect(r.status).toBe('COMPLETED')
     expect(r.paymentId).toBe(pago.id)
+  })
+
+  it('🔴 Codex r4: el replay NO dice «liberada» con una aprobación del banco pendiente de retención', async () => {
+    const requestId = await sembrarFilaAtorada()
+    const declarar = () =>
+      reconcileUncharged(
+        { venueId, requestId, actorStaffId: staffCajeroId, source: 'MOBILE' },
+        { requestId, resolutionId: resolucionFija, statement: 'UNCHARGED_VERIFIED', statementVersion: 1 },
+      )
+    await declarar()
+
+    // Llega un Payment PENDING con evidencia de colisión: el banco habló, pero la fila NO cambió de estado.
+    const orden = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: `UNCH-R4-${sufijo}-${Math.random().toString(36).slice(2, 6)}`,
+        type: 'TAKEOUT', source: 'TPV', status: 'CONFIRMED', paymentStatus: 'PENDING',
+        subtotal: 65, taxAmount: 0, total: 65, createdById: staffCajeroId,
+      },
+    })
+    await prisma.payment.create({
+      data: {
+        venueId, orderId: orden.id, amount: 65, tipAmount: 0, method: 'CREDIT_CARD',
+        status: 'PENDING', feePercentage: 0, feeAmount: 0, netAmount: 65,
+        terminalPaymentRequestId: requestId,
+        processorData: { reconciliation: { kind: 'POSSIBLE_SECOND_CAPTURE' } },
+      },
+    })
+
+    // La fila sigue FAILED/OPERATOR_RECONCILED_NO_CHARGE, sin paymentId...
+    const fila = await prisma.terminalPaymentRequest.findUnique({ where: { requestId } })
+    expect(fila).toMatchObject({ status: 'FAILED', failureCode: 'OPERATOR_RECONCILED_NO_CHARGE', paymentId: null })
+
+    // ...y aun así el replay NO puede decir que quedó liberada.
+    const r = await terminalPaymentService.releaseUnknownRequest({
+      requestId, venueId,
+      actor: { staffId: staffCajeroId, source: 'MOBILE' },
+      reason: 'replay',
+      declaration: { requestId, resolutionId: resolucionFija, statement: 'UNCHARGED_VERIFIED', statementVersion: 1 },
+    })
+    expect(r.released).toBe(false)
+  })
+
+  it('🟢 CONTROL del veto: sin ninguna evidencia, el replay SÍ dice «liberada» (si no, el de arriba pasa por el motivo equivocado)', async () => {
+    const requestId = await sembrarFilaAtorada()
+    const declaracion = {
+      requestId,
+      resolutionId: resolucionFija,
+      statement: 'UNCHARGED_VERIFIED' as const,
+      statementVersion: 1,
+    }
+    await reconcileUncharged({ venueId, requestId, actorStaffId: staffCajeroId, source: 'MOBILE' }, declaracion)
+
+    const r = await terminalPaymentService.releaseUnknownRequest({
+      requestId,
+      venueId,
+      actor: { staffId: staffCajeroId, source: 'MOBILE' },
+      reason: 'replay',
+      declaration: declaracion,
+    })
+    expect(r.released).toBe(true)
   })
 
   it('🔴 una fila TIMED_OUT legacy SIN la marca de retorno se declara si la terminal está viva', async () => {

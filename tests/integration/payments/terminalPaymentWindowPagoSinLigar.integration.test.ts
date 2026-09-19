@@ -511,7 +511,10 @@ describe('Ronda 2 · hermano: la aprobación tardía tras una DECLARACIÓN tiene
     expect(correosTardios()[0][0]).toMatchObject({
       subject: `Cobro aprobado tarde tras la declaración del cajero — ${f.serial}`,
       lines: expect.arrayContaining([
-        expect.stringContaining('declarara que no se presentó tarjeta'),
+        // 🔴 Actualizada a propósito (19-sep, ronda 4): el correo ya NO afirma «no se presentó tarjeta» —eso es un
+        // hecho sobre la TARJETA que nadie comprobó— sino lo que de verdad ocurrió: alguien DECLARÓ que el cobro no
+        // había pasado, y el banco lo contradijo. El nombre de la función sigue siendo el de la feature.
+        expect.stringContaining('declarara que ese cobro no había pasado'),
         expect.stringContaining(`La orden ${venta!.id} tiene 1 cobro(s) con tarjeta`),
       ]),
     })
