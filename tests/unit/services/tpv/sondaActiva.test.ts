@@ -17,10 +17,19 @@ describe('sondaReportoActiva', () => {
     expect(sondaReportoActiva({ probeActiveAt: new Date('2026-09-18T16:29:30.000Z') }, ahora)).toBe(true)
   })
 
-  it('🔴 la marca vive en COLUMNA PROPIA, no en el sobre que otros resultados reemplazan', () => {
-    // Estaba en `resultJson`, y un timeout posterior que reemplaza el sobre entero borraba la evidencia de
-    // que el cobro seguía corriendo (Codex r2).
-    expect(sondaReportoActiva({ resultJson: { probeActiveAt: '2026-09-18T16:29:30.000Z' } } as any, ahora)).toBe(false)
+  it('🔴 la marca del formato ANTERIOR (en el sobre) TAMBIÉN veta', () => {
+    // Codex r3 (P1-2): la versión previa de esta prueba exigía lo contrario —que el sobre no vetara— y con eso
+    // CONSOLIDABA el defecto: al mover la marca a columna propia sin migrar los datos, las filas que ya la
+    // tenían quedaban desprotegidas. La migración las traslada y este respaldo cubre el despliegue.
+    expect(sondaReportoActiva({ resultJson: { probeActiveAt: '2026-09-18T16:29:30.000Z' } } as any, ahora)).toBe(true)
+  })
+
+  it('🔴 una marca ILEGIBLE del formato anterior también veta: falla CERRADO', () => {
+    expect(sondaReportoActiva({ resultJson: { probeActiveAt: 'basura' } } as any, ahora)).toBe(true)
+  })
+
+  it('el sobre sin marca no veta', () => {
+    expect(sondaReportoActiva({ resultJson: { status: 'timeout' } } as any, ahora)).toBe(false)
   })
 
   it('🔴 RONDA 2 de Codex: una sonda ACTIVE VIEJA SIGUE vetando — el reloj no desmiente una ejecución', () => {
@@ -32,13 +41,19 @@ describe('sondaReportoActiva', () => {
 
   it('🔴 sólo una RESPUESTA POSTERIOR que resuelve el intento levanta el veto', () => {
     expect(
-      sondaReportoActiva({ probeActiveAt: new Date('2026-09-18T15:00:00.000Z'), probeResolvedAt: new Date('2026-09-18T15:05:00.000Z') }, ahora),
+      sondaReportoActiva(
+        { probeActiveAt: new Date('2026-09-18T15:00:00.000Z'), probeResolvedAt: new Date('2026-09-18T15:05:00.000Z') },
+        ahora,
+      ),
     ).toBe(false)
   })
 
   it('🔴 una respuesta ANTERIOR al ACTIVE no lo levanta: llegó antes, no lo desmiente', () => {
     expect(
-      sondaReportoActiva({ probeActiveAt: new Date('2026-09-18T15:00:00.000Z'), probeResolvedAt: new Date('2026-09-18T14:00:00.000Z') }, ahora),
+      sondaReportoActiva(
+        { probeActiveAt: new Date('2026-09-18T15:00:00.000Z'), probeResolvedAt: new Date('2026-09-18T14:00:00.000Z') },
+        ahora,
+      ),
     ).toBe(true)
   })
 

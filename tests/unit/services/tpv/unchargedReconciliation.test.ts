@@ -71,9 +71,7 @@ function montar(fila = filaDelIncidente(), miembro: unknown = CAJERO, latidoHace
   prismaMock.activityLog.create.mockResolvedValue({})
   prismaMock.staffVenue.findFirst.mockResolvedValue(miembro)
   prismaMock.venueRolePermission.findUnique.mockResolvedValue(null)
-  prismaMock.terminal.findFirst.mockResolvedValue(
-    latidoHaceMs === null ? null : { lastHeartbeat: new Date(Date.now() - latidoHaceMs) },
-  )
+  prismaMock.terminal.findFirst.mockResolvedValue(latidoHaceMs === null ? null : { lastHeartbeat: new Date(Date.now() - latidoHaceMs) })
   // Sin intentos ligados y sin eventos que contradigan, salvo que la prueba diga otra cosa.
   prismaMock.terminalPaymentAttemptLink.findMany.mockResolvedValue([])
 }
@@ -105,9 +103,7 @@ describe('reconcileUncharged — camino feliz', () => {
     expect(r.staffId).toBe('staff-cashier')
     expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(1)
     expect(prismaMock.activityLog.create).toHaveBeenCalledTimes(1)
-    expect(prismaMock.activityLog.create.mock.calls[0][0].data.action).toBe(
-      'TERMINAL_PAYMENT_OPERATOR_RECONCILED_UNCHARGED',
-    )
+    expect(prismaMock.activityLog.create.mock.calls[0][0].data.action).toBe('TERMINAL_PAYMENT_OPERATOR_RECONCILED_UNCHARGED')
   })
 
   it('🔴 el CAS escribe EXACTAMENTE el desenlace que sale de los dos candados', async () => {
@@ -120,13 +116,6 @@ describe('reconcileUncharged — camino feliz', () => {
 
   it('también acepta una fila TIMED_OUT sin desenlace acreditado (las legacy del incidente)', async () => {
     montar(filaDelIncidente({ status: 'TIMED_OUT' }))
-    await expect(reconcileUncharged(identidad, declaracion())).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
-  })
-
-  it('🔴 una fila SIN la marca de retorno es elegible si la terminal está VIVA ahora', async () => {
-    // Es el caso de las filas legacy: el barrido sólo sella `terminalReturnedAt` sobre UNKNOWN, así que una
-    // TIMED_OUT vieja nunca la tendría — y sería inelegible para siempre justo la que hay que poder limpiar.
-    montar(filaDelIncidente({ status: 'TIMED_OUT', terminalReturnedAt: null }), CAJERO, 30 * 1000)
     await expect(reconcileUncharged(identidad, declaracion())).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
   })
 })
@@ -147,16 +136,6 @@ describe('reconcileUncharged — lo que VETA la declaración', () => {
     montar(filaDelIncidente({ probeActiveAt: new Date() }))
     await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'EXECUTION_STILL_ACTIVE' })
     expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
-  })
-
-  it('🔴 rechaza si la terminal TODAVÍA no ha vuelto ni está viva', async () => {
-    montar(filaDelIncidente({ terminalReturnedAt: null }), CAJERO, null)
-    await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'TERMINAL_NOT_BACK' })
-  })
-
-  it('🔴 rechaza si la terminal existe pero su latido es VIEJO: sigue sin volver', async () => {
-    montar(filaDelIncidente({ terminalReturnedAt: null }), CAJERO, 20 * 60 * 1000)
-    await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'TERMINAL_NOT_BACK' })
   })
 
   it('🔴 rechaza una fila RETENIDA por el banco', async () => {
@@ -192,9 +171,9 @@ describe('reconcileUncharged — lo que VETA la declaración', () => {
 describe('reconcileUncharged — autorización', () => {
   it('🔴 sin el permiso efectivo no se acepta, aunque el cuerpo venga perfecto', async () => {
     montar(filaDelIncidente(), MESERO)
-    await expect(
-      reconcileUncharged({ ...identidad, actorStaffId: 'staff-waiter' }, declaracion()),
-    ).rejects.toMatchObject({ statusCode: 403 })
+    await expect(reconcileUncharged({ ...identidad, actorStaffId: 'staff-waiter' }, declaracion())).rejects.toMatchObject({
+      statusCode: 403,
+    })
     expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
   })
 
@@ -205,9 +184,9 @@ describe('reconcileUncharged — autorización', () => {
 
   it('🔴 la autorización se comprueba ANTES que la elegibilidad: no filtra el estado del cobro', async () => {
     montar(filaDelIncidente({ paymentId: 'pay-9' }), MESERO)
-    await expect(
-      reconcileUncharged({ ...identidad, actorStaffId: 'staff-waiter' }, declaracion()),
-    ).rejects.toMatchObject({ statusCode: 403 })
+    await expect(reconcileUncharged({ ...identidad, actorStaffId: 'staff-waiter' }, declaracion())).rejects.toMatchObject({
+      statusCode: 403,
+    })
   })
 })
 
@@ -233,15 +212,15 @@ describe('reconcileUncharged — idempotencia', () => {
 
 describe('REGRESIÓN — la identidad nunca sale del cuerpo', () => {
   it('🔴 un staffId en el cuerpo NO se obedece', async () => {
-    await expect(
-      reconcileUncharged(identidad, { ...declaracion(), staffId: 'staff-owner' } as unknown),
-    ).rejects.toThrow(UnchargedReconciliationError)
+    await expect(reconcileUncharged(identidad, { ...declaracion(), staffId: 'staff-owner' } as unknown)).rejects.toThrow(
+      UnchargedReconciliationError,
+    )
   })
 
   it('🔴 `reason` y `confirm` NO son una declaración', async () => {
-    await expect(
-      reconcileUncharged(identidad, { requestId, reason: 'la PAX se reinició', confirm: true } as unknown),
-    ).rejects.toThrow(UnchargedReconciliationError)
+    await expect(reconcileUncharged(identidad, { requestId, reason: 'la PAX se reinició', confirm: true } as unknown)).rejects.toThrow(
+      UnchargedReconciliationError,
+    )
     expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
   })
 })
@@ -302,16 +281,6 @@ describe('P1 Codex 8 — sólo se declara sobre estados ADMITIDOS, nunca sobre u
     await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'ATTEMPT_NOT_ELIGIBLE' })
     expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
   })
-
-  it('🔴 una solicitud que TODAVÍA NO VENCE no se declara, aunque el aparato reporte un latido nuevo', async () => {
-    montar(filaDelIncidente({ terminalReturnedAt: null, expiresAt: new Date(Date.now() + 90 * 1000) }), CAJERO, 30 * 1000)
-    await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'TERMINAL_NOT_BACK' })
-  })
-
-  it('🔴 un latido del FUTURO (reloj del aparato adelantado) no acredita que la terminal volvió', async () => {
-    montar(filaDelIncidente({ terminalReturnedAt: null }), CAJERO, -60 * 60 * 1000)
-    await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'TERMINAL_NOT_BACK' })
-  })
 })
 
 describe('P2 Codex 7 — la pertenencia de la ORDEN se comprueba, no se supone', () => {
@@ -336,26 +305,20 @@ describe('P2 Codex 7 — la pertenencia de la ORDEN se comprueba, no se supone',
 
 // ============ RONDA 2 de Codex (19-sep): lo que los arreglos dejaron abierto ============
 
-describe('P1-8 r2 — una marca de RETORNO sellada no exime de comprobar el vencimiento', () => {
-  it('🔴 UNKNOWN con terminalReturnedAt sellado pero SIN vencer todavía NO se declara', async () => {
-    // Un ACK perdido deja UNKNOWN a los 5 s, con `expiresAt` minutos por delante; el barrido pudo sellar la
-    // marca con un latido adelantado. Antes se retornaba `true` al ver la marca y no se comprobaba nada más.
-    montar(filaDelIncidente({ terminalReturnedAt: new Date(), expiresAt: new Date(Date.now() + 4 * 60 * 1000) }))
-    await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'TERMINAL_NOT_BACK' })
-    expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
-  })
-})
+describe('P2 r2 — un latido guardado DURANTE la consulta no es «del futuro»', () => {})
 
-describe('P2 r2 — un latido guardado DURANTE la consulta no es «del futuro»', () => {
-  it('🔴 un heartbeat de hace -50 ms (llegó mientras consultábamos) NO rechaza: es legítimo', async () => {
-    // El arreglo del latido futuro tomaba `ahora` ANTES de leer la terminal, así que un latido guardado por
-    // otro request entre medias se leía como futuro. Es un falso negativo que yo introduje.
-    montar(filaDelIncidente({ terminalReturnedAt: null }), CAJERO, -50)
+describe('19-sep — la declaración NO depende de relojes ni latidos', () => {
+  it('🔴 se declara aunque la terminal NO tenga marca de retorno ni latido ninguno', async () => {
+    // Decisión del founder tras tres rondas de Codex: `terminalVolvio()` se BORRÓ. Comprobaba conectividad,
+    // no que el cobro terminara, y cada intento de afinarla abrió un hueco nuevo. Lo que protege el dinero
+    // es el veto de evidencia, que sigue intacto. Si alguien reintroduce una condición temporal, esta prueba
+    // se cae y hay que leer el comentario del servicio antes de "arreglarla".
+    montar(filaDelIncidente({ terminalReturnedAt: null, expiresAt: new Date(Date.now() + 60 * 60 * 1000) }), CAJERO, null)
     await expect(reconcileUncharged(identidad, declaracion())).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
   })
 
-  it('🔴 un latido de una HORA en el futuro sigue rechazando: eso sí es un reloj adelantado', async () => {
-    montar(filaDelIncidente({ terminalReturnedAt: null }), CAJERO, -60 * 60 * 1000)
-    await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'TERMINAL_NOT_BACK' })
+  it('🔴 pero la SONDA diciendo que el cobro sigue corriendo sigue vetando: eso sí es evidencia', async () => {
+    montar(filaDelIncidente({ terminalReturnedAt: null, probeActiveAt: new Date() }), CAJERO, null)
+    await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'EXECUTION_STILL_ACTIVE' })
   })
 })

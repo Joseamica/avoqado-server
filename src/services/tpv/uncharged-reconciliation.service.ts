@@ -58,15 +58,13 @@ export class UnchargedReconciliationError extends Error {
         ? 'Este cobro sí tiene señales de haber pasado. No lo declares: consulta su resultado.'
         : code === 'EXECUTION_STILL_ACTIVE'
           ? 'La terminal dice que este cobro sigue en curso. Espera unos segundos y vuelve a consultar.'
-          : code === 'TERMINAL_NOT_BACK'
-            ? 'La terminal todavía no ha vuelto. Espera a que se reconecte para poder declararlo.'
-            : code === 'NOT_ALLOWED'
-              ? 'No tienes permiso para declarar que un cobro no pasó. Pídeselo a tu administrador.'
-              : code === 'RESOLUTION_CONFLICT'
-                ? 'Esta declaración ya se registró con otros datos. Vuelve a consultar el cobro.'
-                : code === 'ATTEMPT_NOT_FOUND'
-                  ? 'No encontré ese cobro en este negocio.'
-                  : 'No se pudo declarar este cobro. Conserva el pendiente y consulta su resultado.',
+          : code === 'NOT_ALLOWED'
+            ? 'No tienes permiso para declarar que un cobro no pasó. Pídeselo a tu administrador.'
+            : code === 'RESOLUTION_CONFLICT'
+              ? 'Esta declaración ya se registró con otros datos. Vuelve a consultar el cobro.'
+              : code === 'ATTEMPT_NOT_FOUND'
+                ? 'No encontré ese cobro en este negocio.'
+                : 'No se pudo declarar este cobro. Conserva el pendiente y consulta su resultado.',
     )
   }
 }
@@ -118,66 +116,25 @@ async function miembroConPermiso(
   return { id: sv.id, staffId: sv.staffId, permitido }
 }
 
-/** Igual que `TERMINAL_ALIVE_WINDOW_MS` del servicio: un latido de hace más de 5 min ya no dice nada del ahora. */
-const VENTANA_LATIDO_VIVO_MS = 5 * 60_000
-
 /**
- * 🔴 Ronda 2 de Codex (19-sep): cuánto puede un latido «venir del futuro» y seguir siendo legítimo.
+ * 🔴 AQUÍ VIVÍA `terminalVolvio()`, y se BORRÓ a propósito (decisión del founder, 19-sep, con las tres
+ * auditorías de Codex enfrente).
  *
- * Rechazar TODO negativo excluía un caso real: otro request guarda el latido —con hora de servidor— mientras
- * esta consulta corre, y sale adelantado por milisegundos. Tomar la hora después de leer no basta: el desfase
- * puede ser mayor que lo que tarda la lectura. 30 s separa con holgura ese caso del que sí hay que frenar,
- * un aparato con el reloj adelantado una hora.
+ * Comprobaba que la terminal «hubiera vuelto» mirando `terminalReturnedAt` o un latido reciente. Tres rondas
+ * seguidas produjeron defectos NUEVOS exactamente ahí —relojes de aparato adelantados, marcas selladas a
+ * partir de esos relojes, tolerancias que volvían «posterior» un latido anterior— y dos de ellos los
+ * introdujeron los propios arreglos de la ronda anterior.
+ *
+ * 🔑 Y lo que decidió quitarlo: **nunca fue una garantía**. Lo dijo Codex desde la ronda 1 — un latido
+ * acredita CONECTIVIDAD, jamás que la ejecución del cobro terminara. Era ceremonia que parecía seguridad, y
+ * su única consecuencia real era abrir huecos en cada intento de afinarla.
+ *
+ * Lo que SÍ protege el dinero se queda intacto y es lo que siempre lo protegió: que no exista NINGÚN rastro
+ * de cobro —`Payment` por cualquiera de sus identidades, aprobación del banco, contradicción de procedencia,
+ * afirmación de la terminal en el sobre, o una sonda diciendo que el cobro sigue corriendo—. Y sobre todo:
+ * una PERSONA que miró la pantalla del aparato, que es la premisa de esta declaración y no necesita que un
+ * reloj se lo confirme.
  */
-const TOLERANCIA_LATIDO_FUTURO_MS = 30_000
-
-/**
- * ¿La terminal VOLVIÓ? Dos caminos, y el segundo es el encargo de Codex («definir cómo se observa el retorno
- * para todos los estados admitidos»):
- *
- *  1. `terminalReturnedAt` sellado — pero el barrido SÓLO lo sella sobre filas `UNKNOWN`, así que una `TIMED_OUT`
- *     legacy nunca lo tendría y quedaría inelegible PARA SIEMPRE: justo las que hay que poder limpiar hoy.
- *  2. La terminal está VIVA ahora (latido de los últimos 5 min) y ese latido es posterior al vencimiento de la
- *     solicitud. Es la misma señal que usa el barrido, leída en vivo en vez de diferida.
- *
- * 🔴 Y como allá: esto acredita CONECTIVIDAD, nunca que la ejecución terminó. Es un requisito NECESARIO de la
- * declaración, no la prueba — la prueba la pone la persona que miró la pantalla, y por eso se audita con su nombre.
- * Ampliar el barrido para sellar también TIMED_OUT habría tocado el camino que ya corre en producción.
- */
-async function terminalVolvio(
-  tx: Prisma.TransactionClient,
-  row: { terminalId: string; terminalReturnedAt: Date | null; expiresAt: Date },
-  ahora: Date,
-): Promise<boolean> {
-  // 🔴 Ronda 2 de Codex (19-sep): el VENCIMIENTO se comprueba SIEMPRE, antes que nada. Una marca de retorno
-  // sellada hacía retornar `true` de inmediato y saltarse todo lo demás — y esa marca puede haberla puesto el
-  // barrido a partir de un latido adelantado, sobre una fila que pasó a UNKNOWN por un ACK perdido a los 5 s
-  // con `expiresAt` minutos por delante. Resultado: se podía declarar un cobro que ni había vencido.
-  if (ahora.getTime() <= row.expiresAt.getTime()) return false
-  if (row.terminalReturnedAt) return true
-  const terminal = await tx.terminal.findFirst({
-    where: {
-      OR: [
-        { serialNumber: { equals: row.terminalId, mode: 'insensitive' } },
-        { serialNumber: { equals: `AVQD-${row.terminalId}`, mode: 'insensitive' } },
-      ],
-    },
-    select: { lastHeartbeat: true },
-  })
-  const latido = terminal?.lastHeartbeat
-  if (!latido) return false
-  // 🔴 P1 de Codex (18-sep): el latido lo reporta el APARATO y no tenía límite superior — un reloj adelantado
-  // una hora satisfacía las dos comparaciones y destrababa un cobro en vuelo. Se exige que caiga DENTRO de la
-  // ventana por los dos lados.
-  //
-  // 🔴 Ronda 2 (19-sep): y la hora de comparación se toma AQUÍ, después de leerlo. Tomándola antes, un latido
-  // legítimo guardado por otro request mientras corría esta consulta salía «del futuro» por unos milisegundos
-  // y rechazaba una declaración válida — un falso negativo que introdujo el arreglo anterior.
-  const ahoraTrasLeer = new Date()
-  const edadMs = ahoraTrasLeer.getTime() - latido.getTime()
-  if (edadMs < -TOLERANCIA_LATIDO_FUTURO_MS || edadMs >= VENTANA_LATIDO_VIVO_MS) return false
-  return latido.getTime() > row.expiresAt.getTime()
-}
 
 /** Las señales del sobre de la terminal que, solas, ya afirman un cobro. */
 const SENALES_POSITIVAS_DEL_SOBRE = ['paymentId', 'authorizationCode', 'transactionId', 'reference', 'readMode'] as const
@@ -300,8 +257,6 @@ export async function reconcileUncharged(
     if (!actor || !actor.permitido) throw new UnchargedReconciliationError('NOT_ALLOWED', 403)
 
     // ELEGIBILIDAD
-    const ahora = new Date()
-    if (!(await terminalVolvio(tx, row, ahora))) throw new UnchargedReconciliationError('TERMINAL_NOT_BACK')
     if (sondaReportoActiva(row)) throw new UnchargedReconciliationError('EXECUTION_STILL_ACTIVE')
 
     const sobre =

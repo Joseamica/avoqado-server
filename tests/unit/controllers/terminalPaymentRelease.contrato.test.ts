@@ -96,6 +96,26 @@ describe('el contrato de la declaración', () => {
     expect(cuerpo.outcomeEvidence).toBe('OPERATOR_RECONCILED')
   })
 
+  it('🔴 no liberada NUNCA afirma «no cobrado»: el desenlace honesto es que sigue sin resolverse', async () => {
+    // Codex r3 (P1-5): `desenlaceCanonico` clasifica por el código de la fila, así que con un claimedSuccess
+    // durable encima seguía diciendo NOT_CHARGED / OPERATOR_RECONCILED — decirle al POS que no se cobró
+    // justo cuando la terminal acaba de afirmar lo contrario.
+    mockRelease.mockResolvedValue({
+      requestId: 'req-1',
+      released: false,
+      status: 'FAILED',
+      outcome: 'UNRESOLVED',
+      outcomeEvidence: null,
+      resolution: { id: 'r1', acceptedAt: 'x' },
+    })
+    const res = resFalso()
+    await releaseTerminalPayment(reqFalso({ statement: 'UNCHARGED_VERIFIED', statementVersion: 1, resolutionId: 'uuid-1' }), res)
+    const cuerpo = res.json.mock.calls[0][0]
+    expect(cuerpo.released).toBe(false)
+    expect(cuerpo.outcome).not.toBe('NOT_CHARGED')
+    expect(cuerpo.outcomeEvidence).toBeNull()
+  })
+
   it('🔴 sin declaración, el cuerpo NO se toca: el camino viejo queda igual', async () => {
     mockRelease.mockResolvedValue({ requestId: 'req-1', released: false, status: 'UNKNOWN' })
     await releaseTerminalPayment(reqFalso({ reason: 'la PAX se reinició' }), resFalso())

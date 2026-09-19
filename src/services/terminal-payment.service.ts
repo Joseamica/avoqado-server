@@ -1451,9 +1451,9 @@ export function avisarAprobacionTardiaTrasVentana(
     }`,
     lines: [
       porCajero
-        // 🔴 P3 de Codex (18-sep): hay DOS declaraciones y este texto atribuía siempre la de gerencia. Quien
-        // declaró «revisé la terminal y no se cobró» no afirmó que nadie presentara tarjeta.
-        ? `El banco aprobó un cobro (${ctx.paymentId}) de la solicitud ${ctx.requestId} después de que un operador declarara que ese cobro no había pasado.`
+        ? // 🔴 P3 de Codex (18-sep): hay DOS declaraciones y este texto atribuía siempre la de gerencia. Quien
+          // declaró «revisé la terminal y no se cobró» no afirmó que nadie presentara tarjeta.
+          `El banco aprobó un cobro (${ctx.paymentId}) de la solicitud ${ctx.requestId} después de que un operador declarara que ese cobro no había pasado.`
         : `El banco aprobó un cobro (${ctx.paymentId}) de la solicitud ${ctx.requestId} después de que la ventana de 30 s la liberara.`,
       otros === null
         ? 'Sin orden ligada: no se pudo contar otros cobros.'
@@ -5486,13 +5486,21 @@ class TerminalPaymentService {
       }
       // 🔴 P2-12 residual (Codex r2): el contrato del plan promete `requestId`, `outcome` y `outcomeEvidence`
       // en la respuesta, y sólo iban `released` y `status`. El POS los necesita para decidir sin re-preguntar.
+      // 🔴 Ronda 3 de Codex (P1-5): `desenlaceCanonico` clasifica por el CÓDIGO de la fila, así que con una
+      // afirmación de cobro durable encima seguía respondiendo `NOT_CHARGED / OPERATOR_RECONCILED` — decirle
+      // al POS que no se cobró cuando la terminal acaba de afirmar lo contrario. Si no está liberada, el
+      // desenlace que se reporta es el honesto: sigue sin resolverse.
       const desenlace = fresh ? desenlaceCanonico(fresh) : null
       return {
         requestId,
         released: liberada,
         status: fresh?.status ?? TerminalPaymentRequestStatus.FAILED,
         ...(fresh?.paymentId ? { paymentId: fresh.paymentId } : {}),
-        ...(desenlace ? { outcome: desenlace.outcome, outcomeEvidence: desenlace.outcomeEvidence ?? null } : {}),
+        ...(desenlace
+          ? liberada
+            ? { outcome: desenlace.outcome, outcomeEvidence: desenlace.outcomeEvidence ?? null }
+            : { outcome: 'UNRESOLVED', outcomeEvidence: null }
+          : {}),
         resolution: { id: resolution.id, acceptedAt: resolution.acceptedAt },
       }
     }
@@ -6433,21 +6441,6 @@ class TerminalPaymentService {
       return true
     }
 
-    if (disposition === 'RESOLVED' || disposition === 'RECEIVED_CANCELLED' || disposition === 'NOT_FOUND') {
-      // 🔴 Ronda 2 de Codex: una respuesta POSTERIOR que resuelve el intento es lo ÚNICO que levanta el veto
-      // de `probeActiveAt`. El transcurso del tiempo no desmiente una ejecución; una respuesta de la propia
-      // terminal sí. Se sella aquí, antes de cualquier otra decisión, y su fallo no cambia el desenlace.
-      try {
-        await prisma.$executeRaw`
-          UPDATE "TerminalPaymentRequest" SET "probeResolvedAt" = (NOW() AT TIME ZONE 'UTC') WHERE "id" = ${row.id}`
-      } catch (err) {
-        logger.warn('⚠️ [TerminalPayment] no se pudo sellar probeResolvedAt', {
-          requestId,
-          error: err instanceof Error ? err.message : String(err),
-        })
-      }
-    }
-
     if (disposition === 'RESOLVED' || disposition === 'RECEIVED_CANCELLED') {
       const fr = event.finalResult
       if (!fr || fr.requestId !== requestId || !fr.status || !['success', 'failed', 'cancelled', 'timeout'].includes(fr.status))
@@ -6514,6 +6507,22 @@ class TerminalPaymentService {
         this.unaccreditedProbeAnswers.delete(requestId)
       }
       const outcome = await this.closeRow(requestId, terminal.venueId, result)
+
+      // 🔴 Ronda 3 de Codex (P1-1): el sello va AQUÍ, DESPUÉS de que `closeRow` haya persistido el resultado
+      // y sus señales positivas — no antes. Sellado arriba, retiraba la protección de `probeActiveAt` en la
+      // ventana que va del sello a la escritura: otra instancia podía aceptar la declaración justo ahí, sobre
+      // un cobro que la terminal acababa de confirmar. Y `NOT_FOUND` ya NO sella: que la bandeja no tenga la
+      // solicitud no acredita que el intento terminara (esa respuesta tiene su propio tratamiento).
+      // Su fallo no cambia el desenlace: sin sello, el veto SIGUE puesto, que es el lado seguro.
+      try {
+        await prisma.$executeRaw`
+          UPDATE "TerminalPaymentRequest" SET "probeResolvedAt" = (NOW() AT TIME ZONE 'UTC') WHERE "id" = ${row.id}`
+      } catch (err) {
+        logger.warn('⚠️ [TerminalPayment] no se pudo sellar probeResolvedAt — el veto se conserva', {
+          requestId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
       const after = await prisma.terminalPaymentRequest.findFirst({
         where,
         select: { status: true, failureCode: true, cancelDisposition: true },

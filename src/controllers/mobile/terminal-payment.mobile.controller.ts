@@ -393,8 +393,7 @@ export async function releaseTerminalPayment(req: Request, res: Response) {
     // cuerpo intacto y el esquema lo exigía también dentro del JSON, así que el contrato documentado devolvía 409.
     // Y pedirlo dos veces abre la puerta a que se contradigan: la identidad de la solicitud es la de la URL,
     // que es la que ya gobierna el resto del endpoint.
-    const declaration =
-      req.body && typeof req.body === 'object' && 'statement' in req.body ? { ...req.body, requestId } : undefined
+    const declaration = req.body && typeof req.body === 'object' && 'statement' in req.body ? { ...req.body, requestId } : undefined
 
     const r = await terminalPaymentService.releaseUnknownRequest({
       requestId,

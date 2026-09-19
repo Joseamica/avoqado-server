@@ -23,10 +23,19 @@
  * (`probeResolvedAt`). Una respuesta anterior no cuenta: llegó antes, no desmiente nada.
  */
 export function sondaReportoActiva(
-  row: { probeActiveAt?: Date | null; probeResolvedAt?: Date | null },
+  row: { probeActiveAt?: Date | null; probeResolvedAt?: Date | null; resultJson?: unknown },
   _ahora?: Date,
 ): boolean {
-  const activa = row.probeActiveAt
+  // 🔴 Codex r3 (P1-2): el formato ANTERIOR guardaba la marca dentro de `resultJson`, y al mover la columna
+  // esas observaciones quedaban invisibles: el lector devolvía «no hay sonda activa» y la declaración pasaba
+  // sobre un cobro que la terminal había dicho estar ejecutando. La migración `20260919020000` las traslada,
+  // y este respaldo cubre la ventana del despliegue, en la que un proceso viejo todavía puede escribir ahí.
+  // Cualquier valor presente cuenta como veto, incluso ilegible: falla CERRADO.
+  const enElSobre =
+    row.resultJson && typeof row.resultJson === 'object' && !Array.isArray(row.resultJson)
+      ? (row.resultJson as Record<string, unknown>).probeActiveAt
+      : undefined
+  const activa = row.probeActiveAt ?? (enElSobre !== undefined && enElSobre !== null ? new Date(0) : null)
   if (!activa) return false
   const resuelta = row.probeResolvedAt
   if (!resuelta) return true
