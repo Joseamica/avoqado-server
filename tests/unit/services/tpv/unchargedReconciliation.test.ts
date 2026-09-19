@@ -57,7 +57,11 @@ const MESERO = { id: 'sv-waiter', staffId: 'staff-waiter', role: 'WAITER', permi
 /** `latidoHaceMs = null` ⇒ la terminal no aparece (nunca volvió). */
 function montar(fila = filaDelIncidente(), miembro: unknown = CAJERO, latidoHaceMs: number | null = null) {
   prismaMock.$transaction.mockImplementation((fn: any) => fn(prismaMock))
-  prismaMock.$queryRaw.mockResolvedValue([{ id: 'order-1' }])
+  // El candado de la orden devuelve su fila; la consulta de eventos del procesador, ninguna (sin contradicción).
+  // Con un mock que devuelve lo mismo a TODA consulta cruda, el veto de procedencia leería contradicción siempre.
+  prismaMock.$queryRaw.mockImplementation(async (frag: any) =>
+    JSON.stringify(frag).includes('ProviderEventLog') ? [] : [{ id: 'order-1' }],
+  )
   prismaMock.$executeRaw.mockResolvedValue(1)
   prismaMock.$executeRawUnsafe.mockResolvedValue(0)
   prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue(fila)
@@ -68,6 +72,8 @@ function montar(fila = filaDelIncidente(), miembro: unknown = CAJERO, latidoHace
   prismaMock.terminal.findFirst.mockResolvedValue(
     latidoHaceMs === null ? null : { lastHeartbeat: new Date(Date.now() - latidoHaceMs) },
   )
+  // Sin intentos ligados y sin eventos que contradigan, salvo que la prueba diga otra cosa.
+  prismaMock.terminalPaymentAttemptLink.findMany.mockResolvedValue([])
 }
 
 beforeEach(() => {
@@ -235,5 +241,74 @@ describe('REGRESIÓN — la identidad nunca sale del cuerpo', () => {
       reconcileUncharged(identidad, { requestId, reason: 'la PAX se reinició', confirm: true } as unknown),
     ).rejects.toThrow(UnchargedReconciliationError)
     expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
+  })
+})
+
+// ============ Auditoría de Codex del 18-sep: los seis P1 ============
+
+describe('P1 Codex 1 — el sobre que AFIRMA un cobro veta, aunque el pago no se haya podido acreditar', () => {
+  it('🔴 claimedSuccess con un código de autorización NO deja declarar', async () => {
+    montar(filaDelIncidente({ resultJson: { requestId, status: 'timeout', claimedSuccess: { authorizationCode: '103520' } } }))
+    await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'POSITIVE_EVIDENCE_EXISTS' })
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
+  })
+
+  it('claimedSuccess con TODOS los campos vacíos no afirma nada: sí deja declarar', async () => {
+    montar(filaDelIncidente({ resultJson: { requestId, status: 'timeout', claimedSuccess: { authorizationCode: '', paymentId: null } } }))
+    await expect(reconcileUncharged(identidad, declaracion())).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
+  })
+})
+
+describe('P1 Codex 2 — el veto del pago NO se limita a COMPLETED ni a la solicitud', () => {
+  it('🔴 un Payment PENDING por la llave de un intento ligado veta', async () => {
+    montar()
+    prismaMock.terminalPaymentAttemptLink.findMany.mockResolvedValue([{ attemptId: 'att-1' }])
+    // El primer findFirst del veto por solicitud no encuentra nada; el de los intentos sí.
+    prismaMock.payment.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 'pay-pendiente' })
+    await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'POSITIVE_EVIDENCE_EXISTS' })
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
+  })
+})
+
+describe('P1 Codex 3 — las contradicciones de procedencia del procesador vetan', () => {
+  it('🔴 un evento del procesador que contradice (otro venue / otra terminal / aprobado) NO deja declarar', async () => {
+    montar()
+    prismaMock.terminalPaymentAttemptLink.findMany.mockResolvedValue([{ attemptId: 'att-1' }])
+    // La consulta cruda del veto por eventos devuelve una fila = hay contradicción.
+    prismaMock.$queryRaw.mockImplementation(async (frag: any) => {
+      const texto = JSON.stringify(frag)
+      return texto.includes('ProviderEventLog') ? [{ id: 'evt-1' }] : [{ id: 'order-1' }]
+    })
+    await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'POSITIVE_EVIDENCE_EXISTS' })
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
+  })
+})
+
+describe('P1 Codex 4 — el candado alcanza también a los INTENTOS, no sólo a la solicitud', () => {
+  it('🔴 toma un candado por cada intento ligado, dentro de la transacción', async () => {
+    montar()
+    prismaMock.terminalPaymentAttemptLink.findMany.mockResolvedValue([{ attemptId: 'att-b' }, { attemptId: 'att-a' }])
+    await reconcileUncharged(identidad, declaracion())
+    const candados = prismaMock.$queryRaw.mock.calls.filter((c: any) => JSON.stringify(c).includes('pg_advisory_xact_lock'))
+    // 1 de la solicitud + 2 de los intentos
+    expect(candados.length).toBeGreaterThanOrEqual(3)
+  })
+})
+
+describe('P1 Codex 8 — sólo se declara sobre estados ADMITIDOS, nunca sobre un cobro en vuelo', () => {
+  it.each([['SENT'], ['CANCEL_REQUESTED'], ['PENDING']])('🔴 %s NO se puede declarar: el cobro puede seguir corriendo', async estado => {
+    montar(filaDelIncidente({ status: estado }))
+    await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'ATTEMPT_NOT_ELIGIBLE' })
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
+  })
+
+  it('🔴 una solicitud que TODAVÍA NO VENCE no se declara, aunque el aparato reporte un latido nuevo', async () => {
+    montar(filaDelIncidente({ terminalReturnedAt: null, expiresAt: new Date(Date.now() + 90 * 1000) }), CAJERO, 30 * 1000)
+    await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'TERMINAL_NOT_BACK' })
+  })
+
+  it('🔴 un latido del FUTURO (reloj del aparato adelantado) no acredita que la terminal volvió', async () => {
+    montar(filaDelIncidente({ terminalReturnedAt: null }), CAJERO, -60 * 60 * 1000)
+    await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'TERMINAL_NOT_BACK' })
   })
 })

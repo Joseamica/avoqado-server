@@ -16,6 +16,9 @@ import '../../__helpers__/integration-setup'
 import prisma from '@/utils/prismaClient'
 import { reconcileUncharged, UnchargedReconciliationError } from '@/services/tpv/uncharged-reconciliation.service'
 import { randomUUID } from 'crypto'
+import { terminalPaymentService } from '@/services/terminal-payment.service'
+
+const resolucionFija = '11111111-1111-4111-8111-111111111111'
 
 jest.setTimeout(120000)
 
@@ -221,6 +224,66 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
     expect(asientos).toHaveLength(1)
     // Y la declaración guardada es UNA: la segunda no la pisó con otro resolutionId.
     expect((fila?.operatorReconciliation as any)?.kind).toBe('UNCHARGED_VERIFIED')
+  })
+
+  it('🔴 P1 Codex: tras una aprobación TARDÍA, el replay NO dice «liberada»', async () => {
+    const requestId = await sembrarFilaAtorada()
+    const declararla = () =>
+      reconcileUncharged(
+        { venueId, requestId, actorStaffId: staffCajeroId, source: 'MOBILE' },
+        { requestId, resolutionId: resolucionFija, statement: 'UNCHARGED_VERIFIED', statementVersion: 1 },
+      )
+    await declararla()
+
+    // Llega el dinero tarde y el cierre común deja la fila COMPLETED con su Payment.
+    const orden = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: `UNCH-T-${sufijo}-${Math.random().toString(36).slice(2, 6)}`,
+        type: 'TAKEOUT',
+        source: 'TPV',
+        status: 'CONFIRMED',
+        paymentStatus: 'PAID',
+        subtotal: 65,
+        taxAmount: 0,
+        total: 65,
+        createdById: staffCajeroId,
+      },
+    })
+    const pago = await prisma.payment.create({
+      data: {
+        venueId,
+        orderId: orden.id,
+        amount: 65,
+        tipAmount: 9.75,
+        method: 'CREDIT_CARD',
+        status: 'COMPLETED',
+        feePercentage: 0,
+        feeAmount: 0,
+        netAmount: 65,
+        terminalPaymentRequestId: requestId,
+      },
+    })
+    await prisma.terminalPaymentRequest.update({
+      where: { requestId },
+      data: { status: 'COMPLETED', paymentId: pago.id },
+    })
+
+    // El replay devuelve la MISMA declaración (fue aceptada de verdad)...
+    const replay = await declararla()
+    expect(replay.id).toBe(resolucionFija)
+
+    // ...pero el wrapper ya NO puede decir «liberada»: el desenlace se deriva de la fila fresca.
+    const r = await terminalPaymentService.releaseUnknownRequest({
+      requestId,
+      venueId,
+      actor: { staffId: staffCajeroId, source: 'MOBILE' },
+      reason: 'replay',
+      declaration: { requestId, resolutionId: resolucionFija, statement: 'UNCHARGED_VERIFIED', statementVersion: 1 },
+    })
+    expect(r.released).toBe(false)
+    expect(r.status).toBe('COMPLETED')
+    expect(r.paymentId).toBe(pago.id)
   })
 
   it('🔴 una fila TIMED_OUT legacy SIN la marca de retorno se declara si la terminal está viva', async () => {

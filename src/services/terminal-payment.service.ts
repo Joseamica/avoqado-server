@@ -5435,21 +5435,41 @@ class TerminalPaymentService {
         { venueId, requestId, actorStaffId: actor.staffId ?? null, source: actor.source },
         input.declaration,
       )
+      // 🔴 P1 de la auditoría de Codex (18-sep): `released` NO puede ser incondicional. En un REPLAY la
+      // declaración se devuelve tal cual (es correcto: fue aceptada), pero entretanto pudo aparecer el dinero
+      // y la fila estar COMPLETED o retenida por el banco. Decir «Terminal liberada» ahí es mentirle al cajero
+      // justo en el momento en que más caro cuesta. El desenlace se deriva de la fila FRESCA.
       const fresh = await prisma.terminalPaymentRequest.findFirst({
         where: { requestId, venueId },
-        select: { status: true },
+        select: { status: true, failureCode: true, paymentId: true },
       })
-      logger.info('🧾 [TerminalPayment] Cobro conciliado por declaración del operador', {
-        requestId,
-        venueId,
-        staffId: actor.staffId,
-        source: actor.source,
-        resolutionId: resolution.id,
-      })
+      const liberada =
+        fresh?.status === TerminalPaymentRequestStatus.FAILED &&
+        fresh.failureCode === 'OPERATOR_RECONCILED_NO_CHARGE' &&
+        !fresh.paymentId
+      if (!liberada) {
+        logger.error('🚨 [TerminalPayment] declaración aceptada pero la solicitud YA NO está liberada — apareció dinero', {
+          requestId,
+          venueId,
+          status: fresh?.status,
+          failureCode: fresh?.failureCode,
+          paymentId: fresh?.paymentId,
+          resolutionId: resolution.id,
+        })
+      } else {
+        logger.info('🧾 [TerminalPayment] Cobro conciliado por declaración del operador', {
+          requestId,
+          venueId,
+          staffId: actor.staffId,
+          source: actor.source,
+          resolutionId: resolution.id,
+        })
+      }
       return {
         requestId,
-        released: true,
+        released: liberada,
         status: fresh?.status ?? TerminalPaymentRequestStatus.FAILED,
+        ...(fresh?.paymentId ? { paymentId: fresh.paymentId } : {}),
         resolution: { id: resolution.id, acceptedAt: resolution.acceptedAt },
       }
     }

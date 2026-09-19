@@ -388,7 +388,13 @@ export async function releaseTerminalPayment(req: Request, res: Response) {
 
     // La declaración viaja SÓLO si el cuerpo trae `statement`. Nunca se deriva de `reason` ni de `confirm`:
     // son campos libres que ya existían, y leerlos como una afirmación sobre dinero sería un contrato accidental.
-    const declaration = req.body && typeof req.body === 'object' && 'statement' in req.body ? req.body : undefined
+    //
+    // 🔴 P2 de la auditoría de Codex (18-sep): el `requestId` lo pone la RUTA, no el cuerpo. Antes se pasaba el
+    // cuerpo intacto y el esquema lo exigía también dentro del JSON, así que el contrato documentado devolvía 409.
+    // Y pedirlo dos veces abre la puerta a que se contradigan: la identidad de la solicitud es la de la URL,
+    // que es la que ya gobierna el resto del endpoint.
+    const declaration =
+      req.body && typeof req.body === 'object' && 'statement' in req.body ? { ...req.body, requestId } : undefined
 
     const r = await terminalPaymentService.releaseUnknownRequest({
       requestId,

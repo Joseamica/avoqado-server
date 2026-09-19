@@ -30,7 +30,9 @@ import { z } from 'zod'
 import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { evaluatePermissionList, hasPermission } from '../../lib/permissions'
-import { candadoDeSolicitud, OPCIONES_DE_TRANSACCION_DEL_INTENTO } from './candadoDeIntento'
+import { candadoDeIntento, candadoDeSolicitud, llaveDeIntento, OPCIONES_DE_TRANSACCION_DEL_INTENTO } from './candadoDeIntento'
+import { estadoBancarioSql } from './estadoBancario'
+import { PATRON_SQL_TRIM_COMO_JS } from '../../utils/terminalSerial'
 import { hayEvidenciaDeConciliacionSql, sinEvidenciaPositivaSql } from './evidenciaPositivaSql'
 import { sondaReportoActiva } from './sondaActiva'
 
@@ -149,11 +151,64 @@ async function terminalVolvio(
   })
   const latido = terminal?.lastHeartbeat
   if (!latido) return false
-  return latido.getTime() > ahora.getTime() - VENTANA_LATIDO_VIVO_MS && latido.getTime() > row.expiresAt.getTime()
+  // 🔴 P1 de Codex (18-sep): el latido lo reporta el APARATO y no tenía límite superior — un reloj adelantado
+  // una hora satisfacía las dos comparaciones y destrabab un cobro en vuelo. Ahora se exige que caiga DENTRO de
+  // la ventana por los dos lados: ni viejo ni del futuro.
+  const edadMs = ahora.getTime() - latido.getTime()
+  if (edadMs < 0 || edadMs >= VENTANA_LATIDO_VIVO_MS) return false
+  return latido.getTime() > row.expiresAt.getTime()
 }
 
 /** Las señales del sobre de la terminal que, solas, ya afirman un cobro. */
 const SENALES_POSITIVAS_DEL_SOBRE = ['paymentId', 'authorizationCode', 'transactionId', 'reference', 'readMode'] as const
+
+/**
+ * 🔴 P1 de la auditoría de Codex (18-sep): esto FALTABA, y el precedente sí lo tiene.
+ *
+ * Un `success` que el cierre no pudo acreditar queda UNKNOWN con su afirmación guardada en
+ * `resultJson.claimedSuccess` — exactamente el sobre de una terminal que dijo «cobré» y cuyo pago todavía no
+ * se pudo ligar. Sin esta comprobación la declaración pasaba por encima de esa afirmación. Un objeto con
+ * todos los campos vacíos no afirma nada.
+ */
+function afirmaCobro(claimedSuccess: unknown): boolean {
+  if (!claimedSuccess || typeof claimedSuccess !== 'object' || Array.isArray(claimedSuccess)) return false
+  return Object.values(claimedSuccess as Record<string, unknown>).some(v => v !== undefined && v !== null && v !== '' && v !== false)
+}
+
+/**
+ * 🔴 P1 de Codex (18-sep): los ESTADOS admitidos van en lista explícita.
+ *
+ * Antes sólo se excluía `PENDING` y se confiaba en `desenlaceCanonico`, pero `SENT` y `CANCEL_REQUESTED`
+ * también son UNRESOLVED — y son cobros que la terminal puede estar ejecutando AHORA. Declarar sobre ellos
+ * es exactamente el camino del cobro doble.
+ */
+const ESTADOS_DECLARABLES = new Set<string>(['UNKNOWN', 'TIMED_OUT'])
+
+/**
+ * 🔴 P1 de Codex (18-sep): las contradicciones de PROCEDENCIA también vetan.
+ *
+ * Un evento del procesador para un intento de esta solicitud que llegó a OTRO venue, que contradice el
+ * vínculo, que trae el serial de OTRA terminal, o que el banco APROBÓ aunque no naciera `Payment`. Copiado
+ * del precedente (`evidenciaQueVetaLaDeclaracion`) y ampliado a TODOS los intentos ligados, no a uno.
+ */
+async function contradiccionDeProcedencia(
+  tx: Prisma.TransactionClient,
+  attemptIds: string[],
+  venueId: string,
+  terminalId: string,
+): Promise<boolean> {
+  if (attemptIds.length === 0) return false
+  const filas = await tx.$queryRaw<{ id: string }[]>`
+    SELECT e."id" FROM "ProviderEventLog" e
+    WHERE e."attemptId" IN (${Prisma.join(attemptIds)}) AND e."provider" = 'PAYMENT_PROCESSOR'
+      AND (e."venueId" IS DISTINCT FROM ${venueId}
+        OR e."errorReason" IN ('LINK_TERMINAL_MISMATCH', 'LINK_VENUE_MISMATCH')
+        OR (nullif(regexp_replace(coalesce(e."payload"->'payload'->>'terminalSerial', ''), ${PATRON_SQL_TRIM_COMO_JS}, '', 'g'), '') IS NOT NULL
+          AND lower(regexp_replace(regexp_replace(e."payload"->'payload'->>'terminalSerial', ${PATRON_SQL_TRIM_COMO_JS}, '', 'g'), '^AVQD-', '', 'i')) <> ${terminalId})
+        OR ${estadoBancarioSql(Prisma.sql`coalesce(e."payload"->'payload'->'status', e."payload"->'status')`)} = 'APROBADO')
+    LIMIT 1`
+  return filas.length > 0
+}
 
 export async function reconcileUncharged(
   identity: { venueId: string; requestId: string; actorStaffId: string | null; source: string },
@@ -166,8 +221,21 @@ export async function reconcileUncharged(
   const bodyHash = createHash('sha256').update(JSON.stringify(declaration)).digest('hex')
 
   return prisma.$transaction(async tx => {
-    // Candado por SOLICITUD (no por intento): una fila legacy sin intento ligado también se concilia.
+    // Candado por SOLICITUD (no sólo por intento): una fila legacy sin intento ligado también se concilia.
     await candadoDeSolicitud(tx, declaration.requestId)
+
+    // 🔴 P1 de Codex (18-sep): el candado de solicitud NO serializa contra el ingreso del webhook, que toma
+    // `candadoDeIntento`. Se enumeran los intentos DENTRO de la transacción y se toma su candado en orden
+    // estable — el mismo orden que el registrador, para no invertir la jerarquía y crear un abrazo mortal.
+    const vinculos = await tx.terminalPaymentAttemptLink.findMany({
+      where: { requestId: declaration.requestId, venueId: identity.venueId },
+      select: { attemptId: true },
+    })
+    const attemptIds = vinculos
+      .map(v => llaveDeIntento(v.attemptId))
+      .filter((a): a is string => Boolean(a))
+      .sort()
+    for (const attemptId of attemptIds) await candadoDeIntento(tx, attemptId)
 
     const inicial = await tx.terminalPaymentRequest.findFirst({
       where: { requestId: declaration.requestId, venueId: identity.venueId },
@@ -209,11 +277,13 @@ export async function reconcileUncharged(
     const senalPositiva =
       sobre.status === 'success' ||
       sobre.approved === true ||
-      SENALES_POSITIVAS_DEL_SOBRE.some(f => typeof sobre[f] === 'string' && sobre[f] !== '')
+      SENALES_POSITIVAS_DEL_SOBRE.some(f => typeof sobre[f] === 'string' && sobre[f] !== '') ||
+      // 🔴 P1 de Codex: la afirmación conservada de un `success` degradado. El precedente ya lo comprobaba.
+      afirmaCobro(sobre.claimedSuccess)
     const retenidaPorLaVentana =
       row.failureCode === 'BANK_APPROVED_AWAITING_PAYMENT' || row.failureCode === 'PAYMENT_UNBOUND_AWAITING_REVIEW'
 
-    // Las cuatro identidades del pago, igual que el precedente: llave del intento, puntero, etiqueta legacy y fila.
+    // Las identidades del pago POR SOLICITUD: puntero, etiqueta legacy y fila.
     const pago = await tx.payment.findFirst({
       where: {
         OR: [
@@ -224,12 +294,24 @@ export async function reconcileUncharged(
       },
       select: { id: true },
     })
-    if (pago || row.paymentId || senalPositiva || retenidaPorLaVentana)
+    // 🔴 P1 de Codex: y POR INTENTO, sin limitar a COMPLETED. Un `Payment` PENDING con evidencia de colisión
+    // vive con la llave del intento y sin columna de solicitud: por ahí se colaba la declaración.
+    const pagoPorIntento =
+      !pago && attemptIds.length > 0
+        ? await tx.payment.findFirst({ where: { idempotencyKey: { in: attemptIds } }, select: { id: true } })
+        : null
+    if (pago || pagoPorIntento || row.paymentId || senalPositiva || retenidaPorLaVentana)
       throw new UnchargedReconciliationError('POSITIVE_EVIDENCE_EXISTS')
 
+    // 🔴 P1 de Codex: contradicciones de procedencia del procesador (otro venue, otra terminal, aprobado sin Payment).
+    if (await contradiccionDeProcedencia(tx, attemptIds, identity.venueId, row.terminalId))
+      throw new UnchargedReconciliationError('POSITIVE_EVIDENCE_EXISTS')
+
+    // 🔴 P1 de Codex: lista EXPLÍCITA de estados. `SENT` y `CANCEL_REQUESTED` también son UNRESOLVED y son
+    // cobros que pueden seguir corriendo: declarar sobre ellos es el camino del cobro doble.
+    if (!ESTADOS_DECLARABLES.has(row.status)) throw new UnchargedReconciliationError('ATTEMPT_NOT_ELIGIBLE')
     const { desenlaceCanonico } = await import('../terminal-payment.service')
-    if (desenlaceCanonico(row).outcome !== 'UNRESOLVED' || row.status === 'PENDING')
-      throw new UnchargedReconciliationError('ATTEMPT_NOT_ELIGIBLE')
+    if (desenlaceCanonico(row).outcome !== 'UNRESOLVED') throw new UnchargedReconciliationError('ATTEMPT_NOT_ELIGIBLE')
 
     const saved: UnchargedReconciliation = {
       id: declaration.resolutionId,
