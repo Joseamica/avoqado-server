@@ -29,6 +29,8 @@ export function launchCouponId(code: string, offerVersion: number): string {
 export interface PlanListPrice {
   id: string
   unitAmount: number
+  /** Producto de Stripe al que pertenece el precio: es lo que acota el cupón con `applies_to`. */
+  productId: string
 }
 
 /**
@@ -60,7 +62,11 @@ export async function readPlanListPrice(planTier: 'PRO' | 'PREMIUM', advertisedP
   if (price.unit_amount <= advertisedPriceCents) {
     return problema(`el precio de lista (${price.unit_amount}) no es mayor que el anunciado (${advertisedPriceCents})`)
   }
-  return { id: price.id, unitAmount: price.unit_amount }
+  // El producto es lo que permite acotar el cupón con `applies_to`: sin él, el descuento se
+  // aplicaría a cualquier cosa que el negocio contrate después.
+  const productId = typeof price.product === 'string' ? price.product : (price.product as { id?: string } | null)?.id
+  if (!productId) return problema('no tiene producto asociado en Stripe')
+  return { id: price.id, unitAmount: price.unit_amount, productId }
 }
 
 export interface LaunchOfferPreview {
@@ -208,6 +214,15 @@ export async function activateLaunchCampaign(id: string, staffId?: string | null
           currency: 'mxn',
           duration: 'repeating',
           duration_in_months: campaign.discountMonths,
+          // 🔴 El cupón es DINERO, no una promesa de precio: sin `applies_to` Stripe lo aplica a
+          // cualquier producto de la suscripción, y la actualización de precio CONSERVA los
+          // descuentos. Un `LC_POS22_V1` abierto sobrevive a un cambio de plan y descuenta sus
+          // $1,136.84 de lo que sea — sobre PREMIUM el recurrente sería $834, no $22; sobre un
+          // paquete de $500 se lo comería entero. (Auditoría de Codex, 18-sep, hallazgo #9.)
+          //
+          // ⚠️ Stripe NO deja modificar `applies_to` de un cupón ya creado: esto protege a las
+          // campañas que se activen desde hoy, no a las que ya tienen su cupón abierto.
+          applies_to: { products: [price.productId] },
           name: `${campaign.name} v${campaign.offerVersion}`,
           metadata: { launchCampaignId: campaign.id, code: campaign.code, offerVersion: String(campaign.offerVersion) },
         },

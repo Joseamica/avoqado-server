@@ -21,7 +21,7 @@ const RFC_RE = /^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/
 const CURP_RE = /^[A-Z]{4}\d{6}[HM][A-Z]{5}[A-Z0-9]\d$/
 
 export interface PaymentActivationProfileInput {
-  entity?: { entityType: string; entitySubType?: string | null; commercialName?: string | null }
+  entity?: { entityType?: string | null; entitySubType?: string | null; commercialName?: string | null; businessActivity?: string | null }
   identity?: {
     legalFirstName: string
     legalLastName: string
@@ -117,6 +117,7 @@ export async function getPaymentActivation(venueId: string) {
   })
   const v2 = (progress?.v2SetupData ?? {}) as Record<string, Record<string, unknown> | undefined>
   const identidad = (v2.step5 ?? {}) as Record<string, unknown>
+  const negocio = (v2.step4 ?? {}) as Record<string, unknown>
   const banco = (v2.step7 ?? (progress?.step8_paymentInfo as Record<string, unknown> | null) ?? {}) as Record<string, unknown>
 
   const clabe = typeof banco.clabe === 'string' ? banco.clabe : null
@@ -130,7 +131,18 @@ export async function getPaymentActivation(venueId: string) {
     prisma.ecommerceMerchant.findFirst({ where: { venueId, onboardingStatus: 'COMPLETED' }, select: { id: true } }),
   ])
 
-  const complete = Boolean(venue.entityType && venue.legalName && venue.rfc && legalAddressPresent && clabe && direccionDelLocal)
+  // 🔴 Qué significa «completo», y por qué NO incluye los documentos.
+  //
+  // El checklist del Home tiene dos pasos SEPARADOS: «1 · dirección y datos» (esta pantalla) y
+  // «2 · sube tus documentos» (otra pantalla). El paso 1 se palomea con este `complete`. Si aquí
+  // se exigieran los documentos, el paso 1 estaría pidiendo lo del paso 2: el negocio llena todo
+  // lo que la pantalla le pide, guarda, y el paso sigue en gris sin decirle por qué.
+  //
+  // Así que esto mide SÓLO lo que se captura aquí — y desde el 18-sep eso es la dirección del
+  // LOCAL, porque el RFC, la CURP, el domicilio legal, el tipo de entidad y los datos bancarios
+  // dejaron de teclearse: vienen en los documentos que el negocio sube. Los documentos los mide
+  // el paso 2 con `kycStatus`, que para eso está.
+  const complete = Boolean(direccionDelLocal)
 
   return {
     kycStatus: venue.kycStatus,
@@ -138,11 +150,34 @@ export async function getPaymentActivation(venueId: string) {
     profile: {
       entityType: venue.entityType,
       legalName: venue.legalName,
+      // 🔴 `businessActivity` NO es `step3.businessType`, y el nombre parecido es la trampa: aquél
+      // es el enum `VenueType` que alimenta `Venue.type` (RESTAURANT, BAR…) y escribir texto libre
+      // ahí rompería el enum de Prisma. Éste es el GIRO en palabras del dueño («estética canina»,
+      // «renta de inflables»), que es lo que el adquirente pide para clasificar el comercio.
+      businessActivity: typeof negocio.businessActivity === 'string' ? negocio.businessActivity : null,
       // 🔴 Nunca el RFC entero ni la CLABE entera: esta respuesta la lee el navegador (§7.8).
       rfcMasked: enmascararRfc(venue.rfc),
       curpPresent: typeof identidad.curp === 'string' && identidad.curp.length > 0,
       legalAddressPresent,
+      // Lo que «Quién es el responsable» pide HOY: a quién llamarle. La palomita de esa sección se
+      // mide con esto, no con el RFC — que ya no se teclea en ninguna pantalla.
+      contactPresent: Boolean(
+        typeof identidad.legalFirstName === 'string' &&
+          identidad.legalFirstName.trim() &&
+          typeof identidad.personalPhone === 'string' &&
+          identidad.personalPhone.trim(),
+      ),
       venueAddressPresent: direccionDelLocal,
+      // 🔴 Los valores, no sólo el sí/no: sin esto la pantalla no puede volver a pintar lo que el
+      // negocio ya capturó, y quien regresa a su checklist ve los campos en blanco y lo teclea
+      // otra vez. No es dato sensible —va impresa en el ticket de cada venta—, al revés que el
+      // RFC y la CLABE, que siguen enmascarados justo arriba.
+      venueAddress: {
+        address: venue.address ?? '',
+        city: venue.city ?? '',
+        state: venue.state ?? '',
+        zipCode: venue.zipCode ?? '',
+      },
       clabeLast4: clabe ? clabe.slice(-4) : null,
       bankName: typeof banco.bankName === 'string' ? banco.bankName : null,
       complete,
@@ -156,6 +191,15 @@ export async function getPaymentActivation(venueId: string) {
         venue.caratulaBancariaUrl ? 'caratulaBancaria' : null,
         venue.actaDocumentUrl ? 'actaConstitutiva' : null,
         venue.poderLegalUrl ? 'poderLegal' : null,
+      ].filter((x): x is string => x !== null),
+      // 🔴 Los que FALTAN, por nombre. Sin esto la pantalla sólo puede decir «te faltan
+      // documentos» y el negocio tiene que adivinar cuál de los cuatro. Se calcula sobre los
+      // obligatorios; el acta y el poder son de persona moral y no entran aquí.
+      missing: [
+        venue.idDocumentUrl ? null : 'ine',
+        venue.rfcDocumentUrl ? null : 'rfc',
+        venue.comprobanteDomicilioUrl ? null : 'comprobanteDomicilio',
+        venue.caratulaBancariaUrl ? null : 'caratulaBancaria',
       ].filter((x): x is string => x !== null),
     },
     terminalsCount,
@@ -173,7 +217,11 @@ export async function updatePaymentActivationProfile(
 
   // ---- Validación, toda ANTES de escribir nada ----
   if (input.entity) {
-    if (!Object.values(EntityType).includes(input.entity.entityType as EntityType)) {
+    // 🔴 `entityType` es OPCIONAL desde el 18-sep: la pantalla dejó de preguntarlo porque viene en
+    // la constancia de situación fiscal que el negocio ya sube. Sigue validándose cuando SÍ llega
+    // (el alta lo manda), pero su ausencia no puede impedir guardar el giro — y sobre todo no
+    // puede escribir `undefined` encima del que el negocio ya tenía.
+    if (input.entity.entityType != null && !Object.values(EntityType).includes(input.entity.entityType as EntityType)) {
       throw new BadRequestError('El tipo de persona no es válido', 'INVALID_ENTITY_TYPE')
     }
     secciones.push('entity')
@@ -226,7 +274,7 @@ export async function updatePaymentActivationProfile(
   await prisma.$transaction(async tx => {
     if (input.entity || input.identity || input.venueAddress) {
       const data: Prisma.VenueUpdateInput = {}
-      if (input.entity) data.entityType = input.entity.entityType as EntityType
+      if (input.entity?.entityType) data.entityType = input.entity.entityType as EntityType
       if (input.identity) {
         if (input.identity.rfc) data.rfc = input.identity.rfc.trim().toUpperCase()
         // La misma regla del alta: el nombre comercial manda, y si no hay, nombre + apellidos.

@@ -94,7 +94,10 @@ describe('la respuesta va enmascarada', () => {
     expect(r.profile.complete).toBe(false)
   })
 
-  it('con todo capturado, el perfil está completo', async () => {
+  it('con todo capturado Y los documentos subidos, el perfil está completo', async () => {
+    // 🔴 Desde el 18-sep «completo» exige los DOCUMENTOS, no lo tecleado: es lo que el adquirente
+    // necesita para abrir la cuenta, y lo único que el cliente sigue pudiendo hacer.
+    prismaMock.venue.findUnique.mockResolvedValue(venue({ rfcDocumentUrl: 'constancia.pdf', comprobanteDomicilioUrl: 'comprobante.pdf' }) as never)
     const r = await getPaymentActivation('venue-1')
     expect(r.profile.complete).toBe(true)
   })
@@ -252,5 +255,237 @@ describe('el banco llega hasta la revisión de KYC', () => {
     const { step8 } = mirrorDe()
     expect(step8).toMatchObject({ clabe: CLABE_BBVA, accountHolder: 'Juan Pérez', accountType: 'checking' })
     expect((logAction as jest.Mock).mock.calls[0][0].data).toEqual({ sections: ['bank'] })
+  })
+})
+
+/**
+ * 🔴 Decisión del founder (2026-09-18): el cliente NO teclea CLABE, banco ni titular. Sube la
+ * CARÁTULA de su estado de cuenta y de ahí los saca el adquirente. Dos consecuencias que estas
+ * pruebas fijan, porque las dos se rompen en silencio:
+ *
+ *  1. Si `complete` siguiera exigiendo la CLABE tecleada, un negocio con TODO subido se quedaría
+ *     «incompleto» para siempre — y nadie podría completarlo, porque la captura ya no existe.
+ *  2. El giro del negocio es texto libre (el founder lo pidió así para no tocar el esquema): vive
+ *     en el JSON de onboarding y tiene que llegar a quien arma la hoja del adquirente.
+ */
+describe('sin captura de banco: la carátula es la que completa', () => {
+  it('🔴 con la carátula subida el perfil está COMPLETO aunque nadie haya tecleado la CLABE', async () => {
+    prismaMock.venue.findUnique.mockResolvedValue(
+      venue({ caratulaBancariaUrl: 'https://…/caratula.pdf', rfcDocumentUrl: 'constancia.pdf', comprobanteDomicilioUrl: 'comprobante.pdf' }) as never,
+    )
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue({
+      v2SetupData: { step5: { legalAddress: 'Calle 2' } }, // sin step7: nunca se capturó banco
+      step8_paymentInfo: null,
+    } as never)
+
+    const r = await getPaymentActivation('venue-1')
+    expect(r.profile.complete).toBe(true)
+  })
+
+  // ⚠️ Aquí vivían dos pruebas que exigían los DOCUMENTOS para dar el perfil por completo.
+  // Se retiraron el mismo día: afirmaban justo lo que hacía que el paso 1 del checklist pidiera
+  // lo del paso 2 y se quedara en gris para siempre. Lo que manda es el bloque «cada paso del
+  // checklist mide lo suyo», al final de este archivo.
+
+  it('la CLABE tecleada de antes SIGUE completando, sin carátula (nadie pierde lo que ya llenó)', async () => {
+    prismaMock.venue.findUnique.mockResolvedValue(venue({ rfcDocumentUrl: 'constancia.pdf', comprobanteDomicilioUrl: 'comprobante.pdf' }) as never)
+    const r = await getPaymentActivation('venue-1')
+    expect(r.profile.complete).toBe(true)
+  })
+})
+
+describe('el giro del negocio', () => {
+  it('🔴 se guarda tal cual lo escribió el cliente, sin catálogo que lo encasille', async () => {
+    await updatePaymentActivationProfile(
+      'venue-1',
+      'org-1',
+      { entity: { entityType: 'PERSONA_FISICA', businessActivity: 'Estética canina y venta de accesorios' } },
+      'staff-1',
+    )
+
+    const guardado = (prismaMock.onboardingProgress.update as jest.Mock).mock.calls[0][0].data.v2SetupData as Record<
+      string,
+      Record<string, unknown>
+    >
+    expect(guardado.step4.businessActivity).toBe('Estética canina y venta de accesorios')
+  })
+
+  it('🔴 se DEVUELVE en el perfil: sin eso la pantalla no puede mostrar lo ya capturado', async () => {
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue({
+      v2SetupData: { step4: { businessActivity: 'Cafetería de especialidad' }, step5: { legalAddress: 'Calle 2' } },
+      step8_paymentInfo: null,
+    } as never)
+
+    const r = await getPaymentActivation('venue-1')
+    expect(r.profile.businessActivity).toBe('Cafetería de especialidad')
+  })
+})
+
+describe('el giro viaja SOLO (founder, 18-sep: el tipo de entidad viene en la constancia)', () => {
+  it('🔴 sin `entityType` el giro se guarda igual, y `Venue.entityType` NO se toca', async () => {
+    await updatePaymentActivationProfile('venue-1', 'org-1', { entity: { businessActivity: 'Taller mecánico' } }, 'staff-1')
+
+    const guardado = (prismaMock.onboardingProgress.update as jest.Mock).mock.calls[0][0].data.v2SetupData as Record<
+      string,
+      Record<string, unknown>
+    >
+    expect(guardado.step4.businessActivity).toBe('Taller mecánico')
+    // 🔴 Lo que de verdad protege esta prueba: que no se escriba `entityType: undefined` sobre el
+    // que el negocio ya tenía. El alta sigue siendo quien lo fija.
+    const escrituras = (prismaMock.venue.update as jest.Mock).mock.calls
+    expect(escrituras.every(([arg]) => !('entityType' in (arg.data ?? {})))).toBe(true)
+  })
+
+  it('un `entityType` inválido se sigue rechazando cuando SÍ lo mandan', async () => {
+    await expect(
+      updatePaymentActivationProfile('venue-1', 'org-1', { entity: { entityType: 'PERSONA_MARCIANA' } }, 'staff-1'),
+    ).rejects.toMatchObject({ statusCode: 400, code: 'INVALID_ENTITY_TYPE' })
+  })
+})
+
+/**
+ * 🔴 `complete` tiene que medir lo que el cliente PUEDE completar HOY. Si sigue exigiendo el RFC
+ * tecleado o la dirección legal, un negocio que subió sus cuatro documentos y llenó lo que la
+ * pantalla le pide se queda «incompleto» PARA SIEMPRE, sin nada que pueda hacer al respecto —
+ * porque esas capturas ya no existen en ninguna pantalla del producto.
+ */
+describe('el perfil se puede completar de verdad', () => {
+  function sinCapturasRetiradas() {
+    prismaMock.venue.findUnique.mockResolvedValue(
+      venue({
+        rfc: null, // el RFC ya no se teclea: va en la Constancia
+        caratulaBancariaUrl: 'https://…/caratula.pdf',
+        rfcDocumentUrl: 'https://…/constancia.pdf',
+        comprobanteDomicilioUrl: 'https://…/comprobante.pdf',
+      }) as never,
+    )
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue({
+      v2SetupData: { step4: { businessActivity: 'Cafetería' } }, // sin step5.legalAddress
+      step8_paymentInfo: null,
+    } as never)
+  }
+
+  it('🔴 con los documentos subidos y la dirección del local, el perfil está COMPLETO', async () => {
+    sinCapturasRetiradas()
+    const r = await getPaymentActivation('venue-1')
+    expect(r.profile.complete).toBe(true)
+  })
+
+  it('🔴 sin la dirección del LOCAL sigue incompleto: es la única captura que queda', async () => {
+    sinCapturasRetiradas()
+    prismaMock.venue.findUnique.mockResolvedValue(
+      venue({
+        rfc: null,
+        address: null,
+        caratulaBancariaUrl: 'x',
+        rfcDocumentUrl: 'y',
+        comprobanteDomicilioUrl: 'z',
+      }) as never,
+    )
+    const r = await getPaymentActivation('venue-1')
+    expect(r.profile.complete).toBe(false)
+  })
+
+})
+
+/**
+ * 🔴 Visto en la pantalla el 18-sep, y NINGUNA prueba lo cazaba: la dirección del local se guardaba
+ * bien —la sección salía con su palomita— pero al volver a entrar los cuatro campos aparecían
+ * VACÍOS, porque la respuesta sólo traía `venueAddressPresent: true` y nunca los valores. Quien
+ * vuelve a su checklist ve su trabajo borrado y lo teclea otra vez.
+ *
+ * ⚠️ Y no es como el RFC o la CLABE: la dirección del local NO es un dato sensible. Sale impresa
+ * en el ticket de cada venta. Devolverla es correcto; ocultarla era un accidente.
+ */
+describe('la dirección del local se puede volver a ver', () => {
+  it('🔴 la respuesta trae los CUATRO campos, no sólo un sí/no', async () => {
+    const r = await getPaymentActivation('venue-1')
+    expect(r.profile.venueAddress).toMatchObject({
+      address: 'Calle 1',
+      city: 'CDMX',
+      state: 'CDMX',
+      zipCode: '01000',
+    })
+  })
+
+  it('sin dirección capturada devuelve los campos vacíos, no `undefined` suelto', async () => {
+    prismaMock.venue.findUnique.mockResolvedValue(venue({ address: null, city: null, state: null, zipCode: null }) as never)
+    const r = await getPaymentActivation('venue-1')
+    expect(r.profile.venueAddress).toMatchObject({ address: '', city: '', state: '', zipCode: '' })
+    expect(r.profile.venueAddressPresent).toBe(false)
+  })
+})
+
+/**
+ * 🔴 La palomita de cada sección tiene que medir LO QUE ESA SECCIÓN PIDE. «Quién es el responsable»
+ * la medía con `rfcMasked` —del modelo viejo, cuando ahí se tecleaba el RFC—, así que desde que la
+ * sección pasó a pedir sólo nombre y teléfono se quedaba SIN palomear por mucho que el usuario la
+ * guardara: guardas, sale «Guardado», y la sección sigue viéndose pendiente. Visto en pantalla.
+ */
+describe('la palomita del contacto', () => {
+  it('🔴 con nombre y teléfono capturados, el contacto está listo', async () => {
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue({
+      v2SetupData: { step5: { legalFirstName: 'Daniel', legalLastName: 'Aguirre', personalPhone: '+52 442 123 4567' } },
+      step8_paymentInfo: null,
+    } as never)
+    const r = await getPaymentActivation('venue-1')
+    expect(r.profile.contactPresent).toBe(true)
+  })
+
+  it('sólo con el nombre NO está listo: sin teléfono no hay a quién llamarle, que es el punto', async () => {
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue({
+      v2SetupData: { step5: { legalFirstName: 'Daniel', legalLastName: 'Aguirre' } },
+      step8_paymentInfo: null,
+    } as never)
+    const r = await getPaymentActivation('venue-1')
+    expect(r.profile.contactPresent).toBe(false)
+  })
+})
+
+/**
+ * 🔴 CADA PASO DEL CHECKLIST MIDE LO SUYO, o el negocio se queda atorado sin saber por qué.
+ *
+ * El checklist del Home tiene dos pasos distintos: «1 · dirección y datos» (que se llenan en
+ * /activar-cobros) y «2 · sube tus documentos» (que se suben en otra pantalla). El paso 1 se
+ * palomea con `profile.complete`.
+ *
+ * Si `complete` exigiera además los documentos, el paso 1 pediría lo del paso 2: el negocio llena
+ * TODO lo que esa pantalla le pide, guarda, y el paso sigue en gris — sin una sola línea que le
+ * diga qué falta. Se muerden la cola.
+ *
+ * `complete` mide lo que SE CAPTURA AHÍ. Los documentos los mide el paso 2 con `kycStatus`, que
+ * ya existe y para eso está.
+ */
+describe('cada paso del checklist mide lo suyo', () => {
+  it('🔴 con la dirección del local capturada el paso 1 está COMPLETO, aunque no haya subido un solo documento', async () => {
+    prismaMock.venue.findUnique.mockResolvedValue(
+      venue({ rfc: null, idDocumentUrl: null, rfcDocumentUrl: null, comprobanteDomicilioUrl: null, caratulaBancariaUrl: null }) as never,
+    )
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue({ v2SetupData: {}, step8_paymentInfo: null } as never)
+
+    const r = await getPaymentActivation('venue-1')
+    expect(r.profile.complete).toBe(true)
+  })
+
+  it('sin la dirección del local NO está completo: es lo único que esa pantalla exige', async () => {
+    prismaMock.venue.findUnique.mockResolvedValue(venue({ address: null }) as never)
+    const r = await getPaymentActivation('venue-1')
+    expect(r.profile.complete).toBe(false)
+  })
+
+  it('🔴 la respuesta dice QUÉ documentos faltan, para que la pantalla lo pueda decir con nombre', async () => {
+    prismaMock.venue.findUnique.mockResolvedValue(
+      venue({ idDocumentUrl: 'ine.pdf', rfcDocumentUrl: null, comprobanteDomicilioUrl: null, caratulaBancariaUrl: null }) as never,
+    )
+    const r = await getPaymentActivation('venue-1')
+    expect(r.documents.missing).toEqual(['rfc', 'comprobanteDomicilio', 'caratulaBancaria'])
+  })
+
+  it('con los cuatro subidos no falta ninguno', async () => {
+    prismaMock.venue.findUnique.mockResolvedValue(
+      venue({ idDocumentUrl: 'a', rfcDocumentUrl: 'b', comprobanteDomicilioUrl: 'c', caratulaBancariaUrl: 'd' }) as never,
+    )
+    const r = await getPaymentActivation('venue-1')
+    expect(r.documents.missing).toEqual([])
   })
 })

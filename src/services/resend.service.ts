@@ -65,6 +65,9 @@ interface KycDocumentsToBlumonData {
   venueId: string
   venueSlug: string
   entityType: 'PERSONA_FISICA' | 'PERSONA_MORAL' | null
+  // Giro del negocio, en palabras del dueño («estética canina», «renta de inflables»). El
+  // adquirente lo pide para clasificar el comercio; es texto libre a propósito (founder, 18-sep).
+  businessActivity: string | null
   rfc: string | null
 
   // Bank info
@@ -1156,6 +1159,7 @@ Descargar: ${data.blumonExcelUrl}
                     <td style="padding: 8px 0; color: #666;">Tipo de Entidad:</td>
                     <td style="padding: 8px 0; color: #333; font-weight: 600;">${entityTypeDisplay}</td>
                   </tr>
+                  ${data.businessActivity ? `<tr><td style="padding: 8px 0; color: #666;">Giro:</td><td style="padding: 8px 0; color: #333; font-weight: 600;">${data.businessActivity}</td></tr>` : ''}
                   ${data.rfc ? `<tr><td style="padding: 8px 0; color: #666;">RFC:</td><td style="padding: 8px 0; color: #333; font-weight: 600;">${data.rfc}</td></tr>` : ''}
                   ${data.clabe ? `<tr><td style="padding: 8px 0; color: #666;">CLABE:</td><td style="padding: 8px 0; color: #333; font-weight: 600; font-family: monospace;">${data.clabe}</td></tr>` : ''}
                   ${data.bankName ? `<tr><td style="padding: 8px 0; color: #666;">Banco:</td><td style="padding: 8px 0; color: #333; font-weight: 600;">${data.bankName}</td></tr>` : ''}
@@ -1236,6 +1240,7 @@ INFORMACIÓN DEL COMERCIO
 ------------------------
 Nombre: ${data.venueName}
 Tipo: ${entityTypeDisplay}
+${data.businessActivity ? `Giro: ${data.businessActivity}` : ''}
 ${data.rfc ? `RFC: ${data.rfc}` : ''}
 ${data.clabe ? `CLABE: ${data.clabe}` : ''}
 ${data.bankName ? `Banco: ${data.bankName}` : ''}

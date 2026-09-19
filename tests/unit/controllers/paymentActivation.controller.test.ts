@@ -41,3 +41,23 @@ describe('paymentActivationProfileSchema — el bloque `bank`', () => {
     expect(paymentActivationProfileSchema.safeParse({ bank: { clabe: CLABE_BBVA, accountHolder: '' } }).success).toBe(false)
   })
 })
+
+describe('paymentActivationProfileSchema — el giro del negocio', () => {
+  it('🔴 CONSERVA `businessActivity`: es el MISMO hueco que dejó `bankName` vacío en toda revisión de KYC', () => {
+    const r = paymentActivationProfileSchema.parse({
+      entity: { entityType: 'PERSONA_FISICA', businessActivity: 'Estética canina y venta de accesorios' },
+    })
+    expect(r.entity?.businessActivity).toBe('Estética canina y venta de accesorios')
+  })
+
+  it('es TEXTO LIBRE: no hay catálogo que rechace un giro que nadie previó', () => {
+    const r = paymentActivationProfileSchema.safeParse({
+      entity: { entityType: 'PERSONA_MORAL', businessActivity: 'Renta de inflables para fiestas' },
+    })
+    expect(r.success).toBe(true)
+  })
+
+  it('es opcional: un negocio que no lo escribió no puede quedarse sin guardar lo demás', () => {
+    expect(paymentActivationProfileSchema.safeParse({ entity: { entityType: 'PERSONA_FISICA' } }).success).toBe(true)
+  })
+})

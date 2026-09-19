@@ -17,8 +17,12 @@ import {
 export const paymentActivationProfileSchema = z.object({
   entity: z
     .object({
-      entityType: z.string(),
+      entityType: z.string().nullable().optional(),
       entitySubType: z.string().nullable().optional(),
+      // Giro del negocio, TEXTO LIBRE por decisión del founder (18-sep). Sin esta línea Zod lo
+      // descarta en silencio y el giro nunca llega a la hoja del adquirente — el mismo hueco que
+      // ya dejó el 'bankName' vacío en toda revisión de KYC.
+      businessActivity: z.string().trim().max(120).nullable().optional(),
       commercialName: z.string().trim().max(120).nullable().optional(),
     })
     .optional(),

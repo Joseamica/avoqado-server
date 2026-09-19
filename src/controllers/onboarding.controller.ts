@@ -1247,7 +1247,13 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
     // guaranteed a paymentMethodId for paid tiers when the feature is enabled.
     // Wrapped in try/catch so a Stripe hiccup never blocks onboarding completion
     // (the venue already exists at this point).
-    if (planEnabled && !planYaCobrado && planData && planData.tier !== 'FREE' && planData.paymentMethodId) {
+    // 🔴 Quien trae una CAMPAÑA reclamada NO se cobra por aquí (auditoría de Codex, 18-sep).
+    // Este carril aplica la promoción legacy de $694.84 y no sabe nada de la ficha de campaña: si
+    // cobrara, el negocio que llegó por el anuncio de $22 pagaría otro precio y su redención
+    // quedaría sin aplicar. Ese cobro le toca a `activate-plan`, que sí lee la oferta, aparta el
+    // cupo y libera el lugar si el banco rechaza.
+    const traeCampanaReclamada = Boolean(progress.launchCampaignId)
+    if (planEnabled && !planYaCobrado && !traeCampanaReclamada && planData && planData.tier !== 'FREE' && planData.paymentMethodId) {
       // The guard above already excluded FREE; name the paid tier once so neither the coupon
       // decision nor the price lookup below has to re-derive it.
       const paidTier = planData.tier === 'PREMIUM' ? ('PREMIUM' as const) : ('PRO' as const)
@@ -1276,6 +1282,11 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
           interval: planData.interval,
           trialPeriodDays: planData.payNow ? 0 : TRIAL_DAYS,
           coupon: introPromo ? LEGACY_INTRO_OFFER.couponId : undefined,
+          // 🔴 Sin esta llave, una petición perdida en la red y reintentada crea DOS suscripciones
+          // y DOS cobros: es lo único que vuelve segura la política de reintentos de Stripe. Es
+          // estable por organización a propósito — el reintento del MISMO alta tiene que reusar el
+          // cobro, no estrenar uno. (Auditoría de Codex, 18-sep.)
+          idempotencyKey: `onboarding-complete:${organizationId}`,
           // 🔴 FUGA DE DINERO CERRADA (spec § 3.7). Sin esto, una tarjeta RECHAZADA crea la
           // suscripción `incomplete` y el `upsert` de `createPlanSubscription` deja igualmente
           // `VenueFeature.active = true`: el negocio se lleva el plan de pago sin haber pagado,

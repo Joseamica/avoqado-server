@@ -81,6 +81,7 @@ function progreso(overrides: Record<string, unknown> = {}) {
     completedAt: null,
     v2SetupData: {},
     launchCampaignId: 'lc-1',
+    termsAcceptedAt: new Date('2026-09-17T00:00:00Z'),
     planActivationStatus: 'NONE',
     planActivationAttempt: 0,
     planActivationLeaseUntil: null,
@@ -333,7 +334,7 @@ describe('recuperación de un intento desconocido', () => {
     // Con `limit: 20` y una sola página, la suscripción buena en la página 2 se leía como
     // «no se creó»: llave nueva y SEGUNDO cobro.
     const pagina1 = Array.from({ length: 100 }, (_, i) => ({ id: `sub_otra_${i}`, metadata: {} }))
-    const buena = { id: 'sub_buena', metadata: { planActivationKey: 'plan-activation:org-1:1' } }
+    const buena = { id: 'sub_buena', status: 'active', metadata: { planActivationKey: 'plan-activation:org-1:1' } }
     mockSubList.mockReturnValue({
       autoPagingEach: async (cb: (s: unknown) => boolean | Promise<boolean>) => {
         for (const s of [...pagina1, buena]) {
@@ -629,5 +630,252 @@ describe('🔴 un fallo de CONFIGURACIÓN no puede disfrazarse de «pago en conf
     expect(err.code).toBe('PLAN_ACTIVATION_PENDING')
     expect(err.message).not.toMatch(/vuelve a intentar|intenta de nuevo/i)
     expect(err.message).toMatch(/te avisamos|avisaremos/i)
+  })
+})
+
+/**
+ * 🔴 AUDITORÍA DE CODEX (2026-09-18, hallazgo #3): la ÚLTIMA plaza bloquea su propia recuperación.
+ *
+ * Secuencia real: queda un lugar → el negocio lo reserva → Stripe cobra → se pierde la respuesta
+ * (red, cierre de pestaña, timeout) → el cliente reintenta.
+ *
+ * `cotizar()` comprueba la disponibilidad de la campaña en el PASO 3, y la recuperación del intento
+ * anterior vive en el PASO 6. Con el cupo lleno POR SU PROPIA RESERVA, el PASO 3 corta con
+ * `SOLD_OUT` y nunca se llega al 6: el negocio queda **cobrado, con el lugar apartado a su nombre, y
+ * recibiendo la respuesta que se le da a un comprador nuevo que llegó tarde**.
+ *
+ * El lugar ya es suyo — el cupo protege de vender de MÁS, no de dejar terminar a quien ya apartó.
+ * `apartarLugar` ya sabe reusar un `RESERVED` propio (PASO 7); el defecto es sólo el orden.
+ */
+describe('la recuperación no puede quedar fuera por un cupo que el propio negocio consumió', () => {
+  function campanaLlenaConMiLugarApartado() {
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(campania({ redemptionCount: 100, redemptionCap: 100 }) as never)
+    // El lugar está apartado a NOMBRE DE ESTA organización, misma campaña y misma versión.
+    prismaMock.launchCampaignRedemption.findFirst.mockResolvedValue({
+      id: 'red-mia',
+      organizationId: 'org-1',
+      campaignId: 'lc-1',
+      offerVersion: 1,
+      status: 'RESERVED',
+      advertisedPriceCents: ANUNCIADO,
+      listPriceCents: LISTA,
+      discountMonths: 3,
+    } as never)
+  }
+
+  it('🔴 con el cupo lleno por SU PROPIA reserva, el reintento NO recibe «agotado»', async () => {
+    campanaLlenaConMiLugarApartado()
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(
+      progreso({ planActivationStatus: 'IN_PROGRESS', planActivationAttempt: 1, planActivationLeaseUntil: new Date('2020-01-01') }) as never,
+    )
+
+    // No importa cómo termine el intento; lo que NO puede pasar es que se le diga «agotado» a
+    // quien ya tiene el lugar y probablemente ya pagó.
+    const resultado = await activatePlan({ ...BASE, offer: OFERTA_LAUNCH } as never).catch((e: unknown) => e)
+    const codigo = (resultado as { code?: string })?.code
+    expect(codigo).not.toBe('LAUNCH_OFFER_UNAVAILABLE')
+  })
+
+  it('un negocio SIN lugar apartado sí recibe «agotado»: el cupo sigue protegiendo de sobrevender', async () => {
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(campania({ redemptionCount: 100, redemptionCap: 100 }) as never)
+    prismaMock.launchCampaignRedemption.findFirst.mockResolvedValue(null as never)
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(progreso() as never)
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH } as never)).rejects.toMatchObject({
+      code: 'LAUNCH_OFFER_UNAVAILABLE',
+    })
+  })
+
+  it('🔴 un lugar de OTRA versión de oferta NO sirve de salvoconducto: eso es `OFFER_CHANGED`', async () => {
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(campania({ redemptionCount: 100, redemptionCap: 100 }) as never)
+    prismaMock.launchCampaignRedemption.findFirst.mockResolvedValue({
+      id: 'red-vieja',
+      organizationId: 'org-1',
+      campaignId: 'lc-1',
+      offerVersion: 99, // el precio que consintió NO es el de hoy
+      status: 'RESERVED',
+    } as never)
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(progreso() as never)
+
+    const resultado = await activatePlan({ ...BASE, offer: OFERTA_LAUNCH } as never).catch((e: unknown) => e)
+    expect((resultado as { code?: string })?.code).not.toBe('LAUNCH_OFFER_UNAVAILABLE')
+  })
+})
+
+/**
+ * 🔴 AUDITORÍA DE CODEX (2026-09-18, hallazgo #4): COBRADO SIN ACCESO.
+ *
+ * Si Stripe crea y cobra la suscripción pero falla el `upsert` de `VenueFeature` (un fallo de DB en
+ * el peor segundo posible), el reintento ENCUENTRA la suscripción en Stripe y por eso **salta
+ * `createPlanSubscription`** — que es justo quien escribe esa fila. Después marca el onboarding
+ * ACTIVE, la redención APPLIED y `Venue.planTier`… sin reconstruir el acceso.
+ *
+ * El acceso efectivo se resuelve consultando `VenueFeature`. Los webhooks tampoco lo reparan: buscan
+ * la fila y si no está, abandonan.
+ *
+ * Resultado: el negocio pagó, la campaña lo cuenta como convertido, y el producto no le funciona.
+ * Es el peor desenlace posible de esta pantalla — peor que un cobro fallido, porque nadie se entera.
+ */
+describe('recuperar un cobro también reconstruye el ACCESO, no sólo el estado', () => {
+  function intentoPerdidoConSuscripcionViva() {
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(campania() as never)
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(
+      progreso({ planActivationStatus: 'IN_PROGRESS', planActivationAttempt: 1, planActivationLeaseUntil: new Date('2020-01-01') }) as never,
+    )
+    // Stripe SÍ tiene la suscripción del intento anterior: se va a recuperar.
+    mockSubList.mockReturnValue({
+      autoPagingEach: async (cb: (s: unknown) => boolean | Promise<boolean>) => {
+        await cb({ id: 'sub_recuperada', status: 'active', metadata: { planActivationKey: 'plan-activation:org-1:1' } })
+      },
+    })
+    mockSubRetrieve.mockResolvedValue({
+      id: 'sub_recuperada',
+      current_period_end: Math.floor(new Date('2026-10-17T00:00:00Z').getTime() / 1000),
+      latest_invoice: { amount_paid: ANUNCIADO },
+      discounts: [{ coupon: { id: 'LC_POS22_V1' } }],
+    })
+    // …y la fila de acceso NO existe (es exactamente el fallo que se está recuperando).
+    prismaMock.venueFeature.findUnique.mockResolvedValue(null as never)
+  }
+
+  it('🔴 al recuperar la suscripción, el acceso (`VenueFeature`) queda escrito', async () => {
+    intentoPerdidoConSuscripcionViva()
+
+    await activatePlan({ ...BASE, offer: OFERTA_LAUNCH } as never).catch(() => undefined)
+
+    expect(prismaMock.venueFeature.upsert).toHaveBeenCalled()
+  })
+
+  it('🔴 y queda ligado a la suscripción RECUPERADA, no a una inventada', async () => {
+    intentoPerdidoConSuscripcionViva()
+
+    await activatePlan({ ...BASE, offer: OFERTA_LAUNCH } as never).catch(() => undefined)
+
+    const llamada = (prismaMock.venueFeature.upsert as jest.Mock).mock.calls[0]?.[0]
+    expect(llamada?.create?.stripeSubscriptionId ?? llamada?.update?.stripeSubscriptionId).toBe('sub_recuperada')
+  })
+})
+
+/**
+ * 🔴 AUDITORÍA DE CODEX (2026-09-18, hallazgo #7b): se puede COBRAR sin consentimiento.
+ *
+ * `activate-plan` es el camino que cobra la oferta, y **no exige `termsAcceptedAt`**. La única
+ * comprobación vive en `completeV2Onboarding` (`onboarding.controller.ts:1104`) — es decir,
+ * DESPUÉS del punto donde el cargo ya pudo ocurrir.
+ *
+ * No es formalismo: el cargo es RECURRENTE y se hace a una tarjeta. Cobrar un plan mensual a
+ * alguien que nunca aceptó los términos ni el aviso de privacidad es exactamente lo que un
+ * contracargo discute, y en México el aviso de privacidad tiene además su propia exigencia legal.
+ *
+ * El consentimiento se comprueba ANTES de tocar Stripe, no después: lo contrario es pedir perdón
+ * con el dinero ya movido.
+ */
+describe('no se cobra sin consentimiento', () => {
+  it('🔴 sin términos aceptados, `activate-plan` NO llega a cobrar', async () => {
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(campania() as never)
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(progreso({ termsAcceptedAt: null }) as never)
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH } as never)).rejects.toMatchObject({
+      code: 'TERMS_NOT_ACCEPTED',
+    })
+    expect(mockSubCreate).not.toHaveBeenCalled()
+  })
+
+  it('con términos aceptados sigue cobrando igual que siempre', async () => {
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(campania() as never)
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(progreso() as never)
+
+    await activatePlan({ ...BASE, offer: OFERTA_LAUNCH } as never)
+
+    expect(mockSubCreate).toHaveBeenCalled()
+  })
+})
+
+/**
+ * 🔴 SEGUNDA AUDITORÍA DE CODEX (2026-09-18): la recuperación concede el tier que pide el
+ * REINTENTO, sin comprobar cuál se cobró de verdad, y reusa suscripciones que ya no están vivas.
+ *
+ * `status: 'all'` en la búsqueda es correcto para NO cobrar dos veces (hay que encontrarla aunque
+ * esté rara), pero después el código hacía dos cosas distintas con el hallazgo:
+ *
+ *   - `asegurarAccesoDelPlan({ tierCode: input.tier … })` — o sea, lo que manda ESTE intento. Si el
+ *     primero cobró PRO y el reintento pide PREMIUM, se reusa la suscripción PRO (bien, no cobra
+ *     dos veces) y se concede acceso PREMIUM (mal: paga $1,158 de Pro y recibe Premium).
+ *   - ningún filtro de estado: una `canceled` o `incomplete_expired` — donde el dinero NO quedó
+ *     cobrado — también «recupera» y cierra el onboarding en ACTIVE.
+ *
+ * La suscripción ya trae la verdad en `metadata.featureCode` (lo escribe `createPlanSubscription`).
+ */
+describe('la recuperación honra lo que SE COBRÓ, no lo que pide el reintento', () => {
+  const recuperada = (extra: Record<string, unknown>) => ({
+    id: 'sub_buena',
+    status: 'active',
+    metadata: { planActivationKey: 'plan-activation:org-1:1', featureCode: 'PLAN_PRO' },
+    ...extra,
+  })
+
+  beforeEach(() => {
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(
+      progreso({ planActivationStatus: 'IN_PROGRESS', planActivationAttempt: 1, planActivationLeaseUntil: new Date(Date.now() - 60_000) }) as never,
+    )
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(campania() as never)
+    prismaMock.launchCampaignRedemption.findFirst.mockResolvedValue({ id: 'red-1', status: 'RESERVED', campaignId: 'lc-1', offerVersion: 1 } as never)
+    mockSubRetrieve.mockResolvedValue({
+      id: 'sub_buena',
+      current_period_end: Math.floor(new Date('2026-10-17T00:00:00Z').getTime() / 1000),
+      latest_invoice: { amount_paid: ANUNCIADO },
+      discounts: [{ coupon: { id: 'LC_POS22_V1' } }],
+    })
+  })
+
+  const listar = (sub: unknown) =>
+    mockSubList.mockReturnValue({
+      autoPagingEach: async (cb: (s: unknown) => boolean | Promise<boolean>) => {
+        await cb(sub)
+      },
+    })
+
+  it('🔴 concede el tier de la suscripción COBRADA, no el que manda el reintento', async () => {
+    // Camino estándar (sin campaña): con campaña, pedir otro tier rebota antes por la propia oferta.
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(
+      progreso({
+        launchCampaignId: null,
+        planActivationStatus: 'IN_PROGRESS',
+        planActivationAttempt: 1,
+        planActivationLeaseUntil: new Date(Date.now() - 60_000),
+      }) as never,
+    )
+    // Lo COBRADO fue Premium; este reintento pide Pro.
+    listar(recuperada({ metadata: { planActivationKey: 'plan-activation:org-1:1', featureCode: 'PLAN_PREMIUM' } }))
+
+    await activatePlan({ ...BASE, offer: { kind: 'STANDARD', expectedFirstChargeCents: 0 }, payNow: false })
+
+    // El acceso se resuelve contra lo cobrado (PLAN_PREMIUM), no contra lo pedido (PLAN_PRO).
+    const codigosConsultados = prismaMock.feature.findFirst.mock.calls.map((c: unknown[]) => (c[0] as { where?: { code?: string } })?.where?.code)
+    expect(codigosConsultados).toContain('PLAN_PREMIUM')
+  })
+
+  it('🔴 una suscripción CANCELADA no se lee como cobro recuperado', async () => {
+    listar(recuperada({ status: 'canceled' }))
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({ statusCode: 503 })
+    // Y sobre todo: no se cobra otra vez encima de una suscripción que existe.
+    expect(mockSubCreate).not.toHaveBeenCalled()
+  })
+
+  it('una suscripción `incomplete_expired` nunca cobró: se estrena intento', async () => {
+    listar(recuperada({ status: 'incomplete_expired' }))
+
+    await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
+
+    expect(mockSubCreate).toHaveBeenCalledTimes(1)
+  })
+
+  it('sin `featureCode` en la metadata (suscripción vieja) cae al tier pedido, como antes', async () => {
+    listar({ id: 'sub_buena', status: 'active', metadata: { planActivationKey: 'plan-activation:org-1:1' } })
+
+    await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
+
+    expect(mockSubCreate).not.toHaveBeenCalled()
   })
 })

@@ -30,7 +30,13 @@ import AppError, { BadRequestError, ConflictError, NotFoundError } from '../../e
 import { logAction } from '../dashboard/activity-log.service'
 import emailService from '../email.service'
 import { resolvePlanNotificationTarget } from '../access/planNotification.service'
-import { assertPaymentMethodBelongsToCustomer, createPlanSubscription, getOrCreateStripeCustomer, planLookupKey } from '../stripe.service'
+import {
+  asegurarAccesoDelPlan,
+  assertPaymentMethodBelongsToCustomer,
+  createPlanSubscription,
+  getOrCreateStripeCustomer,
+  planLookupKey,
+} from '../stripe.service'
 import { ensureVenueForOnboarding } from './ensureVenue.service'
 import { parseV2Plan } from './onboardingProgress.service'
 import {
@@ -50,6 +56,9 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 
 /** Cuánto vale un lease antes de que otro intento pueda recuperarlo. */
 export const LEASE_MS = 5 * 60_000
+
+/** Estados de Stripe en los que una suscripción recuperada acredita que el cobro quedó hecho. */
+const SUSCRIPCION_COBRADA = ['active', 'trialing', 'past_due', 'unpaid'] as const
 
 export type ActivatePlanOffer =
   | { kind: 'LAUNCH'; code: string; offerVersion: number; expectedFirstChargeCents: number }
@@ -160,10 +169,26 @@ async function cotizar(input: ActivatePlanInput, progress: { launchCampaignId: s
 
   const disponible = launchOfferAvailability(toOfferRow(campaign), now)
   if (!disponible.available) {
-    throw new ConflictError('La oferta ya no está disponible', 'LAUNCH_OFFER_UNAVAILABLE', {
-      reason: disponible.reason,
-      standardQuote: { firstChargeCents: standardFirstChargeCents(standardPlanQuote(), input.tier, input.interval, true) },
+    // 🔴 El cupo protege de vender de MÁS, no de dejar terminar a quien YA apartó su lugar.
+    //
+    // Secuencia real (auditoría de Codex, 18-sep): queda una plaza → este negocio la reserva →
+    // Stripe cobra → se pierde la respuesta → el cliente reintenta. Con `redemptionCount` ya en el
+    // tope POR SU PROPIA RESERVA, cortar aquí le devuelve «agotado» a alguien que probablemente ya
+    // pagó, y la recuperación del intento (PASO 6) nunca llega a ejecutarse.
+    //
+    // Se mira SU lugar, de ESTA campaña: uno de otra campaña no es salvoconducto. Si resulta ser de
+    // otra VERSIÓN de la oferta, `apartarLugar` lo rechaza con `OFFER_CHANGED` en el PASO 7 — que es
+    // la respuesta correcta, y muy distinta de «ya no hay lugares».
+    const lugarPropio = await prisma.launchCampaignRedemption.findFirst({
+      where: { organizationId: input.organizationId, campaignId: campaign.id, status: { not: REDEMPTION_STATUS.RELEASED } },
+      select: { id: true },
     })
+    if (!lugarPropio) {
+      throw new ConflictError('La oferta ya no está disponible', 'LAUNCH_OFFER_UNAVAILABLE', {
+        reason: disponible.reason,
+        standardQuote: { firstChargeCents: standardFirstChargeCents(standardPlanQuote(), input.tier, input.interval, true) },
+      })
+    }
   }
 
   // La oferta de campaña es de un plan concreto, mensual, y SIEMPRE se paga hoy.
@@ -380,6 +405,20 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
   if (!progress) throw new NotFoundError('No encontramos tu registro', 'ONBOARDING_NOT_FOUND')
   if (progress.completedAt) throw new ConflictError('Este registro ya terminó', 'ONBOARDING_ALREADY_COMPLETED')
 
+  // 🔴 CONSENTIMIENTO ANTES DEL CARGO (auditoría de Codex, 18-sep).
+  //
+  // Éste es el camino que COBRA, y no exigía los términos: la única comprobación vivía en
+  // `completeV2Onboarding`, o sea DESPUÉS del punto donde el cargo ya pudo ocurrir. El cargo es
+  // recurrente y va a una tarjeta: cobrarle un plan mensual a alguien que nunca aceptó los términos
+  // ni el aviso de privacidad es justo lo que se discute en un contracargo, y el aviso tiene además
+  // su propia exigencia legal en México.
+  //
+  // Va aquí, en el PASO 1, y no más abajo: comprobarlo después de tocar Stripe sería pedir perdón
+  // con el dinero ya movido.
+  if (!progress.termsAcceptedAt) {
+    throw new ConflictError('Acepta los términos y el aviso de privacidad para continuar', 'TERMS_NOT_ACCEPTED')
+  }
+
   const venue = await ensureVenueForOnboarding(organizationId, staffId)
   if (!venue) throw new ConflictError('Falta el nombre de tu negocio para poder cobrar', 'PLAN_VENUE_NOT_READY')
 
@@ -505,6 +544,27 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
       })
       throw pendiente('no se pudo consultar Stripe')
     }
+    // 🔴 Encontrarla NO es haberla cobrado. `status: 'all'` es correcto para la BÚSQUEDA (hay que
+    // verla aunque esté rara, o se cobra dos veces), pero el desenlace se clasifica aquí:
+    //   - viva (`active`/`trialing`/`past_due`/`unpaid`) ⇒ el dinero quedó: se reusa.
+    //   - `incomplete_expired` ⇒ el primer cargo nunca se completó y Stripe la dio por muerta: no
+    //     hay nada que reusar, se estrena intento.
+    //   - `canceled`/`incomplete` ⇒ AMBIGUO: pudo cobrar y pudo no cobrar. Ni conceder acceso ni
+    //     cobrar encima: 503 para que alguien lo mire.
+    // (Segunda auditoría de Codex, 18-sep.)
+    if (suscripcionRecuperada) {
+      const estado = suscripcionRecuperada.status
+      if (estado === 'incomplete_expired') {
+        suscripcionRecuperada = null
+      } else if (!SUSCRIPCION_COBRADA.includes(estado as (typeof SUSCRIPCION_COBRADA)[number])) {
+        logger.warn('activate-plan: suscripción recuperada en estado no concluyente', {
+          organizationId,
+          subscriptionId: suscripcionRecuperada.id,
+          estado,
+        })
+        throw pendiente(`la suscripción anterior quedó en estado ${estado}`)
+      }
+    }
     if (!suscripcionRecuperada) {
       // No existe de verdad: intento nuevo, llave nueva.
       attempt = prev.attempt + 1
@@ -536,6 +596,27 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
   let reused = false
   if (suscripcionRecuperada) {
     subscriptionId = suscripcionRecuperada.id
+    // 🔴 Recuperar el COBRO no basta: hay que reconstruir el ACCESO.
+    //
+    // Saltarse `createPlanSubscription` aquí es correcto (la suscripción ya existe y volver a
+    // crearla cobraría dos veces), pero esa función era también la ÚNICA que escribía
+    // `VenueFeature` — la fila que resuelve si el negocio puede usar lo que pagó. Si el fallo que
+    // estamos recuperando ocurrió justo entre el cobro de Stripe y esa escritura, sin esto el
+    // reintento cierra el onboarding en ACTIVE, marca la redención APPLIED… y deja al cliente
+    // pagando sin producto. Los webhooks tampoco lo reparan: buscan la fila y si no está, se van.
+    //
+    // `asegurarAccesoDelPlan` es idempotente (upsert sobre venue+feature): si la fila ya estaba
+    // bien, esto no cambia nada. (Auditoría de Codex, 18-sep, hallazgo #4.)
+    // 🔴 El tier lo dice lo que SE COBRÓ, no lo que pide este reintento. `createPlanSubscription`
+    // estampa `metadata.featureCode`: si el primer intento cobró Pro y el reintento pide Premium,
+    // reusar la suscripción (bien) y conceder Premium (mal) le regala el tier de arriba al precio
+    // del de abajo. Sin metadata (suscripción anterior a este campo) se cae a lo pedido.
+    const tierCobrado = suscripcionRecuperada.metadata?.featureCode
+    await asegurarAccesoDelPlan({
+      venueId: venue.id,
+      tierCode: tierCobrado || (input.tier === 'PREMIUM' ? 'PLAN_PREMIUM' : 'PLAN_PRO'),
+      subscriptionId: suscripcionRecuperada.id,
+    })
   } else {
     try {
       const r = await createPlanSubscription({

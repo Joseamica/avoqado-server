@@ -61,7 +61,7 @@ function ficha(overrides: Record<string, unknown> = {}) {
   }
 }
 
-const precioBueno = { id: 'price_pro_m', currency: 'mxn', recurring: { interval: 'month' }, tax_behavior: 'inclusive', unit_amount: LISTA }
+const precioBueno = { id: 'price_pro_m', product: 'prod_plan_pro', currency: 'mxn', recurring: { interval: 'month' }, tax_behavior: 'inclusive', unit_amount: LISTA }
 
 beforeEach(() => {
   jest.clearAllMocks()
@@ -199,5 +199,36 @@ describe('launchCouponId', () => {
   it('versiona el id: es lo que ata cada redención a lo que se consintió', () => {
     expect(launchCouponId('POS22', 1)).toBe('LC_POS22_V1')
     expect(launchCouponId('POS22', 2)).toBe('LC_POS22_V2')
+  })
+})
+
+/**
+ * 🔴 AUDITORÍA DE CODEX (2026-09-18, hallazgo #9): el cupón es DINERO DESCONTADO, no una promesa de
+ * precio trasladable.
+ *
+ * `LC_POS22_V1` descuenta $1,136.84 y se crea **sin `applies_to`**: Stripe se lo aplica a CUALQUIER
+ * producto de la suscripción. Como la actualización de precio conserva los descuentos, si ese mismo
+ * cupón sobrevive a un cambio de plan:
+ *
+ *   · sobre PREMIUM mensual el importe recurrente sería **$834**, no $22;
+ *   · sobre un paquete de $500 se lo comería entero.
+ *
+ * Acotarlo al producto del plan que la campaña vende es la diferencia entre «tres meses de
+ * descuento en ESTE plan» y «$1,136.84 de saldo a favor sobre lo que sea que contrate después».
+ *
+ * ⚠️ Límite declarado: Stripe NO deja modificar `applies_to` de un cupón YA creado. Las campañas
+ * activadas antes de este cambio (p. ej. la `LC_POS22_V1` de QA) conservan el cupón abierto; el
+ * candado protege a las que se activen de aquí en adelante.
+ */
+describe('el cupón queda acotado al producto que la campaña vende', () => {
+  it('🔴 se crea con `applies_to` del producto del plan, no abierto a cualquiera', async () => {
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(ficha() as never)
+    prismaMock.launchCampaign.findUniqueOrThrow.mockResolvedValue(ficha({ status: 'ACTIVE' }) as never)
+    mockCouponRetrieve.mockRejectedValue(Object.assign(new Error('No such coupon'), { code: 'resource_missing' }))
+
+    await activateLaunchCampaign('lc-1', 'staff-1')
+
+    const cuerpo = mockCouponCreate.mock.calls[0]?.[0]
+    expect(cuerpo?.applies_to).toEqual({ products: ['prod_plan_pro'] })
   })
 })

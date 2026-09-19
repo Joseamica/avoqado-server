@@ -383,7 +383,7 @@ Campaña: ${utmTexto || '—'}
         yaEsCliente
           ? ''
           : elegidos.length
-            ? `<p style="font-size:16px;margin:0 0 16px 0;color:#000;">Nos dijiste que te interesa esto, y ya viene incluido en tu cuenta:</p>
+            ? `<p style="font-size:16px;margin:0 0 16px 0;color:#000;">Tomamos nota de lo que te interesa. Lo revisamos contigo para dejarte justo lo que necesitas:</p>
       <table style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;margin:0 0 24px 0;">
         ${elegidos
           .map(
@@ -402,10 +402,18 @@ Campaña: ${utmTexto || '—'}
         <li style="margin-bottom:8px;">Llevar mesas, cuentas abiertas y división de cuenta sin papelitos</li>
         <li style="margin-bottom:8px;">Mandar las órdenes a cocina y a barra por separado, cada una a su impresora</li>
         <li style="margin-bottom:8px;">Cuadrar tu corte de caja al centavo al cerrar el turno</li>
-        <li style="margin-bottom:8px;">Facturar CFDI 4.0: tu cliente escanea el QR del ticket y se factura solo</li>
       </ul>`
       }
-      ${yaEsCliente ? '' : `<p style="font-size:16px;margin:0 0 8px 0;color:#000;">El plan inicial es <strong>gratis para siempre</strong> y no pedimos tarjeta. Puedes ir creciendo cuando tu negocio crezca.</p>`}
+      ${
+        // 🔴 A quien llega por una campaña de pago se le cobra el primer mes CON tarjeta, en la
+        // última pantalla del alta. Decirle aquí «gratis para siempre y no pedimos tarjeta» es
+        // contradecir por escrito lo que va a ver en 3 minutos. (Auditoría de Codex, 18-sep.)
+        yaEsCliente
+          ? ''
+          : launchCampaignCode
+            ? `<p style="font-size:16px;margin:0 0 8px 0;color:#000;">Tu oferta se activa con tarjeta al terminar de crear tu cuenta. Cancela cuando quieras desde tu panel.</p>`
+            : `<p style="font-size:16px;margin:0 0 8px 0;color:#000;">El plan inicial es <strong>gratis para siempre</strong> y no pedimos tarjeta. Puedes ir creciendo cuando tu negocio crezca.</p>`
+      }
     </div>
 
     ${
@@ -464,17 +472,20 @@ Recibimos los datos de ${String(companyName)}. Te escribimos por WhatsApp hoy mi
 
 ${
   elegidos.length
-    ? `Nos dijiste que te interesa esto, y ya viene incluido en tu cuenta:
+    ? `Tomamos nota de lo que te interesa. Lo revisamos contigo para dejarte justo lo que necesitas:
 ${elegidos.map(m => `- ${m.label}${m.beneficio ? `: ${m.beneficio}` : ''}`).join('\n')}`
     : `Esto es lo que vas a poder hacer desde el primer día:
 - Cobrar con tarjeta, efectivo o transferencia desde tu tablet, tu compu o el celular de tus meseros
 - Llevar mesas, cuentas abiertas y división de cuenta sin papelitos
 - Mandar las órdenes a cocina y a barra por separado, cada una a su impresora
-- Cuadrar tu corte de caja al centavo al cerrar el turno
-- Facturar CFDI 4.0: tu cliente escanea el QR del ticket y se factura solo`
+- Cuadrar tu corte de caja al centavo al cerrar el turno`
 }
 
-El plan inicial es gratis para siempre y no pedimos tarjeta.
+${
+  launchCampaignCode
+    ? 'Tu oferta se activa con tarjeta al terminar de crear tu cuenta. Cancela cuando quieras desde tu panel.'
+    : 'El plan inicial es gratis para siempre y no pedimos tarjeta.'
+}
 
 ${magicLink ? `Tu cuenta ya está creada; solo falta que elijas tu contraseña.\n${ctaTexto}: ${ctaUrl}\n(el enlace sirve 24 horas y una sola vez)` : `${ctaTexto}: ${ctaUrl}`}
 

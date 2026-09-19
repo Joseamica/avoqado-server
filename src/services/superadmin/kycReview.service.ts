@@ -222,6 +222,9 @@ async function sendKycToBlumonAfterApproval(venueId: string, approvedById: strin
       venueId: venue.id,
       venueSlug: venue.slug,
       entityType: venue.entityType as 'PERSONA_FISICA' | 'PERSONA_MORAL' | null,
+      // El giro vive en el JSON del alta (`v2SetupData.step4`), no en una columna: el founder lo
+      // pidió como texto libre para no tocar el esquema. Sin esta línea se captura y nadie lo ve.
+      businessActivity: ((onboarding?.v2SetupData as any)?.step4?.businessActivity as string | undefined) ?? null,
       rfc: venue.rfc,
       clabe: paymentInfo?.clabe || null,
       bankName: paymentInfo?.bankName || null,
