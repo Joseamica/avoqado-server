@@ -288,11 +288,54 @@ describe('Auth Flow: Signup → Verification → Login (Approach B - FAANG Patte
       expect(response.body.message).toContain('expired')
     })
 
-    it('should handle already verified email gracefully', async () => {
+    /**
+     * P1 — BYPASS DE AUTENTICACION (encontrado el 2026-09-19, auditoria de Codex sobre una
+     * investigacion de produccion).
+     *
+     * `verifyEmailCode` devolvia accessToken + refreshToken de OWNER dentro del bloque
+     * `if (staff.emailVerified)`, que se ejecuta ANTES de los pasos 3/4/5 (existe codigo,
+     * no expirado, coincide). El codigo recibido no se comparaba NUNCA. Como la ruta es
+     * publica y el controlador fija los dos tokens como cookies httpOnly (24 h / 7 dias),
+     * bastaba CONOCER EL CORREO de un dueño con la cuenta ya verificada — el estado normal
+     * de toda cuenta real — para obtener credenciales suyas.
+     *
+     * La prueba anterior («should handle already verified email gracefully») afirmaba
+     * exactamente lo contrario —200 con cookies, comentado «allow re-auth»— asi que el
+     * defecto viajaba con su propia prueba en verde. Re-autenticar es lo que hace el LOGIN,
+     * con contraseña; esta ruta solo existe para estrenar la verificacion.
+     *
+     * El hermano `resend-verification` ya rechazaba el correo ya verificado (ver bloque 3):
+     * la asimetria entre los dos era el defecto.
+     */
+    it('P1 una cuenta YA verificada no recibe tokens: el codigo nunca se comparaba', async () => {
       const mockStaff = {
         id: userId,
         email: testEmail,
-        emailVerified: true, // Already verified
+        emailVerified: true, // Ya verificada: el estado de toda cuenta real
+        emailVerificationCode: null,
+        emailVerificationExpires: null,
+      }
+
+      mockPrismaClient.staff.findUnique.mockResolvedValue(mockStaff)
+      mockPrismaClient.staffOrganization.findFirst.mockResolvedValue({
+        organizationId,
+      })
+
+      const response = await request(app).post('/api/v1/onboarding/verify-email').send({
+        email: testEmail,
+        verificationCode: '000000', // Codigo que NO corresponde a nada
+      })
+
+      expect(response.status).toBe(400)
+      expect(response.body.accessToken).toBeUndefined()
+      expect(response.body.refreshToken).toBeUndefined()
+    })
+
+    it('P1 una cuenta YA verificada no recibe cookies de sesion', async () => {
+      const mockStaff = {
+        id: userId,
+        email: testEmail,
+        emailVerified: true,
         emailVerificationCode: null,
         emailVerificationExpires: null,
       }
@@ -307,13 +350,55 @@ describe('Auth Flow: Signup → Verification → Login (Approach B - FAANG Patte
         verificationCode,
       })
 
-      // Should still return success with tokens (allow re-auth)
-      expect(response.status).toBe(200)
-      expect(response.body.emailVerified).toBe(true)
+      // Lo que de verdad se entregaba: las credenciales en cookies httpOnly de 24 h y 7 dias.
+      expect(response.headers['set-cookie']).toBeUndefined()
+    })
 
-      // Should still set cookies
-      const cookies = response.headers['set-cookie']
-      expect(cookies).toBeDefined()
+    it('P1 una cuenta YA verificada se manda al login, y lo DICE', async () => {
+      const mockStaff = {
+        id: userId,
+        email: testEmail,
+        emailVerified: true,
+        emailVerificationCode: null,
+        emailVerificationExpires: null,
+      }
+
+      mockPrismaClient.staff.findUnique.mockResolvedValue(mockStaff)
+      mockPrismaClient.staffOrganization.findFirst.mockResolvedValue({
+        organizationId,
+      })
+
+      const response = await request(app).post('/api/v1/onboarding/verify-email').send({
+        email: testEmail,
+        verificationCode,
+      })
+
+      // Apagado se VE y se EXPLICA: quien ya verifico no se queda sin saber que hacer.
+      expect(response.body.message).toMatch(/already verified/i)
+      expect(response.body.message).toMatch(/log in/i)
+    })
+
+    it('P1 no se consulta la organizacion de una cuenta ajena para armarle un token', async () => {
+      const mockStaff = {
+        id: userId,
+        email: testEmail,
+        emailVerified: true,
+        emailVerificationCode: null,
+        emailVerificationExpires: null,
+      }
+
+      mockPrismaClient.staff.findUnique.mockResolvedValue(mockStaff)
+      mockPrismaClient.staffOrganization.findFirst.mockResolvedValue({
+        organizationId,
+      })
+
+      await request(app).post('/api/v1/onboarding/verify-email').send({
+        email: testEmail,
+        verificationCode,
+      })
+
+      // `getPrimaryOrganizationId` solo se llama para EMITIR tokens. Si se llamo, se emitieron.
+      expect(mockPrismaClient.staffOrganization.findFirst).not.toHaveBeenCalled()
     })
 
     it('should reject non-existent email', async () => {
