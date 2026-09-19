@@ -1,10 +1,16 @@
 # Conciliación operable del cobro sin confirmar — Plan de implementación
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Que un cajero pueda declarar «ya revisé la terminal: no se cobró» y con eso se liberen de golpe la venta y la ranura de la terminal, sin volver a escribir SQL en producción.
+**Goal:** Que un cajero pueda declarar «ya revisé la terminal: no se cobró» y con eso se liberen de golpe la venta y la ranura de la
+terminal, sin volver a escribir SQL en producción.
 
-**Architecture:** Un servicio nuevo, hermano de `resolveNoInstrument`, que **no toca** el camino que ya corre en producción. Reusa las piezas ya extraídas y probadas (`candadoDeSolicitud`, `sinEvidenciaPositivaSql`, `desenlaceCanonico`, `estadoBancarioSql`) y escribe el mismo desenlace que ya libera los dos candados: `FAILED` + `OPERATOR_RECONCILED_NO_CHARGE`. La declaración se persiste en **columna propia** de `TerminalPaymentRequest` (no en `resultJson`, que varios escritores reemplazan entero; no en `TerminalPaymentAttemptLink`, que exige un vínculo que las filas legacy no tienen).
+**Architecture:** Un servicio nuevo, hermano de `resolveNoInstrument`, que **no toca** el camino que ya corre en producción. Reusa las
+piezas ya extraídas y probadas (`candadoDeSolicitud`, `sinEvidenciaPositivaSql`, `desenlaceCanonico`, `estadoBancarioSql`) y escribe el
+mismo desenlace que ya libera los dos candados: `FAILED` + `OPERATOR_RECONCILED_NO_CHARGE`. La declaración se persiste en **columna propia**
+de `TerminalPaymentRequest` (no en `resultJson`, que varios escritores reemplazan entero; no en `TerminalPaymentAttemptLink`, que exige un
+vínculo que las filas legacy no tienen).
 
 **Tech Stack:** TypeScript · Express · Prisma/PostgreSQL · Jest (+ supertest) · Kotlin/Compose (Android) · SwiftUI (iOS)
 
@@ -14,14 +20,41 @@
 
 ---
 
+## 🔴 ESTADO AL 19-sep — léelo antes de seguir este plan
+
+La **etapa 1 está construida** y pasó por **cuatro rondas de auditoría de Codex** (las tres primeras
+rechazaron). Eso cambió cosas que este plan da por buenas:
+
+| Lo que el plan decía | Lo que pasó |
+|---|---|
+| **Task 4:** ampliar el sellado de `terminalReturnedAt` a `TIMED_OUT` | ❌ **Se hizo lo contrario.** Primero se resolvió leyendo el latido en vivo, y después **se borró la comprobación entera** (`terminalVolvio`) por decisión del founder: tres rondas seguidas produjeron defectos nuevos ahí, y Codex había dicho desde la ronda 1 que un latido acredita conectividad, **no** que el cobro terminara. La elegibilidad ya no mira relojes |
+| **Task 2:** la marca de la sonda en `resultJson` | Se movió a **columna propia** (`probeActiveAt`/`probeResolvedAt`) + migración que traslada las viejas: el sobre lo reemplaza cualquier resultado tardío. Y el veto **ya no caduca por tiempo** — sólo lo levanta una respuesta posterior de la terminal |
+| **Task 5:** el cuerpo con `requestId` dentro del JSON | El `requestId` lo pone la **ruta**. Pedirlo dos veces devolvía 409 |
+
+**Auditorías:** `docs/auditorias/2026-09-18-auditoria-codex-conciliacion-operable.md` y las de la ronda 2 y 3
+del 19-sep. Léelas antes de tocar la elegibilidad: documentan qué se intentó y por qué se descartó.
+
+🔑 **Y la lección que más vale de las cuatro rondas:** un veto comprobado al LEER no protege nada si el
+`UPDATE` condicional no lo repite — el escritor que no comparte tu candado entra entre medias. Pasó dos veces.
+
+---
+
 ## Global Constraints
 
-- **Nada del camino de producción se modifica en la etapa 1.** `no-instrument-resolution.service.ts`, `closeRowFromPaymentTx`, la ventana de confirmación y el predicado `UNRESOLVED_FINANCIAL_OUTCOME` se leen y se reusan, **nunca se editan**. Si una tarea parece necesitar editarlos, se para y se reporta.
-- **El desenlace que se escribe es exactamente** `status = 'FAILED'`, `failureCode = 'OPERATOR_RECONCILED_NO_CHARGE'`, `cancelDisposition = NULL`. Verificado contra los tres predicados: sale del bloqueo heredado (`terminal-payment.service.ts:549`), del estricto (el código **está** en `CODIGOS_SIN_COBRO`, `:428`) y del índice único parcial (que sólo cubre `PENDING/SENT/CANCEL_REQUESTED/UNKNOWN`).
+- **Nada del camino de producción se modifica en la etapa 1.** `no-instrument-resolution.service.ts`, `closeRowFromPaymentTx`, la ventana de
+  confirmación y el predicado `UNRESOLVED_FINANCIAL_OUTCOME` se leen y se reusan, **nunca se editan**. Si una tarea parece necesitar
+  editarlos, se para y se reporta.
+- **El desenlace que se escribe es exactamente** `status = 'FAILED'`, `failureCode = 'OPERATOR_RECONCILED_NO_CHARGE'`,
+  `cancelDisposition = NULL`. Verificado contra los tres predicados: sale del bloqueo heredado (`terminal-payment.service.ts:549`), del
+  estricto (el código **está** en `CODIGOS_SIN_COBRO`, `:428`) y del índice único parcial (que sólo cubre
+  `PENDING/SENT/CANCEL_REQUESTED/UNKNOWN`).
 - **Dinero en PESOS, 1:1** en toda respuesta de API y MCP. `amountCents / 100` sólo al proyectar.
-- **TDD estricto:** la prueba se escribe primero y **se ve fallar** antes de implementar. Un paso «Run test to verify it fails» que pase es un defecto de la prueba, no un atajo.
-- **Toda mutación escribe `ActivityLog`** dentro de la misma transacción (`tx.activityLog.create`, nunca `logAction` que abre su propia conexión).
-- **Verificación pesada por `avq-verify`**, desde el root del workspace: `./scripts/avq-verify.sh avoqado-server <comando>`. Se lee el CUERPO de la salida (`errores TS:`, `Test Suites:`), nunca el código de salida del script.
+- **TDD estricto:** la prueba se escribe primero y **se ve fallar** antes de implementar. Un paso «Run test to verify it fails» que pase es
+  un defecto de la prueba, no un atajo.
+- **Toda mutación escribe `ActivityLog`** dentro de la misma transacción (`tx.activityLog.create`, nunca `logAction` que abre su propia
+  conexión).
+- **Verificación pesada por `avq-verify`**, desde el root del workspace: `./scripts/avq-verify.sh avoqado-server <comando>`. Se lee el
+  CUERPO de la salida (`errores TS:`, `Test Suites:`), nunca el código de salida del script.
 - **Mensajes de Zod en español** (el middleware los muestra al usuario tal cual).
 - **Android e iOS se cambian JUNTOS** (regla del workspace). La etapa 2 no se da por terminada con una sola.
 - **`git commit -- <ruta>`** siempre, nunca `git add` + `git commit`: el índice es compartido con ~20 sesiones.
@@ -30,18 +63,18 @@
 
 ## File Structure
 
-| Archivo | Responsabilidad |
-|---|---|
-| `prisma/schema.prisma` | + columna `operatorReconciliation Json?` en `TerminalPaymentRequest` |
-| `prisma/migrations/<ts>_operator_reconciliation/migration.sql` | La migración aditiva |
-| `src/lib/permissions.ts` | + permiso `payments:reconcile-uncharged`, que **sí** tiene CASHIER |
-| `src/services/tpv/uncharged-reconciliation.service.ts` | **NUEVO.** El servicio: esquema, elegibilidad, veto, CAS, auditoría |
-| `src/services/terminal-payment.service.ts` | Despacho de la variante + persistir la respuesta `ACTIVE` de la sonda + sellar `terminalReturnedAt` en los estados admitidos |
-| `src/controllers/mobile/terminalPayment.mobile.controller.ts` | La variante en el controlador de `/release` |
-| `src/routes/mobile.routes.ts` | El permiso de la variante |
-| `src/mcp/tools/terminals.ts` | Despacho antes del filtro exclusivo de `UNKNOWN` |
-| `tests/unit/services/tpv/unchargedReconciliation.test.ts` | **NUEVO.** El veto, la idempotencia, la elegibilidad |
-| `tests/integration/tpv/unchargedReconciliation.integration.test.ts` | **NUEVO.** Contra Postgres real: el CAS y los dos candados liberados |
+| Archivo                                                             | Responsabilidad                                                                                                              |
+| ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `prisma/schema.prisma`                                              | + columna `operatorReconciliation Json?` en `TerminalPaymentRequest`                                                         |
+| `prisma/migrations/<ts>_operator_reconciliation/migration.sql`      | La migración aditiva                                                                                                         |
+| `src/lib/permissions.ts`                                            | + permiso `payments:reconcile-uncharged`, que **sí** tiene CASHIER                                                           |
+| `src/services/tpv/uncharged-reconciliation.service.ts`              | **NUEVO.** El servicio: esquema, elegibilidad, veto, CAS, auditoría                                                          |
+| `src/services/terminal-payment.service.ts`                          | Despacho de la variante + persistir la respuesta `ACTIVE` de la sonda + sellar `terminalReturnedAt` en los estados admitidos |
+| `src/controllers/mobile/terminalPayment.mobile.controller.ts`       | La variante en el controlador de `/release`                                                                                  |
+| `src/routes/mobile.routes.ts`                                       | El permiso de la variante                                                                                                    |
+| `src/mcp/tools/terminals.ts`                                        | Despacho antes del filtro exclusivo de `UNKNOWN`                                                                             |
+| `tests/unit/services/tpv/unchargedReconciliation.test.ts`           | **NUEVO.** El veto, la idempotencia, la elegibilidad                                                                         |
+| `tests/integration/tpv/unchargedReconciliation.integration.test.ts` | **NUEVO.** Contra Postgres real: el CAS y los dos candados liberados                                                         |
 
 ---
 
@@ -50,14 +83,17 @@
 ### Task 1: La columna y el permiso
 
 **Files:**
+
 - Modify: `prisma/schema.prisma` (modelo `TerminalPaymentRequest`)
 - Create: `prisma/migrations/<timestamp>_operator_reconciliation/migration.sql`
 - Modify: `src/lib/permissions.ts`
 - Test: `tests/unit/lib/permissions.reconcileUncharged.test.ts`
 
 **Interfaces:**
+
 - Consumes: nada.
-- Produces: la columna `TerminalPaymentRequest.operatorReconciliation` (Json, nullable) y la constante de permiso `'payments:reconcile-uncharged'`.
+- Produces: la columna `TerminalPaymentRequest.operatorReconciliation` (Json, nullable) y la constante de permiso
+  `'payments:reconcile-uncharged'`.
 
 - [ ] **Step 1: Escribir la prueba que falla — el cajero tiene el permiso, y el de gerencia NO cambió**
 
@@ -127,7 +163,8 @@ En los bloques `[StaffRole.MANAGER]`, `[StaffRole.ADMIN]` y `[StaffRole.OWNER]`,
     'payments:reconcile-uncharged', // el cajero también lo tiene; explícito para que la lista se lea sin expandir el comodín
 ```
 
-Y en `INDIVIDUAL_PERMISSIONS_BY_RESOURCE`, recurso `payments`, siguiendo el formato exacto de las entradas vecinas del archivo (copiar la forma de `payments:resolve-no-instrument`).
+Y en `INDIVIDUAL_PERMISSIONS_BY_RESOURCE`, recurso `payments`, siguiendo el formato exacto de las entradas vecinas del archivo (copiar la
+forma de `payments:resolve-no-instrument`).
 
 - [ ] **Step 4: Correr y ver pasar**
 
@@ -156,7 +193,9 @@ En `prisma/schema.prisma`, modelo `TerminalPaymentRequest`, justo después de `c
 npx prisma migrate dev --name operator_reconciliation
 ```
 
-Verificar que el SQL generado es **sólo** `ALTER TABLE "TerminalPaymentRequest" ADD COLUMN "operatorReconciliation" JSONB;` — aditivo, sin `NOT NULL`, sin default, sin tocar datos. Si la migración trae cualquier otra sentencia, **parar**: significa que el schema local tiene deriva de otra sesión.
+Verificar que el SQL generado es **sólo** `ALTER TABLE "TerminalPaymentRequest" ADD COLUMN "operatorReconciliation" JSONB;` — aditivo, sin
+`NOT NULL`, sin default, sin tocar datos. Si la migración trae cualquier otra sentencia, **parar**: significa que el schema local tiene
+deriva de otra sesión.
 
 - [ ] **Step 7: Regenerar el mapa del schema (obligatorio en el MISMO cambio)**
 
@@ -172,6 +211,7 @@ git show --stat HEAD
 ```
 
 Mensaje:
+
 ```
 feat(cobro): permiso del cajero y columna para la conciliacion declarada
 
@@ -190,15 +230,21 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 
 ### Task 2: La sonda deja constancia durable de `ACTIVE`
 
-**Por qué va antes del servicio:** el spec veta la declaración si la terminal reporta que el cobro **sigue corriendo**. Hoy esa respuesta sólo se escribe en el log y la función retorna (`terminal-payment.service.ts:6321`): no queda ningún dato que la declaración pueda consultar. Sin esta tarea el veto del spec es una promesa vacía.
+**Por qué va antes del servicio:** el spec veta la declaración si la terminal reporta que el cobro **sigue corriendo**. Hoy esa respuesta
+sólo se escribe en el log y la función retorna (`terminal-payment.service.ts:6321`): no queda ningún dato que la declaración pueda
+consultar. Sin esta tarea el veto del spec es una promesa vacía.
 
 **Files:**
+
 - Modify: `src/services/terminal-payment.service.ts` (el manejador de la respuesta de la sonda, alrededor de `:6321`)
 - Test: `tests/unit/services/tpv/sondaActiva.test.ts`
 
 **Interfaces:**
-- Consumes: la columna `operatorReconciliation` de la Task 1 **no**; esta tarea escribe en `resultJson.probeActiveAt` (el sobre ya se conserva y esta llave es aditiva).
-- Produces: `resultJson.probeActiveAt` (ISO string) en la fila cuya sonda contestó `ACTIVE`, y el helper exportado `sondaReportoActiva(row, ahora, ventanaMs): boolean`.
+
+- Consumes: la columna `operatorReconciliation` de la Task 1 **no**; esta tarea escribe en `resultJson.probeActiveAt` (el sobre ya se
+  conserva y esta llave es aditiva).
+- Produces: `resultJson.probeActiveAt` (ISO string) en la fila cuya sonda contestó `ACTIVE`, y el helper exportado
+  `sondaReportoActiva(row, ahora, ventanaMs): boolean`.
 
 - [ ] **Step 1: Escribir la prueba que falla**
 
@@ -257,14 +303,11 @@ export const VENTANA_SONDA_ACTIVA_MS = 15 * 60 * 1000
  * sino de la ejecución. 🔴 Falla CERRADO: una marca ilegible se trata como «sigue activo», porque la alternativa
  * —dejar declarar encima de un cobro en curso— es la que produce el cobro doble.
  */
-export function sondaReportoActiva(
-  row: { resultJson?: unknown },
-  ahora: Date,
-  ventanaMs: number = VENTANA_SONDA_ACTIVA_MS,
-): boolean {
-  const sobre = row.resultJson && typeof row.resultJson === 'object' && !Array.isArray(row.resultJson)
-    ? (row.resultJson as Record<string, unknown>)
-    : null
+export function sondaReportoActiva(row: { resultJson?: unknown }, ahora: Date, ventanaMs: number = VENTANA_SONDA_ACTIVA_MS): boolean {
+  const sobre =
+    row.resultJson && typeof row.resultJson === 'object' && !Array.isArray(row.resultJson)
+      ? (row.resultJson as Record<string, unknown>)
+      : null
   if (!sobre) return false
   const marca = sobre.probeActiveAt
   if (marca === undefined || marca === null) return false
@@ -275,18 +318,20 @@ export function sondaReportoActiva(
 }
 ```
 
-Y en el manejador de la respuesta de la sonda (donde hoy se registra `ACTIVE` y la función retorna, `:6321`), **antes** del `return`, sellar la marca sin tocar el estado ni `updatedAt`:
+Y en el manejador de la respuesta de la sonda (donde hoy se registra `ACTIVE` y la función retorna, `:6321`), **antes** del `return`, sellar
+la marca sin tocar el estado ni `updatedAt`:
 
 ```typescript
-      // La respuesta ACTIVE deja constancia DURABLE: es lo que la declaración del cajero consulta para no
-      // escribir encima de un cobro que sigue corriendo. Sin estado ni `updatedAt`: es contabilidad, no desenlace.
-      await prisma.$executeRaw`
+// La respuesta ACTIVE deja constancia DURABLE: es lo que la declaración del cajero consulta para no
+// escribir encima de un cobro que sigue corriendo. Sin estado ni `updatedAt`: es contabilidad, no desenlace.
+await prisma.$executeRaw`
         UPDATE "TerminalPaymentRequest"
         SET "resultJson" = coalesce("resultJson", '{}'::jsonb) || jsonb_build_object('probeActiveAt', ${new Date().toISOString()})
         WHERE "requestId" = ${requestId} AND "venueId" = ${venueId}`
 ```
 
-⚠️ Antes de escribir el `UPDATE`, **leer las 30 líneas alrededor de `:6321`** y usar los nombres de variable que ya existen en ese scope (`requestId`/`venueId` pueden llamarse distinto). No inventar nombres.
+⚠️ Antes de escribir el `UPDATE`, **leer las 30 líneas alrededor de `:6321`** y usar los nombres de variable que ya existen en ese scope
+(`requestId`/`venueId` pueden llamarse distinto). No inventar nombres.
 
 - [ ] **Step 4: Correr y ver pasar**
 
@@ -298,7 +343,8 @@ Esperado: **PASS**, 5/5.
 
 - [ ] **Step 5: Sabotaje — romperlo a propósito**
 
-Cambiar `if (Number.isNaN(t)) return true` por `return false` y correr la suite: **debe caer** la prueba «falla CERRADO». Revertir el sabotaje.
+Cambiar `if (Number.isNaN(t)) return true` por `return false` y correr la suite: **debe caer** la prueba «falla CERRADO». Revertir el
+sabotaje.
 
 - [ ] **Step 6: Commit**
 
@@ -312,12 +358,17 @@ git show --stat HEAD
 ### Task 3: El servicio de conciliación declarada
 
 **Files:**
+
 - Create: `src/services/tpv/uncharged-reconciliation.service.ts`
 - Test: `tests/unit/services/tpv/unchargedReconciliation.test.ts`
 
 **Interfaces:**
-- Consumes: `candadoDeSolicitud` y `OPCIONES_DE_TRANSACCION_DEL_INTENTO` de `./candadoDeIntento`; `sinEvidenciaPositivaSql`, `hayEvidenciaDeConciliacionSql` y `porQueHayEvidenciaPositiva` de `./evidenciaPositivaSql`; `desenlaceCanonico` y `sondaReportoActiva` de `../terminal-payment.service` (import dinámico, como hace el precedente, para no cerrar un ciclo).
+
+- Consumes: `candadoDeSolicitud` y `OPCIONES_DE_TRANSACCION_DEL_INTENTO` de `./candadoDeIntento`; `sinEvidenciaPositivaSql`,
+  `hayEvidenciaDeConciliacionSql` y `porQueHayEvidenciaPositiva` de `./evidenciaPositivaSql`; `desenlaceCanonico` y `sondaReportoActiva` de
+  `../terminal-payment.service` (import dinámico, como hace el precedente, para no cerrar un ciclo).
 - Produces:
+
   - `export const RECONCILE_UNCHARGED_PERMISSION = 'payments:reconcile-uncharged'`
   - `export type UnchargedReconciliation = { id: string; kind: 'UNCHARGED_VERIFIED'; acceptedAt: string; bodyHash: string; staffId: string; staffVenueId: string; statementVersion: number; previousRequest: { status: string; failureCode: string | null } }`
   - `export function readUnchargedReconciliation(value: unknown): UnchargedReconciliation | null`
@@ -326,13 +377,12 @@ git show --stat HEAD
 
 - [ ] **Step 1: Escribir las pruebas que fallan**
 
-Crear `tests/unit/services/tpv/unchargedReconciliation.test.ts`. Cubre exactamente lo que el spec exige vetar. Usar el patrón de mocks de `tests/unit/services/tpv/` que ya exista en el repo para `prisma` (leer una suite vecina antes de escribir, y copiar su forma de mockear; no inventar un doble nuevo):
+Crear `tests/unit/services/tpv/unchargedReconciliation.test.ts`. Cubre exactamente lo que el spec exige vetar. Usar el patrón de mocks de
+`tests/unit/services/tpv/` que ya exista en el repo para `prisma` (leer una suite vecina antes de escribir, y copiar su forma de mockear; no
+inventar un doble nuevo):
 
 ```typescript
-import {
-  readUnchargedReconciliation,
-  UnchargedReconciliationError,
-} from '@/services/tpv/uncharged-reconciliation.service'
+import { readUnchargedReconciliation, UnchargedReconciliationError } from '@/services/tpv/uncharged-reconciliation.service'
 
 describe('readUnchargedReconciliation', () => {
   it('reconoce una declaración guardada', () => {
@@ -359,7 +409,9 @@ describe('UnchargedReconciliationError', () => {
 })
 ```
 
-Y las pruebas de elegibilidad. 🔴 **El montaje se copia de la suite hermana `tests/unit/services/tpv/no-instrument-resolution.service.test.ts`** — mismo `prismaMock` global de `tests/__helpers__/setup.ts`, mismos helpers. Preámbulo:
+Y las pruebas de elegibilidad. 🔴 **El montaje se copia de la suite hermana
+`tests/unit/services/tpv/no-instrument-resolution.service.test.ts`** — mismo `prismaMock` global de `tests/__helpers__/setup.ts`, mismos
+helpers. Preámbulo:
 
 ```typescript
 import prisma from '@/utils/prismaClient'
@@ -414,7 +466,11 @@ beforeEach(() => {
   prismaMock.payment.findFirst.mockResolvedValue(null)
   prismaMock.activityLog.create.mockResolvedValue({})
   prismaMock.staffVenue.findFirst.mockResolvedValue({
-    id: 'sv-cashier', staffId: 'staff-cashier', role: 'CASHIER', permissionSetId: null, permissionSet: null,
+    id: 'sv-cashier',
+    staffId: 'staff-cashier',
+    role: 'CASHIER',
+    permissionSetId: null,
+    permissionSet: null,
   })
   prismaMock.venueRolePermission.findUnique.mockResolvedValue(null)
 })
@@ -431,8 +487,7 @@ describe('reconcileUncharged — camino feliz', () => {
     expect(r.staffId).toBe('staff-cashier')
     expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(1)
     expect(prismaMock.activityLog.create).toHaveBeenCalledTimes(1)
-    expect(prismaMock.activityLog.create.mock.calls[0][0].data.action)
-      .toBe('TERMINAL_PAYMENT_OPERATOR_RECONCILED_UNCHARGED')
+    expect(prismaMock.activityLog.create.mock.calls[0][0].data.action).toBe('TERMINAL_PAYMENT_OPERATOR_RECONCILED_UNCHARGED')
   })
 
   it('🔴 el CAS escribe EXACTAMENTE el desenlace que sale de los dos candados', async () => {
@@ -507,11 +562,15 @@ describe('reconcileUncharged — lo que VETA la declaración', () => {
 
   it('🔴 sin el permiso efectivo no se acepta, aunque el cuerpo venga perfecto', async () => {
     prismaMock.staffVenue.findFirst.mockResolvedValue({
-      id: 'sv-waiter', staffId: 'staff-waiter', role: 'WAITER', permissionSetId: null, permissionSet: null,
+      id: 'sv-waiter',
+      staffId: 'staff-waiter',
+      role: 'WAITER',
+      permissionSetId: null,
+      permissionSet: null,
     })
-    await expect(
-      reconcileUncharged({ ...identidad, actorStaffId: 'staff-waiter' }, declaracion()),
-    ).rejects.toMatchObject({ statusCode: 403 })
+    await expect(reconcileUncharged({ ...identidad, actorStaffId: 'staff-waiter' }, declaracion())).rejects.toMatchObject({
+      statusCode: 403,
+    })
     expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
   })
 
@@ -549,15 +608,15 @@ describe('reconcileUncharged — idempotencia', () => {
 
 describe('REGRESIÓN — la identidad nunca sale del cuerpo', () => {
   it('🔴 un staffId en el cuerpo NO se obedece: el actor es el de la sesión', async () => {
-    await expect(
-      reconcileUncharged(identidad, { ...declaracion(), staffId: 'staff-owner' } as unknown),
-    ).rejects.toThrow(UnchargedReconciliationError)
+    await expect(reconcileUncharged(identidad, { ...declaracion(), staffId: 'staff-owner' } as unknown)).rejects.toThrow(
+      UnchargedReconciliationError,
+    )
   })
 
   it('🔴 `reason` y `confirm` NO son una declaración', async () => {
-    await expect(
-      reconcileUncharged(identidad, { requestId, reason: 'la PAX se reinició', confirm: true } as unknown),
-    ).rejects.toThrow(UnchargedReconciliationError)
+    await expect(reconcileUncharged(identidad, { requestId, reason: 'la PAX se reinició', confirm: true } as unknown)).rejects.toThrow(
+      UnchargedReconciliationError,
+    )
   })
 })
 ```
@@ -572,29 +631,37 @@ Esperado: **FAIL** — el módulo no existe.
 
 - [ ] **Step 3: Implementar el servicio**
 
-Crear `src/services/tpv/uncharged-reconciliation.service.ts`. **Leer primero `src/services/tpv/no-instrument-resolution.service.ts` completo** y seguir su estructura literalmente, con estas seis diferencias, que son el encargo:
+Crear `src/services/tpv/uncharged-reconciliation.service.ts`. **Leer primero `src/services/tpv/no-instrument-resolution.service.ts`
+completo** y seguir su estructura literalmente, con estas seis diferencias, que son el encargo:
 
-1. **Se identifica por SOLICITUD, no por intento.** Candado `candadoDeSolicitud(tx, requestId)` (no `candadoDeIntento`), y ninguna lectura de `TerminalPaymentAttemptLink` es obligatoria: una solicitud legacy sin vínculo es elegible.
+1. **Se identifica por SOLICITUD, no por intento.** Candado `candadoDeSolicitud(tx, requestId)` (no `candadoDeIntento`), y ninguna lectura
+   de `TerminalPaymentAttemptLink` es obligatoria: una solicitud legacy sin vínculo es elegible.
 2. **La declaración se guarda en `TerminalPaymentRequest.operatorReconciliation`**, no en el vínculo.
-3. **El actor es el POS**, no la terminal: `identity.actorStaffId` viene del `authContext` de la ruta móvil y el permiso es `RECONCILE_UNCHARGED_PERMISSION`. La autorización reusa la MISMA regla efectiva que `miembroDelVenue` del precedente — **copiar esa función**, cambiando sólo la constante del permiso (es una regla de permisos, no una abstracción que valga la pena compartir entre dos archivos que evolucionan aparte).
-4. **Estados admitidos:** `UNKNOWN` y `TIMED_OUT`. La elegibilidad exige `desenlaceCanonico(row).outcome === 'UNRESOLVED'`, `row.status !== 'PENDING'`, y que el `failureCode` **no** sea `BANK_APPROVED_AWAITING_PAYMENT` ni `PAYMENT_UNBOUND_AWAITING_REVIEW`.
-5. **Exige que la terminal haya vuelto:** `row.terminalReturnedAt !== null`. (La Task 4 hace que eso también se selle en `TIMED_OUT`; hasta entonces, una fila `TIMED_OUT` legacy responde `TERMINAL_SIN_REGRESAR`, que es el comportamiento correcto y seguro.)
-6. **Veta también por `sondaReportoActiva(row, new Date())`** y por `hayEvidenciaDeConciliacionSql(requestId, venueId)`, además del veto compartido `sinEvidenciaPositivaSql` en el CAS.
+3. **El actor es el POS**, no la terminal: `identity.actorStaffId` viene del `authContext` de la ruta móvil y el permiso es
+   `RECONCILE_UNCHARGED_PERMISSION`. La autorización reusa la MISMA regla efectiva que `miembroDelVenue` del precedente — **copiar esa
+   función**, cambiando sólo la constante del permiso (es una regla de permisos, no una abstracción que valga la pena compartir entre dos
+   archivos que evolucionan aparte).
+4. **Estados admitidos:** `UNKNOWN` y `TIMED_OUT`. La elegibilidad exige `desenlaceCanonico(row).outcome === 'UNRESOLVED'`,
+   `row.status !== 'PENDING'`, y que el `failureCode` **no** sea `BANK_APPROVED_AWAITING_PAYMENT` ni `PAYMENT_UNBOUND_AWAITING_REVIEW`.
+5. **Exige que la terminal haya vuelto:** `row.terminalReturnedAt !== null`. (La Task 4 hace que eso también se selle en `TIMED_OUT`; hasta
+   entonces, una fila `TIMED_OUT` legacy responde `TERMINAL_SIN_REGRESAR`, que es el comportamiento correcto y seguro.)
+6. **Veta también por `sondaReportoActiva(row, new Date())`** y por `hayEvidenciaDeConciliacionSql(requestId, venueId)`, además del veto
+   compartido `sinEvidenciaPositivaSql` en el CAS.
 
 El CAS final, calcado del precedente:
 
 ```typescript
-    const sobreDeclarado = {
-      ...sobre,
-      requestId,
-      status: 'failed',
-      outcomeEvidence: 'OPERATOR_RECONCILED',
-      // 🔴 Mensaje PROPIO: el de gerencia dice «no se presentó tarjeta», que aquí sería falso — el cliente
-      // sí presentó la tarjeta; lo que no hubo fue cobro. Los POS pintan ESTE texto, no uno hardcodeado.
-      errorMessage: 'El cajero revisó la terminal y confirmó que este cobro no pasó. Se puede volver a cobrar.',
-      operatorReconciliation: saved,
-    }
-    const cas = await tx.$executeRaw`
+const sobreDeclarado = {
+  ...sobre,
+  requestId,
+  status: 'failed',
+  outcomeEvidence: 'OPERATOR_RECONCILED',
+  // 🔴 Mensaje PROPIO: el de gerencia dice «no se presentó tarjeta», que aquí sería falso — el cliente
+  // sí presentó la tarjeta; lo que no hubo fue cobro. Los POS pintan ESTE texto, no uno hardcodeado.
+  errorMessage: 'El cajero revisó la terminal y confirmó que este cobro no pasó. Se puede volver a cobrar.',
+  operatorReconciliation: saved,
+}
+const cas = await tx.$executeRaw`
       UPDATE "TerminalPaymentRequest"
       SET "status" = 'FAILED', "failureCode" = 'OPERATOR_RECONCILED_NO_CHARGE', "cancelDisposition" = NULL,
           "resultJson" = ${JSON.stringify(sobreDeclarado)}::jsonb,
@@ -603,25 +670,25 @@ El CAS final, calcado del precedente:
       WHERE "id" = ${row.id} AND "status" = ${row.status}::"TerminalPaymentRequestStatus" AND "paymentId" IS NULL
         AND ${sinEvidenciaPositivaSql(requestId, identity.venueId)}
         AND NOT ${hayEvidenciaDeConciliacionSql(requestId, identity.venueId)}`
-    if (cas !== 1) {
-      const motivo = await porQueHayEvidenciaPositiva(tx, requestId, identity.venueId)
-      throw new UnchargedReconciliationError(motivo === 'NINGUNA' ? 'ATTEMPT_NOT_ELIGIBLE' : 'POSITIVE_EVIDENCE_EXISTS')
-    }
+if (cas !== 1) {
+  const motivo = await porQueHayEvidenciaPositiva(tx, requestId, identity.venueId)
+  throw new UnchargedReconciliationError(motivo === 'NINGUNA' ? 'ATTEMPT_NOT_ELIGIBLE' : 'POSITIVE_EVIDENCE_EXISTS')
+}
 ```
 
 Y el asiento de auditoría, **dentro** de la transacción:
 
 ```typescript
-    await tx.activityLog.create({
-      data: {
-        action: 'TERMINAL_PAYMENT_OPERATOR_RECONCILED_UNCHARGED',
-        entity: 'TerminalPaymentRequest',
-        entityId: row.id,
-        venueId: identity.venueId,
-        staffId: actor.staffId,
-        data: { requestId, terminalId: row.terminalId, orderId: row.orderId, resolutionId: saved.id, source },
-      },
-    })
+await tx.activityLog.create({
+  data: {
+    action: 'TERMINAL_PAYMENT_OPERATOR_RECONCILED_UNCHARGED',
+    entity: 'TerminalPaymentRequest',
+    entityId: row.id,
+    venueId: identity.venueId,
+    staffId: actor.staffId,
+    data: { requestId, terminalId: row.terminalId, orderId: row.orderId, resolutionId: saved.id, source },
+  },
+})
 ```
 
 - [ ] **Step 4: Correr y ver pasar**
@@ -634,13 +701,14 @@ Esperado: **PASS**, todas.
 
 - [ ] **Step 5: Tres sabotajes, cada uno cazado por su prueba**
 
-| Sabotaje | Prueba que DEBE caer |
-|---|---|
-| Quitar `AND NOT ${hayEvidenciaDeConciliacionSql(...)}` del CAS | «evidencia de conciliación» |
-| Quitar la comprobación de `terminalReturnedAt` | «la terminal todavía no ha vuelto» |
-| Devolver la declaración guardada sin comparar `bodyHash` | «otro cuerpo bajo el mismo resolutionId» |
+| Sabotaje                                                       | Prueba que DEBE caer                     |
+| -------------------------------------------------------------- | ---------------------------------------- |
+| Quitar `AND NOT ${hayEvidenciaDeConciliacionSql(...)}` del CAS | «evidencia de conciliación»              |
+| Quitar la comprobación de `terminalReturnedAt`                 | «la terminal todavía no ha vuelto»       |
+| Devolver la declaración guardada sin comparar `bodyHash`       | «otro cuerpo bajo el mismo resolutionId» |
 
-Aplicar uno, correr, comprobar que cae **exactamente** ésa, revertir. Si un sabotaje **no** tumba ninguna prueba, la prueba está pasando por el motivo equivocado: arreglarla antes de seguir.
+Aplicar uno, correr, comprobar que cae **exactamente** ésa, revertir. Si un sabotaje **no** tumba ninguna prueba, la prueba está pasando por
+el motivo equivocado: arreglarla antes de seguir.
 
 - [ ] **Step 6: Commit**
 
@@ -653,19 +721,24 @@ git show --stat HEAD
 
 ### Task 4: `terminalReturnedAt` también en los estados admitidos
 
-**Por qué:** hoy sólo se sella sobre filas `UNKNOWN` (`terminal-payment.service.ts:5189`). Una `TIMED_OUT` todavía incierta quedaría **inelegible para siempre** aunque la terminal esté conectada — y ésas son justo las filas legacy que hay que poder limpiar.
+**Por qué:** hoy sólo se sella sobre filas `UNKNOWN` (`terminal-payment.service.ts:5189`). Una `TIMED_OUT` todavía incierta quedaría
+**inelegible para siempre** aunque la terminal esté conectada — y ésas son justo las filas legacy que hay que poder limpiar.
 
 **Files:**
+
 - Modify: `src/services/terminal-payment.service.ts` (alrededor de `:5189`)
 - Test: `tests/integration/tpv/terminalReturnedAt.integration.test.ts`
 
 **Interfaces:**
+
 - Consumes: nada nuevo.
 - Produces: `terminalReturnedAt` sellado también en filas `TIMED_OUT` cuyo desenlace siga `UNRESOLVED`.
 
 - [ ] **Step 1: Escribir la prueba de integración que falla**
 
-Contra Postgres real (necesita `TEST_DATABASE_URL`). Sembrar dos filas de la misma terminal —una `UNKNOWN`, una `TIMED_OUT` sin desenlace acreditado— simular un latido posterior a `expiresAt`, y afirmar que **las dos** quedan con `terminalReturnedAt`. Añadir una tercera fila `COMPLETED` y afirmar que **no** se toca.
+Contra Postgres real (necesita `TEST_DATABASE_URL`). Sembrar dos filas de la misma terminal —una `UNKNOWN`, una `TIMED_OUT` sin desenlace
+acreditado— simular un latido posterior a `expiresAt`, y afirmar que **las dos** quedan con `terminalReturnedAt`. Añadir una tercera fila
+`COMPLETED` y afirmar que **no** se toca.
 
 - [ ] **Step 2: Correrla y verla fallar**
 
@@ -677,12 +750,13 @@ Esperado: **FAIL** — la fila `TIMED_OUT` queda con `terminalReturnedAt` en nul
 
 - [ ] **Step 3: Ampliar el sellado**
 
-Leer las 40 líneas alrededor de `:5189` y ampliar el `where` del `updateMany` para incluir `TIMED_OUT`, conservando **intactas** las demás condiciones (terminal, `expiresAt`, `terminalReturnedAt: null`). Comentario obligatorio:
+Leer las 40 líneas alrededor de `:5189` y ampliar el `where` del `updateMany` para incluir `TIMED_OUT`, conservando **intactas** las demás
+condiciones (terminal, `expiresAt`, `terminalReturnedAt: null`). Comentario obligatorio:
 
 ```typescript
-      // 18-sep: también TIMED_OUT. La marca es diagnóstica —acredita CONECTIVIDAD, nunca que la ejecución
-      // terminó— y es el requisito de elegibilidad de la declaración del cajero. Sin esto, una fila TIMED_OUT
-      // legacy sería ineligible para siempre, que son justo las que hay que poder limpiar.
+// 18-sep: también TIMED_OUT. La marca es diagnóstica —acredita CONECTIVIDAD, nunca que la ejecución
+// terminó— y es el requisito de elegibilidad de la declaración del cajero. Sin esto, una fila TIMED_OUT
+// legacy sería ineligible para siempre, que son justo las que hay que poder limpiar.
 ```
 
 - [ ] **Step 4: Correr y ver pasar**
@@ -702,14 +776,18 @@ git commit -- src/services/terminal-payment.service.ts tests/integration/tpv/ter
 ### Task 5: El despacho — ruta móvil y `releaseUnknownRequest`
 
 **Files:**
+
 - Modify: `src/services/terminal-payment.service.ts` (`releaseUnknownRequest`, `:5396`)
 - Modify: `src/controllers/mobile/terminalPayment.mobile.controller.ts`
 - Modify: `src/routes/mobile.routes.ts:1704`
 - Test: `tests/integration/tpv/unchargedReconciliation.integration.test.ts`
 
 **Interfaces:**
+
 - Consumes: `reconcileUncharged` de la Task 3.
-- Produces: el contrato HTTP de la variante — `POST /mobile/venues/:venueId/terminal-payment/:requestId/release` con cuerpo `{ statement: 'UNCHARGED_VERIFIED', statementVersion: 1, resolutionId: <uuid> }` responde `{ requestId, released: true, status: 'FAILED', outcome: 'NOT_CHARGED', outcomeEvidence: 'OPERATOR_RECONCILED', resolution: { id, acceptedAt } }`.
+- Produces: el contrato HTTP de la variante — `POST /mobile/venues/:venueId/terminal-payment/:requestId/release` con cuerpo
+  `{ statement: 'UNCHARGED_VERIFIED', statementVersion: 1, resolutionId: <uuid> }` responde
+  `{ requestId, released: true, status: 'FAILED', outcome: 'NOT_CHARGED', outcomeEvidence: 'OPERATOR_RECONCILED', resolution: { id, acceptedAt } }`.
 
 - [ ] **Step 1: Escribir la prueba de integración que falla**
 
@@ -827,7 +905,8 @@ it('🔴 una solicitud de OTRO negocio responde 404, nunca la toca', async () =>
 })
 ```
 
-⚠️ Los helpers `sembrarSolicitud`, `sembrarPaymentLigado`, `datosDeSolicitudNueva` y los tokens por rol se copian de la suite de integración de terminal-payment que ya exista en `tests/integration/tpv/` — **leerla primero**; no inventar un montaje nuevo.
+⚠️ Los helpers `sembrarSolicitud`, `sembrarPaymentLigado`, `datosDeSolicitudNueva` y los tokens por rol se copian de la suite de integración
+de terminal-payment que ya exista en `tests/integration/tpv/` — **leerla primero**; no inventar un montaje nuevo.
 
 - [ ] **Step 2: Correrlas y verlas fallar**
 
@@ -837,32 +916,33 @@ npx jest --selectProjects integration --testPathPattern "unchargedReconciliation
 
 - [ ] **Step 3: Despachar en `releaseUnknownRequest`**
 
-En `src/services/terminal-payment.service.ts`, dentro de `releaseUnknownRequest`, **después** de `const row = await prisma.terminalPaymentRequest.findFirst(...)` y su `if (!row)`, y **antes** del filtro `if (row.status !== TerminalPaymentRequestStatus.UNKNOWN)`:
+En `src/services/terminal-payment.service.ts`, dentro de `releaseUnknownRequest`, **después** de
+`const row = await prisma.terminalPaymentRequest.findFirst(...)` y su `if (!row)`, y **antes** del filtro
+`if (row.status !== TerminalPaymentRequestStatus.UNKNOWN)`:
 
 ```typescript
-    // 🔴 La variante declarada va ANTES del filtro exclusivo de UNKNOWN: una fila TIMED_OUT todavía incierta
-    // también aparta la terminal, y es la que más abunda entre las legacy. Sin declaración, todo sigue igual.
-    if (input.declaration) {
-      const { reconcileUncharged } = await import('./tpv/uncharged-reconciliation.service')
-      const resolution = await reconcileUncharged(
-        { venueId, requestId, actorStaffId: actor.staffId ?? '' },
-        input.declaration,
-      )
-      const fresh = await prisma.terminalPaymentRequest.findFirst({ where: { requestId, venueId } })
-      return {
-        requestId,
-        released: true,
-        status: fresh?.status ?? TerminalPaymentRequestStatus.FAILED,
-        resolution: { id: resolution.id, acceptedAt: resolution.acceptedAt },
-      }
-    }
+// 🔴 La variante declarada va ANTES del filtro exclusivo de UNKNOWN: una fila TIMED_OUT todavía incierta
+// también aparta la terminal, y es la que más abunda entre las legacy. Sin declaración, todo sigue igual.
+if (input.declaration) {
+  const { reconcileUncharged } = await import('./tpv/uncharged-reconciliation.service')
+  const resolution = await reconcileUncharged({ venueId, requestId, actorStaffId: actor.staffId ?? '' }, input.declaration)
+  const fresh = await prisma.terminalPaymentRequest.findFirst({ where: { requestId, venueId } })
+  return {
+    requestId,
+    released: true,
+    status: fresh?.status ?? TerminalPaymentRequestStatus.FAILED,
+    resolution: { id: resolution.id, acceptedAt: resolution.acceptedAt },
+  }
+}
 ```
 
 y ampliar la firma de `input` con `declaration?: unknown` y el tipo de retorno con `resolution?: { id: string; acceptedAt: string }`.
 
 - [ ] **Step 4: Pasar la declaración desde el controlador y la ruta**
 
-En el controlador, leer el cuerpo y pasarlo **sólo** si trae `statement`; nunca derivarlo de `reason` ni de `confirm`. En `mobile.routes.ts:1704`, sustituir el `checkPermission('tpv:update')` fijo por un middleware que elija el permiso según el cuerpo, con el patrón que la propia `permissions-policy.md` del repo prescribe para endpoints con sub-acciones:
+En el controlador, leer el cuerpo y pasarlo **sólo** si trae `statement`; nunca derivarlo de `reason` ni de `confirm`. En
+`mobile.routes.ts:1704`, sustituir el `checkPermission('tpv:update')` fijo por un middleware que elija el permiso según el cuerpo, con el
+patrón que la propia `permissions-policy.md` del repo prescribe para endpoints con sub-acciones:
 
 ```typescript
 /**
@@ -907,10 +987,12 @@ git show --stat HEAD
 ### Task 6: El tool del MCP
 
 **Files:**
+
 - Modify: `src/mcp/tools/terminals.ts` (`release_terminal_payment`, `:482`–`:540`)
 - Test: `tests/unit/mcp-customer/releaseTerminalPayment.test.ts`
 
 **Interfaces:**
+
 - Consumes: `reconcileUncharged` de la Task 3.
 - Produces: el parámetro `verifiedUncharged?: boolean` en el tool, en dos pasos como el resto.
 
@@ -927,7 +1009,11 @@ it('🔴 con verifiedUncharged SIN confirm devuelve vista previa y NO escribe', 
 
 it('con verifiedUncharged + confirm declara y libera', async () => {
   const r = await invocarTool('release_terminal_payment', {
-    venueId, requestId, verifiedUncharged: true, confirm: true, reason: 'revisé la N86 y no cobró',
+    venueId,
+    requestId,
+    verifiedUncharged: true,
+    confirm: true,
+    reason: 'revisé la N86 y no cobró',
   })
   const cuerpo = JSON.parse(r.content[0].text)
   expect(cuerpo).toMatchObject({ ok: true, released: true, status: 'FAILED' })
@@ -951,7 +1037,10 @@ it('sin verifiedUncharged, una fila TIMED_OUT sigue rebotando EXACTAMENTE igual 
 it('🔴 un token de SÓLO LECTURA no puede declarar', async () => {
   await expect(
     invocarToolConScope(scopeDeSoloLectura, 'release_terminal_payment', {
-      venueId, requestId, verifiedUncharged: true, confirm: true,
+      venueId,
+      requestId,
+      verifiedUncharged: true,
+      confirm: true,
     }),
   ).rejects.toThrow()
 })
@@ -959,13 +1048,17 @@ it('🔴 un token de SÓLO LECTURA no puede declarar', async () => {
 it('🔴 sin el permiso del cajero la declaración no pasa por el MCP', async () => {
   await expect(
     invocarToolConScope(scopeSinPermisos, 'release_terminal_payment', {
-      venueId, requestId, verifiedUncharged: true, confirm: true,
+      venueId,
+      requestId,
+      verifiedUncharged: true,
+      confirm: true,
     }),
   ).rejects.toThrow()
 })
 ```
 
-⚠️ `invocarTool`, `invocarToolConScope` y los scopes se copian de la suite de tools del MCP que ya exista en `tests/unit/mcp-customer/` — **leerla primero**.
+⚠️ `invocarTool`, `invocarToolConScope` y los scopes se copian de la suite de tools del MCP que ya exista en `tests/unit/mcp-customer/` —
+**leerla primero**.
 
 - [ ] **Step 2: Correrlas y verlas fallar**
 
@@ -984,7 +1077,9 @@ Añadir el parámetro al esquema del tool:
         .describe('Una PERSONA miró la pantalla de la terminal y confirma que no hubo cobro. Es testimonio, no evidencia del procesador.'),
 ```
 
-Y **antes** del `if (row.status !== TerminalPaymentRequestStatus.UNKNOWN)` de `:521`, despachar la variante, conservando la vista previa y la confirmación humana. Mantener `requireWriteScopeAlways` y `guard.requirePermission` — para la variante, el permiso pedido es `payments:reconcile-uncharged`.
+Y **antes** del `if (row.status !== TerminalPaymentRequestStatus.UNKNOWN)` de `:521`, despachar la variante, conservando la vista previa y
+la confirmación humana. Mantener `requireWriteScopeAlways` y `guard.requirePermission` — para la variante, el permiso pedido es
+`payments:reconcile-uncharged`.
 
 - [ ] **Step 4: Correr y ver pasar**
 
@@ -1010,13 +1105,17 @@ codex exec --json --sandbox read-only "Audita el diff completo de la conciliaci�
 
 ### Task 7: El aviso al cajero cuando el cobro aparece TARDE
 
-**Por qué:** el spec lo exige y **el mockup aprobado lo dibuja** (tercer artboard), pero hoy no existe: el tratamiento de la aprobación tardía manda `sendOpsAlert`, que es **correo a operaciones**, no un aviso en el aparato (`terminal-payment.service.ts:1448`). Sin esta tarea, el cajero declara, cobra otra vez y **nadie le dice** que el dinero apareció.
+**Por qué:** el spec lo exige y **el mockup aprobado lo dibuja** (tercer artboard), pero hoy no existe: el tratamiento de la aprobación
+tardía manda `sendOpsAlert`, que es **correo a operaciones**, no un aviso en el aparato (`terminal-payment.service.ts:1448`). Sin esta
+tarea, el cajero declara, cobra otra vez y **nadie le dice** que el dinero apareció.
 
 **Files:**
+
 - Modify: `src/services/terminal-payment.service.ts` (`avisarAprobacionTardiaTrasVentana`, alrededor de `:1448`)
 - Test: `tests/unit/services/tpv/avisoDeAprobacionTardia.test.ts`
 
 **Interfaces:**
+
 - Consumes: la columna `operatorReconciliation` de la Task 1 — sólo se avisa si **hubo** declaración.
 - Produces: una `Notification` durable para el venue, tipo `PAYMENT_LATE_AFTER_RECONCILIATION`, con `entityId = TerminalPaymentRequest.id`.
 
@@ -1029,26 +1128,40 @@ import { avisarCobroTardioTrasDeclaracion } from '@/services/terminal-payment.se
 const prismaMock = prisma as any
 
 describe('avisarCobroTardioTrasDeclaracion', () => {
-  beforeEach(() => { jest.clearAllMocks(); prismaMock.notification.create.mockResolvedValue({}) })
+  beforeEach(() => {
+    jest.clearAllMocks()
+    prismaMock.notification.create.mockResolvedValue({})
+  })
 
   it('🔴 avisa en el aparato cuando el dinero aparece SOBRE una declaración del cajero', async () => {
     await avisarCobroTardioTrasDeclaracion({
-      requestId: 'req-1', venueId: 'v1', paymentId: 'pay-1', rowId: 'row-1',
-      amountCents: 7475, terminalId: 'n86', orderId: 'order-1',
+      requestId: 'req-1',
+      venueId: 'v1',
+      paymentId: 'pay-1',
+      rowId: 'row-1',
+      amountCents: 7475,
+      terminalId: 'n86',
+      orderId: 'order-1',
       reconciliation: { id: 'r1', kind: 'UNCHARGED_VERIFIED', staffId: 'staff-cashier' } as any,
     })
     expect(prismaMock.notification.create).toHaveBeenCalledTimes(1)
     const data = prismaMock.notification.create.mock.calls[0][0].data
     expect(data.venueId).toBe('v1')
     expect(data.entityId).toBe('row-1')
-    expect(data.message).toMatch(/74\.75/)       // PESOS, no centavos
+    expect(data.message).toMatch(/74\.75/) // PESOS, no centavos
     expect(data.message).toMatch(/no lo cobres otra vez/i)
   })
 
   it('NO avisa cuando no hubo declaración: es el camino de siempre, y ése ya tiene su correo a operaciones', async () => {
     await avisarCobroTardioTrasDeclaracion({
-      requestId: 'req-1', venueId: 'v1', paymentId: 'pay-1', rowId: 'row-1',
-      amountCents: 7475, terminalId: 'n86', orderId: 'order-1', reconciliation: null,
+      requestId: 'req-1',
+      venueId: 'v1',
+      paymentId: 'pay-1',
+      rowId: 'row-1',
+      amountCents: 7475,
+      terminalId: 'n86',
+      orderId: 'order-1',
+      reconciliation: null,
     })
     expect(prismaMock.notification.create).not.toHaveBeenCalled()
   })
@@ -1057,8 +1170,13 @@ describe('avisarCobroTardioTrasDeclaracion', () => {
     prismaMock.notification.create.mockRejectedValue(new Error('db caída'))
     await expect(
       avisarCobroTardioTrasDeclaracion({
-        requestId: 'req-1', venueId: 'v1', paymentId: 'pay-1', rowId: 'row-1',
-        amountCents: 7475, terminalId: 'n86', orderId: 'order-1',
+        requestId: 'req-1',
+        venueId: 'v1',
+        paymentId: 'pay-1',
+        rowId: 'row-1',
+        amountCents: 7475,
+        terminalId: 'n86',
+        orderId: 'order-1',
         reconciliation: { id: 'r1', kind: 'UNCHARGED_VERIFIED', staffId: 'x' } as any,
       }),
     ).resolves.toBeUndefined()
@@ -1074,13 +1192,15 @@ npx jest --selectProjects unit --testPathPattern "avisoDeAprobacionTardia" --ci
 
 - [ ] **Step 3: Implementar**
 
-Leer primero `avisarAprobacionTardiaTrasVentana` (`:1448`) y **no tocarla**: la función nueva es hermana y se llama desde el mismo punto, después de aquélla. El texto del aviso es el del mockup:
+Leer primero `avisarAprobacionTardiaTrasVentana` (`:1448`) y **no tocarla**: la función nueva es hermana y se llama desde el mismo punto,
+después de aquélla. El texto del aviso es el del mockup:
 
 ```typescript
       message: `El banco aprobó $${(amountCents / 100).toFixed(2)} de una venta que se había dado por no cobrada. Avoqado ya lo registró: no lo cobres otra vez.`,
 ```
 
-🔴 Fire-and-forget, fuera de cualquier `$transaction`, con `catch` que sólo registra: un aviso que falla **nunca** puede deshacer el registro del dinero.
+🔴 Fire-and-forget, fuera de cualquier `$transaction`, con `catch` que sólo registra: un aviso que falla **nunca** puede deshacer el
+registro del dinero.
 
 - [ ] **Step 4: Correr y ver pasar**
 
@@ -1098,29 +1218,33 @@ git commit -- src/services/terminal-payment.service.ts tests/unit/services/tpv/a
 
 ## Etapa 2 — el botón en el POS (viaja con el siguiente APK)
 
-🔴 **Regla del workspace: Android e iOS se cambian JUNTOS.** La etapa no se cierra con una sola. Los textos se comparan cadena por cadena entre las dos apps antes de commitear: la divergencia `Atendio/Atendió` del ticket nació exactamente así.
+🔴 **Regla del workspace: Android e iOS se cambian JUNTOS.** La etapa no se cierra con una sola. Los textos se comparan cadena por cadena
+entre las dos apps antes de commitear: la divergencia `Atendio/Atendió` del ticket nació exactamente así.
 
 **Los cuatro textos, idénticos en las dos apps** (del mockup aprobado):
 
-| Elemento | Texto exacto |
-|---|---|
-| Botón | `Ya revisé la terminal: no se cobró` |
-| Título del diálogo | `Confirma que no se cobró` |
+| Elemento           | Texto exacto                                                                                                        |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| Botón              | `Ya revisé la terminal: no se cobró`                                                                                |
+| Título del diálogo | `Confirma que no se cobró`                                                                                          |
 | Cuerpo del diálogo | `Estás declarando que miraste la pantalla de la terminal y el cobro de $X no pasó. Tu nombre queda en el registro.` |
-| Botón de confirmar | `Sí, no se cobró` |
-| Botón de cancelar | `Mejor no` |
-| Éxito | `Listo, puedes cobrar` |
+| Botón de confirmar | `Sí, no se cobró`                                                                                                   |
+| Botón de cancelar  | `Mejor no`                                                                                                          |
+| Éxito              | `Listo, puedes cobrar`                                                                                              |
 
 ### Task 8: Android
 
 **Files:**
+
 - Modify: `app/src/main/java/com/avoqado/pos/.../PaymentResultScreen.kt` (`PaymentUndeterminedView`, `:654`)
 - Modify: `app/src/main/java/com/avoqado/pos/.../PaymentFlowViewModel.kt`
 - Test: la suite del flujo de cobro que ya exista junto al ViewModel (`*PaymentFlowViewModel*Test`)
 
 **Interfaces:**
+
 - Consumes: el contrato HTTP de la Task 5.
-- Produces: el parámetro `onDeclararNoCobrado: (() -> Unit)? = null` en `PaymentUndeterminedView` (null = no se ofrece el botón) y `fun declararNoCobrado()` en el ViewModel.
+- Produces: el parámetro `onDeclararNoCobrado: (() -> Unit)? = null` en `PaymentUndeterminedView` (null = no se ofrece el botón) y
+  `fun declararNoCobrado()` en el ViewModel.
 
 - [ ] **Step 1: Escribir las pruebas que fallan**
 
@@ -1211,7 +1335,8 @@ En `PaymentUndeterminedView`, añadir el parámetro y el botón **debajo** de «
     }
 ```
 
-y el `AvoqadoDialog` de confirmación con los textos de la tabla de arriba. 🔴 **No se toca `chargeAgainDespiteUndetermined`** (sigue vacía a propósito) ni se quitan `onSalir` / `onCancelarVenta`.
+y el `AvoqadoDialog` de confirmación con los textos de la tabla de arriba. 🔴 **No se toca `chargeAgainDespiteUndetermined`** (sigue vacía a
+propósito) ni se quitan `onSalir` / `onCancelarVenta`.
 
 - [ ] **Step 4: Correr y ver pasar**
 
@@ -1230,10 +1355,12 @@ Hacer que el camino sin red encole la declaración: **debe caer** la prueba «si
 ### Task 9: iOS — paridad texto por texto
 
 **Files:**
+
 - Modify: `Avoqado/.../PaymentResultViews.swift` (`:1417`)
 - Modify: `Avoqado/.../PaymentFlowViewModel.swift`
 
 **Interfaces:**
+
 - Consumes: el contrato HTTP de la Task 5, idéntico al de Android.
 - Produces: `onDeclararNoCobrado: (() -> Void)?` en la vista y `func declararNoCobrado() async` en el ViewModel.
 
@@ -1309,7 +1436,8 @@ Cualquier diferencia se resuelve antes de commitear.
 
 ### Task 10: QA en hardware, con la red apagada de verdad
 
-**Por qué:** la regla `todo-funciona-sin-red.md` del workspace. Los dos defectos de dinero de agosto pasaron los tests, las auditorías y el compilador; sólo salieron apagando el WiFi de un aparato real.
+**Por qué:** la regla `todo-funciona-sin-red.md` del workspace. Los dos defectos de dinero de agosto pasaron los tests, las auditorías y el
+compilador; sólo salieron apagando el WiFi de un aparato real.
 
 - [ ] **Step 1: Sembrar el escenario en una base desechable**
 
@@ -1324,7 +1452,8 @@ Sembrar una fila `UNKNOWN` con `terminalReturnedAt` puesto, sin `Payment`, con s
 - [ ] **Step 2: Declarar desde el aparato y verificar en TRES lados**
 
 1. **Pantalla:** dice «Listo, puedes cobrar».
-2. **Postgres:** `status='FAILED'`, `failureCode='OPERATOR_RECONCILED_NO_CHARGE'`, `cancelDisposition IS NULL`, `operatorReconciliation` con el `staffId` real, y **un** `ActivityLog`.
+2. **Postgres:** `status='FAILED'`, `failureCode='OPERATOR_RECONCILED_NO_CHARGE'`, `cancelDisposition IS NULL`, `operatorReconciliation` con
+   el `staffId` real, y **un** `ActivityLog`.
 3. **logcat:** sin excepción, sin reintento.
 
 - [ ] **Step 3: Cobrar en la MISMA terminal inmediatamente después**
@@ -1339,18 +1468,20 @@ adb -s <serial> shell svc wifi disable
 adb -s <serial> shell svc wifi enable
 ```
 
-Esperado: la pantalla dice que necesita conexión, el cobro sin confirmar **sigue ahí**, y **no** se encoló nada. Verificar con `adb logcat` y con la base: cero filas nuevas.
+Esperado: la pantalla dice que necesita conexión, el cobro sin confirmar **sigue ahí**, y **no** se encoló nada. Verificar con `adb logcat`
+y con la base: cero filas nuevas.
 
-⚠️ Con depuración **inalámbrica** esto no se puede (apagar el WiFi mata el propio adb): por cable, o con la secuencia `nohup sh -c` dentro del aparato que documenta la regla.
+⚠️ Con depuración **inalámbrica** esto no se puede (apagar el WiFi mata el propio adb): por cable, o con la secuencia `nohup sh -c` dentro
+del aparato que documenta la regla.
 
 - [ ] **Step 5: Reportar las cuatro preguntas de la regla sin red, respondidas**
 
-| Pregunta | Respuesta esperada |
-|---|---|
-| ¿Qué VE el cajero sin red? | «Necesitas conexión para confirmar esta declaración» — con todas sus letras, no un error genérico |
-| ¿Qué se pierde si el proceso muere entre el toque y el POST? | Nada: el `resolutionId` se persiste ANTES del POST y al reconectar se consulta qué se aceptó |
-| ¿En qué ORDEN se reproduce lo encolado? | No aplica: **no se encola nada**, es online-only a propósito |
-| ¿Y si vuelve la red y el servidor ya cambió? | El servidor decide: si apareció dinero, la declaración se rechaza con `POSITIVE_EVIDENCE_EXISTS` y la pantalla lo dice |
+| Pregunta                                                     | Respuesta esperada                                                                                                     |
+| ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
+| ¿Qué VE el cajero sin red?                                   | «Necesitas conexión para confirmar esta declaración» — con todas sus letras, no un error genérico                      |
+| ¿Qué se pierde si el proceso muere entre el toque y el POST? | Nada: el `resolutionId` se persiste ANTES del POST y al reconectar se consulta qué se aceptó                           |
+| ¿En qué ORDEN se reproduce lo encolado?                      | No aplica: **no se encola nada**, es online-only a propósito                                                           |
+| ¿Y si vuelve la red y el servidor ya cambió?                 | El servidor decide: si apareció dinero, la declaración se rechaza con `POSITIVE_EVIDENCE_EXISTS` y la pantalla lo dice |
 
 **Clasificación de la capacidad:** 🟡 **online-only a propósito**, y la UI lo explica.
 
@@ -1358,5 +1489,7 @@ Esperado: la pantalla dice que necesita conexión, el cobro sin confirmar **sigu
 
 ## Notas de mantenimiento
 
-- Cuando la etapa 1 aterrice, **actualizar en el MISMO cambio** la tabla de `/.claude/rules/proyectos-por-fases.md`, en el proyecto «Fiabilidad del circuito de cobro Testarudo», con una fila nueva y el enlace a la crónica en `docs/proyectos/`.
-- El caso de la **aprobación tardía** (la fila vuelve a `TIMED_OUT/BANK_APPROVED_AWAITING_PAYMENT` y bloquea de nuevo) es comportamiento correcto y ya está en el spec: no «arreglarlo».
+- Cuando la etapa 1 aterrice, **actualizar en el MISMO cambio** la tabla de `/.claude/rules/proyectos-por-fases.md`, en el proyecto
+  «Fiabilidad del circuito de cobro Testarudo», con una fila nueva y el enlace a la crónica en `docs/proyectos/`.
+- El caso de la **aprobación tardía** (la fila vuelve a `TIMED_OUT/BANK_APPROVED_AWAITING_PAYMENT` y bloquea de nuevo) es comportamiento
+  correcto y ya está en el spec: no «arreglarlo».
