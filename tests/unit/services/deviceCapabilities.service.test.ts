@@ -3,6 +3,7 @@ import { TerminalType } from '@prisma/client'
 import {
   ACTIVATABLE_TERMINAL_TYPES,
   assertDeviceActionSupported,
+  assertSettingsConfigurable,
   type DeviceCapabilitySnapshot,
   resolveEffectiveDeviceCapabilities,
   toDeviceManagementDto,
@@ -59,6 +60,7 @@ describe('resolveEffectiveDeviceCapabilities', () => {
         stale: false,
       },
       supportedRemoteCommands: TPV_ANDROID_COMMANDS,
+      configurableSettings: expect.arrayContaining(['showReviewScreen', 'kioskModeEnabled']),
     })
   })
 
@@ -75,6 +77,7 @@ describe('resolveEffectiveDeviceCapabilities', () => {
         stale: false,
       },
       supportedRemoteCommands: [],
+      configurableSettings: expect.arrayContaining(['showReviewScreen', 'kioskModeEnabled']),
     })
   })
 
@@ -110,6 +113,7 @@ describe('resolveEffectiveDeviceCapabilities', () => {
         stale: false,
       },
       supportedRemoteCommands: [],
+      configurableSettings: ['showReviewScreen', 'showTipScreen', 'tipSuggestions'],
     })
     expect(presentOnly.customerDisplay).toEqual({
       presence: 'SUPPORTED',
@@ -184,7 +188,24 @@ describe('resolveEffectiveDeviceCapabilities', () => {
     })
   })
 
-  it.each([TerminalType.POS_IOS, TerminalType.POS_DESKTOP, TerminalType.KDS, TerminalType.PRINTER_RECEIPT, TerminalType.PRINTER_KITCHEN])(
+  it('POS_IOS has an explicitly unsupported display but still configures its own checkout screens', () => {
+    expect(resolveEffectiveDeviceCapabilities(device(TerminalType.POS_IOS), { now: NOW })).toEqual({
+      requiresActivation: false,
+      canManagePaymentConfiguration: false,
+      canAcceptTerminalPaymentRequests: false,
+      customerDisplay: {
+        presence: 'UNSUPPORTED',
+        invertibility: 'UNSUPPORTED',
+        canRequestInversion: false,
+        observedAt: null,
+        stale: false,
+      },
+      supportedRemoteCommands: [],
+      configurableSettings: ['showReviewScreen', 'showTipScreen', 'tipSuggestions'],
+    })
+  })
+
+  it.each([TerminalType.POS_DESKTOP, TerminalType.KDS, TerminalType.PRINTER_RECEIPT, TerminalType.PRINTER_KITCHEN])(
     '%s is explicitly unsupported rather than unknown',
     type => {
       expect(resolveEffectiveDeviceCapabilities(device(type), { now: NOW })).toEqual({
@@ -199,6 +220,7 @@ describe('resolveEffectiveDeviceCapabilities', () => {
           stale: false,
         },
         supportedRemoteCommands: [],
+        configurableSettings: [],
       })
     },
   )
@@ -317,5 +339,59 @@ describe('assertDeviceActionSupported', () => {
         code: 'DEVICE_ACTION_UNSUPPORTED',
       }),
     )
+  })
+})
+
+describe('configurableSettings — qué ajustes admite cada tipo de aparato', () => {
+  it('deja a la PAX/Nexgo su catálogo completo de hoy (no se le quita nada)', () => {
+    for (const type of [TerminalType.TPV_ANDROID, TerminalType.TPV_IOS]) {
+      const settings = resolveEffectiveDeviceCapabilities(device(type)).configurableSettings
+      // El catálogo completo es el que ya edita el dashboard: esta tanda no lo recorta.
+      expect(settings).toEqual(expect.arrayContaining(['showReviewScreen', 'showTipScreen', 'kioskModeEnabled', 'requirePinLogin']))
+    }
+  })
+
+  it('a un POS (tablet/iPad) sólo le deja lo que su app realmente obedece', () => {
+    for (const type of [TerminalType.POS_ANDROID, TerminalType.POS_IOS]) {
+      expect(resolveEffectiveDeviceCapabilities(device(type)).configurableSettings).toEqual(['showReviewScreen', 'showTipScreen', 'tipSuggestions'])
+    }
+  })
+
+  it('no le deja nada a un aparato que no es un POS ni una terminal de cobro', () => {
+    for (const type of [TerminalType.PRINTER_RECEIPT, TerminalType.PRINTER_KITCHEN, TerminalType.KDS, TerminalType.POS_DESKTOP]) {
+      expect(resolveEffectiveDeviceCapabilities(device(type)).configurableSettings).toEqual([])
+    }
+  })
+
+  it('assertSettingsConfigurable devuelve las llaves cuando el aparato las admite', () => {
+    expect(assertSettingsConfigurable(device(TerminalType.POS_ANDROID), ['showReviewScreen'])).toEqual(['showReviewScreen'])
+  })
+
+  it('🔴 una tablet NO puede tocar un ajuste de la PAX, aunque quien lo pida sea el dueño', () => {
+    expect(() => assertSettingsConfigurable(device(TerminalType.POS_ANDROID), ['showReviewScreen', 'kioskModeEnabled'])).toThrow(
+      expect.objectContaining({ statusCode: 422, code: 'SETTING_NOT_SUPPORTED_BY_DEVICE' }),
+    )
+  })
+
+  it('🔴 una impresora no configura nada, ni siquiera lo que un POS sí puede', () => {
+    expect(() => assertSettingsConfigurable(device(TerminalType.PRINTER_KITCHEN), ['showReviewScreen'])).toThrow(
+      expect.objectContaining({ statusCode: 422, code: 'SETTING_NOT_SUPPORTED_BY_DEVICE' }),
+    )
+  })
+
+  it('un cuerpo vacío no pasa como "no cambies nada": se rechaza', () => {
+    expect(() => assertSettingsConfigurable(device(TerminalType.POS_ANDROID), [])).toThrow(
+      expect.objectContaining({ statusCode: 422, code: 'NO_SETTINGS_PROVIDED' }),
+    )
+  })
+
+  it('el mensaje de error nombra el ajuste rechazado y está en español', () => {
+    try {
+      assertSettingsConfigurable(device(TerminalType.POS_ANDROID), ['kioskModeEnabled'])
+      throw new Error('debió lanzar')
+    } catch (error) {
+      expect((error as Error).message).toContain('kioskModeEnabled')
+      expect((error as Error).message).toMatch(/este dispositivo/i)
+    }
   })
 })

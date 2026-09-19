@@ -16,9 +16,10 @@ import { getDeviceReceiptPayload } from '../../services/dashboard/receiptLayout/
 import AppError, { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { VenuePlanInfo, getVenuePlanInfo } from '../../services/access/basePlan.service'
-import { TpvSettings, getTpvSettings } from '../../services/dashboard/tpv.dashboard.service'
+import { TpvSettings, getTpvSettings, updateTpvSettings } from '../../services/dashboard/tpv.dashboard.service'
+import { assertSettingsConfigurable, resolveConfigurableSettings } from '../../services/device-capabilities.service'
 import { logAction } from '../../services/dashboard/activity-log.service'
-import type { UpdateDisplayModeInput } from '../../schemas/mobile/tpvSettings.mobile.schema'
+import type { UpdateDisplayModeInput, UpdateTerminalSettingsInput } from '../../schemas/mobile/tpvSettings.mobile.schema'
 import {
   DisplayModeRequestError,
   acknowledgeDisplayModeRequest,
@@ -170,6 +171,11 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
               canDeliverAreaTickets: deviceTerminal.canDeliverAreaTickets,
               fulfillmentAreaId: deviceTerminal.fulfillmentAreaId,
               customerDisplayInverted: deviceTerminal.customerDisplayInverted,
+              // Qué ajustes puede cambiar ESTE aparato desde su propia pantalla de Configuración.
+              // Viaja aquí para que las apps NO lleven la lista codificada: el día que un tipo de
+              // aparato gane o pierda un ajuste, no hay que recompilar ni publicar un APK.
+              // Aditivo y opcional (mismo contrato que `plan`): un POS viejo lo ignora.
+              configurableSettings: resolveConfigurableSettings(deviceTerminal.type),
             }
           : null,
         ...(plan ? { plan } : {}),
@@ -296,5 +302,44 @@ export const updateDisplayMode = async (req: Request, res: Response, next: NextF
   } catch (error) {
     logger.error('Error updating terminal display mode', { error })
     next(mapDisplayModeRequestError(error))
+  }
+}
+
+/**
+ * El POS cambia un ajuste de SU PROPIA ficha (hoy: las pantallas del cobro).
+ *
+ * 🔴 Tres candados, y ninguno sustituye a los otros:
+ *   1. `checkPermission('tpv-settings:update')` en la ruta — QUIÉN (hoy, por defecto, sólo el dueño).
+ *   2. El binding `id + venueId + deviceUid` de abajo — SOBRE QUÉ: sólo la ficha de este aparato.
+ *      Sin el `deviceUid`, un dueño podría reconfigurar la PAX (o la tablet del otro mostrador)
+ *      desde su propia tablet, que es justo lo que la pestaña del dashboard evita mostrando sólo
+ *      las terminales de cobro.
+ *   3. `assertSettingsConfigurable` — QUÉ: un POS no obedece los ajustes de la PAX, así que
+ *      dejárselos escribir sería guardar un interruptor que no hace nada (peor que no tenerlo).
+ *
+ * @route PATCH /api/v1/mobile/venues/:venueId/terminals/:terminalId/settings
+ */
+export const updateTerminalSettings = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, terminalId } = req.params
+    const deviceUid = requireRequestDeviceUid(req)
+    const changes = req.body as UpdateTerminalSettingsInput
+
+    const terminal = await prisma.terminal.findFirst({
+      where: { id: terminalId, venueId, deviceUid },
+      select: { id: true, type: true, customerDisplayPresent: true, customerDisplayInvertible: true, displayModeProtocolVersion: true, capabilitiesObservedAt: true },
+    })
+    if (!terminal) throw new NotFoundError('Este dispositivo no está registrado en este establecimiento.', 'DEVICE_NOT_FOUND')
+
+    assertSettingsConfigurable(terminal, Object.keys(changes))
+
+    // 🔴 El `staffId` va en el scope, no en un `logAction` aparte: `updateTpvSettings` YA audita, y
+    // escribir aquí otro renglón dejaba DOS filas por un toque —la suya anónima, la mía con el
+    // detalle—. Medido en el QA del 18-sep sobre una Sunmi OrderPAD 3 real.
+    const settings = await updateTpvSettings(terminalId, changes, { venueId, staffId: (req as any).authContext?.userId, source: 'pos', deviceUid })
+
+    return res.json({ success: true, data: { terminalId, settings } })
+  } catch (error) {
+    next(error)
   }
 }

@@ -698,6 +698,10 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
 export interface TerminalSettingsScope {
   venueId?: string
   staffId?: string
+  /** Desde dónde se cambió, para la bitácora: `'pos'` (la app, en su propia ficha) o el default. */
+  source?: 'pos' | 'dashboard'
+  /** El aparato que lo cambió, cuando vino del POS. */
+  deviceUid?: string
 }
 
 function terminalWhere(tpvId: string, scope: TerminalSettingsScope): { id: string; venueId?: string } {
@@ -831,6 +835,10 @@ export async function updateTpvSettings(
     action: 'TPV_SETTINGS_UPDATED',
     entity: 'Terminal',
     entityId: tpvId,
+    // QUÉ cambió y desde dónde. Sin esto la bitácora del dueño dice «alguien cambió los ajustes
+    // de esta terminal» y no sirve para responder «¿quién apagó la propina de la tablet?».
+    // `source` lo pasa el carril que llamó (el POS manda 'pos'; el dashboard, nada ⇒ 'dashboard').
+    data: { changes: restSettingsUpdate, source: scope.source ?? 'dashboard', ...(scope.deviceUid ? { deviceUid: scope.deviceUid } : {}) },
   })
 
   logger.info(`TPV settings updated for terminal ${tpvId}`, {

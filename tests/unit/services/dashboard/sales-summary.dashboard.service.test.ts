@@ -761,3 +761,104 @@ describe('computeSettlementProjection', () => {
     expect(calendar[0].totalNet).toBe(300)
   })
 })
+
+/**
+ * computeSettlementProjection recorre por páginas con cursor (query-guard 2026-09-18).
+ *
+ * El resumen de ventas —que también sirve la TPV en `GET /mobile/.../reports/sales-summary`—
+ * cargaba todos los pagos con tarjeta del rango para proyectarlos uno por uno. Medido en
+ * producción el 15 y el 18-sep: 2,274 filas por llamada, pedidas desde una terminal en el
+ * mostrador. Es hermano de `getSettlementsLandingInWeek` (arreglado el 7-sep) y del
+ * calendario del superadmin: mismo motor, mismo patrón de traer-y-proyectar.
+ */
+describe('computeSettlementProjection — páginas de 500 con cursor', () => {
+  const VENUE = 'venue-amaena'
+  const TZ_P = 'America/Mexico_City'
+  const START_P = new Date('2026-06-01T00:00:00.000Z')
+  const END_P = new Date('2026-06-30T23:59:59.999Z')
+
+  const configBase = {
+    settlementDays: 1,
+    settlementDayType: 'BUSINESS_DAYS',
+    cutoffTime: '23:00',
+    cutoffTimezone: TZ_P,
+    effectiveFrom: new Date('2026-01-01T00:00:00.000Z'),
+    effectiveTo: null,
+  }
+
+  const filaP = (i: number, merchantAccountId = 'ma-A') => ({
+    id: `pay${String(i).padStart(4, '0')}`,
+    amount: 100,
+    tipAmount: 0,
+    createdAt: new Date('2026-06-04T15:00:00.000Z'), // jueves → cae viernes 06-05
+    merchantAccountId,
+    transactionCost: { transactionType: 'CREDIT', venueChargeAmount: 3, venueFixedFee: 0 },
+  })
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    // `doNotFake: ['setImmediate']` es OBLIGATORIO aquí: el recorrido cede el event loop
+    // entre páginas con `setImmediate`, y unos temporizadores falsos completos lo dejan sin
+    // resolver nunca — la prueba se cuelga hasta el timeout de 30 s y arrastra a las demás
+    // del bloque. El reloj sí se fija, porque el estado del día (settled/pending/projected)
+    // depende de "hoy".
+    jest.useFakeTimers({ doNotFake: ['setImmediate'] }).setSystemTime(new Date('2026-06-30T12:00:00.000Z'))
+  })
+  afterEach(() => jest.useRealTimers())
+
+  it('una página llena pide la siguiente con cursor en el último id; el total cubre las 503 filas', async () => {
+    const pagina1 = Array.from({ length: 500 }, (_, i) => filaP(i))
+    const pagina2 = [filaP(500), filaP(501), filaP(502)]
+    ;(prismaMock.payment.findMany as jest.Mock).mockResolvedValueOnce(pagina1).mockResolvedValueOnce(pagina2)
+    ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockResolvedValue([
+      { merchantAccountId: 'ma-A', cardType: 'CREDIT', ...configBase },
+    ])
+    ;(prismaMock.merchantAccount.findMany as jest.Mock).mockResolvedValue([{ id: 'ma-A', displayName: 'Amaena - A', alias: null }])
+
+    const { calendar } = await computeSettlementProjection(VENUE, START_P, END_P, TZ_P)
+
+    expect(prismaMock.payment.findMany).toHaveBeenCalledTimes(2)
+    const [primera, segunda] = (prismaMock.payment.findMany as jest.Mock).mock.calls.map(c => c[0])
+    expect(primera).toMatchObject({ take: 500, orderBy: [{ id: 'asc' }] })
+    expect(primera.select.id).toBe(true)
+    expect(primera.cursor).toBeUndefined()
+    expect(segunda).toMatchObject({ take: 500, cursor: { id: 'pay0499' }, skip: 1 })
+    expect(primera.where).toEqual(segunda.where)
+
+    expect(calendar).toHaveLength(1)
+    expect(calendar[0].date).toBe('2026-06-05')
+    expect(calendar[0].byMerchant[0].transactionCount).toBe(503)
+    expect(calendar[0].byMerchant[0].platformFee).toBeCloseTo(1509, 2) // 503 x 3
+    expect(calendar[0].byMerchant[0].netToReceive).toBeCloseTo(48791, 2) // 503 x 97
+  })
+
+  it('los nombres de comercio se piden UNA vez por comercio, conforme aparecen', async () => {
+    const pagina1 = Array.from({ length: 500 }, (_, i) => filaP(i, 'ma-A'))
+    const pagina2 = [filaP(500, 'ma-A'), filaP(501, 'ma-B')]
+    ;(prismaMock.payment.findMany as jest.Mock).mockResolvedValueOnce(pagina1).mockResolvedValueOnce(pagina2)
+    ;(prismaMock.settlementConfiguration.findMany as jest.Mock)
+      .mockResolvedValueOnce([{ merchantAccountId: 'ma-A', cardType: 'CREDIT', ...configBase }])
+      .mockResolvedValueOnce([{ merchantAccountId: 'ma-B', cardType: 'CREDIT', ...configBase }])
+    ;(prismaMock.merchantAccount.findMany as jest.Mock)
+      .mockResolvedValueOnce([{ id: 'ma-A', displayName: 'Amaena - A', alias: null }])
+      .mockResolvedValueOnce([{ id: 'ma-B', displayName: 'Amaena - B', alias: null }])
+
+    const { calendar } = await computeSettlementProjection(VENUE, START_P, END_P, TZ_P)
+
+    const pedidos = (prismaMock.merchantAccount.findMany as jest.Mock).mock.calls.map(c => c[0].where.id.in)
+    expect(pedidos).toEqual([['ma-A'], ['ma-B']])
+    const nombres = calendar[0].byMerchant.map(m => m.displayName).sort()
+    expect(nombres).toEqual(['Amaena - A', 'Amaena - B'])
+  })
+
+  it('regresión: menos de 500 filas es UNA consulta (un mock constante no puede ciclar)', async () => {
+    ;(prismaMock.payment.findMany as jest.Mock).mockResolvedValue([filaP(0), filaP(1)])
+    ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockResolvedValue([
+      { merchantAccountId: 'ma-A', cardType: 'CREDIT', ...configBase },
+    ])
+    ;(prismaMock.merchantAccount.findMany as jest.Mock).mockResolvedValue([{ id: 'ma-A', displayName: 'Amaena - A', alias: null }])
+    const { calendar } = await computeSettlementProjection(VENUE, START_P, END_P, TZ_P)
+    expect(prismaMock.payment.findMany).toHaveBeenCalledTimes(1)
+    expect(calendar[0].byMerchant[0].transactionCount).toBe(2)
+  })
+})

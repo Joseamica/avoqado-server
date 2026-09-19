@@ -46,6 +46,10 @@ const MODELOS_GRANDES = [
   // mismo: una fila por cobro en línea.
   'transactionCost',
   'checkoutSession',
+  // 2026-09-18: el query-guard cazó el resumen de inventario de modificadores cargando
+  // 2,568 `OrderItemModifier` (una fila por extra vendido) para devolver el top 10. Quedó
+  // pendiente el 10-sep porque este archivo lo tenía otra sesión; se agrega ahora.
+  'orderItemModifier',
 ]
 
 // Ventana de búsqueda del `take` tras el findMany — idéntica al barrido que produjo
@@ -101,13 +105,16 @@ const INVENTARIO: Record<string, number> = {
   // conserva el findMany paginado del listado nativo.
   'src/services/dashboard/payment.dashboard.service.ts': 1,
   'src/services/dashboard/purchaseOrder.service.ts': 1,
-  'src/services/dashboard/receipt.dashboard.service.ts': 2,
+  // 2026-09-18: +1 al añadir orderItemModifier a la lista (no es código nuevo, es un
+  // findMany que el barrido no miraba). Registrado para que no crezca; su arreglo va aparte.
+  'src/services/dashboard/receipt.dashboard.service.ts': 3,
   'src/services/dashboard/refund.dashboard.service.ts': 3,
   'src/services/dashboard/refunds.dashboard.service.ts': 1,
   'src/services/dashboard/reports.dashboard.service.ts': 1,
   'src/services/dashboard/review.dashboard.service.ts': 1,
   'src/services/dashboard/sale-verification.dashboard.service.ts': 2,
-  'src/services/dashboard/sales-summary.dashboard.service.ts': 3,
+  // 2026-09-18: 3 → 2. `computeSettlementProjection` recorre por páginas con cursor.
+  'src/services/dashboard/sales-summary.dashboard.service.ts': 2,
   // 2026-09-07: settlementCalendar 1 → 0. La semana de liquidación recorre los pagos por
   // páginas de 500 con cursor (mismo patrón que availableBalance).
   'src/services/dashboard/settlementIncident.service.ts': 1,
@@ -164,7 +171,8 @@ const INVENTARIO: Record<string, number> = {
   // es un findMany que el barrido no miraba). Registrado para que no crezca; su arreglo va aparte.
   'src/services/superadmin/rateCorrection/rateCorrectionPreview.ts': 2,
   'src/services/superadmin/paymentAnalytics.service.ts': 1,
-  'src/services/superadmin/settlementCalendar.superadmin.service.ts': 1,
+  // 2026-09-18: settlementCalendar.superadmin 1 → 0. El calendario de todos los negocios
+  // recorre por páginas con cursor; al llegar a cero sale del inventario.
   'src/services/tpv/blumon-webhook.service.ts': 1,
   'src/services/tpv/order.tpv.service.ts': 3,
   'src/services/tpv/payment.tpv.service.ts': 2,

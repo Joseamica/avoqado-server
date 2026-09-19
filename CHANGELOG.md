@@ -311,6 +311,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Changed
 
+- **Los dos hermanos que faltaban del motor de liquidación recorren por páginas (query-guard 2026-09-18)**: el motor
+  (`projectPaymentSettlement`) tiene CUATRO consumidores que recorren pagos. Dos ya estaban acotados (saldo disponible, y la
+  semana por negocio desde el 7-sep); los otros dos no, y al cruzar las 2,000 filas volvieron a disparar la alerta —18 eventos
+  entre el 15 y el 18-sep—. (1) `GET /superadmin/settlement-calendar` es el ÚNICO camino que **no filtra por negocio**: recorre
+  todos los de la plataforma con `venue` y `merchantAccount` (proveedor + agregador) colgando de cada pago; medido en
+  producción: 2,207 a 2,462 filas por llamada con sólo dos negocios activos, y **crece con cada cliente nuevo, no con el
+  tiempo**. (2) `computeSettlementProjection` (resumen de ventas, que sirve también a la TPV en
+  `GET /mobile/venues/:id/reports/sales-summary`): 2,274 filas, pedidas desde una terminal en el mostrador. Los dos recorren
+  ahora por páginas de 500 con cursor (`orderBy id`), cargando las reglas de cada comercio —y sus nombres, en el resumen—
+  conforme aparecen. **Se pagina y NO se agrega en SQL** porque la fecha de caída la calcula el motor en JS, por pago y en la
+  zona horaria de SU negocio: no cabe en un `GROUP BY`. Verificación: paridad viejo contra nuevo en la base de desarrollo
+  (12 casos sobre 4 rangos y todos los negocios) con **cero diferencias**, más pruebas del recorrido con 503 filas sintéticas
+  repartidas en dos páginas.
+- **`cargarReglasFaltantes` se exporta desde `settlementCalendar.dashboard.service` (mismo cambio)**: los tres consumidores que
+  recorren pagos necesitaban el mismo cargador perezoso de reglas por comercio. Duplicar un bucle de cursor con carga perezosa
+  en tres archivos es justo como se cuelan las diferencias entre ellos.
+- **El candado estático ya mira `OrderItemModifier` (mismo cambio)**: quedó pendiente el 10-sep porque el archivo lo tenía otra
+  sesión. Al añadirlo salió a la luz un `findMany` sin tope más en `receipt.dashboard.service`, **registrado** en el inventario
+  congelado para que no crezca; su arreglo va aparte. El inventario encoge en dos: `sales-summary` 3 → 2 y
+  `settlementCalendar.superadmin` 1 → 0.
+
 - **El resumen de inventario de modificadores recorre los usos por páginas (query-guard 2026-09-10)**: `GET
   /venues/:id/modifiers/inventory/summary` cargaba TODOS los `OrderItemModifier` del rango —cada uno con su modificador, su
   grupo, su materia prima y la cantidad del platillo— para quedarse al final con los 10 de mayor costo. Medido en producción:
