@@ -16,6 +16,7 @@
 import { NotificationPriority, NotificationType } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
+import socketManager from '../../communication/sockets'
 import { readUnchargedReconciliation } from './uncharged-reconciliation.service'
 
 /**
@@ -41,7 +42,7 @@ export async function avisarCobroTardioAlCajero(ctx: {
     if (!declaracion?.staffId) return
 
     const pesos = ((row?.amountCents ?? 0) / 100).toFixed(2)
-    await prisma.notification.create({
+    const notificacion = await prisma.notification.create({
       data: {
         recipientId: declaracion.staffId,
         venueId: ctx.venueId,
@@ -62,6 +63,33 @@ export async function avisarCobroTardioAlCajero(ctx: {
         },
       },
     })
+    // 🔴 Guardar no es avisar: un buzón que nadie abre no le dice nada al cajero que está por cobrar otra vez.
+    // Se emite EN VIVO por el mismo canal que el resto de las notificaciones.
+    //
+    // 🔴 Y por eso NO se usa `createNotification` del dashboard, que sí emitiría: esa función LANZA si el
+    // usuario tiene el tipo deshabilitado o está en horas de silencio. Un aviso de DINERO no se puede poder
+    // silenciar — es la misma regla de los anuncios: la fila siempre existe, sólo la entrega respeta preferencias.
+    try {
+      socketManager.getBroadcastingService()?.broadcastNewNotification({
+        notificationId: notificacion.id,
+        recipientId: notificacion.recipientId,
+        venueId: notificacion.venueId || '',
+        userId: notificacion.recipientId,
+        type: notificacion.type,
+        title: notificacion.title,
+        message: notificacion.message,
+        priority: 'HIGH',
+        isRead: false,
+        metadata: (notificacion.metadata as Record<string, unknown>) || undefined,
+      })
+    } catch (err) {
+      // La fila ya está guardada: el cajero la verá al abrir el buzón aunque el socket esté caído.
+      logger.warn('⚠️ [TerminalPayment] el aviso quedó GUARDADO pero no se pudo emitir en vivo', {
+        requestId: ctx.requestId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+
     logger.warn('🧾 [TerminalPayment] cobro tardío sobre una declaración del cajero — avisado en el aparato', {
       requestId: ctx.requestId,
       venueId: ctx.venueId,

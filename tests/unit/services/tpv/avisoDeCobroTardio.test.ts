@@ -13,6 +13,12 @@
 import prisma from '@/utils/prismaClient'
 import { avisarCobroTardioAlCajero } from '@/services/tpv/avisoDeCobroTardio'
 
+const mockBroadcast = jest.fn()
+jest.mock('@/communication/sockets', () => ({
+  __esModule: true,
+  default: { getBroadcastingService: () => ({ broadcastNewNotification: (...a: unknown[]) => mockBroadcast(...(a as [])) }) },
+}))
+
 const prismaMock = prisma as any
 
 const ctx = {
@@ -25,7 +31,7 @@ const ctx = {
 
 beforeEach(() => {
   jest.clearAllMocks()
-  prismaMock.notification.create.mockResolvedValue({})
+  prismaMock.notification.create.mockResolvedValue({ id: 'notif-1', recipientId: 'staff-cashier', venueId: 'v1' })
   prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue({
     id: 'row-1',
     amountCents: 7475,
@@ -66,6 +72,20 @@ describe('avisarCobroTardioAlCajero', () => {
     })
     await avisarCobroTardioAlCajero(ctx)
     expect(prismaMock.notification.create).not.toHaveBeenCalled()
+  })
+
+  it('🔴 lo EMITE en vivo, no sólo lo guarda: un buzón que nadie abre no avisa de nada', async () => {
+    await avisarCobroTardioAlCajero(ctx)
+    expect(mockBroadcast).toHaveBeenCalledTimes(1)
+    expect(mockBroadcast.mock.calls[0][0]).toMatchObject({ recipientId: 'staff-cashier', notificationId: 'notif-1' })
+  })
+
+  it('🔴 si la emisión en vivo falla, el aviso GUARDADO sobrevive: no se deshace nada', async () => {
+    mockBroadcast.mockImplementationOnce(() => {
+      throw new Error('socket caído')
+    })
+    await expect(avisarCobroTardioAlCajero(ctx)).resolves.toBeUndefined()
+    expect(prismaMock.notification.create).toHaveBeenCalledTimes(1)
   })
 
   it('🔴 un fallo del aviso NO tumba el registro del dinero', async () => {
