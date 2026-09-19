@@ -1,42 +1,35 @@
 /**
- * «La terminal dijo hace poco que ESTE cobro sigue ejecutándose» — el único veto que no viene del dinero, sino
- * de la EJECUCIÓN.
+ * «La terminal dijo que ESTE cobro sigue ejecutándose» — el único veto que no viene del dinero, sino de la
+ * EJECUCIÓN.
  *
- * 🔴 Por qué es un módulo y no una línea del log: la sonda (`terminal:payment_probe`) ya preguntaba y la terminal
- * ya contestaba `ACTIVE`, pero esa respuesta sólo se registraba y la función retornaba. No quedaba ningún dato
- * durable, así que la declaración del cajero «revisé la terminal y no se cobró» no tenía cómo consultarla: el
- * veto existía en el diseño y no en el código (Codex, 18-sep).
+ * 🔴 RONDA 2 de Codex (19-sep). La primera versión tenía dos defectos, y los dos venían de la misma premisa
+ * equivocada: que un `ACTIVE` viejo ya no dice nada porque «cada barrido lo habría repetido».
  *
- * Vive aparte del servicio —como `estadoBancario`, `evidenciaPositivaSql` y `candadoDeIntento`— porque es PURO:
- * se prueba sin base, sin sockets y sin arrastrar las ~7 000 líneas de `terminal-payment.service`.
+ *  1. **Esa premisa es FALSA.** El barrido periódico parte de filas `UNKNOWN` y la sonda acota sus candidatos
+ *     a 25, así que a una `TIMED_OUT` puede no volver a preguntársele nunca. Dejar caducar el veto por reloj
+ *     era afirmar «ya no está corriendo» sin que nadie lo desmintiera — exactamente lo que este módulo existe
+ *     para no hacer. Ahora **el tiempo no levanta el veto**: sólo lo levanta una RESPUESTA POSTERIOR que
+ *     resuelva ese intento.
+ *  2. **La marca vivía en `resultJson`**, el sobre que cualquier resultado posterior reemplaza entero. Un
+ *     timeout tardío borraba la evidencia de que el cobro seguía vivo. Ahora vive en columnas propias.
+ *
+ * Consecuencia asumida y declarada: una solicitud con `ACTIVE` sin desmentir **no se puede declarar**, ni
+ * siquiera pasado mucho tiempo. Es el lado seguro: quien la destrabe tendrá que conseguir que la terminal
+ * conteste, no esperar a que el reloj le dé la razón.
  */
 
 /**
- * 15 minutos. No es un plazo de seguridad sino de VIGENCIA: la sonda se manda al conectar y en cada barrido, así
- * que un cobro que siguiera corriendo lo habría vuelto a declarar dentro de esa ventana. Pasado ese tiempo la
- * marca ya no dice nada del presente — y quien decide sigue siendo la evidencia de dinero, que se comprueba aparte.
- */
-export const VENTANA_SONDA_ACTIVA_MS = 15 * 60 * 1000
-
-/**
- * 🔴 Falla CERRADO. Una marca que no se puede leer (texto basura, número, objeto) se trata como «sigue activo»:
- * el costo de equivocarse hacia el otro lado es dejar declarar «no se cobró» encima de un cobro en curso, que es
- * exactamente el camino del cobro doble del 2026-08-10. Una marca del FUTURO (reloj adelantado) también veta.
+ * 🔴 Falla CERRADO. Una marca presente veta hasta que llegue una respuesta POSTERIOR que resuelva ese intento
+ * (`probeResolvedAt`). Una respuesta anterior no cuenta: llegó antes, no desmiente nada.
  */
 export function sondaReportoActiva(
-  row: { resultJson?: unknown },
-  ahora: Date,
-  ventanaMs: number = VENTANA_SONDA_ACTIVA_MS,
+  row: { probeActiveAt?: Date | null; probeResolvedAt?: Date | null },
+  _ahora?: Date,
 ): boolean {
-  const sobre =
-    row.resultJson && typeof row.resultJson === 'object' && !Array.isArray(row.resultJson)
-      ? (row.resultJson as Record<string, unknown>)
-      : null
-  if (!sobre) return false
-  const marca = sobre.probeActiveAt
-  if (marca === undefined || marca === null) return false
-  if (typeof marca !== 'string') return true
-  const t = Date.parse(marca)
-  if (Number.isNaN(t)) return true
-  return ahora.getTime() - t < ventanaMs
+  const activa = row.probeActiveAt
+  if (!activa) return false
+  const resuelta = row.probeResolvedAt
+  if (!resuelta) return true
+  // Sólo una respuesta posterior al ACTIVE lo levanta.
+  return resuelta.getTime() <= activa.getTime()
 }

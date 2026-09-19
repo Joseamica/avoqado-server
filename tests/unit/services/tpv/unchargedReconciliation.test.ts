@@ -59,8 +59,10 @@ function montar(fila = filaDelIncidente(), miembro: unknown = CAJERO, latidoHace
   prismaMock.$transaction.mockImplementation((fn: any) => fn(prismaMock))
   // El candado de la orden devuelve su fila; la consulta de eventos del procesador, ninguna (sin contradicción).
   // Con un mock que devuelve lo mismo a TODA consulta cruda, el veto de procedencia leería contradicción siempre.
+  // La consulta de procedencia se reconoce por su ALIAS: el SQL de ProviderEventLog viaja interpolado en
+  // otro argumento del template, así que mirar sólo el primero no lo ve.
   prismaMock.$queryRaw.mockImplementation(async (frag: any) =>
-    JSON.stringify(frag).includes('ProviderEventLog') ? [] : [{ id: 'order-1' }],
+    JSON.stringify(frag).includes('hay') ? [{ hay: false }] : [{ id: 'order-1' }],
   )
   prismaMock.$executeRaw.mockResolvedValue(1)
   prismaMock.$executeRawUnsafe.mockResolvedValue(0)
@@ -141,8 +143,8 @@ describe('reconcileUncharged — lo que VETA la declaración', () => {
     await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'POSITIVE_EVIDENCE_EXISTS' })
   })
 
-  it('🔴 rechaza si la SONDA dijo hace poco que el cobro sigue corriendo', async () => {
-    montar(filaDelIncidente({ resultJson: { requestId, probeActiveAt: new Date().toISOString() } }))
+  it('🔴 rechaza si la SONDA dijo que el cobro sigue corriendo (columna propia, no el sobre)', async () => {
+    montar(filaDelIncidente({ probeActiveAt: new Date() }))
     await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'EXECUTION_STILL_ACTIVE' })
     expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
   })
@@ -275,10 +277,9 @@ describe('P1 Codex 3 — las contradicciones de procedencia del procesador vetan
     montar()
     prismaMock.terminalPaymentAttemptLink.findMany.mockResolvedValue([{ attemptId: 'att-1' }])
     // La consulta cruda del veto por eventos devuelve una fila = hay contradicción.
-    prismaMock.$queryRaw.mockImplementation(async (frag: any) => {
-      const texto = JSON.stringify(frag)
-      return texto.includes('ProviderEventLog') ? [{ id: 'evt-1' }] : [{ id: 'order-1' }]
-    })
+    prismaMock.$queryRaw.mockImplementation(async (frag: any) =>
+      JSON.stringify(frag).includes('hay') ? [{ hay: true }] : [{ id: 'order-1' }],
+    )
     await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'POSITIVE_EVIDENCE_EXISTS' })
     expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
   })
@@ -319,7 +320,7 @@ describe('P2 Codex 7 — la pertenencia de la ORDEN se comprueba, no se supone',
     // `orderId` es referencia BLANDA (sin FK): puede apuntar a una orden inexistente o de otro negocio.
     prismaMock.$queryRaw.mockImplementation(async (frag: any) => {
       const t = JSON.stringify(frag)
-      if (t.includes('ProviderEventLog')) return []
+      if (t.includes('hay')) return [{ hay: false }]
       if (t.includes('Order')) return [] // no hay orden autorizada en este venue
       return [{ id: 'x' }]
     })
@@ -330,5 +331,31 @@ describe('P2 Codex 7 — la pertenencia de la ORDEN se comprueba, no se supone',
   it('una solicitud SIN orden ligada sí se declara: no hay nada que comprobar', async () => {
     montar(filaDelIncidente({ orderId: null }))
     await expect(reconcileUncharged(identidad, declaracion())).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
+  })
+})
+
+// ============ RONDA 2 de Codex (19-sep): lo que los arreglos dejaron abierto ============
+
+describe('P1-8 r2 — una marca de RETORNO sellada no exime de comprobar el vencimiento', () => {
+  it('🔴 UNKNOWN con terminalReturnedAt sellado pero SIN vencer todavía NO se declara', async () => {
+    // Un ACK perdido deja UNKNOWN a los 5 s, con `expiresAt` minutos por delante; el barrido pudo sellar la
+    // marca con un latido adelantado. Antes se retornaba `true` al ver la marca y no se comprobaba nada más.
+    montar(filaDelIncidente({ terminalReturnedAt: new Date(), expiresAt: new Date(Date.now() + 4 * 60 * 1000) }))
+    await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'TERMINAL_NOT_BACK' })
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
+  })
+})
+
+describe('P2 r2 — un latido guardado DURANTE la consulta no es «del futuro»', () => {
+  it('🔴 un heartbeat de hace -50 ms (llegó mientras consultábamos) NO rechaza: es legítimo', async () => {
+    // El arreglo del latido futuro tomaba `ahora` ANTES de leer la terminal, así que un latido guardado por
+    // otro request entre medias se leía como futuro. Es un falso negativo que yo introduje.
+    montar(filaDelIncidente({ terminalReturnedAt: null }), CAJERO, -50)
+    await expect(reconcileUncharged(identidad, declaracion())).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
+  })
+
+  it('🔴 un latido de una HORA en el futuro sigue rechazando: eso sí es un reloj adelantado', async () => {
+    montar(filaDelIncidente({ terminalReturnedAt: null }), CAJERO, -60 * 60 * 1000)
+    await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'TERMINAL_NOT_BACK' })
   })
 })

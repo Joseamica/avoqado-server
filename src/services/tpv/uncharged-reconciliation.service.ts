@@ -122,6 +122,16 @@ async function miembroConPermiso(
 const VENTANA_LATIDO_VIVO_MS = 5 * 60_000
 
 /**
+ * 🔴 Ronda 2 de Codex (19-sep): cuánto puede un latido «venir del futuro» y seguir siendo legítimo.
+ *
+ * Rechazar TODO negativo excluía un caso real: otro request guarda el latido —con hora de servidor— mientras
+ * esta consulta corre, y sale adelantado por milisegundos. Tomar la hora después de leer no basta: el desfase
+ * puede ser mayor que lo que tarda la lectura. 30 s separa con holgura ese caso del que sí hay que frenar,
+ * un aparato con el reloj adelantado una hora.
+ */
+const TOLERANCIA_LATIDO_FUTURO_MS = 30_000
+
+/**
  * ¿La terminal VOLVIÓ? Dos caminos, y el segundo es el encargo de Codex («definir cómo se observa el retorno
  * para todos los estados admitidos»):
  *
@@ -139,6 +149,11 @@ async function terminalVolvio(
   row: { terminalId: string; terminalReturnedAt: Date | null; expiresAt: Date },
   ahora: Date,
 ): Promise<boolean> {
+  // 🔴 Ronda 2 de Codex (19-sep): el VENCIMIENTO se comprueba SIEMPRE, antes que nada. Una marca de retorno
+  // sellada hacía retornar `true` de inmediato y saltarse todo lo demás — y esa marca puede haberla puesto el
+  // barrido a partir de un latido adelantado, sobre una fila que pasó a UNKNOWN por un ACK perdido a los 5 s
+  // con `expiresAt` minutos por delante. Resultado: se podía declarar un cobro que ni había vencido.
+  if (ahora.getTime() <= row.expiresAt.getTime()) return false
   if (row.terminalReturnedAt) return true
   const terminal = await tx.terminal.findFirst({
     where: {
@@ -152,10 +167,15 @@ async function terminalVolvio(
   const latido = terminal?.lastHeartbeat
   if (!latido) return false
   // 🔴 P1 de Codex (18-sep): el latido lo reporta el APARATO y no tenía límite superior — un reloj adelantado
-  // una hora satisfacía las dos comparaciones y destrabab un cobro en vuelo. Ahora se exige que caiga DENTRO de
-  // la ventana por los dos lados: ni viejo ni del futuro.
-  const edadMs = ahora.getTime() - latido.getTime()
-  if (edadMs < 0 || edadMs >= VENTANA_LATIDO_VIVO_MS) return false
+  // una hora satisfacía las dos comparaciones y destrababa un cobro en vuelo. Se exige que caiga DENTRO de la
+  // ventana por los dos lados.
+  //
+  // 🔴 Ronda 2 (19-sep): y la hora de comparación se toma AQUÍ, después de leerlo. Tomándola antes, un latido
+  // legítimo guardado por otro request mientras corría esta consulta salía «del futuro» por unos milisegundos
+  // y rechazaba una declaración válida — un falso negativo que introdujo el arreglo anterior.
+  const ahoraTrasLeer = new Date()
+  const edadMs = ahoraTrasLeer.getTime() - latido.getTime()
+  if (edadMs < -TOLERANCIA_LATIDO_FUTURO_MS || edadMs >= VENTANA_LATIDO_VIVO_MS) return false
   return latido.getTime() > row.expiresAt.getTime()
 }
 
@@ -191,14 +211,9 @@ const ESTADOS_DECLARABLES = new Set<string>(['UNKNOWN', 'TIMED_OUT'])
  * vínculo, que trae el serial de OTRA terminal, o que el banco APROBÓ aunque no naciera `Payment`. Copiado
  * del precedente (`evidenciaQueVetaLaDeclaracion`) y ampliado a TODOS los intentos ligados, no a uno.
  */
-async function contradiccionDeProcedencia(
-  tx: Prisma.TransactionClient,
-  attemptIds: string[],
-  venueId: string,
-  terminalId: string,
-): Promise<boolean> {
-  if (attemptIds.length === 0) return false
-  const filas = await tx.$queryRaw<{ id: string }[]>`
+function contradiccionDeProcedenciaSql(attemptIds: string[], venueId: string, terminalId: string): Prisma.Sql {
+  if (attemptIds.length === 0) return Prisma.sql`FALSE`
+  return Prisma.sql`EXISTS (
     SELECT e."id" FROM "ProviderEventLog" e
     WHERE e."attemptId" IN (${Prisma.join(attemptIds)}) AND e."provider" = 'PAYMENT_PROCESSOR'
       AND (e."venueId" IS DISTINCT FROM ${venueId}
@@ -206,8 +221,19 @@ async function contradiccionDeProcedencia(
         OR (nullif(regexp_replace(coalesce(e."payload"->'payload'->>'terminalSerial', ''), ${PATRON_SQL_TRIM_COMO_JS}, '', 'g'), '') IS NOT NULL
           AND lower(regexp_replace(regexp_replace(e."payload"->'payload'->>'terminalSerial', ${PATRON_SQL_TRIM_COMO_JS}, '', 'g'), '^AVQD-', '', 'i')) <> ${terminalId})
         OR ${estadoBancarioSql(Prisma.sql`coalesce(e."payload"->'payload'->'status', e."payload"->'status')`)} = 'APROBADO')
-    LIMIT 1`
-  return filas.length > 0
+  )`
+}
+
+async function contradiccionDeProcedencia(
+  tx: Prisma.TransactionClient,
+  attemptIds: string[],
+  venueId: string,
+  terminalId: string,
+): Promise<boolean> {
+  if (attemptIds.length === 0) return false
+  const [fila] = await tx.$queryRaw<{ hay: boolean }[]>`
+    SELECT ${contradiccionDeProcedenciaSql(attemptIds, venueId, terminalId)} AS "hay"`
+  return Boolean(fila?.hay)
 }
 
 export async function reconcileUncharged(
@@ -276,7 +302,7 @@ export async function reconcileUncharged(
     // ELEGIBILIDAD
     const ahora = new Date()
     if (!(await terminalVolvio(tx, row, ahora))) throw new UnchargedReconciliationError('TERMINAL_NOT_BACK')
-    if (sondaReportoActiva(row, ahora)) throw new UnchargedReconciliationError('EXECUTION_STILL_ACTIVE')
+    if (sondaReportoActiva(row)) throw new UnchargedReconciliationError('EXECUTION_STILL_ACTIVE')
 
     const sobre =
       row.resultJson && typeof row.resultJson === 'object' && !Array.isArray(row.resultJson)
@@ -345,6 +371,10 @@ export async function reconcileUncharged(
       errorMessage: 'El cajero revisó la terminal y confirmó que este cobro no pasó. Se puede volver a cobrar.',
       operatorReconciliation: saved,
     }
+    // 🔴 Ronda 2 de Codex (19-sep): el veto de procedencia va TAMBIÉN en la escritura. `sinEvidenciaPositivaSql`
+    // exige que el evento sea de ESTE venue, así que un aprobado del MISMO intento recibido por OTRO venue
+    // —que entra por un INSERT sin ningún candado— pasaba el CAS aunque la lectura sí lo habría vetado. Ése era
+    // exactamente el camino que permitía declarar «no cobrado» con un aprobado durable ya guardado.
     const cas = await tx.$executeRaw`
       UPDATE "TerminalPaymentRequest"
       SET "status" = 'FAILED', "failureCode" = 'OPERATOR_RECONCILED_NO_CHARGE', "cancelDisposition" = NULL,
@@ -353,7 +383,8 @@ export async function reconcileUncharged(
           "updatedAt" = (NOW() AT TIME ZONE 'UTC')
       WHERE "id" = ${row.id} AND "status" = ${row.status}::"TerminalPaymentRequestStatus" AND "paymentId" IS NULL
         AND ${sinEvidenciaPositivaSql(declaration.requestId, identity.venueId)}
-        AND NOT ${hayEvidenciaDeConciliacionSql(declaration.requestId, identity.venueId)}`
+        AND NOT ${hayEvidenciaDeConciliacionSql(declaration.requestId, identity.venueId)}
+        AND NOT ${contradiccionDeProcedenciaSql(attemptIds, identity.venueId, row.terminalId)}`
     if (cas !== 1) throw new UnchargedReconciliationError('ATTEMPT_NOT_ELIGIBLE')
 
     // Asiento DENTRO de la transacción: una declaración = un asiento.

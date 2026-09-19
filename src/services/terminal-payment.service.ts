@@ -5422,6 +5422,8 @@ class TerminalPaymentService {
     status: TerminalPaymentRequestStatus | null
     paymentId?: string
     resolution?: { id: string; acceptedAt: string }
+    outcome?: string
+    outcomeEvidence?: string | null
   }> {
     const { requestId, venueId, actor, reason } = input
     const row = await prisma.terminalPaymentRequest.findFirst({ where: { requestId, venueId } })
@@ -5443,12 +5445,27 @@ class TerminalPaymentService {
       // justo en el momento en que más caro cuesta. El desenlace se deriva de la fila FRESCA.
       const fresh = await prisma.terminalPaymentRequest.findFirst({
         where: { requestId, venueId },
-        select: { status: true, failureCode: true, paymentId: true },
+        // `desenlaceCanonico` necesita estos cuatro: sin ellos compila igual y clasifica MAL.
+        select: { status: true, failureCode: true, paymentId: true, resultJson: true, cancelDisposition: true },
       })
+      // 🔴 Ronda 2 de Codex (19-sep): no basta con mirar estado y puntero. Un `success` TARDÍO sin pago
+      // acreditable persiste su afirmación en `resultJson.claimedSuccess` SIN cambiar todavía el estado: la
+      // fila sigue FAILED/OPERATOR_RECONCILED_NO_CHARGE y el replay respondía «liberada» con una afirmación
+      // de cobro durable encima.
+      const sobreFresco =
+        fresh?.resultJson && typeof fresh.resultJson === 'object' && !Array.isArray(fresh.resultJson)
+          ? (fresh.resultJson as Record<string, unknown>)
+          : {}
+      const afirmacionDeCobro = Object.values(
+        (sobreFresco.claimedSuccess && typeof sobreFresco.claimedSuccess === 'object' && !Array.isArray(sobreFresco.claimedSuccess)
+          ? (sobreFresco.claimedSuccess as Record<string, unknown>)
+          : {}) as Record<string, unknown>,
+      ).some(v => v !== undefined && v !== null && v !== '' && v !== false)
       const liberada =
         fresh?.status === TerminalPaymentRequestStatus.FAILED &&
         fresh.failureCode === 'OPERATOR_RECONCILED_NO_CHARGE' &&
-        !fresh.paymentId
+        !fresh.paymentId &&
+        !afirmacionDeCobro
       if (!liberada) {
         logger.error('🚨 [TerminalPayment] declaración aceptada pero la solicitud YA NO está liberada — apareció dinero', {
           requestId,
@@ -5467,11 +5484,15 @@ class TerminalPaymentService {
           resolutionId: resolution.id,
         })
       }
+      // 🔴 P2-12 residual (Codex r2): el contrato del plan promete `requestId`, `outcome` y `outcomeEvidence`
+      // en la respuesta, y sólo iban `released` y `status`. El POS los necesita para decidir sin re-preguntar.
+      const desenlace = fresh ? desenlaceCanonico(fresh) : null
       return {
         requestId,
         released: liberada,
         status: fresh?.status ?? TerminalPaymentRequestStatus.FAILED,
         ...(fresh?.paymentId ? { paymentId: fresh.paymentId } : {}),
+        ...(desenlace ? { outcome: desenlace.outcome, outcomeEvidence: desenlace.outcomeEvidence ?? null } : {}),
         resolution: { id: resolution.id, acceptedAt: resolution.acceptedAt },
       }
     }
@@ -6397,11 +6418,12 @@ class TerminalPaymentService {
       // («revisé la terminal y no se cobró») para no escribir encima de un cobro que sigue corriendo: antes
       // esto sólo iba al log y el veto del diseño no tenía dato que mirar. Contabilidad, no desenlace — por
       // eso NO toca `status`, `failureCode` ni `updatedAt`, y un fallo aquí no cambia la respuesta a la sonda.
+      //
+      // 🔴 Ronda 2 de Codex (19-sep): en COLUMNA PROPIA, no en `resultJson`. Ese sobre lo reemplaza entero
+      // cualquier resultado posterior, y con él se borraba la evidencia de que el cobro seguía vivo.
       try {
         await prisma.$executeRaw`
-          UPDATE "TerminalPaymentRequest"
-          SET "resultJson" = coalesce("resultJson", '{}'::jsonb) || jsonb_build_object('probeActiveAt', ${new Date().toISOString()})
-          WHERE "id" = ${row.id}`
+          UPDATE "TerminalPaymentRequest" SET "probeActiveAt" = (NOW() AT TIME ZONE 'UTC') WHERE "id" = ${row.id}`
       } catch (err) {
         logger.warn('⚠️ [TerminalPayment] no se pudo sellar probeActiveAt — la reserva se conserva igual', {
           requestId,
@@ -6409,6 +6431,21 @@ class TerminalPaymentService {
         })
       }
       return true
+    }
+
+    if (disposition === 'RESOLVED' || disposition === 'RECEIVED_CANCELLED' || disposition === 'NOT_FOUND') {
+      // 🔴 Ronda 2 de Codex: una respuesta POSTERIOR que resuelve el intento es lo ÚNICO que levanta el veto
+      // de `probeActiveAt`. El transcurso del tiempo no desmiente una ejecución; una respuesta de la propia
+      // terminal sí. Se sella aquí, antes de cualquier otra decisión, y su fallo no cambia el desenlace.
+      try {
+        await prisma.$executeRaw`
+          UPDATE "TerminalPaymentRequest" SET "probeResolvedAt" = (NOW() AT TIME ZONE 'UTC') WHERE "id" = ${row.id}`
+      } catch (err) {
+        logger.warn('⚠️ [TerminalPayment] no se pudo sellar probeResolvedAt', {
+          requestId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
     }
 
     if (disposition === 'RESOLVED' || disposition === 'RECEIVED_CANCELLED') {

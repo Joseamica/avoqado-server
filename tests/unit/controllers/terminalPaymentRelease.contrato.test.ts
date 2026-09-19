@@ -79,6 +79,23 @@ describe('el contrato de la declaración', () => {
     expect(res.json.mock.calls[0][0].resolution).toMatchObject({ id: 'r1' })
   })
 
+  it('🔴 la respuesta trae los campos que PROMETE el contrato: requestId, outcome y outcomeEvidence', async () => {
+    mockRelease.mockResolvedValue({
+      requestId: 'req-1',
+      released: true,
+      status: 'FAILED',
+      outcome: 'NOT_CHARGED',
+      outcomeEvidence: 'OPERATOR_RECONCILED',
+      resolution: { id: 'r1', acceptedAt: 'x' },
+    })
+    const res = resFalso()
+    await releaseTerminalPayment(reqFalso({ statement: 'UNCHARGED_VERIFIED', statementVersion: 1, resolutionId: 'uuid-1' }), res)
+    const cuerpo = res.json.mock.calls[0][0]
+    expect(cuerpo.requestId).toBe('req-1')
+    expect(cuerpo.outcome).toBe('NOT_CHARGED')
+    expect(cuerpo.outcomeEvidence).toBe('OPERATOR_RECONCILED')
+  })
+
   it('🔴 sin declaración, el cuerpo NO se toca: el camino viejo queda igual', async () => {
     mockRelease.mockResolvedValue({ requestId: 'req-1', released: false, status: 'UNKNOWN' })
     await releaseTerminalPayment(reqFalso({ reason: 'la PAX se reinició' }), resFalso())

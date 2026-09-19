@@ -410,7 +410,9 @@ export async function releaseTerminalPayment(req: Request, res: Response) {
       success: r.released,
       released: r.released,
       status: r.status,
+      requestId: r.requestId,
       paymentId: r.paymentId ?? null,
+      ...(r.outcome ? { outcome: r.outcome, outcomeEvidence: r.outcomeEvidence ?? null } : {}),
       ...(r.resolution ? { resolution: r.resolution } : {}),
       message: r.released
         ? 'Terminal liberada. Ya puedes volver a mandarle cobros.'

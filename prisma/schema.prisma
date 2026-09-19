@@ -5110,6 +5110,13 @@ model TerminalPaymentRequest {
   /// tienen. Inmutable: se escribe una vez; un replay con el mismo `resolutionId` y el mismo cuerpo devuelve la
   /// guardada sin reescribir nada.
   operatorReconciliation Json?
+  /// La sonda (`terminal:payment_probe`) contestó que este cobro SIGUE ejecutándose. Columna PROPIA y no una
+  /// llave de `resultJson` porque ese sobre lo reemplaza entero cualquier resultado posterior, y con él se
+  /// borraba la evidencia de que el cobro seguía vivo (Codex r2, 19-sep). Veta la declaración del cajero.
+  probeActiveAt   DateTime?
+  /// La respuesta POSTERIOR de la sonda que resolvió ese intento (RESOLVED / NOT_FOUND / RECEIVED_CANCELLED).
+  /// Es lo ÚNICO que levanta el veto de `probeActiveAt`: el transcurso del tiempo no desmiente una ejecución.
+  probeResolvedAt DateTime?
   expiresAt          DateTime
   createdAt          DateTime                     @default(now())
   updatedAt          DateTime                     @updatedAt
