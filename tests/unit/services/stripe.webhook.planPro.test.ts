@@ -26,6 +26,8 @@ jest.mock('@/services/dashboard/creditPack.public.service', () => ({
 
 // Mock Stripe service BEFORE importing webhook service to prevent Stripe SDK initialization error
 jest.mock('@/services/stripe.service', () => ({
+  // 6ª auditoría: los handlers consultan el estado VIGENTE antes de activar.
+  estadoDeLaSuscripcion: jest.fn().mockResolvedValue('active'),
   __esModule: true,
   default: jest.fn(),
   getOrCreateStripeCustomer: jest.fn(),

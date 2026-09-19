@@ -18,6 +18,8 @@ jest.mock('@/services/dashboard/creditPack.public.service', () => ({
 
 // Mock Stripe service BEFORE importing webhook service to prevent Stripe SDK initialization error
 jest.mock('@/services/stripe.service', () => ({
+  // 6ª auditoría: los handlers consultan el estado VIGENTE antes de activar.
+  estadoDeLaSuscripcion: jest.fn().mockResolvedValue('active'),
   __esModule: true,
   default: jest.fn(),
   getOrCreateStripeCustomer: jest.fn(),
@@ -303,12 +305,18 @@ describe('Stripe Webhook Service - Critical Tests', () => {
 
       await handleSubscriptionUpdated(mockSubscription)
 
-      // Should activate feature with no expiration (paid subscription)
+      // Should activate feature with no expiration (paid subscription).
+      // 🔴 Desde la 2ª auditoría de Codex (18-sep) también suelta el candado de suspensión: este
+      // evento puede ser el ÚNICO que llegue al recuperarse un pago, y `suspendedAt` es candado
+      // duro en el resolver (`basePlan.service.ts:91`). Ver stripe.webhook.reactivacion.test.ts.
       expect(prisma.venueFeature.update).toHaveBeenCalledWith({
         where: { id: 'vf_1' },
         data: {
           active: true,
           endDate: null, // null = paid subscription forever
+          suspendedAt: null,
+          paymentFailureCount: 0,
+          gracePeriodEndsAt: null,
         },
       })
     })
@@ -469,7 +477,11 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       // Should reactivate feature after payment
       expect(prisma.venueFeature.update).toHaveBeenCalledWith({
         where: { id: 'vf_1' },
-        data: { active: true, endDate: null },
+        // 🔴 Desde el 18-sep la reactivación limpia TAMBIÉN la suspensión. `active: true` solo no
+        // devolvía el acceso: el resolver trata `suspendedAt` como candado duro, así que el negocio
+        // pagaba y seguía bloqueado (auditoría de Codex, hallazgo #11). Esta aserción fijaba la
+        // forma vieja; ahora fija la que de verdad devuelve el servicio.
+        data: { active: true, endDate: null, suspendedAt: null, paymentFailureCount: 0, gracePeriodEndsAt: null },
       })
     })
 

@@ -223,7 +223,9 @@ export async function retryWebhookEvent(eventId: string) {
     // function reported success. `replayStripeWebhookEvent` also owns the
     // RETRYING flip and the attempt counter, so neither is done here anymore.
     const { replayStripeWebhookEvent } = await import('../stripe.webhook.service')
-    const result = await replayStripeWebhookEvent(eventId)
+    // Esta ruta la dispara una PERSONA desde superadmin: puede saltarse el tope de reintentos
+    // automáticos, que existe para frenar al cron y no para bloquear una recuperación manual.
+    const result = await replayStripeWebhookEvent(eventId, { forzadoPorPersona: true })
 
     if (!result.replayed) {
       logger.info('ℹ️ Webhook retry skipped', {

@@ -12,7 +12,7 @@ import emailService from './email.service'
 import { resolvePlanNotificationTarget } from './access/planNotification.service'
 import { createNotification } from './dashboard/notification.dashboard.service'
 import { NotificationType, NotificationChannel, NotificationPriority, StaffRole } from '@prisma/client'
-import { handlePaymentFailure, generateBillingPortalUrl, fulfillPlanCheckout } from './stripe.service'
+import { handlePaymentFailure, generateBillingPortalUrl, fulfillPlanCheckout, estadoDeLaSuscripcion } from './stripe.service'
 import { PAID_PLAN_TIER_CODES } from './access/basePlan.service'
 import socketManager from '../communication/sockets'
 import { tokenBudgetService } from './dashboard/token-budget.service'
@@ -76,6 +76,52 @@ async function runSeatReactivationSafely(venueId: string): Promise<void> {
  *
  * @param subscription - Stripe Subscription object
  */
+/**
+ * ¿Procede activar (o reactivar) este registro, según el estado VIGENTE en Stripe?
+ *
+ * Tres casos, y cada uno exige algo distinto:
+ *
+ * | Estado del registro            | Qué hace falta                                          |
+ * |--------------------------------|---------------------------------------------------------|
+ * | activo y sano                  | nada que decidir: no se consulta                        |
+ * | suspendido por impago          | **`active`**: `trialing` es acceso sin pago y no salda  |
+ * |                                | una deuda; aceptarlo además borraba el fin de la prueba |
+ * | inactivo (alta, o CANCELADO)   | `active` o `trialing`                                   |
+ *
+ * 🔴 El atajo NO puede ser `if (!suspendedAt) return true`: una cancelación deja `active:false` con
+ * `suspendedAt: null`, y una factura antigua reactivaba el registro sin consultar nada.
+ * (6ª auditoría de Codex, reproducido.)
+ *
+ * Si Stripe no contesta, se PROPAGA: la fila queda `FAILED` y el cron
+ * `stripe-webhook-reconciliation` la reprocesa (Stripe NO reintenta: el controlador devuelve 200 a
+ * propósito). Nadie decide a ciegas.
+ *
+ * Nota: la suspensión ADMINISTRATIVA (`Venue.status = ADMIN_SUSPENDED`) se resuelve antes, en el
+ * guard de `OPERATIONAL_VENUE_STATUSES`.
+ */
+async function procedeActivar(
+  venueFeature: { active: boolean; suspendedAt: Date | null },
+  subscriptionId: string,
+): Promise<boolean> {
+  if (venueFeature.active && !venueFeature.suspendedAt) return true
+
+  const estado = await estadoDeLaSuscripcion(subscriptionId)
+  if (venueFeature.suspendedAt) return estado === 'active'
+  return estado === 'active' || estado === 'trialing'
+}
+
+/**
+ * ¿Hay que reparar este registro?
+ *
+ * 🔴 NO es `!active`. Un registro `active: true` CON `suspendedAt` puesto está bloqueado igual
+ * (`basePlan.service.ts:91`) y ningún job lo rescata: winback y cancelación buscan `active: false`.
+ * Preguntar sólo por `active` dejaba al negocio pagando sin acceso, para siempre.
+ * (Cuarta auditoría de Codex, 19-sep.)
+ */
+function necesitaReactivacion(venueFeature: { active: boolean; suspendedAt: Date | null }): boolean {
+  return !venueFeature.active || venueFeature.suspendedAt != null
+}
+
 export async function handleSubscriptionUpdated(subscription: Stripe.Subscription) {
   const subscriptionId = subscription.id
   const status = subscription.status
@@ -113,6 +159,16 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
     return
   }
 
+  // 🔴 Mismo criterio que en el pago: con una suspensión puesta manda el estado vigente en Stripe.
+  if (status === 'active' && !(await procedeActivar(venueFeature, subscriptionId))) {
+    logger.warn('⚠️ Webhook: subscription.updated sin estar al corriente; la suspensión se mantiene', {
+      subscriptionId,
+      venueId: venueFeature.venueId,
+      suspendedAt: venueFeature.suspendedAt,
+    })
+    return
+  }
+
   // Update VenueFeature based on subscription status
   switch (status) {
     case 'active':
@@ -122,6 +178,14 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
         data: {
           active: true,
           endDate: null, // null = paid subscription (no expiration)
+          // 🔴 `status: 'active'` de Stripe afirma que el dinero está al corriente, así que suelta
+          // también el candado de suspensión. Sin esto, una recuperación que sólo emite este evento
+          // (y no `invoice.payment_succeeded`) deja al negocio pagando sin acceso, porque el
+          // resolver trata `suspendedAt` como candado duro — `basePlan.service.ts:91`.
+          // (Segunda auditoría de Codex, 18-sep.)
+          suspendedAt: null,
+          paymentFailureCount: 0,
+          gracePeriodEndsAt: null,
         },
       })
       logger.info('✅ Webhook: Feature activated (trial → paid)', {
@@ -385,14 +449,35 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
     return
   }
 
+  // 🔴 Con una suspensión puesta, la levanta el ESTADO VIGENTE en Stripe, no este evento. Y si no
+  // procede, no se escribe NADA: dejar `active: true` con `suspendedAt` puesto crea un registro
+  // contradictorio que el resolver niega y que ningún job rescata. (Auditorías 4ª y 5ª, 19-sep.)
+  if (!(await procedeActivar(venueFeature, subscriptionIdStr))) {
+    logger.warn('⚠️ Webhook: la suscripción NO está al corriente en Stripe; la suspensión se mantiene', {
+      invoiceId: invoice.id,
+      venueId: venueFeature.venueId,
+      suspendedAt: venueFeature.suspendedAt,
+    })
+    return
+  }
+
   // Ensure feature is active
-  // This handles two cases:
+  // This handles three cases:
   // 1. First-time activation (trialPeriodDays=0, created with active=false)
   // 2. Reactivation after payment failure suspension
-  if (!venueFeature.active) {
+  // 3. Registro ACTIVO pero con `suspendedAt` puesto: bloqueado y sin rescate automático
+  if (necesitaReactivacion(venueFeature)) {
     await prisma.venueFeature.update({
       where: { id: venueFeature.id },
-      data: { active: true, endDate: null },
+      // 🔴 `active: true` NO basta para devolver el acceso. El resolver trata `suspendedAt` como
+      // candado duro —`basePlan.service.ts:91`: `if (!vf.active || vf.suspendedAt) return false`—,
+      // así que dejarlo puesto significa que el negocio paga, Stripe cobra, este webhook escribe
+      // «Feature activated after successful payment»… y el producto le sigue negando el acceso,
+      // sin que nada lo denuncie. (Auditoría de Codex, 18-sep, hallazgo #11.)
+      //
+      // `paymentFailureCount` vuelve a cero por lo mismo: si se queda en 3, el siguiente tropiezo
+      // de cobro suspende de inmediato en vez de darle su periodo de gracia otra vez.
+      data: { active: true, endDate: null, suspendedAt: null, paymentFailureCount: 0, gracePeriodEndsAt: null },
     })
     logger.info('✅ Webhook: Feature activated after successful payment', {
       venueId: venueFeature.venueId,
@@ -1431,7 +1516,22 @@ export async function handleStripeWebhookEvent(event: Stripe.Event, opts?: { cla
  *   or out of attempts) — callers should treat that as "nothing to do", not an
  *   error.
  */
-export async function replayStripeWebhookEvent(webhookEventId: string): Promise<{ replayed: boolean; reason?: string }> {
+export async function replayStripeWebhookEvent(
+  webhookEventId: string,
+  opts?: {
+    /**
+     * 🔴 Una PERSONA reintentando a mano puede saltarse el tope de intentos.
+     *
+     * El tope existe para que el cron no entre en bucle, no para impedirle a alguien recuperar un
+     * evento cuando la causa de fondo ya se resolvió. Importa desde la 6ª auditoría: una
+     * recuperación de pago que no pudo consultar a Stripe deja el registro suspendido, y sin
+     * salida manual el cliente se queda esperando un evento que ya no va a llegar.
+     *
+     * El intento se sigue contando: forzar no borra el historial.
+     */
+    forzadoPorPersona?: boolean
+  },
+): Promise<{ replayed: boolean; reason?: string }> {
   const row = await prisma.webhookEvent.findUnique({
     where: { id: webhookEventId },
     select: { id: true, stripeEventId: true, eventType: true, status: true, retryCount: true, payload: true },
@@ -1439,7 +1539,7 @@ export async function replayStripeWebhookEvent(webhookEventId: string): Promise<
 
   if (!row) throw new Error('Webhook event not found')
   if (row.status === 'SUCCESS') return { replayed: false, reason: 'ALREADY_SUCCEEDED' }
-  if (row.retryCount >= STRIPE_WEBHOOK_MAX_RETRIES) {
+  if (row.retryCount >= STRIPE_WEBHOOK_MAX_RETRIES && !opts?.forzadoPorPersona) {
     return { replayed: false, reason: 'MAX_RETRIES_EXHAUSTED' }
   }
 

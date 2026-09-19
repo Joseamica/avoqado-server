@@ -20,6 +20,7 @@ import { CronJob } from 'cron'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import Stripe from 'stripe'
+import { estadoDeLaSuscripcion } from '../services/stripe.service'
 import { subDays } from 'date-fns'
 import emailService from '@/services/email.service'
 import { resolvePlanNotificationTarget } from '@/services/access/planNotification.service'
@@ -274,8 +275,26 @@ export class SubscriptionCancellationJob {
             daysSinceGracePeriodEnd: Math.floor((now.getTime() - (venueFeature.gracePeriodEndsAt?.getTime() || 0)) / (1000 * 60 * 60 * 24)),
           })
 
-          // Cancel subscription in Stripe
+          // 🔴 ÚLTIMA COMPROBACIÓN antes de cancelar, y es la que evita el peor escenario de todos:
+          // cancelarle la suscripción a un cliente que SÍ está pagando.
+          //
+          // Llegar aquí sólo significa que nuestro registro dice «suspendido hace 14+ días». Eso
+          // puede ser falso: si el webhook de recuperación no pudo consultar a Stripe y agotó sus
+          // reintentos, el registro se queda `active:false` aunque el cliente esté al corriente, y
+          // cae en esta consulta. Preguntar una vez más cuesta una llamada y evita un daño que no
+          // se deshace solo. (6ª auditoría de Codex, 19-sep.)
           if (venueFeature.stripeSubscriptionId) {
+            const estadoVigente = await estadoDeLaSuscripcion(venueFeature.stripeSubscriptionId)
+            if (estadoVigente === 'active' || estadoVigente === 'trialing') {
+              logger.warn('⛔ NO se cancela: la suscripción está al corriente en Stripe pese a figurar suspendida', {
+                venueFeatureId: venueFeature.id,
+                venueId: venueFeature.venueId,
+                subscriptionId: venueFeature.stripeSubscriptionId,
+                estadoVigente,
+              })
+              continue
+            }
+
             await stripe.subscriptions.cancel(venueFeature.stripeSubscriptionId, {
               prorate: false, // Don't charge for partial period
             })

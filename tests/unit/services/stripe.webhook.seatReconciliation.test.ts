@@ -20,6 +20,8 @@ jest.mock('@/services/dashboard/seatReconciliation.service', () => ({
 
 // Mock the Stripe service module to avoid SDK init at import time.
 jest.mock('@/services/stripe.service', () => ({
+  // 6ª auditoría: los handlers consultan el estado VIGENTE antes de activar.
+  estadoDeLaSuscripcion: jest.fn().mockResolvedValue('active'),
   __esModule: true,
   default: jest.fn(),
   handlePaymentFailure: jest.fn(),

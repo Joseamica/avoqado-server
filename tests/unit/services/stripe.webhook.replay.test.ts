@@ -42,6 +42,8 @@ jest.mock('@/services/email.service', () => ({ __esModule: true, default: {} }))
 jest.mock('@/services/access/planNotification.service', () => ({ resolvePlanNotificationTarget: jest.fn() }))
 jest.mock('@/services/dashboard/notification.dashboard.service', () => ({ createNotification: jest.fn() }))
 jest.mock('@/services/stripe.service', () => ({
+  // 6ª auditoría: los handlers consultan el estado VIGENTE antes de activar.
+  estadoDeLaSuscripcion: jest.fn().mockResolvedValue('active'),
   handlePaymentFailure: jest.fn(),
   generateBillingPortalUrl: jest.fn(),
   fulfillPlanCheckout: jest.fn(),
@@ -210,5 +212,64 @@ describe('handleStripeWebhookEvent — regression: duplicate protection stays in
     const failedCall = mockPrisma.webhookEvent.update.mock.calls.find(([arg]) => arg?.data?.status === 'FAILED')
     expect(failedCall).toBeDefined()
     expect(failedCall![0].data.retryCount).toEqual({ increment: 1 })
+  })
+})
+
+/**
+ * 🔴 SEXTA AUDITORÍA (Codex xhigh, 19-sep): agotar los reintentos AUTOMÁTICOS bloqueaba también a
+ * la persona.
+ *
+ * `replayStripeWebhookEvent` cortaba con `MAX_RETRIES_EXHAUSTED` sin distinguir quién llama. El
+ * tope existe para que el cron no entre en bucle, no para impedirle a un humano recuperar un
+ * evento cuando el problema de fondo ya se resolvió (Stripe se recuperó, se arregló un dato).
+ *
+ * Importa ahora más que antes: desde esta misma auditoría, una recuperación de pago que no pueda
+ * consultar a Stripe deja el registro suspendido, y sin salida manual el cliente se queda
+ * bloqueado esperando un evento que ya no va a llegar.
+ */
+describe('el tope de reintentos no puede bloquear a una persona', () => {
+  it('🔴 el cron SÍ se detiene al agotar los intentos', async () => {
+    ;(prisma.webhookEvent.findUnique as jest.Mock).mockResolvedValue({
+      id: 'we1',
+      stripeEventId: 'evt_1',
+      eventType: 'invoice.payment_succeeded',
+      status: 'FAILED',
+      retryCount: STRIPE_WEBHOOK_MAX_RETRIES,
+      payload: {},
+    })
+
+    const r = await replayStripeWebhookEvent('we1')
+
+    expect(r).toMatchObject({ replayed: false, reason: 'MAX_RETRIES_EXHAUSTED' })
+  })
+
+  it('🔴 una persona SÍ puede reintentarlo aunque estén agotados', async () => {
+    ;(prisma.webhookEvent.findUnique as jest.Mock).mockResolvedValue({
+      id: 'we1',
+      stripeEventId: 'evt_1',
+      eventType: 'invoice.payment_succeeded',
+      status: 'FAILED',
+      retryCount: STRIPE_WEBHOOK_MAX_RETRIES + 3,
+      payload: { type: 'invoice.payment_succeeded', data: { object: { id: 'in_1', currency: 'mxn', amount_paid: 0, subscription: null, metadata: {} } } },
+    })
+
+    const r = await replayStripeWebhookEvent('we1', { forzadoPorPersona: true })
+
+    expect(r.reason).not.toBe('MAX_RETRIES_EXHAUSTED')
+  })
+
+  it('un evento ya exitoso no se reintenta ni forzándolo (eso sí sería cobrar dos veces)', async () => {
+    ;(prisma.webhookEvent.findUnique as jest.Mock).mockResolvedValue({
+      id: 'we1',
+      stripeEventId: 'evt_1',
+      eventType: 'invoice.payment_succeeded',
+      status: 'SUCCESS',
+      retryCount: 0,
+      payload: {},
+    })
+
+    const r = await replayStripeWebhookEvent('we1', { forzadoPorPersona: true })
+
+    expect(r).toMatchObject({ replayed: false, reason: 'ALREADY_SUCCEEDED' })
   })
 })
