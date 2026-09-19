@@ -57,6 +57,34 @@ describe('sondaReportoActiva', () => {
     ).toBe(true)
   })
 
+  // ── Ronda 4 de Codex: cuando la COLUMNA y el SOBRE traen marcas distintas, manda la MÁS RECIENTE.
+  // Antes había un `new Date(0)` sintético (1970, anterior a cualquier resolución ⇒ el veto se levantaba solo)
+  // y un `??` que dejaba a la columna tapar una marca del sobre más nueva. Sin estas dos pruebas, el arreglo
+  // no lo fija nada: las demás afirman el caso NEGATIVO y un merge equivocado las satisface igual.
+  it('🔴 SOBRE más reciente que la columna: manda el sobre — una resolución intermedia NO levanta el veto', () => {
+    expect(
+      sondaReportoActiva(
+        {
+          probeActiveAt: new Date('2026-09-18T16:00:00.000Z'),
+          resultJson: { probeActiveAt: '2026-09-18T16:20:00.000Z' },
+          probeResolvedAt: new Date('2026-09-18T16:10:00.000Z'), // posterior a la columna, ANTERIOR al sobre
+        },
+        ahora,
+      ),
+    ).toBe(true)
+  })
+
+  it('🔴 COLUMNA más reciente que el sobre: manda la columna — y una resolución posterior a ella SÍ levanta el veto', () => {
+    const fila = {
+      probeActiveAt: new Date('2026-09-18T16:20:00.000Z'),
+      resultJson: { probeActiveAt: '2026-09-18T16:00:00.000Z' },
+    }
+    // Resolución entre las dos marcas: desmiente la vieja, no la nueva ⇒ sigue vetando.
+    expect(sondaReportoActiva({ ...fila, probeResolvedAt: new Date('2026-09-18T16:10:00.000Z') }, ahora)).toBe(true)
+    // Resolución posterior a la MÁS RECIENTE ⇒ el veto se levanta.
+    expect(sondaReportoActiva({ ...fila, probeResolvedAt: new Date('2026-09-18T16:25:00.000Z') }, ahora)).toBe(false)
+  })
+
   it('sin sonda no veta: es el caso de casi todas las filas legacy', () => {
     expect(sondaReportoActiva({ probeActiveAt: null }, ahora)).toBe(false)
     expect(sondaReportoActiva({}, ahora)).toBe(false)

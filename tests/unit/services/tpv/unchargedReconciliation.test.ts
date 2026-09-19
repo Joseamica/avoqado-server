@@ -42,6 +42,7 @@ function filaDelIncidente(over: Record<string, unknown> = {}) {
     closedVia: null,
     lateResult: false,
     terminalReturnedAt: ahora,
+    acknowledgedAt: ahora,
     expiresAt: new Date(ahora.getTime() - 30 * 60 * 1000),
     operatorReconciliation: null,
     resultJson: { requestId, status: 'timeout' },
@@ -320,5 +321,33 @@ describe('19-sep — la declaración NO depende de relojes ni latidos', () => {
   it('🔴 pero la SONDA diciendo que el cobro sigue corriendo sigue vetando: eso sí es evidencia', async () => {
     montar(filaDelIncidente({ terminalReturnedAt: null, probeActiveAt: new Date() }), CAJERO, null)
     await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'EXECUTION_STILL_ACTIVE' })
+  })
+})
+
+describe('RONDA 4 — sólo se declara sobre un cobro que la terminal RECIBIÓ', () => {
+  it('🔴 una solicitud que la terminal NUNCA acusó no se declara', async () => {
+    // Codex r4, sobre la decisión de quitar el reloj: «que el latido no pruebe el cese no significa que
+    // quitar todas esas condiciones conserve las mismas barreras». El caso que se abrió: un ACK perdido
+    // deja la fila en UNKNOWN a los 5 segundos, con el cobro quizá corriendo, y la declaración pasaba.
+    // La barrera nueva es EVIDENCIA DEL APARATO, no tiempo: sin acuse y sin respuesta, no se declara.
+    montar(filaDelIncidente({ acknowledgedAt: null, resultJson: null }))
+    await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'TERMINAL_NEVER_ANSWERED' })
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
+  })
+
+  it('🔴 el caso de Testarudo SÍ se declara: la terminal acusó y luego se reinició', async () => {
+    montar(filaDelIncidente({ acknowledgedAt: new Date(), resultJson: { requestId, status: 'timeout' } }))
+    await expect(reconcileUncharged(identidad, declaracion())).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
+  })
+
+  it('sin acuse pero CON respuesta de la terminal también se declara: contestó algo', async () => {
+    // Un APK viejo puede no acusar, pero si su resultado llegó, la terminal habló.
+    montar(filaDelIncidente({ acknowledgedAt: null, resultJson: { requestId, status: 'timeout' } }))
+    await expect(reconcileUncharged(identidad, declaracion())).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
+  })
+
+  it('🔴 un sobre VACÍO no cuenta como respuesta', async () => {
+    montar(filaDelIncidente({ acknowledgedAt: null, resultJson: {} }))
+    await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'TERMINAL_NEVER_ANSWERED' })
   })
 })

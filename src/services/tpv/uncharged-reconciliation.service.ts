@@ -56,6 +56,8 @@ export class UnchargedReconciliationError extends Error {
     super(
       code === 'POSITIVE_EVIDENCE_EXISTS'
         ? 'Este cobro sí tiene señales de haber pasado. No lo declares: consulta su resultado.'
+        : code === 'TERMINAL_NEVER_ANSWERED'
+          ? 'Esta terminal nunca confirmó haber recibido el cobro. No se puede declarar: consulta su resultado.'
         : code === 'EXECUTION_STILL_ACTIVE'
           ? 'La terminal dice que este cobro sigue en curso. Espera unos segundos y vuelve a consultar.'
           : code === 'NOT_ALLOWED'
@@ -257,6 +259,24 @@ export async function reconcileUncharged(
     if (!actor || !actor.permitido) throw new UnchargedReconciliationError('NOT_ALLOWED', 403)
 
     // ELEGIBILIDAD
+    // 🔴 RONDA 4 de Codex, y corrige la decisión de la ronda 3. Al borrar la elegibilidad por reloj se
+    // llevó por delante una barrera que no era un reloj: «que el latido no pruebe el cese no significa que
+    // quitar TODAS esas condiciones conserve las mismas barreras». El caso que quedó abierto: un ACK perdido
+    // deja la fila en `UNKNOWN/ACK_TIMEOUT` a los CINCO SEGUNDOS —con el cobro quizá corriendo y minutos por
+    // delante hasta vencer— y la declaración se aceptaba ahí mismo.
+    //
+    // La barrera es EVIDENCIA DEL APARATO, no tiempo: la terminal tuvo que decir ALGO sobre esta solicitud —
+    // acusarla, o devolver un resultado—. Si nunca habló, nadie sabe siquiera si le llegó, y la inspección
+    // visual del cajero no revoca un mensaje en tránsito.
+    //
+    // ⚠️ Límite declarado: una solicitud entregada a un APK antiguo que no acusa NI llegó a contestar queda
+    // fuera. Es el lado seguro, y esas filas se resuelven por el camino de siempre (sonda, evidencia, tiempo).
+    const sobreConRespuesta =
+      row.resultJson && typeof row.resultJson === 'object' && !Array.isArray(row.resultJson)
+        ? Object.keys(row.resultJson as Record<string, unknown>).length > 0
+        : false
+    if (!row.acknowledgedAt && !sobreConRespuesta) throw new UnchargedReconciliationError('TERMINAL_NEVER_ANSWERED')
+
     if (sondaReportoActiva(row)) throw new UnchargedReconciliationError('EXECUTION_STILL_ACTIVE')
 
     const sobre =

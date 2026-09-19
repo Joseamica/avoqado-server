@@ -35,7 +35,20 @@ export function sondaReportoActiva(
     row.resultJson && typeof row.resultJson === 'object' && !Array.isArray(row.resultJson)
       ? (row.resultJson as Record<string, unknown>).probeActiveAt
       : undefined
-  const activa = row.probeActiveAt ?? (enElSobre !== undefined && enElSobre !== null ? new Date(0) : null)
+
+  // 🔴 Ronda 4 de Codex: aquí había un `new Date(0)` como marca sintética, y era un defecto doble. 1970 es
+  // anterior a CUALQUIER `probeResolvedAt`, así que una resolución vieja levantaba el veto de una observación
+  // nueva; y el `??` hacía que una columna poblada ocultara una marca del sobre MÁS RECIENTE. Ahora se miran
+  // las dos fuentes y manda la más nueva. Una marca del sobre ilegible veta siempre: falla CERRADO.
+  let delSobre: Date | null = null
+  if (enElSobre !== undefined && enElSobre !== null) {
+    const t = typeof enElSobre === 'string' ? Date.parse(enElSobre) : NaN
+    if (Number.isNaN(t)) return true // ilegible ⇒ no se puede desmentir ⇒ veta
+    delSobre = new Date(t)
+  }
+  const deLaColumna = row.probeActiveAt ?? null
+  const activa =
+    deLaColumna && delSobre ? (deLaColumna.getTime() >= delSobre.getTime() ? deLaColumna : delSobre) : (deLaColumna ?? delSobre)
   if (!activa) return false
   const resuelta = row.probeResolvedAt
   if (!resuelta) return true
