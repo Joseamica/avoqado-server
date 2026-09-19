@@ -616,6 +616,77 @@ export interface CreatePlanSubscriptionResult {
  * pay-now (trialPeriodDays:0), an intro coupon, and Stripe Tax (16% IVA).
  * Idempotent: reuses an existing subscription for the venue+tier if one already exists.
  */
+/**
+ * Escribe el ACCESO del plan (`VenueFeature`) y lo liga a su suscripción de Stripe.
+ *
+ * 🔴 Existe separada porque el cobro y el acceso son DOS escrituras, y entre ellas cabe un fallo.
+ * `createPlanSubscription` la llama en el camino normal; el camino de RECUPERACIÓN de
+ * `activate-plan` la llama también — si Stripe cobró y esta fila no llegó a escribirse, el reintento
+ * encuentra la suscripción, se salta la creación, y sin esto el negocio queda **pagando sin acceso**
+ * (auditoría de Codex, 18-sep). Los webhooks no lo reparan: buscan la fila y si no está, abandonan.
+ *
+ * Es idempotente por diseño (`upsert` sobre la llave única venue+feature): llamarla de más no hace
+ * daño, y es justo lo que la vuelve segura de invocar en un camino de recuperación.
+ */
+/**
+ * El estado VIGENTE de la suscripción en Stripe.
+ *
+ * 🔴 Es la única forma honesta de decidir si se activa o se levanta una suspensión. Deducirlo del
+ * orden de los webhooks NO funciona, y costó cinco rondas de auditoría descubrir por qué:
+ * `VenueFeature.suspendedAt` guarda la hora en que NOSOTROS procesamos el fallo, mientras que
+ * `event.created` es la hora de Stripe. Son magnitudes distintas y ninguna precisión lo arregla.
+ *
+ * ⚠️ Devuelve el estado CRUDO a propósito, sin interpretarlo: quien llama decide qué estado
+ * autoriza qué. `active` no significa «no debe nada» (puede haber una factura abierta); significa
+ * que la suscripción está corriente. Y `trialing` es acceso legítimo sin pago, que sirve para una
+ * primera activación pero no para levantar una suspensión por impago. (6ª auditoría de Codex.)
+ *
+ * Si Stripe no contesta, LANZA. ⚠️ El reintento NO lo hace Stripe: el controlador del webhook
+ * devuelve 200 a propósito (`webhook.controller.ts:92`, «prevent retries»). Quien lo reintenta es
+ * el cron `stripe-webhook-reconciliation`, que reprocesa las filas `FAILED` hasta
+ * `STRIPE_WEBHOOK_MAX_RETRIES`.
+ */
+export async function estadoDeLaSuscripcion(subscriptionId: string): Promise<Stripe.Subscription.Status> {
+  const suscripcion = await stripe.subscriptions.retrieve(subscriptionId)
+  return suscripcion.status
+}
+
+export async function asegurarAccesoDelPlan(input: {
+  venueId: string
+  tierCode: string
+  subscriptionId: string
+  stripePriceId?: string | null
+  trialEnd?: Date | null
+}): Promise<void> {
+  const feature = await prisma.feature.findFirst({ where: { code: input.tierCode, active: true } })
+  if (!feature) throw new Error(`Feature ${input.tierCode} not found or inactive`)
+
+  const trialEnd = input.trialEnd ?? null
+  await prisma.venueFeature.upsert({
+    where: { venueId_featureId: { venueId: input.venueId, featureId: feature.id } },
+    update: {
+      active: true,
+      stripeSubscriptionId: input.subscriptionId,
+      ...(input.stripePriceId ? { stripePriceId: input.stripePriceId } : {}),
+      monthlyPrice: feature.monthlyPrice,
+      endDate: trialEnd,
+      trialEndDate: trialEnd,
+      suspendedAt: null,
+      paymentFailureCount: 0,
+    },
+    create: {
+      venueId: input.venueId,
+      featureId: feature.id,
+      active: true,
+      monthlyPrice: feature.monthlyPrice,
+      stripeSubscriptionId: input.subscriptionId,
+      ...(input.stripePriceId ? { stripePriceId: input.stripePriceId } : {}),
+      endDate: trialEnd,
+      trialEndDate: trialEnd,
+    },
+  })
+}
+
 export async function createPlanSubscription(input: CreatePlanSubscriptionInput): Promise<CreatePlanSubscriptionResult> {
   const feature = await prisma.feature.findFirst({ where: { code: input.tierCode, active: true } })
   if (!feature) throw new Error(`Feature ${input.tierCode} not found or inactive`)
@@ -672,30 +743,13 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
     { retries: 3, shouldRetry: shouldRetryStripeError, context: 'stripe.createPlanSubscription' },
   )
 
-  const now = new Date()
-  const trialEnd = input.trialPeriodDays > 0 ? new Date(now.getTime() + input.trialPeriodDays * 86400000) : null
-  await prisma.venueFeature.upsert({
-    where: { venueId_featureId: { venueId: input.venueId, featureId: feature.id } },
-    update: {
-      active: true,
-      stripeSubscriptionId: subscription.id,
-      stripePriceId: price.id,
-      monthlyPrice: feature.monthlyPrice,
-      endDate: trialEnd,
-      trialEndDate: trialEnd,
-      suspendedAt: null,
-      paymentFailureCount: 0,
-    },
-    create: {
-      venueId: input.venueId,
-      featureId: feature.id,
-      active: true,
-      monthlyPrice: feature.monthlyPrice,
-      stripeSubscriptionId: subscription.id,
-      stripePriceId: price.id,
-      endDate: trialEnd,
-      trialEndDate: trialEnd,
-    },
+  const trialEnd = input.trialPeriodDays > 0 ? new Date(Date.now() + input.trialPeriodDays * 86400000) : null
+  await asegurarAccesoDelPlan({
+    venueId: input.venueId,
+    tierCode: input.tierCode,
+    subscriptionId: subscription.id,
+    stripePriceId: price.id,
+    trialEnd,
   })
 
   logger.info(
@@ -1291,62 +1345,86 @@ export async function previewSubscriptionProration(
   immediateCharge: boolean
   description: string
 }> {
-  // Get current subscription
   const subscription = await stripe.subscriptions.retrieve(subscriptionId)
-
-  if (!subscription.items.data[0]) {
-    throw new Error('Subscription has no items')
-  }
-
   const currentItem = subscription.items.data[0]
-  const currentPrice = await stripe.prices.retrieve(currentItem.price.id)
+  if (!currentItem) throw new Error('Subscription has no items')
+
   const newPrice = await stripe.prices.retrieve(newPriceId)
+  const currency = newPrice.currency
 
-  // Calculate time remaining in current period
-  const now = Math.floor(Date.now() / 1000)
-  const periodEnd = (subscription as any).current_period_end
-  const periodStart = (subscription as any).current_period_start
-  const totalPeriodSeconds = periodEnd - periodStart
-  const remainingSeconds = periodEnd - now
-  const percentageRemaining = remainingSeconds / totalPeriodSeconds
+  // 🔴 El importe lo dice STRIPE, no una resta local (auditoría de Codex, 18-sep, hallazgo #10).
+  //
+  // El cálculo anterior era `(precioNuevo − precioViejo) × fracción de periodo restante`, y por
+  // tanto ignoraba el CUPÓN de la campaña, el saldo del cliente, las facturas impagadas, los
+  // cambios de intervalo y los impuestos. Medido por el auditor: pasar de PRO con POS22 a un
+  // producto de $500 a mitad de mes estimaba ~$329.42 de crédito sobre un mes en que el cliente
+  // pagó $22. Y la ejecución real (`updateSubscriptionPrice`, con `always_invoice`) usa además
+  // otro instante y la aritmética completa de Stripe: dos números distintos por construcción.
+  try {
+    const preview = await stripe.invoices.createPreview({
+      customer: typeof subscription.customer === 'string' ? subscription.customer : subscription.customer.id,
+      subscription: subscriptionId,
+      subscription_details: {
+        items: [{ id: currentItem.id, price: newPriceId }],
+        proration_behavior: 'always_invoice',
+      },
+    } as never)
 
-  // Calculate amounts (Stripe prices are in cents)
-  const currentAmount = currentPrice.unit_amount || 0
-  const newAmount = newPrice.unit_amount || 0
-  const priceDiff = newAmount - currentAmount
+    // 🔴 `amount_due` NUNCA es negativo: cuando el cambio genera saldo a favor Stripe lo clampa a 0
+    // y el crédito viaja en `total` (acaba en el balance del cliente). Leer sólo `amount_due` dejaba
+    // la rama del crédito como código muerto y le decía «sin cargo hoy» a quien baja de plan.
+    // (Segunda auditoría de Codex, 18-sep.)
+    // Lo que se COBRA hoy es `amount_due`, y punto. `total` sólo manda cuando es un CRÉDITO
+    // (negativo): ahí Stripe clampa `amount_due` a 0 y el saldo a favor viaja en `total`.
+    //
+    // 🔴 Los dos errores que ya se cometieron aquí, uno en cada dirección:
+    //   · leer SÓLO `amount_due` dejaba la rama del crédito muerta y decía «sin cargo» a quien
+    //     baja de plan y tiene saldo a favor (2ª auditoría, 18-sep);
+    //   · preferir `total` cuando `amount_due` es 0 anunciaba «Hoy pagas $42.00» a quien NO se le
+    //     va a cobrar nada porque su saldo cubre el ajuste (4ª auditoría, 19-sep).
+    const p = preview as { amount_due?: number; total?: number }
+    const aCobrarHoy = p.amount_due ?? 0
+    const total = p.total ?? 0
+    const debido = aCobrarHoy > 0 ? aCobrarHoy : total < 0 ? total : 0
+    const immediateCharge = debido > 0
+    // ⚠️ `amount_due: 0` con `total` positivo NO siempre es saldo a favor: Stripe también difiere
+    // al siguiente ciclo un importe que queda debajo de su mínimo facturable. Desde aquí no se
+    // distinguen, así que el texto es NEUTRO en vez de afirmar un saldo que puede no existir.
+    // (Quinta auditoría de Codex, 19-sep.)
+    const sinCobroHoy = aCobrarHoy === 0 && total > 0
+    const description = immediateCharge
+      ? `Hoy pagas ${(debido / 100).toFixed(2)} ${currency.toUpperCase()} por el cambio`
+      : debido < 0
+        ? `Se te acredita ${(Math.abs(debido) / 100).toFixed(2)} ${currency.toUpperCase()}`
+        : sinCobroHoy
+          ? 'Sin cargo hoy: el ajuste se aplica a tu próxima factura'
+          : 'Sin cargo hoy: el cambio entra en tu próximo ciclo'
 
-  // Calculate prorated amount
-  // For upgrade: charge the difference prorated for remaining time
-  // For downgrade: credit the difference prorated for remaining time
-  const prorationAmount = Math.round(priceDiff * percentageRemaining)
-  const immediateCharge = prorationAmount > 0
+    logger.info('💰 Vista previa de prorrateo pedida a Stripe', { subscriptionId, newPriceId, debido })
 
-  const currency = currentPrice.currency
-  let description = ''
-
-  if (immediateCharge) {
-    description = `You'll be charged ${(prorationAmount / 100).toFixed(2)} ${currency.toUpperCase()} today (prorated)`
-  } else if (prorationAmount < 0) {
-    description = `You'll receive a ${(Math.abs(prorationAmount) / 100).toFixed(2)} ${currency.toUpperCase()} credit (prorated)`
-  } else {
-    description = 'No immediate charge - change takes effect on next billing cycle'
-  }
-
-  logger.info(`💰 Proration preview calculated`, {
-    subscriptionId,
-    currentAmount,
-    newAmount,
-    prorationAmount,
-    percentageRemaining,
-    immediateCharge,
-  })
-
-  return {
-    prorationAmount,
-    currency,
-    nextInvoiceAmount: newAmount,
-    immediateCharge,
-    description,
+    return {
+      prorationAmount: debido,
+      currency,
+      nextInvoiceAmount: newPrice.unit_amount || 0,
+      immediateCharge,
+      description,
+    }
+  } catch (error) {
+    // 🔴 Si Stripe no puede contestar, se DICE. Un número inventado en la pantalla que decide un
+    // cambio de plan es peor que admitir que no se pudo calcular: el cliente aceptaría un cargo
+    // que nadie le va a hacer, o rechazaría un cambio por un crédito que no existe.
+    logger.warn('No se pudo obtener la vista previa de prorrateo de Stripe', {
+      subscriptionId,
+      newPriceId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    // 🔴 Y se dice LANZANDO, no devolviendo ceros. Un objeto con `prorationAmount: 0` e
+    // `immediateCharge: false` es una cotización VÁLIDA para quien lee los números —el dashboard,
+    // una app, un script—: dice «este cambio no te cuesta nada». Y no es cierto: confirmar ejecuta
+    // igual `updateSubscriptionPrice` con `always_invoice`, que sí puede cobrar. El aviso en
+    // `description` es texto y no protege a nadie que no lo lea.
+    // (Auditoría de riesgo de despliegue de Codex, 19-sep, hallazgo P2.)
+    throw new AppError('No pudimos calcular el ajuste ahora. Inténtalo de nuevo en unos minutos.', 503, true, 'PRORATION_PREVIEW_UNAVAILABLE')
   }
 }
 
@@ -1733,8 +1811,24 @@ export async function handlePaymentFailure(
       }
       break
 
-    case 4:
+    case 4: {
       // Day 7: Soft suspension
+      //
+      // 🔴 Quitar el acceso también se decide con el ESTADO VIGENTE, no con este aviso. Es el
+      // espejo exacto del defecto que costó seis rondas en el camino de recuperación: un aviso de
+      // fallo ATRASADO llega después de que el cliente se puso al corriente y lo suspende igual.
+      // Si Stripe no contesta, se PROPAGA: suspender a ciegas le quita el producto a alguien que
+      // quizá ya pagó. (6ª auditoría de Codex, 19-sep.)
+      const estadoVigente = await estadoDeLaSuscripcion(subscriptionId)
+      if (estadoVigente === 'active' || estadoVigente === 'trialing') {
+        logger.warn('⚠️ Aviso de fallo ATRASADO: la suscripción está al corriente, NO se suspende', {
+          subscriptionId,
+          estadoVigente,
+          venueId: venueFeature.venueId,
+        })
+        break
+      }
+
       await prisma.venueFeature.update({
         where: { id: venueFeature.id },
         data: {
@@ -1784,6 +1878,8 @@ export async function handlePaymentFailure(
         })
       }
       break
+
+    }
 
     default:
       // Attempt 5+: Grace period expired, awaiting hard cancel by cron job

@@ -369,18 +369,54 @@ export async function updateSubscription(
       return
     }
 
+    // 🔴 La colisión se comprueba ANTES de tocar Stripe (auditoría de Codex, 18-sep, hallazgo #8).
+    // `VenueFeature` es única por `(venueId, featureId)`: si este negocio YA tiene una fila de la
+    // feature destino, el `update` de abajo revienta con P2002 — pero para entonces Stripe ya
+    // cambió el precio de la suscripción, y el cliente queda pagando el plan nuevo con la base
+    // diciendo el viejo. Descubrirlo aquí cuesta una consulta; descubrirlo allá cuesta dinero.
+    const filaDestino = await prisma.venueFeature.findUnique({
+      where: { venueId_featureId: { venueId, featureId: newFeature.id } },
+      select: { id: true },
+    })
+    if (filaDestino && filaDestino.id !== featureId) {
+      res.status(409).json({
+        success: false,
+        error: 'Este negocio ya tiene ese plan contratado',
+        code: 'FEATURE_ALREADY_SUBSCRIBED',
+      })
+      return
+    }
+
     // Update subscription in Stripe
     const updatedSubscription = await stripeService.updateSubscriptionPrice(venueFeature.stripeSubscriptionId, newFeature.stripePriceId)
 
     // Update VenueFeature record
-    const updatedVenueFeature = await prisma.venueFeature.update({
-      where: { id: featureId },
-      data: {
-        featureId: newFeature.id,
-        monthlyPrice: newFeature.monthlyPrice,
-      },
-      include: { feature: true },
-    })
+    let updatedVenueFeature
+    try {
+      updatedVenueFeature = await prisma.venueFeature.update({
+        where: { id: featureId },
+        data: {
+          featureId: newFeature.id,
+          monthlyPrice: newFeature.monthlyPrice,
+          // Sin esto la fila conserva el precio VIEJO y miente a cualquiera que la lea.
+          stripePriceId: newFeature.stripePriceId,
+        },
+        include: { feature: true },
+      })
+    } catch (error) {
+      // 🚨 Stripe YA cambió y la base no: el negocio paga una cosa y aquí dice otra. Esto no se
+      // puede tragar en un log genérico — alguien tiene que conciliarlo a mano.
+      logger.error('🚨 Suscripción cambiada en Stripe pero NO en la base: conciliar a mano', {
+        venueId,
+        venueFeatureId: featureId,
+        subscriptionId: venueFeature.stripeSubscriptionId,
+        deFeature: venueFeature.feature.code,
+        aFeature: newFeature.code,
+        stripePriceId: newFeature.stripePriceId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      throw error
+    }
 
     logger.info('✅ Subscription updated successfully', {
       venueId,
