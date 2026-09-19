@@ -312,3 +312,23 @@ describe('P1 Codex 8 — sólo se declara sobre estados ADMITIDOS, nunca sobre u
     await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'TERMINAL_NOT_BACK' })
   })
 })
+
+describe('P2 Codex 7 — la pertenencia de la ORDEN se comprueba, no se supone', () => {
+  it('🔴 si el candado de la orden no encuentra NINGUNA orden de este venue, NO se declara', async () => {
+    montar()
+    // `orderId` es referencia BLANDA (sin FK): puede apuntar a una orden inexistente o de otro negocio.
+    prismaMock.$queryRaw.mockImplementation(async (frag: any) => {
+      const t = JSON.stringify(frag)
+      if (t.includes('ProviderEventLog')) return []
+      if (t.includes('Order')) return [] // no hay orden autorizada en este venue
+      return [{ id: 'x' }]
+    })
+    await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'ATTEMPT_NOT_ELIGIBLE' })
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
+  })
+
+  it('una solicitud SIN orden ligada sí se declara: no hay nada que comprobar', async () => {
+    montar(filaDelIncidente({ orderId: null }))
+    await expect(reconcileUncharged(identidad, declaracion())).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
+  })
+})

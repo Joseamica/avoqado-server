@@ -243,15 +243,23 @@ export async function reconcileUncharged(
     if (!inicial) throw new UnchargedReconciliationError('ATTEMPT_NOT_FOUND', 404)
 
     // El candado de la orden va acotado al venue: una orden de otro negocio no se bloquea ni se acepta.
-    if (inicial.orderId) {
-      await tx.$queryRaw`SELECT "id" FROM "Order" WHERE "id" = ${inicial.orderId} AND "venueId" = ${identity.venueId} FOR UPDATE`
-    }
+    // 🔴 P2 de Codex (18-sep): y su RESULTADO decide la pertenencia. `orderId` es una referencia BLANDA (sin
+    // FK), así que puede apuntar a una orden inexistente o de otro negocio; antes se lanzaba el FOR UPDATE y
+    // se seguía adelante aunque devolviera cero filas. El precedente sí lo comprueba.
+    const ordenBloqueada = inicial.orderId
+      ? await tx.$queryRaw<
+          { id: string }[]
+        >`SELECT "id" FROM "Order" WHERE "id" = ${inicial.orderId} AND "venueId" = ${identity.venueId} FOR UPDATE`
+      : null
     await tx.$queryRaw`SELECT "id" FROM "TerminalPaymentRequest" WHERE "requestId" = ${declaration.requestId} AND "venueId" = ${identity.venueId} FOR UPDATE`
 
     const row = await tx.terminalPaymentRequest.findFirst({
       where: { requestId: declaration.requestId, venueId: identity.venueId },
     })
     if (!row) throw new UnchargedReconciliationError('ATTEMPT_NOT_FOUND', 404)
+    // La orden tiene que seguir siendo la MISMA y tiene que existir en este negocio.
+    if (row.orderId && (row.orderId !== inicial.orderId || ordenBloqueada?.length !== 1))
+      throw new UnchargedReconciliationError('ATTEMPT_NOT_ELIGIBLE')
 
     // Replay idempotente ANTES de todo lo demás: repetir la misma declaración no re-audita ni reescribe.
     const existente = readUnchargedReconciliation(row.operatorReconciliation)

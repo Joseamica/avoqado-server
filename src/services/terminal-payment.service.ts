@@ -1451,7 +1451,9 @@ export function avisarAprobacionTardiaTrasVentana(
     }`,
     lines: [
       porCajero
-        ? `El banco aprobó un cobro (${ctx.paymentId}) de la solicitud ${ctx.requestId} después de que el cajero declarara que no se presentó tarjeta.`
+        // 🔴 P3 de Codex (18-sep): hay DOS declaraciones y este texto atribuía siempre la de gerencia. Quien
+        // declaró «revisé la terminal y no se cobró» no afirmó que nadie presentara tarjeta.
+        ? `El banco aprobó un cobro (${ctx.paymentId}) de la solicitud ${ctx.requestId} después de que un operador declarara que ese cobro no había pasado.`
         : `El banco aprobó un cobro (${ctx.paymentId}) de la solicitud ${ctx.requestId} después de que la ventana de 30 s la liberara.`,
       otros === null
         ? 'Sin orden ligada: no se pudo contar otros cobros.'

@@ -796,7 +796,14 @@ describe('Ronda 2 · hermano: el correo de la aprobación tardía dice cuál de 
     avisarAprobacionTardiaTrasVentana(cierre('OPERATOR_RECONCILED_NO_CHARGE', 1), ctx)
     const correo = alerta.mock.calls[0][0] as { subject: string; lines: string[] }
     expect(correo.subject).toBe('Cobro aprobado tarde tras la declaración del cajero — T-M')
-    expect(correo.lines[0]).toContain('el cajero declarara que no se presentó tarjeta')
+    // 🔴 El texto cambió el 18-sep, y NO es que la prueba se haya aflojado para que pase (P3 de la auditoría de
+    // Codex): cuando esta prueba se escribió existía UNA sola declaración —la de gerencia, «no se presentó
+    // tarjeta»—. Ahora hay dos que escriben el MISMO `failureCode`, y la nueva afirma otra cosa: que el cajero
+    // MIRÓ la terminal y el cobro no pasó. El texto viejo se lo atribuía a quien nunca lo dijo. Se usa un texto
+    // común que no atribuye ninguna de las dos afirmaciones; el ASUNTO sigue distinguiendo las dos liberaciones,
+    // que es la garantía que esta prueba nació a cuidar y que no se toca.
+    expect(correo.lines[0]).toContain('un operador declarara que ese cobro no había pasado')
+    expect(correo.lines[0]).not.toContain('no se presentó tarjeta')
     expect(correo.lines[0]).toContain('pay-m')
     expect(correo.lines[0]).toContain('REQ-M')
     expect(correo.lines.join(' ')).toContain('La orden order-m tiene 1 cobro(s) con tarjeta')

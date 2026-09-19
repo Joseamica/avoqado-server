@@ -41,7 +41,16 @@ export async function avisarCobroTardioAlCajero(ctx: {
     const declaracion = readUnchargedReconciliation(row?.operatorReconciliation)
     if (!declaracion?.staffId) return
 
-    const pesos = ((row?.amountCents ?? 0) / 100).toFixed(2)
+    // 🔴 P2 de Codex (18-sep): el importe es el REGISTRADO, no el solicitado. La solicitud del incidente
+    // decía $65.00 y el banco aprobó $74.75 con la propina: decir «el banco aprobó $65.00» miente sobre
+    // dinero, y es justo el número con el que el cajero decide si cobra otra vez. Si no se puede leer el
+    // pago no se inventa ninguno: se omite el importe.
+    const pago = await prisma.payment.findFirst({
+      where: { id: ctx.paymentId, venueId: ctx.venueId },
+      select: { amount: true, tipAmount: true },
+    })
+    const totalRegistrado = pago ? Number(pago.amount) + Number(pago.tipAmount ?? 0) : null
+    const importe = totalRegistrado === null ? null : totalRegistrado.toFixed(2)
     const notificacion = await prisma.notification.create({
       data: {
         recipientId: declaracion.staffId,
@@ -50,7 +59,9 @@ export async function avisarCobroTardioAlCajero(ctx: {
         priority: NotificationPriority.HIGH,
         title: 'Apareció el cobro de una venta anterior',
         message:
-          `El banco aprobó $${pesos} de una venta que habías dado por no cobrada. ` +
+          (importe === null
+            ? 'El banco aprobó un cobro de una venta que habías dado por no cobrada. '
+            : `El banco aprobó $${importe} de una venta que habías dado por no cobrada. `) +
           'Avoqado ya lo registró: no lo cobres otra vez.',
         entityType: 'TerminalPaymentRequest',
         entityId: row?.id ?? null,

@@ -32,9 +32,10 @@ const ctx = {
 beforeEach(() => {
   jest.clearAllMocks()
   prismaMock.notification.create.mockResolvedValue({ id: 'notif-1', recipientId: 'staff-cashier', venueId: 'v1' })
+  prismaMock.payment.findFirst.mockResolvedValue({ amount: 65, tipAmount: 9.75 })
   prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue({
     id: 'row-1',
-    amountCents: 7475,
+    amountCents: 6500,
     operatorReconciliation: { kind: 'UNCHARGED_VERIFIED', staffId: 'staff-cashier', id: 'r1' },
   })
 })
@@ -47,7 +48,17 @@ describe('avisarCobroTardioAlCajero', () => {
     expect(data.recipientId).toBe('staff-cashier')
     expect(data.venueId).toBe('v1')
     expect(data.entityId).toBe('row-1')
+    // 🔴 P2 de Codex: el importe es el REGISTRADO (venta + propina del Payment), no el solicitado.
+    // La solicitud decía $65.00; el banco aprobó $74.75 con la propina. Decir «$65.00» miente sobre dinero.
     expect(data.message).toContain('74.75')
+    expect(data.message).toMatch(/no lo cobres otra vez/i)
+  })
+
+  it('🔴 si no se puede leer el Payment, NO inventa un importe: lo omite', async () => {
+    prismaMock.payment.findFirst.mockResolvedValue(null)
+    await avisarCobroTardioAlCajero(ctx)
+    const data = prismaMock.notification.create.mock.calls[0][0].data
+    expect(data.message).not.toMatch(/\$0\.00/)
     expect(data.message).toMatch(/no lo cobres otra vez/i)
   })
 
