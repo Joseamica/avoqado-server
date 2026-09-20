@@ -647,8 +647,24 @@ export interface CreatePlanSubscriptionResult {
  * `STRIPE_WEBHOOK_MAX_RETRIES`.
  */
 export async function estadoDeLaSuscripcion(subscriptionId: string): Promise<Stripe.Subscription.Status> {
+  return (await suscripcionVigente(subscriptionId)).status
+}
+
+/**
+ * La suscripción VIGENTE, con los datos que hacen falta para escribir el acceso.
+ *
+ * 🔴 No basta el `status`: el `trial_end` del EVENTO también puede estar vencido. Un aviso atrasado
+ * de `trialing` sobre un plan que hoy está pagado volvía a escribir el vencimiento viejo y, si ya
+ * había pasado, le quitaba el acceso a quien paga. (8ª auditoría de Codex, 19-sep.)
+ */
+export async function suscripcionVigente(
+  subscriptionId: string,
+): Promise<{ status: Stripe.Subscription.Status; trialEnd: Date | null }> {
   const suscripcion = await stripe.subscriptions.retrieve(subscriptionId)
-  return suscripcion.status
+  return {
+    status: suscripcion.status,
+    trialEnd: suscripcion.trial_end ? new Date(suscripcion.trial_end * 1000) : null,
+  }
 }
 
 export async function asegurarAccesoDelPlan(input: {

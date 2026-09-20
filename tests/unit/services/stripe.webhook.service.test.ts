@@ -20,6 +20,12 @@ jest.mock('@/services/dashboard/creditPack.public.service', () => ({
 jest.mock('@/services/stripe.service', () => ({
   // 6ª auditoría: los handlers consultan el estado VIGENTE antes de activar.
   estadoDeLaSuscripcion: jest.fn().mockResolvedValue('active'),
+  // 8ª auditoría: el handler lee la suscripción VIGENTE (status + trial_end). Este mock DELEGA en
+  // `estadoDeLaSuscripcion`, así que un test que fije el estado controla los dos sin tocar nada más.
+  suscripcionVigente: jest.fn(async function (this: unknown, id: string) {
+    const m = jest.requireMock('@/services/stripe.service') as { estadoDeLaSuscripcion: jest.Mock }
+    return { status: await m.estadoDeLaSuscripcion(id), trialEnd: null }
+  }),
   __esModule: true,
   default: jest.fn(),
   getOrCreateStripeCustomer: jest.fn(),
@@ -104,6 +110,10 @@ jest.mock('@/services/dashboard/notification.dashboard.service', () => ({
 describe('Stripe Webhook Service - Critical Tests', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    // 🔴 `jest.clearAllMocks()` NO resetea implementaciones: sin esto, un `mockResolvedValue`
+    // puesto dentro de un test se filtra a los siguientes de la suite. El default es «al corriente».
+    ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('active')
+    ;(require('@/services/stripe.service').suscripcionVigente as jest.Mock).mockResolvedValue({ status: 'active', trialEnd: null })
     // Default mock for webhookEvent.create - tests can override if needed
     ;(prisma.webhookEvent.create as jest.Mock).mockResolvedValue({
       id: 'webhook_default_id',
@@ -303,6 +313,14 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       })
       ;(prisma.venueFeature.update as jest.Mock).mockResolvedValueOnce({})
 
+      // El estado vigente refleja el status del propio objeto: es el escenario realista.
+      // Las DIVERGENCIAS (aviso atrasado) se prueban a proposito en stripe.webhook.reactivacion.test.ts
+      ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue((mockSubscription as any).status)
+      // …y el trial_end vigente es el del propio objeto (el handler ya no usa el del evento)
+      ;(require('@/services/stripe.service').suscripcionVigente as jest.Mock).mockResolvedValue({
+        status: (mockSubscription as any).status,
+        trialEnd: (mockSubscription as any).trial_end ? new Date((mockSubscription as any).trial_end * 1000) : null,
+      })
       await handleSubscriptionUpdated(mockSubscription)
 
       // Should activate feature with no expiration (paid subscription).
@@ -342,6 +360,14 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       })
       ;(prisma.venueFeature.update as jest.Mock).mockResolvedValueOnce({})
 
+      // El estado vigente refleja el status del propio objeto: es el escenario realista.
+      // Las DIVERGENCIAS (aviso atrasado) se prueban a proposito en stripe.webhook.reactivacion.test.ts
+      ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue((mockSubscription as any).status)
+      // …y el trial_end vigente es el del propio objeto (el handler ya no usa el del evento)
+      ;(require('@/services/stripe.service').suscripcionVigente as jest.Mock).mockResolvedValue({
+        status: (mockSubscription as any).status,
+        trialEnd: (mockSubscription as any).trial_end ? new Date((mockSubscription as any).trial_end * 1000) : null,
+      })
       await handleSubscriptionUpdated(mockSubscription)
 
       // Should deactivate feature
@@ -376,6 +402,14 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       })
       ;(prisma.venueFeature.update as jest.Mock).mockResolvedValueOnce({})
 
+      // El estado vigente refleja el status del propio objeto: es el escenario realista.
+      // Las DIVERGENCIAS (aviso atrasado) se prueban a proposito en stripe.webhook.reactivacion.test.ts
+      ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue((mockSubscription as any).status)
+      // …y el trial_end vigente es el del propio objeto (el handler ya no usa el del evento)
+      ;(require('@/services/stripe.service').suscripcionVigente as jest.Mock).mockResolvedValue({
+        status: (mockSubscription as any).status,
+        trialEnd: (mockSubscription as any).trial_end ? new Date((mockSubscription as any).trial_end * 1000) : null,
+      })
       await handleSubscriptionUpdated(mockSubscription)
 
       // Should activate with trial endDate
@@ -407,6 +441,14 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         venue: { name: 'Test', status: 'ACTIVE' },
       })
 
+      // El estado vigente refleja el status del propio objeto: es el escenario realista.
+      // Las DIVERGENCIAS (aviso atrasado) se prueban a proposito en stripe.webhook.reactivacion.test.ts
+      ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue((mockSubscription as any).status)
+      // …y el trial_end vigente es el del propio objeto (el handler ya no usa el del evento)
+      ;(require('@/services/stripe.service').suscripcionVigente as jest.Mock).mockResolvedValue({
+        status: (mockSubscription as any).status,
+        trialEnd: (mockSubscription as any).trial_end ? new Date((mockSubscription as any).trial_end * 1000) : null,
+      })
       await handleSubscriptionUpdated(mockSubscription)
 
       // Should NOT deactivate - Stripe will retry payment
@@ -433,6 +475,14 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       })
       ;(prisma.venueFeature.update as jest.Mock).mockResolvedValueOnce({})
 
+      // El estado vigente refleja el status del propio objeto: es el escenario realista.
+      // Las DIVERGENCIAS (aviso atrasado) se prueban a proposito en stripe.webhook.reactivacion.test.ts
+      ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue((mockSubscription as any).status)
+      // …y el trial_end vigente es el del propio objeto (el handler ya no usa el del evento)
+      ;(require('@/services/stripe.service').suscripcionVigente as jest.Mock).mockResolvedValue({
+        status: (mockSubscription as any).status,
+        trialEnd: (mockSubscription as any).trial_end ? new Date((mockSubscription as any).trial_end * 1000) : null,
+      })
       await handleSubscriptionUpdated(mockSubscription)
 
       // Should deactivate incomplete subscription
@@ -548,6 +598,14 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       // VenueFeature not found
       ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValueOnce(null)
 
+      // El estado vigente refleja el status del propio objeto: es el escenario realista.
+      // Las DIVERGENCIAS (aviso atrasado) se prueban a proposito en stripe.webhook.reactivacion.test.ts
+      ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue((mockSubscription as any).status)
+      // …y el trial_end vigente es el del propio objeto (el handler ya no usa el del evento)
+      ;(require('@/services/stripe.service').suscripcionVigente as jest.Mock).mockResolvedValue({
+        status: (mockSubscription as any).status,
+        trialEnd: (mockSubscription as any).trial_end ? new Date((mockSubscription as any).trial_end * 1000) : null,
+      })
       await handleSubscriptionUpdated(mockSubscription)
 
       // Should NOT throw error, just log warning

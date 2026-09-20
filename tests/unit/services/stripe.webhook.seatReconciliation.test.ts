@@ -22,6 +22,12 @@ jest.mock('@/services/dashboard/seatReconciliation.service', () => ({
 jest.mock('@/services/stripe.service', () => ({
   // 6ª auditoría: los handlers consultan el estado VIGENTE antes de activar.
   estadoDeLaSuscripcion: jest.fn().mockResolvedValue('active'),
+  // 8ª auditoría: el handler lee la suscripción VIGENTE (status + trial_end). Este mock DELEGA en
+  // `estadoDeLaSuscripcion`, así que un test que fije el estado controla los dos sin tocar nada más.
+  suscripcionVigente: jest.fn(async function (this: unknown, id: string) {
+    const m = jest.requireMock('@/services/stripe.service') as { estadoDeLaSuscripcion: jest.Mock }
+    return { status: await m.estadoDeLaSuscripcion(id), trialEnd: null }
+  }),
   __esModule: true,
   default: jest.fn(),
   handlePaymentFailure: jest.fn(),
@@ -78,6 +84,9 @@ function baseplanFeature(overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   jest.clearAllMocks()
+    // 🔴 `jest.clearAllMocks()` NO resetea implementaciones: sin esto, un `mockResolvedValue`
+    // puesto dentro de un test se filtra a los siguientes de la suite. El default es «al corriente».
+    ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('active')
   ;(prisma.venueFeature.update as jest.Mock).mockResolvedValue({})
   ;(prisma.venueFeature.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
 })
@@ -85,6 +94,8 @@ beforeEach(() => {
 describe('stripe webhook → seat reconciliation hook', () => {
   it('runs executeSeatReconciliation on a base-plan paid→Free transition (status=canceled)', async () => {
     ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue(baseplanFeature())
+
+    ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('canceled')
 
     await handleSubscriptionUpdated({ id: 'sub_1', status: 'canceled' } as Stripe.Subscription)
 
@@ -96,6 +107,8 @@ describe('stripe webhook → seat reconciliation hook', () => {
     ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue(
       baseplanFeature({ feature: { code: 'CHATBOT', name: 'Chatbot Add-on' } }),
     )
+
+    ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('canceled')
 
     await handleSubscriptionUpdated({ id: 'sub_2', status: 'canceled' } as Stripe.Subscription)
 
@@ -116,6 +129,8 @@ describe('stripe webhook → seat reconciliation hook', () => {
     ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue(baseplanFeature())
     execMock.mockRejectedValueOnce(new Error('boom'))
 
+    ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('canceled')
+
     await expect(handleSubscriptionUpdated({ id: 'sub_4', status: 'canceled' } as Stripe.Subscription)).resolves.toBeUndefined()
     expect(execMock).toHaveBeenCalledWith('venue_1')
   })
@@ -124,6 +139,8 @@ describe('stripe webhook → seat reconciliation hook', () => {
 describe('stripe webhook → seat REACTIVATION hook (re-upgrade to paid plan)', () => {
   it('runs reactivateSeatCapDeactivated on a base-plan Free→paid transition (status=active)', async () => {
     ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue(baseplanFeature())
+
+    ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('active')
 
     await handleSubscriptionUpdated({ id: 'sub_5', status: 'active' } as Stripe.Subscription)
 
@@ -137,6 +154,8 @@ describe('stripe webhook → seat REACTIVATION hook (re-upgrade to paid plan)', 
       baseplanFeature({ feature: { code: 'CHATBOT', name: 'Chatbot Add-on' } }),
     )
 
+    ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('active')
+
     await handleSubscriptionUpdated({ id: 'sub_6', status: 'active' } as Stripe.Subscription)
 
     expect(prisma.venueFeature.update).toHaveBeenCalled()
@@ -146,6 +165,8 @@ describe('stripe webhook → seat REACTIVATION hook (re-upgrade to paid plan)', 
   it('a reactivation failure never throws (webhook must not fail)', async () => {
     ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue(baseplanFeature())
     reactivateMock.mockRejectedValueOnce(new Error('boom'))
+
+    ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('active')
 
     await expect(handleSubscriptionUpdated({ id: 'sub_7', status: 'active' } as Stripe.Subscription)).resolves.toBeUndefined()
     expect(reactivateMock).toHaveBeenCalledWith('venue_1')

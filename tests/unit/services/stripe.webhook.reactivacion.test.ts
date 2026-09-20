@@ -31,6 +31,11 @@ jest.mock('@/services/stripe.service', () => ({
   generateBillingPortalUrl: jest.fn(),
   asegurarAccesoDelPlan: jest.fn(),
   estadoDeLaSuscripcion: jest.fn(),
+  // 🔴 9ª auditoría: este mock es INDEPENDIENTE de `estadoDeLaSuscripcion`, no delega en él.
+  // Delegar ataba las dos consultas a la misma respuesta y volvía INVISIBLE el defecto que Codex
+  // reprodujo: `subscription.updated` consultaba Stripe DOS veces (guard y rama) y podía decidir
+  // con una foto y escribir con la otra. Separados, un test puede hacerlos divergir a propósito.
+  suscripcionVigente: jest.fn(),
 }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -40,6 +45,10 @@ jest.mock('@/utils/prismaClient', () => ({
     staffVenue: { findMany: jest.fn() },
     venue: { findUnique: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
   },
+}))
+jest.mock('@/communication/sockets', () => ({
+  __esModule: true,
+  default: { getServer: jest.fn(() => ({})), broadcastToVenue: jest.fn() },
 }))
 jest.mock('@/config/logger', () => ({ __esModule: true, default: { info: jest.fn(), warn: jest.fn(), error: jest.fn() } }))
 jest.mock('@/services/email.service', () => ({ __esModule: true, default: { sendTrialEndingEmail: jest.fn() } }))
@@ -76,8 +85,12 @@ beforeEach(() => {
   ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue(planSuspendido)
   ;(prisma.venueFeature.update as jest.Mock).mockResolvedValue({})
   // Por defecto Stripe dice que está al corriente: el caso normal es «pagó y se recupera».
+  // 🔴 Se restablecen las DOS, explícitamente: `jest.clearAllMocks()` borra el historial de llamadas
+  // pero NO las implementaciones, así que un `mockResolvedValue` de un test se filtraba al siguiente.
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('active')
+  const stripeSvc = require('@/services/stripe.service')
+  ;(stripeSvc.estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('active')
+  ;(stripeSvc.suscripcionVigente as jest.Mock).mockResolvedValue({ status: 'active', trialEnd: null })
 })
 
 describe('recuperar el pago devuelve el ACCESO, no sólo el flag `active`', () => {
@@ -184,7 +197,6 @@ describe('un registro ACTIVO pero SUSPENDIDO sigue necesitando rescate', () => {
     expect(escritura?.data?.suspendedAt).toBeNull()
   })
 })
-
 
 /**
  * 🔴 QUINTA AUDITORÍA (Codex xhigh, 19-sep) — la RAÍZ de cinco rondas de parches.
@@ -295,5 +307,184 @@ describe('qué estado de Stripe autoriza qué', () => {
     await handleInvoicePaymentSucceeded({ ...facturaPagada } as never)
 
     expect(estadoDeLaSuscripcion).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * 🔴 AUDITORÍAS 7ª y 8ª (Codex xhigh, 19-sep): `subscription.updated` decidía —y ESCRIBÍA— con la
+ * foto que traía el evento, que puede estar vencida porque Stripe no ordena las entregas.
+ *
+ * Ahora tanto la rama del `switch` como los datos que se escriben salen del estado VIGENTE
+ * (`suscripcionVigente`: status + trial_end). Los cinco cruces que se reprodujeron:
+ */
+describe('subscription.updated: manda el estado VIGENTE, no el del evento', () => {
+  const sub = (status: string, trialEnd: number | null = null) =>
+    ({ id: 'sub_pro', status, trial_end: trialEnd, current_period_end: 1790000000 }) as never
+
+  const vigente = async (status: string, trialEnd: Date | null = null) => {
+    const m = await import('@/services/stripe.service')
+    ;(m.estadoDeLaSuscripcion as jest.Mock).mockResolvedValue(status)
+    ;(m.suscripcionVigente as jest.Mock).mockResolvedValue({ status, trialEnd })
+  }
+  const escrituras = () => (prisma.venueFeature.update as jest.Mock).mock.calls.map(c => c[0]?.data ?? {})
+
+  it('🔴 aviso atrasado `trialing` sobre un CANCELADO: no reactiva', async () => {
+    const { handleSubscriptionUpdated } = await import('@/services/stripe.webhook.service')
+    ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({ ...planSuspendido, active: false, suspendedAt: null })
+    await vigente('canceled')
+
+    await handleSubscriptionUpdated(sub('trialing'))
+
+    // Llegó hasta la decisión (consultó el vigente) y aun así no reactivó: sin esta primera
+    // aserción la prueba pasaría también si el manejador hubiera salido antes de decidir nada.
+    expect((await import('@/services/stripe.service')).suscripcionVigente).toHaveBeenCalledTimes(1)
+    expect(escrituras().some(d => d.active === true)).toBe(false)
+  })
+
+  it('🔴 aviso atrasado `unpaid` con Stripe al corriente: NO desactiva a quien paga', async () => {
+    const { handleSubscriptionUpdated } = await import('@/services/stripe.webhook.service')
+    ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({ ...planSuspendido, active: true, suspendedAt: null })
+    await vigente('active')
+
+    await handleSubscriptionUpdated(sub('unpaid'))
+
+    expect((await import('@/services/stripe.service')).suscripcionVigente).toHaveBeenCalledTimes(1)
+    expect(escrituras().some(d => d.active === false)).toBe(false)
+  })
+
+  it('🔴 aviso atrasado `incomplete` con Stripe al corriente: tampoco desactiva (8ª auditoría)', async () => {
+    const { handleSubscriptionUpdated } = await import('@/services/stripe.webhook.service')
+    ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({ ...planSuspendido, active: true, suspendedAt: null })
+    await vigente('active')
+
+    await handleSubscriptionUpdated(sub('incomplete'))
+
+    expect((await import('@/services/stripe.service')).suscripcionVigente).toHaveBeenCalledTimes(1)
+    expect(escrituras().some(d => d.active === false)).toBe(false)
+  })
+
+  it('🔴 aviso atrasado `trialing` sobre un plan HOY PAGADO: no le repone un vencimiento viejo (8ª)', async () => {
+    const { handleSubscriptionUpdated } = await import('@/services/stripe.webhook.service')
+    ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({ ...planSuspendido, active: true, suspendedAt: null })
+    await vigente('active')
+
+    const vencidoHaceUnMes = Math.floor(new Date('2026-08-19T00:00:00Z').getTime() / 1000)
+    await handleSubscriptionUpdated(sub('trialing', vencidoHaceUnMes))
+
+    // Va por la rama `active` (la vigente): el update DEBE ocurrir, y deja el plan sin vencimiento
+    // —no con uno ya pasado—. Exigir la escritura es lo que impide que la prueba pase en vacío.
+    expect(prisma.venueFeature.update).toHaveBeenCalledTimes(1)
+    expect(escrituras()[0]).toHaveProperty('endDate', null)
+  })
+
+  it('🔴 aviso `active` con la suscripción HOY en trial: no le borra el vencimiento (8ª)', async () => {
+    const { handleSubscriptionUpdated } = await import('@/services/stripe.webhook.service')
+    ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({ ...planSuspendido, active: true, suspendedAt: null })
+    const finDelTrial = new Date('2026-10-01T00:00:00Z')
+    await vigente('trialing', finDelTrial)
+
+    await handleSubscriptionUpdated(sub('active'))
+
+    // Va por la rama `trialing` (la vigente): escribe EL vencimiento vigente, nunca `null`.
+    expect(prisma.venueFeature.update).toHaveBeenCalledTimes(1)
+    expect(escrituras()[0]).toHaveProperty('endDate', finDelTrial)
+  })
+
+  /**
+   * 🔴 9ª AUDITORÍA (Codex xhigh, 19-sep) — EL BLOQUEANTE: dos consultas a Stripe en el mismo
+   * manejador son dos fotos distintas. El guard preguntaba por su cuenta (`procedeActivar` →
+   * `estadoDeLaSuscripcion`) mientras el `switch` usaba la respuesta de `suscripcionVigente`:
+   * entre una y otra el estado puede cambiar y se autoriza con una foto y se escribe con la otra.
+   *
+   * Las dos pruebas siguientes hacen DIVERGIR los mocks a propósito — algo que era imposible
+   * mientras uno delegaba en el otro.
+   */
+  it('🔴 con el registro SUSPENDIDO y las dos consultas en desacuerdo, NO deja `active:true` con `suspendedAt` puesto', async () => {
+    const { handleSubscriptionUpdated } = await import('@/services/stripe.webhook.service')
+    const m = await import('@/services/stripe.service')
+    ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({ ...planSuspendido })
+    // Vigente: sigue en trial (no salda la deuda). La consulta VIEJA del guard decía 'active'.
+    ;(m.suscripcionVigente as jest.Mock).mockResolvedValue({ status: 'trialing', trialEnd: null })
+    ;(m.estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('active')
+
+    await handleSubscriptionUpdated(sub('trialing'))
+
+    // Con el defecto: el guard pasaba con 'active' y la rama 'trialing' escribía `active:true`
+    // SIN limpiar `suspendedAt` ⇒ el negocio paga y el resolver le sigue negando el acceso.
+    expect(escrituras().some(d => d.active === true)).toBe(false)
+  })
+
+  it('🔴 consulta a Stripe UNA sola vez: el guard no puede pedir su propia foto', async () => {
+    const { handleSubscriptionUpdated } = await import('@/services/stripe.webhook.service')
+    const m = await import('@/services/stripe.service')
+    ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({ ...planSuspendido, active: false, suspendedAt: null })
+    ;(m.suscripcionVigente as jest.Mock).mockResolvedValue({ status: 'active', trialEnd: null })
+
+    await handleSubscriptionUpdated(sub('active'))
+
+    expect(m.suscripcionVigente as jest.Mock).toHaveBeenCalledTimes(1)
+    expect(m.estadoDeLaSuscripcion as jest.Mock).not.toHaveBeenCalled()
+  })
+
+  it('🔴 el socket avisa con el estado VIGENTE, no con el del aviso atrasado', async () => {
+    const { handleSubscriptionUpdated } = await import('@/services/stripe.webhook.service')
+    const sockets = (await import('@/communication/sockets')).default as unknown as { broadcastToVenue: jest.Mock }
+    ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({ ...planSuspendido, active: true, suspendedAt: null })
+    await vigente('canceled')
+
+    // El aviso llega diciendo 'active' aunque la suscripción ya está cancelada.
+    await handleSubscriptionUpdated(sub('active'))
+
+    // Se desactiva (manda el vigente) y el aviso al dashboard NO puede decir 'active': sería un
+    // evento `subscription.deactivated` que se contradice a sí mismo.
+    const emitido = sockets.broadcastToVenue.mock.calls.find(c => c[1] === 'subscription.deactivated')
+    expect(emitido).toBeDefined()
+    expect(emitido![2]).toHaveProperty('status', 'canceled')
+  })
+
+  it('un moroso REAL sí se desactiva: el candado no vuelve inerte al handler', async () => {
+    const { handleSubscriptionUpdated } = await import('@/services/stripe.webhook.service')
+    ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({ ...planSuspendido, active: true, suspendedAt: null })
+    await vigente('unpaid')
+
+    await handleSubscriptionUpdated(sub('unpaid'))
+
+    expect(escrituras().some(d => d.active === false)).toBe(true)
+  })
+})
+
+/**
+ * 🔴 AUDITORÍA 7ª/8ª: la primera activación en TRIAL conservaba… o no… su vencimiento.
+ *
+ * `endDate: null` significa «pagado, sin vencimiento». Escribirlo siempre convertía una prueba
+ * gratuita en acceso permanente. Ahora se reserva para `active`.
+ *
+ * ⚠️ Las aserciones son ESTRICTAS a propósito: Codex señaló que `not.toBeNull()` acepta `undefined`
+ * y pasa incluso si no hubo escritura. Aquí se exige que el update ocurriera Y qué escribió.
+ */
+describe('una activación en TRIAL conserva su vencimiento', () => {
+  it('🔴 con estado vigente `trialing` NO escribe `endDate: null`', async () => {
+    ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({ ...planSuspendido, active: false, suspendedAt: null })
+    const m = await import('@/services/stripe.service')
+    ;(m.estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('trialing')
+
+    await handleInvoicePaymentSucceeded({ ...facturaPagada } as never)
+
+    expect(prisma.venueFeature.update).toHaveBeenCalled()
+    const data = (prisma.venueFeature.update as jest.Mock).mock.calls[0][0].data
+    expect(data.active).toBe(true)
+    expect(Object.keys(data)).not.toContain('endDate')
+  })
+
+  it('con estado vigente `active` sí lo borra (plan pagado, sin vencimiento)', async () => {
+    ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({ ...planSuspendido, active: false, suspendedAt: null })
+    const m = await import('@/services/stripe.service')
+    ;(m.estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('active')
+
+    await handleInvoicePaymentSucceeded({ ...facturaPagada } as never)
+
+    expect(prisma.venueFeature.update).toHaveBeenCalled()
+    const data = (prisma.venueFeature.update as jest.Mock).mock.calls[0][0].data
+    expect(data).toHaveProperty('endDate', null)
   })
 })

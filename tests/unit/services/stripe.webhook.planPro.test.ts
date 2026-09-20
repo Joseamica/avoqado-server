@@ -28,6 +28,12 @@ jest.mock('@/services/dashboard/creditPack.public.service', () => ({
 jest.mock('@/services/stripe.service', () => ({
   // 6ª auditoría: los handlers consultan el estado VIGENTE antes de activar.
   estadoDeLaSuscripcion: jest.fn().mockResolvedValue('active'),
+  // 8ª auditoría: el handler lee la suscripción VIGENTE (status + trial_end). Este mock DELEGA en
+  // `estadoDeLaSuscripcion`, así que un test que fije el estado controla los dos sin tocar nada más.
+  suscripcionVigente: jest.fn(async function (this: unknown, id: string) {
+    const m = jest.requireMock('@/services/stripe.service') as { estadoDeLaSuscripcion: jest.Mock }
+    return { status: await m.estadoDeLaSuscripcion(id), trialEnd: null }
+  }),
   __esModule: true,
   default: jest.fn(),
   getOrCreateStripeCustomer: jest.fn(),
@@ -110,6 +116,9 @@ const planProVenueFeature = {
 describe('Stripe Webhook — PLAN_PRO base plan deactivation on terminal failure', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    // 🔴 `jest.clearAllMocks()` NO resetea implementaciones: sin esto, un `mockResolvedValue`
+    // puesto dentro de un test se filtra a los siguientes de la suite. El default es «al corriente».
+    ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('active')
   })
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -132,6 +141,9 @@ describe('Stripe Webhook — PLAN_PRO base plan deactivation on terminal failure
     ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValueOnce(planProVenueFeature)
     ;(prisma.venueFeature.update as jest.Mock).mockResolvedValueOnce({})
 
+    // El estado vigente refleja el status del propio objeto: es el escenario realista.
+    // Las DIVERGENCIAS (aviso atrasado) se prueban a proposito en stripe.webhook.reactivacion.test.ts
+    ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue((mockSubscription as any).status)
     await handleSubscriptionUpdated(mockSubscription)
 
     // The mapped PLAN_PRO VenueFeature must be deactivated → venue falls back to basic feature set.
@@ -158,6 +170,9 @@ describe('Stripe Webhook — PLAN_PRO base plan deactivation on terminal failure
     ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValueOnce(planProVenueFeature)
     ;(prisma.venueFeature.update as jest.Mock).mockResolvedValueOnce({})
 
+    // El estado vigente refleja el status del propio objeto: es el escenario realista.
+    // Las DIVERGENCIAS (aviso atrasado) se prueban a proposito en stripe.webhook.reactivacion.test.ts
+    ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue((mockSubscription as any).status)
     await handleSubscriptionUpdated(mockSubscription)
 
     expect(prisma.venueFeature.update).toHaveBeenCalledWith({
@@ -189,6 +204,9 @@ describe('Stripe Webhook — PLAN_PRO base plan deactivation on terminal failure
       paymentFailureCount: 1,
     })
 
+    // El estado vigente refleja el status del propio objeto: es el escenario realista.
+    // Las DIVERGENCIAS (aviso atrasado) se prueban a proposito en stripe.webhook.reactivacion.test.ts
+    ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue((mockSubscription as any).status)
     await handleSubscriptionUpdated(mockSubscription)
 
     // Stripe will keep retrying — venue keeps PLAN_PRO until terminal failure.
@@ -207,6 +225,9 @@ describe('Stripe Webhook — PLAN_PRO base plan deactivation on terminal failure
 
     ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValueOnce(null)
 
+    // El estado vigente refleja el status del propio objeto: es el escenario realista.
+    // Las DIVERGENCIAS (aviso atrasado) se prueban a proposito en stripe.webhook.reactivacion.test.ts
+    ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue((mockSubscription as any).status)
     await handleSubscriptionUpdated(mockSubscription)
 
     expect(prisma.venueFeature.update).not.toHaveBeenCalled()

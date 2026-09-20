@@ -12,7 +12,13 @@ import emailService from './email.service'
 import { resolvePlanNotificationTarget } from './access/planNotification.service'
 import { createNotification } from './dashboard/notification.dashboard.service'
 import { NotificationType, NotificationChannel, NotificationPriority, StaffRole } from '@prisma/client'
-import { handlePaymentFailure, generateBillingPortalUrl, fulfillPlanCheckout, estadoDeLaSuscripcion } from './stripe.service'
+import {
+  handlePaymentFailure,
+  generateBillingPortalUrl,
+  fulfillPlanCheckout,
+  estadoDeLaSuscripcion,
+  suscripcionVigente,
+} from './stripe.service'
 import { PAID_PLAN_TIER_CODES } from './access/basePlan.service'
 import socketManager from '../communication/sockets'
 import { tokenBudgetService } from './dashboard/token-budget.service'
@@ -99,15 +105,30 @@ async function runSeatReactivationSafely(venueId: string): Promise<void> {
  * Nota: la suspensión ADMINISTRATIVA (`Venue.status = ADMIN_SUSPENDED`) se resuelve antes, en el
  * guard de `OPERATIONAL_VENUE_STATUSES`.
  */
+function veredictoDeActivacion(venueFeature: { active: boolean; suspendedAt: Date | null }, estado: Stripe.Subscription.Status): boolean {
+  // Con una suspensión puesta, levantarla exige `active`: un trial no salda una deuda.
+  if (venueFeature.suspendedAt) return estado === 'active'
+  return estado === 'active' || estado === 'trialing'
+}
+
+/**
+ * 🔴 Quien YA consultó el estado vigente NO debe llamar a esta función: debe llamar a
+ * `veredictoDeActivacion` con ESA respuesta. Dos `retrieve` en el mismo manejador son dos fotos
+ * distintas de Stripe, y entre ellas el estado puede cambiar: el guard autorizaría con una y la
+ * rama escribiría con la otra. Reproducido por Codex en la 9ª auditoría (19-sep): primera consulta
+ * `trialing`, segunda `active`, registro suspendido ⇒ el guard deja pasar, corre la rama de trial y
+ * el registro queda `active:true` CON `suspendedAt` — pagando sin acceso, que es el defecto que la
+ * 4ª auditoría ya había cerrado. Y al revés: primera `active`, segunda `trialing`, registro
+ * inactivo ⇒ le borra el vencimiento.
+ */
 async function procedeActivar(
   venueFeature: { active: boolean; suspendedAt: Date | null },
   subscriptionId: string,
-): Promise<boolean> {
-  if (venueFeature.active && !venueFeature.suspendedAt) return true
+): Promise<{ procede: boolean; estado?: Stripe.Subscription.Status }> {
+  if (venueFeature.active && !venueFeature.suspendedAt) return { procede: true }
 
   const estado = await estadoDeLaSuscripcion(subscriptionId)
-  if (venueFeature.suspendedAt) return estado === 'active'
-  return estado === 'active' || estado === 'trialing'
+  return { procede: veredictoDeActivacion(venueFeature, estado), estado }
 }
 
 /**
@@ -159,8 +180,29 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
     return
   }
 
-  // 🔴 Mismo criterio que en el pago: con una suspensión puesta manda el estado vigente en Stripe.
-  if (status === 'active' && !(await procedeActivar(venueFeature, subscriptionId))) {
+  // 🔴 TODO lo que sigue —qué rama se toma Y qué se escribe— sale del estado VIGENTE, no del
+  // evento. El `status` y el `trial_end` que trae el aviso son una foto que puede estar vencida, y
+  // Stripe no ordena las entregas. Cubrir sólo algunas ramas dejaba huecos reproducidos en las
+  // auditorías 7ª y 8ª (Codex, 19-sep):
+  //   · cancelado + aviso atrasado `trialing` ⇒ REACTIVABA sin consultar;
+  //   · Stripe `active` + aviso atrasado `unpaid` o `incomplete` ⇒ DESACTIVABA a quien paga;
+  //   · suspendido + `trialing` ⇒ `active:true` con `suspendedAt` puesto (bloqueado y fuera del cron);
+  //   · aviso atrasado `trialing` sobre un plan ya pagado ⇒ le reponía un vencimiento YA PASADO;
+  //   · aviso `active` con la suscripción hoy en `trialing` ⇒ le borraba el vencimiento.
+  const vigente = await suscripcionVigente(subscriptionId)
+  const statusVigente = vigente.status
+  if (statusVigente !== status) {
+    logger.warn('⚠️ Webhook: subscription.updated llega con un status vencido; manda el vigente', {
+      subscriptionId,
+      statusDelEvento: status,
+      statusVigente,
+      venueId: venueFeature.venueId,
+    })
+  }
+
+  // 🔴 El guard decide con la MISMA respuesta que usa el switch de abajo (`vigente`), nunca con una
+  // segunda consulta: ver el comentario de `procedeActivar`.
+  if ((statusVigente === 'active' || statusVigente === 'trialing') && !veredictoDeActivacion(venueFeature, statusVigente)) {
     logger.warn('⚠️ Webhook: subscription.updated sin estar al corriente; la suspensión se mantiene', {
       subscriptionId,
       venueId: venueFeature.venueId,
@@ -170,7 +212,7 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
   }
 
   // Update VenueFeature based on subscription status
-  switch (status) {
+  switch (statusVigente) {
     case 'active':
       // Trial ended, subscription is now active (paid)
       await prisma.venueFeature.update({
@@ -224,13 +266,13 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
         where: { id: venueFeature.id },
         data: {
           active: true,
-          endDate: trialEnd,
+          endDate: vigente.trialEnd,
         },
       })
       logger.info('✅ Webhook: Feature in trial', {
         venueId: venueFeature.venueId,
         featureCode: venueFeature.feature.code,
-        trialEnd,
+        trialEnd: vigente.trialEnd,
       })
       break
 
@@ -257,7 +299,7 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
         venueId: venueFeature.venueId,
         featureCode: venueFeature.feature.code,
         subscriptionId,
-        status,
+        status: statusVigente,
       })
 
       // 🔔 Emit socket event for real-time UI update
@@ -266,7 +308,7 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
           featureId: venueFeature.featureId,
           featureCode: venueFeature.feature.code,
           subscriptionId,
-          status,
+          status: statusVigente,
           timestamp: new Date(),
         })
         logger.info('📡 Socket event emitted: subscription.deactivated', {
@@ -296,12 +338,12 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
         venueId: venueFeature.venueId,
         featureCode: venueFeature.feature.code,
         subscriptionId,
-        status,
+        status: statusVigente,
       })
       break
 
     default:
-      logger.info('ℹ️ Webhook: Unhandled subscription status', { status, subscriptionId })
+      logger.info('ℹ️ Webhook: Unhandled subscription status', { status: statusVigente, statusDelEvento: status, subscriptionId })
   }
 }
 
@@ -452,7 +494,8 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
   // 🔴 Con una suspensión puesta, la levanta el ESTADO VIGENTE en Stripe, no este evento. Y si no
   // procede, no se escribe NADA: dejar `active: true` con `suspendedAt` puesto crea un registro
   // contradictorio que el resolver niega y que ningún job rescata. (Auditorías 4ª y 5ª, 19-sep.)
-  if (!(await procedeActivar(venueFeature, subscriptionIdStr))) {
+  const veredicto = await procedeActivar(venueFeature, subscriptionIdStr)
+  if (!veredicto.procede) {
     logger.warn('⚠️ Webhook: la suscripción NO está al corriente en Stripe; la suspensión se mantiene', {
       invoiceId: invoice.id,
       venueId: venueFeature.venueId,
@@ -477,7 +520,16 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
       //
       // `paymentFailureCount` vuelve a cero por lo mismo: si se queda en 3, el siguiente tropiezo
       // de cobro suspende de inmediato en vez de darle su periodo de gracia otra vez.
-      data: { active: true, endDate: null, suspendedAt: null, paymentFailureCount: 0, gracePeriodEndsAt: null },
+      // 🔴 `endDate: null` significa «pagado, sin vencimiento». Reservarlo para `active`: en
+      // `trialing` borrarlo convertía una prueba gratuita en acceso permanente.
+      // (7ª auditoría de Codex, 19-sep.)
+      data: {
+        active: true,
+        ...(veredicto.estado === 'trialing' ? {} : { endDate: null }),
+        suspendedAt: null,
+        paymentFailureCount: 0,
+        gracePeriodEndsAt: null,
+      },
     })
     logger.info('✅ Webhook: Feature activated after successful payment', {
       venueId: venueFeature.venueId,
