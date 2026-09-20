@@ -330,7 +330,15 @@ describe('RONDA 4 — sólo se declara sobre un cobro que la terminal RECIBIÓ',
     // quitar todas esas condiciones conserve las mismas barreras». El caso que se abrió: un ACK perdido
     // deja la fila en UNKNOWN a los 5 segundos, con el cobro quizá corriendo, y la declaración pasaba.
     // La barrera nueva es EVIDENCIA DEL APARATO, no tiempo: sin acuse y sin respuesta, no se declara.
-    montar(filaDelIncidente({ acknowledgedAt: null, resultJson: null }))
+    // La terminal SÍ sabe acusar (`ackVersion: 1`) y no lo hizo: su silencio es información.
+    montar(
+      filaDelIncidente({
+        acknowledgedAt: null,
+        resultJson: null,
+        lastDeliveredAt: new Date(),
+        deliveryProvenance: { deliveries: [{ protocol: 'DURABLE', ackVersion: 1, at: new Date().toISOString() }] },
+      }),
+    )
     await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'TERMINAL_NEVER_ANSWERED' })
     expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
   })
@@ -347,7 +355,49 @@ describe('RONDA 4 — sólo se declara sobre un cobro que la terminal RECIBIÓ',
   })
 
   it('🔴 un sobre VACÍO no cuenta como respuesta', async () => {
-    montar(filaDelIncidente({ acknowledgedAt: null, resultJson: {} }))
+    montar(filaDelIncidente({ acknowledgedAt: null, resultJson: {}, deliveryProvenance: { deliveries: [] } }))
     await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'TERMINAL_NEVER_ANSWERED' })
+  })
+
+  // ── El hueco que destapó el QA en la Sunmi (19-sep), y que esta barrera había creado ──────────
+  //
+  // 🔴 Con una terminal de APK ANTIGUO (anterior a la 2.9.0 del 3-sep, que fue la que estrenó el
+  // acuse) la entrega es LEGACY: el servidor deja `lastDeliveredAt` y NUNCA `acknowledgedAt`.
+  // Medido en hardware: esa fila no la libera la SONDA —NOT_FOUND sólo suelta procedencia `[]`— ni
+  // la liberaba esta declaración. El cajero se quedaba EXACTAMENTE en el callejón sin salida del
+  // 18-sep, que es lo que esta función existe para quitar.
+  //
+  // La barrera correcta no es «acusó», es «CONSTA QUE SALIÓ». Lo que sigue bloqueado es la fila que
+  // nunca se entregó a nadie: ahí el cobro puede estar en tránsito y la mirada del cajero no lo revoca.
+
+  it('🔴 entregada por el camino LEGACY (sin acuse) SÍ se declara: consta que salió', async () => {
+    montar(
+      filaDelIncidente({
+        acknowledgedAt: null,
+        resultJson: null,
+        lastDeliveredAt: new Date(),
+        deliveryProvenance: { deliveries: [{ protocol: 'LEGACY', ackVersion: 0, at: new Date().toISOString() }] },
+      }),
+    )
+    await expect(reconcileUncharged(identidad, declaracion())).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
+  })
+
+  it('🔴 procedencia DESCONOCIDA (null, fila anterior a la columna) también se declara', async () => {
+    // Regla del repo: `null` es «no se sabe», y NUNCA se lee como «no entregada».
+    montar(filaDelIncidente({ acknowledgedAt: null, resultJson: null, lastDeliveredAt: new Date(), deliveryProvenance: null }))
+    await expect(reconcileUncharged(identidad, declaracion())).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
+  })
+
+  it('🔴 creada y NUNCA entregada a nadie sigue bloqueada: el cobro podría ir en camino', async () => {
+    montar(
+      filaDelIncidente({
+        acknowledgedAt: null,
+        resultJson: null,
+        lastDeliveredAt: null,
+        deliveryProvenance: { deliveries: [] },
+      }),
+    )
+    await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'TERMINAL_NEVER_ANSWERED' })
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
   })
 })

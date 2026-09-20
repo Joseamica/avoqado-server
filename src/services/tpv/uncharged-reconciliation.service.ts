@@ -265,17 +265,41 @@ export async function reconcileUncharged(
     // deja la fila en `UNKNOWN/ACK_TIMEOUT` a los CINCO SEGUNDOS —con el cobro quizá corriendo y minutos por
     // delante hasta vencer— y la declaración se aceptaba ahí mismo.
     //
-    // La barrera es EVIDENCIA DEL APARATO, no tiempo: la terminal tuvo que decir ALGO sobre esta solicitud —
-    // acusarla, o devolver un resultado—. Si nunca habló, nadie sabe siquiera si le llegó, y la inspección
-    // visual del cajero no revoca un mensaje en tránsito.
+    // La barrera es EVIDENCIA DEL APARATO, no tiempo. Lo que hay que descartar es que el cobro siga EN
+    // TRÁNSITO hacia una terminal: ahí la mirada del cajero no revoca nada, porque el aparato todavía
+    // puede encenderse y pedir la tarjeta. Una vez que CONSTA QUE SALIÓ, lo que el cajero ve en la
+    // pantalla es la mejor evidencia disponible.
     //
-    // ⚠️ Límite declarado: una solicitud entregada a un APK antiguo que no acusa NI llegó a contestar queda
-    // fuera. Es el lado seguro, y esas filas se resuelven por el camino de siempre (sonda, evidencia, tiempo).
+    // 🔴 CORREGIDA el 19-sep por el QA en la Sunmi, y el hueco lo había abierto esta misma barrera al
+    // exigir ACUSE. Con una terminal de APK anterior a la 2.9.0 (3-sep, la que estrenó el acuse) la
+    // entrega es LEGACY: el servidor deja `lastDeliveredAt` y NUNCA `acknowledgedAt`. Medido en
+    // hardware: esa fila no la libera la SONDA —su NOT_FOUND sólo suelta procedencia `[]`— ni la
+    // liberaba esta declaración, así que el cajero quedaba en el MISMO callejón sin salida del 18-sep
+    // que esta función existe para quitar. El «camino de siempre» que yo había declarado como salida
+    // no existía.
+    //
+    // Se declara si consta CUALQUIERA de estas cuatro, en orden de fuerza:
+    //   1. la terminal ACUSÓ recibo                  (`acknowledgedAt`)
+    //   2. la terminal CONTESTÓ algo                 (`resultJson` no vacío)
+    //   3. se entregó a una terminal que NO SABE ACUSAR (procedencia con `ackVersion` 0/ausente): esperar
+    //      su acuse es esperar algo que no va a llegar nunca
+    //   4. la procedencia es DESCONOCIDA (`null`) — fila anterior a la columna; por regla del repo `null`
+    //      nunca se lee como «no entregada» (ver `.claude/rules/cobro-remoto-pos-a-tpv.md`)
+    //
+    // 🔴 Y sigue BLOQUEADA, que es lo que Codex hizo cerrar en la ronda 4 y NO se reabre:
+    //   · la fila que consta NUNCA entregada (procedencia exactamente `[]`) — el cobro puede ir en camino;
+    //   · la entregada a una terminal que SÍ SABE ACUSAR (`ackVersion >= 1`) y aun así no acusó. Ahí el
+    //     silencio ES información: o no le llegó, o está ocupada con la tarjeta. Es el caso del ACK
+    //     perdido que deja `UNKNOWN/ACK_TIMEOUT` a los CINCO SEGUNDOS, con minutos por delante.
     const sobreConRespuesta =
       row.resultJson && typeof row.resultJson === 'object' && !Array.isArray(row.resultJson)
         ? Object.keys(row.resultJson as Record<string, unknown>).length > 0
         : false
-    if (!row.acknowledgedAt && !sobreConRespuesta) throw new UnchargedReconciliationError('TERMINAL_NEVER_ANSWERED')
+    const entregas = (row.deliveryProvenance as { deliveries?: { ackVersion?: number }[] } | null)?.deliveries
+    const procedenciaDesconocida = !Array.isArray(entregas)
+    const entregadaASordo = Array.isArray(entregas) && entregas.length > 0 && entregas.every(e => !Number(e?.ackVersion))
+    const constaQueSalio = Boolean(row.acknowledgedAt) || sobreConRespuesta || entregadaASordo || procedenciaDesconocida
+    if (!constaQueSalio) throw new UnchargedReconciliationError('TERMINAL_NEVER_ANSWERED')
 
     if (sondaReportoActiva(row)) throw new UnchargedReconciliationError('EXECUTION_STILL_ACTIVE')
 
