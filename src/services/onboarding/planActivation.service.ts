@@ -542,16 +542,32 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
   if (prev.status === PLAN_ACTIVATION_STATUS.IN_PROGRESS) {
     const llaveAnterior = `plan-activation:${organizationId}:${prev.attempt}`
     try {
-      // 🔴 La cota va anclada a AHORA menos una ventana FIJA, no a `planActivationLeaseUntil`.
-      // Ese lease se RENUEVA en cada reintento (paso 5), así que usarlo movía la ventana hacia
-      // adelante: tras una recuperación fallida podía dejar FUERA la suscripción que YA cobró, el
-      // reintento no la veía y creaba otra — un segundo cobro al mismo negocio (Codex, 20-sep).
-      // La cota sigue existiendo (deja el recorrido en O(1) páginas), pero ya no se mueve.
-      suscripcionRecuperada = await buscarSuscripcionDelIntento(
-        customerId,
-        llaveAnterior,
-        new Date(now.getTime() - VENTANA_RECUPERACION_MS),
-      )
+      // 🔴 Si el intento anterior alcanzó a dejar su id, se recupera EXACTA — sin ventana, sin
+      // recorrer páginas. Cualquier cota por fecha deja fuera un intento más viejo y entonces se
+      // crea un segundo cobro; con 31 días de por medio lo reprodujo Codex (20-sep). El id se
+      // persiste en cuanto la suscripción existe (paso 8), así que este es el camino normal.
+      if (progress.planStripeSubscriptionId) {
+        suscripcionRecuperada = await stripe.subscriptions.retrieve(progress.planStripeSubscriptionId)
+      }
+    } catch (error) {
+      logger.warn('activate-plan: no se pudo recuperar la suscripción registrada', {
+        organizationId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      throw pendiente('no se pudo consultar Stripe')
+    }
+    try {
+      // RESPALDO, sólo para intentos anteriores a que se persistiera el id: se busca por la llave
+      // de idempotencia dentro de una cota FIJA hacia atrás. La cota ya no se ancla al lease —que
+      // se renueva en cada reintento y corría la ventana hacia adelante—, pero sigue siendo una
+      // ventana: por eso el camino bueno es el id de arriba, no éste.
+      if (!suscripcionRecuperada) {
+        suscripcionRecuperada = await buscarSuscripcionDelIntento(
+          customerId,
+          llaveAnterior,
+          new Date(now.getTime() - VENTANA_RECUPERACION_MS),
+        )
+      }
     } catch (error) {
       // 🔴 «No pude ver» NUNCA es «no existe». Se deja el lease VIVO y se responde 503.
       logger.warn('activate-plan: no se pudo consultar Stripe para recuperar el intento anterior', {
@@ -663,6 +679,24 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
       })
       subscriptionId = r.subscriptionId
       reused = r.reused
+
+      // 🔴 El id se persiste AQUÍ, en cuanto la suscripción existe — no en el paso 9 junto al
+      // resto del éxito. Ese era todo el defecto: si el proceso moría entre el cobro de Stripe y
+      // el cierre, no quedaba rastro del id y el reintento tenía que BUSCARLA; cualquier ventana
+      // de búsqueda deja fuera un intento suficientemente viejo y entonces se crea un SEGUNDO
+      // COBRO (Codex lo reprodujo con 31 días de por medio, 20-sep). Con el id guardado, el
+      // reintento la recupera exacta. Mismo principio que la regla offline del workspace: lo que
+      // YA ocurrió se persiste ANTES de que algo pueda fallar, no después.
+      await prisma.onboardingProgress
+        .updateMany({ where: { organizationId, completedAt: null }, data: { planStripeSubscriptionId: r.subscriptionId } })
+        .catch(error => {
+          // No puede tumbar un cobro que ya ocurrió: se avisa y queda el respaldo por búsqueda.
+          logger.error('🚨 activate-plan: no se pudo registrar el id de la suscripción recién creada', {
+            organizationId,
+            subscriptionId: r.subscriptionId,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        })
     } catch (error) {
       if (esErrorDeTarjeta(error)) {
         // ---- PASO 10: rechazo del banco ----

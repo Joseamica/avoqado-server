@@ -427,6 +427,52 @@ describe('recuperación de un intento desconocido', () => {
     })
   })
 
+  it('🔴 el id se persiste EN CUANTO la suscripción existe, no al cerrar el éxito', async () => {
+    // Lo que importa es el ORDEN: el id tiene que quedar guardado ANTES de cerrar el éxito. Si
+    // sólo se guardara al cerrar, un fallo entre el cobro y ese cierre deja al reintento sin
+    // rastro — y entonces hay que BUSCARLA, con una ventana que puede dejarla fuera y cobrar otra
+    // vez. Comprobar el orden distingue las dos cosas; comprobar «que en algún momento se guarde»
+    // no, porque el cierre también lo guarda.
+    mockSubList.mockReturnValue({ autoPagingEach: async () => undefined })
+
+    await activatePlan({ ...BASE, offer: OFERTA_LAUNCH }).catch(() => undefined)
+
+    const llamadas = prismaMock.onboardingProgress.updateMany.mock.calls
+    const iId = llamadas.findIndex(
+      (c: unknown[]) => (c[0] as { data?: { planStripeSubscriptionId?: string } })?.data?.planStripeSubscriptionId,
+    )
+    const iCierre = llamadas.findIndex(
+      (c: unknown[]) => (c[0] as { data?: { planActivationStatus?: string } })?.data?.planActivationStatus === 'ACTIVE',
+    )
+    expect(iId).toBeGreaterThanOrEqual(0)
+    if (iCierre >= 0) expect(iId).toBeLessThan(iCierre)
+  })
+
+  it('🔴 si el id de la suscripción quedó guardado, se recupera por ID y NO se busca por ventana', async () => {
+    // Codex, 20-sep: cualquier ventana (1 h, 30 días) deja fuera un intento más viejo y crea un
+    // segundo cobro. La salida no es agrandarla: es no depender de ella. El id se persiste en
+    // cuanto la suscripción existe, así que el reintento la recupera EXACTA.
+    const progresoConId = progreso({
+      planActivationStatus: 'IN_PROGRESS',
+      planActivationAttempt: 1,
+      planActivationLeaseUntil: new Date(Date.now() - 60_000),
+      planStripeSubscriptionId: 'sub_guardada',
+    }) as Record<string, unknown>
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(progresoConId as never)
+    mockSubRetrieve.mockResolvedValue({
+      id: 'sub_guardada',
+      status: 'active',
+      discounts: [{ coupon: { id: 'LC_POS22_V1' } }],
+      metadata: { featureCode: 'PLAN_PRO' },
+    })
+
+    await activatePlan({ ...BASE, offer: OFERTA_LAUNCH }).catch(() => undefined)
+
+    expect(mockSubRetrieve).toHaveBeenCalledWith('sub_guardada', expect.anything())
+    expect(mockSubList).not.toHaveBeenCalled()
+    expect(mockSubCreate).not.toHaveBeenCalled()
+  })
+
   it('🔴 la ventana de búsqueda NO se mueve con los reintentos (si se mueve, cobra dos veces)', async () => {
     // Codex, 20-sep: la cota iba anclada a `planActivationLeaseUntil`, que se RENUEVA en cada
     // reintento. Tras una recuperación fallida, la ventana se corría hacia adelante y podía dejar
