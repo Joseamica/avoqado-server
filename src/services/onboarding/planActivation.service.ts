@@ -57,6 +57,13 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 /** Cuánto vale un lease antes de que otro intento pueda recuperarlo. */
 export const LEASE_MS = 5 * 60_000
 
+/**
+ * Cota hacia atrás para BUSCAR la suscripción de un intento anterior. Fija a propósito: un
+ * onboarding puede arrastrar intentos de varios días, y cualquier cota que dependa del estado del
+ * propio intento (el lease, que se renueva) se desplaza y deja de ver lo que ya se cobró.
+ */
+const VENTANA_RECUPERACION_MS = 30 * 24 * 60 * 60 * 1000
+
 /** Estados de Stripe en los que una suscripción recuperada acredita que el cobro quedó hecho. */
 const SUSCRIPCION_COBRADA = ['active', 'trialing', 'past_due', 'unpaid'] as const
 
@@ -535,7 +542,16 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
   if (prev.status === PLAN_ACTIVATION_STATUS.IN_PROGRESS) {
     const llaveAnterior = `plan-activation:${organizationId}:${prev.attempt}`
     try {
-      suscripcionRecuperada = await buscarSuscripcionDelIntento(customerId, llaveAnterior, prev.leaseUntil ?? now)
+      // 🔴 La cota va anclada a AHORA menos una ventana FIJA, no a `planActivationLeaseUntil`.
+      // Ese lease se RENUEVA en cada reintento (paso 5), así que usarlo movía la ventana hacia
+      // adelante: tras una recuperación fallida podía dejar FUERA la suscripción que YA cobró, el
+      // reintento no la veía y creaba otra — un segundo cobro al mismo negocio (Codex, 20-sep).
+      // La cota sigue existiendo (deja el recorrido en O(1) páginas), pero ya no se mueve.
+      suscripcionRecuperada = await buscarSuscripcionDelIntento(
+        customerId,
+        llaveAnterior,
+        new Date(now.getTime() - VENTANA_RECUPERACION_MS),
+      )
     } catch (error) {
       // 🔴 «No pude ver» NUNCA es «no existe». Se deja el lease VIVO y se responde 503.
       logger.warn('activate-plan: no se pudo consultar Stripe para recuperar el intento anterior', {
@@ -669,8 +685,13 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
     }
   }
 
-  // 🔴 Una suscripción REUSADA sin el cupón esperado NO se puede cerrar como un cobro.
-  if (reused && cuponEsperado) {
+  // 🔴 Una suscripción que NO creamos nosotros en esta pasada —da igual si vino del reuso o de la
+  // RECUPERACIÓN de un intento anterior— tiene que llevar el cupón de la oferta para cerrarse como
+  // tal. Comprobarlo sólo con `reused` dejaba fuera el camino de recuperación, donde `reused`
+  // queda en `false`: el resultado medido por Codex (20-sep) era una campaña `APPLIED` con **$0
+  // pagados y renovación anunciada a $22**, mientras en Stripe esa suscripción no tenía descuento.
+  const noLaCreamosConElCupon = reused || suscripcionRecuperada != null
+  if (noLaCreamosConElCupon && cuponEsperado) {
     const sub = await stripe.subscriptions.retrieve(subscriptionId, { expand: ['discounts'] })
     const descuentos = (sub as unknown as { discounts?: Array<string | { coupon?: { id?: string } }> }).discounts ?? []
     const lleva = descuentos.some(d => typeof d !== 'string' && d?.coupon?.id === cuponEsperado)
