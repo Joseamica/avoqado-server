@@ -6022,14 +6022,40 @@ class TerminalPaymentService {
     attemptId: string
     amountCents: number
     tipCents: number
+    /**
+     * La liga del recibo digital que el registrador ya generó para este Payment. 🔴 Sin ella el POS imprime el ticket SIN
+     * QR de recibo/factura: dibuja el QR con `receipt.receiptUrl`, y cuando el webhook gana la carrera este aviso es lo
+     * ÚNICO que recibe (la terminal ya no le manda su `receipt`, y el cierre por `closeRowFromPaymentTx` ocurre ANTES de
+     * que exista el recibo). Testarudo, 18→21-sep: 0/389 cobros cerrados por webhook llevaban la liga; 21/21 cerrados por
+     * la terminal sí. Va también a la fila para que el GET, la réplica del POST y el vigía la lean.
+     */
+    receipt?: { receiptUrl: string; receiptAccessKey: string } | null
   }): Promise<{ posAwakened: boolean; terminalNotified: boolean }> {
     let posAwakened = false
+    const receipt = input.receipt ?? undefined
     const pending = this.pendingPayments.get(input.requestId)
     if (pending && pending.venueId === input.venueId) {
       clearTimeout(pending.timeout)
       this.pendingPayments.delete(input.requestId)
-      pending.resolve({ requestId: input.requestId, status: 'success', paymentId: input.paymentId })
+      pending.resolve({ requestId: input.requestId, status: 'success', paymentId: input.paymentId, ...(receipt ? { receipt } : {}) })
       posAwakened = true
+    }
+    if (receipt) {
+      // Fusión jsonb sobre el sobre VIGENTE (nunca leer-modificar-escribir): un `success` tardío de la terminal funde su sobre
+      // con `{ ...socket, ...stored }` —lo guardado gana—, así que la liga sobrevive aunque la terminal llegue sin ella.
+      // Best-effort: un fallo aquí no puede dejar al POS esperando ni callar el aviso a la terminal.
+      try {
+        await prisma.$executeRaw`
+          UPDATE "TerminalPaymentRequest"
+          SET "resultJson" = coalesce("resultJson", '{}'::jsonb) || ${JSON.stringify({ receipt })}::jsonb
+          WHERE "requestId" = ${input.requestId} AND "venueId" = ${input.venueId}
+            AND "paymentId" = ${input.paymentId} AND "status" = 'COMPLETED'::"TerminalPaymentRequestStatus"`
+      } catch (error) {
+        logger.warn('⚠️ [TerminalPayment] No se pudo guardar la liga del recibo en la solicitud confirmada por webhook', {
+          requestId: input.requestId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
     }
     let terminalNotified = false
     const row = await prisma.terminalPaymentRequest.findFirst({
@@ -6047,6 +6073,8 @@ class TerminalPaymentService {
         tipCents: input.tipCents,
         via: 'webhook',
         timestamp: new Date().toISOString(),
+        // Aditivo: la TPV publicada no lo lee; la que imprima su ticket desde este aviso lo necesita para el QR.
+        ...(receipt ? { receipt } : {}),
       })
       terminalNotified = true
     }

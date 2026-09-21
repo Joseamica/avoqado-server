@@ -357,6 +357,45 @@ describe('S5 · el webhook como primer confirmador despierta al POS y avisa a la
     })
   })
 
+  it('el POS despertado por el webhook recibe la LIGA DEL RECIBO (receipt.receiptUrl) y la fila la conserva: sin ella el ticket sale sin QR', async () => {
+    // Testarudo, 18-sep → 21-sep: desde que el webhook gana la carrera, el POS recibía `success` SIN `receipt` (0/389 filas
+    // cerradas por webhook la traían; 21/21 cerradas por la terminal sí) ⇒ el ticket del cobro y el «volver a imprimir» de
+    // la pantalla de cobro salían sin QR de recibo/factura. El registrador ya generó el recibo antes de confirmar.
+    const A = actores()
+    const { requestId, pos, limpiar } = await posEsperandoComoActor(A)
+    const obs = { desenlace: null as Awaited<ReturnType<typeof A.carrera>> | null }
+    let fallo: Fallo = null
+    try {
+      const attemptId = await vincular(requestId)
+      await webhook(attemptId)
+      obs.desenlace = await A.carrera(pos, 3000)
+    } catch (error) {
+      fallo = { error }
+    } finally {
+      await A.liberar({ 'long-poll del POS': limpiar })
+    }
+    await A.cerrar(fallo)
+    await A.afirmar(async () => {
+      const despues = await fila(requestId)
+      expect(despues).toMatchObject({ status: 'COMPLETED', closedVia: 'webhook' })
+      const recibo = await exigir(prisma.digitalReceipt.findFirst({ where: { paymentId: despues.paymentId! } }))
+      const receipt = {
+        receiptUrl: expect.stringMatching(new RegExp(`/receipts/public/${recibo.accessKey}$`)),
+        receiptAccessKey: recibo.accessKey,
+      }
+      // Lo que despierta al long-poll del POS (es lo que imprime el ticket del cobro).
+      expect(obs.desenlace).toMatchObject({ estado: 'ASENTADA', ok: true, value: { status: 'success', paymentId: despues.paymentId, receipt } })
+      // Lo que queda DURABLE en la fila (el GET del POS, la réplica del POST y el vigía leen de aquí).
+      expect(despues.resultJson).toMatchObject({ requestId, status: 'success', paymentId: despues.paymentId, receipt })
+      // Un `success` tardío de la terminal SIN receipt (lo que manda la TPV 2.10.0 cuando el webhook ya cerró) no la borra.
+      await terminalPaymentService.handlePaymentResultFromSocket(
+        { requestId, status: 'success', paymentId: despues.paymentId!, transactionId: despues.paymentId!, errorMessage: null } as any,
+        { socketId: 's', terminalId: f.serial, venueId: f.venueId },
+      )
+      expect((await fila(requestId)).resultJson).toMatchObject({ receipt, transactionId: despues.paymentId })
+    })
+  })
+
   it('el cierre por REST NO pasa por confirmFromWebhook ni emite payment_confirmed (la terminal ya sabe); el vigía recupera el resultado durable si el aviso al POS se perdió', async () => {
     const A = actores()
     const { requestId, pos, limpiar } = await posEsperandoComoActor(A)

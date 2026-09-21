@@ -30,6 +30,14 @@ import {
 } from './candadoDeIntento'
 import { RETRIES_EXHAUSTED } from './angelpayEventWorker.service'
 
+/** La liga del recibo tal como la lee el POS (`receipt.receiptUrl` / `receiptAccessKey`), desde el `digitalReceipt` del registrador. */
+function ligaDelRecibo(digitalReceipt: unknown): { receiptUrl: string; receiptAccessKey: string } | null {
+  const r = digitalReceipt as { receiptUrl?: unknown; accessKey?: unknown } | null | undefined
+  return r && typeof r.receiptUrl === 'string' && r.receiptUrl && typeof r.accessKey === 'string' && r.accessKey
+    ? { receiptUrl: r.receiptUrl, receiptAccessKey: r.accessKey }
+    : null
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Public types
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -731,6 +739,8 @@ async function confirmarPorVinculo(args: {
         attemptId,
         amountCents: request.amountCents,
         tipCents: request.tipCents ?? 0,
+        // La liga que el registrador ya armó (`digitalReceipt` del cobro): es con lo que el POS dibuja el QR del ticket.
+        receipt: ligaDelRecibo(resultado.digitalReceipt),
       })
       .catch(error =>
         logger.error('⚠️ [AngelPay webhook] No se pudo avisar al POS/terminal tras confirmar (el resultado durable ya está en la fila)', {
