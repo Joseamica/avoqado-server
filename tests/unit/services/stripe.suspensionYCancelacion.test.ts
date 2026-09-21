@@ -111,7 +111,15 @@ describe('🔴 la suspensión del intento 4 ocurre de verdad (dos escrituras, ma
 
     await handlePaymentFailure('sub_1', 4)
 
-    const suspendio = (prisma.venueFeature.updateMany as jest.Mock).mock.calls.some(c => c[0]?.data?.active === false)
+    const escrituras = (prisma.venueFeature.updateMany as jest.Mock).mock.calls
+    const suspendio = escrituras.some(c => c[0]?.data?.active === false)
     expect(suspendio).toBe(true)
+
+    // 🔴 Y el invariante que cierra la clase entera: UNA sola escritura. Con dos, la segunda
+    // necesitaba una marca fresca, y releerla podía devolver la de OTRO escritor —un checkout
+    // que acaba de vincular una suscripción nueva y PAGADA—, suspendiendo el plan nuevo por la
+    // deuda del anterior (Codex, 20-sep). Sin segunda escritura, esa carrera no existe.
+    expect(escrituras).toHaveLength(1)
+    expect(escrituras[0][0].data).toMatchObject({ active: false, suspendedAt: expect.any(Date) })
   })
 })

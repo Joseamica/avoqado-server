@@ -1865,7 +1865,7 @@ async function escribirPlanDeCobranzaConCas(
   venueFeature: { id: string; updatedAt: Date; venueId: string },
   data: Record<string, unknown>,
   contexto: { subscriptionId: string },
-): Promise<Date> {
+): Promise<void> {
   const { count } = await prisma.venueFeature.updateMany({
     where: { id: venueFeature.id, updatedAt: venueFeature.updatedAt },
     data,
@@ -1877,13 +1877,6 @@ async function escribirPlanDeCobranzaConCas(
     })
     throw new Error(`handlePaymentFailure: el registro del plan de ${venueFeature.venueId} cambió bajo nosotros; se reintentará`)
   }
-
-  // 🔴 Devuelve la marca NUEVA. Este flujo escribe DOS veces (seguimiento de fallos y, en el
-  // intento 4, la suspensión): si la segunda reutilizara la marca leída al principio, su CAS
-  // fallaría SIEMPRE —la primera escritura ya la movió— y el moroso conservaría el acceso.
-  // Lo reprodujo Codex el 19-sep sobre mi propio arreglo.
-  const fresco = await prisma.venueFeature.findUnique({ where: { id: venueFeature.id }, select: { updatedAt: true } })
-  return fresco?.updatedAt ?? venueFeature.updatedAt
 }
 
 export async function handlePaymentFailure(
@@ -1956,7 +1949,33 @@ export async function handlePaymentFailure(
     }
   }
 
-  const marcaFresca = await escribirPlanDeCobranzaConCas(venueFeature, updateData, { subscriptionId })
+  // 🔴 UNA SOLA ESCRITURA. Este flujo escribía dos veces (seguimiento y, en el intento 4, la
+  // suspensión) y encadenar sus marcas no bastaba: releer `updatedAt` tras escribir puede devolver
+  // la marca de OTRO escritor —un checkout que acaba de vincular una suscripción NUEVA y pagada—,
+  // y entonces el segundo CAS pasa y suspende el plan nuevo por la deuda del anterior (Codex,
+  // 20-sep). La salida no es gestionar esa relectura: es no necesitarla. La suspensión se decide
+  // aquí y viaja en el MISMO `updateData`.
+  let suspendePorImpago = false
+  if (attemptCount === 4) {
+    // Quitar el acceso también se decide con el ESTADO VIGENTE, no con este aviso: un aviso de
+    // fallo ATRASADO llega después de que el cliente se puso al corriente. Si Stripe no contesta
+    // se PROPAGA: suspender a ciegas le quita el producto a alguien que quizá ya pagó.
+    // (6ª auditoría de Codex, 19-sep.)
+    const estadoVigente = await estadoDeLaSuscripcion(subscriptionId)
+    if (estadoVigente === 'active' || estadoVigente === 'trialing') {
+      logger.warn('⚠️ Aviso de fallo ATRASADO: la suscripción está al corriente, NO se suspende', {
+        subscriptionId,
+        estadoVigente,
+        venueId: venueFeature.venueId,
+      })
+    } else {
+      suspendePorImpago = true
+      updateData.suspendedAt = now
+      updateData.active = false // Block access but keep data
+    }
+  }
+
+  await escribirPlanDeCobranzaConCas(venueFeature, updateData, { subscriptionId })
 
   logger.info(`📊 Updated failure tracking for ${venueFeature.feature.name} (Venue: ${venueFeature.venue.name})`, {
     attemptCount,
@@ -2034,31 +2053,9 @@ export async function handlePaymentFailure(
       break
 
     case 4: {
-      // Day 7: Soft suspension
-      //
-      // 🔴 Quitar el acceso también se decide con el ESTADO VIGENTE, no con este aviso. Es el
-      // espejo exacto del defecto que costó seis rondas en el camino de recuperación: un aviso de
-      // fallo ATRASADO llega después de que el cliente se puso al corriente y lo suspende igual.
-      // Si Stripe no contesta, se PROPAGA: suspender a ciegas le quita el producto a alguien que
-      // quizá ya pagó. (6ª auditoría de Codex, 19-sep.)
-      const estadoVigente = await estadoDeLaSuscripcion(subscriptionId)
-      if (estadoVigente === 'active' || estadoVigente === 'trialing') {
-        logger.warn('⚠️ Aviso de fallo ATRASADO: la suscripción está al corriente, NO se suspende', {
-          subscriptionId,
-          estadoVigente,
-          venueId: venueFeature.venueId,
-        })
-        break
-      }
-
-      await escribirPlanDeCobranzaConCas(
-        { ...venueFeature, updatedAt: marcaFresca },
-        {
-          suspendedAt: now,
-          active: false, // Block access but keep data
-        },
-        { subscriptionId },
-      )
+      // Day 7: Soft suspension. La decisión y la escritura ocurrieron ARRIBA, en la escritura
+      // única; aquí sólo queda avisar.
+      if (!suspendePorImpago) break
 
       logger.warn(`⛔ SUSPENDED: Feature ${venueFeature.feature.name} for venue ${venueFeature.venue.name}`)
 
