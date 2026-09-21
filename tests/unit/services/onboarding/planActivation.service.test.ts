@@ -448,6 +448,37 @@ describe('recuperación de un intento desconocido', () => {
     if (iCierre >= 0) expect(iId).toBeLessThan(iCierre)
   })
 
+  it('🔴 «no la encontré» fuera de la ventana NO autoriza otro cobro: responde pendiente', async () => {
+    // Codex, 21-sep: si el intento anterior es MÁS VIEJO que lo que la búsqueda puede cubrir,
+    // no encontrarla no prueba nada — y tratarlo como «no existe» crea un SEGUNDO COBRO. Es el
+    // mismo principio del cobro con terminal: nunca autorizar con un desenlace pendiente.
+    const intentoViejo = progreso({
+      planActivationStatus: 'IN_PROGRESS',
+      planActivationAttempt: 1,
+      // El intento anterior es de hace 40 días: la búsqueda (30 días) no lo alcanza.
+      planActivationLeaseUntil: new Date(Date.now() - 40 * 24 * 60 * 60 * 1000),
+      planStripeSubscriptionId: null,
+    }) as Record<string, unknown>
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(intentoViejo as never)
+    mockSubList.mockReturnValue({ autoPagingEach: async () => undefined })
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({
+      statusCode: 503,
+      code: 'PLAN_ACTIVATION_PENDING',
+    })
+    expect(mockSubCreate).not.toHaveBeenCalled()
+  })
+
+  it('un intento anterior DENTRO de la ventana sí puede concluir «no existe» y estrenar intento', async () => {
+    // El caso legítimo no se rompe: si la búsqueda SÍ cubre el periodo del intento anterior,
+    // no encontrarla es prueba suficiente.
+    mockSubList.mockReturnValue({ autoPagingEach: async () => undefined })
+
+    await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
+
+    expect(mockSubCreate).toHaveBeenCalledTimes(1)
+  })
+
   it('🔴 si el id de la suscripción quedó guardado, se recupera por ID y NO se busca por ventana', async () => {
     // Codex, 20-sep: cualquier ventana (1 h, 30 días) deja fuera un intento más viejo y crea un
     // segundo cobro. La salida no es agrandarla: es no depender de ella. El id se persiste en

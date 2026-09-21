@@ -562,11 +562,27 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
       // se renueva en cada reintento y corría la ventana hacia adelante—, pero sigue siendo una
       // ventana: por eso el camino bueno es el id de arriba, no éste.
       if (!suscripcionRecuperada) {
-        suscripcionRecuperada = await buscarSuscripcionDelIntento(
-          customerId,
-          llaveAnterior,
-          new Date(now.getTime() - VENTANA_RECUPERACION_MS),
-        )
+        const desde = new Date(now.getTime() - VENTANA_RECUPERACION_MS)
+        suscripcionRecuperada = await buscarSuscripcionDelIntento(customerId, llaveAnterior, desde)
+
+        // 🔴 «No la encontré» sólo vale como «no existe» si la búsqueda pudo CUBRIR el periodo en
+        // que ese intento pudo crearla. Si el intento anterior es más viejo que la ventana, no
+        // encontrarla no prueba nada — y tratarlo como ausencia estrena llave y cobra OTRA VEZ
+        // (Codex lo reprodujo con 31 días de por medio, 20-sep). Es el mismo principio que el
+        // cobro con terminal: nunca autorizar con un desenlace pendiente.
+        //
+        // Esto NO bloquea a nadie del camino normal: desde que el id se persiste al crear
+        // (`planStripeSubscriptionId`), los intentos nuevos se recuperan por id y ni llegan aquí.
+        // Sólo alcanza a los anteriores a ese cambio, y ahí el desenlace es genuinamente incierto.
+        if (!suscripcionRecuperada && prev.leaseUntil && prev.leaseUntil < desde) {
+          logger.error('🚨 activate-plan: intento anterior fuera de la ventana de búsqueda — NO se cobra de nuevo', {
+            organizationId,
+            intentoAnterior: prev.attempt,
+            leaseUntil: prev.leaseUntil,
+            desde,
+          })
+          throw pendiente('el intento anterior no se pudo verificar')
+        }
       }
     } catch (error) {
       // 🔴 «No pude ver» NUNCA es «no existe». Se deja el lease VIVO y se responde 503.
@@ -661,6 +677,15 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
         trialPeriodDays: campaign || input.payNow ? 0 : TRIAL_DAYS,
         coupon: cuponEsperado ?? undefined,
         idempotencyKey: planActivationKey,
+        // 🔴 El rastro del cobro se guarda en el instante siguiente al cargo, no al final: entre
+        // crear en Stripe y que esta función devuelva hay escrituras que pueden fallar, y sin el
+        // id el reintento tiene que BUSCARLA — que es donde nacía el segundo cobro.
+        alCrearEnStripe: async (subId: string) => {
+          await prisma.onboardingProgress.updateMany({
+            where: { organizationId, completedAt: null },
+            data: { planStripeSubscriptionId: subId },
+          })
+        },
         paymentBehavior: 'error_if_incomplete',
         extraMetadata: {
           organizationId,
@@ -680,13 +705,9 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
       subscriptionId = r.subscriptionId
       reused = r.reused
 
-      // 🔴 El id se persiste AQUÍ, en cuanto la suscripción existe — no en el paso 9 junto al
-      // resto del éxito. Ese era todo el defecto: si el proceso moría entre el cobro de Stripe y
-      // el cierre, no quedaba rastro del id y el reintento tenía que BUSCARLA; cualquier ventana
-      // de búsqueda deja fuera un intento suficientemente viejo y entonces se crea un SEGUNDO
-      // COBRO (Codex lo reprodujo con 31 días de por medio, 20-sep). Con el id guardado, el
-      // reintento la recupera exacta. Mismo principio que la regla offline del workspace: lo que
-      // YA ocurrió se persiste ANTES de que algo pueda fallar, no después.
+      // Red de seguridad: el gancho `alCrearEnStripe` ya lo guardó en el instante del cargo.
+      // Esto cubre el camino en que la suscripción se REUSÓ (no se creó ahora), donde el gancho
+      // no corre.
       await prisma.onboardingProgress
         .updateMany({ where: { organizationId, completedAt: null }, data: { planStripeSubscriptionId: r.subscriptionId } })
         .catch(error => {

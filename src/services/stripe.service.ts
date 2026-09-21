@@ -622,6 +622,14 @@ export interface CreatePlanSubscriptionInput {
   paymentBehavior?: 'error_if_incomplete'
   /** Metadatos extra (campaña, intento) para poder RECUPERAR un resultado desconocido. */
   extraMetadata?: Record<string, string>
+  /**
+   * 🔴 Se invoca en el INSTANTE siguiente a crear la suscripción en Stripe, antes de cualquier
+   * otra escritura. Existe porque entre el cargo y el retorno de esta función hay trabajo que
+   * puede fallar (`asegurarAccesoDelPlan`): si falla, el llamador nunca ve el id y pierde el
+   * rastro del cobro que YA ocurrió — y su reintento acaba creando un segundo cargo (Codex,
+   * 21-sep). Lo que este gancho haga NO puede tumbar el cobro: se invoca protegido.
+   */
+  alCrearEnStripe?: (subscriptionId: string) => Promise<void>
 }
 
 /**
@@ -785,6 +793,18 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
       ),
     { retries: 3, shouldRetry: shouldRetryStripeError, context: 'stripe.createPlanSubscription' },
   )
+
+  // 🔴 ANTES que cualquier otra escritura: el cargo ya ocurrió y el llamador necesita su rastro
+  // aunque lo de abajo falle.
+  if (input.alCrearEnStripe) {
+    await input.alCrearEnStripe(subscription.id).catch(error => {
+      logger.error('🚨 createPlanSubscription: el gancho posterior al cargo falló', {
+        subscriptionId: subscription.id,
+        venueId: input.venueId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    })
+  }
 
   const trialEnd = input.trialPeriodDays > 0 ? new Date(Date.now() + input.trialPeriodDays * 86400000) : null
   await asegurarAccesoDelPlan({

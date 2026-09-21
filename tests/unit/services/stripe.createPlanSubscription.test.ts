@@ -74,3 +74,54 @@ describe('createPlanSubscription', () => {
     expect(arg.items[0].price).toBe('price_annual')
   })
 })
+
+/**
+ * 🔴 EL GANCHO DEL CARGO (Codex, 21-sep).
+ *
+ * Entre crear la suscripción en Stripe —el momento en que el dinero se mueve— y que esta función
+ * devuelva su id, todavía corre `asegurarAccesoDelPlan`. Si ESA escritura falla, el llamador nunca
+ * ve el id y pierde el rastro del cobro que ya ocurrió; su reintento tiene entonces que BUSCAR la
+ * suscripción, y ahí es donde nacía el segundo cargo. Por eso el gancho corre ANTES.
+ */
+describe('alCrearEnStripe: el rastro del cargo, antes que cualquier otra escritura', () => {
+  it('🔴 se invoca ANTES de escribir el acceso (si no, un fallo ahí pierde el id)', async () => {
+    const orden: string[] = []
+    const prismaMod = (await import('@/utils/prismaClient')).default as unknown as {
+      venueFeature: { upsert: jest.Mock }
+    }
+    prismaMod.venueFeature.upsert.mockImplementation(async () => {
+      orden.push('acceso')
+      return {}
+    })
+
+    await createPlanSubscription({
+      venueId: 'v1',
+      customerId: 'cus_1',
+      paymentMethodId: 'pm_1',
+      tierCode: 'PLAN_PRO',
+      interval: 'monthly',
+      trialPeriodDays: 30,
+      alCrearEnStripe: async () => {
+        orden.push('gancho')
+      },
+    })
+
+    expect(orden[0]).toBe('gancho')
+  })
+
+  it('🔴 si el gancho falla, NO se tumba el cobro que ya ocurrió', async () => {
+    const r = await createPlanSubscription({
+      venueId: 'v1',
+      customerId: 'cus_1',
+      paymentMethodId: 'pm_1',
+      tierCode: 'PLAN_PRO',
+      interval: 'monthly',
+      trialPeriodDays: 30,
+      alCrearEnStripe: async () => {
+        throw new Error('la base se cayó')
+      },
+    })
+
+    expect(r.subscriptionId).toBeTruthy()
+  })
+})
