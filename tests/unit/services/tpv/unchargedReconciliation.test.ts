@@ -388,6 +388,55 @@ describe('RONDA 4 — sólo se declara sobre un cobro que la terminal RECIBIÓ',
     await expect(reconcileUncharged(identidad, declaracion())).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
   })
 
+  it('🔴 Codex final (P1-2): un sobre escrito por el SERVIDOR no cuenta como respuesta de la TERMINAL', async () => {
+    // El envío original conserva el socket A; la terminal reconecta por B y recibe un replay durable
+    // cuyo ACK se pierde. El envío original no encuentra a A y llama a `failUndelivered`, que escribe
+    // `UNKNOWN/SOCKET_NOT_FOUND` y un `resultJson` SINTÉTICO. La declaración lo leía como «la terminal
+    // contestó» y aceptaba — con todas las entregas DURABLE y sin un solo ACK del aparato.
+    montar(
+      filaDelIncidente({
+        acknowledgedAt: null,
+        failureCode: 'SOCKET_NOT_FOUND',
+        resultJson: { requestId, status: 'timeout', errorMessage: 'La entrega no pudo confirmarse…', origin: 'SERVER' },
+        deliveryProvenance: { deliveries: [{ protocol: 'DURABLE', ackVersion: 1, at: new Date().toISOString() }] },
+      }),
+    )
+    await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'TERMINAL_NEVER_ANSWERED' })
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
+  })
+
+  it('🔴 Codex (21-sep): el sobre sintético HISTÓRICO —sin la marca `origin`— tampoco cuenta', async () => {
+    // Las filas que la versión anterior ya persistió llevan el MISMO sobre de `failUndelivered` sin
+    // `origin`. Marcar sólo las nuevas dejaba a las viejas acreditando «la terminal contestó». Se
+    // reconocen por su firma: `timeout` + el texto que redacta el servidor.
+    montar(
+      filaDelIncidente({
+        acknowledgedAt: null,
+        failureCode: 'SOCKET_NOT_FOUND',
+        resultJson: {
+          requestId,
+          status: 'timeout',
+          errorMessage: 'La entrega no pudo confirmarse. Consulta el resultado en la terminal antes de volver a cobrar',
+        },
+        deliveryProvenance: { deliveries: [{ protocol: 'DURABLE', ackVersion: 1, at: new Date().toISOString() }] },
+      }),
+    )
+    await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'TERMINAL_NEVER_ANSWERED' })
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
+  })
+
+  it('🟢 CONTROL: el MISMO sobre, pero escrito por la TERMINAL, sí cuenta', async () => {
+    // Sin `origin: SERVER` es un resultado del aparato: la terminal habló y se puede declarar.
+    montar(
+      filaDelIncidente({
+        acknowledgedAt: null,
+        resultJson: { requestId, status: 'timeout', errorMessage: 'La entrega no pudo confirmarse…' },
+        deliveryProvenance: { deliveries: [{ protocol: 'DURABLE', ackVersion: 1, at: new Date().toISOString() }] },
+      }),
+    )
+    await expect(reconcileUncharged(identidad, declaracion())).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
+  })
+
   it('🔴 creada y NUNCA entregada a nadie sigue bloqueada: el cobro podría ir en camino', async () => {
     montar(
       filaDelIncidente({

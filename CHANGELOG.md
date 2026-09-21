@@ -7,6 +7,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **PlayTelecom vuelve a corregir monto y forma de pago de un cobro en EFECTIVO desde la verificación de venta (21-sep-2026).**
+  Desde el deploy del 18-sep todo cobro registrado por la terminal lleva la llave `pricing` (en efectivo sin afiliación vale
+  `null`) y `cobrosDelProtocolo` lo clasificaba «del protocolo de costo»: 162 SIMs de $0 quedaron protegidos en dos días y el
+  back-office recibía 409 `PAYMENT_PROTECTED_BY_COST_PROTOCOL` (Daniel Samperio, 18-sep). Nueva excepción **acotada**
+  (`efectivoManualEditable`, sólo en `editOrgSaleVerification`): CASH/OTHER, sin afiliación, snapshot exactamente nulo, sin
+  costo, sin obligación `TRANSACTION_COST` en ningún estado y sin reembolsos; la forma sólo se mueve entre efectivo y otro
+  (TARJETA sigue en 409), y al cambiarla se estampa `fundsFlow` coherente (CASH → `CASH_DRAWER`, otro → `EXTERNAL_RECORDED`).
+  La pertenencia GLOBAL no cambia: el PUT y el DELETE del dashboard siguen protegiendo ese mismo cobro. La bitácora
+  `SALE_VERIFICATION_EDIT` marca `viaExcepcionEfectivoManual: true`. Recomendación de Codex gpt-6-astra (20-sep) sobre la
+  auditoría de los hallazgos del monitor; pruebas en `saleVerificationEdit.protocolo.integration.test.ts` (3 sabotajes cazados).
+- **El detalle de una venta para el POS trae el saldo reembolsable POR COMPONENTE (aditivo): `remainingRefundableSale`,
+  `remainingRefundableTip` y, en cada reembolso, `saleAmount`/`tipAmount`.** Con «Incluir propina» apagada, la app sólo
+  puede ofrecer la venta restante; con el tope total mandaba `amount: 22000, tipRefundCents: 0` sobre una venta de $200 y el
+  servidor rechazaba (Testarudo, 17-sep: cinco 400 y el reembolso 4.7 h después por otro camino). Nada se quita del contrato.
+
 ### Added
 
 - **Ventana de confirmación de 30 s para negativos sin evidencia (`NO_EVIDENCE_AFTER_WINDOW`), aprobación tardía con alarma y

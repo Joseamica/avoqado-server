@@ -24,7 +24,28 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
  * @param paymentMethodId - Optional Stripe payment method ID to use for subscription
  * @returns Array of created VenueFeature records
  */
-export async function addFeaturesToVenue(venueId: string, featureCodes: string[], trialPeriodDays: number = 5, paymentMethodId?: string) {
+/**
+ * 🔴 Los días de prueba de una compra suelta los decide el SERVIDOR, nunca quien compra.
+ * Antes venían en el body (`trialPeriodDays`, 0..365 en el schema), así que cualquiera con
+ * permiso de compra podía regalarse un año (auditoría del 21-sep-2026, hallazgo #8). El schema
+ * sigue aceptando el campo para no romper clientes viejos, pero su valor se IGNORA.
+ */
+const TRIAL_ALA_CARTE_DIAS = 5
+
+export async function addFeaturesToVenue(venueId: string, featureCodes: string[], paymentMethodId?: string) {
+  // 🔴 Un PLAN no se contrata por la puerta de las funciones sueltas. Los planes son filas de la
+  // MISMA tabla `Feature` (`PLAN_PRO`, `PLAN_PREMIUM`), así que sin este corte esta ruta permitía
+  // contratar un segundo plan saltándose el guard del checkout —que sí rechaza un plan activo— y
+  // dejaba a `cancelPlan()` eligiendo con un `findFirst()` cuál de los dos cancelar (hallazgo #3).
+  // Se comprueba ANTES de tocar la base o Stripe: nada de la petición debe ejecutarse a medias.
+  const planesPedidos = featureCodes.filter(code => (PAID_PLAN_TIER_CODES as readonly string[]).includes(code))
+  if (planesPedidos.length > 0) {
+    throw new BadRequestError(
+      `Los planes (${planesPedidos.join(', ')}) se contratan desde el flujo de plan, no como función suelta.`,
+    )
+  }
+
+  const trialPeriodDays = TRIAL_ALA_CARTE_DIAS
   logger.info('Adding features to venue', { venueId, featureCodes, trialPeriodDays, paymentMethodId })
 
   // Get venue with Stripe customer ID

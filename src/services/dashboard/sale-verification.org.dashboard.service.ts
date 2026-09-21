@@ -1,8 +1,13 @@
-import { SaleVerificationStatus, SaleVerificationRejectionReason, PaymentMethod, Prisma } from '@prisma/client'
+import { SaleVerificationStatus, SaleVerificationRejectionReason, PaymentMethod, PaymentFundsFlow, Prisma } from '@prisma/client'
 import { fromZonedTime } from 'date-fns-tz'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
-import { MOTIVO_EXCLUSION_DEL_PROTOCOLO, bloquearConSuOriginal, cobrosDelProtocolo } from '../shared/cobroDelProtocolo'
+import {
+  MOTIVO_EXCLUSION_DEL_PROTOCOLO,
+  bloquearConSuOriginal,
+  cobrosDelProtocolo,
+  efectivoManualEditable,
+} from '../shared/cobroDelProtocolo'
 import {
   reviewSaleVerification as reviewSaleVerificationVenue,
   PROMOTER_FEEDBACK_MIN_CHARS,
@@ -1391,6 +1396,7 @@ export async function editOrgSaleVerification(
     // segundo reembolso real podía meterlo al protocolo entre la clasificación «legacy» del reembolso y su UPDATE (R1 de −$40 a
     // +$40 sin movimiento bancario). Un cobro que no es reembolso toma sólo su fila, como antes.
     let methodChanged = false
+    let viaExcepcionEfectivoManual = false
     if (existing.payment) {
       const candado = await bloquearConSuOriginal(tx, { paymentId: existing.payment.id, venueId: existing.venueId }, 'proteccion')
       if (!candado.existe) throw createServiceError('Venta no encontrada', 404)
@@ -1399,7 +1405,12 @@ export async function editOrgSaleVerification(
       const amountChanged = params.amount != null && new Prisma.Decimal(params.amount).toDecimalPlaces(2).comparedTo(vigente.amount) !== 0
       if (amountChanged || methodChanged) {
         const esDelProtocolo = (await cobrosDelProtocolo(tx, [existing.payment.id])).has(existing.payment.id)
-        if (esDelProtocolo) {
+        // Excepción de efectivo manual (ver `efectivoManualEditable`): el cobro CASH sin afiliación lleva la llave `pricing: null`
+        // y por eso «pertenece», pero no hay tarifa ni obligación que proteger. Sólo mueve la forma entre efectivo y otro.
+        const efectivoManual =
+          esDelProtocolo && (!methodChanged || params.paymentForm !== 'CARD') && (await efectivoManualEditable(tx, existing.payment.id))
+        viaExcepcionEfectivoManual = efectivoManual
+        if (esDelProtocolo && !efectivoManual) {
           const fields = [...(amountChanged ? ['amount'] : []), ...(methodChanged ? ['method'] : [])]
           const err = createServiceError(
             'Este cobro pertenece al protocolo de costo (tarifa congelada y obligación de costo): su importe y su forma de pago sólo cambian por reembolso, anulación o corrección acreditada, no desde la verificación de venta.',
@@ -1409,11 +1420,18 @@ export async function editOrgSaleVerification(
           err.details = { paymentId: existing.payment.id, fields, reason: MOTIVO_EXCLUSION_DEL_PROTOCOLO }
           throw err
         }
+        // La forma corregida arrastra su `fundsFlow`: la caja y el saldo disponible lo leen por encima de `method`
+        // (`tenderSemantics`). Sin esto, un CASH → OTHER seguía contando como efectivo del cajón.
         await tx.payment.update({
           where: { id: existing.payment.id },
           data: {
             ...(amountChanged ? { amount: params.amount } : {}),
-            ...(methodChanged ? { method: PAYMENT_FORM_TO_METHOD[params.paymentForm!] } : {}),
+            ...(methodChanged
+              ? {
+                  method: PAYMENT_FORM_TO_METHOD[params.paymentForm!],
+                  fundsFlow: params.paymentForm === 'CASH' ? PaymentFundsFlow.CASH_DRAWER : PaymentFundsFlow.EXTERNAL_RECORDED,
+                }
+              : {}),
           },
         })
       }
@@ -1469,6 +1487,8 @@ export async function editOrgSaleVerification(
             amount: params.amount ?? before.amount,
             method: methodChanged ? PAYMENT_FORM_TO_METHOD[params.paymentForm!] : before.method,
           },
+          // Queda escrito que el dinero cambió por la excepción de efectivo manual, no por una corrección acreditada.
+          ...(viaExcepcionEfectivoManual ? { viaExcepcionEfectivoManual: true } : {}),
         } as Prisma.InputJsonValue,
       },
     })

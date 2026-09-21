@@ -58,15 +58,15 @@ export class UnchargedReconciliationError extends Error {
         ? 'Este cobro sí tiene señales de haber pasado. No lo declares: consulta su resultado.'
         : code === 'TERMINAL_NEVER_ANSWERED'
           ? 'Esta terminal nunca confirmó haber recibido el cobro. No se puede declarar: consulta su resultado.'
-        : code === 'EXECUTION_STILL_ACTIVE'
-          ? 'La terminal dice que este cobro sigue en curso. Espera unos segundos y vuelve a consultar.'
-          : code === 'NOT_ALLOWED'
-            ? 'No tienes permiso para declarar que un cobro no pasó. Pídeselo a tu administrador.'
-            : code === 'RESOLUTION_CONFLICT'
-              ? 'Esta declaración ya se registró con otros datos. Vuelve a consultar el cobro.'
-              : code === 'ATTEMPT_NOT_FOUND'
-                ? 'No encontré ese cobro en este negocio.'
-                : 'No se pudo declarar este cobro. Conserva el pendiente y consulta su resultado.',
+          : code === 'EXECUTION_STILL_ACTIVE'
+            ? 'La terminal dice que este cobro sigue en curso. Espera unos segundos y vuelve a consultar.'
+            : code === 'NOT_ALLOWED'
+              ? 'No tienes permiso para declarar que un cobro no pasó. Pídeselo a tu administrador.'
+              : code === 'RESOLUTION_CONFLICT'
+                ? 'Esta declaración ya se registró con otros datos. Vuelve a consultar el cobro.'
+                : code === 'ATTEMPT_NOT_FOUND'
+                  ? 'No encontré ese cobro en este negocio.'
+                  : 'No se pudo declarar este cobro. Conserva el pendiente y consulta su resultado.',
     )
   }
 }
@@ -163,6 +163,22 @@ function afirmaCobro(claimedSuccess: unknown): boolean {
  */
 const ESTADOS_DECLARABLES = new Set<string>(['UNKNOWN', 'TIMED_OUT'])
 
+/** El texto EXACTO que redacta el servidor en `failUndelivered`. Ninguna terminal lo manda. */
+const MENSAJE_DEL_SOBRE_SINTETICO = 'La entrega no pudo confirmarse. Consulta el resultado en la terminal antes de volver a cobrar'
+
+/**
+ * ¿Este sobre lo escribió el SERVIDOR y no la terminal?
+ *
+ * 🔴 P1 de Codex (21-sep): marcar los sobres nuevos con `origin: 'SERVER'` no alcanza, porque las filas
+ * que la versión ANTERIOR ya persistió llevan el mismo sobre SIN esa marca — y `origin !== 'SERVER'` las
+ * acredita como «la terminal contestó». Se reconocen además por su firma: el `status: 'timeout'` con el
+ * texto que redacta `failUndelivered`, que ningún aparato produce.
+ */
+function sobreEscritoPorElServidor(sobre: Record<string, unknown>): boolean {
+  if (sobre.origin === 'SERVER') return true
+  return sobre.status === 'timeout' && sobre.errorMessage === MENSAJE_DEL_SOBRE_SINTETICO
+}
+
 /**
  * 🔴 P1 de Codex (18-sep): las contradicciones de PROCEDENCIA también vetan.
  *
@@ -181,6 +197,30 @@ function contradiccionDeProcedenciaSql(attemptIds: string[], venueId: string, te
           AND lower(regexp_replace(regexp_replace(e."payload"->'payload'->>'terminalSerial', ${PATRON_SQL_TRIM_COMO_JS}, '', 'g'), '^AVQD-', '', 'i')) <> ${terminalId})
         OR ${estadoBancarioSql(Prisma.sql`coalesce(e."payload"->'payload'->'status', e."payload"->'status')`)} = 'APROBADO')
   )`
+}
+
+/**
+ * La misma contradicción de procedencia, para quien la necesita FUERA de la transacción de la declaración.
+ *
+ * 🔴 P1 de Codex (20-sep): el REPLAY revalidaba con `hayAprobadoVinculadoSql`, que filtra por
+ * `e."venueId" = venueId`. Un aprobado del MISMO intento que aterriza en OTRO negocio queda
+ * `LINK_VENUE_MISMATCH`, NO crea `Payment` y no mueve ni el estado ni el puntero de la fila: el replay
+ * respondía `released: true` y le decía al cajero «vuelve a cobrar» con el cargo ya hecho, cuando una
+ * declaración NUEVA sí lo habría vetado. Enumera sus propios intentos: quien llama sólo tiene la llave.
+ */
+export async function hayContradiccionDeProcedencia(
+  client: Prisma.TransactionClient,
+  requestId: string,
+  venueId: string,
+): Promise<boolean> {
+  const row = await client.terminalPaymentRequest.findFirst({ where: { requestId, venueId }, select: { terminalId: true } })
+  if (!row) return false
+  const vinculos = await client.terminalPaymentAttemptLink.findMany({ where: { requestId, venueId }, select: { attemptId: true } })
+  const attemptIds = vinculos
+    .map(v => llaveDeIntento(v.attemptId))
+    .filter((a): a is string => Boolean(a))
+    .sort()
+  return contradiccionDeProcedencia(client, attemptIds, venueId, row.terminalId)
 }
 
 async function contradiccionDeProcedencia(
@@ -291,10 +331,17 @@ export async function reconcileUncharged(
     //   · la entregada a una terminal que SÍ SABE ACUSAR (`ackVersion >= 1`) y aun así no acusó. Ahí el
     //     silencio ES información: o no le llegó, o está ocupada con la tarjeta. Es el caso del ACK
     //     perdido que deja `UNKNOWN/ACK_TIMEOUT` a los CINCO SEGUNDOS, con minutos por delante.
-    const sobreConRespuesta =
+    //
+    // 🔴 P1 de Codex (20-sep): el sobre tiene que venir de LA TERMINAL. `failUndelivered` escribe uno
+    // SINTÉTICO —`UNKNOWN/SOCKET_NOT_FOUND` con un `timeout` que redacta el servidor— cuando el envío
+    // original no encuentra su socket. Sin distinguirlo, la declaración lo leía como «la terminal
+    // contestó algo» y aceptaba con todas las entregas DURABLE y sin un solo ACK del aparato. El
+    // servidor marca ese sobre con `origin: 'SERVER'`; aquí se descuenta.
+    const sobreCrudo =
       row.resultJson && typeof row.resultJson === 'object' && !Array.isArray(row.resultJson)
-        ? Object.keys(row.resultJson as Record<string, unknown>).length > 0
-        : false
+        ? (row.resultJson as Record<string, unknown>)
+        : null
+    const sobreConRespuesta = !!sobreCrudo && Object.keys(sobreCrudo).length > 0 && !sobreEscritoPorElServidor(sobreCrudo)
     const entregas = (row.deliveryProvenance as { deliveries?: { ackVersion?: number }[] } | null)?.deliveries
     const procedenciaDesconocida = !Array.isArray(entregas)
     const entregadaASordo = Array.isArray(entregas) && entregas.length > 0 && entregas.every(e => !Number(e?.ackVersion))

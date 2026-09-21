@@ -98,6 +98,11 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
     // 🔴 También el rastro: sin esto los asientos de una prueba se cuentan en la siguiente y el conteo
     // acusa en falso al candado de concurrencia (pasó al escribir esta suite).
     await prisma.activityLog.deleteMany({ where: { venueId } })
+    // Los eventos del procesador no cuelgan del venue (el cruce los deja con `venueId: null`): se
+    // limpian por los intentos de ESTA suite, o contaminan la siguiente prueba.
+    const vinculos = await prisma.terminalPaymentAttemptLink.findMany({ where: { venueId }, select: { attemptId: true } })
+    if (vinculos.length > 0)
+      await prisma.providerEventLog.deleteMany({ where: { attemptId: { in: vinculos.map(v => v.attemptId) } } })
     await prisma.terminalPaymentRequest.deleteMany({ where: { venueId } })
   })
 
@@ -326,6 +331,147 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
       declaration: { requestId, resolutionId: resolucionFija, statement: 'UNCHARGED_VERIFIED', statementVersion: 1 },
     })
     expect(r.released).toBe(false)
+  })
+
+  it('🔴 P1 Codex (20-sep): el replay NO dice «liberada» con un aprobado del MISMO intento recibido por OTRO venue', async () => {
+    // 🔴 El hueco: la revalidación del replay buscaba aprobaciones SÓLO en este venue
+    // (`aprobadoVinculadoSql` filtra por `e."venueId" = venueId`). Un webhook del mismo intento que
+    // aterriza en OTRO negocio queda `LINK_VENUE_MISMATCH` y NO crea `Payment`, así que ni el estado
+    // ni el puntero de la fila se mueven: el replay respondía `released:true` y le decía al cajero
+    // «vuelve a cobrar» con el cargo ya hecho. Una declaración NUEVA sí lo habría vetado.
+    const requestId = await sembrarFilaAtorada()
+    const declaration = { requestId, resolutionId: resolucionFija, statement: 'UNCHARGED_VERIFIED' as const, statementVersion: 1 as const }
+    const attemptId = `att-cruce-${sufijo}-${Math.random().toString(36).slice(2, 8)}`
+    await prisma.terminalPaymentAttemptLink.create({ data: { requestId, attemptId, venueId, terminalId } })
+
+    await reconcileUncharged({ venueId, requestId, actorStaffId: staffCajeroId, source: 'MOBILE' }, declaration)
+
+    // El aprobado llega a OTRO venue: el vínculo es de éste, el evento no.
+    await prisma.providerEventLog.create({
+      data: {
+        provider: 'PAYMENT_PROCESSOR',
+        venueId: null, // ningún venue lo reclamó: es el cruce que `LINK_VENUE_MISMATCH` describe
+        type: 'send_transaction',
+        attemptId,
+        errorReason: 'LINK_VENUE_MISMATCH',
+        payload: { payload: { status: 'APROBADO' } },
+      },
+    })
+
+    const r = await terminalPaymentService.releaseUnknownRequest({
+      requestId,
+      venueId,
+      actor: { staffId: staffCajeroId, source: 'MOBILE' },
+      reason: 'replay',
+      declaration,
+    })
+    expect(r.released).toBe(false)
+  })
+
+  it('🔴 P1 Codex (20-sep): tras la declaración, la entrega YA NO EMITE — y el control demuestra que sí emitiría', async () => {
+    // 🔴 El hueco: grabar la procedencia y emitir eran dos pasos con una SUSPENSIÓN en medio. Si en esa
+    // ventana la fila vencía a UNKNOWN y el cajero declaraba, el `emit` salía igual y la terminal pedía la
+    // tarjeta sobre una venta YA liberada — el cobro doble por el otro extremo. Ahora las dos van bajo el
+    // MISMO candado que toma la declaración, y el UPDATE de la procedencia (que exige un estado entregable)
+    // ES la comprobación del estado vigente.
+    const entregar = (requestId: string, emitir: () => void) =>
+      (
+        terminalPaymentService as unknown as {
+          entregarBajoCandado: (
+            requestId: string,
+            venueId: string,
+            entry: Record<string, number>,
+            socketId: string,
+            replay: boolean,
+            emitir: () => void,
+          ) => Promise<boolean>
+        }
+      ).entregarBajoCandado(requestId, venueId, { terminalPaymentAckVersion: 1 }, 'socket-de-prueba', false, emitir)
+
+    // 🟢 CONTROL primero: sobre una fila viva SÍ emite. Sin esto, el caso de abajo pasaría por el motivo
+    // equivocado (por ejemplo si `entregarBajoCandado` devolviera false siempre).
+    // Terminal PROPIA: el índice único parcial sólo deja una fila viva por terminal, y abajo hay otra.
+    const vivo = await sembrarFilaAtorada({ status: 'PENDING', terminalId: `${terminalId}-b`.slice(0, 40) })
+    let emitidosVivo = 0
+    expect(await entregar(vivo, () => void emitidosVivo++)).toBe(true)
+    expect(emitidosVivo).toBe(1)
+
+    // Y sobre una DECLARADA no sale un solo paquete.
+    const requestId = await sembrarFilaAtorada()
+    await reconcileUncharged(
+      { venueId, requestId, actorStaffId: staffCajeroId, source: 'MOBILE' },
+      { requestId, resolutionId: resolucionFija, statement: 'UNCHARGED_VERIFIED', statementVersion: 1 },
+    )
+    let emitidos = 0
+    expect(await entregar(requestId, () => void emitidos++)).toBe(false)
+    expect(emitidos).toBe(0)
+
+    // Y la declaración queda intacta: no se re-abrió la solicitud ni se le añadió una entrega.
+    const fresca = await prisma.terminalPaymentRequest.findFirstOrThrow({ where: { requestId, venueId } })
+    expect(fresca.status).toBe('FAILED')
+    expect(fresca.failureCode).toBe('OPERATOR_RECONCILED_NO_CHARGE')
+  })
+
+  it('🔴 Codex (21-sep): si algo falla DESPUÉS de emitir, la constancia de la entrega SOBREVIVE', async () => {
+    // 🔴 La regresión que abrí el 20-sep al meter grabación y emisión en UNA transacción: al fallar el
+    // commit, Postgres revertía la procedencia **pero el paquete ya había salido**. Quedaba un cobro
+    // entregado sin rastro, y un `NOT_FOUND` de la sonda lo libera como `TPV_NEVER_RECEIVED` — o sea,
+    // liberar a ciegas una terminal que sí lo recibió. Ahora la marca va ANTES y por su cuenta.
+    const requestId = await sembrarFilaAtorada({ status: 'PENDING', terminalId: `${terminalId}-c`.slice(0, 40) })
+    const servicio = terminalPaymentService as unknown as {
+      entregarBajoCandado: (
+        requestId: string,
+        venueId: string,
+        entry: Record<string, number>,
+        socketId: string,
+        replay: boolean,
+        emitir: () => void,
+      ) => Promise<boolean>
+    }
+
+    await expect(
+      servicio.entregarBajoCandado(requestId, venueId, { terminalPaymentAckVersion: 1 }, 'socket-x', false, () => {
+        throw new Error('el socket murió justo después de mandar el paquete')
+      }),
+    ).rejects.toThrow('el socket murió')
+
+    const fila = await prisma.terminalPaymentRequest.findFirstOrThrow({ where: { requestId, venueId } })
+    const entregas = (fila.deliveryProvenance as { deliveries?: unknown[] } | null)?.deliveries
+    expect(Array.isArray(entregas)).toBe(true)
+    expect(entregas).toHaveLength(1)
+    // Y NO es `[]`: una procedencia vacía es exactamente lo que la sonda lee como «nunca entregada».
+    expect(fila.deliveryAttempts).toBe(1)
+  })
+
+  it('🔴 Codex (21-sep): `failUndelivered` CONSERVA una afirmación de cobro ya guardada', async () => {
+    // El envío original no encuentra su socket y entra aquí mientras un éxito degradado ya dejó su
+    // `claimedSuccess`. Antes el sobre se reemplazaba entero: la señal positiva desaparecía y la
+    // declaración podía aceptar sin verla. Ahora se fusiona.
+    const requestId = await sembrarFilaAtorada({
+      status: 'PENDING',
+      terminalId: `${terminalId}-d`.slice(0, 40),
+      resultJson: { status: 'success', claimedSuccess: { transactionId: 'tx-real-123' } },
+    })
+    const servicio = terminalPaymentService as unknown as {
+      failUndelivered: (requestId: string, venueId: string, failureCode: string) => Promise<void>
+    }
+
+    await servicio.failUndelivered(requestId, venueId, 'SOCKET_NOT_FOUND')
+
+    const fila = await prisma.terminalPaymentRequest.findFirstOrThrow({ where: { requestId, venueId } })
+    const sobre = fila.resultJson as Record<string, unknown>
+    expect(fila.status).toBe('UNKNOWN')
+    expect(sobre.origin).toBe('SERVER')
+    // 🔴 Lo que importa: la afirmación del cobro sigue ahí.
+    expect(sobre.claimedSuccess).toEqual({ transactionId: 'tx-real-123' })
+
+    // Y por eso la declaración NO puede aceptar sobre esta fila.
+    await expect(
+      reconcileUncharged(
+        { venueId, requestId, actorStaffId: staffCajeroId, source: 'MOBILE' },
+        { requestId, resolutionId: resolucionFija, statement: 'UNCHARGED_VERIFIED', statementVersion: 1 },
+      ),
+    ).rejects.toMatchObject({ code: expect.stringMatching(/POSITIVE_EVIDENCE_EXISTS|TERMINAL_NEVER_ANSWERED/) })
   })
 
   it('🟢 CONTROL del veto: sin ninguna evidencia, el replay SÍ dice «liberada» (si no, el de arriba pasa por el motivo equivocado)', async () => {

@@ -57,7 +57,8 @@ export async function addVenueFeatures(
       paymentMethodId: paymentMethodId || 'default',
     })
 
-    const createdFeatures = await venueFeatureService.addFeaturesToVenue(venueId, featureCodes, trialPeriodDays, paymentMethodId)
+    // `trialPeriodDays` del body se ignora a propósito: la política de prueba es del servidor.
+    const createdFeatures = await venueFeatureService.addFeaturesToVenue(venueId, featureCodes, paymentMethodId)
 
     // Separate features by status for better UI feedback
     const activeFeatures = createdFeatures.filter(f => f.active)

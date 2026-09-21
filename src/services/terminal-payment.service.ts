@@ -1953,7 +1953,16 @@ class TerminalPaymentService {
         // 🔴 Procedencia durable ANTES de emitir (Codex 11-sep): protocolo, capacidades e identidad del socket, por
         // solicitud. Si no se puede escribir, NO se emite: una entrega sin rastro volvería a ser «nunca recibida»
         // para la sonda y liberaría a ciegas.
-        const grabada = await this.recordDelivery(requestId, venueId, terminalEntry, socketId, false)
+        const grabada = await this.entregarBajoCandado(requestId, venueId, terminalEntry, socketId, false, () => {
+          if (legacy) {
+            // Compatibilidad backend-first: APKs publicadas aún no conocen el ACK ni tienen inbox durable. Se entrega
+            // una sola vez; la procedencia LEGACY (y `lastDeliveredAt` sin ACK) ya quedó escrita arriba.
+            directSocket.emit('terminal:payment_request', paymentPayload)
+            logger.info(`📡 [TerminalPayment] Emitted once to legacy socket ${socketId}`, { requestId, terminalId })
+            return
+          }
+          emitirConAcuse()
+        })
         if (!grabada) {
           if (!this.pendingPayments.has(requestId)) return
           clearTimeout(timeout)
@@ -1969,13 +1978,8 @@ class TerminalPaymentService {
           resolve(incierto)
           return
         }
-        if (legacy) {
-          // Compatibilidad backend-first: APKs publicadas aún no conocen el ACK ni tienen inbox durable. Se entrega
-          // una sola vez; la procedencia LEGACY (y `lastDeliveredAt` sin ACK) ya quedó escrita arriba.
-          directSocket.emit('terminal:payment_request', paymentPayload)
-          logger.info(`📡 [TerminalPayment] Emitted once to legacy socket ${socketId}`, { requestId, terminalId })
-          return
-        }
+      }
+      const emitirConAcuse = () => {
         directSocket
           .timeout(PAYMENT_DELIVERY_ACK_TIMEOUT_MS)
           .emit(
@@ -2139,6 +2143,54 @@ class TerminalPaymentService {
   }
 
   /**
+   * Deja constancia DURABLE de la entrega y emite bajo exclusión por `requestId`.
+   *
+   * 🔴 Son DOS pasos a propósito, y el orden es la garantía. La versión del 20-sep metía los dos
+   * dentro de una transacción, y Codex demostró el hueco al día siguiente: **si el commit falla o la
+   * transacción vence DESPUÉS del `emit`, Postgres revierte la procedencia pero el paquete ya salió.**
+   * Queda un cobro entregado sin rastro, y un `NOT_FOUND` de la sonda lo libera como
+   * `TPV_NEVER_RECEIVED` — que es liberar a ciegas una terminal que sí recibió. Mi comentario de
+   * entonces («el rollback deja la procedencia sin escribir, que es la verdad») era FALSO.
+   *
+   * 1. **La marca va primero y en su propia transacción** (autocommit), antes de cualquier efecto
+   *    externo. Es conservadora: dice «pudo haberse entregado», y sobrevive a que todo lo demás falle.
+   *    Su `WHERE status IN (PENDING, SENT, CANCEL_REQUESTED)` ya rechaza una fila que la declaración
+   *    haya cerrado antes.
+   * 2. **La emisión va bajo el MISMO `candadoDeSolicitud` que toma la declaración**, releyendo el
+   *    estado vigente dentro de esa exclusión: si el cajero declaró entre la marca y el emit, no sale
+   *    nada. Eso es lo que cierra el P1 original — la terminal pidiendo la tarjeta sobre una venta ya
+   *    liberada.
+   *
+   * `emitir` es SÍNCRONO (socket.io no espera al ACK para retornar), así que la transacción dura lo
+   * que una lectura.
+   *
+   * ⚠️ Al verificar esto con un sabotaje: mover la llamada a `recordDelivery` dentro del bloque de la
+   * transacción **no reproduce** la regresión, porque escribe con el cliente global (autocommit) y el
+   * rollback no la alcanza. El sabotaje fiel exige además pasarle el `tx`, que es lo que hacía la
+   * versión del 20-sep. Comprobado: así cae la prueba, y sólo ella.
+   */
+  private async entregarBajoCandado(
+    requestId: string,
+    venueId: string,
+    entry: { terminalPaymentAckVersion?: number; terminalPaymentCancelDispositionVersion?: number; terminalPaymentProbeVersion?: number },
+    socketId: string,
+    replay: boolean,
+    emitir: () => void,
+  ): Promise<boolean> {
+    return prisma.$transaction(async tx => {
+      await candadoDeSolicitud(tx, requestId)
+      // 🔑 `recordDelivery` escribe con el cliente GLOBAL, en su propia conexión y con autocommit. Por
+      // eso su marca no participa de esta transacción y SOBREVIVE a que el commit falle: es la
+      // constancia conservadora que exige el hallazgo. Y su `WHERE status IN (…)` es la comprobación
+      // del estado vigente, evaluada ya bajo el candado. No hace falta una lectura aparte.
+      const grabada = await this.recordDelivery(requestId, venueId, entry, socketId, replay)
+      if (!grabada) return false
+      emitir()
+      return true
+    }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
+  }
+
+  /**
    * ACK de una REENTREGA (replay). Sólo confirma una fila PENDING —igual que `markDelivered` en el camino fresco—.
    * Re-auditoría 11-sep (P2-1): renovar la vigencia de una fila ya SENT en cada reconexión la dejaba «en curso» para
    * siempre, sin que el vigía la pasara nunca a UNKNOWN ni avisara. (P2-3): el filtro de estado es también lo único que
@@ -2174,18 +2226,32 @@ class TerminalPaymentService {
   }
 
   private async failUndelivered(requestId: string, venueId: string, failureCode: string): Promise<void> {
-    await prisma.terminalPaymentRequest.updateMany({
-      where: { requestId, venueId, status: TerminalPaymentRequestStatus.PENDING },
-      data: {
-        status: TerminalPaymentRequestStatus.UNKNOWN,
-        failureCode,
-        resultJson: {
-          requestId,
-          status: 'timeout',
-          errorMessage: 'La entrega no pudo confirmarse. Consulta el resultado en la terminal antes de volver a cobrar',
-        },
-      },
-    })
+    // 🔴 P1 de Codex (21-sep): esto REEMPLAZABA el sobre entero, y podía borrar un `claimedSuccess` ya
+    // persistido — la afirmación de un éxito que todavía no se pudo acreditar como `Payment`. El caso:
+    // el envío original no encuentra su socket (otro recibió el replay) y entra aquí entre las dos
+    // escrituras del éxito degradado; la segunda sólo conserva el `claimedSuccess` que ENCUENTRE, y ya
+    // no está. La fila quedaba como un `timeout` limpio y la declaración podía aceptarla sin ver la
+    // señal positiva perdida.
+    //
+    // Por eso el sobre se FUSIONA en vez de sustituirse: lo que afirma un cobro se conserva, pase lo
+    // que pase. `origin: 'SERVER'` sigue marcando que este texto lo redactó el servidor.
+    const sobre = {
+      requestId,
+      status: 'timeout',
+      errorMessage: 'La entrega no pudo confirmarse. Consulta el resultado en la terminal antes de volver a cobrar',
+      origin: 'SERVER',
+    }
+    await prisma.$executeRaw`
+      UPDATE "TerminalPaymentRequest"
+         SET "status" = 'UNKNOWN'::"TerminalPaymentRequestStatus",
+             "failureCode" = ${failureCode},
+             "resultJson" = ${JSON.stringify(sobre)}::jsonb || CASE
+               WHEN "resultJson" ? 'claimedSuccess'
+                 THEN jsonb_build_object('claimedSuccess', "resultJson"->'claimedSuccess')
+               ELSE '{}'::jsonb END,
+             "updatedAt" = (now() AT TIME ZONE 'UTC')
+       WHERE "requestId" = ${requestId} AND "venueId" = ${venueId}
+         AND "status" = 'PENDING'::"TerminalPaymentRequestStatus"`
   }
 
   /**
@@ -2246,19 +2312,21 @@ class TerminalPaymentService {
         timestamp: new Date().toISOString(),
         attemptLinkVersion: TERMINAL_ATTEMPT_LINK_VERSION,
       }
-      const grabada = await this.recordDelivery(row.requestId, venueId, entry, socketId, true)
-      if (!grabada) continue
-      directSocket
-        .timeout(PAYMENT_DELIVERY_ACK_TIMEOUT_MS)
-        .emit('terminal:payment_request', payload, (error: Error | null, response?: { accepted?: boolean; requestId?: string }) => {
-          if (error || response?.accepted !== true || response.requestId !== row.requestId) return
-          // 🔴 Antes era `void prisma…updateMany(…)` pelón, y una consulta de Prisma es PEREZOSA: sin `await`/`.then`
-          // no se ejecuta NUNCA, así que el ACK de un replay jamás se escribía. El método es `async` (corre al llamarlo)
-          // y `.catch` evita un rechazo sin manejar, que `server.ts` convierte en gracefulShutdown.
-          void this.registrarAckDeReplay(row.requestId, venueId).catch(err =>
-            logger.warn('⚠️ [TerminalPayment] Could not record replay ACK', { requestId: row.requestId, error: String(err) }),
-          )
-        })
+      // 🔴 P1 de Codex (20-sep): grabar y emitir, en la MISMA exclusión — un replay corre la misma carrera
+      // contra la declaración del cajero que el envío original.
+      await this.entregarBajoCandado(row.requestId, venueId, entry, socketId, true, () => {
+        directSocket
+          .timeout(PAYMENT_DELIVERY_ACK_TIMEOUT_MS)
+          .emit('terminal:payment_request', payload, (error: Error | null, response?: { accepted?: boolean; requestId?: string }) => {
+            if (error || response?.accepted !== true || response.requestId !== row.requestId) return
+            // 🔴 Antes era `void prisma…updateMany(…)` pelón, y una consulta de Prisma es PEREZOSA: sin `await`/`.then`
+            // no se ejecuta NUNCA, así que el ACK de un replay jamás se escribía. El método es `async` (corre al llamarlo)
+            // y `.catch` evita un rechazo sin manejar, que `server.ts` convierte en gracefulShutdown.
+            void this.registrarAckDeReplay(row.requestId, venueId).catch(err =>
+              logger.warn('⚠️ [TerminalPayment] Could not record replay ACK', { requestId: row.requestId, error: String(err) }),
+            )
+          })
+      })
     }
   }
 
@@ -5454,7 +5522,7 @@ class TerminalPaymentService {
     // `declaration` no entra aquí y el comportamiento de siempre queda intacto — `reason` y un `confirm` NUNCA
     // se leen como declaración implícita.
     if (input.declaration !== undefined && input.declaration !== null) {
-      const { reconcileUncharged } = await import('./tpv/uncharged-reconciliation.service')
+      const { reconcileUncharged, hayContradiccionDeProcedencia } = await import('./tpv/uncharged-reconciliation.service')
       const resolution = await reconcileUncharged(
         { venueId, requestId, actorStaffId: actor.staffId ?? null, source: actor.source },
         input.declaration,
@@ -5491,7 +5559,10 @@ class TerminalPaymentService {
           SELECT (${hayAprobadoVinculadoSql(requestId, venueId)}
                OR ${hayPagoLigadoSql(requestId, venueId)}
                OR ${hayEvidenciaDeConciliacionSql(requestId, venueId)}) AS "hay"`
-        evidenciaActual = Boolean(e?.hay)
+        // 🔴 P1 de Codex (20-sep): las tres preguntas de arriba miran SÓLO este venue, así que un aprobado
+        // del mismo intento recibido por OTRO negocio (`LINK_VENUE_MISMATCH`, sin `Payment`) no movía nada y
+        // el replay contestaba «liberada». La declaración NUEVA sí lo veta: el replay usa el MISMO veto.
+        evidenciaActual = Boolean(e?.hay) || (await hayContradiccionDeProcedencia(prisma, requestId, venueId))
       } catch (err) {
         // Falla CERRADO: si no se puede comprobar, no se afirma que quedó liberada.
         evidenciaActual = true
