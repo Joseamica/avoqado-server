@@ -185,7 +185,7 @@ export async function getActiveBatchesFIFO(venueId: string, rawMaterialId: strin
  * Type for locked stock batch (row-level locking)
  * Used with PostgreSQL FOR UPDATE to prevent race conditions
  */
-type LockedStockBatch = {
+export type LockedStockBatch = {
   id: string
   remainingQuantity: Prisma.Decimal
   costPerUnit: Prisma.Decimal
@@ -225,9 +225,47 @@ async function lockBatchesForAllocation(tx: Prisma.TransactionClient, rawMateria
       AND "venueId" = ${venueId}
       AND status = 'ACTIVE'
       AND "remainingQuantity" > 0
-    ORDER BY "receivedDate" ASC
+    ORDER BY "receivedDate" ASC, id ASC
     FOR UPDATE NOWAIT
   `
+}
+
+export type BatchAllocationOrder = 'FIFO' | 'FEFO'
+type DeductedBatchMovement = Prisma.RawMaterialMovementGetPayload<{
+  include: { batch: { select: { batchNumber: true } } }
+}>
+
+/**
+ * Hermana de lockBatchesForAllocation con orden FEFO (primero el lote que vence antes).
+ *
+ * La merma por caducidad debe consumir el lote que vence primero: si consumiera el más
+ * antiguo, el job nocturno de caducidad volvería a descontar el lote que de verdad venció.
+ * Los lotes sin fecha de caducidad van al final; el desempate es el mismo de FIFO.
+ */
+export async function lockBatchesForFEFOAllocation(
+  tx: Prisma.TransactionClient,
+  rawMaterialId: string,
+  venueId: string,
+): Promise<LockedStockBatch[]> {
+  return tx.$queryRaw<LockedStockBatch[]>`
+    SELECT id, "remainingQuantity", "costPerUnit", "receivedDate", "batchNumber", unit
+    FROM "StockBatch"
+    WHERE "rawMaterialId" = ${rawMaterialId}
+      AND "venueId" = ${venueId}
+      AND status = 'ACTIVE'
+      AND "remainingQuantity" > 0
+    ORDER BY "expirationDate" ASC NULLS LAST, "receivedDate" ASC, id ASC
+    FOR UPDATE NOWAIT
+  `
+}
+
+export function lockWasteBatchesInTx(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  rawMaterialId: string,
+  order: BatchAllocationOrder,
+): Promise<LockedStockBatch[]> {
+  return order === 'FEFO' ? lockBatchesForFEFOAllocation(tx, rawMaterialId, venueId) : lockBatchesForAllocation(tx, rawMaterialId, venueId)
 }
 
 /**
@@ -235,15 +273,16 @@ async function lockBatchesForAllocation(tx: Prisma.TransactionClient, rawMateria
  *
  * This is a pure calculation function - receives batches, returns allocations.
  * Used internally by both locked and non-locked allocation functions.
+ * Reparte en el orden en que recibe los lotes, así que sirve igual para FIFO y FEFO.
  */
-function calculateFIFOAllocations(
+export function calculateFIFOAllocations(
   batches: Array<{
     id: string
     batchNumber: string
     remainingQuantity: Prisma.Decimal
     costPerUnit: Prisma.Decimal
   }>,
-  quantityNeeded: number,
+  quantityNeeded: number | Prisma.Decimal,
 ): {
   allocations: Array<{
     batchId: string
@@ -428,15 +467,19 @@ export async function deductStockFIFOInTx(
   tx: Prisma.TransactionClient,
   venueId: string,
   rawMaterialId: string,
-  quantityToDeduct: number,
+  quantityToDeduct: number | Prisma.Decimal,
   movementType: RawMaterialMovementType,
   metadata: {
     reason?: string
     reference?: string
     createdBy?: string
     postingLineId?: string
+    wasteReportId?: string
+    createdAt?: Date
   },
-): Promise<any[]> {
+  // Con el default, todo llamador que no lo pase conserva el orden FIFO de siempre.
+  allocationOrder: BatchAllocationOrder = 'FIFO',
+): Promise<DeductedBatchMovement[]> {
   // 0. El rawMaterial debe pertenecer al venue que deduce — venueId no es
   // decorativo. Sin esto, cualquier caller interno con un rawMaterialId
   // ajeno cruzaba tenants.
@@ -449,7 +492,7 @@ export async function deductStockFIFOInTx(
   }
 
   // 1. Lock batches FIRST (inside transaction) - prevents race conditions
-  const lockedBatches = await lockBatchesForAllocation(tx, rawMaterialId, venueId)
+  const lockedBatches = await lockWasteBatchesInTx(tx, venueId, rawMaterialId, allocationOrder)
 
   if (lockedBatches.length === 0) {
     throw new AppError(`No active batches available for raw material ${rawMaterialId}`, 400)
@@ -462,7 +505,7 @@ export async function deductStockFIFOInTx(
     throw new AppError(`Insufficient stock. Needed: ${quantityToDeduct}, Available: ${result.totalAvailable.toNumber()}`, 400)
   }
 
-  const movements: any[] = []
+  const movements: DeductedBatchMovement[] = []
   let cumulativeStock = rawMaterial.currentStock
 
   // 4. Process each allocation (update batches + create movements)
@@ -497,6 +540,8 @@ export async function deductStockFIFOInTx(
         reference: metadata.reference,
         createdBy: metadata.createdBy,
         postingLineId: metadata.postingLineId ?? null,
+        wasteReportId: metadata.wasteReportId,
+        createdAt: metadata.createdAt,
       },
       include: {
         batch: {
