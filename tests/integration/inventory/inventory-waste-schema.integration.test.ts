@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto'
+import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 
 const fixture = `waste-schema-${randomUUID()}`
@@ -70,8 +71,8 @@ const aplicada = (articulo: { itemType: 'PRODUCT'; productId: string } | { itemT
   ...articulo,
 })
 
-const crearInsumo = () =>
-  prisma.rawMaterial.create({
+const crearInsumo = (db: Prisma.TransactionClient = prisma) =>
+  db.rawMaterial.create({
     data: {
       venueId,
       name: 'Leche',
@@ -86,10 +87,53 @@ const crearInsumo = () =>
     },
   })
 
-const crearMovimientoDeInsumo = (rawMaterialId: string, wasteReportId: string) =>
-  prisma.rawMaterialMovement.create({
+const crearMovimientoDeInsumo = (rawMaterialId: string, wasteReportId: string, db: Prisma.TransactionClient = prisma) =>
+  db.rawMaterialMovement.create({
     data: { rawMaterialId, venueId, type: 'SPOILAGE', quantity: -2, unit: 'LITER', previousStock: 10, newStock: 8, wasteReportId },
   })
+
+class Revertir extends Error {}
+const PRIMERO = 'RI_ConstraintTrigger_a_0'
+
+const triggerDeBorrado = async (db: Prisma.TransactionClient, tabla: 'Product' | 'RawMaterial', constraint: string) => {
+  const [fila] = await db.$queryRawUnsafe<Array<{ tgname: string }>>(
+    `SELECT t.tgname FROM pg_trigger t JOIN pg_constraint c ON c.oid = t.tgconstraint
+      WHERE t.tgrelid = '"${tabla}"'::regclass AND c.conname = '${constraint}' AND t.tgfoid = '"RI_FKey_cascade_del"'::regproc`,
+  )
+  return fila.tgname
+}
+
+/**
+ * Postgres dispara los triggers RI de un mismo evento en orden ALFABÉTICO de nombre, y el nombre
+ * lleva el OID (`RI_ConstraintTrigger_a_<oid>`): el orden en producción es impredecible. Para
+ * probar el orden desfavorable sin depender de los OIDs de esta base, se renombra el trigger de la
+ * cascada artículo → folio a uno que ordena antes que cualquier OID. Todo corre en una transacción
+ * que SIEMPRE se revierte (nombre y datos vuelven a su estado). Un FK diferido sólo se verifica al
+ * COMMIT, que aquí nunca llega: `SET CONSTRAINTS ALL IMMEDIATE` fuerza esa verificación antes.
+ */
+async function enOrdenDesfavorable(
+  tabla: 'Product' | 'RawMaterial',
+  folioFk: string,
+  kardexFk: string,
+  escenario: (tx: Prisma.TransactionClient) => Promise<void>,
+) {
+  try {
+    await prisma.$transaction(
+      async tx => {
+        const folio = await triggerDeBorrado(tx, tabla, folioFk)
+        const kardex = await triggerDeBorrado(tx, tabla, kardexFk)
+        await tx.$executeRawUnsafe(`ALTER TRIGGER "${folio}" ON "${tabla}" RENAME TO "${PRIMERO}"`)
+        expect(PRIMERO < kardex).toBe(true) // la cascada del folio dispara antes que la del kardex
+        await escenario(tx)
+        await tx.$executeRawUnsafe('SET CONSTRAINTS ALL IMMEDIATE')
+        throw new Revertir()
+      },
+      { timeout: 60_000 },
+    )
+  } catch (error) {
+    if (!(error instanceof Revertir)) throw error
+  }
+}
 
 test('una lápida VOIDED mínima es válida', async () => {
   await expect(prisma.inventoryWasteReport.create({ data: lapida() })).resolves.toMatchObject({ status: 'VOIDED' })
@@ -153,4 +197,42 @@ test('🔴 un folio no se puede borrar solo mientras un movimiento lo referencia
 
   expect(await prisma.inventoryWasteReport.findUnique({ where: { id: report.id } })).not.toBeNull()
   expect(await prisma.rawMaterialMovement.findUnique({ where: { id: movement.id } })).not.toBeNull()
+})
+
+// El kardex del producto cuelga a DOS niveles (Product → Inventory → InventoryMovement) y el folio a
+// uno (Product → InventoryWasteReport): si la cascada del folio dispara primero, la verificación del
+// FK del movimiento se encola ANTES que el borrado del movimiento. Sólo un FK diferido sobrevive.
+test('🔴 borrar un PRODUCTO funciona aunque la cascada del folio dispare antes que la del kardex', async () => {
+  await enOrdenDesfavorable('Product', 'InventoryWasteReport_productId_fkey', 'Inventory_productId_fkey', async tx => {
+    const product = await tx.product.create({
+      data: { venueId, sku: `sku-${randomUUID()}`, name: 'Pan', categoryId, price: 10 },
+    })
+    const inventory = await tx.inventory.create({ data: { productId: product.id, venueId, currentStock: 8 } })
+    const report = await tx.inventoryWasteReport.create({ data: aplicada({ itemType: 'PRODUCT', productId: product.id }, 'UNIT') })
+    const movement = await tx.inventoryMovement.create({
+      data: { inventoryId: inventory.id, type: 'LOSS', quantity: -2, previousStock: 10, newStock: 8, wasteReportId: report.id },
+    })
+
+    await tx.product.delete({ where: { id: product.id } })
+
+    expect(await tx.inventoryWasteReport.findUnique({ where: { id: report.id } })).toBeNull()
+    expect(await tx.inventoryMovement.findUnique({ where: { id: movement.id } })).toBeNull()
+  })
+})
+
+// Mismo orden forzado para el insumo. Aquí kardex y folio cuelgan a UN nivel, así que la
+// verificación se encola detrás del borrado del movimiento: pasa con o sin diferir. Queda como guarda.
+test('borrar un INSUMO funciona aunque la cascada del folio dispare antes que la del kardex', async () => {
+  await enOrdenDesfavorable('RawMaterial', 'InventoryWasteReport_rawMaterialId_fkey', 'RawMaterialMovement_rawMaterialId_fkey', async tx => {
+    const rawMaterial = await crearInsumo(tx)
+    const report = await tx.inventoryWasteReport.create({
+      data: aplicada({ itemType: 'RAW_MATERIAL', rawMaterialId: rawMaterial.id }, 'LITER'),
+    })
+    const movement = await crearMovimientoDeInsumo(rawMaterial.id, report.id, tx)
+
+    await tx.rawMaterial.delete({ where: { id: rawMaterial.id } })
+
+    expect(await tx.inventoryWasteReport.findUnique({ where: { id: report.id } })).toBeNull()
+    expect(await tx.rawMaterialMovement.findUnique({ where: { id: movement.id } })).toBeNull()
+  })
 })

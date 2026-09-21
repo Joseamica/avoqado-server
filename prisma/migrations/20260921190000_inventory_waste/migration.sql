@@ -63,20 +63,25 @@ BEGIN
   FOR relation IN
     SELECT *
     FROM (
+      -- Los FKs movimiento → folio van DIFERIDOS al COMMIT. El folio cae en cascada con su
+      -- artículo a un nivel y el kardex del producto a dos (Product → Inventory → InventoryMovement);
+      -- Postgres dispara esas cascadas en orden alfabético de trigger, que lleva el OID y en
+      -- producción es impredecible. Una verificación inmediata truena si la del folio corre primero.
+      -- Prisma no expresa DEFERRABLE: en el schema estas relaciones dicen sólo NoAction.
       VALUES
         ('InventoryWasteReport', 'InventoryWasteReport_venueId_fkey',
-         'venueId', 'Venue', 'CASCADE'),
+         'venueId', 'Venue', 'CASCADE', ''),
         ('InventoryWasteReport', 'InventoryWasteReport_rawMaterialId_fkey',
-         'rawMaterialId', 'RawMaterial', 'CASCADE'),
+         'rawMaterialId', 'RawMaterial', 'CASCADE', ''),
         ('InventoryWasteReport', 'InventoryWasteReport_productId_fkey',
-         'productId', 'Product', 'CASCADE'),
+         'productId', 'Product', 'CASCADE', ''),
         ('InventoryWasteReport', 'InventoryWasteReport_reportedByStaffId_fkey',
-         'reportedByStaffId', 'Staff', 'RESTRICT'),
+         'reportedByStaffId', 'Staff', 'RESTRICT', ''),
         ('RawMaterialMovement', 'RawMaterialMovement_wasteReportId_fkey',
-         'wasteReportId', 'InventoryWasteReport', 'NO ACTION'),
+         'wasteReportId', 'InventoryWasteReport', 'NO ACTION', 'DEFERRABLE INITIALLY DEFERRED'),
         ('InventoryMovement', 'InventoryMovement_wasteReportId_fkey',
-         'wasteReportId', 'InventoryWasteReport', 'NO ACTION')
-    ) AS definitions(table_name, constraint_name, column_name, referenced_table, delete_action)
+         'wasteReportId', 'InventoryWasteReport', 'NO ACTION', 'DEFERRABLE INITIALLY DEFERRED')
+    ) AS definitions(table_name, constraint_name, column_name, referenced_table, delete_action, deferral)
   LOOP
     IF NOT EXISTS (
       SELECT 1
@@ -85,12 +90,13 @@ BEGIN
         AND conname = relation.constraint_name
     ) THEN
       EXECUTE format(
-        'ALTER TABLE %I ADD CONSTRAINT %I FOREIGN KEY (%I) REFERENCES %I(id) ON DELETE %s ON UPDATE CASCADE',
+        'ALTER TABLE %I ADD CONSTRAINT %I FOREIGN KEY (%I) REFERENCES %I(id) ON DELETE %s ON UPDATE CASCADE %s',
         relation.table_name,
         relation.constraint_name,
         relation.column_name,
         relation.referenced_table,
-        relation.delete_action
+        relation.delete_action,
+        relation.deferral
       );
     END IF;
   END LOOP;

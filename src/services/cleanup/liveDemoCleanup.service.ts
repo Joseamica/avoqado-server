@@ -318,8 +318,9 @@ async function deleteVenueDataTx(tx: DbClient, venueId: string): Promise<number>
   // 4. Recipes and inventory
   await borrar(tx.recipe.deleteMany({ where: { product: { venueId } } }))
   await borrar(tx.rawMaterialMovement.deleteMany({ where: { rawMaterial: { venueId } } }))
-  // Merma: sus movimientos referencian el folio con RESTRICT, y el folio a su vez bloquea el
-  // borrado del insumo y del producto. De la hoja a la raíz, antes que ambos.
+  // Merma: el folio cae en cascada con su insumo o producto, y sus movimientos lo referencian con
+  // un FK diferido al COMMIT, así que en Postgres el orden ya no importa. Se borran explícitos (de
+  // la hoja a la raíz) porque la guardia del DMMF en su prueba trata NoAction como bloqueante.
   await borrar(tx.inventoryMovement.deleteMany({ where: { wasteReport: { venueId } } }))
   await borrar(tx.inventoryWasteReport.deleteMany({ where: { venueId } }))
   await borrar(tx.rawMaterial.deleteMany({ where: { venueId } }))
