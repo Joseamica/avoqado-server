@@ -49,8 +49,10 @@ jest.mock('@/services/stripe.service', () => ({
     })
 
     if (venueFeature) {
-      await prisma.venueFeature.update({
-        where: { id: venueFeature.id },
+      // Espeja el mecanismo REAL: la cobranza escribe con CAS (`updateMany` + `updatedAt`), no
+      // con un `update` por id. Un mock que imita el mecanismo viejo deja de probar lo que corre.
+      await prisma.venueFeature.updateMany({
+        where: { id: venueFeature.id, updatedAt: venueFeature.updatedAt },
         data: {
           paymentFailureCount: attemptCount,
           lastPaymentAttempt: new Date(),
@@ -110,6 +112,8 @@ jest.mock('@/services/dashboard/notification.dashboard.service', () => ({
 describe('Stripe Webhook Service - Critical Tests', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    ;(prisma.venueFeature.updateMany as jest.Mock)?.mockResolvedValue?.({ count: 1 })
+    ;(prisma.venueFeature.updateMany as jest.Mock)?.mockResolvedValue?.({ count: 1 })
     // 🔴 `jest.clearAllMocks()` NO resetea implementaciones: sin esto, un `mockResolvedValue`
     // puesto dentro de un test se filtra a los siguientes de la suite. El default es «al corriente».
     ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('active')
@@ -158,13 +162,13 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         feature: { id: 'feature_1', code: 'TEST_FEATURE', name: 'Test Feature' },
         venue: { id: 'venue_1', name: 'Test Venue', status: 'ACTIVE' },
       })
-      ;(prisma.venueFeature.update as jest.Mock).mockResolvedValueOnce({})
+      ;(prisma.venueFeature.updateMany as jest.Mock).mockResolvedValueOnce({})
       ;(prisma.webhookEvent.update as jest.Mock).mockResolvedValueOnce({})
 
       await handleStripeWebhookEvent(mockEvent)
 
       expect(prisma.webhookEvent.create).toHaveBeenCalledTimes(1)
-      expect(prisma.venueFeature.update).toHaveBeenCalledTimes(1)
+      expect(prisma.venueFeature.updateMany).toHaveBeenCalledTimes(1)
 
       // Second call - should skip (idempotency)
       const P2002Error = new Error('Unique constraint violation')
@@ -175,7 +179,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
 
       // Should NOT process again
       expect(prisma.webhookEvent.create).toHaveBeenCalledTimes(2)
-      expect(prisma.venueFeature.update).toHaveBeenCalledTimes(1) // Still 1, not 2
+      expect(prisma.venueFeature.updateMany).toHaveBeenCalledTimes(1) // Still 1, not 2
     })
 
     it('should handle concurrent webhook processing without race conditions', async () => {
@@ -209,7 +213,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         feature: { code: 'TEST' },
         venue: { name: 'Test', status: 'ACTIVE' },
       })
-      ;(prisma.venueFeature.update as jest.Mock).mockResolvedValue({})
+      ;(prisma.venueFeature.updateMany as jest.Mock).mockResolvedValue({})
       ;(prisma.webhookEvent.update as jest.Mock).mockResolvedValue({})
 
       // Other 9 calls get P2002 (already processing)
@@ -228,7 +232,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       await Promise.all(promises)
 
       // Only ONE should actually process
-      expect(prisma.venueFeature.update).toHaveBeenCalledTimes(1)
+      expect(prisma.venueFeature.updateMany).toHaveBeenCalledTimes(1)
     })
   })
 
@@ -311,7 +315,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         feature: { id: 'feature_1', code: 'TEST_FEATURE', name: 'Test Feature' },
         venue: { id: 'venue_1', name: 'Test Venue', status: 'ACTIVE' },
       })
-      ;(prisma.venueFeature.update as jest.Mock).mockResolvedValueOnce({})
+      ;(prisma.venueFeature.updateMany as jest.Mock).mockResolvedValueOnce({})
 
       // El estado vigente refleja el status del propio objeto: es el escenario realista.
       // Las DIVERGENCIAS (aviso atrasado) se prueban a proposito en stripe.webhook.reactivacion.test.ts
@@ -327,8 +331,8 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       // 🔴 Desde la 2ª auditoría de Codex (18-sep) también suelta el candado de suspensión: este
       // evento puede ser el ÚNICO que llegue al recuperarse un pago, y `suspendedAt` es candado
       // duro en el resolver (`basePlan.service.ts:91`). Ver stripe.webhook.reactivacion.test.ts.
-      expect(prisma.venueFeature.update).toHaveBeenCalledWith({
-        where: { id: 'vf_1' },
+      expect(prisma.venueFeature.updateMany).toHaveBeenCalledWith({
+        where: expect.objectContaining({ id: 'vf_1' }),
         data: {
           active: true,
           endDate: null, // null = paid subscription forever
@@ -358,7 +362,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         feature: { id: 'feature_1', code: 'TEST_FEATURE', name: 'Test Feature' },
         venue: { id: 'venue_1', name: 'Test Venue', status: 'ACTIVE' },
       })
-      ;(prisma.venueFeature.update as jest.Mock).mockResolvedValueOnce({})
+      ;(prisma.venueFeature.updateMany as jest.Mock).mockResolvedValueOnce({})
 
       // El estado vigente refleja el status del propio objeto: es el escenario realista.
       // Las DIVERGENCIAS (aviso atrasado) se prueban a proposito en stripe.webhook.reactivacion.test.ts
@@ -371,8 +375,8 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       await handleSubscriptionUpdated(mockSubscription)
 
       // Should deactivate feature
-      expect(prisma.venueFeature.update).toHaveBeenCalledWith({
-        where: { id: 'vf_1' },
+      expect(prisma.venueFeature.updateMany).toHaveBeenCalledWith({
+        where: expect.objectContaining({ id: 'vf_1' }),
         data: {
           active: false,
         },
@@ -400,7 +404,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         feature: { id: 'feature_1', code: 'TEST_FEATURE', name: 'Test Feature' },
         venue: { id: 'venue_1', name: 'Test Venue', status: 'ACTIVE' },
       })
-      ;(prisma.venueFeature.update as jest.Mock).mockResolvedValueOnce({})
+      ;(prisma.venueFeature.updateMany as jest.Mock).mockResolvedValueOnce({})
 
       // El estado vigente refleja el status del propio objeto: es el escenario realista.
       // Las DIVERGENCIAS (aviso atrasado) se prueban a proposito en stripe.webhook.reactivacion.test.ts
@@ -413,8 +417,8 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       await handleSubscriptionUpdated(mockSubscription)
 
       // Should activate with trial endDate
-      expect(prisma.venueFeature.update).toHaveBeenCalledWith({
-        where: { id: 'vf_1' },
+      expect(prisma.venueFeature.updateMany).toHaveBeenCalledWith({
+        where: expect.objectContaining({ id: 'vf_1' }),
         data: {
           active: true,
           endDate: new Date(trialEnd * 1000), // Convert to Date object
@@ -452,7 +456,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       await handleSubscriptionUpdated(mockSubscription)
 
       // Should NOT deactivate - Stripe will retry payment
-      expect(prisma.venueFeature.update).not.toHaveBeenCalled()
+      expect(prisma.venueFeature.updateMany).not.toHaveBeenCalled()
     })
 
     it('should handle incomplete subscription status', async () => {
@@ -473,7 +477,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         feature: { code: 'TEST' },
         venue: { name: 'Test', status: 'ACTIVE' },
       })
-      ;(prisma.venueFeature.update as jest.Mock).mockResolvedValueOnce({})
+      ;(prisma.venueFeature.updateMany as jest.Mock).mockResolvedValueOnce({})
 
       // El estado vigente refleja el status del propio objeto: es el escenario realista.
       // Las DIVERGENCIAS (aviso atrasado) se prueban a proposito en stripe.webhook.reactivacion.test.ts
@@ -486,8 +490,8 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       await handleSubscriptionUpdated(mockSubscription)
 
       // Should deactivate incomplete subscription
-      expect(prisma.venueFeature.update).toHaveBeenCalledWith({
-        where: { id: 'vf_1' },
+      expect(prisma.venueFeature.updateMany).toHaveBeenCalledWith({
+        where: expect.objectContaining({ id: 'vf_1' }),
         data: { active: false },
       })
     })
@@ -510,7 +514,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         feature: { code: 'TEST' },
         venue: { name: 'Test', status: 'ACTIVE' },
       })
-      ;(prisma.venueFeature.update as jest.Mock).mockResolvedValueOnce({})
+      ;(prisma.venueFeature.updateMany as jest.Mock).mockResolvedValueOnce({})
 
       await handleStripeWebhookEvent({
         id: 'evt_payment_success',
@@ -525,8 +529,8 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       } as Stripe.Event)
 
       // Should reactivate feature after payment
-      expect(prisma.venueFeature.update).toHaveBeenCalledWith({
-        where: { id: 'vf_1' },
+      expect(prisma.venueFeature.updateMany).toHaveBeenCalledWith({
+        where: expect.objectContaining({ id: 'vf_1' }),
         // 🔴 Desde el 18-sep la reactivación limpia TAMBIÉN la suspensión. `active: true` solo no
         // devolvía el acceso: el resolver trata `suspendedAt` como candado duro, así que el negocio
         // pagaba y seguía bloqueado (auditoría de Codex, hallazgo #11). Esta aserción fijaba la
@@ -562,7 +566,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue(mockVenueFeature)
       ;(prisma.staffVenue.findMany as jest.Mock).mockResolvedValue([])
       ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ slug: 'test-venue' })
-      ;(prisma.venueFeature.update as jest.Mock).mockResolvedValue(mockVenueFeature)
+      ;(prisma.venueFeature.updateMany as jest.Mock).mockResolvedValue(mockVenueFeature)
 
       await handleStripeWebhookEvent({
         id: 'evt_payment_failed',
@@ -577,8 +581,8 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       } as Stripe.Event)
 
       // Should track payment failure (attempt count 2)
-      expect(prisma.venueFeature.update).toHaveBeenCalledWith({
-        where: { id: 'vf_1' },
+      expect(prisma.venueFeature.updateMany).toHaveBeenCalledWith({
+        where: expect.objectContaining({ id: 'vf_1' }),
         data: expect.objectContaining({
           paymentFailureCount: 2,
           lastPaymentAttempt: expect.any(Date),
@@ -609,7 +613,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       await handleSubscriptionUpdated(mockSubscription)
 
       // Should NOT throw error, just log warning
-      expect(prisma.venueFeature.update).not.toHaveBeenCalled()
+      expect(prisma.venueFeature.updateMany).not.toHaveBeenCalled()
     })
 
     it('should track failed webhook processing with retry count', async () => {

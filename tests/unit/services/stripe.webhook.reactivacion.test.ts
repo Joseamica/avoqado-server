@@ -59,8 +59,11 @@ import prisma from '@/utils/prismaClient'
 import { handleInvoicePaymentSucceeded } from '@/services/stripe.webhook.service'
 
 /** Un plan SUSPENDIDO por falta de pago: `active:false` y `suspendedAt` con fecha. */
+const FECHA_LEIDA = new Date('2026-09-19T10:00:00.000Z')
+
 const planSuspendido = {
   id: 'vf1',
+  updatedAt: FECHA_LEIDA,
   venueId: 'v1',
   featureId: 'feat_pro',
   active: false,
@@ -82,6 +85,7 @@ const facturaPagada = {
 
 beforeEach(() => {
   jest.clearAllMocks()
+  ;(prisma.venueFeature.updateMany as jest.Mock)?.mockResolvedValue?.({ count: 1 })
   ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue(planSuspendido)
   ;(prisma.venueFeature.update as jest.Mock).mockResolvedValue({})
   // Por defecto Stripe dice que está al corriente: el caso normal es «pagó y se recupera».
@@ -97,21 +101,24 @@ describe('recuperar el pago devuelve el ACCESO, no sólo el flag `active`', () =
   it('🔴 limpia `suspendedAt`: si se queda puesto, el resolver sigue negando aunque ya pagó', async () => {
     await handleInvoicePaymentSucceeded(facturaPagada)
 
-    const escritura = (prisma.venueFeature.update as jest.Mock).mock.calls[0]?.[0]
+    const escritura = ((prisma.venueFeature.update as jest.Mock).mock.calls[0] ??
+      (prisma.venueFeature.updateMany as jest.Mock).mock.calls[0])?.[0]
     expect(escritura?.data).toHaveProperty('suspendedAt', null)
   })
 
   it('🔴 y pone el contador de fallos en cero: si no, el siguiente tropiezo suspende de inmediato', async () => {
     await handleInvoicePaymentSucceeded(facturaPagada)
 
-    const escritura = (prisma.venueFeature.update as jest.Mock).mock.calls[0]?.[0]
+    const escritura = ((prisma.venueFeature.update as jest.Mock).mock.calls[0] ??
+      (prisma.venueFeature.updateMany as jest.Mock).mock.calls[0])?.[0]
     expect(escritura?.data).toHaveProperty('paymentFailureCount', 0)
   })
 
   it('sigue reactivando el plan, que es lo que ya hacía bien', async () => {
     await handleInvoicePaymentSucceeded(facturaPagada)
 
-    const escritura = (prisma.venueFeature.update as jest.Mock).mock.calls[0]?.[0]
+    const escritura = ((prisma.venueFeature.update as jest.Mock).mock.calls[0] ??
+      (prisma.venueFeature.updateMany as jest.Mock).mock.calls[0])?.[0]
     expect(escritura?.data).toMatchObject({ active: true })
   })
 })
@@ -139,7 +146,8 @@ describe('customer.subscription.updated con status ACTIVE también suelta el can
     const { handleSubscriptionUpdated } = await import('@/services/stripe.webhook.service')
     await handleSubscriptionUpdated(suscripcionActiva)
 
-    const escritura = (prisma.venueFeature.update as jest.Mock).mock.calls[0]?.[0]
+    const escritura = ((prisma.venueFeature.update as jest.Mock).mock.calls[0] ??
+      (prisma.venueFeature.updateMany as jest.Mock).mock.calls[0])?.[0]
     expect(escritura?.data).toHaveProperty('suspendedAt', null)
   })
 
@@ -147,7 +155,8 @@ describe('customer.subscription.updated con status ACTIVE también suelta el can
     const { handleSubscriptionUpdated } = await import('@/services/stripe.webhook.service')
     await handleSubscriptionUpdated(suscripcionActiva)
 
-    const escritura = (prisma.venueFeature.update as jest.Mock).mock.calls[0]?.[0]
+    const escritura = ((prisma.venueFeature.update as jest.Mock).mock.calls[0] ??
+      (prisma.venueFeature.updateMany as jest.Mock).mock.calls[0])?.[0]
     expect(escritura?.data).toHaveProperty('paymentFailureCount', 0)
   })
 
@@ -155,7 +164,8 @@ describe('customer.subscription.updated con status ACTIVE también suelta el can
     const { handleSubscriptionUpdated } = await import('@/services/stripe.webhook.service')
     await handleSubscriptionUpdated(suscripcionActiva)
 
-    const escritura = (prisma.venueFeature.update as jest.Mock).mock.calls[0]?.[0]
+    const escritura = ((prisma.venueFeature.update as jest.Mock).mock.calls[0] ??
+      (prisma.venueFeature.updateMany as jest.Mock).mock.calls[0])?.[0]
     expect(escritura?.data).toMatchObject({ active: true, endDate: null })
   })
 })
@@ -184,14 +194,16 @@ describe('un registro ACTIVO pero SUSPENDIDO sigue necesitando rescate', () => {
 
     await handleInvoicePaymentSucceeded({ ...facturaPagada } as never)
 
-    const escritura = (prisma.venueFeature.update as jest.Mock).mock.calls[0]?.[0]
+    const escritura = ((prisma.venueFeature.update as jest.Mock).mock.calls[0] ??
+      (prisma.venueFeature.updateMany as jest.Mock).mock.calls[0])?.[0]
     expect(escritura?.data).toHaveProperty('suspendedAt', null)
   })
 
   it('🔴 y la aserción es ESTRICTA: la clave no puede llegar como `undefined`', async () => {
     await handleInvoicePaymentSucceeded({ ...facturaPagada } as never)
 
-    const escritura = (prisma.venueFeature.update as jest.Mock).mock.calls[0]?.[0]
+    const escritura = ((prisma.venueFeature.update as jest.Mock).mock.calls[0] ??
+      (prisma.venueFeature.updateMany as jest.Mock).mock.calls[0])?.[0]
     // `not.toBeNull()` aceptaba `undefined` y no probaba nada. Esto sí. (Codex, 4ª auditoría.)
     expect(Object.keys(escritura?.data ?? {})).toContain('suspendedAt')
     expect(escritura?.data?.suspendedAt).toBeNull()
@@ -228,7 +240,8 @@ describe('la suspensión la levanta el ESTADO VIGENTE, no el orden de los evento
 
     await handleInvoicePaymentSucceeded({ ...facturaPagada } as never)
 
-    const escritura = (prisma.venueFeature.update as jest.Mock).mock.calls[0]?.[0]
+    const escritura = ((prisma.venueFeature.update as jest.Mock).mock.calls[0] ??
+      (prisma.venueFeature.updateMany as jest.Mock).mock.calls[0])?.[0]
     expect(escritura?.data).toHaveProperty('suspendedAt', null)
   })
 
@@ -238,7 +251,7 @@ describe('la suspensión la levanta el ESTADO VIGENTE, no el orden de los evento
 
     await handleInvoicePaymentSucceeded({ ...facturaPagada } as never)
 
-    expect(prisma.venueFeature.update).not.toHaveBeenCalled()
+    expect(prisma.venueFeature.updateMany).not.toHaveBeenCalled()
   })
 
   it('🔴 si no se puede preguntar a Stripe, PROPAGA para que reintente (no decide a ciegas)', async () => {
@@ -246,7 +259,7 @@ describe('la suspensión la levanta el ESTADO VIGENTE, no el orden de los evento
     ;(estadoDeLaSuscripcion as jest.Mock).mockRejectedValue(new Error('Stripe caído'))
 
     await expect(handleInvoicePaymentSucceeded({ ...facturaPagada } as never)).rejects.toThrow()
-    expect(prisma.venueFeature.update).not.toHaveBeenCalled()
+    expect(prisma.venueFeature.updateMany).not.toHaveBeenCalled()
   })
 
   // ⚠️ RETIRADA (6ª auditoría). Fijaba el atajo `if (!suspendedAt) return true`, que resultó ser un
@@ -276,7 +289,7 @@ describe('qué estado de Stripe autoriza qué', () => {
     await handleInvoicePaymentSucceeded({ ...facturaPagada } as never)
 
     expect(estadoDeLaSuscripcion).toHaveBeenCalled()
-    expect(prisma.venueFeature.update).not.toHaveBeenCalled()
+    expect(prisma.venueFeature.updateMany).not.toHaveBeenCalled()
   })
 
   it('🔴 `trialing` NO levanta una suspensión por impago', async () => {
@@ -286,7 +299,7 @@ describe('qué estado de Stripe autoriza qué', () => {
 
     await handleInvoicePaymentSucceeded({ ...facturaPagada } as never)
 
-    expect(prisma.venueFeature.update).not.toHaveBeenCalled()
+    expect(prisma.venueFeature.updateMany).not.toHaveBeenCalled()
   })
 
   it('`trialing` SÍ vale para la primera activación (sin suspensión previa)', async () => {
@@ -296,7 +309,7 @@ describe('qué estado de Stripe autoriza qué', () => {
 
     await handleInvoicePaymentSucceeded({ ...facturaPagada } as never)
 
-    expect(prisma.venueFeature.update).toHaveBeenCalled()
+    expect(prisma.venueFeature.updateMany).toHaveBeenCalled()
   })
 
   it('un registro ya ACTIVO y sano no consulta a Stripe (no hay nada que decidir)', async () => {
@@ -326,7 +339,10 @@ describe('subscription.updated: manda el estado VIGENTE, no el del evento', () =
     ;(m.estadoDeLaSuscripcion as jest.Mock).mockResolvedValue(status)
     ;(m.suscripcionVigente as jest.Mock).mockResolvedValue({ status, trialEnd })
   }
-  const escrituras = () => (prisma.venueFeature.update as jest.Mock).mock.calls.map(c => c[0]?.data ?? {})
+  const escrituras = () =>
+    [...(prisma.venueFeature.update as jest.Mock).mock.calls, ...(prisma.venueFeature.updateMany as jest.Mock).mock.calls].map(
+      c => c[0]?.data ?? {},
+    )
 
   it('🔴 aviso atrasado `trialing` sobre un CANCELADO: no reactiva', async () => {
     const { handleSubscriptionUpdated } = await import('@/services/stripe.webhook.service')
@@ -373,7 +389,7 @@ describe('subscription.updated: manda el estado VIGENTE, no el del evento', () =
 
     // Va por la rama `active` (la vigente): el update DEBE ocurrir, y deja el plan sin vencimiento
     // —no con uno ya pasado—. Exigir la escritura es lo que impide que la prueba pase en vacío.
-    expect(prisma.venueFeature.update).toHaveBeenCalledTimes(1)
+    expect(escrituras()).toHaveLength(1)
     expect(escrituras()[0]).toHaveProperty('endDate', null)
   })
 
@@ -386,7 +402,7 @@ describe('subscription.updated: manda el estado VIGENTE, no el del evento', () =
     await handleSubscriptionUpdated(sub('active'))
 
     // Va por la rama `trialing` (la vigente): escribe EL vencimiento vigente, nunca `null`.
-    expect(prisma.venueFeature.update).toHaveBeenCalledTimes(1)
+    expect(escrituras()).toHaveLength(1)
     expect(escrituras()[0]).toHaveProperty('endDate', finDelTrial)
   })
 
@@ -442,6 +458,77 @@ describe('subscription.updated: manda el estado VIGENTE, no el del evento', () =
     expect(emitido![2]).toHaveProperty('status', 'canceled')
   })
 
+  /**
+   * 🔴 PASADA DE CIERRE: la OTRA mitad del rescate. `fulfillPlanCheckout` guarda el vínculo
+   * inactivo cuando niega el acceso; esta prueba comprueba que el camino endurecido lo RECOGE
+   * cuando el pago prospera. Sin las dos mitades, el cliente que paga tarde se queda sin plan.
+   */
+  it('🔴 recoge el registro INACTIVO que dejó un checkout negado, y lo activa cuando Stripe ya está al corriente', async () => {
+    const { handleSubscriptionUpdated } = await import('@/services/stripe.webhook.service')
+    // Lo que deja fulfillPlanCheckout al negar: vínculo puesto, acceso NO concedido.
+    ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({
+      ...planSuspendido,
+      active: false,
+      suspendedAt: null,
+      stripeSubscriptionId: 'sub_pro',
+    })
+    await vigente('active')
+
+    await handleSubscriptionUpdated(sub('active'))
+
+    expect(escrituras()).toHaveLength(1)
+    expect(escrituras()[0]).toMatchObject({ active: true, suspendedAt: null, endDate: null })
+  })
+
+  /**
+   * 🔴 LA CAUSA RAÍZ DE LAS CARRERAS QUE QUEDABAN (Codex, 19-sep): el manejador leía el registro,
+   * consultaba Stripe y después escribía condicionado SÓLO por `id`. Entre la lectura y la
+   * escritura cabe otro webhook — una suspensión, una cancelación ya procesada — y esta escritura
+   * la pisaba. Ahora la escritura es CAS sobre `active` y `suspendedAt`: si cambiaron, no se pisa
+   * y el evento se reintenta con datos frescos.
+   */
+  it('🔴 escribe con CAS sobre lo que leyó, no sólo por id', async () => {
+    const { handleSubscriptionUpdated } = await import('@/services/stripe.webhook.service')
+    ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({ ...planSuspendido, active: false, suspendedAt: null })
+    await vigente('active')
+
+    await handleSubscriptionUpdated(sub('active'))
+
+    expect(prisma.venueFeature.updateMany).toHaveBeenCalled()
+    const { where } = (prisma.venueFeature.updateMany as jest.Mock).mock.calls[0][0]
+    // 🔴 El CAS va por `updatedAt`, no por los campos: Codex demostró que comparar `active` +
+    // `suspendedAt` NO detecta a un escritor que reescribe el MISMO valor (una cancelación que
+    // pone `active:false` sobre un `false`). Prisma mueve `updatedAt` en cada escritura, así que
+    // ese caso sí se detecta — y ningún escritor tiene que acordarse de incrementar nada.
+    expect(where).toMatchObject({ id: planSuspendido.id, updatedAt: FECHA_LEIDA })
+  })
+
+  it('🔴 una cancelación que reescribe el MISMO valor también se detecta (el caso que los campos no veían)', async () => {
+    const { handleSubscriptionUpdated } = await import('@/services/stripe.webhook.service')
+    // A lee `active:false`; B procesa la cancelación y vuelve a escribir `active:false`.
+    // Comparando campos, A no notaba nada y reactivaba una cancelación ya procesada.
+    ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({ ...planSuspendido, active: false, suspendedAt: null })
+    await vigente('active')
+    ;(prisma.venueFeature.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+
+    await expect(handleSubscriptionUpdated(sub('active'))).rejects.toThrow(/cambió|reintent/i)
+
+    // Lo que hace detectable ese caso es que el CAS mira la marca de tiempo, no los valores.
+    const { where } = (prisma.venueFeature.updateMany as jest.Mock).mock.calls[0][0]
+    expect(where).toHaveProperty('updatedAt', FECHA_LEIDA)
+    expect(where).not.toHaveProperty('active')
+  })
+
+  it('🔴 si otro webhook tocó el registro en medio, NO lo pisa y se reintenta', async () => {
+    const { handleSubscriptionUpdated } = await import('@/services/stripe.webhook.service')
+    ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({ ...planSuspendido, active: false, suspendedAt: null })
+    await vigente('active')
+    // Una suspensión (o una cancelación) se escribió entre nuestra lectura y esta escritura.
+    ;(prisma.venueFeature.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+
+    await expect(handleSubscriptionUpdated(sub('active'))).rejects.toThrow(/cambió|reintent/i)
+  })
+
   it('un moroso REAL sí se desactiva: el candado no vuelve inerte al handler', async () => {
     const { handleSubscriptionUpdated } = await import('@/services/stripe.webhook.service')
     ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({ ...planSuspendido, active: true, suspendedAt: null })
@@ -470,8 +557,8 @@ describe('una activación en TRIAL conserva su vencimiento', () => {
 
     await handleInvoicePaymentSucceeded({ ...facturaPagada } as never)
 
-    expect(prisma.venueFeature.update).toHaveBeenCalled()
-    const data = (prisma.venueFeature.update as jest.Mock).mock.calls[0][0].data
+    expect(prisma.venueFeature.updateMany).toHaveBeenCalled()
+    const data = (prisma.venueFeature.updateMany as jest.Mock).mock.calls[0][0].data
     expect(data.active).toBe(true)
     expect(Object.keys(data)).not.toContain('endDate')
   })
@@ -483,8 +570,8 @@ describe('una activación en TRIAL conserva su vencimiento', () => {
 
     await handleInvoicePaymentSucceeded({ ...facturaPagada } as never)
 
-    expect(prisma.venueFeature.update).toHaveBeenCalled()
-    const data = (prisma.venueFeature.update as jest.Mock).mock.calls[0][0].data
+    expect(prisma.venueFeature.updateMany).toHaveBeenCalled()
+    const data = (prisma.venueFeature.updateMany as jest.Mock).mock.calls[0][0].data
     expect(data).toHaveProperty('endDate', null)
   })
 })

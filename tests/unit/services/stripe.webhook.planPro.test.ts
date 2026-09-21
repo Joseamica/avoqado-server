@@ -116,6 +116,7 @@ const planProVenueFeature = {
 describe('Stripe Webhook — PLAN_PRO base plan deactivation on terminal failure', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    ;(prisma.venueFeature.updateMany as jest.Mock)?.mockResolvedValue?.({ count: 1 })
     // 🔴 `jest.clearAllMocks()` NO resetea implementaciones: sin esto, un `mockResolvedValue`
     // puesto dentro de un test se filtra a los siguientes de la suite. El default es «al corriente».
     ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('active')
@@ -147,9 +148,11 @@ describe('Stripe Webhook — PLAN_PRO base plan deactivation on terminal failure
     await handleSubscriptionUpdated(mockSubscription)
 
     // The mapped PLAN_PRO VenueFeature must be deactivated → venue falls back to basic feature set.
-    expect(prisma.venueFeature.update).toHaveBeenCalledTimes(1)
-    const updateArg = (prisma.venueFeature.update as jest.Mock).mock.calls[0][0]
-    expect(updateArg.where).toEqual({ id: 'vf1' })
+    expect(prisma.venueFeature.updateMany).toHaveBeenCalledTimes(1)
+    const updateArg = (prisma.venueFeature.updateMany as jest.Mock).mock.calls[0][0]
+    // El `where` lleva además el CAS (`active`, `suspendedAt`): la escritura no puede pisar lo que
+    // otro webhook haya cambiado entre la lectura y este momento.
+    expect(updateArg.where).toMatchObject({ id: 'vf1' })
     // active:false is the deactivation signal venueHasActiveBasePlan reads.
     // (suspendedAt may also be set by a future enhancement; assert active:false is the contract.)
     expect(updateArg.data.active).toBe(false)
@@ -175,8 +178,8 @@ describe('Stripe Webhook — PLAN_PRO base plan deactivation on terminal failure
     ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue((mockSubscription as any).status)
     await handleSubscriptionUpdated(mockSubscription)
 
-    expect(prisma.venueFeature.update).toHaveBeenCalledWith({
-      where: { id: 'vf1' },
+    expect(prisma.venueFeature.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: 'vf1' }),
       data: { active: false },
     })
   })
@@ -210,7 +213,7 @@ describe('Stripe Webhook — PLAN_PRO base plan deactivation on terminal failure
     await handleSubscriptionUpdated(mockSubscription)
 
     // Stripe will keep retrying — venue keeps PLAN_PRO until terminal failure.
-    expect(prisma.venueFeature.update).not.toHaveBeenCalled()
+    expect(prisma.venueFeature.updateMany).not.toHaveBeenCalled()
   })
 
   it('does not deactivate any feature when the subscription maps to no VenueFeature', async () => {
@@ -230,6 +233,6 @@ describe('Stripe Webhook — PLAN_PRO base plan deactivation on terminal failure
     ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue((mockSubscription as any).status)
     await handleSubscriptionUpdated(mockSubscription)
 
-    expect(prisma.venueFeature.update).not.toHaveBeenCalled()
+    expect(prisma.venueFeature.updateMany).not.toHaveBeenCalled()
   })
 })

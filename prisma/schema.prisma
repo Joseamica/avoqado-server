@@ -162,9 +162,9 @@ model Zone {
 
 model Venue {
   paymentEffects PaymentEffect[]
-  id             String       @id @default(cuid())
+  id             String          @id @default(cuid())
   organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id])
+  organization   Organization    @relation(fields: [organizationId], references: [id])
 
   // Zone assignment (optional geographic grouping)
   zoneId String?
@@ -656,8 +656,8 @@ model Venue {
   privacyNoticeVersions PrivacyNoticeVersion[]
 
   // Fase 1 — campañas de correo a clientes
-  customerCampaigns  CustomerCampaign[]
-  emailQuotaLedgers  EmailQuotaLedger[]
+  customerCampaigns CustomerCampaign[]
+  emailQuotaLedgers EmailQuotaLedger[]
 
   // Fase 2 — felicitación automática de cumpleaños
   birthdayAutomation BirthdayAutomation?
@@ -2800,10 +2800,10 @@ model StockCount {
   venueId String
   venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
-  type   StockCountType // CYCLE or FULL
-  status StockCountStatus @default(IN_PROGRESS)
-  revision Int @default(0)
-  note   String?
+  type     StockCountType // CYCLE or FULL
+  status   StockCountStatus @default(IN_PROGRESS)
+  revision Int              @default(0)
+  note     String?
 
   items StockCountItem[]
 
@@ -3628,9 +3628,9 @@ enum PromoterLocationSource {
 
 model Order {
   paymentEffects PaymentEffect[]
-  id      String @id @default(cuid())
-  venueId String
-  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  id             String          @id @default(cuid())
+  venueId        String
+  venue          Venue           @relation(fields: [venueId], references: [id], onDelete: Restrict)
 
   // Order info
   orderNumber String
@@ -4158,13 +4158,13 @@ enum ActionType {
 
 model Payment {
   paymentEffects PaymentEffect[]
-  id      String  @id @default(cuid())
-  venueId String
-  venue   Venue   @relation(fields: [venueId], references: [id], onDelete: Restrict)
-  orderId String
-  order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  shiftId String?
-  shift   Shift?  @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+  id             String          @id @default(cuid())
+  venueId        String
+  venue          Venue           @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  orderId        String
+  order          Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  shiftId        String?
+  shift          Shift?          @relation(fields: [shiftId], references: [id], onDelete: SetNull)
 
   processedById String?
   processedBy   Staff?  @relation(fields: [processedById], references: [id], onDelete: SetNull)
@@ -4209,7 +4209,7 @@ model Payment {
   // of that attempt, so the backend can atomically deduplicate via the unique index
   // below. Nullable for backwards compatibility with TPV versions < v1.10.10 and
   // for non-TPV payment sources (dashboard manual settlements, POS sync, etc.).
-  idempotencyKey String? @db.VarChar(64)
+  idempotencyKey           String? @db.VarChar(64)
   /// S0 (checkpoint 1 del webhook): la solicitud POS→terminal que este cobro resolvió, como COLUMNA. Lo que hoy
   /// vive en `processorData.terminalPaymentRequestId` (se conserva para los lectores actuales). Índice único
   /// PARCIAL en la migración 20260913170000: sólo UN COMPLETED (no REFUND) por solicitud = el ganador canónico;
@@ -4624,6 +4624,13 @@ model VenueFeature {
 
   renewalReminderSentAt DateTime? // last renewal-reminder email sent (cron dedup, per billing period)
   winbackSentAt         DateTime? // win-back email sent once after suspension (cron dedup)
+
+  /// 🔴 CAS del acceso al plan. Prisma la actualiza en CADA escritura (`@updatedAt`), incluso
+  /// cuando los valores no cambian —una cancelación que reescribe `active: false` sobre un `false`
+  /// la mueve igual—, que es justo el caso que una comparación por campos NO detecta (Codex,
+  /// 19-sep). Los manejadores de webhook comparan este valor para no pisar lo que otro escritor
+  /// hizo entre su lectura y su escritura. No hace falta que ningún escritor se acuerde de nada.
+  updatedAt DateTime @updatedAt
 
   @@unique([venueId, featureId])
   @@index([venueId])
@@ -5098,54 +5105,54 @@ enum TerminalPaymentRequestStatus {
 }
 
 model TerminalPaymentRequest {
-  id                 String                       @id @default(cuid())
-  requestId          String                       @unique // POS-generated idempotency key (UUID)
-  venueId            String
-  terminalId         String // normalized registry lock key (no AVQD-, lowercase)
-  status             TerminalPaymentRequestStatus @default(PENDING)
-  amountCents        Int
-  tipCents           Int                          @default(0)
-  orderId            String?
-  requestedById      String?
-  senderDevice       String?
+  id                      String                       @id @default(cuid())
+  requestId               String                       @unique // POS-generated idempotency key (UUID)
+  venueId                 String
+  terminalId              String // normalized registry lock key (no AVQD-, lowercase)
+  status                  TerminalPaymentRequestStatus @default(PENDING)
+  amountCents             Int
+  tipCents                Int                          @default(0)
+  orderId                 String?
+  requestedById           String?
+  senderDevice            String?
   // El cliente que el cajero eligió en el POS antes de mandar el cobro. Soft ref SIN FK,
   // igual que orderId/paymentId: esta fila es un registro de INTENCIÓN en el camino del
   // dinero — no puede bloquear el borrado de un cliente ni tumbar un cobro por
   // integridad referencial. Es lo que permite que la venta con TARJETA nazca con
   // cliente sin que la TPV (que registra ese cobro) tenga que conocerlo.
-  customerId         String?
+  customerId              String?
   // Snapshot del contrato que el POS ya resolvió antes de delegar el cobro. Se
   // conserva en servidor para que una TPV vieja o con otra sesión no pueda perder
   // vendedor/calificación al registrar el dinero.
-  processedByStaffId String?
-  rating             Int?
-  skipReview         Boolean                      @default(true)
-  paymentId          String? // the recorded Payment.id once COMPLETED (soft ref)
-  resultJson         Json? // full terminal result, for idempotent replay
-  lateResult         Boolean                      @default(false) // result arrived after TIMED_OUT/UNKNOWN
-  failureCode        String?
+  processedByStaffId      String?
+  rating                  Int?
+  skipReview              Boolean                      @default(true)
+  paymentId               String? // the recorded Payment.id once COMPLETED (soft ref)
+  resultJson              Json? // full terminal result, for idempotent replay
+  lateResult              Boolean                      @default(false) // result arrived after TIMED_OUT/UNKNOWN
+  failureCode             String?
   // A cancel request/timeout is not proof of no charge. Only a terminal's
   // explicit pre-execution acceptance sets ACCEPTED.
-  cancelDisposition  String?
-  deliveryAttempts   Int                          @default(0)
-  lastDeliveredAt    DateTime?
-  acknowledgedAt     DateTime?
+  cancelDisposition       String?
+  deliveryAttempts        Int                          @default(0)
+  lastDeliveredAt         DateTime?
+  acknowledgedAt          DateTime?
   // First observed return after expiresAt. Diagnostic only: connectivity and
   // elapsed time cannot prove that execution or financial recovery has finished.
-  terminalReturnedAt DateTime?
+  terminalReturnedAt      DateTime?
   /// Procedencia de cada ENTREGA de esta solicitud, escrita ANTES de emitir: { deliveries: [{ protocol: 'LEGACY'|'DURABLE',
   /// ackVersion, cancelDispositionVersion, probeVersion, socketId, at, replay }] }. `null` = procedencia DESCONOCIDA (fila
   /// anterior a esta columna: nunca inferir «no entregada»); `[]` = creada y todavía no entregada a ningún socket.
-  deliveryProvenance Json?
-  closedVia          String? // S8: 'terminal' | 'webhook'. Se escribe UNA vez: conserva quién ganó originalmente
+  deliveryProvenance      Json?
+  closedVia               String? // S8: 'terminal' | 'webhook'. Se escribe UNA vez: conserva quién ganó originalmente
   /// Ronda 6 (Codex r11, P1-B): la última EVIDENCIA de colisión (id de un Payment PENDING) que la red durable ya recorrió en
   /// esta solicitud liberada. `NULL` = empezar por el principio. Contabilidad del barrido: nunca viaja al POS, no cambia el
   /// estado y se escribe SIN tocar `updatedAt`. Columna propia y no una llave de `resultJson` porque ese sobre se devuelve
   /// entero al POS (`resultFromRow`) y varios escritores lo reemplazan completo.
   collisionEvidenceCursor String?
-  expiresAt          DateTime
-  createdAt          DateTime                     @default(now())
-  updatedAt          DateTime                     @updatedAt
+  expiresAt               DateTime
+  createdAt               DateTime                     @default(now())
+  updatedAt               DateTime                     @updatedAt
   // Per-terminal active-slot partial UNIQUE index (the mutex) is in the
   // migration SQL: UNIQUE(terminalId) WHERE status IN
   // ('PENDING','SENT','CANCEL_REQUESTED','UNKNOWN').
@@ -6068,7 +6075,7 @@ model ProviderEventLog {
   payment   Payment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
 
   // S7 (checkpoint 1 del webhook): evidencia por INTENTO (`integratorReference` = attemptId de la terminal).
-  attemptId String?
+  attemptId     String?
   // S4: lease del worker propio que procesa los PENDING, mismo vocabulario que PaymentEffect.
   attempts      Int       @default(0)
   nextAttemptAt DateTime?
@@ -7190,17 +7197,17 @@ enum BirthdayAutomationStatus {
 /// switch, existe cuando el dueño la escribe. Aquí sí hace falta, porque el correo sale
 /// solo todos los días.
 model BirthdayAutomation {
-  id       String                   @id @default(cuid())
-  venueId  String                   @unique
-  venue    Venue                    @relation(fields: [venueId], references: [id], onDelete: Cascade)
-  status   BirthdayAutomationStatus @default(PAUSED)
-  subject  String
+  id      String                   @id @default(cuid())
+  venueId String                   @unique
+  venue   Venue                    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  status  BirthdayAutomationStatus @default(PAUSED)
+  subject String
 
   /// Contenido por BLOQUES (decisión del founder, 2026-09-02): el servidor los renderiza.
   /// Nadie escribe HTML, así que no hay nada que sanitizar.
   contentBlocks Json?
-  htmlBody      String @db.Text
-  textBody      String @db.Text
+  htmlBody      String   @db.Text
+  textBody      String   @db.Text
   linkDomains   String[]
 
   /// Con cuántos días de antelación sale la felicitación.
@@ -7222,30 +7229,30 @@ model BirthdayAutomation {
 }
 
 model CustomerCampaignDelivery {
-  id            String                      @id @default(cuid())
+  id            String                         @id @default(cuid())
   /// XOR con automationId (fase 2): exactamente uno, garantizado por CHECK en la base
   campaignId    String?
-  campaign      CustomerCampaign?           @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  campaign      CustomerCampaign?              @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   automationId  String?
-  automation    BirthdayAutomation?         @relation(fields: [automationId], references: [id], onDelete: Cascade)
+  automation    BirthdayAutomation?            @relation(fields: [automationId], references: [id], onDelete: Cascade)
   customerId    String
-  customer      Customer                    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customer      Customer                       @relation(fields: [customerId], references: [id], onDelete: Cascade)
   venueId       String
   /// puntual: campaignId + ":" + customerId · cumpleaños (fase 2): "birthday:" + automationId + ":" + customerId + ":" + anniversaryYear
-  dedupeKey     String                      @unique
+  dedupeKey     String                         @unique
   status        CustomerCampaignDeliveryStatus @default(PENDING)
   /// 🔴 Se escribe UNA sola vez, al reclamar, ANTES de tocar la red: ancla inmutable de la
   /// vigencia del cupón y de la cuota. Un retry JAMÁS la mueve.
   sendAttemptAt DateTime?
-  attempts      Int                    @default(0)
+  attempts      Int                            @default(0)
   nextAttemptAt DateTime?
   leaseUntil    DateTime?
   resendId      String?
   openedAt      DateTime?
   clickedAt     DateTime?
-  lastError     String?                @db.Text
-  createdAt     DateTime               @default(now())
-  updatedAt     DateTime               @updatedAt
+  lastError     String?                        @db.Text
+  createdAt     DateTime                       @default(now())
+  updatedAt     DateTime                       @updatedAt
 
   @@index([status, nextAttemptAt, leaseUntil])
   @@index([resendId])
@@ -17560,26 +17567,26 @@ model RefreshGrant {
 
 /// Independently replayable post-payment obligations, committed with their source payment.
 model PaymentEffect {
-  id String @id @default(cuid())
-  venueId String
-  paymentId String
-  orderId String?
-  kind String
-  dedupeKey String
-  version Int @default(1)
-  payload Json
-  status String @default("PENDING")
-  attempts Int @default(0)
-  nextAttemptAt DateTime @default(now())
-  leaseUntil DateTime?
-  claimToken String?
-  completedAt DateTime?
-  lastError String? @db.VarChar(500)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  venue Venue @relation(fields: [venueId], references: [id], onDelete: Cascade)
-  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
-  order Order? @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  id            String    @id @default(cuid())
+  venueId       String
+  paymentId     String
+  orderId       String?
+  kind          String
+  dedupeKey     String
+  version       Int       @default(1)
+  payload       Json
+  status        String    @default("PENDING")
+  attempts      Int       @default(0)
+  nextAttemptAt DateTime  @default(now())
+  leaseUntil    DateTime?
+  claimToken    String?
+  completedAt   DateTime?
+  lastError     String?   @db.VarChar(500)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  venue         Venue     @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  payment       Payment   @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  order         Order?    @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
   @@unique([venueId, dedupeKey])
   @@index([orderId, kind, status])
@@ -17764,7 +17771,7 @@ model LaunchCampaignRedemption {
   stripeSubscriptionId String? @unique
   /// PaymentMethod.card.fingerprint — se REGISTRA; bloquear por tarjeta repetida es decisión
   /// del founder (D11). Nunca sale del superadmin.
-  cardFingerprint String?
+  cardFingerprint      String?
 
   reservedAt DateTime  @default(now())
   appliedAt  DateTime?

@@ -20,7 +20,7 @@ import AppError from '@/errors/AppError'
 
 // Initialize Stripe
 // Using default API version from SDK (automatically uses the latest compatible version)
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
+export const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 
 /**
  * Get or create Stripe customer for an organization
@@ -243,6 +243,21 @@ export async function syncFeaturesToStripe(): Promise<Feature[]> {
  * @param paymentMethodId - Optional Stripe payment method ID to use for subscription
  * @returns Created subscription IDs
  */
+/**
+ * ¿Este error de Stripe AFIRMA que el objeto no existe?
+ *
+ * 🔴 11ª auditoría de Codex (19-sep). Sólo `resource_missing` (404) lo afirma. Un
+ * `StripeConnectionError`, un 500 o un timeout dicen «no pude consultarlo», que es una cosa
+ * MUY distinta: tratarlos como «no existe» llevaba a crear una suscripción NUEVA teniendo una
+ * viva, y a sustituir el vínculo local por el de la nueva — dos suscripciones cobrándole al
+ * mismo negocio y la vieja sin que nada local la apuntara.
+ */
+export function stripeAfirmaQueNoExiste(error: unknown): boolean {
+  const e = error as { code?: string; statusCode?: number; type?: string } | null
+  if (!e) return false
+  return e.code === 'resource_missing' || (e.type === 'StripeInvalidRequestError' && e.statusCode === 404)
+}
+
 export async function createTrialSubscriptions(
   customerId: string,
   venueId: string,
@@ -377,7 +392,21 @@ export async function createTrialSubscriptions(
             logger.info(`  ✅ Reusing existing active subscription ${existingSubscription.id}`)
             subscription = existingSubscription
           }
-        } catch {
+        } catch (error: any) {
+          // 🔴 Sólo se crea otra si Stripe AFIRMA que la anterior no existe. Cualquier otro error
+          // («no pude consultarla») se propaga: el feature queda sin suscripción y alguien lo
+          // reintenta, que es infinitamente mejor que dejar DOS cobrando.
+          if (!stripeAfirmaQueNoExiste(error)) {
+            logger.error(`  🚨 No se pudo consultar la suscripción ${existingVenueFeature.stripeSubscriptionId}: NO se crea otra`, {
+              venueId,
+              featureCode: feature.code,
+              subscriptionId: existingVenueFeature.stripeSubscriptionId,
+              errorType: error?.type,
+              errorCode: error?.code,
+              statusCode: error?.statusCode,
+            })
+            throw error
+          }
           // Subscription not found in Stripe - create new one
           logger.warn(`  ⚠️ Subscription ${existingVenueFeature.stripeSubscriptionId} not found in Stripe, creating new one`)
           subscription = await retry(
@@ -657,9 +686,7 @@ export async function estadoDeLaSuscripcion(subscriptionId: string): Promise<Str
  * de `trialing` sobre un plan que hoy está pagado volvía a escribir el vencimiento viejo y, si ya
  * había pasado, le quitaba el acceso a quien paga. (8ª auditoría de Codex, 19-sep.)
  */
-export async function suscripcionVigente(
-  subscriptionId: string,
-): Promise<{ status: Stripe.Subscription.Status; trialEnd: Date | null }> {
+export async function suscripcionVigente(subscriptionId: string): Promise<{ status: Stripe.Subscription.Status; trialEnd: Date | null }> {
   const suscripcion = await stripe.subscriptions.retrieve(subscriptionId)
   return {
     status: suscripcion.status,
@@ -941,40 +968,184 @@ export async function fulfillPlanCheckout(session: Stripe.Checkout.Session): Pro
 
   // Pull the real price + trial state from the subscription Stripe created so monthlyPrice/
   // stripePriceId/endDate reflect what the customer actually subscribed to.
+  // 🔴 El registro se lee ANTES de consultar Stripe, y NO al revés. Con el orden invertido el CAS
+  // vigilaba la ventana equivocada: una cancelación que llegaba entre el `retrieve` y esta lectura
+  // ya estaba escrita cuando leíamos, el CAS coincidía y la reactivábamos (medido por Codex,
+  // 19-sep). Leyendo primero, cualquier escritura ajena posterior hace fallar el CAS, y el estado
+  // que trae Stripe es por construcción más nuevo que lo que comparamos.
+  const previo = await prisma.venueFeature.findUnique({
+    where: { venueId_featureId: { venueId, featureId: feature.id } },
+    select: { id: true, active: true, stripeSubscriptionId: true, updatedAt: true },
+  })
+
   const subscription = await retry(() => stripe.subscriptions.retrieve(subscriptionId as string), {
     retries: 3,
     shouldRetry: shouldRetryStripeError,
     context: 'stripe.fulfillPlanCheckout.retrieveSubscription',
   })
+  // 🔴 El estado VIGENTE decide si se concede el acceso, no el hecho de que llegara un
+  // `checkout.session.completed` (11ª auditoría de Codex, 19-sep). Stripe no ordena las entregas y
+  // este manejador se reprocesa, así que un aviso tardío sobre una suscripción ya muerta devolvía
+  // el plan completo. Misma familia que las auditorías 7ª-10ª cerraron en `subscription.updated`.
+  //
+  // 🔑 Y la ESCRITURA es tan importante como la decisión. Entre consultar Stripe y escribir cabe
+  // otro webhook: una cancelación podía desactivar el registro y el `upsert` ciego lo reactivaba.
+  // Por eso todas las escrituras de aquí abajo son CAS sobre `updatedAt`, que Prisma mueve en CADA
+  // escritura —incluso cuando reescribe el MISMO valor, que es el caso que una comparación por
+  // campos NO detecta (Codex, 19-sep)—: si alguien tocó la fila, no escribimos y se reintenta.
   const stripePriceId = subscription.items?.data?.[0]?.price?.id ?? null
+
+  if (subscription.status !== 'active' && subscription.status !== 'trialing') {
+    // Terminal (`canceled`, `incomplete_expired`): no hay nada que esperar, y reintentar sólo
+    // gastaría los 5 intentos del cron.
+    const recuperable =
+      subscription.status === 'past_due' ||
+      subscription.status === 'unpaid' ||
+      subscription.status === 'incomplete' ||
+      subscription.status === 'paused' // `paused` se reanuda (pause_collection): NO es terminal
+    if (!recuperable) {
+      logger.warn('🚨 fulfillPlanCheckout: la suscripción está en un estado terminal — NO se concede acceso', {
+        sessionId: session.id,
+        venueId,
+        subscriptionId: subscription.id,
+        status: subscription.status,
+        tierCode,
+      })
+      return null
+    }
+
+    // Recuperable: el cobro todavía puede prosperar. NO se concede acceso, pero se guarda el
+    // VÍNCULO — sin él, `customer.subscription.updated` e `invoice.payment_succeeded` no
+    // encuentran el registro y el cliente que paga tarde se queda sin plan para siempre.
+    //
+    // 🔴 Y NO se lanza: lanzar consumía los 5 reintentos del cron en ~15-20 min, así que quien
+    // pagaba dos horas después ya no tenía rescate (14ª pasada de Codex). El vínculo guardado no
+    // caduca; el rescate llega cuando llegue.
+    if (previo?.active) {
+      logger.warn('🚨 fulfillPlanCheckout: el venue ya tiene el plan ACTIVO — no se toca', {
+        venueId,
+        tierCode,
+        suscripcionViva: previo.stripeSubscriptionId,
+        suscripcionDelCheckout: subscription.id,
+        status: subscription.status,
+      })
+      return null
+    }
+    if (previo?.stripeSubscriptionId && previo.stripeSubscriptionId !== subscription.id) {
+      // Reapuntar el vínculo le quitaría el rescate a la OTRA suscripción, que puede estar
+      // igualmente a punto de pagar.
+      logger.warn('🚨 fulfillPlanCheckout: el registro ya apunta a otra suscripción — no se sustituye', {
+        venueId,
+        tierCode,
+        vinculoActual: previo.stripeSubscriptionId,
+        suscripcionDelCheckout: subscription.id,
+      })
+      return null
+    }
+
+    logger.warn('🚨 fulfillPlanCheckout: la suscripción no está vigente todavía — se guarda el vínculo sin conceder acceso', {
+      sessionId: session.id,
+      venueId,
+      subscriptionId: subscription.id,
+      status: subscription.status,
+      tierCode,
+    })
+
+    if (previo) {
+      const { count } = await prisma.venueFeature.updateMany({
+        where: { id: previo.id, updatedAt: previo.updatedAt },
+        data: { stripeSubscriptionId: subscription.id, stripePriceId },
+      })
+      // 🔴 Un `count: 0` NO se puede tragar aquí: sin vínculo guardado, el barrido
+      // `plan-access-reconciliation` no ve esta fila y el cliente que pague después se queda sin
+      // plan. Se lanza para que el evento quede FAILED y el cron lo reprocese con lectura fresca
+      // (Codex, 19-sep: «termina sin error y el barrido excluye esa fila»).
+      if (count === 0) {
+        logger.warn('🚨 fulfillPlanCheckout: no se pudo guardar el vínculo (la fila cambió) — se reintentará', {
+          sessionId: session.id,
+          venueId,
+          subscriptionId: subscription.id,
+          tierCode,
+        })
+        throw new Error(`fulfillPlanCheckout: no se pudo guardar el vínculo de ${venueId}/${tierCode}; se reintentará`)
+      }
+    } else {
+      try {
+        await prisma.venueFeature.create({
+          data: {
+            venueId,
+            featureId: feature.id,
+            active: false,
+            monthlyPrice: feature.monthlyPrice,
+            stripeSubscriptionId: subscription.id,
+            stripePriceId,
+          },
+        })
+      } catch (error: any) {
+        if (error?.code !== 'P2002') throw error
+        // 🔴 Otro evento creó el registro mientras tanto. NO se puede dar por bueno en silencio:
+        // si ese registro quedó SIN el vínculo, el barrido no ve esta fila y el cliente que pague
+        // después se queda sin plan (Codex, 19-sep). Se reintenta para releer y decidir de nuevo.
+        logger.warn('🚨 fulfillPlanCheckout: otro evento creó el registro a la vez — se reintentará', {
+          sessionId: session.id,
+          venueId,
+          subscriptionId: subscription.id,
+          tierCode,
+        })
+        throw new Error(`fulfillPlanCheckout: el registro de ${venueId}/${tierCode} lo creó otro evento; se reintentará`)
+      }
+    }
+    return null
+  }
+
   // trial_end is unix-seconds while the subscription is trialing; mirrors createPlanSubscription's
   // endDate/trialEndDate semantics (not-null = trial window, null = paid subscription).
   const trialEnd = subscription.status === 'trialing' && subscription.trial_end ? new Date(subscription.trial_end * 1000) : null
 
-  // Idempotent upsert on the (venueId, featureId) unique key — mirrors createPlanSubscription exactly.
-  await prisma.venueFeature.upsert({
-    where: { venueId_featureId: { venueId, featureId: feature.id } },
-    update: {
-      active: true,
-      stripeSubscriptionId: subscription.id,
-      stripePriceId,
-      monthlyPrice: feature.monthlyPrice,
-      endDate: trialEnd,
-      trialEndDate: trialEnd,
-      suspendedAt: null,
-      paymentFailureCount: 0,
-    },
-    create: {
-      venueId,
-      featureId: feature.id,
-      active: true,
-      monthlyPrice: feature.monthlyPrice,
-      stripeSubscriptionId: subscription.id,
-      stripePriceId,
-      endDate: trialEnd,
-      trialEndDate: trialEnd,
-    },
-  })
+  const concesion = {
+    active: true,
+    stripeSubscriptionId: subscription.id,
+    stripePriceId,
+    monthlyPrice: feature.monthlyPrice,
+    endDate: trialEnd,
+    trialEndDate: trialEnd,
+    suspendedAt: null,
+    paymentFailureCount: 0,
+  }
+
+  if (previo) {
+    const { count } = await prisma.venueFeature.updateMany({
+      where: { id: previo.id, updatedAt: previo.updatedAt },
+      data: concesion,
+    })
+    if (count === 0) {
+      // El registro cambió entre la consulta a Stripe y esta escritura (típicamente una
+      // cancelación que llegó en medio). No se pisa: el evento queda FAILED y el cron lo
+      // reprocesa leyendo el estado fresco.
+      logger.warn('🚨 fulfillPlanCheckout: el registro cambió mientras consultábamos Stripe — se reintentará', {
+        sessionId: session.id,
+        venueId,
+        subscriptionId: subscription.id,
+        tierCode,
+      })
+      throw new Error(`fulfillPlanCheckout: el registro de ${venueId}/${tierCode} cambió bajo nosotros; se reintentará`)
+    }
+  } else {
+    try {
+      await prisma.venueFeature.create({
+        data: { venueId, featureId: feature.id, ...concesion },
+      })
+    } catch (error: any) {
+      if (error?.code !== 'P2002') throw error
+      logger.warn('🚨 fulfillPlanCheckout: otro evento creó el registro primero — se reintentará', {
+        sessionId: session.id,
+        venueId,
+        subscriptionId: subscription.id,
+        tierCode,
+      })
+      throw new Error(`fulfillPlanCheckout: el registro de ${venueId}/${tierCode} lo creó otro evento; se reintentará`)
+    }
+  }
 
   logger.info(`✅ fulfillPlanCheckout: ${tierCode} activated for venue ${venueId} (sub ${subscription.id}, trial=${!!trialEnd})`)
 
@@ -1440,7 +1611,12 @@ export async function previewSubscriptionProration(
     // igual `updateSubscriptionPrice` con `always_invoice`, que sí puede cobrar. El aviso en
     // `description` es texto y no protege a nadie que no lo lea.
     // (Auditoría de riesgo de despliegue de Codex, 19-sep, hallazgo P2.)
-    throw new AppError('No pudimos calcular el ajuste ahora. Inténtalo de nuevo en unos minutos.', 503, true, 'PRORATION_PREVIEW_UNAVAILABLE')
+    throw new AppError(
+      'No pudimos calcular el ajuste ahora. Inténtalo de nuevo en unos minutos.',
+      503,
+      true,
+      'PRORATION_PREVIEW_UNAVAILABLE',
+    )
   }
 }
 
@@ -1677,6 +1853,39 @@ async function isFirstSubscriptionPayment(subscriptionId: string): Promise<boole
  * @param attemptCount - Number of payment attempts (from invoice.attempt_count)
  * @param invoiceData - Invoice details for email (invoiceId, amountDue, currency, last4)
  */
+/**
+ * Escritura CAS del registro del plan en el camino de COBRANZA.
+ *
+ * 🔴 Mismo motivo que en `subscription.updated`: entre leer el registro, consultar el estado
+ * vigente y escribir cabe otro webhook. Escribir sólo por `id` permitía que una suspensión pisara
+ * una recuperación que acababa de ocurrir (Codex, 19-sep). `updatedAt` lo mueve Prisma en CADA
+ * escritura, así que detecta incluso a quien reescribe el mismo valor.
+ */
+async function escribirPlanDeCobranzaConCas(
+  venueFeature: { id: string; updatedAt: Date; venueId: string },
+  data: Record<string, unknown>,
+  contexto: { subscriptionId: string },
+): Promise<Date> {
+  const { count } = await prisma.venueFeature.updateMany({
+    where: { id: venueFeature.id, updatedAt: venueFeature.updatedAt },
+    data,
+  })
+  if (count === 0) {
+    logger.warn('🚨 Cobranza: el registro del plan cambió mientras consultábamos Stripe — se reintentará', {
+      venueId: venueFeature.venueId,
+      ...contexto,
+    })
+    throw new Error(`handlePaymentFailure: el registro del plan de ${venueFeature.venueId} cambió bajo nosotros; se reintentará`)
+  }
+
+  // 🔴 Devuelve la marca NUEVA. Este flujo escribe DOS veces (seguimiento de fallos y, en el
+  // intento 4, la suspensión): si la segunda reutilizara la marca leída al principio, su CAS
+  // fallaría SIEMPRE —la primera escritura ya la movió— y el moroso conservaría el acceso.
+  // Lo reprodujo Codex el 19-sep sobre mi propio arreglo.
+  const fresco = await prisma.venueFeature.findUnique({ where: { id: venueFeature.id }, select: { updatedAt: true } })
+  return fresco?.updatedAt ?? venueFeature.updatedAt
+}
+
 export async function handlePaymentFailure(
   subscriptionId: string,
   attemptCount: number,
@@ -1747,10 +1956,7 @@ export async function handlePaymentFailure(
     }
   }
 
-  await prisma.venueFeature.update({
-    where: { id: venueFeature.id },
-    data: updateData,
-  })
+  const marcaFresca = await escribirPlanDeCobranzaConCas(venueFeature, updateData, { subscriptionId })
 
   logger.info(`📊 Updated failure tracking for ${venueFeature.feature.name} (Venue: ${venueFeature.venue.name})`, {
     attemptCount,
@@ -1845,13 +2051,14 @@ export async function handlePaymentFailure(
         break
       }
 
-      await prisma.venueFeature.update({
-        where: { id: venueFeature.id },
-        data: {
+      await escribirPlanDeCobranzaConCas(
+        { ...venueFeature, updatedAt: marcaFresca },
+        {
           suspendedAt: now,
           active: false, // Block access but keep data
         },
-      })
+        { subscriptionId },
+      )
 
       logger.warn(`⛔ SUSPENDED: Feature ${venueFeature.feature.name} for venue ${venueFeature.venue.name}`)
 
@@ -1894,7 +2101,6 @@ export async function handlePaymentFailure(
         })
       }
       break
-
     }
 
     default:

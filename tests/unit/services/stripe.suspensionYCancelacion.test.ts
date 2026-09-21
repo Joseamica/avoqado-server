@@ -26,7 +26,9 @@ jest.mock('stripe', () =>
 )
 jest.mock('@/config/logger', () => ({ __esModule: true, default: { info: jest.fn(), warn: jest.fn(), error: jest.fn() } }))
 jest.mock('@/services/email.service', () => ({ __esModule: true, default: { sendPaymentFailedEmail: jest.fn() } }))
-jest.mock('@/services/access/planNotification.service', () => ({ resolvePlanNotificationTarget: jest.fn().mockResolvedValue({ email: 'a@b.c' }) }))
+jest.mock('@/services/access/planNotification.service', () => ({
+  resolvePlanNotificationTarget: jest.fn().mockResolvedValue({ email: 'a@b.c' }),
+}))
 
 import prisma from '@/utils/prismaClient'
 import { handlePaymentFailure } from '@/services/stripe.service'
@@ -44,8 +46,9 @@ const planVivo = {
 
 beforeEach(() => {
   jest.clearAllMocks()
+  ;(prisma.venueFeature.updateMany as jest.Mock)?.mockResolvedValue?.({ count: 1 })
   ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue(planVivo)
-  ;(prisma.venueFeature.update as jest.Mock).mockResolvedValue({})
+  ;(prisma.venueFeature.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
 })
 
 describe('suspender también se decide con el estado VIGENTE', () => {
@@ -54,7 +57,7 @@ describe('suspender también se decide con el estado VIGENTE', () => {
 
     await handlePaymentFailure('sub_1', 4)
 
-    const suspendio = (prisma.venueFeature.update as jest.Mock).mock.calls.some(
+    const suspendio = (prisma.venueFeature.updateMany as jest.Mock).mock.calls.some(
       c => c[0]?.data?.suspendedAt != null || c[0]?.data?.active === false,
     )
     expect(suspendio).toBe(false)
@@ -65,7 +68,7 @@ describe('suspender también se decide con el estado VIGENTE', () => {
 
     await handlePaymentFailure('sub_1', 4)
 
-    const suspendio = (prisma.venueFeature.update as jest.Mock).mock.calls.some(c => c[0]?.data?.active === false)
+    const suspendio = (prisma.venueFeature.updateMany as jest.Mock).mock.calls.some(c => c[0]?.data?.active === false)
     expect(suspendio).toBe(true)
   })
 
@@ -74,7 +77,41 @@ describe('suspender también se decide con el estado VIGENTE', () => {
 
     await expect(handlePaymentFailure('sub_1', 4)).rejects.toThrow()
 
-    const suspendio = (prisma.venueFeature.update as jest.Mock).mock.calls.some(c => c[0]?.data?.active === false)
+    const suspendio = (prisma.venueFeature.updateMany as jest.Mock).mock.calls.some(c => c[0]?.data?.active === false)
     expect(suspendio).toBe(false)
+  })
+})
+
+/**
+ * 🔴 REGRESIÓN QUE INTRODUJO MI PROPIO ARREGLO (Codex, 19-sep).
+ *
+ * El flujo de cobranza escribe DOS veces: el seguimiento de fallos y, en el intento 4, la
+ * suspensión. Al ponerles CAS, las dos usaban la marca leída al principio — pero la PRIMERA ya la
+ * había movido, así que el CAS de la segunda fallaba SIEMPRE y el moroso conservaba el acceso.
+ * También al reintentar. Ahora la primera escritura devuelve la marca nueva y la segunda la usa.
+ *
+ * El mock que devolvía `{}` (sin `count`) escondía esto: un `count` indefinido nunca es `0`.
+ */
+describe('🔴 la suspensión del intento 4 ocurre de verdad (dos escrituras, marcas encadenadas)', () => {
+  it('suspende aunque el flujo haya escrito antes en la misma fila', async () => {
+    const { handlePaymentFailure } = await import('@/services/stripe.service')
+    // `clearAllMocks` no resetea implementaciones: sin esto hereda el «Stripe caído» de la
+    // prueba anterior. Un impago REAL: la suscripción no está al corriente.
+    mockSubRetrieve.mockResolvedValue({ id: 'sub_1', status: 'unpaid' })
+
+    // Simula la fila real: cada escritura mueve la marca, y el CAS sólo acepta la vigente.
+    let marca = new Date('2026-09-19T10:00:00.000Z')
+    ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({ ...planVivo, updatedAt: marca })
+    ;(prisma.venueFeature.findUnique as jest.Mock).mockImplementation(async () => ({ updatedAt: marca }))
+    ;(prisma.venueFeature.updateMany as jest.Mock).mockImplementation(async ({ where }: any) => {
+      if (where.updatedAt && where.updatedAt.getTime() !== marca.getTime()) return { count: 0 }
+      marca = new Date(marca.getTime() + 1000)
+      return { count: 1 }
+    })
+
+    await handlePaymentFailure('sub_1', 4)
+
+    const suspendio = (prisma.venueFeature.updateMany as jest.Mock).mock.calls.some(c => c[0]?.data?.active === false)
+    expect(suspendio).toBe(true)
   })
 })

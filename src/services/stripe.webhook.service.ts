@@ -143,6 +143,30 @@ function necesitaReactivacion(venueFeature: { active: boolean; suspendedAt: Date
   return !venueFeature.active || venueFeature.suspendedAt != null
 }
 
+/**
+ * Escritura CAS del registro del plan dentro de `subscription.updated`.
+ *
+ * 🔴 Entre leer el registro, consultar Stripe y escribir cabe OTRO webhook — una suspensión de
+ * cobranza, una cancelación ya procesada — y una escritura condicionada sólo por `id` la pisaba
+ * (Codex, 19-sep: reproducido en las dos direcciones). Condicionando por `active` y `suspendedAt`,
+ * si alguien los cambió no se pisa nada: se lanza, el evento queda `FAILED` y el cron
+ * `stripe-webhook-reconciliation` lo reprocesa leyendo el estado fresco.
+ */
+async function escribirPlanConCas(
+  venueFeature: { id: string; updatedAt: Date },
+  data: Record<string, unknown>,
+  contexto: { subscriptionId: string; venueId: string },
+): Promise<void> {
+  const { count } = await prisma.venueFeature.updateMany({
+    where: { id: venueFeature.id, updatedAt: venueFeature.updatedAt },
+    data,
+  })
+  if (count === 0) {
+    logger.warn('🚨 Webhook: el registro del plan cambió mientras consultábamos Stripe — se reintentará', contexto)
+    throw new Error(`subscription.updated: el registro del plan de ${contexto.venueId} cambió bajo nosotros; se reintentará`)
+  }
+}
+
 export async function handleSubscriptionUpdated(subscription: Stripe.Subscription) {
   const subscriptionId = subscription.id
   const status = subscription.status
@@ -215,9 +239,9 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
   switch (statusVigente) {
     case 'active':
       // Trial ended, subscription is now active (paid)
-      await prisma.venueFeature.update({
-        where: { id: venueFeature.id },
-        data: {
+      await escribirPlanConCas(
+        venueFeature,
+        {
           active: true,
           endDate: null, // null = paid subscription (no expiration)
           // 🔴 `status: 'active'` de Stripe afirma que el dinero está al corriente, así que suelta
@@ -229,7 +253,8 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
           paymentFailureCount: 0,
           gracePeriodEndsAt: null,
         },
-      })
+        { subscriptionId, venueId: venueFeature.venueId },
+      )
       logger.info('✅ Webhook: Feature activated (trial → paid)', {
         venueId: venueFeature.venueId,
         featureCode: venueFeature.feature.code,
@@ -262,13 +287,14 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
 
     case 'trialing':
       // Still in trial period
-      await prisma.venueFeature.update({
-        where: { id: venueFeature.id },
-        data: {
+      await escribirPlanConCas(
+        venueFeature,
+        {
           active: true,
           endDate: vigente.trialEnd,
         },
-      })
+        { subscriptionId, venueId: venueFeature.venueId },
+      )
       logger.info('✅ Webhook: Feature in trial', {
         venueId: venueFeature.venueId,
         featureCode: venueFeature.feature.code,
@@ -289,12 +315,13 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
     case 'canceled':
     case 'unpaid':
       // Subscription canceled or payment failed multiple times
-      await prisma.venueFeature.update({
-        where: { id: venueFeature.id },
-        data: {
+      await escribirPlanConCas(
+        venueFeature,
+        {
           active: false,
         },
-      })
+        { subscriptionId, venueId: venueFeature.venueId },
+      )
       logger.info('❌ Webhook: Feature deactivated (subscription canceled/unpaid)', {
         venueId: venueFeature.venueId,
         featureCode: venueFeature.feature.code,
@@ -328,12 +355,13 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
     case 'incomplete':
     case 'incomplete_expired':
       // Subscription creation failed
-      await prisma.venueFeature.update({
-        where: { id: venueFeature.id },
-        data: {
+      await escribirPlanConCas(
+        venueFeature,
+        {
           active: false,
         },
-      })
+        { subscriptionId, venueId: venueFeature.venueId },
+      )
       logger.warn('⚠️ Webhook: Subscription incomplete/expired', {
         venueId: venueFeature.venueId,
         featureCode: venueFeature.feature.code,
@@ -510,8 +538,11 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
   // 2. Reactivation after payment failure suspension
   // 3. Registro ACTIVO pero con `suspendedAt` puesto: bloqueado y sin rescate automático
   if (necesitaReactivacion(venueFeature)) {
-    await prisma.venueFeature.update({
-      where: { id: venueFeature.id },
+    // 🔴 CAS igual que en `subscription.updated`: entre leer el registro, consultar Stripe y
+    // escribir cabe una cancelación, y escribir sólo por `id` la pisaba devolviendo el acceso
+    // (Codex, 19-sep).
+    await escribirPlanConCas(
+      venueFeature,
       // 🔴 `active: true` NO basta para devolver el acceso. El resolver trata `suspendedAt` como
       // candado duro —`basePlan.service.ts:91`: `if (!vf.active || vf.suspendedAt) return false`—,
       // así que dejarlo puesto significa que el negocio paga, Stripe cobra, este webhook escribe
@@ -523,14 +554,15 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
       // 🔴 `endDate: null` significa «pagado, sin vencimiento». Reservarlo para `active`: en
       // `trialing` borrarlo convertía una prueba gratuita en acceso permanente.
       // (7ª auditoría de Codex, 19-sep.)
-      data: {
+      {
         active: true,
         ...(veredicto.estado === 'trialing' ? {} : { endDate: null }),
         suspendedAt: null,
         paymentFailureCount: 0,
         gracePeriodEndsAt: null,
       },
-    })
+      { subscriptionId: subscriptionIdStr, venueId: venueFeature.venueId },
+    )
     logger.info('✅ Webhook: Feature activated after successful payment', {
       venueId: venueFeature.venueId,
       featureCode: venueFeature.feature.code,
@@ -1445,7 +1477,13 @@ export async function handleStripeWebhookEvent(event: Stripe.Event, opts?: { cla
           // reactivate any seats the Free-tier cap previously deactivated (paid = unlimited).
           // Already inside the PAID_PLAN_TIER_CODES guard above; no-op when nothing was
           // cap-deactivated; never throws.
-          await runSeatReactivationSafely(result?.venueId ?? session.metadata.venueId)
+          //
+          // 🔴 SÓLO si el plan se concedió de verdad (11ª auditoría). `fulfillPlanCheckout`
+          // devuelve `null` cuando la suscripción no está vigente, y devolver los asientos que el
+          // tope Gratis desactivó por un plan que NO se concedió es regalar lo que no se pagó.
+          if (result) {
+            await runSeatReactivationSafely(result.venueId)
+          }
 
           // 🔔 Emit socket event for real-time UI update (mirrors handleSubscriptionUpdated)
           if (result && socketManager.getServer()) {

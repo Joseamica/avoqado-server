@@ -27,7 +27,7 @@ jest.mock('@/utils/prismaClient', () => ({
       findUnique: jest.fn(),
     },
     venue: { findUnique: jest.fn() },
-    venueFeature: { findFirst: jest.fn() },
+    venueFeature: { findFirst: jest.fn(), updateMany: jest.fn() },
   },
 }))
 
@@ -96,6 +96,7 @@ const row = (over: Partial<Record<string, unknown>> = {}) => ({
 
 beforeEach(() => {
   jest.clearAllMocks()
+  ;(prisma.venueFeature.updateMany as jest.Mock)?.mockResolvedValue?.({ count: 1 })
   mockPrisma.webhookEvent.update.mockResolvedValue({})
   mockPrisma.webhookEvent.create.mockResolvedValue({ id: 'whe_new' })
 })
@@ -256,7 +257,10 @@ describe('el tope de reintentos no puede bloquear a una persona', () => {
       eventType: 'invoice.payment_succeeded',
       status: 'FAILED',
       retryCount: STRIPE_WEBHOOK_MAX_RETRIES + 3,
-      payload: { type: 'invoice.payment_succeeded', data: { object: { id: 'in_1', currency: 'mxn', amount_paid: 0, subscription: null, metadata: {} } } },
+      payload: {
+        type: 'invoice.payment_succeeded',
+        data: { object: { id: 'in_1', currency: 'mxn', amount_paid: 0, subscription: null, metadata: {} } },
+      },
     })
 
     const r = await replayStripeWebhookEvent('we1', { forzadoPorPersona: true })

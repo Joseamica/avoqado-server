@@ -77,6 +77,7 @@ import { loyaltyReconciliationJob } from './jobs/loyalty-reconciliation.job'
 import { paymentEffectsJob } from './jobs/payment-effects.job'
 import { angelpayEventWorkerJob } from './jobs/angelpay-event-worker.job'
 import { cashDrawerReconcilerJob } from './jobs/cash-drawer-reconciler.job'
+import { planAccessReconciliationJob } from './jobs/plan-access-reconciliation.job'
 import { paidOrderReconcilerJob } from './jobs/paid-order-reconciler.job'
 import { cashClosePairReconcilerJob } from './jobs/cash-close-pair-reconciler.job'
 // Import the new Socket.io system
@@ -164,6 +165,7 @@ const gracefulShutdown = async (signal: string) => {
       paymentEffectsJob.stop()
       angelpayEventWorkerJob.stop()
       cashDrawerReconcilerJob.stop()
+      planAccessReconciliationJob.stop()
       paidOrderReconcilerJob.stop()
       cashClosePairReconcilerJob.stop()
 
@@ -502,6 +504,7 @@ const startApplication = async (retries = 3) => {
       // worker propio con claim atómico y lease — nunca el vigía de 30 s.
       angelpayEventWorkerJob.start()
       cashDrawerReconcilerJob.start()
+      planAccessReconciliationJob.start()
       paidOrderReconcilerJob.start()
       // Completa el cierre unificado que murió entre sus dos commits: sin él, un turno sin su
       // gaveta acaba firmando dos arqueos, y una gaveta sin su turno sigue tragando efectivo.

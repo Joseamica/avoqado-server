@@ -21,6 +21,9 @@ export const DATABASE_JOB_SCHEDULES = {
   // S4 (checkpoint 1 del webhook): worker propio de eventos PENDING de AngelPay. Segundos :13/:43, huecos libres
   // entre el reconciliador de Blumon (:11/:41) y el monitor de salud (:14).
   angelpayEventWorker: '13,43 * * * * *',
+  // Reconciliador del acceso al plan: «pagó y se quedó sin plan». Cada 10 min en el segundo :05,
+  // hueco libre entre el watchdog de pagos (:08) y el de expiración (:04).
+  planAccessReconciliation: '5 */10 * * * *',
   // Fase 3 de la unificación de caja: repone ventas en efectivo sin evento en el cajón.
   // Segundo :02, cada 5 min — hueco libre antes del watchdog de pagos (:08).
   cashDrawerReconciler: '2 */5 * * * *',

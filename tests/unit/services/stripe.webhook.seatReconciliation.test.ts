@@ -84,9 +84,9 @@ function baseplanFeature(overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   jest.clearAllMocks()
-    // 🔴 `jest.clearAllMocks()` NO resetea implementaciones: sin esto, un `mockResolvedValue`
-    // puesto dentro de un test se filtra a los siguientes de la suite. El default es «al corriente».
-    ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('active')
+  // 🔴 `jest.clearAllMocks()` NO resetea implementaciones: sin esto, un `mockResolvedValue`
+  // puesto dentro de un test se filtra a los siguientes de la suite. El default es «al corriente».
+  ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('active')
   ;(prisma.venueFeature.update as jest.Mock).mockResolvedValue({})
   ;(prisma.venueFeature.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
 })
@@ -94,12 +94,11 @@ beforeEach(() => {
 describe('stripe webhook → seat reconciliation hook', () => {
   it('runs executeSeatReconciliation on a base-plan paid→Free transition (status=canceled)', async () => {
     ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue(baseplanFeature())
-
     ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('canceled')
 
     await handleSubscriptionUpdated({ id: 'sub_1', status: 'canceled' } as Stripe.Subscription)
 
-    expect(prisma.venueFeature.update).toHaveBeenCalled() // feature deactivated first
+    expect(prisma.venueFeature.updateMany).toHaveBeenCalled() // feature deactivated first
     expect(execMock).toHaveBeenCalledWith('venue_1') // then reconciliation runs
   })
 
@@ -107,12 +106,11 @@ describe('stripe webhook → seat reconciliation hook', () => {
     ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue(
       baseplanFeature({ feature: { code: 'CHATBOT', name: 'Chatbot Add-on' } }),
     )
-
     ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('canceled')
 
     await handleSubscriptionUpdated({ id: 'sub_2', status: 'canceled' } as Stripe.Subscription)
 
-    expect(prisma.venueFeature.update).toHaveBeenCalled()
+    expect(prisma.venueFeature.updateMany).toHaveBeenCalled()
     expect(execMock).not.toHaveBeenCalled() // add-ons don't trigger seat reconciliation
   })
 
@@ -128,7 +126,6 @@ describe('stripe webhook → seat reconciliation hook', () => {
   it('a reconciliation failure never throws (webhook must not fail)', async () => {
     ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue(baseplanFeature())
     execMock.mockRejectedValueOnce(new Error('boom'))
-
     ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('canceled')
 
     await expect(handleSubscriptionUpdated({ id: 'sub_4', status: 'canceled' } as Stripe.Subscription)).resolves.toBeUndefined()
@@ -139,12 +136,11 @@ describe('stripe webhook → seat reconciliation hook', () => {
 describe('stripe webhook → seat REACTIVATION hook (re-upgrade to paid plan)', () => {
   it('runs reactivateSeatCapDeactivated on a base-plan Free→paid transition (status=active)', async () => {
     ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue(baseplanFeature())
-
     ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('active')
 
     await handleSubscriptionUpdated({ id: 'sub_5', status: 'active' } as Stripe.Subscription)
 
-    expect(prisma.venueFeature.update).toHaveBeenCalled() // feature (re)activated
+    expect(prisma.venueFeature.updateMany).toHaveBeenCalled() // feature (re)activated
     expect(reactivateMock).toHaveBeenCalledWith('venue_1') // cap-deactivated seats reactivated
     expect(execMock).not.toHaveBeenCalled() // never deactivates on an activation
   })
@@ -153,19 +149,17 @@ describe('stripe webhook → seat REACTIVATION hook (re-upgrade to paid plan)', 
     ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue(
       baseplanFeature({ feature: { code: 'CHATBOT', name: 'Chatbot Add-on' } }),
     )
-
     ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('active')
 
     await handleSubscriptionUpdated({ id: 'sub_6', status: 'active' } as Stripe.Subscription)
 
-    expect(prisma.venueFeature.update).toHaveBeenCalled()
+    expect(prisma.venueFeature.updateMany).toHaveBeenCalled()
     expect(reactivateMock).not.toHaveBeenCalled() // add-ons don't trigger seat reactivation
   })
 
   it('a reactivation failure never throws (webhook must not fail)', async () => {
     ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue(baseplanFeature())
     reactivateMock.mockRejectedValueOnce(new Error('boom'))
-
     ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('active')
 
     await expect(handleSubscriptionUpdated({ id: 'sub_7', status: 'active' } as Stripe.Subscription)).resolves.toBeUndefined()
@@ -199,6 +193,35 @@ describe('stripe webhook → seat REACTIVATION hook (re-upgrade to paid plan)', 
 
     expect(fulfillMock).toHaveBeenCalled()
     expect(reactivateMock).toHaveBeenCalledWith('venue_1')
+  })
+
+  /**
+   * 🔴 11ª auditoría: consecuencia del arreglo de `fulfillPlanCheckout`. Al dejar de conceder el
+   * plan sobre una suscripción muerta, el manejador devuelve `null` — y la reactivación de
+   * asientos corría IGUAL con el venue del metadata. Habría devuelto los asientos que el tope
+   * Gratis desactivó, por un plan que NO se concedió.
+   */
+  it('🔴 NO reactiva asientos cuando el checkout no concedió el plan (fulfillPlanCheckout devuelve null)', async () => {
+    ;(prisma.webhookEvent.create as jest.Mock).mockResolvedValue({ id: 'whe_null' })
+    ;(prisma.webhookEvent.update as jest.Mock).mockResolvedValue({})
+    ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ id: 'venue_1' })
+    fulfillMock.mockResolvedValue(null)
+
+    const event = {
+      id: 'evt_null',
+      type: 'checkout.session.completed',
+      data: {
+        object: {
+          id: 'cs_null',
+          metadata: { tierCode: 'PLAN_PRO', venueId: 'venue_1', interval: 'month' },
+        },
+      },
+    } as unknown as Stripe.Event
+
+    await handleStripeWebhookEvent(event)
+
+    expect(fulfillMock).toHaveBeenCalled()
+    expect(reactivateMock).not.toHaveBeenCalled()
   })
 
   it('does NOT reactivate for a non-base-plan checkout (e.g. credit pack)', async () => {
