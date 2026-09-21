@@ -451,6 +451,7 @@ model Venue {
   purchaseOrderInvoices       PurchaseOrderInvoice[]
   staffDocuments              StaffDocument[]
   pricingPolicies             PricingPolicy[]
+  wasteReports                InventoryWasteReport[]
   rawMaterialMovements        RawMaterialMovement[]
   lowStockAlerts              LowStockAlert[]
   stockBatches                StockBatch[] // FIFO batch tracking
@@ -1214,8 +1215,9 @@ model Staff {
   catalogPublicationBatches              CatalogPublicationBatch[]        @relation("CatalogPublicationBatchHumanActor")
 
   // Reglas de upsell que este staff aprobó (ver nota en UpsellRule.approvedBy).
-  upsellRulesApproved UpsellRule[]       @relation("UpsellRuleApprovedBy")
+  upsellRulesApproved UpsellRule[]           @relation("UpsellRuleApprovedBy")
   supplierItemCodes   SupplierItemCode[]
+  wasteReports        InventoryWasteReport[]
 
   // Email is now @unique on the field itself (globally unique)
   @@index([email])
@@ -1955,6 +1957,7 @@ model Product {
   promotionOptions  PromotionOption[]
   supplierItemCodes SupplierItemCode[]
   invoiceLines      PurchaseOrderInvoiceLine[]
+  wasteReports      InventoryWasteReport[]
 
   @@unique([venueId, sku])
   @@unique([venueId, gtin])
@@ -1993,6 +1996,76 @@ model Inventory {
   updatedAt DateTime @updatedAt
 
   @@index([productId])
+}
+
+enum WasteReportStatus {
+  APPLIED
+  VOIDED
+}
+
+enum WasteItemType {
+  RAW_MATERIAL
+  PRODUCT
+}
+
+enum WasteCostState {
+  KNOWN
+  PARTIAL
+  UNKNOWN
+  NONE
+}
+
+enum WasteSource {
+  POS
+  DASHBOARD
+  MCP
+}
+
+// Declaración física de una merma: aquí vive el folio (idempotencyKey). Los
+// movimientos de stock (uno por lote FIFO) cuelgan de ella por wasteReportId.
+// Un folio VOIDED es una lápida: reserva la llave sin cargar datos de declaración.
+// Las reglas por estado y por costo las imponen CHECK en la base (migración
+// 20260921190000_inventory_waste), no sólo el servicio.
+model InventoryWasteReport {
+  id                 String                @id @default(cuid())
+  venueId            String
+  venue              Venue                 @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  idempotencyKey     String
+  status             WasteReportStatus
+  payloadHash        String?
+  itemType           WasteItemType?
+  rawMaterialId      String?
+  rawMaterial        RawMaterial?          @relation(fields: [rawMaterialId], references: [id], onDelete: Restrict)
+  productId          String?
+  product            Product?              @relation(fields: [productId], references: [id], onDelete: Restrict)
+  unit               String?
+  reasonCode         String?
+  declaredQuantity   Decimal?              @db.Decimal(12, 3)
+  deductedQuantity   Decimal               @default(0) @db.Decimal(12, 3)
+  unrecordedQuantity Decimal               @default(0) @db.Decimal(12, 3)
+  // Magnitud POSITIVA de la pérdida. (22,5) cubre Decimal(12,3) × Decimal(10,2) sin desbordar.
+  costImpact         Decimal?              @db.Decimal(22, 5)
+  costState          WasteCostState
+  note               String?               @db.Text
+  reference          String?
+  unitCost           Decimal?              @db.Decimal(10, 2)
+  unitCostSnapshot   Decimal?              @db.Decimal(10, 2)
+  supplier           String?
+  // Siempre el actor autenticado; en una lápida, quien anuló.
+  reportedByStaffId  String
+  reportedByStaff    Staff                 @relation(fields: [reportedByStaffId], references: [id], onDelete: Restrict)
+  source             WasteSource
+  // Reloj del aparato: informativo. Los reportes filtran por createdAt (llegada al servidor).
+  clientOccurredAt   DateTime?
+  createdAt          DateTime              @default(now())
+  rawMovements       RawMaterialMovement[]
+  productMovements   InventoryMovement[]
+
+  @@unique([venueId, idempotencyKey])
+  @@index([venueId, createdAt, id])
+  @@index([rawMaterialId])
+  @@index([productId])
+  @@index([reportedByStaffId])
 }
 
 model InventoryMovement {
@@ -2034,11 +2107,17 @@ model InventoryMovement {
   postingLineId String?
   postingLine   InventoryPostingLine? @relation(fields: [postingLineId], references: [id], onDelete: SetNull)
 
+  // Folio de merma que originó este movimiento. FIFO escribe un movimiento por
+  // lote, así que la declaración vive en InventoryWasteReport y aquí sólo se liga.
+  wasteReportId String?
+  wasteReport   InventoryWasteReport? @relation(fields: [wasteReportId], references: [id], onDelete: Restrict)
+
   @@index([inventoryId])
   @@index([type])
   @@index([createdAt])
   @@index([purchaseOrderItemId])
   @@index([postingLineId])
+  @@index([wasteReportId])
 }
 
 // ==========================================
@@ -2209,6 +2288,7 @@ model RawMaterial {
   updatedAt         DateTime                   @updatedAt
   supplierItemCodes SupplierItemCode[]
   invoiceLines      PurchaseOrderInvoiceLine[]
+  wasteReports      InventoryWasteReport[]
 
   @@unique([venueId, sku])
   @@unique([venueId, gtin])
@@ -2754,12 +2834,17 @@ model RawMaterialMovement {
   postingLineId String?
   postingLine   InventoryPostingLine? @relation(fields: [postingLineId], references: [id], onDelete: SetNull)
 
+  // Folio de merma que originó este movimiento (espejo del mismo campo en InventoryMovement).
+  wasteReportId String?
+  wasteReport   InventoryWasteReport? @relation(fields: [wasteReportId], references: [id], onDelete: Restrict)
+
   @@index([rawMaterialId])
   @@index([venueId])
   @@index([type])
   @@index([postingLineId])
   @@index([batchId])
   @@index([createdAt])
+  @@index([wasteReportId])
 }
 
 // Low stock alerts for raw materials
