@@ -22,6 +22,8 @@ const H1_CONSTRAINT_MARKERS = [
   'CatalogImportBatch_staffId',
   'CatalogBindingBatch_staffId',
   'CatalogPublicationBatch_staffId',
+  // Quién declaró una merma es auditoría durable, igual que ActivityLog.actorStaffId.
+  'InventoryWasteReport_reportedByStaffId_fkey',
 ] as const
 
 export function isH1ProvenanceConstraint(error: unknown): boolean {
@@ -65,6 +67,7 @@ export async function deleteOrRetainStaffWithH1ProvenanceTx(
        OR EXISTS (SELECT 1 FROM "CatalogImportBatch" WHERE "staffId" = ${staffId})
        OR EXISTS (SELECT 1 FROM "CatalogBindingBatch" WHERE "staffId" = ${staffId})
        OR EXISTS (SELECT 1 FROM "CatalogPublicationBatch" WHERE "staffId" = ${staffId})
+       OR EXISTS (SELECT 1 FROM "InventoryWasteReport" WHERE "reportedByStaffId" = ${staffId})
     LIMIT 1
   `)
   // These authorities use plain String actor identifiers rather than

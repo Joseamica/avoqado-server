@@ -2034,10 +2034,11 @@ model InventoryWasteReport {
   status             WasteReportStatus
   payloadHash        String?
   itemType           WasteItemType?
+  // Cascade como el kardex: si el artículo se borra en duro, su merma se va con sus movimientos.
   rawMaterialId      String?
-  rawMaterial        RawMaterial?          @relation(fields: [rawMaterialId], references: [id], onDelete: Restrict)
+  rawMaterial        RawMaterial?          @relation(fields: [rawMaterialId], references: [id], onDelete: Cascade)
   productId          String?
-  product            Product?              @relation(fields: [productId], references: [id], onDelete: Restrict)
+  product            Product?              @relation(fields: [productId], references: [id], onDelete: Cascade)
   unit               String?
   reasonCode         String?
   declaredQuantity   Decimal?              @db.Decimal(12, 3)
@@ -2109,8 +2110,10 @@ model InventoryMovement {
 
   // Folio de merma que originó este movimiento. FIFO escribe un movimiento por
   // lote, así que la declaración vive en InventoryWasteReport y aquí sólo se liga.
+  // NoAction (no Restrict): se verifica al final del enunciado, así convive con la
+  // cascada artículo → folio y aun así impide borrar un folio con movimientos vivos.
   wasteReportId String?
-  wasteReport   InventoryWasteReport? @relation(fields: [wasteReportId], references: [id], onDelete: Restrict)
+  wasteReport   InventoryWasteReport? @relation(fields: [wasteReportId], references: [id], onDelete: NoAction)
 
   @@index([inventoryId])
   @@index([type])
@@ -2834,9 +2837,9 @@ model RawMaterialMovement {
   postingLineId String?
   postingLine   InventoryPostingLine? @relation(fields: [postingLineId], references: [id], onDelete: SetNull)
 
-  // Folio de merma que originó este movimiento (espejo del mismo campo en InventoryMovement).
+  // Folio de merma que originó este movimiento (espejo del mismo campo en InventoryMovement, NoAction incluido).
   wasteReportId String?
-  wasteReport   InventoryWasteReport? @relation(fields: [wasteReportId], references: [id], onDelete: Restrict)
+  wasteReport   InventoryWasteReport? @relation(fields: [wasteReportId], references: [id], onDelete: NoAction)
 
   @@index([rawMaterialId])
   @@index([venueId])

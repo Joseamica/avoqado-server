@@ -67,15 +67,15 @@ BEGIN
         ('InventoryWasteReport', 'InventoryWasteReport_venueId_fkey',
          'venueId', 'Venue', 'CASCADE'),
         ('InventoryWasteReport', 'InventoryWasteReport_rawMaterialId_fkey',
-         'rawMaterialId', 'RawMaterial', 'RESTRICT'),
+         'rawMaterialId', 'RawMaterial', 'CASCADE'),
         ('InventoryWasteReport', 'InventoryWasteReport_productId_fkey',
-         'productId', 'Product', 'RESTRICT'),
+         'productId', 'Product', 'CASCADE'),
         ('InventoryWasteReport', 'InventoryWasteReport_reportedByStaffId_fkey',
          'reportedByStaffId', 'Staff', 'RESTRICT'),
         ('RawMaterialMovement', 'RawMaterialMovement_wasteReportId_fkey',
-         'wasteReportId', 'InventoryWasteReport', 'RESTRICT'),
+         'wasteReportId', 'InventoryWasteReport', 'NO ACTION'),
         ('InventoryMovement', 'InventoryMovement_wasteReportId_fkey',
-         'wasteReportId', 'InventoryWasteReport', 'RESTRICT')
+         'wasteReportId', 'InventoryWasteReport', 'NO ACTION')
     ) AS definitions(table_name, constraint_name, column_name, referenced_table, delete_action)
   LOOP
     IF NOT EXISTS (

@@ -318,6 +318,17 @@ describe('staff.superadmin.service — ActivityLog capture + performedBy actor',
     expect(JSON.stringify(mockLogAction.mock.calls)).not.toContain('target@example.com')
   })
 
+  it('🔴 the provenance query counts a waste report the Staff registered (reportedByStaffId)', async () => {
+    mockPrisma.$queryRaw.mockResolvedValueOnce([{ id: TARGET_STAFF_ID, email: 'target@example.com' }]).mockResolvedValueOnce([])
+    mockPrisma.staff.delete.mockResolvedValue({})
+
+    await deleteStaff(TARGET_STAFF_ID, ACTOR_ID, ACTOR_ID)
+
+    // Segunda consulta cruda = la de provenance (la primera es el FOR UPDATE del Staff).
+    const provenanceQuery = mockPrisma.$queryRaw.mock.calls[1][0] as { text: string }
+    expect(provenanceQuery.text).toMatch(/EXISTS \(SELECT 1 FROM "InventoryWasteReport" WHERE "reportedByStaffId" = \$\d+\)/)
+  })
+
   it('does not reach anonymization when retained credential revocation fails in the transaction', async () => {
     mockPrisma.$queryRaw
       .mockResolvedValueOnce([{ id: TARGET_STAFF_ID, email: 'target@example.com' }])
@@ -413,6 +424,28 @@ describe('H1 Staff provenance constraint recovery', () => {
       true,
     )
     expect(isH1ProvenanceConstraint({ code: '23514', constraint: 'Staff_email_format_check', message: 'check violation' })).toBe(false)
+  })
+
+  it('🔴 recognizes the waste-report reporter FK as provenance (raw PostgreSQL and Prisma P2003)', () => {
+    expect(
+      isH1ProvenanceConstraint({
+        code: '23503',
+        constraint: 'InventoryWasteReport_reportedByStaffId_fkey',
+        message: 'update or delete violates foreign key constraint',
+      }),
+    ).toBe(true)
+    expect(
+      isH1ProvenanceConstraint({
+        code: 'P2003',
+        message: 'Foreign key constraint violated',
+        meta: { field_name: 'InventoryWasteReport_reportedByStaffId_fkey (index)' },
+      }),
+    ).toBe(true)
+  })
+
+  it('does not relabel the other waste-report FKs as Staff provenance', () => {
+    expect(isH1ProvenanceConstraint({ code: '23503', constraint: 'InventoryWasteReport_productId_fkey', message: 'fk' })).toBe(false)
+    expect(isH1ProvenanceConstraint({ code: '23503', constraint: 'InventoryWasteReport_venueId_fkey', message: 'fk' })).toBe(false)
   })
 })
 
