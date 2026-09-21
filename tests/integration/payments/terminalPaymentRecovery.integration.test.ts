@@ -1520,6 +1520,30 @@ describe('Sonda de conciliación: la terminal aporta la evidencia, nunca el relo
     expect(await terminalPaymentService.isTerminalBusy(fixture, venueId)).toBe(true)
   })
 
+  it('🔴 Codex r4: tras un ACTIVE, un RESOLVED acreditado SÍ sella — si no, el veto del cajero queda puesto para siempre', async () => {
+    const row = await auditRequest({ status: 'UNKNOWN', acknowledgedAt: new Date(), orderId: null })
+
+    // 1) La terminal dice «sigo cobrando»: queda la observación durable que VETA la declaración del cajero.
+    expect(await responder({ requestId: row.requestId, disposition: 'ACTIVE' })).toBe(true)
+    const conActiva = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    expect(conActiva.probeActiveAt).toBeTruthy()
+    expect(conActiva.probeResolvedAt).toBeNull()
+
+    // 2) La terminal resuelve CON evidencia acreditada. El sello tiene que caer sobre ESA observación.
+    //    🔴 Con `probeActiveAt` fuera del `select` del handler, el CAS comparaba siempre contra `null` y este
+    //    sello NO ocurría nunca: la fila se quedaba vetada y el cajero volvía al callejón sin salida.
+    expect(
+      await responder({
+        requestId: row.requestId,
+        disposition: 'RESOLVED',
+        finalResult: { requestId: row.requestId, status: 'failed', outcomeEvidence: 'PROCESSOR_DECLINED' },
+      }),
+    ).toBe(true)
+    const resuelta = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    expect(resuelta.probeResolvedAt).toBeTruthy()
+    expect(resuelta.probeResolvedAt!.getTime()).toBeGreaterThanOrEqual(conActiva.probeActiveAt!.getTime())
+  })
+
   it('another terminal cannot answer the probe for a request it does not own', async () => {
     const row = await auditRequest({ status: 'TIMED_OUT', acknowledgedAt: null, orderId: null })
     const ajena = { socketId: 'otro', terminalId: `${fixture}-otra`, venueId }

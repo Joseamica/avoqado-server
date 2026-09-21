@@ -1,181 +1,136 @@
-import * as XLSX from 'xlsx'
+import { Worker } from 'node:worker_threads'
+import { resolve } from 'node:path'
+import AppError from '../../errors/AppError'
 import { orgStockControlService } from './orgStockControl.service'
 import type { OrgStockOverview, OrgStockOverviewOptions } from './orgStockControl.types'
+import { ORG_STOCK_XLSX_TASK } from '../../workers/orgStockXlsx.worker'
 
-function pad(n: number): string {
-  return String(n).padStart(2, '0')
+// WHY: 19-sep-2026, 11:44 CDMX — esta descarga congeló el event loop 3.27 s
+// (Better Stack «Server congelado ≥3 s»; la única petición en vuelo era ésta).
+// La causa no fue la consulta —ya viene paginada de 500 en 500— sino armar el
+// libro: `json_to_sheet` y `XLSX.write` de SheetJS son 100 % síncronos, así que
+// mientras corrían, ni un cobro de la PAX podía ser atendido. Medido: mandar los
+// datos al worker cuesta ~43 ms donde armar el libro cuesta ~1,727 ms (60k SIMs).
+// Por eso SheetJS ya no se importa aquí; vive en `workers/orgStockXlsx.worker`.
+
+/** Un export explícito de un año puede tardar segundos; matarlo a los 15 s rompería un caso que hoy funciona. */
+export const ORG_STOCK_EXPORT_TIMEOUT_MS = 60_000
+
+export interface OrgStockExportWorkerHandle {
+  result: Promise<Buffer>
+  terminate(): Promise<unknown>
 }
 
-function fmtDate(iso: string | null): string {
-  if (!iso) return ''
-  const d = new Date(iso)
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+interface OrgStockExportThread {
+  once(event: 'message', listener: (message: unknown) => void): this
+  once(event: 'error', listener: (error: Error) => void): this
+  once(event: 'exit', listener: (code: number) => void): this
+  terminate(): Promise<number> | number
 }
 
-function fmtDateTime(iso: string | null): string {
-  if (!iso) return ''
-  const d = new Date(iso)
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+export interface OrgStockControlExportService {
+  generateExcelBuffer(orgId: string, options: OrgStockOverviewOptions, orgSlug: string): Promise<{ buffer: Buffer; filename: string }>
 }
 
-export class OrgStockControlExportService {
-  async generateExcelBuffer(
-    orgId: string,
-    options: OrgStockOverviewOptions,
-    orgSlug: string,
-  ): Promise<{ buffer: Buffer; filename: string }> {
-    const data = await orgStockControlService.getOrgExportOverview(orgId, options)
+interface OrgStockControlExportDependencies {
+  fetchOverview?: (orgId: string, options: OrgStockOverviewOptions) => Promise<OrgStockOverview>
+  spawnWorker?: (data: OrgStockOverview, orgSlug: string) => OrgStockExportWorkerHandle
+  workerFactory?: (filename: string, options: ConstructorParameters<typeof Worker>[1]) => OrgStockExportThread
+  timeoutMs?: number
+}
 
-    const wb = XLSX.utils.book_new()
+function exportError(code: string, statusCode = 500): AppError {
+  // WHY: el mensaje no lleva detalle del fallo — el libro contiene ICCIDs y
+  // nombres de promotores que no deben acabar en un log ni en una respuesta.
+  return new AppError('No se pudo generar el Excel de control de stock. Vuelve a intentarlo.', statusCode, true, code)
+}
 
-    const wsResumen = this.buildResumenSheet(data, orgSlug)
-    wsResumen['!cols'] = [{ wch: 35 }, { wch: 28 }]
-    XLSX.utils.book_append_sheet(wb, wsResumen, 'Resumen Ejecutivo')
+function createDefaultWorker(
+  data: OrgStockOverview,
+  orgSlug: string,
+  workerFactory: (filename: string, options: ConstructorParameters<typeof Worker>[1]) => OrgStockExportThread = (filename, options) =>
+    new Worker(filename, options),
+): OrgStockExportWorkerHandle {
+  // WHY: en el repo el worker es `.ts` y necesita el loader; en el deploy
+  // compilado es el `.js` colocado al lado. Mismo criterio que
+  // `catalogWorkbook.service.ts`, que ya lo tenía resuelto.
+  const execArgv = __filename.endsWith('.ts') ? ['-r', 'ts-node/register/transpile-only', '-r', 'tsconfig-paths/register'] : undefined
+  const extension = __filename.endsWith('.ts') ? 'ts' : 'js'
+  const workerPath = resolve(__dirname, `../../workers/orgStockXlsx.worker.${extension}`)
+  const worker = workerFactory(workerPath, {
+    workerData: { task: ORG_STOCK_XLSX_TASK, data, orgSlug },
+    // WHY: un tenant que crezca lo bastante mata ESTE thread por memoria en vez
+    // de tumbar el proceso que cobra. El contenedor tiene 2 GB y la API ronda
+    // los 510 MB, así que 1 GB deja margen para las dos cosas.
+    resourceLimits: { maxOldGenerationSizeMb: 1024 },
+    ...(execArgv ? { execArgv } : {}),
+  })
+  const result = new Promise<Buffer>((resolveResult, reject) => {
+    let settled = false
+    worker.once('message', (message: unknown) => {
+      settled = true
+      const response = message as { ok?: boolean; bytes?: ArrayBuffer }
+      if (response.ok && response.bytes) resolveResult(Buffer.from(response.bytes))
+      else reject(exportError('ORG_STOCK_EXPORT_WORKER_FAILED'))
+    })
+    worker.once('error', () => {
+      settled = true
+      reject(exportError('ORG_STOCK_EXPORT_WORKER_FAILED'))
+    })
+    worker.once('exit', () => {
+      // WHY: un worker muerto por `resourceLimits` sale sin emitir 'message';
+      // sin esto la petición se quedaría colgada hasta el timeout.
+      if (!settled) {
+        settled = true
+        reject(exportError('ORG_STOCK_EXPORT_WORKER_FAILED'))
+      }
+    })
+  })
+  return { result, terminate: () => Promise.resolve(worker.terminate()) }
+}
 
-    const wsCargas = this.buildCargasSheet(data)
-    wsCargas['!cols'] = [
-      { wch: 5 },
-      { wch: 18 },
-      { wch: 38 },
-      { wch: 22 },
-      { wch: 14 },
-      { wch: 24 },
-      { wch: 24 },
-      { wch: 22 },
-      { wch: 14 }, // ID Registrante
-      { wch: 12 },
-      { wch: 10 },
-      { wch: 22 },
-    ]
-    XLSX.utils.book_append_sheet(wb, wsCargas, 'Cargas (Resumen)')
+export function createOrgStockControlExportService(dependencies: OrgStockControlExportDependencies = {}): OrgStockControlExportService {
+  const fetchOverview = dependencies.fetchOverview ?? ((orgId, options) => orgStockControlService.getOrgExportOverview(orgId, options))
+  const spawnWorker =
+    dependencies.spawnWorker ??
+    ((data: OrgStockOverview, orgSlug: string) => createDefaultWorker(data, orgSlug, dependencies.workerFactory))
+  const timeoutMs = dependencies.timeoutMs ?? ORG_STOCK_EXPORT_TIMEOUT_MS
 
-    const wsDetalle = this.buildDetalleSheet(data)
-    wsDetalle['!cols'] = [
-      { wch: 5 }, // #
-      { wch: 24 }, // ICCID
-      { wch: 22 }, // Categoría
-      { wch: 12 }, // Estado
-      { wch: 18 }, // Custodia
-      { wch: 12 }, // Fecha Carga
-      { wch: 38 }, // Sucursal Receptora
-      { wch: 22 }, // Sucursal Actual
-      { wch: 22 }, // Sucursal Venta
-      { wch: 12 }, // Fecha Venta
-      { wch: 25 }, // Registrado Por
-      { wch: 14 }, // ID Registrante
-      { wch: 22 }, // Supervisor
-      { wch: 14 }, // ID Supervisor
-      { wch: 22 }, // Promotor
-      { wch: 14 }, // ID Promotor
-    ]
-    XLSX.utils.book_append_sheet(wb, wsDetalle, 'Detalle SIMs')
+  return {
+    async generateExcelBuffer(orgId, options, orgSlug) {
+      const data = await fetchOverview(orgId, options)
 
-    const wsSucursal = this.buildPorSucursalSheet(data)
-    wsSucursal['!cols'] = [{ wch: 5 }, { wch: 38 }, { wch: 20 }, { wch: 14 }, { wch: 12 }, { wch: 12 }]
-    XLSX.utils.book_append_sheet(wb, wsSucursal, 'Por Sucursal')
+      let handle: OrgStockExportWorkerHandle
+      try {
+        handle = spawnWorker(data, orgSlug)
+      } catch {
+        // WHY: `new Worker` puede fallar de forma síncrona antes de que exista
+        // un handle que terminar.
+        throw exportError('ORG_STOCK_EXPORT_WORKER_FAILED')
+      }
 
-    const wsCategoria = this.buildPorCategoriaSheet(data)
-    wsCategoria['!cols'] = [{ wch: 5 }, { wch: 30 }, { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 20 }]
-    XLSX.utils.book_append_sheet(wb, wsCategoria, 'Por Categoría')
+      let timeout: NodeJS.Timeout | undefined
+      const timeoutFailure = new Promise<never>((_resolveTimeout, reject) => {
+        timeout = setTimeout(() => reject(exportError('ORG_STOCK_EXPORT_TIMEOUT', 504)), timeoutMs)
+      })
 
-    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer
+      let buffer: Buffer
+      try {
+        buffer = await Promise.race([handle.result, timeoutFailure])
+      } catch (error) {
+        const candidate = error as { code?: string }
+        throw candidate?.code?.startsWith('ORG_STOCK_EXPORT_') ? (error as AppError) : exportError('ORG_STOCK_EXPORT_WORKER_FAILED')
+      } finally {
+        if (timeout) clearTimeout(timeout)
+        // WHY: sin esto un worker colgado sobrevive a su petición y fuga un thread.
+        await handle.terminate().catch(() => undefined)
+      }
 
-    const dateStr = new Date().toISOString().split('T')[0]
-    const safeSlug = orgSlug.toLowerCase().replace(/[^a-z0-9-]+/g, '-')
-    const filename = `${safeSlug}-control-stock-${dateStr}.xlsx`
-
-    return { buffer, filename }
-  }
-
-  private buildResumenSheet(data: OrgStockOverview, orgSlug: string): XLSX.WorkSheet {
-    const { summary } = data
-    const rows = [
-      { Métrica: 'Organización', Valor: orgSlug },
-      { Métrica: 'Fecha del reporte', Valor: fmtDate(summary.generatedAt) },
-      { Métrica: '', Valor: '' },
-      { Métrica: 'TOTAL SIMs cargadas', Valor: summary.totalSims },
-      { Métrica: 'SIMs disponibles', Valor: summary.available },
-      { Métrica: 'SIMs vendidas', Valor: summary.sold },
-      { Métrica: 'SIMs dañadas', Valor: summary.damaged },
-      { Métrica: 'SIMs devueltas', Valor: summary.returned },
-      { Métrica: '% Rotación', Valor: `${summary.rotacionPct.toFixed(2)}%` },
-      { Métrica: '', Valor: '' },
-      { Métrica: 'Total de cargas (bulk groups)', Valor: summary.totalCargas },
-      { Métrica: 'Sucursales involucradas', Valor: summary.sucursalesInvolucradas },
-      { Métrica: 'Categorías activas', Valor: summary.categoriasActivas },
-      { Métrica: '', Valor: '' },
-      { Métrica: 'Rango desde', Valor: fmtDate(summary.dateRange.from) },
-      { Métrica: 'Rango hasta', Valor: fmtDate(summary.dateRange.to) },
-    ]
-    return XLSX.utils.json_to_sheet(rows)
-  }
-
-  private buildCargasSheet(data: OrgStockOverview): XLSX.WorkSheet {
-    const rows = data.bulkGroups.map((g, idx) => ({
-      '#': idx + 1,
-      'Fecha y Hora': fmtDateTime(g.firstCreatedAt),
-      'Sucursal Receptora': g.registeredFromVenueName ?? '—',
-      Categoría: g.categoryName,
-      'Cantidad SIMs': g.itemCount,
-      'ICCID Primero': g.serialNumberFirst,
-      'ICCID Último': g.serialNumberLast,
-      'Registrado Por': g.createdByName ?? '—',
-      // White-label orgs use this; blank for everyone else.
-      'ID Registrante': g.createdByEmployeeCode ?? '',
-      Disponibles: g.availableCount,
-      Vendidos: g.soldCount,
-      Estado: g.soldCount > 0 ? 'Parcialmente vendido' : 'Todo disponible',
-    }))
-    return XLSX.utils.json_to_sheet(rows)
-  }
-
-  private buildDetalleSheet(data: OrgStockOverview): XLSX.WorkSheet {
-    const rows = data.items.map((item, idx) => ({
-      '#': idx + 1,
-      ICCID: item.serialNumber,
-      Categoría: item.categoryName,
-      Estado: item.status,
-      Custodia: item.custodyState,
-      'Fecha Carga': fmtDate(item.createdAt),
-      'Sucursal Receptora': item.registeredFromVenueName ?? '—',
-      'Sucursal Actual': item.currentVenueName ?? 'Stock Org',
-      'Sucursal Venta': item.sellingVenueName ?? '',
-      'Fecha Venta': fmtDate(item.soldAt),
-      'Registrado Por': item.createdByName ?? '—',
-      'ID Registrante': item.createdByEmployeeCode ?? '',
-      Supervisor: item.assignedSupervisorName ?? '',
-      'ID Supervisor': item.assignedSupervisorEmployeeCode ?? '',
-      Promotor: item.assignedPromoterName ?? '',
-      'ID Promotor': item.assignedPromoterEmployeeCode ?? '',
-    }))
-    return XLSX.utils.json_to_sheet(rows)
-  }
-
-  private buildPorSucursalSheet(data: OrgStockOverview): XLSX.WorkSheet {
-    const rows = data.aggregatesBySucursal.map((agg, idx) => ({
-      '#': idx + 1,
-      'Sucursal Receptora': agg.venueName,
-      'Total SIMs Cargados': agg.totalSims,
-      Disponibles: agg.available,
-      Vendidos: agg.sold,
-      '% Vendido': `${agg.rotacionPct.toFixed(2)}%`,
-    }))
-    return XLSX.utils.json_to_sheet(rows)
-  }
-
-  private buildPorCategoriaSheet(data: OrgStockOverview): XLSX.WorkSheet {
-    const rows = data.aggregatesByCategoria.map((agg, idx) => ({
-      '#': idx + 1,
-      Categoría: agg.categoryName,
-      'Total SIMs': agg.totalSims,
-      Disponibles: agg.available,
-      Vendidos: agg.sold,
-      '% Rotación': `${agg.rotacionPct.toFixed(2)}%`,
-      '% del Total': `${agg.pctOfTotal.toFixed(2)}%`,
-      'Sucursales con Stock': agg.sucursalesConStock,
-    }))
-    return XLSX.utils.json_to_sheet(rows)
+      const dateStr = new Date().toISOString().split('T')[0]
+      const safeSlug = orgSlug.toLowerCase().replace(/[^a-z0-9-]+/g, '-')
+      return { buffer, filename: `${safeSlug}-control-stock-${dateStr}.xlsx` }
+    },
   }
 }
 
-export const orgStockControlExportService = new OrgStockControlExportService()
+export const orgStockControlExportService = createOrgStockControlExportService()

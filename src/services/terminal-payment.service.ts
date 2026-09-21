@@ -38,7 +38,7 @@ import {
   sinEvidenciaPositivaSql,
   sinPagoLigadoSql,
 } from './tpv/evidenciaPositivaSql'
-import { utcTs } from '../utils/sqlDates'
+import { utcTs, utcTsOrNull } from '../utils/sqlDates'
 import socketManager from '../communication/sockets/managers/socketManager'
 import logger from '../config/logger'
 import AppError, {
@@ -1451,7 +1451,9 @@ export function avisarAprobacionTardiaTrasVentana(
     }`,
     lines: [
       porCajero
-        ? `El banco aprobó un cobro (${ctx.paymentId}) de la solicitud ${ctx.requestId} después de que el cajero declarara que no se presentó tarjeta.`
+        ? // 🔴 P3 de Codex (18-sep): hay DOS declaraciones y este texto atribuía siempre la de gerencia. Quien
+          // declaró «revisé la terminal y no se cobró» no afirmó que nadie presentara tarjeta.
+          `El banco aprobó un cobro (${ctx.paymentId}) de la solicitud ${ctx.requestId} después de que un operador declarara que ese cobro no había pasado.`
         : `El banco aprobó un cobro (${ctx.paymentId}) de la solicitud ${ctx.requestId} después de que la ventana de 30 s la liberara.`,
       otros === null
         ? 'Sin orden ligada: no se pudo contar otros cobros.'
@@ -1460,6 +1462,20 @@ export function avisarAprobacionTardiaTrasVentana(
           : 'La orden no muestra otro cobro con tarjeta posterior en esta orden: sólo confirmar que quedó registrado.',
     ],
   })
+  // 18-sep: además del correo a operaciones, AVISAR AL CAJERO en su aparato. El correo llega a quien administra;
+  // quien puede cobrar otra vez por error es la persona que declaró, y hasta hoy no se enteraba de nada.
+  // Fire-and-forget y nunca lanza: un aviso no puede deshacer el registro de un cobro.
+  if (porCajero) {
+    void import('./tpv/avisoDeCobroTardio').then(m =>
+      m.avisarCobroTardioAlCajero({
+        requestId: ctx.requestId,
+        venueId: ctx.venueId,
+        paymentId: ctx.paymentId,
+        terminalId: ctx.terminalId,
+        orderId: ctx.orderId,
+      }),
+    )
+  }
 }
 
 class TerminalPaymentService {
@@ -2548,23 +2564,42 @@ class TerminalPaymentService {
    * El brazo (en vuelo / tardío) es el mismo de la escritura normal (`brazoTardioDeCierre`). Nunca encoge; sólo un NEGATIVO
    * posterior de la terminal (brazo tardío de un failed/cancelled, ruling (c) de la Task 2) reemplaza el sobre entero.
    */
+  /**
+   * La AFIRMACIÓN que de verdad se va a persistir: el `claimedSuccess` filtrado de valores vacíos. `null` = no hay nada que
+   * persistir (ninguna clave sobrevive al filtro), que NO es lo mismo que «falló la escritura».
+   *
+   * Separado del cuerpo para que la condición «¿hay algo que persistir?» se lea de un vistazo: es la que decide si el fallo
+   * de esa escritura puede propagar (ronda 4, P1-1 residual).
+   */
+  private afirmacionAPersistir(result: TerminalPaymentResult): Record<string, unknown> | null {
+    const nueva = Object.fromEntries(
+      Object.entries(result.claimedSuccess ?? {}).filter(([, v]) => v !== undefined && v !== null && v !== '' && v !== false),
+    )
+    return Object.keys(nueva).length > 0 ? nueva : null
+  }
+
   private async escribirSuccessDegradado(
     requestId: string,
     venueId: string,
     result: TerminalPaymentResult,
     newStatus: TerminalPaymentRequestStatus,
   ): Promise<TerminalPaymentResult> {
-    const { claimedSuccess, ...sobre } = result
-    const nueva = Object.fromEntries(
-      Object.entries(claimedSuccess ?? {}).filter(([, v]) => v !== undefined && v !== null && v !== '' && v !== false),
-    )
+    const { claimedSuccess: _claimedSuccess, ...sobre } = result
+    const nueva = this.afirmacionAPersistir(result) ?? {}
     let afirmacionPersistida = false
-    try {
-      // (1) La afirmación, fuera del CAS de estado. Codex r5 (P1-N5): SÍ toca `updatedAt` — una afirmación positiva es un hecho
-      // relevante para el estado, y el CAS de la ventana (`updatedAt` leído) tiene que perderlo: sin el toque, la ventana ganaba su
-      // CAS entre esta sentencia y la (2) y reescribía el sobre desde su lectura previa, borrando la afirmación y liberando.
-      if (Object.keys(nueva).length > 0) {
-        const n = await prisma.$executeRaw`
+    // (1) La afirmación, FUERA del try y fuera del CAS de estado. Codex r5 (P1-N5): SÍ toca `updatedAt` — una afirmación
+    // positiva es un hecho relevante para el estado, y el CAS de la ventana (`updatedAt` leído) tiene que perderlo: sin el
+    // toque, la ventana ganaba su CAS entre esta sentencia y la (2) y reescribía el sobre desde su lectura previa, borrando
+    // la afirmación y liberando.
+    //
+    // 🔴 Ronda 4 de Codex (P1-1 residual): va fuera del `try` A PROPÓSITO. Atrapada, esta excepción se devolvía como
+    // `{status:'timeout'}` —un valor de TRANSPORTE, indistinguible de «la terminal no contestó»— y quien llama seguía
+    // adelante: la sonda sellaba `probeResolvedAt`, levantaba el veto y la siguiente declaración del cajero pasaba sobre un
+    // cobro que la terminal acababa de afirmar. Propagando, el sello no se alcanza y el veto se conserva, que es el lado
+    // seguro; la terminal repregunta. El `catch` de abajo sigue cubriendo el CAS de ESTADO, cuyo fallo sí es tolerable
+    // porque la afirmación —lo que protege el dinero— ya quedó durable aquí.
+    if (Object.keys(nueva).length > 0) {
+      const n = await prisma.$executeRaw`
           UPDATE "TerminalPaymentRequest"
           SET "resultJson" = jsonb_set(
                 coalesce("resultJson", '{}'::jsonb),
@@ -2574,8 +2609,9 @@ class TerminalPaymentService {
                 true),
               "updatedAt" = (NOW() AT TIME ZONE 'UTC')
           WHERE "requestId" = ${requestId} AND "venueId" = ${venueId} AND "paymentId" IS NULL AND "status" <> 'COMPLETED'`
-        afirmacionPersistida = n === 1
-      }
+      afirmacionPersistida = n === 1
+    }
+    try {
       // (2) El estado, con CAS y sin volver a fundir.
       let vueltas = 0
       for (; vueltas < 3; vueltas++) {
@@ -5398,10 +5434,120 @@ class TerminalPaymentService {
     venueId: string
     actor: { staffId?: string | null; source: 'MCP' | 'SUPERADMIN' | 'MOBILE' }
     reason: string
-  }): Promise<{ requestId: string; released: boolean; status: TerminalPaymentRequestStatus | null; paymentId?: string }> {
+    /** La declaración del cajero «revisé la terminal y no se cobró». Sin ella, TODO sigue exactamente igual. */
+    declaration?: unknown
+  }): Promise<{
+    requestId: string
+    released: boolean
+    status: TerminalPaymentRequestStatus | null
+    paymentId?: string
+    resolution?: { id: string; acceptedAt: string }
+    outcome?: string
+    outcomeEvidence?: string | null
+  }> {
     const { requestId, venueId, actor, reason } = input
     const row = await prisma.terminalPaymentRequest.findFirst({ where: { requestId, venueId } })
     if (!row) return { requestId, released: false, status: null }
+
+    // 🔴 La variante DECLARADA se despacha ANTES del filtro exclusivo de UNKNOWN: una fila TIMED_OUT todavía
+    // incierta también aparta la terminal, y es la que más abunda entre las legacy que hay que limpiar. Sin
+    // `declaration` no entra aquí y el comportamiento de siempre queda intacto — `reason` y un `confirm` NUNCA
+    // se leen como declaración implícita.
+    if (input.declaration !== undefined && input.declaration !== null) {
+      const { reconcileUncharged } = await import('./tpv/uncharged-reconciliation.service')
+      const resolution = await reconcileUncharged(
+        { venueId, requestId, actorStaffId: actor.staffId ?? null, source: actor.source },
+        input.declaration,
+      )
+      // 🔴 P1 de la auditoría de Codex (18-sep): `released` NO puede ser incondicional. En un REPLAY la
+      // declaración se devuelve tal cual (es correcto: fue aceptada), pero entretanto pudo aparecer el dinero
+      // y la fila estar COMPLETED o retenida por el banco. Decir «Terminal liberada» ahí es mentirle al cajero
+      // justo en el momento en que más caro cuesta. El desenlace se deriva de la fila FRESCA.
+      const fresh = await prisma.terminalPaymentRequest.findFirst({
+        where: { requestId, venueId },
+        // `desenlaceCanonico` necesita estos cuatro: sin ellos compila igual y clasifica MAL.
+        select: { status: true, failureCode: true, paymentId: true, resultJson: true, cancelDisposition: true },
+      })
+      // 🔴 Ronda 2 de Codex (19-sep): no basta con mirar estado y puntero. Un `success` TARDÍO sin pago
+      // acreditable persiste su afirmación en `resultJson.claimedSuccess` SIN cambiar todavía el estado: la
+      // fila sigue FAILED/OPERATOR_RECONCILED_NO_CHARGE y el replay respondía «liberada» con una afirmación
+      // de cobro durable encima.
+      const sobreFresco =
+        fresh?.resultJson && typeof fresh.resultJson === 'object' && !Array.isArray(fresh.resultJson)
+          ? (fresh.resultJson as Record<string, unknown>)
+          : {}
+      const afirmacionDeCobro = Object.values(
+        (sobreFresco.claimedSuccess && typeof sobreFresco.claimedSuccess === 'object' && !Array.isArray(sobreFresco.claimedSuccess)
+          ? (sobreFresco.claimedSuccess as Record<string, unknown>)
+          : {}) as Record<string, unknown>,
+      ).some(v => v !== undefined && v !== null && v !== '' && v !== false)
+      // 🔴 Ronda 4 de Codex (P1 residual): el REPLAY no puede fiarse sólo del estado de la fila. Una
+      // aprobación bancaria durable, todavía pendiente de retención, no ha movido `status` ni `paymentId`,
+      // así que la fila sigue diciendo «declarada» y el replay respondía `released:true` sobre un cobro que
+      // el banco ya aprobó. Se revalida con el MISMO veto de evidencia que usa la declaración.
+      let evidenciaActual = false
+      try {
+        const [e] = await prisma.$queryRaw<{ hay: boolean }[]>`
+          SELECT (${hayAprobadoVinculadoSql(requestId, venueId)}
+               OR ${hayPagoLigadoSql(requestId, venueId)}
+               OR ${hayEvidenciaDeConciliacionSql(requestId, venueId)}) AS "hay"`
+        evidenciaActual = Boolean(e?.hay)
+      } catch (err) {
+        // Falla CERRADO: si no se puede comprobar, no se afirma que quedó liberada.
+        evidenciaActual = true
+        logger.warn('⚠️ [TerminalPayment] no se pudo revalidar la evidencia en el replay — se reporta sin liberar', {
+          requestId,
+          venueId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+      const liberada =
+        fresh?.status === TerminalPaymentRequestStatus.FAILED &&
+        fresh.failureCode === 'OPERATOR_RECONCILED_NO_CHARGE' &&
+        !fresh.paymentId &&
+        !afirmacionDeCobro &&
+        !evidenciaActual
+      if (!liberada) {
+        logger.error('🚨 [TerminalPayment] declaración aceptada pero la solicitud YA NO está liberada — apareció dinero', {
+          requestId,
+          venueId,
+          status: fresh?.status,
+          failureCode: fresh?.failureCode,
+          paymentId: fresh?.paymentId,
+          resolutionId: resolution.id,
+        })
+      } else {
+        logger.info('🧾 [TerminalPayment] Cobro conciliado por declaración del operador', {
+          requestId,
+          venueId,
+          staffId: actor.staffId,
+          source: actor.source,
+          resolutionId: resolution.id,
+        })
+      }
+      // 🔴 P2-12 residual (Codex r2): el contrato del plan promete `requestId`, `outcome` y `outcomeEvidence`
+      // en la respuesta, y sólo iban `released` y `status`. El POS los necesita para decidir sin re-preguntar.
+      // 🔴 Ronda 3 de Codex (P1-5): `desenlaceCanonico` clasifica por el CÓDIGO de la fila, así que con una
+      // afirmación de cobro durable encima seguía respondiendo `NOT_CHARGED / OPERATOR_RECONCILED` — decirle
+      // al POS que no se cobró cuando la terminal acaba de afirmar lo contrario. Si no está liberada, el
+      // desenlace que se reporta es el honesto: sigue sin resolverse.
+      const desenlace = fresh ? desenlaceCanonico(fresh) : null
+      return {
+        requestId,
+        released: liberada,
+        status: fresh?.status ?? TerminalPaymentRequestStatus.FAILED,
+        ...(fresh?.paymentId ? { paymentId: fresh.paymentId } : {}),
+        // 🔴 Ronda 4 de Codex (P2 nuevo): `UNRESOLVED` se reserva para la evidencia positiva que TODAVÍA no
+        // tiene desenlace acreditado. Con un `Payment` registrado, el desenlace canónico es la verdad y
+        // decir «sin resolver» sería tan falso como decir «no cobrado»: el dinero ya consta.
+        ...(desenlace
+          ? liberada || fresh?.paymentId
+            ? { outcome: desenlace.outcome, outcomeEvidence: desenlace.outcomeEvidence ?? null }
+            : { outcome: 'UNRESOLVED', outcomeEvidence: null }
+          : {}),
+        resolution: { id: resolution.id, acceptedAt: resolution.acceptedAt },
+      }
+    }
     if (row.status !== TerminalPaymentRequestStatus.UNKNOWN) {
       return { requestId, released: false, status: row.status, paymentId: row.paymentId ?? undefined }
     }
@@ -6306,6 +6452,10 @@ class TerminalPaymentService {
         deliveryProvenance: true,
         expiresAt: true,
         terminalId: true,
+        // 🔴 La observación que se está resolviendo. Sin ella en el `select`, el CAS del sello comparaba SIEMPRE
+        // contra `null` y una fila con `ACTIVE` observado no se sellaba NUNCA: el veto quedaba puesto para siempre
+        // y el cajero volvía al callejón sin salida que esta función existe para quitar.
+        probeActiveAt: true,
       },
     })
     if (!row) {
@@ -6320,6 +6470,22 @@ class TerminalPaymentService {
 
     if (disposition === 'ACTIVE') {
       logger.info('🔎 [TerminalPayment] Probe: terminal still executing the attempt — reservation kept', { requestId })
+      // 18-sep: la respuesta ACTIVE deja CONSTANCIA DURABLE. Es lo que consulta la declaración del cajero
+      // («revisé la terminal y no se cobró») para no escribir encima de un cobro que sigue corriendo: antes
+      // esto sólo iba al log y el veto del diseño no tenía dato que mirar. Contabilidad, no desenlace — por
+      // eso NO toca `status`, `failureCode` ni `updatedAt`, y un fallo aquí no cambia la respuesta a la sonda.
+      //
+      // 🔴 Ronda 2 de Codex (19-sep): en COLUMNA PROPIA, no en `resultJson`. Ese sobre lo reemplaza entero
+      // cualquier resultado posterior, y con él se borraba la evidencia de que el cobro seguía vivo.
+      try {
+        await prisma.$executeRaw`
+          UPDATE "TerminalPaymentRequest" SET "probeActiveAt" = (NOW() AT TIME ZONE 'UTC') WHERE "id" = ${row.id}`
+      } catch (err) {
+        logger.warn('⚠️ [TerminalPayment] no se pudo sellar probeActiveAt — la reserva se conserva igual', {
+          requestId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
       return true
     }
 
@@ -6389,6 +6555,31 @@ class TerminalPaymentService {
         this.unaccreditedProbeAnswers.delete(requestId)
       }
       const outcome = await this.closeRow(requestId, terminal.venueId, result)
+
+      // 🔴 Ronda 3 de Codex (P1-1): el sello va AQUÍ, DESPUÉS de que `closeRow` haya persistido el resultado
+      // y sus señales positivas — no antes. Sellado arriba, retiraba la protección de `probeActiveAt` en la
+      // ventana que va del sello a la escritura: otra instancia podía aceptar la declaración justo ahí, sobre
+      // un cobro que la terminal acababa de confirmar. Y `NOT_FOUND` ya NO sella: que la bandeja no tenga la
+      // solicitud no acredita que el intento terminara (esa respuesta tiene su propio tratamiento).
+      // Su fallo no cambia el desenlace: sin sello, el veto SIGUE puesto, que es el lado seguro.
+      // 🔴 Ronda 4 de Codex: el sello va con CAS sobre la observación que se está resolviendo. Sin él, un
+      // `ACTIVE` que llegara MIENTRAS corría `closeRow` quedaba desmentido por una hora posterior que no
+      // resolvió nada de ese ACTIVE nuevo. Si la observación cambió, no se sella: el veto se conserva.
+      // 🔴 Ronda 4 de Codex (P1-1 residual): que `closeRow` RETORNE no significa que haya PERSISTIDO. El candado está
+      // en el origen — la escritura de la afirmación ya no se traga su excepción (`escribirSuccessDegradado`, paso 1),
+      // así que un fallo de persistencia PROPAGA y esta línea no se alcanza. Comprobarlo aquí, en cambio, sería inerte:
+      // el `result` que arma la sonda nunca trae `claimedSuccess` — lo construye `closeRow` por dentro.
+      const observacionAlEmpezar = row.probeActiveAt ?? null
+      try {
+        await prisma.$executeRaw`
+          UPDATE "TerminalPaymentRequest" SET "probeResolvedAt" = (NOW() AT TIME ZONE 'UTC')
+          WHERE "id" = ${row.id} AND "probeActiveAt" IS NOT DISTINCT FROM ${utcTsOrNull(observacionAlEmpezar)}`
+      } catch (err) {
+        logger.warn('⚠️ [TerminalPayment] no se pudo sellar probeResolvedAt — el veto se conserva', {
+          requestId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
       const after = await prisma.terminalPaymentRequest.findFirst({
         where,
         select: { status: true, failureCode: true, cancelDisposition: true },

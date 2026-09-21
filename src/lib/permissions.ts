@@ -891,6 +891,11 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'payments:read',
     'payments:create',
     'payments:refund',
+    // 🔴 El cajero SÍ declara «revisé la terminal y no se cobró» — decisión del founder (18-sep) tras 26 minutos
+    // parados en Testarudo: en un mostrador a las 10 de la mañana puede no haber gerente, y esperar a uno es
+    // volver a estar parado. NO es `payments:resolve-no-instrument` (gerencia, y afirma otra cosa) ni concede
+    // `tpv:update`: libera ESE cobro con su nombre en el registro, no administra la terminal.
+    'payments:reconcile-uncharged',
     'area-tickets:checkout',
     // Cotizar: el mostrador ya podia (heredaba orders:create via area-tickets:checkout),
     // pero esa herencia es de UN nivel y no alcanzaba al permiso nuevo. Explicito.
@@ -1001,6 +1006,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'payments:create',
     'payments:refund',
     'payments:resolve-no-instrument', // Cobro remoto: declarar «no se presentó tarjeta» libera la venta — decisión de gerencia
+    'payments:reconcile-uncharged', // el cajero también lo tiene; gerencia lo conserva para poder resolverlo desde el dashboard
     'payment-link:read', // Can view and share existing payment links
     'payment-link:create', // Can create new payment links for collections
     'payment-link:update', // Can edit (pause / resume) payment links
@@ -1149,6 +1155,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'receipt-layout:*', // RECEIPT_LAYOUT: diseñar el ticket en papel — administrativo; MANAGER excluido a propósito
     'payments:*',
     'payments:resolve-no-instrument', // ya cabe en 'payments:*'; explícito para que la lista se lea sin expandir el comodín
+    'payments:reconcile-uncharged', // el cajero también lo tiene; explícito para que la lista se lea sin expandir el comodín
     'tender-types:*', // Tipos de pago personalizados: crear/editar/ordenar el catálogo
     'area-tickets:*', // Operate and configure multi-area retail tickets
     'scale:*', // Use and configure connected scales
@@ -1291,6 +1298,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'estimates:create',
     'payments:*',
     'payments:resolve-no-instrument', // ya cabe en 'payments:*'; explícito para que la lista se lea sin expandir el comodín
+    'payments:reconcile-uncharged', // el cajero también lo tiene; explícito para que la lista se lea sin expandir el comodín
     'tender-types:*', // Tipos de pago personalizados: crear/editar/ordenar el catálogo
     'area-tickets:*', // Operate and configure multi-area retail tickets
     'scale:*', // Use and configure connected scales
@@ -1885,6 +1893,9 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
     // Cobro remoto: confirmar en la terminal que NO se presentó tarjeta (cierra el intento como OPERATOR_RECONCILED_NO_CHARGE y
     // libera la venta para recobrarla). Misma clase de decisión que un reembolso: MANAGER+, nunca roles de piso.
     'payments:resolve-no-instrument',
+    // Cobro remoto: el CAJERO declara que MIRÓ la pantalla de la terminal y no hubo cobro; libera la venta y la
+    // ranura de golpe. Distinto del de arriba —aquél afirma que nadie presentó tarjeta— y por eso es permiso propio.
+    'payments:reconcile-uncharged',
   ],
   // Tipos de pago personalizados (VenueTenderType) — catálogo de tenders del venue.
   // NO confundir con billing:payment-methods (tarjetas Stripe de facturación).
