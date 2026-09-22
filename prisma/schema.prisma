@@ -2111,7 +2111,7 @@ model InventoryMovement {
   // Folio de merma que originó este movimiento. FIFO escribe un movimiento por
   // lote, así que la declaración vive en InventoryWasteReport y aquí sólo se liga.
   // NoAction aquí; en la base además es DEFERRABLE INITIALLY DEFERRED (migración
-  // 20260921190000_inventory_waste — Prisma no lo expresa). Se verifica al COMMIT: así no
+  // 20260921190050_inventory_waste_kardex_link — Prisma no lo expresa). Se verifica al COMMIT: así no
   // importa en qué orden disparen las cascadas artículo → folio y artículo → kardex, y aun
   // así un folio con movimientos vivos no se puede borrar.
   wasteReportId String?

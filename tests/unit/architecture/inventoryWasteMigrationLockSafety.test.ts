@@ -11,16 +11,21 @@ import path from 'node:path'
  * tiempo en que ninguna venta puede escribir su movimiento. Esta guardia fija las tres cosas que no
  * se ven en una prueba de resultados:
  *
- * 1. La migración inicial ya no construye índices sobre las tablas del kardex, y sus dos llaves
- *    movimiento → folio nacen `NOT VALID` (no recorren la tabla) además de diferidas.
- * 2. La validación de esas dos llaves va en su propia migración (`VALIDATE CONSTRAINT` toma SHARE
+ * 1. La migración inicial NO toca las tablas del kardex (Ruling 29): crea la tabla nueva y sus llaves
+ *    hacia Venue/RawMaterial/Product/Staff. Si tocara el kardex, su ACCESS EXCLUSIVE quedaría puesto
+ *    mientras la misma transacción espera los candados de esas cuatro tablas.
+ * 2. La siguiente migración sólo liga el kardex: `ADD COLUMN` + dos llaves movimiento → folio que nacen
+ *    `NOT VALID` (no recorren la tabla) además de diferidas. Sólo toca el kardex y la tabla nueva (vacía):
+ *    la retención del kardex queda en lo que tardan dos cambios de metadatos.
+ * 3. La validación de esas dos llaves va en su propia migración (`VALIDATE CONSTRAINT` toma SHARE
  *    UPDATE EXCLUSIVE: no bloquea escrituras).
- * 3. Cada índice de `wasteReportId` se construye CONCURRENTLY, en una migración de UNA sentencia
+ * 4. Cada índice de `wasteReportId` se construye CONCURRENTLY, en una migración de UNA sentencia
  *    (CONCURRENTLY no corre dentro de la transacción implícita de un lote: SQLSTATE 25001).
  */
 const migrationsRoot = path.resolve(__dirname, '../../../prisma/migrations')
 
 const INITIAL = '20260921190000_inventory_waste'
+const LINK = '20260921190050_inventory_waste_kardex_link'
 const VALIDATE = '20260921190100_validate_waste_report_fks'
 const RAW_INDEX = '20260921190200_index_raw_material_movement_waste_report_concurrently'
 const PRODUCT_INDEX = '20260921190300_index_inventory_movement_waste_report_concurrently'
@@ -63,30 +68,51 @@ function migrationNames(): string[] {
     .sort()
 }
 
-describe('migración del libro de merma sin bloquear el kardex (Ruling 27)', () => {
-  it('la migración inicial no crea índices sobre las tablas del kardex', () => {
+/** Tablas de negocio que referencia la tabla nueva: sus candados NO pueden esperarse con el kardex tomado. */
+const BUSINESS_TABLES = ['Venue', 'RawMaterial', 'Product', 'Staff'] as const
+const quoted = (name: string) => new RegExp(`['"]${name}['"]`)
+
+describe('migración del libro de merma sin bloquear el kardex (Rulings 27 y 29)', () => {
+  it('la migración inicial no toca las tablas del kardex: ni columnas, ni llaves, ni índices', () => {
     const code = statements(readMigration(INITIAL)).join(' ; ')
 
     for (const table of HOT_TABLES) {
-      expect(code).not.toMatch(new RegExp(`CREATE (UNIQUE )?INDEX[^;]* ON "${table}"`))
+      expect(code).not.toMatch(quoted(table))
       expect(code).not.toContain(INDEXES[table])
+      expect(code).not.toContain(FKS[table])
     }
+    expect(code).not.toContain('wasteReportId')
   })
 
-  it('la migración inicial crea las dos llaves movimiento → folio NOT VALID y diferidas, y nada más de ellas se aplaza', () => {
+  it('la migración inicial crea la tabla nueva con sus llaves de negocio validadas en el acto', () => {
     const code = statements(readMigration(INITIAL)).join(' ; ')
 
+    expect(code).toContain('CREATE TABLE IF NOT EXISTS "InventoryWasteReport"')
+    for (const table of BUSINESS_TABLES) expect(code).toMatch(quoted(table))
+    // La tabla está vacía: validar es instantáneo, y NOT VALID no bajaría su candado (SHARE ROW EXCLUSIVE
+    // sobre las dos tablas hasta el COMMIT, medido en PG 14).
+    expect(code).not.toContain('NOT VALID')
+    expect(code).not.toContain('VALIDATE CONSTRAINT')
+  })
+
+  it(`${LINK} sólo liga el kardex: columnas y llaves NOT VALID diferidas hacia el folio, sin otras tablas`, () => {
+    const code = statements(readMigration(LINK)).join(' ; ')
+
     for (const table of HOT_TABLES) {
+      expect(code).toContain(`ALTER TABLE "${table}" ADD COLUMN IF NOT EXISTS "wasteReportId" TEXT`)
       expect(code).toMatch(
         new RegExp(
           `\\('${table}', '${FKS[table]}', 'wasteReportId', 'InventoryWasteReport', 'NO ACTION', 'DEFERRABLE INITIALLY DEFERRED NOT VALID'\\)`,
         ),
       )
     }
-    // Las llaves de la tabla NUEVA hacia Venue/RawMaterial/Product/Staff validan en el acto: la tabla
-    // está vacía, y NOT VALID no bajaría su candado (SHARE ROW EXCLUSIVE hasta el COMMIT, igual).
     expect(code.match(/NOT VALID/g)).toHaveLength(2)
+    for (const table of BUSINESS_TABLES) expect(code).not.toMatch(quoted(table))
+    expect(code).not.toMatch(/CREATE (UNIQUE )?INDEX/)
     expect(code).not.toContain('VALIDATE CONSTRAINT')
+    // Sin BEGIN/COMMIT propios (los BEGIN de los bloques DO son de PL/pgSQL): la transacción implícita
+    // del lote basta, y un COMMIT a media migración soltaría el kardex sin las llaves puestas.
+    expect(statements(readMigration(LINK)).filter(statement => /^(BEGIN|COMMIT)$/i.test(statement))).toEqual([])
   })
 
   it(`${VALIDATE} valida las dos llaves y no hace nada más`, () => {
@@ -106,9 +132,9 @@ describe('migración del libro de merma sin bloquear el kardex (Ruling 27)', () 
     expect(sql).not.toMatch(/^\s*(?:BEGIN|COMMIT)\b/im)
   })
 
-  it('el orden: inicial → validar → índices → índices parciales de la merma sin folio', () => {
+  it('el orden: inicial → ligar el kardex → validar → índices → índices parciales de la merma sin folio', () => {
     const names = migrationNames()
-    const order = [INITIAL, VALIDATE, RAW_INDEX, PRODUCT_INDEX, ...LEGACY_INDEXES].map(name => names.indexOf(name))
+    const order = [INITIAL, LINK, VALIDATE, RAW_INDEX, PRODUCT_INDEX, ...LEGACY_INDEXES].map(name => names.indexOf(name))
 
     expect(order.every(position => position >= 0)).toBe(true)
     expect(order).toEqual([...order].sort((a, b) => a - b))
@@ -125,8 +151,8 @@ describe('migración del libro de merma sin bloquear el kardex (Ruling 27)', () 
     expect(owners).toEqual([
       { name: INDEXES.RawMaterialMovement, migrations: [RAW_INDEX] },
       { name: INDEXES.InventoryMovement, migrations: [PRODUCT_INDEX] },
-      { name: FKS.RawMaterialMovement, migrations: [INITIAL, VALIDATE] },
-      { name: FKS.InventoryMovement, migrations: [INITIAL, VALIDATE] },
+      { name: FKS.RawMaterialMovement, migrations: [LINK, VALIDATE] },
+      { name: FKS.InventoryMovement, migrations: [LINK, VALIDATE] },
     ])
   })
 })

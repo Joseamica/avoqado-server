@@ -1,3 +1,11 @@
+-- Merma (spec v5 §4.1): el libro de merma. SÓLO la tabla nueva — enums, InventoryWasteReport, sus CHECK,
+-- su índice único y sus llaves hacia Venue, RawMaterial, Product y Staff.
+--
+-- 🔴 NO toca las tablas del kardex (Ruling 29). Prisma manda este archivo como UNA transacción implícita:
+-- si aquí se tomara el ACCESS EXCLUSIVE de RawMaterialMovement / InventoryMovement (el ADD COLUMN), quedaría
+-- puesto mientras la misma transacción espera los candados de esas cuatro tablas de negocio — hasta
+-- 4 × 5 s (lock_timeout) sin que ninguna venta pudiera escribir su movimiento. Ligar el kardex va en la
+-- migración siguiente, 20260921190050_inventory_waste_kardex_link, que sólo toca el kardex y esta tabla.
 DO $$
 BEGIN
   IF to_regtype('"WasteReportStatus"') IS NULL THEN
@@ -47,12 +55,6 @@ BEGIN
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "InventoryWasteReport_pkey" PRIMARY KEY ("id")
   );
-
-  ALTER TABLE "RawMaterialMovement"
-    ADD COLUMN IF NOT EXISTS "wasteReportId" TEXT;
-
-  ALTER TABLE "InventoryMovement"
-    ADD COLUMN IF NOT EXISTS "wasteReportId" TEXT;
 END
 $$;
 
@@ -63,21 +65,10 @@ BEGIN
   FOR relation IN
     SELECT *
     FROM (
-      -- Los FKs movimiento → folio van DIFERIDOS al COMMIT. El folio cae en cascada con su
-      -- artículo a un nivel y el kardex del producto a dos (Product → Inventory → InventoryMovement);
-      -- Postgres dispara esas cascadas en orden alfabético de trigger, que lleva el OID y en
-      -- producción es impredecible. Una verificación inmediata truena si la del folio corre primero.
-      -- Prisma no expresa DEFERRABLE: en el schema estas relaciones dicen sólo NoAction.
-      --
-      -- Y nacen NOT VALID (Ruling 27): este archivo corre como UNA transacción implícita y el
-      -- ADD COLUMN de arriba ya tiene las dos tablas del kardex en ACCESS EXCLUSIVE hasta el COMMIT
-      -- (cada venta escribe ahí). Una FK validada las recorrería enteras con ese candado puesto.
-      -- NOT VALID no recorre: vigila desde ya toda fila nueva o cambiada y deja las viejas (todas con
-      -- wasteReportId NULL, la columna es nueva) a 20260921190100_validate_waste_report_fks, cuyo
-      -- VALIDATE CONSTRAINT toma SHARE UPDATE EXCLUSIVE y no frena escrituras.
-      -- Las FKs de la tabla NUEVA hacia Venue/RawMaterial/Product/Staff se quedan validadas: la tabla
-      -- está vacía (validar es instantáneo) y NOT VALID no bajaría su candado — ADD FOREIGN KEY toma
-      -- SHARE ROW EXCLUSIVE sobre las dos tablas igual, y lo suelta al mismo COMMIT (medido en PG 14).
+      -- Las llaves de la tabla NUEVA hacia sus tablas de negocio. Se validan en el acto: la tabla está
+      -- vacía (validar es instantáneo) y NOT VALID no bajaría su candado — ADD FOREIGN KEY toma SHARE ROW
+      -- EXCLUSIVE sobre las dos tablas igual y lo suelta al mismo COMMIT (medido en PG 14). Las llaves
+      -- movimiento → folio NO van aquí: van con el kardex, en 20260921190050_inventory_waste_kardex_link.
       VALUES
         ('InventoryWasteReport', 'InventoryWasteReport_venueId_fkey',
          'venueId', 'Venue', 'CASCADE', ''),
@@ -86,11 +77,7 @@ BEGIN
         ('InventoryWasteReport', 'InventoryWasteReport_productId_fkey',
          'productId', 'Product', 'CASCADE', ''),
         ('InventoryWasteReport', 'InventoryWasteReport_reportedByStaffId_fkey',
-         'reportedByStaffId', 'Staff', 'RESTRICT', ''),
-        ('RawMaterialMovement', 'RawMaterialMovement_wasteReportId_fkey',
-         'wasteReportId', 'InventoryWasteReport', 'NO ACTION', 'DEFERRABLE INITIALLY DEFERRED NOT VALID'),
-        ('InventoryMovement', 'InventoryMovement_wasteReportId_fkey',
-         'wasteReportId', 'InventoryWasteReport', 'NO ACTION', 'DEFERRABLE INITIALLY DEFERRED NOT VALID')
+         'reportedByStaffId', 'Staff', 'RESTRICT', '')
     ) AS definitions(table_name, constraint_name, column_name, referenced_table, delete_action, deferral)
   LOOP
     IF NOT EXISTS (
@@ -242,9 +229,8 @@ BEGIN
   CREATE INDEX IF NOT EXISTS "InventoryWasteReport_reportedByStaffId_idx"
     ON "InventoryWasteReport" ("reportedByStaffId");
 
-  -- Los índices de "wasteReportId" sobre las tablas del kardex NO van aquí (Ruling 27): un CREATE
-  -- INDEX normal recorre la tabla con las escrituras bloqueadas, y dentro de este lote ni siquiera
-  -- podría ser CONCURRENTLY (SQLSTATE 25001). Van en 20260921190200 y 20260921190300, una sentencia
-  -- CONCURRENTLY por archivo.
+  -- Las tablas del kardex no se tocan en este archivo (Rulings 27 y 29): la columna y sus llaves van
+  -- en 20260921190050, la validación en 20260921190100 y los índices, CONCURRENTLY y uno por archivo,
+  -- en 20260921190200 y 20260921190300.
 END
 $$;

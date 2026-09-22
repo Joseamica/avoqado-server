@@ -1,6 +1,6 @@
--- Merma (Ruling 27): valida las dos llaves movimiento → folio que 20260921190000_inventory_waste creó
--- NOT VALID (y DEFERRABLE INITIALLY DEFERRED) para no recorrer las tablas del kardex mientras las tenía
--- en ACCESS EXCLUSIVE.
+-- Merma (Ruling 27): valida las dos llaves movimiento → folio que 20260921190050_inventory_waste_kardex_link
+-- creó NOT VALID (y DEFERRABLE INITIALLY DEFERRED) para no recorrer las tablas del kardex mientras las
+-- tenía en ACCESS EXCLUSIVE.
 --
 -- VALIDATE CONSTRAINT revisa las filas EXISTENTES en el acto aunque la llave sea diferida (medido en
 -- PG 14: una fila rota truena en el ALTER, no al COMMIT) y toma SHARE UPDATE EXCLUSIVE sobre la tabla
