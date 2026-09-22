@@ -59,12 +59,14 @@ type ReportClient = Pick<Prisma.TransactionClient, 'inventoryWasteReport'>
 
 type LockedRawMaterial = {
   id: string
+  name: string
   currentStock: Prisma.Decimal
   unit: Unit
 }
 
 type LockedProduct = {
   id: string
+  name: string
   inventoryId: string
   currentStock: Prisma.Decimal
   lastCountedAt: Date | null
@@ -341,6 +343,7 @@ async function audit(
   tx: Prisma.TransactionClient,
   report: InventoryWasteReport,
   action: 'INVENTORY_WASTE_LOGGED' | 'INVENTORY_WASTE_VOIDED',
+  extra: Record<string, string | null> = {},
 ): Promise<void> {
   const venue = await tx.venue.findUniqueOrThrow({
     where: { id: report.venueId },
@@ -371,6 +374,8 @@ async function audit(
         unrecorded: report.unrecordedQuantity.toString(),
         costImpact: report.costImpact?.toString() ?? null,
         costState: report.costState,
+        // Aditivo (Opus menor 1): el nombre del artículo al mermar, o el folio anulado.
+        ...extra,
       },
     },
   })
@@ -438,7 +443,7 @@ export async function logWaste<T>(
 
       if (payload.itemType === 'RAW_MATERIAL') {
         const rows = await tx.$queryRaw<LockedRawMaterial[]>`
-          SELECT id, "currentStock", unit
+          SELECT id, name, "currentStock", unit
           FROM "RawMaterial"
           WHERE id = ${payload.itemId}
             AND "venueId" = ${venueId}
@@ -480,7 +485,7 @@ export async function logWaste<T>(
         deducted = byBatches.add(withoutBatches)
       } else {
         const rows = await tx.$queryRaw<LockedProduct[]>`
-          SELECT p.id, i.id AS "inventoryId", i."currentStock", i."lastCountedAt",
+          SELECT p.id, p.name, i.id AS "inventoryId", i."currentStock", i."lastCountedAt",
                  COALESCE(p.unit::text, 'UNIT') AS unit, p.cost
           FROM "Product" p
           INNER JOIN "Inventory" i
@@ -620,7 +625,8 @@ export async function logWaste<T>(
         )
       }
 
-      await audit(tx, report, 'INVENTORY_WASTE_LOGGED')
+      // El nombre sale de la fila ya bloqueada: es el que tenía el artículo al mermarlo.
+      await audit(tx, report, 'INVENTORY_WASTE_LOGGED', { itemName: raw?.name ?? product?.name ?? null })
       const summary = wasteSummary(report)
       return { summary, result: await respond(tx, summary), applied: true }
     })
@@ -698,7 +704,7 @@ export async function voidWasteKey(
           createdAt: new Date(),
         },
       })
-      await audit(tx, report, 'INVENTORY_WASTE_VOIDED')
+      await audit(tx, report, 'INVENTORY_WASTE_VOIDED', { idempotencyKey: report.idempotencyKey })
       return voidResult(report, actorStaffId, canAdjust)
     })
   } catch (error) {

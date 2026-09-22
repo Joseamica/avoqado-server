@@ -712,13 +712,32 @@ test('la auditoría dice qué artículo, motivo y unidad se mermaron', async () 
   expect(rawLog.data).toMatchObject({
     itemType: 'RAW_MATERIAL',
     itemId: ingredient.id,
+    // Opus menor 1: el NOMBRE, como guardaba el camino viejo — la pantalla del dueño lo lee de aquí.
+    itemName: ingredient.name,
     reasonCode: 'SPOILED',
     unit: 'PIECE',
     declared: '2',
   })
 
   const productLog = await prisma.activityLog.findFirstOrThrow({ where: { venueId, entityId: productResult.reportId } })
-  expect(productLog.data).toMatchObject({ itemType: 'PRODUCT', itemId: item.id, reasonCode: 'DROPPED', unit: 'UNIT', declared: '1' })
+  expect(productLog.data).toMatchObject({
+    itemType: 'PRODUCT',
+    itemId: item.id,
+    itemName: item.name,
+    reasonCode: 'DROPPED',
+    unit: 'UNIT',
+    declared: '1',
+  })
+})
+
+test('la auditoría de una anulación guarda el folio anulado', async () => {
+  const key = randomUUID().toUpperCase()
+  const result = await voidWasteKey(venueId, staffId, key)
+  expect(result).toMatchObject({ outcome: 'VOIDED' })
+
+  const log = await prisma.activityLog.findFirstOrThrow({ where: { venueId, action: 'INVENTORY_WASTE_VOIDED' } })
+  // El folio normalizado: el mismo que ocupa el índice único y el que el aparato vuelve a mandar.
+  expect(log.data).toMatchObject({ idempotencyKey: key.toLowerCase(), source: 'POS' })
 })
 
 // ─── Alerta de existencia baja (Opus I1) ─────────────────────────────────────────────────
