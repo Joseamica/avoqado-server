@@ -32,6 +32,11 @@
 import type { Request, Response, NextFunction } from 'express'
 import { PerformanceObserver, performance } from 'node:perf_hooks'
 import logger from '../config/logger'
+import {
+  registroDeJobs as registroGlobalDeJobs,
+  type RegistroDeJobs,
+  type JobEnVentana,
+} from '../observability/registroDeJobs'
 
 /**
  * Umbral de aviso en producción.
@@ -295,6 +300,22 @@ interface TramoPendiente {
   topInFlight: Array<{ method: string; url: string; ageMs: number }>
   inFlightCount: number
   /**
+   * Los jobs del tramo, fotografiados AL DETECTARLO.
+   *
+   * 🔴 No se consultan al emitir: entre detectar y emitir pasa un tick, y en ese tick el
+   * historial puede recortarse y llevarse justo al job culpable (Codex lo reprodujo: un aviso
+   * salía con la lista VACÍA tras 200 ticks de ruido). Las pausas de GC obligan a esperar
+   * porque llegan tarde; los jobs terminados ya están aquí cuando el tramo se detecta.
+   */
+  jobsDelTramo: JobEnVentana[]
+  /**
+   * Evidencia que el historial de jobs tiró entre que el tramo ABRIÓ y su foto.
+   *
+   * 🔴 Se congela con la foto, no se lee al emitir: el ruido posterior recorta el historial y
+   * declararía una pérdida que esta foto no tuvo.
+   */
+  jobsDescartadosDelTramo: number
+  /**
    * Descartes del buffer en el momento en que ABRIÓ el tramo.
    *
    * 🔴 No es «al detectarlo»: el observador puede entregar —y truncar— ANTES de que el
@@ -327,6 +348,8 @@ export function startEventLoopMonitor(
     ahoraMs?: () => number
     /** Costura de prueba: CPU acumulada del proceso, en microsegundos (como `process.cpuUsage`). */
     cpuAcumulada?: () => { user: number; system: number }
+    /** Costura de prueba: el registro de jobs en vuelo, para no depender del reloj real. */
+    registroDeJobs?: RegistroDeJobs
   } = {},
 ): () => void {
   const thresholdMs = options.thresholdMs ?? PROD_ALERT_THRESHOLD_MS
@@ -335,6 +358,7 @@ export function startEventLoopMonitor(
   const gc = gcPedido ? (options.observadorDeGc ?? observarPausasDeGc()) : null
   const ahora = options.ahoraMs ?? (() => performance.now())
   const leerCpu = options.cpuAcumulada ?? (() => process.cpuUsage())
+  const jobs = options.registroDeJobs ?? registroGlobalDeJobs
 
   let ultimoMs = ahora()
   let lastCpu = leerCpu()
@@ -342,6 +366,8 @@ export function startEventLoopMonitor(
   let pendiente: TramoPendiente | null = null
   /** Descartes leídos en el tick anterior = los que había cuando ABRIÓ el tramo en curso. */
   let descartesAlAbrirTramo = gc?.descartadas() ?? 0
+  /** Lo mismo para el historial de jobs: su contador al abrir el tramo en curso. */
+  let descartesDeHistorialAlAbrir = jobs.descartesDeHistorial()
 
   /** Emite un tramo ya guardado, cruzando sus pausas de GC por tiempo. `gcConfiable` dice si se pudo. */
   const emitir = (t: TramoPendiente, esperóSuTick: boolean) => {
@@ -373,6 +399,31 @@ export function startEventLoopMonitor(
       inFlightCount: t.inFlightCount,
       // La más vieja primero: la que lleva más tiempo ESPERANDO. Pista, no veredicto.
       topInFlight: t.topInFlight,
+      // Los cron cuya vida asíncrona se SOLAPÓ con el tramo, el de mayor solape primero —
+      // incluidos los que ya terminaron, que son el caso probable: mientras un job tiene el
+      // hilo, este tick no puede correr.
+      // 🔴 `ms` es SOLAPE, no CPU ni posesión del hilo: un job esperando a Postgres cuenta
+      // igual que uno calculando. Medido por la auditoría: cinco jobs en espera de I/O llenan
+      // la lista y dejan fuera al que sí bloqueó la CPU. Es una pista de dónde mirar.
+      // `vivo` significa vivo AL DETECTAR el tramo: la foto se toma ahí, así que un tick que
+      // termine entre la detección y este aviso sigue apareciendo como vivo.
+      jobsEnVuelo: t.jobsDelTramo.slice(0, 5),
+      // Sin esto, «cinco jobs» se leería como «sólo había cinco».
+      jobsOmitidos: Math.max(0, t.jobsDelTramo.length - 5),
+      // Ticks terminados que el historial tiró entre que el tramo abrió y su foto: con uno
+      // solo, la lista de arriba puede estar incompleta.
+      jobsRastrosPerdidos: t.jobsDescartadosDelTramo,
+      // 🔴 Acumulado DESDE EL ARRANQUE, no del tramo: un trabajo expulsado por el tope sigue
+      // sin verse mientras corra, así que un delta por tramo diría «0 perdidos» en los avisos
+      // siguientes y afirmaría que se ve todo. Distinto \u00a1ojo!: que no sea cero significa
+      // «hubo expulsiones alguna vez, así que podrían faltar trabajos», NO que el registro esté
+      // saturado ahora — los expulsados pueden haber terminado hace rato.
+      jobsActivosExpulsados: jobs.expulsionesDeActivos(),
+      // 🔴 Nunca se afirma que la lista esté completa: 5 registros de scheduler no pasan por el
+      // envoltorio, `node-cron` queda fuera a propósito, y los ticks que descartan su promesa
+      // con `=> void` se dan de baja al instante aunque sigan trabajando. Una lista vacía NO
+      // significa «no fue un job».
+      jobsCoberturaParcial: true,
     })
   }
 
@@ -415,12 +466,15 @@ export function startEventLoopMonitor(
         eluRatio: elu ? Number(elu.utilization.toFixed(3)) : undefined,
         topInFlight: culprits.slice(0, 5),
         inFlightCount: culprits.length,
+        jobsDelTramo: jobs.jobsEnVentana(inicioTramo, ahoraTick),
+        jobsDescartadosDelTramo: jobs.descartesDeHistorial() - descartesDeHistorialAlAbrir,
         descartesAlAbrirTramo,
       }
     }
 
     // Referencia para el PRÓXIMO tramo, que empieza justo ahora.
     descartesAlAbrirTramo = gc?.descartadas() ?? 0
+    descartesDeHistorialAlAbrir = jobs.descartesDeHistorial()
   }, sampleIntervalMs)
 
   if (typeof sampler.unref === 'function') sampler.unref()

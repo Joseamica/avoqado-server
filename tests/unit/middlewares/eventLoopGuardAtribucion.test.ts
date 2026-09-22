@@ -30,6 +30,7 @@ import {
   __resetInFlightForTests,
   type ObservadorDeGc,
 } from '@/middlewares/eventLoopGuard.middleware'
+import { crearRegistroDeJobs } from '@/observability/registroDeJobs'
 
 const avisos = () => (logger.warn as jest.Mock).mock.calls.map(c => c[1])
 
@@ -519,7 +520,12 @@ describe('detener el monitor nunca frena el apagado', () => {
     jest.clearAllMocks()
     jest.useFakeTimers()
   })
-  afterEach(() => jest.useRealTimers())
+  afterEach(() => {
+    jest.useRealTimers()
+    // 🔴 `clearAllMocks` borra las LLAMADAS, no la implementación: sin esto, el logger que
+    // lanza se filtra a los describes siguientes y los tumba por un motivo que no es el suyo.
+    ;(logger.warn as jest.Mock).mockImplementation(() => {})
+  })
 
   /** Deja un tramo detectado esperando su tick, que es el que `stop()` tiene que emitir. */
   const conTramoPendiente = () => {
@@ -576,5 +582,222 @@ describe('detener el monitor nunca frena el apagado', () => {
     stop()
     // El pendiente se retira ANTES de emitir: el segundo apagado no tiene nada que reintentar.
     expect((logger.warn as jest.Mock).mock.calls.length).toBe(intentosDelPrimero)
+  })
+})
+
+/**
+ * Y QUIÉN tenía el hilo: el aviso nombra los jobs del tramo.
+ *
+ * `topInFlight` sólo ve peticiones HTTP. Una retención de medio segundo que no corresponde a
+ * ninguna ruta —el caso medido en producción: 41 de 1,849 retenciones sin una sola petición en
+ * vuelo— apunta a un cron, y hasta ahora el aviso no tenía forma de decir cuál.
+ *
+ * 🔴 La cobertura es PARCIAL y el aviso lo DICE. Medido el 22-sep: 5 registros de scheduler no
+ * pasan por el envoltorio (`server.ts` ×2, los dos de catálogo, `reviewSync`), `node-cron` queda
+ * fuera a propósito, y varios jobs descartan su promesa con `=> void`, así que su tick «termina»
+ * al instante aunque siga trabajando. Sin esa bandera, leer «ningún job» como «no fue un job»
+ * sería la siguiente conclusión equivocada — exactamente el error que esta instrumentación vino
+ * a corregir con `topInFlight`.
+ */
+describe('el aviso nombra los jobs que corrían en el tramo', () => {
+  beforeEach(() => {
+    __resetInFlightForTests()
+    jest.clearAllMocks()
+    jest.useFakeTimers()
+  })
+  afterEach(() => jest.useRealTimers())
+
+  it('nombra al job que tenía el hilo, aunque haya TERMINADO antes del tick', () => {
+    const b = bancoDePruebas()
+    const registro = crearRegistroDeJobs({ ahoraMs: b.ahoraMs })
+    const stop = startEventLoopMonitor({
+      thresholdMs: 100,
+      sampleIntervalMs: 20,
+      observadorDeGc: b.observador,
+      ahoraMs: b.ahoraMs,
+      cpuAcumulada: b.cpuAcumulada,
+      registroDeJobs: registro,
+    })
+
+    // Un barrido arranca, se come 450 ms de hilo y termina ANTES de que el tick pueda correr.
+    const id = registro.iniciar('cash-drawer-reconciler')
+    b.avanzar(450, 440)
+    registro.terminar(id)
+    b.avanzar(70)
+
+    jest.advanceTimersByTime(20) // detecta
+    b.avanzar(20)
+    jest.advanceTimersByTime(20) // emite
+
+    const a = avisos()
+    expect(a).toHaveLength(1)
+    expect(a[0].jobsEnVuelo).toEqual([{ nombre: 'cash-drawer-reconciler', ms: 450, vivo: false }])
+    expect(a[0].jobsCoberturaParcial).toBe(true) // nunca se afirma que la lista sea completa
+    stop()
+  })
+
+  it('sin ningún job, la lista va vacía y la bandera SIGUE puesta', () => {
+    const b = bancoDePruebas()
+    const registro = crearRegistroDeJobs({ ahoraMs: b.ahoraMs })
+    const stop = startEventLoopMonitor({
+      thresholdMs: 100,
+      sampleIntervalMs: 20,
+      observadorDeGc: b.observador,
+      ahoraMs: b.ahoraMs,
+      cpuAcumulada: b.cpuAcumulada,
+      registroDeJobs: registro,
+    })
+
+    b.avanzar(520, 500)
+    jest.advanceTimersByTime(20)
+    b.avanzar(20)
+    jest.advanceTimersByTime(20)
+
+    const a = avisos()
+    expect(a[0].jobsEnVuelo).toEqual([])
+    // 🔴 Lo que impide la conclusión equivocada: «ningún job» ≠ «no fue un job».
+    expect(a[0].jobsCoberturaParcial).toBe(true)
+    stop()
+  })
+})
+
+/**
+ * 🔴 Codex: el historial podía BORRAR la evidencia de un tramo ya detectado.
+ *
+ * Los jobs se consultaban al EMITIR, un tick después de detectar. Codex lo reprodujo sobre el
+ * guardia real: un job se come 450 ms, se detecta la retención, terminan otros 200 ticks antes
+ * de emitir, y el aviso sale con `jobsEnVuelo: []` — el culpable, borrado por el recorte.
+ *
+ * La causa de diferir la emisión eran las pausas de GC, que llegan TARDE. Los jobs no: un tick
+ * terminado ya está en el historial en el momento de detectar. Así que se fotografían ahí, y el
+ * recorte posterior ya no puede llevárselos.
+ */
+describe('los jobs se fotografían al DETECTAR el tramo, no al emitirlo', () => {
+  beforeEach(() => {
+    __resetInFlightForTests()
+    jest.clearAllMocks()
+    jest.useFakeTimers()
+  })
+  afterEach(() => jest.useRealTimers())
+
+  const montar = (b: ReturnType<typeof bancoDePruebas>, registro: ReturnType<typeof crearRegistroDeJobs>) =>
+    startEventLoopMonitor({
+      thresholdMs: 100,
+      sampleIntervalMs: 20,
+      observadorDeGc: b.observador,
+      ahoraMs: b.ahoraMs,
+      cpuAcumulada: b.cpuAcumulada,
+      registroDeJobs: registro,
+    })
+
+  it('un aluvión de ticks entre detectar y emitir NO borra al job del tramo', () => {
+    const b = bancoDePruebas()
+    const registro = crearRegistroDeJobs({ ahoraMs: b.ahoraMs, maxHistorial: 5 })
+    const stop = montar(b, registro)
+
+    const culpable = registro.iniciar('barrido-culpable')
+    b.avanzar(450, 440)
+    registro.terminar(culpable)
+    b.avanzar(70)
+    jest.advanceTimersByTime(20) // DETECTA el tramo
+
+    // Entre la detección y el aviso pasan muchos ticks cortos que desbordan el historial.
+    for (let i = 0; i < 20; i += 1) {
+      const id = registro.iniciar(`ruido-${i}`)
+      b.avanzar(1)
+      registro.terminar(id)
+    }
+
+    b.avanzar(20)
+    jest.advanceTimersByTime(20) // EMITE
+
+    const a = avisos()
+    expect(a[0].jobsEnVuelo.map((j: { nombre: string }) => j.nombre)).toContain('barrido-culpable')
+    stop()
+  })
+
+  it('dice cuántos candidatos quedaron FUERA del tope de cinco', () => {
+    const b = bancoDePruebas()
+    const registro = crearRegistroDeJobs({ ahoraMs: b.ahoraMs })
+    const stop = montar(b, registro)
+
+    for (let i = 0; i < 9; i += 1) registro.iniciar(`job-${i}`)
+    b.avanzar(520, 500)
+    jest.advanceTimersByTime(20)
+    b.avanzar(20)
+    jest.advanceTimersByTime(20)
+
+    const a = avisos()
+    expect(a[0].jobsEnVuelo).toHaveLength(5)
+    // Sin esto, «cinco jobs» se leería como «sólo había cinco».
+    expect(a[0].jobsOmitidos).toBe(4)
+    stop()
+  })
+
+  it('🔴 el ruido POSTERIOR a la foto no infla el contador de evidencia perdida', () => {
+    // Codex: la lista se congela al detectar, pero el contador se leía al emitir. Ruido de por
+    // medio recortaba el historial y el aviso declaraba una pérdida que su foto no tenía.
+    const b = bancoDePruebas()
+    const registro = crearRegistroDeJobs({ ahoraMs: b.ahoraMs, maxHistorial: 2 })
+    const stop = montar(b, registro)
+
+    const culpable = registro.iniciar('culpable')
+    b.avanzar(450, 440)
+    registro.terminar(culpable)
+    b.avanzar(70)
+    jest.advanceTimersByTime(20) // DETECTA y fotografía: la evidencia está completa
+
+    for (let i = 0; i < 10; i += 1) {
+      const id = registro.iniciar(`ruido-${i}`)
+      b.avanzar(1)
+      registro.terminar(id)
+    }
+    b.avanzar(20)
+    jest.advanceTimersByTime(20)
+
+    const a = avisos()
+    expect(a[0].jobsEnVuelo.map((j: { nombre: string }) => j.nombre)).toContain('culpable')
+    expect(a[0].jobsRastrosPerdidos).toBe(0) // su foto no perdió nada
+    stop()
+  })
+
+  it('🔴 una expulsión ANTERIOR sigue declarándose: seguimos ciegos respecto de ese trabajo', () => {
+    const b = bancoDePruebas()
+    const registro = crearRegistroDeJobs({ ahoraMs: b.ahoraMs, maxActivos: 1 })
+    const stop = montar(b, registro)
+
+    registro.iniciar('colgado-que-nadie-ve') // se expulsa al entrar el siguiente
+    registro.iniciar('el-que-queda')
+    b.avanzar(30)
+    jest.advanceTimersByTime(20) // un tramo NORMAL de por medio
+    b.avanzar(520, 500)
+    jest.advanceTimersByTime(20) // ahora sí, el tramo lento
+    b.avanzar(20)
+    jest.advanceTimersByTime(20)
+
+    const a = avisos()
+    // El delta por tramo diría 0 y afirmaría que se ve todo. El acumulado no deja mentir.
+    expect(a[0].jobsActivosExpulsados).toBe(1)
+    stop()
+  })
+
+  it('declara cuando se perdió el rastro de algún tick del tramo', () => {
+    const b = bancoDePruebas()
+    const registro = crearRegistroDeJobs({ ahoraMs: b.ahoraMs, maxHistorial: 2 })
+    const stop = montar(b, registro)
+
+    for (let i = 0; i < 6; i += 1) {
+      const id = registro.iniciar(`t-${i}`)
+      b.avanzar(80, 80)
+      registro.terminar(id)
+    }
+    b.avanzar(60)
+    jest.advanceTimersByTime(20)
+    b.avanzar(20)
+    jest.advanceTimersByTime(20)
+
+    const a = avisos()
+    expect(a[0].jobsRastrosPerdidos).toBeGreaterThan(0)
+    stop()
   })
 })

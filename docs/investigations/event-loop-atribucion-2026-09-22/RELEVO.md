@@ -76,7 +76,38 @@ desviación y la cubrió con su propia reproducción.
 
 1. 🔴 **DECISIÓN DEL FOUNDER: commitear y desplegar.** Los 6 archivos están autorizados por
    Codex y verificados. Nada está commiteado — hace falta su permiso explícito.
-2. **Jobs en vuelo** — `AUTORIZADO CON CAMBIOS para implementar`, diseño v2 escrito pero **sin una
+2. **Jobs en vuelo** — 🟡 **CONSTRUIDOS (22-sep), sin commitear**, esperando la 2ª pasada de Codex.
+   `src/observability/registroDeJobs.ts` (nuevo) + el registro en `scheduleJob` + 3 campos en el
+   aviso (`jobsEnVuelo`, `jobsOmitidos`, `jobsRastrosPerdidos`, `jobsCoberturaParcial`).
+   ✅ **CUATRO pasadas de Codex: AUTORIZADO para desplegar en la 4ª.** Verde final:
+   **98 suites / 948 pruebas, local y Alienware COINCIDIENDO** · **8 sabotajes, 8 cazados**.
+   Las rondas 2-4 afinaron: contadores de pérdida separados (recortar el historial pierde
+   evidencia de UN tramo; expulsar un activo deja ciego mientras ese trabajo corra, así que va
+   como acumulado persistente) · el contador viaja con la FOTO, no se lee al emitir · la prueba
+   de huecos compara **cantidades por archivo**, no nombres (Codex demostró que un registro nuevo
+   DENTRO de un archivo ya excluido pasaba: sus dos sabotajes ahora fallan) · y tres frases mías
+   que reinstalaban la lectura equivocada («contrato exacto», «tenía el hilo», «el registro está
+   saturado» — esto último significa «hubo expulsiones alguna vez», no saturación actual).
+   Dato corregido: **5 llamadas directas en 4 archivos** y **6 ticks con promesa descartada en 5**.
+
+   **1ª pasada de Codex: AUTORIZADO CON CAMBIOS, 4 correcciones — las 4 cerradas:**
+   (a) 🔴 mi afirmación «el contrato de errores queda idéntico» era **FALSA** y se retiró: Node
+   cuenta los rechazos POR PROMESA, así que un tick que devuelve una promesa que él mismo ya
+   manejó produce un `unhandledRejection` que antes no existía (0 → 1) — y ése arranca el
+   apagado. Medido con el módulo real en proceso aparte; los 4 escenarios quedan FIJADOS en
+   `tests/unit/observability/contratoDeErroresDeJobs.test.ts`. Hoy ningún callback del repo tiene
+   esa forma. No se resuelve encadenando: cualquier `.then/.finally` marca la original como
+   manejada. (b) los activos ya están acotados (500) y expulsar cuenta como **rastro perdido**,
+   nunca como terminado. (c) el aviso ya NO dice que los jobs «estaban ejecutando»: `ms` es
+   SOLAPE e incluye espera de I/O (cinco jobs esperando llenan la lista y tapan al que bloqueó la
+   CPU). (d) los jobs se fotografían **al DETECTAR** el tramo, no al emitir — si no, el historial
+   podía borrar al culpable entre un tick y el siguiente.
+   🔑 **Y una prueba mía que no probaba nada:** «registra su tick» pasaba con el registro quitado
+   de `scheduleJob`. Reescrita por el scheduler real y verificada con ese sabotaje exacto.
+   Verde: **58 pruebas** en 4 suites · **5 sabotajes, 5 cazados** · typecheck del CI **0 errores
+   míos** (queda 1 ajeno en `stripe.updateSubscriptionPrice.test.ts`).
+
+   **La fase que sigue, cuando los jobs cierren:** — `AUTORIZADO CON CAMBIOS para implementar`, diseño v2 escrito pero **sin una
    línea de código**. Sus 4 condiciones: (a) normalizar el thenable con `Promise.resolve` (un
    `thenable` sin `.finally()` lanza y deja el job registrado); (b) crear la promesa derivada
    **dentro** de `runWithContext` o el rechazo fatal pierde el contexto del job; (c) `scheduleCron`
