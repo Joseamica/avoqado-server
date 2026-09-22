@@ -14,8 +14,10 @@
  * token de un solo uso `X-Permission-Override` — las dos apps lo piden solas ante un 403
  * `overridable`. Lo que `checkPermission` no mira (acceso vigente, cuenta activa, activación
  * white-label del inventario) va en `requireActivation`, montado ANTES de él, y la validación de
- * la entrada también: ningún rechazo POSTERIOR a `checkPermission` puede quemar el PIN. Por eso
- * estos manejadores ya no llaman `requireWastePermission` (ése es el camino completo del MCP).
+ * la entrada también: esos rechazos de ACCESO y de forma no consumen el PIN. Un rechazo de negocio
+ * de `logWaste` (artículo que no existe, unidad que cambió) sí llega con el PIN ya gastado: el PIN
+ * autoriza UN intento. Por eso estos manejadores ya no llaman `requireWastePermission` (ése es el
+ * camino completo del MCP).
  */
 import { NextFunction, Request, Response } from 'express'
 import { ForbiddenError, UnauthorizedError } from '../../errors/AppError'

@@ -318,9 +318,11 @@ export function hasWastePermission(access: UserAccess, permission: string): bool
 /**
  * Lo que `checkPermission` NO mira, sin evaluar el permiso: acceso vigente al venue, cuenta
  * activa y activación white-label del inventario. Es el paso previo de las rutas HTTP (Ruling 18):
- * se monta ANTES de `checkPermission` para que ningún rechazo posterior queme el token de un
+ * se monta ANTES de `checkPermission` para que estos rechazos de ACCESO no consuman el token de un
  * solo uso del PIN de gerente, y para que el permiso lo decida UNA sola autoridad que respeta ese
- * PIN. Quien llama sin middleware (el MCP) usa `requireWastePermission`, que evalúa las dos cosas.
+ * PIN. Un rechazo de negocio posterior (artículo que no existe, unidad que cambió) sí llega con el
+ * PIN ya gastado: el PIN autoriza UN intento. Quien llama sin middleware (el MCP) usa
+ * `requireWastePermission`, que evalúa las dos cosas.
  */
 export async function requireWasteActivation(staffId: string, venueId: string): Promise<UserAccess> {
   const access = await getWasteAccess(staffId, venueId)
