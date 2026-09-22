@@ -406,10 +406,38 @@ async function alertLowStockAfterWaste(venueId: string, rawMaterialId: string, r
 }
 
 /**
+ * Tope de la ESPERA de `logWaste` por la alerta de existencia baja (Codex, ronda final de fase 1).
+ * Con `notifyOnLowStock` activo, la cadena llega hasta el proveedor de correo (Resend) en serie por
+ * destinatario: sin este tope, un envío lento retiene la respuesta de `/mobile` y del MCP detrás de
+ * una merma que YA quedó confirmada.
+ */
+const LOW_STOCK_ALERT_RESPONSE_BUDGET_MS = 1000
+
+/**
+ * Corre `task` sin dejar que la respuesta de `logWaste` tarde más de `budgetMs`. Si `task` no
+ * terminó a tiempo, la evaluación sigue en segundo plano — nunca se cancela — y `logWaste` continúa
+ * de cualquier forma. Es seguro dejarla corriendo: `task` (`alertLowStockAfterWaste`) ya atrapa sus
+ * propios errores, así que un rechazo tardío nunca llega como unhandled rejection.
+ */
+function withResponseBudget(task: Promise<void>, budgetMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  return Promise.race([
+    task,
+    new Promise<void>(resolve => {
+      timer = setTimeout(resolve, budgetMs)
+    }),
+  ]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer)
+  })
+}
+
+/**
  * Lo que la entrada responde, leído DENTRO de la transacción de `logWaste` (Codex P2-2): después de
- * escribir los efectos y antes del COMMIT. Si la lectura falla, la merma entera se revierte; nunca
- * queda una merma aplicada con una respuesta de error. Importa porque el dashboard de hoy no manda
- * folio: un error tras el COMMIT haría que reintentara con otro y descontara dos veces.
+ * escribir los efectos y antes del COMMIT. Si la lectura falla, la merma entera se revierte — eso
+ * cierra el fallo de ESTA lectura, nunca queda una merma aplicada por un error de construirla. Pero
+ * la respuesta todavía puede perderse DESPUÉS del commit por una caída de red o un timeout del
+ * cliente (Codex, ronda final): por eso el dashboard necesita un folio estable (fase 2) para
+ * recuperarla, en vez de reintentar sin folio y descontar dos veces.
  */
 export type WasteResultReader<T> = (tx: Prisma.TransactionClient, summary: WasteSummary) => Promise<T>
 
@@ -644,8 +672,13 @@ export async function logWaste<T>(
 
   // Después del COMMIT: sólo un insumo del que ESTA llamada descontó algo puede haber cruzado el
   // punto de reorden (un producto no tiene LowStockAlert, y sin descuento la existencia no cambió).
+  // Con tope de espera (Codex, ronda final): un correo lento no retiene la respuesta de una merma
+  // que YA está confirmada — la evaluación sigue de fondo aunque `logWaste` ya haya continuado.
   if (outcome.applied && payload.itemType === 'RAW_MATERIAL' && new Decimal(outcome.summary.deducted).gt(0)) {
-    await alertLowStockAfterWaste(venueId, payload.itemId, outcome.summary.reportId)
+    await withResponseBudget(
+      alertLowStockAfterWaste(venueId, payload.itemId, outcome.summary.reportId),
+      LOW_STOCK_ALERT_RESPONSE_BUDGET_MS,
+    )
   }
   return outcome.result
 }
