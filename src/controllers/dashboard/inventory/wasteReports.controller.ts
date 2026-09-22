@@ -3,7 +3,7 @@
  * nada (todo «sin existencia») no tienen movimiento, así que SÓLO se ven aquí.
  *
  *   GET /api/v1/dashboard/venues/:venueId/inventory/waste-reports
- *     ?page&pageSize&search&startDate&endDate   → 200 { items, total, page, pageSize }
+ *     ?page&pageSize&search&startDate&endDate   → 200 { success: true, data: { items, total, page, pageSize } }
  *
  * Candados (los pone la RUTA, no este controlador): `checkFeatureAccess('INVENTORY_TRACKING')` de
  * todo el router de inventario y `checkPermission('inventory:read')`, que además resuelve el rol en
@@ -28,7 +28,8 @@ export async function listWasteReportsHandler(req: Request, res: Response, next:
   try {
     if (!req.authContext?.userId) throw new UnauthorizedError()
     const query = parseWasteSchema(WasteQuerySchema, req.query)
-    res.json(await listWasteReports(req.params.venueId, query))
+    // Mismo envoltorio `{ success, data }` que el resto de las rutas de inventario del dashboard.
+    res.json({ success: true, data: await listWasteReports(req.params.venueId, query) })
   } catch (error) {
     next(error)
   }

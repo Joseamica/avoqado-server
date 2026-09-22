@@ -290,6 +290,11 @@ export async function getProfitabilityReport(
   }
 }
 
+/** Un entero seguro ≥ `min`, o `fallback` (0, NaN, negativos, fracciones y ausentes caen al default). */
+function safeIntegerAtLeast(value: number | undefined, min: number, fallback: number): number {
+  return value !== undefined && Number.isSafeInteger(value) && value >= min ? value : fallback
+}
+
 /**
  * Ingredient Usage Report - Track ingredient consumption and costs
  * OPTIMIZED: Uses database aggregations for better performance
@@ -316,13 +321,24 @@ export async function getIngredientUsageReport(
   // 🔴 Contrato viejo: SIN `limit`, `materials` trae TODO, como siempre (no se impone un recorte
   // por defecto que dejaría fuera a quien hoy no pagina). El desglose `waste` sí va acotado por el
   // lector (100 por defecto, tope 200) y trae su `total`.
+  //
+  // 🔴 El desglose es ADITIVO: no puede romper la respuesta vieja. `report.controller.ts` convierte con
+  // `parseInt`, así que `limit=0` llega como 0 y `limit=abc` / `offset=abc` como NaN; el SQL principal
+  // siempre los ignoró y respondía el reporte completo, mientras que el lector de merma los rechazaría
+  // con 422. Se sanean SÓLO para el desglose; el LIMIT/OFFSET del reporte principal queda como hoy.
   const wasteFilter = options?.rawMaterialId ? { itemType: 'RAW_MATERIAL' as const, itemId: options.rawMaterialId } : undefined
+  const breakdownLimit = safeIntegerAtLeast(options?.limit, 1, 100)
+  const breakdownOffset = safeIntegerAtLeast(options?.offset, 0, 0)
   const [wasteTotals, wasteBreakdown] = await Promise.all([
     getWasteTotals(venueId, startDate, endDate, wasteFilter),
-    getWasteBreakdown(venueId, startDate, endDate, options?.limit ?? 100, options?.offset ?? 0, wasteFilter),
+    getWasteBreakdown(venueId, startDate, endDate, breakdownLimit, breakdownOffset, wasteFilter),
   ])
 
-  // Use raw SQL for efficient aggregation by movement type
+  // Use raw SQL for efficient aggregation by movement type.
+  // ⚠️ LIMITACIÓN DECLARADA de `total_cost` (va a la auditoría Codex #2, no se corrige aquí): la rama
+  // ELSE valora a `cantidad × costo actual`, pero SPOILAGE va a su `costImpact`. Poner un lote en
+  // cuarentena escribe SPOILAGE a costo de LOTE y liberarlo escribe ADJUSTMENT a costo ACTUAL, así que
+  // ese par ya no suma 0 cuando los dos costos difieren.
   const materialStats = await prisma.$queryRaw<
     Array<{
       raw_material_id: string
@@ -395,10 +411,13 @@ export async function getIngredientUsageReport(
       totalCost: totalCost.toNumber(),
       totalUsage: materials.reduce((sum, m) => sum + m.usage, 0),
       // Toda la ventana (ingredientes Y productos), del libro de merma; no sólo la página.
+      // ⚠️ Conteo de REFERENCIA, no una magnitud: suma unidades distintas (kg, piezas, unidades de
+      // producto). La cantidad con sentido está en `waste.items`, que separa por artículo y unidad.
       totalWaste: wasteTotals.quantity.toNumber(),
       /** Costo CONOCIDO de la merma, en pesos (texto decimal); `null` si ninguna parte tiene costo. */
       valuedWasteCost: wasteTotals.cost?.toString() ?? null,
-      /** Cantidad mermada cuyo costo no se conoce: no se valora a costo actual. */
+      /** Cantidad mermada cuyo costo no se conoce: no se valora a costo actual. ⚠️ Conteo de referencia
+       *  que suma unidades distintas; por unidad, ver `waste.items[].unvaluedQuantity`. */
       unvaluedWasteQuantity: wasteTotals.unvaluedQuantity.toString(),
       totalPurchases: materials.reduce((sum, m) => sum + m.purchases, 0),
     },
@@ -474,7 +493,9 @@ export async function getCostVarianceReport(venueId: string, startDate: Date, en
     costs: {
       expected: expectedTotalCost.toNumber(),
       actual: actualTotalCost.toNumber(),
-      /** Cantidad mermada sin costo conocido: NO está en `actual` (no se inventa a costo actual). */
+      /** Cantidad mermada sin costo conocido: NO está en `actual` (no se inventa a costo actual).
+       *  ⚠️ Conteo de referencia que suma unidades distintas (kg, piezas, unidades de producto), no una
+       *  magnitud; el desglose por unidad está en `waste.items` del reporte de materiales. */
       unvaluedWasteQuantity: waste.unvaluedQuantity.toString(),
       variance: variance.toNumber(),
       variancePercentage: variancePercentage.toNumber(),

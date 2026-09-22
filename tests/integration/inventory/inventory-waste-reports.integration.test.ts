@@ -317,6 +317,30 @@ describe('reporte de materiales (getIngredientUsageReport)', () => {
     expect([...first.materials, ...second.materials].map(m => m.rawMaterialId)).toEqual(all.materials.map(m => m.rawMaterialId))
   })
 
+  // 🔴 Ronda de menores (Ruling 21): `report.controller.ts` convierte con `parseInt`, así que un
+  // `limit=0` llega como 0 y un `limit=abc` / `offset=abc` como NaN. El SQL principal siempre los
+  // ignoró (`options?.limit ? LIMIT … : nada`) y respondía el reporte completo; el desglose `waste`
+  // —un campo ADITIVO— no puede convertir esa respuesta vieja en un 422.
+  test.each([
+    ['limit = 0', { limit: 0 }],
+    ['limit = NaN (limit=abc)', { limit: Number.NaN }],
+    ['offset = NaN (offset=abc)', { offset: Number.NaN }],
+    ['limit y offset NaN', { limit: Number.NaN, offset: Number.NaN }],
+  ])('🔴 %s: responde el reporte como antes, sin 422, y el desglose usa 100 / 0', async (_caso, options) => {
+    const item = await raw(0, 1)
+    await logWaste(venueId, staffId, request('RAW_MATERIAL', item.id, 2))
+    const other = await raw(10, 3)
+    await movement(other.id, 'USAGE', -1, null)
+
+    const baseline = await getIngredientUsageReport(venueId, from, to)
+    const report = await getIngredientUsageReport(venueId, from, to, options)
+
+    expect(report.materials).toEqual(baseline.materials)
+    expect(report.summary).toEqual(baseline.summary)
+    expect(report.waste).toMatchObject({ total: 1, limit: 100, offset: 0 })
+    expect(report.waste.items.map(w => w.itemId)).toEqual([item.id])
+  })
+
   test('los productos (LOSS) entran en el desglose y en el total de merma, no en la lista de ingredientes', async () => {
     const item = await product(10, 10)
     await logWaste(venueId, staffId, request('PRODUCT', item.id, 3))

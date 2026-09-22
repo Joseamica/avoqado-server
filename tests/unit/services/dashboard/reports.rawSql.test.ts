@@ -128,6 +128,19 @@ describe('raw SQL in the inventory reports', () => {
     }
   })
 
+  it('🔴 TENANT: the ingredient report bounds its BASE table by venue, not only a joined one', () => {
+    // The generic guard above is satisfied by ANY `"venueId" = ${venueId}` in the query, and in the
+    // ingredient report the first one lives inside the ON of `LEFT JOIN "RawMaterialMovement"` —
+    // which does NOT bound the base table. Without the WHERE on `rm`, the query would scan (and
+    // group) every raw material of the PLATFORM; the HAVING would hide the rows, not the cost.
+    const start = codeOnly.indexOf('export async function getIngredientUsageReport')
+    const end = codeOnly.indexOf('export async function', start + 1)
+    expect(start).toBeGreaterThan(-1)
+    const ingredientUsage = codeOnly.slice(start, end === -1 ? undefined : end)
+    expect(ingredientUsage).toContain('FROM "RawMaterial" rm')
+    expect(ingredientUsage).toMatch(/WHERE rm\."venueId" = \$\{venueId\}/)
+  })
+
   it('paginated listings order by something UNIQUE', () => {
     // A non-unique ORDER BY silently drops rows when paginating: it already happened to us
     // in 37 places.

@@ -62,7 +62,7 @@ const CONCESION = {
   feature: { code: 'INVENTORY_TRACKING', name: 'Inventario' },
 }
 
-/** Lo que devuelve el lector real: `{ items, total, page, pageSize }`, Decimals como texto en JSON. */
+/** Lo que devuelve el lector real (`data` de la respuesta): `{ items, total, page, pageSize }`, Decimals como texto en JSON. */
 const FOLIO = {
   id: 'clwastereport00000000001',
   itemType: 'RAW_MATERIAL',
@@ -126,14 +126,16 @@ describe('GET …/dashboard/venues/:venueId/inventory/waste-reports', () => {
   })
 
   it.each(['OWNER', 'ADMIN', 'MANAGER', 'CASHIER'])(
-    '200 para %s con la forma del contrato { items, total, page, pageSize }',
+    '200 para %s con la forma del contrato { success, data: { items, total, page, pageSize } }',
     async role => {
       const res = await request(app)
         .get(RUTA)
         .set('Authorization', `Bearer ${token(role)}`)
       expect(res.status).toBe(200)
-      expect(res.body).toEqual(PAGINA)
-      expect(Object.keys(res.body).sort()).toEqual(['items', 'page', 'pageSize', 'total'])
+      // Mismo envoltorio que el resto de las rutas de inventario del dashboard.
+      expect(res.body).toEqual({ success: true, data: PAGINA })
+      expect(Object.keys(res.body).sort()).toEqual(['data', 'success'])
+      expect(Object.keys(res.body.data).sort()).toEqual(['items', 'page', 'pageSize', 'total'])
       // Sin query: primera página de 100, sin filtros.
       expect(listWasteReports).toHaveBeenCalledWith(venueId, { page: 1, pageSize: 100 })
       // 🔴 Ruling 19: el permiso lo decide SÓLO checkPermission.
@@ -246,7 +248,7 @@ describe('GET …/dashboard/venues/:venueId/inventory/waste-reports', () => {
       .set('Authorization', `Bearer ${token('HOST')}`)
       .set('X-Permission-Override', OVERRIDE)
     expect(res.status).toBe(200)
-    expect(res.body).toEqual(PAGINA)
+    expect(res.body).toEqual({ success: true, data: PAGINA })
     expect(prismaMock.permissionOverride.updateMany).toHaveBeenCalledTimes(1)
     expect(requireWastePermission).not.toHaveBeenCalled()
   })

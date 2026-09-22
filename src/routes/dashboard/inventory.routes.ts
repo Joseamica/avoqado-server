@@ -133,7 +133,7 @@ router.use(checkFeatureAccess('INVENTORY_TRACKING'))
  *       - { name: startDate, in: query, schema: { type: string, format: date-time } }
  *       - { name: endDate, in: query, schema: { type: string, format: date-time } }
  *     responses:
- *       200: { description: "{ items, total, page, pageSize }" }
+ *       200: { description: "{ success: true, data: { items, total, page, pageSize } }" }
  *       403: { description: "Sin plan INVENTORY_TRACKING (featureCode) o sin inventory:read" }
  *       422: { description: "Query inválida (INVALID_WASTE_PAYLOAD)" }
  */
