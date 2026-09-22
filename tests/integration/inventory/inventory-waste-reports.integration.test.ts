@@ -13,8 +13,10 @@
  *     de cuarentena, entrada manual con lote nuevo, reversa de vale por área) se valora con ESE costo en
  *     `materials[].totalCost`, no a `cantidad × costo actual`: cuarentena + liberación suman 0.
  *   - 🔴 Contrato viejo: quien no manda `limit` sigue recibiendo TODOS los ingredientes, sin recorte.
- *   - Varianza (`getCostVarianceReport`): costo real = USAGE a costo actual (como hoy) + merma a
- *     costo de lote (del libro, sin multiplicar), e incluye los productos (LOSS), que hoy no estaban.
+ *   - Varianza (`getCostVarianceReport`): costo real = USAGE a costo actual (como hoy) + merma de
+ *     INGREDIENTES a costo de lote (del libro, sin multiplicar). La merma de PRODUCTOS terminados (LOSS)
+ *     no es varianza de ingredientes contra recetas: queda fuera (Ruling 26), aunque sí entra en los
+ *     totales de merma del reporte de materiales (§4.6).
  */
 import { randomUUID } from 'crypto'
 import { Prisma } from '@prisma/client'
@@ -483,7 +485,7 @@ describe('reporte de materiales (getIngredientUsageReport)', () => {
 })
 
 describe('reporte de varianza (getCostVarianceReport)', () => {
-  test('🔴 costo real = consumo a costo actual + merma a costo de LOTE, sin multiplicar, con productos y lo sin valorar a la vista', async () => {
+  test('🔴 costo real = consumo a costo actual + merma de INGREDIENTES a costo de LOTE, sin multiplicar, sin productos y con lo sin valorar a la vista', async () => {
     // Ingrediente A: costo actual 100; lotes a 2 y 4. Merma 5 = 3 por lotes (8) + 2 sin existencia.
     const a = await raw(3, 100)
     await batch(a.id, 2, 2, new Date('2026-01-01T00:00:00Z'))
@@ -493,16 +495,21 @@ describe('reporte de varianza (getCostVarianceReport)', () => {
     // Ingrediente B: merma legacy con costo guardado 12.
     const b = await raw(10, 5)
     await movement(b.id, 'SPOILAGE', -4, -12)
-    // Producto: merma de 3 a 10 = 30 (hoy los productos no entraban).
+    // Producto: merma de 3 a 10 = 30. Es pérdida de producto TERMINADO, no varianza de ingredientes
+    // contra recetas (Ruling 26): no entra en el costo real.
     const p = await product(10, 10)
     await logWaste(venueId, staffId, request('PRODUCT', p.id, 3))
+    // …y una merma de producto SIN costo tampoco suma a lo sin valorar de la varianza.
+    const sinCosto = await product(10, null)
+    await logWaste(venueId, staffId, request('PRODUCT', sinCosto.id, 4))
 
     const report = await getCostVarianceReport(venueId, from, to)
-    // 100 (USAGE) + 8 (lotes) + 12 (legacy) + 30 (producto) = 150.
-    // Con la fórmula vieja: USAGE 100 + hijos 3 × 100 + legacy 4 × 5 = 420, sin el producto.
-    expect(report.costs.actual).toBe(150)
+    // 100 (USAGE) + 8 (lotes) + 12 (legacy) = 120; los 30 del producto quedan fuera.
+    // Con la fórmula vieja: USAGE 100 + hijos 3 × 100 + legacy 4 × 5 = 420.
+    expect(report.costs.actual).toBe(120)
     expect(report.costs.expected).toBe(0)
-    expect(report.costs.variance).toBe(150)
+    expect(report.costs.variance).toBe(120)
+    // Sólo las 2 piezas del ingrediente A sin existencia; las 4 del producto sin costo no.
     expect(report.costs.unvaluedWasteQuantity).toBe('2')
     // El porcentaje sigue siendo el de siempre (sin costo esperado ⇒ 0).
     expect(report.costs.variancePercentage).toBe(0)

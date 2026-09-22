@@ -483,9 +483,11 @@ export async function getCostVarianceReport(venueId: string, startDate: Date, en
   `
 
   // La merma ya no se valora a `cantidad × costo actual`: su costo REAL (por lote) sale del libro de
-  // merma, una vez por folio y con los productos (LOSS) incluidos. Lo que no tiene costo conocido
-  // no suma y se declara aparte (`unvaluedWasteQuantity`).
-  const waste = await getWasteTotals(venueId, startDate, endDate)
+  // merma, una vez por folio. Sólo la de INGREDIENTES (Ruling 26): la varianza compara ingredientes
+  // contra recetas, y la pérdida de un producto terminado no es eso — sigue en los totales de merma
+  // del reporte de materiales (§4.6). Lo que no tiene costo conocido no suma y se declara aparte
+  // (`unvaluedWasteQuantity`).
+  const waste = await getWasteTotals(venueId, startDate, endDate, { itemType: 'RAW_MATERIAL' })
 
   const expectedTotalCost = new Decimal(expectedData[0]?.expected_cost || 0)
   const actualRevenue = new Decimal(expectedData[0]?.actual_revenue || 0)
