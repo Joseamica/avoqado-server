@@ -5,7 +5,7 @@
 import './config/env'
 
 import http from 'http'
-import app, { getAppCpuPercent, getAppActiveConnections, getAppEventLoopHistogram } from './app' // The configured Express application
+import app, { getAppCpuPercent, getAppActiveConnections, getAppEventLoopHistogram, detenerMonitorDeEventLoop } from './app' // The configured Express application
 import logger from './config/logger'
 import { PORT, NODE_ENV, DATABASE_URL } from './config/env'
 import pgPool from './config/database' // Import pgPool for graceful shutdown
@@ -111,6 +111,13 @@ const gracefulShutdown = async (signal: string) => {
   // but does NOT write back to process.env, so process.env.NODE_ENV can be
   // undefined even when NODE_ENV === 'development' from the config module.
   const isDev = NODE_ENV === 'development'
+
+  // 🔴 Va en el camino COMÚN y antes de cualquier salida: el monitor arranca
+  // incondicionalmente en `app.ts`, así que su cierre no puede colgar de un modo. Vivía dentro
+  // del bloque que se salta en DEMO_MODE y después de la salida rápida de desarrollo (que hace
+  // `process.exit` de inmediato): medido, en esos dos caminos no se llamaba NUNCA, y un tramo
+  // detectado que esperaba sus pausas de GC se perdía sin decir nada. Es síncrono y no toca red.
+  detenerMonitorDeEventLoop()
 
   // Stop accepting new connections AND force-close active ones. Without
   // closeAllConnections(), httpServer.close()'s callback never fires while

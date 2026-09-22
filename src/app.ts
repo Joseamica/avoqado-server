@@ -96,7 +96,12 @@ app.use((req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
 // justo las que no queremos que se queden formadas sin que nadie se entere.
 // Incidente 2026-08-04: /dashboard/auth/status tardó 33.7 s y nada avisó.
 app.use(eventLoopGuardMiddleware)
-startEventLoopMonitor()
+/**
+ * 🔴 Se CONSERVA el cierre. Descartarlo (como estaba) deja el muestreo sin forma de vaciar el
+ * tramo detectado y aún no emitido: al reiniciar el proceso entre la detección y su aviso, ese
+ * aviso —el de una retención real— se perdía en silencio. `server.ts` lo llama al apagar.
+ */
+export const detenerMonitorDeEventLoop = startEventLoopMonitor()
 
 // Getters for the metrics service to read live values
 export function getAppCpuPercent() {

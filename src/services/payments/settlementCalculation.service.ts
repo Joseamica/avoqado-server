@@ -290,12 +290,27 @@ export function calculateSettlementDate(
   // Back to a real UTC instant for storage/formatting.
   const settlementDate = fromZonedTime(settlementLocal, tz)
 
-  logger.info('Settlement date calculated', {
-    transactionDate,
-    settlementDays: config.settlementDays,
-    settlementDayType: config.settlementDayType,
-    settlementDate,
-  })
+  // 🔴 Esta función es PURA y el calendario de liquidaciones la llama UNA VEZ POR PAGO
+  // (`settlementCalendar.dashboard.service.ts`). Medido en producción el 2026-09-21: ~2,900
+  // pagos por carga de la pantalla, creciendo ~300/día — un log por pago es ~2,900 objetos
+  // formateados en el mismo hilo que atiende los cobros, cada vez que alguien la abre.
+  //
+  // 🔴 Bajar de `info` a `debug` NO basta, y ésa fue la trampa: winston aplica el formato
+  // ANTES de que el transporte descarte la línea por nivel. Medido con la versión instalada:
+  // 50 llamadas `debug` con `level=info` ⇒ **50 pasadas por el formato y 0 escrituras**. El
+  // gasto de CPU se evitaba sólo a medias. Con la guarda, ni siquiera se construye el objeto.
+  // El `?.` no es paranoia: media docena de suites del repo mockean el logger con sólo
+  // `{info, warn, debug, error}`, y exigirles un método nuevo rompería pruebas ajenas por un
+  // detalle de instrumentación. Si faltara, la degradación es benigna: no se escribe la
+  // línea de debug, que es justo lo que ocurre en producción.
+  if (logger.isDebugEnabled?.()) {
+    logger.debug('Settlement date calculated', {
+      transactionDate,
+      settlementDays: config.settlementDays,
+      settlementDayType: config.settlementDayType,
+      settlementDate,
+    })
+  }
 
   return settlementDate
 }
