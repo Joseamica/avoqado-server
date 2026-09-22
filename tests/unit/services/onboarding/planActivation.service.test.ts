@@ -1484,3 +1484,51 @@ describe('🔴 R13: lo que se guarda es lo COBRADO, no lo que pide el reintento'
     expect((cierre?.[0].data.v2SetupData as Record<string, any>).plan).toMatchObject({ payNow: true })
   })
 })
+
+/**
+ * 🔴 Codex #14 (ronda 3 y 4, P1): rechazar el intento y liberar el lugar del cupo estaban en transacciones DISTINTAS.
+ * Entre una y otra, otra petición tomaba un intento nuevo y reusaba la reserva —que seguía `RESERVED`— y la primera la
+ * liberaba por debajo: la segunda podía cobrar y fallar al marcarla `APPLIED`, y el contador dejaba vender ese lugar
+ * otra vez. Comprobar `count === 1` antes de abrir OTRA transacción no cierra esa ventana. Y las salidas por «no
+ * autorizado» y «reusada sin cupón» liberaban sin acreditar siquiera la propiedad del intento.
+ */
+describe('🔴 #14: liberar el lugar exige ser el dueño, y va con el cambio de estado', () => {
+  beforeEach(() => {
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(campania() as never)
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(progreso() as never)
+  })
+
+  /** El lease ya no es nuestro: cualquier escritura condicionada a él no toca ninguna fila. */
+  const elLeaseYaNoEsNuestro = () =>
+    (prismaMock.onboardingProgress.updateMany as jest.Mock).mockImplementation(async (args: any) =>
+      args?.where?.planActivationLeaseUntil && args?.data?.planActivationStatus !== 'IN_PROGRESS' ? { count: 0 } : { count: 1 },
+    )
+
+  it('🔴 la regla rechaza ANTES de cobrar y el lease ya no es nuestro: NO se libera el lugar', async () => {
+    mockAutorizar.mockRejectedValue(Object.assign(new Error('otro plan vivo'), { statusCode: 409, code: 'PLAN_YA_CONTRATADO' }))
+    elLeaseYaNoEsNuestro()
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH } as never)).rejects.toMatchObject({ code: 'PLAN_YA_CONTRATADO' })
+
+    const liberado = (prismaMock.launchCampaignRedemption.updateMany as jest.Mock).mock.calls.find(
+      (c: any[]) => c[0]?.data?.status === 'RELEASED',
+    )
+    expect(liberado).toBeUndefined()
+  })
+
+  it('🔴 una suscripción reusada SIN el cupón y el lease ya no es nuestro: NO se libera el lugar', async () => {
+    mockSubCreate.mockResolvedValue({ id: 'sub_vieja' })
+    prismaMock.venueFeature.findUnique.mockResolvedValue({ stripeSubscriptionId: 'sub_vieja' } as never)
+    mockSubRetrieve.mockResolvedValue({ id: 'sub_vieja', discounts: [] })
+    elLeaseYaNoEsNuestro()
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH } as never)).rejects.toMatchObject({
+      code: 'PLAN_ACTIVE_WITHOUT_OFFER',
+    })
+
+    const liberado = (prismaMock.launchCampaignRedemption.updateMany as jest.Mock).mock.calls.find(
+      (c: any[]) => c[0]?.data?.status === 'RELEASED',
+    )
+    expect(liberado).toBeUndefined()
+  })
+})

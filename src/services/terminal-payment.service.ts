@@ -176,7 +176,8 @@ export type AttemptProcessorEvidence = 'APPROVED' | 'DECLINED' | 'NONE'
 
 export interface TerminalAttemptStatus {
   attemptId: string
-  requestId: string
+  /** `null` en un cobro LOCAL (iniciado en la terminal): no hay solicitud del POS. El espejo del cliente ya lo tolera. */
+  requestId: string | null
   attempt: {
     attemptId: string
     outcome: AttemptOutcome
@@ -196,9 +197,25 @@ export interface TerminalAttemptStatus {
     paymentContradiction: boolean
     /** Existe evidencia del procesador para este intento con el serial de OTRA terminal: no cuenta, y se declara. */
     evidenceContradiction: boolean
-    linkedAt: string
+    /**
+     * Hay evidencia del procesador de este intento que no se pudo atribuir a NADIE (sin vínculo y sin serial). No es
+     * evidencia propia ni contradicción, pero existe — y mientras exista, una `resolution` NO puede usarse para soltar
+     * la venta (Codex P1-3, 22-sep). Campo ADITIVO: un cliente que no lo conozca se comporta como antes.
+     */
+    unattributedEvidence: boolean
+    /** `null` sin vinculo (cobro local). */
+    linkedAt: string | null
+    /**
+     * La declaración del cajero «no se presentó tarjeta» sobre ESTE intento, o `null` si nadie declaró (22-sep).
+     * 🔴 Es lo que destraba un cobro LOCAL: la señal de liberación que el cliente lee hoy viaja dentro de
+     * `request.outcome`, y aquí no hay `request`. Campo ADITIVO: un APK de la calle lo ignora y se comporta igual.
+     * Con solicitud sale del vínculo; sin ella, de `TerminalAttemptResolution`. Una aprobación tardía NO la borra:
+     * conviven, y la contradicción se ve en `processorEvidence`.
+     */
+    resolution: unknown | null
   }
-  request: TerminalPaymentStatus & { closedVia: string | null; winnerAttemptId: string | null }
+  /** `null` en un cobro LOCAL: no hay solicitud que proyectar. */
+  request: (TerminalPaymentStatus & { closedVia: string | null; winnerAttemptId: string | null }) | null
 }
 
 /**
@@ -6197,11 +6214,14 @@ class TerminalPaymentService {
   }
 
   /** El dueño de un intento (S1), para el webhook (S2) y la consulta por intento (S6). `null` = intento desconocido. */
-  async findAttemptLink(attemptId: string): Promise<{ requestId: string; venueId: string; terminalId: string; createdAt: Date } | null> {
+  async findAttemptLink(
+    attemptId: string,
+  ): Promise<{ requestId: string; venueId: string; terminalId: string; createdAt: Date; operatorResolution: unknown } | null> {
     if (!attemptId) return null
+    // `operatorResolution` (22-sep): S6 publica la declaración del cajero en `attempt.resolution`, y con solicitud vive aquí.
     return prisma.terminalPaymentAttemptLink.findUnique({
       where: { attemptId },
-      select: { requestId: true, venueId: true, terminalId: true, createdAt: true },
+      select: { requestId: true, venueId: true, terminalId: true, createdAt: true, operatorResolution: true },
     })
   }
 
@@ -6214,6 +6234,47 @@ class TerminalPaymentService {
    * Nunca atribuye a A el Payment de B: el Payment del intento es el de SU llave (`idempotencyKey === attemptId`);
    * el ganador de la solicitud viaja aparte, en `request`.
    */
+  /**
+   * 🔴 Pieza D (22-sep) — la consulta por SOLICITUD, hermana de S6.
+   *
+   * Nace de un hallazgo en hardware: una N86 llevaba **25 horas** mostrando «quedó un cobro de $50 sin confirmar»
+   * sobre una solicitud que este servidor ya había resuelto (`FAILED / OPERATOR_RECONCILED_NO_CHARGE`). Su bandeja
+   * seguía en `PROCESSING`, su libreta no tenía NINGÚN intento de esa solicitud, y nada podía alcanzarla: toda la
+   * recuperación consulta por INTENTO, y esa fila no tiene intento. El cajero veía un aviso permanente —con el
+   * contador subiendo— sobre dinero ya conciliado, y no tenía forma de quitarlo.
+   *
+   * Es SÓLO LECTURA y con la MISMA pertenencia que S6: venue del token y terminal del JWT. `resuelta` es la única
+   * respuesta que la terminal necesita para cerrar su bandeja, y se calcula con el MISMO predicado que decide si
+   * una solicitud sigue reteniendo la ranura (`UNRESOLVED_FINANCIAL_OUTCOME`): si el servidor aún la considera sin
+   * desenlace, aquí también lo dice. Nunca acredita por sí sola ausencia de cobro — eso lo dicen `outcome` y
+   * `outcomeEvidence` de la proyección, igual que siempre.
+   */
+  async consultarSolicitudDeTerminal(input: {
+    requestId: string
+    venueId: string
+    terminalSerial: string
+  }): Promise<{ request: TerminalPaymentStatus & { closedVia: string | null }; resuelta: boolean } | null> {
+    const terminalKey = typeof input.terminalSerial === 'string' ? normalizeTerminalId(input.terminalSerial) : ''
+    const requestId = typeof input.requestId === 'string' ? input.requestId.trim() : ''
+    if (!requestId || !terminalKey || !input.venueId) return null
+
+    // La pertenencia va en el WHERE: una solicitud de otra terminal o de otro venue no existe para quien pregunta.
+    const row = await prisma.terminalPaymentRequest.findFirst({
+      where: { requestId, venueId: input.venueId, terminalId: terminalKey },
+    })
+    if (!row) return null
+
+    // `resuelta` = el servidor ya NO la cuenta como desenlace pendiente. Se mide con el MISMO predicado que retiene
+    // la ranura, para que las dos respuestas no puedan divergir: preguntar aquí y preguntar allá dicen lo mismo.
+    const sinDesenlace = await prisma.terminalPaymentRequest.count({
+      where: { AND: [{ requestId, venueId: input.venueId }, UNRESOLVED_FINANCIAL_OUTCOME] },
+    })
+    return {
+      request: { ...proyectarEstado(row), closedVia: row.closedVia ?? null },
+      resuelta: sinDesenlace === 0,
+    }
+  }
+
   async consultarIntentoDeTerminal(input: {
     attemptId: string
     venueId: string
@@ -6223,10 +6284,31 @@ class TerminalPaymentService {
     const terminalKey = typeof input.terminalSerial === 'string' ? normalizeTerminalId(input.terminalSerial) : ''
     if (!attemptId || attemptId.length > 64 || !terminalKey || !input.venueId) return null
 
+    // 🔴 «Ninguna terminal muerta» (founder, 22-sep): la consulta es POR INTENTO, y un **Pago rápido** —cobro iniciado EN la
+    // terminal, sin solicitud del POS— no puede tener vínculo, porque `TerminalPaymentAttemptLink.requestId` es obligatorio con
+    // FK a la solicitud. Antes eso devolvía `null` ⇒ 404 ⇒ la pantalla se quedaba sin reloj, sin botón y sin reintento, y su
+    // fila `INDETERMINADO` sin `orderId` apartaba EL APARATO ENTERO (medido en la N86: 13 de 27 intentos son de esta clase).
+    // Sin vínculo se contesta IGUAL, con lo que SÍ consta de ESTA terminal: la atribución del Payment cae entonces en la rama
+    // por SERIAL que ya existía abajo (`terminalPaymentRequestId == null && serial === terminalKey`), que es exactamente el
+    // cobro local. Lo que NO cambia: con vínculo se siguen exigiendo venue y terminal, y nada de esto acredita ausencia de
+    // cargo — `NOT_RECORDED`/`NONE` es «no sé», y es justo lo que habilita la ventana de confirmación y la declaración.
     const link = await this.findAttemptLink(attemptId)
-    if (!link || link.venueId !== input.venueId || normalizeTerminalId(link.terminalId) !== terminalKey) return null
-    const row = await prisma.terminalPaymentRequest.findFirst({ where: { requestId: link.requestId, venueId: input.venueId } })
-    if (!row) return null
+    if (link && (link.venueId !== input.venueId || normalizeTerminalId(link.terminalId) !== terminalKey)) return null
+    const row = link
+      ? await prisma.terminalPaymentRequest.findFirst({ where: { requestId: link.requestId, venueId: input.venueId } })
+      : null
+    // Un vínculo cuya solicitud no existe es un estado incoherente, no un cobro local: se conserva el 404 de siempre.
+    if (link && !row) return null
+
+    // La declaración del cajero sobre ESTE intento (22-sep, pieza B). Con vínculo vive en él; sin vínculo, en su propia
+    // tabla. 🔴 Acotada a este venue Y esta terminal: la declaración de una terminal no la ve otra, igual que el resto.
+    const declaracionLocal = link
+      ? null
+      : await prisma.terminalAttemptResolution.findFirst({
+          where: { attemptId, venueId: input.venueId, terminalId: terminalKey },
+          select: { resolution: true },
+        })
+    const resolution = link ? (link.operatorResolution ?? null) : (declaracionLocal?.resolution ?? null)
 
     // Codex R1 (P1-7 / P2): la EVIDENCIA se acota al venue del vínculo (un approved recibido por el merchant de OTRO venue
     // —LINK_VENUE_MISMATCH— no es evidencia de este intento — ver la consulta SQL de evidencia más abajo); y un Payment
@@ -6245,7 +6327,7 @@ class TerminalPaymentService {
           terminal: { select: { serialNumber: true } },
         },
       }),
-      row.paymentId
+      row?.paymentId
         ? prisma.payment.findUnique({ where: { id: row.paymentId }, select: { id: true, idempotencyKey: true } })
         : Promise.resolve(null),
     ])
@@ -6263,21 +6345,53 @@ class TerminalPaymentService {
         ? (datosCandidato.reconciliation as Record<string, unknown>)
         : null
     const serialKey = (valor: unknown): string | null => (typeof valor === 'string' && valor.trim() ? normalizeTerminalId(valor) : null)
-    const atribuible =
+    // 🔴 Sin solicitud (cobro local) las tres comparaciones por `requestId` NO se evalúan: con `row?.requestId` valiendo
+    // `undefined`, un `datosCandidato.terminalPaymentRequestId` AUSENTE daría `undefined === undefined` ⇒ atribuible sin
+    // comprobar el serial, y un Payment de OTRA terminal se presentaría como dinero propio. Por eso van bajo `!!row`.
+    const atribuiblePorSolicitud =
       !!candidato &&
+      !!row &&
       (candidato.terminalPaymentRequestId === row.requestId ||
         datosCandidato?.terminalPaymentRequestId === row.requestId ||
-        reconciliacionCandidato?.requestId === row.requestId ||
-        (candidato.terminalPaymentRequestId == null &&
-          datosCandidato?.terminalPaymentRequestId == null &&
-          (serialKey(datosCandidato?.deviceSerialNumber) === terminalKey || serialKey(candidato.terminal?.serialNumber) === terminalKey)))
-    const paymentContradiction = !!candidato && !atribuible
+        reconciliacionCandidato?.requestId === row.requestId)
+    // 🔴 Codex P1-1 (22-sep): con un `OR`, un Payment cuyas DOS identidades DISCREPAN —snapshot de A en
+    // `processorData.deviceSerialNumber`, relación de B en `Terminal`— era reclamado como propio por A **y** por B. Ese
+    // estado lo produce el código actual: `payment.tpv.controller` resuelve `terminalId` con el `deviceSerialNumber` del
+    // CUERPO y guarda en `processorData` el serial AUTENTICADO del JWT. Consecuencia medida: la terminal que NO cobró veía
+    // `RECORDED`, su fila pasaba a REGISTRADO y soltaba la retención. Sin vínculo la pertenencia tiene que ser ACREDITADA:
+    // debe haber al menos una identidad, y TODAS las presentes tienen que ser ésta. Una identidad que contradice no se
+    // compensa con otra que coincide.
+    const identidadesDelPago = [serialKey(datosCandidato?.deviceSerialNumber), serialKey(candidato?.terminal?.serialNumber)].filter(
+      (s): s is string => s !== null,
+    )
+    const atribuiblePorTerminal =
+      !!candidato &&
+      candidato.terminalPaymentRequestId == null &&
+      datosCandidato?.terminalPaymentRequestId == null &&
+      identidadesDelPago.length > 0 &&
+      identidadesDelPago.every(s => s === terminalKey)
+    const atribuible = atribuiblePorSolicitud || atribuiblePorTerminal
+    // 🔴 Codex r4-3 (22-sep): el candidato se busca por venue propio y llave EXACTA, mientras el veto del POST busca
+    // GLOBAL y con la llave normalizada. La diferencia dejaba pasar por «declaración limpia» un pago que apareció
+    // DESPUÉS, con la llave sucia o en otro negocio — y el cliente usa esta respuesta para soltar la venta. Aquí no se
+    // publica NADA de ese pago (ni id, ni importe, ni negocio): sólo que existe algo que contradice.
+    const dineroNoAtribuible =
+      !candidato &&
+      (
+        await prisma.$queryRaw<{ id: string }[]>`
+          SELECT "id" FROM "Payment"
+          WHERE ("idempotencyKey" = ${attemptId}
+             OR regexp_replace("idempotencyKey", ${PATRON_SQL_TRIM_COMO_JS}, '', 'g') = ${attemptId})
+            AND ("type" IS NULL OR "type" <> ${PaymentType.REFUND}::"PaymentType")
+          LIMIT 1`
+      ).length > 0
+    const paymentContradiction = (!!candidato && !atribuible) || dineroNoAtribuible
     if (paymentContradiction && candidato) {
       logger.error(
         '🚨 [TerminalPayment] Un Payment con la llave del intento NO es atribuible a esta solicitud/terminal — se conserva la incertidumbre',
         {
           attemptId,
-          requestId: row.requestId,
+          requestId: row?.requestId ?? null,
           terminalKey,
           paymentId: candidato.id,
           paymentRequestId: candidato.terminalPaymentRequestId,
@@ -6299,17 +6413,21 @@ class TerminalPaymentService {
     // un `123` o un `{}` y S6 publicaba DECLINED sin rechazo bancario acreditado).
     // Lógica trivalente de SQL: un `errorReason` NULL (evento sano) no puede volver NULL la contradicción entera — por eso
     // `IS NOT DISTINCT FROM` y no `=`; sin eso, el approved propio del evento CONFIRMADO desaparecía de la evidencia.
-    const evidencia = await prisma.$queryRaw<{ contradicciones: bigint | number; aprobadoAt: Date | null; veredictoAt: Date | null }[]>`
+    const evidencia = await prisma.$queryRaw<{ contradicciones: bigint | number; sinDueno: bigint | number; aprobadoAt: Date | null; veredictoAt: Date | null }[]>`
       WITH eventos AS (
         SELECT
           e."createdAt",
           e."errorReason",
           ${estadoBancarioSql(Prisma.sql`coalesce(e."payload"->'payload'->'status', e."payload"->'status')`)} AS estado,
-          nullif(regexp_replace(coalesce(e."payload"->'payload'->>'terminalSerial', ''), ${PATRON_SQL_TRIM_COMO_JS}, '', 'g'), '') AS serial
+          nullif(regexp_replace(coalesce(e."payload"->'payload'->>'terminalSerial', ''), ${PATRON_SQL_TRIM_COMO_JS}, '', 'g'), '') AS serial,
+          -- 🔴 Codex r5-2 (22-sep): el filtro de venue se movió de la CLÁUSULA a una COLUMNA. Filtrarlo aquí borraba el
+          -- evento de otro negocio ANTES de calcular ningún aviso, así que una declaración salía «limpia» aunque el POST
+          -- la hubiera vetado por procedencia — y el cliente la usa para liberar. Se separa ATRIBUCIÓN de VETO: un evento
+          -- ajeno no es dinero propio (no puede dar APPROVED), pero SÍ contradice. Nada de ese evento se publica.
+          (e."venueId" IS NOT DISTINCT FROM ${input.venueId}) AS "deEsteVenue"
         FROM "ProviderEventLog" e
         WHERE e."provider" = 'PAYMENT_PROCESSOR'
           AND e."attemptId" = ${attemptId}
-          AND e."venueId" = ${link.venueId}
           AND e."eventId" LIKE 'angelpay-%'
       ), clasificados AS (
         SELECT
@@ -6318,14 +6436,34 @@ class TerminalPaymentService {
           (
             "errorReason" IS NOT DISTINCT FROM 'LINK_TERMINAL_MISMATCH'
             OR (serial IS NOT NULL AND lower(regexp_replace(serial, '^AVQD-', '', 'i')) <> ${terminalKey})
-          ) AS contradice
+            -- r5-2: recibido por OTRO negocio ⇒ contradice, exactamente como lo trata el veto del POST.
+            OR NOT "deEsteVenue"
+          ) AS contradice,
+          -- 🔴 Codex P1-2 (22-sep): un serial AUSENTE se vuelve NULL, así que no «contradice» a nadie. CON vínculo eso da
+          -- igual: la pertenencia la acredita el vínculo. SIN vínculo no hay nada más, y ese «approved» se publicaba como
+          -- propio a CUALQUIER terminal del venue — que además el recuperador de la TPV guarda de forma DURABLE en la fila
+          -- consultada. Sin vínculo, la pertenencia la da SÓLO el serial del evento: uno ausente no es evidencia de nadie.
+          -- No es una contradicción (no acusa a otra terminal): simplemente no cuenta.
+          ("deEsteVenue" AND (${!!link} OR serial IS NOT NULL)) AS "conDueno"
         FROM eventos
       )
       SELECT
         (SELECT count(*) FROM clasificados WHERE contradice) AS contradicciones,
-        (SELECT max("createdAt") FROM clasificados WHERE NOT contradice AND estado = 'APROBADO') AS "aprobadoAt",
-        (SELECT max("createdAt") FROM clasificados WHERE NOT contradice AND estado = 'RECHAZADO') AS "veredictoAt"`
-    const resumen = evidencia[0] ?? { contradicciones: 0, aprobadoAt: null, veredictoAt: null }
+        -- 🔴 Codex P1-3 (22-sep): un evento del procesador SIN serial y SIN vínculo no «contradice» (no acusa a otra
+        -- terminal) y tampoco cuenta como evidencia propia — queda en tierra de nadie. Eso está bien para decidir el
+        -- desenlace, pero dejaba publicar una declaración del cajero como si nada la desmintiera, y el cliente la usa
+        -- para soltar la venta. Se cuenta aparte para poder DECIRLO.
+        -- 🔴 Codex r4-4: sólo cuenta la evidencia que PODRÍA ser dinero. Un evento huérfano con veredicto RECHAZADO no
+        -- puede ser un cobro de nadie —el propio veto del POST lo deja declarar—, y contarlo dejaba este aviso encendido
+        -- para siempre: la declaración se aceptaba y luego no se podía usar. Aceptar y poder usar tienen que decir lo mismo.
+        (SELECT count(*) FROM clasificados WHERE NOT contradice AND NOT "conDueno" AND estado IS DISTINCT FROM 'RECHAZADO') AS "sinDueno",
+        (SELECT max("createdAt") FROM clasificados WHERE NOT contradice AND "conDueno" AND estado = 'APROBADO') AS "aprobadoAt",
+        (SELECT max("createdAt") FROM clasificados WHERE NOT contradice AND "conDueno" AND estado = 'RECHAZADO') AS "veredictoAt"`
+    const resumen = evidencia[0] ?? { contradicciones: 0, sinDueno: 0, aprobadoAt: null, veredictoAt: null }
+    // Evidencia del procesador para este intento que no se pudo atribuir a nadie. NO cambia `processorEvidence` ni el
+    // desenlace —seguiría siendo inventarle un dueño—: se publica aparte para que la terminal sepa que hay algo que
+    // impide usar una declaración para liberar la venta.
+    const unattributedEvidence = Number(resumen.sinDueno ?? 0) > 0
     const evidenceContradiction = Number(resumen.contradicciones) > 0
     const propioAprobado = resumen.aprobadoAt ? { createdAt: new Date(resumen.aprobadoAt) } : null
     const propioConVeredicto = resumen.veredictoAt ? { createdAt: new Date(resumen.veredictoAt) } : null
@@ -6334,7 +6472,7 @@ class TerminalPaymentService {
         '🚨 [TerminalPayment] Evidencia del procesador con el serial de OTRA terminal para este intento — no cuenta como evidencia',
         {
           attemptId,
-          requestId: row.requestId,
+          requestId: row?.requestId ?? null,
           terminalKey,
         },
       )
@@ -6367,13 +6505,13 @@ class TerminalPaymentService {
       if (ganador.idempotencyKey === attemptId) winnerAttemptId = attemptId
       else {
         const vinculoDelGanador = await this.findAttemptLink(ganador.idempotencyKey)
-        winnerAttemptId = vinculoDelGanador?.requestId === row.requestId ? ganador.idempotencyKey : null
+        winnerAttemptId = !!row && vinculoDelGanador?.requestId === row.requestId ? ganador.idempotencyKey : null
       }
     }
 
     return {
       attemptId,
-      requestId: row.requestId,
+      requestId: row?.requestId ?? null,
       attempt: {
         attemptId,
         outcome,
@@ -6382,17 +6520,19 @@ class TerminalPaymentService {
         recordedVia: pago ? (datos?.registradoVia === 'webhook' ? 'webhook' : 'terminal') : null,
         amountCents: pago ? centavos(pago.amount) : null,
         tipCents: pago ? centavos(pago.tipAmount) : null,
-        isWinner: !!pago && row.paymentId === pago.id,
+        isWinner: !!pago && row?.paymentId === pago.id,
         winnerPaymentId: esSegundaCaptura
-          ? ((typeof reconciliacion?.winnerPaymentId === 'string' ? reconciliacion.winnerPaymentId : null) ?? row.paymentId ?? null)
+          ? ((typeof reconciliacion?.winnerPaymentId === 'string' ? reconciliacion.winnerPaymentId : null) ?? row?.paymentId ?? null)
           : null,
         processorEvidence,
         processorEvidenceAt: conVeredicto?.createdAt.toISOString() ?? null,
         paymentContradiction,
         evidenceContradiction,
-        linkedAt: link.createdAt.toISOString(),
+        unattributedEvidence,
+        linkedAt: link?.createdAt.toISOString() ?? null,
+        resolution,
       },
-      request: { ...proyectarEstado(row), closedVia: row.closedVia ?? null, winnerAttemptId },
+      request: row ? { ...proyectarEstado(row), closedVia: row.closedVia ?? null, winnerAttemptId } : null,
     }
   }
 

@@ -773,7 +773,7 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
         venueId,
         requestId,
         origen: 'ANGELPAY',
-        evidencia: { eventLogId: `evt-${randomUUID()}`, attemptId: `att-${requestId}`, attemptId: intentoA, codigo: 'rejected', descripcion: '05 DECLINADA' },
+        evidencia: { eventLogId: `evt-${randomUUID()}`, attemptId: intentoA, codigo: 'rejected', descripcion: '05 DECLINADA' },
       })
 
       expect(r.closed).toBe(false)

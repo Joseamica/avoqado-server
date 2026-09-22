@@ -1,5 +1,5 @@
 /**
- * Unit tests for planStateService.applyRetentionOffer (cancellation-retention flow).
+ * Unit tests for applyRetentionOffer (cancellation-retention flow).
  *
  * Strategy: the global setup (tests/__helpers__/setup.ts) mocks prismaClient + logger.
  * We additionally mock the stripe.service module so we can drive the Stripe-side helpers
@@ -49,6 +49,7 @@ import { prismaMock } from '../../__helpers__/setup'
 import { applyRetentionOffer, RETENTION_DISCOUNT_COUPON } from '@/services/dashboard/planState.service'
 import { BadRequestError } from '@/errors/AppError'
 
+let pausaPrevia: { createdAt: Date } | null = null
 const VENUE_ID = 'venue_1'
 const SUB_ID = 'sub_123'
 
@@ -78,6 +79,8 @@ function subSummary(overrides: Record<string, unknown> = {}) {
     currentPeriodEnd: new Date('2026-07-01T00:00:00Z'),
     createdAt: TENURED_CREATED_AT,
     hasActiveDiscount: false,
+    /** 🔴 Codex N3: hasta ahora el servidor NO leía si ya había una pausa, y por eso se podía extender sin fin. */
+    pausedUntil: null as Date | null,
     interval: 'month',
     grossAmountCents: 115884,
     ...overrides,
@@ -95,6 +98,15 @@ beforeEach(() => {
   // getPlanState (called at the end) reads the VenueFeature + venue + Stripe sub.
   prismaMock.venue.findUnique.mockResolvedValue({ id: VENUE_ID, stripeCustomerId: 'cus_1' })
   prismaMock.venueFeature.findMany.mockResolvedValue([planProFeature])
+  // 🔴 Codex N3: el tope de frecuencia se lee de la bitácora (sin pausas previas por defecto).
+  // El mock HONRA el `where.createdAt.gte`: si no, una pausa vieja se devolvería como si estuviera dentro de la
+  // ventana y la prueba pasaría por el motivo equivocado.
+  pausaPrevia = null
+  prismaMock.activityLog.findFirst.mockImplementation(async (args: any) => {
+    if (!pausaPrevia) return null
+    const desde: Date | undefined = args?.where?.createdAt?.gte
+    return !desde || pausaPrevia.createdAt >= desde ? pausaPrevia : null
+  })
 })
 
 describe('applyRetentionOffer', () => {
@@ -162,5 +174,49 @@ describe('applyRetentionOffer', () => {
 
     await expect(applyRetentionOffer(VENUE_ID, 'discount')).rejects.toBeInstanceOf(BadRequestError)
     expect(mockApplySubscriptionCoupon).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * 🔴 Codex N3 (ronda 4, P1) — y está DESPLEGADO: la oferta de PAUSA dejaba conservar el plan sin pagar de forma
+ * indefinida. El único antiabuso era «¿ya tienes un descuento activo?», y una pausa NO es un descuento; nada
+ * persistía que ya se hubiera usado (sólo un `ActivityLog` que ningún candado leía); la fecha de reanudación se
+ * recalculaba a «hoy + 2 meses» en CADA llamada, así que pedirla otra vez antes de que venciera la extendía; y la
+ * fila de `VenueFeature` no se toca, así que el acceso se conserva entero. Con `mark_uncollectible`, esos periodos
+ * no se cobran después.
+ *
+ * 🔑 No se cierra la oferta: existe para no perder a un cliente con problemas de flujo, que es justo nuestro ICP.
+ * Lo que le faltaba era TOPE. Y el tope va en el servidor a propósito: este endpoint ya devuelve mensajes que la
+ * pantalla muestra, así que no hace falta tocar el dashboard para que el cliente entienda qué pasó.
+ */
+describe('🔴 N3: la pausa tiene tope', () => {
+  it('🔴 no se puede extender una pausa que ya está corriendo', async () => {
+    mockRetrievePlanSubscription.mockResolvedValue(subSummary({ pausedUntil: new Date('2026-12-01T00:00:00Z') }))
+
+    await expect(applyRetentionOffer(VENUE_ID, 'pause')).rejects.toThrow(BadRequestError)
+    expect(mockPauseSubscriptionCollection).not.toHaveBeenCalled()
+  })
+
+  it('🔴 y no se puede pedir otra antes de que pase el periodo mínimo entre pausas', async () => {
+    pausaPrevia = { createdAt: new Date(Date.now() - 30 * 24 * 3600_000) }
+
+    await expect(applyRetentionOffer(VENUE_ID, 'pause')).rejects.toThrow(BadRequestError)
+    expect(mockPauseSubscriptionCollection).not.toHaveBeenCalled()
+  })
+
+  it('una pausa vieja (fuera del periodo mínimo) sí permite otra', async () => {
+    pausaPrevia = { createdAt: new Date(Date.now() - 400 * 24 * 3600_000) }
+
+    await applyRetentionOffer(VENUE_ID, 'pause')
+
+    expect(mockPauseSubscriptionCollection).toHaveBeenCalled()
+  })
+
+  it('el tope NO estorba a la oferta de descuento (son ofertas distintas)', async () => {
+    pausaPrevia = { createdAt: new Date(Date.now() - 30 * 24 * 3600_000) }
+
+    await applyRetentionOffer(VENUE_ID, 'discount')
+
+    expect(mockApplySubscriptionCoupon).toHaveBeenCalled()
   })
 })

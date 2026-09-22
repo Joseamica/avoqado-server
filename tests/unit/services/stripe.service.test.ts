@@ -1051,7 +1051,57 @@ describe('Stripe Service - Comprehensive Tests', () => {
           hasActiveDiscount: true,
           interval: 'month',
           grossAmountCents: 115884,
+          pausedUntil: null,
         })
+      })
+
+      /**
+       * 🔴 Codex N3 (ronda 4, P1): nadie leía `pause_collection`, y por eso el servidor no sabía que la cobranza ya
+       * estaba pausada — pedir la pausa otra vez la EXTENDÍA dos meses más, sin límite, conservando el acceso.
+       */
+      it('🔴 expone hasta cuándo está PAUSADA la cobranza', async () => {
+        const reanuda = 1893456000
+        mockStripeInstance.subscriptions.retrieve.mockResolvedValueOnce({
+          id: 'sub_pausada',
+          status: 'active',
+          cancel_at_period_end: false,
+          current_period_end: reanuda,
+          created: 1735689600,
+          pause_collection: { behavior: 'mark_uncollectible', resumes_at: reanuda },
+          items: { data: [{ price: { recurring: { interval: 'month' }, unit_amount: 115884 } }] },
+        })
+
+        const r = await stripeService.retrievePlanSubscription('sub_pausada')
+        expect(r.pausedUntil).toEqual(new Date(reanuda * 1000))
+      })
+
+      it('🔴 una pausa INDEFINIDA (sin fecha de reanudación) también cuenta como pausada', async () => {
+        mockStripeInstance.subscriptions.retrieve.mockResolvedValueOnce({
+          id: 'sub_pausada_sin_fin',
+          status: 'active',
+          cancel_at_period_end: false,
+          current_period_end: 1893456000,
+          created: 1735689600,
+          pause_collection: { behavior: 'mark_uncollectible' },
+          items: { data: [{ price: { recurring: { interval: 'month' }, unit_amount: 115884 } }] },
+        })
+
+        const r = await stripeService.retrievePlanSubscription('sub_pausada_sin_fin')
+        expect(r.pausedUntil).not.toBeNull()
+      })
+
+      it('sin pausa, `pausedUntil` es null', async () => {
+        mockStripeInstance.subscriptions.retrieve.mockResolvedValueOnce({
+          id: 'sub_normal',
+          status: 'active',
+          cancel_at_period_end: false,
+          current_period_end: 1893456000,
+          created: 1735689600,
+          items: { data: [{ price: { recurring: { interval: 'month' }, unit_amount: 115884 } }] },
+        })
+
+        const r = await stripeService.retrievePlanSubscription('sub_normal')
+        expect(r.pausedUntil).toBeNull()
       })
 
       it('should detect an active discount from the discounts[] array form', async () => {
@@ -1105,6 +1155,7 @@ describe('Stripe Service - Comprehensive Tests', () => {
           hasActiveDiscount: false,
           interval: null, // 'week' is neither month nor year
           grossAmountCents: null,
+          pausedUntil: null,
         })
       })
 

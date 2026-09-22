@@ -77,3 +77,55 @@ sea del POS. El intento, que es donde de verdad vive el dinero, no tiene carril 
 
 Servidor (A y B) → desplegar → TPV (C) con la próxima release. C sin A es inerte; A sin C no rompe
 nada (ningún cliente llama todavía).
+
+---
+
+# Anexo · Diseño detallado de B (mapeado contra `no-instrument-resolution.service.ts`)
+
+Escrito el 22-sep tras leer las 13 guardas del servicio actual. **B entra por el núcleo existente**:
+reusa `miembroDelVenue` (autorización + PIN de supervisor), `evidenciaQueVetaLaDeclaracion`,
+`OperatorResolution`/`readOperatorResolution` y `NO_INSTRUMENT_PERMISSION`. No se duplica nada.
+
+## Qué guarda sobrevive sin solicitud
+
+| Guarda actual | Sin solicitud |
+|---|---|
+| `count(vínculos del requestId) !== 1` ⇒ `OTHER_ATTEMPT_UNRESOLVED` | ❌ no aplica |
+| `payment.findFirst` por **4** identidades | 🟡 sólo `idempotencyKey = attemptId`, acotado al venue |
+| `senalPositiva` del sobre (`row.resultJson`) | ❌ no hay sobre |
+| **`evidenciaQueVetaLaDeclaracion`** | ✅ **tal cual** — sólo depende de intento/venue/terminal |
+| `desenlaceCanonico(row)` · `row.status` · `row.paymentId` · CAS sobre la fila | ❌ no hay fila |
+
+🔴 **Los dos vetos que quedan son toda la evidencia que el servidor tiene de un cobro local, y bastan:**
+un `Payment` con la llave del intento, o evidencia del procesador que vete. Si alguno existe, la
+declaración se rechaza con `POSITIVE_EVIDENCE_EXISTS`, igual que hoy.
+
+## La tabla (aditiva, no toca el vínculo)
+
+```prisma
+model TerminalAttemptResolution {
+  id         String   @id @default(cuid())
+  attemptId  String   @unique   // un intento se declara UNA sola vez
+  venueId    String
+  terminalId String              // llave normalizada, como en TerminalPaymentRequest
+  resolution Json                // el MISMO OperatorResolution que el vínculo
+  createdAt  DateTime @default(now())
+  @@index([venueId, terminalId, createdAt])
+}
+```
+
+La inmutabilidad la da el `@unique` + `create`: un P2002 es «ya declarado» ⇒ replay idempotente si
+el `resolutionId` coincide, `RESOLUTION_CONFLICT` si no. Misma semántica que el trigger del vínculo,
+sin tocarlo.
+
+🔴 **Una aprobación tardía NO borra la declaración**: la fila se conserva y la contradicción se
+publica, igual que en el carril del POS.
+
+## Cómo se entera la terminal (la parte acoplada con C)
+
+La señal de liberación que el cliente lee hoy viaja en `request.outcome === 'NOT_CHARGED'`, y en un
+cobro local **no hay `request`**. Por eso S6 gana un campo **aditivo**: `attempt.resolution`
+(`null` cuando nadie declaró). `consultarIntentoDeTerminal` —que desde la pieza A ya contesta sin
+vínculo— lee esa tabla y lo expone. El cliente suelta su fila al verlo.
+
+**Contrato:** aditivo. Un APK de la calle ignora el campo y se comporta como hoy.

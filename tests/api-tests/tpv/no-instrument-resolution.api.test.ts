@@ -157,7 +157,8 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
     expect(res.body.success).toBe(true)
     expect(res.body.resolution).toMatchObject({ id: resolutionId, by: 'SESSION' })
     expect(typeof res.body.resolution.acceptedAt).toBe('string')
-    // Contrato con las apps publicadas: TODO lo que S6 ya devolvía sigue ahí.
+    // Contrato con las apps publicadas: TODO lo que S6 ya devolvía sigue ahí. Los campos NUEVOS son aditivos — un APK
+    // de la calle los ignora — y se listan aquí a propósito: si alguno desapareciera, esta prueba lo caza.
     expect(res.body).toMatchObject({ attemptId, requestId })
     expect(Object.keys(res.body.attempt).sort()).toEqual(
       [
@@ -175,6 +176,9 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
         'recordedVia',
         'tipCents',
         'winnerPaymentId',
+        // «Ninguna terminal muerta» (22-sep): la declaración del cajero y el aviso de evidencia sin dueño.
+        'resolution',
+        'unattributedEvidence',
       ].sort(),
     )
     expect(res.body.request).toMatchObject({

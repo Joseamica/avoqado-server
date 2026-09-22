@@ -386,16 +386,57 @@ async function apartarLugar(
  * reintento) decrementarían el contador DOS veces y la campaña regalaría un lugar de cupo.
  */
 export async function liberarLugar(redemptionId: string, campaignId: string, motivo: string): Promise<boolean> {
+  return prisma.$transaction(tx => liberarLugarEn(tx, redemptionId, campaignId, motivo))
+}
+
+/** El cuerpo de {@link liberarLugar}, para poder liberar DENTRO de la transacción que acredita la propiedad (Codex #14). */
+async function liberarLugarEn(
+  tx: Prisma.TransactionClient,
+  redemptionId: string,
+  campaignId: string,
+  motivo: string,
+): Promise<boolean> {
+  const r = await tx.launchCampaignRedemption.updateMany({
+    where: { id: redemptionId, status: REDEMPTION_STATUS.RESERVED },
+    data: { status: REDEMPTION_STATUS.RELEASED, releasedAt: new Date(), lastError: motivo.slice(0, 300) },
+  })
+  if (r.count === 0) return false
+  await tx.launchCampaign.updateMany({
+    where: { id: campaignId, redemptionCount: { gt: 0 } },
+    data: { redemptionCount: { decrement: 1 } },
+  })
+  return true
+}
+
+/**
+ * 🔴 Codex #14: acreditar la propiedad del intento y liberar el lugar van en UNA transacción.
+ *
+ * Estaban en dos: entre la primera y la segunda, otra petición tomaba un intento nuevo y reusaba la reserva —que
+ * seguía `RESERVED`—, y esta liberación se la quitaba por debajo. Comprobar el `count` antes de abrir otra
+ * transacción no cierra esa ventana, sólo la hace más corta. Y si no somos los dueños, no se libera nada.
+ *
+ * `estadoFinal` es el estado al que pasa el intento: el previo cuando no hubo cobro, `DECLINED` cuando el banco
+ * rechazó. Devuelve si la fila era nuestra.
+ */
+async function cerrarIntentoYLiberarLugar(args: {
+  organizationId: string
+  attempt: number
+  lease: Date
+  estadoFinal: string
+  lugar: { redemptionId: string; campaignId: string; motivo: string } | null
+}): Promise<boolean> {
   return prisma.$transaction(async tx => {
-    const r = await tx.launchCampaignRedemption.updateMany({
-      where: { id: redemptionId, status: REDEMPTION_STATUS.RESERVED },
-      data: { status: REDEMPTION_STATUS.RELEASED, releasedAt: new Date(), lastError: motivo.slice(0, 300) },
+    const { count } = await tx.onboardingProgress.updateMany({
+      where: {
+        organizationId: args.organizationId,
+        planActivationStatus: PLAN_ACTIVATION_STATUS.IN_PROGRESS,
+        planActivationAttempt: args.attempt,
+        planActivationLeaseUntil: args.lease,
+      },
+      data: { planActivationStatus: args.estadoFinal as never, planActivationLeaseUntil: null },
     })
-    if (r.count === 0) return false
-    await tx.launchCampaign.updateMany({
-      where: { id: campaignId, redemptionCount: { gt: 0 } },
-      data: { redemptionCount: { decrement: 1 } },
-    })
+    if (count === 0) return false
+    if (args.lugar) await liberarLugarEn(tx, args.lugar.redemptionId, args.lugar.campaignId, args.lugar.motivo)
     return true
   })
 }
@@ -750,24 +791,27 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
       if (!intentoCobrar) {
         // La regla lo rechazó ANTES de cobrar (un plan vivo, otra compra en curso, Stripe sin verificar): no hubo cargo,
         // así que el lease y el lugar vuelven a como estaban, y su mensaje explica qué pasa.
-        if (redemption && campaign) await liberarLugar(redemption.id, campaign.id, 'PLAN_PURCHASE_NOT_AUTHORIZED')
-        await soltarLease(organizationId, prev.status, attempt, nuestroLease)
+        // 🔴 Codex #14: el estado y el lugar se cierran JUNTOS, y sólo si el intento sigue siendo nuestro.
+        await cerrarIntentoYLiberarLugar({
+          organizationId,
+          attempt,
+          lease: nuestroLease,
+          estadoFinal: prev.status,
+          lugar: redemption && campaign ? { redemptionId: redemption.id, campaignId: campaign.id, motivo: 'PLAN_PURCHASE_NOT_AUTHORIZED' } : null,
+        })
         throw error
       }
       if (esErrorDeTarjeta(error)) {
         // ---- PASO 10: rechazo del banco ----
         // 🔴 Marcar el rechazo y liberar el lugar van JUNTOS (Codex R4): si el intento ya no es de esta petición —otra
         // recuperó el lease y está cobrando con ese mismo lugar—, liberarlo le quitaría el cupo a un cobro vivo.
-        const rechazado409 = await prisma.onboardingProgress.updateMany({
-          where: {
-            organizationId,
-            planActivationStatus: PLAN_ACTIVATION_STATUS.IN_PROGRESS,
-            planActivationAttempt: attempt,
-            planActivationLeaseUntil: nuestroLease,
-          },
-          data: { planActivationStatus: PLAN_ACTIVATION_STATUS.DECLINED, planActivationLeaseUntil: null },
+        await cerrarIntentoYLiberarLugar({
+          organizationId,
+          attempt,
+          lease: nuestroLease,
+          estadoFinal: PLAN_ACTIVATION_STATUS.DECLINED,
+          lugar: redemption && campaign ? { redemptionId: redemption.id, campaignId: campaign.id, motivo: 'PLAN_PAYMENT_DECLINED' } : null,
         })
-        if (rechazado409.count === 1 && redemption && campaign) await liberarLugar(redemption.id, campaign.id, 'PLAN_PAYMENT_DECLINED')
         const e = error as unknown as { message?: string; decline_code?: string; code?: string }
         throw rechazado(e.message || 'Tu banco rechazó la tarjeta', e.decline_code ?? e.code)
       }
@@ -794,8 +838,13 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
     const lleva = descuentos.some(d => typeof d !== 'string' && d?.coupon?.id === cuponEsperado)
     if (!lleva) {
       logger.error('🚨 activate-plan: se reusó una suscripción sin el cupón de la oferta', { organizationId, subscriptionId })
-      if (redemption && campaign) await liberarLugar(redemption.id, campaign.id, 'REUSED_WITHOUT_COUPON')
-      await soltarLease(organizationId, prev.status, attempt, nuestroLease)
+      await cerrarIntentoYLiberarLugar({
+        organizationId,
+        attempt,
+        lease: nuestroLease,
+        estadoFinal: prev.status,
+        lugar: redemption && campaign ? { redemptionId: redemption.id, campaignId: campaign.id, motivo: 'REUSED_WITHOUT_COUPON' } : null,
+      })
       throw new ConflictError(
         'Este negocio ya tiene un plan activo sin esta oferta, así que no se puede aplicar encima.',
         'PLAN_ACTIVE_WITHOUT_OFFER',

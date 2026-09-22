@@ -3479,7 +3479,17 @@ router.get(
  *           type: string
  *     responses:
  *       200:
- *         description: "{ success, attemptId, requestId, attempt: { outcome, paymentId, paymentStatus, recordedVia, amountCents, tipCents, isWinner, winnerPaymentId, processorEvidence, processorEvidenceAt, linkedAt }, request: { …estado de la solicitud, closedVia, winnerAttemptId } }"
+ *         description: >
+ *           "{ success, attemptId, requestId, attempt: { outcome, paymentId, paymentStatus, recordedVia, amountCents,
+ *           tipCents, isWinner, winnerPaymentId, processorEvidence, processorEvidenceAt, paymentContradiction,
+ *           evidenceContradiction, unattributedEvidence, resolution, linkedAt }, request: { …estado de la solicitud,
+ *           closedVia, winnerAttemptId } }".
+ *           🔴 En un cobro LOCAL (Pago rápido, iniciado EN la terminal, sin solicitud del POS) `requestId`, `request` y
+ *           `linkedAt` son **null** — no hay solicitud que proyectar — y la declaración del cajero viaja en
+ *           `attempt.resolution` en lugar de en `request.outcome`. `attempt.unattributedEvidence` avisa de evidencia del
+ *           procesador que el servidor no pudo atribuir a nadie: mientras esté en true, NINGUNA declaración sirve para
+ *           liberar la venta, igual que `paymentContradiction` y `evidenceContradiction`. Ningún dato del pago o del
+ *           negocio ajeno se publica: sólo que existe algo que contradice.
  *       403:
  *         description: El token no lleva identidad de terminal (TERMINAL_IDENTITY_REQUIRED) o el venue no es el del token
  *       404:
@@ -3492,6 +3502,49 @@ router.get(
   authenticateTokenMiddleware,
   validateVenueAccess,
   terminalPaymentTpvController.getAttemptStatus,
+)
+
+/**
+ * @openapi
+ * /api/v1/tpv/venues/{venueId}/terminal-payment/requests/{requestId}:
+ *   get:
+ *     tags: [TPV - Terminal Payment]
+ *     summary: Estado de UNA solicitud de cobro, para la terminal dueña (pieza D)
+ *     description: >
+ *       La hermana de la consulta por intento, pero por SOLICITUD. Existe porque una fila de la bandeja de la
+ *       terminal puede quedar sin intento correlacionado: entonces nada la alcanza —toda la recuperación pregunta
+ *       por intento— y el aviso de «cobro sin confirmar» se queda para siempre, aunque el servidor ya lo haya
+ *       resuelto. Sólo lectura, con la misma pertenencia que la consulta por intento: venue del token y terminal
+ *       del JWT. Devuelve `{ success, requestId, request: {…la proyección de siempre…, closedVia}, resuelta }`.
+ *       🔴 `resuelta` dice que el servidor ya NO cuenta esa solicitud como desenlace pendiente — se calcula con el
+ *       MISMO predicado que retiene la ranura. NUNCA acredita por sí sola ausencia de cobro: eso lo dicen `outcome`
+ *       y `outcomeEvidence`.
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: requestId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: "{ success, requestId, request: { …, closedVia }, resuelta }"
+ *       403:
+ *         description: El token no lleva identidad de terminal (TERMINAL_IDENTITY_REQUIRED) o el venue no es el del token
+ *       404:
+ *         description: "{ status: REQUEST_NOT_FOUND } — no es de esta terminal. No acredita nada sobre el cobro"
+ *       401:
+ *         description: Unauthorized
+ */
+router.get(
+  '/venues/:venueId/terminal-payment/requests/:requestId',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  terminalPaymentTpvController.getRequestStatus,
 )
 
 /**
@@ -3534,10 +3587,15 @@ router.get(
  *         application/json:
  *           schema:
  *             type: object
- *             required: [requestId, resolutionId, statement, statementVersion]
+ *             required: [resolutionId, statement, statementVersion]
  *             properties:
  *               requestId:
  *                 type: string
+ *                 description: >
+ *                   La solicitud del POS. OPCIONAL desde el 22-sep («ninguna terminal muerta»): un Pago rápido —cobro
+ *                   iniciado EN la terminal— no tiene solicitud, y exigirla dejaba al cajero sin salida con el aparato
+ *                   apartado. Omitirla NO elige el camino: si el intento tiene vínculo, el servidor aplica igualmente
+ *                   las guardas de su solicitud, y un valor que contradiga al vínculo es un 404.
  *               resolutionId:
  *                 type: string
  *                 format: uuid
