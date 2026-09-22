@@ -12,6 +12,7 @@ import {
   logWaste,
   prepareWaste,
   recoverByKey,
+  requireWasteActivation,
   requireWastePermission,
   voidWasteKey,
   WasteInput,
@@ -827,8 +828,8 @@ test('sin ninguno de los dos permisos, sin acceso o con folio inválido: rechazo
   expect(hasWastePermission(viewerAccess, 'inventory:adjust')).toBe(false)
 
   const key = randomUUID()
-  await expect(voidWasteKey(venueId, viewerId, key)).rejects.toMatchObject({ statusCode: 403 })
-  await expect(voidWasteKey(venueId, outsiderId, key)).rejects.toMatchObject({ statusCode: 403 })
+  await expect(voidWasteKey(venueId, viewerId, key)).rejects.toMatchObject({ statusCode: 403, code: 'WASTE_PERMISSION_DENIED' })
+  await expect(voidWasteKey(venueId, outsiderId, key)).rejects.toMatchObject({ statusCode: 403, code: 'WASTE_ACCESS_REVOKED' })
   await expect(voidWasteKey(venueId, staffId, 'no-es-un-uuid')).rejects.toMatchObject({
     statusCode: 422,
     code: 'INVALID_WASTE_KEY',
@@ -842,7 +843,7 @@ test('sin ninguno de los dos permisos, sin acceso o con folio inválido: rechazo
   expect(applied).toMatchObject({ deducted: '2' })
 
   // Y sobre un APPLIED el VIEWER tampoco se entera de nada.
-  await expect(voidWasteKey(venueId, viewerId, key)).rejects.toMatchObject({ statusCode: 403 })
+  await expect(voidWasteKey(venueId, viewerId, key)).rejects.toMatchObject({ statusCode: 403, code: 'WASTE_PERMISSION_DENIED' })
   expect(await productStock(item.id)).toBe('8')
 })
 
@@ -877,7 +878,7 @@ test('🔴 con log-waste QUITADO por el venue: el gerente anula por inventory:ad
 
     // Contraste: el mesero, sin ninguno de los dos, recibe 403 y no deja lápida.
     const deniedKey = randomUUID()
-    await expect(voidWasteKey(venueId, waiterBId, deniedKey)).rejects.toMatchObject({ statusCode: 403 })
+    await expect(voidWasteKey(venueId, waiterBId, deniedKey)).rejects.toMatchObject({ statusCode: 403, code: 'WASTE_PERMISSION_DENIED' })
     expect(await prisma.inventoryWasteReport.count({ where: { venueId, idempotencyKey: deniedKey } })).toBe(0)
     expect(await productStock(item.id)).toBe('8')
   } finally {
@@ -1316,6 +1317,33 @@ test('los permisos previos a la activación son EXACTAMENTE los de getUserAccess
   }
 })
 
+test('🔴 requireWasteActivation (paso previo HTTP, Ruling 18) mira acceso, cuenta y activación, NUNCA el permiso', async () => {
+  // Sin white-label: el VIEWER no tiene log-waste, pero la activación no lo evalúa — eso le toca a
+  // checkPermission, que es la única autoridad que respeta el PIN de gerente.
+  await expect(requireWasteActivation(viewerId, venueId)).resolves.toMatchObject({ role: 'VIEWER' })
+  await expect(requireWastePermission(viewerId, venueId, 'inventory:log-waste')).rejects.toMatchObject({
+    statusCode: 403,
+    code: 'WASTE_PERMISSION_DENIED',
+  })
+  // Con permiso, el camino completo (el del MCP) pasa.
+  await expect(requireWastePermission(waiterAId, venueId, 'inventory:log-waste')).resolves.toMatchObject({ role: 'WAITER' })
+
+  // Sin acceso al venue.
+  await expect(requireWasteActivation(outsiderId, venueId)).rejects.toMatchObject({ statusCode: 403, code: 'WASTE_ACCESS_REVOKED' })
+
+  // Cuenta dada de baja con la membresía todavía activa.
+  await prisma.staff.update({ where: { id: waiterBId }, data: { active: false } })
+  try {
+    await expect(requireWasteActivation(waiterBId, venueId)).rejects.toMatchObject({ statusCode: 403, code: 'WASTE_ACCOUNT_INACTIVE' })
+    await expect(requireWastePermission(waiterBId, venueId, 'inventory:log-waste')).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'WASTE_ACCOUNT_INACTIVE',
+    })
+  } finally {
+    await prisma.staff.update({ where: { id: waiterBId }, data: { active: true } })
+  }
+})
+
 test('anular cierra folios aunque el white-label apague el inventario; permisos y privacidad se respetan', async () => {
   const item = await product(5)
   const byManager = await logWaste(venueId, staffId, request('PRODUCT', item.id, 2))
@@ -1347,7 +1375,13 @@ test('anular cierra folios aunque el white-label apague el inventario; permisos 
     expect(filtered.corePermissions).not.toContain('inventory:log-waste')
     expect((await getWasteAccess(waiterAId, venueId)).corePermissions).not.toContain('inventory:log-waste')
     // …y registrar una merma NUEVA sigue exigiendo la activación: eso no cambia.
-    await expect(requireWastePermission(waiterAId, venueId, 'inventory:log-waste')).rejects.toMatchObject({ statusCode: 403 })
+    await expect(requireWastePermission(waiterAId, venueId, 'inventory:log-waste')).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'WASTE_INVENTORY_DISABLED',
+    })
+    // …y el paso previo de las rutas HTTP (Ruling 18) corta ANTES de checkPermission: el PIN de gerente no se quema.
+    await expect(requireWasteActivation(waiterAId, venueId)).rejects.toMatchObject({ statusCode: 403, code: 'WASTE_INVENTORY_DISABLED' })
+    await expect(requireWasteActivation(staffId, venueId)).rejects.toMatchObject({ statusCode: 403, code: 'WASTE_INVENTORY_DISABLED' })
 
     // Anular sí: el gerente y el mesero cierran folios pendientes.
     await expect(voidWasteKey(venueId, staffId, randomUUID())).resolves.toMatchObject({ outcome: 'VOIDED', voidedByStaffId: staffId })
@@ -1362,12 +1396,12 @@ test('anular cierra folios aunque el white-label apague el inventario; permisos 
 
     // Sin nada concedido sigue el 403 sin lápida: el VIEWER, y un mesero con un Conjunto vacío.
     const viewerKey = randomUUID()
-    await expect(voidWasteKey(venueId, viewerId, viewerKey)).rejects.toMatchObject({ statusCode: 403 })
+    await expect(voidWasteKey(venueId, viewerId, viewerKey)).rejects.toMatchObject({ statusCode: 403, code: 'WASTE_PERMISSION_DENIED' })
     const set = await prisma.permissionSet.create({ data: { venueId, name: `Sin permisos ${randomUUID()}`, permissions: [] } })
     permissionSetId = set.id
     await prisma.staffVenue.update({ where: { staffId_venueId: { staffId: waiterAId, venueId } }, data: { permissionSetId } })
     const deniedKey = randomUUID()
-    await expect(voidWasteKey(venueId, waiterAId, deniedKey)).rejects.toMatchObject({ statusCode: 403 })
+    await expect(voidWasteKey(venueId, waiterAId, deniedKey)).rejects.toMatchObject({ statusCode: 403, code: 'WASTE_PERMISSION_DENIED' })
     expect(await prisma.inventoryWasteReport.count({ where: { venueId, idempotencyKey: { in: [viewerKey, deniedKey] } } })).toBe(0)
 
     // Anular no movió existencia: 5 − 2 − 1, y sólo los dos movimientos de las mermas.

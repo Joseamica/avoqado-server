@@ -2224,12 +2224,18 @@ router.get(
  * Catálogo de artículos que se pueden mermar (ingredientes activos + productos por cantidad):
  * `{ items: [{ itemType, itemId, name, sku, unit }], total, page, pageSize }`. SIN existencias ni
  * costos: `inventory:log-waste` no concede `inventory:read`. `pageSize` hostil ⇒ se recorta a 200.
+ *
+ * 🔴 PIN de gerente (Ruling 18): TODO rechazo va ANTES de `checkPermission` —la query y la
+ * activación/cuenta (`requireActivation`)— porque `checkPermission` gasta el token de un solo uso
+ * de `X-Permission-Override`. Después de él sólo queda leer.
  */
 router.get(
   '/venues/:venueId/inventory/waste-items',
   authenticateTokenMiddleware,
   requireVenueMembership,
+  wasteController.parseItemsQuery,
   checkFeatureAccess('INVENTORY_TRACKING'),
+  wasteController.requireActivation,
   checkPermission('inventory:log-waste'),
   wasteController.listItems,
 )
@@ -2240,10 +2246,12 @@ router.get(
  * 201 `{ reportId, declared, deducted, unrecorded }`. La merma nunca se rechaza por falta de
  * existencia: descuenta lo que haya y reporta el resto en `unrecorded`.
  *
- * 🔴 El ORDEN es el contrato: membresía → recuperar por folio → plan → permiso → registrar. Sólo
- * los candados de escritura NUEVA van detrás del folio: un reintento de una merma ya aplicada
- * recupera su resumen aunque entre tanto se revocara el permiso o venciera el plan, pero nunca por
- * quien ya no pertenece al venue.
+ * 🔴 El ORDEN es el contrato: membresía → recuperar por folio (valida el cuerpo) → plan →
+ * activación/cuenta → permiso → registrar. Sólo los candados de escritura NUEVA van detrás del
+ * folio: un reintento de una merma ya aplicada recupera su resumen aunque entre tanto se revocara
+ * el permiso o venciera el plan, pero nunca por quien ya no pertenece al venue.
+ * 🔴 PIN de gerente (Ruling 18): el permiso lo decide SÓLO `checkPermission` (respeta
+ * `X-Permission-Override`); la activación va ANTES para que su 403 no queme el token.
  */
 router.post(
   '/venues/:venueId/inventory/waste',
@@ -2251,6 +2259,7 @@ router.post(
   requireVenueMembership,
   wasteController.recover,
   checkFeatureAccess('INVENTORY_TRACKING'),
+  wasteController.requireActivation,
   checkPermission('inventory:log-waste'),
   wasteController.create,
 )

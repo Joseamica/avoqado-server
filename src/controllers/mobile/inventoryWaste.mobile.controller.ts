@@ -9,14 +9,22 @@
  * de plan y de permiso (orden de middlewares en `mobile.routes.ts`): una respuesta perdida se
  * recupera aunque entre tanto se revocara el permiso o venciera el plan, pero sólo por quien sigue
  * perteneciendo al venue (`requireVenueMembership` corre antes que los dos).
+ *
+ * 🔴 PIN de gerente (Ruling 18): el permiso lo decide SÓLO `checkPermission`, que respeta el
+ * token de un solo uso `X-Permission-Override` — las dos apps lo piden solas ante un 403
+ * `overridable`. Lo que `checkPermission` no mira (acceso vigente, cuenta activa, activación
+ * white-label del inventario) va en `requireActivation`, montado ANTES de él, y la validación de
+ * la entrada también: ningún rechazo POSTERIOR a `checkPermission` puede quemar el PIN. Por eso
+ * estos manejadores ya no llaman `requireWastePermission` (ése es el camino completo del MCP).
  */
 import { NextFunction, Request, Response } from 'express'
 import { ForbiddenError, UnauthorizedError } from '../../errors/AppError'
+import { IMPERSONATION_ERROR_CODES } from '../../types/impersonation'
 import {
   logWaste,
   prepareWaste,
   recoverByKey,
-  requireWastePermission,
+  requireWasteActivation,
   voidWasteKey,
   WasteInput,
 } from '../../services/shared/inventoryWaste.service'
@@ -27,7 +35,7 @@ import { parseWasteSchema, VoidWasteBodySchema, WasteBodySchema, WasteQuerySchem
 function actor(req: Request, write = false): string {
   if (!req.authContext?.userId) throw new UnauthorizedError()
   if (write && req.authContext.isImpersonating) {
-    throw new ForbiddenError('La sesión de suplantación es de solo lectura.')
+    throw new ForbiddenError('La sesión de suplantación es de solo lectura.', IMPERSONATION_ERROR_CODES.READ_ONLY)
   }
   return req.authContext.userId
 }
@@ -72,13 +80,27 @@ export async function recover(req: Request, res: Response, next: NextFunction): 
 }
 
 /**
- * Paso 2 del POST, tras plan y permiso: registra la merma. `requireWastePermission` añade lo que
- * `checkPermission` no mira — la activación white-label de inventario y la cuenta activa.
+ * Paso previo de las rutas de merma, ANTES de `checkPermission`: acceso vigente, cuenta activa y
+ * activación white-label (`403 WASTE_ACCESS_REVOKED | WASTE_ACCOUNT_INACTIVE |
+ * WASTE_INVENTORY_DISABLED`). NO evalúa el permiso: si lo hiciera, un KITCHEN autorizado con el
+ * PIN de gerente recibiría 403 después de que `checkPermission` ya gastó el token.
+ */
+export async function requireActivation(req: Request, _res: Response, next: NextFunction): Promise<void> {
+  try {
+    await requireWasteActivation(actor(req), req.params.venueId)
+    next()
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Paso 2 del POST, tras plan, activación y permiso (este último puede venir del PIN de gerente):
+ * registra la merma. El cuerpo ya se validó en `recover`, antes de `checkPermission`.
  */
 export async function create(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const staffId = actor(req, true)
-    await requireWastePermission(staffId, req.params.venueId, 'inventory:log-waste')
     res.status(201).json(await logWaste(req.params.venueId, staffId, wasteInput(req)))
   } catch (error) {
     next(error)
@@ -106,11 +128,23 @@ function itemDelCatalogo(item: WasteItem): WasteItem {
   return { itemType: item.itemType, itemId: item.itemId, name: item.name, sku: item.sku, unit: item.unit }
 }
 
+/**
+ * Valida la query del catálogo ANTES de `checkPermission` (una query inválida no puede quemar el
+ * PIN de gerente) y la deja lista en `res.locals.wasteQuery`.
+ */
+export function parseItemsQuery(req: Request, res: Response, next: NextFunction): void {
+  try {
+    res.locals.wasteQuery = parseWasteSchema(WasteQuerySchema, req.query)
+    next()
+  } catch (error) {
+    next(error)
+  }
+}
+
 /** Catálogo paginado de artículos que se pueden mermar. `pageSize` hostil ⇒ se recorta a 200. */
 export async function listItems(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const query = parseWasteSchema(WasteQuerySchema, req.query)
-    await requireWastePermission(actor(req), req.params.venueId, 'inventory:log-waste')
+    const query = res.locals.wasteQuery ?? parseWasteSchema(WasteQuerySchema, req.query)
     const result = await listWasteItems(req.params.venueId, { page: query.page, pageSize: query.pageSize, search: query.search })
     res.json({ items: result.items.map(itemDelCatalogo), total: result.total, page: result.page, pageSize: result.pageSize })
   } catch (error) {

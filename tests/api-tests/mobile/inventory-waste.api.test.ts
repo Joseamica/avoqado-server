@@ -21,6 +21,12 @@
   🔴 `null` = ausente: el POS Android serializa con `encodeDefaults = true`, así que un opcional
   que no aplica viaja como `"note": null`. Rechazarlo mataría toda merma sin nota (misma familia
   que el reembolso del 11-sep).
+
+  🔴 PIN de gerente (Ruling 18): el permiso lo decide SÓLO `checkPermission`, que respeta el token
+  de un solo uso `X-Permission-Override` (las dos apps lo piden solas ante un 403 `overridable`).
+  Lo que `checkPermission` no mira —acceso vigente, cuenta activa y activación white-label— es un
+  paso previo (`requireWasteActivation`) montado ANTES, para que ningún rechazo posterior queme el
+  PIN. La ruta HTTP ya no llama `requireWastePermission` (ése es el camino completo del MCP).
 */
 process.env.NODE_ENV = process.env.NODE_ENV || 'test'
 process.env.ACCESS_TOKEN_SECRET = process.env.ACCESS_TOKEN_SECRET || 'test-access-secret'
@@ -44,12 +50,14 @@ const logWaste = jest.fn()
 const recoverByKey = jest.fn()
 const voidWasteKey = jest.fn()
 const requireWastePermission = jest.fn()
+const requireWasteActivation = jest.fn()
 jest.mock('../../../src/services/shared/inventoryWaste.service', () => ({
   ...jest.requireActual('../../../src/services/shared/inventoryWaste.service'),
   logWaste: (...a: unknown[]) => logWaste(...a),
   recoverByKey: (...a: unknown[]) => recoverByKey(...a),
   voidWasteKey: (...a: unknown[]) => voidWasteKey(...a),
   requireWastePermission: (...a: unknown[]) => requireWastePermission(...a),
+  requireWasteActivation: (...a: unknown[]) => requireWasteActivation(...a),
 }))
 const listWasteItems = jest.fn()
 const listWasteReports = jest.fn()
@@ -60,6 +68,7 @@ jest.mock('../../../src/services/shared/inventoryWasteRead.service', () => ({
 
 const { prepareWaste } = jest.requireActual('../../../src/services/shared/inventoryWaste.service')
 const app = require('../../../src/app').default
+const wasteController = require('../../../src/controllers/mobile/inventoryWaste.mobile.controller')
 
 const venueId = 'clvenuewaste000000000001'
 const otherVenueId = 'clvenuewaste000000000002'
@@ -100,6 +109,33 @@ function textos(body: any): string[] {
   return [body?.message, ...(detalles.formErrors ?? []), ...campos].filter(Boolean)
 }
 
+const OVERRIDE = 'tok-override-merma-0001'
+
+/**
+ * El venue tiene prendido el PIN de gerente y existe UN token vivo para `inventory:log-waste` en
+ * este venue. Mismo contrato que prueba `checkPermission.middleware.test.ts`: el `updateMany`
+ * condicional es el que consume; aquí además recuerda que ya se usó, como lo haría la base.
+ */
+function pinDeGerenteValido() {
+  prismaMock.venueSettings.findUnique.mockResolvedValue({ managerPinOverrideEnabled: true })
+  let usado = false
+  prismaMock.permissionOverride.updateMany.mockImplementation(async (args: any) => {
+    const w = args?.where ?? {}
+    if (usado || w.token !== OVERRIDE || w.venueId !== venueId || w.permission !== 'inventory:log-waste' || w.consumedAt !== null) {
+      return { count: 0 }
+    }
+    usado = true
+    return { count: 1 }
+  })
+  prismaMock.permissionOverride.findUnique.mockResolvedValue({ authorizedById: 'sv_gerente' })
+}
+
+/** Lo que haría el servicio real ante un KITCHEN: sin `inventory:log-waste` y sin saber del PIN. */
+const NEGADO_POR_EL_SERVICIO = () => new ForbiddenError('No tienes permiso para esta operación de inventario.', 'WASTE_PERMISSION_DENIED')
+
+const INVENTARIO_APAGADO = () =>
+  new ForbiddenError('El inventario no está habilitado para tu usuario en este establecimiento.', 'WASTE_INVENTORY_DISABLED')
+
 /** El WAITER con `inventory:log-waste` revocado por su venue, con la membresía intacta. */
 function revocarLogWaste() {
   prismaMock.venueRolePermission.findUnique.mockResolvedValue({ permissions: [], deniedPermissions: ['inventory:log-waste'] })
@@ -113,10 +149,17 @@ beforeEach(() => {
   prismaMock.staffOrganization.findUnique.mockResolvedValue(null)
   prismaMock.venueRolePermission.findUnique.mockResolvedValue(null)
   prismaMock.venueFeature.findFirst.mockResolvedValue(CONCESION as never)
+  prismaMock.venueSettings.findUnique.mockResolvedValue(null)
+  prismaMock.permissionOverride.updateMany.mockResolvedValue({ count: 0 })
+  prismaMock.permissionOverride.findUnique.mockResolvedValue(null)
   recoverByKey.mockResolvedValue(null)
   logWaste.mockResolvedValue(RESUMEN)
   voidWasteKey.mockResolvedValue({ outcome: 'VOIDED', voidedByStaffId: 'user_test', voidedAt: '2026-09-21T00:00:00.000Z' })
-  requireWastePermission.mockResolvedValue({})
+  // 🔴 El camino HTTP NO debe re-evaluar el permiso (Ruling 18): si alguien vuelve a llamar
+  // `requireWastePermission` desde una ruta, contesta como el servicio real ante quien no trae el
+  // permiso — y el PIN de gerente vuelve a quemarse sin merma.
+  requireWastePermission.mockRejectedValue(NEGADO_POR_EL_SERVICIO())
+  requireWasteActivation.mockResolvedValue({})
   listWasteItems.mockResolvedValue(PAGINA_VACIA)
   listWasteReports.mockResolvedValue(PAGINA_VACIA)
 })
@@ -136,8 +179,9 @@ describe('POST …/inventory/waste', () => {
     expect(res.status).toBe(201)
     expect(res.body).toEqual(RESUMEN)
     expect(logWaste).toHaveBeenCalledWith(venueId, 'user_test', expect.objectContaining({ source: 'POS', reasonCode: 'DROPPED' }))
-    // El candado white-label (AVOQADO_INVENTORY) lo pone el servicio, no checkPermission.
-    expect(requireWastePermission).toHaveBeenCalledWith('user_test', venueId, 'inventory:log-waste')
+    // Lo que checkPermission no mira (cuenta, white-label) lo pone el paso previo; el permiso, sólo checkPermission.
+    expect(requireWasteActivation).toHaveBeenCalledWith('user_test', venueId)
+    expect(requireWastePermission).not.toHaveBeenCalled()
   })
 
   it.each(['KITCHEN', 'HOST', 'VIEWER'])('🔴 403 real para %s, sin tocar existencias', async role => {
@@ -231,14 +275,83 @@ describe('POST …/inventory/waste', () => {
     expect(logWaste).toHaveBeenCalledWith(venueId, 'user_test', expect.objectContaining({ source: 'POS' }))
   })
 
-  it('🔴 el candado white-label del servicio (requireWastePermission) corta con 403 antes de registrar', async () => {
-    requireWastePermission.mockRejectedValue(new ForbiddenError('No tienes permiso para esta operación de inventario.'))
+  it.each([
+    ['WASTE_INVENTORY_DISABLED', 'El inventario no está habilitado para tu usuario en este establecimiento.'],
+    ['WASTE_ACCOUNT_INACTIVE', 'La cuenta ya no está activa.'],
+    ['WASTE_ACCESS_REVOKED', 'Ya no tienes acceso a este establecimiento.'],
+  ])('🔴 el paso previo (activación / cuenta / acceso) corta con 403 %s antes de registrar', async (code, message) => {
+    requireWasteActivation.mockRejectedValue(new ForbiddenError(message, code))
     const res = await request(app)
       .post(`${BASE}/waste`)
       .set('Authorization', `Bearer ${token('WAITER')}`)
       .send(cuerpo)
     expect(res.status).toBe(403)
+    expect(res.body.code).toBe(code)
     expect(logWaste).not.toHaveBeenCalled()
+  })
+
+  describe('🔴 PIN de gerente (Ruling 18): la merma respeta el override como el resto de la plataforma', () => {
+    it('sin PIN y con la función prendida, el 403 del permiso trae overridable: las apps lo piden solas', async () => {
+      prismaMock.venueSettings.findUnique.mockResolvedValue({ managerPinOverrideEnabled: true })
+      const res = await request(app)
+        .post(`${BASE}/waste`)
+        .set('Authorization', `Bearer ${token('KITCHEN')}`)
+        .send(cuerpo)
+      expect(res.status).toBe(403)
+      expect(res.body).toMatchObject({ required: 'inventory:log-waste', overridable: true })
+      expect(logWaste).not.toHaveBeenCalled()
+    })
+
+    it('(a) KITCHEN con un PIN válido → 201, la merma ocurre y el token se consume UNA sola vez', async () => {
+      pinDeGerenteValido()
+      const res = await request(app)
+        .post(`${BASE}/waste`)
+        .set('Authorization', `Bearer ${token('KITCHEN')}`)
+        .set('X-Permission-Override', OVERRIDE)
+        .send(cuerpo)
+      expect(res.status).toBe(201)
+      expect(res.body).toEqual(RESUMEN)
+      expect(logWaste).toHaveBeenCalledTimes(1)
+      expect(logWaste).toHaveBeenCalledWith(venueId, 'user_test', expect.objectContaining({ source: 'POS' }))
+      expect(prismaMock.permissionOverride.updateMany).toHaveBeenCalledTimes(1)
+      expect(requireWastePermission).not.toHaveBeenCalled()
+
+      // El mismo token no sirve dos veces: una merma NUEVA con él vuelve al 403 de permiso.
+      const otra = await request(app)
+        .post(`${BASE}/waste`)
+        .set('Authorization', `Bearer ${token('KITCHEN')}`)
+        .set('X-Permission-Override', OVERRIDE)
+        .send({ ...cuerpo, idempotencyKey: 'a1e0c7d2-6b1f-4c3a-8d2e-5f9a0b1c2d3e' })
+      expect(otra.status).toBe(403)
+      expect(otra.body).toHaveProperty('required', 'inventory:log-waste')
+      expect(logWaste).toHaveBeenCalledTimes(1)
+    })
+
+    it('(b) white-label con AVOQADO_INVENTORY apagado + PIN válido → 403 y el PIN NO se consume', async () => {
+      pinDeGerenteValido()
+      requireWasteActivation.mockRejectedValue(INVENTARIO_APAGADO())
+      const res = await request(app)
+        .post(`${BASE}/waste`)
+        .set('Authorization', `Bearer ${token('KITCHEN')}`)
+        .set('X-Permission-Override', OVERRIDE)
+        .send(cuerpo)
+      expect(res.status).toBe(403)
+      expect(res.body.code).toBe('WASTE_INVENTORY_DISABLED')
+      expect(prismaMock.permissionOverride.updateMany).not.toHaveBeenCalled()
+      expect(logWaste).not.toHaveBeenCalled()
+    })
+
+    it('un PIN inválido no deja pasar y no registra nada', async () => {
+      pinDeGerenteValido()
+      const res = await request(app)
+        .post(`${BASE}/waste`)
+        .set('Authorization', `Bearer ${token('KITCHEN')}`)
+        .set('X-Permission-Override', 'tok-que-no-existe')
+        .send(cuerpo)
+      expect(res.status).toBe(403)
+      expect(res.body).toHaveProperty('required', 'inventory:log-waste')
+      expect(logWaste).not.toHaveBeenCalled()
+    })
   })
 
   it('422 con un cuerpo inválido, con su código', async () => {
@@ -323,7 +436,19 @@ describe('POST …/inventory/waste', () => {
       },
     )
 
-    it.each([-1, -0.001, true, null])('rechaza la cantidad %j (no es un número no negativo ni un decimal)', async quantity => {
+    it.each([0, '0', '0.000', '00.0'])('🔴 rechaza la cantidad cero %j con 422 INVALID_WASTE_PAYLOAD «mayor que cero»', async quantity => {
+      const res = await request(app)
+        .post(`${BASE}/waste`)
+        .set('Authorization', `Bearer ${token('WAITER')}`)
+        .send({ ...cuerpo, quantity })
+      expect(res.status).toBe(422)
+      expect(res.body.code).toBe('INVALID_WASTE_PAYLOAD')
+      expect(res.body.message).toContain('La cantidad debe ser mayor que cero.')
+      expect(recoverByKey).not.toHaveBeenCalled()
+      expect(logWaste).not.toHaveBeenCalled()
+    })
+
+    it.each([-1, -0.001, true, null])('rechaza la cantidad %j (no es un número positivo ni un decimal)', async quantity => {
       const res = await request(app)
         .post(`${BASE}/waste`)
         .set('Authorization', `Bearer ${token('WAITER')}`)
@@ -453,13 +578,14 @@ describe('POST …/inventory/waste/void', () => {
     expect(voidWasteKey).toHaveBeenCalledWith(venueId, 'user_test', cuerpo.idempotencyKey)
   })
 
-  it('🔴 quien decide el permiso es el servicio: su ForbiddenError sale como 403', async () => {
-    voidWasteKey.mockRejectedValue(new ForbiddenError('No tienes permiso para anular este folio.'))
+  it('🔴 quien decide el permiso es el servicio: su ForbiddenError sale como 403 con su código', async () => {
+    voidWasteKey.mockRejectedValue(new ForbiddenError('No tienes permiso para anular este folio.', 'WASTE_PERMISSION_DENIED'))
     const res = await request(app)
       .post(VOID)
       .set('Authorization', `Bearer ${token('KITCHEN')}`)
       .send({ idempotencyKey: cuerpo.idempotencyKey })
     expect(res.status).toBe(403)
+    expect(res.body.code).toBe('WASTE_PERMISSION_DENIED')
     expect(voidWasteKey).toHaveBeenCalled()
   })
 
@@ -500,7 +626,7 @@ describe('POST …/inventory/waste/void', () => {
 describe('GET …/inventory/waste-items', () => {
   const ITEMS = `${BASE}/waste-items`
 
-  it('pagina y nunca devuelve existencias', async () => {
+  it('200 con la forma del contrato { items, total, page, pageSize } que entrega el lector', async () => {
     const res = await request(app)
       .get(`${ITEMS}?page=1&pageSize=9999`)
       .set('Authorization', `Bearer ${token('WAITER')}`)
@@ -579,13 +705,58 @@ describe('GET …/inventory/waste-items', () => {
     expect(listWasteItems).not.toHaveBeenCalled()
   })
 
-  it('🔴 el candado white-label del servicio corta con 403', async () => {
-    requireWastePermission.mockRejectedValue(new ForbiddenError('No tienes permiso para esta operación de inventario.'))
+  it('🔴 el paso previo (activación white-label) corta con 403 WASTE_INVENTORY_DISABLED', async () => {
+    requireWasteActivation.mockRejectedValue(INVENTARIO_APAGADO())
     const res = await request(app)
       .get(ITEMS)
       .set('Authorization', `Bearer ${token('WAITER')}`)
     expect(res.status).toBe(403)
+    expect(res.body.code).toBe('WASTE_INVENTORY_DISABLED')
     expect(listWasteItems).not.toHaveBeenCalled()
+  })
+
+  it('el paso previo corre con el autor y el venue de la URL, y el permiso ya no se re-evalúa', async () => {
+    const res = await request(app)
+      .get(ITEMS)
+      .set('Authorization', `Bearer ${token('WAITER')}`)
+    expect(res.status).toBe(200)
+    expect(requireWasteActivation).toHaveBeenCalledWith('user_test', venueId)
+    expect(requireWastePermission).not.toHaveBeenCalled()
+  })
+
+  it('(a) KITCHEN con un PIN válido → 200 y el token se consume UNA sola vez', async () => {
+    pinDeGerenteValido()
+    const res = await request(app)
+      .get(ITEMS)
+      .set('Authorization', `Bearer ${token('KITCHEN')}`)
+      .set('X-Permission-Override', OVERRIDE)
+    expect(res.status).toBe(200)
+    expect(listWasteItems).toHaveBeenCalledTimes(1)
+    expect(prismaMock.permissionOverride.updateMany).toHaveBeenCalledTimes(1)
+    expect(requireWastePermission).not.toHaveBeenCalled()
+  })
+
+  it('(b) white-label apagado + PIN válido → 403 y el PIN NO se consume', async () => {
+    pinDeGerenteValido()
+    requireWasteActivation.mockRejectedValue(INVENTARIO_APAGADO())
+    const res = await request(app)
+      .get(ITEMS)
+      .set('Authorization', `Bearer ${token('KITCHEN')}`)
+      .set('X-Permission-Override', OVERRIDE)
+    expect(res.status).toBe(403)
+    expect(res.body.code).toBe('WASTE_INVENTORY_DISABLED')
+    expect(prismaMock.permissionOverride.updateMany).not.toHaveBeenCalled()
+    expect(listWasteItems).not.toHaveBeenCalled()
+  })
+
+  it('🔴 una query inválida sale 422 ANTES de checkPermission: no quema el PIN de gerente', async () => {
+    pinDeGerenteValido()
+    const res = await request(app)
+      .get(`${ITEMS}?page=0`)
+      .set('Authorization', `Bearer ${token('KITCHEN')}`)
+      .set('X-Permission-Override', OVERRIDE)
+    expect(res.status).toBe(422)
+    expect(prismaMock.permissionOverride.updateMany).not.toHaveBeenCalled()
   })
 
   it.each(['page=0', 'page=abc', 'pageSize=0', 'pageSize=-5', 'page=1.5', `search=${'x'.repeat(201)}`])(
@@ -600,4 +771,23 @@ describe('GET …/inventory/waste-items', () => {
       expect(listWasteItems).not.toHaveBeenCalled()
     },
   )
+})
+
+describe('controlador · suplantación', () => {
+  // El middleware de autenticación ya corta las escrituras de una sesión suplantada; ésta es la
+  // segunda capa, y su 403 lleva el MISMO código que el del middleware.
+  it('🔴 recover y voidKey rechazan una sesión suplantada con 403 IMPERSONATION_READ_ONLY', async () => {
+    for (const handler of [wasteController.recover, wasteController.voidKey]) {
+      const next = jest.fn()
+      const req = {
+        authContext: { userId: 'user_test', isImpersonating: true },
+        params: { venueId },
+        body: { ...cuerpo },
+      }
+      await handler(req, {}, next)
+      expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 403, code: 'IMPERSONATION_READ_ONLY' }))
+    }
+    expect(recoverByKey).not.toHaveBeenCalled()
+    expect(voidWasteKey).not.toHaveBeenCalled()
+  })
 })

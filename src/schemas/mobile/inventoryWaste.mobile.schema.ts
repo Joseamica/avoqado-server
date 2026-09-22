@@ -34,17 +34,24 @@ function nullComoAusente<T extends z.ZodTypeAny>(schema: T) {
  *   no los permite, así que se cortan aquí.
  * - Número: se acepta porque Swift codifica `Decimal` como número JSON y el POS iOS lo manda así;
  *   exigir texto rompería la app sin ganar nada, porque el servicio ya rechaza cualquier número con
- *   más de 3 decimales (0.1 + 0.2 no pasa) y fuera de rango. Aquí sólo se exige finito y no
- *   negativo.
+ *   más de 3 decimales (0.1 + 0.2 no pasa) y fuera de rango. Aquí sólo se exige finito.
+ * - En los dos: mayor que cero. Un texto decimal es > 0 si y sólo si trae algún dígito distinto de
+ *   cero (`0`, `0.000`, `00.0` no), así que no hace falta convertirlo para saberlo.
  *
- * El valor llega intacto al servicio: ni se redondea ni se convierte.
+ * El valor llega intacto al servicio: ni se redondea ni se convierte. El rango (≤ 999 999.999) y
+ * los ≤ 3 decimales los sigue decidiendo el servicio (`QUANTITY_TOO_LARGE`).
  */
 const DECIMAL_ESTRICTO = /^\d+(?:\.\d+)?$/
 const CANTIDAD_MSG = 'La cantidad debe ser un número decimal positivo, como 2 o 2.5.'
+const CANTIDAD_CERO_MSG = 'La cantidad debe ser mayor que cero.'
 const quantity = z.union(
   [
-    z.string({ invalid_type_error: CANTIDAD_MSG }).max(40, 'La cantidad es demasiado larga.').regex(DECIMAL_ESTRICTO, CANTIDAD_MSG),
-    z.number({ invalid_type_error: CANTIDAD_MSG }).finite(CANTIDAD_MSG).nonnegative(CANTIDAD_MSG),
+    z
+      .string({ invalid_type_error: CANTIDAD_MSG })
+      .max(40, 'La cantidad es demasiado larga.')
+      .regex(DECIMAL_ESTRICTO, CANTIDAD_MSG)
+      .refine(value => !DECIMAL_ESTRICTO.test(value) || /[1-9]/.test(value), CANTIDAD_CERO_MSG),
+    z.number({ invalid_type_error: CANTIDAD_MSG }).finite(CANTIDAD_MSG).positive(CANTIDAD_CERO_MSG),
   ],
   { errorMap: () => ({ message: CANTIDAD_MSG }) },
 )

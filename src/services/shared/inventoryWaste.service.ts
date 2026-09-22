@@ -252,12 +252,12 @@ async function serializable<T>(operation: (tx: Prisma.TransactionClient) => Prom
 
 export async function getWasteAccess(staffId: string, venueId: string): Promise<UserAccess> {
   const { role } = await resolveUserRoleForVenue({ userId: staffId, targetVenueId: venueId })
-  if (!role) throw new ForbiddenError('Ya no tienes acceso a este establecimiento.')
+  if (!role) throw new ForbiddenError('Ya no tienes acceso a este establecimiento.', 'WASTE_ACCESS_REVOKED')
   const staff = await prisma.staff.findUnique({
     where: { id: staffId },
     select: { active: true },
   })
-  if (!staff?.active) throw new ForbiddenError('La cuenta ya no está activa.')
+  if (!staff?.active) throw new ForbiddenError('La cuenta ya no está activa.', 'WASTE_ACCOUNT_INACTIVE')
   return getUserAccess(staffId, venueId)
 }
 
@@ -301,17 +301,36 @@ async function getWasteVoidAccess(staffId: string, venueId: string): Promise<Use
   return { ...access, corePermissions: await grantedPermissionsBeforeActivation(staffId, venueId, access.role) }
 }
 
-export function hasWastePermission(access: UserAccess, permission: string): boolean {
-  if (access.role !== StaffRole.SUPERADMIN && access.whiteLabelEnabled && !access.featureAccess.AVOQADO_INVENTORY?.allowed) {
-    return false
-  }
-  return hasPermission(access, permission)
+/** ¿El inventario está activado para este usuario? Sin white-label, siempre; con white-label,
+ *  sólo si `AVOQADO_INVENTORY` está encendido y permitido para su rol. SUPERADMIN pasa. */
+function wasteInventoryActivated(access: UserAccess): boolean {
+  return access.role === StaffRole.SUPERADMIN || !access.whiteLabelEnabled || access.featureAccess.AVOQADO_INVENTORY?.allowed === true
 }
 
-export async function requireWastePermission(staffId: string, venueId: string, permission: string): Promise<UserAccess> {
+export function hasWastePermission(access: UserAccess, permission: string): boolean {
+  return wasteInventoryActivated(access) && hasPermission(access, permission)
+}
+
+/**
+ * Lo que `checkPermission` NO mira, sin evaluar el permiso: acceso vigente al venue, cuenta
+ * activa y activación white-label del inventario. Es el paso previo de las rutas HTTP (Ruling 18):
+ * se monta ANTES de `checkPermission` para que ningún rechazo posterior queme el token de un
+ * solo uso del PIN de gerente, y para que el permiso lo decida UNA sola autoridad que respeta ese
+ * PIN. Quien llama sin middleware (el MCP) usa `requireWastePermission`, que evalúa las dos cosas.
+ */
+export async function requireWasteActivation(staffId: string, venueId: string): Promise<UserAccess> {
   const access = await getWasteAccess(staffId, venueId)
-  if (!hasWastePermission(access, permission)) {
-    throw new ForbiddenError('No tienes permiso para esta operación de inventario.')
+  if (!wasteInventoryActivated(access)) {
+    throw new ForbiddenError('El inventario no está habilitado para tu usuario en este establecimiento.', 'WASTE_INVENTORY_DISABLED')
+  }
+  return access
+}
+
+/** Activación + permiso, para quien no pasa por `checkPermission` (MCP). No conoce el PIN de gerente. */
+export async function requireWastePermission(staffId: string, venueId: string, permission: string): Promise<UserAccess> {
+  const access = await requireWasteActivation(staffId, venueId)
+  if (!hasPermission(access, permission)) {
+    throw new ForbiddenError('No tienes permiso para esta operación de inventario.', 'WASTE_PERMISSION_DENIED')
   }
   return access
 }
@@ -603,7 +622,7 @@ export async function voidWasteKey(
   const access = await getWasteVoidAccess(actorStaffId, venueId)
   const canAdjust = hasPermission(access, 'inventory:adjust')
   if (!canAdjust && !hasPermission(access, 'inventory:log-waste')) {
-    throw new ForbiddenError('No tienes permiso para anular este folio.')
+    throw new ForbiddenError('No tienes permiso para anular este folio.', 'WASTE_PERMISSION_DENIED')
   }
 
   try {
