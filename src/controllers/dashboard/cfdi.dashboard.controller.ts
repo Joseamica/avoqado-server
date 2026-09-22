@@ -15,6 +15,7 @@ import { env } from '@/config/env'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { issueCfdiForOrder, cancelCfdi, getCfdiStatus, listCfdisForVenue } from '@/services/fiscal/cfdi.service'
+import { replaceCfdi } from '@/services/fiscal/cfdiReplacement.service'
 import { emitRefundCreditNote, getRefundCreditNoteStatus } from '@/services/fiscal/cfdiCreditNote.service'
 import { searchSatCatalog } from '@/services/fiscal/satCatalogLookup.service'
 import { SatCatalogUnavailableError } from '@/errors/AppError'
@@ -260,6 +261,95 @@ export async function cancelCfdiController(req: Request, res: Response): Promise
     }
 
     res.status(500).json({ error: 'Error interno al cancelar el CFDI' })
+  }
+}
+
+/**
+ * POST /api/v1/dashboard/venues/:venueId/cfdi/:cfdiId/replace
+ *
+ * Sustituye una factura equivocada: timbra la CORREGIDA relacionada a la original
+ * (TipoRelacion 04) y pide cancelar la original con motivo 01 apuntando a la nueva.
+ *
+ * 🔴 La respuesta NUNCA afirma que la original quedó cancelada: el PAC puede dejarla
+ * `pending` (esperando al receptor) o `rejected`, y en ambos casos SIGUE VIGENTE ante el SAT.
+ * `cancelPendiente` es lo que la pantalla tiene que mostrar.
+ *
+ * Mismo candado que cancelar (`cfdi:configure`, OWNER/ADMIN): emite un documento fiscal nuevo
+ * y pide cancelar uno existente.
+ */
+export async function replaceCfdiController(req: Request, res: Response): Promise<void> {
+  const { cfdiId } = req.params
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
+
+  const sandbox = env.NODE_ENV !== 'production'
+
+  try {
+    const result = await replaceCfdi({ cfdiId, sandbox, expectedVenueId: venueId })
+
+    if (result.status === 'VALIDATION_FAILED') {
+      logAction({
+        staffId: authContext.userId,
+        venueId,
+        action: 'CFDI_REPLACE_REJECTED',
+        entity: 'Cfdi',
+        entityId: cfdiId,
+        data: { reasons: result.reasons ?? [] },
+      })
+      res.status(422).json({ status: result.status, reasons: result.reasons ?? [] })
+      return
+    }
+
+    logAction({
+      staffId: authContext.userId,
+      venueId,
+      action: 'CFDI_REPLACED',
+      entity: 'Cfdi',
+      entityId: cfdiId,
+      data: {
+        status: result.status,
+        sustitutaId: result.sustituta?.id ?? null,
+        sustitutaUuid: result.sustituta?.uuid ?? null,
+        cancelStatus: result.cancelStatus,
+        cancelPendiente: result.cancelPendiente,
+      },
+    })
+
+    res.status(result.status === 'REPLACED' ? 200 : 502).json({
+      status: result.status,
+      sustituta: result.sustituta
+        ? {
+            id: result.sustituta.id,
+            uuid: result.sustituta.uuid ?? null,
+            serie: result.sustituta.serie ?? null,
+            folio: result.sustituta.folio ?? null,
+            totalCents: result.sustituta.totalCents ?? null,
+            xmlUrl: result.sustituta.xmlUrl ?? null,
+            pdfUrl: result.sustituta.pdfUrl ?? null,
+          }
+        : null,
+      original: { id: cfdiId, uuid: result.original?.uuid ?? null },
+      cancelStatus: result.cancelStatus,
+      cancelPendiente: result.cancelPendiente,
+    })
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    logger.error(`[cfdi.controller] replaceCfdi failed for cfdi ${cfdiId}: ${message}`)
+
+    if (/not found/i.test(message)) {
+      res.status(404).json({ error: 'CFDI no encontrado' })
+      return
+    }
+    // Reglas de negocio y carreras → 409 (mismo criterio que cancelar)
+    if (/en proceso|timbrada|global|emisor|folio fiscal/i.test(message)) {
+      res.status(409).json({ error: message })
+      return
+    }
+    res.status(500).json({ error: 'Error interno al sustituir el CFDI' })
   }
 }
 

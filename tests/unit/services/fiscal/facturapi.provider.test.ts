@@ -117,6 +117,40 @@ describe('FacturapiProvider', () => {
     expect(mockCreate.mock.calls[0][0].items[0].product.taxability).toBe('01')
   })
 
+  // 🔴 `cancellation_status: 'none'` significa que el PAC NO canceló nada. Tratarlo como cancelado hacía
+  // que diéramos por cancelada una factura viva — y en una sustitución eso deja DOS facturas vigentes.
+  it('cancelInvoice NO da por cancelado un `none` ni un status desconocido: la factura sigue viva', async () => {
+    const provider = new FacturapiProvider('sk_test_x')
+    mockCancel.mockResolvedValue({ ...MOCK_INVOICE_RESPONSE, status: 'valid', cancellation_status: 'none' })
+    await expect(provider.cancelInvoice({ providerInvoiceId: 'fa1', motivo: '02' })).resolves.toMatchObject({ status: 'none', cancelledAt: null })
+    mockCancel.mockResolvedValue({ ...MOCK_INVOICE_RESPONSE, status: 'valid', cancellation_status: 'lo-que-sea' })
+    await expect(provider.cancelInvoice({ providerInvoiceId: 'fa1', motivo: '02' })).resolves.toMatchObject({ status: 'none', cancelledAt: null })
+  })
+
+  it('cancelInvoice: la factura ya cancelada manda sobre el cancellation_status', async () => {
+    const provider = new FacturapiProvider('sk_test_x')
+    mockCancel.mockResolvedValue({ ...MOCK_INVOICE_RESPONSE, status: 'canceled', cancellation_status: 'none' })
+    const r = await provider.cancelInvoice({ providerInvoiceId: 'fa1', motivo: '02' })
+    expect(r.status).toBe('canceled')
+    expect(r.cancelledAt).toBeInstanceOf(Date)
+  })
+
+  it('cancelInvoice mapea pending/verifying, accepted, rejected y expired sin inventar una cancelación', async () => {
+    const provider = new FacturapiProvider('sk_test_x')
+    for (const [raw, esperado] of [
+      ['pending', 'pending'],
+      ['verifying', 'pending'],
+      ['accepted', 'accepted'],
+      ['rejected', 'rejected'],
+      ['expired', 'expired'],
+    ] as const) {
+      mockCancel.mockResolvedValue({ ...MOCK_INVOICE_RESPONSE, status: 'valid', cancellation_status: raw })
+      const r = await provider.cancelInvoice({ providerInvoiceId: 'fa1', motivo: '02' })
+      expect([raw, r.status]).toEqual([raw, esperado])
+      expect([raw, r.cancelledAt]).toEqual([raw, esperado === 'accepted' ? expect.any(Date) : null])
+    }
+  })
+
   it('createInvoice passes external_id when externalId is provided', async () => {
     mockCreate.mockResolvedValue(MOCK_INVOICE_RESPONSE)
     const provider = new FacturapiProvider('sk_test_x')

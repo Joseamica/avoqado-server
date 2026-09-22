@@ -55,6 +55,15 @@ const CFDI_LIST_SELECT = {
   xmlUrl: true,
   pdfUrl: true,
   globalPeriod: true,
+  // Sustitución: `replacesCfdiId` dice a cuál corrige ESTA factura; `replacedBy`, qué factura la
+  // corrigió a ella. Sin esto la lista no puede contestar «¿cuál vale?» y enseña dos facturas
+  // vivas por la misma venta sin decir que una sustituye a la otra. Acotado a propósito (take).
+  replacesCfdiId: true,
+  replacedBy: {
+    select: { id: true, uuid: true, serie: true, folio: true, status: true, totalCents: true },
+    orderBy: { createdAt: 'desc' as const },
+    take: 5,
+  },
 } as const
 
 /**
@@ -172,6 +181,20 @@ export interface IssueCfdiDeps {
    * Must INSERT a row with status:'STAMPING'. On unique-key conflict the caller handles P2002.
    */
   reserveCfdi: (data: Record<string, any>) => Promise<any>
+  /**
+   * RECLAMA un intento existente para reintentarlo. Devuelve si ESTE proceso se lo llevó.
+   *
+   * 🔴 El predicado lleva la VERSIÓN que el llamador leyó (`attempts`), no sólo el estado. Con el
+   * estado solo, dos reintentos que leen la misma fila `STAMP_FAILED` ganan LOS DOS: el primero la
+   * pasa a `STAMPING`, y `STAMPING` también está entre los estados admitidos, así que el segundo
+   * también hace `count === 1` y timbra un documento fiscal de más (auditoría Codex, 22-sep P1-1).
+   */
+  claimCfdi: (cfdiId: string, desdeEstados: string[], version: number) => Promise<boolean>
+  /**
+   * Guarda SÓLO las URLs de los archivos. Nunca toca `status`: entre el timbre y la descarga otra
+   * petición pudo cancelar el CFDI, y reescribir el estado aquí lo resucitaría (Codex P1-4).
+   */
+  persistArtifacts: (idempotencyKey: string, urls: { xmlUrl: string; pdfUrl: string }) => Promise<any>
 }
 
 export interface IssueCfdiResult {
@@ -251,12 +274,25 @@ export async function issueCfdiForOrder(
         if (ageMs < STAMPING_TTL_MS) {
           throw new Error('CFDI en proceso para esta orden') // → 409 in controllers
         }
-        // Stale reservation — reclaim and retry. (Residual rare risk: the original may have
-        // stamped at the PAC just before crashing; the getInvoice reconcile job is the proper guard.)
         logger.warn(`[cfdi] reclaiming stale STAMPING reservation for order ${params.orderId} (age ${Math.round(ageMs / 1000)}s)`)
       }
-      // Terminal failure (VALIDATION_FAILED / STAMP_FAILED) — proceed to retry;
-      // the existing row will be overwritten by the persistCfdi upsert below.
+      // 🔴 RECLAMO ATÓMICO: sin esto, dos peticiones que encuentran el mismo intento fallido (o la
+      // misma reserva vieja) seguían las DOS y podían timbrar dos veces. Quien pierde recibe el mismo
+      // 409 de siempre.
+      if (existing) {
+        // 🔴 Un intento anterior de OTRO emisor no se re-timbra: el documento pudo emitirse con el
+        // comercio viejo y preguntarle al nuevo devolvería «no existe» (Codex P1-3).
+        if (existing.fiscalEmisorId && existing.fiscalEmisorId !== bundle.emisor.id) {
+          throw new Error('El emisor fiscal de esta cuenta cambió desde el intento anterior; revísalo antes de volver a facturar.')
+        }
+        const mio = await deps.claimCfdi(existing.id, ['STAMPING', 'STAMP_FAILED', 'VALIDATION_FAILED'], existing.attempts ?? 0)
+        if (!mio) throw new Error('CFDI en proceso para esta orden') // → 409
+        // 🔴 RECONCILIAR ANTES DE RE-TIMBRAR: un intento anterior pudo haber timbrado y fallar DESPUÉS
+        // (un timeout tras la respuesta del PAC deja `STAMP_FAILED` con el documento ya emitido). Se le
+        // pregunta al PAC por nuestro `external_id` antes de emitir otro.
+        const yaEmitido = await reconciliarIntentoPrevio(params, bundle, idempotencyKey, invoiceParams, deps)
+        if (yaEmitido) return yaEmitido
+      }
     } else {
       throw err
     }
@@ -307,27 +343,79 @@ export async function issueCfdiForOrder(
     return { status: 'STAMP_FAILED', cfdi }
   }
 
-  // 6. Store XML + PDF
-  const [xmlBuf, pdfBuf] = await Promise.all([
-    provider.downloadXml(stamped.providerInvoiceId),
-    provider.downloadPdf(stamped.providerInvoiceId),
-  ])
-  const base = `venues/${bundle.venueSlug}/cfdi/${stamped.uuid}`
-  const [xmlUrl, pdfUrl] = await Promise.all([
-    deps.storeArtifact(xmlBuf, buildStoragePath(`${base}.xml`), 'application/xml'),
-    deps.storeArtifact(pdfBuf, buildStoragePath(`${base}.pdf`), 'application/pdf'),
-  ])
+  // 6. 🔴 Persistir el TIMBRE de inmediato, ANTES de tocar Storage. El documento ya existe ante el SAT:
+  //    si la descarga o la subida fallan, la fila tiene que conservar uuid/serie/folio o quedamos con un
+  //    CFDI real que no sabemos identificar (pasó el 21-sep con la factura de Laura: 13 min en STAMPING
+  //    sin identificadores tras un `fetch failed`).
+  const identidad = {
+    facturapiId: stamped.providerInvoiceId,
+    uuid: stamped.uuid,
+    serie: stamped.serie,
+    folio: stamped.folio,
+    stampedAt: stamped.stampedAt,
+  }
+  let cfdi = await deps.persistCfdi(baseCfdiData(params, bundle, idempotencyKey, invoiceParams, 'STAMPED', identidad))
 
-  // 7. Persist STAMPED
+  // 7. Archivos: best-effort. Un fallo aquí NO invalida el timbre; el job de conciliación los completa.
+  try {
+    const [xmlBuf, pdfBuf] = await Promise.all([
+      provider.downloadXml(stamped.providerInvoiceId),
+      provider.downloadPdf(stamped.providerInvoiceId),
+    ])
+    const base = `venues/${bundle.venueSlug}/cfdi/${stamped.uuid}`
+    const [xmlUrl, pdfUrl] = await Promise.all([
+      deps.storeArtifact(xmlBuf, buildStoragePath(`${base}.xml`), 'application/xml'),
+      deps.storeArtifact(pdfBuf, buildStoragePath(`${base}.pdf`), 'application/pdf'),
+    ])
+    const guardada = await deps.persistArtifacts(idempotencyKey, { xmlUrl, pdfUrl })
+    // Se FUNDE sobre la fila que ya traía el timbre: `persistArtifacts` sólo escribe URLs y
+    // podría devolver una vista parcial; perder aquí el uuid rompería la cancelación de abajo.
+    cfdi = { ...cfdi, ...(guardada ?? {}), xmlUrl, pdfUrl }
+  } catch (err: unknown) {
+    // 🔴 El timbre YA es válido; lo que falta son los archivos. Se deja dicho en la fila porque
+    // NADIE los repone solo: el job de conciliación sólo mira filas `STAMPING` (Codex P2-8). Hasta
+    // que alguien los baje, la descarga del dashboard contestará 404.
+    logger.error(
+      `[cfdi] timbrado OK pero fallaron los archivos de ${stamped.uuid} (orden ${params.orderId}): ${err instanceof Error ? err.message : String(err)}`,
+    )
+  }
+  return { status: 'STAMPED', cfdi }
+}
+
+/**
+ * Antes de re-timbrar un intento reclamado, le pregunta al PAC si NUESTRO `external_id` ya tiene
+ * documento. Tres desenlaces: existe y es válido ⇒ se completa la fila sin volver a timbrar; existe y
+ * está cancelado ⇒ no se toca (queda para revisión humana); no existe ⇒ se sigue al timbrado normal.
+ */
+async function reconciliarIntentoPrevio(
+  params: { orderId: string; receptor: IssueReceptor; sandbox: boolean; flow?: 'STAFF_B' | 'AUTOFACTURA_A'; expectedVenueId?: string },
+  bundle: LoadedOrderBundle,
+  idempotencyKey: string,
+  invoiceParams: any,
+  deps: IssueCfdiDeps,
+): Promise<IssueCfdiResult | null> {
+  const provider = deps.resolveProvider(bundle.emisor as any, { sandbox: params.sandbox })
+  if (typeof provider.findByExternalId !== 'function') return null
+  let previo
+  try {
+    previo = await provider.findByExternalId(idempotencyKey)
+  } catch (err: unknown) {
+    // Si no se puede preguntar, NO se timbra a ciegas: se corta con 409 y el job lo reintenta.
+    logger.error(`[cfdi] no se pudo consultar el PAC antes de reintentar ${idempotencyKey}: ${err instanceof Error ? err.message : String(err)}`)
+    throw new Error('CFDI en proceso para esta orden')
+  }
+  if (!previo) return null
+  if (previo.status === 'canceled') {
+    throw new Error(`Esta cuenta ya tiene una factura cancelada en el PAC (${previo.uuid ?? previo.providerInvoiceId}); revísala antes de volver a facturar`)
+  }
+  logger.warn(`[cfdi] el PAC ya tenía ${previo.uuid} para ${idempotencyKey}: se completa sin volver a timbrar`)
   const cfdi = await deps.persistCfdi(
     baseCfdiData(params, bundle, idempotencyKey, invoiceParams, 'STAMPED', {
-      facturapiId: stamped.providerInvoiceId,
-      uuid: stamped.uuid,
-      serie: stamped.serie,
-      folio: stamped.folio,
-      stampedAt: stamped.stampedAt,
-      xmlUrl,
-      pdfUrl,
+      facturapiId: previo.providerInvoiceId,
+      uuid: previo.uuid,
+      serie: previo.serie,
+      folio: previo.folio,
+      stampedAt: previo.stampedAt ?? new Date(),
     }),
   )
   return { status: 'STAMPED', cfdi }
@@ -373,9 +461,40 @@ const defaultDeps: IssueCfdiDeps = {
     prisma.cfdi.upsert({
       where: { idempotencyKey: data.idempotencyKey },
       create: data as any,
-      update: { status: data.status, lastError: data.lastError ?? null, attempts: { increment: 1 }, ...stampedFields(data) },
+      // 🔴 El dinero se REFRESCA: entre una reserva fallida y el reintento la cuenta pudo corregirse,
+      // y la fila tiene que describir el documento que de verdad se timbró (Codex P2-6).
+      update: {
+        status: data.status,
+        lastError: data.lastError ?? null,
+        attempts: { increment: 1 },
+        ...moneyFields(data),
+        ...stampedFields(data),
+      },
     }),
   loadOrderForCfdi: loadOrderForCfdiFromDb,
+  claimCfdi: async (cfdiId, desdeEstados, version) => {
+    const { count } = await prisma.cfdi.updateMany({
+      where: claimWhere(cfdiId, desdeEstados, version) as any,
+      data: { status: 'STAMPING', attempts: { increment: 1 }, updatedAt: new Date() },
+    })
+    return count === 1
+  },
+  persistArtifacts: async (idempotencyKey, urls) => {
+    // Sólo las URLs, y sólo sobre una fila que siga timbrada. Un `update` normal reescribiría el
+    // estado que otra petición acaba de cambiar.
+    const { count } = await prisma.cfdi.updateMany({ where: { idempotencyKey, status: 'STAMPED' }, data: urls })
+    if (count === 0) logger.warn(`[cfdi] no se guardaron los archivos de ${idempotencyKey}: la fila ya no está timbrada`)
+    return prisma.cfdi.findUnique({ where: { idempotencyKey } })
+  },
+}
+
+/**
+ * El predicado del reclamo, aparte y puro para poder probarlo: id + estado admitido + **la versión
+ * exacta que se leyó**. `attempts` sólo crece, así que dos reclamos que leyeron la misma fila no
+ * pueden ganar los dos aunque ocurran en el mismo milisegundo.
+ */
+export function claimWhere(cfdiId: string, desdeEstados: string[], version: number) {
+  return { id: cfdiId, status: { in: desdeEstados }, attempts: version }
 }
 
 export type RenglonParaCfdi = {
@@ -898,6 +1017,14 @@ export async function loadOrderForCfdiFromDb(orderId: string): Promise<LoadedOrd
   }
 }
 
+/** Importes y clasificación de pago del documento realmente emitido. */
+function moneyFields(data: Record<string, any>) {
+  const keys = ['subtotalCents', 'taxCents', 'totalCents', 'discountCents', 'formaPago', 'metodoPago'] as const
+  const out: Record<string, any> = {}
+  for (const k of keys) if (data[k] !== undefined) out[k] = data[k]
+  return out
+}
+
 function stampedFields(data: Record<string, any>) {
   const keys = ['facturapiId', 'uuid', 'serie', 'folio', 'stampedAt', 'xmlUrl', 'pdfUrl'] as const
   const out: Record<string, any> = {}
@@ -954,16 +1081,28 @@ export async function cancelCfdi(
 
   // 4. Map provider status → CfdiCancelStatus enum
   const cancelStatus = mapProviderCancelStatus(result.status)
+  // 🔴 `none` y `expired` NO son cancelaciones: la factura sigue vigente ante el SAT. Se guardan como
+  // rechazo (que es lo que el dueño necesita saber: no quedó cancelada) pero con su razón propia, para
+  // que la pantalla no diga sólo «rechazada» cuando en realidad nadie la rechazó.
+  const porQue =
+    result.status === 'none'
+      ? 'El PAC no registró la cancelación: la factura sigue vigente. Vuelve a intentarlo.'
+      : result.status === 'expired'
+        ? 'La solicitud de cancelación caducó sin respuesta del receptor: la factura sigue vigente. Vuelve a pedirla.'
+        : null
 
   // 5. Persist — update cancel fields + flip cfdi.status when definitively resolved
   const updated = await deps.updateCfdi(cfdi.id, {
     cancelMotivo: params.motivo,
-    cancelSubstituteUuid: params.substituteUuid ?? null,
+    // 🔴 Nunca se BORRA lo que ya constaba: una respuesta `pending` que llega tarde no puede tirar
+    // el sustituto ni la fecha de una cancelación que el SAT ya confirmó (Codex P2-5).
+    ...(params.substituteUuid ? { cancelSubstituteUuid: params.substituteUuid } : {}),
     cancelStatus,
     cancelRequestedAt: new Date(),
-    cancelledAt: result.cancelledAt,
-    // Only flip the CFDI status to CANCELLED when the PAC confirms it is done
-    status: cancelStatus === 'CANCELLED' || cancelStatus === 'ACCEPTED' ? 'CANCELLED' : cfdi.status,
+    ...(result.cancelledAt ? { cancelledAt: result.cancelledAt } : {}),
+    ...(porQue ? { lastError: porQue } : {}),
+    // Sólo se marca CANCELLED cuando el PAC lo confirma — y nunca se baja de CANCELLED.
+    status: cancelStatus === 'CANCELLED' || cancelStatus === 'ACCEPTED' || cfdi.status === 'CANCELLED' ? 'CANCELLED' : cfdi.status,
   })
 
   return { cancelStatus, cancelledAt: result.cancelledAt, cfdi: updated }
@@ -975,6 +1114,10 @@ function mapProviderCancelStatus(s: string): 'REQUESTED' | 'ACCEPTED' | 'REJECTE
       return 'CANCELLED'
     case 'accepted':
       return 'ACCEPTED'
+    // La factura sigue vigente: se registran como «no quedó cancelada», con su razón en `lastError`.
+    case 'none':
+    case 'expired':
+      return 'REJECTED'
     case 'rejected':
       return 'REJECTED'
     default:
@@ -1010,5 +1153,9 @@ export async function getCfdiStatus(
 
 // Real defaults
 const defaultStatusDeps: GetCfdiStatusDeps = {
-  loadCfdi: id => prisma.cfdi.findUnique({ where: { id } }),
+  loadCfdi: id =>
+    prisma.cfdi.findUnique({
+      where: { id },
+      include: { replacedBy: { select: { id: true, uuid: true, serie: true, folio: true, status: true }, orderBy: { createdAt: 'desc' }, take: 5 } },
+    }),
 }

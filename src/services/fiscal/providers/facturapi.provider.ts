@@ -182,6 +182,11 @@ export class FacturapiProvider implements FiscalProvider {
       // to stamp our idempotencyKey onto the document so the reconcile job can look it up
       // deterministically via GET /v2/invoices?external_id= instead of relying on attribute search.
       ...(params.externalId ? { external_id: params.externalId } : {}),
+      // CFDI relacionado — mismo campo que usa la nota de crédito (`related_documents`), con
+      // relationship '04' (sustitución). Se omite cuando no hay relación: mandarlo vacío lo rechaza.
+      ...(params.relation
+        ? { related_documents: [{ relationship: params.relation.tipoRelacion, documents: params.relation.relatedUuids }] }
+        : {}),
       items: params.items.map(it => ({
         quantity: it.quantity,
         discount: toPesos(it.discountCents),
@@ -551,28 +556,32 @@ export class FacturapiProvider implements FiscalProvider {
     const opts: { motive: string; substitution?: string } = { motive: params.motivo }
     if (params.substituteUuid) opts.substitution = params.substituteUuid
     const inv = await this.client.invoices.cancel(params.providerInvoiceId, opts as Parameters<typeof this.client.invoices.cancel>[1])
-    const rawStatus = inv.cancellation_status as string
-    const status = this.mapCancellationStatus(rawStatus)
+    // 🔴 Hay que mirar LAS DOS cosas: el estado de la FACTURA y el de la SOLICITUD. Una cancelación
+    // inmediata deja `status: 'canceled'` aunque `cancellation_status` siga en `none`; y un `none` con
+    // la factura viva significa que NO se canceló nada. Tratar `none` (o un valor desconocido) como
+    // cancelado era decir que una factura viva estaba cancelada.
+    const status = this.mapCancellationStatus(inv.status as string, inv.cancellation_status as string)
     return {
       status,
       cancelledAt: status === 'canceled' || status === 'accepted' ? new Date() : null,
     }
   }
 
-  private mapCancellationStatus(raw: string): CancelInvoiceResult['status'] {
+  private mapCancellationStatus(invoiceStatus: string, raw: string): CancelInvoiceResult['status'] {
+    if (invoiceStatus === 'canceled') return 'canceled' // la factura YA no está vigente: manda esto
     switch (raw) {
       case 'accepted':
-        return 'accepted'
+        return 'accepted' // el receptor aceptó ⇒ cancelada
       case 'rejected':
         return 'rejected'
       case 'pending':
       case 'verifying':
-        return 'pending'
-      case 'canceled':
+        return 'pending' // el SAT espera al receptor; la factura sigue vigente mientras tanto
+      case 'expired':
+        return 'expired' // la solicitud caducó sin respuesta: hay que volver a pedirla
       case 'none':
       default:
-        // If the invoice status itself is canceled, treat as canceled
-        return 'canceled'
+        return 'none' // el PAC no registró cancelación alguna
     }
   }
 

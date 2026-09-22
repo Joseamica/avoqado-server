@@ -103,6 +103,7 @@ import {
   listCfdisController,
   getCfdiStatusController,
   cancelCfdiController,
+  replaceCfdiController,
   emitRefundCreditNoteController,
   getRefundCreditNoteController,
   getFiscalConfigController,
@@ -3632,6 +3633,15 @@ router.post(
   checkFeatureAccess('CFDI'),
   checkPermission('cfdi:configure'), // destructive → OWNER/ADMIN only
   cancelCfdiController,
+)
+// Sustituir una factura equivocada (TipoRelacion 04 + cancelación motivo 01). No lleva body:
+// el documento corregido se reconstruye de la orden, con las mismas barreras que una emisión nueva.
+router.post(
+  '/venues/:venueId/cfdi/:cfdiId/replace',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:configure'), // emite un CFDI y cancela otro → OWNER/ADMIN
+  replaceCfdiController,
 )
 
 // ---- Facturación CFDI 4.0 — Nota de crédito (CFDI de EGRESO) por un reembolso ----
