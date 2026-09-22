@@ -118,9 +118,21 @@ test('sin caducidades FEFO degenera a FIFO: primero la fecha de recepción, lueg
 
 class Revertir extends Error {}
 
+/** Plazo del ARNÉS, no de la prueba: si se agota, la observación quedó inconclusa y la prueba cae con
+ *  ese mensaje — no se lee como un fallo de concurrencia ni suelta a A antes de tiempo. */
+const PLAZO_MS = 30_000
+
 /**
- * A bloquea el lote con FOR UPDATE y se queda abierta; B intenta asignar mientras tanto.
- * A sólo se suelta cuando B ya respondió, y siempre termina por rollback (Revertir).
+ * A bloquea el lote con FOR UPDATE y lo RETIENE hasta que termina la observación; B intenta asignar
+ * mientras tanto. A siempre termina por rollback (Revertir).
+ *
+ * Determinista a propósito (Codex P3-1, la misma receta que la guardia NOWAIT de la merma):
+ *  - B corre con `SET LOCAL lock_timeout = '0'` y `statement_timeout = '0'` (espera sin límite). Con
+ *    un `lock_timeout` chico heredado del entorno, quitar NOWAIT daría el MISMO `lock_not_available`
+ *    (55P03) y la prueba pasaría sin NOWAIT (falso verde). Sólo se neutralizan esos parámetros: la
+ *    consulta es la del servicio.
+ *  - A no suelta el candado por reloj: sólo en el `finally`, cuando B ya respondió o el arnés agotó
+ *    su plazo. Sin NOWAIT, B se queda esperando y lo que cae es el plazo del arnés, con su mensaje.
  */
 async function asignarMientrasOtraTxBloqueaElLote(order: 'FIFO' | 'FEFO') {
   const item = await raw(venueId)
@@ -133,39 +145,62 @@ async function asignarMientrasOtraTxBloqueaElLote(order: 'FIFO' | 'FEFO') {
 
   let errorDeA: unknown
   const a = prisma
-    .$transaction(async txA => {
-      await txA.$queryRaw`SELECT id FROM "StockBatch" WHERE id = ${lote.id} FOR UPDATE`
-      avisarCandado()
-      await aPuedeTerminar
-      throw new Revertir()
-    })
+    .$transaction(
+      async txA => {
+        await txA.$queryRaw`SELECT id FROM "StockBatch" WHERE id = ${lote.id} FOR UPDATE`
+        avisarCandado()
+        await aPuedeTerminar
+        throw new Revertir()
+      },
+      { timeout: PLAZO_MS + 15_000, maxWait: 10_000 },
+    )
     .catch(error => {
       if (!(error instanceof Revertir)) errorDeA = error
     })
+  const finDeA = a.then(() => {
+    throw errorDeA ?? new Error('A soltó el candado antes de terminar la observación')
+  })
+  void finDeA.catch(() => undefined)
 
-  let resultado!: { error?: unknown; ms: number }
+  let temporizador: NodeJS.Timeout | undefined
+  const plazo = new Promise<never>((_, reject) => {
+    temporizador = setTimeout(() => reject(new Error(`El arnés agotó ${PLAZO_MS} ms observando NOWAIT (inconcluso)`)), PLAZO_MS)
+  })
+  void plazo.catch(() => undefined)
+
+  let b: Promise<{ error?: unknown; ms: number }> | undefined
   try {
-    const aTieneElCandado = await Promise.race([candadoTomado.then(() => true), a.then(() => false)])
-    if (!aTieneElCandado) throw new Error('A terminó sin tomar el candado del lote')
+    await Promise.race([candadoTomado, finDeA, plazo])
     const inicio = Date.now()
-    try {
-      await prisma.$transaction(txB => lockWasteBatchesInTx(txB, venueId, item.id, order))
-      resultado = { ms: Date.now() - inicio }
-    } catch (error) {
-      resultado = { error, ms: Date.now() - inicio }
-    }
+    b = prisma
+      .$transaction(
+        async txB => {
+          await txB.$executeRaw`SET LOCAL lock_timeout = '0'`
+          await txB.$executeRaw`SET LOCAL statement_timeout = '0'`
+          return lockWasteBatchesInTx(txB, venueId, item.id, order)
+        },
+        { timeout: PLAZO_MS + 15_000, maxWait: 10_000 },
+      )
+      .then(
+        () => ({ ms: Date.now() - inicio }),
+        error => ({ error, ms: Date.now() - inicio }),
+      )
+    return await Promise.race([b, finDeA, plazo])
   } finally {
+    clearTimeout(temporizador)
     soltarA()
-    await a
+    await Promise.allSettled([a, b ?? Promise.resolve()])
   }
-  if (errorDeA) throw errorDeA
-  return resultado
 }
 
-test.each(['FEFO', 'FIFO'] as const)('🔴 %s no espera un lote bloqueado: falla al instante con 55P03 (NOWAIT)', async order => {
-  const resultado = await asignarMientrasOtraTxBloqueaElLote(order)
-  expect(resultado.error).toBeInstanceOf(Prisma.PrismaClientKnownRequestError)
-  expect(resultado.error).toMatchObject({ code: 'P2010', meta: { code: '55P03' } })
-  // Sin NOWAIT, B esperaría a que A suelte el lote (hasta el timeout de 5 s de la transacción).
-  expect(resultado.ms).toBeLessThan(2500)
-})
+test.each(['FEFO', 'FIFO'] as const)(
+  '🔴 %s no espera un lote bloqueado: falla al instante con 55P03 (NOWAIT), sin depender de lock_timeout',
+  async order => {
+    const resultado = await asignarMientrasOtraTxBloqueaElLote(order)
+    expect(resultado.error).toBeInstanceOf(Prisma.PrismaClientKnownRequestError)
+    expect(resultado.error).toMatchObject({ code: 'P2010', meta: { code: '55P03' } })
+    // Sin NOWAIT, B esperaría a que A suelte el lote: lo que caería es el plazo del arnés.
+    expect(resultado.ms).toBeLessThan(2500)
+  },
+  PLAZO_MS + 30_000,
+)
