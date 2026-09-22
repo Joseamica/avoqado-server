@@ -17,10 +17,21 @@ import {
   WasteInput,
   WasteSummary,
 } from '@/services/shared/inventoryWaste.service'
+import {
+  findWasteItem,
+  getWasteBreakdown,
+  getWasteTotals,
+  listWasteItems,
+  listWasteReports,
+  wasteLedgerSql,
+} from '@/services/shared/inventoryWasteRead.service'
 
-// Los lectores (getWasteTotals, listWasteReports) y los choques con caducidad, conteo y
-// venta entran con sus tareas; aquí logWaste y la anulación (voidWasteKey).
+// Aquí logWaste, la anulación (voidWasteKey) y los lectores (catálogo, totales, desglose y
+// lista de folios); los choques con caducidad, conteo y venta entran con sus tareas.
 const D = (value: Prisma.Decimal.Value) => new Prisma.Decimal(value)
+// Ventana que abarca todo: los lectores filtran por createdAt del servidor.
+const from = new Date('2000-01-01T00:00:00.000Z')
+const to = new Date('2100-01-01T00:00:00.000Z')
 const fixture = `waste-${randomUUID()}`
 
 let organizationId = ''
@@ -372,6 +383,11 @@ test('varios lotes: costos firmados en hijos, magnitud en cabecera, sin multipli
   expect(report.costState).toBe('KNOWN')
   expect(await rawStock(item.id)).toBe('0')
   expect(movements.every(row => row.createdAt.getTime() === report.createdAt.getTime())).toBe(true)
+
+  const totals = await getWasteTotals(venueId, from, to)
+  expect(totals.quantity.toString()).toBe('5')
+  expect(totals.cost?.toString()).toBe('16')
+  expect(totals.unvaluedQuantity.toString()).toBe('0')
 })
 
 test('sin existencia persiste declaración sin inventar movimientos o costo', async () => {
@@ -384,6 +400,10 @@ test('sin existencia persiste declaración sin inventar movimientos o costo', as
   const report = await prisma.inventoryWasteReport.findUniqueOrThrow({ where: { id: result.reportId } })
   expect(report.costState).toBe('NONE')
   expect(report.costImpact).toBeNull()
+
+  const list = await listWasteReports(venueId, { page: 1, pageSize: 100 })
+  expect(list.total).toBe(1)
+  expect(list.items[0].id).toBe(result.reportId)
 })
 
 test('hueco legacy: lote conocido más ajuste directo sin costo', async () => {
@@ -401,6 +421,9 @@ test('hueco legacy: lote conocido más ajuste directo sin costo', async () => {
   expect(movements.find(row => row.batchId === null)?.costImpact).toBeNull()
   expect(report.costImpact?.toString()).toBe('6')
   expect(report.costState).toBe('PARTIAL')
+
+  const totals = await getWasteTotals(venueId, from, to)
+  expect(totals.unvaluedQuantity.toString()).toBe('2')
 })
 
 test('inverso legacy: los lotes no permiten exceder currentStock', async () => {
@@ -1525,3 +1548,441 @@ test.each([null, 'OTRO_VENUE', 'MISMO_DEMO'] as const)(
     }
   },
 )
+
+// ── Lectores (Task 9a): catálogo que baja el aparato, totales, desglose y lista de folios ──
+// Merma = declaración de cada folio APPLIED + |movimiento| SPOILAGE/LOSS SIN folio (legacy y
+// cron), cada término agregado por su cuenta: un folio NUNCA se une a sus movimientos hijos.
+
+test('🔴 los totales no se multiplican: 2 movimientos hijos + sin existencia cuentan UNA vez', async () => {
+  const item = await raw(3)
+  await batch(item.id, 2, 2, new Date('2026-01-01T00:00:00Z'))
+  await batch(item.id, 1, 4, new Date('2026-02-01T00:00:00Z'))
+  await logWaste(venueId, staffId, request('RAW_MATERIAL', item.id, 5)) // 3 por lotes + 2 sin existencia
+
+  const totals = await getWasteTotals(venueId, from, to)
+  expect(totals.quantity.toString()).toBe('5')
+  expect(totals.cost?.toString()).toBe('8')
+  expect(totals.unvaluedQuantity.toString()).toBe('2')
+})
+
+test('una merma legacy (movimiento SPOILAGE sin reporte) cuenta una vez, en positivo', async () => {
+  const item = await raw(10)
+  await prisma.rawMaterialMovement.create({
+    data: {
+      venueId,
+      rawMaterialId: item.id,
+      type: 'SPOILAGE',
+      quantity: D(-4),
+      unit: 'PIECE',
+      previousStock: D(10),
+      newStock: D(6),
+      costImpact: D(-12),
+      reason: 'Expired',
+    },
+  })
+  const totals = await getWasteTotals(venueId, from, to)
+  expect(totals.quantity.toString()).toBe('4')
+  expect(totals.cost?.toString()).toBe('12')
+})
+
+test('los productos (LOSS) entran en los totales', async () => {
+  const item = await product(10, 10)
+  await logWaste(venueId, staffId, request('PRODUCT', item.id, 3))
+  const totals = await getWasteTotals(venueId, from, to, { itemType: 'PRODUCT', itemId: item.id })
+  expect(totals.quantity.toString()).toBe('3')
+  expect(totals.cost?.toString()).toBe('30')
+})
+
+test('🔴 el catálogo pagina con total, respeta el tope y no trae existencias', async () => {
+  for (let i = 0; i < 3; i++) await product(5)
+  const pagina = await listWasteItems(venueId, { page: 1, pageSize: 2 })
+  expect(pagina.total).toBe(3)
+  expect(pagina.items).toHaveLength(2)
+  expect(Object.keys(pagina.items[0]).sort()).toEqual(['itemId', 'itemType', 'name', 'sku', 'unit'])
+  expect((await listWasteItems(venueId, { page: 1, pageSize: 100000 })).pageSize).toBe(200)
+})
+
+test('un costo desconocido NO es cero: va a «sin valorar», y sin ningún costo conocido el total es null', async () => {
+  // Legacy sin costo: ingrediente con costImpact null y producto con unitCost null.
+  const legacyRaw = await raw(10)
+  await prisma.rawMaterialMovement.create({
+    data: {
+      venueId,
+      rawMaterialId: legacyRaw.id,
+      type: 'SPOILAGE',
+      quantity: D(-3),
+      unit: 'PIECE',
+      previousStock: D(10),
+      newStock: D(7),
+      costImpact: null,
+      reason: 'Legacy sin costo',
+    },
+  })
+  const legacyProduct = await product(10, 10)
+  await prisma.inventoryMovement.createMany({
+    data: [
+      { inventoryId: legacyProduct.inventory!.id, type: 'LOSS', quantity: D(-2), previousStock: D(10), newStock: D(8), unitCost: null },
+      { inventoryId: legacyProduct.inventory!.id, type: 'LOSS', quantity: D(-2), previousStock: D(8), newStock: D(6), unitCost: D(7) },
+    ],
+  })
+  // Folios de producto: sin costo (UNKNOWN) y con costo pero parcial (PARTIAL: 3 de 5).
+  const noCost = await product(5, null)
+  await logWaste(venueId, staffId, request('PRODUCT', noCost.id, 2))
+  const partial = await product(3, 10)
+  await logWaste(venueId, staffId, request('PRODUCT', partial.id, 5))
+
+  const totals = await getWasteTotals(venueId, from, to)
+  // 3 + (2 + 2) + 2 + 5 declarados; costo conocido: 2 × 7 legacy + 3 × 10 del parcial.
+  expect(totals.quantity.toString()).toBe('14')
+  expect(totals.cost?.toString()).toBe('44')
+  // Sin valorar: 3 (legacy ingrediente) + 2 (legacy producto sin costo) + 2 (UNKNOWN) + 2 (lo no descontado del parcial).
+  expect(totals.unvaluedQuantity.toString()).toBe('9')
+
+  const onlyUnknown = await getWasteTotals(venueId, from, to, { itemType: 'RAW_MATERIAL', itemId: legacyRaw.id })
+  expect(onlyUnknown.quantity.toString()).toBe('3')
+  expect(onlyUnknown.cost).toBeNull()
+  expect(onlyUnknown.unvaluedQuantity.toString()).toBe('3')
+
+  const unknownReport = await getWasteTotals(venueId, from, to, { itemType: 'PRODUCT', itemId: noCost.id })
+  expect(unknownReport.cost).toBeNull()
+  expect(unknownReport.unvaluedQuantity.toString()).toBe('2')
+
+  const empty = await getWasteTotals(venueId, from, to, { itemType: 'PRODUCT', itemId: randomUUID() })
+  expect(empty.quantity.toString()).toBe('0')
+  expect(empty.cost).toBeNull()
+  expect(empty.unvaluedQuantity.toString()).toBe('0')
+})
+
+test('la ventana compara en UTC real: el borde entra y lo de afuera no, en folios y en legacy', async () => {
+  const item = await raw(10)
+  const legacyAt = new Date('2026-03-10T12:00:00.000Z')
+  await prisma.rawMaterialMovement.create({
+    data: {
+      venueId,
+      rawMaterialId: item.id,
+      type: 'SPOILAGE',
+      quantity: D(-4),
+      unit: 'PIECE',
+      previousStock: D(10),
+      newStock: D(6),
+      costImpact: D(-4),
+      reason: 'Legacy',
+      createdAt: legacyAt,
+    },
+  })
+  const goods = await product(5, 10)
+  const report = await logWaste(venueId, staffId, request('PRODUCT', goods.id, 1))
+  const reportAt = new Date('2026-03-10T12:30:00.000Z')
+  await prisma.inventoryWasteReport.update({ where: { id: report.reportId }, data: { createdAt: reportAt } })
+
+  const at = (iso: string) => new Date(iso)
+  const quantity = async (start: Date, end: Date) => (await getWasteTotals(venueId, start, end)).quantity.toString()
+
+  expect(await quantity(at('2026-03-10T11:00:00.000Z'), at('2026-03-10T13:00:00.000Z'))).toBe('5')
+  expect(await quantity(legacyAt, legacyAt)).toBe('4')
+  expect(await quantity(reportAt, reportAt)).toBe('1')
+  expect(await quantity(at('2026-03-10T12:00:00.001Z'), at('2026-03-10T12:29:59.999Z'))).toBe('0')
+  await expect(getWasteTotals(venueId, new Date('no es fecha'), to)).rejects.toMatchObject({ statusCode: 422 })
+
+  // 🔴 La misma ventana bajo la zona de sesión LOCAL (México) y la de PRODUCCIÓN (UTC): con un
+  // `Date` pelón en vez de utcTs, México corre el filtro seis horas y estos bordes cambian.
+  const ledgerQuantityUnder = (zone: string, start: Date, end: Date) =>
+    prisma.$transaction(async tx => {
+      await tx.$executeRawUnsafe(`SET LOCAL TIME ZONE '${zone}'`)
+      const rows = await tx.$queryRaw<Array<{ quantity: Prisma.Decimal }>>(
+        Prisma.sql`SELECT COALESCE(SUM(quantity), 0) AS quantity FROM (${wasteLedgerSql(venueId, start, end)}) ledger`,
+      )
+      return rows[0].quantity.toString()
+    })
+  for (const zone of ['America/Mexico_City', 'UTC']) {
+    expect(await ledgerQuantityUnder(zone, legacyAt, legacyAt)).toBe('4')
+    expect(await ledgerQuantityUnder(zone, reportAt, reportAt)).toBe('1')
+    expect(await ledgerQuantityUnder(zone, at('2026-03-10T12:00:00.001Z'), at('2026-03-10T12:29:59.999Z'))).toBe('0')
+    expect(await ledgerQuantityUnder(zone, at('2026-03-10T12:30:00.001Z'), at('2026-03-10T13:00:00.000Z'))).toBe('0')
+    expect(await ledgerQuantityUnder(zone, at('2026-03-10T11:00:00.000Z'), at('2026-03-10T11:59:59.999Z'))).toBe('0')
+  }
+})
+
+test('el desglose agrupa por artículo sin multiplicar, trae el nombre y pagina con total', async () => {
+  const ingredient = await raw(3)
+  await batch(ingredient.id, 3, 2)
+  await logWaste(venueId, staffId, request('RAW_MATERIAL', ingredient.id, 5)) // 3 por lote ($6) + 2 sin existencia
+  await prisma.rawMaterialMovement.create({
+    data: {
+      venueId,
+      rawMaterialId: ingredient.id,
+      type: 'SPOILAGE',
+      quantity: D(-1),
+      unit: 'PIECE',
+      previousStock: D(1),
+      newStock: D(0),
+      costImpact: D(-2),
+      reason: 'Legacy',
+    },
+  })
+  const goods = await product(10, 10)
+  await logWaste(venueId, staffId, request('PRODUCT', goods.id, 3))
+
+  const breakdown = await getWasteBreakdown(venueId, from, to)
+  expect(breakdown.total).toBe(2)
+  const byId = new Map(breakdown.items.map(row => [row.itemId, row]))
+  expect(byId.get(ingredient.id)).toMatchObject({ itemType: 'RAW_MATERIAL', name: ingredient.name, unit: 'PIECE' })
+  expect(byId.get(ingredient.id)?.quantity.toString()).toBe('6')
+  expect(byId.get(ingredient.id)?.cost?.toString()).toBe('8')
+  expect(byId.get(ingredient.id)?.unvaluedQuantity.toString()).toBe('2')
+  expect(byId.get(goods.id)).toMatchObject({ itemType: 'PRODUCT', name: goods.name, unit: 'UNIT' })
+  expect(byId.get(goods.id)?.quantity.toString()).toBe('3')
+  expect(byId.get(goods.id)?.cost?.toString()).toBe('30')
+  expect(byId.get(goods.id)?.unvaluedQuantity.toString()).toBe('0')
+
+  const first = await getWasteBreakdown(venueId, from, to, 1, 0)
+  const second = await getWasteBreakdown(venueId, from, to, 1, 1)
+  expect(first).toMatchObject({ total: 2, limit: 1, offset: 0 })
+  expect(first.items).toHaveLength(1)
+  expect(second.items).toHaveLength(1)
+  expect(new Set([first.items[0].itemId, second.items[0].itemId])).toEqual(new Set([ingredient.id, goods.id]))
+  expect((await getWasteBreakdown(venueId, from, to, 100000, 0)).limit).toBe(200)
+  expect((await getWasteBreakdown(venueId, from, to, 100, 0, { itemType: 'PRODUCT', itemId: goods.id })).total).toBe(1)
+  await expect(getWasteBreakdown(venueId, from, to, 100, -1)).rejects.toMatchObject({ statusCode: 422 })
+})
+
+test('el catálogo sólo trae ingredientes activos y productos por cantidad, en orden estable, y busca en el servidor', async () => {
+  const ingredient = await raw(1)
+  const inactive = await raw(1)
+  await prisma.rawMaterial.update({ where: { id: inactive.id }, data: { active: false } })
+  const deleted = await raw(1)
+  await prisma.rawMaterial.update({ where: { id: deleted.id }, data: { deletedAt: new Date() } })
+  const goods = await product(1)
+  const deletedGoods = await product(1)
+  await prisma.product.update({ where: { id: deletedGoods.id }, data: { deletedAt: new Date() } })
+  const inactiveGoods = await product(1)
+  await prisma.product.update({ where: { id: inactiveGoods.id }, data: { active: false } })
+  const untracked = await product(1)
+  await prisma.product.update({ where: { id: untracked.id }, data: { trackInventory: false } })
+  const recipe = await product(1)
+  await prisma.product.update({ where: { id: recipe.id }, data: { inventoryMethod: 'RECIPE' } })
+  await prisma.product.create({
+    data: {
+      venueId,
+      categoryId,
+      name: `Sin inventario ${randomUUID()}`,
+      sku: randomUUID(),
+      price: D(10),
+      unit: 'UNIT',
+      trackInventory: true,
+      inventoryMethod: 'QUANTITY',
+    },
+  })
+
+  const all = await listWasteItems(venueId, { page: 1, pageSize: 200 })
+  expect(all.total).toBe(2)
+  // «Ingrediente …» < «Producto …»: el orden es por nombre.
+  expect(all.items).toEqual([
+    { itemType: 'RAW_MATERIAL', itemId: ingredient.id, name: ingredient.name, sku: ingredient.sku, unit: 'PIECE' },
+    { itemType: 'PRODUCT', itemId: goods.id, name: goods.name, sku: goods.sku, unit: 'UNIT' },
+  ])
+
+  expect((await listWasteItems(venueId, { page: 1, pageSize: 200, search: goods.sku })).items.map(row => row.itemId)).toEqual([goods.id])
+  expect((await listWasteItems(venueId, { page: 1, pageSize: 200, search: 'iNgReDiEnTe' })).total).toBe(1)
+  // Un comodín que teclea el usuario se busca literal, no como «todo».
+  expect((await listWasteItems(venueId, { page: 1, pageSize: 200, search: '%' })).total).toBe(0)
+  expect((await listWasteItems(venueId, { page: 1, pageSize: 200, search: '   ' })).total).toBe(2)
+
+  const pageTwo = await listWasteItems(venueId, { page: 2, pageSize: 1 })
+  expect(pageTwo).toMatchObject({ total: 2, page: 2, pageSize: 1 })
+  expect(pageTwo.items.map(row => row.itemId)).toEqual([goods.id])
+  expect((await listWasteItems(venueId, { page: 9, pageSize: 1 })).items).toEqual([])
+  await expect(listWasteItems(venueId, { page: 0, pageSize: 1 })).rejects.toMatchObject({ statusCode: 422 })
+})
+
+test('🔴 empates de nombre: el catálogo desempata por id y tipo y ninguna página repite ni salta', async () => {
+  const same = `Mismo nombre ${randomUUID()}`
+  const a = await raw(1)
+  const b = await raw(1)
+  const c = await product(1)
+  await prisma.rawMaterial.updateMany({ where: { id: { in: [a.id, b.id] } }, data: { name: same } })
+  await prisma.product.update({ where: { id: c.id }, data: { name: same } })
+
+  const seen: string[] = []
+  for (let page = 1; page <= 3; page++) {
+    const result = await listWasteItems(venueId, { page, pageSize: 1 })
+    expect(result.total).toBe(3)
+    seen.push(...result.items.map(row => row.itemId))
+  }
+  expect(seen).toEqual([a.id, b.id, c.id].sort())
+  expect((await listWasteItems(venueId, { page: 1, pageSize: 200 })).items.map(row => row.itemId)).toEqual(seen)
+})
+
+test('la lista de folios pagina con total, excluye lápidas, desempata por id, busca por artículo y acota fechas', async () => {
+  const goods = await product(10)
+  const empty = await raw(0)
+  const r1 = await logWaste(venueId, staffId, request('PRODUCT', goods.id, 1))
+  const r2 = await logWaste(venueId, staffId, request('PRODUCT', goods.id, 1))
+  const r3 = await logWaste(venueId, staffId, request('RAW_MATERIAL', empty.id, 2)) // sin existencia
+  await voidWasteKey(venueId, staffId, randomUUID()) // una lápida no es merma
+
+  const tie = new Date('2026-03-10T12:00:00.000Z')
+  const later = new Date('2026-03-10T13:00:00.000Z')
+  await prisma.inventoryWasteReport.updateMany({ where: { id: { in: [r1.reportId, r2.reportId] } }, data: { createdAt: tie } })
+  await prisma.inventoryWasteReport.update({ where: { id: r3.reportId }, data: { createdAt: later } })
+  const tied = [r1.reportId, r2.reportId].sort().reverse()
+
+  const first = await listWasteReports(venueId, { page: 1, pageSize: 2 })
+  const second = await listWasteReports(venueId, { page: 2, pageSize: 2 })
+  expect(first.total).toBe(3)
+  expect(first.items.map(row => row.id)).toEqual([r3.reportId, tied[0]])
+  expect(second.items.map(row => row.id)).toEqual([tied[1]])
+  expect(first.items[0]).toMatchObject({
+    itemType: 'RAW_MATERIAL',
+    rawMaterialId: empty.id,
+    reasonCode: 'OTHER',
+    costState: 'NONE',
+    reportedByStaffId: staffId,
+    reportedByStaff: { firstName: 'Prueba', lastName: 'Merma' },
+    rawMaterial: { name: empty.name, sku: empty.sku },
+  })
+  expect(first.items[0].declaredQuantity?.toString()).toBe('2')
+  expect(first.items[0].unrecordedQuantity.toString()).toBe('2')
+  expect(first.items[0]).not.toHaveProperty('payloadHash')
+  expect((await listWasteReports(venueId, { page: 1, pageSize: 100000 })).pageSize).toBe(200)
+
+  const search = await listWasteReports(venueId, { page: 1, pageSize: 100, search: empty.name.toUpperCase() })
+  expect(search.items.map(row => row.id)).toEqual([r3.reportId])
+
+  const window = await listWasteReports(venueId, {
+    page: 1,
+    pageSize: 100,
+    startDate: '2026-03-10T06:00:00-06:00', // = 12:00 UTC: el borde entra
+    endDate: '2026-03-10T12:59:59.999Z',
+  })
+  expect(window.total).toBe(2)
+  expect(window.items.map(row => row.id).sort()).toEqual([r1.reportId, r2.reportId].sort())
+  // Una fecha sin hora ni zona no dice de qué día local hablamos: se rechaza en vez de adivinar.
+  await expect(listWasteReports(venueId, { page: 1, pageSize: 100, startDate: '2026-03-10' })).rejects.toMatchObject({
+    statusCode: 422,
+  })
+})
+
+test('🔴 aislamiento: artículos, mermas y folios de OTRO venue no aparecen', async () => {
+  const label = `otro-${fixture}`
+  const other = await prisma.venue.create({
+    data: { organizationId, name: label, slug: label, timezone: 'America/Mexico_City', currency: 'MXN' },
+  })
+  try {
+    const otherCategory = await prisma.menuCategory.create({ data: { venueId: other.id, name: label, slug: label } })
+    const foreignRaw = await prisma.rawMaterial.create({
+      data: {
+        venueId: other.id,
+        name: `Ingrediente ajeno ${randomUUID()}`,
+        sku: randomUUID(),
+        category: 'OTHER',
+        unit: 'PIECE',
+        unitType: 'COUNT',
+        currentStock: D(5),
+        minimumStock: D(0),
+        reorderPoint: D(0),
+        costPerUnit: D(1),
+        avgCostPerUnit: D(1),
+        notifyOnLowStock: false,
+      },
+    })
+    await prisma.stockBatch.create({
+      data: {
+        venueId: other.id,
+        rawMaterialId: foreignRaw.id,
+        batchNumber: randomUUID(),
+        initialQuantity: D(5),
+        remainingQuantity: D(5),
+        unit: 'PIECE',
+        costPerUnit: D(3),
+        receivedDate: new Date('2026-01-01T00:00:00.000Z'),
+      },
+    })
+    const foreignProduct = await prisma.product.create({
+      data: {
+        venueId: other.id,
+        categoryId: otherCategory.id,
+        name: `Producto ajeno ${randomUUID()}`,
+        sku: randomUUID(),
+        price: D(100),
+        cost: D(10),
+        unit: 'UNIT',
+        trackInventory: true,
+        inventoryMethod: 'QUANTITY',
+        inventory: { create: { venueId: other.id, currentStock: D(5) } },
+      },
+      include: { inventory: true },
+    })
+    await logWaste(other.id, staffId, request('RAW_MATERIAL', foreignRaw.id, 2)) // 2 × 3 = 6
+    const foreignReport = await logWaste(other.id, staffId, request('PRODUCT', foreignProduct.id, 1)) // 10
+    await prisma.rawMaterialMovement.create({
+      data: {
+        venueId: other.id,
+        rawMaterialId: foreignRaw.id,
+        type: 'SPOILAGE',
+        quantity: D(-1),
+        unit: 'PIECE',
+        previousStock: D(3),
+        newStock: D(2),
+        costImpact: D(-3),
+        reason: 'Legacy ajeno',
+      },
+    })
+    await prisma.inventoryMovement.create({
+      data: {
+        inventoryId: foreignProduct.inventory!.id,
+        type: 'LOSS',
+        quantity: D(-1),
+        previousStock: D(4),
+        newStock: D(3),
+        unitCost: D(5),
+      },
+    })
+
+    const own = await product(5, 10)
+    const ownReport = await logWaste(venueId, staffId, request('PRODUCT', own.id, 1))
+
+    const catalog = await listWasteItems(venueId, { page: 1, pageSize: 200 })
+    expect(catalog.total).toBe(1)
+    expect(catalog.items.map(row => row.itemId)).toEqual([own.id])
+    expect(await findWasteItem(venueId, 'RAW_MATERIAL', foreignRaw.id)).toBeNull()
+    expect(await findWasteItem(venueId, 'PRODUCT', foreignProduct.id)).toBeNull()
+    expect(await findWasteItem(venueId, 'PRODUCT', own.id)).toEqual({
+      itemType: 'PRODUCT',
+      itemId: own.id,
+      name: own.name,
+      sku: own.sku,
+      unit: 'UNIT',
+    })
+
+    const totals = await getWasteTotals(venueId, from, to)
+    expect(totals.quantity.toString()).toBe('1')
+    expect(totals.cost?.toString()).toBe('10')
+    const foreignFiltered = await getWasteTotals(venueId, from, to, { itemType: 'RAW_MATERIAL', itemId: foreignRaw.id })
+    expect(foreignFiltered.quantity.toString()).toBe('0')
+    expect((await getWasteBreakdown(venueId, from, to)).items.map(row => row.itemId)).toEqual([own.id])
+
+    const list = await listWasteReports(venueId, { page: 1, pageSize: 200 })
+    expect(list.items.map(row => row.id)).toEqual([ownReport.reportId])
+    expect(list.items.map(row => row.id)).not.toContain(foreignReport.reportId)
+
+    // Control positivo: el otro venue sí ve lo suyo (2 + 1 folios, 1 + 1 legacy).
+    const foreignTotals = await getWasteTotals(other.id, from, to)
+    expect(foreignTotals.quantity.toString()).toBe('5')
+    expect(foreignTotals.cost?.toString()).toBe('24')
+    expect((await listWasteItems(other.id, { page: 1, pageSize: 200 })).total).toBe(2)
+    expect((await listWasteReports(other.id, { page: 1, pageSize: 200 })).total).toBe(2)
+  } finally {
+    await prisma.activityLog.deleteMany({ where: { venueId: other.id } })
+    await prisma.rawMaterialMovement.deleteMany({ where: { venueId: other.id } })
+    await prisma.inventoryMovement.deleteMany({ where: { inventory: { venueId: other.id } } })
+    await prisma.inventoryWasteReport.deleteMany({ where: { venueId: other.id } })
+    await prisma.stockBatch.deleteMany({ where: { venueId: other.id } })
+    await prisma.lowStockAlert.deleteMany({ where: { venueId: other.id } })
+    await prisma.inventory.deleteMany({ where: { venueId: other.id } })
+    await prisma.product.deleteMany({ where: { venueId: other.id } })
+    await prisma.rawMaterial.deleteMany({ where: { venueId: other.id } })
+    await prisma.menuCategory.deleteMany({ where: { venueId: other.id } })
+    await prisma.venue.deleteMany({ where: { id: other.id, organizationId } })
+  }
+})
