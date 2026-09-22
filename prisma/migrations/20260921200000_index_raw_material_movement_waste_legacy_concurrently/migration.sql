@@ -1,0 +1,36 @@
+-- Merma (T9c): la rama «sin folio» de insumos de los lectores de merma (inventoryWasteRead.service.ts,
+-- wasteLedgerSql) suma los movimientos SPOILAGE sin wasteReportId de UN venue en una ventana de
+-- fechas: mermas viejas del dashboard y bajas del cron de caducidad. Hasta aquí sólo había índices
+-- de UNA columna ("venueId", "type" y "createdAt" sueltos) y el planificador recorría todos los
+-- movimientos del venue o las mermas de toda la plataforma.
+--
+-- PARCIAL a propósito, con EXACTAMENTE el predicado de esa consulta. Cada venta escribe movimientos
+-- USAGE y ninguno entra a este índice, así que el camino caliente no paga una inserción más. Medido
+-- en T9c con 2 M de movimientos (0.7 % mermas): 568 kB contra 113 MB del compuesto completo
+-- ("venueId", "type", "createdAt"), el mismo plan en ventanas de 30 días, y el WAL de insertar
+-- 100 k movimientos USAGE sin cambio (90-97 MB con él, 96-100 MB sin él) cuando el compuesto
+-- completo lo sube a 114-121 MB. La consulta escribe el tipo y el IS NULL LITERALES: con un
+-- parámetro Postgres no puede probar que cae dentro del predicado y no usa el índice.
+--
+-- Prisma 6 no expresa índices parciales en schema.prisma (precedentes: las migraciones
+-- 20260901204000 y 20260808120700) y `migrate diff` no los reporta como drift. El modelo lo anota
+-- en un comentario.
+--
+-- UNA sentencia por archivo, a propósito: Prisma manda el archivo como un solo lote y Postgres
+-- envuelve un lote de varias sentencias en una transacción implícita, donde CREATE INDEX
+-- CONCURRENTLY se rechaza (SQLSTATE 25001). Precedente: 20260901190001. CONCURRENTLY porque las
+-- ventas escriben en esta tabla: un CREATE INDEX normal bloquearía esas escrituras mientras se
+-- construye.
+--
+-- RUNBOOK si falla a medias (p. ej. el lock_timeout de 5 s de migrate:deploy:bounded al esperar a
+-- una transacción larga): un CREATE INDEX CONCURRENTLY interrumpido deja el índice INVÁLIDO, y en
+-- el reintento IF NOT EXISTS lo daría por hecho SIN reconstruirlo. Antes de reintentar:
+--   SELECT indexrelid::regclass, indisvalid, indisready FROM pg_index
+--    WHERE indexrelid = '"RawMaterialMovement_venueId_createdAt_waste_legacy_idx"'::regclass
+--   DROP INDEX CONCURRENTLY IF EXISTS "RawMaterialMovement_venueId_createdAt_waste_legacy_idx"
+--     (sólo si indisvalid = false, y fuera de cualquier transacción)
+--   npx prisma migrate resolve --rolled-back 20260921200000_index_raw_material_movement_waste_legacy_concurrently
+--   y volver a correr el deploy. Tras cada deploy, la misma consulta debe dar indisvalid = true.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "RawMaterialMovement_venueId_createdAt_waste_legacy_idx"
+  ON "RawMaterialMovement"("venueId", "createdAt")
+  WHERE "type" = 'SPOILAGE' AND "wasteReportId" IS NULL;

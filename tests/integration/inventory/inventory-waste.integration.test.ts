@@ -1703,6 +1703,40 @@ test('la ventana compara en UTC real: el borde entra y lo de afuera no, en folio
   }
 })
 
+test('🔴 la rama legacy de PRODUCTOS (LATERAL, T9c) respeta los dos bordes de la ventana en las dos zonas', async () => {
+  const goods = await product(10, 10)
+  const lossAt = new Date('2026-04-02T18:00:00.000Z')
+  await prisma.inventoryMovement.create({
+    data: {
+      inventoryId: goods.inventory!.id,
+      type: 'LOSS',
+      quantity: D(-3),
+      previousStock: D(10),
+      newStock: D(7),
+      unitCost: D(10),
+      createdAt: lossAt,
+    },
+  })
+  const at = (iso: string) => new Date(iso)
+  const quantityUnder = (zone: string, start: Date, end: Date) =>
+    prisma.$transaction(async tx => {
+      await tx.$executeRawUnsafe(`SET LOCAL TIME ZONE '${zone}'`)
+      const rows = await tx.$queryRaw<Array<{ quantity: Prisma.Decimal }>>(
+        Prisma.sql`SELECT COALESCE(SUM(quantity), 0) AS quantity FROM (${wasteLedgerSql(venueId, start, end)}) ledger`,
+      )
+      return rows[0].quantity.toString()
+    })
+  for (const zone of ['America/Mexico_City', 'UTC']) {
+    expect(await quantityUnder(zone, lossAt, lossAt)).toBe('3') // los dos bordes son inclusivos
+    expect(await quantityUnder(zone, at('2026-04-02T12:00:00.000Z'), at('2026-04-02T17:59:59.999Z'))).toBe('0') // termina antes
+    expect(await quantityUnder(zone, at('2026-04-02T18:00:00.001Z'), at('2026-04-03T00:00:00.000Z'))).toBe('0') // empieza después
+  }
+  const totals = await getWasteTotals(venueId, at('2026-04-02T00:00:00.000Z'), lossAt)
+  expect(totals.quantity.toString()).toBe('3')
+  expect(totals.cost?.toString()).toBe('30')
+  expect((await getWasteTotals(venueId, at('2026-04-02T00:00:00.000Z'), at('2026-04-02T17:59:59.999Z'))).quantity.toString()).toBe('0')
+})
+
 test('el desglose agrupa por artículo sin multiplicar, trae el nombre y pagina con total', async () => {
   const ingredient = await raw(3)
   await batch(ingredient.id, 3, 2)
@@ -1861,6 +1895,35 @@ test('la lista de folios pagina con total, excluye lápidas, desempata por id, b
   await expect(listWasteReports(venueId, { page: 1, pageSize: 100, startDate: '2026-03-10' })).rejects.toMatchObject({
     statusCode: 422,
   })
+})
+
+test('🔴 la búsqueda de folios busca `%`, `_` y `\\` literales, no como comodines', async () => {
+  const goods = await product(10)
+  const ingredient = await raw(10)
+  const r1 = await logWaste(venueId, staffId, request('PRODUCT', goods.id, 1))
+  const r2 = await logWaste(venueId, staffId, request('RAW_MATERIAL', ingredient.id, 1))
+  const search = async (term: string) =>
+    (await listWasteReports(venueId, { page: 1, pageSize: 100, search: term })).items.map(row => row.id).sort()
+
+  // Ningún nombre ni SKU contiene `%`, `_` ni `\`: un comodín sin escapar traería los dos folios.
+  expect(await search('%')).toEqual([])
+  expect(await search('_')).toEqual([])
+  expect(await search('%%')).toEqual([])
+  // Control positivo: el nombre real sigue encontrando su folio (sin distinguir mayúsculas).
+  expect(await search(goods.name.toUpperCase())).toEqual([r1.reportId])
+  expect(await search(ingredient.sku)).toEqual([r2.reportId])
+
+  // Con los caracteres en el nombre, se encuentran LITERALES y sólo en ese folio.
+  const label = `Salsa 100% casera_${randomUUID()}`
+  await prisma.product.update({ where: { id: goods.id }, data: { name: label } })
+  await prisma.rawMaterial.update({ where: { id: ingredient.id }, data: { name: `Ingrediente C:\\ruta ${randomUUID()}` } })
+  expect(await search('%')).toEqual([r1.reportId])
+  expect(await search('100% casera_')).toEqual([r1.reportId])
+  expect(await search('_')).toEqual([r1.reportId])
+  expect(await search('\\')).toEqual([r2.reportId])
+  expect(await search('C:\\ruta')).toEqual([r2.reportId])
+  // `1_0` con `_` como comodín encontraría «100»; literal, no.
+  expect(await search('1_0')).toEqual([])
 })
 
 test('🔴 aislamiento: artículos, mermas y folios de OTRO venue no aparecen', async () => {

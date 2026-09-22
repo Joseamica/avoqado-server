@@ -98,9 +98,14 @@ function searchTerm(search: string | undefined): string | undefined {
   return trimmed ? trimmed : undefined
 }
 
-/** `%` y `_` que teclea el usuario se buscan literales, no como comodines. */
+/** `%`, `_` y `\` que teclea el usuario se buscan literales, no como comodines (`\` es el escape por
+ *  defecto de `LIKE`/`ILIKE` en Postgres). */
+function escapeLike(term: string): string {
+  return term.replace(/[\\%_]/g, ch => `\\${ch}`)
+}
+
 function likeContains(term: string): string {
-  return `%${term.replace(/[\\%_]/g, ch => `\\${ch}`)}%`
+  return `%${escapeLike(term)}%`
 }
 
 /**
@@ -180,6 +185,19 @@ export async function listWasteItems(venueId: string, query: WastePage) {
  *                      directo sin lote», así que se lee de los hijos por `wasteReportId` en una
  *                      subconsulta escalar: agrega por folio y no multiplica la fila.
  * Movimiento legacy: sin costo (`costImpact` / `unitCost` nulos) ⇒ toda su cantidad sin valorar.
+ *
+ * Acceso acotado por tenant (T9c, medido con EXPLAIN ANALYZE): cada rama legacy tiene su índice
+ * PARCIAL con el predicado EXACTO de abajo — `RawMaterialMovement(venueId, createdAt)` y
+ * `InventoryMovement(inventoryId, createdAt)`, ambos `WHERE type = … AND "wasteReportId" IS NULL`.
+ * Por eso el tipo y el `IS NULL` van LITERALES: con un parámetro Postgres no puede probar que la
+ * consulta cae dentro del predicado y no usa el índice.
+ * `InventoryMovement` no tiene `venueId`: la rama de productos recorre los inventarios DEL VENUE y
+ * baja a sus mermas por `LATERAL`. El `OFFSET 0` es una barrera deliberada: sin ella el planificador
+ * aplana la subconsulta y, en ventanas largas, vuelve a un hash join sobre las `LOSS` de TODA la
+ * plataforma (medido: 365 días, 4 k mermas del venue contra 12 k–410 k de la plataforma). Con ella
+ * son N búsquedas por índice, N = inventarios del venue. ⚠️ Depende del índice parcial
+ * `InventoryMovement_inventoryId_createdAt_waste_legacy_idx`: sin él, cada búsqueda recorre todos
+ * los movimientos del inventario (medido: ~600 ms con 400 k movimientos en el venue).
  */
 export function wasteLedgerSql(venueId: string, from: Date, to: Date): Prisma.Sql {
   return Prisma.sql`
@@ -227,13 +245,18 @@ export function wasteLedgerSql(venueId: string, from: Date, to: Date): Prisma.Sq
            CASE WHEN m."unitCost" IS NULL THEN ABS(m.quantity) ELSE 0 END
     FROM "Product" p
     INNER JOIN "Inventory" i ON i."productId" = p.id AND i."venueId" = p."venueId"
-    INNER JOIN "InventoryMovement" m ON m."inventoryId" = i.id
+    CROSS JOIN LATERAL (
+      SELECT mv.quantity, mv."unitCost"
+      FROM "InventoryMovement" mv
+      WHERE mv."inventoryId" = i.id
+        AND mv.type = 'LOSS'
+        AND mv."wasteReportId" IS NULL
+        AND mv."createdAt" >= ${utcTs(from)}
+        AND mv."createdAt" <= ${utcTs(to)}
+      OFFSET 0
+    ) m
     WHERE p."venueId" = ${venueId}
       AND i."venueId" = ${venueId}
-      AND m.type = 'LOSS'
-      AND m."wasteReportId" IS NULL
-      AND m."createdAt" >= ${utcTs(from)}
-      AND m."createdAt" <= ${utcTs(to)}
   `
 }
 
@@ -307,19 +330,22 @@ export async function listWasteReports(venueId: string, query: WastePage) {
   const { page, pageSize, skip } = pagination(query.page, query.pageSize)
   const startDate = instant(query.startDate)
   const endDate = instant(query.endDate)
+  // `contains` de Prisma arma `%término%` SIN escapar (medido en 6.19): se le pasa ya escapado, igual que
+  // al catálogo, para que buscar `%` no devuelva todos los folios del venue.
   const search = searchTerm(query.search)
+  const pattern = search === undefined ? undefined : escapeLike(search)
 
   const where: Prisma.InventoryWasteReportWhereInput = {
     venueId,
     status: 'APPLIED',
     ...(startDate || endDate ? { createdAt: { gte: startDate, lte: endDate } } : {}),
-    ...(search
+    ...(pattern
       ? {
           OR: [
-            { rawMaterial: { name: { contains: search, mode: 'insensitive' } } },
-            { rawMaterial: { sku: { contains: search, mode: 'insensitive' } } },
-            { product: { name: { contains: search, mode: 'insensitive' } } },
-            { product: { sku: { contains: search, mode: 'insensitive' } } },
+            { rawMaterial: { name: { contains: pattern, mode: 'insensitive' } } },
+            { rawMaterial: { sku: { contains: pattern, mode: 'insensitive' } } },
+            { product: { name: { contains: pattern, mode: 'insensitive' } } },
+            { product: { sku: { contains: pattern, mode: 'insensitive' } } },
           ],
         }
       : {}),

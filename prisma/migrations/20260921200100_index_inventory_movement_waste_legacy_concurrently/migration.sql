@@ -1,0 +1,39 @@
+-- Merma (T9c): la rama «sin folio» de productos de los lectores de merma (inventoryWasteRead.service.ts,
+-- wasteLedgerSql) suma los movimientos LOSS sin wasteReportId de los inventarios de UN venue en una
+-- ventana de fechas. InventoryMovement no tiene "venueId": el venue se alcanza por Inventory. Con
+-- los índices de UNA columna que había, el planificador recorría las LOSS de TODA la plataforma por
+-- "InventoryMovement_type_idx" (medido en T9c, 365 días: 12 k filas con ruido realista y 410 k con
+-- un tenant patológico, para 4 k mermas del venue).
+--
+-- La consulta recorre los inventarios del venue y baja a sus mermas por LATERAL con OFFSET 0 (ver
+-- el comentario de wasteLedgerSql): este índice es la búsqueda por inventario. Sin él esa consulta
+-- recorre todos los movimientos de cada inventario (medido: ~600 ms con 400 k movimientos en el
+-- venue), así que esta migración va en el MISMO deploy que el código y corre antes (preDeploy).
+--
+-- PARCIAL a propósito, con EXACTAMENTE el predicado de la consulta. Cada venta escribe movimientos
+-- SALE y ninguno entra a este índice. Medido con 2 M de movimientos (0.6 % mermas): 832 kB contra
+-- 165 MB del compuesto completo ("inventoryId", "type", "createdAt"), y el WAL de insertar 100 k
+-- movimientos SALE sin cambio (87-91 MB con él, 91-92 MB sin él) cuando el compuesto completo lo
+-- sube a 103-126 MB. El tipo y el IS NULL van LITERALES en la consulta: con un parámetro Postgres
+-- no usa un índice parcial.
+--
+-- Prisma 6 no expresa índices parciales en schema.prisma (precedentes: las migraciones
+-- 20260901204000 y 20260808120700) y `migrate diff` no los reporta como drift. El modelo lo anota
+-- en un comentario.
+--
+-- UNA sentencia por archivo (CREATE INDEX CONCURRENTLY no corre dentro de la transacción implícita
+-- de un lote de varias sentencias, SQLSTATE 25001, precedente 20260901190001). CONCURRENTLY porque
+-- cada venta de un producto por cantidad escribe aquí.
+--
+-- RUNBOOK si falla a medias (p. ej. el lock_timeout de 5 s de migrate:deploy:bounded): el índice
+-- queda INVÁLIDO y en el reintento IF NOT EXISTS lo daría por hecho SIN reconstruirlo. Antes de
+-- reintentar:
+--   SELECT indexrelid::regclass, indisvalid, indisready FROM pg_index
+--    WHERE indexrelid = '"InventoryMovement_inventoryId_createdAt_waste_legacy_idx"'::regclass
+--   DROP INDEX CONCURRENTLY IF EXISTS "InventoryMovement_inventoryId_createdAt_waste_legacy_idx"
+--     (sólo si indisvalid = false, y fuera de cualquier transacción)
+--   npx prisma migrate resolve --rolled-back 20260921200100_index_inventory_movement_waste_legacy_concurrently
+--   y volver a correr el deploy. Tras cada deploy, la misma consulta debe dar indisvalid = true.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "InventoryMovement_inventoryId_createdAt_waste_legacy_idx"
+  ON "InventoryMovement"("inventoryId", "createdAt")
+  WHERE "type" = 'LOSS' AND "wasteReportId" IS NULL;

@@ -2123,6 +2123,9 @@ model InventoryMovement {
   @@index([purchaseOrderItemId])
   @@index([postingLineId])
   @@index([wasteReportId])
+  // + índice PARCIAL "InventoryMovement_inventoryId_createdAt_waste_legacy_idx" ON (inventoryId, createdAt)
+  //   WHERE type = 'LOSS' AND wasteReportId IS NULL — la rama «sin folio» de los lectores de merma
+  //   (migración 20260921200100). Prisma no expresa índices parciales: vive sólo en la migración.
 }
 
 // ==========================================
@@ -2850,6 +2853,9 @@ model RawMaterialMovement {
   @@index([batchId])
   @@index([createdAt])
   @@index([wasteReportId])
+  // + índice PARCIAL "RawMaterialMovement_venueId_createdAt_waste_legacy_idx" ON (venueId, createdAt)
+  //   WHERE type = 'SPOILAGE' AND wasteReportId IS NULL — la rama «sin folio» de los lectores de merma
+  //   (migración 20260921200000). Prisma no expresa índices parciales: vive sólo en la migración.
 }
 
 // Low stock alerts for raw materials
