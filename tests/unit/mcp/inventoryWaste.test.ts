@@ -113,6 +113,30 @@ describe('MCP log_waste', () => {
     expect(logWaste).not.toHaveBeenCalled()
   })
 
+  // Ruling 25 (Codex P2-3): el spec §4.7 dice «scope de escritura SIEMPRE exigido». El helper deja pasar
+  // un token SIN scopes declarados (desarrollo/legacy); para log_waste eso también se rechaza.
+  it.each([{ scopes: undefined }, { scopes: [] as string[] }, { scopes: ['mcp:read'] }])(
+    '🔴 log_waste exige mcp:write EXPLÍCITO, en la vista previa y al confirmar: %j',
+    async ({ scopes }) => {
+      const previa = json(await tool('log_waste')(entrada))
+      getWasteAccess.mockClear()
+      let handler: ((input: Record<string, unknown>) => Promise<unknown>) | undefined
+      const server = {
+        tool: (n: string, _d: string, _s: unknown, h: typeof handler) => {
+          if (n === 'log_waste') handler = h
+        },
+      }
+      registerInventoryWasteTools(server as never, { ...ambito([]), scopes } as never)
+      if (!handler) throw new Error('log_waste no se registró')
+
+      await expect(handler(entrada)).rejects.toThrow(/mcp:write/)
+      await expect(handler(previa.confirmationPayload)).rejects.toThrow(/mcp:write/)
+      expect(logWaste).not.toHaveBeenCalled()
+      // El scope se revisa antes de leer nada del usuario.
+      expect(getWasteAccess).not.toHaveBeenCalled()
+    },
+  )
+
   it('🔴 la vista previa devuelve un folio y NO calcula existencias', async () => {
     const out = json(await tool('log_waste')(entrada))
     expect(out.requiresConfirmation).toBe(true)

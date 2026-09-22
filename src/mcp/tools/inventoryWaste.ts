@@ -6,7 +6,8 @@
  *
  * 🔴 `log_waste` es una escritura que RESTA existencias, pedida por un LLM que interpreta a una
  * persona. Por eso:
- *   · exige `mcp:write` SIEMPRE (`requireWriteScopeAlways`), no el guard observador;
+ *   · exige `mcp:write` SIEMPRE y EXPLÍCITO (`requireWriteScopeAlways`, sin la excepción del token sin
+ *     scopes declarados), no el guard observador;
  *   · la primera llamada sólo arma una vista previa legible y emite el folio; la segunda escribe;
  *   · el folio va atado a lo que se previsualizó (`previewDigest`): confirmar con otra cantidad,
  *     otro motivo u otro artículo se rechaza, porque no es lo que el operador vio;
@@ -279,7 +280,10 @@ export function registerInventoryWasteTools(server: McpServer, scope: McpScope):
     async args => {
       const { venueId } = args
       guard.venueFilter(venueId) // lanza si el venue no está en el alcance
-      requireWriteScopeAlways(scope, PERMISSION, 'descuenta existencias del inventario')
+      // Ruling 25: `mcp:write` EXPLÍCITO. El helper conserva el acceso completo de un token SIN scopes
+      // declarados (desarrollo/legacy); el spec (§4.7) no le concede esa excepción a la merma, así que
+      // aquí un token sin scopes cuenta como uno sin `mcp:write`. Sólo esta tool: el helper no cambia.
+      requireWriteScopeAlways({ ...scope, scopes: scope.scopes ?? [] }, PERMISSION, 'descuenta existencias del inventario')
       guard.requirePermission(PERMISSION, venueId) // el rol conectado en ESE venue
       const confirm = args.confirm === true
 
