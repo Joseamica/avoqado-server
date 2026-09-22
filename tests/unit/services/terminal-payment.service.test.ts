@@ -1932,7 +1932,7 @@ describe('Audit round1 lost captured socket', () => {
     // para no borrar una afirmación de cobro ya guardada). Aquí se comprueba lo que importa —que la
     // retención se escribe y NUNCA se marca FAILED—; la semántica exacta del UPDATE la fija la prueba de
     // integración contra Postgres (`unchargedReconciliation.integration`, «CONSERVA una afirmación»).
-    const sqlDeRetencion = prismaMock.$executeRaw.mock.calls.map(c => String(c[0])).join('\n')
+    const sqlDeRetencion = prismaMock.$executeRaw.mock.calls.map((c: unknown[]) => String(c[0])).join('\n')
     expect(sqlDeRetencion).toContain('UNKNOWN')
     expect(tpr().updateMany).not.toHaveBeenCalledWith(
       expect.objectContaining({

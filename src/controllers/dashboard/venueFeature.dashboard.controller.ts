@@ -6,6 +6,7 @@ import { Request, Response, NextFunction } from 'express'
 import * as venueFeatureService from '../../services/dashboard/venueFeature.dashboard.service'
 import * as stripeService from '../../services/stripe.service'
 import prisma from '../../utils/prismaClient'
+import { cruzaPlanYSuelta } from '../../services/access/basePlan.service'
 import logger from '../../config/logger'
 
 /**
@@ -285,6 +286,17 @@ export async function previewSubscriptionChange(
       return
     }
 
+    // 🔴 Un plan no se convierte en función suelta ni al revés por esta ruta: eso contrataría o
+    // desharía un plan saltándose el checkout de planes (Codex, 21-sep). Se corta ANTES de Stripe.
+    if (cruzaPlanYSuelta(venueFeature.feature.code, newFeature.code)) {
+      res.status(400).json({
+        success: false,
+        error: 'Un plan no se cambia por una función suelta ni al revés. Usa el flujo de planes.',
+        code: 'PLAN_CROSSING_NOT_ALLOWED',
+      })
+      return
+    }
+
     // Get proration preview from Stripe
     const prorationDetails = await stripeService.previewSubscriptionProration(venueFeature.stripeSubscriptionId, newFeature.stripePriceId)
 
@@ -366,6 +378,17 @@ export async function updateSubscription(
       res.status(404).json({
         success: false,
         error: 'Target feature not found or has no price',
+      })
+      return
+    }
+
+    // 🔴 Un plan no se convierte en función suelta ni al revés por esta ruta: eso contrataría o
+    // desharía un plan saltándose el checkout de planes (Codex, 21-sep). Se corta ANTES de Stripe.
+    if (cruzaPlanYSuelta(venueFeature.feature.code, newFeature.code)) {
+      res.status(400).json({
+        success: false,
+        error: 'Un plan no se cambia por una función suelta ni al revés. Usa el flujo de planes.',
+        code: 'PLAN_CROSSING_NOT_ALLOWED',
       })
       return
     }

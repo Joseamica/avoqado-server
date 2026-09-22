@@ -8,25 +8,34 @@
  */
 const mockCreateTrialSubscriptions = jest.fn()
 const mockCancelSubscription = jest.fn()
+const mockEstado = jest.fn()
 
 jest.mock('../../../src/services/stripe.service', () => ({
   createTrialSubscriptions: (...args: unknown[]) => mockCreateTrialSubscriptions(...args),
+  stripeAfirmaQueNoExiste: (e: any) => e?.code === 'resource_missing',
+  estadoDeLaSuscripcion: (...args: unknown[]) => mockEstado(...args),
   cancelSubscription: (...args: unknown[]) => mockCancelSubscription(...args),
 }))
 
 const mockVenueFindUnique = jest.fn()
 const mockVenueFeatureFindMany = jest.fn()
+const mockVenueFeatureFindFirst = jest.fn()
+const mockVenueFeatureUpdate = jest.fn()
 jest.mock('../../../src/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     venue: { findUnique: (...a: unknown[]) => mockVenueFindUnique(...a) },
-    venueFeature: { findMany: (...a: unknown[]) => mockVenueFeatureFindMany(...a) },
+    venueFeature: {
+      findMany: (...a: unknown[]) => mockVenueFeatureFindMany(...a),
+      findFirst: (...a: unknown[]) => mockVenueFeatureFindFirst(...a),
+      update: (...a: unknown[]) => mockVenueFeatureUpdate(...a),
+    },
   },
 }))
 
 jest.mock('../../../src/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 
-import { addFeaturesToVenue } from '../../../src/services/dashboard/venueFeature.dashboard.service'
+import { addFeaturesToVenue, removeFeatureFromVenue } from '../../../src/services/dashboard/venueFeature.dashboard.service'
 
 const venueListo = {
   id: 'venue-1',
@@ -43,6 +52,7 @@ beforeEach(() => {
   mockVenueFindUnique.mockResolvedValue(venueListo)
   mockVenueFeatureFindMany.mockResolvedValue([])
   mockCreateTrialSubscriptions.mockResolvedValue([])
+  mockVenueFeatureUpdate.mockResolvedValue({})
 })
 
 describe('addFeaturesToVenue — un PLAN no se contrata por la puerta de las funciones sueltas', () => {
@@ -77,5 +87,71 @@ describe('addFeaturesToVenue — los días de prueba los decide el SERVIDOR', ()
   it('la firma ya no acepta un trial del cliente', () => {
     // 4 parámetros del cliente sería la firma vieja (venueId, codes, trialDays, paymentMethodId).
     expect(addFeaturesToVenue.length).toBeLessThanOrEqual(3)
+  })
+})
+
+/**
+ * Hallazgo #6: `removeFeatureFromVenue` capturaba el fallo de Stripe, desactivaba igual y el
+ * controlador respondía «subscription canceled successfully». El cliente perdía el acceso y
+ * SEGUÍA PAGANDO. El comentario del código decía «admin can manually cancel» — nadie se enteraba.
+ */
+describe('removeFeatureFromVenue — cancelar no puede mentir', () => {
+  const filaConSub = {
+    id: 'vf-1',
+    venueId: 'venue-1',
+    stripeSubscriptionId: 'sub_x',
+    feature: { id: 'f1', code: 'LOYALTY_PROGRAM', name: 'Lealtad' },
+  }
+
+  it('si Stripe falla y la suscripción SIGUE viva, NO desactiva y responde 503 (es Stripe, no el cliente)', async () => {
+    mockVenueFeatureFindFirst.mockResolvedValue(filaConSub)
+    mockCancelSubscription.mockRejectedValue(new Error('Stripe caído'))
+    mockEstado.mockResolvedValue('active')
+
+    await expect(removeFeatureFromVenue('venue-1', 'vf-1')).rejects.toMatchObject({
+      statusCode: 503,
+      code: 'SUBSCRIPTION_CANCEL_PENDING',
+    })
+    expect(mockVenueFeatureUpdate).not.toHaveBeenCalled()
+  })
+
+  it('🔴 respuesta AMBIGUA pero Stripe confirma que SÍ se canceló → completa la baja local', async () => {
+    // Codex, 21-sep: si Stripe canceló y la respuesta se perdió —o falló la escritura local que
+    // `cancelSubscription` hace después—, rendirse deja al cliente sin poder dar de baja nunca:
+    // Stripe ya no cobra y la base dice que sigue activa. Se pregunta el estado real.
+    mockVenueFeatureFindFirst.mockResolvedValue(filaConSub)
+    mockCancelSubscription.mockRejectedValue(new Error('socket hang up'))
+    mockEstado.mockResolvedValue('canceled')
+
+    await expect(removeFeatureFromVenue('venue-1', 'vf-1')).resolves.toBeDefined()
+    expect(mockVenueFeatureUpdate).toHaveBeenCalled()
+  })
+
+  it('si ni siquiera se puede consultar Stripe → 503 y NO desactiva', async () => {
+    mockVenueFeatureFindFirst.mockResolvedValue(filaConSub)
+    mockCancelSubscription.mockRejectedValue(new Error('Stripe caído'))
+    mockEstado.mockRejectedValue(new Error('Stripe caído'))
+
+    await expect(removeFeatureFromVenue('venue-1', 'vf-1')).rejects.toMatchObject({ statusCode: 503 })
+    expect(mockVenueFeatureUpdate).not.toHaveBeenCalled()
+  })
+
+  it('si Stripe dice que esa suscripción NO EXISTE, sí desactiva: no hay nada que cancelar', async () => {
+    mockVenueFeatureFindFirst.mockResolvedValue(filaConSub)
+    const noExiste: any = new Error('No such subscription')
+    noExiste.code = 'resource_missing'
+    mockCancelSubscription.mockRejectedValue(noExiste)
+
+    await expect(removeFeatureFromVenue('venue-1', 'vf-1')).resolves.toBeDefined()
+    expect(mockVenueFeatureUpdate).toHaveBeenCalled()
+  })
+
+  it('camino normal: cancela en Stripe y desactiva', async () => {
+    mockVenueFeatureFindFirst.mockResolvedValue(filaConSub)
+    mockCancelSubscription.mockResolvedValue({ id: 'sub_x', status: 'canceled' })
+
+    await expect(removeFeatureFromVenue('venue-1', 'vf-1')).resolves.toBeDefined()
+    expect(mockCancelSubscription).toHaveBeenCalledWith('sub_x')
+    expect(mockVenueFeatureUpdate).toHaveBeenCalled()
   })
 })

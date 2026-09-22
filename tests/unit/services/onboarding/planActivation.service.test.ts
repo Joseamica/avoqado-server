@@ -397,16 +397,10 @@ describe('recuperación de un intento desconocido', () => {
     expect(r).toMatchObject({ status: 'ACTIVE', alreadyActive: false })
     // 🔴 Y se pide la página COMPLETA (100, el tope de Stripe) y TODOS los estados: con una
     // página chica la suscripción buena se va a la siguiente y el recorrido concluye «no
-    // existe» — que es exactamente lo que cobra dos veces. La cota por `created` deja el
-    // recorrido en O(1) páginas en el caso normal.
-    expect(mockSubList).toHaveBeenCalledWith(
-      expect.objectContaining({
-        customer: 'cus_1',
-        status: 'all',
-        limit: 100,
-        created: expect.objectContaining({ gte: expect.any(Number) }),
-      }),
-    )
+    // existe» — que es exactamente lo que cobra dos veces.
+    expect(mockSubList).toHaveBeenCalledWith(expect.objectContaining({ customer: 'cus_1', status: 'all', limit: 100 }))
+    // 🔴 Y SIN cota por fecha (Codex, 21-sep): cualquier ventana deja fuera un intento más viejo.
+    expect(mockSubList.mock.calls[0][0]).not.toHaveProperty('created')
   })
 
   it('🔴 una suscripción RECUPERADA sin el cupón de la oferta NO se cierra como campaña aplicada', async () => {
@@ -448,35 +442,72 @@ describe('recuperación de un intento desconocido', () => {
     if (iCierre >= 0) expect(iId).toBeLessThan(iCierre)
   })
 
-  it('🔴 «no la encontré» fuera de la ventana NO autoriza otro cobro: responde pendiente', async () => {
-    // Codex, 21-sep: si el intento anterior es MÁS VIEJO que lo que la búsqueda puede cubrir,
-    // no encontrarla no prueba nada — y tratarlo como «no existe» crea un SEGUNDO COBRO. Es el
-    // mismo principio del cobro con terminal: nunca autorizar con un desenlace pendiente.
-    const intentoViejo = progreso({
+  it('🔴 SEGUNDO reintento con una suscripción de hace 40 días sin id guardado: la encuentra, NO cobra otra vez', async () => {
+    // Codex, 21-sep (P1, reproducido): la regla anterior comparaba la fecha del LEASE, que se
+    // renueva en cada reintento. El primer reintento respondía 503 pero dejaba el lease recién
+    // renovado; en el segundo, esa fecha reciente hacía pasar la búsqueda vacía por «no existe» y
+    // se creaba un SEGUNDO COBRO. La salida no es otra fecha: es no depender de ninguna.
+    const segundoReintento = progreso({
       planActivationStatus: 'IN_PROGRESS',
       planActivationAttempt: 1,
-      // El intento anterior es de hace 40 días: la búsqueda (30 días) no lo alcanza.
-      planActivationLeaseUntil: new Date(Date.now() - 40 * 24 * 60 * 60 * 1000),
+      // El estado EXACTO del segundo reintento: el lease se renovó en el primero y acaba de vencer.
+      planActivationLeaseUntil: new Date(Date.now() - 60_000),
       planStripeSubscriptionId: null,
     }) as Record<string, unknown>
-    prismaMock.onboardingProgress.findUnique.mockResolvedValue(intentoViejo as never)
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(segundoReintento as never)
+    const hace40Dias = Math.floor((Date.now() - 40 * 24 * 60 * 60 * 1000) / 1000)
+    const laQueYaCobro = {
+      id: 'sub_vieja',
+      status: 'active',
+      created: hace40Dias,
+      metadata: { planActivationKey: 'plan-activation:org-1:1' },
+    }
+    // 🔑 Este Stripe simulado FILTRA por `created` igual que el real. Sin eso la prueba pasaría
+    // con la ventana puesta y no vería el defecto.
+    mockSubList.mockImplementation((params: { created?: { gte?: number } }) => ({
+      autoPagingEach: async (cb: (s: unknown) => boolean | Promise<boolean>) => {
+        for (const sub of [laQueYaCobro]) {
+          if (params.created?.gte !== undefined && sub.created < params.created.gte) continue
+          if ((await cb(sub)) === false) return
+        }
+      },
+    }))
+    mockSubRetrieve.mockResolvedValue({
+      id: 'sub_vieja',
+      current_period_end: Math.floor(new Date('2026-10-17T00:00:00Z').getTime() / 1000),
+      latest_invoice: { amount_paid: ANUNCIADO },
+      discounts: [{ coupon: { id: 'LC_POS22_V1' } }],
+    })
+
+    await activatePlan({ ...BASE, offer: OFERTA_LAUNCH }).catch(() => undefined)
+
+    expect(mockSubCreate).not.toHaveBeenCalled()
+  })
+
+  it('recorrió TODAS las suscripciones del cliente y no está ⇒ no existe ⇒ estrena intento', async () => {
+    // El caso legítimo no se rompe: con la búsqueda completa, no encontrarla SÍ es prueba.
     mockSubList.mockReturnValue({ autoPagingEach: async () => undefined })
+
+    await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
+
+    expect(mockSubCreate).toHaveBeenCalledTimes(1)
+  })
+
+  it('🔴 si el cliente tiene más suscripciones de las que se pueden recorrer, NO cobra: pendiente', async () => {
+    // Recorrer todo sólo prueba ausencia si de verdad se recorrió todo. Si se llega al tope sin
+    // encontrarla, el desenlace es incierto — y ante lo incierto nunca se autoriza otro cobro.
+    const muchas = Array.from({ length: 1_200 }, (_, i) => ({ id: `sub_${i}`, metadata: {} }))
+    mockSubList.mockReturnValue({
+      autoPagingEach: async (cb: (s: unknown) => boolean | Promise<boolean>) => {
+        for (const sub of muchas) if ((await cb(sub)) === false) return
+      },
+    })
 
     await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({
       statusCode: 503,
       code: 'PLAN_ACTIVATION_PENDING',
     })
     expect(mockSubCreate).not.toHaveBeenCalled()
-  })
-
-  it('un intento anterior DENTRO de la ventana sí puede concluir «no existe» y estrenar intento', async () => {
-    // El caso legítimo no se rompe: si la búsqueda SÍ cubre el periodo del intento anterior,
-    // no encontrarla es prueba suficiente.
-    mockSubList.mockReturnValue({ autoPagingEach: async () => undefined })
-
-    await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
-
-    expect(mockSubCreate).toHaveBeenCalledTimes(1)
   })
 
   it('🔴 si el id de la suscripción quedó guardado, se recupera por ID y NO se busca por ventana', async () => {
@@ -502,22 +533,6 @@ describe('recuperación de un intento desconocido', () => {
     expect(mockSubRetrieve).toHaveBeenCalledWith('sub_guardada', expect.anything())
     expect(mockSubList).not.toHaveBeenCalled()
     expect(mockSubCreate).not.toHaveBeenCalled()
-  })
-
-  it('🔴 la ventana de búsqueda NO se mueve con los reintentos (si se mueve, cobra dos veces)', async () => {
-    // Codex, 20-sep: la cota iba anclada a `planActivationLeaseUntil`, que se RENUEVA en cada
-    // reintento. Tras una recuperación fallida, la ventana se corría hacia adelante y podía dejar
-    // FUERA la suscripción que ya cobró — el reintento no la veía y creaba otra.
-    // El `beforeEach` de este describe ya deja el intento IN_PROGRESS con el lease recién
-    // vencido — el escenario exacto del reintento tras una recuperación fallida. Con la cota
-    // anclada a ese lease, la ventana sólo alcanzaba ~1 h atrás.
-    mockSubList.mockReturnValue({ autoPagingEach: async () => undefined })
-
-    await activatePlan({ ...BASE, offer: OFERTA_LAUNCH }).catch(() => undefined)
-
-    const gte = mockSubList.mock.calls[0][0].created.gte * 1000
-    // La cota tiene que alcanzar DÍAS atrás, no minutos: un intento anterior puede ser viejo.
-    expect(Date.now() - gte).toBeGreaterThan(24 * 60 * 60 * 1000)
   })
 
   it('🔴 si `subscriptions.list` FALLA → 503, NUNCA «no existe»', async () => {

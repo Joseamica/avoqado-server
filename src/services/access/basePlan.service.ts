@@ -86,6 +86,49 @@ export const FREE_TIER_CODES = ['CHATBOT'] as const // AVAILABLE_BALANCE moved t
 
 export type BaseTier = 'PREMIUM' | 'PRO'
 
+/**
+ * ¿El plan `tier` concede por sí solo el código `code`? Predicado PURO, sin base de datos.
+ *
+ * ⚠️ Hoy esta regla vive escrita tres veces (aquí, en `venueHasFeatureAccess` y en el `tierGrants`
+ * del payload del dashboard). No se unifican en este cambio a propósito: el camino del acceso es
+ * el que la fase 1 del plan de coexistencia va a reescribir para leer la política desde una tabla
+ * (`PlanFeatureGrant`), y tocarlo dos veces multiplica el riesgo. Cuando eso entre, los tres pasan
+ * a llamar aquí. Ver `docs/superpowers/plans/2026-09-21-coexistencia-planes-y-funciones-sueltas.md`.
+ */
+export function elPlanConcede(tier: BaseTier, code: string): boolean {
+  if ((PAID_PLAN_TIER_CODES as readonly string[]).includes(code)) return false // un plan no concede otro plan
+  if ((FREE_TIER_CODES as readonly string[]).includes(code)) return true // ya es gratis para todos
+  if (tier === 'PREMIUM') return true
+  return !(PREMIUM_ONLY_CODES as readonly string[]).includes(code)
+}
+
+/**
+ * De las funciones SUELTAS que el negocio ya paga, cuáles quedan absorbidas al mudarse a `tier`.
+ *
+ * 🔴 Decisión del founder (21-sep-2026), «como lo hace Claude»: al subir de plan a mitad de ciclo
+ * la suelta absorbida se cancela, se acreditan los días no usados y se cobra la diferencia — jamás
+ * se cobran las dos. Antes nadie relacionaba ambas suscripciones (son features distintas de la
+ * MISMA tabla), así que subir a Premium con inventario contratado seguía cobrando los dos.
+ *
+ * Es pura para que la COTIZACIÓN y la EJECUCIÓN no puedan contestar distinto: el cliente ve
+ * exactamente lo que se le va a cancelar. Lo que NO absorbe se conserva intacto, con su cobro.
+ */
+export function sueltasAbsorbidasPorElPlan(tier: BaseTier, codigosSueltos: string[]): string[] {
+  return codigosSueltos.filter(code => elPlanConcede(tier, code))
+}
+
+/**
+ * ¿Cambiar de `origen` a `destino` convertiría un PLAN en una función suelta, o al revés?
+ *
+ * 🔴 Codex, 21-sep (P1, reproducido): la ruta de cambiar suscripción aceptaba `PLAN_PRO →
+ * LOYALTY_PROGRAM` y `LOYALTY_PROGRAM → PLAN_PREMIUM` y los mandaba a Stripe — un plan se
+ * contrataba o se deshacía saltándose el checkout de planes. Plan↔plan y suelta↔suelta sí valen.
+ */
+export function cruzaPlanYSuelta(origen: string, destino: string): boolean {
+  const esPlan = (code: string) => (PAID_PLAN_TIER_CODES as readonly string[]).includes(code)
+  return esPlan(origen) !== esPlan(destino)
+}
+
 /** Active-window predicate shared by every base-plan query: active, not suspended, trial null/future. */
 function isActiveWindow(vf: { active: boolean; suspendedAt: Date | null; endDate: Date | null }, now: Date = new Date()): boolean {
   if (!vf.active || vf.suspendedAt) return false

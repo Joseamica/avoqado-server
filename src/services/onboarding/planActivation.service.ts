@@ -58,11 +58,15 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 export const LEASE_MS = 5 * 60_000
 
 /**
- * Cota hacia atrás para BUSCAR la suscripción de un intento anterior. Fija a propósito: un
- * onboarding puede arrastrar intentos de varios días, y cualquier cota que dependa del estado del
- * propio intento (el lease, que se renueva) se desplaza y deja de ver lo que ya se cobró.
+ * Tope de suscripciones que se recorren de UN cliente al buscar el intento anterior.
+ *
+ * 🔴 La búsqueda ya no lleva ventana de fechas (Codex, 21-sep, P1 reproducido): cualquier cota
+ * deja fuera un intento más viejo, y la regla que la protegía comparaba la fecha del LEASE, que se
+ * renueva en cada reintento — al SEGUNDO reintento una búsqueda vacía pasaba por «no existe» y se
+ * cobraba otra vez. Recorriendo TODAS las suscripciones del cliente, «no la encontré» sí prueba
+ * ausencia. Un cliente real tiene un puñado; si se llega al tope, NO se pudo cubrir y no se cobra.
  */
-const VENTANA_RECUPERACION_MS = 30 * 24 * 60 * 60 * 1000
+const TOPE_SUSCRIPCIONES_POR_CLIENTE = 1_000
 
 /** Estados de Stripe en los que una suscripción recuperada acredita que el cobro quedó hecho. */
 const SUSCRIPCION_COBRADA = ['active', 'trialing', 'past_due', 'unpaid'] as const
@@ -274,24 +278,25 @@ async function verificarPrecioDeStripe(tier: PaidPlanTier, interval: PlanBilling
 async function buscarSuscripcionDelIntento(
   customerId: string,
   planActivationKey: string,
-  desde: Date,
-): Promise<Stripe.Subscription | null> {
+): Promise<{ encontrada: Stripe.Subscription | null; cubrioTodo: boolean }> {
   let encontrada: Stripe.Subscription | null = null
+  let vistas = 0
+  let cubrioTodo = true
   await stripe.subscriptions
-    .list({
-      customer: customerId,
-      status: 'all',
-      limit: 100,
-      created: { gte: Math.floor(desde.getTime() / 1000) - 3600 },
-    })
+    .list({ customer: customerId, status: 'all', limit: 100 })
     .autoPagingEach(sub => {
       if (sub.metadata?.planActivationKey === planActivationKey) {
         encontrada = sub
         return false // corta el recorrido
       }
+      vistas += 1
+      if (vistas >= TOPE_SUSCRIPCIONES_POR_CLIENTE) {
+        cubrioTodo = false // no se recorrió todo: «no la encontré» ya no prueba nada
+        return false
+      }
       return true
     })
-  return encontrada
+  return { encontrada, cubrioTodo }
 }
 
 /**
@@ -558,28 +563,19 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
     }
     try {
       // RESPALDO, sólo para intentos anteriores a que se persistiera el id: se busca por la llave
-      // de idempotencia dentro de una cota FIJA hacia atrás. La cota ya no se ancla al lease —que
-      // se renueva en cada reintento y corría la ventana hacia adelante—, pero sigue siendo una
-      // ventana: por eso el camino bueno es el id de arriba, no éste.
+      // de idempotencia entre TODAS las suscripciones del cliente, sin ventana de fechas.
       if (!suscripcionRecuperada) {
-        const desde = new Date(now.getTime() - VENTANA_RECUPERACION_MS)
-        suscripcionRecuperada = await buscarSuscripcionDelIntento(customerId, llaveAnterior, desde)
+        const busqueda = await buscarSuscripcionDelIntento(customerId, llaveAnterior)
+        suscripcionRecuperada = busqueda.encontrada
 
-        // 🔴 «No la encontré» sólo vale como «no existe» si la búsqueda pudo CUBRIR el periodo en
-        // que ese intento pudo crearla. Si el intento anterior es más viejo que la ventana, no
-        // encontrarla no prueba nada — y tratarlo como ausencia estrena llave y cobra OTRA VEZ
-        // (Codex lo reprodujo con 31 días de por medio, 20-sep). Es el mismo principio que el
-        // cobro con terminal: nunca autorizar con un desenlace pendiente.
-        //
-        // Esto NO bloquea a nadie del camino normal: desde que el id se persiste al crear
-        // (`planStripeSubscriptionId`), los intentos nuevos se recuperan por id y ni llegan aquí.
-        // Sólo alcanza a los anteriores a ese cambio, y ahí el desenlace es genuinamente incierto.
-        if (!suscripcionRecuperada && prev.leaseUntil && prev.leaseUntil < desde) {
-          logger.error('🚨 activate-plan: intento anterior fuera de la ventana de búsqueda — NO se cobra de nuevo', {
+        // 🔴 «No la encontré» sólo vale como «no existe» si de verdad se recorrió todo. Si se llegó
+        // al tope, el desenlace del intento anterior es incierto — y ante lo incierto NUNCA se
+        // autoriza otro cobro (mismo principio que el cobro con terminal).
+        if (!suscripcionRecuperada && !busqueda.cubrioTodo) {
+          logger.error('🚨 activate-plan: no se pudo recorrer todas las suscripciones del cliente — NO se cobra de nuevo', {
             organizationId,
             intentoAnterior: prev.attempt,
-            leaseUntil: prev.leaseUntil,
-            desde,
+            tope: TOPE_SUSCRIPCIONES_POR_CLIENTE,
           })
           throw pendiente('el intento anterior no se pudo verificar')
         }

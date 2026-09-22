@@ -87,9 +87,57 @@ se identifican los solapes reales en producción y su tratamiento económico.
 
 ## Decisiones que necesita el founder
 
-1. **Solapes al subir de plan:** ¿cancelar la suelta y acreditar la diferencia (lo que proponía el
-   spec de junio), o dejar las dos cobrando?
+~~1. **Solapes al subir de plan**~~ → 🟢 **DECIDIDO por el founder (21-sep): opción A, «como lo
+   hace Claude».** Al subir de plan a mitad de ciclo se **cancela la suelta absorbida, se acreditan
+   los días no usados y se cobra la diferencia** — nunca el plan completo tirando lo ya pagado.
+   Sus palabras: *«si tengo una suscripción de Max de $100 y quiero aumentar a $200, me descuentan
+   al mes corriente lo que llevo»*. Ejemplo con los precios reales, subiendo el día 15 de 30:
+   inventario $89 → crédito $44.50 · Premium $1,699 → $849.50 por esos días · **cobro hoy: $805**.
+   🔑 El mecanismo ya existe (`proration_behavior: 'always_invoice'`, el mismo del cambio de plan).
+   Lo que falta NO es el descuento: es que la cotización y la ejecución **miren también las sueltas
+   que el plan absorbe** — hoy son dos suscripciones distintas que nadie relacionó.
 2. **Los 5 precios que un PRO ya tiene gratis:** ¿suben por encima del plan, se sacan del catálogo,
    o se mueven a PREMIUM_ONLY?
 3. **`CHATBOT` a $199 siendo gratis para todos:** ¿se retira del catálogo o deja de ser Free?
 4. **Solapes que ya existan en producción** (sin medir todavía: hace falta lectura de prod).
+
+## Estado (21-sep-2026, tarde)
+
+| # | Hallazgo | Estado | Dónde |
+|---|---|---|---|
+| 3 | Plan contratable por la puerta de sueltas | 🟢 cerrado (TDD) | `addFeaturesToVenue` rechaza `PLAN_*` antes de tocar base o Stripe |
+| 8 | Trial de 0-365 días elegido por el cliente | 🟢 cerrado (TDD) | `TRIAL_ALA_CARTE_DIAS = 5`; el campo del body se acepta y se ignora |
+| 9 | MANAGER cambia una suscripción | 🟢 cerrado (TDD) | el PUT exige `billing:subscriptions:manage` |
+| 6 | Cancelar responde éxito con Stripe caído | 🟢 cerrado (TDD) | sólo sigue si `stripeAfirmaQueNoExiste`; cualquier otro fallo detiene la baja |
+| 4 | El portero niega lo que el plan cubre | 🟢 cerrado (TDD) | el middleware consulta `elPlanConcede` antes de negar por caducidad o suspensión |
+| 1 | Subir de plan cobra la suelta absorbida | 🟡 **piezas hechas, sin enchufar** | `sueltasAbsorbidasPorElPlan` (pura) + `sueltasQueAbsorbeElPlan` (lectura). Falta la cotización y la cancelación con crédito |
+| 2 | Dos compras concurrentes = dos suscripciones | ⬜ | |
+| 7 | Recomprar `past_due` pisa una recuperación | ⬜ | |
+| 5 | El plan vive en código | ⬜ fase 1 | `elPlanConcede` ya es el punto único al que migrarán los otros dos sitios |
+| 10 | Empleado ve paywall sobre lo pagado | ⬜ fase 4 | 🔑 hallazgo nuevo: la ruta abierta (`features:read`) **existe y está tapada** por la de facturación, registrada antes en `dashboard.routes.ts` |
+
+🔴 **Por qué el #1 no se enchufó en esta sesión:** conectar la cancelación automática es tocar el
+carril de suscripciones que acaba de pasar 22 rondas de auditoría. Las dos piezas son puras o de
+sólo lectura y están probadas; el enganche merece su propia auditoría de Codex antes de mover dinero.
+
+Pruebas nuevas: `tests/unit/services/venueFeature.alaCarte.test.ts` (9) · `venueFeature.absorcion.test.ts` (6) ·
+`basePlan.sueltasAbsorbidas.test.ts` (7) · `tests/unit/routes/venueFeatureSubscription.permissions.test.ts` (3) ·
+`tests/unit/middlewares/checkFeatureAccess.planCubre.test.ts` (4). Vecinas: 56 suites / 740 y 52 / 583 en verde.
+
+## Ronda 2 (21-sep, noche) — dos rechazos de Codex y una aprobación
+
+Codex auditó la fase 0 en dos pasadas y RECHAZÓ: 3 P1 + 5 P2. Todos cerrados con TDD y la tercera pasada
+dio **AUTORIZADO** con los 8 cerrados y ningún hallazgo nuevo.
+
+| Hallazgo | Arreglo |
+|---|---|
+| P1 · el 2º reintento de `activate-plan` volvía a cobrar (la regla comparaba el LEASE, que se renueva) | `buscarSuscripcionDelIntento` recorre TODAS las suscripciones del cliente, sin ventana; tope 1000 ⇒ 503 |
+| P1 · el PUT seguía convirtiendo plan↔suelta | `cruzaPlanYSuelta` en cotizar y cambiar, 400 `PLAN_CROSSING_NOT_ALLOWED` antes de Stripe |
+| P1 · el portero negaba CHATBOT con una fila vieja | delega en `venueHasFeatureAccess`; la prueba usa el resolver REAL |
+| P2 · la absorción descartaba sueltas suspendidas que siguen cobrando | candidatas = ligadas a Stripe o con acceso; el ejecutor verifica en Stripe |
+| P2 · cancelar con Stripe caído daba 400 y podía trabarse | consulta `estadoDeLaSuscripcion`; `canceled` ⇒ completa la baja; si no, 503 `SUBSCRIPTION_CANCEL_PENDING` |
+| P2 · el cartel ofrecía «$0», «+ IVA» en la suelta y el botón a quien sólo lee | precio sólo con `stripePriceId`; «+ IVA» sólo en planes; botón con `billing:subscriptions:manage` |
+
+🔑 La salvedad que dejó Codex sobre el doble cobro: la etiqueta `metadata.planActivationKey` la estampa todo
+`activate-plan` desde `b1b57c43`, pero **el onboarding legacy y el Checkout no la ponen**. No son parte de
+este protocolo de recuperación, así que no reabre el hueco; no se inspeccionaron suscripciones de producción.

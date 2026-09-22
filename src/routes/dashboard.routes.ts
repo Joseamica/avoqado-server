@@ -3101,7 +3101,10 @@ router.post(
 router.put(
   '/venues/:venueId/features/:featureId/subscription',
   authenticateTokenMiddleware,
-  checkPermission('features:write'),
+  // 🔴 Cambiar el producto/precio de una suscripción MUEVE DINERO: pide el mismo permiso que
+  // darla de alta y cancelarla (`billing:subscriptions:manage`). Con `features:write` un MANAGER
+  // —que no puede contratar ni cancelar— sí podía cambiar lo contratado (auditoría 21-sep, #9).
+  checkPermission('billing:subscriptions:manage'),
   venueFeatureController.updateSubscription,
 )
 

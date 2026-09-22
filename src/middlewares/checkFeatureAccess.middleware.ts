@@ -144,6 +144,23 @@ export function checkFeatureAccess(featureCode: string) {
         return
       }
 
+      // 🔴 Antes de negar por caducidad o suspensión: ¿el PLAN lo cubre igual?
+      // El resolver canónico (`venueHasFeatureAccess`) cae al plan en cuanto la fila propia deja
+      // de ser válida; este portero no lo hacía y cortaba con 403 primero. Medido el 21-sep: un
+      // negocio con PREMIUM pagado, que además tenía inventario contratado aparte con el trial
+      // vencido, recibía 403 en inventario mientras el resolver decía `true` (auditoría #4).
+      // Sólo AMPLÍA acceso: a quien el plan no cubre se le sigue negando, igual que antes.
+      // Se pregunta al resolver CANÓNICO, no a un atajo propio: el primer arreglo usaba
+      // tier + `elPlanConcede` y seguía negando CHATBOT —gratis para todos, sin depender de
+      // plan— si había una fila vieja vencida (Codex, 21-sep). Así este portero y el resto de la
+      // plataforma no pueden volver a contestar distinto.
+      if ((venueFeature.endDate && venueFeature.endDate < new Date()) || venueFeature.suspendedAt) {
+        if (await venueHasFeatureAccess(venueId, featureCode)) {
+          ;(req as any).venueFeature = { featureCode, grantedBy: 'BASE_PLAN' }
+          return next()
+        }
+      }
+
       // Check if trial has expired (endDate is in the past)
       const now = new Date()
       if (venueFeature.endDate && venueFeature.endDate < now) {
