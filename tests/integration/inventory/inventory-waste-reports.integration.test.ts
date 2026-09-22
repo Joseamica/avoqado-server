@@ -9,6 +9,9 @@
  *   - 🔴 CAMBIO VISIBLE declarado: el costo de la merma deja de ser `cantidad × costo ACTUAL`
  *     (`RawMaterial.costPerUnit` de hoy) y pasa a ser el costo REAL de cada lote que se dio de baja
  *     (`costImpact` de cada movimiento). Un costo desconocido no se inventa: queda «sin valorar».
+ *   - 🔴 CAMBIO VISIBLE declarado (Ruling 24): un ADJUSTMENT de lote con costo guardado (liberar un lote
+ *     de cuarentena, entrada manual con lote nuevo, reversa de vale por área) se valora con ESE costo en
+ *     `materials[].totalCost`, no a `cantidad × costo actual`: cuarentena + liberación suman 0.
  *   - 🔴 Contrato viejo: quien no manda `limit` sigue recibiendo TODOS los ingredientes, sin recorte.
  *   - Varianza (`getCostVarianceReport`): costo real = USAGE a costo actual (como hoy) + merma a
  *     costo de lote (del libro, sin multiplicar), e incluye los productos (LOSS), que hoy no estaban.
@@ -379,6 +382,90 @@ describe('reporte de materiales (getIngredientUsageReport)', () => {
     expect(report.materials.map(m => m.rawMaterialId)).toEqual([dentro.id])
     expect(report.materials[0]).toMatchObject({ waste: 2, usage: 0, totalCost: -4 })
     expect(report.summary.totalWaste).toBe(2)
+  })
+
+  // Ruling 24 (Codex P2-1): la cuarentena escribe SPOILAGE a costo de LOTE y la liberación escribe
+  // ADJUSTMENT también a costo de lote (fifoBatch.service, releaseBatchFromQuarantine). El reporte
+  // valoraba el ajuste a costo ACTUAL, así que el par dejaba un costo residual ficticio.
+  test('🔴 cuarentena y liberación del mismo lote se compensan: el par suma 0', async () => {
+    const item = await raw(5, 10)
+    const lot = await batch(item.id, 5, 2, new Date('2026-01-01T00:00:00Z'))
+
+    await prisma.rawMaterialMovement.createMany({
+      data: [
+        {
+          venueId,
+          rawMaterialId: item.id,
+          batchId: lot.id,
+          type: 'SPOILAGE',
+          quantity: D(-5),
+          unit: 'PIECE',
+          previousStock: D(5),
+          newStock: D(0),
+          costImpact: D(-10),
+          reason: 'Lote retenido: revisión',
+          reference: lot.id,
+        },
+        {
+          venueId,
+          rawMaterialId: item.id,
+          batchId: lot.id,
+          type: 'ADJUSTMENT',
+          quantity: D(5),
+          unit: 'PIECE',
+          previousStock: D(0),
+          newStock: D(5),
+          costImpact: D(10),
+          reason: 'Lote liberado de cuarentena: revisión terminada',
+          reference: lot.id,
+        },
+      ],
+    })
+
+    const report = await getIngredientUsageReport(venueId, from, to)
+
+    expect(report.materials).toHaveLength(1)
+    // Antes: −10 (SPOILAGE a su costo) + 5 × 10 (ajuste a costo actual) = 40, sin pérdida real.
+    expect(report.materials[0]).toMatchObject({ rawMaterialId: item.id, netChange: 0, totalCost: 0 })
+    expect(report.summary.totalCost).toBe(0)
+  })
+
+  test('un ajuste SIN costo de lote guardado (sin lote o sin costImpact) conserva la valoración de siempre (cantidad × costo actual)', async () => {
+    const item = await raw(5, 10)
+    const lot = await batch(item.id, 5, 2, new Date('2026-01-01T00:00:00Z'))
+    await prisma.rawMaterialMovement.createMany({
+      data: [
+        // Ajuste manual sin lote.
+        { venueId, rawMaterialId: item.id, type: 'ADJUSTMENT', quantity: D(2), unit: 'PIECE', previousStock: D(5), newStock: D(7) },
+        // Sin lote aunque traiga costImpact: la regla nueva es sólo para ajustes DE LOTE.
+        {
+          venueId,
+          rawMaterialId: item.id,
+          type: 'ADJUSTMENT',
+          quantity: D(1),
+          unit: 'PIECE',
+          previousStock: D(10),
+          newStock: D(11),
+          costImpact: D(1),
+        },
+        // Existencia inicial: con lote pero sin costImpact (rawMaterial.service, createRawMaterial).
+        {
+          venueId,
+          rawMaterialId: item.id,
+          batchId: lot.id,
+          type: 'ADJUSTMENT',
+          quantity: D(3),
+          unit: 'PIECE',
+          previousStock: D(7),
+          newStock: D(10),
+          costImpact: null,
+        },
+      ],
+    })
+
+    const report = await getIngredientUsageReport(venueId, from, to)
+    // (2 + 3 + 1) × 10 = 60: ninguno trae un costo DE LOTE guardado.
+    expect(report.materials[0]).toMatchObject({ rawMaterialId: item.id, adjustments: 6, totalCost: 60 })
   })
 
   test('🔴 aislamiento: ingredientes, movimientos y mermas de OTRO venue no aparecen', async () => {

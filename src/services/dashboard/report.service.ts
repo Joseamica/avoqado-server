@@ -335,10 +335,10 @@ export async function getIngredientUsageReport(
   ])
 
   // Use raw SQL for efficient aggregation by movement type.
-  // ⚠️ LIMITACIÓN DECLARADA de `total_cost` (va a la auditoría Codex #2, no se corrige aquí): la rama
-  // ELSE valora a `cantidad × costo actual`, pero SPOILAGE va a su `costImpact`. Poner un lote en
-  // cuarentena escribe SPOILAGE a costo de LOTE y liberarlo escribe ADJUSTMENT a costo ACTUAL, así que
-  // ese par ya no suma 0 cuando los dos costos difieren.
+  // `total_cost` (Ruling 24): SPOILAGE y los ADJUSTMENT de lote con costo guardado usan ese costo. Así
+  // la cuarentena (SPOILAGE a costo de lote) y la liberación (ADJUSTMENT a costo de lote,
+  // fifoBatch.service `releaseBatchFromQuarantine`) del mismo lote se compensan. Los demás
+  // movimientos conservan la valoración del contrato anterior: cantidad × costo actual.
   const materialStats = await prisma.$queryRaw<
     Array<{
       raw_material_id: string
@@ -364,7 +364,17 @@ export async function getIngredientUsageReport(
       COALESCE(SUM(CASE WHEN rmm.type = 'ADJUSTMENT' THEN rmm.quantity ELSE 0 END), 0) as adjustments,
       COALESCE(MAX(w.quantity), 0) as waste,
       COALESCE(SUM(rmm.quantity), 0) as net_change,
-      COALESCE(SUM(CASE WHEN rmm.type = 'SPOILAGE' THEN rmm."costImpact" ELSE rmm.quantity * rm."costPerUnit" END), 0) as total_cost,
+      COALESCE(SUM(
+        CASE
+          WHEN rmm.type = 'SPOILAGE'
+            THEN rmm."costImpact"
+          WHEN rmm.type = 'ADJUSTMENT'
+            AND rmm."batchId" IS NOT NULL
+            AND rmm."costImpact" IS NOT NULL
+            THEN rmm."costImpact"
+          ELSE rmm.quantity * rm."costPerUnit"
+        END
+      ), 0) as total_cost,
       rm."costPerUnit" as avg_cost_per_unit
     FROM "RawMaterial" rm
     LEFT JOIN "RawMaterialMovement" rmm ON rmm."rawMaterialId" = rm.id
