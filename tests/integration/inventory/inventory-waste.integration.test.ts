@@ -9,6 +9,7 @@ import * as rawMaterialService from '@/services/dashboard/rawMaterial.service'
 import { deductInventoryForProduct } from '@/services/dashboard/productInventoryIntegration.service'
 import { confirmStockCount } from '@/services/mobile/inventory.mobile.service'
 import { create as createFromPos } from '@/controllers/mobile/inventoryWaste.mobile.controller'
+import { adaptDashboardWaste } from '@/services/shared/dashboardWasteAdapter'
 import {
   getWasteAccess,
   grantedPermissionsBeforeActivation,
@@ -1063,14 +1064,22 @@ test('🔴 con log-waste QUITADO por el venue: el gerente anula por inventory:ad
   }
 })
 
-async function waitFor<T>(read: () => Promise<T | undefined>): Promise<T> {
-  const deadline = Date.now() + 4000
+/**
+ * Plazo del ARNÉS para ver en Postgres el bloqueo que fuerza la carrera (Codex P3-1). Holgado para la
+ * Mac cargada, pero por debajo de los 10 s con que `withSerializableRetry` cierra las transacciones de
+ * los dos contendientes: si se agota, la observación quedó INCONCLUSA — no es un fallo de concurrencia
+ * y ninguna aserción de la carrera llegó a evaluarse.
+ */
+const PLAZO_OBSERVACION_MS = 8000
+
+async function waitFor<T>(what: string, read: () => Promise<T | undefined>): Promise<T> {
+  const deadline = Date.now() + PLAZO_OBSERVACION_MS
   while (Date.now() < deadline) {
     const value = await read()
     if (value !== undefined) return value
     await new Promise(resolve => setTimeout(resolve, 10))
   }
-  throw new Error('No se observó el bloqueo esperado en Postgres.')
+  throw new Error(`Observación inconclusa del arnés: no se vio ${what} en ${PLAZO_OBSERVACION_MS} ms (no es un fallo de concurrencia).`)
 }
 
 /**
@@ -1145,7 +1154,7 @@ async function forceOrder(
     winner = startWinner()
     void winner.catch(() => undefined)
 
-    const winnerPid = await waitFor(async () => {
+    const winnerPid = await waitFor('al ganador detenido en su trigger', async () => {
       const rows = await prisma.$queryRaw<Array<{ pid: number }>>`
         SELECT pid FROM pg_locks
         WHERE locktype = 'advisory'
@@ -1160,7 +1169,7 @@ async function forceOrder(
     void loser.catch(() => undefined)
 
     // El perdedor está detenido POR el ganador: el orden quedó forzado, no a la suerte.
-    const loserPid = await waitFor(async () => {
+    const loserPid = await waitFor('al perdedor detenido por el ganador', async () => {
       const rows = await prisma.$queryRaw<Array<{ pid: number }>>`
         SELECT pid FROM pg_stat_activity
         WHERE ${winnerPid}::int = ANY(pg_blocking_pids(pid))
@@ -1231,18 +1240,39 @@ test('carrera real POST–void: gana APPLIED y void devuelve ALREADY_APPLIED', a
   expect(await prisma.activityLog.count({ where: { venueId, action: 'INVENTORY_WASTE_VOIDED' } })).toBe(0)
 })
 
-test('carrera real POST–void: gana VOIDED y el POST no deja efectos', async () => {
-  const item = await product(5)
+// Codex P3-1: la guardia de orden de escrituras también por el camino de INSUMO (lote + hueco legacy:
+// los dos tipos de descuento). Un POST que adelantara los efectos de insumo antes del folio seguiría
+// terminando revertido; sólo esta observación, con el perdedor DETENIDO en el índice, lo ve.
+const CARRERA_VOIDED = {
+  PRODUCT: { effects: ['Inventory', 'InventoryMovement'] },
+  RAW_MATERIAL: { effects: ['RawMaterial', 'RawMaterialMovement', 'StockBatch'] },
+} as const
+
+test.each(['PRODUCT', 'RAW_MATERIAL'] as const)('carrera real POST–void (%s): gana VOIDED y el POST no deja efectos', async itemType => {
+  let item: { id: string }
+  let lotId: string | undefined
+  let input: WasteInput
+  if (itemType === 'PRODUCT') {
+    item = await product(5)
+    input = request('PRODUCT', item.id, 2)
+  } else {
+    // Existencia 5 con un lote de 2: descontar 3 toca el lote Y el ajuste directo sin lotes.
+    item = await raw(5)
+    lotId = (await batch(item.id, 2, 2)).id
+    input = request('RAW_MATERIAL', item.id, 3)
+  }
   let writtenWhileBlocked: string[] = []
-  const result = await racePostAndVoid(request('PRODUCT', item.id, 2), 'VOIDED', async loserPid => {
+  const result = await racePostAndVoid(input, 'VOIDED', async loserPid => {
     writtenWhileBlocked = await tablesWrittenBy(loserPid)
   })
 
   // 🔴 El índice único se disputa ANTES de escribir los efectos: detenido en él, el POST sólo ha
-  // tocado la tabla de folios; ni la existencia ni el kardex. (Control positivo: sí ve su folio.)
+  // tocado la tabla de folios; ni la existencia, ni el kardex, ni los lotes, ni la auditoría.
+  // (Control positivo: sí ve su folio.)
   expect(writtenWhileBlocked).toContain('InventoryWasteReport')
-  expect(writtenWhileBlocked).not.toContain('Inventory')
-  expect(writtenWhileBlocked).not.toContain('InventoryMovement')
+  for (const table of [...CARRERA_VOIDED[itemType].effects, 'ActivityLog']) {
+    expect(writtenWhileBlocked).not.toContain(table)
+  }
 
   expect(result.cancel.status).toBe('fulfilled')
   if (result.cancel.status === 'fulfilled') {
@@ -1252,10 +1282,16 @@ test('carrera real POST–void: gana VOIDED y el POST no deja efectos', async ()
   if (result.post.status === 'rejected') {
     expect(result.post.reason).toMatchObject({ code: 'WASTE_VOIDED', statusCode: 409 })
   }
-  expect(await productStock(item.id)).toBe('5')
+  if (itemType === 'PRODUCT') {
+    expect(await productStock(item.id)).toBe('5')
+  } else {
+    expect(await rawStock(item.id)).toBe('5')
+    expect((await prisma.stockBatch.findUniqueOrThrow({ where: { id: lotId } })).remainingQuantity.toString()).toBe('2')
+  }
   expect(await prisma.inventoryWasteReport.count({ where: { venueId, status: 'VOIDED' } })).toBe(1)
   expect(await prisma.inventoryWasteReport.count({ where: { venueId, status: 'APPLIED' } })).toBe(0)
   expect(await prisma.inventoryMovement.count({ where: { inventory: { venueId } } })).toBe(0)
+  expect(await prisma.rawMaterialMovement.count({ where: { venueId } })).toBe(0)
   expect(await prisma.activityLog.count({ where: { venueId, action: 'INVENTORY_WASTE_VOIDED' } })).toBe(1)
   expect(await prisma.activityLog.count({ where: { venueId, action: 'INVENTORY_WASTE_LOGGED' } })).toBe(0)
 })
@@ -1379,6 +1415,76 @@ test.each(['APPLIED', 'VOIDED'] as const)(
     }
   },
 )
+
+// Duda 2 de la ronda final: la rama «colisión P2002 → recuperar fuera → la respuesta se arma en una
+// transacción PROPIA» (Codex P2-2) con la ruta del DASHBOARD de perdedora. Mismo patrón: el ganador
+// inserta DIRECTO (READ COMMITTED), así el perdedor recibe el 23505 real y sólo el catch lo salva.
+test('🔴 la ruta del dashboard que pierde el folio por un P2002 real arma su respuesta en una transacción propia', async () => {
+  const item = await raw(0)
+  const key = randomUUID()
+  // La MISMA entrada que arma adaptDashboardWaste para { quantity: -2 } sobre un insumo en piezas.
+  const prepared = prepareWaste(staffId, {
+    itemType: 'RAW_MATERIAL',
+    itemId: item.id,
+    quantity: D(2),
+    unit: 'PIECE',
+    reasonCode: 'UNSPECIFIED',
+    idempotencyKey: key,
+    source: 'DASHBOARD',
+  })
+  const data: Prisma.InventoryWasteReportUncheckedCreateInput = {
+    venueId,
+    idempotencyKey: prepared.idempotencyKey,
+    status: 'APPLIED',
+    payloadHash: prepared.payloadHash,
+    itemType: 'RAW_MATERIAL',
+    rawMaterialId: item.id,
+    unit: prepared.unit,
+    reasonCode: prepared.reasonCode,
+    declaredQuantity: prepared.quantity,
+    deductedQuantity: D(0),
+    unrecordedQuantity: prepared.quantity,
+    costState: 'NONE',
+    reportedByStaffId: staffId,
+    source: 'DASHBOARD',
+  }
+
+  const transactions = jest.spyOn(prisma, '$transaction')
+  try {
+    const result = await forceOrder(
+      prepared.idempotencyKey,
+      'APPLIED',
+      () => prisma.inventoryWasteReport.create({ data }),
+      () => adaptDashboardWaste(venueId, staffId, 'RAW_MATERIAL', item.id, { quantity: -2, idempotencyKey: key }),
+    )
+    expect(result.winner.status).toBe('fulfilled')
+
+    // DOS transacciones y la primera terminó en P2002: la respuesta NO salió de un reintento (que la
+    // habría leído dentro de la primera), sino de la transacción propia del catch.
+    expect(transactions).toHaveBeenCalledTimes(2)
+    expect(await captureError(transactions.mock.results[0].value as Promise<unknown>)).toMatchObject({ code: 'P2002' })
+    await expect(transactions.mock.results[1].value as Promise<unknown>).resolves.toBeDefined()
+
+    const persisted = await prisma.inventoryWasteReport.findUniqueOrThrow({
+      where: { venueId_idempotencyKey: { venueId, idempotencyKey: prepared.idempotencyKey } },
+    })
+    expect(result.loser.status).toBe('fulfilled')
+    if (result.loser.status === 'fulfilled') {
+      const value = result.loser.value as { waste: WasteSummary; item: { id: string; currentStock: Prisma.Decimal } }
+      expect(value.waste).toEqual({ reportId: persisted.id, declared: '2', deducted: '0', unrecorded: '2' })
+      expect(value.item.id).toBe(item.id)
+      expect(value.item.currentStock.toString()).toBe('0')
+    }
+
+    // El perdedor revirtió entero.
+    expect(await rawStock(item.id)).toBe('0')
+    expect(await prisma.inventoryWasteReport.count({ where: { venueId } })).toBe(1)
+    expect(await prisma.rawMaterialMovement.count({ where: { venueId } })).toBe(0)
+    expect(await prisma.activityLog.count({ where: { venueId } })).toBe(0)
+  } finally {
+    transactions.mockRestore()
+  }
+})
 
 // ─── Auditoría Codex #1 · P2-1: la merma de producto no espera candados (NOWAIT) ──────────
 
