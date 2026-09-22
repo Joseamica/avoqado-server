@@ -54,7 +54,10 @@ const lapida = () => ({
 
 // Una declaración APPLIED que cumple los tres CHECK: hash de 64 hex, artículo, unidad, motivo,
 // declarada = descontada + no registrada, y costo KNOWN con importe.
-const aplicada = (articulo: { itemType: 'PRODUCT'; productId: string } | { itemType: 'RAW_MATERIAL'; rawMaterialId: string }, unit: string) => ({
+const aplicada = (
+  articulo: { itemType: 'PRODUCT'; productId: string } | { itemType: 'RAW_MATERIAL'; rawMaterialId: string },
+  unit: string,
+) => ({
   venueId,
   idempotencyKey: randomUUID(),
   status: 'APPLIED' as const,
@@ -146,9 +149,9 @@ test('🔴 una lápida no puede cargar datos de una declaración', async () => {
 })
 
 test('🔴 APPLIED sin hash, sin artículo o sin cantidad se rechaza en la base', async () => {
-  await expect(
-    prisma.inventoryWasteReport.create({ data: { ...lapida(), status: 'APPLIED' } }),
-  ).rejects.toThrow(/InventoryWasteReport_state_check/)
+  await expect(prisma.inventoryWasteReport.create({ data: { ...lapida(), status: 'APPLIED' } })).rejects.toThrow(
+    /InventoryWasteReport_state_check/,
+  )
 })
 
 test('🔴 el mismo folio dos veces en el mismo venue choca con el índice único', async () => {
@@ -223,16 +226,69 @@ test('🔴 borrar un PRODUCTO funciona aunque la cascada del folio dispare antes
 // Mismo orden forzado para el insumo. Aquí kardex y folio cuelgan a UN nivel, así que la
 // verificación se encola detrás del borrado del movimiento: pasa con o sin diferir. Queda como guarda.
 test('borrar un INSUMO funciona aunque la cascada del folio dispare antes que la del kardex', async () => {
-  await enOrdenDesfavorable('RawMaterial', 'InventoryWasteReport_rawMaterialId_fkey', 'RawMaterialMovement_rawMaterialId_fkey', async tx => {
-    const rawMaterial = await crearInsumo(tx)
-    const report = await tx.inventoryWasteReport.create({
-      data: aplicada({ itemType: 'RAW_MATERIAL', rawMaterialId: rawMaterial.id }, 'LITER'),
-    })
-    const movement = await crearMovimientoDeInsumo(rawMaterial.id, report.id, tx)
+  await enOrdenDesfavorable(
+    'RawMaterial',
+    'InventoryWasteReport_rawMaterialId_fkey',
+    'RawMaterialMovement_rawMaterialId_fkey',
+    async tx => {
+      const rawMaterial = await crearInsumo(tx)
+      const report = await tx.inventoryWasteReport.create({
+        data: aplicada({ itemType: 'RAW_MATERIAL', rawMaterialId: rawMaterial.id }, 'LITER'),
+      })
+      const movement = await crearMovimientoDeInsumo(rawMaterial.id, report.id, tx)
 
-    await tx.rawMaterial.delete({ where: { id: rawMaterial.id } })
+      await tx.rawMaterial.delete({ where: { id: rawMaterial.id } })
 
-    expect(await tx.inventoryWasteReport.findUnique({ where: { id: report.id } })).toBeNull()
-    expect(await tx.rawMaterialMovement.findUnique({ where: { id: movement.id } })).toBeNull()
-  })
+      expect(await tx.inventoryWasteReport.findUnique({ where: { id: report.id } })).toBeNull()
+      expect(await tx.rawMaterialMovement.findUnique({ where: { id: movement.id } })).toBeNull()
+    },
+  )
+})
+
+// Ruling 27: la migración inicial crea las llaves movimiento → folio NOT VALID y los índices de
+// "wasteReportId" van aparte, CONCURRENTLY. El estado FINAL tiene que ser el mismo de antes: las seis
+// llaves validadas (las del kardex, además, diferidas) y los dos índices válidos. Si una migración de
+// validación o de índice faltara o fallara en silencio, esto lo dice.
+test('🔴 tras migrar: las seis llaves validadas, las del kardex diferidas, y los índices de wasteReportId válidos', async () => {
+  const llaves = await prisma.$queryRaw<Array<{ conname: string; condeferrable: boolean; condeferred: boolean; convalidated: boolean }>>`
+    SELECT conname::text AS conname, condeferrable, condeferred, convalidated
+    FROM pg_constraint
+    WHERE conname IN (
+      'InventoryWasteReport_venueId_fkey', 'InventoryWasteReport_rawMaterialId_fkey',
+      'InventoryWasteReport_productId_fkey', 'InventoryWasteReport_reportedByStaffId_fkey',
+      'RawMaterialMovement_wasteReportId_fkey', 'InventoryMovement_wasteReportId_fkey'
+    )
+    ORDER BY conname
+  `
+  const inmediata = { condeferrable: false, condeferred: false, convalidated: true }
+  const diferida = { condeferrable: true, condeferred: true, convalidated: true }
+  expect(llaves).toEqual([
+    { conname: 'InventoryMovement_wasteReportId_fkey', ...diferida },
+    { conname: 'InventoryWasteReport_productId_fkey', ...inmediata },
+    { conname: 'InventoryWasteReport_rawMaterialId_fkey', ...inmediata },
+    { conname: 'InventoryWasteReport_reportedByStaffId_fkey', ...inmediata },
+    { conname: 'InventoryWasteReport_venueId_fkey', ...inmediata },
+    { conname: 'RawMaterialMovement_wasteReportId_fkey', ...diferida },
+  ])
+
+  const indices = await prisma.$queryRaw<Array<{ indice: string; indisvalid: boolean; indisready: boolean; definicion: string }>>`
+    SELECT i.indexrelid::regclass::text AS indice, i.indisvalid, i.indisready, pg_get_indexdef(i.indexrelid) AS definicion
+    FROM pg_index i
+    WHERE i.indexrelid IN (to_regclass('"RawMaterialMovement_wasteReportId_idx"'), to_regclass('"InventoryMovement_wasteReportId_idx"'))
+    ORDER BY 1
+  `
+  expect(indices).toEqual([
+    {
+      indice: '"InventoryMovement_wasteReportId_idx"',
+      indisvalid: true,
+      indisready: true,
+      definicion: 'CREATE INDEX "InventoryMovement_wasteReportId_idx" ON public."InventoryMovement" USING btree ("wasteReportId")',
+    },
+    {
+      indice: '"RawMaterialMovement_wasteReportId_idx"',
+      indisvalid: true,
+      indisready: true,
+      definicion: 'CREATE INDEX "RawMaterialMovement_wasteReportId_idx" ON public."RawMaterialMovement" USING btree ("wasteReportId")',
+    },
+  ])
 })

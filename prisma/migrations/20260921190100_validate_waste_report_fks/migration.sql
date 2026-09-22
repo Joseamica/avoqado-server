@@ -1,0 +1,25 @@
+-- Merma (Ruling 27): valida las dos llaves movimiento → folio que 20260921190000_inventory_waste creó
+-- NOT VALID (y DEFERRABLE INITIALLY DEFERRED) para no recorrer las tablas del kardex mientras las tenía
+-- en ACCESS EXCLUSIVE.
+--
+-- VALIDATE CONSTRAINT revisa las filas EXISTENTES en el acto aunque la llave sea diferida (medido en
+-- PG 14: una fila rota truena en el ALTER, no al COMMIT) y toma SHARE UPDATE EXCLUSIVE sobre la tabla
+-- del kardex y ROW SHARE sobre el folio: las ventas siguen escribiendo mientras recorre. No puede
+-- fallar por datos salvo corrupción: toda fila previa trae "wasteReportId" NULL (la columna nació en la
+-- migración anterior) y las nuevas ya las vigilaba la llave NOT VALID.
+--
+-- Dos sentencias ⇒ Prisma las manda como un lote ⇒ UNA transacción implícita: si la segunda no consigue
+-- su candado (lock_timeout de 5 s de migrate:deploy:bounded; SHARE UPDATE EXCLUSIVE choca con un
+-- autovacuum anti-wraparound, que no cede, o con otro DDL), la primera se revierte con ella. Las dos
+-- llaves quedan NOT VALID, que siguen vigilando toda fila nueva: nada queda sin protección.
+--
+-- RUNBOOK si falla:
+--   SELECT conname, convalidated FROM pg_constraint
+--    WHERE conname IN ('RawMaterialMovement_wasteReportId_fkey', 'InventoryMovement_wasteReportId_fkey')
+--   (convalidated = false es el estado esperado tras el fallo: no hay nada que borrar)
+--   npx prisma migrate resolve --rolled-back 20260921190100_validate_waste_report_fks
+--   y volver a correr el deploy. Tras cada deploy la misma consulta debe dar convalidated = true.
+--   Si en vez de un candado falla por una fila rota: NO se borra la llave; se busca la fila
+--   ("wasteReportId" IS NOT NULL sin folio) y se decide con el dueño de los datos.
+ALTER TABLE "RawMaterialMovement" VALIDATE CONSTRAINT "RawMaterialMovement_wasteReportId_fkey";
+ALTER TABLE "InventoryMovement" VALIDATE CONSTRAINT "InventoryMovement_wasteReportId_fkey";

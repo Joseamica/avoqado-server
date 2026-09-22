@@ -1,0 +1,29 @@
+-- Merma (Ruling 27): el índice de la llave movimiento → folio de PRODUCTOS, que 20260921190000_inventory_waste
+-- ya no construye. Lo usan la verificación de esa llave al borrar un folio (sin índice, cada folio borrado
+-- —p. ej. en la cascada al borrar el producto, o al limpiar una demo— recorre "InventoryMovement" entera)
+-- y los lectores que bajan de un folio a sus movimientos.
+--
+-- UNA sentencia por archivo, a propósito: Prisma manda el archivo como un solo lote y Postgres envuelve un
+-- lote de varias sentencias en una transacción implícita, donde CREATE INDEX CONCURRENTLY se rechaza
+-- (SQLSTATE 25001). Precedentes: 20260901190001 y 20260921200100. CONCURRENTLY porque cada venta de un
+-- producto por cantidad escribe aquí: un CREATE INDEX normal bloquearía esas escrituras mientras se
+-- construye. Aun así consume CPU y E/S y espera a que terminen las transacciones que ya estaban abiertas:
+-- el lock_timeout de 5 s sólo acota la espera por cada candado, no la duración total.
+--
+-- 🔴 Va ANTES del código que escribe folios: tiene que existir y ser VÁLIDO antes de abrirle tráfico.
+--
+-- RUNBOOK si falla a medias: un CREATE INDEX CONCURRENTLY interrumpido deja el índice INVÁLIDO, y en el
+-- reintento IF NOT EXISTS lo daría por hecho SIN reconstruirlo. Antes de reintentar:
+--   SELECT i.indexrelid::regclass, i.indisvalid, i.indisready FROM pg_index i
+--    WHERE i.indexrelid = to_regclass('"InventoryMovement_wasteReportId_idx"')
+--   · sin fila: no llegó a crearse.
+--   · indisvalid = false: DROP INDEX CONCURRENTLY IF EXISTS "InventoryMovement_wasteReportId_idx"
+--     fuera de cualquier transacción (psql en autocommit, sin BEGIN).
+--   · indisvalid = true: el índice quedó bien aunque Prisma marcara la migración fallida (se cortó la
+--     conexión al final). NO se borra.
+--   En los TRES casos, si Prisma registró la migración como fallida (P3009 detiene los deploys siguientes):
+--   npx prisma migrate resolve --rolled-back 20260921190300_index_inventory_movement_waste_report_concurrently
+--   y volver a correr el deploy (con el índice válido, IF NOT EXISTS lo deja igual y la marca aplicada).
+--   Tras cada deploy la misma consulta debe dar indisvalid = true e indisready = true.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "InventoryMovement_wasteReportId_idx"
+  ON "InventoryMovement"("wasteReportId");

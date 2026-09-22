@@ -68,6 +68,16 @@ BEGIN
       -- Postgres dispara esas cascadas en orden alfabético de trigger, que lleva el OID y en
       -- producción es impredecible. Una verificación inmediata truena si la del folio corre primero.
       -- Prisma no expresa DEFERRABLE: en el schema estas relaciones dicen sólo NoAction.
+      --
+      -- Y nacen NOT VALID (Ruling 27): este archivo corre como UNA transacción implícita y el
+      -- ADD COLUMN de arriba ya tiene las dos tablas del kardex en ACCESS EXCLUSIVE hasta el COMMIT
+      -- (cada venta escribe ahí). Una FK validada las recorrería enteras con ese candado puesto.
+      -- NOT VALID no recorre: vigila desde ya toda fila nueva o cambiada y deja las viejas (todas con
+      -- wasteReportId NULL, la columna es nueva) a 20260921190100_validate_waste_report_fks, cuyo
+      -- VALIDATE CONSTRAINT toma SHARE UPDATE EXCLUSIVE y no frena escrituras.
+      -- Las FKs de la tabla NUEVA hacia Venue/RawMaterial/Product/Staff se quedan validadas: la tabla
+      -- está vacía (validar es instantáneo) y NOT VALID no bajaría su candado — ADD FOREIGN KEY toma
+      -- SHARE ROW EXCLUSIVE sobre las dos tablas igual, y lo suelta al mismo COMMIT (medido en PG 14).
       VALUES
         ('InventoryWasteReport', 'InventoryWasteReport_venueId_fkey',
          'venueId', 'Venue', 'CASCADE', ''),
@@ -78,9 +88,9 @@ BEGIN
         ('InventoryWasteReport', 'InventoryWasteReport_reportedByStaffId_fkey',
          'reportedByStaffId', 'Staff', 'RESTRICT', ''),
         ('RawMaterialMovement', 'RawMaterialMovement_wasteReportId_fkey',
-         'wasteReportId', 'InventoryWasteReport', 'NO ACTION', 'DEFERRABLE INITIALLY DEFERRED'),
+         'wasteReportId', 'InventoryWasteReport', 'NO ACTION', 'DEFERRABLE INITIALLY DEFERRED NOT VALID'),
         ('InventoryMovement', 'InventoryMovement_wasteReportId_fkey',
-         'wasteReportId', 'InventoryWasteReport', 'NO ACTION', 'DEFERRABLE INITIALLY DEFERRED')
+         'wasteReportId', 'InventoryWasteReport', 'NO ACTION', 'DEFERRABLE INITIALLY DEFERRED NOT VALID')
     ) AS definitions(table_name, constraint_name, column_name, referenced_table, delete_action, deferral)
   LOOP
     IF NOT EXISTS (
@@ -232,10 +242,9 @@ BEGIN
   CREATE INDEX IF NOT EXISTS "InventoryWasteReport_reportedByStaffId_idx"
     ON "InventoryWasteReport" ("reportedByStaffId");
 
-  CREATE INDEX IF NOT EXISTS "RawMaterialMovement_wasteReportId_idx"
-    ON "RawMaterialMovement" ("wasteReportId");
-
-  CREATE INDEX IF NOT EXISTS "InventoryMovement_wasteReportId_idx"
-    ON "InventoryMovement" ("wasteReportId");
+  -- Los índices de "wasteReportId" sobre las tablas del kardex NO van aquí (Ruling 27): un CREATE
+  -- INDEX normal recorre la tabla con las escrituras bloqueadas, y dentro de este lote ni siquiera
+  -- podría ser CONCURRENTLY (SQLSTATE 25001). Van en 20260921190200 y 20260921190300, una sentencia
+  -- CONCURRENTLY por archivo.
 END
 $$;
