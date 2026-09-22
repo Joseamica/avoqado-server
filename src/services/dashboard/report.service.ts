@@ -3,6 +3,7 @@ import prisma from '../../utils/prismaClient'
 import { Decimal } from '@prisma/client/runtime/library'
 import { lineRevenueSql, lineUnitsSql } from './lineRevenue'
 import { utcTs } from '../../utils/sqlDates'
+import { getWasteBreakdown, getWasteTotals, wasteLedgerSql } from '../shared/inventoryWasteRead.service'
 
 /**
  * 🔴 These queries were WRITTEN IN snake_case (`o.venue_id`, `rmm.raw_material_id`,
@@ -303,6 +304,24 @@ export async function getIngredientUsageReport(
     offset?: number
   },
 ) {
+  // 🔴 La MERMA sale del libro de merma (spec §4.6), no de sumar movimientos SPOILAGE:
+  //   - un folio cuenta lo DECLARADO una sola vez — incluida la parte «sin existencia», que no
+  //     tiene movimiento —; sus movimientos hijos (uno por lote) no se suman encima;
+  //   - una merma vieja (SPOILAGE sin folio: dashboard anterior y cron de caducidad) cuenta una vez;
+  //   - su costo es el REAL de cada lote (`costImpact`), no `cantidad × costo actual`; un costo
+  //     desconocido no se inventa: va como cantidad «sin valorar».
+  // Los productos (LOSS) entran en `waste` (desglose) y en los totales de merma; `materials`
+  // conserva la forma de siempre (sólo ingredientes).
+  //
+  // 🔴 Contrato viejo: SIN `limit`, `materials` trae TODO, como siempre (no se impone un recorte
+  // por defecto que dejaría fuera a quien hoy no pagina). El desglose `waste` sí va acotado por el
+  // lector (100 por defecto, tope 200) y trae su `total`.
+  const wasteFilter = options?.rawMaterialId ? { itemType: 'RAW_MATERIAL' as const, itemId: options.rawMaterialId } : undefined
+  const [wasteTotals, wasteBreakdown] = await Promise.all([
+    getWasteTotals(venueId, startDate, endDate, wasteFilter),
+    getWasteBreakdown(venueId, startDate, endDate, options?.limit ?? 100, options?.offset ?? 0, wasteFilter),
+  ])
+
   // Use raw SQL for efficient aggregation by movement type
   const materialStats = await prisma.$queryRaw<
     Array<{
@@ -320,25 +339,33 @@ export async function getIngredientUsageReport(
     }>
   >`
     SELECT
-      rmm."rawMaterialId" as raw_material_id,
+      rm.id as raw_material_id,
       rm.name as raw_material_name,
       rm.category,
       rm.unit,
       COALESCE(SUM(CASE WHEN rmm.type = 'PURCHASE' THEN rmm.quantity ELSE 0 END), 0) as purchases,
       COALESCE(SUM(CASE WHEN rmm.type = 'USAGE' THEN ABS(rmm.quantity) ELSE 0 END), 0) as usage,
       COALESCE(SUM(CASE WHEN rmm.type = 'ADJUSTMENT' THEN rmm.quantity ELSE 0 END), 0) as adjustments,
-      COALESCE(SUM(CASE WHEN rmm.type = 'SPOILAGE' THEN ABS(rmm.quantity) ELSE 0 END), 0) as waste,
+      COALESCE(MAX(w.quantity), 0) as waste,
       COALESCE(SUM(rmm.quantity), 0) as net_change,
-      COALESCE(SUM(rmm.quantity * rm."costPerUnit"), 0) as total_cost,
+      COALESCE(SUM(CASE WHEN rmm.type = 'SPOILAGE' THEN rmm."costImpact" ELSE rmm.quantity * rm."costPerUnit" END), 0) as total_cost,
       rm."costPerUnit" as avg_cost_per_unit
-    FROM "RawMaterialMovement" rmm
-    INNER JOIN "RawMaterial" rm ON rm.id = rmm."rawMaterialId"
-    WHERE rmm."venueId" = ${venueId}
+    FROM "RawMaterial" rm
+    LEFT JOIN "RawMaterialMovement" rmm ON rmm."rawMaterialId" = rm.id
+      AND rmm."venueId" = ${venueId}
       AND rmm."createdAt" >= ${utcTs(startDate)}
       AND rmm."createdAt" <= ${utcTs(endDate)}
-      ${options?.rawMaterialId ? Prisma.sql`AND rmm."rawMaterialId" = ${options.rawMaterialId}` : Prisma.empty}
-    GROUP BY rmm."rawMaterialId", rm.name, rm.category, rm.unit, rm."costPerUnit"
-    ORDER BY total_cost DESC, rmm."rawMaterialId" ASC
+    LEFT JOIN (
+      SELECT "itemId", SUM(quantity) AS quantity
+      FROM (${wasteLedgerSql(venueId, startDate, endDate)}) ledger
+      WHERE "itemType" = 'RAW_MATERIAL'
+      GROUP BY "itemId"
+    ) w ON w."itemId" = rm.id
+    WHERE rm."venueId" = ${venueId}
+      ${options?.rawMaterialId ? Prisma.sql`AND rm.id = ${options.rawMaterialId}` : Prisma.empty}
+    GROUP BY rm.id, rm.name, rm.category, rm.unit, rm."costPerUnit"
+    HAVING COUNT(rmm.id) > 0 OR MAX(w.quantity) > 0
+    ORDER BY total_cost DESC, rm.id ASC
     ${options?.limit ? Prisma.sql`LIMIT ${options.limit}` : Prisma.empty}
     ${options?.offset ? Prisma.sql`OFFSET ${options.offset}` : Prisma.empty}
   `
@@ -367,10 +394,17 @@ export async function getIngredientUsageReport(
       totalMaterials: materials.length,
       totalCost: totalCost.toNumber(),
       totalUsage: materials.reduce((sum, m) => sum + m.usage, 0),
-      totalWaste: materials.reduce((sum, m) => sum + m.waste, 0),
+      // Toda la ventana (ingredientes Y productos), del libro de merma; no sólo la página.
+      totalWaste: wasteTotals.quantity.toNumber(),
+      /** Costo CONOCIDO de la merma, en pesos (texto decimal); `null` si ninguna parte tiene costo. */
+      valuedWasteCost: wasteTotals.cost?.toString() ?? null,
+      /** Cantidad mermada cuyo costo no se conoce: no se valora a costo actual. */
+      unvaluedWasteQuantity: wasteTotals.unvaluedQuantity.toString(),
       totalPurchases: materials.reduce((sum, m) => sum + m.purchases, 0),
     },
     materials,
+    /** Merma por artículo (ingredientes y productos), paginada con `total`. */
+    waste: wasteBreakdown,
     pagination: {
       limit: options?.limit,
       offset: options?.offset,
@@ -416,12 +450,17 @@ export async function getCostVarianceReport(venueId: string, startDate: Date, en
     WHERE rmm."venueId" = ${venueId}
       AND rmm."createdAt" >= ${utcTs(startDate)}
       AND rmm."createdAt" <= ${utcTs(endDate)}
-      AND rmm.type IN ('USAGE', 'SPOILAGE')
+      AND rmm.type = 'USAGE'
   `
+
+  // La merma ya no se valora a `cantidad × costo actual`: su costo REAL (por lote) sale del libro de
+  // merma, una vez por folio y con los productos (LOSS) incluidos. Lo que no tiene costo conocido
+  // no suma y se declara aparte (`unvaluedWasteQuantity`).
+  const waste = await getWasteTotals(venueId, startDate, endDate)
 
   const expectedTotalCost = new Decimal(expectedData[0]?.expected_cost || 0)
   const actualRevenue = new Decimal(expectedData[0]?.actual_revenue || 0)
-  const actualTotalCost = new Decimal(actualCostData[0]?.actual_cost || 0)
+  const actualTotalCost = new Decimal(actualCostData[0]?.actual_cost || 0).add(waste.cost ?? 0)
 
   const variance = actualTotalCost.minus(expectedTotalCost)
   const variancePercentage = expectedTotalCost.greaterThan(0) ? variance.div(expectedTotalCost).mul(100) : new Decimal(0)
@@ -435,6 +474,8 @@ export async function getCostVarianceReport(venueId: string, startDate: Date, en
     costs: {
       expected: expectedTotalCost.toNumber(),
       actual: actualTotalCost.toNumber(),
+      /** Cantidad mermada sin costo conocido: NO está en `actual` (no se inventa a costo actual). */
+      unvaluedWasteQuantity: waste.unvaluedQuantity.toString(),
       variance: variance.toNumber(),
       variancePercentage: variancePercentage.toNumber(),
     },

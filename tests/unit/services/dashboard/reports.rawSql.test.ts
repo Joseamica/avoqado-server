@@ -113,7 +113,10 @@ describe('raw SQL in the inventory reports', () => {
   })
 
   it('the raw-material filter is real SQL again', () => {
-    expect(codeOnly).toMatch(/Prisma\.sql`AND rmm\."rawMaterialId" = \$\{options\.rawMaterialId\}`/)
+    // The ingredient report now starts FROM "RawMaterial" (so an ingredient whose only waste
+    // could not deduct anything still shows up), so the filter lives on `rm.id`. Still a
+    // parameterized Prisma.sql fragment, never interpolated text.
+    expect(codeOnly).toMatch(/Prisma\.sql`AND rm\.id = \$\{options\.rawMaterialId\}`/)
   })
 
   it('TENANT: every raw query filters by venue', () => {
@@ -129,7 +132,8 @@ describe('raw SQL in the inventory reports', () => {
     // A non-unique ORDER BY silently drops rows when paginating: it already happened to us
     // in 37 places.
     expect(codeOnly).toContain('ORDER BY total_revenue DESC, oi."productId" ASC')
-    expect(codeOnly).toContain('ORDER BY total_cost DESC, rmm."rawMaterialId" ASC')
+    // Grouped by `rm.id`, so `rm.id` is the unique tie-breaker of the ingredient report.
+    expect(codeOnly).toContain('ORDER BY total_cost DESC, rm.id ASC')
   })
 })
 

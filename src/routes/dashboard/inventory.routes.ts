@@ -24,6 +24,7 @@ import * as stockBatchController from '../../controllers/dashboard/inventory/sto
 import * as inventoryTransferController from '../../controllers/dashboard/inventory/inventoryTransfer.controller'
 import * as interVenueTransferController from '../../controllers/dashboard/inventory/interVenueTransfer.controller'
 import * as exportController from '../../controllers/dashboard/inventory/export.controller'
+import { listWasteReportsHandler } from '../../controllers/dashboard/inventory/wasteReports.controller'
 import {
   ConsolidatedInterVenueInventorySchema,
   CreateInterVenueTransferSchema,
@@ -109,6 +110,34 @@ const router = Router({ mergeParams: true })
 // own premium code). Mirrors the dashboard's <FeatureGate feature="INVENTORY_TRACKING"> and
 // the MCP's planGateMessage — this closes the server side of that same paywall.
 router.use(checkFeatureAccess('INVENTORY_TRACKING'))
+
+// ===========================================
+// WASTE REPORTS (folios de merma)
+// ===========================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/waste-reports:
+ *   get:
+ *     tags: [Inventory - Waste]
+ *     summary: Folios de merma aplicados (incluidos los que no pudieron descontar nada), paginados
+ *     description: >
+ *       Más recientes primero (desempate por id). Las lápidas de anulación no salen. Las fechas van en
+ *       ISO 8601 CON zona horaria (una fecha sin hora ni zona se rechaza con 422 INVALID_WASTE_PAYLOAD).
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *       - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+ *       - { name: pageSize, in: query, schema: { type: integer, minimum: 1, default: 100, maximum: 200 } }
+ *       - { name: search, in: query, schema: { type: string, maxLength: 200 } }
+ *       - { name: startDate, in: query, schema: { type: string, format: date-time } }
+ *       - { name: endDate, in: query, schema: { type: string, format: date-time } }
+ *     responses:
+ *       200: { description: "{ items, total, page, pageSize }" }
+ *       403: { description: "Sin plan INVENTORY_TRACKING (featureCode) o sin inventory:read" }
+ *       422: { description: "Query inválida (INVALID_WASTE_PAYLOAD)" }
+ */
+router.get('/waste-reports', checkPermission('inventory:read'), listWasteReportsHandler)
 
 // ===========================================
 // RAW MATERIALS ROUTES
