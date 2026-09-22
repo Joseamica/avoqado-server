@@ -47,13 +47,13 @@ export interface ResultadoReconciliacion {
 
 interface Dependencias {
   cron?: CronHandle
-  /** Inyectable para poder probar el barrido sin arrastrar el manejador completo. */
-  conceder?: (subscription: Stripe.Subscription) => Promise<void>
+  /** Inyectable para poder probar el barrido sin arrastrar el manejador completo. `true` = quedó concedido. */
+  conceder?: (subscription: Stripe.Subscription) => Promise<boolean>
 }
 
 export class PlanAccessReconciliationJob {
   private readonly cron: CronHandle
-  private readonly conceder: (subscription: Stripe.Subscription) => Promise<void>
+  private readonly conceder: (subscription: Stripe.Subscription) => Promise<boolean>
   private corriendo = false
   /**
    * 🔴 Cursor ROTATIVO. `VenueFeature` no tiene columna de fecha con la que acotar, así que sin
@@ -123,16 +123,19 @@ export class PlanAccessReconciliationJob {
           const subscription = await stripe.subscriptions.retrieve(candidato.stripeSubscriptionId as string)
           if (subscription.status !== 'active' && subscription.status !== 'trialing') continue
 
-          // 🚨 Llegar aquí significa que el negocio está pagando y el producto le niega el acceso.
-          logger.warn('🚨 Reconciliación: plan PAGADO sin acceso — se concede', {
+          // 🔴 V5-A paso 6: el manejador puede NO conceder —la suscripción ya vende otro plan y la entrega decidió
+          // retirar esta fila, o quedó en conflicto—. Sólo una concesión real es una recuperación: contarla y
+          // auditarla sin serlo dejaba un rastro falso cada 10 minutos.
+          if (!(await this.conceder(subscription))) continue
+          recuperados += 1
+
+          // 🚨 Llegar aquí significa que el negocio estaba pagando y el producto le negaba el acceso.
+          logger.warn('🚨 Reconciliación: plan PAGADO sin acceso — se concedió', {
             venueId: candidato.venueId,
             featureCode: candidato.feature.code,
             subscriptionId: candidato.stripeSubscriptionId,
             status: subscription.status,
           })
-
-          await this.conceder(subscription)
-          recuperados += 1
 
           void logAction({
             action: 'PLAN_ACCESS_RECONCILED',

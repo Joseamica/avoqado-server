@@ -1,3 +1,5 @@
+import { elegirFilaDelPlan } from '../access/filaDelPlan'
+import { exigirQueSePuedaConceder } from '../access/concederPlan'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import Stripe from 'stripe'
@@ -80,13 +82,15 @@ type VenueSubscriptionRow = {
     stripeSubscriptionId: string | null
     stripePriceId: string | null
     monthlyPrice: { toString(): string }
+    updatedAt?: Date
+    feature?: { code: string } | null
   }>
   staff: Array<{ role: string; staff: { firstName: string; lastName: string; email: string } | null }>
 }
 
 /** Map one venue row (with its PLAN_PRO feature + owner) into a SuperadminVenueSubscription, reading Stripe when a sub id exists. */
 async function mapVenueSubscription(v: VenueSubscriptionRow): Promise<SuperadminVenueSubscription> {
-  const vf = v.features[0] ?? null
+  const vf = elegirFilaDelPlan(v.features)
 
   // Read Stripe on demand (best-effort — never throw the whole list on one bad sub).
   let stripeSub: { status: string; cancelAtPeriodEnd: boolean } | null = null
@@ -118,7 +122,10 @@ async function mapVenueSubscription(v: VenueSubscriptionRow): Promise<Superadmin
     venueId: v.id,
     name: v.name,
     slug: v.slug,
-    planTier: (v.planTier as SuperadminPlanTier) ?? null,
+    // 🔴 Codex R10: derivado de la MISMA fila que se administra; `Venue.planTier` sólo es el respaldo cuando no hay fila.
+    planTier: ((vf?.feature?.code === 'PLAN_PREMIUM' ? 'PREMIUM' : vf?.feature?.code === 'PLAN_PRO' ? 'PRO' : null) ??
+      (v.planTier as SuperadminPlanTier) ??
+      null) as SuperadminPlanTier | null,
     state,
     trialEndsAt: vf?.endDate ? vf.endDate.toISOString() : null,
     currentPeriodEnd,
@@ -144,8 +151,14 @@ const VENUE_SUBSCRIPTION_SELECT = {
       stripeSubscriptionId: true,
       stripePriceId: true,
       monthlyPrice: true,
+      updatedAt: true,
+      // 🔴 Codex R10: el tier que se MUESTRA sale de la fila elegida, no de `Venue.planTier` (que la entrega no
+      // actualiza y por eso podía anunciar un plan que ya no respalda nadie).
+      feature: { select: { code: true } },
     },
-    take: 1,
+    // Las DOS filas de plan (tras un cambio de plan conviven la vieja y la vigente): se elige la administrable con la
+    // regla explícita de `elegirFilaDelPlan`, no «la primera» (Codex C8).
+    take: PAID_PLAN_TIER_CODES.length,
   },
   staff: {
     where: { role: { in: ['OWNER', 'ADMIN'] } },
@@ -223,6 +236,11 @@ async function runAuditedPlanMutation(
   mutate: (tx: Prisma.TransactionClient, feature: PlanFeatureRow) => Promise<PlanMutationResult>,
 ): Promise<SuperadminVenueSubscription> {
   const venue = await prisma.$transaction(async tx => {
+    // 🔴 Codex C2: el MISMO candado del negocio que la entrega de Stripe (`entregarSuscripcionDePlan`) y la regla común.
+    // Sin él, una mutación de superadmin y una entrega leían «no hay fila» a la vez y dejaban dos planes, o reactivaban
+    // uno que la entrega acababa de retirar. El CAS no protege una fila AUSENTE.
+    await tx.$executeRaw`SET LOCAL lock_timeout = '15s'`
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`stripe-obligaciones:${venueId}`}))`
     const feature = await requirePlanFeatureTx(tx, venueId)
     const { auditData } = await mutate(tx, feature)
 
@@ -246,19 +264,47 @@ async function runAuditedPlanMutation(
   return mapVenueSubscription(venue)
 }
 
+/**
+ * Activar el plan Pro a mano (acceso local, sin cobro). 🔴 Codex C2: nunca con un `upsert` ciego —encendía la fila sin
+ * mirar el otro tier ni su vínculo—. Bajo el candado del negocio se leen las DOS filas de plan y:
+ *   - una fila Pro ligada a Stripe NO se enciende a mano: su acceso lo decide el cobro;
+ *   - con el otro tier activo o ligado, no se crea un segundo plan;
+ *   - si no, se escribe con CAS (fila propia sin vínculo) o se crea.
+ * Para cambiar de plan o regalarlo sobre algo ligado está «Asignar cortesía» (`assignCompPlan`), que consulta Stripe.
+ */
 export async function activateVenuePlan(venueId: string, actorId: string): Promise<SuperadminVenueSubscription> {
   return runAuditedPlanMutation(venueId, actorId, 'SUPERADMIN_PLAN_ACTIVATED', async (tx, feature) => {
-    await tx.venueFeature.upsert({
-      where: { venueId_featureId: { venueId, featureId: feature.id } },
-      create: {
-        venueId,
-        featureId: feature.id,
-        active: true,
-        monthlyPrice: feature.monthlyPrice,
-        startDate: new Date(),
-      },
-      update: { active: true, endDate: null, monthlyPrice: feature.monthlyPrice },
+    const filas = await tx.venueFeature.findMany({
+      where: { venueId, feature: { code: { in: [...PAID_PLAN_TIER_CODES] } } },
+      select: { id: true, featureId: true, active: true, stripeSubscriptionId: true, updatedAt: true },
+      take: PAID_PLAN_TIER_CODES.length,
     })
+    const propia = filas.find(f => f.featureId === feature.id)
+    exigirQueSePuedaConceder(filas, feature.id)
+    const acceso = {
+      active: true,
+      endDate: null,
+      monthlyPrice: feature.monthlyPrice,
+      suspendedAt: null,
+      gracePeriodEndsAt: null,
+      paymentFailureCount: 0,
+    }
+    const cambio = () =>
+      new ConflictError('El plan de este negocio cambió mientras se hacía el ajuste. Vuelve a intentarlo.', 'SUBSCRIPTION_LINK_CHANGED')
+    if (propia) {
+      const { count } = await tx.venueFeature.updateMany({
+        where: { id: propia.id, updatedAt: propia.updatedAt, stripeSubscriptionId: null },
+        data: acceso,
+      })
+      if (count === 0) throw cambio()
+    } else {
+      try {
+        await tx.venueFeature.create({ data: { venueId, featureId: feature.id, startDate: new Date(), ...acceso } })
+      } catch (error: any) {
+        if (error?.code === 'P2002') throw cambio()
+        throw error
+      }
+    }
     return { auditData: {} }
   })
 }
@@ -310,7 +356,10 @@ async function escribirPlanSiVinculoIgual(
     await tx.venueFeature.create({ data: crear })
   } catch (error: any) {
     if (error?.code === 'P2002') {
-      throw new ConflictError('El plan de este negocio cambió mientras se hacía el ajuste. Vuelve a intentarlo.', 'SUBSCRIPTION_LINK_CHANGED')
+      throw new ConflictError(
+        'El plan de este negocio cambió mientras se hacía el ajuste. Vuelve a intentarlo.',
+        'SUBSCRIPTION_LINK_CHANGED',
+      )
     }
     throw error
   }
@@ -322,6 +371,14 @@ export async function grantVenuePlanTrial(venueId: string, days: number, actorId
   const vinculo = await vinculoDelPlan(venueId)
   await exigirSinObligacionViva(vinculo, 'conceder una prueba del plan')
   return runAuditedPlanMutation(venueId, actorId, 'SUPERADMIN_PLAN_TRIAL_GRANTED', async (tx, feature) => {
+    // 🔴 Codex R2: bajo el candado se leen las DOS filas de plan. Mirar sólo PRO dejaba conceder una prueba PRO a quien
+    // tenía PREMIUM activo — dos planes vivos a la vez, sin necesidad de ninguna carrera.
+    const filas = await tx.venueFeature.findMany({
+      where: { venueId, feature: { code: { in: [...PAID_PLAN_TIER_CODES] } } },
+      select: { featureId: true, active: true, stripeSubscriptionId: true },
+      take: PAID_PLAN_TIER_CODES.length,
+    })
+    exigirQueSePuedaConceder(filas, feature.id, { vinculoPropioYaComprobado: true })
     const startDate = new Date()
     const endDate = addDays(startDate, days)
     await escribirPlanSiVinculoIgual(
@@ -363,13 +420,19 @@ export async function adjustVenuePlanEndDate(venueId: string, deltaDays: number,
     })
     if (!vf) throw new BadRequestError('El venue no tiene un plan PLAN_PRO')
     if ((vf.stripeSubscriptionId ?? null) !== vinculo) {
-      throw new ConflictError('El plan de este negocio cambió mientras se hacía el ajuste. Vuelve a intentarlo.', 'SUBSCRIPTION_LINK_CHANGED')
+      throw new ConflictError(
+        'El plan de este negocio cambió mientras se hacía el ajuste. Vuelve a intentarlo.',
+        'SUBSCRIPTION_LINK_CHANGED',
+      )
     }
 
     const newEnd = addDays(vf.endDate ?? new Date(), deltaDays)
     const { count } = await tx.venueFeature.updateMany({ where: { id: vf.id, stripeSubscriptionId: vinculo }, data: { endDate: newEnd } })
     if (count === 0) {
-      throw new ConflictError('El plan de este negocio cambió mientras se hacía el ajuste. Vuelve a intentarlo.', 'SUBSCRIPTION_LINK_CHANGED')
+      throw new ConflictError(
+        'El plan de este negocio cambió mientras se hacía el ajuste. Vuelve a intentarlo.',
+        'SUBSCRIPTION_LINK_CHANGED',
+      )
     }
     return { auditData: { deltaDays, endDate: newEnd.toISOString() } }
   })

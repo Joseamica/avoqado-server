@@ -325,8 +325,12 @@ describe('audited venue plan mutations', () => {
         findFirst: jest.fn().mockResolvedValue(venueRow()),
       },
       feature: { findUnique: jest.fn().mockResolvedValue({ id: 'feature-pro', monthlyPrice: 1158.84 }) },
+      $queryRaw: jest.fn().mockResolvedValue([{}]),
+      $executeRaw: jest.fn().mockResolvedValue(0),
       venueFeature: {
         findFirst: jest.fn().mockResolvedValue({ id: 'vf1', endDate: new Date('2026-06-30T00:00:00.000Z') }),
+        // V5-A C2: activar lee las DOS filas de plan bajo el candado del negocio.
+        findMany: jest.fn().mockResolvedValue([]),
         upsert: jest.fn().mockResolvedValue({ id: 'vf1' }),
         update: jest.fn().mockResolvedValue({ id: 'vf1' }),
         // R0: grant, desactivar y vigencia escriben condicionados al vínculo (updateMany).
@@ -373,7 +377,172 @@ describe('audited venue plan mutations', () => {
 
     await expect(activateVenuePlan('cven1', 'staff-1')).rejects.toThrow('audit unavailable')
 
-    expect(tx.venueFeature.upsert).toHaveBeenCalledTimes(1)
+    expect(tx.venueFeature.create).toHaveBeenCalledTimes(1)
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+  })
+})
+
+/**
+ * 🔴 Codex C2 (22-sep): las mutaciones de plan de superadmin no compartían el candado de la entrega, y «activar» hacía un
+ * upsert que encendía la fila sin mirar el otro tier ni su vínculo: podía reactivar un plan que la entrega retiró o crear
+ * dos planes a la vez.
+ */
+describe('🔴 C2: las mutaciones de plan de superadmin comparten el candado de la entrega', () => {
+  const LEIDA = new Date('2026-09-20T00:00:00Z')
+  function txCon(filas: unknown[]) {
+    const tx = {
+      $queryRaw: jest.fn().mockResolvedValue([{}]),
+      $executeRaw: jest.fn().mockResolvedValue(0),
+      venue: { findUnique: jest.fn().mockResolvedValue({ id: 'cven1' }), findFirst: jest.fn().mockResolvedValue(venueRow()) },
+      feature: { findUnique: jest.fn().mockResolvedValue({ id: 'feature-pro', monthlyPrice: 1158.84 }) },
+      venueFeature: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'vf1', endDate: null, stripeSubscriptionId: null }),
+        findMany: jest.fn().mockResolvedValue(filas),
+        upsert: jest.fn(),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        create: jest.fn().mockResolvedValue({ id: 'vf1' }),
+      },
+      activityLog: { create: jest.fn().mockResolvedValue({ id: 'audit-1' }) },
+    }
+    prismaMock.$transaction.mockImplementationOnce(async (cb: (c: never) => Promise<unknown>) => cb(tx as never))
+    return tx
+  }
+
+  it('toda mutación toma el candado del negocio ANTES de escribir', async () => {
+    const tx = txCon([])
+
+    await activateVenuePlan('cven1', 'staff-1')
+
+    expect(tx.$queryRaw.mock.calls[0].slice(1)).toContain('stripe-obligaciones:cven1')
+    expect((tx.$queryRaw.mock.calls[0][0] as string[]).join('?')).toMatch(/pg_advisory_xact_lock/)
+    expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(tx.venueFeature.create.mock.invocationCallOrder[0])
+  })
+
+  it('activar NO enciende una fila ligada a Stripe (su acceso lo decide el cobro): 409 y nada escrito', async () => {
+    const tx = txCon([{ id: 'vf-pro', featureId: 'feature-pro', active: false, stripeSubscriptionId: 'sub_x', updatedAt: LEIDA }])
+
+    await expect(activateVenuePlan('cven1', 'staff-1')).rejects.toMatchObject({ statusCode: 409, code: 'PLAN_LIGADO_A_STRIPE' })
+    expect(tx.venueFeature.updateMany).not.toHaveBeenCalled()
+    expect(tx.venueFeature.upsert).not.toHaveBeenCalled()
+  })
+
+  it('activar NO crea un segundo plan si el otro tier está activo o ligado: 409', async () => {
+    const tx = txCon([{ id: 'vf-premium', featureId: 'feature-premium', active: true, stripeSubscriptionId: null, updatedAt: LEIDA }])
+
+    await expect(activateVenuePlan('cven1', 'staff-1')).rejects.toMatchObject({ statusCode: 409, code: 'OTRO_PLAN_ACTIVO' })
+    expect(tx.venueFeature.create).not.toHaveBeenCalled()
+  })
+
+  /**
+   * 🔴 Codex R2 (ronda 2): la prueba gratis tomaba el candado pero sólo miraba PRO. Con PREMIUM activo, conceder una
+   * prueba PRO dejaba los DOS planes vivos — y bastaba hacerlo en secuencia, sin ninguna carrera.
+   */
+  it('🔴 R2: conceder una prueba NO crea un segundo plan si el otro tier está activo: 409 y nada escrito', async () => {
+    const tx = txCon([{ id: 'vf-premium', featureId: 'feature-premium', active: true, stripeSubscriptionId: null, updatedAt: LEIDA }])
+
+    await expect(grantVenuePlanTrial('cven1', 14, 'staff-1')).rejects.toMatchObject({ statusCode: 409, code: 'OTRO_PLAN_ACTIVO' })
+    expect(tx.venueFeature.updateMany).not.toHaveBeenCalled()
+    expect(tx.venueFeature.create).not.toHaveBeenCalled()
+  })
+
+  it('🔴 R2: y tampoco si el otro tier sigue LIGADO a Stripe aunque su fila esté apagada', async () => {
+    const tx = txCon([{ id: 'vf-premium', featureId: 'feature-premium', active: false, stripeSubscriptionId: 'sub_y', updatedAt: LEIDA }])
+
+    await expect(grantVenuePlanTrial('cven1', 14, 'staff-1')).rejects.toMatchObject({ statusCode: 409, code: 'OTRO_PLAN_ACTIVO' })
+    expect(tx.venueFeature.create).not.toHaveBeenCalled()
+  })
+
+  /**
+   * 🔴 El camino que R0 dejó abierto A PROPÓSITO y que el guard de R2 no puede cerrar: la prueba SÍ se concede sobre un
+   * vínculo MUERTO (suscripción cancelada), limpiándolo. Quien llama ya le preguntó a Stripe (`exigirSinObligacionViva`);
+   * bloquearlo aquí por el solo hecho de que la columna tenga un id dejaría a ese negocio sin forma de recibir una prueba.
+   */
+  /**
+   * 🔴 Codex ronda 3, hallazgo 12: el caso que junta las DOS condiciones. La fila propia tiene un vínculo muerto (la
+   * excepción legítima que deja limpiarlo) Y el otro tier está activo. Antes, el primer choque tapaba al segundo y la
+   * excepción se los saltaba los dos: quedaban PRO y PREMIUM vivos a la vez.
+   */
+  it('🔴 vínculo propio MUERTO + otro tier ACTIVO: el segundo choque sigue bloqueando', async () => {
+    const tx = txCon([
+      { id: 'vf-pro', featureId: 'feature-pro', active: false, stripeSubscriptionId: 'sub_cancelada', updatedAt: LEIDA },
+      { id: 'vf-premium', featureId: 'feature-premium', active: true, stripeSubscriptionId: null, updatedAt: LEIDA },
+    ])
+
+    await expect(grantVenuePlanTrial('cven1', 14, 'staff-1')).rejects.toMatchObject({ statusCode: 409, code: 'OTRO_PLAN_ACTIVO' })
+    expect(tx.venueFeature.updateMany).not.toHaveBeenCalled()
+    expect(tx.venueFeature.create).not.toHaveBeenCalled()
+  })
+
+  it('🔴 la prueba SIGUE concediéndose sobre el vínculo MUERTO de su propia fila (lo limpia)', async () => {
+    const tx = txCon([{ id: 'vf-pro', featureId: 'feature-pro', active: false, stripeSubscriptionId: 'sub_cancelada', updatedAt: LEIDA }])
+
+    await grantVenuePlanTrial('cven1', 14, 'staff-1')
+
+    expect(tx.venueFeature.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ active: true, stripeSubscriptionId: null }) }),
+    )
+  })
+
+  it('la prueba sobre un negocio sin otro plan sigue concediéndose', async () => {
+    const tx = txCon([])
+
+    await grantVenuePlanTrial('cven1', 14, 'staff-1')
+
+    expect(tx.venueFeature.updateMany.mock.calls.length + tx.venueFeature.create.mock.calls.length).toBeGreaterThan(0)
+  })
+
+  it('activar una fila propia SIN vínculo escribe con CAS (nunca upsert ciego) y limpia la cobranza', async () => {
+    const tx = txCon([{ id: 'vf-pro', featureId: 'feature-pro', active: false, stripeSubscriptionId: null, updatedAt: LEIDA }])
+
+    await activateVenuePlan('cven1', 'staff-1')
+
+    expect(tx.venueFeature.upsert).not.toHaveBeenCalled()
+    expect(tx.venueFeature.updateMany).toHaveBeenCalledWith({
+      where: { id: 'vf-pro', updatedAt: LEIDA, stripeSubscriptionId: null },
+      data: expect.objectContaining({ active: true, endDate: null, suspendedAt: null, gracePeriodEndsAt: null, paymentFailureCount: 0 }),
+    })
+  })
+})
+
+/**
+ * 🔴 Codex R10 (ronda 2): superadmin mostraba `Venue.planTier`, que la entrega NO actualiza, en vez del tier de la fila
+ * que de verdad administra. Tras un cambio de plan podía anunciar un plan que ya no respalda nadie.
+ */
+describe('🔴 R10: el tier que se muestra sale de la fila elegida', () => {
+  beforeEach(() => {
+    prismaMock.venue.count.mockResolvedValue(1 as never)
+  })
+
+  it('con una fila PREMIUM vigente, muestra PREMIUM aunque el venue diga PRO', async () => {
+    prismaMock.venue.findMany.mockResolvedValue([
+      venueRow({
+        planTier: 'PRO',
+        features: [
+          {
+            active: true,
+            endDate: null,
+            suspendedAt: null,
+            gracePeriodEndsAt: null,
+            stripeSubscriptionId: null,
+            stripePriceId: null,
+            monthlyPrice: { toString: () => '1999' },
+            updatedAt: new Date('2026-09-20T00:00:00Z'),
+            feature: { code: 'PLAN_PREMIUM' },
+          },
+        ],
+      }),
+    ] as never)
+
+    const { items } = await getSubscriptionsForSuperadmin({ page: 1, pageSize: 25 })
+    const [fila] = items
+    expect(fila.planTier).toBe('PREMIUM')
+  })
+
+  it('sin ninguna fila de plan, cae al del venue (respaldo)', async () => {
+    prismaMock.venue.findMany.mockResolvedValue([venueRow({ planTier: 'PRO', features: [] })] as never)
+
+    const { items } = await getSubscriptionsForSuperadmin({ page: 1, pageSize: 25 })
+    const [fila] = items
+    expect(fila.planTier).toBe('PRO')
   })
 })

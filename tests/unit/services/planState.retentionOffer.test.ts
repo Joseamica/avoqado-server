@@ -94,7 +94,7 @@ beforeEach(() => {
   mockRetrievePlanSubscription.mockResolvedValue(subSummary())
   // getPlanState (called at the end) reads the VenueFeature + venue + Stripe sub.
   prismaMock.venue.findUnique.mockResolvedValue({ id: VENUE_ID, stripeCustomerId: 'cus_1' })
-  prismaMock.venueFeature.findFirst.mockResolvedValue(planProFeature)
+  prismaMock.venueFeature.findMany.mockResolvedValue([planProFeature])
 })
 
 describe('applyRetentionOffer', () => {
@@ -158,7 +158,7 @@ describe('applyRetentionOffer', () => {
   })
 
   it('blocks when there is an active plan but no Stripe subscription id', async () => {
-    prismaMock.venueFeature.findFirst.mockResolvedValue({ ...planProFeature, stripeSubscriptionId: null })
+    prismaMock.venueFeature.findMany.mockResolvedValue([{ ...planProFeature, stripeSubscriptionId: null }])
 
     await expect(applyRetentionOffer(VENUE_ID, 'discount')).rejects.toBeInstanceOf(BadRequestError)
     expect(mockApplySubscriptionCoupon).not.toHaveBeenCalled()

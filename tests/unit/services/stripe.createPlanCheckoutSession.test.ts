@@ -44,7 +44,7 @@ describe('createPlanCheckoutSession', () => {
     })
 
     expect(url).toBe('https://checkout.stripe.com/c/pay/cs_1')
-    expect(mockPriceList).toHaveBeenCalledWith(expect.objectContaining({ lookup_keys: ['plan_pro_monthly'] }))
+    expect(mockPriceList).toHaveBeenCalledWith(expect.objectContaining({ lookup_keys: ['plan_pro_monthly'] }), expect.anything())
 
     const arg = mockSessionCreate.mock.calls[0][0]
     expect(arg.mode).toBe('subscription')
@@ -59,6 +59,24 @@ describe('createPlanCheckoutSession', () => {
     expect(arg.automatic_tax).toBeUndefined()
   })
 
+  it('🔴 V5-A: la sesión se marca como NUESTRA (kind) y caduca en 30 min, para que la regla común pueda expirarla', async () => {
+    const antes = Math.floor(Date.now() / 1000)
+    await createPlanCheckoutSession({
+      venueId: 'v1',
+      customerId: 'cus_1',
+      interval: 'monthly',
+      successUrl: 'https://ok',
+      cancelUrl: 'https://no',
+    })
+
+    const arg = mockSessionCreate.mock.calls[0][0]
+    expect(arg.metadata).toMatchObject({ kind: 'PLAN_CHECKOUT', venueId: 'v1' })
+    expect(arg.subscription_data.metadata).toMatchObject({ kind: 'PLAN_CHECKOUT' })
+    expect(arg.payment_method_types).toEqual(['card'])
+    expect(arg.expires_at).toBeGreaterThanOrEqual(antes + 30 * 60)
+    expect(arg.expires_at).toBeLessThanOrEqual(antes + 31 * 60)
+  })
+
   it('annual: uses the annual price lookup_key', async () => {
     mockPriceList.mockResolvedValue({ data: [{ id: 'price_annual' }] })
     await createPlanCheckoutSession({
@@ -68,7 +86,7 @@ describe('createPlanCheckoutSession', () => {
       successUrl: 'https://dash/ok',
       cancelUrl: 'https://dash/cancel',
     })
-    expect(mockPriceList).toHaveBeenCalledWith(expect.objectContaining({ lookup_keys: ['plan_pro_annual'] }))
+    expect(mockPriceList).toHaveBeenCalledWith(expect.objectContaining({ lookup_keys: ['plan_pro_annual'] }), expect.anything())
     const arg = mockSessionCreate.mock.calls[0][0]
     expect(arg.line_items[0].price).toBe('price_annual')
   })
@@ -82,7 +100,7 @@ describe('createPlanCheckoutSession', () => {
       cancelUrl: 'https://dash/cancel',
     })
     expect(mockFeatureFindFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { code: 'PLAN_PRO', active: true } }))
-    expect(mockPriceList).toHaveBeenCalledWith(expect.objectContaining({ lookup_keys: ['plan_pro_monthly'] }))
+    expect(mockPriceList).toHaveBeenCalledWith(expect.objectContaining({ lookup_keys: ['plan_pro_monthly'] }), expect.anything())
     const arg = mockSessionCreate.mock.calls[0][0]
     expect(arg.metadata).toEqual(expect.objectContaining({ tierCode: 'PLAN_PRO' }))
     expect(arg.subscription_data.metadata).toEqual(expect.objectContaining({ tierCode: 'PLAN_PRO' }))
@@ -104,7 +122,7 @@ describe('createPlanCheckoutSession', () => {
     expect(url).toBe('https://checkout.stripe.com/c/pay/cs_1')
     // Looks up the PLAN_PREMIUM feature, not PLAN_PRO.
     expect(mockFeatureFindFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { code: 'PLAN_PREMIUM', active: true } }))
-    expect(mockPriceList).toHaveBeenCalledWith(expect.objectContaining({ lookup_keys: ['plan_premium_monthly'] }))
+    expect(mockPriceList).toHaveBeenCalledWith(expect.objectContaining({ lookup_keys: ['plan_premium_monthly'] }), expect.anything())
 
     const arg = mockSessionCreate.mock.calls[0][0]
     expect(arg.mode).toBe('subscription')
@@ -127,7 +145,7 @@ describe('createPlanCheckoutSession', () => {
       successUrl: 'https://dash/ok',
       cancelUrl: 'https://dash/cancel',
     })
-    expect(mockPriceList).toHaveBeenCalledWith(expect.objectContaining({ lookup_keys: ['plan_premium_annual'] }))
+    expect(mockPriceList).toHaveBeenCalledWith(expect.objectContaining({ lookup_keys: ['plan_premium_annual'] }), expect.anything())
     const arg = mockSessionCreate.mock.calls[0][0]
     expect(arg.line_items[0].price).toBe('price_premium_annual')
   })
@@ -159,5 +177,26 @@ describe('createPlanCheckoutSession', () => {
       }),
     ).rejects.toThrow(/plan_premium_annual/)
     expect(mockSessionCreate).not.toHaveBeenCalled()
+  })
+})
+
+describe('🔴 Codex C3: se abre bajo el candado de la regla', () => {
+  it('cada llamada a Stripe sin reintentos del SDK', async () => {
+    await createPlanCheckoutSession({
+      venueId: 'v1',
+      customerId: 'cus_1',
+      interval: 'monthly',
+      successUrl: 'https://dash/ok',
+      cancelUrl: 'https://dash/no',
+    })
+
+    expect(mockPriceList).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ timeout: expect.any(Number), maxNetworkRetries: 0 }),
+    )
+    expect(mockSessionCreate).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ timeout: expect.any(Number), maxNetworkRetries: 0 }),
+    )
   })
 })

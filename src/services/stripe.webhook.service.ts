@@ -18,6 +18,9 @@ import {
   fulfillPlanCheckout,
   estadoDeLaSuscripcion,
   suscripcionVigente,
+  suscripcionVendeElPlan,
+  entregarSuscripcionDePlan,
+  type FulfillPlanCheckoutResult,
 } from './stripe.service'
 import { PAID_PLAN_TIER_CODES } from './access/basePlan.service'
 import socketManager from '../communication/sockets'
@@ -167,7 +170,46 @@ async function escribirPlanConCas(
   }
 }
 
-export async function handleSubscriptionUpdated(subscription: Stripe.Subscription) {
+const esFilaDePlan = (venueFeature: { feature: { code: string } }) =>
+  (PAID_PLAN_TIER_CODES as readonly string[]).includes(venueFeature.feature.code)
+
+/**
+ * Un plan que se acaba de conceder devuelve los asientos que el tope Gratis había apagado y avisa a la pantalla.
+ * 🔴 SÓLO con un plan concedido de verdad (11ª auditoría): devolver asientos por un plan que no se concedió es regalar lo
+ * que no se pagó.
+ */
+async function avisarPlanConcedido(result: FulfillPlanCheckoutResult | null): Promise<boolean> {
+  if (!result) return false
+  await runSeatReactivationSafely(result.venueId)
+  if (socketManager.getServer()) {
+    socketManager.broadcastToVenue(result.venueId, 'subscription.activated' as any, {
+      featureId: result.featureId,
+      featureCode: result.featureCode,
+      subscriptionId: result.subscriptionId,
+      status: 'active',
+      endDate: result.endDate,
+      timestamp: new Date(),
+    })
+    logger.info('📡 Socket event emitted: subscription.activated', { venueId: result.venueId, featureCode: result.featureCode })
+  }
+  return true
+}
+
+/**
+ * 🔴 V5-A paso 6 (Codex, pasos 2-5, P1-3): la fila de un PLAN la encontramos por el vínculo, pero si la suscripción ya
+ * vende OTRO plan (o algo que no reconocemos), esa fila no la respalda. Reactivarla aquí deshacía lo que la entrega había
+ * decidido — p. ej. retirar PREMIUM porque PRO ya lo ocupa otra obligación viva —. Ese caso lo decide la entrega, que ve
+ * las dos filas bajo el candado del negocio.
+ */
+async function entregaDecidePorElPlan(venueId: string, subscriptionId: string, detectedBy: string): Promise<boolean> {
+  logger.warn('⚠️ Webhook: la suscripción ya no vende el plan de su fila — decide la entrega', { venueId, subscriptionId, detectedBy })
+  return avisarPlanConcedido(await entregarSuscripcionDePlan({ venueId, subscriptionId, detectedBy }))
+}
+
+/**
+ * @returns `true` si dejó el plan/función CONCEDIDO (el barrido de acceso sólo cuenta —y audita— una recuperación real).
+ */
+export async function handleSubscriptionUpdated(subscription: Stripe.Subscription): Promise<boolean> {
   const subscriptionId = subscription.id
   const status = subscription.status
   const trialEnd = subscription.trial_end ? new Date(subscription.trial_end * 1000) : null
@@ -188,8 +230,22 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
   })
 
   if (!venueFeature) {
+    // 🔴 Codex C11: una suscripción en CONFLICTO no quedó ligada a ninguna fila. Cuando operaciones la corrige en Stripe,
+    // este aviso es lo único que llega: sin esto el negocio seguiría sin el acceso que paga. Decide la entrega.
+    const conflicto = await prisma.billingObligationConflict.findUnique({
+      where: { subscriptionId },
+      select: { venueId: true, status: true },
+    })
+    if (conflicto?.status === 'PENDING') {
+      // El mismo candado que el camino de siempre (abajo): un negocio suspendido o cerrado no recibe activaciones.
+      const venue = await prisma.venue.findUnique({ where: { id: conflicto.venueId }, select: { status: true } })
+      if (venue && OPERATIONAL_VENUE_STATUSES.includes(venue.status))
+        return entregaDecidePorElPlan(conflicto.venueId, subscriptionId, 'customer.subscription.updated')
+      logger.warn('⚠️ Webhook: conflicto pendiente de un negocio no operativo — no se entrega', { subscriptionId, venueStatus: venue?.status })
+      return false
+    }
     logger.warn('⚠️ Webhook: Subscription not found in database', { subscriptionId })
-    return
+    return false
   }
 
   // Security Enhancement: Skip activation for non-operational venues
@@ -201,7 +257,7 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
       venueStatus: venueFeature.venue.status,
       status,
     })
-    return
+    return false
   }
 
   // 🔴 TODO lo que sigue —qué rama se toma Y qué se escribe— sale del estado VIGENTE, no del
@@ -224,6 +280,15 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
     })
   }
 
+  // Una fila de PLAN sólo se reactiva aquí si la suscripción vende HOY ese mismo plan (misma foto: `vigente`).
+  if (
+    (statusVigente === 'active' || statusVigente === 'trialing') &&
+    esFilaDePlan(venueFeature) &&
+    !(await suscripcionVendeElPlan(vigente, venueFeature.feature.code))
+  ) {
+    return entregaDecidePorElPlan(venueFeature.venueId, subscriptionId, 'customer.subscription.updated')
+  }
+
   // 🔴 El guard decide con la MISMA respuesta que usa el switch de abajo (`vigente`), nunca con una
   // segunda consulta: ver el comentario de `procedeActivar`.
   if ((statusVigente === 'active' || statusVigente === 'trialing') && !veredictoDeActivacion(venueFeature, statusVigente)) {
@@ -232,7 +297,7 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
       venueId: venueFeature.venueId,
       suspendedAt: venueFeature.suspendedAt,
     })
-    return
+    return false
   }
 
   // Update VenueFeature based on subscription status
@@ -283,7 +348,7 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
       if ((PAID_PLAN_TIER_CODES as readonly string[]).includes(venueFeature.feature.code)) {
         await runSeatReactivationSafely(venueFeature.venueId)
       }
-      break
+      return true
 
     case 'trialing':
       // Still in trial period
@@ -300,7 +365,7 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
         featureCode: venueFeature.feature.code,
         trialEnd: vigente.trialEnd,
       })
-      break
+      return true
 
     case 'past_due':
       // Payment failed, but subscription still active
@@ -373,6 +438,7 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
     default:
       logger.info('ℹ️ Webhook: Unhandled subscription status', { status: statusVigente, statusDelEvento: status, subscriptionId })
   }
+  return false
 }
 
 /**
@@ -519,10 +585,33 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
     return
   }
 
+  if (!necesitaReactivacion(venueFeature)) {
+    // Feature already active - this is expected when immediate payment activation
+    // happened in createTrialSubscriptions() before webhook arrived
+    logger.info('ℹ️ Webhook: Invoice paid but feature already active (immediate activation worked)', {
+      venueId: venueFeature.venueId,
+      featureCode: venueFeature.feature.code,
+      subscriptionId: subscriptionIdStr,
+    })
+    return
+  }
+
   // 🔴 Con una suspensión puesta, la levanta el ESTADO VIGENTE en Stripe, no este evento. Y si no
   // procede, no se escribe NADA: dejar `active: true` con `suspendedAt` puesto crea un registro
   // contradictorio que el resolver niega y que ningún job rescata. (Auditorías 4ª y 5ª, 19-sep.)
-  const veredicto = await procedeActivar(venueFeature, subscriptionIdStr)
+  // Una fila de PLAN necesita además saber QUÉ vende la suscripción: estado y plan salen de la MISMA consulta.
+  let veredicto: { procede: boolean; estado?: Stripe.Subscription.Status }
+  let otroPlan = false
+  // El vencimiento de la MISMA foto (sólo se conoce en las filas de plan, que consultan `suscripcionVigente`).
+  let trialEndVigente: Date | null | undefined
+  if (esFilaDePlan(venueFeature)) {
+    const vigente = await suscripcionVigente(subscriptionIdStr)
+    trialEndVigente = vigente.trialEnd
+    veredicto = { procede: veredictoDeActivacion(venueFeature, vigente.status), estado: vigente.status }
+    otroPlan = veredicto.procede && !(await suscripcionVendeElPlan(vigente, venueFeature.feature.code))
+  } else {
+    veredicto = await procedeActivar(venueFeature, subscriptionIdStr)
+  }
   if (!veredicto.procede) {
     logger.warn('⚠️ Webhook: la suscripción NO está al corriente en Stripe; la suspensión se mantiene', {
       invoiceId: invoice.id,
@@ -531,13 +620,17 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
     })
     return
   }
+  if (otroPlan) {
+    await entregaDecidePorElPlan(venueFeature.venueId, subscriptionIdStr, 'invoice.payment_succeeded')
+    return
+  }
 
   // Ensure feature is active
   // This handles three cases:
   // 1. First-time activation (trialPeriodDays=0, created with active=false)
   // 2. Reactivation after payment failure suspension
   // 3. Registro ACTIVO pero con `suspendedAt` puesto: bloqueado y sin rescate automático
-  if (necesitaReactivacion(venueFeature)) {
+  {
     // 🔴 CAS igual que en `subscription.updated`: entre leer el registro, consultar Stripe y
     // escribir cabe una cancelación, y escribir sólo por `id` la pisaba devolviendo el acceso
     // (Codex, 19-sep).
@@ -556,7 +649,10 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
       // (7ª auditoría de Codex, 19-sep.)
       {
         active: true,
-        ...(veredicto.estado === 'trialing' ? {} : { endDate: null }),
+        // En `trialing`, el vencimiento es el que Stripe dice HOY: conservar el local dejaba una prueba extendida vencida
+        // (y el barrido ya no la ve) o una sin fecha (Codex C14). Sin fecha de Stripe se conserva la local: un trial nunca
+        // queda «sin vencimiento» (7ª auditoría).
+        ...(veredicto.estado === 'trialing' ? (trialEndVigente ? { endDate: trialEndVigente } : {}) : { endDate: null }),
         suspendedAt: null,
         paymentFailureCount: 0,
         gracePeriodEndsAt: null,
@@ -567,14 +663,6 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
       venueId: venueFeature.venueId,
       featureCode: venueFeature.feature.code,
       amountPaid,
-    })
-  } else {
-    // Feature already active - this is expected when immediate payment activation
-    // happened in createTrialSubscriptions() before webhook arrived
-    logger.info('ℹ️ Webhook: Invoice paid but feature already active (immediate activation worked)', {
-      venueId: venueFeature.venueId,
-      featureCode: venueFeature.feature.code,
-      subscriptionId: subscriptionIdStr,
     })
   }
 }
@@ -1013,23 +1101,45 @@ export async function handleCustomerDeleted(customer: Stripe.Customer) {
     customerId,
   })
 
-  // Clear Stripe customer ID from venue
-  await prisma.venue.update({
-    where: { id: venue.id },
-    data: {
-      stripeCustomerId: null,
-    },
-  })
+  // 🔴 Codex R14 (ronda 2): esto apagaba TODAS las funciones activas del negocio. Entre que Stripe borra el cliente y
+  // que llega este aviso, superadmin puede haber concedido una cortesía legítima —sin Stripe— y se apagaba también.
+  // Ahora sólo se retira lo que ESE cliente respaldaba: filas con vínculo a alguna de SUS suscripciones. Lo que no
+  // depende de él (cortesías, pruebas locales) no se toca. Todo bajo el candado del negocio, como el resto de V5-A.
+  const suyas = await (async () => {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY)
+      const r = await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 100 })
+      return (r.data as { id: string }[]).map(x => x.id)
+    } catch (error) {
+      // No poder preguntar NO es «no respaldaba nada»: sin la lista no se retira nada y el barrido lo concilia.
+      logger.error('🚨 Webhook customer.deleted: no se pudo listar las suscripciones del cliente borrado', {
+        customerId,
+        venueId: venue.id,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return null
+    }
+  })()
 
-  // Deactivate only this venue's features (since payment method is gone)
-  const deactivatedCount = await prisma.venueFeature.updateMany({
-    where: {
-      venueId: venue.id,
-      active: true,
-    },
-    data: {
-      active: false,
-    },
+  const deactivatedCount = await prisma.$transaction(async tx => {
+    await tx.$executeRaw`SET LOCAL lock_timeout = '15s'`
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`stripe-obligaciones:${venue.id}`}))`
+
+    // El id del cliente se limpia CONDICIONADO a que siga siendo el borrado: si el negocio ya tiene otro, no se pisa.
+    await tx.venue.updateMany({ where: { id: venue.id, stripeCustomerId: customerId }, data: { stripeCustomerId: null } })
+
+    if (!suyas || suyas.length === 0) return { count: 0 }
+    return tx.venueFeature.updateMany({
+      where: {
+        venueId: venue.id,
+        active: true,
+        stripeSubscriptionId: { in: suyas },
+      },
+      data: {
+        active: false,
+      },
+    })
   })
 
   logger.warn('⚠️ Webhook: Deactivated venue features due to customer deletion', {
@@ -1471,35 +1581,8 @@ export async function handleStripeWebhookEvent(event: Stripe.Event, opts?: { cla
             tierCode: session.metadata.tierCode,
             interval: session.metadata.interval,
           })
-          const result = await fulfillPlanCheckout(session)
-
-          // 🪑 Free→Paid RE-UPGRADE via self-serve checkout: the base plan is now active, so
-          // reactivate any seats the Free-tier cap previously deactivated (paid = unlimited).
-          // Already inside the PAID_PLAN_TIER_CODES guard above; no-op when nothing was
-          // cap-deactivated; never throws.
-          //
-          // 🔴 SÓLO si el plan se concedió de verdad (11ª auditoría). `fulfillPlanCheckout`
-          // devuelve `null` cuando la suscripción no está vigente, y devolver los asientos que el
-          // tope Gratis desactivó por un plan que NO se concedió es regalar lo que no se pagó.
-          if (result) {
-            await runSeatReactivationSafely(result.venueId)
-          }
-
-          // 🔔 Emit socket event for real-time UI update (mirrors handleSubscriptionUpdated)
-          if (result && socketManager.getServer()) {
-            socketManager.broadcastToVenue(result.venueId, 'subscription.activated' as any, {
-              featureId: result.featureId,
-              featureCode: result.featureCode,
-              subscriptionId: result.subscriptionId,
-              status: 'active',
-              endDate: result.endDate,
-              timestamp: new Date(),
-            })
-            logger.info('📡 Socket event emitted: subscription.activated', {
-              venueId: result.venueId,
-              featureCode: result.featureCode,
-            })
-          }
+          // 🪑 + 🔔 Sólo si el plan se concedió de verdad (11ª auditoría): ver `avisarPlanConcedido`.
+          await avisarPlanConcedido(await fulfillPlanCheckout(session))
         }
         break
       }

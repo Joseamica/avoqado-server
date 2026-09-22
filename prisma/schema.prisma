@@ -4636,6 +4636,45 @@ model VenueFeature {
   @@index([venueId])
 }
 
+/// Obligación de cobro que la entrega NO pudo representar sin pisar otra (diseño v5 de la compra, 22-sep-2026):
+/// una segunda suscripción de plan, una función duplicada, o una suscripción que nadie sabe qué vende. Se guarda
+/// aquí, durable y por `subscriptionId`, hasta que una persona la resuelva — nunca sólo en un log. Mientras esté
+/// PENDIENTE, la regla común de compra la cuenta como obligación viva (no se abre otra encima).
+/// `venueId` sin relación a propósito (igual que `ActivityLog`): un negocio con cliente de Stripe no se borra.
+model BillingObligationConflict {
+  id                String                          @id @default(cuid())
+  venueId           String
+  subscriptionId    String                          @unique
+  customerId        String?
+  kind              BillingObligationConflictKind
+  /// Las otras suscripciones vivas con las que choca (vacío si es un producto desconocido).
+  conflictsWith     String[]
+  /// Qué vende, si se sabe (`PLAN_PRO`, `PLAN_PREMIUM` o el código de la función).
+  featureCode       String?
+  status            BillingObligationConflictStatus @default(PENDING)
+  /// Qué camino la detectó por primera vez (`checkout.session.completed`, `subscription.updated`, …).
+  detectedBy        String
+  lastSeenAt        DateTime                        @default(now())
+  resolvedAt        DateTime?
+  resolvedByStaffId String?
+  resolution        String?
+  createdAt         DateTime                        @default(now())
+  updatedAt         DateTime                        @updatedAt
+
+  @@index([venueId, status])
+}
+
+enum BillingObligationConflictKind {
+  DUPLICATE_PLAN
+  DUPLICATE_FEATURE
+  UNKNOWN_PRODUCT
+}
+
+enum BillingObligationConflictStatus {
+  PENDING
+  RESOLVED
+}
+
 // ==========================================
 // NOTE: STRIPE WEBHOOK LOGGING
 // ==========================================
@@ -5199,6 +5238,31 @@ model TerminalPaymentAttemptLink {
   operatorResolution Json?
 
   @@index([requestId, createdAt])
+  @@index([venueId, terminalId, createdAt])
+}
+
+/// «Ninguna terminal muerta» (22-sep-2026), pieza B: la declaración del cajero «el cliente no presentó tarjeta» sobre un
+/// intento que NO tiene solicitud del POS — un **Pago rápido**, cobro iniciado EN la terminal.
+///
+/// 🔴 Por qué una tabla propia y no `requestId` nullable en `TerminalPaymentAttemptLink`: de esa columna cuelgan una FK,
+/// el trigger de inmutabilidad `preserve_no_instrument_resolution`, un `count` que exige UN solo intento por solicitud y
+/// el despertador del POS (`resolverEsperaDelPos`). Volverla opcional debilitaría las cuatro a la vez; esto es aditivo y
+/// no toca nada vivo.
+///
+/// La inmutabilidad la da el `@unique` sobre `attemptId` + `create`: un intento se declara UNA sola vez. Un P2002 es «ya
+/// declarado» ⇒ replay idempotente si el `resolutionId` coincide, conflicto si no. Igual que el carril del POS, una
+/// aprobación TARDÍA no borra esta fila: se conserva y la contradicción se publica.
+model TerminalAttemptResolution {
+  id         String   @id @default(cuid())
+  /// El intento declarado. Único: es lo que vuelve la declaración irrepetible.
+  attemptId  String   @unique
+  venueId    String
+  /// Llave normalizada (sin AVQD-, minúsculas), igual que `TerminalPaymentRequest.terminalId`.
+  terminalId String
+  /// El MISMO `OperatorResolution` que guarda el vínculo: quién declaró, cuándo, con qué texto y bajo qué autorización.
+  resolution Json
+  createdAt  DateTime @default(now())
+
   @@index([venueId, terminalId, createdAt])
 }
 
@@ -16119,11 +16183,21 @@ model Cfdi {
   cancelRequestedAt    DateTime?
   cancelledAt          DateTime?
 
+  /// Sustitución (CFDI 4.0 TipoRelacion 04): la factura CORREGIDA apunta a la que sustituye.
+  /// 🔴 Es el INTENTO DURABLE: se escribe al reservar, ANTES de llamar al PAC. Sustituir son dos
+  /// documentos en dos llamadas (timbrar la nueva, cancelar la vieja); si el proceso muere en medio
+  /// y no queda este vínculo, el negocio se queda con DOS facturas vivas por la misma venta y nadie
+  /// sabe cuál vale. Con él, volver a pedir la sustitución reanuda desde donde se quedó.
+  replacesCfdiId String?
+  replaces       Cfdi?   @relation("CfdiSustitucion", fields: [replacesCfdiId], references: [id], onDelete: SetNull)
+  replacedBy     Cfdi[]  @relation("CfdiSustitucion")
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([venueId, status])
   @@index([fiscalEmisorId, isGlobal, createdAt])
+  @@index([replacesCfdiId])
 }
 
 /// Receptor fiscal data. A Customer may have several; guests/autofactura create a one-off.

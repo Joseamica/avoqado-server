@@ -35,6 +35,9 @@ jest.mock('@/services/stripe.service', () => ({
   // Delegar ataba las dos consultas a la misma respuesta y volvía INVISIBLE el defecto que Codex
   // reprodujo: `subscription.updated` consultaba Stripe DOS veces (guard y rama) y podía decidir
   // con una foto y escribir con la otra. Separados, un test puede hacerlos divergir a propósito.
+  // V5-A paso 6: la fila de plan sigue su camino sólo si la suscripción vende ese plan (por defecto, sí).
+  suscripcionVendeElPlan: jest.fn().mockResolvedValue(true),
+  entregarSuscripcionDePlan: jest.fn().mockResolvedValue(null),
   suscripcionVigente: jest.fn(),
 }))
 jest.mock('@/utils/prismaClient', () => ({
@@ -235,8 +238,8 @@ describe('la suspensión la levanta el ESTADO VIGENTE, no el orden de los evento
   })
 
   it('🔴 el pago ANTERIOR al procesamiento del fallo SÍ levanta la suspensión si Stripe dice que está al corriente', async () => {
-    const { estadoDeLaSuscripcion } = await import('@/services/stripe.service')
-    ;(estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('active')
+    const { suscripcionVigente } = await import('@/services/stripe.service')
+    ;(suscripcionVigente as jest.Mock).mockResolvedValue({ status: 'active', trialEnd: null, items: [], itemsCompletos: true })
 
     await handleInvoicePaymentSucceeded({ ...facturaPagada } as never)
 
@@ -246,8 +249,8 @@ describe('la suspensión la levanta el ESTADO VIGENTE, no el orden de los evento
   })
 
   it('🔴 si Stripe dice que SIGUE DEBIENDO, no la levanta aunque el evento sea reciente', async () => {
-    const { estadoDeLaSuscripcion } = await import('@/services/stripe.service')
-    ;(estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('past_due')
+    const { suscripcionVigente } = await import('@/services/stripe.service')
+    ;(suscripcionVigente as jest.Mock).mockResolvedValue({ status: 'past_due', trialEnd: null, items: [], itemsCompletos: true })
 
     await handleInvoicePaymentSucceeded({ ...facturaPagada } as never)
 
@@ -255,8 +258,8 @@ describe('la suspensión la levanta el ESTADO VIGENTE, no el orden de los evento
   })
 
   it('🔴 si no se puede preguntar a Stripe, PROPAGA para que reintente (no decide a ciegas)', async () => {
-    const { estadoDeLaSuscripcion } = await import('@/services/stripe.service')
-    ;(estadoDeLaSuscripcion as jest.Mock).mockRejectedValue(new Error('Stripe caído'))
+    const { suscripcionVigente } = await import('@/services/stripe.service')
+    ;(suscripcionVigente as jest.Mock).mockRejectedValue(new Error('Stripe caído'))
 
     await expect(handleInvoicePaymentSucceeded({ ...facturaPagada } as never)).rejects.toThrow()
     expect(prisma.venueFeature.updateMany).not.toHaveBeenCalled()
@@ -283,19 +286,19 @@ describe('la suspensión la levanta el ESTADO VIGENTE, no el orden de los evento
 describe('qué estado de Stripe autoriza qué', () => {
   it('🔴 un registro CANCELADO (active:false, sin suspensión) SÍ se consulta antes de reactivar', async () => {
     ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({ ...planSuspendido, active: false, suspendedAt: null })
-    const { estadoDeLaSuscripcion } = await import('@/services/stripe.service')
-    ;(estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('canceled')
+    const { suscripcionVigente } = await import('@/services/stripe.service')
+    ;(suscripcionVigente as jest.Mock).mockResolvedValue({ status: 'canceled', trialEnd: null, items: [], itemsCompletos: true })
 
     await handleInvoicePaymentSucceeded({ ...facturaPagada } as never)
 
-    expect(estadoDeLaSuscripcion).toHaveBeenCalled()
+    expect(suscripcionVigente).toHaveBeenCalled()
     expect(prisma.venueFeature.updateMany).not.toHaveBeenCalled()
   })
 
   it('🔴 `trialing` NO levanta una suspensión por impago', async () => {
     ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({ ...planSuspendido, suspendedAt: new Date('2026-09-18T00:00:00Z') })
-    const { estadoDeLaSuscripcion } = await import('@/services/stripe.service')
-    ;(estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('trialing')
+    const { suscripcionVigente } = await import('@/services/stripe.service')
+    ;(suscripcionVigente as jest.Mock).mockResolvedValue({ status: 'trialing', trialEnd: null, items: [], itemsCompletos: true })
 
     await handleInvoicePaymentSucceeded({ ...facturaPagada } as never)
 
@@ -304,8 +307,8 @@ describe('qué estado de Stripe autoriza qué', () => {
 
   it('`trialing` SÍ vale para la primera activación (sin suspensión previa)', async () => {
     ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({ ...planSuspendido, active: false, suspendedAt: null })
-    const { estadoDeLaSuscripcion } = await import('@/services/stripe.service')
-    ;(estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('trialing')
+    const { suscripcionVigente } = await import('@/services/stripe.service')
+    ;(suscripcionVigente as jest.Mock).mockResolvedValue({ status: 'trialing', trialEnd: null, items: [], itemsCompletos: true })
 
     await handleInvoicePaymentSucceeded({ ...facturaPagada } as never)
 
@@ -314,12 +317,12 @@ describe('qué estado de Stripe autoriza qué', () => {
 
   it('un registro ya ACTIVO y sano no consulta a Stripe (no hay nada que decidir)', async () => {
     ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({ ...planSuspendido, active: true, suspendedAt: null })
-    const { estadoDeLaSuscripcion } = await import('@/services/stripe.service')
-    ;(estadoDeLaSuscripcion as jest.Mock).mockClear()
+    const { suscripcionVigente } = await import('@/services/stripe.service')
+    ;(suscripcionVigente as jest.Mock).mockClear()
 
     await handleInvoicePaymentSucceeded({ ...facturaPagada } as never)
 
-    expect(estadoDeLaSuscripcion).not.toHaveBeenCalled()
+    expect(suscripcionVigente).not.toHaveBeenCalled()
   })
 })
 
@@ -553,7 +556,7 @@ describe('una activación en TRIAL conserva su vencimiento', () => {
   it('🔴 con estado vigente `trialing` NO escribe `endDate: null`', async () => {
     ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({ ...planSuspendido, active: false, suspendedAt: null })
     const m = await import('@/services/stripe.service')
-    ;(m.estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('trialing')
+    ;(m.suscripcionVigente as jest.Mock).mockResolvedValue({ status: 'trialing', trialEnd: null, items: [], itemsCompletos: true })
 
     await handleInvoicePaymentSucceeded({ ...facturaPagada } as never)
 
@@ -566,7 +569,7 @@ describe('una activación en TRIAL conserva su vencimiento', () => {
   it('con estado vigente `active` sí lo borra (plan pagado, sin vencimiento)', async () => {
     ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({ ...planSuspendido, active: false, suspendedAt: null })
     const m = await import('@/services/stripe.service')
-    ;(m.estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('active')
+    ;(m.suscripcionVigente as jest.Mock).mockResolvedValue({ status: 'active', trialEnd: null, items: [], itemsCompletos: true })
 
     await handleInvoicePaymentSucceeded({ ...facturaPagada } as never)
 

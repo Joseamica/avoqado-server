@@ -1,10 +1,12 @@
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
-import { VenueStatus } from '@prisma/client'
+import { Prisma, VenueStatus } from '@prisma/client'
 import { PRODUCTION_VENUE_STATUSES, OPERATIONAL_VENUE_STATUSES, DEMO_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import { logAction } from './activity-log.service'
 import AppError, { ConflictError, NotFoundError } from '@/errors/AppError'
 import { exigirSinObligacionViva } from '@/services/stripe.service'
+import { PAID_PLAN_TIER_CODES } from '@/services/access/basePlan.service'
+import { exigirQueSePuedaConceder } from '@/services/access/concederPlan'
 import { utcTs } from '@/utils/sqlDates'
 
 // ===== PRODUCTION VENUE FILTER =====
@@ -685,6 +687,20 @@ export async function enableFeatureForVenue(venueId: string, featureCode: string
       throw new Error('Feature not found')
     }
 
+    // 🔴 Codex C2: un PLAN no se enciende con un upsert ciego (podía reactivar uno que la entrega retiró o dejar dos
+    // planes): va por la cortesía, que revisa Stripe y el otro tier bajo el candado del negocio.
+    if (feature.code === 'PLAN_PRO' || feature.code === 'PLAN_PREMIUM') {
+      await assignCompPlan(venueId, feature.code === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO')
+      logAction({
+        venueId,
+        action: 'FEATURE_ENABLED_BY_ADMIN',
+        entity: 'VenueFeature',
+        entityId: venueId,
+        data: { featureCode: feature.code },
+      })
+      return
+    }
+
     // Upsert venue-feature association and activate it
     await prisma.venueFeature.upsert({
       where: { venueId_featureId: { venueId, featureId: feature.id } },
@@ -710,6 +726,8 @@ export async function enableFeatureForVenue(venueId: string, featureCode: string
     })
   } catch (error) {
     logger.error('Error enabling feature for venue:', error)
+    // Un rechazo con motivo (un cobro vivo, un plan que cambió) se dice tal cual, no como fallo genérico.
+    if (error instanceof AppError) throw error
     throw new Error('Failed to enable feature for venue')
   }
 }
@@ -795,45 +813,69 @@ export async function grantTrialForVenue(venueId: string, featureCode: string, t
       select: { id: true, stripeSubscriptionId: true },
     })
     await exigirSinObligacionViva(fila?.stripeSubscriptionId, 'conceder una prueba de esta función')
-    if (fila) {
-      const { count } = await prisma.venueFeature.updateMany({
-        where: { id: fila.id, stripeSubscriptionId: fila.stripeSubscriptionId },
-        data: {
-          active: true,
-          startDate,
-          endDate, // Trial expires on this date
-          monthlyPrice: feature.monthlyPrice,
-          stripeSubscriptionId: null,
-          stripeSubscriptionItemId: null,
-          suspendedAt: null,
-          gracePeriodEndsAt: null,
-          paymentFailureCount: 0,
-        },
-      })
-      if (count === 0) {
-        throw new ConflictError('La función cambió mientras se concedía la prueba. Vuelve a intentarlo.', 'SUBSCRIPTION_LINK_CHANGED')
+
+    // 🔴 Codex R2 (ronda 2): esta función es genérica, pero acepta también `PLAN_PRO`/`PLAN_PREMIUM` (la usa
+    // `extendPlanTrial`) y escribía sin mirar el OTRO tier: una prueba PRO sobre un PREMIUM activo dejaba los dos
+    // planes vivos, en secuencia y sin ninguna carrera.
+    //
+    // 🔴 Codex ronda 3 (hallazgo 13): comprobar y escribir van en la MISMA transacción, con el candado sostenido hasta
+    // el commit. Comprobar en una transacción y escribir en otra deja que dos pruebas simultáneas —una PRO y otra
+    // PREMIUM— lean «libre» las dos y creen después sus dos filas: el candado no sirve de nada si se suelta antes de
+    // escribir. Una función que NO es plan no puede chocar con nada y sigue por el camino de siempre, sin candado.
+    const esPlan = (PAID_PLAN_TIER_CODES as readonly string[]).includes(featureCode)
+    const conceder = async (tx: Prisma.TransactionClient) => {
+      if (esPlan) {
+        await tx.$executeRaw`SET LOCAL lock_timeout = '15s'`
+        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`stripe-obligaciones:${venueId}`}))`
+        const filasDePlan = await tx.venueFeature.findMany({
+          where: { venueId, feature: { code: { in: [...PAID_PLAN_TIER_CODES] } } },
+          select: { featureId: true, active: true, stripeSubscriptionId: true },
+          take: PAID_PLAN_TIER_CODES.length,
+        })
+        exigirQueSePuedaConceder(filasDePlan, feature.id, { vinculoPropioYaComprobado: true })
       }
-    } else {
-      await prisma.venueFeature
-        .create({
+      if (fila) {
+        const { count } = await tx.venueFeature.updateMany({
+          where: { id: fila.id, stripeSubscriptionId: fila.stripeSubscriptionId },
           data: {
-            venueId,
-            featureId: feature.id,
             active: true,
-            monthlyPrice: feature.monthlyPrice,
             startDate,
             endDate, // Trial expires on this date
-            // No stripeSubscriptionId = DB-only trial
+            monthlyPrice: feature.monthlyPrice,
+            stripeSubscriptionId: null,
+            stripeSubscriptionItemId: null,
+            suspendedAt: null,
+            gracePeriodEndsAt: null,
+            paymentFailureCount: 0,
           },
         })
-        .catch((error: any) => {
-          // Otra escritura creó la fila entre la lectura y aquí: no se pisa, se avisa.
-          if (error?.code === 'P2002') {
-            throw new ConflictError('La función cambió mientras se concedía la prueba. Vuelve a intentarlo.', 'SUBSCRIPTION_LINK_CHANGED')
-          }
-          throw error
-        })
+        if (count === 0) {
+          throw new ConflictError('La función cambió mientras se concedía la prueba. Vuelve a intentarlo.', 'SUBSCRIPTION_LINK_CHANGED')
+        }
+      } else {
+        await tx.venueFeature
+          .create({
+            data: {
+              venueId,
+              featureId: feature.id,
+              active: true,
+              monthlyPrice: feature.monthlyPrice,
+              startDate,
+              endDate, // Trial expires on this date
+              // No stripeSubscriptionId = DB-only trial
+            },
+          })
+          .catch((error: any) => {
+            // Otra escritura creó la fila entre la lectura y aquí: no se pisa, se avisa.
+            if (error?.code === 'P2002') {
+              throw new ConflictError('La función cambió mientras se concedía la prueba. Vuelve a intentarlo.', 'SUBSCRIPTION_LINK_CHANGED')
+            }
+            throw error
+          })
+      }
     }
+    if (esPlan) await prisma.$transaction(conceder)
+    else await conceder(prisma as unknown as Prisma.TransactionClient)
 
     logger.info(`Granted ${trialDays}-day DB-only trial for ${featureCode} to venue ${venueId}`, {
       venueId,
@@ -997,6 +1039,10 @@ export async function assignCompPlan(venueId: string, tier: PlanAdminTier) {
     // R0 ronda 4 (Codex): dos cortesías simultáneas a tiers distintos leían «no hay filas», creaban cada
     // una su destino y ninguna apagaba la otra. El candado de la fila del negocio las serializa, y bajo él
     // se relee: si el plan ya no es el que se validó (una fila nueva, otro vínculo, otro `active`), 409.
+    // 🔴 Codex C2: primero el MISMO candado del negocio que la entrega de Stripe y la regla común (la fila del Venue sola
+    // no serializa con ellas: una entrega podía crear el otro tier mientras la cortesía creaba el suyo).
+    await tx.$executeRaw`SET LOCAL lock_timeout = '15s'`
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`stripe-obligaciones:${venueId}`}))`
     await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR UPDATE`
     const vigentes = await leerFilas(tx)
     const huella = (xs: typeof filas) => JSON.stringify(xs.map(x => [x.id, x.featureId, x.active, x.stripeSubscriptionId]))

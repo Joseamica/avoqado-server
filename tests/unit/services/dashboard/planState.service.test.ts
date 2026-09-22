@@ -50,7 +50,7 @@ describe('planState.service', () => {
   // 1. getPlanState
   describe('getPlanState', () => {
     it('returns state "none" with hasPlan=false when there is no PLAN_PRO VenueFeature', async () => {
-      prismaMock.venueFeature.findFirst.mockResolvedValue(null)
+      prismaMock.venueFeature.findMany.mockResolvedValue([])
       const result = await getPlanState('venue_1')
       expect(result.hasPlan).toBe(false)
       expect(result.state).toBe('none')
@@ -58,7 +58,7 @@ describe('planState.service', () => {
     })
 
     it('returns "active" with real currentPeriodEnd + IVA gross/base price from Stripe', async () => {
-      prismaMock.venueFeature.findFirst.mockResolvedValue(planProFeature())
+      prismaMock.venueFeature.findMany.mockResolvedValue([planProFeature()])
       mockStripe.retrievePlanSubscription.mockResolvedValue(subSummary())
       const result = await getPlanState('venue_1')
       expect(result.state).toBe('active')
@@ -72,8 +72,26 @@ describe('planState.service', () => {
       expect(result.retentionOfferEligible).toBe(true)
     })
 
+    it('🔴 Codex C8: con DOS filas de plan (la vieja retirada primero) administra la VIGENTE', async () => {
+      prismaMock.venueFeature.findMany.mockResolvedValue([
+        planProFeature({ id: 'vf_viejo', active: false, stripeSubscriptionId: null }),
+        planProFeature({
+          id: 'vf_premium',
+          stripeSubscriptionId: 'sub_premium',
+          feature: { code: 'PLAN_PREMIUM', name: 'Plan Avoqado Premium' },
+        }),
+      ])
+      mockStripe.retrievePlanSubscription.mockResolvedValue(subSummary())
+
+      const result = await getPlanState('venue_1')
+
+      expect(result.state).toBe('active')
+      expect(result.planTier).toBe('PREMIUM')
+      expect(result.stripeSubscriptionId).toBe('sub_premium')
+    })
+
     it('returns "canceling" when Stripe sub has cancelAtPeriodEnd=true', async () => {
-      prismaMock.venueFeature.findFirst.mockResolvedValue(planProFeature())
+      prismaMock.venueFeature.findMany.mockResolvedValue([planProFeature()])
       mockStripe.retrievePlanSubscription.mockResolvedValue(subSummary({ cancelAtPeriodEnd: true }))
       const result = await getPlanState('venue_1')
       expect(result.state).toBe('canceling')
@@ -82,27 +100,27 @@ describe('planState.service', () => {
 
     it('retentionOfferEligible reflects tenure and active-discount state', async () => {
       // Eligible baseline (tenured, no discount).
-      prismaMock.venueFeature.findFirst.mockResolvedValue(planProFeature())
+      prismaMock.venueFeature.findMany.mockResolvedValue([planProFeature()])
       mockStripe.retrievePlanSubscription.mockResolvedValue(subSummary())
       expect((await getPlanState('venue_1')).retentionOfferEligible).toBe(true)
 
       // Tenure < 30 days → NOT eligible (anti-farm).
-      prismaMock.venueFeature.findFirst.mockResolvedValue(planProFeature())
+      prismaMock.venueFeature.findMany.mockResolvedValue([planProFeature()])
       mockStripe.retrievePlanSubscription.mockResolvedValue(subSummary({ createdAt: freshCreatedAt }))
       expect((await getPlanState('venue_1')).retentionOfferEligible).toBe(false)
 
       // Discount already active → NOT eligible (non-stackable).
-      prismaMock.venueFeature.findFirst.mockResolvedValue(planProFeature())
+      prismaMock.venueFeature.findMany.mockResolvedValue([planProFeature()])
       mockStripe.retrievePlanSubscription.mockResolvedValue(subSummary({ hasActiveDiscount: true }))
       expect((await getPlanState('venue_1')).retentionOfferEligible).toBe(false)
 
       // DB-only plan (no Stripe sub) → NOT eligible (nothing to discount).
-      prismaMock.venueFeature.findFirst.mockResolvedValue(planProFeature({ stripeSubscriptionId: null }))
+      prismaMock.venueFeature.findMany.mockResolvedValue([planProFeature({ stripeSubscriptionId: null })])
       expect((await getPlanState('venue_1')).retentionOfferEligible).toBe(false)
     })
 
     it('returns "trial" with trialEndsAt and no Stripe call failing the response (DB-only trial)', async () => {
-      prismaMock.venueFeature.findFirst.mockResolvedValue(planProFeature({ endDate: future, stripeSubscriptionId: null }))
+      prismaMock.venueFeature.findMany.mockResolvedValue([planProFeature({ endDate: future, stripeSubscriptionId: null })])
       const result = await getPlanState('venue_1')
       expect(result.state).toBe('trial')
       expect(result.trialEndsAt).toBe(future.toISOString())
@@ -114,9 +132,9 @@ describe('planState.service', () => {
 
     it('returns "suspended" and tolerates a Stripe retrieve error (nulls, never throws)', async () => {
       // monthlyPrice nulled so the only price source would be Stripe; with Stripe down → price null.
-      prismaMock.venueFeature.findFirst.mockResolvedValue(
+      prismaMock.venueFeature.findMany.mockResolvedValue([
         planProFeature({ suspendedAt: new Date(Date.now() - 86400000), monthlyPrice: null }),
-      )
+      ])
       mockStripe.retrievePlanSubscription.mockRejectedValue(new Error('stripe down'))
       const result = await getPlanState('venue_1')
       expect(result.state).toBe('suspended')
@@ -128,9 +146,9 @@ describe('planState.service', () => {
   // 2. cancelPlan / reactivatePlan
   describe('cancelPlan / reactivatePlan', () => {
     it('cancelPlan flips cancel_at_period_end=true (NOT immediate cancel) and returns updated state', async () => {
-      prismaMock.venueFeature.findFirst
-        .mockResolvedValueOnce(planProFeature()) // initial fetch for the sub id
-        .mockResolvedValueOnce(planProFeature()) // re-fetch inside getPlanState
+      prismaMock.venueFeature.findMany
+        .mockResolvedValueOnce([planProFeature()]) // initial fetch for the sub id
+        .mockResolvedValueOnce([planProFeature()]) // re-fetch inside getPlanState
       mockStripe.setSubscriptionCancelAtPeriodEnd.mockResolvedValue({} as any)
       mockStripe.retrievePlanSubscription.mockResolvedValue(subSummary({ cancelAtPeriodEnd: true }))
       const result = await cancelPlan('venue_1')
@@ -140,7 +158,7 @@ describe('planState.service', () => {
     })
 
     it('reactivatePlan flips cancel_at_period_end=false', async () => {
-      prismaMock.venueFeature.findFirst.mockResolvedValueOnce(planProFeature()).mockResolvedValueOnce(planProFeature())
+      prismaMock.venueFeature.findMany.mockResolvedValueOnce([planProFeature()]).mockResolvedValueOnce([planProFeature()])
       mockStripe.setSubscriptionCancelAtPeriodEnd.mockResolvedValue({} as any)
       mockStripe.retrievePlanSubscription.mockResolvedValue(subSummary())
       const result = await reactivatePlan('venue_1')
@@ -149,13 +167,13 @@ describe('planState.service', () => {
     })
 
     it('cancelPlan throws BadRequestError when there is no Stripe subscription', async () => {
-      prismaMock.venueFeature.findFirst.mockResolvedValue(planProFeature({ stripeSubscriptionId: null }))
+      prismaMock.venueFeature.findMany.mockResolvedValue([planProFeature({ stripeSubscriptionId: null })])
       await expect(cancelPlan('venue_1')).rejects.toThrow(BadRequestError)
       await expect(cancelPlan('venue_1')).rejects.toThrow('suscripción de Stripe que cancelar')
     })
 
     it('cancelPlan throws BadRequestError when there is no PLAN_PRO plan at all', async () => {
-      prismaMock.venueFeature.findFirst.mockResolvedValue(null)
+      prismaMock.venueFeature.findMany.mockResolvedValue([])
       await expect(cancelPlan('venue_1')).rejects.toThrow(BadRequestError)
     })
   })

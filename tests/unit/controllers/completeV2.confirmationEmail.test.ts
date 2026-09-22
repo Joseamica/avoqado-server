@@ -37,7 +37,20 @@ jest.mock('../../../src/services/stripe.service', () => ({
   createOnboardingSetupIntent: jest.fn(),
   createPlanSetupIntent: jest.fn(),
   createPlanSubscription: jest.fn().mockResolvedValue({ subscriptionId: 'sub_123' }),
+  // Concede lo cobrado; con un código que no es de tier, el negocio conserva el tier pedido (lo que miden estas pruebas).
+  entregarSuscripcionDePlan: jest.fn().mockResolvedValue({
+    venueId: 'venue_1',
+    featureId: 'f',
+    featureCode: 'PLAN_COBRADO',
+    subscriptionId: 'sub_123',
+    endDate: null,
+  }),
   getOrCreateStripeCustomer: jest.fn().mockResolvedValue('cus_123'),
+}))
+
+// V5-A paso 6: el cobro pasa por la regla común (probada en su suite); aquí deja pasar para medir el CORREO.
+jest.mock('../../../src/services/access/autorizarObligacionNueva', () => ({
+  autorizarObligacionNueva: (_v: string, _c: string, _i: unknown, crear: () => Promise<unknown>) => crear(),
 }))
 
 jest.mock('../../../src/services/access/planNotification.service', () => ({

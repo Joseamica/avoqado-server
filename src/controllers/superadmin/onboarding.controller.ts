@@ -10,6 +10,10 @@
  */
 
 import { Request, Response, NextFunction } from 'express'
+import { PAID_PLAN_TIER_CODES } from '@/services/access/basePlan.service'
+import { exigirQueSePuedaConceder } from '@/services/access/concederPlan'
+import { planesPedidos } from '@/services/access/concederPlanDecision'
+import { ConflictError } from '@/errors/AppError'
 import { Prisma, AccountType, StaffRole, OrgRole, InvitationStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { generateSlug, validateSlug } from '@/utils/slugify'
@@ -587,16 +591,46 @@ export async function createVenueWizard(req: Request, res: Response, next: NextF
           where: { code: { in: payload.features }, active: true },
         })
 
-        for (const feature of features) {
-          await prisma.venueFeature.create({
-            data: {
-              venueId,
-              featureId: feature.id,
-              active: true,
-              monthlyPrice: feature.monthlyPrice,
-              startDate: new Date(),
-            },
+        // 🔴 Codex R2 (ronda 2): el wizard creaba una fila por cada código pedido, sin mirar nada. Con `PLAN_PRO` y
+        // `PLAN_PREMIUM` en el mismo payload dejaba los DOS planes activos de una sola pasada; y encima de un negocio
+        // que ya tuviera plan, un segundo. Un negocio tiene UN plan.
+        const codigosDePlan = planesPedidos(
+          features.map(f => f.code),
+          PAID_PLAN_TIER_CODES,
+        )
+        const planes = features.filter(f => codigosDePlan.includes(f.code))
+        if (planes.length > 1) {
+          throw new ConflictError('Un negocio tiene UN plan: elige PRO o PREMIUM, no los dos.', 'DOS_PLANES_EN_EL_ALTA')
+        }
+        // 🔴 Codex ronda 3 (hallazgo 13): comprobar y crear van en la MISMA transacción, con el candado sostenido
+        // hasta el commit. Comprobar en una y escribir en otra deja que otra concesión se cuele en medio.
+        const crearFilas = async (tx: Prisma.TransactionClient) => {
+          for (const feature of features) {
+            await tx.venueFeature.create({
+              data: {
+                venueId,
+                featureId: feature.id,
+                active: true,
+                monthlyPrice: feature.monthlyPrice,
+                startDate: new Date(),
+              },
+            })
+          }
+        }
+        if (planes.length === 1) {
+          await prisma.$transaction(async tx => {
+            await tx.$executeRaw`SET LOCAL lock_timeout = '15s'`
+            await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`stripe-obligaciones:${venueId}`}))`
+            const filasDePlan = await tx.venueFeature.findMany({
+              where: { venueId, feature: { code: { in: [...PAID_PLAN_TIER_CODES] } } },
+              select: { featureId: true, active: true, stripeSubscriptionId: true },
+              take: PAID_PLAN_TIER_CODES.length,
+            })
+            exigirQueSePuedaConceder(filasDePlan, planes[0].id)
+            await crearFilas(tx)
           })
+        } else {
+          await crearFilas(prisma as unknown as Prisma.TransactionClient)
         }
 
         steps.push({

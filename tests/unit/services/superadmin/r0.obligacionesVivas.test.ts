@@ -23,7 +23,7 @@ jest.mock('@/services/stripe.service', () => ({
 jest.mock('stripe')
 
 import { adjustVenuePlanEndDate, deactivateVenuePlan, grantVenuePlanTrial } from '@/services/superadmin/subscription.service'
-import { assignCompPlan, disableFeatureForVenue, grantTrialForVenue } from '@/services/dashboard/superadmin.service'
+import { assignCompPlan, disableFeatureForVenue, enableFeatureForVenue, grantTrialForVenue } from '@/services/dashboard/superadmin.service'
 import { deleteVenue } from '@/services/dashboard/venue.dashboard.service'
 
 const viva = () =>
@@ -163,7 +163,11 @@ describe('superadmin · funciones (dashboard/superadmin.service)', () => {
 
 describe('cortesía del plan (R0 ronda 3, Codex)', () => {
   // Una transacción con su propio `tx`: lo que no pase por aquí, no está dentro de la transacción.
-  const tx = { $queryRaw: jest.fn(), venueFeature: { findMany: jest.fn(), updateMany: jest.fn(), create: jest.fn() } }
+  const tx = {
+    $queryRaw: jest.fn(),
+    $executeRaw: jest.fn(),
+    venueFeature: { findMany: jest.fn(), updateMany: jest.fn(), create: jest.fn() },
+  }
   const acciones = () => (logAction as jest.Mock).mock.calls.map((c: any[]) => c[0].action)
   /** La lectura validada y la relectura bajo el candado ven lo mismo (nadie tocó el plan en medio). */
   const filasLeidas = (filas: unknown[]) => {
@@ -272,15 +276,19 @@ describe('cortesía del plan (R0 ronda 3, Codex)', () => {
     expect(tx.venueFeature.create).not.toHaveBeenCalled()
   })
 
-  it('el candado es la fila del negocio (FOR UPDATE) y se toma ANTES de releer', async () => {
+  it('🔴 Codex C2: toma el MISMO candado del negocio que la entrega (y luego la fila), ANTES de releer', async () => {
     filasLeidas([])
 
     await assignCompPlan('cven1', 'PRO').catch(() => undefined)
 
-    const sql = (tx.$queryRaw.mock.calls[0][0] as string[]).join('?')
-    expect(sql).toMatch(/FROM "Venue"/)
-    expect(sql).toMatch(/FOR UPDATE/)
-    expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(tx.venueFeature.findMany.mock.invocationCallOrder[0])
+    const sqls = tx.$queryRaw.mock.calls.map(c => (c[0] as string[]).join('?'))
+    expect(sqls[0]).toMatch(/pg_advisory_xact_lock/)
+    expect(tx.$queryRaw.mock.calls[0].slice(1)).toContain('stripe-obligaciones:cven1')
+    expect(sqls.some(q => /FROM "Venue"/.test(q) && /FOR UPDATE/.test(q))).toBe(true)
+    // Toda relectura (la del final de la transacción) va después del candado.
+    expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      tx.venueFeature.findMany.mock.invocationCallOrder[tx.venueFeature.findMany.mock.invocationCallOrder.length - 1],
+    )
   })
 })
 
@@ -326,5 +334,75 @@ describe('borrar un venue', () => {
     expect(prismaMock.venue.delete).not.toHaveBeenCalled()
     expect(mockBorrarCarpeta).not.toHaveBeenCalled()
     expect((logAction as jest.Mock).mock.calls.map((c: any[]) => c[0].action)).not.toContain('VENUE_DELETED')
+  })
+})
+
+describe('🔴 Codex C2: la ruta genérica de funciones no enciende PLANES a ciegas', () => {
+  it('un código de plan pasa por la cortesía (revisa Stripe y el otro tier) y nunca hace upsert', async () => {
+    prismaMock.venue.findUnique.mockResolvedValue({ id: 'cven1' } as never)
+    prismaMock.feature.findUnique.mockResolvedValue({ id: 'feat-premium', code: 'PLAN_PREMIUM', monthlyPrice: 1999 } as never)
+    prismaMock.feature.findMany.mockResolvedValue([
+      { id: 'feat-premium', code: 'PLAN_PREMIUM', monthlyPrice: 1999 },
+      { id: 'feat-pro', code: 'PLAN_PRO', monthlyPrice: 999 },
+    ] as never)
+    prismaMock.venueFeature.findMany.mockResolvedValue([
+      { id: 'vf-pro', featureId: 'feat-pro', active: true, stripeSubscriptionId: 'sub_viva' },
+    ] as never)
+    mockExigir.mockRejectedValueOnce(viva())
+
+    await expect(enableFeatureForVenue('cven1', 'PLAN_PREMIUM')).rejects.toMatchObject({ code: 'LIVE_SUBSCRIPTION_LINKED' })
+    expect(mockExigir).toHaveBeenCalledWith('sub_viva', expect.any(String))
+    expect(prismaMock.venueFeature.upsert).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * 🔴 Codex R2 (ronda 2): `grantTrialForVenue` es genérica —sirve para cualquier función— pero acepta también `PLAN_PRO`
+ * y `PLAN_PREMIUM`, y escribía su fila sin candado y sin mirar el OTRO tier. `extendPlanTrial` la usa. Conceder una
+ * prueba PRO a quien tenía PREMIUM activo dejaba los DOS planes vivos, en secuencia, sin ninguna carrera.
+ */
+describe('🔴 R2: la prueba genérica tampoco puede dejar dos planes vivos', () => {
+  beforeEach(() => {
+    prismaMock.feature.findUnique.mockResolvedValue({ id: 'feature-pro', code: 'PLAN_PRO', monthlyPrice: 1158.84 } as never)
+    prismaMock.venueFeature.findUnique.mockResolvedValue(null as never)
+    prismaMock.venueFeature.findMany.mockReset().mockResolvedValue([] as never)
+    prismaMock.venueFeature.create.mockReset().mockResolvedValue({ id: 'vf-nueva' } as never)
+    prismaMock.venueFeature.updateMany.mockReset().mockResolvedValue({ count: 1 } as never)
+  })
+
+  it('🔴 con el otro tier ACTIVO: 409 y nada escrito', async () => {
+    prismaMock.venueFeature.findMany.mockResolvedValue([
+      { featureId: 'feature-premium', active: true, stripeSubscriptionId: null },
+    ] as never)
+
+    await expect(grantTrialForVenue('cven1', 'PLAN_PRO', 14)).rejects.toMatchObject({ statusCode: 409, code: 'OTRO_PLAN_ACTIVO' })
+    expect(prismaMock.venueFeature.create).not.toHaveBeenCalled()
+    expect(prismaMock.venueFeature.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('🔴 con el otro tier LIGADO a Stripe aunque apagado (sigue cobrando): 409', async () => {
+    prismaMock.venueFeature.findMany.mockResolvedValue([
+      { featureId: 'feature-premium', active: false, stripeSubscriptionId: 'sub_premium' },
+    ] as never)
+
+    await expect(grantTrialForVenue('cven1', 'PLAN_PRO', 14)).rejects.toMatchObject({ statusCode: 409, code: 'OTRO_PLAN_ACTIVO' })
+    expect(prismaMock.venueFeature.create).not.toHaveBeenCalled()
+  })
+
+  it('el plan concedido bajo el candado del negocio: sin otro tier, se concede', async () => {
+    await grantTrialForVenue('cven1', 'PLAN_PRO', 14)
+
+    expect(prismaMock.venueFeature.create).toHaveBeenCalled()
+    // El MISMO candado que la entrega y la regla común.
+    const candado = (prismaMock.$queryRaw as jest.Mock).mock.calls.find((c: unknown[]) => JSON.stringify(c).includes('stripe-obligaciones'))
+    expect(candado).toBeDefined()
+  })
+
+  it('una función que NO es plan no paga el candado ni la lectura de tiers', async () => {
+    prismaMock.feature.findUnique.mockResolvedValue({ id: 'f-loyal', code: 'LOYALTY_PROGRAM', monthlyPrice: 99 } as never)
+
+    await grantTrialForVenue('cven1', 'LOYALTY_PROGRAM', 14)
+
+    expect(prismaMock.venueFeature.findMany).not.toHaveBeenCalled()
   })
 })

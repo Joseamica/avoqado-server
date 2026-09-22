@@ -11,6 +11,13 @@ const mockPreview = jest.fn()
 jest.mock('../../../../src/services/stripe.service', () => ({
   updateSubscriptionPrice: (...a: unknown[]) => mockUpdatePrice(...a),
   previewSubscriptionProration: (...a: unknown[]) => mockPreview(...a),
+  entregarSuscripcionDePlan: jest.fn().mockResolvedValue(null),
+}))
+// V5-A paso 6: plan → plan pasa por la regla común (sus casos viven en `cambioDePlanConvergente.test.ts`); aquí se deja pasar
+// o se hace rechazar, para seguir probando lo de este archivo: el cruce plan↔suelta y los candados de la suelta.
+const mockAutorizar = jest.fn()
+jest.mock('../../../../src/services/access/autorizarObligacionNueva', () => ({
+  autorizarObligacionNueva: (...a: unknown[]) => mockAutorizar(...a),
 }))
 const mockAssertSinCobroDoble = jest.fn()
 const mockAssertNoIncluida = jest.fn()
@@ -36,12 +43,17 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
       update: (...a: unknown[]) => mockVfUpdate(...a),
     },
     feature: { findUnique: (...a: unknown[]) => mockFeatureFindUnique(...a) },
+    venue: { findUnique: jest.fn().mockResolvedValue({ stripeCustomerId: 'cus_1' }) },
     activityLog: { create: jest.fn().mockResolvedValue({}) },
   },
 }))
 
 import { cruzaPlanYSuelta } from '../../../../src/services/access/basePlan.service'
-import { addVenueFeatures, previewSubscriptionChange, updateSubscription } from '../../../../src/controllers/dashboard/venueFeature.dashboard.controller'
+import {
+  addVenueFeatures,
+  previewSubscriptionChange,
+  updateSubscription,
+} from '../../../../src/controllers/dashboard/venueFeature.dashboard.controller'
 
 function peticion(origen: string, destino: string) {
   mockVfFindFirst.mockResolvedValue({
@@ -50,7 +62,13 @@ function peticion(origen: string, destino: string) {
     stripeSubscriptionId: 'sub_1',
     feature: { id: `f-${origen}`, code: origen, name: origen },
   })
-  mockFeatureFindUnique.mockResolvedValue({ id: `f-${destino}`, code: destino, name: destino, stripePriceId: `price_${destino}`, monthlyPrice: 1 })
+  mockFeatureFindUnique.mockResolvedValue({
+    id: `f-${destino}`,
+    code: destino,
+    name: destino,
+    stripePriceId: `price_${destino}`,
+    monthlyPrice: 1,
+  })
   mockVfFindUnique.mockResolvedValue(null)
   const req: any = { params: { venueId: 'venue-1', featureId: 'vf-1' }, body: { newFeatureCode: destino } }
   const res: any = { status: jest.fn().mockReturnThis(), json: jest.fn().mockReturnThis() }
@@ -66,6 +84,7 @@ beforeEach(() => {
   mockAssertNoIncluida.mockReset().mockResolvedValue(undefined)
   mockVentaAbierta.mockReset().mockReturnValue(true)
   mockAddFeatures.mockReset().mockResolvedValue([])
+  mockAutorizar.mockReset().mockImplementation(async (_v: string, _c: string, _i: unknown, crear: () => Promise<unknown>) => crear())
 })
 
 describe('cruzaPlanYSuelta', () => {
@@ -95,31 +114,53 @@ describe.each([
     expect(llamadaAStripe).not.toHaveBeenCalled()
   })
 
-  it('plan → plan (subir de Pro a Premium) sigue permitido', async () => {
-    const { req, res, next } = peticion('PLAN_PRO', 'PLAN_PREMIUM')
-    await (handler as any)(req, res, next)
+})
 
-    expect(llamadaAStripe).toHaveBeenCalled()
+/**
+ * 🔴 Actualizado el 22-sep: el CAMBIO plan → plan quedó cerrado (el dinero sólo se mueve en una confirmación de
+ * Stripe). La COTIZACIÓN no: es de sólo lectura, no mueve un peso, y el negocio puede seguir viendo cuánto le
+ * costaría antes de escribirnos. Antes una sola prueba cubría los dos caminos; ahora dicen cosas distintas.
+ */
+describe('plan → plan tras cerrar el cambio', () => {
+  it('🔴 CAMBIAR no toca Stripe: está cerrado', async () => {
+    const { req, res, next } = peticion('PLAN_PRO', 'PLAN_PREMIUM')
+    await updateSubscription(req, res, next)
+
+    expect(mockUpdatePrice).not.toHaveBeenCalled()
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ code: 'CAMBIO_DE_PLAN_CERRADO' }))
+  })
+
+  it('COTIZAR sigue disponible: no mueve dinero', async () => {
+    const { req, res, next } = peticion('PLAN_PRO', 'PLAN_PREMIUM')
+    await previewSubscriptionChange(req, res, next)
+
+    expect(mockPreview).toHaveBeenCalled()
   })
 })
 
 describe('hallazgo #1 · subir de plan con una suelta que el plan incluye y sigue cobrando', () => {
-  const solape = () =>
-    Object.assign(new Error('Ya pagas Inventario por separado'), { statusCode: 409, code: 'PLAN_ABSORBS_ALA_CARTE' })
+  const solape = () => Object.assign(new Error('Ya pagas Inventario por separado'), { statusCode: 409, code: 'PLAN_ABSORBS_ALA_CARTE' })
 
-  it.each([
-    ['cotizar', previewSubscriptionChange],
-    ['cambiar', updateSubscription],
-  ])('🔴 %s PRO → PREMIUM con solape: 409 y NO toca Stripe', async (_n, handler) => {
+  it('🔴 cotizar PRO → PREMIUM con solape: 409 y NO toca Stripe', async () => {
     mockAssertSinCobroDoble.mockRejectedValue(solape())
     const { req, res, next } = peticion('PLAN_PRO', 'PLAN_PREMIUM')
 
-    await (handler as any)(req, res, next)
+    await previewSubscriptionChange(req, res, next)
 
     expect(mockAssertSinCobroDoble).toHaveBeenCalledWith('venue-1', 'PREMIUM')
     expect(next).toHaveBeenCalledWith(expect.objectContaining({ code: 'PLAN_ABSORBS_ALA_CARTE' }))
-    expect(mockUpdatePrice).not.toHaveBeenCalled()
     expect(mockPreview).not.toHaveBeenCalled()
+  })
+
+  // 🔴 Actualizada el 22-sep: con el cambio de plan CERRADO, el solape ya no lo decide la regla — no se llega a ella.
+  it('🔴 cambiar PRO → PREMIUM está cerrado: ni regla ni Stripe', async () => {
+    const { req, res, next } = peticion('PLAN_PRO', 'PLAN_PREMIUM')
+
+    await updateSubscription(req, res, next)
+
+    expect(mockAutorizar).not.toHaveBeenCalled()
+    expect(mockUpdatePrice).not.toHaveBeenCalled()
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ code: 'CAMBIO_DE_PLAN_CERRADO' }))
   })
 
   it.each([
@@ -189,13 +230,15 @@ describe('venta suelta CERRADA', () => {
     expect(mockPreview).not.toHaveBeenCalled()
   })
 
-  it('los PLANES se siguen vendiendo: PRO → PREMIUM no se cierra', async () => {
+  // 🔴 Actualizada el 22-sep: los planes se siguen VENDIENDO (alta y checkout), pero CAMBIAR de plan desde el panel
+  // quedó cerrado — era el único camino que movía dinero desde el servidor.
+  it('🔴 cambiar de plan desde el panel: cerrado, con su propio mensaje', async () => {
     const { req, res, next } = peticion('PLAN_PRO', 'PLAN_PREMIUM')
 
     await updateSubscription(req, res, next)
 
-    expect(mockUpdatePrice).toHaveBeenCalled()
-    expect(next).not.toHaveBeenCalled()
+    expect(mockUpdatePrice).not.toHaveBeenCalled()
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ code: 'CAMBIO_DE_PLAN_CERRADO' }))
   })
 
   it('el mensaje dice qué hacer: escribirnos', async () => {

@@ -17,8 +17,10 @@ import {
   createOnboardingSetupIntent,
   createPlanSetupIntent,
   createPlanSubscription,
+  entregarSuscripcionDePlan,
   getOrCreateStripeCustomer,
 } from '../services/stripe.service'
+import { autorizarObligacionNueva } from '../services/access/autorizarObligacionNueva'
 import { resolvePlanNotificationTarget } from '../services/access/planNotification.service'
 import { LEGACY_INTRO_OFFER, STANDARD_PLAN_GROSS_CENTS, TRIAL_DAYS, isLegacyIntroEligible } from '../services/access/planPricing.constants'
 import emailService from '../services/email.service'
@@ -1042,6 +1044,41 @@ export async function acceptV2Terms(req: Request, res: Response, next: NextFunct
 }
 
 /**
+ * 🔴 Codex C4 (22-sep): el cobro del carril viejo del alta quedó DUDOSO. Se suelta la marca del asistente (para que el
+ * reintento pueda entrar) pero el cobro queda EN CURSO con el mismo lease de `activatePlan`: mientras dure, la regla común
+ * no deja abrir otra compra desde el dashboard. El siguiente intento —este carril o `activate-plan`— recupera la
+ * suscripción por el id que `alCrearEnStripe` guardó, o la ve viva en Stripe; nunca cobra a ciegas.
+ */
+async function dejarCobroEnCurso(organizationId: string): Promise<never> {
+  await prisma.onboardingProgress.updateMany({
+    where: { organizationId },
+    data: {
+      completedAt: null,
+      planActivationStatus: PLAN_ACTIVATION_STATUS.IN_PROGRESS,
+      planActivationLeaseUntil: new Date(Date.now() + planActivationService.LEASE_MS),
+    },
+  })
+  throw new AppError(
+    'Estamos confirmando tu pago con el banco. Vuelve a intentarlo en unos minutos; no se te cobrará dos veces.',
+    503,
+    true,
+    'PLAN_ACTIVATION_PENDING',
+  )
+}
+
+/** El cobro del alta quedó concedido: `activate-plan` y cualquier reintento lo ven como YA cobrado (y con su id). */
+async function marcarPlanCobrado(organizationId: string, subscriptionId: string): Promise<void> {
+  await prisma.onboardingProgress.updateMany({
+    where: { organizationId },
+    data: { planActivationStatus: PLAN_ACTIVATION_STATUS.ACTIVE, planActivationLeaseUntil: null, planStripeSubscriptionId: subscriptionId },
+  })
+}
+
+/** El tier del negocio es el CONCEDIDO (sale del precio cobrado); sin dato, el pedido. */
+const tierDe = (featureCode: string, pedido: 'PRO' | 'PREMIUM'): 'PRO' | 'PREMIUM' =>
+  featureCode === 'PLAN_PREMIUM' ? 'PREMIUM' : featureCode === 'PLAN_PRO' ? 'PRO' : pedido
+
+/**
  * POST /api/v1/onboarding/organizations/:organizationId/v2/complete
  *
  * Completes V2 onboarding — creates venue from v2SetupData
@@ -1102,8 +1139,14 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
 
     // 🔴 COBRO EN CURSO. Si `activate-plan` tiene un lease vivo, terminar aquí tomaría el lock y
     // el carril legacy de abajo intentaría cobrar EN PARALELO con el que ya está en vuelo.
-    // Tampoco se toma el lock: se responde 409 y el cliente reintenta.
-    if (progress.planActivationStatus === PLAN_ACTIVATION_STATUS.IN_PROGRESS) {
+    // Tampoco se toma el lock: se responde 409 y el cliente reintenta. 🔴 Sólo con el lease VIVO (Codex R3): un cobro
+    // dudoso deja IN_PROGRESS con su lease, y al vencer el reintento TIENE que poder entrar — si no, el alta queda atorada
+    // para siempre. Entrar es seguro: la regla ve en Stripe lo que ya se cobró y lo entrega en vez de cobrar otra vez.
+    if (
+      progress.planActivationStatus === PLAN_ACTIVATION_STATUS.IN_PROGRESS &&
+      progress.planActivationLeaseUntil &&
+      progress.planActivationLeaseUntil > new Date()
+    ) {
       throw new ConflictError('Tu pago se está confirmando. Vuelve a intentar en unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
     }
 
@@ -1257,6 +1300,9 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
       // Its shape lives in planPricing.constants.ts (LEGACY_INTRO_OFFER), the single source that
       // mirrors the Stripe coupon seeded by scripts/seed-plan-pro.ts.
       const introPromo = isLegacyIntroEligible(paidTier, planData.interval, planData.payNow)
+      // 🔴 V5-A paso 6: el cobro pasa por la regla común (candado por negocio + lo VIVO en Stripe) y el acceso lo escribe
+      // la entrega. `intentoCobrar` separa «la regla no dejó cobrar» (nada se cobró) de «el cobro falló» (pudo cobrarse).
+      let intentoCobrar = false
       try {
         const venueRecord = await prisma.venue.findUnique({
           where: { id: result.venue.id },
@@ -1269,31 +1315,60 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
           venueRecord?.name || result.venue.name,
           result.venue.slug,
         )
-        await createPlanSubscription({
-          venueId: result.venue.id,
+        const { venue } = result
+        // Comprobado en el `if` de arriba; se fija aquí porque dentro de la función que recibe la regla se pierde.
+        const paymentMethodId = planData.paymentMethodId
+        const cobro = await autorizarObligacionNueva(
+          venue.id,
           customerId,
-          paymentMethodId: planData.paymentMethodId,
-          tierCode,
-          interval: planData.interval,
-          trialPeriodDays: planData.payNow ? 0 : TRIAL_DAYS,
-          coupon: introPromo ? LEGACY_INTRO_OFFER.couponId : undefined,
-          // 🔴 Sin esta llave, una petición perdida en la red y reintentada crea DOS suscripciones
-          // y DOS cobros: es lo único que vuelve segura la política de reintentos de Stripe. Es
-          // estable por organización a propósito — el reintento del MISMO alta tiene que reusar el
-          // cobro, no estrenar uno. (Auditoría de Codex, 18-sep.)
-          idempotencyKey: `onboarding-complete:${organizationId}`,
-          // 🔴 FUGA DE DINERO CERRADA (spec § 3.7). Sin esto, una tarjeta RECHAZADA crea la
-          // suscripción `incomplete` y el `upsert` de `createPlanSubscription` deja igualmente
-          // `VenueFeature.active = true`: el negocio se lleva el plan de pago sin haber pagado,
-          // hasta que llegue —o no— el webhook. Con `error_if_incomplete` Stripe responde 402
-          // y NO crea nada.
-          // Sólo aplica pagando hoy: con prueba gratis no hay primer cobro que pueda fallar, y
-          // mandarlo con `trial_period_days > 0` no tiene sentido.
-          ...(planData.payNow ? { paymentBehavior: 'error_if_incomplete' as const } : {}),
-          venueName: result.venue.name,
-          venueSlug: result.venue.slug,
+          { tipo: 'PLAN', tier: paidTier },
+          () => {
+            return createPlanSubscription({
+              // «Pudo cobrarse» empieza justo antes del POST, no al entrar aquí (Codex C15).
+              antesDeCobrar: () => {
+                intentoCobrar = true
+              },
+              venueId: venue.id,
+              customerId,
+              paymentMethodId,
+              tierCode,
+              interval: planData.interval,
+              trialPeriodDays: planData.payNow ? 0 : TRIAL_DAYS,
+              coupon: introPromo ? LEGACY_INTRO_OFFER.couponId : undefined,
+              // 🔴 Sin esta llave, una petición perdida en la red y reintentada crea DOS suscripciones
+              // y DOS cobros: es lo único que vuelve segura la política de reintentos de Stripe. Es
+              // estable por organización a propósito — el reintento del MISMO alta tiene que reusar el
+              // cobro, no estrenar uno. (Auditoría de Codex, 18-sep.)
+              idempotencyKey: `onboarding-complete:${organizationId}`,
+              // 🔴 FUGA DE DINERO CERRADA (spec § 3.7). Sin esto, una tarjeta RECHAZADA crea la
+              // suscripción `incomplete` y el `upsert` de `createPlanSubscription` deja igualmente
+              // `VenueFeature.active = true`: el negocio se lleva el plan de pago sin haber pagado,
+              // hasta que llegue —o no— el webhook. Con `error_if_incomplete` Stripe responde 402
+              // y NO crea nada.
+              // Sólo aplica pagando hoy: con prueba gratis no hay primer cobro que pueda fallar, y
+              // mandarlo con `trial_period_days > 0` no tiene sentido.
+              ...(planData.payNow ? { paymentBehavior: 'error_if_incomplete' as const } : {}),
+              venueName: venue.name,
+              venueSlug: venue.slug,
+              // 🔴 Codex C4: el rastro del cargo se guarda en el instante siguiente, como en `activatePlan`: el siguiente
+              // intento (este mismo carril o `activate-plan`) recupera la suscripción por su id y no cobra otra vez.
+              alCrearEnStripe: async (subId: string) => {
+                await prisma.onboardingProgress.updateMany({ where: { organizationId }, data: { planStripeSubscriptionId: subId } })
+              },
+            })
+          },
+          { desdeElAlta: true },
+        )
+        // Fuera del candado de la regla (la entrega toma el mismo): ve las dos filas de plan y deriva el tier del precio.
+        // Si falla o NO concede, el cargo ya ocurrió: lo trata el `catch` como cobro en curso (Codex C5).
+        const concedido = await entregarSuscripcionDePlan({
+          venueId: venue.id,
+          subscriptionId: cobro.subscriptionId,
+          detectedBy: 'onboarding.completeV2',
         })
-        await prisma.venue.update({ where: { id: result.venue.id }, data: { planTier: planData.tier } })
+        if (!concedido) throw new Error(`la suscripción cobrada ${cobro.subscriptionId} no se pudo conceder (conflicto)`)
+        await marcarPlanCobrado(organizationId, cobro.subscriptionId)
+        await prisma.venue.update({ where: { id: result.venue.id }, data: { planTier: tierDe(concedido.featureCode, paidTier) } })
 
         // Send the plan confirmation email (non-blocking). The venue's `language`
         // was persisted above, so the resolver returns the right locale. A null
@@ -1343,7 +1418,37 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
           })
           throw planErr
         }
-        logger.error(`⚠️ ${tierCode} subscription creation failed for venue ${result.venue.id}`, planErr)
+        const vivas = (planErr as { code?: string; suscripciones?: string[] })?.suscripciones
+        if (!intentoCobrar && planErr instanceof AppError && planErr.code === 'PLAN_YA_CONTRATADO' && vivas?.length === 1) {
+          // La regla no dejó cobrar porque el negocio YA tiene su plan cobrando —el reintento de esta misma alta, o lo
+          // pagó por el dashboard—: ése es su plan, se entrega y el alta termina sin cobrar encima. Si la entrega falla o
+          // no concede, la misma salida que un cobro dudoso: nunca una marca temprana sin salida (Codex C5).
+          let recuperado: Awaited<ReturnType<typeof entregarSuscripcionDePlan>> = null
+          try {
+            recuperado = await entregarSuscripcionDePlan({
+              venueId: result.venue.id,
+              subscriptionId: vivas[0],
+              detectedBy: 'onboarding.completeV2',
+            })
+          } catch (error) {
+            logger.error(`🚨 V2 completion: no se pudo entregar el plan que ya cobraba (${vivas[0]})`, error)
+          }
+          if (!recuperado) await dejarCobroEnCurso(organizationId)
+          await marcarPlanCobrado(organizationId, vivas[0])
+          await prisma.venue.update({ where: { id: result.venue.id }, data: { planTier: tierDe(recuperado!.featureCode, paidTier) } })
+          logger.warn(`⚠️ V2 completion: el negocio ya tenía un plan cobrando (${vivas[0]}); se entregó sin cobrar otra vez`)
+        } else if (!intentoCobrar) {
+          // La regla no dejó cobrar por otra razón (otra compra en curso, algo que no reconoce): no hubo cargo.
+          logger.error(`⚠️ ${tierCode}: la regla común no dejó cobrar al terminar el alta de ${result.venue.id}`, planErr)
+        } else if (planActivationService.esErrorDeTarjeta(planErr)) {
+          // El banco rechazó: no hubo cobro. El negocio queda en Gratis, como siempre.
+          logger.error(`⚠️ ${tierCode} subscription declined for venue ${result.venue.id}`, planErr)
+        } else {
+          // 🔴 Resultado DESCONOCIDO (Stripe no contestó, la entrega falló o no concedió): el cargo pudo ocurrir. Dar el alta
+          // por terminada lo dejaría cobrado sin acceso. Ver `dejarCobroEnCurso`.
+          logger.error(`🚨 ${tierCode}: resultado desconocido al cobrar el alta de ${result.venue.id} — NO se da por terminada`, planErr)
+          await dejarCobroEnCurso(organizationId)
+        }
       }
     }
 

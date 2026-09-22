@@ -7,6 +7,7 @@
  * derivePlanState (access/basePlan.service.ts) and is shared with the superadmin overview.
  */
 
+import { elegirFilaDelPlan } from '../access/filaDelPlan'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
@@ -136,9 +137,13 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100
 }
 
-/** Fetch the PLAN_PRO VenueFeature (active or not) for a venue. */
+/**
+ * La fila de plan que se ADMINISTRA (activa o no). Tras un cambio de plan hay DOS filas (la vieja retirada y la vigente):
+ * se leen las dos y se elige con la regla explícita de `elegirFilaDelPlan` — «la primera» sin orden mostraba el plan viejo
+ * como cancelado y rechazaba cancelar el vigente (Codex C8).
+ */
 async function findPlanProFeature(venueId: string) {
-  return prisma.venueFeature.findFirst({
+  const filas = await prisma.venueFeature.findMany({
     where: { venueId, feature: { code: { in: [...PAID_PLAN_TIER_CODES] } } },
     select: {
       id: true,
@@ -148,9 +153,12 @@ async function findPlanProFeature(venueId: string) {
       gracePeriodEndsAt: true,
       monthlyPrice: true,
       stripeSubscriptionId: true,
+      updatedAt: true,
       feature: { select: { code: true, name: true } },
     },
+    take: PAID_PLAN_TIER_CODES.length,
   })
+  return elegirFilaDelPlan(filas)
 }
 
 /**

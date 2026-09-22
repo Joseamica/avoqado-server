@@ -31,12 +31,14 @@ import { logAction } from '../dashboard/activity-log.service'
 import emailService from '../email.service'
 import { resolvePlanNotificationTarget } from '../access/planNotification.service'
 import {
-  asegurarAccesoDelPlan,
   assertPaymentMethodBelongsToCustomer,
   createPlanSubscription,
+  entregarSuscripcionDePlan,
+  tierQueVendeLaSuscripcion,
   getOrCreateStripeCustomer,
   planLookupKey,
 } from '../stripe.service'
+import { autorizarObligacionNueva } from '../access/autorizarObligacionNueva'
 import { ensureVenueForOnboarding } from './ensureVenue.service'
 import { parseV2Plan } from './onboardingProgress.service'
 import {
@@ -115,7 +117,7 @@ function rechazado(message: string, declineCode?: string): AppError {
   return new AppError(message, 402, true, 'PLAN_PAYMENT_DECLINED', { declineCode: declineCode ?? null, message })
 }
 
-function esErrorDeTarjeta(error: unknown): error is Stripe.errors.StripeError {
+export function esErrorDeTarjeta(error: unknown): error is Stripe.errors.StripeError {
   const e = error as { type?: string; code?: string }
   return e?.type === 'StripeCardError' || e?.type === 'card_error'
 }
@@ -282,20 +284,18 @@ async function buscarSuscripcionDelIntento(
   let encontrada: Stripe.Subscription | null = null
   let vistas = 0
   let cubrioTodo = true
-  await stripe.subscriptions
-    .list({ customer: customerId, status: 'all', limit: 100 })
-    .autoPagingEach(sub => {
-      if (sub.metadata?.planActivationKey === planActivationKey) {
-        encontrada = sub
-        return false // corta el recorrido
-      }
-      vistas += 1
-      if (vistas >= TOPE_SUSCRIPCIONES_POR_CLIENTE) {
-        cubrioTodo = false // no se recorrió todo: «no la encontré» ya no prueba nada
-        return false
-      }
-      return true
-    })
+  await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 100 }).autoPagingEach(sub => {
+    if (sub.metadata?.planActivationKey === planActivationKey) {
+      encontrada = sub
+      return false // corta el recorrido
+    }
+    vistas += 1
+    if (vistas >= TOPE_SUSCRIPCIONES_POR_CLIENTE) {
+      cubrioTodo = false // no se recorrió todo: «no la encontré» ya no prueba nada
+      return false
+    }
+    return true
+  })
   return { encontrada, cubrioTodo }
 }
 
@@ -400,10 +400,21 @@ export async function liberarLugar(redemptionId: string, campaignId: string, mot
   })
 }
 
-/** Deja el lease como estaba, sin subir el intento: sólo se usa cuando NO hubo cobro. */
-async function soltarLease(organizationId: string, status: string, attempt: number): Promise<void> {
+/**
+ * Deja el lease como estaba, sin subir el intento: sólo se usa cuando NO hubo cobro.
+ *
+ * 🔴 Exige el vencimiento que ESTA petición escribió (Codex R4): estado e intento no cambian cuando otra petición
+ * recupera un lease vencido, así que sin la marca del dueño esta escritura le pisaba el IN_PROGRESS a quien estaba
+ * cobrando y lo dejaba sin candado a media compra.
+ */
+async function soltarLease(organizationId: string, status: string, attempt: number, lease: Date): Promise<void> {
   await prisma.onboardingProgress.updateMany({
-    where: { organizationId, planActivationStatus: PLAN_ACTIVATION_STATUS.IN_PROGRESS, planActivationAttempt: attempt },
+    where: {
+      organizationId,
+      planActivationStatus: PLAN_ACTIVATION_STATUS.IN_PROGRESS,
+      planActivationAttempt: attempt,
+      planActivationLeaseUntil: lease,
+    },
     data: { planActivationStatus: status as never, planActivationLeaseUntil: null },
   })
 }
@@ -527,17 +538,24 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
   // Un intento IN_PROGRESS con el lease VENCIDO se RECUPERA con su mismo número: subirlo
   // estrenaría llave de idempotencia y crearía un segundo cobro del mismo intento.
   let attempt = prev.status === PLAN_ACTIVATION_STATUS.IN_PROGRESS ? prev.attempt : prev.attempt + 1
+  // 🔴 El vencimiento LEÍDO entra al CAS y el nuevo es la marca del dueño (Codex C6): al recuperar un lease vencido, estado
+  // e intento no cambian, así que sin esto dos peticiones lo tomaban a la vez — una cobraba y la otra, rechazada después,
+  // liberaba el lugar de la oferta que la primera estaba usando.
+  // 🔴 Y se mide con el reloj de ESTE momento, no con el `now` del principio (Codex R4): entre uno y otro corren
+  // cinco llamadas externas a Stripe, así que un lease nacido del reloj viejo podía tomarse ya casi vencido.
+  const nuestroLease = new Date(Date.now() + LEASE_MS)
   const tomado = await prisma.onboardingProgress.updateMany({
     where: {
       organizationId,
       completedAt: null,
       planActivationStatus: prev.status as never,
       planActivationAttempt: prev.attempt,
+      planActivationLeaseUntil: prev.leaseUntil,
     },
     data: {
       planActivationStatus: PLAN_ACTIVATION_STATUS.IN_PROGRESS,
       planActivationAttempt: attempt,
-      planActivationLeaseUntil: new Date(now.getTime() + LEASE_MS),
+      planActivationLeaseUntil: nuestroLease,
     },
   })
   if (tomado.count === 0) throw new ConflictError('Tu pago se está confirmando. Espera unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
@@ -612,10 +630,17 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
     if (!suscripcionRecuperada) {
       // No existe de verdad: intento nuevo, llave nueva.
       attempt = prev.attempt + 1
-      await prisma.onboardingProgress.updateMany({
-        where: { organizationId, planActivationStatus: PLAN_ACTIVATION_STATUS.IN_PROGRESS, planActivationAttempt: prev.attempt },
+      const avanzado = await prisma.onboardingProgress.updateMany({
+        where: {
+          organizationId,
+          planActivationStatus: PLAN_ACTIVATION_STATUS.IN_PROGRESS,
+          planActivationAttempt: prev.attempt,
+          planActivationLeaseUntil: nuestroLease,
+        },
         data: { planActivationAttempt: attempt },
       })
+      // Ya no es nuestro (el lease venció y otra petición lo tomó): no se cobra nada.
+      if (avanzado.count === 0) throw new ConflictError('Tu pago se está confirmando. Espera unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
     }
   }
 
@@ -626,7 +651,7 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
       redemption = await apartarLugar(campaign, organizationId, venue.id, staffId, now)
     } catch (error) {
       // No hubo cobro: el lease vuelve a como estaba.
-      await soltarLease(organizationId, prev.status, attempt)
+      await soltarLease(organizationId, prev.status, attempt, nuestroLease)
       throw error
     }
   }
@@ -649,55 +674,62 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
     // reintento cierra el onboarding en ACTIVE, marca la redención APPLIED… y deja al cliente
     // pagando sin producto. Los webhooks tampoco lo reparan: buscan la fila y si no está, se van.
     //
-    // `asegurarAccesoDelPlan` es idempotente (upsert sobre venue+feature): si la fila ya estaba
-    // bien, esto no cambia nada. (Auditoría de Codex, 18-sep, hallazgo #4.)
-    // 🔴 El tier lo dice lo que SE COBRÓ, no lo que pide este reintento. `createPlanSubscription`
-    // estampa `metadata.featureCode`: si el primer intento cobró Pro y el reintento pide Premium,
-    // reusar la suscripción (bien) y conceder Premium (mal) le regala el tier de arriba al precio
-    // del de abajo. Sin metadata (suscripción anterior a este campo) se cae a lo pedido.
-    const tierCobrado = suscripcionRecuperada.metadata?.featureCode
-    await asegurarAccesoDelPlan({
-      venueId: venue.id,
-      tierCode: tierCobrado || (input.tier === 'PREMIUM' ? 'PLAN_PREMIUM' : 'PLAN_PRO'),
-      subscriptionId: suscripcionRecuperada.id,
-    })
+    // El acceso lo reconstruye la ENTREGA (más abajo, para los dos caminos): idempotente, y el tier sale del PRECIO de lo
+    // que SE COBRÓ, nunca de lo que pide este reintento (reusar la suscripción de Pro y conceder Premium regalaría el tier
+    // de arriba). (Auditoría de Codex, 18-sep, hallazgo #4; V5-A paso 6.)
   } else {
+    // 🔴 V5-A paso 6: el cobro NUEVO pasa por la regla común — el mismo candado por negocio del dashboard y lo VIVO en
+    // Stripe —. Si el negocio ya tiene un plan cobrando (p. ej. lo pagó por el dashboard), no se cobra encima.
+    // `intentoCobrar` distingue un rechazo de la regla (nada se cobró) de un fallo del cobro (pudo cobrarse).
+    let intentoCobrar = false
     try {
-      const r = await createPlanSubscription({
-        venueId: venue.id,
+      const r = await autorizarObligacionNueva(
+        venue.id,
         customerId,
-        paymentMethodId: input.paymentMethodId,
-        tierCode: input.tier === 'PREMIUM' ? 'PLAN_PREMIUM' : 'PLAN_PRO',
-        interval: input.interval,
-        // Con campaña SIEMPRE se paga el primer ciclo: la oferta no tiene prueba gratis.
-        trialPeriodDays: campaign || input.payNow ? 0 : TRIAL_DAYS,
-        coupon: cuponEsperado ?? undefined,
-        idempotencyKey: planActivationKey,
-        // 🔴 El rastro del cobro se guarda en el instante siguiente al cargo, no al final: entre
-        // crear en Stripe y que esta función devuelva hay escrituras que pueden fallar, y sin el
-        // id el reintento tiene que BUSCARLA — que es donde nacía el segundo cobro.
-        alCrearEnStripe: async (subId: string) => {
-          await prisma.onboardingProgress.updateMany({
-            where: { organizationId, completedAt: null },
-            data: { planStripeSubscriptionId: subId },
+        { tipo: 'PLAN', tier: input.tier },
+        () => {
+          return createPlanSubscription({
+            // «Pudo cobrarse» empieza justo antes del POST, no al entrar aquí (Codex C15).
+            antesDeCobrar: () => {
+              intentoCobrar = true
+            },
+            venueId: venue.id,
+            customerId,
+            paymentMethodId: input.paymentMethodId,
+            tierCode: input.tier === 'PREMIUM' ? 'PLAN_PREMIUM' : 'PLAN_PRO',
+            interval: input.interval,
+            // Con campaña SIEMPRE se paga el primer ciclo: la oferta no tiene prueba gratis.
+            trialPeriodDays: campaign || input.payNow ? 0 : TRIAL_DAYS,
+            coupon: cuponEsperado ?? undefined,
+            idempotencyKey: planActivationKey,
+            // 🔴 El rastro del cobro se guarda en el instante siguiente al cargo, no al final: entre
+            // crear en Stripe y que esta función devuelva hay escrituras que pueden fallar, y sin el
+            // id el reintento tiene que BUSCARLA — que es donde nacía el segundo cobro.
+            alCrearEnStripe: async (subId: string) => {
+              await prisma.onboardingProgress.updateMany({
+                where: { organizationId, completedAt: null },
+                data: { planStripeSubscriptionId: subId },
+              })
+            },
+            paymentBehavior: 'error_if_incomplete',
+            extraMetadata: {
+              organizationId,
+              planActivationKey,
+              ...(campaign
+                ? {
+                    launchCampaignId: campaign.id,
+                    launchCampaignCode: campaign.code,
+                    launchOfferVersion: String(campaign.offerVersion),
+                    launchRedemptionId: redemption?.id ?? '',
+                  }
+                : {}),
+            },
+            venueName: venueRecord?.name,
+            venueSlug: venueRecord?.slug,
           })
         },
-        paymentBehavior: 'error_if_incomplete',
-        extraMetadata: {
-          organizationId,
-          planActivationKey,
-          ...(campaign
-            ? {
-                launchCampaignId: campaign.id,
-                launchCampaignCode: campaign.code,
-                launchOfferVersion: String(campaign.offerVersion),
-                launchRedemptionId: redemption?.id ?? '',
-              }
-            : {}),
-        },
-        venueName: venueRecord?.name,
-        venueSlug: venueRecord?.slug,
-      })
+        { desdeElAlta: true },
+      )
       subscriptionId = r.subscriptionId
       reused = r.reused
 
@@ -715,13 +747,27 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
           })
         })
     } catch (error) {
+      if (!intentoCobrar) {
+        // La regla lo rechazó ANTES de cobrar (un plan vivo, otra compra en curso, Stripe sin verificar): no hubo cargo,
+        // así que el lease y el lugar vuelven a como estaban, y su mensaje explica qué pasa.
+        if (redemption && campaign) await liberarLugar(redemption.id, campaign.id, 'PLAN_PURCHASE_NOT_AUTHORIZED')
+        await soltarLease(organizationId, prev.status, attempt, nuestroLease)
+        throw error
+      }
       if (esErrorDeTarjeta(error)) {
         // ---- PASO 10: rechazo del banco ----
-        await prisma.onboardingProgress.updateMany({
-          where: { organizationId, planActivationStatus: PLAN_ACTIVATION_STATUS.IN_PROGRESS, planActivationAttempt: attempt },
+        // 🔴 Marcar el rechazo y liberar el lugar van JUNTOS (Codex R4): si el intento ya no es de esta petición —otra
+        // recuperó el lease y está cobrando con ese mismo lugar—, liberarlo le quitaría el cupo a un cobro vivo.
+        const rechazado409 = await prisma.onboardingProgress.updateMany({
+          where: {
+            organizationId,
+            planActivationStatus: PLAN_ACTIVATION_STATUS.IN_PROGRESS,
+            planActivationAttempt: attempt,
+            planActivationLeaseUntil: nuestroLease,
+          },
           data: { planActivationStatus: PLAN_ACTIVATION_STATUS.DECLINED, planActivationLeaseUntil: null },
         })
-        if (redemption && campaign) await liberarLugar(redemption.id, campaign.id, 'PLAN_PAYMENT_DECLINED')
+        if (rechazado409.count === 1 && redemption && campaign) await liberarLugar(redemption.id, campaign.id, 'PLAN_PAYMENT_DECLINED')
         const e = error as unknown as { message?: string; decline_code?: string; code?: string }
         throw rechazado(e.message || 'Tu banco rechazó la tarjeta', e.decline_code ?? e.code)
       }
@@ -749,7 +795,7 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
     if (!lleva) {
       logger.error('🚨 activate-plan: se reusó una suscripción sin el cupón de la oferta', { organizationId, subscriptionId })
       if (redemption && campaign) await liberarLugar(redemption.id, campaign.id, 'REUSED_WITHOUT_COUPON')
-      await soltarLease(organizationId, prev.status, attempt)
+      await soltarLease(organizationId, prev.status, attempt, nuestroLease)
       throw new ConflictError(
         'Este negocio ya tiene un plan activo sin esta oferta, así que no se puede aplicar encima.',
         'PLAN_ACTIVE_WITHOUT_OFFER',
@@ -757,22 +803,73 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
     }
   }
 
+  // ---- El ACCESO: lo escribe la entrega (V5-A paso 6) ----
+  // Ve las dos filas de plan bajo el candado del negocio y deriva el tier del PRECIO. Si falla, el cargo ya ocurrió: el
+  // lease queda vivo y el siguiente intento recupera ESTA suscripción por su id y vuelve a entregar.
+  let concedido: Awaited<ReturnType<typeof entregarSuscripcionDePlan>>
+  try {
+    concedido = await entregarSuscripcionDePlan({ venueId: venue.id, subscriptionId, detectedBy: 'onboarding.activatePlan' })
+  } catch (error) {
+    logger.error('🚨 activate-plan: cobrado, pero la entrega del acceso falló — se reintentará', {
+      organizationId,
+      subscriptionId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    throw pendiente('no se pudo registrar el acceso')
+  }
+
   // ---- PASO 9: éxito ----
   const sub = await stripe.subscriptions.retrieve(subscriptionId, { expand: ['latest_invoice'] })
   const nextChargeAt = siguienteCobro(sub)
 
+  // 🔴 Vigente y SIN conceder = la entrega la dejó en conflicto (otro plan vivo la ocupa). Cerrar el alta como ACTIVE
+  // diría «tienes tu plan» sin que lo tenga; el conflicto quedó registrado para revisarse.
+  if (!concedido && (sub.status === 'active' || sub.status === 'trialing')) {
+    logger.error('🚨 activate-plan: la suscripción cobrada quedó en conflicto y no se concedió — el alta NO se cierra', {
+      organizationId,
+      subscriptionId,
+    })
+    throw pendiente('la suscripción cobrada quedó en conflicto con otro plan')
+  }
+  // El tier del negocio es el CONCEDIDO (sale del precio cobrado), no el que pide este intento.
+  // 🔴 Codex R13: y si la entrega no concedió, se deriva de lo que la suscripción VENDE — nunca de `input.tier`. El
+  // guard de arriba sólo detiene `active`/`trialing`: una recuperada en `past_due` pasaba y el alta se cerraba
+  // anunciando el plan del formulario sobre un cobro de otro. Si no se puede determinar, no se cierra.
+  const tierDeLoCobrado = concedido
+    ? concedido.featureCode === 'PLAN_PREMIUM'
+      ? ('PREMIUM' as const)
+      : ('PRO' as const)
+    : await tierQueVendeLaSuscripcion(sub)
+  if (!tierDeLoCobrado) throw pendiente('no se pudo determinar qué plan se cobró')
+  const tierConcedido = tierDeLoCobrado
+  // …y el intervalo el de la suscripción COBRADA (Codex C12): recuperar Premium anual cuando el reintento pide Pro mensual
+  // guardaba, respondía y mandaba por correo «Pro mensual», y la idempotencia de después comparaba contra ese dato falso.
+  const periodo = (sub.items?.data?.[0]?.price as { recurring?: { interval?: string } } | undefined)?.recurring?.interval
+  const intervalCobrado: 'monthly' | 'annual' = periodo === 'year' ? 'annual' : periodo === 'month' ? 'monthly' : input.interval
+  // 🔴 Codex R13: `payNow` también sale de lo COBRADO cuando las condiciones no son las de este formulario (una
+  // suscripción reusada o recuperada). Recuperar un pago YA hecho con `payNow:false` lo guardaba y lo anunciaba como
+  // prueba gratis. En el camino normal manda el formulario, que es lo que de verdad se pidió.
+  const yaCobrada = ((sub.latest_invoice as { amount_paid?: number } | null)?.amount_paid ?? 0) > 0
+  const payNowCobrado = noLaCreamosConElCupon ? yaCobrada : campaign ? true : input.payNow
+  const cobrado = { ...input, tier: tierConcedido, interval: intervalCobrado }
+
   await prisma.$transaction(async tx => {
     const planGuardado = {
-      tier: input.tier,
+      tier: cobrado.tier,
       paymentMethodId: input.paymentMethodId,
-      interval: input.interval,
-      payNow: campaign ? true : input.payNow,
+      interval: cobrado.interval,
+      payNow: payNowCobrado,
       acceptedAt: now.toISOString(),
       offer: input.offer,
     }
     const v2 = ((progress.v2SetupData as Record<string, unknown> | null) ?? {}) as Record<string, unknown>
-    await tx.onboardingProgress.updateMany({
-      where: { organizationId, planActivationStatus: PLAN_ACTIVATION_STATUS.IN_PROGRESS, planActivationAttempt: attempt },
+    const cerrado = await tx.onboardingProgress.updateMany({
+      where: {
+        organizationId,
+        planActivationStatus: PLAN_ACTIVATION_STATUS.IN_PROGRESS,
+        planActivationAttempt: attempt,
+        planActivationLeaseUntil: nuestroLease,
+      },
       data: {
         planActivationStatus: PLAN_ACTIVATION_STATUS.ACTIVE,
         planActivatedAt: now,
@@ -783,16 +880,20 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
       },
     })
 
+    // 🔴 Cada cierre tiene que TOCAR su fila (Codex C6): si el intento ya no es de esta petición o el lugar de la oferta
+    // ya no estaba apartado, no se da por aplicada el alta — el cargo quedó registrado y el siguiente intento lo recupera.
+    if (cerrado.count === 0) throw pendiente('el intento ya no era de esta petición al cerrarlo')
     if (redemption && campaign) {
-      await tx.launchCampaignRedemption.updateMany({
+      const aplicada = await tx.launchCampaignRedemption.updateMany({
         where: { id: redemption.id, status: REDEMPTION_STATUS.RESERVED },
         data: { status: REDEMPTION_STATUS.APPLIED, appliedAt: now, stripeSubscriptionId: subscriptionId, cardFingerprint: fingerprint },
       })
+      if (aplicada.count === 0) throw pendiente('el lugar de la oferta ya no estaba apartado al cerrar')
     }
 
     // 🔴 El local queda con su tier, NUNCA en TRIAL: TRIAL se escapa de todo candado de plan y
     // de KYC (`basePlan.service.ts`, `kyc-utils.ts`).
-    await tx.venue.update({ where: { id: venue.id }, data: { planTier: input.tier } })
+    await tx.venue.update({ where: { id: venue.id }, data: { planTier: tierConcedido } })
   })
 
   const firstChargeCents = primerCobroDe(sub, expected)
@@ -804,8 +905,8 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
     entity: 'OnboardingProgress',
     entityId: progress.id,
     data: {
-      tier: input.tier,
-      interval: input.interval,
+      tier: cobrado.tier,
+      interval: cobrado.interval,
       firstChargeCents,
       subscriptionId,
       ...(campaign ? { code: campaign.code, offerVersion: campaign.offerVersion, redemptionId: redemption?.id ?? null } : {}),
@@ -813,18 +914,19 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
   })
 
   // El correo no bloquea la respuesta: el dinero ya se movió.
-  void enviarConfirmacion({ venueId: venue.id, venueSlug: venueRecord?.slug ?? venue.slug, campaign, input, expected, now }).catch(error =>
-    logger.warn('activate-plan: no se pudo enviar el correo de confirmación', {
-      organizationId,
-      error: error instanceof Error ? error.message : String(error),
-    }),
+  void enviarConfirmacion({ venueId: venue.id, venueSlug: venueRecord?.slug ?? venue.slug, campaign, input: cobrado, expected, now }).catch(
+    error =>
+      logger.warn('activate-plan: no se pudo enviar el correo de confirmación', {
+        organizationId,
+        error: error instanceof Error ? error.message : String(error),
+      }),
   )
 
   return {
     status: 'ACTIVE',
     alreadyActive: false,
-    tier: input.tier,
-    interval: input.interval,
+    tier: cobrado.tier,
+    interval: cobrado.interval,
     firstChargeCents,
     nextChargeAt,
     ...(campaign

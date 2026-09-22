@@ -45,8 +45,7 @@ import {
   setDefaultPaymentMethod,
   createTrialSetupIntent,
 } from '../stripe.service'
-import { getVenueBaseTier } from '../access/basePlan.service'
-import { assertSinCobroDobleAlSubir } from './venueFeature.dashboard.service'
+import { autorizarObligacionNueva } from '../access/autorizarObligacionNueva'
 import { ventaSueltaAbierta } from '../access/ventaSuelta'
 import { notifySuperadminsNewKycSubmission } from '../superadmin/kycReview.service'
 import { cleanDemoData } from '../onboarding/demoCleanup.service'
@@ -1642,20 +1641,6 @@ export async function createVenuePlanCheckoutSession(
     throw new NotFoundError(`Venue with ID ${venueId} not found`)
   }
 
-  // Guard: don't create a duplicate base subscription if the venue already has ANY
-  // active base plan (PLAN_PRO or PLAN_PREMIUM). A fresh checkout would stack a second
-  // base subscription on the customer. Tier upgrades/downgrades with proration are a
-  // separate future flow — for now, changing plans goes through support.
-  // A venue with NO active base plan may checkout either tier.
-  const currentTier = await getVenueBaseTier(venueId)
-  if (currentTier !== null) {
-    throw new BadRequestError('Este venue ya tiene un plan activo. Para cambiar de plan, contacta a soporte.')
-  }
-
-  // 🔴 Un negocio sin plan pudo haber comprado funciones sueltas; contratar el plan que las incluye
-  // mientras siguen cobrando = pagarlas dos veces (hallazgo #1, 21-sep). Antes de abrir el checkout.
-  await assertSinCobroDobleAlSubir(venueId, tierCode === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO')
-
   // If venue doesn't have Stripe customer, create one (same flow as billing-portal).
   let stripeCustomerId = venue.stripeCustomerId
   if (!stripeCustomerId) {
@@ -1720,16 +1705,22 @@ export async function createVenuePlanCheckoutSession(
   const FRONTEND_URL = process.env.FRONTEND_URL || 'https://dashboard.avoqado.io'
   const billingBase = `${FRONTEND_URL}/venues/${venue.slug}/settings/billing/subscriptions`
 
-  const checkoutUrl = await createPlanCheckoutSession({
-    venueId,
-    customerId: stripeCustomerId,
-    interval,
-    tierCode,
-    successUrl: `${billingBase}?checkout=success`,
-    cancelUrl: `${billingBase}?checkout=cancel`,
-    venueName: venue.name,
-    venueSlug: venue.slug,
-  })
+  // 🔴 V5-A (diseño v5.1): la sesión se abre DENTRO de la regla común de compra. Sustituye a los guardas locales de
+  // antes, que miraban el ACCESO (un plan suspendido que Stripe sigue cobrando no contaba) y no impedían dos pestañas:
+  // ahora se expiran las compras abiertas y se lee lo que el negocio tiene vivo en Stripe.
+  const cliente = stripeCustomerId
+  const checkoutUrl = await autorizarObligacionNueva(venueId, cliente, { tipo: 'PLAN', tier }, () =>
+    createPlanCheckoutSession({
+      venueId,
+      customerId: cliente,
+      interval,
+      tierCode,
+      successUrl: `${billingBase}?checkout=success`,
+      cancelUrl: `${billingBase}?checkout=cancel`,
+      venueName: venue.name,
+      venueSlug: venue.slug,
+    }),
+  )
 
   logger.info('✅ Plan checkout session created', {
     venueId,

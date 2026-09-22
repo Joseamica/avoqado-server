@@ -904,10 +904,118 @@ Abierto: portal (la sesión vence 1 h después de la ÚLTIMA actividad — Strip
    (`clasificarSuscripcion`, `clasificarEstado`, `evaluarCompatibilidad`, `decidirEntregaDePlan`). 40 pruebas; 6 sabotajes,
    cada uno tumba la suya: lo desconocido no bloquea · no mirar el otro tier · conservar el acceso no respaldado · vínculo sin
    respuesta leído como terminado · conceder siempre · lo desconocido convertido en ajeno.
-2. **Tabla durable de obligaciones pendientes** (migración aditiva, base desechable para pruebas).
-3. **`inventarioDeObligaciones(venueId)`**: clientes (actual + de los vínculos) → suscripciones `status: all` recorrido completo →
-   clasificadas; incompleto ⇒ 503.
-4. **`autorizarObligacionNueva`** aplicada al checkout de plan (sesiones legacy reconocidas por `metadata.tierCode`).
-5. **`entregarSuscripcion`** (sustituye `fulfillPlanCheckout`; ambos tiers; retiro de acceso no respaldado).
-6. **Convergencia** del cambio de plan del controlador, `asegurarAccesoDelPlan` y onboarding.
+   🔴 **Codex RECHAZÓ el núcleo (ronda 1: 3 P1 · 2 P2)** — decidía UNA acción cuando la entrega decide sobre las DOS filas:
+   una terminal podía moverse sobre una fila ajena viva; conflicto y reintento conservaban un acceso ya sin respaldo; las
+   salidas normales dejaban activo el otro tier con su obligación terminada; la política de concesiones locales quedaba
+   implícita; y la compatibilidad contaba suscripciones en vez de ítems. **Rediseñado:** una operación por fila
+   (`LIGAR`/`SUSTITUIR`+`activar` · `APLICAR_ESTADO` · `RETIRAR_ACCESO` · `SOLTAR`) + `conflictoCon` + `reintentar`, con las
+   retiradas conocidas SIEMPRE; política explícita (una pagada HABILITANTE sustituye las concesiones locales; una recuperable
+   no quita nada); compatibilidad por ítem y por conjunto resultante (`CAMBIO_AMBIGUO`, `OBLIGACIONES_INCOMPATIBLES`).
+   52 pruebas con sus contraejemplos; 6 sabotajes más. Ronda 2 de Codex en curso.
+2. 🟢 **HECHO (22-sep, sin commitear) — tabla durable:** modelo `BillingObligationConflict` (por `subscriptionId` único,
+   `PENDING`/`RESOLVED`, `conflictsWith`, `kind` = plan duplicado · función duplicada · producto desconocido), migración
+   ADITIVA escrita a mano `20260922000000_billing_obligation_conflict` (**sin aplicar a ninguna base**), mapa del schema
+   regenerado. Servicio `conflictosDeObligacion.service.ts`: registrar (crea o sólo refresca `lastSeenAt`; nunca reabre una
+   resolución; P2002 ⇒ actualiza) y leer pendientes (acotado). 5 pruebas; 3 sabotajes cazados.
+3. 🟢 **HECHO (22-sep, sin commitear) — `inventarioDeObligaciones.ts`:** cliente actual + clientes de TODOS los vínculos
+   locales (cada vínculo se consulta; el que Stripe afirma inexistente no cuenta) → `subscriptions.list(status: all)` completo
+   por cliente → lo no terminal, clasificado. Topes (200 vínculos · 5 clientes · 1,000 suscripciones por cliente) y cualquier
+   error ⇒ 503 `OBLIGATIONS_UNVERIFIED`. 10 pruebas; 5 sabotajes cazados.
+4. 🟢 **HECHO (22-sep, sin commitear) — `autorizarObligacionNueva.ts` y el checkout de plan:** candado POR NEGOCIO sin espera
+   → alta económica en curso (409) → expira las confirmaciones abiertas nuestras, incluidas las legacy por `tierCode` (una ya
+   completada ⇒ 409, una de estado desconocido ⇒ 503, `has_more` ⇒ 503) → inventario → compatibilidad → recién entonces crea.
+   Los rechazos se DEVUELVEN desde la transacción (no se lanzan dentro), para que el conflicto `UNKNOWN_PRODUCT` registrado
+   sobreviva, y se audita tras confirmar. `createVenuePlanCheckoutSession` ya abre la sesión dentro de la regla (se retiraron
+   `getVenueBaseTier` y `assertSinCobroDobleAlSubir` de ese camino: miraban acceso local). `createPlanCheckoutSession` marca
+   `kind: PLAN_CHECKOUT`, sólo tarjeta y caducidad de 30 min. 14 + 3 pruebas; 6 sabotajes cazados.
+   ⚠️ **Cambio visible declarado:** un negocio con una cortesía o prueba LOCAL (sin Stripe) ya puede contratar el plan por
+   checkout (antes: «ya tiene un plan activo»); la entrega (paso 5) hará que la pagada sustituya esa concesión.
+5. 🟢 **HECHO (22-sep, sin commitear) — `entregarSuscripcionDePlan`** (en `stripe.service.ts` para no crear una importación
+   circular; `fulfillPlanCheckout` queda como envoltorio del webhook): filas de los DOS tiers leídas ANTES de Stripe, tier por el
+   PRECIO vigente, `puedeCobrar` de cada vínculo ajeno, decisión del núcleo auditado, y todo en una transacción con CAS sobre
+   `updatedAt` (SOLTAR → RETIRAR → resto). Conflicto `DUPLICATE_PLAN` durable y auditado tras confirmar; `UNKNOWN_PRODUCT` si
+   la suscripción trae un plan junto con otra cosa o algo que no se reconoce; reintento lanzado DESPUÉS de aplicar lo sabido.
+   Las 450 líneas de pruebas se reescribieron conservando cada caso de las auditorías 11ª-14ª: 24 pruebas; 4 sabotajes.
+   🔴 **Con esto, la segunda pestaña pagada ya no reapunta la fila: queda como conflicto.**
+   🔴 **Codex RECHAZÓ los pasos 2-5 (22-sep: 3 P1 · 5 P2) — los 8 cerrados, cada uno con prueba y sabotaje:**
+   - **P1-1** la entrega no serializaba el conjunto de los dos tiers: ahora TODO (leer filas, consultar Stripe, escribir)
+     va bajo el MISMO candado por negocio (`pg_advisory_xact_lock`, bloqueante, `lock_timeout` 15 s), tomado ANTES de leer.
+   - **P1-2** una obligación nueva heredaba la deuda de la anterior (`suspendedAt`, gracia vencida ⇒ el job de cancelación
+     cancelaba la suscripción NUEVA): `LIGAR`/`SUSTITUIR` arrancan con su propia cobranza, vigencia e ítem.
+   - **P1-3** los manejadores viejos deshacían una retirada correcta ⇒ paso 6a (abajo).
+   - **P2-4** filas inactivas bloqueaban el cambio de plan ⇒ paso 6b.
+   - **P2-5** una suscripción TERMINADA de producto desconocido conservaba el acceso: ahora se retira por CAS aunque no se
+     sepa qué vendía.
+   - **P2-6** atrapar un P2002 aborta la transacción de Postgres: el conflicto se registra con `createMany` +
+     `skipDuplicates` (ON CONFLICT) y después se refresca.
+   - **P2-7** ítems en páginas incompletas (`items.has_more`) y catálogo truncado ⇒ 503 en el inventario, y la entrega lo
+     trata como producto no entendido (conflicto, sin conceder).
+   - **P2-8** el inventario reporta `pause_collection`, `collection_method` y los cambios programados (`schedule`,
+     `pending_update`); la regla común bloquea (`CAMBIOS_PROGRAMADOS`) mientras existan.
+   - De paso: la entrega respeta la regla de los webhooks — **una prueba no levanta una suspensión por impago** (sólo
+     `active` la levanta).
+6. 🟢 **HECHO (22-sep, sin commitear) — Convergencia: UN solo camino concede un plan (la entrega).**
+   - **6a · webhooks y barrido (P1-3):** `subscription.updated` e `invoice.payment_succeeded` siguen escribiendo una fila de
+     plan SÓLO si su suscripción vende HOY ese mismo plan (`suscripcionVendeElPlan`, misma foto de Stripe que decide el
+     estado); si vende otro o algo que no se reconoce, decide la entrega. La factura ya no consulta Stripe dos veces. El
+     barrido de acceso sólo cuenta —y audita— una recuperación si de verdad concedió (antes dejaba `PLAN_ACCESS_RECONCILED`
+     falso cada 10 min). 9 sabotajes cazados.
+   - **6b · cambio de plan del panel (P2-4):** `PUT …/features/:id/subscription` PRO↔PREMIUM pasa por la regla común
+     (`CAMBIO_DE_PLAN` con la suscripción identificada; Stripe se toca DENTRO del candado) y las filas las decide la entrega
+     DESPUÉS de soltarlo (dentro se bloquearían). Una fila del destino que ya existe deja de ser «ya tienes ese plan». Si la
+     entrega falla tras cambiar Stripe: 202 honesto, no un error que invite a repetir el cobro. Bitácora
+     `SUBSCRIPTION_PLAN_CHANGED`. Ningún cliente lo llama hoy (dashboard ni superadmin), pero está vivo por API. 4 sabotajes.
+   - **6c · alta:** `asegurarAccesoDelPlan` (upsert ciego) **se retiró**: `createPlanSubscription` sólo COBRA, reusa sólo una
+     suscripción que todavía puede cobrar (antes cerraba el alta con una muerta) y el acceso lo escribe la entrega.
+     `activatePlan` cobra dentro de la regla común (`desdeElAlta`, para no bloquearse con su propio «cobro en curso»): un
+     rechazo ANTES de cobrar suelta el lease y el lugar; un fallo de la entrega tras el cobro es 503 pendiente (el lease
+     queda y el reintento recupera por id); vigente y sin conceder (conflicto) NO cierra ACTIVE; el tier del negocio es el
+     CONCEDIDO. El carril viejo de `completeV2Onboarding`: si el negocio ya tiene su plan cobrando, lo entrega sin cobrar
+     encima; y un resultado **desconocido** ya no da el alta por terminada — suelta la marca y responde 503: el reintento
+     reusa el mismo cobro por su llave (`onboarding-complete:<org>`) o lo entrega. 9 sabotajes.
+   - **6d · la barrera del alta sólo mientras un cobro puede estar EN VUELO** (hallado midiendo producción, 22-sep): la
+     única organización con la marca temprana puesta es **Berthe** (cliente real, alta del 8-dic-2025, 1 venue ACTIVE, sin
+     cliente de Stripe), y con la regla tal cual habría quedado bloqueada PARA SIEMPRE en el dashboard. Ahora el paso 0
+     bloquea sólo con el lease de `activatePlan` vigente o una marca temprana de menos de 15 min (ninguna petición del alta
+     vive más); pasado eso protege el inventario de Stripe, que ve la suscripción si el cobro ocurrió. Con esto queda
+     también la «salida de conciliación» que pidió Codex (v5 punto 5), sin herramienta nueva. 3 sabotajes.
+   ⚠️ **Declarado, fuera de V5-A:** una suscripción NUESTRA que no quedó ligada a ninguna fila (p. ej. el carril viejo antes
+   de este cambio) sólo la recoge el barrido de V5-C.
+   🔴 **Codex RECHAZÓ el paso 6 (22-sep: 7 P1 · 7 P2 · 1 P3).** De los 8 anteriores: 6 cerrados, P1-1 y P1-3 parciales
+   (quedan escritores administrativos). Lista (estado al lado; ⬜ = pendiente):
+   - C1 [P1] ✅ `POST /venues/:venueId/features` (`saveVenueFeatures`) borra TODAS las filas y recrea planes activos sin cobro.
+   - C2 [P1] ✅ `activateVenuePlan`, `enableFeatureForVenue` y `assignCompPlan` no comparten el candado ni la decisión de las dos filas.
+     Ahora: los tres toman el candado del negocio; `activateVenuePlan` responde 409 si su fila está ligada a Stripe
+     (`PLAN_LIGADO_A_STRIPE`) o si el otro tier está activo/ligado (`OTRO_PLAN_ACTIVO`) y escribe con CAS; el código de un
+     plan en la ruta genérica pasa por la cortesía (`assignCompPlan`). Sabotajes S46–S50.
+   - C3 [P1] ✅ llamadas a Stripe bajo el candado sin presupuesto total ni `maxNetworkRetries: 0` (el SDK reintenta 2× con 80 s).
+     Ahora: `STRIPE_DENTRO_DEL_CANDADO` (15 s, sin reintentos) en todas; presupuesto de lecturas de 45 s en la regla; y el
+     cambio de plan del panel responde 202 «se está aplicando» si algo falla DESPUÉS de enviar a Stripe. Sabotajes S41–S45.
+   - C4 [P1] ✅ carril viejo: ante lo desconocido suelta la barrera sin dejar un estado económico pendiente.
+   - C5 [P1] ✅ carril viejo: la recuperación dentro del catch puede fallar y dejar una marca temprana sin salida; `null` ignorado.
+   - C6 [P1] ✅ `activatePlan`: dos recuperaciones del lease vencido lo adquieren a la vez (CAS sin el vencimiento leído);
+     avance y `APPLIED` sin comprobar `count`.
+   - C7 [P1] ✅ `CAMBIO_DE_PLAN` cambia el PRIMER ítem de la suscripción, no el del plan.
+   - C8 [P2] ✅ lectores de facturación (`findPlanProFeature`, superadmin `take: 1`) suponen una sola fila de plan.
+   - C9 [P2] ✅ trasladar la MISMA suscripción de tier (SOLTAR+LIGAR) borra su suspensión y su cobranza.
+   - C10 [P2] ✅ la rama de conflicto por varios ítems no retira el acceso que ya se sabe incorrecto.
+   - C11 [P2] ✅ recuperaciones legítimas (precio histórico, plan + ítem legítimo) quedan sin acceso y sin explicación visible.
+     Ahora: (a) el precio histórico YA se reconoce: el producto del plan es estable (los `seed-plan-*` lo anclan a la
+     `lookup_key`, y `transfer_lookup_key` le quita la llave al precio viejo pero no el producto); (b) la forma mixta se
+     BLOQUEA como conflicto, a propósito; (c) al NACER un conflicto, `avisarConflictoCreado` escribe la bitácora Y manda
+     correo a operaciones (`OPS_ALERT_EMAIL`) con qué pasó y qué hacer — una sola vez por suscripción; (d) la vía de
+     resolución es Stripe: al corregir la suscripción, `subscription.updated` —aunque no haya fila ligada— encuentra el
+     conflicto pendiente y decide la entrega, que al conceder lo cierra (`RESOLVED`, `ENTREGADA`) en la misma transacción.
+     Sabotajes S51–S54. ⚠️ **Declarado:** el negocio NO ve el conflicto en su pantalla de plan (el dashboard no se tocó):
+     la salida es que operaciones lo contacte. Hoy ninguna ruta nuestra crea una suscripción mixta (la venta suelta está
+     cerrada), así que sólo nace de una edición a mano en Stripe.
+   - C12 [P2] ✅ `activatePlan` guarda/comunica el tier pedido aunque concedió otro.
+   - C13 [P2] ✅ los conflictos pendientes no entran al inventario (cliente histórico).
+   - C14 [P2] ✅ la factura descarta el `trialEnd` vigente al reactivar en `trialing`.
+   - C15 [P3] ✅ `intentoCobrar` se marca antes de preparar, no justo antes del POST.
+   Informe completo: `~/.claude/jobs/0f1d7b63/tmp/codex-v5a6.txt`.
+   🔴 **Ronda 2 de Codex sobre el paso 6 (22-sep, tarde): RECHAZADO (6 P1 · 8 P2, R1–R14).** Cerrados R1, R3 y R6;
+   pendientes las regresiones R4, R7, R9 (+R8) y la decisión del founder sobre los preexistentes (R2, R5, R10–R14).
+   **Estado completo, receta de lo que sigue y lista de archivos: `docs/superpowers/plans/RELEVO-v5a-planes-2026-09-22.md`.**
+   Informe: `docs/auditorias/2026-09-22-auditoria-codex-v5a-paso6-ronda2.md` (raíz del workspace).
 7. `/full-testing`, auditoría de Codex del código, verificación completa.

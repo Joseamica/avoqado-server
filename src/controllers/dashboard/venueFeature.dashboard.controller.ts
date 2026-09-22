@@ -9,10 +9,27 @@ import prisma from '../../utils/prismaClient'
 import { cruzaPlanYSuelta } from '../../services/access/basePlan.service'
 import logger from '../../config/logger'
 import { ConflictError } from '../../errors/AppError'
+import { logAction } from '../../services/dashboard/activity-log.service'
 
 /** Venta suelta cerrada (founder, 21-sep): el mensaje dice qué hacer, no sólo que no se puede. */
 const MENSAJE_VENTA_SUELTA_CERRADA =
   'Por ahora las funciones sueltas se contratan con nuestro equipo: escríbenos a hola@avoqado.io y te la activamos.'
+
+/**
+ * 🔴 Cambio de plan directo CERRADO (founder, 22-sep, tras la 3ª ronda de Codex).
+ *
+ * Este botón era el único camino que todavía movía dinero desde el SERVIDOR: llamaba a `subscriptions.update` con
+ * `always_invoice` y le cobraba el prorrateo al cliente en ese instante. Para que eso fuera seguro había que
+ * inventarle una barrera económica durable, una llave de idempotencia estable, una fecha de prorrateo que no
+ * cambiara entre reintentos y un 202 honesto — y cada una de esas piezas resultó ser una fuente de defectos
+ * (8 de los 16 hallazgos abiertos de la ronda 3 vivían ahí). Contradecía además la decisión del v4: **el dinero
+ * sólo se mueve en una confirmación de Stripe**.
+ *
+ * Se reabre cuando el cambio pase por Checkout o por el portal de Stripe, donde el cliente confirma y Stripe
+ * responde. Mientras tanto el mensaje dice QUÉ HACER, no sólo que no se puede.
+ */
+const MENSAJE_CAMBIO_DE_PLAN_CERRADO =
+  'Por ahora el cambio de plan lo hacemos nosotros: escríbenos a hola@avoqado.io y te lo cambiamos el mismo día.'
 
 /**
  * Get venue feature status (active and available features)
@@ -423,18 +440,16 @@ export async function updateSubscription(
       return
     }
 
-    // 🔴 Subir de plan con una suelta que el plan incluye y que sigue cobrando = pagar dos veces
-    // (hallazgo #1). Parche inicial hasta que el cobro de la diferencia esté medido y auditado.
+    // 🔴 Plan → plan: CERRADO (founder, 22-sep, tras la 3ª ronda de Codex).
     if (newFeature.code === 'PLAN_PRO' || newFeature.code === 'PLAN_PREMIUM') {
-      await venueFeatureService.assertSinCobroDobleAlSubir(venueId, newFeature.code === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO')
-    } else {
-      // Cambiar a otra suelta ES comprar una suelta: cerrado hasta el rediseño (founder, 21-sep).
-      if (!venueFeatureService.ventaSueltaAbierta()) {
-        throw new ConflictError(MENSAJE_VENTA_SUELTA_CERRADA, 'ALA_CARTE_SALES_CLOSED')
-      }
-      // Cambiar una suelta por otra que el plan ya incluye = pagar aparte lo incluido (ronda 5, P1-3).
-      await venueFeatureService.assertNoIncluidaEnElPlan(venueId, [newFeature.code])
+      throw new ConflictError(MENSAJE_CAMBIO_DE_PLAN_CERRADO, 'CAMBIO_DE_PLAN_CERRADO')
     }
+    // Cambiar a otra suelta ES comprar una suelta: cerrado hasta el rediseño (founder, 21-sep).
+    if (!venueFeatureService.ventaSueltaAbierta()) {
+      throw new ConflictError(MENSAJE_VENTA_SUELTA_CERRADA, 'ALA_CARTE_SALES_CLOSED')
+    }
+    // Cambiar una suelta por otra que el plan ya incluye = pagar aparte lo incluido (ronda 5, P1-3).
+    await venueFeatureService.assertNoIncluidaEnElPlan(venueId, [newFeature.code])
 
     // 🔴 La colisión se comprueba ANTES de tocar Stripe (auditoría de Codex, 18-sep, hallazgo #8).
     // `VenueFeature` es única por `(venueId, featureId)`: si este negocio YA tiene una fila de la
@@ -506,6 +521,7 @@ export async function updateSubscription(
     next(error)
   }
 }
+
 
 /**
  * Retry failed invoice payment
