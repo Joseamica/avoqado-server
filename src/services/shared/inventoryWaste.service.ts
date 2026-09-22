@@ -524,3 +524,74 @@ export async function logWaste(venueId: string, actorStaffId: string, input: Was
     throw error
   }
 }
+
+function voidResult(report: InventoryWasteReport, actorStaffId: string, canAdjust: boolean): VoidWasteResult {
+  if (report.status === 'VOIDED') {
+    // La autoría CANÓNICA de la lápida: quien la creó y cuándo, aunque la repita otra persona.
+    return {
+      outcome: 'VOIDED',
+      voidedByStaffId: report.reportedByStaffId,
+      voidedAt: report.createdAt.toISOString(),
+    }
+  }
+  // Cuánto se descontó sólo lo ve el autor o quien administra inventario (spec §4.3).
+  if (report.reportedByStaffId === actorStaffId || canAdjust) {
+    return { outcome: 'ALREADY_APPLIED', report: wasteSummary(report) }
+  }
+  return { outcome: 'ALREADY_APPLIED' }
+}
+
+/**
+ * La ÚNICA forma de anular un folio: el aparato se deshace de un envío con desenlace
+ * desconocido sin arriesgarse a que el servidor lo aplique después. Si el folio no existe,
+ * inserta una lápida VOIDED que ocupa el índice único; si ya se aplicó, lo dice y no toca nada.
+ * La carrera con el POST la decide ese índice: el que pierde revierte entero.
+ * SIN candado de plan: anular no escribe existencia.
+ */
+export async function voidWasteKey(
+  venueId: string,
+  actorStaffId: string,
+  key: string,
+  source: WasteSource = 'POS',
+): Promise<VoidWasteResult> {
+  const idempotencyKey = normalizeWasteKey(key)
+  const access = await getWasteAccess(actorStaffId, venueId)
+  const canAdjust = hasWastePermission(access, 'inventory:adjust')
+  if (!canAdjust && !hasWastePermission(access, 'inventory:log-waste')) {
+    throw new ForbiddenError('No tienes permiso para anular este folio.')
+  }
+
+  try {
+    return await serializable(async tx => {
+      const existing = await tx.inventoryWasteReport.findUnique({
+        where: { venueId_idempotencyKey: { venueId, idempotencyKey } },
+      })
+      if (existing) return voidResult(existing, actorStaffId, canAdjust)
+
+      const report = await tx.inventoryWasteReport.create({
+        data: {
+          venueId,
+          idempotencyKey,
+          status: 'VOIDED',
+          costState: 'NONE',
+          deductedQuantity: new Decimal(0),
+          unrecordedQuantity: new Decimal(0),
+          reportedByStaffId: actorStaffId,
+          source,
+          createdAt: new Date(),
+        },
+      })
+      await audit(tx, report, 'INVENTORY_WASTE_VOIDED')
+      return voidResult(report, actorStaffId, canAdjust)
+    })
+  } catch (error) {
+    if (!isWasteKeyCollision(error)) throw error
+
+    // Ganó el otro (POST o lápida): se lee lo que quedó, fuera de la transacción abortada.
+    const existing = await prisma.inventoryWasteReport.findUnique({
+      where: { venueId_idempotencyKey: { venueId, idempotencyKey } },
+    })
+    if (!existing) throw error
+    return voidResult(existing, actorStaffId, canAdjust)
+  }
+}

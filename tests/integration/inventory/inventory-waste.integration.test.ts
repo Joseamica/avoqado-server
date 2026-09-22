@@ -1,10 +1,20 @@
-import { randomUUID } from 'crypto'
-import { Prisma } from '@prisma/client'
+import { randomInt, randomUUID } from 'crypto'
+import { Prisma, PrismaClient } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import { isWasteKeyCollision, logWaste, prepareWaste, recoverByKey, WasteInput } from '@/services/shared/inventoryWaste.service'
+import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
+import {
+  getWasteAccess,
+  hasWastePermission,
+  isWasteKeyCollision,
+  logWaste,
+  prepareWaste,
+  recoverByKey,
+  voidWasteKey,
+  WasteInput,
+} from '@/services/shared/inventoryWaste.service'
 
-// Los lectores (getWasteTotals, listWasteReports), la anulación (voidWasteKey) y los
-// choques con caducidad, conteo y venta entran con sus tareas; aquí sólo logWaste.
+// Los lectores (getWasteTotals, listWasteReports) y los choques con caducidad, conteo y
+// venta entran con sus tareas; aquí logWaste y la anulación (voidWasteKey).
 const D = (value: Prisma.Decimal.Value) => new Prisma.Decimal(value)
 const fixture = `waste-${randomUUID()}`
 
@@ -12,6 +22,12 @@ let organizationId = ''
 let venueId = ''
 let staffId = ''
 let categoryId = ''
+// Para anular: dos meseros con `inventory:log-waste` (override del venue) y SIN `inventory:adjust`,
+// un VIEWER sin ninguno de los dos, y alguien sin acceso al venue.
+let waiterAId = ''
+let waiterBId = ''
+let viewerId = ''
+let outsiderId = ''
 
 function assertTestDatabase(): void {
   const declared = new URL(process.env.TEST_DATABASE_URL ?? '')
@@ -62,6 +78,25 @@ beforeAll(async () => {
     data: { staffId, venueId, role: 'MANAGER', active: true },
   })
 
+  const extra = async (label: string) =>
+    (await prisma.staff.create({ data: { email: `${label}-${fixture}@example.test`, firstName: 'Prueba', lastName: label } })).id
+  waiterAId = await extra('mesero-a')
+  waiterBId = await extra('mesero-b')
+  viewerId = await extra('viewer')
+  outsiderId = await extra('ajeno')
+  await prisma.staffVenue.createMany({
+    data: [
+      { staffId: waiterAId, venueId, role: 'WAITER', active: true },
+      { staffId: waiterBId, venueId, role: 'WAITER', active: true },
+      { staffId: viewerId, venueId, role: 'VIEWER', active: true },
+    ],
+  })
+  // `inventory:log-waste` aún no está en los defaults (Task 7): se otorga como lo haría el dueño,
+  // con el editor de roles. Es aditivo sobre WAITER, que no trae `inventory:adjust`.
+  await prisma.venueRolePermission.create({
+    data: { venueId, role: 'WAITER', permissions: ['inventory:log-waste'], modifiedBy: staffId },
+  })
+
   const category = await prisma.menuCategory.create({
     data: { venueId, name: fixture, slug: fixture },
   })
@@ -74,10 +109,22 @@ afterAll(async () => {
   assertTestDatabase()
   await clearInventory()
   if (categoryId) await prisma.menuCategory.deleteMany({ where: { id: categoryId, venueId } })
+  if (venueId) await prisma.venueRolePermission.deleteMany({ where: { venueId } })
   if (venueId) await prisma.staffVenue.deleteMany({ where: { venueId } })
   if (venueId) await prisma.venue.deleteMany({ where: { id: venueId, organizationId } })
   if (organizationId) await prisma.organization.deleteMany({ where: { id: organizationId } })
-  if (staffId) await prisma.staff.deleteMany({ where: { id: staffId } })
+  const staffIds = [staffId, waiterAId, waiterBId, viewerId, outsiderId].filter(Boolean)
+  if (staffIds.length) await prisma.staff.deleteMany({ where: { id: { in: staffIds } } })
+
+  // Las pruebas de carrera y de rollback crean triggers temporales: ninguno puede sobrevivir.
+  const leftovers = await prisma.$queryRaw<Array<{ name: string }>>`
+    SELECT tgname::text AS name FROM pg_trigger
+    WHERE starts_with(tgname::text, 'waste_race_') OR starts_with(tgname::text, 'waste_rollback_')
+    UNION ALL
+    SELECT proname::text AS name FROM pg_proc
+    WHERE starts_with(proname::text, 'waste_race_') OR starts_with(proname::text, 'waste_rollback_')
+  `
+  expect(leftovers).toEqual([])
 })
 
 async function product(stock: string | number, cost: string | number | null = 10) {
@@ -641,4 +688,328 @@ test('la auditoría dice qué artículo, motivo y unidad se mermaron', async () 
 
   const productLog = await prisma.activityLog.findFirstOrThrow({ where: { venueId, entityId: productResult.reportId } })
   expect(productLog.data).toMatchObject({ itemType: 'PRODUCT', itemId: item.id, reasonCode: 'DROPPED', unit: 'UNIT', declared: '1' })
+})
+
+// ─── Anular un folio (voidWasteKey) ───────────────────────────────────────────────────────
+
+test('void no necesita plan y devuelve la autoría canónica al repetirlo', async () => {
+  // Premisa: el venue de prueba NO tiene el plan de inventario. Anular no lo pide (spec §4.3).
+  expect(await venueHasFeatureAccess(venueId, 'INVENTORY_TRACKING')).toBe(false)
+
+  const key = randomUUID()
+  const before = new Date()
+  const first = await voidWasteKey(venueId, staffId, key)
+  const after = new Date()
+  const second = await voidWasteKey(venueId, staffId, key)
+
+  expect(first).toMatchObject({ outcome: 'VOIDED', voidedByStaffId: staffId })
+  expect(second).toEqual(first)
+
+  // La lápida: sin artículo ni cantidades, con la hora del SERVIDOR y una sola auditoría.
+  const tombstone = await prisma.inventoryWasteReport.findUniqueOrThrow({
+    where: { venueId_idempotencyKey: { venueId, idempotencyKey: key } },
+  })
+  expect(tombstone).toMatchObject({
+    status: 'VOIDED',
+    costState: 'NONE',
+    itemType: null,
+    declaredQuantity: null,
+    payloadHash: null,
+    reportedByStaffId: staffId,
+    source: 'POS',
+  })
+  expect(tombstone.deductedQuantity.toString()).toBe('0')
+  expect(tombstone.createdAt.getTime()).toBeGreaterThanOrEqual(before.getTime())
+  expect(tombstone.createdAt.getTime()).toBeLessThanOrEqual(after.getTime())
+  expect(first).toMatchObject({ voidedAt: tombstone.createdAt.toISOString() })
+  expect(await prisma.activityLog.count({ where: { venueId, action: 'INVENTORY_WASTE_VOIDED', entityId: tombstone.id } })).toBe(1)
+  expect(await prisma.activityLog.count({ where: { venueId } })).toBe(1)
+
+  // POST tardío sobre la lápida: 409 WASTE_VOIDED, sin descontar nada.
+  const item = await product(10)
+  await expect(logWaste(venueId, staffId, request('PRODUCT', item.id, 2, { idempotencyKey: key }))).rejects.toMatchObject({
+    code: 'WASTE_VOIDED',
+    statusCode: 409,
+  })
+  expect(await productStock(item.id)).toBe('10')
+  expect(await prisma.inventoryMovement.count({ where: { inventory: { venueId } } })).toBe(0)
+  expect(await prisma.inventoryWasteReport.count({ where: { venueId } })).toBe(1)
+})
+
+test('otra persona que repite la anulación recibe la autoría canónica, no la suya', async () => {
+  const key = randomUUID()
+  // Un mesero con sólo `inventory:log-waste` puede anular.
+  const first = await voidWasteKey(venueId, waiterAId, key)
+  expect(first).toMatchObject({ outcome: 'VOIDED', voidedByStaffId: waiterAId })
+
+  // El gerente la repite con el folio en mayúsculas: es el MISMO folio.
+  const repeated = await voidWasteKey(venueId, staffId, key.toUpperCase())
+  expect(repeated).toEqual(first)
+
+  expect(await prisma.inventoryWasteReport.count({ where: { venueId } })).toBe(1)
+  expect(await prisma.activityLog.count({ where: { venueId, action: 'INVENTORY_WASTE_VOIDED' } })).toBe(1)
+  const log = await prisma.activityLog.findFirstOrThrow({ where: { venueId, action: 'INVENTORY_WASTE_VOIDED' } })
+  expect(log).toMatchObject({ staffId: waiterAId, actorStaffId: waiterAId })
+})
+
+test('void de APPLIED no revierte el stock', async () => {
+  const item = await product(10)
+  const input = request('PRODUCT', item.id, 2)
+  const report = await logWaste(venueId, staffId, input)
+  const stored = await prisma.inventoryWasteReport.findUniqueOrThrow({ where: { id: report.reportId } })
+
+  expect(await voidWasteKey(venueId, staffId, input.idempotencyKey)).toEqual({
+    outcome: 'ALREADY_APPLIED',
+    report,
+  })
+  expect(await productStock(item.id)).toBe('8')
+
+  // El folio aplicado queda EXACTAMENTE como estaba: ni cambia de estado ni se escribe nada.
+  expect(await prisma.inventoryWasteReport.findUniqueOrThrow({ where: { id: report.reportId } })).toEqual(stored)
+  expect(await prisma.inventoryWasteReport.count({ where: { venueId } })).toBe(1)
+  expect(await prisma.inventoryMovement.count({ where: { inventory: { venueId } } })).toBe(1)
+  expect(await prisma.activityLog.count({ where: { venueId, action: 'INVENTORY_WASTE_VOIDED' } })).toBe(0)
+})
+
+test('el resumen de un APPLIED sólo lo recibe el autor o quien tiene inventory:adjust', async () => {
+  // Premisa: los dos meseros tienen log-waste y NO adjust.
+  for (const id of [waiterAId, waiterBId]) {
+    const access = await getWasteAccess(id, venueId)
+    expect(hasWastePermission(access, 'inventory:log-waste')).toBe(true)
+    expect(hasWastePermission(access, 'inventory:adjust')).toBe(false)
+  }
+
+  const item = await product(10)
+  const input = request('PRODUCT', item.id, 3)
+  const report = await logWaste(venueId, waiterAId, input)
+
+  // El autor, aunque no sea gerente.
+  expect(await voidWasteKey(venueId, waiterAId, input.idempotencyKey)).toStrictEqual({ outcome: 'ALREADY_APPLIED', report })
+  // Otro mesero: sabe que ya se registró, pero no ve cuánto ni el id del reporte.
+  expect(await voidWasteKey(venueId, waiterBId, input.idempotencyKey)).toStrictEqual({ outcome: 'ALREADY_APPLIED' })
+  // El gerente, aunque no sea el autor.
+  expect(await voidWasteKey(venueId, staffId, input.idempotencyKey)).toStrictEqual({ outcome: 'ALREADY_APPLIED', report })
+
+  expect(await productStock(item.id)).toBe('7')
+  expect(await prisma.inventoryWasteReport.count({ where: { venueId } })).toBe(1)
+})
+
+test('sin ninguno de los dos permisos, sin acceso o con folio inválido: rechazo sin lápida', async () => {
+  // Premisa: el VIEWER tiene acceso vigente pero ni log-waste ni adjust.
+  const viewerAccess = await getWasteAccess(viewerId, venueId)
+  expect(hasWastePermission(viewerAccess, 'inventory:log-waste')).toBe(false)
+  expect(hasWastePermission(viewerAccess, 'inventory:adjust')).toBe(false)
+
+  const key = randomUUID()
+  await expect(voidWasteKey(venueId, viewerId, key)).rejects.toMatchObject({ statusCode: 403 })
+  await expect(voidWasteKey(venueId, outsiderId, key)).rejects.toMatchObject({ statusCode: 403 })
+  await expect(voidWasteKey(venueId, staffId, 'no-es-un-uuid')).rejects.toMatchObject({
+    statusCode: 422,
+    code: 'INVALID_WASTE_KEY',
+  })
+  expect(await prisma.inventoryWasteReport.count({ where: { venueId } })).toBe(0)
+  expect(await prisma.activityLog.count({ where: { venueId } })).toBe(0)
+
+  // El folio no quedó inutilizado: el POST original todavía se aplica.
+  const item = await product(10)
+  const applied = await logWaste(venueId, staffId, request('PRODUCT', item.id, 2, { idempotencyKey: key }))
+  expect(applied).toMatchObject({ deducted: '2' })
+
+  // Y sobre un APPLIED el VIEWER tampoco se entera de nada.
+  await expect(voidWasteKey(venueId, viewerId, key)).rejects.toMatchObject({ statusCode: 403 })
+  expect(await productStock(item.id)).toBe('8')
+})
+
+async function waitFor<T>(read: () => Promise<T | undefined>): Promise<T> {
+  const deadline = Date.now() + 4000
+  while (Date.now() < deadline) {
+    const value = await read()
+    if (value !== undefined) return value
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error('No se observó el bloqueo esperado en Postgres.')
+}
+
+/**
+ * Fuerza el orden de una carrera por el folio: el GANADOR inserta su fila y se queda detenido
+ * por un trigger (advisory lock que retiene otra conexión); el PERDEDOR arranca y se bloquea
+ * contra el índice único del folio; entonces se suelta al ganador. El trigger sólo actúa sobre
+ * ESTE folio y ESTE estado, y se borra en `finally` pase lo que pase.
+ */
+async function forceOrder(
+  key: string,
+  winnerStatus: 'APPLIED' | 'VOIDED',
+  startWinner: () => Promise<unknown>,
+  startLoser: () => Promise<unknown>,
+): Promise<{ winner: PromiseSettledResult<unknown>; loser: PromiseSettledResult<unknown> }> {
+  const suffix = randomUUID().replace(/-/g, '')
+  const functionName = `waste_race_${suffix}`
+  const triggerName = `waste_race_trigger_${suffix}`
+  const gate = randomInt(1, 2_000_000_000)
+  const blocker = new PrismaClient({
+    datasources: { db: { url: process.env.TEST_DATABASE_URL } },
+  })
+
+  let release: () => void = () => undefined
+  let acquired: () => void = () => undefined
+  const released = new Promise<void>(resolve => {
+    release = resolve
+  })
+  const held = new Promise<void>(resolve => {
+    acquired = resolve
+  })
+  let blockerTransaction: Promise<void> | undefined
+  let winner: Promise<unknown> | undefined
+  let loser: Promise<unknown> | undefined
+
+  try {
+    // Los identificadores y literales proceden exclusivamente de UUID, enum e integer del test.
+    await prisma.$executeRawUnsafe(`
+      CREATE FUNCTION "${functionName}"() RETURNS trigger LANGUAGE plpgsql AS $body$
+      BEGIN
+        IF NEW."idempotencyKey" = '${key.toLowerCase()}'
+           AND NEW.status::text = '${winnerStatus}' THEN
+          PERFORM pg_advisory_xact_lock(${gate}::bigint);
+        END IF;
+        RETURN NEW;
+      END
+      $body$
+    `)
+    await prisma.$executeRawUnsafe(`
+      CREATE TRIGGER "${triggerName}"
+      AFTER INSERT ON "InventoryWasteReport"
+      FOR EACH ROW EXECUTE FUNCTION "${functionName}"()
+    `)
+
+    blockerTransaction = blocker.$transaction(
+      async tx => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(${gate}::bigint)`
+        acquired()
+        await released
+      },
+      { timeout: 30000 },
+    )
+    // Si el bloqueador no llega a tomar el candado, falla en vez de colgarse.
+    await Promise.race([
+      held,
+      blockerTransaction.then(() => {
+        throw new Error('El bloqueador terminó sin retener el candado.')
+      }),
+    ])
+
+    winner = startWinner()
+    void winner.catch(() => undefined)
+
+    const winnerPid = await waitFor(async () => {
+      const rows = await prisma.$queryRaw<Array<{ pid: number }>>`
+        SELECT pid FROM pg_locks
+        WHERE locktype = 'advisory'
+          AND classid = 0
+          AND objid = ${gate}::oid
+          AND granted = FALSE
+      `
+      return rows[0]?.pid
+    })
+
+    loser = startLoser()
+    void loser.catch(() => undefined)
+
+    // El perdedor está detenido POR el ganador: el orden quedó forzado, no a la suerte.
+    await waitFor(async () => {
+      const rows = await prisma.$queryRaw<Array<{ pid: number }>>`
+        SELECT pid FROM pg_stat_activity
+        WHERE ${winnerPid}::int = ANY(pg_blocking_pids(pid))
+        LIMIT 1
+      `
+      return rows[0]?.pid
+    })
+
+    release()
+    await blockerTransaction
+    const results = await Promise.allSettled([winner, loser])
+    return { winner: results[0], loser: results[1] }
+  } finally {
+    release()
+    await Promise.allSettled([blockerTransaction ?? Promise.resolve(), winner ?? Promise.resolve(), loser ?? Promise.resolve()])
+    await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS "${triggerName}" ON "InventoryWasteReport"`)
+    await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS "${functionName}"()`)
+    await blocker.$disconnect()
+  }
+}
+
+async function racePostAndVoid(
+  input: WasteInput,
+  winnerStatus: 'APPLIED' | 'VOIDED',
+): Promise<{ post: PromiseSettledResult<unknown>; cancel: PromiseSettledResult<unknown> }> {
+  const post = () => logWaste(venueId, staffId, input)
+  const cancel = () => voidWasteKey(venueId, staffId, input.idempotencyKey)
+  if (winnerStatus === 'APPLIED') {
+    const { winner, loser } = await forceOrder(input.idempotencyKey, 'APPLIED', post, cancel)
+    return { post: winner, cancel: loser }
+  }
+  const { winner, loser } = await forceOrder(input.idempotencyKey, 'VOIDED', cancel, post)
+  return { post: loser, cancel: winner }
+}
+
+test('carrera real POST–void: gana APPLIED y void devuelve ALREADY_APPLIED', async () => {
+  const item = await product(5)
+  const result = await racePostAndVoid(request('PRODUCT', item.id, 2), 'APPLIED')
+
+  expect(result.post.status).toBe('fulfilled')
+  expect(result.cancel.status).toBe('fulfilled')
+  if (result.cancel.status === 'fulfilled' && result.post.status === 'fulfilled') {
+    expect(result.cancel.value).toEqual({ outcome: 'ALREADY_APPLIED', report: result.post.value })
+  }
+  expect(await productStock(item.id)).toBe('3')
+  expect(await prisma.inventoryWasteReport.count({ where: { venueId, status: 'APPLIED' } })).toBe(1)
+  expect(await prisma.inventoryWasteReport.count({ where: { venueId, status: 'VOIDED' } })).toBe(0)
+  expect(await prisma.inventoryMovement.count({ where: { inventory: { venueId } } })).toBe(1)
+  expect(await prisma.activityLog.count({ where: { venueId, action: 'INVENTORY_WASTE_LOGGED' } })).toBe(1)
+  expect(await prisma.activityLog.count({ where: { venueId, action: 'INVENTORY_WASTE_VOIDED' } })).toBe(0)
+})
+
+test('carrera real POST–void: gana VOIDED y el POST no deja efectos', async () => {
+  const item = await product(5)
+  const result = await racePostAndVoid(request('PRODUCT', item.id, 2), 'VOIDED')
+
+  expect(result.cancel.status).toBe('fulfilled')
+  if (result.cancel.status === 'fulfilled') {
+    expect(result.cancel.value).toMatchObject({ outcome: 'VOIDED', voidedByStaffId: staffId })
+  }
+  expect(result.post.status).toBe('rejected')
+  if (result.post.status === 'rejected') {
+    expect(result.post.reason).toMatchObject({ code: 'WASTE_VOIDED', statusCode: 409 })
+  }
+  expect(await productStock(item.id)).toBe('5')
+  expect(await prisma.inventoryWasteReport.count({ where: { venueId, status: 'VOIDED' } })).toBe(1)
+  expect(await prisma.inventoryWasteReport.count({ where: { venueId, status: 'APPLIED' } })).toBe(0)
+  expect(await prisma.inventoryMovement.count({ where: { inventory: { venueId } } })).toBe(0)
+  expect(await prisma.activityLog.count({ where: { venueId, action: 'INVENTORY_WASTE_VOIDED' } })).toBe(1)
+  expect(await prisma.activityLog.count({ where: { venueId, action: 'INVENTORY_WASTE_LOGGED' } })).toBe(0)
+})
+
+test('colisión P2002 real: la anulación que pierde lee lo que quedó y no deja rastro propio', async () => {
+  // Entre dos escritores SERIALIZABLE, Postgres responde al perdedor con un fallo de serialización
+  // (se reintenta y ve la fila). Aquí el ganador escribe FUERA de SERIALIZABLE, así que el perdedor
+  // recibe el 23505 real (P2002) y se ejerce la recuperación por el índice único.
+  const key = randomUUID()
+  const result = await forceOrder(
+    key,
+    'VOIDED',
+    () =>
+      prisma.inventoryWasteReport.create({
+        data: { venueId, idempotencyKey: key, status: 'VOIDED', costState: 'NONE', reportedByStaffId: waiterAId, source: 'POS' },
+      }),
+    () => voidWasteKey(venueId, staffId, key),
+  )
+
+  expect(result.winner.status).toBe('fulfilled')
+  expect(result.loser.status).toBe('fulfilled')
+  if (result.loser.status === 'fulfilled') {
+    // La autoría es la de la fila que ganó, no la de quien perdió.
+    expect(result.loser.value).toMatchObject({ outcome: 'VOIDED', voidedByStaffId: waiterAId })
+  }
+  expect(await prisma.inventoryWasteReport.count({ where: { venueId } })).toBe(1)
+  // El perdedor revirtió entero: su auditoría no existe.
+  expect(await prisma.activityLog.count({ where: { venueId } })).toBe(0)
 })
