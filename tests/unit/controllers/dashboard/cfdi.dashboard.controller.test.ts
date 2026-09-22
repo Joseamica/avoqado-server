@@ -60,9 +60,11 @@ jest.mock('../../../../src/services/fiscal/fiscalConfig.service', () => ({
 
 const mockProvisionEmisor = jest.fn()
 const mockUploadEmisorCsd = jest.fn()
+const mockSyncEmisorLogo = jest.fn()
 jest.mock('../../../../src/services/fiscal/fiscalOnboarding.service', () => ({
   provisionEmisor: (...a: any[]) => mockProvisionEmisor(...a),
   uploadEmisorCsd: (...a: any[]) => mockUploadEmisorCsd(...a),
+  syncEmisorLogo: (...a: any[]) => mockSyncEmisorLogo(...a),
 }))
 
 const mockLogAction = jest.fn()
@@ -93,6 +95,8 @@ import {
   uploadEmisorCsdController,
   triggerGlobalCfdiController,
   searchSatCatalogController,
+  syncEmisorLogoController,
+  downloadCfdiFileController,
 } from '../../../../src/controllers/dashboard/cfdi.dashboard.controller'
 
 // ==========================================
@@ -1350,5 +1354,93 @@ describe('listCfdisController', () => {
         pageSize: 10,
       }),
     )
+  })
+})
+
+// ==========================================
+// LOGO DEL EMISOR (Testarudo 21-sep: el PDF salía sin logo)
+// ==========================================
+describe('syncEmisorLogoController', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  it('200 { synced:true } y ActivityLog FISCAL_LOGO_SYNCED', async () => {
+    mockSyncEmisorLogo.mockResolvedValue({ synced: true })
+    const res = mockRes()
+    await syncEmisorLogoController(mockReq({ params: { venueId: 'v1', emisorId: 'e1' }, authContext: { userId: 'u1' } }), res)
+    expect(mockSyncEmisorLogo).toHaveBeenCalledWith({ emisorId: 'e1', expectedVenueId: 'v1' })
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith({ synced: true })
+    expect(mockLogAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'FISCAL_LOGO_SYNCED', entityId: 'e1', venueId: 'v1' }))
+  })
+
+  it('200 { synced:false, reason } sin ActivityLog cuando no hay logo o no está provisionado', async () => {
+    mockSyncEmisorLogo.mockResolvedValue({ synced: false, reason: 'NO_LOGO' })
+    const res = mockRes()
+    await syncEmisorLogoController(mockReq({ params: { venueId: 'v1', emisorId: 'e1' }, authContext: { userId: 'u1' } }), res)
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith({ synced: false, reason: 'NO_LOGO' })
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+
+  it('404 cuando el emisor no es del venue', async () => {
+    mockSyncEmisorLogo.mockRejectedValue(new Error('Emisor e1 not found'))
+    const res = mockRes()
+    await syncEmisorLogoController(mockReq({ params: { venueId: 'v1', emisorId: 'e1' }, authContext: { userId: 'u1' } }), res)
+    expect(res.status).toHaveBeenCalledWith(404)
+  })
+})
+
+// ==========================================
+// DESCARGA DE PDF/XML (Testarudo 21-sep: el navegador los abría en vez de descargarlos)
+// ==========================================
+describe('downloadCfdiFileController', () => {
+  const cfdi = { id: 'c1', venueId: 'v1', serie: 'A', folio: '14', pdfUrl: 'https://storage/x.pdf', xmlUrl: 'https://storage/x.xml' }
+  const fetchBytes = jest.fn()
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockGetStatus.mockResolvedValue(cfdi)
+    fetchBytes.mockResolvedValue(Buffer.from('%PDF-1.4'))
+  })
+  function fileRes() {
+    const res: any = mockRes()
+    res.setHeader = jest.fn().mockReturnValue(res)
+    res.send = jest.fn().mockReturnValue(res)
+    return res
+  }
+
+  it('manda el PDF como ADJUNTO con nombre serie-folio.pdf (el navegador lo guarda en Descargas)', async () => {
+    const res = fileRes()
+    await downloadCfdiFileController(mockReq({ params: { venueId: 'v1', cfdiId: 'c1' }, query: { type: 'pdf' } }), res, fetchBytes)
+    expect(mockGetStatus).toHaveBeenCalledWith({ cfdiId: 'c1', expectedVenueId: 'v1' })
+    expect(fetchBytes).toHaveBeenCalledWith('https://storage/x.pdf')
+    expect(res.setHeader).toHaveBeenCalledWith('Content-Type', 'application/pdf')
+    expect(res.setHeader).toHaveBeenCalledWith('Content-Disposition', 'attachment; filename="A-14.pdf"')
+    expect(res.setHeader).toHaveBeenCalledWith('Access-Control-Expose-Headers', 'Content-Disposition') // el dashboard es otro origen
+    expect(res.send).toHaveBeenCalledWith(Buffer.from('%PDF-1.4'))
+  })
+
+  it('type=xml → application/xml y .xml', async () => {
+    const res = fileRes()
+    await downloadCfdiFileController(mockReq({ params: { venueId: 'v1', cfdiId: 'c1' }, query: { type: 'xml' } }), res, fetchBytes)
+    expect(fetchBytes).toHaveBeenCalledWith('https://storage/x.xml')
+    expect(res.setHeader).toHaveBeenCalledWith('Content-Type', 'application/xml')
+    expect(res.setHeader).toHaveBeenCalledWith('Content-Disposition', 'attachment; filename="A-14.xml"')
+  })
+
+  it('400 con type inválido; 404 si el CFDI no tiene archivo todavía; 404 si es de otro venue', async () => {
+    let res = fileRes()
+    await downloadCfdiFileController(mockReq({ params: { venueId: 'v1', cfdiId: 'c1' }, query: { type: 'exe' } }), res, fetchBytes)
+    expect(res.status).toHaveBeenCalledWith(400)
+
+    mockGetStatus.mockResolvedValue({ ...cfdi, pdfUrl: null })
+    res = fileRes()
+    await downloadCfdiFileController(mockReq({ params: { venueId: 'v1', cfdiId: 'c1' }, query: { type: 'pdf' } }), res, fetchBytes)
+    expect(res.status).toHaveBeenCalledWith(404)
+
+    mockGetStatus.mockRejectedValue(new Error('CFDI c1 not found'))
+    res = fileRes()
+    await downloadCfdiFileController(mockReq({ params: { venueId: 'v1', cfdiId: 'c1' }, query: { type: 'pdf' } }), res, fetchBytes)
+    expect(res.status).toHaveBeenCalledWith(404)
+    expect(fetchBytes).not.toHaveBeenCalled()
   })
 })

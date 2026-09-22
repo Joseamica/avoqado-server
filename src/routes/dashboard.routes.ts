@@ -110,6 +110,8 @@ import {
   upsertMerchantFiscalConfigController,
   provisionEmisorController,
   uploadEmisorCsdController,
+  syncEmisorLogoController,
+  downloadCfdiFileController,
   getEmisorProviderStatusController,
   triggerGlobalCfdiController,
   searchSatCatalogController,
@@ -3615,6 +3617,14 @@ router.get(
   checkPermission('cfdi:view'),
   getCfdiStatusController,
 )
+// PDF/XML como ADJUNTO (Content-Disposition) para que el navegador lo descargue en vez de abrirlo.
+router.get(
+  '/venues/:venueId/cfdi/:cfdiId/file',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:view'),
+  (req, res) => downloadCfdiFileController(req, res),
+)
 router.post(
   '/venues/:venueId/cfdi/:cfdiId/cancel',
   authenticateTokenMiddleware,
@@ -3691,6 +3701,14 @@ router.post(
   checkFeatureAccess('CFDI'),
   checkPermission('cfdi:configure'),
   uploadEmisorCsdController,
+)
+// Sube el logo del venue a la org del PAC (lo que imprime en el PDF de cada factura). Idempotente.
+router.post(
+  '/venues/:venueId/fiscal/emisores/:emisorId/logo',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:configure'),
+  syncEmisorLogoController,
 )
 // Read-only: onboarding status at the PAC (Carta Manifiesto pendiente, etc.)
 router.get(

@@ -107,6 +107,16 @@ describe('FacturapiProvider', () => {
     expect(product.tax_included).toBe(true) // PAC back-computes base+IVA → stamped total stays 116
   })
 
+  it('createInvoice envía `taxability` (ObjetoImp) por concepto: sin él facturapi asume 02 y un «no objeto» (01) se timbraría como objeto de impuesto', async () => {
+    mockCreate.mockResolvedValue(MOCK_INVOICE_RESPONSE)
+    const provider = new FacturapiProvider('sk_test_x')
+    await provider.createInvoice({
+      ...BASE_CREATE_PARAMS,
+      items: [{ ...BASE_CREATE_PARAMS.items[0], objetoImp: '01', taxes: [] }],
+    })
+    expect(mockCreate.mock.calls[0][0].items[0].product.taxability).toBe('01')
+  })
+
   it('createInvoice passes external_id when externalId is provided', async () => {
     mockCreate.mockResolvedValue(MOCK_INVOICE_RESPONSE)
     const provider = new FacturapiProvider('sk_test_x')

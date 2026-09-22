@@ -21,6 +21,14 @@ import {
   reconcileGlobalLines,
 } from './cfdiPayloadBuilder'
 import { splitIvaIncluded } from './ivaMath'
+import {
+  esCobroElegible,
+  importeConceptoCents,
+  motivosDeOrden,
+  reconstruirConceptos,
+  totalDelDocumentoCents,
+  OrdenParaConceptos,
+} from './cfdi.service'
 import { closedPeriodFor, ClosedPeriod } from './globalPeriod'
 import { validateBeforeStamp } from './cfdiValidation'
 import { mapFormaPago } from './satCatalog'
@@ -57,7 +65,13 @@ export interface GlobalEmisor {
 export interface IssueGlobalDeps {
   loadEmisor: (emisorId: string) => Promise<GlobalEmisor | null>
   findExistingGlobal: (idempotencyKey: string) => Promise<any | null>
-  loadGlobalCandidates: (emisorId: string, periodStart: Date, periodEnd: Date, invoiceCashSales: boolean) => Promise<GlobalInvoiceLine[]>
+  loadGlobalCandidates: (
+    emisorId: string,
+    periodStart: Date,
+    periodEnd: Date,
+    invoiceCashSales: boolean,
+    venueId: string,
+  ) => Promise<GlobalInvoiceLine[]>
   resolveProvider: typeof resolveFiscalProvider
   storeArtifact: (buffer: Buffer, path: string, contentType: string) => Promise<string>
   persistCfdi: (data: Record<string, any>) => Promise<any>
@@ -113,7 +127,13 @@ export async function issueGlobalForEmisor(
   // 5. Load candidates (PAID orders, not individually stamped, under this emisor in the period).
   //    Cash-paid orders are swept ONLY if the emisor opted in (invoiceCashSales) — most venues don't
   //    declare cash, so by default a cash (or cash+card mixed) order is left out of the global.
-  const candidates = await deps.loadGlobalCandidates(emisorId, period.periodStart, period.periodEnd, emisor.invoiceCashSales)
+  const candidates = await deps.loadGlobalCandidates(
+    emisorId,
+    period.periodStart,
+    period.periodEnd,
+    emisor.invoiceCashSales,
+    emisor.venueId,
+  )
   logger.info(
     `[cfdiGlobal] emisor=${emisorId} period=${period.meses}/${period.anio} candidates=${candidates.length} periodStart=${period.periodStart.toISOString()} periodEnd=${period.periodEnd.toISOString()}`,
   )
@@ -310,6 +330,7 @@ const defaultDeps: IssueGlobalDeps = {
     periodStart: Date,
     periodEnd: Date,
     invoiceCashSales: boolean,
+    venueId: string,
   ): Promise<GlobalInvoiceLine[]> => {
     // Candidates = PAID orders settled (payment COMPLETED) via a merchant under this emisor
     // with includeInGlobal && facturacionEnabled, and NO STAMPED individual Cfdi.
@@ -318,11 +339,17 @@ const defaultDeps: IssueGlobalDeps = {
     // STAMPED Cfdi (orderId = that order's id). This is a two-step query for clarity.
     const orders = await prisma.order.findMany({
       where: {
+        // 🔴 Sólo órdenes de ESTE venue: una cuenta de cobro compartida entre sucursales no puede meter
+        // ventas de otra sucursal bajo este RFC.
+        venueId,
         paymentStatus: 'PAID',
         updatedAt: { gte: periodStart, lt: periodEnd },
         payments: {
+          // La MISMA elegibilidad que la suma: un pago TEST/REFUND no puede decidir bajo qué RFC entra
+          // una orden (Codex, pasada 4).
           some: {
             status: 'COMPLETED',
+            AND: [{ OR: [{ type: { in: ['REGULAR', 'FAST'] } }, { type: null }] }],
             OR: [
               {
                 merchantAccount: {
@@ -347,8 +374,8 @@ const defaultDeps: IssueGlobalDeps = {
           // Cash NOT declared by default: unless the emisor opted in, drop any order that has a
           // COMPLETED cash payment. This also drops mixed cash+card orders (whose total would
           // otherwise declare the cash portion) — conservative, matches "don't invoice cash".
-          ...(invoiceCashSales ? {} : { none: { status: 'COMPLETED', method: 'CASH' } }),
         },
+        AND: filtrosDeExclusion(emisorId, invoiceCashSales),
         // Exclude orders that already have a STAMPED individual Cfdi
         cfdis: {
           none: { status: 'STAMPED', isGlobal: false },
@@ -360,71 +387,40 @@ const defaultDeps: IssueGlobalDeps = {
         subtotal: true,
         taxAmount: true,
         total: true,
+        discountAmount: true,
+        serviceChargeAmount: true,
+        promotions: { select: { id: true }, take: 1 },
         payments: {
-          where: { status: 'COMPLETED' },
-          take: 1,
+          // Todos los cobros ELEGIBLES (misma regla que la factura individual): su suma es lo cobrado,
+          // la verdad contra la que se valida cada orden antes de entrar a la global.
+          where: { status: 'COMPLETED', OR: [{ type: { in: ['REGULAR', 'FAST'] } }, { type: null }] },
           orderBy: { createdAt: 'desc' },
           // `tenderSatFormaPago`: la forma SAT que el NEGOCIO declaró en su tipo de pago.
           // Sin ella, un ticket cobrado con un tipo del catálogo (method = OTHER) entra a
           // la global como '99' (por definir) y arrastra a TODA la factura al genérico
           // cuando se mezcla con otras formas.
-          select: { method: true, tenderSatFormaPago: true },
+          select: { method: true, tenderSatFormaPago: true, amount: true, type: true },
         },
         // Items carry each product's real tax treatment (rate + objetoImp) so the global lines
         // declare the actual IVA per product instead of assuming 16% for the whole ticket.
         items: {
           select: {
+            productName: true,
             quantity: true,
             unitPrice: true,
             discountAmount: true,
             taxAmount: true,
-            product: { select: { taxRate: true, objetoImp: true } },
+            total: true,
+            weightQuantity: true,
+            modifiers: { select: { name: true, price: true, quantity: true } },
+            product: { select: { taxRate: true, objetoImp: true, satProductKey: true, satUnitKey: true } },
           },
         },
       },
     })
 
-    const peso = (d: any): number => Math.round(Number(d) * 100)
-
-    // One order → one or more global lines, grouped by each product's REAL tax rate (16/8/0/exento).
-    // taxAmount=0 ⇒ gross (IVA-included) prices, e.g. TPV. Non-zero taxAmount ⇒ separated-tax source.
-    return orders.flatMap((o): GlobalInvoiceLine[] => {
-      const priceIncludesIva = peso(o.taxAmount) === 0
-      const method = o.payments[0]?.method
-      const formaPago = method ? mapFormaPago(method, o.payments[0]?.tenderSatFormaPago) : '99'
-      const meta = { orderId: o.id, orderNumber: o.orderNumber, formaPago, priceIncludesIva }
-
-      // Preferred path: derive per-product tax groups from the items.
-      if (o.items.length > 0) {
-        const lineItems: GlobalLineItemInput[] = o.items.map(it => {
-          const rate = it.product ? Number(it.product.taxRate) : 0.16
-          const objetoImp = it.product?.objetoImp ?? (rate > 0 ? '02' : '01')
-          const lineNet = peso(it.unitPrice) * it.quantity - peso(it.discountAmount)
-          // Gross items already include IVA; net items add their separated tax to reach the paid gross.
-          const grossCents = priceIncludesIva ? lineNet : lineNet + peso(it.taxAmount)
-          return { grossCents, taxRate: rate, objetoImp }
-        })
-        return groupOrderIntoGlobalLines(lineItems, meta)
-      }
-
-      // Fallback (order with no items): one line from the aggregate total, assuming 16%.
-      const totalCents = peso(o.total)
-      const { netCents, taxCents } = priceIncludesIva
-        ? splitIvaIncluded(totalCents, 0.16)
-        : { netCents: peso(o.subtotal), taxCents: peso(o.taxAmount) }
-      return [
-        {
-          ...meta,
-          totalCents,
-          subtotalCents: netCents,
-          taxCents,
-          taxRate: 0.16,
-          objetoImp: '02',
-        },
-      ]
-    })
+    return orders.flatMap(o => globalLinesFromOrder(o))
   },
-
   resolveProvider: resolveFiscalProvider,
 
   storeArtifact: (buffer: Buffer, path: string, contentType: string) => uploadFileToStorage(buffer, path, contentType),
@@ -446,4 +442,135 @@ const defaultDeps: IssueGlobalDeps = {
     if (!venue) throw new Error(`Venue ${venueId} not found`)
     return venue.slug
   },
+}
+
+/** Cobros elegibles para decidir/sumar en la global: la MISMA regla que la factura individual. */
+const COBRO_ELEGIBLE: Prisma.PaymentWhereInput = { OR: [{ type: { in: ['REGULAR', 'FAST'] } }, { type: null }] }
+
+/**
+ * Exclusiones de la consulta de candidatos: ningún cobro elegible bajo OTRO emisor (una cuenta cobrada
+ * con comercios de RFC distinto no entra completa en la global de ninguno — Codex, pasada 5), y sin
+ * efectivo salvo que el emisor haya optado por declararlo.
+ */
+function filtrosDeExclusion(emisorId: string, invoiceCashSales: boolean): Prisma.OrderWhereInput[] {
+  // Un comercio «incompatible» = sin configuración, de otro emisor, con facturación apagada o fuera de la
+  // global. Basta UN cobro elegible así para que la orden no entre completa bajo este emisor.
+  const configIncompatible: Prisma.MerchantFiscalConfigWhereInput = {
+    OR: [{ fiscalEmisorId: { not: emisorId } }, { facturacionEnabled: false }, { includeInGlobal: false }],
+  }
+  const filtros: Prisma.OrderWhereInput[] = [
+    {
+      payments: {
+        none: {
+          status: 'COMPLETED',
+          AND: [COBRO_ELEGIBLE],
+          OR: [
+            {
+              merchantAccountId: { not: null },
+              merchantAccount: { OR: [{ fiscalConfig: { is: null } }, { fiscalConfig: configIncompatible }] },
+            },
+            {
+              ecommerceMerchantId: { not: null },
+              ecommerceMerchant: { OR: [{ fiscalConfig: { is: null } }, { fiscalConfig: configIncompatible }] },
+            },
+          ],
+        },
+      },
+    },
+  ]
+  if (!invoiceCashSales) filtros.push({ payments: { none: { status: 'COMPLETED', method: 'CASH', AND: [COBRO_ELEGIBLE] } } })
+  return filtros
+}
+
+/** Fila de orden tal como la carga `loadGlobalCandidates` (PURA para poder probarla sin Prisma). */
+export interface GlobalCandidateOrder {
+  id: string
+  orderNumber: string | null
+  subtotal: any
+  taxAmount: any
+  total: any
+  discountAmount?: any
+  serviceChargeAmount?: any
+  promotions?: Array<{ id: string }> | null
+  payments: Array<{ method: any; tenderSatFormaPago: string | null; amount?: any; type?: string | null }>
+  items: Array<{
+    productName?: string | null
+    quantity: number
+    unitPrice: any
+    discountAmount: any
+    taxAmount: any
+    total?: any
+    weightQuantity?: any
+    modifiers?: Array<{ name?: string | null; price: any; quantity?: number }> | null
+    product: { taxRate: any; objetoImp: string | null } | null
+  }>
+}
+
+/**
+ * One order → one or more global lines, grouped by each product's REAL tax rate (16/8/0/exento).
+ * taxAmount=0 ⇒ gross (IVA-included) prices, e.g. TPV. Non-zero taxAmount ⇒ separated-tax source.
+ *
+ * 🔴 MISMA verdad de dinero que la factura individual (`conceptosDesdeRenglon`, descuento de orden,
+ * cobros elegibles): con `unitPrice × quantity` la global declaraba MENOS de lo cobrado en cualquier
+ * ticket con extras (Testarudo, 21-sep-2026). Y la misma BARRERA: si el documento de una orden no
+ * cuadra con lo cobrado, la orden se EXCLUYE de la global (con aviso) — nunca se declara mal.
+ */
+export function globalLinesFromOrder(o: GlobalCandidateOrder): GlobalInvoiceLine[] {
+  const peso = (d: any): number => Math.round(Number(d) * 100)
+  const pays = o.payments.filter(p => esCobroElegible(p))
+  const paidCents = pays.reduce((sum, p) => sum + peso(p.amount ?? 0), 0)
+  if (paidCents <= 0) {
+    logger.warn(`[cfdiGlobal] orden ${o.id} sin cobros elegibles; excluida de la global`)
+    return []
+  }
+  const sinRenglones = o.items.length === 0
+  const priceIncludesIva = peso(o.taxAmount) === 0 || sinRenglones
+  const method = pays[0]?.method
+  const formaPago = method ? mapFormaPago(method, pays[0]?.tenderSatFormaPago) : '99'
+  const meta = { orderId: o.id, orderNumber: o.orderNumber, formaPago, priceIncludesIva }
+
+  // Preferred path: derive per-product tax groups from the items.
+  if (!sinRenglones) {
+    const { items: conceptos, motivos } = reconstruirConceptos(o as OrdenParaConceptos, o.id)
+    if (motivos.length > 0) {
+      logger.warn(`[cfdiGlobal] orden ${o.id} fuera del sobre seguro; excluida de la global: ${motivos.join(' | ')}`)
+      return []
+    }
+    const documentoCents = totalDelDocumentoCents({ items: conceptos as any, pricesIncludeIva: priceIncludesIva })
+    if (documentoCents !== paidCents) {
+      logger.warn(
+        `[cfdiGlobal] orden ${o.id}: el documento (${documentoCents}) no coincide con lo cobrado (${paidCents}); excluida de la global`,
+      )
+      return []
+    }
+    const lineItems: GlobalLineItemInput[] = conceptos.map(it => {
+      const rate = it.product ? Number(it.product.taxRate) : 0.16
+      const objetoImp = it.product?.objetoImp ?? (rate > 0 ? '02' : '01')
+      const lineNet = importeConceptoCents(it) - peso(it.discountAmount)
+      // Gross items already include IVA; net items add their separated tax to reach the paid gross.
+      const grossCents = priceIncludesIva ? lineNet : Math.round(lineNet * (1 + rate))
+      return { grossCents, taxRate: rate, objetoImp }
+    })
+    return groupOrderIntoGlobalLines(lineItems, meta)
+  }
+
+  // Fallback (order with no items): one line for what was PAID (never `order.total`, which may carry
+  // the tip), IVA included, assuming 16%. Las exclusiones de ORDEN aplican igual sin renglones.
+  const motivosOrden = motivosDeOrden(o as OrdenParaConceptos)
+  if (motivosOrden.length > 0) {
+    logger.warn(`[cfdiGlobal] orden ${o.id} sin renglones fuera del sobre seguro; excluida: ${motivosOrden.join(' | ')}`)
+    return []
+  }
+  const totalCents = paidCents
+  const { netCents, taxCents } = splitIvaIncluded(totalCents, 0.16)
+  return [
+    {
+      ...meta,
+      totalCents,
+      subtotalCents: netCents,
+      taxCents,
+      taxRate: 0.16,
+      objetoImp: '02',
+    },
+  ]
 }

@@ -265,6 +265,8 @@ export interface FiscalProvider {
   uploadCsd(params: UploadCsdParams): Promise<UploadCsdResult>
   /** Consulta el estado de onboarding de la org en el PAC (pasos pendientes, p.ej. la Carta Manifiesto). */
   getOrganizationStatus(providerOrgId: string): Promise<OrgStatusResult>
+  /** Sube el logo del negocio a la org del PAC: es lo que imprime en el PDF de cada factura. */
+  uploadLogo(providerOrgId: string, image: Buffer): Promise<void>
   // NOTA: la validación de formato del receptor NO vive aquí. `validateBeforeStamp()`
   // (src/services/fiscal/cfdiValidation.ts) es el único pre-check antes de timbrar y ya
   // cubre RFC, CP, razón social, régimen y uso de CFDI — además de CSD, forma de pago,

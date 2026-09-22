@@ -20,8 +20,9 @@ import { searchSatCatalog } from '@/services/fiscal/satCatalogLookup.service'
 import { SatCatalogUnavailableError } from '@/errors/AppError'
 import { issueGlobalForEmisor } from '@/services/fiscal/cfdiGlobal.service'
 import { upsertEmisor, upsertMerchantFiscalConfig, getFiscalConfig } from '@/services/fiscal/fiscalConfig.service'
-import { provisionEmisor, uploadEmisorCsd, getEmisorProviderStatus } from '@/services/fiscal/fiscalOnboarding.service'
+import { provisionEmisor, uploadEmisorCsd, syncEmisorLogo, getEmisorProviderStatus } from '@/services/fiscal/fiscalOnboarding.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { fetchStorageObject } from '@/services/storage.service'
 import { resolveRequestVenueId } from '@/middlewares/checkPermission.middleware'
 
 /**
@@ -835,4 +836,93 @@ export async function triggerGlobalCfdiController(req: Request, res: Response): 
 
     res.status(500).json({ error: 'Error interno al generar la factura global' })
   }
+}
+
+/**
+ * POST /api/v1/dashboard/venues/:venueId/fiscal/emisores/:emisorId/logo
+ *
+ * Sube el logo del venue a la organización del PAC (es lo que imprime en el PDF de cada factura).
+ * Idempotente. Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:configure').
+ */
+export async function syncEmisorLogoController(req: Request, res: Response): Promise<void> {
+  const { emisorId } = req.params
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
+
+  try {
+    const result = await syncEmisorLogo({ emisorId, expectedVenueId: venueId })
+    if (result.synced) {
+      logAction({ staffId: authContext.userId, venueId, action: 'FISCAL_LOGO_SYNCED', entity: 'FiscalEmisor', entityId: emisorId })
+    }
+    res.status(200).json(result)
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    logger.error(`[cfdi.controller] syncEmisorLogo failed for emisor ${emisorId}: ${message}`)
+    if (/not found/i.test(message)) {
+      res.status(404).json({ error: 'Emisor no encontrado' })
+      return
+    }
+    res.status(502).json({ error: 'No se pudo subir el logo al PAC', message })
+  }
+}
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/cfdi/:cfdiId/file?type=pdf|xml
+ *
+ * Entrega el PDF/XML como ADJUNTO (`Content-Disposition: attachment; filename="A-14.pdf"`), que es lo
+ * que hace que el navegador lo guarde en Descargas en vez de abrirlo en una pestaña. El archivo vive
+ * en Storage; el servidor lo baja y lo reenvía para poder poner el nombre y el encabezado, y para que
+ * la liga que usa el dashboard sea la del API (con sesión) y no la pública permanente de Storage.
+ * Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:view').
+ */
+export async function downloadCfdiFileController(
+  req: Request,
+  res: Response,
+  fetchBytes: (url: string) => Promise<Buffer> = defaultFetchBytes,
+): Promise<void> {
+  const { cfdiId } = req.params
+  const type = String((req.query as any)?.type ?? '')
+  if (type !== 'pdf' && type !== 'xml') {
+    res.status(400).json({ error: 'type debe ser pdf o xml' })
+    return
+  }
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
+
+  try {
+    const cfdi = await getCfdiStatus({ cfdiId, expectedVenueId: venueId })
+    const url: string | null = type === 'pdf' ? cfdi.pdfUrl : cfdi.xmlUrl
+    if (!url) {
+      res.status(404).json({ error: 'Este CFDI todavía no tiene archivo' })
+      return
+    }
+    const bytes = await fetchBytes(url)
+    const name = [cfdi.serie, cfdi.folio].filter(Boolean).join('-') || cfdi.uuid || cfdi.id
+    res.setHeader('Content-Type', type === 'pdf' ? 'application/pdf' : 'application/xml')
+    res.setHeader('Content-Disposition', `attachment; filename="${String(name).replace(/[^\w.-]/g, '_')}.${type}"`)
+    // El dashboard vive en otro origen: sin esto axios no puede leer el nombre del archivo.
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition')
+    res.status(200).send(bytes)
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    logger.error(`[cfdi.controller] downloadCfdiFile failed for cfdi ${cfdiId}: ${message}`)
+    if (/not found/i.test(message)) {
+      res.status(404).json({ error: 'CFDI no encontrado' })
+      return
+    }
+    res.status(502).json({ error: 'No se pudo descargar el archivo' })
+  }
+}
+
+/** Sólo desde nuestro Storage, ≤ 25 MB, 15 s (un PDF de CFDI pesa ~100 KB). */
+function defaultFetchBytes(url: string): Promise<Buffer> {
+  return fetchStorageObject(url, { maxBytes: 25 * 1024 * 1024, timeoutMs: 15_000 })
 }

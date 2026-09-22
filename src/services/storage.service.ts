@@ -200,3 +200,63 @@ export async function deleteVenueFolder(venueSlug: string): Promise<boolean> {
     return false
   }
 }
+
+// ─── Descarga SEGURA de objetos de nuestro Storage ─────────────────────────────
+
+export class StorageFetchError extends Error {}
+
+/** Hosts desde los que el servidor acepta descargar (logo del venue, PDF/XML de CFDI). Nada más. */
+const STORAGE_HOSTS = new Set(['storage.googleapis.com', 'firebasestorage.googleapis.com'])
+
+/**
+ * Descarga un objeto de NUESTRO Storage con las cuatro defensas que faltaban (Codex, 21-sep-2026):
+ * sólo hosts de Google Storage y sólo https (una URL arbitraria en `Venue.logo` no puede volver al
+ * servidor un proxy hacia la red interna), sin seguir redirecciones, con timeout, y con tope de bytes
+ * —comprobado en `Content-Length` y otra vez sobre el cuerpo— para no cargar en memoria lo que sea.
+ * `fetchImpl` se inyecta para probarlo sin red.
+ */
+export async function fetchStorageObject(
+  url: string,
+  opts: { maxBytes: number; timeoutMs?: number; contentTypePrefix?: string },
+  fetchImpl: typeof fetch = fetch,
+): Promise<Buffer> {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    throw new StorageFetchError('URL de Storage inválida')
+  }
+  if (parsed.protocol !== 'https:' || !STORAGE_HOSTS.has(parsed.hostname)) {
+    throw new StorageFetchError(`Sólo se descargan objetos de nuestro Storage (host rechazado: ${parsed.hostname})`)
+  }
+  const res = await fetchImpl(parsed.toString(), { redirect: 'error', signal: AbortSignal.timeout(opts.timeoutMs ?? 10_000) })
+  if (!res.ok) throw new StorageFetchError(`Storage respondió ${res.status}`)
+  const declared = Number(res.headers.get('content-length') ?? 0)
+  if (declared > opts.maxBytes) throw new StorageFetchError(`El archivo (${declared} bytes) excede el tope de ${opts.maxBytes} bytes`)
+  if (opts.contentTypePrefix) {
+    const type = res.headers.get('content-type') ?? ''
+    if (!type.startsWith(opts.contentTypePrefix)) throw new StorageFetchError(`El archivo no es del tipo esperado (${type || 'sin tipo'})`)
+  }
+  // Lectura por trozos: se corta en cuanto se rebasa el tope, sin cargar el resto en memoria.
+  const body: any = (res as any).body
+  if (body && typeof body.getReader === 'function') {
+    const reader = body.getReader()
+    const chunks: Buffer[] = []
+    let total = 0
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > opts.maxBytes) {
+        await reader.cancel().catch(() => undefined)
+        throw new StorageFetchError(`El archivo excede el tope de ${opts.maxBytes} bytes`)
+      }
+      chunks.push(Buffer.from(value))
+    }
+    return Buffer.concat(chunks)
+  }
+  const bytes = Buffer.from(await res.arrayBuffer())
+  if (bytes.length > opts.maxBytes)
+    throw new StorageFetchError(`El archivo (${bytes.length} bytes) excede el tope de ${opts.maxBytes} bytes`)
+  return bytes
+}

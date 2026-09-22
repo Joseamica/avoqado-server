@@ -86,6 +86,11 @@ export class FacturapiProvider implements FiscalProvider {
     return { csdExpiresAt: expiresAt ? new Date(expiresAt) : null }
   }
 
+  /** organizations.uploadLogo(id, file) — BinaryInput acepta Buffer (Uint8Array) directo, igual que el CSD. */
+  async uploadLogo(providerOrgId: string, image: Buffer): Promise<void> {
+    await this.client.organizations.uploadLogo(providerOrgId, image)
+  }
+
   /**
    * Normaliza el nombre del receptor justo antes de mandarlo al PAC — la última red antes
    * del SAT. El padrón del SAT guarda las razones sociales en MAYÚSCULAS; un nombre bien
@@ -188,6 +193,8 @@ export class FacturapiProvider implements FiscalProvider {
           // stamped Total equals what the customer paid; NET (+IVA on top) otherwise.
           price: toPesos(it.unitPriceCents),
           tax_included: it.taxIncluded === true,
+          // ObjetoImp del concepto: sin él facturapi asume 02 (sí objeto) y un exento/no objeto se timbraría mal.
+          ...(it.objetoImp ? { taxability: it.objetoImp } : {}),
           taxes: it.taxes.map(t => ({
             type: t.type,
             rate: t.rate,
@@ -382,6 +389,8 @@ export class FacturapiProvider implements FiscalProvider {
           unit_key: it.satUnitKey,
           price: toPesos(it.unitPriceCents),
           tax_included: it.taxIncluded === true,
+          // ObjetoImp del concepto: sin él facturapi asume 02 (sí objeto) y un exento/no objeto se timbraría mal.
+          ...(it.objetoImp ? { taxability: it.objetoImp } : {}),
           taxes: it.taxes.map(t => ({
             type: t.type,
             rate: t.rate,
@@ -453,6 +462,8 @@ export class FacturapiProvider implements FiscalProvider {
           // stamped Total equals what the customer paid; NET (+IVA on top) otherwise.
           price: toPesos(it.unitPriceCents),
           tax_included: it.taxIncluded === true,
+          // ObjetoImp del concepto: sin él facturapi asume 02 (sí objeto) y un exento/no objeto se timbraría mal.
+          ...(it.objetoImp ? { taxability: it.objetoImp } : {}),
           taxes: it.taxes.map(t => ({
             type: t.type,
             rate: t.rate,

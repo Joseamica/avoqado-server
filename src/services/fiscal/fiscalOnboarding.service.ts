@@ -19,10 +19,12 @@
  */
 
 import prisma from '../../utils/prismaClient'
+import logger from '../../config/logger'
 import { env } from '../../config/env'
 import { FacturapiProvider } from './providers/facturapi.provider'
 import { FiscalProvider } from './providers/fiscal-provider.interface'
 import { encryptProviderKey } from './fiscalKey.service'
+import { fetchStorageObject } from '../storage.service'
 
 // ─── DI interface ─────────────────────────────────────────────────────────────
 
@@ -33,11 +35,15 @@ export interface EmisorOnboardingDeps {
    * Account-level provider (built from FACTURAPI_USER_KEY).
    * Only createOrganization, updateOrgLegal, uploadCsd and getOrganizationStatus are used here.
    */
-  accountProvider: Pick<FiscalProvider, 'createOrganization' | 'updateOrgLegal' | 'uploadCsd' | 'getOrganizationStatus'>
+  accountProvider: Pick<FiscalProvider, 'createOrganization' | 'updateOrgLegal' | 'uploadCsd' | 'getOrganizationStatus' | 'uploadLogo'>
   /** Persist changes to a FiscalEmisor row. */
   updateEmisor: (emisorId: string, data: Record<string, any>) => Promise<any>
   /** Encrypt a provider key before DB storage. Injected so tests can assert without real crypto. */
   encryptKey: (plaintext: string) => string
+  /** URL del logo del venue (`Venue.logo`), o null si no ha subido uno. */
+  findVenueLogo: (venueId: string) => Promise<string | null>
+  /** Descarga bytes de una URL (el logo vive en Storage; el PAC quiere el archivo, no la liga). */
+  fetchBytes: (url: string) => Promise<Buffer>
 }
 
 // ─── Service functions ────────────────────────────────────────────────────────
@@ -91,7 +97,51 @@ export async function provisionEmisor(
     zip: emisor.lugarExpedicion,
   })
 
+  // El logo va en el mismo paso (es lo que imprime en el PDF de cada factura), pero un fallo del
+  // logo NUNCA tumba el provisioning: el emisor queda listo y el logo se reintenta desde el botón.
+  try {
+    await syncEmisorLogo({ emisorId: emisor.id, expectedVenueId: params.expectedVenueId }, { ...deps, findEmisor: async () => provisioned })
+  } catch (err: unknown) {
+    logger.warn(`[fiscal] logo no sincronizado al provisionar emisor ${emisor.id}: ${err instanceof Error ? err.message : String(err)}`)
+  }
+
   return provisioned
+}
+
+/**
+ * Sube el logo del venue (`Venue.logo`) a la organización del PAC, que es lo que aparece en el PDF
+ * de cada factura. Sin esto el PDF sale con el nombre en texto plano (Testarudo, 21-sep-2026).
+ * Idempotente: subirlo dos veces sólo lo reemplaza.
+ *
+ * @throws {Error} "Emisor {id} not found" on tenant mismatch → 404.
+ */
+export async function syncEmisorLogo(
+  params: { emisorId: string; expectedVenueId: string; timeoutMs?: number },
+  deps: EmisorOnboardingDeps = defaultDeps(),
+): Promise<{ synced: true } | { synced: false; reason: 'NO_LOGO' | 'NOT_PROVISIONED' }> {
+  const emisor = await deps.findEmisor(params.emisorId)
+  if (!emisor || emisor.venueId !== params.expectedVenueId) {
+    throw new Error(`Emisor ${params.emisorId} not found`) // tenant guard → 404
+  }
+  if (!emisor.providerOrgId) return { synced: false, reason: 'NOT_PROVISIONED' }
+  const logoUrl = await deps.findVenueLogo(emisor.venueId)
+  if (!logoUrl) return { synced: false, reason: 'NO_LOGO' }
+  const bytes = await deps.fetchBytes(logoUrl)
+  // El SDK del PAC no acota la subida: sin esto, un socket colgado dejaba el provisioning esperando.
+  await conTiempoLimite(
+    deps.accountProvider.uploadLogo(emisor.providerOrgId, bytes),
+    params.timeoutMs ?? 10_000,
+    'la subida del logo al PAC',
+  )
+  return { synced: true }
+}
+
+function conTiempoLimite<T>(promise: Promise<T>, ms: number, que: string): Promise<T> {
+  let timer: NodeJS.Timeout
+  const limite = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Se agotó el tiempo de espera de ${que} (${ms} ms)`)), ms)
+  })
+  return Promise.race([promise, limite]).finally(() => clearTimeout(timer))
 }
 
 /**
@@ -173,5 +223,8 @@ function defaultDeps(): EmisorOnboardingDeps {
     accountProvider,
     updateEmisor: (id, data) => prisma.fiscalEmisor.update({ where: { id }, data }),
     encryptKey: encryptProviderKey,
+    findVenueLogo: async venueId => (await prisma.venue.findUnique({ where: { id: venueId }, select: { logo: true } }))?.logo ?? null,
+    // Sólo desde nuestro Storage, imagen, ≤ 5 MB, 10 s: `Venue.logo` es editable por el cliente.
+    fetchBytes: url => fetchStorageObject(url, { maxBytes: 5 * 1024 * 1024, timeoutMs: 10_000, contentTypePrefix: 'image/' }),
   }
 }

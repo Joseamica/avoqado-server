@@ -28,6 +28,8 @@ function deps(over: Partial<EmisorOnboardingDeps> = {}): EmisorOnboardingDeps {
     } as any,
     updateEmisor: jest.fn().mockImplementation(async (_id, data) => ({ ...emisor, ...data })),
     encryptKey: jest.fn().mockReturnValue('ENC'),
+    findVenueLogo: jest.fn().mockResolvedValue(null),
+    fetchBytes: jest.fn().mockResolvedValue(Buffer.alloc(0)),
     ...over,
   }
 }
@@ -172,5 +174,69 @@ describe('uploadEmisorCsd', () => {
     })
     const r = await uploadEmisorCsd({ emisorId: 'e1', cerBase64: 'AA==', keyBase64: 'BB==', csdPassword: 'pw', expectedVenueId: 'v1' }, d)
     expect(r.csdStatus).toBe('ACTIVE')
+  })
+})
+
+// ─── syncEmisorLogo ──────────────────────────────────────────────────────────
+// Testarudo (21-sep-2026): las facturas salían con el nombre en texto porque el logo del venue
+// nunca se subía a la organización del PAC. El logo es un paso del onboarding, no un adorno.
+
+import { syncEmisorLogo } from '../../../../src/services/fiscal/fiscalOnboarding.service'
+
+describe('syncEmisorLogo', () => {
+  const provisioned = { ...emisor, providerOrgId: 'org1' }
+  const logoDeps = (over: Partial<EmisorOnboardingDeps> = {}) =>
+    deps({
+      findEmisor: jest.fn().mockResolvedValue(provisioned),
+      findVenueLogo: jest.fn().mockResolvedValue('https://cdn/venues/testarudo/logo.jpg'),
+      fetchBytes: jest.fn().mockResolvedValue(Buffer.from('JPEGBYTES')),
+      accountProvider: { ...deps().accountProvider, uploadLogo: jest.fn().mockResolvedValue(undefined) } as any,
+      ...over,
+    })
+
+  it('baja el logo del venue y lo sube a la organización del PAC', async () => {
+    const d = logoDeps()
+    const r = await syncEmisorLogo({ emisorId: 'e1', expectedVenueId: 'v1' }, d)
+    expect(d.fetchBytes).toHaveBeenCalledWith('https://cdn/venues/testarudo/logo.jpg')
+    expect(d.accountProvider.uploadLogo).toHaveBeenCalledWith('org1', Buffer.from('JPEGBYTES'))
+    expect(r).toEqual({ synced: true })
+  })
+
+  it('sin logo en el venue: no llama al PAC y lo dice', async () => {
+    const d = logoDeps({ findVenueLogo: jest.fn().mockResolvedValue(null) })
+    const r = await syncEmisorLogo({ emisorId: 'e1', expectedVenueId: 'v1' }, d)
+    expect(r).toEqual({ synced: false, reason: 'NO_LOGO' })
+    expect(d.accountProvider.uploadLogo).not.toHaveBeenCalled()
+  })
+
+  it('emisor sin provisionar: no llama al PAC y lo dice', async () => {
+    const d = logoDeps({ findEmisor: jest.fn().mockResolvedValue(emisor) })
+    const r = await syncEmisorLogo({ emisorId: 'e1', expectedVenueId: 'v1' }, d)
+    expect(r).toEqual({ synced: false, reason: 'NOT_PROVISIONED' })
+    expect(d.accountProvider.uploadLogo).not.toHaveBeenCalled()
+  })
+
+  it('la subida al PAC tiene TIMEOUT: un uploadLogo que nunca contesta no cuelga el provisioning', async () => {
+    const d = logoDeps({ accountProvider: { ...deps().accountProvider, uploadLogo: jest.fn(() => new Promise(() => {})) } as any })
+    await expect(syncEmisorLogo({ emisorId: 'e1', expectedVenueId: 'v1', timeoutMs: 30 }, d)).rejects.toThrow(/tiempo/i)
+  })
+
+  it('tenant guard: emisor de otro venue → not found, sin tocar el PAC', async () => {
+    const d = logoDeps()
+    await expect(syncEmisorLogo({ emisorId: 'e1', expectedVenueId: 'OTRO' }, d)).rejects.toThrow(/not found/)
+    expect(d.accountProvider.uploadLogo).not.toHaveBeenCalled()
+  })
+})
+
+describe('provisionEmisor + logo', () => {
+  it('al provisionar, sube el logo del venue en el mismo paso (best-effort: un fallo del logo no tumba el provisioning)', async () => {
+    const d = deps({
+      findVenueLogo: jest.fn().mockResolvedValue('https://cdn/logo.jpg'),
+      fetchBytes: jest.fn().mockResolvedValue(Buffer.from('X')),
+      accountProvider: { ...deps().accountProvider, uploadLogo: jest.fn().mockRejectedValue(new Error('PAC caído')) } as any,
+    })
+    const r = await provisionEmisor({ emisorId: 'e1', expectedVenueId: 'v1' }, d)
+    expect(r.providerOrgId).toBe('org1')
+    expect(d.accountProvider.uploadLogo).toHaveBeenCalledWith('org1', Buffer.from('X'))
   })
 })

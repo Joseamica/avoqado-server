@@ -41,6 +41,16 @@ describe('resolveAutofacturaAvailable', () => {
     expect(mockLoadOrderForCfdiFromDb).toHaveBeenCalledWith('order-123')
   })
 
+  it('returns false when the order is outside the safe envelope (unsupportedReasons): the ticket must not offer autofactura for a document the engine would refuse', async () => {
+    mockLoadOrderForCfdiFromDb.mockResolvedValue({
+      facturacionEnabled: true,
+      autofacturaEnabled: true,
+      unsupportedReasons: ['La cuenta lleva cargo por servicio; …'],
+    } as any)
+
+    expect(await resolveAutofacturaAvailable('order-123')).toBe(false)
+  })
+
   it('returns false when bundle is null', async () => {
     mockLoadOrderForCfdiFromDb.mockResolvedValue(null)
 

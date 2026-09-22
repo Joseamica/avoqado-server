@@ -196,6 +196,71 @@ describe('issueCfdiForOrder', () => {
     expect(deps.resolveProvider).not.toHaveBeenCalled()
   })
 
+  // Testarudo 21-sep-2026: se timbraron facturas por MENOS de lo cobrado (extras ignorados). El motor
+  // ya carga los extras; esta barrera es la red de seguridad para cualquier otra deriva de datos.
+  it('BARRERA de dinero: si el total de la factura ≠ lo pagado, NO llama al PAC y persiste VALIDATION_FAILED con la razón', async () => {
+    const deps = makeDeps()
+    const base = await (makeDeps().loadOrderForCfdi as jest.Mock)('o1')
+    deps.loadOrderForCfdi = jest.fn().mockResolvedValue({ ...base, paidCents: 12180 }) // cobró 121.80, la factura dice 116.00
+    const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
+    expect(res.status).toBe('VALIDATION_FAILED')
+    expect(res.reasons?.join(' ')).toMatch(/\$116\.00.*\$121\.80/)
+    expect(deps.resolveProvider).not.toHaveBeenCalled()
+    expect((deps.persistCfdi as jest.Mock).mock.calls[0][0].status).toBe('VALIDATION_FAILED')
+  })
+
+  it('SOBRE SEGURO: una orden con unsupportedReasons NO llama al PAC y responde VALIDATION_FAILED con esa razón', async () => {
+    const deps = makeDeps()
+    const base = await (makeDeps().loadOrderForCfdi as jest.Mock)('o1')
+    deps.loadOrderForCfdi = jest.fn().mockResolvedValue({
+      ...base,
+      paidCents: 12600, // ≠ documento (11600) a propósito: el cargo por servicio quedó fuera del documento
+      unsupportedReasons: ['La cuenta lleva cargo por servicio; la facturación de cargos por servicio llega en la siguiente versión.'],
+    })
+    const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
+    expect(res.status).toBe('VALIDATION_FAILED')
+    expect(res.reasons?.join(' ')).toMatch(/cargo por servicio/)
+    expect(res.reasons?.join(' ')).not.toMatch(/no coincide con lo cobrado/) // la razón del sobre no se apila con el desajuste
+    expect(deps.resolveProvider).not.toHaveBeenCalled()
+  })
+
+  it('BARRERA de dinero: con paidCents == totalCents timbra normal (control positivo)', async () => {
+    const deps = makeDeps()
+    const base = await (makeDeps().loadOrderForCfdi as jest.Mock)('o1')
+    deps.loadOrderForCfdi = jest.fn().mockResolvedValue({ ...base, paidCents: 11600 })
+    const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
+    expect(res.status).toBe('STAMPED')
+  })
+
+  it('BARRERA de dinero: compara el DOCUMENTO que se manda (conceptos como los calcula el PAC), no los agregados de la orden', async () => {
+    // Orden NET (precios sin IVA): concepto 100 + 16% = 116 al PAC. Si la orden dice total 120 y se
+    // cobraron 120, los agregados cuadran pero el documento diría 116: no se timbra.
+    const deps = makeDeps()
+    const base = await (makeDeps().loadOrderForCfdi as jest.Mock)('o1')
+    deps.loadOrderForCfdi = jest.fn().mockResolvedValue({
+      ...base,
+      subtotalCents: 10345,
+      taxCents: 1655,
+      totalCents: 12000,
+      paidCents: 12000,
+      order: { ...base.order, pricesIncludeIva: false }, // items: 1 × 100 neto, tasa 0.16
+    })
+    const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
+    expect(res.status).toBe('VALIDATION_FAILED')
+    expect(res.reasons?.join(' ')).toMatch(/\$116\.00.*\$120\.00/)
+    expect(deps.resolveProvider).not.toHaveBeenCalled()
+  })
+
+  it('tenant isolation: un CFDI ya STAMPED de OTRO venue no se devuelve por idempotencia (404), y no se toca el PAC', async () => {
+    const deps = makeDeps({
+      findExistingCfdi: jest.fn().mockResolvedValue({ id: 'cfdiA', status: 'STAMPED', venueId: 'venueA', pdfUrl: 'https://x/a.pdf' }),
+    })
+    await expect(issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true, expectedVenueId: 'venueB' }, deps)).rejects.toThrow(
+      /not found/,
+    )
+    expect(deps.resolveProvider).not.toHaveBeenCalled()
+  })
+
   it('PAC error: persists STAMP_FAILED with the error', async () => {
     const deps = makeDeps({
       resolveProvider: jest.fn().mockReturnValue({
