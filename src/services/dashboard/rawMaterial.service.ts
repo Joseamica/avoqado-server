@@ -4,6 +4,7 @@ import prisma from '../../utils/prismaClient'
 import AppError, { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { CreateRawMaterialDto, UpdateRawMaterialDto, AdjustStockDto } from '../../schemas/dashboard/inventory.schema'
 import { createStockBatch, deductStockFIFO, deductStockFIFOInTx } from './fifoBatch.service'
+import { wasteHistoryFields } from './productInventory.service'
 import { withSerializableRetry } from '../../utils/serializableRetry'
 import { sendLowStockAlertNotification } from './notification.service'
 import { logAction } from './activity-log.service'
@@ -934,6 +935,11 @@ export async function countStockMovementsForExport(
  * relation behind it, so the names take their own scoped lookups. `limit` comes from the
  * caller's cap; leaving it out inherits the listing's default page size of 100 and hands
  * over a fraction of the year as if it were the year.
+ *
+ * Merma (Codex P3-2, spec §4.6): cada renglón con folio trae el folio, su código de motivo y la
+ * cantidad «sin existencia» — ésta sólo en el primer movimiento del folio, la MISMA ancla que el
+ * Historial (`wasteHistoryFields`) —, así la declaración se reconstruye sumando por folio. Los folios
+ * salen de UNA consulta acotada por los ids de esta página (sin N+1); un kardex sin merma no la paga.
  */
 export async function fetchStockMovementsForExport(
   venueId: string,
@@ -956,20 +962,43 @@ export async function fetchStockMovementsForExport(
         })
       : Promise.resolve([])
 
-  const [rawMaterial, staff] = await Promise.all([
+  const reportIds = Array.from(new Set(movements.map(m => m.wasteReportId).filter((id): id is string => Boolean(id))))
+  const reportsPromise =
+    reportIds.length > 0
+      ? prisma.inventoryWasteReport.findMany({
+          where: { id: { in: reportIds }, venueId },
+          take: reportIds.length,
+          select: {
+            id: true,
+            reasonCode: true,
+            unrecordedQuantity: true,
+            rawMovements: { select: { id: true }, orderBy: { id: 'asc' }, take: 1 },
+          },
+        })
+      : Promise.resolve([])
+
+  const [rawMaterial, staff, reports] = await Promise.all([
     prisma.rawMaterial.findFirst({
       where: { id: rawMaterialId, venueId },
       select: { name: true },
     }),
     staffPromise,
+    reportsPromise,
   ])
 
   const staffNameById = new Map(staff.map(s => [s.id, `${s.firstName} ${s.lastName}`.trim()]))
+  const reportById = new Map(reports.map(report => [report.id, report]))
 
   return movements.map(movement => ({
     ...movement,
     rawMaterialName: rawMaterial?.name ?? '',
     staffName: movement.createdBy ? (staffNameById.get(movement.createdBy) ?? '') : '',
+    ...wasteHistoryFields(
+      movement.id,
+      movement.wasteReportId,
+      movement.wasteReportId ? (reportById.get(movement.wasteReportId) ?? null) : null,
+      'rawMovements',
+    ),
   }))
 }
 

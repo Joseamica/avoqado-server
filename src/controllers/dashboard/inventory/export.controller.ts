@@ -215,6 +215,13 @@ export async function exportStockMovements(req: Request, res: Response, next: Ne
       { id: 'reference', label: 'Referencia', value: r => r.reference ?? '' },
       // The whole point of the report: an adjustment with no name attached is unauditable.
       { id: 'staffName', label: 'Responsable', value: r => r.staffName ?? '' },
+      // Merma (Codex P3-2, spec §4.6), AL FINAL para no mover ninguna columna existente: con el folio,
+      // su código de motivo y lo «sin existencia» la declaración se reconstruye sumando por folio. El
+      // excedente va sólo en el primer renglón del folio (vacío en sus hermanos): repetirlo lo contaría
+      // doble. Fuera de la merma las tres celdas van vacías.
+      { id: 'wasteReportId', label: 'Folio de merma', value: r => r.wasteReportId ?? '' },
+      { id: 'wasteReasonCode', label: 'Código de motivo', value: r => r.wasteReasonCode ?? '' },
+      { id: 'wasteUnrecorded', label: 'Sin existencia', value: r => r.wasteUnrecorded ?? '' },
     ]
 
     const encoded = await encodeExport(format, {

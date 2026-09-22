@@ -21,7 +21,7 @@ import { adaptDashboardWaste } from '@/services/shared/dashboardWasteAdapter'
 import { adjustInventoryStock, getGlobalMovements } from '@/services/dashboard/productInventory.service'
 import { fetchStockMovementsForExport } from '@/services/dashboard/rawMaterial.service'
 import * as notificationService from '@/services/dashboard/notification.service'
-import { voidWasteKey } from '@/services/shared/inventoryWaste.service'
+import { logWaste, voidWasteKey } from '@/services/shared/inventoryWaste.service'
 import { validateRequest } from '@/middlewares/validation'
 import { AdjustProductInventoryStockSchema, AdjustStockSchema } from '@/schemas/dashboard/inventory.schema'
 import { adjustStock } from '@/controllers/dashboard/inventory/rawMaterial.controller'
@@ -637,6 +637,50 @@ describe('Historial y export leen el folio y no inventan costo', () => {
     const exported = await fetchStockMovementsForExport(venueId, item.id, undefined, 100)
     expect(exported).toHaveLength(1)
     expect(exported[0]).toMatchObject({ wasteReportId: r.reportId, costImpact: null })
+  })
+
+  // Codex P3-2: el export del kardex permite RECONSTRUIR la declaración (§4.6): folio, código de motivo y
+  // cantidad «sin existencia», con el excedente en UN solo renglón (el ancla del Historial, el primer
+  // movimiento del folio), nunca repetido por lote.
+  test('🔴 el export reconstruye la declaración: 5 declaradas = 3 descontadas en dos lotes + 2 sin existencia', async () => {
+    const item = await raw(3)
+    await batch(item.id, 1, 3, new Date('2026-01-01T00:00:00.000Z'))
+    await batch(item.id, 2, 4, new Date('2026-02-01T00:00:00.000Z'))
+    const waste = await logWaste(venueId, staffId, {
+      itemType: 'RAW_MATERIAL',
+      itemId: item.id,
+      quantity: '5',
+      unit: 'PIECE',
+      reasonCode: 'SPOILED',
+      idempotencyKey: randomUUID(),
+      source: 'POS',
+    })
+    // Un movimiento que NO es merma, en el mismo kardex: sus campos de folio quedan vacíos.
+    await prisma.rawMaterialMovement.create({
+      data: { venueId, rawMaterialId: item.id, type: 'ADJUSTMENT', quantity: D(4), unit: 'PIECE', previousStock: D(0), newStock: D(4) },
+    })
+
+    const rows = await fetchStockMovementsForExport(venueId, item.id, undefined, 100)
+    const folio = rows.filter(row => row.wasteReportId === waste.reportId)
+    expect(folio).toHaveLength(2)
+    expect(folio.every(row => row.wasteReasonCode === 'SPOILED')).toBe(true)
+    // El excedente va UNA vez: en el primer movimiento del folio, como en el Historial.
+    const anchorId = folio.map(row => row.id).sort()[0]
+    expect(folio.map(row => [row.id === anchorId, row.wasteUnrecorded])).toEqual(
+      expect.arrayContaining([
+        [true, 2],
+        [false, null],
+      ]),
+    )
+
+    const descontado = folio.reduce((sum, row) => sum - Number(row.quantity), 0)
+    const sinExistencia = folio.reduce((sum, row) => sum + (row.wasteUnrecorded ?? 0), 0)
+    expect(descontado).toBe(3)
+    expect(sinExistencia).toBe(2)
+    expect(descontado + sinExistencia).toBe(Number(waste.declared))
+
+    const other = rows.find(row => row.wasteReportId === null)
+    expect(other).toMatchObject({ type: 'ADJUSTMENT', wasteReportId: null, wasteReasonCode: null, wasteUnrecorded: null })
   })
 
   test('los movimientos que NO son merma quedan exactamente como hoy', async () => {

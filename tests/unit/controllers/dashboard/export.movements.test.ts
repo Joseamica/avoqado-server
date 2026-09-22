@@ -152,6 +152,48 @@ describe('exportStockMovements', () => {
     expect(col.value({ wasteReportId: null, costImpact: -50 })).toBe(-50)
   })
 
+  // ── Codex P3-2: el export reconstruye la declaración de merma (§4.6) ──────────────
+  it('🔴 folio, código de motivo y «sin existencia» van AL FINAL; ninguna columna existente se mueve', async () => {
+    await exportStockMovements(req(), res(), jest.fn())
+
+    const columns = encodeExport.mock.calls[0][1].allColumns
+    expect(columns.map((c: { id: string }) => c.id)).toEqual([
+      'createdAt',
+      'rawMaterialName',
+      'type',
+      'quantity',
+      'unit',
+      'previousStock',
+      'newStock',
+      'costImpact',
+      'reason',
+      'reference',
+      'staffName',
+      'wasteReportId',
+      'wasteReasonCode',
+      'wasteUnrecorded',
+    ])
+    expect(columns.slice(-3).map((c: { label: string }) => c.label)).toEqual(['Folio de merma', 'Código de motivo', 'Sin existencia'])
+  })
+
+  it('las columnas nuevas: el folio y su motivo en cada renglón, el excedente sólo en el ancla, vacías fuera de la merma', async () => {
+    await exportStockMovements(req(), res(), jest.fn())
+
+    const col = (id: string) => encodeExport.mock.calls[0][1].allColumns.find((c: { id: string }) => c.id === id)
+    const anchor = { wasteReportId: 'clwaste1', wasteReasonCode: 'SPOILED', wasteUnrecorded: 2 }
+    const sibling = { wasteReportId: 'clwaste1', wasteReasonCode: 'SPOILED', wasteUnrecorded: null }
+    const plain = { wasteReportId: null, wasteReasonCode: null, wasteUnrecorded: null }
+
+    expect(col('wasteReportId').value(anchor)).toBe('clwaste1')
+    expect(col('wasteReasonCode').value(sibling)).toBe('SPOILED')
+    expect(col('wasteUnrecorded').value(anchor)).toBe(2)
+    expect(col('wasteUnrecorded').value({ ...anchor, wasteUnrecorded: 0 })).toBe(0)
+    expect(col('wasteUnrecorded').value(sibling)).toBe('')
+    expect([col('wasteReportId'), col('wasteReasonCode'), col('wasteUnrecorded')].map(c => c.value(plain))).toEqual(['', '', ''])
+    // Filas sin los campos (movimientos de antes del libro, mocks viejos): vacías, nunca «undefined».
+    expect([col('wasteReportId'), col('wasteReasonCode'), col('wasteUnrecorded')].map(c => c.value({}))).toEqual(['', '', ''])
+  })
+
   it('names the file for what it is', async () => {
     await exportStockMovements(req(), res(), jest.fn())
 

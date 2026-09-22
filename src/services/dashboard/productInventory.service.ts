@@ -228,25 +228,32 @@ const WASTE_REPORT_FOR_HISTORY = {
   productMovements: { select: { id: true }, orderBy: { id: 'asc' }, take: 1 },
 } satisfies Prisma.InventoryWasteReportSelect
 
-type WasteReportForHistory = Prisma.InventoryWasteReportGetPayload<{ select: typeof WASTE_REPORT_FOR_HISTORY }>
+/** Lo mínimo que hace falta del folio para `wasteHistoryFields`: motivo, excedente y el ancla (el
+ *  primer movimiento del folio) de la tabla de hijos que corresponda. El Historial trae las dos; el
+ *  export del kardex de un insumo sólo `rawMovements`. */
+type WasteReportAnchor = {
+  reasonCode: string | null
+  unrecordedQuantity: Prisma.Decimal
+} & Partial<Record<'rawMovements' | 'productMovements', { id: string }[]>>
 
 /**
- * Campos ADITIVOS del Historial para los movimientos de merma con folio; `null` en todo lo demás.
+ * Campos ADITIVOS del Historial (y del export del kardex, Codex P3-2) para los movimientos de merma
+ * con folio; `null` en todo lo demás.
  *
  * `wasteUnrecorded` es del FOLIO, no del movimiento: una merma de insumo que tocó dos lotes deja
  * dos movimientos, y repetir el excedente en los dos lo contaría doble. Va sólo en el primer
  * movimiento del folio (el de menor id); en sus hermanos es `null` — agrupar por `wasteReportId`.
  */
-function wasteHistoryFields(
+export function wasteHistoryFields(
   movementId: string,
   wasteReportId: string | null,
-  report: WasteReportForHistory | null,
+  report: WasteReportAnchor | null,
   children: 'rawMovements' | 'productMovements',
 ): { wasteReportId: string | null; wasteReasonCode: string | null; wasteUnrecorded: number | null } {
   if (!wasteReportId || !report) {
     return { wasteReportId: null, wasteReasonCode: null, wasteUnrecorded: null }
   }
-  const anchorId = report[children][0]?.id
+  const anchorId = report[children]?.[0]?.id
   return {
     wasteReportId,
     wasteReasonCode: report.reasonCode,
