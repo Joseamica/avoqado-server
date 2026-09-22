@@ -398,16 +398,33 @@ async function alertLowStockAfterWaste(venueId: string, rawMaterialId: string, r
   }
 }
 
-export async function logWaste(venueId: string, actorStaffId: string, input: WasteInput): Promise<WasteSummary> {
+/**
+ * Lo que la entrada responde, leído DENTRO de la transacción de `logWaste` (Codex P2-2): después de
+ * escribir los efectos y antes del COMMIT. Si la lectura falla, la merma entera se revierte; nunca
+ * queda una merma aplicada con una respuesta de error. Importa porque el dashboard de hoy no manda
+ * folio: un error tras el COMMIT haría que reintentara con otro y descontara dos veces.
+ */
+export type WasteResultReader<T> = (tx: Prisma.TransactionClient, summary: WasteSummary) => Promise<T>
+
+export function logWaste(venueId: string, actorStaffId: string, input: WasteInput): Promise<WasteSummary>
+export function logWaste<T>(venueId: string, actorStaffId: string, input: WasteInput, readResult: WasteResultReader<T>): Promise<T>
+export async function logWaste<T>(
+  venueId: string,
+  actorStaffId: string,
+  input: WasteInput,
+  readResult?: WasteResultReader<T>,
+): Promise<WasteSummary | T> {
   const payload = prepareWaste(actorStaffId, input)
+  const respond = (tx: Prisma.TransactionClient, summary: WasteSummary): Promise<WasteSummary | T> =>
+    readResult ? readResult(tx, summary) : Promise.resolve(summary)
 
   // `applied`: ESTA llamada escribió los efectos. Recuperar un folio ya aplicado no los repite, y
   // tampoco repite lo que va después del COMMIT.
-  let outcome: { summary: WasteSummary; applied: boolean }
+  let outcome: { summary: WasteSummary; result: WasteSummary | T; applied: boolean }
   try {
     outcome = await serializable(async tx => {
       const recovered = await recoverByKey(venueId, payload.idempotencyKey, actorStaffId, payload.payloadHash, tx)
-      if (recovered) return { summary: recovered, applied: false }
+      if (recovered) return { summary: recovered, result: await respond(tx, recovered), applied: false }
 
       let raw: LockedRawMaterial | undefined
       let product: LockedProduct | undefined
@@ -604,14 +621,16 @@ export async function logWaste(venueId: string, actorStaffId: string, input: Was
       }
 
       await audit(tx, report, 'INVENTORY_WASTE_LOGGED')
-      return { summary: wasteSummary(report), applied: true }
+      const summary = wasteSummary(report)
+      return { summary, result: await respond(tx, summary), applied: true }
     })
   } catch (error) {
     if (!isWasteKeyCollision(error)) throw error
 
-    // La transacción que perdió ya terminó: no se consulta con su cliente abortado.
+    // La transacción que perdió ya terminó: no se consulta con su cliente abortado. La respuesta se
+    // arma en una transacción propia (el ganador ya confirmó: aquí no hay efectos que proteger).
     const recovered = await recoverByKey(venueId, payload.idempotencyKey, actorStaffId, payload.payloadHash)
-    if (recovered) return recovered
+    if (recovered) return readResult ? serializable(tx => readResult(tx, recovered)) : recovered
     throw error
   }
 
@@ -620,7 +639,7 @@ export async function logWaste(venueId: string, actorStaffId: string, input: Was
   if (outcome.applied && payload.itemType === 'RAW_MATERIAL' && new Decimal(outcome.summary.deducted).gt(0)) {
     await alertLowStockAfterWaste(venueId, payload.itemId, outcome.summary.reportId)
   }
-  return outcome.summary
+  return outcome.result
 }
 
 function voidResult(report: InventoryWasteReport, actorStaffId: string, canAdjust: boolean): VoidWasteResult {

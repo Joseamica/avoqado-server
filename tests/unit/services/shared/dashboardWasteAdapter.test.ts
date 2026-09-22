@@ -6,7 +6,9 @@
  *  - el adaptador ya NO evalúa la alerta de existencia baja: la evalúa `logWaste` después del COMMIT,
  *    igual para POS, dashboard y MCP (Opus I1; lo fija inventory-waste.integration.test.ts);
  *  - el adaptador no es un segundo candado de permiso (Rulings 18 y 20);
- *  - devuelve el artículo RELEÍDO del venue después de la merma, para que la ruta no lea la base.
+ *  - el artículo que responde la ruta se lee DENTRO de la transacción de `logWaste`, después de los
+ *    efectos y antes del COMMIT (Codex P2-2): ningún fallo posterior al COMMIT puede devolver error
+ *    con la merma ya aplicada (el dashboard de hoy reintentaría sin folio y descontaría otra vez).
  */
 import { prismaMock } from '../../../__helpers__/setup'
 
@@ -42,7 +44,11 @@ beforeEach(() => {
   })
   prismaMock.rawMaterial.findFirstOrThrow.mockResolvedValue(INSUMO)
   prismaMock.inventory.findFirstOrThrow.mockResolvedValue(INVENTARIO)
-  logWaste.mockResolvedValue(RESUMEN)
+  // Como el servicio real: arma la respuesta con la proyección, dentro de «su» transacción.
+  logWaste.mockImplementation(
+    async (_venue: unknown, _actor: unknown, _input: unknown, project: (tx: unknown, summary: typeof RESUMEN) => Promise<unknown>) =>
+      project(prismaMock, RESUMEN),
+  )
   checkAndCreateLowStockAlert.mockResolvedValue(undefined)
 })
 
@@ -80,15 +86,19 @@ describe('adaptDashboardWaste', () => {
   })
 })
 
-describe('adaptDashboardWaste — el artículo releído', () => {
-  it('🔴 relee el insumo o el inventario DESPUÉS de registrar, acotado al venue', async () => {
+describe('adaptDashboardWaste — la respuesta dentro de la transacción', () => {
+  it('🔴 obtiene el artículo después de los efectos y antes del COMMIT, acotado al venue', async () => {
     const orden: string[] = []
-    logWaste.mockImplementation(async () => {
-      orden.push('logWaste')
-      return RESUMEN
-    })
+    logWaste.mockImplementation(
+      async (_venue: unknown, _actor: unknown, _input: unknown, project: (tx: unknown, summary: typeof RESUMEN) => Promise<unknown>) => {
+        orden.push('efectos')
+        const result = await project(prismaMock, RESUMEN)
+        orden.push('commit')
+        return result
+      },
+    )
     prismaMock.rawMaterial.findFirstOrThrow.mockImplementation((async () => {
-      orden.push('relectura')
+      orden.push('respuesta')
       return INSUMO
     }) as never)
 
@@ -96,7 +106,7 @@ describe('adaptDashboardWaste — el artículo releído', () => {
       waste: RESUMEN,
       item: INSUMO,
     })
-    expect(orden).toEqual(['logWaste', 'relectura'])
+    expect(orden).toEqual(['efectos', 'respuesta', 'commit'])
     expect(prismaMock.rawMaterial.findFirstOrThrow).toHaveBeenCalledWith({ where: { id: 'rm-1', venueId: 'venue-1' } })
 
     await expect(adaptDashboardWaste('venue-1', 'staff-1', 'PRODUCT', 'p-1', { quantity: -3 })).resolves.toEqual({
@@ -105,6 +115,30 @@ describe('adaptDashboardWaste — el artículo releído', () => {
     })
     expect(prismaMock.inventory.findFirstOrThrow).toHaveBeenCalledWith({ where: { venueId: 'venue-1', productId: 'p-1' } })
   })
+
+  it.each([
+    ['RAW_MATERIAL', () => adaptDashboardWaste('venue-1', 'staff-1', 'RAW_MATERIAL', 'rm-1', { quantity: -3 }), INSUMO],
+    ['PRODUCT', () => adaptDashboardWaste('venue-1', 'staff-1', 'PRODUCT', 'p-1', { quantity: -3 }), INVENTARIO],
+  ] as const)(
+    '🔴 %s: un fallo de la base DESPUÉS del COMMIT ya no convierte la merma aplicada en error',
+    async (_itemType, adapt, item) => {
+      // La transacción de logWaste contesta; el cliente global —lo que se usaría después del COMMIT— falla.
+      const tx = {
+        rawMaterial: { findFirstOrThrow: jest.fn().mockResolvedValue(INSUMO) },
+        inventory: { findFirstOrThrow: jest.fn().mockResolvedValue(INVENTARIO) },
+      }
+      logWaste.mockImplementation(
+        async (_venue: unknown, _actor: unknown, _input: unknown, project: (tx: unknown, summary: typeof RESUMEN) => Promise<unknown>) =>
+          project(tx, RESUMEN),
+      )
+      prismaMock.rawMaterial.findFirstOrThrow.mockRejectedValue(new Error('conexión perdida'))
+      prismaMock.inventory.findFirstOrThrow.mockRejectedValue(new Error('conexión perdida'))
+
+      await expect(adapt()).resolves.toEqual({ waste: RESUMEN, item })
+      expect(prismaMock.rawMaterial.findFirstOrThrow).not.toHaveBeenCalled()
+      expect(prismaMock.inventory.findFirstOrThrow).not.toHaveBeenCalled()
+    },
+  )
 })
 
 describe('canRecordDashboardWaste', () => {

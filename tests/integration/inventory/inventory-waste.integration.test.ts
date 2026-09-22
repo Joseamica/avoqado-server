@@ -814,6 +814,66 @@ test('la alerta sólo se evalúa cuando ESTA llamada descontó un insumo: ni pro
   }
 })
 
+// ─── La respuesta se arma DENTRO de la transacción (Codex P2-2) ─────────────────────────
+// El dashboard de hoy no manda folio: si la ruta contestara error DESPUÉS del COMMIT, el reintento
+// generaría otro folio y descontaría otra vez. Por eso lo que responde la entrada se lee dentro de la
+// transacción de logWaste, antes del COMMIT: o sale la respuesta, o no queda nada aplicado.
+
+test('🔴 si falla la lectura de la respuesta, revierte toda la merma', async () => {
+  const item = await product(5)
+  const input = request('PRODUCT', item.id, 2)
+  const failure = new Error('No se pudo construir la respuesta')
+
+  await expect(
+    logWaste(venueId, staffId, input, async tx => {
+      // Los efectos ya están escritos dentro de la transacción…
+      const current = await tx.inventory.findUniqueOrThrow({ where: { productId: item.id } })
+      expect(current.currentStock.toString()).toBe('3')
+      throw failure
+    }),
+  ).rejects.toBe(failure)
+
+  // …y caen con ella: nada aplicado sin respuesta.
+  expect(await productStock(item.id)).toBe('5')
+  expect(await prisma.inventoryWasteReport.count({ where: { venueId } })).toBe(0)
+  expect(await prisma.inventoryMovement.count({ where: { inventory: { venueId } } })).toBe(0)
+  expect(await prisma.activityLog.count({ where: { venueId, action: 'INVENTORY_WASTE_LOGGED' } })).toBe(0)
+})
+
+test('la respuesta leída en la transacción ve los efectos y es lo que devuelve logWaste, también al recuperar el folio', async () => {
+  const ingredient = await raw(5)
+  const input = request('RAW_MATERIAL', ingredient.id, 2)
+  const read = async (tx: Prisma.TransactionClient, summary: WasteSummary) => {
+    const row = await tx.rawMaterial.findUniqueOrThrow({ where: { id: ingredient.id } })
+    return { summary, stock: row.currentStock.toString() }
+  }
+
+  const first = await logWaste(venueId, staffId, input, read)
+  expect(first.stock).toBe('3')
+  expect(first.summary).toMatchObject({ declared: '2', deducted: '2', unrecorded: '0' })
+
+  // El mismo folio: no descuenta otra vez y la respuesta se arma sobre el folio recuperado.
+  expect(await logWaste(venueId, staffId, input, read)).toEqual(first)
+  expect(await rawStock(ingredient.id)).toBe('3')
+  expect(await prisma.inventoryWasteReport.count({ where: { venueId } })).toBe(1)
+})
+
+test('dos peticiones concurrentes con el mismo folio y lectura de respuesta: descuentan una vez y contestan lo mismo', async () => {
+  const item = await product(10)
+  const input = request('PRODUCT', item.id, 4)
+  const read = async (tx: Prisma.TransactionClient, summary: WasteSummary) => {
+    const inventory = await tx.inventory.findUniqueOrThrow({ where: { productId: item.id } })
+    return { summary, stock: inventory.currentStock.toString() }
+  }
+
+  const [first, second] = await Promise.all([logWaste(venueId, staffId, input, read), logWaste(venueId, staffId, input, read)])
+
+  expect(first).toEqual(second)
+  expect(first.stock).toBe('6')
+  expect(await productStock(item.id)).toBe('6')
+  expect(await prisma.inventoryWasteReport.count({ where: { venueId } })).toBe(1)
+})
+
 // ─── Anular un folio (voidWasteKey) ───────────────────────────────────────────────────────
 
 test('void no necesita plan y devuelve la autoría canónica al repetirlo', async () => {

@@ -15,9 +15,10 @@
  *   conservan. `unitCost: 0` es un costo conocido; ausente = sin costo recibido.
  * - Folio del cuerpo, o uno generado por el servidor (el dashboard de hoy no lo manda).
  *
- * Devuelve el resumen del folio (`waste`) y el artículo RELEÍDO después de la merma (`item`: la fila
- * del insumo, o el `Inventory` del producto), que es lo que las rutas ya respondían: así el
- * controlador sólo arma la respuesta y no lee la base.
+ * Devuelve el resumen del folio (`waste`) y el artículo después de la merma (`item`: la fila del
+ * insumo, o el `Inventory` del producto), que es lo que las rutas ya respondían: así el controlador
+ * sólo arma la respuesta y no lee la base. El artículo se lee dentro de la transacción de la merma,
+ * antes del COMMIT: o sale la respuesta, o no queda nada aplicado.
  *
  * 🔴 UN SOLO candado de permiso (Rulings 18 y 20): aquí NO se evalúa el permiso. Lo decide
  * `checkPermission('inventory:adjust')` de la ruta, que respeta el PIN de gerente; una segunda
@@ -126,27 +127,32 @@ export async function adaptDashboardWaste(
   const idempotencyKey = normalizeWasteKey(input.idempotencyKey ?? randomUUID())
   const unit = await resolveUnit(venueId, itemType, itemId, idempotencyKey)
 
-  const summary = await logWaste(venueId, staffId, {
-    itemType,
-    itemId,
-    quantity: new Prisma.Decimal(input.quantity).abs(),
-    unit,
-    reasonCode: input.reasonCode ?? 'UNSPECIFIED',
-    note: input.reason,
-    reference: input.reference,
-    unitCost: input.unitCost,
-    supplier: input.supplier,
-    idempotencyKey,
-    source: 'DASHBOARD',
-  })
-
-  // La alerta de existencia baja ya no va aquí: la evalúa `logWaste` después del COMMIT, igual para
-  // POS, dashboard y MCP (Opus I1).
-
-  // La fila que respondía la ruta, leída DESPUÉS de la merma y acotada al venue.
-  const item =
-    itemType === 'RAW_MATERIAL'
-      ? await prisma.rawMaterial.findFirstOrThrow({ where: { id: itemId, venueId } })
-      : await prisma.inventory.findFirstOrThrow({ where: { venueId, productId: itemId } })
-  return { waste: summary, item }
+  // La fila que respondía la ruta se lee DENTRO de la transacción de logWaste, después de los efectos
+  // y antes del COMMIT, acotada al venue (Codex P2-2): leerla después dejaba una ventana en que la
+  // merma ya estaba confirmada y la ruta contestaba error, y el dashboard de hoy reintenta SIN folio.
+  // La alerta de existencia baja tampoco va aquí: la evalúa logWaste después del COMMIT (Opus I1).
+  return logWaste(
+    venueId,
+    staffId,
+    {
+      itemType,
+      itemId,
+      quantity: new Prisma.Decimal(input.quantity).abs(),
+      unit,
+      reasonCode: input.reasonCode ?? 'UNSPECIFIED',
+      note: input.reason,
+      reference: input.reference,
+      unitCost: input.unitCost,
+      supplier: input.supplier,
+      idempotencyKey,
+      source: 'DASHBOARD',
+    },
+    async (tx, waste): Promise<DashboardWasteResult<RawMaterial | Inventory>> => ({
+      waste,
+      item:
+        itemType === 'RAW_MATERIAL'
+          ? await tx.rawMaterial.findFirstOrThrow({ where: { id: itemId, venueId } })
+          : await tx.inventory.findFirstOrThrow({ where: { venueId, productId: itemId } }),
+    }),
+  )
 }
