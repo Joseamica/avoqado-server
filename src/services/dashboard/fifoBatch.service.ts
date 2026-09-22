@@ -456,7 +456,8 @@ export async function deductStockFIFO(
  *
  * Reglas para usarla:
  *   - `tx` DEBE ser una transacción Serializable (withSerializableRetry) — el
- *     FOR UPDATE NOWAIT de lockBatchesForAllocation lanza 55P03 bajo contención
+ *     FOR UPDATE NOWAIT de lockWasteBatchesInTx (el candado de TODA deducción:
+ *     ventas, conteos y merma, no sólo merma) lanza 55P03 bajo contención
  *     y el poseedor de la tx debe reintentarla completa.
  *   - No escribas nada ANTES en la misma tx que no pueda reintentarse junto.
  *
