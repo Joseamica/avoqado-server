@@ -40,11 +40,13 @@ function assertTestDatabase(): void {
 async function clearVenue(id: string): Promise<void> {
   if (!id) return
   await prisma.activityLog.deleteMany({ where: { venueId: id } })
+  await prisma.rawMaterialMovement.deleteMany({ where: { venueId: id } })
   await prisma.inventoryMovement.deleteMany({ where: { inventory: { venueId: id } } })
   await prisma.inventoryWasteReport.deleteMany({ where: { venueId: id } })
   await prisma.lowStockAlert.deleteMany({ where: { venueId: id } })
   await prisma.inventory.deleteMany({ where: { venueId: id } })
   await prisma.product.deleteMany({ where: { venueId: id } })
+  await prisma.rawMaterial.deleteMany({ where: { venueId: id } })
 }
 
 async function clearAll(): Promise<void> {
@@ -110,6 +112,26 @@ async function product(stock: number, cost: number, targetVenueId: string = venu
   })
 }
 
+/** Insumo sin lotes (se descuenta directo) con su punto de reorden: la merma lo puede dejar abajo. */
+async function ingredient(stock: number, reorderPoint: number) {
+  return prisma.rawMaterial.create({
+    data: {
+      venueId,
+      name: `Leche ${randomUUID()}`,
+      sku: randomUUID(),
+      category: 'OTHER',
+      unit: 'PIECE',
+      unitType: 'COUNT',
+      currentStock: D(stock),
+      minimumStock: D(0),
+      reorderPoint: D(reorderPoint),
+      costPerUnit: D(1),
+      avgCostPerUnit: D(1),
+      notifyOnLowStock: false,
+    },
+  })
+}
+
 type Handler = (input: Record<string, unknown>) => Promise<{ content: { text: string }[] }>
 
 async function tools(): Promise<Record<string, Handler>> {
@@ -168,6 +190,19 @@ describe('log_waste por el MCP, contra la base real', () => {
     expect(await stockOf(taza.id)).toBe('5')
     expect(await prisma.inventoryWasteReport.count({ where: { venueId } })).toBe(0)
     expect(await prisma.activityLog.count({ where: { venueId } })).toBe(0)
+  })
+
+  test('🔴 la merma de un insumo por el MCP crea la alerta de existencia baja, como el POS y el dashboard', async () => {
+    const leche = await ingredient(6, 5)
+    const t = await tools()
+    const previa = json(await t.log_waste({ venueId, itemType: 'RAW_MATERIAL', itemId: leche.id, quantity: 3, reasonCode: 'SPOILED' }))
+    const hecho = json(await t.log_waste(previa.confirmationPayload))
+    expect(hecho.report).toMatchObject({ declared: '3', deducted: '3', unrecorded: '0' })
+
+    const alertas = await prisma.lowStockAlert.findMany({ where: { venueId, rawMaterialId: leche.id } })
+    expect(alertas).toHaveLength(1)
+    expect(alertas[0]).toMatchObject({ status: 'ACTIVE', alertType: 'LOW_STOCK' })
+    expect(alertas[0].currentLevel.toString()).toBe('3')
   })
 
   test('un local sin el plan responde planRequired con el resolver real y no escribe', async () => {

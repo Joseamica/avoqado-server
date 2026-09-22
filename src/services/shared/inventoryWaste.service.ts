@@ -1,10 +1,12 @@
 import { createHash } from 'crypto'
 import { InventoryWasteReport, Prisma, StaffRole, Unit, WasteCostState, WasteItemType, WasteSource } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
+import logger from '../../config/logger'
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../../errors/AppError'
 import { withSerializableRetry } from '../../utils/serializableRetry'
 import { BatchAllocationOrder, calculateFIFOAllocations, deductStockFIFOInTx, lockWasteBatchesInTx } from '../dashboard/fifoBatch.service'
 import { adjustInventoryStockInTx } from '../dashboard/productInventory.service'
+import { checkAndCreateLowStockAlert } from '../dashboard/rawMaterial.service'
 import { getUserAccess, hasPermission, UserAccess } from '../access/access.service'
 import { getEffectiveRolePermissions, resolvePermissions } from '../../lib/permissions'
 import { getEffectivePermissions } from '../../lib/resolveEffectivePermissions'
@@ -374,13 +376,38 @@ async function audit(
   })
 }
 
+/**
+ * La alerta de existencia baja tras la merma de un INSUMO (Opus I1). Ventas, modificadores, conteo
+ * móvil y la merma vieja la disparan; la del libro la dispara aquí, igual para POS, dashboard y MCP.
+ *
+ * Corre DESPUÉS del COMMIT y nunca convierte la merma en error: la merma ya está confirmada, y un
+ * error haría que el cliente reintentara — el dashboard de hoy sin folio, o sea descontando otra vez.
+ * Es idempotente (`checkAndCreateLowStockAlert` no crea otra si ya hay una ACTIVE) y respeta
+ * `notifyOnLowStock` para el aviso (Ruling 22).
+ */
+async function alertLowStockAfterWaste(venueId: string, rawMaterialId: string, reportId: string): Promise<void> {
+  try {
+    await checkAndCreateLowStockAlert(venueId, rawMaterialId)
+  } catch (error) {
+    logger.warn('No se pudo evaluar la alerta de existencia baja tras la merma', {
+      venueId,
+      rawMaterialId,
+      reportId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+}
+
 export async function logWaste(venueId: string, actorStaffId: string, input: WasteInput): Promise<WasteSummary> {
   const payload = prepareWaste(actorStaffId, input)
 
+  // `applied`: ESTA llamada escribió los efectos. Recuperar un folio ya aplicado no los repite, y
+  // tampoco repite lo que va después del COMMIT.
+  let outcome: { summary: WasteSummary; applied: boolean }
   try {
-    return await serializable(async tx => {
+    outcome = await serializable(async tx => {
       const recovered = await recoverByKey(venueId, payload.idempotencyKey, actorStaffId, payload.payloadHash, tx)
-      if (recovered) return recovered
+      if (recovered) return { summary: recovered, applied: false }
 
       let raw: LockedRawMaterial | undefined
       let product: LockedProduct | undefined
@@ -577,7 +604,7 @@ export async function logWaste(venueId: string, actorStaffId: string, input: Was
       }
 
       await audit(tx, report, 'INVENTORY_WASTE_LOGGED')
-      return wasteSummary(report)
+      return { summary: wasteSummary(report), applied: true }
     })
   } catch (error) {
     if (!isWasteKeyCollision(error)) throw error
@@ -587,6 +614,13 @@ export async function logWaste(venueId: string, actorStaffId: string, input: Was
     if (recovered) return recovered
     throw error
   }
+
+  // Después del COMMIT: sólo un insumo del que ESTA llamada descontó algo puede haber cruzado el
+  // punto de reorden (un producto no tiene LowStockAlert, y sin descuento la existencia no cambió).
+  if (outcome.applied && payload.itemType === 'RAW_MATERIAL' && new Decimal(outcome.summary.deducted).gt(0)) {
+    await alertLowStockAfterWaste(venueId, payload.itemId, outcome.summary.reportId)
+  }
+  return outcome.summary
 }
 
 function voidResult(report: InventoryWasteReport, actorStaffId: string, canAdjust: boolean): VoidWasteResult {

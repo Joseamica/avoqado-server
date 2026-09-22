@@ -28,10 +28,8 @@
 import { randomUUID } from 'crypto'
 import { Inventory, Prisma, RawMaterial, WasteItemType } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
-import logger from '../../config/logger'
 import AppError, { ConflictError, UnauthorizedError } from '../../errors/AppError'
 import { MASTER_ADMIN_PRINCIPAL_ID } from '../../lib/authPrincipals'
-import { checkAndCreateLowStockAlert } from '../dashboard/rawMaterial.service'
 import { logWaste, normalizeWasteKey, WasteSummary } from './inventoryWaste.service'
 import { WasteReasonCode } from './wasteReasons'
 
@@ -142,21 +140,8 @@ export async function adaptDashboardWaste(
     source: 'DASHBOARD',
   })
 
-  if (itemType === 'RAW_MATERIAL') {
-    // El camino viejo creaba la alerta de existencia baja al ajustar un insumo. La merma ya está
-    // confirmada: si la alerta falla, NO se convierte en error — un 500 aquí haría que el
-    // dashboard reintentara sin folio y registrara la merma dos veces.
-    try {
-      await checkAndCreateLowStockAlert(venueId, itemId)
-    } catch (error) {
-      logger.warn('No se pudo evaluar la alerta de existencia baja tras la merma del dashboard', {
-        venueId,
-        rawMaterialId: itemId,
-        reportId: summary.reportId,
-        error: error instanceof Error ? error.message : String(error),
-      })
-    }
-  }
+  // La alerta de existencia baja ya no va aquí: la evalúa `logWaste` después del COMMIT, igual para
+  // POS, dashboard y MCP (Opus I1).
 
   // La fila que respondía la ruta, leída DESPUÉS de la merma y acotada al venue.
   const item =

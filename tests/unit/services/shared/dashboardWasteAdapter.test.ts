@@ -3,8 +3,8 @@
  *
  * El comportamiento real (folio, descuento, costo, idempotencia) lo cubre
  * tests/integration/inventory/dashboard-waste-adapter.integration.test.ts. Aquí sólo:
- *  - la alerta de existencia baja que falla DESPUÉS de confirmar la merma no la convierte en error
- *    (un 500 haría que el dashboard reintentara sin folio y la registrara dos veces);
+ *  - el adaptador ya NO evalúa la alerta de existencia baja: la evalúa `logWaste` después del COMMIT,
+ *    igual para POS, dashboard y MCP (Opus I1; lo fija inventory-waste.integration.test.ts);
  *  - el adaptador no es un segundo candado de permiso (Rulings 18 y 20);
  *  - devuelve el artículo RELEÍDO del venue después de la merma, para que la ruta no lea la base.
  */
@@ -47,17 +47,8 @@ beforeEach(() => {
 })
 
 describe('adaptDashboardWaste', () => {
-  it('🔴 si la alerta de existencia baja falla, la merma YA registrada se devuelve igual', async () => {
-    checkAndCreateLowStockAlert.mockRejectedValue(new Error('smtp caído'))
-
-    await expect(adaptDashboardWaste('venue-1', 'staff-1', 'RAW_MATERIAL', 'rm-1', { quantity: -3 })).resolves.toEqual({
-      waste: RESUMEN,
-      item: INSUMO,
-    })
-    expect(checkAndCreateLowStockAlert).toHaveBeenCalledWith('venue-1', 'rm-1')
-  })
-
-  it('la alerta de existencia baja sólo aplica a insumos (el camino viejo de productos no la tenía)', async () => {
+  it('🔴 ya no evalúa la alerta de existencia baja: la evalúa logWaste después del COMMIT, para las tres entradas', async () => {
+    await adaptDashboardWaste('venue-1', 'staff-1', 'RAW_MATERIAL', 'rm-1', { quantity: -3 })
     await adaptDashboardWaste('venue-1', 'staff-1', 'PRODUCT', 'p-1', { quantity: -3 })
     expect(checkAndCreateLowStockAlert).not.toHaveBeenCalled()
   })

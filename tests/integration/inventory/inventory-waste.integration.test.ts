@@ -5,8 +5,10 @@ import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { getUserAccess } from '@/services/access/access.service'
 import { deleteDisposableDemoSession } from '@/services/cleanup/liveDemoCleanup.service'
 import { markExpiredBatches } from '@/services/dashboard/fifoBatch.service'
+import * as rawMaterialService from '@/services/dashboard/rawMaterial.service'
 import { deductInventoryForProduct } from '@/services/dashboard/productInventoryIntegration.service'
 import { confirmStockCount } from '@/services/mobile/inventory.mobile.service'
+import { create as createFromPos } from '@/controllers/mobile/inventoryWaste.mobile.controller'
 import {
   getWasteAccess,
   grantedPermissionsBeforeActivation,
@@ -717,6 +719,99 @@ test('la auditoría dice qué artículo, motivo y unidad se mermaron', async () 
 
   const productLog = await prisma.activityLog.findFirstOrThrow({ where: { venueId, entityId: productResult.reportId } })
   expect(productLog.data).toMatchObject({ itemType: 'PRODUCT', itemId: item.id, reasonCode: 'DROPPED', unit: 'UNIT', declared: '1' })
+})
+
+// ─── Alerta de existencia baja (Opus I1) ─────────────────────────────────────────────────
+// Ventas, modificadores, conteo móvil y la merma vieja la disparan; la merma del libro la dispara
+// en logWaste, DESPUÉS del COMMIT, para las tres entradas (POS, dashboard y MCP). Nunca convierte
+// la merma en error: ya está confirmada, y un error haría que el cliente reintentara.
+
+/** La cadena real de `POST /mobile/.../inventory/waste` después de los candados: el controlador `create`. */
+async function postFromPos(body: Record<string, unknown>, userId: string = staffId) {
+  const captured: { status: number; body: unknown; error: unknown } = { status: 200, body: undefined, error: undefined }
+  const req = { params: { venueId }, body, authContext: { userId, venueId, orgId: organizationId, role: 'MANAGER' } }
+  const res = {
+    status(code: number) {
+      captured.status = code
+      return this
+    },
+    json(payload: unknown) {
+      captured.body = JSON.parse(JSON.stringify(payload))
+      return this
+    },
+  }
+  await createFromPos(req as never, res as never, error => {
+    captured.error = error
+  })
+  return captured
+}
+
+async function rawWithReorderPoint(stock: number, reorderPoint: number) {
+  const item = await raw(stock)
+  return prisma.rawMaterial.update({ where: { id: item.id }, data: { reorderPoint: D(reorderPoint) } })
+}
+
+test('🔴 /mobile: la merma de un insumo que lo deja bajo el punto de reorden crea la alerta de existencia baja', async () => {
+  const item = await rawWithReorderPoint(6, 5)
+  await batch(item.id, 6, 1)
+
+  const r = await postFromPos({
+    itemType: 'RAW_MATERIAL',
+    itemId: item.id,
+    quantity: '3',
+    unit: 'PIECE',
+    reasonCode: 'SPOILED',
+    idempotencyKey: randomUUID(),
+  })
+
+  expect(r.error).toBeUndefined()
+  expect(r.status).toBe(201)
+  expect(r.body).toMatchObject({ declared: '3', deducted: '3', unrecorded: '0' })
+  const alerts = await prisma.lowStockAlert.findMany({ where: { venueId, rawMaterialId: item.id } })
+  expect(alerts).toHaveLength(1)
+  expect(alerts[0]).toMatchObject({ status: 'ACTIVE', alertType: 'LOW_STOCK' })
+  expect(alerts[0].currentLevel.toString()).toBe('3')
+})
+
+test('🔴 si la alerta falla DESPUÉS del COMMIT, la merma se devuelve igual y queda aplicada', async () => {
+  const item = await rawWithReorderPoint(6, 5)
+  await batch(item.id, 6, 1)
+  const alerta = jest.spyOn(rawMaterialService, 'checkAndCreateLowStockAlert').mockRejectedValue(new Error('smtp caído'))
+  try {
+    const summary = await logWaste(venueId, staffId, request('RAW_MATERIAL', item.id, 3))
+
+    expect(summary).toMatchObject({ declared: '3', deducted: '3', unrecorded: '0' })
+    expect(alerta).toHaveBeenCalledTimes(1)
+    expect(alerta).toHaveBeenCalledWith(venueId, item.id)
+    expect(await rawStock(item.id)).toBe('3')
+    expect(await prisma.inventoryWasteReport.count({ where: { venueId, status: 'APPLIED' } })).toBe(1)
+    expect(await prisma.activityLog.count({ where: { venueId, action: 'INVENTORY_WASTE_LOGGED' } })).toBe(1)
+  } finally {
+    alerta.mockRestore()
+  }
+})
+
+test('la alerta sólo se evalúa cuando ESTA llamada descontó un insumo: ni productos, ni nada descontado, ni recuperar el folio', async () => {
+  const alerta = jest.spyOn(rawMaterialService, 'checkAndCreateLowStockAlert').mockResolvedValue()
+  try {
+    // Producto: el camino viejo de productos no tenía alerta (LowStockAlert es de insumos).
+    const item = await product(5)
+    await logWaste(venueId, staffId, request('PRODUCT', item.id, 2))
+    // Insumo sin existencia: no se descontó nada, la existencia no cambió.
+    const empty = await raw(0)
+    await logWaste(venueId, staffId, request('RAW_MATERIAL', empty.id, 2))
+    expect(alerta).not.toHaveBeenCalled()
+
+    // Insumo con existencia: una evaluación; recuperar el MISMO folio no vuelve a evaluar.
+    const ingredient = await raw(5)
+    const input = request('RAW_MATERIAL', ingredient.id, 2)
+    const first = await logWaste(venueId, staffId, input)
+    expect(await logWaste(venueId, staffId, input)).toEqual(first)
+    expect(alerta).toHaveBeenCalledTimes(1)
+    expect(alerta).toHaveBeenCalledWith(venueId, ingredient.id)
+  } finally {
+    alerta.mockRestore()
+  }
 })
 
 // ─── Anular un folio (voidWasteKey) ───────────────────────────────────────────────────────
