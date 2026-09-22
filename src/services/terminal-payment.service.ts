@@ -142,6 +142,18 @@ export interface TerminalPaymentStatus {
   outcomeEvidence?: TerminalOutcomeEvidence | null
   evidenceClass?: TerminalEvidenceClass | null
   reconciliationRequired?: boolean
+  /**
+   * 🔴 El texto que el POS debe pintar, y SÓLO cuando lo escribió el SERVIDOR.
+   *
+   * Hoy se expone únicamente para `BANK_DECLINED` (el rechazo que el webhook del procesador acredita), donde
+   * el servidor ya traduce el código del banco a nuestras palabras: «No tiene fondos suficientes», «No se leyó
+   * bien la tarjeta: vuelve a pasarla». Sin esto el POS pinta su genérico y ese motivo —que es lo único
+   * accionable para el cajero— nunca llega a la pantalla.
+   *
+   * Deliberadamente NO se expone el `errorMessage` de otros desenlaces: ésos los escribe la terminal o el SDK,
+   * y la regla del repo es que el mensaje de un rechazo lo escribe el servidor.
+   */
+  errorMessage?: string | null
   createdAt: string // ISO
   updatedAt: string // ISO
 }
@@ -429,6 +441,12 @@ const CODIGOS_SIN_COBRO: Record<string, { evidencia: TerminalOutcomeEvidence; cl
   // 🔴 Lo escribe SÓLO `releaseUnprovenNegative` (Task 2): una terminal que lo mande en su sobre se degrada igual que
   // cualquier negativo sin evidencia (`closeRow` sólo acredita PRE_AUTHORIZATION / PROCESSOR_DECLINED).
   NO_EVIDENCE_AFTER_WINDOW: { evidencia: 'NO_EVIDENCE_AFTER_WINDOW', clase: 'SERVER' },
+  // 🔴 El webhook del procesador dijo que el banco RECHAZÓ (`reconcileBankDeclined`, 21-sep-2026). Sin esta
+  // entrada la fila queda FAILED pero `desenlaceCanonico` devuelve SIN_DESENLACE, así que el POS pinta «no se
+  // sabe si se cobró» — la pantalla exacta que ese trabajo existe para eliminar — con el veredicto del banco ya
+  // en la base. La clase es SERVER (lo supo el servidor por el webhook, no el aparato) y la evidencia reusa
+  // `PROCESSOR_DECLINED`, que ya significa justo eso y los clientes publicados ya leen.
+  BANK_DECLINED: { evidencia: 'PROCESSOR_DECLINED', clase: 'SERVER' },
 }
 
 /**
@@ -882,6 +900,13 @@ export interface FilaProyectable extends FilaDeDesenlace {
  * La proyección ÚNICA del estado de un cobro hacia cualquier cliente (GET móvil, POST cancel y MCP). Vive una sola
  * vez para que el POS y el operador no puedan leer dos verdades distintas de la misma fila.
  */
+/** El `errorMessage` del sobre, sólo como texto acotado. Lo escribió el servidor; aun así no se confía a ciegas. */
+function mensajeDelServidor(resultJson: Prisma.JsonValue | null | undefined): string | null {
+  if (!resultJson || typeof resultJson !== 'object' || Array.isArray(resultJson)) return null
+  const m = (resultJson as Record<string, unknown>).errorMessage
+  return typeof m === 'string' && m.trim() ? m.trim().slice(0, 300) : null
+}
+
 export function proyectarEstado(row: FilaProyectable): TerminalPaymentStatus {
   const desenlace = desenlaceCanonico(row)
   return {
@@ -902,6 +927,7 @@ export function proyectarEstado(row: FilaProyectable): TerminalPaymentStatus {
     outcomeEvidence: desenlace.outcomeEvidence,
     evidenceClass: desenlace.evidenceClass,
     ...(desenlace.reconciliationRequired ? { reconciliationRequired: true } : {}),
+    ...(row.failureCode === 'BANK_DECLINED' ? { errorMessage: mensajeDelServidor(row.resultJson) } : {}),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   }
@@ -1017,8 +1043,19 @@ function instanteDeDeclaracion(resultJson: Prisma.JsonValue | null): Date | null
  * cuando el banco aprueba después sin Payment. Los «no se cobró» acreditados por otra vía (declinación del procesador, cancelación
  * aceptada por la terminal, lápidas de admisión, entrega nunca hecha) quedan fuera de ella a propósito.
  */
-const CODIGOS_DE_LIBERACION_REVERSIBLE: readonly string[] = ['NO_EVIDENCE_AFTER_WINDOW', 'OPERATOR_RECONCILED_NO_CHARGE']
+// 🔴 `BANK_DECLINED` entra aquí por el P1-4 de Codex (21-sep-2026): una liberación por rechazo del banco
+// necesita LA MISMA red que la declaración del cajero. Sin esto, los caminos que vuelven a retener —aprobación
+// tardía, pago que no pudo ligarse, recuperación de colas viejas— responden `NOT_APPLICABLE` y la fila se queda
+// liberada con dinero real encima.
+const CODIGOS_DE_LIBERACION_REVERSIBLE: readonly string[] = [
+  'NO_EVIDENCE_AFTER_WINDOW',
+  'OPERATOR_RECONCILED_NO_CHARGE',
+  'BANK_DECLINED',
+]
 /** El espejo en JS del `WHERE` del CAS de re-retención: FAILED, con uno de esos códigos y sin ganador (`paymentId IS NULL`). */
+export function esLiberacionReversible(row: { status: TerminalPaymentRequestStatus; failureCode: string | null; paymentId: string | null }) {
+  return liberadaSinCobroReversible(row)
+}
 function liberadaSinCobroReversible(row: { status: TerminalPaymentRequestStatus; failureCode: string | null; paymentId: string | null }) {
   return (
     row.status === TerminalPaymentRequestStatus.FAILED &&

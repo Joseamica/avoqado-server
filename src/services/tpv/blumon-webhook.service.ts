@@ -490,6 +490,23 @@ export async function processBlumonPaymentWebhook(payload: BlumonWebhookPayload)
         select: { id: true },
       })
 
+      // 🔴 Blumon NO libera solo, y es una decisión medida, no prudencia genérica (21-sep-2026).
+      //
+      // Blumon no devuelve nuestra llave: manda `reference`, un timestamp de SU terminal. La única correlación
+      // posible sería la ranura + el importe, y eso se midió contra producción: **149 de 1211 transacciones
+      // (12,3 %) tienen otra del MISMO importe en la MISMA terminal dentro de 15 minutos**. Uno de cada ocho.
+      // Atribuir automáticamente con esa tasa es el camino al cobro doble — exactamente lo que la cerca existe
+      // para impedir. (Codex gpt-6-astra lo señaló como P1: «el índice garantiza exclusividad ACTUAL, no
+      // pertenencia histórica del webhook».)
+      //
+      // 🔑 Lo que sí sabe el cajero y el servidor no: CUÁL de esos cobros es el suyo. Por eso aquí el rechazo se
+      // queda como EVIDENCIA consultable (`ProviderEventLog` ya lo guarda con su terminal, importe y hora), y el
+      // POS la ofrece para que una persona confirme con un toque. La evidencia del banco convierte su declaración
+      // de «te creo» en «confirma lo que el banco ya dijo».
+      //
+      // Y de paso desaparecen otros dos P1 que eran de este carril: una DEVOLUCIÓN o CANCELACIÓN rechazada ya no
+      // puede leerse como venta rechazada (que es al revés: el cargo sigue vigente), y un webhook falsificado —
+      // Blumon no firma, sólo lista de IPs — ya no mueve estado financiero por sí solo.
       return {
         success: true,
         action: 'NOT_APPROVED',

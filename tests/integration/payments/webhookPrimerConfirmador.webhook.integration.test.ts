@@ -1991,3 +1991,52 @@ describe('Codex R12 (pasada exhaustiva) · R12-12: el backfill del REST sólo se
     expect(despues.pricing).toEqual(snapshotNuevo)
   })
 })
+
+/**
+ * 🔴 EL RECHAZO DEL BANCO, POR EL CAMINO REAL DEL WEBHOOK (21-sep-2026).
+ *
+ * Esta suite existe por un defecto de MÉTODO, no de código: el primer enganche del rechazo se puso dentro de
+ * `confirmarPorVinculo` y era CÓDIGO MUERTO —`reconciliarEventoPendiente` retorna `NOT_APPROVED` mucho antes de
+ * llegar ahí—. Las pruebas no lo cazaron porque ejercitaban `reconcileBankDeclined` DIRECTAMENTE y nunca el
+ * camino que recorre un webhook de verdad. Lo encontró Codex gpt-6-astra, ejecutando un `declined` y contando
+ * cero invocaciones.
+ *
+ * La lección, y por eso el test entra aquí y no en la suite de la función: **probar la función no es probar el
+ * camino**. Estas pruebas entran por `processAngelPayWebhook`, como entra AngelPay.
+ */
+describe('S2-bis · el webhook DECLINED suelta la venta y la ranura (camino real)', () => {
+  it('🔴 un declined con vínculo cierra la solicitud como BANK_DECLINED', async () => {
+    const solicitud = await f.solicitud({ status: 'UNKNOWN', acknowledgedAt: new Date() })
+    const attemptId = await vincular(solicitud.requestId)
+
+    const { result } = await webhook(attemptId, { status: 'declined', description: 'TRANSACCION INVALIDA' })
+
+    expect(result).toMatchObject({ action: 'NOT_APPROVED' })
+    const r = await fila(solicitud.requestId)
+    expect(r.status).toBe('FAILED')
+    expect(r.failureCode).toBe('BANK_DECLINED')
+    // El servidor escribe el texto que el POS pinta: el genérico no dice lo único accionable.
+    expect(String((r.resultJson as Record<string, unknown>).errorMessage)).toContain('volver a cobrar')
+    // Y el desenlace canónico tiene que decir NO SE COBRÓ, no «no se sabe»: es lo que lee el POS.
+    const { desenlaceCanonico } = await import('@/services/terminal-payment.service')
+    expect(desenlaceCanonico(r).outcome).toBe('NOT_CHARGED')
+  })
+
+  it('🔴 un declined SIN vínculo no toca ninguna solicitud (sin correlación no se libera nada)', async () => {
+    const solicitud = await f.solicitud({ status: 'UNKNOWN', acknowledgedAt: new Date() })
+
+    const { result } = await webhook(undefined, { status: 'declined' })
+
+    expect(result).toMatchObject({ action: 'NOT_APPROVED' })
+    expect((await fila(solicitud.requestId)).status).toBe('UNKNOWN')
+  })
+
+  it('🔴 un declined NO cierra una solicitud todavía en vuelo (SENT): el cajero puede estar cobrando', async () => {
+    const solicitud = await f.solicitud({ status: 'SENT' })
+    const attemptId = await vincular(solicitud.requestId)
+
+    await webhook(attemptId, { status: 'declined' })
+
+    expect((await fila(solicitud.requestId)).status).toBe('SENT')
+  })
+})

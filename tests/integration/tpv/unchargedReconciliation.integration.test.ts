@@ -14,7 +14,11 @@
  */
 import '../../__helpers__/integration-setup'
 import prisma from '@/utils/prismaClient'
-import { reconcileUncharged, UnchargedReconciliationError } from '@/services/tpv/uncharged-reconciliation.service'
+import {
+  reconcileUncharged,
+  reconcileBankDeclined,
+  UnchargedReconciliationError,
+} from '@/services/tpv/uncharged-reconciliation.service'
 import { randomUUID } from 'crypto'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
 
@@ -90,6 +94,12 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
         expiresAt: new Date(ahora.getTime() - 30 * 60 * 1000),
         ...over,
       },
+    })
+    // 🔴 En el camino REAL siempre existe el vínculo S1: el webhook no llega aquí sin él (`findAttemptLink`).
+    // Sembrarlo hace que las pruebas ejerciten el escenario que de verdad ocurre — sin esto probaban uno
+    // imposible, y por eso no vieron que sin vínculos se liberaba (Codex, 5ª pasada).
+    await prisma.terminalPaymentAttemptLink.create({
+      data: { attemptId: `att-${requestId}`, requestId, venueId, terminalId: (over.terminalId as string) ?? terminalId },
     })
     return requestId
   }
@@ -512,5 +522,336 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
     )
     expect(r.kind).toBe('UNCHARGED_VERIFIED')
     await prisma.terminal.deleteMany({ where: { venueId } })
+  })
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════
+  // 🔴 EL RECHAZO DEL BANCO — la misma liberación, con evidencia del procesador en vez de la
+  // palabra del cajero.
+  //
+  // Founder, 21-sep-2026: «todo lo que hicimos fue hacer lo de webhook first. ¿Por qué seguimos
+  // con lo de "si no cobró"? eso lo podemos verificar en el webhook». Tenía razón, y está medido
+  // en producción ese día: **187 rechazos en 30 días** (68 de AngelPay + 119 de Blumon), el 100 %
+  // con referencia, y NINGUNO liberaba nada — AngelPay los tiraba (`return null` para todo lo que
+  // no fuera aprobado) y Blumon ni siquiera mira `TerminalPaymentRequest`.
+  //
+  // 🔑 Un rechazo NUNCA crea dinero, así que su único modo de falla es cerrar la fila EQUIVOCADA.
+  // Por eso reusa los mismos vetos que la declaración del cajero, y por eso estas pruebas corren
+  // contra Postgres real: el veto y la ranura son SQL, no comparaciones en JavaScript.
+  // ══════════════════════════════════════════════════════════════════════════════════════════
+  describe('el rechazo del banco libera la venta Y la ranura', () => {
+    it('🔴 un rechazo cierra la fila y SUELTA LA RANURA: otra solicitud en la MISMA terminal entra', async () => {
+      const requestId = await sembrarFilaAtorada()
+
+      const r = await reconcileBankDeclined({
+        venueId,
+        requestId,
+        origen: 'ANGELPAY',
+        evidencia: { eventLogId: `evt-${randomUUID()}`, attemptId: `att-${requestId}`, codigo: '05', descripcion: 'Do not honor' },
+      })
+      expect(r.closed).toBe(true)
+
+      const fila = await prisma.terminalPaymentRequest.findUnique({ where: { requestId } })
+      expect(fila?.status).toBe('FAILED')
+      expect(fila?.failureCode).toBe('BANK_DECLINED')
+      // 🔴 El POS pinta ESTE texto: el mensaje lo escribe el servidor, nunca la app.
+      const sobre = fila?.resultJson as Record<string, unknown>
+      expect(sobre.status).toBe('failed')
+      expect(sobre.outcomeEvidence).toBe('BANK_DECLINED')
+      expect(String(sobre.errorMessage)).toMatch(/rechaz/i)
+
+      // La mitad que sólo Postgres puede probar: el índice único parcial soltó la terminal.
+      await expect(
+        prisma.terminalPaymentRequest.create({
+          data: {
+            requestId: randomUUID(),
+            venueId,
+            terminalId,
+            status: 'PENDING',
+            amountCents: 1000,
+            tipCents: 0,
+            expiresAt: new Date(Date.now() + 60_000),
+          },
+        }),
+      ).resolves.toBeTruthy()
+    })
+
+    it('🔴 con un Payment ligado NO cierra: el veto SQL corre de verdad', async () => {
+      const requestId = await sembrarFilaAtorada()
+      const orden = await prisma.order.create({
+        data: {
+          venueId,
+          orderNumber: `BANKDEC-${sufijo}-${Math.random().toString(36).slice(2, 6)}`,
+          type: 'TAKEOUT',
+          source: 'TPV',
+          status: 'CONFIRMED',
+          paymentStatus: 'PENDING',
+          subtotal: 65,
+          taxAmount: 0,
+          total: 65,
+          createdById: staffCajeroId,
+        },
+      })
+      await prisma.payment.create({
+        data: {
+          venueId,
+          orderId: orden.id,
+          amount: 65,
+          tipAmount: 9.75,
+          method: 'CREDIT_CARD',
+          status: 'COMPLETED',
+          feePercentage: 0,
+          feeAmount: 0,
+          netAmount: 65,
+          terminalPaymentRequestId: requestId,
+        },
+      })
+
+      const r = await reconcileBankDeclined({
+        venueId,
+        requestId,
+        origen: 'ANGELPAY',
+        evidencia: { eventLogId: `evt-${randomUUID()}`, attemptId: `att-${requestId}`, codigo: '05' },
+      })
+      expect(r.closed).toBe(false)
+      expect(r.reason).toBe('POSITIVE_EVIDENCE_EXISTS')
+
+      const fila = await prisma.terminalPaymentRequest.findUnique({ where: { requestId } })
+      expect(fila?.failureCode).not.toBe('BANK_DECLINED')
+      expect(fila?.status).toBe('UNKNOWN')
+    })
+
+    it('🔴 una fila PENDING NO se cierra: el cajero puede estar reintentando EN la terminal', async () => {
+      // 🔑 Éste es el candado que hace innecesario razonar sobre relojes: mientras la terminal
+      // trabaja, la fila está PENDING y el rechazo del intento anterior no puede matarla.
+      const requestId = await sembrarFilaAtorada({ status: 'PENDING', terminalId: `${terminalId}-viva`.slice(0, 40) })
+
+      const r = await reconcileBankDeclined({
+        venueId,
+        requestId,
+        origen: 'BLUMON',
+        evidencia: { eventLogId: `evt-${randomUUID()}`, attemptId: `att-${requestId}`, codigo: '55' },
+      })
+      expect(r.closed).toBe(false)
+      expect(r.reason).toBe('NOT_ELIGIBLE')
+
+      const fila = await prisma.terminalPaymentRequest.findUnique({ where: { requestId } })
+      expect(fila?.status).toBe('PENDING')
+    })
+
+    it('🔴 un webhook REPETIDO no rompe nada ni vuelve a cerrar (los procesadores reintentan)', async () => {
+      const requestId = await sembrarFilaAtorada()
+      const evidencia = { eventLogId: `evt-${randomUUID()}`, attemptId: `att-${requestId}`, codigo: '51' }
+
+      const primero = await reconcileBankDeclined({ venueId, requestId, origen: 'BLUMON', evidencia })
+      const segundo = await reconcileBankDeclined({ venueId, requestId, origen: 'BLUMON', evidencia })
+
+      expect(primero.closed).toBe(true)
+      // El segundo NO vuelve a cerrar, y tampoco explota: un webhook jamás puede lanzar.
+      expect(segundo.closed).toBe(false)
+      expect(segundo.reason).toBe('NOT_ELIGIBLE')
+      const fila = await prisma.terminalPaymentRequest.findUnique({ where: { requestId } })
+      expect(fila?.failureCode).toBe('BANK_DECLINED')
+    })
+
+    it('🔴 la terminal SORDA también se libera: el banco es mejor evidencia que el ACK del aparato', async () => {
+      // 🔑 Es justo lo que a la declaración del cajero se le escapa (`constaQueSalio`): si la terminal nunca
+      // acusó recibo, el cajero no puede declarar — pero si el BANCO contestó, la transacción salió sin duda.
+      const requestId = await sembrarFilaAtorada({ acknowledgedAt: null, resultJson: undefined, deliveryProvenance: undefined })
+      const r = await reconcileBankDeclined({
+        venueId,
+        requestId,
+        origen: 'BLUMON',
+        evidencia: { eventLogId: `evt-${randomUUID()}`, attemptId: `att-${requestId}`, codigo: 'rejected', descripcion: '51 FONDOS INSUFICIENTES' },
+      })
+      expect(r.closed).toBe(true)
+      const fila = await prisma.terminalPaymentRequest.findUnique({ where: { requestId } })
+      expect(fila?.failureCode).toBe('BANK_DECLINED')
+      // 🔴 El CÓDIGO sí, la prosa del banco NO: el destructive pass del 21-sep demostró que meter su texto libre
+      // en la pantalla deja pasar un «APROBADA, COBRO EXITOSO» dentro de un mensaje de rechazo. La descripción
+      // vive en `bankDeclined.descripcion`, para diagnóstico.
+      // El motivo se dice con NUESTRAS palabras (lista blanca por código), nunca con la prosa del banco.
+      expect(String((fila?.resultJson as Record<string, unknown>).errorMessage)).toContain('fondos suficientes')
+      expect(String((fila?.resultJson as Record<string, unknown>).errorMessage)).not.toContain('FONDOS INSUFICIENTES')
+      expect((fila?.resultJson as Record<string, any>).bankDeclined.descripcion).toBe('51 FONDOS INSUFICIENTES')
+    })
+
+    it('🔴 tras el rechazo el servidor dice «NO se cobró», no «no se sabe» — es lo que lee el POS', async () => {
+      // 🔴 El defecto que este test fija, y casi se me va: liberar la ranura NO basta. El POS decide qué pintar
+      // con `desenlaceCanonico`, que para una fila FAILED sólo acredita «no se cobró» si su `failureCode` está en
+      // `CODIGOS_SIN_COBRO`. Con un código que no esté en ese mapa, el cajero lee «no se sabe si se cobró» —
+      // justo la pantalla que este trabajo existe para eliminar — mientras el banco ya había dicho que NO.
+      const requestId = await sembrarFilaAtorada()
+      await reconcileBankDeclined({
+        venueId,
+        requestId,
+        origen: 'ANGELPAY',
+        evidencia: { eventLogId: `evt-${randomUUID()}`, attemptId: `att-${requestId}`, codigo: 'declined', descripcion: 'Do not honor' },
+      })
+      const fila = await prisma.terminalPaymentRequest.findUnique({ where: { requestId } })
+      const { desenlaceCanonico } = await import('@/services/terminal-payment.service')
+      const d = desenlaceCanonico(fila!)
+      expect(d.outcome).toBe('NOT_CHARGED')
+      expect(d.outcomeEvidence).toBe('PROCESSOR_DECLINED')
+    })
+
+    it('🔴 P1-3 de Codex: NO cierra si entre la lectura y el CAS alguien afirmó cobro, y NO borra esa afirmación', async () => {
+      // El CAS escribía `resultJson` COMPLETO desde la copia leída antes: un `claimedSuccess` persistido en
+      // paralelo (`escribirSuccessDegradado`, que no toma el candado de solicitud) se perdía. Borrar evidencia
+      // de cobro es peor que no liberar.
+      const requestId = await sembrarFilaAtorada()
+      await prisma.terminalPaymentRequest.update({
+        where: { requestId },
+        data: { resultJson: { claimedSuccess: { authorizationCode: '123456' } } },
+      })
+      const r = await reconcileBankDeclined({
+        venueId,
+        requestId,
+        origen: 'ANGELPAY',
+        evidencia: { eventLogId: `evt-${randomUUID()}`, attemptId: `att-${requestId}`, codigo: 'declined' },
+      })
+      expect(r.closed).toBe(false)
+      const fila = await prisma.terminalPaymentRequest.findUnique({ where: { requestId } })
+      expect(fila?.status).toBe('UNKNOWN')
+      // La afirmación SIGUE AHÍ: no se pisó.
+      expect((fila?.resultJson as Record<string, any>).claimedSuccess?.authorizationCode).toBe('123456')
+    })
+
+    it('🔴 P1-3 de Codex: NO cierra con la sonda reportando ejecución ACTIVA en el aparato', async () => {
+      const requestId = await sembrarFilaAtorada({ probeActiveAt: new Date() })
+      const r = await reconcileBankDeclined({
+        venueId,
+        requestId,
+        origen: 'BLUMON',
+        evidencia: { eventLogId: `evt-${randomUUID()}`, attemptId: `att-${requestId}`, codigo: '05' },
+      })
+      expect(r.closed).toBe(false)
+      expect((await prisma.terminalPaymentRequest.findUnique({ where: { requestId } }))?.status).toBe('UNKNOWN')
+    })
+
+    it('🔴 P1-4 de Codex: una liberación por rechazo es REVERSIBLE si luego aparece el dinero', async () => {
+      // Sin esto, los caminos que vuelven a retener (aprobación tardía, pago sin ligar) responden NOT_APPLICABLE
+      // y la fila se queda liberada con un cobro real encima. La declaración del cajero SÍ tiene esa red.
+      const requestId = await sembrarFilaAtorada()
+      await reconcileBankDeclined({
+        venueId,
+        requestId,
+        origen: 'ANGELPAY',
+        evidencia: { eventLogId: `evt-${randomUUID()}`, attemptId: `att-${requestId}`, codigo: 'declined' },
+      })
+      const fila = await prisma.terminalPaymentRequest.findUnique({ where: { requestId } })
+      const { esLiberacionReversible } = await import('@/services/terminal-payment.service')
+      expect(esLiberacionReversible(fila!)).toBe(true)
+    })
+
+    it('🔴 P1 de Codex: con REINTENTO el webhook no libera solo — el cajero confirma', async () => {
+      // 🔴 El defecto que este test fija, y NO es una correlación equivocada — los dos intentos pertenecen
+      // correctamente a la MISMA venta. El cajero reintenta conservando la solicitud: A se rechaza, nace B, B
+      // autoriza mientras la fila está SENT, la fila vence a UNKNOWN y ENTONCES llega el webhook demorado de A.
+      // Si B todavía no dejó evidencia, liberar la venta y decir «puedes volver a cobrar» es el cobro doble.
+      // Codex: «los candados serializan escrituras; NO detienen al procesador».
+      const requestId = await sembrarFilaAtorada()
+      const intentoA = randomUUID()
+      const intentoB = randomUUID()
+      for (const attemptId of [intentoA, intentoB]) {
+        await prisma.terminalPaymentAttemptLink.create({
+          data: { attemptId, requestId, venueId, terminalId },
+        })
+      }
+      // Sólo A tiene veredicto del banco. B no dejó nada: puede seguir ejecutándose en la terminal.
+      await prisma.providerEventLog.create({
+        data: {
+          provider: 'PAYMENT_PROCESSOR',
+          eventId: `angelpay-${randomUUID()}`,
+          attemptId: intentoA,
+          venueId,
+          payload: { event_type: 'send_transaction', payload: { status: 'rejected', integratorReference: intentoA } },
+          status: 'ERROR',
+        },
+      })
+
+      const r = await reconcileBankDeclined({
+        venueId,
+        requestId,
+        origen: 'ANGELPAY',
+        evidencia: { eventLogId: `evt-${randomUUID()}`, attemptId: `att-${requestId}`, attemptId: intentoA, codigo: 'rejected', descripcion: '05 DECLINADA' },
+      })
+
+      expect(r.closed).toBe(false)
+      expect(r.reason).toBe('NOT_ELIGIBLE')
+      expect((await prisma.terminalPaymentRequest.findUnique({ where: { requestId } }))?.status).toBe('UNKNOWN')
+    })
+
+    it('🟢 CONTROL: con UN solo intento el webhook ES toda la verdad y libera solo (97,4 % de las ventas)', async () => {
+      // Un solo intento: el que sembró el helper. Es el caso del 97,4 % de las ventas.
+      const requestId = await sembrarFilaAtorada()
+
+      const r = await reconcileBankDeclined({
+        venueId,
+        requestId,
+        origen: 'ANGELPAY',
+        evidencia: { eventLogId: `evt-${randomUUID()}`, attemptId: `att-${requestId}`, codigo: 'rejected', descripcion: '05 DECLINADA' },
+      })
+
+      expect(r.closed).toBe(true)
+      expect((await prisma.terminalPaymentRequest.findUnique({ where: { requestId } }))?.failureCode).toBe('BANK_DECLINED')
+    })
+
+    it('🔴 Codex (5ª pasada): SIN ningún vínculo tampoco libera — una precondición externa no es una guarda', async () => {
+      // Codex: «el array vacío sí pasa `some()`». Llamar sin vínculos liberaba, y la seguridad dependía de que
+      // el llamador exigiera uno antes. Eso funciona hoy y se rompe el día que entre otro llamador.
+      const requestId = randomUUID()
+      const ahora = new Date()
+      await prisma.terminalPaymentRequest.create({
+        data: {
+          requestId,
+          venueId,
+          terminalId: `${terminalId}-sinvinc`.slice(0, 40),
+          status: 'UNKNOWN',
+          amountCents: 6500,
+          tipCents: 0,
+          terminalReturnedAt: ahora,
+          acknowledgedAt: ahora,
+          expiresAt: new Date(ahora.getTime() - 60000),
+        },
+      })
+
+      const r = await reconcileBankDeclined({
+        venueId,
+        requestId,
+        origen: 'ANGELPAY',
+        evidencia: { eventLogId: `evt-${randomUUID()}`, codigo: 'rejected', descripcion: '05 DECLINADA' },
+      })
+
+      expect(r.closed).toBe(false)
+      expect((await prisma.terminalPaymentRequest.findUnique({ where: { requestId } }))?.status).toBe('UNKNOWN')
+    })
+
+    it('🔴 SEGURIDAD: un cliente NO puede colar statement BANK_DECLINED para saltarse el permiso', async () => {
+      // Agujero que abrí yo al parametrizar (21-sep) y que el guard nuevo cierra: si la procedencia se leyera
+      // del CUERPO, cualquiera con acceso al endpoint del POS —un WAITER, sin `payments:reconcile-uncharged`—
+      // podría declarar «el banco lo rechazó» y liberar la venta sin permiso.
+      const requestId = await sembrarFilaAtorada()
+      await expect(
+        reconcileUncharged(
+          { venueId, requestId, actorStaffId: staffMeseroId, source: 'MOBILE' },
+          { requestId, resolutionId: randomUUID(), statement: 'BANK_DECLINED', statementVersion: 1 },
+        ),
+      ).rejects.toThrow(UnchargedReconciliationError)
+      expect((await prisma.terminalPaymentRequest.findUnique({ where: { requestId } }))?.status).toBe('UNKNOWN')
+    })
+
+    it('🔴 una solicitud de OTRO venue no se toca (el webhook llega por el secreto del comercio)', async () => {
+      const requestId = await sembrarFilaAtorada()
+      const r = await reconcileBankDeclined({
+        venueId: 'venue-de-otro-negocio',
+        requestId,
+        origen: 'ANGELPAY',
+        evidencia: { eventLogId: `evt-${randomUUID()}`, attemptId: `att-${requestId}`, codigo: '05' },
+      })
+      expect(r.closed).toBe(false)
+      expect(r.reason).toBe('NOT_FOUND')
+      const fila = await prisma.terminalPaymentRequest.findUnique({ where: { requestId } })
+      expect(fila?.status).toBe('UNKNOWN')
+    })
   })
 })

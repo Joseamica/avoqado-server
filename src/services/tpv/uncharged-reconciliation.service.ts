@@ -35,6 +35,7 @@ import { estadoBancarioSql } from './estadoBancario'
 import { PATRON_SQL_TRIM_COMO_JS } from '../../utils/terminalSerial'
 import { hayEvidenciaDeConciliacionSql, sinEvidenciaPositivaSql } from './evidenciaPositivaSql'
 import { sondaReportoActiva } from './sondaActiva'
+import logger from '../../config/logger'
 
 export const RECONCILE_UNCHARGED_PERMISSION = 'payments:reconcile-uncharged'
 
@@ -43,8 +44,24 @@ const schema = z
   .object({
     requestId: z.string().min(1),
     resolutionId: z.string().uuid(),
-    statement: z.literal('UNCHARGED_VERIFIED'),
+    // 🔴 DOS procedencias por el MISMO núcleo (21-sep-2026, decisión del founder tras el 2º rechazo de Codex):
+    // `UNCHARGED_VERIFIED` la firma un cajero; `BANK_DECLINED` la firma el SERVIDOR con el webhook del
+    // procesador como evidencia. Antes el rechazo del banco tenía su propia función, y Codex demostró en dos
+    // pasadas que le faltaban las guardas de ésta: los candados por intento, el veto de contradicción de
+    // procedencia, la orden bloqueada y el replay idempotente. Duplicar el camino era el defecto.
+    statement: z.union([z.literal('UNCHARGED_VERIFIED'), z.literal('BANK_DECLINED')]),
     statementVersion: z.literal(1),
+    /** Sólo para `BANK_DECLINED`: qué dijo el procesador. El texto libre NUNCA llega a la pantalla. */
+    bank: z
+      .object({
+        origen: z.enum(['ANGELPAY', 'BLUMON']),
+        eventLogId: z.string().max(64),
+        /** El intento QUE TRAE el rechazo: su veredicto es el del payload, no hace falta buscarlo en la base. */
+        attemptId: z.string().max(64).optional(),
+        descripcion: z.string().max(300).optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict()
 
@@ -73,11 +90,11 @@ export class UnchargedReconciliationError extends Error {
 
 export type UnchargedReconciliation = {
   id: string
-  kind: 'UNCHARGED_VERIFIED'
+  kind: 'UNCHARGED_VERIFIED' | 'BANK_DECLINED'
   acceptedAt: string
   bodyHash: string
-  staffId: string
-  staffVenueId: string
+  staffId: string | null
+  staffVenueId: string | null
   statementVersion: number
   source: string
   previousRequest: { status: string; failureCode: string | null }
@@ -295,8 +312,19 @@ export async function reconcileUncharged(
     }
 
     // 🔴 AUTORIZACIÓN ANTES QUE ELEGIBILIDAD: quien no puede declarar recibe 403 sin enterarse del estado del cobro.
+    // El rechazo del BANCO no tiene humano que autorizar — su credencial es la firma del webhook, que el
+    // controlador ya verificó (HMAC-SHA256 contra el secreto del comercio) antes de llegar aquí. Sigue siendo
+    // una puerta cerrada: `source: 'WEBHOOK'` sólo lo pone `reconcileBankDeclined`, nunca una petición HTTP.
+    // 🔴 La procedencia la decide la FUENTE, jamás el cuerpo. `identity.source` lo pone el servidor
+    // (`'WEBHOOK'` sólo lo escribe `reconcileBankDeclined`); `declaration.statement` viene del cliente. Si el
+    // guard mirara el cuerpo —como lo escribí primero—, cualquiera que alcance el endpoint del POS podría
+    // mandar `"statement":"BANK_DECLINED"` y SALTARSE el permiso del cajero. Se exigen los DOS, y que
+    // coincidan: un cuerpo que se declare del banco por un camino humano es un rechazo, no un dato.
+    const porElBanco = identity.source === 'WEBHOOK'
+    if (porElBanco !== (declaration.statement === 'BANK_DECLINED'))
+      throw new UnchargedReconciliationError('NOT_ALLOWED', 403)
     const actor = identity.actorStaffId ? await miembroConPermiso(tx, identity.venueId, identity.actorStaffId) : null
-    if (!actor || !actor.permitido) throw new UnchargedReconciliationError('NOT_ALLOWED', 403)
+    if (!porElBanco && (!actor || !actor.permitido)) throw new UnchargedReconciliationError('NOT_ALLOWED', 403)
 
     // ELEGIBILIDAD
     // 🔴 RONDA 4 de Codex, y corrige la decisión de la ronda 3. Al borrar la elegibilidad por reloj se
@@ -387,6 +415,34 @@ export async function reconcileUncharged(
     if (await contradiccionDeProcedencia(tx, attemptIds, identity.venueId, row.terminalId))
       throw new UnchargedReconciliationError('POSITIVE_EVIDENCE_EXISTS')
 
+    // 🔴 EL WEBHOOK CONFIRMA EL INTENTO, NO LA VENTA — decisión del founder (21-sep), y es la regla que
+    // sostiene todo este carril.
+    //
+    // Codex lo demostró en dos pasadas: el rechazo del intento A no acredita el desenlace del intento B. El
+    // cajero reintenta conservando la venta, A se rechaza, nace B, B autoriza mientras la fila está `SENT`, la
+    // fila vence a `UNKNOWN` y ENTONCES llega el webhook demorado de A. Liberar ahí es el cobro doble, y los
+    // candados no lo impiden: «serializan escrituras, NO detienen al procesador».
+    //
+    // 🔑 La regla, medida contra producción: **con UN solo intento el webhook es toda la verdad** — el 97,4 %
+    // de las ventas (450 de 462 en 30 días) están ahí, y se liberan solas. **Con reintento el servidor no
+    // puede estar seguro**, así que no toca nada: la evidencia del banco queda guardada y el cajero confirma
+    // con un toque, que es lo que él sí puede hacer — tiene la pantalla de la terminal enfrente.
+    //
+    // ⚠️ **Residuo declarado, medido el 21-sep:** el 0,8 % de los intentos (3 de 374 desde el 19-sep) cobran
+    // sin anunciarse (`DecisionDelVinculo.Legacy` de la TPV deja seguir al procesador si S1 falla), así que un
+    // B invisible no aparece aquí. Es irreducible desde el servidor: si B está cobrando AHORA todavía no dejó
+    // rastro. Cerrarlo de raíz es que la TPV no pueda cobrar sin anunciar — trabajo de terminal, días de
+    // viaje. Mientras tanto el riesgo exige las TRES cosas a la vez: reintento, sin anunciar, y justo en la
+    // ventana en que llega el rechazo del primero.
+    if (porElBanco) {
+      const elDelRechazo = declaration.bank?.attemptId ? llaveDeIntento(declaration.bank.attemptId) : null
+      // 🔴 Sin NINGÚN vínculo tampoco se libera. Codex (5ª pasada): «el array vacío sí pasa `some()`» —
+      // llamar directamente sin vínculos liberaba, y la seguridad dependía de que el llamador exigiera uno
+      // antes. Una precondición externa no es una guarda: si mañana entra otro llamador, el hueco vuelve.
+      if (attemptIds.length === 0 || attemptIds.some(a => a !== elDelRechazo))
+        throw new UnchargedReconciliationError('ATTEMPT_NOT_ELIGIBLE')
+    }
+
     // 🔴 P1 de Codex: lista EXPLÍCITA de estados. `SENT` y `CANCEL_REQUESTED` también son UNRESOLVED y son
     // cobros que pueden seguir corriendo: declarar sobre ellos es el camino del cobro doble.
     if (!ESTADOS_DECLARABLES.has(row.status)) throw new UnchargedReconciliationError('ATTEMPT_NOT_ELIGIBLE')
@@ -395,11 +451,11 @@ export async function reconcileUncharged(
 
     const saved: UnchargedReconciliation = {
       id: declaration.resolutionId,
-      kind: 'UNCHARGED_VERIFIED',
+      kind: declaration.statement,
       acceptedAt: new Date().toISOString(),
       bodyHash,
-      staffId: actor.staffId,
-      staffVenueId: actor.id,
+      staffId: actor?.staffId ?? null,
+      staffVenueId: actor?.id ?? null,
       statementVersion: declaration.statementVersion,
       source: identity.source,
       previousRequest: { status: row.status, failureCode: row.failureCode },
@@ -407,14 +463,30 @@ export async function reconcileUncharged(
 
     // CAS sobre el estado LEÍDO y sin Payment, revalidando la evidencia EN LA PROPIA ESCRITURA: si un aprobado o
     // un pago entran entre el veto y este UPDATE, devuelve 0 y no se declara nada.
+    // 🔴 El motivo, con NUESTRAS palabras. Para el banco se traduce su código (lista blanca); su texto libre
+    // NUNCA entra aquí — el destructive pass del 21-sep coló por ahí un «APROBADA, COBRO EXITOSO» dentro de un
+    // mensaje de rechazo, y un byte nulo suyo reventaba el jsonb y tumbaba la liberación entera.
+    const motivo = porElBanco ? motivoDelBanco(declaration.bank?.descripcion) : ''
     const sobreDeclarado = {
       ...sobre,
       requestId: declaration.requestId,
       status: 'failed',
-      outcomeEvidence: 'OPERATOR_RECONCILED',
+      outcomeEvidence: porElBanco ? 'BANK_DECLINED' : 'OPERATOR_RECONCILED',
       // 🔴 Mensaje PROPIO: el de gerencia dice «no se presentó tarjeta», que aquí sería falso — el cliente sí
       // presentó la tarjeta; lo que no hubo fue cobro. Los POS pintan ESTE texto, no uno hardcodeado.
-      errorMessage: 'El cajero revisó la terminal y confirmó que este cobro no pasó. Se puede volver a cobrar.',
+      errorMessage: porElBanco
+        ? `El banco rechazó este cobro.${motivo ? ` ${motivo}` : ''} No se cobró nada: puedes volver a cobrar.`
+        : 'El cajero revisó la terminal y confirmó que este cobro no pasó. Se puede volver a cobrar.',
+      ...(porElBanco && declaration.bank
+        ? {
+            bankDeclined: {
+              origen: declaration.bank.origen,
+              eventLogId: declaration.bank.eventLogId,
+              descripcion: declaration.bank.descripcion ?? null,
+              at: new Date().toISOString(),
+            },
+          }
+        : {}),
       operatorReconciliation: saved,
     }
     // 🔴 Ronda 2 de Codex (19-sep): el veto de procedencia va TAMBIÉN en la escritura. `sinEvidenciaPositivaSql`
@@ -423,7 +495,7 @@ export async function reconcileUncharged(
     // exactamente el camino que permitía declarar «no cobrado» con un aprobado durable ya guardado.
     const cas = await tx.$executeRaw`
       UPDATE "TerminalPaymentRequest"
-      SET "status" = 'FAILED', "failureCode" = 'OPERATOR_RECONCILED_NO_CHARGE', "cancelDisposition" = NULL,
+      SET "status" = 'FAILED', "failureCode" = ${porElBanco ? 'BANK_DECLINED' : 'OPERATOR_RECONCILED_NO_CHARGE'}, "cancelDisposition" = NULL,
           "resultJson" = ${JSON.stringify(sobreDeclarado)}::jsonb,
           "operatorReconciliation" = ${JSON.stringify(saved)}::jsonb,
           "updatedAt" = (NOW() AT TIME ZONE 'UTC')
@@ -436,12 +508,13 @@ export async function reconcileUncharged(
     // Asiento DENTRO de la transacción: una declaración = un asiento.
     await tx.activityLog.create({
       data: {
-        action: 'TERMINAL_PAYMENT_OPERATOR_RECONCILED_UNCHARGED',
+        action: porElBanco ? 'TERMINAL_PAYMENT_BANK_DECLINED_RELEASED' : 'TERMINAL_PAYMENT_OPERATOR_RECONCILED_UNCHARGED',
         entity: 'TerminalPaymentRequest',
         entityId: row.id,
         venueId: identity.venueId,
-        staffId: actor.staffId,
+        staffId: actor?.staffId ?? null,
         data: {
+          ...(porElBanco && declaration.bank ? { origen: declaration.bank.origen, eventLogId: declaration.bank.eventLogId } : {}),
           requestId: declaration.requestId,
           terminalId: row.terminalId,
           orderId: row.orderId,
@@ -453,4 +526,228 @@ export async function reconcileUncharged(
     })
     return saved
   }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+// 🔴 EL RECHAZO DEL BANCO — la misma liberación, con evidencia del PROCESADOR
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+/**
+ * Cierra una solicitud atorada cuando el webhook del procesador dice que el banco **rechazó** el cobro.
+ *
+ * 🔑 **Por qué existe, y es una corrección de rumbo del founder (21-sep-2026):** *«todo lo que hicimos fue
+ * hacer lo de webhook first. ¿Por qué seguimos con lo de "si no cobró"? eso lo podemos verificar en el
+ * webhook»*. Tenía razón. El carril webhook-first se había construido **sólo en su mitad feliz**: el
+ * aprobado confirma y crea dinero, y el rechazado se tiraba — `confirmarPorVinculo` hacía `return null`
+ * para todo lo que no fuera `APROBADO`, y el servicio de Blumon ni siquiera menciona
+ * `TerminalPaymentRequest`. Mientras tanto le pedíamos al CAJERO que declarara a mano lo que el banco ya
+ * nos había contestado.
+ *
+ * **Medido en producción ese día (30 días, sólo lectura): 187 rechazos** — 68 de AngelPay y 119 de Blumon —
+ * el 100 % con referencia, y ninguno liberaba nada.
+ *
+ * 🔑 **Un rechazo NUNCA crea dinero**, pero eso NO quiere decir que su único riesgo sea «cerrar la fila
+ * equivocada» — así lo afirmé y Codex lo refutó: el rechazo del intento A y el cobro del intento B pertenecen
+ * correctamente a la MISMA fila, y ahí el peligro no es la correlación sino dar por terminada una venta que
+ * sigue ejecutándose. Por eso, además de los vetos de la declaración del cajero, este carril **sólo libera
+ * cuando la venta tiene UN SOLO intento vinculado** — el 97,4 % de los casos, medido. Con reintento el
+ * servidor no puede estar seguro y no toca nada: confirma el cajero, que sí ve la pantalla de la terminal.
+ *
+ * **Diferencias deliberadas con la declaración del cajero, y cada una tiene su motivo:**
+ *
+ *  | | cajero (`reconcileUncharged`) | banco (esto) |
+ *  |---|---|---|
+ *  | evidencia | una persona miró la pantalla | el webhook del procesador (AngelPay lo FIRMA; Blumon no, por eso Blumon no libera) |
+ *  | permiso | `payments:reconcile-uncharged` | ninguno: no hay actor humano |
+ *  | ¿exige que la terminal contestara? | **sí** (`constaQueSalio`) | **también sí**: al entrar por el núcleo se hereda. ⚠️ P2 abierto de Codex — con el ACK perdido un rechazo legítimo queda sin liberar, y **la declaración del cajero TAMPOCO lo salva: comparte la misma guarda**. Se deja a propósito: relajarla toca el camino que ya está en producción |
+ *  | lanza | sí (`UnchargedReconciliationError`) | **nunca**: un webhook que lanza provoca reintentos del procesador. Devuelve `{closed:false, reason}` |
+ *
+ * 🔴 **Sólo se cierra desde `ESTADOS_DECLARABLES`** (`UNKNOWN`/`TIMED_OUT`), el mismo conjunto que la
+ * declaración del cajero. ⚠️ Codex (21-sep) corrigió aquí una afirmación mía FALSA: yo decía «si el cajero está
+ * reintentando, la fila está PENDING». No es cierto — con el ACK perdido el servidor escribe `UNKNOWN`
+ * precisamente porque la terminal PUDO recibir y ejecutar. Por eso la correlación tiene que ser exacta (nuestra
+ * llave) y no basta con el estado: es lo que dejó a Blumon fuera de la liberación automática.
+ *
+ * @param requestId la solicitud a cerrar. **La correlación la resuelve el llamador**, y no es igual en los dos:
+ *   AngelPay devuelve NUESTRA llave (`integratorReference` → `findAttemptLink`). **Blumon NO llega aquí**: no
+ *   manda nuestra llave, y su rechazo sólo guarda evidencia para que la confirme el cajero (medido: el 12,3 %
+ *   de sus transacciones tienen otra del mismo importe en la misma terminal dentro de 15 min).
+ */
+
+/**
+ * 🔴 Lo que el procesador manda NO se pinta tal cual: el mensaje que lee el cajero lo escribe el SERVIDOR.
+ *
+ * Los tres defectos que esto cierra salieron del destructive pass del 21-sep-2026, y los tres eran míos:
+ *  1. una `descripcion` de 10 000 caracteres producía un mensaje de **10 078** en la pantalla del POS;
+ *  2. un procesador que mandara `"APROBADA, COBRO EXITOSO"` hacía que el cajero leyera *«El banco rechazó este
+ *     cobro (declined · APROBADA, COBRO EXITOSO). No se cobró nada»* — contradictorio, y en la pantalla del dinero;
+ *  3. 🔴 un **byte nulo** en ese texto reventaba el jsonb de Postgres y la liberación entera moría con
+ *     `reason: 'ERROR'` — o sea que el procesador podía dejar la terminal trabada, justo lo que esto evita.
+ *
+ * Y el tercero casi se escapa: la prueba «pasaba» porque el mensaje salía VACÍO. Sólo cayó al añadirle el
+ * control positivo de que la fila quedara `FAILED`.
+ */
+function textoSeguro(valor: string | null | undefined, tope: number): string {
+  if (typeof valor !== 'string') return ''
+  // Sin caracteres de control (el NUL incluido: Postgres lo rechaza dentro de jsonb).
+  const limpio = valor.replace(/[\u0000-\u001f\u007f]/g, ' ').trim()
+  // 🔴 Cortar por CODE POINTS, no por unidades UTF-16 (P2 de Codex, 2ª pasada, reproducido el 21-sep):
+  // `.slice()` parte un par sustituto y deja un `\ud83d` suelto. Postgres exige pares válidos dentro de
+  // `jsonb`, así que la transacción revienta y la liberación muere con `reason: 'ERROR'` — medido: la fila se
+  // quedaba `UNKNOWN`. O sea que un emoji del procesador, al filo exacto del tope, dejaba la terminal trabada.
+  // 🔑 Y el tope se mide en UNIDADES UTF-16, que es como lo cuentan `.length` y el `.max()` de Zod: cortar a
+  // N code points puede dar N+1 unidades si hay un emoji, y entonces el esquema lo rechaza y la liberación
+  // muere igual, sólo que con otro nombre (`NOT_ELIGIBLE` en vez de `ERROR`). Medido también el 21-sep.
+  let salida = ''
+  for (const caracter of limpio) {
+    if (salida.length + caracter.length > tope) break
+    salida += caracter
+  }
+  return salida
+}
+
+
+/**
+ * 🔴 El motivo del rechazo, con NUESTRAS palabras — lista blanca de códigos, nunca la prosa del banco.
+ *
+ * Mismo patrón que `textoDeRechazo(declineCode)` del dashboard para Stripe, y por el mismo motivo: el texto
+ * libre del procesador no puede llegar a la pantalla (el destructive pass del 21-sep metió por ahí un
+ * «APROBADA, COBRO EXITOSO» dentro de un mensaje de rechazo).
+ *
+ * Los códigos salen de PRODUCCIÓN, no de un catálogo: 68 rechazos de AngelPay en 30 días, medidos ese día.
+ * AngelPay manda `description` con el formato `<CÓDIGO> <TEXTO ES>` — `51 FONDOS INSUFICIENTES` (18),
+ * `1A SE REQUIERE AUTENTICACION…` (8), `05 DECLINADA` (7), `U0 LLAMAR AL EMISOR` (6),
+ * `87 DATOS DE PISTA INCORRECTOS` (5) — y `status` vale siempre `rejected`, que en la pantalla sólo sería
+ * una palabra en inglés sin información.
+ *
+ * Un código que no esté en la lista NO inventa motivo: el mensaje queda limpio y accionable. Preferir el
+ * genérico ante lo desconocido es la misma decisión que se tomó con los rechazos de Stripe.
+ */
+const MOTIVOS_DEL_BANCO: Record<string, string> = {
+  '51': 'No tiene fondos suficientes.',
+  '05': 'El banco la declinó.',
+  '1A': 'La tarjeta pide autenticación: cóbrala con chip y NIP.',
+  'U0': 'El banco pide que el cliente lo llame.',
+  '87': 'No se leyó bien la tarjeta: vuelve a pasarla.',
+  '91': 'El banco no pudo procesarla en este momento.',
+  '57': 'El banco no acepta esta operación con esa tarjeta.',
+  '06': 'El banco no pudo procesarla.',
+  '12': 'El banco no pudo procesarla.',
+  '30': 'El banco no pudo procesarla.',
+  'N2': 'El banco no pudo procesarla en este momento.',
+  '54': 'La tarjeta está vencida.',
+  '14': 'El número de tarjeta no es válido.',
+  '55': 'El NIP es incorrecto.',
+  '38': 'Se agotaron los intentos de NIP.',
+  '75': 'Se agotaron los intentos de NIP.',
+  '65': 'La tarjeta superó su límite de operaciones.',
+}
+
+/** Sólo el CÓDIGO del inicio de la descripción (`51 FONDOS…` → `51`), y sólo si lo conocemos. */
+function motivoDelBanco(descripcion: string | null | undefined): string {
+  const limpio = textoSeguro(descripcion, 64)
+  const codigo = /^([0-9A-Z]{2})(\s|$)/.exec(limpio)?.[1]
+  return codigo ? (MOTIVOS_DEL_BANCO[codigo] ?? '') : ''
+}
+/**
+ * El banco dijo que NO: suelta la venta y la ranura, **por el MISMO núcleo que la declaración del cajero**.
+ *
+ * 🔴 Esto era una función paralela de ~130 líneas, y Codex la rechazó DOS veces (21-sep-2026). Sus 4 P1 de la
+ * segunda pasada decían todos lo mismo con distinta cara: **le faltaban las guardas de `reconcileUncharged`**.
+ *
+ *  - liberaba la venta desde UN intento sin mirar los demás ⇒ el rechazo del intento A soltaba la venta
+ *    mientras el intento B seguía cobrando (cobro doble, y sin ninguna correlación equivocada);
+ *  - no tomaba `candadoDeIntento`, así que un aprobado concurrente podía quedar desatendido;
+ *  - no consultaba `contradiccionDeProcedencia` (un aprobado del mismo intento recibido por OTRO venue);
+ *  - su CAS revalidaba menos señales que su propia lectura.
+ *
+ * Decisión del founder tras el segundo rechazo: **no parchar los nueve defectos, entrar por el núcleo.** Ahora
+ * el rechazo del banco es una declaración más —`statement: 'BANK_DECLINED'`— cuyo autor es el SERVIDOR, con la
+ * firma del webhook como credencial, y hereda entero el camino ya auditado: candado de solicitud, candados de
+ * TODOS los intentos en orden estable, orden bloqueada, replay idempotente, los vetos de evidencia positiva y
+ * de procedencia, el CAS que los revalida en la escritura y el asiento en la bitácora.
+ *
+ * 🔑 **El `resolutionId` se deriva del `eventLogId`**: un procesador que reenvíe el mismo webhook produce la
+ * MISMA declaración, así que nunca puede chocar con `RESOLUTION_CONFLICT` sobre su propia liberación.
+ *
+ * ⚠️ Medido, no supuesto (21-sep): el reenvío **no** entra al replay idempotente del núcleo —
+ * `readUnchargedReconciliation` sólo reconoce `kind: 'UNCHARGED_VERIFIED'`—, sino que cae en el veto de
+ * estados y devuelve `NOT_ELIGIBLE`, porque la fila ya quedó `FAILED`. Es seguro (no reescribe ni re-audita) y
+ * por eso se deja así: ampliar ese lector tocaría a todos sus consumidores sin ganar nada aquí.
+ *
+ * Nunca lanza: un webhook que lanza provoca reintentos en bucle del procesador.
+ */
+export async function reconcileBankDeclined(input: {
+  venueId: string
+  requestId: string
+  origen: 'ANGELPAY' | 'BLUMON'
+  evidencia: { eventLogId: string; attemptId?: string | null; codigo?: string | null; descripcion?: string | null }
+}): Promise<{ closed: boolean; reason?: 'NOT_FOUND' | 'NOT_ELIGIBLE' | 'POSITIVE_EVIDENCE_EXISTS' | 'ERROR' }> {
+  const { venueId, requestId, origen, evidencia } = input
+  try {
+    await reconcileUncharged(
+      { venueId, requestId, actorStaffId: null, source: 'WEBHOOK' },
+      {
+        requestId,
+        resolutionId: resolucionDelEvento(evidencia.eventLogId),
+        statement: 'BANK_DECLINED',
+        statementVersion: 1,
+        bank: {
+          origen,
+          eventLogId: textoSeguro(evidencia.eventLogId, 64),
+          // 🔴 P1 de Codex (4ª pasada): el `attemptId` es una IDENTIDAD, no texto para pintar. `textoSeguro`
+          // sustituye controles internos por espacios, así que `"x\ty"` se convertía en `"x y"` — y podía
+          // COINCIDIR con otro intento, excluyendo del veto al equivocado. La identidad se canonicaliza con
+          // `llaveDeIntento`, la misma de S1 y de los candados, en todo el recorrido; lo que no sea una
+          // identidad válida simplemente no se manda, y entonces no se excluye a nadie.
+          ...(llaveDeIntento(evidencia.attemptId ?? '') ? { attemptId: llaveDeIntento(evidencia.attemptId ?? '') as string } : {}),
+          ...(evidencia.descripcion ? { descripcion: textoSeguro(evidencia.descripcion, 300) } : {}),
+        },
+      },
+    )
+    // 🔴 P2 de Codex (2ª pasada): liberar no basta — el POS puede estar esperando el resultado en su long-poll
+    // y quedarse hasta CINCO MINUTOS aunque el desenlace ya sea durable. `resolverEsperaDelPos` sólo despierta
+    // si `desenlaceCanonico` ya dice algo (con `BANK_DECLINED` en `CODIGOS_SIN_COBRO`, sí), y nunca toca la
+    // espera de otro venue. Va POST-COMMIT y best-effort: la liberación ya está escrita y no puede depender de
+    // despertar a nadie. Mismo patrón que la resolución por no-instrumento.
+    try {
+      const { terminalPaymentService } = await import('../terminal-payment.service')
+      await terminalPaymentService.resolverEsperaDelPos(requestId, venueId)
+    } catch (err) {
+      logger.warn('⚠️ [BankDeclined] liberada, pero no se pudo despertar la espera del POS', {
+        requestId,
+        venueId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+    return { closed: true }
+  } catch (error) {
+    const reason =
+      error instanceof UnchargedReconciliationError
+        ? error.code === 'ATTEMPT_NOT_FOUND'
+          ? ('NOT_FOUND' as const)
+          : error.code === 'POSITIVE_EVIDENCE_EXISTS'
+            ? ('POSITIVE_EVIDENCE_EXISTS' as const)
+            : ('NOT_ELIGIBLE' as const)
+        : ('ERROR' as const)
+    // 🔴 Sólo se alarma lo que NO es un desenlace esperado: que la fila no exista, no sea elegible o tenga
+    // evidencia positiva es el sistema haciendo su trabajo, no un fallo.
+    if (reason === 'ERROR')
+      logger.error('🚨 [BankDeclined] no se pudo liberar la solicitud por el rechazo del banco', {
+        requestId,
+        venueId,
+        origen,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    return { closed: false, reason }
+  }
+}
+
+/**
+ * UUID determinista del evento: un reenvío produce la MISMA declaración y nunca choca con `RESOLUTION_CONFLICT`
+ * sobre su propia liberación. ⚠️ NO entra al replay idempotente del núcleo — `readUnchargedReconciliation` no
+ * reconoce `kind: 'BANK_DECLINED'`—: cae en el veto de estados, como dice la nota de arriba.
+ */
+function resolucionDelEvento(eventLogId: string): string {
+  const h = createHash('sha256').update(`bank-declined:${eventLogId}`).digest('hex')
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`
 }

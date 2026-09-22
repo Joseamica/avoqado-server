@@ -440,6 +440,56 @@ async function resolveReceiverVenueId(merchantAccountId: string): Promise<string
  * Payment nace con método provisional y costo pendiente (S3 lo enriquece). Si fue el PRIMER confirmador, despierta al
  * POS y avisa a la terminal (S5). `null` = no aplica: el llamador sigue con el flujo de siempre.
  */
+/**
+ * El banco dijo que NO: suelta la venta y la ranura de la solicitud dueña de ESTE intento.
+ *
+ * 🔑 La correlación es exacta y es la mitad que hace esto seguro: `integratorReference` es NUESTRA llave
+ * (`attemptId`), y el vínculo S1 dice de qué solicitud es. Se exige además que el venue del vínculo sea el del
+ * secreto del comercio — el mismo candado que el camino aprobado, para no tocar la fila de otro negocio.
+ *
+ * Silencioso a propósito ante cualquier duda (sin intento, sin vínculo, otro venue): un webhook nunca decide a
+ * ciegas, y no liberar sólo deja las cosas como estaban.
+ */
+async function liberarPorRechazo(args: {
+  attemptId: string
+  receiverVenueId: string | null
+  payload: AngelPayWebhookPayload
+  eventLogId: string
+  correlationId: string
+}): Promise<'OK' | 'SIN_CORRELACION' | 'REINTENTAR'> {
+  const { attemptId, receiverVenueId, payload, eventLogId, correlationId } = args
+  if (!receiverVenueId) return 'SIN_CORRELACION'
+  const { terminalPaymentService } = await import('../terminal-payment.service')
+  const link = await terminalPaymentService.findAttemptLink(attemptId)
+  if (!link || link.venueId !== receiverVenueId) return 'SIN_CORRELACION'
+
+  const { reconcileBankDeclined } = await import('./uncharged-reconciliation.service')
+  const r = await reconcileBankDeclined({
+    venueId: link.venueId,
+    requestId: link.requestId,
+    origen: 'ANGELPAY',
+    evidencia: {
+      eventLogId,
+      // 🔴 El intento QUE TRAE este rechazo. Sin él, el veto del reintento contaría a este mismo intento como
+      // «otro» y bloquearía SIEMPRE — porque para llegar aquí siempre existe al menos su vínculo.
+      attemptId,
+      codigo: typeof payload.payload.status === 'string' ? payload.payload.status : null,
+      descripcion: typeof payload.payload.description === 'string' ? payload.payload.description : null,
+    },
+  })
+  logger.info(r.closed ? '🔓 [AngelPay webhook] Rechazo del banco: la venta y la ranura quedaron libres' : 'ℹ️ [AngelPay webhook] Rechazo del banco sin liberar', {
+    correlationId,
+    attemptId,
+    requestId: link.requestId,
+    venueId: link.venueId,
+    closed: r.closed,
+    reason: r.reason,
+  })
+  // 🔴 Sólo un fallo TRANSITORIO pide reintento (lock timeout, base caída). Que la fila no exista, no sea
+  // elegible o tenga evidencia positiva son desenlaces LEGÍTIMOS: el evento se cierra y no se reintenta.
+  return r.reason === 'ERROR' ? 'REINTENTAR' : 'OK'
+}
+
 async function confirmarPorVinculo(args: {
   payload: AngelPayWebhookPayload
   eventLogId: string
@@ -454,6 +504,10 @@ async function confirmarPorVinculo(args: {
   const attemptId = typeof payload.payload.integratorReference === 'string' ? payload.payload.integratorReference.trim() : ''
   if (!attemptId) return null
   // Codex R14-3: la MISMA clasificación que el receptor, el backfill y S6 (`"  Approved  "` es APROBADO en todas partes).
+  // 🔴 Aquí NO se atiende el rechazo, y es a propósito: `reconciliarEventoPendiente` ya retornó `NOT_APPROVED`
+  // mucho antes de llegar a esta función. Codex (21-sep-2026) demostró que un enganche puesto aquí es CÓDIGO
+  // MUERTO —cero invocaciones con un `declined` real—, y mis pruebas no lo cazaron porque probaban la función
+  // de liberación directamente y nunca el camino del webhook. El enganche vive donde sí se alcanza.
   if (clasificarEstadoBancario(payload.payload.status) !== 'APROBADO') return null
 
   const { terminalPaymentService } = await import('../terminal-payment.service')
@@ -1375,6 +1429,33 @@ export async function reconciliarEventoPendiente(args: {
   // reconcilia ni se crea dinero con él); el campo AUSENTE sigue siendo la compatibilidad legacy de siempre.
   const estadoBancario = clasificarEstadoBancario(payload.payload.status)
   if (estadoBancario === 'RECHAZADO') {
+    // 🔴 EL ENGANCHE DEL RECHAZO VA AQUÍ, no en `confirmarPorVinculo`: éste es el único punto por el que un
+    // `declined` pasa de verdad (Codex lo demostró el 21-sep con cero invocaciones en el otro sitio).
+    // El banco dijo que NO ⇒ la venta y la ranura se sueltan solas, con correlación EXACTA por nuestra llave
+    // (`integratorReference` = attemptId → vínculo S1).
+    const liberacion = await liberarPorRechazo({
+      attemptId: typeof payload.payload.integratorReference === 'string' ? payload.payload.integratorReference.trim() : '',
+      receiverVenueId,
+      payload,
+      eventLogId,
+      correlationId,
+    })
+    // 🔴 P2 de Codex con confianza 10/10, y mi comentario anterior aquí era FALSO: yo afirmaba que «un fallo
+    // deja el evento sin marcar», pero `liberarPorRechazo` se traga el error, así que el cierre corría igual y
+    // el rechazo se perdía PARA SIEMPRE (el worker sólo recoge PENDING y un reenvío del procesador responde
+    // DUPLICATE). Ahora un fallo TRANSITORIO deja el evento PENDING para que el worker lo reintente — el mismo
+    // trato que ya recibía un estado bancario ilegible, cinco líneas más abajo.
+    if (liberacion === 'REINTENTAR') {
+      await prisma.providerEventLog.updateMany({
+        where: { id: eventLogId, ...propietario },
+        data: { status: EventStatus.PENDING, errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.NOT_APPROVED },
+      })
+      logger.error('🚨 [AngelPay webhook] rechazo sin liberar por fallo transitorio — el evento queda PENDIENTE para reintento', {
+        correlationId,
+        eventLogId,
+      })
+      return { action: 'NOT_APPROVED', errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.NOT_APPROVED, eventLogId }
+    }
     await prisma.providerEventLog.updateMany({
       where: { id: eventLogId, ...propietario },
       data: { status: EventStatus.ERROR, errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.NOT_APPROVED, processedAt: new Date() },
