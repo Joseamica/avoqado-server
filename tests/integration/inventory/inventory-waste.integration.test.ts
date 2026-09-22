@@ -4,6 +4,9 @@ import prisma from '@/utils/prismaClient'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { getUserAccess } from '@/services/access/access.service'
 import { deleteDisposableDemoSession } from '@/services/cleanup/liveDemoCleanup.service'
+import { markExpiredBatches } from '@/services/dashboard/fifoBatch.service'
+import { deductInventoryForProduct } from '@/services/dashboard/productInventoryIntegration.service'
+import { confirmStockCount } from '@/services/mobile/inventory.mobile.service'
 import {
   getWasteAccess,
   grantedPermissionsBeforeActivation,
@@ -900,13 +903,15 @@ async function waitFor<T>(read: () => Promise<T | undefined>): Promise<T> {
  * Fuerza el orden de una carrera por el folio: el GANADOR inserta su fila y se queda detenido
  * por un trigger (advisory lock que retiene otra conexión); el PERDEDOR arranca y se bloquea
  * contra el índice único del folio; entonces se suelta al ganador. El trigger sólo actúa sobre
- * ESTE folio y ESTE estado, y se borra en `finally` pase lo que pase.
+ * ESTE folio y ESTE estado, y se borra en `finally` pase lo que pase. `whileBlocked` corre con el
+ * perdedor TODAVÍA detenido en el índice (recibe su pid), para observar qué alcanzó a hacer.
  */
 async function forceOrder(
   key: string,
   winnerStatus: 'APPLIED' | 'VOIDED',
   startWinner: () => Promise<unknown>,
   startLoser: () => Promise<unknown>,
+  whileBlocked?: (loserPid: number) => Promise<void>,
 ): Promise<{ winner: PromiseSettledResult<unknown>; loser: PromiseSettledResult<unknown> }> {
   const suffix = randomUUID().replace(/-/g, '')
   const functionName = `waste_race_${suffix}`
@@ -981,7 +986,7 @@ async function forceOrder(
     void loser.catch(() => undefined)
 
     // El perdedor está detenido POR el ganador: el orden quedó forzado, no a la suerte.
-    await waitFor(async () => {
+    const loserPid = await waitFor(async () => {
       const rows = await prisma.$queryRaw<Array<{ pid: number }>>`
         SELECT pid FROM pg_stat_activity
         WHERE ${winnerPid}::int = ANY(pg_blocking_pids(pid))
@@ -989,6 +994,7 @@ async function forceOrder(
       `
       return rows[0]?.pid
     })
+    if (whileBlocked) await whileBlocked(loserPid)
 
     release()
     await blockerTransaction
@@ -1006,15 +1012,32 @@ async function forceOrder(
 async function racePostAndVoid(
   input: WasteInput,
   winnerStatus: 'APPLIED' | 'VOIDED',
+  whileLoserBlocked?: (loserPid: number) => Promise<void>,
 ): Promise<{ post: PromiseSettledResult<unknown>; cancel: PromiseSettledResult<unknown> }> {
   const post = () => logWaste(venueId, staffId, input)
   const cancel = () => voidWasteKey(venueId, staffId, input.idempotencyKey)
   if (winnerStatus === 'APPLIED') {
-    const { winner, loser } = await forceOrder(input.idempotencyKey, 'APPLIED', post, cancel)
+    const { winner, loser } = await forceOrder(input.idempotencyKey, 'APPLIED', post, cancel, whileLoserBlocked)
     return { post: winner, cancel: loser }
   }
-  const { winner, loser } = await forceOrder(input.idempotencyKey, 'VOIDED', cancel, post)
+  const { winner, loser } = await forceOrder(input.idempotencyKey, 'VOIDED', cancel, post, whileLoserBlocked)
   return { post: loser, cancel: winner }
+}
+
+/** Tablas en las que `pid` ya ESCRIBIÓ dentro de su transacción abierta (RowExclusiveLock concedido). */
+async function tablesWrittenBy(pid: number): Promise<string[]> {
+  const rows = await prisma.$queryRaw<Array<{ relation: string }>>`
+    SELECT DISTINCT c.relname::text AS relation
+    FROM pg_locks l
+    JOIN pg_class c ON c.oid = l.relation
+    WHERE l.pid = ${pid}::int
+      AND l.locktype = 'relation'
+      AND l.mode = 'RowExclusiveLock'
+      AND l.granted
+      AND c.relkind IN ('r', 'p')
+    ORDER BY 1
+  `
+  return rows.map(row => row.relation)
 }
 
 test('carrera real POST–void: gana APPLIED y void devuelve ALREADY_APPLIED', async () => {
@@ -1036,7 +1059,16 @@ test('carrera real POST–void: gana APPLIED y void devuelve ALREADY_APPLIED', a
 
 test('carrera real POST–void: gana VOIDED y el POST no deja efectos', async () => {
   const item = await product(5)
-  const result = await racePostAndVoid(request('PRODUCT', item.id, 2), 'VOIDED')
+  let writtenWhileBlocked: string[] = []
+  const result = await racePostAndVoid(request('PRODUCT', item.id, 2), 'VOIDED', async loserPid => {
+    writtenWhileBlocked = await tablesWrittenBy(loserPid)
+  })
+
+  // 🔴 El índice único se disputa ANTES de escribir los efectos: detenido en él, el POST sólo ha
+  // tocado la tabla de folios; ni la existencia ni el kardex. (Control positivo: sí ve su folio.)
+  expect(writtenWhileBlocked).toContain('InventoryWasteReport')
+  expect(writtenWhileBlocked).not.toContain('Inventory')
+  expect(writtenWhileBlocked).not.toContain('InventoryMovement')
 
   expect(result.cancel.status).toBe('fulfilled')
   if (result.cancel.status === 'fulfilled') {
@@ -1059,25 +1091,36 @@ test('colisión P2002 real: la anulación que pierde lee lo que quedó y no deja
   // (se reintenta y ve la fila). Aquí el ganador escribe FUERA de SERIALIZABLE, así que el perdedor
   // recibe el 23505 real (P2002) y se ejerce la recuperación por el índice único.
   const key = randomUUID()
-  const result = await forceOrder(
-    key,
-    'VOIDED',
-    () =>
-      prisma.inventoryWasteReport.create({
-        data: { venueId, idempotencyKey: key, status: 'VOIDED', costState: 'NONE', reportedByStaffId: waiterAId, source: 'POS' },
-      }),
-    () => voidWasteKey(venueId, staffId, key),
-  )
+  // Espía que conserva la implementación real: no fabrica errores, sólo cuenta los intentos.
+  const transactions = jest.spyOn(prisma, '$transaction')
+  try {
+    const result = await forceOrder(
+      key,
+      'VOIDED',
+      () =>
+        prisma.inventoryWasteReport.create({
+          data: { venueId, idempotencyKey: key, status: 'VOIDED', costState: 'NONE', reportedByStaffId: waiterAId, source: 'POS' },
+        }),
+      () => voidWasteKey(venueId, staffId, key),
+    )
 
-  expect(result.winner.status).toBe('fulfilled')
-  expect(result.loser.status).toBe('fulfilled')
-  if (result.loser.status === 'fulfilled') {
-    // La autoría es la de la fila que ganó, no la de quien perdió.
-    expect(result.loser.value).toMatchObject({ outcome: 'VOIDED', voidedByStaffId: waiterAId })
+    expect(result.winner.status).toBe('fulfilled')
+    // UNA sola transacción, y terminó en P2002: si un 40001 + reintento la hubiera salvado (el
+    // reintento ve la fila DENTRO de la transacción), esta prueba no estaría probando el catch.
+    expect(transactions).toHaveBeenCalledTimes(1)
+    expect(await captureError(transactions.mock.results[0].value as Promise<unknown>)).toMatchObject({ code: 'P2002' })
+
+    expect(result.loser.status).toBe('fulfilled')
+    if (result.loser.status === 'fulfilled') {
+      // La autoría es la de la fila que ganó, no la de quien perdió.
+      expect(result.loser.value).toMatchObject({ outcome: 'VOIDED', voidedByStaffId: waiterAId })
+    }
+    expect(await prisma.inventoryWasteReport.count({ where: { venueId } })).toBe(1)
+    // El perdedor revirtió entero: su auditoría no existe.
+    expect(await prisma.activityLog.count({ where: { venueId } })).toBe(0)
+  } finally {
+    transactions.mockRestore()
   }
-  expect(await prisma.inventoryWasteReport.count({ where: { venueId } })).toBe(1)
-  // El perdedor revirtió entero: su auditoría no existe.
-  expect(await prisma.activityLog.count({ where: { venueId } })).toBe(0)
 })
 
 // ─── Auditoría Codex #1 · P2-4: el catch P2002 de logWaste, con un P2002 REAL ─────────────
@@ -1169,64 +1212,98 @@ class SoltarCandado extends Error {}
 
 /**
  * Otra transacción —en la vida real, una compra: actualiza Inventory y después Product.cost—
- * bloquea la fila de `tabla` y la retiene hasta RETENCION_MS o hasta que la merma responda.
- * Sin NOWAIT la merma se quedaría esperando y sólo terminaría DESPUÉS de que la otra soltara
- * (y ahí está la espera circular con la compra). Con NOWAIT cada intento aborta con 55P03 y
- * se agotan los reintentos mientras el candado sigue tomado.
+ * bloquea la fila de `tabla` y la RETIENE hasta que termina la observación de la merma. Sin NOWAIT
+ * la merma se quedaría esperando (y ahí está la espera circular con la compra); con NOWAIT cada
+ * intento aborta con 55P03 y se agotan los reintentos mientras el candado sigue tomado.
+ *
+ * Determinista a propósito (P3 de la verificación de Codex #1):
+ *  - A no suelta el candado por reloj: un plazo que libera a A dejaría pasar la merma bajo carga
+ *    (falso rojo). El plazo del arnés es un ERROR explícito que tumba la prueba, no una liberación.
+ *  - Las transacciones REALES de la merma corren con `SET LOCAL lock_timeout = '0'` (espera sin
+ *    límite). Con un `lock_timeout` chico heredado del entorno, quitar NOWAIT daría el MISMO
+ *    `lock_not_available` y la prueba pasaría sin NOWAIT (falso verde). Sólo se neutraliza ese
+ *    parámetro: las transacciones y las consultas son las del servicio.
  */
 async function mermaMientrasOtraTxRetiene(
   tabla: 'Inventory' | 'Product',
   filaId: string,
   input: WasteInput,
 ): Promise<{ merma: PromiseSettledResult<WasteSummary>; seguiaRetenido: boolean }> {
-  const RETENCION_MS = 6000
+  const PLAZO_MS = 30_000
+  const ejecutarTx = prisma.$transaction.bind(prisma) as unknown as <T>(
+    fn: (tx: Prisma.TransactionClient) => Promise<T>,
+    options?: { maxWait?: number; timeout?: number; isolationLevel?: Prisma.TransactionIsolationLevel },
+  ) => Promise<T>
+
   let avisar: () => void = () => undefined
   const tomado = new Promise<void>(resolve => {
     avisar = resolve
   })
   let soltar: () => void = () => undefined
-  const mermaTermino = new Promise<void>(resolve => {
+  const liberacion = new Promise<void>(resolve => {
     soltar = resolve
   })
-  let temporizador: NodeJS.Timeout | undefined
-  const plazo = new Promise<void>(resolve => {
-    temporizador = setTimeout(resolve, RETENCION_MS)
-  })
+
   let retiene = false
   let errorDeA: unknown
+  let temporizador: NodeJS.Timeout | undefined
+  let restaurar: (() => void) | undefined
+  let b: Promise<PromiseSettledResult<WasteSummary>[]> | undefined
+  let resultado: { merma: PromiseSettledResult<WasteSummary>; seguiaRetenido: boolean } | undefined
 
-  const a = prisma
-    .$transaction(
-      async txA => {
-        if (tabla === 'Inventory') await txA.$queryRaw`SELECT id FROM "Inventory" WHERE id = ${filaId} FOR UPDATE`
-        else await txA.$queryRaw`SELECT id FROM "Product" WHERE id = ${filaId} FOR UPDATE`
-        retiene = true
-        avisar()
-        await Promise.race([mermaTermino, plazo])
-        retiene = false
-        throw new SoltarCandado()
-      },
-      { timeout: RETENCION_MS + 10_000 },
-    )
-    .catch(error => {
-      if (!(error instanceof SoltarCandado)) errorDeA = error
+  const a = ejecutarTx(
+    async txA => {
+      if (tabla === 'Inventory') await txA.$queryRaw`SELECT id FROM "Inventory" WHERE id = ${filaId} FOR UPDATE`
+      else await txA.$queryRaw`SELECT id FROM "Product" WHERE id = ${filaId} FOR UPDATE`
+      retiene = true
+      avisar()
+      await liberacion
+      retiene = false
+      throw new SoltarCandado()
+    },
+    { timeout: PLAZO_MS + 15_000, maxWait: 10_000 },
+  ).catch(error => {
+    if (!(error instanceof SoltarCandado)) errorDeA = error
+  })
+
+  try {
+    const adquirido = await Promise.race([tomado.then(() => true), a.then(() => false)])
+    if (!adquirido) throw errorDeA ?? new Error('La otra transacción terminó sin tomar el candado.')
+
+    const transactions = jest.spyOn(prisma, '$transaction')
+    restaurar = () => transactions.mockRestore()
+    transactions.mockImplementation(((
+      operation: (tx: Prisma.TransactionClient) => Promise<unknown>,
+      options?: { maxWait?: number; timeout?: number; isolationLevel?: Prisma.TransactionIsolationLevel },
+    ) =>
+      ejecutarTx(async tx => {
+        await tx.$executeRaw`SET LOCAL lock_timeout = '0'`
+        return operation(tx)
+      }, options)) as never)
+
+    const plazo = new Promise<never>((_, reject) => {
+      temporizador = setTimeout(() => reject(new Error(`El arnés agotó ${PLAZO_MS} ms mientras A retenía el candado.`)), PLAZO_MS)
     })
 
-  let merma: PromiseSettledResult<WasteSummary> | undefined
-  let seguiaRetenido = false
-  try {
-    const aLoTiene = await Promise.race([tomado.then(() => true), a.then(() => false)])
-    if (!aLoTiene) throw new Error(`La otra transacción terminó sin tomar el candado: ${String(errorDeA)}`)
-    ;[merma] = await Promise.allSettled([logWaste(venueId, staffId, input)])
-    seguiaRetenido = retiene
+    b = Promise.allSettled([logWaste(venueId, staffId, input)])
+    const [merma] = await Promise.race([
+      b,
+      plazo,
+      a.then(() => {
+        throw errorDeA ?? new Error('A liberó el candado antes de terminar la observación.')
+      }),
+    ])
+    resultado = { merma, seguiaRetenido: retiene }
   } finally {
-    soltar()
     clearTimeout(temporizador)
-    await a
+    soltar()
+    await Promise.allSettled([a, b ?? Promise.resolve()])
+    restaurar?.()
   }
+
   if (errorDeA) throw errorDeA
-  if (!merma) throw new Error('La merma no llegó a correr.')
-  return { merma, seguiaRetenido }
+  if (!resultado) throw new Error('La observación no produjo un resultado.')
+  return resultado
 }
 
 test.each(['Inventory', 'Product'] as const)(
@@ -1771,6 +1848,33 @@ test('🔴 la rama legacy de PRODUCTOS (LATERAL, T9c) respeta los dos bordes de 
   expect((await getWasteTotals(venueId, at('2026-04-02T00:00:00.000Z'), at('2026-04-02T17:59:59.999Z'))).quantity.toString()).toBe('0')
 })
 
+test('🔴 la rama legacy de PRODUCTOS sólo suma LOSS: una venta o un ajuste sin folio NO son merma', async () => {
+  // El filtro `mv.type = 'LOSS'` del LATERAL es literal (lo exige el índice parcial): sin él, cada
+  // venta y cada ajuste del producto entrarían a los totales como merma.
+  const goods = await product(20, 10)
+  const at = new Date('2026-05-05T15:00:00.000Z')
+  const movement = (type: 'SALE' | 'ADJUSTMENT' | 'LOSS', quantity: number, previous: number) => ({
+    inventoryId: goods.inventory!.id,
+    type,
+    quantity: D(quantity),
+    previousStock: D(previous),
+    newStock: D(previous + quantity),
+    unitCost: D(10),
+    createdAt: at,
+  })
+  await prisma.inventoryMovement.createMany({
+    data: [movement('SALE', -4, 20), movement('ADJUSTMENT', -2, 16), movement('LOSS', -1, 14)],
+  })
+
+  const totals = await getWasteTotals(venueId, from, to)
+  expect(totals.quantity.toString()).toBe('1') // sólo la LOSS
+  expect(totals.cost?.toString()).toBe('10')
+  expect(totals.unvaluedQuantity.toString()).toBe('0')
+  const breakdown = await getWasteBreakdown(venueId, from, to)
+  expect(breakdown.total).toBe(1)
+  expect(breakdown.items[0].quantity.toString()).toBe('1')
+})
+
 test('el desglose agrupa por artículo sin multiplicar, trae el nombre y pagina con total', async () => {
   const ingredient = await raw(3)
   await batch(ingredient.id, 3, 2)
@@ -2082,4 +2186,74 @@ test('🔴 aislamiento: artículos, mermas y folios de OTRO venue no aparecen', 
     await prisma.menuCategory.deleteMany({ where: { venueId: other.id } })
     await prisma.venue.deleteMany({ where: { id: other.id, organizationId } })
   }
+})
+
+// ── Limitaciones aceptadas (spec §7, D6): L1, L3 y L4 ─────────────────────────────────────────
+// La merma es una resta con motivo que se aplica AL LLEGAR; no se concilia contra conteos ni contra
+// el cron de caducidad (tres diseños para conciliarlo fueron rechazados). L2, L5 y L6 no son de este
+// servidor o no se prueban aquí: L2 es del conteo, L5 del aparato y L6 lo fija la ventana por createdAt.
+
+// LIMITACIÓN ACEPTADA (spec §7, decisión D6 del founder, 21-sep-2026). Esta prueba no dice que
+// el resultado sea deseable: FIJA el comportamiento para que cambiarlo sea una decisión y no un accidente.
+test('L1: el conteo fija 8 y la merma tardía de 2 deja 6', async () => {
+  const item = await product(10)
+  // La merma OCURRIÓ antes del conteo (así lo dice el aparato), pero LLEGA después.
+  const input = request('PRODUCT', item.id, 2, { clientOccurredAt: new Date('2026-01-01T00:00:00Z') })
+  const count = await prisma.stockCount.create({
+    data: {
+      venueId,
+      type: 'CYCLE',
+      status: 'IN_PROGRESS',
+      createdById: staffId,
+      items: { create: { productId: item.id, expected: D(10), counted: D(8), countedAt: new Date() } },
+    },
+  })
+
+  await confirmStockCount(count.id, venueId, staffId, 0)
+  expect(await productStock(item.id)).toBe('8')
+
+  const result = await logWaste(venueId, staffId, input)
+  expect(result).toMatchObject({ declared: '2', deducted: '2', unrecorded: '0' })
+  expect(await productStock(item.id)).toBe('6')
+})
+
+// LIMITACIÓN ACEPTADA (spec §7, decisión D6 del founder, 21-sep-2026). Esta prueba no dice que
+// el resultado sea deseable: FIJA el comportamiento para que cambiarlo sea una decisión y no un accidente.
+test('L3: cron de 5 y declaración posterior sin stock suman 10', async () => {
+  const item = await raw(5)
+  await batch(item.id, 5, 2, new Date('2000-01-01T00:00:00Z'), new Date('2000-01-02T00:00:00Z'))
+
+  // El cron da de baja el lote vencido: la existencia queda en 0 y deja su SPOILAGE sin folio.
+  expect(await markExpiredBatches(venueId)).toBe(1)
+  expect(await rawStock(item.id)).toBe('0')
+
+  // Alguien declara «Caducó» por lo mismo: ya no hay qué descontar, pero la declaración cuenta.
+  const result = await logWaste(venueId, staffId, request('RAW_MATERIAL', item.id, 5, { reasonCode: 'EXPIRED' }))
+  expect(result).toMatchObject({ declared: '5', deducted: '0', unrecorded: '5' })
+  expect(await rawStock(item.id)).toBe('0')
+
+  const totals = await getWasteTotals(venueId, from, to)
+  expect(totals.quantity.toString()).toBe('10') // 5 del cron + 5 declaradas: la misma pérdida, dos veces
+  expect(totals.cost?.toString()).toBe('10') // sólo el cron tiene costo (5 × 2)
+  expect(totals.unvaluedQuantity.toString()).toBe('5') // la declaración sin existencia no tiene costo
+})
+
+// LIMITACIÓN ACEPTADA (spec §7, decisión D6 del founder, 21-sep-2026). Esta prueba no dice que
+// el resultado sea deseable: FIJA el comportamiento para que cambiarlo sea una decisión y no un accidente.
+test('L4: merma antes de venta deja -3; venta antes deja 0 y 3 sin existencia', async () => {
+  const first = await product(10)
+  const second = await product(10)
+
+  // Orden 1: merma de 5 y después venta de 8. La venta descuenta siempre, aunque quede negativa.
+  const wasteFirst = await logWaste(venueId, staffId, request('PRODUCT', first.id, 5))
+  await deductInventoryForProduct(venueId, first.id, 8, randomUUID(), staffId)
+
+  // Orden 2: venta de 8 y después merma de 5. La merma se trunca en 0 y el resto queda sin existencia.
+  await deductInventoryForProduct(venueId, second.id, 8, randomUUID(), staffId)
+  const saleFirst = await logWaste(venueId, staffId, request('PRODUCT', second.id, 5))
+
+  expect(wasteFirst).toMatchObject({ declared: '5', deducted: '5', unrecorded: '0' })
+  expect(await productStock(first.id)).toBe('-3')
+  expect(saleFirst).toMatchObject({ declared: '5', deducted: '2', unrecorded: '3' })
+  expect(await productStock(second.id)).toBe('0')
 })

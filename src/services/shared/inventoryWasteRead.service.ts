@@ -253,6 +253,7 @@ export function wasteLedgerSql(venueId: string, from: Date, to: Date): Prisma.Sq
         AND mv."wasteReportId" IS NULL
         AND mv."createdAt" >= ${utcTs(from)}
         AND mv."createdAt" <= ${utcTs(to)}
+      -- barrera: no quitar, ver arriba
       OFFSET 0
     ) m
     WHERE p."venueId" = ${venueId}
