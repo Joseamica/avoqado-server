@@ -66,7 +66,14 @@ export function createDisposableDemoSessionDeletion(
             throw new ConflictError('La sucursal ya no es un demo desechable', 'LIVE_DEMO_VENUE_NOT_DISPOSABLE')
           }
           await overrides.afterVenueLock?.(session.venueId)
-          const result = await deleteOrRetainStaffWithH1ProvenanceTx(tx, session.staffId)
+          let mermaBorrada = 0
+          const result = await deleteOrRetainStaffWithH1ProvenanceTx(tx, session.staffId, async () => {
+            // 🔴 La merma del demo haría del visitante «provenance H1» (autor del folio y su
+            // auditoría con organizationId) y la limpieza revertiría en cada pasada. Con Venue y
+            // Staff ya bloqueados se purga SÓLO la merma de este LIVE_DEMO, antes de clasificar;
+            // cualquier otra historia protegida sigue rechazando, y el rechazo revierte la purga.
+            mermaBorrada = await deleteDemoWasteTx(tx, session.venueId, session.staffId)
+          })
           if (result.retainedForAudit) {
             throw new ConflictError(
               'El Staff del demo conserva provenance H1 y requiere revisión manual',
@@ -76,7 +83,7 @@ export function createDisposableDemoSessionDeletion(
           const filasBorradas = await deleteVenueDataTx(tx, session.venueId)
           // Venue deletion cascades the session, so this remains idempotent.
           const sesion = await tx.liveDemoSession.deleteMany({ where: { id: session.id } })
-          return filasBorradas + sesion.count
+          return mermaBorrada + filasBorradas + sesion.count
         },
         { timeout: DELETION_TIMEOUT_MS, maxWait: DELETION_MAX_WAIT_MS },
       )
@@ -90,6 +97,30 @@ export function createDisposableDemoSessionDeletion(
 }
 
 export const deleteDisposableDemoSession = createDisposableDemoSessionDeletion()
+
+/**
+ * Borra la merma de un venue LIVE_DEMO: movimientos, auditoría de merma y folios (de la hoja a
+ * la raíz). Sólo se llama dentro de la transacción de limpieza, con el Venue bloqueado y ya
+ * comprobado LIVE_DEMO, y con el Staff del demo bloqueado.
+ *
+ * Los folios y sus movimientos se van todos: mueren igual con el venue en esta misma
+ * transacción. La AUDITORÍA sólo la del visitante del demo: el ActivityLog no cuelga del venue
+ * y sobrevive a su borrado, así que la de cualquier otra persona se conserva como hasta hoy.
+ */
+async function deleteDemoWasteTx(tx: DbClient, venueId: string, demoStaffId: string): Promise<number> {
+  const movimientosDeInsumo = await tx.rawMaterialMovement.deleteMany({ where: { venueId, wasteReport: { venueId } } })
+  const movimientosDeProducto = await tx.inventoryMovement.deleteMany({ where: { inventory: { venueId }, wasteReport: { venueId } } })
+  const auditoria = await tx.activityLog.deleteMany({
+    where: {
+      venueId,
+      actorStaffId: demoStaffId,
+      entity: 'InventoryWasteReport',
+      action: { in: ['INVENTORY_WASTE_LOGGED', 'INVENTORY_WASTE_VOIDED'] },
+    },
+  })
+  const folios = await tx.inventoryWasteReport.deleteMany({ where: { venueId } })
+  return movimientosDeInsumo.count + movimientosDeProducto.count + auditoria.count + folios.count
+}
 
 /**
  * Cleans up expired and inactive live demo sessions
@@ -150,8 +181,8 @@ export async function cleanupExpiredLiveDemos(): Promise<number> {
         // Delete venue and staff data manually to avoid foreign key constraint errors
         logger.info(`🗑️ Cleaning up venue: ${session.venue.name} (${session.venue.id})`)
 
-        // Staff deletion performs the row-lock + provenance decision before
-        // any venue data is removed, so cleanup fails closed without partial loss.
+        // La baja del Staff bloquea Venue y Staff y conserva el rechazo ante historia H1 ajena a
+        // la merma de este demo; cualquier rechazo revierte la purga y no borra nada del venue.
         filasBorradas += await deleteDisposableDemoSession(session)
 
         logger.info(`✅ Cleaned up live demo session ${session.sessionId} (venue: ${session.venue.name}, staff: ${session.staff.email})`)

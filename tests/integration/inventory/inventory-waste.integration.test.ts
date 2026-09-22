@@ -2,15 +2,20 @@ import { randomInt, randomUUID } from 'crypto'
 import { Prisma, PrismaClient } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
+import { getUserAccess } from '@/services/access/access.service'
+import { deleteDisposableDemoSession } from '@/services/cleanup/liveDemoCleanup.service'
 import {
   getWasteAccess,
+  grantedPermissionsBeforeActivation,
   hasWastePermission,
   isWasteKeyCollision,
   logWaste,
   prepareWaste,
   recoverByKey,
+  requireWastePermission,
   voidWasteKey,
   WasteInput,
+  WasteSummary,
 } from '@/services/shared/inventoryWaste.service'
 
 // Los lectores (getWasteTotals, listWasteReports) y los choques con caducidad, conteo y
@@ -1013,3 +1018,422 @@ test('colisión P2002 real: la anulación que pierde lee lo que quedó y no deja
   // El perdedor revirtió entero: su auditoría no existe.
   expect(await prisma.activityLog.count({ where: { venueId } })).toBe(0)
 })
+
+// ─── Auditoría Codex #1 · P2-4: el catch P2002 de logWaste, con un P2002 REAL ─────────────
+
+test.each(['APPLIED', 'VOIDED'] as const)(
+  'logWaste recupera FUERA de la transacción tras un P2002 real, sin reintento; ganador=%s',
+  async status => {
+    const item = await raw(0)
+    const input = request('RAW_MATERIAL', item.id, 2)
+    const prepared = prepareWaste(staffId, input)
+
+    // El ganador escribe DIRECTO (READ COMMITTED, sin auditoría): así el perdedor SERIALIZABLE recibe
+    // el 23505 real en vez de un 40001, y lo único que puede salvarlo es el catch de logWaste.
+    const data: Prisma.InventoryWasteReportUncheckedCreateInput =
+      status === 'VOIDED'
+        ? {
+            venueId,
+            idempotencyKey: prepared.idempotencyKey,
+            status: 'VOIDED',
+            costState: 'NONE',
+            reportedByStaffId: waiterAId,
+            source: 'POS',
+          }
+        : {
+            venueId,
+            idempotencyKey: prepared.idempotencyKey,
+            status: 'APPLIED',
+            payloadHash: prepared.payloadHash,
+            itemType: 'RAW_MATERIAL',
+            rawMaterialId: item.id,
+            unit: prepared.unit,
+            reasonCode: prepared.reasonCode,
+            note: prepared.note,
+            declaredQuantity: prepared.quantity,
+            deductedQuantity: D(0),
+            unrecordedQuantity: prepared.quantity,
+            costState: 'NONE',
+            reportedByStaffId: staffId,
+            source: 'POS',
+          }
+
+    // Espía que conserva la implementación real: no fabrica errores, sólo cuenta los intentos.
+    const transactions = jest.spyOn(prisma, '$transaction')
+    try {
+      const result = await forceOrder(
+        prepared.idempotencyKey,
+        status,
+        () => prisma.inventoryWasteReport.create({ data }),
+        () => logWaste(venueId, staffId, input),
+      )
+      expect(result.winner.status).toBe('fulfilled')
+
+      // UNA sola transacción, y terminó en P2002: si un 40001 + reintento la hubiera salvado,
+      // esta prueba no estaría probando el catch.
+      expect(transactions).toHaveBeenCalledTimes(1)
+      expect(await captureError(transactions.mock.results[0].value as Promise<unknown>)).toMatchObject({ code: 'P2002' })
+
+      const persisted = await prisma.inventoryWasteReport.findUniqueOrThrow({
+        where: { venueId_idempotencyKey: { venueId, idempotencyKey: prepared.idempotencyKey } },
+      })
+      if (status === 'APPLIED') {
+        expect(result.loser).toEqual({
+          status: 'fulfilled',
+          value: { reportId: persisted.id, declared: '2', deducted: '0', unrecorded: '2' },
+        })
+      } else {
+        expect(result.loser.status).toBe('rejected')
+        if (result.loser.status === 'rejected') {
+          expect(result.loser.reason).toMatchObject({ code: 'WASTE_VOIDED', statusCode: 409 })
+        }
+        expect(persisted.reportedByStaffId).toBe(waiterAId)
+      }
+
+      // El perdedor revirtió entero: ni existencia, ni movimientos, ni auditoría propia.
+      expect(await rawStock(item.id)).toBe('0')
+      expect(await prisma.inventoryWasteReport.count({ where: { venueId } })).toBe(1)
+      expect(await prisma.rawMaterialMovement.count({ where: { venueId } })).toBe(0)
+      expect(await prisma.inventoryMovement.count({ where: { inventory: { venueId } } })).toBe(0)
+      expect(await prisma.activityLog.count({ where: { venueId } })).toBe(0)
+    } finally {
+      transactions.mockRestore()
+    }
+  },
+)
+
+// ─── Auditoría Codex #1 · P2-1: la merma de producto no espera candados (NOWAIT) ──────────
+
+class SoltarCandado extends Error {}
+
+/**
+ * Otra transacción —en la vida real, una compra: actualiza Inventory y después Product.cost—
+ * bloquea la fila de `tabla` y la retiene hasta RETENCION_MS o hasta que la merma responda.
+ * Sin NOWAIT la merma se quedaría esperando y sólo terminaría DESPUÉS de que la otra soltara
+ * (y ahí está la espera circular con la compra). Con NOWAIT cada intento aborta con 55P03 y
+ * se agotan los reintentos mientras el candado sigue tomado.
+ */
+async function mermaMientrasOtraTxRetiene(
+  tabla: 'Inventory' | 'Product',
+  filaId: string,
+  input: WasteInput,
+): Promise<{ merma: PromiseSettledResult<WasteSummary>; seguiaRetenido: boolean }> {
+  const RETENCION_MS = 6000
+  let avisar: () => void = () => undefined
+  const tomado = new Promise<void>(resolve => {
+    avisar = resolve
+  })
+  let soltar: () => void = () => undefined
+  const mermaTermino = new Promise<void>(resolve => {
+    soltar = resolve
+  })
+  let temporizador: NodeJS.Timeout | undefined
+  const plazo = new Promise<void>(resolve => {
+    temporizador = setTimeout(resolve, RETENCION_MS)
+  })
+  let retiene = false
+  let errorDeA: unknown
+
+  const a = prisma
+    .$transaction(
+      async txA => {
+        if (tabla === 'Inventory') await txA.$queryRaw`SELECT id FROM "Inventory" WHERE id = ${filaId} FOR UPDATE`
+        else await txA.$queryRaw`SELECT id FROM "Product" WHERE id = ${filaId} FOR UPDATE`
+        retiene = true
+        avisar()
+        await Promise.race([mermaTermino, plazo])
+        retiene = false
+        throw new SoltarCandado()
+      },
+      { timeout: RETENCION_MS + 10_000 },
+    )
+    .catch(error => {
+      if (!(error instanceof SoltarCandado)) errorDeA = error
+    })
+
+  let merma: PromiseSettledResult<WasteSummary> | undefined
+  let seguiaRetenido = false
+  try {
+    const aLoTiene = await Promise.race([tomado.then(() => true), a.then(() => false)])
+    if (!aLoTiene) throw new Error(`La otra transacción terminó sin tomar el candado: ${String(errorDeA)}`)
+    ;[merma] = await Promise.allSettled([logWaste(venueId, staffId, input)])
+    seguiaRetenido = retiene
+  } finally {
+    soltar()
+    clearTimeout(temporizador)
+    await a
+  }
+  if (errorDeA) throw errorDeA
+  if (!merma) throw new Error('La merma no llegó a correr.')
+  return { merma, seguiaRetenido }
+}
+
+test.each(['Inventory', 'Product'] as const)(
+  'merma de producto no espera la fila de %s que otra transacción retiene: se rinde sin efectos y el folio sigue usable',
+  async tabla => {
+    const item = await product(5)
+    const input = request('PRODUCT', item.id, 2)
+    const filaId = tabla === 'Inventory' ? (item.inventory?.id ?? '') : item.id
+    expect(filaId).not.toBe('')
+
+    const { merma, seguiaRetenido } = await mermaMientrasOtraTxRetiene(tabla, filaId, input)
+
+    expect(merma.status).toBe('rejected')
+    if (merma.status === 'rejected') {
+      expect(merma.reason).toMatchObject({ code: 'WASTE_RETRYABLE_CONFLICT', statusCode: 409 })
+    }
+    // Respondió mientras la otra transacción TODAVÍA tenía el candado: no la esperó.
+    expect(seguiaRetenido).toBe(true)
+
+    expect(await productStock(item.id)).toBe('5')
+    expect(await prisma.inventoryWasteReport.count({ where: { venueId } })).toBe(0)
+    expect(await prisma.inventoryMovement.count({ where: { inventory: { venueId } } })).toBe(0)
+    expect(await prisma.activityLog.count({ where: { venueId } })).toBe(0)
+
+    // Sin el candado, el aparato reintenta con el MISMO folio y se aplica una sola vez.
+    await expect(logWaste(venueId, staffId, input)).resolves.toMatchObject({ deducted: '2' })
+    expect(await productStock(item.id)).toBe('3')
+  },
+)
+
+// ─── Auditoría Codex #1 · P2-2 (Ruling 12): anular no depende de la activación white-label ──
+
+test('los permisos previos a la activación son EXACTAMENTE los de getUserAccess sin white-label', async () => {
+  // Premisa: sin white-label, getUserAccess no filtra nada, así que su lista es la de antes del filtro.
+  expect((await getUserAccess(staffId, venueId)).whiteLabelEnabled).toBe(false)
+
+  const owner = await prisma.staff.create({
+    data: { email: `owner-${fixture}@example.test`, firstName: 'Prueba', lastName: 'Dueña' },
+  })
+  let permissionSetId: string | undefined
+  try {
+    await prisma.staffVenue.create({ data: { staffId: owner.id, venueId, role: 'OWNER', active: true } })
+    // (b) Override del rol con exclusiones: el WAITER ya agrega log-waste; aquí además se le quita algo.
+    await prisma.venueRolePermission.update({
+      where: { venueId_role: { venueId, role: 'WAITER' } },
+      data: { deniedPermissions: ['reviews:read'] },
+    })
+    // (c) Conjunto de permisos: manda sobre el rol.
+    const set = await prisma.permissionSet.create({
+      data: { venueId, name: `Conjunto ${randomUUID()}`, permissions: ['inventory:log-waste', 'orders:read'] },
+    })
+    permissionSetId = set.id
+    await prisma.staffVenue.update({
+      where: { staffId_venueId: { staffId: waiterBId, venueId } },
+      data: { permissionSetId },
+    })
+
+    // (a) Rol por defecto: MANAGER, VIEWER y OWNER. En OWNER, resolver las dependencias a un solo
+    // nivel ya da una lista distinta (medido): por eso no se usa resolveStaffVenuePermissions.
+    const casos: Array<[string, string]> = [
+      ['MANAGER por defecto', staffId],
+      ['VIEWER por defecto', viewerId],
+      ['OWNER por defecto', owner.id],
+      ['WAITER con override y exclusiones', waiterAId],
+      ['Conjunto de permisos', waiterBId],
+    ]
+    for (const [caso, id] of casos) {
+      const access = await getUserAccess(id, venueId)
+      const antes = await grantedPermissionsBeforeActivation(id, venueId, access.role)
+      expect({ caso, permisos: [...antes].sort() }).toEqual({ caso, permisos: [...access.corePermissions].sort() })
+    }
+
+    // Las premisas de cada caso sí se aplicaron (si no, la igualdad no probaría nada).
+    const waiterA = await grantedPermissionsBeforeActivation(waiterAId, venueId, 'WAITER')
+    expect(waiterA).toContain('inventory:log-waste')
+    expect(waiterA).not.toContain('reviews:read')
+    const conjunto = await grantedPermissionsBeforeActivation(waiterBId, venueId, 'WAITER')
+    expect(conjunto).toContain('inventory:log-waste')
+    expect(conjunto).not.toContain('orders:create')
+  } finally {
+    await prisma.staffVenue.update({ where: { staffId_venueId: { staffId: waiterBId, venueId } }, data: { permissionSetId: null } })
+    if (permissionSetId) await prisma.permissionSet.deleteMany({ where: { id: permissionSetId, venueId } })
+    await prisma.venueRolePermission.update({
+      where: { venueId_role: { venueId, role: 'WAITER' } },
+      data: { deniedPermissions: [] },
+    })
+    await prisma.staffVenue.deleteMany({ where: { staffId: owner.id } })
+    await prisma.staff.deleteMany({ where: { id: owner.id } })
+  }
+})
+
+test('anular cierra folios aunque el white-label apague el inventario; permisos y privacidad se respetan', async () => {
+  const item = await product(5)
+  const byManager = await logWaste(venueId, staffId, request('PRODUCT', item.id, 2))
+  const byWaiter = await logWaste(venueId, waiterAId, request('PRODUCT', item.id, 1))
+  const managerReport = await prisma.inventoryWasteReport.findUniqueOrThrow({ where: { id: byManager.reportId } })
+  const waiterReport = await prisma.inventoryWasteReport.findUniqueOrThrow({ where: { id: byWaiter.reportId } })
+
+  const previousModule = await prisma.module.findUnique({ where: { code: 'WHITE_LABEL_DASHBOARD' } })
+  const module = await prisma.module.upsert({
+    where: { code: 'WHITE_LABEL_DASHBOARD' },
+    update: {},
+    create: { code: 'WHITE_LABEL_DASHBOARD', name: 'White label', defaultConfig: {} },
+  })
+  let permissionSetId: string | undefined
+
+  try {
+    // White-label ENCENDIDO y sin AVOQADO_INVENTORY entre sus funciones: el inventario queda apagado.
+    await prisma.venueModule.create({
+      data: { venueId, moduleId: module.id, enabled: true, enabledBy: staffId, config: { enabledFeatures: [] } },
+    })
+
+    // Premisa: la lista filtrada ya no concede inventario a nadie…
+    const filtered = await getWasteAccess(staffId, venueId)
+    expect(filtered.whiteLabelEnabled).toBe(true)
+    expect(hasWastePermission(filtered, 'inventory:adjust')).toBe(false)
+    expect(hasWastePermission(await getWasteAccess(waiterAId, venueId), 'inventory:log-waste')).toBe(false)
+    // …y registrar una merma NUEVA sigue exigiendo la activación: eso no cambia.
+    await expect(requireWastePermission(waiterAId, venueId, 'inventory:log-waste')).rejects.toMatchObject({ statusCode: 403 })
+
+    // Anular sí: el gerente y el mesero cierran folios pendientes.
+    await expect(voidWasteKey(venueId, staffId, randomUUID())).resolves.toMatchObject({ outcome: 'VOIDED', voidedByStaffId: staffId })
+    await expect(voidWasteKey(venueId, waiterAId, randomUUID())).resolves.toMatchObject({ outcome: 'VOIDED', voidedByStaffId: waiterAId })
+
+    // Privacidad: el mesero no ve el resumen ajeno; el gerente sí (inventory:adjust CONCEDIDO, aunque filtrado).
+    await expect(voidWasteKey(venueId, waiterAId, managerReport.idempotencyKey)).resolves.toStrictEqual({ outcome: 'ALREADY_APPLIED' })
+    await expect(voidWasteKey(venueId, staffId, waiterReport.idempotencyKey)).resolves.toStrictEqual({
+      outcome: 'ALREADY_APPLIED',
+      report: byWaiter,
+    })
+
+    // Sin nada concedido sigue el 403 sin lápida: el VIEWER, y un mesero con un Conjunto vacío.
+    const viewerKey = randomUUID()
+    await expect(voidWasteKey(venueId, viewerId, viewerKey)).rejects.toMatchObject({ statusCode: 403 })
+    const set = await prisma.permissionSet.create({ data: { venueId, name: `Sin permisos ${randomUUID()}`, permissions: [] } })
+    permissionSetId = set.id
+    await prisma.staffVenue.update({ where: { staffId_venueId: { staffId: waiterAId, venueId } }, data: { permissionSetId } })
+    const deniedKey = randomUUID()
+    await expect(voidWasteKey(venueId, waiterAId, deniedKey)).rejects.toMatchObject({ statusCode: 403 })
+    expect(await prisma.inventoryWasteReport.count({ where: { venueId, idempotencyKey: { in: [viewerKey, deniedKey] } } })).toBe(0)
+
+    // Anular no movió existencia: 5 − 2 − 1, y sólo los dos movimientos de las mermas.
+    expect(await productStock(item.id)).toBe('2')
+    expect(await prisma.inventoryMovement.count({ where: { inventory: { venueId } } })).toBe(2)
+    expect(await prisma.inventoryWasteReport.count({ where: { venueId, status: 'VOIDED' } })).toBe(2)
+  } finally {
+    await prisma.staffVenue.update({ where: { staffId_venueId: { staffId: waiterAId, venueId } }, data: { permissionSetId: null } })
+    if (permissionSetId) await prisma.permissionSet.deleteMany({ where: { id: permissionSetId, venueId } })
+    await prisma.venueModule.deleteMany({ where: { venueId, moduleId: module.id } })
+    if (!previousModule) {
+      await prisma.module.deleteMany({ where: { id: module.id, venueModules: { none: {} }, organizationModules: { none: {} } } })
+    }
+  }
+})
+
+// ─── Auditoría Codex #1 · P2-3 (Ruling 13): una merma no impide limpiar el live demo ───────
+
+test.each([null, 'OTRO_VENUE', 'MISMO_DEMO'] as const)(
+  'limpieza del live demo con merma y lápida; historia protegida ajena a la merma=%s',
+  async externalProvenance => {
+    const suffix = randomUUID()
+    const demoEmail = `demo-${suffix}@example.test`
+    let demoStaffId: string | undefined
+    let demoVenueId: string | undefined
+
+    try {
+      demoStaffId = (await prisma.staff.create({ data: { email: demoEmail, firstName: 'Demo', lastName: 'Merma', active: true } })).id
+      demoVenueId = (
+        await prisma.venue.create({
+          data: {
+            organizationId,
+            name: `Demo ${suffix}`,
+            slug: `demo-${suffix}`,
+            status: 'LIVE_DEMO',
+            timezone: 'America/Mexico_City',
+            currency: 'MXN',
+          },
+        })
+      ).id
+      await prisma.staffVenue.create({ data: { staffId: demoStaffId, venueId: demoVenueId, role: 'OWNER', active: true } })
+      const category = await prisma.menuCategory.create({ data: { venueId: demoVenueId, name: 'Demo', slug: `categoria-${suffix}` } })
+      const item = await prisma.product.create({
+        data: {
+          venueId: demoVenueId,
+          categoryId: category.id,
+          name: 'Producto demo',
+          sku: randomUUID(),
+          price: D(100),
+          cost: D(10),
+          unit: 'UNIT',
+          trackInventory: true,
+          inventoryMethod: 'QUANTITY',
+          inventory: { create: { venueId: demoVenueId, currentStock: D(5) } },
+        },
+      })
+      const session = await prisma.liveDemoSession.create({
+        data: { sessionId: randomUUID(), venueId: demoVenueId, staffId: demoStaffId, expiresAt: new Date(Date.now() - 60_000) },
+      })
+
+      // El visitante del demo registra una merma y anula otro folio: dos folios, dos auditorías.
+      await logWaste(demoVenueId, demoStaffId, request('PRODUCT', item.id, 2))
+      await voidWasteKey(demoVenueId, demoStaffId, randomUUID())
+      expect(await prisma.inventoryWasteReport.count({ where: { venueId: demoVenueId } })).toBe(2)
+      expect(await prisma.activityLog.count({ where: { venueId: demoVenueId } })).toBe(2)
+
+      if (externalProvenance) {
+        // La misma persona tiene OTRA historia protegida —en otro venue, o en el propio demo pero
+        // que no es merma—: eso sigue impidiendo borrarla. La purga sólo alcanza a la merma.
+        const whereVenue = externalProvenance === 'OTRO_VENUE' ? venueId : demoVenueId
+        await prisma.activityLog.create({
+          data: {
+            staffId: demoStaffId,
+            actorStaffId: demoStaffId,
+            actorType: 'HUMAN',
+            organizationId,
+            venueId: whereVenue,
+            action: 'EXTERNAL_PROTECTED_EVENT',
+            entity: 'Venue',
+            entityId: whereVenue,
+            data: {},
+          },
+        })
+
+        await expect(deleteDisposableDemoSession(session)).rejects.toMatchObject({ code: 'LIVE_DEMO_STAFF_HAS_H1_PROVENANCE' })
+
+        // El rechazo revierte también la purga de la merma.
+        expect(await prisma.inventoryWasteReport.count({ where: { venueId: demoVenueId } })).toBe(2)
+        expect(await prisma.inventoryMovement.count({ where: { inventory: { venueId: demoVenueId } } })).toBe(1)
+        expect(
+          await prisma.activityLog.count({
+            where: { venueId: demoVenueId, action: { in: ['INVENTORY_WASTE_LOGGED', 'INVENTORY_WASTE_VOIDED'] } },
+          }),
+        ).toBe(2)
+        expect(
+          await prisma.activityLog.count({ where: { venueId: whereVenue, actorStaffId: demoStaffId, action: 'EXTERNAL_PROTECTED_EVENT' } }),
+        ).toBe(1)
+        expect(await prisma.staff.findUnique({ where: { id: demoStaffId } })).toMatchObject({ active: true, email: demoEmail })
+        expect(await prisma.venue.count({ where: { id: demoVenueId } })).toBe(1)
+        expect(await prisma.liveDemoSession.count({ where: { id: session.id } })).toBe(1)
+      } else {
+        // Otra persona también registró merma en el demo: su folio muere con el venue, pero su
+        // AUDITORÍA no es del visitante y se conserva, como todo ActivityLog de un venue borrado.
+        await prisma.staffVenue.create({ data: { staffId, venueId: demoVenueId, role: 'MANAGER', active: true } })
+        const ajena = await logWaste(demoVenueId, staffId, request('PRODUCT', item.id, 1))
+
+        await expect(deleteDisposableDemoSession(session)).resolves.toBeGreaterThan(0)
+
+        expect(await prisma.venue.findUnique({ where: { id: demoVenueId } })).toBeNull()
+        expect(await prisma.staff.findUnique({ where: { id: demoStaffId } })).toBeNull()
+        expect(await prisma.inventoryWasteReport.count({ where: { venueId: demoVenueId } })).toBe(0)
+        expect(await prisma.inventoryMovement.count({ where: { inventory: { venueId: demoVenueId } } })).toBe(0)
+        expect(await prisma.activityLog.count({ where: { venueId: demoVenueId, actorStaffId: demoStaffId } })).toBe(0)
+        expect(await prisma.activityLog.count({ where: { venueId: demoVenueId, actorStaffId: staffId, entityId: ajena.reportId } })).toBe(1)
+        expect(await prisma.staff.count({ where: { id: staffId } })).toBe(1)
+        expect(await prisma.liveDemoSession.count({ where: { id: session.id } })).toBe(0)
+      }
+    } finally {
+      if (demoStaffId) await prisma.activityLog.deleteMany({ where: { actorStaffId: demoStaffId } })
+      if (demoVenueId) {
+        await prisma.activityLog.deleteMany({ where: { venueId: demoVenueId } })
+        await prisma.inventoryMovement.deleteMany({ where: { inventory: { venueId: demoVenueId } } })
+        await prisma.inventoryWasteReport.deleteMany({ where: { venueId: demoVenueId } })
+        await prisma.inventory.deleteMany({ where: { venueId: demoVenueId } })
+        await prisma.product.deleteMany({ where: { venueId: demoVenueId } })
+        await prisma.menuCategory.deleteMany({ where: { venueId: demoVenueId } })
+        await prisma.venue.deleteMany({ where: { id: demoVenueId, status: 'LIVE_DEMO' } })
+      }
+      if (demoStaffId) await prisma.staff.deleteMany({ where: { id: demoStaffId } })
+    }
+  },
+)

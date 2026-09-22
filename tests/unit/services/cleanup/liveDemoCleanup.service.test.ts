@@ -78,7 +78,9 @@ describe('cleanupExpiredLiveDemos — cascade-tolerant session delete', () => {
 
     expect(cleaned).toBe(1)
     expect(prismaMock.venue.delete).toHaveBeenCalledWith({ where: { id: 'venue-1' } })
-    expect(deleteOrRetainStaffWithH1ProvenanceTx).toHaveBeenCalledWith(prismaMock, 'staff-1')
+    // El tercer argumento purga la merma del demo con Venue y Staff ya bloqueados (Ruling 13);
+    // su efecto real lo prueba inventory-waste.integration.test.ts contra Postgres.
+    expect(deleteOrRetainStaffWithH1ProvenanceTx).toHaveBeenCalledWith(prismaMock, 'staff-1', expect.any(Function))
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
     // Idempotent delete: tolerates the row being gone (cascade), never throws P2025
     expect(prismaMock.liveDemoSession.deleteMany).toHaveBeenCalledWith({ where: { id: 'lds-1' } })

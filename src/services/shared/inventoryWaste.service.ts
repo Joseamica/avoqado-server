@@ -6,6 +6,8 @@ import { withSerializableRetry } from '../../utils/serializableRetry'
 import { BatchAllocationOrder, calculateFIFOAllocations, deductStockFIFOInTx, lockWasteBatchesInTx } from '../dashboard/fifoBatch.service'
 import { adjustInventoryStockInTx } from '../dashboard/productInventory.service'
 import { getUserAccess, hasPermission, UserAccess } from '../access/access.service'
+import { getEffectiveRolePermissions, resolvePermissions } from '../../lib/permissions'
+import { getEffectivePermissions } from '../../lib/resolveEffectivePermissions'
 import { resolveUserRoleForVenue } from '../../middlewares/checkPermission.middleware'
 import { isWasteReasonCode, WasteReasonCode, WASTE_REASONS } from './wasteReasons'
 
@@ -259,6 +261,46 @@ export async function getWasteAccess(staffId: string, venueId: string): Promise<
   return getUserAccess(staffId, venueId)
 }
 
+/**
+ * Los permisos que el rol o el Conjunto conceden en el local ANTES del filtro de activación
+ * white-label: la misma lista que `getUserAccess` arma antes de filtrar
+ * (access.service.ts, `basePermissions` → `resolvePermissions`), con las MISMAS funciones y
+ * en el mismo orden. 🔴 No es `resolveStaffVenuePermissions`: ése resuelve las dependencias un
+ * nivel menos en la rama del rol y ya da otra lista para OWNER (medido). Una prueba de
+ * integración compara las dos listas en un local sin white-label para que no se separen.
+ */
+export async function grantedPermissionsBeforeActivation(staffId: string, venueId: string, role: StaffRole): Promise<string[]> {
+  const [membership, rolePermission] = await Promise.all([
+    prisma.staffVenue.findUnique({
+      where: { staffId_venueId: { staffId, venueId } },
+      select: { permissionSetId: true, permissionSet: true },
+    }),
+    prisma.venueRolePermission.findUnique({
+      where: { venueId_role: { venueId, role } },
+      select: { permissions: true, deniedPermissions: true },
+    }),
+  ])
+
+  const base =
+    membership?.permissionSetId && membership.permissionSet
+      ? getEffectivePermissions(membership, [])
+      : getEffectiveRolePermissions(role, rolePermission?.permissions ?? null, rolePermission?.deniedPermissions ?? null)
+  return Array.from(resolvePermissions(base))
+}
+
+/**
+ * Acceso para ANULAR (Ruling 12): la membresía vigente y la cuenta activa se exigen igual que
+ * siempre (`getWasteAccess`), pero apagar AVOQADO_INVENTORY en white-label no le quita a nadie
+ * la forma de CERRAR un folio pendiente — anular no mueve existencia, y bloquearlo dejaría en el
+ * aparato filas imposibles de cerrar (spec §4.3). Registrar mermas NUEVAS sí sigue exigiendo la
+ * activación (`hasWastePermission`). Sin white-label la lista ya es la de antes del filtro.
+ */
+async function getWasteVoidAccess(staffId: string, venueId: string): Promise<UserAccess> {
+  const access = await getWasteAccess(staffId, venueId)
+  if (!access.whiteLabelEnabled || access.role === StaffRole.SUPERADMIN) return access
+  return { ...access, corePermissions: await grantedPermissionsBeforeActivation(staffId, venueId, access.role) }
+}
+
 export function hasWastePermission(access: UserAccess, permission: string): boolean {
   if (access.role !== StaffRole.SUPERADMIN && access.whiteLabelEnabled && !access.featureAccess.AVOQADO_INVENTORY?.allowed) {
     return false
@@ -388,7 +430,10 @@ export async function logWaste(venueId: string, actorStaffId: string, input: Was
               ${payload.source === 'DASHBOARD'}
               OR (p.active = TRUE AND p."deletedAt" IS NULL)
             )
-          FOR UPDATE OF p, i
+          -- NOWAIT: una compra toma Inventory y después Product.cost, el orden inverso a éste.
+          -- Esperar aquí cierra una espera circular (40P01, que no se reintenta); con NOWAIT la
+          -- contención sale como 55P03 y entra al reintento de withSerializableRetry.
+          FOR UPDATE OF p, i NOWAIT
         `
         product = rows[0]
         if (!product) throw new NotFoundError('Artículo no encontrado.', 'ITEM_NOT_FOUND')
@@ -546,7 +591,7 @@ function voidResult(report: InventoryWasteReport, actorStaffId: string, canAdjus
  * desconocido sin arriesgarse a que el servidor lo aplique después. Si el folio no existe,
  * inserta una lápida VOIDED que ocupa el índice único; si ya se aplicó, lo dice y no toca nada.
  * La carrera con el POST la decide ese índice: el que pierde revierte entero.
- * SIN candado de plan: anular no escribe existencia.
+ * SIN candado de plan ni de activación white-label: anular no escribe existencia (Ruling 12).
  */
 export async function voidWasteKey(
   venueId: string,
@@ -555,9 +600,9 @@ export async function voidWasteKey(
   source: WasteSource = 'POS',
 ): Promise<VoidWasteResult> {
   const idempotencyKey = normalizeWasteKey(key)
-  const access = await getWasteAccess(actorStaffId, venueId)
-  const canAdjust = hasWastePermission(access, 'inventory:adjust')
-  if (!canAdjust && !hasWastePermission(access, 'inventory:log-waste')) {
+  const access = await getWasteVoidAccess(actorStaffId, venueId)
+  const canAdjust = hasPermission(access, 'inventory:adjust')
+  if (!canAdjust && !hasPermission(access, 'inventory:log-waste')) {
     throw new ForbiddenError('No tienes permiso para anular este folio.')
   }
 
