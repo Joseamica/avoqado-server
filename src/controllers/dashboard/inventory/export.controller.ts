@@ -203,7 +203,14 @@ export async function exportStockMovements(req: Request, res: Response, next: Ne
       { id: 'unit', label: 'Unidad', value: r => r.unit ?? '' },
       { id: 'previousStock', label: 'Existencia anterior', value: r => Number(r.previousStock) || 0 },
       { id: 'newStock', label: 'Existencia nueva', value: r => Number(r.newStock) || 0 },
-      { id: 'costImpact', label: 'Impacto en costo', value: r => Number(r.costImpact ?? 0) || 0 },
+      // Una merma CON folio sin costo (ajuste directo sin lotes) no vale $0: nadie la valoró. Sólo
+      // ahí la celda dice «Sin valorar» (spec §4.6); el resto de los movimientos queda como hoy.
+      // En una hoja de cálculo el texto no suma: SUMA() lo ignora, igual que ignoraría un vacío.
+      {
+        id: 'costImpact',
+        label: 'Impacto en costo',
+        value: r => (r.wasteReportId && r.costImpact == null ? 'Sin valorar' : Number(r.costImpact ?? 0) || 0),
+      },
       { id: 'reason', label: 'Motivo', value: r => r.reason ?? '' },
       { id: 'reference', label: 'Referencia', value: r => r.reference ?? '' },
       // The whole point of the report: an adjustment with no name attached is unauditable.

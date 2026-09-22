@@ -217,6 +217,44 @@ export async function getInventoryMovements(venueId: string, productId: string) 
 }
 
 /**
+ * Lo que el Historial lee del folio de merma de cada movimiento (spec §4.6).
+ * `rawMovements` / `productMovements` traen UN solo id — el primero del folio — para
+ * saber en qué renglón va el excedente sin repetirlo (ver `wasteHistoryFields`).
+ */
+const WASTE_REPORT_FOR_HISTORY = {
+  reasonCode: true,
+  unrecordedQuantity: true,
+  rawMovements: { select: { id: true }, orderBy: { id: 'asc' }, take: 1 },
+  productMovements: { select: { id: true }, orderBy: { id: 'asc' }, take: 1 },
+} satisfies Prisma.InventoryWasteReportSelect
+
+type WasteReportForHistory = Prisma.InventoryWasteReportGetPayload<{ select: typeof WASTE_REPORT_FOR_HISTORY }>
+
+/**
+ * Campos ADITIVOS del Historial para los movimientos de merma con folio; `null` en todo lo demás.
+ *
+ * `wasteUnrecorded` es del FOLIO, no del movimiento: una merma de insumo que tocó dos lotes deja
+ * dos movimientos, y repetir el excedente en los dos lo contaría doble. Va sólo en el primer
+ * movimiento del folio (el de menor id); en sus hermanos es `null` — agrupar por `wasteReportId`.
+ */
+function wasteHistoryFields(
+  movementId: string,
+  wasteReportId: string | null,
+  report: WasteReportForHistory | null,
+  children: 'rawMovements' | 'productMovements',
+): { wasteReportId: string | null; wasteReasonCode: string | null; wasteUnrecorded: number | null } {
+  if (!wasteReportId || !report) {
+    return { wasteReportId: null, wasteReasonCode: null, wasteUnrecorded: null }
+  }
+  const anchorId = report[children][0]?.id
+  return {
+    wasteReportId,
+    wasteReasonCode: report.reasonCode,
+    wasteUnrecorded: anchorId === movementId ? report.unrecordedQuantity.toNumber() : null,
+  }
+}
+
+/**
  * Get unified global inventory movements (Products + Raw Materials)
  */
 export async function getGlobalMovements(
@@ -290,6 +328,7 @@ export async function getGlobalMovements(
           product: true,
         },
       },
+      wasteReport: { select: WASTE_REPORT_FOR_HISTORY },
     },
     orderBy: { createdAt: 'desc' },
     take: limit * page, // Fetch up to current page depth to ensure correct merge sort
@@ -313,6 +352,7 @@ export async function getGlobalMovements(
       // compra. La columna "Proveedor" del dashboard lo esperaba y el backend
       // nunca lo mandaba, así que TODO salía "Sin proveedor".
       batch: { include: { purchaseOrderItem: { include: { purchaseOrder: { include: { supplier: true } } } } } },
+      wasteReport: { select: WASTE_REPORT_FOR_HISTORY },
     },
     orderBy: { createdAt: 'desc' },
     take: limit * page,
@@ -367,7 +407,15 @@ export async function getGlobalMovements(
       // CON SIGNO. Con `Math.abs` perder 10 cervezas y comprar 10 se veían
       // idénticos en la columna de costo — el historial no distinguía una
       // merma de una entrada.
-      totalCost: (m.inventory.product.cost?.toNumber() || 0) * m.quantity.toNumber(),
+      // Una merma CON folio usa el costo que congeló el folio (`unitCost` del
+      // movimiento), no el costo actual; sin costo congelado es `null` =
+      // «sin valorar», nunca un costo inventado. Lo demás queda como hoy.
+      totalCost: m.wasteReportId
+        ? m.unitCost === null
+          ? null
+          : m.unitCost.toNumber() * m.quantity.toNumber()
+        : (m.inventory.product.cost?.toNumber() || 0) * m.quantity.toNumber(),
+      ...wasteHistoryFields(m.id, m.wasteReportId, m.wasteReport, 'productMovements'),
       // Un movimiento de PRODUCTO no cuelga de una orden de compra, así que no
       // hay proveedor que mostrar. Se declara `null` en vez de omitirlo: la UI
       // pinta "Sin proveedor" a propósito, no por un campo que nunca llegó.
@@ -389,14 +437,19 @@ export async function getGlobalMovements(
       unit: m.unit,
       cost: m.rawMaterial.costPerUnit.toNumber(),
       // `costImpact` ya viene firmado desde el movimiento; si falta, se deriva
-      // de la cantidad (que también lleva signo).
-      totalCost: m.costImpact?.toNumber() ?? m.rawMaterial.costPerUnit.toNumber() * m.quantity.toNumber(),
+      // de la cantidad (que también lleva signo). Una merma CON folio usa SÓLO
+      // el costo del propio movimiento (su lote): el ajuste directo sin lotes no
+      // tiene costo y sale `null` = «sin valorar», sin inventarle el costo actual.
+      totalCost: m.wasteReportId
+        ? (m.costImpact?.toNumber() ?? null)
+        : (m.costImpact?.toNumber() ?? m.rawMaterial.costPerUnit.toNumber() * m.quantity.toNumber()),
       supplierName: (m as any).batch?.purchaseOrderItem?.purchaseOrder?.supplier?.name ?? null,
       reason: m.reason,
       reference: m.reference,
       previousStock: m.previousStock.toNumber(),
       newStock: m.newStock.toNumber(),
       createdBy: m.createdBy,
+      ...wasteHistoryFields(m.id, m.wasteReportId, m.wasteReport, 'rawMovements'),
     })),
   ]
 

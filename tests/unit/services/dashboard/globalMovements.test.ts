@@ -102,6 +102,89 @@ describe('getGlobalMovements — el historial no puede mentir', () => {
     expect(result.data[1].category).toBe('INGREDIENT')
   })
 
+  // ── Tarea 10: el Historial lee el folio de merma y no inventa costo ─────────
+  const report = (over: Partial<any> = {}) => ({
+    reasonCode: 'EXPIRED',
+    unrecordedQuantity: { toNumber: () => 2 },
+    rawMovements: [],
+    productMovements: [],
+    ...over,
+  })
+
+  it('🔴 merma de producto con folio y sin costo congelado: totalCost null, no costo actual × cantidad', async () => {
+    prismaMock.inventoryMovement.findMany.mockResolvedValue([
+      productMovement({
+        type: 'LOSS',
+        wasteReportId: 'clwaste1',
+        unitCost: null,
+        wasteReport: report({ productMovements: [{ id: 'mov-prod-1' }] }),
+      }),
+    ] as any)
+
+    const result = await getGlobalMovements(venueId, { page: 1, limit: 50 })
+    const row = result.data.find(m => m.itemName === 'Cerveza Corona')!
+    expect(row).toMatchObject({ totalCost: null, wasteReportId: 'clwaste1', wasteReasonCode: 'EXPIRED', wasteUnrecorded: 2 })
+  })
+
+  it('merma de producto con folio: usa el costo CONGELADO del movimiento, con signo', async () => {
+    prismaMock.inventoryMovement.findMany.mockResolvedValue([
+      productMovement({
+        type: 'LOSS',
+        wasteReportId: 'clwaste1',
+        unitCost: { toNumber: () => 4 },
+        wasteReport: report({ productMovements: [{ id: 'mov-prod-1' }] }),
+      }),
+    ] as any)
+
+    const result = await getGlobalMovements(venueId, { page: 1, limit: 50 })
+    expect(result.data.find(m => m.itemName === 'Cerveza Corona')!.totalCost).toBe(-40) // 10 × $4, no × $20 actual
+  })
+
+  it('🔴 merma de insumo con folio sin costo: null; y el excedente sólo en el primer movimiento del folio', async () => {
+    prismaMock.rawMaterialMovement.findMany.mockResolvedValue([
+      rawMovement({
+        id: 'mov-raw-2',
+        type: 'SPOILAGE',
+        costImpact: null,
+        wasteReportId: 'clwaste2',
+        wasteReport: report({ rawMovements: [{ id: 'mov-raw-1' }] }),
+      }),
+      rawMovement({
+        id: 'mov-raw-1',
+        type: 'SPOILAGE',
+        wasteReportId: 'clwaste2',
+        wasteReport: report({ rawMovements: [{ id: 'mov-raw-1' }] }),
+      }),
+    ] as any)
+
+    const result = await getGlobalMovements(venueId, { page: 1, limit: 50 })
+    const hermano = result.data.find(m => m.id === 'mov-raw-2')!
+    const primero = result.data.find(m => m.id === 'mov-raw-1')!
+    expect(hermano).toMatchObject({ totalCost: null, wasteReportId: 'clwaste2', wasteUnrecorded: null })
+    expect(primero).toMatchObject({ totalCost: -160, wasteReportId: 'clwaste2', wasteUnrecorded: 2 })
+  })
+
+  it('un movimiento SIN folio (merma vieja incluida) conserva la cuenta de siempre y trae los campos nuevos en null', async () => {
+    prismaMock.rawMaterialMovement.findMany.mockResolvedValue([
+      rawMovement({ type: 'SPOILAGE', costImpact: null, wasteReportId: null, wasteReport: null }),
+    ] as any)
+
+    const result = await getGlobalMovements(venueId, { page: 1, limit: 50 })
+    expect(result.data.find(m => m.itemName === 'Champiñones')).toMatchObject({
+      totalCost: -160, // costo actual × cantidad, como hoy
+      wasteReportId: null,
+      wasteReasonCode: null,
+      wasteUnrecorded: null,
+    })
+  })
+
+  it('pide el folio en las DOS consultas de movimientos', async () => {
+    await getGlobalMovements(venueId, { page: 1, limit: 50 })
+
+    expect(prismaMock.inventoryMovement.findMany.mock.calls[0][0].include).toHaveProperty('wasteReport')
+    expect(prismaMock.rawMaterialMovement.findMany.mock.calls[0][0].include).toHaveProperty('wasteReport')
+  })
+
   it('sin filtro de tipo no restringe ninguna de las dos tablas', async () => {
     await getGlobalMovements(venueId, { page: 1, limit: 50 })
 

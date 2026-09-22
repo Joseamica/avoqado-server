@@ -1,6 +1,9 @@
 import { Request, Response, NextFunction } from 'express'
 import * as rawMaterialService from '../../../services/dashboard/rawMaterial.service'
 import AppError from '../../../errors/AppError'
+import prisma from '../../../utils/prismaClient'
+import { adaptDashboardWaste, canRecordDashboardWaste } from '../../../services/shared/dashboardWasteAdapter'
+import type { AdjustStockDto } from '../../../schemas/dashboard/inventory.schema'
 
 /**
  * Get all raw materials for a venue
@@ -153,8 +156,24 @@ export async function reactivateRawMaterial(req: Request, res: Response, next: N
 export async function adjustStock(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId, rawMaterialId } = req.params
-    const data = req.body
+    // Ya validado y normalizado por `validateRequest(AdjustStockSchema)`.
+    const data = req.body as AdjustStockDto
     const staffId = req.authContext?.userId
+
+    // Merma (SPOILAGE negativa) → libro de merma (tarea 10, spec §4.5). Mismo contrato de
+    // respuesta, más `waste` (el resumen del folio). Ya no se rechaza por existencia: descuenta lo
+    // que haya y marca el excedente. Todo lo demás —ADJUSTMENT, entradas— sigue igual que siempre.
+    if (data.type === 'SPOILAGE' && data.quantity < 0 && canRecordDashboardWaste(staffId)) {
+      const waste = await adaptDashboardWaste(venueId, staffId, 'RAW_MATERIAL', rawMaterialId, data)
+      const updated = await prisma.rawMaterial.findFirstOrThrow({ where: { id: rawMaterialId, venueId } })
+      res.json({
+        success: true,
+        message: 'Stock adjusted successfully',
+        data: updated,
+        waste,
+      })
+      return
+    }
 
     const rawMaterial = await rawMaterialService.adjustStock(venueId, rawMaterialId, data, staffId)
 

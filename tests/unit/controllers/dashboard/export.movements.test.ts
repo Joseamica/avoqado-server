@@ -126,6 +126,32 @@ describe('exportStockMovements', () => {
     expect(col.value({ type: 'SOMETHING_NEW' })).toBe('SOMETHING_NEW')
   })
 
+  // ── Tarea 10: la merma con folio sin costo no vale $0 (spec §4.6) ────────────────
+  it('🔴 a folio-backed waste movement with no cost says «Sin valorar», not 0', async () => {
+    // A direct adjustment without batches has no cost. Printing 0 reads as «it cost nothing».
+    await exportStockMovements(req(), res(), jest.fn())
+
+    const col = encodeExport.mock.calls[0][1].allColumns.find((c: { id: string }) => c.id === 'costImpact')
+    expect(col.value({ wasteReportId: 'clwaste1', costImpact: null })).toBe('Sin valorar')
+  })
+
+  it('a folio-backed waste movement WITH cost still exports the number', async () => {
+    await exportStockMovements(req(), res(), jest.fn())
+
+    const col = encodeExport.mock.calls[0][1].allColumns.find((c: { id: string }) => c.id === 'costImpact')
+    expect(col.value({ wasteReportId: 'clwaste1', costImpact: -18 })).toBe(-18)
+    expect(col.value({ wasteReportId: 'clwaste1', costImpact: 0 })).toBe(0)
+  })
+
+  it('movements WITHOUT a folio keep exporting a null cost as 0, exactly as before', async () => {
+    await exportStockMovements(req(), res(), jest.fn())
+
+    const col = encodeExport.mock.calls[0][1].allColumns.find((c: { id: string }) => c.id === 'costImpact')
+    expect(col.value({ wasteReportId: null, costImpact: null })).toBe(0)
+    expect(col.value({ costImpact: null })).toBe(0)
+    expect(col.value({ wasteReportId: null, costImpact: -50 })).toBe(-50)
+  })
+
   it('names the file for what it is', async () => {
     await exportStockMovements(req(), res(), jest.fn())
 

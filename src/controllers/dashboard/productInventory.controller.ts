@@ -1,6 +1,12 @@
 import { Request, Response, NextFunction } from 'express'
+import { z } from 'zod'
 import * as productInventoryService from '../../services/dashboard/productInventory.service'
 import logger from '../../config/logger'
+import prisma from '../../utils/prismaClient'
+import { adaptDashboardWaste, canRecordDashboardWaste } from '../../services/shared/dashboardWasteAdapter'
+import type { AdjustProductInventoryStockSchema } from '../../schemas/dashboard/inventory.schema'
+
+type AdjustProductInventoryStockBody = z.infer<typeof AdjustProductInventoryStockSchema>['body']
 
 /**
  * Adjust stock for a product with QUANTITY tracking
@@ -8,7 +14,8 @@ import logger from '../../config/logger'
 export const adjustInventoryStockHandler = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const { venueId, productId } = req.params
-    const data = req.body
+    // Ya validado y normalizado por `validateRequest(AdjustProductInventoryStockSchema)`.
+    const data = req.body as AdjustProductInventoryStockBody
     const correlationId = (req as any).correlationId
     const staffId = (req as any).authContext?.userId
 
@@ -19,6 +26,25 @@ export const adjustInventoryStockHandler = async (req: Request, res: Response, n
       quantity: data.quantity,
       type: data.type,
     })
+
+    // Merma (LOSS negativa) → libro de merma (tarea 10, spec §4.5). Mismo contrato de respuesta,
+    // más `waste` (el resumen del folio). Ya no se rechaza por existencia: descuenta lo que haya
+    // (nunca por debajo de 0) y marca el excedente. ADJUSTMENT y entradas siguen igual que siempre.
+    if (data.type === 'LOSS' && data.quantity < 0 && canRecordDashboardWaste(staffId)) {
+      const waste = await adaptDashboardWaste(venueId, staffId, 'PRODUCT', productId, data)
+      const inventory = await prisma.inventory.findFirstOrThrow({ where: { venueId, productId } })
+      res.status(200).json({
+        message: `Inventory stock adjusted successfully`,
+        data: {
+          currentStock: inventory.currentStock.toNumber(),
+          minimumStock: inventory.minimumStock.toNumber(),
+          reservedStock: inventory.reservedStock.toNumber(),
+        },
+        correlationId,
+        waste,
+      })
+      return
+    }
 
     const result = await productInventoryService.adjustInventoryStock(venueId, productId, data, staffId)
 

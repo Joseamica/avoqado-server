@@ -11,12 +11,31 @@ import {
   Unit,
 } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
+import { WASTE_REASON_CODES } from '../../services/shared/wasteReasons'
 
 // Some legacy products and raw materials in production use non-cuid-v1 IDs
 // (e.g. "rb44l0fgk30kp0soskrlys5c", "prod_ad_blanq_003"). Strict z.cuid()
 // rejects them with 400 before the controller can 404. Use cuidLikeId() for
 // productId and rawMaterialId only — venueId/supplierId/etc. remain cuid.
 const cuidLikeId = () => z.string().regex(/^[a-z][a-z0-9_-]{0,49}$/, { message: 'Invalid ID format' })
+
+/**
+ * Campos NUEVOS y OPCIONALES de las dos rutas `adjust-stock` (spec §4.5): sólo los lee la merma
+ * (SPOILAGE / LOSS negativa), que desde la tarea 10 entra al libro de merma; el resto de los
+ * movimientos los ignora. `null` = ausente (familia del reembolso del 11-sep): un cliente que
+ * serializa los opcionales vacíos como `null` no recibe un 400.
+ */
+const dashboardWasteFields = {
+  reasonCode: z
+    .enum(WASTE_REASON_CODES, { errorMap: () => ({ message: 'El motivo de la merma no es válido.' }) })
+    .nullish()
+    .transform(value => value ?? undefined),
+  idempotencyKey: z
+    .string({ invalid_type_error: 'El folio (idempotencyKey) debe ser un UUID.' })
+    .uuid('El folio (idempotencyKey) debe ser un UUID.')
+    .nullish()
+    .transform(value => value ?? undefined),
+}
 
 // RecipeLine.quantity persists as Decimal(12,3). A value below 0.0005 passes
 // `.positive()` here and is then stored as 0 by Postgres, which makes the cost
@@ -195,6 +214,7 @@ export const AdjustStockSchema = z.object({
       ),
     reason: z.string().optional(),
     reference: z.string().optional(),
+    ...dashboardWasteFields,
   }),
 })
 
@@ -799,6 +819,7 @@ export const AdjustProductInventoryStockSchema = z.object({
     reference: z.string().optional(),
     unitCost: z.number().positive('El costo unitario debe ser positivo').optional(),
     supplier: z.string().optional(),
+    ...dashboardWasteFields,
   }),
 })
 
