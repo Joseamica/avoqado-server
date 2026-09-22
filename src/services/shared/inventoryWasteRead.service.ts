@@ -132,10 +132,13 @@ function catalogSql(venueId: string): Prisma.Sql {
   `
 }
 
-function catalogFilter(search: string | undefined): Prisma.Sql {
-  if (!search) return Prisma.sql`TRUE`
+/** Búsqueda y, opcionalmente, tipo. Ambos van ANTES de paginar: el total y la página cuentan lo
+ *  mismo (filtrar el tipo sobre una página ya cortada perdería candidatos de las siguientes). */
+function catalogFilter(search: string | undefined, itemType?: WasteItemType): Prisma.Sql {
+  const byType = itemType ? Prisma.sql`"itemType" = ${itemType}` : Prisma.sql`TRUE`
+  if (!search) return byType
   const pattern = likeContains(search)
-  return Prisma.sql`(name ILIKE ${pattern} OR sku ILIKE ${pattern})`
+  return Prisma.sql`${byType} AND (name ILIKE ${pattern} OR sku ILIKE ${pattern})`
 }
 
 export async function findWasteItem(venueId: string, itemType: WasteItemType, itemId: string): Promise<WasteItem | null> {
@@ -148,10 +151,11 @@ export async function findWasteItem(venueId: string, itemType: WasteItemType, it
 }
 
 /** Catálogo paginado que el aparato recorre hasta `total`. Orden estable `(name, itemId, itemType)`:
- *  el par `(itemId, itemType)` es único, así que ninguna página repite ni salta. */
-export async function listWasteItems(venueId: string, query: WastePage) {
+ *  el par `(itemId, itemType)` es único, así que ninguna página repite ni salta. `itemType` es
+ *  opcional (lo usa el MCP al buscar por nombre); sin él, el catálogo trae los dos tipos. */
+export async function listWasteItems(venueId: string, query: WastePage & { itemType?: WasteItemType }) {
   const { page, pageSize, skip } = pagination(query.page, query.pageSize)
-  const filter = catalogFilter(searchTerm(query.search))
+  const filter = catalogFilter(searchTerm(query.search), query.itemType)
 
   // Conteo y página en la MISMA foto: el total que ve el aparato cuadra con lo que recorre.
   return prisma.$transaction(

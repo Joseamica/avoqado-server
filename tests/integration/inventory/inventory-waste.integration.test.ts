@@ -1713,6 +1713,54 @@ test('🔴 el catálogo pagina con total, respeta el tope y no trae existencias'
   expect((await listWasteItems(venueId, { page: 1, pageSize: 100000 })).pageSize).toBe(200)
 })
 
+test('🔴 el catálogo filtra por tipo ANTES de paginar: total y página cuentan sólo ese tipo', async () => {
+  // El MCP busca «por nombre» con itemType: si el tipo se filtrara después de paginar, una primera
+  // página llena de insumos dejaría fuera al único producto que coincide.
+  const tag = randomUUID().slice(0, 8)
+  for (let i = 0; i < 3; i++) {
+    await prisma.rawMaterial.create({
+      data: {
+        venueId,
+        name: `Leche ${tag} insumo ${i}`,
+        sku: randomUUID(),
+        category: 'OTHER',
+        unit: 'PIECE',
+        unitType: 'COUNT',
+        currentStock: D(1),
+        minimumStock: D(0),
+        reorderPoint: D(0),
+        costPerUnit: D(1),
+        avgCostPerUnit: D(1),
+        notifyOnLowStock: false,
+      },
+    })
+  }
+  const goods = await prisma.product.create({
+    data: {
+      venueId,
+      categoryId,
+      name: `Leche ${tag} producto`,
+      sku: randomUUID(),
+      price: D(10),
+      unit: 'UNIT',
+      trackInventory: true,
+      inventoryMethod: 'QUANTITY',
+      inventory: { create: { venueId, currentStock: D(1) } },
+    },
+  })
+
+  const products = await listWasteItems(venueId, { page: 1, pageSize: 2, search: `Leche ${tag}`, itemType: 'PRODUCT' })
+  expect(products.total).toBe(1)
+  expect(products.items.map(row => row.itemId)).toEqual([goods.id])
+
+  const rawOnly = await listWasteItems(venueId, { page: 1, pageSize: 2, search: `Leche ${tag}`, itemType: 'RAW_MATERIAL' })
+  expect(rawOnly.total).toBe(3)
+  expect(rawOnly.items.every(row => row.itemType === 'RAW_MATERIAL')).toBe(true)
+
+  // Sin tipo, como siempre: los cuatro.
+  expect((await listWasteItems(venueId, { page: 1, pageSize: 2, search: `Leche ${tag}` })).total).toBe(4)
+})
+
 test('un costo desconocido NO es cero: va a «sin valorar», y sin ningún costo conocido el total es null', async () => {
   // Legacy sin costo: ingrediente con costImpact null y producto con unitCost null.
   const legacyRaw = await raw(10)

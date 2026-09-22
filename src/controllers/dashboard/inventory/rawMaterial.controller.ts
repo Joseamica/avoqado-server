@@ -1,7 +1,6 @@
 import { Request, Response, NextFunction } from 'express'
 import * as rawMaterialService from '../../../services/dashboard/rawMaterial.service'
 import AppError from '../../../errors/AppError'
-import prisma from '../../../utils/prismaClient'
 import { adaptDashboardWaste, canRecordDashboardWaste } from '../../../services/shared/dashboardWasteAdapter'
 import type { AdjustStockDto } from '../../../schemas/dashboard/inventory.schema'
 
@@ -164,12 +163,11 @@ export async function adjustStock(req: Request, res: Response, next: NextFunctio
     // respuesta, más `waste` (el resumen del folio). Ya no se rechaza por existencia: descuenta lo
     // que haya y marca el excedente. Todo lo demás —ADJUSTMENT, entradas— sigue igual que siempre.
     if (data.type === 'SPOILAGE' && data.quantity < 0 && canRecordDashboardWaste(staffId)) {
-      const waste = await adaptDashboardWaste(venueId, staffId, 'RAW_MATERIAL', rawMaterialId, data)
-      const updated = await prisma.rawMaterial.findFirstOrThrow({ where: { id: rawMaterialId, venueId } })
+      const { waste, item } = await adaptDashboardWaste(venueId, staffId, 'RAW_MATERIAL', rawMaterialId, data)
       res.json({
         success: true,
         message: 'Stock adjusted successfully',
-        data: updated,
+        data: item,
         waste,
       })
       return

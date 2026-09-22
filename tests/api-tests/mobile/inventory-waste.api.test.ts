@@ -497,6 +497,8 @@ describe('POST …/inventory/waste', () => {
       { ...cuerpo, note: 'x'.repeat(281) },
       { ...cuerpo, note: 5 },
       { ...cuerpo, idempotencyKey: 'no-es-uuid' },
+      { ...cuerpo, idempotencyKey: '00000000-0000-0000-0000-000000000000' },
+      { ...cuerpo, idempotencyKey: '3f1c9a52-7b1e-0c1d-9f0a-2b6f4e8d1c07' },
       { ...cuerpo, clientOccurredAt: 'ayer' },
       { ...cuerpo, extra: 1 },
     ]
@@ -608,19 +610,23 @@ describe('POST …/inventory/waste/void', () => {
     expect(res.body).toEqual({ outcome: 'ALREADY_APPLIED', report: RESUMEN })
   })
 
-  it.each([[{ idempotencyKey: 'no-es-uuid' }], [{}], [{ idempotencyKey: cuerpo.idempotencyKey, itemId: 'x' }], [{ idempotencyKey: null }]])(
-    '422 INVALID_WASTE_PAYLOAD con el cuerpo %j, en español',
-    async body => {
-      const res = await request(app)
-        .post(VOID)
-        .set('Authorization', `Bearer ${token('WAITER')}`)
-        .send(body)
-      expect(res.status).toBe(422)
-      expect(res.body.code).toBe('INVALID_WASTE_PAYLOAD')
-      for (const texto of textos(res.body)) expect(texto).not.toMatch(INGLES)
-      expect(voidWasteKey).not.toHaveBeenCalled()
-    },
-  )
+  it.each([
+    [{ idempotencyKey: 'no-es-uuid' }],
+    [{ idempotencyKey: '00000000-0000-0000-0000-000000000000' }],
+    [{ idempotencyKey: '3f1c9a52-7b1e-0c1d-9f0a-2b6f4e8d1c07' }],
+    [{}],
+    [{ idempotencyKey: cuerpo.idempotencyKey, itemId: 'x' }],
+    [{ idempotencyKey: null }],
+  ])('422 INVALID_WASTE_PAYLOAD con el cuerpo %j, en español', async body => {
+    const res = await request(app)
+      .post(VOID)
+      .set('Authorization', `Bearer ${token('WAITER')}`)
+      .send(body)
+    expect(res.status).toBe(422)
+    expect(res.body.code).toBe('INVALID_WASTE_PAYLOAD')
+    for (const texto of textos(res.body)) expect(texto).not.toMatch(INGLES)
+    expect(voidWasteKey).not.toHaveBeenCalled()
+  })
 })
 
 describe('GET …/inventory/waste-items', () => {

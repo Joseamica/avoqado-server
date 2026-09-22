@@ -15,6 +15,10 @@
  *   conservan. `unitCost: 0` es un costo conocido; ausente = sin costo recibido.
  * - Folio del cuerpo, o uno generado por el servidor (el dashboard de hoy no lo manda).
  *
+ * Devuelve el resumen del folio (`waste`) y el artículo RELEÍDO después de la merma (`item`: la fila
+ * del insumo, o el `Inventory` del producto), que es lo que las rutas ya respondían: así el
+ * controlador sólo arma la respuesta y no lee la base.
+ *
  * 🔴 UN SOLO candado de permiso (Rulings 18 y 20): aquí NO se evalúa el permiso. Lo decide
  * `checkPermission('inventory:adjust')` de la ruta, que respeta el PIN de gerente; una segunda
  * evaluación que no lo conoce contestaría 403 con el PIN ya gastado. Tampoco se aplica la
@@ -22,7 +26,7 @@
  * hacen, y un candado sólo aquí haría que dos rutas contestaran distinto al mismo usuario.
  */
 import { randomUUID } from 'crypto'
-import { Prisma, WasteItemType } from '@prisma/client'
+import { Inventory, Prisma, RawMaterial, WasteItemType } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import AppError, { ConflictError, UnauthorizedError } from '../../errors/AppError'
@@ -92,13 +96,33 @@ async function resolveUnit(venueId: string, itemType: WasteItemType, itemId: str
   return item.unit ?? 'UNIT'
 }
 
+/** Lo que responde el adaptador: el resumen del folio y el artículo ya releído. */
+export interface DashboardWasteResult<Item> {
+  waste: WasteSummary
+  item: Item
+}
+
+export async function adaptDashboardWaste(
+  venueId: string,
+  staffId: string | undefined,
+  itemType: 'RAW_MATERIAL',
+  itemId: string,
+  input: DashboardWasteInput,
+): Promise<DashboardWasteResult<RawMaterial>>
+export async function adaptDashboardWaste(
+  venueId: string,
+  staffId: string | undefined,
+  itemType: 'PRODUCT',
+  itemId: string,
+  input: DashboardWasteInput,
+): Promise<DashboardWasteResult<Inventory>>
 export async function adaptDashboardWaste(
   venueId: string,
   staffId: string | undefined,
   itemType: WasteItemType,
   itemId: string,
   input: DashboardWasteInput,
-): Promise<WasteSummary> {
+): Promise<DashboardWasteResult<RawMaterial | Inventory>> {
   if (!canRecordDashboardWaste(staffId)) throw new UnauthorizedError()
 
   const idempotencyKey = normalizeWasteKey(input.idempotencyKey ?? randomUUID())
@@ -134,5 +158,10 @@ export async function adaptDashboardWaste(
     }
   }
 
-  return summary
+  // La fila que respondía la ruta, leída DESPUÉS de la merma y acotada al venue.
+  const item =
+    itemType === 'RAW_MATERIAL'
+      ? await prisma.rawMaterial.findFirstOrThrow({ where: { id: itemId, venueId } })
+      : await prisma.inventory.findFirstOrThrow({ where: { venueId, productId: itemId } })
+  return { waste: summary, item }
 }

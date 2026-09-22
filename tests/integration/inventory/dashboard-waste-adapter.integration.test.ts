@@ -20,6 +20,7 @@ import prisma from '@/utils/prismaClient'
 import { adaptDashboardWaste } from '@/services/shared/dashboardWasteAdapter'
 import { adjustInventoryStock, getGlobalMovements } from '@/services/dashboard/productInventory.service'
 import { fetchStockMovementsForExport } from '@/services/dashboard/rawMaterial.service'
+import * as notificationService from '@/services/dashboard/notification.service'
 import { voidWasteKey } from '@/services/shared/inventoryWaste.service'
 import { validateRequest } from '@/middlewares/validation'
 import { AdjustProductInventoryStockSchema, AdjustStockSchema } from '@/schemas/dashboard/inventory.schema'
@@ -219,23 +220,36 @@ const flush = () => new Promise(resolve => setTimeout(resolve, 300))
 describe('adaptDashboardWaste — el contrato viejo entra al libro de merma', () => {
   test('🔴 contrato viejo SIN motivo: entra como UNSPECIFIED y descuenta', async () => {
     const item = await product(10)
-    const r = await adaptDashboardWaste(venueId, staffId, 'PRODUCT', item.id, { quantity: -3 })
+    const { waste: r } = await adaptDashboardWaste(venueId, staffId, 'PRODUCT', item.id, { quantity: -3 })
     expect(r).toMatchObject({ declared: '3', deducted: '3' })
     const report = await prisma.inventoryWasteReport.findUniqueOrThrow({ where: { id: r.reportId } })
     expect(report).toMatchObject({ reasonCode: 'UNSPECIFIED', source: 'DASHBOARD', note: null })
+  })
+
+  test('🔴 devuelve el artículo RELEÍDO tras la merma: la ruta ya no tiene que leer la base', async () => {
+    const ingredient = await raw(10)
+    await batch(ingredient.id, 10, 1)
+    const rawResult = await adaptDashboardWaste(venueId, staffId, 'RAW_MATERIAL', ingredient.id, { quantity: -3 })
+    expect(rawResult.item).toMatchObject({ id: ingredient.id, venueId, name: ingredient.name })
+    expect(rawResult.item.currentStock.toString()).toBe('7')
+
+    const goods = await product(10)
+    const productResult = await adaptDashboardWaste(venueId, staffId, 'PRODUCT', goods.id, { quantity: -4 })
+    expect(productResult.item).toMatchObject({ id: goods.inventory?.id, productId: goods.id, venueId })
+    expect(productResult.item.currentStock.toString()).toBe('6')
   })
 
   test('un motivo viejo de 400 caracteres se conserva íntegro en la nota', async () => {
     const item = await raw(10)
     await batch(item.id, 10, 1)
     const reason = 'x'.repeat(400)
-    const r = await adaptDashboardWaste(venueId, staffId, 'RAW_MATERIAL', item.id, { quantity: -1, reason })
+    const { waste: r } = await adaptDashboardWaste(venueId, staffId, 'RAW_MATERIAL', item.id, { quantity: -1, reason })
     expect((await prisma.inventoryWasteReport.findUniqueOrThrow({ where: { id: r.reportId } })).note).toBe(reason)
   })
 
   test('conserva reference, unitCost y supplier; el costo recibido manda sobre Product.cost', async () => {
     const item = await product(10, 5)
-    const r = await adaptDashboardWaste(venueId, staffId, 'PRODUCT', item.id, {
+    const { waste: r } = await adaptDashboardWaste(venueId, staffId, 'PRODUCT', item.id, {
       quantity: -2,
       reasonCode: 'DEFECTIVE',
       reference: 'R-9',
@@ -250,7 +264,7 @@ describe('adaptDashboardWaste — el contrato viejo entra al libro de merma', ()
 
   test('🔴 un costo recibido de 0 es un costo CONOCIDO, no «sin costo»', async () => {
     const item = await product(10, 5)
-    const r = await adaptDashboardWaste(venueId, staffId, 'PRODUCT', item.id, { quantity: -2, unitCost: 0 })
+    const { waste: r } = await adaptDashboardWaste(venueId, staffId, 'PRODUCT', item.id, { quantity: -2, unitCost: 0 })
     const report = await prisma.inventoryWasteReport.findUniqueOrThrow({ where: { id: r.reportId } })
     expect(report.unitCostSnapshot?.toString()).toBe('0')
     expect(report.costImpact?.toString()).toBe('0')
@@ -260,8 +274,7 @@ describe('adaptDashboardWaste — el contrato viejo entra al libro de merma', ()
   test('🔴 más merma que existencia ya NO se rechaza desde el dashboard', async () => {
     const item = await product(1)
     await expect(adaptDashboardWaste(venueId, staffId, 'PRODUCT', item.id, { quantity: -4 })).resolves.toMatchObject({
-      deducted: '1',
-      unrecorded: '3',
+      waste: { deducted: '1', unrecorded: '3' },
     })
     expect((await prisma.inventory.findFirstOrThrow({ where: { productId: item.id } })).currentStock.toString()).toBe('0')
   })
@@ -276,16 +289,15 @@ describe('adaptDashboardWaste — el contrato viejo entra al libro de merma', ()
   test('acepta la cantidad máxima del contrato viejo', async () => {
     const item = await product(0)
     await expect(adaptDashboardWaste(venueId, staffId, 'PRODUCT', item.id, { quantity: -999999999.999 })).resolves.toMatchObject({
-      declared: '999999999.999',
-      deducted: '0',
+      waste: { declared: '999999999.999', deducted: '0' },
     })
   })
 
   test('el folio del cuerpo hace idempotente el reintento: un solo reporte y un solo descuento', async () => {
     const item = await product(10)
     const idempotencyKey = randomUUID()
-    const first = await adaptDashboardWaste(venueId, staffId, 'PRODUCT', item.id, { quantity: -2, idempotencyKey })
-    const again = await adaptDashboardWaste(venueId, staffId, 'PRODUCT', item.id, { quantity: -2, idempotencyKey })
+    const { waste: first } = await adaptDashboardWaste(venueId, staffId, 'PRODUCT', item.id, { quantity: -2, idempotencyKey })
+    const { waste: again } = await adaptDashboardWaste(venueId, staffId, 'PRODUCT', item.id, { quantity: -2, idempotencyKey })
     expect(again).toEqual(first)
     expect(await prisma.inventoryWasteReport.count({ where: { venueId } })).toBe(1)
     expect((await prisma.inventory.findFirstOrThrow({ where: { productId: item.id } })).currentStock.toString()).toBe('8')
@@ -294,9 +306,12 @@ describe('adaptDashboardWaste — el contrato viejo entra al libro de merma', ()
   test('el reintento se reconoce aunque la unidad del artículo haya cambiado entre medio', async () => {
     const item = await product(10)
     const idempotencyKey = randomUUID()
-    const first = await adaptDashboardWaste(venueId, staffId, 'PRODUCT', item.id, { quantity: -2, idempotencyKey })
+    const { waste: first } = await adaptDashboardWaste(venueId, staffId, 'PRODUCT', item.id, { quantity: -2, idempotencyKey })
     await prisma.product.update({ where: { id: item.id }, data: { unit: 'KILOGRAM' } })
-    await expect(adaptDashboardWaste(venueId, staffId, 'PRODUCT', item.id, { quantity: -2, idempotencyKey })).resolves.toEqual(first)
+    await expect(adaptDashboardWaste(venueId, staffId, 'PRODUCT', item.id, { quantity: -2, idempotencyKey })).resolves.toHaveProperty(
+      'waste',
+      first,
+    )
   })
 
   test('un folio reutilizado con otra cantidad es 409 IDEMPOTENCY_KEY_REUSED, no un segundo descuento', async () => {
@@ -326,7 +341,9 @@ describe('adaptDashboardWaste — el contrato viejo entra al libro de merma', ()
     // aquí — y en HTTP gastaría el PIN de gerente que checkPermission ya aceptó (Ruling 18). La
     // prueba HTTP de la ruta demuestra que sin permiso ni PIN la petición no llega hasta aquí.
     const item = await product(10)
-    await expect(adaptDashboardWaste(venueId, waiterId, 'PRODUCT', item.id, { quantity: -1 })).resolves.toMatchObject({ deducted: '1' })
+    await expect(adaptDashboardWaste(venueId, waiterId, 'PRODUCT', item.id, { quantity: -1 })).resolves.toMatchObject({
+      waste: { deducted: '1' },
+    })
   })
 
   test('sin autor humano el adaptador no inventa uno', async () => {
@@ -459,6 +476,62 @@ describe('las rutas del dashboard desvían la merma al libro', () => {
     expect(movements[0]).toMatchObject({ type: 'SPOILAGE', wasteReportId: null })
   })
 
+  test('el acceso de emergencia sigue por el camino de siempre también en la ruta de PRODUCTO', async () => {
+    const item = await product(10)
+    const r = await call(
+      AdjustProductInventoryStockSchema,
+      adjustInventoryStockHandler,
+      { venueId, productId: item.id },
+      { type: 'LOSS', quantity: -2 },
+      MASTER_ADMIN_PRINCIPAL_ID,
+    )
+
+    expect(r.error).toBeUndefined()
+    expect(Object.keys(r.body).sort()).toEqual(['correlationId', 'data', 'message'])
+    expect(r.body.data).toMatchObject({ currentStock: 8 })
+    expect(await prisma.inventoryWasteReport.count({ where: { venueId } })).toBe(0)
+    const movements = await prisma.inventoryMovement.findMany({ where: { inventoryId: item.inventory?.id } })
+    expect(movements).toHaveLength(1)
+    expect(movements[0]).toMatchObject({ type: 'LOSS', wasteReportId: null })
+    expect(movements[0].quantity.toString()).toBe('-2')
+  })
+
+  test('🔴 cambio declarado (Ruling 22): con notifyOnLowStock apagado la alerta se registra pero ya NO se avisa', async () => {
+    // El camino viejo avisaba SIEMPRE; la merma del libro respeta el ajuste del dueño.
+    const aviso = jest.spyOn(notificationService, 'sendLowStockAlertNotification').mockResolvedValue()
+    try {
+      const silent = await raw(6, { reorderPoint: D(5), notifyOnLowStock: false })
+      await batch(silent.id, 6, 1)
+      const quiet = await call(AdjustStockSchema, adjustStock, { venueId, rawMaterialId: silent.id }, { type: 'SPOILAGE', quantity: -3 })
+      expect(quiet.error).toBeUndefined()
+      expect(await prisma.lowStockAlert.count({ where: { venueId, rawMaterialId: silent.id, status: 'ACTIVE' } })).toBe(1)
+      expect(aviso).not.toHaveBeenCalled()
+
+      const loud = await raw(6, { reorderPoint: D(5), notifyOnLowStock: true })
+      await batch(loud.id, 6, 1)
+      const noisy = await call(AdjustStockSchema, adjustStock, { venueId, rawMaterialId: loud.id }, { type: 'SPOILAGE', quantity: -3 })
+      expect(noisy.error).toBeUndefined()
+      expect(aviso).toHaveBeenCalledTimes(1)
+      expect(aviso).toHaveBeenCalledWith(venueId, loud.id, 'LOW_STOCK', 3, 'PIECE', 5)
+
+      // Contraste: el camino VIEJO (acceso de emergencia) sigue avisando con el ajuste apagado.
+      aviso.mockClear()
+      const legacy = await raw(6, { reorderPoint: D(5), notifyOnLowStock: false })
+      await batch(legacy.id, 6, 1)
+      const old = await call(
+        AdjustStockSchema,
+        adjustStock,
+        { venueId, rawMaterialId: legacy.id },
+        { type: 'SPOILAGE', quantity: -3 },
+        MASTER_ADMIN_PRINCIPAL_ID,
+      )
+      expect(old.error).toBeUndefined()
+      expect(aviso).toHaveBeenCalledTimes(1)
+    } finally {
+      aviso.mockRestore()
+    }
+  })
+
   test('un motivo inválido o un folio que no es UUID se rechaza con 400 en español', async () => {
     const item = await raw(10)
     const bad = await call(
@@ -507,7 +580,7 @@ describe('las rutas del dashboard desvían la merma al libro', () => {
 describe('Historial y export leen el folio y no inventan costo', () => {
   test('🔴 producto sin costo: totalCost null («sin valorar»), con motivo, folio y excedente', async () => {
     const item = await product(2, null)
-    const r = await adaptDashboardWaste(venueId, staffId, 'PRODUCT', item.id, { quantity: -5, reasonCode: 'DEFECTIVE' })
+    const { waste: r } = await adaptDashboardWaste(venueId, staffId, 'PRODUCT', item.id, { quantity: -5, reasonCode: 'DEFECTIVE' })
     const { data } = await getGlobalMovements(venueId, { page: 1, limit: 50 })
     const row = data.find(m => m.itemName === item.name)!
     expect(row).toMatchObject({
@@ -529,11 +602,19 @@ describe('Historial y export leen el folio y no inventan costo', () => {
     expect(data.find(m => m.itemName === item.name)).toMatchObject({ totalCost: -8, wasteUnrecorded: 0 })
   })
 
+  test('🔴 el costo del folio en el Historial se multiplica en DECIMAL, no en flotante', async () => {
+    const item = await product(10, '1.15')
+    await adaptDashboardWaste(venueId, staffId, 'PRODUCT', item.id, { quantity: -3 })
+    const { data } = await getGlobalMovements(venueId, { page: 1, limit: 50 })
+    // En flotante, 1.15 × −3 = −3.4499999999999997; el folio vale −3.45 exactos.
+    expect(data.find(m => m.itemName === item.name)?.totalCost).toBe(-3.45)
+  })
+
   test('🔴 insumo con varios lotes: cada renglón trae SU costo y el excedente del folio sale UNA vez', async () => {
     const item = await raw(5)
     await batch(item.id, 2, 3, new Date('2026-01-01T00:00:00.000Z'))
     await batch(item.id, 3, 4, new Date('2026-02-01T00:00:00.000Z'))
-    const r = await adaptDashboardWaste(venueId, staffId, 'RAW_MATERIAL', item.id, { quantity: -7 })
+    const { waste: r } = await adaptDashboardWaste(venueId, staffId, 'RAW_MATERIAL', item.id, { quantity: -7 })
     const report = await prisma.inventoryWasteReport.findUniqueOrThrow({ where: { id: r.reportId } })
 
     const rows = (await getGlobalMovements(venueId, { page: 1, limit: 50 })).data.filter(m => m.itemName === item.name)
@@ -548,7 +629,7 @@ describe('Historial y export leen el folio y no inventan costo', () => {
 
   test('🔴 insumo con existencia pero sin lotes: el ajuste directo sale «sin valorar», no costo actual × cantidad', async () => {
     const item = await raw(4, { costPerUnit: D(9) })
-    const r = await adaptDashboardWaste(venueId, staffId, 'RAW_MATERIAL', item.id, { quantity: -3 })
+    const { waste: r } = await adaptDashboardWaste(venueId, staffId, 'RAW_MATERIAL', item.id, { quantity: -3 })
     const row = (await getGlobalMovements(venueId, { page: 1, limit: 50 })).data.find(m => m.itemName === item.name)!
     expect(row).toMatchObject({ quantity: -3, totalCost: null, wasteReportId: r.reportId, wasteUnrecorded: 0 })
 

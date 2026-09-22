@@ -10,6 +10,7 @@ import { getEffectiveRolePermissions, resolvePermissions } from '../../lib/permi
 import { getEffectivePermissions } from '../../lib/resolveEffectivePermissions'
 import { resolveUserRoleForVenue } from '../../middlewares/checkPermission.middleware'
 import { isWasteReasonCode, WasteReasonCode, WASTE_REASONS } from './wasteReasons'
+import { WASTE_KEY_PATTERN } from './wasteKey'
 
 const Decimal = Prisma.Decimal.clone({
   precision: 48,
@@ -17,7 +18,6 @@ const Decimal = Prisma.Decimal.clone({
 })
 
 const KEY_CONSTRAINT = 'InventoryWasteReport_venueId_idempotencyKey_key'
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 export interface WasteInput {
   itemType: WasteItemType
@@ -93,7 +93,7 @@ function checkedMoney(value: Prisma.Decimal, integerDigits: number, scale: numbe
 }
 
 export function normalizeWasteKey(key: string): string {
-  if (!UUID.test(key)) {
+  if (!WASTE_KEY_PATTERN.test(key)) {
     throw new ValidationError('El folio debe ser un UUID.', 'INVALID_WASTE_KEY')
   }
   return key.toLowerCase()

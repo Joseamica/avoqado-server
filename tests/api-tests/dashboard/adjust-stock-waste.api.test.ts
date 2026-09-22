@@ -103,12 +103,14 @@ beforeEach(() => {
   prismaMock.venueSettings.findUnique.mockResolvedValue(null)
   prismaMock.permissionOverride.updateMany.mockResolvedValue({ count: 0 })
   prismaMock.permissionOverride.findUnique.mockResolvedValue(null)
-  prismaMock.rawMaterial.findFirstOrThrow.mockResolvedValue(FILA_INSUMO as never)
-  prismaMock.inventory.findFirstOrThrow.mockResolvedValue(INVENTARIO as never)
   requireWastePermission.mockRejectedValue(
     new ForbiddenError('No tienes permiso para esta operación de inventario.', 'WASTE_PERMISSION_DENIED'),
   )
-  adaptDashboardWaste.mockResolvedValue(RESUMEN)
+  // El adaptador devuelve el resumen del folio Y el artículo ya releído: la ruta sólo responde.
+  adaptDashboardWaste.mockImplementation(async (_venueId: unknown, _staffId: unknown, itemType: unknown) => ({
+    waste: RESUMEN,
+    item: itemType === 'RAW_MATERIAL' ? FILA_INSUMO : INVENTARIO,
+  }))
   legacyRawAdjust.mockResolvedValue(FILA_INSUMO)
   legacyProductAdjust.mockResolvedValue({ currentStock: 8, minimumStock: 2, reservedStock: 0 })
 })
@@ -148,7 +150,9 @@ describe('POST …/raw-materials/:id/adjust-stock', () => {
         expect.objectContaining({ quantity: -2, reason: 'Caducó', reasonCode: 'EXPIRED', idempotencyKey: FOLIO }),
       )
       expect(legacyRawAdjust).not.toHaveBeenCalled()
-      expect(prismaMock.rawMaterial.findFirstOrThrow).toHaveBeenCalledWith({ where: { id: rawMaterialId, venueId } })
+      // Controlador delgado: la relectura es del adaptador, la ruta no toca la base.
+      expect(prismaMock.rawMaterial.findFirstOrThrow).not.toHaveBeenCalled()
+      expect(prismaMock.rawMaterial.findFirst).not.toHaveBeenCalled()
       expect(requireWastePermission).not.toHaveBeenCalled()
     },
   )
@@ -171,6 +175,10 @@ describe('POST …/raw-materials/:id/adjust-stock', () => {
   it.each([
     ['un motivo que no existe', { reasonCode: 'NOPE' }, 'El motivo de la merma no es válido.'],
     ['un folio que no es UUID', { idempotencyKey: 'abc' }, 'El folio (idempotencyKey) debe ser un UUID.'],
+    // El MISMO patrón que el servicio (versión 1-8, variante RFC): el nulo y la versión 0 los
+    // rechaza el esquema con este 400, no el servicio con otro código.
+    ['el folio nulo', { idempotencyKey: '00000000-0000-0000-0000-000000000000' }, 'El folio (idempotencyKey) debe ser un UUID.'],
+    ['un folio versión 0', { idempotencyKey: '3f1c9a52-7b1e-0c1d-9f0a-2b6f4e8d1c07' }, 'El folio (idempotencyKey) debe ser un UUID.'],
   ])('🔴 400 en español con %s, y nada se registra', async (_caso, extra, mensaje) => {
     const res = await request(app)
       .post(RUTA_INSUMO)
@@ -247,7 +255,9 @@ describe('POST …/products/:id/adjust-stock', () => {
       expect.objectContaining({ quantity: -2, reason: 'Roto', reference: 'R-1', unitCost: 7.5, supplier: 'X', reasonCode: 'DEFECTIVE' }),
     )
     expect(legacyProductAdjust).not.toHaveBeenCalled()
-    expect(prismaMock.inventory.findFirstOrThrow).toHaveBeenCalledWith({ where: { venueId, productId } })
+    // Controlador delgado: la relectura es del adaptador, la ruta no toca la base.
+    expect(prismaMock.inventory.findFirstOrThrow).not.toHaveBeenCalled()
+    expect(prismaMock.inventory.findFirst).not.toHaveBeenCalled()
     expect(requireWastePermission).not.toHaveBeenCalled()
   })
 

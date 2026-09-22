@@ -1,18 +1,23 @@
 import { z } from 'zod'
 import { ValidationError } from '../../errors/AppError'
 import { WASTE_REASON_CODES } from '../../services/shared/wasteReasons'
+import { WASTE_KEY_PATTERN } from '../../services/shared/wasteKey'
 
 /**
  * Contrato de la merma en `/mobile` (spec §4.4). Lo espejan avoqado-android y avoqado-ios.
  *
  * Aquí sólo se valida la FORMA; los topes de cantidad (0.001 – 999 999.999, ≤ 3 decimales), los
- * motivos que ofrece el POS, la nota de «Otro» y el formato estricto del folio los decide
- * `prepareWaste`, que es la misma regla para POS, dashboard y MCP.
+ * motivos que ofrece el POS y la nota de «Otro» los decide `prepareWaste`, que es la misma regla para
+ * POS, dashboard y MCP. El folio se valida aquí con el MISMO patrón que usa el servicio
+ * (`WASTE_KEY_PATTERN`), así un folio malo recibe una sola respuesta.
  *
  * 🔴 Todos los mensajes van en ESPAÑOL: el 422 los devuelve tal cual (`message` y `details`).
  */
 
 const UUID_MSG = 'El folio (idempotencyKey) debe ser un UUID.'
+/** El MISMO patrón que el servicio (versión 1-8, variante RFC): `.uuid()` de Zod deja pasar el nulo y la versión 0. */
+const folio = () =>
+  z.string({ required_error: 'Falta el folio (idempotencyKey).', invalid_type_error: UUID_MSG }).regex(WASTE_KEY_PATTERN, UUID_MSG)
 
 /**
  * 🔴 `null` = ausente. El POS Android serializa con `encodeDefaults = true`: un opcional que no
@@ -73,7 +78,7 @@ export const WasteBodySchema = z
         .max(64, 'La unidad es demasiado larga.'),
       reasonCode: z.enum(WASTE_REASON_CODES, { errorMap: () => ({ message: 'El motivo de la merma no es válido.' }) }),
       note: nullComoAusente(z.string({ invalid_type_error: 'La nota debe ser texto.' }).max(280, 'La nota admite hasta 280 caracteres.')),
-      idempotencyKey: z.string({ required_error: 'Falta el folio (idempotencyKey).', invalid_type_error: UUID_MSG }).uuid(UUID_MSG),
+      idempotencyKey: folio(),
       clientOccurredAt: nullComoAusente(
         z
           .string({ invalid_type_error: 'La fecha de la merma debe ser texto ISO 8601.' })
@@ -90,7 +95,7 @@ export const WasteBodySchema = z
 export const VoidWasteBodySchema = z
   .object(
     {
-      idempotencyKey: z.string({ required_error: 'Falta el folio (idempotencyKey).', invalid_type_error: UUID_MSG }).uuid(UUID_MSG),
+      idempotencyKey: folio(),
     },
     {
       required_error: 'Falta el cuerpo de la anulación.',

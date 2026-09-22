@@ -413,7 +413,7 @@ export async function getGlobalMovements(
       totalCost: m.wasteReportId
         ? m.unitCost === null
           ? null
-          : m.unitCost.toNumber() * m.quantity.toNumber()
+          : m.unitCost.mul(m.quantity).toNumber() // en Decimal: 1.15 × −3 es −3.45, no −3.4499999999999997
         : (m.inventory.product.cost?.toNumber() || 0) * m.quantity.toNumber(),
       ...wasteHistoryFields(m.id, m.wasteReportId, m.wasteReport, 'productMovements'),
       // Un movimiento de PRODUCTO no cuelga de una orden de compra, así que no

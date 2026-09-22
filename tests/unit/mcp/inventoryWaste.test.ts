@@ -259,6 +259,35 @@ describe('MCP log_waste', () => {
     expect(logWaste).not.toHaveBeenCalled()
   })
 
+  it('🔴 con itemType, el filtro lo aplica el LECTOR antes de paginar (no se pierden candidatos en otra página)', async () => {
+    // La búsqueda «leche» trae 11 insumos y UN producto. Si la tool filtrara la primera página
+    // (10 insumos) DESPUÉS de paginar, no quedaría nadie y respondería «coincide con varios»
+    // con la lista vacía.
+    const insumo = (i: number) => ({ itemType: 'RAW_MATERIAL', itemId: `rm${i}`, name: `Leche ${i}`, sku: `L${i}`, unit: 'LITER' })
+    listWasteItems.mockImplementation(async (_venueId: string, query: { itemType?: string }) =>
+      query.itemType === 'PRODUCT'
+        ? {
+            items: [{ itemType: 'PRODUCT', itemId: 'p9', name: 'Leche embotellada', sku: 'LB', unit: 'UNIT' }],
+            total: 1,
+            page: 1,
+            pageSize: 10,
+          }
+        : { items: Array.from({ length: 10 }, (_, i) => insumo(i)), total: 12, page: 1, pageSize: 10 },
+    )
+    const porNombre = sin(entrada, 'itemId', 'unit')
+    const out = json(await tool('log_waste')({ ...porNombre, name: 'leche', itemType: 'PRODUCT' }))
+
+    expect(listWasteItems).toHaveBeenCalledWith('venue-1', expect.objectContaining({ search: 'leche', itemType: 'PRODUCT', page: 1 }))
+    expect(out.requiresConfirmation).toBe(true)
+    expect(out.confirmationPayload).toMatchObject({ itemType: 'PRODUCT', itemId: 'p9', unit: 'UNIT' })
+  })
+
+  it('sin itemType, la búsqueda no filtra por tipo', async () => {
+    const porNombre = sin(entrada, 'itemType', 'itemId')
+    await tool('log_waste')({ ...porNombre, name: 'leche' })
+    expect(listWasteItems.mock.calls[0][1].itemType).toBeUndefined()
+  })
+
   it('por nombre sin coincidencias no emite folio', async () => {
     const porNombre = sin(entrada, 'itemType', 'itemId')
     const out = json(await tool('log_waste')({ ...porNombre, name: 'inexistente' }))
@@ -272,6 +301,15 @@ describe('MCP log_waste', () => {
       code: 'WASTE_PREVIEW_MISMATCH',
     })
     expect(logWaste).not.toHaveBeenCalled()
+  })
+
+  it('🔴 confirmar con un folio NUEVO y sin huella (el asistente se saltó la vista previa) se rechaza sin escribir', async () => {
+    const out = tool('log_waste')({ ...entrada, confirm: true, idempotencyKey: '7b9f3c2e-1d4a-4e8b-9a6c-5f2d1e0c3b4a' })
+    await expect(out).rejects.toMatchObject({ code: 'WASTE_PREVIEW_MISMATCH' })
+    // Se buscó el folio (un reintento legítimo lo recuperaría) y nada más: ni candados de escritura ni registro.
+    expect(recoverByKey).toHaveBeenCalledTimes(1)
+    expect(logWaste).not.toHaveBeenCalled()
+    expect(venueHasFeatureAccess).not.toHaveBeenCalled()
   })
 
   it('🔴 confirmar sin el artículo exacto (sólo un nombre) se rechaza sin escribir', async () => {

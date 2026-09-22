@@ -5,7 +5,8 @@
  * tests/integration/inventory/dashboard-waste-adapter.integration.test.ts. Aquí sólo:
  *  - la alerta de existencia baja que falla DESPUÉS de confirmar la merma no la convierte en error
  *    (un 500 haría que el dashboard reintentara sin folio y la registrara dos veces);
- *  - el adaptador no es un segundo candado de permiso (Rulings 18 y 20).
+ *  - el adaptador no es un segundo candado de permiso (Rulings 18 y 20);
+ *  - devuelve el artículo RELEÍDO del venue después de la merma, para que la ruta no lea la base.
  */
 import { prismaMock } from '../../../__helpers__/setup'
 
@@ -26,6 +27,8 @@ jest.mock('@/services/dashboard/rawMaterial.service', () => ({
 import { adaptDashboardWaste, canRecordDashboardWaste } from '@/services/shared/dashboardWasteAdapter'
 
 const RESUMEN = { reportId: 'clwastereport00000000001', declared: '3', deducted: '3', unrecorded: '0' }
+const INSUMO = { id: 'rm-1', venueId: 'venue-1', name: 'Aguacate', currentStock: '7' }
+const INVENTARIO = { id: 'inv-1', venueId: 'venue-1', productId: 'p-1', currentStock: '7' }
 
 beforeEach(() => {
   jest.clearAllMocks()
@@ -37,6 +40,8 @@ beforeEach(() => {
     inventoryMethod: 'QUANTITY',
     inventory: { id: 'inv-1' },
   })
+  prismaMock.rawMaterial.findFirstOrThrow.mockResolvedValue(INSUMO)
+  prismaMock.inventory.findFirstOrThrow.mockResolvedValue(INVENTARIO)
   logWaste.mockResolvedValue(RESUMEN)
   checkAndCreateLowStockAlert.mockResolvedValue(undefined)
 })
@@ -45,7 +50,10 @@ describe('adaptDashboardWaste', () => {
   it('🔴 si la alerta de existencia baja falla, la merma YA registrada se devuelve igual', async () => {
     checkAndCreateLowStockAlert.mockRejectedValue(new Error('smtp caído'))
 
-    await expect(adaptDashboardWaste('venue-1', 'staff-1', 'RAW_MATERIAL', 'rm-1', { quantity: -3 })).resolves.toEqual(RESUMEN)
+    await expect(adaptDashboardWaste('venue-1', 'staff-1', 'RAW_MATERIAL', 'rm-1', { quantity: -3 })).resolves.toEqual({
+      waste: RESUMEN,
+      item: INSUMO,
+    })
     expect(checkAndCreateLowStockAlert).toHaveBeenCalledWith('venue-1', 'rm-1')
   })
 
@@ -78,6 +86,33 @@ describe('adaptDashboardWaste', () => {
     })
     expect(input.quantity.toString()).toBe('2.5')
     expect(input.idempotencyKey).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+  })
+})
+
+describe('adaptDashboardWaste — el artículo releído', () => {
+  it('🔴 relee el insumo o el inventario DESPUÉS de registrar, acotado al venue', async () => {
+    const orden: string[] = []
+    logWaste.mockImplementation(async () => {
+      orden.push('logWaste')
+      return RESUMEN
+    })
+    prismaMock.rawMaterial.findFirstOrThrow.mockImplementation((async () => {
+      orden.push('relectura')
+      return INSUMO
+    }) as never)
+
+    await expect(adaptDashboardWaste('venue-1', 'staff-1', 'RAW_MATERIAL', 'rm-1', { quantity: -3 })).resolves.toEqual({
+      waste: RESUMEN,
+      item: INSUMO,
+    })
+    expect(orden).toEqual(['logWaste', 'relectura'])
+    expect(prismaMock.rawMaterial.findFirstOrThrow).toHaveBeenCalledWith({ where: { id: 'rm-1', venueId: 'venue-1' } })
+
+    await expect(adaptDashboardWaste('venue-1', 'staff-1', 'PRODUCT', 'p-1', { quantity: -3 })).resolves.toEqual({
+      waste: RESUMEN,
+      item: INVENTARIO,
+    })
+    expect(prismaMock.inventory.findFirstOrThrow).toHaveBeenCalledWith({ where: { venueId: 'venue-1', productId: 'p-1' } })
   })
 })
 

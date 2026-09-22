@@ -2,7 +2,6 @@ import { Request, Response, NextFunction } from 'express'
 import { z } from 'zod'
 import * as productInventoryService from '../../services/dashboard/productInventory.service'
 import logger from '../../config/logger'
-import prisma from '../../utils/prismaClient'
 import { adaptDashboardWaste, canRecordDashboardWaste } from '../../services/shared/dashboardWasteAdapter'
 import type { AdjustProductInventoryStockSchema } from '../../schemas/dashboard/inventory.schema'
 
@@ -31,8 +30,7 @@ export const adjustInventoryStockHandler = async (req: Request, res: Response, n
     // más `waste` (el resumen del folio). Ya no se rechaza por existencia: descuenta lo que haya
     // (nunca por debajo de 0) y marca el excedente. ADJUSTMENT y entradas siguen igual que siempre.
     if (data.type === 'LOSS' && data.quantity < 0 && canRecordDashboardWaste(staffId)) {
-      const waste = await adaptDashboardWaste(venueId, staffId, 'PRODUCT', productId, data)
-      const inventory = await prisma.inventory.findFirstOrThrow({ where: { venueId, productId } })
+      const { waste, item: inventory } = await adaptDashboardWaste(venueId, staffId, 'PRODUCT', productId, data)
       res.status(200).json({
         message: `Inventory stock adjusted successfully`,
         data: {

@@ -347,8 +347,10 @@ export function registerInventoryWasteTools(server: McpServer, scope: McpScope):
         }
         item = await findWasteItem(venueId, args.itemType, args.itemId)
       } else if (name) {
-        const found = await listWasteItems(venueId, { page: 1, pageSize: CANDIDATE_CAP, search: name })
-        const matches = args.itemType ? found.items.filter(i => i.itemType === args.itemType) : found.items
+        // El tipo lo filtra el LECTOR, antes de paginar: filtrarlo aquí sobre la primera página dejaba
+        // fuera a los candidatos de las siguientes y respondía «varios» con la lista vacía.
+        const found = await listWasteItems(venueId, { page: 1, pageSize: CANDIDATE_CAP, search: name, itemType: args.itemType })
+        const matches = found.items
         const more = found.total > found.items.length
         if (matches.length === 1 && !more) {
           item = matches[0]

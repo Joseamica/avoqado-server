@@ -12,6 +12,7 @@ import {
 } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 import { WASTE_REASON_CODES } from '../../services/shared/wasteReasons'
+import { WASTE_KEY_PATTERN } from '../../services/shared/wasteKey'
 
 // Some legacy products and raw materials in production use non-cuid-v1 IDs
 // (e.g. "rb44l0fgk30kp0soskrlys5c", "prod_ad_blanq_003"). Strict z.cuid()
@@ -32,7 +33,8 @@ const dashboardWasteFields = {
     .transform(value => value ?? undefined),
   idempotencyKey: z
     .string({ invalid_type_error: 'El folio (idempotencyKey) debe ser un UUID.' })
-    .uuid('El folio (idempotencyKey) debe ser un UUID.')
+    // El MISMO patrón que el servicio: `.uuid()` de Zod deja pasar el nulo y la versión 0.
+    .regex(WASTE_KEY_PATTERN, 'El folio (idempotencyKey) debe ser un UUID.')
     .nullish()
     .transform(value => value ?? undefined),
 }
