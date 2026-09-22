@@ -219,6 +219,10 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'inventory:create': ['inventory:read', 'inventory:create', 'products:read'],
   'inventory:update': ['inventory:read', 'inventory:update', 'products:read'],
   'inventory:adjust': ['inventory:read', 'inventory:adjust', 'products:read'],
+  // 🔴 Registrar merma desde el POS: SÓLO resta con motivo. NO arrastra `inventory:read` ni
+  // `inventory:adjust` a propósito — el mesero puede decir «se me cayó», no ver existencias
+  // ni corregirlas. La lista de artículos elegibles del POS no trae existencias por lo mismo.
+  'inventory:log-waste': ['inventory:log-waste'],
   'inventory:delete': ['inventory:read', 'inventory:delete', 'products:read'],
   'inventory-transfers:read': ['inventory-transfers:read', 'inventory:read'],
   'inventory-transfers:request': ['inventory-transfers:read', 'inventory-transfers:request', 'inventory:read'],
@@ -813,6 +817,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    * - Cannot create/edit menu items (MANAGER+ only)
    */
   [StaffRole.WAITER]: [
+    'inventory:log-waste', // registrar merma desde el POS: sólo resta, sin leer ni ajustar existencias
     'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
     'home:read',
     'menu:read', // Read-only access to menus, categories, products, modifiers
@@ -883,6 +888,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    * CASHIER: Payment processing
    */
   [StaffRole.CASHIER]: [
+    'inventory:log-waste', // registrar merma desde el POS: sólo resta, sin leer ni ajustar existencias
     'home:read',
     'menu:read',
     'orders:read',
@@ -960,6 +966,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    * MANAGER: Operational management
    */
   [StaffRole.MANAGER]: [
+    'inventory:log-waste', // registrar merma desde el POS (además tiene inventory:adjust)
     'cash-drawer:view-expected', // ve el esperado del cajón físico (conteo ciego para el resto)
     'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
     'attendance:read', // Revisar el checador — nunca a roles de piso
@@ -1923,7 +1930,15 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
     'tpv:command:schedule',
     'tpv:command:geofence',
   ],
-  inventory: ['inventory:read', 'inventory:create', 'inventory:update', 'inventory:delete', 'inventory:adjust', 'inventory:org-manage'],
+  inventory: [
+    'inventory:read',
+    'inventory:create',
+    'inventory:update',
+    'inventory:delete',
+    'inventory:adjust',
+    'inventory:log-waste',
+    'inventory:org-manage',
+  ],
   'inventory-transfers': [
     'inventory-transfers:read',
     'inventory-transfers:request',

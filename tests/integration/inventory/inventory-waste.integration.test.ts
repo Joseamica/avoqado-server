@@ -27,8 +27,8 @@ let organizationId = ''
 let venueId = ''
 let staffId = ''
 let categoryId = ''
-// Para anular: dos meseros con `inventory:log-waste` (override del venue) y SIN `inventory:adjust`,
-// un VIEWER sin ninguno de los dos, y alguien sin acceso al venue.
+// Para anular: dos meseros con `inventory:log-waste` DE FÁBRICA (Task 7, sin override del venue) y
+// SIN `inventory:adjust`, un VIEWER sin ninguno de los dos, y alguien sin acceso al venue.
 let waiterAId = ''
 let waiterBId = ''
 let viewerId = ''
@@ -96,11 +96,8 @@ beforeAll(async () => {
       { staffId: viewerId, venueId, role: 'VIEWER', active: true },
     ],
   })
-  // `inventory:log-waste` aún no está en los defaults (Task 7): se otorga como lo haría el dueño,
-  // con el editor de roles. Es aditivo sobre WAITER, que no trae `inventory:adjust`.
-  await prisma.venueRolePermission.create({
-    data: { venueId, role: 'WAITER', permissions: ['inventory:log-waste'], modifiedBy: staffId },
-  })
+  // Sin VenueRolePermission a propósito: desde Task 7 el WAITER trae `inventory:log-waste` de fábrica
+  // (y sigue sin `inventory:adjust`). Las pruebas que necesitan un override lo crean y lo borran.
 
   const category = await prisma.menuCategory.create({
     data: { venueId, name: fixture, slug: fixture },
@@ -743,7 +740,7 @@ test('void no necesita plan y devuelve la autoría canónica al repetirlo', asyn
 
 test('otra persona que repite la anulación recibe la autoría canónica, no la suya', async () => {
   const key = randomUUID()
-  // Un mesero con sólo `inventory:log-waste` puede anular.
+  // Un mesero de fábrica (log-waste sin adjust) puede anular.
   const first = await voidWasteKey(venueId, waiterAId, key)
   expect(first).toMatchObject({ outcome: 'VOIDED', voidedByStaffId: waiterAId })
 
@@ -777,7 +774,8 @@ test('void de APPLIED no revierte el stock', async () => {
 })
 
 test('el resumen de un APPLIED sólo lo recibe el autor o quien tiene inventory:adjust', async () => {
-  // Premisa: los dos meseros tienen log-waste y NO adjust.
+  // Premisa: los dos meseros tienen log-waste DE FÁBRICA (no hay override del rol) y NO adjust.
+  expect(await prisma.venueRolePermission.count({ where: { venueId, role: 'WAITER' } })).toBe(0)
   for (const id of [waiterAId, waiterBId]) {
     const access = await getWasteAccess(id, venueId)
     expect(hasWastePermission(access, 'inventory:log-waste')).toBe(true)
@@ -823,6 +821,45 @@ test('sin ninguno de los dos permisos, sin acceso o con folio inválido: rechazo
   // Y sobre un APPLIED el VIEWER tampoco se entera de nada.
   await expect(voidWasteKey(venueId, viewerId, key)).rejects.toMatchObject({ statusCode: 403 })
   expect(await productStock(item.id)).toBe('8')
+})
+
+test('🔴 con log-waste QUITADO por el venue: el gerente anula por inventory:adjust; el mesero se queda sin camino', async () => {
+  // Desde Task 7 el gerente trae los DOS permisos de fábrica, así que sin esta exclusión nada
+  // distinguiría el brazo `inventory:adjust` del OR de voidWasteKey (Ruling 15-b).
+  const item = await product(10)
+  const input = request('PRODUCT', item.id, 2)
+  const report = await logWaste(venueId, waiterAId, input)
+
+  await prisma.venueRolePermission.createMany({
+    data: [
+      { venueId, role: 'MANAGER', permissions: [], deniedPermissions: ['inventory:log-waste'], modifiedBy: staffId },
+      { venueId, role: 'WAITER', permissions: [], deniedPermissions: ['inventory:log-waste'], modifiedBy: staffId },
+    ],
+  })
+  try {
+    // Premisa: la exclusión muerde — al gerente le queda adjust y ya no log-waste; al mesero, ninguno.
+    const manager = await getWasteAccess(staffId, venueId)
+    expect(hasWastePermission(manager, 'inventory:adjust')).toBe(true)
+    expect(hasWastePermission(manager, 'inventory:log-waste')).toBe(false)
+    expect(await grantedPermissionsBeforeActivation(staffId, venueId, 'MANAGER')).not.toContain('inventory:log-waste')
+    const waiter = await getWasteAccess(waiterBId, venueId)
+    expect(hasWastePermission(waiter, 'inventory:log-waste')).toBe(false)
+    expect(hasWastePermission(waiter, 'inventory:adjust')).toBe(false)
+
+    // El gerente anula un folio nuevo por el brazo adjust…
+    const key = randomUUID()
+    await expect(voidWasteKey(venueId, staffId, key)).resolves.toMatchObject({ outcome: 'VOIDED', voidedByStaffId: staffId })
+    // …y sobre un APPLIED ajeno recibe el resumen, porque administra inventario.
+    await expect(voidWasteKey(venueId, staffId, input.idempotencyKey)).resolves.toStrictEqual({ outcome: 'ALREADY_APPLIED', report })
+
+    // Contraste: el mesero, sin ninguno de los dos, recibe 403 y no deja lápida.
+    const deniedKey = randomUUID()
+    await expect(voidWasteKey(venueId, waiterBId, deniedKey)).rejects.toMatchObject({ statusCode: 403 })
+    expect(await prisma.inventoryWasteReport.count({ where: { venueId, idempotencyKey: deniedKey } })).toBe(0)
+    expect(await productStock(item.id)).toBe('8')
+  } finally {
+    await prisma.venueRolePermission.deleteMany({ where: { venueId, role: { in: ['MANAGER', 'WAITER'] } } })
+  }
 })
 
 async function waitFor<T>(read: () => Promise<T | undefined>): Promise<T> {
@@ -1208,10 +1245,11 @@ test('los permisos previos a la activación son EXACTAMENTE los de getUserAccess
   let permissionSetId: string | undefined
   try {
     await prisma.staffVenue.create({ data: { staffId: owner.id, venueId, role: 'OWNER', active: true } })
-    // (b) Override del rol con exclusiones: el WAITER ya agrega log-waste; aquí además se le quita algo.
-    await prisma.venueRolePermission.update({
-      where: { venueId_role: { venueId, role: 'WAITER' } },
-      data: { deniedPermissions: ['reviews:read'] },
+    // (b) Override del rol con adiciones Y exclusiones. Desde Task 7 log-waste es de fábrica en WAITER,
+    // así que la adición es otro permiso que el mesero no trae (`reports:read`), para que la rama
+    // aditiva del override siga ejercitada.
+    await prisma.venueRolePermission.create({
+      data: { venueId, role: 'WAITER', permissions: ['reports:read'], deniedPermissions: ['reviews:read'], modifiedBy: staffId },
     })
     // (c) Conjunto de permisos: manda sobre el rol.
     const set = await prisma.permissionSet.create({
@@ -1240,18 +1278,16 @@ test('los permisos previos a la activación son EXACTAMENTE los de getUserAccess
 
     // Las premisas de cada caso sí se aplicaron (si no, la igualdad no probaría nada).
     const waiterA = await grantedPermissionsBeforeActivation(waiterAId, venueId, 'WAITER')
-    expect(waiterA).toContain('inventory:log-waste')
-    expect(waiterA).not.toContain('reviews:read')
+    expect(waiterA).toContain('inventory:log-waste') // de fábrica
+    expect(waiterA).toContain('reports:read') // la adición del override
+    expect(waiterA).not.toContain('reviews:read') // la exclusión del override
     const conjunto = await grantedPermissionsBeforeActivation(waiterBId, venueId, 'WAITER')
     expect(conjunto).toContain('inventory:log-waste')
     expect(conjunto).not.toContain('orders:create')
   } finally {
     await prisma.staffVenue.update({ where: { staffId_venueId: { staffId: waiterBId, venueId } }, data: { permissionSetId: null } })
     if (permissionSetId) await prisma.permissionSet.deleteMany({ where: { id: permissionSetId, venueId } })
-    await prisma.venueRolePermission.update({
-      where: { venueId_role: { venueId, role: 'WAITER' } },
-      data: { deniedPermissions: [] },
-    })
+    await prisma.venueRolePermission.deleteMany({ where: { venueId, role: 'WAITER' } })
     await prisma.staffVenue.deleteMany({ where: { staffId: owner.id } })
     await prisma.staff.deleteMany({ where: { id: owner.id } })
   }
@@ -1283,6 +1319,10 @@ test('anular cierra folios aunque el white-label apague el inventario; permisos 
     expect(filtered.whiteLabelEnabled).toBe(true)
     expect(hasWastePermission(filtered, 'inventory:adjust')).toBe(false)
     expect(hasWastePermission(await getWasteAccess(waiterAId, venueId), 'inventory:log-waste')).toBe(false)
+    // …y la LISTA que leen el dashboard y las apps tampoco trae log-waste (PERMISSION_TO_FEATURE_MAP
+    // la filtra con AVOQADO_INVENTORY): el botón no se pinta para ninguno de los dos.
+    expect(filtered.corePermissions).not.toContain('inventory:log-waste')
+    expect((await getWasteAccess(waiterAId, venueId)).corePermissions).not.toContain('inventory:log-waste')
     // …y registrar una merma NUEVA sigue exigiendo la activación: eso no cambia.
     await expect(requireWastePermission(waiterAId, venueId, 'inventory:log-waste')).rejects.toMatchObject({ statusCode: 403 })
 
@@ -1314,6 +1354,54 @@ test('anular cierra folios aunque el white-label apague el inventario; permisos 
   } finally {
     await prisma.staffVenue.update({ where: { staffId_venueId: { staffId: waiterAId, venueId } }, data: { permissionSetId: null } })
     if (permissionSetId) await prisma.permissionSet.deleteMany({ where: { id: permissionSetId, venueId } })
+    await prisma.venueModule.deleteMany({ where: { venueId, moduleId: module.id } })
+    if (!previousModule) {
+      await prisma.module.deleteMany({ where: { id: module.id, venueModules: { none: {} }, organizationModules: { none: {} } } })
+    }
+  }
+})
+
+test('🔴 white-label CON AVOQADO_INVENTORY conserva inventory:log-waste para los roles que su config permite', async () => {
+  const previousModule = await prisma.module.findUnique({ where: { code: 'WHITE_LABEL_DASHBOARD' } })
+  const module = await prisma.module.upsert({
+    where: { code: 'WHITE_LABEL_DASHBOARD' },
+    update: {},
+    create: { code: 'WHITE_LABEL_DASHBOARD', name: 'White label', defaultConfig: {} },
+  })
+
+  try {
+    // Inventario ACTIVADO en la config white-label y abierto al mesero. El plan (INVENTORY_TRACKING)
+    // NO está: este venue no lo tiene, y no debe importar para el filtro de la lista (spec §4.4).
+    expect(await venueHasFeatureAccess(venueId, 'INVENTORY_TRACKING')).toBe(false)
+    await prisma.venueModule.create({
+      data: {
+        venueId,
+        moduleId: module.id,
+        enabled: true,
+        enabledBy: staffId,
+        config: {
+          enabledFeatures: [
+            { code: 'AVOQADO_INVENTORY', source: 'avoqado', access: { allowedRoles: ['MANAGER', 'WAITER'], dataScope: 'user-venues' } },
+          ],
+        },
+      },
+    })
+
+    const waiter = await getWasteAccess(waiterAId, venueId)
+    expect(waiter.whiteLabelEnabled).toBe(true)
+    expect(waiter.corePermissions).toContain('inventory:log-waste')
+    expect(waiter.corePermissions).not.toContain('inventory:adjust')
+    await expect(requireWastePermission(waiterAId, venueId, 'inventory:log-waste')).resolves.toMatchObject({ userId: waiterAId })
+
+    // Misma función SIN `access` en la config: el default white-label (OWNER/ADMIN/MANAGER) deja al
+    // gerente y le quita el botón al mesero. Hay que abrírselo en la config, no en el rol.
+    await prisma.venueModule.updateMany({
+      where: { venueId, moduleId: module.id },
+      data: { config: { enabledFeatures: [{ code: 'AVOQADO_INVENTORY', source: 'avoqado' }] } },
+    })
+    expect((await getWasteAccess(staffId, venueId)).corePermissions).toContain('inventory:log-waste')
+    expect((await getWasteAccess(waiterAId, venueId)).corePermissions).not.toContain('inventory:log-waste')
+  } finally {
     await prisma.venueModule.deleteMany({ where: { venueId, moduleId: module.id } })
     if (!previousModule) {
       await prisma.module.deleteMany({ where: { id: module.id, venueModules: { none: {} }, organizationModules: { none: {} } } })

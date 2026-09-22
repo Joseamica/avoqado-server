@@ -130,6 +130,10 @@ const PERMISSION_TO_FEATURE_MAP: Record<string, string> = {
   'inventory:create': 'AVOQADO_INVENTORY',
   'inventory:update': 'AVOQADO_INVENTORY',
   'inventory:adjust': 'AVOQADO_INVENTORY',
+  // 🔴 AVOQADO_INVENTORY (la función activada en la config white-label), NO INVENTORY_TRACKING
+  // (el plan): este mapa filtra contra `config.enabledFeatures`. El plan lo revisa aparte
+  // `checkFeatureAccess('INVENTORY_TRACKING')` en la ruta.
+  'inventory:log-waste': 'AVOQADO_INVENTORY',
   'inventory:delete': 'AVOQADO_INVENTORY',
   'inventory:org-manage': 'SERIALIZED_INVENTORY',
   'inventory-transfers:read': 'AVOQADO_INVENTORY',
