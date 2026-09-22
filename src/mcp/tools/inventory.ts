@@ -5,6 +5,7 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
+import { registerInventoryWasteTools } from './inventoryWaste'
 import { adjustInventoryStock } from '@/services/dashboard/productInventory.service'
 import { createRawMaterial } from '@/services/dashboard/rawMaterial.service'
 import { listPresentations, setPresentations } from '@/services/dashboard/rawMaterialPresentation.service'
@@ -43,6 +44,9 @@ const BATCH_STATUS_LABEL = {
 
 export function registerInventoryTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
+  // Merma (log_waste en dos pasos, list_waste_reports): mismo servicio que el POS y el dashboard.
+  // `adjust_stock` sigue igual: corrige existencias; la merma declara pérdidas con motivo y folio.
+  registerInventoryWasteTools(server, scope)
 
   server.tool(
     'low_stock',
