@@ -19,6 +19,7 @@ import * as transactionMobileController from '../controllers/mobile/transaction.
 import * as paymentMobileController from '../controllers/mobile/payment.mobile.controller'
 import * as terminalPaymentMobileController from '../controllers/mobile/terminal-payment.mobile.controller'
 import * as inventoryMobileController from '../controllers/mobile/inventory.mobile.controller'
+import * as wasteController from '../controllers/mobile/inventoryWaste.mobile.controller'
 import * as loyaltyMobileController from '../controllers/mobile/loyalty.mobile.controller'
 import * as serviceChargeMobileController from '../controllers/mobile/service-charge.mobile.controller'
 import * as menuMobileController from '../controllers/mobile/menu.mobile.controller'
@@ -2215,6 +2216,54 @@ router.get(
   checkPermission('inventory:read'),
   inventoryMobileController.getStockOverview,
 )
+
+/**
+ * MERMA DESDE EL POS (spec 2026-09-21 §4.3-§4.4) — el contrato que espejan Android e iOS.
+ *
+ * GET /api/v1/mobile/venues/:venueId/inventory/waste-items?search&page&pageSize
+ * Catálogo de artículos que se pueden mermar (ingredientes activos + productos por cantidad):
+ * `{ items: [{ itemType, itemId, name, sku, unit }], total, page, pageSize }`. SIN existencias ni
+ * costos: `inventory:log-waste` no concede `inventory:read`. `pageSize` hostil ⇒ se recorta a 200.
+ */
+router.get(
+  '/venues/:venueId/inventory/waste-items',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkFeatureAccess('INVENTORY_TRACKING'),
+  checkPermission('inventory:log-waste'),
+  wasteController.listItems,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/inventory/waste
+ * Registra una merma con folio (`idempotencyKey`, UUID que genera el aparato ANTES de la red).
+ * 201 `{ reportId, declared, deducted, unrecorded }`. La merma nunca se rechaza por falta de
+ * existencia: descuenta lo que haya y reporta el resto en `unrecorded`.
+ *
+ * 🔴 El ORDEN es el contrato: membresía → recuperar por folio → plan → permiso → registrar. Sólo
+ * los candados de escritura NUEVA van detrás del folio: un reintento de una merma ya aplicada
+ * recupera su resumen aunque entre tanto se revocara el permiso o venciera el plan, pero nunca por
+ * quien ya no pertenece al venue.
+ */
+router.post(
+  '/venues/:venueId/inventory/waste',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  wasteController.recover,
+  checkFeatureAccess('INVENTORY_TRACKING'),
+  checkPermission('inventory:log-waste'),
+  wasteController.create,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/inventory/waste/void — body `{ idempotencyKey }`
+ * Anula un folio cuyo envío quedó con desenlace desconocido: `{ outcome: 'VOIDED', … }` o
+ * `{ outcome: 'ALREADY_APPLIED', report? }`. 🔴 SIN `checkFeatureAccess` ni `checkPermission` a
+ * propósito (Ruling 12): la autorización es de `voidWasteKey` (membresía + log-waste O adjust).
+ * Un candado aquí dejaría en el aparato folios imposibles de cerrar, y un `checkPermission`
+ * dejaría fuera al gerente que sólo tiene `inventory:adjust`.
+ */
+router.post('/venues/:venueId/inventory/waste/void', authenticateTokenMiddleware, requireVenueMembership, wasteController.voidKey)
 
 /**
  * GET /api/v1/mobile/venues/:venueId/inventory/stock-counts
