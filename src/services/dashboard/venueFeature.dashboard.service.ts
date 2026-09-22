@@ -6,9 +6,10 @@
 
 import Stripe from 'stripe'
 import logger from '../../config/logger'
-import { BadRequestError, NotFoundError, ServiceUnavailableError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError, ServiceUnavailableError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import {
+  elPlanConcede,
   getVenueBaseTier,
   sueltasAbsorbidasPorElPlan,
   type BaseTier,
@@ -101,6 +102,70 @@ export async function sueltasQueAbsorbeElPlan(venueId: string, tier: BaseTier): 
 }
 
 /**
+ * 🔴 No se vende suelto lo que el plan del negocio YA incluye (21-sep): un PRO pagaba $599 por lealtad,
+ * que su plan trae. Lo gratis para todos (CHATBOT) tampoco se vende, con o sin plan. El paywall no lo
+ * ofrece porque el acceso ya está concedido, pero la API lo cobraba igual. Todo o nada, y antes de
+ * tocar Stripe. Lo usan la compra suelta y el cambio suelta→suelta (Codex, ronda 5, P1-3).
+ */
+export async function assertNoIncluidaEnElPlan(venueId: string, featureCodes: string[]): Promise<void> {
+  const tier = await getVenueBaseTier(venueId)
+  const yaIncluidas = featureCodes.filter(code =>
+    tier ? elPlanConcede(tier, code) : (FREE_TIER_CODES as readonly string[]).includes(code),
+  )
+  if (yaIncluidas.length > 0) {
+    throw new ConflictError(
+      `Tu plan ya incluye ${yaIncluidas.join(', ')}: no hace falta contratarlo aparte.`,
+      'FEATURE_INCLUDED_IN_PLAN',
+      { featureCodes: yaIncluidas, tier: tier ?? 'FREE' },
+    )
+  }
+}
+
+// La decisión de si la venta suelta está abierta vive en su propio módulo (la consulta también Stripe).
+export { ventaSueltaAbierta } from '@/services/access/ventaSuelta'
+
+/** Estados de Stripe en los que una suscripción YA no puede volver a cobrar. */
+const SUSCRIPCION_SIN_COBRO: ReadonlySet<string> = new Set(['canceled', 'incomplete_expired'])
+
+/**
+ * 🔴 PARCHE INICIAL del hallazgo #1 (21-sep-2026): no se sube a `tier` mientras una función suelta
+ * que ese plan INCLUYE siga cobrando en Stripe — el negocio pagaría las dos.
+ *
+ * La solución decidida por el founder («como lo hace Claude»: cancelar la suelta, acreditar los días
+ * no usados y cobrar sólo la diferencia) exige medir en Stripe de prueba cómo sale ese crédito y
+ * auditarlo antes de mover dinero. Mientras tanto se bloquea el cambio y se dice cuál es y qué hacer.
+ *
+ * Estado de cada candidata consultado en Stripe, nunca deducido de la fila: «suspendida en local» no
+ * es «ya no cobra». Si Stripe no contesta, 503 y no se sube a ciegas.
+ */
+export async function assertSinCobroDobleAlSubir(venueId: string, tier: BaseTier): Promise<void> {
+  const candidatas = await sueltasQueAbsorbeElPlan(venueId, tier)
+  const cobrando: SueltaAbsorbida[] = []
+  for (const suelta of candidatas) {
+    if (!suelta.stripeSubscriptionId) continue // concedida sin Stripe: no cobra
+    let estado: string
+    try {
+      estado = await estadoDeLaSuscripcion(suelta.stripeSubscriptionId)
+    } catch (error) {
+      if (stripeAfirmaQueNoExiste(error)) continue
+      throw new ServiceUnavailableError(
+        'No pudimos confirmar tus funciones contratadas. Inténtalo de nuevo en unos minutos.',
+        'PLAN_OVERLAP_UNVERIFIED',
+      )
+    }
+    if (!SUSCRIPCION_SIN_COBRO.has(estado)) cobrando.push(suelta)
+  }
+  if (cobrando.length === 0) return
+
+  const nombres = cobrando.map(s => s.name).join(', ')
+  throw new ConflictError(
+    `Ya pagas ${nombres} por separado y el plan lo incluye. Para no cobrarte dos veces, escríbenos a hola@avoqado.io y te hacemos el cambio con el ajuste de lo ya pagado.`,
+    'PLAN_ABSORBS_ALA_CARTE',
+    { features: cobrando.map(s => ({ code: s.code, name: s.name })) },
+  )
+}
+
+/**
  * 🔴 Los días de prueba de una compra suelta los decide el SERVIDOR, nunca quien compra.
  * Antes venían en el body (`trialPeriodDays`, 0..365 en el schema), así que cualquiera con
  * permiso de compra podía regalarse un año (auditoría del 21-sep-2026, hallazgo #8). El schema
@@ -120,6 +185,8 @@ export async function addFeaturesToVenue(venueId: string, featureCodes: string[]
       `Los planes (${planesPedidos.join(', ')}) se contratan desde el flujo de plan, no como función suelta.`,
     )
   }
+
+  await assertNoIncluidaEnElPlan(venueId, featureCodes)
 
   const trialPeriodDays = TRIAL_ALA_CARTE_DIAS
   logger.info('Adding features to venue', { venueId, featureCodes, trialPeriodDays, paymentMethodId })
@@ -364,11 +431,24 @@ export async function removeFeatureFromVenue(venueId: string, featureId: string)
     }
   }
 
-  // Deactivate VenueFeature record
-  await prisma.venueFeature.update({
-    where: { id: venueFeature.id },
+  // 🔴 R0 (Codex, 21-sep): se apaga SÓLO la fila que sigue ligada a lo que se canceló. Por `id` a secas,
+  // una recompra ligada entre la cancelación y esta escritura se quedaba sin el acceso recién pagado.
+  const { count } = await prisma.venueFeature.updateMany({
+    where: { id: venueFeature.id, stripeSubscriptionId: venueFeature.stripeSubscriptionId },
     data: { active: false },
   })
+  if (count === 0) {
+    logger.warn('🚨 El vínculo de la función cambió mientras se daba de baja (¿recompra?): no se toca la fila', {
+      venueId,
+      venueFeatureId: venueFeature.id,
+      canceledSubscriptionId: venueFeature.stripeSubscriptionId,
+    })
+    // Ni auditoría ni «baja hecha» de algo que no ocurrió (Codex, ronda 3): la función sigue contratada.
+    throw new ConflictError(
+      'Esta función se volvió a contratar mientras se daba de baja. La suscripción anterior sí se canceló; la actual sigue activa.',
+      'SUBSCRIPTION_LINK_CHANGED',
+    )
+  }
 
   logAction({
     venueId,

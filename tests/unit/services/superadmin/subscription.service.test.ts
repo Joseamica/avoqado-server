@@ -267,15 +267,16 @@ describe('adjustVenuePlanEndDate', () => {
 
   it('extends the plan by +N days and returns the updated row', async () => {
     prismaMock.venueFeature.findFirst.mockResolvedValue({ id: 'vf1', endDate: baseEnd })
-    prismaMock.venueFeature.update.mockResolvedValue({ id: 'vf1' })
+    // R0: la vigencia se escribe condicionada al vínculo leído (updateMany), no por id a secas.
+    prismaMock.venueFeature.updateMany.mockResolvedValue({ count: 1 } as never)
     // After the update, the single-venue fetch reflects the new endDate (+10d).
     const newEnd = new Date('2026-07-10T00:00:00.000Z')
     prismaMock.venue.findFirst.mockResolvedValue(planVenueRow(newEnd))
 
     const row = await adjustVenuePlanEndDate('cven1', 10, 'staff-1')
 
-    expect(prismaMock.venueFeature.update).toHaveBeenCalledWith({
-      where: { id: 'vf1' },
+    expect(prismaMock.venueFeature.updateMany).toHaveBeenCalledWith({
+      where: { id: 'vf1', stripeSubscriptionId: null },
       data: { endDate: newEnd },
     })
     expect(row?.trialEndsAt).toBe(newEnd.toISOString())
@@ -283,26 +284,28 @@ describe('adjustVenuePlanEndDate', () => {
 
   it('removes days with a negative delta', async () => {
     prismaMock.venueFeature.findFirst.mockResolvedValue({ id: 'vf1', endDate: baseEnd })
-    prismaMock.venueFeature.update.mockResolvedValue({ id: 'vf1' })
+    // R0: la vigencia se escribe condicionada al vínculo leído (updateMany), no por id a secas.
+    prismaMock.venueFeature.updateMany.mockResolvedValue({ count: 1 } as never)
     const newEnd = new Date('2026-06-23T00:00:00.000Z') // -7 days
     prismaMock.venue.findFirst.mockResolvedValue(planVenueRow(newEnd))
 
     await adjustVenuePlanEndDate('cven1', -7, 'staff-1')
 
-    expect(prismaMock.venueFeature.update).toHaveBeenCalledWith({
-      where: { id: 'vf1' },
+    expect(prismaMock.venueFeature.updateMany).toHaveBeenCalledWith({
+      where: { id: 'vf1', stripeSubscriptionId: null },
       data: { endDate: newEnd },
     })
   })
 
   it('falls back to now() as the base when endDate is null', async () => {
     prismaMock.venueFeature.findFirst.mockResolvedValue({ id: 'vf1', endDate: null })
-    prismaMock.venueFeature.update.mockResolvedValue({ id: 'vf1' })
+    // R0: la vigencia se escribe condicionada al vínculo leído (updateMany), no por id a secas.
+    prismaMock.venueFeature.updateMany.mockResolvedValue({ count: 1 } as never)
     prismaMock.venue.findFirst.mockResolvedValue(planVenueRow(new Date()))
 
     await adjustVenuePlanEndDate('cven1', 5, 'staff-1')
 
-    const arg = prismaMock.venueFeature.update.mock.calls[0][0]
+    const arg = prismaMock.venueFeature.updateMany.mock.calls[0][0]
     const days = Math.round((arg.data.endDate.getTime() - Date.now()) / 86400_000)
     expect(days).toBe(5)
   })
@@ -326,6 +329,9 @@ describe('audited venue plan mutations', () => {
         findFirst: jest.fn().mockResolvedValue({ id: 'vf1', endDate: new Date('2026-06-30T00:00:00.000Z') }),
         upsert: jest.fn().mockResolvedValue({ id: 'vf1' }),
         update: jest.fn().mockResolvedValue({ id: 'vf1' }),
+        // R0: grant, desactivar y vigencia escriben condicionados al vínculo (updateMany).
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        create: jest.fn().mockResolvedValue({ id: 'vf1' }),
       },
       activityLog: { create: jest.fn().mockResolvedValue({ id: 'audit-1' }) },
     }

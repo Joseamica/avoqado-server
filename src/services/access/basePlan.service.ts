@@ -240,6 +240,24 @@ export interface VenuePlanInfo {
  * Nonexistent venue → { tier: 'FREE', grandfathered: false, exempt: false } (same false
  * defaults as the individual helpers).
  */
+/**
+ * Los CÓDIGOS de las funciones sueltas vigentes de un negocio — sin precios ni ids de Stripe.
+ *
+ * 🔴 Existe para que un empleado sin permiso de facturación no vea «contrátala» sobre algo que el
+ * negocio YA pagó (Codex, 21-sep, #10): sus compras sólo viajaban en `/features`, que exige
+ * `billing:subscriptions:read`, y el candado del dashboard caía al tier FREE. `/plan-tier` —que
+ * leen todos los roles— los lleva ahora. Sólo el código: lo que paga el negocio sigue privado.
+ */
+export async function getVenueGrantedFeatureCodes(venueId: string): Promise<string[]> {
+  const filas = await prisma.venueFeature.findMany({
+    where: { venueId, ...activeWindowWhere(new Date()), feature: { code: { notIn: [...PAID_PLAN_TIER_CODES] } } },
+    select: { feature: { select: { code: true } } },
+    orderBy: { id: 'asc' },
+    take: 200,
+  })
+  return filas.map(f => f.feature.code)
+}
+
 export async function getVenuePlanInfo(venueId: string): Promise<VenuePlanInfo> {
   const [tier, venue] = await Promise.all([
     getVenueBaseTier(venueId),

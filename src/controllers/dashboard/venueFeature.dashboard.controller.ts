@@ -8,6 +8,11 @@ import * as stripeService from '../../services/stripe.service'
 import prisma from '../../utils/prismaClient'
 import { cruzaPlanYSuelta } from '../../services/access/basePlan.service'
 import logger from '../../config/logger'
+import { ConflictError } from '../../errors/AppError'
+
+/** Venta suelta cerrada (founder, 21-sep): el mensaje dice qué hacer, no sólo que no se puede. */
+const MENSAJE_VENTA_SUELTA_CERRADA =
+  'Por ahora las funciones sueltas se contratan con nuestro equipo: escríbenos a hola@avoqado.io y te la activamos.'
 
 /**
  * Get venue feature status (active and available features)
@@ -57,6 +62,11 @@ export async function addVenueFeatures(
       trialPeriodDays,
       paymentMethodId: paymentMethodId || 'default',
     })
+
+    // 🔴 Venta suelta CERRADA hasta el rediseño de la compra (founder, 21-sep). Antes de todo.
+    if (!venueFeatureService.ventaSueltaAbierta()) {
+      throw new ConflictError(MENSAJE_VENTA_SUELTA_CERRADA, 'ALA_CARTE_SALES_CLOSED')
+    }
 
     // `trialPeriodDays` del body se ignora a propósito: la política de prueba es del servidor.
     const createdFeatures = await venueFeatureService.addFeaturesToVenue(venueId, featureCodes, paymentMethodId)
@@ -217,8 +227,15 @@ export async function downloadInvoice(
 
     logger.info('Downloading invoice', { venueId, invoiceId })
 
+    // 🔴 Sólo facturas del cliente de Stripe de ESTE negocio (aislamiento entre negocios, 21-sep).
+    const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { stripeCustomerId: true } })
+    if (!venue?.stripeCustomerId) {
+      res.status(404).json({ success: false, error: 'Factura no encontrada' })
+      return
+    }
+
     // Get invoice PDF URL from Stripe
-    const pdfUrl = await stripeService.getInvoicePdfUrl(invoiceId)
+    const pdfUrl = await stripeService.getInvoicePdfUrl(invoiceId, venue.stripeCustomerId)
 
     // Redirect to Stripe's hosted PDF
     res.redirect(pdfUrl)
@@ -295,6 +312,19 @@ export async function previewSubscriptionChange(
         code: 'PLAN_CROSSING_NOT_ALLOWED',
       })
       return
+    }
+
+    // 🔴 Subir de plan con una suelta que el plan incluye y que sigue cobrando = pagar dos veces
+    // (hallazgo #1). Parche inicial hasta que el cobro de la diferencia esté medido y auditado.
+    if (newFeature.code === 'PLAN_PRO' || newFeature.code === 'PLAN_PREMIUM') {
+      await venueFeatureService.assertSinCobroDobleAlSubir(venueId, newFeature.code === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO')
+    } else {
+      // Cambiar a otra suelta ES comprar una suelta: cerrado hasta el rediseño (founder, 21-sep).
+      if (!venueFeatureService.ventaSueltaAbierta()) {
+        throw new ConflictError(MENSAJE_VENTA_SUELTA_CERRADA, 'ALA_CARTE_SALES_CLOSED')
+      }
+      // Cambiar una suelta por otra que el plan ya incluye = pagar aparte lo incluido (ronda 5, P1-3).
+      await venueFeatureService.assertNoIncluidaEnElPlan(venueId, [newFeature.code])
     }
 
     // Get proration preview from Stripe
@@ -391,6 +421,19 @@ export async function updateSubscription(
         code: 'PLAN_CROSSING_NOT_ALLOWED',
       })
       return
+    }
+
+    // 🔴 Subir de plan con una suelta que el plan incluye y que sigue cobrando = pagar dos veces
+    // (hallazgo #1). Parche inicial hasta que el cobro de la diferencia esté medido y auditado.
+    if (newFeature.code === 'PLAN_PRO' || newFeature.code === 'PLAN_PREMIUM') {
+      await venueFeatureService.assertSinCobroDobleAlSubir(venueId, newFeature.code === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO')
+    } else {
+      // Cambiar a otra suelta ES comprar una suelta: cerrado hasta el rediseño (founder, 21-sep).
+      if (!venueFeatureService.ventaSueltaAbierta()) {
+        throw new ConflictError(MENSAJE_VENTA_SUELTA_CERRADA, 'ALA_CARTE_SALES_CLOSED')
+      }
+      // Cambiar una suelta por otra que el plan ya incluye = pagar aparte lo incluido (ronda 5, P1-3).
+      await venueFeatureService.assertNoIncluidaEnElPlan(venueId, [newFeature.code])
     }
 
     // 🔴 La colisión se comprueba ANTES de tocar Stripe (auditoría de Codex, 18-sep, hallazgo #8).
@@ -504,7 +547,8 @@ export async function retryInvoicePayment(
     }
 
     // Retry payment using Stripe
-    const paidInvoice = await stripeService.retryInvoicePayment(invoiceId)
+    // 🔴 Sólo si la factura es del cliente de Stripe de ESTE negocio (aislamiento entre negocios, 21-sep).
+    const paidInvoice = await stripeService.retryInvoicePayment(invoiceId, venue.stripeCustomerId)
 
     logger.info('✅ Invoice payment retry successful', {
       venueId,

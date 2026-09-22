@@ -12,6 +12,8 @@
  */
 const mockSubRetrieve = jest.fn()
 const mockSubCreate = jest.fn()
+// Estas pruebas cubren la compra con la venta suelta ABIERTA.
+jest.mock('../../../src/services/access/ventaSuelta', () => ({ ventaSueltaAbierta: () => true }))
 jest.mock('stripe', () => {
   return jest.fn().mockImplementation(() => ({
     subscriptions: { retrieve: mockSubRetrieve, create: mockSubCreate },
@@ -23,7 +25,17 @@ jest.mock('../../../src/utils/prismaClient', () => ({
   default: {
     venue: { findUnique: jest.fn() },
     feature: { findMany: jest.fn() },
-    venueFeature: { findUnique: jest.fn(), upsert: jest.fn().mockResolvedValue({}), update: jest.fn().mockResolvedValue({}) },
+    venueFeature: {
+      findUnique: jest.fn(),
+      // El vínculo ya no se escribe con `upsert` incondicional sino con CAS (Codex, 21-sep, #2).
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      create: jest.fn().mockResolvedValue({}),
+      update: jest.fn().mockResolvedValue({}),
+    },
+    // La compra va dentro de una transacción con candado (Codex, 21-sep, ronda 4).
+    $queryRaw: () => Promise.resolve([{ tomado: true }]),
+    $executeRaw: () => Promise.resolve(0),
+    $transaction: (fn: (tx: unknown) => unknown) => fn(jest.requireMock('../../../src/utils/prismaClient').default),
   },
 }))
 jest.mock('../../../src/config/logger', () => ({

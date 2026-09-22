@@ -3,7 +3,8 @@ import logger from '@/config/logger'
 import Stripe from 'stripe'
 import { Prisma } from '@prisma/client'
 import { addDays } from 'date-fns'
-import { BadRequestError, NotFoundError } from '@/errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
+import { exigirSinObligacionViva } from '@/services/stripe.service'
 import { PAID_PLAN_TIER_CODES, derivePlanState } from '@/services/access/basePlan.service'
 import { writeLegacyActivityAuditTx } from '@/services/activityAudit.service'
 
@@ -263,23 +264,72 @@ export async function activateVenuePlan(venueId: string, actorId: string): Promi
 }
 
 export async function deactivateVenuePlan(venueId: string, actorId: string): Promise<SuperadminVenueSubscription> {
+  // 🔴 R0: apagar el plan de quien sigue pagando lo deja pagando sin acceso. Para cortar, se cancela en Stripe.
+  const vinculo = await vinculoDelPlan(venueId)
+  await exigirSinObligacionViva(vinculo, 'desactivar el plan')
   return runAuditedPlanMutation(venueId, actorId, 'SUPERADMIN_PLAN_DEACTIVATED', async (tx, feature) => {
-    await tx.venueFeature.update({
-      where: { venueId_featureId: { venueId, featureId: feature.id } },
-      data: { active: false, endDate: new Date() },
-    })
+    await escribirPlanSiVinculoIgual(tx, venueId, feature.id, vinculo, { active: false, endDate: new Date() })
     return { auditData: {} }
   })
 }
 
+/**
+ * 🔴 R0 (Codex, 21-sep): el vínculo del plan a Stripe, leído ANTES de la transacción para poder consultar a
+ * Stripe fuera de ella. Dentro, `escribirPlanSiVinculoIgual` escribe SÓLO si sigue igual.
+ */
+async function vinculoDelPlan(venueId: string): Promise<string | null> {
+  const fila = await prisma.venueFeature.findFirst({
+    where: { venueId, feature: { code: PLAN_PRO_FEATURE_CODE } },
+    select: { stripeSubscriptionId: true },
+  })
+  return fila?.stripeSubscriptionId ?? null
+}
+
+/**
+ * 🔴 La escritura es CONDICIONAL al vínculo comprobado (R0, Codex ronda 3): comparar y después escribir sin
+ * condición dejaba caber, entre las dos, un cobro que liga una suscripción nueva — y la escritura la pisaba.
+ * El `UPDATE … WHERE stripeSubscriptionId = <comprobado>` ES la comparación. Si no existe la fila y hay
+ * `crear`, se crea (nunca `upsert`, que pisaría una fila recién creada por otro).
+ */
+async function escribirPlanSiVinculoIgual(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  featureId: string,
+  esperado: string | null,
+  data: Prisma.VenueFeatureUpdateManyMutationInput,
+  crear?: Prisma.VenueFeatureUncheckedCreateInput,
+): Promise<void> {
+  const { count } = await tx.venueFeature.updateMany({ where: { venueId, featureId, stripeSubscriptionId: esperado }, data })
+  if (count > 0) return
+  const existe = await tx.venueFeature.findFirst({ where: { venueId, featureId }, select: { id: true } })
+  if (existe || esperado !== null) {
+    throw new ConflictError('El plan de este negocio cambió mientras se hacía el ajuste. Vuelve a intentarlo.', 'SUBSCRIPTION_LINK_CHANGED')
+  }
+  if (!crear) throw new BadRequestError('El venue no tiene un plan PLAN_PRO')
+  try {
+    await tx.venueFeature.create({ data: crear })
+  } catch (error: any) {
+    if (error?.code === 'P2002') {
+      throw new ConflictError('El plan de este negocio cambió mientras se hacía el ajuste. Vuelve a intentarlo.', 'SUBSCRIPTION_LINK_CHANGED')
+    }
+    throw error
+  }
+}
+
 export async function grantVenuePlanTrial(venueId: string, days: number, actorId: string): Promise<SuperadminVenueSubscription> {
+  // 🔴 R0: un trial local sobre una suscripción que sigue cobrando borraba su vínculo — el negocio seguía
+  // pagando y, al vencer el trial, se quedaba sin acceso. Se rechaza; nunca se cancela por debajo.
+  const vinculo = await vinculoDelPlan(venueId)
+  await exigirSinObligacionViva(vinculo, 'conceder una prueba del plan')
   return runAuditedPlanMutation(venueId, actorId, 'SUPERADMIN_PLAN_TRIAL_GRANTED', async (tx, feature) => {
     const startDate = new Date()
     const endDate = addDays(startDate, days)
-    await tx.venueFeature.upsert({
-      where: { venueId_featureId: { venueId, featureId: feature.id } },
-      create: { venueId, featureId: feature.id, active: true, monthlyPrice: feature.monthlyPrice, startDate, endDate },
-      update: {
+    await escribirPlanSiVinculoIgual(
+      tx,
+      venueId,
+      feature.id,
+      vinculo,
+      {
         active: true,
         startDate,
         endDate,
@@ -289,7 +339,8 @@ export async function grantVenuePlanTrial(venueId: string, days: number, actorId
         suspendedAt: null,
         gracePeriodEndsAt: null,
       },
-    })
+      { venueId, featureId: feature.id, active: true, monthlyPrice: feature.monthlyPrice, startDate, endDate },
+    )
     return { auditData: { days, endDate: endDate.toISOString() } }
   })
 }
@@ -301,15 +352,25 @@ export async function grantVenuePlanTrial(venueId: string, days: number, actorId
  * venue has no PLAN_PRO VenueFeature.
  */
 export async function adjustVenuePlanEndDate(venueId: string, deltaDays: number, actorId: string): Promise<SuperadminVenueSubscription> {
+  // 🔴 R0: poner vencimiento a un plan que Stripe sigue cobrando le quita el acceso a quien paga al llegar
+  // esa fecha. Sólo se ajustan planes sin suscripción viva (trials locales).
+  const vinculo = await vinculoDelPlan(venueId)
+  await exigirSinObligacionViva(vinculo, 'ajustar la vigencia del plan')
   return runAuditedPlanMutation(venueId, actorId, 'SUPERADMIN_PLAN_ENDDATE_ADJUSTED', async tx => {
     const vf = await tx.venueFeature.findFirst({
       where: { venueId, feature: { code: PLAN_PRO_FEATURE_CODE } },
-      select: { id: true, endDate: true },
+      select: { id: true, endDate: true, stripeSubscriptionId: true },
     })
     if (!vf) throw new BadRequestError('El venue no tiene un plan PLAN_PRO')
+    if ((vf.stripeSubscriptionId ?? null) !== vinculo) {
+      throw new ConflictError('El plan de este negocio cambió mientras se hacía el ajuste. Vuelve a intentarlo.', 'SUBSCRIPTION_LINK_CHANGED')
+    }
 
     const newEnd = addDays(vf.endDate ?? new Date(), deltaDays)
-    await tx.venueFeature.update({ where: { id: vf.id }, data: { endDate: newEnd } })
+    const { count } = await tx.venueFeature.updateMany({ where: { id: vf.id, stripeSubscriptionId: vinculo }, data: { endDate: newEnd } })
+    if (count === 0) {
+      throw new ConflictError('El plan de este negocio cambió mientras se hacía el ajuste. Vuelve a intentarlo.', 'SUBSCRIPTION_LINK_CHANGED')
+    }
     return { auditData: { deltaDays, endDate: newEnd.toISOString() } }
   })
 }

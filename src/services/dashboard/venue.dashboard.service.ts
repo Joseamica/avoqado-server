@@ -28,11 +28,12 @@ import prisma from '../../utils/prismaClient'
 import { CreateVenueDto } from '../../schemas/dashboard/venue.schema'
 import { EnhancedCreateVenueBody } from '../../schemas/dashboard/cost-management.schema'
 import { Venue, AccountType, EntityType, VerificationStatus, VenueStatus, VenueOperationalRole, VenueType } from '@prisma/client'
-import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { generateSlug, validateSlug } from '../../utils/slugify'
 import logger from '../../config/logger'
 import { deleteVenueFolder, deleteFileFromStorage } from '../storage.service'
 import {
+  exigirSinObligacionViva,
   getOrCreateStripeCustomer,
   updatePaymentMethod,
   createTrialSubscriptions,
@@ -45,6 +46,8 @@ import {
   createTrialSetupIntent,
 } from '../stripe.service'
 import { getVenueBaseTier } from '../access/basePlan.service'
+import { assertSinCobroDobleAlSubir } from './venueFeature.dashboard.service'
+import { ventaSueltaAbierta } from '../access/ventaSuelta'
 import { notifySuperadminsNewKycSubmission } from '../superadmin/kycReview.service'
 import { cleanDemoData } from '../onboarding/demoCleanup.service'
 import { deleteOnboardingProgress } from '../onboarding/onboardingProgress.service'
@@ -349,6 +352,12 @@ export async function updateVenue(orgId: string, venueId: string, updateData: an
   return updatedVenue
 }
 
+const negocioConCuentaDeCobro = () =>
+  new ConflictError(
+    'Este negocio ya tiene una cuenta de cobro en Stripe: no se borra, se cierra (conserva su historial de cobros).',
+    'VENUE_HAS_BILLING_CUSTOMER',
+  )
+
 export async function deleteVenue(orgId: string, venueId: string, options?: { skipOrgCheck?: boolean }): Promise<void> {
   // Verify that the venue belongs to the organization (unless SUPERADMIN)
   const whereClause: any = { id: venueId }
@@ -373,30 +382,42 @@ export async function deleteVenue(orgId: string, venueId: string, options?: { sk
     )
   }
 
+  // 🔴 R0 (Codex, rondas 3 y 4): un negocio con cliente de Stripe puede tener cobros vivos que la base no ve
+  // (un pago ya hecho y aún no ligado, un checkout que se paga después). Preguntarle a Stripe deja siempre una
+  // ventana: un checkout abierto justo después. Por eso no se borra: se CIERRA, que conserva su historial.
+  // Ningún negocio borrable (LIVE_DEMO/TRIAL) lo tenía en producción al 21-sep.
+  if (existingVenue.stripeCustomerId) throw negocioConCuentaDeCobro()
+  //    Y los vínculos locales, TODOS (páginas estables), por si alguno apunta a otra cuenta.
+  let cursor: string | undefined
+  for (;;) {
+    const vinculos = await prisma.venueFeature.findMany({
+      where: { venueId, stripeSubscriptionId: { not: null } },
+      select: { id: true, stripeSubscriptionId: true },
+      orderBy: { id: 'asc' },
+      take: 100,
+      ...(cursor && { cursor: { id: cursor }, skip: 1 }),
+    })
+    for (const v of vinculos) {
+      await exigirSinObligacionViva(v.stripeSubscriptionId, 'borrar este negocio')
+    }
+    if (vinculos.length < 100) break
+    cursor = vinculos[vinculos.length - 1].id
+  }
+
   logger.info(`🗑️ Deleting demo venue: ${existingVenue.name} (${existingVenue.slug})`, {
     venueId,
     status: existingVenue.status, // Single source of truth
     isDemoVenue: isDemoVenue(existingVenue.status),
   })
 
-  logAction({
-    venueId,
-    action: 'VENUE_DELETED',
-    entity: 'Venue',
-    entityId: venueId,
-    data: { name: existingVenue.name, slug: existingVenue.slug },
-  })
-
-  // Delete all Firebase Storage files for this venue BEFORE deleting database records
-  // This is a "best effort" deletion - we don't want to block venue deletion if storage cleanup fails
-  logger.info(`🗑️  Deleting Firebase Storage files for venue: ${existingVenue.slug}`)
-  await deleteVenueFolder(existingVenue.slug).catch(error => {
-    logger.error(`❌ Failed to delete Firebase Storage folder for venue ${existingVenue.slug}`, error)
-    // Continue with database deletion even if storage cleanup fails
-  })
-
   // Use a transaction to delete all related data in the correct order
   await prisma.$transaction(async tx => {
+    // La fila del negocio queda BLOQUEADA hasta confirmar: quien quiera ligarle un cliente de Stripe
+    // (`getOrCreateStripeCustomer` lo reclama con un UPDATE condicional) espera, y ya no encuentra el negocio.
+    const [bloqueada] = await tx.$queryRaw<{ stripeCustomerId: string | null }[]>`
+      SELECT "stripeCustomerId" FROM "Venue" WHERE id = ${venueId} FOR UPDATE`
+    if (bloqueada?.stripeCustomerId) throw negocioConCuentaDeCobro()
+
     logger.info(`🗑️  Starting venue deletion for venueId: ${venueId}`)
 
     // 1. Delete OrderItems (depends on Orders)
@@ -643,6 +664,20 @@ export async function deleteVenue(orgId: string, venueId: string, options?: { sk
   })
 
   logger.info(`🎉 Venue deletion complete for venueId: ${venueId}`)
+
+  // Auditoría y archivos DESPUÉS de confirmar: un borrado rechazado no deja rastro falso ni archivos borrados.
+  logAction({
+    venueId,
+    action: 'VENUE_DELETED',
+    entity: 'Venue',
+    entityId: venueId,
+    data: { name: existingVenue.name, slug: existingVenue.slug },
+  })
+  // Best effort: la limpieza de Storage no revierte un borrado ya confirmado.
+  logger.info(`🗑️  Deleting Firebase Storage files for venue: ${existingVenue.slug}`)
+  await deleteVenueFolder(existingVenue.slug).catch(error => {
+    logger.error(`❌ Failed to delete Firebase Storage folder for venue ${existingVenue.slug}`, error)
+  })
 
   // Check if organization has any remaining venues
   const remainingVenues = await prisma.venue.count({
@@ -1062,7 +1097,14 @@ export async function convertDemoVenue(
   }
 
   // 🎯 STRIPE INTEGRATION: Create trial subscriptions for selected features
-  if (conversionData.selectedFeatures && conversionData.selectedFeatures.length > 0 && stripeCustomerId) {
+  // 🔴 Venta suelta CERRADA (founder, 21-sep): el asistente ya no manda sueltas, pero la API las aceptaba.
+  if (conversionData.selectedFeatures?.length && !ventaSueltaAbierta()) {
+    logger.warn('Conversión de demo: funciones sueltas pedidas pero la venta suelta está cerrada; no se activan', {
+      venueId,
+      features: conversionData.selectedFeatures,
+    })
+  }
+  if (conversionData.selectedFeatures && conversionData.selectedFeatures.length > 0 && stripeCustomerId && ventaSueltaAbierta()) {
     logger.info('🔄 Creating trial subscriptions for selected features', {
       venueId,
       featureCount: conversionData.selectedFeatures.length,
@@ -1609,6 +1651,10 @@ export async function createVenuePlanCheckoutSession(
   if (currentTier !== null) {
     throw new BadRequestError('Este venue ya tiene un plan activo. Para cambiar de plan, contacta a soporte.')
   }
+
+  // 🔴 Un negocio sin plan pudo haber comprado funciones sueltas; contratar el plan que las incluye
+  // mientras siguen cobrando = pagarlas dos veces (hallazgo #1, 21-sep). Antes de abrir el checkout.
+  await assertSinCobroDobleAlSubir(venueId, tierCode === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO')
 
   // If venue doesn't have Stripe customer, create one (same flow as billing-portal).
   let stripeCustomerId = venue.stripeCustomerId

@@ -20,12 +20,7 @@ import {
   getOrCreateStripeCustomer,
 } from '../services/stripe.service'
 import { resolvePlanNotificationTarget } from '../services/access/planNotification.service'
-import {
-  LEGACY_INTRO_OFFER,
-  STANDARD_PLAN_GROSS_CENTS,
-  TRIAL_DAYS,
-  isLegacyIntroEligible,
-} from '../services/access/planPricing.constants'
+import { LEGACY_INTRO_OFFER, STANDARD_PLAN_GROSS_CENTS, TRIAL_DAYS, isLegacyIntroEligible } from '../services/access/planPricing.constants'
 import emailService from '../services/email.service'
 import { generateMenuCSVTemplate, parseMenuCSV } from '../utils/menuCsvParser'
 import { validateCLABE } from '../utils/clabeValidator'
@@ -40,7 +35,7 @@ import { claimLaunchCampaign } from '../services/launchCampaigns/launchCampaignC
 import { LANDING_SLUG_RE } from '../services/launchCampaigns/launchCampaign.schema'
 import { optionalLaunchCampaignCode, utmSchema } from '../schemas/acquisition.schema'
 import logger from '../config/logger'
-import { BadRequestError, ConflictError, NotFoundError } from '../errors/AppError'
+import AppError, { BadRequestError, ConflictError, NotFoundError } from '../errors/AppError'
 import prisma from '../utils/prismaClient'
 
 /**
@@ -1339,6 +1334,15 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
           logger.error(`⚠️ Plan confirmation email failed for venue ${result.venue.id}`, mailErr)
         }
       } catch (planErr) {
+        // R0 ronda 5 (Codex): el negocio se borró mientras se creaba su cliente de Stripe. Eso NO es un
+        // tropiezo de Stripe: no hay negocio que dar por terminado. Se suelta la marca y se propaga.
+        if (planErr instanceof AppError && planErr.code === 'VENUE_NOT_FOUND') {
+          await prisma.onboardingProgress.updateMany({
+            where: { organizationId, completedAt: { not: null } },
+            data: { completedAt: null },
+          })
+          throw planErr
+        }
         logger.error(`⚠️ ${tierCode} subscription creation failed for venue ${result.venue.id}`, planErr)
       }
     }

@@ -3,7 +3,8 @@ import prisma from '@/utils/prismaClient'
 import { VenueStatus } from '@prisma/client'
 import { PRODUCTION_VENUE_STATUSES, OPERATIONAL_VENUE_STATUSES, DEMO_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import { logAction } from './activity-log.service'
-import { NotFoundError } from '@/errors/AppError'
+import AppError, { ConflictError, NotFoundError } from '@/errors/AppError'
+import { exigirSinObligacionViva } from '@/services/stripe.service'
 import { utcTs } from '@/utils/sqlDates'
 
 // ===== PRODUCTION VENUE FILTER =====
@@ -730,14 +731,24 @@ export async function disableFeatureForVenue(venueId: string, featureCode: strin
       throw new Error('Feature not found')
     }
 
-    // Update association to inactive if exists
-    await prisma.venueFeature.update({
+    // 🔴 R0 (Codex, 21-sep): apagar una función que Stripe sigue cobrando deja al negocio pagando sin
+    // acceso. Se rechaza; y la escritura va condicionada al vínculo que se comprobó.
+    const fila = await prisma.venueFeature.findUnique({
       where: { venueId_featureId: { venueId, featureId: feature.id } },
+      select: { id: true, stripeSubscriptionId: true },
+    })
+    if (!fila) throw new NotFoundError('La función no está activa en este negocio')
+    await exigirSinObligacionViva(fila.stripeSubscriptionId, 'desactivar esta función')
+    const { count } = await prisma.venueFeature.updateMany({
+      where: { id: fila.id, stripeSubscriptionId: fila.stripeSubscriptionId },
       data: {
         active: false,
         endDate: new Date(),
       },
     })
+    if (count === 0) {
+      throw new ConflictError('La función cambió mientras se desactivaba. Vuelve a intentarlo.', 'SUBSCRIPTION_LINK_CHANGED')
+    }
 
     logAction({
       venueId,
@@ -746,6 +757,8 @@ export async function disableFeatureForVenue(venueId: string, featureCode: strin
       entityId: venueId,
     })
   } catch (error) {
+    // Un rechazo con código (409 obligación viva, 503 Stripe sin contestar) llega tal cual a quien llamó.
+    if (error instanceof AppError) throw error
     logger.error('Error disabling feature for venue:', error)
     throw new Error('Failed to disable feature for venue')
   }
@@ -774,30 +787,53 @@ export async function grantTrialForVenue(venueId: string, featureCode: string, t
     const endDate = new Date(startDate)
     endDate.setDate(endDate.getDate() + trialDays)
 
-    // Upsert venue-feature association with trial end date
-    await prisma.venueFeature.upsert({
+    // 🔴 R0 (Codex, 21-sep): el trial local BORRABA el vínculo a Stripe. Sobre una suscripción que sigue
+    // cobrando, el negocio pagaba y al vencer el trial se quedaba sin acceso. Se rechaza; sobre un vínculo
+    // muerto (cancelada o inexistente) sí se limpia, condicionado a que siga siendo el que se comprobó.
+    const fila = await prisma.venueFeature.findUnique({
       where: { venueId_featureId: { venueId, featureId: feature.id } },
-      create: {
-        venueId,
-        featureId: feature.id,
-        active: true,
-        monthlyPrice: feature.monthlyPrice,
-        startDate,
-        endDate, // Trial expires on this date
-        // No stripeSubscriptionId = DB-only trial
-      },
-      update: {
-        active: true,
-        startDate,
-        endDate, // Trial expires on this date
-        monthlyPrice: feature.monthlyPrice,
-        // Clear any previous Stripe subscription
-        stripeSubscriptionId: null,
-        stripeSubscriptionItemId: null,
-        suspendedAt: null,
-        gracePeriodEndsAt: null,
-      },
+      select: { id: true, stripeSubscriptionId: true },
     })
+    await exigirSinObligacionViva(fila?.stripeSubscriptionId, 'conceder una prueba de esta función')
+    if (fila) {
+      const { count } = await prisma.venueFeature.updateMany({
+        where: { id: fila.id, stripeSubscriptionId: fila.stripeSubscriptionId },
+        data: {
+          active: true,
+          startDate,
+          endDate, // Trial expires on this date
+          monthlyPrice: feature.monthlyPrice,
+          stripeSubscriptionId: null,
+          stripeSubscriptionItemId: null,
+          suspendedAt: null,
+          gracePeriodEndsAt: null,
+          paymentFailureCount: 0,
+        },
+      })
+      if (count === 0) {
+        throw new ConflictError('La función cambió mientras se concedía la prueba. Vuelve a intentarlo.', 'SUBSCRIPTION_LINK_CHANGED')
+      }
+    } else {
+      await prisma.venueFeature
+        .create({
+          data: {
+            venueId,
+            featureId: feature.id,
+            active: true,
+            monthlyPrice: feature.monthlyPrice,
+            startDate,
+            endDate, // Trial expires on this date
+            // No stripeSubscriptionId = DB-only trial
+          },
+        })
+        .catch((error: any) => {
+          // Otra escritura creó la fila entre la lectura y aquí: no se pisa, se avisa.
+          if (error?.code === 'P2002') {
+            throw new ConflictError('La función cambió mientras se concedía la prueba. Vuelve a intentarlo.', 'SUBSCRIPTION_LINK_CHANGED')
+          }
+          throw error
+        })
+    }
 
     logger.info(`Granted ${trialDays}-day DB-only trial for ${featureCode} to venue ${venueId}`, {
       venueId,
@@ -808,6 +844,7 @@ export async function grantTrialForVenue(venueId: string, featureCode: string, t
 
     return { endDate }
   } catch (error) {
+    if (error instanceof AppError) throw error
     logger.error('Error granting trial for venue:', error)
     throw new Error('Failed to grant trial for venue')
   }
@@ -921,8 +958,7 @@ export async function setOrganizationGrandfathered(organizationId: string, value
  *   - 'PRO'     → enable PLAN_PRO   (and remove PLAN_PREMIUM if present)
  *   - 'PREMIUM' → enable PLAN_PREMIUM (and remove PLAN_PRO if present)
  *   - 'FREE'    → disable BOTH PLAN_* features (drop to Free)
- * After this, getPlanState derives the right tier (PRO/PREMIUM) or null (Free). Reuses the
- * existing enable/disable helpers (which upsert with endDate null and log their own actions).
+ * After this, getPlanState derives the right tier (PRO/PREMIUM) or null (Free).
  */
 export async function assignCompPlan(venueId: string, tier: PlanAdminTier) {
   const { getPlanState } = await import('./planState.service')
@@ -930,18 +966,85 @@ export async function assignCompPlan(venueId: string, tier: PlanAdminTier) {
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { id: true } })
   if (!venue) throw new Error('Venue not found')
 
-  if (tier === 'FREE') {
-    // Drop to Free: disable whichever PLAN_* features are currently active (idempotent).
-    await disablePlanCodeIfActive(venueId, 'PLAN_PRO')
-    await disablePlanCodeIfActive(venueId, 'PLAN_PREMIUM')
-  } else {
-    const targetCode = TIER_TO_PLAN_CODE[tier]
-    const otherCode = targetCode === 'PLAN_PRO' ? 'PLAN_PREMIUM' : 'PLAN_PRO'
-    // Remove the other tier first so the two never coexist, then comp the target (endDate null).
-    await disablePlanCodeIfActive(venueId, otherCode)
-    await enableFeatureForVenue(venueId, targetCode)
+  const planes = await prisma.feature.findMany({
+    where: { code: { in: ['PLAN_PRO', 'PLAN_PREMIUM'] } },
+    select: { id: true, code: true, monthlyPrice: true },
+    take: 2,
+  })
+  const destino = tier === 'FREE' ? null : planes.find(p => p.code === TIER_TO_PLAN_CODE[tier])
+  if (tier !== 'FREE' && !destino) throw new Error('Feature not found')
+
+  // 🔴 R0 (Codex, rondas 3 y 4): una cortesía es «sin Stripe». Se leen las filas de los DOS tiers —también
+  // inactivas, que pueden recuperarse— y se valida cada vínculo ANTES de modificar nada. Las escrituras van
+  // contra ESE vínculo (no contra una relectura) y todas en UNA transacción: si el destino choca, el otro
+  // tier no queda apagado.
+  const leerFilas = (db: Pick<typeof prisma, 'venueFeature'>) =>
+    db.venueFeature.findMany({
+      where: { venueId, featureId: { in: planes.map(p => p.id) } },
+      select: { id: true, featureId: true, active: true, stripeSubscriptionId: true },
+      orderBy: { featureId: 'asc' },
+      take: 2, // una fila por plan como máximo (única por venue y feature)
+    })
+  const filas = await leerFilas(prisma)
+  for (const f of filas) {
+    await exigirSinObligacionViva(f.stripeSubscriptionId, 'asignar un plan de cortesía')
   }
 
+  const cambio = () =>
+    new ConflictError('El plan cambió mientras se asignaba la cortesía. Vuelve a intentarlo.', 'SUBSCRIPTION_LINK_CHANGED')
+  const apagadas: string[] = []
+  await prisma.$transaction(async tx => {
+    // R0 ronda 4 (Codex): dos cortesías simultáneas a tiers distintos leían «no hay filas», creaban cada
+    // una su destino y ninguna apagaba la otra. El candado de la fila del negocio las serializa, y bajo él
+    // se relee: si el plan ya no es el que se validó (una fila nueva, otro vínculo, otro `active`), 409.
+    await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR UPDATE`
+    const vigentes = await leerFilas(tx)
+    const huella = (xs: typeof filas) => JSON.stringify(xs.map(x => [x.id, x.featureId, x.active, x.stripeSubscriptionId]))
+    if (huella(vigentes) !== huella(filas)) throw cambio()
+
+    for (const f of filas) {
+      if (f.featureId === destino?.id || !f.active) continue
+      const { count } = await tx.venueFeature.updateMany({
+        where: { id: f.id, stripeSubscriptionId: f.stripeSubscriptionId, active: true },
+        data: { active: false, endDate: new Date() },
+      })
+      if (count === 0) throw cambio()
+      apagadas.push(f.id)
+    }
+    if (!destino) return
+    // El vínculo del destino ya se comprobó que no cobra: se limpia junto con la cobranza, o la fila
+    // seguiría apuntando a una suscripción muerta (y un webhook tardío de ella la tocaría).
+    const cortesia = {
+      active: true,
+      endDate: null,
+      monthlyPrice: destino.monthlyPrice,
+      stripeSubscriptionId: null,
+      stripeSubscriptionItemId: null,
+      suspendedAt: null,
+      gracePeriodEndsAt: null,
+      paymentFailureCount: 0,
+    }
+    const fila = filas.find(f => f.featureId === destino.id)
+    if (fila) {
+      const { count } = await tx.venueFeature.updateMany({
+        where: { id: fila.id, stripeSubscriptionId: fila.stripeSubscriptionId },
+        data: cortesia,
+      })
+      if (count === 0) throw cambio()
+      return
+    }
+    try {
+      await tx.venueFeature.create({ data: { venueId, featureId: destino.id, startDate: new Date(), ...cortesia } })
+    } catch (error: any) {
+      if (error?.code === 'P2002') throw cambio()
+      throw error
+    }
+  })
+
+  // Auditoría DESPUÉS de confirmar: una transacción revertida no deja rastro de un cambio que no ocurrió.
+  for (const id of apagadas) {
+    logAction({ venueId, action: 'FEATURE_DISABLED_BY_ADMIN', entity: 'VenueFeature', entityId: id })
+  }
   logAction({
     venueId,
     action: 'PLAN_COMP_ASSIGNED',
@@ -952,19 +1055,6 @@ export async function assignCompPlan(venueId: string, tier: PlanAdminTier) {
 
   logger.info(`Comp plan ${tier} assigned to venue ${venueId} (no Stripe, no expiry)`)
   return getPlanState(venueId)
-}
-
-/**
- * Disable a PLAN_* feature ONLY if the venue currently has an active row for it — avoids
- * disableFeatureForVenue's update() throwing when no VenueFeature row exists (it updates by
- * the composite unique key, which fails if the row was never created).
- */
-async function disablePlanCodeIfActive(venueId: string, planCode: 'PLAN_PRO' | 'PLAN_PREMIUM'): Promise<void> {
-  const existing = await prisma.venueFeature.findFirst({
-    where: { venueId, active: true, feature: { code: planCode } },
-    select: { id: true },
-  })
-  if (existing) await disableFeatureForVenue(venueId, planCode)
 }
 
 /**

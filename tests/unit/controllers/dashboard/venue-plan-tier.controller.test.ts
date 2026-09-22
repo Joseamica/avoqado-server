@@ -11,13 +11,15 @@
  */
 jest.mock('@/services/access/basePlan.service', () => ({
   getVenuePlanInfo: jest.fn(),
+  getVenueGrantedFeatureCodes: jest.fn(),
 }))
 
 import type { NextFunction, Request, Response } from 'express'
-import { getVenuePlanInfo } from '@/services/access/basePlan.service'
+import { getVenueGrantedFeatureCodes, getVenuePlanInfo } from '@/services/access/basePlan.service'
 import { getVenuePlanTier } from '@/controllers/dashboard/venue.dashboard.controller'
 
 const mockGetVenuePlanInfo = getVenuePlanInfo as jest.Mock
+const mockGranted = getVenueGrantedFeatureCodes as jest.Mock
 
 function makeRes(): Response {
   const res: Record<string, jest.Mock> = {}
@@ -28,7 +30,10 @@ function makeRes(): Response {
 
 const makeReq = (venueId: string) => ({ params: { venueId } }) as unknown as Request<{ venueId: string }>
 
-beforeEach(() => jest.clearAllMocks())
+beforeEach(() => {
+  jest.clearAllMocks()
+  mockGranted.mockResolvedValue([])
+})
 
 describe('getVenuePlanTier controller', () => {
   it('returns ONLY the gating signal { tier, grandfathered, exempt } from getVenuePlanInfo', async () => {
@@ -40,7 +45,7 @@ describe('getVenuePlanTier controller', () => {
 
     expect(mockGetVenuePlanInfo).toHaveBeenCalledWith('venue-1')
     expect(res.status).toHaveBeenCalledWith(200)
-    expect(res.json).toHaveBeenCalledWith({ success: true, data: plan })
+    expect(res.json).toHaveBeenCalledWith({ success: true, data: { ...plan, grantedFeatureCodes: [] } })
     // The response must NOT carry billing detail (price / Stripe ids) — that's GET /plan's job.
     const body = (res.json as jest.Mock).mock.calls[0][0]
     expect(body.data).not.toHaveProperty('price')
@@ -53,7 +58,10 @@ describe('getVenuePlanTier controller', () => {
 
     await getVenuePlanTier(makeReq('mindform'), res, jest.fn() as unknown as NextFunction)
 
-    expect(res.json).toHaveBeenCalledWith({ success: true, data: { tier: 'FREE', grandfathered: true, exempt: true } })
+    expect(res.json).toHaveBeenCalledWith({
+      success: true,
+      data: { tier: 'FREE', grandfathered: true, exempt: true, grantedFeatureCodes: [] },
+    })
   })
 
   it('forwards service errors to next() (never throws)', async () => {
@@ -66,5 +74,17 @@ describe('getVenuePlanTier controller', () => {
 
     expect(next).toHaveBeenCalledWith(err)
     expect(res.status).not.toHaveBeenCalled()
+  })
+
+  it('🔴 lleva los CÓDIGOS de las funciones sueltas pagadas, para que un empleado no vea «contrátala» sobre algo ya pagado', async () => {
+    mockGetVenuePlanInfo.mockResolvedValue({ tier: 'FREE', grandfathered: false, exempt: false })
+    mockGranted.mockResolvedValue(['INVENTORY_TRACKING'])
+    const res = makeRes()
+
+    await getVenuePlanTier(makeReq('venue-1'), res, jest.fn() as unknown as NextFunction)
+
+    const body = (res.json as jest.Mock).mock.calls[0][0]
+    expect(body.data.grantedFeatureCodes).toEqual(['INVENTORY_TRACKING'])
+    expect(body.data).not.toHaveProperty('price')
   })
 })

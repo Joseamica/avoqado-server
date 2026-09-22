@@ -49,6 +49,12 @@ services:
       # sesión del cajero a media venta. Generar con: openssl rand -hex 32
       - key: SESSION_SUCCESSOR_ENC_KEY
         sync: false
+      # Configuración del Billing Portal de Stripe SIN «cambiar suscripción» (R0 del rediseño de la compra,
+      # 21-sep-2026). Sin ella, el portal usa la de la cuenta y un cliente podría cambiar de plan saltándose
+      # la coordinación de la compra. Se crea UNA vez en Stripe (Settings → Billing → Customer portal) y su
+      # id (bpc_…) se teclea aquí.
+      - key: STRIPE_BILLING_PORTAL_CONFIGURATION_ID
+        sync: false
       - key: RABBITMQ_URL
         sync: false
       - key: OPENAI_API_KEY
@@ -123,6 +129,12 @@ services:
       # 🔴 Sin ella, un reintento del refresco por red intermitente se lee como robo y REVOCA la
       # sesión del cajero a media venta. Generar con: openssl rand -hex 32
       - key: SESSION_SUCCESSOR_ENC_KEY
+        sync: false
+      # Configuración del Billing Portal de Stripe SIN «cambiar suscripción» (R0 del rediseño de la compra,
+      # 21-sep-2026). Sin ella, el portal usa la de la cuenta y un cliente podría cambiar de plan saltándose
+      # la coordinación de la compra. Se crea UNA vez en Stripe (Settings → Billing → Customer portal) y su
+      # id (bpc_…) se teclea aquí.
+      - key: STRIPE_BILLING_PORTAL_CONFIGURATION_ID
         sync: false
       - key: RABBITMQ_URL
         sync: false

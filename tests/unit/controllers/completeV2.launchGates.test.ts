@@ -74,6 +74,7 @@ import * as venueCreationService from '../../../src/services/onboarding/venueCre
 import { resolvePlanNotificationTarget } from '../../../src/services/access/planNotification.service'
 import emailService from '../../../src/services/email.service'
 import prisma from '../../../src/utils/prismaClient'
+import AppError from '../../../src/errors/AppError'
 
 const VENUE = { id: 'venue_1', slug: 'bar-test', name: 'Bar Test' }
 
@@ -130,7 +131,6 @@ function primeHappyPath(planOverrides: Record<string, any> = {}, targetOverrides
     ...targetOverrides,
   })
 }
-
 
 describe('completeV2Onboarding — candados del lanzamiento (S7) y fugas del legacy (S9)', () => {
   const ORIGINAL_FLAG = process.env.ENABLE_VENUE_BASE_SUBSCRIPTION
@@ -243,5 +243,37 @@ describe('completeV2Onboarding — candados del lanzamiento (S7) y fugas del leg
       'bar@test.com',
       expect.objectContaining({ introAmountCents: undefined, nextChargeAmountCents: 1158840 }),
     )
+  })
+
+  it('🔴 si el negocio desaparece mientras se crea su cliente de Stripe: 404, se suelta la marca y NO se da el alta por terminada', async () => {
+    // R0 ronda 5 (Codex): `getOrCreateStripeCustomer` ya no devuelve un cliente huérfano, pero este
+    // `catch` se tragaba su 404 y respondía 201 con un negocio borrado.
+    conProgreso({}, { payNow: true })
+    ;(stripeService.getOrCreateStripeCustomer as jest.Mock).mockRejectedValueOnce(
+      new AppError('El negocio venue_1 ya no existe.', 404, true, 'VENUE_NOT_FOUND'),
+    )
+    const res = buildRes()
+    const next = jest.fn() as unknown as NextFunction
+
+    await completeV2Onboarding(buildReq() as Request, res as Response, next)
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 404, code: 'VENUE_NOT_FOUND' }))
+    expect(res.status).not.toHaveBeenCalledWith(201)
+    expect(stripeService.createPlanSubscription).not.toHaveBeenCalled()
+    expect(prisma.organization.update).not.toHaveBeenCalled()
+    expect(prisma.onboardingProgress.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ organizationId: 'org_1' }), data: { completedAt: null } }),
+    )
+  })
+
+  it('un tropiezo de Stripe cualquiera sigue sin bloquear el alta (el negocio existe)', async () => {
+    conProgreso({}, { payNow: true })
+    ;(stripeService.getOrCreateStripeCustomer as jest.Mock).mockRejectedValueOnce(new Error('socket hang up'))
+    const res = buildRes()
+
+    await completeV2Onboarding(buildReq() as Request, res as Response, jest.fn() as unknown as NextFunction)
+
+    expect(res.status).toHaveBeenCalledWith(201)
+    expect(prisma.organization.update).toHaveBeenCalled()
   })
 })
