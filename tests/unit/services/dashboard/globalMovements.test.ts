@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client'
 import { prismaMock } from '../../../__helpers__/setup'
 import { getGlobalMovements } from '@/services/dashboard/productInventory.service'
 
@@ -131,7 +132,10 @@ describe('getGlobalMovements — el historial no puede mentir', () => {
       productMovement({
         type: 'LOSS',
         wasteReportId: 'clwaste1',
-        unitCost: { toNumber: () => 4 },
+        // Prisma entrega `Decimal` en `quantity` y `unitCost`; el Historial multiplica en Decimal
+        // (`unitCost.mul(quantity)`), así que un objeto con sólo `toNumber` ya no representa lo real.
+        quantity: new Prisma.Decimal(-10),
+        unitCost: new Prisma.Decimal(4),
         wasteReport: report({ productMovements: [{ id: 'mov-prod-1' }] }),
       }),
     ] as any)
