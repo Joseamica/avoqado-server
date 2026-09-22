@@ -374,6 +374,20 @@ test('producto negativo queda intacto', async () => {
   expect(await prisma.inventoryMovement.count({ where: { wasteReportId: result.reportId } })).toBe(0)
 })
 
+test('producto con existencia positiva: descuenta hasta la existencia y el resto queda sin registrar', async () => {
+  const item = await product(3, 10)
+  const result = await logWaste(venueId, staffId, request('PRODUCT', item.id, 5))
+
+  // Sin el tope, adjustInventoryStockInTx llevaría 3 → −2 y respondería 400 «Insufficient stock».
+  expect(result).toMatchObject({ declared: '5', deducted: '3', unrecorded: '2' })
+  expect(await productStock(item.id)).toBe('0')
+  const report = await prisma.inventoryWasteReport.findUniqueOrThrow({ where: { id: result.reportId } })
+  expect(report.costState).toBe('PARTIAL')
+  expect(report.costImpact?.toString()).toBe('30')
+  const movement = await prisma.inventoryMovement.findFirstOrThrow({ where: { wasteReportId: result.reportId } })
+  expect(movement.quantity.toString()).toBe('-3')
+})
+
 test('FEFO consume el vencimiento anterior aunque su recepción sea posterior', async () => {
   const item = await raw(10)
   const older = await batch(item.id, 5, 2, new Date('2026-01-01T00:00:00Z'), new Date('2026-12-01T00:00:00Z'))
@@ -433,7 +447,7 @@ test.each(['0', '0.0001', '1.0001', '1000000000', 'NaN', 'Infinity'])('rechaza c
   expect(await prisma.inventoryWasteReport.count({ where: { venueId } })).toBe(0)
 })
 
-test('costo de lote fuera de numeric(10,4) revierte toda la operación', async () => {
+test('costo de lote fuera de numeric(10,4) se rechaza sin efectos', async () => {
   const item = await raw(2)
   const lot = await batch(item.id, 2, 600000)
 
@@ -480,4 +494,151 @@ test('Sin especificar fuera del dashboard se rechaza sin efectos', async () => {
   expect(await prisma.rawMaterialMovement.count({ where: { venueId } })).toBe(0)
   const stored = await prisma.stockBatch.findUniqueOrThrow({ where: { id: lot.id } })
   expect(stored.remainingQuantity.toString()).toBe('5')
+})
+
+test('si la última escritura falla, la merma ya descontada se revierte entera', async () => {
+  const ingredient = await raw(5)
+  const lot = await batch(ingredient.id, 2, 3)
+  const item = await product(4, 10)
+
+  const suffix = randomUUID().replace(/-/g, '')
+  const functionName = `waste_rollback_${suffix}`
+  const triggerName = `waste_rollback_trigger_${suffix}`
+
+  // La auditoría es la ÚLTIMA escritura de la tx: fallar ahí prueba que lotes y existencia ya
+  // descontados se deshacen. Acotado a este venue; los literales vienen del propio test (cuid).
+  await prisma.$executeRawUnsafe(`
+    CREATE FUNCTION "${functionName}"() RETURNS trigger LANGUAGE plpgsql AS $body$
+    BEGIN
+      IF NEW.action = 'INVENTORY_WASTE_LOGGED' AND NEW."venueId" = '${venueId}' THEN
+        RAISE EXCEPTION 'merma-rollback-probe';
+      END IF;
+      RETURN NEW;
+    END
+    $body$
+  `)
+  await prisma.$executeRawUnsafe(`
+    CREATE TRIGGER "${triggerName}"
+    BEFORE INSERT ON "ActivityLog"
+    FOR EACH ROW EXECUTE FUNCTION "${functionName}"()
+  `)
+
+  try {
+    // Ingrediente: un lote (2) y el hueco sin lotes (2) — los dos caminos de escritura.
+    await expect(logWaste(venueId, staffId, request('RAW_MATERIAL', ingredient.id, 4))).rejects.toThrow('merma-rollback-probe')
+    await expect(logWaste(venueId, staffId, request('PRODUCT', item.id, 3))).rejects.toThrow('merma-rollback-probe')
+  } finally {
+    await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS "${triggerName}" ON "ActivityLog"`)
+    await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS "${functionName}"()`)
+  }
+
+  expect(await prisma.inventoryWasteReport.count({ where: { venueId } })).toBe(0)
+  expect(await prisma.rawMaterialMovement.count({ where: { venueId } })).toBe(0)
+  expect(await prisma.inventoryMovement.count({ where: { inventory: { venueId } } })).toBe(0)
+  expect(await prisma.activityLog.count({ where: { venueId } })).toBe(0)
+  expect(await rawStock(ingredient.id)).toBe('5')
+  expect(await productStock(item.id)).toBe('4')
+  const stored = await prisma.stockBatch.findUniqueOrThrow({ where: { id: lot.id } })
+  expect(stored.remainingQuantity.toString()).toBe('2')
+  expect(stored.status).toBe('ACTIVE')
+})
+
+test('createdAt lo pone el servidor; clientOccurredAt sólo se guarda', async () => {
+  const item = await raw(5)
+  await batch(item.id, 2, 3)
+  const clientOccurredAt = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000)
+
+  const before = new Date()
+  const result = await logWaste(venueId, staffId, request('RAW_MATERIAL', item.id, 4, { clientOccurredAt }))
+  const after = new Date()
+
+  const report = await prisma.inventoryWasteReport.findUniqueOrThrow({ where: { id: result.reportId } })
+  expect(report.createdAt.getTime()).toBeGreaterThanOrEqual(before.getTime())
+  expect(report.createdAt.getTime()).toBeLessThanOrEqual(after.getTime())
+  expect(report.clientOccurredAt?.toISOString()).toBe(clientOccurredAt.toISOString())
+
+  const movements = await prisma.rawMaterialMovement.findMany({ where: { wasteReportId: report.id } })
+  expect(movements).toHaveLength(2)
+  expect(movements.every(row => row.createdAt.getTime() === report.createdAt.getTime())).toBe(true)
+  const log = await prisma.activityLog.findFirstOrThrow({ where: { venueId, entityId: report.id } })
+  expect(log.createdAt.getTime()).toBe(report.createdAt.getTime())
+})
+
+test('merma de producto con costo recibido no toca Product.cost; el movimiento guarda la foto', async () => {
+  const item = await product(5, 12)
+  const result = await logWaste(venueId, staffId, request('PRODUCT', item.id, 2, { source: 'DASHBOARD', unitCost: '15.25' }))
+
+  const stored = await prisma.product.findUniqueOrThrow({ where: { id: item.id } })
+  expect(stored.cost?.toString()).toBe('12')
+  const movement = await prisma.inventoryMovement.findFirstOrThrow({ where: { wasteReportId: result.reportId } })
+  expect(movement.unitCost?.toString()).toBe('15.25')
+  const report = await prisma.inventoryWasteReport.findUniqueOrThrow({ where: { id: result.reportId } })
+  expect(report.unitCostSnapshot?.toString()).toBe('15.25')
+  expect(movement.createdAt.getTime()).toBe(report.createdAt.getTime())
+})
+
+test('los movimientos hijos llevan motivo legible, autor, referencia y su tipo', async () => {
+  const ingredient = await raw(5)
+  await batch(ingredient.id, 2, 3)
+  const rawResult = await logWaste(
+    venueId,
+    staffId,
+    request('RAW_MATERIAL', ingredient.id, 4, { reasonCode: 'SPOILED', note: 'Olía mal', reference: 'REF-9' }),
+  )
+  const rawMovements = await prisma.rawMaterialMovement.findMany({ where: { wasteReportId: rawResult.reportId } })
+  expect(rawMovements).toHaveLength(2)
+  expect(rawMovements.every(row => row.type === 'SPOILAGE' && row.createdBy === staffId && row.reference === 'REF-9')).toBe(true)
+  expect(rawMovements.find(row => row.batchId !== null)?.reason).toBe('Se echó a perder: Olía mal')
+  expect(rawMovements.find(row => row.batchId === null)?.reason).toBe('Se echó a perder: Olía mal (ajuste directo, sin lotes)')
+
+  const item = await product(5)
+  const productResult = await logWaste(
+    venueId,
+    staffId,
+    request('PRODUCT', item.id, 1, { reasonCode: 'DROPPED', note: 'Se rompió', reference: 'REF-10' }),
+  )
+  const productMovement = await prisma.inventoryMovement.findFirstOrThrow({ where: { wasteReportId: productResult.reportId } })
+  expect(productMovement).toMatchObject({ type: 'LOSS', reason: 'Se cayó / derramó: Se rompió', createdBy: staffId, reference: 'REF-10' })
+
+  // Sin nota, el motivo es sólo la etiqueta.
+  const noNote = await logWaste(venueId, staffId, request('PRODUCT', item.id, 1, { reasonCode: 'EXPIRED', note: undefined }))
+  const noNoteMovement = await prisma.inventoryMovement.findFirstOrThrow({ where: { wasteReportId: noNote.reportId } })
+  expect(noNoteMovement.reason).toBe('Caducó')
+})
+
+test('unitCost null es AUSENTE: usa Product.cost y recupera el mismo folio que sin el campo', async () => {
+  const item = await product(5, 12)
+  const input = request('PRODUCT', item.id, 2, { source: 'DASHBOARD', unitCost: null })
+
+  // El null de JSON no es una cantidad: antes respondía 422 QUANTITY_TOO_LARGE.
+  const first = await logWaste(venueId, staffId, input)
+  const report = await prisma.inventoryWasteReport.findUniqueOrThrow({ where: { id: first.reportId } })
+  expect(report.unitCost).toBeNull()
+  expect(report.unitCostSnapshot?.toString()).toBe('12')
+  expect(report.costImpact?.toString()).toBe('24')
+
+  const withoutField: WasteInput = { ...input }
+  delete withoutField.unitCost
+  expect(await logWaste(venueId, staffId, withoutField)).toEqual(first)
+  expect(await productStock(item.id)).toBe('3')
+})
+
+test('la auditoría dice qué artículo, motivo y unidad se mermaron', async () => {
+  const ingredient = await raw(5)
+  const rawResult = await logWaste(venueId, staffId, request('RAW_MATERIAL', ingredient.id, 2, { reasonCode: 'SPOILED', note: undefined }))
+  const item = await product(5)
+  const productResult = await logWaste(venueId, staffId, request('PRODUCT', item.id, 1, { reasonCode: 'DROPPED', note: undefined }))
+
+  const rawLog = await prisma.activityLog.findFirstOrThrow({ where: { venueId, entityId: rawResult.reportId } })
+  expect(rawLog).toMatchObject({ action: 'INVENTORY_WASTE_LOGGED', entity: 'InventoryWasteReport', staffId, actorStaffId: staffId })
+  expect(rawLog.data).toMatchObject({
+    itemType: 'RAW_MATERIAL',
+    itemId: ingredient.id,
+    reasonCode: 'SPOILED',
+    unit: 'PIECE',
+    declared: '2',
+  })
+
+  const productLog = await prisma.activityLog.findFirstOrThrow({ where: { venueId, entityId: productResult.reportId } })
+  expect(productLog.data).toMatchObject({ itemType: 'PRODUCT', itemId: item.id, reasonCode: 'DROPPED', unit: 'UNIT', declared: '1' })
 })

@@ -27,7 +27,8 @@ export interface WasteInput {
   source: WasteSource
   note?: string
   reference?: string
-  unitCost?: string | number | Prisma.Decimal
+  // null = ausente, igual que omitirlo: es lo que manda un JSON con el campo vacío.
+  unitCost?: string | number | Prisma.Decimal | null
   supplier?: string
   clientOccurredAt?: Date
 }
@@ -139,7 +140,8 @@ export function prepareWaste(actorStaffId: string, input: WasteInput) {
     throw new ValidationError('Fecha inválida.', 'INVALID_WASTE_PAYLOAD')
   }
 
-  const suppliedCost = input.unitCost === undefined ? null : decimal(input.unitCost)
+  // `== null` y no `=== undefined`: un null de JSON no es una cantidad (familia del reembolso del 11-sep).
+  const suppliedCost = input.unitCost == null ? null : decimal(input.unitCost)
   const unitCost = suppliedCost === null ? null : checkedMoney(suppliedCost, 8, 2)
   const reference = input.reference ?? null
   const supplier = input.supplier ?? null
@@ -295,6 +297,11 @@ async function audit(
       entityId: report.id,
       createdAt: report.createdAt,
       data: {
+        // La pantalla de auditoría del dueño sólo lee ActivityLog: tiene que decir QUÉ se mermó.
+        itemType: report.itemType,
+        itemId: report.rawMaterialId ?? report.productId,
+        reasonCode: report.reasonCode,
+        unit: report.unit,
         source: report.source,
         declared: report.declaredQuantity?.toString() ?? null,
         deducted: report.deductedQuantity.toString(),
