@@ -15,7 +15,7 @@
  * el evento queda FAILED para reconciliar con el comercio; al revés, un pedido perfectamente
  * ingerido se cancela solo y el cliente se queda sin comida.
  */
-import { DeliveryChannelStatus, DeliveryOrderEventStatus, DeliveryProvider, OrderAcceptanceMode, OrderStatus } from '@prisma/client'
+import { DeliveryOrderEventStatus, DeliveryProvider, OrderAcceptanceMode, OrderStatus } from '@prisma/client'
 
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
@@ -27,6 +27,7 @@ import { ingestDeliveryOrder } from '../../core/deliveryOrderIngestion.service'
 import { markEventResult } from '../../core/deliveryWebhookEvent.service'
 import { esEvidenciaHttp } from '../../core/respondToDeliveryOrder.service'
 import { reconcileDeliveryOrderFromProvider } from '../../core/deliveryReconciliation.service'
+import { revocarTienda } from '../../core/deliveryStoreClaim.service'
 import { uberAdapter } from './uber.adapter'
 import { processUberReport } from './uber.reportProcessor'
 
@@ -149,37 +150,20 @@ export async function processUberEvent(eventRowId: string, deps: UberProcessDeps
   // que siempre van a fallar (es exactamente el síntoma del canal muerto de "La Ribera":
   // 401 al leer, 403 en pos_data, y en Avoqado figuraba ACTIVE).
   if (tipo === 'STORE_STATE') {
-    if (evento.channelLink) {
-      const quitada = identidad.eventType === 'store.deprovisioned'
-      if (quitada) {
-        // 🔴 La revocación PREVALECE (spec §4.2, [C-3][N-16]): se borra el consentimiento y la
-        // versión sube EN LA MISMA sentencia (`+1` atómico, nunca leer-y-escribir). Una activación
-        // que ya pasó `pos_data` finaliza con CAS sobre la versión reclamada: con esto, no pasa.
-        await prisma.deliveryChannelLink.update({
-          where: { id: evento.channelLink.id },
-          data: {
-            status: DeliveryChannelStatus.DISABLED,
-            ownerAuthorizedAt: null,
-            ownerAuthorizedEnvironment: null,
-            ownerAuthorizedStoreId: null,
-            ownerAuthorizedClientId: null,
-            ownerAuthorizedByIntentId: null,
-            revocationVersion: { increment: 1 },
-          },
-        })
-        logger.error('🚨 [Uber] el comercio QUITÓ el acceso a esta tienda — canal deshabilitado', {
-          eventRowId,
-          linkId: evento.channelLink.id,
-          venueId: evento.channelLink.venueId,
-          storeId: identidad.storeId,
-        })
-      } else {
-        logger.info('🏪 [Uber] la tienda cambió de estado del lado del proveedor', {
-          eventRowId,
-          tipo: identidad.eventType,
-          linkId: evento.channelLink.id,
-        })
-      }
+    if (identidad.eventType === 'store.deprovisioned' && identidad.storeId) {
+      // 🔴 La revocación PREVALECE (spec §4.2, [C-3][N-16]) y se registra POR TIENDA aunque todavía no
+      // exista el vínculo (P1-3): antes, sin vínculo el evento se tiraba y una conexión en curso
+      // re-otorgaba la tienda al crearla. El vínculo se busca AHORA, no el que había al recibir el aviso.
+      const deshabilitados = await revocarTienda(identidad.storeId)
+      const datos = { eventRowId, storeId: identidad.storeId, linkIds: deshabilitados.map(l => l.id), venueIds: deshabilitados.map(l => l.venueId) }
+      if (deshabilitados.length) logger.error('🚨 [Uber] el comercio QUITÓ el acceso a esta tienda — canal deshabilitado', datos)
+      else logger.warn('🏪 [Uber] revocación de una tienda sin vínculo — registrada para que una conexión en curso no la reactive', datos)
+    } else if (evento.channelLink) {
+      logger.info('🏪 [Uber] la tienda cambió de estado del lado del proveedor', {
+        eventRowId,
+        tipo: identidad.eventType,
+        linkId: evento.channelLink.id,
+      })
     }
     await markEventResult(eventRowId, DeliveryOrderEventStatus.PROCESSED)
     return { outcome: 'STORE_STATE' }

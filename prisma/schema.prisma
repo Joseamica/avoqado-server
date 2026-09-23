@@ -6348,6 +6348,20 @@ model DeliveryConnectIntent {
   @@index([venueId])
 }
 
+/// Revocaciones de una tienda del proveedor, POR TIENDA y no por vínculo (spec §4.2; P1-3 de la
+/// auditoría final). Un `store.deprovisioned` de una tienda que todavía NO tiene vínculo no se guardaba
+/// en ningún lado: la tienda nacía después con `revocationVersion` 0 y se re-otorgaba sin consentimiento.
+/// `version` sube con CADA revocación (con o sin vínculo); la reclamación y la finalización de §4.3
+/// la comparan contra la congelada al consentir. `externalLocationId` va normalizado (trim + minúsculas).
+model DeliveryStoreRevocation {
+  provider           DeliveryProvider
+  externalLocationId String
+  version            Int              @default(0)
+  revokedAt          DateTime?
+
+  @@id([provider, externalLocationId])
+}
+
 /// Solicitud de un venue para activar delivery. El dueño la crea (self-serve,
 /// expresa intención); ops la avanza al conectar el canal real con Deliverect.
 /// Distinta de DeliveryChannelLink (la conexión técnica real).

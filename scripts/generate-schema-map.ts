@@ -314,6 +314,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   DeliveryActivationRequest: 'Orders, KDS & Cash',
   DeliveryLineAction: 'Orders, KDS & Cash',
   DeliveryConnectIntent: 'Orders, KDS & Cash',
+  DeliveryStoreRevocation: 'Orders, KDS & Cash',
   PosSyncIntent: 'Orders, KDS & Cash',
   // Vales por área (AREA_TICKETS): cuenta compartida entre áreas emisoras + entrega.
   // Cuelgan de Order/OrderItem/PrintStation, por eso van con sus hermanos de orden.

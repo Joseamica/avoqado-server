@@ -82,6 +82,21 @@ describe('Activación por tienda: reclamar antes del HTTP, finalizar por CAS (Ta
     expect((await processUberEvent(ev.id)).outcome).toBe('STORE_STATE')
   }
 
+  /** Igual, pero de una tienda que todavía NO tiene vínculo: el webhook la guarda con link y venue nulos. */
+  async function deprovisionarSinVinculo(store: string) {
+    const eventId = `t18-deprov-sinlink-${store}-${Date.now()}`
+    const ev = await prisma.deliveryOrderEvent.create({
+      data: {
+        provider: DeliveryProvider.UBER_EATS,
+        externalEventId: eventId,
+        eventType: 'store.deprovisioned',
+        payload: { event_id: eventId, event_type: 'store.deprovisioned', meta: { user_id: store, resource_id: store } },
+        dedupKey: `UBER_EATS:${eventId}`,
+      },
+    })
+    expect((await processUberEvent(ev.id)).outcome).toBe('STORE_STATE')
+  }
+
   beforeAll(async () => {
     for (const k of Object.keys(ENV_PRUEBA)) envOriginal[k] = (env as Record<string, unknown>)[k]
     Object.assign(env, ENV_PRUEBA)
@@ -117,6 +132,7 @@ describe('Activación por tienda: reclamar antes del HTTP, finalizar por CAS (Ta
   afterAll(async () => {
     try {
       await prisma.deliveryOrderEvent.deleteMany({ where: { venueId: { in: [venueA, venueB] } } })
+      await prisma.deliveryOrderEvent.deleteMany({ where: { externalEventId: { contains: `-${sufijo}` } } })
       await prisma.deliveryConnectIntent.deleteMany({ where: { venueId: { in: [venueA, venueB] } } })
       await prisma.activityLog.deleteMany({ where: { venueId: { in: [venueA, venueB] } } })
       await prisma.deliveryChannelLink.deleteMany({ where: { venueId: { in: [venueA, venueB] } } })
@@ -125,6 +141,7 @@ describe('Activación por tienda: reclamar antes del HTTP, finalizar por CAS (Ta
       await prisma.venue.deleteMany({ where: { id: { in: [venueA, venueB] } } })
       await prisma.organization.deleteMany({ where: { id: orgId } })
       await prisma.staff.deleteMany({ where: { id: staffId } })
+      await prisma.$executeRaw`DELETE FROM "DeliveryStoreRevocation" WHERE "externalLocationId" LIKE ${`t18-%-${sufijo}`}`
     } catch {
       /* fixtures */
     }
@@ -358,6 +375,87 @@ describe('Activación por tienda: reclamar antes del HTTP, finalizar por CAS (Ta
     expect(await link(s2)).toMatchObject({ status: 'DISABLED', revocationVersion: 1, ownerAuthorizedAt: null, activatingIntentId: null })
   })
 
+  it('deprovisioned de una tienda que AÚN NO tiene vínculo, mientras otra se activa ⇒ REVOKED_MEANWHILE sin pos_data (P1-3)', async () => {
+    // El escenario exacto de la auditoría final de Codex: S1 y S2 nuevas; Uber revoca S2 mientras S1
+    // se activa y S2 todavía no tiene vínculo. Antes el evento se marcaba PROCESSED y se tiraba: S2
+    // nacía en versión 0 = la congelada al consentir ⇒ `pos_data` y consentimiento sin autorización.
+    const s1 = nuevaTienda()
+    const s2 = nuevaTienda()
+    const id = await activando(venueA, [s1, s2])
+    posData.mockImplementation(async (storeId: string) => {
+      if (storeId === s1) await deprovisionarSinVinculo(s2)
+      return OK
+    })
+
+    const r = await activar(id)
+
+    expect(outcome(r, s1)).toBe('ACTIVATED')
+    expect(outcome(r, s2)).toBe('REVOKED_MEANWHILE')
+    expect(posData.mock.calls).toEqual([[s1]]) // s2 nunca llegó a pos_data
+    expect(await prisma.deliveryChannelLink.count({ where: { externalLocationId: s2, ownerAuthorizedAt: { not: null } } })).toBe(0)
+    // La reclamación que creó la fila la suelta: S2 no queda atada a este negocio.
+    expect(await prisma.deliveryChannelLink.count({ where: { externalLocationId: s2 } })).toBe(0)
+  })
+
+  it('revocación registrada POR TIENDA después de reclamar (el webhook no alcanzó a ver el vínculo) ⇒ la finalización la ve (P1-3)', async () => {
+    const store = nuevaTienda()
+    const id = await activando(venueA, [store])
+    posData.mockImplementation(async () => {
+      // El webhook buscó el vínculo ANTES de que la reclamación lo creara: sólo subió la revocación de la tienda.
+      await prisma.$executeRaw`UPDATE "DeliveryStoreRevocation" SET "version" = "version" + 1 WHERE "externalLocationId" = ${store}`
+      return OK
+    })
+
+    const r = await activar(id)
+
+    expect(outcome(r, store)).toBe('REVOKED_MEANWHILE')
+    expect(await prisma.deliveryChannelLink.count({ where: { externalLocationId: store, ownerAuthorizedAt: { not: null } } })).toBe(0)
+  })
+
+  it('intent abandonado que CREÓ la fila ⇒ el job la borra y OTRO negocio conecta la tienda (M-3)', async () => {
+    const store = nuevaTienda()
+    const abandonado = await activando(venueA, [store])
+    jest.spyOn(claims, 'finalizarTienda').mockRejectedValueOnce(new Error('la base se cayó'))
+    expect((await activar(abandonado)).estado).toBe('INCOMPLETO') // nadie le da «Reintentar»
+    expect(await link(store)).toMatchObject({ venueId: venueA, status: 'PENDING', ownerAuthorizedAt: null, activatingIntentId: abandonado })
+    await prisma.deliveryConnectIntent.update({ where: { id: abandonado }, data: { expiresAt: new Date(Date.now() - 60_000) } })
+
+    await claims.limpiarIntents()
+
+    expect(await prisma.deliveryChannelLink.count({ where: { externalLocationId: store } })).toBe(0)
+    const deB = await activando(venueB, [store])
+    expect(outcome(await activar(deB), store)).toBe('ACTIVATED') // antes: OTHER_VENUE «contacta a Avoqado»
+    expect(await link(store)).toMatchObject({ venueId: venueB, ownerAuthorizedByIntentId: deB })
+  })
+
+  it('intent abandonado de OTRO negocio que creó la fila ⇒ la tienda se conecta YA, sin esperar al job (M-3)', async () => {
+    const store = nuevaTienda()
+    const abandonado = await activando(venueA, [store])
+    jest.spyOn(claims, 'finalizarTienda').mockRejectedValueOnce(new Error('la base se cayó'))
+    expect((await activar(abandonado)).estado).toBe('INCOMPLETO')
+    await prisma.deliveryConnectIntent.update({ where: { id: abandonado }, data: { expiresAt: new Date(Date.now() - 60_000) } })
+
+    const deB = await activando(venueB, [store])
+    expect(outcome(await activar(deB), store)).toBe('ACTIVATED')
+    expect(await fila(abandonado)).toMatchObject({ state: 'EXPIRED', merchantTokenEnvelope: null })
+    expect(await link(store)).toMatchObject({ venueId: venueB, ownerAuthorizedByIntentId: deB })
+  })
+
+  it('el job NO borra una fila que el intent muerto no creó: sólo la libera (M-3)', async () => {
+    const previa = nuevaTienda()
+    await prisma.deliveryChannelLink.create({
+      data: { venueId: venueA, provider: DeliveryProvider.UBER_EATS, externalLocationId: previa, webhookSecret: 'x'.repeat(64) },
+    })
+    const id = await activando(venueA, [previa])
+    jest.spyOn(claims, 'finalizarTienda').mockRejectedValueOnce(new Error('la base se cayó'))
+    expect((await activar(id)).estado).toBe('INCOMPLETO')
+    await prisma.deliveryConnectIntent.update({ where: { id }, data: { expiresAt: new Date(Date.now() - 60_000) } })
+
+    await claims.limpiarIntents()
+
+    expect(await link(previa)).toMatchObject({ venueId: venueA, status: 'PENDING', activatingIntentId: null, activationOwner: null })
+  })
+
   it('intent vencido ⇒ el job libera la reclamacion', async () => {
     const store = nuevaTienda()
     const id1 = await activando(venueA, [store])
@@ -377,9 +475,10 @@ describe('Activación por tienda: reclamar antes del HTTP, finalizar por CAS (Ta
     const r = await claims.limpiarIntents()
 
     expect(r.vencidos).toBeGreaterThanOrEqual(1)
-    expect(r.liberadas).toBeGreaterThanOrEqual(1)
+    expect(r.borradas).toBeGreaterThanOrEqual(1) // M-3: la fila de id1 se borra (la liberación sin borrar la cubre la prueba de abajo)
     expect(await fila(id1)).toMatchObject({ state: 'EXPIRED', merchantTokenEnvelope: null, activationOwner: null })
-    expect(await link(store)).toMatchObject({ activatingIntentId: null, activationOwner: null })
+    // M-3: id1 CREÓ la fila y nunca se consintió ⇒ el job la borra (no sólo la libera).
+    expect(await prisma.deliveryChannelLink.count({ where: { externalLocationId: store } })).toBe(0)
     expect(await prisma.deliveryConnectIntent.findUnique({ where: { id: viejo } })).toBeNull() // purgado a los 7 días
 
     const id3 = await activando(venueA, [store])
