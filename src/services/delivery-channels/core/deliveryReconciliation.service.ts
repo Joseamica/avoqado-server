@@ -268,6 +268,18 @@ export async function reconcileDeliveryOrderFromProvider(
       const d = (enLibros[tasa] ?? 0) - (ivaSuperviviente[tasa] ?? 0)
       if (d !== 0) fiscal[tasa] = d
     }
+    // Deriva de redondeo (re-revisión final, Minor): cada devolución se redondea por separado e
+    // IVA(S) − IVA(R) ≠ IVA(S − R), así que queda hasta 1 centavo por tasa. Se absorbe —con log— sólo
+    // donde bloquearía en falso: con Δventa = 0 cualquier diferencia, con Δventa > 0 un componente
+    // negativo. Más de 1 centavo NO es deriva: sigue a FISCAL_PENDING.
+    const deriva: Record<string, number> = {}
+    for (const [tasa, v] of Object.entries(fiscal)) {
+      if (Math.abs(v) === 1 && (dVenta === 0 || v < 0)) {
+        deriva[tasa] = v
+        delete fiscal[tasa]
+      }
+    }
+    if (Object.keys(deriva).length > 0) logger.warn('[Delivery] deriva de redondeo de 1 centavo absorbida en el IVA del retiro', { orderId, deriva })
     const ivaDevuelto = Object.values(fiscal).reduce((s, v) => s + v, 0)
 
     const aFiscalPendiente = async (motivo: string) => {

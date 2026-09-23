@@ -306,6 +306,70 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
     expect((refunds[2].processorData as any).fiscalByRateCents).toEqual({ '0.16': ivaVenta - ivaManual })
   })
 
+  describe('deriva de redondeo (re-revisión, Minor): 1 centavo por tasa se absorbe; 2 siguen bloqueando', () => {
+    const manual = async (orderId: string, cents: number) => {
+      const original = await prisma.payment.findFirstOrThrow({ where: { orderId, type: { not: 'REFUND' } } })
+      await prisma.$transaction(tx =>
+        writeRefundInTx(tx, {
+          originalPaymentId: original.id,
+          venueId,
+          salesRefundCents: cents,
+          tipRefundCents: 0,
+          refundedItems: [],
+          reason: 'OTHER',
+          tenderCommission: 'NONE',
+          shift: 'INHERIT_ORIGINAL',
+          provenance: 'MANUAL',
+        }),
+      )
+    }
+
+    it('$150 (dos de $75), manual de $75 y Uber retira un $75 ⇒ NO_DELTA, sin bloquear por 1 centavo', async () => {
+      const { order, foto } = await sembrar(
+        [
+          { linea: 'a', nombre: 'Taco', precio: '75.00' },
+          { linea: 'b', nombre: 'Torta', precio: '75.00' },
+        ],
+        pago('150.00', '0.00'),
+      )
+      await manual(order.id, 7500)
+      proveedorDevuelve(foto(['a'], pago('75.00', '0.00')))
+
+      expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('NO_DELTA')
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).deliveryReconcileBlocked).toBeNull()
+    })
+
+    it('Δ de 1 centavo con IVA de −1 por redondeo ⇒ se compensa (REFUNDED), no FISCAL_PENDING', async () => {
+      const { order, foto } = await sembrar(
+        [
+          { linea: 'a', nombre: 'Taco', precio: '50.00' },
+          { linea: 'b', nombre: 'Torta', precio: '50.00' },
+        ],
+        pago('100.00', '0.00'),
+      )
+      await manual(order.id, 4999)
+      proveedorDevuelve(foto(['a'], pago('50.00', '0.00')))
+
+      expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('REFUNDED')
+      const ultimo = (await reembolsos(order.id)).pop()!
+      expect(ultimo.amount.toString()).toBe('-0.01')
+      expect((ultimo.processorData as any).fiscalByRateCents).toEqual({})
+    })
+
+    it('una reclasificación de 2 centavos NO es deriva: sigue FISCAL_PENDING', async () => {
+      const { order, foto } = await sembrar(
+        [
+          { linea: 'a', nombre: 'Chicle', precio: '0.14' },
+          { linea: 'b', nombre: 'Agua', precio: '100.00', tasa: 0 },
+        ],
+        pago('100.14', '0.14'),
+      )
+      proveedorDevuelve(foto(['b'], pago('100.00', '0.00')))
+
+      expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('FISCAL_PENDING')
+    })
+  })
+
   describe('M-2: el reporte de pagos de Uber y el ajuste del retiro no restan dos veces el mismo dinero', () => {
     const renglones: Renglon[] = [
       { linea: 'a', nombre: 'Cochinita', precio: '150.00' },
