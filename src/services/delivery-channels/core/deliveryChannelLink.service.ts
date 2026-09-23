@@ -280,8 +280,16 @@ export async function updateChannelLink(
       config = mezclarConfig(actual?.config, data.config)
     }
 
+    // 🔴 Con consentimiento del dueño, la identidad de la tienda NO se cambia a mano (spec §4.2):
+    // el consentimiento es de ESA tienda. Condición en el mismo UPDATE (sin ventana): sólo pasa si
+    // no hay consentimiento o si los valores pedidos son los que ya tiene.
+    const identidad = {
+      ...(data.externalLocationId !== undefined && { externalLocationId: data.externalLocationId }),
+      ...(data.externalAccountId !== undefined && { externalAccountId: data.externalAccountId }),
+    }
+    const tocaIdentidad = Object.keys(identidad).length > 0
     const result = await tx.deliveryChannelLink.updateMany({
-      where: { id: linkId, venueId },
+      where: { id: linkId, venueId, ...(tocaIdentidad && { OR: [{ ownerAuthorizedAt: null }, identidad] }) },
       data: {
         ...(data.externalLocationId !== undefined && { externalLocationId: data.externalLocationId }),
         ...(data.externalAccountId !== undefined && { externalAccountId: data.externalAccountId }),
@@ -292,6 +300,12 @@ export async function updateChannelLink(
     })
 
     if (result.count === 0) {
+      if (tocaIdentidad && (await tx.deliveryChannelLink.count({ where: { id: linkId, venueId } }))) {
+        throw new ConflictError(
+          'Esta tienda la autorizó su dueño desde Uber: no se puede cambiar su identificador. Para conectar otra tienda, usa «Conectar Uber Eats».',
+          'IDENTITY_LOCKED',
+        )
+      }
       throw new NotFoundError('Canal de delivery no encontrado')
     }
 
@@ -320,8 +334,8 @@ export async function updateChannelLink(
  * link ya conectado-pero-pausado (PAUSED) — un link PENDING (nunca confirmado por el
  * proveedor) o DISABLED saltando directo a ACTIVE se brincaría el lifecycle de
  * confirmación del proveedor; este endpoint no es el paso de "confirmar conexión".
- * Pausar (→PAUSED) NO tiene esta restricción — cualquier estado puede pausarse, sin
- * cambio de comportamiento. El gate vive en el WHERE del updateMany (filtro atómico,
+ * Pausar (→PAUSED) sólo desde ACTIVE o PAUSED (spec KDS Uber §4.2): un DISABLED pausado y
+ * luego reanudado volvería a ACTIVE por encima de una revocación. El gate vive en el WHERE del updateMany (filtro atómico,
  * evita una carrera entre leer el status y mutar); si el count sale 0 por el gate (no
  * por tenant), un segundo lookup da el mensaje de validación correcto en vez de un
  * 404 genérico.
@@ -333,30 +347,37 @@ export async function pauseChannelLink(
   performedBy?: string,
 ): Promise<DeliveryChannelLinkSafe> {
   const newStatus = paused ? DeliveryChannelStatus.PAUSED : DeliveryChannelStatus.ACTIVE
+  // 🔴 `snoozedUntil: null` SIEMPRE, en las dos direcciones. Esta es la pausa
+  // INDEFINIDA (la del dashboard): la decidió una persona a propósito y no se
+  // reactiva sola. Si no se limpiara, un snooze del POS que quedó vivo reanudaría
+  // la tienda que el dueño acaba de apagar — el peor error posible de esta feature.
+  // `snoozeChannelLink` vuelve a poner el reloj DESPUÉS, encima de esta escritura.
+  const cas = (desde: DeliveryChannelStatus) =>
+    prisma.deliveryChannelLink.updateMany({
+      where: { id: linkId, venueId, status: desde },
+      data: { status: newStatus, snoozedUntil: null },
+    })
 
-  const result = await prisma.deliveryChannelLink.updateMany({
-    where: {
-      id: linkId,
-      venueId,
-      ...(paused ? {} : { status: DeliveryChannelStatus.PAUSED }),
-    },
-    // 🔴 `snoozedUntil: null` SIEMPRE, en las dos direcciones. Esta es la pausa
-    // INDEFINIDA (la del dashboard): la decidió una persona a propósito y no se
-    // reactiva sola. Si no se limpiara, un snooze del POS que quedó vivo reanudaría
-    // la tienda que el dueño acaba de apagar — el peor error posible de esta feature.
-    // `snoozeChannelLink` vuelve a poner el reloj DESPUÉS, encima de esta escritura.
-    data: { status: newStatus, snoozedUntil: null },
-  })
-
-  if (result.count === 0) {
-    if (!paused) {
-      const current = await prisma.deliveryChannelLink.findFirst({ where: { id: linkId, venueId }, select: { status: true } })
-      if (current) {
-        throw new ValidationError(
-          `No se puede reactivar un canal en estado ${current.status}. Solo un canal en estado PAUSED puede reactivarse.`,
-        )
-      }
+  // El estado PREVIO se sabe ANTES de escribir, por el CAS que pasó (spec §4.2, H18): es a lo que
+  // se revierte si el proveedor dice que no. Pausar sólo desde un canal vivo ([C-4]): pausar un
+  // DISABLED —revocado por el proveedor— y luego reanudarlo lo resucitaría. PAUSED→PAUSED sí: es
+  // cómo el dueño vuelve indefinida una pausa del POS.
+  let previo: DeliveryChannelStatus | null = null
+  for (const desde of paused ? [DeliveryChannelStatus.ACTIVE, DeliveryChannelStatus.PAUSED] : [DeliveryChannelStatus.PAUSED]) {
+    if ((await cas(desde)).count === 1) {
+      previo = desde
+      break
     }
+  }
+
+  if (previo === null) {
+    const current = await prisma.deliveryChannelLink.findFirst({ where: { id: linkId, venueId }, select: { status: true } })
+    if (current && !paused) {
+      throw new ValidationError(
+        `No se puede reactivar un canal en estado ${current.status}. Solo un canal en estado PAUSED puede reactivarse.`,
+      )
+    }
+    if (current) throw new ConflictError(`No se puede pausar un canal en estado ${current.status}: sólo un canal activo se pausa.`)
     throw new NotFoundError('Canal de delivery no encontrado')
   }
 
@@ -394,7 +415,11 @@ export async function pauseChannelLink(
         // PAUSADO cuando él dijo que no. Se revierte el estado local y se lanza, para que el
         // dueño se entere y pueda hacer otra cosa —apagar el menú, hablar a soporte— en vez
         // de creerse protegido mientras le siguen entrando pedidos.
-        await prisma.deliveryChannelLink.updateMany({ where: { id: linkId, venueId }, data: { status: fullLink.status } })
+        // Reversión CONDICIONAL al estado del que se partió: sólo si nadie lo movió entretanto —
+        // un DISABLED concurrente (revocación del proveedor) no se pisa.
+        if (previo !== newStatus) {
+          await prisma.deliveryChannelLink.updateMany({ where: { id: linkId, venueId, status: newStatus }, data: { status: previo } })
+        }
         logger.error('🚨 [DeliveryChannel] el proveedor NO aceptó la pausa — estado local revertido', {
           linkId,
           venueId,

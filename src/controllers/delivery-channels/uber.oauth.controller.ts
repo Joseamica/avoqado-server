@@ -22,7 +22,8 @@ import { Request, Response } from 'express'
 
 import { env } from '@/config/env'
 import logger from '@/config/logger'
-import * as deliveryChannelLinkService from '@/services/delivery-channels/core/deliveryChannelLink.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
+import * as claims from '@/services/delivery-channels/core/deliveryStoreClaim.service'
 import * as intents from '@/services/delivery-channels/core/deliveryConnectIntent.service'
 import prisma from '@/utils/prismaClient'
 
@@ -94,6 +95,9 @@ const TEXTO_RESULTADO: Record<string, string> = {
   EXCLUDED_BY_ENV: '<span class="bad">excluida por Avoqado</span> — no está en la lista de tiendas habilitadas para conectar.',
   OTHER_VENUE: '<span class="bad">ya está conectada a otro negocio</span>; contacta a Avoqado.',
   POS_DATA_FAILED: '<span class="bad">Uber rechazó la activación</span>',
+  CLAIMED_BY_OTHER: '<span class="bad">otra conexión la está activando en este momento</span>; espera unos minutos y vuelve a intentar.',
+  REVOKED_MEANWHILE:
+    '<span class="bad">Uber retiró el permiso de esta tienda mientras se conectaba</span>; para conectarla hay que autorizarla de nuevo con un enlace nuevo.',
   [intents.RESULTADO_REINTENTABLE]: '<span class="bad">no se pudo guardar</span>; usa «Reintentar».',
 }
 
@@ -199,77 +203,92 @@ async function responderActivacion(res: Response, id: string, r: intents.Resulta
 }
 
 /**
- * El trabajo por tienda. ⚠️ Versión mínima (Tarea 17): la Tarea 18 la sustituye por la
- * reclamación atómica antes del HTTP y la finalización por CAS con consentimiento (spec §4.3).
+ * El trabajo por tienda (spec §4.3): reclamar la tienda ANTES del HTTP, `pos_data`, finalizar
+ * por CAS. Exportado para las pruebas: la reclamación y la finalización viven en
+ * `deliveryStoreClaim.service`, donde cada efecto exige el lease vivo de esta ejecución.
  */
-const activarTiendaUber: intents.ActivarTienda = async ({ intent, token, storeId, store }) => {
+export const activarTiendaUber: intents.ActivarTienda = async ({ intent, owner, token, storeId, store }) => {
   const e = intent.environment as UberEnvironment
-  // 🔴 El candado REAL, no uno fabricado al vuelo: autorizar justo la tienda que se va a
-  // escribir anulaba el default-deny. Hallado por auditoría externa el 2026-08-20.
-  const permitidas = getWritableStores(e)
-  if (!permitidas.has(storeId.toLowerCase())) return { outcome: 'EXCLUDED_BY_ENV' }
+  // La variable RESTRINGE por intersección, nunca amplía (§4.3, [N-5]): en SANDBOX sólo lo que
+  // lista (default-deny, el sandbox de Uber NO aísla producción); en PRODUCTION vacía no restringe
+  // — ahí la palomita del dueño, reclamada abajo, ES el permiso de esta tienda.
+  const lista = getWritableStores(e)
+  if ((e === 'SANDBOX' || lista.size > 0) && !lista.has(storeId.toLowerCase())) return { outcome: 'EXCLUDED_BY_ENV' }
 
-  const link = await prisma.deliveryChannelLink.findUnique({
-    where: { provider_externalLocationId: { provider: 'UBER_EATS', externalLocationId: storeId } },
-    select: { venueId: true },
-  })
-  // 🔴 Una tienda de OTRO negocio no se toca: activarla sería desviarle sus pedidos.
-  if (link && link.venueId !== intent.venueId) return { outcome: 'OTHER_VENUE' }
-  if (!link) {
-    try {
-      await deliveryChannelLinkService.createChannelLink(
-        intent.venueId,
-        {
-          provider: 'UBER_EATS',
-          externalLocationId: storeId,
-          externalAccountId: store?.name ?? null,
-          orderAcceptanceMode: intent.orderAcceptanceMode,
+  const reclamo = await claims.reclamarTienda(intent, owner, storeId, store?.name ?? null)
+  // Ejecución muerta: nada de HTTP; `activar` descarta el resultado y la recuperación re-reclama.
+  if (reclamo.tipo === 'MUERTA') return { outcome: intents.RESULTADO_REINTENTABLE }
+  if (reclamo.tipo === 'FINAL') return { outcome: reclamo.outcome }
+
+  let status = 0
+  try {
+    const activacion = await uberRequest(
+      // El candado de escritura de ESTA llamada es la intersección de arriba + la reclamación.
+      { environment: e, token, writableStores: new Set([storeId.toLowerCase()]) },
+      {
+        method: 'POST',
+        path: `/v1/eats/stores/${encodeURIComponent(storeId)}/pos_data`,
+        storeId,
+        body: {
+          integrator_store_id: intent.venueId,
+          integrator_brand_id: 'avoqado',
+          // 🔴 `is_order_manager` ES EL INTERRUPTOR. Sin él, la tienda queda con
+          // `integration_enabled: true` y todo PARECE bien —el webhook llega, el pedido
+          // se trae, se ingiere con su comanda de cocina— pero `accept_pos_order`
+          // responde `403 user_not_allowed` y Uber cancela a los ~11.5 min. El cliente se
+          // queda sin comida y el log sólo dice "user not allowed".
+          //
+          // Medido con un pedido REAL el 2026-08-20 (`00012fba-…`, "Avoqado Sandbox 1").
+          // Ningún test lo podía atrapar: todos mockean la red.
+          //
+          // ⚠️ NO es `pos_integration_enabled`: ése está DEPRECADO y Uber lo IGNORA en
+          // silencio — se probó mandándolo, el POST devolvió 200 y el flag siguió en
+          // `false`. Lo dice nuestra propia investigación (ANEXO §Flujo
+          // integrator-initiated, paso 4) y se confirmó contra la API real.
+          is_order_manager: true,
+          // AUTO: que Uber no exija que un humano confirme en su app. Nuestro
+          // `orderAcceptanceMode` por canal es quien decide si aceptamos solos.
+          require_manual_acceptance: false,
         },
-        intent.staffId,
-      )
-    } catch (err) {
-      logger.error('🚨 [UberOAuth] no se pudo crear el canal', { intentId: intent.id, storeId, error: (err as Error).message })
-      return { outcome: intents.RESULTADO_REINTENTABLE }
+      },
+    )
+    status = activacion.status
+    if (status < 200 || status >= 300) {
+      logger.warn('🛵 [UberOAuth] Uber rechazó pos_data', { intentId: intent.id, storeId, status, cuerpo: activacion.text.slice(0, 200) })
     }
+  } catch (err) {
+    logger.warn('🛵 [UberOAuth] pos_data no respondió', { intentId: intent.id, storeId, error: (err as Error).message })
+  }
+  if (status < 200 || status >= 300) {
+    // Final: la tienda queda libre para un enlace nuevo (un lease perdido lo repite la recuperación).
+    await claims.liberarReclamo(intent.id, owner, storeId, 'POS_DATA_FAILED')
+    return { outcome: 'POS_DATA_FAILED', status }
   }
 
-  const activacion = await uberRequest(
-    { environment: e, token, writableStores: permitidas },
-    {
-      method: 'POST',
-      path: `/v1/eats/stores/${encodeURIComponent(storeId)}/pos_data`,
+  let fin: Awaited<ReturnType<typeof claims.finalizarTienda>>
+  try {
+    fin = await claims.finalizarTienda(intent, owner, storeId, reclamo.version)
+  } catch (err) {
+    // Entre 2 y 3: Uber ya dijo que sí y la escritura local no. «Reintentar» repite 2–3.
+    logger.error('🚨 [UberOAuth] pos_data OK pero no se pudo guardar la conexión', {
+      intentId: intent.id,
       storeId,
-      body: {
-        integrator_store_id: intent.venueId,
-        integrator_brand_id: 'avoqado',
-        // 🔴 `is_order_manager` ES EL INTERRUPTOR. Sin él, la tienda queda con
-        // `integration_enabled: true` y todo PARECE bien —el webhook llega, el pedido
-        // se trae, se ingiere con su comanda de cocina— pero `accept_pos_order`
-        // responde `403 user_not_allowed` y Uber cancela a los ~11.5 min. El cliente se
-        // queda sin comida y el log sólo dice "user not allowed".
-        //
-        // Medido con un pedido REAL el 2026-08-20 (`00012fba-…`, "Avoqado Sandbox 1").
-        // Ningún test lo podía atrapar: todos mockean la red.
-        //
-        // ⚠️ NO es `pos_integration_enabled`: ése está DEPRECADO y Uber lo IGNORA en
-        // silencio — se probó mandándolo, el POST devolvió 200 y el flag siguió en
-        // `false`. Lo dice nuestra propia investigación (ANEXO §Flujo
-        // integrator-initiated, paso 4) y se confirmó contra la API real.
-        is_order_manager: true,
-        // AUTO: que Uber no exija que un humano confirme en su app. Nuestro
-        // `orderAcceptanceMode` por canal es quien decide si aceptamos solos.
-        require_manual_acceptance: false,
-      },
-    },
-  )
-  if (activacion.status < 400) return { outcome: 'ACTIVATED' }
-  logger.warn('🛵 [UberOAuth] Uber rechazó pos_data', {
-    intentId: intent.id,
-    storeId,
-    status: activacion.status,
-    cuerpo: activacion.text.slice(0, 200),
-  })
-  return { outcome: 'POS_DATA_FAILED', status: activacion.status }
+      error: (err as Error).message,
+    })
+    return { outcome: intents.RESULTADO_REINTENTABLE }
+  }
+  if (fin === null) return { outcome: intents.RESULTADO_REINTENTABLE }
+  if (fin === 'ACTIVATED') {
+    void logAction({
+      staffId: intent.staffId,
+      venueId: intent.venueId,
+      action: 'DELIVERY_CHANNEL_CONNECTED',
+      entity: 'DeliveryChannelLink',
+      entityId: reclamo.linkId,
+      data: { provider: 'UBER_EATS', externalLocationId: storeId, intentId: intent.id, environment: e },
+    })
+  }
+  return { outcome: fin }
 }
 
 /** Paso 1: `GET /oauth/start?intent=<id>.<hmac>` — manda al comerciante a autorizar. Ya NO acepta `venueId`. */

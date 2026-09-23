@@ -144,9 +144,20 @@ export async function processUberEvent(eventRowId: string, deps: UberProcessDeps
     if (evento.channelLink) {
       const quitada = identidad.eventType === 'store.deprovisioned'
       if (quitada) {
+        // 🔴 La revocación PREVALECE (spec §4.2, [C-3][N-16]): se borra el consentimiento y la
+        // versión sube EN LA MISMA sentencia (`+1` atómico, nunca leer-y-escribir). Una activación
+        // que ya pasó `pos_data` finaliza con CAS sobre la versión reclamada: con esto, no pasa.
         await prisma.deliveryChannelLink.update({
           where: { id: evento.channelLink.id },
-          data: { status: DeliveryChannelStatus.DISABLED },
+          data: {
+            status: DeliveryChannelStatus.DISABLED,
+            ownerAuthorizedAt: null,
+            ownerAuthorizedEnvironment: null,
+            ownerAuthorizedStoreId: null,
+            ownerAuthorizedClientId: null,
+            ownerAuthorizedByIntentId: null,
+            revocationVersion: { increment: 1 },
+          },
         })
         logger.error('🚨 [Uber] el comercio QUITÓ el acceso a esta tienda — canal deshabilitado', {
           eventRowId,

@@ -48,4 +48,7 @@ export const DATABASE_JOB_SCHEDULES = {
   // KDS de Uber (spec §3.4): retiros de renglón a medias, reservas huérfanas y «listos» sin avisar.
   // Cada minuto en el segundo :52, hueco libre entre el sweeper de gcal (:53) y el de pagos (:46).
   deliveryLineActionReconciler: '52 * * * * *',
+  // KDS de Uber (spec §4.1): intents de conexión vencidos ⇒ EXPIRED, reclamaciones de tienda
+  // huérfanas ⇒ liberadas, purga a los 7 días. Diario a las 04:17:31 (CDMX), fuera de la hora pico.
+  deliveryConnectIntentCleanup: '31 17 4 * * *',
 } as const

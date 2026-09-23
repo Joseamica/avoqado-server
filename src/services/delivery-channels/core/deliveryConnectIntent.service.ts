@@ -243,11 +243,13 @@ export async function liberarLease(id: string, owner: string): Promise<boolean> 
  * Anota el resultado de UNA tienda. El `where` exige estado, dueño y lease vivo EN LA MISMA
  * sentencia: si otra ejecución recuperó el intent, esta escritura no pasa (count 0).
  * Merge con `||` de jsonb: no hay lectura-modificación-escritura que pueda pisar otra tienda.
+ * ANIDADO: `claimedRevocationVersion`, que la reclamación anotó antes, sobrevive al resultado.
  */
 async function registrarResultado(id: string, owner: string, storeId: string, resultado: ResultadoTienda): Promise<boolean> {
   const n = await prisma.$executeRaw`
     UPDATE "DeliveryConnectIntent"
-       SET "resultsJson" = COALESCE("resultsJson", '{}'::jsonb) || jsonb_build_object(${storeId}::text, ${JSON.stringify(resultado)}::jsonb),
+       SET "resultsJson" = COALESCE("resultsJson", '{}'::jsonb) || jsonb_build_object(
+             ${storeId}::text, COALESCE("resultsJson" -> ${storeId}::text, '{}'::jsonb) || ${JSON.stringify(resultado)}::jsonb),
            "updatedAt" = ${utcTs(new Date())}
      WHERE "id" = ${id}
        AND "state" = 'ACTIVATING'
@@ -280,13 +282,14 @@ export type ResultadoActivacion =
   | { estado: 'EN_CURSO' }
   | { estado: 'CONSUMED' | 'INCOMPLETO' | 'INTERRUMPIDO'; resultados: Record<string, ResultadoTienda> }
 
-const esFinal = (r: ResultadoTienda | undefined) => !!r && r.outcome !== RESULTADO_REINTENTABLE
+/** Sin `outcome` (sólo la versión reclamada: el proceso murió antes de anotarlo) NO es final. */
+const esFinal = (r: ResultadoTienda | undefined) => !!r?.outcome && r.outcome !== RESULTADO_REINTENTABLE
 
 /**
  * Corre la activación de un intent en `ACTIVATING`. Una sola función para el callback (una
  * tienda) y para `POST /oauth/activate` (varias, y el «Reintentar»).
  *
- * @param activarTienda el trabajo por tienda (hoy: `pos_data`; T18: reclamar + finalizar por CAS).
+ * @param activarTienda el trabajo por tienda: reclamar, `pos_data` y finalizar por CAS (`deliveryStoreClaim.service`).
  */
 export async function activar(id: string, activarTienda: ActivarTienda): Promise<ResultadoActivacion> {
   const leido = await prisma.deliveryConnectIntent.findUnique({ where: { id } })

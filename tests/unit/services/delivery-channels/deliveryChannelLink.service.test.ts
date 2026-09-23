@@ -393,7 +393,8 @@ describe('deliveryChannelLink.service', () => {
       await pauseChannelLink('venue1', 'link1', true, 'staff1')
 
       expect(prisma.deliveryChannelLink.updateMany).toHaveBeenCalledWith({
-        where: { id: 'link1', venueId: 'venue1' },
+        // Spec KDS Uber §4.2: el CAS sale de un ACTIVE (así se sabe a qué revertir).
+        where: { id: 'link1', venueId: 'venue1', status: DeliveryChannelStatus.ACTIVE },
         // `objectContaining` sólo en `data`: desde el snooze, pausar escribe también
         // `snoozedUntil: null`. El `where` se queda EXACTO — es lo que este test cuida.
         data: expect.objectContaining({ status: DeliveryChannelStatus.PAUSED }),
@@ -442,24 +443,22 @@ describe('deliveryChannelLink.service', () => {
       expect(logAction).not.toHaveBeenCalled()
     })
 
-    it('REGRESIÓN Fix B4: pausar (paused:true) sigue SIN gate — permitido desde CUALQUIER estado (PENDING incluido), where sin filtro de status', async () => {
-      ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
-      ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue({ ...baseLink, status: DeliveryChannelStatus.PAUSED })
-      ;(getAdapter as jest.Mock).mockReturnValue({ setChannelPaused: jest.fn().mockResolvedValue(undefined) })
+    it('spec KDS Uber §4.2: pausar un DISABLED (revocado) o PENDING ⇒ 409, sin escribir ni avisar al proveedor', async () => {
+      // Un DISABLED pausado y luego reanudado volvería a ACTIVE por encima de la revocación.
+      ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({ status: DeliveryChannelStatus.DISABLED })
 
-      await pauseChannelLink('venue1', 'link1', true)
+      await expect(pauseChannelLink('venue1', 'link1', true)).rejects.toThrow(ConflictError)
 
-      expect(prisma.deliveryChannelLink.updateMany).toHaveBeenCalledWith({
-        where: { id: 'link1', venueId: 'venue1' },
-        // `objectContaining` sólo en `data`: desde el snooze, pausar escribe también
-        // `snoozedUntil: null`. El `where` se queda EXACTO — es lo que este test cuida.
-        data: expect.objectContaining({ status: DeliveryChannelStatus.PAUSED }),
-      })
-      expect(prisma.deliveryChannelLink.findFirst).not.toHaveBeenCalled()
+      const desde = (prisma.deliveryChannelLink.updateMany as jest.Mock).mock.calls.map(c => c[0].where.status)
+      expect(desde).toEqual([DeliveryChannelStatus.ACTIVE, DeliveryChannelStatus.PAUSED]) // ni PENDING ni DISABLED
+      expect(getAdapter).not.toHaveBeenCalled()
+      expect(logAction).not.toHaveBeenCalled()
     })
 
     it('REGRESIÓN tenant isolation: link de OTRO venue → NotFoundError (no pausa, no llama adapter)', async () => {
       ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue(null) // el lookup también filtra por venueId
 
       await expect(pauseChannelLink('venue-otro', 'link1', true)).rejects.toThrow(NotFoundError)
 
