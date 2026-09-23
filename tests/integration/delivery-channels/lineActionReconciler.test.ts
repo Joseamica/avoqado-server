@@ -559,6 +559,44 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
       expect(ev.externalOrderId).toBe(s.ext) // el evento sigue nombrando al pedido de Uber
     })
 
+    it('P1-2: la foto todavía VIEJA no entierra el cambio: el evento queda reintentable y la relectura liquida', async () => {
+      const s = await sembrar() // el proveedor aún devuelve el pedido intacto
+      const { id: eventoId } = await evento(s.ext)
+
+      const r = await processUberEvent(eventoId)
+
+      expect(r).toMatchObject({ outcome: 'FAILED', error: 'CAMBIO_SIN_REFLEJAR' })
+      const ev = await prisma.deliveryOrderEvent.findUniqueOrThrow({ where: { id: eventoId } })
+      expect(ev).toMatchObject({ status: 'FAILED', error: 'CAMBIO_SIN_REFLEJAR', orderId: s.order.id })
+
+      // El reintento del job de webhooks (mismo procesador) ya ve la foto con el retiro.
+      fotos.set(s.ext, { ...s.foto(['a'], '150.00'), raw: { fuente: 'foto-fresca' } })
+      expect(await processUberEvent(eventoId)).toMatchObject({ outcome: 'RECONCILED', orderId: s.order.id })
+
+      expect((await prisma.deliveryOrderEvent.findUniqueOrThrow({ where: { id: eventoId } })).status).toBe('PROCESSED')
+      const [refund] = await reembolsos(s.order.id)
+      expect(refund.amount.toString()).toBe('-50')
+      // M-1: tras un reprecio la orden guarda la foto fresca, no la original.
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: s.order.id } })).posRawData).toEqual({ fuente: 'foto-fresca' })
+    })
+
+    it('P1-2: un cambio que NUNCA se refleja se cierra VISIBLE al vencer la ventana, sin reintentar para siempre', async () => {
+      const s = await sembrar()
+      const { id: eventoId } = await evento(s.ext)
+      await prisma.deliveryOrderEvent.update({ where: { id: eventoId }, data: { receivedAt: hace(31 * MIN) } })
+      const avisos = jest.spyOn(logger, 'warn')
+
+      const r = await processUberEvent(eventoId)
+
+      expect(r).toMatchObject({ outcome: 'RECONCILED', orderId: s.order.id })
+      expect((await prisma.deliveryOrderEvent.findUniqueOrThrow({ where: { id: eventoId } })).status).toBe('PROCESSED')
+      const rastro = await prisma.activityLog.findMany({ where: { venueId, entityId: s.order.id, action: 'DELIVERY_ORDER_CHANGE_UNREFLECTED' } })
+      expect(rastro).toHaveLength(1)
+      expect(rastro[0].data).toMatchObject({ eventId: eventoId })
+      expect(avisos.mock.calls.some(([m]) => String(m).includes('nunca mostró el cambio'))).toBe(true)
+      expect(await reembolsos(s.order.id)).toHaveLength(0)
+    })
+
     it('FULFILLMENT_CHANGED exitoso propaga removedAt a TODAS las comandas y liquida', async () => {
       const s = await sembrar()
       // Una segunda comanda del mismo pedido (reapertura / otra estación).

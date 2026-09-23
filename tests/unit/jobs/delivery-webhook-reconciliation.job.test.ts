@@ -25,6 +25,7 @@ jest.mock('@/services/delivery-channels/core/deliveryWebhookEvent.service', () =
 
 jest.mock('@/services/delivery-channels/providers/uber-eats/uber.eventProcessor', () => ({
   processUberEvent: jest.fn(),
+  CAMBIO_SIN_REFLEJAR: 'CAMBIO_SIN_REFLEJAR',
 }))
 jest.mock('@/services/delivery-channels/providers/rappi/rappi.eventProcessor', () => ({
   processRappiEvent: jest.fn(),
@@ -505,6 +506,22 @@ describe('DeliveryWebhookReconciliationJob', () => {
           data: expect.objectContaining({ attemptCount: 1, nextAttemptAt: expect.any(Date) }),
         }),
       )
+    })
+
+    it('P1-2: un cambio que la foto aún no trae se relee con backoff, y es una espera (warn), no una falla', async () => {
+      mockedFindMany.mockResolvedValueOnce([eventoUber({ eventType: 'order.fulfillment_issues.resolved' })]).mockResolvedValueOnce([])
+      mockedProcessUber.mockResolvedValueOnce({ outcome: 'FAILED', orderId: 'ord_u', error: 'CAMBIO_SIN_REFLEJAR' })
+      const errores = jest.spyOn(logger, 'error')
+      const avisos = jest.spyOn(logger, 'warn')
+
+      const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+      expect(result.reprocessed).toBe(0)
+      expect(mockedUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'evt_uber' }, data: expect.objectContaining({ attemptCount: 1, nextAttemptAt: expect.any(Date) }) }),
+      )
+      expect(errores.mock.calls.some(([m]) => String(m).includes('Failed to reprocess event'))).toBe(false)
+      expect(avisos.mock.calls.some(([m]) => String(m).includes('cambio de pedido aún sin reflejar'))).toBe(true)
     })
 
     it('🔴 el barrido de 24 h también alcanza a Uber: nada se queda colgado para siempre', async () => {

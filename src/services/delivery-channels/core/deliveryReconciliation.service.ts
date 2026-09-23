@@ -318,7 +318,8 @@ async function reprecio(
     paidAmount: pesos(p.pagadoCents),
     remainingBalance: d(pay.cashDueSale).plus(d(pay.cashDueTip)),
   }
-  await tx.order.update({ where: { id: p.orderId }, data })
+  // M-1: tras un reprecio la orden guarda la foto que lo justificó, no la de la ingesta.
+  await tx.order.update({ where: { id: p.orderId }, data: { ...data, posRawData: p.foto.raw as Prisma.InputJsonValue } })
   await tx.activityLog.create({
     data: {
       venueId: p.venueId,

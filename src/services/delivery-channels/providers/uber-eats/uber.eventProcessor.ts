@@ -30,6 +30,14 @@ import { reconcileDeliveryOrderFromProvider } from '../../core/deliveryReconcili
 import { uberAdapter } from './uber.adapter'
 import { processUberReport } from './uber.reportProcessor'
 
+/** Motivo de un `FULFILLMENT_CHANGED` cuya foto aún no trae el cambio: reintentable, no terminal. */
+export const CAMBIO_SIN_REFLEJAR = 'CAMBIO_SIN_REFLEJAR'
+/**
+ * Cuánto se relee un pedido que avisó un cambio sin reflejarlo. Con el backoff del job de webhooks
+ * (2, 4, 8, 16 min) son ~5 lecturas; después se cierra con rastro en `ActivityLog`.
+ */
+export const CAMBIO_SIN_REFLEJAR_VENTANA_MS = 30 * 60_000
+
 export type UberProcessOutcome =
   | 'PROCESSED' // pedido aceptado en Uber y convertido en venta
   | 'ALREADY_DONE' // ya se había procesado: reintento inofensivo
@@ -206,11 +214,40 @@ export async function processUberEvent(eventRowId: string, deps: UberProcessDeps
       return { outcome: 'FAILED', error: 'ORDEN_NO_EXISTE' }
     }
     let fallo: string | null
+    let sinCambio = false
     try {
       const r = await reconcileDeliveryOrderFromProvider(orden.id, { trigger: 'WEBHOOK' })
       fallo = r.outcome === 'READ_FAILED' ? 'READ_FAILED' : null
+      sinCambio = r.outcome === 'NO_ACTIONS'
     } catch (err) {
       fallo = err instanceof Error ? err.message : String(err)
+    }
+    // P1-2: Uber avisó un cambio y su foto todavía no lo trae (el GET puede ir detrás del aviso).
+    // Marcarlo PROCESSED lo enterraría: nadie vuelve a leer ese pedido. Queda FAILED con un motivo
+    // propio y el job de webhooks lo relee con su backoff; al vencer la ventana se cierra, VISIBLE.
+    if (sinCambio) {
+      const edadMs = Date.now() - evento.receivedAt.getTime()
+      if (edadMs < CAMBIO_SIN_REFLEJAR_VENTANA_MS) {
+        logger.warn('[Uber] el pedido cambió y la foto aún no lo trae: se relee más tarde', { eventRowId, orderId: orden.id })
+        await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, orden.id, CAMBIO_SIN_REFLEJAR)
+        return { outcome: 'FAILED', orderId: orden.id, error: CAMBIO_SIN_REFLEJAR }
+      }
+      logger.warn('[Uber] el proveedor avisó un cambio y su foto nunca mostró el cambio: se cierra el aviso', {
+        eventRowId,
+        orderId: orden.id,
+        venueId: evento.channelLink.venueId,
+        edadMin: Math.round(edadMs / 60_000),
+      })
+      await prisma.activityLog.create({
+        data: {
+          venueId: evento.channelLink.venueId,
+          staffId: null,
+          action: 'DELIVERY_ORDER_CHANGE_UNREFLECTED',
+          entity: 'Order',
+          entityId: orden.id,
+          data: { eventId: eventRowId, externalOrderId: identidad.orderId, ventanaMin: CAMBIO_SIN_REFLEJAR_VENTANA_MS / 60_000 },
+        },
+      })
     }
     if (fallo) {
       logger.error('🚨 [Uber] el pedido cambió y no se pudo reconciliar: el evento queda para reintento', {
