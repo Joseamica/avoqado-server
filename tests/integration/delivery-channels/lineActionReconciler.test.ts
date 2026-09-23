@@ -305,6 +305,80 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
     expect(await reembolsos(s.order.id)).toHaveLength(0)
   })
 
+  it('I-1: a las 24 h alerta UNA vez el retiro FISCAL_PENDING y la orden bloqueada sin retiros pendientes', async () => {
+    const hace25h = hace(25 * 60 * MIN)
+    const bloqueadaHace25h = async (orderId: string) => {
+      const l = await prisma.activityLog.create({
+        data: { venueId, action: 'DELIVERY_ORDER_RECONCILE_BLOCKED', entity: 'Order', entityId: orderId, data: {} },
+      })
+      await prisma.$executeRaw`UPDATE "ActivityLog" SET "createdAt" = ${utcTs(hace25h)} WHERE id = ${l.id}`
+    }
+    const fiscal = await sembrar()
+    await prisma.order.update({ where: { id: fiscal.order.id }, data: { deliveryReconcileBlocked: 'FISCAL_RECLASS_UNSUPPORTED' } })
+    await bloqueadaHace25h(fiscal.order.id)
+    const f = await accion(fiscal.order, fiscal.ext, fiscal.item.b.id, 'b', {
+      status: 'CONFIRMED',
+      settlement: 'FISCAL_PENDING',
+      lastAttemptAt: hace25h,
+      resolvedAt: hace25h,
+    })
+    const sube = await sembrar() // bloqueada por un aumento del proveedor, sin ningún retiro
+    await prisma.order.update({ where: { id: sube.order.id }, data: { deliveryReconcileBlocked: 'INCREASE_UNSUPPORTED' } })
+    await bloqueadaHace25h(sube.order.id)
+    const reciente = await sembrar() // bloqueada hace un rato: todavía no
+    await prisma.order.update({ where: { id: reciente.order.id }, data: { deliveryReconcileBlocked: 'INCREASE_UNSUPPORTED' } })
+    await prisma.activityLog.create({
+      data: { venueId, action: 'DELIVERY_ORDER_RECONCILE_BLOCKED', entity: 'Order', entityId: reciente.order.id, data: {} },
+    })
+    const gritos = jest.spyOn(logger, 'error')
+
+    await correr()
+    await correr()
+
+    const cuenta = (entityId: string, action: string) => prisma.activityLog.count({ where: { venueId, entityId, action } })
+    expect(await cuenta(f.id, 'DELIVERY_ITEM_REMOVAL_UNREFLECTED')).toBe(1)
+    expect(await cuenta(sube.order.id, 'DELIVERY_ORDER_BLOCKED_UNRESOLVED')).toBe(1)
+    // La orden fiscal ya la cubre la alerta de su retiro: no se grita dos veces el mismo caso.
+    expect(await cuenta(fiscal.order.id, 'DELIVERY_ORDER_BLOCKED_UNRESOLVED')).toBe(0)
+    expect(await cuenta(reciente.order.id, 'DELIVERY_ORDER_BLOCKED_UNRESOLVED')).toBe(0)
+    const deOrden = gritos.mock.calls.filter(([m, d]) => String(m).includes('orden bloqueada') && (d as any)?.orderId === sube.order.id)
+    expect(deOrden).toHaveLength(1)
+  })
+
+  it('I-1: el MCP ve qué órdenes están bloqueadas y por qué, aunque no tengan retiros', async () => {
+    const s = await sembrar()
+    await accion(s.order, s.ext, s.item.b.id, 'b', { status: 'CONFIRMED', settlement: 'ACCREDITED' })
+    await prisma.order.update({ where: { id: s.order.id }, data: { deliveryReconcileBlocked: 'INCREASE_UNSUPPORTED' } })
+    const sola = await sembrar()
+    await prisma.order.update({ where: { id: sola.order.id }, data: { deliveryReconcileBlocked: 'FISCAL_RECLASS_UNSUPPORTED' } })
+
+    const vista = await listDeliveryLineActions(venueId, { limit: 100 })
+
+    expect(vista.items.find(i => i.orderId === s.order.id)?.reconcileBlocked).toBe('INCREASE_UNSUPPORTED')
+    expect(vista.blockedOrders.map(o => o.orderId)).toEqual(expect.arrayContaining([s.order.id, sola.order.id]))
+    expect(vista.blockedOrders.find(o => o.orderId === sola.order.id)?.reason).toBe('FISCAL_RECLASS_UNSUPPORTED')
+    expect(vista.blockedOrdersTotal).toBeGreaterThanOrEqual(2)
+  })
+
+  it('P2: el listado de retiros se recorre COMPLETO por cursor, estable aunque empaten en updatedAt', async () => {
+    const x = await sembrar()
+    const y = await sembrar()
+    const acciones = [
+      await accion(x.order, x.ext, x.item.a.id, 'a', { status: 'REJECTED' }),
+      await accion(x.order, x.ext, x.item.b.id, 'b', { status: 'REJECTED' }),
+      await accion(y.order, y.ext, y.item.a.id, 'a', { status: 'REJECTED' }),
+    ]
+    await prisma.$executeRaw`UPDATE "DeliveryLineAction" SET "updatedAt" = ${utcTs(hace(MIN))} WHERE id = ANY(${acciones.map(a => a.id)}::text[])`
+
+    const p1 = await listDeliveryLineActions(venueId, { limit: 2 })
+    expect(p1).toMatchObject({ total: 3, hasMore: true })
+    expect(p1.items).toHaveLength(2)
+    const p2 = await listDeliveryLineActions(venueId, { limit: 2, cursor: p1.nextCursor! })
+    expect(p2).toMatchObject({ total: 3, hasMore: false, nextCursor: null })
+
+    expect([...p1.items, ...p2.items].map(i => i.id).sort()).toEqual(acciones.map(a => a.id).sort())
+  })
+
   it('reservas huerfanas de mas de 2 min se limpian', async () => {
     const huerfana = await sembrar()
     const viva = await sembrar()
@@ -555,11 +629,13 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
   it('los índices que sirven al barrido existen', async () => {
     const idx = await prisma.$queryRaw<{ indexname: string }[]>`
       SELECT indexname FROM pg_indexes
-      WHERE indexname IN ('KdsOrder_orderId_idx', 'KdsOrder_delivery_done_updatedAt_idx', 'Order_deliveryOpInFlightAt_pending_idx')`
+      WHERE indexname IN ('KdsOrder_orderId_idx', 'KdsOrder_delivery_done_updatedAt_idx', 'Order_deliveryOpInFlightAt_pending_idx',
+                          'Order_deliveryReconcileBlocked_idx')`
     expect(idx.map(i => i.indexname).sort()).toEqual([
       'KdsOrder_delivery_done_updatedAt_idx',
       'KdsOrder_orderId_idx',
       'Order_deliveryOpInFlightAt_pending_idx',
+      'Order_deliveryReconcileBlocked_idx',
     ])
   })
 

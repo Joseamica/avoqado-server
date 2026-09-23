@@ -358,6 +358,8 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
     expect(await prisma.payment.count({ where: { orderId: order.id, type: 'REFUND' } })).toBe(0)
     const o = await prisma.order.findUniqueOrThrow({ where: { id: order.id } })
     expect(o.deliveryReconcileBlocked).toBe('INCREASE_UNSUPPORTED')
+    // I-1: el bloqueo deja rastro con su hora — de ahí cuenta la alerta de 24 h.
+    expect(await prisma.activityLog.count({ where: { venueId, entityId: order.id, action: 'DELIVERY_ORDER_RECONCILE_BLOCKED' } })).toBe(1)
     expect(o.total.toString()).toBe('200')
     // La ausencia SÍ quedó acreditada: sigue en el barrido hasta que una persona decida.
     expect((await accionDe(order.id, 'b')).settlement).toBe('ACCREDITED')
@@ -386,6 +388,7 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
     expect(o.deliveryReconcileBlocked).toBe('FISCAL_RECLASS_UNSUPPORTED')
     expect(await prisma.payment.count({ where: { orderId: order.id, type: 'REFUND' } })).toBe(0)
     expect((await accionDe(order.id, 'a')).settlement).toBe('FISCAL_PENDING')
+    expect(await prisma.activityLog.count({ where: { venueId, entityId: order.id, action: 'DELIVERY_ORDER_RECONCILE_BLOCKED' } })).toBe(1)
   })
 
   it('deltas 0 y fiscal 0 ⇒ NO_DELTA, y la orden refleja al proveedor', async () => {

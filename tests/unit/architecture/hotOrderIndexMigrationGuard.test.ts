@@ -16,7 +16,13 @@ describe('migrations on the hot Order table', () => {
   })
 
   // KDS de Uber (tarea 15): KdsOrder se escribe en cada comanda y Order en cada cobro.
-  it.each(['KdsOrder_orderId_idx', 'KdsOrder_delivery_done_updatedAt_idx', 'Order_deliveryOpInFlightAt_pending_idx'])(
+  it.each([
+    'KdsOrder_orderId_idx',
+    'KdsOrder_delivery_done_updatedAt_idx',
+    'Order_deliveryOpInFlightAt_pending_idx',
+    // Revisión final (I-1): órdenes con la reconciliación bloqueada.
+    'Order_deliveryReconcileBlocked_idx',
+  ])(
     'builds %s concurrently in a standalone migration',
     name => {
       const migrationsRoot = path.resolve(process.cwd(), 'prisma/migrations')

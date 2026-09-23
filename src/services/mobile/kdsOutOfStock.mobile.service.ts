@@ -40,7 +40,7 @@ export const RETIRO_SIN_REFLEJAR_MS = 24 * 3_600_000
 
 /**
  * La MISMA condición que la alerta de 24 h del barrido (`delivery-line-action-reconciler.job.ts`
- * la espeja en SQL): un CONFIRMED cuyo dinero no se ha liquidado, o un UNCERTAIN sobre una orden
+ * la espeja en SQL): un CONFIRMED cuyo dinero no se ha liquidado (o espera una decisión fiscal), o un UNCERTAIN sobre una orden
  * bloqueada (fuera del barrido, esperando a una persona), con 24 h en ese estado.
  */
 export function retiroSinReflejar(
@@ -49,7 +49,7 @@ export function retiroSinReflejar(
   ahora = Date.now(),
 ): boolean {
   const esperando =
-    (a.status === 'CONFIRMED' && (a.settlement === 'PENDING' || a.settlement === 'ACCREDITED')) ||
+    (a.status === 'CONFIRMED' && (a.settlement === 'PENDING' || a.settlement === 'ACCREDITED' || a.settlement === 'FISCAL_PENDING')) ||
     (a.status === 'UNCERTAIN' && ordenBloqueada)
   return esperando && ahora - (a.resolvedAt ?? a.lastAttemptAt).getTime() >= RETIRO_SIN_REFLEJAR_MS
 }
@@ -489,48 +489,92 @@ export async function retryOutOfStock(
   return enviarYAplicar(l, a, staffId, propio)
 }
 
-/** Vista de sólo lectura (MCP): los retiros de renglón del venue, más recientes primero. */
-export async function listDeliveryLineActions(venueId: string, opts: { orderId?: string; limit?: number } = {}) {
+/**
+ * Vista de sólo lectura (MCP): los retiros de renglón del venue, más recientes primero, recorribles
+ * COMPLETOS por cursor `(updatedAt, id)` (P2), y las órdenes que esperan a una persona porque su
+ * reconciliación quedó bloqueada (I-1) — con o sin retiros.
+ */
+export async function listDeliveryLineActions(venueId: string, opts: { orderId?: string; limit?: number; cursor?: string } = {}) {
   const take = Math.min(Math.max(Math.trunc(opts.limit ?? 50), 1), 100)
-  const filas = await prisma.deliveryLineAction.findMany({
-    where: { venueId, ...(opts.orderId ? { orderId: opts.orderId } : {}) },
-    orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
-    take: take + 1,
-    select: {
-      orderId: true,
-      orderItemId: true,
-      lineId: true,
-      status: true,
-      settlement: true,
-      origin: true,
-      attempts: true,
-      lastAttemptAt: true,
-      providerStatus: true,
-      requestedByStaffId: true,
-      retriedByStaffId: true,
-      createdAt: true,
-      resolvedAt: true,
-    },
-  })
+  const base: Prisma.DeliveryLineActionWhereInput = { venueId, ...(opts.orderId ? { orderId: opts.orderId } : {}) }
+  const desde = opts.cursor ? leerCursor(opts.cursor) : null
+  const [filas, total, bloqueadasPag, blockedOrdersTotal] = await Promise.all([
+    prisma.deliveryLineAction.findMany({
+      where: desde
+        ? { ...base, OR: [{ updatedAt: { lt: desde.updatedAt } }, { updatedAt: desde.updatedAt, id: { lt: desde.id } }] }
+        : base,
+      orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
+      take: take + 1,
+      select: {
+        id: true,
+        orderId: true,
+        orderItemId: true,
+        lineId: true,
+        status: true,
+        settlement: true,
+        origin: true,
+        attempts: true,
+        lastAttemptAt: true,
+        providerStatus: true,
+        requestedByStaffId: true,
+        retriedByStaffId: true,
+        createdAt: true,
+        updatedAt: true,
+        resolvedAt: true,
+      },
+    }),
+    prisma.deliveryLineAction.count({ where: base }),
+    // Índice parcial `Order_deliveryReconcileBlocked_idx`: casi siempre ninguna fila.
+    prisma.order.findMany({
+      where: { venueId, deliveryReconcileBlocked: { not: null }, ...(opts.orderId ? { id: opts.orderId } : {}) },
+      orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
+      take: 20,
+      select: { id: true, orderNumber: true, externalId: true, deliveryReconcileBlocked: true, total: true, updatedAt: true },
+    }),
+    prisma.order.count({ where: { venueId, deliveryReconcileBlocked: { not: null }, ...(opts.orderId ? { id: opts.orderId } : {}) } }),
+  ])
   const pagina = filas.slice(0, take)
-  const inciertas = [...new Set(pagina.filter(f => f.status === 'UNCERTAIN').map(f => f.orderId))]
-  const bloqueadas = new Set(
-    inciertas.length === 0
+  const ordenes = [...new Set(pagina.map(f => f.orderId))]
+  const bloqueo = new Map(
+    ordenes.length === 0
       ? []
       : (
           await prisma.order.findMany({
-            where: { venueId, id: { in: inciertas }, deliveryReconcileBlocked: { not: null } },
-            select: { id: true },
-            take: inciertas.length,
+            where: { venueId, id: { in: ordenes }, deliveryReconcileBlocked: { not: null } },
+            select: { id: true, deliveryReconcileBlocked: true },
+            take: ordenes.length,
           })
-        ).map(o => o.id),
+        ).map(o => [o.id, o.deliveryReconcileBlocked]),
   )
+  const ultima = pagina[pagina.length - 1]
+  const hasMore = filas.length > take
   return {
     items: pagina.map(f => ({
       ...f,
       canRetryAt: f.status === 'UNCERTAIN' ? reintentableDesde(f.lastAttemptAt) : null,
-      unreflectedInProvider: retiroSinReflejar(f, bloqueadas.has(f.orderId)),
+      unreflectedInProvider: retiroSinReflejar(f, bloqueo.has(f.orderId)),
+      /** Por qué la reconciliación de esa orden espera a una persona, o null. */
+      reconcileBlocked: bloqueo.get(f.orderId) ?? null,
     })),
-    hasMore: filas.length > take,
+    hasMore,
+    nextCursor: hasMore && ultima ? `${ultima.updatedAt.toISOString()}|${ultima.id}` : null,
+    total,
+    blockedOrders: bloqueadasPag.map(o => ({
+      orderId: o.id,
+      orderNumber: o.orderNumber,
+      externalId: o.externalId,
+      reason: o.deliveryReconcileBlocked,
+      total: o.total.toString(),
+      updatedAt: o.updatedAt,
+    })),
+    blockedOrdersTotal,
   }
+}
+
+/** Cursor opaco `updatedAt ISO | id`. Uno que no se entiende es un error del llamador, no «desde el principio». */
+function leerCursor(cursor: string): { updatedAt: Date; id: string } {
+  const [iso, id] = cursor.split('|')
+  const updatedAt = new Date(iso ?? '')
+  if (!id || Number.isNaN(updatedAt.getTime())) throw new Error('cursor inválido: usa el nextCursor de la página anterior')
+  return { updatedAt, id }
 }

@@ -28,7 +28,8 @@ import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
  *     reenvía jamás. Las órdenes con `deliveryReconcileBlocked` (esperan a una persona) y las
  *     CANCELADAS (ya no son venta) NO entran — se ven en el 3. Las recientes van primero; las
  *     dormidas rotan y, si no avanzan, esperan por la misma racha que las fallas.
- *  3. A las 24 h en ese estado ⇒ 🚨 una vez, con rastro en `ActivityLog`.
+ *  3. A las 24 h en ese estado ⇒ 🚨 una vez, con rastro en `ActivityLog` (también un retiro
+ *     `FISCAL_PENDING` y una orden bloqueada que ningún retiro alerta).
  *  4. Reservas huérfanas (> 2 min) ⇒ se limpian, por token.
  *  5. «Listo» que la reserva dejó sin avisar ⇒ se reintenta (Ruling P7 de la Tarea 7).
  *
@@ -58,6 +59,8 @@ const ERROR_RECONCILIACION = 'DELIVERY_RECONCILE_ERROR'
 const RECONCILIACION_RECUPERADA = 'DELIVERY_RECONCILE_RECOVERED'
 const RETIRO_SIN_REFLEJAR = 'DELIVERY_ITEM_REMOVAL_UNREFLECTED'
 const SIN_AVANCE = 'SIN_AVANCE'
+const ORDEN_BLOQUEADA = 'DELIVERY_ORDER_RECONCILE_BLOCKED'
+const ORDEN_BLOQUEADA_SIN_RESOLVER = 'DELIVERY_ORDER_BLOCKED_UNRESOLVED'
 
 /** Minutos de espera tras `n` fallas seguidas: 0 hasta la 3.ª, luego 2, 4, 8… con tope de 6 h. */
 export const esperaTrasFallosMin = (n: number) => (n < FALLOS_ANTES_DE_ESPERAR ? 0 : Math.min(2 ** (n - 2), ESPERA_MAXIMA_MIN))
@@ -282,7 +285,7 @@ export class DeliveryLineActionReconcilerJob {
           FROM "DeliveryLineAction" a
           JOIN "Order" o ON o.id = a."orderId" AND o."venueId" = a."venueId"
           WHERE a.action = 'REMOVE_ITEM'
-            AND ((a.status = 'CONFIRMED' AND a.settlement IN ('PENDING', 'ACCREDITED'))
+            AND ((a.status = 'CONFIRMED' AND a.settlement IN ('PENDING', 'ACCREDITED', 'FISCAL_PENDING'))
                  OR (a.status = 'UNCERTAIN' AND o."deliveryReconcileBlocked" IS NOT NULL))
             AND COALESCE(a."resolvedAt", a."lastAttemptAt") <= ${utcTs(corte)}
             AND NOT EXISTS (
@@ -306,6 +309,47 @@ export class DeliveryLineActionReconcilerJob {
       logger.error('🚨 [Delivery line-actions] retiro sin reflejar en Uber tras 24 h: revisar el pedido', {
         actionId: f.id,
         orderId: f.orderId,
+        venueId: f.venueId,
+        bloqueo: f.bloqueo,
+      })
+    }
+    return filas.length + (await this.alertarOrdenesBloqueadas(corte))
+  }
+
+  /**
+   * 3b. Orden BLOQUEADA (espera a una persona) desde hace 24 h y sin un retiro que ya la alerte ⇒ 🚨
+   * una vez (I-1): un aumento del proveedor sin retiros, o retiros ya liquidados, no tenían quién la
+   * recordara. La hora sale del rastro `DELIVERY_ORDER_RECONCILE_BLOCKED` que deja el reconciliador;
+   * el índice parcial `Order_deliveryReconcileBlocked_idx` evita recorrer Order.
+   */
+  private async alertarOrdenesBloqueadas(corte: Date): Promise<number> {
+    const filas = await retry(
+      () =>
+        prisma.$queryRaw<Array<{ id: string; venueId: string; bloqueo: string }>>`
+          SELECT o.id, o."venueId", o."deliveryReconcileBlocked" AS bloqueo
+          FROM "Order" o
+          WHERE o."deliveryReconcileBlocked" IS NOT NULL
+            AND EXISTS (
+              SELECT 1 FROM "ActivityLog" l
+              WHERE l.entity = 'Order' AND l."entityId" = o.id AND l.action = ${ORDEN_BLOQUEADA}
+                AND l."createdAt" <= ${utcTs(corte)})
+            AND NOT EXISTS (
+              SELECT 1 FROM "ActivityLog" l
+              WHERE l.entity = 'Order' AND l."entityId" = o.id AND l.action = ${ORDEN_BLOQUEADA_SIN_RESOLVER})
+            -- La cubre la alerta de su retiro (el mismo caso no se grita dos veces).
+            AND NOT EXISTS (
+              SELECT 1 FROM "DeliveryLineAction" a
+              WHERE a."orderId" = o.id AND a.action = 'REMOVE_ITEM'
+                AND (a.status = 'UNCERTAIN'
+                     OR (a.status = 'CONFIRMED' AND a.settlement IN ('PENDING', 'ACCREDITED', 'FISCAL_PENDING'))))
+          ORDER BY o.id
+          LIMIT ${LOTE}`,
+      { shouldRetry: shouldRetryDbConnectionError, context: 'deliveryLineActions.ordenesBloqueadas' },
+    )
+    for (const f of filas) {
+      await this.registrar(f.venueId, f.id, ORDEN_BLOQUEADA_SIN_RESOLVER, { bloqueo: f.bloqueo })
+      logger.error('🚨 [Delivery line-actions] orden bloqueada 24 h esperando a una persona: el dinero no se ha reconciliado', {
+        orderId: f.id,
         venueId: f.venueId,
         bloqueo: f.bloqueo,
       })

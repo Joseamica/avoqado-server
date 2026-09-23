@@ -245,7 +245,7 @@ export async function reconcileDeliveryOrderFromProvider(
     const dPropina = pagadoPropina - centavos(foto.payment.externallyPaidTip)
 
     if (dVenta < 0 || dPropina < 0) {
-      await tx.order.update({ where: { id: orderId }, data: { deliveryReconcileBlocked: 'INCREASE_UNSUPPORTED' } })
+      await bloquear(tx, { orderId, venueId, motivo: 'INCREASE_UNSUPPORTED', data: { dVentaCents: dVenta, dPropinaCents: dPropina } })
       logger.error('🚨 [Delivery] el proveedor SUBIÓ venta o propina: no se escribe dinero, espera a una persona', {
         orderId,
         venueId,
@@ -277,7 +277,7 @@ export async function reconcileDeliveryOrderFromProvider(
         where: { id: { in: acreditadas.map(a => a.id) }, settlement: 'ACCREDITED' },
         data: { settlement: 'FISCAL_PENDING' },
       })
-      await tx.order.update({ where: { id: orderId }, data: { deliveryReconcileBlocked: 'FISCAL_RECLASS_UNSUPPORTED' } })
+      await bloquear(tx, { orderId, venueId, motivo: 'FISCAL_RECLASS_UNSUPPORTED', data: { fiscal, dVentaCents: dVenta } })
       logger.error(`🚨 [Delivery] ${motivo}: no se declara liquidado, espera a una persona`, {
         orderId,
         venueId,
@@ -355,6 +355,27 @@ export async function reconcileDeliveryOrderFromProvider(
       refundPaymentId,
     })
     return { outcome: 'REFUNDED' as const }
+  })
+}
+
+/**
+ * Bloquea la orden hasta que una persona decida, y deja rastro con la HORA del bloqueo: de ahí cuenta
+ * la alerta de 24 h del barrido (I-1), que no tiene otra forma de saber desde cuándo espera.
+ */
+async function bloquear(
+  tx: Prisma.TransactionClient,
+  p: { orderId: string; venueId: string; motivo: 'INCREASE_UNSUPPORTED' | 'FISCAL_RECLASS_UNSUPPORTED'; data: Prisma.InputJsonObject },
+) {
+  await tx.order.update({ where: { id: p.orderId }, data: { deliveryReconcileBlocked: p.motivo } })
+  await tx.activityLog.create({
+    data: {
+      venueId: p.venueId,
+      staffId: null,
+      action: 'DELIVERY_ORDER_RECONCILE_BLOCKED',
+      entity: 'Order',
+      entityId: p.orderId,
+      data: { motivo: p.motivo, ...p.data },
+    },
   })
 }
 

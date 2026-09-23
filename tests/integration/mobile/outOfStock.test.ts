@@ -735,9 +735,30 @@ describe('«No tengo este artículo» desde el KDS (Tarea 14)', () => {
     const vista = await listDeliveryLineActions(venueId, { orderId: s.order.id })
 
     expect(vista).toEqual({
-      items: [expect.objectContaining({ orderId: s.order.id, lineId: 'b', status: 'UNCERTAIN', attempts: 1, settlement: 'PENDING' })],
+      items: [
+        expect.objectContaining({
+          orderId: s.order.id,
+          lineId: 'b',
+          status: 'UNCERTAIN',
+          attempts: 1,
+          settlement: 'PENDING',
+          reconcileBlocked: null,
+        }),
+      ],
       hasMore: false,
+      nextCursor: null,
+      total: 1,
+      blockedOrders: [],
+      blockedOrdersTotal: 0,
     })
-    expect(await listDeliveryLineActions(venueIdOtro, { orderId: s.order.id })).toEqual({ items: [], hasMore: false })
+    // Otro negocio no ve nada: ni los retiros ni que la orden exista.
+    expect(await listDeliveryLineActions(venueIdOtro, { orderId: s.order.id })).toEqual({
+      items: [],
+      hasMore: false,
+      nextCursor: null,
+      total: 0,
+      blockedOrders: [],
+      blockedOrdersTotal: 0,
+    })
   })
 })
