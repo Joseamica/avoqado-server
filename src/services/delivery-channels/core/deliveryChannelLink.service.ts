@@ -345,6 +345,12 @@ export async function pauseChannelLink(
   linkId: string,
   paused: boolean,
   performedBy?: string,
+  /**
+   * Reanudar SÓLO una pausa con reloj (el POS o el job), leído en el mismo estado previo que usa el
+   * CAS: si entre la revisión del llamador y esta lectura el dueño la volvió indefinida, no se reabre.
+   * `VENCIDO` exige además que el reloj ya haya pasado (un re-snooze a futuro tampoco se reabre).
+   */
+  soloSnooze?: 'CUALQUIERA' | 'VENCIDO',
 ): Promise<DeliveryChannelLinkSafe> {
   const newStatus = paused ? DeliveryChannelStatus.PAUSED : DeliveryChannelStatus.ACTIVE
 
@@ -367,6 +373,16 @@ export async function pauseChannelLink(
       )
     }
     throw new ConflictError(`No se puede pausar un canal en estado ${previo.status}: sólo un canal activo se pausa.`)
+  }
+  if (!paused && soloSnooze) {
+    if (previo.snoozedUntil === null) {
+      throw new ValidationError(
+        'Este canal lo pausaron desde el dashboard, sin fecha de reactivación. Para volver a recibir pedidos, pídeselo a quien administra el negocio.',
+      )
+    }
+    if (soloSnooze === 'VENCIDO' && previo.snoozedUntil > new Date()) {
+      throw new ConflictError('La pausa de este canal se extendió; se reanudará cuando venza.')
+    }
   }
 
   // CAS sobre ese estado exacto. 🔴 `snoozedUntil: null` SIEMPRE, en las dos direcciones. Esta
@@ -537,20 +553,7 @@ export async function snoozeChannelLink(
  * avería, por falta de personal, o por lo que sea. Reabrir sigue siendo suyo.
  */
 export async function cancelarSnooze(venueId: string, linkId: string, performedBy?: string): Promise<DeliveryChannelLinkSafe> {
-  const actual = await prisma.deliveryChannelLink.findFirst({
-    where: { id: linkId, venueId },
-    select: { snoozedUntil: true },
-  })
-
-  if (!actual) throw new NotFoundError('Canal de delivery no encontrado')
-
-  if (actual.snoozedUntil === null) {
-    throw new ValidationError(
-      'Este canal lo pausaron desde el dashboard, sin fecha de reactivación. Para volver a recibir pedidos, pídeselo a quien administra el negocio.',
-    )
-  }
-
-  return pauseChannelLink(venueId, linkId, false, performedBy)
+  return pauseChannelLink(venueId, linkId, false, performedBy, 'CUALQUIERA')
 }
 
 /**
@@ -572,7 +575,7 @@ export async function reanudarSnoozesVencidos(): Promise<{ reanudados: number; f
 
   for (const canal of vencidos) {
     try {
-      await pauseChannelLink(canal.venueId, canal.id, false)
+      await pauseChannelLink(canal.venueId, canal.id, false, undefined, 'VENCIDO')
       reanudados++
       logger.info('⏰ [DeliveryChannel] se acabó la pausa: canal reactivado', {
         linkId: canal.id,

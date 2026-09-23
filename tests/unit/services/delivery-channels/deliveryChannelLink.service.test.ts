@@ -650,7 +650,10 @@ describe('deliveryChannelLink.service', () => {
     })
 
     it('🔴 si un canal falla al reanudar, los DEMÁS igual se reanudan', async () => {
-      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({ status: DeliveryChannelStatus.PAUSED, snoozedUntil: null })
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({
+        status: DeliveryChannelStatus.PAUSED,
+        snoozedUntil: new Date(Date.now() - 60_000),
+      })
       // Sin aislar, un venue con el proveedor caído dejaría a todos los demás negocios
       // apagados. El trabajo por lote no puede rendirse en el primer error.
       ;(prisma.deliveryChannelLink.findMany as jest.Mock).mockResolvedValue([
@@ -666,6 +669,23 @@ describe('deliveryChannelLink.service', () => {
 
       expect(r.reanudados).toBe(1)
       expect(r.fallidos).toBe(1)
+    })
+
+    // El job elige los vencidos y DESPUÉS reanuda cada uno: si en medio el dueño volvió la pausa
+    // indefinida (o la alargó), el estado que manda es el que se relee para el CAS, no la lista vieja.
+    it.each([
+      ['el dueño la volvió indefinida', null],
+      ['el reloj se alargó a futuro', new Date(Date.now() + 600_000)],
+    ])('🔴 no reabre un canal si entre la selección y la escritura %s', async (_caso, snoozedUntil) => {
+      ;(prisma.deliveryChannelLink.findMany as jest.Mock).mockResolvedValue([
+        { id: 'l1', venueId: 'v1', provider: DeliveryProvider.UBER_EATS },
+      ])
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({ status: DeliveryChannelStatus.PAUSED, snoozedUntil })
+
+      const r = await reanudarSnoozesVencidos()
+
+      expect(r).toEqual({ reanudados: 0, fallidos: 1 })
+      expect(prisma.deliveryChannelLink.updateMany).not.toHaveBeenCalled()
     })
   })
 
