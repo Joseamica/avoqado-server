@@ -118,18 +118,18 @@ async function revocacionesDeLaTienda(tx: Tx, storeId: string): Promise<number> 
  */
 export async function revocarTienda(storeId: string): Promise<Array<{ id: string; venueId: string }>> {
   const clave = claveTienda(storeId)
-  const ahora = utcTs(new Date())
+  const ahora = new Date()
   return prisma.$transaction(async tx => {
     await tx.$executeRaw`
       INSERT INTO "DeliveryStoreRevocation" ("provider", "externalLocationId", "version", "revokedAt")
-      VALUES ('UBER_EATS', ${clave}, 1, ${ahora})
+      VALUES ('UBER_EATS', ${clave}, 1, ${utcTs(ahora)})
       ON CONFLICT ("provider", "externalLocationId")
       DO UPDATE SET "version" = "DeliveryStoreRevocation"."version" + 1, "revokedAt" = EXCLUDED."revokedAt"`
     return tx.$queryRaw<Array<{ id: string; venueId: string }>>`
       UPDATE "DeliveryChannelLink"
          SET "status" = 'DISABLED', "ownerAuthorizedAt" = NULL, "ownerAuthorizedEnvironment" = NULL,
              "ownerAuthorizedStoreId" = NULL, "ownerAuthorizedClientId" = NULL, "ownerAuthorizedByIntentId" = NULL,
-             "revocationVersion" = "revocationVersion" + 1, "updatedAt" = ${ahora}
+             "revocationVersion" = "revocationVersion" + 1, "updatedAt" = ${utcTs(ahora)}
        WHERE "provider" = 'UBER_EATS' AND lower(btrim("externalLocationId")) = ${clave}
        RETURNING "id", "venueId"`
   })
