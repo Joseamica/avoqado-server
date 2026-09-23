@@ -508,6 +508,15 @@ describe('DeliveryWebhookReconciliationJob', () => {
       )
     })
 
+    it('P1-2: el presupuesto de reintentos del job alcanza la vida del aviso (3 h) antes de volverlo POISON', () => {
+      // Si el backoff o MAX_ATTEMPTS cambian y el job se rinde antes, el aviso muere como POISON sin la
+      // incidencia de «cambio sin confirmar» que el procesador levanta al agotarse la vida del pedido.
+      const job = new DeliveryWebhookReconciliationJob() as unknown as { backoffMs(n: number): number; MAX_ATTEMPTS: number }
+      let esperaMs = 0
+      for (let n = 1; n < job.MAX_ATTEMPTS; n++) esperaMs += job.backoffMs(n)
+      expect(esperaMs).toBeGreaterThan(3 * 3_600_000)
+    })
+
     it.each(['CAMBIO_SIN_CONFIRMAR'])('P1-2: %s se relee con backoff, y es una espera (warn), no una falla', async motivo => {
       mockedFindMany.mockResolvedValueOnce([eventoUber({ eventType: 'order.fulfillment_issues.resolved' })]).mockResolvedValueOnce([])
       mockedProcessUber.mockResolvedValueOnce({ outcome: 'FAILED', orderId: 'ord_u', error: motivo })
