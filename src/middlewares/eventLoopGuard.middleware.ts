@@ -32,6 +32,7 @@
 import type { Request, Response, NextFunction } from 'express'
 import { PerformanceObserver, performance } from 'node:perf_hooks'
 import logger from '../config/logger'
+import { redactUrlSecrets } from './requestLogger'
 import {
   registroDeJobs as registroGlobalDeJobs,
   type RegistroDeJobs,
@@ -107,7 +108,9 @@ export function getInFlightRequests(): Array<{ method: string; url: string; ageM
   const now = Date.now()
   return Array.from(inFlight.values()).map(r => ({
     method: r.method,
-    url: r.url,
+    // 🔴 Redactada al LEER, no al anotar: esta lista sale al log del hilo retenido, y el query
+    // puede traer `code`/`state`/`intent` de OAuth. Hacerlo aquí no cuesta nada por petición.
+    url: redactUrlSecrets(r.url),
     ageMs: now - r.startedAt,
   }))
 }

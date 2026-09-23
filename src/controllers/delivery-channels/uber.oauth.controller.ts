@@ -97,6 +97,58 @@ const TEXTO_RESULTADO: Record<string, string> = {
   [intents.RESULTADO_REINTENTABLE]: '<span class="bad">no se pudo guardar</span>; usa «Reintentar».',
 }
 
+/** El negocio de Avoqado al que van las tiendas: la ÚNICA pista que tiene el dueño de la cuenta de Uber de que el enlace es el correcto. */
+async function nombreDelNegocio(venueId: string): Promise<string> {
+  return (await prisma.venue.findUnique({ where: { id: venueId }, select: { name: true } }))?.name ?? '(negocio sin nombre)'
+}
+
+/** Error público: texto fijo + el código de la petición para soporte. El mensaje interno sólo va al log. */
+function paginaError(res: Response, titulo: string): string {
+  const codigo = res.getHeader('X-Correlation-ID')
+  return page(
+    titulo,
+    '<p class="bad">Algo falló de nuestro lado. Inténtalo de nuevo en unos minutos.</p>' +
+      (codigo ? `<p>Si escribes a soporte, comparte este código: <code>${esc(codigo)}</code></p>` : ''),
+  )
+}
+
+/**
+ * La confirmación ANTES de conectar, también con UNA sola tienda.
+ *
+ * ⚠️ Desviación deliberada del spec §4.1 (que activaba sola la tienda única): el enlace es al
+ * portador y el dashboard lo manda por correo, así que alguien con permiso en OTRO negocio podría
+ * mandárselo al dueño de una tienda real haciéndose pasar por Avoqado. Con una tienda, un clic en
+ * la pantalla legítima de Uber bastaba para desviarle los pedidos. Ahora siempre se ve A QUÉ
+ * negocio van y hay que confirmarlo; los dos caminos publican al mismo `POST /oauth/activate`.
+ */
+function paginaSeleccion(id: string, tiendas: intents.TiendaUber[], negocio: string): string {
+  const cabecera =
+    `<p>Vas a conectar estas tiendas a <strong>${esc(negocio)}</strong> en Avoqado. Al conectarlas, Uber empezará a mandar ` +
+    'sus pedidos a ese negocio. Si ése no es tu negocio, cierra esta página y no conectes nada.</p>'
+  const state2 = `<input type="hidden" name="state2" value="${esc(intents.firmarIntent(id, 'activate'))}">`
+  if (tiendas.length === 1) {
+    const t = tiendas[0]
+    return page(
+      'Confirma la conexión',
+      `${cabecera}<form method="post" action="${ACTIVATE_PATH}">${state2}<input type="hidden" name="stores" value="${esc(t.id)}">
+<p><strong>${esc(t.name ?? '(sin nombre)')}</strong> <code>${esc(t.id)}</code></p>
+<button type="submit">Conectar ${esc(t.name ?? t.id)} a ${esc(negocio)}</button></form>`,
+    )
+  }
+  // La palomita del dueño ES el permiso por tienda (decisión del founder). Nada viene marcado.
+  const opciones = tiendas
+    .map(
+      t =>
+        `<li><label><input type="checkbox" name="stores" value="${esc(t.id)}"> <strong>${esc(t.name ?? '(sin nombre)')}</strong> <code>${esc(t.id)}</code></label></li>`,
+    )
+    .join('')
+  return page(
+    'Elige qué tiendas conectar',
+    `${cabecera}<form method="post" action="${ACTIVATE_PATH}">${state2}
+<ul>${opciones}</ul><button type="submit">Conectar las tiendas marcadas a ${esc(negocio)}</button></form>`,
+  )
+}
+
 function formularioReintentar(id: string): string {
   return `<form method="post" action="${ACTIVATE_PATH}"><input type="hidden" name="state2" value="${esc(intents.firmarIntent(id, 'activate'))}">
 <button type="submit">Reintentar</button></form>`
@@ -117,13 +169,9 @@ async function responderActivacion(res: Response, id: string, r: intents.Resulta
       .send(page('Activación en curso', '<p>Ya se están conectando estas tiendas en otra pestaña. Espera unos segundos y recarga.</p>'))
     return
   }
-  const tiendas = new Map(
-    (
-      ((await prisma.deliveryConnectIntent.findUnique({ where: { id }, select: { storesJson: true } }))?.storesJson as
-        | intents.TiendaUber[]
-        | null) ?? []
-    ).map(t => [t.id, t]),
-  )
+  const fila = await prisma.deliveryConnectIntent.findUnique({ where: { id }, select: { storesJson: true, venueId: true } })
+  const tiendas = new Map(((fila?.storesJson as intents.TiendaUber[] | null) ?? []).map(t => [t.id, t]))
+  const negocio = esc(fila ? await nombreDelNegocio(fila.venueId) : '')
   const filas = Object.entries(r.resultados).map(
     ([storeId, x]) =>
       `<li><strong>${esc(tiendas.get(storeId)?.name ?? '(sin nombre)')}</strong><br><code>${esc(storeId)}</code><br>` +
@@ -131,13 +179,23 @@ async function responderActivacion(res: Response, id: string, r: intents.Resulta
   )
   if (r.estado === 'CONSUMED') {
     const todas = Object.values(r.resultados).every(x => x.outcome === 'ACTIVATED')
-    res.status(todas ? 200 : 207).send(page(todas ? 'Avoqado quedó conectado' : 'Conexión con avisos', `<ul>${filas.join('')}</ul>`))
+    const encabezado = todas
+      ? `Conectadas a <strong>${negocio}</strong> en Avoqado:`
+      : `Resultado para <strong>${negocio}</strong> en Avoqado:`
+    res
+      .status(todas ? 200 : 207)
+      .send(page(todas ? 'Avoqado quedó conectado' : 'Conexión con avisos', `<p>${encabezado}</p><ul>${filas.join('')}</ul>`))
     return
   }
   // INCOMPLETO (un fallo local dejó tiendas sin finalizar) o INTERRUMPIDO (esta ejecución perdió el lease).
   res
     .status(r.estado === 'INCOMPLETO' ? 207 : 409)
-    .send(page('La conexión quedó a medias', `<ul>${filas.join('')}</ul><p>Faltan tiendas por terminar.</p>${formularioReintentar(id)}`))
+    .send(
+      page(
+        'La conexión quedó a medias',
+        `<p>Resultado para <strong>${negocio}</strong> en Avoqado:</p><ul>${filas.join('')}</ul><p>Faltan tiendas por terminar.</p>${formularioReintentar(id)}`,
+      ),
+    )
 }
 
 /**
@@ -242,11 +300,11 @@ export async function startUberOAuth(req: Request, res: Response): Promise<void>
     )
   } catch (e) {
     logger.error('No se pudo iniciar el OAuth de Uber', { error: (e as Error).message })
-    res.status(500).send(page('No se pudo iniciar', `<p class="bad">${esc((e as Error).message)}</p>`))
+    res.status(500).send(paginaError(res, 'No se pudo iniciar'))
   }
 }
 
-/** Paso 2: recibe el código, canjea, lista tiendas; una ⇒ activa ya, varias ⇒ el dueño palomea. */
+/** Paso 2: recibe el código, canjea, lista tiendas y pide confirmar A QUÉ negocio van (una o varias). */
 export async function uberOAuthCallback(req: Request, res: Response): Promise<void> {
   const { code, state, error, error_description: desc } = req.query as Record<string, string>
   try {
@@ -308,36 +366,19 @@ export async function uberOAuthCallback(req: Request, res: Response): Promise<vo
       return
     }
 
-    const una = tiendas.length === 1
-    const guardado = await intents.casEstado(id, 'EXCHANGED', una ? 'ACTIVATING' : 'EXCHANGED', {
+    const guardado = await intents.casEstado(id, 'EXCHANGED', 'EXCHANGED', {
       storesJson: tiendas as never,
       merchantTokenEnvelope: intents.cifrarTokenComerciante(intent, token),
-      ...(una ? { selectionJson: [tiendas[0].id] } : {}),
     })
     if (!guardado) {
       res.status(400).send(YA_USADO)
       return
     }
-    if (una) return responderActivacion(res, id, await intents.activar(id, activarTiendaUber))
-
-    // Varias tiendas: la palomita del dueño ES el permiso por tienda (decisión del founder). Nada viene marcado.
-    const opciones = tiendas
-      .map(
-        t =>
-          `<li><label><input type="checkbox" name="stores" value="${esc(t.id)}"> <strong>${esc(t.name ?? '(sin nombre)')}</strong> <code>${esc(t.id)}</code></label></li>`,
-      )
-      .join('')
-    res.status(200).send(
-      page(
-        'Elige qué tiendas conectar',
-        `<p>Marca sólo las tiendas que pertenecen a este negocio. Al conectarlas, Uber empezará a mandar sus pedidos a Avoqado.</p>
-<form method="post" action="${ACTIVATE_PATH}"><input type="hidden" name="state2" value="${esc(intents.firmarIntent(id, 'activate'))}">
-<ul>${opciones}</ul><button type="submit">Conectar las tiendas marcadas</button></form>`,
-      ),
-    )
+    // Con una tienda o con varias, nada se activa sin que el dueño vea A QUÉ negocio van y lo confirme.
+    res.status(200).send(paginaSeleccion(id, tiendas, await nombreDelNegocio(intent.venueId)))
   } catch (err) {
     logger.error('Falló el callback de OAuth de Uber', { error: (err as Error).message })
-    res.status(500).send(page('Falló la activación', `<p class="bad">${esc((err as Error).message)}</p>`))
+    res.status(500).send(paginaError(res, 'Falló la conexión'))
   }
 }
 
@@ -357,13 +398,23 @@ export async function activarUberOAuth(req: Request, res: Response): Promise<voi
         res.status(400).send(page('Selección inválida', '<p class="bad">Marca al menos una de las tiendas que Uber mostró.</p>'))
         return
       }
-      // count 0 ⇒ otra petición ya la movió; `activar` decide con el estado real.
-      await intents.casEstado(id, 'EXCHANGED', 'ACTIVATING', { selectionJson: pedidas as string[] })
+      // count 0 ⇒ otra pestaña mandó SU selección antes: no se activa la de otro en nombre de ésta.
+      if (!(await intents.casEstado(id, 'EXCHANGED', 'ACTIVATING', { selectionJson: pedidas as string[] }))) {
+        res
+          .status(409)
+          .send(
+            page(
+              'Ya se había enviado otra selección',
+              '<p class="bad">Para este enlace ya se había enviado otra selección de tiendas (quizá desde otra pestaña). Revisa esa pestaña para ver el resultado.</p>',
+            ),
+          )
+        return
+      }
     }
     // ACTIVATING = «Reintentar»: se usa la selección guardada, nunca la del cuerpo.
     return responderActivacion(res, id, await intents.activar(id, activarTiendaUber))
   } catch (err) {
     logger.error('Falló la activación de Uber', { error: (err as Error).message })
-    res.status(500).send(page('Falló la activación', `<p class="bad">${esc((err as Error).message)}</p>`))
+    res.status(500).send(paginaError(res, 'Falló la conexión'))
   }
 }

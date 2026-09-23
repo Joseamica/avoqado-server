@@ -111,9 +111,15 @@ export function descifrarTokenComerciante(intent: Identidad & { merchantTokenEnv
   try {
     const [v, iv, tag, ct] = (intent.merchantTokenEnvelope ?? '').split(':')
     if (v !== 'v1' || !iv || !tag || !ct) return null
-    const d = crypto.createDecipheriv('aes-256-gcm', derivar('uber-merchant-token', intent.id), Buffer.from(iv, 'base64'))
+    // 🔴 La etiqueta mide 16 B exactos: GCM acepta etiquetas RECORTADAS (hasta 4 B) si no se exige
+    // el largo, y un prefijo de la buena verifica — la resistencia a falsificación caería a ~2^32.
+    const etiqueta = Buffer.from(tag, 'base64')
+    if (etiqueta.length !== 16) return null
+    const d = crypto.createDecipheriv('aes-256-gcm', derivar('uber-merchant-token', intent.id), Buffer.from(iv, 'base64'), {
+      authTagLength: 16,
+    })
     d.setAAD(aad(intent))
-    d.setAuthTag(Buffer.from(tag, 'base64'))
+    d.setAuthTag(etiqueta)
     return Buffer.concat([d.update(Buffer.from(ct, 'base64')), d.final()]).toString('utf8')
   } catch {
     return null

@@ -23,6 +23,7 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 describe('Intención de conexión de Uber (Tarea 17)', () => {
   const sufijo = Date.now()
   const tiendaA = `t17-a-${sufijo}`
+  const negocio = `V t17 ${sufijo}`
   const tiendaB = `t17-b-${sufijo}`
   const tiendasDeUber = [
     { id: tiendaA, name: 'Sucursal A' },
@@ -80,7 +81,7 @@ describe('Intención de conexión de Uber (Tarea 17)', () => {
       create: { code: 'DELIVERY_CHANNELS', name: 'Delivery', category: 'INTEGRATIONS', monthlyPrice: 0 },
     })
     orgId = (await prisma.organization.create({ data: { name: `Org t17 ${sufijo}`, email: `t17${sufijo}@t.mx`, phone: '5555555555' } })).id
-    venueId = (await prisma.venue.create({ data: { organizationId: orgId, name: `V t17 ${sufijo}`, slug: `v-t17-${sufijo}` } })).id
+    venueId = (await prisma.venue.create({ data: { organizationId: orgId, name: negocio, slug: `v-t17-${sufijo}` } })).id
     venueSinPlanId = (
       await prisma.venue.create({ data: { organizationId: orgId, name: `V t17 sp ${sufijo}`, slug: `v-t17-sp-${sufijo}` } })
     ).id
@@ -167,22 +168,75 @@ describe('Intención de conexión de Uber (Tarea 17)', () => {
     expect(await fila(id as string)).toMatchObject({ venueId, staffId, state: 'CREATED', clientId: 'cid-sandbox-t17' })
   })
 
-  it('replay del callback ⇒ "ya se usó o venció", sin canjear el código', async () => {
-    listaDeTiendas = [tiendasDeUber[0]]
+  /** `/start` → 302 → el `state` del callback, como lo haría el navegador. */
+  async function stateDelCallback() {
     const { intent, firmado } = await intents.crearIntent({ venueId, staffId })
     const inicio = await request(server).get(`${OAUTH}/start?intent=${firmado}`)
-    const state = new URL(inicio.headers.location).searchParams.get('state') as string
+    return { id: intent.id, state: new URL(inicio.headers.location).searchParams.get('state') as string }
+  }
 
-    const primero = await request(server).get(`${OAUTH}/callback`).query({ code: 'codigo-1', state })
-    expect(primero.status).toBe(200)
-    expect(posData).toHaveBeenCalledTimes(1)
-    expect(await fila(intent.id)).toMatchObject({ state: 'CONSUMED', merchantTokenEnvelope: null })
+  it('replay del callback ⇒ "ya se usó o venció", sin canjear el código', async () => {
+    listaDeTiendas = [tiendasDeUber[0]]
+    const { id, state } = await stateDelCallback()
 
+    expect((await request(server).get(`${OAUTH}/callback`).query({ code: 'codigo-1', state })).status).toBe(200)
     const replay = await request(server).get(`${OAUTH}/callback`).query({ code: 'codigo-1', state })
     expect(replay.status).toBe(400)
     expect(replay.text).toContain('ya se usó o venció')
     expect(canje).toHaveBeenCalledTimes(1)
-    expect(posData).toHaveBeenCalledTimes(1)
+    expect((await fila(id)).state).toBe('EXCHANGED')
+  })
+
+  it('una sola tienda NO se activa sola: el callback pide confirmar, nombrando el negocio, y espera el POST', async () => {
+    listaDeTiendas = [tiendasDeUber[0]]
+    const { id, state } = await stateDelCallback()
+
+    const confirmar = await request(server).get(`${OAUTH}/callback`).query({ code: 'codigo-1', state })
+    expect(confirmar.status).toBe(200)
+    expect(confirmar.text).toContain(`Vas a conectar estas tiendas a <strong>${negocio}</strong>`)
+    expect(confirmar.text).toContain(`Conectar Sucursal A a ${negocio}`)
+    expect(await fila(id)).toMatchObject({ state: 'EXCHANGED', selectionJson: null, activationAttempt: 0 })
+    expect(posData).not.toHaveBeenCalled()
+
+    const resultado = await postActivar(id, [tiendaA])
+    expect(resultado.status).toBe(200)
+    expect(resultado.text).toContain(`Conectadas a <strong>${negocio}</strong>`)
+    expect(posData.mock.calls).toEqual([[tiendaA]])
+    expect((await fila(id)).state).toBe('CONSUMED')
+  })
+
+  it('con varias tiendas la página de selección nombra el negocio y no marca ninguna', async () => {
+    const { state } = await stateDelCallback()
+    const pagina = await request(server).get(`${OAUTH}/callback`).query({ code: 'codigo-1', state })
+    expect(pagina.status).toBe(200)
+    expect(pagina.text).toContain(`Vas a conectar estas tiendas a <strong>${negocio}</strong>`)
+    expect(pagina.text).toContain(`Conectar las tiendas marcadas a ${negocio}`)
+    expect(pagina.text).not.toContain('checked')
+    expect(posData).not.toHaveBeenCalled()
+  })
+
+  it('si otra pestaña ya mandó su selección, el segundo POST lo dice y NO activa la selección ajena', async () => {
+    const id = await canjeado()
+    const real = intents.casEstado
+    // La otra pestaña gana el CAS justo entre la lectura y el CAS de ésta.
+    jest.spyOn(intents, 'casEstado').mockImplementationOnce(async () => {
+      await real(id, 'EXCHANGED', 'ACTIVATING', { selectionJson: [tiendaB] })
+      return false
+    })
+    const res = await postActivar(id, [tiendaA])
+    expect(res.status).toBe(409)
+    expect(res.text).toContain('ya se había enviado otra selección')
+    expect(posData).not.toHaveBeenCalled()
+    expect(await fila(id)).toMatchObject({ state: 'ACTIVATING', selectionJson: [tiendaB], activationAttempt: 0 })
+  })
+
+  it('una página de error pública no enseña el mensaje interno: texto fijo + código de soporte', async () => {
+    const { firmado } = await intents.crearIntent({ venueId, staffId })
+    jest.spyOn(prisma.deliveryConnectIntent, 'findUnique').mockRejectedValueOnce(new Error('detalle-interno-de-la-base'))
+    const res = await request(server).get(`${OAUTH}/start?intent=${firmado}`)
+    expect(res.status).toBe(500)
+    expect(res.text).not.toContain('detalle-interno-de-la-base')
+    expect(res.text).toContain(res.headers['x-correlation-id'])
   })
 
   it('empleado dado de baja entre emitir y activar ⇒ FAILED, cero activaciones', async () => {
@@ -274,6 +328,9 @@ describe('Intención de conexión de Uber (Tarea 17)', () => {
     expect(f.merchantTokenEnvelope).not.toContain('token-del-comerciante')
     expect(intents.descifrarTokenComerciante(f)).toBe('token-del-comerciante')
     expect(intents.descifrarTokenComerciante({ ...f, venueId: venueSinPlanId })).toBeNull() // AAD
+    // Una etiqueta RECORTADA (prefijo de la buena) no abre: GCM la aceptaría si no se exige 16 B.
+    const recortada = [v, iv, Buffer.from(tag, 'base64').subarray(0, 12).toString('base64'), ct].join(':')
+    expect(intents.descifrarTokenComerciante({ ...f, merchantTokenEnvelope: recortada })).toBeNull()
 
     Object.assign(env, { UBER_WEBHOOK_SIGNING_KEY: 'llave-rotada' })
     const tienda = jest.fn()
@@ -283,10 +340,27 @@ describe('Intención de conexión de Uber (Tarea 17)', () => {
     expect(await fila(id)).toMatchObject({ state: 'FAILED', merchantTokenEnvelope: null, activationOwner: null })
   })
 
+  it('el paso a CONSUMED exige dueño y lease vivos: si el lease vence tras el último resultado ⇒ INTERRUMPIDO', async () => {
+    const id = await activando([tiendaA])
+    const real = prisma.$executeRaw.bind(prisma)
+    // El último `registrarResultado` pasa; justo después el lease vence (un GC largo, un proceso congelado).
+    jest.spyOn(prisma, '$executeRaw').mockImplementation((async (...args: Parameters<typeof prisma.$executeRaw>) => {
+      const n = await real(...args)
+      await prisma.deliveryConnectIntent.update({ where: { id }, data: { activationLeaseUntil: new Date(Date.now() - 1_000) } })
+      return n
+    }) as never)
+    const r = await intents.activar(id, async () => ({ outcome: 'ACTIVATED' }))
+    expect(r.estado).toBe('INTERRUMPIDO')
+    const f = await fila(id)
+    expect(f.state).toBe('ACTIVATING')
+    expect(f.merchantTokenEnvelope).not.toBeNull()
+  })
+
   it('tras CONSUMED el token queda en null', async () => {
     const id = await canjeado()
     const res = await postActivar(id, [tiendaB])
     expect(res.status).toBe(200)
+    expect(res.text).toContain(`Conectadas a <strong>${negocio}</strong>`)
     const f = await fila(id)
     expect(f).toMatchObject({
       state: 'CONSUMED',
