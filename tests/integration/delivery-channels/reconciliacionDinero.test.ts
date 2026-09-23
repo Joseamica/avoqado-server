@@ -111,6 +111,23 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
 
   const reembolsos = (orderId: string) => prisma.payment.findMany({ where: { orderId, type: 'REFUND' }, orderBy: { createdAt: 'asc' } })
   const accionDe = (orderId: string, lineId: string) => prisma.deliveryLineAction.findFirstOrThrow({ where: { orderId, lineId } })
+  /** Un reembolso MANUAL del dashboard (el núcleo real, ligado al cobro original). */
+  const manual = async (orderId: string, cents: number) => {
+    const original = await prisma.payment.findFirstOrThrow({ where: { orderId, type: { not: 'REFUND' } } })
+    await prisma.$transaction(tx =>
+      writeRefundInTx(tx, {
+        originalPaymentId: original.id,
+        venueId,
+        salesRefundCents: cents,
+        tipRefundCents: 0,
+        refundedItems: [],
+        reason: 'OTHER',
+        tenderCommission: 'NONE',
+        shift: 'INHERIT_ORIGINAL',
+        provenance: 'MANUAL',
+      }),
+    )
+  }
 
   beforeAll(async () => {
     const org = await prisma.organization.create({
@@ -310,23 +327,6 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
   })
 
   describe('deriva de redondeo (re-revisión, Minor): 1 centavo por tasa se absorbe; 2 siguen bloqueando', () => {
-    const manual = async (orderId: string, cents: number) => {
-      const original = await prisma.payment.findFirstOrThrow({ where: { orderId, type: { not: 'REFUND' } } })
-      await prisma.$transaction(tx =>
-        writeRefundInTx(tx, {
-          originalPaymentId: original.id,
-          venueId,
-          salesRefundCents: cents,
-          tipRefundCents: 0,
-          refundedItems: [],
-          reason: 'OTHER',
-          tenderCommission: 'NONE',
-          shift: 'INHERIT_ORIGINAL',
-          provenance: 'MANUAL',
-        }),
-      )
-    }
-
     it('N-6: manual del renglón retirado y DESPUÉS la compensación del proveedor ⇒ se escribe y queda la bandera', async () => {
       const { order, foto } = await sembrar(
         [
@@ -405,6 +405,54 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
       proveedorDevuelve(foto(['b'], pago('100.00', '0.00')))
 
       expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('FISCAL_PENDING')
+    })
+  })
+
+  describe('N-7: la compensación del proveedor excede lo que queda reembolsable del cobro', () => {
+    const renglones: Renglon[] = [
+      { linea: 'a', nombre: 'Cochinita', precio: '150.00' },
+      { linea: 'b', nombre: 'Horchata', precio: '50.00' },
+    ]
+    const cuentaBandera = (orderId: string) =>
+      prisma.activityLog.count({ where: { venueId, entityId: orderId, action: 'DELIVERY_REFUND_POSSIBLE_DUPLICATE' } })
+
+    it('Codex r5: $200, manual de $180 y Uber retira $50 ⇒ bloqueo VISIBLE, sin excepción; las pasadas siguientes callan', async () => {
+      const { order, item, foto } = await sembrar(renglones, pago('200.00', '0.00'))
+      await manual(order.id, 18000)
+      proveedorDevuelve(foto(['a'], pago('150.00', '0.00')))
+      const gritos = jest.spyOn(logger, 'error')
+
+      const r = await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })
+
+      expect(r.outcome).toBe('BLOCKED_EXCEEDS_REFUNDABLE')
+      const o = await prisma.order.findUniqueOrThrow({ where: { id: order.id } })
+      expect(o.deliveryReconcileBlocked).toBe('EXCEEDS_REFUNDABLE')
+      expect((await reembolsos(order.id)).map(f => f.amount.toString())).toEqual(['-180']) // ningún dinero nuevo
+      expect(await cuentaBandera(order.id)).toBe(1)
+      expect(gritos.mock.calls.filter(([m]) => String(m).startsWith('🚨') && String(m).includes('excede lo reembolsable'))).toHaveLength(1)
+      // La cocina es independiente del dinero: el renglón SÍ queda retirado.
+      expect((await prisma.orderItem.findUniqueOrThrow({ where: { id: item.b.id } })).removedAt).not.toBeNull()
+
+      // Pasadas siguientes: bloqueada, sin lanzar, sin bandera nueva.
+      expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'JOB' })).outcome).toBe('BLOCKED_EXCEEDS_REFUNDABLE')
+      expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'WEBHOOK' })).outcome).toBe('BLOCKED_EXCEEDS_REFUNDABLE')
+      expect(await cuentaBandera(order.id)).toBe(1)
+      expect((await reembolsos(order.id)).map(f => f.amount.toString())).toEqual(['-180'])
+    })
+
+    it('control: chargeback de $180 del reporte (no ligado al cobro) y retiro de $50 ⇒ se compensa y queda la bandera, como hoy', async () => {
+      const { order, foto } = await sembrar(renglones, pago('200.00', '0.00'))
+      expect(
+        (await applyDeliveryRefund({ externalOrderId: order.externalId!.split(':')[1], provider: 'UBER_EATS', montoDevuelto: '180.00', motivo: 'reporte' }))
+          .outcome,
+      ).toBe('APPLIED')
+      proveedorDevuelve(foto(['a'], pago('150.00', '0.00')))
+
+      expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('REFUNDED')
+
+      expect((await reembolsos(order.id)).map(f => f.amount.toString())).toEqual(['-180', '-50'])
+      expect(await cuentaBandera(order.id)).toBe(1)
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).deliveryReconcileBlocked).toBeNull()
     })
   })
 

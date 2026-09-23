@@ -8,5 +8,5 @@
  * `create` del Payment, su reclamo de turno y su auditoría se rastreen hasta un
  * `prisma.$transaction` del MISMO archivo — el de `issueRefund`.
  */
-export { writeRefundInTx } from '../dashboard/refund.dashboard.service'
+export { bloquearCobroParaReembolso, writeRefundInTx } from '../dashboard/refund.dashboard.service'
 export type { WriteRefundInput } from '../dashboard/refund.dashboard.service'

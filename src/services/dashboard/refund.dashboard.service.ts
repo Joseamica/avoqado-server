@@ -300,7 +300,7 @@ export interface CobroBloqueado {
  * después el reclamo) y lee cuánto se ha devuelto ya. Es el tramo que comparten el reembolso
  * del dashboard y el núcleo `writeRefundInTx`.
  */
-async function bloquearCobroParaReembolso(
+export async function bloquearCobroParaReembolso(
   tx: Prisma.TransactionClient,
   input: { venueId: string; paymentId: string; expectedOrderId: string | null },
 ): Promise<CobroBloqueado> {

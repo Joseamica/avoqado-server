@@ -20,7 +20,7 @@ import { grossByRateForOrder } from '@/services/fiscal/autoPosting.service'
 import { ivaEnLibrosPorTasa } from '@/services/fiscal/deliveryFiscalDelta'
 import { splitPaymentIvaByOrderRates } from '@/services/fiscal/ivaMath'
 import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
-import { writeRefundInTx } from '@/services/shared/writeRefundInTx'
+import { bloquearCobroParaReembolso, writeRefundInTx } from '@/services/shared/writeRefundInTx'
 
 import { CANDADO_TX_TIMEOUT_MS, withDeliveryOrderLock } from './deliveryOrderLock'
 import { applyLineRemoval } from './lineRemoval.service'
@@ -42,6 +42,8 @@ export type ResultadoReconciliacion = {
     | 'NO_ACTIONS'
     | 'READ_FAILED'
     | 'ORDER_CANCELLED'
+    /** La compensación no cabe en lo que queda reembolsable del cobro: bloqueada para una persona (N-7). */
+    | 'BLOCKED_EXCEEDS_REFUNDABLE'
     /** El proveedor cerró el pedido y no hay dinero que mover; si algún retiro esperaba con el renglón presente, se cerró (I-2). */
     | 'PROVIDER_CLOSED'
 }
@@ -181,7 +183,12 @@ export async function reconcileDeliveryOrderFromProvider(
       // «Queda pendiente hasta que una persona decida»: bloqueado, ninguna pasada mueve dinero.
       logger.warn('[Delivery] reconciliación bloqueada: espera a una persona', { orderId, bloqueo: orden.deliveryReconcileBlocked })
       return {
-        outcome: orden.deliveryReconcileBlocked === 'INCREASE_UNSUPPORTED' ? ('BLOCKED_INCREASE' as const) : ('FISCAL_PENDING' as const),
+        outcome:
+          orden.deliveryReconcileBlocked === 'INCREASE_UNSUPPORTED'
+            ? ('BLOCKED_INCREASE' as const)
+            : orden.deliveryReconcileBlocked === 'EXCEEDS_REFUNDABLE'
+              ? ('BLOCKED_EXCEEDS_REFUNDABLE' as const)
+              : ('FISCAL_PENDING' as const),
       }
     }
 
@@ -355,7 +362,33 @@ export async function reconcileDeliveryOrderFromProvider(
       cobros.filter(c => c.type === 'REFUND' && (c.processorData as { provenance?: unknown } | null)?.provenance === 'PROVIDER_ADJUSTMENT')
         .length
     const porId = new Map(filas.map(f => [f.id, f]))
+    // N-7: el núcleo nunca devuelve más de lo que queda reembolsable del cobro (y eso NO se relaja).
+    // Si un reembolso manual previo ya se comió ese saldo, la compensación del proveedor no cabe:
+    // se detecta ANTES, con la MISMA lectura del núcleo bajo el mismo candado, y la orden queda
+    // bloqueada y visible en vez de lanzar en cada pasada sin dejar rastro.
+    const cobro = await bloquearCobroParaReembolso(tx, { venueId, paymentId: original.id, expectedOrderId: orderId })
+    if (dVenta + dPropina > cobro.remainingBeforeCents) {
+      const datos = {
+        mensaje: 'posible doble registro: revisar contra el reporte de Uber',
+        origen: 'RECONCILIACION',
+        motivo: 'EXCEEDS_REFUNDABLE',
+        compensacion: pesos(dVenta + dPropina).toFixed(2),
+        reembolsable: pesos(cobro.remainingBeforeCents).toFixed(2),
+        independientesPaymentIds: independientes.map(c => c.id),
+      }
+      await bloquear(tx, { orderId, venueId, motivo: 'EXCEEDS_REFUNDABLE', data: { ...datos, eventId: opts.eventId ?? null } })
+      await tx.activityLog.create({
+        data: { venueId, staffId: null, action: 'DELIVERY_REFUND_POSSIBLE_DUPLICATE', entity: 'Order', entityId: orderId, data: datos },
+      })
+      logger.error('🚨 [Delivery] la compensación del proveedor excede lo reembolsable del cobro: no se escribe dinero, espera a una persona', {
+        orderId,
+        venueId,
+        ...datos,
+      })
+      return { outcome: 'BLOCKED_EXCEEDS_REFUNDABLE' as const }
+    }
     const { refundPaymentId, replay } = await writeRefundInTx(tx, {
+      bloqueado: cobro,
       originalPaymentId: original.id,
       venueId,
       salesRefundCents: dVenta,
@@ -432,7 +465,12 @@ export async function reconcileDeliveryOrderFromProvider(
  */
 async function bloquear(
   tx: Prisma.TransactionClient,
-  p: { orderId: string; venueId: string; motivo: 'INCREASE_UNSUPPORTED' | 'FISCAL_RECLASS_UNSUPPORTED'; data: Prisma.InputJsonObject },
+  p: {
+    orderId: string
+    venueId: string
+    motivo: 'INCREASE_UNSUPPORTED' | 'FISCAL_RECLASS_UNSUPPORTED' | 'EXCEEDS_REFUNDABLE'
+    data: Prisma.InputJsonObject
+  },
 ) {
   await tx.order.update({ where: { id: p.orderId }, data: { deliveryReconcileBlocked: p.motivo } })
   await tx.activityLog.create({
