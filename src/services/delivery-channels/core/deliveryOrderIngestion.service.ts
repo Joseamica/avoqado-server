@@ -34,6 +34,16 @@ const PLACEHOLDER_CATEGORY_SLUG = 'delivery-desconocido'
 const D = (v: string) => new Prisma.Decimal(v)
 
 /**
+ * Texto de contacto listo para el KDS: cocina no abre el detalle de la orden, así que
+ * necesita ver a quién es el pedido de un vistazo. Sin PIN (Rappi/DiDi, o Uber si algún
+ * día deja de mandarlo) es sólo el número — nunca se inventa un PIN vacío.
+ */
+export function contactoParaComanda(phone?: string | null, pin?: string | null): string | null {
+  if (!phone) return null
+  return pin ? `${phone} · PIN ${pin}` : phone
+}
+
+/**
  * Slug determinístico para el sku placeholder de un item sin externalId: lowercase,
  * no-alfanumérico → '-', recortado a 40 chars. Determinístico (nunca `Date.now()`) para que
  * el MISMO item sin externalId en pedidos distintos reutilice el mismo producto placeholder
@@ -197,7 +207,7 @@ export async function ingestDeliveryOrder(
   const postingState: { id: string | null } = { id: null }
   // Fuera de la transacción a propósito: la comanda se arma DESPUÉS y necesita los productos
   // que se resolvieron adentro, para poder rutear cada renglón a su estación.
-  const renglonesCreados: Array<{ productId: string | null }> = []
+  const renglonesCreados: Array<{ id: string | null; productId: string | null }> = []
 
   const order = await prisma.$transaction(
     async tx => {
@@ -216,9 +226,22 @@ export async function ingestDeliveryOrder(
       // ese instante le cargaría a un cajero una venta que nunca tocó.
       const order = await tx.order.upsert({
         where: { venueId_externalId: { venueId: venue.id, externalId: externalIdNamespaceado } },
-        update: { posRawData: normalized.raw as Prisma.InputJsonValue, syncedAt: new Date() },
+        update: {
+          posRawData: normalized.raw as Prisma.InputJsonValue,
+          syncedAt: new Date(),
+          // Un reintento/actualización del mismo pedido puede traer contacto nuevo (Uber
+          // reenvía el evento tras enmascarar el teléfono) — se refresca igual que el crudo.
+          customerName: normalized.customer?.name ?? undefined,
+          customerPhone: normalized.customer?.phone ?? undefined,
+          customerPhonePin: normalized.customer?.phonePin ?? undefined,
+          deliveryChannelLinkId: link.id,
+        },
         create: {
           externalId: externalIdNamespaceado,
+          customerName: normalized.customer?.name ?? undefined,
+          customerPhone: normalized.customer?.phone ?? undefined,
+          customerPhonePin: normalized.customer?.phonePin ?? undefined,
+          deliveryChannelLinkId: link.id,
           orderNumber: normalized.displayId,
           source: normalized.source,
           originSystem: OriginSystem.DELIVERY_PLATFORM,
@@ -297,10 +320,13 @@ export async function ingestDeliveryOrder(
               // Nace del canal de delivery, no del POS: los reportes por origen lo separan.
               originSystem: OriginSystem.DELIVERY_PLATFORM,
               externalId: `${externalIdNamespaceado}-${item.externalId || 'noplu'}-${idx}`,
+              // KDS de Uber: id de LÍNEA del proveedor (cart_item_id) — distinto del
+              // externalId de arriba, que es del sync del POS.
+              externalLineId: item.lineId ?? null,
             },
           })
           createdItems.push(createdItem)
-          renglonesCreados.push({ productId: createdItem.productId })
+          renglonesCreados.push({ id: createdItem.id, productId: createdItem.productId })
 
           // Modifiers: filas OrderItemModifier reales (contrato unificado, igual que
           // — ya NO texto concatenado en notes (v1 legacy).
@@ -475,15 +501,16 @@ export async function ingestDeliveryOrder(
       // ÍNDICE que el propio `externalId` lleva al final (`…-<idx>`), que es determinista.
       const yaExistentes = await prisma.orderItem.findMany({
         where: { orderId: order.id },
-        select: { productId: true, externalId: true },
+        select: { id: true, productId: true, externalId: true },
       })
-      const porIndice = new Map<number, string | null>()
+      const porIndice = new Map<number, { id: string; productId: string | null }>()
       for (const r of yaExistentes) {
         const m = /-(\d+)$/.exec(r.externalId ?? '')
-        if (m) porIndice.set(Number(m[1]), r.productId)
+        if (m) porIndice.set(Number(m[1]), { id: r.id, productId: r.productId })
       }
       for (let idx = 0; idx < normalized.items.length; idx++) {
-        renglonesCreados.push({ productId: porIndice.get(idx) ?? null })
+        const r = porIndice.get(idx)
+        renglonesCreados.push({ id: r?.id ?? null, productId: r?.productId ?? null })
       }
     } catch {
       // Mismo criterio que abajo: sin ruteo se imprime igual; sin comanda, no.
@@ -536,6 +563,10 @@ export async function ingestDeliveryOrder(
           orderNumber: order.orderNumber,
           orderType: 'DELIVERY',
           orderId: order.id,
+          // KDS de Uber: la cocina lee esta pantalla, no el detalle de la orden — sin
+          // nombre/contacto aquí no tiene forma de identificar el pedido de un vistazo.
+          customerName: normalized.customer?.name ?? null,
+          customerContact: contactoParaComanda(normalized.customer?.phone, normalized.customer?.phonePin),
           items: {
             create: normalized.items.map((it, idx) => ({
               productName: it.name,
@@ -546,6 +577,11 @@ export async function ingestDeliveryOrder(
               // se crearon recorriendo `normalized.items` en este mismo orden.
               productId: renglonesCreados[idx]?.productId ?? null,
               categoryId: categoriaPorProducto.get(renglonesCreados[idx]?.productId ?? '') ?? null,
+              // Liga floja al OrderItem real (misma razón que productId/categoryId arriba: la
+              // comanda es una foto del momento, no una relación) + el id de línea del
+              // proveedor, para retiro/edición por renglón (KDS de Uber).
+              orderItemId: renglonesCreados[idx]?.id ?? null,
+              externalLineId: it.lineId ?? null,
               // 🔴 Por el normalizador COMPARTIDO, nunca serializando la forma del proveedor.
               // Guardar aquí `[{name, quantity}]` mientras el POS guardaba `["texto"]` en la
               // MISMA columna llegó hasta la cocina: Android pintó el JSON crudo y iOS perdió
