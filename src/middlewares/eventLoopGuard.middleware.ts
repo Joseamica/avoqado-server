@@ -33,11 +33,7 @@ import type { Request, Response, NextFunction } from 'express'
 import { PerformanceObserver, performance } from 'node:perf_hooks'
 import logger from '../config/logger'
 import { redactUrlSecrets } from './requestLogger'
-import {
-  registroDeJobs as registroGlobalDeJobs,
-  type RegistroDeJobs,
-  type JobEnVentana,
-} from '../observability/registroDeJobs'
+import { registroDeJobs as registroGlobalDeJobs, type RegistroDeJobs, type JobEnVentana } from '../observability/registroDeJobs'
 
 /**
  * Umbral de aviso en producción.

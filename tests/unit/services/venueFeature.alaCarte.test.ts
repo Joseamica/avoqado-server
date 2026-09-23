@@ -100,9 +100,7 @@ describe('addFeaturesToVenue — los días de prueba los decide el SERVIDOR', ()
 describe('addFeaturesToVenue — no se vende suelto lo que el plan ya incluye', () => {
   const conPlan = (code: 'PLAN_PRO' | 'PLAN_PREMIUM') => {
     mockVenueFeatureFindMany.mockImplementation((args: any) =>
-      args?.where?.feature?.code?.in?.includes?.('PLAN_PRO')
-        ? [{ active: true, suspendedAt: null, endDate: null, feature: { code } }]
-        : [],
+      args?.where?.feature?.code?.in?.includes?.('PLAN_PRO') ? [{ active: true, suspendedAt: null, endDate: null, feature: { code } }] : [],
     )
   }
 

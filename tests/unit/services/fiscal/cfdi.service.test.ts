@@ -39,9 +39,7 @@ function makeDeps(over: Partial<IssueCfdiDeps> = {}): IssueCfdiDeps {
     // Por default este proceso gana el reclamo del intento (la carrera se prueba aparte)
     claimCfdi: jest.fn().mockResolvedValue(true),
     // Como el dep real: escribe sólo las URLs (jamás el estado) y devuelve la fila completa.
-    persistArtifacts: jest
-      .fn()
-      .mockImplementation(async (_llave, urls) => ({ id: 'cfdi1', uuid: 'UUID-1', status: 'STAMPED', ...urls })),
+    persistArtifacts: jest.fn().mockImplementation(async (_llave, urls) => ({ id: 'cfdi1', uuid: 'UUID-1', status: 'STAMPED', ...urls })),
     loadOrderForCfdi: jest.fn().mockResolvedValue({
       venueId: 'v1',
       venueSlug: 'demo',
@@ -439,7 +437,9 @@ describe('issueCfdiForOrder — recuperación de intentos', () => {
       createInvoice,
       downloadXml: jest.fn().mockResolvedValue(Buffer.from('<xml/>')),
       downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
-      findByExternalId: jest.fn().mockResolvedValue({ providerInvoiceId: 'fa-ya', uuid: 'UUID-YA', serie: 'F', folio: '9', status: 'valid', stampedAt: new Date() }),
+      findByExternalId: jest
+        .fn()
+        .mockResolvedValue({ providerInvoiceId: 'fa-ya', uuid: 'UUID-YA', serie: 'F', folio: '9', status: 'valid', stampedAt: new Date() }),
     }
     const deps = makeDeps({
       reserveCfdi: jest.fn().mockRejectedValue(asPrisma(P2002)),
@@ -460,7 +460,9 @@ describe('issueCfdiForOrder — recuperación de intentos', () => {
       createInvoice: jest.fn(),
       downloadXml: jest.fn(),
       downloadPdf: jest.fn(),
-      findByExternalId: jest.fn().mockResolvedValue({ providerInvoiceId: 'fa-x', uuid: 'U', serie: 'F', folio: '1', status: 'canceled', stampedAt: new Date() }),
+      findByExternalId: jest
+        .fn()
+        .mockResolvedValue({ providerInvoiceId: 'fa-x', uuid: 'U', serie: 'F', folio: '1', status: 'canceled', stampedAt: new Date() }),
     }
     const deps = makeDeps({
       reserveCfdi: jest.fn().mockRejectedValue(asPrisma(P2002)),
@@ -475,7 +477,15 @@ describe('issueCfdiForOrder — recuperación de intentos', () => {
   it('R3: el timbre se persiste ANTES de bajar los archivos; si la descarga falla, la fila queda STAMPED con uuid y folio', async () => {
     const provider = {
       name: 'facturapi',
-      createInvoice: jest.fn().mockResolvedValue({ providerInvoiceId: 'fa1', uuid: 'UUID-1', serie: 'F', folio: '2', totalCents: 11600, stampedAt: new Date(), status: 'valid' as const }),
+      createInvoice: jest.fn().mockResolvedValue({
+        providerInvoiceId: 'fa1',
+        uuid: 'UUID-1',
+        serie: 'F',
+        folio: '2',
+        totalCents: 11600,
+        stampedAt: new Date(),
+        status: 'valid' as const,
+      }),
       downloadXml: jest.fn().mockRejectedValue(new Error('fetch failed')), // el caso de Laura
       downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
     }

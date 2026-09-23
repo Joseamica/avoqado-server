@@ -501,3 +501,614 @@ vez de la de la libreta.
    IP a `app/src/debug/res/xml/network_security_config_debug.xml` — **sólo DEBUG**.
 2. **`adb reverse` no funciona con depuración inalámbrica**: adb lo acepta y lo lista, pero desde el
    aparato el puerto sale CERRADO. Sólo por cable.
+
+---
+
+## 16. 🔴 6ª pasada de Codex (22-sep, 15:14): RECHAZO — 4 P1 · 7 P2 · 1 P3. Los cuatro P1, CERRADOS
+
+Veredicto textual: *«La regla todavía **no es única**: los dos POST comparten `hayDineroConEstaLlave`, pero el
+CAS y S6 siguen usando definiciones distintas. El veto durable tampoco está integrado en todos los consumidores
+y caminos de salida.»* Codex retiró por su cuenta su observación inicial sobre la pieza D («ya está conectada al
+worker»), y reprodujo tres de sus hallazgos con consultas reales en SQLite.
+
+🔑 **La familia entera se resume en una frase: el veto se ESCRIBÍA en una entrada y se RESPETABA en dos de tres
+salidas.** Eso es lo que hay que conservar al leer los cuatro arreglos.
+
+| # | Hallazgo | Arreglo | Dónde |
+|---|---|---|---|
+| **P1-1** | El CAS **con solicitud** no revalidaba la regla GLOBAL del POST: su `NOT EXISTS` cuelga de la SOLICITUD (venue propio · `send_transaction` · COMPLETED), así que un cobro del mismo intento con la llave sin recortar, bajo otro negocio o en PENDING se le escapaba — y escribía `FAILED / OPERATOR_RECONCILED_NO_CHARGE`, que el POS lee como «no se cobró» | Fragmento **único** `dineroConEstaLlaveSql` en `evidenciaPositivaSql.ts`, con sus dos envolturas (`hayDineroConEstaLlaveSql` para la LECTURA, `sinDineroConEstaLlaveSql` para la ESCRITURA). `hayDineroConEstaLlave` del servicio ya no tiene SQL propio: llama al fragmento. Y el `WHERE` del UPDATE lo lleva dentro ⇒ **entre la comprobación y la escritura no cabe nadie** | server |
+| **P1-2** | `recover()` (la pasada del **worker**) no pasa por `recoverOne()` y no guardaba el veto: el worker recibía `paymentContradiction`, conservaba la fila y dejaba `server_veto` en NULL; la respuesta LIMPIA y ATRASADA de otro de los tres consumidores liberaba la venta. **Sin reiniciar el proceso** | Los tres avisos se hacen durables también ahí, ANTES de procesar ninguna liberación (mismas 3 líneas que `recoverOne`), con contador `vetos=` en el log de la pasada | tpv |
+| **P1-3** | `declararSinCobroLocal` y su selector `retencionLocalDeclarable` **no miraban `server_veto`** — y es la salida a la que llega el respaldo `declararSinRed()`. Reproducido en SQLite: misma fila consultada con `PAYMENT_CONTRADICTION`, el CAS del servidor devuelve **0** y el local **1** | `AND server_veto IS NULL` en el CAS y `fila.serverVeto == null` en la oferta. Que el veto valiera para la liberación del servidor y no para el testimonio de una persona era al revés de lo que pesa cada evidencia | tpv |
+| **P1-4** | Un veto guardado **después** de una liberación no la invalidaba: la fila seguía diciendo «se puede volver a cobrar» y quedaba fuera del aviso y de la protección contra la poda (`aplicarLoQueDigaLaLibreta`, la restauración y `SQL_CONTRADICCION` no leían `serverVeto`) | `server_veto IS NOT NULL AND state NOT IN ('REGISTRADO','CERRADA')` entra en `SQL_CONTRADICCION`, y la pantalla lo lee ANTES de los dos `mostrarLiberada`. 🔴 **La fila NO se reabre a propósito** — ver el punto siguiente | tpv |
+
+### 🔴 Por qué el P1-4 no reabre la fila (decisión, no descuido)
+
+Reabrir una fila liberada al llegar un veto la devuelve a INDETERMINADO, y una fila INDETERMINADO **sin
+`orderId`** —que es lo que es un Pago rápido— **aparta el aparato entero** (`findTerminalHold`, líneas 89-93).
+Como el veto de hoy **no tiene salida acreditada** (el propio P2-5 de esta pasada), eso produciría exactamente
+la terminal muerta que este trabajo existe para eliminar. Así que el veto posterior se hace **visible** y
+**conservador** (entra al aviso, sobrevive a la poda, la pantalla deja de invitar a cobrar) sin cambiar la
+retención que ya había.
+
+### ⬜ P2-5, declarado y abierto: el veto puede sobrevivir a su motivo
+
+Medido y confirmado: un `unattributedEvidence` que después se vuelve atribuible deja de publicarse, pero el
+`server_veto` guardado persiste — y con él la fila INDETERMINADO **sigue apartando el aparato**, porque ninguna
+salida puede liberarla. Hoy sólo sale por que el servidor **registre el dinero** (la fila pasa a REGISTRADO y
+deja de retener).
+
+Lo que falta es una **resolución explícita del veto**, y no se improvisó a propósito: una respuesta limpia
+cualquiera no puede borrarlo (podría ser vieja — es justo el defecto r5-4), así que hace falta que el SERVIDOR
+declare que ya no contradice, con algo más fuerte que una bandera. Es diseño de dinero y va con decisión del
+founder, no un parche de 7ª ronda.
+
+### Los P2/P3 de la 6ª pasada: SIETE cerrados (22-sep, tarde), UNO abierto (P2-5)
+
+| # | Hallazgo | Cierre |
+|---|---|---|
+| **P2-6** | Una declaración LOCAL previa se ocultaba si el vínculo aparecía DESPUÉS: S6, al ver vínculo, omitía la tabla local y leía sólo `link.operatorResolution` ⇒ `resolution:null`. El POST sí la encontraba y prohibía otra, pero el cliente perdía la declaración recuperable por consulta | La tabla local se lee SIEMPRE; manda la del vínculo si existe y si no la local, que es igual de acreditada. 1 prueba |
+| **P2-7** | La pieza D podía decir `resuelta=true` con una aprobación durable pendiente de conciliar: `UNRESOLVED_FINANCIAL_OUTCOME` clasifica la FILA de solicitud, no mira Payments ni eventos ⇒ la terminal apagaba su último aviso sobre dinero que S6 sí veía | `resuelta` exige además que no conste evidencia positiva, con las MISMAS dos preguntas del CAS de la liberación (`hayAprobadoVinculadoSql` / `hayPagoLigadoSql`). 1 prueba con control positivo |
+| **P2-8** | La pieza D comprobaba la orfandad al SELECCIONAR y no al CERRAR (Codex lo reprodujo: UPDATE = 1 con un intento correlacionado insertado en medio) | El MISMO `NOT EXISTS` del selector va dentro del UPDATE. 1 prueba |
+| **P2-9** | El JSON que guardaba la pieza D no era reproducible: sin `requestId` y con vocabulario propio (`FAILED`), el servidor lo rechazaba en reentregas y sondas. Y dejarlo NULL era **peor**: la reentrega contesta `Reject` y la sonda contesta **ACTIVE** ⇒ la ranura seguiría apartada por algo YA cerrado | JSON reproducible con `requestId` y el vocabulario del servidor (`failed`/`cancelled`). 🔴 **Y `COMPLETED` ya NO se conciliesa**: hay DINERO y eso lo resuelve la libreta por INTENTO — emitir `success` sin `paymentId` haría que el servidor lo degradara a `timeout` y volviera a retener. 2 pruebas |
+| **P2-10** | El índice funcional traía los caracteres Unicode REALES y la app manda las secuencias LITERALES: regex equivalentes, **constantes distintas**, y PostgreSQL compara la expresión ESTRUCTURALMENTE ⇒ el índice existía y la consulta no lo usaba | Migración regenerada **desde la constante** (153 bytes, idénticos). Y la consulta quedó en **UNA sola rama** sobre el recorte de la llave: la rama `llave = X` **no tenía índice que la sirviera** (el único con la llave es `(venueId, idempotencyKey)` y empieza por `venueId`) y además sobraba — si la llave ES el intento, su recorte también. Un primer intento con `UNION` de dos ramas dejaba justo esa rama en `Filter`; lo destapó medirlo en vez de fiarse del comentario que lo afirmaba. **Medido: un solo `Index Cond`**. 3 pruebas: el texto de la migración contra la constante, el plan del FRAGMENTO real (no de una consulta escrita a mano) y que un cobro con la llave limpia y otro con espacios se sigan viendo. 2 sabotajes: meter la rama exacta de vuelta tumba sólo la del plan |
+| **P2-11** | Sin cursor: las 20 huérfanas más viejas salían siempre y la 21 no se consultaba nunca (reproducido en SQLite) | Rotación por `updated_at` + `estamparConsultaHuerfana` manda al final de la fila a la consultada que no se pudo cerrar. La ANTIGÜEDAD del aviso sigue saliendo de `created_at`. 2 pruebas |
+| **P3-12** | La prueba r5-3 pasaba por el motivo equivocado: su Payment PENDING no era atribuible, así que encendía `paymentContradiction` y la aserción con `OR` salía verde aunque el veto por `paymentId` no existiera | El pago lleva la TERMINAL del fixture (dinero PROPIO) y la aserción es concreta (`paymentId` + `paymentStatus`). **Sabotaje verificado**: dejar de proyectar el pago tumba la prueba |
+
+⚠️ **Y una trampa de MEDICIÓN que costó varios ciclos, anotada en la memoria
+[[el-shell-se-come-los-escapes-al-medir-un-explain]]:** medir el `EXPLAIN` pasando el SQL por el
+heredoc del shell convierte `\u00a0` en el carácter real (53 bytes contra 153) ⇒ se mide una consulta
+que NO es la de la aplicación y sale `Filter`. Se mide escribiendo el SQL con node a un archivo y
+`psql -f`. Y `SET LOCAL enable_seqscan = off` sólo vale DENTRO de una transacción.
+
+### Una CUARTA salida que se revisó y se dejó IGUAL a propósito
+
+Cerrando el P1-3 se barrieron todas las consultas que pasan una fila a `DESCARTADA`, por la clase de
+defecto «una regla copiada en N sitios». La que merece explicación es **`marcarSinAutorizacion`** (el
+«no salió al banco» del SDK 1.0.19): tampoco mira `server_veto`, y **se deja así**.
+
+- Su evidencia es más FUERTE que un veto: el propio SDK acredita que ese intento no se envió al host
+  (`authorizationAttempted = false`, NUESTRA referencia, código de catálogo).
+- Ya exige `host_approved IS NULL`, `server_payment_id IS NULL`, `server_outcome IS NULL` y
+  `server_processor_evidence IS NULL` — más estricto que las dos liberaciones, y cubre todo el dinero
+  que el servidor puede acreditar.
+- Y bloquearla tiene un costo en la dirección contraria: es justo el camino que evita que un U101 o un
+  «Cancelar» dejen la terminal apartada. Con el veto delante, un cobro que el SDK dice que nunca salió
+  quedaría `AUTORIZANDO` apartando el aparato — la terminal muerta otra vez.
+
+Las otras (`casTransition` genérica, `discardStalePreparing` desde PREPARANDO, `reabrirSinAutorizacion`
+que va en la dirección conservadora, `guardarVeredictoDelServidor` que no libera) no son salidas de
+liberación. Codex tampoco las señaló.
+
+### Verificación de la TPV tras la 6ª pasada (22-sep, tarde)
+
+- **Corrida conjunta** (`core.remotepayment.*` + `ledger.*` + el ViewModel de AngelPay): **424 pruebas, 2 fallos**,
+  ambos en el ViewModel. Una corrida anterior había dado **18**: el predicado del veto se escribió primero como
+  `serverVeto != null`, y **un `mockk(relaxed = true)` devuelve `""` para un `String?`**, así que la rama se encendía
+  en toda prueba con mock relajado. Corregido a `!isNullOrBlank()` — que es también lo correcto en producción: un
+  motivo vacío no es un veto (memoria [[mockk-relajado-devuelve-cadena-vacia-no-null]]).
+- **Los 2 que quedan NO son de este trabajo, y está medido, no supuesto:** la clase del ViewModel **sola** da
+  **168/168**; mis cuatro clases nuevas corriendo ANTES del ViewModel dan **218/218**. Los dos fallos sólo aparecen
+  con las otras **19 clases que ya existían** en el conjunto: una de ellas deja viva una corrutina en `Dispatchers.IO`
+  que toca `Dispatchers.Main` después de que su prueba lo restauró (`UncaughtExceptionsBeforeTest`, «Dispatchers.Main
+  was accessed when… the test dispatcher was unset»). Ninguna de mis clases toca Main ni un ViewModel. No se
+  identificó cuál de las 19 — es trabajo aparte, no de esta tanda.
+- **Sabotajes, ronda A** (un sabotaje por clase de prueba, para que cada caída se atribuya): 46 pruebas, **exactamente
+  3 caídas** — P1-3a (el CAS de la declaración sin el candado del veto), P1-2 (el worker deja de guardar el veto) y
+  P2-8 (el UPDATE de la bandeja sin revalidar la orfandad). Controles en verde.
+- **Ronda B**: 27 pruebas, **3 caídas** — P1-4 (el veto sale de `SQL_CONTRADICCION`), P2-9b (un `COMPLETED` vuelve a
+  conciliarse) y **también P1-4b**, que yo había previsto como control. No era control: P1-4b comprueba primero que el
+  veto CONVIERTE la fila en contradicción (y luego que REGISTRADO la saca), así que quitar la cláusula entera la tumba
+  en su PRIMERA aserción. Por eso la ronda C le puso su propio sabotaje con el control verdadero al lado.
+- **Ronda C**: 27 pruebas, **exactamente 3 caídas**, cada una en la aserción que la nombra — P2-11 (*«expected to
+  contain r20, but was [r0…r19]»*: sin rotación la 21ª nunca se consulta), P1-3b (el botón se ofrece con veto) y P1-4b
+  (*«expected to be false»* en su SEGUNDA aserción: un REGISTRADO ya no sale de la contradicción). **El control P1-4
+  siguió verde** (su fila es DESCARTADA, no REGISTRADO). Evidencia: `run-avoqado-tpv.mX1IYo`.
+  ⚠️ Dos intentos previos de la ronda C no dicen nada del código: uno murió con `OutOfMemoryError: Java heap space` en
+  el daemon de Kotlin (builds de otras sesiones encima), otro con «Type T not present» por correr con Java 24. El que
+  cuenta se lanzó con Java 17 y `-Pkotlin.compiler.execution.strategy=in-process`.
+- 🔑 **Cómo se sabotea sin exponer el árbol compartido:** se aplica el sabotaje, se lanza `avq-verify`, y el árbol real
+  se restaura en cuanto aparece `out-local.txt` de la corrida nueva — ahí la copia ya está congelada. Ojo: `avq-verify`
+  congela DESPUÉS de tomar la fila (`tomar_fila` en la línea 844, `congelar` en la 847), así que sólo se sabotea con la
+  fila libre; con la fila ocupada el código roto se quedaría expuesto mientras espera. Medido: 54-66 s de exposición.
+  🔴 **Y hoy la fila ni siquiera espera** (medido esta tarde, chip «Arreglar la fila de avq-verify»): en macOS `ln -s`
+  sobre el symlink `heavy` se mete DENTRO del directorio del dueño y sale 0, así que todos «toman» la fila. Consecuencia
+  para sabotear: otra sesión que lance avq-verify **del mismo repo** en esa ventana congelaría TU código roto. Se
+  comprobó en `~/.claude/avq-verify/log.jsonl` que las 8 corridas de avoqado-tpv desde las 15:00 fueron de esta sesión.
+  Exposición de la ronda C: 44 s.
+
+### 🔴 El botón del respaldo SIN RED no existía — cableado el 22-sep (tarde)
+
+La decisión del founder fue «**los dos**: con internet decide el servidor; si no contesta, el aparato». El motor
+(`retencionLocalDeclarable` + `declararSinCobroLocal`, cinco candados dentro del UPDATE) y la mitad del ViewModel
+(`puedeDeclararSinRed`, `declararSinRed()`) existían, pero **`ResultadoInciertoContent` nunca pintaba el botón**: la
+decisión era código muerto. Lo destapó revisar «¿quién llama a esto?» antes del reporte final, no una prueba.
+
+Al cablearlo aparecieron **dos candados que faltaban**, y los dos eran de las que ven los ojos de un cajero:
+
+| # | Hueco | Arreglo |
+|---|---|---|
+| 1 | El respaldo se ofrecía **aunque el servidor contestara** (sin veredicto), con el texto «El servidor no contesta» — falso. Y con el servidor vivo, era una forma de declarar sin la regla de gerencia | `LecturaDelIntento.servidorContesto` (2xx; sin red, tope, 5xx o 401 NO cuentan: la declaración por el servidor tampoco pasaría). El respaldo exige que el servidor NO haya contestado en TODA la ventana |
+| 2 | **Sin ningún permiso**: cualquier cajero podía cerrar el cobro en el aparato, mientras el camino por servidor exige `payments:resolve-no-instrument` (decisión de gerencia) o PIN de supervisor. Apagar el WiFi era la forma de saltarse el PIN | El MISMO permiso, leído de la sesión guardada (`authRepository.hasPermission`, sin red) al OFRECER y otra vez al TOCAR. Sin él no se ofrece y la pantalla dice que sólo un gerente puede cerrarlo |
+
+Y dos detalles de honestidad: el botón **sustituye** al que declara por el servidor (que fallaría) en vez de sumarse, y
+el texto al cerrarlo ya no dice «no se confirmó en 30 s» — no fue la ventana del servidor, fue el cajero.
+
+⚠️ **Lo que el respaldo NO hace, declarado:** exige `server_checked_at IS NOT NULL` (diseño de la otra sesión: «el
+testimonio de una persona nunca va por delante de la evidencia»). Un aparato que perdió la red ANTES de que el
+servidor contestara una sola vez no ofrece nada, y el cobro queda apartando la terminal hasta que vuelva la red. Sin
+red tampoco se puede cobrar con tarjeta (AngelPay necesita al banco), así que el respaldo sirve sobre todo cuando el
+que falla es **el servidor de Avoqado** y no la red.
+
+**Verificado (22-sep, noche), con la Mac en carga 60-320 por otras sesiones:**
+
+- **ROJO primero: 8 de 30 cayeron, exactamente las previstas** — 3 de la pantalla (no había bloque del botón ni
+  cableado), 1 de `servidorContesto` (el campo no se llenaba) y 4 del ViewModel (servidor vivo · sin permiso · el
+  permiso al tocar · el texto honesto). Las otras 3 del ViewModel ya pasaban: describen lo que YA estaba bien
+  (se ofrece cuando debe, un cobro del POS no, un CAS rechazado nunca dice «liberado») y quedan como red.
+- **VERDE: 210 pruebas, 0 fallas** (`run-avoqado-tpv.b6ZgcG`): la clase COMPLETA del ViewModel (168 + 7), la
+  recuperación por servidor (20), la declaración local (8) y las dos pruebas estáticas de la pantalla (4 + 3).
+- **Sabotajes: las 7 guardas nuevas, cada una tumba SÓLO su prueba.** Ronda X (`run-avoqado-tpv.zn3k6H`, 198
+  pruebas, 4 caídas): un 5xx cuenta como «contestó» · la pantalla sin cablear · sin el permiso al tocar · sin el
+  candado de «el servidor contestó». Ronda Y (`run-avoqado-tpv.uRjTbq`, 198 pruebas, 3 caídas): sin el permiso en
+  la oferta · el texto que vuelve a decir «30 s» · un cobro del POS que también lo ofrece.
+- ⚠️ Dos corridas previas no dicen nada del código: una murió por `OutOfMemoryError` del daemon de Kotlin y otra
+  con «Type T not present» por correr con Java 24. Las buenas usan Java 17 y
+  `-Pkotlin.compiler.execution.strategy=in-process`.
+- ⬜ **Sin QA en hardware del botón**: provocarlo exige un cobro local INCIERTO (el SDK 1.0.19 acredita casi todos
+  los negativos solo), con el servidor caído DESPUÉS de haber contestado una vez. Necesita al founder con tarjeta.
+
+### Los dos que quedan ABIERTOS
+
+- **P2-5** (arriba, con su razonamiento): un veto puede sobrevivir a su motivo.
+- **La suite COMPLETA de la TPV** sigue sin correr: la corrida acotada cubre bandeja, libreta y el ViewModel de AngelPay.
+  Va antes de commitear, con la Mac libre: `./scripts/avq-verify.sh avoqado-tpv ./gradlew testSandboxDebugUnitTest`
+  (con `JAVA_HOME` de zulu-17: el java por defecto de esta Mac es 24 y Gradle revienta con «Type T not present»).
+
+(El P2-10 que estaba en esta lista quedó CERRADO — ver su fila en la tabla de arriba.)
+
+### Qué se verificó de esta pasada
+
+- **Servidor, al cierre de los P2/P3:** `noInstrumentSinSolicitud` **36/36** (eran 31 al cerrar los P1) · las suites
+  vecinas del carril (`ventanaConfirmacion`, `webhookPrimerConfirmador`, `unchargedReconciliation`) **8 suites / 371
+  pruebas** · unitarias del área **20 suites / 478 pruebas** · el typecheck del CI (`npm run typecheck`, con pruebas)
+  **`errores TS: 0`, local y Alienware COINCIDEN** (`run-avoqado-server.pmunMp`). Los dos sabotajes del P1-1 tumban **exactamente** su prueba (sacar la condición
+  del CAS ⇒ cae la estructural; quitar la rama insensible a espacios ⇒ cae la de comportamiento), con el control
+  positivo en verde.
+- De paso: la suite del MCP (`tests/unit/mcp/terminalPaymentRequests.test.ts`) fallaba **entera** (15 de 22)
+  porque el mock de Prisma no tenía `terminalAttemptResolution`; arreglado y con 2 pruebas nuevas de la
+  capacidad (`localResolutions`).
+- **TPV:** ver «Verificación de la TPV tras la 6ª pasada», arriba (corrida conjunta, aislamiento y las rondas de
+  sabotajes).
+
+### ⚠️ Lo que Codex NO pudo certificar, y hay que tenerlo en cuenta
+
+*«No pude reconfirmar 28/28, 133/133, TS=0 ni el EXPLAIN de la consulta real. Jest terminó antes de ejecutar
+pruebas por `EPERM` al escribir su caché.»* O sea: sus **reproducciones en SQLite sí valen como evidencia**,
+pero su pasada **no trae veredicto de pruebas**.
+
+### ⚠️ Otra sesión commiteó este trabajo (y se llevó WIP de una tercera)
+
+`fe1b1499` («feat(terminal-payment): implementa manejo de cobros locales y consulta por solicitud», 15:19:50)
+metió en `develop` los archivos del servidor de las piezas A/B/D **más** WIP ajeno de las suscripciones
+(`planState.service.ts`, `planActivation.service.ts`, `stripe.service.ts` y sus pruebas). No se revierte, por la
+regla del árbol compartido. Efecto colateral: al escribirse el archivo de pruebas desde una copia anterior,
+**se perdieron 3 pruebas del árbol** y hubo que reponerlas — de ahí que ahora haya copia de seguridad de cada
+archivo tocado en el scratchpad de la sesión.
+
+---
+
+## 17. ⏸️ PAUSA por decisión del founder (22-sep, 19:40) — el estado exacto para retomar
+
+**1. La 7ª pasada de Codex: RECHAZO, 4 P1 · 11 P2.** Veredicto completo (final del archivo):
+`/Users/amieva/.claude/jobs/e2ff49a9/tmp/auditoria/veredicto-B-r5.txt` · encargo: `encargo-B-r5.md` (misma carpeta).
+- **P1-1** la respuesta del POST de la declaración trae los tres avisos (`paymentContradiction`/`evidenceContradiction`/
+  `unattributedEvidence`) y el ViewModel NO guarda `server_veto` ni enciende el veto en memoria (`AngelPayPaymentViewModel.kt:~3617`).
+- **P1-2** un veto tardío sobre una fila DESCARTADA no cerca SU VENTA: reserva y autorización de otro intento de la misma
+  orden pasan (`PaymentAttemptDao.kt:~220` y `~375`; reproducido por Codex con el SQL real). Mantener DESCARTADA sí, pero
+  el veto tiene que seguir cercando la orden identificable.
+- **P1-3** el CAS del servidor revalida menos evidencia bancaria que el POST: `sinEvidenciaPositivaSql` exige venue propio
+  y `type='send_transaction'`, y el fallback del webhook puede persistir un aprobado de otro venue entre la comprobación y el CAS.
+- **P1-4** la pieza D cierra una huérfana con un intento en `PREPARANDO` o `KERNEL_ACTIVO` (el `NOT EXISTS` los omite) y no
+  escribe `final_emitted_at`, que es lo que mira la barrera de reserva.
+- P2 principales: el permiso del botón lee los permisos CRUDOS del login y no el efectivo (un MANAGER por defecto quedaría
+  fuera — **mi candado nuevo es demasiado estricto**) · D dice `resuelta` con un `Payment PENDING` · S6 no usa todavía el
+  fragmento indexado · un veto nuevo sobre una liberación vieja nace con el aviso vencido · la poda de 7 días borra una
+  declaración local sin conciliar · el respaldo no existe si Avoqado nunca contestó · tras reiniciar, un Pago rápido
+  trabado no tiene botón · la ventana de «45 s» puede durar 5 min 45 s · sobre P2-5 **Codex propone una salida segura**
+  (resolución explícita del servidor con revisión creciente del intento + CAS que rechace evidencia posterior).
+
+**2. 🔴 El QA en la N86 encontró un P1 que Codex NO vio: la terminal revienta al leer `null`.**
+`JsonSyntaxException: Expected a com.google.gson.JsonObject but was JsonNull; at path $.attempt.resolution`. El servidor
+de hoy contesta `"resolution": null` y `"request": null` para un cobro local, y los TRES campos tipados `JsonObject?`
+(`TerminalAttemptStatusResponse.request`, `TerminalAttemptResultDto.resolution`, `TerminalRequestStatusResponse.request`,
+en `TerminalAttemptApiService.kt`) no aceptan un `null` de JSON ⇒ **toda** consulta S6 sin declaración cuenta como «sin
+respuesta» y la recuperación por servidor queda muda. Ninguna prueba lo veía porque arman las respuestas como objetos
+Kotlin, nunca desde el JSON real. **Arreglo decidido, sin aplicar:** un `@JsonAdapter` en esos 3 campos que lea `null`
+como «no hay» (sin cambiar tipos ni usos). **Prueba en rojo lista:** la respuesta REAL capturada del aparato,
+`/Users/amieva/.claude/jobs/e2ff49a9/tmp/auditoria/s6-real-intento-local-20260922.json`, parseada con `Gson()` (el
+mismo que usa `GsonConverterFactory.create()`).
+
+**3. Lo que SÍ se vio funcionando en la N86 (19:12–19:32):** el APK nuevo arrancó sin crash; la base del aparato
+**migró de 36 a 37** con `server_veto` y conservó sus datos; conectó al servidor; «Pago rápido» y «Cobrar» habilitados
+con el aviso puesto; y **la pieza D apagó sola el aviso fantasma de $50 de hace 30 h** (`consultadas=1 conciliadas=1`,
+la solicitud `ad5fb00b…` quedó RESOLVED).
+
+**4. Trampas de entorno medidas hoy:**
+- 🔴 **El servidor del puerto 3010 es un huérfano con código del 20-sep** (su `tsx watch` murió; el proceso sigue
+  escuchando): el QA de la tarde mandó el REST ahí, a código viejo, mientras el socket iba por ngrok al 3000. **Usar el
+  3000** (`tsx watch` vivo del árbol principal).
+- La N86 estaba en LTE con el WiFi apagado y no se asocia a ninguna red guardada. Se le encendió el WiFi y se instaló el
+  APK apuntando a `127.0.0.1:3000` con `adb reverse tcp:3000 tcp:3000` **por cable**: desconectada del USB, dirá «sin
+  conexión».
+
+**5. Qué sigue, en este orden:** (a) el arreglo del `null` con su prueba en rojo; (b) decisión del founder sobre la ronda 8
+(los 4 P1 de Codex) o acotar alcance; (c) el P2 del permiso efectivo antes de cualquier QA del botón.
+
+## 18. ▶️ Ronda 8 (22-sep, noche): el `null` de la N86 y los 4 P1 de la 7ª pasada — cerrados, verificación en curso
+
+**Lo cerrado (sin commitear, nada desplegado):**
+
+| # | Qué | Dónde | Prueba (vista en rojo o por sabotaje) |
+|---|---|---|---|
+| N86 | un `null` de JSON en `resolution`/`request` tumbaba la consulta ENTERA | TPV `TerminalAttemptApiService.kt` (`@JsonAdapter(ObjetoJsonONulo)` en los 3 campos) | `RespuestasRealesDelServidorTest` — JSON REAL del logcat |
+| P1-1 | la respuesta de la declaración perdía el veto | TPV VM `declararSinTarjeta` (veto RAM + `marcarVetoDelServidor` antes de leer la fila) | VM `r7 P1-1` ×3 avisos + control — **ROJO real visto** (corrida `ZFdNh6`) |
+| P1-2 | un veto sobre una liberada no cercaba SU venta | TPV DAO: guarda 2, `retencionDeLaVenta`, `casTransition`, `findUnresolvedForRequest` | `EvidenciaDurable…` r7 P1-2 ×4 (con control sin identidad) |
+| P1-3 | el CAS con solicitud revalidaba menos eventos que el POST | server: `eventoQueVetaSql` ÚNICO en `evidenciaPositivaSql.ts`, dentro del CAS | integración INTERCALADA de verdad (Proxy sobre la tx) + control; sabotaje cae |
+| P1-4 | D cerraba con un cobro vivo y sin cerca | TPV `RemotePaymentRequestDao` (NOT EXISTS de CUALQUIER intento + `final_emitted_at` + `execution_started_at IS NULL`) | `BandejaHuerfana…` r7 P1-4 ×2 |
+| P2-1 | el botón sin red leía permisos CRUDOS (error mío) | TPV `PermissionsRepository.enLaUltimaListaEfectiva` + server `/tpv/auth/permissions` con `resolveStaffVenuePermissions` | VM r7 P2-1 ×2; los crudos dicen SIEMPRE lo contrario en las pruebas del botón |
+| P2-2 | D decía «resuelta» con un Payment PENDING / llave sucia / colisión | server `hayDineroDeSusIntentosSql` + `hayEvidenciaDeConciliacionSql` en D | integración r7 P2-2 y P2-2b; sabotajes caen |
+| P2-3 | S6 con su propia copia de la regla de dinero (sin índice, sin REFUND) | server S6 usa `hayDineroConEstaLlaveSql` | integración r7 P2-3; sabotaje cae |
+| P2-4 | un veto nuevo sobre una liberación vieja nacía vencido | TPV aviso: con veto manda la fecha MÁS RECIENTE | `EvidenciaDurable…` r7 P2-4 |
+| P2-5 | la poda borraba una declaración sin red sin conciliar | TPV poda: se queda hasta 7 días de vigilancia DESPUÉS | `DeclaracionLocal…` r7 P2-5 + control |
+| P2-7 | tras reiniciar, un Pago rápido pendiente sin salida | TPV VM `adoptarCobroLocalQueAparta` (sólo local, INDETERMINADO) | VM r7 P2-7 + 2 controles |
+| P2-8 | la ventana de 45 s podía durar 345 s | TPV VM: `withTimeoutOrNull` de la ventana entera | VM r7 P2-8 |
+| P2-9 | la rotación de D se atoraba con excepciones | TPV `BandejaServerRecovery` estampa también en el `catch` | `BandejaHuerfana…` r7 P2-9 (pasa por el recuperador de verdad) |
+
+🔴 **Un defecto MÍO que las pruebas viejas cazaron en la primera corrida:** la exclusión de la poda (P2-5) usaba
+`last_error LIKE …` dentro de `AND NOT (…)`; con `last_error` NULL la poda dejó de podar TODO (3 pruebas de la poda en
+rojo). Arreglado con `IFNULL`. Es la segunda vez en este módulo — memoria `predicado-not-en-sql-con-columnas-null-excluye-en-silencio`.
+
+⚠️ **Entorno:** a la base desechable le faltaban 3 migraciones aditivas de OTRAS sesiones (`cfdi_sustitucion`,
+`uber_kds_fase1`, y la del índice registrada) — 12 pruebas cayeron por `Order.customerPhonePin` inexistente. Se aplicaron
+con `migrate deploy` contra `avoqado_terminalmuerta_test_20260922` (URL impresa y comprobada antes).
+
+**Abiertos y declarados (decisión del founder o diseño aparte):** P2-6 (el respaldo exige que al servidor se le haya
+PREGUNTADO con éxito una vez — si Avoqado nunca contestó, no hay botón), P2-10 (una huérfana COMPLETED sin intento no tiene
+quién la cierre), P2-11 (el veto no tiene salida; Codex propone resolución explícita con revisión creciente + CAS), la
+ventana de carrera residual del P1-3 (un evento que entra DESPUÉS de la sentencia del CAS por el camino del candado vencido
+— mismo residuo que ya declara la ventana), y el índice en producción (`CONCURRENTLY`).
+
+**Servidor verificado:** `noInstrumentSinSolicitud` **41/41** contra la base desechable; 4 sabotajes (P1-3, P2-2, P2-2b,
+P2-3), cada uno tumba SÓLO su prueba, con restauración por hash. Vecinas del carril (12 suites: ventana, webhook, uncharged)
+**507/507** (`run-avoqado-server.s6BkvL` dio 506/507 y el único fallo era del ARNÉS, no del código: el `interceptarSiguienteTx`
+de `terminalPaymentWindow` buscaba el marcador sólo en la plantilla, y la consulta del veto ahora viaja como `Prisma.Sql`
+anidado — sin inyección, la declaración pasaba. Arreglado para mirar también los anidados; la suite completa **77/77**).
+
+**TPV verificada:** los tres paquetes (`ledger`, `remotepayment`, `angelpay`) **555/555**, 33 clases (`run-avoqado-tpv.Ld29OS`,
+copia idéntica al árbol en los 7 archivos tocados). La primera corrida (`ZFdNh6`) dio 552/4: el ROJO real del P1-1 (el
+arreglo no estaba escrito — se me olvidó entre tantos) y 3 pruebas VIEJAS de la poda que cazaron el `NULL LIKE`.
+
+**Typecheck del CI** (`npm run typecheck`, con pruebas): **`errores TS: 0`, local y Alienware COINCIDEN**
+(`run-avoqado-server.B86CU6`; la copia es idéntica al árbol en los 6 archivos tocados).
+
+**18 sabotajes de la TPV, en 3 rondas, TODOS cazados por exactamente su prueba** (5 clases, 229 pruebas por ronda; árbol
+restaurado por hash tras cada una; exposición 52-59 s, lanzadas sólo con la fila VACÍA; 0 commits en el repo durante las rondas):
+
+| Ronda | Sabotaje | Cae |
+|---|---|---|
+| X · `LedbDO` | S1a sin adaptador en `resolution` · S3 guarda 2 sin veto · S7 D con la lista vieja · S9 permisos crudos · S12 aviso sin fecha del veto · S14 sin adopción | S6 real · veto tardío · P1-4 PREPARANDO/KERNEL · P2-1 ×2 + 5 del respaldo (usan el permiso) · P2-4 · P2-7 — 12 |
+| Y · `5XyKvg` | S1b sin adaptador (D) · S4 `retencionDeLaVenta` sin veto · S8 D sin cerca · S10 ventana sin plazo · S13 poda sin excepción · S15 adopta AUTORIZANDO | D con null · veto tardío (2ª aserción) · la cerca · P2-8 · P2-5 · control AUTORIZANDO — 6 |
+| Z · `XKd9VV` | S1c sin adaptador (S6 `request`) · S5 CAS sin veto · S6 restauración sin veto · S2 declaración sin veto · S11 D sin estampa en el catch · S16 adopta del POS | S6 real + regresión de la declaración · carrera · restauración · P1-1 · P2-9 · control del POS — 7 |
+
+**Codex r8** corriendo (encargo `encargo-B-r8.md`, veredicto `veredicto-B-r8.txt`, misma carpeta). **Pendiente además:** el APK
+nuevo en la N86 (desconectada del USB al cierre de esta ronda).
+
+## 19. ⏸️ Ronda 9 (22-sep, noche) — PAUSA del founder a media verificación. Estado exacto para retomar
+
+**8ª pasada de Codex: RECHAZO, 3 P1 · 3 P2** (`/Users/amieva/.claude/jobs/e2ff49a9/tmp/auditoria/veredicto-B-r8.txt`, final
+del archivo). Todo lo de abajo está **aplicado en el árbol, sin commitear**; las pruebas están escritas.
+
+| # | Hallazgo | Arreglo (aplicado) | Prueba |
+|---|---|---|---|
+| P1-1 | el veto que dejó el WORKER no frenaba el «no se cobró» del SDK ni el negativo/cancel de la bandeja | DAO `marcarSinAutorizacion` + `server_veto IS NULL` · VM `hayDineroEnLaFila` cuenta el veto · bandeja `contarIntentosBloqueadores` + `SQL_CONTRADICCION` | `SinAutorizacionYBarreraRoomTest` r8 P1-1 ×2 + control · `AngelPaySdk119ViewModelTest` r8 P1-1 (local y POS) |
+| P1-2 | si guardar el veto fallaba, la pantalla leía la liberación VIEJA | `LecturaDelIntento.vetoDelServidor` (del CUERPO, no de la escritura) → VM enciende el veto en RAM | `LedgerServerRecoveryRoomTest` r8 P1-2 + control · VM r8 P1-2 |
+| P1-3 | la lista de permisos no tenía dueño: el cajero B usaba la del gerente A | `PermissionsRepository`: dueño `venueId|staffId` (el que devuelve el servidor), rechazado si no es la sesión; sin dueño = no vale | `PermissionsRepositoryTest` (nuevo, 5) · VM r8 P1-3 |
+| P2-4 | `server_checked_at` = «le pregunté», también tras 401/403/404/5xx | **Room 38**: columna `server_answered_at` (MIGRATION_37_38) = «CONTESTÓ 2xx»; candado 5, oferta del botón y poda la leen; se estampa en `recover()`/`recoverOne()` (con o sin `estampar`) y en `guardarVeredictoDelServidor` | `DeclaracionLocalSinCobroRoomTest` r8 P2-4 ×4 (pasan por la recuperación REAL con 503/401/403/404/2xx) · `MigracionV38RoomTest` (nuevo) |
+| P2-5 | `/tpv/auth/permissions` usaba el rol del TOKEN | server `tpv.routes.ts`: rol VIGENTE de `StaffVenue`; baja ⇒ lista vacía; sin membresía ⇒ 403 | `tests/unit/routes/tpv.authPermissions.routes.test.ts` (nuevo): **5 vistos en ROJO, 6/6 en verde** |
+| P2-6 | la adopción registraba el cobro de A con la cuenta M2 elegida para B | VM `cuentaParaRegistrar()`: la cuenta del intento restaurado de su fila; se limpia en `resetPayment()` y al abrir un intento nuevo | VM r8 P2-6 |
+| test | «r6 P1-1» probaba un SELECT, no el UPDATE | prueba INTERCALADA: un Payment entra DESPUÉS de la última comprobación (marcador `LINK_TERMINAL_MISMATCH`) | `noInstrumentSinSolicitud` r8 — **verde de entrada** (el CAS ya lo tenía): falta verificarla por SABOTAJE |
+
+🔴 **Dos defectos míos encontrados de paso, ya arreglados:** (a) `MigracionV36RoomTest` estaba en ROJO desde la r5-4 (esperaba
+`version = 36`; nadie corría `core.data.local`) — ahora compara contra la versión de la primera apertura; (b) el parche en
+Python pasó `PermissionsRepository.kt` de CRLF a LF (diff de 400 líneas) — restaurados los fines de línea de HEAD (39+/5-).
+Memoria `python-reescribe-crlf-a-lf-en-silencio`.
+
+**ROJO COMPLETO** en `run-avoqado-tpv.fQVkcz` (copia congelada ANTES de aplicar los arreglos): **577 pruebas, 15 fallan, y
+son EXACTAMENTE las 15 nuevas de la r8** (P1-1 ×3, P1-2 ×2, P1-3 ×5, P2-4 ×4, P2-6 ×1); las otras 562 en verde. Los arreglos
+se aplicaron al árbol DESPUÉS de que la copia quedara congelada.
+
+**Al retomar, en este orden:**
+1. ✅ Hecho al pausar: typecheck del CI del server (`npm run typecheck`, con pruebas) **`errores TS: 0`, local y Alienware
+   COINCIDEN** (`run-avoqado-server.xwWqOd`, conservada). Avisó «otra sesión movió el árbol»: repetirlo antes de commitear.
+2. VERDE de la TPV: `…/scratchpad/tpv-r9.sh` (ledger, remotepayment, angelpay, permissions, `Migracion*`).
+3. Server: `noInstrumentSinSolicitud` entero + vecinas (ventana, webhook, uncharged) contra la base desechable.
+4. Sabotajes, uno por guarda nueva, con la fila VACÍA y restauración por hash.
+5. CHANGELOG de la TPV, tabla de fases, y la 9ª pasada de Codex.
+
+**Decisión del founder que sigue abierta (P2-6 de la r7, ahora EXACTA):** el respaldo sin red exige que Avoqado haya
+CONTESTADO (2xx) alguna vez por ese cobro. Si Avoqado nunca contestó, no hay botón y el aparato espera a que vuelva la red.
+¿Se acepta, o el aparato puede cerrar aunque Avoqado nunca haya contestado?
+
+### 19.b ▶️ Retomado (22-sep, 22:35) — verificación de la ronda 9 COMPLETA
+
+- **VERDE TPV:** 578/578 en las 38 clases del carril (`run-avoqado-tpv.HC0KTJ`). La primera corrida en verde dio 21 fallos y los
+  21 eran MÍOS: 18 por `lectura?.vetoDelServidor != null` (el `mockk(relaxed = true)` devuelve "" ⇒ veto siempre encendido;
+  ahora `isNullOrBlank`) y 2 porque `LiberacionLocalDelServidorRoomTest` usaba `server_checked_at` como «contestó» — la de `r6 P1-3`
+  pasaba por el MOTIVO EQUIVOCADO (el candado 5 la rechazaba antes que el veto); ahora también pone `serverAnsweredAt`.
+- **Suite COMPLETA de la TPV:** **2 192 pruebas / 174 clases, 0 fallos** (`run-avoqado-tpv.awEX0c`, ejecutada, no de caché).
+- **Servidor:** 13 suites / **549** de integración contra la base desechable (`run-avoqado-server.NWWlmX`) · ruta 6/6 · typecheck
+  del CI 0 (local = Alienware).
+- **17 sabotajes, TODOS cazados sólo por su prueba**, árbol restaurado por hash: servidor 4 (corridos DENTRO de una verificación, con
+  el candado de la fila tomado, para que ninguna sesión congelara una copia saboteada) · TPV ronda A 5 (9 caídas) · B 5 · C 3
+  (exposición 50-54 s cada una; `run-avoqado-tpv.c3ZUQ3`, `.dvjkVi`, `.BVpPZw`).
+- **Cambios de diseño en la verificación** (ya en el encargo): la cuenta del intento restaurado va atada al NÚMERO de intento, no a
+  una bandera (un reintento abre intento nuevo sin `resetPayment()`); y se quitó `server_answered_at` de
+  `guardarVeredictoDelServidor` (redundante con las estampas de S6 y sin prueba).
+- **El acceso maestro de la terminal** (`MASTER_ADMIN`, sin `StaffVenue`) queda SIN lista de permisos con el cambio del P2-5: el
+  servidor ya le negaba todo en `checkPermission`. Declarado a Codex.
+- **Aparatos:** la D3 (`D40625BRJ0469`) actualizada con el APK dev del árbol actual de avoqado-android (2.18.4-dev, 23:38); arranca
+  sin caídas en «Cobrar» con la sesión de Main Owner. **La Nexgo NO aparece por USB** (ni en `adb`, ni en `system_profiler`, ni por
+  mDNS): el QA en hardware de esta ronda queda pendiente de que se reconecte.
+- **9ª pasada de Codex lanzada** 23:1x: encargo `encargo-B-r9.md`, veredicto `veredicto-B-r9.txt` (misma carpeta de auditoría).
+
+### 19.c 🔴 9ª pasada de Codex (23-sep, madrugada): RECHAZO — 4 P1 · 4 P2. Ronda 10 en curso
+
+Veredicto completo: `/Users/amieva/.claude/jobs/e2ff49a9/tmp/auditoria/veredicto-B-r9.txt` (líneas 16261-16345). Dos de ellos
+los reprodujo con el SQL real de los DAO en SQLite.
+
+| # | Hallazgo | Dónde |
+|---|---|---|
+| P1-1 | El rechazo bancario NORMAL (`markHostResponded(false)` → `casHostResponded`) cierra un intento que ya tenía `server_veto` del worker ⇒ DESCARTADA + «Reintentar». Mismo en el callback app-to-app | `PaymentAttemptDao.kt:400`, VM `:2801` y `:2521` |
+| P1-2 | `recoverOne()` estampa `server_answered_at` ANTES de sacar el veto del cuerpo: si esa escritura lanza, el `catch` devuelve lectura sin veto. Y un `RECORDED` cuyo `aplicarVeredictoDelServidor` falla no devuelve la evidencia positiva | `LedgerServerRecovery.kt:143, :170` |
+| P1-3 | La poda puede borrar una declaración entre estampar la respuesta y guardar el veto/APPROVED que esa respuesta trae (reproducido: 0 → 1 → poda 1 → veto 0) | `LedgerServerRecovery.kt:66`, `PaymentAttemptDao.kt:590` |
+| P1-4 | Borrar la membresía ⇒ 403, pero el repositorio lo trata como fallo de red y devuelve la lista vieja (dueño aún coincide) | `tpv.routes.ts:2804`, `PermissionsRepository.kt:130` |
+| P2-5 | La restauración app-to-app adopta sólo el `attemptId`; registra con la cuenta actual | VM `:2418` |
+| P2-6 | `/auth/permissions` da 403 a SUPERADMIN acreditado en otro venue y al OWNER de la organización (sí autorizados por `checkPermission`); `MASTER_ADMIN` pierde Ajustes y modo kiosco local | `tpv.routes.ts:2804`, `checkPermission.middleware.ts:221,294`, `WelcomeScreen.kt:1142` |
+| P2-7 | Un 200 atrasado de la sesión A se devuelve TAL CUAL aunque ya se cambió a B | `PermissionsRepository.kt:116` |
+| P2-8 | Lista, fecha y dueño se escriben con editores separados: morir entre ellos deja lista de B con dueño A | `PermissionsRepository.kt:211`, `SecureStorage.kt:1015` |
+
+Además pidió sabotear `cuentaParaRegistrar()` con la secuencia real que encontró: adoptar A → rechazo confirmado →
+`retryAfterError()` → B (sin `resetPayment()`).
+
+### 19.d ▶️ Ronda 10 (23-sep, madrugada): los 8 hallazgos de la 9ª pasada, construidos con TDD
+
+**ROJO visto antes de cada arreglo:** TPV `run-avoqado-tpv.zjZ6Ti` — 595 pruebas, **13 fallos, los 13 nuevos** (+1 de armado: la
+prueba de la secuencia de Codex no alineaba la sesión del SDK con la cuenta elegida y el cobro B se bloqueaba antes de la
+barrera; corregida, esa prueba es de sabotaje y pasa desde el principio) · servidor `run-avoqado-server.jy5U72` — 3 fallos, los 3
+nuevos, controles en verde, **local = Alienware**.
+
+| # | Arreglo | Dónde |
+|---|---|---|
+| P1-1 | El CAS del RECHAZO exige `server_veto IS NULL` (una aprobación aterriza igual; con `APPROVED` el rechazo se anota como siempre porque esa DESCARTADA ya aparta la terminal — exigirlo también rompía `fix5 D5 sumidero app-to-app`, que documenta ese comportamiento); los dos callbacks releen la fila tras el rechazo (`rechazoDesmentidoPorLaFila`) ⇒ contradicción, sin «Reintentar» | `PaymentAttemptDao.casHostResponded`, VM |
+| P1-2 | `recoverOne` decide veto, evidencia y veredicto por el CUERPO antes de escribir; las marcas (respuesta, turno) pasan por `anotar`, que no tumba la lectura; un veredicto que no se pudo guardar vuelve como `evidenciaPositivaSinRegistro` | `LedgerServerRecovery` |
+| P1-3 | «Contestó» (`server_answered_at`) se anota DESPUÉS de dejar durable lo que trae la respuesta, y NO se anota si una escritura falló — en el worker y en el sondeo | `LedgerServerRecovery` |
+| P1-4 | Un 403 de `/tpv/auth/permissions` invalida la lista guardada (aunque borrarla falle, no se reusa) | `PermissionsRepository` |
+| P2-5 | La adopción app a app restaura el contexto de la fila (cuenta, venta, importe); sin fila, ninguna cuenta | VM |
+| P2-6 | Sin membresía: acceso maestro ⇒ SUPERADMIN, SUPERADMIN acreditado en cualquier `StaffVenue` (salvo suplantando) y OWNER activo de la organización reciben la lista de su rol **sin** `payments:resolve-no-instrument` | `tpv.routes.ts` (`rolAutorizadoSinMembresia`) |
+| P2-7 | Un 200 que llega con otra sesión (o calculado para otra persona) no se devuelve ni se guarda | `PermissionsRepository` |
+| P2-8 | Lista y dueño en UN valor (`venueId|staffId` + salto de línea + lista): o quedan los dos o ninguno | `PermissionsRepository` |
+
+Y la prueba que Codex pidió para sabotear `cuentaParaRegistrar()`: adoptar A local → rechazo confirmado → `retryAfterError()` → B.
+
+⚠️ **Tropiezo en la 1ª corrida verde (`run-avoqado-tpv.ammTSZ`, 1 507 s, 35 fallos):** mi prueba nueva de la poda
+intercalada se colgó 60 s (`UncompletedCoroutinesError`) y a partir de ahí el JVM de pruebas se quedó sin memoria
+(`OutOfMemoryError` ×33 en clases que no toqué). La prueba reusaba el mismo intento en dos vueltas y lo borraba con
+`db.openHelper.writableDatabase.execSQL` entre llamadas suspendidas de Room. Reescrita con un intento por vuelta y sin
+borrar: el paquete `ledger` completo pasa **159/159** (`run-avoqado-tpv.MUoOOe`, ejecutado, no de caché). La causa exacta
+del cuelgue no quedó demostrada (otras pruebas usan `execSQL` sin problema); lo que sí quedó demostrado es que sin ese
+patrón no ocurre.
+
+🔴 **Causa real del cuelgue (corregida):** no era el `execSQL` sino **`spyk` + `callOriginal()` de mockk sobre una función
+suspendida que salta a `Dispatchers.IO`** — devuelve `COROUTINE_SUSPENDED` y la prueba se cuelga (el repo ya lo advertía en
+`AngelPayPaymentReviewRoomTest.kt` ~528). Intermitente: pasó en la corrida de `ledger` y volvió a colgarse en la completa
+(`run-avoqado-tpv.LUWhpl`, 46 min con la fila tomada; detuve sólo su JVM de pruebas, comprobando con `lsof` que era la copia
+de la TPV). Las 5 pruebas nuevas que usaban espías sobre la libreta o el DAO pasan ahora por un **DAO decorador**
+(`object : PaymentAttemptDao by dao`). Tres pruebas VIEJAS se ajustaron por motivos legítimos: `fix5 D5 callback VACIO`
+(stub de 5 comodines que fijaba `affiliation = null`), mi prueba app a app de P1-1 (usaba un número de intento que no era el
+de la pantalla) y la guarda del CAS de rechazo, que se ACOTÓ al veto — con `APPROVED` el rechazo se anota como siempre porque
+esa DESCARTADA ya aparta el aparato (`fix5 D5 sumidero app-to-app` lo documenta y volvía a colgar 15 s esperando la fila).
+Memoria: `spyk-calloriginal-en-suspend-cuelga-el-jvm-de-pruebas`.
+
+**Verificación de la ronda 10, COMPLETA (23-sep, madrugada):**
+- **VERDE:** TPV **595/595** en 38 clases (`run-avoqado-tpv.qwwtRr`) · servidor: ruta de permisos **11/11** local = Alienware ·
+  `npm run typecheck` del CI **0**, local = Alienware.
+- **17 sabotajes, todos cazados, cada uno por su prueba**: TPV A (6, `run-avoqado-tpv.QNCk23`) · B (4, `.ESycBb`) · C (3,
+  `.gKckyL`) — exposición 46-53 s con la fila vacía, restaurado por hash — y servidor 4 (1 · 1 · 3 · 3 caídas, con la fila tomada).
+  Incluye el sabotaje que Codex pidió de `cuentaParaRegistrar()` (C2, por la secuencia adoptar → rechazo → reintentar → B).
+- **10ª pasada de Codex lanzada**: encargo `encargo-B-r10.md`, veredicto `veredicto-B-r10.txt` (misma carpeta de auditoría).
+
+### 19.e 🔴 10ª pasada de Codex (23-sep, madrugada): RECHAZO — 2 P1 · 2 P2. Ronda 11 en curso
+
+Veredicto: `veredicto-B-r10.txt` (líneas 17752-17813). Confirmó rojo 595/14 y servidor 3/11 → 11/11 en ambos equipos, y que el
+cambio «evidencia → contestó» cierra la intercalación de r9.
+
+| # | Hallazgo | Dónde |
+|---|---|---|
+| P1-1 | Un 200 ATRASADO de la MISMA sesión restaura el permiso que un 403 posterior revocó (dos consultas concurrentes: `WelcomeScreen.kt:612` y `:629`). Igual con un 200 autoritativo vacío | `PermissionsRepository.kt:134` |
+| P1-2 | Un veredicto `RECHAZADO_PERTENENCIA` (el `RECORDED` es de OTRA solicitud) no escribe nada, pero la libreta lo envuelve en `Result.success` ⇒ la recuperación anota «contestó», devuelve sin evidencia y la pantalla re-anuncia una liberación vieja | `LedgerServerRecovery.kt:182` y `:101`, `PaymentAttemptDao.kt:762` |
+| P2-3 | Un 403 ATRASADO de A borra la lista válida de B (esa rama no mira `sesionAlPedir`) | `PermissionsRepository.kt:153` |
+| P2-4 | Si el borrado del 403 falla, la lista sigue en disco y la SIGUIENTE llamada (el lector estático de la declaración) la acepta | `PermissionsRepository.kt:154`, `clearCache:204` |
+
+Notas (no hallazgos): Blumon SÍ puede recibir veto por `LedgerRecoveryTrigger → recoverOne` (el CAS corregido lo respeta, medido en
+SQLite; faltan pruebas de sus callbacks) · el acceso maestro recibe botones locales que `checkPermission` no le avala en endpoints
+(no es escalada) · la afiliación restaurada SÍ decide un `Cobrado` en `AngelPayChargeVerifier.kt:97` (falta prueba con el
+verificador real) · no pudo certificar desde el log el 595/38 exacto ni los hashes de los sabotajes.
+
+### 19.f ▶️ Ronda 11 (23-sep, madrugada): los 4 de la 10ª pasada, construidos con TDD
+
+| # | Arreglo | Dónde |
+|---|---|---|
+| P1-1 · P2-3 | Cada descarga de permisos toma un número al salir (`emitidas`); sólo se aplica la más nueva (`aplicarSiEsLaMasNueva`, en `synchronized`). El 403 además exige que la sesión no haya cambiado | `PermissionsRepository` |
+| P2-4 | `revocadas` (por `SecureStorage`, débil): el 403 marca al dueño ANTES de borrar; `listaGuardada` lo ignora; sólo lo levanta una descarga nueva exitosa. Residuo declarado: memoria del proceso | `PermissionsRepository` |
+| P1-2 | `quedoGuardado()`: `RECHAZADO_PERTENENCIA`, `FUERA_DE_ALCANCE` y `SIN_FILA` NO cuentan; vuelven como evidencia, dejan la marca `APPROVED` sin atribuir el Payment y no anotan «contestó» (el worker gasta el turno) | `LedgerServerRecovery` |
+
+- **ROJO** `run-avoqado-tpv.cySuOg`: 4 fallan, las 4 nuevas, cada una en su aserción · **VERDE** 600/600 (`.DAkQ0d`) + las dos clases
+  tras agregar las pruebas que AÍSLAN cada defensa del P2-3 y dividir la del P1-2: 29 + 14 (`.FRHJAl`).
+- **7 sabotajes, todos cazados** (`.L1uipI`, `.px7fpB`). La P2-3 original no cae con uno solo porque tiene dos defensas: por eso
+  existen P2-3b (sólo sesión) y P1-1b (sólo orden).
+- **11ª pasada de Codex lanzada** (`encargo-B-r11.md` → `veredicto-B-r11.txt`).
+
+### 19.g 🔴 11ª pasada de Codex (23-sep): RECHAZO — 1 P1 · 3 P2. Ronda 12 en curso
+
+Veredicto: `veredicto-B-r11.txt` (línea 17071 en adelante). Confirmó que las pruebas aisladas NO pasan por el motivo equivocado, que
+`quedoGuardado` clasifica bien y que el servidor no cambió (diffs r10/r11 idénticos byte a byte).
+
+| # | Hallazgo | Dónde |
+|---|---|---|
+| P1-1 | El orden de EMISIÓN no es el orden de LECTURA del servidor: la consulta 2 se lee antes de revocar y llega después de la 1 (ya revocada) ⇒ `2 > ultimaAplicada` rehabilita el permiso. Solución: serializar la descarga COMPLETA (petición + aplicación) | `PermissionsRepository.kt:128` |
+| P2-2 | Un 200 autoritativo SIN el permiso cuya escritura falla cae al `catch` de red y devuelve la caché vieja (y el lector estático la acepta) | `PermissionsRepository.kt:205` |
+| P2-3 | `revocadas` guarda UN dueño: el 403 de B (borrado fallido) sustituye la revocación de A y la lista de A vuelve a valer | `PermissionsRepository.kt:76` |
+| P2-4 | La respuesta de la DECLARACIÓN con `RECORDED` cuya aplicación falla (o es `RECHAZADO_PERTENENCIA`, que `.isSuccess` cuenta como guardado) no deja `APPROVED`; y el worker descarta el `Result.failure` antes del respaldo y sin pedir reintento | `AngelPayPaymentViewModel.kt:3670`, `LedgerServerRecovery.kt:101` |
+
+Pruebas que pidió: invertir el orden de LECTURA · lista reducida con fallo al guardar · dos 403 de personas distintas con borrado
+fallido · POST con veredicto no guardado · worker con fallo sólo al aplicar · y comprobar que la rama rechazada GASTA el turno.
+
+### 19.h ▶️ Ronda 12 (23-sep): los 4 de la 11ª pasada, construidos con TDD
+
+| # | Arreglo | Dónde |
+|---|---|---|
+| P1-1 | **Una descarga de permisos a la vez, completa** (petición + aplicación): `Mutex` `unaDescargaALaVez`; dentro, `descargar` vuelve a mirar la caché. La segunda petición no SALE hasta que la primera se aplicó ⇒ el servidor la lee después. Se retiraron `emitidas`/`ultimaAplicada` de la r11 | `PermissionsRepository` |
+| P2-2 | El guardado de una lista autoritativa va en su propio `try`: si falla, se revoca al dueño y se devuelve la lista NUEVA (no cae al «sin red») | `PermissionsRepository` |
+| P2-3 | `revocadas` es un CONJUNTO por `SecureStorage`: el 403 de B ya no borra la revocación de A | `PermissionsRepository` |
+| P2-4 | `ResultadoDelVeredicto.quedoEnLaFila`, regla única. La respuesta de la declaración (VM) y el worker ante una transacción caída dejan la marca durable `APPROVED`; el worker además cuenta `sinRespuesta` | `VeredictoDeIntento`, `LedgerServerRecovery`, `AngelPayPaymentViewModel` |
+
+- **ROJO** `run-avoqado-tpv.qZNSGN` (copia congelada ANTES del parche): 235 pruebas, **5 fallan — las 5 nuevas —** cada una en su
+  aserción (P1-1 `llamadas == 1`; P2-2 el valor devuelto; P2-3 el lector estático tras volver A; P2-4 VM `marcarEvidencia…` no
+  llamado; P2-4 worker `APPROVED` nulo).
+- **VERDE** `run-avoqado-tpv.7z1sv9`: TPV **606/606** en 38 clases (XML de la copia).
+- Borde declarado, no programado: un 200 sin `venueId`/`staffId` cuyo `remove` falla no revoca a nadie; hoy el servidor siempre
+  los manda.
+- **SABOTAJES: 7, todos cazados** (restaurado por hash, 48–50 s de exposición con la fila vacía):
+  - Ronda A (`.HCYm4d`): F1 sin `Mutex` → r11 P1-1 · F2 el worker no marca al fallar aplicar → r11 P2-4 worker · F3 la
+    declaración no marca → r11 P2-4 VM · **F7 la rama rechazada no gasta el turno → r10 P1-2 worker en `serverCheckedAt`**
+    (el sabotaje que Codex dijo que faltaba).
+  - Ronda B (`.eWZr8m`): F4 pertenencia cuenta como guardada → las dos r10 P1-2 + el caso pertenencia de r11 P2-4 VM · F5 una
+    sola revocación → r11 P2-3 · F6 guardar falla sin revocar → r11 P2-2 (lector sin red).
+- **12ª pasada de Codex lanzada** (`encargo-B-r12.md` → `veredicto-B-r12.txt`). El diff del servidor es idéntico byte a byte al
+  de la r11 (la prueba `tpv.authPermissions.routes.test.ts` es un archivo sin seguimiento: no aparece en `git diff HEAD`).
+
+### 19.i 🟡 12ª pasada de Codex (23-sep): RECHAZO sin P1 — 2 P2 · 2 P3. Ronda 13 construida y verificada
+
+Veredicto: `veredicto-B-r12.txt` (línea 18111). **Sin P1**; los arreglos de permisos, cerrados («no encontré otro defecto
+bloqueante»). Y cazó un error mío: generé el diff completo del encargo MIENTRAS la ronda B de sabotajes estaba aplicada (llevaba
+F4/F5/F6); el disco y el delta estaban bien. Lección en la memoria `sabotear-en-el-arbol-compartido-se-commitea-solo`.
+
+| # | Hallazgo | Arreglo |
+|---|---|---|
+| P2-1 | Cancelar la pantalla o el worker mientras Room aplica el veredicto se lleva la marca: el REGRESO de «aplicar» a un contexto cancelado lanza y «marcar» nunca corre | `aplicarConRespaldo` (recovery) y el mismo tramo en la VM: `withContext(NonCancellable) { aplicar; marcar si no quedó }` |
+| P2-2 | El worker gasta el turno aunque la marca de respaldo falle (y la rama sin veredicto también) | `sinRespuesta++` sin turno ni «contestó» si nada quedó durable; `recoverOne` con `estampar` tampoco gasta el turno |
+| P3-3 | La prueba del `Mutex` no probaba que cubriera el GUARDADO | Prueba con hilos reales y barrera en `putString`; cancelación del dueño y del que espera; dos llamadas no forzadas comparten la caché |
+| P3-4 | La prueba del worker no comprobaba que el fallo conservara el turno | `serverCheckedAt == null` y `serverCheckCount == 0` |
+
+- **ROJO** `.RqePs1`: 244 pruebas, **6 fallos = las 6 nuevas de comportamiento**, cada una en su aserción. Las del candado y P3-4
+  pasan desde el inicio (cobertura).
+- **VERDE** `.19p7iL`: TPV **615/615** en 38 clases.
+- **SABOTAJES: 9, todos cazados** (`.SpKTfo`, `.zEyytq`, `.qBKs7D`). G4 tumbó además `r9 P1-3`, correcto: al reordenar, la guarda
+  de «contestó» quedó detrás del mismo `if`.
+- **13ª pasada de Codex lanzada** (`encargo-B-r13.md` → `veredicto-B-r13.txt`); diffs generados con el árbol = respaldo.
+
+### 19.j 🔴 13ª pasada de Codex (23-sep): RECHAZO — 1 P1 · 3 P2 · 1 P3. Ronda 14 construida
+
+Veredicto: `veredicto-B-r13.txt` (línea 15968). 🔴 **El P1 desmintió algo que YO declaré inocuo en el encargo**: «el veto solo ya
+bloquea». Codex lo midió con el SQL real del DAO: para un Pago rápido sin orden, con SÓLO el veto la reserva de otro cobro ENTRA; con
+veto + `APPROVED`, no. La reserva del aparato mira `APPROVED`; el veto sólo cerca la VENTA. Lección: una afirmación de seguridad
+sobre el candado se comprueba contra la consulta del candado, no contra la intuición de qué «debería» bloquear.
+
+| # | Hallazgo | Arreglo |
+|---|---|---|
+| P1 | Veto y aprobación de UNA respuesta en escrituras separadas: cancelar entre ambas deja entrar otro cobro | `guardarLoDelCuerpo` (worker y sondeo) y la VM escribe el veto DENTRO del tramo de lo demás de esa respuesta |
+| P2-2 | `withContext(NonCancellable)` con el mismo dispatcher no comprueba la cancelación al regresar | `ensureActive()` al salir de cada tramo |
+| P2-3 | S5 sin pantalla no dejaba la marca de respaldo | tramo `aplicar + marcar` en el listener |
+| P2-4 | 25 filas atoradas por escritura tapan a la 26 para siempre | la consulta acepta `excluir`/`limite`; el worker pagina sólo si la página entera quedó atorada por ESCRITURA (sin red no), tope 4 |
+| P3 | La prueba de hilos reales podía dar verde falso por planificación | `CoroutineStart.UNDISPATCHED` + barrera en `finally` |
+
+- NO se metió el veto al candado del aparato: un veto hoy no tiene salida (P2-11) y apartaría la terminal sin escape.
+- **ROJO** `.cKQKSA`: 284 pruebas, **7 fallos = las 7 de comportamiento**, cada una en su aserción; los controles pasan.
+- **VERDE** `.hlFEF9`: TPV **686/686** en 41 clases (se sumaron socket y workers: cambió la firma de la consulta y el S5).
+- **SABOTAJES: 10, todos cazados** (`.0ZAHkJ`, `.B9dQ6i`). Paginar sin red dio 100 consultas (4 × 25): el tope actúa.
+- **14ª pasada de Codex lanzada** (`encargo-B-r14.md` → `veredicto-B-r14.txt`).
+
+### 19.k 🔴 14ª pasada de Codex (23-sep): RECHAZO — 2 P1 · 2 P2 · 1 P3. Ronda 15 construida
+
+Veredicto: `veredicto-B-r14.txt` (línea 16831). Los dos P1 son de la protección del APARATO, y los midió con el SQL real:
+
+| # | Hallazgo | Arreglo |
+|---|---|---|
+| P1-1 | «No cancelable» no es «atómico»: entre el commit del veto y el de la aprobación otra pantalla reserva y autoriza | La marca que aparta el aparato va SIEMPRE PRIMERO (worker, sondeo, pantalla, S5); el veto al final. Sin transacción nueva: el orden elimina el estado intermedio |
+| P1-2 | Aprobación CON Payment (colisión, o `RECORDED` sobre DESCARTADA): el veredicto se guarda sin promover y sin marca; la reserva no mira el Payment | Todo veredicto deja la marca, antes de aplicarse |
+| P2-3 | El tope de páginas movía la inanición a la candidata 101 | `atoradasDeLaPasadaAnterior` (en memoria, `@Singleton`): la pasada siguiente las salta; se alternan |
+| P2-4 | Un fallo al estampar tras un 2xx contaba como «sin red» | `contesto` por fila: tras recibir HTTP, un fallo es atasco |
+| P3 | El control del S5 dependía de un reloj | Espera el evento final; el control «APLICADO no marca» se retiró (afirmaba lo que cambió) |
+
+- **ROJO** `.v3DBZh`: 295 pruebas, **11 fallos = las 11 nuevas**, cada una en su aserción (reserva 2 en vez de -1, B autorizado 1,
+  sana sin atender, orden invertido).
+- **VERDE** `.EjlqMw` dio 2 fallos que eran de ANDAMIAJE: las pruebas de cancelación de la pantalla (r12, r13) limpiaban el registro
+  DESPUÉS de detenerse y la marca ahora ocurre ANTES. Se verifican en el punto de parada. **VERDE** `.HC2dkB`: **697/697** en 41 clases.
+- **SABOTAJES: 9, todos cazados** (`.jB6auD`, `.lvgJK1`, `.rlz3qM`).
+- **15ª pasada de Codex lanzada** (`encargo-B-r15.md` → `veredicto-B-r15.txt`).
+
+### 19.l 🟡 15ª pasada de Codex (23-sep): RECHAZO — 1 P1 · 1 P2 (los órdenes, dados por buenos). Ronda 16 construida
+
+Veredicto: `veredicto-B-r15.txt` (línea 16439). Distinguió «llamar primero» de «conseguir persistir primero».
+
+| # | Hallazgo | Arreglo |
+|---|---|---|
+| P1 | Si la marca falla pero el veredicto sí se guarda, la fila sale de toda recuperación: el DAO gasta el turno al guardar, `RECORDED` la saca de las candidatas y una DESCARTADA no se reaplica ⇒ otro cobro entra para siempre | **Sin marca no se aplica el veredicto** (worker, sondeo, pantalla, S5): la fila queda candidata |
+| P2 | La rotación alternaba dos grupos: con 200 atoradas la 201 nunca tenía turno | **Rueda**: cada pasada da turno a ≤25 atoradas desde `ultimaEnTurno`, excluye al resto; salen las que avanzan o dejan de ser candidatas |
+
+- **ROJO** `.7LzWPT`: 282 pruebas, 5 fallos = las 5 nuevas. La del S5 caía por el motivo EQUIVOCADO (un mock sin programar tumbaba el
+  listener antes de emitir); se programó «aplicar» y se repitió (`.3rNDlX`) hasta verla caer en «should not be called».
+- **VERDE** `.E3NtE2`: 702 pruebas con 2 fallos que eran aserciones MÍAS mal planteadas (esperaban `serverOutcome` nulo y la fila venía
+  de una liberación: `OPERATOR_NO_INSTRUMENT`). Corregidas a «no cambió y sin Payment»; la clase del recovery **52/52** (`.zqzZSE`).
+- **SABOTAJES**: K1 (aplica aunque falle la marca), K2 (pantalla), K3 (S5) cazados en `.EIQsYS`; K5 (puntero congelado) cazado AISLADO
+  en `.nSIbuc` justo en `at-030`. 🔴 K4 (la rueda no excluye) NO quedó aislado en la tanda A — K1 también desactiva la detección de
+  atascos — y se repitió SOLO (`.lc36g5`): cazado, tumba justo las dos de rotación. **5/5 sabotajes.**
+- **16ª pasada de Codex lanzada** (`encargo-B-r16.md` → `veredicto-B-r16.txt`).
+
+### 19.m 🟡 16ª pasada de Codex (23-sep): RECHAZO — 1 P1 · 1 P2. Ronda 17 construida
+
+Veredicto: `veredicto-B-r16.txt`. Reprodujo los dos con SQLite en memoria y el SELECT real del DAO.
+
+| # | Hallazgo | Arreglo |
+|---|---|---|
+| P1 | El respaldo de S5 de la pantalla (`dejarDuraderoElAvisoS5`) guardaba el veredicto SIN la marca: DESCARTADA + RECORDED sin `APPROVED` ⇒ el CAS de B a AUTORIZANDO devolvía 1 | **La marca va DENTRO de `aplicarVeredictoDelServidor`** (su `@Transaction`), justo tras leer la fila: ningún llamador la salta y no hay ventana |
+| P2 | La rueda excluía con `NOT IN (:excluir)`: con 1.000 atoradas pasaba de 999 variables (SQLite < 3.32, API 27) y el fallo de LECTURA se leía como «ya no hay más» (sacaba el turno de la rueda) | **Cursor por la clave del orden** (variables fijas), las excluidas se saltan en memoria, tope de **100 filas atendidas** (no 4 páginas), y un fallo de lectura pide reintento sin tocar la rueda |
+
+- Por qué la marca va SIEMPRE y no sólo sobre una DESCARTADA: el rechazo del host (`casHostResponded`, AUTORIZANDO → DESCARTADA) no mira
+  el veredicto guardado y confía en la marca para apartar el aparato. Efecto declarado (existe desde r13 en S5): con el webhook primero y
+  el SDK dentro, la fila es «contradicción» unos segundos hasta quedar REGISTRADO.
+- **ROJO** `.zmKIXt`: 56 del recovery, 4 fallos = las 4 nuevas, cada una en su aserción.
+- **VERDE** `.16gKG5`: 41 clases, **706 pruebas, 0 fallos**.
+- **SABOTAJES: 5/5 cazados** — A `.Uge45x` (L1 sin marca, L2 sin salto), B `.21fser` (L3 lectura sin reintento), C `.0Zhud6` (L4 la
+  lectura saca de la rueda, L5 sin el tope de una página que avanza).
+- **17ª pasada de Codex lanzada** (`encargo-B-r17.md` → `veredicto-B-r17.txt`).
+
+### 19.n 🟡 17ª pasada de Codex (23-sep): RECHAZO — 1 P1 · 1 P2 · 2 P3. Ronda 18 construida
+
+Veredicto: `veredicto-B-r17.txt`. La marca dentro de la transacción la dio por buena; lo que quedaba era lo VIEJO.
+
+| # | Hallazgo | Arreglo |
+|---|---|---|
+| P1 | Al actualizar, una fila que la versión anterior guardó con dinero y SIN marca no vuelve a pasar por la transacción (E2 no reaplica DESCARTADA, E3 no consulta RECORDED): reservar y autorizar otro cobro devolvían 1 (lo midió con el esquema v36 real) | **Migración de Room 38 → 39**, sólo datos e idempotente: marca AngelPay · SALE · no heredada · con outcome de dinero · fuera de REGISTRADO/CERRADA, fechada desde el veredicto |
+| P2 | Los topes se revisaban entre páginas: 1 atorada + 24 sin red ⇒ 49 sin respuesta; una excluida desalineaba hasta 124 atendidas | El tope se revisa **antes de cada fila**; alcanzarlo no es «ya no hay más» |
+| P3 | Cada página de 25 reordenaba el venue: cuadrático con la rueda llena | `limite = 25 + min(saltar, 475)`: ≤ 6 lecturas con 1.000 atoradas (antes 41) |
+| P3 | Las pruebas no fijaban la transacción ni todas las claves del cursor | Prueba del rollback (trigger que aborta tras marcar) y del cursor con tres turnos, fechas empatadas e ids al revés |
+
+- **ROJO** `.xJlewG`: 62 pruebas, 5 fallos = las 5 nuevas en su aserción (las de cobertura, verdes a propósito).
+- **VERDE** `.0mh9Ni`: 42 clases, **712 pruebas, 0 fallos** — XML conservados en `…/auditoria/evidencia-r18/verde-0mh9Ni/`.
+- **SABOTAJES: 8/8 cazados** (A `.FYICIe`: M1, B1, T1 · B `.SDhGP2`: M2, R1, C1 · C `.4oUjgV`: B2, M3).
+- **Nexgo real** (copia de su base v38): la migración no alcanzaría ninguna fila.
+- 🔴 **Pregunta de diseño abierta, para el founder**: una DESCARTADA con dinero y marca, SIN orden, aparta el aparato sin fecha de
+  salida — ninguna barrera mira si el servidor ya registró ese Payment, y `registrarPorVeredicto` no admite DESCARTADA. Riesgo de
+  terminal muerta (p. ej. el caso del 16-sep: el SDK dijo «cancelado» y el banco aprobó). Se le preguntó a Codex en la 18ª pasada.
+- **18ª pasada de Codex lanzada** (`encargo-B-r18.md` → `veredicto-B-r18.txt`).

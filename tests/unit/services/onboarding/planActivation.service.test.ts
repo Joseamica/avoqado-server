@@ -1405,7 +1405,9 @@ describe('🔴 R13: lo que se guarda es lo COBRADO, no lo que pide el reintento'
       status: 'past_due',
       current_period_end: Math.floor(new Date('2026-10-17T00:00:00Z').getTime() / 1000),
       latest_invoice: { amount_paid: 0 },
-      items: { data: [{ price: { id: 'price_pro', product: 'prod_pro', lookup_key: 'plan_pro_monthly', recurring: { interval: 'month' } } }] },
+      items: {
+        data: [{ price: { id: 'price_pro', product: 'prod_pro', lookup_key: 'plan_pro_monthly', recurring: { interval: 'month' } } }],
+      },
     })
 
     const r = await activatePlan({
@@ -1473,10 +1475,16 @@ describe('🔴 R13: lo que se guarda es lo COBRADO, no lo que pide el reintento'
       status: 'active',
       current_period_end: Math.floor(new Date('2026-10-17T00:00:00Z').getTime() / 1000),
       latest_invoice: { amount_paid: 115884 },
-      items: { data: [{ price: { id: 'price_pro', product: 'prod_pro', lookup_key: 'plan_pro_monthly', recurring: { interval: 'month' } } }] },
+      items: {
+        data: [{ price: { id: 'price_pro', product: 'prod_pro', lookup_key: 'plan_pro_monthly', recurring: { interval: 'month' } } }],
+      },
     })
 
-    await activatePlan({ ...BASE, payNow: false, offer: { kind: 'STANDARD', expectedFirstChargeCents: standardFirstChargeCents(standardPlanQuote(), 'PRO', 'monthly', false) } } as never)
+    await activatePlan({
+      ...BASE,
+      payNow: false,
+      offer: { kind: 'STANDARD', expectedFirstChargeCents: standardFirstChargeCents(standardPlanQuote(), 'PRO', 'monthly', false) },
+    } as never)
 
     const cierre = (prismaMock.onboardingProgress.updateMany as jest.Mock).mock.calls.find(
       (c: any[]) => c[0]?.data?.planActivationStatus === 'ACTIVE',

@@ -390,12 +390,7 @@ export async function liberarLugar(redemptionId: string, campaignId: string, mot
 }
 
 /** El cuerpo de {@link liberarLugar}, para poder liberar DENTRO de la transacción que acredita la propiedad (Codex #14). */
-async function liberarLugarEn(
-  tx: Prisma.TransactionClient,
-  redemptionId: string,
-  campaignId: string,
-  motivo: string,
-): Promise<boolean> {
+async function liberarLugarEn(tx: Prisma.TransactionClient, redemptionId: string, campaignId: string, motivo: string): Promise<boolean> {
   const r = await tx.launchCampaignRedemption.updateMany({
     where: { id: redemptionId, status: REDEMPTION_STATUS.RESERVED },
     data: { status: REDEMPTION_STATUS.RELEASED, releasedAt: new Date(), lastError: motivo.slice(0, 300) },
@@ -797,7 +792,10 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
           attempt,
           lease: nuestroLease,
           estadoFinal: prev.status,
-          lugar: redemption && campaign ? { redemptionId: redemption.id, campaignId: campaign.id, motivo: 'PLAN_PURCHASE_NOT_AUTHORIZED' } : null,
+          lugar:
+            redemption && campaign
+              ? { redemptionId: redemption.id, campaignId: campaign.id, motivo: 'PLAN_PURCHASE_NOT_AUTHORIZED' }
+              : null,
         })
         throw error
       }

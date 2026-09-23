@@ -60,7 +60,9 @@ jest.mock('../../../src/utils/prismaClient', () => ({
     feature: {
       findMany: jest
         .fn()
-        .mockResolvedValue([{ id: 'feat-inv', code: 'INVENTORY_TRACKING', name: 'Inventario', stripePriceId: 'price_inv', monthlyPrice: 89 }]),
+        .mockResolvedValue([
+          { id: 'feat-inv', code: 'INVENTORY_TRACKING', name: 'Inventario', stripePriceId: 'price_inv', monthlyPrice: 89 },
+        ]),
     },
     venueFeature,
     $transaction: (fn: (t: typeof tx) => unknown) => fn(tx),
@@ -79,7 +81,16 @@ beforeEach(() => {
   jest.clearAllMocks()
   // `clearAllMocks` NO vacía la cola de `mockResolvedValueOnce`: una respuesta sobrante se colaría
   // en la prueba siguiente.
-  for (const m of [mockSubRetrieve, mockSubCreate, mockSubCancel, mockInvoicePay, mockLock, mockVfFindUnique, mockVfUpdateMany, mockVfCreate]) {
+  for (const m of [
+    mockSubRetrieve,
+    mockSubCreate,
+    mockSubCancel,
+    mockInvoicePay,
+    mockLock,
+    mockVfFindUnique,
+    mockVfUpdateMany,
+    mockVfCreate,
+  ]) {
     m.mockReset()
   }
   orden.length = 0
@@ -136,7 +147,9 @@ describe('#2 · la llave de idempotencia es de UNA invocación, nunca compartida
 
 describe('#2 · si otro escritor movió el vínculo, sólo se compensa lo que ESTA llamada creó', () => {
   it('🔴 CAS perdido tras CREAR: cancela la suya y falla, sin intentar cobrarla', async () => {
-    mockVfFindUnique.mockResolvedValueOnce({ id: 'vf1', stripeSubscriptionId: null }).mockResolvedValue({ id: 'vf1', stripeSubscriptionId: null })
+    mockVfFindUnique
+      .mockResolvedValueOnce({ id: 'vf1', stripeSubscriptionId: null })
+      .mockResolvedValue({ id: 'vf1', stripeSubscriptionId: null })
     mockVfUpdateMany.mockResolvedValue({ count: 0 })
 
     await expect(createTrialSubscriptions('cus_1', 'v1', ['INVENTORY_TRACKING'], 0)).rejects.toThrow()

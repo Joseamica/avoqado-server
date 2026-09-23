@@ -113,7 +113,6 @@ describe.each([
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'PLAN_CROSSING_NOT_ALLOWED' }))
     expect(llamadaAStripe).not.toHaveBeenCalled()
   })
-
 })
 
 /**

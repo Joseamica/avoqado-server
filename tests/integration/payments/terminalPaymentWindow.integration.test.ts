@@ -238,7 +238,12 @@ const interceptarSiguienteTx = (marcador: string, entre: () => Promise<void>) =>
           if (prop !== '$queryRaw') return typeof v === 'function' ? v.bind(target) : v
           return async (strings: TemplateStringsArray | { sql?: string }, ...values: unknown[]) => {
             const r = await target.$queryRaw(strings as TemplateStringsArray, ...values)
-            const sql = Array.isArray(strings) ? strings.join('?') : String((strings as { sql?: string }).sql ?? '')
+            // Codex r7 (P1-3): la consulta del veto es ahora un FRAGMENTO compartido (`eventosQueVetanSql`), así que su texto
+            // viaja en un `Prisma.Sql` anidado y no en la plantilla: el marcador se busca en los dos.
+            const sql = [
+              Array.isArray(strings) ? strings.join('?') : String((strings as { sql?: string }).sql ?? ''),
+              ...values.map(v => (v as { sql?: string } | null)?.sql ?? ''),
+            ].join(' ')
             if (sql.includes(marcador)) await entre()
             return r
           }

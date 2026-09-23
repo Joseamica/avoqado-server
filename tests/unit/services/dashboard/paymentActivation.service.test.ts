@@ -97,7 +97,9 @@ describe('la respuesta va enmascarada', () => {
   it('con todo capturado Y los documentos subidos, el perfil está completo', async () => {
     // 🔴 Desde el 18-sep «completo» exige los DOCUMENTOS, no lo tecleado: es lo que el adquirente
     // necesita para abrir la cuenta, y lo único que el cliente sigue pudiendo hacer.
-    prismaMock.venue.findUnique.mockResolvedValue(venue({ rfcDocumentUrl: 'constancia.pdf', comprobanteDomicilioUrl: 'comprobante.pdf' }) as never)
+    prismaMock.venue.findUnique.mockResolvedValue(
+      venue({ rfcDocumentUrl: 'constancia.pdf', comprobanteDomicilioUrl: 'comprobante.pdf' }) as never,
+    )
     const r = await getPaymentActivation('venue-1')
     expect(r.profile.complete).toBe(true)
   })
@@ -151,7 +153,12 @@ describe('guardar el perfil', () => {
 
   it('una dirección a medias se rechaza', async () => {
     await expect(
-      updatePaymentActivationProfile('venue-1', 'org-1', { venueAddress: { address: 'X', city: '', state: 'CDMX', zipCode: '06600' } }, 'staff-1'),
+      updatePaymentActivationProfile(
+        'venue-1',
+        'org-1',
+        { venueAddress: { address: 'X', city: '', state: 'CDMX', zipCode: '06600' } },
+        'staff-1',
+      ),
     ).rejects.toMatchObject({ code: 'INVALID_VENUE_ADDRESS' })
     expect(prismaMock.venue.update).not.toHaveBeenCalled()
   })
@@ -168,7 +175,10 @@ describe('guardar el perfil', () => {
     await updatePaymentActivationProfile(
       'venue-1',
       'org-1',
-      { bank: { clabe: CLABE_BUENA, accountHolder: 'Juan' }, identity: { legalFirstName: 'Juan', legalLastName: 'Pérez', rfc: 'XAXX010101000' } },
+      {
+        bank: { clabe: CLABE_BUENA, accountHolder: 'Juan' },
+        identity: { legalFirstName: 'Juan', legalLastName: 'Pérez', rfc: 'XAXX010101000' },
+      },
       'staff-1',
     )
     const asiento = (logAction as jest.Mock).mock.calls[0][0]
@@ -271,7 +281,11 @@ describe('el banco llega hasta la revisión de KYC', () => {
 describe('sin captura de banco: la carátula es la que completa', () => {
   it('🔴 con la carátula subida el perfil está COMPLETO aunque nadie haya tecleado la CLABE', async () => {
     prismaMock.venue.findUnique.mockResolvedValue(
-      venue({ caratulaBancariaUrl: 'https://…/caratula.pdf', rfcDocumentUrl: 'constancia.pdf', comprobanteDomicilioUrl: 'comprobante.pdf' }) as never,
+      venue({
+        caratulaBancariaUrl: 'https://…/caratula.pdf',
+        rfcDocumentUrl: 'constancia.pdf',
+        comprobanteDomicilioUrl: 'comprobante.pdf',
+      }) as never,
     )
     prismaMock.onboardingProgress.findUnique.mockResolvedValue({
       v2SetupData: { step5: { legalAddress: 'Calle 2' } }, // sin step7: nunca se capturó banco
@@ -288,7 +302,9 @@ describe('sin captura de banco: la carátula es la que completa', () => {
   // checklist mide lo suyo», al final de este archivo.
 
   it('la CLABE tecleada de antes SIGUE completando, sin carátula (nadie pierde lo que ya llenó)', async () => {
-    prismaMock.venue.findUnique.mockResolvedValue(venue({ rfcDocumentUrl: 'constancia.pdf', comprobanteDomicilioUrl: 'comprobante.pdf' }) as never)
+    prismaMock.venue.findUnique.mockResolvedValue(
+      venue({ rfcDocumentUrl: 'constancia.pdf', comprobanteDomicilioUrl: 'comprobante.pdf' }) as never,
+    )
     const r = await getPaymentActivation('venue-1')
     expect(r.profile.complete).toBe(true)
   })
@@ -385,7 +401,6 @@ describe('el perfil se puede completar de verdad', () => {
     const r = await getPaymentActivation('venue-1')
     expect(r.profile.complete).toBe(false)
   })
-
 })
 
 /**

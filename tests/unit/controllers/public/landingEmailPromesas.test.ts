@@ -41,9 +41,7 @@ describe('el correo de la landing no promete lo que no se vendió', () => {
     // que distinga si hay campaña.
     const lineas = fuente.split('\n')
     // Los COMENTARIOS que explican este mismo defecto citan la frase: no son texto del correo.
-    const apariciones = lineas
-      .map((l, i) => ({ l, i }))
-      .filter(({ l }) => /no pedimos tarjeta/.test(l) && !/^\s*(\/\/|\*|\/\*)/.test(l))
+    const apariciones = lineas.map((l, i) => ({ l, i })).filter(({ l }) => /no pedimos tarjeta/.test(l) && !/^\s*(\/\/|\*|\/\*)/.test(l))
     expect(apariciones.length).toBeGreaterThan(0)
     for (const { i } of apariciones) {
       const contexto = lineas.slice(Math.max(0, i - 8), i + 1).join('\n')

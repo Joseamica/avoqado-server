@@ -180,7 +180,9 @@ describe('cancelCfdi — sólo marca CANCELLED cuando consta', () => {
         loadCfdi: jest.fn().mockResolvedValue({ ...stampedCfdi, ...over }),
         resolveProvider: jest.fn().mockReturnValue({
           name: 'facturapi',
-          cancelInvoice: jest.fn().mockResolvedValue({ status, cancelledAt: status === 'canceled' || status === 'accepted' ? new Date() : null }),
+          cancelInvoice: jest
+            .fn()
+            .mockResolvedValue({ status, cancelledAt: status === 'canceled' || status === 'accepted' ? new Date() : null }),
         } as any),
         updateCfdi,
       } as any,

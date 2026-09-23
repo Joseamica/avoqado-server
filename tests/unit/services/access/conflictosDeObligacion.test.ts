@@ -2,7 +2,11 @@
  * V5-A paso 2 (Codex, v5 punto 2): una obligación que la entrega no pudo representar se guarda DURABLE y por
  * `subscriptionId` (pendiente/resuelta), no sólo en un log. Estas pruebas fijan el contrato del registro.
  */
-import { cerrarConflictoTerminado, conflictosPendientes, registrarConflictoDeObligacion } from '@/services/access/conflictosDeObligacion.service'
+import {
+  cerrarConflictoTerminado,
+  conflictosPendientes,
+  registrarConflictoDeObligacion,
+} from '@/services/access/conflictosDeObligacion.service'
 
 const modelo = { createMany: jest.fn(), update: jest.fn(), updateMany: jest.fn(), findMany: jest.fn() }
 const db = { billingObligationConflict: modelo } as never

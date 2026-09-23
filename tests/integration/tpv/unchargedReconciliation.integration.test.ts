@@ -14,11 +14,7 @@
  */
 import '../../__helpers__/integration-setup'
 import prisma from '@/utils/prismaClient'
-import {
-  reconcileUncharged,
-  reconcileBankDeclined,
-  UnchargedReconciliationError,
-} from '@/services/tpv/uncharged-reconciliation.service'
+import { reconcileUncharged, reconcileBankDeclined, UnchargedReconciliationError } from '@/services/tpv/uncharged-reconciliation.service'
 import { randomUUID } from 'crypto'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
 
@@ -111,8 +107,7 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
     // Los eventos del procesador no cuelgan del venue (el cruce los deja con `venueId: null`): se
     // limpian por los intentos de ESTA suite, o contaminan la siguiente prueba.
     const vinculos = await prisma.terminalPaymentAttemptLink.findMany({ where: { venueId }, select: { attemptId: true } })
-    if (vinculos.length > 0)
-      await prisma.providerEventLog.deleteMany({ where: { attemptId: { in: vinculos.map(v => v.attemptId) } } })
+    if (vinculos.length > 0) await prisma.providerEventLog.deleteMany({ where: { attemptId: { in: vinculos.map(v => v.attemptId) } } })
     await prisma.terminalPaymentRequest.deleteMany({ where: { venueId } })
   })
 
@@ -316,14 +311,27 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
       data: {
         venueId,
         orderNumber: `UNCH-R4-${sufijo}-${Math.random().toString(36).slice(2, 6)}`,
-        type: 'TAKEOUT', source: 'TPV', status: 'CONFIRMED', paymentStatus: 'PENDING',
-        subtotal: 65, taxAmount: 0, total: 65, createdById: staffCajeroId,
+        type: 'TAKEOUT',
+        source: 'TPV',
+        status: 'CONFIRMED',
+        paymentStatus: 'PENDING',
+        subtotal: 65,
+        taxAmount: 0,
+        total: 65,
+        createdById: staffCajeroId,
       },
     })
     await prisma.payment.create({
       data: {
-        venueId, orderId: orden.id, amount: 65, tipAmount: 0, method: 'CREDIT_CARD',
-        status: 'PENDING', feePercentage: 0, feeAmount: 0, netAmount: 65,
+        venueId,
+        orderId: orden.id,
+        amount: 65,
+        tipAmount: 0,
+        method: 'CREDIT_CARD',
+        status: 'PENDING',
+        feePercentage: 0,
+        feeAmount: 0,
+        netAmount: 65,
         terminalPaymentRequestId: requestId,
         processorData: { reconciliation: { kind: 'POSSIBLE_SECOND_CAPTURE' } },
       },
@@ -335,7 +343,8 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
 
     // ...y aun así el replay NO puede decir que quedó liberada.
     const r = await terminalPaymentService.releaseUnknownRequest({
-      requestId, venueId,
+      requestId,
+      venueId,
       actor: { staffId: staffCajeroId, source: 'MOBILE' },
       reason: 'replay',
       declaration: { requestId, resolutionId: resolucionFija, statement: 'UNCHARGED_VERIFIED', statementVersion: 1 },
@@ -661,7 +670,12 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
         venueId,
         requestId,
         origen: 'BLUMON',
-        evidencia: { eventLogId: `evt-${randomUUID()}`, attemptId: `att-${requestId}`, codigo: 'rejected', descripcion: '51 FONDOS INSUFICIENTES' },
+        evidencia: {
+          eventLogId: `evt-${randomUUID()}`,
+          attemptId: `att-${requestId}`,
+          codigo: 'rejected',
+          descripcion: '51 FONDOS INSUFICIENTES',
+        },
       })
       expect(r.closed).toBe(true)
       const fila = await prisma.terminalPaymentRequest.findUnique({ where: { requestId } })

@@ -199,7 +199,7 @@ describe('getVenueTpvSettings (mobile) — plan-tier info', () => {
       canCheckoutAreaTickets: true,
       canDeliverAreaTickets: false,
       fulfillmentAreaId: null,
-  // Sin `type` en la fila simulada no hay tipo de aparato que resolver ⇒ ningún ajuste.
+      // Sin `type` en la fila simulada no hay tipo de aparato que resolver ⇒ ningún ajuste.
       configurableSettings: [],
     })
     expect(res.__json.data.terminals[0]).not.toHaveProperty('deviceUid')
@@ -251,7 +251,7 @@ describe('getVenueTpvSettings (mobile) — plan-tier info', () => {
       canCheckoutAreaTickets: false,
       canDeliverAreaTickets: true,
       fulfillmentAreaId: 'area-cremeria',
-  // Sin `type` en la fila simulada no hay tipo de aparato que resolver ⇒ ningún ajuste.
+      // Sin `type` en la fila simulada no hay tipo de aparato que resolver ⇒ ningún ajuste.
       configurableSettings: [],
     })
   })

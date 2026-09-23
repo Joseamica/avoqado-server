@@ -16,6 +16,7 @@
  * guarda G1 de la ventana): si hay un Payment ligado que no se pudo LIGAR, la fila se retiene con marca, nunca en silencio.
  */
 import { Prisma } from '@prisma/client'
+import { PATRON_SQL_TRIM_COMO_JS } from '../../utils/terminalSerial'
 import { estadoBancarioSql } from './estadoBancario'
 
 /** Una cadena como PARÁMETRO ligado (`$n`), para que las envolturas públicas sigan recibiendo `string`. */
@@ -74,6 +75,95 @@ const pagoLigadoSql = (requestId: Prisma.Sql, venueId: Prisma.Sql): Prisma.Sql =
       UNION
       SELECT p."id" FROM "Payment" p
       WHERE ${cobroConTarjetaSql(venueId)} AND p."idempotencyKey" IN (${vinculosSql(requestId, venueId)})`
+
+/**
+ * 🔴 Codex r6 (P1-1, 22-sep): «¿existe dinero de ESTE intento?» — la regla ÚNICA, y como FRAGMENTO para poder vivir dentro
+ * de un UPDATE.
+ *
+ * Es deliberadamente más amplia que las de arriba, y por eso no se puede sustituir por ellas: esas cuelgan de la SOLICITUD
+ * (vínculos, puntero, etiqueta legacy) y están acotadas al venue, al tipo `send_transaction` y al estado COMPLETED. Ésta
+ * pregunta por la LLAVE DEL INTENTO en toda la tabla, insensible a espacios y a cualquier estado: un cobro del mismo intento
+ * guardado con la llave sin recortar, registrado bajo otro negocio, o todavía en PENDING, **es dinero** — lo veta la
+ * comprobación previa del POST y tenía que vetarlo también la escritura.
+ *
+ * 🔴 Codex r6 (P2-10): UNA sola rama, sobre el recorte de la llave, y NINGUNA sobre la llave cruda. Medido con
+ * `EXPLAIN` (escrito desde archivo, no por el shell, que se come los escapes): una rama `llave = X` no tiene índice
+ * que la sirva — el único índice con la llave es `(venueId, idempotencyKey)` y empieza por `venueId` —, así que salía
+ * `Filter` y recorría la tabla de pagos; y esto corre en el sondeo interactivo cada 5 s, no sólo al declarar. La rama
+ * exacta además SOBRABA: si la llave ES el intento, su recorte también lo es. Queda un solo `Index Cond` por
+ * `Payment_idempotencyKey_trimmed_idx`, y lo fija una prueba sobre este mismo fragmento.
+ *
+ * El intento se recorta en JS con `trim()`, que es exactamente la clase de `PATRON_SQL_TRIM_COMO_JS`: para un intento
+ * limpio la regla es idéntica a la de antes, y para uno con espacios es MÁS amplia — ve el cobro guardado con o sin
+ * ellos. Más amplia en la dirección del veto es la dirección segura: ante la duda, se retiene.
+ *
+ * Sin esto, el hueco medido por Codex: la comprobación previa termina, el fallback del webhook (que NO toma el candado
+ * consultivo del intento) persiste ese cobro, y el CAS lo ignoraba porque su `NOT EXISTS` era el de la solicitud ⇒ escribía
+ * `FAILED / OPERATOR_RECONCILED_NO_CHARGE`, que el POS lee como «no se cobró». Dentro del propio UPDATE no cabe nadie.
+ */
+const dineroConLaLlaveSql = (llave: Prisma.Sql): Prisma.Sql => Prisma.sql`
+      SELECT p."id" FROM "Payment" p
+      WHERE regexp_replace(p."idempotencyKey", ${PATRON_SQL_TRIM_COMO_JS}, '', 'g') = ${llave}`
+const dineroConEstaLlaveSql = (attemptId: string): Prisma.Sql => dineroConLaLlaveSql(bind(attemptId.trim()))
+
+/**
+ * 🔴 Codex r7 (P2-2, 22-sep): «consta dinero con la llave de ALGÚN intento vinculado HOY a la solicitud» — la MISMA regla de
+ * la llave (`dineroConLaLlaveSql`: recortada, cualquier estado, cualquier negocio), correlacionada con cada vínculo. La usa la
+ * pieza D: `hayPagoLigadoSql` sólo cuenta cobros COMPLETED del venue, así que un Payment PENDING del intento —o uno guardado
+ * con la llave sin recortar— lo veían S6 y el POST, pero la consulta por solicitud decía `resuelta:true` y la terminal
+ * apagaba su último aviso sobre ese dinero. El vínculo guarda la llave ya canónica, así que casa con el recorte.
+ */
+export function hayDineroDeSusIntentosSql(requestId: string, venueId: string): Prisma.Sql {
+  return Prisma.sql`EXISTS (
+      SELECT 1 FROM "TerminalPaymentAttemptLink" l
+      WHERE l."requestId" = ${requestId} AND l."venueId" = ${venueId}
+        AND EXISTS (${dineroConLaLlaveSql(columna('l', 'attemptId'))}))`
+}
+
+/** La LECTURA de esa regla (la comprobación previa del POST, los dos caminos). */
+export function hayDineroConEstaLlaveSql(attemptId: string): Prisma.Sql {
+  return Prisma.sql`EXISTS (${dineroConEstaLlaveSql(attemptId)})`
+}
+
+/** La misma regla como condición de ESCRITURA: va en el `WHERE` de todo UPDATE que declare «no se cobró». */
+export function sinDineroConEstaLlaveSql(attemptId: string): Prisma.Sql {
+  return Prisma.sql`NOT EXISTS (${dineroConEstaLlaveSql(attemptId)})`
+}
+
+/**
+ * 🔴 Codex r7 (P1-3, 22-sep): la regla de EVENTOS DEL PROCESADOR que veta declarar «no se presentó tarjeta», como FRAGMENTO
+ * — la misma en la comprobación previa del POST y DENTRO del UPDATE que escribe la declaración con solicitud.
+ *
+ * Veta un evento de ESTE intento si: llegó bajo OTRO negocio · trae contradicción de vínculo · trae el serial de OTRA
+ * terminal · el banco lo APROBÓ (aunque no haya Payment) · o, sin vínculo, no se puede atribuir a nadie y no es un rechazo
+ * acreditado (r5-6). Antes el CAS sólo llevaba `sinEvidenciaPositivaSql`, cuyo aprobado exige venue PROPIO y
+ * `send_transaction`: un aprobado de este intento recibido bajo otro negocio que el fallback persistiera entre la
+ * comprobación y la escritura no lo veía nadie, y se escribía `FAILED / OPERATOR_RECONCILED_NO_CHARGE`. Se había unificado
+ * la pregunta sobre el Payment, no la regla completa.
+ */
+const eventoQueVetaSql = (attemptId: string, venueId: string, terminalId: string, hayVinculo: boolean): Prisma.Sql => Prisma.sql`
+    SELECT e."id" FROM "ProviderEventLog" e
+    WHERE e."attemptId" = ${attemptId} AND e."provider" = 'PAYMENT_PROCESSOR'
+      AND (e."venueId" IS DISTINCT FROM ${venueId}
+        OR e."errorReason" IN ('LINK_TERMINAL_MISMATCH', 'LINK_VENUE_MISMATCH')
+        OR (nullif(regexp_replace(coalesce(e."payload"->'payload'->>'terminalSerial', ''), ${PATRON_SQL_TRIM_COMO_JS}, '', 'g'), '') IS NOT NULL
+          AND lower(regexp_replace(regexp_replace(e."payload"->'payload'->>'terminalSerial', ${PATRON_SQL_TRIM_COMO_JS}, '', 'g'), '^AVQD-', '', 'i')) <> ${terminalId})
+        OR ${estadoBancarioSql(Prisma.sql`coalesce(e."payload"->'payload'->'status', e."payload"->'status')`)} = 'APROBADO'
+        -- 🔴 Codex r5-6: un evento que no se puede atribuir a nadie —sin vínculo y sin serial— y que NO es un rechazo
+        -- acreditado también veta: aceptar una declaración y poder usarla tienen que decir lo mismo.
+        OR (${!hayVinculo}
+          AND nullif(regexp_replace(coalesce(e."payload"->'payload'->>'terminalSerial', ''), ${PATRON_SQL_TRIM_COMO_JS}, '', 'g'), '') IS NULL
+          AND ${estadoBancarioSql(Prisma.sql`coalesce(e."payload"->'payload'->'status', e."payload"->'status')`)} IS DISTINCT FROM 'RECHAZADO'))`
+
+/** La LECTURA de esa regla: los eventos que vetan (la comprobación previa del POST), acotada. */
+export function eventosQueVetanSql(attemptId: string, venueId: string, terminalId: string, hayVinculo: boolean): Prisma.Sql {
+  return Prisma.sql`${eventoQueVetaSql(attemptId, venueId, terminalId, hayVinculo)} LIMIT 1`
+}
+
+/** La misma regla como condición de ESCRITURA: va en el `WHERE` del UPDATE que declara «no se cobró». */
+export function sinEventoQueVetaSql(attemptId: string, venueId: string, terminalId: string, hayVinculo: boolean): Prisma.Sql {
+  return Prisma.sql`NOT EXISTS (${eventoQueVetaSql(attemptId, venueId, terminalId, hayVinculo)})`
+}
 
 /** «No consta un APROBADO de ningún intento vinculado HOY a la solicitud» (Codex r2 P1-A: el `NOT EXISTS` del negativo acreditado). */
 export function sinAprobadoVinculadoSql(requestId: string, venueId: string): Prisma.Sql {

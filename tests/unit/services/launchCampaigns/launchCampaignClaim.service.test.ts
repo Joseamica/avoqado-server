@@ -59,9 +59,7 @@ describe('claimLaunchCampaign', () => {
         acquisitionUtm: { utm_source: 'google' },
       }),
     })
-    expect(logAction).toHaveBeenCalledWith(
-      expect.objectContaining({ action: 'LAUNCH_CAMPAIGN_CLAIMED', organizationId: 'org-1' }),
-    )
+    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'LAUNCH_CAMPAIGN_CLAIMED', organizationId: 'org-1' }))
   })
 
   it('🔴 sin UTMs NO escribe la columna: un `{}` borraría los que ya había', async () => {

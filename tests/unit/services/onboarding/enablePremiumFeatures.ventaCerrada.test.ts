@@ -25,7 +25,10 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
     venueFeature: { create: (...a: unknown[]) => mockVfCreate(...a) },
   },
 }))
-jest.mock('../../../../src/config/logger', () => ({ __esModule: true, default: { info: jest.fn(), error: jest.fn(), warn: jest.fn(), debug: jest.fn() } }))
+jest.mock('../../../../src/config/logger', () => ({
+  __esModule: true,
+  default: { info: jest.fn(), error: jest.fn(), warn: jest.fn(), debug: jest.fn() },
+}))
 jest.mock('../../../../src/services/superadmin/kycReview.service', () => ({ __esModule: true }))
 jest.mock('../../../../src/services/email.service', () => ({ __esModule: true, default: {} }))
 jest.mock('../../../../src/services/resend.service', () => ({ __esModule: true }))

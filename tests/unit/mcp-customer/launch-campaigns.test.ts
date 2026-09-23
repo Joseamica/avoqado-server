@@ -32,7 +32,13 @@ function handlersPara(scope: Partial<McpScope>) {
     tool: (name: string, _d: string, _s: unknown, handler: (args: never) => Promise<{ content: Array<{ text: string }> }>) =>
       handlers.set(name, handler),
   } as never
-  registerLaunchCampaignTools(server, { staffId: 's1', activeOrg: 'o1', allowedVenueIds: [], perVenueAccess: new Map(), ...scope } as McpScope)
+  registerLaunchCampaignTools(server, {
+    staffId: 's1',
+    activeOrg: 'o1',
+    allowedVenueIds: [],
+    perVenueAccess: new Map(),
+    ...scope,
+  } as McpScope)
   return handlers
 }
 
@@ -94,7 +100,9 @@ describe('confirmación de dos pasos', () => {
     } as never)
 
     const handlers = handlersPara({ isSuperAdmin: true, scopes: ['mcp:write'] })
-    const r = leer(await handlers.get('set_launch_campaign_status')!({ code: 'POS22', action: 'pause', reason: 'se acabó el presupuesto' } as never))
+    const r = leer(
+      await handlers.get('set_launch_campaign_status')!({ code: 'POS22', action: 'pause', reason: 'se acabó el presupuesto' } as never),
+    )
 
     expect(r).toMatchObject({ requiresConfirmation: true, actual: 'ACTIVE', siguiente: 'PAUSED', cupoTomado: '3 / 100' })
     expect(prismaMock.launchCampaign.updateMany).not.toHaveBeenCalled()
@@ -113,19 +121,17 @@ describe('confirmación de dos pasos', () => {
     const handlers = handlersPara({ isSuperAdmin: true, scopes: ['mcp:write'] })
     // `previewLaunchOffer` lee el precio de Stripe; el SDK está mockeado en este proyecto por
     // el setup de pruebas, así que una llamada real es imposible.
-    const r = await handlers
-      .get('create_launch_campaign')!({
-        code: 'POS22',
-        name: 'POS $22',
-        landingSlug: 'pos-22',
-        planTier: 'PRO',
-        advertisedPriceCents: 2200,
-        discountMonths: 3,
-        redemptionCap: 100,
-        validFrom: '2026-09-01T00:00:00Z',
-        validUntil: '2026-12-01T00:00:00Z',
-      } as never)
-      .catch(() => null)
+    const r = await handlers.get('create_launch_campaign')!({
+      code: 'POS22',
+      name: 'POS $22',
+      landingSlug: 'pos-22',
+      planTier: 'PRO',
+      advertisedPriceCents: 2200,
+      discountMonths: 3,
+      redemptionCap: 100,
+      validFrom: '2026-09-01T00:00:00Z',
+      validUntil: '2026-12-01T00:00:00Z',
+    } as never).catch(() => null)
 
     // Pase lo que pase con la cotización, lo que NO puede haber es una escritura.
     expect(prismaMock.launchCampaign.create).not.toHaveBeenCalled()

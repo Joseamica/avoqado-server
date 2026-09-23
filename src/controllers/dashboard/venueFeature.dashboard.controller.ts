@@ -522,7 +522,6 @@ export async function updateSubscription(
   }
 }
 
-
 /**
  * Retry failed invoice payment
  * POST /api/v1/dashboard/venues/:venueId/invoices/:invoiceId/retry

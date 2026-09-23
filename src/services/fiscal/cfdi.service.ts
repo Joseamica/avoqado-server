@@ -401,12 +401,16 @@ async function reconciliarIntentoPrevio(
     previo = await provider.findByExternalId(idempotencyKey)
   } catch (err: unknown) {
     // Si no se puede preguntar, NO se timbra a ciegas: se corta con 409 y el job lo reintenta.
-    logger.error(`[cfdi] no se pudo consultar el PAC antes de reintentar ${idempotencyKey}: ${err instanceof Error ? err.message : String(err)}`)
+    logger.error(
+      `[cfdi] no se pudo consultar el PAC antes de reintentar ${idempotencyKey}: ${err instanceof Error ? err.message : String(err)}`,
+    )
     throw new Error('CFDI en proceso para esta orden')
   }
   if (!previo) return null
   if (previo.status === 'canceled') {
-    throw new Error(`Esta cuenta ya tiene una factura cancelada en el PAC (${previo.uuid ?? previo.providerInvoiceId}); revísala antes de volver a facturar`)
+    throw new Error(
+      `Esta cuenta ya tiene una factura cancelada en el PAC (${previo.uuid ?? previo.providerInvoiceId}); revísala antes de volver a facturar`,
+    )
   }
   logger.warn(`[cfdi] el PAC ya tenía ${previo.uuid} para ${idempotencyKey}: se completa sin volver a timbrar`)
   const cfdi = await deps.persistCfdi(
@@ -1156,6 +1160,8 @@ const defaultStatusDeps: GetCfdiStatusDeps = {
   loadCfdi: id =>
     prisma.cfdi.findUnique({
       where: { id },
-      include: { replacedBy: { select: { id: true, uuid: true, serie: true, folio: true, status: true }, orderBy: { createdAt: 'desc' }, take: 5 } },
+      include: {
+        replacedBy: { select: { id: true, uuid: true, serie: true, folio: true, status: true }, orderBy: { createdAt: 'desc' }, take: 5 },
+      },
     }),
 }

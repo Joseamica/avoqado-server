@@ -102,7 +102,9 @@ function makeDeps(over: Partial<ReplaceCfdiDeps> = {}): ReplaceCfdiDeps {
     // archivo tiene que cazar (la fila quedándose con el importe viejo del intento fallido).
     persistCfdi: jest.fn().mockImplementation(async data => ({ id: 'cfdi-sub', totalCents: 12500, subtotalCents: 12500, ...data })),
     // Como el dep real: escribe sólo las URLs y devuelve la fila COMPLETA (findUnique).
-    persistArtifacts: jest.fn().mockImplementation(async (_llave, urls) => ({ id: 'cfdi-sub', uuid: 'UUID-SUB', status: 'STAMPED', ...urls })),
+    persistArtifacts: jest
+      .fn()
+      .mockImplementation(async (_llave, urls) => ({ id: 'cfdi-sub', uuid: 'UUID-SUB', status: 'STAMPED', ...urls })),
     claimCfdi: jest.fn().mockResolvedValue(true),
     storeArtifact: jest.fn().mockImplementation(async (_b, path) => `https://cdn/${path}`),
     updateCfdi: jest.fn().mockImplementation(async (id, data) => ({ ...original, id, ...data })),
@@ -343,7 +345,9 @@ describe('replaceCfdi — reanudar y concurrencia', () => {
 
   it('con una sustitución EN VUELO (STAMPING fresca) corta con 409 y no toca el PAC', async () => {
     const deps = makeDeps({
-      findSustituta: jest.fn().mockResolvedValue({ id: 'cfdi-sub', status: 'STAMPING', updatedAt: new Date(), replacesCfdiId: 'cfdi-orig' }),
+      findSustituta: jest
+        .fn()
+        .mockResolvedValue({ id: 'cfdi-sub', status: 'STAMPING', updatedAt: new Date(), replacesCfdiId: 'cfdi-orig' }),
     })
     await expect(replaceCfdi(params, deps)).rejects.toThrow(/en proceso/i)
     expect(deps.resolveProvider).not.toHaveBeenCalled()
@@ -360,9 +364,14 @@ describe('replaceCfdi — reanudar y concurrencia', () => {
 
   it('si gana el reclamo, reintenta el timbrado sobre la MISMA fila', async () => {
     const deps = makeDeps({
-      findSustituta: jest
-        .fn()
-        .mockResolvedValue({ id: 'cfdi-sub', status: 'STAMP_FAILED', attempts: 2, idempotencyKey: 'cfdi-order-o1-r1', replacesCfdiId: 'cfdi-orig', venueId: 'v1' }),
+      findSustituta: jest.fn().mockResolvedValue({
+        id: 'cfdi-sub',
+        status: 'STAMP_FAILED',
+        attempts: 2,
+        idempotencyKey: 'cfdi-order-o1-r1',
+        replacesCfdiId: 'cfdi-orig',
+        venueId: 'v1',
+      }),
       claimCfdi: jest.fn().mockResolvedValue(true),
     })
     // Este conector NO sabe consultar por external_id (versión anterior): se sigue sin él.
@@ -373,7 +382,11 @@ describe('replaceCfdi — reanudar y concurrencia', () => {
   })
 
   it('una carrera en la reserva (P2002) no produce un segundo documento', async () => {
-    const p2002 = new Prisma.PrismaClientKnownRequestError('dup', { code: 'P2002', clientVersion: 'x', meta: { target: ['idempotencyKey'] } })
+    const p2002 = new Prisma.PrismaClientKnownRequestError('dup', {
+      code: 'P2002',
+      clientVersion: 'x',
+      meta: { target: ['idempotencyKey'] },
+    })
     const deps = makeDeps({
       reserveCfdi: jest.fn().mockRejectedValue(p2002),
       findSustituta: jest
@@ -448,7 +461,14 @@ describe('replaceCfdi — P1/P2 de la auditoría', () => {
   // P1-1 · El reclamo tiene que ser EXCLUSIVO: dos reintentos leen la misma fila fallida y los dos
   // llaman a claimCfdi con la MISMA versión. Sin versión en el predicado, ambos ganan y timbran.
   it('🔴 reclama con la VERSIÓN que leyó, no sólo por estado', async () => {
-    const previa = { id: 'cfdi-sub', status: 'STAMP_FAILED', attempts: 3, idempotencyKey: 'cfdi-order-o1-r1', replacesCfdiId: 'cfdi-orig', venueId: 'v1' }
+    const previa = {
+      id: 'cfdi-sub',
+      status: 'STAMP_FAILED',
+      attempts: 3,
+      idempotencyKey: 'cfdi-order-o1-r1',
+      replacesCfdiId: 'cfdi-orig',
+      venueId: 'v1',
+    }
     const deps = makeDeps({ findSustituta: jest.fn().mockResolvedValue(previa) })
     await replaceCfdi(params, deps)
     expect(deps.claimCfdi).toHaveBeenCalledWith('cfdi-sub', expect.any(Array), 3)
@@ -458,11 +478,23 @@ describe('replaceCfdi — P1/P2 de la auditoría', () => {
   // preguntarle al PAC produce un TERCER documento fiscal por la misma venta.
   it('🔴 antes de re-timbrar un intento reclamado le pregunta al PAC por su external_id', async () => {
     const findByExternalId = jest.fn().mockResolvedValue({
-      providerInvoiceId: 'fa-sub', uuid: 'UUID-SUB', serie: 'A', folio: '16', status: 'valid', stampedAt: new Date(),
+      providerInvoiceId: 'fa-sub',
+      uuid: 'UUID-SUB',
+      serie: 'A',
+      folio: '16',
+      status: 'valid',
+      stampedAt: new Date(),
     })
     const createInvoice = jest.fn().mockResolvedValue(timbrada)
     const deps = makeDeps({
-      findSustituta: jest.fn().mockResolvedValue({ id: 'cfdi-sub', status: 'STAMP_FAILED', attempts: 1, idempotencyKey: 'cfdi-order-o1-r1', replacesCfdiId: 'cfdi-orig', venueId: 'v1' }),
+      findSustituta: jest.fn().mockResolvedValue({
+        id: 'cfdi-sub',
+        status: 'STAMP_FAILED',
+        attempts: 1,
+        idempotencyKey: 'cfdi-order-o1-r1',
+        replacesCfdiId: 'cfdi-orig',
+        venueId: 'v1',
+      }),
       resolveProvider: jest.fn().mockReturnValue({
         name: 'facturapi',
         findByExternalId,
@@ -483,7 +515,14 @@ describe('replaceCfdi — P1/P2 de la auditoría', () => {
   it('si el PAC no contesta al reconciliar, NO timbra a ciegas', async () => {
     const createInvoice = jest.fn().mockResolvedValue(timbrada)
     const deps = makeDeps({
-      findSustituta: jest.fn().mockResolvedValue({ id: 'cfdi-sub', status: 'STAMP_FAILED', attempts: 1, idempotencyKey: 'cfdi-order-o1-r1', replacesCfdiId: 'cfdi-orig', venueId: 'v1' }),
+      findSustituta: jest.fn().mockResolvedValue({
+        id: 'cfdi-sub',
+        status: 'STAMP_FAILED',
+        attempts: 1,
+        idempotencyKey: 'cfdi-order-o1-r1',
+        replacesCfdiId: 'cfdi-orig',
+        venueId: 'v1',
+      }),
       resolveProvider: jest.fn().mockReturnValue({
         name: 'facturapi',
         findByExternalId: jest.fn().mockRejectedValue(new Error('PAC caído')),
@@ -537,8 +576,14 @@ describe('replaceCfdi — P1/P2 de la auditoría', () => {
   it('🔴 al reintentar, la fila guarda el importe que SE TIMBRÓ, no el de la reserva vieja', async () => {
     const deps = makeDeps({
       findSustituta: jest.fn().mockResolvedValue({
-        id: 'cfdi-sub', status: 'STAMP_FAILED', attempts: 1, idempotencyKey: 'cfdi-order-o1-r1',
-        replacesCfdiId: 'cfdi-orig', venueId: 'v1', totalCents: 12500, subtotalCents: 12500,
+        id: 'cfdi-sub',
+        status: 'STAMP_FAILED',
+        attempts: 1,
+        idempotencyKey: 'cfdi-order-o1-r1',
+        replacesCfdiId: 'cfdi-orig',
+        venueId: 'v1',
+        totalCents: 12500,
+        subtotalCents: 12500,
       }),
       loadOrderForCfdi: jest.fn().mockResolvedValue(bundle()), // la cuenta corregida: $135
       resolveProvider: jest.fn().mockReturnValue({
@@ -568,8 +613,12 @@ describe('replaceCfdi — P1/P2 de la auditoría', () => {
   // que perdió la respuesta. Tiene que contestar lo mismo, no 409.
   it('🔴 repetir el POST de una sustitución YA terminada devuelve el mismo resultado, no 409', async () => {
     const deps = makeDeps({
-      loadCfdi: jest.fn().mockResolvedValue({ ...original, status: 'CANCELLED', cancelStatus: 'ACCEPTED', cancelSubstituteUuid: 'UUID-SUB' }),
-      findSustituta: jest.fn().mockResolvedValue({ id: 'cfdi-sub', status: 'STAMPED', uuid: 'UUID-SUB', venueId: 'v1', replacesCfdiId: 'cfdi-orig' }),
+      loadCfdi: jest
+        .fn()
+        .mockResolvedValue({ ...original, status: 'CANCELLED', cancelStatus: 'ACCEPTED', cancelSubstituteUuid: 'UUID-SUB' }),
+      findSustituta: jest
+        .fn()
+        .mockResolvedValue({ id: 'cfdi-sub', status: 'STAMPED', uuid: 'UUID-SUB', venueId: 'v1', replacesCfdiId: 'cfdi-orig' }),
     })
     const res = await replaceCfdi(params, deps)
     expect(res.status).toBe('REPLACED')
@@ -587,7 +636,9 @@ describe('replaceCfdi — P1/P2 de la auditoría', () => {
       .mockResolvedValue({ ...original, cancelStatus: 'REQUESTED' })
     const deps = makeDeps({
       loadCfdi,
-      findSustituta: jest.fn().mockResolvedValue({ id: 'cfdi-sub', status: 'STAMPED', uuid: 'UUID-SUB', venueId: 'v1', replacesCfdiId: 'cfdi-orig' }),
+      findSustituta: jest
+        .fn()
+        .mockResolvedValue({ id: 'cfdi-sub', status: 'STAMPED', uuid: 'UUID-SUB', venueId: 'v1', replacesCfdiId: 'cfdi-orig' }),
     })
     await replaceCfdi(params, deps)
     expect(loadCfdi).toHaveBeenCalledTimes(2)

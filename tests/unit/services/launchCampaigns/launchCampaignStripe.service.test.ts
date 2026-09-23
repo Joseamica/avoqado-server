@@ -61,7 +61,14 @@ function ficha(overrides: Record<string, unknown> = {}) {
   }
 }
 
-const precioBueno = { id: 'price_pro_m', product: 'prod_plan_pro', currency: 'mxn', recurring: { interval: 'month' }, tax_behavior: 'inclusive', unit_amount: LISTA }
+const precioBueno = {
+  id: 'price_pro_m',
+  product: 'prod_plan_pro',
+  currency: 'mxn',
+  recurring: { interval: 'month' },
+  tax_behavior: 'inclusive',
+  unit_amount: LISTA,
+}
 
 beforeEach(() => {
   jest.clearAllMocks()
@@ -98,9 +105,19 @@ describe('activateLaunchCampaign', () => {
 
   it('🔴 un cupón existente con OTRO monto da COUPON_CONFLICT y NUNCA se borra', async () => {
     prismaMock.launchCampaign.findUnique.mockResolvedValue(ficha() as never)
-    mockCouponRetrieve.mockResolvedValue({ id: 'LC_POS22_V1', amount_off: 999, currency: 'mxn', duration: 'repeating', duration_in_months: 3, valid: true })
+    mockCouponRetrieve.mockResolvedValue({
+      id: 'LC_POS22_V1',
+      amount_off: 999,
+      currency: 'mxn',
+      duration: 'repeating',
+      duration_in_months: 3,
+      valid: true,
+    })
 
-    await expect(activateLaunchCampaign('lc-1', 'staff-1')).rejects.toMatchObject({ statusCode: 409, code: 'LAUNCH_CAMPAIGN_COUPON_CONFLICT' })
+    await expect(activateLaunchCampaign('lc-1', 'staff-1')).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'LAUNCH_CAMPAIGN_COUPON_CONFLICT',
+    })
     // 🔴 La afirmación que de verdad protege dinero: borrar un cupón vivo le sube el precio, en
     // el siguiente ciclo, a todos los clientes que ya lo llevan puesto.
     expect(mockCouponDel).not.toHaveBeenCalled()
@@ -111,7 +128,14 @@ describe('activateLaunchCampaign', () => {
   it('un cupón existente que YA coincide se reutiliza sin crear otro', async () => {
     prismaMock.launchCampaign.findUnique.mockResolvedValue(ficha() as never)
     prismaMock.launchCampaign.findUniqueOrThrow.mockResolvedValue(ficha({ status: 'ACTIVE' }) as never)
-    mockCouponRetrieve.mockResolvedValue({ id: 'LC_POS22_V1', amount_off: AMOUNT_OFF, currency: 'mxn', duration: 'repeating', duration_in_months: 3, valid: true })
+    mockCouponRetrieve.mockResolvedValue({
+      id: 'LC_POS22_V1',
+      amount_off: AMOUNT_OFF,
+      currency: 'mxn',
+      duration: 'repeating',
+      duration_in_months: 3,
+      valid: true,
+    })
 
     await activateLaunchCampaign('lc-1', 'staff-1')
     expect(mockCouponCreate).not.toHaveBeenCalled()
@@ -133,7 +157,13 @@ describe('activateLaunchCampaign', () => {
 
   it('🔴 reactivar con un precio de lista distinto del snapshot → PLAN_PRICE_MISMATCH', async () => {
     prismaMock.launchCampaign.findUnique.mockResolvedValue(
-      ficha({ status: 'PAUSED', stripeCouponId: 'LC_POS22_V1', listPriceCentsSnapshot: LISTA, discountAmountCents: AMOUNT_OFF, activatedAt: new Date() }) as never,
+      ficha({
+        status: 'PAUSED',
+        stripeCouponId: 'LC_POS22_V1',
+        listPriceCentsSnapshot: LISTA,
+        discountAmountCents: AMOUNT_OFF,
+        activatedAt: new Date(),
+      }) as never,
     )
     mockCouponRetrieve.mockResolvedValue({ id: 'LC_POS22_V1', valid: true })
     mockPriceList.mockResolvedValue({ data: [{ ...precioBueno, unit_amount: 129999 }] })

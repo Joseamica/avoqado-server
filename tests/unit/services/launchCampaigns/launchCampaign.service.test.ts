@@ -131,20 +131,22 @@ describe('updateLaunchCampaign — revisión optimista y campos congelados', () 
   })
 
   it('sobre una ficha ACTIVA los textos y las etiquetas SÍ se pueden editar', () => {
-    expect(camposBloqueados(ficha({ status: 'ACTIVE', activatedAt: VISTA }) as never, { headline: 'Hola', vertical: 'RETAIL' } as never)).toEqual([])
-  })
-
-  it('en DRAFT no hay nada congelado', () => {
     expect(
-      camposBloqueados(ficha() as never, { advertisedPriceCents: 3300, landingSlug: 'otro', discountMonths: 6 } as never),
+      camposBloqueados(ficha({ status: 'ACTIVE', activatedAt: VISTA }) as never, { headline: 'Hola', vertical: 'RETAIL' } as never),
     ).toEqual([])
   })
 
+  it('en DRAFT no hay nada congelado', () => {
+    expect(camposBloqueados(ficha() as never, { advertisedPriceCents: 3300, landingSlug: 'otro', discountMonths: 6 } as never)).toEqual([])
+  })
+
   it('🔴 `validFrom` se congela en cuanto alguien tomó un lugar', () => {
-    expect(camposBloqueados(ficha({ status: 'ACTIVE', activatedAt: VISTA, redemptionCount: 1 }) as never, { validFrom: new Date() } as never)).toEqual([
-      'validFrom',
-    ])
-    expect(camposBloqueados(ficha({ status: 'ACTIVE', activatedAt: VISTA, redemptionCount: 0 }) as never, { validFrom: new Date() } as never)).toEqual([])
+    expect(
+      camposBloqueados(ficha({ status: 'ACTIVE', activatedAt: VISTA, redemptionCount: 1 }) as never, { validFrom: new Date() } as never),
+    ).toEqual(['validFrom'])
+    expect(
+      camposBloqueados(ficha({ status: 'ACTIVE', activatedAt: VISTA, redemptionCount: 0 }) as never, { validFrom: new Date() } as never),
+    ).toEqual([])
   })
 
   it('una ficha TERMINADA es historia: no se edita nada', () => {
@@ -239,9 +241,7 @@ describe('listLaunchCampaigns', () => {
 
 describe('findClaimableByCode', () => {
   it('🔴 NO mira el cupo: una ficha llena se sigue pudiendo reclamar (atribución ≠ lugar)', async () => {
-    prismaMock.launchCampaign.findUnique.mockResolvedValue(
-      ficha({ status: 'ACTIVE', redemptionCap: 5, redemptionCount: 5 }) as never,
-    )
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(ficha({ status: 'ACTIVE', redemptionCap: 5, redemptionCount: 5 }) as never)
     await expect(findClaimableByCode('POS22', new Date('2026-09-17T00:00:00Z'))).resolves.toMatchObject({ code: 'POS22' })
   })
 
@@ -279,9 +279,7 @@ describe('findClaimableByCodeOrSlug — el anuncio puede traer cualquiera de los
 
   it('🔴 EL CASO QUE COSTABA DINERO: el slug de la página de oferta resuelve la ficha', async () => {
     // el alta ya lo subió a mayúsculas, así que por código no existe; por slug sí
-    prismaMock.launchCampaign.findUnique
-      .mockResolvedValueOnce(null as never)
-      .mockResolvedValueOnce(ficha({ status: 'ACTIVE' }) as never)
+    prismaMock.launchCampaign.findUnique.mockResolvedValueOnce(null as never).mockResolvedValueOnce(ficha({ status: 'ACTIVE' }) as never)
     await expect(findClaimableByCodeOrSlug('POS-22', DENTRO)).resolves.toMatchObject({ code: 'POS22' })
   })
 
@@ -292,20 +290,14 @@ describe('findClaimableByCodeOrSlug — el anuncio puede traer cualquiera de los
   })
 
   it('acepta el slug tal como se ve en la barra del navegador, en minúsculas', async () => {
-    prismaMock.launchCampaign.findUnique
-      .mockResolvedValueOnce(null as never)
-      .mockResolvedValueOnce(ficha({ status: 'ACTIVE' }) as never)
+    prismaMock.launchCampaign.findUnique.mockResolvedValueOnce(null as never).mockResolvedValueOnce(ficha({ status: 'ACTIVE' }) as never)
     await expect(findClaimableByCodeOrSlug('pos-22', DENTRO)).resolves.toMatchObject({ code: 'POS22' })
     // la segunda consulta va por landingSlug y en minúsculas, no por código
-    expect(prismaMock.launchCampaign.findUnique).toHaveBeenLastCalledWith(
-      expect.objectContaining({ where: { landingSlug: 'pos-22' } }),
-    )
+    expect(prismaMock.launchCampaign.findUnique).toHaveBeenLastCalledWith(expect.objectContaining({ where: { landingSlug: 'pos-22' } }))
   })
 
   it('🔴 la reclamabilidad NO se relaja por entrar por slug: una ficha PAUSADA sigue sin serlo', async () => {
-    prismaMock.launchCampaign.findUnique
-      .mockResolvedValueOnce(null as never)
-      .mockResolvedValueOnce(ficha({ status: 'PAUSED' }) as never)
+    prismaMock.launchCampaign.findUnique.mockResolvedValueOnce(null as never).mockResolvedValueOnce(ficha({ status: 'PAUSED' }) as never)
     await expect(findClaimableByCodeOrSlug('pos-22', DENTRO)).resolves.toBeNull()
   })
 

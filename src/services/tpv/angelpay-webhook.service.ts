@@ -477,14 +477,19 @@ async function liberarPorRechazo(args: {
       descripcion: typeof payload.payload.description === 'string' ? payload.payload.description : null,
     },
   })
-  logger.info(r.closed ? '🔓 [AngelPay webhook] Rechazo del banco: la venta y la ranura quedaron libres' : 'ℹ️ [AngelPay webhook] Rechazo del banco sin liberar', {
-    correlationId,
-    attemptId,
-    requestId: link.requestId,
-    venueId: link.venueId,
-    closed: r.closed,
-    reason: r.reason,
-  })
+  logger.info(
+    r.closed
+      ? '🔓 [AngelPay webhook] Rechazo del banco: la venta y la ranura quedaron libres'
+      : 'ℹ️ [AngelPay webhook] Rechazo del banco sin liberar',
+    {
+      correlationId,
+      attemptId,
+      requestId: link.requestId,
+      venueId: link.venueId,
+      closed: r.closed,
+      reason: r.reason,
+    },
+  )
   // 🔴 Sólo un fallo TRANSITORIO pide reintento (lock timeout, base caída). Que la fila no exista, no sea
   // elegible o tenga evidencia positiva son desenlaces LEGÍTIMOS: el evento se cierra y no se reintenta.
   return r.reason === 'ERROR' ? 'REINTENTAR' : 'OK'

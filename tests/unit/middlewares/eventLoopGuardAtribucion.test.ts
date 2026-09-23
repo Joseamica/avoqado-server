@@ -118,17 +118,53 @@ describe('gcEnVentana (pura)', () => {
   })
 
   it('suma varias pausas del mismo tramo', () => {
-    expect(gcEnVentana([{ inicioMs: 110, finMs: 130 }, { inicioMs: 150, finMs: 190 }], 100, 200)).toBe(60)
+    expect(
+      gcEnVentana(
+        [
+          { inicioMs: 110, finMs: 130 },
+          { inicioMs: 150, finMs: 190 },
+        ],
+        100,
+        200,
+      ),
+    ).toBe(60)
   })
 
   it('NO cuenta dos veces dos pausas que se solapen entre sí', () => {
     // Medido: V8 no solapa sus pausas (0 de 97 pares). Pero sumar a ciegas dejaría `gcMs`
     // a merced de esa suposición, y pasarse del tramo fabricaría un `gc-dominante` falso.
-    expect(gcEnVentana([{ inicioMs: 110, finMs: 160 }, { inicioMs: 140, finMs: 180 }], 100, 200)).toBe(70)
+    expect(
+      gcEnVentana(
+        [
+          { inicioMs: 110, finMs: 160 },
+          { inicioMs: 140, finMs: 180 },
+        ],
+        100,
+        200,
+      ),
+    ).toBe(70)
     // Contenida dentro de otra: aporta cero extra.
-    expect(gcEnVentana([{ inicioMs: 110, finMs: 190 }, { inicioMs: 130, finMs: 150 }], 100, 200)).toBe(80)
+    expect(
+      gcEnVentana(
+        [
+          { inicioMs: 110, finMs: 190 },
+          { inicioMs: 130, finMs: 150 },
+        ],
+        100,
+        200,
+      ),
+    ).toBe(80)
     // Pegadas: un solo intervalo, sin huecos inventados.
-    expect(gcEnVentana([{ inicioMs: 110, finMs: 150 }, { inicioMs: 150, finMs: 170 }], 100, 200)).toBe(60)
+    expect(
+      gcEnVentana(
+        [
+          { inicioMs: 110, finMs: 150 },
+          { inicioMs: 150, finMs: 170 },
+        ],
+        100,
+        200,
+      ),
+    ).toBe(60)
   })
 
   it('nunca devuelve más GC que el tamaño de la ventana', () => {

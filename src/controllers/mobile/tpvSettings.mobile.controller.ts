@@ -327,7 +327,14 @@ export const updateTerminalSettings = async (req: Request, res: Response, next: 
 
     const terminal = await prisma.terminal.findFirst({
       where: { id: terminalId, venueId, deviceUid },
-      select: { id: true, type: true, customerDisplayPresent: true, customerDisplayInvertible: true, displayModeProtocolVersion: true, capabilitiesObservedAt: true },
+      select: {
+        id: true,
+        type: true,
+        customerDisplayPresent: true,
+        customerDisplayInvertible: true,
+        displayModeProtocolVersion: true,
+        capabilitiesObservedAt: true,
+      },
     })
     if (!terminal) throw new NotFoundError('Este dispositivo no está registrado en este establecimiento.', 'DEVICE_NOT_FOUND')
 
@@ -336,7 +343,12 @@ export const updateTerminalSettings = async (req: Request, res: Response, next: 
     // 🔴 El `staffId` va en el scope, no en un `logAction` aparte: `updateTpvSettings` YA audita, y
     // escribir aquí otro renglón dejaba DOS filas por un toque —la suya anónima, la mía con el
     // detalle—. Medido en el QA del 18-sep sobre una Sunmi OrderPAD 3 real.
-    const settings = await updateTpvSettings(terminalId, changes, { venueId, staffId: (req as any).authContext?.userId, source: 'pos', deviceUid })
+    const settings = await updateTpvSettings(terminalId, changes, {
+      venueId,
+      staffId: (req as any).authContext?.userId,
+      source: 'pos',
+      deviceUid,
+    })
 
     return res.json({ success: true, data: { terminalId, settings } })
   } catch (error) {

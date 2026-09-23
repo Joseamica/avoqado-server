@@ -388,9 +388,7 @@ describe('MCP terminal_checkout_screens', () => {
   })
 
   it('refleja lo que el negocio apagó, sin tocar el otro ajuste', async () => {
-    prismaMock.terminal.findMany.mockResolvedValue([
-      device({ config: { settings: { showReviewScreen: false } } }),
-    ] as any)
+    prismaMock.terminal.findMany.mockResolvedValue([device({ config: { settings: { showReviewScreen: false } } })] as any)
 
     const body = parseBody(await captureHandler()({ venueId: 'venue-1' }))
 

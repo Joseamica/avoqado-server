@@ -15,8 +15,17 @@ describe('FULL-TESTING destructive - lo que un procesador puede meter en la pant
       data: { name: `FULLTEST Dest ${sufijo}`, email: `ftd-${sufijo}@test.com`, phone: '5550000001' },
     })
     const v = await prisma.venue.create({
-      data: { name: `FULLTEST Dest ${sufijo}`, slug: `fulltest-dest-${sufijo}`, organizationId: org.id,
-              address: 'T', city: 'T', state: 'T', country: 'MX', zipCode: '12345', timezone: 'America/Mexico_City' },
+      data: {
+        name: `FULLTEST Dest ${sufijo}`,
+        slug: `fulltest-dest-${sufijo}`,
+        organizationId: org.id,
+        address: 'T',
+        city: 'T',
+        state: 'T',
+        country: 'MX',
+        zipCode: '12345',
+        timezone: 'America/Mexico_City',
+      },
     })
     venueId = v.id
   })
@@ -25,9 +34,17 @@ describe('FULL-TESTING destructive - lo que un procesador puede meter en la pant
     const requestId = randomUUID()
     const ahora = new Date()
     await prisma.terminalPaymentRequest.create({
-      data: { requestId, venueId, terminalId: `${base}-${Math.random().toString(36).slice(2, 7)}`,
-              status: 'UNKNOWN', amountCents: 6500, tipCents: 975, terminalReturnedAt: ahora, acknowledgedAt: ahora,
-              expiresAt: new Date(ahora.getTime() - 60000) },
+      data: {
+        requestId,
+        venueId,
+        terminalId: `${base}-${Math.random().toString(36).slice(2, 7)}`,
+        status: 'UNKNOWN',
+        amountCents: 6500,
+        tipCents: 975,
+        terminalReturnedAt: ahora,
+        acknowledgedAt: ahora,
+        expiresAt: new Date(ahora.getTime() - 60000),
+      },
     })
     // En el camino real el webhook sólo llega con su vínculo S1: sembrarlo hace la prueba fiel.
     await prisma.terminalPaymentAttemptLink.create({
@@ -40,8 +57,12 @@ describe('FULL-TESTING destructive - lo que un procesador puede meter en la pant
 
   it('A1 - descripcion de 10000 caracteres del procesador', async () => {
     const r = await fila()
-    await reconcileBankDeclined({ venueId, requestId: r, origen: 'ANGELPAY',
-      evidencia: { eventLogId: 'e', attemptId: `att-${r}`, codigo: '05', descripcion: 'X'.repeat(10000) } })
+    await reconcileBankDeclined({
+      venueId,
+      requestId: r,
+      origen: 'ANGELPAY',
+      evidencia: { eventLogId: 'e', attemptId: `att-${r}`, codigo: '05', descripcion: 'X'.repeat(10000) },
+    })
     const m = await msg(r)
     console.log(`[A1] longitud del mensaje que pinta el POS: ${m.length}`)
     expect(m.length).toBeLessThan(400)
@@ -49,8 +70,12 @@ describe('FULL-TESTING destructive - lo que un procesador puede meter en la pant
 
   it('A2 - el procesador manda un texto que CONTRADICE el rechazo', async () => {
     const r = await fila()
-    await reconcileBankDeclined({ venueId, requestId: r, origen: 'ANGELPAY',
-      evidencia: { eventLogId: 'e', attemptId: `att-${r}`, codigo: 'declined', descripcion: 'APROBADA, COBRO EXITOSO' } })
+    await reconcileBankDeclined({
+      venueId,
+      requestId: r,
+      origen: 'ANGELPAY',
+      evidencia: { eventLogId: 'e', attemptId: `att-${r}`, codigo: 'declined', descripcion: 'APROBADA, COBRO EXITOSO' },
+    })
     const m = await msg(r)
     console.log(`[A2] el cajero lee: "${m}"`)
     expect(m).not.toMatch(/APROBADA|EXITOSO/i)
@@ -58,9 +83,17 @@ describe('FULL-TESTING destructive - lo que un procesador puede meter en la pant
 
   it('A3 - saltos de linea y control chars rompen el renglon', async () => {
     const r = await fila()
-    const res = await reconcileBankDeclined({ venueId, requestId: r, origen: 'BLUMON',
-      evidencia: { eventLogId: 'e', attemptId: `att-${r}`, codigo: '05' + String.fromCharCode(10, 10),
-                   descripcion: 'A' + String.fromCharCode(0) + 'B' + String.fromCharCode(13, 10) + 'C' } })
+    const res = await reconcileBankDeclined({
+      venueId,
+      requestId: r,
+      origen: 'BLUMON',
+      evidencia: {
+        eventLogId: 'e',
+        attemptId: `att-${r}`,
+        codigo: '05' + String.fromCharCode(10, 10),
+        descripcion: 'A' + String.fromCharCode(0) + 'B' + String.fromCharCode(13, 10) + 'C',
+      },
+    })
     const m = await msg(r)
     const fila2 = await prisma.terminalPaymentRequest.findUnique({ where: { requestId: r } })
     console.log(`[A3] closed=${JSON.stringify(res)} status=${fila2?.status} failureCode=${fila2?.failureCode} msg=${JSON.stringify(m)}`)
@@ -85,8 +118,12 @@ describe('FULL-TESTING destructive - lo que un procesador puede meter en la pant
   // ══════════════════════════════════════════════════════════════════════════════════════
   it('R1 - con el payload REAL, el cajero NO lee "rejected" en ingles', async () => {
     const r = await fila()
-    await reconcileBankDeclined({ venueId, requestId: r, origen: 'ANGELPAY',
-      evidencia: { eventLogId: 'e', attemptId: `att-${r}`, codigo: 'rejected', descripcion: '87 DATOS DE PISTA INCORRECTOS' } })
+    await reconcileBankDeclined({
+      venueId,
+      requestId: r,
+      origen: 'ANGELPAY',
+      evidencia: { eventLogId: 'e', attemptId: `att-${r}`, codigo: 'rejected', descripcion: '87 DATOS DE PISTA INCORRECTOS' },
+    })
     const m = await msg(r)
     console.log(`[R1] el cajero lee: "${m}"`)
     expect(m).not.toContain('rejected')
@@ -100,8 +137,12 @@ describe('FULL-TESTING destructive - lo que un procesador puede meter en la pant
     ]
     for (const [desc, esperado] of casos) {
       const r = await fila()
-      await reconcileBankDeclined({ venueId, requestId: r, origen: 'ANGELPAY',
-        evidencia: { eventLogId: 'e', attemptId: `att-${r}`, codigo: 'rejected', descripcion: desc } })
+      await reconcileBankDeclined({
+        venueId,
+        requestId: r,
+        origen: 'ANGELPAY',
+        evidencia: { eventLogId: 'e', attemptId: `att-${r}`, codigo: 'rejected', descripcion: desc },
+      })
       const m = await msg(r)
       console.log(`[R2] "${desc}" -> "${m}"`)
       expect(m).toMatch(esperado)
@@ -112,8 +153,12 @@ describe('FULL-TESTING destructive - lo que un procesador puede meter en la pant
 
   it('R3 - un codigo DESCONOCIDO no inventa motivo: mensaje limpio y accionable', async () => {
     const r = await fila()
-    await reconcileBankDeclined({ venueId, requestId: r, origen: 'ANGELPAY',
-      evidencia: { eventLogId: 'e', attemptId: `att-${r}`, codigo: 'rejected', descripcion: 'ZZ MOTIVO QUE NO CONOCEMOS' } })
+    await reconcileBankDeclined({
+      venueId,
+      requestId: r,
+      origen: 'ANGELPAY',
+      evidencia: { eventLogId: 'e', attemptId: `att-${r}`, codigo: 'rejected', descripcion: 'ZZ MOTIVO QUE NO CONOCEMOS' },
+    })
     const m = await msg(r)
     console.log(`[R3] el cajero lee: "${m}"`)
     expect(m).not.toContain('ZZ')
@@ -126,9 +171,16 @@ describe('FULL-TESTING destructive - lo que un procesador puede meter en la pant
     // liberacion muere con reason ERROR — o sea, el procesador podia dejar la terminal trabada con un emoji.
     const r = await fila()
     const res = await reconcileBankDeclined({
-      venueId, requestId: r, origen: 'ANGELPAY',
+      venueId,
+      requestId: r,
+      origen: 'ANGELPAY',
       // 299 caracteres + emoji: el corte a 300 cae EXACTAMENTE en medio del par sustituto.
-      evidencia: { eventLogId: 'e', attemptId: `att-${r}`, codigo: 'rejected', descripcion: '51 ' + 'x'.repeat(296) + String.fromCodePoint(0x1f600) },
+      evidencia: {
+        eventLogId: 'e',
+        attemptId: `att-${r}`,
+        codigo: 'rejected',
+        descripcion: '51 ' + 'x'.repeat(296) + String.fromCodePoint(0x1f600),
+      },
     })
     const f2 = await prisma.terminalPaymentRequest.findUnique({ where: { requestId: r } })
     console.log(`[U1] closed=${JSON.stringify(res)} status=${f2?.status}`)

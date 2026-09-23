@@ -113,11 +113,10 @@ export async function assertNoIncluidaEnElPlan(venueId: string, featureCodes: st
     tier ? elPlanConcede(tier, code) : (FREE_TIER_CODES as readonly string[]).includes(code),
   )
   if (yaIncluidas.length > 0) {
-    throw new ConflictError(
-      `Tu plan ya incluye ${yaIncluidas.join(', ')}: no hace falta contratarlo aparte.`,
-      'FEATURE_INCLUDED_IN_PLAN',
-      { featureCodes: yaIncluidas, tier: tier ?? 'FREE' },
-    )
+    throw new ConflictError(`Tu plan ya incluye ${yaIncluidas.join(', ')}: no hace falta contratarlo aparte.`, 'FEATURE_INCLUDED_IN_PLAN', {
+      featureCodes: yaIncluidas,
+      tier: tier ?? 'FREE',
+    })
   }
 }
 
@@ -181,9 +180,7 @@ export async function addFeaturesToVenue(venueId: string, featureCodes: string[]
   // Se comprueba ANTES de tocar la base o Stripe: nada de la petición debe ejecutarse a medias.
   const planesPedidos = featureCodes.filter(code => (PAID_PLAN_TIER_CODES as readonly string[]).includes(code))
   if (planesPedidos.length > 0) {
-    throw new BadRequestError(
-      `Los planes (${planesPedidos.join(', ')}) se contratan desde el flujo de plan, no como función suelta.`,
-    )
+    throw new BadRequestError(`Los planes (${planesPedidos.join(', ')}) se contratan desde el flujo de plan, no como función suelta.`)
   }
 
   await assertNoIncluidaEnElPlan(venueId, featureCodes)

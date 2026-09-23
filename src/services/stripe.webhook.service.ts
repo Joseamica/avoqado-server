@@ -241,7 +241,10 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
       const venue = await prisma.venue.findUnique({ where: { id: conflicto.venueId }, select: { status: true } })
       if (venue && OPERATIONAL_VENUE_STATUSES.includes(venue.status))
         return entregaDecidePorElPlan(conflicto.venueId, subscriptionId, 'customer.subscription.updated')
-      logger.warn('⚠️ Webhook: conflicto pendiente de un negocio no operativo — no se entrega', { subscriptionId, venueStatus: venue?.status })
+      logger.warn('⚠️ Webhook: conflicto pendiente de un negocio no operativo — no se entrega', {
+        subscriptionId,
+        venueStatus: venue?.status,
+      })
       return false
     }
     logger.warn('⚠️ Webhook: Subscription not found in database', { subscriptionId })
@@ -1107,7 +1110,6 @@ export async function handleCustomerDeleted(customer: Stripe.Customer) {
   // depende de él (cortesías, pruebas locales) no se toca. Todo bajo el candado del negocio, como el resto de V5-A.
   const suyas = await (async () => {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
       const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY)
       const r = await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 100 })
       return (r.data as { id: string }[]).map(x => x.id)

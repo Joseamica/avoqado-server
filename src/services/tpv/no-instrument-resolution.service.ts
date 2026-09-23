@@ -27,9 +27,13 @@ import { normalizeTerminalId } from '../../communication/sockets/terminal-regist
 import { evaluatePermissionList, hasPermission } from '../../lib/permissions'
 import { PIN_REGEX } from '../../schemas/common/pin.schema'
 import { candadoDeIntento, llaveDeIntento, OPCIONES_DE_TRANSACCION_DEL_INTENTO } from './candadoDeIntento'
-import { estadoBancarioSql } from './estadoBancario'
-import { sinEvidenciaPositivaSql } from './evidenciaPositivaSql'
-import { PATRON_SQL_TRIM_COMO_JS } from '../../utils/terminalSerial'
+import {
+  eventosQueVetanSql,
+  hayDineroConEstaLlaveSql,
+  sinDineroConEstaLlaveSql,
+  sinEventoQueVetaSql,
+  sinEvidenciaPositivaSql,
+} from './evidenciaPositivaSql'
 
 export const NO_INSTRUMENT_PERMISSION = 'payments:resolve-no-instrument'
 
@@ -128,22 +132,9 @@ async function evidenciaQueVetaLaDeclaracion(
   terminalId: string,
   hayVinculo = false,
 ) {
-  return tx.$queryRaw<{ id: string }[]>`
-    SELECT e."id" FROM "ProviderEventLog" e
-    WHERE e."attemptId" = ${attemptId} AND e."provider" = 'PAYMENT_PROCESSOR'
-      AND (e."venueId" IS DISTINCT FROM ${venueId}
-        OR e."errorReason" IN ('LINK_TERMINAL_MISMATCH', 'LINK_VENUE_MISMATCH')
-        OR (nullif(regexp_replace(coalesce(e."payload"->'payload'->>'terminalSerial', ''), ${PATRON_SQL_TRIM_COMO_JS}, '', 'g'), '') IS NOT NULL
-          AND lower(regexp_replace(regexp_replace(e."payload"->'payload'->>'terminalSerial', ${PATRON_SQL_TRIM_COMO_JS}, '', 'g'), '^AVQD-', '', 'i')) <> ${terminalId})
-        OR ${estadoBancarioSql(Prisma.sql`coalesce(e."payload"->'payload'->'status', e."payload"->'status')`)} = 'APROBADO'
-        -- 🔴 Codex r5-6 (22-sep): un evento de este intento que no se puede atribuir a nadie —sin vínculo y sin
-        -- serial— y cuyo estado NO es un rechazo acreditado también veta. Antes el POST lo dejaba pasar y S6 lo
-        -- contaba como evidencia sin dueño: la declaración se guardaba y quedaba INSERVIBLE al instante. Aceptar
-        -- una declaración y poder usarla tienen que decir lo mismo, y esta es la regla que los iguala.
-        OR (${!hayVinculo}
-          AND nullif(regexp_replace(coalesce(e."payload"->'payload'->>'terminalSerial', ''), ${PATRON_SQL_TRIM_COMO_JS}, '', 'g'), '') IS NULL
-          AND ${estadoBancarioSql(Prisma.sql`coalesce(e."payload"->'payload'->'status', e."payload"->'status')`)} IS DISTINCT FROM 'RECHAZADO'))
-    LIMIT 1`
+  // 🔴 Codex r7 (P1-3): el TEXTO de la regla vive en `evidenciaPositivaSql` y es el MISMO que entra en el `WHERE` del CAS con
+  // solicitud (`sinEventoQueVetaSql`). Tenerlo aquí en SQL suelto dejaba a la escritura revalidando MENOS que la lectura.
+  return tx.$queryRaw<{ id: string }[]>`${eventosQueVetanSql(attemptId, venueId, terminalId, hayVinculo)}`
 }
 
 /**
@@ -161,12 +152,10 @@ async function evidenciaQueVetaLaDeclaracion(
  * representativo, y la corrección de raíz es normalizar también al ESCRIBIR (`recordFastPayment`), que es otro carril.
  */
 async function hayDineroConEstaLlave(tx: Prisma.TransactionClient, attemptId: string): Promise<boolean> {
-  const filas = await tx.$queryRaw<{ id: string }[]>`
-    SELECT "id" FROM "Payment"
-    WHERE "idempotencyKey" = ${attemptId}
-       OR regexp_replace("idempotencyKey", ${PATRON_SQL_TRIM_COMO_JS}, '', 'g') = ${attemptId}
-    LIMIT 1`
-  return filas.length > 0
+  // 🔴 Codex r6 (P1-1): el TEXTO de la regla vive en `evidenciaPositivaSql` y es el MISMO que entra en el `WHERE` de las dos
+  // escrituras. Tenerlo aquí en SQL suelto era la puerta por la que divergieron la comprobación previa y el CAS.
+  const [fila] = await tx.$queryRaw<{ hay: boolean }[]>`SELECT ${hayDineroConEstaLlaveSql(attemptId)} AS "hay"`
+  return fila?.hay === true
 }
 
 const SENALES_POSITIVAS_DEL_SOBRE = ['paymentId', 'authorizationCode', 'transactionId', 'reference', 'readMode'] as const
@@ -459,7 +448,9 @@ export async function resolveNoInstrument(
       SET "status" = 'FAILED', "failureCode" = 'OPERATOR_RECONCILED_NO_CHARGE', "cancelDisposition" = NULL,
           "resultJson" = ${JSON.stringify(sobreDeclarado)}::jsonb, "updatedAt" = (NOW() AT TIME ZONE 'UTC')
       WHERE "id" = ${row.id} AND "status" = ${row.status}::"TerminalPaymentRequestStatus" AND "paymentId" IS NULL
-        AND ${sinEvidenciaPositivaSql(requestId, identity.venueId)}`
+        AND ${sinEvidenciaPositivaSql(requestId, identity.venueId)}
+        AND ${sinDineroConEstaLlaveSql(attemptId)}
+        AND ${sinEventoQueVetaSql(attemptId, identity.venueId, terminalId, true)}`
     if (cas !== 1) throw new NoInstrumentResolutionError('ATTEMPT_NOT_ELIGIBLE')
     await tx.terminalPaymentAttemptLink.update({
       where: { attemptId },

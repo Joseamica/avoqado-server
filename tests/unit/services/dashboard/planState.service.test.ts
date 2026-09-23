@@ -21,6 +21,10 @@ function subSummary(overrides: Record<string, unknown> = {}) {
     currentPeriodEnd: future,
     createdAt: tenuredCreatedAt,
     hasActiveDiscount: false,
+    // Añadido por OTRA sesión al tipo de producción en `fe1b1499` (la pausa de cobranza) sin actualizar este ayudante:
+    // el commit dejó `develop` sin typechequear (8 errores TS2345). Aquí sólo se hace compilar — sin cambiar comportamiento,
+    // porque `null` es lo que ya asumía cada aserción de esta suite.
+    pausedUntil: null as Date | null,
     interval: 'month' as const,
     grossAmountCents: 115884,
     ...overrides,

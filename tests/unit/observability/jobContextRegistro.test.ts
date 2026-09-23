@@ -136,7 +136,7 @@ describe('qué schedulers quedan cubiertos (cobertura declarada, no supuesta)', 
 
     const relativo = (ruta: string) => ruta.slice(raizSrc.length + 1)
 
-/**
+    /**
      * 🔴 Se comparan CANTIDADES por archivo, no nombres de archivo.
      *
      * La versión anterior sólo listaba los archivos, así que un registro NUEVO dentro de uno ya

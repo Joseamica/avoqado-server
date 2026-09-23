@@ -103,7 +103,6 @@ async function apartar(i: number): Promise<'ganó' | 'perdió'> {
   }
 }
 
-
 describe('el cupo bajo concurrencia real', () => {
   it(`🔴 ${INTENTOS} reservas simultáneas sobre un cupo de ${CUPO} dejan EXACTAMENTE ${CUPO}`, async () => {
     const resultados = await Promise.all(Array.from({ length: INTENTOS }, (_, i) => apartar(i)))
@@ -124,9 +123,7 @@ describe('el cupo bajo concurrencia real', () => {
   it('🔴 el CHECK de la base es el respaldo: un UPDATE directo que pase del cupo se RECHAZA', async () => {
     // Si alguien «optimiza» el WHERE condicional algún día, esto es lo que sigue impidiendo la
     // sobreventa — y por eso el CHECK existe además de la sentencia.
-    await expect(
-      prisma.$executeRaw`UPDATE "LaunchCampaign" SET "redemptionCount" = ${CUPO + 1} WHERE "id" = ${CAMPAIGN}`,
-    ).rejects.toThrow()
+    await expect(prisma.$executeRaw`UPDATE "LaunchCampaign" SET "redemptionCount" = ${CUPO + 1} WHERE "id" = ${CAMPAIGN}`).rejects.toThrow()
   })
 
   it('🔴 la MISMA organización no puede tomar DOS lugares vivos (índice único parcial)', async () => {

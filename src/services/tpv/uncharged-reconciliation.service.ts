@@ -321,8 +321,7 @@ export async function reconcileUncharged(
     // mandar `"statement":"BANK_DECLINED"` y SALTARSE el permiso del cajero. Se exigen los DOS, y que
     // coincidan: un cuerpo que se declare del banco por un camino humano es un rechazo, no un dato.
     const porElBanco = identity.source === 'WEBHOOK'
-    if (porElBanco !== (declaration.statement === 'BANK_DECLINED'))
-      throw new UnchargedReconciliationError('NOT_ALLOWED', 403)
+    if (porElBanco !== (declaration.statement === 'BANK_DECLINED')) throw new UnchargedReconciliationError('NOT_ALLOWED', 403)
     const actor = identity.actorStaffId ? await miembroConPermiso(tx, identity.venueId, identity.actorStaffId) : null
     if (!porElBanco && (!actor || !actor.permitido)) throw new UnchargedReconciliationError('NOT_ALLOWED', 403)
 
@@ -605,7 +604,6 @@ function textoSeguro(valor: string | null | undefined, tope: number): string {
   return salida
 }
 
-
 /**
  * 🔴 El motivo del rechazo, con NUESTRAS palabras — lista blanca de códigos, nunca la prosa del banco.
  *
@@ -626,14 +624,14 @@ const MOTIVOS_DEL_BANCO: Record<string, string> = {
   '51': 'No tiene fondos suficientes.',
   '05': 'El banco la declinó.',
   '1A': 'La tarjeta pide autenticación: cóbrala con chip y NIP.',
-  'U0': 'El banco pide que el cliente lo llame.',
+  U0: 'El banco pide que el cliente lo llame.',
   '87': 'No se leyó bien la tarjeta: vuelve a pasarla.',
   '91': 'El banco no pudo procesarla en este momento.',
   '57': 'El banco no acepta esta operación con esa tarjeta.',
   '06': 'El banco no pudo procesarla.',
   '12': 'El banco no pudo procesarla.',
   '30': 'El banco no pudo procesarla.',
-  'N2': 'El banco no pudo procesarla en este momento.',
+  N2: 'El banco no pudo procesarla en este momento.',
   '54': 'La tarjeta está vencida.',
   '14': 'El número de tarjeta no es válido.',
   '55': 'El NIP es incorrecto.',

@@ -78,9 +78,7 @@ export interface RegistroDeJobs {
   limpiar: () => void
 }
 
-export function crearRegistroDeJobs(
-  opciones: { ahoraMs?: () => number; maxHistorial?: number; maxActivos?: number } = {},
-): RegistroDeJobs {
+export function crearRegistroDeJobs(opciones: { ahoraMs?: () => number; maxHistorial?: number; maxActivos?: number } = {}): RegistroDeJobs {
   const ahora = opciones.ahoraMs ?? (() => performance.now())
   const maxHistorial = opciones.maxHistorial ?? MAX_HISTORIAL
 

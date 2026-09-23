@@ -45,20 +45,26 @@ describe('GET /superadmin/launch-campaigns — capa HTTP', () => {
   })
 
   it.each(['OWNER', 'ADMIN', 'MANAGER', 'CASHIER', 'WAITER', 'VIEWER'])('🔴 403 para %s: es SOLO de Avoqado', async role => {
-    const res = await request(app).get(PATH).set('Authorization', `Bearer ${token(role)}`)
+    const res = await request(app)
+      .get(PATH)
+      .set('Authorization', `Bearer ${token(role)}`)
     expect(res.status).toBe(403)
     // Y no llega a consultar nada: el guardia corta antes del controlador.
     expect(prismaMock.launchCampaign.findMany).not.toHaveBeenCalled()
   })
 
   it('200 para SUPERADMIN — y esto es lo que prueba que la subruta está MONTADA', async () => {
-    const res = await request(app).get(PATH).set('Authorization', `Bearer ${token('SUPERADMIN')}`)
+    const res = await request(app)
+      .get(PATH)
+      .set('Authorization', `Bearer ${token('SUPERADMIN')}`)
     expect(res.status).toBe(200)
     expect(res.body).toMatchObject({ success: true, data: [], meta: { total: 0, page: 1, pageSize: 25 } })
   })
 
   it('un `pageSize` por encima del tope se rechaza con un 400 legible', async () => {
-    const res = await request(app).get(`${PATH}?pageSize=5000`).set('Authorization', `Bearer ${token('SUPERADMIN')}`)
+    const res = await request(app)
+      .get(`${PATH}?pageSize=5000`)
+      .set('Authorization', `Bearer ${token('SUPERADMIN')}`)
     expect(res.status).toBe(400)
     expect(String(res.body.message)).toMatch(/cupo|pageSize|Revisa|:/i)
   })

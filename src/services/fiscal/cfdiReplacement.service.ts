@@ -233,7 +233,9 @@ export async function replaceCfdi(
     try {
       previo = await provider.findByExternalId(llave)
     } catch (err: unknown) {
-      logger.error(`[cfdi] no se pudo consultar el PAC antes de reintentar la sustituta ${llave}: ${err instanceof Error ? err.message : String(err)}`)
+      logger.error(
+        `[cfdi] no se pudo consultar el PAC antes de reintentar la sustituta ${llave}: ${err instanceof Error ? err.message : String(err)}`,
+      )
       throw new Error('Sustitución en proceso para esta factura') // → 409; nunca se timbra a ciegas
     }
     if (previo && previo.status !== 'canceled') {
@@ -250,7 +252,9 @@ export async function replaceCfdi(
       return await cancelarOriginal(params, original, recuperada, deps, 'REPLACED')
     }
     if (previo?.status === 'canceled') {
-      throw new Error(`La sustituta anterior (${previo.uuid ?? previo.providerInvoiceId}) quedó cancelada en el PAC; revísala antes de volver a sustituir.`)
+      throw new Error(
+        `La sustituta anterior (${previo.uuid ?? previo.providerInvoiceId}) quedó cancelada en el PAC; revísala antes de volver a sustituir.`,
+      )
     }
   }
 
@@ -322,7 +326,13 @@ async function cancelarOriginal(
       return { status, sustituta, original: vigente, cancelStatus: vigente.cancelStatus ?? 'CANCELLED', cancelPendiente: false }
     }
     const res = await cancelCfdi(
-      { cfdiId: vigente.id, motivo: '01', substituteUuid: sustituta.uuid, sandbox: params.sandbox, expectedVenueId: params.expectedVenueId },
+      {
+        cfdiId: vigente.id,
+        motivo: '01',
+        substituteUuid: sustituta.uuid,
+        sandbox: params.sandbox,
+        expectedVenueId: params.expectedVenueId,
+      },
       { loadCfdi: async () => vigente, resolveProvider: deps.resolveProvider, updateCfdi: deps.updateCfdi },
     )
     return {

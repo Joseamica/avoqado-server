@@ -353,7 +353,11 @@ describe('configurableSettings — qué ajustes admite cada tipo de aparato', ()
 
   it('a un POS (tablet/iPad) sólo le deja lo que su app realmente obedece', () => {
     for (const type of [TerminalType.POS_ANDROID, TerminalType.POS_IOS]) {
-      expect(resolveEffectiveDeviceCapabilities(device(type)).configurableSettings).toEqual(['showReviewScreen', 'showTipScreen', 'tipSuggestions'])
+      expect(resolveEffectiveDeviceCapabilities(device(type)).configurableSettings).toEqual([
+        'showReviewScreen',
+        'showTipScreen',
+        'tipSuggestions',
+      ])
     }
   })
 

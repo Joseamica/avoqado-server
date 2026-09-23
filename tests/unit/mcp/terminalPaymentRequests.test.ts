@@ -86,16 +86,46 @@ function vinculos(
   )
 }
 
-async function listar(rows: ReturnType<typeof fila>[]) {
+async function listar(rows: ReturnType<typeof fila>[], declaracionesLocales: unknown[] = []) {
   ;(prismaMock as any).terminalPaymentRequest.findMany.mockResolvedValue(rows)
   vinculos([])
   ;(prismaMock as any).terminalPaymentAttemptLink.findMany.mockResolvedValue([])
   ;(prismaMock as any).payment.findMany.mockResolvedValue([])
+  // Las declaraciones del cajero sobre cobros LOCALES (sin solicitud): viven en su propia tabla y por eso no pueden
+  // aparecer en `requests`. Por defecto, ninguna — cada prueba que las necesite las pasa.
+  ;(prismaMock as any).terminalAttemptResolution.findMany.mockResolvedValue(declaracionesLocales)
   const handler = capturarTool('terminal_payment_requests')
   return JSON.parse((await handler({ venueId: 'venue-1' })).content[0].text)
 }
 
 describe('terminal_payment_requests — la misma proyección que el GET del POS', () => {
+  it('🔴 r6 · las declaraciones del cajero sobre cobros LOCALES salen aparte (no tienen solicitud a la que pertenecer)', async () => {
+    // Un Pago rápido no tiene `TerminalPaymentRequest`, así que una declaración suya NUNCA podría salir en `requests`:
+    // sin esto, «el cajero declaró que no se cobró» era invisible para el MCP justo en los cobros que más se atascan
+    // (medido en una N86: 13 de 27 intentos son locales).
+    const salida = await listar([], [
+      {
+        attemptId: 'att-local-1', terminalId: 'avqd-1', venueId: 'venue-1',
+        resolution: { kind: 'NO_INSTRUMENT_PRESENTED', by: 'SESSION', staffId: 'staff-9', acceptedAt: '2026-09-22T12:00:00.000Z' },
+        createdAt: new Date('2026-09-22T12:00:01.000Z'),
+      },
+    ])
+    expect(salida.localResolutions).toEqual([
+      {
+        attemptId: 'att-local-1', terminalId: 'avqd-1', venueId: 'venue-1',
+        kind: 'NO_INSTRUMENT_PRESENTED', authorizedBy: 'SESSION', staffId: 'staff-9',
+        declaredAt: '2026-09-22T12:00:00.000Z',
+      },
+    ])
+  })
+
+  it('r6b · sin declaraciones locales la llave sale vacía, y el resto de la proyección no cambia', async () => {
+    const salida = await listar([fila({ requestId: 'R-1', status: S.FAILED, failureCode: 'TPV_ERROR' })])
+    expect(salida.localResolutions).toEqual([])
+    expect(salida.count).toBe(1)
+  })
+
+
   it('🔴 una FAILED sin evidencia sale UNKNOWN, ocupada y UNRESOLVED (antes: FAILED y libre)', async () => {
     const salida = await listar([fila({ requestId: 'R-TPV-ERROR', status: S.FAILED, failureCode: 'TPV_ERROR' })])
     expect(salida.requests[0]).toMatchObject({

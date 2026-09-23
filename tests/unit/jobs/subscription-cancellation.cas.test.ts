@@ -15,7 +15,10 @@ const mockTrialEmail = jest.fn().mockResolvedValue(true)
 const mockCanceledEmail = jest.fn().mockResolvedValue(true)
 jest.mock('@/services/email.service', () => ({
   __esModule: true,
-  default: { sendTrialExpiredEmail: (...a: unknown[]) => mockTrialEmail(...a), sendSubscriptionCanceledEmail: (...a: unknown[]) => mockCanceledEmail(...a) },
+  default: {
+    sendTrialExpiredEmail: (...a: unknown[]) => mockTrialEmail(...a),
+    sendSubscriptionCanceledEmail: (...a: unknown[]) => mockCanceledEmail(...a),
+  },
 }))
 jest.mock('@/observability/jobContext', () => ({ scheduleJob: jest.fn() }))
 jest.mock('@/services/stripe.service', () => ({ __esModule: true, estadoDeLaSuscripcion: jest.fn().mockResolvedValue('unpaid') }))

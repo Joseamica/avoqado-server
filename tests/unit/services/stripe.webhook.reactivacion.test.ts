@@ -94,7 +94,7 @@ beforeEach(() => {
   // Por defecto Stripe dice que está al corriente: el caso normal es «pagó y se recupera».
   // 🔴 Se restablecen las DOS, explícitamente: `jest.clearAllMocks()` borra el historial de llamadas
   // pero NO las implementaciones, así que un `mockResolvedValue` de un test se filtraba al siguiente.
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
+
   const stripeSvc = require('@/services/stripe.service')
   ;(stripeSvc.estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('active')
   ;(stripeSvc.suscripcionVigente as jest.Mock).mockResolvedValue({ status: 'active', trialEnd: null })

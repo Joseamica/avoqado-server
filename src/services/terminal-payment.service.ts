@@ -29,6 +29,8 @@ import { solicitudDelRegistro } from './tpv/identidadDelCobro'
 import {
   hayAprobadoVinculadoSql,
   evidenciaDeConciliacionDeLaFilaSql,
+  hayDineroConEstaLlaveSql,
+  hayDineroDeSusIntentosSql,
   hayEvidenciaDeConciliacionSql,
   pagoLigadoDeLaFilaSql,
   hayPagoLigadoSql,
@@ -1064,13 +1066,13 @@ function instanteDeDeclaracion(resultJson: Prisma.JsonValue | null): Date | null
 // necesita LA MISMA red que la declaración del cajero. Sin esto, los caminos que vuelven a retener —aprobación
 // tardía, pago que no pudo ligarse, recuperación de colas viejas— responden `NOT_APPLICABLE` y la fila se queda
 // liberada con dinero real encima.
-const CODIGOS_DE_LIBERACION_REVERSIBLE: readonly string[] = [
-  'NO_EVIDENCE_AFTER_WINDOW',
-  'OPERATOR_RECONCILED_NO_CHARGE',
-  'BANK_DECLINED',
-]
+const CODIGOS_DE_LIBERACION_REVERSIBLE: readonly string[] = ['NO_EVIDENCE_AFTER_WINDOW', 'OPERATOR_RECONCILED_NO_CHARGE', 'BANK_DECLINED']
 /** El espejo en JS del `WHERE` del CAS de re-retención: FAILED, con uno de esos códigos y sin ganador (`paymentId IS NULL`). */
-export function esLiberacionReversible(row: { status: TerminalPaymentRequestStatus; failureCode: string | null; paymentId: string | null }) {
+export function esLiberacionReversible(row: {
+  status: TerminalPaymentRequestStatus
+  failureCode: string | null
+  paymentId: string | null
+}) {
   return liberadaSinCobroReversible(row)
 }
 function liberadaSinCobroReversible(row: { status: TerminalPaymentRequestStatus; failureCode: string | null; paymentId: string | null }) {
@@ -6269,9 +6271,20 @@ class TerminalPaymentService {
     const sinDesenlace = await prisma.terminalPaymentRequest.count({
       where: { AND: [{ requestId, venueId: input.venueId }, UNRESOLVED_FINANCIAL_OUTCOME] },
     })
+    // 🔴 Codex r6 (P2-7): ese predicado clasifica LA FILA de solicitud — no mira Payments ni eventos. Así que una
+    // solicitud ya liberada a la que después entra una aprobación durable pendiente de re-retener salía `resuelta:true`,
+    // y la terminal apagaba su último aviso sobre dinero que S6 sí veía. Se exige además que no conste evidencia
+    // positiva, con las MISMAS dos preguntas que usa el CAS de la liberación (una sola definición de «consta dinero»).
+    // 🔴 Codex r7 (P2-2): y el dinero con la llave de sus intentos por la regla ÚNICA (cualquier estado, llave recortada), más
+    // la evidencia de conciliación pendiente: `hayPagoLigadoSql` sólo ve cobros COMPLETED, y un Payment PENDING del intento
+    // —que S6 y el POST sí ven— salía `resuelta:true`.
+    const [evidencia] = await prisma.$queryRaw<{ hay: boolean }[]>`
+      SELECT (${hayAprobadoVinculadoSql(requestId, input.venueId)} OR ${hayPagoLigadoSql(requestId, input.venueId)}
+           OR ${hayDineroDeSusIntentosSql(requestId, input.venueId)}
+           OR ${hayEvidenciaDeConciliacionSql(requestId, input.venueId)}) AS "hay"`
     return {
       request: { ...proyectarEstado(row), closedVia: row.closedVia ?? null },
-      resuelta: sinDesenlace === 0,
+      resuelta: sinDesenlace === 0 && evidencia?.hay !== true,
     }
   }
 
@@ -6302,13 +6315,15 @@ class TerminalPaymentService {
 
     // La declaración del cajero sobre ESTE intento (22-sep, pieza B). Con vínculo vive en él; sin vínculo, en su propia
     // tabla. 🔴 Acotada a este venue Y esta terminal: la declaración de una terminal no la ve otra, igual que el resto.
-    const declaracionLocal = link
-      ? null
-      : await prisma.terminalAttemptResolution.findFirst({
-          where: { attemptId, venueId: input.venueId, terminalId: terminalKey },
-          select: { resolution: true },
-        })
-    const resolution = link ? (link.operatorResolution ?? null) : (declaracionLocal?.resolution ?? null)
+    // 🔴 Codex r6 (P2-6): se lee SIEMPRE, también con vínculo. Declarar en local y que el vínculo aparezca DESPUÉS
+    // (el POS reclama esa venta más tarde) dejaba `resolution:null`: el POST sí encontraba el testimonio previo y
+    // prohibía otro, pero la consulta ya no lo publicaba — y el cliente, tras perder la respuesta original, se quedaba
+    // sin una declaración recuperable. Manda la del vínculo si existe; si no, la local, que es igual de acreditada.
+    const declaracionLocal = await prisma.terminalAttemptResolution.findFirst({
+      where: { attemptId, venueId: input.venueId, terminalId: terminalKey },
+      select: { resolution: true },
+    })
+    const resolution = (link ? link.operatorResolution : null) ?? declaracionLocal?.resolution ?? null
 
     // Codex R1 (P1-7 / P2): la EVIDENCIA se acota al venue del vínculo (un approved recibido por el merchant de OTRO venue
     // —LINK_VENUE_MISMATCH— no es evidencia de este intento — ver la consulta SQL de evidencia más abajo); y un Payment
@@ -6375,16 +6390,12 @@ class TerminalPaymentService {
     // GLOBAL y con la llave normalizada. La diferencia dejaba pasar por «declaración limpia» un pago que apareció
     // DESPUÉS, con la llave sucia o en otro negocio — y el cliente usa esta respuesta para soltar la venta. Aquí no se
     // publica NADA de ese pago (ni id, ni importe, ni negocio): sólo que existe algo que contradice.
+    // 🔴 Codex r7 (P2-3): con la regla ÚNICA (`hayDineroConEstaLlaveSql`), no con SQL propio. Aquí había una copia de dos ramas
+    // —`llave = A OR recorte = A`— que ni usaba el índice del recorte (esto corre cada 5 s en el sondeo) ni decía lo mismo que
+    // el POST: excluía los REFUND, y el veto del POST no. Aceptar la declaración y poder usarla tienen que decir lo mismo.
     const dineroNoAtribuible =
       !candidato &&
-      (
-        await prisma.$queryRaw<{ id: string }[]>`
-          SELECT "id" FROM "Payment"
-          WHERE ("idempotencyKey" = ${attemptId}
-             OR regexp_replace("idempotencyKey", ${PATRON_SQL_TRIM_COMO_JS}, '', 'g') = ${attemptId})
-            AND ("type" IS NULL OR "type" <> ${PaymentType.REFUND}::"PaymentType")
-          LIMIT 1`
-      ).length > 0
+      (await prisma.$queryRaw<{ hay: boolean }[]>`SELECT ${hayDineroConEstaLlaveSql(attemptId)} AS "hay"`)[0]?.hay === true
     const paymentContradiction = (!!candidato && !atribuible) || dineroNoAtribuible
     if (paymentContradiction && candidato) {
       logger.error(
@@ -6413,7 +6424,9 @@ class TerminalPaymentService {
     // un `123` o un `{}` y S6 publicaba DECLINED sin rechazo bancario acreditado).
     // Lógica trivalente de SQL: un `errorReason` NULL (evento sano) no puede volver NULL la contradicción entera — por eso
     // `IS NOT DISTINCT FROM` y no `=`; sin eso, el approved propio del evento CONFIRMADO desaparecía de la evidencia.
-    const evidencia = await prisma.$queryRaw<{ contradicciones: bigint | number; sinDueno: bigint | number; aprobadoAt: Date | null; veredictoAt: Date | null }[]>`
+    const evidencia = await prisma.$queryRaw<
+      { contradicciones: bigint | number; sinDueno: bigint | number; aprobadoAt: Date | null; veredictoAt: Date | null }[]
+    >`
       WITH eventos AS (
         SELECT
           e."createdAt",

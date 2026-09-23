@@ -395,7 +395,11 @@ describe('S5 · el webhook como primer confirmador despierta al POS y avisa a la
         receiptAccessKey: recibo.accessKey,
       }
       // Lo que despierta al long-poll del POS (es lo que imprime el ticket del cobro).
-      expect(obs.desenlace).toMatchObject({ estado: 'ASENTADA', ok: true, value: { status: 'success', paymentId: despues.paymentId, receipt } })
+      expect(obs.desenlace).toMatchObject({
+        estado: 'ASENTADA',
+        ok: true,
+        value: { status: 'success', paymentId: despues.paymentId, receipt },
+      })
       // Lo que queda DURABLE en la fila (el GET del POS, la réplica del POST y el vigía leen de aquí).
       expect(despues.resultJson).toMatchObject({ requestId, status: 'success', paymentId: despues.paymentId, receipt })
       // Un `success` tardío de la terminal SIN receipt (lo que manda la TPV 2.10.0 cuando el webhook ya cerró) no la borra.

@@ -18,10 +18,7 @@ describe('sueltasAbsorbidasPorElPlan', () => {
   })
 
   it('PRO sí absorbe lealtad y referidos, que ya vienen incluidos', () => {
-    expect(sueltasAbsorbidasPorElPlan('PRO', ['LOYALTY_PROGRAM', 'REFERRAL_PROGRAM'])).toEqual([
-      'LOYALTY_PROGRAM',
-      'REFERRAL_PROGRAM',
-    ])
+    expect(sueltasAbsorbidasPorElPlan('PRO', ['LOYALTY_PROGRAM', 'REFERRAL_PROGRAM'])).toEqual(['LOYALTY_PROGRAM', 'REFERRAL_PROGRAM'])
   })
 
   it('un plan NUNCA se absorbe a sí mismo ni a otro plan', () => {

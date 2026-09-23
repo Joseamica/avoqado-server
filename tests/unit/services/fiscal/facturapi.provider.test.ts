@@ -122,9 +122,15 @@ describe('FacturapiProvider', () => {
   it('cancelInvoice NO da por cancelado un `none` ni un status desconocido: la factura sigue viva', async () => {
     const provider = new FacturapiProvider('sk_test_x')
     mockCancel.mockResolvedValue({ ...MOCK_INVOICE_RESPONSE, status: 'valid', cancellation_status: 'none' })
-    await expect(provider.cancelInvoice({ providerInvoiceId: 'fa1', motivo: '02' })).resolves.toMatchObject({ status: 'none', cancelledAt: null })
+    await expect(provider.cancelInvoice({ providerInvoiceId: 'fa1', motivo: '02' })).resolves.toMatchObject({
+      status: 'none',
+      cancelledAt: null,
+    })
     mockCancel.mockResolvedValue({ ...MOCK_INVOICE_RESPONSE, status: 'valid', cancellation_status: 'lo-que-sea' })
-    await expect(provider.cancelInvoice({ providerInvoiceId: 'fa1', motivo: '02' })).resolves.toMatchObject({ status: 'none', cancelledAt: null })
+    await expect(provider.cancelInvoice({ providerInvoiceId: 'fa1', motivo: '02' })).resolves.toMatchObject({
+      status: 'none',
+      cancelledAt: null,
+    })
   })
 
   it('cancelInvoice: la factura ya cancelada manda sobre el cancellation_status', async () => {
