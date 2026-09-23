@@ -897,6 +897,27 @@ describe('GET …/inventory/waste-reports (historial del POS)', () => {
 
   // Codex (historial, P3): el Zod instalado acepta el offset +24:00; la fecha imposible reventaba
   // DESPUÉS de checkPermission, con el PIN de gerente ya gastado.
+  it('🔴 el cursor viaja al lector y el siguiente vuelve al aparato', async () => {
+    listWasteReports.mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 30, nextCursor: 'siguiente' })
+    const cursor = Buffer.from('2026-09-23T15:00:00.000Z|rep1', 'utf8').toString('base64url')
+    const res = await request(app)
+      .get(`${REPORTS}?cursor=${cursor}`)
+      .set('Authorization', `Bearer ${token('WAITER')}`)
+    expect(res.status).toBe(200)
+    expect(res.body.nextCursor).toBe('siguiente')
+    expect(listWasteReports).toHaveBeenCalledWith(venueId, expect.objectContaining({ cursor }))
+  })
+
+  it('🔴 un cursor que no se entiende sale 422 ANTES de gastar el PIN de gerente', async () => {
+    pinDeGerenteValido()
+    const res = await request(app)
+      .get(`${REPORTS}?cursor=basura`)
+      .set('Authorization', `Bearer ${token('KITCHEN')}`)
+      .set('X-Permission-Override', OVERRIDE)
+    expect(res.status).toBe(422)
+    expect(prismaMock.permissionOverride.updateMany).not.toHaveBeenCalled()
+  })
+
   it('🔴 una fecha imposible sale 422 ANTES de gastar el PIN de gerente', async () => {
     pinDeGerenteValido()
     const res = await request(app)

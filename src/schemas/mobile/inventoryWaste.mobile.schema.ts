@@ -116,6 +116,22 @@ const fecha = () =>
     .refine(value => Number.isFinite(new Date(value).getTime()), FECHA_MSG)
 
 /**
+ * El cursor del historial: la marca del ÚLTIMO folio leído (`createdAt` + `id`). Leer «los anteriores a éste» no se
+ * salta ni repite folios aunque lleguen o se borren otros a media lectura, que con el número de página sí pasaba
+ * (Codex, historial P2). Es opaco para el aparato: sólo lo devuelve tal cual.
+ */
+export function encodeWasteCursor(createdAt: Date, id: string): string {
+  return Buffer.from(`${createdAt.toISOString()}|${id}`, 'utf8').toString('base64url')
+}
+
+export function decodeWasteCursor(cursor: string): { createdAt: Date; id: string } | null {
+  const [iso, id, ...resto] = Buffer.from(cursor, 'base64url').toString('utf8').split('|')
+  const createdAt = new Date(iso ?? '')
+  if (resto.length || !id || !Number.isFinite(createdAt.getTime())) return null
+  return { createdAt, id }
+}
+
+/**
  * Paginación de los lectores de merma (catálogo del POS y, en el dashboard, la lista de folios).
  * 🔴 Un `pageSize` hostil se RECORTA a 200, nunca se rechaza ni se obedece: el tope lo impone el
  * servidor (el lector vuelve a recortarlo). Parámetros desconocidos se ignoran.
@@ -137,6 +153,11 @@ export const WasteQuerySchema = z
     search: z.string({ invalid_type_error: 'La búsqueda debe ser texto.' }).max(200, 'La búsqueda admite hasta 200 caracteres.').optional(),
     startDate: fecha().optional(),
     endDate: fecha().optional(),
+    cursor: z
+      .string({ invalid_type_error: 'El cursor no es válido.' })
+      .max(200, 'El cursor no es válido.')
+      .refine(value => decodeWasteCursor(value) !== null, 'El cursor no es válido.')
+      .optional(),
   })
   .refine(value => !value.startDate || !value.endDate || new Date(value.startDate) <= new Date(value.endDate), {
     message: 'El inicio debe ser anterior al final.',

@@ -201,9 +201,18 @@ export async function listReports(req: Request, res: Response, next: NextFunctio
       search: query.search,
       startDate: query.startDate,
       endDate: query.endDate,
+      cursor: query.cursor,
       ...(scope === 'MINE' && { reportedByStaffId: staffId }),
     })
-    res.json({ scope, items: result.items.map(folioDelHistorial), total: result.total, page: result.page, pageSize: result.pageSize })
+    res.json({
+      scope,
+      items: result.items.map(folioDelHistorial),
+      total: result.total,
+      page: result.page,
+      pageSize: result.pageSize,
+      // La siguiente página se pide con esto; `null` = ya no hay más.
+      nextCursor: result.nextCursor,
+    })
   } catch (error) {
     next(error)
   }

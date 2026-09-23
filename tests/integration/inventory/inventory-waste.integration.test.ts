@@ -2420,6 +2420,34 @@ test('🔴 historial del POS: `reportedByStaffId` deja ver SÓLO los folios de q
   expect((await listWasteReports(venueId, { page: 1, pageSize: 100 })).total).toBe(3)
 })
 
+test('🔴 historial del POS: el cursor lee sin saltarse folios aunque lleguen o se borren otros a media lectura', async () => {
+  const goods = await product(20)
+  const folios: string[] = []
+  for (let i = 0; i < 5; i++) {
+    const r = await logWaste(venueId, waiterAId, request('PRODUCT', goods.id, 1))
+    await prisma.inventoryWasteReport.update({ where: { id: r.reportId }, data: { createdAt: new Date(Date.UTC(2026, 8, 23, 10, i)) } })
+    folios.push(r.reportId)
+  }
+  const recientesPrimero = [...folios].reverse()
+  const mias = { pageSize: 2, reportedByStaffId: waiterAId }
+
+  const p1 = await listWasteReports(venueId, { page: 1, ...mias })
+  expect(p1.items.map(row => row.id)).toEqual(recientesPrimero.slice(0, 2))
+  expect(p1.nextCursor).toBeTruthy()
+
+  // Entre página y página: llega una más nueva y desaparece una ya leída.
+  const nueva = await logWaste(venueId, waiterAId, request('PRODUCT', goods.id, 1))
+  await prisma.inventoryWasteReport.update({ where: { id: nueva.reportId }, data: { createdAt: new Date(Date.UTC(2026, 8, 23, 11, 0)) } })
+  // «Desaparece» del conjunto de este mesero (la base no deja borrar un folio con su kardex; para la lista es igual).
+  await prisma.inventoryWasteReport.update({ where: { id: recientesPrimero[0] }, data: { reportedByStaffId: waiterBId } })
+
+  const p2 = await listWasteReports(venueId, { page: 1, ...mias, cursor: p1.nextCursor! })
+  expect(p2.items.map(row => row.id)).toEqual(recientesPrimero.slice(2, 4))
+  const p3 = await listWasteReports(venueId, { page: 1, ...mias, cursor: p2.nextCursor! })
+  expect(p3.items.map(row => row.id)).toEqual(recientesPrimero.slice(4))
+  expect(p3.nextCursor).toBeNull()
+})
+
 test('🔴 la búsqueda de folios busca `%`, `_` y `\\` literales, no como comodines', async () => {
   const goods = await product(10)
   const ingredient = await raw(10)

@@ -2,6 +2,7 @@ import { Prisma, WasteItemType } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { ValidationError } from '../../errors/AppError'
 import { utcTs } from '../../utils/sqlDates'
+import { decodeWasteCursor, encodeWasteCursor } from '../../schemas/mobile/inventoryWaste.mobile.schema'
 
 /**
  * Lectores de la merma (spec §4.4 y §4.6). Todo en PESOS 1:1 y filtrando por el `createdAt`
@@ -331,7 +332,7 @@ export async function getWasteBreakdown(venueId: string, from: Date, to: Date, r
 
 /** Folios aplicados (incluidas las declaraciones que no pudieron descontar nada), más recientes
  *  primero, desempate por id. Las lápidas `VOIDED` no son merma y no salen. */
-export async function listWasteReports(venueId: string, query: WastePage & { reportedByStaffId?: string }) {
+export async function listWasteReports(venueId: string, query: WastePage & { reportedByStaffId?: string; cursor?: string }) {
   const { page, pageSize, skip } = pagination(query.page, query.pageSize)
   const startDate = instant(query.startDate)
   const endDate = instant(query.endDate)
@@ -358,13 +359,27 @@ export async function listWasteReports(venueId: string, query: WastePage & { rep
       : {}),
   }
 
+  // Con cursor, «los anteriores al último leído»: no se salta ni repite folios aunque lleguen o se borren otros a
+  // media lectura. La ruta ya lo validó; aquí se vuelve a validar porque el lector es compartido.
+  const despues = query.cursor === undefined ? null : decodeWasteCursor(query.cursor)
+  if (query.cursor !== undefined && !despues) throw new ValidationError('El cursor no es válido.')
+  const pagina: Prisma.InventoryWasteReportWhereInput = despues
+    ? {
+        AND: [
+          where,
+          { OR: [{ createdAt: { lt: despues.createdAt } }, { createdAt: despues.createdAt, id: { lt: despues.id } }] },
+        ],
+      }
+    : where
+
   return prisma.$transaction(
     async tx => {
       const total = await tx.inventoryWasteReport.count({ where })
-      const items = await tx.inventoryWasteReport.findMany({
-        where,
-        skip,
-        take: pageSize,
+      // Uno de más: dice si queda otra página sin contar filas únicas del lado del aparato.
+      const filas = await tx.inventoryWasteReport.findMany({
+        where: pagina,
+        skip: despues ? 0 : skip,
+        take: pageSize + 1,
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         select: {
           id: true,
@@ -391,7 +406,10 @@ export async function listWasteReports(venueId: string, query: WastePage & { rep
           product: { select: { name: true, sku: true } },
         },
       })
-      return { items, total, page, pageSize }
+      const items = filas.slice(0, pageSize)
+      const ultima = items[items.length - 1]
+      const nextCursor = filas.length > pageSize && ultima ? encodeWasteCursor(ultima.createdAt, ultima.id) : null
+      return { items, total, page, pageSize, nextCursor }
     },
     { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
   )
