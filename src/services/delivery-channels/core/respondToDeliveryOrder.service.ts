@@ -120,14 +120,19 @@ async function conReserva(
 }
 
 /** Respaldo para órdenes previas al cambio: la orden aún no guardaba su propio link. */
-async function linkPorEventoOriginador(venueId: string, orderId: string, provider: DeliveryProvider) {
-  const evento = await prisma.deliveryOrderEvent.findFirst({
+async function linkPorEventoOriginador(
+  venueId: string,
+  orderId: string,
+  provider: DeliveryProvider,
+  db: Prisma.TransactionClient = prisma,
+) {
+  const evento = await db.deliveryOrderEvent.findFirst({
     where: { orderId, venueId, channelLinkId: { not: null } },
     orderBy: { receivedAt: 'asc' },
     select: { channelLinkId: true },
   })
   if (!evento?.channelLinkId) return null
-  return prisma.deliveryChannelLink.findFirst({
+  return db.deliveryChannelLink.findFirst({
     where: { id: evento.channelLinkId, venueId, provider },
     select: { provider: true, externalLocationId: true },
   })
@@ -138,10 +143,11 @@ async function linkPorEventoOriginador(venueId: string, orderId: string, provide
  *
  * Exportada (Tarea 8, KDS "¿quién trae esto?"): es la MISMA resolución de link que usan
  * accept/deny/ready — reusarla evita un segundo camino que podría resolver a un canal
- * distinto para la misma orden.
+ * distinto para la misma orden. `db` permite leer con el `tx` de quien ya sostiene el candado
+ * del pedido (`applyLineRemoval`), en vez de pedir otra conexión mientras retiene una.
  */
-export async function contexto(venueId: string, orderId: string) {
-  const order = await prisma.order.findFirst({
+export async function contexto(venueId: string, orderId: string, db: Prisma.TransactionClient = prisma) {
+  const order = await db.order.findFirst({
     where: { id: orderId, venueId },
     select: {
       id: true,
@@ -166,12 +172,12 @@ export async function contexto(venueId: string, orderId: string) {
   // 🔴 El link se resuelve por la ORDEN. `findFirst({ venueId, provider })` elegía la PRIMERA
   // tienda del negocio: con dos tiendas, autorizaba contra A y escribía sobre un pedido de B.
   const link = order.deliveryChannelLinkId
-    ? await prisma.deliveryChannelLink.findFirst({
+    ? await db.deliveryChannelLink.findFirst({
         // El link debe ser del MISMO proveedor que el pedido; si no, no se le contesta a nadie.
         where: { id: order.deliveryChannelLinkId, venueId, provider },
         select: { provider: true, externalLocationId: true },
       })
-    : await linkPorEventoOriginador(venueId, order.id, provider) // DeliveryOrderEvent.channelLinkId, para órdenes previas al cambio
+    : await linkPorEventoOriginador(venueId, order.id, provider, db) // DeliveryOrderEvent.channelLinkId, para órdenes previas al cambio
   if (!link) return null
 
   return { order, provider, externalOrderId, storeId: link.externalLocationId, adapter: adapterFor(provider) }

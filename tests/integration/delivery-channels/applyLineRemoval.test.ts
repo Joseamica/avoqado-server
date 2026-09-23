@@ -262,6 +262,43 @@ describe('applyLineRemoval (Tarea 12)', () => {
     expect(b.productName).toBe('Horchata')
   })
 
+  it('reproceso con la foto FRESCA sin la linea retirada: Horchata no se marca por el indice de Cochinita', async () => {
+    // Revision de la Tarea 12: el reproceso emparejaba por INDICE contra la foto fresca.
+    // Sin la linea A (indice 0), Horchata quedaba en el indice 0 -> orderItemId de A ->
+    // «RETIRADO · Horchata»: un platillo pagado y presente que la cocina no prepararia.
+    const { order, itemA, itemB, normalized } = await sembrar()
+    await prisma.kdsOrder.deleteMany({ where: { orderId: order.id } })
+    await prisma.orderItem.update({ where: { id: itemA.id }, data: { removedAt: new Date() } })
+    const fotoFresca: NormalizedDeliveryOrder = {
+      ...normalized,
+      items: [normalized.items[1]],
+      payment: { ...normalized.payment, saleAmount: '50.00', externallyPaidSale: '50.00' },
+    }
+
+    const r = await ingestDeliveryOrder(fotoFresca, link)
+    expect(r.kitchenTicketCreated).toBe(true)
+
+    const renglones = await renglonesDe(order.id)
+    const horchata = renglones.find(x => x.externalLineId === 'linea-b')!
+    expect(horchata.productName).toBe('Horchata')
+    expect(horchata.removedAt).toBeNull()
+    expect(horchata.orderItemId).toBe(itemB.id)
+    // La linea retirada no viene en la foto: o no esta en la comanda, o esta marcada.
+    expect(renglones.filter(x => x.orderItemId === itemA.id).every(x => x.removedAt !== null)).toBe(true)
+  })
+
+  it('una accion que NO existia la crea con origen PROVIDER aunque llame el cajero', async () => {
+    const { order, itemA } = await sembrar()
+
+    await withDeliveryOrderLock(order.id, tx => applyLineRemoval(tx, { orderId: order.id, orderItemId: itemA.id, origin: 'STAFF' }))
+
+    const accion = await prisma.deliveryLineAction.findUniqueOrThrow({
+      where: { orderId_lineId_action: { orderId: order.id, lineId: 'linea-a', action: 'REMOVE_ITEM' } },
+    })
+    expect(accion.origin).toBe('PROVIDER')
+    expect(accion.status).toBe('CONFIRMED')
+  })
+
   it('un pedido PROGRAMADO liberado despues de un retiro nace con el renglon RETIRADO', async () => {
     const { order, itemA, itemB } = await sembrar({ scheduledFor: new Date(Date.now() + 60 * 60 * 1000) })
     expect(await prisma.kdsOrder.count({ where: { orderId: order.id } })).toBe(0)

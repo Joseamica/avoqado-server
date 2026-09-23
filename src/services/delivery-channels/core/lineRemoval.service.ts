@@ -64,7 +64,7 @@ export async function applyLineRemoval(
         await tx.deliveryLineAction.update({ where: { id: accion.id }, data: { status: 'CONFIRMED', resolvedAt: new Date() } })
       }
     } else {
-      const ctx = await contexto(venueId, p.orderId)
+      const ctx = await contexto(venueId, p.orderId, tx)
       if (ctx) {
         await tx.deliveryLineAction.create({
           data: {
@@ -77,7 +77,8 @@ export async function applyLineRemoval(
             lineId: item.externalLineId,
             action: 'REMOVE_ITEM',
             status: 'CONFIRMED',
-            origin: p.origin,
+            // Spec §3.0: una acción que nace aquí es del PROVEEDOR; la del cajero ya existía (T14).
+            origin: 'PROVIDER',
             requestedByStaffId: p.staffId ?? null,
             resolvedAt: new Date(),
           },

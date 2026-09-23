@@ -512,17 +512,24 @@ export async function ingestDeliveryOrder(
       // ÍNDICE que el propio `externalId` lleva al final (`…-<idx>`), que es determinista.
       const yaExistentes = await prisma.orderItem.findMany({
         where: { orderId: order.id },
-        select: { id: true, productId: true, externalId: true },
+        select: { id: true, productId: true, externalId: true, externalLineId: true },
       })
       const porIndice = new Map<number, { id: string; productId: string | null }>()
+      const porLinea = new Map<string, { id: string; productId: string | null }>()
       for (const r of yaExistentes) {
         const m = /-(\d+)$/.exec(r.externalId ?? '')
         if (m) porIndice.set(Number(m[1]), { id: r.id, productId: r.productId })
+        if (r.externalLineId) porLinea.set(r.externalLineId, { id: r.id, productId: r.productId })
       }
-      for (let idx = 0; idx < normalized.items.length; idx++) {
-        const r = porIndice.get(idx)
+      // 🔴 Por el id de LÍNEA del proveedor, nunca por índice contra una foto fresca: si el
+      // proveedor retiró el renglón 0, el que era 1 queda en 0 y heredaría el `orderItemId` del
+      // retirado — «RETIRADO · Horchata», un platillo pagado que la cocina no prepararía. El
+      // índice sólo aplica si ningún lado trae id de línea (proveedores sin retiro por renglón,
+      // o ventas previas a la columna, que por eso nunca pudieron retirarse).
+      normalized.items.forEach((it, idx) => {
+        const r = it.lineId && porLinea.size ? porLinea.get(it.lineId) : porIndice.get(idx)
         renglonesCreados.push({ id: r?.id ?? null, productId: r?.productId ?? null })
-      }
+      })
     } catch {
       // Mismo criterio que abajo: sin ruteo se imprime igual; sin comanda, no.
     }
@@ -547,9 +554,9 @@ export async function ingestDeliveryOrder(
   // las dos, el reintento ve la orden ya existente (`isNew=false`), se salta la comanda y
   // marca el evento como procesado. Resultado: un pedido cobrado que la cocina nunca ve, sin
   // un solo error en el log. Se repone comprobando si la comanda existe de verdad.
-  // (`KdsOrder.orderId` no es único, así que dos procesadores simultáneos podrían crear dos;
-  //  es un empate mucho menos dañino que no imprimir nada, y el mismo que ya existía.)
-  const comandaYaExiste = isNew ? false : (await prisma.kdsOrder.count({ where: { orderId: order.id } })) > 0
+  // (`KdsOrder.orderId` no es único: la relectura DENTRO del candado, más abajo, es la que
+  //  impide que dos procesadores simultáneos creen dos.)
+  let comandaYaExiste = isNew ? false : (await prisma.kdsOrder.count({ where: { orderId: order.id } })) > 0
 
   // 🔴 Y la tercera pregunta, que faltaba: ¿el pedido sigue VIVO? Cancelar BORRA las filas de
   // KDS (`cancelDeliveryOrder`), así que al reprocesar un evento de un pedido ya cancelado
@@ -571,6 +578,11 @@ export async function ingestDeliveryOrder(
       // 🔴 Bajo el candado del pedido [N-21]: si el proveedor retiró un renglón entre la venta
       // y esta comanda, `marcarRetirosEnComandas` la hace nacer con el renglón RETIRADO.
       await withDeliveryOrderLock(order.id, async tx => {
+        // Relectura dentro del candado: dos reprocesos simultáneos ya no imprimen dos comandas.
+        if ((await tx.kdsOrder.count({ where: { orderId: order.id } })) > 0) {
+          comandaYaExiste = true
+          return
+        }
         await tx.kdsOrder.create({
           data: {
             venueId: venue.id,
@@ -610,7 +622,7 @@ export async function ingestDeliveryOrder(
         })
         await marcarRetirosEnComandas(tx, order.id, venue.id)
       })
-      kitchenTicketCreated = true
+      kitchenTicketCreated = !comandaYaExiste
     } catch (error) {
       logger.error('[❌ DeliveryIngest] el pedido NO llegó a la cocina (venta guardada, comanda no)', {
         orderId: order.id,
