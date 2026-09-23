@@ -15,8 +15,10 @@ import { acceptDeliveryOrder, denyDeliveryOrder } from '@/services/delivery-chan
 const ok = { ok: true, status: 200, raw: '' }
 
 describe('responder a un pedido de marketplace desde el POS', () => {
-  let venueId: string, orgId: string
+  let venueId: string, orgId: string, linkId: string
 
+  // 🔴 La orden lleva SU link (así la deja la ingesta real, Task 3) — el resolutor de
+  // `contexto()` ya no adivina "el primer link del venue", lee éste.
   const nuevaOrden = async (status: OrderStatus, externalId: string) =>
     prisma.order.create({
       data: {
@@ -28,6 +30,7 @@ describe('responder a un pedido de marketplace desde el POS', () => {
         subtotal: '100',
         taxAmount: '0',
         tipAmount: '0',
+        deliveryChannelLinkId: linkId,
       },
     })
 
@@ -38,9 +41,10 @@ describe('responder a un pedido de marketplace desde el POS', () => {
     orgId = org.id
     const v = await prisma.venue.create({ data: { organizationId: orgId, name: `V resp ${Date.now()}`, slug: `vp-${Date.now()}` } })
     venueId = v.id
-    await prisma.deliveryChannelLink.create({
+    const link = await prisma.deliveryChannelLink.create({
       data: { venueId, provider: DeliveryProvider.UBER_EATS, externalLocationId: 'store-resp', webhookSecret: 'x' },
     })
+    linkId = link.id
   })
 
   afterAll(async () => {

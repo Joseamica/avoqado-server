@@ -26,8 +26,12 @@ describe('markDeliveryOrderReady', () => {
       externalId: 'UBER_EATS:uuid-uber-1',
       status: 'CONFIRMED',
       orderNumber: 'A-1',
+      deliveryChannelLinkId: 'link1',
     })
-    ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({ externalLocationId: 'store-uuid' })
+    ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({
+      provider: 'UBER_EATS',
+      externalLocationId: 'store-uuid',
+    })
     markOrderReady.mockResolvedValue({ ok: true, status: 200, raw: '' })
   })
 

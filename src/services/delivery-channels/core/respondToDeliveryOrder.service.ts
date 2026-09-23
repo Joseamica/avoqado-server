@@ -32,11 +32,25 @@ export interface RespuestaPedido {
   error?: string
 }
 
+/** Respaldo para órdenes previas al cambio: la orden aún no guardaba su propio link. */
+async function linkPorEventoOriginador(venueId: string, orderId: string) {
+  const evento = await prisma.deliveryOrderEvent.findFirst({
+    where: { orderId, venueId, channelLinkId: { not: null } },
+    orderBy: { receivedAt: 'asc' },
+    select: { channelLinkId: true },
+  })
+  if (!evento?.channelLinkId) return null
+  return prisma.deliveryChannelLink.findFirst({
+    where: { id: evento.channelLinkId, venueId },
+    select: { provider: true, externalLocationId: true },
+  })
+}
+
 /** El pedido, su canal y el id que el proveedor entiende. Sin esto no se le puede contestar. */
 async function contexto(venueId: string, orderId: string) {
   const order = await prisma.order.findFirst({
     where: { id: orderId, venueId },
-    select: { id: true, externalId: true, status: true, orderNumber: true },
+    select: { id: true, externalId: true, status: true, orderNumber: true, deliveryChannelLinkId: true },
   })
   if (!order?.externalId) return null
 
@@ -48,8 +62,15 @@ async function contexto(venueId: string, orderId: string) {
   const externalOrderId = order.externalId.slice(sep + 1)
   if (!hasAdapter(provider)) return null
 
-  const link = await prisma.deliveryChannelLink.findFirst({ where: { venueId, provider }, select: { externalLocationId: true } })
-  if (!link) return null
+  // 🔴 El link se resuelve por la ORDEN. `findFirst({ venueId, provider })` elegía la PRIMERA
+  // tienda del negocio: con dos tiendas, autorizaba contra A y escribía sobre un pedido de B.
+  const link = order.deliveryChannelLinkId
+    ? await prisma.deliveryChannelLink.findFirst({
+        where: { id: order.deliveryChannelLinkId, venueId },
+        select: { provider: true, externalLocationId: true },
+      })
+    : await linkPorEventoOriginador(venueId, order.id) // DeliveryOrderEvent.channelLinkId, para órdenes previas al cambio
+  if (!link || link.provider !== provider) return null
 
   return { order, provider, externalOrderId, storeId: link.externalLocationId, adapter: adapterFor(provider) }
 }
