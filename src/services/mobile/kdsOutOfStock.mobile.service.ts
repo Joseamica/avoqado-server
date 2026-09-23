@@ -21,7 +21,6 @@ import { NotFoundError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { reconcileDeliveryOrderFromProvider } from '@/services/delivery-channels/core/deliveryReconciliation.service'
 import {
-  reservaViva,
   soltarReserva,
   tomarReserva,
   withDeliveryOrderLock,
@@ -33,9 +32,9 @@ import type { ActionResult } from '@/services/delivery-channels/core/types'
 import prisma from '@/utils/prismaClient'
 
 import { formatKdsOrderConVenta, type KdsOrderResponse } from './kds.mobile.service'
+import { bloqueoDelPedido, bloqueoDelRenglon, REINTENTO_TRAS_MS, reintentableDesde, ventasDeComandas } from './kdsCapacidades'
 
-/** Cuánto espera una persona antes de poder reintentar un aviso que el proveedor no confirmó (§3.5). */
-export const REINTENTO_TRAS_MS = 15 * 60_000
+export { REINTENTO_TRAS_MS }
 /** Spec §3.4: un retiro que el proveedor sigue sin reflejar a las 24 h es «retiro sin reflejar en Uber». */
 export const RETIRO_SIN_REFLEJAR_MS = 24 * 3_600_000
 
@@ -57,7 +56,6 @@ export function retiroSinReflejar(
 const CUERPO_MAX = 2_000
 /** Texto observado el 27-ago y documentado en el adaptador: tras «listo» el proveedor ya no modifica. */
 const CAUSA_TERMINAL_409 = /already been marked ready|cannot modify order/i
-const COMANDA_ABIERTA = new Set(['NEW', 'PREPARING'])
 
 export type CodigoConflicto =
   | 'LINE_ID_MISSING'
@@ -118,30 +116,41 @@ type Propio = { accionId: string; attempt: number; previo: { lastAttemptAt: Date
 type Abierta = { kind: 'ABIERTA'; accionId: string; attempt: number; token: string }
 type Apertura = ResultadoRetiro | Abierta | { kind: 'SIN_ACEPTAR' }
 
-/** Paso 1: la cadena de pertenencia, en el orden del spec. Todo acotado por el venue autenticado. */
+/**
+ * Paso 1: la cadena de pertenencia. El ORDEN de los códigos lo decide `bloqueoDelRenglon`, el mismo
+ * predicado que pinta el botón en el tablero. Todo acotado por el venue autenticado.
+ */
 async function resolverLinea(venueId: string, kdsOrderId: string, itemId: string): Promise<Linea | ResultadoRetiro> {
   const item = await prisma.kdsOrderItem.findFirst({
     where: { id: itemId, kdsOrderId, kdsOrder: { venueId } },
     select: { orderItemId: true, kdsOrder: { select: { orderId: true } } },
   })
   if (!item) throw new NotFoundError('Orden KDS no encontrada')
-  if (!item.orderItemId) return conflicto('LINE_ID_MISSING')
   const orderId = item.kdsOrder.orderId
   const venta = orderId ? await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { type: true } }) : null
-  if (!orderId || venta?.type !== OrderType.DELIVERY) return conflicto('NOT_DELIVERY')
-  const ctx = await contexto(venueId, orderId)
-  if (!ctx) return conflicto('LINK_UNRESOLVED')
-  if (typeof ctx.adapter.resolveFulfillmentIssues !== 'function') return conflicto('UNSUPPORTED_PROVIDER')
+  const esReparto = Boolean(orderId) && venta?.type === OrderType.DELIVERY
+  const ctx = esReparto ? await contexto(venueId, orderId!) : null
   // El id de línea del PROVEEDOR vive en la venta; sin él no hay qué pedirle que retire.
-  const renglon = await prisma.orderItem.findFirst({ where: { id: item.orderItemId, orderId }, select: { externalLineId: true } })
-  if (!renglon?.externalLineId) return conflicto('LINE_ID_MISSING')
-  return { venueId, kdsOrderId, orderId, orderItemId: item.orderItemId, lineId: renglon.externalLineId, ctx }
+  const renglon =
+    ctx && item.orderItemId
+      ? await prisma.orderItem.findFirst({ where: { id: item.orderItemId, orderId: orderId! }, select: { externalLineId: true } })
+      : null
+  const bloqueo = bloqueoDelRenglon({
+    orderItemId: item.orderItemId,
+    esReparto,
+    conLink: Boolean(ctx),
+    conCapacidad: typeof ctx?.adapter.resolveFulfillmentIssues === 'function',
+    externalLineId: renglon?.externalLineId ?? null,
+  })
+  if (bloqueo) return conflicto(bloqueo)
+  return { venueId, kdsOrderId, orderId: orderId!, orderItemId: item.orderItemId!, lineId: renglon!.externalLineId!, ctx: ctx! }
 }
 
 async function leerComanda(db: Prisma.TransactionClient, l: Linea): Promise<KdsOrderResponse> {
   const k = await db.kdsOrder.findFirstOrThrow({ where: { id: l.kdsOrderId, venueId: l.venueId }, include: { items: true } })
-  const venta = await db.order.findFirst({ where: { id: l.orderId, venueId: l.venueId }, select: { type: true, status: true } })
-  return formatKdsOrderConVenta(k, venta)
+  // El MISMO lote que el tablero: la comanda que devuelve la ruta trae las mismas capacidades.
+  const ventas = await ventasDeComandas(db, l.venueId, [k])
+  return formatKdsOrderConVenta(k, ventas.get(l.orderId))
 }
 
 const enCurso = (a: { status: string; attempts: number; lastAttemptAt: Date }): ResultadoRetiro => ({
@@ -149,7 +158,7 @@ const enCurso = (a: { status: string; attempts: number; lastAttemptAt: Date }): 
   state: a.status as 'PENDING' | 'UNCERTAIN',
   attempts: a.attempts,
   since: a.lastAttemptAt.toISOString(),
-  canRetryAt: new Date(a.lastAttemptAt.getTime() + REINTENTO_TRAS_MS).toISOString(),
+  canRetryAt: reintentableDesde(a.lastAttemptAt).toISOString(),
 })
 
 /**
@@ -195,25 +204,25 @@ async function abrir(tx: Prisma.TransactionClient, l: Linea, staffId: string, pr
     where: { id: l.orderId },
     select: { providerAcceptedAt: true, readyReportedAt: true, deliveryOpInFlight: true, deliveryOpInFlightAt: true },
   })
-  if (!o.providerAcceptedAt) return { kind: 'SIN_ACEPTAR' }
   const comanda = await tx.kdsOrder.findUniqueOrThrow({ where: { id: l.kdsOrderId }, select: { status: true } })
+  // 'PENDING' < 'UNCERTAIN': si hay uno en vuelo, ése manda (se resuelve solo en segundos).
+  const otra = await tx.deliveryLineAction.findFirst({
+    where: {
+      orderId: l.orderId,
+      venueId: l.venueId,
+      status: { in: ['PENDING', 'UNCERTAIN'] },
+      ...(propio ? { id: { not: propio.accionId } } : {}),
+    },
+    orderBy: [{ status: 'asc' }, { id: 'asc' }],
+    select: { status: true },
+  })
+  // Paso 3 con el MISMO predicado que el botón del tablero (`kdsCapacidades`).
+  const bloqueo = bloqueoDelPedido(o, comanda.status, Boolean(otra))
+  if (bloqueo === 'NOT_ACCEPTED') return { kind: 'SIN_ACEPTAR' }
   let falla: ResultadoRetiro | null = null
-  if (o.readyReportedAt || !COMANDA_ABIERTA.has(comanda.status)) falla = conflicto('ALREADY_READY')
-  else if (reservaViva(o)) falla = conflicto('DELIVERY_OP_IN_PROGRESS', { ocupadaPor: o.deliveryOpInFlight as OperacionDeReparto })
-  else {
-    // 'PENDING' < 'UNCERTAIN': si hay uno en vuelo, ése manda (se resuelve solo en segundos).
-    const otra = await tx.deliveryLineAction.findFirst({
-      where: {
-        orderId: l.orderId,
-        venueId: l.venueId,
-        status: { in: ['PENDING', 'UNCERTAIN'] },
-        ...(propio ? { id: { not: propio.accionId } } : {}),
-      },
-      orderBy: [{ status: 'asc' }, { id: 'asc' }],
-      select: { status: true },
-    })
-    if (otra) falla = conflicto('LINE_ACTION_IN_PROGRESS', otra.status === 'UNCERTAIN' ? { error: LINEA_EN_DUDA } : {})
-  }
+  if (bloqueo === 'DELIVERY_OP_IN_PROGRESS') falla = conflicto(bloqueo, { ocupadaPor: o.deliveryOpInFlight as OperacionDeReparto })
+  else if (bloqueo === 'LINE_ACTION_IN_PROGRESS') falla = conflicto(bloqueo, otra?.status === 'UNCERTAIN' ? { error: LINEA_EN_DUDA } : {})
+  else if (bloqueo) falla = conflicto(bloqueo)
   if (falla) {
     if (propio) await deshacerReintento(tx, propio)
     return falla
@@ -479,7 +488,7 @@ export async function listDeliveryLineActions(venueId: string, opts: { orderId?:
   return {
     items: pagina.map(f => ({
       ...f,
-      canRetryAt: f.status === 'UNCERTAIN' ? new Date(f.lastAttemptAt.getTime() + REINTENTO_TRAS_MS) : null,
+      canRetryAt: f.status === 'UNCERTAIN' ? reintentableDesde(f.lastAttemptAt) : null,
       unreflectedInProvider: retiroSinReflejar(f, bloqueadas.has(f.orderId)),
     })),
     hasMore: filas.length > take,

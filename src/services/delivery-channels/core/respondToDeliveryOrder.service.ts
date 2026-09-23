@@ -122,6 +122,18 @@ async function conReserva(
   }
 }
 
+/**
+ * `PROVEEDOR:idDelProveedor` — el prefijo existe porque dos marketplaces pueden repetir folio, y
+ * al proveedor hay que devolverle el id que ÉL conoce, sin el prefijo. `null` = no es de un
+ * proveedor con adaptador. Exportada para que el tablero del KDS lea el proveedor igual que aquí.
+ */
+export function proveedorDelPedido(externalId: string | null | undefined) {
+  const sep = externalId ? externalId.indexOf(':') : -1
+  if (!externalId || sep < 0) return null
+  const provider = externalId.slice(0, sep) as DeliveryProvider
+  return hasAdapter(provider) ? { provider, externalOrderId: externalId.slice(sep + 1) } : null
+}
+
 /** Respaldo para órdenes previas al cambio: la orden aún no guardaba su propio link. */
 async function linkPorEventoOriginador(
   venueId: string,
@@ -162,15 +174,9 @@ export async function contexto(venueId: string, orderId: string, db: Prisma.Tran
       readyReportedAt: true,
     },
   })
-  if (!order?.externalId) return null
-
-  // `PROVEEDOR:idDelProveedor` — el prefijo existe porque dos marketplaces pueden repetir
-  // folio, y aquí hay que devolverle a Uber el id que ÉL conoce, sin el prefijo.
-  const sep = order.externalId.indexOf(':')
-  if (sep < 0) return null
-  const provider = order.externalId.slice(0, sep) as DeliveryProvider
-  const externalOrderId = order.externalId.slice(sep + 1)
-  if (!hasAdapter(provider)) return null
+  const origen = proveedorDelPedido(order?.externalId)
+  if (!order || !origen) return null
+  const { provider, externalOrderId } = origen
 
   // 🔴 El link se resuelve por la ORDEN. `findFirst({ venueId, provider })` elegía la PRIMERA
   // tienda del negocio: con dos tiendas, autorizaba contra A y escribía sobre un pedido de B.

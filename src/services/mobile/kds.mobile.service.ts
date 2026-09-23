@@ -13,6 +13,7 @@ import type { CourierInfo } from '@/services/delivery-channels/core/types'
 import prisma from '../../utils/prismaClient'
 import { OrderStatus } from '@prisma/client'
 import type { KdsOrderStatus } from '@prisma/client'
+import { capacidadesDeComanda, ventasDeComandas, type VentaDeComanda } from './kdsCapacidades'
 
 // Use string constants instead of Prisma enum to avoid runtime import issues with tsx
 const KdsStatus = {
@@ -108,12 +109,21 @@ export interface KdsOrderResponse {
    */
   customerName?: string | null
   customerContact?: string | null
+  /** Reparto (Tarea 16): lo decide el servidor, las apps sólo leen. Ausentes fuera de reparto. */
+  canCancelDelivery?: boolean
+  deliveryOpInFlight?: string | null
+  hasLineActionInProgress?: boolean
   items: Array<{
     id: string
     productName: string
     quantity: number
     modifiers: string[]
     notes: string | null
+    removedAt?: string | null
+    canReportOutOfStock?: boolean
+    lineActionState?: string | null
+    lineActionAttempts?: number | null
+    canRetryAt?: string | null
   }>
   startedAt: string | null
   completedAt: string | null
@@ -149,21 +159,13 @@ export async function listKdsOrders(venueId: string, statusFilter?: string): Pro
     orderBy: { createdAt: 'asc' },
   })
 
-  // 🔴 Segunda consulta y no un `include`: `KdsOrder.orderId` es un `String?` SUELTO, sin
-  // relación con `Order` en el schema — un `include` revienta en runtime. (Que no haya
-  // relación también significa que un ticket puede apuntar a una orden borrada; por eso
-  // abajo la ausencia se trata como "no falta aceptar" y no como un error.)
-  //
-  // Sin esto el POS NO puede saber cuáles pedidos de delivery falta aceptar, y el botón que
-  // la cocina necesita no puede existir. `Order.status` es la única verdad: PENDING = nadie
-  // le ha dicho que sí al proveedor todavía, y el reloj de ~11.5 min ya corre.
-  const orderIds = orders.map(o => o.orderId).filter((id): id is string => Boolean(id))
-  const ventas = orderIds.length
-    ? await prisma.order.findMany({ where: { id: { in: orderIds } }, select: { id: true, status: true, type: true } })
-    : []
-  const porId = new Map(ventas.map(v => [v.id, v]))
+  // 🔴 Consultas aparte y no un `include`: `KdsOrder.orderId` es un `String?` SUELTO, sin relación con
+  // `Order` — un `include` revienta en runtime (y la orden puede estar borrada: ausencia = "no falta
+  // aceptar", no error). `Order.status` PENDING = nadie le ha dicho que sí al proveedor y el reloj de
+  // ~11.5 min ya corre. Las capacidades del reparto (Tarea 16) salen del MISMO lote: consultas fijas.
+  const ventas = await ventasDeComandas(prisma, venueId, orders)
 
-  return orders.map(o => formatKdsOrderConVenta(o, o.orderId ? porId.get(o.orderId) : undefined))
+  return orders.map(o => formatKdsOrderConVenta(o, o.orderId ? ventas.get(o.orderId) : undefined))
 }
 
 /**
@@ -171,9 +173,14 @@ export async function listKdsOrders(venueId: string, statusFilter?: string): Pro
  * «no tengo este artículo» devuelven la misma comanda y no pueden contestar distinto).
  * `type === 'DELIVERY'` es lo que separa "llegó solo" de "lo mandó un mesero": sólo lo primero
  * necesita que alguien reclame la impresión, y sólo un reparto PENDING necesita que lo acepten.
+ * Un reparto trae además sus capacidades (spec «Apps»), opcionales y ausentes fuera de reparto.
  */
-export function formatKdsOrderConVenta(o: any, venta?: { type: string; status: string } | null): KdsOrderResponse {
-  return formatKdsOrder({ ...o, esDeMarketplace: venta?.type === 'DELIVERY' }, venta?.type === 'DELIVERY' && venta?.status === 'PENDING')
+export function formatKdsOrderConVenta(o: any, venta?: VentaDeComanda | null): KdsOrderResponse {
+  const esReparto = venta?.type === 'DELIVERY'
+  const base = formatKdsOrder({ ...o, esDeMarketplace: esReparto }, esReparto && venta?.status === 'PENDING')
+  if (!venta || !esReparto) return base
+  const cap = capacidadesDeComanda(o, venta)
+  return { ...base, ...cap.comanda, items: base.items.map((item, i) => ({ ...item, ...cap.renglones[i] })) }
 }
 
 // MARK: - Create KDS Order
