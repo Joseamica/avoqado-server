@@ -99,6 +99,12 @@ export interface NormalizedDeliveryOrder {
    * y cocinarlo al llegar tira la comida. La comanda espera al aviso de "ya es hora".
    */
   scheduledFor?: Date | null
+  /**
+   * El proveedor dice que el pedido YA está aceptado (Uber: `state = 'ACCEPTED'`). Es la
+   * evidencia que recupera una aceptación cuyo 2xx se perdió; la ingesta sólo lee esta marca,
+   * nunca pregunta quién es el proveedor.
+   */
+  providerAccepted?: boolean
 }
 
 // ============================================================================

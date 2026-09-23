@@ -274,6 +274,15 @@ export async function ingestDeliveryOrder(
         },
       })
 
+      // La lectura del proveedor dice "ya aceptado": es la evidencia que recupera un 2xx
+      // perdido (AUTO que se cayó entre aceptar e ingerir). Nunca pisa una marca previa.
+      if (normalized.providerAccepted && !order.providerAcceptedAt) {
+        await tx.order.updateMany({
+          where: { id: order.id, providerAcceptedAt: null },
+          data: { providerAcceptedAt: new Date(), providerAcceptedEvidence: 'PROVIDER_STATE' },
+        })
+      }
+
       if (esNueva) {
         // Renglones recién creados: el vale de inventario se arma con ELLOS (ids
         // reales), no con los items normalizados del canal.

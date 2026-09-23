@@ -17,23 +17,110 @@
  *   · DESPUÉS de aceptar → cancelar (`cancelDeliveryOrder`). Ya dijimos que sí, así que
  *     cuesta más caro: el cliente ya está esperando. Sigue siendo mejor que no entregar.
  */
-import { DeliveryProvider, OrderStatus } from '@prisma/client'
+import { DeliveryProvider, OrderStatus, Prisma } from '@prisma/client'
 
 import logger from '@/config/logger'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import prisma from '@/utils/prismaClient'
 
 import { adapterFor, hasAdapter } from './adapterRegistry'
 import { cancelDeliveryOrder } from './cancelDeliveryOrder.service'
+import { soltarReserva, tomarReserva, withDeliveryOrderLock, type OperacionDeReparto } from './deliveryOrderLock'
+import type { ActionResult } from './types'
 
 export type MotivoRechazo = 'OUT_OF_ITEMS' | 'STORE_CLOSED' | 'TOO_BUSY' | 'OTHER'
 
 export interface RespuestaPedido {
-  outcome: 'ACCEPTED' | 'DENIED' | 'CANCELLED' | 'READY' | 'ALREADY_DONE' | 'NOT_A_DELIVERY_ORDER' | 'FAILED'
+  outcome:
+    | 'ACCEPTED'
+    | 'DENIED'
+    | 'CANCELLED'
+    | 'READY'
+    | 'ALREADY_DONE'
+    | 'NOT_A_DELIVERY_ORDER'
+    | 'FAILED'
+    // Spec §3.2: otra salida a Uber tiene tomado el pedido — no se le habla a Uber.
+    | 'OP_IN_PROGRESS'
+    // Hay un retiro de renglón PENDING|UNCERTAIN: un cambio a la vez por pedido.
+    | 'LINE_ACTION_IN_PROGRESS'
   error?: string
+  /** Con `OP_IN_PROGRESS`: qué operación tiene el pedido. */
+  ocupadaPor?: OperacionDeReparto
+}
+
+/**
+ * ¿Esta respuesta del proveedor PRUEBA que la acción ocurrió? Sólo un 2xx/3xx. El 409 sigue
+ * siendo "ok" en el adaptador (no repetir la acción), pero no acredita nada: puede significar
+ * "ya estaba" o "el estado es otro". Y el placeholder MANUAL del auto-accept trae status 0.
+ */
+export const esEvidenciaHttp = (status: number) => status >= 200 && status < 400
+
+type Salida = { tipo: 'BLOQUEADA'; respuesta: RespuestaPedido } | { tipo: 'TARDIA' } | { tipo: 'HECHA'; r: ActionResult }
+
+/**
+ * Protocolo de reserva de spec §3.2, igual para accept · ready · deny (y el retiro):
+ *  (a) tomar la reserva con token — si otra operación la tiene viva, no se le habla a Uber;
+ *  (b) la llamada HTTP, FUERA de todo candado de Postgres;
+ *  (c) bajo el candado: soltar la reserva y aplicar el resultado SÓLO si la reserva seguía
+ *      siendo nuestra. Si no, el resultado es TARDÍO: no se aplica y queda en ActivityLog.
+ * La reserva se suelta en `finally`: una llamada que lanza no deja el pedido tomado 2 min.
+ */
+async function conReserva(
+  venueId: string,
+  orderId: string,
+  op: OperacionDeReparto,
+  llamar: () => Promise<ActionResult>,
+  aplicar?: (tx: Prisma.TransactionClient, r: ActionResult) => Promise<unknown>,
+): Promise<Salida> {
+  const reserva = await tomarReserva(orderId, op)
+  if (!reserva.ok) {
+    logger.warn('[Delivery] operación omitida: el pedido tiene otra salida a Uber en vuelo', {
+      orderId,
+      op,
+      ocupadaPor: reserva.ocupadaPor,
+    })
+    return { tipo: 'BLOQUEADA', respuesta: { outcome: 'OP_IN_PROGRESS', ocupadaPor: reserva.ocupadaPor } }
+  }
+  let soltada = false
+  try {
+    // Con la reserva en mano nadie abre un retiro nuevo: lo que haya aquí ya estaba en curso.
+    const retiros = await prisma.deliveryLineAction.count({ where: { orderId, status: { in: ['PENDING', 'UNCERTAIN'] } } })
+    if (retiros > 0) return { tipo: 'BLOQUEADA', respuesta: { outcome: 'LINE_ACTION_IN_PROGRESS' } }
+
+    const r = await llamar()
+    const aTiempo = await withDeliveryOrderLock(orderId, async tx => {
+      const mia = await soltarReserva(orderId, reserva.token, tx)
+      if (mia && aplicar) await aplicar(tx, r)
+      return mia
+    })
+    soltada = true
+    if (!aTiempo) {
+      logger.error('🚨 [Delivery] resultado TARDÍO de Uber: la reserva ya era de otra operación, NO se aplica', {
+        orderId,
+        op,
+        status: r.status,
+      })
+      await logAction({
+        venueId,
+        action: 'DELIVERY_OP_LATE_RESULT',
+        entity: 'Order',
+        entityId: orderId,
+        data: { operacion: op, httpStatus: r.status, ok: r.ok },
+      })
+      return { tipo: 'TARDIA' }
+    }
+    return { tipo: 'HECHA', r }
+  } finally {
+    if (!soltada) {
+      await soltarReserva(orderId, reserva.token).catch(e =>
+        logger.error('🚨 [Delivery] no se pudo soltar la reserva (vence sola en 2 min)', { orderId, op, error: String(e) }),
+      )
+    }
+  }
 }
 
 /** Respaldo para órdenes previas al cambio: la orden aún no guardaba su propio link. */
-async function linkPorEventoOriginador(venueId: string, orderId: string) {
+async function linkPorEventoOriginador(venueId: string, orderId: string, provider: DeliveryProvider) {
   const evento = await prisma.deliveryOrderEvent.findFirst({
     where: { orderId, venueId, channelLinkId: { not: null } },
     orderBy: { receivedAt: 'asc' },
@@ -41,7 +128,7 @@ async function linkPorEventoOriginador(venueId: string, orderId: string) {
   })
   if (!evento?.channelLinkId) return null
   return prisma.deliveryChannelLink.findFirst({
-    where: { id: evento.channelLinkId, venueId },
+    where: { id: evento.channelLinkId, venueId, provider },
     select: { provider: true, externalLocationId: true },
   })
 }
@@ -50,7 +137,15 @@ async function linkPorEventoOriginador(venueId: string, orderId: string) {
 async function contexto(venueId: string, orderId: string) {
   const order = await prisma.order.findFirst({
     where: { id: orderId, venueId },
-    select: { id: true, externalId: true, status: true, orderNumber: true, deliveryChannelLinkId: true },
+    select: {
+      id: true,
+      externalId: true,
+      status: true,
+      orderNumber: true,
+      deliveryChannelLinkId: true,
+      providerAcceptedAt: true,
+      readyReportedAt: true,
+    },
   })
   if (!order?.externalId) return null
 
@@ -66,11 +161,12 @@ async function contexto(venueId: string, orderId: string) {
   // tienda del negocio: con dos tiendas, autorizaba contra A y escribía sobre un pedido de B.
   const link = order.deliveryChannelLinkId
     ? await prisma.deliveryChannelLink.findFirst({
-        where: { id: order.deliveryChannelLinkId, venueId },
+        // El link debe ser del MISMO proveedor que el pedido; si no, no se le contesta a nadie.
+        where: { id: order.deliveryChannelLinkId, venueId, provider },
         select: { provider: true, externalLocationId: true },
       })
-    : await linkPorEventoOriginador(venueId, order.id) // DeliveryOrderEvent.channelLinkId, para órdenes previas al cambio
-  if (!link || link.provider !== provider) return null
+    : await linkPorEventoOriginador(venueId, order.id, provider) // DeliveryOrderEvent.channelLinkId, para órdenes previas al cambio
+  if (!link) return null
 
   return { order, provider, externalOrderId, storeId: link.externalLocationId, adapter: adapterFor(provider) }
 }
@@ -89,8 +185,23 @@ export async function markDeliveryOrderReady(venueId: string, orderId: string): 
   const ctx = await contexto(venueId, orderId)
   if (!ctx) return { outcome: 'NOT_A_DELIVERY_ORDER' }
   if (typeof ctx.adapter.markOrderReady !== 'function') return { outcome: 'NOT_A_DELIVERY_ORDER' }
+  // «Listo» es irrevocable: con un 2xx ya acreditado no hay nada que volver a decirle a Uber.
+  if (ctx.order.readyReportedAt) return { outcome: 'ALREADY_DONE' }
 
-  const r = await ctx.adapter.markOrderReady(ctx.externalOrderId, ctx.storeId)
+  const s = await conReserva(
+    venueId,
+    orderId,
+    'READY',
+    () => ctx.adapter.markOrderReady!(ctx.externalOrderId, ctx.storeId),
+    (tx, r) =>
+      esEvidenciaHttp(r.status)
+        ? tx.order.updateMany({ where: { id: orderId, readyReportedAt: null }, data: { readyReportedAt: new Date() } })
+        : Promise.resolve(),
+  )
+  // Reserva tomada: el aviso se omite y `readyReportedAt` queda nulo para que el job lo reintente.
+  if (s.tipo === 'BLOQUEADA') return s.respuesta
+  if (s.tipo === 'TARDIA') return { outcome: 'FAILED', error: 'RESULTADO_TARDIO' }
+  const r = s.r
   if (!r.ok) {
     logger.warn('El marketplace rechazó el "listo" del pedido', {
       orderId,
@@ -109,7 +220,24 @@ export async function acceptDeliveryOrder(venueId: string, orderId: string, staf
   if (!ctx) return { outcome: 'NOT_A_DELIVERY_ORDER' }
   if (typeof ctx.adapter.acceptOrder !== 'function') return { outcome: 'FAILED', error: 'PROVEEDOR_SIN_ACEPTAR' }
 
-  const r = await ctx.adapter.acceptOrder(ctx.externalOrderId, ctx.storeId)
+  const s = await conReserva(
+    venueId,
+    orderId,
+    'ACCEPT',
+    () => ctx.adapter.acceptOrder!(ctx.externalOrderId, ctx.storeId),
+    // 🔴 Sólo el 2xx acredita. El 409 sigue siendo "ok" (no se repite el accept) pero no prueba
+    // nada: la marca, si falta, la recupera `recuperarAceptacionDesdeProveedor` leyendo a Uber.
+    (tx, r) =>
+      esEvidenciaHttp(r.status)
+        ? tx.order.updateMany({
+            where: { id: orderId, providerAcceptedAt: null },
+            data: { providerAcceptedAt: new Date(), providerAcceptedEvidence: 'HTTP_2XX' },
+          })
+        : Promise.resolve(),
+  )
+  if (s.tipo === 'BLOQUEADA') return s.respuesta
+  if (s.tipo === 'TARDIA') return { outcome: 'FAILED', error: 'RESULTADO_TARDIO' }
+  const r = s.r
   if (!r.ok) {
     // Pasado el plazo, el proveedor ya lo canceló y no hay nada que aceptar. Se dice con
     // ese nombre para que el mesero entienda que no es un error suyo ni un reintento útil.
@@ -143,10 +271,14 @@ export async function denyDeliveryOrder(
   const yaAceptado = ctx.order.status === OrderStatus.CONFIRMED
 
   if (yaAceptado) {
-    if (typeof ctx.adapter.cancelOrder === 'function') {
-      const r = await ctx.adapter.cancelOrder(ctx.externalOrderId, ctx.storeId, motivo)
-      if (!r.ok) return { outcome: 'FAILED', error: `HTTP ${r.status}` }
-    }
+    const s = await conReserva(venueId, orderId, 'DENY', async () =>
+      typeof ctx.adapter.cancelOrder === 'function'
+        ? ctx.adapter.cancelOrder(ctx.externalOrderId, ctx.storeId, motivo)
+        : { ok: true, status: 0, raw: 'el proveedor no cancela por API' },
+    )
+    if (s.tipo === 'BLOQUEADA') return s.respuesta
+    if (s.tipo === 'TARDIA') return { outcome: 'FAILED', error: 'RESULTADO_TARDIO' }
+    if (!s.r.ok) return { outcome: 'FAILED', error: `HTTP ${s.r.status}` }
     // Y del lado de Avoqado: sale de la cocina, deja de contar como venta, y el inventario
     // regresa. Es la misma rutina que una cancelación del proveedor.
     await cancelDeliveryOrder(ctx.externalOrderId, ctx.provider, `el negocio no pudo prepararlo: ${motivo}`)
@@ -155,10 +287,41 @@ export async function denyDeliveryOrder(
   }
 
   if (typeof ctx.adapter.denyOrder !== 'function') return { outcome: 'FAILED', error: 'PROVEEDOR_SIN_RECHAZAR' }
-  const r = await ctx.adapter.denyOrder(ctx.externalOrderId, ctx.storeId, motivo)
-  if (!r.ok) return { outcome: 'FAILED', error: `HTTP ${r.status}` }
+  const s = await conReserva(venueId, orderId, 'DENY', () => ctx.adapter.denyOrder!(ctx.externalOrderId, ctx.storeId, motivo))
+  if (s.tipo === 'BLOQUEADA') return s.respuesta
+  if (s.tipo === 'TARDIA') return { outcome: 'FAILED', error: 'RESULTADO_TARDIO' }
+  if (!s.r.ok) return { outcome: 'FAILED', error: `HTTP ${s.r.status}` }
 
   await cancelDeliveryOrder(ctx.externalOrderId, ctx.provider, `rechazado por el negocio: ${motivo}`)
   logger.info('🚫 [Delivery] pedido RECHAZADO antes de aceptar', { orderId, motivo, staffId })
   return { outcome: 'DENIED' }
+}
+
+/**
+ * Recupera una aceptación cuyo 2xx se perdió: LEE el pedido al proveedor y, si dice que ya
+ * está aceptado, estampa `PROVIDER_STATE`. Devuelve si el pedido está (ahora) aceptado.
+ *
+ * Ante cualquier duda —sin capacidad de leer, GET caído, pedido que no se puede normalizar—
+ * contesta `false`: lo seguro es NO afirmar una aceptación que no se pudo probar.
+ */
+export async function recuperarAceptacionDesdeProveedor(venueId: string, orderId: string): Promise<boolean> {
+  const ctx = await contexto(venueId, orderId)
+  if (!ctx) return false
+  if (ctx.order.providerAcceptedAt) return true
+  if (typeof ctx.adapter.fetchOrder !== 'function') return false
+
+  let aceptado: boolean
+  try {
+    aceptado = ctx.adapter.normalizeOrder(await ctx.adapter.fetchOrder(ctx.externalOrderId)).providerAccepted === true
+  } catch (e) {
+    logger.warn('[Delivery] no se pudo leer el pedido al proveedor para recuperar su aceptación', { orderId, error: String(e) })
+    return false
+  }
+  if (!aceptado) return false
+
+  await prisma.order.updateMany({
+    where: { id: orderId, providerAcceptedAt: null },
+    data: { providerAcceptedAt: new Date(), providerAcceptedEvidence: 'PROVIDER_STATE' },
+  })
+  return true
 }

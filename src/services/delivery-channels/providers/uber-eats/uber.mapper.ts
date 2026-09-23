@@ -96,6 +96,7 @@ export function mapUberOrder(raw: unknown): NormalizedDeliveryOrder {
   const d = (envelope?.order ?? raw) as {
     id?: string
     display_id?: string
+    state?: string
     created_time?: string
     fulfillment_type?: unknown
     customers?: Array<{
@@ -449,6 +450,8 @@ export function mapUberOrder(raw: unknown): NormalizedDeliveryOrder {
     // para no mandar la comanda hasta su hora, y llegar tarde a un pedido agendado es peor
     // que prepararlo con holgura.
     scheduledFor: fechaProgramada(d),
+    // uAPI: `state: "ACCEPTED"` (fixture real `pedido-con-modificadores-uapi.json`).
+    providerAccepted: d.state === 'ACCEPTED',
   }
 }
 

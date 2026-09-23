@@ -14,11 +14,20 @@ jest.mock('../../../../src/services/delivery-channels/core/adapterRegistry', () 
   adapterFor: jest.fn(),
 }))
 
+// La reserva simétrica (spec §3.2) se prueba contra Postgres en
+// tests/integration/delivery-channels/aceptacionAcreditada.test.ts; aquí se deja pasar.
+jest.mock('../../../../src/services/delivery-channels/core/deliveryOrderLock', () => ({
+  tomarReserva: jest.fn(async () => ({ ok: true, token: 'tok' })),
+  soltarReserva: jest.fn(async () => true),
+  withDeliveryOrderLock: jest.fn(async (_id: string, fn: (tx: unknown) => unknown) => fn({ order: { updateMany: jest.fn() } })),
+}))
+
 const markOrderReady = jest.fn()
 
 describe('markDeliveryOrderReady', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    ;(prisma as any).deliveryLineAction = { count: jest.fn().mockResolvedValue(0) }
     ;(hasAdapter as jest.Mock).mockReturnValue(true)
     ;(adapterFor as jest.Mock).mockReturnValue({ markOrderReady })
     ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({

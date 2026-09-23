@@ -25,6 +25,7 @@ import { syncChannelMenu } from '../../core/menuSync.service'
 import { releaseScheduledOrder } from '../../core/releaseScheduledOrder.service'
 import { ingestDeliveryOrder } from '../../core/deliveryOrderIngestion.service'
 import { markEventResult } from '../../core/deliveryWebhookEvent.service'
+import { esEvidenciaHttp } from '../../core/respondToDeliveryOrder.service'
 import { uberAdapter } from './uber.adapter'
 import { processUberReport } from './uber.reportProcessor'
 
@@ -265,6 +266,15 @@ export async function processUberEvent(eventRowId: string, deps: UberProcessDeps
     // 4. Convertirlo en venta.
     const normalizado = uberAdapter.normalizeOrder(crudo)
     const { order, created, kitchenTicketCreated, hayComanda } = await ingestDeliveryOrder(normalizado, link)
+
+    // El accept salió ANTES de que existiera la orden: la marca se escribe ahora. Sólo un
+    // 2xx acredita — el 409 ("ya estaba aceptado") y el placeholder MANUAL (status 0) no.
+    if (automatico && esEvidenciaHttp(aceptacion.status)) {
+      await prisma.order.updateMany({
+        where: { id: order.id, providerAcceptedAt: null },
+        data: { providerAcceptedAt: new Date(), providerAcceptedEvidence: 'HTTP_2XX' },
+      })
+    }
 
     // 🔴 REQUISITO DE UBER, y además es seguridad de una persona: la integración debe
     // RECHAZAR el pedido cuando no puede transmitir alergias o instrucciones especiales
