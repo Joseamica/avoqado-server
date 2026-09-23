@@ -115,7 +115,7 @@ describe('el KDS entrega el contacto del cliente (Tarea 4)', () => {
     // Un pedido programado no va a la cocina al recibirse: cocinarlo al llegar tira la comida.
     await expect(prisma.kdsOrder.count({ where: { orderId: order.id } })).resolves.toBe(0)
 
-    const resultado = await releaseScheduledOrder(order.externalId)
+    const resultado = await releaseScheduledOrder(order.externalId!)
     expect(resultado.outcome).toBe('RELEASED')
 
     const kds = await prisma.kdsOrder.findFirstOrThrow({ where: { orderId: order.id } })
