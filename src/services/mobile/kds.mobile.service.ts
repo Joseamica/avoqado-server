@@ -183,8 +183,15 @@ export function formatKdsOrderConVenta(o: any, venta?: VentaDeComanda | null): K
 
 /** La comanda recién escrita, con su venta: `PUT …/status` y `bump` contestan lo mismo que el tablero (una carga por lote). */
 async function comandaConVenta(venueId: string, k: { orderId: string | null }): Promise<KdsOrderResponse> {
-  const ventas = await ventasDeComandas(prisma, venueId, [k])
-  return formatKdsOrderConVenta(k, k.orderId ? ventas.get(k.orderId) : undefined)
+  // La comanda YA se escribió: si esta lectura falla, la cocina recibe su comanda sin capacidades
+  // (campos opcionales, llegan en el siguiente sondeo) y el aviso de «listo» al proveedor sale igual.
+  try {
+    const ventas = await ventasDeComandas(prisma, venueId, [k])
+    return formatKdsOrderConVenta(k, k.orderId ? ventas.get(k.orderId) : undefined)
+  } catch (error) {
+    logger.warn('KDS: no se pudieron leer las capacidades de la comanda; se contesta sin ellas', { venueId, orderId: k.orderId, error })
+    return formatKdsOrder(k)
+  }
 }
 
 // MARK: - Create KDS Order

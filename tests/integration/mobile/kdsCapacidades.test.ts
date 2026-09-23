@@ -14,7 +14,9 @@ import { ingestDeliveryOrder } from '@/services/delivery-channels/core/deliveryO
 import type { NormalizedDeliveryOrder, NormalizedDeliveryPayment } from '@/services/delivery-channels/core/types'
 import { uberAdapter } from '@/services/delivery-channels/providers/uber-eats/uber.adapter'
 import { listKdsOrders } from '@/services/mobile/kds.mobile.service'
+import * as capacidadesModulo from '@/services/mobile/kdsCapacidades'
 import { anexarCapacidades, ventasDeComandas } from '@/services/mobile/kdsCapacidades'
+import * as respuestaAlProveedor from '@/services/delivery-channels/core/respondToDeliveryOrder.service'
 
 jest.setTimeout(30_000)
 
@@ -338,6 +340,27 @@ describe('El DTO del KDS decide por las apps (Tarea 16)', () => {
     expect(capacidades(bump.body.data)).toEqual(capacidades(await comandaDe(t, 'COMPLETED')))
     expect(bump.body.data).toMatchObject({ canCancelDelivery: false })
     expect(renglonB(bump.body.data, t).canReportOutOfStock).toBe(false)
+  })
+
+  it('si la lectura de capacidades falla, el bump contesta 200 y el «listo» al proveedor sale igual', async () => {
+    const s = await sembrar()
+    const falla = jest.spyOn(capacidadesModulo, 'ventasDeComandas').mockRejectedValueOnce(new Error('BD caída un instante'))
+    const listo = jest
+      .spyOn(respuestaAlProveedor, 'markDeliveryOrderReady')
+      .mockResolvedValue({ outcome: 'ALREADY_DONE' } as any)
+    try {
+      const bump = await request(server)
+        .post(`/api/v1/mobile/venues/${venueId}/kds/orders/${s.kds.id}/bump`)
+        .set('Authorization', `Bearer ${token}`)
+      expect(bump.status).toBe(200)
+      expect(bump.body.data).not.toHaveProperty('canCancelDelivery') // sin capacidades: llegan en el siguiente sondeo
+      expect(falla).toHaveBeenCalled()
+      await new Promise(r => setImmediate(r)) // el aviso es fire-and-forget
+      expect(listo).toHaveBeenCalled()
+    } finally {
+      falla.mockRestore()
+      listo.mockRestore()
+    }
   })
 
   it('el estado del retiro viaja por renglón, con canRetryAt = la regla de 15 min del reintento', async () => {
