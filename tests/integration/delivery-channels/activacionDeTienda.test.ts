@@ -16,7 +16,7 @@ import * as claims from '@/services/delivery-channels/core/deliveryStoreClaim.se
 import * as adapterRegistry from '@/services/delivery-channels/core/adapterRegistry'
 import { pauseChannelLink, updateChannelLink } from '@/services/delivery-channels/core/deliveryChannelLink.service'
 import { processUberEvent } from '@/services/delivery-channels/providers/uber-eats/uber.eventProcessor'
-import { activarTiendaUber } from '@/controllers/delivery-channels/uber.oauth.controller'
+import { activarTiendaUber, textoResultado } from '@/controllers/delivery-channels/uber.oauth.controller'
 
 jest.setTimeout(30_000)
 
@@ -25,7 +25,7 @@ const OK = { status: 200, json: {}, text: '{}' }
 
 describe('Activación por tienda: reclamar antes del HTTP, finalizar por CAS (Tarea 18)', () => {
   const sufijo = Date.now()
-  const tiendas = Array.from({ length: 20 }, (_, i) => `t18-${i}-${sufijo}`)
+  const tiendas = Array.from({ length: 40 }, (_, i) => `t18-${i}-${sufijo}`)
   let n = 0
   const nuevaTienda = () => tiendas[n++]
   let orgId: string, venueA: string, venueB: string, staffId: string
@@ -43,7 +43,7 @@ describe('Activación por tienda: reclamar antes del HTTP, finalizar por CAS (Ta
     UBER_WRITABLE_STORE_IDS_PRODUCTION: '',
   }
 
-  /** Un intent en ACTIVATING con su selección, como lo deja el POST de la selección. */
+  /** Un intent en ACTIVATING con su selección, por el MISMO camino que el POST de la selección. */
   async function activando(venueId: string, seleccion: string[]) {
     const { intent } = await intents.crearIntent({ venueId, staffId })
     expect(
@@ -52,7 +52,7 @@ describe('Activación por tienda: reclamar antes del HTTP, finalizar por CAS (Ta
         merchantTokenEnvelope: intents.cifrarTokenComerciante(intent, 'token-del-comerciante'),
       }),
     ).toBe(true)
-    expect(await intents.casEstado(intent.id, 'EXCHANGED', 'ACTIVATING', { selectionJson: seleccion })).toBe(true)
+    expect(await claims.seleccionarTiendas(intent.id, seleccion)).toBe(true)
     return intent.id
   }
   const activar = (id: string) => intents.activar(id, activarTiendaUber)
@@ -145,8 +145,13 @@ describe('Activación por tienda: reclamar antes del HTTP, finalizar por CAS (Ta
     const pA = activar(idA)
     const pB = activar(idB)
     while (posData.mock.calls.length === 0) await sleep(20)
-    // El ganador está DENTRO de pos_data con la tienda reclamada; el otro tiene que terminar sin HTTP.
-    await Promise.race([pA, pB, sleep(3_000)])
+    // El ganador está DENTRO de pos_data con la tienda reclamada; el otro tiene que terminar SIN
+    // HTTP y ANTES de que el ganador salga (si pos_data corriera dentro de la transacción de la
+    // reclamación, el perdedor esperaría el candado y sólo resolvería después de `soltar()`).
+    const primero = await Promise.race([pA.then(r => ({ cual: 'A', r })), pB.then(r => ({ cual: 'B', r })), sleep(3_000).then(() => null)])
+    expect(primero).not.toBeNull()
+    expect(posData).toHaveBeenCalledTimes(1)
+    expect(outcome(primero!.r, store)).toBe('OTHER_VENUE')
     soltar()
     const [rA, rB] = await Promise.all([pA, pB])
 
@@ -213,7 +218,7 @@ describe('Activación por tienda: reclamar antes del HTTP, finalizar por CAS (Ta
     const r2 = await activar(id)
     expect(r2.estado).toBe('CONSUMED')
     expect(outcome(r2, store)).toBe('ACTIVATED')
-    expect(posData).toHaveBeenCalledTimes(2) // «Reintentar» repite pos_data (idempotente) y finaliza
+    expect(posData).toHaveBeenCalledTimes(1) // M3: `posDataOk` quedó anotado con la misma versión ⇒ no se repite
     expect(await link(store)).toMatchObject({
       venueId: venueA,
       status: 'ACTIVE',
@@ -225,7 +230,7 @@ describe('Activación por tienda: reclamar antes del HTTP, finalizar por CAS (Ta
       activationOwner: null,
     })
     expect((await link(store)).ownerAuthorizedAt).toBeInstanceOf(Date)
-    expect((await resultados(id))[store]).toMatchObject({ outcome: 'ACTIVATED', claimedRevocationVersion: 0 })
+    expect((await resultados(id))[store]).toMatchObject({ outcome: 'ACTIVATED', claimedRevocationVersion: 0, posDataOk: true })
   })
 
   it('pos_data fallido ⇒ la reclamacion se libera y un intent NUEVO puede activar', async () => {
@@ -234,12 +239,123 @@ describe('Activación por tienda: reclamar antes del HTTP, finalizar por CAS (Ta
     const id1 = await activando(venueA, [store])
     const r1 = await activar(id1)
     expect(outcome(r1, store)).toBe('POS_DATA_FAILED')
-    expect(await link(store)).toMatchObject({ activatingIntentId: null, activationOwner: null, ownerAuthorizedAt: null })
+    // M4: esta reclamación CREÓ la fila y quedó PENDING sin consentimiento ⇒ se borra: la tienda no
+    // queda atada al negocio de un intento fallido.
+    expect(await prisma.deliveryChannelLink.count({ where: { externalLocationId: store } })).toBe(0)
 
-    const id2 = await activando(venueA, [store])
+    // Y OTRO negocio la puede conectar después (antes: OTHER_VENUE para siempre).
+    const id2 = await activando(venueB, [store])
     const r2 = await activar(id2)
     expect(outcome(r2, store)).toBe('ACTIVATED')
-    expect((await link(store)).ownerAuthorizedByIntentId).toBe(id2)
+    expect(await link(store)).toMatchObject({ venueId: venueB, ownerAuthorizedByIntentId: id2 })
+  })
+
+  it('pos_data fallido sobre un vínculo que YA existía ⇒ se libera, no se borra', async () => {
+    const store = nuevaTienda()
+    const previo = await prisma.deliveryChannelLink.create({
+      data: { venueId: venueA, provider: DeliveryProvider.UBER_EATS, externalLocationId: store, webhookSecret: 'x'.repeat(64) },
+    })
+    posData.mockResolvedValueOnce({ status: 500, json: {}, text: 'boom' })
+    expect(outcome(await activar(await activando(venueA, [store])), store)).toBe('POS_DATA_FAILED')
+    expect(await link(store)).toMatchObject({ id: previo.id, status: 'PENDING', activatingIntentId: null, activationOwner: null })
+  })
+
+  it('pos_data sin respuesta (timeout) ⇒ texto neutral, nunca «Uber rechazó»', async () => {
+    const store = nuevaTienda()
+    posData.mockRejectedValueOnce(new Error('timeout de 25 s'))
+    const r = await activar(await activando(venueA, [store]))
+    const x = (r as { resultados: Record<string, intents.ResultadoTienda> }).resultados[store]
+    expect(x).toMatchObject({ outcome: 'POS_DATA_FAILED', sinRespuesta: true })
+    expect(textoResultado(x)).toContain('no pudimos confirmar con Uber')
+    expect(textoResultado(x)).not.toContain('rechazó')
+    // Con status HTTP sí es un rechazo de Uber.
+    expect(textoResultado({ outcome: 'POS_DATA_FAILED', status: 403 })).toContain('Uber rechazó')
+  })
+
+  it('intent abandonado pasado su vencimiento ⇒ un intent NUEVO del mismo negocio activa YA (sin esperar al job)', async () => {
+    const store = nuevaTienda()
+    const abandonado = await activando(venueA, [store])
+    jest.spyOn(claims, 'finalizarTienda').mockRejectedValueOnce(new Error('la base se cayó'))
+    expect((await activar(abandonado)).estado).toBe('INCOMPLETO') // nadie le da «Reintentar»
+    await prisma.deliveryConnectIntent.update({ where: { id: abandonado }, data: { expiresAt: new Date(Date.now() - 60_000) } })
+
+    const nuevo = await activando(venueA, [store])
+    expect(outcome(await activar(nuevo), store)).toBe('ACTIVATED')
+    expect(await fila(abandonado)).toMatchObject({ state: 'EXPIRED', merchantTokenEnvelope: null })
+    expect(await link(store)).toMatchObject({ ownerAuthorizedByIntentId: nuevo, activatingIntentId: null })
+  })
+
+  it('un dueño VIVO conserva la tienda ⇒ CLAIMED_BY_OTHER (aunque haya pasado su vencimiento, con lease vivo)', async () => {
+    const store = nuevaTienda()
+    const vivo = await activando(venueA, [store])
+    jest.spyOn(claims, 'finalizarTienda').mockRejectedValueOnce(new Error('la base se cayó'))
+    expect((await activar(vivo)).estado).toBe('INCOMPLETO')
+    // Una corrida suya está en vuelo: lease vivo aunque el enlace ya venció.
+    await prisma.deliveryConnectIntent.update({
+      where: { id: vivo },
+      data: {
+        expiresAt: new Date(Date.now() - 60_000),
+        activationOwner: 'otra-corrida',
+        activationLeaseUntil: new Date(Date.now() + 60_000),
+      },
+    })
+
+    const otro = await activando(venueA, [store])
+    expect(outcome(await activar(otro), store)).toBe('CLAIMED_BY_OTHER')
+    expect((await fila(vivo)).state).toBe('ACTIVATING')
+    expect((await link(store)).activatingIntentId).toBe(vivo)
+  })
+
+  it('reconectar un vínculo PAUSADO del mismo negocio ⇒ consentimiento y SIGUE en pausa (M2)', async () => {
+    const store = nuevaTienda()
+    const reloj = new Date(Date.now() + 20 * 60_000)
+    await prisma.deliveryChannelLink.create({
+      data: {
+        venueId: venueA,
+        provider: DeliveryProvider.UBER_EATS,
+        externalLocationId: store,
+        webhookSecret: 'x'.repeat(64),
+        status: 'PAUSED',
+        snoozedUntil: reloj,
+      },
+    })
+    const id = await activando(venueA, [store])
+    const r = await activar(id)
+    const x = (r as { resultados: Record<string, intents.ResultadoTienda> }).resultados[store]
+
+    expect(x).toMatchObject({ outcome: 'ACTIVATED', sigueEnPausa: true })
+    expect(textoResultado(x)).toContain('sigue en pausa')
+    expect(textoResultado(x)).not.toContain('retiró')
+    const l = await link(store)
+    expect(l).toMatchObject({ status: 'PAUSED', ownerAuthorizedByIntentId: id, activatingIntentId: null })
+    expect(l.snoozedUntil?.getTime()).toBe(reloj.getTime())
+  })
+
+  it('deprovisioned entre el clic del dueño y la reclamación de la tienda N ⇒ REVOKED_MEANWHILE sin HTTP (M7)', async () => {
+    const s1 = nuevaTienda()
+    const s2 = nuevaTienda()
+    // s2 ya estaba conectada (vínculo del mismo negocio, versión 0) cuando el dueño hizo clic.
+    await prisma.deliveryChannelLink.create({
+      data: {
+        venueId: venueA,
+        provider: DeliveryProvider.UBER_EATS,
+        externalLocationId: s2,
+        webhookSecret: 'x'.repeat(64),
+        status: 'ACTIVE',
+      },
+    })
+    const id = await activando(venueA, [s1, s2])
+    posData.mockImplementation(async (storeId: string) => {
+      if (storeId === s1) await deprovisionar(s2) // Uber revoca s2 mientras s1 se activa
+      return OK
+    })
+
+    const r = await activar(id)
+
+    expect(outcome(r, s1)).toBe('ACTIVATED')
+    expect(outcome(r, s2)).toBe('REVOKED_MEANWHILE')
+    expect(posData.mock.calls).toEqual([[s1]]) // s2 nunca llegó a pos_data
+    expect(await link(s2)).toMatchObject({ status: 'DISABLED', revocationVersion: 1, ownerAuthorizedAt: null, activatingIntentId: null })
   })
 
   it('intent vencido ⇒ el job libera la reclamacion', async () => {
@@ -247,7 +363,7 @@ describe('Activación por tienda: reclamar antes del HTTP, finalizar por CAS (Ta
     const id1 = await activando(venueA, [store])
     jest.spyOn(claims, 'finalizarTienda').mockRejectedValueOnce(new Error('la base se cayó'))
     expect((await activar(id1)).estado).toBe('INCOMPLETO')
-    // Nadie le dio «Reintentar»: la reclamación sigue viva y bloquea a un enlace nuevo.
+    // Nadie le dio «Reintentar»: mientras el enlace no vence, su dueño está VIVO y bloquea a otro.
     const bloqueado = await activando(venueA, [store])
     expect(outcome(await activar(bloqueado), store)).toBe('CLAIMED_BY_OTHER')
 
@@ -349,6 +465,26 @@ describe('Activación por tienda: reclamar antes del HTTP, finalizar por CAS (Ta
       await expect(pauseChannelLink(venueA, l2.id, true)).rejects.toMatchObject({ statusCode: 409 })
       expect(setStoreStatus.mock.calls.length).toBe(antes)
       expect((await prisma.deliveryChannelLink.findUniqueOrThrow({ where: { id: l2.id } })).status).toBe('DISABLED')
+    })
+
+    it('una pausa o reanudación rechazada restaura el estado COMPLETO, reloj incluido (M5)', async () => {
+      const setStoreStatus = jest.fn(async () => ({ ok: false, status: 500, raw: 'no' }))
+      jest.spyOn(adapterRegistry, 'adapterFor').mockReturnValue({ setStoreStatus } as never)
+      const reloj = new Date(Date.now() + 20 * 60_000)
+      const l = await conectada(true)
+      await prisma.deliveryChannelLink.update({ where: { id: l.id }, data: { status: 'PAUSED', snoozedUntil: reloj } })
+      const estado = () =>
+        prisma.deliveryChannelLink.findUniqueOrThrow({ where: { id: l.id }, select: { status: true, snoozedUntil: true } })
+
+      // PAUSED→PAUSED (el dueño la vuelve indefinida) rechazado: no se borra el reloj ni se miente.
+      const e1 = await pauseChannelLink(venueA, l.id, true).catch(e => e)
+      expect(e1).toMatchObject({ statusCode: 409 })
+      expect(e1.message).not.toContain('sigue recibiendo pedidos')
+      expect(await estado()).toEqual({ status: 'PAUSED', snoozedUntil: reloj })
+
+      // Reanudar rechazado (p. ej. el job del reloj): sigue PAUSED CON su reloj, para reintentarse.
+      await expect(pauseChannelLink(venueA, l.id, false)).rejects.toMatchObject({ statusCode: 409 })
+      expect(await estado()).toEqual({ status: 'PAUSED', snoozedUntil: reloj })
     })
 
     it('updateChannelLink con consentimiento ⇒ 409 IDENTITY_LOCKED', async () => {

@@ -34,7 +34,13 @@ export type EstadoIntent = 'CREATED' | 'EXCHANGED' | 'ACTIVATING' | 'CONSUMED' |
 export type Proposito = 'start' | 'callback' | 'activate'
 
 const TERMINALES: EstadoIntent[] = ['CONSUMED', 'FAILED', 'EXPIRED']
-const VIVOS: EstadoIntent[] = ['CREATED', 'EXCHANGED', 'ACTIVATING']
+/**
+ * Los estados en los que un intent todavía puede tener lease. ÚNICA lista: la usan el `fallar`,
+ * el job diario y la reclamación de una tienda cuyo dueño anterior murió (su SQL se arma de aquí).
+ * Un estado nuevo que se agregara sólo en una copia haría que se liberara la reclamación de uno vivo.
+ */
+export const ESTADOS_VIVOS: readonly EstadoIntent[] = ['CREATED', 'EXCHANGED', 'ACTIVATING']
+const VIVOS = [...ESTADOS_VIVOS]
 const INTENT_TTL_MS = 10 * 60_000
 const LEASE_MS = 2 * 60_000
 
@@ -240,16 +246,22 @@ export async function liberarLease(id: string, owner: string): Promise<boolean> 
 }
 
 /**
+ * Merge ANIDADO en `resultsJson[storeId]` (ÚNICA copia; la reclamación la usa también): lo anotado
+ * antes para esa tienda —la versión reclamada, `posDataOk`— sobrevive al resultado.
+ */
+export function mezclaResultadoSql(storeId: string, parcial: Record<string, unknown>): Prisma.Sql {
+  return Prisma.sql`COALESCE("resultsJson", '{}'::jsonb) || jsonb_build_object(
+    ${storeId}::text, COALESCE("resultsJson" -> ${storeId}::text, '{}'::jsonb) || ${JSON.stringify(parcial)}::jsonb)`
+}
+
+/**
  * Anota el resultado de UNA tienda. El `where` exige estado, dueño y lease vivo EN LA MISMA
  * sentencia: si otra ejecución recuperó el intent, esta escritura no pasa (count 0).
- * Merge con `||` de jsonb: no hay lectura-modificación-escritura que pueda pisar otra tienda.
- * ANIDADO: `claimedRevocationVersion`, que la reclamación anotó antes, sobrevive al resultado.
  */
 async function registrarResultado(id: string, owner: string, storeId: string, resultado: ResultadoTienda): Promise<boolean> {
   const n = await prisma.$executeRaw`
     UPDATE "DeliveryConnectIntent"
-       SET "resultsJson" = COALESCE("resultsJson", '{}'::jsonb) || jsonb_build_object(
-             ${storeId}::text, COALESCE("resultsJson" -> ${storeId}::text, '{}'::jsonb) || ${JSON.stringify(resultado)}::jsonb),
+       SET "resultsJson" = ${mezclaResultadoSql(storeId, resultado)},
            "updatedAt" = ${utcTs(new Date())}
      WHERE "id" = ${id}
        AND "state" = 'ACTIVATING'

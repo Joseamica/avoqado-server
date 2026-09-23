@@ -68,6 +68,8 @@ describe('deliveryChannelLink.service', () => {
     // `mockReturnValue(true)` de un test se filtra a todos los siguientes y los manda por
     // el camino equivocado. El default es 'no hay adaptador directo' (camino legado).
     ;(hasAdapter as jest.Mock).mockReturnValue(false)
+    // Pausar lee primero el estado COMPLETO previo (status + reloj) al que revertiría.
+    ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({ status: DeliveryChannelStatus.ACTIVE, snoozedUntil: null })
   })
 
   // ============================================================
@@ -353,6 +355,7 @@ describe('deliveryChannelLink.service', () => {
     })
 
     it('reanudar también le llega al proveedor', async () => {
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({ status: DeliveryChannelStatus.PAUSED, snoozedUntil: null })
       const setStoreStatus = jest.fn().mockResolvedValue({ ok: true, status: 200, raw: '' })
       ;(hasAdapter as jest.Mock).mockReturnValue(true)
       ;(adapterFor as jest.Mock).mockReturnValue({ setStoreStatus })
@@ -393,8 +396,8 @@ describe('deliveryChannelLink.service', () => {
       await pauseChannelLink('venue1', 'link1', true, 'staff1')
 
       expect(prisma.deliveryChannelLink.updateMany).toHaveBeenCalledWith({
-        // Spec KDS Uber §4.2: el CAS sale de un ACTIVE (así se sabe a qué revertir).
-        where: { id: 'link1', venueId: 'venue1', status: DeliveryChannelStatus.ACTIVE },
+        // Spec KDS Uber §4.2: el CAS sale del estado COMPLETO leído (así se sabe a qué revertir).
+        where: { id: 'link1', venueId: 'venue1', status: DeliveryChannelStatus.ACTIVE, snoozedUntil: null },
         // `objectContaining` sólo en `data`: desde el snooze, pausar escribe también
         // `snoozedUntil: null`. El `where` se queda EXACTO — es lo que este test cuida.
         data: expect.objectContaining({ status: DeliveryChannelStatus.PAUSED }),
@@ -402,6 +405,7 @@ describe('deliveryChannelLink.service', () => {
     })
 
     it('paused=false actualiza status a ACTIVE — Fix B4: el where del updateMany ahora exige status:PAUSED (gate atómico, no check-then-update)', async () => {
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({ status: DeliveryChannelStatus.PAUSED, snoozedUntil: null })
       ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
       ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue(baseLink)
       ;(getAdapter as jest.Mock).mockReturnValue({ setChannelPaused: jest.fn().mockResolvedValue(undefined) })
@@ -409,7 +413,7 @@ describe('deliveryChannelLink.service', () => {
       await pauseChannelLink('venue1', 'link1', false)
 
       expect(prisma.deliveryChannelLink.updateMany).toHaveBeenCalledWith({
-        where: { id: 'link1', venueId: 'venue1', status: DeliveryChannelStatus.PAUSED },
+        where: { id: 'link1', venueId: 'venue1', status: DeliveryChannelStatus.PAUSED, snoozedUntil: null },
         data: expect.objectContaining({ status: DeliveryChannelStatus.ACTIVE }),
       })
     })
@@ -427,7 +431,7 @@ describe('deliveryChannelLink.service', () => {
 
       expect(prisma.deliveryChannelLink.findFirst).toHaveBeenCalledWith({
         where: { id: 'link1', venueId: 'venue1' },
-        select: { status: true },
+        select: { status: true, snoozedUntil: true },
       })
       expect(getAdapter).not.toHaveBeenCalled()
       expect(logAction).not.toHaveBeenCalled()
@@ -450,8 +454,7 @@ describe('deliveryChannelLink.service', () => {
 
       await expect(pauseChannelLink('venue1', 'link1', true)).rejects.toThrow(ConflictError)
 
-      const desde = (prisma.deliveryChannelLink.updateMany as jest.Mock).mock.calls.map(c => c[0].where.status)
-      expect(desde).toEqual([DeliveryChannelStatus.ACTIVE, DeliveryChannelStatus.PAUSED]) // ni PENDING ni DISABLED
+      expect(prisma.deliveryChannelLink.updateMany).not.toHaveBeenCalled()
       expect(getAdapter).not.toHaveBeenCalled()
       expect(logAction).not.toHaveBeenCalled()
     })
@@ -474,7 +477,7 @@ describe('deliveryChannelLink.service', () => {
 
       expect(prisma.deliveryChannelLink.findFirst).toHaveBeenCalledWith({
         where: { id: 'link1', venueId: 'venue-otro' },
-        select: { status: true },
+        select: { status: true, snoozedUntil: true },
       })
       expect(getAdapter).not.toHaveBeenCalled()
       expect(logAction).not.toHaveBeenCalled()
@@ -620,6 +623,7 @@ describe('deliveryChannelLink.service', () => {
     })
 
     it('reanudar también limpia el reloj', async () => {
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({ status: DeliveryChannelStatus.PAUSED, snoozedUntil: null })
       ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
       ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue({ ...baseLink, status: DeliveryChannelStatus.ACTIVE })
 
@@ -646,6 +650,7 @@ describe('deliveryChannelLink.service', () => {
     })
 
     it('🔴 si un canal falla al reanudar, los DEMÁS igual se reanudan', async () => {
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({ status: DeliveryChannelStatus.PAUSED, snoozedUntil: null })
       // Sin aislar, un venue con el proveedor caído dejaría a todos los demás negocios
       // apagados. El trabajo por lote no puede rendirse en el primer error.
       ;(prisma.deliveryChannelLink.findMany as jest.Mock).mockResolvedValue([
@@ -669,7 +674,10 @@ describe('deliveryChannelLink.service', () => {
   // ============================================================
   describe('cancelarSnooze', () => {
     it('si la cocina se puso al día, reanuda antes de que venza el reloj', async () => {
-      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({ snoozedUntil: new Date(Date.now() + 600_000) })
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({
+        status: DeliveryChannelStatus.PAUSED,
+        snoozedUntil: new Date(Date.now() + 600_000),
+      })
       ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
       ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue({ ...baseLink, status: DeliveryChannelStatus.ACTIVE })
 

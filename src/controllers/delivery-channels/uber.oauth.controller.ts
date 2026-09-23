@@ -18,6 +18,7 @@
  * ⚠️ Rutas PÚBLICAS (Uber redirige el navegador aquí, sin sesión de Avoqado). La prueba de
  * origen es la firma HMAC de la intención, con un propósito por paso.
  */
+import { DeliveryConnectIntent } from '@prisma/client'
 import { Request, Response } from 'express'
 
 import { env } from '@/config/env'
@@ -101,6 +102,18 @@ const TEXTO_RESULTADO: Record<string, string> = {
   [intents.RESULTADO_REINTENTABLE]: '<span class="bad">no se pudo guardar</span>; usa «Reintentar».',
 }
 
+/** El texto de UNA tienda en la página de resultado. Exportado para las pruebas. */
+export function textoResultado(x: intents.ResultadoTienda): string {
+  // Reconectar una tienda PAUSADA: se autorizó, pero sigue sin recibir pedidos hasta que la reanuden.
+  if (x.outcome === 'ACTIVATED' && x.sigueEnPausa)
+    return '<span class="ok">conectada</span>; sigue en pausa — reanúdala desde el panel de Avoqado.'
+  // Sin respuesta de Uber (red, timeout) no sabemos si la rechazó: no se dice que sí.
+  if (x.outcome === 'POS_DATA_FAILED' && x.sinRespuesta) {
+    return '<span class="bad">no pudimos confirmar con Uber</span>; reintenta en unos minutos con un enlace nuevo desde el dashboard.'
+  }
+  return TEXTO_RESULTADO[x.outcome] ?? esc(x.outcome)
+}
+
 /** El negocio de Avoqado al que van las tiendas: la ÚNICA pista que tiene el dueño de la cuenta de Uber de que el enlace es el correcto. */
 async function nombreDelNegocio(venueId: string): Promise<string> {
   return (await prisma.venue.findUnique({ where: { id: venueId }, select: { name: true } }))?.name ?? '(negocio sin nombre)'
@@ -176,11 +189,14 @@ async function responderActivacion(res: Response, id: string, r: intents.Resulta
   const fila = await prisma.deliveryConnectIntent.findUnique({ where: { id }, select: { storesJson: true, venueId: true } })
   const tiendas = new Map(((fila?.storesJson as intents.TiendaUber[] | null) ?? []).map(t => [t.id, t]))
   const negocio = esc(fila ? await nombreDelNegocio(fila.venueId) : '')
-  const filas = Object.entries(r.resultados).map(
-    ([storeId, x]) =>
-      `<li><strong>${esc(tiendas.get(storeId)?.name ?? '(sin nombre)')}</strong><br><code>${esc(storeId)}</code><br>` +
-      `${TEXTO_RESULTADO[x.outcome] ?? esc(x.outcome)}${x.status ? ` (HTTP ${esc(x.status)})` : ''}</li>`,
-  )
+  // Sólo tiendas con resultado: la versión consentida se anota antes para todas las elegidas.
+  const filas = Object.entries(r.resultados)
+    .filter(([, x]) => x.outcome)
+    .map(
+      ([storeId, x]) =>
+        `<li><strong>${esc(tiendas.get(storeId)?.name ?? '(sin nombre)')}</strong><br><code>${esc(storeId)}</code><br>` +
+        `${textoResultado(x)}${x.status ? ` (HTTP ${esc(x.status)})` : ''}</li>`,
+    )
   if (r.estado === 'CONSUMED') {
     const todas = Object.values(r.resultados).every(x => x.outcome === 'ACTIVATED')
     const encabezado = todas
@@ -220,6 +236,50 @@ export const activarTiendaUber: intents.ActivarTienda = async ({ intent, owner, 
   if (reclamo.tipo === 'MUERTA') return { outcome: intents.RESULTADO_REINTENTABLE }
   if (reclamo.tipo === 'FINAL') return { outcome: reclamo.outcome }
 
+  // Recuperación con la MISMA versión consentida y `pos_data` ya aceptado: no se repite (M3).
+  if (!reclamo.posDataOk) {
+    const fallo = await posData(intent, token, storeId, e)
+    if (fallo) {
+      // Final: la tienda queda libre para un enlace nuevo (un lease perdido lo repite la recuperación).
+      await claims.liberarReclamo(intent, owner, storeId, fallo)
+      return fallo
+    }
+    if (!(await claims.anotarPosDataOk(intent.id, owner, storeId))) return { outcome: intents.RESULTADO_REINTENTABLE }
+  }
+
+  let fin: Awaited<ReturnType<typeof claims.finalizarTienda>>
+  try {
+    fin = await claims.finalizarTienda(intent, owner, storeId, reclamo.version)
+  } catch (err) {
+    // Entre 2 y 3: Uber ya dijo que sí y la escritura local no. «Reintentar» finaliza sin repetir `pos_data`.
+    logger.error('🚨 [UberOAuth] pos_data OK pero no se pudo guardar la conexión', {
+      intentId: intent.id,
+      storeId,
+      error: (err as Error).message,
+    })
+    return { outcome: intents.RESULTADO_REINTENTABLE }
+  }
+  if (fin === null) return { outcome: intents.RESULTADO_REINTENTABLE }
+  if (fin.outcome === 'ACTIVATED') {
+    void logAction({
+      staffId: intent.staffId,
+      venueId: intent.venueId,
+      action: 'DELIVERY_CHANNEL_CONNECTED',
+      entity: 'DeliveryChannelLink',
+      entityId: reclamo.linkId,
+      data: { provider: 'UBER_EATS', externalLocationId: storeId, intentId: intent.id, environment: e, sigueEnPausa: !!fin.sigueEnPausa },
+    })
+  }
+  return fin
+}
+
+/** Paso 2: `POST /pos_data` (2xx exigido). `null` = aceptado; si no, el resultado final de la tienda. */
+async function posData(
+  intent: DeliveryConnectIntent,
+  token: string,
+  storeId: string,
+  e: UberEnvironment,
+): Promise<claims.ResultadoFinal | null> {
   let status = 0
   try {
     const activacion = await uberRequest(
@@ -258,37 +318,9 @@ export const activarTiendaUber: intents.ActivarTienda = async ({ intent, owner, 
     }
   } catch (err) {
     logger.warn('🛵 [UberOAuth] pos_data no respondió', { intentId: intent.id, storeId, error: (err as Error).message })
+    return { outcome: 'POS_DATA_FAILED', sinRespuesta: true }
   }
-  if (status < 200 || status >= 300) {
-    // Final: la tienda queda libre para un enlace nuevo (un lease perdido lo repite la recuperación).
-    await claims.liberarReclamo(intent.id, owner, storeId, 'POS_DATA_FAILED')
-    return { outcome: 'POS_DATA_FAILED', status }
-  }
-
-  let fin: Awaited<ReturnType<typeof claims.finalizarTienda>>
-  try {
-    fin = await claims.finalizarTienda(intent, owner, storeId, reclamo.version)
-  } catch (err) {
-    // Entre 2 y 3: Uber ya dijo que sí y la escritura local no. «Reintentar» repite 2–3.
-    logger.error('🚨 [UberOAuth] pos_data OK pero no se pudo guardar la conexión', {
-      intentId: intent.id,
-      storeId,
-      error: (err as Error).message,
-    })
-    return { outcome: intents.RESULTADO_REINTENTABLE }
-  }
-  if (fin === null) return { outcome: intents.RESULTADO_REINTENTABLE }
-  if (fin === 'ACTIVATED') {
-    void logAction({
-      staffId: intent.staffId,
-      venueId: intent.venueId,
-      action: 'DELIVERY_CHANNEL_CONNECTED',
-      entity: 'DeliveryChannelLink',
-      entityId: reclamo.linkId,
-      data: { provider: 'UBER_EATS', externalLocationId: storeId, intentId: intent.id, environment: e },
-    })
-  }
-  return { outcome: fin }
+  return status >= 200 && status < 300 ? null : { outcome: 'POS_DATA_FAILED', status }
 }
 
 /** Paso 1: `GET /oauth/start?intent=<id>.<hmac>` — manda al comerciante a autorizar. Ya NO acepta `venueId`. */
@@ -429,7 +461,8 @@ export async function activarUberOAuth(req: Request, res: Response): Promise<voi
         return
       }
       // count 0 ⇒ otra pestaña mandó SU selección antes: no se activa la de otro en nombre de ésta.
-      if (!(await intents.casEstado(id, 'EXCHANGED', 'ACTIVATING', { selectionJson: pedidas as string[] }))) {
+      // Congela la versión de revocación de cada tienda EN el consentimiento (M7).
+      if (!(await claims.seleccionarTiendas(id, pedidas as string[]))) {
         res.status(409).send(OTRA_SELECCION)
         return
       }
