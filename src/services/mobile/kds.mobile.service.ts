@@ -100,6 +100,12 @@ export interface KdsOrderResponse {
   needsAcceptance?: boolean
   /** ¿Falta que un aparato reclame e imprima esta comanda? Sólo para pedidos de marketplace. */
   needsPrint?: boolean
+  /**
+   * Nombre y contacto (con PIN) del cliente, para pedidos de delivery — la cocina lee esta
+   * pantalla y no el detalle de la orden. `null` en comandas que no son de reparto.
+   */
+  customerName?: string | null
+  customerContact?: string | null
   items: Array<{
     id: string
     productName: string
@@ -307,6 +313,8 @@ function formatKdsOrder(order: any, needsAcceptance = false): KdsOrderResponse {
     orderType: order.orderType,
     orderId: order.orderId,
     status: order.status,
+    customerName: order.customerName ?? null,
+    customerContact: order.customerContact ?? null,
     items: (order.items || []).map((item: any) => ({
       id: item.id,
       productName: item.productName,

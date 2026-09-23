@@ -9,13 +9,22 @@
  */
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
+import { contactoParaComanda } from './deliveryOrderIngestion.service'
 
 export type ReleaseOutcome = 'RELEASED' | 'ALREADY_IN_KITCHEN' | 'ORDER_NOT_FOUND'
 
 export async function releaseScheduledOrder(externalId: string): Promise<{ outcome: ReleaseOutcome; orderId?: string }> {
   const order = await prisma.order.findFirst({
     where: { externalId },
-    select: { id: true, venueId: true, orderNumber: true, scheduledFor: true },
+    select: {
+      id: true,
+      venueId: true,
+      orderNumber: true,
+      scheduledFor: true,
+      customerName: true,
+      customerPhone: true,
+      customerPhonePin: true,
+    },
   })
   if (!order) {
     logger.warn('[🕗 Release] llegó el aviso de hora de un pedido que no existe', { externalId })
@@ -39,6 +48,8 @@ export async function releaseScheduledOrder(externalId: string): Promise<{ outco
       orderNumber: order.orderNumber,
       orderType: 'DELIVERY',
       orderId: order.id,
+      customerName: order.customerName ?? null,
+      customerContact: contactoParaComanda(order.customerPhone, order.customerPhonePin),
       items: { create: items.map(i => ({ productName: i.productName ?? 'Producto', quantity: i.quantity })) },
     },
   })
