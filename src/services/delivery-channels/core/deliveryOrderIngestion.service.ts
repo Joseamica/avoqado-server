@@ -24,6 +24,8 @@ import { assertDeliveryMoneyInvariants } from './money'
 import { computeTenderCommission } from '../../dashboard/tenderType.dashboard.service'
 import { ensureDeliveryTenderType } from './deliveryTenderProvisioning.service'
 import { toKdsModifierLabels } from '../../mobile/kds.mobile.service'
+import { withDeliveryOrderLock } from './deliveryOrderLock'
+import { marcarRetirosEnComandas } from './lineRemoval.service'
 import {
   assertLegacyCatalogGovernanceForVenue,
   writeLegacyServiceProductCreationAuditForVenue,
@@ -566,42 +568,47 @@ export async function ingestDeliveryOrder(
 
   if (!comandaYaExiste && !pedidoCancelado && !normalized.scheduledFor) {
     try {
-      await prisma.kdsOrder.create({
-        data: {
-          venueId: venue.id,
-          orderNumber: order.orderNumber,
-          orderType: 'DELIVERY',
-          orderId: order.id,
-          // KDS de Uber: la cocina lee esta pantalla, no el detalle de la orden — sin
-          // nombre/contacto aquí no tiene forma de identificar el pedido de un vistazo.
-          customerName: normalized.customer?.name ?? null,
-          customerContact: contactoParaComanda(normalized.customer?.phone, normalized.customer?.phonePin),
-          items: {
-            create: normalized.items.map((it, idx) => ({
-              productName: it.name,
-              quantity: it.quantity,
-              // Los ids que hacen RUTEABLE la comanda: sin ellos, los tacos y la cerveza
-              // salen en el mismo papel. `renglonesCreados` ya trae el producto que resolvió la
-              // transacción de arriba — no se vuelve a buscar. Se aparean por índice porque
-              // se crearon recorriendo `normalized.items` en este mismo orden.
-              productId: renglonesCreados[idx]?.productId ?? null,
-              categoryId: categoriaPorProducto.get(renglonesCreados[idx]?.productId ?? '') ?? null,
-              // Liga floja al OrderItem real (misma razón que productId/categoryId arriba: la
-              // comanda es una foto del momento, no una relación) + el id de línea del
-              // proveedor, para retiro/edición por renglón (KDS de Uber).
-              orderItemId: renglonesCreados[idx]?.id ?? null,
-              externalLineId: it.lineId ?? null,
-              // 🔴 Por el normalizador COMPARTIDO, nunca serializando la forma del proveedor.
-              // Guardar aquí `[{name, quantity}]` mientras el POS guardaba `["texto"]` en la
-              // MISMA columna llegó hasta la cocina: Android pintó el JSON crudo y iOS perdió
-              // el modificador en silencio (visto en una Sunmi D3 con un pedido real de Uber).
-              modifiers: it.modifiers?.length ? JSON.stringify(toKdsModifierLabels(it.modifiers)) : null,
-              // Lo que el cliente escribió para este renglón. Es lo que separa servir bien
-              // de servir mal, y el único lugar del sistema donde hoy sobrevive.
-              notes: it.notes ?? null,
-            })),
+      // 🔴 Bajo el candado del pedido [N-21]: si el proveedor retiró un renglón entre la venta
+      // y esta comanda, `marcarRetirosEnComandas` la hace nacer con el renglón RETIRADO.
+      await withDeliveryOrderLock(order.id, async tx => {
+        await tx.kdsOrder.create({
+          data: {
+            venueId: venue.id,
+            orderNumber: order.orderNumber,
+            orderType: 'DELIVERY',
+            orderId: order.id,
+            // KDS de Uber: la cocina lee esta pantalla, no el detalle de la orden — sin
+            // nombre/contacto aquí no tiene forma de identificar el pedido de un vistazo.
+            customerName: normalized.customer?.name ?? null,
+            customerContact: contactoParaComanda(normalized.customer?.phone, normalized.customer?.phonePin),
+            items: {
+              create: normalized.items.map((it, idx) => ({
+                productName: it.name,
+                quantity: it.quantity,
+                // Los ids que hacen RUTEABLE la comanda: sin ellos, los tacos y la cerveza
+                // salen en el mismo papel. `renglonesCreados` ya trae el producto que resolvió la
+                // transacción de arriba — no se vuelve a buscar. Se aparean por índice porque
+                // se crearon recorriendo `normalized.items` en este mismo orden.
+                productId: renglonesCreados[idx]?.productId ?? null,
+                categoryId: categoriaPorProducto.get(renglonesCreados[idx]?.productId ?? '') ?? null,
+                // Liga floja al OrderItem real (misma razón que productId/categoryId arriba: la
+                // comanda es una foto del momento, no una relación) + el id de línea del
+                // proveedor, para retiro/edición por renglón (KDS de Uber).
+                orderItemId: renglonesCreados[idx]?.id ?? null,
+                externalLineId: it.lineId ?? null,
+                // 🔴 Por el normalizador COMPARTIDO, nunca serializando la forma del proveedor.
+                // Guardar aquí `[{name, quantity}]` mientras el POS guardaba `["texto"]` en la
+                // MISMA columna llegó hasta la cocina: Android pintó el JSON crudo y iOS perdió
+                // el modificador en silencio (visto en una Sunmi D3 con un pedido real de Uber).
+                modifiers: it.modifiers?.length ? JSON.stringify(toKdsModifierLabels(it.modifiers)) : null,
+                // Lo que el cliente escribió para este renglón. Es lo que separa servir bien
+                // de servir mal, y el único lugar del sistema donde hoy sobrevive.
+                notes: it.notes ?? null,
+              })),
+            },
           },
-        },
+        })
+        await marcarRetirosEnComandas(tx, order.id, venue.id)
       })
       kitchenTicketCreated = true
     } catch (error) {
