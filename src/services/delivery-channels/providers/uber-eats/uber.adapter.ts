@@ -116,8 +116,8 @@ export const uberAdapter = {
    * Trae el pedido completo. Uber manda un PUNTERO en el webhook, no el contenido: sin este
    * GET no hay nada que ingerir.
    */
-  async fetchOrder(orderId: string): Promise<unknown> {
-    const r = await fetchUberOrder(orderId)
+  async fetchOrder(orderId: string, signal?: AbortSignal): Promise<unknown> {
+    const r = await fetchUberOrder(orderId, signal)
     if (r.status >= 400) {
       throw new Error(`Uber devolvió HTTP ${r.status} al traer el pedido ${orderId}: ${r.text.slice(0, 200)}`)
     }

@@ -239,7 +239,7 @@ export interface DirectDeliveryAdapter {
   normalizeOrder(raw: unknown): NormalizedDeliveryOrder
 
   /** Sólo si el webhook manda un PUNTERO en vez del pedido (es el caso de Uber). */
-  fetchOrder?(orderId: string): Promise<unknown>
+  fetchOrder?(orderId: string, signal?: AbortSignal): Promise<unknown>
 
   /** Sólo si el proveedor espera que el POS conteste — y normalmente con un plazo. */
   acceptOrder?(orderId: string, storeId: string): Promise<ActionResult>

@@ -66,7 +66,7 @@ export async function uberApi(opts: UberRequestOptions): Promise<UberResponse> {
  * Devuelve también el texto crudo — es lo que se congela como fixture real, y la
  * única forma honesta de escribir el mapper contra el formato de verdad.
  */
-export async function fetchUberOrder(orderId: string): Promise<UberResponse> {
+export async function fetchUberOrder(orderId: string, signal?: AbortSignal): Promise<UberResponse> {
   if (!orderId || typeof orderId !== 'string') {
     throw new Error(`fetchUberOrder requiere un orderId no vacío, recibió: ${JSON.stringify(orderId)}`)
   }
@@ -76,7 +76,7 @@ export async function fetchUberOrder(orderId: string): Promise<UberResponse> {
   // re-integraron a "API version 1.0.0". `expand=carts,payment` no es opcional: sin él el
   // pedido llega SIN artículos ni dinero (verificado: 1.1 KB pelones contra 5.2 KB
   // completos), y el mapper lo rechazaría por no poder determinar la venta.
-  const r = await uberApi({ method: 'GET', path: `/v1/delivery/order/${encodeURIComponent(orderId)}?expand=carts,payment` })
+  const r = await uberApi({ method: 'GET', path: `/v1/delivery/order/${encodeURIComponent(orderId)}?expand=carts,payment`, signal })
 
   if (r.status >= 400) {
     logger.warn('Uber devolvió error al traer el pedido', {
