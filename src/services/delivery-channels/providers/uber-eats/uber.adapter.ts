@@ -15,10 +15,10 @@ import logger from '@/config/logger'
 import { uberApi, fetchUberOrder } from './uber.client'
 import { orderIdFromResourceHref } from './uber.http'
 import { verifyUberSignature } from './uber.signature'
-import { mapUberOrder } from './uber.mapper'
+import { mapCourier, mapUberOrder } from './uber.mapper'
 import { aDisponibilidadUber, mapSnapshotToUberMenu, type UberMenuOptions } from './uber.menuMapper'
 import type { MenuSnapshot } from '../../core/menuSnapshot.service'
-import type { CanonicalDeliveryEvent, DirectDeliveryAdapter, NormalizedDeliveryOrder } from '../../core/types'
+import type { CanonicalDeliveryEvent, CourierInfo, DirectDeliveryAdapter, NormalizedDeliveryOrder } from '../../core/types'
 
 export type UberDenyReason = 'OUT_OF_ITEMS' | 'STORE_CLOSED' | 'TOO_BUSY' | 'OTHER'
 
@@ -127,6 +127,20 @@ export const uberAdapter = {
   /** Traduce el pedido crudo al contrato interno. Aquí vive TODA la diferencia de formato. */
   normalizeOrder(raw: unknown): NormalizedDeliveryOrder {
     return mapUberOrder(raw)
+  },
+
+  /**
+   * "¿Quién trae este pedido?" Reusa el MISMO GET que `fetchOrder` — el pedido completo ya
+   * trae `deliveries[]` cuando Uber asignó a alguien, así que pedir un endpoint aparte sería
+   * una llamada de más para un dato que el pedido ya trae. `storeId` no se usa: el GET no
+   * necesita alcance de tienda (igual que `fetchOrder`).
+   */
+  async fetchCourier(orderId: string): Promise<CourierInfo | null> {
+    const r = await fetchUberOrder(orderId)
+    if (r.status >= 400) {
+      throw new Error(`Uber devolvió HTTP ${r.status} al traer el pedido ${orderId}: ${r.text.slice(0, 200)}`)
+    }
+    return mapCourier(r.json)
   },
 
   /**

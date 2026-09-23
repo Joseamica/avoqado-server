@@ -7,9 +7,11 @@
  */
 
 import logger from '../../config/logger'
-import { BadRequestError, NotFoundError } from '../../errors/AppError'
-import { markDeliveryOrderReady } from '@/services/delivery-channels/core/respondToDeliveryOrder.service'
+import { BadRequestError, NotFoundError, ProviderUnavailableError } from '../../errors/AppError'
+import { contexto, markDeliveryOrderReady } from '@/services/delivery-channels/core/respondToDeliveryOrder.service'
+import type { CourierInfo } from '@/services/delivery-channels/core/types'
 import prisma from '../../utils/prismaClient'
+import { OrderStatus } from '@prisma/client'
 import type { KdsOrderStatus } from '@prisma/client'
 
 // Use string constants instead of Prisma enum to avoid runtime import issues with tsx
@@ -429,6 +431,52 @@ export async function confirmKdsPrinted(venueId: string, kdsOrderId: string, dev
     data: { printedAt: new Date() },
   })
   return { ok: r.count > 0 }
+}
+
+// MARK: - "¿Quién trae este pedido?" (Tarea 8, KDS de Uber)
+
+export interface KdsCourierResponse {
+  supported: boolean
+  assigned: boolean
+  courier?: CourierInfo
+}
+
+/**
+ * A botón desde la cocina, nunca en cada refresco del tablero: preguntarle al proveedor por
+ * el repartidor en cada poll sería una llamada de más por comanda para un dato que casi
+ * nunca cambia.
+ *
+ * `supported:false` = el proveedor de esta comanda no tiene esta capacidad (no es un error,
+ * es "aquí no aplica"). `assigned:false` = sí aplica pero nadie ha tomado el pedido todavía,
+ * o ya se cerró (COMPLETED/CANCELLED) y no vale la pena preguntar.
+ */
+export async function fetchKdsCourier(venueId: string, kdsOrderId: string): Promise<KdsCourierResponse> {
+  const kdsOrder = await prisma.kdsOrder.findFirst({ where: { id: kdsOrderId, venueId }, select: { orderId: true } })
+  if (!kdsOrder?.orderId) throw new NotFoundError('Orden KDS no encontrada')
+
+  // Misma resolución de canal que accept/deny/ready: si esta comanda no es de reparto (o es
+  // de otro venue), `contexto` no encuentra nada que preguntar.
+  const ctx = await contexto(venueId, kdsOrder.orderId)
+  if (!ctx) throw new NotFoundError('Orden KDS no encontrada')
+
+  if (typeof ctx.adapter.fetchCourier !== 'function') return { supported: false, assigned: false }
+
+  if (ctx.order.status === OrderStatus.COMPLETED || ctx.order.status === OrderStatus.CANCELLED) {
+    return { supported: true, assigned: false }
+  }
+
+  let courier: CourierInfo | null
+  try {
+    courier = await ctx.adapter.fetchCourier(ctx.externalOrderId, ctx.storeId)
+  } catch (error) {
+    logger.warn('No se pudo consultar al repartidor con el proveedor de delivery', {
+      orderId: kdsOrder.orderId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    throw new ProviderUnavailableError()
+  }
+
+  return courier ? { supported: true, assigned: true, courier } : { supported: true, assigned: false }
 }
 
 /**

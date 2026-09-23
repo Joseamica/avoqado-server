@@ -166,6 +166,20 @@ export const confirmKdsPrinted = async (req: Request, res: Response, next: NextF
   }
 }
 
+/**
+ * GET /mobile/venues/:venueId/kds/orders/:kdsOrderId/courier — "¿quién trae esto?", a botón.
+ */
+export const fetchKdsCourier = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, kdsOrderId } = req.params
+    const data = await kdsMobileService.fetchKdsCourier(venueId, kdsOrderId)
+    res.status(200).json({ success: true, data })
+  } catch (error) {
+    logger.error('Error in fetchKdsCourier controller:', error)
+    next(error)
+  }
+}
+
 /** POST .../release-print — "no pude"; la suelta YA para que otro aparato lo intente. */
 export const releaseKdsPrint = async (req: Request, res: Response, next: NextFunction) => {
   try {

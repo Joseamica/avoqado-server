@@ -3057,6 +3057,20 @@ router.post(
 )
 
 /**
+ * GET /api/v1/mobile/venues/:venueId/kds/orders/:kdsOrderId/courier
+ * "¿Quién trae este pedido?" — nombre, teléfono (con su código) y vehículo del repartidor,
+ * cuando el proveedor ya asignó a alguien. `orders:read`, igual que ver el tablero: es una
+ * lectura, no una acción sobre la comanda.
+ */
+router.get(
+  '/venues/:venueId/kds/orders/:kdsOrderId/courier',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('orders:read'),
+  kdsMobileController.fetchKdsCourier,
+)
+
+/**
  * PUT /api/v1/mobile/venues/:venueId/kds/orders/:id/status
  * Update KDS order status.
  * Body: { status: "PREPARING" | "READY" | "COMPLETED" }

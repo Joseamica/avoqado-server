@@ -128,6 +128,20 @@ export interface EventIdentity {
 
 export type WebhookVerdict = 'VALID' | 'INVALID_SIGNATURE' | 'MALFORMED'
 
+/**
+ * El repartidor asignado a un pedido, para "¿quién trae esto?" en el KDS. Todo opcional
+ * porque el proveedor lo manda tal cual lo tenga — un campo ausente no es un error, es que
+ * Uber todavía no lo sabe o no lo comparte.
+ */
+export interface CourierInfo {
+  name?: string
+  phone?: string
+  /** Código/pin necesario para poder llamar al número anónimo del repartidor. */
+  phoneCode?: string
+  vehicle?: { make?: string; model?: string; licensePlate?: string }
+  pictureUrl?: string
+}
+
 export type DenyReason = 'OUT_OF_ITEMS' | 'STORE_CLOSED' | 'TOO_BUSY' | 'OTHER'
 
 export interface ActionResult {
@@ -252,6 +266,13 @@ export interface DirectDeliveryAdapter {
    */
   resolveFulfillmentIssues?(orderId: string, storeId: string, cartItemIds: string[]): Promise<ActionResult>
   markReady?(orderId: string, storeId: string): Promise<ActionResult>
+
+  /**
+   * "¿Quién trae este pedido?" — nombre, teléfono (con su código para poder llamarlo) y
+   * vehículo del repartidor YA asignado. `null` = el proveedor todavía no asigna a nadie —
+   * no es un error, es el estado normal mientras la cocina cocina.
+   */
+  fetchCourier?(externalOrderId: string, storeId: string): Promise<CourierInfo | null>
 
   publishMenu?(snapshot: MenuSnapshot, storeId: string, opts?: { availability?: unknown; precios?: unknown }): Promise<ActionResult>
 

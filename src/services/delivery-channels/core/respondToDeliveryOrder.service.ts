@@ -133,8 +133,14 @@ async function linkPorEventoOriginador(venueId: string, orderId: string, provide
   })
 }
 
-/** El pedido, su canal y el id que el proveedor entiende. Sin esto no se le puede contestar. */
-async function contexto(venueId: string, orderId: string) {
+/**
+ * El pedido, su canal y el id que el proveedor entiende. Sin esto no se le puede contestar.
+ *
+ * Exportada (Tarea 8, KDS "¿quién trae esto?"): es la MISMA resolución de link que usan
+ * accept/deny/ready — reusarla evita un segundo camino que podría resolver a un canal
+ * distinto para la misma orden.
+ */
+export async function contexto(venueId: string, orderId: string) {
   const order = await prisma.order.findFirst({
     where: { id: orderId, venueId },
     select: {
