@@ -163,12 +163,17 @@ export async function listKdsOrders(venueId: string, statusFilter?: string): Pro
     : []
   const porId = new Map(ventas.map(v => [v.id, v]))
 
-  return orders.map(o => {
-    const venta = o.orderId ? porId.get(o.orderId) : undefined
-    // `type === 'DELIVERY'` es lo que separa "llegó solo" de "lo mandó un mesero". Sólo lo
-    // primero necesita que alguien reclame la impresión.
-    return formatKdsOrder({ ...o, esDeMarketplace: venta?.type === 'DELIVERY' }, venta?.type === 'DELIVERY' && venta?.status === 'PENDING')
-  })
+  return orders.map(o => formatKdsOrderConVenta(o, o.orderId ? porId.get(o.orderId) : undefined))
+}
+
+/**
+ * La comanda con lo que depende de su VENTA, calculado en UN solo sitio (el tablero y la ruta
+ * «no tengo este artículo» devuelven la misma comanda y no pueden contestar distinto).
+ * `type === 'DELIVERY'` es lo que separa "llegó solo" de "lo mandó un mesero": sólo lo primero
+ * necesita que alguien reclame la impresión, y sólo un reparto PENDING necesita que lo acepten.
+ */
+export function formatKdsOrderConVenta(o: any, venta?: { type: string; status: string } | null): KdsOrderResponse {
+  return formatKdsOrder({ ...o, esDeMarketplace: venta?.type === 'DELIVERY' }, venta?.type === 'DELIVERY' && venta?.status === 'PENDING')
 }
 
 // MARK: - Create KDS Order
@@ -308,7 +313,7 @@ export async function bumpKdsOrder(venueId: string, orderId: string): Promise<Kd
 
 // MARK: - Helper
 
-export function formatKdsOrder(order: any, needsAcceptance = false): KdsOrderResponse {
+function formatKdsOrder(order: any, needsAcceptance = false): KdsOrderResponse {
   return {
     id: order.id,
     orderNumber: order.orderNumber,

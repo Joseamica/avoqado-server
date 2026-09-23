@@ -32,7 +32,7 @@ import { contexto, recuperarAceptacionDesdeProveedor } from '@/services/delivery
 import type { ActionResult } from '@/services/delivery-channels/core/types'
 import prisma from '@/utils/prismaClient'
 
-import { formatKdsOrder, type KdsOrderResponse } from './kds.mobile.service'
+import { formatKdsOrderConVenta, type KdsOrderResponse } from './kds.mobile.service'
 
 /** Cuánto espera una persona antes de poder reintentar un aviso que el proveedor no confirmó (§3.5). */
 export const REINTENTO_TRAS_MS = 15 * 60_000
@@ -66,15 +66,23 @@ const MENSAJES: Record<CodigoConflicto, string> = {
   NOT_ACCEPTED: 'La app de delivery todavía no confirma que el pedido está aceptado. Acéptalo primero.',
   ALREADY_READY: 'El pedido ya se marcó como listo: la app de delivery ya no deja quitar artículos.',
   DELIVERY_OP_IN_PROGRESS: 'Espera: hay otra operación en curso sobre este pedido. Intenta en un momento.',
-  LINE_ACTION_IN_PROGRESS: 'Espera: se está retirando otro artículo de este pedido. Intenta cuando termine.',
+  LINE_ACTION_IN_PROGRESS: 'Espera: se está retirando otro artículo de este pedido; intenta en unos segundos.',
   RETRY_NOT_ELIGIBLE: 'Todavía no se puede reintentar, o alguien más ya lo reintentó. Actualiza la comanda.',
 }
 
-const conflicto = (code: CodigoConflicto, ocupadaPor?: OperacionDeReparto): ResultadoRetiro => ({
+/**
+ * `LINE_ACTION_IN_PROGRESS` tiene tres causas y las apps muestran el texto tal cual: un retiro
+ * en vuelo (termina solo, en segundos), uno en duda (NO termina solo: §3.4 lo deja UNCERTAIN
+ * mientras el renglón siga) y el respaldo de unicidad sobre el MISMO renglón.
+ */
+const LINEA_EN_DUDA = 'Otro artículo de este pedido espera confirmación de la app de reparto; reintenta ése primero.'
+const MISMO_RENGLON = 'Alguien más acaba de pedir retirar este mismo artículo; actualiza la comanda.'
+
+const conflicto = (code: CodigoConflicto, extra: { ocupadaPor?: OperacionDeReparto; error?: string } = {}): ResultadoRetiro => ({
   kind: 'CONFLICTO',
   code,
-  error: MENSAJES[code],
-  ...(ocupadaPor ? { ocupadaPor } : {}),
+  error: extra.error ?? MENSAJES[code],
+  ...(extra.ocupadaPor ? { ocupadaPor: extra.ocupadaPor } : {}),
 })
 
 /** Paso 5 del spec: qué PRUEBA la respuesta del proveedor. Sólo un 2xx acredita el retiro. */
@@ -114,7 +122,8 @@ async function resolverLinea(venueId: string, kdsOrderId: string, itemId: string
 
 async function leerComanda(db: Prisma.TransactionClient, l: Linea): Promise<KdsOrderResponse> {
   const k = await db.kdsOrder.findFirstOrThrow({ where: { id: l.kdsOrderId, venueId: l.venueId }, include: { items: true } })
-  return formatKdsOrder({ ...k, esDeMarketplace: true })
+  const venta = await db.order.findFirst({ where: { id: l.orderId, venueId: l.venueId }, select: { type: true, status: true } })
+  return formatKdsOrderConVenta(k, venta)
 }
 
 const enCurso = (a: { status: string; attempts: number; lastAttemptAt: Date }): ResultadoRetiro => ({
@@ -172,17 +181,20 @@ async function abrir(tx: Prisma.TransactionClient, l: Linea, staffId: string, pr
   const comanda = await tx.kdsOrder.findUniqueOrThrow({ where: { id: l.kdsOrderId }, select: { status: true } })
   let falla: ResultadoRetiro | null = null
   if (o.readyReportedAt || !COMANDA_ABIERTA.has(comanda.status)) falla = conflicto('ALREADY_READY')
-  else if (reservaViva(o)) falla = conflicto('DELIVERY_OP_IN_PROGRESS', o.deliveryOpInFlight as OperacionDeReparto)
+  else if (reservaViva(o)) falla = conflicto('DELIVERY_OP_IN_PROGRESS', { ocupadaPor: o.deliveryOpInFlight as OperacionDeReparto })
   else {
-    const otras = await tx.deliveryLineAction.count({
+    // 'PENDING' < 'UNCERTAIN': si hay uno en vuelo, ése manda (se resuelve solo en segundos).
+    const otra = await tx.deliveryLineAction.findFirst({
       where: {
         orderId: l.orderId,
         venueId: l.venueId,
         status: { in: ['PENDING', 'UNCERTAIN'] },
         ...(propio ? { id: { not: propio.accionId } } : {}),
       },
+      orderBy: [{ status: 'asc' }, { id: 'asc' }],
+      select: { status: true },
     })
-    if (otras > 0) falla = conflicto('LINE_ACTION_IN_PROGRESS')
+    if (otra) falla = conflicto('LINE_ACTION_IN_PROGRESS', otra.status === 'UNCERTAIN' ? { error: LINEA_EN_DUDA } : {})
   }
   if (falla) {
     if (propio) await deshacerReintento(tx, propio)
@@ -240,7 +252,7 @@ async function abrirConAceptacion(l: Linea, staffId: string, propio?: Propio): P
       paso = await withDeliveryOrderLock(l.orderId, tx => abrir(tx, l, staffId, propio))
     } catch (e) {
       // La unicidad por renglón rechaza al segundo cajero (respaldo del candado).
-      if (esDuplicado(e)) return conflicto('LINE_ACTION_IN_PROGRESS')
+      if (esDuplicado(e)) return conflicto('LINE_ACTION_IN_PROGRESS', { error: MISMO_RENGLON })
       throw e
     }
     if (paso.kind !== 'SIN_ACEPTAR') return paso
@@ -299,6 +311,15 @@ async function enviarYAplicar(l: Linea, a: Abierta, staffId: string): Promise<Re
       return { mia, aplicado: cas.count === 1 }
     })
     soltada = true
+    if (mia && !aplicado) {
+      // Nada se descarta en silencio: el intento ya no era el vigente (lo movió el barrido, el webhook o un reintento).
+      logger.warn('[Delivery] respuesta del proveedor a un intento que ya no es el vigente: no se aplica', {
+        orderId: l.orderId,
+        attempt: a.attempt,
+        status: r?.status ?? null,
+        cuerpo: (r?.raw ?? fallo).slice(0, 200),
+      })
+    }
     if (!mia) {
       logger.error('🚨 [Delivery] resultado TARDÍO del retiro: la reserva ya era de otra operación', {
         orderId: l.orderId,
@@ -367,24 +388,37 @@ export async function retryOutOfStock(
     data: { status: 'PENDING', attempts: expectedAttempt + 1, retriedByStaffId: staffId, lastAttemptAt: new Date() },
   })
   if (cas.count === 0) return conflicto('RETRY_NOT_ELIGIBLE')
-  void logAction({
-    venueId,
-    staffId,
-    action: 'DELIVERY_ITEM_REMOVAL_RETRIED',
-    entity: 'Order',
-    entityId: l.orderId,
-    data: { orderItemId: l.orderItemId, lineId: l.lineId, attempt: expectedAttempt + 1 },
-  })
   const propio: Propio = {
     accionId: accion.id,
     attempt: expectedAttempt + 1,
     previo: { lastAttemptAt: accion.lastAttemptAt, retriedByStaffId: accion.retriedByStaffId },
   }
 
-  // Antes de reenviar: si el proveedor YA no trae el renglón, queda CONFIRMED sin volver a avisar.
-  await reconciliarSinLanzar(l.orderId)
-  const a = await abrirConAceptacion(l, staffId, propio)
+  let a: ResultadoRetiro | Abierta
+  try {
+    // Antes de reenviar: si el proveedor YA no trae el renglón, queda CONFIRMED sin volver a avisar.
+    await reconciliarSinLanzar(l.orderId)
+    a = await abrirConAceptacion(l, staffId, propio)
+  } catch (e) {
+    // Un reintento que no llegó a salir no puede quedar como intento PENDING que nadie envió.
+    await withDeliveryOrderLock(l.orderId, tx => deshacerReintento(tx, propio)).catch(err =>
+      logger.error('🚨 [Delivery] no se pudo deshacer el reintento fallido (el barrido lo pasa a UNCERTAIN)', {
+        orderId: l.orderId,
+        error: String(err),
+      }),
+    )
+    throw e
+  }
   if (a.kind !== 'ABIERTA') return a
+  // Sólo un intento que DE VERDAD se abrió deja rastro de reintento.
+  void logAction({
+    venueId,
+    staffId,
+    action: 'DELIVERY_ITEM_REMOVAL_RETRIED',
+    entity: 'Order',
+    entityId: l.orderId,
+    data: { orderItemId: l.orderItemId, lineId: l.lineId, attempt: a.attempt },
+  })
   return enviarYAplicar(l, a, staffId)
 }
 

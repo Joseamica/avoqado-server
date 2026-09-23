@@ -6,11 +6,13 @@
  * fresca del proveedor ya no trae el renglón. Aquí el proveedor se simula en el adaptador REAL
  * (`resolveFulfillmentIssues`, `fetchOrder`, `normalizeOrder` espiados): nunca se pega a Uber.
  */
-import { DeliveryChannelLink, DeliveryProvider, OrderSource, OrderType, StaffRole } from '@prisma/client'
+import { DeliveryChannelLink, DeliveryProvider, OrderSource, OrderStatus, OrderType, StaffRole } from '@prisma/client'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import app from '@/app'
 import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
+import * as candado from '@/services/delivery-channels/core/deliveryOrderLock'
 import { ingestDeliveryOrder } from '@/services/delivery-channels/core/deliveryOrderIngestion.service'
 import * as reconciliacion from '@/services/delivery-channels/core/deliveryReconciliation.service'
 import type { ActionResult, NormalizedDeliveryOrder, NormalizedDeliveryPayment } from '@/services/delivery-channels/core/types'
@@ -159,6 +161,8 @@ describe('«No tengo este artículo» desde el KDS (Tarea 14)', () => {
     // aceptación ni la reconciliación salen a la red de verdad.
     leerPedido = jest.spyOn(uberAdapter, 'fetchOrder').mockRejectedValue(new Error('sin red en la prueba'))
     jest.spyOn(uberAdapter, 'normalizeOrder').mockImplementation(raw => raw as NormalizedDeliveryOrder)
+    // La ingesta AUTO dispara un accept en segundo plano: tampoco sale a la red.
+    jest.spyOn(uberAdapter, 'acceptOrder').mockRejectedValue(new Error('sin red en la prueba'))
   })
 
   afterEach(() => jest.restoreAllMocks())
@@ -474,6 +478,98 @@ describe('«No tengo este artículo» desde el KDS (Tarea 14)', () => {
     const dos = await segundo
     expect(dos.status).toBe(202)
     expect(dos.body.data).toMatchObject({ state: 'UNCERTAIN', attempts: 2 })
+  })
+
+  it('2xx con la reserva ya en manos de OTRA operación ⇒ la acción queda CONFIRMED pero el pedido NO se marca (§3.2(c))', async () => {
+    const s = await sembrar()
+    const uber = diferida()
+    resolver.mockReturnValue(uber.promesa)
+
+    const primero = retirar(s.kds.id, s.itemB.id).then(r => r)
+    await hasta(() => resolver.mock.calls.length === 1)
+    // Mientras Uber contesta, otra operación se queda con la reserva (el intento sigue siendo el 1).
+    await prisma.order.update({
+      where: { id: s.order.id },
+      data: { deliveryOpInFlight: 'READY', deliveryOpInFlightAt: new Date(), deliveryOpToken: 'de-otra-operacion' },
+    })
+    uber.soltar({ ok: true, status: 200, raw: '{}' })
+    const res = await primero
+
+    expect(res.status).toBe(200)
+    expect(await accionDe(s.order.id)).toMatchObject({ status: 'CONFIRMED', attempts: 1 })
+    expect((await prisma.orderItem.findFirstOrThrow({ where: { orderId: s.order.id, externalLineId: 'b' } })).removedAt).toBeNull()
+    expect(await prisma.activityLog.count({ where: { entityId: s.order.id, action: 'DELIVERY_OP_LATE_RESULT' } })).toBe(1)
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: s.order.id } })).deliveryOpToken).toBe('de-otra-operacion')
+  })
+
+  it('la respuesta de un intento que YA no es el vigente (con la reserva aún propia) queda en el log, no se tira en silencio', async () => {
+    const s = await sembrar()
+    const uber = diferida()
+    resolver.mockReturnValue(uber.promesa)
+    ;(logger.warn as jest.Mock).mockClear()
+
+    const primero = retirar(s.kds.id, s.itemB.id).then(r => r)
+    await hasta(() => resolver.mock.calls.length === 1)
+    // El barrido lo pasó a UNCERTAIN mientras Uber contestaba; la reserva sigue siendo nuestra.
+    await prisma.deliveryLineAction.updateMany({ where: { orderId: s.order.id, lineId: 'b' }, data: { status: 'UNCERTAIN' } })
+    uber.soltar({ ok: false, status: 503, raw: 'caido' })
+    const res = await primero
+
+    expect(res.status).toBe(202)
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('ya no es el vigente'),
+      expect.objectContaining({ attempt: 1, status: 503 }),
+    )
+    expect(await prisma.activityLog.count({ where: { entityId: s.order.id, action: 'DELIVERY_OP_LATE_RESULT' } })).toBe(0)
+  })
+
+  it('un reintento que LANZA tras su CAS se deshace: vuelve a UNCERTAIN con su intento anterior, sin rastro de RETRIED', async () => {
+    const s = await sembrar()
+    const item = await prisma.orderItem.findFirstOrThrow({ where: { orderId: s.order.id, externalLineId: 'b' } })
+    const antes = new Date(Date.now() - QUINCE_MIN - 60_000)
+    await sembrarAccion(s.order, item.id, { status: 'UNCERTAIN', attempts: 1, lastAttemptAt: antes })
+    jest.spyOn(candado, 'tomarReserva').mockRejectedValueOnce(new Error('se cayó la base a media apertura'))
+
+    const res = await reintentar(s.kds.id, s.itemB.id, 1)
+
+    expect(res.status).toBe(500)
+    expect(resolver).not.toHaveBeenCalled()
+    const a = (await accionDe(s.order.id))!
+    expect(a).toMatchObject({ status: 'UNCERTAIN', attempts: 1, retriedByStaffId: null })
+    expect(a.lastAttemptAt.getTime()).toBe(antes.getTime())
+    await new Promise(r => setTimeout(r, 200)) // el log de RETRIED es fire-and-forget: se le da tiempo de aparecer
+    expect(await prisma.activityLog.count({ where: { entityId: s.order.id, action: 'DELIVERY_ITEM_REMOVAL_RETRIED' } })).toBe(0)
+  })
+
+  it('la comanda devuelta calcula needsAcceptance IGUAL que el tablero (pedido MANUAL aún PENDING)', async () => {
+    const s = await sembrar()
+    // Aceptado desde la tableta de Uber (PROVIDER_STATE) pero la venta sigue PENDING en Avoqado.
+    await prisma.order.update({ where: { id: s.order.id }, data: { status: OrderStatus.PENDING } })
+    resolver.mockResolvedValue({ ok: true, status: 200, raw: '{}' })
+
+    const res = await retirar(s.kds.id, s.itemB.id)
+    const tablero = await request(app).get(`/api/v1/mobile/venues/${venueId}/kds/orders`).set('Authorization', `Bearer ${token}`)
+    const enTablero = tablero.body.data.find((k: { id: string }) => k.id === s.kds.id)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.needsAcceptance).toBe(true)
+    expect(res.body.data.needsAcceptance).toBe(enTablero.needsAcceptance)
+    expect(res.body.data.needsPrint).toBe(enTablero.needsPrint)
+  })
+
+  it.each([
+    ['PENDING', 'Espera: se está retirando otro artículo de este pedido; intenta en unos segundos.'],
+    ['UNCERTAIN', 'Otro artículo de este pedido espera confirmación de la app de reparto; reintenta ése primero.'],
+  ])('otro artículo %s en el pedido ⇒ 409 LINE_ACTION_IN_PROGRESS con el texto que lo explica', async (estado, texto) => {
+    const s = await sembrar()
+    const a = await prisma.orderItem.findFirstOrThrow({ where: { orderId: s.order.id, externalLineId: 'a' } })
+    await sembrarAccion(s.order, a.id, { status: estado, attempts: 1, lastAttemptAt: new Date(), lineId: 'a' })
+
+    const res = await retirar(s.kds.id, s.itemB.id)
+
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ code: 'LINE_ACTION_IN_PROGRESS', error: texto })
+    expect(resolver).not.toHaveBeenCalled()
   })
 
   it('retry con expectedAttempt viejo ⇒ 409 RETRY_NOT_ELIGIBLE', async () => {
