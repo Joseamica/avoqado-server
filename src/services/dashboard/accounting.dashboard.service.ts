@@ -175,7 +175,7 @@ export async function getIncomeStatement(venueId: string, filters: IncomeStateme
 
     if (r.type === PaymentType.REFUND) {
       const magnitudeCents = Math.abs(amountCents)
-      const s = ivaDeDevolucion(r.id, magnitudeCents, processorDataDeAjustes.get(r.id), grossByRate)
+      const s = ivaDeDevolucion(r.id, magnitudeCents, processorDataDeAjustes.get(r.id), grossByRate, { avisar: false })
       ger.refunds += magnitudeCents
       ger.base -= s.netCents
       ger.iva -= s.taxCents

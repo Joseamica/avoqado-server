@@ -23,12 +23,27 @@ import { generatePoliciesForVenue } from '@/services/fiscal/autoPosting.service'
 import { seedBaseChart } from '@/services/fiscal/chartOfAccounts.service'
 import { getMappings, seedDefaultMappings } from '@/services/fiscal/accountMapping.service'
 import { fiscalByRateCents } from '@/services/fiscal/deliveryFiscalDelta'
+import { getExtendedMetrics } from '@/services/dashboard/generalStats.dashboard.service'
+import { getPMIXReport } from '@/services/dashboard/report.service'
+import { SharedQueryService } from '@/services/dashboard/shared-query.service'
+import { getPromotionSales } from '@/services/dashboard/promotion-sales.dashboard.service'
+import { getCategoryBreakdown } from '@/jobs/nightly-sales-summary.job'
+import { registerProductTools } from '@/mcp/tools/products'
+import type { McpScope } from '@/mcp/scope'
 import { limpiarVenue, sembrarCobro } from './sembrarCobroParaReembolso'
+
+// La tool del MCP se llama directo: el guardia y el plan no son lo que se prueba aquí (tienen sus suites).
+jest.mock('@/mcp/planGate', () => ({ planGateMessage: jest.fn().mockResolvedValue(null) }))
+jest.mock('@/mcp/guard', () => ({
+  createGuard: () => ({ venueFilter: (v: string) => ({ venueId: { in: [v] } }), requirePermission: jest.fn() }),
+}))
 
 jest.setTimeout(120000)
 
 const ayer = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10)
 const manana = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10)
+const desde = new Date(Date.now() - 86_400_000)
+const hasta = new Date(Date.now() + 86_400_000)
 
 describe('lectores con un renglón retirado por el proveedor', () => {
   let venueId: string
@@ -38,6 +53,7 @@ describe('lectores con un renglón retirado por el proveedor', () => {
   let tenderRetiro: string
   let tenderManual: string
   let ivaCuenta: string
+  let producto: { vivo: string; retirado: string }
 
   beforeAll(async () => {
     const testData = await setupTestData()
@@ -49,6 +65,7 @@ describe('lectores con un renglón retirado por el proveedor', () => {
     rfc = `LCR${Date.now().toString(36).toUpperCase().slice(-6)}XX0`
     await prisma.venue.update({ where: { id: venueId }, data: { rfc } })
     const [latte, pan] = testData.products
+    producto = { vivo: latte.name, retirado: pan.name }
     await prisma.product.update({ where: { id: latte.id }, data: { taxRate: new Prisma.Decimal('0.16') } })
     await prisma.product.update({ where: { id: pan.id }, data: { taxRate: new Prisma.Decimal('0') } })
     await seedBaseChart(venueId, { staffId })
@@ -70,7 +87,25 @@ describe('lectores con un renglón retirado por el proveedor', () => {
     })
     ordenRetiro = a.order.id
     tenderRetiro = a.tender!.id
-    await prisma.orderItem.update({ where: { id: a.items[1].id }, data: { removedAt: new Date() } })
+    // El Pan salió dentro de una promoción y con $5 de descuento en su renglón: así los reportes de
+    // promociones y los descuentos crudos también tienen algo que NO deben contar.
+    const promo = await prisma.promotion.create({ data: { venueId, name: 'Combo retiro', type: 'BUNDLE', pricingMode: 'FIXED_TOTAL' } })
+    const op = await prisma.orderPromotion.create({
+      data: {
+        orderId: a.order.id,
+        promotionId: promo.id,
+        instanceId: `op-${a.order.id}`,
+        snapshotJson: { name: 'Combo retiro' },
+        grossCents: 20000,
+        discountCents: 500,
+        netCents: 19500,
+      },
+    })
+    await prisma.orderItem.update({ where: { id: a.items[0].id }, data: { orderPromotionId: op.id } })
+    await prisma.orderItem.update({
+      where: { id: a.items[1].id },
+      data: { removedAt: new Date(), orderPromotionId: op.id, discountAmount: new Prisma.Decimal(5) },
+    })
     const L = (unitPrice: number, taxRate: number) => ({ unitPrice, quantity: 1, discountAmount: 0, taxRate })
     // Retirar lo del 0 % no devuelve IVA ({}); la mezcla de la orden diría 5.17. Distintos a propósito.
     const fiscal = fiscalByRateCents([L(150, 0.16), L(50, 0)], [L(150, 0.16)], 20000, 15000)
@@ -105,6 +140,7 @@ describe('lectores con un renglón retirado por el proveedor', () => {
     await prisma.accountMapping.deleteMany({ where: { organizationId, rfc } }).catch(() => undefined)
     await prisma.ledgerAccount.deleteMany({ where: { organizationId, rfc } }).catch(() => undefined)
     await limpiarVenue(venueId)
+    await prisma.promotion.deleteMany({ where: { venueId } }).catch(() => undefined)
     await teardownTestData().catch(() => undefined)
   })
 
@@ -153,5 +189,48 @@ describe('lectores con un renglón retirado por el proveedor', () => {
     expect(e.fiscalRevenue.ivaCents).toBe(ivaDelDiario)
     // Todo el IVA es del 16 % (el Pan era 0 % y B no tiene renglones): su única llave es el diario.
     expect(e.revenue.taxByRate).toEqual({ '0.16': ivaDelDiario })
+  })
+
+  // ── Cada familia de consultas por renglón: el retirado no aporta unidades, costo, descuento ni venta ──
+
+  it('productos (generalStats): el retirado no aparece; el vivo cuenta 1 unidad', async () => {
+    const filas = (await getExtendedMetrics(venueId, 'product-profitability', {
+      fromDate: desde.toISOString(),
+      toDate: hasta.toISOString(),
+    })) as Array<{ name: string; quantity: number; totalRevenue: number }>
+    expect(filas.find(f => f.name === producto.retirado)).toBeUndefined()
+    expect(filas.find(f => f.name === producto.vivo)).toMatchObject({ quantity: 1, totalRevenue: 150 })
+  })
+
+  it('PMIX (report.service): el retirado no suma unidades ni al total', async () => {
+    const r = await getPMIXReport(venueId, desde, hasta)
+    expect(r.products.find(p => p.productName === producto.retirado)).toBeUndefined()
+    expect(r.summary).toMatchObject({ totalQuantitySold: 1, totalRevenue: 150 })
+  })
+
+  it('correo nocturno (categorias): el retirado no suma articulos', async () => {
+    expect(await getCategoryBreakdown(venueId, desde, hasta)).toEqual([{ name: 'Test Menu', itemsSold: 1, netSales: 150 }])
+  })
+
+  it('top de productos (shared-query): el retirado no aparece', async () => {
+    const top = await SharedQueryService.getTopProducts(venueId, { from: desde, to: hasta })
+    expect(top.find(p => p.productName === producto.retirado)).toBeUndefined()
+    expect(top.find(p => p.productName === producto.vivo)).toMatchObject({ quantitySold: 1, revenue: 150 })
+  })
+
+  it('MCP product_sales: el retirado vale 0 unidades, 0 venta y 0 veces pedido', async () => {
+    const tools = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
+    const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: [venueId], perVenueAccess: new Map() } as McpScope
+    registerProductTools({ tool: (...a: unknown[]) => tools.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
+    const r = await tools.get('product_sales')!({ venueId, name: producto.retirado, fromDate: ayer, toDate: manana }, {})
+    expect(JSON.parse(r.content[0].text)).toMatchObject({ found: true, unitsSold: 0, revenue: 0, timesOrdered: 0 })
+  })
+
+  it('promociones: el renglon retirado no aporta bruto, descuento ni neto', async () => {
+    const r = await getPromotionSales(venueId, { startDate: ayer, endDate: manana, reportType: 'days' })
+    expect(r.promotions).toHaveLength(1)
+    expect(r.promotions[0]).toMatchObject({ timesSold: 1, grossSales: 150, discounts: 0, netSales: 150 })
+    expect(r.byPeriod!.reduce((s, p) => s + p.discounts, 0)).toBe(0)
+    expect(r.byPeriod!.reduce((s, p) => s + p.grossSales, 0)).toBe(150)
   })
 })

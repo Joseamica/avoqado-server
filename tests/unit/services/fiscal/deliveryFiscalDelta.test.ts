@@ -6,7 +6,8 @@
  * `splitPaymentIvaByOrderRates`) y su desempate (el residual al bucket de MAYOR importe). Así
  * `IVA original − Σ compensaciones = IVA de lo que sobrevive`, también en retiros sucesivos.
  */
-import { fiscalByRateCents } from '../../../../src/services/fiscal/deliveryFiscalDelta'
+import logger from '@/config/logger'
+import { fiscalByRateCents, ivaDeDevolucion } from '../../../../src/services/fiscal/deliveryFiscalDelta'
 import { grossByRateFromItems, splitPaymentIvaByOrderRates } from '../../../../src/services/fiscal/ivaMath'
 
 const L = (unitPrice: number, taxRate: number | null, discountAmount = 0) => ({ unitPrice, quantity: 1, discountAmount, taxRate })
@@ -58,5 +59,27 @@ describe('fiscalByRateCents — IVA del retiro como diferencia de composiciones'
   it('las llaves son las de ivaMath (String(tasa)) y no aparecen tasas sin diferencia', () => {
     const d = fiscalByRateCents([L(100, 0.08), L(100, 0.16)], [L(100, 0.16)], 20000, 10000)
     expect(Object.keys(d)).toEqual(['0.08'])
+  })
+})
+
+describe('ivaDeDevolucion — el 🚨 sólo lo da la póliza', () => {
+  const mezcla = [{ rate: 0.16, grossCents: 10000 }]
+  const malformado = { provenance: 'PROVIDER_ADJUSTMENT', fiscalByRateCents: 'x' }
+  const fueraDeRango = { provenance: 'PROVIDER_ADJUSTMENT', fiscalByRateCents: { '0.16': -1 } }
+  beforeEach(() => jest.clearAllMocks())
+
+  it('por defecto (autoPosting) grita con el id y usa la mezcla de la orden', () => {
+    expect(ivaDeDevolucion('pay-1', 5000, malformado, mezcla).taxCents).toBe(690)
+    expect(ivaDeDevolucion('pay-2', 5000, fueraDeRango, mezcla).taxCents).toBe(690)
+    expect((logger.error as jest.Mock).mock.calls.map(([m]) => String(m))).toEqual([
+      expect.stringMatching(/🚨.*pay-1/),
+      expect.stringMatching(/🚨.*pay-2/),
+    ])
+  })
+
+  it('en modo silencioso (estado de resultados) da la MISMA cifra sin gritar', () => {
+    expect(ivaDeDevolucion('pay-1', 5000, malformado, mezcla, { avisar: false }).taxCents).toBe(690)
+    expect(ivaDeDevolucion('pay-2', 5000, fueraDeRango, mezcla, { avisar: false }).taxCents).toBe(690)
+    expect(logger.error).not.toHaveBeenCalled()
   })
 })

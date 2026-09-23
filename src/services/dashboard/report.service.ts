@@ -72,6 +72,7 @@ export async function getPMIXReport(
       AND o."createdAt" >= ${utcTs(startDate)}
       AND o."createdAt" <= ${utcTs(endDate)}
       AND o.status = 'COMPLETED'
+      AND oi."removedAt" IS NULL -- a line the delivery provider removed sold nothing
     GROUP BY oi."productId", p.name, r."totalCost"
     ORDER BY total_revenue DESC, oi."productId" ASC
     ${options?.limit ? Prisma.sql`LIMIT ${options.limit}` : Prisma.empty}
@@ -97,6 +98,7 @@ export async function getPMIXReport(
       AND o."createdAt" >= ${utcTs(startDate)}
       AND o."createdAt" <= ${utcTs(endDate)}
       AND o.status = 'COMPLETED'
+      AND oi."removedAt" IS NULL
   `
 
   const totalQuantity = Number(totals[0]?.total_quantity || 0)

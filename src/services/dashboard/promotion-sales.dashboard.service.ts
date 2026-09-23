@@ -172,7 +172,7 @@ export async function getPromotionSales(venueId: string, filters: PromotionSales
     FROM "OrderPromotion" op
     INNER JOIN "Order" o ON o.id = op."orderId"
     LEFT JOIN "Promotion" pr ON pr.id = op."promotionId"
-    LEFT JOIN "OrderItem" oi ON oi."orderPromotionId" = op.id
+    LEFT JOIN "OrderItem" oi ON oi."orderPromotionId" = op.id AND oi."removedAt" IS NULL
     WHERE ${ORDER_SCOPE_SQL}
     GROUP BY op."promotionId", ${SNAPSHOT_NAME_SQL}, ${SNAPSHOT_TYPE_SQL}, ${SNAPSHOT_MODE_SQL}
     ORDER BY net_sales DESC
@@ -271,7 +271,7 @@ async function calculatePromotionPeriodMetrics(
       COALESCE(SUM(${lineRevenueSql()}), 0) as net_sales
     FROM "OrderPromotion" op
     INNER JOIN "Order" o ON o.id = op."orderId"
-    LEFT JOIN "OrderItem" oi ON oi."orderPromotionId" = op.id
+    LEFT JOIN "OrderItem" oi ON oi."orderPromotionId" = op.id AND oi."removedAt" IS NULL
     WHERE ${ORDER_SCOPE_SQL}
     GROUP BY ${groupByExpression}
     ORDER BY period

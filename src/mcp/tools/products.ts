@@ -72,6 +72,7 @@ export function registerProductTools(server: McpServer, scope: McpScope) {
           AND o."createdAt" >= ${utcTs(start)}
           AND o."createdAt" <= ${utcTs(end)}
           AND o.status NOT IN (${OrderStatus.CANCELLED}::"OrderStatus", ${OrderStatus.DELETED}::"OrderStatus")
+          AND oi."removedAt" IS NULL -- a line the delivery provider removed was never sold
       `
 
       return text({

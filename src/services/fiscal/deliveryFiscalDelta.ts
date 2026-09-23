@@ -44,26 +44,31 @@ export function fiscalByRateCents(
  * nunca se queda sin cifra.
  *
  * @param salesCents magnitud (≥ 0) de la venta devuelta, sin propina.
+ * @param opts.avisar `false` en los caminos de LECTURA (estado de resultados): la cifra es la misma, pero el
+ *   🚨 lo da una sola vez la póliza — si no, cada vez que alguien abre un reporte gritaría de nuevo.
  */
 export function ivaDeDevolucion(
   paymentId: string,
   salesCents: number,
   processorData: unknown,
   grossByRate: { rate: number; grossCents: number }[],
+  { avisar = true }: { avisar?: boolean } = {},
 ): { netCents: number; taxCents: number; taxByRate: Record<string, number> } {
   const pd = processorData as { provenance?: unknown; fiscalByRateCents?: unknown } | null | undefined
   if (pd?.provenance !== 'PROVIDER_ADJUSTMENT') return splitPaymentIvaByOrderRates(salesCents, grossByRate)
   const f = pd.fiscalByRateCents
   if (!f || typeof f !== 'object' || Array.isArray(f) || !Object.values(f).every(Number.isInteger)) {
-    logger.error(`🚨 [fiscal] ajuste del proveedor ${paymentId} sin fiscalByRateCents válido: se usa la mezcla de la orden`)
+    if (avisar) logger.error(`🚨 [fiscal] ajuste del proveedor ${paymentId} sin fiscalByRateCents válido: se usa la mezcla de la orden`)
     return splitPaymentIvaByOrderRates(salesCents, grossByRate)
   }
   const taxByRate = { ...(f as FiscalByRateCents) }
   const taxCents = Object.values(taxByRate).reduce((a, b) => a + b, 0)
   if (taxCents < 0 || taxCents > salesCents) {
-    logger.error(
-      `🚨 [fiscal] ajuste del proveedor ${paymentId}: IVA ${taxCents} fuera de [0, ${salesCents}] centavos — se usa la mezcla de la orden`,
-    )
+    if (avisar) {
+      logger.error(
+        `🚨 [fiscal] ajuste del proveedor ${paymentId}: IVA ${taxCents} fuera de [0, ${salesCents}] centavos — se usa la mezcla de la orden`,
+      )
+    }
     return splitPaymentIvaByOrderRates(salesCents, grossByRate)
   }
   return { netCents: salesCents - taxCents, taxCents, taxByRate }
