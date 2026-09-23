@@ -40,6 +40,8 @@ export interface NormalizedDeliveryItem {
    */
   notes?: string | null
   modifiers?: NormalizedDeliveryModifier[]
+  /** id de LÍNEA del pedido en el proveedor (Uber: cart_item_id) */
+  lineId?: string
 }
 
 /**
@@ -86,7 +88,7 @@ export interface NormalizedDeliveryOrder {
   source: OrderSource
   items: NormalizedDeliveryItem[]
   payment: NormalizedDeliveryPayment
-  customer?: { name?: string; phone?: string; note?: string }
+  customer?: { name?: string; phone?: string; phonePin?: string; note?: string }
   /** JSON crudo del proveedor, para auditoría — va a `Order.posRawData` */
   raw: unknown
   placedAt: Date

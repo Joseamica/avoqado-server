@@ -100,7 +100,7 @@ export function mapUberOrder(raw: unknown): NormalizedDeliveryOrder {
     fulfillment_type?: unknown
     customers?: Array<{
       name?: { display_name?: string; first_name?: string; last_name?: string }
-      contact?: { phone?: { number?: string } }
+      contact?: { phone?: { number?: string; pin_code?: string } }
     }>
     carts?: Array<{
       items?: Array<{
@@ -345,6 +345,7 @@ export function mapUberOrder(raw: unknown): NormalizedDeliveryOrder {
         // `item_charges` — hay un test con el pedido real de cantidad 2.
         total: aPesos(totalLinea.plus(extrasPorUnidad.mul(cantidad))),
         modifiers,
+        lineId: typeof it.cart_item_id === 'string' ? it.cart_item_id : undefined,
       })
     }
   }
@@ -427,6 +428,9 @@ export function mapUberOrder(raw: unknown): NormalizedDeliveryOrder {
         d.customers?.[0]?.name?.display_name ??
         ([d.customers?.[0]?.name?.first_name, d.customers?.[0]?.name?.last_name].filter(Boolean).join(' ') || undefined),
       phone: d.customers?.[0]?.contact?.phone?.number,
+      // 🔴 El número es ANÓNIMO: sin el PIN no se puede llamar. Tirarlo dejaba un
+      // teléfono que marca a un conmutador y cuelga.
+      phonePin: d.customers?.[0]?.contact?.phone?.pin_code,
     },
     raw,
     placedAt: d.created_time ? new Date(d.created_time) : new Date(),
