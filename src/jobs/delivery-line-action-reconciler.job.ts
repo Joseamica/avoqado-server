@@ -49,6 +49,7 @@ const LISTO_LOOKBACK_MS = 6 * 3_600_000
  */
 const ACTIVIDAD_RECIENTE_MS = 24 * 3_600_000
 const LOTE_RECIENTES = 15
+const ESPERA_RECIENTE_MAX_MIN = 20
 const FALLOS_ANTES_DE_ESPERAR = 3
 const ESPERA_MAXIMA_MIN = 6 * 60
 
@@ -77,6 +78,13 @@ export class DeliveryLineActionReconcilerJob {
    * se repite un aviso); una columna si algún día corre en varias instancias.
    */
   private esperaListo = new Map<string, { n: number; hasta: number }>()
+  /**
+   * Acción RECIENTE que se revisó sin avance: espera 1, 2, 4… min (tope 20) antes de volver a la
+   * cubeta de recientes. Sin esto, las 15 más nuevas atoradas se re-eligen cada minuto y una más
+   * vieja no entra hasta volverse dormida (24 h). Por ACCIÓN, no por pedido: una acción nunca
+   * revisada no tiene entrada y entra en su primer tick. ponytail: en memoria, como `esperaListo`.
+   */
+  private revisadaHasta = new Map<string, { n: number; hasta: number }>()
 
   start(): void {
     if (this.job) return
@@ -151,7 +159,11 @@ export class DeliveryLineActionReconcilerJob {
    * canceladas (ya no son venta) y en espera por racha de fallas.
    */
   private async reconciliar(): Promise<{ reconciliadas: number; fallidas: number }> {
-    const recienteDesde = new Date(Date.now() - ACTIVIDAD_RECIENTE_MS)
+    const ahora = Date.now()
+    const recienteDesde = new Date(ahora - ACTIVIDAD_RECIENTE_MS)
+    // A las 24 h la acción ya es dormida y la gobierna la racha: su entrada aquí sobra.
+    for (const [id, e] of this.revisadaHasta) if (e.hasta < ahora - ACTIVIDAD_RECIENTE_MS) this.revisadaHasta.delete(id)
+    const revisadas = [...this.revisadaHasta].filter(([, e]) => e.hasta > ahora).map(([id]) => id)
     const candidatas = Prisma.sql`
       FROM "DeliveryLineAction" a
       JOIN "Order" o ON o.id = a."orderId" AND o."venueId" = a."venueId"
@@ -173,6 +185,7 @@ export class DeliveryLineActionReconcilerJob {
       () =>
         prisma.$queryRaw<Fila[]>`
           SELECT a.id, a."orderId", a."venueId" ${candidatas} AND a."updatedAt" >= ${utcTs(recienteDesde)}
+            AND NOT (a.id = ANY(${revisadas}::text[]))
           ORDER BY a."updatedAt" DESC, a.id DESC
           LIMIT ${LOTE_RECIENTES}`,
       { shouldRetry: shouldRetryDbConnectionError, context: 'deliveryLineActions.recientes' },
@@ -189,19 +202,31 @@ export class DeliveryLineActionReconcilerJob {
     this.cursor = dormidas.length < lugares ? '' : dormidas[dormidas.length - 1].id
 
     // Una reconciliación cubre todas las acciones del pedido; es «reciente» si alguna lo es.
-    const porOrden = new Map<string, { venueId: string; reciente: boolean }>()
-    for (const f of recientes) porOrden.set(f.orderId, { venueId: f.venueId, reciente: true })
-    for (const f of dormidas) if (!porOrden.has(f.orderId)) porOrden.set(f.orderId, { venueId: f.venueId, reciente: false })
+    const porOrden = new Map<string, { venueId: string; reciente: boolean; acciones: string[] }>()
+    for (const f of recientes) {
+      const o = porOrden.get(f.orderId) ?? { venueId: f.venueId, reciente: true, acciones: [] }
+      o.acciones.push(f.id)
+      porOrden.set(f.orderId, o)
+    }
+    for (const f of dormidas) if (!porOrden.has(f.orderId)) porOrden.set(f.orderId, { venueId: f.venueId, reciente: false, acciones: [] })
 
     let reconciliadas = 0
     let fallidas = 0
-    for (const [orderId, { venueId, reciente }] of porOrden) {
+    for (const [orderId, { venueId, reciente, acciones }] of porOrden) {
       let fallo: string | null = null
       try {
         const r = await reconciliacion.reconcileDeliveryOrderFromProvider(orderId, { trigger: 'JOB' })
         if (r.outcome === 'READ_FAILED') fallo = 'READ_FAILED'
-        // Dormida y sin avance: cuenta para la racha, o la leeríamos a Uber cada vuelta para siempre.
-        else if (r.outcome === 'NO_ACTIONS' && !reciente) fallo = SIN_AVANCE
+        else if (r.outcome === 'NO_ACTIONS') {
+          // Reciente y sin avance: espera corta en memoria. Dormida: cuenta para la racha, o la
+          // leeríamos a Uber cada vuelta para siempre.
+          if (reciente) {
+            for (const id of acciones) {
+              const n = (this.revisadaHasta.get(id)?.n ?? 0) + 1
+              this.revisadaHasta.set(id, { n, hasta: Date.now() + Math.min(2 ** (n - 1), ESPERA_RECIENTE_MAX_MIN) * 60_000 })
+            }
+          } else fallo = SIN_AVANCE
+        } else for (const id of acciones) this.revisadaHasta.delete(id) // hubo avance
       } catch (error) {
         fallo = error instanceof Error ? error.message : String(error)
       }
@@ -221,7 +246,9 @@ export class DeliveryLineActionReconcilerJob {
         error: fallo.slice(0, 300),
       })
       const detalle = { orderId, venueId, consecutive: n, retryAt, error: fallo.slice(0, 300) }
-      // La falta de avance ya se gritó una vez en la alerta de 24 h: aquí sólo se anota.
+      // «Sin avance» no es una falla del sistema, así que va en warn y sin 🚨: un CONFIRMED así lo
+      // reporta la alerta de 24 h; un UNCERTAIN de una orden NO bloqueada no tiene alerta — espera a
+      // que una persona lo reintente, y el MCP lo muestra con `canRetryAt`.
       if (n >= FALLOS_ANTES_DE_ESPERAR && fallo !== SIN_AVANCE)
         logger.error('🚨 [Delivery line-actions] reconciliación sin resultado seguida: la orden espera', detalle)
       else logger.warn('[Delivery line-actions] reconciliación sin resultado; se reintenta', detalle)

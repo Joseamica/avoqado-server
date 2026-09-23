@@ -112,6 +112,16 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
   const lecturasDe = (ext: string) => (uberAdapter.fetchOrder as jest.Mock).mock.calls.filter(c => c[0] === ext).length
   const reembolsos = (orderId: string) => prisma.payment.findMany({ where: { orderId, type: 'REFUND' } })
   const correr = (job = new DeliveryLineActionReconcilerJob()) => job.runOnce()
+  /** Corre `fn` con el reloj de la app adelantado `ms` (vence las esperas en memoria del job). */
+  const dentroDe = async <T>(ms: number, fn: () => Promise<T>): Promise<T> => {
+    const real = Date.now.bind(Date)
+    const reloj = jest.spyOn(Date, 'now').mockImplementation(() => real() + ms)
+    try {
+      return await fn()
+    } finally {
+      reloj.mockRestore()
+    }
+  }
   /** Sin escrituras en más de 24 h: la acción deja de ser «reciente» para el barrido. */
   const dormir = (ids: string[]) =>
     prisma.$executeRaw`UPDATE "DeliveryLineAction" SET "updatedAt" = ${utcTs(hace(30 * 60 * MIN))} WHERE id = ANY(${ids}::text[])`
@@ -226,7 +236,8 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
 
     const job = new DeliveryLineActionReconcilerJob()
     await correr(job)
-    await correr(job)
+    await correr(job) // dentro de su espera corta: no se relee
+    await dentroDe(2 * MIN, () => correr(job)) // vencida la espera, vuelve a entrar
 
     expect(lecturasDe(s.ext)).toBe(2)
     expect(await prisma.deliveryLineAction.findUniqueOrThrow({ where: { id: a.id } })).toMatchObject({
@@ -391,6 +402,23 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
     expect(lecturasDe(fresca.ext)).toBe(1)
   })
 
+  it('16 recientes atoradas no dejan fuera a una reciente más vieja: entra a más tardar en el 2.º tick', async () => {
+    const atoradas: Array<Awaited<ReturnType<typeof sembrar>>> = []
+    for (let i = 0; i < 16; i++) atoradas.push(await sembrar())
+    for (const a of atoradas) await accion(a.order, a.ext, a.item.b.id, 'b', { status: 'CONFIRMED' })
+    const vieja = await sembrar()
+    const v = await accion(vieja.order, vieja.ext, vieja.item.b.id, 'b', { status: 'CONFIRMED' })
+    // Reciente (menos de 24 h), pero con la escritura más vieja: por `updatedAt DESC` es la 17.ª.
+    await prisma.$executeRaw`UPDATE "DeliveryLineAction" SET "updatedAt" = ${utcTs(hace(2 * 60 * MIN))} WHERE id = ${v.id}`
+
+    const job = new DeliveryLineActionReconcilerJob()
+    await correr(job)
+    expect(lecturasDe(vieja.ext)).toBe(0) // la cubeta de recientes (15) se llenó con las más nuevas
+    await correr(job)
+
+    expect(lecturasDe(vieja.ext)).toBe(1) // sin la espera, la 2.ª pasada re-elige las mismas 15
+  })
+
   it('una DORMIDA que no avanza suma a la racha y espera; una reciente que no avanza, no', async () => {
     const dormida = await sembrar()
     const reciente = await sembrar()
@@ -406,7 +434,9 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
     const racha = await rachaDe(dormida.order.id)
     expect(racha.map(x => (x.data as { error: string }).error)).toEqual(['SIN_AVANCE', 'SIN_AVANCE', 'SIN_AVANCE'])
     expect(lecturasDe(dormida.ext)).toBe(3) // la 4.ª pasada ya la saltó en SQL
-    expect(lecturasDe(reciente.ext)).toBe(4)
+    // La reciente sin avance espera en memoria (1 min), no en la racha: las 3 pasadas siguientes
+    // son inmediatas y no la releen.
+    expect(lecturasDe(reciente.ext)).toBe(1)
     expect(await rachaDe(reciente.order.id)).toHaveLength(0)
   })
 
