@@ -541,6 +541,17 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
     expect(primera.listos).toBe(0)
   })
 
+  it('M-5: un pedido de un proveedor SIN adaptador no ocupa lugar en el reintento de «listo»', async () => {
+    const s = await sembrar()
+    await prisma.order.update({ where: { id: s.order.id }, data: { externalId: `DELIVERECT:${s.ext}` } })
+    await prisma.kdsOrder.updateMany({ where: { orderId: s.order.id }, data: { status: KdsOrderStatus.COMPLETED } })
+    const espia = jest.spyOn(respuestas, 'markDeliveryOrderReady')
+
+    await correr()
+
+    expect(espia.mock.calls.filter(c => c[1] === s.order.id)).toHaveLength(0)
+  })
+
   it('los índices que sirven al barrido existen', async () => {
     const idx = await prisma.$queryRaw<{ indexname: string }[]>`
       SELECT indexname FROM pg_indexes

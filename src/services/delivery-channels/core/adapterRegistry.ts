@@ -31,6 +31,11 @@ export function hasAdapter(provider: DeliveryProvider): boolean {
   return ADAPTERS[provider] !== undefined
 }
 
+/** Proveedores con adaptador: con ellos se arma, por ejemplo, el prefijo de `Order.externalId` que vale la pena barrer. */
+export function proveedoresConAdaptador(): DeliveryProvider[] {
+  return Object.keys(ADAPTERS) as DeliveryProvider[]
+}
+
 export function adapterFor(provider: DeliveryProvider): DirectDeliveryAdapter {
   const a = ADAPTERS[provider]
   if (!a) {

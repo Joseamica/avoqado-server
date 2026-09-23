@@ -5,6 +5,7 @@ import { Prisma } from '@prisma/client'
 
 import logger from '../config/logger'
 import { scheduleJob } from '../observability/jobContext'
+import { proveedoresConAdaptador } from '../services/delivery-channels/core/adapterRegistry'
 import { RESERVA_TTL_MS } from '../services/delivery-channels/core/deliveryOrderLock'
 import * as reconciliacion from '../services/delivery-channels/core/deliveryReconciliation.service'
 import { markDeliveryOrderReady } from '../services/delivery-channels/core/respondToDeliveryOrder.service'
@@ -354,6 +355,9 @@ export class DeliveryLineActionReconcilerJob {
     for (const [id, e] of this.esperaListo) if (e.hasta + LISTO_LOOKBACK_MS < ahora) this.esperaListo.delete(id)
 
     const enEspera = [...this.esperaListo].filter(([, e]) => e.hasta > ahora).map(([id]) => id)
+    // M-5: sólo pedidos de proveedores con adaptador (`UBER_EATS:…`); un Deliverect con `externalId`
+    // caería en NOT_A_DELIVERY_ORDER y gastaría un lugar del lote. `_` y `%` se escapan para LIKE.
+    const prefijos = proveedoresConAdaptador().map(p => `${p.replace(/[\\%_]/g, '\\$&')}:%`)
     const filas = await retry(
       () =>
         prisma.$queryRaw<Array<{ id: string; venueId: string }>>`
@@ -362,7 +366,7 @@ export class DeliveryLineActionReconcilerJob {
           JOIN "Order" o ON o.id = k."orderId" AND o."venueId" = k."venueId"
           WHERE k."orderType" = 'DELIVERY' AND k.status IN ('READY', 'COMPLETED')
             AND k."updatedAt" >= ${utcTs(new Date(ahora - LISTO_LOOKBACK_MS))}
-            AND o.type = 'DELIVERY' AND o."externalId" IS NOT NULL
+            AND o.type = 'DELIVERY' AND o."externalId" LIKE ANY(${prefijos}::text[])
             AND o."readyReportedAt" IS NULL AND o.status <> 'CANCELLED'
             AND NOT (o.id = ANY(${enEspera}::text[]))
             -- Un retiro en curso bloquea el «listo» (spec §3.2): reintentarlo sólo gastaría reservas.
