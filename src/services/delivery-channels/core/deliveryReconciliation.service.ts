@@ -238,15 +238,26 @@ export async function reconcileDeliveryOrderFromProvider(
       take: LIMITE_FILAS,
     })
 
-    // ── 3. Deltas del bloque `payment` contra lo registrado del proveedor (original + REFUND previos).
+    // ── 3. Deltas del bloque `payment` contra lo que el PROVEEDOR registró: la venta original menos
+    // sus compensaciones (`PROVIDER_ADJUSTMENT`). La foto de Uber sólo refleja cambios de Uber, así que
+    // los reembolsos INDEPENDIENTES (manual del dashboard, chargeback del reporte) NO entran al Δ (N-6,
+    // reemplaza la base (b) de T13): contarlos inventaba un «aumento» tras un chargeback. Si existen y
+    // hay que compensar, se compensa igual y una persona revisa el posible doble registro (como N-1).
     const cobros = await tx.payment.findMany({
       where: { orderId, venueId, source: PaymentSource.DELIVERY_PLATFORM, status: TransactionStatus.COMPLETED },
       select: { id: true, type: true, amount: true, tipAmount: true, processorData: true },
       orderBy: { createdAt: 'asc' },
       take: LIMITE_FILAS,
     })
-    const pagadoVenta = cobros.reduce((s, c) => s + centavos(c.amount), 0)
-    const pagadoPropina = cobros.reduce((s, c) => s + centavos(c.tipAmount), 0)
+    const esAjuste = (c: (typeof cobros)[number]) =>
+      c.type === 'REFUND' && (c.processorData as { provenance?: unknown } | null)?.provenance === 'PROVIDER_ADJUSTMENT'
+    const delProveedor = cobros.filter(c => c.type !== 'REFUND' || esAjuste(c))
+    const independientes = cobros.filter(c => c.type === 'REFUND' && !esAjuste(c))
+    const pagadoVenta = delProveedor.reduce((s, c) => s + centavos(c.amount), 0)
+    const pagadoPropina = delProveedor.reduce((s, c) => s + centavos(c.tipAmount), 0)
+    /** Lo que los reembolsos independientes ya sacaron de los libros (magnitud ≥ 0). */
+    const independienteVenta = -independientes.reduce((s, c) => s + centavos(c.amount), 0)
+    const independientePropina = -independientes.reduce((s, c) => s + centavos(c.tipAmount), 0)
     const dVenta = pagadoVenta - centavos(foto.payment.externallyPaidSale)
     const dPropina = pagadoPropina - centavos(foto.payment.externallyPaidTip)
 
@@ -275,7 +286,9 @@ export async function reconcileDeliveryOrderFromProvider(
       cobros.map(c => ({ id: c.id, type: c.type, amountCents: centavos(c.amount), processorData: c.processorData })),
       grossByRateForOrder(filas),
     )
-    const ivaSuperviviente = splitPaymentIvaByOrderRates(pagadoVenta - dVenta, grossByRateForOrder(superviviente)).taxByRate
+    // Lo que queda en libros tras compensar: la venta de la foto menos lo que los independientes ya sacaron.
+    const quedaEnLibros = Math.max(0, pagadoVenta - dVenta - independienteVenta)
+    const ivaSuperviviente = splitPaymentIvaByOrderRates(quedaEnLibros, grossByRateForOrder(superviviente)).taxByRate
     const fiscal: Record<string, number> = {}
     for (const tasa of new Set([...Object.keys(enLibros), ...Object.keys(ivaSuperviviente)])) {
       const d = (enLibros[tasa] ?? 0) - (ivaSuperviviente[tasa] ?? 0)
@@ -319,7 +332,14 @@ export async function reconcileDeliveryOrderFromProvider(
         where: { id: { in: acreditadas.map(a => a.id) }, settlement: 'ACCREDITED' },
         data: { settlement: 'NO_DELTA' },
       })
-      await reprecio(tx, { orderId, venueId, foto, pagadoCents: pagadoVenta + pagadoPropina, trigger: opts.trigger, eventId: opts.eventId })
+      await reprecio(tx, {
+        orderId,
+        venueId,
+        foto,
+        pagadoCents: pagadoVenta + pagadoPropina - independienteVenta - independientePropina,
+        trigger: opts.trigger,
+        eventId: opts.eventId,
+      })
       return { outcome: 'NO_DELTA' as const }
     }
 
@@ -371,11 +391,31 @@ export async function reconcileDeliveryOrderFromProvider(
       where: { id: { in: acreditadas.map(a => a.id) }, settlement: 'ACCREDITED' },
       data: { settlement: 'REFUNDED', refundPaymentId },
     })
+    if (independientes.length > 0) {
+      // N-6: nada prueba que el reembolso independiente sea ESTE retiro. Se compensa completo
+      // (ingreso subvaluado y visible, nunca sobrevaluado y silencioso) y una persona lo revisa.
+      const datos = {
+        mensaje: 'posible doble registro: revisar contra el reporte de Uber',
+        origen: 'RECONCILIACION',
+        compensacionPaymentId: refundPaymentId,
+        compensacion: pesos(dVenta + dPropina).toFixed(2),
+        independientesPaymentIds: independientes.map(c => c.id),
+        independientes: pesos(independienteVenta + independientePropina).toFixed(2),
+      }
+      await tx.activityLog.create({
+        data: { venueId, staffId: null, action: 'DELIVERY_REFUND_POSSIBLE_DUPLICATE', entity: 'Order', entityId: orderId, data: datos },
+      })
+      logger.error('🚨 [Delivery] posible doble registro: se compensó un retiro en una orden con reembolso independiente — revisar contra el reporte de Uber', {
+        orderId,
+        venueId,
+        ...datos,
+      })
+    }
     await reprecio(tx, {
       orderId,
       venueId,
       foto,
-      pagadoCents: pagadoVenta - dVenta + pagadoPropina - dPropina,
+      pagadoCents: pagadoVenta - dVenta + pagadoPropina - dPropina - independienteVenta - independientePropina,
       trigger: opts.trigger,
       eventId: opts.eventId,
       refundPaymentId,

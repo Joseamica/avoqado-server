@@ -290,7 +290,9 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
     expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('REFUNDED')
 
     const refunds = await reembolsos(order.id)
-    expect(refunds.map(f => f.amount.toString())).toEqual(['-100', '-50', '-50'])
+    // N-6: el manual es INDEPENDIENTE, no entra al Δ: se compensa A completo y una persona revisa.
+    expect(refunds.map(f => f.amount.toString())).toEqual(['-100', '-50', '-100'])
+    expect(await prisma.activityLog.count({ where: { venueId, entityId: order.id, action: 'DELIVERY_REFUND_POSSIBLE_DUPLICATE' } })).toBe(1)
     // IVA en libros = el de la venta − el de cada devolución, cada uno como lo postea la póliza.
     const renglones = await prisma.orderItem.findMany({
       where: { orderId: order.id },
@@ -325,7 +327,7 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
       )
     }
 
-    it('$150 (dos de $75), manual de $75 y Uber retira un $75 ⇒ NO_DELTA, sin bloquear por 1 centavo', async () => {
+    it('N-6: manual del renglón retirado y DESPUÉS la compensación del proveedor ⇒ se escribe y queda la bandera', async () => {
       const { order, foto } = await sembrar(
         [
           { linea: 'a', nombre: 'Taco', precio: '75.00' },
@@ -335,21 +337,56 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
       )
       await manual(order.id, 7500)
       proveedorDevuelve(foto(['a'], pago('75.00', '0.00')))
+      const gritos = jest.spyOn(logger, 'error')
+
+      expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('REFUNDED')
+
+      const refunds = await reembolsos(order.id)
+      expect(refunds.map(f => f.amount.toString())).toEqual(['-75', '-75'])
+      expect(await prisma.activityLog.count({ where: { venueId, entityId: order.id, action: 'DELIVERY_REFUND_POSSIBLE_DUPLICATE' } })).toBe(1)
+      // En libros quedan $0 de venta ⇒ $0 de IVA: la compensación descuenta el IVA de lo que el manual
+      // no sacó ya, no el de la foto entera.
+      const renglones = await prisma.orderItem.findMany({
+        where: { orderId: order.id },
+        select: { quantity: true, unitPrice: true, discountAmount: true, product: { select: { taxRate: true } } },
+      })
+      const mezcla = grossByRateForOrder(renglones)
+      const ivaDevuelto = refunds.reduce(
+        (t, f) => t + ivaDeDevolucion(f.id, new Prisma.Decimal(f.amount).times(-100).toNumber(), f.processorData, mezcla).taxCents,
+        0,
+      )
+      expect(splitPaymentIvaByOrderRates(15000, mezcla).taxCents - ivaDevuelto).toBe(0)
+      expect(gritos.mock.calls.some(([m]) => String(m).startsWith('🚨') && String(m).includes('posible doble registro'))).toBe(true)
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).deliveryReconcileBlocked).toBeNull()
+    })
+
+    it('Δ = 0 con 1 centavo de deriva por el redondeo del manual ⇒ NO_DELTA, sin bloquear', async () => {
+      // $75 + $75 con descuento de $75 (se cobran $75); manual de $0.04; Uber retira b y quita el descuento.
+      const { order, foto } = await sembrar(
+        [
+          { linea: 'a', nombre: 'Taco', precio: '75.00' },
+          { linea: 'b', nombre: 'Torta', precio: '75.00' },
+        ],
+        pago('150.00', '75.00'),
+      )
+      await manual(order.id, 4)
+      proveedorDevuelve(foto(['a'], pago('75.00', '0.00')))
 
       expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('NO_DELTA')
       expect((await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).deliveryReconcileBlocked).toBeNull()
     })
 
     it('Δ de 1 centavo con IVA de −1 por redondeo ⇒ se compensa (REFUNDED), no FISCAL_PENDING', async () => {
+      // $99.99 + $0.01; manual de $0.04; Uber retira el renglón de $0.01.
       const { order, foto } = await sembrar(
         [
-          { linea: 'a', nombre: 'Taco', precio: '50.00' },
-          { linea: 'b', nombre: 'Torta', precio: '50.00' },
+          { linea: 'a', nombre: 'Taco', precio: '99.99' },
+          { linea: 'b', nombre: 'Chicle', precio: '0.01' },
         ],
         pago('100.00', '0.00'),
       )
-      await manual(order.id, 4999)
-      proveedorDevuelve(foto(['a'], pago('50.00', '0.00')))
+      await manual(order.id, 4)
+      proveedorDevuelve(foto(['a'], pago('99.99', '0.00')))
 
       expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('REFUNDED')
       const ultimo = (await reembolsos(order.id)).pop()!
@@ -402,15 +439,32 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
       expect(await bandera(order.id)).toBe(1)
     })
 
-    it('primero el reporte, luego el retiro: la reconciliación ya lo cuenta y no escribe otro REFUND', async () => {
+    it('N-6: primero el chargeback, luego el retiro: la compensación se escribe y queda la bandera', async () => {
       const { order, foto } = await sembrar(renglones, pago('200.00', '0.00'))
       expect((await reporte(order, '50.00')).outcome).toBe('APPLIED')
+      expect(await bandera(order.id)).toBe(0) // sin ajuste previo, el reporte no duda
 
       proveedorDevuelve(foto(['a'], pago('150.00', '0.00')))
-      expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('NO_DELTA')
+      expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('REFUNDED')
 
-      expect((await reembolsos(order.id)).map(f => f.amount.toString())).toEqual(['-50'])
-      expect(await bandera(order.id)).toBe(0) // sin ajuste previo no hay duda que revisar
+      expect((await reembolsos(order.id)).map(f => f.amount.toString())).toEqual(['-50', '-50'])
+      expect(await bandera(order.id)).toBe(1) // la reconciliación sí duda: hay un reembolso independiente
+    })
+
+    it('N-6 (Codex r4): tras un chargeback independiente completo, la relectura NO inventa un aumento', async () => {
+      const { order, foto } = await sembrar(renglones, pago('200.00', '0.00'))
+      proveedorDevuelve(foto(['a'], pago('150.00', '0.00')))
+      expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('REFUNDED')
+      expect((await reporte(order, '80.00')).outcome).toBe('APPLIED')
+
+      proveedorDevuelve({ ...foto(['a'], pago('150.00', '0.00')), providerClosed: true })
+      expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'WEBHOOK' })).outcome).toBe('PROVIDER_CLOSED')
+
+      const o = await prisma.order.findUniqueOrThrow({ where: { id: order.id } })
+      expect(o.deliveryReconcileBlocked).toBeNull()
+      const pagos = await prisma.payment.findMany({ where: { orderId: order.id }, select: { amount: true } })
+      expect(pagos.reduce((t, p) => t.plus(p.amount), new Prisma.Decimal(0)).toString()).toBe('70')
+      expect((await reembolsos(order.id)).map(f => f.amount.toString())).toEqual(['-50', '-80'])
     })
   })
 
@@ -624,7 +678,7 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
 
   // ── Ronda de endurecimiento ────────────────────────────────────────────────────────────────
 
-  it('Q-2: un reembolso del dashboard en vuelo entre el GET y la lectura de cobros entra al Δ: el renglón no se compensa dos veces', async () => {
+  it('Q-2 (N-6): un reembolso del dashboard en vuelo se serializa con la reconciliación y levanta la bandera de posible doble registro', async () => {
     const { order, item, foto } = await sembrar(
       [
         { linea: 'a', nombre: 'Cochinita', precio: '150.00' },
@@ -663,11 +717,13 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
     const r = await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'WEBHOOK' })
     await manual
 
-    expect(r.outcome).toBe('NO_DELTA')
+    // N-6 (reemplaza la base (b) de T13): el manual en vuelo se VE —el candado lo serializa— pero NO
+    // entra al Δ: la compensación se escribe y queda la bandera de posible doble registro.
+    expect(r.outcome).toBe('REFUNDED')
     const refunds = await reembolsos(order.id)
-    expect(refunds).toHaveLength(1)
-    expect(refunds[0].processorData).toMatchObject({ provenance: 'MANUAL' })
-    expect((await accionDe(order.id, 'b')).settlement).toBe('NO_DELTA')
+    expect(refunds.map(f => (f.processorData as any).provenance)).toEqual(['MANUAL', 'PROVIDER_ADJUSTMENT'])
+    expect((await accionDe(order.id, 'b')).settlement).toBe('REFUNDED')
+    expect(await prisma.activityLog.count({ where: { venueId, entityId: order.id, action: 'DELIVERY_REFUND_POSSIBLE_DUPLICATE' } })).toBe(1)
   })
 
   it('Q-4: la llave del ajuste ya existía (fuera del filtro) con un Δ nuevo ⇒ 🚨 y lanza; nada se liquida', async () => {
