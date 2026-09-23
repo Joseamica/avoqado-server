@@ -508,8 +508,8 @@ export async function ingestDeliveryOrder(
     try {
       // 🔴 NO por `createdAt`: los renglones se crean dentro de UNA transacción y pueden
       // compartir marca de tiempo, así que ese orden no es estable — y si se desordena, la
-      // comanda rutea el renglón equivocado a la estación equivocada. Se aparea por el
-      // ÍNDICE que el propio `externalId` lleva al final (`…-<idx>`), que es determinista.
+      // comanda rutea el renglón equivocado a la estación equivocada. Se aparea por el id de
+      // LÍNEA del proveedor; el ÍNDICE del `externalId` (`…-<idx>`) sólo si nadie trae id.
       const yaExistentes = await prisma.orderItem.findMany({
         where: { orderId: order.id },
         select: { id: true, productId: true, externalId: true, externalLineId: true },
@@ -527,7 +527,9 @@ export async function ingestDeliveryOrder(
       // índice sólo aplica si ningún lado trae id de línea (proveedores sin retiro por renglón,
       // o ventas previas a la columna, que por eso nunca pudieron retirarse).
       normalized.items.forEach((it, idx) => {
-        const r = it.lineId && porLinea.size ? porLinea.get(it.lineId) : porIndice.get(idx)
+        // Si ALGÚN renglón guardado trae id de línea, un renglón de la foto sin id no se aparea
+        // por índice: una foto más corta lo correría de lugar (sin id ⇒ sin ruteo, nunca mal ruteado).
+        const r = porLinea.size ? (it.lineId ? porLinea.get(it.lineId) : undefined) : porIndice.get(idx)
         renglonesCreados.push({ id: r?.id ?? null, productId: r?.productId ?? null })
       })
     } catch {
