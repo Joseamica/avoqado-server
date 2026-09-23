@@ -3825,6 +3825,23 @@ model Order {
   /// Sin @unique: una mesa recibe upsells al ordenar, en rondas y al pagar.
   upsellImpressions UpsellImpression[]
 
+  // --- KDS de Uber: contacto del cliente, retiro de renglón, aceptación del proveedor ---
+  /// PIN corto del contacto enmascarado de Uber (nunca el número real).
+  customerPhonePin String?
+  /// Vínculo del canal que originó este pedido, si vino de un agregador de delivery.
+  deliveryChannelLinkId String?
+  providerAcceptedAt       DateTime?
+  /// 'HTTP_2XX' | 'PROVIDER_STATE' — cómo se supo que el proveedor aceptó.
+  providerAcceptedEvidence String?
+  readyReportedAt          DateTime?
+  /// 'REMOVE_ITEM' | 'READY' | 'DENY' | 'ACCEPT' — operación contra el proveedor en vuelo.
+  deliveryOpInFlight       String?
+  deliveryOpInFlightAt     DateTime?
+  deliveryOpToken          String?
+  /// 'INCREASE_UNSUPPORTED' | 'FISCAL_RECLASS_UNSUPPORTED' — por qué la reconciliación
+  /// automática no pudo aplicar un ajuste del proveedor.
+  deliveryReconcileBlocked String?
+
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   completedAt DateTime?
@@ -4002,6 +4019,11 @@ model OrderItem {
   // productSku should be filled from SerializedItem.serialNumber
   // ==========================================
   serializedItem SerializedItem?
+
+  /// KDS de Uber: id de renglón del proveedor (distinto de `externalId`, que es del
+  /// sync del POS) y cuándo se retiró el renglón por una operación de proveedor.
+  externalLineId String?
+  removedAt      DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt // ✅ NUEVO
@@ -6226,12 +6248,104 @@ model DeliveryChannelLink {
 
   events DeliveryOrderEvent[]
 
+  /// Autorización del dueño de la tienda del proveedor (§4.3 del spec) — cuándo y bajo
+  /// qué credenciales de la app de Uber se autorizó, y qué DeliveryConnectIntent la
+  /// produjo. `null` = todavía no se conectó por este camino (vínculos legacy/Deliverect).
+  ownerAuthorizedAt          DateTime?
+  ownerAuthorizedEnvironment String?
+  ownerAuthorizedStoreId     String?
+  ownerAuthorizedClientId    String?
+  ownerAuthorizedByIntentId  String?
+  /// El intent que está en proceso de activar (o reactivar) este vínculo ahora mismo.
+  activatingIntentId String?
+  /// Quién tiene el lease de activación sobre este vínculo — igual patrón que
+  /// `KdsOrder.printClaimedBy`: el primero que reclama gana, la reclamación caduca.
+  activationOwner    String?
+  /// Se incrementa cada vez que se revoca/reautoriza la conexión, para que un
+  /// intent viejo no pueda reactivar por encima de una revocación posterior.
+  revocationVersion  Int     @default(0)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@unique([provider, externalLocationId])
   @@index([venueId])
   @@index([status])
+}
+
+/// KDS de Uber: retiro de un renglón hacia el proveedor (§4.1 del spec). Una fila por
+/// intento de operación sobre una línea de un pedido de delivery — nace PENDING al
+/// pedirle al proveedor que quite el renglón, y se resuelve con su veredicto y (si aplica)
+/// el reembolso compensatorio ya asentado.
+model DeliveryLineAction {
+  id              String           @id @default(cuid())
+  venueId         String
+  orderId         String
+  orderItemId     String
+  provider        DeliveryProvider
+  externalOrderId String
+  storeId         String
+  lineId          String
+  /// 'REMOVE_ITEM' — único valor hoy; texto libre para no migrar si aparece otro.
+  action String
+  /// 'PENDING' | 'CONFIRMED' | 'REJECTED' | 'UNCERTAIN'
+  status String
+  /// 'PENDING' | 'ACCREDITED' | 'REFUNDED' | 'NO_DELTA' | 'FISCAL_PENDING' — a qué llegó
+  /// el reembolso compensatorio de este retiro, si lo hubo.
+  settlement String @default("PENDING")
+  /// 'STAFF' | 'PROVIDER' — quién originó el retiro.
+  origin             String
+  requestedByStaffId String?
+  retriedByStaffId   String?
+  attempts           Int      @default(1)
+  lastAttemptAt      DateTime @default(now())
+  providerStatus     Int?
+  providerBody       String?  @db.Text
+  refundPaymentId    String?
+
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  resolvedAt DateTime?
+
+  @@unique([orderId, lineId, action])
+  @@index([venueId, status])
+  @@index([status, settlement])
+}
+
+/// KDS de Uber: intento de conexión de un venue a una tienda de Uber Eats (§4.2 del spec)
+/// — desde que el dueño arranca el OAuth hasta que el vínculo (`DeliveryChannelLink`)
+/// queda activado. Vida corta y con lease de activación (mismo patrón que
+/// `KdsOrder.printClaimedBy`): el primero que reclama activar gana, con caducidad.
+model DeliveryConnectIntent {
+  id       String           @id @default(cuid())
+  venueId  String
+  staffId  String
+  provider DeliveryProvider
+  /// Ambiente de la app de Uber usado para este intento (sandbox/production).
+  environment         String
+  clientId            String
+  orderAcceptanceMode OrderAcceptanceMode @default(AUTO)
+  /// 'CREATED' | 'EXCHANGED' | 'ACTIVATING' | 'CONSUMED' | 'FAILED' | 'EXPIRED'
+  state              String   @default("CREATED")
+  activationAttempt  Int      @default(0)
+  /// Quién tiene el lease de activación sobre ESTE intent ahora mismo.
+  activationOwner      String?
+  activationLeaseUntil DateTime?
+  expiresAt            DateTime
+
+  storesJson    Json?
+  selectionJson Json?
+  resultsJson   Json?
+  /// Token de intercambio con Uber, cifrado en reposo. Nunca se expone tal cual a un
+  /// cliente — sólo el servidor lo usa para completar la activación.
+  merchantTokenEnvelope String? @db.Text
+  failureReason          String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([state, expiresAt])
+  @@index([venueId])
 }
 
 /// Solicitud de un venue para activar delivery. El dueño la crea (self-serve,
@@ -14921,6 +15035,11 @@ model KdsOrder {
   /// definitiva: hasta entonces, sigue siendo retomable.
   printedAt      DateTime?
 
+  /// KDS de Uber: nombre y contacto (PIN enmascarado) del cliente, para que la cocina
+  /// pueda identificar el pedido sin abrir el detalle de la orden.
+  customerName    String?
+  customerContact String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -14937,6 +15056,13 @@ model KdsOrderItem {
   quantity    Int
   modifiers   String? // JSON array of modifier names
   notes       String?
+
+  /// KDS de Uber: liga floja al OrderItem real (igual que productId/categoryId abajo,
+  /// sin `@relation` — una comanda es una foto del momento), id de renglón del
+  /// proveedor, y cuándo se retiró por una operación de proveedor.
+  orderItemId    String?
+  externalLineId String?
+  removedAt      DateTime?
 
   /// A qué producto y categoría corresponde el renglón.
   ///
