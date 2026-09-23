@@ -692,6 +692,17 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
       expect((await prisma.order.findUniqueOrThrow({ where: { id: s.order.id } })).posRawData).toEqual({ fuente: 'foto-fresca' })
     })
 
+    it('P1-2: si Uber ya CERRÓ el pedido, una foto sin cambios es definitiva: se cierra el aviso sin releer', async () => {
+      const s = await sembrar()
+      fotos.set(s.ext, { ...s.foto(['a', 'b'], '200.00'), providerClosed: true })
+      const { id: eventoId } = await evento(s.ext)
+
+      expect(await processUberEvent(eventoId)).toMatchObject({ outcome: 'RECONCILED', orderId: s.order.id })
+
+      expect((await prisma.deliveryOrderEvent.findUniqueOrThrow({ where: { id: eventoId } })).status).toBe('PROCESSED')
+      expect(await reembolsos(s.order.id)).toHaveLength(0)
+    })
+
     it('P1-2: un cambio que NUNCA se refleja se cierra VISIBLE al vencer la ventana, sin reintentar para siempre', async () => {
       const s = await sembrar()
       const { id: eventoId } = await evento(s.ext)

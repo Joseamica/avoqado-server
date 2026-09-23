@@ -37,7 +37,7 @@ export type ResultadoReconciliacion = {
     | 'NO_ACTIONS'
     | 'READ_FAILED'
     | 'ORDER_CANCELLED'
-    /** El proveedor cerró el pedido y se cerraron retiros que esperaban con el renglón presente (I-2). */
+    /** El proveedor cerró el pedido y no hay dinero que mover; si algún retiro esperaba con el renglón presente, se cerró (I-2). */
     | 'PROVIDER_CLOSED'
 }
 
@@ -181,7 +181,6 @@ export async function reconcileDeliveryOrderFromProvider(
     // ocurrir (ruling I-2; desvío anotado del §3.4 — «entregado con el artículo» SÍ prueba que el
     // retiro no pasó). Sin esto, el UNCERTAIN y el CONFIRMED/PENDING esperan para siempre y el barrido
     // le lee el pedido a Uber cada ~6 h indefinidamente. No mueve dinero: sólo cierra la espera.
-    let cerradas = 0
     if (foto.providerClosed) {
       const lineas = filas.filter(f => presentes.has(f.externalLineId!)).map(f => f.externalLineId!)
       const colgadas = await tx.deliveryLineAction.findMany({
@@ -222,7 +221,6 @@ export async function reconcileDeliveryOrderFromProvider(
           rechazadas: inciertas.length,
           sinDelta: confirmadas.length,
         })
-        cerradas = colgadas.length
       }
     }
 
@@ -288,7 +286,9 @@ export async function reconcileDeliveryOrderFromProvider(
     }
 
     if (dVenta === 0 && dPropina === 0) {
-      if (acreditadas.length === 0) return { outcome: cerradas > 0 ? ('PROVIDER_CLOSED' as const) : ('NO_ACTIONS' as const) }
+      // Pedido cerrado: una foto sin cambios es DEFINITIVA (Uber ya no retira renglones), no una foto
+      // que quizá va detrás del aviso — quien la recibe no tiene que volver a leer (P1-2).
+      if (acreditadas.length === 0) return { outcome: foto.providerClosed ? ('PROVIDER_CLOSED' as const) : ('NO_ACTIONS' as const) }
       if (Object.values(fiscal).some(v => v !== 0)) return aFiscalPendiente('retiro sin movimiento de dinero pero con IVA reclasificado')
       await tx.deliveryLineAction.updateMany({
         where: { id: { in: acreditadas.map(a => a.id) }, settlement: 'ACCREDITED' },
