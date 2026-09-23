@@ -150,4 +150,36 @@ describe('autoPosting — REFUND de reparto con fiscalByRateCents', () => {
     expect(error.mock.calls.some(([msg]) => String(msg).includes('🚨') && String(msg).includes(refundPaymentId))).toBe(true)
     error.mockRestore()
   })
+
+  it('un ajuste con IVA fuera de [0, venta] NUNCA queda sin póliza: 🚨 y mezcla de la orden, propina incluida', async () => {
+    // Composición que el reconciliador SÍ puede producir: el gravado llevaba $50 de descuento y el
+    // superviviente no ⇒ la diferencia de IVA sale NEGATIVA ({'0.16': -689}).
+    const error = jest.spyOn(logger, 'error')
+    const { pago } = await sembrarCobro({
+      venueId,
+      staffId,
+      saleCents: 20000,
+      tipCents: 1000,
+      commissionPercent: 30,
+      items: [
+        { productId: gravado.id, productName: gravado.name, quantity: 1, totalCents: 10000 },
+        { productId: exento.id, productName: exento.name, quantity: 1, totalCents: 10000 },
+      ],
+    })
+    const { refundPaymentId } = await prisma.$transaction(tx =>
+      writeRefundInTx(
+        tx,
+        reembolso(pago.id, { tipRefundCents: 500, fiscalByRateCents: { '0.16': -689 }, provenance: 'PROVIDER_ADJUSTMENT', generation: 1 }),
+      ),
+    )
+    await generatePoliciesForVenue(venueId)
+
+    const polizaRefund = await poliza(`refund:${refundPaymentId}:v1`)
+    expect(cuadra(polizaRefund.lines)).toBe(true)
+    expect(linea(polizaRefund.lines, 'IVA_OUTPUT')!.debitCents).toBe(690) // mezcla de la orden
+    expect(linea(polizaRefund.lines, 'SALES_RETURN')!.debitCents).toBe(9310)
+    expect(linea(polizaRefund.lines, 'TIPS_PAYABLE')!.debitCents).toBe(500)
+    expect(error.mock.calls.some(([msg]) => String(msg).includes('🚨') && String(msg).includes(refundPaymentId))).toBe(true)
+    error.mockRestore()
+  })
 })

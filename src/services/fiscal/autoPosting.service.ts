@@ -66,7 +66,7 @@ export interface GenerateResult {
   cogsCents?: number
 }
 
-interface OrderItemRow {
+export interface OrderItemRow {
   quantity: number
   unitPrice: Prisma.Decimal
   discountAmount: Prisma.Decimal
@@ -92,7 +92,7 @@ interface PaymentRow {
  * truth for reading each product's rate, so auto-posting, the income-statement read-model and the CFDI
  * all group identically. Empty (custom-amount sale) → [], and callers fall back to flat 16%.
  */
-function grossByRateForOrder(items: OrderItemRow[] | undefined): { rate: number; grossCents: number }[] {
+export function grossByRateForOrder(items: OrderItemRow[] | undefined): { rate: number; grossCents: number }[] {
   return grossByRateFromItems(
     (items ?? []).map(it => ({
       unitPrice: Number(it.unitPrice),
@@ -143,10 +143,13 @@ function buildRefundLines(
   const rG = Math.abs(toCents(p.amount))
   const rT = Math.abs(toCents(p.tipAmount))
   const rF = Math.abs(toCents(p.feeAmount)) // normalmente 0: el procesador conserva la comisión
-  const ivaDelAjuste = fiscalByRateCents ? Object.values(fiscalByRateCents).reduce((a, b) => a + b, 0) : null
+  let ivaDelAjuste = fiscalByRateCents ? Object.values(fiscalByRateCents).reduce((a, b) => a + b, 0) : null
   if (ivaDelAjuste !== null && (ivaDelAjuste < 0 || ivaDelAjuste > rG)) {
-    logger.error(`🚨 [autoPosting] ajuste del proveedor ${p.id}: IVA ${ivaDelAjuste} fuera de [0, ${rG}] centavos — no se postea`)
-    return null
+    // Una devolución NUNCA se queda sin póliza (banco, propina y devolución se registran siempre).
+    logger.error(
+      `🚨 [autoPosting] ajuste del proveedor ${p.id}: IVA ${ivaDelAjuste} fuera de [0, ${rG}] centavos — se postea con la mezcla de la orden`,
+    )
+    ivaDelAjuste = null
   }
   // Sin ajuste: IVA por tasa real de la orden (espejo de la venta) — cuadra al centavo.
   const { netCents, taxCents } =
