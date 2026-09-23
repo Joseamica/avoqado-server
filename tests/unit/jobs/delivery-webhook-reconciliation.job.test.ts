@@ -467,6 +467,18 @@ describe('DeliveryWebhookReconciliationJob', () => {
       expect(result.reprocessed).toBe(1)
     })
 
+    it('🔴 un cambio de pedido RECONCILIADO cuenta como resuelto: no agenda backoff', async () => {
+      // El procesador ya marcó el evento PROCESSED; si el job no reconoce el desenlace lo trata
+      // como fallo transitorio y agenda un reintento de algo que ya terminó.
+      mockedFindMany.mockResolvedValueOnce([eventoUber({ eventType: 'order.fulfillment_issues.resolved' })]).mockResolvedValueOnce([])
+      mockedProcessUber.mockResolvedValueOnce({ outcome: 'RECONCILED', orderId: 'ord_u' })
+
+      const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+      expect(result.reprocessed).toBe(1)
+      expect(mockedUpdate).not.toHaveBeenCalled()
+    })
+
     it('🔴 pedido que Uber YA CANCELÓ: es terminal, no se reintenta más', async () => {
       // Medido el 2026-08-20: pasado el plazo Uber responde "The order is no longer active".
       // Reintentar no lo resucita — sólo ocuparía un lugar del lote cada 2 minutos.

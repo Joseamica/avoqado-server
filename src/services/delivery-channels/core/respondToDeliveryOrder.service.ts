@@ -71,6 +71,8 @@ async function conReserva(
   op: OperacionDeReparto,
   llamar: () => Promise<ActionResult>,
   aplicar?: (tx: Prisma.TransactionClient, r: ActionResult) => Promise<unknown>,
+  /** Se revisa YA con la reserva en mano: lo que otro terminó entre la lectura y la reserva no se repite. */
+  yaHecho?: () => Promise<boolean>,
 ): Promise<Salida> {
   const reserva = await tomarReserva(orderId, op)
   if (!reserva.ok) {
@@ -86,6 +88,7 @@ async function conReserva(
     // Con la reserva en mano nadie abre un retiro nuevo: lo que haya aquí ya estaba en curso.
     const retiros = await prisma.deliveryLineAction.count({ where: { orderId, status: { in: ['PENDING', 'UNCERTAIN'] } } })
     if (retiros > 0) return { tipo: 'BLOQUEADA', respuesta: { outcome: 'LINE_ACTION_IN_PROGRESS' } }
+    if (yaHecho && (await yaHecho())) return { tipo: 'BLOQUEADA', respuesta: { outcome: 'ALREADY_DONE' } }
 
     const r = await llamar()
     const aTiempo = await withDeliveryOrderLock(orderId, async tx => {
@@ -209,6 +212,8 @@ export async function markDeliveryOrderReady(venueId: string, orderId: string): 
       esEvidenciaHttp(r.status)
         ? tx.order.updateMany({ where: { id: orderId, readyReportedAt: null }, data: { readyReportedAt: new Date() } })
         : Promise.resolve(),
+    // El 2xx del bump pudo acreditarse entre la lectura de arriba y la reserva: no se manda otro /ready.
+    async () => Boolean((await prisma.order.findUnique({ where: { id: orderId }, select: { readyReportedAt: true } }))?.readyReportedAt),
   )
   // Reserva tomada: el aviso se omite y `readyReportedAt` queda nulo para que el job lo reintente.
   if (s.tipo === 'BLOQUEADA') return s.respuesta

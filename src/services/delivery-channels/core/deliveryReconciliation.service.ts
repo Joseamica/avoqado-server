@@ -13,7 +13,7 @@
  * reclasificar IVA sin movimiento de dinero. Esos casos quedan bloqueados y visibles
  * (`Order.deliveryReconcileBlocked`) hasta que una persona decida.
  */
-import { PaymentSource, Prisma, TransactionStatus } from '@prisma/client'
+import { OrderStatus, PaymentSource, Prisma, TransactionStatus } from '@prisma/client'
 
 import logger from '@/config/logger'
 import { grossByRateForOrder } from '@/services/fiscal/autoPosting.service'
@@ -28,7 +28,7 @@ import { contexto } from './respondToDeliveryOrder.service'
 import type { NormalizedDeliveryOrder } from './types'
 
 export type ResultadoReconciliacion = {
-  outcome: 'REFUNDED' | 'NO_DELTA' | 'FISCAL_PENDING' | 'BLOCKED_INCREASE' | 'NO_ACTIONS' | 'READ_FAILED'
+  outcome: 'REFUNDED' | 'NO_DELTA' | 'FISCAL_PENDING' | 'BLOCKED_INCREASE' | 'NO_ACTIONS' | 'READ_FAILED' | 'ORDER_CANCELLED'
 }
 
 /** ponytail: el candado se sostiene durante UNA lectura acotada; el tx del candado vence a los 15 s. */
@@ -67,8 +67,14 @@ export async function reconcileDeliveryOrderFromProvider(
   // ponytail: se mide ANTES de pedir el tx, así la espera de conexión cuenta como gastada (conservador).
   const inicio = Date.now()
   return withDeliveryOrderLock(orderId, async tx => {
-    const orden = await tx.order.findUnique({ where: { id: orderId }, select: { venueId: true, deliveryReconcileBlocked: true } })
+    const orden = await tx.order.findUnique({
+      where: { id: orderId },
+      select: { venueId: true, deliveryReconcileBlocked: true, status: true },
+    })
     if (!orden) return { outcome: 'READ_FAILED' as const }
+    // Una venta cancelada ya no existe como venta: compensarla escribiría un REFUND sobre dinero que
+    // no se cuenta. No se toca nada — ni retiros ni acciones (se revalida con la fila bloqueada abajo).
+    if (orden.status === OrderStatus.CANCELLED) return { outcome: 'ORDER_CANCELLED' as const }
     const venueId = orden.venueId
     const ctx = await contexto(venueId, orderId, tx)
     if (!ctx || typeof ctx.adapter.fetchOrder !== 'function') {
@@ -107,6 +113,9 @@ export async function reconcileDeliveryOrderFromProvider(
     // reparto. Sin esto, Δ se calcula sin él y el MISMO renglón se compensa dos veces. Orden de
     // candados: reparto → Order → Payment, el mismo de `writeRefundInTx`.
     if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) return { outcome: 'READ_FAILED' as const }
+    // Con la fila bloqueada: una cancelación que entró durante la lectura también frena el dinero.
+    const vigente = await tx.order.findUnique({ where: { id: orderId }, select: { status: true } })
+    if (vigente?.status === OrderStatus.CANCELLED) return { outcome: 'ORDER_CANCELLED' as const }
 
     const filas = await tx.orderItem.findMany({
       where: { orderId },

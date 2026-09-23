@@ -15,6 +15,9 @@ import { uberAdapter } from '@/services/delivery-channels/providers/uber-eats/ub
 import { processUberEvent } from '@/services/delivery-channels/providers/uber-eats/uber.eventProcessor'
 import type { NormalizedDeliveryItem, NormalizedDeliveryOrder, NormalizedDeliveryPayment } from '@/services/delivery-channels/core/types'
 import { DeliveryLineActionReconcilerJob } from '@/jobs/delivery-line-action-reconciler.job'
+import * as deliveryOrderLock from '@/services/delivery-channels/core/deliveryOrderLock'
+import * as respuestas from '@/services/delivery-channels/core/respondToDeliveryOrder.service'
+import { utcTs } from '@/utils/sqlDates'
 import { listDeliveryLineActions } from '@/services/mobile/kdsOutOfStock.mobile.service'
 
 type Renglon = { linea: string; nombre: string; precio: string }
@@ -109,6 +112,9 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
   const lecturasDe = (ext: string) => (uberAdapter.fetchOrder as jest.Mock).mock.calls.filter(c => c[0] === ext).length
   const reembolsos = (orderId: string) => prisma.payment.findMany({ where: { orderId, type: 'REFUND' } })
   const correr = (job = new DeliveryLineActionReconcilerJob()) => job.runOnce()
+  /** Sin escrituras en más de 24 h: la acción deja de ser «reciente» para el barrido. */
+  const dormir = (ids: string[]) =>
+    prisma.$executeRaw`UPDATE "DeliveryLineAction" SET "updatedAt" = ${utcTs(hace(30 * 60 * MIN))} WHERE id = ANY(${ids}::text[])`
 
   beforeAll(async () => {
     const org = await prisma.organization.create({
@@ -122,7 +128,9 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
     })
   })
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    // El barrido no distingue venue: cada prueba arranca sin acciones de las anteriores.
+    await prisma.deliveryLineAction.deleteMany({ where: { venueId } })
     fotos = new Map()
     // Hermético: nada sale a la red. El GET contesta la foto sembrada; si no hay, truena.
     jest.spyOn(uberAdapter, 'fetchOrder').mockImplementation(async (id: string) => {
@@ -237,19 +245,28 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
       resolvedAt: hace(25 * 60 * MIN),
     })
     await accion(nueva.order, nueva.ext, nueva.item.b.id, 'b', { status: 'CONFIRMED', resolvedAt: hace(60 * MIN) })
+    // Una UNCERTAIN sobre una orden BLOQUEADA no entra al barrido: la alerta es lo que la deja ver.
+    const bloqueada = await sembrar()
+    await prisma.order.update({ where: { id: bloqueada.order.id }, data: { deliveryReconcileBlocked: 'INCREASE_UNSUPPORTED' } })
+    const u = await accion(bloqueada.order, bloqueada.ext, bloqueada.item.b.id, 'b', {
+      status: 'UNCERTAIN',
+      lastAttemptAt: hace(25 * 60 * MIN),
+    })
     const gritos = jest.spyOn(logger, 'error')
 
     await correr()
     await correr()
 
     const alertas = await prisma.activityLog.findMany({ where: { venueId, action: 'DELIVERY_ITEM_REMOVAL_UNREFLECTED' } })
-    expect(alertas).toHaveLength(1) // una sola vez, aunque el barrido pase de nuevo
-    expect(alertas[0]).toMatchObject({ entity: 'DeliveryLineAction', entityId: a.id })
-    expect(gritos.mock.calls.filter(([m]) => String(m).startsWith('🚨') && String(m).includes('sin reflejar'))).toHaveLength(1)
+    // Una sola vez cada una, aunque el barrido pase de nuevo.
+    expect(alertas.map(x => x.entityId).sort()).toEqual([a.id, u.id].sort())
+    expect(alertas.every(x => x.entity === 'DeliveryLineAction')).toBe(true)
+    expect(gritos.mock.calls.filter(([m]) => String(m).startsWith('🚨') && String(m).includes('sin reflejar'))).toHaveLength(2)
     // El MCP lo muestra como «retiro sin reflejar en Uber» (spec §3.4).
     const { items } = await listDeliveryLineActions(venueId, { limit: 100 })
     expect(items.find(i => i.lineId === 'b' && i.orderId === vieja.order.id)?.unreflectedInProvider).toBe(true)
     expect(items.find(i => i.orderId === nueva.order.id)?.unreflectedInProvider).toBe(false)
+    expect(items.find(i => i.orderId === bloqueada.order.id)?.unreflectedInProvider).toBe(true) // lo mismo que la alerta
   })
 
   it('reservas huerfanas de mas de 2 min se limpian', async () => {
@@ -344,6 +361,142 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
     expect((await prisma.order.findUniqueOrThrow({ where: { id: s.order.id } })).readyReportedAt).toBeNull()
   })
 
+  it('las dormidas ROTAN: dos pasadas alcanzan a las 25 aunque el lote sea de 20', async () => {
+    const dormidas: Array<Awaited<ReturnType<typeof sembrar>>> = []
+    for (let i = 0; i < 25; i++) dormidas.push(await sembrar())
+    const acciones: Array<{ id: string }> = []
+    for (const d of dormidas) acciones.push(await accion(d.order, d.ext, d.item.b.id, 'b', { status: 'CONFIRMED' }))
+    await dormir(acciones.map(x => x.id))
+    const leidas = () => new Set(dormidas.filter(d => lecturasDe(d.ext) > 0).map(d => d.ext))
+
+    const job = new DeliveryLineActionReconcilerJob()
+    await correr(job)
+    expect(leidas().size).toBe(20)
+    await correr(job)
+
+    expect(leidas().size).toBe(25) // sin el cursor, la 2.ª pasada vuelve a las mismas 20
+  })
+
+  it('una acción RECIENTE entra en su primer tick aunque haya más de 20 dormidas', async () => {
+    const dormidas: Array<Awaited<ReturnType<typeof sembrar>>> = []
+    for (let i = 0; i < 22; i++) dormidas.push(await sembrar())
+    const viejas: Array<{ id: string }> = []
+    for (const d of dormidas) viejas.push(await accion(d.order, d.ext, d.item.b.id, 'b', { status: 'CONFIRMED' }))
+    await dormir(viejas.map(x => x.id))
+    const fresca = await sembrar() // su id es el mayor: por id, iría al final de la fila
+    await accion(fresca.order, fresca.ext, fresca.item.b.id, 'b', { status: 'UNCERTAIN', lastAttemptAt: hace(3 * MIN) })
+
+    await correr()
+
+    expect(lecturasDe(fresca.ext)).toBe(1)
+  })
+
+  it('una DORMIDA que no avanza suma a la racha y espera; una reciente que no avanza, no', async () => {
+    const dormida = await sembrar()
+    const reciente = await sembrar()
+    const d = await accion(dormida.order, dormida.ext, dormida.item.b.id, 'b', { status: 'CONFIRMED' })
+    await accion(reciente.order, reciente.ext, reciente.item.b.id, 'b', { status: 'CONFIRMED' })
+    await dormir([d.id])
+    const rachaDe = (orderId: string) =>
+      prisma.activityLog.findMany({ where: { entity: 'Order', entityId: orderId, action: 'DELIVERY_RECONCILE_ERROR' } })
+
+    const job = new DeliveryLineActionReconcilerJob()
+    for (let i = 0; i < 4; i++) await correr(job)
+
+    const racha = await rachaDe(dormida.order.id)
+    expect(racha.map(x => (x.data as { error: string }).error)).toEqual(['SIN_AVANCE', 'SIN_AVANCE', 'SIN_AVANCE'])
+    expect(lecturasDe(dormida.ext)).toBe(3) // la 4.ª pasada ya la saltó en SQL
+    expect(lecturasDe(reciente.ext)).toBe(4)
+    expect(await rachaDe(reciente.order.id)).toHaveLength(0)
+  })
+
+  it('una venta CANCELADA no mueve dinero: la reconciliación la rechaza y el barrido no la toma', async () => {
+    const s = await sembrar()
+    const a = await accion(s.order, s.ext, s.item.b.id, 'b', { status: 'CONFIRMED' })
+    fotos.set(s.ext, s.foto(['a'], '150.00')) // compensaría $50 si no estuviera cancelada
+    await prisma.order.update({ where: { id: s.order.id }, data: { status: 'CANCELLED' } })
+
+    const r = await reconciliacion.reconcileDeliveryOrderFromProvider(s.order.id, { trigger: 'JOB' })
+
+    expect(r.outcome).toBe('ORDER_CANCELLED')
+    expect(lecturasDe(s.ext)).toBe(0)
+    expect(await reembolsos(s.order.id)).toHaveLength(0)
+    expect(await prisma.deliveryLineAction.findUniqueOrThrow({ where: { id: a.id } })).toMatchObject({
+      status: 'CONFIRMED',
+      settlement: 'PENDING',
+    })
+    expect((await prisma.orderItem.findUniqueOrThrow({ where: { id: s.item.b.id } })).removedAt).toBeNull()
+
+    const espia = jest.spyOn(reconciliacion, 'reconcileDeliveryOrderFromProvider')
+    await correr()
+    expect(espia.mock.calls.filter(c => c[0] === s.order.id)).toHaveLength(0)
+  })
+
+  it('un PROGRAMADO colocado hace más de 24 h también reintenta su listo (manda la comanda)', async () => {
+    const s = await sembrar()
+    await prisma.order.update({ where: { id: s.order.id }, data: { createdAt: hace(30 * 60 * MIN) } })
+    await prisma.kdsOrder.updateMany({ where: { orderId: s.order.id }, data: { status: KdsOrderStatus.COMPLETED } })
+
+    await correr()
+
+    expect(uberAdapter.markOrderReady).toHaveBeenCalledWith(s.ext, link.externalLocationId)
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: s.order.id } })).readyReportedAt).not.toBeNull()
+  })
+
+  it('un retiro en curso deja fuera el reintento del listo (no gasta reservas)', async () => {
+    const s = await sembrar()
+    await accion(s.order, s.ext, s.item.b.id, 'b', { status: 'UNCERTAIN', lastAttemptAt: hace(3 * MIN) })
+    await prisma.kdsOrder.updateMany({ where: { orderId: s.order.id }, data: { status: KdsOrderStatus.COMPLETED } })
+    const espia = jest.spyOn(respuestas, 'markDeliveryOrderReady')
+
+    await correr()
+
+    expect(espia.mock.calls.filter(c => c[1] === s.order.id)).toHaveLength(0)
+  })
+
+  it('el listo que otro acreditó entre la lectura y la reserva no se manda dos veces', async () => {
+    const s = await sembrar()
+    const real = deliveryOrderLock.tomarReserva
+    jest.spyOn(deliveryOrderLock, 'tomarReserva').mockImplementation(async (orderId, op, tx) => {
+      // El 2xx del bump se acredita justo antes de que esta operación tome la reserva.
+      await prisma.order.update({ where: { id: orderId }, data: { readyReportedAt: new Date() } })
+      return real(orderId, op, tx)
+    })
+
+    const r = await respuestas.markDeliveryOrderReady(venueId, s.order.id)
+
+    expect(r.outcome).toBe('ALREADY_DONE')
+    expect(uberAdapter.markOrderReady).not.toHaveBeenCalled()
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: s.order.id } })).deliveryOpToken).toBeNull()
+  })
+
+  it('un pedido sin canal que avise «listo» no se reevalúa en toda la ventana ni cuenta como reintento', async () => {
+    const s = await sembrar()
+    await prisma.order.update({ where: { id: s.order.id }, data: { deliveryChannelLinkId: null } })
+    await prisma.kdsOrder.updateMany({ where: { orderId: s.order.id }, data: { status: KdsOrderStatus.COMPLETED } })
+    // Los «listos» pendientes de pruebas anteriores no deben entrar al contador de esta pasada.
+    await prisma.order.updateMany({ where: { venueId, id: { not: s.order.id } }, data: { readyReportedAt: new Date() } })
+    const espia = jest.spyOn(respuestas, 'markDeliveryOrderReady')
+
+    const job = new DeliveryLineActionReconcilerJob()
+    const primera = await correr(job)
+    await correr(job)
+
+    expect(espia.mock.calls.filter(c => c[1] === s.order.id)).toHaveLength(1)
+    expect(primera.listos).toBe(0)
+  })
+
+  it('los índices que sirven al barrido existen', async () => {
+    const idx = await prisma.$queryRaw<{ indexname: string }[]>`
+      SELECT indexname FROM pg_indexes
+      WHERE indexname IN ('KdsOrder_orderId_idx', 'KdsOrder_delivery_done_updatedAt_idx', 'Order_deliveryOpInFlightAt_pending_idx')`
+    expect(idx.map(i => i.indexname).sort()).toEqual([
+      'KdsOrder_delivery_done_updatedAt_idx',
+      'KdsOrder_orderId_idx',
+      'Order_deliveryOpInFlightAt_pending_idx',
+    ])
+  })
+
   describe('FULFILLMENT_CHANGED', () => {
     const evento = (ext: string) =>
       prisma.deliveryOrderEvent.create({
@@ -373,6 +526,7 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
       expect(r.outcome).toBe('FAILED')
       const ev = await prisma.deliveryOrderEvent.findUniqueOrThrow({ where: { id: eventoId } })
       expect(ev.status).toBe('FAILED') // hoy queda PROCESSED aunque el GET truene
+      expect(ev.externalOrderId).toBe(s.ext) // el evento sigue nombrando al pedido de Uber
     })
 
     it('FULFILLMENT_CHANGED exitoso propaga removedAt a TODAS las comandas y liquida', async () => {

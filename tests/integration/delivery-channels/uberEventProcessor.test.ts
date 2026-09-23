@@ -545,19 +545,22 @@ describe('procesador de eventos de Uber: aviso → pedido → venta aceptada', (
       // Antes: se guardaba el pedido nuevo y se gritaba, pero la venta seguía reportando lo que el
       // cliente ya no pagó (spec H11). Ahora pasa por la MISMA reconciliación que el retiro del KDS;
       // su dinero se prueba en `lineActionReconciler.test.ts` y `reconciliacionDinero.test.ts`.
-      const existente = await prisma.order.findUniqueOrThrow({
-        where: { venueId_externalId: { venueId, externalId: `UBER_EATS:${pedidoReal.id}` } },
-      })
-      const lectura = jest.spyOn(uberAdapter, 'fetchOrder').mockResolvedValue(pedidoReal)
+      // Un pedido propio: el de `pedidoReal` ya lo cancelaron las pruebas de arriba, y una venta
+      // cancelada no se reconcilia (no se lee al proveedor).
+      const propio = { ...pedidoReal, id: `fc-${Date.now()}` }
+      const idN = `ev-fc-alta-${Date.now()}`
+      const alta = await processUberEvent(await nuevoEvento(idN, aviso(idN, propio.id)), { ...deps, fetchOrder: async () => propio })
+      const existente = await prisma.order.findUniqueOrThrow({ where: { id: alta.orderId! } })
+      const lectura = jest.spyOn(uberAdapter, 'fetchOrder').mockResolvedValue(propio)
       const id = `ev-fulfill-${Date.now()}`
       try {
-        const r = await processUberEvent(await nuevoEvento(id, avisoTipo(id, 'order.fulfillment_issues.resolved')), deps)
+        const r = await processUberEvent(await nuevoEvento(id, avisoTipo(id, 'order.fulfillment_issues.resolved', propio.id)), deps)
 
         expect(r).toMatchObject({ outcome: 'RECONCILED', orderId: existente.id })
-        expect(lectura).toHaveBeenCalledWith(pedidoReal.id, expect.anything())
+        expect(lectura).toHaveBeenCalledWith(propio.id, expect.anything())
         const ev = await prisma.deliveryOrderEvent.findFirstOrThrow({ where: { externalEventId: id } })
         expect(ev.status).toBe(DeliveryOrderEventStatus.PROCESSED)
-        expect(await prisma.order.count({ where: { venueId, externalId: `UBER_EATS:${pedidoReal.id}` } })).toBe(1) // no crea otra venta
+        expect(await prisma.order.count({ where: { venueId, externalId: `UBER_EATS:${propio.id}` } })).toBe(1) // no crea otra venta
       } finally {
         lectura.mockRestore()
       }

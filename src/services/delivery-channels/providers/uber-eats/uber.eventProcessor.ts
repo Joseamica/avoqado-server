@@ -177,6 +177,8 @@ export async function processUberEvent(eventRowId: string, deps: UberProcessDeps
       await markEventResult(eventRowId, DeliveryOrderEventStatus.PROCESSED)
       return { outcome: 'NOT_AN_ORDER' }
     }
+    // El evento nombra al pedido de Uber pase lo que pase: un FAILED sin esto sólo lo guarda en el payload.
+    await prisma.deliveryOrderEvent.update({ where: { id: eventRowId }, data: { externalOrderId: identidad.orderId } })
     if (!evento.channelLink) {
       await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, undefined, 'SIN_VINCULO')
       return { outcome: 'ORPHANED' }

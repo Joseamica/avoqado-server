@@ -36,8 +36,24 @@ import { formatKdsOrderConVenta, type KdsOrderResponse } from './kds.mobile.serv
 
 /** Cuánto espera una persona antes de poder reintentar un aviso que el proveedor no confirmó (§3.5). */
 export const REINTENTO_TRAS_MS = 15 * 60_000
-/** Spec §3.4: un retiro CONFIRMED que Uber sigue sin reflejar a las 24 h es «retiro sin reflejar en Uber». */
+/** Spec §3.4: un retiro que el proveedor sigue sin reflejar a las 24 h es «retiro sin reflejar en Uber». */
 export const RETIRO_SIN_REFLEJAR_MS = 24 * 3_600_000
+
+/**
+ * La MISMA condición que la alerta de 24 h del barrido (`delivery-line-action-reconciler.job.ts`
+ * la espeja en SQL): un CONFIRMED cuyo dinero no se ha liquidado, o un UNCERTAIN sobre una orden
+ * bloqueada (fuera del barrido, esperando a una persona), con 24 h en ese estado.
+ */
+export function retiroSinReflejar(
+  a: { status: string; settlement: string; resolvedAt: Date | null; lastAttemptAt: Date },
+  ordenBloqueada: boolean,
+  ahora = Date.now(),
+): boolean {
+  const esperando =
+    (a.status === 'CONFIRMED' && (a.settlement === 'PENDING' || a.settlement === 'ACCREDITED')) ||
+    (a.status === 'UNCERTAIN' && ordenBloqueada)
+  return esperando && ahora - (a.resolvedAt ?? a.lastAttemptAt).getTime() >= RETIRO_SIN_REFLEJAR_MS
+}
 const CUERPO_MAX = 2_000
 /** Texto observado el 27-ago y documentado en el adaptador: tras «listo» el proveedor ya no modifica. */
 const CAUSA_TERMINAL_409 = /already been marked ready|cannot modify order/i
@@ -447,14 +463,24 @@ export async function listDeliveryLineActions(venueId: string, opts: { orderId?:
       resolvedAt: true,
     },
   })
+  const pagina = filas.slice(0, take)
+  const inciertas = [...new Set(pagina.filter(f => f.status === 'UNCERTAIN').map(f => f.orderId))]
+  const bloqueadas = new Set(
+    inciertas.length === 0
+      ? []
+      : (
+          await prisma.order.findMany({
+            where: { venueId, id: { in: inciertas }, deliveryReconcileBlocked: { not: null } },
+            select: { id: true },
+            take: inciertas.length,
+          })
+        ).map(o => o.id),
+  )
   return {
-    items: filas.slice(0, take).map(f => ({
+    items: pagina.map(f => ({
       ...f,
       canRetryAt: f.status === 'UNCERTAIN' ? new Date(f.lastAttemptAt.getTime() + REINTENTO_TRAS_MS) : null,
-      unreflectedInProvider:
-        f.status === 'CONFIRMED' &&
-        (f.settlement === 'PENDING' || f.settlement === 'ACCREDITED') &&
-        Date.now() - (f.resolvedAt ?? f.lastAttemptAt).getTime() >= RETIRO_SIN_REFLEJAR_MS,
+      unreflectedInProvider: retiroSinReflejar(f, bloqueadas.has(f.orderId)),
     })),
     hasMore: filas.length > take,
   }

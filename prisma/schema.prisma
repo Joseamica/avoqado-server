@@ -15046,6 +15046,9 @@ model KdsOrder {
   @@index([venueId, status])
   /// Para "¿qué falta imprimir aquí?" sin recorrer la tabla entera.
   @@index([venueId, printedAt])
+  /// Las comandas de una venta (cancelar un pedido, el barrido del KDS de Uber). Se construye
+  /// CONCURRENTLY en su propia migración: KdsOrder se escribe en cada comanda.
+  @@index([orderId])
 }
 
 model KdsOrderItem {
