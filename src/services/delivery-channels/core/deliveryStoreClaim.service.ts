@@ -175,7 +175,7 @@ export async function finalizarTienda(
         activationOwner: null,
       },
     })
-    const outcome = count === 1 ? 'ACTIVATED' : 'REVOKED_MEANWHILE'
+    const outcome: 'ACTIVATED' | 'REVOKED_MEANWHILE' = count === 1 ? 'ACTIVATED' : 'REVOKED_MEANWHILE'
     if (count === 0) await soltar(tx, intent.id, owner, storeId)
     await conResultado(tx, intent.id, storeId, outcome)
     return { outcome }
