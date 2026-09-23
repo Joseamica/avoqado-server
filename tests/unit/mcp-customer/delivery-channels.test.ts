@@ -15,6 +15,7 @@ const mockVenueFindUnique = jest.fn()
 const mockVenueStartOfDay = jest.fn()
 const mockHasAdapter = jest.fn()
 const mockReservationFindUnique = jest.fn()
+const mockIntentFindMany = jest.fn(async (..._a: unknown[]): Promise<unknown[]> => [])
 
 jest.mock('@/services/access/basePlan.service', () => ({
   venueHasFeatureAccess: (...a: unknown[]) => mockHasFeatureAccess(...(a as [])),
@@ -39,6 +40,7 @@ jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     deliveryChannelLink: { findMany: (...a: unknown[]) => mockLinkFindMany(...(a as [])) },
+    deliveryConnectIntent: { findMany: (...a: unknown[]) => mockIntentFindMany(...(a as [])) },
     order: { groupBy: (...a: unknown[]) => mockOrderGroupBy(...(a as [])) },
     venue: { findUnique: (...a: unknown[]) => mockVenueFindUnique(...(a as [])) },
     // `resolveDeliveryHours` cae al horario del módulo de RESERVAS cuando el canal no
@@ -173,6 +175,43 @@ describe('delivery_channels', () => {
     ])
     // money stays in pesos major units, never cents
     expect(typeof out.todayByChannel[0].totalPesos).toBe('number')
+  })
+
+  it('Tarea 17 (KDS de Uber): muestra los intentos recientes de conectar tiendas, sin el token', async () => {
+    mockHasFeatureAccess.mockResolvedValueOnce(true)
+    mockVenueFindUnique.mockResolvedValueOnce({ timezone: 'America/Mexico_City' })
+    mockLinkFindMany.mockResolvedValueOnce([])
+    mockOrderGroupBy.mockResolvedValueOnce([])
+    mockIntentFindMany.mockResolvedValueOnce([
+      {
+        id: 'int1',
+        provider: 'UBER_EATS',
+        state: 'CONSUMED',
+        failureReason: null,
+        createdAt: new Date('2026-09-22T10:00:00Z'),
+        expiresAt: new Date('2026-09-22T10:10:00Z'),
+        selectionJson: ['s1', 's2'],
+        resultsJson: { s1: { outcome: 'ACTIVATED', at: 'x' }, s2: { outcome: 'OTHER_VENUE', at: 'x' } },
+      },
+    ])
+
+    const out = parse(await call({ venueId: 'v1' }))
+
+    expect(out.conexionesRecientes).toEqual([
+      {
+        id: 'int1',
+        provider: 'UBER_EATS',
+        estado: 'CONSUMED',
+        motivo: null,
+        creado: '2026-09-22T10:00:00.000Z',
+        vence: '2026-09-22T10:10:00.000Z',
+        tiendasElegidas: 2,
+        resultadoPorTienda: { s1: 'ACTIVATED', s2: 'OTHER_VENUE' },
+      },
+    ])
+    const consulta = mockIntentFindMany.mock.calls[0][0] as { where: unknown; take: number; select: Record<string, unknown> }
+    expect(consulta).toMatchObject({ where: { venueId: 'v1' }, take: 10 })
+    expect(consulta.select.merchantTokenEnvelope).toBeUndefined()
   })
 
   // ============================================================

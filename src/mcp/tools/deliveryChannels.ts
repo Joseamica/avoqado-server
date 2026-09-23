@@ -16,7 +16,7 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
 
   server.tool(
     'delivery_channels',
-    'Estado de los canales de delivery del venue (Uber Eats/Rappi/DiDi vía Deliverect): canales conectados, estado (activo/pausado), modo de aceptación de pedidos, si su integración YA está lista para operar, último sync de menú, HORARIO en que acepta pedidos (y si es el configurado o un estimado), MARGEN de precios sobre el mostrador, y pedidos de delivery de hoy por canal. Responde "¿cómo van mis canales de delivery? ¿cuántos pedidos de Uber/Rappi hoy? ¿cuál canal ya funciona de verdad? ¿a qué horas acepto pedidos en Uber? ¿qué margen tengo puesto?". Pass venueId.',
+    'Estado de los canales de delivery del venue (Uber Eats/Rappi/DiDi vía Deliverect): canales conectados, estado (activo/pausado), modo de aceptación de pedidos, si su integración YA está lista para operar, último sync de menú, HORARIO en que acepta pedidos (y si es el configurado o un estimado), MARGEN de precios sobre el mostrador, pedidos de delivery de hoy por canal, y los últimos intentos de conectar tiendas de Uber Eats con su resultado por tienda. Responde "¿cómo van mis canales de delivery? ¿cuántos pedidos de Uber/Rappi hoy? ¿cuál canal ya funciona de verdad? ¿a qué horas acepto pedidos en Uber? ¿qué margen tengo puesto? ¿por qué no quedó conectada mi tienda de Uber?". Pass venueId.',
     { venueId: z.string().describe('Venue cuyos canales de delivery leer (debe estar en tu scope)') },
     async ({ venueId }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
@@ -48,6 +48,23 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
       // un estimado, y un estimado presentado como certeza es peor que no tenerlo — nadie lo
       // revisa. Por eso viaja junto con `fuente`, que dice de dónde salió.
       const horarios = new Map(await Promise.all(links.map(async l => [l.id, await resolveDeliveryHours(l)] as const)))
+      // «¿por qué no quedó conectada mi tienda de Uber?»: los últimos intentos de conexión, con el
+      // resultado por tienda. Sólo estado — el token cifrado NUNCA sale del server.
+      const conexiones = await prisma.deliveryConnectIntent.findMany({
+        where: { venueId },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: 10,
+        select: {
+          id: true,
+          provider: true,
+          state: true,
+          failureReason: true,
+          createdAt: true,
+          expiresAt: true,
+          selectionJson: true,
+          resultsJson: true,
+        },
+      })
 
       return text({
         venueId,
@@ -92,6 +109,21 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
               : null,
         })),
         todayByChannel,
+        conexionesRecientes: conexiones.map(c => ({
+          id: c.id,
+          provider: c.provider,
+          estado: c.state,
+          motivo: c.failureReason,
+          creado: c.createdAt.toISOString(),
+          vence: c.expiresAt.toISOString(),
+          tiendasElegidas: Array.isArray(c.selectionJson) ? c.selectionJson.length : 0,
+          resultadoPorTienda: Object.fromEntries(
+            Object.entries((c.resultsJson as Record<string, { outcome?: string }> | null) ?? {}).map(([tienda, r]) => [
+              tienda,
+              r?.outcome ?? null,
+            ]),
+          ),
+        })),
         // `porcentaje: null` con `estado: SIN_DATOS` significa que aún no llegan pedidos —
         // NO que la tasa sea 0. Reportar 0% sin datos dispararía alarma en cada negocio
         // que todavía no vende por ahí, y las alarmas falsas enseñan a ignorarlas.

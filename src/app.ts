@@ -42,7 +42,7 @@ import { eventLoopGuardMiddleware, startEventLoopMonitor } from './middlewares/e
 import webhookRoutes from './routes/webhook.routes'
 import { handleGoogleCalendarWebhook } from './controllers/webhook/google-calendar.webhook.controller'
 import { handleMercadoPagoWebhook } from './controllers/webhook/mercadoPago.webhook.controller'
-import { startUberOAuth, uberOAuthCallback } from './controllers/delivery-channels/uber.oauth.controller'
+import { activarUberOAuth, startUberOAuth, uberOAuthCallback } from './controllers/delivery-channels/uber.oauth.controller'
 import publicRoutes from './routes/public.routes'
 import appUpdateRoutes from './routes/superadmin/appUpdate.routes'
 import settlementReportRoutes from './routes/settlement-report.routes'
@@ -164,6 +164,13 @@ app.use('/api/v1/public', requestLoggerMiddleware, express.json(), cookieParser(
 // dueño autorice aquí; sin este flujo cada alta dependería de un ticket a soporte de Uber.
 app.get('/api/v1/delivery/uber/oauth/start', requestLoggerMiddleware, startUberOAuth)
 app.get('/api/v1/delivery/uber/oauth/callback', requestLoggerMiddleware, uberOAuthCallback)
+// La página de selección de tiendas publica aquí (form HTML): `state2` firmado + las tiendas marcadas.
+app.post(
+  '/api/v1/delivery/uber/oauth/activate',
+  requestLoggerMiddleware,
+  express.urlencoded({ extended: false, limit: '16kb' }),
+  activarUberOAuth,
+)
 
 // Customer-facing MCP OAuth 2.1 Authorization Server: DCR, /authorize (bcrypt consent), /token,
 // /revoke, and discovery metadata — all at the app root (required by the SDK).

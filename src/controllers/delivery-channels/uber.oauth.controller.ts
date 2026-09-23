@@ -6,19 +6,24 @@
  * [doc: developer.uber.com/docs/eats/guides/integration-activation-flows]. Sin este
  * flujo, cada alta dependería de un ticket a soporte de Uber.
  *
- * El token del COMERCIANTE se usa una sola vez y se descarta: tras la activación el
- * acceso es perpetuo vía `client_credentials`, así que guardarlo sería conservar una
- * credencial ajena sin necesidad.
+ * 🔴 El flujo cuelga de una INTENCIÓN de conexión (`DeliveryConnectIntent`, spec §4.1), que
+ * emite una petición AUTENTICADA (`connect-url`) y que se revalida en cada paso. Antes el
+ * `venueId` viajaba suelto por `/start?venueId=…`: cualquiera podía armar el enlace de un
+ * negocio ajeno y conectarle tiendas — o sea, desviarle pedidos reales.
  *
- * ⚠️ Rutas PÚBLICAS (Uber redirige el navegador aquí, sin sesión de Avoqado). Por eso
- * el `state` es obligatorio y se firma: sin él, cualquiera podría disparar el callback.
+ * El token del COMERCIANTE vive cifrado en la intención sólo mientras la activación lo
+ * necesita, y se borra al terminar: tras la activación el acceso es perpetuo vía
+ * `client_credentials`.
+ *
+ * ⚠️ Rutas PÚBLICAS (Uber redirige el navegador aquí, sin sesión de Avoqado). La prueba de
+ * origen es la firma HMAC de la intención, con un propósito por paso.
  */
-import crypto from 'crypto'
 import { Request, Response } from 'express'
 
 import { env } from '@/config/env'
 import logger from '@/config/logger'
 import * as deliveryChannelLinkService from '@/services/delivery-channels/core/deliveryChannelLink.service'
+import * as intents from '@/services/delivery-channels/core/deliveryConnectIntent.service'
 import prisma from '@/utils/prismaClient'
 
 import {
@@ -30,12 +35,9 @@ import {
 import { getWritableStores } from '@/services/delivery-channels/providers/uber-eats/uber.client'
 import { type UberEnvironment } from '@/services/delivery-channels/providers/uber-eats/uber.storeAllowlist'
 
-function environment(): UberEnvironment {
-  return env.UBER_ENVIRONMENT as UberEnvironment
-}
+const ACTIVATE_PATH = '/api/v1/delivery/uber/oauth/activate'
 
-function credentials(): UberCredentials {
-  const e = environment()
+function credentials(e: UberEnvironment): UberCredentials {
   const clientId = e === 'SANDBOX' ? env.UBER_CLIENT_ID_SANDBOX : env.UBER_CLIENT_ID_PRODUCTION
   const clientSecret = e === 'SANDBOX' ? env.UBER_CLIENT_SECRET_SANDBOX : env.UBER_CLIENT_SECRET_PRODUCTION
   if (!clientId || !clientSecret) {
@@ -48,79 +50,6 @@ function credentials(): UberCredentials {
 function redirectUri(req: Request): string {
   const base = env.UBER_OAUTH_REDIRECT_BASE || `${req.protocol}://${req.get('host')}`
   return `${base}/api/v1/delivery/uber/oauth/callback`
-}
-
-/**
- * Llave para firmar el `state`. LANZA si falta.
- *
- * 🔴 Antes caía a la cadena literal `'sin-llave'`, que está en el código fuente: cualquiera
- * podía forjar un `state` válido. Un default de firma NUNCA puede ser público. Hallado por
- * auditoría externa el 2026-08-20.
- */
-function stateKey(): string {
-  const key = env.UBER_WEBHOOK_SIGNING_KEY
-  if (!key) {
-    throw new Error('Falta UBER_WEBHOOK_SIGNING_KEY: sin ella no se puede firmar el state del OAuth de forma segura.')
-  }
-  return key
-}
-
-const STATE_TTL_MS = 10 * 60 * 1000
-
-/**
- * `state` de un solo uso, con caducidad.
- *
- * ⚠️ El registro vive en memoria del proceso. Es válido mientras producción corra UNA sola
- * instancia (`.claude/rules/una-sola-instancia.md`); al pasar a varias hay que moverlo a
- * Redis o a una tabla, igual que el challenge store de auth móvil.
- */
-const statesEmitidos = new Map<string, number>()
-
-function signState(payload: string): string {
-  const mac = crypto.createHmac('sha256', stateKey()).update(payload).digest('hex').slice(0, 32)
-  return `${payload}.${mac}`
-}
-
-/**
- * @param venueId A qué negocio de Avoqado pertenecen las tiendas que el comercio va a
- *   autorizar. Viaja DENTRO del state firmado y NO como parámetro suelto — si viniera del
- *   query, cualquiera podría enlazar las tiendas de un comercio al negocio que quisiera.
- *   El HMAC es lo que hace que sólo nosotros podamos emitirlo.
- */
-function issueState(venueId?: string): string {
-  const ahora = Date.now()
-  for (const [k, exp] of statesEmitidos) if (exp < ahora) statesEmitidos.delete(k)
-
-  // El venueId va en el payload firmado. Sin `:` cuando no hay venue, para que los states
-  // viejos (sin venue) sigan siendo válidos y una sesión en curso no se rompa al desplegar.
-  const nonce = `${crypto.randomBytes(12).toString('hex')}.${ahora}${venueId ? `.${venueId}` : ''}`
-  const state = signState(nonce)
-  statesEmitidos.set(state, ahora + STATE_TTL_MS)
-  return state
-}
-
-/** El venue que viajó dentro del state, si venía uno. Sólo se lee DESPUÉS de verificar la firma. */
-function venueDelState(state: string): string | null {
-  const payload = state.slice(0, state.lastIndexOf('.'))
-  const partes = payload.split('.')
-  return partes.length >= 3 ? partes[2] : null
-}
-
-/** Verifica firma, caducidad y que NO se haya usado. Consume el state al validarlo. */
-function consumeState(state: string): boolean {
-  const i = state.lastIndexOf('.')
-  if (i <= 0) return false
-
-  const esperado = signState(state.slice(0, i))
-  const a = Buffer.from(state)
-  const b = Buffer.from(esperado)
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return false
-
-  // Firma válida no basta: sin esto, UN state robado sirve para siempre (replay).
-  const expira = statesEmitidos.get(state)
-  if (!expira || expira < Date.now()) return false
-  statesEmitidos.delete(state)
-  return true
 }
 
 /**
@@ -145,211 +74,296 @@ code{background:#f2f2f0;padding:2px 6px;border-radius:4px;font-size:14px}
 <h1>${esc(titulo)}</h1>${cuerpo}`
 }
 
-/** Paso 1: manda al comerciante a autorizar. */
+const PIDE_OTRO = 'Pide un enlace nuevo desde el dashboard de Avoqado (Delivery → Conectar Uber Eats).'
+const YA_USADO = page('Este enlace ya se usó o venció', `<p class="bad">Este enlace ya se usó o venció. ${PIDE_OTRO}</p>`)
+
+const MOTIVOS: Record<string, string> = {
+  EXPIRED: `El enlace venció (dura 10 minutos). ${PIDE_OTRO}`,
+  ENVIRONMENT_CHANGED: `La configuración de Uber en Avoqado cambió mientras conectabas. ${PIDE_OTRO}`,
+  CLIENT_ID_CHANGED: `La configuración de Uber en Avoqado cambió mientras conectabas. ${PIDE_OTRO}`,
+  STAFF_NOT_AUTHORIZED:
+    'Quien generó este enlace ya no tiene permiso para conectar canales en este negocio. Pide a un administrador que genere uno nuevo.',
+  PLAN_REQUIRED: 'El envío a domicilio requiere el plan PREMIUM. Actívalo en el dashboard (Configuración → Plan) y genera un enlace nuevo.',
+  TOKEN_UNREADABLE: `No pudimos leer la autorización de Uber que guardamos. ${PIDE_OTRO}`,
+}
+const paginaFallo = (motivo: string) =>
+  page('No se pudo conectar', `<p class="bad">${esc(MOTIVOS[motivo] ?? `${motivo}. ${PIDE_OTRO}`)}</p>`)
+
+const TEXTO_RESULTADO: Record<string, string> = {
+  ACTIVATED: '<span class="ok">conectada</span>',
+  EXCLUDED_BY_ENV: '<span class="bad">excluida por Avoqado</span> — no está en la lista de tiendas habilitadas para conectar.',
+  OTHER_VENUE: '<span class="bad">ya está conectada a otro negocio</span>; contacta a Avoqado.',
+  POS_DATA_FAILED: '<span class="bad">Uber rechazó la activación</span>',
+  [intents.RESULTADO_REINTENTABLE]: '<span class="bad">no se pudo guardar</span>; usa «Reintentar».',
+}
+
+function formularioReintentar(id: string): string {
+  return `<form method="post" action="${ACTIVATE_PATH}"><input type="hidden" name="state2" value="${esc(intents.firmarIntent(id, 'activate'))}">
+<button type="submit">Reintentar</button></form>`
+}
+
+async function responderActivacion(res: Response, id: string, r: intents.ResultadoActivacion): Promise<void> {
+  if (r.estado === 'NO_DISPONIBLE') {
+    res.status(400).send(YA_USADO)
+    return
+  }
+  if (r.estado === 'FAILED') {
+    res.status(403).send(paginaFallo(r.motivo))
+    return
+  }
+  if (r.estado === 'EN_CURSO') {
+    res
+      .status(409)
+      .send(page('Activación en curso', '<p>Ya se están conectando estas tiendas en otra pestaña. Espera unos segundos y recarga.</p>'))
+    return
+  }
+  const tiendas = new Map(
+    (
+      ((await prisma.deliveryConnectIntent.findUnique({ where: { id }, select: { storesJson: true } }))?.storesJson as
+        | intents.TiendaUber[]
+        | null) ?? []
+    ).map(t => [t.id, t]),
+  )
+  const filas = Object.entries(r.resultados).map(
+    ([storeId, x]) =>
+      `<li><strong>${esc(tiendas.get(storeId)?.name ?? '(sin nombre)')}</strong><br><code>${esc(storeId)}</code><br>` +
+      `${TEXTO_RESULTADO[x.outcome] ?? esc(x.outcome)}${x.status ? ` (HTTP ${esc(x.status)})` : ''}</li>`,
+  )
+  if (r.estado === 'CONSUMED') {
+    const todas = Object.values(r.resultados).every(x => x.outcome === 'ACTIVATED')
+    res.status(todas ? 200 : 207).send(page(todas ? 'Avoqado quedó conectado' : 'Conexión con avisos', `<ul>${filas.join('')}</ul>`))
+    return
+  }
+  // INCOMPLETO (un fallo local dejó tiendas sin finalizar) o INTERRUMPIDO (esta ejecución perdió el lease).
+  res
+    .status(r.estado === 'INCOMPLETO' ? 207 : 409)
+    .send(page('La conexión quedó a medias', `<ul>${filas.join('')}</ul><p>Faltan tiendas por terminar.</p>${formularioReintentar(id)}`))
+}
+
+/**
+ * El trabajo por tienda. ⚠️ Versión mínima (Tarea 17): la Tarea 18 la sustituye por la
+ * reclamación atómica antes del HTTP y la finalización por CAS con consentimiento (spec §4.3).
+ */
+const activarTiendaUber: intents.ActivarTienda = async ({ intent, token, storeId, store }) => {
+  const e = intent.environment as UberEnvironment
+  // 🔴 El candado REAL, no uno fabricado al vuelo: autorizar justo la tienda que se va a
+  // escribir anulaba el default-deny. Hallado por auditoría externa el 2026-08-20.
+  const permitidas = getWritableStores(e)
+  if (!permitidas.has(storeId.toLowerCase())) return { outcome: 'EXCLUDED_BY_ENV' }
+
+  const link = await prisma.deliveryChannelLink.findUnique({
+    where: { provider_externalLocationId: { provider: 'UBER_EATS', externalLocationId: storeId } },
+    select: { venueId: true },
+  })
+  // 🔴 Una tienda de OTRO negocio no se toca: activarla sería desviarle sus pedidos.
+  if (link && link.venueId !== intent.venueId) return { outcome: 'OTHER_VENUE' }
+  if (!link) {
+    try {
+      await deliveryChannelLinkService.createChannelLink(
+        intent.venueId,
+        {
+          provider: 'UBER_EATS',
+          externalLocationId: storeId,
+          externalAccountId: store?.name ?? null,
+          orderAcceptanceMode: intent.orderAcceptanceMode,
+        },
+        intent.staffId,
+      )
+    } catch (err) {
+      logger.error('🚨 [UberOAuth] no se pudo crear el canal', { intentId: intent.id, storeId, error: (err as Error).message })
+      return { outcome: intents.RESULTADO_REINTENTABLE }
+    }
+  }
+
+  const activacion = await uberRequest(
+    { environment: e, token, writableStores: permitidas },
+    {
+      method: 'POST',
+      path: `/v1/eats/stores/${encodeURIComponent(storeId)}/pos_data`,
+      storeId,
+      body: {
+        integrator_store_id: intent.venueId,
+        integrator_brand_id: 'avoqado',
+        // 🔴 `is_order_manager` ES EL INTERRUPTOR. Sin él, la tienda queda con
+        // `integration_enabled: true` y todo PARECE bien —el webhook llega, el pedido
+        // se trae, se ingiere con su comanda de cocina— pero `accept_pos_order`
+        // responde `403 user_not_allowed` y Uber cancela a los ~11.5 min. El cliente se
+        // queda sin comida y el log sólo dice "user not allowed".
+        //
+        // Medido con un pedido REAL el 2026-08-20 (`00012fba-…`, "Avoqado Sandbox 1").
+        // Ningún test lo podía atrapar: todos mockean la red.
+        //
+        // ⚠️ NO es `pos_integration_enabled`: ése está DEPRECADO y Uber lo IGNORA en
+        // silencio — se probó mandándolo, el POST devolvió 200 y el flag siguió en
+        // `false`. Lo dice nuestra propia investigación (ANEXO §Flujo
+        // integrator-initiated, paso 4) y se confirmó contra la API real.
+        is_order_manager: true,
+        // AUTO: que Uber no exija que un humano confirme en su app. Nuestro
+        // `orderAcceptanceMode` por canal es quien decide si aceptamos solos.
+        require_manual_acceptance: false,
+      },
+    },
+  )
+  if (activacion.status < 400) return { outcome: 'ACTIVATED' }
+  logger.warn('🛵 [UberOAuth] Uber rechazó pos_data', {
+    intentId: intent.id,
+    storeId,
+    status: activacion.status,
+    cuerpo: activacion.text.slice(0, 200),
+  })
+  return { outcome: 'POS_DATA_FAILED', status: activacion.status }
+}
+
+/** Paso 1: `GET /oauth/start?intent=<id>.<hmac>` — manda al comerciante a autorizar. Ya NO acepta `venueId`. */
 export async function startUberOAuth(req: Request, res: Response): Promise<void> {
   try {
-    const url = buildUberAuthorizeUrl({
-      environment: environment(),
-      clientId: credentials().clientId,
-      redirectUri: redirectUri(req),
-      // `venueId` sólo se acepta de una petición ya autenticada (ver la ruta del dashboard
-      // que lo emite); aquí llega ya validado y se sella dentro del state.
-      state: issueState(typeof req.query.venueId === 'string' ? req.query.venueId : undefined),
-    })
-    res.redirect(url)
+    const id = intents.leerFirma(req.query.intent, 'start')
+    if (!id) {
+      res.status(400).send(page('Enlace inválido', `<p class="bad">Este enlace no es válido. ${PIDE_OTRO}</p>`))
+      return
+    }
+    const intent = await prisma.deliveryConnectIntent.findUnique({ where: { id } })
+    if (!intent || intent.state !== 'CREATED') {
+      res.status(400).send(YA_USADO)
+      return
+    }
+    const motivo = await intents.revalidar(intent)
+    if (motivo) {
+      res.status(403).send(paginaFallo(motivo))
+      return
+    }
+    res.redirect(
+      buildUberAuthorizeUrl({
+        environment: intent.environment as UberEnvironment,
+        clientId: intent.clientId,
+        redirectUri: redirectUri(req),
+        state: intents.firmarIntent(id, 'callback'),
+      }),
+    )
   } catch (e) {
     logger.error('No se pudo iniciar el OAuth de Uber', { error: (e as Error).message })
-    res.status(500).send(page('No se pudo iniciar', `<p class="bad">${(e as Error).message}</p>`))
+    res.status(500).send(page('No se pudo iniciar', `<p class="bad">${esc((e as Error).message)}</p>`))
   }
 }
 
-/** Paso 2: recibe el código, canjea, lista tiendas y activa Avoqado contra cada una. */
+/** Paso 2: recibe el código, canjea, lista tiendas; una ⇒ activa ya, varias ⇒ el dueño palomea. */
 export async function uberOAuthCallback(req: Request, res: Response): Promise<void> {
   const { code, state, error, error_description: desc } = req.query as Record<string, string>
-
-  // 🔴 El `state` se valida ANTES de tocar nada más: sin eso, `error`/`error_description`
-  // de un GET arbitrario llegaban a la respuesta sin haber probado que el flujo nació aquí.
-  // El venue viaja DENTRO del state firmado; se lee antes de consumirlo, pero sólo se usa
-  // después de que `consumeState` haya validado la firma — leerlo no lo autentica.
-  const venueDelFlujo = state ? venueDelState(state) : null
-
-  if (!state || !consumeState(state)) {
-    res
-      .status(400)
-      .send(
-        page('Estado inválido', '<p class="bad">El <code>state</code> no se pudo verificar, ya se usó, o caducó. Reinicia el flujo.</p>'),
-      )
-    return
-  }
-  if (error) {
-    res.status(400).send(page('Uber rechazó la autorización', `<p class="bad"><code>${esc(error)}</code> ${esc(desc)}</p>`))
-    return
-  }
-  if (!code) {
-    res.status(400).send(page('Falta el código', '<p class="bad">Uber no mandó <code>code</code>.</p>'))
-    return
-  }
-
   try {
-    const e = environment()
-    const creds = credentials()
-
-    const userToken = await exchangeUberAuthCode({
-      environment: e,
-      credentials: creds,
-      code,
-      redirectUri: redirectUri(req),
-    })
-
-    // Con el token del COMERCIANTE: sus tiendas, no las nuestras.
-    // uAPI (`/v1/delivery/stores`): es el "Get Stores to User" que la validación de Uber
-    // rastrea (caso 59605086) — el clásico `/v1/eats/stores` ya no cuenta para ellos.
-    const lista = await uberRequest(
-      { environment: e, token: userToken.access_token, writableStores: new Set() },
-      { method: 'GET', path: '/v1/delivery/stores' },
-    )
-
-    // 🔴 Un 401/500 de Uber NO es "no hay tiendas". Antes ambos casos devolvían 200 con el
-    // mismo mensaje, así que un fallo real se leía como éxito vacío.
-    if (lista.status >= 400) {
-      logger.error('Uber falló al listar las tiendas del comerciante', { status: lista.status, cuerpo: lista.text.slice(0, 300) })
+    // 🔴 El `state` se valida ANTES de tocar nada más: sin eso, `error`/`error_description`
+    // de un GET arbitrario llegaban a la respuesta sin haber probado que el flujo nació aquí.
+    const id = intents.leerFirma(state, 'callback')
+    if (!id) {
+      res.status(400).send(page('Estado inválido', `<p class="bad">El <code>state</code> no se pudo verificar. ${PIDE_OTRO}</p>`))
+      return
+    }
+    const intent = await prisma.deliveryConnectIntent.findUnique({ where: { id } })
+    // Un replay del callback muere aquí: el código NUNCA se canjea dos veces.
+    if (!intent || intent.state !== 'CREATED') {
+      res.status(400).send(YA_USADO)
+      return
+    }
+    if (error || !code) {
+      await intents.fallar(id, error ? 'UBER_DENIED' : 'NO_CODE')
       res
-        .status(502)
-        .send(page('Uber no devolvió tus tiendas', `<p class="bad">Uber respondió HTTP ${lista.status}. No se activó nada. Reintenta.</p>`))
+        .status(400)
+        .send(page('Uber no autorizó la conexión', `<p class="bad"><code>${esc(error ?? 'sin código')}</code> ${esc(desc)}</p>`))
+      return
+    }
+    const motivo = await intents.revalidar(intent)
+    if (motivo) {
+      res.status(403).send(paginaFallo(motivo))
+      return
+    }
+    // CAS ANTES de canjear: si dos callbacks llegan juntos, sólo uno pasa de aquí.
+    if (!(await intents.casEstado(id, 'CREATED', 'EXCHANGED'))) {
+      res.status(400).send(YA_USADO)
       return
     }
 
-    // uAPI: cada tienda trae `id`; la familia clásica traía `store_id`. Se aceptan ambos —
-    // un shape inesperado no puede convertir una cuenta con tiendas en "sin tiendas".
-    const tiendas: Array<{ id?: string; store_id?: string; name?: string }> = (lista.json as { stores?: [] })?.stores ?? []
+    const e = intent.environment as UberEnvironment
+    let tiendas: intents.TiendaUber[]
+    let token: string
+    try {
+      token = (await exchangeUberAuthCode({ environment: e, credentials: credentials(e), code, redirectUri: redirectUri(req) }))
+        .access_token
+      // Con el token del COMERCIANTE: sus tiendas, no las nuestras. uAPI (`/v1/delivery/stores`)
+      // es el "Get Stores to User" que la validación de Uber rastrea (caso 59605086).
+      const lista = await uberRequest({ environment: e, token, writableStores: new Set() }, { method: 'GET', path: '/v1/delivery/stores' })
+      // 🔴 Un 401/500 de Uber NO es "no hay tiendas".
+      if (lista.status >= 400) throw new Error(`Uber respondió HTTP ${lista.status} al listar las tiendas`)
+      // uAPI trae `id`; la familia clásica traía `store_id`. Se aceptan ambos.
+      tiendas = ((lista.json as { stores?: Array<{ id?: string; store_id?: string; name?: string }> })?.stores ?? [])
+        .map(t => ({ id: t.id ?? t.store_id ?? '', name: t.name ?? null }))
+        .filter(t => t.id)
+    } catch (err) {
+      await intents.fallar(id, 'EXCHANGE_FAILED')
+      logger.error('Uber OAuth: falló el canje o el listado de tiendas', { intentId: id, error: (err as Error).message })
+      res.status(502).send(page('Uber no devolvió tus tiendas', `<p class="bad">No se conectó nada. ${PIDE_OTRO}</p>`))
+      return
+    }
     if (tiendas.length === 0) {
+      await intents.fallar(id, 'NO_STORES')
       res.status(200).send(page('Autorizado, pero sin tiendas', '<p>Uber no devolvió ninguna tienda para esta cuenta.</p>'))
       return
     }
 
-    // Activar la app contra cada tienda. Esto es lo que da acceso PERPETUO al token
-    // de aplicación; sin ello, seguiríamos viendo 401.
-    // 🔴 El candado REAL, no uno fabricado al vuelo. Antes esta línea construía
-    // `new Set([storeId])`, o sea que autorizaba justo la tienda que iba a escribir: el
-    // default-deny quedaba anulado y una lista vacía permitía escribir en CUALQUIER tienda
-    // que Uber devolviera — incluida una real. Hallado por auditoría externa el 2026-08-20.
-    const permitidas = getWritableStores(e)
-
-    const filas: string[] = []
-    let activadas = 0
-    let fallidas = 0
-    let bloqueadas = 0
-
-    for (const t of tiendas) {
-      const storeId = t.id ?? t.store_id
-      if (!storeId) continue
-
-      let link = await prisma.deliveryChannelLink.findUnique({
-        where: { provider_externalLocationId: { provider: 'UBER_EATS', externalLocationId: storeId } },
-        select: { venueId: true, venue: { select: { name: true } } },
-      })
-
-      // 🔴 EL VÍNCULO SE CREA AQUÍ, y es lo que convierte esto en algo que un CLIENTE puede
-      // usar. Antes sólo buscaba: había un huevo-y-gallina imposible de resolver solo —
-      // hacía falta el id de tienda de Uber para crear el canal, y ese id sólo aparece
-      // DESPUÉS de que el comercio autoriza. El resultado era que cada alta la teníamos que
-      // rematar a mano contra la base.
-      //
-      // El `venueId` viene del state FIRMADO, no del query: si viniera del query, cualquiera
-      // podría enlazar las tiendas de un comercio al negocio que quisiera.
-      if (!link && venueDelFlujo) {
-        try {
-          await deliveryChannelLinkService.createChannelLink(venueDelFlujo, {
-            provider: 'UBER_EATS',
-            externalLocationId: storeId,
-            externalAccountId: t.name ?? null,
-          })
-          link = await prisma.deliveryChannelLink.findUnique({
-            where: { provider_externalLocationId: { provider: 'UBER_EATS', externalLocationId: storeId } },
-            select: { venueId: true, venue: { select: { name: true } } },
-          })
-          logger.info('🛵 [UberOAuth] canal creado automáticamente al autorizar', { venueId: venueDelFlujo, storeId })
-        } catch (err) {
-          // Una tienda que no se pudo vincular NO detiene a las demás: un comercio con seis
-          // sucursales no se queda sin conectar ninguna porque una falló.
-          logger.error('🚨 [UberOAuth] no se pudo crear el canal', {
-            venueId: venueDelFlujo,
-            storeId,
-            error: err instanceof Error ? err.message : err,
-          })
-        }
-      }
-
-      const encabezado = `<strong>${esc(t.name ?? '(sin nombre)')}</strong><br><code>${esc(storeId)}</code><br>`
-      const negocio = `<br>negocio en Avoqado: ${link?.venue?.name ? esc(link.venue.name) : '<span class="bad">sin vincular</span>'}`
-
-      if (!permitidas.has(storeId.toLowerCase())) {
-        bloqueadas++
-        filas.push(
-          `<li>${encabezado}<span class="bad">NO activada</span> — no está en la lista de tiendas escribibles ` +
-            `(<code>UBER_WRITABLE_STORE_IDS_${esc(e)}</code>). Es la protección que impide tocar un comercio real.${negocio}</li>`,
-        )
-        continue
-      }
-
-      const activacion = await uberRequest(
-        { environment: e, token: userToken.access_token, writableStores: permitidas },
-        {
-          method: 'POST',
-          path: `/v1/eats/stores/${encodeURIComponent(storeId)}/pos_data`,
-          storeId,
-          body: {
-            integrator_store_id: link?.venueId ?? storeId,
-            integrator_brand_id: 'avoqado',
-            // 🔴 `is_order_manager` ES EL INTERRUPTOR. Sin él, la tienda queda con
-            // `integration_enabled: true` y todo PARECE bien —el webhook llega, el pedido
-            // se trae, se ingiere con su comanda de cocina— pero `accept_pos_order`
-            // responde `403 user_not_allowed` y Uber cancela a los ~11.5 min. El cliente se
-            // queda sin comida y el log sólo dice "user not allowed".
-            //
-            // Medido con un pedido REAL el 2026-08-20 (`00012fba-…`, "Avoqado Sandbox 1").
-            // Ningún test lo podía atrapar: todos mockean la red.
-            //
-            // ⚠️ NO es `pos_integration_enabled`: ése está DEPRECADO y Uber lo IGNORA en
-            // silencio — se probó mandándolo, el POST devolvió 200 y el flag siguió en
-            // `false`. Lo dice nuestra propia investigación (ANEXO §Flujo
-            // integrator-initiated, paso 4) y se confirmó contra la API real.
-            is_order_manager: true,
-            // AUTO: que Uber no exija que un humano confirme en su app. Nuestro
-            // `orderAcceptanceMode` por canal es quien decide si aceptamos solos.
-            require_manual_acceptance: false,
-          },
-        },
-      )
-
-      const ok = activacion.status < 400
-      // `if` y no un ternario: un ternario cuyo valor se tira es una expresión sin efecto
-      // declarado, y el linter lo marca con razón — el incremento es el efecto, no el valor.
-      if (ok) activadas++
-      else fallidas++
-      filas.push(
-        `<li>${encabezado}activación: <span class="${ok ? 'ok' : 'bad'}">HTTP ${activacion.status}</span>` +
-          (ok ? '' : ` — ${esc(activacion.text.slice(0, 200))}`) +
-          `${negocio}</li>`,
-      )
-    }
-
-    // 🔴 "completada" sólo si de verdad se activó algo y nada falló. Antes se logueaba
-    // "activación completada" aunque todas las tiendas hubieran fallado.
-    const huboProblema = fallidas > 0 || activadas === 0
-    logger[huboProblema ? 'warn' : 'info']('Uber OAuth: fin de la activación', {
-      tiendas: tiendas.length,
-      activadas,
-      fallidas,
-      bloqueadas,
+    const una = tiendas.length === 1
+    const guardado = await intents.casEstado(id, 'EXCHANGED', una ? 'ACTIVATING' : 'EXCHANGED', {
+      storesJson: tiendas as never,
+      merchantTokenEnvelope: intents.cifrarTokenComerciante(intent, token),
+      ...(una ? { selectionJson: [tiendas[0].id] } : {}),
     })
+    if (!guardado) {
+      res.status(400).send(YA_USADO)
+      return
+    }
+    if (una) return responderActivacion(res, id, await intents.activar(id, activarTiendaUber))
 
-    const titulo = activadas > 0 && fallidas === 0 ? 'Avoqado quedó conectado' : 'Activación incompleta'
-    res
-      .status(huboProblema ? 207 : 200)
-      .send(page(titulo, `<ul>${filas.join('')}</ul><p>Activadas: ${activadas} · fallidas: ${fallidas} · bloqueadas: ${bloqueadas}</p>`))
+    // Varias tiendas: la palomita del dueño ES el permiso por tienda (decisión del founder). Nada viene marcado.
+    const opciones = tiendas
+      .map(
+        t =>
+          `<li><label><input type="checkbox" name="stores" value="${esc(t.id)}"> <strong>${esc(t.name ?? '(sin nombre)')}</strong> <code>${esc(t.id)}</code></label></li>`,
+      )
+      .join('')
+    res.status(200).send(
+      page(
+        'Elige qué tiendas conectar',
+        `<p>Marca sólo las tiendas que pertenecen a este negocio. Al conectarlas, Uber empezará a mandar sus pedidos a Avoqado.</p>
+<form method="post" action="${ACTIVATE_PATH}"><input type="hidden" name="state2" value="${esc(intents.firmarIntent(id, 'activate'))}">
+<ul>${opciones}</ul><button type="submit">Conectar las tiendas marcadas</button></form>`,
+      ),
+    )
   } catch (err) {
     logger.error('Falló el callback de OAuth de Uber', { error: (err as Error).message })
-    res.status(500).send(page('Falló la activación', `<p class="bad">${(err as Error).message}</p>`))
+    res.status(500).send(page('Falló la activación', `<p class="bad">${esc((err as Error).message)}</p>`))
+  }
+}
+
+/** Paso 3: `POST /oauth/activate` (`state2` firmado + `stores[]`) — la selección, y el «Reintentar». */
+export async function activarUberOAuth(req: Request, res: Response): Promise<void> {
+  try {
+    const id = intents.leerFirma(req.body?.state2, 'activate')
+    const intent = id ? await prisma.deliveryConnectIntent.findUnique({ where: { id } }) : null
+    if (!id || !intent) {
+      res.status(400).send(YA_USADO)
+      return
+    }
+    if (intent.state === 'EXCHANGED') {
+      const disponibles = new Set(((intent.storesJson as intents.TiendaUber[] | null) ?? []).map(t => t.id))
+      const pedidas = [...new Set(([] as unknown[]).concat(req.body?.stores ?? []))]
+      if (pedidas.length === 0 || pedidas.some(s => typeof s !== 'string' || !disponibles.has(s))) {
+        res.status(400).send(page('Selección inválida', '<p class="bad">Marca al menos una de las tiendas que Uber mostró.</p>'))
+        return
+      }
+      // count 0 ⇒ otra petición ya la movió; `activar` decide con el estado real.
+      await intents.casEstado(id, 'EXCHANGED', 'ACTIVATING', { selectionJson: pedidas as string[] })
+    }
+    // ACTIVATING = «Reintentar»: se usa la selección guardada, nunca la del cuerpo.
+    return responderActivacion(res, id, await intents.activar(id, activarTiendaUber))
+  } catch (err) {
+    logger.error('Falló la activación de Uber', { error: (err as Error).message })
+    res.status(500).send(page('Falló la activación', `<p class="bad">${esc((err as Error).message)}</p>`))
   }
 }
