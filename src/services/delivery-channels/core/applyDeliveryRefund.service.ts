@@ -23,7 +23,7 @@ import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 
-export type RefundOutcome = 'APPLIED' | 'ALREADY_APPLIED' | 'ORDER_NOT_FOUND' | 'NOTHING_TO_APPLY' | 'COVERED_BY_ADJUSTMENT'
+export type RefundOutcome = 'APPLIED' | 'ALREADY_APPLIED' | 'ORDER_NOT_FOUND' | 'NOTHING_TO_APPLY'
 
 export interface ApplyRefundResult {
   outcome: RefundOutcome
@@ -61,14 +61,16 @@ export async function applyDeliveryRefund(params: {
   // ingreso del comercio se hundiría solo, un poco cada día, sin que nada fallara.
   const idempotencyKey = `uber-refund:${params.externalOrderId}`
   const r = await prisma.$transaction(async tx => {
-    // Serializa con la reconciliación del retiro (toma la MISMA fila `Order FOR UPDATE`): sin esto
-    // los dos leen «sin ajuste previo» y restan el mismo dinero dos veces.
+    // Serializa con la reconciliación del retiro (toma la MISMA fila `Order FOR UPDATE`): así la
+    // reconciliación ve este chargeback al calcular su Δ, y la duda de abajo ve un ajuste recién escrito.
     await lockExistingOrderForPayment(tx, { venueId: order.venueId, orderId: order.id })
     const yaAplicado = await tx.payment.findFirst({ where: { orderId: order.id, idempotencyKey }, select: { id: true } })
     if (yaAplicado) return { outcome: 'ALREADY_APPLIED' as const }
 
-    // M-2: si el reporte cuenta como «chargeback» un renglón que el retiro YA compensó (REFUND
-    // `PROVIDER_ADJUSTMENT`), ese dinero ya salió de la venta: sólo se escribe el EXCEDENTE.
+    // N-1 (2ª pasada de Codex): el chargeback se escribe COMPLETO. Un ajuste previo del retiro
+    // (REFUND `PROVIDER_ADJUSTMENT`) NO prueba que este chargeback sea ese mismo dinero — puede ser
+    // la queja por OTRO artículo. Restarlo dejaba ingresos sobrevaluados en silencio; aquí, si
+    // coexisten, se escribe todo y se levanta la duda para una persona (errar a subvaluado y visible).
     const ajustes = await tx.payment.findMany({
       where: {
         orderId: order.id,
@@ -77,24 +79,22 @@ export async function applyDeliveryRefund(params: {
         status: TransactionStatus.COMPLETED,
         processorData: { path: ['provenance'], equals: 'PROVIDER_ADJUSTMENT' },
       },
-      select: { amount: true },
+      select: { id: true, amount: true },
       take: 500,
     })
     const compensado = ajustes.reduce((s, a) => s.plus(a.amount.abs()), new Prisma.Decimal(0))
-    const excedente = monto.minus(compensado)
-    if (excedente.lessThanOrEqualTo(0)) return { outcome: 'COVERED_BY_ADJUSTMENT' as const, compensado }
 
     const original = await tx.payment.findFirst({
       where: { orderId: order.id, type: 'REGULAR' },
       select: { method: true, source: true, tenderTypeId: true, fundsFlow: true },
     })
 
-    await tx.payment.create({
+    const escrito = await tx.payment.create({
       data: {
         venueId: order.venueId,
         orderId: order.id,
         // Negativo, como el reembolso del TPV: es la forma que los reportes ya netean.
-        amount: excedente.neg(),
+        amount: monto.neg(),
         tipAmount: new Prisma.Decimal(0),
         // 🔴 Cero, y NO es un placeholder: estos tres son la comisión del PROCESADOR de pagos,
         // y aquí Avoqado no procesa nada — el dinero lo mueve el marketplace. El propio schema
@@ -103,7 +103,7 @@ export async function applyDeliveryRefund(params: {
         // distintos y rompería el reporte de comisiones de tarjeta.
         feePercentage: new Prisma.Decimal(0),
         feeAmount: new Prisma.Decimal(0),
-        netAmount: excedente.neg(),
+        netAmount: monto.neg(),
         type: 'REFUND',
         status: TransactionStatus.COMPLETED,
         method: original?.method ?? 'OTHER',
@@ -121,18 +121,36 @@ export async function applyDeliveryRefund(params: {
         // acreditaría al negocio una comisión que nadie le regresó.
         idempotencyKey,
       },
+      select: { id: true },
     })
-    return { outcome: 'APPLIED' as const, compensado, excedente }
+    if (ajustes.length > 0) {
+      await tx.activityLog.create({
+        data: {
+          venueId: order.venueId,
+          staffId: null,
+          action: 'DELIVERY_REFUND_POSSIBLE_DUPLICATE',
+          entity: 'Order',
+          entityId: order.id,
+          data: {
+            mensaje: 'posible doble registro: revisar contra el reporte de Uber',
+            chargebackPaymentId: escrito.id,
+            chargeback: monto.toString(),
+            ajustesPaymentIds: ajustes.map(a => a.id),
+            ajustes: compensado.toString(),
+          },
+        },
+      })
+    }
+    return { outcome: 'APPLIED' as const, compensado, duda: ajustes.length > 0 }
   })
 
   if (r.outcome === 'ALREADY_APPLIED') return { outcome: 'ALREADY_APPLIED', orderId: order.id }
-  if (r.outcome === 'COVERED_BY_ADJUSTMENT') {
-    logger.warn('[💸 DeliveryRefund] el reembolso del reporte ya lo compensó el ajuste del retiro: no se escribe', {
+  if (r.duda) {
+    logger.error('🚨 [💸 DeliveryRefund] posible doble registro: el chargeback llegó sobre una orden con retiro ya compensado — revisar contra el reporte de Uber', {
       orderId: order.id,
-      monto: monto.toString(),
-      compensado: r.compensado.toString(),
+      chargeback: monto.toString(),
+      ajustes: r.compensado.toString(),
     })
-    return { outcome: 'COVERED_BY_ADJUSTMENT', orderId: order.id }
   }
 
   void logAction({
@@ -140,14 +158,13 @@ export async function applyDeliveryRefund(params: {
     entity: 'Order',
     entityId: order.id,
     venueId: order.venueId,
-    data: { externalId, monto: monto.toString(), compensado: r.compensado.toString(), aplicado: r.excedente.toString(), motivo: params.motivo },
+    data: { externalId, monto: monto.toString(), motivo: params.motivo },
   })
 
   logger.info('💸 [DeliveryRefund] reembolso del proveedor aplicado', {
     orderId: order.id,
     orderNumber: order.orderNumber,
     monto: monto.toString(),
-    aplicado: r.excedente.toString(),
     motivo: params.motivo,
   })
   return { outcome: 'APPLIED', orderId: order.id }

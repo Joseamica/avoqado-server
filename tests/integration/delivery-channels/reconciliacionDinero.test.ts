@@ -6,6 +6,7 @@
  */
 import { DeliveryChannelLink, DeliveryProvider, OrderSource, Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
 import { ingestDeliveryOrder } from '@/services/delivery-channels/core/deliveryOrderIngestion.service'
 import { applyDeliveryRefund } from '@/services/delivery-channels/core/applyDeliveryRefund.service'
 import { LECTURA_PROVEEDOR_MS, reconcileDeliveryOrderFromProvider } from '@/services/delivery-channels/core/deliveryReconciliation.service'
@@ -370,7 +371,7 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
     })
   })
 
-  describe('M-2: el reporte de pagos de Uber y el ajuste del retiro no restan dos veces el mismo dinero', () => {
+  describe('M-2/N-1: el reporte de pagos de Uber frente al ajuste del retiro', () => {
     const renglones: Renglon[] = [
       { linea: 'a', nombre: 'Cochinita', precio: '150.00' },
       { linea: 'b', nombre: 'Horchata', precio: '50.00' },
@@ -378,21 +379,27 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
     const reporte = (order: { externalId: string | null }, monto: string) =>
       applyDeliveryRefund({ externalOrderId: order.externalId!.split(':')[1], provider: 'UBER_EATS', montoDevuelto: monto, motivo: 'reporte' })
 
-    it('primero el ajuste, luego el reporte: sólo se escribe el EXCEDENTE (y nada si el ajuste lo cubre)', async () => {
-      const cubierto = await sembrar(renglones, pago('200.00', '0.00'))
-      proveedorDevuelve(cubierto.foto(['a'], pago('150.00', '0.00')))
-      expect((await reconcileDeliveryOrderFromProvider(cubierto.order.id, { trigger: 'ROUTE' })).outcome).toBe('REFUNDED')
+    const bandera = (orderId: string) =>
+      prisma.activityLog.count({ where: { venueId, entityId: orderId, action: 'DELIVERY_REFUND_POSSIBLE_DUPLICATE' } })
 
-      expect((await reporte(cubierto.order, '50.00')).outcome).toBe('COVERED_BY_ADJUSTMENT')
-      expect((await reembolsos(cubierto.order.id)).map(f => f.amount.toString())).toEqual(['-50'])
+    it('N-1: un chargeback INDEPENDIENTE se escribe completo aunque haya un retiro compensado; una persona lo revisa', async () => {
+      // Codex, 2ª pasada: $200; retiro de $50 ya compensado; Uber reembolsa $80 por OTRO artículo.
+      // Restar el ajuste dejaba $120 en libros; deben quedar $70, con la duda a la vista.
+      const { order, foto } = await sembrar(renglones, pago('200.00', '0.00'))
+      proveedorDevuelve(foto(['a'], pago('150.00', '0.00')))
+      expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('REFUNDED')
+      const gritos = jest.spyOn(logger, 'error')
 
-      const excede = await sembrar(renglones, pago('200.00', '0.00'))
-      proveedorDevuelve(excede.foto(['a'], pago('150.00', '0.00')))
-      expect((await reconcileDeliveryOrderFromProvider(excede.order.id, { trigger: 'ROUTE' })).outcome).toBe('REFUNDED')
+      expect((await reporte(order, '80.00')).outcome).toBe('APPLIED')
 
-      expect((await reporte(excede.order, '80.00')).outcome).toBe('APPLIED')
-      expect((await reembolsos(excede.order.id)).map(f => f.amount.toString())).toEqual(['-50', '-30'])
-      expect((await reporte(excede.order, '80.00')).outcome).toBe('ALREADY_APPLIED')
+      expect((await reembolsos(order.id)).map(f => f.amount.toString())).toEqual(['-50', '-80'])
+      const pagos = await prisma.payment.findMany({ where: { orderId: order.id }, select: { amount: true } })
+      expect(pagos.reduce((t, p) => t.plus(p.amount), new Prisma.Decimal(0)).toString()).toBe('70')
+      expect(await bandera(order.id)).toBe(1)
+      expect(gritos.mock.calls.some(([m]) => String(m).startsWith('🚨') && String(m).includes('posible doble registro'))).toBe(true)
+      // El mismo reporte otra vez no escribe ni vuelve a levantar la bandera.
+      expect((await reporte(order, '80.00')).outcome).toBe('ALREADY_APPLIED')
+      expect(await bandera(order.id)).toBe(1)
     })
 
     it('primero el reporte, luego el retiro: la reconciliación ya lo cuenta y no escribe otro REFUND', async () => {
@@ -403,6 +410,7 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
       expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('NO_DELTA')
 
       expect((await reembolsos(order.id)).map(f => f.amount.toString())).toEqual(['-50'])
+      expect(await bandera(order.id)).toBe(0) // sin ajuste previo no hay duda que revisar
     })
   })
 
