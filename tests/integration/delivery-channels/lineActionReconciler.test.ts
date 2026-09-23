@@ -280,6 +280,31 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
     expect(items.find(i => i.orderId === bloqueada.order.id)?.unreflectedInProvider).toBe(true) // lo mismo que la alerta
   })
 
+  it('I-2: pedido CERRADO en Uber con el renglón presente ⇒ UNCERTAIN→REJECTED y CONFIRMED/PENDING→NO_DELTA, una sola vez', async () => {
+    const s = await sembrar()
+    const incierta = await accion(s.order, s.ext, s.item.b.id, 'b', { status: 'UNCERTAIN', lastAttemptAt: hace(20 * MIN) })
+    const confirmada = await accion(s.order, s.ext, s.item.a.id, 'a', { status: 'CONFIRMED', resolvedAt: new Date() })
+    fotos.set(s.ext, { ...s.foto(['a', 'b'], '200.00'), providerClosed: true })
+    const gritos = jest.spyOn(logger, 'error')
+
+    const job = new DeliveryLineActionReconcilerJob()
+    await correr(job)
+    await dentroDe(30 * MIN, () => correr(job)) // vencidas las esperas: ya no queda nada que releer
+
+    expect(lecturasDe(s.ext)).toBe(1)
+    expect(await prisma.deliveryLineAction.findUniqueOrThrow({ where: { id: incierta.id } })).toMatchObject({
+      status: 'REJECTED',
+      providerBody: 'pedido cerrado en el proveedor con el renglón presente',
+    })
+    expect(await prisma.deliveryLineAction.findUniqueOrThrow({ where: { id: confirmada.id } })).toMatchObject({
+      status: 'CONFIRMED',
+      settlement: 'NO_DELTA',
+    })
+    expect(await prisma.activityLog.count({ where: { venueId, entityId: s.order.id, action: 'DELIVERY_LINE_ACTIONS_CLOSED_BY_PROVIDER' } })).toBe(1)
+    expect(gritos.mock.calls.filter(([m]) => String(m).startsWith('🚨') && String(m).includes('cerró el pedido'))).toHaveLength(1)
+    expect(await reembolsos(s.order.id)).toHaveLength(0)
+  })
+
   it('reservas huerfanas de mas de 2 min se limpian', async () => {
     const huerfana = await sembrar()
     const viva = await sembrar()

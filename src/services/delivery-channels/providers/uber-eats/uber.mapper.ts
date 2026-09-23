@@ -454,6 +454,9 @@ export function mapUberOrder(raw: unknown): NormalizedDeliveryOrder {
     scheduledFor: fechaProgramada(d),
     // uAPI: `state: "ACCEPTED"` (fixture real `pedido-con-modificadores-uapi.json`).
     providerAccepted: d.state === 'ACCEPTED',
+    // uAPI: `status: "COMPLETED"` (fixture real `pedido-real-uapi.json`) o `state` terminal
+    // (`SUCCEEDED`/`FAILED`). `HANDED_OFF` no cierra: el pedido sigue vivo con el repartidor.
+    providerClosed: d.status === 'COMPLETED' || d.state === 'SUCCEEDED' || d.state === 'FAILED',
   }
 }
 

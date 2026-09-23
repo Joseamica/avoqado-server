@@ -105,6 +105,12 @@ export interface NormalizedDeliveryOrder {
    * nunca pregunta quién es el proveedor.
    */
   providerAccepted?: boolean
+  /**
+   * El proveedor ya CERRÓ el pedido (entregado, fallido): ya no admite cambios. Un retiro que siga
+   * esperando con el renglón todavía presente no va a ocurrir (spec §3.4, ruling I-2 de la
+   * revisión final). Ausente = el proveedor no lo informa: se trata como abierto.
+   */
+  providerClosed?: boolean
 }
 
 // ============================================================================

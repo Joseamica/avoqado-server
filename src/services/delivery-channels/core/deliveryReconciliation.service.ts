@@ -29,7 +29,16 @@ import { contexto } from './respondToDeliveryOrder.service'
 import type { NormalizedDeliveryOrder } from './types'
 
 export type ResultadoReconciliacion = {
-  outcome: 'REFUNDED' | 'NO_DELTA' | 'FISCAL_PENDING' | 'BLOCKED_INCREASE' | 'NO_ACTIONS' | 'READ_FAILED' | 'ORDER_CANCELLED'
+  outcome:
+    | 'REFUNDED'
+    | 'NO_DELTA'
+    | 'FISCAL_PENDING'
+    | 'BLOCKED_INCREASE'
+    | 'NO_ACTIONS'
+    | 'READ_FAILED'
+    | 'ORDER_CANCELLED'
+    /** El proveedor cerró el pedido y se cerraron retiros que esperaban con el renglón presente (I-2). */
+    | 'PROVIDER_CLOSED'
 }
 
 /** ponytail: el candado se sostiene durante UNA lectura acotada; el tx del candado vence a los 15 s. */
@@ -168,6 +177,55 @@ export async function reconcileDeliveryOrderFromProvider(
       }
     }
 
+    // ── 2b. Pedido CERRADO en el proveedor con el renglón todavía presente: ese retiro ya no va a
+    // ocurrir (ruling I-2; desvío anotado del §3.4 — «entregado con el artículo» SÍ prueba que el
+    // retiro no pasó). Sin esto, el UNCERTAIN y el CONFIRMED/PENDING esperan para siempre y el barrido
+    // le lee el pedido a Uber cada ~6 h indefinidamente. No mueve dinero: sólo cierra la espera.
+    let cerradas = 0
+    if (foto.providerClosed) {
+      const lineas = filas.filter(f => presentes.has(f.externalLineId!)).map(f => f.externalLineId!)
+      const colgadas = await tx.deliveryLineAction.findMany({
+        where: {
+          orderId,
+          venueId,
+          action: 'REMOVE_ITEM',
+          lineId: { in: lineas },
+          OR: [{ status: 'UNCERTAIN' }, { status: 'CONFIRMED', settlement: 'PENDING' }],
+        },
+        select: { id: true, status: true, lineId: true },
+        take: LIMITE_FILAS,
+      })
+      if (colgadas.length > 0) {
+        const inciertas = colgadas.filter(a => a.status === 'UNCERTAIN').map(a => a.id)
+        const confirmadas = colgadas.filter(a => a.status === 'CONFIRMED').map(a => a.id)
+        await tx.deliveryLineAction.updateMany({
+          where: { id: { in: inciertas }, status: 'UNCERTAIN' },
+          data: { status: 'REJECTED', providerBody: 'pedido cerrado en el proveedor con el renglón presente', resolvedAt: new Date() },
+        })
+        await tx.deliveryLineAction.updateMany({
+          where: { id: { in: confirmadas }, status: 'CONFIRMED', settlement: 'PENDING' },
+          data: { settlement: 'NO_DELTA' },
+        })
+        await tx.activityLog.create({
+          data: {
+            venueId,
+            staffId: null,
+            action: 'DELIVERY_LINE_ACTIONS_CLOSED_BY_PROVIDER',
+            entity: 'Order',
+            entityId: orderId,
+            data: { rechazadas: inciertas, sinDelta: confirmadas, lineas: colgadas.map(a => a.lineId), trigger: opts.trigger },
+          },
+        })
+        logger.error('🚨 [Delivery] el proveedor cerró el pedido con renglones que se pidió retirar: esos retiros no ocurrieron', {
+          orderId,
+          venueId,
+          rechazadas: inciertas.length,
+          sinDelta: confirmadas.length,
+        })
+        cerradas = colgadas.length
+      }
+    }
+
     const acreditadas = await tx.deliveryLineAction.findMany({
       where: { orderId, venueId, action: 'REMOVE_ITEM', settlement: 'ACCREDITED' },
       select: { id: true, orderItemId: true },
@@ -230,7 +288,7 @@ export async function reconcileDeliveryOrderFromProvider(
     }
 
     if (dVenta === 0 && dPropina === 0) {
-      if (acreditadas.length === 0) return { outcome: 'NO_ACTIONS' as const }
+      if (acreditadas.length === 0) return { outcome: cerradas > 0 ? ('PROVIDER_CLOSED' as const) : ('NO_ACTIONS' as const) }
       if (Object.values(fiscal).some(v => v !== 0)) return aFiscalPendiente('retiro sin movimiento de dinero pero con IVA reclasificado')
       await tx.deliveryLineAction.updateMany({
         where: { id: { in: acreditadas.map(a => a.id) }, settlement: 'ACCREDITED' },
