@@ -110,6 +110,9 @@ export class DeliveryWebhookReconciliationJob {
    */
   private readonly SEGUIMIENTO_POR_PASADA = 10
 
+  /** N-8: mínimo de relecturas de seguimiento por pasada, aunque el carril urgente llene el lote. */
+  private readonly SEGUIMIENTO_GARANTIZADO = 5
+
   /** Candado en memoria: una sola pasada a la vez (ver `runOnce`). */
   private enCurso = false
 
@@ -198,12 +201,6 @@ export class DeliveryWebhookReconciliationJob {
       // so rows with error=null (never failed before) are NOT accidentally excluded —
       // same pattern as blumon-webhook-reconciliation.job.ts's REVERSAL_OPERATION_TYPES guard.
       { OR: [{ error: null }, { error: { notIn: DeliveryWebhookReconciliationJob.TERMINAL_ERRORS } }] },
-      {
-        OR: [
-          { status: DeliveryOrderEventStatus.FAILED, receivedAt: { gte: orphanCutoff } },
-          { status: DeliveryOrderEventStatus.RECEIVED, receivedAt: { gte: orphanCutoff, lt: receivedCutoff } },
-        ],
-      },
       // Fix B2: never re-select a poison event (maxed out its retry budget) —
       // it stays FAILED forever, excluded here rather than re-touched every pass.
       { attemptCount: { lt: this.MAX_ATTEMPTS } },
@@ -232,7 +229,16 @@ export class DeliveryWebhookReconciliationJob {
     // cancelaciones, tiendas…); las relecturas de SEGUIMIENTO sólo usan el sobrante, con tope, y
     // se leen DESPUÉS de procesar las urgentes. Un solo carril por antigüedad dejaba un pedido nuevo
     // detrás de 50 avisos viejos hasta el minuto 12 (Codex, 4.ª pasada) y Uber lo cancelaba.
-    const urgentes = await leer({ eventType: { notIn: DeliveryWebhookReconciliationJob.EVENTOS_DE_SEGUIMIENTO } }, this.BATCH_SIZE)
+    const urgentes = await leer(
+      {
+        eventType: { notIn: DeliveryWebhookReconciliationJob.EVENTOS_DE_SEGUIMIENTO },
+        OR: [
+          { status: DeliveryOrderEventStatus.FAILED, receivedAt: { gte: orphanCutoff } },
+          { status: DeliveryOrderEventStatus.RECEIVED, receivedAt: { gte: orphanCutoff, lt: receivedCutoff } },
+        ],
+      },
+      this.BATCH_SIZE,
+    )
     const procesar = async (events: typeof urgentes) => {
       for (const event of events) {
         const { channelLink } = event
@@ -327,8 +333,22 @@ export class DeliveryWebhookReconciliationJob {
       }
     }
     await procesar(urgentes)
-    const cupo = Math.min(this.BATCH_SIZE - urgentes.length, this.SEGUIMIENTO_POR_PASADA)
-    if (cupo > 0) await procesar(await leer({ eventType: { in: DeliveryWebhookReconciliationJob.EVENTOS_DE_SEGUIMIENTO } }, cupo))
+    // N-8: aunque el carril urgente llene el lote, el seguimiento tiene un mínimo garantizado por
+    // pasada (va DESPUÉS de las urgentes); si no, un aviso nunca tenía turno y caducaba sin lectura.
+    const cupo = Math.max(this.SEGUIMIENTO_GARANTIZADO, Math.min(this.BATCH_SIZE - urgentes.length, this.SEGUIMIENTO_POR_PASADA))
+    // Sin el piso de 24 h: un seguimiento se cierra solo (incidencia a las 3 h, en su primera lectura
+    // pasada esa vida), así que uno que nunca tuvo turno se lee aunque sea viejo — no caduca por edad.
+    const seguimiento = await leer(
+      {
+        eventType: { in: DeliveryWebhookReconciliationJob.EVENTOS_DE_SEGUIMIENTO },
+        OR: [
+          { status: DeliveryOrderEventStatus.FAILED },
+          { status: DeliveryOrderEventStatus.RECEIVED, receivedAt: { lt: receivedCutoff } },
+        ],
+      },
+      cupo,
+    )
+    await procesar(seguimiento)
 
     return { reprocessed, orphanedImmediate }
   }
@@ -425,6 +445,9 @@ export class DeliveryWebhookReconciliationJob {
       // Idempotent — never re-log/re-touch a row already marked ORPHANED. Null-tolerant
       // OR (not a bare `not: 'ORPHANED'`) so error=null rows (first time aging out) still match.
       OR: [{ error: null }, { error: { notIn: DeliveryWebhookReconciliationJob.TERMINAL_ERRORS } }],
+      // N-8: un seguimiento que este job nunca intentó no caduca por edad: su carril lo lee sin piso
+      // de 24 h y el procesador lo cierra (con incidencia si pasó su vida).
+      NOT: { eventType: { in: DeliveryWebhookReconciliationJob.EVENTOS_DE_SEGUIMIENTO }, attemptCount: 0 },
     } satisfies Prisma.DeliveryOrderEventWhereInput
 
     // Fetch rows BEFORE flipping them so we can emit a per-event alert with enough detail
