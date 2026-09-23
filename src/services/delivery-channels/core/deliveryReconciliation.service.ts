@@ -29,6 +29,11 @@ import { contexto } from './respondToDeliveryOrder.service'
 import type { NormalizedDeliveryOrder } from './types'
 
 export type ResultadoReconciliacion = {
+  /**
+   * La foto leída en esta pasada dice que el pedido YA está cerrado en el proveedor (y la pasada la
+   * reconcilió): es la evidencia con la que se cierra un aviso de cambio (P1-2, regla definitiva).
+   */
+  providerClosed?: boolean
   outcome:
     | 'REFUNDED'
     | 'NO_DELTA'
@@ -71,11 +76,13 @@ async function leerConLimite<T>(leer: (signal: AbortSignal) => Promise<T>, ms: n
 
 export async function reconcileDeliveryOrderFromProvider(
   orderId: string,
-  opts: { trigger: 'ROUTE' | 'JOB' | 'WEBHOOK' },
+  /** `eventId`: el aviso que disparó la pasada; su rastro (reprecio/bloqueo) es el avance de ese aviso (N-3). */
+  opts: { trigger: 'ROUTE' | 'JOB' | 'WEBHOOK'; eventId?: string },
 ): Promise<ResultadoReconciliacion> {
   // ponytail: se mide ANTES de pedir el tx, así la espera de conexión cuenta como gastada (conservador).
   const inicio = Date.now()
-  return withDeliveryOrderLock(orderId, async tx => {
+  let cerradoEnProveedor = false
+  const r = await withDeliveryOrderLock(orderId, async (tx): Promise<ResultadoReconciliacion> => {
     const orden = await tx.order.findUnique({
       where: { id: orderId },
       select: { venueId: true, deliveryReconcileBlocked: true, status: true },
@@ -109,6 +116,7 @@ export async function reconcileDeliveryOrderFromProvider(
       assertDeliveryMoneyInvariants(foto.payment, foto.items)
       if (foto.externalId !== ctx.externalOrderId) throw new Error(`la foto es del pedido ${foto.externalId}`)
       if (foto.items.some(i => !i.lineId)) throw new Error('la foto trae renglones sin id de línea: no prueba ausencias')
+      cerradoEnProveedor = foto.providerClosed === true
     } catch (e) {
       logger.warn('[Delivery] reconciliación sin foto confiable del proveedor: no se escribe nada', {
         orderId,
@@ -243,7 +251,12 @@ export async function reconcileDeliveryOrderFromProvider(
     const dPropina = pagadoPropina - centavos(foto.payment.externallyPaidTip)
 
     if (dVenta < 0 || dPropina < 0) {
-      await bloquear(tx, { orderId, venueId, motivo: 'INCREASE_UNSUPPORTED', data: { dVentaCents: dVenta, dPropinaCents: dPropina } })
+      await bloquear(tx, {
+        orderId,
+        venueId,
+        motivo: 'INCREASE_UNSUPPORTED',
+        data: { dVentaCents: dVenta, dPropinaCents: dPropina, eventId: opts.eventId ?? null },
+      })
       logger.error('🚨 [Delivery] el proveedor SUBIÓ venta o propina: no se escribe dinero, espera a una persona', {
         orderId,
         venueId,
@@ -287,7 +300,7 @@ export async function reconcileDeliveryOrderFromProvider(
         where: { id: { in: acreditadas.map(a => a.id) }, settlement: 'ACCREDITED' },
         data: { settlement: 'FISCAL_PENDING' },
       })
-      await bloquear(tx, { orderId, venueId, motivo: 'FISCAL_RECLASS_UNSUPPORTED', data: { fiscal, dVentaCents: dVenta } })
+      await bloquear(tx, { orderId, venueId, motivo: 'FISCAL_RECLASS_UNSUPPORTED', data: { fiscal, dVentaCents: dVenta, eventId: opts.eventId ?? null } })
       logger.error(`🚨 [Delivery] ${motivo}: no se declara liquidado, espera a una persona`, {
         orderId,
         venueId,
@@ -306,7 +319,7 @@ export async function reconcileDeliveryOrderFromProvider(
         where: { id: { in: acreditadas.map(a => a.id) }, settlement: 'ACCREDITED' },
         data: { settlement: 'NO_DELTA' },
       })
-      await reprecio(tx, { orderId, venueId, foto, pagadoCents: pagadoVenta + pagadoPropina, trigger: opts.trigger })
+      await reprecio(tx, { orderId, venueId, foto, pagadoCents: pagadoVenta + pagadoPropina, trigger: opts.trigger, eventId: opts.eventId })
       return { outcome: 'NO_DELTA' as const }
     }
 
@@ -364,10 +377,13 @@ export async function reconcileDeliveryOrderFromProvider(
       foto,
       pagadoCents: pagadoVenta - dVenta + pagadoPropina - dPropina,
       trigger: opts.trigger,
+      eventId: opts.eventId,
       refundPaymentId,
     })
     return { outcome: 'REFUNDED' as const }
   })
+  // Sólo cuenta si la pasada llegó a reconciliar: una que falló después de leer no cierra nada.
+  return r.outcome === 'READ_FAILED' ? r : { ...r, providerClosed: cerradoEnProveedor }
 }
 
 /**
@@ -397,7 +413,15 @@ async function bloquear(
  */
 async function reprecio(
   tx: Prisma.TransactionClient,
-  p: { orderId: string; venueId: string; foto: NormalizedDeliveryOrder; pagadoCents: number; trigger: string; refundPaymentId?: string },
+  p: {
+    orderId: string
+    venueId: string
+    foto: NormalizedDeliveryOrder
+    pagadoCents: number
+    trigger: string
+    eventId?: string
+    refundPaymentId?: string
+  },
 ) {
   const d = (v: string | undefined) => new Prisma.Decimal(v ?? '0')
   const pay = p.foto.payment
@@ -420,6 +444,7 @@ async function reprecio(
       entityId: p.orderId,
       data: {
         trigger: p.trigger,
+        eventId: p.eventId ?? null,
         refundPaymentId: p.refundPaymentId ?? null,
         ...Object.fromEntries(Object.entries(data).map(([k, v]) => [k, v.toFixed(2)])),
       },

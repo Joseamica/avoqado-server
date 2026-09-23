@@ -8,7 +8,7 @@ import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { parseDeliverectOrder } from '../services/delivery-channels/providers/deliverect/deliverect.mapper'
 import { ingestDeliveryOrder } from '../services/delivery-channels/core/deliveryOrderIngestion.service'
 import { markEventResult } from '../services/delivery-channels/core/deliveryWebhookEvent.service'
-import { RELECTURAS_ACOTADAS, processUberEvent } from '../services/delivery-channels/providers/uber-eats/uber.eventProcessor'
+import { CAMBIO_SIN_CONFIRMAR, processUberEvent } from '../services/delivery-channels/providers/uber-eats/uber.eventProcessor'
 import { processRappiEvent } from '../services/delivery-channels/providers/rappi/rappi.eventProcessor'
 import { scheduleJob } from '../observability/jobContext'
 
@@ -279,8 +279,9 @@ export class DeliveryWebhookReconciliationJob {
             venueId: event.venueId,
             attemptCount,
           })
-        } else if (err instanceof Error && RELECTURAS_ACOTADAS.includes(err.message)) {
-          // Espera acotada, no falla: el procesador lo cierra al estabilizarse o al vencer su ventana (P1-2).
+        } else if (err instanceof Error && err.message === CAMBIO_SIN_CONFIRMAR) {
+          // Espera acotada, no falla: el procesador lo cierra cuando el pedido cierra en Uber o al
+          // agotarse su vida, con incidencia (P1-2).
           logger.warn('[Delivery recon] cambio de pedido aún sin reflejar en el proveedor: se relee con backoff', {
             motivo: err.message,
             eventId: event.id,

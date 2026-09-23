@@ -31,36 +31,39 @@ import { revocarTienda } from '../../core/deliveryStoreClaim.service'
 import { uberAdapter } from './uber.adapter'
 import { processUberReport } from './uber.reportProcessor'
 
-/** Motivo de un `FULFILLMENT_CHANGED` cuya foto aún no trae el cambio: reintentable, no terminal. */
-export const CAMBIO_SIN_REFLEJAR = 'CAMBIO_SIN_REFLEJAR'
 /**
- * Cuánto se relee un pedido que avisó un cambio sin reflejarlo. Con el backoff del job de webhooks
- * (2, 4, 8, 16 min) son ~5 lecturas; después se cierra con rastro en `ActivityLog`.
+ * Un `FULFILLMENT_CHANGED` es una OBLIGACIÓN que sólo se cierra con evidencia (P1-2, regla definitiva
+ * de la 3.ª pasada): el pedido CERRADO en Uber con su foto final reconciliada. El aviso no dice qué
+ * cambió (sólo trae el puntero al pedido), así que ni una foto repetida ni un retiro previo por la
+ * ruta prueban que el cambio avisado ya llegó. Mientras tanto el evento queda FAILED con este motivo
+ * y el job de webhooks lo relee con su espera creciente.
  */
-export const CAMBIO_SIN_REFLEJAR_VENTANA_MS = 30 * 60_000
-
-/** Motivo de un FULFILLMENT_CHANGED que YA liquidó un cambio: se relee una vez más por si viene otro detrás. */
-export const CAMBIO_POR_CONFIRMAR = 'CAMBIO_POR_CONFIRMAR'
-/** Motivos de relectura ACOTADA: esperas, no fallas (el job los registra en warn). */
-export const RELECTURAS_ACOTADAS = [CAMBIO_SIN_REFLEJAR, CAMBIO_POR_CONFIRMAR]
+export const CAMBIO_SIN_CONFIRMAR = 'CAMBIO_SIN_CONFIRMAR'
+/**
+ * Vida máxima de la obligación: la de un pedido de reparto. Con el backoff del job (2, 4, 8, 16, 32,
+ * 60, 60 min) son ~8 lecturas; al pasarla sin evidencia se cierra con una incidencia para una persona.
+ */
+export const VIDA_DEL_PEDIDO_MS = 3 * 3_600_000
 
 /**
- * ¿El retiro del cajero ya se reflejó en la venta hace poco? Una reconciliación de la RUTA o del
- * BARRIDO (no de un aviso) que repreció la orden en la ventana: entonces un aviso sin cambios es ese
- * mismo retiro, no una foto atrasada (P1-2, sin relecturas de más ni rastro falso).
+ * El avance de UN aviso, persistido aparte del último `error` del evento (N-3): los reprecios y
+ * bloqueos que sus propias lecturas escribieron llevan su `eventId`. Un fallo de lectura no lo borra.
  */
-async function cambioReflejadoPorElCajero(orderId: string, recibido: Date): Promise<boolean> {
-  const hit = await prisma.activityLog.findFirst({
+async function avanceDelAviso(orderId: string, eventId: string): Promise<{ cambioVisto: boolean; reembolsos: string[] }> {
+  const filas = await prisma.activityLog.findMany({
     where: {
       entity: 'Order',
       entityId: orderId,
-      action: 'DELIVERY_ORDER_REPRICED',
-      createdAt: { gte: new Date(recibido.getTime() - CAMBIO_SIN_REFLEJAR_VENTANA_MS) },
-      OR: [{ data: { path: ['trigger'], equals: 'ROUTE' } }, { data: { path: ['trigger'], equals: 'JOB' } }],
+      action: { in: ['DELIVERY_ORDER_REPRICED', 'DELIVERY_ORDER_RECONCILE_BLOCKED'] },
+      data: { path: ['eventId'], equals: eventId },
     },
-    select: { id: true },
+    select: { data: true },
+    take: 50,
   })
-  return hit !== null
+  const reembolsos = filas
+    .map(f => (f.data as { refundPaymentId?: unknown } | null)?.refundPaymentId)
+    .filter((x): x is string => typeof x === 'string')
+  return { cambioVisto: filas.length > 0, reembolsos }
 }
 
 export type UberProcessOutcome =
@@ -196,9 +199,8 @@ export async function processUberEvent(eventRowId: string, deps: UberProcessDeps
   // El pedido cambió del lado de Uber (el cliente aceptó sustituir o quitar algo). La venta se
   // RECONCILIA contra una foto fresca, bajo el candado del pedido, con la MISMA función que el
   // retiro desde el KDS (spec §3.1, H11): renglones retirados en todas las comandas, reembolso
-  // compensatorio y reprecio. Sin foto confiable no se escribe nada y el evento queda FAILED
-  // para que el job de webhooks lo reintente — antes quedaba PROCESSED y la venta seguía
-  // reportando lo que el cliente ya no pagó.
+  // compensatorio y reprecio. Cada lectura liquida lo que ya trae; el aviso sigue ABIERTO (FAILED,
+  // `CAMBIO_SIN_CONFIRMAR`) hasta que el pedido cierra en Uber o se agota su vida (ver arriba).
   if (tipo === 'FULFILLMENT_CHANGED') {
     if (!identidad.orderId) {
       await markEventResult(eventRowId, DeliveryOrderEventStatus.PROCESSED)
@@ -221,56 +223,52 @@ export async function processUberEvent(eventRowId: string, deps: UberProcessDeps
       await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, undefined, 'ORDEN_NO_EXISTE')
       return { outcome: 'FAILED', error: 'ORDEN_NO_EXISTE' }
     }
-    let fallo: string | null
-    let outcome: string | null = null
+    let fallo: string | null = null
+    let r: Awaited<ReturnType<typeof reconcileDeliveryOrderFromProvider>> | null = null
     try {
-      outcome = (await reconcileDeliveryOrderFromProvider(orden.id, { trigger: 'WEBHOOK' })).outcome
-      fallo = outcome === 'READ_FAILED' ? 'READ_FAILED' : null
+      r = await reconcileDeliveryOrderFromProvider(orden.id, { trigger: 'WEBHOOK', eventId: eventRowId })
+      if (r.outcome === 'READ_FAILED') fallo = 'READ_FAILED'
     } catch (err) {
       fallo = err instanceof Error ? err.message : String(err)
     }
-    if (fallo) {
-      logger.error('🚨 [Uber] el pedido cambió y no se pudo reconciliar: el evento queda para reintento', {
-        eventRowId,
-        orderId: orden.id,
-        venueId: evento.channelLink.venueId,
-        error: fallo.slice(0, 300),
-      })
-      await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, orden.id, fallo.slice(0, 500))
-      return { outcome: 'FAILED', orderId: orden.id, error: fallo }
-    }
-    // P1-2: el GET puede ir DETRÁS del aviso. El evento se relee (FAILED con un motivo propio; el job
-    // de webhooks con su backoff) hasta una lectura SIN cambios DESPUÉS de una que sí cambió: una
-    // lectura que liquida algo no prueba que traiga TODO lo avisado (2ª pasada de Codex: bajó la
-    // propina y el retiro llegó después). Pedido cancelado, cerrado o bloqueado = terminal.
-    const dentro = Date.now() - evento.receivedAt.getTime() < CAMBIO_SIN_REFLEJAR_VENTANA_MS
-    if ((outcome === 'REFUNDED' || outcome === 'NO_DELTA') && dentro) {
-      await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, orden.id, CAMBIO_POR_CONFIRMAR)
-      return { outcome: 'FAILED', orderId: orden.id, error: CAMBIO_POR_CONFIRMAR }
-    }
-    // Sin cambios y sin un cambio previo que la acredite (de este aviso, o de la ruta del cajero hace poco).
-    if (outcome === 'NO_ACTIONS' && evento.error !== CAMBIO_POR_CONFIRMAR && !(await cambioReflejadoPorElCajero(orden.id, evento.receivedAt))) {
-      if (dentro) {
-        logger.warn('[Uber] el pedido cambió y la foto aún no lo trae: se relee más tarde', { eventRowId, orderId: orden.id })
-        await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, orden.id, CAMBIO_SIN_REFLEJAR)
-        return { outcome: 'FAILED', orderId: orden.id, error: CAMBIO_SIN_REFLEJAR }
-      }
-      logger.warn('[Uber] el proveedor avisó un cambio y su foto nunca mostró el cambio: se cierra el aviso', {
-        eventRowId,
-        orderId: orden.id,
-        venueId: evento.channelLink.venueId,
-        edadMin: Math.round((Date.now() - evento.receivedAt.getTime()) / 60_000),
-      })
-      await prisma.activityLog.create({
-        data: {
+    // Evidencia: el pedido CERRADO en Uber con su foto final reconciliada en ESTA pasada, o una venta
+    // que ya se canceló (dejó de ser venta; no hay nada que esperar).
+    const acreditado = !fallo && (r?.outcome === 'ORDER_CANCELLED' || r?.providerClosed === true)
+    const edadMs = Date.now() - evento.receivedAt.getTime()
+    if (!acreditado && edadMs < VIDA_DEL_PEDIDO_MS) {
+      if (fallo) {
+        logger.error('🚨 [Uber] el pedido cambió y no se pudo reconciliar: el evento queda para reintento', {
+          eventRowId,
+          orderId: orden.id,
           venueId: evento.channelLink.venueId,
-          staffId: null,
-          action: 'DELIVERY_ORDER_CHANGE_UNREFLECTED',
-          entity: 'Order',
-          entityId: orden.id,
-          data: { eventId: eventRowId, externalOrderId: identidad.orderId, ventanaMin: CAMBIO_SIN_REFLEJAR_VENTANA_MS / 60_000 },
-        },
+          error: fallo.slice(0, 300),
+        })
+      }
+      const motivo = fallo ? fallo.slice(0, 500) : CAMBIO_SIN_CONFIRMAR
+      await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, orden.id, motivo)
+      return { outcome: 'FAILED', orderId: orden.id, error: fallo ?? CAMBIO_SIN_CONFIRMAR }
+    }
+    // N-4: se agotó la vida del pedido sin evidencia ⇒ incidencia visible SEA CUAL SEA el último resultado.
+    if (!acreditado) {
+      const avance = await avanceDelAviso(orden.id, eventRowId)
+      const accion = avance.cambioVisto ? 'DELIVERY_ORDER_CHANGE_UNCONFIRMED' : 'DELIVERY_ORDER_CHANGE_UNREFLECTED'
+      const datos = {
+        eventId: eventRowId,
+        externalOrderId: identidad.orderId,
+        cambioVisto: avance.cambioVisto,
+        reembolsos: avance.reembolsos,
+        ultimoResultado: fallo ?? r?.outcome ?? null,
+        vidaMin: VIDA_DEL_PEDIDO_MS / 60_000,
+      }
+      await prisma.activityLog.create({
+        data: { venueId: evento.channelLink.venueId, staffId: null, action: accion, entity: 'Order', entityId: orden.id, data: datos },
       })
+      logger.error(
+        avance.cambioVisto
+          ? '🚨 [Uber] el cambio avisado no se confirmó: el pedido no cerró en su vida máxima — revisar la venta contra Uber'
+          : '🚨 [Uber] el proveedor avisó un cambio y su foto nunca mostró el cambio — revisar la venta contra Uber',
+        { orderId: orden.id, venueId: evento.channelLink.venueId, ...datos },
+      )
     }
     await markEventResult(eventRowId, DeliveryOrderEventStatus.PROCESSED, orden.id)
     return { outcome: 'RECONCILED', orderId: orden.id }
