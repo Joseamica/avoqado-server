@@ -44,10 +44,21 @@ export async function tomarReserva(
   })
 }
 
-export async function soltarReserva(orderId: string, token: string): Promise<void> {
-  const r = await prisma.order.updateMany({
+/**
+ * Acepta un `tx` opcional para que Task 7 pueda soltar la reserva DENTRO del mismo
+ * `withDeliveryOrderLock` que la tomó, sin abrir una segunda transacción que se
+ * bloquearía a sí misma esperando el candado que ya sostiene. Devuelve si de verdad
+ * liberó algo — Task 7 lo usa para distinguir `DELIVERY_OP_LATE_RESULT` (spec §3.2(c)).
+ */
+export async function soltarReserva(orderId: string, token: string, tx?: Prisma.TransactionClient): Promise<boolean> {
+  // Prisma trata `deliveryOpToken: undefined` como "sin filtro": un token vacío
+  // liberaría CUALQUIER reserva viva del pedido, no sólo la propia.
+  if (!token) return false
+  const client = tx ?? prisma
+  const r = await client.order.updateMany({
     where: { id: orderId, deliveryOpToken: token },
     data: { deliveryOpInFlight: null, deliveryOpInFlightAt: null, deliveryOpToken: null },
   })
   if (r.count === 0) logger.warn('[Delivery] soltarReserva ignorado: la reserva ya es de otra operación', { orderId })
+  return r.count > 0
 }

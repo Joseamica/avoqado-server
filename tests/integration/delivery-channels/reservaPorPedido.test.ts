@@ -77,19 +77,35 @@ describe('candado por pedido y reserva simetrica con token', () => {
     expect(fila.deliveryOpToken).toBe((b as { ok: true; token: string }).token)
   })
 
+  it('soltar con token vacio no toca la reserva (Prisma trataria undefined como "sin filtro")', async () => {
+    const { order } = await sembrarOrdenDeReparto()
+    const a = await tomarReserva(order.id, 'READY')
+    const liberado = await soltarReserva(order.id, '')
+    expect(liberado).toBe(false)
+    const fila = await prisma.order.findUniqueOrThrow({ where: { id: order.id } })
+    expect(fila.deliveryOpInFlight).toBe('READY')
+    expect(fila.deliveryOpToken).toBe((a as { ok: true; token: string }).token)
+  })
+
   it('withDeliveryOrderLock serializa: la segunda transaccion espera a que la primera termine', async () => {
     const { order } = await sembrarOrdenDeReparto()
     const tiempos: { quien: string; evento: string; en: number }[] = []
     const registra = (quien: string, evento: string) => tiempos.push({ quien, evento, en: Date.now() })
 
+    let resolveATomoElCandado: () => void
+    const aTomoElCandado = new Promise<void>(resolve => {
+      resolveATomoElCandado = resolve
+    })
+
     const a = withDeliveryOrderLock(order.id, async () => {
       registra('A', 'start')
+      resolveATomoElCandado() // A ya está DENTRO de la función: el advisory lock ya es suyo.
       await new Promise(resolve => setTimeout(resolve, 300))
       registra('A', 'end')
     })
-    // Deja que A tome el candado (abre su transacción y corre el advisory lock)
-    // antes de lanzar B, para que B se quede esperando el mismo lock.
-    await new Promise(resolve => setTimeout(resolve, 50))
+    // Espera a que A entre a su cuerpo (ya tomó el lock) antes de lanzar B — determinista,
+    // no depende de que un `setTimeout` fijo le gane la carrera a una Mac cargada.
+    await aTomoElCandado
     const b = withDeliveryOrderLock(order.id, async () => {
       registra('B', 'start')
     })
