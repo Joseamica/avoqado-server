@@ -19,6 +19,7 @@ import { uberAdapter } from '@/services/delivery-channels/providers/uber-eats/ub
 import { processUberEvent } from '@/services/delivery-channels/providers/uber-eats/uber.eventProcessor'
 import * as responder from '@/services/delivery-channels/core/respondToDeliveryOrder.service'
 import { tomarReserva } from '@/services/delivery-channels/core/deliveryOrderLock'
+import { DeliveryWriteNotSentError } from '@/services/delivery-channels/core/types'
 import { bumpKdsOrder } from '@/services/mobile/kds.mobile.service'
 import fixtureAceptado from '../../fixtures/delivery/uber/pedido-con-modificadores-uapi.json'
 import fixtureFallido from '../../fixtures/delivery/uber/pedido-real-uapi.json'
@@ -354,5 +355,23 @@ describe('aceptación acreditada, «listo» irrevocable y reserva simétrica (Ta
     expect(res.body.code).toBe('DELIVERY_OP_IN_PROGRESS')
     expect(res.body.ok).toBe(false)
     expect(spy).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['STORE_NOT_AUTHORIZED' as const, 409, 'STORE_NOT_CONNECTED'],
+    ['UNAVAILABLE' as const, 503, 'PROVIDER_NOT_CONTACTED'],
+  ])('POST /delivery/accept que no llegó a la app (%s) ⇒ %i %s, sin sellar ni dejar la reserva', async (motivo, status, code) => {
+    jest.spyOn(uberAdapter, 'acceptOrder').mockRejectedValue(new DeliveryWriteNotSentError(motivo, 'no salió'))
+    const o = await nuevaOrden(OrderStatus.PENDING)
+
+    const res = await request(app)
+      .post(`/api/v1/mobile/venues/${venueId}/orders/${o.id}/delivery/accept`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(status)
+    expect(res.body.code).toBe(code)
+    const orden = await prisma.order.findUniqueOrThrow({ where: { id: o.id } })
+    expect(orden.providerAcceptedAt).toBeNull()
+    expect(orden.deliveryOpToken).toBeNull()
   })
 })

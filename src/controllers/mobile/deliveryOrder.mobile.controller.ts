@@ -5,6 +5,7 @@
  * tablet o en la terminal, no en la computadora de la oficina.
  */
 import type { NextFunction, Request, Response } from 'express'
+import { DeliveryWriteNotSentError } from '../../services/delivery-channels/core/types'
 
 import {
   acceptDeliveryOrder,
@@ -41,6 +42,25 @@ function respuestaDeReserva(res: Response, r: RespuestaPedido) {
   return null
 }
 
+/**
+ * Nada llegó a la app de delivery (candado, token o tienda sin consentimiento): se dice con esas
+ * palabras en vez de un 500 genérico — la tienda desconectada no se arregla picándole otra vez.
+ */
+function respuestaNoEnviado(res: Response, e: unknown) {
+  if (!(e instanceof DeliveryWriteNotSentError)) return null
+  return e.reason === 'STORE_NOT_AUTHORIZED'
+    ? res
+        .status(409)
+        .json({ ok: false, code: 'STORE_NOT_CONNECTED', error: 'Uber está desconectada para esta tienda; reconéctala desde el panel.' })
+    : res
+        .status(503)
+        .json({
+          ok: false,
+          code: 'PROVIDER_NOT_CONTACTED',
+          error: 'No se pudo contactar a la app de delivery; no se envió nada, intenta de nuevo.',
+        })
+}
+
 export const acceptOrder = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId, orderId } = req.params
@@ -67,7 +87,7 @@ export const acceptOrder = async (req: Request, res: Response, next: NextFunctio
     }
     return res.json({ ok: true, outcome: r.outcome })
   } catch (e) {
-    return next(e)
+    return respuestaNoEnviado(res, e) ?? next(e)
   }
 }
 
@@ -92,6 +112,6 @@ export const denyOrder = async (req: Request, res: Response, next: NextFunction)
     // decir algo distinto en pantalla.
     return res.json({ ok: true, outcome: r.outcome })
   } catch (e) {
-    return next(e)
+    return respuestaNoEnviado(res, e) ?? next(e)
   }
 }
