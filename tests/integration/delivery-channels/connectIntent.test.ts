@@ -230,6 +230,15 @@ describe('Intención de conexión de Uber (Tarea 17)', () => {
     expect(await fila(id)).toMatchObject({ state: 'ACTIVATING', selectionJson: [tiendaB], activationAttempt: 0 })
   })
 
+  it('una pestaña que llega TARDE con su selección (el intent ya está en ACTIVATING) no «reintenta» la ajena', async () => {
+    const id = await activando([tiendaB])
+    const res = await postActivar(id, [tiendaA])
+    expect(res.status).toBe(409)
+    expect(res.text).toContain('ya se había enviado otra selección')
+    expect(posData).not.toHaveBeenCalled()
+    expect(await fila(id)).toMatchObject({ state: 'ACTIVATING', selectionJson: [tiendaB], activationAttempt: 0 })
+  })
+
   it('una página de error pública no enseña el mensaje interno: texto fijo + código de soporte', async () => {
     const { firmado } = await intents.crearIntent({ venueId, staffId })
     jest.spyOn(prisma.deliveryConnectIntent, 'findUnique').mockRejectedValueOnce(new Error('detalle-interno-de-la-base'))

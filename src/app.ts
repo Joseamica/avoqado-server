@@ -48,7 +48,7 @@ import appUpdateRoutes from './routes/superadmin/appUpdate.routes'
 import settlementReportRoutes from './routes/settlement-report.routes'
 import { authenticateTokenMiddleware } from './middlewares/authenticateToken.middleware'
 import { authorizeRole } from './middlewares/authorizeRole.middleware'
-import { requestLoggerMiddleware } from './middlewares/requestLogger'
+import { redactUrlSecrets, requestLoggerMiddleware } from './middlewares/requestLogger'
 import { isJsonBodyParseError } from './utils/httpErrors'
 
 // Types (could be moved to a central types file)
@@ -407,7 +407,7 @@ export function globalErrorHandler(err: Error, req: ExpressRequest, res: Express
       correlationId,
       request: {
         method: req.method,
-        url: req.originalUrl,
+        url: redactUrlSecrets(req.originalUrl),
         ip: req.ip,
       },
     })
@@ -431,7 +431,7 @@ export function globalErrorHandler(err: Error, req: ExpressRequest, res: Express
       correlationId,
       request: {
         method: req.method,
-        url: req.originalUrl,
+        url: redactUrlSecrets(req.originalUrl),
         ip: req.ip,
       },
     })
@@ -452,7 +452,7 @@ export function globalErrorHandler(err: Error, req: ExpressRequest, res: Express
     isOperational: false,
     request: {
       method: req.method,
-      url: req.originalUrl,
+      url: redactUrlSecrets(req.originalUrl),
       ip: req.ip,
     },
   })

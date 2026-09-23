@@ -382,6 +382,17 @@ export async function uberOAuthCallback(req: Request, res: Response): Promise<vo
   }
 }
 
+function mismaSeleccion(cuerpo: unknown, guardada: unknown): boolean {
+  const a = new Set(([] as unknown[]).concat(cuerpo ?? []))
+  const b = new Set(Array.isArray(guardada) ? guardada : [])
+  return a.size === b.size && [...a].every(x => b.has(x))
+}
+
+const OTRA_SELECCION = page(
+  'Ya se había enviado otra selección',
+  '<p class="bad">Para este enlace ya se había enviado otra selección de tiendas (quizá desde otra pestaña). Revisa esa pestaña para ver el resultado.</p>',
+)
+
 /** Paso 3: `POST /oauth/activate` (`state2` firmado + `stores[]`) — la selección, y el «Reintentar». */
 export async function activarUberOAuth(req: Request, res: Response): Promise<void> {
   try {
@@ -400,18 +411,18 @@ export async function activarUberOAuth(req: Request, res: Response): Promise<voi
       }
       // count 0 ⇒ otra pestaña mandó SU selección antes: no se activa la de otro en nombre de ésta.
       if (!(await intents.casEstado(id, 'EXCHANGED', 'ACTIVATING', { selectionJson: pedidas as string[] }))) {
-        res
-          .status(409)
-          .send(
-            page(
-              'Ya se había enviado otra selección',
-              '<p class="bad">Para este enlace ya se había enviado otra selección de tiendas (quizá desde otra pestaña). Revisa esa pestaña para ver el resultado.</p>',
-            ),
-          )
+        res.status(409).send(OTRA_SELECCION)
         return
       }
     }
-    // ACTIVATING = «Reintentar»: se usa la selección guardada, nunca la del cuerpo.
+    // ACTIVATING = «Reintentar»: se usa la selección guardada, nunca la del cuerpo. El formulario de
+    // «Reintentar» no manda `stores`; si llegan y NO son la selección guardada, es otra pestaña con SU
+    // selección tarde — no se activa la de otro en nombre de ésta. La misma selección (doble clic)
+    // sigue de largo y el lease contesta «en curso».
+    else if (req.body?.stores !== undefined && !mismaSeleccion(req.body.stores, intent.selectionJson)) {
+      res.status(409).send(OTRA_SELECCION)
+      return
+    }
     return responderActivacion(res, id, await intents.activar(id, activarTiendaUber))
   } catch (err) {
     logger.error('Falló la activación de Uber', { error: (err as Error).message })
