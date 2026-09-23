@@ -59,7 +59,7 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
   ]
 
   /** Una venta de reparto como la deja la ingesta real, y su foto con los renglones que SIGUEN. */
-  async function sembrar() {
+  async function sembrar(propina = '0.00') {
     const sufijo = ++n
     const ext = `t15-${Date.now()}-${sufijo}`
     const normalized: NormalizedDeliveryOrder = {
@@ -67,7 +67,7 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
       displayId: `T15-${sufijo}`,
       source: OrderSource.UBER_EATS,
       items: RENGLONES.map(r => renglon(r, sufijo)),
-      payment: pago('200.00'),
+      payment: pago('200.00', propina),
       customer: { name: 'Cliente T15' },
       raw: { fuente: 'test' },
       placedAt: new Date(),
@@ -76,10 +76,10 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
     const filas = await prisma.orderItem.findMany({ where: { orderId: order.id } })
     const item: Record<string, (typeof filas)[number]> = {}
     for (const f of filas) item[f.externalLineId!] = f
-    const foto = (siguen: string[], venta: string): NormalizedDeliveryOrder => ({
+    const foto = (siguen: string[], venta: string, prop = propina): NormalizedDeliveryOrder => ({
       ...normalized,
       items: RENGLONES.filter(r => siguen.includes(r.linea)).map(r => renglon(r, sufijo)),
-      payment: pago(venta),
+      payment: pago(venta, prop),
     })
     // Por defecto el proveedor devuelve el pedido intacto.
     fotos.set(ext, foto(['a', 'b'], '200.00'))
@@ -709,6 +709,8 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
 
       // El reintento del job de webhooks (mismo procesador) ya ve la foto con el retiro.
       fotos.set(s.ext, { ...s.foto(['a'], '150.00'), raw: { fuente: 'foto-fresca' } })
+      // Cambió: se relee UNA vez más para confirmar que no viene nada detrás (2ª pasada de Codex).
+      expect(await processUberEvent(eventoId)).toMatchObject({ outcome: 'FAILED', error: 'CAMBIO_POR_CONFIRMAR' })
       expect(await processUberEvent(eventoId)).toMatchObject({ outcome: 'RECONCILED', orderId: s.order.id })
 
       expect((await prisma.deliveryOrderEvent.findUniqueOrThrow({ where: { id: eventoId } })).status).toBe('PROCESSED')
@@ -716,6 +718,38 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
       expect(refund.amount.toString()).toBe('-50')
       // M-1: tras un reprecio la orden guarda la foto fresca, no la original.
       expect((await prisma.order.findUniqueOrThrow({ where: { id: s.order.id } })).posRawData).toEqual({ fuente: 'foto-fresca' })
+    })
+
+    it('P1-2 (2ª pasada): la 1.ª foto trae OTRO cambio parcial (propina) ⇒ se relee hasta que deja de cambiar y el retiro no se entierra', async () => {
+      const s = await sembrar('10.00')
+      fotos.set(s.ext, s.foto(['a', 'b'], '200.00', '5.00')) // bajó la propina; el artículo aún no
+      const { id: eventoId } = await evento(s.ext)
+
+      expect(await processUberEvent(eventoId)).toMatchObject({ outcome: 'FAILED', error: 'CAMBIO_POR_CONFIRMAR' })
+      fotos.set(s.ext, s.foto(['a'], '150.00', '5.00')) // ahora sí, sin el renglón de $50
+      expect(await processUberEvent(eventoId)).toMatchObject({ outcome: 'FAILED', error: 'CAMBIO_POR_CONFIRMAR' })
+      expect(await processUberEvent(eventoId)).toMatchObject({ outcome: 'RECONCILED', orderId: s.order.id })
+
+      expect((await prisma.deliveryOrderEvent.findUniqueOrThrow({ where: { id: eventoId } })).status).toBe('PROCESSED')
+      const refunds = await reembolsos(s.order.id)
+      expect(refunds.reduce((t, f) => t.plus(f.amount), new Prisma.Decimal(0)).toString()).toBe('-50')
+      expect(refunds.reduce((t, f) => t.plus(f.tipAmount), new Prisma.Decimal(0)).toString()).toBe('-5')
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: s.order.id } })).subtotal.toString()).toBe('150')
+      expect(await prisma.activityLog.count({ where: { venueId, entityId: s.order.id, action: 'DELIVERY_ORDER_CHANGE_UNREFLECTED' } })).toBe(0)
+    })
+
+    it('P1-2: el cajero YA lo reconcilió por la ruta ⇒ el aviso se cierra en la PRIMERA lectura, sin rastro falso de «nunca se reflejó»', async () => {
+      const s = await sembrar()
+      await accion(s.order, s.ext, s.item.b.id, 'b', { status: 'CONFIRMED', resolvedAt: new Date() })
+      fotos.set(s.ext, s.foto(['a'], '150.00'))
+      expect((await reconciliacion.reconcileDeliveryOrderFromProvider(s.order.id, { trigger: 'ROUTE' })).outcome).toBe('REFUNDED')
+      const { id: eventoId } = await evento(s.ext)
+
+      expect(await processUberEvent(eventoId)).toMatchObject({ outcome: 'RECONCILED', orderId: s.order.id })
+
+      expect(lecturasDe(s.ext)).toBe(2) // la de la ruta y UNA del aviso
+      expect((await prisma.deliveryOrderEvent.findUniqueOrThrow({ where: { id: eventoId } })).status).toBe('PROCESSED')
+      expect(await prisma.activityLog.count({ where: { venueId, entityId: s.order.id, action: 'DELIVERY_ORDER_CHANGE_UNREFLECTED' } })).toBe(0)
     })
 
     it('P1-2: si Uber ya CERRÓ el pedido, una foto sin cambios es definitiva: se cierra el aviso sin releer', async () => {
@@ -761,9 +795,12 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
       fotos.set(s.ext, s.foto(['a'], '150.00'))
       const { id: eventoId } = await evento(s.ext)
 
+      // Un cambio legítimo cuesta UNA lectura de más: la que confirma que ya no cambia.
+      expect(await processUberEvent(eventoId)).toMatchObject({ outcome: 'FAILED', error: 'CAMBIO_POR_CONFIRMAR' })
       const r = await processUberEvent(eventoId)
 
       expect(r).toMatchObject({ outcome: 'RECONCILED', orderId: s.order.id })
+      expect(lecturasDe(s.ext)).toBe(2)
       expect((await prisma.deliveryOrderEvent.findUniqueOrThrow({ where: { id: eventoId } })).status).toBe(
         DeliveryOrderEventStatus.PROCESSED,
       )

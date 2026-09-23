@@ -26,6 +26,7 @@ jest.mock('@/services/delivery-channels/core/deliveryWebhookEvent.service', () =
 jest.mock('@/services/delivery-channels/providers/uber-eats/uber.eventProcessor', () => ({
   processUberEvent: jest.fn(),
   CAMBIO_SIN_REFLEJAR: 'CAMBIO_SIN_REFLEJAR',
+  RELECTURAS_ACOTADAS: ['CAMBIO_SIN_REFLEJAR', 'CAMBIO_POR_CONFIRMAR'],
 }))
 jest.mock('@/services/delivery-channels/providers/rappi/rappi.eventProcessor', () => ({
   processRappiEvent: jest.fn(),
@@ -508,9 +509,9 @@ describe('DeliveryWebhookReconciliationJob', () => {
       )
     })
 
-    it('P1-2: un cambio que la foto aún no trae se relee con backoff, y es una espera (warn), no una falla', async () => {
+    it.each(['CAMBIO_SIN_REFLEJAR', 'CAMBIO_POR_CONFIRMAR'])('P1-2: %s se relee con backoff, y es una espera (warn), no una falla', async motivo => {
       mockedFindMany.mockResolvedValueOnce([eventoUber({ eventType: 'order.fulfillment_issues.resolved' })]).mockResolvedValueOnce([])
-      mockedProcessUber.mockResolvedValueOnce({ outcome: 'FAILED', orderId: 'ord_u', error: 'CAMBIO_SIN_REFLEJAR' })
+      mockedProcessUber.mockResolvedValueOnce({ outcome: 'FAILED', orderId: 'ord_u', error: motivo })
       const errores = jest.spyOn(logger, 'error')
       const avisos = jest.spyOn(logger, 'warn')
 
