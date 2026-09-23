@@ -308,7 +308,7 @@ export async function bumpKdsOrder(venueId: string, orderId: string): Promise<Kd
 
 // MARK: - Helper
 
-function formatKdsOrder(order: any, needsAcceptance = false): KdsOrderResponse {
+export function formatKdsOrder(order: any, needsAcceptance = false): KdsOrderResponse {
   return {
     id: order.id,
     orderNumber: order.orderNumber,

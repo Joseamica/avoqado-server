@@ -39,6 +39,7 @@ import { registerFeatureTools } from './tools/features'
 import { registerDeliveryChannelTools } from './tools/deliveryChannels'
 import { registerDeliveryActivationTools } from './tools/deliveryActivation'
 import { registerDeliveryCourierTools } from './tools/deliveryCourier'
+import { registerDeliveryLineActionTools } from './tools/deliveryLineActions'
 import { registerProductTools } from './tools/products'
 import { registerTrendTools } from './tools/trends'
 import { registerOrganizationTools } from './tools/organizations'
@@ -119,6 +120,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerDeliveryChannelTools(server, scope)
   registerDeliveryActivationTools(server, scope)
   registerDeliveryCourierTools(server, scope)
+  registerDeliveryLineActionTools(server, scope)
   registerProductTools(server, scope)
   registerTrendTools(server, scope)
   registerOrganizationTools(server, scope)

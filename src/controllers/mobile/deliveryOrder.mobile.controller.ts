@@ -15,7 +15,7 @@ import {
 
 const MOTIVOS: MotivoRechazo[] = ['OUT_OF_ITEMS', 'STORE_CLOSED', 'TOO_BUSY', 'OTHER']
 
-const OPERACION_EN_CURSO: Record<string, string> = {
+export const OPERACION_EN_CURSO: Record<string, string> = {
   REMOVE_ITEM: 'se está retirando un artículo',
   READY: 'se está marcando listo',
   DENY: 'se está rechazando el pedido',

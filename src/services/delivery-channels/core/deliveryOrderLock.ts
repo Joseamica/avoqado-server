@@ -23,30 +23,40 @@ export async function withDeliveryOrderLock<T>(orderId: string, fn: (tx: Prisma.
   )
 }
 
-/** 🔴 La reserva lleva TOKEN: un `finally` tardío no puede abrir el pedido que otra operación ya tomó. */
+/** ¿Otra salida a Uber tiene el pedido tomado? Una reserva de más de 2 min es huérfana y no cuenta. */
+export function reservaViva(fila: { deliveryOpInFlight: string | null; deliveryOpInFlightAt: Date | null }): boolean {
+  return Boolean(fila.deliveryOpInFlight && fila.deliveryOpInFlightAt && Date.now() - fila.deliveryOpInFlightAt.getTime() < RESERVA_TTL_MS)
+}
+
+/**
+ * 🔴 La reserva lleva TOKEN: un `finally` tardío no puede abrir el pedido que otra operación ya tomó.
+ *
+ * Con `tx`, quien YA sostiene `withDeliveryOrderLock` la toma dentro de su propia transacción (el
+ * retiro de renglón la escribe junto con su acción PENDING); abrir un segundo candado ahí se
+ * bloquearía esperándose a sí mismo.
+ */
 export async function tomarReserva(
   orderId: string,
   op: OperacionDeReparto,
+  tx?: Prisma.TransactionClient,
 ): Promise<{ ok: true; token: string } | { ok: false; ocupadaPor: OperacionDeReparto; desde: Date }> {
-  return withDeliveryOrderLock(orderId, async tx => {
-    const fila = await tx.order.findUniqueOrThrow({
-      where: { id: orderId },
-      select: { deliveryOpInFlight: true, deliveryOpInFlightAt: true },
-    })
-    const viva = fila.deliveryOpInFlight && fila.deliveryOpInFlightAt && Date.now() - fila.deliveryOpInFlightAt.getTime() < RESERVA_TTL_MS
-    if (viva) {
-      return { ok: false as const, ocupadaPor: fila.deliveryOpInFlight as OperacionDeReparto, desde: fila.deliveryOpInFlightAt! }
-    }
-    if (fila.deliveryOpInFlight) {
-      logger.error('🚨 [Delivery] reserva huérfana tomada por otra operación', { orderId, previa: fila.deliveryOpInFlight, nueva: op })
-    }
-    const token = randomUUID()
-    await tx.order.update({
-      where: { id: orderId },
-      data: { deliveryOpInFlight: op, deliveryOpInFlightAt: new Date(), deliveryOpToken: token },
-    })
-    return { ok: true as const, token }
+  if (!tx) return withDeliveryOrderLock(orderId, t => tomarReserva(orderId, op, t))
+  const fila = await tx.order.findUniqueOrThrow({
+    where: { id: orderId },
+    select: { deliveryOpInFlight: true, deliveryOpInFlightAt: true },
   })
+  if (reservaViva(fila)) {
+    return { ok: false as const, ocupadaPor: fila.deliveryOpInFlight as OperacionDeReparto, desde: fila.deliveryOpInFlightAt! }
+  }
+  if (fila.deliveryOpInFlight) {
+    logger.error('🚨 [Delivery] reserva huérfana tomada por otra operación', { orderId, previa: fila.deliveryOpInFlight, nueva: op })
+  }
+  const token = randomUUID()
+  await tx.order.update({
+    where: { id: orderId },
+    data: { deliveryOpInFlight: op, deliveryOpInFlightAt: new Date(), deliveryOpToken: token },
+  })
+  return { ok: true as const, token }
 }
 
 /**
