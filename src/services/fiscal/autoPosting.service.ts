@@ -9,6 +9,7 @@ import { postJournalEntry } from './journalEntry.service'
 import { splitPaymentIvaByOrderRates, grossByRateFromItems } from './ivaMath'
 import { paymentInFiscalScope } from './fiscalScope'
 import { generateCogsPolicyForVenue } from './cogs.service'
+import { ivaDeDevolucion, processorDataDeDevoluciones } from './deliveryFiscalDelta'
 import logger from '../../config/logger'
 
 /**
@@ -132,30 +133,18 @@ function buildSaleLines(
 
 /**
  * Líneas de una DEVOLUCIÓN (espejo invertido). Usa los montos de la propia fila refund.
- * `fiscalByRateCents` (sólo ajustes del proveedor de reparto, spec KDS Uber [N-13]): el IVA por tasa ya
- * calculado como diferencia de composiciones — se usa tal cual en vez de la mezcla de la orden.
+ * El IVA sale de `ivaDeDevolucion` — la MISMA regla que el estado de resultados: la mezcla de la orden,
+ * salvo el ajuste del proveedor de reparto con su `fiscalByRateCents` (spec KDS Uber [N-13]).
  */
 function buildRefundLines(
   p: PaymentRow,
   acct: (m: string) => string,
-  fiscalByRateCents?: Record<string, number>,
+  processorData?: unknown,
 ): { lines: { ledgerAccountId: string; debitCents: number; creditCents: number }[] } | null {
   const rG = Math.abs(toCents(p.amount))
   const rT = Math.abs(toCents(p.tipAmount))
   const rF = Math.abs(toCents(p.feeAmount)) // normalmente 0: el procesador conserva la comisión
-  let ivaDelAjuste = fiscalByRateCents ? Object.values(fiscalByRateCents).reduce((a, b) => a + b, 0) : null
-  if (ivaDelAjuste !== null && (ivaDelAjuste < 0 || ivaDelAjuste > rG)) {
-    // Una devolución NUNCA se queda sin póliza (banco, propina y devolución se registran siempre).
-    logger.error(
-      `🚨 [autoPosting] ajuste del proveedor ${p.id}: IVA ${ivaDelAjuste} fuera de [0, ${rG}] centavos — se postea con la mezcla de la orden`,
-    )
-    ivaDelAjuste = null
-  }
-  // Sin ajuste: IVA por tasa real de la orden (espejo de la venta) — cuadra al centavo.
-  const { netCents, taxCents } =
-    ivaDelAjuste !== null
-      ? { netCents: rG - ivaDelAjuste, taxCents: ivaDelAjuste }
-      : splitPaymentIvaByOrderRates(rG, grossByRateForOrder(p.order?.items))
+  const { netCents, taxCents } = ivaDeDevolucion(p.id, rG, processorData, grossByRateForOrder(p.order?.items))
   const isCash = p.method === PaymentMethod.CASH
   const refundCents = rG + rT - rF
   if (refundCents < 0) return null
@@ -168,32 +157,6 @@ function buildRefundLines(
     lines.push({ ledgerAccountId: acct(isCash ? 'CASH_RECEIPT' : 'BANK_RECEIPT'), debitCents: 0, creditCents: refundCents })
   if (rF > 0) lines.push({ ledgerAccountId: acct('PROCESSOR_FEE'), debitCents: 0, creditCents: rF })
   return lines.length >= 2 ? { lines } : null
-}
-
-/**
- * `processorData.fiscalByRateCents` de los ajustes del proveedor de reparto (spec KDS Uber [N-13]), leído
- * SÓLO de las devoluciones por postear: el processorData de cada venta del periodo no hace falta. Un
- * ajuste sin él (o malformado) es un defecto aguas arriba: 🚨 y se postea como hoy (mezcla de la orden).
- */
-async function leerFiscalDeAjustes(venueId: string, ids: string[]): Promise<Map<string, Record<string, number>>> {
-  const fiscal = new Map<string, Record<string, number>>()
-  if (ids.length === 0) return fiscal
-  const filas = await prisma.payment.findMany({
-    where: { venueId, id: { in: ids } },
-    select: { id: true, processorData: true },
-    take: ids.length,
-  })
-  for (const { id, processorData } of filas) {
-    const pd = processorData as { provenance?: unknown; fiscalByRateCents?: unknown } | null | undefined
-    if (pd?.provenance !== 'PROVIDER_ADJUSTMENT') continue
-    const f = pd.fiscalByRateCents
-    if (f && typeof f === 'object' && !Array.isArray(f) && Object.values(f).every(Number.isInteger)) {
-      fiscal.set(id, f as Record<string, number>)
-    } else {
-      logger.error(`🚨 [autoPosting] ajuste del proveedor ${id} sin fiscalByRateCents válido: se postea con la mezcla de la orden`)
-    }
-  }
-  return fiscal
 }
 
 /** ¿El pago es elegible para auto-postear? (espejo de las exclusiones del read-model de ingresos). */
@@ -303,7 +266,7 @@ export async function generatePoliciesForVenue(
     ).map(e => e.idempotencyKey),
   )
 
-  const fiscalDeAjustes = await leerFiscalDeAjustes(
+  const processorDataDeAjustes = await processorDataDeDevoluciones(
     venueId,
     eligible.filter(p => (toCents(p.amount) < 0 || p.type === PaymentType.REFUND) && !existing.has(`refund:${p.id}:v1`)).map(p => p.id),
   )
@@ -324,7 +287,7 @@ export async function generatePoliciesForVenue(
       base.alreadyPosted++
       continue
     }
-    const built = isRefund ? buildRefundLines(p, acct, fiscalDeAjustes.get(p.id)) : buildSaleLines(p, acct)
+    const built = isRefund ? buildRefundLines(p, acct, processorDataDeAjustes.get(p.id)) : buildSaleLines(p, acct)
     if (!built) {
       base.skipped++ // anomalía no balanceable (ej. comisión > cobro)
       continue

@@ -160,8 +160,12 @@ export async function getSalesByItem(venueId: string, filters: SalesByItemFilter
   // Build query based on groupBy option
   const { selectFields, groupByFields, orderByField } = buildGroupByClause(groupBy)
 
-  // Add Payment JOIN only when grouping by paymentMethod
-  const paymentJoin = groupBy === 'paymentMethod' ? 'LEFT JOIN "Payment" pay ON pay."orderId" = o.id' : ''
+  // Add Payment JOIN only when grouping by paymentMethod. A REFUND row (e.g. the delivery provider's
+  // compensation for a removed line, spec KDS Uber [N-14]) is not a way the order was paid: joining it
+  // would count every surviving line a second time. (Two PAYMENT rows of a split still duplicate — known.)
+  // IS DISTINCT FROM, not <>: `type` is nullable and a legacy NULL row is a real payment.
+  const paymentJoin =
+    groupBy === 'paymentMethod' ? `LEFT JOIN "Payment" pay ON pay."orderId" = o.id AND pay.type IS DISTINCT FROM 'REFUND'` : ''
 
   // Add Terminal JOIN only when grouping by device
   const terminalJoin = groupBy === 'device' ? 'LEFT JOIN "Terminal" t ON t.id = o."terminalId"' : ''
@@ -204,6 +208,7 @@ export async function getSalesByItem(venueId: string, filters: SalesByItemFilter
       AND o."createdAt" <= ${utcTsParam(3)}
       AND o.status NOT IN ('CANCELLED')
       AND o."paymentStatus" NOT IN ('REFUNDED')
+      AND oi."removedAt" IS NULL
       ${hourFilterClause}
     GROUP BY ${groupByFields}
     ORDER BY ${orderByField} DESC
@@ -370,6 +375,7 @@ async function getPromotionAttribution(
       AND o."createdAt" <= ${utcTsParam(3)}
       AND o.status NOT IN ('CANCELLED')
       AND o."paymentStatus" NOT IN ('REFUNDED')
+      AND oi."removedAt" IS NULL
       ${hourFilterClause}
     GROUP BY oi."productId", COALESCE(oi."productName", p.name, 'Sin descripción'),
              COALESCE(NULLIF(op."snapshotJson"->>'name', ''), pr.name, 'Promoción')
@@ -491,6 +497,7 @@ async function calculateTimePeriodItemMetrics(
       AND o."createdAt" <= ${utcTsParam(3)}
       AND o.status NOT IN ('CANCELLED')
       AND o."paymentStatus" NOT IN ('REFUNDED')
+      AND oi."removedAt" IS NULL
       ${hourFilterClause}
     GROUP BY ${groupByExpression}
     ORDER BY ${orderByExpression}

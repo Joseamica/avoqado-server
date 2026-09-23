@@ -105,13 +105,15 @@ describe('lineRevenue — one definition of what a line earned', () => {
     expect(sql).toContain('FROM "OrderItemModifier"') // modifiers
     expect(sql).toContain('- oi."discountAmount"') // discount
     expect(lineRevenueSql('x')).toContain('x."unitPrice"')
-    expect(lineUnitsSql()).toBe('COALESCE(oi."weightQuantity", oi."quantity")')
+    // A line the delivery provider removed (`removedAt`) sold nothing: units, gross and net are 0.
+    expect(lineUnitsSql()).toBe('(CASE WHEN oi."removedAt" IS NULL THEN COALESCE(oi."weightQuantity", oi."quantity") ELSE 0 END)')
   })
 
   it('SQL and JS agree — gross minus the discount, both including modifiers', () => {
     // The two implementations drift apart silently; pin the shape that makes
     // `net = gross − discounts` hold in the reports that show both.
-    expect(lineRevenueSql()).toBe(`(${lineGrossSql()} - oi."discountAmount")`)
+    // (Same gross expression, minus the discount, inside the same `removedAt` guard.)
+    expect(lineRevenueSql()).toBe(lineGrossSql().replace(' ELSE 0 END)', ' - oi."discountAmount" ELSE 0 END)'))
     const line = { quantity: 1, unitPrice: 169, discountAmount: 20, modifiers: [{ price: 280, quantity: 1 }] }
     expect(lineGross(line)).toBe(449)
     expect(lineRevenue(line)).toBe(429)
