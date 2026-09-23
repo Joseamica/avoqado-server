@@ -33,6 +33,7 @@ describe('Candado de escrituras de Uber: consentimiento vigente, sin caché (Tar
     consentidaEnSandbox: t('en-sandbox'),
     deLaVariableSandbox: t('variable-sandbox'),
     revocable: t('revocable'),
+    revocadaEnVuelo: t('revocada-en-vuelo'),
   }
   let orgId: string, venueId: string
   const envOriginal: Record<string, unknown> = {}
@@ -80,6 +81,7 @@ describe('Candado de escrituras de Uber: consentimiento vigente, sin caché (Tar
     await vinculo(tiendas.sinConsentimiento, S.ACTIVE, null)
     await vinculo(tiendas.consentidaEnSandbox, S.ACTIVE, consentido(tiendas.consentidaEnSandbox, { ownerAuthorizedEnvironment: 'SANDBOX' }))
     await vinculo(tiendas.revocable, S.ACTIVE, consentido(tiendas.revocable))
+    await vinculo(tiendas.revocadaEnVuelo, S.ACTIVE, consentido(tiendas.revocadaEnVuelo))
   })
 
   afterEach(() => {
@@ -184,6 +186,28 @@ describe('Candado de escrituras de Uber: consentimiento vigente, sin caché (Tar
       await expect(aceptar(tiendas.activa)).rejects.toThrow('conexión perdida')
       // Tipado «no se envió» (no «en duda»): quien llama sabe que Uber no recibió nada.
       await expect(aceptar(tiendas.activa)).rejects.toMatchObject({ name: 'DeliveryWriteNotSentError', reason: 'UNAVAILABLE' })
+      expect(red).not.toHaveBeenCalled()
+    })
+
+    it('revocación MIENTRAS se espera el token ⇒ la escritura NO sale y dice «no se envió» (P1-4)', async () => {
+      // El permiso se leía ANTES del token: una renovación lenta dejaba una ventana en la que
+      // `deprovisioned` borraba el consentimiento y la escritura salía igual con el `Set` viejo.
+      const store = tiendas.revocadaEnVuelo
+      let darToken: ((t: string) => void) | undefined
+      jest.spyOn(uberToken, 'getUberAppToken').mockImplementation(() => new Promise<string>(r => (darToken = r)))
+      const envio = aceptar(store)
+      envio.catch(() => undefined) // se revisa abajo; evita un rechazo sin manejar mientras esperamos
+      for (let i = 0; i < 200 && !darToken; i++) await new Promise(r => setTimeout(r, 10))
+      expect(darToken).toBeDefined() // la escritura está esperando el token
+
+      await prisma.deliveryChannelLink.updateMany({
+        where: { provider: DeliveryProvider.UBER_EATS, externalLocationId: store },
+        data: { status: DeliveryChannelStatus.DISABLED, ownerAuthorizedAt: null, ownerAuthorizedClientId: null },
+      })
+      darToken!('token-renovado')
+
+      await expect(envio).rejects.toMatchObject({ reason: 'STORE_NOT_AUTHORIZED' })
+      await expect(envio).rejects.toBeInstanceOf(UberStoreWriteBlockedError)
       expect(red).not.toHaveBeenCalled()
     })
   })

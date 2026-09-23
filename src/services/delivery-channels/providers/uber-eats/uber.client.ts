@@ -116,8 +116,12 @@ export async function getUberToken(): Promise<string> {
 
 /**
  * Petición autenticada a Uber, con el candado de escrituras ya aplicado. El candado se resuelve AQUÍ,
- * en cada escritura y antes del token y de la red; las lecturas no tocan la base. `uberRequest`
- * rechaza la escritura si la tienda no está en el `Set`.
+ * en cada escritura; las lecturas no tocan la base. `uberRequest` rechaza la escritura si la tienda no
+ * está en el `Set`.
+ *
+ * 🔴 PRIMERO el token, DESPUÉS el permiso (P1-4 de la auditoría final): el token puede tardar (una
+ * renovación), y un permiso leído antes de esperarlo deja salir la escritura aunque `deprovisioned`
+ * haya borrado el consentimiento mientras tanto. Entre leer el permiso y `uberRequest` no hay otra espera.
  */
 export async function uberApi(opts: UberRequestOptions): Promise<UberResponse> {
   const environment = getUberEnvironment()
@@ -125,8 +129,8 @@ export async function uberApi(opts: UberRequestOptions): Promise<UberResponse> {
   let writableStores = new Set<string>()
   let token: string
   try {
-    if (escritura && opts.storeId) writableStores = await getWritableStores(environment, opts.storeId)
     token = await getUberToken()
+    if (escritura && opts.storeId) writableStores = await getWritableStores(environment, opts.storeId)
   } catch (e) {
     // Una escritura que falla aquí NO salió: el caller no debe dejarla «en duda» (las lecturas, igual que siempre).
     if (!escritura) throw e
