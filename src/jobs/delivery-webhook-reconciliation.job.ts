@@ -217,8 +217,13 @@ export class DeliveryWebhookReconciliationJob {
 
     for (const event of events) {
       const { channelLink } = event
+      // P1-3: una revocación de tienda se registra POR TIENDA aunque aún no exista su vínculo
+      // (`DeliveryStoreRevocation`, lo hace el procesador). Tirarla aquí como ORPHANED la perdía y una
+      // conexión en curso podía re-otorgar la tienda.
+      const revocacionSinVinculo =
+        !channelLink && event.provider === DeliveryProvider.UBER_EATS && event.eventType === 'store.deprovisioned'
       try {
-        if (!channelLink) {
+        if (!channelLink && !revocacionSinVinculo) {
           // Same per-event alert shape/prefix as the 24h sweep below — BetterStack
           // alerts on the '🚨 [Delivery recon] ORPHANED' pattern. Without this, a
           // deleted DeliveryChannelLink (venue turning off its integration) would
@@ -308,7 +313,7 @@ export class DeliveryWebhookReconciliationJob {
    */
   private async reprocesarSegunProveedor(
     event: { id: string; provider: DeliveryProvider; payload: unknown; externalEventId: string; venueId: string | null },
-    channelLink: Parameters<typeof ingestDeliveryOrder>[1],
+    channelLink: Parameters<typeof ingestDeliveryOrder>[1] | null,
   ): Promise<boolean> {
     if (event.provider === DeliveryProvider.RAPPI) {
       const r = await processRappiEvent(event.id)
@@ -332,7 +337,13 @@ export class DeliveryWebhookReconciliationJob {
       // NO lanza: reporta el desenlace. Traducirlo es lo que decide reintento vs. rendición.
       const r = await processUberEvent(event.id)
 
-      if (r.outcome === 'PROCESSED' || r.outcome === 'ALREADY_DONE' || r.outcome === 'NOT_AN_ORDER' || r.outcome === 'RECONCILED')
+      if (
+        r.outcome === 'PROCESSED' ||
+        r.outcome === 'ALREADY_DONE' ||
+        r.outcome === 'NOT_AN_ORDER' ||
+        r.outcome === 'RECONCILED' ||
+        r.outcome === 'STORE_STATE'
+      )
         return true
 
       // Sin vínculo no hay a quién ingerirle: el procesador ya lo dejó visible y no hay
@@ -354,6 +365,7 @@ export class DeliveryWebhookReconciliationJob {
       throw new Error(r.error ?? 'Uber: fallo desconocido al reprocesar')
     }
 
+    if (!channelLink) return false // sólo una revocación de Uber llega aquí sin vínculo, y ya salió arriba
     const normalized = parseDeliverectOrder(Buffer.from(JSON.stringify(event.payload)), channelLink)
     const { order } = await ingestDeliveryOrder(normalized, channelLink)
     await markEventResult(event.id, DeliveryOrderEventStatus.PROCESSED, order.id)

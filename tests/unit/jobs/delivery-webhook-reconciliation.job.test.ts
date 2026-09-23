@@ -524,6 +524,36 @@ describe('DeliveryWebhookReconciliationJob', () => {
       expect(avisos.mock.calls.some(([m]) => String(m).includes('cambio de pedido aún sin reflejar'))).toBe(true)
     })
 
+    it('P1-3: un store.deprovisioned SIN vínculo va al procesador (registra la revocación), no se tira como ORPHANED', async () => {
+      // Codex, 2ª pasada: con el job real salía `reprocessed: 0, orphaned: 1` y cero llamadas al
+      // procesador — la revocación de una tienda aún sin vínculo se perdía y una conexión en curso
+      // podía re-otorgarla.
+      const revocacion = eventoUber({
+        eventType: 'store.deprovisioned',
+        channelLinkId: null,
+        channelLink: null,
+        payload: { event_type: 'store.deprovisioned', meta: { user_id: 'store_sin_vinculo' } },
+      })
+      mockedFindMany.mockResolvedValueOnce([revocacion]).mockResolvedValueOnce([])
+      mockedProcessUber.mockResolvedValueOnce({ outcome: 'STORE_STATE' })
+
+      const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+      expect(mockedProcessUber).toHaveBeenCalledWith('evt_uber')
+      expect(result).toEqual({ reprocessed: 1, orphaned: 0 })
+      expect(mockedMarkEventResult).not.toHaveBeenCalled()
+      expect(mockedUpdate).not.toHaveBeenCalled() // STORE_STATE es éxito: sin backoff
+    })
+
+    it('P1-3: cualquier OTRO evento sin vínculo sigue siendo ORPHANED de inmediato', async () => {
+      mockedFindMany.mockResolvedValueOnce([eventoUber({ channelLinkId: null, channelLink: null })]).mockResolvedValueOnce([])
+
+      const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+      expect(mockedProcessUber).not.toHaveBeenCalled()
+      expect(result.orphaned).toBe(1)
+    })
+
     it('🔴 el barrido de 24 h también alcanza a Uber: nada se queda colgado para siempre', async () => {
       // Antes el barrido excluía a Uber a propósito, porque el scan no lo procesaba y
       // descartarlo habría sido perder la venta. Ahora que SÍ se procesa, tiene que poder
