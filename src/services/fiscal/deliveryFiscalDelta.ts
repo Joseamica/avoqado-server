@@ -96,6 +96,29 @@ export function ivaDeDevolucion(
 }
 
 /**
+ * IVA por tasa QUE HOY ESTÁ EN LIBROS para los cobros de una orden: el de cada venta (como la póliza,
+ * `splitPaymentIvaByOrderRates` con la mezcla de la orden) menos el de cada devolución (`ivaDeDevolucion`,
+ * la misma regla de la póliza: mezcla para las manuales, `fiscalByRateCents` para los ajustes del
+ * proveedor). Es el saldo del que un retiro nuevo descuenta — NO la composición cobrada, que deja de
+ * representar el IVA registrado en cuanto entra una devolución manual (auditoría final de Codex, P1-1).
+ */
+export function ivaEnLibrosPorTasa(
+  cobros: { id: string; type: string | null; amountCents: number; processorData: unknown }[],
+  grossByRate: { rate: number; grossCents: number }[],
+): FiscalByRateCents {
+  const saldo: FiscalByRateCents = {}
+  for (const c of cobros) {
+    const g = Math.abs(c.amountCents)
+    const devolucion = c.type === 'REFUND'
+    const { taxByRate } = devolucion
+      ? ivaDeDevolucion(c.id, g, c.processorData, grossByRate, { avisar: false })
+      : splitPaymentIvaByOrderRates(g, grossByRate)
+    for (const [tasa, v] of Object.entries(taxByRate)) saldo[tasa] = (saldo[tasa] ?? 0) + (devolucion ? -v : v)
+  }
+  return saldo
+}
+
+/**
  * `processorData` de las devoluciones indicadas, en UNA consulta acotada: el de cada venta del periodo
  * no hace falta, así que quien lista pagos no lo trae en su consulta principal.
  */

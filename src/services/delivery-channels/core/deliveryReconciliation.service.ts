@@ -17,7 +17,8 @@ import { OrderStatus, PaymentSource, Prisma, TransactionStatus } from '@prisma/c
 
 import logger from '@/config/logger'
 import { grossByRateForOrder } from '@/services/fiscal/autoPosting.service'
-import { fiscalByRateCentsPorTasa } from '@/services/fiscal/deliveryFiscalDelta'
+import { ivaEnLibrosPorTasa } from '@/services/fiscal/deliveryFiscalDelta'
+import { splitPaymentIvaByOrderRates } from '@/services/fiscal/ivaMath'
 import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { writeRefundInTx } from '@/services/shared/writeRefundInTx'
 
@@ -39,7 +40,6 @@ const LECTURA_MINIMA_MS = 1_000
 /** Un pedido de reparto trae decenas de renglones, no cientos; pasar de aquí es un dato roto. */
 const LIMITE_FILAS = 500
 
-const TERMINALES = new Set(['REFUNDED', 'NO_DELTA', 'FISCAL_PENDING'])
 const centavos = (v: Prisma.Decimal | string) => new Prisma.Decimal(v).times(100).round().toNumber()
 const pesos = (c: number) => new Prisma.Decimal(c).div(100)
 
@@ -168,14 +168,11 @@ export async function reconcileDeliveryOrderFromProvider(
       }
     }
 
-    const acciones = await tx.deliveryLineAction.findMany({
-      where: { orderId, venueId, action: 'REMOVE_ITEM' },
-      select: { id: true, orderItemId: true, settlement: true },
+    const acreditadas = await tx.deliveryLineAction.findMany({
+      where: { orderId, venueId, action: 'REMOVE_ITEM', settlement: 'ACCREDITED' },
+      select: { id: true, orderItemId: true },
       take: LIMITE_FILAS,
     })
-    const liquidadas = new Set(acciones.filter(a => TERMINALES.has(a.settlement)).map(a => a.orderItemId))
-    const acreditadas = acciones.filter(a => a.settlement === 'ACCREDITED')
-    const idsAcreditados = new Set(acreditadas.map(a => a.orderItemId))
 
     // ── 3. Deltas del bloque `payment` contra lo registrado del proveedor (original + REFUND previos).
     const cobros = await tx.payment.findMany({
@@ -200,16 +197,21 @@ export async function reconcileDeliveryOrderFromProvider(
       return { outcome: 'BLOCKED_INCREASE' as const }
     }
 
-    // ── 4. IVA por tasa: composición cobrada hasta ahora (sin lo ya liquidado) − la superviviente.
-    const cobrada = filas.filter(f => !liquidadas.has(f.id))
-    const superviviente = cobrada.filter(f => !idsAcreditados.has(f.id))
-    // Las dos composiciones por el MISMO mapeo de campos que la póliza de la venta.
-    const fiscal = fiscalByRateCentsPorTasa(
-      grossByRateForOrder(cobrada),
-      grossByRateForOrder(superviviente),
-      pagadoVenta,
-      pagadoVenta - dVenta,
+    // ── 4. IVA por tasa: lo que HOY está en libros (venta − cada devolución, manual o del proveedor,
+    // como la póliza las postea) − el IVA de la composición superviviente. Restar composiciones
+    // cobradas dejaba IVA residual en cuanto un reembolso manual entraba entre dos retiros (P1-1).
+    // Sobrevive lo que la foto fresca TRAE, con el MISMO mapeo de campos que la póliza de la venta.
+    const superviviente = filas.filter(f => presentes.has(f.externalLineId!))
+    const enLibros = ivaEnLibrosPorTasa(
+      cobros.map(c => ({ id: c.id, type: c.type, amountCents: centavos(c.amount), processorData: c.processorData })),
+      grossByRateForOrder(filas),
     )
+    const ivaSuperviviente = splitPaymentIvaByOrderRates(pagadoVenta - dVenta, grossByRateForOrder(superviviente)).taxByRate
+    const fiscal: Record<string, number> = {}
+    for (const tasa of new Set([...Object.keys(enLibros), ...Object.keys(ivaSuperviviente)])) {
+      const d = (enLibros[tasa] ?? 0) - (ivaSuperviviente[tasa] ?? 0)
+      if (d !== 0) fiscal[tasa] = d
+    }
     const ivaDevuelto = Object.values(fiscal).reduce((s, v) => s + v, 0)
 
     const aFiscalPendiente = async (motivo: string) => {

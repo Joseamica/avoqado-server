@@ -254,6 +254,57 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
     expect(ivaSuperviviente).toBe(1379)
   })
 
+  it('P1-1: un reembolso manual intercalado entre dos retiros no deja IVA residual (sólo sobrevive el 0 %)', async () => {
+    // Codex, auditoría final: A $100@16 %, B y C $100@0 %. Se retira B; devolución manual de $50
+    // (IVA por la mezcla de la orden, como la póliza); se retira A. Sobrevive sólo C al 0 %:
+    // el IVA que queda en libros tiene que ser CERO.
+    const { order, foto } = await sembrar(
+      [
+        { linea: 'a', nombre: 'Taco', precio: '100.00' },
+        { linea: 'b', nombre: 'Agua', precio: '100.00', tasa: 0 },
+        { linea: 'c', nombre: 'Jugo', precio: '100.00', tasa: 0 },
+      ],
+      pago('300.00', '0.00'),
+    )
+    proveedorDevuelve(foto(['a', 'c'], pago('200.00', '0.00')))
+    expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('REFUNDED')
+
+    const original = await prisma.payment.findFirstOrThrow({ where: { orderId: order.id, type: { not: 'REFUND' } } })
+    await prisma.$transaction(tx =>
+      writeRefundInTx(tx, {
+        originalPaymentId: original.id,
+        venueId,
+        salesRefundCents: 5000,
+        tipRefundCents: 0,
+        refundedItems: [],
+        reason: 'OTHER',
+        tenderCommission: 'NONE',
+        shift: 'INHERIT_ORIGINAL',
+        provenance: 'MANUAL',
+      }),
+    )
+
+    proveedorDevuelve(foto(['c'], pago('100.00', '0.00')))
+    expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('REFUNDED')
+
+    const refunds = await reembolsos(order.id)
+    expect(refunds.map(f => f.amount.toString())).toEqual(['-100', '-50', '-50'])
+    // IVA en libros = el de la venta − el de cada devolución, cada uno como lo postea la póliza.
+    const renglones = await prisma.orderItem.findMany({
+      where: { orderId: order.id },
+      select: { quantity: true, unitPrice: true, discountAmount: true, removedAt: true, product: { select: { taxRate: true } } },
+    })
+    const mezcla = grossByRateForOrder(renglones)
+    const ivaVenta = splitPaymentIvaByOrderRates(30000, mezcla).taxCents
+    const ivaDevuelto = refunds.reduce(
+      (s, f) => s + ivaDeDevolucion(f.id, new Prisma.Decimal(f.amount).times(-100).toNumber(), f.processorData, mezcla).taxCents,
+      0,
+    )
+    expect(ivaVenta - ivaDevuelto).toBe(0)
+    const ivaManual = ivaDeDevolucion(refunds[1].id, 5000, refunds[1].processorData, mezcla).taxCents
+    expect((refunds[2].processorData as any).fiscalByRateCents).toEqual({ '0.16': ivaVenta - ivaManual })
+  })
+
   it('sube la propina ⇒ nada escrito, deliveryReconcileBlocked = INCREASE_UNSUPPORTED, y bloqueado no mueve dinero', async () => {
     const { order, foto } = await sembrar(
       [
