@@ -299,7 +299,10 @@ interface ClaimRefundShiftInput {
  */
 export async function claimShiftForRefund(tx: PaymentShiftTransaction, input: ClaimRefundShiftInput): Promise<CapturedPaymentShiftClaim> {
   if (input.inherit) {
-    return { shiftId: input.inherit.shiftId, candidateShiftId: null, observedStatus: null, pendingReason: null }
+    // El turno HEREDADO sale de la fila del cobro original, leída bajo candado por `writeRefundInTx`
+    // — nunca del cuerpo de la petición (la guarda «nadie toma el turno del input del cliente»).
+    const delCobroOriginal = input.inherit
+    return { shiftId: delCobroOriginal.shiftId, candidateShiftId: null, observedStatus: null, pendingReason: null }
   }
 
   // Mismo predicado que el cobro: el turno VIVO (OPEN o CLOSING, `endTime` nulo). CLOSING sigue
