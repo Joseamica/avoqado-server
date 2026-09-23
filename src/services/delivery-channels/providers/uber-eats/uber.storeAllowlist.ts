@@ -13,14 +13,18 @@
  * Módulo PURO sin efectos secundarios (regla del repo: importable desde tests sin
  * arrastrar @/config/env). El caller resuelve el env var y pasa el valor crudo.
  */
+import { DeliveryWriteNotSentError } from '../../core/types'
+
 export type UberEnvironment = 'SANDBOX' | 'PRODUCTION'
 
-export class UberStoreWriteBlockedError extends Error {
+/** Pre-envío: el bloqueo salta antes de la red, así que es un «no se envió» (`STORE_NOT_AUTHORIZED`). */
+export class UberStoreWriteBlockedError extends DeliveryWriteNotSentError {
   readonly storeId: string
   readonly environment: UberEnvironment
   constructor(storeId: string, environment: UberEnvironment) {
     const envVar = `UBER_WRITABLE_STORE_IDS_${environment}`
     super(
+      'STORE_NOT_AUTHORIZED',
       environment === 'PRODUCTION'
         ? `Escritura a Uber BLOQUEADA por el candado de tiendas: store "${storeId || '(vacío)'}" no tiene ` +
             `consentimiento vigente del dueño (conéctala por OAuth con la app de Uber actual; revocada, ` +

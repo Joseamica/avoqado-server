@@ -152,6 +152,21 @@ export interface ActionResult {
 }
 
 /**
+ * La escritura al proveedor NO salió: falló ANTES de la red (el candado de escrituras, su lectura a
+ * la base, el token). Se SABE que el proveedor no recibió nada — a diferencia de un timeout/5xx, donde
+ * no se sabe y por eso queda en duda. `STORE_NOT_AUTHORIZED`: la tienda no tiene permiso de escritura
+ * (consentimiento revocado, app del proveedor cambiada); `UNAVAILABLE`: cualquier otro fallo previo.
+ */
+export class DeliveryWriteNotSentError extends Error {
+  readonly reason: 'STORE_NOT_AUTHORIZED' | 'UNAVAILABLE'
+  constructor(reason: 'STORE_NOT_AUTHORIZED' | 'UNAVAILABLE', message: string) {
+    super(message)
+    this.name = 'DeliveryWriteNotSentError'
+    this.reason = reason
+  }
+}
+
+/**
  * Contrato LEGADO de Deliverect. Congelado: Deliverect es el fallback, no el camino nuevo.
  *
  * No se le agregan métodos. Un proveedor DIRECTO (Uber, y mañana Rappi/DiDi) implementa

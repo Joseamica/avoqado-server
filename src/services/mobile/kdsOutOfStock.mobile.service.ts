@@ -28,7 +28,7 @@ import {
 } from '@/services/delivery-channels/core/deliveryOrderLock'
 import { applyLineRemoval } from '@/services/delivery-channels/core/lineRemoval.service'
 import { contexto, recuperarAceptacionDesdeProveedor } from '@/services/delivery-channels/core/respondToDeliveryOrder.service'
-import type { ActionResult } from '@/services/delivery-channels/core/types'
+import { DeliveryWriteNotSentError, type ActionResult } from '@/services/delivery-channels/core/types'
 import prisma from '@/utils/prismaClient'
 
 import { formatKdsOrderConVenta, type KdsOrderResponse } from './kds.mobile.service'
@@ -67,12 +67,15 @@ export type CodigoConflicto =
   | 'DELIVERY_OP_IN_PROGRESS'
   | 'LINE_ACTION_IN_PROGRESS'
   | 'RETRY_NOT_ELIGIBLE'
+  | 'STORE_NOT_CONNECTED'
 
 export type ResultadoRetiro =
   | { kind: 'HECHO'; comanda: KdsOrderResponse }
   | { kind: 'EN_CURSO'; state: 'PENDING' | 'UNCERTAIN'; attempts: number; since: string; canRetryAt: string }
   | { kind: 'CONFLICTO'; code: CodigoConflicto; error: string; ocupadaPor?: OperacionDeReparto }
   | { kind: 'RECHAZADO'; reason?: 'ALREADY_READY'; error: string }
+  /** Falló ANTES de la red: el proveedor no recibió nada, el intento se deshizo y se puede volver a pedir. */
+  | { kind: 'NO_ENVIADO'; error: string }
 
 const MENSAJES: Record<CodigoConflicto, string> = {
   LINE_ID_MISSING: 'Este renglón no se puede retirar: la app de delivery no nos dio su identificador.',
@@ -84,7 +87,9 @@ const MENSAJES: Record<CodigoConflicto, string> = {
   DELIVERY_OP_IN_PROGRESS: 'Espera: hay otra operación en curso sobre este pedido. Intenta en un momento.',
   LINE_ACTION_IN_PROGRESS: 'Espera: se está retirando otro artículo de este pedido; intenta en unos segundos.',
   RETRY_NOT_ELIGIBLE: 'Todavía no se puede reintentar, o alguien más ya lo reintentó. Actualiza la comanda.',
+  STORE_NOT_CONNECTED: 'Uber está desconectada para esta tienda; reconéctala desde el panel.',
 }
+const NO_SE_ENVIO = 'No se pudo contactar a Uber; no se envió nada, intenta de nuevo.'
 
 /**
  * `LINE_ACTION_IN_PROGRESS` tiene tres causas y las apps muestran el texto tal cual: un retiro
@@ -299,13 +304,48 @@ async function reconciliarSinLanzar(orderId: string): Promise<void> {
   }
 }
 
+/**
+ * La llamada falló ANTES de la red: no hay nada en duda. Se deshace el intento (el primero se borra;
+ * un reintento vuelve a UNCERTAIN con su intento anterior), se suelta la reserva y el cajero puede
+ * volver a pedirlo. NO es `REJECTED`: eso cerraría el renglón para siempre por un fallo nuestro.
+ */
+async function deshacerNoEnviado(l: Linea, a: Abierta, staffId: string, propio: Propio | undefined, e: DeliveryWriteNotSentError) {
+  logger.warn('[Delivery] el retiro NO salió hacia el proveedor: se deshace el intento', {
+    orderId: l.orderId,
+    attempt: a.attempt,
+    reason: e.reason,
+    error: e.message,
+  })
+  try {
+    await withDeliveryOrderLock(l.orderId, async tx => {
+      await soltarReserva(l.orderId, a.token, tx)
+      if (propio) await deshacerReintento(tx, propio)
+      else await tx.deliveryLineAction.deleteMany({ where: { id: a.accionId, status: 'PENDING', attempts: a.attempt } })
+    })
+  } catch (err) {
+    // Si no se pudo deshacer, el barrido pasa el PENDING huérfano a UNCERTAIN; la reserva vence sola en 2 min.
+    logger.error('🚨 [Delivery] no se pudo deshacer el retiro que no salió', { orderId: l.orderId, error: String(err) })
+    await soltarReserva(l.orderId, a.token).catch(() => undefined)
+  }
+  void logAction({
+    venueId: l.venueId,
+    staffId,
+    action: 'DELIVERY_ITEM_REMOVAL_NOT_SENT',
+    entity: 'Order',
+    entityId: l.orderId,
+    data: { orderItemId: l.orderItemId, lineId: l.lineId, attempt: a.attempt, reason: e.reason },
+  })
+  return e.reason === 'STORE_NOT_AUTHORIZED' ? conflicto('STORE_NOT_CONNECTED') : { kind: 'NO_ENVIADO' as const, error: NO_SE_ENVIO }
+}
+
 /** Paso 5: el HTTP fuera de todo candado; el resultado se aplica con CAS sobre ESTE intento. */
-async function enviarYAplicar(l: Linea, a: Abierta, staffId: string): Promise<ResultadoRetiro> {
+async function enviarYAplicar(l: Linea, a: Abierta, staffId: string, propio?: Propio): Promise<ResultadoRetiro> {
   let r: ActionResult | null = null
   let fallo = ''
   try {
     r = await l.ctx.adapter.resolveFulfillmentIssues!(l.ctx.externalOrderId, l.ctx.storeId, [l.lineId])
   } catch (e) {
+    if (e instanceof DeliveryWriteNotSentError) return deshacerNoEnviado(l, a, staffId, propio, e)
     fallo = String(e)
     logger.warn('[Delivery] el retiro de renglón no tuvo respuesta del proveedor: queda en duda, sin reenvío', {
       orderId: l.orderId,
@@ -446,7 +486,7 @@ export async function retryOutOfStock(
     entityId: l.orderId,
     data: { orderItemId: l.orderItemId, lineId: l.lineId, attempt: a.attempt },
   })
-  return enviarYAplicar(l, a, staffId)
+  return enviarYAplicar(l, a, staffId, propio)
 }
 
 /** Vista de sólo lectura (MCP): los retiros de renglón del venue, más recientes primero. */

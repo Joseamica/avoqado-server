@@ -13,6 +13,7 @@ import { env } from '@/config/env'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 
+import { DeliveryWriteNotSentError } from '../../core/types'
 import { createUberTokenFetcher, uberRequest, type UberRequestOptions, type UberResponse } from './uber.http'
 
 export { orderIdFromResourceHref } from './uber.http'
@@ -43,11 +44,13 @@ function getCredentials(environment: UberEnvironment): { clientId: string; clien
 }
 
 /**
- * SÓLO la variable `UBER_WRITABLE_STORE_IDS_<ENV>`, normalizada. No es el candado: en SANDBOX es la
- * lista entera; en PRODUCTION es una restricción (vacía no restringe). La activación la usa para la
- * intersección de §4.3 antes de que exista consentimiento.
+ * SÓLO lo que dice la variable `UBER_WRITABLE_STORE_IDS_<ENV>`, normalizado. 🔴 NO es permiso de
+ * escritura: nunca se le pasa a `uberRequest` como `writableStores` (en PRODUCTION saltaría el
+ * consentimiento). Lo usan el candado (`getWritableStores`, para la intersección) y la activación,
+ * que corre antes de que exista consentimiento (§4.3). En SANDBOX es la lista entera; en PRODUCTION
+ * es una restricción (vacía no restringe).
  */
-export function envWritableStores(environment: UberEnvironment): Set<string> {
+export function tiendasDeLaVariable(environment: UberEnvironment): Set<string> {
   const crudo = environment === 'SANDBOX' ? env.UBER_WRITABLE_STORE_IDS_SANDBOX : env.UBER_WRITABLE_STORE_IDS_PRODUCTION
   return parseWritableStoreIds(crudo)
 }
@@ -73,7 +76,7 @@ export async function getWritableStores(
   environment: UberEnvironment = getUberEnvironment(),
   soloTienda?: string,
 ): Promise<Set<string>> {
-  const variable = envWritableStores(environment)
+  const variable = tiendasDeLaVariable(environment)
   if (environment === 'SANDBOX') return variable
   const clientId = env.UBER_CLIENT_ID_PRODUCTION
   if (!clientId) return new Set()
@@ -118,9 +121,18 @@ export async function getUberToken(): Promise<string> {
  */
 export async function uberApi(opts: UberRequestOptions): Promise<UberResponse> {
   const environment = getUberEnvironment()
-  const writableStores =
-    opts.method === 'GET' || !opts.storeId ? new Set<string>() : await getWritableStores(environment, opts.storeId)
-  return uberRequest({ environment, token: await getUberToken(), writableStores }, opts)
+  const escritura = opts.method !== 'GET'
+  let writableStores = new Set<string>()
+  let token: string
+  try {
+    if (escritura && opts.storeId) writableStores = await getWritableStores(environment, opts.storeId)
+    token = await getUberToken()
+  } catch (e) {
+    // Una escritura que falla aquí NO salió: el caller no debe dejarla «en duda» (las lecturas, igual que siempre).
+    if (!escritura) throw e
+    throw new DeliveryWriteNotSentError('UNAVAILABLE', `No se envió nada a Uber: ${(e as Error).message}`)
+  }
+  return uberRequest({ environment, token, writableStores }, opts)
 }
 
 /**

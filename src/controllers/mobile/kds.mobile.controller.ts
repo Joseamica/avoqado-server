@@ -197,7 +197,8 @@ export const releaseKdsPrint = async (req: Request, res: Response, next: NextFun
 
 // ── «No tengo este artículo» (spec KDS Uber §3.3 / §3.5) ────────────────────────────
 // 200 retirado (o ya lo estaba) · 202 esperando al proveedor · 409 precondición · 502 el proveedor
-// lo rechazó. Las apps muestran `error` tal cual: el texto lo escribe el servidor.
+// lo rechazó · 503 no se le pudo hablar (nada salió; se puede volver a pedir).
+// Las apps muestran `error` tal cual: el texto lo escribe el servidor.
 
 function responderRetiro(res: Response, r: ResultadoRetiro) {
   switch (r.kind) {
@@ -213,6 +214,8 @@ function responderRetiro(res: Response, r: ResultadoRetiro) {
     }
     case 'RECHAZADO':
       return res.status(502).json({ success: false, code: 'PROVIDER_REJECTED', ...(r.reason ? { reason: r.reason } : {}), error: r.error })
+    case 'NO_ENVIADO':
+      return res.status(503).json({ success: false, code: 'PROVIDER_NOT_CONTACTED', error: r.error })
   }
 }
 

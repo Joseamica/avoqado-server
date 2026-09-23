@@ -34,7 +34,7 @@ import {
   uberRequest,
   type UberCredentials,
 } from '@/services/delivery-channels/providers/uber-eats/uber.http'
-import { envWritableStores } from '@/services/delivery-channels/providers/uber-eats/uber.client'
+import { tiendasDeLaVariable } from '@/services/delivery-channels/providers/uber-eats/uber.client'
 import { type UberEnvironment } from '@/services/delivery-channels/providers/uber-eats/uber.storeAllowlist'
 
 const ACTIVATE_PATH = '/api/v1/delivery/uber/oauth/activate'
@@ -229,7 +229,7 @@ export const activarTiendaUber: intents.ActivarTienda = async ({ intent, owner, 
   // lista (default-deny, el sandbox de Uber NO aísla producción); en PRODUCTION vacía no restringe
   // — ahí la palomita del dueño, reclamada abajo, ES el permiso de esta tienda.
   // Sólo la variable: el candado de la base exige un consentimiento que esta activación aún no escribe.
-  const lista = envWritableStores(e)
+  const lista = tiendasDeLaVariable(e)
   if ((e === 'SANDBOX' || lista.size > 0) && !lista.has(storeId.toLowerCase())) return { outcome: 'EXCLUDED_BY_ENV' }
 
   const reclamo = await claims.reclamarTienda(intent, owner, storeId, store?.name ?? null)

@@ -169,6 +169,7 @@ describe('Candado de escrituras de Uber: consentimiento vigente, sin caché (Tar
 
     it('tienda sin consentimiento: bloqueada, nada sale a la red', async () => {
       await expect(aceptar(tiendas.sinConsentimiento)).rejects.toBeInstanceOf(UberStoreWriteBlockedError)
+      await expect(aceptar(tiendas.sinConsentimiento)).rejects.toMatchObject({ reason: 'STORE_NOT_AUTHORIZED' }) // un «no se envió»
       expect(red).not.toHaveBeenCalled()
     })
 
@@ -181,6 +182,8 @@ describe('Candado de escrituras de Uber: consentimiento vigente, sin caché (Tar
     it('si la base falla, la escritura NO sale (falla cerrado)', async () => {
       jest.spyOn(prisma.deliveryChannelLink, 'findMany').mockRejectedValue(new Error('conexión perdida'))
       await expect(aceptar(tiendas.activa)).rejects.toThrow('conexión perdida')
+      // Tipado «no se envió» (no «en duda»): quien llama sabe que Uber no recibió nada.
+      await expect(aceptar(tiendas.activa)).rejects.toMatchObject({ name: 'DeliveryWriteNotSentError', reason: 'UNAVAILABLE' })
       expect(red).not.toHaveBeenCalled()
     })
   })

@@ -12,11 +12,14 @@ import request from 'supertest'
 import app from '@/app'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
+import { env } from '@/config/env'
 import * as candado from '@/services/delivery-channels/core/deliveryOrderLock'
 import { ingestDeliveryOrder } from '@/services/delivery-channels/core/deliveryOrderIngestion.service'
 import * as reconciliacion from '@/services/delivery-channels/core/deliveryReconciliation.service'
 import type { ActionResult, NormalizedDeliveryOrder, NormalizedDeliveryPayment } from '@/services/delivery-channels/core/types'
+import { DeliveryWriteNotSentError } from '@/services/delivery-channels/core/types'
 import { uberAdapter } from '@/services/delivery-channels/providers/uber-eats/uber.adapter'
+import * as uberToken from '@/services/delivery-channels/providers/uber-eats/uber.token'
 import { listDeliveryLineActions } from '@/services/mobile/kdsOutOfStock.mobile.service'
 
 // El rastro de un resultado tardío se lee en la base: aquí `logAction` es el REAL (el setup lo mockea).
@@ -369,6 +372,101 @@ describe('«No tengo este artículo» desde el KDS (Tarea 14)', () => {
     expect(resolver).toHaveBeenCalledTimes(1)
     const o = await prisma.order.findUniqueOrThrow({ where: { id: s.order.id } })
     expect(o.deliveryOpInFlight).toBeNull() // la reserva se limpia en finally
+  })
+
+  // ── Fallo ANTES de la red (candado, su lectura a la base, token): no hay nada en duda ────────
+  /**
+   * El adaptador REAL hasta `fetch` (sustituido): así el fallo nace donde nace en producción —el
+   * candado de escrituras de la Tarea 19— y no en un espía. El env se restaura al terminar.
+   */
+  async function conUberReal<T>(ambiente: Record<string, unknown>, cuerpo: (red: jest.SpyInstance) => Promise<T>): Promise<T> {
+    const antes: Record<string, unknown> = {}
+    for (const k of Object.keys(ambiente)) antes[k] = (env as Record<string, unknown>)[k]
+    Object.assign(env, ambiente)
+    resolver.mockRestore()
+    jest.spyOn(uberToken, 'getUberAppToken').mockResolvedValue('token-de-prueba')
+    const red = jest.spyOn(global, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }))
+    try {
+      return await cuerpo(red)
+    } finally {
+      Object.assign(env, antes)
+    }
+  }
+  const PROD = { UBER_ENVIRONMENT: 'PRODUCTION', UBER_CLIENT_ID_PRODUCTION: 'cid-oos', UBER_CLIENT_SECRET_PRODUCTION: 'secreto-oos' }
+
+  it('el candado no se pudo leer (base caída) ⇒ 503, sin intento colgado; el pedido no queda bloqueado', async () => {
+    const s = await sembrar()
+    await conUberReal(PROD, async red => {
+      const real = prisma.deliveryChannelLink.findMany.bind(prisma.deliveryChannelLink)
+      jest
+        .spyOn(prisma.deliveryChannelLink, 'findMany')
+        .mockImplementation(((args: { where?: Record<string, unknown> }) =>
+          args?.where && 'ownerAuthorizedEnvironment' in args.where ? Promise.reject(new Error('conexión perdida')) : real(args as never)) as never)
+
+      const res = await retirar(s.kds.id, s.itemB.id)
+
+      expect(res.status).toBe(503)
+      expect(res.body).toMatchObject({ code: 'PROVIDER_NOT_CONTACTED', error: 'No se pudo contactar a Uber; no se envió nada, intenta de nuevo.' })
+      expect(red).not.toHaveBeenCalled()
+    })
+    expect(await accionDe(s.order.id)).toBeNull()
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: s.order.id } })).deliveryOpInFlight).toBeNull()
+    // Nada quedó en duda: un pedido nuevo abre otro intento y sale.
+    jest.spyOn(uberAdapter, 'resolveFulfillmentIssues').mockResolvedValue({ ok: true, status: 200, raw: '{}' })
+    const otra = await retirar(s.kds.id, s.itemB.id)
+    expect(otra.status).toBe(200)
+    expect(await accionDe(s.order.id)).toMatchObject({ status: 'CONFIRMED', attempts: 1 })
+  })
+
+  it('tienda sin consentimiento (Uber desconectada) ⇒ 409 STORE_NOT_CONNECTED, nunca REJECTED', async () => {
+    const s = await sembrar()
+    await conUberReal(PROD, async red => {
+      const res = await retirar(s.kds.id, s.itemB.id)
+
+      expect(res.status).toBe(409)
+      expect(res.body).toMatchObject({ code: 'STORE_NOT_CONNECTED', error: 'Uber está desconectada para esta tienda; reconéctala desde el panel.' })
+      expect(red).not.toHaveBeenCalled()
+    })
+    expect(await accionDe(s.order.id)).toBeNull()
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: s.order.id } })).deliveryOpInFlight).toBeNull()
+  })
+
+  it('un timeout REAL de la red sigue en duda: 202 UNCERTAIN, sin reenvío', async () => {
+    const s = await sembrar()
+    await conUberReal(
+      {
+        UBER_ENVIRONMENT: 'SANDBOX',
+        UBER_CLIENT_ID_SANDBOX: 'cid-oos-sbx',
+        UBER_CLIENT_SECRET_SANDBOX: 'secreto-oos-sbx',
+        UBER_WRITABLE_STORE_IDS_SANDBOX: link.externalLocationId,
+      },
+      async red => {
+        red.mockRejectedValue(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
+
+        const res = await retirar(s.kds.id, s.itemB.id)
+
+        expect(res.status).toBe(202)
+        expect(res.body.data).toMatchObject({ state: 'UNCERTAIN', attempts: 1 })
+        expect(red).toHaveBeenCalledTimes(1)
+      },
+    )
+  })
+
+  it('un reintento que no salió vuelve a UNCERTAIN con su intento anterior ⇒ 503', async () => {
+    const s = await sembrar()
+    const item = await prisma.orderItem.findFirstOrThrow({ where: { orderId: s.order.id, externalLineId: 'b' } })
+    const antes = new Date(Date.now() - QUINCE_MIN - 60_000)
+    await sembrarAccion(s.order, item.id, { status: 'UNCERTAIN', attempts: 1, lastAttemptAt: antes })
+    resolver.mockRejectedValue(new DeliveryWriteNotSentError('UNAVAILABLE', 'No se envió nada a Uber: token'))
+
+    const res = await reintentar(s.kds.id, s.itemB.id, 1)
+
+    expect(res.status).toBe(503)
+    expect(resolver).toHaveBeenCalledTimes(1)
+    const a = (await accionDe(s.order.id))!
+    expect(a).toMatchObject({ status: 'UNCERTAIN', attempts: 1, retriedByStaffId: null })
+    expect(a.lastAttemptAt.getTime()).toBe(antes.getTime())
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: s.order.id } })).deliveryOpInFlight).toBeNull()
   })
 
   it('409 de Uber con "already been marked ready" ⇒ REJECTED', async () => {
