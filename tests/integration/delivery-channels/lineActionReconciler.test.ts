@@ -341,7 +341,9 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
     // La orden fiscal ya la cubre la alerta de su retiro: no se grita dos veces el mismo caso.
     expect(await cuenta(fiscal.order.id, 'DELIVERY_ORDER_BLOCKED_UNRESOLVED')).toBe(0)
     expect(await cuenta(reciente.order.id, 'DELIVERY_ORDER_BLOCKED_UNRESOLVED')).toBe(0)
-    const deOrden = gritos.mock.calls.filter(([m, d]) => String(m).includes('orden bloqueada') && (d as any)?.orderId === sube.order.id)
+    const deOrden = (gritos.mock.calls as unknown[][]).filter(
+      ([m, d]) => String(m).includes('orden bloqueada') && (d as { orderId?: string } | undefined)?.orderId === sube.order.id,
+    )
     expect(deOrden).toHaveLength(1)
   })
 
