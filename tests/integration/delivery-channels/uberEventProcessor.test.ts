@@ -10,6 +10,7 @@ import prisma from '@/utils/prismaClient'
 import { processUberEvent } from '@/services/delivery-channels/providers/uber-eats/uber.eventProcessor'
 import { uberAdapter } from '@/services/delivery-channels/providers/uber-eats/uber.adapter'
 import { listKdsOrders } from '@/services/mobile/kds.mobile.service'
+import * as deliveryOrderLock from '@/services/delivery-channels/core/deliveryOrderLock'
 import fixtureUapi from '../../fixtures/delivery/uber/pedido-real-uapi.json'
 
 // El pedido PELÓN, sin el sobre `{order}`: el mapper acepta ambos, y así los spreads de los
@@ -330,10 +331,11 @@ describe('procesador de eventos de Uber: aviso → pedido → venta aceptada', (
       ],
     }
     const cancelados: string[] = []
-    // Se simula el fallo de la comanda tirando la tabla de KDS con un venue inexistente NO
-    // sirve; se fuerza con un espía sobre prisma.kdsOrder.create.
-    const original = prisma.kdsOrder.create
-    ;(prisma as any).kdsOrder.create = jest.fn().mockRejectedValue(new Error('KDS caído'))
+    // La comanda se crea DENTRO de `withDeliveryOrderLock` (Task 12), en una transacción
+    // interactiva — mockear `prisma.kdsOrder.create` en el cliente GLOBAL ya no intercepta
+    // nada (el `tx` es otro objeto). Se fuerza el fallo espiando el candado mismo, que es
+    // exactamente lo que ve el `catch` de `deliveryOrderIngestion.service.ts`.
+    const spyLock = jest.spyOn(deliveryOrderLock, 'withDeliveryOrderLock').mockRejectedValue(new Error('KDS caído'))
     const spyCancel = jest.spyOn(uberAdapter, 'cancelOrder').mockImplementation(async (id: string) => {
       cancelados.push(id)
       return { ok: true, status: 200, raw: '' }
@@ -349,7 +351,7 @@ describe('procesador de eventos de Uber: aviso → pedido → venta aceptada', (
       const order = await prisma.order.findUniqueOrThrow({ where: { id: r.orderId! } })
       expect(order.status).toBe('CANCELLED')
     } finally {
-      ;(prisma as any).kdsOrder.create = original
+      spyLock.mockRestore()
       spyCancel.mockRestore()
     }
   })
@@ -367,15 +369,16 @@ describe('procesador de eventos de Uber: aviso → pedido → venta aceptada', (
       id: `sinnota-${Date.now()}`,
       carts: [{ ...pedidoReal.carts[0], items: [{ ...pedidoReal.carts[0].items[0], customer_request: undefined }] }],
     }
-    const original = prisma.kdsOrder.create
-    ;(prisma as any).kdsOrder.create = jest.fn().mockRejectedValue(new Error('KDS caído'))
+    // Mismo motivo que arriba: la comanda se crea dentro de la transacción del candado, no
+    // sobre el cliente global de Prisma.
+    const spyLock = jest.spyOn(deliveryOrderLock, 'withDeliveryOrderLock').mockRejectedValue(new Error('KDS caído'))
     try {
       const id = `ev-sinnota-${Date.now()}`
       const r = await processUberEvent(await nuevoEvento(id, aviso(id, sinNota.id)), { ...deps, fetchOrder: async () => sinNota })
       expect(r.outcome).toBe('PROCESSED')
       expect((await prisma.order.findUniqueOrThrow({ where: { id: r.orderId! } })).status).toBe('CONFIRMED')
     } finally {
-      ;(prisma as any).kdsOrder.create = original
+      spyLock.mockRestore()
     }
   })
 
