@@ -33,18 +33,20 @@ describe('writeRefundInTx — núcleo del reembolso', () => {
     await teardownTestData().catch(() => undefined)
   })
 
-  const ajusteDeReparto = (originalPaymentId: string, extra: Partial<WriteRefundInput> = {}): WriteRefundInput => ({
-    originalPaymentId,
-    venueId,
-    salesRefundCents: 5000,
-    tipRefundCents: 0,
-    refundedItems: [],
-    reason: 'DELIVERY_ITEM_REMOVED',
-    tenderCommission: 'REVERSE_PROPORTIONAL',
-    shift: 'INHERIT_ORIGINAL',
-    provenance: 'PROVIDER_ADJUSTMENT',
-    ...extra,
-  })
+  // `as`: estas pruebas arman a propósito ajustes incompletos (sin generación/reparto) para el camino defensivo.
+  const ajusteDeReparto = (originalPaymentId: string, extra: Partial<WriteRefundInput> = {}): WriteRefundInput =>
+    ({
+      originalPaymentId,
+      venueId,
+      salesRefundCents: 5000,
+      tipRefundCents: 0,
+      refundedItems: [],
+      reason: 'DELIVERY_ITEM_REMOVED',
+      tenderCommission: 'REVERSE_PROPORTIONAL',
+      shift: 'INHERIT_ORIGINAL',
+      provenance: 'PROVIDER_ADJUSTMENT',
+      ...extra,
+    }) as WriteRefundInput
 
   it('REVERSE_PROPORTIONAL revierte la comision con el % del original, en PESOS', async () => {
     const { pago } = await sembrarCobro({ venueId, staffId, saleCents: 20000, commissionPercent: 30 })

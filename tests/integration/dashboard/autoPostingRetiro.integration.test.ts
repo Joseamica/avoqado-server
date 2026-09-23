@@ -71,17 +71,19 @@ describe('autoPosting — REFUND de reparto con fiscalByRateCents', () => {
       ],
     })
 
-  const reembolso = (originalPaymentId: string, extra: Partial<WriteRefundInput>): WriteRefundInput => ({
-    originalPaymentId,
-    venueId,
-    salesRefundCents: 10000,
-    tipRefundCents: 0,
-    refundedItems: [],
-    reason: 'DELIVERY_ITEM_REMOVED',
-    tenderCommission: 'REVERSE_PROPORTIONAL',
-    shift: 'INHERIT_ORIGINAL',
-    ...extra,
-  })
+  // `as`: arma a propósito ajustes del proveedor SIN reparto fiscal para probar el camino defensivo de la póliza.
+  const reembolso = (originalPaymentId: string, extra: Partial<WriteRefundInput>): WriteRefundInput =>
+    ({
+      originalPaymentId,
+      venueId,
+      salesRefundCents: 10000,
+      tipRefundCents: 0,
+      refundedItems: [],
+      reason: 'DELIVERY_ITEM_REMOVED',
+      tenderCommission: 'REVERSE_PROPORTIONAL',
+      shift: 'INHERIT_ORIGINAL',
+      ...extra,
+    }) as WriteRefundInput
 
   const poliza = (idempotencyKey: string) =>
     prisma.journalEntry.findFirstOrThrow({

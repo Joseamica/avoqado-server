@@ -25,8 +25,29 @@ export function fiscalByRateCents(
   cobradoGrossCents: number,
   supervivienteGrossCents: number,
 ): FiscalByRateCents {
-  const antes = splitPaymentIvaByOrderRates(cobradoGrossCents, grossByRateFromItems(cobrada)).taxByRate
-  const despues = splitPaymentIvaByOrderRates(supervivienteGrossCents, grossByRateFromItems(superviviente)).taxByRate
+  return fiscalByRateCentsPorTasa(
+    grossByRateFromItems(cobrada),
+    grossByRateFromItems(superviviente),
+    cobradoGrossCents,
+    supervivienteGrossCents,
+  )
+}
+
+type PorTasa = { rate: number; grossCents: number }[]
+
+/**
+ * El mismo cálculo con las composiciones YA agrupadas por tasa. El reconciliador las arma con
+ * `grossByRateForOrder` —el mapeo de campos de la póliza de la venta— para que no exista un segundo
+ * mapeo que pueda divergir en silencio.
+ */
+export function fiscalByRateCentsPorTasa(
+  cobrada: PorTasa,
+  superviviente: PorTasa,
+  cobradoGrossCents: number,
+  supervivienteGrossCents: number,
+): FiscalByRateCents {
+  const antes = splitPaymentIvaByOrderRates(cobradoGrossCents, cobrada).taxByRate
+  const despues = splitPaymentIvaByOrderRates(supervivienteGrossCents, superviviente).taxByRate
   const delta: FiscalByRateCents = {}
   for (const tasa of new Set([...Object.keys(antes), ...Object.keys(despues)])) {
     const d = (antes[tasa] ?? 0) - (despues[tasa] ?? 0)

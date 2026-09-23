@@ -4,6 +4,8 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 
 export const RESERVA_TTL_MS = 2 * 60 * 1000
+/** Presupuesto del tx del candado: quien lee al proveedor dentro de él acota su lectura con esto. */
+export const CANDADO_TX_TIMEOUT_MS = 15_000
 export type OperacionDeReparto = 'REMOVE_ITEM' | 'READY' | 'DENY' | 'ACCEPT'
 
 /**
@@ -17,7 +19,7 @@ export async function withDeliveryOrderLock<T>(orderId: string, fn: (tx: Prisma.
       await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`delivery-order:${orderId}`}, 0))::text`
       return fn(tx)
     },
-    { timeout: 15_000, maxWait: 5_000 },
+    { timeout: CANDADO_TX_TIMEOUT_MS, maxWait: 5_000 },
   )
 }
 
@@ -39,7 +41,10 @@ export async function tomarReserva(
       logger.error('🚨 [Delivery] reserva huérfana tomada por otra operación', { orderId, previa: fila.deliveryOpInFlight, nueva: op })
     }
     const token = randomUUID()
-    await tx.order.update({ where: { id: orderId }, data: { deliveryOpInFlight: op, deliveryOpInFlightAt: new Date(), deliveryOpToken: token } })
+    await tx.order.update({
+      where: { id: orderId },
+      data: { deliveryOpInFlight: op, deliveryOpInFlightAt: new Date(), deliveryOpToken: token },
+    })
     return { ok: true as const, token }
   })
 }

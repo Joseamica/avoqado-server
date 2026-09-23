@@ -16,10 +16,12 @@
 import { PaymentSource, Prisma, TransactionStatus } from '@prisma/client'
 
 import logger from '@/config/logger'
-import { fiscalByRateCents, type FiscalByRateCents } from '@/services/fiscal/deliveryFiscalDelta'
+import { grossByRateForOrder } from '@/services/fiscal/autoPosting.service'
+import { fiscalByRateCentsPorTasa } from '@/services/fiscal/deliveryFiscalDelta'
+import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { writeRefundInTx } from '@/services/shared/writeRefundInTx'
 
-import { withDeliveryOrderLock } from './deliveryOrderLock'
+import { CANDADO_TX_TIMEOUT_MS, withDeliveryOrderLock } from './deliveryOrderLock'
 import { applyLineRemoval } from './lineRemoval.service'
 import { assertDeliveryMoneyInvariants } from './money'
 import { contexto } from './respondToDeliveryOrder.service'
@@ -31,6 +33,9 @@ export type ResultadoReconciliacion = {
 
 /** ponytail: el candado se sostiene durante UNA lectura acotada; el tx del candado vence a los 15 s. */
 export const LECTURA_PROVEEDOR_MS = 8_000
+/** Lo que el tx necesita DESPUÉS de la lectura (escrituras), y la lectura más corta que vale la pena intentar. */
+const MARGEN_ESCRITURA_MS = 3_000
+const LECTURA_MINIMA_MS = 1_000
 /** Un pedido de reparto trae decenas de renglones, no cientos; pasar de aquí es un dato roto. */
 const LIMITE_FILAS = 500
 
@@ -39,14 +44,14 @@ const centavos = (v: Prisma.Decimal | string) => new Prisma.Decimal(v).times(100
 const pesos = (c: number) => new Prisma.Decimal(c).div(100)
 
 /** Lee con límite: aborta la señal Y deja de esperar, aunque el proveedor ignore la señal. */
-async function leerConLimite<T>(leer: (signal: AbortSignal) => Promise<T>): Promise<T> {
+async function leerConLimite<T>(leer: (signal: AbortSignal) => Promise<T>, ms: number): Promise<T> {
   const ctl = new AbortController()
   let timer: NodeJS.Timeout | undefined
   const vencio = new Promise<never>((_, rechazar) => {
     timer = setTimeout(() => {
       ctl.abort()
-      rechazar(new Error(`la lectura del proveedor venció a los ${LECTURA_PROVEEDOR_MS} ms`))
-    }, LECTURA_PROVEEDOR_MS)
+      rechazar(new Error(`la lectura del proveedor venció a los ${ms} ms`))
+    }, ms)
   })
   try {
     return await Promise.race([leer(ctl.signal), vencio])
@@ -55,27 +60,12 @@ async function leerConLimite<T>(leer: (signal: AbortSignal) => Promise<T>): Prom
   }
 }
 
-/** La línea tal como la lee la póliza de la venta (`grossByRateForOrder`): mismos campos, misma tasa. */
-type Fila = {
-  id: string
-  externalLineId: string | null
-  quantity: number
-  total: Prisma.Decimal
-  unitPrice: Prisma.Decimal
-  discountAmount: Prisma.Decimal
-  product: { taxRate: Prisma.Decimal | null } | null
-}
-const comoEnLaVenta = (f: Fila) => ({
-  unitPrice: Number(f.unitPrice),
-  quantity: f.quantity,
-  discountAmount: Number(f.discountAmount),
-  taxRate: f.product?.taxRate != null ? Number(f.product.taxRate) : null,
-})
-
 export async function reconcileDeliveryOrderFromProvider(
   orderId: string,
   opts: { trigger: 'ROUTE' | 'JOB' | 'WEBHOOK' },
 ): Promise<ResultadoReconciliacion> {
+  // ponytail: se mide ANTES de pedir el tx, así la espera de conexión cuenta como gastada (conservador).
+  const inicio = Date.now()
   return withDeliveryOrderLock(orderId, async tx => {
     const orden = await tx.order.findUnique({ where: { id: orderId }, select: { venueId: true, deliveryReconcileBlocked: true } })
     if (!orden) return { outcome: 'READ_FAILED' as const }
@@ -87,9 +77,20 @@ export async function reconcileDeliveryOrderFromProvider(
     }
 
     // ── 1. Foto FRESCA, dentro del candado, acotada. Si no se puede confiar en ella, nada se escribe.
+    // El plazo sale de lo que le queda al tx: quien esperó el candado detrás de otra lectura lenta
+    // lee menos, y si ya no alcanza, no lee — un tx vencido lanza en vez de contestar READ_FAILED.
+    const plazo = Math.min(LECTURA_PROVEEDOR_MS, CANDADO_TX_TIMEOUT_MS - (Date.now() - inicio) - MARGEN_ESCRITURA_MS)
+    if (plazo < LECTURA_MINIMA_MS) {
+      logger.warn('[Delivery] reconciliación sin tiempo para leer al proveedor: no se escribe nada', {
+        orderId,
+        trigger: opts.trigger,
+        plazo,
+      })
+      return { outcome: 'READ_FAILED' as const }
+    }
     let foto: NormalizedDeliveryOrder
     try {
-      foto = ctx.adapter.normalizeOrder(await leerConLimite(signal => ctx.adapter.fetchOrder!(ctx.externalOrderId, signal)))
+      foto = ctx.adapter.normalizeOrder(await leerConLimite(signal => ctx.adapter.fetchOrder!(ctx.externalOrderId, signal), plazo))
       assertDeliveryMoneyInvariants(foto.payment, foto.items)
       if (foto.externalId !== ctx.externalOrderId) throw new Error(`la foto es del pedido ${foto.externalId}`)
       if (foto.items.some(i => !i.lineId)) throw new Error('la foto trae renglones sin id de línea: no prueba ausencias')
@@ -102,7 +103,12 @@ export async function reconcileDeliveryOrderFromProvider(
       return { outcome: 'READ_FAILED' as const }
     }
 
-    const filas: Fila[] = await tx.orderItem.findMany({
+    // Serializa con un reembolso del dashboard en vuelo: ése toma `Order FOR UPDATE` sin el candado de
+    // reparto. Sin esto, Δ se calcula sin él y el MISMO renglón se compensa dos veces. Orden de
+    // candados: reparto → Order → Payment, el mismo de `writeRefundInTx`.
+    if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) return { outcome: 'READ_FAILED' as const }
+
+    const filas = await tx.orderItem.findMany({
       where: { orderId },
       select: {
         id: true,
@@ -188,7 +194,13 @@ export async function reconcileDeliveryOrderFromProvider(
     // ── 4. IVA por tasa: composición cobrada hasta ahora (sin lo ya liquidado) − la superviviente.
     const cobrada = filas.filter(f => !liquidadas.has(f.id))
     const superviviente = cobrada.filter(f => !idsAcreditados.has(f.id))
-    const fiscal = fiscalByRateCents(cobrada.map(comoEnLaVenta), superviviente.map(comoEnLaVenta), pagadoVenta, pagadoVenta - dVenta)
+    // Las dos composiciones por el MISMO mapeo de campos que la póliza de la venta.
+    const fiscal = fiscalByRateCentsPorTasa(
+      grossByRateForOrder(cobrada),
+      grossByRateForOrder(superviviente),
+      pagadoVenta,
+      pagadoVenta - dVenta,
+    )
     const ivaDevuelto = Object.values(fiscal).reduce((s, v) => s + v, 0)
 
     const aFiscalPendiente = async (motivo: string) => {
@@ -229,7 +241,7 @@ export async function reconcileDeliveryOrderFromProvider(
       cobros.filter(c => c.type === 'REFUND' && (c.processorData as { provenance?: unknown } | null)?.provenance === 'PROVIDER_ADJUSTMENT')
         .length
     const porId = new Map(filas.map(f => [f.id, f]))
-    const { refundPaymentId } = await writeRefundInTx(tx, {
+    const { refundPaymentId, replay } = await writeRefundInTx(tx, {
       originalPaymentId: original.id,
       venueId,
       salesRefundCents: dVenta,
@@ -239,7 +251,7 @@ export async function reconcileDeliveryOrderFromProvider(
         quantity: porId.get(a.orderItemId)!.quantity,
         amountCents: centavos(porId.get(a.orderItemId)!.total),
       })),
-      fiscalByRateCents: fiscal as FiscalByRateCents,
+      fiscalByRateCents: fiscal,
       generation,
       reason: 'DELIVERY_ITEM_REMOVED',
       staffId: null,
@@ -248,6 +260,19 @@ export async function reconcileDeliveryOrderFromProvider(
       shift: 'INHERIT_ORIGINAL',
       provenance: 'PROVIDER_ADJUSTMENT',
     })
+    if (replay) {
+      // Un Δ fresco no puede ser la réplica de otro movimiento: estampar ese id liquidaría estas
+      // acciones con dinero que nunca se movió.
+      logger.error('🚨 [Delivery] la llave del ajuste ya existía con un Δ nuevo: no se liquida nada', {
+        orderId,
+        venueId,
+        generation,
+        refundPaymentId,
+        dVentaCents: dVenta,
+        dPropinaCents: dPropina,
+      })
+      throw new Error(`reconciliación: la llave dlr:${orderId}:${generation} es un replay con Δ nuevo`)
+    }
     await tx.deliveryLineAction.updateMany({
       where: { id: { in: acreditadas.map(a => a.id) }, settlement: 'ACCREDITED' },
       data: { settlement: 'REFUNDED', refundPaymentId },

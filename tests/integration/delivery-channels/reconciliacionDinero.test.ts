@@ -10,6 +10,11 @@ import { ingestDeliveryOrder } from '@/services/delivery-channels/core/deliveryO
 import { LECTURA_PROVEEDOR_MS, reconcileDeliveryOrderFromProvider } from '@/services/delivery-channels/core/deliveryReconciliation.service'
 import { uberAdapter } from '@/services/delivery-channels/providers/uber-eats/uber.adapter'
 import type { NormalizedDeliveryItem, NormalizedDeliveryOrder, NormalizedDeliveryPayment } from '@/services/delivery-channels/core/types'
+import { CANDADO_TX_TIMEOUT_MS } from '@/services/delivery-channels/core/deliveryOrderLock'
+import { grossByRateForOrder } from '@/services/fiscal/autoPosting.service'
+import { ivaDeDevolucion } from '@/services/fiscal/deliveryFiscalDelta'
+import { splitPaymentIvaByOrderRates } from '@/services/fiscal/ivaMath'
+import { writeRefundInTx, type WriteRefundInput } from '@/services/shared/writeRefundInTx'
 
 type Renglon = { linea: string; nombre: string; precio: string; tasa?: number }
 
@@ -231,7 +236,22 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
     // IVA de la venta al 16 %: $200 sobre {16 %: 150, 0 %: 50} = 20.69; superviviente (Torta $100) = 13.79.
     const fiscales = refunds.map(f => (f.processorData as any).fiscalByRateCents)
     expect(fiscales).toEqual([{ '0.16': 690 }, {}])
-    expect(2069 - 690 - 0).toBe(1379)
+
+    // original − Σ compensaciones = composición superviviente, leído del sistema: los renglones
+    // guardados (con su tasa y su marca de retiro) y el IVA que la póliza toma de cada REFUND.
+    const renglones = await prisma.orderItem.findMany({
+      where: { orderId: order.id },
+      select: { quantity: true, unitPrice: true, discountAmount: true, removedAt: true, product: { select: { taxRate: true } } },
+    })
+    const mezcla = grossByRateForOrder(renglones)
+    const ivaOriginal = splitPaymentIvaByOrderRates(20000, mezcla).taxCents
+    const ivaSuperviviente = splitPaymentIvaByOrderRates(10000, grossByRateForOrder(renglones.filter(r => !r.removedAt))).taxCents
+    const ivaDevuelto = refunds.reduce(
+      (s, f) => s + ivaDeDevolucion(f.id, new Prisma.Decimal(f.amount).times(-100).toNumber(), f.processorData, mezcla).taxCents,
+      0,
+    )
+    expect(ivaOriginal - ivaDevuelto).toBe(ivaSuperviviente)
+    expect(ivaSuperviviente).toBe(1379)
   })
 
   it('sube la propina ⇒ nada escrito, deliveryReconcileBlocked = INCREASE_UNSUPPORTED, y bloqueado no mueve dinero', async () => {
@@ -437,5 +457,162 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
     expect(refunds).toHaveLength(1)
     expect(refunds[0].amount.toString()).toBe('-50')
     expect(await prisma.activityLog.count({ where: { venueId, entityId: order.id, action: 'DELIVERY_ORDER_REPRICED' } })).toBe(1)
+  })
+
+  // ── Ronda de endurecimiento ────────────────────────────────────────────────────────────────
+
+  it('Q-2: un reembolso del dashboard en vuelo entre el GET y la lectura de cobros entra al Δ: el renglón no se compensa dos veces', async () => {
+    const { order, item, foto } = await sembrar(
+      [
+        { linea: 'a', nombre: 'Cochinita', precio: '150.00' },
+        { linea: 'b', nombre: 'Horchata', precio: '50.00' },
+      ],
+      pago('200.00', '0.00'),
+    )
+    await accionConfirmada(order, item.b.id, 'b')
+    const original = await prisma.payment.findFirstOrThrow({ where: { orderId: order.id, type: { not: 'REFUND' } } })
+    let avisar!: () => void
+    const manualEscribio = new Promise<void>(r => (avisar = r))
+    let manual: Promise<unknown> | undefined
+    jest.spyOn(uberAdapter, 'normalizeOrder').mockImplementation(raw => raw as NormalizedDeliveryOrder)
+    // Mientras el reconciliador espera a Uber, una persona devuelve los $50 desde el dashboard: su tx
+    // toma `Order FOR UPDATE`, escribe el REFUND y tarda en confirmar.
+    jest.spyOn(uberAdapter, 'fetchOrder').mockImplementation(async () => {
+      manual = prisma.$transaction(async tx => {
+        await writeRefundInTx(tx, {
+          originalPaymentId: original.id,
+          venueId,
+          salesRefundCents: 5000,
+          tipRefundCents: 0,
+          refundedItems: [],
+          reason: 'OTHER',
+          tenderCommission: 'NONE',
+          shift: 'INHERIT_ORIGINAL',
+          provenance: 'MANUAL',
+        })
+        avisar()
+        await new Promise(r => setTimeout(r, 500))
+      })
+      await manualEscribio
+      return foto(['a'], pago('150.00', '0.00'))
+    })
+
+    const r = await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'WEBHOOK' })
+    await manual
+
+    expect(r.outcome).toBe('NO_DELTA')
+    const refunds = await reembolsos(order.id)
+    expect(refunds).toHaveLength(1)
+    expect(refunds[0].processorData).toMatchObject({ provenance: 'MANUAL' })
+    expect((await accionDe(order.id, 'b')).settlement).toBe('NO_DELTA')
+  })
+
+  it('Q-4: la llave del ajuste ya existía (fuera del filtro) con un Δ nuevo ⇒ 🚨 y lanza; nada se liquida', async () => {
+    const { order, foto } = await sembrar(
+      [
+        { linea: 'a', nombre: 'Cochinita', precio: '150.00' },
+        { linea: 'b', nombre: 'Horchata', precio: '50.00' },
+      ],
+      pago('200.00', '0.00'),
+    )
+    const original = await prisma.payment.findFirstOrThrow({ where: { orderId: order.id, type: { not: 'REFUND' } } })
+    // Un ajuste que no está COMPLETED no cuenta para la generación, pero su llave `dlr:<orden>:1` sí existe.
+    const viejo = await prisma.payment.create({
+      data: {
+        venueId,
+        orderId: order.id,
+        amount: 0,
+        tipAmount: 0,
+        method: 'OTHER',
+        status: 'PENDING',
+        type: 'REFUND',
+        splitType: 'FULLPAYMENT',
+        source: 'DELIVERY_PLATFORM',
+        feePercentage: 0,
+        feeAmount: 0,
+        netAmount: 0,
+        idempotencyKey: `dlr:${order.id}:1`,
+        processorData: { originalPaymentId: original.id, provenance: 'PROVIDER_ADJUSTMENT' },
+      },
+    })
+    proveedorDevuelve(foto(['a'], pago('150.00', '0.00')))
+
+    await expect(reconcileDeliveryOrderFromProvider(order.id, { trigger: 'JOB' })).rejects.toThrow(/replay/)
+
+    expect(await prisma.payment.count({ where: { orderId: order.id, type: 'REFUND', id: { not: viejo.id } } })).toBe(0)
+    expect(await prisma.deliveryLineAction.count({ where: { orderId: order.id } })).toBe(0)
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).total.toString()).toBe('200')
+  })
+
+  it('Q-1: detrás de una lectura lenta que retiene el candado, la segunda acorta su plazo y devuelve READ_FAILED sin tronar', async () => {
+    const { order, item } = await sembrar(
+      [
+        { linea: 'a', nombre: 'Cochinita', precio: '150.00' },
+        { linea: 'b', nombre: 'Horchata', precio: '50.00' },
+      ],
+      pago('200.00', '0.00'),
+    )
+    await accionConfirmada(order, item.b.id, 'b')
+    jest.spyOn(uberAdapter, 'fetchOrder').mockImplementation(() => new Promise(() => undefined))
+
+    const t0 = Date.now()
+    const rs = await Promise.all([
+      reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' }),
+      reconcileDeliveryOrderFromProvider(order.id, { trigger: 'WEBHOOK' }),
+    ])
+
+    expect(rs.map(x => x.outcome)).toEqual(['READ_FAILED', 'READ_FAILED'])
+    expect(Date.now() - t0).toBeLessThan(CANDADO_TX_TIMEOUT_MS)
+    expect(await prisma.payment.count({ where: { orderId: order.id, type: 'REFUND' } })).toBe(0)
+    expect(await accionDe(order.id, 'b')).toMatchObject({ status: 'CONFIRMED', settlement: 'PENDING' })
+  }, 40_000)
+
+  it('Q-9: dos reconciliaciones con fotos DISTINTAS: la que toma el candado después usa SU foto, más fresca', async () => {
+    const { order, item, foto } = await sembrar(
+      [
+        { linea: 'a', nombre: 'Cochinita', precio: '100.00' },
+        { linea: 'b', nombre: 'Horchata', precio: '50.00' },
+        { linea: 'c', nombre: 'Agua', precio: '50.00' },
+      ],
+      pago('200.00', '0.00'),
+    )
+    const fotoSinB = foto(['a', 'c'], pago('150.00', '0.00'))
+    const fotoSinByC = foto(['a'], pago('100.00', '0.00'))
+    jest.spyOn(uberAdapter, 'normalizeOrder').mockImplementation(raw => raw as NormalizedDeliveryOrder)
+    // La primera lectura tarda: si alguien leyera FUERA del candado, la segunda (más fresca) llegaría antes.
+    jest
+      .spyOn(uberAdapter, 'fetchOrder')
+      .mockImplementationOnce(() => new Promise(r => setTimeout(() => r(fotoSinB), 200)))
+      .mockResolvedValueOnce(fotoSinByC)
+
+    const rs = await Promise.all([
+      reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' }),
+      reconcileDeliveryOrderFromProvider(order.id, { trigger: 'WEBHOOK' }),
+    ])
+
+    expect(rs.map(x => x.outcome)).toEqual(['REFUNDED', 'REFUNDED'])
+    const refunds = await reembolsos(order.id)
+    expect(refunds.map(f => f.amount.toString())).toEqual(['-50', '-50'])
+    expect(refunds.map(f => (f.processorData as any).refundedItems.map((i: any) => i.orderItemId))).toEqual([[item.b.id], [item.c.id]])
+    expect((refunds[1].processorData as any).generation).toBe(2)
+    const o = await prisma.order.findUniqueOrThrow({ where: { id: order.id } })
+    expect(o.total.toString()).toBe('100')
+    expect(o.deliveryReconcileBlocked).toBeNull()
+  })
+
+  it('Q-5: un ajuste del proveedor sin generación ni reparto fiscal no compila', () => {
+    // @ts-expect-error — `generation` y `fiscalByRateCents` son obligatorios con PROVIDER_ADJUSTMENT
+    const incompleto: WriteRefundInput = {
+      originalPaymentId: 'p',
+      venueId: 'v',
+      salesRefundCents: 1,
+      tipRefundCents: 0,
+      refundedItems: [],
+      reason: 'DELIVERY_ITEM_REMOVED',
+      tenderCommission: 'NONE',
+      shift: 'INHERIT_ORIGINAL',
+      provenance: 'PROVIDER_ADJUSTMENT',
+    }
+    expect(incompleto.provenance).toBe('PROVIDER_ADJUSTMENT')
   })
 })

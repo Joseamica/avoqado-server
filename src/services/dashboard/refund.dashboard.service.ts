@@ -407,26 +407,37 @@ async function bloquearCobroParaReembolso(
  * Contrato del núcleo de reembolso (spec KDS Uber §3.1). Todo en CENTAVOS enteros ≥ 0.
  * `issueRefund` lo llama con los defaults de siempre (`NONE` · `CLAIM_LIVE` · `MANUAL`).
  */
-export interface WriteRefundInput {
+interface WriteRefundBase {
   originalPaymentId: string
   venueId: string
   salesRefundCents: number
   tipRefundCents: number
   /** Viaja tal cual a `processorData.refundedItems` (el dashboard añade nombre y producto). */
   refundedItems: Array<{ orderItemId: string; quantity: number; amountCents: number }>
-  fiscalByRateCents?: Record<string, number>
   reason: RefundReason
   note?: string | null
   staffId?: string | null
   idempotencyKey?: string
   tenderCommission: 'NONE' | 'REVERSE_PROPORTIONAL'
   shift: 'CLAIM_LIVE' | 'INHERIT_ORIGINAL'
-  provenance?: 'MANUAL' | 'PROVIDER_ADJUSTMENT'
-  /** Sólo con `PROVIDER_ADJUSTMENT`: la generación del ajuste, que estampa el reconciliador. */
-  generation?: number
   /** @internal `issueRefund` ya bloqueó y leyó el cobro en ESTE tx: no se repite. */
   bloqueado?: CobroBloqueado
 }
+
+/**
+ * Un ajuste del proveedor SIN su generación o su reparto fiscal no compila: sin ellos la póliza
+ * caería a la mezcla de la orden y la llave `dlr:` no tendría con qué numerarse.
+ */
+export type WriteRefundInput = WriteRefundBase &
+  (
+    | { provenance?: 'MANUAL'; generation?: undefined; fiscalByRateCents?: undefined }
+    | {
+        provenance: 'PROVIDER_ADJUSTMENT'
+        /** La generación del ajuste, que estampa el reconciliador. */
+        generation: number
+        fiscalByRateCents: Record<string, number>
+      }
+  )
 
 /**
  * El núcleo del reembolso: replay por llave → bloquear el cobro original → validar → reclamar
