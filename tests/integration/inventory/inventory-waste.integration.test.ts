@@ -2408,6 +2408,18 @@ test('la lista de folios pagina con total, excluye lápidas, desempata por id, b
   })
 })
 
+test('🔴 historial del POS: `reportedByStaffId` deja ver SÓLO los folios de quien los registró', async () => {
+  const goods = await product(10)
+  const mine = await logWaste(venueId, waiterAId, request('PRODUCT', goods.id, 1))
+  await logWaste(venueId, waiterBId, request('PRODUCT', goods.id, 1))
+  await logWaste(venueId, staffId, request('PRODUCT', goods.id, 1))
+
+  const own = await listWasteReports(venueId, { page: 1, pageSize: 100, reportedByStaffId: waiterAId })
+  expect(own.total).toBe(1)
+  expect(own.items.map(row => row.id)).toEqual([mine.reportId])
+  expect((await listWasteReports(venueId, { page: 1, pageSize: 100 })).total).toBe(3)
+})
+
 test('🔴 la búsqueda de folios busca `%`, `_` y `\\` literales, no como comodines', async () => {
   const goods = await product(10)
   const ingredient = await raw(10)

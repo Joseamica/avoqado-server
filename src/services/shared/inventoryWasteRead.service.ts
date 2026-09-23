@@ -331,7 +331,7 @@ export async function getWasteBreakdown(venueId: string, from: Date, to: Date, r
 
 /** Folios aplicados (incluidas las declaraciones que no pudieron descontar nada), más recientes
  *  primero, desempate por id. Las lápidas `VOIDED` no son merma y no salen. */
-export async function listWasteReports(venueId: string, query: WastePage) {
+export async function listWasteReports(venueId: string, query: WastePage & { reportedByStaffId?: string }) {
   const { page, pageSize, skip } = pagination(query.page, query.pageSize)
   const startDate = instant(query.startDate)
   const endDate = instant(query.endDate)
@@ -343,6 +343,8 @@ export async function listWasteReports(venueId: string, query: WastePage) {
   const where: Prisma.InventoryWasteReportWhereInput = {
     venueId,
     status: 'APPLIED',
+    // Historial del POS: el mesero ve SÓLO lo suyo, y el filtro lo pone la base, no el aparato.
+    ...(query.reportedByStaffId ? { reportedByStaffId: query.reportedByStaffId } : {}),
     ...(startDate || endDate ? { createdAt: { gte: startDate, lte: endDate } } : {}),
     ...(pattern
       ? {

@@ -23,6 +23,7 @@ import { NextFunction, Request, Response } from 'express'
 import { ForbiddenError, UnauthorizedError } from '../../errors/AppError'
 import { IMPERSONATION_ERROR_CODES } from '../../types/impersonation'
 import {
+  hasWastePermission,
   logWaste,
   prepareWaste,
   recoverByKey,
@@ -30,7 +31,8 @@ import {
   voidWasteKey,
   WasteInput,
 } from '../../services/shared/inventoryWaste.service'
-import { listWasteItems, WasteItem } from '../../services/shared/inventoryWasteRead.service'
+import { isWasteReasonCode, WASTE_REASONS } from '../../services/shared/wasteReasons'
+import { listWasteItems, listWasteReports, WasteItem } from '../../services/shared/inventoryWasteRead.service'
 import { parseWasteSchema, VoidWasteBodySchema, WasteBodySchema, WasteQuerySchema } from '../../schemas/mobile/inventoryWaste.mobile.schema'
 
 /** Quién actúa. `write`: la suplantación es de sólo lectura (el middleware ya la corta; esto es la segunda capa). */
@@ -87,9 +89,10 @@ export async function recover(req: Request, res: Response, next: NextFunction): 
  * WASTE_INVENTORY_DISABLED`). NO evalúa el permiso: si lo hiciera, un KITCHEN autorizado con el
  * PIN de gerente recibiría 403 después de que `checkPermission` ya gastó el token.
  */
-export async function requireActivation(req: Request, _res: Response, next: NextFunction): Promise<void> {
+export async function requireActivation(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    await requireWasteActivation(actor(req), req.params.venueId)
+    // El historial la reusa para decidir el alcance con los permisos PROPIOS (no con el PIN).
+    res.locals.wasteAccess = await requireWasteActivation(actor(req), req.params.venueId)
     next()
   } catch (error) {
     next(error)
@@ -149,6 +152,57 @@ export async function listItems(req: Request, res: Response, next: NextFunction)
     const query = res.locals.wasteQuery ?? parseWasteSchema(WasteQuerySchema, req.query)
     const result = await listWasteItems(req.params.venueId, { page: query.page, pageSize: query.pageSize, search: query.search })
     res.json({ items: result.items.map(itemDelCatalogo), total: result.total, page: result.page, pageSize: result.pageSize })
+  } catch (error) {
+    next(error)
+  }
+}
+
+type WasteReportRow = Awaited<ReturnType<typeof listWasteReports>>['items'][number]
+
+/** Un folio para el POS, campo por campo: aunque el lector cambie, esta ruta nunca entrega pesos
+ *  (`costImpact`, `unitCostSnapshot`, `costState`) ni proveedor. Los costos viven en el dashboard. */
+function folioDelHistorial(row: WasteReportRow) {
+  const item = row.rawMaterial ?? row.product
+  const staff = row.reportedByStaff
+  return {
+    id: row.id,
+    itemType: row.itemType,
+    name: item?.name ?? '',
+    sku: item?.sku ?? '',
+    unit: row.unit,
+    reasonCode: row.reasonCode,
+    // Los motivos del dashboard no son chips del POS: la etiqueta viaja para que el aparato no la adivine.
+    reasonLabel: row.reasonCode && isWasteReasonCode(row.reasonCode) ? WASTE_REASONS[row.reasonCode].label : null,
+    declaredQuantity: row.declaredQuantity?.toString() ?? null,
+    deductedQuantity: row.deductedQuantity.toString(),
+    unrecordedQuantity: row.unrecordedQuantity.toString(),
+    note: row.note,
+    createdAt: row.createdAt,
+    reportedByName: staff ? `${staff.firstName} ${staff.lastName}`.trim() : null,
+  }
+}
+
+/**
+ * Historial de mermas del POS (decisión del founder, 23-sep): quien tiene `inventory:adjust`
+ * (gerente, dueño) ve las de todos; los demás, SÓLO las suyas. El alcance sale de los permisos
+ * PROPIOS de quien llama (`requireActivation` los dejó en `res.locals`), nunca del PIN de gerente:
+ * un override abre la ruta pero no la lista del negocio.
+ */
+export async function listReports(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const staffId = actor(req)
+    const query = res.locals.wasteQuery ?? parseWasteSchema(WasteQuerySchema, req.query)
+    const access = res.locals.wasteAccess
+    const scope = access && hasWastePermission(access, 'inventory:adjust') ? 'ALL' : 'MINE'
+    const result = await listWasteReports(req.params.venueId, {
+      page: query.page,
+      pageSize: query.pageSize,
+      search: query.search,
+      startDate: query.startDate,
+      endDate: query.endDate,
+      ...(scope === 'MINE' && { reportedByStaffId: staffId }),
+    })
+    res.json({ scope, items: result.items.map(folioDelHistorial), total: result.total, page: result.page, pageSize: result.pageSize })
   } catch (error) {
     next(error)
   }

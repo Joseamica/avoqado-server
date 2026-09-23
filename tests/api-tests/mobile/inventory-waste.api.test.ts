@@ -779,6 +779,134 @@ describe('GET …/inventory/waste-items', () => {
   )
 })
 
+describe('GET …/inventory/waste-reports (historial del POS)', () => {
+  const REPORTS = `${BASE}/waste-reports`
+  const MESERO = { role: 'WAITER', corePermissions: ['inventory:log-waste', 'inventory:read'], whiteLabelEnabled: false, featureAccess: {} }
+  const GERENTE = { role: 'MANAGER', corePermissions: ['inventory:log-waste', 'inventory:read', 'inventory:adjust'], whiteLabelEnabled: false, featureAccess: {} }
+  const DUENO = { role: 'OWNER', corePermissions: ['inventory:*'], whiteLabelEnabled: false, featureAccess: {} }
+  const FILA = {
+    id: 'rep1',
+    itemType: 'RAW_MATERIAL',
+    rawMaterialId: 'clraw0000000000000000001',
+    productId: null,
+    unit: 'LITER',
+    reasonCode: 'SPOILED',
+    declaredQuantity: '2',
+    deductedQuantity: '1.5',
+    unrecordedQuantity: '0.5',
+    costImpact: '34.65',
+    costState: 'PARTIAL',
+    unitCostSnapshot: '23.10',
+    note: 'se cortó',
+    reference: null,
+    supplier: 'Lala',
+    source: 'POS',
+    createdAt: '2026-09-23T15:00:00.000Z',
+    clientOccurredAt: null,
+    reportedByStaffId: 'user_test',
+    reportedByStaff: { firstName: 'Ana', lastName: 'Pérez' },
+    rawMaterial: { name: 'Leche', sku: 'LEC-1' },
+    product: null,
+  }
+
+  beforeEach(() => requireWasteActivation.mockResolvedValue(MESERO))
+
+  it('🔴 el mesero ve SÓLO sus folios: el filtro va a la base con su id y scope=MINE', async () => {
+    const res = await request(app)
+      .get(`${REPORTS}?page=2&pageSize=30`)
+      .set('Authorization', `Bearer ${token('WAITER')}`)
+    expect(res.status).toBe(200)
+    expect(res.body.scope).toBe('MINE')
+    expect(listWasteReports).toHaveBeenCalledWith(venueId, expect.objectContaining({ page: 2, pageSize: 30, reportedByStaffId: 'user_test' }))
+  })
+
+  it.each([
+    ['gerente', GERENTE],
+    ['dueño con comodín', DUENO],
+  ])('🔴 el %s (inventory:adjust) ve los de todos: scope=ALL, sin filtro de autor', async (_n, access) => {
+    requireWasteActivation.mockResolvedValue(access)
+    const res = await request(app)
+      .get(REPORTS)
+      .set('Authorization', `Bearer ${token('MANAGER')}`)
+    expect(res.status).toBe(200)
+    expect(res.body.scope).toBe('ALL')
+    expect(listWasteReports.mock.calls[0][1]).not.toHaveProperty('reportedByStaffId')
+  })
+
+  it('🔴 nunca entrega pesos: la fila se arma campo por campo', async () => {
+    requireWasteActivation.mockResolvedValue(GERENTE)
+    listWasteReports.mockResolvedValue({ items: [FILA], total: 1, page: 1, pageSize: 100 })
+    const res = await request(app)
+      .get(REPORTS)
+      .set('Authorization', `Bearer ${token('MANAGER')}`)
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      scope: 'ALL',
+      items: [
+        {
+          id: 'rep1',
+          itemType: 'RAW_MATERIAL',
+          name: 'Leche',
+          sku: 'LEC-1',
+          unit: 'LITER',
+          reasonCode: 'SPOILED',
+          reasonLabel: 'Se echó a perder',
+          declaredQuantity: '2',
+          deductedQuantity: '1.5',
+          unrecordedQuantity: '0.5',
+          note: 'se cortó',
+          createdAt: '2026-09-23T15:00:00.000Z',
+          reportedByName: 'Ana Pérez',
+        },
+      ],
+      total: 1,
+      page: 1,
+      pageSize: 100,
+    })
+  })
+
+  it('🔴 el PIN de gerente abre la ruta pero NO da el alcance del gerente (falla hacia MINE)', async () => {
+    pinDeGerenteValido()
+    requireWasteActivation.mockResolvedValue({ role: 'KITCHEN', corePermissions: ['inventory:read'], whiteLabelEnabled: false, featureAccess: {} })
+    const res = await request(app)
+      .get(REPORTS)
+      .set('Authorization', `Bearer ${token('KITCHEN')}`)
+      .set('X-Permission-Override', OVERRIDE)
+    expect(res.status).toBe(200)
+    expect(res.body.scope).toBe('MINE')
+    expect(listWasteReports).toHaveBeenCalledWith(venueId, expect.objectContaining({ reportedByStaffId: 'user_test' }))
+  })
+
+  it.each(['KITCHEN', 'HOST', 'VIEWER'])('🔴 403 para %s (sin inventory:log-waste)', async role => {
+    const res = await request(app)
+      .get(REPORTS)
+      .set('Authorization', `Bearer ${token(role)}`)
+    expect(res.status).toBe(403)
+    expect(listWasteReports).not.toHaveBeenCalled()
+  })
+
+  it('🔴 403 de plan con featureCode', async () => {
+    prismaMock.venueFeature.findFirst.mockResolvedValue(null)
+    const res = await request(app)
+      .get(REPORTS)
+      .set('Authorization', `Bearer ${token('WAITER')}`)
+    expect(res.status).toBe(403)
+    expect(res.body.featureCode).toBe('INVENTORY_TRACKING')
+    expect(listWasteReports).not.toHaveBeenCalled()
+  })
+
+  it('🔴 una query inválida sale 422 ANTES de gastar el PIN de gerente', async () => {
+    pinDeGerenteValido()
+    const res = await request(app)
+      .get(`${REPORTS}?page=0`)
+      .set('Authorization', `Bearer ${token('KITCHEN')}`)
+      .set('X-Permission-Override', OVERRIDE)
+    expect(res.status).toBe(422)
+    expect(res.body.code).toBe('INVALID_WASTE_PAYLOAD')
+    expect(prismaMock.permissionOverride.updateMany).not.toHaveBeenCalled()
+  })
+})
+
 describe('controlador · suplantación', () => {
   // El middleware de autenticación ya corta las escrituras de una sesión suplantada; ésta es la
   // segunda capa, y su 403 lleva el MISMO código que el del middleware.

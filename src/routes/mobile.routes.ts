@@ -2241,6 +2241,23 @@ router.get(
 )
 
 /**
+ * GET /api/v1/mobile/venues/:venueId/inventory/waste-reports?page&pageSize&search&startDate&endDate
+ * Historial de mermas del POS: `{ scope: 'MINE' | 'ALL', items, total, page, pageSize }`. Con
+ * `inventory:adjust` ve las de todos; sin él, SÓLO las suyas (el filtro lo pone la base). Nunca
+ * entrega pesos. Mismo orden de candados que `waste-items` (Ruling 18: nada rechaza después del PIN).
+ */
+router.get(
+  '/venues/:venueId/inventory/waste-reports',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  wasteController.parseItemsQuery,
+  checkFeatureAccess('INVENTORY_TRACKING'),
+  wasteController.requireActivation,
+  checkPermission('inventory:log-waste'),
+  wasteController.listReports,
+)
+
+/**
  * POST /api/v1/mobile/venues/:venueId/inventory/waste
  * Registra una merma con folio (`idempotencyKey`, UUID que genera el aparato ANTES de la red).
  * 201 `{ reportId, declared, deducted, unrecorded }`. La merma nunca se rechaza por falta de
