@@ -45,4 +45,7 @@ export const DATABASE_JOB_SCHEDULES = {
   // entre :35 (watchdog de cierre), :36 (outbox de anuncios) y :38 (watchdog de pagos), y este
   // barrido consulta las mismas tablas de turnos que el primero. :48/:49 estaban libres.
   cashClosePairReconciler: '49 * * * * *',
+  // KDS de Uber (spec §3.4): retiros de renglón a medias, reservas huérfanas y «listos» sin avisar.
+  // Cada minuto en el segundo :52, hueco libre entre el sweeper de gcal (:53) y el de pagos (:46).
+  deliveryLineActionReconciler: '52 * * * * *',
 } as const

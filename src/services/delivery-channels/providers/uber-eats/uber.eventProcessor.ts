@@ -26,6 +26,7 @@ import { releaseScheduledOrder } from '../../core/releaseScheduledOrder.service'
 import { ingestDeliveryOrder } from '../../core/deliveryOrderIngestion.service'
 import { markEventResult } from '../../core/deliveryWebhookEvent.service'
 import { esEvidenciaHttp } from '../../core/respondToDeliveryOrder.service'
+import { reconcileDeliveryOrderFromProvider } from '../../core/deliveryReconciliation.service'
 import { uberAdapter } from './uber.adapter'
 import { processUberReport } from './uber.reportProcessor'
 
@@ -40,6 +41,7 @@ export type UberProcessOutcome =
   | 'RELEASED' // ya era hora del programado: fue a la cocina
   | 'STORE_STATE' // la tienda cambió de estado del lado del proveedor
   | 'REPORT' // llegó el reporte financiero; de ahí salen los reembolsos
+  | 'RECONCILED' // el pedido cambió del lado del proveedor y la venta se reconcilió contra su foto
   | 'FAILED'
 
 export interface UberProcessResult {
@@ -164,32 +166,51 @@ export async function processUberEvent(eventRowId: string, deps: UberProcessDeps
     return { outcome: 'STORE_STATE' }
   }
 
-  // El cliente cambió algo del pedido y lo confirmó. v1 NO muta la venta —reconciliar
-  // artículos + cobro + inventario a medias es peor que no hacerlo (spec §10)— pero SÍ se
-  // vuelve a traer el pedido y se guarda, y se GRITA: alguien tiene que mirar ese pedido
-  // antes de que la cocina prepare lo que ya no es.
+  // El pedido cambió del lado de Uber (el cliente aceptó sustituir o quitar algo). La venta se
+  // RECONCILIA contra una foto fresca, bajo el candado del pedido, con la MISMA función que el
+  // retiro desde el KDS (spec §3.1, H11): renglones retirados en todas las comandas, reembolso
+  // compensatorio y reprecio. Sin foto confiable no se escribe nada y el evento queda FAILED
+  // para que el job de webhooks lo reintente — antes quedaba PROCESSED y la venta seguía
+  // reportando lo que el cliente ya no pagó.
   if (tipo === 'FULFILLMENT_CHANGED') {
-    if (identidad.orderId) {
-      try {
-        const crudo = await fetchOrder(identidad.orderId)
-        await prisma.deliveryOrderEvent.update({
-          where: { id: eventRowId },
-          data: { resourcePayload: crudo as object, resourceFetchedAt: new Date(), externalOrderId: identidad.orderId },
-        })
-      } catch (err) {
-        logger.error('🚨 [Uber] no se pudo releer el pedido que el cliente cambió', {
-          eventRowId,
-          error: err instanceof Error ? err.message : err,
-        })
-      }
-      logger.error('🚨 [Uber] EL CLIENTE CAMBIÓ EL PEDIDO — revisar antes de prepararlo', {
-        eventRowId,
-        orderId: identidad.orderId,
-        venueId: evento.venueId,
-      })
+    if (!identidad.orderId) {
+      await markEventResult(eventRowId, DeliveryOrderEventStatus.PROCESSED)
+      return { outcome: 'NOT_AN_ORDER' }
     }
-    await markEventResult(eventRowId, DeliveryOrderEventStatus.PROCESSED)
-    return { outcome: 'NOT_AN_ORDER' }
+    if (!evento.channelLink) {
+      await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, undefined, 'SIN_VINCULO')
+      return { outcome: 'ORPHANED' }
+    }
+    const orden = await prisma.order.findUnique({
+      where: {
+        venueId_externalId: { venueId: evento.channelLink.venueId, externalId: `${DeliveryProvider.UBER_EATS}:${identidad.orderId}` },
+      },
+      select: { id: true },
+    })
+    // El cambio se adelantó a la ingesta: queda FAILED y el reintento lo encuentra.
+    if (!orden) {
+      await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, undefined, 'ORDEN_NO_EXISTE')
+      return { outcome: 'FAILED', error: 'ORDEN_NO_EXISTE' }
+    }
+    let fallo: string | null
+    try {
+      const r = await reconcileDeliveryOrderFromProvider(orden.id, { trigger: 'WEBHOOK' })
+      fallo = r.outcome === 'READ_FAILED' ? 'READ_FAILED' : null
+    } catch (err) {
+      fallo = err instanceof Error ? err.message : String(err)
+    }
+    if (fallo) {
+      logger.error('🚨 [Uber] el pedido cambió y no se pudo reconciliar: el evento queda para reintento', {
+        eventRowId,
+        orderId: orden.id,
+        venueId: evento.channelLink.venueId,
+        error: fallo.slice(0, 300),
+      })
+      await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, orden.id, fallo.slice(0, 500))
+      return { outcome: 'FAILED', orderId: orden.id, error: fallo }
+    }
+    await markEventResult(eventRowId, DeliveryOrderEventStatus.PROCESSED, orden.id)
+    return { outcome: 'RECONCILED', orderId: orden.id }
   }
 
   // El reporte financiero: la ÚNICA vía por la que nos enteramos de un reembolso. No

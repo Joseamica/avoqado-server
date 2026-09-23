@@ -541,22 +541,26 @@ describe('procesador de eventos de Uber: aviso → pedido → venta aceptada', (
       await prisma.deliveryChannelLink.update({ where: { id: linkId }, data: { status: 'ACTIVE' } })
     })
 
-    it('🔴 el cliente CAMBIA el pedido: se vuelve a traer y se guarda para revisar', async () => {
-      // v1 NO muta la venta —reconciliar artículos + cobro + inventario a medias es peor que
-      // no hacerlo— pero el pedido nuevo queda guardado y se grita, porque alguien tiene que
-      // mirarlo antes de que la cocina prepare lo que ya no es.
-      const cambiado = { ...pedidoReal, display_id: 'CAMBIADO' }
+    it('🔴 el cliente CAMBIA el pedido: la venta se RECONCILIA contra una foto fresca, sin crear otra', async () => {
+      // Antes: se guardaba el pedido nuevo y se gritaba, pero la venta seguía reportando lo que el
+      // cliente ya no pagó (spec H11). Ahora pasa por la MISMA reconciliación que el retiro del KDS;
+      // su dinero se prueba en `lineActionReconciler.test.ts` y `reconciliacionDinero.test.ts`.
+      const existente = await prisma.order.findUniqueOrThrow({
+        where: { venueId_externalId: { venueId, externalId: `UBER_EATS:${pedidoReal.id}` } },
+      })
+      const lectura = jest.spyOn(uberAdapter, 'fetchOrder').mockResolvedValue(pedidoReal)
       const id = `ev-fulfill-${Date.now()}`
-      const r = await processUberEvent(await nuevoEvento(id, avisoTipo(id, 'order.fulfillment_issues.resolved')), {
-        ...deps,
-        fetchOrder: async () => cambiado,
-      })
+      try {
+        const r = await processUberEvent(await nuevoEvento(id, avisoTipo(id, 'order.fulfillment_issues.resolved')), deps)
 
-      expect(r.outcome).toBe('NOT_AN_ORDER') // no crea otra venta
-      const ev = await prisma.deliveryOrderEvent.findUniqueOrThrow({
-        where: { id: (await prisma.deliveryOrderEvent.findFirstOrThrow({ where: { externalEventId: id } })).id },
-      })
-      expect(ev.resourcePayload).toMatchObject({ display_id: 'CAMBIADO' }) // el pedido NUEVO quedó guardado
+        expect(r).toMatchObject({ outcome: 'RECONCILED', orderId: existente.id })
+        expect(lectura).toHaveBeenCalledWith(pedidoReal.id, expect.anything())
+        const ev = await prisma.deliveryOrderEvent.findFirstOrThrow({ where: { externalEventId: id } })
+        expect(ev.status).toBe(DeliveryOrderEventStatus.PROCESSED)
+        expect(await prisma.order.count({ where: { venueId, externalId: `UBER_EATS:${pedidoReal.id}` } })).toBe(1) // no crea otra venta
+      } finally {
+        lectura.mockRestore()
+      }
     })
   })
 })

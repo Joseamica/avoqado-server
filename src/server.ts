@@ -34,6 +34,7 @@ import { blumonWebhookReconciliationJob } from './jobs/blumon-webhook-reconcilia
 import { blumonPaymentAuditJob } from './jobs/blumon-payment-audit.job'
 import { deliveryMenuSyncJob } from './jobs/delivery-menu-sync.job'
 import { deliverySnoozeResumeJob } from './jobs/delivery-snooze-resume.job'
+import { deliveryLineActionReconcilerJob } from './jobs/delivery-line-action-reconciler.job'
 import { deliveryWebhookReconciliationJob } from './jobs/delivery-webhook-reconciliation.job'
 import { stripeWebhookReconciliationJob } from './jobs/stripe-webhook-reconciliation.job'
 import { moneyIntegrityWatchdogJob } from './jobs/money-integrity-watchdog.job'
@@ -213,6 +214,7 @@ const gracefulShutdown = async (signal: string) => {
       deliveryWebhookReconciliationJob.stop()
       deliveryMenuSyncJob.stop()
       deliverySnoozeResumeJob.stop()
+      deliveryLineActionReconcilerJob.stop()
 
       logger.info('Stopping Stripe webhook reconciliation job...')
       stripeWebhookReconciliationJob.stop()
@@ -577,6 +579,8 @@ const startApplication = async (retries = 3) => {
       deliveryWebhookReconciliationJob.start()
       deliveryMenuSyncJob.start()
       deliverySnoozeResumeJob.start()
+      // KDS de Uber (spec §3.4): retiros a medias, reservas huérfanas y «listos» sin avisar — cada minuto en :52
+      deliveryLineActionReconcilerJob.start()
 
       // Start Stripe PLATFORM webhook reconciliation job (every 5min at :03 —
       // replays FAILED WebhookEvent rows. The controller answers 200 even on

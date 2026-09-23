@@ -36,6 +36,8 @@ import { formatKdsOrderConVenta, type KdsOrderResponse } from './kds.mobile.serv
 
 /** Cuánto espera una persona antes de poder reintentar un aviso que el proveedor no confirmó (§3.5). */
 export const REINTENTO_TRAS_MS = 15 * 60_000
+/** Spec §3.4: un retiro CONFIRMED que Uber sigue sin reflejar a las 24 h es «retiro sin reflejar en Uber». */
+export const RETIRO_SIN_REFLEJAR_MS = 24 * 3_600_000
 const CUERPO_MAX = 2_000
 /** Texto observado el 27-ago y documentado en el adaptador: tras «listo» el proveedor ya no modifica. */
 const CAUSA_TERMINAL_409 = /already been marked ready|cannot modify order/i
@@ -449,6 +451,10 @@ export async function listDeliveryLineActions(venueId: string, opts: { orderId?:
     items: filas.slice(0, take).map(f => ({
       ...f,
       canRetryAt: f.status === 'UNCERTAIN' ? new Date(f.lastAttemptAt.getTime() + REINTENTO_TRAS_MS) : null,
+      unreflectedInProvider:
+        f.status === 'CONFIRMED' &&
+        (f.settlement === 'PENDING' || f.settlement === 'ACCREDITED') &&
+        Date.now() - (f.resolvedAt ?? f.lastAttemptAt).getTime() >= RETIRO_SIN_REFLEJAR_MS,
     })),
     hasMore: filas.length > take,
   }

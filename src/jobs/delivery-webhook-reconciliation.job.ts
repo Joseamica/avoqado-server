@@ -325,7 +325,8 @@ export class DeliveryWebhookReconciliationJob {
       // NO lanza: reporta el desenlace. Traducirlo es lo que decide reintento vs. rendición.
       const r = await processUberEvent(event.id)
 
-      if (r.outcome === 'PROCESSED' || r.outcome === 'ALREADY_DONE' || r.outcome === 'NOT_AN_ORDER') return true
+      if (r.outcome === 'PROCESSED' || r.outcome === 'ALREADY_DONE' || r.outcome === 'NOT_AN_ORDER' || r.outcome === 'RECONCILED')
+        return true
 
       // Sin vínculo no hay a quién ingerirle: el procesador ya lo dejó visible y no hay
       // nada que reintentar. (En la práctica el guard de `channelLink` del llamador lo
