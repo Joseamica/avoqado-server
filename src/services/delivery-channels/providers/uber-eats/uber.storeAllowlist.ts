@@ -5,7 +5,9 @@
  * un PUT /menus modificó el menú EN VIVO de un restaurante real (verificado
  * 2026-08-17). El dominio del entorno no garantiza aislamiento, así que ninguna
  * escritura (accept/deny/cancel/menú/status/pos_data) sale sin que la tienda esté
- * EXPLÍCITAMENTE autorizada por env var. Vacío ⇒ cero escrituras (default-deny).
+ * EXPLÍCITAMENTE autorizada. SANDBOX: por env var (vacío ⇒ cero escrituras, default-deny).
+ * PRODUCTION: por el consentimiento vigente del dueño en la base, resuelto en cada
+ * escritura por `getWritableStores` (`uber.client.ts`); la env var sólo restringe.
  * Las lecturas (GET) quedan fuera del candado a propósito.
  *
  * Módulo PURO sin efectos secundarios (regla del repo: importable desde tests sin
@@ -19,9 +21,13 @@ export class UberStoreWriteBlockedError extends Error {
   constructor(storeId: string, environment: UberEnvironment) {
     const envVar = `UBER_WRITABLE_STORE_IDS_${environment}`
     super(
-      `Escritura a Uber BLOQUEADA por el candado de tiendas: store "${storeId || '(vacío)'}" no está ` +
-        `en ${envVar}. Default-deny: sin lista no hay escrituras. Si es una tienda de PRUEBA legítima, ` +
-        `agrégala a ${envVar}; si no lo es, este bloqueo acaba de evitar tocar un comercio real.`,
+      environment === 'PRODUCTION'
+        ? `Escritura a Uber BLOQUEADA por el candado de tiendas: store "${storeId || '(vacío)'}" no tiene ` +
+            `consentimiento vigente del dueño (conéctala por OAuth con la app de Uber actual; revocada, ` +
+            `DISABLED o PENDING no escriben) o está fuera de ${envVar}.`
+        : `Escritura a Uber BLOQUEADA por el candado de tiendas: store "${storeId || '(vacío)'}" no está ` +
+            `en ${envVar}. Default-deny: sin lista no hay escrituras. Si es una tienda de PRUEBA legítima, ` +
+            `agrégala a ${envVar}; si no lo es, este bloqueo acaba de evitar tocar un comercio real.`,
     )
     this.name = 'UberStoreWriteBlockedError'
     this.storeId = storeId

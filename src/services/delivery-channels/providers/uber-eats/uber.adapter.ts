@@ -264,8 +264,9 @@ export const uberAdapter = {
    * y hubo que restaurarlo desde respaldo—, porque el aislamiento del sandbox que Uber
    * documenta NO se cumple cuando la cuenta no tiene tienda de prueba asignada.
    *
-   * Lo único que lo hace seguro es `assertStoreWritable` en `uber.http.ts`, que corre ANTES
-   * de cualquier escritura y sólo deja pasar las tiendas de `UBER_WRITABLE_STORE_IDS_*`.
+   * Lo único que lo hace seguro es el candado: `uberApi` resuelve en CADA escritura las tiendas
+   * escribibles (consentimiento vigente del dueño en producción; `UBER_WRITABLE_STORE_IDS_SANDBOX`
+   * en sandbox) y `assertStoreWritable` en `uber.http.ts` rechaza cualquier otra ANTES de la red.
    * **Nunca quites ese candado ni lo muevas más arriba en la pila.**
    *
    * Para marcar UN producto agotado NO se usa esto: hay un update puntual
