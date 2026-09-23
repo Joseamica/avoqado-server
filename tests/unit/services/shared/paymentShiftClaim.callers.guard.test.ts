@@ -71,11 +71,11 @@ const INVENTORY: Record<string, InventoryDecision> = {
     lane: 'mercadoPagoPaymentLink',
     reason: 'online processor checkout without cashier',
   },
-  'src/services/dashboard/refund.dashboard.service.ts#issueRefund#create': {
+  'src/services/dashboard/refund.dashboard.service.ts#writeRefundInTx#create': {
     decision: 'include',
     lane: 'issueRefund',
-    auditFunction: 'issueRefund',
-    transactionPath: [],
+    auditFunction: 'writeRefundInTx',
+    transactionPath: ['writeRefundInTx'],
   },
   'src/services/dashboard/sale-verification.org.dashboard.service.ts#editOrgSaleVerification#confirmation:update:1': {
     decision: 'exclude',
@@ -3139,7 +3139,9 @@ describe('paymentShiftClaim — inventario AST de carriles de caja', () => {
       guardedExistingOrderPathPrecedes(b4bitCalls, 'completeAndAttributeB4BitPaymentInTx', 'paymentOrderId', 'lockB4BitPaymentRow'),
     ).toBe(true)
     const dashboardRefundCalls = parseCalls('src/services/dashboard/refund.dashboard.service.ts')
-    expect(guardedExistingOrderPathPrecedes(dashboardRefundCalls, 'issueRefund', 'originalOrder?.orderId', 'tx.$queryRaw')).toBe(true)
+    expect(
+      guardedExistingOrderPathPrecedes(dashboardRefundCalls, 'bloquearCobroParaReembolso', 'input.expectedOrderId', 'tx.$queryRaw'),
+    ).toBe(true)
     const tpvRefundCalls = parseCalls('src/services/tpv/refund.tpv.service.ts')
     expect(
       guardedExistingOrderPathPrecedes(tpvRefundCalls, 'ejecutarTransaccionDelReembolso', 'originalPayment.orderId', 'tx.$queryRaw'),
