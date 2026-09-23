@@ -4,6 +4,7 @@
  * booleanos: si una condición del predicado se cayera del DTO, la cocina vería un botón que la
  * ruta niega (o, peor, dejaría de ver uno que sí sirve).
  */
+import type { Server } from 'http'
 import { DeliveryChannelLink, DeliveryProvider, OrderSource, StaffRole } from '@prisma/client'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
@@ -13,6 +14,7 @@ import { ingestDeliveryOrder } from '@/services/delivery-channels/core/deliveryO
 import type { NormalizedDeliveryOrder, NormalizedDeliveryPayment } from '@/services/delivery-channels/core/types'
 import { uberAdapter } from '@/services/delivery-channels/providers/uber-eats/uber.adapter'
 import { listKdsOrders } from '@/services/mobile/kds.mobile.service'
+import { anexarCapacidades, ventasDeComandas } from '@/services/mobile/kdsCapacidades'
 
 jest.setTimeout(30_000)
 
@@ -24,6 +26,12 @@ describe('El DTO del KDS decide por las apps (Tarea 16)', () => {
   let venueId: string, orgId: string, staffId: string
   let link: DeliveryChannelLink
   let token: string
+  /**
+   * UN servidor escuchando en 127.0.0.1 (patrón de `pin-rate-limit-code.test.ts`): `request(app)` levanta uno efímero por
+   * petición en `::` y supertest conecta por IPv4 — en una Mac con otros servidores vivos, alguna petición cae en el proceso
+   * de otro. Ése fue el 404 intermitente de `GET /kds/orders` (ninguna capa de esa ruta responde 404).
+   */
+  let server: Server
   let n = 0
   let resolver: jest.SpyInstance
   let leerPedido: jest.SpyInstance
@@ -99,15 +107,27 @@ describe('El DTO del KDS decide por las apps (Tarea 16)', () => {
       },
     })
 
-  const tablero = () => request(app).get(`/api/v1/mobile/venues/${venueId}/kds/orders`).set('Authorization', `Bearer ${token}`)
-  const comandaDe = async (s: Semilla) => {
-    const res = await tablero()
+  const tablero = (status?: string) =>
+    request(server)
+      .get(`/api/v1/mobile/venues/${venueId}/kds/orders${status ? `?status=${status}` : ''}`)
+      .set('Authorization', `Bearer ${token}`)
+  const comandaDe = async (s: Semilla, status?: string) => {
+    const res = await tablero(status)
     expect({ status: res.status, body: res.status === 200 ? null : res.body }).toEqual({ status: 200, body: null })
     return res.body.data.find((k: { id: string }) => k.id === s.kds.id)
   }
   const renglonB = (comanda: { items: Array<{ id: string }> }, s: Semilla) => comanda.items.find(i => i.id === s.itemB.id) as any
 
+  /** Las capacidades de una comanda, con los renglones por id (`include: { items: true }` no fija su orden). */
+  const capacidades = (k: any) => ({
+    ...Object.fromEntries(CAMPOS_COMANDA.map(c => [c, k[c]])),
+    items: Object.fromEntries(k.items.map((i: any) => [i.id, Object.fromEntries(CAMPOS_RENGLON.map(c => [c, i[c]]))])),
+  })
+
   beforeAll(async () => {
+    server = app.listen(0, '127.0.0.1')
+    // `listen` con host resuelve la dirección de forma asíncrona: hasta el evento, supertest levantaría otro.
+    await new Promise<void>(listo => server.once('listening', () => listo()))
     const org = await prisma.organization.create({
       data: { name: `Org cap ${Date.now()}`, email: `cap${Date.now()}@t.mx`, phone: '5555555555' },
     })
@@ -158,6 +178,7 @@ describe('El DTO del KDS decide por las apps (Tarea 16)', () => {
     } catch {
       /* fixtures */
     }
+    await new Promise<void>(listo => server.close(() => listo()))
   })
 
   // Cada fila rompe UNA condición del predicado completo; la de arriba no rompe ninguna. 3 elementos
@@ -244,10 +265,79 @@ describe('El DTO del KDS decide por las apps (Tarea 16)', () => {
         }),
     ],
     ['retiro UNCERTAIN en la orden', s => sembrarAccion(s, 'a', { status: 'UNCERTAIN' })],
+    ['venta DELETED', s => prisma.order.update({ where: { id: s.order.id }, data: { status: 'DELETED' } })],
+    // `deny` resuelve el canal por `contexto`: sin link, contestaría 404.
+    ['link no resoluble', s => prisma.order.update({ where: { id: s.order.id }, data: { deliveryChannelLinkId: 'link-que-no-existe' } })],
   ])('canCancelDelivery es false con %s', async (_caso, preparar) => {
     const s = await sembrar()
     await preparar(s)
     expect((await comandaDe(s)).canCancelDelivery).toBe(false)
+  })
+
+  it('un pedido «Entrega» del POS (DELIVERY sin proveedor) no trae capacidades ni «Cancelar pedido»', async () => {
+    // Como lo hace el POS: la venta nace DELIVERY y CONFIRMED sin `externalId`, y la comanda se crea por la ruta de siempre.
+    const orden = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: `POS-ENT-${Date.now()}`,
+        type: 'DELIVERY',
+        status: 'CONFIRMED',
+        subtotal: 100,
+        taxAmount: 0,
+        total: 100,
+      },
+    })
+    const creada = await request(server)
+      .post(`/api/v1/mobile/venues/${venueId}/kds/orders`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ orderNumber: orden.orderNumber, orderType: 'DELIVERY', orderId: orden.id, items: [{ productName: 'Torta', quantity: 1 }] })
+    expect(creada.status).toBe(201)
+
+    const res = await tablero()
+    const comanda = res.body.data.find((k: { id: string }) => k.id === creada.body.data.id)
+
+    for (const c of CAMPOS_COMANDA) expect(comanda).not.toHaveProperty(c)
+    for (const c of CAMPOS_RENGLON) expect(comanda.items[0]).not.toHaveProperty(c)
+  })
+
+  it('las capacidades se pegan a cada renglón por su ID, no por su posición', async () => {
+    const s = await sembrar()
+    // `a` sin id de línea del proveedor ⇒ sin botón; `b` intacto ⇒ con botón.
+    await prisma.orderItem.update({ where: { id: (await s.orderItem('a')).id }, data: { externalLineId: null } })
+    const k = await prisma.kdsOrder.findUniqueOrThrow({ where: { id: s.kds.id }, include: { items: true } })
+    const venta = (await ventasDeComandas(prisma, venueId, [k])).get(s.order.id)!
+    const renglones = k.items.map(i => ({ id: i.id }))
+
+    // Lo que se le pasa a la mezcla llega invertido o filtrado respecto de la comanda.
+    const invertida = anexarCapacidades({ items: [...renglones].reverse() }, k, venta)
+    const filtrada = anexarCapacidades({ items: renglones.filter(i => i.id !== s.itemB.id) }, k, venta)
+
+    expect(invertida.items.find(i => i.id === s.itemB.id)).toMatchObject({ canReportOutOfStock: true })
+    expect(invertida.items.find(i => i.id !== s.itemB.id)).toMatchObject({ canReportOutOfStock: false })
+    expect(filtrada.items).toHaveLength(1)
+    expect(filtrada.items[0]).toMatchObject({ canReportOutOfStock: false })
+  })
+
+  it('PUT …/status y bump devuelven la comanda con las MISMAS capacidades que el tablero', async () => {
+    const s = await sembrar()
+    const put = await request(server)
+      .put(`/api/v1/mobile/venues/${venueId}/kds/orders/${s.kds.id}/status`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ status: 'PREPARING' })
+    expect(put.status).toBe(200)
+    expect(capacidades(put.body.data)).toEqual(capacidades(await comandaDe(s)))
+    expect(renglonB(put.body.data, s).canReportOutOfStock).toBe(true)
+
+    // Con «listo» ya acreditado el bump no le vuelve a hablar al proveedor: la prueba no sale a la red.
+    const t = await sembrar()
+    await prisma.order.update({ where: { id: t.order.id }, data: { readyReportedAt: new Date() } })
+    const bump = await request(server)
+      .post(`/api/v1/mobile/venues/${venueId}/kds/orders/${t.kds.id}/bump`)
+      .set('Authorization', `Bearer ${token}`)
+    expect(bump.status).toBe(200)
+    expect(capacidades(bump.body.data)).toEqual(capacidades(await comandaDe(t, 'COMPLETED')))
+    expect(bump.body.data).toMatchObject({ canCancelDelivery: false })
+    expect(renglonB(bump.body.data, t).canReportOutOfStock).toBe(false)
   })
 
   it('el estado del retiro viaja por renglón, con canRetryAt = la regla de 15 min del reintento', async () => {
@@ -271,18 +361,12 @@ describe('El DTO del KDS decide por las apps (Tarea 16)', () => {
     resolver.mockResolvedValue({ ok: true, status: 200, raw: '{}' })
     leerPedido.mockResolvedValue(s.foto(['a'], '150.00'))
 
-    const ruta = await request(app)
+    const ruta = await request(server)
       .post(`/api/v1/mobile/venues/${venueId}/kds/orders/${s.kds.id}/items/${s.itemB.id}/out-of-stock`)
       .set('Authorization', `Bearer ${token}`)
     expect(ruta.status).toBe(200)
     const deLaRuta = ruta.body.data
     const delTablero = await comandaDe(s)
-
-    const capacidades = (k: any) => ({
-      ...Object.fromEntries(CAMPOS_COMANDA.map(c => [c, k[c]])),
-      // Por id: `include: { items: true }` no fija el orden de los renglones.
-      items: Object.fromEntries(k.items.map((i: any) => [i.id, Object.fromEntries(CAMPOS_RENGLON.map(c => [c, i[c]]))])),
-    })
     expect(capacidades(deLaRuta)).toEqual(capacidades(delTablero))
     expect(renglonB(deLaRuta, s)).toMatchObject({ lineActionState: 'CONFIRMED', canReportOutOfStock: false })
     expect(renglonB(deLaRuta, s).removedAt).toEqual(expect.any(String))
@@ -292,7 +376,7 @@ describe('El DTO del KDS decide por las apps (Tarea 16)', () => {
     const s = await sembrar()
     resolver.mockResolvedValue({ ok: true, status: 200, raw: '{}' })
     leerPedido.mockResolvedValue(s.foto(['a'], '150.00'))
-    await request(app)
+    await request(server)
       .post(`/api/v1/mobile/venues/${venueId}/kds/orders/${s.kds.id}/items/${s.itemB.id}/out-of-stock`)
       .set('Authorization', `Bearer ${token}`)
     // Una comanda de mostrador (no de reparto) en el mismo tablero.

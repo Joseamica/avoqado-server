@@ -16,8 +16,11 @@ export const REINTENTO_TRAS_MS = 15 * 60_000
 export const reintentableDesde = (lastAttemptAt: Date) => new Date(lastAttemptAt.getTime() + REINTENTO_TRAS_MS)
 
 const COMANDA_ABIERTA = new Set(['NEW', 'PREPARING'])
-const VENTA_CERRADA = new Set(['COMPLETED', 'CANCELLED'])
+const VENTA_CERRADA = new Set(['COMPLETED', 'CANCELLED', 'DELETED'])
 const EN_CURSO = new Set(['PENDING', 'UNCERTAIN'])
+
+/** Estados de `DeliveryLineAction.status` (contrato de las apps: `lineActionState`). */
+export type EstadoRetiro = 'PENDING' | 'UNCERTAIN' | 'CONFIRMED' | 'REJECTED'
 
 export type Bloqueo =
   | 'LINE_ID_MISSING'
@@ -61,9 +64,14 @@ export function puedeReportarAgotado(r: Renglon, renglonTocado: boolean, o: Pedi
   return !bloqueoDelRenglon(r) && !renglonTocado && !bloqueoDelPedido(o, comandaStatus, accionEnCurso)
 }
 
-/** «Cancelar pedido» [C-15]: reparto abierto, sin «listo» avisado, sin otra salida en vuelo ni retiro en curso. */
-export function puedeCancelarReparto(v: PedidoVivo & { type: string; status: string }, accionEnCurso: boolean): boolean {
-  return v.type === OrderType.DELIVERY && !VENTA_CERRADA.has(v.status) && !v.readyReportedAt && !reservaViva(v) && !accionEnCurso
+/**
+ * «Cancelar pedido» [C-15]: reparto abierto, sin «listo» avisado, sin otra salida en vuelo ni retiro en curso. Y con su canal
+ * resuelto (`conLink`): `deny` lo resuelve por `contexto`, y sin él contestaría 404 al botón que el tablero pintó.
+ */
+export function puedeCancelarReparto(v: PedidoVivo & { type: string; status: string; conLink: boolean }, accionEnCurso: boolean): boolean {
+  return (
+    v.type === OrderType.DELIVERY && v.conLink && !VENTA_CERRADA.has(v.status) && !v.readyReportedAt && !reservaViva(v) && !accionEnCurso
+  )
 }
 
 // ── Carga por LOTE para el tablero: consultas fijas por llamada, nunca una por comanda ──────────
@@ -73,6 +81,11 @@ export type VentaDeComanda = PedidoVivo & {
   id: string
   type: string
   status: string
+  /**
+   * 🔴 Reparto de un PROVEEDOR (`externalId` `PROVEEDOR:id` con adaptador). `type === DELIVERY` solo NO basta: el POS deja
+   * marcar «Entrega» una venta propia, sin proveedor al que avisarle nada.
+   */
+  conProveedor: boolean
   conLink: boolean
   conCapacidad: boolean
   accionEnCurso: boolean
@@ -153,6 +166,7 @@ export async function ventasDeComandas(db: Prisma.TransactionClient, venueId: st
     const propias = accionesDe.get(v.id) ?? []
     porId.set(v.id, {
       ...v,
+      conProveedor: Boolean(origen),
       // ponytail: sólo el link propio de la orden. `contexto` además cae al evento originador para
       // órdenes previas a `deliveryChannelLinkId`; aquí esas salen sin botón (falso negativo seguro,
       // sólo las que estaban en cocina al desplegar). Si hiciera falta, cargar esos eventos por lote.
@@ -172,29 +186,11 @@ function agrupar<T extends { orderId: string }>(filas: T[]): Map<string, T[]> {
   return m
 }
 
-/** Los campos de capacidad de una comanda de reparto y de sus renglones (spec «Apps», todos opcionales). */
-export function capacidadesDeComanda(
-  k: { status: string; items?: Array<{ orderItemId?: string | null; removedAt?: Date | null }> },
-  v: VentaDeComanda,
-) {
-  const renglones = (k.items ?? []).map(item => {
-    const oi = item.orderItemId ? v.renglones.get(item.orderItemId) : undefined
-    const retiro = oi?.externalLineId ? v.retiros.get(oi.externalLineId) : undefined
-    const renglon: Renglon = {
-      orderItemId: item.orderItemId ?? null,
-      esReparto: true,
-      conLink: v.conLink,
-      conCapacidad: v.conCapacidad,
-      externalLineId: oi?.externalLineId ?? null,
-    }
-    return {
-      removedAt: (item.removedAt ?? oi?.removedAt)?.toISOString() ?? null,
-      canReportOutOfStock: puedeReportarAgotado(renglon, Boolean(oi?.removedAt || retiro), v, k.status, v.accionEnCurso),
-      lineActionState: retiro?.status ?? null,
-      lineActionAttempts: retiro?.attempts ?? null,
-      canRetryAt: retiro && EN_CURSO.has(retiro.status) ? reintentableDesde(retiro.lastAttemptAt).toISOString() : null,
-    }
-  })
+type ComandaConRenglones = { status: string; items?: Array<{ id: string; orderItemId?: string | null; removedAt?: Date | null }> }
+
+/** Los campos de capacidad de una comanda de reparto y de cada renglón, por el ID del renglón (spec «Apps», opcionales). */
+export function capacidadesDeComanda(k: ComandaConRenglones, v: VentaDeComanda) {
+  const renglones = new Map((k.items ?? []).map(item => [item.id, capacidadesDelRenglon(item, k.status, v)]))
   return {
     comanda: {
       canCancelDelivery: puedeCancelarReparto(v, v.accionEnCurso),
@@ -202,5 +198,35 @@ export function capacidadesDeComanda(
       hasLineActionInProgress: v.accionEnCurso,
     },
     renglones,
+  }
+}
+
+/**
+ * Pega las capacidades a la comanda ya formateada. Sólo en un reparto de PROVEEDOR: en lo demás no se agrega ni una
+ * llave. 🔴 Cada renglón las recibe por su ID, nunca por posición: un filtro u orden futuro en el formateo le pondría
+ * a un platillo el botón de otro, y la cocina le avisaría al proveedor que falta lo que no falta.
+ */
+export function anexarCapacidades<B extends { items: Array<{ id: string }> }>(base: B, k: ComandaConRenglones, v: VentaDeComanda) {
+  if (v.type !== OrderType.DELIVERY || !v.conProveedor) return base
+  const { comanda, renglones } = capacidadesDeComanda(k, v)
+  return { ...base, ...comanda, items: base.items.map(item => ({ ...item, ...renglones.get(item.id) })) }
+}
+
+function capacidadesDelRenglon(item: NonNullable<ComandaConRenglones['items']>[number], comandaStatus: string, v: VentaDeComanda) {
+  const oi = item.orderItemId ? v.renglones.get(item.orderItemId) : undefined
+  const retiro = oi?.externalLineId ? v.retiros.get(oi.externalLineId) : undefined
+  const renglon: Renglon = {
+    orderItemId: item.orderItemId ?? null,
+    esReparto: true,
+    conLink: v.conLink,
+    conCapacidad: v.conCapacidad,
+    externalLineId: oi?.externalLineId ?? null,
+  }
+  return {
+    removedAt: (item.removedAt ?? oi?.removedAt)?.toISOString() ?? null,
+    canReportOutOfStock: puedeReportarAgotado(renglon, Boolean(oi?.removedAt || retiro), v, comandaStatus, v.accionEnCurso),
+    lineActionState: (retiro?.status as EstadoRetiro | undefined) ?? null,
+    lineActionAttempts: retiro?.attempts ?? null,
+    canRetryAt: retiro && EN_CURSO.has(retiro.status) ? reintentableDesde(retiro.lastAttemptAt).toISOString() : null,
   }
 }

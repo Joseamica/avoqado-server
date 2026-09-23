@@ -13,7 +13,7 @@ import type { CourierInfo } from '@/services/delivery-channels/core/types'
 import prisma from '../../utils/prismaClient'
 import { OrderStatus } from '@prisma/client'
 import type { KdsOrderStatus } from '@prisma/client'
-import { capacidadesDeComanda, ventasDeComandas, type VentaDeComanda } from './kdsCapacidades'
+import { anexarCapacidades, ventasDeComandas, type EstadoRetiro, type VentaDeComanda } from './kdsCapacidades'
 
 // Use string constants instead of Prisma enum to avoid runtime import issues with tsx
 const KdsStatus = {
@@ -121,7 +121,7 @@ export interface KdsOrderResponse {
     notes: string | null
     removedAt?: string | null
     canReportOutOfStock?: boolean
-    lineActionState?: string | null
+    lineActionState?: EstadoRetiro | null
     lineActionAttempts?: number | null
     canRetryAt?: string | null
   }>
@@ -178,9 +178,13 @@ export async function listKdsOrders(venueId: string, statusFilter?: string): Pro
 export function formatKdsOrderConVenta(o: any, venta?: VentaDeComanda | null): KdsOrderResponse {
   const esReparto = venta?.type === 'DELIVERY'
   const base = formatKdsOrder({ ...o, esDeMarketplace: esReparto }, esReparto && venta?.status === 'PENDING')
-  if (!venta || !esReparto) return base
-  const cap = capacidadesDeComanda(o, venta)
-  return { ...base, ...cap.comanda, items: base.items.map((item, i) => ({ ...item, ...cap.renglones[i] })) }
+  return venta ? anexarCapacidades(base, o, venta) : base
+}
+
+/** La comanda recién escrita, con su venta: `PUT …/status` y `bump` contestan lo mismo que el tablero (una carga por lote). */
+async function comandaConVenta(venueId: string, k: { orderId: string | null }): Promise<KdsOrderResponse> {
+  const ventas = await ventasDeComandas(prisma, venueId, [k])
+  return formatKdsOrderConVenta(k, k.orderId ? ventas.get(k.orderId) : undefined)
 }
 
 // MARK: - Create KDS Order
@@ -258,6 +262,8 @@ export async function updateKdsOrderStatus(venueId: string, orderId: string, new
   })
 
   logger.info(`KDS order #${updated.orderNumber} status -> ${upperStatus}`)
+  // Antes del aviso al marketplace: la respuesta describe el estado que ESTA escritura dejó.
+  const respuesta = await comandaConVenta(venueId, updated)
 
   // "Listo" en la cocina = avisarle al marketplace que mande al repartidor. Best-effort y
   // FUERA del camino del tablero: un marketplace caído no puede impedir que la cocina
@@ -266,7 +272,7 @@ export async function updateKdsOrderStatus(venueId: string, orderId: string, new
     avisarListoAlMarketplace(venueId, updated.orderId, updated.orderNumber)
   }
 
-  return formatKdsOrder(updated)
+  return respuesta
 }
 
 /**
@@ -308,6 +314,7 @@ export async function bumpKdsOrder(venueId: string, orderId: string): Promise<Kd
   })
 
   logger.info(`KDS order #${updated.orderNumber} bumped to COMPLETED`)
+  const respuesta = await comandaConVenta(venueId, updated)
 
   // El bump salta directo a COMPLETED sin pasar por READY — el aviso al marketplace no se
   // puede perder por tomar el atajo.
@@ -315,7 +322,7 @@ export async function bumpKdsOrder(venueId: string, orderId: string): Promise<Kd
     avisarListoAlMarketplace(venueId, updated.orderId, updated.orderNumber)
   }
 
-  return formatKdsOrder(updated)
+  return respuesta
 }
 
 // MARK: - Helper
