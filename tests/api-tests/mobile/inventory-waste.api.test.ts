@@ -895,6 +895,20 @@ describe('GET …/inventory/waste-reports (historial del POS)', () => {
     expect(listWasteReports).not.toHaveBeenCalled()
   })
 
+  // Codex (historial, P3): el Zod instalado acepta el offset +24:00; la fecha imposible reventaba
+  // DESPUÉS de checkPermission, con el PIN de gerente ya gastado.
+  it('🔴 una fecha imposible sale 422 ANTES de gastar el PIN de gerente', async () => {
+    pinDeGerenteValido()
+    const res = await request(app)
+      .get(`${REPORTS}?startDate=2026-09-23T15:00:00%2B24:00`)
+      .set('Authorization', `Bearer ${token('KITCHEN')}`)
+      .set('X-Permission-Override', OVERRIDE)
+    expect(res.status).toBe(422)
+    expect(res.body.code).toBe('INVALID_WASTE_PAYLOAD')
+    expect(prismaMock.permissionOverride.updateMany).not.toHaveBeenCalled()
+    expect(listWasteReports).not.toHaveBeenCalled()
+  })
+
   it('🔴 una query inválida sale 422 ANTES de gastar el PIN de gerente', async () => {
     pinDeGerenteValido()
     const res = await request(app)
@@ -904,6 +918,28 @@ describe('GET …/inventory/waste-reports (historial del POS)', () => {
     expect(res.status).toBe(422)
     expect(res.body.code).toBe('INVALID_WASTE_PAYLOAD')
     expect(prismaMock.permissionOverride.updateMany).not.toHaveBeenCalled()
+  })
+})
+
+describe('controlador · historial en suplantación', () => {
+  // Codex (historial, P1): la suplantación `mode=role` conserva el id del SUPERADMIN y el acceso
+  // se resolvía con SU rol ⇒ `scope=ALL` aunque se suplantara a un mesero. Suplantando, el alcance
+  // falla cerrado: sólo lo propio.
+  it('🔴 una sesión suplantada ve SÓLO lo propio aunque el acceso real tenga inventory:adjust', async () => {
+    const next = jest.fn()
+    const json = jest.fn()
+    const req = { authContext: { userId: 'user_test', isImpersonating: true }, params: { venueId }, query: {} }
+    const res = {
+      json,
+      locals: {
+        wasteQuery: { page: 1, pageSize: 30 },
+        wasteAccess: { role: 'SUPERADMIN', corePermissions: ['*:*'], whiteLabelEnabled: false, featureAccess: {} },
+      },
+    }
+    await wasteController.listReports(req, res, next)
+    expect(next).not.toHaveBeenCalled()
+    expect(json).toHaveBeenCalledWith(expect.objectContaining({ scope: 'MINE' }))
+    expect(listWasteReports).toHaveBeenCalledWith(venueId, expect.objectContaining({ reportedByStaffId: 'user_test' }))
   })
 })
 

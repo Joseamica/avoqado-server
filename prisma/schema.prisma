@@ -2064,6 +2064,8 @@ model InventoryWasteReport {
 
   @@unique([venueId, idempotencyKey])
   @@index([venueId, createdAt, id])
+  // Historial del POS: «mis mermas» del mesero, más recientes primero (Codex, historial P2).
+  @@index([venueId, status, reportedByStaffId, createdAt(sort: Desc), id(sort: Desc)], map: "InventoryWasteReport_author_history_idx")
   @@index([rawMaterialId])
   @@index([productId])
   @@index([reportedByStaffId])

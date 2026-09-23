@@ -192,7 +192,8 @@ export async function listReports(req: Request, res: Response, next: NextFunctio
   try {
     const staffId = actor(req)
     const query = res.locals.wasteQuery ?? parseWasteSchema(WasteQuerySchema, req.query)
-    const access = res.locals.wasteAccess
+    // Suplantando, el acceso se resolvió con el rol REAL (en `mode=role` es el SUPERADMIN): falla cerrado.
+    const access = req.authContext?.isImpersonating ? undefined : res.locals.wasteAccess
     const scope = access && hasWastePermission(access, 'inventory:adjust') ? 'ALL' : 'MINE'
     const result = await listWasteReports(req.params.venueId, {
       page: query.page,

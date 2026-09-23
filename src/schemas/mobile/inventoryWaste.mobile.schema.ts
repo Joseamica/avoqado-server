@@ -108,6 +108,13 @@ const PAGE_MSG = 'La página debe ser un entero positivo.'
 const PAGE_SIZE_MSG = 'El tamaño de página debe ser un entero positivo.'
 const FECHA_MSG = 'La fecha debe ser ISO 8601 con hora y zona horaria.'
 
+/** ISO con zona Y un instante que exista: Zod acepta `+24:00`, que `new Date` no puede leer (Codex, historial P3). */
+const fecha = () =>
+  z
+    .string({ invalid_type_error: FECHA_MSG })
+    .datetime({ offset: true, message: FECHA_MSG })
+    .refine(value => Number.isFinite(new Date(value).getTime()), FECHA_MSG)
+
 /**
  * Paginación de los lectores de merma (catálogo del POS y, en el dashboard, la lista de folios).
  * 🔴 Un `pageSize` hostil se RECORTA a 200, nunca se rechaza ni se obedece: el tope lo impone el
@@ -128,8 +135,8 @@ export const WasteQuerySchema = z
       .transform(value => Math.min(value, 200))
       .default(100),
     search: z.string({ invalid_type_error: 'La búsqueda debe ser texto.' }).max(200, 'La búsqueda admite hasta 200 caracteres.').optional(),
-    startDate: z.string({ invalid_type_error: FECHA_MSG }).datetime({ offset: true, message: FECHA_MSG }).optional(),
-    endDate: z.string({ invalid_type_error: FECHA_MSG }).datetime({ offset: true, message: FECHA_MSG }).optional(),
+    startDate: fecha().optional(),
+    endDate: fecha().optional(),
   })
   .refine(value => !value.startDate || !value.endDate || new Date(value.startDate) <= new Date(value.endDate), {
     message: 'El inicio debe ser anterior al final.',
