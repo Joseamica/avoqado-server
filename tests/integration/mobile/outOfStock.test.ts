@@ -750,6 +750,7 @@ describe('«No tengo este artículo» desde el KDS (Tarea 14)', () => {
       total: 1,
       blockedOrders: [],
       blockedOrdersTotal: 0,
+      blockedOrdersNextCursor: null,
     })
     // Otro negocio no ve nada: ni los retiros ni que la orden exista.
     expect(await listDeliveryLineActions(venueIdOtro, { orderId: s.order.id })).toEqual({
@@ -759,6 +760,7 @@ describe('«No tengo este artículo» desde el KDS (Tarea 14)', () => {
       total: 0,
       blockedOrders: [],
       blockedOrdersTotal: 0,
+      blockedOrdersNextCursor: null,
     })
   })
 })

@@ -362,6 +362,30 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
     expect(vista.blockedOrdersTotal).toBeGreaterThanOrEqual(2)
   })
 
+  it('N-2: las órdenes bloqueadas tienen su PROPIO cursor: 21 se alcanzan en dos páginas', async () => {
+    const mias: string[] = []
+    for (let i = 0; i < 21; i++) {
+      const s = await sembrar()
+      await prisma.order.update({ where: { id: s.order.id }, data: { deliveryReconcileBlocked: 'INCREASE_UNSUPPORTED' } })
+      mias.push(s.order.id)
+    }
+
+    const p1 = await listDeliveryLineActions(venueId, { limit: 100 })
+    expect(p1.blockedOrders).toHaveLength(20)
+    expect(p1.blockedOrdersNextCursor).not.toBeNull()
+    const vistas = [...p1.blockedOrders.map(o => o.orderId)]
+    let cursor = p1.blockedOrdersNextCursor
+    while (cursor) {
+      const pag = await listDeliveryLineActions(venueId, { limit: 100, blockedCursor: cursor })
+      vistas.push(...pag.blockedOrders.map(o => o.orderId))
+      cursor = pag.blockedOrdersNextCursor
+    }
+
+    expect(new Set(vistas).size).toBe(vistas.length) // sin duplicados
+    expect(vistas).toHaveLength(p1.blockedOrdersTotal)
+    expect(vistas).toEqual(expect.arrayContaining(mias))
+  })
+
   it('P2: el listado de retiros se recorre COMPLETO por cursor, estable aunque empaten en updatedAt', async () => {
     const x = await sembrar()
     const y = await sembrar()

@@ -494,7 +494,10 @@ export async function retryOutOfStock(
  * COMPLETOS por cursor `(updatedAt, id)` (P2), y las órdenes que esperan a una persona porque su
  * reconciliación quedó bloqueada (I-1) — con o sin retiros.
  */
-export async function listDeliveryLineActions(venueId: string, opts: { orderId?: string; limit?: number; cursor?: string } = {}) {
+export async function listDeliveryLineActions(
+  venueId: string,
+  opts: { orderId?: string; limit?: number; cursor?: string; blockedCursor?: string } = {},
+) {
   const take = Math.min(Math.max(Math.trunc(opts.limit ?? 50), 1), 100)
   const base: Prisma.DeliveryLineActionWhereInput = { venueId, ...(opts.orderId ? { orderId: opts.orderId } : {}) }
   const desde = opts.cursor ? leerCursor(opts.cursor) : null
@@ -524,11 +527,16 @@ export async function listDeliveryLineActions(venueId: string, opts: { orderId?:
       },
     }),
     prisma.deliveryLineAction.count({ where: base }),
-    // Índice parcial `Order_deliveryReconcileBlocked_idx`: casi siempre ninguna fila.
+    // Índice parcial `Order_deliveryReconcileBlocked_idx`: casi siempre ninguna fila. Cursor PROPIO por
+    // `id` (N-2: inmutable y único; `updatedAt` de una orden cambia con cualquier escritura).
     prisma.order.findMany({
-      where: { venueId, deliveryReconcileBlocked: { not: null }, ...(opts.orderId ? { id: opts.orderId } : {}) },
-      orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
-      take: 20,
+      where: {
+        venueId,
+        deliveryReconcileBlocked: { not: null },
+        AND: [opts.orderId ? { id: opts.orderId } : {}, opts.blockedCursor ? { id: { lt: opts.blockedCursor } } : {}],
+      },
+      orderBy: { id: 'desc' },
+      take: PAGINA_BLOQUEADAS + 1,
       select: { id: true, orderNumber: true, externalId: true, deliveryReconcileBlocked: true, total: true, updatedAt: true },
     }),
     prisma.order.count({ where: { venueId, deliveryReconcileBlocked: { not: null }, ...(opts.orderId ? { id: opts.orderId } : {}) } }),
@@ -548,6 +556,7 @@ export async function listDeliveryLineActions(venueId: string, opts: { orderId?:
   )
   const ultima = pagina[pagina.length - 1]
   const hasMore = filas.length > take
+  const bloqueadas = bloqueadasPag.slice(0, PAGINA_BLOQUEADAS)
   return {
     items: pagina.map(f => ({
       ...f,
@@ -559,7 +568,7 @@ export async function listDeliveryLineActions(venueId: string, opts: { orderId?:
     hasMore,
     nextCursor: hasMore && ultima ? `${ultima.updatedAt.toISOString()}|${ultima.id}` : null,
     total,
-    blockedOrders: bloqueadasPag.map(o => ({
+    blockedOrders: bloqueadas.map(o => ({
       orderId: o.id,
       orderNumber: o.orderNumber,
       externalId: o.externalId,
@@ -568,8 +577,12 @@ export async function listDeliveryLineActions(venueId: string, opts: { orderId?:
       updatedAt: o.updatedAt,
     })),
     blockedOrdersTotal,
+    /** Siguiente página de `blockedOrders` (pásalo como `blockedCursor`), o null. */
+    blockedOrdersNextCursor: bloqueadasPag.length > PAGINA_BLOQUEADAS ? bloqueadas[bloqueadas.length - 1].id : null,
   }
 }
+
+const PAGINA_BLOQUEADAS = 20
 
 /** Cursor opaco `updatedAt ISO | id`. Uno que no se entiende es un error del llamador, no «desde el principio». */
 function leerCursor(cursor: string): { updatedAt: Date; id: string } {
