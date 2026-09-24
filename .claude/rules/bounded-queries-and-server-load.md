@@ -16,6 +16,13 @@ against 10× and 100× today's largest tenant before coding.
   totals.
 - Never add an unbounded tenant `findMany`. Every `findMany` needs `take`, a truly unique lookup, or a written explanation enforced by the
   architecture guard. Avoid N+1; batch or aggregate instead.
+- 🔴 The guard (`tests/unit/architecture/findManySinTopeGuard.test.ts`) covers **every model in `prisma/schema.prisma`** since 2026-09-24 —
+  not a hand-picked list of "big" tables. The hand-picked list let three tables through to production, one after another (TransactionCost
+  8-sep, OrderItemModifier 18-sep, KdsOrder 24-sep: the kitchen display read 3,068 comandas). A new model is watched from day one; a new
+  unbounded `findMany` on ANY table fails CI. Its inventory only shrinks.
+- Bounding a read must not cost the user anything: keep the response shape old clients read, return the true total (body field or a header
+  like `X-Total-Count` when the body cannot change), and choose WHICH rows survive the cap by what the screen needs (a kitchen display keeps
+  the NEWEST tickets, not the oldest). A cap that silently shows the wrong rows is a UX bug, not a fix.
 - Bound parallel work and background fan-out. Retries need backoff/jitter and must not multiply a failing database request across every
   client.
 
