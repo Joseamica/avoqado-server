@@ -255,6 +255,30 @@ describe('issueCfdiForOrder — venta con facturas previas', () => {
   })
 })
 
+// ─── ¿Quién factura el efectivo? (founder, 24-sep-2026) ───────────────────────
+// El interruptor «Facturar ventas en efectivo» gobierna la AUTOFACTURA del cliente (QR) y la global; el
+// dueño/personal que factura una venta desde Pedidos lo hace a propósito y no lo necesita.
+
+describe('issueCfdiForOrder — permitir efectivo según quién factura', () => {
+  it('el PERSONAL (STAFF_B, o sin flujo) pide permitir efectivo', async () => {
+    const deps = makeIssueDeps()
+    await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true, expectedVenueId: 'v1', flow: 'STAFF_B' }, deps)
+    expect(deps.loadOrderForCfdi).toHaveBeenCalledWith('o1', { permitirEfectivo: true })
+    ;(deps.loadOrderForCfdi as jest.Mock).mockClear()
+    await issueCfdiForOrder(
+      { orderId: 'o2', receptor, sandbox: true, expectedVenueId: 'v1' },
+      makeIssueDeps({ loadOrderForCfdi: deps.loadOrderForCfdi }),
+    )
+    expect(deps.loadOrderForCfdi).toHaveBeenCalledWith('o2', { permitirEfectivo: true })
+  })
+
+  it('la AUTOFACTURA del cliente NO: respeta el interruptor del negocio', async () => {
+    const deps = makeIssueDeps()
+    await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true, expectedVenueId: 'v1', flow: 'AUTOFACTURA_A' }, deps)
+    expect(deps.loadOrderForCfdi).toHaveBeenCalledWith('o1', { permitirEfectivo: false })
+  })
+})
+
 // ─── refreshPendingCancellation ───────────────────────────────────────────────
 
 function refreshDeps(estado: { status: string; cancelledAt: Date | null }, over: Partial<RefreshCancellationDeps> = {}) {

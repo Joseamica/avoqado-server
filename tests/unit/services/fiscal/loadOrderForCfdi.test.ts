@@ -9,6 +9,7 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
   default: {
     order: { findUnique: jest.fn() },
     merchantFiscalConfig: { findUnique: jest.fn() },
+    fiscalEmisor: { findMany: jest.fn().mockResolvedValue([]) },
   },
 }))
 jest.mock('../../../../src/config/logger', () => ({
@@ -160,6 +161,111 @@ describe('loadOrderForCfdiFromDb', () => {
     orderMock.mockResolvedValue(anOrder({ payments: [{ method: 'CASH', merchantAccountId: null, ecommerceMerchantId: null }] }))
     expect(await loadOrderForCfdiFromDb('o1')).toBeNull()
     expect(cfgMock).not.toHaveBeenCalled()
+  })
+
+  // ─── Venta SIN terminal (Testarudo, 24-sep-2026) ──────────────────────────────────────────────
+  // 698 ventas en efectivo y una transferencia de $3,082 en 30 días no se podían facturar: el emisor sólo
+  // se sacaba del comercio de la TERMINAL, y un cobro en efectivo o por transferencia no lleva comercio.
+  // Si el negocio tiene UN solo emisor, es inequívoco quién factura. El efectivo sigue su interruptor,
+  // salvo que la factura la emita el personal a propósito (`permitirEfectivo`).
+  describe('venta sin terminal', () => {
+    const emisorMock = (prisma as any).fiscalEmisor.findMany as jest.Mock
+    afterEach(() => emisorMock.mockResolvedValue([]))
+    function unEmisor(over: Record<string, any> = {}) {
+      return {
+        id: 'e1',
+        venueId: 'venueB',
+        provider: 'FACTURAPI',
+        providerKeyEnc: null,
+        csdStatus: 'ACTIVE',
+        serie: 'A',
+        invoiceCashSales: false,
+        merchantConfigs: [{ facturacionEnabled: true, autofacturaEnabled: true }],
+        ...over,
+      }
+    }
+    const transferencia = { method: 'BANK_TRANSFER', merchantAccountId: null, ecommerceMerchantId: null, amount: D(116), type: 'REGULAR' }
+    const efectivo = { method: 'CASH', merchantAccountId: null, ecommerceMerchantId: null, amount: D(116), type: 'REGULAR' }
+
+    it('TRANSFERENCIA con un solo emisor ⇒ lo factura ese emisor (no hace falta el interruptor de efectivo)', async () => {
+      orderMock.mockResolvedValue(anOrder({ payments: [transferencia] }))
+      emisorMock.mockResolvedValue([unEmisor()])
+      const bundle = await loadOrderForCfdiFromDb('o1')
+      expect(bundle).not.toBeNull()
+      expect(bundle!.emisor.id).toBe('e1')
+      expect(bundle!.paymentMethod).toBe('BANK_TRANSFER')
+      expect(bundle!.facturacionEnabled).toBe(true)
+      expect(emisorMock.mock.calls[0][0].where).toEqual({ venueId: 'venueB' })
+    })
+
+    it('EFECTIVO con el interruptor apagado ⇒ no para la autofactura (default), SÍ para el personal', async () => {
+      orderMock.mockResolvedValue(anOrder({ payments: [efectivo] }))
+      emisorMock.mockResolvedValue([unEmisor({ invoiceCashSales: false })])
+      expect(await loadOrderForCfdiFromDb('o1')).toBeNull()
+      const bundle = await loadOrderForCfdiFromDb('o1', { permitirEfectivo: true })
+      expect(bundle).not.toBeNull()
+      expect(bundle!.paymentMethod).toBe('CASH')
+    })
+
+    it('EFECTIVO con el interruptor prendido ⇒ facturable también por autofactura', async () => {
+      orderMock.mockResolvedValue(anOrder({ payments: [efectivo] }))
+      emisorMock.mockResolvedValue([unEmisor({ invoiceCashSales: true })])
+      expect(await loadOrderForCfdiFromDb('o1')).not.toBeNull()
+    })
+
+    it('DOS emisores (dos RFC) ⇒ no se adivina quién factura', async () => {
+      orderMock.mockResolvedValue(anOrder({ payments: [transferencia] }))
+      emisorMock.mockResolvedValue([unEmisor(), unEmisor({ id: 'e2' })])
+      expect(await loadOrderForCfdiFromDb('o1', { permitirEfectivo: true })).toBeNull()
+    })
+
+    it('tipo del catálogo (OTHER: Uber Eats, vales…) ⇒ no se factura por este camino', async () => {
+      orderMock.mockResolvedValue(anOrder({ payments: [{ ...transferencia, method: 'OTHER' }] }))
+      emisorMock.mockResolvedValue([unEmisor()])
+      expect(await loadOrderForCfdiFromDb('o1', { permitirEfectivo: true })).toBeNull()
+    })
+
+    it('autofactura sólo si TODOS los comercios con facturación encendida la tienen encendida', async () => {
+      orderMock.mockResolvedValue(anOrder({ payments: [transferencia] }))
+      emisorMock.mockResolvedValue([
+        unEmisor({
+          merchantConfigs: [
+            { facturacionEnabled: true, autofacturaEnabled: true },
+            { facturacionEnabled: true, autofacturaEnabled: false },
+          ],
+        }),
+      ])
+      const bundle = await loadOrderForCfdiFromDb('o1')
+      expect(bundle!.facturacionEnabled).toBe(true)
+      expect(bundle!.autofacturaEnabled).toBe(false)
+    })
+
+    it('sin ningún comercio con facturación encendida ⇒ facturación apagada', async () => {
+      orderMock.mockResolvedValue(anOrder({ payments: [transferencia] }))
+      emisorMock.mockResolvedValue([unEmisor({ merchantConfigs: [{ facturacionEnabled: false, autofacturaEnabled: false }] })])
+      expect((await loadOrderForCfdiFromDb('o1'))!.facturacionEnabled).toBe(false)
+    })
+
+    it('REGRESIÓN: una venta con tarjeta sigue resolviendo por su comercio, sin consultar emisores', async () => {
+      orderMock.mockResolvedValue(anOrder())
+      cfgMock.mockResolvedValue(aConfig())
+      await loadOrderForCfdiFromDb('o1')
+      expect(emisorMock).not.toHaveBeenCalled()
+    })
+  })
+
+  it('MIXTA con efectivo e interruptor apagado: la emite el PERSONAL (permitirEfectivo), no la autofactura', async () => {
+    orderMock.mockResolvedValue(
+      anOrder({
+        payments: [
+          { method: 'CREDIT_CARD', merchantAccountId: 'm1', ecommerceMerchantId: null },
+          { method: 'CASH', merchantAccountId: null, ecommerceMerchantId: null },
+        ],
+      }),
+    )
+    cfgMock.mockResolvedValue(aConfig())
+    expect(await loadOrderForCfdiFromDb('o1')).toBeNull()
+    expect(await loadOrderForCfdiFromDb('o1', { permitirEfectivo: true })).not.toBeNull()
   })
 
   it('returns null when the merchant has no fiscal config', async () => {

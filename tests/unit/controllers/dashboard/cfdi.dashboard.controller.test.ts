@@ -231,7 +231,12 @@ describe('issueCfdiForOrderController', () => {
     await issueCfdiForOrderController(mockReq(), res)
 
     expect(res.status).toHaveBeenCalledWith(404)
-    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Orden no encontrada o sin emisor fiscal configurado' }))
+    // Testarudo 24-sep: «sin emisor fiscal configurado» mandaba a revisar una configuración que estaba bien.
+    // El mensaje dice qué revisar y cuál es el caso que de verdad no se puede facturar todavía.
+    const body = res.json.mock.calls[0][0]
+    expect(body.code).toBe('CFDI_NO_EMISOR')
+    expect(body.error).toMatch(/Facturación › Configuración/)
+    expect(body.error).toMatch(/más de un RFC/)
   })
 
   it('returns 500 on unexpected errors', async () => {

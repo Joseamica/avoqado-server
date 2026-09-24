@@ -32,6 +32,7 @@ import {
   totalDelDocumentoCents,
   STAMPING_TTL_MS,
   type LoadedOrderBundle,
+  type LoadOrderForCfdiOpts,
   type IssueReceptor,
 } from './cfdi.service'
 
@@ -40,7 +41,7 @@ export interface ReplaceCfdiDeps {
   loadCfdi: (cfdiId: string) => Promise<any | null>
   /** La sustituta que ya exista para esta original — el intento durable de una corrida anterior. */
   findSustituta: (originalCfdiId: string) => Promise<any | null>
-  loadOrderForCfdi: (orderId: string) => Promise<LoadedOrderBundle | null>
+  loadOrderForCfdi: (orderId: string, opts?: LoadOrderForCfdiOpts) => Promise<LoadedOrderBundle | null>
   resolveProvider: typeof resolveFiscalProvider
   /** INSERT que reserva la llave de la sustituta. Un P2002 es la carrera con otra petición. */
   reserveCfdi: (data: Record<string, any>) => Promise<any>
@@ -151,7 +152,8 @@ export async function replaceCfdi(
   }
 
   // 4. Armar el documento CORREGIDO con los datos ACTUALES de la orden.
-  const bundle = await deps.loadOrderForCfdi(original.orderId)
+  // La sustitución la hace el personal a propósito: el interruptor de efectivo es de la autofactura.
+  const bundle = await deps.loadOrderForCfdi(original.orderId, { permitirEfectivo: true })
   if (!bundle) throw new Error(`Order ${original.orderId} not found or has no fiscal emisor configured`)
   if (bundle.venueId !== original.venueId) throw new Error(`CFDI ${params.cfdiId} not found`)
   // 🔴 Una sustitución vive ENTRE DOS DOCUMENTOS DEL MISMO EMISOR. Si el negocio cambió de comercio

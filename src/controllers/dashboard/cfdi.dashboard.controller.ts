@@ -122,7 +122,13 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
     logger.error(`[cfdi.controller] issue failed for order ${orderId}: ${message}`)
 
     if (/not found|no fiscal emisor/i.test(message)) {
-      res.status(404).json({ error: 'Orden no encontrada o sin emisor fiscal configurado' })
+      // Testarudo 24-sep: el texto viejo («sin emisor fiscal configurado») mandaba a revisar una configuración
+      // que estaba bien. Éste dice qué revisar y qué caso todavía no se puede facturar.
+      res.status(404).json({
+        code: 'CFDI_NO_EMISOR',
+        error:
+          'No se pudo determinar quién factura esta venta. Revisa en Facturación › Configuración que el comercio con el que se cobró tenga la facturación encendida. Una venta cobrada sin terminal (efectivo o transferencia) sólo se puede facturar si el negocio tiene un solo RFC; con más de un RFC todavía no.',
+      })
       return
     }
 

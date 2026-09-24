@@ -188,7 +188,7 @@ export interface IssueCfdiDeps {
   findOrderInvoices?: (orderId: string) => Promise<any[]>
   /** Le pregunta al PAC cómo va una cancelación que quedó «en trámite» (ver `refreshPendingCancellation`). */
   refreshPendingCancellation?: (cfdi: any, opts: { sandbox: boolean }) => Promise<any>
-  loadOrderForCfdi: (orderId: string) => Promise<LoadedOrderBundle | null>
+  loadOrderForCfdi: (orderId: string, opts?: LoadOrderForCfdiOpts) => Promise<LoadedOrderBundle | null>
   resolveProvider: typeof resolveFiscalProvider
   storeArtifact: (buffer: Buffer, path: string, contentType: string) => Promise<string>
   persistCfdi: (data: Record<string, any>) => Promise<any>
@@ -316,7 +316,8 @@ export async function issueCfdiForOrder(
   }
 
   // 2. Load
-  const bundle = await deps.loadOrderForCfdi(params.orderId)
+  // El personal (Pedidos → Facturar) factura a propósito; la autofactura del cliente respeta el interruptor.
+  const bundle = await deps.loadOrderForCfdi(params.orderId, { permitirEfectivo: (params.flow ?? 'STAFF_B') === 'STAFF_B' })
   if (!bundle) throw new Error(`Order ${params.orderId} not found or has no fiscal emisor configured`)
   // Tenant isolation (critical-warnings rule): the order MUST belong to the caller's venue.
   if (params.expectedVenueId && bundle.venueId !== params.expectedVenueId) {
@@ -909,7 +910,24 @@ export function reconstruirConceptos(order: OrdenParaConceptos, orderId: string)
  * DB-backed order loader for CFDI issuance — extracted from defaultDeps so the tenant guard
  * (emisor.venueId MUST equal order.venueId) and merchant-resolution edge cases are unit-testable.
  */
-export async function loadOrderForCfdiFromDb(orderId: string): Promise<LoadedOrderBundle | null> {
+/**
+ * Métodos que pueden facturarse sin comercio (el cobro no pasó por una terminal nuestra): efectivo,
+ * transferencia, y tarjeta cobrada en otra terminal. Los tipos del catálogo (`OTHER`: Uber Eats, vales…)
+ * y cripto quedan fuera: quién factura esa venta no es evidente.
+ */
+const METODOS_SIN_COMERCIO = new Set<string>(['CASH', 'BANK_TRANSFER', 'CREDIT_CARD', 'DEBIT_CARD'])
+
+export interface LoadOrderForCfdiOpts {
+  /**
+   * `true` cuando la factura la emite el PERSONAL a propósito (Pedidos → Facturar, o una sustitución).
+   * El interruptor «Facturar ventas en efectivo» (`invoiceCashSales`) gobierna la AUTOFACTURA del cliente
+   * y la factura global — así lo dice su definición en el schema —, no la decisión deliberada del dueño.
+   * Por default `false`: todo lector que no lo pida (QR del ticket, portal) sigue siendo estricto.
+   */
+  permitirEfectivo?: boolean
+}
+
+export async function loadOrderForCfdiFromDb(orderId: string, opts: LoadOrderForCfdiOpts = {}): Promise<LoadedOrderBundle | null> {
   // Tenant-safe load: order + items + product(+category) + venue.
   // Emisor is now resolved via the most-recent payment's merchant → MerchantFiscalConfig → fiscalEmisor.
   // Schema-verified field names:
@@ -977,20 +995,59 @@ export async function loadOrderForCfdiFromDb(orderId: string): Promise<LoadedOrd
   // que ningún llamador con filas sin filtrar (o una prueba) sume un pago TEST/ADJUSTMENT/REFUND.
   const pays = order.payments.filter(pp => esCobroElegible(pp))
   const pay = pays.find(pp => pp.merchantAccountId || pp.ecommerceMerchantId) ?? pays[0]
-  // No payment or no merchant on the payment → cannot resolve an emisor
-  if (!pay || (!pay.merchantAccountId && !pay.ecommerceMerchantId)) return null
+  if (!pay) return null
 
-  // Resolve MerchantFiscalConfig via the unique merchantAccountId XOR ecommerceMerchantId
-  const cfg = await prisma.merchantFiscalConfig.findUnique({
-    where: pay.merchantAccountId ? { merchantAccountId: pay.merchantAccountId } : { ecommerceMerchantId: pay.ecommerceMerchantId! },
-    select: {
-      facturacionEnabled: true,
-      autofacturaEnabled: true,
-      fiscalEmisor: {
-        select: { id: true, venueId: true, provider: true, providerKeyEnc: true, csdStatus: true, serie: true, invoiceCashSales: true },
-      },
-    },
-  })
+  const EMISOR_SELECT = {
+    id: true,
+    venueId: true,
+    provider: true,
+    providerKeyEnc: true,
+    csdStatus: true,
+    serie: true,
+    invoiceCashSales: true,
+  } as const
+  let cfg: {
+    facturacionEnabled: boolean
+    autofacturaEnabled: boolean
+    fiscalEmisor: {
+      id: string
+      venueId: string
+      provider: FiscalProviderType
+      providerKeyEnc: string | null
+      csdStatus: CsdStatus
+      serie: string | null
+      invoiceCashSales: boolean
+    } | null
+  } | null
+
+  if (pay.merchantAccountId || pay.ecommerceMerchantId) {
+    // Resolve MerchantFiscalConfig via the unique merchantAccountId XOR ecommerceMerchantId
+    cfg = await prisma.merchantFiscalConfig.findUnique({
+      where: pay.merchantAccountId ? { merchantAccountId: pay.merchantAccountId } : { ecommerceMerchantId: pay.ecommerceMerchantId! },
+      select: { facturacionEnabled: true, autofacturaEnabled: true, fiscalEmisor: { select: EMISOR_SELECT } },
+    })
+  } else {
+    // 🔴 Venta SIN terminal (efectivo, transferencia, tarjeta de otra terminal). Testarudo, 24-sep-2026:
+    // 698 ventas en efectivo y una transferencia de $3,082 en 30 días no se podían facturar porque el
+    // emisor sólo se sacaba del comercio de la terminal. El emisor es el del NEGOCIO, y sólo cuando es
+    // inequívoco: con UN solo RFC. Con dos o más no se adivina (queda como antes).
+    if (pays.some(pp => !METODOS_SIN_COMERCIO.has(pp.method))) return null
+    const emisores = await prisma.fiscalEmisor.findMany({
+      where: { venueId: order.venueId },
+      select: { ...EMISOR_SELECT, merchantConfigs: { select: { facturacionEnabled: true, autofacturaEnabled: true }, take: 50 } },
+      take: 2,
+    })
+    if (emisores.length !== 1) return null
+    const { merchantConfigs, ...emisor } = emisores[0]
+    // Hereda los interruptores de SUS comercios: se factura si alguno la tiene encendida; la autofactura
+    // sólo si TODOS los que facturan la tienen encendida (mismo criterio que una cuenta con varios comercios).
+    const encendidos = merchantConfigs.filter(c => c.facturacionEnabled)
+    cfg = {
+      facturacionEnabled: encendidos.length > 0,
+      autofacturaEnabled: encendidos.length > 0 && encendidos.every(c => c.autofacturaEnabled),
+      fiscalEmisor: emisor,
+    }
+  }
   // No merchant config or emisor not set up → cannot invoice
   if (!cfg || !cfg.fiscalEmisor) return null
 
@@ -1017,8 +1074,9 @@ export async function loadOrderForCfdiFromDb(orderId: string): Promise<LoadedOrd
   // Cash sales are not invoiceable unless the emisor opted in (most venues don't declare cash, so a
   // cash-settled ticket must not self-invoice via the receipt QR). En una orden MIXTA basta que CUALQUIER
   // pago sea en efectivo para bloquearla — si no, se facturaría el total (incl. la parte de efectivo).
+  // Salvo que la emita el personal a propósito (`permitirEfectivo`): ver `LoadOrderForCfdiOpts`.
   const hasCash = pays.some(pp => pp.method === 'CASH')
-  if (hasCash && !cfg.fiscalEmisor.invoiceCashSales) return null
+  if (hasCash && !cfg.fiscalEmisor.invoiceCashSales && !opts.permitirEfectivo) return null
 
   // Tenant isolation: a MerchantAccount can be shared across venues in the same org (via VenuePaymentConfig
   // primary/secondary/tertiary slots). The emisor it maps to MUST belong to THIS order's venue — otherwise
