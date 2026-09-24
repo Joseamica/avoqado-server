@@ -83,9 +83,10 @@ import {
 } from '../schemas/public/venueCheckout.schema'
 
 import * as passkitController from '../controllers/public/passkit.public.controller'
-import { getLaunchOffer } from '../controllers/public/launchOffer.public.controller'
+import { getFeaturedLaunchOffer, getLaunchOffer } from '../controllers/public/launchOffer.public.controller'
 import { optionalLaunchCampaignCode, utmSchema } from '../schemas/acquisition.schema'
 import { LANDING_SLUG_RE } from '../services/launchCampaigns/launchCampaign.schema'
+import { CAMPAIGN_VERTICAL_VALUES } from '../services/launchCampaigns/launchCampaignEnums'
 
 const router = Router()
 
@@ -536,6 +537,34 @@ router.get(
   offerReadLimit,
   validateRequest(z.object({ params: z.object({ slug: z.string().regex(LANDING_SLUG_RE).max(60) }) })),
   getLaunchOffer,
+)
+
+/**
+ * @openapi
+ * /api/v1/public/launch-offers/featured/{vertical}:
+ *   get:
+ *     tags: [Public, LaunchCampaigns]
+ *     summary: La oferta que ocupa la VITRINA de un giro (la que pinta /restaurants)
+ *     description: >
+ *       Sin autenticar. La campaña que el superadmin marcó como vitrina del giro; cambiarla no
+ *       exige desplegar la landing. Misma vista que /launch-offers/{slug}: sin campaña marcada
+ *       o marcada en DRAFT responde 404; marcada pero no vendible responde 200 con
+ *       `available:false` y SIN ninguna llave de precio.
+ *     parameters:
+ *       - in: path
+ *         name: vertical
+ *         required: true
+ *         schema: { type: string, enum: [ALL, FOOD_SERVICE, RETAIL, SERVICES, HOSPITALITY, ENTERTAINMENT] }
+ *     responses:
+ *       200: { description: LaunchOfferView o LaunchOfferUnavailableView }
+ *       400: { description: Giro inválido }
+ *       404: { description: LAUNCH_OFFER_NOT_FOUND }
+ */
+router.get(
+  '/launch-offers/featured/:vertical',
+  offerReadLimit,
+  validateRequest(z.object({ params: z.object({ vertical: z.enum(CAMPAIGN_VERTICAL_VALUES) }) })),
+  getFeaturedLaunchOffer,
 )
 
 router.post('/contact', writeLimit, validateRequest(contactSchema), submitContact)

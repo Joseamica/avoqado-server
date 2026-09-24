@@ -48,6 +48,8 @@ export const createLaunchCampaignBody = offerFields
     validFrom: z.coerce.date(),
     validUntil: z.coerce.date(),
     redemptionCap: z.number().int().min(1).max(100_000),
+    /** La vitrina de su giro. NO se congela al activar: se mueve sobre campañas vivas. */
+    featuredForVertical: z.boolean().default(false),
     ...copy,
   })
   .refine(b => b.validFrom < b.validUntil, { message: 'La vigencia debe terminar después de empezar', path: ['validUntil'] })

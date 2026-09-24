@@ -42,6 +42,7 @@ export const LAUNCH_CAMPAIGN_SELECT = {
   landingSlug: true,
   vertical: true,
   channel: true,
+  featuredForVertical: true,
   planTier: true,
   billingInterval: true,
   advertisedPriceCents: true,
@@ -95,12 +96,65 @@ export function toOfferRow(c: LaunchCampaignRow): LaunchOfferCampaignRow {
 /** Traduce el P2002 de Prisma al 409 que el superadmin puede explicar. */
 function traducirUnico(error: unknown): never {
   if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-    const campos = (error.meta?.target as string[] | undefined) ?? []
+    // Prisma reporta un índice declarado como lista de columnas, pero uno PARCIAL escrito a mano
+    // (el de la vitrina) puede llegar como el NOMBRE del índice: se aceptan las dos formas.
+    const target = error.meta?.target
+    const campos = Array.isArray(target) ? (target as string[]) : typeof target === 'string' ? [target] : []
     if (campos.includes('code')) throw new ConflictError('Ya existe una campaña con ese código', 'LAUNCH_CAMPAIGN_CODE_TAKEN')
     if (campos.includes('landingSlug')) throw new ConflictError('Ya existe una campaña con esa dirección', 'LAUNCH_CAMPAIGN_SLUG_TAKEN')
+    if (campos.includes('vertical') || campos.some(c => c.includes('featured'))) {
+      throw new ConflictError('Otra campaña acaba de tomar la vitrina de ese giro. Vuelve a abrirla.', 'LAUNCH_CAMPAIGN_FEATURED_TAKEN')
+    }
   }
   throw error
 }
+
+type Tx = Prisma.TransactionClient
+
+/**
+ * 🔴 La VITRINA del giro es EXCLUSIVA: marcar una campaña desmarca a la que la ocupaba.
+ *
+ * Se llama SIEMPRE dentro de la transacción que marca a la nueva, así que si esa escritura pierde
+ * (CAS, cupo, índice) la desmarca se revierte con ella: nunca queda el giro sin vitrina por una
+ * edición que falló. El advisory lock por giro serializa a dos pestañas que marcan a la vez; el
+ * índice único parcial de la migración es el respaldo que la hace imposible de romper.
+ *
+ * Devuelve la campaña desplazada (o null) para dejarle su propio renglón en la bitácora.
+ */
+async function soltarVitrinaDelGiro(tx: Tx, vertical: string, exceptoId: string | undefined, staffId?: string | null) {
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`launch-campaign-featured:${vertical}`}))::text`
+  const previa = await tx.launchCampaign.findFirst({
+    where: {
+      vertical: vertical as Prisma.LaunchCampaignWhereInput['vertical'],
+      featuredForVertical: true,
+      ...(exceptoId ? { id: { not: exceptoId } } : {}),
+    },
+    select: { id: true, code: true },
+  })
+  if (previa) {
+    await tx.launchCampaign.update({ where: { id: previa.id }, data: { featuredForVertical: false, updatedById: staffId ?? null } })
+  }
+  return previa
+}
+
+/** La que perdió la vitrina deja su propio renglón: el dueño de esa ficha tiene que poder verlo. */
+async function registrarDesplazada(
+  previa: { id: string; code: string } | null,
+  nueva: { code: string; vertical: string },
+  staffId?: string | null,
+) {
+  if (!previa) return
+  await logAction({
+    staffId,
+    action: 'LAUNCH_CAMPAIGN_UNFEATURED',
+    entity: 'LaunchCampaign',
+    entityId: previa.id,
+    data: { code: previa.code, vertical: nueva.vertical, replacedBy: nueva.code },
+  })
+}
+
+/** Marca de que el CAS no escribió: se lanza DENTRO de la transacción para que revierta la desmarca. */
+class SinEscribir extends Error {}
 
 export async function listLaunchCampaigns(query: ListLaunchCampaignsQuery) {
   const where: Prisma.LaunchCampaignWhereInput = {
@@ -172,37 +226,49 @@ export async function getLaunchCampaignDetail(id: string) {
 
 export async function createLaunchCampaign(body: CreateLaunchCampaignBody, staffId?: string | null) {
   try {
-    const campaign = await prisma.launchCampaign.create({
-      data: {
-        code: body.code,
-        name: body.name,
-        landingSlug: body.landingSlug,
-        vertical: body.vertical,
-        channel: body.channel,
-        planTier: body.planTier,
-        billingInterval: body.billingInterval,
-        advertisedPriceCents: body.advertisedPriceCents,
-        discountMonths: body.discountMonths,
-        validFrom: body.validFrom,
-        validUntil: body.validUntil,
-        redemptionCap: body.redemptionCap,
-        headline: body.headline,
-        subheadline: body.subheadline,
-        bullets: body.bullets,
-        // 🔴 Nace SIEMPRE en DRAFT. Crear no activa: activar es lo que habla con Stripe.
-        status: CAMPAIGN_STATUS.DRAFT,
-        createdById: staffId ?? null,
-        updatedById: staffId ?? null,
-      },
-      select: LAUNCH_CAMPAIGN_SELECT,
+    const marcar = body.featuredForVertical === true
+    const { campaign, desplazada } = await prisma.$transaction(async tx => {
+      const desplazada = marcar ? await soltarVitrinaDelGiro(tx, body.vertical, undefined, staffId) : null
+      const campaign = await tx.launchCampaign.create({
+        data: {
+          code: body.code,
+          name: body.name,
+          landingSlug: body.landingSlug,
+          vertical: body.vertical,
+          channel: body.channel,
+          planTier: body.planTier,
+          billingInterval: body.billingInterval,
+          advertisedPriceCents: body.advertisedPriceCents,
+          discountMonths: body.discountMonths,
+          validFrom: body.validFrom,
+          validUntil: body.validUntil,
+          redemptionCap: body.redemptionCap,
+          headline: body.headline,
+          subheadline: body.subheadline,
+          bullets: body.bullets,
+          featuredForVertical: marcar,
+          // 🔴 Nace SIEMPRE en DRAFT. Crear no activa: activar es lo que habla con Stripe.
+          status: CAMPAIGN_STATUS.DRAFT,
+          createdById: staffId ?? null,
+          updatedById: staffId ?? null,
+        },
+        select: LAUNCH_CAMPAIGN_SELECT,
+      })
+      return { campaign, desplazada }
     })
 
+    await registrarDesplazada(desplazada, campaign, staffId)
     await logAction({
       staffId,
       action: 'LAUNCH_CAMPAIGN_CREATED',
       entity: 'LaunchCampaign',
       entityId: campaign.id,
-      data: { code: campaign.code, advertisedPriceCents: campaign.advertisedPriceCents, discountMonths: campaign.discountMonths },
+      data: {
+        code: campaign.code,
+        advertisedPriceCents: campaign.advertisedPriceCents,
+        discountMonths: campaign.discountMonths,
+        ...(marcar ? { featuredForVertical: true, replaced: desplazada?.code ?? null } : {}),
+      },
     })
     return campaign
   } catch (error) {
@@ -250,6 +316,17 @@ export async function updateLaunchCampaign(id: string, body: UpdateLaunchCampaig
   }
 
   const { expectedUpdatedAt, ...cambios } = body
+
+  // 🔴 Mover de giro una campaña que ocupa la vitrina movería la vitrina en silencio: el giro de
+  // origen se quedaría sin precio (o el de destino chocaría con la suya). Se pide soltarla explícito.
+  const cambiaDeGiro = cambios.vertical !== undefined && cambios.vertical !== actual.vertical
+  if (actual.featuredForVertical && cambiaDeGiro && cambios.featuredForVertical !== false) {
+    throw new ConflictError(
+      'Esta campaña ocupa la vitrina de su giro. Quítale la vitrina antes de cambiarla de giro.',
+      'LAUNCH_CAMPAIGN_FEATURED_VERTICAL_CHANGE',
+    )
+  }
+
   const data: Prisma.LaunchCampaignUpdateManyMutationInput = { updatedById: staffId ?? null }
   for (const [k, v] of Object.entries(cambios)) {
     if (v !== undefined) (data as Record<string, unknown>)[k] = v
@@ -271,8 +348,24 @@ export async function updateLaunchCampaign(id: string, body: UpdateLaunchCampaig
     ...(nuevoCap !== undefined ? { redemptionCount: { lte: nuevoCap } } : {}),
   }
 
-  const r = await prisma.launchCampaign.updateMany({ where, data })
-  if (r.count === 0) {
+  const marcar = cambios.featuredForVertical === true
+  const giroDestino = cambios.vertical ?? actual.vertical
+  let desplazada: { id: string; code: string } | null = null
+  let escribio = true
+  try {
+    desplazada = await prisma.$transaction(async tx => {
+      const previa = marcar ? await soltarVitrinaDelGiro(tx, giroDestino, id, staffId) : null
+      const r = await tx.launchCampaign.updateMany({ where, data })
+      // Se lanza DENTRO: si el CAS pierde, la desmarca de la otra campaña se revierte con él.
+      if (r.count === 0) throw new SinEscribir()
+      return previa
+    })
+  } catch (error) {
+    if (!(error instanceof SinEscribir)) traducirUnico(error)
+    escribio = false
+  }
+
+  if (!escribio) {
     // Se relee para distinguir los DOS motivos y responder el que corresponde. Un 409 genérico
     // haría que el superadmin bajara el cupo otra vez creyendo que fue una carrera de edición.
     const releida = await prisma.launchCampaign.findUnique({
@@ -291,6 +384,7 @@ export async function updateLaunchCampaign(id: string, body: UpdateLaunchCampaig
   }
 
   const campaign = await prisma.launchCampaign.findUniqueOrThrow({ where: { id }, select: LAUNCH_CAMPAIGN_SELECT })
+  await registrarDesplazada(desplazada, campaign, staffId)
   await logAction({
     staffId,
     action: 'LAUNCH_CAMPAIGN_UPDATED',
@@ -304,6 +398,7 @@ export async function updateLaunchCampaign(id: string, body: UpdateLaunchCampaig
           .filter(([k, v]) => v !== undefined && String((actual as Record<string, unknown>)[k]) !== String(v))
           .map(([k, v]) => [k, { from: (actual as Record<string, unknown>)[k], to: v }]),
       ),
+      ...(desplazada ? { replacedFeatured: desplazada.code } : {}),
     } as Prisma.InputJsonValue,
   })
   return campaign
@@ -331,7 +426,15 @@ async function transicion(
 
   const r = await prisma.launchCampaign.updateMany({
     where: { id, status: { in: desde }, updatedAt: actual.updatedAt },
-    data: { status: hacia, statusReason: reason, updatedById: staffId ?? null },
+    data: {
+      status: hacia,
+      statusReason: reason,
+      updatedById: staffId ?? null,
+      // 🔴 Terminar es definitivo: una ficha terminada no puede seguir ocupando la vitrina de su
+      // giro (el CHECK `LaunchCampaign_featured_not_ended` lo exige). Pausar, en cambio, la
+      // CONSERVA: al reanudarla la página vuelve a enseñarla sin que nadie la marque de nuevo.
+      ...(hacia === CAMPAIGN_STATUS.ENDED ? { featuredForVertical: false } : {}),
+    },
   })
   if (r.count === 0) throw new ConflictError('Alguien más cambió esta campaña. Vuelve a abrirla.', 'LAUNCH_CAMPAIGN_STALE')
 
@@ -341,7 +444,11 @@ async function transicion(
     action: accion === 'pausar' ? 'LAUNCH_CAMPAIGN_PAUSED' : 'LAUNCH_CAMPAIGN_ENDED',
     entity: 'LaunchCampaign',
     entityId: id,
-    data: { code: campaign.code, reason },
+    data: {
+      code: campaign.code,
+      reason,
+      ...(hacia === CAMPAIGN_STATUS.ENDED && actual.featuredForVertical ? { releasedFeatured: true } : {}),
+    },
   })
   return campaign
 }
@@ -464,6 +571,18 @@ export async function findClaimableByCodeOrSlug(raw: string, now: Date = new Dat
 
 export async function findBySlug(landingSlug: string): Promise<LaunchCampaignRow | null> {
   return prisma.launchCampaign.findUnique({ where: { landingSlug }, select: LAUNCH_CAMPAIGN_SELECT })
+}
+
+/**
+ * La campaña que ocupa la vitrina de un giro, en cualquier estado (quien la muestra decide con
+ * `launchOfferAvailability`). Giro EXACTO: una campaña «ALL» no rellena la vitrina de otro giro —
+ * si el founder la quiere ahí, la marca ahí. Sin caídas implícitas que nadie eligió.
+ */
+export async function findFeaturedByVertical(vertical: string): Promise<LaunchCampaignRow | null> {
+  return prisma.launchCampaign.findFirst({
+    where: { vertical: vertical as Prisma.LaunchCampaignWhereInput['vertical'], featuredForVertical: true },
+    select: LAUNCH_CAMPAIGN_SELECT,
+  })
 }
 
 export async function findByCode(code: string): Promise<LaunchCampaignRow | null> {

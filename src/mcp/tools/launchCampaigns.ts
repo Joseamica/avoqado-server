@@ -24,6 +24,7 @@ import {
   listRedemptions,
   pauseLaunchCampaign,
   toOfferRow,
+  updateLaunchCampaign,
 } from '@/services/launchCampaigns/launchCampaign.service'
 import prisma from '@/utils/prismaClient'
 import { LAUNCH_CAMPAIGN_SELECT } from '@/services/launchCampaigns/launchCampaign.service'
@@ -61,6 +62,9 @@ export function registerLaunchCampaignTools(server: McpServer, scope: McpScope):
           renovacion: c.listPriceCentsSnapshot ? pesos(c.listPriceCentsSnapshot) : null,
           cupo: `${c.redemptionCount} / ${c.redemptionCap}`,
           estado: c.status,
+          giro: c.vertical,
+          // La que enseña la página del giro sin slug en la URL (hoy /restaurants ⇒ FOOD_SERVICE).
+          vitrina: c.featuredForVertical,
           sePuedeVender: c.availability.available,
           motivoSiNo: c.availability.available ? null : c.availability.reason,
           vigencia: { desde: c.validFrom.toISOString(), hasta: c.validUntil.toISOString() },
@@ -87,6 +91,8 @@ export function registerLaunchCampaignTools(server: McpServer, scope: McpScope):
         codigo: detalle.code,
         nombre: detalle.name,
         estado: detalle.status,
+        giro: detalle.vertical,
+        vitrina: detalle.featuredForVertical,
         sePuedeVender: detalle.availability.available,
         precioMensual: pesos(detalle.advertisedPriceCents),
         meses: detalle.discountMonths,
@@ -127,7 +133,10 @@ export function registerLaunchCampaignTools(server: McpServer, scope: McpScope):
       redemptionCap: z.number().int().min(1).describe('Cuántos negocios pueden tomarla'),
       validFrom: z.string().describe('Desde cuándo (ISO)'),
       validUntil: z.string().describe('Hasta cuándo (ISO)'),
-      vertical: z.enum(CAMPAIGN_VERTICAL_VALUES).optional().describe('Giro al que apunta el anuncio (solo etiqueta)'),
+      vertical: z
+        .enum(CAMPAIGN_VERTICAL_VALUES)
+        .optional()
+        .describe('Giro al que apunta el anuncio. Decide de qué página de giro puede ser vitrina (FOOD_SERVICE = /restaurants)'),
       channel: z.enum(CAMPAIGN_CHANNEL_VALUES).optional().describe('Dónde se anuncia'),
       headline: z.string().optional(),
       subheadline: z.string().optional(),
@@ -260,6 +269,57 @@ export function registerLaunchCampaignTools(server: McpServer, scope: McpScope):
         sePuedeVender: disponible.available,
         cupon: resultado.stripeCouponId,
       })
+    },
+  )
+
+  server.tool(
+    'set_launch_campaign_featured',
+    'Pone o quita una oferta en la VITRINA de su giro: la oferta que enseña la página de ese giro que no lleva ' +
+      'la dirección de la oferta en su URL (FOOD_SERVICE = avoqado.io/restaurants). Solo una por giro: ponerla ' +
+      'quita a la que estaba. Cambia lo que ve el público sin desplegar nada. Sin confirm devuelve qué oferta ' +
+      'ocupa hoy la vitrina y cuál la ocupará. Solo para Avoqado.',
+    {
+      code: z.string().describe('El código de la oferta'),
+      featured: z.boolean().describe('true para ponerla en la vitrina de su giro, false para quitarla'),
+      confirm: z.boolean().optional().describe('true para aplicarlo de verdad'),
+    },
+    async ({ code, featured, confirm }) => {
+      if (!scope.isSuperAdmin) return text({ ok: false, error: SOLO_AVOQADO })
+      requireWriteScopeAlways(scope, 'launch-campaigns:write', 'cambia la oferta que ve el público en la página de un giro')
+
+      const ficha = await prisma.launchCampaign.findUnique({ where: { code: code.trim().toUpperCase() }, select: LAUNCH_CAMPAIGN_SELECT })
+      if (!ficha) return text({ ok: false, error: `No existe una oferta con el código ${code}.` })
+      if (ficha.status === 'ENDED') return text({ ok: false, error: 'Una oferta terminada no puede ocupar la vitrina.' })
+
+      if (!confirm) {
+        const ocupante = await prisma.launchCampaign.findFirst({
+          where: { vertical: ficha.vertical, featuredForVertical: true },
+          select: { code: true, name: true },
+        })
+        const disponible = launchOfferAvailability(toOfferRow(ficha), new Date())
+        return text({
+          ok: true,
+          requiresConfirmation: true,
+          giro: ficha.vertical,
+          ocupaHoy: ocupante?.code ?? null,
+          ocupara: featured ? ficha.code : ocupante?.code === ficha.code ? null : (ocupante?.code ?? null),
+          // Marcarla no la publica: si no se puede vender, la página del giro calla el precio.
+          seVendeHoy: disponible.available,
+          motivoSiNo: disponible.available ? null : disponible.reason,
+          mensaje: featured
+            ? 'Vuelve a llamar con confirm: true para ponerla en la vitrina. Si otra la ocupaba, se la quita.'
+            : 'Vuelve a llamar con confirm: true para quitarla. La página del giro se quedará sin precio hasta que marques otra.',
+        })
+      }
+
+      // Con `confirm` se llama al MISMO servicio que usa el superadmin: la exclusividad por giro
+      // (candado + índice único) y la revisión optimista viven ahí, no se duplican aquí.
+      const resultado = await updateLaunchCampaign(
+        ficha.id,
+        { featuredForVertical: featured, expectedUpdatedAt: ficha.updatedAt } as never,
+        scope.staffId,
+      )
+      return text({ ok: true, codigo: resultado.code, giro: resultado.vertical, vitrina: resultado.featuredForVertical })
     },
   )
 }

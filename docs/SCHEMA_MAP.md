@@ -206,7 +206,7 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `KioskCheckInChallenge` → `schema.prisma:L17561`
 - `KioskOutreachOutbox` → `schema.prisma:L17628`
 - `LaunchCampaign` → `schema.prisma:L17966`
-- `LaunchCampaignRedemption` → `schema.prisma:L18072`
+- `LaunchCampaignRedemption` → `schema.prisma:L18083`
 - `LearnedPatterns` → `schema.prisma:L9987`
 - `LedgerAccount` → `schema.prisma:L16550`
 - `LiveDemoSession` → `schema.prisma:L823`

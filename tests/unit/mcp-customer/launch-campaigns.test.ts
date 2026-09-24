@@ -12,7 +12,13 @@ import { ScopeError } from '@/mcp/errors'
 import type { McpScope } from '@/mcp/scope'
 import { prismaMock } from '@tests/__helpers__/setup'
 
-const NOMBRES = ['list_launch_campaigns', 'get_launch_campaign', 'create_launch_campaign', 'set_launch_campaign_status']
+const NOMBRES = [
+  'list_launch_campaigns',
+  'get_launch_campaign',
+  'create_launch_campaign',
+  'set_launch_campaign_status',
+  'set_launch_campaign_featured',
+]
 
 function catalogoPara(scope: Partial<McpScope>) {
   const tools: Array<{ name: string; desc: string }> = []
@@ -136,5 +142,66 @@ describe('confirmación de dos pasos', () => {
     // Pase lo que pase con la cotización, lo que NO puede haber es una escritura.
     expect(prismaMock.launchCampaign.create).not.toHaveBeenCalled()
     if (r) expect(leer(r)).toMatchObject({ requiresConfirmation: true })
+  })
+})
+
+/**
+ * La vitrina del giro desde el MCP: qué campaña enseña la página de un giro sin slug en la URL
+ * (hoy `/restaurants`). Cambia lo que ve el público ⇒ va en dos pasos y la vista previa dice a
+ * QUIÉN le quita la vitrina.
+ */
+describe('set_launch_campaign_featured', () => {
+  const VISTA = new Date('2026-09-24T10:00:00Z')
+  const ficha = (o: Record<string, unknown> = {}) => ({
+    id: 'lc-1',
+    code: 'POS22MX',
+    name: 'POS $22',
+    landingSlug: 'pos-22-mx',
+    vertical: 'FOOD_SERVICE',
+    featuredForVertical: false,
+    status: 'ACTIVE',
+    activatedAt: VISTA,
+    redemptionCount: 0,
+    redemptionCap: 100,
+    validFrom: new Date('2026-09-01T00:00:00Z'),
+    validUntil: new Date('2026-12-31T00:00:00Z'),
+    updatedAt: VISTA,
+    ...o,
+  })
+
+  it('🔴 SIN confirm no escribe, y dice qué campaña pierde la vitrina', async () => {
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(ficha() as never)
+    prismaMock.launchCampaign.findFirst.mockResolvedValue({ code: 'META25', name: 'Meta $25' } as never)
+    const handlers = handlersPara({ isSuperAdmin: true, scopes: ['mcp:write'] })
+
+    const r = leer(await handlers.get('set_launch_campaign_featured')!({ code: 'pos22mx', featured: true } as never))
+
+    expect(r).toMatchObject({ requiresConfirmation: true, giro: 'FOOD_SERVICE', ocupaHoy: 'META25', ocupara: 'POS22MX' })
+    expect(prismaMock.launchCampaign.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.launchCampaign.update).not.toHaveBeenCalled()
+  })
+
+  it('con confirm pasa por el MISMO servicio que el superadmin (CAS + exclusividad por giro)', async () => {
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(ficha() as never)
+    prismaMock.launchCampaign.findFirst.mockResolvedValue(null as never)
+    prismaMock.launchCampaign.updateMany.mockResolvedValue({ count: 1 } as never)
+    prismaMock.launchCampaign.findUniqueOrThrow.mockResolvedValue(ficha({ featuredForVertical: true }) as never)
+    const handlers = handlersPara({ isSuperAdmin: true, scopes: ['mcp:write'] })
+
+    const r = leer(await handlers.get('set_launch_campaign_featured')!({ code: 'POS22MX', featured: true, confirm: true } as never))
+
+    expect(r).toMatchObject({ ok: true, codigo: 'POS22MX', vitrina: true })
+    expect(prismaMock.launchCampaign.updateMany).toHaveBeenCalledWith({
+      where: { id: 'lc-1', updatedAt: VISTA },
+      data: expect.objectContaining({ featuredForVertical: true }),
+    })
+  })
+
+  it('🔴 sin `mcp:write` corta aunque el token sea de Avoqado', async () => {
+    const handlers = handlersPara({ isSuperAdmin: true, scopes: ['mcp:read'] })
+    await expect(
+      handlers.get('set_launch_campaign_featured')!({ code: 'POS22MX', featured: true, confirm: true } as never),
+    ).rejects.toBeInstanceOf(ScopeError)
+    expect(prismaMock.launchCampaign.updateMany).not.toHaveBeenCalled()
   })
 })

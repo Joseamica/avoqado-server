@@ -17974,6 +17974,17 @@ model LaunchCampaign {
   vertical    LaunchCampaignVertical @default(ALL)
   channel     LaunchCampaignChannel?
 
+  /// La VITRINA del giro: la campaña que enseña la página de un giro que no lleva el slug en su
+  /// URL (hoy `/restaurants` ⇒ FOOD_SERVICE). Interruptor EXPLÍCITO del superadmin, NO congelado
+  /// al activar (se puede mover sobre una campaña viva). 🔴 EXCLUSIVO por giro: lo garantiza el
+  /// índice único PARCIAL escrito a mano en la migración 20260924120000 —
+  ///   CREATE UNIQUE INDEX "LaunchCampaign_featured_vertical_unique"
+  ///     ON "LaunchCampaign" ("vertical") WHERE "featuredForVertical" = true;
+  /// que Prisma no sabe expresar (ni lo reporta en un `migrate diff`). Un CHECK impide además que
+  /// una ficha ENDED la conserve. Dos campañas del MISMO giro pueden estar ACTIVE a la vez; sólo
+  /// una ocupa la vitrina.
+  featuredForVertical Boolean @default(false)
+
   /// Sólo PRO | PREMIUM — lo impone un CHECK en la base (la migración), porque Prisma no sabe
   /// restringir un enum a un subconjunto.
   planTier        PlanTier

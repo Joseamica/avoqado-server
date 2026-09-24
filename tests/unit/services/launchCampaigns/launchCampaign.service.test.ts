@@ -14,6 +14,7 @@ import {
   endLaunchCampaign,
   findClaimableByCode,
   findClaimableByCodeOrSlug,
+  findFeaturedByVertical,
   listLaunchCampaigns,
   pauseLaunchCampaign,
   updateLaunchCampaign,
@@ -309,5 +310,215 @@ describe('findClaimableByCodeOrSlug — el anuncio puede traer cualquiera de los
   it('una cadena vacía o de puro espacio no consulta nada', async () => {
     await expect(findClaimableByCodeOrSlug('   ', DENTRO)).resolves.toBeNull()
     expect(prismaMock.launchCampaign.findUnique).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * La VITRINA del giro (relevo 2026-09-24): qué campaña enseña la página de un giro que no tiene
+ * el slug en su URL (hoy, `/restaurants`). Es un interruptor EXPLÍCITO y EXCLUSIVO por giro: marcar
+ * una la desmarca en la otra del mismo giro, dentro de UNA transacción. «La más reciente gana» se
+ * descartó porque activar una segunda campaña le quitaría la vitrina a la primera sin que nadie lo
+ * pidiera.
+ */
+describe('la vitrina del giro', () => {
+  it('🔴 marcar la vitrina NO está congelado en una ficha ACTIVA (es lo contrario del precio)', () => {
+    expect(
+      camposBloqueados(
+        ficha({ status: 'ACTIVE', activatedAt: VISTA, redemptionCount: 7 }) as never,
+        {
+          featuredForVertical: true,
+        } as never,
+      ),
+    ).toEqual([])
+  })
+
+  it('🔴 marcar una desmarca a la otra del MISMO giro, bajo candado y dentro de la misma transacción', async () => {
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(
+      ficha({ status: 'ACTIVE', activatedAt: VISTA, vertical: 'FOOD_SERVICE' }) as never,
+    )
+    prismaMock.launchCampaign.findFirst.mockResolvedValue({ id: 'lc-otra', code: 'META25' } as never)
+    prismaMock.launchCampaign.findUniqueOrThrow.mockResolvedValue(
+      ficha({ status: 'ACTIVE', vertical: 'FOOD_SERVICE', featuredForVertical: true }) as never,
+    )
+
+    await updateLaunchCampaign('lc-1', { expectedUpdatedAt: VISTA, featuredForVertical: true } as never, 'staff-1')
+
+    expect(prismaMock.$transaction).toHaveBeenCalled()
+    // el candado por giro serializa a dos pestañas que marcan a la vez
+    expect(prismaMock.$queryRaw).toHaveBeenCalled()
+    // la anterior del mismo giro se busca excluyendo a la propia…
+    expect(prismaMock.launchCampaign.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { vertical: 'FOOD_SERVICE', featuredForVertical: true, id: { not: 'lc-1' } } }),
+    )
+    // …y se desmarca ANTES de marcar la nueva
+    expect(prismaMock.launchCampaign.update).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'lc-otra' }, data: expect.objectContaining({ featuredForVertical: false }) }),
+    )
+    const ordenDesmarca = prismaMock.launchCampaign.update.mock.invocationCallOrder[0]
+    const ordenMarca = prismaMock.launchCampaign.updateMany.mock.invocationCallOrder[0]
+    expect(ordenDesmarca).toBeLessThan(ordenMarca)
+    expect(prismaMock.launchCampaign.updateMany).toHaveBeenCalledWith({
+      where: { id: 'lc-1', updatedAt: VISTA },
+      data: expect.objectContaining({ featuredForVertical: true }),
+    })
+    // la que perdió la vitrina deja rastro propio en la bitácora
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'LAUNCH_CAMPAIGN_UNFEATURED',
+        entityId: 'lc-otra',
+        data: expect.objectContaining({ replacedBy: 'POS22' }),
+      }),
+    )
+  })
+
+  it('🔴 si el CAS pierde, la desmarca de la otra se deshace con la transacción (409 STALE)', async () => {
+    prismaMock.launchCampaign.findUnique
+      .mockResolvedValueOnce(ficha({ status: 'ACTIVE', activatedAt: VISTA, vertical: 'FOOD_SERVICE' }) as never)
+      .mockResolvedValueOnce({ updatedAt: new Date('2026-09-18T00:00:00Z'), redemptionCount: 0 } as never)
+    prismaMock.launchCampaign.findFirst.mockResolvedValue({ id: 'lc-otra', code: 'META25' } as never)
+    prismaMock.launchCampaign.updateMany.mockResolvedValue({ count: 0 } as never)
+    const rollback = new Error('rollback')
+    prismaMock.$transaction.mockImplementationOnce(async (cb: (tx: unknown) => unknown) => {
+      try {
+        return await cb(prismaMock)
+      } catch (e) {
+        ;(rollback as Error & { causa?: unknown }).causa = e
+        throw e
+      }
+    })
+
+    await expect(updateLaunchCampaign('lc-1', { expectedUpdatedAt: VISTA, featuredForVertical: true } as never)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'LAUNCH_CAMPAIGN_STALE',
+    })
+    // el error se lanzó DENTRO de la transacción: Postgres revierte la desmarca
+    expect((rollback as Error & { causa?: unknown }).causa).toBeDefined()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('una edición que no toca la vitrina no toma candado ni busca a nadie', async () => {
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(ficha({ status: 'ACTIVE', activatedAt: VISTA }) as never)
+    prismaMock.launchCampaign.findUniqueOrThrow.mockResolvedValue(ficha() as never)
+
+    await updateLaunchCampaign('lc-1', { expectedUpdatedAt: VISTA, name: 'Otro nombre' } as never)
+
+    expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+    expect(prismaMock.launchCampaign.findFirst).not.toHaveBeenCalled()
+  })
+
+  it('🔴 cambiar de giro una campaña que OCUPA la vitrina se rechaza: la vitrina no se mueve en silencio', async () => {
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(
+      ficha({ status: 'ACTIVE', activatedAt: VISTA, vertical: 'FOOD_SERVICE', featuredForVertical: true }) as never,
+    )
+
+    await expect(updateLaunchCampaign('lc-1', { expectedUpdatedAt: VISTA, vertical: 'RETAIL' } as never)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'LAUNCH_CAMPAIGN_FEATURED_VERTICAL_CHANGE',
+    })
+    expect(prismaMock.launchCampaign.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('cambiar de giro Y soltar la vitrina en la misma petición sí se permite', async () => {
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(
+      ficha({ status: 'ACTIVE', activatedAt: VISTA, vertical: 'FOOD_SERVICE', featuredForVertical: true }) as never,
+    )
+    prismaMock.launchCampaign.findUniqueOrThrow.mockResolvedValue(ficha({ vertical: 'RETAIL' }) as never)
+
+    await updateLaunchCampaign('lc-1', { expectedUpdatedAt: VISTA, vertical: 'RETAIL', featuredForVertical: false } as never)
+
+    expect(prismaMock.launchCampaign.updateMany).toHaveBeenCalledWith({
+      where: { id: 'lc-1', updatedAt: VISTA },
+      data: expect.objectContaining({ vertical: 'RETAIL', featuredForVertical: false }),
+    })
+  })
+
+  it('🔴 un choque con el índice único de la vitrina responde 409 FEATURED_TAKEN, no un 500', async () => {
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(
+      ficha({ status: 'ACTIVE', activatedAt: VISTA, vertical: 'FOOD_SERVICE' }) as never,
+    )
+    prismaMock.launchCampaign.findFirst.mockResolvedValue(null as never)
+    prismaMock.launchCampaign.updateMany.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('dup', {
+        code: 'P2002',
+        clientVersion: '6',
+        meta: { target: 'LaunchCampaign_featured_vertical_unique' },
+      }),
+    )
+
+    await expect(updateLaunchCampaign('lc-1', { expectedUpdatedAt: VISTA, featuredForVertical: true } as never)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'LAUNCH_CAMPAIGN_FEATURED_TAKEN',
+    })
+  })
+
+  it('crear una ficha ya marcada también desmarca a la anterior del giro, en la misma transacción', async () => {
+    prismaMock.launchCampaign.findFirst.mockResolvedValue({ id: 'lc-otra', code: 'META25' } as never)
+    prismaMock.launchCampaign.create.mockResolvedValue(ficha({ vertical: 'FOOD_SERVICE', featuredForVertical: true }) as never)
+
+    await createLaunchCampaign(
+      {
+        code: 'POS22',
+        name: 'POS $22',
+        landingSlug: 'pos-22',
+        vertical: 'FOOD_SERVICE',
+        channel: null,
+        planTier: 'PRO',
+        billingInterval: 'MONTHLY',
+        advertisedPriceCents: 2200,
+        discountMonths: 3,
+        validFrom: new Date('2026-09-01T00:00:00Z'),
+        validUntil: new Date('2026-12-01T00:00:00Z'),
+        redemptionCap: 100,
+        headline: null,
+        subheadline: null,
+        bullets: [],
+        featuredForVertical: true,
+      } as never,
+      'staff-1',
+    )
+
+    expect(prismaMock.$queryRaw).toHaveBeenCalled()
+    expect(prismaMock.launchCampaign.update).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'lc-otra' }, data: expect.objectContaining({ featuredForVertical: false }) }),
+    )
+    expect(prismaMock.launchCampaign.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ featuredForVertical: true, vertical: 'FOOD_SERVICE' }) }),
+    )
+  })
+
+  it('🔴 terminar una campaña suelta su vitrina (terminar es definitivo; la vitrina no puede quedar tomada por historia)', async () => {
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(
+      ficha({ status: 'ACTIVE', activatedAt: VISTA, vertical: 'FOOD_SERVICE', featuredForVertical: true }) as never,
+    )
+    prismaMock.launchCampaign.findUniqueOrThrow.mockResolvedValue(ficha({ status: 'ENDED' }) as never)
+
+    await endLaunchCampaign('lc-1', 'fin del mes', 'staff-1')
+
+    expect(prismaMock.launchCampaign.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: 'lc-1' }),
+      data: expect.objectContaining({ status: 'ENDED', featuredForVertical: false }),
+    })
+  })
+
+  it('🔴 pausar NO suelta la vitrina: al reanudarla, la página vuelve a enseñarla sola', async () => {
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(
+      ficha({ status: 'ACTIVE', activatedAt: VISTA, vertical: 'FOOD_SERVICE', featuredForVertical: true }) as never,
+    )
+    prismaMock.launchCampaign.findUniqueOrThrow.mockResolvedValue(ficha({ status: 'PAUSED' }) as never)
+
+    await pauseLaunchCampaign('lc-1', 'sin presupuesto', 'staff-1')
+
+    const data = prismaMock.launchCampaign.updateMany.mock.calls[0][0].data
+    expect(data).not.toHaveProperty('featuredForVertical')
+  })
+})
+
+describe('findFeaturedByVertical', () => {
+  it('busca la marcada del giro EXACTO (sin caer a «ALL»)', async () => {
+    prismaMock.launchCampaign.findFirst.mockResolvedValue(ficha({ vertical: 'FOOD_SERVICE' }) as never)
+    await expect(findFeaturedByVertical('FOOD_SERVICE')).resolves.toMatchObject({ code: 'POS22' })
+    expect(prismaMock.launchCampaign.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { vertical: 'FOOD_SERVICE', featuredForVertical: true } }),
+    )
   })
 })

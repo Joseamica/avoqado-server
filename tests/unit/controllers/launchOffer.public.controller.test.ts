@@ -4,7 +4,7 @@
  * 🔴 Lo que estas pruebas guardan, y es lo que un revisor de anuncios comprueba: una oferta que
  * ya no se puede vender NO devuelve ni un número de precio.
  */
-import { getLaunchOffer } from '@/controllers/public/launchOffer.public.controller'
+import { getFeaturedLaunchOffer, getLaunchOffer } from '@/controllers/public/launchOffer.public.controller'
 import { prismaMock } from '@tests/__helpers__/setup'
 
 function ficha(overrides: Record<string, unknown> = {}) {
@@ -132,5 +132,88 @@ describe('GET /public/launch-offers/:slug', () => {
     await getLaunchOffer(req, res, next)
 
     expect(res_.json.mock.calls[0][0].data).toMatchObject({ available: false, unavailableReason: 'NOT_PUBLISHED' })
+  })
+})
+
+/**
+ * La vitrina del giro: la página de un giro (hoy `/restaurants`) no tiene el slug en su URL, así
+ * que pregunta «¿qué campaña ocupa la vitrina de FOOD_SERVICE?». 🔴 Responde con la MISMA vista
+ * que `/launch-offers/:slug` — la misma aritmética, los mismos motivos, las mismas cuatro llaves
+ * cuando no se puede vender — para que una oferta pausada, vencida o agotada se vea igual por las
+ * dos puertas.
+ */
+describe('GET /public/launch-offers/featured/:vertical', () => {
+  function ctxGiro(vertical = 'FOOD_SERVICE') {
+    const res = { set: jest.fn(), status: jest.fn().mockReturnThis(), json: jest.fn() }
+    const next = jest.fn()
+    return { req: { params: { vertical } } as never, res: res as never, next, res_: res }
+  }
+
+  it('la campaña marcada del giro devuelve la vista exacta del contrato, con su slug para la atribución', async () => {
+    prismaMock.launchCampaign.findFirst.mockResolvedValue(
+      ficha({ vertical: 'FOOD_SERVICE', landingSlug: 'pos-22-mx', code: 'POS22MX' }) as never,
+    )
+    const { req, res, next, res_ } = ctxGiro()
+
+    await getFeaturedLaunchOffer(req, res, next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(prismaMock.launchCampaign.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { vertical: 'FOOD_SERVICE', featuredForVertical: true } }),
+    )
+    expect(res_.set).toHaveBeenCalledWith('Cache-Control', 'public, max-age=0, s-maxage=30, stale-while-revalidate=60')
+    const data = res_.json.mock.calls[0][0].data
+    expect(data).toMatchObject({ code: 'POS22MX', slug: 'pos-22-mx', available: true, firstChargeCents: 2200, vertical: 'FOOD_SERVICE' })
+  })
+
+  it('🔴 ningún giro marcado ⇒ 404: la página cae a «Escríbenos», nunca a una oferta inventada', async () => {
+    prismaMock.launchCampaign.findFirst.mockResolvedValue(null as never)
+    const { req, res, next, res_ } = ctxGiro()
+
+    await getFeaturedLaunchOffer(req, res, next)
+
+    expect(res_.json).not.toHaveBeenCalled()
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 404, code: 'LAUNCH_OFFER_NOT_FOUND' }))
+    expect(res_.set).toHaveBeenCalledWith('Cache-Control', 'public, max-age=0, s-maxage=30')
+  })
+
+  it('🔴 una marcada que sigue en DRAFT es 404, igual que por slug: aún no existe para el mundo', async () => {
+    prismaMock.launchCampaign.findFirst.mockResolvedValue(ficha({ status: 'DRAFT', vertical: 'FOOD_SERVICE' }) as never)
+    const { req, res, next } = ctxGiro()
+    await getFeaturedLaunchOffer(req, res, next)
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 404, code: 'LAUNCH_OFFER_NOT_FOUND' }))
+  })
+
+  it.each([
+    ['PAUSED', { status: 'PAUSED' }, 'PAUSED'],
+    ['agotada', { redemptionCount: 100 }, 'SOLD_OUT'],
+    ['vencida', { validUntil: new Date('2020-01-01T00:00:00Z') }, 'EXPIRED'],
+  ])('🔴 marcada pero %s → 200 available:false y SIN una sola llave de precio', async (_caso, overrides, motivo) => {
+    prismaMock.launchCampaign.findFirst.mockResolvedValue(ficha({ vertical: 'FOOD_SERVICE', ...overrides }) as never)
+    const { req, res, next, res_ } = ctxGiro()
+
+    await getFeaturedLaunchOffer(req, res, next)
+
+    const data = res_.json.mock.calls[0][0].data
+    expect(data).toEqual({ code: 'POS22', slug: 'pos-22', available: false, unavailableReason: motivo })
+  })
+
+  it('🔴 tampoco expone cupo, conteo, ids ni el cupón por esta puerta', async () => {
+    prismaMock.launchCampaign.findFirst.mockResolvedValue(ficha({ vertical: 'FOOD_SERVICE', redemptionCount: 42 }) as never)
+    const { req, res, next, res_ } = ctxGiro()
+    await getFeaturedLaunchOffer(req, res, next)
+    const texto = JSON.stringify(res_.json.mock.calls[0][0])
+    for (const prohibido of [
+      'redemptionCap',
+      'redemptionCount',
+      'stripeCouponId',
+      'LC_POS22_V1',
+      'price_x',
+      '"id"',
+      '42',
+      'featuredForVertical',
+    ]) {
+      expect(texto).not.toContain(prohibido)
+    }
   })
 })
