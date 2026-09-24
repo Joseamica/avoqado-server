@@ -64,6 +64,7 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
           totalCents: true,
           receptorNombre: true,
           stampedAt: true,
+          cancelStatus: true,
           venue: { select: { name: true } },
           // Una factura SUSTITUIDA sigue STAMPED hasta que el SAT confirme su cancelación. Sin esto
           // el operador ve la equivocada y la corregida como dos ventas distintas.
@@ -86,6 +87,8 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
           venue: r.venue?.name,
           // null = vigente. Con valor: esta factura se corrigió y la cancelación puede seguir en trámite.
           sustituidaPor: r.replacedBy[0] ? `${r.replacedBy[0].serie ?? ''}${r.replacedBy[0].folio ?? ''}` || r.replacedBy[0].uuid : null,
+          // true = se pidió cancelarla y el SAT aún no la confirma: sigue vigente, pero no se puede refacturar la venta todavía.
+          cancelacionEnTramite: r.cancelStatus === 'REQUESTED',
         })),
       })
     },

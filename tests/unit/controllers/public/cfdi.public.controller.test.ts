@@ -314,6 +314,33 @@ describe('autofacturaController (POST /receipt/:accessKey/cfdi)', () => {
     expect(mockLogAction).not.toHaveBeenCalled()
   })
 
+  it('cancelación anterior EN TRÁMITE ⇒ 409 con el mensaje (antes caía en 500)', async () => {
+    const msg =
+      'La cancelación de la factura A-14 sigue en trámite ante el SAT; en cuanto quede cancelada podrás volver a facturar esta venta.'
+    mockFindReceipt.mockResolvedValue(makeReceipt())
+    mockFindCfdi.mockResolvedValue(null)
+    mockIssueCfdi.mockRejectedValue(new Error(msg))
+
+    const res = makeRes()
+    await autofacturaController(makeReq({ accessKey: 'key-abc' }) as any, res as any)
+
+    expect(res.status).toHaveBeenCalledWith(409)
+    expect(res.json).toHaveBeenCalledWith({ error: msg })
+  })
+
+  it('el servicio dice que la venta YA tenía factura (carrera) ⇒ 409 «ya fue facturada», sin CFDI_ISSUED', async () => {
+    mockFindReceipt.mockResolvedValue(makeReceipt())
+    mockFindCfdi.mockResolvedValue(null)
+    mockIssueCfdi.mockResolvedValue({ status: 'STAMPED', alreadyIssued: true, cfdi: { id: 'c1', uuid: 'U1', serie: 'A', folio: '14' } })
+
+    const res = makeRes()
+    await autofacturaController(makeReq({ accessKey: 'key-abc' }) as any, res as any)
+
+    expect(res.status).toHaveBeenCalledWith(409)
+    expect(res.json).toHaveBeenCalledWith({ error: 'Esta cuenta ya fue facturada.' })
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+
   it('returns 500 for unexpected errors', async () => {
     mockFindReceipt.mockRejectedValue(new Error('Database connection lost'))
 

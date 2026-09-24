@@ -314,6 +314,11 @@ export interface FiscalProvider {
   downloadXml(providerInvoiceId: string): Promise<Buffer>
   downloadPdf(providerInvoiceId: string): Promise<Buffer>
   cancelInvoice(params: CancelInvoiceParams): Promise<CancelInvoiceResult>
+  /**
+   * Consulta (sin volver a pedirla) cómo va una cancelación que el SAT dejó «en trámite». Opcional por
+   * proveedor: sin él, la cancelación pendiente sólo se resuelve a mano.
+   */
+  getCancellationStatus?(providerInvoiceId: string): Promise<CancelInvoiceResult>
   /** Timbra un recibo de NÓMINA (CFDI 4.0 tipo "N" + complemento Nómina 1.2). Opcional por proveedor. */
   createPayrollReceipt?(params: PayrollReceiptParams): Promise<StampedInvoice>
   /** Timbra un CFDI 4.0 tipo "P" (Recibo Electrónico de Pago / complemento de pago). Opcional por proveedor. */

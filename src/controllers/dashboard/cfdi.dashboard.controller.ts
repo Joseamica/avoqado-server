@@ -76,6 +76,26 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
       return
     }
 
+    // 🔴 La venta YA tenía esta factura vigente: no se timbró nada. Antes esto salía como 201 y la pantalla
+    // decía «éxito» (Testarudo 24-sep: a otra razón social y tras cancelar). 409 para que ningún cliente
+    // —tampoco el dashboard ya desplegado— pueda leerlo como una factura nueva.
+    if (result.alreadyIssued) {
+      const folio = [result.cfdi?.serie, result.cfdi?.folio].filter(Boolean).join('-') || result.cfdi?.uuid || 'anterior'
+      res.status(409).json({
+        code: 'CFDI_ALREADY_ISSUED',
+        error: `Esta venta ya tiene la factura ${folio} vigente. Para facturarla a otra razón social, primero cancela la ${folio} en Facturación; si sólo el importe está mal, usa «Corregir importe».`,
+        cfdi: {
+          id: result.cfdi.id,
+          uuid: result.cfdi.uuid,
+          serie: result.cfdi.serie,
+          folio: result.cfdi.folio,
+          status: result.cfdi.status,
+          receptorNombre: result.cfdi.receptorNombre,
+        },
+      })
+      return
+    }
+
     // STAMPED — audit + 201 with minimal public fields
     logAction({
       staffId: authContext.userId,
@@ -109,6 +129,12 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
     // Merchant gating: facturacionEnabled or autofacturaEnabled is false → 403 (feature disabled, not missing)
     if (/no habilitada/i.test(message)) {
       res.status(403).json({ error: message })
+      return
+    }
+
+    // La cancelación de la factura anterior sigue en trámite ante el SAT: todavía no se puede refacturar.
+    if (/en trámite/i.test(message)) {
+      res.status(409).json({ code: 'CFDI_CANCEL_PENDING', error: message })
       return
     }
 

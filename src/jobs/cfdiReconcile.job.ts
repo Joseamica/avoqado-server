@@ -26,6 +26,7 @@ import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { reconcileStuckCfdi, StuckCfdi } from '../services/fiscal/cfdiReconcile.service'
+import { CANCEL_SYNC_MAX_PER_TICK, refreshPendingCancellation, syncPendingCancellations } from '../services/fiscal/cfdi.service'
 import { NODE_ENV } from '../config/env'
 import { scheduleJob } from '../observability/jobContext'
 
@@ -79,6 +80,10 @@ export class CfdiReconcileJob {
     const startTime = Date.now()
 
     try {
+      // Pase 1: cancelaciones que el SAT dejó «en trámite». Independiente del pase de STAMPING: si falla,
+      // no impide conciliar timbres atorados (y viceversa).
+      await this.syncCancellations(startTime)
+
       const cutoff = new Date(startTime - STUCK_THRESHOLD_MS)
 
       // ── Entry read: stuck STAMPING rows older than the threshold ───────────
@@ -143,6 +148,37 @@ export class CfdiReconcileJob {
       logger.error('[cfdiReconcile] tick failed (top-level)', err)
     } finally {
       this.isRunning = false
+    }
+  }
+
+  /**
+   * Le pregunta al PAC por las cancelaciones que quedaron «en trámite». Sin esto una factura cancelada en
+   * el SAT seguía «Timbrada» en Avoqado para siempre y la venta no se podía volver a facturar
+   * (Testarudo, A-14, 21→24-sep-2026). Silencioso cuando no hay nada pendiente.
+   */
+  private async syncCancellations(startTime: number): Promise<void> {
+    try {
+      const sandbox = NODE_ENV !== 'production'
+      const tally = await syncPendingCancellations(
+        { sandbox, now: new Date(startTime) },
+        {
+          findPending: cutoff =>
+            retry(
+              () =>
+                prisma.cfdi.findMany({
+                  where: { cancelStatus: 'REQUESTED', cancelRequestedAt: { lt: cutoff } },
+                  orderBy: [{ cancelRequestedAt: 'asc' }, { id: 'asc' }],
+                  take: CANCEL_SYNC_MAX_PER_TICK,
+                  include: { fiscalEmisor: true },
+                }),
+              { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'cfdiReconcile.findPendingCancels' },
+            ),
+          refresh: cfdi => refreshPendingCancellation(cfdi, { sandbox }),
+        },
+      )
+      if (tally.revisadas > 0) logger.info('[cfdiReconcile] cancelaciones en trámite revisadas', { tally })
+    } catch (err) {
+      logger.error('[cfdiReconcile] no se pudieron revisar las cancelaciones en trámite', err)
     }
   }
 }

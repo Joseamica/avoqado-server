@@ -567,6 +567,22 @@ export class FacturapiProvider implements FiscalProvider {
     }
   }
 
+  /**
+   * CONSULTA el estado de una cancelación ya pedida, sin volver a pedirla. Cuando el SAT contesta «en
+   * trámite» al cancelar, ésta es la única forma de enterarse después de que sí quedó (Testarudo, A-14:
+   * cancelada en el SAT y «Timbrada» en Avoqado durante tres días). La fecha sale de lo que registró el
+   * PAC; si no la trae, se devuelve `null` en vez de inventar una.
+   */
+  async getCancellationStatus(providerInvoiceId: string): Promise<CancelInvoiceResult> {
+    const inv: any = await this.client.invoices.retrieve(providerInvoiceId)
+    const status = this.mapCancellationStatus(inv.status as string, inv.cancellation_status as string)
+    const registrada = inv.cancellation?.last_checked ? new Date(inv.cancellation.last_checked) : null
+    return {
+      status,
+      cancelledAt: (status === 'canceled' || status === 'accepted') && registrada && !isNaN(registrada.getTime()) ? registrada : null,
+    }
+  }
+
   private mapCancellationStatus(invoiceStatus: string, raw: string): CancelInvoiceResult['status'] {
     if (invoiceStatus === 'canceled') return 'canceled' // la factura YA no está vigente: manda esto
     switch (raw) {

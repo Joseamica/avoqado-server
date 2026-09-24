@@ -277,6 +277,39 @@ describe('issueCfdiForOrderController', () => {
     expect(mockLogAction).not.toHaveBeenCalled()
   })
 
+  // Testarudo 24-sep-2026: «Facturar» sobre una venta que YA tenía factura devolvía la vieja con 201 y la
+  // pantalla decía «éxito» — a otra razón social o tras cancelar. Nunca más un 2xx sin timbre.
+  it('venta que YA tiene factura vigente ⇒ 409 CFDI_ALREADY_ISSUED con el folio, sin CFDI_ISSUED en la bitácora', async () => {
+    mockIssue.mockResolvedValue({
+      status: 'STAMPED',
+      alreadyIssued: true,
+      cfdi: { id: 'c14', uuid: 'U14', serie: 'A', folio: '14', status: 'STAMPED', receptorNombre: 'WORKY', xmlUrl: 'x', pdfUrl: 'p' },
+    })
+
+    const res = mockRes()
+    await issueCfdiForOrderController(mockReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(409)
+    const body = res.json.mock.calls[0][0]
+    expect(body.code).toBe('CFDI_ALREADY_ISSUED')
+    expect(body.error).toMatch(/A-14/)
+    expect(body.error).toMatch(/cancela/i)
+    expect(body.cfdi).toMatchObject({ id: 'c14', serie: 'A', folio: '14' })
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+
+  it('cancelación de la factura anterior EN TRÁMITE ⇒ 409 con el mensaje del servicio', async () => {
+    const msg =
+      'La cancelación de la factura A-14 sigue en trámite ante el SAT; en cuanto quede cancelada podrás volver a facturar esta venta.'
+    mockIssue.mockRejectedValue(new Error(msg))
+
+    const res = mockRes()
+    await issueCfdiForOrderController(mockReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(409)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: msg, code: 'CFDI_CANCEL_PENDING' }))
+  })
+
   it('calls issueCfdiForOrder with the correct receptor and orderId', async () => {
     mockIssue.mockResolvedValue({
       status: 'STAMPED',

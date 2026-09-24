@@ -9,13 +9,15 @@ import { buildCreateInvoiceParams } from './cfdiPayloadBuilder'
 import { validateBeforeStamp } from './cfdiValidation'
 import { assembleSaleInput, LoadedOrderForCfdi } from './assembleSaleInput'
 import { splitIvaIncluded } from './ivaMath'
+import { logAction, LogActionParams } from '../dashboard/activity-log.service'
 
 // ─── List CFDIs ───────────────────────────────────────────────────────────────
 
 export interface ListCfdisParams {
   venueId: string
-  status?: CfdiStatus
-  flow?: CfdiFlow
+  /** Uno o varios (la pantalla deja marcar más de uno). */
+  status?: CfdiStatus | CfdiStatus[]
+  flow?: CfdiFlow | CfdiFlow[]
   isGlobal?: boolean
   receptorRfc?: string
   from?: string // ISO date string, venue-local day start (e.g. "2026-06-01")
@@ -84,12 +86,17 @@ export async function listCfdisForVenue(params: ListCfdisParams): Promise<ListCf
   // Build the where clause — venueId is always the first clause (tenant isolation)
   const where: Prisma.CfdiWhereInput = { venueId }
 
-  if (status !== undefined) {
-    where.status = status
+  // Uno ⇒ filtro exacto (igual que siempre); varios ⇒ `in`. Una lista vacía no filtra.
+  const unoOVarios = <T>(v: T | T[] | undefined): T | { in: T[] } | undefined => {
+    if (v === undefined) return undefined
+    if (!Array.isArray(v)) return v
+    if (v.length === 0) return undefined
+    return v.length === 1 ? v[0] : { in: v }
   }
-  if (flow !== undefined) {
-    where.flow = flow
-  }
+  const statusWhere = unoOVarios(status)
+  if (statusWhere !== undefined) where.status = statusWhere
+  const flowWhere = unoOVarios(flow)
+  if (flowWhere !== undefined) where.flow = flowWhere
   if (isGlobal !== undefined) {
     where.isGlobal = isGlobal
   }
@@ -101,13 +108,14 @@ export async function listCfdisForVenue(params: ListCfdisParams): Promise<ListCf
   // Date range: convert venue-local day boundaries → real UTC (critical-warnings rule)
   if (from || to) {
     where.createdAt = {}
+    // 🔴 Ancla de MEDIODÍA: `T00:00:00` se lee en el huso del SERVIDOR (UTC en producción) y el «24-sep»
+    // se volvía el 23-sep de México — el filtro de Facturas enseñaba el día anterior. El mediodía cae en el
+    // mismo día calendario en cualquier huso (critical-warnings, «bare YYYY-MM-DD»).
     if (from) {
-      const parsedFrom = new Date(`${from}T00:00:00`)
-      where.createdAt.gte = venueStartOfDay(timezone, parsedFrom)
+      where.createdAt.gte = venueStartOfDay(timezone, new Date(`${from}T12:00:00`))
     }
     if (to) {
-      const parsedTo = new Date(`${to}T00:00:00`)
-      where.createdAt.lte = venueEndOfDay(timezone, parsedTo)
+      where.createdAt.lte = venueEndOfDay(timezone, new Date(`${to}T12:00:00`))
     }
   }
 
@@ -172,6 +180,14 @@ export interface LoadedOrderBundle {
 
 export interface IssueCfdiDeps {
   findExistingCfdi: (idempotencyKey: string) => Promise<any | null>
+  /**
+   * Todas las facturas de VENTA (ingreso, no globales) que ya tuvo la orden, de cualquier estado.
+   * 🔴 Se mira por ORDEN y no sólo por la llave: una sustitución (`…-r1`) o una emisión nueva tras
+   * cancelar (`…-n2`) viven en otra llave, y sólo así se sabe si la venta ya tiene una factura VIGENTE.
+   */
+  findOrderInvoices?: (orderId: string) => Promise<any[]>
+  /** Le pregunta al PAC cómo va una cancelación que quedó «en trámite» (ver `refreshPendingCancellation`). */
+  refreshPendingCancellation?: (cfdi: any, opts: { sandbox: boolean }) => Promise<any>
   loadOrderForCfdi: (orderId: string) => Promise<LoadedOrderBundle | null>
   resolveProvider: typeof resolveFiscalProvider
   storeArtifact: (buffer: Buffer, path: string, contentType: string) => Promise<string>
@@ -201,6 +217,39 @@ export interface IssueCfdiResult {
   status: 'STAMPED' | 'VALIDATION_FAILED' | 'STAMP_FAILED'
   cfdi: any
   reasons?: string[]
+  /**
+   * true = NO se timbró nada: la venta ya tenía esta factura vigente y se devuelve ésa. Quien llama NO
+   * puede presentarlo como «factura emitida» (Testarudo, 24-sep: la pantalla decía «éxito» y era la vieja).
+   */
+  alreadyIssued?: boolean
+}
+
+/** «A-14», o el UUID si la factura no trae serie/folio. Para mensajes al usuario. */
+function folioDe(cfdi: { serie?: string | null; folio?: string | null; uuid?: string | null }): string {
+  if (cfdi.serie || cfdi.folio) return [cfdi.serie, cfdi.folio].filter(Boolean).join('-')
+  return cfdi.uuid ?? 'anterior'
+}
+
+/**
+ * La llave de la SIGUIENTE factura de venta de una orden. La primera es `cfdi-order-<orden>` (la de
+ * siempre, así no cambia nada para las ventas que nunca se cancelaron); si la última emisión quedó
+ * CANCELADA ante el SAT, la venta estrena generación: `-n2`, `-n3`… Un intento que falló sin timbrar se
+ * reintenta con SU misma llave (el reclamo atómico de siempre). Las llaves de sustitución (`-rN`) son de
+ * otro carril (`cfdiReplacement.service`) y no cuentan como generación.
+ */
+export function llaveDeEmision(orderId: string, facturas: Array<{ idempotencyKey?: string | null; status: string }>): string {
+  const base = `cfdi-order-${orderId}`
+  const patron = new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:-n(\\d+))?$`)
+  let ultima: { gen: number; status: string } | null = null
+  for (const f of facturas) {
+    const m = f.idempotencyKey?.match(patron)
+    if (!m) continue
+    const gen = m[1] ? Number(m[1]) : 1
+    if (!ultima || gen > ultima.gen) ultima = { gen, status: f.status }
+  }
+  if (!ultima) return base
+  const gen = ultima.status === 'CANCELLED' ? ultima.gen + 1 : ultima.gen
+  return gen === 1 ? base : `${base}-n${gen}`
 }
 
 // A reservation older than this is treated as stale (crashed/deployed mid-stamp) and may be reclaimed,
@@ -211,7 +260,49 @@ export async function issueCfdiForOrder(
   params: { orderId: string; receptor: IssueReceptor; sandbox: boolean; flow?: 'STAFF_B' | 'AUTOFACTURA_A'; expectedVenueId?: string },
   deps: IssueCfdiDeps = defaultDeps,
 ): Promise<IssueCfdiResult> {
-  const idempotencyKey = `cfdi-order-${params.orderId}`
+  let idempotencyKey = `cfdi-order-${params.orderId}`
+
+  // 0. ¿La venta ya tuvo factura? Una sola factura VIGENTE por venta; después de cancelarla (confirmado
+  //    por el PAC, no supuesto) sí se puede volver a facturar — a la misma u otra razón social.
+  if (deps.findOrderInvoices) {
+    const previas = (await deps.findOrderInvoices(params.orderId)).filter(f => !f.isGlobal && (f.type ?? 'INGRESO') === 'INGRESO')
+    // Aislamiento ANTES de mirar nada: una factura de la orden que diga otro negocio es un 404, sin fuga.
+    if (params.expectedVenueId && previas.some(f => f.venueId && f.venueId !== params.expectedVenueId)) {
+      throw new Error(`Order ${params.orderId} not found`)
+    }
+    const vistas: any[] = []
+    for (const f of previas) {
+      if (f.status === 'STAMPED' && f.cancelStatus === 'REQUESTED' && deps.refreshPendingCancellation) {
+        try {
+          vistas.push((await deps.refreshPendingCancellation(f, { sandbox: params.sandbox })) ?? f)
+        } catch (err: unknown) {
+          // Si no se pudo preguntar, la cancelación NO se da por hecha: sigue contando como en trámite.
+          logger.warn(`[cfdi] no se pudo consultar la cancelación de ${f.id}: ${err instanceof Error ? err.message : String(err)}`)
+          vistas.push(f)
+        }
+      } else {
+        vistas.push(f)
+      }
+    }
+    const vigente = vistas.find(f => f.status === 'STAMPED' || f.status === 'CANCEL_REQUESTED')
+    if (vigente) {
+      if (vigente.cancelStatus === 'REQUESTED' || vigente.status === 'CANCEL_REQUESTED') {
+        throw new Error(
+          `La cancelación de la factura ${folioDe(vigente)} sigue en trámite ante el SAT; en cuanto quede cancelada podrás volver a facturar esta venta.`,
+        ) // → 409
+      }
+      return { status: 'STAMPED', cfdi: vigente, alreadyIssued: true }
+    }
+    idempotencyKey = llaveDeEmision(params.orderId, vistas)
+    // Otro carril timbrando AHORA mismo sobre esta venta (p. ej. una sustitución): nunca en paralelo.
+    const enCurso = vistas.find(
+      f =>
+        f.status === 'STAMPING' &&
+        f.idempotencyKey !== idempotencyKey &&
+        Date.now() - new Date(f.updatedAt ?? f.createdAt).getTime() < STAMPING_TTL_MS,
+    )
+    if (enCurso) throw new Error('CFDI en proceso para esta orden') // → 409
+  }
 
   // 1. Idempotency — never double-stamp (facturapi has no idempotency; we own it)
   const existing = await deps.findExistingCfdi(idempotencyKey)
@@ -457,6 +548,15 @@ function baseCfdiData(
 // ─── real default deps (DB + storage). Tests inject their own. ───
 const defaultDeps: IssueCfdiDeps = {
   findExistingCfdi: idempotencyKey => prisma.cfdi.findUnique({ where: { idempotencyKey } }),
+  // Acotado: una venta tiene un puñado de facturas (original, sustitutas, reemisiones). 50 sobra.
+  findOrderInvoices: orderId =>
+    prisma.cfdi.findMany({
+      where: { orderId, isGlobal: false, type: 'INGRESO' },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: 50,
+      include: { fiscalEmisor: true },
+    }),
+  refreshPendingCancellation: (cfdi, opts) => refreshPendingCancellation(cfdi, opts),
   storeArtifact: (buffer, path, contentType) => uploadFileToStorage(buffer, path, contentType),
   resolveProvider: resolveFiscalProvider,
   // Reserves the idempotency slot (INSERT only — raises P2002 on conflict).
@@ -1135,6 +1235,129 @@ const defaultCancelDeps: CancelCfdiDeps = {
   loadCfdi: id => prisma.cfdi.findUnique({ where: { id }, include: { fiscalEmisor: true } }),
   resolveProvider: resolveFiscalProvider,
   updateCfdi: (id, data) => prisma.cfdi.update({ where: { id }, data }),
+}
+
+// ─── Cancelaciones que el SAT dejó «en trámite» ───────────────────────────────
+//
+// Testarudo, 21→24-sep-2026: al cancelar la A-14 el PAC contestó «en trámite», se guardó REQUESTED y
+// NADIE volvió a preguntar. El SAT la canceló minutos después; Avoqado siguió diciendo «Timbrada» tres
+// días y no dejaba volver a facturar la venta. Esto es lo que faltaba: preguntar después.
+
+export interface RefreshCancellationDeps {
+  loadEmisor: (fiscalEmisorId: string) => Promise<any | null>
+  resolveProvider: typeof resolveFiscalProvider
+  /**
+   * Escribe el desenlace SÓLO si la fila sigue en trámite (CAS). Devuelve la fila actualizada, o `null`
+   * si otra petición ya la había resuelto — así nunca se escribe la bitácora dos veces.
+   */
+  applyCancelOutcome: (cfdiId: string, data: Record<string, any>) => Promise<any | null>
+  logAction: (params: LogActionParams) => Promise<void>
+}
+
+/** Por qué una cancelación NO quedó, en palabras del dueño. `null` si sí quedó o sigue en trámite. */
+function porQueNoQuedoCancelada(providerStatus: string): string | null {
+  switch (providerStatus) {
+    case 'none':
+      return 'El PAC no registró la cancelación: la factura sigue vigente. Vuelve a intentarlo.'
+    case 'expired':
+      return 'La solicitud de cancelación caducó sin respuesta del receptor: la factura sigue vigente. Vuelve a pedirla.'
+    case 'rejected':
+      return 'El receptor rechazó la cancelación ante el SAT: la factura sigue vigente.'
+    default:
+      return null
+  }
+}
+
+export async function refreshPendingCancellation(
+  cfdi: any,
+  opts: { sandbox: boolean },
+  deps: RefreshCancellationDeps = defaultRefreshDeps,
+): Promise<any> {
+  if (cfdi.cancelStatus !== 'REQUESTED' || !cfdi.facturapiId) return cfdi
+  const emisor = cfdi.fiscalEmisor ?? (cfdi.fiscalEmisorId ? await deps.loadEmisor(cfdi.fiscalEmisorId) : null)
+  if (!emisor) return cfdi
+  const provider = deps.resolveProvider(emisor, { sandbox: opts.sandbox })
+  if (typeof provider.getCancellationStatus !== 'function') return cfdi
+
+  const res = await provider.getCancellationStatus(cfdi.facturapiId)
+  const cancelStatus = mapProviderCancelStatus(res.status)
+  if (cancelStatus === 'REQUESTED') return cfdi // sigue en trámite: no hay nada que escribir
+
+  const cancelada = cancelStatus === 'CANCELLED' || cancelStatus === 'ACCEPTED'
+  const razon = cancelada ? null : porQueNoQuedoCancelada(res.status)
+  const updated = await deps.applyCancelOutcome(cfdi.id, {
+    cancelStatus,
+    // Sólo se marca CANCELLED cuando el PAC lo confirma — y nunca se baja de CANCELLED.
+    status: cancelada || cfdi.status === 'CANCELLED' ? 'CANCELLED' : cfdi.status,
+    // La fecha es la que registró el PAC; sin ella se deja vacía en vez de inventar una.
+    ...(res.cancelledAt ? { cancelledAt: res.cancelledAt } : {}),
+    ...(razon ? { lastError: razon } : {}),
+  })
+  if (!updated) return cfdi
+
+  await deps.logAction({
+    staffId: null,
+    venueId: cfdi.venueId,
+    action: cancelada ? 'CFDI_CANCEL_CONFIRMED' : 'CFDI_CANCEL_NOT_APPLIED',
+    entity: 'Cfdi',
+    entityId: cfdi.id,
+    data: { uuid: cfdi.uuid ?? null, folio: folioDe(cfdi), providerStatus: res.status, cancelStatus },
+  })
+  return updated
+}
+
+const defaultRefreshDeps: RefreshCancellationDeps = {
+  loadEmisor: id => prisma.fiscalEmisor.findUnique({ where: { id } }),
+  resolveProvider: resolveFiscalProvider,
+  applyCancelOutcome: async (id, data) => {
+    const { count } = await prisma.cfdi.updateMany({ where: { id, cancelStatus: 'REQUESTED' }, data })
+    if (count === 0) return null
+    return prisma.cfdi.findUnique({ where: { id }, include: { fiscalEmisor: true } })
+  },
+  logAction,
+}
+
+export interface SyncPendingCancellationsDeps {
+  /** Filas con cancelación en trámite pedida antes de `cutoff`, acotadas. */
+  findPending: (cutoff: Date) => Promise<any[]>
+  refresh: (cfdi: any) => Promise<any>
+}
+
+/** Cuánto se espera tras pedir la cancelación antes de volver a preguntar (el SAT suele tardar minutos). */
+export const CANCEL_RECHECK_AFTER_MS = 2 * 60_000
+/** Tope por pasada del barrido (bounded-queries): cada fila es una llamada al PAC. */
+export const CANCEL_SYNC_MAX_PER_TICK = 50
+
+/**
+ * El barrido del job: le pregunta al PAC por cada cancelación en trámite. Un fallo en una fila no
+ * detiene a las demás; la que falló se reintenta en la siguiente pasada.
+ */
+export async function syncPendingCancellations(
+  params: { sandbox: boolean; now: Date },
+  deps: SyncPendingCancellationsDeps = {
+    findPending: cutoff =>
+      prisma.cfdi.findMany({
+        where: { cancelStatus: 'REQUESTED', cancelRequestedAt: { lt: cutoff } },
+        orderBy: [{ cancelRequestedAt: 'asc' }, { id: 'asc' }],
+        take: CANCEL_SYNC_MAX_PER_TICK,
+        include: { fiscalEmisor: true },
+      }),
+    refresh: cfdi => refreshPendingCancellation(cfdi, { sandbox: params.sandbox }),
+  },
+): Promise<{ revisadas: number; resueltas: number; siguenEnTramite: number; errores: number }> {
+  const pendientes = await deps.findPending(new Date(params.now.getTime() - CANCEL_RECHECK_AFTER_MS))
+  const tally = { revisadas: pendientes.length, resueltas: 0, siguenEnTramite: 0, errores: 0 }
+  for (const cfdi of pendientes) {
+    try {
+      const r = await deps.refresh(cfdi)
+      if (r?.cancelStatus && r.cancelStatus !== 'REQUESTED') tally.resueltas += 1
+      else tally.siguenEnTramite += 1
+    } catch (err: unknown) {
+      tally.errores += 1
+      logger.error(`[cfdi] no se pudo consultar la cancelación de ${cfdi.id}: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+  return tally
 }
 
 // ─── Status ───────────────────────────────────────────────────────────────────

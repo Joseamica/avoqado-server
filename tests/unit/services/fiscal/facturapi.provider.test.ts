@@ -157,6 +157,31 @@ describe('FacturapiProvider', () => {
     }
   })
 
+  // Testarudo 24-sep-2026: la A-14 se canceló en el SAT pero Avoqado se quedó con la solicitud «en trámite»
+  // para siempre, porque sólo se preguntaba UNA vez (al pedirla). Esta consulta es la que faltaba.
+  it('getCancellationStatus CONSULTA (no cancela) y usa la misma regla que cancelInvoice', async () => {
+    const provider = new FacturapiProvider('sk_test_x')
+    mockCancel.mockClear()
+    mockRetrieve.mockResolvedValue({
+      ...MOCK_INVOICE_RESPONSE,
+      status: 'canceled',
+      cancellation_status: 'none',
+      cancellation: { status: 'accepted', last_checked: '2026-09-21T18:09:00.000Z' },
+    })
+    const r = await provider.getCancellationStatus('fa1')
+    expect(mockRetrieve).toHaveBeenCalledWith('fa1')
+    expect(mockCancel).not.toHaveBeenCalled()
+    expect(r.status).toBe('canceled')
+    expect(r.cancelledAt).toEqual(new Date('2026-09-21T18:09:00.000Z'))
+
+    mockRetrieve.mockResolvedValue({ ...MOCK_INVOICE_RESPONSE, status: 'valid', cancellation_status: 'pending' })
+    await expect(provider.getCancellationStatus('fa1')).resolves.toEqual({ status: 'pending', cancelledAt: null })
+
+    // Sin fecha del PAC no se inventa una: cancelada, pero `cancelledAt` vacío.
+    mockRetrieve.mockResolvedValue({ ...MOCK_INVOICE_RESPONSE, status: 'canceled', cancellation_status: 'none', cancellation: null })
+    await expect(provider.getCancellationStatus('fa1')).resolves.toEqual({ status: 'canceled', cancelledAt: null })
+  })
+
   it('createInvoice passes external_id when externalId is provided', async () => {
     mockCreate.mockResolvedValue(MOCK_INVOICE_RESPONSE)
     const provider = new FacturapiProvider('sk_test_x')

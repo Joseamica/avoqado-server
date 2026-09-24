@@ -146,18 +146,24 @@ export const uploadCsdSchema = z.object({
  * and assigns the parsed (coerced) values back to req.query.
  * Coercions: page/pageSize → number, isGlobal → boolean.
  */
+/**
+ * Uno o varios valores: `?status=STAMPED`, `?status=STAMPED&status=CANCELLED`, `?status[]=…` (axios) o
+ * `?status=STAMPED,CANCELLED`. Siempre sale como arreglo; el servicio convierte uno solo en filtro exacto.
+ */
+const unoOVariosQuery = <T extends [string, ...string[]]>(valores: T, mensaje: string) =>
+  z.preprocess(
+    v => (v === undefined || v === '' ? undefined : (Array.isArray(v) ? v : [v]).flatMap(x => String(x).split(',')).filter(Boolean)),
+    // Sólo `errorMap`: Zod revienta AL CARGAR el módulo si se combina con `invalid_type_error`.
+    z.array(z.enum(valores, { errorMap: () => ({ message: mensaje }) })).optional(),
+  )
+
 export const listCfdisSchema = z.object({
   query: z.object({
-    status: z
-      .enum(['DRAFT', 'VALIDATING', 'VALIDATION_FAILED', 'STAMPING', 'STAMPED', 'STAMP_FAILED', 'CANCEL_REQUESTED', 'CANCELLED'], {
-        invalid_type_error: 'El estado del CFDI no es válido',
-      })
-      .optional(),
-    flow: z
-      .enum(['STAFF_B', 'AUTOFACTURA_A', 'GLOBAL_C'], {
-        invalid_type_error: 'El flujo del CFDI no es válido',
-      })
-      .optional(),
+    status: unoOVariosQuery(
+      ['DRAFT', 'VALIDATING', 'VALIDATION_FAILED', 'STAMPING', 'STAMPED', 'STAMP_FAILED', 'CANCEL_REQUESTED', 'CANCELLED'],
+      'El estado del CFDI no es válido',
+    ),
+    flow: unoOVariosQuery(['STAFF_B', 'AUTOFACTURA_A', 'GLOBAL_C'], 'El flujo del CFDI no es válido'),
     isGlobal: z
       .string()
       .transform(v => v === 'true')

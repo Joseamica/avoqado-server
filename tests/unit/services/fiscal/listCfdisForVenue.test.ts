@@ -135,6 +135,23 @@ describe('filter mapping', () => {
     expect(where.receptorRfc).toEqual({ contains: 'TEST', mode: 'insensitive' })
   })
 
+  // Testarudo 24-sep-2026: marcar dos estatus (o dos flujos) en la pantalla no filtraba nada, porque sólo
+  // se mandaba el filtro cuando había exactamente uno. El servidor acepta ahora la lista.
+  it('varios estatus ⇒ where.status = { in: [...] }', async () => {
+    await listCfdisForVenue({ venueId: VENUE_ID, status: ['STAMPED', 'CANCELLED'], page: 1, pageSize: 20 })
+    expect(findMany.mock.calls[0][0].where.status).toEqual({ in: ['STAMPED', 'CANCELLED'] })
+  })
+
+  it('varios flujos ⇒ where.flow = { in: [...] }', async () => {
+    await listCfdisForVenue({ venueId: VENUE_ID, flow: ['STAFF_B', 'AUTOFACTURA_A'], page: 1, pageSize: 20 })
+    expect(findMany.mock.calls[0][0].where.flow).toEqual({ in: ['STAFF_B', 'AUTOFACTURA_A'] })
+  })
+
+  it('una lista con UN estatus sigue siendo un filtro exacto', async () => {
+    await listCfdisForVenue({ venueId: VENUE_ID, status: ['STAMPED'], page: 1, pageSize: 20 })
+    expect(findMany.mock.calls[0][0].where.status).toBe('STAMPED')
+  })
+
   it('omits optional filters from where when not provided', async () => {
     await listCfdisForVenue({ venueId: VENUE_ID, page: 1, pageSize: 20 })
 
@@ -150,6 +167,16 @@ describe('filter mapping', () => {
 // ─── Date range timezone conversion ───────────────────────────────────────────
 
 describe('date range: timezone conversion (Prisma = real UTC)', () => {
+  // 🔴 El día pedido NO puede depender del huso del servidor. Producción corre en UTC: con
+  // `new Date('AAAA-MM-DDT00:00:00')` el «24 sep» se volvía el 23-sep 18:00 de México y el filtro de la
+  // pantalla de Facturas enseñaba el día ANTERIOR. México es UTC−6 todo el año (sin horario de verano).
+  it('EXACTO: el día 24-sep de México es [24-sep 06:00Z, 25-sep 05:59:59.999Z], sea cual sea el huso del servidor', async () => {
+    await listCfdisForVenue({ venueId: VENUE_ID, from: '2026-09-24', to: '2026-09-24', page: 1, pageSize: 20, venueTimezone: TIMEZONE })
+    const where = findMany.mock.calls[0][0].where
+    expect(where.createdAt.gte.toISOString()).toBe('2026-09-24T06:00:00.000Z')
+    expect(where.createdAt.lte.toISOString()).toBe('2026-09-25T05:59:59.999Z')
+  })
+
   it('converts from (venue-local midnight) to real UTC for gte', async () => {
     // Mexico City is UTC-6 in winter (CST). June 1 midnight Mexico = June 1 06:00 UTC.
     await listCfdisForVenue({

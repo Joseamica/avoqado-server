@@ -123,6 +123,12 @@ export async function autofacturaController(req: Request<{ accessKey: string }>,
       return
     }
 
+    // La venta ya tenía factura vigente (otra petición ganó la carrera): no se timbró nada.
+    if (result.alreadyIssued) {
+      res.status(409).json({ error: 'Esta cuenta ya fue facturada.' })
+      return
+    }
+
     // STAMPED — log the action before returning
     await logAction({
       staffId: null,
@@ -162,8 +168,9 @@ export async function autofacturaController(req: Request<{ accessKey: string }>,
       return
     }
 
-    // Concurrent in-flight reservation — surface as 409 so the widget can retry
-    if (/en proceso/i.test(message)) {
+    // Concurrent in-flight reservation (or a previous invoice whose cancellation is still pending at the SAT)
+    // — surface as 409 so the widget can retry
+    if (/en proceso|en trámite/i.test(message)) {
       res.status(409).json({ error: message })
       return
     }
