@@ -25,6 +25,7 @@ import { terminalRegistry, normalizeTerminalId } from '../communication/sockets/
 import { PATRON_SQL_TRIM_COMO_JS } from '../utils/terminalSerial'
 import { estadoBancarioSql } from './tpv/estadoBancario'
 import { candadoDeIntento, candadoDeSolicitud, llaveDeIntento, OPCIONES_DE_TRANSACCION_DEL_INTENTO } from './tpv/candadoDeIntento'
+import { puertaDelDinero } from './tpv/avisosNoGuardados'
 import { solicitudDelRegistro } from './tpv/identidadDelCobro'
 import {
   hayAprobadoVinculadoSql,
@@ -2930,7 +2931,7 @@ class TerminalPaymentService {
     venueId: string,
     original: TerminalPaymentResult,
     acreditado: boolean,
-    eventLogId: string,
+    eventLogId: string | null,
   ): void {
     logger.warn(
       '🏦 [TerminalPayment] Negative terminal result degraded to the confirmation window: a bank approval of a linked attempt is already known',
@@ -3925,8 +3926,12 @@ class TerminalPaymentService {
     db: Pick<Prisma.TransactionClient, '$queryRaw'>,
     venueId: string,
     attemptIds: string[],
-  ): Promise<{ eventLogId: string } | null> {
+  ): Promise<{ eventLogId: string | null } | null> {
     if (attemptIds.length === 0) return null
+    // 🔴 Codex pasada final (P1-2): la aprobación de un intento vinculado que llegó FIRMADA y no se pudo guardar también es
+    // evidencia bancaria conocida (sólo vive en la memoria del receptor, `avisosNoGuardados`). Sin esto la ventana liberaba
+    // por silencio a los 30 s y el POS decía «puedes volver a cobrar». Sin evento guardado, `eventLogId` es null. Por LA PUERTA.
+    if (attemptIds.some(puertaDelDinero)) return { eventLogId: null }
     const [fila] = await db.$queryRaw<{ id: string }[]>`
       SELECT e."id" FROM "ProviderEventLog" e
       WHERE e."provider" = 'PAYMENT_PROCESSOR' AND e."venueId" = ${venueId} AND e."type" = 'send_transaction'
@@ -6394,8 +6399,7 @@ class TerminalPaymentService {
     // —`llave = A OR recorte = A`— que ni usaba el índice del recorte (esto corre cada 5 s en el sondeo) ni decía lo mismo que
     // el POST: excluía los REFUND, y el veto del POST no. Aceptar la declaración y poder usarla tienen que decir lo mismo.
     const dineroNoAtribuible =
-      !candidato &&
-      (await prisma.$queryRaw<{ hay: boolean }[]>`SELECT ${hayDineroConEstaLlaveSql(attemptId)} AS "hay"`)[0]?.hay === true
+      !candidato && (await prisma.$queryRaw<{ hay: boolean }[]>`SELECT ${hayDineroConEstaLlaveSql(attemptId)} AS "hay"`)[0]?.hay === true
     const paymentContradiction = (!!candidato && !atribuible) || dineroNoAtribuible
     if (paymentContradiction && candidato) {
       logger.error(
@@ -6491,7 +6495,19 @@ class TerminalPaymentService {
       )
     }
     const conVeredicto = propioAprobado ?? propioConVeredicto
-    const processorEvidence: AttemptProcessorEvidence = propioAprobado ? 'APPROVED' : conVeredicto ? 'DECLINED' : 'NONE'
+    // 🔴 Codex final-2 (P1-2): la aprobación FIRMADA de este intento que llegó y la base no pudo guardar también es dinero — la
+    // misma respuesta que un aprobado durable sin Payment. Sin esto, una liberación ANTERIOR (aceptada antes del aviso) se seguía
+    // publicando limpia y la terminal la usaba para liberar. Se pregunta por LA PUERTA, que también despierta su reingreso.
+    const aprobadoSinGuardar = puertaDelDinero(attemptId)
+    if (aprobadoSinGuardar && !propioAprobado) {
+      logger.warn('⚠️ [TerminalPayment] S6 publica como APPROVED una aprobación que la base todavía no guarda (reingreso en curso)', {
+        attemptId,
+        requestId: row?.requestId ?? null,
+        terminalKey,
+      })
+    }
+    const processorEvidence: AttemptProcessorEvidence =
+      propioAprobado || aprobadoSinGuardar ? 'APPROVED' : conVeredicto ? 'DECLINED' : 'NONE'
 
     const datos = pago ? datosCandidato : null
     const reconciliacion =

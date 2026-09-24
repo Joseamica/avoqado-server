@@ -597,6 +597,41 @@ describe('processAngelPayWebhook — error paths', () => {
     expect(mockedProviderEventLogFindFirst).not.toHaveBeenCalled()
   })
 
+  // 🔴 Codex pasada final (P1-2): el receptor LANZA sólo si el aviso no quedó guardado — el controlador contesta 503 y
+  // AngelPay reintenta. Lo que falle DESPUÉS del ingreso durable lo recupera el worker (evento PENDING): ahí se contesta.
+  it('🔴 final P1-2 · si la conciliación falla DESPUÉS del ingreso durable, contesta PROCESSING_ERROR con su eventLogId — no lanza', async () => {
+    mockedProviderEventLogCreate.mockResolvedValue({ id: 'evt_durable' })
+    mockedPaymentFindFirst.mockRejectedValue(new Error('la base se cayó a media conciliación'))
+
+    const result = await processAngelPayWebhook({
+      payload: {
+        event_type: 'send_transaction',
+        payload: { integratorReference: 'ref-durable', amount: '000000001000', status: 'approved' },
+      } as any,
+      eventId: 'msg_durable',
+      merchantAccount: TEST_MERCHANT,
+      retryDelaysMs: [0, 0, 0],
+    })
+
+    expect(result).toMatchObject({ action: 'ERROR', errorReason: 'PROCESSING_ERROR', eventLogId: 'evt_durable' })
+  })
+
+  it('final P1-2 · si el INGRESO falla, lanza: no hay evento que el worker pueda recuperar', async () => {
+    mockedProviderEventLogCreate.mockRejectedValue(new Error('la base se cayó al insertar'))
+
+    await expect(
+      processAngelPayWebhook({
+        payload: {
+          event_type: 'send_transaction',
+          payload: { integratorReference: 'ref-perdida', amount: '000000001000', status: 'approved' },
+        } as any,
+        eventId: 'msg_perdido',
+        merchantAccount: TEST_MERCHANT,
+        retryDelaysMs: [0, 0, 0],
+      }),
+    ).rejects.toThrow('la base se cayó al insertar')
+  })
+
   it('returns ORPHANED/NO_MATCH_FIELDS when payload has none of integratorReference/transactionId', async () => {
     mockedProviderEventLogCreate.mockResolvedValue({ id: 'evt_6' })
     mockedPaymentFindFirst.mockResolvedValue(null)

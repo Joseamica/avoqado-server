@@ -1673,7 +1673,14 @@ describe('Codex R6 · R6-2: EXCLUSIÓN por intento — el vínculo y todo escrit
             retryDelaysMs: [0],
           }),
         )
-        expect(await A1.carrera(escritorDebil, 10_000)).toMatchObject(vencio)
+        // 🔴 Codex pasada final (P1-2): E YA quedó guardado (entró por el fallback), así que el receptor ya no LANZA cuando el
+        // escritor débil vence: contesta PROCESSING_ERROR con su evento y el worker lo retoma (hacia AngelPay, 200 como antes).
+        // Lanzar se lee ahora como «el aviso no se guardó» — 503 y marca de dinero conocido —, y eso aquí sería falso.
+        expect(await A1.carrera(escritorDebil, 10_000)).toMatchObject({
+          estado: 'ASENTADA',
+          ok: true,
+          value: { action: 'ERROR', errorReason: 'PROCESSING_ERROR', eventLogId: expect.any(String) },
+        })
         // E conserva su estado durable (PENDING, sin decisión) y B no lleva huella: nada se escribió a medias. Codex R15-1: el
         // ingreso también venció, así que E entró por el fallback y quedó MARCADO (sin orden acreditado).
         expect(await evento(eventId)).toMatchObject({ status: 'PENDING', paymentId: null })

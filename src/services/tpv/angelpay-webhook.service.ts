@@ -934,16 +934,28 @@ export async function processAngelPayWebhook(args: ProcessArgs): Promise<AngelPa
   }
 
   // El receptor reconcilia con el MISMO payload que quedó persistido (con la captura del ingreso): S4 leerá ese mismo objeto.
-  return reconciliarEventoPendiente({
-    payload: stampedPayload as unknown as AngelPayWebhookPayload,
-    eventLogId,
-    rawEventId,
-    merchantAccount,
-    receiverVenueId,
-    correlationId,
-    retryDelaysMs: args.retryDelaysMs,
-    claimToken: receptorToken,
-  })
+  // 🔴 Codex pasada final (P1-2): desde aquí el aviso YA está guardado (PENDING, con su ventana de exclusiva): si la
+  // conciliación falla, el worker lo retoma. Por eso NO se lanza — el controlador lee un lanzamiento como «no se guardó»
+  // (503 y marca de dinero conocido), y eso sólo es verdad ANTES de esta línea.
+  try {
+    return await reconciliarEventoPendiente({
+      payload: stampedPayload as unknown as AngelPayWebhookPayload,
+      eventLogId,
+      rawEventId,
+      merchantAccount,
+      receiverVenueId,
+      correlationId,
+      retryDelaysMs: args.retryDelaysMs,
+      claimToken: receptorToken,
+    })
+  } catch (err) {
+    logger.error('❌ [AngelPay webhook] La conciliación falló DESPUÉS del ingreso durable — el worker retoma el evento', {
+      correlationId,
+      eventLogId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return { action: 'ERROR', errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.PROCESSING_ERROR, eventLogId }
+  }
 }
 
 /**

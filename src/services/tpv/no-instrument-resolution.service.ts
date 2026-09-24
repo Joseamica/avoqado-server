@@ -29,6 +29,7 @@ import { ANGELPAY_WEBHOOK_ERROR_REASONS } from './angelpay-webhook.service'
 import { evaluatePermissionList, hasPermission } from '../../lib/permissions'
 import { PIN_REGEX } from '../../schemas/common/pin.schema'
 import { candadoDeIntento, llaveDeIntento, OPCIONES_DE_TRANSACCION_DEL_INTENTO } from './candadoDeIntento'
+import { canalDelComercioFalloHacePoco, puertaDelDinero } from './avisosNoGuardados'
 import {
   eventosQueVetanSql,
   hayDineroConEstaLlaveSql,
@@ -171,6 +172,10 @@ async function evidenciaQueVetaLaDeclaracion(
  * representativo, y la corrección de raíz es normalizar también al ESCRIBIR (`recordFastPayment`), que es otro carril.
  */
 async function hayDineroConEstaLlave(tx: Prisma.TransactionClient, attemptId: string): Promise<boolean> {
+  // 🔴 Codex pasada final (P1-2): una aprobación de este intento que llegó firmada y NO se pudo guardar también es dinero —
+  // no está en la base, así que ninguna consulta la vería (`avisosNoGuardados`, en memoria a propósito). Se pregunta por LA PUERTA,
+  // que además despierta su reingreso: primero se guarda la nota, después se decide.
+  if (puertaDelDinero(attemptId)) return true
   // 🔴 Codex r6 (P1-1): el TEXTO de la regla vive en `evidenciaPositivaSql` y es el MISMO que entra en el `WHERE` de las dos
   // escrituras. Tenerlo aquí en SQL suelto era la puerta por la que divergieron la comprobación previa y el CAS.
   const [fila] = await tx.$queryRaw<{ hay: boolean }[]>`SELECT ${hayDineroConEstaLlaveSql(attemptId)} AS "hay"`
@@ -247,15 +252,15 @@ const MOTIVOS_QUE_NO_SON_EL_AVISO_PROPIO = [
   ANGELPAY_WEBHOOK_ERROR_REASONS.POSSIBLE_SECOND_CAPTURE,
 ]
 
-async function avisoDelBancoComprobado(
-  tx: Prisma.TransactionClient,
-  venueId: string,
-  merchantAccountId: string,
-): Promise<boolean | null> {
+async function avisoDelBancoComprobado(tx: Prisma.TransactionClient, venueId: string, merchantAccountId: string): Promise<boolean | null> {
   const [comercio] = await tx.$queryRaw<{ comprobado: boolean }[]>`
     SELECT (m."active" AND m."angelpayWebhookLastReceivedAt" IS NOT NULL AND NOT EXISTS (
               SELECT 1 FROM (
-                SELECT p."id", p."idempotencyKey" FROM "Payment" p
+                SELECT p."id", p."idempotencyKey",
+                       lower(regexp_replace(regexp_replace(COALESCE(t."serialNumber", p."processorData"->>'deviceSerialNumber', ''),
+                             ${PATRON_SQL_TRIM_COMO_JS}, '', 'g'), '^AVQD-', '', 'i')) AS "serialDelCobro"
+                FROM "Payment" p
+                LEFT JOIN "Terminal" t ON t."id" = p."terminalId"
                 WHERE p."venueId" = ${venueId}
                   AND COALESCE(NULLIF(p."processorData"->>'merchantAccountIdFromApk', ''), p."merchantAccountId") = m."id"
                   AND p."method" IN ('CREDIT_CARD', 'DEBIT_CARD') AND p."status" = 'COMPLETED'
@@ -270,7 +275,14 @@ async function avisoDelBancoComprobado(
                        OR (ultimos."idempotencyKey" IS NOT NULL AND e."attemptId" = regexp_replace(ultimos."idempotencyKey", ${PATRON_SQL_TRIM_COMO_JS}, '', 'g')))
                   -- 🔴 Ronda 23 (Codex r21, P1-3): sólo el aviso PROPIO. El receptor liga por referencia avisos de OTRO intento o
                   -- recibidos por OTRO comercio (y los conserva como evidencia, con su motivo); eso no prueba que llegó el de éste.
-                  AND (e."attemptId" IS NULL
+                  -- 🔴 Codex pasada final (P1-3): SIN llave, el aviso sólo es propio si trae el serial de la terminal que cobró.
+                  -- Dos terminales del mismo comercio que cobran igual importe en el mismo segundo comparten la referencia
+                  -- yyMMddHHmmss, y el receptor liga el aviso sin llave de una al pago de la otra. Medido el 23-sep (14 días):
+                  -- los 1,533 avisos ligados de producción traen el serial y coincide con el del pago en TODOS.
+                  AND ((e."attemptId" IS NULL
+                        AND ultimos."serialDelCobro" <> ''
+                        AND lower(regexp_replace(regexp_replace(e."payload"->'payload'->>'terminalSerial', ${PATRON_SQL_TRIM_COMO_JS}, '', 'g'),
+                                  '^AVQD-', '', 'i')) = ultimos."serialDelCobro")
                        OR (ultimos."idempotencyKey" IS NOT NULL AND e."attemptId" = regexp_replace(ultimos."idempotencyKey", ${PATRON_SQL_TRIM_COMO_JS}, '', 'g')))
                   AND (e."errorReason" IS NULL OR e."errorReason" NOT IN (${Prisma.join(MOTIVOS_QUE_NO_SON_EL_AVISO_PROPIO)}))
                   -- 🔴 Ronda 24 (Codex r22, P1-1): y lo RECIBIÓ este comercio (el receptor lo estampa en cada evento desde julio).
@@ -281,7 +293,9 @@ async function avisoDelBancoComprobado(
     JOIN "PaymentProvider" pp ON pp."id" = m."providerId" AND pp."code" = 'ANGELPAY'
     JOIN "AngelPayUserAccount" a ON a."id" = m."angelpayUserAccountId" AND a."venueId" = ${venueId}
     WHERE m."id" = ${merchantAccountId}`
-  return comercio ? comercio.comprobado : null
+  // 🔴 Codex pasada final (P1-2): si su canal de avisos acaba de FALLAR (un aviso firmado que no se pudo guardar), su silencio
+  // no prueba nada aunque sus últimos diez cobros traigan el suyo: el que se perdió no está en la base para medirlo.
+  return comercio ? comercio.comprobado && !canalDelComercioFalloHacePoco(merchantAccountId) : null
 }
 
 /**

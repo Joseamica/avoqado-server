@@ -2831,10 +2831,12 @@ router.get('/auth/permissions', authenticateTokenMiddleware, async (req: Request
         })
       }
       const customPermsSinMembresia = await rolePermissionService.getRolePermissions(venueId, rolSinMembresia)
-      const permissionsSinMembresia = expandWildcards(resolveStaffVenuePermissions({ role: rolSinMembresia }, customPermsSinMembresia)).filter(
-        p => p !== NO_INSTRUMENT_PERMISSION,
+      const permissionsSinMembresia = expandWildcards(
+        resolveStaffVenuePermissions({ role: rolSinMembresia }, customPermsSinMembresia),
+      ).filter(p => p !== NO_INSTRUMENT_PERMISSION)
+      logger.info(
+        `[TPV] Permissions fetched for ${staffId} WITHOUT venue membership (${rolSinMembresia}): ${permissionsSinMembresia.length}`,
       )
-      logger.info(`[TPV] Permissions fetched for ${staffId} WITHOUT venue membership (${rolSinMembresia}): ${permissionsSinMembresia.length}`)
       return res.json({
         success: true,
         data: { staffId, venueId, role: rolSinMembresia, permissions: permissionsSinMembresia },

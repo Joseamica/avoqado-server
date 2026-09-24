@@ -13,6 +13,7 @@ import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { UNPROVEN_NEGATIVE_WINDOW_MS, terminalPaymentService } from '@/services/terminal-payment.service'
 import { candadoDeIntento, candadoDeSolicitud } from '@/services/tpv/candadoDeIntento'
+import { _olvidarTodoParaPruebas, registrarAvisoNoGuardado } from '@/services/tpv/avisosNoGuardados'
 import { utcTs } from '@/utils/sqlDates'
 import socketManager from '@/communication/sockets/managers/socketManager'
 import { terminalRegistry } from '@/communication/sockets/terminal-registry'
@@ -429,6 +430,35 @@ describe('Ventana de confirmación: un negativo sin evidencia dura 30 s y se lib
     expect(
       await prisma.activityLog.count({ where: { venueId, action: 'TERMINAL_PAYMENT_WINDOW_HELD_BY_BANK_EVIDENCE', entityId: row.id } }),
     ).toBe(1)
+  })
+
+  // 🔴 Codex pasada final (P1-2), aplicado también aquí: la ventana libera por SILENCIO igual que la liberación automática. Si
+  // el aviso APROBADO de un intento vinculado llegó firmado y su INSERT falló, no hay evento que la frene — sólo la marca en
+  // memoria del receptor (`avisosNoGuardados`). Debe pesar como la aprobación guardada: se RETIENE, nunca se libera.
+  it('🔴 final P1-2 · con el aviso APROBADO de un intento vinculado que NO se pudo guardar, la ventana RETIENE igual que con el guardado', async () => {
+    const row = await auditRequest({ ...negativoSinEvidencia(), updatedAt: new Date(Date.now() - UNPROVEN_NEGATIVE_WINDOW_MS - 1_000) })
+    const attemptId = `att-${randomUUID()}`
+    await prisma.terminalPaymentAttemptLink.create({ data: { attemptId, requestId: row.requestId, venueId, terminalId: fixture } })
+    registrarAvisoNoGuardado({ merchantAccountId: 'comercio-del-aviso', attemptId, posibleDinero: true })
+    try {
+      expect(await terminalPaymentService.releaseUnprovenNegative(row.requestId, venueId, 'WATCHDOG')).toBe('HELD_BY_BANK_EVIDENCE')
+      const fila = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+      expect(fila).toMatchObject({ status: 'TIMED_OUT', failureCode: 'BANK_APPROVED_AWAITING_PAYMENT', paymentId: null })
+      expect(await terminalPaymentService.hasChargeBlockingOrderCancel(venueId, orderId)).toBe(true)
+    } finally {
+      _olvidarTodoParaPruebas()
+    }
+  })
+
+  it('final P1-2 control · la marca de OTRO intento (no vinculado a la solicitud) no retiene: la ventana libera', async () => {
+    const row = await auditRequest({ ...negativoSinEvidencia(), updatedAt: new Date(Date.now() - UNPROVEN_NEGATIVE_WINDOW_MS - 1_000) })
+    await prisma.terminalPaymentAttemptLink.create({ data: { attemptId: `att-${randomUUID()}`, requestId: row.requestId, venueId, terminalId: fixture } })
+    registrarAvisoNoGuardado({ merchantAccountId: 'comercio-del-aviso', attemptId: `att-${randomUUID()}`, posibleDinero: true })
+    try {
+      expect(await terminalPaymentService.releaseUnprovenNegative(row.requestId, venueId, 'WATCHDOG')).toBe('RELEASED')
+    } finally {
+      _olvidarTodoParaPruebas()
+    }
   })
 
   it('un webhook RECHAZADO del intento no veta: la ventana libera igual (un rechazo no es evidencia de cobro)', async () => {

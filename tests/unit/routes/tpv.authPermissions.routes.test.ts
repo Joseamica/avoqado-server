@@ -150,7 +150,13 @@ describe('GET /tpv/auth/permissions · la lista sale del rol VIGENTE, no del tok
 
     const args = staffVenueFindUnique.mock.calls[0][0]
     expect(args.where).toEqual({ staffId_venueId: { staffId: STAFF, venueId: VENUE } })
-    expect(args.select).toMatchObject({ role: true, active: true, permissionSetId: true, permissionSet: true, staff: { select: { active: true } } })
+    expect(args.select).toMatchObject({
+      role: true,
+      active: true,
+      permissionSetId: true,
+      permissionSet: true,
+      staff: { select: { active: true } },
+    })
   })
 })
 

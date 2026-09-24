@@ -103,17 +103,26 @@ describe('terminal_payment_requests — la misma proyección que el GET del POS'
     // Un Pago rápido no tiene `TerminalPaymentRequest`, así que una declaración suya NUNCA podría salir en `requests`:
     // sin esto, «el cajero declaró que no se cobró» era invisible para el MCP justo en los cobros que más se atascan
     // (medido en una N86: 13 de 27 intentos son locales).
-    const salida = await listar([], [
-      {
-        attemptId: 'att-local-1', terminalId: 'avqd-1', venueId: 'venue-1',
-        resolution: { kind: 'NO_INSTRUMENT_PRESENTED', by: 'SESSION', staffId: 'staff-9', acceptedAt: '2026-09-22T12:00:00.000Z' },
-        createdAt: new Date('2026-09-22T12:00:01.000Z'),
-      },
-    ])
+    const salida = await listar(
+      [],
+      [
+        {
+          attemptId: 'att-local-1',
+          terminalId: 'avqd-1',
+          venueId: 'venue-1',
+          resolution: { kind: 'NO_INSTRUMENT_PRESENTED', by: 'SESSION', staffId: 'staff-9', acceptedAt: '2026-09-22T12:00:00.000Z' },
+          createdAt: new Date('2026-09-22T12:00:01.000Z'),
+        },
+      ],
+    )
     expect(salida.localResolutions).toEqual([
       {
-        attemptId: 'att-local-1', terminalId: 'avqd-1', venueId: 'venue-1',
-        kind: 'NO_INSTRUMENT_PRESENTED', authorizedBy: 'SESSION', staffId: 'staff-9',
+        attemptId: 'att-local-1',
+        terminalId: 'avqd-1',
+        venueId: 'venue-1',
+        kind: 'NO_INSTRUMENT_PRESENTED',
+        authorizedBy: 'SESSION',
+        staffId: 'staff-9',
         declaredAt: '2026-09-22T12:00:00.000Z',
       },
     ])
@@ -124,7 +133,6 @@ describe('terminal_payment_requests — la misma proyección que el GET del POS'
     expect(salida.localResolutions).toEqual([])
     expect(salida.count).toBe(1)
   })
-
 
   it('🔴 una FAILED sin evidencia sale UNKNOWN, ocupada y UNRESOLVED (antes: FAILED y libre)', async () => {
     const salida = await listar([fila({ requestId: 'R-TPV-ERROR', status: S.FAILED, failureCode: 'TPV_ERROR' })])

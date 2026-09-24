@@ -1336,3 +1336,153 @@ Otros hallazgos del QA, a la lista (no de dinero):
 - ⚠️ De paso, el servidor local tenía 11 migraciones sin aplicar en `av-db-25` (Uber KDS, planes, campañas): cualquier lectura de
   `Order` o `VenueFeature` tronaba. Aplicadas con OK del founder y respaldo previo (memoria
   `migracion-sin-aplicar-rompe-todas-las-lecturas-del-modelo`).
+
+### 19.v 🔴 Pasada FINAL de Codex (23-sep, noche): RECHAZO — 3 P1 · 5 P2 · 1 P3. Ronda 26: los tres P1 cerrados
+
+Primera pasada con la cadencia nueva: UNA revisión completa, después del QA en la N86 (§19.u) y de las pruebas con tarjeta física
+del founder (cobro de $10 aprobado y registrado con el serial de la terminal; $5.05 rechazado y la terminal libre al instante).
+Encargo `encargo-B-final.md`, veredicto `veredicto-B-final.txt`. Codex: «Los tres P1 permiten volver a cobrar pese a dinero ya
+movido» y «la siguiente revisión puede limitarse a esos tres arreglos y sus pruebas adversariales».
+
+| # | Hallazgo | Arreglo |
+|---|---|---|
+| **P1-1** (terminal) | `evidenciaSinGuardar` protegía el botón, la declaración y el inicio de la automática, **no** la liberación del servidor, el rechazo del SDK ni la reserva del cobro siguiente; y una salida que ya la había mirado (vacía) cerraba igual. Reproducido por Codex con esquema 40 + `marca_rota`, sin muerte del proceso | Un `Mutex` (`candadoDeEvidencia`) para la escritura de la evidencia, TODA salida «no se cobró» (`salidaNegativa`: liberación del servidor, rechazo del host, sin autorización, kernel, descarte, declaración) y la reserva; cada una mira la memoria DENTRO del candado. La pantalla relee también la memoria (`tieneEvidenciaSinGuardar`) |
+| **P1-2** (servidor) | El controlador del webhook contestaba **200** cuando el INSERT del aviso fallaba: sin evento, sin worker que lo recupere, y el silencio del intento parecía «no se cobró» | 503 si no se guardó (y si la base falla ya al buscar el comercio); lo que falla DESPUÉS del ingreso contesta `PROCESSING_ERROR` con su evento (lo retoma el worker). `avisosNoGuardados.ts` (memoria a propósito): aprobación no guardada = dinero de su llave (automática, cajero y — extensión mía — la ventana de 30 s del POS vía `aprobacionBancariaConocida`); y el canal del comercio sin comprobar 30 min |
+| **P1-3** (servidor) | Un aviso SIN llave de otra terminal del mismo comercio (misma referencia `yyMMddHHmmss`) se ligaba al cobro A y contaba como su aviso propio: la salud volvía a comprobarse | Sin llave, el aviso sólo es propio si trae el serial de la terminal que cobró. Medido en producción: mismo veredicto que la regla vieja en los 22 comercios (1 533 avisos ligados, todos con serial coincidente) |
+
+🔴 **Una extensión que no pidió Codex, del mismo defecto:** la ventana de 30 s del servidor (cobros que manda el POS, en producción
+desde el 17-sep) también libera por silencio. Con la marca en `aprobacionBancariaConocida`, la aprobación no guardada de un intento
+vinculado RETIENE (`HELD_BY_BANK_EVIDENCE`, `eventLogId: null`) en vez de liberar; el cierre de la terminal degrada igual.
+
+⚠️ **Commits ajenos (no se revierten, regla del workspace):** `9fb1de73` (servidor, ya en origin/develop, «feat(mcp): request guard»)
+se llevó el trabajo de esta función hasta la ronda 24, incluido este relevo; `d56fd08` (terminal, ya en origin/main, «turnos abiertos
+y recuperación del servidor») se llevó la ronda 25. Nada está desplegado.
+
+**Lista para después (P2/P3 de la pasada final, no bloquean):** backoff de WorkManager por interrupción con 21 candidatas · la espera
+de 2 min de la incertidumbre delante del «corre ya» · la bandeja puede terminar sin agendar la recuperación que necesita · la
+adopción deja fuera una orden local retenida · `LIMIT 10` sin índice del comercio efectivo · la muestra de 10 sin desempate por `id`.
+Míos: mientras la evidencia no se escribe, la barrera de la reserva usa el texto genérico; `discardStalePreparing` sin candado
+(PREPARANDO de AngelPay nunca tiene dinero del servidor); el CHANGELOG de la terminal pesa 233 KB (la regla pide rotar a 50 KB).
+
+🔴 **Un hueco MÍO, cerrado antes de mandar la revisión:** el P1-2 marcaba el canal del comercio también cuando la base fallaba
+AL BUSCARLO, con el id tal como viene en la URL. Medido en el servidor local: `POST /api/v1/webhooks/angelpay/abc%00def` hace
+reventar esa búsqueda en Postgres (`22021 invalid byte sequence`) — la rama «la base falló» era alcanzable SIN caída y por
+cualquiera, y cada request basura metía una llave en un mapa sin tope. Arreglo: el id se valida contra `^[A-Za-z0-9_-]{1,64}$`
+ANTES de la base (404, igual que un comercio desconocido; los 34 `MerchantAccount` de producción son cuid) y el mapa del canal
+lleva tope (`TOPE_DE_COMERCIOS` = 10 000, se olvida la falla más vieja, 🚨 si aún era vigente). Rojo visto en las dos pruebas
+nuevas; verde 18/18.
+
+🔴 **Y el reingreso propio (otro hueco MÍO, cerrado antes de Codex):** con el P1-2 tal como lo pidió Codex, si AngelPay no
+reintentaba el 503 la terminal quedaba apartada SIN SALIDA — el servidor contesta `409 POSITIVE_EVIDENCE_EXISTS` por la marca en
+memoria, la terminal lo guarda DURABLE (`LedgerServerRecovery.kt:538`, `AngelPayPaymentViewModel.kt:3827`) y nadie registra ese
+cobro porque el aviso no existe en la base. Que AngelPay reintente ante un 5xx NO está documentado. Ahora el servidor vuelve a
+procesar él mismo la misma entrada (`procesarAviso`, sin `req`/`res`) a los 5 s, 15 s y cada minuto hasta guardarla; deduplicado
+por `merchantAccountId:eventId`, tope de 1 000 pendientes y de 16 KB por cuerpo. Residual: un reinicio con la base AÚN caída y sin
+reintento de AngelPay pierde el reingreso — cae en la familia del P2-6 (evidencia sin Payment, decisión del founder pendiente).
+Verificado: rojo en 7 unitarias + la de punta a punta (el disparador deja de romper el INSERT: 0 → 1 evento), sabotajes R1–R7, V1
+y C1 cazados (R4 sólo tras corregir la prueba: con un reintento que salía bien a la primera, el temporizador duplicado no dejaba
+rastro), unitarias del área 98/98, `noInstrumentSinSolicitud` 79/79, `webhook/angelpay-webhook` 6/6.
+
+**Verificación:** terminal (3 clases, 303 pruebas, sabotajes DENTRO de la copia de avq-verify): VERDE 303/303 · G0 (rojo) 10
+caen = las 9 nuevas + `r22 P1-2 a` · T1 caen b, c, d, e, f + las 2 de pantalla del rechazo · T2 caen a, e, f + la de pantalla de «sin autorización». Servidor: P1-3 rojo → verde,
+P3a–c cazados · P1-2 unitarias 131/131 (+18/18 tras el hueco del byte nulo), `noInstrumentSinSolicitud` 78/78 con el disparador que
+rompe el INSERT, `terminalPaymentWindow` 79/79, P2a–P2i cazados, arquitectura 55/55, terminal-payment 222/222 · typecheck del CI
+0 local y Alienware antes del reingreso (`run-avoqado-server.xmgPjz`); con el reingreso, 0 en el Alienware y 191 locales, TODOS de la merma de otra sesión contra el cliente de Prisma viejo de esta Mac (falso positivo documentado, `run-avoqado-server.lTUuzM`) · 14 suites de integración **14/14 suites, 593/593** (evidencia `run-avoqado-server.o5szJJ`, con el arreglo del byte nulo dentro).
+
+**Revisión acotada de Codex (gpt-6-astra xhigh, 21:26): RECHAZO — 3 P1, los tres verificados por mí en el código.** Todos de la
+MISMA familia: la evidencia que quedó sólo EN MEMORIA porque la base falló, y un lector que no la consulta.
+1. **Terminal:** `markAuthorizing` (y por la misma razón `markKernelEntered`) no mira `evidenciaSinGuardar`. B reservó ANTES de que
+   llegara la evidencia de A y autoriza DESPUÉS (la espera del vínculo N1 está en medio). Codex, con el SQL real y esquema 40:
+   autorización = 1 con la evidencia en memoria, 0 con la misma evidencia escrita. Puede volver a cobrar la venta.
+2. **Servidor:** la consulta S6 de la terminal (`terminal-payment.service.ts` ~6401) no consulta `hayDineroNoGuardado`: una
+   liberación aceptada ANTES del aviso aprobado (que luego no se guardó) se sigue publicando limpia, y la terminal la acepta.
+3. **Servidor, el reingreso:** el tope de 1 000 comparte cola entre avisos VERIFICADOS y los de la búsqueda caída (sin verificar):
+   1 000 entradas con firma falsa durante la caída expulsan el reingreso del aviso auténtico y su veto queda vivo ⇒ terminal
+   retenida sin recuperación aunque la base ya volvió.
+Codex confirmó: el P1-3 cerrado, el cambio de expectativa de R6-2 correcto, sin cobros/resoluciones duplicados por el reingreso,
+y ninguna otra salida «no se cobró» fuera de `salidaNegativa` (la excepción de PREPARANDO se sostiene).
+🔴 **Parada por la regla de la cadencia** (2 pasadas con P1 ⇒ se revisa el DISEÑO con el founder, no se sigue parchando).
+
+### 19.w 🔴 Decisión del founder tras la parada: LA PUERTA — «primero se guarda la nota, después se decide» (23-sep, noche)
+
+Con la analogía de la nota adhesiva (la memoria) y el cuaderno (la base) se le presentaron tres caminos: parchar los 3 lectores,
+salir así y apuntarlo, o una sola puerta. Eligió **una sola puerta**, con una pregunta: «¿no se traba la terminal?». Respuesta
+(y hay prueba de ella, `final-2 d`): la puerta sólo espera mientras la base está rota —y con la base rota nada decide igual—; en
+cuanto vuelve, lo pendiente se escribe en el acto y la terminal sigue. Además CIERRA el único caso que sí la trababa para siempre
+(el hueco 3). Excepción declarada: un aviso auténtico que la base rechazara SIEMPRE (dañado) retiene sólo esa venta/terminal, con 🚨.
+
+**Terminal:** `puertaBajoCandado()` (bajo `candadoDeEvidencia`) escribe la evidencia pendiente y devuelve si quedó alguna; la
+llaman la reserva, `markAuthorizing`, `markKernelEntered` (cuyo CAS ni siquiera lleva la cerca de la venta) y `salidaNegativa`.
+**Servidor:** `puertaDelDinero(attemptId)` es la única lectora de la nota (prueba de arquitectura), despierta los reingresos
+auténticos (a lo más cada 5 s) y la consultan la declaración y la liberación automática (tres caminos), la ventana de 30 s y el
+cierre, y **S6**, que con dinero sin guardar publica `processorEvidence: 'APPROVED'`. El reingreso son dos listas con topes aparte
+(auténticos 10 000 · sin verificar 1 000) y un pendiente sin verificar que resulta auténtico se promueve.
+
+**Verificación:** terminal (3 clases, sabotajes DENTRO de la copia de avq-verify): VERDE 307/307 · T3 (reserva, autorización y salidas vuelven a su código de antes) caen a, b, c y d · T4 (el lector de antes) cae a — T3 ∪ T4 es el código previo: el rojo. Servidor: rojo en las 10 pruebas nuevas; unitarias del área 36/36; sabotajes D1–D8 (D4 sólo cae junto con D4b: dos capas, cada una suficiente; D8 sólo lo caza la integración de la ventana); integración 14/14 suites, 595/595 (`run-avoqado-server.DFZLiO`); typecheck del CI 0 en el Alienware (`run-avoqado-server.FaiKUd`) — la corrida anterior destapó un error de tipos MÍO que ts-jest no ve (`programar(…, 0)` contra la unión literal del `as const`), corregido. ⚠️ De paso: los nombres de prueba de Kotlin no admiten «:» (ya estaba en memoria y no lo miré): una tanda no compiló.
+
+**Revisión acotada #2 de Codex (la puerta):** 🔴 RECHAZO, 2 P1 de la misma familia — arreglos en §19.x.
+
+### 19.x Revisión acotada #2 → 2 P1 cerrados, más un hermano hallado ANTES de mandárselo (23-sep, noche)
+
+1. **Terminal — el lector sin la cerca de la venta.** Al volver la base la puerta escribía la evidencia de A, pero el CAS de
+   `KERNEL_ACTIVO` sólo llevaba la cerca para `AUTORIZANDO`: B (misma venta, reservada antes) entraba al lector, que en la PAX
+   puede aprobar SOLO (contactless offline) sin pasar por autorización. Arreglo: la MISMA cerca también para `KERNEL_ACTIVO`. Sólo
+   la usa la PAX (cobro y reembolso contactless; AngelPay nunca entra por ahí), y no crea bloqueos nuevos: vuelve a preguntar en el
+   lector lo que la reserva ya exige, justo antes de entrar. Pruebas: `final-2 e` (la reproducción de Codex) y `final-2 d` reforzada
+   (tras volver la base, OTRA venta reserva, entra al lector y autoriza — la terminal no se traba).
+2. **Servidor — la promoción se quedaba con el reintento del falso.** Un cuerpo con firma falsa encolado con la búsqueda caída y
+   después el auténtico con la misma clave: la promoción conservaba el reintento del falso (401 ⇒ «terminado») y el auténtico nunca
+   se reingresaba. Arreglo: la promoción toma el reintento del auténtico, y una corrida vieja que termina después no da por guardado
+   al promovido (corre el auténtico en el acto).
+3. **Servidor — el hermano:** el falso y el auténtico llegando LOS DOS con la búsqueda caída. Ninguno se puede verificar sin la base;
+   el primero (el falso) se quedaba la clave y el auténtico se descartaba (visto en rojo: 0 procesados). Arreglo: la clave del
+   reingreso es la de ESA entrega, `comercio:eventId:sha256(firma + cuerpo)`; dos entregas idénticas (el reintento de AngelPay)
+   siguen compartiendo clave. Con esto la promoción sólo ocurre para la MISMA entrega; el reemplazo del reintento queda como defensa
+   del módulo.
+
+**Verificación:** terminal VERDE 386/386 (8 clases, `run-avoqado-tpv.4cKFOp`) · Q5 (la cerca de antes) cae sólo `final-2 e`.
+Servidor: rojo de `final-4` visto; unitarias 40/40; sabotajes F1 (cae en las 2 del módulo), F2 (1) y H1 (sólo `final-4`), árbol
+restaurado y HEAD sin mover en cada uno; integración contra la base desechable `noInstrumentSinSolicitud` 80/80 y webhook 68/68;
+typecheck Alienware 0 con el (2) — la corrida con la huella quedó en la fila.
+
+**Residuales declarados a Codex** (no arreglados): (1) el GET de la solicitud, `resolverEsperaDelPos` y crear una solicitud NUEVA de
+la misma venta no pasan por la puerta — Codex ya lo había clasificado como misma familia, no P1 independiente; (2) una inundación de
+≥1 000 cuerpos falsos durante la caída puede expulsar un auténtico que llegó SIN verificar — queda la marca del canal (30 min);
+cerrarlo del todo pediría guardar en memoria los secretos ya vistos; (3) el aviso dañado también frena la liberación automática del
+resto de su comercio (la declaración del cajero sigue).
+
+**Revisión acotada #3 de Codex (segunda sobre la puerta):** 🟢 **AUTORIZO, sin P1 nuevo** (`veredicto-B-final-4.txt`). Contrastó
+la cerca del lector con SQL real y el esquema 40: 2 640 combinaciones, ningún rechazo del lector que una reserva nueva permitiera.
+Typecheck con la huella: Alienware 0 (`run-avoqado-server.quAKRW`; local 191, todos de la merma). Dos notas suyas que quedan:
+- **Corrección a mi encargo:** dije que el reembolso lleva la cerca por venta igual que el cobro. Es falso: el reembolso serializa
+  `originalOrderId` y la reserva y el CAS leen `orderId`, así que para un reembolso ninguno de los dos reconoce la venta. Es previo y
+  no lo introduce este cambio (los dos pasos coinciden); no es un bloqueo nuevo.
+- **El residual (2) sigue teniendo riesgo de DINERO** bajo su combinación (caída de la base + inundación dirigida + AngelPay sin
+  reintentar): la marca de 30 min frena la liberación automática pero no recupera el aviso expulsado. Decisión del founder: guardar
+  en memoria los secretos ya vistos para verificar sin la base, o aceptarlo.
+
+### 19.y 🧪 QA en la N86 con el código FINAL (puerta + cerca del lector + pasada final) — 23-sep, 22:58–23:21
+
+APK `nexgoDebug` del árbol con todo lo de esta noche (comprobado en el dex: la puerta, el rechazo del lector y la cerca de
+`KERNEL_ACTIVO`), servidor local en 3010 reiniciado con el código actual, túnel `adb reverse`. Sin tarjeta: nunca hubo cobro.
+
+| # | Escenario | Resultado |
+|---|---|---|
+| P1 | Pago rápido $5, app muerta con el lector abierto, comercio SIN aviso comprobado | 🟢 fila «en duda»; liberación sola → 409 `WEBHOOK_NOT_CONFIRMED`; aviso honesto en Inicio |
+| P1b | Cobrar $7 encima | 🟢 la barrera ADOPTA el pendiente («NO se inició el cobro nuevo»), sin fila huérfana; «El cliente no presentó tarjeta» → POST 200 en 0.16 s, testimonio `SESSION`/`NO_INSTRUMENT_PRESENTED`, bitácora, **0 pagos** |
+| P1c | Otra venta ($6) tras liberar | 🟢 llega al lector (AUTORIZANDO: la puerta y el candado nuevos no traban ni frenan); Cancelar ⇒ U100, «No se cobró» |
+| P2 | Pago rápido $9, app muerta con el lector abierto, arranque SIN servidor | 🟢 «4 consultas sin respuesta — otra pasada en 31 s» (el arreglo de la ronda 25 sigue) |
+| P2b | Vuelve el servidor, avisos del comercio comprobados | 🟢 **liberado SOLO 11 s después de arrancar**: testimonio `AUTOMATIC`/`NO_BANK_TRACE_AFTER_WINDOW`, bitácora, **0 pagos** |
+| P2c | Otra venta ($4) tras la liberación sola | 🟢 llega al lector; cierra con U101 («nadie acercó una tarjeta») |
+
+Log del servidor en toda la prueba: 0 errores, 0 5xx; los únicos 4xx, los tres 409 esperados. Siembra y marca del comercio
+restauradas (`qa-puerta/limpiar.sql`: 0 avisos de prueba, `angelpayWebhookLastReceivedAt` otra vez NULL).
+
+🔑 **Dos cosas de la receta que ya no son como en la ronda 24** (memoria `qa-liberacion-sola-siembra-y-espera`):
+- La siembra de avisos tiene que traer `payload.payload.terminalSerial` del pago: desde la pasada final, un aviso SIN llave sólo
+  cuenta con el serial de la terminal que cobró. La siembra vieja dio 409 — y era lo correcto: los avisos reales lo traen.
+- Tras un 409 `WEBHOOK_NOT_CONFIRMED` la terminal no vuelve a pedir la liberación en 10 min (`REINTENTO_SIN_AVISO_MS`, en memoria;
+  el botón del cajero sigue disponible). Para reintentar en QA, reiniciar la app.
+
+No cubierto en el aparato: los caminos con la BASE rota de la puerta (sólo con inyección de fallas: los cubren las pruebas de Room
+con `marca_rota`), la cerca del lector (sólo la PAX la usa) y «el dinero manda» con tarjeta real.
