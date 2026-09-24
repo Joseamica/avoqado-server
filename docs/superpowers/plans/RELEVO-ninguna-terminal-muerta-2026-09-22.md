@@ -1112,3 +1112,227 @@ Veredicto: `veredicto-B-r17.txt`. La marca dentro de la transacción la dio por 
   salida — ninguna barrera mira si el servidor ya registró ese Payment, y `registrarPorVeredicto` no admite DESCARTADA. Riesgo de
   terminal muerta (p. ej. el caso del 16-sep: el SDK dijo «cancelado» y el banco aprobó). Se le preguntó a Codex en la 18ª pasada.
 - **18ª pasada de Codex lanzada** (`encargo-B-r18.md` → `veredicto-B-r18.txt`).
+
+### 19.o 🟡 18ª pasada de Codex (23-sep): confirmó que faltaba la SALIDA → decisión del founder «A · corrige y avisa». Ronda 19 construida
+
+Veredicto: `veredicto-B-r18.txt`. Confirmó con archivo:línea lo que se le preguntó: una DESCARTADA con dinero y marca, sin orden,
+apartaba el aparato **para siempre** (ninguna transición la sacaba). El founder eligió **A · corrige y avisa**: la terminal dice
+«ese cobro de $X SÍ pasó, no lo vuelvas a cobrar», el cajero toca **Entendido**, la fila pasa a REGISTRADO y queda quién y cuándo.
+
+- **Regla única** `SQL_COBRO_POR_RECONOCER` (sólo el caso LIMPIO): AngelPay · SALE · no heredada · DESCARTADA/INDETERMINADO ·
+  `server_outcome = RECORDED` con su Payment · mismos importes · sin veto · sin reconocer · y, con solicitud, ganador de ella.
+  Va DENTRO del UPDATE de `reconocerCobroRegistrado`; lo demás sigue apartado como contradicción.
+- **Room 40** (aditiva, idempotente): `acknowledged_at`, `acknowledged_by`. `SQL_CONTRADICCION` deja de contar un rechazo del host
+  ya reconocido; el aviso de contradicción (familia 3) excluye lo que ya ofrece el Entendido; la barrera nombra el Entendido.
+- **ROJO** `.OvFu9f`: 30 pruebas, 9 fallos = las nuevas, cada una en su aserción (stubs).
+- **VERDE**: 727 pruebas, 0 fallos. 🔴 La primera corrida destapó una prueba vieja (`AngelPayPaymentReviewRoomTest`, S5 sin
+  persistir) que esperaba «contradicción» donde ahora, por la decisión A, sale el Entendido: se actualizó (y además fija que el
+  aparato SIGUE apartado hasta confirmar).
+- Prueba nueva con base real del cableado de la barrera (antes sólo se probaba con las banderas puestas a mano).
+
+### 19.p ▶️ Ronda 20 (23-sep): «no debería trabarse nunca y todo es por webhook» — la terminal se libera SOLA a los 10 s
+
+Origen: QA en la N86 con el APK r18 — matar la app a media venta dejó la fila AUTORIZANDO y la terminal sin cobrar 10 min. El
+founder: *«no debería de trabarse nunca y todo es por webhook»* y *«no debería ni de tardar 3 segundos»*. Medido en producción
+(7 días): aviso del banco p50 1.6 s · p99 3.4 s · máx 4.5 s; 790 de 812 cobros Nexgo con aviso — los 22 sin aviso, TODOS de
+ESTOCOLMO (Doña Simona), cuyo webhook nunca se configuró. Extra medido: la latencia del host (el `transactionId` lleva la hora de
+la terminal) varía ≤ 7 s sobre su mediana en 1 710 eventos de 30 días (p99 2.5 s). Decisión del founder: **10 segundos**.
+
+**Servidor** (`no-instrument-resolution.service.ts`): nuevo testimonio `NO_BANK_TRACE_AFTER_WINDOW`, de la TERMINAL:
+sólo en un Pago rápido (con vínculo ⇒ `ATTEMPT_NOT_ELIGIBLE`), sin PIN, sin pedir el permiso de declarar (la sesión sí tiene que
+ser miembro), el MISMO veto de dinero (antes que todo lo demás) y sólo si el aviso del banco de los comercios AngelPay de ESA
+terminal está **comprobado**: cada uno recibió aviso y ningún cobro con tarjeta completado suyo es posterior al último aviso +60 s
+(todos tienen que cumplir). Si no ⇒ `409 WEBHOOK_NOT_CONFIRMED`. Bitácora `TERMINAL_PAYMENT_AUTO_RELEASED_NO_BANK_TRACE`; MCP
+(`localResolutions`) la distingue por `kind` y `authorizedBy: AUTOMATIC`. ROJO 11/13 · VERDE 56/56 · **8/8 sabotajes** cazados.
+De paso: una prueba unitaria vieja del veto por evento pasaba en vacío desde la ronda 7 (el fragmento del veto viaja anidado y el
+mock sólo miraba el texto exterior): corregida y verificada con sabotaje.
+
+**Terminal**: (1) la libreta guarda en memoria qué abrió ESTE proceso; al arrancar (y en cada pasada del worker) lo que dejó un
+proceso muerto pasa AL INSTANTE a INDETERMINADO `proceso_terminado` (el SDK vive en el proceso: su manifiesto no declara
+`android:process`), un PREPARANDO huérfano se descarta, y con orden sólo cerca su venta; (2) la ventana de un Pago rápido baja de
+45 s a **10 s** y al final pide la liberación sola (id fijo por intento, así pantalla y worker piden la misma); (3) el worker libera
+en segundo plano las dudas locales quietas ≥ 10 s, con espera de 10 min tras un «no» del servidor; se agenda a los 12 s de arrancar.
+Una duda por RELOJ de este proceso (su lector puede seguir dentro) nunca se libera sola. Sin aviso comprobado, queda el botón.
+
+### 19.q 🔴 19ª pasada de Codex (23-sep): RECHAZO — 3 P1 · 2 P2 · 1 P3. Ronda 21 construida
+
+Veredicto: `veredicto-B-r19.txt`. Los seis, confirmados en el código y cerrados:
+
+- **P1-1 · «Entendido» sobre un cobro que el servidor contradice** (terminal). Una respuesta puede traer a la vez un Payment
+  RECORDED y `evidenceContradiction`/`unattributedEvidence` (el servidor los calcula por separado). Con veredicto, los tres
+  consumidores aplicaban el veredicto y NO el veto ⇒ fila limpia ⇒ «Entendido» ⇒ volver a cobrar. Ahora el veto viaja DENTRO del
+  veredicto (`VeredictoDeIntento.veto`) y se escribe en la MISMA transacción (`aplicarVeredictoDelServidor`), así que los tres lo
+  guardan por un solo camino; la pantalla lo recibe también con veredicto.
+- **P1-2 · la regla del aviso comprobado aceptaba un webhook roto** (servidor). «Ningún cobro posterior al último aviso + 60 s» se
+  dejaba engañar por un cobro sin aviso a < 60 s del último, y un aviso POSTERIOR de otra terminal del mismo comercio lo tapaba.
+  Nueva regla: **cada uno de los últimos 10 cobros con tarjeta** del comercio (de hace > 60 s) tiene SU aviso, ligado al pago o
+  al intento por la llave recortada.
+- **P1-3 · se medía el comercio asignado HOY, no el del cobro** (servidor + terminal). La terminal manda `merchantAccountId` del
+  contexto que la libreta guardó al abrir el cobro; el servidor exige que sea AngelPay y de ESTE negocio (`AngelPayUserAccount`),
+  y mide sólo ése. Sin comercio en el contexto: no se pide (decide el cajero).
+- **P2-1 · un salto de la hora adelantaba la liberación** (terminal). La espera se mide con el reloj MONOTÓNICO del proceso
+  (`faltaParaLiberarSola`); la consulta ya no filtra por `updated_at` — que además, con la hora corrida hacia atrás, dejaba la
+  duda apartada tanto como se moviera la hora.
+- **P2-2 · la liberación de arranque podía esperar minutos detrás de la cadena de WorkManager** (terminal). Ahora corre EN EL
+  PROCESO (`liberarTrasArrancar`: pide ya, espera lo que falte, vuelve a pedir); WorkManager queda de respaldo. El worker agenda
+  la pasada siguiente a tiempo si deja una duda sin cumplir su espera.
+- **P3-1**: la prueba «sólo cerca SU venta» comprueba la MISMA venta antes de reservar otra.
+
+**Verificación:** servidor ROJO 13/18 del bloque (los 5 que «pasaron» lo hacían por el esquema estricto: motivo equivocado, fijado después
+por sabotaje) · VERDE 62/62 · 13 suites / **569** integraciones vecinas · `npm run typecheck` 0 errores, local = Alienware ·
+**8 sabotajes, 7 cazados**; S5 (quitar la exigencia explícita del comercio) no cae: sin comercio la consulta devuelve `null` ⇒
+no elegible igual — defensa en profundidad, verificada. Terminal ROJO 14 de 230 (contra esqueletos) · VERDE **761/0** (45 clases)
++ control 232/0 con las 2 pruebas añadidas para que K6 y K10 tuvieran quién los cazara · **14 de 14 sabotajes cazados**. Encargo de
+la 20ª pasada: `encargo-B-r20.md`.
+
+**QA en la N86 real (23-sep, APK r21 contra el servidor local de la ronda 21 por `adb reverse`; sin tarjeta — nunca hubo cobro):**
+- QA-1 · comercio SIN sus avisos (el de prueba, 0 de 10): al arrancar la app pidió la liberación EN EL PROCESO a los ~11 s y el
+  servidor contestó 409 `WEBHOOK_NOT_CONFIRMED` con el comercio del cobro; la fila se queda en duda (decide el cajero).
+- QA-2 · con los 10 avisos sembrados (base local, revertido después): arranque 13:45:41 → **liberado solo 13:45:52**; testimonio
+  `NO_BANK_TRACE_AFTER_WINDOW` firmado `AUTOMATIC` y bitácora con el comercio.
+- QA-3 · **el caso original**: app muerta con el lector esperando tarjeta (fila `AUTORIZANDO`) a las 13:47:35, reabierta 13:47:38,
+  la app terminó de arrancar 13:47:53 y la fila quedó **liberada sola 13:48:04**; inicio limpio, 0 Payments de ese intento. Antes de
+  las rondas 20-21: 10 minutos trabada y después seguía apartada.
+- 🔴 Trampa de QA: el build de depuración sólo permite HTTP a `localhost` (`network_security_config_debug.xml`); con la IP de la
+  Mac en `devBaseUrl` todo falla con `CLEARTEXT … not permitted`. Receta: `adb reverse tcp:3010 tcp:3010` +
+  `-Pavoqado.devBaseUrl=http://127.0.0.1:3010/api/v1/`.
+
+### 19.r 🔴 20ª pasada de Codex (23-sep): RECHAZO — 3 P1 · 2 P2 · 1 P3. Ronda 22 construida
+
+Veredicto: `veredicto-B-r20.txt`. Los seis, confirmados y cerrados:
+
+- **P1-1 · el veto quedaba guardado pero la promoción a REGISTRADO lo volvía inofensivo** (terminal). Codex lo reprodujo con el
+  SQL real: RECORDED + veto ⇒ REGISTRADO, contradicción 0, sin retención, otro cobro reservado, y la pantalla «cobrado». Ahora
+  `registrarPorVeredictoDelServidor` y el lote de reaplicación exigen `server_veto IS NULL`. ⚠️ **Esto AMPLÍA el P2-6 abierto**
+  (decisión del founder): una fila con veto ya no tiene la salida «el servidor registró el dinero» — era justo esa salida la que
+  volvía el veto inofensivo.
+- **P1-2 · un cobro con `Payment.merchantAccountId` vacío desaparecía de la medición** (servidor). El registrador lo deja en null
+  cuando la cuenta está inactiva y conserva la identidad en `processorData.merchantAccountIdFromApk`. Ahora el cobro cuenta para el
+  comercio con el que cobró la terminal (`COALESCE(FromApk, columna)`), dentro del negocio; y un comercio desactivado no sostiene
+  el silencio. Medido en producción (sólo lectura): Testarudo, 36 214 pagos, **1.6 ms**, índice `venueId, createdAt`.
+- **P1-3 · tras un 409 se ignoraba lo que traía la consulta** (terminal): si `recoverOne` trae evidencia o veto (aunque no se hayan
+  podido guardar), CON_EVIDENCIA antes de leer la fila.
+- **P2-1 · las primeras 100 dudas tapaban a la 101**: paginación con cursor; las que esperan su reintento se saltan en memoria sin
+  gastar el cupo (hasta 2 000 filas por pasada).
+- **P2-2 · el reintento de 10 min con reloj de pared**: ahora monotónico, y lo que le falta cuenta para el seguimiento. Con el cupo
+  lleno y dudas por pedir, `proximaEnMs = 0`.
+- **P3 · `instalar()` y `doWork()` probados de verdad** (no sólo sus funciones auxiliares).
+
+🔴 **Dos defectos que cazaron NUESTRAS pruebas antes de Codex:** (1) mío — `(sinAvisoHasta[id] ?: Long.MIN_VALUE) − reloj`
+DESBORDA a un positivo enorme ⇒ toda duda parecía «esperando reintento» y ninguna se liberaba (8 pruebas en rojo); (2) la prueba
+nueva del P1-3 fallaba en ROJO por el motivo equivocado: su `coAnswers` suspendía en Room y `runTest` adelantaba el reloj virtual
+hasta el tope ⇒ SIN_RESPUESTA (memoria `runtest-adelanta-el-reloj-mientras-room-trabaja`).
+
+**Verificación:** servidor ROJO 3/3 · VERDE 65/65 · 572 integraciones vecinas · typecheck 0 local = Alienware · **3/3 sabotajes**.
+Terminal ROJO 6/240 · VERDE **772/0** (45 clases) · control 241/0 · tandas U/V/W de sabotaje (9 guardas) en la fila. Codex 21ª
+pasada lanzada (`encargo-B-r21.md`).
+
+### 19.s 🔴 21ª pasada de Codex (23-sep): RECHAZO — 3 P1 · 1 P2 (sin P3). Ronda 23 construida
+
+Veredicto: `veredicto-B-r21.txt`. Los cuatro, confirmados y cerrados:
+
+- **P1-1 · registro limpio PRIMERO, veto DESPUÉS** (terminal): la ronda 22 impedía promover con veto, pero una consulta S6 en vuelo
+  podía traer el veto sobre una fila YA registrada, y la contradicción excluía REGISTRADO/CERRADA ⇒ el veto desaparecía. Ahora el
+  veto cuenta en cualquier estado: la fila sale en el **aviso de Inicio** y queda fuera de la poda. **No aparta el aparato a
+  propósito** (el cobro está registrado; apartarlo sin salida sería la terminal muerta). La pantalla ya no dice «cobrado» sobre una
+  registrada con veto. 🔑 Esto contradecía una prueba de la r6 (P1-4b, «REGISTRADO no queda como contradicción para siempre»): se
+  reescribió a la regla nueva y se le preguntará a Codex si «aviso sin retención» basta.
+- **P1-2 · el propio 409 POSITIVE_EVIDENCE_EXISTS** (terminal): veta desde que llega — marca durable (aparta el aparato y veta el
+  cierre sin red), en la liberación sola y en la declaración del cajero, sin depender de la consulta siguiente (que igual se hace,
+  para guardar el Payment).
+- **P1-3 · un aviso ajeno ligado por referencia acreditaba al comercio** (servidor): sólo cuenta el aviso PROPIO (su intento es el
+  del pago o no trae intento, y su motivo no es de la familia que contradice su atribución). Probado por el webhook real con dos
+  intentos, dos comercios, misma referencia e importe, y una prueba por cada condición.
+- **P2 · 25 dudas con 503 persistente acaparaban el cupo**: una espera corta propia (30 s, monotónica) y la 26 recibe su turno.
+
+🔴 **Tres pruebas VIEJAS que chocaron y por qué:** (1) «el dinero manda con 409» — mi primer arreglo vetaba SIN consultar y dejaba de
+guardar el Payment: corregido en el código (marca y además consulta); (2) la r6 P1-4b, reescrita (ver arriba); (3) la de «409 genérico
+reconsulta» usaba justo POSITIVE_EVIDENCE_EXISTS: pasa a RESOLUTION_CONFLICT, su propósito intacto.
+🔴 **Y una prueba no determinista destapada, no causada por el cambio:** `r5-3` elegía la terminal con `findFirst({ venueId })`;
+otras pruebas del archivo crean una segunda terminal en el mismo negocio y, según el orden físico de la tabla, le tocaba ésa. Falló una
+vez en la corrida de 13 suites; forzando la terminal ajena se reproduce idéntico (`Received: null`). Ahora la toma por el serial.
+
+**Verificación:** servidor 68/68 del archivo · typecheck: **12 errores, todos en `tests/unit/middlewares/mcp-request-guard.test.ts`,
+un archivo SIN versionar de otra sesión** (ninguno en lo tocado aquí) · **2/2 sabotajes** (cada condición del aviso propio).
+Terminal ROJO 5/246 (cada uno por su motivo) · VERDE **777/0** (45 clases) · tandas X/Y (9 guardas, incluidas L5/L9 que la tanda W
+de la ronda 22 no alcanzó a correr por la fila) en curso.
+
+### 19.t 🔴 22ª pasada de Codex (23-sep): RECHAZO — 2 P1 · 2 P2 · 1 P3. Ronda 24 construida · y CAMBIO DE CADENCIA
+
+Veredicto: `veredicto-B-r22.txt`. Los cinco, confirmados y cerrados:
+
+- **P1-1 · un aviso recibido por M2 acreditaba a M1** (servidor): excluir motivos no alcanzaba. Un evento de M2 con la llave de un
+  pago de M1 contaba ANTES de clasificarse (PENDING, sin motivo), y el backfill lo ligaba sin `MERCHANT_MISMATCH` cuando la columna
+  del pago quedó vacía. Ahora el aviso cuenta sólo si lo RECIBIÓ ese comercio:
+  `payload->'_avoqado'->>'receivedByMerchantAccountId' = m.id` (el receptor lo estampa al insertar, `angelpay-webhook.service.ts:895`).
+  Un evento sin la estampa ya no cuenta (conservador: sólo reduce liberaciones automáticas).
+- **P1-2 · el 409 «hay evidencia» se perdía si fallaba la escritura de su marca** (terminal): queda en memoria
+  (`evidenciaSinGuardar`, intento → venue) hasta que se escribe; mientras, las TRES salidas negativas lo rechazan (cierre sin red,
+  botón, liberación sola) y cada pasada lo reintenta primero. Residual declarado: si además muere el proceso, se pierde la memoria,
+  pero la fila sigue INDETERMINADO y el servidor vuelve a vetar en la consulta siguiente.
+- **P2 · el backoff de 30 s del worker devolvía a las mismas 25 dudas** y **P2 · la duda 2 001**: la pasada de dudas locales empieza
+  donde terminó la anterior (cursor en rueda, por negocio, en memoria).
+- **P3 · dos asertos del 409 pasaban por otra guarda**: las pruebas parten ahora de una fila DECLARABLE (con respuesta previa del
+  servidor) y rompen la escritura de la marca con un trigger de SQLite.
+
+🔴 **El compilador cazó un defecto MÍO que ninguna prueba habría visto a tiempo:** `x in evidenciaSinGuardar` sobre un
+`ConcurrentHashMap` en Kotlin llama `contains(value)` = `containsValue` — buscaba el INTENTO entre los VENUES. Kotlin lo marca como
+error (KT-18053), así que no llegó a correr; el ROJO previo había compilado contra el código viejo. Ahora `containsKey`. Además un
+`return` dentro de una función de expresión. Y de paso una trampa de proceso: la cadena de sabotajes que esperaba turno había
+RESPALDADO el árbol antes del arreglo — al restaurar lo habría borrado. Se detuvo, se verificó el árbol (sólo difería el arreglo) y
+se relanzó con un respaldo nuevo.
+Prueba nueva `r22 P1-2 d` (la liberación sola no vuelve a pedir con la marca sin escribir, aunque el servidor la aceptara) y su
+sabotaje N6: la guarda de `puedeLiberarseSola` no tenía uno.
+
+**Verificación:** servidor `noInstrumentSinSolicitud` 71/71 · 13 suites de integración **578/578** · typecheck **0 local y 0
+Alienware** (la otra sesión ya arregló su archivo) · sabotaje X3 cazado. Terminal VERDE **783/0 (45 clases)** con el arreglo del
+compilador; tandas de sabotaje A-D (15 guardas, incluida N6) en la fila — ver `scratchpad/sab-tpv-r24/tandas.out`.
+
+🔑 **Cambio de cadencia (23-sep, noche; propuesta del founder, recomendada por mí; la regla de parada es mía y se la declaré): se
+acaba el ciclo «una pasada de Codex por arreglo».** Van 22 pasadas desde el 22-sep en la
+mañana (13 sólo el 23, de más de una hora cada una) y los P1 recientes son fallos DOBLES en el mismo instante. Nuevo orden:
+(1) termino lo pendiente; (2) pruebas completas en la N86 y la D3, incluidas sin red; (3) las de tarjeta física, con el founder;
+(4) Codex UNA pasada completa sobre todo el diff. Regla de parada: lo que pueda mover o perder dinero se arregla y Codex revisa SÓLO
+eso; lo menor va a la lista; si tras 2 pasadas sigue habiendo P1, se para y se revisa el diseño con el founder. El encargo de la 23ª
+pasada (sólo delta) quedó preparado y NO se lanzó: `encargo-B-r23-cabecera.md`.
+
+### 19.u 🧪 QA en la N86 real con el APK de la ronda 24 (23-sep, noche) · y ronda 25: la cadena de WorkManager atorada
+
+APK `nexgoDebug` compilado del MISMO árbol que el verde 783/0 (huella `eb5ca83f…`), servidor local en 3010 reiniciado con el
+código de la ronda 24, túnel `adb reverse tcp:3010`. Sin tarjeta: nunca hubo cobro.
+
+| # | Escenario | Resultado |
+|---|---|---|
+| QA-1 | Pago rápido $5, app muerta con el lector abierto, comercio SIN avisos | 🟢 fila «en duda» al arrancar; 11 s después, liberación sola → **409 `WEBHOOK_NOT_CONFIRMED`**; aviso verde honesto en Inicio |
+| QA-1b | Intentar cobrar $7 con esa duda | 🟢 la barrera ADOPTA el cobro pendiente («NO se inició el cobro nuevo») y ofrece «El cliente no presentó tarjeta»; al tocarlo: POST 200 en 0.34 s, libreta DESCARTADA `OPERATOR_RECONCILED`, testimonio `SESSION` con el staff, bitácora, **0 pagos**. El intento de $7 no dejó fila huérfana |
+| QA-2b | 10 avisos sembrados pero RECIBIDOS POR OTRO COMERCIO (P1-1 de la r22) | 🟢 **409 `WEBHOOK_NOT_CONFIRMED`** — la regla de la ronda 24, en el aparato |
+| QA-2 | Los mismos avisos, receptor corregido | 🟢 **liberada SOLA 11 s después de arrancar**; testimonio `AUTOMATIC`/`NO_BANK_TRACE_AFTER_WINDOW`, bitácora con el comercio, 0 pagos |
+| QA-3 | «El dinero manda» (409 `POSITIVE_EVIDENCE_EXISTS`) | ⬜ **no ejecutada a propósito**: simularla deja la terminal apartada sin salida limpia de QA. Va con la tarjeta física del founder |
+| QA-4 | Cobro atorado + arranque SIN servidor + vuelve la red sin reiniciar | 🔴 **FALLÓ**: sin servidor, «liberación sola sin respuesta» (correcto: no libera a ciegas); **con la red de vuelta, 3 minutos sin liberarse** |
+
+🔴 **La causa de QA-4, medida en la base de WorkManager del aparato:** la cabeza de la cadena `ledger_server_recovery` llevaba
+**9 reintentos** (`run_attempt_count = 9`) y detrás **10 pasadas BLOQUEADAS**. Cada pasada con una consulta sin respuesta
+devolvía `retry()`; WorkManager duplica la espera en cada reintento (30 s … hasta 5 h), y como todo va en una sola cadena
+`APPEND_OR_REPLACE`, el «corre ya» de la reconexión quedaba detrás. Es el P2-3 de Codex r22, **peor de lo que él describió**: no
+sólo la duda 26, TODA la recuperación. Un local con WiFi que se cae un rato quedaba con la terminal apartada horas.
+
+**Ronda 25 (TDD):** la pasada sin respuesta termina en `success()` y agenda su PROPIO seguimiento a 31 s; el seguimiento tiene
+tope de 31 s (era la cabeza que bloqueaba: con una duda sin aviso llegaba a 10 min); y la fila estrena nombre
+(`ledger_server_recovery_v2`) cancelando la vieja, para que un aparato ya atorado se destrabe al actualizar. Rojo 5/11, cada una
+por su motivo (Retry en vez de Success ×3, 601 s en vez de 31, la vieja sin cancelar). 🔴 Choca a propósito con la prueba de
+Codex P2-1 («sin respuesta ⇒ `retry()`»): su intención —que la pasada se repita— se conserva con el seguimiento explícito.
+
+🟢 **QA-4 REPETIDO con el APK de la ronda 25 (19:18–19:19): pasa.** Al primer uso, la cadena vieja quedó CANCELADA (14 pasadas, incluida la cabeza con 9 reintentos: estado 5 en `WorkSpec`) y nació `ledger_server_recovery_v2`. Sin servidor, la pasada terminó en `success` con «otra pasada en 29 s» (no más espera que se duplica). **Red de vuelta a las 19:19:07 → cobro de $4 liberado SOLO a las 19:19:14 (7 s).** Verde de la terminal 788/792: los 4 rojos son pruebas NUEVAS de la sesión del «Sin turno de caja», en rojo mientras termina su arreglo; las mías, todas verdes.
+⚠️ **Declarado para Codex (trade-off, no arreglado):** una consulta S6 sin respuesta no gasta su turno (a propósito, Codex P2-1); antes la espaciaba el backoff de WorkManager, ahora se repite con el seguimiento de 31 s. Con la red caída o el servidor caído falla al instante y no llega a nadie; con 5xx sí gasta el turno. Sólo un servidor tan lento que no contesta en 30 s recibe una consulta continua por terminal. Remedio listo si hace falta: espera propia por consulta en memoria, como `sinAvisoHasta`.
+🔴 **Trampa de QA:** la siembra de avisos falsos da «aviso comprobado» a un comercio cuyos avisos REALES no llegan a esta Mac. Con ella puesta, matar la app tras una aprobación REAL liberaría un cobro que sí pasó. Se retiró al terminar (`limpiar.sql`), y la prueba del «dinero manda» sólo tiene sentido contra un servidor que reciba los webhooks de AngelPay.
+
+Otros hallazgos del QA, a la lista (no de dinero):
+- 🔴 **Arranque sin red: «Sin turno de caja» falso** que bloquea Pago rápido y Cobrar (hasta efectivo) aunque la caja esté abierta.
+  Defecto previo, fuera de este proyecto: tarea aparte creada.
+- 🟡 El «Revisar» del aviso verde lleva a Pagos, donde un cobro local en duda **no aparece** (no es un pago); la salida real es
+  intentar cobrar otra vez (la barrera lo adopta). Falta un camino directo desde el aviso.
+- 🟡 Al adoptar la duda, dos POST automáticos en 2 s (los dos 409): uno de la barrera y otro del worker. Sin daño (idempotente),
+  pero sobra uno.
+- ⚠️ De paso, el servidor local tenía 11 migraciones sin aplicar en `av-db-25` (Uber KDS, planes, campañas): cualquier lectura de
+  `Order` o `VenueFeature` tronaba. Aplicadas con OK del founder y respaldo previo (memoria
+  `migracion-sin-aplicar-rompe-todas-las-lecturas-del-modelo`).

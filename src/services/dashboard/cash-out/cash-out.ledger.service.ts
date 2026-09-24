@@ -17,6 +17,7 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { runWithoutCancellation } from '@/utils/requestCancellation'
 import { assertCashOutEnabled, resolveActiveDaysForVenue, resolveRatesForVenue } from './cash-out.config.service'
 import { buildCommissionEntry, venueBusinessDate, weekStartMonday, type RateTier } from './cash-out.domain'
 
@@ -161,13 +162,18 @@ export async function reconcileClawbacks(venueId: string): Promise<{ clawedBack:
     data: { status: 'CLAWED_BACK', clawedBackAt: new Date() },
   })
 
-  void logAction({
-    action: 'CASH_OUT_CLAWBACK',
-    entity: 'PromoterCommissionEntry',
-    entityId: venueId,
-    venueId,
-    data: { count: toClaw.length },
-  })
+  // Outside the MCP brake (incident 2026-09-23): the org roll-up calls `endOfWriteUnit()` right after this venue, and
+  // Prisma runs this audit INSERT later — inside the brake it would mark the unit as written again (the roll-up could no
+  // longer stop at the next venue) or, with the unit already cut, be refused and the clawback left without a trace.
+  void runWithoutCancellation(() =>
+    logAction({
+      action: 'CASH_OUT_CLAWBACK',
+      entity: 'PromoterCommissionEntry',
+      entityId: venueId,
+      venueId,
+      data: { count: toClaw.length },
+    }),
+  )
 
   return { clawedBack: toClaw.length }
 }

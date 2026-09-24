@@ -53,7 +53,7 @@ export function proyectarLiberacionPorVentana(resultJson: unknown): { windowMs: 
  */
 export function proyectarDeclaracionDelCajero(
   operatorResolution: unknown,
-): { by: 'SESSION' | 'SUPERVISOR_PIN'; staffId: string; acceptedAt: string } | null {
+): { by: 'SESSION' | 'SUPERVISOR_PIN' | 'AUTOMATIC'; staffId: string; acceptedAt: string } | null {
   const r = readOperatorResolution(operatorResolution)
   return r ? { by: r.by, staffId: r.staffId, acceptedAt: r.acceptedAt } : null
 }
@@ -489,8 +489,10 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
           attemptId: r.attemptId,
           terminalId: r.terminalId,
           venueId: r.venueId,
+          // NO_INSTRUMENT_PRESENTED = el cajero; NO_BANK_TRACE_AFTER_WINDOW = la terminal sola (ronda 20, 23-sep), donde el
+          // aviso del banco está comprobado y no llegó.
           kind: d.kind ?? null,
-          // Cómo se autorizó: la sesión de la terminal, o el PIN de un supervisor que la elevó.
+          // Cómo se autorizó: la sesión de la terminal, el PIN de un supervisor que la elevó, o AUTOMATIC (la terminal).
           authorizedBy: d.by ?? null,
           staffId: d.staffId ?? null,
           declaredAt: d.acceptedAt ?? r.createdAt.toISOString(),
@@ -504,10 +506,12 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         unknownCount: requests.filter(r => r.status === TerminalPaymentRequestStatus.UNKNOWN).length,
         requests,
         /**
-         * Cashier declarations of "no card was presented" on LOCAL charges (started ON the terminal, with no POS
-         * request), from the last 24h. They never appear under `requests` because they have no request to belong to.
-         * Human testimony, never a bank decline: if money shows up later for that attempt, the money wins and the
-         * declaration is kept as the contradiction it is.
+         * Releases of LOCAL charges (started ON the terminal, with no POS request), from the last 24h: a cashier's
+         * "no card was presented" (kind NO_INSTRUMENT_PRESENTED), or the terminal's own automatic release after waiting
+         * for the bank notice that never came, only where that merchant's bank notices are proven to arrive
+         * (kind NO_BANK_TRACE_AFTER_WINDOW, authorizedBy AUTOMATIC). They never appear under `requests` because they
+         * have no request to belong to. Never a bank decline: if money shows up later for that attempt, the money wins
+         * and the release is kept as the contradiction it is.
          */
         localResolutions,
       })

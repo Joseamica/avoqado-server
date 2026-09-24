@@ -45,3 +45,4 @@ graphify-out/
 .DS_Store
 *.tsbuildinfo
 .gbrain-source
+.context/codex-session-id

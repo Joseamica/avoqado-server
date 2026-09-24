@@ -120,6 +120,14 @@ export const resolveNoInstrument = async (req: Request, res: Response) => {
     return res.status(200).json({ success: true, ...result })
   } catch (error) {
     if (error instanceof service.NoInstrumentResolutionError) {
+      // Sólo el CÓDIGO (nunca el cuerpo: puede traer un PIN): sin esto el log decía «409» y no por qué — un «sin aviso
+      // comprobado» (ronda 20) y una evidencia de dinero se veían idénticos.
+      logger.warn('No-instrument resolution rejected', {
+        venueId: req.params.venueId,
+        attemptId: req.params.attemptId,
+        code: error.code,
+        statusCode: error.statusCode,
+      })
       if (error.statusCode === 403) {
         void logAction({
           staffId: req.authContext?.userId ?? null,

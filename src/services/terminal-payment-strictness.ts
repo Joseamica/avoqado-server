@@ -1,5 +1,6 @@
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
+import { runWithoutCancellation } from '@/utils/requestCancellation'
 import type { EstrictoPorVenue } from './terminal-payment.service'
 
 /**
@@ -87,15 +88,20 @@ function refrescar(opciones?: { forzarLecturaNueva?: boolean }): Promise<void> {
   }
   enVuelo = (async () => {
     try {
-      const filas = await prisma.venue.findMany({
-        // ENCENDIDO y con corte: la fecha sola no basta, porque apagar la conserva (para no desplazar el corte
-        // al reencender). Ver `Venue.terminalPaymentStrictEnabled`.
-        where: { terminalPaymentStrictEnabled: true, terminalPaymentStrictSince: { not: null } },
-        select: { id: true, terminalPaymentStrictSince: true },
-        // Tope explícito (regla `bounded-queries-and-server-load.md`): son los venues MIGRADOS, un puñado durante
-        // la migración. Si algún día se pasara de aquí, se vería en el log de arranque antes que en un incidente.
-        take: 500,
-      })
+      // Trabajo GLOBAL que puede nacer dentro de una petición del MCP (sus herramientas de terminales consultan esta
+      // lista): el freno de esa petición no le toca. Cortarlo gritaría un 🚨 falso, y hacerlo esperar el cupo de esa
+      // persona retrasaría la marcha atrás de `invalidarVenuesEstrictos` (freno del 23-sep-2026).
+      const filas = await runWithoutCancellation(() =>
+        prisma.venue.findMany({
+          // ENCENDIDO y con corte: la fecha sola no basta, porque apagar la conserva (para no desplazar el corte
+          // al reencender). Ver `Venue.terminalPaymentStrictEnabled`.
+          where: { terminalPaymentStrictEnabled: true, terminalPaymentStrictSince: { not: null } },
+          select: { id: true, terminalPaymentStrictSince: true },
+          // Tope explícito (regla `bounded-queries-and-server-load.md`): son los venues MIGRADOS, un puñado durante
+          // la migración. Si algún día se pasara de aquí, se vería en el log de arranque antes que en un incidente.
+          take: 500,
+        }),
+      )
       const nuevo = new Map<string, Date>()
       for (const f of filas) if (f.terminalPaymentStrictSince) nuevo.set(f.id, f.terminalPaymentStrictSince)
       cache = nuevo

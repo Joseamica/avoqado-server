@@ -3644,7 +3644,18 @@ router.get(
  *                 description: Lo genera la terminal UNA vez por declaración; el replay con el mismo id es idempotente
  *               statement:
  *                 type: string
- *                 enum: [NO_INSTRUMENT_PRESENTED]
+ *                 enum: [NO_INSTRUMENT_PRESENTED, NO_BANK_TRACE_AFTER_WINDOW]
+ *                 description: >
+ *                   `NO_BANK_TRACE_AFTER_WINDOW` (ronda 20, 23-sep) = la TERMINAL, no una persona: esperó el aviso del banco
+ *                   y no llegó. Sólo en un Pago rápido (sin solicitud del POS), sin `supervisorPin`, sin pedir permiso de
+ *                   declarar, y sólo donde el aviso del banco del comercio de ESE cobro (`merchantAccountId`) está
+ *                   comprobado: cada uno de sus últimos 10 cobros con tarjeta trajo su aviso. Mismo veto de dinero; la
+ *                   sesión tiene que ser miembro activo del negocio.
+ *               merchantAccountId:
+ *                 type: string
+ *                 description: >
+ *                   Ronda 21. Obligatorio con `NO_BANK_TRACE_AFTER_WINDOW`: el comercio con el que se hizo ese cobro. Tiene
+ *                   que ser AngelPay y del negocio; si no, 409 ATTEMPT_NOT_ELIGIBLE.
  *               statementVersion:
  *                 type: integer
  *                 enum: [1]
@@ -3653,13 +3664,13 @@ router.get(
  *                 description: Sólo cuando la sesión NO tiene el permiso — el PIN de alguien que sí lo tiene. Nunca se guarda
  *     responses:
  *       200:
- *         description: "{ success, …la respuesta del GET del intento (S6), resolution: { id, acceptedAt, by: SESSION | SUPERVISOR_PIN } }"
+ *         description: "{ success, …la respuesta del GET del intento (S6), resolution: { id, acceptedAt, by: SESSION | SUPERVISOR_PIN | AUTOMATIC } }"
  *       403:
  *         description: "{ success: false, code: TERMINAL_IDENTITY_REQUIRED | SUPERVISOR_AUTHORIZATION_REQUIRED | SESSION_NOT_IN_VENUE }"
  *       404:
  *         description: "{ success: false, code: ATTEMPT_NOT_FOUND } — intento desconocido, de otra terminal o de otro venue"
  *       409:
- *         description: "{ success: false, code: ATTEMPT_NOT_ELIGIBLE | POSITIVE_EVIDENCE_EXISTS | RESOLUTION_CONFLICT | OTHER_ATTEMPT_UNRESOLVED }"
+ *         description: "{ success: false, code: ATTEMPT_NOT_ELIGIBLE | POSITIVE_EVIDENCE_EXISTS | RESOLUTION_CONFLICT | OTHER_ATTEMPT_UNRESOLVED | WEBHOOK_NOT_CONFIRMED }"
  *       429:
  *         description: Demasiados intentos de autorización — sólo cuenta las llamadas CON supervisorPin (mismos topes que el PIN de gerente)
  *       503:

@@ -1,4 +1,4 @@
-import { instrumentTools, sanitizeThrownError, sanitizeToolResult } from '../../../src/mcp/instrument'
+import { instrumentTools, recordCancelledToolCall, sanitizeThrownError, sanitizeToolResult } from '../../../src/mcp/instrument'
 import { ScopeError } from '../../../src/mcp/errors'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
@@ -255,5 +255,272 @@ describe('sanitizeToolResult (errors a tool RETURNS as ok:false)', () => {
     expect(await wrapped({}, {})).toBe(normal)
     expect(mockedLogger.warn).toHaveBeenCalledTimes(1)
     expect(mockedLogger.warn.mock.calls[0][1]).not.toHaveProperty('ref')
+  })
+})
+
+/**
+ * El freno del incidente del 23-sep-2026: una petición del MCP cancelada (tope vencido o cliente que se
+ * fue) no debe EMPEZAR una herramienta, ni DEVOLVER un resultado que pudo quedar a medias porque un `catch`
+ * de la herramienta se tragó el corte de una lectura. Y la bitácora de la llamada (McpToolCall) se escribe
+ * siempre, fuera del freno.
+ */
+describe('instrumentTools — peticiones canceladas', () => {
+  const { runWithContext, getContext } = jest.requireActual(
+    '@/observability/executionContext',
+  ) as typeof import('@/observability/executionContext')
+  const { RequestCancelledError, checkCancellation, isRequestCancelledError } = jest.requireActual(
+    '@/utils/requestCancellation',
+  ) as typeof import('@/utils/requestCancellation')
+
+  function cancelacion(abortada = false) {
+    const controller = new AbortController()
+    const c = { signal: controller.signal, hasWritten: false, refused: false }
+    if (abortada) controller.abort(new RequestCancelledError('timeout', 25_000))
+    return { c, abortar: () => controller.abort(new RequestCancelledError('timeout', 25_000)) }
+  }
+  const enPeticion = <T>(c: { signal: AbortSignal; hasWritten: boolean; refused: boolean }, fn: () => T): T =>
+    runWithContext({ correlationId: 'c-9', source: 'http', entrypoint: 'POST /mcp tools/call daily_sales', cancellation: c }, fn)
+
+  function registrar(handler: (...a: unknown[]) => unknown) {
+    const { server, original } = makeServer()
+    instrumentTools(server, ctx)
+    callTool(server, 'daily_sales', {}, handler)
+    return original.mock.calls[0][2] as (...a: unknown[]) => Promise<unknown>
+  }
+
+  beforeEach(() => jest.clearAllMocks())
+
+  it('si la petición ya venía cancelada, la herramienta NO empieza y se avisa (warn, no error) con el motivo', async () => {
+    const handler = jest.fn().mockResolvedValue(okResult)
+    const wrapped = registrar(handler)
+    const { c } = cancelacion(true)
+
+    let thrown: unknown
+    await enPeticion(c, () => wrapped({ venueId: 'v1' }, {})).catch(e => (thrown = e))
+
+    expect(handler).not.toHaveBeenCalled()
+    expect(isRequestCancelledError(thrown)).toBe(true)
+    expect((thrown as Error).message).toMatch(/25 s/) // el cliente lee POR QUÉ, en español
+    expect(mockedLogger.warn).toHaveBeenCalledWith(
+      'mcp.tool daily_sales cancelada',
+      expect.objectContaining({ reason: 'timeout', venueId: 'v1' }),
+    )
+    expect(mockedLogger.error).not.toHaveBeenCalled()
+  })
+
+  it('si la herramienta se tragó el corte de una lectura y devolvió datos, NO se entregan (pueden estar incompletos)', async () => {
+    const { c, abortar } = cancelacion()
+    const wrapped = registrar(async () => {
+      abortar()
+      try {
+        checkCancellation('findMany', getContext()?.cancellation) // la lectura se corta…
+      } catch {
+        // …y un catch de la herramienta se lo traga
+      }
+      return okResult // devuelve lo que alcanzó a juntar
+    })
+
+    await expect(enPeticion(c, () => wrapped({}, {}))).rejects.toBeInstanceOf(RequestCancelledError)
+  })
+
+  it('si la herramienta convirtió el corte en otro error, se reporta como cancelación y no como error interno', async () => {
+    const { c, abortar } = cancelacion()
+    const wrapped = registrar(async () => {
+      abortar()
+      try {
+        checkCancellation('findFirst', getContext()?.cancellation)
+      } catch {
+        throw new TypeError("Cannot read properties of null (reading 'id')")
+      }
+      return okResult
+    })
+
+    let thrown: unknown
+    await enPeticion(c, () => wrapped({}, {})).catch(e => (thrown = e))
+    expect(isRequestCancelledError(thrown)).toBe(true)
+    expect(mockedLogger.error).not.toHaveBeenCalled()
+  })
+
+  it('si todas sus lecturas terminaron antes del tope, el resultado se entrega aunque haya llegado tarde', async () => {
+    const { c, abortar } = cancelacion()
+    const wrapped = registrar(async () => {
+      checkCancellation('findMany', getContext()?.cancellation) // lectura completa, antes del tope
+      abortar() // el tope vence mientras la herramienta arma la respuesta
+      return okResult
+    })
+
+    await expect(enPeticion(c, () => wrapped({}, {}))).resolves.toBe(okResult)
+  })
+
+  it('la bitácora de la llamada cancelada se escribe FUERA del freno (no se rechaza ni cuenta como escritura)', async () => {
+    let cancelacionVista: unknown = 'no se llamó'
+    mockedPrisma.mcpToolCall.create.mockImplementationOnce(async () => {
+      cancelacionVista = getContext()?.cancellation
+      return {}
+    })
+    const wrapped = registrar(jest.fn().mockResolvedValue(okResult))
+    const { c } = cancelacion(true)
+
+    await enPeticion(c, () => wrapped({ venueId: 'v1' }, {})).catch(() => undefined)
+    await new Promise(r => setImmediate(r))
+
+    expect(cancelacionVista).toBeUndefined()
+    expect(mockedPrisma.mcpToolCall.create.mock.calls.at(-1)?.[0]?.data).toMatchObject({
+      toolName: 'daily_sales',
+      outcome: 'error',
+      detail: 'cancelada:timeout',
+      venueId: 'v1',
+    })
+  })
+
+  // Codex P1-2: una herramienta que sigue corriendo retiene el cupo aunque el cliente ya se haya ido.
+  it('la herramienta cuenta como trabajo en vuelo mientras corre, y avisa al terminar', async () => {
+    const { c } = cancelacion()
+    const alTerminar = jest.fn()
+    const conTrabajo = { ...c, activeWork: 0, onIdle: alTerminar }
+    let enVuelo = -1
+    const wrapped = registrar(async () => {
+      enVuelo = getContext()?.cancellation?.activeWork ?? -1
+      return okResult
+    })
+    await enPeticion(conTrabajo, () => wrapped({}, {}))
+    expect(enVuelo).toBe(1)
+    expect(conTrabajo.activeWork).toBe(0)
+    expect(alTerminar).toHaveBeenCalledTimes(1)
+  })
+
+  // Codex P1-3, su escenario exacto: Promise.all rechaza con la primera rama cortada, el catch escribe la
+  // bitácora y la rama hermana SIGUE trabajando. Ni la bitácora puede marcar la petición como escrita, ni la
+  // hermana puede seguir leyendo.
+  it('Promise.all: cortada una rama y escrita la bitácora, la rama hermana se detiene en su siguiente lectura', async () => {
+    const { c, abortar } = cancelacion()
+    // la bitácora pasa por la extensión real, como en producción
+    mockedPrisma.mcpToolCall.create.mockImplementation(async () => {
+      checkCancellation('create', getContext()?.cancellation)
+      return {}
+    })
+    const hermana: string[] = []
+    let ramaHermana: Promise<void> = Promise.resolve()
+    const wrapped = registrar(async () => {
+      abortar()
+      const cancel = getContext()?.cancellation
+      const ramaA = (async () => {
+        checkCancellation('findMany', cancel)
+      })()
+      ramaHermana = (async () => {
+        for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r)) // sigue después del catch y la bitácora
+        try {
+          checkCancellation('findFirst', cancel)
+          hermana.push('leyó')
+        } catch {
+          hermana.push('cortada')
+        }
+      })()
+      await Promise.all([ramaA, ramaHermana])
+      return okResult
+    })
+
+    await enPeticion(c, () => wrapped({}, {})).catch(() => undefined)
+    await ramaHermana
+    expect(hermana).toEqual(['cortada'])
+    expect(c.hasWritten).toBe(false)
+    mockedPrisma.mcpToolCall.create.mockReset()
+  })
+
+  // Codex ronda 2, P1, su reproducción exacta: un error ORDINARIO (no una cancelación) en una rama de Promise.all.
+  // Antes la hermana seguía leyendo sin reloj con el cupo ya libre; ahora, al responder la herramienta, la unidad
+  // se cierra para lecturas y la hermana se detiene en su siguiente lectura.
+  it('Promise.all con un error ordinario: al responder la herramienta, la rama hermana se detiene en su siguiente lectura', async () => {
+    const controller = new AbortController()
+    const c = {
+      signal: controller.signal,
+      hasWritten: false,
+      refused: false,
+      cancel: (reason: Error) => {
+        if (!controller.signal.aborted) controller.abort(reason)
+      },
+    }
+    const hermana: string[] = []
+    let ramaHermana: Promise<void> = Promise.resolve()
+    const wrapped = registrar(async () => {
+      const cancel = getContext()?.cancellation
+      const ramaA = (async () => {
+        throw new Error('venue no encontrado')
+      })()
+      ramaHermana = (async () => {
+        for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r)) // sigue después de la respuesta
+        try {
+          checkCancellation('findMany', cancel)
+          hermana.push('leyó')
+        } catch (e) {
+          hermana.push(isRequestCancelledError(e) ? (e as InstanceType<typeof RequestCancelledError>).reason : 'otro')
+        }
+      })()
+      await Promise.all([ramaA, ramaHermana])
+      return okResult
+    })
+
+    await enPeticion(c, () => wrapped({}, {})).catch(() => undefined)
+    await ramaHermana
+    expect(hermana).toEqual(['tool-finished'])
+  })
+
+  it('una herramienta que escribió no ve cortado lo que siga después de responder (un registro posterior termina)', async () => {
+    const controller = new AbortController()
+    const c = {
+      signal: controller.signal,
+      hasWritten: false,
+      refused: false,
+      cancel: (reason: Error) => {
+        if (!controller.signal.aborted) controller.abort(reason)
+      },
+    }
+    let despues: Promise<string> = Promise.resolve('no corrió')
+    const wrapped = registrar(async () => {
+      const cancel = getContext()?.cancellation
+      checkCancellation('create', cancel) // la herramienta escribió
+      despues = (async () => {
+        await new Promise(r => setImmediate(r))
+        checkCancellation('findFirst', cancel) // p. ej. un aviso posterior que lee y escribe
+        checkCancellation('create', cancel)
+        return 'terminó'
+      })()
+      return okResult
+    })
+    await enPeticion(c, () => wrapped({}, {}))
+    await expect(despues).resolves.toBe('terminó')
+  })
+
+  // REGRESIÓN — con la petición viva, nada cambia
+  it('con la petición viva, la herramienta corre y su resultado se entrega idéntico', async () => {
+    const wrapped = registrar(jest.fn().mockResolvedValue(okResult))
+    const { c } = cancelacion()
+    await expect(enPeticion(c, () => wrapped({}, {}))).resolves.toBe(okResult)
+    expect(mockedLogger.warn).not.toHaveBeenCalled()
+  })
+})
+
+describe('recordCancelledToolCall — un intento cortado antes de que la herramienta corriera', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  it('deja la fila de bitácora como cancelada, con su motivo y su venue', async () => {
+    recordCancelledToolCall({
+      toolName: 'daily_sales',
+      staffId: 'staff-1',
+      orgId: 'org-1',
+      venueId: 'v1',
+      reason: 'timeout',
+      durationMs: 25_010,
+    })
+    await new Promise(r => setImmediate(r))
+    expect(mockedPrisma.mcpToolCall.create.mock.calls.at(-1)?.[0]?.data).toMatchObject({
+      toolName: 'daily_sales',
+      staffId: 'staff-1',
+      orgId: 'org-1',
+      venueId: 'v1',
+      outcome: 'error',
+      detail: 'cancelada:timeout',
+      durationMs: 25_010,
+    })
   })
 })

@@ -30,6 +30,9 @@ import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { moduleService } from '@/services/modules/module.service'
 import { materializeEntries, reconcileClawbacks, getSaldo } from '@/services/dashboard/cash-out/cash-out.ledger.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
+import { getContext, runWithContext, type RequestCancellation } from '@/observability/executionContext'
+import { checkCancellation, endOfWriteUnit, RequestCancelledError } from '@/utils/requestCancellation'
 
 const p = prisma as unknown as {
   venue: { findUnique: jest.Mock }
@@ -166,5 +169,61 @@ describe('cash-out ledger — reconcileClawbacks', () => {
     expect(p.promoterCommissionEntry.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: { in: ['e2'] } }, data: expect.objectContaining({ status: 'CLAWED_BACK' }) }),
     )
+  })
+})
+
+/**
+ * Freno del MCP (incidente del 23-sep-2026, Codex ronda 5): `cash_out_org_saldos` recorre las tiendas y, al terminar
+ * cada una, `endOfWriteUnit()` vuelve a permitir el corte. La bitácora del clawback queda corriendo sola y, como Prisma
+ * difiere la ejecución, su INSERT llega al freno DESPUÉS de ese reinicio: dentro de la cancelación volvía a marcar la
+ * unidad como escrita — el recorrido ya no se detenía en las tiendas siguientes — o, con la unidad ya envenenada, se
+ * rechazaba y el clawback quedaba sin rastro. Por eso corre fuera del freno, como la bitácora propia del MCP.
+ */
+describe('cash-out ledger — reconcileClawbacks dentro de una petición del MCP (freno 23-sep)', () => {
+  it('la bitácora que llega DESPUÉS de endOfWriteUnit() no vuelve a desactivar el freno, y se escribe igual', async () => {
+    const controller = new AbortController()
+    const cancellation: RequestCancellation = { signal: controller.signal, hasWritten: false, refused: false }
+    p.promoterCommissionEntry.findMany.mockResolvedValue([{ id: 'e1', saleVerificationId: 's1' }])
+    p.saleVerification.findMany.mockResolvedValue([]) // s1 ya no está COMPLETED
+    p.promoterCommissionEntry.updateMany.mockImplementation(async () => {
+      checkCancellation('updateMany', getContext()?.cancellation) // como la extensión: el clawback ESCRIBE
+      return { count: 1 }
+    })
+    let bitacora!: Promise<void>
+    ;(logAction as jest.Mock).mockImplementation(() => {
+      // Como Prisma: el INSERT de la bitácora llega al freno en un turno posterior, con el contexto en que se lanzó.
+      bitacora = new Promise<void>(resolve =>
+        setImmediate(() => {
+          checkCancellation('create', getContext()?.cancellation)
+          resolve()
+        }),
+      )
+      return bitacora
+    })
+
+    await runWithContext(
+      { correlationId: 'c-cb', source: 'http', entrypoint: 'POST /mcp tools/call cash_out_org_saldos', cancellation },
+      async () => {
+        await reconcileClawbacks('v_pt')
+        endOfWriteUnit() // la tienda quedó completa: el freno puede volver a cortar
+      },
+    )
+    await bitacora
+
+    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'CASH_OUT_CLAWBACK', venueId: 'v_pt' }))
+    expect(cancellation.hasWritten).toBe(false)
+    // Y el freno SIGUE activo: vence el tope y la lectura de la tienda siguiente se corta.
+    controller.abort(new RequestCancelledError('timeout', 25_000))
+    expect(() => checkCancellation('findMany', cancellation)).toThrow(RequestCancelledError)
+  })
+
+  // REGRESIÓN — fuera de una petición del MCP (dashboard, jobs) la bitácora se escribe igual que siempre
+  it('fuera de una petición del MCP la bitácora del clawback se escribe como siempre', async () => {
+    p.promoterCommissionEntry.findMany.mockResolvedValue([{ id: 'e1', saleVerificationId: 's1' }])
+    p.saleVerification.findMany.mockResolvedValue([])
+    p.promoterCommissionEntry.updateMany.mockResolvedValue({ count: 1 })
+    ;(logAction as jest.Mock).mockResolvedValue(undefined)
+    await expect(reconcileClawbacks('v_pt')).resolves.toEqual({ clawedBack: 1 })
+    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'CASH_OUT_CLAWBACK', entity: 'PromoterCommissionEntry' }))
   })
 })

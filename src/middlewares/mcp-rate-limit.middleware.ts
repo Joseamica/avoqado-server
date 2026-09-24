@@ -104,7 +104,7 @@ function jsonRpcRateLimitError(res: Response, message: string, retryAfterSeconds
 }
 
 /** Identity threaded by `requireBearerAuth` (`provider.verifyAccessToken`) onto the request. */
-function identityOf(req: Request): { staffId?: string; activeOrg?: string } {
+export function identityOf(req: Request): { staffId?: string; activeOrg?: string } {
   const extra = (req as { auth?: { extra?: Record<string, unknown> } }).auth?.extra
   return {
     staffId: typeof extra?.staffId === 'string' ? extra.staffId : undefined,

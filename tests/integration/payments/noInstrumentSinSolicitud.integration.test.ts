@@ -11,7 +11,7 @@
   `Payment` con la llave del intento y la evidencia del procesador — y son toda la evidencia que el servidor tiene
   de un cobro local. Si alguno existe, la declaración se RECHAZA.
 */
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import prisma from '@/utils/prismaClient'
 import { recordFastPayment } from '@/services/tpv/payment.tpv.service'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
@@ -824,7 +824,10 @@ describe('Pieza B · declarar «no se presentó tarjeta» SIN solicitud del POS'
     // `OR` salía verde aunque el veto nuevo por `paymentId` no existiera. Se le pone la TERMINAL de este fixture: así
     // es dinero PROPIO de este intento, y lo único que puede publicarlo es la regla que se quiere probar.
     const orden = await f.nuevaVenta()
-    const terminal = await prisma.terminal.findFirst({ where: { venueId: f.venueId }, select: { id: true } })
+    // Ronda 23: la terminal DEL FIXTURE, por su serial. Con `findFirst({ venueId })` a secas la prueba era no determinista: otras
+    // del archivo crean una segunda terminal («otra») en el mismo negocio y, según el orden físico de la tabla, le tocaba ésa —
+    // el pago dejaba de ser de este intento y no se publicaba (falló así una vez en la corrida de las 13 suites).
+    const terminal = await prisma.terminal.findUnique({ where: { serialNumber: f.serial }, select: { id: true } })
     await prisma.payment.create({
       data: {
         venueId: f.venueId,
@@ -924,5 +927,430 @@ describe('Pieza B · declarar «no se presentó tarjeta» SIN solicitud del POS'
     const A = randomUUID()
     await expect(declarar(A)).rejects.toMatchObject({ code: 'SUPERVISOR_AUTHORIZATION_REQUIRED' })
     expect(await prisma.terminalAttemptResolution.findUnique({ where: { attemptId: A } })).toBeNull()
+  })
+})
+
+/**
+ * 🔴 Ronda 20 (founder, 23-sep): «no debería trabarse nunca y todo es por webhook». Un Pago rápido que quedó sin desenlace
+ * ya no espera a una persona: la TERMINAL espera el aviso del banco 10 s y, si no llega, declara ELLA MISMA «sin rastro del
+ * banco tras la ventana».
+ *
+ * El silencio sólo prueba algo donde el aviso del banco está COMPROBADO — y para EL COMERCIO CON EL QUE SE HIZO ESE COBRO
+ * (Codex r19, P1-3: medir el comercio asignado HOY dejaba pasar un cobro hecho con otro). Comprobado quiere decir (Codex r19,
+ * P1-2): recibió avisos, y CADA UNO de sus últimos 10 cobros con tarjeta (completados, no reembolsos, de hace más de 60 s)
+ * tiene su propio aviso. Medido en producción el 23-sep: Testarudo, Amaena, Fonason y Restbar 10/10; ETHERA 5/9 (su aviso se
+ * rompió el 7-ago) y ESTOCOLMO 0/10 (nunca se configuró).
+ */
+describe('Ronda 20/21 · la terminal se libera SOLA: «sin rastro del banco tras la ventana»', () => {
+  const HACE_UN_MINUTO = () => new Date(Date.now() - 60_000)
+  let avisos = 0
+
+  const automatica = (attemptId: string, over: Record<string, unknown> = {}, actorStaffId: string | null = f.staffId) =>
+    resolveNoInstrument(
+      { venueId: f.venueId, terminalSerial: f.serial, attemptId, actorStaffId },
+      { resolutionId: randomUUID(), statement: 'NO_BANK_TRACE_AFTER_WINDOW', statementVersion: 1, merchantAccountId: f.merchantId, ...over },
+    )
+
+  /** La terminal de la fixture con SUS comercios AngelPay, y el último aviso de cada uno. */
+  async function comercios(ultimosAvisos: (Date | null)[]) {
+    const ids = [f.merchantId]
+    while (ids.length < ultimosAvisos.length) ids.push((await f.afiliacionSecundaria()).id)
+    await prisma.terminal.update({ where: { serialNumber: f.serial }, data: { assignedMerchantIds: ids } })
+    for (const [i, id] of ids.entries()) {
+      await prisma.merchantAccount.update({ where: { id }, data: { angelpayWebhookLastReceivedAt: ultimosAvisos[i] } })
+    }
+    return ids
+  }
+
+  /**
+   * Un cobro YA registrado del comercio (no del intento que se declara), en el instante dado — y, salvo que se pida lo
+   * contrario, CON su aviso del banco (un `ProviderEventLog` ligado a ese Payment, como lo deja el receptor del webhook).
+   */
+  async function cobroDelComercio(merchantAccountId: string, createdAt: Date, over: Record<string, unknown> = {}, conAviso = true) {
+    const orden = await f.nuevaVenta()
+    const pago = await prisma.payment.create({
+      data: {
+        venueId: f.venueId,
+        orderId: orden.id,
+        amount: 100,
+        method: 'CREDIT_CARD',
+        status: 'COMPLETED',
+        feePercentage: 0,
+        feeAmount: 0,
+        netAmount: 100,
+        merchantAccountId,
+        createdAt,
+        ...over,
+      },
+    })
+    if (conAviso) {
+      await prisma.providerEventLog.create({
+        data: {
+          provider: 'PAYMENT_PROCESSOR',
+          eventId: `angelpay-${f.fixture}-aviso-${++avisos}`,
+          paymentId: pago.id,
+          venueId: f.venueId,
+          payload: avisoRecibidoPor(merchantAccountId),
+          status: 'PROCESSED',
+        },
+      })
+    }
+    return pago
+  }
+
+  /** El `payload` como lo guarda el receptor real: con el comercio que RECIBIÓ el aviso (`_avoqado.receivedByMerchantAccountId`). */
+  const avisoRecibidoPor = (merchantAccountId: string) => ({
+    payload: { status: 'approved' },
+    _avoqado: { receivedByMerchantAccountId: merchantAccountId },
+  })
+
+  /** Un comercio AngelPay cuyo acceso es de OTRO negocio: la terminal no puede apoyarse en su aviso. */
+  async function comercioDeOtroNegocio() {
+    const hermano = await venueHermano()
+    const proveedor = await prisma.paymentProvider.findUniqueOrThrow({ where: { code: 'ANGELPAY' } })
+    const login = await prisma.angelPayUserAccount.create({
+      data: { venueId: hermano, email: `${f.fixture}-ajeno@angelpay.test`, environment: 'QA', status: 'ACTIVE' },
+    })
+    return prisma.merchantAccount.create({
+      data: {
+        providerId: proveedor.id,
+        externalMerchantId: `ajeno-${randomUUID().slice(0, 8)}`,
+        alias: 'AngelPay de otro negocio',
+        credentialsEncrypted: {},
+        angelpayUserAccountId: login.id,
+        angelpayWebhookLastReceivedAt: HACE_UN_MINUTO(),
+      },
+    })
+  }
+
+  afterEach(async () => {
+    await prisma.terminal.update({ where: { serialNumber: f.serial }, data: { assignedMerchantIds: [] } })
+    await prisma.merchantAccount.update({ where: { id: f.merchantId }, data: { angelpayWebhookLastReceivedAt: null, active: true } })
+    await prisma.activityLog.deleteMany({ where: { venueId: f.venueId } })
+    const ajenos = await prisma.angelPayUserAccount.findMany({ where: { email: `${f.fixture}-ajeno@angelpay.test` }, select: { id: true } })
+    await prisma.merchantAccount.deleteMany({ where: { angelpayUserAccountId: { in: ajenos.map(a => a.id) } } })
+    await prisma.angelPayUserAccount.deleteMany({ where: { id: { in: ajenos.map(a => a.id) } } })
+  })
+
+  it('con el aviso COMPROBADO: se acepta SIN permiso del cajero, queda durable como AUTOMÁTICA y S6 la publica', async () => {
+    await cajeroSinPermiso() // no es la palabra de una persona: no pide `payments:resolve-no-instrument` ni PIN
+    const [m] = await comercios([HACE_UN_MINUTO()])
+    await cobroDelComercio(m, new Date(Date.now() - 90_000)) // el último cobro con tarjeta SÍ trajo su aviso
+    // Un cobro en EFECTIVO posterior, sin aviso, no dice nada del aviso del banco: no lo invalida.
+    await cobroDelComercio(m, new Date(Date.now() - 120_000), { method: 'CASH' }, false)
+    const A = randomUUID()
+
+    const r = await automatica(A)
+
+    expect((r as { resolution?: { by?: string } }).resolution?.by).toBe('AUTOMATIC')
+    const fila = await prisma.terminalAttemptResolution.findUnique({ where: { attemptId: A } })
+    expect(fila!.resolution).toMatchObject({ kind: 'NO_BANK_TRACE_AFTER_WINDOW', by: 'AUTOMATIC', staffId: f.staffId })
+    const visto = await consultar(A)
+    expect((visto!.attempt as { resolution?: unknown }).resolution).toMatchObject({ kind: 'NO_BANK_TRACE_AFTER_WINDOW' })
+    // La bitácora dice que fue la TERMINAL, en qué sesión y con qué comercio.
+    const asiento = await prisma.activityLog.findFirst({ where: { venueId: f.venueId, entityId: A } })
+    expect(asiento?.action).toBe('TERMINAL_PAYMENT_AUTO_RELEASED_NO_BANK_TRACE')
+    expect(asiento?.data).toMatchObject({ attemptId: A, terminalId: f.llaveTerminal, sinSolicitud: true, merchantAccountId: m })
+  })
+
+  it('🔴 comercio que NUNCA recibió un aviso (el caso medido de 22 cobros): 409 WEBHOOK_NOT_CONFIRMED, nada escrito', async () => {
+    await comercios([null])
+    const A = randomUUID()
+    await expect(automatica(A)).rejects.toMatchObject({ code: 'WEBHOOK_NOT_CONFIRMED' })
+    expect(await prisma.terminalAttemptResolution.findUnique({ where: { attemptId: A } })).toBeNull()
+  })
+
+  it('🔴 r19 P1-2 · un cobro 30 s DESPUÉS del último aviso que nunca trajo el suyo ⇒ WEBHOOK_NOT_CONFIRMED (antes se colaba por la gracia de 60 s)', async () => {
+    const hace10min = new Date(Date.now() - 10 * 60_000)
+    const [m] = await comercios([hace10min])
+    await cobroDelComercio(m, new Date(hace10min.getTime() - 60_000)) // uno anterior, con su aviso
+    await cobroDelComercio(m, new Date(hace10min.getTime() + 30_000), {}, false) // el que se quedó sin aviso
+    await expect(automatica(randomUUID())).rejects.toMatchObject({ code: 'WEBHOOK_NOT_CONFIRMED' })
+  })
+
+  it('🔴 r19 P1-2 · un aviso POSTERIOR (p. ej. de otra terminal que comparte el comercio) no tapa el cobro que se quedó sin el suyo', async () => {
+    const [m] = await comercios([HACE_UN_MINUTO()])
+    await cobroDelComercio(m, new Date(Date.now() - 20 * 60_000), {}, false) // sin aviso
+    await cobroDelComercio(m, new Date(Date.now() - 5 * 60_000)) // más reciente, con aviso
+    await expect(automatica(randomUUID())).rejects.toMatchObject({ code: 'WEBHOOK_NOT_CONFIRMED' })
+  })
+
+  it('los 10 cobros más recientes con su aviso ⇒ comprobado, aunque uno MÁS VIEJO (el 11º) no lo tenga', async () => {
+    const [m] = await comercios([HACE_UN_MINUTO()])
+    await cobroDelComercio(m, new Date(Date.now() - 60 * 60_000), {}, false) // el 11º, sin aviso
+    for (let i = 0; i < 10; i++) await cobroDelComercio(m, new Date(Date.now() - (30 - i) * 60_000))
+    await expect(automatica(randomUUID())).resolves.toBeTruthy()
+  })
+
+  it('un aviso ligado al INTENTO (por la llave del cobro, recortada) y no al pago también cuenta', async () => {
+    const [m] = await comercios([HACE_UN_MINUTO()])
+    const llave = randomUUID()
+    await cobroDelComercio(m, new Date(Date.now() - 5 * 60_000), { idempotencyKey: `\t${llave} ` }, false)
+    await prisma.providerEventLog.create({
+      data: {
+        provider: 'PAYMENT_PROCESSOR',
+        eventId: `angelpay-${f.fixture}-aviso-${++avisos}`,
+        attemptId: llave,
+        venueId: f.venueId,
+        payload: avisoRecibidoPor(m),
+        status: 'PROCESSED',
+      },
+    })
+    await expect(automatica(randomUUID())).resolves.toBeTruthy()
+  })
+
+  it('un cobro de hace MENOS de 60 s cuyo aviso todavía va en camino no descalifica', async () => {
+    const [m] = await comercios([HACE_UN_MINUTO()])
+    await cobroDelComercio(m, new Date(Date.now() - 5 * 60_000))
+    await cobroDelComercio(m, new Date(Date.now() - 20_000), {}, false)
+    await expect(automatica(randomUUID())).resolves.toBeTruthy()
+  })
+
+  it('un reembolso, un cobro fallido o uno en efectivo sin aviso NO invalidan (sólo cuentan los cobros con tarjeta completados)', async () => {
+    const [m] = await comercios([HACE_UN_MINUTO()])
+    await cobroDelComercio(m, new Date(Date.now() - 5 * 60_000), { type: 'REFUND' }, false)
+    await cobroDelComercio(m, new Date(Date.now() - 5 * 60_000), { status: 'FAILED' }, false)
+    await cobroDelComercio(m, new Date(Date.now() - 5 * 60_000), { method: 'CASH' }, false)
+    await expect(automatica(randomUUID())).resolves.toBeTruthy()
+  })
+
+  it('🔴 r19 P1-3 · se mide el comercio DEL INTENTO: con M1 sin aviso y la terminal ya reasignada a M2 (con aviso) ⇒ WEBHOOK_NOT_CONFIRMED', async () => {
+    const [m1, m2] = await comercios([null, HACE_UN_MINUTO()])
+    await prisma.terminal.update({ where: { serialNumber: f.serial }, data: { assignedMerchantIds: [m2] } }) // la reasignación
+    await expect(automatica(randomUUID(), { merchantAccountId: m1 })).rejects.toMatchObject({ code: 'WEBHOOK_NOT_CONFIRMED' })
+    // …y el mismo intento hecho con M2 sí se libera, aunque la terminal tuviera asignado otro.
+    await prisma.terminal.update({ where: { serialNumber: f.serial }, data: { assignedMerchantIds: [m1] } })
+    await expect(automatica(randomUUID(), { merchantAccountId: m2 })).resolves.toBeTruthy()
+  })
+
+  it('🔴 r20 P1-2 · un cobro de ESTE comercio registrado con la columna vacía (la cuenta estaba inactiva) SÍ cuenta: sin su aviso ⇒ WEBHOOK_NOT_CONFIRMED', async () => {
+    const [m] = await comercios([HACE_UN_MINUTO()])
+    await cobroDelComercio(m, new Date(Date.now() - 10 * 60_000)) // uno sano, con su aviso
+    // El registrador dejó el comercio en null y conservó la identidad con la que cobró la terminal en `processorData`.
+    await cobroDelComercio(m, new Date(Date.now() - 5 * 60_000), { merchantAccountId: null, processorData: { merchantAccountIdFromApk: m } }, false)
+    await expect(automatica(randomUUID())).rejects.toMatchObject({ code: 'WEBHOOK_NOT_CONFIRMED' })
+  })
+
+  it('r20 P1-2 control · un cobro atribuido a este comercio pero cobrado con OTRO (recuperado por serial) no cuenta contra éste', async () => {
+    const [m, otro] = await comercios([HACE_UN_MINUTO(), HACE_UN_MINUTO()])
+    await cobroDelComercio(m, new Date(Date.now() - 10 * 60_000))
+    await cobroDelComercio(m, new Date(Date.now() - 5 * 60_000), { processorData: { merchantAccountIdFromApk: otro } }, false)
+    await expect(automatica(randomUUID())).resolves.toBeTruthy()
+  })
+
+  it('🔴 r21 P1-3 · el aviso de OTRO intento recibido por OTRO comercio y ligado al pago por referencia NO acredita el aviso propio', async () => {
+    const [m1, m2] = await comercios([HACE_UN_MINUTO(), HACE_UN_MINUTO()])
+    await cobroDelComercio(m1, new Date(Date.now() - 10 * 60_000)) // uno sano de M1, con su aviso
+    const referencia = `REF-${randomUUID().slice(0, 8)}`
+    // El cobro A de M1 se quedó SIN su aviso…
+    const pagoA = await cobroDelComercio(m1, new Date(Date.now() - 5 * 60_000), { idempotencyKey: randomUUID(), referenceNumber: referencia }, false)
+    // …y llega por el webhook de M2 el aviso de OTRO intento (B), con la misma referencia bancaria e importe.
+    const externoM2 = (await prisma.merchantAccount.findUniqueOrThrow({ where: { id: m2 }, select: { externalMerchantId: true } })).externalMerchantId
+    await processAngelPayWebhook({
+      payload: f.eventoAngelPay(randomUUID(), { transactionId: referencia }),
+      eventId: f.nuevoEventId(),
+      merchantAccount: { id: m2, externalMerchantId: externoM2 },
+      retryDelaysMs: [0],
+    })
+    const ligado = await prisma.providerEventLog.findFirst({ where: { paymentId: pagoA.id } })
+    expect(ligado).not.toBeNull() // el receptor SÍ lo liga al pago A (conserva la evidencia)…
+
+    // …pero eso no es el aviso de A por M1: el silencio de M1 sigue sin estar comprobado.
+    await expect(automatica(randomUUID(), { merchantAccountId: m1 })).rejects.toMatchObject({ code: 'WEBHOOK_NOT_CONFIRMED' })
+  })
+
+  it('r21 P1-3 · un aviso ligado al pago pero de OTRO intento (su integratorReference no es la llave del pago) no cuenta', async () => {
+    const [m] = await comercios([HACE_UN_MINUTO()])
+    const pago = await cobroDelComercio(m, new Date(Date.now() - 5 * 60_000), { idempotencyKey: randomUUID() }, false)
+    await prisma.providerEventLog.create({
+      data: {
+        provider: 'PAYMENT_PROCESSOR', eventId: `angelpay-${f.fixture}-aviso-${++avisos}`, paymentId: pago.id, attemptId: randomUUID(),
+        venueId: f.venueId, payload: avisoRecibidoPor(m), status: 'PROCESSED',
+      },
+    })
+    await expect(automatica(randomUUID())).rejects.toMatchObject({ code: 'WEBHOOK_NOT_CONFIRMED' })
+  })
+
+  it('r21 P1-3 · un aviso ligado al pago con un motivo que contradice su atribución (MERCHANT_MISMATCH) no cuenta', async () => {
+    const [m] = await comercios([HACE_UN_MINUTO()])
+    const pago = await cobroDelComercio(m, new Date(Date.now() - 5 * 60_000), {}, false)
+    await prisma.providerEventLog.create({
+      data: {
+        provider: 'PAYMENT_PROCESSOR', eventId: `angelpay-${f.fixture}-aviso-${++avisos}`, paymentId: pago.id,
+        venueId: f.venueId, payload: avisoRecibidoPor(m), status: 'PROCESSED', errorReason: 'MERCHANT_MISMATCH',
+      },
+    })
+    await expect(automatica(randomUUID())).rejects.toMatchObject({ code: 'WEBHOOK_NOT_CONFIRMED' })
+  })
+
+  it('🔴 r22 P1-1 · un aviso de ESTA llave recibido por OTRO comercio y todavía sin clasificar (PENDING, sin motivo) no acredita', async () => {
+    const [m1, m2] = await comercios([HACE_UN_MINUTO(), HACE_UN_MINUTO()])
+    const llave = randomUUID()
+    await cobroDelComercio(m1, new Date(Date.now() - 5 * 60_000), { idempotencyKey: llave }, false)
+    await prisma.providerEventLog.create({
+      data: {
+        provider: 'PAYMENT_PROCESSOR', eventId: `angelpay-${f.fixture}-aviso-${++avisos}`, attemptId: llave,
+        venueId: f.venueId, payload: avisoRecibidoPor(m2), status: 'PENDING',
+      },
+    })
+    await expect(automatica(randomUUID(), { merchantAccountId: m1 })).rejects.toMatchObject({ code: 'WEBHOOK_NOT_CONFIRMED' })
+  })
+
+  it('🔴 r22 P1-1 · tras el backfill: un aviso recibido por OTRO comercio, ligado al pago y SIN MERCHANT_MISMATCH, no acredita', async () => {
+    const [m1, m2] = await comercios([HACE_UN_MINUTO(), HACE_UN_MINUTO()])
+    const llave = randomUUID()
+    // La columna quedó vacía (cuenta inactiva al registrar); la identidad con que cobró la terminal es M1.
+    const pago = await cobroDelComercio(m1, new Date(Date.now() - 5 * 60_000),
+      { idempotencyKey: llave, merchantAccountId: null, processorData: { merchantAccountIdFromApk: m1 } }, false)
+    await prisma.providerEventLog.create({
+      data: {
+        provider: 'PAYMENT_PROCESSOR', eventId: `angelpay-${f.fixture}-aviso-${++avisos}`, attemptId: llave, paymentId: pago.id,
+        venueId: f.venueId, payload: avisoRecibidoPor(m2), status: 'PROCESSED',
+      },
+    })
+    await expect(automatica(randomUUID(), { merchantAccountId: m1 })).rejects.toMatchObject({ code: 'WEBHOOK_NOT_CONFIRMED' })
+  })
+
+  it('r22 P1-1 control · el MISMO aviso recibido por el propio comercio sí acredita', async () => {
+    const [m1] = await comercios([HACE_UN_MINUTO()])
+    const llave = randomUUID()
+    const pago = await cobroDelComercio(m1, new Date(Date.now() - 5 * 60_000), { idempotencyKey: llave }, false)
+    await prisma.providerEventLog.create({
+      data: {
+        provider: 'PAYMENT_PROCESSOR', eventId: `angelpay-${f.fixture}-aviso-${++avisos}`, attemptId: llave, paymentId: pago.id,
+        venueId: f.venueId, payload: avisoRecibidoPor(m1), status: 'PROCESSED',
+      },
+    })
+    await expect(automatica(randomUUID(), { merchantAccountId: m1 })).resolves.toBeTruthy()
+  })
+
+  it('🔴 r20 P1-2 · un comercio DESACTIVADO no sostiene el silencio ⇒ WEBHOOK_NOT_CONFIRMED', async () => {
+    const [m] = await comercios([HACE_UN_MINUTO()])
+    await cobroDelComercio(m, new Date(Date.now() - 5 * 60_000))
+    await prisma.merchantAccount.update({ where: { id: m }, data: { active: false } })
+    await expect(automatica(randomUUID())).rejects.toMatchObject({ code: 'WEBHOOK_NOT_CONFIRMED' })
+  })
+
+  it('sin el comercio del intento ⇒ ATTEMPT_NOT_ELIGIBLE (sin él no hay aviso que medir)', async () => {
+    await comercios([HACE_UN_MINUTO()])
+    await expect(automatica(randomUUID(), { merchantAccountId: undefined })).rejects.toMatchObject({ code: 'ATTEMPT_NOT_ELIGIBLE' })
+  })
+
+  it('🔴 un comercio de OTRO negocio (aunque su aviso esté sano) ⇒ ATTEMPT_NOT_ELIGIBLE, nada escrito', async () => {
+    await comercios([null])
+    const ajeno = await comercioDeOtroNegocio()
+    const A = randomUUID()
+    await expect(automatica(A, { merchantAccountId: ajeno.id })).rejects.toMatchObject({ code: 'ATTEMPT_NOT_ELIGIBLE' })
+    expect(await prisma.terminalAttemptResolution.findUnique({ where: { attemptId: A } })).toBeNull()
+  })
+
+  it('un comercio que NO es de AngelPay (aunque cuelgue de un acceso AngelPay del negocio) ⇒ ATTEMPT_NOT_ELIGIBLE', async () => {
+    await comercios([null])
+    const otro = await prisma.paymentProvider.upsert({
+      where: { code: `NO-ANGELPAY-${f.fixture}` },
+      update: {},
+      create: { code: `NO-ANGELPAY-${f.fixture}`, name: 'Otro procesador', type: 'PAYMENT_PROCESSOR', countryCode: ['MX'] },
+    })
+    const login = await prisma.angelPayUserAccount.create({
+      data: { venueId: f.venueId, email: `${f.fixture}-ajeno@angelpay.test`, environment: 'QA', status: 'ACTIVE' },
+    })
+    const m = await prisma.merchantAccount.create({
+      data: {
+        providerId: otro.id,
+        externalMerchantId: `otro-${randomUUID().slice(0, 8)}`,
+        alias: 'Otro procesador',
+        credentialsEncrypted: {},
+        angelpayUserAccountId: login.id,
+        angelpayWebhookLastReceivedAt: HACE_UN_MINUTO(),
+      },
+    })
+    try {
+      await expect(automatica(randomUUID(), { merchantAccountId: m.id })).rejects.toMatchObject({ code: 'ATTEMPT_NOT_ELIGIBLE' })
+    } finally {
+      await prisma.merchantAccount.delete({ where: { id: m.id } })
+      await prisma.paymentProvider.delete({ where: { id: otro.id } })
+    }
+  })
+
+  it('un comercio que no existe ⇒ ATTEMPT_NOT_ELIGIBLE', async () => {
+    await comercios([HACE_UN_MINUTO()])
+    await expect(automatica(randomUUID(), { merchantAccountId: 'no-existe' })).rejects.toMatchObject({ code: 'ATTEMPT_NOT_ELIGIBLE' })
+  })
+
+  it('🔴 EL DINERO MANDA: con un Payment del intento ⇒ POSITIVE_EVIDENCE_EXISTS, aunque el aviso esté comprobado', async () => {
+    await comercios([HACE_UN_MINUTO()])
+    const A = randomUUID()
+    await recordFastPayment(f.venueId, f.registroDeLaTerminal({ attemptId: A }), f.staffId)
+    await expect(automatica(A)).rejects.toMatchObject({ code: 'POSITIVE_EVIDENCE_EXISTS' })
+    expect(await prisma.terminalAttemptResolution.findUnique({ where: { attemptId: A } })).toBeNull()
+  })
+
+  it('🔴 EL DINERO MANDA: con un APROBADO del banco sin Payment ⇒ POSITIVE_EVIDENCE_EXISTS', async () => {
+    await comercios([HACE_UN_MINUTO()])
+    const A = randomUUID()
+    await processAngelPayWebhook({
+      payload: f.eventoAngelPay(A),
+      eventId: f.nuevoEventId(),
+      merchantAccount: { id: f.merchantId, externalMerchantId: f.merchantExternalId },
+      retryDelaysMs: [0],
+    })
+    await expect(automatica(A)).rejects.toMatchObject({ code: 'POSITIVE_EVIDENCE_EXISTS' })
+  })
+
+  it('un intento VINCULADO a una solicitud del POS ⇒ ATTEMPT_NOT_ELIGIBLE: ése lo libera la ventana del servidor', async () => {
+    await comercios([HACE_UN_MINUTO()])
+    const req = await f.solicitud({ status: 'TIMED_OUT' })
+    const A = randomUUID()
+    await prisma.terminalPaymentAttemptLink.create({
+      data: { requestId: req.requestId, attemptId: A, venueId: f.venueId, terminalId: f.llaveTerminal },
+    })
+    await expect(automatica(A)).rejects.toMatchObject({ code: 'ATTEMPT_NOT_ELIGIBLE' })
+    const link = await prisma.terminalPaymentAttemptLink.findUnique({ where: { attemptId: A } })
+    expect(link?.operatorResolution).toBeNull()
+  })
+
+  it('con `supervisorPin` ⇒ ATTEMPT_NOT_ELIGIBLE: la automática no la firma ninguna persona', async () => {
+    await comercios([HACE_UN_MINUTO()])
+    await expect(automatica(randomUUID(), { supervisorPin: '4821' })).rejects.toMatchObject({ code: 'ATTEMPT_NOT_ELIGIBLE' })
+  })
+
+  it('una sesión que no es miembro activo del negocio ⇒ 403 SESSION_NOT_IN_VENUE (alguien tiene que responder por la terminal)', async () => {
+    await comercios([HACE_UN_MINUTO()])
+    await expect(automatica(randomUUID(), {}, 'staff-que-no-existe')).rejects.toMatchObject({ code: 'SESSION_NOT_IN_VENUE' })
+  })
+
+  it('acepta el id FIJO que manda la terminal (UUID versión 3, derivado del intento): pantalla y worker piden LA MISMA', async () => {
+    await comercios([HACE_UN_MINUTO()])
+    const A = randomUUID()
+    // Lo que hace `java.util.UUID.nameUUIDFromBytes` en la terminal: MD5, versión 3 y variante IETF.
+    const h = createHash('md5').update(`liberacion-sola:${A}`).digest()
+    h[6] = (h[6] & 0x0f) | 0x30
+    h[8] = (h[8] & 0x3f) | 0x80
+    const hex = h.toString('hex')
+    const idFijo = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+    await automatica(A, { resolutionId: idFijo })
+    await automatica(A, { resolutionId: idFijo }) // la segunda (el worker después de la pantalla) es replay, no conflicto
+    expect(await prisma.terminalAttemptResolution.count({ where: { attemptId: A } })).toBe(1)
+  })
+
+  it('UN testimonio por intento: replay idempotente; y el cajero ya no declara encima de la automática (ni al revés)', async () => {
+    await cajeroConPermiso()
+    await comercios([HACE_UN_MINUTO()])
+    const A = randomUUID()
+    const cuerpo = {
+      resolutionId: randomUUID(),
+      statement: 'NO_BANK_TRACE_AFTER_WINDOW' as const,
+      statementVersion: 1 as const,
+      merchantAccountId: f.merchantId,
+    }
+    const identidad = { venueId: f.venueId, terminalSerial: f.serial, attemptId: A, actorStaffId: f.staffId }
+    await resolveNoInstrument(identidad, cuerpo)
+    await resolveNoInstrument(identidad, cuerpo)
+    expect(await prisma.terminalAttemptResolution.count({ where: { attemptId: A } })).toBe(1)
+    await expect(declarar(A)).rejects.toMatchObject({ code: 'RESOLUTION_CONFLICT' })
+
+    const B = randomUUID()
+    await declarar(B)
+    await expect(automatica(B)).rejects.toMatchObject({ code: 'RESOLUTION_CONFLICT' })
   })
 })

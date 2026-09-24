@@ -2,6 +2,14 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { randomBytes } from 'crypto'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
+import {
+  beginWork,
+  isRequestCancelledError,
+  pendingCancellation,
+  refuseNewWork,
+  runWithoutCancellation,
+  settleTool,
+} from '@/utils/requestCancellation'
 import { ScopeError, genericErrorMessage, looksInternal } from './errors'
 
 /** Identity behind an MCP request — for attributing tool calls in the logs. */
@@ -103,12 +111,33 @@ async function recordMcpCall(row: {
   durationMs: number
 }): Promise<void> {
   try {
-    await prisma.mcpToolCall.create({
-      data: { ...row, detail: row.detail ? row.detail.slice(0, 500) : null },
-    })
+    // Bookkeeping, not the tool's work: the brake of a cancelled request must never refuse it, nor count
+    // it as the tool's write (see src/utils/requestCancellation.ts).
+    await runWithoutCancellation(() =>
+      prisma.mcpToolCall.create({
+        data: { ...row, detail: row.detail ? row.detail.slice(0, 500) : null },
+      }),
+    )
   } catch (err) {
     logger.warn('mcp.audit persist failed', { mcp: true, tool: row.toolName, error: (err as Error).message })
   }
+}
+
+/**
+ * Records a tool call that the 2026-09-23 brake cut BEFORE the tool ran (the deadline passed or the client left
+ * while the caller's scope was being built). The tool wrapper never runs in that case, so without this the 12h
+ * audit — which reads McpToolCall — would never learn about the attempt.
+ */
+export function recordCancelledToolCall(row: {
+  toolName: string
+  staffId: string | null
+  orgId: string | null
+  venueId: string | null
+  reason: string
+  durationMs: number
+}): void {
+  const { reason, ...rest } = row
+  void recordMcpCall({ ...rest, outcome: 'error', detail: `cancelada:${reason}` })
 }
 
 /**
@@ -169,8 +198,16 @@ function makePatched(original: ToolFn, ctx: ToolCallContext): ToolFn {
       const venueId = typeof params?.venueId === 'string' ? params.venueId : null
       const meta = venueId ? { ...base, venueId } : base
       const audit = { toolName: name, staffId: ctx.staffId, orgId: ctx.org, venueId }
+      // A running tool holds its caller's slot even if the client already hung up (see the MCP guard).
+      const endWork = beginWork()
       try {
+        // The request may already be cancelled (deadline passed, client gone) before this tool starts.
+        const refusedAtStart = refuseNewWork()
+        if (refusedAtStart) throw refusedAtStart
         const result = await cb(...cbArgs)
+        // One of this tool's reads was refused and a `catch` swallowed it: the result may be partial.
+        const cancelled = pendingCancellation()
+        if (cancelled) throw cancelled
         const ms = Date.now() - start
         const { ok, detail } = resultOutcome(result)
         // Redact an internal error the tool RETURNED (ok:false) before it reaches the client.
@@ -186,11 +223,25 @@ function makePatched(original: ToolFn, ctx: ToolCallContext): ToolFn {
         return safe
       } catch (err) {
         const ms = Date.now() - start
+        // A cancelled request (the 2026-09-23 brake). Also when the tool turned the refused read into
+        // another error: that error is a consequence of the cutoff, not an internal failure. Operational,
+        // so the client reads the Spanish reason (sanitizeThrownError lets it through).
+        const cancellation = isRequestCancelledError(err) ? err : pendingCancellation()
+        if (cancellation) {
+          logger.warn(`mcp.tool ${name} cancelada`, { ...meta, ms, reason: cancellation.reason })
+          void recordMcpCall({ ...audit, outcome: 'error', detail: `cancelada:${cancellation.reason}`, durationMs: ms })
+          throw cancellation
+        }
         const message = (err as Error).message
         const { error, ref } = sanitizeThrownError(err, name, ctx)
         logger.error(`mcp.tool ${name} threw`, { ...meta, ms, error: message, ...(ref ? { ref } : {}) })
         void recordMcpCall({ ...audit, outcome: 'threw', detail: (ref ? `[${ref}] ${message}` : message) ?? null, durationMs: ms })
         throw error
+      } finally {
+        // The tool answered: a branch it left running (a `Promise.all` sibling that outlived a rejection) is cut
+        // at its next read, and the caller's slot waits for its in-flight work to go quiet (see the MCP guard).
+        settleTool()
+        endWork()
       }
     }
     toolArgs[cbIndex] = wrapped

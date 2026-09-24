@@ -2,6 +2,7 @@ import { OrgRole, StaffRole } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { getUserAccess, createAccessCache } from '@/services/access/access.service'
 import type { UserAccess } from '@/services/access/access.service'
+import { isRequestCancelledError } from '@/utils/requestCancellation'
 
 export interface McpScope {
   staffId: string
@@ -23,6 +24,22 @@ export interface McpScope {
 }
 
 /**
+ * Whether `staffId` is a platform SUPERADMIN RIGHT NOW. The one definition, shared by `resolveScope` and the
+ * lightweight MCP handshake (which answers `initialize` without building the scope).
+ *
+ * WHY active filters: a SUPERADMIN whose StaffVenue row was deactivated (role revoked) or whose Staff account was
+ * disabled must LOSE the global bypass. Without them, a revoked superadmin still resolves to all-venues/all-orgs
+ * access via the MCP. (Mirror of the getUserAccess fix.)
+ */
+export async function isActiveSuperAdmin(staffId: string): Promise<boolean> {
+  const superAdminVenue = await prisma.staffVenue.findFirst({
+    where: { staffId, role: StaffRole.SUPERADMIN, active: true, staff: { active: true } },
+    select: { id: true },
+  })
+  return superAdminVenue != null
+}
+
+/**
  * What a connected Staff may touch in their active org.
  *   platform SUPERADMIN (any StaffVenue with role SUPERADMIN — same rule as getUserAccess)
  *                                          -> ALL venues, ALL orgs (founder: "solo si hago
@@ -36,14 +53,7 @@ export interface McpScope {
 export async function resolveScope(staffId: string, activeOrg: string): Promise<McpScope> {
   // Platform SUPERADMIN → global scope. Synthesized wildcard access per venue (hasPermission
   // short-circuits on role SUPERADMIN) instead of 61× getUserAccess — resolveScope runs per request.
-  // WHY active filters: a SUPERADMIN whose StaffVenue row was deactivated (role revoked) or whose
-  // Staff account was disabled must LOSE the global bypass. Without them, a revoked superadmin still
-  // resolves to all-venues/all-orgs access via the MCP. (Mirror of the getUserAccess fix.)
-  const superAdminVenue = await prisma.staffVenue.findFirst({
-    where: { staffId, role: StaffRole.SUPERADMIN, active: true, staff: { active: true } },
-    select: { id: true },
-  })
-  if (superAdminVenue) {
+  if (await isActiveSuperAdmin(staffId)) {
     const venues = await prisma.venue.findMany({ select: { id: true, organizationId: true } })
     const perVenueAccess = new Map<string, UserAccess>()
     for (const v of venues) {
@@ -107,7 +117,10 @@ export async function resolveScope(staffId: string, activeOrg: string): Promise<
       venueIds.slice(i, i + CONCURRENCY).map(async venueId => {
         try {
           return [venueId, await getUserAccess(staffId, venueId, cache)] as const
-        } catch {
+        } catch (err) {
+          // A cancelled request (deadline passed, client gone — the 2026-09-23 brake) is NOT "no access":
+          // swallowing it would hand the tools a silently incomplete scope. Let it propagate.
+          if (isRequestCancelledError(err)) throw err
           // getUserAccess throws when the staff has no access to that venue — skip defensively.
           return null
         }

@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client'
 import { extensionResultadoGigante } from './queryResultGuard'
+import { extensionCancellableReads, extensionCancellableTransactions } from './requestCancellation'
 
 /**
  * Prisma Client Singleton
@@ -81,7 +82,17 @@ const prismaBase = datasourceUrl
 // denuncia en el log con modelo + tamaño (el contexto le estampa el endpoint). Nunca
 // recorta ni lanza — ver src/utils/queryResultGuard.ts. El mismo cast de abajo aplica:
 // $extends cambia el tipo genérico y rompería los puertos estrechos del repo.
-const prisma = prismaBase.$extends(extensionResultadoGigante) as unknown as PrismaClient
+//
+// Freno del incidente 2026-09-23: dentro de una petición cancelada (sólo el MCP las marca hoy), la
+// siguiente LECTURA se rechaza en vez de seguir quemando el único hilo. Una escritura nunca se corta, y
+// tras la primera escritura ya no se corta nada. Fuera de una petición cancelable es un no-op — ver
+// src/utils/requestCancellation.ts. La última extensión envuelve `$transaction`: dentro de una petición del MCP, una
+// transacción cuenta como UN trabajo de principio a fin y recupera el cupo antes de empezar; fuera, devuelve la promesa
+// de Prisma tal cual (el resto de la plataforma no cambia).
+const prisma = prismaBase
+  .$extends(extensionResultadoGigante)
+  .$extends(extensionCancellableReads)
+  .$extends(extensionCancellableTransactions) as unknown as PrismaClient
 
 // Graceful shutdown to close database connections
 process.on('beforeExit', async () => {
