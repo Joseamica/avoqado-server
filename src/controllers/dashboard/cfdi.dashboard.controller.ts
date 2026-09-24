@@ -119,11 +119,13 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
     })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
-    logger.error(`[cfdi.controller] issue failed for order ${orderId}: ${message}`)
+    // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
+    const aviso = `[cfdi.controller] issue failed for order ${orderId}: ${message}`
 
     // La venta no es de este negocio (aislamiento) o no existe: no es un problema de configuración fiscal,
     // y el texto no debe mandar a revisar emisores.
     if (/^Order \S+ not found$/i.test(message)) {
+      logger.warn(aviso)
       res.status(404).json({ code: 'ORDER_NOT_FOUND', error: 'Esta venta no existe o no es de este negocio.' })
       return
     }
@@ -131,6 +133,7 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
     if (/not found|no fiscal emisor/i.test(message)) {
       // Testarudo 24-sep: el texto viejo («sin emisor fiscal configurado») mandaba a revisar una configuración
       // que estaba bien. Éste dice qué revisar y qué caso todavía no se puede facturar.
+      logger.warn(aviso)
       res.status(404).json({
         code: 'CFDI_NO_EMISOR',
         error:
@@ -141,22 +144,26 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
 
     // Merchant gating: facturacionEnabled or autofacturaEnabled is false → 403 (feature disabled, not missing)
     if (/no habilitada/i.test(message)) {
+      logger.warn(aviso)
       res.status(403).json({ error: message })
       return
     }
 
     // La cancelación de la factura anterior sigue en trámite ante el SAT: todavía no se puede refacturar.
     if (/en trámite/i.test(message)) {
+      logger.warn(aviso)
       res.status(409).json({ code: 'CFDI_CANCEL_PENDING', error: message })
       return
     }
 
     // Concurrent in-flight reservation — surface as 409 so the client can retry after the first request resolves
     if (/en proceso/i.test(message)) {
+      logger.warn(aviso)
       res.status(409).json({ error: message })
       return
     }
 
+    logger.error(aviso)
     res.status(500).json({ error: 'Error interno al facturar' })
   }
 }
@@ -183,13 +190,16 @@ export async function getCfdiStatusController(req: Request, res: Response): Prom
     res.status(200).json({ cfdi })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
-    logger.error(`[cfdi.controller] getCfdiStatus failed for cfdi ${cfdiId}: ${message}`)
+    // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
+    const aviso = `[cfdi.controller] getCfdiStatus failed for cfdi ${cfdiId}: ${message}`
 
     if (/not found/i.test(message)) {
+      logger.warn(aviso)
       res.status(404).json({ error: 'CFDI no encontrado' })
       return
     }
 
+    logger.error(aviso)
     res.status(500).json({ error: 'Error interno al consultar el CFDI' })
   }
 }
@@ -235,7 +245,9 @@ export async function listCfdisController(req: Request, res: Response): Promise<
     res.status(200).json(result)
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
-    logger.error(`[cfdi.controller] listCfdis failed for venue ${venueId}: ${message}`)
+    // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
+    const aviso = `[cfdi.controller] listCfdis failed for venue ${venueId}: ${message}`
+    logger.error(aviso)
     res.status(500).json({ error: 'Error interno al listar los CFDIs' })
   }
 }
@@ -286,19 +298,23 @@ export async function cancelCfdiController(req: Request, res: Response): Promise
     })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
-    logger.error(`[cfdi.controller] cancelCfdi failed for cfdi ${cfdiId}: ${message}`)
+    // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
+    const aviso = `[cfdi.controller] cancelCfdi failed for cfdi ${cfdiId}: ${message}`
 
     if (/not found/i.test(message)) {
+      logger.warn(aviso)
       res.status(404).json({ error: 'CFDI no encontrado' })
       return
     }
 
     // Business-rule violations (not STAMPED, motivo 01 without substitute) → 409 Conflict
     if (/timbrad|stamped|motivo|sustituci|substitut/i.test(message)) {
+      logger.warn(aviso)
       res.status(409).json({ error: message })
       return
     }
 
+    logger.error(aviso)
     res.status(500).json({ error: 'Error interno al cancelar el CFDI' })
   }
 }
@@ -377,17 +393,21 @@ export async function replaceCfdiController(req: Request, res: Response): Promis
     })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
-    logger.error(`[cfdi.controller] replaceCfdi failed for cfdi ${cfdiId}: ${message}`)
+    // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
+    const aviso = `[cfdi.controller] replaceCfdi failed for cfdi ${cfdiId}: ${message}`
 
     if (/not found/i.test(message)) {
+      logger.warn(aviso)
       res.status(404).json({ error: 'CFDI no encontrado' })
       return
     }
     // Reglas de negocio y carreras → 409 (mismo criterio que cancelar)
     if (/en proceso|timbrada|global|emisor|folio fiscal/i.test(message)) {
+      logger.warn(aviso)
       res.status(409).json({ error: message })
       return
     }
+    logger.error(aviso)
     res.status(500).json({ error: 'Error interno al sustituir el CFDI' })
   }
 }
@@ -447,23 +467,28 @@ export async function emitRefundCreditNoteController(req: Request, res: Response
     })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
-    logger.error(`[cfdi.controller] credit note failed for refund ${refundId}: ${message}`)
+    // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
+    const aviso = `[cfdi.controller] credit note failed for refund ${refundId}: ${message}`
 
     if (/no encontrado/i.test(message)) {
+      logger.warn(aviso)
       res.status(404).json({ error: message })
       return
     }
     if (/en proceso/i.test(message)) {
+      logger.warn(aviso)
       res.status(409).json({ error: message })
       return
     }
     // Reglas de negocio fiscales: sin factura original, cancelada, sólo propina, importe excedido,
     // pago que no es reembolso, PAC sin soporte → 409 con el texto EXACTO para que la UI lo pinte.
     if (/no es un reembolso|no está completado|no tiene una factura|cancelada|propina|excede|no soporta/i.test(message)) {
+      logger.warn(aviso)
       res.status(409).json({ error: message })
       return
     }
 
+    logger.error(aviso)
     res.status(500).json({ error: 'Error interno al emitir la nota de crédito' })
   }
 }
@@ -493,7 +518,9 @@ export async function getRefundCreditNoteController(req: Request, res: Response)
     res.status(200).json(status)
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
-    logger.error(`[cfdi.controller] getRefundCreditNote failed for refund ${refundId}: ${message}`)
+    // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
+    const aviso = `[cfdi.controller] getRefundCreditNote failed for refund ${refundId}: ${message}`
+    logger.error(aviso)
     res.status(500).json({ error: 'Error interno al consultar la nota de crédito' })
   }
 }
@@ -520,7 +547,9 @@ export async function getFiscalConfigController(req: Request, res: Response): Pr
     res.status(200).json(config)
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
-    logger.error(`[cfdi.controller] getFiscalConfig failed for venue ${venueId}: ${message}`)
+    // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
+    const aviso = `[cfdi.controller] getFiscalConfig failed for venue ${venueId}: ${message}`
+    logger.error(aviso)
     res.status(500).json({ error: 'Error interno al obtener la configuración fiscal' })
   }
 }
@@ -583,13 +612,16 @@ export async function upsertEmisorController(req: Request, res: Response): Promi
     res.status(200).json({ emisor })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
-    logger.error(`[cfdi.controller] upsertEmisor failed for venue ${venueId}: ${message}`)
+    // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
+    const aviso = `[cfdi.controller] upsertEmisor failed for venue ${venueId}: ${message}`
 
     if (/not found/i.test(message)) {
+      logger.warn(aviso)
       res.status(404).json({ error: 'Emisor no encontrado' })
       return
     }
 
+    logger.error(aviso)
     res.status(500).json({ error: 'Error interno al guardar el emisor fiscal' })
   }
 }
@@ -651,19 +683,23 @@ export async function upsertMerchantFiscalConfigController(req: Request, res: Re
     res.status(200).json({ config })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
-    logger.error(`[cfdi.controller] upsertMerchantFiscalConfig failed for venue ${venueId}: ${message}`)
+    // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
+    const aviso = `[cfdi.controller] upsertMerchantFiscalConfig failed for venue ${venueId}: ${message}`
 
     if (/not found/i.test(message)) {
+      logger.warn(aviso)
       res.status(404).json({ error: 'Comercio o emisor no encontrado' })
       return
     }
 
     // XOR violation (service throws "Debe especificar exactamente un merchant…")
     if (/merchant/i.test(message)) {
+      logger.warn(aviso)
       res.status(409).json({ error: message })
       return
     }
 
+    logger.error(aviso)
     res.status(500).json({ error: 'Error interno al guardar la configuración de facturación' })
   }
 }
@@ -705,13 +741,16 @@ export async function provisionEmisorController(req: Request, res: Response): Pr
     res.status(200).json({ emisor })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
-    logger.error(`[cfdi.controller] provisionEmisor failed for emisor ${emisorId}: ${message}`)
+    // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
+    const aviso = `[cfdi.controller] provisionEmisor failed for emisor ${emisorId}: ${message}`
 
     if (/not found/i.test(message)) {
+      logger.warn(aviso)
       res.status(404).json({ error: 'Emisor no encontrado' })
       return
     }
 
+    logger.error(aviso)
     res.status(500).json({ error: 'Error interno al provisionar el emisor fiscal' })
   }
 }
@@ -760,19 +799,23 @@ export async function uploadEmisorCsdController(req: Request, res: Response): Pr
     res.status(200).json({ emisor })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
-    logger.error(`[cfdi.controller] uploadEmisorCsd failed for emisor ${emisorId}: ${message}`)
+    // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
+    const aviso = `[cfdi.controller] uploadEmisorCsd failed for emisor ${emisorId}: ${message}`
 
     if (/not found/i.test(message)) {
+      logger.warn(aviso)
       res.status(404).json({ error: 'Emisor no encontrado' })
       return
     }
 
     // provisión required before CSD upload
     if (/provision/i.test(message)) {
+      logger.warn(aviso)
       res.status(409).json({ error: message })
       return
     }
 
+    logger.error(aviso)
     res.status(500).json({ error: 'Error interno al subir el CSD del emisor fiscal' })
   }
 }
@@ -799,13 +842,16 @@ export async function getEmisorProviderStatusController(req: Request, res: Respo
     res.status(200).json({ status })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
-    logger.error(`[cfdi.controller] getEmisorProviderStatus failed for emisor ${emisorId}: ${message}`)
+    // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
+    const aviso = `[cfdi.controller] getEmisorProviderStatus failed for emisor ${emisorId}: ${message}`
 
     if (/not found/i.test(message)) {
+      logger.warn(aviso)
       res.status(404).json({ error: 'Emisor no encontrado' })
       return
     }
 
+    logger.error(aviso)
     res.status(502).json({ error: 'No se pudo consultar el estado del emisor con el proveedor fiscal' })
   }
 }
@@ -834,7 +880,8 @@ export async function searchSatCatalogController(req: Request, res: Response): P
     res.status(200).json(result)
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
-    logger.error(`[cfdi.controller] searchSatCatalog failed venue=${venueId} type=${type} q="${q}": ${message}`)
+    // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
+    const aviso = `[cfdi.controller] searchSatCatalog failed venue=${venueId} type=${type} q="${q}": ${message}`
 
     // La clasificación la hace el SERVICIO, que es quien sabe a quién llamó y con qué llave.
     // El status viene del error (400 falta configuración · 502 falló el proveedor); el texto
@@ -844,6 +891,8 @@ export async function searchSatCatalogController(req: Request, res: Response): P
         err.reason === 'NO_KEY'
           ? err.message // ya está escrito para el usuario y dice qué configurar
           : 'No se pudo consultar el catálogo del SAT. Vuelve a intentarlo en unos minutos.'
+      if (err.statusCode >= 500) logger.error(aviso)
+      else logger.warn(aviso)
       res.status(err.statusCode).json({ error: mensaje, code: err.code })
       return
     }
@@ -852,10 +901,12 @@ export async function searchSatCatalogController(req: Request, res: Response): P
     // error es justo lo que produjo el incidente del 2026-09-07 («La API key proporcionada no es
     // válida» no casa /facturapi|catalog/i y salía como 500) — lo nuevo va por el error tipado.
     if (/facturapi|catalog/i.test(message)) {
+      logger.error(aviso)
       res.status(502).json({ error: 'No se pudo consultar el catálogo SAT' })
       return
     }
 
+    logger.error(aviso)
     res.status(500).json({ error: 'Error interno al consultar el catálogo SAT' })
   }
 }
@@ -950,19 +1001,23 @@ export async function triggerGlobalCfdiController(req: Request, res: Response): 
     }
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
-    logger.error(`[cfdi.controller] triggerGlobalCfdi failed for emisor ${emisorId}: ${message}`)
+    // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
+    const aviso = `[cfdi.controller] triggerGlobalCfdi failed for emisor ${emisorId}: ${message}`
 
     if (/not found/i.test(message)) {
+      logger.warn(aviso)
       res.status(404).json({ error: 'Emisor fiscal no encontrado' })
       return
     }
 
     // Concurrent in-flight reservation — surface as 409 so the client can retry
     if (/en proceso/i.test(message)) {
+      logger.warn(aviso)
       res.status(409).json({ error: message })
       return
     }
 
+    logger.error(aviso)
     res.status(500).json({ error: 'Error interno al generar la factura global' })
   }
 }
@@ -990,11 +1045,14 @@ export async function syncEmisorLogoController(req: Request, res: Response): Pro
     res.status(200).json(result)
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
-    logger.error(`[cfdi.controller] syncEmisorLogo failed for emisor ${emisorId}: ${message}`)
+    // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
+    const aviso = `[cfdi.controller] syncEmisorLogo failed for emisor ${emisorId}: ${message}`
     if (/not found/i.test(message)) {
+      logger.warn(aviso)
       res.status(404).json({ error: 'Emisor no encontrado' })
       return
     }
+    logger.error(aviso)
     res.status(502).json({ error: 'No se pudo subir el logo al PAC', message })
   }
 }
@@ -1042,11 +1100,14 @@ export async function downloadCfdiFileController(
     res.status(200).send(bytes)
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
-    logger.error(`[cfdi.controller] downloadCfdiFile failed for cfdi ${cfdiId}: ${message}`)
+    // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
+    const aviso = `[cfdi.controller] downloadCfdiFile failed for cfdi ${cfdiId}: ${message}`
     if (/not found/i.test(message)) {
+      logger.warn(aviso)
       res.status(404).json({ error: 'CFDI no encontrado' })
       return
     }
+    logger.error(aviso)
     res.status(502).json({ error: 'No se pudo descargar el archivo' })
   }
 }

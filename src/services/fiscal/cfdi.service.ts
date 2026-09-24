@@ -1412,7 +1412,10 @@ export async function syncPendingCancellations(
       else tally.siguenEnTramite += 1
     } catch (err: unknown) {
       tally.errores += 1
-      logger.error(`[cfdi] no se pudo consultar la cancelación de ${cfdi.id}: ${err instanceof Error ? err.message : String(err)}`)
+      // warn, no error: la fila sigue «en trámite» y se reintenta en la siguiente pasada (cada 5 min). Como
+      // error, una sola factura que el PAC no reconoce llenaba el log de alertas falsas (full-testing 24-sep).
+      // El recuento `errores` sale en el resumen de la pasada.
+      logger.warn(`[cfdi] no se pudo consultar la cancelación de ${cfdi.id}: ${err instanceof Error ? err.message : String(err)}`)
     }
   }
   return tally

@@ -1497,3 +1497,78 @@ describe('downloadCfdiFileController', () => {
     expect(fetchBytes).not.toHaveBeenCalled()
   })
 })
+
+// /full-testing 24-sep: los casos NORMALES (ya tiene factura, cancelación en trámite, venta ajena, sin emisor…)
+// salían en el log como `error:`, igual que una caída. Eso ensucia Better Stack y esconde los fallos de verdad.
+// Regla (la misma del controlador público): un 4xx esperado es `warn`; sólo lo que termina en 5xx es `error`.
+describe('nivel del log en los fallos de facturación', () => {
+  const log = jest.requireMock('../../../../src/config/logger') as { error: jest.Mock; warn: jest.Mock }
+
+  beforeEach(() => {
+    log.error.mockClear()
+    log.warn.mockClear()
+  })
+
+  it.each([
+    ['venta de otro negocio', 'Order o1 not found', 404],
+    ['sin emisor', 'Order o1 not found or has no fiscal emisor configured', 404],
+    ['comercio sin facturación', 'Facturación no habilitada para este comercio', 403],
+    ['cancelación en trámite', 'La cancelación de la factura FT-1 sigue en trámite ante el SAT', 409],
+    ['emisión en curso', 'CFDI en proceso para esta orden', 409],
+  ])('Facturar: %s ⇒ %s como warn, nunca error', async (_caso, mensaje, status) => {
+    mockIssue.mockRejectedValue(new Error(mensaje))
+    const res = mockRes()
+    await issueCfdiForOrderController(mockReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(status)
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('[cfdi.controller] issue failed'))
+    expect(log.error).not.toHaveBeenCalled()
+  })
+
+  it('Facturar: un fallo inesperado (500) sí es error', async () => {
+    mockIssue.mockRejectedValue(new Error('Connection refused'))
+    const res = mockRes()
+    await issueCfdiForOrderController(mockReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(500)
+    expect(log.error).toHaveBeenCalledWith(expect.stringContaining('Connection refused'))
+    expect(log.warn).not.toHaveBeenCalled()
+  })
+
+  it('Cancelar: factura no encontrada (404) es warn; un fallo inesperado (500) es error', async () => {
+    mockCancel.mockRejectedValue(new Error('CFDI c1 not found'))
+    const res404 = mockRes()
+    await cancelCfdiController({ params: { cfdiId: 'c1', venueId: 'v1' }, body: { motivo: '02' } } as any, res404)
+    expect(res404.status).toHaveBeenCalledWith(404)
+    expect(log.warn).toHaveBeenCalled()
+    expect(log.error).not.toHaveBeenCalled()
+
+    log.warn.mockClear()
+    mockCancel.mockRejectedValue(new Error('socket hang up'))
+    const res500 = mockRes()
+    await cancelCfdiController({ params: { cfdiId: 'c1', venueId: 'v1' }, body: { motivo: '02' } } as any, res500)
+    expect(res500.status).toHaveBeenCalledWith(500)
+    expect(log.error).toHaveBeenCalled()
+    expect(log.warn).not.toHaveBeenCalled()
+  })
+
+  // El error tipado del catálogo trae su status en una variable (400 sin llave · 502 falló el proveedor).
+  // Sin este caso, esa rama se quedaba SIN log alguno.
+  it('Catálogo SAT: sin llave (400) es warn; el proveedor falló (502) es error', async () => {
+    const req = { params: { venueId: 'v1' }, query: { type: 'product', q: 'cafe' }, authContext: { venueId: 'v1' } } as any
+    mockSearchSatCatalog.mockRejectedValue(new SatCatalogUnavailableError('NO_KEY', 'Configura la llave de facturación'))
+    const res400 = mockRes()
+    await searchSatCatalogController(req, res400)
+    expect(res400.status).toHaveBeenCalledWith(400)
+    expect(log.warn).toHaveBeenCalled()
+    expect(log.error).not.toHaveBeenCalled()
+
+    log.warn.mockClear()
+    mockSearchSatCatalog.mockRejectedValue(new SatCatalogUnavailableError('PROVIDER_ERROR', 'timeout'))
+    const res502 = mockRes()
+    await searchSatCatalogController(req, res502)
+    expect(res502.status).toHaveBeenCalledWith(502)
+    expect(log.error).toHaveBeenCalled()
+    expect(log.warn).not.toHaveBeenCalled()
+  })
+})

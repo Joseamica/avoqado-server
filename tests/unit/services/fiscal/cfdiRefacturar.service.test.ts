@@ -367,4 +367,18 @@ describe('syncPendingCancellations', () => {
     expect(refresh).toHaveBeenCalledTimes(2)
     expect(tally).toEqual({ revisadas: 2, resueltas: 1, siguenEnTramite: 0, errores: 1 })
   })
+
+  // full-testing 24-sep: una factura que el PAC no reconocía se reintentaba cada 5 min escribiendo `error:`.
+  // Se reintenta igual (no se pierde), pero como aviso: no es una caída.
+  it('un fallo al consultar una fila se registra como warn, no como error', async () => {
+    const log = jest.requireMock('../../../../src/config/logger') as { error: jest.Mock; warn: jest.Mock }
+    log.error.mockClear()
+    log.warn.mockClear()
+    const refresh = jest.fn().mockRejectedValue(new Error('El campo id no es válido'))
+    const findPending = jest.fn().mockResolvedValue([fila({ id: 'x', cancelStatus: 'REQUESTED' })])
+    const tally = await syncPendingCancellations({ sandbox: true, now: new Date() }, { findPending, refresh })
+    expect(tally.errores).toBe(1)
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('no se pudo consultar la cancelación de x'))
+    expect(log.error).not.toHaveBeenCalled()
+  })
 })
