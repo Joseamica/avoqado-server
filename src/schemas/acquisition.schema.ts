@@ -71,4 +71,10 @@ export const optionalLaunchCampaignCode = z
   })
 
 /** De qué pantalla salió el alta. Es texto plano: la lista vive en el comentario del schema. */
-export type AcquisitionSource = 'landing_oferta' | 'landing_contacto' | 'landing_restaurantes' | 'dashboard_signup' | 'dashboard_attach'
+export type AcquisitionSource =
+  | 'landing_oferta'
+  | 'landing_contacto'
+  | 'landing_restaurantes'
+  | 'dashboard_signup'
+  | 'dashboard_signup_google'
+  | 'dashboard_attach'

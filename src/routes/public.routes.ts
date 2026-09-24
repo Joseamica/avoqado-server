@@ -85,8 +85,7 @@ import {
 import * as passkitController from '../controllers/public/passkit.public.controller'
 import { getFeaturedLaunchOffer, getLaunchOffer } from '../controllers/public/launchOffer.public.controller'
 import { optionalLaunchCampaignCode, utmSchema } from '../schemas/acquisition.schema'
-import { LANDING_SLUG_RE } from '../services/launchCampaigns/launchCampaign.schema'
-import { CAMPAIGN_VERTICAL_VALUES } from '../services/launchCampaigns/launchCampaignEnums'
+import { featuredVerticalParams, LANDING_SLUG_RE } from '../services/launchCampaigns/launchCampaign.schema'
 
 const router = Router()
 
@@ -563,7 +562,7 @@ router.get(
 router.get(
   '/launch-offers/featured/:vertical',
   offerReadLimit,
-  validateRequest(z.object({ params: z.object({ vertical: z.enum(CAMPAIGN_VERTICAL_VALUES) }) })),
+  validateRequest(z.object({ params: featuredVerticalParams })),
   getFeaturedLaunchOffer,
 )
 

@@ -131,6 +131,8 @@ describe('loginWithGoogle — alta de negocio nuevo', () => {
         action: 'ACCOUNT_SIGNUP',
         entity: 'Staff',
         entityId: 'staff-new',
+        // en su COLUMNA, no sólo dentro de data: así la encuentra la bitácora filtrada por organización
+        organizationId: 'org-new',
         data: expect.objectContaining({ method: 'google' }),
       }),
     )

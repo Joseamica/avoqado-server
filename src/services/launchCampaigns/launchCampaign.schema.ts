@@ -49,7 +49,7 @@ export const createLaunchCampaignBody = offerFields
     validUntil: z.coerce.date(),
     redemptionCap: z.number().int().min(1).max(100_000),
     /** La vitrina de su giro. NO se congela al activar: se mueve sobre campañas vivas. */
-    featuredForVertical: z.boolean().default(false),
+    featuredForVertical: z.boolean({ invalid_type_error: 'La vitrina debe ser sí o no (true o false)' }).default(false),
     ...copy,
   })
   .refine(b => b.validFrom < b.validUntil, { message: 'La vigencia debe terminar después de empezar', path: ['validUntil'] })
@@ -64,6 +64,16 @@ export const updateLaunchCampaignBody = createLaunchCampaignBody
   .omit({ code: true })
   .partial()
   .extend({ expectedUpdatedAt: z.coerce.date() })
+
+/**
+ * El giro de `GET /public/launch-offers/featured/:vertical`. El mensaje va en ESPAÑOL a propósito: el
+ * middleware de validación lo muestra tal cual, y el de Zod por defecto dice «Invalid enum value».
+ */
+export const featuredVerticalParams = z.object({
+  vertical: z.enum(CAMPAIGN_VERTICAL_VALUES, {
+    errorMap: () => ({ message: `Giro inválido. Usa uno de: ${CAMPAIGN_VERTICAL_VALUES.join(', ')}` }),
+  }),
+})
 
 export const statusReasonBody = z.object({ reason: z.string().trim().min(3).max(300) })
 /** Activar no exige motivo: es el camino feliz. Pausar y terminar sí (`statusReasonBody`). */

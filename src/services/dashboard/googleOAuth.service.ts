@@ -231,6 +231,8 @@ export async function loginWithGoogle(
       })
       void logAction({
         staffId: creado.staff.id,
+        // En su COLUMNA: es la que usa la bitácora para filtrar por organización (el alta no tiene venue).
+        organizationId: creado.organization.id,
         action: 'ACCOUNT_SIGNUP',
         entity: 'Staff',
         entityId: creado.staff.id,
