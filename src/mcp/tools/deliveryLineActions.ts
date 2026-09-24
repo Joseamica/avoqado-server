@@ -21,7 +21,11 @@ export function registerDeliveryLineActionTools(server: McpServer, scope: McpSco
       orderId: z.string().optional().describe('Id de la venta de delivery, para ver sólo ese pedido'),
       limit: z.number().int().min(1).max(100).optional().describe('Cuántos traer (por defecto 50, máximo 100)'),
       cursor: z.string().max(200).optional().describe('El nextCursor de la página anterior, para seguir recorriendo'),
-      blockedCursor: z.string().max(200).optional().describe('El blockedOrdersNextCursor anterior, para seguir recorriendo las ventas atoradas'),
+      blockedCursor: z
+        .string()
+        .max(200)
+        .optional()
+        .describe('El blockedOrdersNextCursor anterior, para seguir recorriendo las ventas atoradas'),
     },
     async ({ venueId, orderId, limit, cursor, blockedCursor }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope

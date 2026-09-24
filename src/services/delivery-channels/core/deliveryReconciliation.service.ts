@@ -312,7 +312,8 @@ export async function reconcileDeliveryOrderFromProvider(
         delete fiscal[tasa]
       }
     }
-    if (Object.keys(deriva).length > 0) logger.warn('[Delivery] deriva de redondeo de 1 centavo absorbida en el IVA del retiro', { orderId, deriva })
+    if (Object.keys(deriva).length > 0)
+      logger.warn('[Delivery] deriva de redondeo de 1 centavo absorbida en el IVA del retiro', { orderId, deriva })
     const ivaDevuelto = Object.values(fiscal).reduce((s, v) => s + v, 0)
 
     const aFiscalPendiente = async (motivo: string) => {
@@ -320,7 +321,12 @@ export async function reconcileDeliveryOrderFromProvider(
         where: { id: { in: acreditadas.map(a => a.id) }, settlement: 'ACCREDITED' },
         data: { settlement: 'FISCAL_PENDING' },
       })
-      await bloquear(tx, { orderId, venueId, motivo: 'FISCAL_RECLASS_UNSUPPORTED', data: { fiscal, dVentaCents: dVenta, eventId: opts.eventId ?? null } })
+      await bloquear(tx, {
+        orderId,
+        venueId,
+        motivo: 'FISCAL_RECLASS_UNSUPPORTED',
+        data: { fiscal, dVentaCents: dVenta, eventId: opts.eventId ?? null },
+      })
       logger.error(`🚨 [Delivery] ${motivo}: no se declara liquidado, espera a una persona`, {
         orderId,
         venueId,
@@ -380,11 +386,14 @@ export async function reconcileDeliveryOrderFromProvider(
       await tx.activityLog.create({
         data: { venueId, staffId: null, action: 'DELIVERY_REFUND_POSSIBLE_DUPLICATE', entity: 'Order', entityId: orderId, data: datos },
       })
-      logger.error('🚨 [Delivery] la compensación del proveedor excede lo reembolsable del cobro: no se escribe dinero, espera a una persona', {
-        orderId,
-        venueId,
-        ...datos,
-      })
+      logger.error(
+        '🚨 [Delivery] la compensación del proveedor excede lo reembolsable del cobro: no se escribe dinero, espera a una persona',
+        {
+          orderId,
+          venueId,
+          ...datos,
+        },
+      )
       return { outcome: 'BLOCKED_EXCEEDS_REFUNDABLE' as const }
     }
     const { refundPaymentId, replay } = await writeRefundInTx(tx, {
@@ -438,11 +447,14 @@ export async function reconcileDeliveryOrderFromProvider(
       await tx.activityLog.create({
         data: { venueId, staffId: null, action: 'DELIVERY_REFUND_POSSIBLE_DUPLICATE', entity: 'Order', entityId: orderId, data: datos },
       })
-      logger.error('🚨 [Delivery] posible doble registro: se compensó un retiro en una orden con reembolso independiente — revisar contra el reporte de Uber', {
-        orderId,
-        venueId,
-        ...datos,
-      })
+      logger.error(
+        '🚨 [Delivery] posible doble registro: se compensó un retiro en una orden con reembolso independiente — revisar contra el reporte de Uber',
+        {
+          orderId,
+          venueId,
+          ...datos,
+        },
+      )
     }
     await reprecio(tx, {
       orderId,

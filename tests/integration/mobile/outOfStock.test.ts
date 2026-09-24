@@ -401,12 +401,17 @@ describe('«No tengo este artículo» desde el KDS (Tarea 14)', () => {
       jest
         .spyOn(prisma.deliveryChannelLink, 'findMany')
         .mockImplementation(((args: { where?: Record<string, unknown> }) =>
-          args?.where && 'ownerAuthorizedEnvironment' in args.where ? Promise.reject(new Error('conexión perdida')) : real(args as never)) as never)
+          args?.where && 'ownerAuthorizedEnvironment' in args.where
+            ? Promise.reject(new Error('conexión perdida'))
+            : real(args as never)) as never)
 
       const res = await retirar(s.kds.id, s.itemB.id)
 
       expect(res.status).toBe(503)
-      expect(res.body).toMatchObject({ code: 'PROVIDER_NOT_CONTACTED', error: 'No se pudo contactar a Uber; no se envió nada, intenta de nuevo.' })
+      expect(res.body).toMatchObject({
+        code: 'PROVIDER_NOT_CONTACTED',
+        error: 'No se pudo contactar a Uber; no se envió nada, intenta de nuevo.',
+      })
       expect(red).not.toHaveBeenCalled()
     })
     expect(await accionDe(s.order.id)).toBeNull()
@@ -424,7 +429,10 @@ describe('«No tengo este artículo» desde el KDS (Tarea 14)', () => {
       const res = await retirar(s.kds.id, s.itemB.id)
 
       expect(res.status).toBe(409)
-      expect(res.body).toMatchObject({ code: 'STORE_NOT_CONNECTED', error: 'Uber está desconectada para esta tienda; reconéctala desde el panel.' })
+      expect(res.body).toMatchObject({
+        code: 'STORE_NOT_CONNECTED',
+        error: 'Uber está desconectada para esta tienda; reconéctala desde el panel.',
+      })
       expect(red).not.toHaveBeenCalled()
     })
     expect(await accionDe(s.order.id)).toBeNull()

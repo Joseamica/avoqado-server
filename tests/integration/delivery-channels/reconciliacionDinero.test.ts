@@ -343,7 +343,9 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
 
       const refunds = await reembolsos(order.id)
       expect(refunds.map(f => f.amount.toString())).toEqual(['-75', '-75'])
-      expect(await prisma.activityLog.count({ where: { venueId, entityId: order.id, action: 'DELIVERY_REFUND_POSSIBLE_DUPLICATE' } })).toBe(1)
+      expect(await prisma.activityLog.count({ where: { venueId, entityId: order.id, action: 'DELIVERY_REFUND_POSSIBLE_DUPLICATE' } })).toBe(
+        1,
+      )
       // En libros quedan $0 de venta ⇒ $0 de IVA: la compensación descuenta el IVA de lo que el manual
       // no sacó ya, no el de la foto entera.
       const renglones = await prisma.orderItem.findMany({
@@ -443,8 +445,14 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
     it('control: chargeback de $180 del reporte (no ligado al cobro) y retiro de $50 ⇒ se compensa y queda la bandera, como hoy', async () => {
       const { order, foto } = await sembrar(renglones, pago('200.00', '0.00'))
       expect(
-        (await applyDeliveryRefund({ externalOrderId: order.externalId!.split(':')[1], provider: 'UBER_EATS', montoDevuelto: '180.00', motivo: 'reporte' }))
-          .outcome,
+        (
+          await applyDeliveryRefund({
+            externalOrderId: order.externalId!.split(':')[1],
+            provider: 'UBER_EATS',
+            montoDevuelto: '180.00',
+            motivo: 'reporte',
+          })
+        ).outcome,
       ).toBe('APPLIED')
       proveedorDevuelve(foto(['a'], pago('150.00', '0.00')))
 
@@ -462,7 +470,12 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
       { linea: 'b', nombre: 'Horchata', precio: '50.00' },
     ]
     const reporte = (order: { externalId: string | null }, monto: string) =>
-      applyDeliveryRefund({ externalOrderId: order.externalId!.split(':')[1], provider: 'UBER_EATS', montoDevuelto: monto, motivo: 'reporte' })
+      applyDeliveryRefund({
+        externalOrderId: order.externalId!.split(':')[1],
+        provider: 'UBER_EATS',
+        montoDevuelto: monto,
+        motivo: 'reporte',
+      })
 
     const bandera = (orderId: string) =>
       prisma.activityLog.count({ where: { venueId, entityId: orderId, action: 'DELIVERY_REFUND_POSSIBLE_DUPLICATE' } })

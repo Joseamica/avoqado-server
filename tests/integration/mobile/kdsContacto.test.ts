@@ -98,9 +98,7 @@ describe('el KDS entrega el contacto del cliente (Tarea 4)', () => {
   it('GET /kds/orders devuelve el contacto del cliente de un pedido de reparto', async () => {
     await ingestDeliveryOrder(pedido(`http-${Date.now()}`), link)
 
-    const res = await request(app)
-      .get(`/api/v1/mobile/venues/${venueId}/kds/orders`)
-      .set('Authorization', `Bearer ${token}`)
+    const res = await request(app).get(`/api/v1/mobile/venues/${venueId}/kds/orders`).set('Authorization', `Bearer ${token}`)
 
     expect(res.status).toBe(200)
     expect(res.body.data).toHaveLength(1)

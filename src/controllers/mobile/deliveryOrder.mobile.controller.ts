@@ -52,13 +52,11 @@ function respuestaNoEnviado(res: Response, e: unknown) {
     ? res
         .status(409)
         .json({ ok: false, code: 'STORE_NOT_CONNECTED', error: 'Uber está desconectada para esta tienda; reconéctala desde el panel.' })
-    : res
-        .status(503)
-        .json({
-          ok: false,
-          code: 'PROVIDER_NOT_CONTACTED',
-          error: 'No se pudo contactar a la app de delivery; no se envió nada, intenta de nuevo.',
-        })
+    : res.status(503).json({
+        ok: false,
+        code: 'PROVIDER_NOT_CONTACTED',
+        error: 'No se pudo contactar a la app de delivery; no se envió nada, intenta de nuevo.',
+      })
 }
 
 export const acceptOrder = async (req: Request, res: Response, next: NextFunction) => {

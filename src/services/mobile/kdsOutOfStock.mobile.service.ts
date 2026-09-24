@@ -503,9 +503,7 @@ export async function listDeliveryLineActions(
   const desde = opts.cursor ? leerCursor(opts.cursor) : null
   const [filas, total, bloqueadasPag, blockedOrdersTotal] = await Promise.all([
     prisma.deliveryLineAction.findMany({
-      where: desde
-        ? { ...base, OR: [{ updatedAt: { lt: desde.updatedAt } }, { updatedAt: desde.updatedAt, id: { lt: desde.id } }] }
-        : base,
+      where: desde ? { ...base, OR: [{ updatedAt: { lt: desde.updatedAt } }, { updatedAt: desde.updatedAt, id: { lt: desde.id } }] } : base,
       orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
       take: take + 1,
       select: {

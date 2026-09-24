@@ -72,10 +72,7 @@ export function tiendasDeLaVariable(environment: UberEnvironment): Set<string> {
  * ponytail: una consulta indexada por escritura (son pocas por minuto); si algún día pesa, caché con
  * invalidación por `revocationVersion`, nunca por tiempo.
  */
-export async function getWritableStores(
-  environment: UberEnvironment = getUberEnvironment(),
-  soloTienda?: string,
-): Promise<Set<string>> {
+export async function getWritableStores(environment: UberEnvironment = getUberEnvironment(), soloTienda?: string): Promise<Set<string>> {
   const variable = tiendasDeLaVariable(environment)
   if (environment === 'SANDBOX') return variable
   const clientId = env.UBER_CLIENT_ID_PRODUCTION
@@ -101,9 +98,7 @@ export async function getWritableStores(
     })
     throw err
   }
-  return new Set(
-    filas.map(f => f.externalLocationId.trim().toLowerCase()).filter(id => variable.size === 0 || variable.has(id)),
-  )
+  return new Set(filas.map(f => f.externalLocationId.trim().toLowerCase()).filter(id => variable.size === 0 || variable.has(id)))
 }
 
 /** Token de aplicación vigente (cacheado 30 días, single-flight). */

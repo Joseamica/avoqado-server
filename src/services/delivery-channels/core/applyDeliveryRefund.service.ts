@@ -146,11 +146,14 @@ export async function applyDeliveryRefund(params: {
 
   if (r.outcome === 'ALREADY_APPLIED') return { outcome: 'ALREADY_APPLIED', orderId: order.id }
   if (r.duda) {
-    logger.error('🚨 [💸 DeliveryRefund] posible doble registro: el chargeback llegó sobre una orden con retiro ya compensado — revisar contra el reporte de Uber', {
-      orderId: order.id,
-      chargeback: monto.toString(),
-      ajustes: r.compensado.toString(),
-    })
+    logger.error(
+      '🚨 [💸 DeliveryRefund] posible doble registro: el chargeback llegó sobre una orden con retiro ya compensado — revisar contra el reporte de Uber',
+      {
+        orderId: order.id,
+        chargeback: monto.toString(),
+        ajustes: r.compensado.toString(),
+      },
+    )
   }
 
   void logAction({

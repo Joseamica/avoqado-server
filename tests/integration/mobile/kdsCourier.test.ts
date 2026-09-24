@@ -149,7 +149,13 @@ describe('el KDS contesta "¿quién trae este pedido?" (Tarea 8)', () => {
     expect(res.body.data).toEqual({
       supported: true,
       assigned: true,
-      courier: { name: 'Juan', phone: '+52 1', phoneCode: undefined, vehicle: { make: 'Nissan', model: 'March', licensePlate: undefined }, pictureUrl: undefined },
+      courier: {
+        name: 'Juan',
+        phone: '+52 1',
+        phoneCode: undefined,
+        vehicle: { make: 'Nissan', model: 'March', licensePlate: undefined },
+        pictureUrl: undefined,
+      },
     })
   })
 

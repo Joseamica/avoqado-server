@@ -82,7 +82,13 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
       payment: pago(venta, prop),
     })
     // Por defecto el proveedor devuelve el pedido intacto.
-    fotos.set(ext, foto(renglones.map(r => r.linea), '200.00'))
+    fotos.set(
+      ext,
+      foto(
+        renglones.map(r => r.linea),
+        '200.00',
+      ),
+    )
     return { order, ext, item, foto }
   }
 
@@ -300,7 +306,9 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
       status: 'CONFIRMED',
       settlement: 'NO_DELTA',
     })
-    expect(await prisma.activityLog.count({ where: { venueId, entityId: s.order.id, action: 'DELIVERY_LINE_ACTIONS_CLOSED_BY_PROVIDER' } })).toBe(1)
+    expect(
+      await prisma.activityLog.count({ where: { venueId, entityId: s.order.id, action: 'DELIVERY_LINE_ACTIONS_CLOSED_BY_PROVIDER' } }),
+    ).toBe(1)
     expect(gritos.mock.calls.filter(([m]) => String(m).startsWith('🚨') && String(m).includes('cerró el pedido'))).toHaveLength(1)
     expect(await reembolsos(s.order.id)).toHaveLength(0)
   })
@@ -803,7 +811,10 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
       expect((await reembolsos(s.order.id)).some(f => f.amount.toString() === '-50')).toBe(true) // esta lectura sí liquidó
       expect(await incidencias(s.order.id, 'DELIVERY_ORDER_CHANGE_UNCONFIRMED')).toHaveLength(1)
       const deEsta = (gritos.mock.calls as unknown[][]).filter(
-        ([m, d]) => String(m).startsWith('🚨') && String(m).includes('no se confirmó') && (d as { orderId?: string } | undefined)?.orderId === s.order.id,
+        ([m, d]) =>
+          String(m).startsWith('🚨') &&
+          String(m).includes('no se confirmó') &&
+          (d as { orderId?: string } | undefined)?.orderId === s.order.id,
       )
       expect(deEsta).toHaveLength(1)
     })

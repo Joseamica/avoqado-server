@@ -234,7 +234,8 @@ async function vencerDuenoAbandonado(intentId: string, storeId: string): Promise
   if (vencido) logger.info('🛵 [UberConnect] intent abandonado vencido al reclamar su tienda', { intentId: dueno, storeId, por: intentId })
   // Dueño muerto (recién vencido, FAILED o EXPIRED) que creó la fila sin consentirla: se borra ya, sin
   // esperar al job — si no, OTRO negocio recibiría OTHER_VENUE por una fila huérfana (M-3).
-  if (await borrarVinculosDeMuertos(dueno)) logger.info('🛵 [UberConnect] vínculo huérfano de un intent muerto borrado', { intentId: dueno, storeId })
+  if (await borrarVinculosDeMuertos(dueno))
+    logger.info('🛵 [UberConnect] vínculo huérfano de un intent muerto borrado', { intentId: dueno, storeId })
 }
 
 /** Paso 1 (§4.3): reclamación atómica. Sólo `RECLAMADA` autoriza a llamar a `pos_data`. */

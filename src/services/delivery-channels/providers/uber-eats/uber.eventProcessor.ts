@@ -182,7 +182,12 @@ export async function processUberEvent(eventRowId: string, deps: UberProcessDeps
       // exista el vínculo (P1-3): antes, sin vínculo el evento se tiraba y una conexión en curso
       // re-otorgaba la tienda al crearla. El vínculo se busca AHORA, no el que había al recibir el aviso.
       const deshabilitados = await revocarTienda(identidad.storeId)
-      const datos = { eventRowId, storeId: identidad.storeId, linkIds: deshabilitados.map(l => l.id), venueIds: deshabilitados.map(l => l.venueId) }
+      const datos = {
+        eventRowId,
+        storeId: identidad.storeId,
+        linkIds: deshabilitados.map(l => l.id),
+        venueIds: deshabilitados.map(l => l.venueId),
+      }
       if (deshabilitados.length) logger.error('🚨 [Uber] el comercio QUITÓ el acceso a esta tienda — canal deshabilitado', datos)
       else logger.warn('🏪 [Uber] revocación de una tienda sin vínculo — registrada para que una conexión en curso no la reactive', datos)
     } else if (evento.channelLink) {

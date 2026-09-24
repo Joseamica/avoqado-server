@@ -581,8 +581,10 @@ describe('🔴 BYOC — reparte el NEGOCIO, no Uber', () => {
 })
 
 describe('I-2: el pedido CERRADO en Uber (ya no admite retiros)', () => {
-  const leer = (nombre: string) => JSON.parse(fs.readFileSync(path.join(__dirname, `../../../fixtures/delivery/uber/${nombre}.json`), 'utf8'))
-  const envolver = (p: any, cambios: Record<string, unknown>) => (p.order ? { ...p, order: { ...p.order, ...cambios } } : { ...p, ...cambios })
+  const leer = (nombre: string) =>
+    JSON.parse(fs.readFileSync(path.join(__dirname, `../../../fixtures/delivery/uber/${nombre}.json`), 'utf8'))
+  const envolver = (p: any, cambios: Record<string, unknown>) =>
+    p.order ? { ...p, order: { ...p.order, ...cambios } } : { ...p, ...cambios }
 
   it('status COMPLETED (el pedido real terminado) ⇒ providerClosed', () => {
     expect(mapUberOrder(leer('pedido-real-uapi')).providerClosed).toBe(true)
@@ -597,6 +599,8 @@ describe('I-2: el pedido CERRADO en Uber (ya no admite retiros)', () => {
   })
 
   it('HANDED_OFF (va con el repartidor) NO es cierre', () => {
-    expect(mapUberOrder(envolver(leer('pedido-con-modificadores-uapi'), { state: 'HANDED_OFF', status: 'ACTIVE' })).providerClosed).toBe(false)
+    expect(mapUberOrder(envolver(leer('pedido-con-modificadores-uapi'), { state: 'HANDED_OFF', status: 'ACTIVE' })).providerClosed).toBe(
+      false,
+    )
   })
 })

@@ -345,9 +345,7 @@ describe('El DTO del KDS decide por las apps (Tarea 16)', () => {
   it('si la lectura de capacidades falla, el bump contesta 200 y el «listo» al proveedor sale igual', async () => {
     const s = await sembrar()
     const falla = jest.spyOn(capacidadesModulo, 'ventasDeComandas').mockRejectedValueOnce(new Error('BD caída un instante'))
-    const listo = jest
-      .spyOn(respuestaAlProveedor, 'markDeliveryOrderReady')
-      .mockResolvedValue({ outcome: 'ALREADY_DONE' } as any)
+    const listo = jest.spyOn(respuestaAlProveedor, 'markDeliveryOrderReady').mockResolvedValue({ outcome: 'ALREADY_DONE' } as any)
     try {
       const bump = await request(server)
         .post(`/api/v1/mobile/venues/${venueId}/kds/orders/${s.kds.id}/bump`)
