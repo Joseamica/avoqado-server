@@ -113,8 +113,9 @@ const INVENTARIO: Record<string, number> = {
   'src/services/dashboard/reports.dashboard.service.ts': 1,
   'src/services/dashboard/review.dashboard.service.ts': 1,
   'src/services/dashboard/sale-verification.dashboard.service.ts': 2,
-  // 2026-09-18: 3 → 2. `computeSettlementProjection` recorre por páginas con cursor.
-  'src/services/dashboard/sales-summary.dashboard.service.ts': 2,
+  // sales-summary.dashboard.service.ts: 2 → 0 el 2026-09-24. El desglose por método de pago
+  // (`byPaymentMethodDetailed`) y sus reembolsos se agregan en SQL con GROUP BY; antes traían una
+  // fila por cobro (3,109 en un mes de Testarudo) y dispararon el query-guard en producción.
   // 2026-09-07: settlementCalendar 1 → 0. La semana de liquidación recorre los pagos por
   // páginas de 500 con cursor (mismo patrón que availableBalance).
   'src/services/dashboard/settlementIncident.service.ts': 1,

@@ -424,6 +424,22 @@ export function bucketOf(
   return { bucket: 'OTHER' }
 }
 
+/**
+ * `!!processorData?.isInternational` evaluated in SQL, with JavaScript's
+ * truthiness — the rule the per-row breakdown applied before it moved into the
+ * database: true / non-zero number / non-empty string / object / array are
+ * truthy; false, 0, "", null and a missing key (or a non-object
+ * processorData) are not.
+ */
+const IS_INTERNATIONAL_SQL = Prisma.sql`(CASE jsonb_typeof(p."processorData" -> 'isInternational')
+  WHEN 'boolean' THEN (p."processorData" ->> 'isInternational')::boolean
+  WHEN 'number' THEN (p."processorData" ->> 'isInternational')::numeric <> 0
+  WHEN 'string' THEN (p."processorData" ->> 'isInternational') <> ''
+  WHEN 'object' THEN true
+  WHEN 'array' THEN true
+  ELSE false
+END)`
+
 // ============================================================
 // Main Service Function
 // ============================================================
@@ -1179,51 +1195,70 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       return acc
     }
 
-    // (1) Completed payments — one row per payment so we can classify each into
-    // its card sub-bucket. (2) Platform fee per payment via TransactionCost
-    // joined by paymentId. (3) Refund payments (negative amounts) per bucket.
-    const [detailRows, feeRows, refundDetailRows] = await Promise.all([
-      prisma.payment.findMany({
-        where: { venueId, ...dateFilter, status: 'COMPLETED', ...merchantPaymentFilter },
-        select: { id: true, method: true, cardBrand: true, processorData: true, amount: true, tipAmount: true },
-      }),
-      prisma.$queryRaw<Array<{ payment_id: string; fee: number }>>`
-        SELECT tc."paymentId" AS payment_id, (tc."venueChargeAmount" + COALESCE(tc."venueFixedFee", 0))::float AS fee
-        FROM "TransactionCost" tc
-        JOIN "Payment" p ON p.id = tc."paymentId"
+    // Aggregated IN THE DATABASE, grouped by exactly what bucketOf needs
+    // (method, brand, international flag) — a handful of rows whatever the
+    // range. Until 2026-09-24 this hydrated ONE ROW PER PAYMENT and added them
+    // up in JS: a month of Testarudo was 3,109 rows and tripped the query-guard
+    // on the POS Informe de ventas (which always asks for this breakdown).
+    //
+    // (1) Completed payments with their platform fee (TransactionCost is 1:1 by
+    // paymentId, so the LEFT JOIN never fans out). (2) Refund payments, summed
+    // as positive magnitudes row by row (ABS inside the SUM, as before).
+    const merchantSql = merchantAccountId ? Prisma.sql`AND p."merchantAccountId" = ${merchantAccountId}` : Prisma.empty
+    type GroupRow = { method: string; cardBrand: string | null; isIntl: boolean; count: number }
+    const [completedGroups, refundGroups] = await Promise.all([
+      prisma.$queryRaw<Array<GroupRow & { amount: string; tips: string; fees: string }>>`
+        SELECT p."method"::text AS "method",
+               p."cardBrand"::text AS "cardBrand",
+               ${IS_INTERNATIONAL_SQL} AS "isIntl",
+               COUNT(*)::int AS "count",
+               COALESCE(SUM(p."amount"), 0)::text AS "amount",
+               COALESCE(SUM(p."tipAmount"), 0)::text AS "tips",
+               COALESCE(SUM(tc."venueChargeAmount" + COALESCE(tc."venueFixedFee", 0)), 0)::text AS "fees"
+        FROM "Payment" p
+        LEFT JOIN "TransactionCost" tc ON tc."paymentId" = p.id
         WHERE p."venueId" = ${venueId}
           AND p."createdAt" >= ${utcTs(parsedStartDate)}
           AND p."createdAt" <= ${utcTs(parsedEndDate)}
           AND p."status" = 'COMPLETED'
-          ${merchantAccountId ? Prisma.sql`AND p."merchantAccountId" = ${merchantAccountId}` : Prisma.empty}
+          ${merchantSql}
+        GROUP BY 1, 2, 3
       `,
-      prisma.payment.findMany({
-        where: { venueId, ...dateFilter, type: 'REFUND', ...merchantPaymentFilter },
-        select: { method: true, cardBrand: true, processorData: true, amount: true, tipAmount: true },
-      }),
+      prisma.$queryRaw<Array<GroupRow & { refunds: string }>>`
+        SELECT p."method"::text AS "method",
+               p."cardBrand"::text AS "cardBrand",
+               ${IS_INTERNATIONAL_SQL} AS "isIntl",
+               COUNT(*)::int AS "count",
+               COALESCE(SUM(ABS(p."amount" + p."tipAmount")), 0)::text AS "refunds"
+        FROM "Payment" p
+        WHERE p."venueId" = ${venueId}
+          AND p."createdAt" >= ${utcTs(parsedStartDate)}
+          AND p."createdAt" <= ${utcTs(parsedEndDate)}
+          AND p."type" = 'REFUND'
+          ${merchantSql}
+        GROUP BY 1, 2, 3
+      `,
     ])
 
-    const feeMap = new Map(feeRows.map(f => [f.payment_id, Number(f.fee)]))
-
     // Completed payments → bucket (+ sub-bucket) accumulators.
-    for (const row of detailRows) {
-      const isIntl = !!(row.processorData as { isInternational?: boolean } | null)?.isInternational
-      const { bucket, sub } = bucketOf(row.method, row.cardBrand, isIntl)
+    for (const row of completedGroups) {
+      const { bucket, sub } = bucketOf(row.method, row.cardBrand, row.isIntl)
       const amt = Number(row.amount)
-      const tip = Number(row.tipAmount)
-      const fee = feeMap.get(row.id) ?? 0
+      const tip = Number(row.tips)
+      const fee = Number(row.fees)
+      const count = Number(row.count)
 
       const b = ensure(buckets, bucket)
       b.amount += amt + tip // tips-inclusive, matching byPaymentMethod
       b.tips += tip
-      b.count += 1
+      b.count += count
       b.platformFees += fee
 
       if (sub) {
         const s = ensure(subBuckets, sub)
         s.amount += amt + tip
         s.tips += tip
-        s.count += 1
+        s.count += count
         s.platformFees += fee
       }
     }
@@ -1231,11 +1266,10 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     // Refund payments → bucket refunds (positive magnitude). Refunds aren't
     // attributed down to sub-buckets (the dashboard surfaces refunds at the
     // bucket level only).
-    for (const row of refundDetailRows) {
-      const isIntl = !!(row.processorData as { isInternational?: boolean } | null)?.isInternational
-      const { bucket } = bucketOf(row.method, row.cardBrand, isIntl)
+    for (const row of refundGroups) {
+      const { bucket } = bucketOf(row.method, row.cardBrand, row.isIntl)
       const b = ensure(buckets, bucket)
-      b.refunds += Math.abs(Number(row.amount) + Number(row.tipAmount))
+      b.refunds += Number(row.refunds)
     }
 
     // MindForm legacy QR → its own QR_LEGACY bucket (no recorded platform fees).
