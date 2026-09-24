@@ -239,6 +239,21 @@ describe('issueCfdiForOrderController', () => {
     expect(body.error).toMatch(/más de un RFC/)
   })
 
+  // /full-testing 24-sep: una orden de OTRO negocio respondía «no se pudo determinar quién factura», un texto
+  // pensado para el emisor. No es lo mismo: aquí la venta no es de este negocio.
+  it('orden de otro negocio (aislamiento) ⇒ 404 ORDER_NOT_FOUND con su propio texto, sin hablar de emisores', async () => {
+    mockIssue.mockRejectedValue(new Error('Order o1 not found'))
+
+    const res = mockRes()
+    await issueCfdiForOrderController(mockReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(404)
+    const body = res.json.mock.calls[0][0]
+    expect(body.code).toBe('ORDER_NOT_FOUND')
+    expect(body.error).toMatch(/no existe o no es de este negocio/)
+    expect(body.error).not.toMatch(/RFC|Configuración/)
+  })
+
   it('returns 500 on unexpected errors', async () => {
     mockIssue.mockRejectedValue(new Error('Connection refused'))
 

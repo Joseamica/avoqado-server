@@ -157,6 +157,19 @@ const unoOVariosQuery = <T extends [string, ...string[]]>(valores: T, mensaje: s
     z.array(z.enum(valores, { errorMap: () => ({ message: mensaje }) })).optional(),
   )
 
+/**
+ * Un día del calendario `AAAA-MM-DD` que exista (2026-02-30 no). Antes era cualquier texto y una fecha
+ * inválida tumbaba la lista con 500 (/full-testing, 24-sep-2026). Forma, no regla de negocio.
+ */
+const diaCalendario = z
+  .string()
+  .trim()
+  .refine(v => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false
+    const d = new Date(`${v}T12:00:00Z`)
+    return !isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v
+  }, 'La fecha debe ser un día real con formato AAAA-MM-DD')
+
 export const listCfdisSchema = z.object({
   query: z.object({
     status: unoOVariosQuery(
@@ -170,8 +183,8 @@ export const listCfdisSchema = z.object({
       .pipe(z.boolean())
       .optional(),
     receptorRfc: z.string().trim().optional(),
-    from: z.string().trim().optional(),
-    to: z.string().trim().optional(),
+    from: diaCalendario.optional(),
+    to: diaCalendario.optional(),
     page: z.coerce
       .number({ invalid_type_error: 'La página debe ser un número' })
       .int('La página debe ser un entero')

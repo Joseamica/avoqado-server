@@ -121,6 +121,13 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
     const message = err instanceof Error ? err.message : String(err)
     logger.error(`[cfdi.controller] issue failed for order ${orderId}: ${message}`)
 
+    // La venta no es de este negocio (aislamiento) o no existe: no es un problema de configuración fiscal,
+    // y el texto no debe mandar a revisar emisores.
+    if (/^Order \S+ not found$/i.test(message)) {
+      res.status(404).json({ code: 'ORDER_NOT_FOUND', error: 'Esta venta no existe o no es de este negocio.' })
+      return
+    }
+
     if (/not found|no fiscal emisor/i.test(message)) {
       // Testarudo 24-sep: el texto viejo («sin emisor fiscal configurado») mandaba a revisar una configuración
       // que estaba bien. Éste dice qué revisar y qué caso todavía no se puede facturar.
