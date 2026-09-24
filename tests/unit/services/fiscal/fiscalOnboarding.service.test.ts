@@ -37,6 +37,19 @@ function deps(over: Partial<EmisorOnboardingDeps> = {}): EmisorOnboardingDeps {
 // ─── provisionEmisor ─────────────────────────────────────────────────────────
 
 describe('provisionEmisor', () => {
+  // El webhook de Facturapi es por organización: se da de alta en cuanto la organización existe.
+  it('da de alta el webhook de Facturapi del emisor recién provisionado', async () => {
+    const asegurarWebhook = jest.fn().mockResolvedValue({ resultado: 'CREADO' })
+    await provisionEmisor({ emisorId: 'e1', expectedVenueId: 'v1' }, deps({ asegurarWebhook }))
+    expect(asegurarWebhook).toHaveBeenCalledWith('e1')
+  })
+
+  it('un fallo al dar de alta el webhook NO tumba el provisioning (queda la revisión horaria)', async () => {
+    const asegurarWebhook = jest.fn().mockRejectedValue(new Error('Facturapi caído'))
+    const r = await provisionEmisor({ emisorId: 'e1', expectedVenueId: 'v1' }, deps({ asegurarWebhook }))
+    expect(r.providerOrgId).toBe('org1')
+  })
+
   it('creates the org, sets legal info, stores providerOrgId + encrypted key', async () => {
     const d = deps()
     const r = await provisionEmisor({ emisorId: 'e1', expectedVenueId: 'v1' }, d)

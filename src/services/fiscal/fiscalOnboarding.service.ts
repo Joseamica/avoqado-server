@@ -24,6 +24,7 @@ import { env } from '../../config/env'
 import { FacturapiProvider } from './providers/facturapi.provider'
 import { FiscalProvider } from './providers/fiscal-provider.interface'
 import { encryptProviderKey } from './fiscalKey.service'
+import { asegurarWebhookDelEmisor, defaultAsegurarWebhookDeps } from './facturapiWebhook.service'
 import { fetchStorageObject } from '../storage.service'
 
 // ─── DI interface ─────────────────────────────────────────────────────────────
@@ -44,6 +45,11 @@ export interface EmisorOnboardingDeps {
   findVenueLogo: (venueId: string) => Promise<string | null>
   /** Descarga bytes de una URL (el logo vive en Storage; el PAC quiere el archivo, no la liga). */
   fetchBytes: (url: string) => Promise<Buffer>
+  /**
+   * Da de alta el webhook de Facturapi de la organización (facturapiWebhook.service). Opcional para que las
+   * pruebas que no lo tocan no tengan que simularlo; `defaultDeps` siempre lo trae.
+   */
+  asegurarWebhook?: (emisorId: string) => Promise<unknown>
 }
 
 // ─── Service functions ────────────────────────────────────────────────────────
@@ -103,6 +109,18 @@ export async function provisionEmisor(
     await syncEmisorLogo({ emisorId: emisor.id, expectedVenueId: params.expectedVenueId }, { ...deps, findEmisor: async () => provisioned })
   } catch (err: unknown) {
     logger.warn(`[fiscal] logo no sincronizado al provisionar emisor ${emisor.id}: ${err instanceof Error ? err.message : String(err)}`)
+  }
+
+  // El webhook avisa cuando el SAT resuelve una cancelación. Mismo criterio que el logo: un fallo NUNCA tumba
+  // el provisioning — el barrido horario del job cubre, y el script de alta lo reintenta.
+  if (deps.asegurarWebhook) {
+    try {
+      await deps.asegurarWebhook(emisor.id)
+    } catch (err: unknown) {
+      logger.warn(
+        `[fiscal] webhook de Facturapi no dado de alta para el emisor ${emisor.id}: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
   }
 
   return provisioned
@@ -226,5 +244,6 @@ function defaultDeps(): EmisorOnboardingDeps {
     findVenueLogo: async venueId => (await prisma.venue.findUnique({ where: { id: venueId }, select: { logo: true } }))?.logo ?? null,
     // Sólo desde nuestro Storage, imagen, ≤ 5 MB, 10 s: `Venue.logo` es editable por el cliente.
     fetchBytes: url => fetchStorageObject(url, { maxBytes: 5 * 1024 * 1024, timeoutMs: 10_000, contentTypePrefix: 'image/' }),
+    asegurarWebhook: emisorId => asegurarWebhookDelEmisor(emisorId, defaultAsegurarWebhookDeps()),
   }
 }

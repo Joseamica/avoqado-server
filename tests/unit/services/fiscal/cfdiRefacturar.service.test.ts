@@ -16,7 +16,10 @@ import {
   IssueCfdiDeps,
   refreshPendingCancellation,
   RefreshCancellationDeps,
+  sincronizarCancelacionExterna,
+  SincronizarExternaDeps,
   syncPendingCancellations,
+  tocaRevisarCancelaciones,
   llaveDeEmision,
 } from '../../../../src/services/fiscal/cfdi.service'
 
@@ -380,5 +383,89 @@ describe('syncPendingCancellations', () => {
     expect(tally.errores).toBe(1)
     expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('no se pudo consultar la cancelación de x'))
     expect(log.error).not.toHaveBeenCalled()
+  })
+})
+
+// ─── sincronizarCancelacionExterna (webhook: la cancelaron por fuera) ─────────
+// El caso A-14: la factura se canceló desde el portal de Facturapi y Avoqado la seguía mostrando «Timbrada».
+
+function externaDeps(estado: { status: string; cancelledAt: Date | null }, over: Partial<SincronizarExternaDeps> = {}) {
+  const getCancellationStatus = jest.fn().mockResolvedValue(estado)
+  const deps: SincronizarExternaDeps = {
+    resolveProvider: jest.fn().mockReturnValue({ name: 'facturapi', getCancellationStatus } as any),
+    loadEmisor: jest.fn().mockResolvedValue({ id: 'e1', provider: 'FACTURAPI', providerKeyEnc: null, csdStatus: 'ACTIVE' }),
+    applyExternalCancel: jest.fn().mockImplementation(async (_id: string, data: any) => ({ ...fila({}), ...data })),
+    logAction: jest.fn().mockResolvedValue(undefined),
+    ...over,
+  }
+  return Object.assign(deps, { getCancellationStatus })
+}
+
+describe('sincronizarCancelacionExterna', () => {
+  it('el PAC dice cancelada ⇒ CANCELLED con la fecha del PAC y bitácora marcada como externa', async () => {
+    const cuando = new Date('2026-09-24T18:00:00Z')
+    const deps = externaDeps({ status: 'canceled', cancelledAt: cuando })
+    const r = await sincronizarCancelacionExterna(fila({}), { sandbox: false }, deps)
+
+    expect(deps.getCancellationStatus).toHaveBeenCalledWith('fa-a14')
+    const [id, data] = (deps.applyExternalCancel as jest.Mock).mock.calls[0]
+    expect(id).toBe('c-a14')
+    expect(data).toEqual({ status: 'CANCELLED', cancelStatus: 'CANCELLED', cancelledAt: cuando })
+    expect(r.status).toBe('CANCELLED')
+    expect(deps.logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'CFDI_CANCEL_CONFIRMED', entityId: 'c-a14', data: expect.objectContaining({ origen: 'EXTERNA' }) }),
+    )
+  })
+
+  it('aceptada por el receptor ⇒ también cancelada (cancelStatus ACCEPTED)', async () => {
+    const deps = externaDeps({ status: 'accepted', cancelledAt: null })
+    await sincronizarCancelacionExterna(fila({}), { sandbox: false }, deps)
+    expect((deps.applyExternalCancel as jest.Mock).mock.calls[0][1]).toEqual({ status: 'CANCELLED', cancelStatus: 'ACCEPTED' })
+  })
+
+  // No la pedimos nosotros: «pendiente» o «sin cancelación» no dicen nada de nuestra factura. No se escribe.
+  it('pendiente / sin cancelación / rechazada ⇒ no escribe nada', async () => {
+    for (const status of ['pending', 'verifying', 'none', 'rejected', 'expired']) {
+      const deps = externaDeps({ status, cancelledAt: null })
+      const antes = fila({})
+      const r = await sincronizarCancelacionExterna(antes, { sandbox: false }, deps)
+      expect([status, (deps.applyExternalCancel as jest.Mock).mock.calls.length]).toEqual([status, 0])
+      expect(r).toBe(antes)
+    }
+  })
+
+  it('una fila que no está timbrada, o con cancelación en trámite, no se consulta', async () => {
+    for (const f of [fila({ status: 'CANCELLED' }), fila({ cancelStatus: 'REQUESTED' }), fila({ facturapiId: null })]) {
+      const deps = externaDeps({ status: 'canceled', cancelledAt: null })
+      await sincronizarCancelacionExterna(f, { sandbox: false }, deps)
+      expect(deps.getCancellationStatus).not.toHaveBeenCalled()
+    }
+  })
+
+  it('si otra petición ya la resolvió (CAS perdido), no escribe bitácora', async () => {
+    const deps = externaDeps({ status: 'canceled', cancelledAt: null }, { applyExternalCancel: jest.fn().mockResolvedValue(null) })
+    await sincronizarCancelacionExterna(fila({}), { sandbox: false }, deps)
+    expect(deps.logAction).not.toHaveBeenCalled()
+  })
+})
+
+// ─── El barrido como RED DE SEGURIDAD (el webhook es la vía principal) ────────
+// Decisión del founder (24-sep): no preguntar al PAC cada 5 min. El barrido corre 1×hora y sólo mira las
+// cancelaciones que llevan más de una hora en trámite: si el webhook ya avisó, no queda nada que mirar.
+
+describe('barrido de cancelaciones: una vez por hora, sólo las de más de 1 h', () => {
+  it('pide sólo las cancelaciones pedidas hace más de una hora', async () => {
+    const ahora = new Date('2026-09-24T12:00:00Z')
+    const findPending = jest.fn().mockResolvedValue([])
+    await syncPendingCancellations({ sandbox: false, now: ahora }, { findPending, refresh: jest.fn() })
+    expect(findPending).toHaveBeenCalledWith(new Date('2026-09-24T11:00:00Z'))
+  })
+
+  it('toca revisar en la primera pasada y después sólo cuando ya pasó una hora', () => {
+    const t0 = Date.parse('2026-09-24T12:00:00Z')
+    expect(tocaRevisarCancelaciones(null, t0)).toBe(true)
+    expect(tocaRevisarCancelaciones(t0, t0 + 5 * 60_000)).toBe(false)
+    expect(tocaRevisarCancelaciones(t0, t0 + 59 * 60_000)).toBe(false)
+    expect(tocaRevisarCancelaciones(t0, t0 + 60 * 60_000)).toBe(true)
   })
 })

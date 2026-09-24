@@ -12,11 +12,7 @@ type EmisorKeyFields = Pick<FiscalEmisor, 'provider' | 'providerKeyEnc'>
 export function resolveFiscalProvider(emisor: EmisorKeyFields, opts: { sandbox: boolean }): FiscalProvider {
   switch (emisor.provider) {
     case 'FACTURAPI': {
-      const key = emisor.providerKeyEnc
-        ? decryptProviderKey(emisor.providerKeyEnc)
-        : opts.sandbox
-          ? process.env.FACTURAPI_TEST_KEY
-          : undefined
+      const key = resolveFacturapiKey(emisor, opts)
       if (!key) throw new Error('No facturapi key available for emisor (no providerKeyEnc and no FACTURAPI_TEST_KEY in sandbox)')
       return new FacturapiProvider(key)
     }
@@ -24,4 +20,15 @@ export function resolveFiscalProvider(emisor: EmisorKeyFields, opts: { sandbox: 
     default:
       throw new Error(`Unsupported fiscal provider: ${emisor.provider}`)
   }
+}
+
+/**
+ * La llave de Facturapi con la que timbra este emisor — la MISMA regla que `resolveFiscalProvider`, para que
+ * todo lo que se haga en su organización (timbrar, cancelar, dar de alta el webhook) vaya a la misma.
+ * `null` si el emisor no es de Facturapi o no hay llave.
+ */
+export function resolveFacturapiKey(emisor: EmisorKeyFields, opts: { sandbox: boolean }): string | null {
+  if (emisor.provider !== 'FACTURAPI') return null
+  if (emisor.providerKeyEnc) return decryptProviderKey(emisor.providerKeyEnc)
+  return opts.sandbox ? (process.env.FACTURAPI_TEST_KEY ?? null) : null
 }

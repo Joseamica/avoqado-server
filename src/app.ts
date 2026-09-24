@@ -43,6 +43,7 @@ import { eventLoopGuardMiddleware, startEventLoopMonitor } from './middlewares/e
 import webhookRoutes from './routes/webhook.routes'
 import { handleGoogleCalendarWebhook } from './controllers/webhook/google-calendar.webhook.controller'
 import { handleMercadoPagoWebhook } from './controllers/webhook/mercadoPago.webhook.controller'
+import { handleFacturapiWebhook } from './controllers/webhook/facturapi.webhook.controller'
 import { activarUberOAuth, startUberOAuth, uberOAuthCallback } from './controllers/delivery-channels/uber.oauth.controller'
 import publicRoutes from './routes/public.routes'
 import appUpdateRoutes from './routes/superadmin/appUpdate.routes'
@@ -129,6 +130,10 @@ app.post('/api/v1/webhooks/google-calendar', express.raw({ type: '*/*', limit: '
 // application/json parsing) so MP's potentially mixed content types still hit
 // our raw parser. Express matches routes in mount order.
 app.post('/api/v1/webhooks/mercadopago', express.raw({ type: '*/*', limit: '64kb' }), handleMercadoPagoWebhook)
+
+// ⚠️ Facturapi firma el cuerpo CRUDO (HMAC en `Facturapi-Signature`): raw parser propio, antes del router
+// genérico. El aviso trae la factura entera (conceptos incluidos), de ahí el límite de 1 MB.
+app.post('/api/v1/webhooks/facturapi/:emisorId', express.raw({ type: '*/*', limit: '1mb' }), handleFacturapiWebhook)
 
 app.use(
   '/api/v1/webhooks',

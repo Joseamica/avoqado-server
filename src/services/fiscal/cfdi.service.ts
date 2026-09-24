@@ -1375,14 +1375,87 @@ const defaultRefreshDeps: RefreshCancellationDeps = {
   logAction,
 }
 
+export interface SincronizarExternaDeps {
+  loadEmisor: RefreshCancellationDeps['loadEmisor']
+  resolveProvider: RefreshCancellationDeps['resolveProvider']
+  /** Marca cancelada SÓLO si sigue timbrada y sin cancelación en trámite (CAS). `null` si alguien ganó. */
+  applyExternalCancel: (cfdiId: string, data: Record<string, any>) => Promise<any | null>
+  logAction: RefreshCancellationDeps['logAction']
+}
+
+/**
+ * Una factura TIMBRADA que alguien canceló por fuera de Avoqado (p. ej. desde el portal de Facturapi) —
+ * el caso A-14, que seguía «Timbrada» aquí. La dispara el webhook; como con las cancelaciones propias, no se
+ * le cree al aviso: se le pregunta al PAC. Sólo se escribe si el PAC CONFIRMA la cancelación: un «pendiente»
+ * o «sin cancelación» no dice nada de una cancelación que nosotros no pedimos, así que no se toca la fila.
+ */
+export async function sincronizarCancelacionExterna(
+  cfdi: any,
+  opts: { sandbox: boolean },
+  deps: SincronizarExternaDeps = defaultExternaDeps,
+): Promise<any> {
+  if (cfdi.status !== 'STAMPED' || cfdi.cancelStatus === 'REQUESTED' || !cfdi.facturapiId) return cfdi
+  const emisor = cfdi.fiscalEmisor ?? (cfdi.fiscalEmisorId ? await deps.loadEmisor(cfdi.fiscalEmisorId) : null)
+  if (!emisor) return cfdi
+  const provider = deps.resolveProvider(emisor, { sandbox: opts.sandbox })
+  if (typeof provider.getCancellationStatus !== 'function') return cfdi
+
+  const res = await provider.getCancellationStatus(cfdi.facturapiId)
+  const cancelStatus = mapProviderCancelStatus(res.status)
+  if (cancelStatus !== 'CANCELLED' && cancelStatus !== 'ACCEPTED') return cfdi
+
+  const updated = await deps.applyExternalCancel(cfdi.id, {
+    status: 'CANCELLED',
+    cancelStatus,
+    ...(res.cancelledAt ? { cancelledAt: res.cancelledAt } : {}),
+  })
+  if (!updated) return cfdi
+
+  await deps.logAction({
+    staffId: null,
+    venueId: cfdi.venueId,
+    action: 'CFDI_CANCEL_CONFIRMED',
+    entity: 'Cfdi',
+    entityId: cfdi.id,
+    data: { uuid: cfdi.uuid ?? null, folio: folioDe(cfdi), providerStatus: res.status, cancelStatus, origen: 'EXTERNA' },
+  })
+  return updated
+}
+
+const defaultExternaDeps: SincronizarExternaDeps = {
+  loadEmisor: id => prisma.fiscalEmisor.findUnique({ where: { id } }),
+  resolveProvider: resolveFiscalProvider,
+  applyExternalCancel: async (id, data) => {
+    const { count } = await prisma.cfdi.updateMany({
+      where: { id, status: 'STAMPED', OR: [{ cancelStatus: null }, { cancelStatus: { not: 'REQUESTED' } }] },
+      data,
+    })
+    if (count === 0) return null
+    return prisma.cfdi.findUnique({ where: { id }, include: { fiscalEmisor: true } })
+  },
+  logAction,
+}
+
 export interface SyncPendingCancellationsDeps {
   /** Filas con cancelación en trámite pedida antes de `cutoff`, acotadas. */
   findPending: (cutoff: Date) => Promise<any[]>
   refresh: (cfdi: any) => Promise<any>
 }
 
-/** Cuánto se espera tras pedir la cancelación antes de volver a preguntar (el SAT suele tardar minutos). */
-export const CANCEL_RECHECK_AFTER_MS = 2 * 60_000
+/**
+ * El barrido es la RED DE SEGURIDAD: la vía principal es el webhook de Facturapi (facturapiWebhook.service),
+ * que avisa en cuanto el SAT resuelve. El barrido sólo mira lo que lleva más de una hora en trámite (si el
+ * aviso llegó, ya no queda nada que mirar) y corre una vez por hora, no cada 5 min (decisión del founder,
+ * 24-sep-2026). Facturapi no documenta cuántas veces reintenta un aviso que no pudimos recibir.
+ */
+export const CANCEL_RECHECK_AFTER_MS = 60 * 60_000
+/** Cada cuánto corre el barrido de cancelaciones dentro del job de conciliación. */
+export const CANCEL_SYNC_EVERY_MS = 60 * 60_000
+
+/** ¿Ya toca otra pasada del barrido? La primera pasada tras arrancar el proceso siempre toca. */
+export function tocaRevisarCancelaciones(ultimaPasadaMs: number | null, ahoraMs: number): boolean {
+  return ultimaPasadaMs === null || ahoraMs - ultimaPasadaMs >= CANCEL_SYNC_EVERY_MS
+}
 /** Tope por pasada del barrido (bounded-queries): cada fila es una llamada al PAC. */
 export const CANCEL_SYNC_MAX_PER_TICK = 50
 

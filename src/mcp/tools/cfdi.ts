@@ -74,8 +74,22 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
         take: limit,
       })
 
+      // ¿Facturapi nos avisa solo cuando el SAT resuelve una cancelación? Sin webhook, la factura cancelada se
+      // entera por la revisión de cada hora. Pocos emisores por venue: consulta acotada.
+      const emisores = await prisma.fiscalEmisor.findMany({
+        where: { venueId: { in: cfdiVenueIds }, provider: 'FACTURAPI' },
+        select: { rfc: true, webhookId: true, webhookConfiguredAt: true, venue: { select: { name: true } } },
+        take: 50,
+      })
+
       return text({
         venuesInScope: cfdiVenueIds.length,
+        avisosDeFacturapi: emisores.map(e => ({
+          venue: e.venue?.name,
+          rfc: e.rfc,
+          webhookActivo: Boolean(e.webhookId),
+          desde: e.webhookConfiguredAt,
+        })),
         byStatus,
         stamped: { count: stamped._count._all, totalMxn: (stamped._sum.totalCents ?? 0) / 100 },
         recentStamped: recent.map(r => ({

@@ -26,8 +26,14 @@ import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { reconcileStuckCfdi, StuckCfdi } from '../services/fiscal/cfdiReconcile.service'
-import { CANCEL_SYNC_MAX_PER_TICK, refreshPendingCancellation, syncPendingCancellations } from '../services/fiscal/cfdi.service'
+import {
+  CANCEL_SYNC_MAX_PER_TICK,
+  refreshPendingCancellation,
+  syncPendingCancellations,
+  tocaRevisarCancelaciones,
+} from '../services/fiscal/cfdi.service'
 import { NODE_ENV } from '../config/env'
+import { asegurarWebhooksFaltantes, defaultAsegurarFaltantesDeps } from '../services/fiscal/facturapiWebhook.service'
 import { scheduleJob } from '../observability/jobContext'
 
 // Only reconcile rows that have been STAMPING for longer than this. Comfortably larger than the
@@ -41,6 +47,8 @@ const MAX_PER_TICK = 200
 export class CfdiReconcileJob {
   private job: CronJob | null = null
   private isRunning = false
+  /** Última pasada del barrido de cancelaciones (en memoria: el server corre UNA instancia). */
+  private ultimaRevisionDeCancelaciones: number | null = null
 
   constructor() {
     // Every 5 minutes at :02 offset — avoids aligning with top-of-hour / :00 / :05 cron bursts.
@@ -82,7 +90,12 @@ export class CfdiReconcileJob {
     try {
       // Pase 1: cancelaciones que el SAT dejó «en trámite». Independiente del pase de STAMPING: si falla,
       // no impide conciliar timbres atorados (y viceversa).
-      await this.syncCancellations(startTime)
+      // Red de seguridad del webhook de Facturapi: una pasada por hora (ver CANCEL_SYNC_EVERY_MS).
+      if (tocaRevisarCancelaciones(this.ultimaRevisionDeCancelaciones, startTime)) {
+        this.ultimaRevisionDeCancelaciones = startTime
+        await this.syncCancellations(startTime)
+        await this.webhooksFaltantes()
+      }
 
       const cutoff = new Date(startTime - STUCK_THRESHOLD_MS)
 
@@ -179,6 +192,26 @@ export class CfdiReconcileJob {
       if (tally.revisadas > 0) logger.info('[cfdiReconcile] cancelaciones en trámite revisadas', { tally })
     } catch (err) {
       logger.error('[cfdiReconcile] no se pudieron revisar las cancelaciones en trámite', err)
+    }
+  }
+
+  /** Emisores sin webhook de Facturapi (los que ya existían, o a los que les falló el alta). Silencioso si no hay. */
+  private async webhooksFaltantes(): Promise<void> {
+    try {
+      const deps = defaultAsegurarFaltantesDeps()
+      const tally = await asegurarWebhooksFaltantes({
+        ...deps,
+        findSinWebhook: () =>
+          retry(deps.findSinWebhook, {
+            retries: 2,
+            initialDelay: 1500,
+            shouldRetry: shouldRetryDbConnectionError,
+            context: 'cfdiReconcile.findEmisoresSinWebhook',
+          }),
+      })
+      if (tally.revisados > 0) logger.info('[cfdiReconcile] webhooks de Facturapi dados de alta', { tally })
+    } catch (err) {
+      logger.warn('[cfdiReconcile] no se pudieron revisar los webhooks de Facturapi', err)
     }
   }
 }

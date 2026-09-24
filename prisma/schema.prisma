@@ -16299,12 +16299,19 @@ model FiscalEmisor {
   lugarExpedicion String // fiscal CP
 
   // Provider binding (provider-agnostic; facturapi = first adapter)
-  provider         FiscalProviderType @default(FACTURAPI)
-  providerOrgId    String? // facturapi org id / Alegra empresa id
-  providerKeyEnc   String? // encrypted per-emisor key
-  csdStatus        CsdStatus          @default(NONE)
-  csdExpiresAt     DateTime?
-  csdLastCheckedAt DateTime?
+  provider            FiscalProviderType @default(FACTURAPI)
+  providerOrgId       String? // facturapi org id / Alegra empresa id
+  providerKeyEnc      String? // encrypted per-emisor key
+  // Webhook de Facturapi de ESTA organización (cada emisor es una org con su llave). Facturapi entrega el
+  // secreto UNA sola vez, al crearlo (medido 24-sep-2026: list/retrieve no lo devuelven), así que se guarda
+  // cifrado aquí; sin él no hay forma de validar la firma de sus avisos. Lo escribe asegurarWebhookDelEmisor.
+  webhookId           String?
+  webhookSecretEnc    String?
+  webhookUrl          String?
+  webhookConfiguredAt DateTime?
+  csdStatus           CsdStatus          @default(NONE)
+  csdExpiresAt        DateTime?
+  csdLastCheckedAt    DateTime?
 
   // Comprobante defaults
   serie                   String?
