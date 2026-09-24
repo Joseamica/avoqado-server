@@ -2,6 +2,8 @@
  * Codex R8 (l) / R9 (l): los actores en vuelo de una prueba de carrera nunca esconden su desenlace — ni un rechazo detrás de
  * una aserción caída, ni una operación que no termina. Este módulo es lo que vuelve certificable una caída por aserción.
  */
+import { stripVTControlCharacters } from 'node:util'
+
 import { actores } from '../../integration/payments/actores'
 
 const rechazoTardio = (ms: number, msg: string) => new Promise<never>((_, rej) => setTimeout(() => rej(new Error(msg)), ms))
@@ -147,9 +149,11 @@ describe('actores en vuelo', () => {
       capturado = e
     }
     const err = capturado as Error & { cause?: unknown }
-    expect(err.message).toMatch(/^INCONCLUSO — rechazos que la fase de aserciones ya no examinó: \[K2: HTTP 503 CONSOLIDATION_UNCERTAIN\]/)
-    expect(err.message).toContain('fallo original: expect(received).resolves')
-    expect(err.message).not.toMatch(/K1: HTTP 409/) // K1 sí se examinó: viaja como fallo original, no como rechazo escondido
+    // En una terminal Jest pinta `received`/`expected` con códigos ANSI dentro del mensaje (en el CI no): se compara sin ellos.
+    const mensaje = stripVTControlCharacters(err.message)
+    expect(mensaje).toMatch(/^INCONCLUSO — rechazos que la fase de aserciones ya no examinó: \[K2: HTTP 503 CONSOLIDATION_UNCERTAIN\]/)
+    expect(mensaje).toContain('fallo original: expect(received).resolves')
+    expect(mensaje).not.toMatch(/K1: HTTP 409/) // K1 sí se examinó: viaja como fallo original, no como rechazo escondido
     expect(err.cause).toBeInstanceOf(Error)
     expect((err.cause as Error).message).toContain('TERMINAL_BUSY') // el fallo original conserva el desenlace de K1 entero
   })
@@ -166,11 +170,17 @@ describe('actores en vuelo', () => {
     const b = actores(1000)
     b.lanzar('REST', valorTardio(5, 'ok'))
     await b.cerrar()
-    await expect(
-      b.afirmar(async () => {
+    // La caída se relanza tal cual; en una terminal su mensaje trae los colores de Jest: se compara sin ellos.
+    const caida = await b
+      .afirmar(async () => {
         expect(1).toBe(2)
-      }),
-    ).rejects.toThrow(/expect\(received\)\.toBe\(expected\)/)
+      })
+      .then(
+        () => undefined,
+        (e: unknown) => e,
+      )
+    expect(caida).toBeInstanceOf(Error)
+    expect(stripVTControlCharacters((caida as Error).message)).toMatch(/expect\(received\)\.toBe\(expected\)/)
   })
 
   /**

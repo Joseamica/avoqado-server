@@ -815,46 +815,42 @@ test('🔴 si la alerta falla DESPUÉS del COMMIT, la merma se devuelve igual y 
 // fase 1): con un proveedor de correo lento, la merma ya confirmada no puede quedar retenida detrás
 // de una notificación. El mock nunca se resuelve solo — sólo el tope de producción hace avanzar la
 // prueba — así el tiempo medido no depende de correr dos temporizadores en carrera bajo carga.
-test(
-  '🔴 si la alerta tarda, logWaste responde dentro de su tope de 1s y la deja corriendo de fondo sin unhandled rejection',
-  async () => {
-    const item = await rawWithReorderPoint(6, 5)
-    await batch(item.id, 6, 1)
+test('🔴 si la alerta tarda, logWaste responde dentro de su tope de 1s y la deja corriendo de fondo sin unhandled rejection', async () => {
+  const item = await rawWithReorderPoint(6, 5)
+  await batch(item.id, 6, 1)
 
-    let settleSlowAlert: ((error: Error) => void) | undefined
-    const slowAlert = new Promise<void>((_, reject) => {
-      settleSlowAlert = reject
-    })
-    const alerta = jest.spyOn(rawMaterialService, 'checkAndCreateLowStockAlert').mockReturnValue(slowAlert)
-    const onUnhandledRejection = jest.fn()
-    process.on('unhandledRejection', onUnhandledRejection)
+  let settleSlowAlert: ((error: Error) => void) | undefined
+  const slowAlert = new Promise<void>((_, reject) => {
+    settleSlowAlert = reject
+  })
+  const alerta = jest.spyOn(rawMaterialService, 'checkAndCreateLowStockAlert').mockReturnValue(slowAlert)
+  const onUnhandledRejection = jest.fn()
+  process.on('unhandledRejection', onUnhandledRejection)
 
-    try {
-      const start = Date.now()
-      const summary = await logWaste(venueId, staffId, request('RAW_MATERIAL', item.id, 3))
-      const elapsed = Date.now() - start
+  try {
+    const start = Date.now()
+    const summary = await logWaste(venueId, staffId, request('RAW_MATERIAL', item.id, 3))
+    const elapsed = Date.now() - start
 
-      // Margen holgado (3x el tope de 1000ms) para no ser frágil bajo carga de la máquina.
-      expect(elapsed).toBeLessThan(3000)
-      expect(summary).toMatchObject({ declared: '3', deducted: '3', unrecorded: '0' })
-      expect(await rawStock(item.id)).toBe('3')
-      expect(await prisma.inventoryWasteReport.count({ where: { venueId, status: 'APPLIED' } })).toBe(1)
-      expect(alerta).toHaveBeenCalledTimes(1)
-      expect(alerta).toHaveBeenCalledWith(venueId, item.id)
+    // Margen holgado (3x el tope de 1000ms) para no ser frágil bajo carga de la máquina.
+    expect(elapsed).toBeLessThan(3000)
+    expect(summary).toMatchObject({ declared: '3', deducted: '3', unrecorded: '0' })
+    expect(await rawStock(item.id)).toBe('3')
+    expect(await prisma.inventoryWasteReport.count({ where: { venueId, status: 'APPLIED' } })).toBe(1)
+    expect(alerta).toHaveBeenCalledTimes(1)
+    expect(alerta).toHaveBeenCalledWith(venueId, item.id)
 
-      // La evaluación de fondo se resuelve DESPUÉS de que logWaste ya contestó (rechazo tardío):
-      // `alertLowStockAfterWaste` ya la atrapa, así que no debe escapar como unhandled rejection.
-      settleSlowAlert?.(new Error('proveedor de correo lento'))
-      await new Promise(resolve => setImmediate(resolve))
-      await new Promise(resolve => setImmediate(resolve))
-      expect(onUnhandledRejection).not.toHaveBeenCalled()
-    } finally {
-      process.off('unhandledRejection', onUnhandledRejection)
-      alerta.mockRestore()
-    }
-  },
-  8000,
-)
+    // La evaluación de fondo se resuelve DESPUÉS de que logWaste ya contestó (rechazo tardío):
+    // `alertLowStockAfterWaste` ya la atrapa, así que no debe escapar como unhandled rejection.
+    settleSlowAlert?.(new Error('proveedor de correo lento'))
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+    expect(onUnhandledRejection).not.toHaveBeenCalled()
+  } finally {
+    process.off('unhandledRejection', onUnhandledRejection)
+    alerta.mockRestore()
+  }
+}, 8000)
 
 test('la alerta sólo se evalúa cuando ESTA llamada descontó un insumo: ni productos, ni nada descontado, ni recuperar el folio', async () => {
   const alerta = jest.spyOn(rawMaterialService, 'checkAndCreateLowStockAlert').mockResolvedValue()

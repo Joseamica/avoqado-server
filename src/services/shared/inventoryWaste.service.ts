@@ -675,10 +675,7 @@ export async function logWaste<T>(
   // Con tope de espera (Codex, ronda final): un correo lento no retiene la respuesta de una merma
   // que YA está confirmada — la evaluación sigue de fondo aunque `logWaste` ya haya continuado.
   if (outcome.applied && payload.itemType === 'RAW_MATERIAL' && new Decimal(outcome.summary.deducted).gt(0)) {
-    await withResponseBudget(
-      alertLowStockAfterWaste(venueId, payload.itemId, outcome.summary.reportId),
-      LOW_STOCK_ALERT_RESPONSE_BUDGET_MS,
-    )
+    await withResponseBudget(alertLowStockAfterWaste(venueId, payload.itemId, outcome.summary.reportId), LOW_STOCK_ALERT_RESPONSE_BUDGET_MS)
   }
   return outcome.result
 }

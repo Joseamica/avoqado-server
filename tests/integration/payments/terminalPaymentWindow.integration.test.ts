@@ -452,7 +452,9 @@ describe('Ventana de confirmación: un negativo sin evidencia dura 30 s y se lib
 
   it('final P1-2 control · la marca de OTRO intento (no vinculado a la solicitud) no retiene: la ventana libera', async () => {
     const row = await auditRequest({ ...negativoSinEvidencia(), updatedAt: new Date(Date.now() - UNPROVEN_NEGATIVE_WINDOW_MS - 1_000) })
-    await prisma.terminalPaymentAttemptLink.create({ data: { attemptId: `att-${randomUUID()}`, requestId: row.requestId, venueId, terminalId: fixture } })
+    await prisma.terminalPaymentAttemptLink.create({
+      data: { attemptId: `att-${randomUUID()}`, requestId: row.requestId, venueId, terminalId: fixture },
+    })
     registrarAvisoNoGuardado({ merchantAccountId: 'comercio-del-aviso', attemptId: `att-${randomUUID()}`, posibleDinero: true })
     try {
       expect(await terminalPaymentService.releaseUnprovenNegative(row.requestId, venueId, 'WATCHDOG')).toBe('RELEASED')

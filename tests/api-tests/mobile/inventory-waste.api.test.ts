@@ -782,7 +782,12 @@ describe('GET …/inventory/waste-items', () => {
 describe('GET …/inventory/waste-reports (historial del POS)', () => {
   const REPORTS = `${BASE}/waste-reports`
   const MESERO = { role: 'WAITER', corePermissions: ['inventory:log-waste', 'inventory:read'], whiteLabelEnabled: false, featureAccess: {} }
-  const GERENTE = { role: 'MANAGER', corePermissions: ['inventory:log-waste', 'inventory:read', 'inventory:adjust'], whiteLabelEnabled: false, featureAccess: {} }
+  const GERENTE = {
+    role: 'MANAGER',
+    corePermissions: ['inventory:log-waste', 'inventory:read', 'inventory:adjust'],
+    whiteLabelEnabled: false,
+    featureAccess: {},
+  }
   const DUENO = { role: 'OWNER', corePermissions: ['inventory:*'], whiteLabelEnabled: false, featureAccess: {} }
   const FILA = {
     id: 'rep1',
@@ -817,7 +822,10 @@ describe('GET …/inventory/waste-reports (historial del POS)', () => {
       .set('Authorization', `Bearer ${token('WAITER')}`)
     expect(res.status).toBe(200)
     expect(res.body.scope).toBe('MINE')
-    expect(listWasteReports).toHaveBeenCalledWith(venueId, expect.objectContaining({ page: 2, pageSize: 30, reportedByStaffId: 'user_test' }))
+    expect(listWasteReports).toHaveBeenCalledWith(
+      venueId,
+      expect.objectContaining({ page: 2, pageSize: 30, reportedByStaffId: 'user_test' }),
+    )
   })
 
   it.each([
@@ -867,7 +875,12 @@ describe('GET …/inventory/waste-reports (historial del POS)', () => {
 
   it('🔴 el PIN de gerente abre la ruta pero NO da el alcance del gerente (falla hacia MINE)', async () => {
     pinDeGerenteValido()
-    requireWasteActivation.mockResolvedValue({ role: 'KITCHEN', corePermissions: ['inventory:read'], whiteLabelEnabled: false, featureAccess: {} })
+    requireWasteActivation.mockResolvedValue({
+      role: 'KITCHEN',
+      corePermissions: ['inventory:read'],
+      whiteLabelEnabled: false,
+      featureAccess: {},
+    })
     const res = await request(app)
       .get(REPORTS)
       .set('Authorization', `Bearer ${token('KITCHEN')}`)

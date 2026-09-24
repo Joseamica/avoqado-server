@@ -16,8 +16,6 @@
   (merge mode: custom perms ADD to role defaults for non-SUPERADMIN roles).
   The prismaMock from setup.ts simulates the VenueRolePermission override.
 */
-
-import request from 'supertest'
 import jwt from 'jsonwebtoken'
 import type { Express } from 'express'
 import { prismaMock } from '@tests/__helpers__/setup'

@@ -365,10 +365,7 @@ export async function listWasteReports(venueId: string, query: WastePage & { rep
   if (query.cursor !== undefined && !despues) throw new ValidationError('El cursor no es válido.')
   const pagina: Prisma.InventoryWasteReportWhereInput = despues
     ? {
-        AND: [
-          where,
-          { OR: [{ createdAt: { lt: despues.createdAt } }, { createdAt: despues.createdAt, id: { lt: despues.id } }] },
-        ],
+        AND: [where, { OR: [{ createdAt: { lt: despues.createdAt } }, { createdAt: despues.createdAt, id: { lt: despues.id } }] }],
       }
     : where
 
