@@ -249,6 +249,7 @@ export interface CommandQueueResult {
   queued: boolean
   terminalOnline: boolean
   message: string
+  expiresAt: Date // Caducidad del comando en la cola: el socket debe mandar ésta, no una propia
 }
 
 /**
@@ -382,6 +383,7 @@ export class TpvCommandQueueService {
           ? `Command scheduled for ${scheduledFor.toISOString()}`
           : 'Command sent to terminal'
         : 'Terminal offline - command queued',
+      expiresAt,
     }
   }
 

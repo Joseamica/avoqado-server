@@ -325,6 +325,7 @@ export class TpvHealthService {
           ...command,
           commandId: queueResult.commandId,
           correlationId: queueResult.correlationId,
+          expiresAt: queueResult.expiresAt,
         })
         logger.info(`Command also broadcast via Socket.IO to terminal ${terminal.id}`)
       }
@@ -525,6 +526,7 @@ export class TpvHealthService {
       priority: string
       requiresPin: boolean
       expiresAt: string | null
+      expiresInSeconds: number | null
       requestedBy: string
       requestedByName: string | null
       createdAt: string
@@ -631,6 +633,7 @@ export class TpvHealthService {
         })
       }
 
+      const ahora = Date.now()
       return pendingCommands.map(cmd => ({
         commandId: cmd.id,
         correlationId: cmd.correlationId,
@@ -639,6 +642,8 @@ export class TpvHealthService {
         priority: cmd.priority,
         requiresPin: cmd.requiresPin,
         expiresAt: cmd.expiresAt?.toISOString() || null,
+        // Segundos que le QUEDAN: la terminal los suma a su «ahora» y su reloj de pared no importa.
+        expiresInSeconds: cmd.expiresAt ? Math.max(0, Math.round((cmd.expiresAt.getTime() - ahora) / 1000)) : null,
         requestedBy: cmd.requestedBy,
         requestedByName: cmd.requestedByName,
         createdAt: cmd.createdAt.toISOString(),

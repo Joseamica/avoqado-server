@@ -270,6 +270,7 @@ export function broadcastTpvCommand(
     requestedBy: string
     commandId?: string // CUID from TpvCommandQueue.id - used for ACK matching
     correlationId?: string // UUID from TpvCommandQueue.correlationId
+    expiresAt?: Date // TpvCommandQueue.expiresAt — sin él, 5 min por default
   },
   options?: BroadcastOptions,
 ): void {
@@ -279,7 +280,13 @@ export function broadcastTpvCommand(
       // CRITICAL: Must use the same IDs from TpvCommandQueue for proper ACK matching
       const commandId = command.commandId || require('uuid').v4()
       const correlationId = command.correlationId || require('uuid').v4()
-      const timestamp = new Date().toISOString()
+      const ahora = Date.now()
+      const timestamp = new Date(ahora).toISOString()
+      // La caducidad es la del comando en la cola. Y viaja también como SEGUNDOS RESTANTES:
+      // la terminal los suma a su propio «ahora», así su reloj de pared no importa (24-sep-2026:
+      // una Nexgo 9 min adelantada rechazaba en 0.2 s comandos a los que se les inventaban 5 min).
+      const expiresAt = command.expiresAt ?? new Date(ahora + 5 * 60 * 1000)
+      const expiresInSeconds = Math.max(0, Math.round((expiresAt.getTime() - ahora) / 1000))
 
       // 🔴 SÓLO a la terminal destinataria — nunca al venue (7-sep-2026: un FACTORY_RESET
       // repartido al venue entero lo ejecutó la terminal equivocada). Si no tiene socket, no
@@ -298,7 +305,8 @@ export function broadcastTpvCommand(
           payload: command.payload,
           requiresPin: false,
           priority: 'NORMAL',
-          expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(), // 5 min expiry
+          expiresAt: expiresAt.toISOString(),
+          expiresInSeconds,
           requestedBy: command.requestedBy,
           requestedByName: null,
           venueId,

@@ -149,3 +149,44 @@ describe('getPendingCommands — expiring stale in-flight commands', () => {
     await expect(tpvHealthService.getPendingCommands('term-1')).resolves.toEqual([])
   })
 })
+
+/**
+ * El latido también dice cuánto le QUEDA a cada comando, para que la terminal no lo mida
+ * con su propio reloj (24-sep-2026: una Nexgo con el reloj 9 min adelantado rechazaba
+ * comandos vigentes). `expiresAt` se conserva tal cual: las TPV viejas lo siguen leyendo.
+ */
+describe('getPendingCommands — segundos restantes', () => {
+  const AHORA = new Date('2026-09-24T17:48:33.000Z').getTime()
+  beforeEach(() => jest.spyOn(Date, 'now').mockReturnValue(AHORA))
+  afterEach(() => jest.restoreAllMocks())
+
+  const fila = (expiresAt: Date | null) => ({
+    id: 'cmd-1',
+    correlationId: 'corr-1',
+    commandType: 'FACTORY_RESET',
+    payload: null,
+    priority: 'CRITICAL',
+    requiresPin: true,
+    expiresAt,
+    requestedBy: 'sa',
+    requestedByName: 'Super Admin',
+    createdAt: new Date(AHORA - 60 * 1000),
+  })
+
+  it('🔴 cada comando lleva expiresInSeconds = lo que le queda de vida', async () => {
+    const expiresAt = new Date(AHORA + 29 * 60 * 1000)
+    mockedQueueFindMany.mockResolvedValue([fila(expiresAt)])
+
+    const [cmd] = await tpvHealthService.getPendingCommands('term-1')
+
+    expect(cmd).toMatchObject({ expiresAt: expiresAt.toISOString(), expiresInSeconds: 29 * 60 })
+  })
+
+  it('sin caducidad, expiresInSeconds es null (la terminal usa su default)', async () => {
+    mockedQueueFindMany.mockResolvedValue([fila(null)])
+
+    const [cmd] = await tpvHealthService.getPendingCommands('term-1')
+
+    expect(cmd).toMatchObject({ expiresAt: null, expiresInSeconds: null })
+  })
+})
