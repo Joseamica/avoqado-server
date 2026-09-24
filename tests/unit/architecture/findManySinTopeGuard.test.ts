@@ -50,6 +50,9 @@ const MODELOS_GRANDES = [
   // 2,568 `OrderItemModifier` (una fila por extra vendido) para devolver el top 10. Quedó
   // pendiente el 10-sep porque este archivo lo tenía otra sesión; se agrega ahora.
   'orderItemModifier',
+  // 2026-09-24: el query-guard cazó la pantalla de cocina de Testarudo leyendo 3,068 `KdsOrder`
+  // (el POS crea una comanda por venta y nadie las termina). No estaba en esta lista.
+  'kdsOrder',
 ]
 
 // Ventana de búsqueda del `take` tras el findMany — idéntica al barrido que produjo

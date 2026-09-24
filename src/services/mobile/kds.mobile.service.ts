@@ -136,28 +136,43 @@ export interface KdsOrderResponse {
  * Get active KDS orders for a venue, filtered by status.
  * Default: NEW, PREPARING, READY (active orders only).
  */
-export async function listKdsOrders(venueId: string, statusFilter?: string): Promise<KdsOrderResponse[]> {
-  // Parse status filter (comma-separated) or default to active statuses
-  let statuses: string[]
-  if (statusFilter) {
-    statuses = statusFilter
-      .split(',')
-      .map(s => s.trim().toUpperCase())
-      .filter(s => VALID_STATUSES.includes(s))
-  } else {
-    statuses = [KdsStatus.NEW, KdsStatus.PREPARING, KdsStatus.READY]
-  }
+/**
+ * Tope de comandas por lectura del tablero. Una cocina real no tiene 100 pendientes a la vez;
+ * el tope existe para cuando NADIE las termina: el POS crea una comanda por venta y un negocio
+ * sin pantalla de cocina las acumula. Testarudo juntó 3,068 y, al abrir la pantalla una vez
+ * (2026-09-24), el servidor leyó 3,068 comandas + 3,060 ventas — y la pantalla sondea cada 10 s.
+ */
+export const KDS_LIST_MAX = 100
 
-  const orders = await prisma.kdsOrder.findMany({
+function statusesDelFiltro(statusFilter?: string): KdsOrderStatus[] {
+  if (!statusFilter) return [KdsStatus.NEW, KdsStatus.PREPARING, KdsStatus.READY] as KdsOrderStatus[]
+  return statusFilter
+    .split(',')
+    .map(s => s.trim().toUpperCase())
+    .filter(s => VALID_STATUSES.includes(s)) as KdsOrderStatus[]
+}
+
+/** Cuántas comandas coinciden en total: lo que el tope deja fuera no se pierde en silencio. */
+export async function countKdsOrders(venueId: string, statusFilter?: string): Promise<number> {
+  return prisma.kdsOrder.count({ where: { venueId, status: { in: statusesDelFiltro(statusFilter) } } })
+}
+
+export async function listKdsOrders(venueId: string, statusFilter?: string): Promise<KdsOrderResponse[]> {
+  // Las MÁS RECIENTES primero para aplicar el tope — con un rezago acumulado, la cocina debe
+  // seguir viendo lo que acaba de entrar, no lo de hace un mes — y luego se voltean para
+  // entregarlas de la más vieja a la más nueva, como siempre. `id` desempata en el mismo instante.
+  const recientes = await prisma.kdsOrder.findMany({
     where: {
       venueId,
-      status: { in: statuses as KdsOrderStatus[] },
+      status: { in: statusesDelFiltro(statusFilter) },
     },
     include: {
       items: true,
     },
-    orderBy: { createdAt: 'asc' },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    take: KDS_LIST_MAX,
   })
+  const orders = recientes.reverse()
 
   // 🔴 Consultas aparte y no un `include`: `KdsOrder.orderId` es un `String?` SUELTO, sin relación con
   // `Order` — un `include` revienta en runtime (y la orden puede estar borrada: ausencia = "no falta

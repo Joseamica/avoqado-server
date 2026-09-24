@@ -23,7 +23,21 @@ export const listKdsOrders = async (req: Request, res: Response, next: NextFunct
     const { venueId } = req.params
     const { status } = req.query
 
-    const orders = await kdsMobileService.listKdsOrders(venueId, status as string | undefined)
+    const [orders, total] = await Promise.all([
+      kdsMobileService.listKdsOrders(venueId, status as string | undefined),
+      kdsMobileService.countKdsOrders(venueId, status as string | undefined),
+    ])
+
+    // El total va en un encabezado y no en el cuerpo: las apps de la calle leen `data` como
+    // arreglo y no deben cambiar. Si el tope recortó, queda dicho en el log (por negocio).
+    res.setHeader('X-Total-Count', String(total))
+    if (total > orders.length) {
+      logger.warn('KDS: el tablero tiene más comandas activas que el tope; se devuelven las más recientes', {
+        venueId,
+        total,
+        devueltas: orders.length,
+      })
+    }
 
     res.status(200).json({
       success: true,
