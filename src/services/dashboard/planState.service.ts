@@ -7,6 +7,7 @@
  * derivePlanState (access/basePlan.service.ts) and is shared with the superadmin overview.
  */
 
+import { elegirFilaDelPlan } from '../access/filaDelPlan'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
@@ -136,9 +137,13 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100
 }
 
-/** Fetch the PLAN_PRO VenueFeature (active or not) for a venue. */
+/**
+ * La fila de plan que se ADMINISTRA (activa o no). Tras un cambio de plan hay DOS filas (la vieja retirada y la vigente):
+ * se leen las dos y se elige con la regla explícita de `elegirFilaDelPlan` — «la primera» sin orden mostraba el plan viejo
+ * como cancelado y rechazaba cancelar el vigente (Codex C8).
+ */
 async function findPlanProFeature(venueId: string) {
-  return prisma.venueFeature.findFirst({
+  const filas = await prisma.venueFeature.findMany({
     where: { venueId, feature: { code: { in: [...PAID_PLAN_TIER_CODES] } } },
     select: {
       id: true,
@@ -148,9 +153,12 @@ async function findPlanProFeature(venueId: string) {
       gracePeriodEndsAt: true,
       monthlyPrice: true,
       stripeSubscriptionId: true,
+      updatedAt: true,
       feature: { select: { code: true, name: true } },
     },
+    take: PAID_PLAN_TIER_CODES.length,
   })
+  return elegirFilaDelPlan(filas)
 }
 
 /**
@@ -322,6 +330,19 @@ export const RETENTION_DISCOUNT_COUPON = 'RETENTION_30_3M'
 
 /** Months the "pause" retention offer keeps collection paused before Stripe auto-resumes. */
 const RETENTION_PAUSE_MONTHS = 2
+/**
+ * 🔴 Codex N3 (ronda 4, P1 — y estaba DESPLEGADO): mínimo entre una pausa y la siguiente.
+ *
+ * La pausa no tenía tope de ninguna clase: el único antiabuso era «¿ya tienes un descuento activo?», y una pausa no
+ * es un descuento. `resumesAt` se recalculaba a «hoy + 2 meses» en CADA llamada, así que pedirla otra vez antes de
+ * que venciera la EXTENDÍA, indefinidamente, conservando el acceso completo y sin cobrar esos periodos
+ * (`mark_uncollectible`). Un cliente podía quedarse con la plataforma gratis para siempre, en autoservicio.
+ *
+ * 🔑 No se cierra la oferta —existe para no perder a un negocio con problemas de flujo, que es nuestro ICP—: se le
+ * pone tope. 12 meses es el default conservador de la casa para algo que regala servicio; si el founder quiere otro
+ * número, es un dato, no un rediseño. Una pausa por año, de dos meses, sigue siendo una red real para el cliente.
+ */
+const RETENTION_PAUSE_COOLDOWN_MONTHS = 12
 
 export type RetentionOffer = 'discount' | 'pause'
 
@@ -373,12 +394,33 @@ export async function applyRetentionOffer(venueId: string, offer: RetentionOffer
   // Anti-abuse (both offers): refuse if the subscription already carries an active discount.
   if (sub.hasActiveDiscount) throw new BadRequestError('Ya tienes una oferta activa.')
 
+  // 🔴 Codex N3: una pausa que ya corre NO se extiende. Éste es el vector exacto del abuso: pedirla otra vez antes de
+  // que venza movía la fecha dos meses más allá, sin límite.
+  if (offer === 'pause' && sub.pausedUntil) {
+    throw new BadRequestError(`Tu cobranza ya está pausada hasta el ${sub.pausedUntil.toLocaleDateString('es-MX')}.`)
+  }
+
   // Anti-farm (discount only): refuse before the first billing cycle has elapsed.
   if (offer !== 'pause' && !meetsRetentionTenure(sub.createdAt)) {
     throw new BadRequestError('Esta oferta está disponible después de tu primer mes de suscripción.')
   }
 
   if (offer === 'pause') {
+    // 🔴 Codex N3: y tampoco se pide otra antes del periodo mínimo. La bitácora es el registro durable de que ya se
+    // usó — no hace falta una columna nueva, y `ActivityLog` ya es la verdad de quién hizo qué y cuándo.
+    const desde = new Date()
+    desde.setMonth(desde.getMonth() - RETENTION_PAUSE_COOLDOWN_MONTHS)
+    const previa = await prisma.activityLog.findFirst({
+      where: { venueId, action: 'PLAN_RETENTION_PAUSE', createdAt: { gte: desde } },
+      select: { createdAt: true },
+      orderBy: { createdAt: 'desc' },
+    })
+    if (previa) {
+      throw new BadRequestError(
+        `Ya usaste una pausa el ${previa.createdAt.toLocaleDateString('es-MX')}. Si necesitas otra, escríbenos a hola@avoqado.io.`,
+      )
+    }
+
     const resumesAt = new Date()
     resumesAt.setMonth(resumesAt.getMonth() + RETENTION_PAUSE_MONTHS)
     await pauseSubscriptionCollection(subscriptionId, resumesAt)

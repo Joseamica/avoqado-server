@@ -29,7 +29,9 @@
  */
 import { OrderSource, Prisma } from '@prisma/client'
 
-import type { NormalizedDeliveryItem, NormalizedDeliveryModifier, NormalizedDeliveryOrder } from '../../core/types'
+import logger from '@/config/logger'
+
+import type { CourierInfo, NormalizedDeliveryItem, NormalizedDeliveryModifier, NormalizedDeliveryOrder } from '../../core/types'
 
 /** e5 Decimal → pesos con dos decimales. El único lugar donde se divide entre 100,000. */
 function aPesos(e5: Prisma.Decimal): string {
@@ -96,11 +98,12 @@ export function mapUberOrder(raw: unknown): NormalizedDeliveryOrder {
   const d = (envelope?.order ?? raw) as {
     id?: string
     display_id?: string
+    state?: string
     created_time?: string
     fulfillment_type?: unknown
     customers?: Array<{
       name?: { display_name?: string; first_name?: string; last_name?: string }
-      contact?: { phone?: { number?: string } }
+      contact?: { phone?: { number?: string; pin_code?: string } }
     }>
     carts?: Array<{
       items?: Array<{
@@ -345,6 +348,7 @@ export function mapUberOrder(raw: unknown): NormalizedDeliveryOrder {
         // `item_charges` — hay un test con el pedido real de cantidad 2.
         total: aPesos(totalLinea.plus(extrasPorUnidad.mul(cantidad))),
         modifiers,
+        lineId: typeof it.cart_item_id === 'string' ? it.cart_item_id : undefined,
       })
     }
   }
@@ -427,6 +431,9 @@ export function mapUberOrder(raw: unknown): NormalizedDeliveryOrder {
         d.customers?.[0]?.name?.display_name ??
         ([d.customers?.[0]?.name?.first_name, d.customers?.[0]?.name?.last_name].filter(Boolean).join(' ') || undefined),
       phone: d.customers?.[0]?.contact?.phone?.number,
+      // 🔴 El número es ANÓNIMO: sin el PIN no se puede llamar. Tirarlo dejaba un
+      // teléfono que marca a un conmutador y cuelga.
+      phonePin: d.customers?.[0]?.contact?.phone?.pin_code,
     },
     raw,
     placedAt: d.created_time ? new Date(d.created_time) : new Date(),
@@ -445,6 +452,11 @@ export function mapUberOrder(raw: unknown): NormalizedDeliveryOrder {
     // para no mandar la comanda hasta su hora, y llegar tarde a un pedido agendado es peor
     // que prepararlo con holgura.
     scheduledFor: fechaProgramada(d),
+    // uAPI: `state: "ACCEPTED"` (fixture real `pedido-con-modificadores-uapi.json`).
+    providerAccepted: d.state === 'ACCEPTED',
+    // uAPI: `status: "COMPLETED"` (fixture real `pedido-real-uapi.json`) o `state` terminal
+    // (`SUCCEEDED`/`FAILED`). `HANDED_OFF` no cierra: el pedido sigue vivo con el repartidor.
+    providerClosed: d.status === 'COMPLETED' || d.state === 'SUCCEEDED' || d.state === 'FAILED',
   }
 }
 
@@ -471,4 +483,51 @@ function fechaProgramada(d: { status?: unknown; scheduled_order_target_delivery_
 
   const cuando = new Date(inicio)
   return Number.isNaN(cuando.getTime()) ? null : cuando
+}
+
+/** `{make, model, license_plate}` del uAPI → `{make, model, licensePlate}` del contrato interno. */
+function mapVehiculo(v: unknown): CourierInfo['vehicle'] {
+  if (!v || typeof v !== 'object') return undefined
+  const vv = v as { make?: unknown; model?: unknown; license_plate?: unknown }
+  return {
+    make: typeof vv.make === 'string' ? vv.make : undefined,
+    model: typeof vv.model === 'string' ? vv.model : undefined,
+    licensePlate: typeof vv.license_plate === 'string' ? vv.license_plate : undefined,
+  }
+}
+
+/**
+ * El repartidor asignado al pedido — "¿quién lo trae?" en el KDS.
+ *
+ * 🔴 La forma de `deliveries[]` del uAPI NO está verificada con un pedido real todavía (spec
+ * H5, 21-sep): se escribe TOLERANTE, campo por campo, en vez de exigir una forma exacta —
+ * un pedido con repartidor asignado pero un campo inesperado NO debe tumbar la consulta que
+ * la cocina hizo con un botón. La primera vez que llega un bloque no vacío se registra para
+ * poder bajarlo como fixture real y cerrar esta verificación.
+ */
+export function mapCourier(raw: unknown): CourierInfo | null {
+  const envelope = raw as { order?: unknown }
+  const d = (envelope?.order ?? raw) as { deliveries?: unknown }
+
+  if (!Array.isArray(d?.deliveries) || d.deliveries.length === 0) return null
+
+  logger.info('🛵 [Uber] primer bloque deliveries recibido — capturar como fixture', {
+    deliveries: JSON.stringify(d.deliveries).slice(0, 500),
+  })
+
+  const del = d.deliveries[0] as {
+    first_name?: unknown
+    phone?: unknown
+    phone_code?: unknown
+    vehicle?: unknown
+    picture_url?: unknown
+  }
+
+  return {
+    name: typeof del?.first_name === 'string' ? del.first_name : undefined,
+    phone: typeof del?.phone === 'string' ? del.phone : undefined,
+    phoneCode: typeof del?.phone_code === 'string' ? del.phone_code : undefined,
+    vehicle: mapVehiculo(del?.vehicle),
+    pictureUrl: typeof del?.picture_url === 'string' ? del.picture_url : undefined,
+  }
 }

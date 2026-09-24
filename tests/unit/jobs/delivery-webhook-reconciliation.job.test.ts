@@ -25,6 +25,7 @@ jest.mock('@/services/delivery-channels/core/deliveryWebhookEvent.service', () =
 
 jest.mock('@/services/delivery-channels/providers/uber-eats/uber.eventProcessor', () => ({
   processUberEvent: jest.fn(),
+  CAMBIO_SIN_CONFIRMAR: 'CAMBIO_SIN_CONFIRMAR',
 }))
 jest.mock('@/services/delivery-channels/providers/rappi/rappi.eventProcessor', () => ({
   processRappiEvent: jest.fn(),
@@ -91,6 +92,9 @@ describe('DeliveryWebhookReconciliationJob', () => {
       mockedProcessRappi,
     ].forEach(m => m.mockReset())
     mockedRetry.mockImplementation((fn: () => Promise<any>) => fn())
+    // N-5: una pasada hace hasta TRES lecturas (carril urgente, carril de seguimiento, barrido de
+    // 24 h); la que una prueba no siembra contesta vacía.
+    mockedFindMany.mockResolvedValue([])
     mockedUpdateMany.mockResolvedValue({ count: 0 })
     mockedUpdate.mockResolvedValue({})
   })
@@ -318,19 +322,19 @@ describe('DeliveryWebhookReconciliationJob', () => {
       venueId: 'venue_1',
       receivedAt: new Date(NOW - 25 * 3600_000), // 25h ago
     }
-    mockedFindMany.mockResolvedValueOnce([]).mockResolvedValueOnce([staleEvent])
+    mockedFindMany.mockResolvedValueOnce([]).mockResolvedValueOnce([]).mockResolvedValueOnce([staleEvent])
     mockedUpdateMany.mockResolvedValue({ count: 1 })
 
     const result = await new DeliveryWebhookReconciliationJob().runOnce()
 
     expect(mockedParse).not.toHaveBeenCalled()
     // Fix 4 (audit): the cutoff/exclusion + take-cap now live on the FETCH (markOrphaned's
-    // own findMany, the 2nd findMany call in the pass) — the bulk update is scoped to
+    // own findMany, the 3rd findMany call in the pass: after the two lanes, N-5) — the bulk update is scoped to
     // exactly the fetched batch's ids (see below), not this broader where.
-    const orphanFetchWhere = mockedFindMany.mock.calls[1][0].where
+    const orphanFetchWhere = mockedFindMany.mock.calls[2][0].where
     expect(orphanFetchWhere.OR).toEqual([{ error: null }, { error: { notIn: ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO'] } }])
     expect(orphanFetchWhere.receivedAt.lt).toEqual(new Date(NOW - 24 * 3600_000))
-    expect(mockedFindMany.mock.calls[1][0].take).toBe(50)
+    expect(mockedFindMany.mock.calls[2][0].take).toBe(50)
     // The bulk flip is scoped to EXACTLY the fetched (and logged) batch — never the broader
     // orphanWhere — so a row is never marked ORPHANED without first getting its per-event alert.
     const orphanUpdateWhere = mockedUpdateMany.mock.calls[0][0].where
@@ -348,7 +352,7 @@ describe('DeliveryWebhookReconciliationJob', () => {
       venueId: 'venue_1',
       receivedAt: new Date(NOW - 25 * 3600_000),
     }))
-    mockedFindMany.mockResolvedValueOnce([]).mockResolvedValueOnce(batch)
+    mockedFindMany.mockResolvedValueOnce([]).mockResolvedValueOnce([]).mockResolvedValueOnce(batch)
     mockedUpdateMany.mockResolvedValue({ count: 50 })
 
     const result = await new DeliveryWebhookReconciliationJob().runOnce()
@@ -356,7 +360,7 @@ describe('DeliveryWebhookReconciliationJob', () => {
     // The fetch that feeds the sweep is capped at BATCH_SIZE, same as the rest of the job —
     // an unbounded findMany here would load the ENTIRE expired backlog into memory in one
     // pass (possible memory burst) and emit one logger.error per row in one shot.
-    expect(mockedFindMany.mock.calls[1][0].take).toBe(50)
+    expect(mockedFindMany.mock.calls[2][0].take).toBe(50)
     // The bulk flip never targets more than what was actually fetched/logged this pass —
     // a backlog bigger than BATCH_SIZE finishes across subsequent 2-minute passes instead
     // of being swept unbounded in one shot.
@@ -372,8 +376,8 @@ describe('DeliveryWebhookReconciliationJob', () => {
     const scanWhere = mockedFindMany.mock.calls[0][0].where
     const nullSafeErrorGuard = scanWhere.AND.find((c: any) => Array.isArray(c.OR) && 'error' in (c.OR[0] ?? {}))
     expect(nullSafeErrorGuard.OR).toEqual([{ error: null }, { error: { notIn: ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO'] } }])
-    // markOrphaned's own lookup query is the second findMany call in the pass.
-    const orphanLookupWhere = mockedFindMany.mock.calls[1][0].where
+    // markOrphaned's own lookup query is the third findMany call in the pass (after the two lanes, N-5).
+    const orphanLookupWhere = mockedFindMany.mock.calls[2][0].where
     expect(orphanLookupWhere.OR).toEqual([{ error: null }, { error: { notIn: ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO'] } }])
   })
 
@@ -467,6 +471,18 @@ describe('DeliveryWebhookReconciliationJob', () => {
       expect(result.reprocessed).toBe(1)
     })
 
+    it('🔴 un cambio de pedido RECONCILIADO cuenta como resuelto: no agenda backoff', async () => {
+      // El procesador ya marcó el evento PROCESSED; si el job no reconoce el desenlace lo trata
+      // como fallo transitorio y agenda un reintento de algo que ya terminó.
+      mockedFindMany.mockResolvedValueOnce([eventoUber({ eventType: 'order.fulfillment_issues.resolved' })]).mockResolvedValueOnce([])
+      mockedProcessUber.mockResolvedValueOnce({ outcome: 'RECONCILED', orderId: 'ord_u' })
+
+      const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+      expect(result.reprocessed).toBe(1)
+      expect(mockedUpdate).not.toHaveBeenCalled()
+    })
+
     it('🔴 pedido que Uber YA CANCELÓ: es terminal, no se reintenta más', async () => {
       // Medido el 2026-08-20: pasado el plazo Uber responde "The order is no longer active".
       // Reintentar no lo resucita — sólo ocuparía un lugar del lote cada 2 minutos.
@@ -495,18 +511,205 @@ describe('DeliveryWebhookReconciliationJob', () => {
       )
     })
 
+    it('P1-2: el presupuesto de reintentos del job alcanza la vida del aviso (3 h) antes de volverlo POISON', () => {
+      // Si el backoff o MAX_ATTEMPTS cambian y el job se rinde antes, el aviso muere como POISON sin la
+      // incidencia de «cambio sin confirmar» que el procesador levanta al agotarse la vida del pedido.
+      const job = new DeliveryWebhookReconciliationJob() as unknown as { backoffMs(n: number): number; MAX_ATTEMPTS: number }
+      let esperaMs = 0
+      for (let n = 1; n < job.MAX_ATTEMPTS; n++) esperaMs += job.backoffMs(n)
+      expect(esperaMs).toBeGreaterThan(3 * 3_600_000)
+    })
+
+    it.each(['CAMBIO_SIN_CONFIRMAR'])('P1-2: %s se relee con backoff, y es una espera (warn), no una falla', async motivo => {
+      mockedFindMany.mockResolvedValueOnce([eventoUber({ eventType: 'order.fulfillment_issues.resolved' })]).mockResolvedValueOnce([])
+      mockedProcessUber.mockResolvedValueOnce({ outcome: 'FAILED', orderId: 'ord_u', error: motivo })
+      const errores = jest.spyOn(logger, 'error')
+      const avisos = jest.spyOn(logger, 'warn')
+
+      const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+      expect(result.reprocessed).toBe(0)
+      expect(mockedUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'evt_uber' },
+          data: expect.objectContaining({ attemptCount: 1, nextAttemptAt: expect.any(Date) }),
+        }),
+      )
+      expect(errores.mock.calls.some(([m]) => String(m).includes('Failed to reprocess event'))).toBe(false)
+      expect(avisos.mock.calls.some(([m]) => String(m).includes('cambio de pedido aún sin reflejar'))).toBe(true)
+    })
+
+    it('P1-3: un store.deprovisioned SIN vínculo va al procesador (registra la revocación), no se tira como ORPHANED', async () => {
+      // Codex, 2ª pasada: con el job real salía `reprocessed: 0, orphaned: 1` y cero llamadas al
+      // procesador — la revocación de una tienda aún sin vínculo se perdía y una conexión en curso
+      // podía re-otorgarla.
+      const revocacion = eventoUber({
+        eventType: 'store.deprovisioned',
+        channelLinkId: null,
+        channelLink: null,
+        payload: { event_type: 'store.deprovisioned', meta: { user_id: 'store_sin_vinculo' } },
+      })
+      mockedFindMany.mockResolvedValueOnce([revocacion]).mockResolvedValueOnce([])
+      mockedProcessUber.mockResolvedValueOnce({ outcome: 'STORE_STATE' })
+
+      const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+      expect(mockedProcessUber).toHaveBeenCalledWith('evt_uber')
+      expect(result).toEqual({ reprocessed: 1, orphaned: 0 })
+      expect(mockedMarkEventResult).not.toHaveBeenCalled()
+      expect(mockedUpdate).not.toHaveBeenCalled() // STORE_STATE es éxito: sin backoff
+    })
+
+    it('P1-3: cualquier OTRO evento sin vínculo sigue siendo ORPHANED de inmediato', async () => {
+      mockedFindMany.mockResolvedValueOnce([eventoUber({ channelLinkId: null, channelLink: null })]).mockResolvedValueOnce([])
+
+      const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+      expect(mockedProcessUber).not.toHaveBeenCalled()
+      expect(result.orphaned).toBe(1)
+    })
+
+    describe('N-5: carriles — un pedido nuevo nunca espera detrás de las relecturas de seguimiento', () => {
+      /** Una tabla de eventos que respeta el filtro de carril (eventType), el orden por antigüedad y el `take`. */
+      const conTabla = (filas: any[]) =>
+        mockedFindMany.mockImplementation(async (args: any) => {
+          if (args.where?.receivedAt?.lt) return [] // barrido de 24 h
+          const carril = (args.where?.AND ?? []).find((c: any) => c.eventType)?.eventType
+          return filas
+            .filter(f => !carril || (carril.in ? carril.in.includes(f.eventType) : !carril.notIn.includes(f.eventType)))
+            .sort((a, b) => a.receivedAt.getTime() - b.receivedAt.getTime())
+            .slice(0, args.take)
+        })
+      const seguimientos = Array.from({ length: 50 }, (_, i) =>
+        eventoUber({
+          id: `evt_seg_${i}`,
+          eventType: 'order.fulfillment_issues.resolved',
+          error: 'CAMBIO_SIN_CONFIRMAR',
+          receivedAt: new Date(NOW - 90 * 60_000 + i * 1000), // TODOS más viejos que el pedido nuevo
+        }),
+      )
+      const nuevo = eventoUber({
+        id: 'evt_nuevo',
+        eventType: 'orders.notification',
+        error: 'ECONNRESET',
+        receivedAt: new Date(NOW - 60_000),
+      })
+
+      it('Codex r4: 50 relecturas viejas y lentas + 1 pedido nuevo que falló ⇒ el pedido va PRIMERO en el primer tick', async () => {
+        conTabla([...seguimientos, nuevo])
+        let reloj = NOW
+        jest.spyOn(Date, 'now').mockImplementation(() => reloj)
+        mockedProcessUber.mockImplementation(async (id: string) => {
+          reloj += 4_000 // cada GET de seguimiento tarda 4 s
+          return id === 'evt_nuevo' ? { outcome: 'PROCESSED', orderId: 'ord_n' } : { outcome: 'FAILED', error: 'CAMBIO_SIN_CONFIRMAR' }
+        })
+
+        const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+        expect(mockedProcessUber.mock.calls[0][0]).toBe('evt_nuevo')
+        expect(result.reprocessed).toBe(1)
+        // Las relecturas sólo usan el sobrante, con tope: la pasada no se come el siguiente tick.
+        const relecturas = mockedProcessUber.mock.calls.filter(c => c[0] !== 'evt_nuevo').length
+        expect(relecturas).toBeGreaterThan(0)
+        expect(relecturas).toBeLessThanOrEqual(10)
+      })
+
+      it('el próximo intento se calcula al TERMINAR cada evento, no al iniciar el lote', async () => {
+        conTabla(seguimientos.slice(0, 3))
+        let reloj = NOW
+        jest.spyOn(Date, 'now').mockImplementation(() => reloj)
+        mockedProcessUber.mockImplementation(async () => {
+          reloj += 4_000
+          return { outcome: 'FAILED', error: 'CAMBIO_SIN_CONFIRMAR' }
+        })
+
+        await new DeliveryWebhookReconciliationJob().runOnce()
+
+        const proximos = mockedUpdate.mock.calls.map(c => (c[0].data.nextAttemptAt as Date).getTime())
+        expect(proximos).toHaveLength(3)
+        // attemptCount 1 ⇒ 2 min de espera contados desde que terminó CADA uno (4 s, 8 s, 12 s).
+        expect(proximos).toEqual([1, 2, 3].map(k => NOW + k * 4_000 + 2 * 60_000))
+      })
+    })
+
+    describe('N-8: el seguimiento tiene presupuesto garantizado y no caduca sin haber tenido turno', () => {
+      /** Evalúa el `where` REAL del job sobre una tabla en memoria (sólo los operadores que usa). */
+      const cumple = (f: any, w: any): boolean =>
+        Object.entries(w ?? {}).every(([k, v]: [string, any]) => {
+          if (k === 'AND') return v.every((x: any) => cumple(f, x))
+          if (k === 'OR') return v.some((x: any) => cumple(f, x))
+          if (k === 'NOT') return !cumple(f, v)
+          const x = f[k]
+          if (v === null) return x == null
+          if (typeof v !== 'object' || v instanceof Date) return x === v
+          return Object.entries(v).every(([op, arg]: [string, any]) => {
+            const n = (d: any) => (d instanceof Date ? d.getTime() : d)
+            if (op === 'in') return arg.includes(x)
+            if (op === 'notIn') return x != null && !arg.includes(x)
+            if (op === 'gte') return x != null && n(x) >= n(arg)
+            if (op === 'lt') return x != null && n(x) < n(arg)
+            if (op === 'lte') return x != null && n(x) <= n(arg)
+            throw new Error(`operador no soportado en la prueba: ${op}`)
+          })
+        })
+      const tabla = (filas: any[]) =>
+        mockedFindMany.mockImplementation(async (args: any) =>
+          filas
+            .filter(f => cumple(f, args.where))
+            .sort((a, b) => a.receivedAt.getTime() - b.receivedAt.getTime())
+            .slice(0, args.take ?? filas.length),
+        )
+      const seguimiento = (over: Partial<any> = {}) =>
+        eventoUber({ id: 'evt_seg', eventType: 'order.fulfillment_issues.resolved', error: 'CAMBIO_SIN_CONFIRMAR', ...over })
+
+      it('50 urgentes elegibles en CADA pasada + 1 seguimiento ⇒ el seguimiento se relee en la primera, después de los urgentes', async () => {
+        const urgentes = Array.from({ length: 50 }, (_, i) =>
+          eventoUber({ id: `evt_urg_${i}`, eventType: 'orders.notification', receivedAt: new Date(NOW - 30 * 60_000 + i * 1000) }),
+        )
+        tabla([...urgentes, seguimiento({ receivedAt: new Date(NOW - 20 * 60_000) })])
+        mockedProcessUber.mockImplementation(async (id: string) =>
+          id === 'evt_seg' ? { outcome: 'FAILED', error: 'CAMBIO_SIN_CONFIRMAR' } : { outcome: 'FAILED', error: 'ECONNRESET' },
+        )
+
+        await new DeliveryWebhookReconciliationJob().runOnce()
+
+        const orden = mockedProcessUber.mock.calls.map(c => c[0])
+        expect(orden).toContain('evt_seg')
+        expect(orden.indexOf('evt_seg')).toBe(50) // los 50 urgentes van primero
+      })
+
+      it('un seguimiento que nunca tuvo un intento no se descarta por antigüedad: el barrido no lo toca y el carril lo lee', async () => {
+        const viejo = new Date(NOW - 25 * 3600_000)
+        tabla([
+          seguimiento({ id: 'evt_seg_viejo', receivedAt: viejo, attemptCount: 0 }),
+          eventoUber({ id: 'evt_urg_viejo', eventType: 'orders.notification', receivedAt: viejo }), // control
+        ])
+        mockedProcessUber.mockResolvedValue({ outcome: 'RECONCILED', orderId: 'ord_u' })
+        mockedUpdateMany.mockResolvedValue({ count: 1 })
+
+        await new DeliveryWebhookReconciliationJob().runOnce()
+
+        expect(mockedProcessUber.mock.calls.map(c => c[0])).toEqual(['evt_seg_viejo'])
+        const huerfanos = mockedUpdateMany.mock.calls.flatMap(c => c[0].where.id.in)
+        expect(huerfanos).toEqual(['evt_urg_viejo'])
+      })
+    })
+
     it('🔴 el barrido de 24 h también alcanza a Uber: nada se queda colgado para siempre', async () => {
       // Antes el barrido excluía a Uber a propósito, porque el scan no lo procesaba y
       // descartarlo habría sido perder la venta. Ahora que SÍ se procesa, tiene que poder
       // caducar como todos: si no, un payload roto vive eternamente en la cola.
-      mockedFindMany.mockResolvedValueOnce([]).mockResolvedValueOnce([eventoUber({ receivedAt: new Date(NOW - 25 * 3600_000) })])
+      mockedFindMany
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([eventoUber({ receivedAt: new Date(NOW - 25 * 3600_000) })])
       mockedUpdateMany.mockResolvedValueOnce({ count: 1 })
 
       const result = await new DeliveryWebhookReconciliationJob().runOnce()
 
       // El mock devuelve la fila pase lo que pase, así que lo que de verdad prueba esto es
       // el WHERE: es el filtro —no el mock— lo que decide si Uber caduca o vive para siempre.
-      const barridoWhere = mockedFindMany.mock.calls[1][0].where
+      const barridoWhere = mockedFindMany.mock.calls[2][0].where
       expect(barridoWhere.provider.in).toContain('UBER_EATS')
       expect(result.orphaned).toBe(1)
     })

@@ -15,7 +15,7 @@ import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { processAngelPayWebhook } from '@/services/tpv/angelpay-webhook.service'
 import { recordFastPayment } from '@/services/tpv/payment.tpv.service'
-import { terminalPaymentService } from '@/services/terminal-payment.service'
+import { terminalPaymentService, type AttemptOutcome, type AttemptProcessorEvidence } from '@/services/terminal-payment.service'
 import socketManager from '@/communication/sockets/managers/socketManager'
 import { terminalRegistry } from '@/communication/sockets/terminal-registry'
 import { terminalIdentityKey } from '@/utils/terminalSerial'
@@ -271,8 +271,19 @@ describe('S6 · consulta durable POR INTENTO, sólo de la terminal del JWT', () 
     expect(JSON.stringify(estado)).not.toContain('NOT_CHARGED')
   })
 
-  it('un intento desconocido es null: sin evidencia, no una negación', async () => {
-    expect(await consultar(randomUUID())).toBeNull()
+  it('un intento desconocido sigue sin ser una NEGACIÓN — ahora lo dice con NOT_RECORDED/NONE en vez de callarse', async () => {
+    // Antes del 22-sep esto era `null` (404). Cambió el VEHÍCULO, no la garantía: sin solicitud no hay `request`, y la
+    // liberación del cliente exige `request.outcome === 'NOT_CHARGED'` con evidencia de lista blanca
+    // (`LiberacionDelServidor.desdeConsultaS6`), así que esta respuesta no puede soltar nada; `NOT_RECORDED` es «no sé»
+    // y el cliente lo trata como «nada que aplicar». Lo que se gana: la pantalla de un cobro LOCAL entra a la ventana
+    // de confirmación en vez de quedarse en un callejón sin reloj ni botón.
+    const visto = await consultar(randomUUID())
+    expect(visto).not.toBeNull()
+    expect(visto!.attempt.outcome).toBe<AttemptOutcome>('NOT_RECORDED')
+    expect(visto!.attempt.processorEvidence).toBe<AttemptProcessorEvidence>('NONE')
+    expect(visto!.attempt.paymentId).toBeNull()
+    // 🔴 Lo que NO puede aparecer: nada que el cliente pueda leer como liberación.
+    expect(visto!.request).toBeNull()
   })
 
   it('un intento de OTRA terminal del mismo venue se ve igual que uno desconocido (null); la dueña sí lo ve', async () => {
@@ -354,6 +365,49 @@ describe('S5 · el webhook como primer confirmador despierta al POS y avisa a la
         tipCents: 0,
         via: 'webhook',
       })
+    })
+  })
+
+  it('el POS despertado por el webhook recibe la LIGA DEL RECIBO (receipt.receiptUrl) y la fila la conserva: sin ella el ticket sale sin QR', async () => {
+    // Testarudo, 18-sep → 21-sep: desde que el webhook gana la carrera, el POS recibía `success` SIN `receipt` (0/389 filas
+    // cerradas por webhook la traían; 21/21 cerradas por la terminal sí) ⇒ el ticket del cobro y el «volver a imprimir» de
+    // la pantalla de cobro salían sin QR de recibo/factura. El registrador ya generó el recibo antes de confirmar.
+    const A = actores()
+    const { requestId, pos, limpiar } = await posEsperandoComoActor(A)
+    const obs = { desenlace: null as Awaited<ReturnType<typeof A.carrera>> | null }
+    let fallo: Fallo = null
+    try {
+      const attemptId = await vincular(requestId)
+      await webhook(attemptId)
+      obs.desenlace = await A.carrera(pos, 3000)
+    } catch (error) {
+      fallo = { error }
+    } finally {
+      await A.liberar({ 'long-poll del POS': limpiar })
+    }
+    await A.cerrar(fallo)
+    await A.afirmar(async () => {
+      const despues = await fila(requestId)
+      expect(despues).toMatchObject({ status: 'COMPLETED', closedVia: 'webhook' })
+      const recibo = await exigir(prisma.digitalReceipt.findFirst({ where: { paymentId: despues.paymentId! } }))
+      const receipt = {
+        receiptUrl: expect.stringMatching(new RegExp(`/receipts/public/${recibo.accessKey}$`)),
+        receiptAccessKey: recibo.accessKey,
+      }
+      // Lo que despierta al long-poll del POS (es lo que imprime el ticket del cobro).
+      expect(obs.desenlace).toMatchObject({
+        estado: 'ASENTADA',
+        ok: true,
+        value: { status: 'success', paymentId: despues.paymentId, receipt },
+      })
+      // Lo que queda DURABLE en la fila (el GET del POS, la réplica del POST y el vigía leen de aquí).
+      expect(despues.resultJson).toMatchObject({ requestId, status: 'success', paymentId: despues.paymentId, receipt })
+      // Un `success` tardío de la terminal SIN receipt (lo que manda la TPV 2.10.0 cuando el webhook ya cerró) no la borra.
+      await terminalPaymentService.handlePaymentResultFromSocket(
+        { requestId, status: 'success', paymentId: despues.paymentId!, transactionId: despues.paymentId!, errorMessage: null } as any,
+        { socketId: 's', terminalId: f.serial, venueId: f.venueId },
+      )
+      expect((await fila(requestId)).resultJson).toMatchObject({ receipt, transactionId: despues.paymentId })
     })
   })
 
@@ -1190,5 +1244,154 @@ describe('Codex R14-4 · la limpieza de aliases NO espera a otra solicitud: cada
     expect((await terminalPaymentService.reconcileUnknownRequests()).aliasesRetirados).toBe(0)
     expect(A).toBeDefined()
     expect(registro).toBeDefined()
+  })
+})
+
+/**
+ * 🔴 «Ninguna terminal muerta» (founder, 22-sep) — spec
+ * `docs/superpowers/specs/2026-09-22-ninguna-terminal-muerta-cobro-local-design.md`, pieza A.
+ *
+ * Un **Pago rápido** (cobro iniciado EN la terminal, sin solicitud del POS) no tiene
+ * `TerminalPaymentAttemptLink` —esa tabla exige `requestId` con FK—, así que S6 devolvía `null` ⇒ 404
+ * ⇒ la pantalla se quedaba sin reloj, sin botón y sin reintento, y la fila `INDETERMINADO` sin
+ * `orderId` apartaba EL APARATO ENTERO. Medido en la N86: 13 de 27 intentos son de esta clase.
+ *
+ * La consulta es POR INTENTO: sin vínculo contesta igual con lo que SÍ consta de ESA terminal.
+ */
+describe('Ninguna terminal muerta · S6 contesta también sin solicitud del POS (cobro LOCAL)', () => {
+  it('cobro local YA registrado: RECORDED con su Payment, sin solicitud ni vínculo', async () => {
+    const A = randomUUID()
+    const pago = await recordFastPayment(f.venueId, f.registroDeLaTerminal({ attemptId: A }), f.staffId)
+    expect(pago.terminalPaymentRequestId).toBeNull()
+
+    const visto = await consultar(A)
+    expect(visto).not.toBeNull()
+    expect(visto!.attempt.outcome).toBe<AttemptOutcome>('RECORDED')
+    expect(visto!.attempt.paymentId).toBe(pago.id)
+    // No hay solicitud que reportar: el espejo del cliente ya tolera ambos en null.
+    expect(visto!.requestId).toBeNull()
+    expect(visto!.request).toBeNull()
+  })
+
+  it('cobro local SIN evidencia: contesta NOT_RECORDED/NONE en vez de 404 mudo — es lo que abre la ventana', async () => {
+    const visto = await consultar(randomUUID())
+    expect(visto).not.toBeNull()
+    expect(visto!.attempt.outcome).toBe<AttemptOutcome>('NOT_RECORDED')
+    expect(visto!.attempt.processorEvidence).toBe<AttemptProcessorEvidence>('NONE')
+    expect(visto!.attempt.paymentId).toBeNull()
+    expect(visto!.requestId).toBeNull()
+  })
+
+  it('AISLAMIENTO: un cobro local con esa llave pero de OTRA terminal nunca se presenta como dinero propio', async () => {
+    const A = randomUUID()
+    await recordFastPayment(f.venueId, f.registroDeLaTerminal({ attemptId: A }), f.staffId)
+
+    const otroSerial = `AVQD-N86${randomUUID().replace(/-/g, '').slice(0, 8).toUpperCase()}`
+    await prisma.terminal.create({ data: { venueId: f.venueId, name: 'otra N86', serialNumber: otroSerial, type: 'TPV_ANDROID' } })
+
+    const visto = await consultar(A, otroSerial)
+    expect(visto?.attempt.paymentId ?? null).toBeNull()
+    expect(visto?.attempt.outcome ?? 'NOT_RECORDED').not.toBe<AttemptOutcome>('RECORDED')
+  })
+})
+
+/**
+ * Codex (22-sep) RECHAZÓ la pieza A con 2 P1. Los dos nacen de lo mismo: al abrir el camino sin vínculo, la
+ * PERTENENCIA del dinero dejó de estar acreditada por nadie y quedó decidida por coincidencias permisivas.
+ */
+describe('Ninguna terminal muerta · Codex P1: sin vínculo, la pertenencia tiene que ser ACREDITADA', () => {
+  it('P1-1 · identidades CRUZADAS: un Payment con snapshot de A y relación de B no es de NINGUNA de las dos', async () => {
+    // Lo produce el controlador real: `terminalId` se resuelve con el `deviceSerialNumber` del CUERPO, mientras
+    // `processorData.deviceSerialNumber` guarda el serial AUTENTICADO del JWT. Con un `OR` entre ambas identidades,
+    // A y B reclamaban el mismo cobro — y la que no cobró soltaba su retención al verlo RECORDED.
+    const otroSerial = `AVQD-N86${randomUUID().replace(/-/g, '').slice(0, 8).toUpperCase()}`
+    await prisma.terminal.create({ data: { venueId: f.venueId, name: 'la otra', serialNumber: otroSerial, type: 'TPV_ANDROID' } })
+    const A = randomUUID()
+    // cuerpo → terminal de la fixture (relación); JWT → la otra (snapshot en processorData)
+    await recordFastPayment(f.venueId, f.registroDeLaTerminal({ attemptId: A, serialAutenticado: otroSerial }), f.staffId)
+
+    for (const serial of [f.serial, otroSerial]) {
+      // Codex r2 (P3-1): SIN `??`. Con el fallback, un regreso al 404 (`null`) dejaba pasar esta prueba.
+      const visto = await consultar(A, serial)
+      expect(visto).not.toBeNull()
+      expect(visto!.attempt.outcome).toBe<AttemptOutcome>('NOT_RECORDED')
+      expect(visto!.attempt.paymentId).toBeNull()
+    }
+  })
+
+  it('P1-2 · evidencia del webhook SIN serial no es de nadie: no se publica como APPROVED propio', async () => {
+    // El SQL vuelve NULL un serial ausente ⇒ `contradice = false`. Con vínculo la pertenencia la daba el vínculo;
+    // sin él, un `approved` sin serial se presentaba como propio a CUALQUIER terminal del venue, y el recuperador
+    // de la TPV lo guarda de forma durable en la fila consultada.
+    const A = randomUUID()
+    const { result } = await webhook(A, { terminalSerial: '' })
+    expect(result).toBeTruthy()
+
+    // Codex r2 (P3-1): estado EXACTO, no «cualquier cosa menos APPROVED» — así un DECLINED falso tampoco pasa.
+    const visto = await consultar(A)
+    expect(visto).not.toBeNull()
+    expect(visto!.attempt.processorEvidence).toBe<AttemptProcessorEvidence>('NONE')
+    expect(visto!.attempt.evidenceContradiction).toBe(false)
+  })
+
+  it('CONTROL · con serial PROPIO y sin vínculo, la evidencia sí cuenta (el arreglo no apaga el camino bueno)', async () => {
+    const A = randomUUID()
+    await webhook(A)
+    const visto = await consultar(A)
+    expect(visto?.attempt.processorEvidence).toBe<AttemptProcessorEvidence>('APPROVED')
+  })
+})
+
+/**
+ * Codex r2 (P3-2): la guarda `identidadesDelPago.length > 0` estaba escrita pero NO protegida. `[].every(...)` es
+ * `true`, así que sin ella un Payment SIN NINGUNA identidad se acreditaba como propio a cualquier terminal del venue.
+ * Aquí van ese caso, los dos controles de una sola identidad, y el gemelo `declined` del segundo `max()` de `conDueno`.
+ */
+describe('Ninguna terminal muerta · Codex r2 P3-2: la pertenencia necesita AL MENOS una identidad', () => {
+  /** Degrada un Payment real al estado que describe Codex: sin relación a terminal y sin serial en el snapshot. */
+  async function sinNingunaIdentidad(attemptId: string) {
+    const pago = await recordFastPayment(f.venueId, f.registroDeLaTerminal({ attemptId }), f.staffId)
+    const datos = (pago.processorData ?? {}) as Record<string, unknown>
+    await prisma.payment.update({
+      where: { id: pago.id },
+      data: { terminalId: null, processorData: { ...datos, deviceSerialNumber: null } },
+    })
+    return pago
+  }
+
+  it('un Payment SIN ninguna identidad no es de nadie (es la guarda que `[].every()` volvería inútil)', async () => {
+    const A = randomUUID()
+    await sinNingunaIdentidad(A)
+    const visto = await consultar(A)
+    expect(visto).not.toBeNull()
+    expect(visto!.attempt.outcome).toBe<AttemptOutcome>('NOT_RECORDED')
+    expect(visto!.attempt.paymentId).toBeNull()
+  })
+
+  it('CONTROL · sólo el SNAPSHOT identifica (sin relación a terminal): sí es propio', async () => {
+    const A = randomUUID()
+    const pago = await recordFastPayment(f.venueId, f.registroDeLaTerminal({ attemptId: A }), f.staffId)
+    await prisma.payment.update({ where: { id: pago.id }, data: { terminalId: null } })
+    const visto = await consultar(A)
+    expect(visto!.attempt.outcome).toBe<AttemptOutcome>('RECORDED')
+    expect(visto!.attempt.paymentId).toBe(pago.id)
+  })
+
+  it('CONTROL · sólo la RELACIÓN identifica (sin serial en el snapshot): sí es propio', async () => {
+    const A = randomUUID()
+    const pago = await recordFastPayment(f.venueId, f.registroDeLaTerminal({ attemptId: A }), f.staffId)
+    const datos = (pago.processorData ?? {}) as Record<string, unknown>
+    await prisma.payment.update({ where: { id: pago.id }, data: { processorData: { ...datos, deviceSerialNumber: null } } })
+    const visto = await consultar(A)
+    expect(visto!.attempt.outcome).toBe<AttemptOutcome>('RECORDED')
+    expect(visto!.attempt.paymentId).toBe(pago.id)
+  })
+
+  it('el gemelo DECLINED: un rechazo del banco SIN serial tampoco es de nadie (protege el 2º max() de conDueno)', async () => {
+    const A = randomUUID()
+    await webhook(A, { terminalSerial: '', status: 'rejected', description: '05 DECLINADA' })
+    const visto = await consultar(A)
+    expect(visto).not.toBeNull()
+    expect(visto!.attempt.processorEvidence).toBe<AttemptProcessorEvidence>('NONE')
   })
 })

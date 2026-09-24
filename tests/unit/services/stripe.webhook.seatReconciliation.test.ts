@@ -24,6 +24,9 @@ jest.mock('@/services/stripe.service', () => ({
   estadoDeLaSuscripcion: jest.fn().mockResolvedValue('active'),
   // 8ª auditoría: el handler lee la suscripción VIGENTE (status + trial_end). Este mock DELEGA en
   // `estadoDeLaSuscripcion`, así que un test que fije el estado controla los dos sin tocar nada más.
+  // V5-A paso 6: la fila de plan sigue su camino sólo si la suscripción vende ese plan (por defecto, sí).
+  suscripcionVendeElPlan: jest.fn().mockResolvedValue(true),
+  entregarSuscripcionDePlan: jest.fn().mockResolvedValue(null),
   suscripcionVigente: jest.fn(async function (this: unknown, id: string) {
     const m = jest.requireMock('@/services/stripe.service') as { estadoDeLaSuscripcion: jest.Mock }
     return { status: await m.estadoDeLaSuscripcion(id), trialEnd: null }
@@ -128,7 +131,7 @@ describe('stripe webhook → seat reconciliation hook', () => {
     execMock.mockRejectedValueOnce(new Error('boom'))
     ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('canceled')
 
-    await expect(handleSubscriptionUpdated({ id: 'sub_4', status: 'canceled' } as Stripe.Subscription)).resolves.toBeUndefined()
+    await expect(handleSubscriptionUpdated({ id: 'sub_4', status: 'canceled' } as Stripe.Subscription)).resolves.toBe(false)
     expect(execMock).toHaveBeenCalledWith('venue_1')
   })
 })
@@ -162,7 +165,7 @@ describe('stripe webhook → seat REACTIVATION hook (re-upgrade to paid plan)', 
     reactivateMock.mockRejectedValueOnce(new Error('boom'))
     ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('active')
 
-    await expect(handleSubscriptionUpdated({ id: 'sub_7', status: 'active' } as Stripe.Subscription)).resolves.toBeUndefined()
+    await expect(handleSubscriptionUpdated({ id: 'sub_7', status: 'active' } as Stripe.Subscription)).resolves.toBe(true)
     expect(reactivateMock).toHaveBeenCalledWith('venue_1')
   })
 

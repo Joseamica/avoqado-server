@@ -359,6 +359,19 @@ describe('getAutofacturaStatusController (GET /receipt/:accessKey/cfdi)', () => 
     })
   })
 
+  it('returns autofacturaAvailable:false when the order is outside the safe envelope (unsupportedReasons), even with both flags on', async () => {
+    mockFindReceipt.mockResolvedValue(makeReceipt())
+    mockFindCfdi.mockResolvedValue(null)
+    mockLoadOrder.mockResolvedValue({ ...makeBundle(), unsupportedReasons: ['La cuenta lleva una promoción; …'] })
+
+    const req = makeReq({ accessKey: 'key-abc' })
+    const res = makeRes()
+
+    await getAutofacturaStatusController(req as any, res as any)
+
+    expect(res.json).toHaveBeenCalledWith({ cfdi: null, autofacturaAvailable: false })
+  })
+
   it('returns 200 with cfdi:null + autofacturaAvailable:true when no cfdi exists yet but the merchant allows self-invoicing', async () => {
     mockFindReceipt.mockResolvedValue(makeReceipt())
     mockFindCfdi.mockResolvedValue(null)

@@ -9,6 +9,8 @@
  */
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
+import { getContext, runWithContext, type RequestCancellation } from '@/observability/executionContext'
+import { RequestCancelledError } from '@/utils/requestCancellation'
 import {
   __resetVenuesEstrictosParaPruebas,
   getVenuesEstrictos,
@@ -131,5 +133,33 @@ describe('P1 invalidar: la marcha atrás tiene que verse ENSEGUIDA', () => {
     resolver([])
     await Promise.all(espera)
     expect(venueFindMany).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('el freno del MCP no alcanza a este refresco global (freno del 23-sep-2026)', () => {
+  it('un refresco que dispara una consulta del MCP ya cancelada corre SIN su freno: ni 🚨 falso ni espera de cupo', async () => {
+    let frenoVisto: unknown = 'no corrió'
+    venueFindMany.mockImplementation(async () => {
+      frenoVisto = getContext()?.cancellation
+      return []
+    })
+    const controller = new AbortController()
+    controller.abort(new RequestCancelledError('tool-finished'))
+    const cancelada: RequestCancellation = {
+      signal: controller.signal,
+      hasWritten: false,
+      refused: false,
+      attached: false,
+      reattach: jest.fn(async () => undefined),
+    }
+
+    // Las herramientas de terminales del MCP consultan esta lista: el refresco nace DENTRO de su petición.
+    runWithContext({ correlationId: 'c-1', source: 'http', entrypoint: 'POST /mcp tools/call x', cancellation: cancelada }, () =>
+      getVenuesEstrictos(),
+    )
+    await new Promise(r => setImmediate(r))
+
+    expect(frenoVisto).toBeUndefined()
+    expect(cancelada.reattach).not.toHaveBeenCalled()
   })
 })

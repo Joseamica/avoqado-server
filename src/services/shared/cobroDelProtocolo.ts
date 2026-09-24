@@ -74,6 +74,42 @@ export async function cobrosDelProtocolo(
   return new Set(filas.map(f => f.id))
 }
 
+/**
+ * Excepción de EDICIÓN MANUAL — la usa SÓLO el editor de verificaciones de venta (`editOrgSaleVerification`); el PUT y el DELETE
+ * del dashboard no la conocen, así que la pertenencia global no cambia.
+ *
+ * Desde el 18-sep-2026 el registrador de la terminal escribe la llave `pricing` en TODO cobro (`payment.tpv.service.ts`), y en
+ * efectivo sin afiliación vale `null`: `pertenenciaPropiaSql` lo clasifica «del protocolo» aunque no tenga tarifa, evidencia
+ * bancaria ni obligación que proteger. Así quedaron 162 SIMs de $0 de PlayTelecom en dos días, y su back-office —que corrige
+ * 41-58 verificaciones al mes, 77 de 119 de FORMA de pago (CASH → OTHER)— recibió 409 (auditoría Codex gpt-6-astra, 20-sep).
+ *
+ * Es elegible, revalidado bajo el mutex del Payment, el cobro que cumple TODO esto: no es REFUND · CASH u OTHER (la forma sólo se
+ * mueve entre esos dos: TARJETA afirmaría dinero bancario que Avoqado no ve) · sin `merchantAccountId` (un `pricing: null` CON
+ * afiliación es una captura INVÁLIDA, R10-1, y sigue protegido) · snapshot exactamente `null` y sin `pricingSlot` · sin
+ * `costPending` · sin TerminalPaymentRequest · sin TransactionCost · sin PaymentEffect TRANSACTION_COST en NINGÚN estado ·
+ * sin reembolsos que lo apunten (la unidad de costo proyecta sobre el original: un original reembolsado se queda protegido).
+ */
+export async function efectivoManualEditable(db: Pick<Prisma.TransactionClient, '$queryRaw'>, paymentId: string): Promise<boolean> {
+  const filas = await db.$queryRaw<{ id: string }[]>`
+    SELECT p."id" FROM "Payment" p
+    WHERE p."id" = ${paymentId}
+      AND p."type" <> 'REFUND'
+      AND p."method" IN ('CASH', 'OTHER')
+      AND p."merchantAccountId" IS NULL
+      AND p."terminalPaymentRequestId" IS NULL
+      AND jsonb_typeof(p."processorData") = 'object'
+      AND jsonb_typeof(p."processorData"->'pricing') = 'null'
+      AND COALESCE(jsonb_typeof(p."processorData"->'pricingSlot'), 'null') = 'null'
+      AND COALESCE(p."processorData"->>'costPending', 'false') <> 'true'
+      AND NOT EXISTS (SELECT 1 FROM "TransactionCost" tc WHERE tc."paymentId" = p."id")
+      AND NOT EXISTS (SELECT 1 FROM "PaymentEffect" pe WHERE pe."paymentId" = p."id" AND pe."kind" = 'TRANSACTION_COST')
+      AND NOT EXISTS (
+        SELECT 1 FROM "Payment" r
+        WHERE r."type" = 'REFUND' AND jsonb_typeof(r."processorData") = 'object' AND r."processorData"->>'originalPaymentId' = p."id"
+      )`
+  return filas.length === 1
+}
+
 /** Pertenencia PROPIA de una fila (alias de `"Payment"`): snapshot presente (incl. `null`) u obligación TRANSACTION_COST. */
 function pertenenciaPropiaSql(alias: string): Prisma.Sql {
   const a = Prisma.raw(`"${alias}"`)

@@ -171,6 +171,7 @@ async function aggregateProductQuantities(venueId: string, fromDate: Date, toDat
     JOIN "Order" o ON o."id" = oi."orderId"
     JOIN "Product" p ON p."id" = oi."productId"
     WHERE ${orderScope(venueId, fromDate, toDate)}
+      AND oi."removedAt" IS NULL -- a line the delivery provider removed sold nothing
     GROUP BY p."id", p."name", p."type", p."price"
     ORDER BY SUM(oi."quantity") DESC, p."id"
   `
@@ -298,6 +299,7 @@ async function generateProductProfitability(venueId: string, fromDate: Date, toD
     JOIN "Order" o ON o."id" = oi."orderId"
     JOIN "Product" p ON p."id" = oi."productId"
     WHERE ${orderScope(venueId, fromDate, toDate)}
+      AND oi."removedAt" IS NULL -- a line the delivery provider removed sold nothing
     GROUP BY p."id", p."name", p."type", p."price"
     ORDER BY SUM(${Prisma.raw(lineRevenueSql('oi'))}) DESC, p."id"
   `

@@ -53,7 +53,7 @@ export function proyectarLiberacionPorVentana(resultJson: unknown): { windowMs: 
  */
 export function proyectarDeclaracionDelCajero(
   operatorResolution: unknown,
-): { by: 'SESSION' | 'SUPERVISOR_PIN'; staffId: string; acceptedAt: string } | null {
+): { by: 'SESSION' | 'SUPERVISOR_PIN' | 'AUTOMATIC'; staffId: string; acceptedAt: string } | null {
   const r = readOperatorResolution(operatorResolution)
   return r ? { by: r.by, staffId: r.staffId, acceptedAt: r.acceptedAt } : null
 }
@@ -470,12 +470,50 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
           createdAt: r.createdAt.toISOString(),
         }
       })
+      // 🔴 Pieza B/C (22-sep): las declaraciones del cajero sobre un cobro **LOCAL** —un Pago rápido, iniciado EN la
+      // terminal— no tienen solicitud, así que NUNCA aparecerían en la lista de arriba. Sin esto, «el cajero declaró
+      // que no se cobró» sería invisible para el MCP en exactamente los cobros que más se atascan (medido en una N86:
+      // 13 de 27 intentos son locales). Se listan las de las últimas 24 h, acotadas al alcance del usuario.
+      const desdeAyer = new Date(Date.now() - 24 * 60 * 60 * 1000)
+      const venuesDelAlcance = where.venueId
+      const localResolutions = (
+        await prisma.terminalAttemptResolution.findMany({
+          where: { venueId: venuesDelAlcance, createdAt: { gte: desdeAyer } },
+          orderBy: { createdAt: 'desc' },
+          take: 25,
+          select: { attemptId: true, terminalId: true, venueId: true, resolution: true, createdAt: true },
+        })
+      ).map(r => {
+        const d = (r.resolution ?? {}) as { kind?: string; by?: string; staffId?: string; acceptedAt?: string }
+        return {
+          attemptId: r.attemptId,
+          terminalId: r.terminalId,
+          venueId: r.venueId,
+          // NO_INSTRUMENT_PRESENTED = el cajero; NO_BANK_TRACE_AFTER_WINDOW = la terminal sola (ronda 20, 23-sep), donde el
+          // aviso del banco está comprobado y no llegó.
+          kind: d.kind ?? null,
+          // Cómo se autorizó: la sesión de la terminal, el PIN de un supervisor que la elevó, o AUTOMATIC (la terminal).
+          authorizedBy: d.by ?? null,
+          staffId: d.staffId ?? null,
+          declaredAt: d.acceptedAt ?? r.createdAt.toISOString(),
+        }
+      })
+
       return text({
         count: requests.length,
         busyTerminals: [...new Set(requests.filter(r => r.busy).map(r => r.terminalId))],
         // Cuenta lo que el operador VE como UNKNOWN (el status ya traducido), no el valor crudo de la columna.
         unknownCount: requests.filter(r => r.status === TerminalPaymentRequestStatus.UNKNOWN).length,
         requests,
+        /**
+         * Releases of LOCAL charges (started ON the terminal, with no POS request), from the last 24h: a cashier's
+         * "no card was presented" (kind NO_INSTRUMENT_PRESENTED), or the terminal's own automatic release after waiting
+         * for the bank notice that never came, only where that merchant's bank notices are proven to arrive
+         * (kind NO_BANK_TRACE_AFTER_WINDOW, authorizedBy AUTOMATIC). They never appear under `requests` because they
+         * have no request to belong to. Never a bank decline: if money shows up later for that attempt, the money wins
+         * and the release is kept as the contradiction it is.
+         */
+        localResolutions,
       })
     },
   )

@@ -24,7 +24,7 @@
 import { NextFunction, Request, Response } from 'express'
 import * as venueDashboardService from '../../services/dashboard/venue.dashboard.service'
 import * as planStateService from '../../services/dashboard/planState.service'
-import { getVenuePlanInfo } from '../../services/access/basePlan.service'
+import { getVenueGrantedFeatureCodes, getVenuePlanInfo } from '../../services/access/basePlan.service'
 import * as seatReconciliationService from '../../services/dashboard/seatReconciliation.service'
 
 import { CreateVenueDto, ListVenuesQueryDto, ConvertDemoVenueDto } from '../../schemas/dashboard/venue.schema'
@@ -530,8 +530,9 @@ export async function getVenuePlan(req: Request<{ venueId: string }>, res: Respo
 export async function getVenuePlanTier(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId } = req.params
-    const plan = await getVenuePlanInfo(venueId)
-    res.status(200).json({ success: true, data: plan })
+    // `grantedFeatureCodes` es ADITIVO: un dashboard viejo lo ignora. Sólo códigos (#10, 21-sep).
+    const [plan, grantedFeatureCodes] = await Promise.all([getVenuePlanInfo(venueId), getVenueGrantedFeatureCodes(venueId)])
+    res.status(200).json({ success: true, data: { ...plan, grantedFeatureCodes } })
   } catch (error) {
     logger.error('Error getting venue plan tier', {
       error: error instanceof Error ? error.message : 'Unknown error',

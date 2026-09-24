@@ -34,14 +34,15 @@ describe('removeFeatureFromVenue — PLAN_PRO guard', () => {
       stripeSubscriptionId: 'sub_chat',
       feature: { code: 'CHATBOT', name: 'Chatbot' },
     })
-    prismaMock.venueFeature.update.mockResolvedValue({ id: 'vf_chat', active: false })
+    prismaMock.venueFeature.updateMany.mockResolvedValue({ count: 1 } as any)
     mockStripe.cancelSubscription.mockResolvedValue(undefined as any)
 
     await removeFeatureFromVenue('venue_1', 'feat_chat')
 
     expect(mockStripe.cancelSubscription).toHaveBeenCalledWith('sub_chat')
-    expect(prismaMock.venueFeature.update).toHaveBeenCalledWith({
-      where: { id: 'vf_chat' },
+    // R0 (21-sep): se apaga condicionado a la suscripción que se canceló, no por id a secas.
+    expect(prismaMock.venueFeature.updateMany).toHaveBeenCalledWith({
+      where: { id: 'vf_chat', stripeSubscriptionId: 'sub_chat' },
       data: { active: false },
     })
   })

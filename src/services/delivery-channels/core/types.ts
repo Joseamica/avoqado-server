@@ -40,6 +40,8 @@ export interface NormalizedDeliveryItem {
    */
   notes?: string | null
   modifiers?: NormalizedDeliveryModifier[]
+  /** id de LÍNEA del pedido en el proveedor (Uber: cart_item_id) */
+  lineId?: string
 }
 
 /**
@@ -86,7 +88,7 @@ export interface NormalizedDeliveryOrder {
   source: OrderSource
   items: NormalizedDeliveryItem[]
   payment: NormalizedDeliveryPayment
-  customer?: { name?: string; phone?: string; note?: string }
+  customer?: { name?: string; phone?: string; phonePin?: string; note?: string }
   /** JSON crudo del proveedor, para auditoría — va a `Order.posRawData` */
   raw: unknown
   placedAt: Date
@@ -97,6 +99,18 @@ export interface NormalizedDeliveryOrder {
    * y cocinarlo al llegar tira la comida. La comanda espera al aviso de "ya es hora".
    */
   scheduledFor?: Date | null
+  /**
+   * El proveedor dice que el pedido YA está aceptado (Uber: `state = 'ACCEPTED'`). Es la
+   * evidencia que recupera una aceptación cuyo 2xx se perdió; la ingesta sólo lee esta marca,
+   * nunca pregunta quién es el proveedor.
+   */
+  providerAccepted?: boolean
+  /**
+   * El proveedor ya CERRÓ el pedido (entregado, fallido): ya no admite cambios. Un retiro que siga
+   * esperando con el renglón todavía presente no va a ocurrir (spec §3.4, ruling I-2 de la
+   * revisión final). Ausente = el proveedor no lo informa: se trata como abierto.
+   */
+  providerClosed?: boolean
 }
 
 // ============================================================================
@@ -120,6 +134,20 @@ export interface EventIdentity {
 
 export type WebhookVerdict = 'VALID' | 'INVALID_SIGNATURE' | 'MALFORMED'
 
+/**
+ * El repartidor asignado a un pedido, para "¿quién trae esto?" en el KDS. Todo opcional
+ * porque el proveedor lo manda tal cual lo tenga — un campo ausente no es un error, es que
+ * Uber todavía no lo sabe o no lo comparte.
+ */
+export interface CourierInfo {
+  name?: string
+  phone?: string
+  /** Código/pin necesario para poder llamar al número anónimo del repartidor. */
+  phoneCode?: string
+  vehicle?: { make?: string; model?: string; licensePlate?: string }
+  pictureUrl?: string
+}
+
 export type DenyReason = 'OUT_OF_ITEMS' | 'STORE_CLOSED' | 'TOO_BUSY' | 'OTHER'
 
 export interface ActionResult {
@@ -127,6 +155,21 @@ export interface ActionResult {
   status: number
   /** Cuerpo crudo — se guarda para auditoría cuando falla. */
   raw: string
+}
+
+/**
+ * La escritura al proveedor NO salió: falló ANTES de la red (el candado de escrituras, su lectura a
+ * la base, el token). Se SABE que el proveedor no recibió nada — a diferencia de un timeout/5xx, donde
+ * no se sabe y por eso queda en duda. `STORE_NOT_AUTHORIZED`: la tienda no tiene permiso de escritura
+ * (consentimiento revocado, app del proveedor cambiada); `UNAVAILABLE`: cualquier otro fallo previo.
+ */
+export class DeliveryWriteNotSentError extends Error {
+  readonly reason: 'STORE_NOT_AUTHORIZED' | 'UNAVAILABLE'
+  constructor(reason: 'STORE_NOT_AUTHORIZED' | 'UNAVAILABLE', message: string) {
+    super(message)
+    this.name = 'DeliveryWriteNotSentError'
+    this.reason = reason
+  }
 }
 
 /**
@@ -217,7 +260,7 @@ export interface DirectDeliveryAdapter {
   normalizeOrder(raw: unknown): NormalizedDeliveryOrder
 
   /** Sólo si el webhook manda un PUNTERO en vez del pedido (es el caso de Uber). */
-  fetchOrder?(orderId: string): Promise<unknown>
+  fetchOrder?(orderId: string, signal?: AbortSignal): Promise<unknown>
 
   /** Sólo si el proveedor espera que el POS conteste — y normalmente con un plazo. */
   acceptOrder?(orderId: string, storeId: string): Promise<ActionResult>
@@ -244,6 +287,13 @@ export interface DirectDeliveryAdapter {
    */
   resolveFulfillmentIssues?(orderId: string, storeId: string, cartItemIds: string[]): Promise<ActionResult>
   markReady?(orderId: string, storeId: string): Promise<ActionResult>
+
+  /**
+   * "¿Quién trae este pedido?" — nombre, teléfono (con su código para poder llamarlo) y
+   * vehículo del repartidor YA asignado. `null` = el proveedor todavía no asigna a nadie —
+   * no es un error, es el estado normal mientras la cocina cocina.
+   */
+  fetchCourier?(externalOrderId: string, storeId: string): Promise<CourierInfo | null>
 
   publishMenu?(snapshot: MenuSnapshot, storeId: string, opts?: { availability?: unknown; precios?: unknown }): Promise<ActionResult>
 

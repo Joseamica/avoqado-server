@@ -154,6 +154,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   OrganizationEntitlement: 'Modules, Features & Billing',
   Feature: 'Modules, Features & Billing',
   VenueFeature: 'Modules, Features & Billing',
+  BillingObligationConflict: 'Modules, Features & Billing',
   Invoice: 'Modules, Features & Billing',
   InvoiceItem: 'Modules, Features & Billing',
   Estimate: 'Modules, Features & Billing',
@@ -312,6 +313,9 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   DeliveryChannelLink: 'Orders, KDS & Cash',
   DeliveryOrderEvent: 'Orders, KDS & Cash',
   DeliveryActivationRequest: 'Orders, KDS & Cash',
+  DeliveryLineAction: 'Orders, KDS & Cash',
+  DeliveryConnectIntent: 'Orders, KDS & Cash',
+  DeliveryStoreRevocation: 'Orders, KDS & Cash',
   PosSyncIntent: 'Orders, KDS & Cash',
   // Vales por área (AREA_TICKETS): cuenta compartida entre áreas emisoras + entrega.
   // Cuelgan de Order/OrderItem/PrintStation, por eso van con sus hermanos de orden.
@@ -498,6 +502,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   TerminalOrder: 'Terminals / TPV Fleet',
   TerminalPaymentRequest: 'Terminals / TPV Fleet',
   TerminalPaymentAttemptLink: 'Terminals / TPV Fleet',
+  TerminalAttemptResolution: 'Terminals / TPV Fleet',
   TerminalOrderItem: 'Terminals / TPV Fleet',
   AppUpdate: 'Terminals / TPV Fleet',
   TpvCommandHistory: 'Terminals / TPV Fleet',

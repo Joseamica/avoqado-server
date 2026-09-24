@@ -6,7 +6,30 @@ import { Request, Response, NextFunction } from 'express'
 import * as venueFeatureService from '../../services/dashboard/venueFeature.dashboard.service'
 import * as stripeService from '../../services/stripe.service'
 import prisma from '../../utils/prismaClient'
+import { cruzaPlanYSuelta } from '../../services/access/basePlan.service'
 import logger from '../../config/logger'
+import { ConflictError } from '../../errors/AppError'
+import { logAction } from '../../services/dashboard/activity-log.service'
+
+/** Venta suelta cerrada (founder, 21-sep): el mensaje dice qué hacer, no sólo que no se puede. */
+const MENSAJE_VENTA_SUELTA_CERRADA =
+  'Por ahora las funciones sueltas se contratan con nuestro equipo: escríbenos a hola@avoqado.io y te la activamos.'
+
+/**
+ * 🔴 Cambio de plan directo CERRADO (founder, 22-sep, tras la 3ª ronda de Codex).
+ *
+ * Este botón era el único camino que todavía movía dinero desde el SERVIDOR: llamaba a `subscriptions.update` con
+ * `always_invoice` y le cobraba el prorrateo al cliente en ese instante. Para que eso fuera seguro había que
+ * inventarle una barrera económica durable, una llave de idempotencia estable, una fecha de prorrateo que no
+ * cambiara entre reintentos y un 202 honesto — y cada una de esas piezas resultó ser una fuente de defectos
+ * (8 de los 16 hallazgos abiertos de la ronda 3 vivían ahí). Contradecía además la decisión del v4: **el dinero
+ * sólo se mueve en una confirmación de Stripe**.
+ *
+ * Se reabre cuando el cambio pase por Checkout o por el portal de Stripe, donde el cliente confirma y Stripe
+ * responde. Mientras tanto el mensaje dice QUÉ HACER, no sólo que no se puede.
+ */
+const MENSAJE_CAMBIO_DE_PLAN_CERRADO =
+  'Por ahora el cambio de plan lo hacemos nosotros: escríbenos a hola@avoqado.io y te lo cambiamos el mismo día.'
 
 /**
  * Get venue feature status (active and available features)
@@ -57,7 +80,13 @@ export async function addVenueFeatures(
       paymentMethodId: paymentMethodId || 'default',
     })
 
-    const createdFeatures = await venueFeatureService.addFeaturesToVenue(venueId, featureCodes, trialPeriodDays, paymentMethodId)
+    // 🔴 Venta suelta CERRADA hasta el rediseño de la compra (founder, 21-sep). Antes de todo.
+    if (!venueFeatureService.ventaSueltaAbierta()) {
+      throw new ConflictError(MENSAJE_VENTA_SUELTA_CERRADA, 'ALA_CARTE_SALES_CLOSED')
+    }
+
+    // `trialPeriodDays` del body se ignora a propósito: la política de prueba es del servidor.
+    const createdFeatures = await venueFeatureService.addFeaturesToVenue(venueId, featureCodes, paymentMethodId)
 
     // Separate features by status for better UI feedback
     const activeFeatures = createdFeatures.filter(f => f.active)
@@ -215,8 +244,15 @@ export async function downloadInvoice(
 
     logger.info('Downloading invoice', { venueId, invoiceId })
 
+    // 🔴 Sólo facturas del cliente de Stripe de ESTE negocio (aislamiento entre negocios, 21-sep).
+    const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { stripeCustomerId: true } })
+    if (!venue?.stripeCustomerId) {
+      res.status(404).json({ success: false, error: 'Factura no encontrada' })
+      return
+    }
+
     // Get invoice PDF URL from Stripe
-    const pdfUrl = await stripeService.getInvoicePdfUrl(invoiceId)
+    const pdfUrl = await stripeService.getInvoicePdfUrl(invoiceId, venue.stripeCustomerId)
 
     // Redirect to Stripe's hosted PDF
     res.redirect(pdfUrl)
@@ -282,6 +318,30 @@ export async function previewSubscriptionChange(
         error: 'Target feature not found or has no price',
       })
       return
+    }
+
+    // 🔴 Un plan no se convierte en función suelta ni al revés por esta ruta: eso contrataría o
+    // desharía un plan saltándose el checkout de planes (Codex, 21-sep). Se corta ANTES de Stripe.
+    if (cruzaPlanYSuelta(venueFeature.feature.code, newFeature.code)) {
+      res.status(400).json({
+        success: false,
+        error: 'Un plan no se cambia por una función suelta ni al revés. Usa el flujo de planes.',
+        code: 'PLAN_CROSSING_NOT_ALLOWED',
+      })
+      return
+    }
+
+    // 🔴 Subir de plan con una suelta que el plan incluye y que sigue cobrando = pagar dos veces
+    // (hallazgo #1). Parche inicial hasta que el cobro de la diferencia esté medido y auditado.
+    if (newFeature.code === 'PLAN_PRO' || newFeature.code === 'PLAN_PREMIUM') {
+      await venueFeatureService.assertSinCobroDobleAlSubir(venueId, newFeature.code === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO')
+    } else {
+      // Cambiar a otra suelta ES comprar una suelta: cerrado hasta el rediseño (founder, 21-sep).
+      if (!venueFeatureService.ventaSueltaAbierta()) {
+        throw new ConflictError(MENSAJE_VENTA_SUELTA_CERRADA, 'ALA_CARTE_SALES_CLOSED')
+      }
+      // Cambiar una suelta por otra que el plan ya incluye = pagar aparte lo incluido (ronda 5, P1-3).
+      await venueFeatureService.assertNoIncluidaEnElPlan(venueId, [newFeature.code])
     }
 
     // Get proration preview from Stripe
@@ -368,6 +428,28 @@ export async function updateSubscription(
       })
       return
     }
+
+    // 🔴 Un plan no se convierte en función suelta ni al revés por esta ruta: eso contrataría o
+    // desharía un plan saltándose el checkout de planes (Codex, 21-sep). Se corta ANTES de Stripe.
+    if (cruzaPlanYSuelta(venueFeature.feature.code, newFeature.code)) {
+      res.status(400).json({
+        success: false,
+        error: 'Un plan no se cambia por una función suelta ni al revés. Usa el flujo de planes.',
+        code: 'PLAN_CROSSING_NOT_ALLOWED',
+      })
+      return
+    }
+
+    // 🔴 Plan → plan: CERRADO (founder, 22-sep, tras la 3ª ronda de Codex).
+    if (newFeature.code === 'PLAN_PRO' || newFeature.code === 'PLAN_PREMIUM') {
+      throw new ConflictError(MENSAJE_CAMBIO_DE_PLAN_CERRADO, 'CAMBIO_DE_PLAN_CERRADO')
+    }
+    // Cambiar a otra suelta ES comprar una suelta: cerrado hasta el rediseño (founder, 21-sep).
+    if (!venueFeatureService.ventaSueltaAbierta()) {
+      throw new ConflictError(MENSAJE_VENTA_SUELTA_CERRADA, 'ALA_CARTE_SALES_CLOSED')
+    }
+    // Cambiar una suelta por otra que el plan ya incluye = pagar aparte lo incluido (ronda 5, P1-3).
+    await venueFeatureService.assertNoIncluidaEnElPlan(venueId, [newFeature.code])
 
     // 🔴 La colisión se comprueba ANTES de tocar Stripe (auditoría de Codex, 18-sep, hallazgo #8).
     // `VenueFeature` es única por `(venueId, featureId)`: si este negocio YA tiene una fila de la
@@ -480,7 +562,8 @@ export async function retryInvoicePayment(
     }
 
     // Retry payment using Stripe
-    const paidInvoice = await stripeService.retryInvoicePayment(invoiceId)
+    // 🔴 Sólo si la factura es del cliente de Stripe de ESTE negocio (aislamiento entre negocios, 21-sep).
+    const paidInvoice = await stripeService.retryInvoicePayment(invoiceId, venue.stripeCustomerId)
 
     logger.info('✅ Invoice payment retry successful', {
       venueId,

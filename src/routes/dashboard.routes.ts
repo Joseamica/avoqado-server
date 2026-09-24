@@ -103,6 +103,7 @@ import {
   listCfdisController,
   getCfdiStatusController,
   cancelCfdiController,
+  replaceCfdiController,
   emitRefundCreditNoteController,
   getRefundCreditNoteController,
   getFiscalConfigController,
@@ -110,6 +111,8 @@ import {
   upsertMerchantFiscalConfigController,
   provisionEmisorController,
   uploadEmisorCsdController,
+  syncEmisorLogoController,
+  downloadCfdiFileController,
   getEmisorProviderStatusController,
   triggerGlobalCfdiController,
   searchSatCatalogController,
@@ -3101,7 +3104,10 @@ router.post(
 router.put(
   '/venues/:venueId/features/:featureId/subscription',
   authenticateTokenMiddleware,
-  checkPermission('features:write'),
+  // 🔴 Cambiar el producto/precio de una suscripción MUEVE DINERO: pide el mismo permiso que
+  // darla de alta y cancelarla (`billing:subscriptions:manage`). Con `features:write` un MANAGER
+  // —que no puede contratar ni cancelar— sí podía cambiar lo contratado (auditoría 21-sep, #9).
+  checkPermission('billing:subscriptions:manage'),
   venueFeatureController.updateSubscription,
 )
 
@@ -3612,6 +3618,14 @@ router.get(
   checkPermission('cfdi:view'),
   getCfdiStatusController,
 )
+// PDF/XML como ADJUNTO (Content-Disposition) para que el navegador lo descargue en vez de abrirlo.
+router.get(
+  '/venues/:venueId/cfdi/:cfdiId/file',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:view'),
+  (req, res) => downloadCfdiFileController(req, res),
+)
 router.post(
   '/venues/:venueId/cfdi/:cfdiId/cancel',
   authenticateTokenMiddleware,
@@ -3619,6 +3633,15 @@ router.post(
   checkFeatureAccess('CFDI'),
   checkPermission('cfdi:configure'), // destructive → OWNER/ADMIN only
   cancelCfdiController,
+)
+// Sustituir una factura equivocada (TipoRelacion 04 + cancelación motivo 01). No lleva body:
+// el documento corregido se reconstruye de la orden, con las mismas barreras que una emisión nueva.
+router.post(
+  '/venues/:venueId/cfdi/:cfdiId/replace',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:configure'), // emite un CFDI y cancela otro → OWNER/ADMIN
+  replaceCfdiController,
 )
 
 // ---- Facturación CFDI 4.0 — Nota de crédito (CFDI de EGRESO) por un reembolso ----
@@ -3688,6 +3711,14 @@ router.post(
   checkFeatureAccess('CFDI'),
   checkPermission('cfdi:configure'),
   uploadEmisorCsdController,
+)
+// Sube el logo del venue a la org del PAC (lo que imprime en el PDF de cada factura). Idempotente.
+router.post(
+  '/venues/:venueId/fiscal/emisores/:emisorId/logo',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:configure'),
+  syncEmisorLogoController,
 )
 // Read-only: onboarding status at the PAC (Carta Manifiesto pendiente, etc.)
 router.get(

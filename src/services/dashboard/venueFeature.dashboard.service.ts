@@ -6,11 +6,19 @@
 
 import Stripe from 'stripe'
 import logger from '../../config/logger'
-import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError, ServiceUnavailableError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
-import { getVenueBaseTier, PAID_PLAN_TIER_CODES, PREMIUM_ONLY_CODES, FREE_TIER_CODES } from '@/services/access/basePlan.service'
+import {
+  elPlanConcede,
+  getVenueBaseTier,
+  sueltasAbsorbidasPorElPlan,
+  type BaseTier,
+  PAID_PLAN_TIER_CODES,
+  PREMIUM_ONLY_CODES,
+  FREE_TIER_CODES,
+} from '@/services/access/basePlan.service'
 import { GRANDFATHER_SELECT, resolveGrandfathered } from '@/services/access/grandfather'
-import { cancelSubscription, createTrialSubscriptions } from '../stripe.service'
+import { cancelSubscription, createTrialSubscriptions, estadoDeLaSuscripcion, stripeAfirmaQueNoExiste } from '../stripe.service'
 import { logAction } from './activity-log.service'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
@@ -24,7 +32,160 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
  * @param paymentMethodId - Optional Stripe payment method ID to use for subscription
  * @returns Array of created VenueFeature records
  */
-export async function addFeaturesToVenue(venueId: string, featureCodes: string[], trialPeriodDays: number = 5, paymentMethodId?: string) {
+/** Una función suelta que el plan destino dejaría incluida — lo que habría que cancelar. */
+export interface SueltaAbsorbida {
+  venueFeatureId: string
+  code: string
+  name: string
+  monthlyPrice: number
+  /** null cuando la fila no tiene suscripción viva: se reporta igual, para no esconderla. */
+  stripeSubscriptionId: string | null
+}
+
+/**
+ * Qué funciones sueltas de ESTE negocio quedarían incluidas si se mudara a `tier`.
+ *
+ * 🔴 Decisión del founder (21-sep-2026), «como lo hace Claude»: la suelta absorbida se cancela y
+ * se acreditan los días no usados, en vez de cobrar las dos. Esta consulta es la fuente ÚNICA de
+ * esa lista: la cotización que el cliente ve y la cancelación que se ejecuta salen de aquí, así
+ * que la pantalla no puede prometer una cosa y el cobro hacer otra.
+ *
+ * Sólo LEE. No cancela, no cobra, no escribe. Devuelve CANDIDATAS: el estado real de cada una se
+ * verifica en Stripe antes de actuar.
+ *
+ * ⚠️ Lo que NO absorbe el plan se conserva intacto con su cobro — y ese caso importa: PRO no
+ * incluye inventario, así que cancelárselo a quien lo pagó aparte le quitaría acceso comprado.
+ */
+export async function sueltasQueAbsorbeElPlan(venueId: string, tier: BaseTier): Promise<SueltaAbsorbida[]> {
+  const ahora = new Date()
+  const vivas = await prisma.venueFeature.findMany({
+    // 🔴 Son CANDIDATAS, no veredictos. Entra toda fila que pueda estar COBRANDO —ligada a una
+    // suscripción de Stripe, aunque en local esté suspendida o vencida— más las que dan acceso hoy.
+    // «Suspendida en local» NO es «ya no cobra»: Stripe puede seguir en `past_due` reintentando, o
+    // haber renovado con el webhook pendiente (Codex, 21-sep). Descartarla dejaba el solape vivo y
+    // se cobraban las dos. Quien ejecute la absorción DEBE consultar el estado real en Stripe antes
+    // de cancelar o de calcular un crédito — y no acreditar periodos impagados.
+    where: {
+      venueId,
+      OR: [
+        { stripeSubscriptionId: { not: null } },
+        { active: true, suspendedAt: null, OR: [{ endDate: null }, { endDate: { gte: ahora } }] },
+      ],
+    },
+    // Acotada: un negocio tiene un puñado de funciones; el tope evita una lectura sin fin.
+    take: 100,
+    orderBy: { id: 'asc' },
+    select: {
+      id: true,
+      monthlyPrice: true,
+      stripeSubscriptionId: true,
+      feature: { select: { code: true, name: true } },
+    },
+  })
+
+  const absorbidos = new Set(
+    sueltasAbsorbidasPorElPlan(
+      tier,
+      vivas.map(v => v.feature.code),
+    ),
+  )
+
+  return vivas
+    .filter(v => absorbidos.has(v.feature.code))
+    .map(v => ({
+      venueFeatureId: v.id,
+      code: v.feature.code,
+      name: v.feature.name,
+      monthlyPrice: Number(v.monthlyPrice),
+      stripeSubscriptionId: v.stripeSubscriptionId ?? null,
+    }))
+}
+
+/**
+ * 🔴 No se vende suelto lo que el plan del negocio YA incluye (21-sep): un PRO pagaba $599 por lealtad,
+ * que su plan trae. Lo gratis para todos (CHATBOT) tampoco se vende, con o sin plan. El paywall no lo
+ * ofrece porque el acceso ya está concedido, pero la API lo cobraba igual. Todo o nada, y antes de
+ * tocar Stripe. Lo usan la compra suelta y el cambio suelta→suelta (Codex, ronda 5, P1-3).
+ */
+export async function assertNoIncluidaEnElPlan(venueId: string, featureCodes: string[]): Promise<void> {
+  const tier = await getVenueBaseTier(venueId)
+  const yaIncluidas = featureCodes.filter(code =>
+    tier ? elPlanConcede(tier, code) : (FREE_TIER_CODES as readonly string[]).includes(code),
+  )
+  if (yaIncluidas.length > 0) {
+    throw new ConflictError(`Tu plan ya incluye ${yaIncluidas.join(', ')}: no hace falta contratarlo aparte.`, 'FEATURE_INCLUDED_IN_PLAN', {
+      featureCodes: yaIncluidas,
+      tier: tier ?? 'FREE',
+    })
+  }
+}
+
+// La decisión de si la venta suelta está abierta vive en su propio módulo (la consulta también Stripe).
+export { ventaSueltaAbierta } from '@/services/access/ventaSuelta'
+
+/** Estados de Stripe en los que una suscripción YA no puede volver a cobrar. */
+const SUSCRIPCION_SIN_COBRO: ReadonlySet<string> = new Set(['canceled', 'incomplete_expired'])
+
+/**
+ * 🔴 PARCHE INICIAL del hallazgo #1 (21-sep-2026): no se sube a `tier` mientras una función suelta
+ * que ese plan INCLUYE siga cobrando en Stripe — el negocio pagaría las dos.
+ *
+ * La solución decidida por el founder («como lo hace Claude»: cancelar la suelta, acreditar los días
+ * no usados y cobrar sólo la diferencia) exige medir en Stripe de prueba cómo sale ese crédito y
+ * auditarlo antes de mover dinero. Mientras tanto se bloquea el cambio y se dice cuál es y qué hacer.
+ *
+ * Estado de cada candidata consultado en Stripe, nunca deducido de la fila: «suspendida en local» no
+ * es «ya no cobra». Si Stripe no contesta, 503 y no se sube a ciegas.
+ */
+export async function assertSinCobroDobleAlSubir(venueId: string, tier: BaseTier): Promise<void> {
+  const candidatas = await sueltasQueAbsorbeElPlan(venueId, tier)
+  const cobrando: SueltaAbsorbida[] = []
+  for (const suelta of candidatas) {
+    if (!suelta.stripeSubscriptionId) continue // concedida sin Stripe: no cobra
+    let estado: string
+    try {
+      estado = await estadoDeLaSuscripcion(suelta.stripeSubscriptionId)
+    } catch (error) {
+      if (stripeAfirmaQueNoExiste(error)) continue
+      throw new ServiceUnavailableError(
+        'No pudimos confirmar tus funciones contratadas. Inténtalo de nuevo en unos minutos.',
+        'PLAN_OVERLAP_UNVERIFIED',
+      )
+    }
+    if (!SUSCRIPCION_SIN_COBRO.has(estado)) cobrando.push(suelta)
+  }
+  if (cobrando.length === 0) return
+
+  const nombres = cobrando.map(s => s.name).join(', ')
+  throw new ConflictError(
+    `Ya pagas ${nombres} por separado y el plan lo incluye. Para no cobrarte dos veces, escríbenos a hola@avoqado.io y te hacemos el cambio con el ajuste de lo ya pagado.`,
+    'PLAN_ABSORBS_ALA_CARTE',
+    { features: cobrando.map(s => ({ code: s.code, name: s.name })) },
+  )
+}
+
+/**
+ * 🔴 Los días de prueba de una compra suelta los decide el SERVIDOR, nunca quien compra.
+ * Antes venían en el body (`trialPeriodDays`, 0..365 en el schema), así que cualquiera con
+ * permiso de compra podía regalarse un año (auditoría del 21-sep-2026, hallazgo #8). El schema
+ * sigue aceptando el campo para no romper clientes viejos, pero su valor se IGNORA.
+ */
+const TRIAL_ALA_CARTE_DIAS = 5
+
+export async function addFeaturesToVenue(venueId: string, featureCodes: string[], paymentMethodId?: string) {
+  // 🔴 Un PLAN no se contrata por la puerta de las funciones sueltas. Los planes son filas de la
+  // MISMA tabla `Feature` (`PLAN_PRO`, `PLAN_PREMIUM`), así que sin este corte esta ruta permitía
+  // contratar un segundo plan saltándose el guard del checkout —que sí rechaza un plan activo— y
+  // dejaba a `cancelPlan()` eligiendo con un `findFirst()` cuál de los dos cancelar (hallazgo #3).
+  // Se comprueba ANTES de tocar la base o Stripe: nada de la petición debe ejecutarse a medias.
+  const planesPedidos = featureCodes.filter(code => (PAID_PLAN_TIER_CODES as readonly string[]).includes(code))
+  if (planesPedidos.length > 0) {
+    throw new BadRequestError(`Los planes (${planesPedidos.join(', ')}) se contratan desde el flujo de plan, no como función suelta.`)
+  }
+
+  await assertNoIncluidaEnElPlan(venueId, featureCodes)
+
+  const trialPeriodDays = TRIAL_ALA_CARTE_DIAS
   logger.info('Adding features to venue', { venueId, featureCodes, trialPeriodDays, paymentMethodId })
 
   // Get venue with Stripe customer ID
@@ -233,16 +394,58 @@ export async function removeFeatureFromVenue(venueId: string, featureId: string)
         featureId,
         subscriptionId: venueFeature.stripeSubscriptionId,
       })
-      // Continue with deactivation even if Stripe cancellation fails
-      // Admin can manually cancel in Stripe dashboard
+      // 🔴 Antes se seguía SIEMPRE («admin can manually cancel in Stripe dashboard») y el
+      // controlador respondía «canceled successfully»: el cliente perdía el acceso y seguía
+      // pagando, sin que nadie se enterara (auditoría 21-sep, #6). Ahora sólo se sigue cuando
+      // Stripe AFIRMA que esa suscripción ya no existe —ahí cancelar es un no-op y desactivar
+      // es lo correcto—. Cualquier otro fallo (red, Stripe caído, respuesta ambigua) detiene la
+      // baja: es preferible que el cliente conserve el acceso que paga a dejarlo pagando sin él.
+      if (!stripeAfirmaQueNoExiste(error)) {
+        // Un error NO prueba que la cancelación falló: Stripe pudo cancelar y perderse la
+        // respuesta, o pudo fallar la escritura local que `cancelSubscription` hace DESPUÉS de
+        // cancelar. Rendirse ahí deja una baja imposible —Stripe ya no cobra y la base insiste en
+        // que sigue activa— (Codex, 21-sep). Se pregunta el estado real antes de decidir.
+        let estado: string | null = null
+        try {
+          estado = await estadoDeLaSuscripcion(venueFeature.stripeSubscriptionId)
+        } catch {
+          estado = null // tampoco se pudo consultar: se trata como incierto
+        }
+        if (estado !== 'canceled' && estado !== 'incomplete_expired') {
+          // 503, no 400: el fallo es de Stripe, no de lo que mandó el cliente.
+          throw new ServiceUnavailableError(
+            'No pudimos confirmar la cancelación con Stripe, así que la función sigue activa. Inténtalo de nuevo en unos minutos.',
+            'SUBSCRIPTION_CANCEL_PENDING',
+          )
+        }
+        logger.warn('Stripe respondió con error pero la suscripción SÍ quedó cancelada: se completa la baja local', {
+          venueId,
+          featureId,
+          subscriptionId: venueFeature.stripeSubscriptionId,
+          estado,
+        })
+      }
     }
   }
 
-  // Deactivate VenueFeature record
-  await prisma.venueFeature.update({
-    where: { id: venueFeature.id },
+  // 🔴 R0 (Codex, 21-sep): se apaga SÓLO la fila que sigue ligada a lo que se canceló. Por `id` a secas,
+  // una recompra ligada entre la cancelación y esta escritura se quedaba sin el acceso recién pagado.
+  const { count } = await prisma.venueFeature.updateMany({
+    where: { id: venueFeature.id, stripeSubscriptionId: venueFeature.stripeSubscriptionId },
     data: { active: false },
   })
+  if (count === 0) {
+    logger.warn('🚨 El vínculo de la función cambió mientras se daba de baja (¿recompra?): no se toca la fila', {
+      venueId,
+      venueFeatureId: venueFeature.id,
+      canceledSubscriptionId: venueFeature.stripeSubscriptionId,
+    })
+    // Ni auditoría ni «baja hecha» de algo que no ocurrió (Codex, ronda 3): la función sigue contratada.
+    throw new ConflictError(
+      'Esta función se volvió a contratar mientras se daba de baja. La suscripción anterior sí se canceló; la actual sigue activa.',
+      'SUBSCRIPTION_LINK_CHANGED',
+    )
+  }
 
   logAction({
     venueId,

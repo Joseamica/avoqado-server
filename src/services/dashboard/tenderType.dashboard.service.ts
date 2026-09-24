@@ -503,9 +503,14 @@ export interface TenderCommissionsReport {
  * se suma.
  *
  * Cuenta TODO cobro completado que no sea reembolso — incluida la **venta rápida** (`FAST`),
- * que es donde el mostrador más usa estos tipos. Los reembolsos quedan fuera porque hoy NO
- * heredan comisión a propósito (no sabemos si la plataforma la devuelve al cancelar), así que
- * restarlos inventaría un ahorro que quizá no ocurrió.
+ * que es donde el mostrador más usa estos tipos. Un reembolso MANUAL queda fuera porque NO
+ * hereda comisión a propósito (no sabemos si la plataforma la devuelve al cancelar), así que
+ * restarlo inventaría un ahorro que quizá no ocurrió.
+ *
+ * La excepción es la compensación del PROVEEDOR de reparto (`processorData.provenance =
+ * 'PROVIDER_ADJUSTMENT'`, spec KDS Uber [N-9]): ahí el proveedor SÍ devolvió su comisión
+ * proporcional, y la fila la lleva en negativo — suma con signo a venta y comisión. El conteo
+ * sigue siendo de COBROS: una compensación no es un cobro.
  */
 export async function getTenderCommissionsReport(
   venueId: string,
@@ -516,21 +521,26 @@ export async function getTenderCommissionsReport(
   // secas daría jul-31 18:00 en México y el reporte arrancaría un día antes.
   const { from, to } = parseDbDateRange(filters.from, filters.to, venue?.timezone, 30)
 
+  const base = { venueId, tenderTypeId: { not: null }, status: 'COMPLETED' as const, createdAt: { gte: from, lte: to } }
+  // 🔴 `{ not: 'REFUND' }`, NO `'REGULAR'`: la venta rápida del mostrador se guarda como
+  // `FAST`, y es justo donde más se usan los tipos propios. Filtrar por REGULAR mostraba
+  // CERO en el caso más común (encontrado validando contra datos reales, no con mocks).
+  const cobros = { type: { not: 'REFUND' as const } }
+  const conteos = await prisma.payment.groupBy({
+    by: ['tenderTypeId', 'tenderLabel'],
+    where: { ...base, ...cobros },
+    _count: { _all: true },
+  })
   const grouped = await prisma.payment.groupBy({
     by: ['tenderTypeId', 'tenderLabel'],
     where: {
-      venueId,
-      tenderTypeId: { not: null },
-      status: 'COMPLETED',
-      // 🔴 `{ not: 'REFUND' }`, NO `'REGULAR'`: la venta rápida del mostrador se guarda como
-      // `FAST`, y es justo donde más se usan los tipos propios. Filtrar por REGULAR mostraba
-      // CERO en el caso más común (encontrado validando contra datos reales, no con mocks).
-      type: { not: 'REFUND' },
-      createdAt: { gte: from, lte: to },
+      ...base,
+      OR: [cobros, { type: 'REFUND', processorData: { path: ['provenance'], equals: 'PROVIDER_ADJUSTMENT' } }],
     },
     _sum: { tenderCommissionAmount: true, amount: true, tipAmount: true },
-    _count: { _all: true },
   })
+  const llave = (g: { tenderTypeId: string | null; tenderLabel: string | null }) => `${g.tenderTypeId}|${g.tenderLabel}`
+  const cobrosPorTipo = new Map(conteos.map(c => [llave(c), c._count._all]))
 
   const rows: TenderCommissionRow[] = grouped.map(g => {
     const commission = Number(g._sum.tenderCommissionAmount ?? 0)
@@ -538,7 +548,7 @@ export async function getTenderCommissionsReport(
     return {
       tenderTypeId: g.tenderTypeId as string,
       tenderLabel: g.tenderLabel ?? 'Sin nombre',
-      count: g._count._all,
+      count: cobrosPorTipo.get(llave(g)) ?? 0,
       gross,
       commission,
       net: Number((gross - commission).toFixed(2)),

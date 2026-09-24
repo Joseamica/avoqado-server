@@ -24,26 +24,49 @@ import { Prisma, TerminalPaymentRequestStatus } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { normalizeTerminalId } from '../../communication/sockets/terminal-registry'
+import { PATRON_SQL_TRIM_COMO_JS } from '../../utils/terminalSerial'
+import { ANGELPAY_WEBHOOK_ERROR_REASONS } from './angelpay-webhook.service'
 import { evaluatePermissionList, hasPermission } from '../../lib/permissions'
 import { PIN_REGEX } from '../../schemas/common/pin.schema'
 import { candadoDeIntento, llaveDeIntento, OPCIONES_DE_TRANSACCION_DEL_INTENTO } from './candadoDeIntento'
-import { estadoBancarioSql } from './estadoBancario'
-import { sinEvidenciaPositivaSql } from './evidenciaPositivaSql'
-import { PATRON_SQL_TRIM_COMO_JS } from '../../utils/terminalSerial'
+import {
+  eventosQueVetanSql,
+  hayDineroConEstaLlaveSql,
+  sinDineroConEstaLlaveSql,
+  sinEventoQueVetaSql,
+  sinEvidenciaPositivaSql,
+} from './evidenciaPositivaSql'
 
 export const NO_INSTRUMENT_PERMISSION = 'payments:resolve-no-instrument'
+
+/**
+ * 🔴 Ronda 20 (founder, 23-sep: «no debería trabarse nunca y todo es por webhook»): la TERMINAL declara que el banco no dejó
+ * rastro de un Pago rápido tras esperar su aviso. No es la palabra de una persona —no pide permiso ni PIN—, así que la
+ * sostiene el SERVIDOR: sólo se acepta donde el aviso del banco está comprobado ([avisoDelBancoComprobado]) y con el MISMO
+ * veto de dinero que la declaración del cajero. Un intento vinculado a una solicitud del POS no la admite: ése lo libera la
+ * ventana de confirmación del propio servidor.
+ */
+const NO_BANK_TRACE = 'NO_BANK_TRACE_AFTER_WINDOW' as const
 
 /** Estricto: la identidad NUNCA viene en el cuerpo (un `staffId`/`role` extra es un 409, no un dato). */
 const schema = z
   .object({
-    requestId: z.string().min(1),
+    // 🔴 OPCIONAL desde el 22-sep («ninguna terminal muerta»): un **Pago rápido** —cobro iniciado EN la terminal— no tiene
+    // solicitud del POS, y exigirla dejaba al cajero sin salida con el aparato entero apartado. Ausente ⇒ camino LOCAL.
+    // Los APK de la calle siguen mandándola y no cambian de comportamiento.
+    requestId: z.string().min(1).optional(),
     resolutionId: z.string().uuid(),
-    statement: z.literal('NO_INSTRUMENT_PRESENTED'),
+    // Dos testimonios posibles (ronda 20, founder 23-sep): el del CAJERO («no se presentó tarjeta») y el de la TERMINAL
+    // («sin rastro del banco tras la ventana»), que sólo vale en un Pago rápido y donde el aviso del banco está comprobado.
+    statement: z.enum(['NO_INSTRUMENT_PRESENTED', NO_BANK_TRACE]),
     statementVersion: z.literal(1),
     // La MISMA regla de PIN del resto del repo (4-10 dígitos): un PIN legítimo de 9 dígitos no puede rebotar como cuerpo inválido.
     // `nullish`, no `optional`: el DTO de la terminal es `String?` y un serializador con nulls mandaría `"supervisorPin": null` en
     // TODA declaración — leído como inválido sería un 409 en cada una (la lección de `vieneAusente()` en los reembolsos, 11-12 sep).
     supervisorPin: z.string().regex(PIN_REGEX).nullish(),
+    // Ronda 21 (Codex r19 P1-3): el comercio con el que se hizo ESE cobro. La automática lo exige —se mide el aviso de ese
+    // comercio, no el de lo que la terminal tenga asignado hoy—; la del cajero no lo usa.
+    merchantAccountId: z.string().min(1).optional(),
   })
   .strict()
 
@@ -57,27 +80,34 @@ export class NoInstrumentResolutionError extends Error {
         ? 'Se requiere el código de alguien con permiso para confirmar que no se presentó tarjeta.'
         : code === 'SESSION_NOT_IN_VENUE'
           ? 'La sesión de esta terminal no pertenece a este negocio. Vuelve a iniciar sesión.'
-          : 'No se pudo cerrar este intento. Conserva el cobro pendiente y consulta su resultado.',
+          : code === 'WEBHOOK_NOT_CONFIRMED'
+            ? 'Este comercio no tiene comprobado el aviso del banco: confirma tú si el cliente presentó tarjeta.'
+            : 'No se pudo cerrar este intento. Conserva el cobro pendiente y consulta su resultado.',
     )
   }
 }
 
 export type OperatorResolution = {
   id: string
-  kind: 'NO_INSTRUMENT_PRESENTED'
+  kind: 'NO_INSTRUMENT_PRESENTED' | typeof NO_BANK_TRACE
   acceptedAt: string
   bodyHash: string
   staffId: string
   staffVenueId: string
-  by: 'SESSION' | 'SUPERVISOR_PIN'
+  /** `AUTOMATIC` = la terminal (ronda 20); `staffId` es entonces la SESIÓN que la operaba, no un autorizante. */
+  by: 'SESSION' | 'SUPERVISOR_PIN' | 'AUTOMATIC'
   statementVersion: number
-  previousRequest: { status: string; failureCode: string | null }
+  /**
+   * El estado de la solicitud ANTES de declarar. Ausente en el camino LOCAL (22-sep): un Pago rápido no tiene solicitud,
+   * así que no hay estado previo que congelar — inventarle uno sería escribir un dato falso en un testimonio.
+   */
+  previousRequest?: { status: string; failureCode: string | null }
 }
 
 export function readOperatorResolution(value: unknown): OperatorResolution | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const r = value as OperatorResolution
-  return r.kind === 'NO_INSTRUMENT_PRESENTED' && typeof r.id === 'string' ? r : null
+  return (r.kind === 'NO_INSTRUMENT_PRESENTED' || r.kind === NO_BANK_TRACE) && typeof r.id === 'string' ? r : null
 }
 
 /**
@@ -114,16 +144,37 @@ async function miembroDelVenue(
  * contradicción de vínculo, con un serial de terminal que no es éste, o APROBADO por el banco (aunque no exista Payment).
  * Consulta acotada al intento exacto. Misma clasificación bancaria que el receptor (`estadoBancarioSql`).
  */
-async function evidenciaQueVetaLaDeclaracion(tx: Prisma.TransactionClient, attemptId: string, venueId: string, terminalId: string) {
-  return tx.$queryRaw<{ id: string }[]>`
-    SELECT e."id" FROM "ProviderEventLog" e
-    WHERE e."attemptId" = ${attemptId} AND e."provider" = 'PAYMENT_PROCESSOR'
-      AND (e."venueId" IS DISTINCT FROM ${venueId}
-        OR e."errorReason" IN ('LINK_TERMINAL_MISMATCH', 'LINK_VENUE_MISMATCH')
-        OR (nullif(regexp_replace(coalesce(e."payload"->'payload'->>'terminalSerial', ''), ${PATRON_SQL_TRIM_COMO_JS}, '', 'g'), '') IS NOT NULL
-          AND lower(regexp_replace(regexp_replace(e."payload"->'payload'->>'terminalSerial', ${PATRON_SQL_TRIM_COMO_JS}, '', 'g'), '^AVQD-', '', 'i')) <> ${terminalId})
-        OR ${estadoBancarioSql(Prisma.sql`coalesce(e."payload"->'payload'->'status', e."payload"->'status')`)} = 'APROBADO')
-    LIMIT 1`
+async function evidenciaQueVetaLaDeclaracion(
+  tx: Prisma.TransactionClient,
+  attemptId: string,
+  venueId: string,
+  terminalId: string,
+  hayVinculo = false,
+) {
+  // 🔴 Codex r7 (P1-3): el TEXTO de la regla vive en `evidenciaPositivaSql` y es el MISMO que entra en el `WHERE` del CAS con
+  // solicitud (`sinEventoQueVetaSql`). Tenerlo aquí en SQL suelto dejaba a la escritura revalidando MENOS que la lectura.
+  return tx.$queryRaw<{ id: string }[]>`${eventosQueVetanSql(attemptId, venueId, terminalId, hayVinculo)}`
+}
+
+/**
+ * ¿Existe un `Payment` con la llave de ESTE intento, en CUALQUIER negocio, recortada con la MISMA regla que la llave
+ * canónica? (Codex P1-1 y r4-2.) Sólo devuelve si existe: nada del pago ajeno sale de aquí.
+ *
+ * 🔴 `btrim` NO equivale a `String.trim()`: sólo quita el espacio ASCII, mientras `llaveDeIntento` —que es quien define
+ * la llave canónica— quita además tabulador, salto de línea, NBSP y los separadores Unicode. Un Payment guardado con
+ * `"\tA\n"` (el esquema del registro lo admite y se almacena sin recortar) se escapaba de las dos capas del veto y
+ * dejaba declarar «no se cobró» con el dinero ya registrado. La regla correcta ya estaba escrita en este repo —
+ * `PATRON_SQL_TRIM_COMO_JS`, que usa el serial de la terminal por exactamente el mismo motivo— y es la que se usa aquí.
+ *
+ * La igualdad exacta va primero en el OR: es la que puede aprovechar el índice cuando la llave está limpia, que es el
+ * caso normal. ⬜ Declarado: con llave sucia el predicado funcional no usa índice; el coste no está medido con volumen
+ * representativo, y la corrección de raíz es normalizar también al ESCRIBIR (`recordFastPayment`), que es otro carril.
+ */
+async function hayDineroConEstaLlave(tx: Prisma.TransactionClient, attemptId: string): Promise<boolean> {
+  // 🔴 Codex r6 (P1-1): el TEXTO de la regla vive en `evidenciaPositivaSql` y es el MISMO que entra en el `WHERE` de las dos
+  // escrituras. Tenerlo aquí en SQL suelto era la puerta por la que divergieron la comprobación previa y el CAS.
+  const [fila] = await tx.$queryRaw<{ hay: boolean }[]>`SELECT ${hayDineroConEstaLlaveSql(attemptId)} AS "hay"`
+  return fila?.hay === true
 }
 
 const SENALES_POSITIVAS_DEL_SOBRE = ['paymentId', 'authorizationCode', 'transactionId', 'reference', 'readMode'] as const
@@ -139,6 +190,114 @@ function afirmaCobro(claimedSuccess: unknown): boolean {
   return Object.values(claimedSuccess as Record<string, unknown>).some(v => v !== undefined && v !== null && v !== '' && v !== false)
 }
 
+/**
+ * AUTORIZACIÓN de la declaración, COMPARTIDA por el camino con solicitud y el local (22-sep). Extraída tal cual, sin
+ * cambiarle una regla: la persona de la SESIÓN (el PIN con el que entró a la terminal) tiene que ser miembro VÁLIDO de
+ * este venue — si no lo es, nadie la rescata con un PIN —; y si lo es pero no tiene el permiso, hace falta el PIN de
+ * otra persona que sí lo tenga. Duplicarla habría sido la forma más fácil de que los dos caminos divergieran.
+ */
+async function autorizarDeclaracion(
+  tx: Prisma.TransactionClient,
+  identity: { venueId: string; actorStaffId: string | null },
+  supervisorPin: string | undefined,
+): Promise<{ actor: { id: string; staffId: string }; by: OperatorResolution['by'] }> {
+  const sesion = identity.actorStaffId ? await miembroDelVenue(tx, identity.venueId, identity.actorStaffId) : null
+  if (!sesion) throw new NoInstrumentResolutionError('SESSION_NOT_IN_VENUE', 403)
+  if (sesion.permitido) return { actor: sesion, by: 'SESSION' }
+  if (!supervisorPin) throw new NoInstrumentResolutionError('SUPERVISOR_AUTHORIZATION_REQUIRED', 403)
+  const porPin = await tx.staffVenue.findFirst({
+    where: { venueId: identity.venueId, pin: supervisorPin, active: true, staff: { active: true } },
+    select: { staffId: true },
+  })
+  const supervisor = porPin ? await miembroDelVenue(tx, identity.venueId, porPin.staffId) : null
+  if (!supervisor?.permitido) throw new NoInstrumentResolutionError('SUPERVISOR_AUTHORIZATION_REQUIRED', 403)
+  return { actor: supervisor, by: 'SUPERVISOR_PIN' }
+}
+
+/**
+ * ¿El aviso del banco del COMERCIO de este cobro está COMPROBADO? Es lo único que vuelve evidencia el silencio (ronda 20).
+ * Medido en producción el 23-sep (7 días): de 812 cobros con tarjeta de Nexgo, 790 trajeron su aviso (p99 3.4 s, máximo 4.5 s),
+ * y los 22 sin aviso eran TODOS de un comercio cuyo webhook nunca se configuró.
+ *
+ * `null` ⇒ ese comercio no puede sostener la declaración (no existe, no es AngelPay, o su acceso es de otro negocio).
+ *
+ * La regla (ronda 21, Codex r19 P1-2): recibió avisos, y CADA UNO de sus últimos 10 cobros con tarjeta completados (no
+ * reembolsos, de hace más de 60 s: el aviso del más reciente puede ir en camino) tiene el suyo — ligado al pago, o al intento
+ * por la llave del cobro (recortada con la misma regla que la llave canónica, `PATRON_SQL_TRIM_COMO_JS`). La regla de la ronda 20 («ningún cobro posterior al último aviso») se dejaba engañar: un cobro sin
+ * aviso a menos de 60 s del último pasaba, y un aviso POSTERIOR de otra terminal del mismo comercio lo volvía a tapar.
+ * ⚠️ Declarado: un aviso que se rompe no se detecta hasta el primer cobro con tarjeta que se quede sin el suyo.
+ *
+ * 🔴 Ronda 22 (Codex r20, P1-2): un cobro cuenta para el comercio CON EL QUE COBRÓ la terminal, no sólo para el de la columna. El
+ * registrador deja `merchantAccountId` en null cuando la cuenta recibida está inactiva y no encuentra reemplazo, y conserva la
+ * identidad original en `processorData.merchantAccountIdFromApk` (`identidadDelCobro.ts`); contando sólo la columna, ese cobro
+ * SIN aviso desaparecía de la medición y el comercio seguía «comprobado». Por lo mismo, un comercio DESACTIVADO no sostiene el
+ * silencio. La búsqueda va acotada al negocio (índice `venueId, status, createdAt`).
+ */
+/**
+ * Ronda 23 (Codex r21, P1-3): motivos con que el receptor del webhook conserva un aviso que CONTRADICE su atribución (otro comercio
+ * receptor, otro negocio, otra terminal, importe distinto, colisión o segunda captura). Siguen siendo evidencia; no son el aviso
+ * propio del cobro al que quedaron ligados.
+ */
+const MOTIVOS_QUE_NO_SON_EL_AVISO_PROPIO = [
+  ANGELPAY_WEBHOOK_ERROR_REASONS.MERCHANT_MISMATCH,
+  ANGELPAY_WEBHOOK_ERROR_REASONS.LINK_VENUE_MISMATCH,
+  ANGELPAY_WEBHOOK_ERROR_REASONS.LINK_TERMINAL_MISMATCH,
+  ANGELPAY_WEBHOOK_ERROR_REASONS.AMOUNT_MISMATCH,
+  ANGELPAY_WEBHOOK_ERROR_REASONS.POSSIBLE_REFERENCE_COLLISION,
+  ANGELPAY_WEBHOOK_ERROR_REASONS.POSSIBLE_SECOND_CAPTURE,
+]
+
+async function avisoDelBancoComprobado(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  merchantAccountId: string,
+): Promise<boolean | null> {
+  const [comercio] = await tx.$queryRaw<{ comprobado: boolean }[]>`
+    SELECT (m."active" AND m."angelpayWebhookLastReceivedAt" IS NOT NULL AND NOT EXISTS (
+              SELECT 1 FROM (
+                SELECT p."id", p."idempotencyKey" FROM "Payment" p
+                WHERE p."venueId" = ${venueId}
+                  AND COALESCE(NULLIF(p."processorData"->>'merchantAccountIdFromApk', ''), p."merchantAccountId") = m."id"
+                  AND p."method" IN ('CREDIT_CARD', 'DEBIT_CARD') AND p."status" = 'COMPLETED'
+                  AND (p."type" IS NULL OR p."type" <> 'REFUND')
+                  AND p."createdAt" < (NOW() AT TIME ZONE 'UTC') - interval '60 seconds'
+                ORDER BY p."createdAt" DESC
+                LIMIT 10) ultimos
+              WHERE NOT EXISTS (
+                SELECT 1 FROM "ProviderEventLog" e
+                WHERE e."provider" = 'PAYMENT_PROCESSOR'
+                  AND (e."paymentId" = ultimos."id"
+                       OR (ultimos."idempotencyKey" IS NOT NULL AND e."attemptId" = regexp_replace(ultimos."idempotencyKey", ${PATRON_SQL_TRIM_COMO_JS}, '', 'g')))
+                  -- 🔴 Ronda 23 (Codex r21, P1-3): sólo el aviso PROPIO. El receptor liga por referencia avisos de OTRO intento o
+                  -- recibidos por OTRO comercio (y los conserva como evidencia, con su motivo); eso no prueba que llegó el de éste.
+                  AND (e."attemptId" IS NULL
+                       OR (ultimos."idempotencyKey" IS NOT NULL AND e."attemptId" = regexp_replace(ultimos."idempotencyKey", ${PATRON_SQL_TRIM_COMO_JS}, '', 'g')))
+                  AND (e."errorReason" IS NULL OR e."errorReason" NOT IN (${Prisma.join(MOTIVOS_QUE_NO_SON_EL_AVISO_PROPIO)}))
+                  -- 🔴 Ronda 24 (Codex r22, P1-1): y lo RECIBIÓ este comercio (el receptor lo estampa en cada evento desde julio).
+                  -- Excluir motivos no alcanzaba: un aviso de M2 con la llave de M1 cuenta ANTES de clasificarse (PENDING, sin
+                  -- motivo), y el backfill lo liga sin MERCHANT_MISMATCH cuando la columna del pago quedó vacía.
+                  AND e."payload"->'_avoqado'->>'receivedByMerchantAccountId' = m."id"))) AS "comprobado"
+    FROM "MerchantAccount" m
+    JOIN "PaymentProvider" pp ON pp."id" = m."providerId" AND pp."code" = 'ANGELPAY'
+    JOIN "AngelPayUserAccount" a ON a."id" = m."angelpayUserAccountId" AND a."venueId" = ${venueId}
+    WHERE m."id" = ${merchantAccountId}`
+  return comercio ? comercio.comprobado : null
+}
+
+/**
+ * Quién responde por la declaración AUTOMÁTICA: la sesión con la que se operaba la terminal. No se le pide el permiso de
+ * declarar —no es su palabra—, pero tiene que ser miembro activo del negocio: una terminal cuya sesión ya no pertenece al
+ * negocio no se libera sola.
+ */
+async function actorDeLaTerminal(
+  tx: Prisma.TransactionClient,
+  identity: { venueId: string; actorStaffId: string | null },
+): Promise<{ actor: { id: string; staffId: string }; by: OperatorResolution['by'] }> {
+  const sesion = identity.actorStaffId ? await miembroDelVenue(tx, identity.venueId, identity.actorStaffId) : null
+  if (!sesion) throw new NoInstrumentResolutionError('SESSION_NOT_IN_VENUE', 403)
+  return { actor: sesion, by: 'AUTOMATIC' }
+}
+
 export async function resolveNoInstrument(
   identity: { venueId: string; terminalSerial: string; attemptId: string; actorStaffId: string | null },
   raw: unknown,
@@ -147,6 +306,11 @@ export async function resolveNoInstrument(
   if (!parsed.success) throw new NoInstrumentResolutionError('ATTEMPT_NOT_ELIGIBLE')
   const { supervisorPin: pinCrudo, ...declaration } = parsed.data
   const supervisorPin = pinCrudo ?? undefined // JSON `null` = ausente
+  const automatica = declaration.statement === NO_BANK_TRACE
+  // La automática no la firma ninguna persona: un PIN ahí es un cuerpo que no corresponde.
+  if (automatica && supervisorPin) throw new NoInstrumentResolutionError('ATTEMPT_NOT_ELIGIBLE')
+  // Sin el comercio del cobro no hay aviso que medir (ronda 21, Codex r19 P1-3).
+  if (automatica && !declaration.merchantAccountId) throw new NoInstrumentResolutionError('ATTEMPT_NOT_ELIGIBLE')
   const bodyHash = createHash('sha256').update(JSON.stringify(declaration)).digest('hex')
   const terminalId = normalizeTerminalId(identity.terminalSerial)
   // La MISMA normalización de la llave que el registrador y la publicación del vínculo (recortada, ≤ 64): el candado, la lectura
@@ -158,8 +322,138 @@ export async function resolveNoInstrument(
   const resolution = await prisma.$transaction(async tx => {
     // MISMO orden de candados que el registrador y la referencia de Codex: intento → orden → solicitud.
     await candadoDeIntento(tx, attemptId)
+
+    // 🔴 Codex P1-4 (22-sep): el CAMINO lo decide la BASE, NUNCA el cuerpo. Antes bastaba omitir `requestId` para entrar
+    // al camino local —dos vetos— sobre un intento VINCULADO, que debe pasar por las diez guardas de su solicitud; y eso
+    // además dejaba DOS testimonios del mismo intento, uno en cada tabla (los índices únicos, al ser de tablas distintas,
+    // no lo impiden). La pertenencia se lee bajo el candado que ya se tomó, y un `requestId` del cuerpo que CONTRADIGA al
+    // vínculo es un intento que no existe para esa solicitud. Es la misma regla que ya rige la identidad en este archivo:
+    // lo que decide nunca viene del cliente.
+    const vinculo = await tx.terminalPaymentAttemptLink.findUnique({ where: { attemptId }, select: { requestId: true } })
+    if (declaration.requestId && vinculo && declaration.requestId !== vinculo.requestId)
+      throw new NoInstrumentResolutionError('ATTEMPT_NOT_FOUND', 404)
+    const requestId = vinculo?.requestId ?? declaration.requestId ?? null
+    // Ronda 20: con solicitud del POS, la liberación sin evidencia es de la VENTANA del servidor, no de la terminal.
+    if (automatica && requestId) throw new NoInstrumentResolutionError('ATTEMPT_NOT_ELIGIBLE')
+
+    // 🔴 Codex r4-1 (22-sep): el arreglo anterior cerró el vínculo PREEXISTENTE, pero no el que aparece DESPUÉS de una
+    // declaración local — secuencia perfectamente serial: se declara sin vínculo, el POS manda su cobro, se vincula ese
+    // mismo intento, y una segunda declaración entraba por el camino con solicitud y escribía OTRO testimonio en la otra
+    // tabla. Dos testimonios del mismo intento, que los índices únicos no pueden impedir por estar en tablas distintas.
+    // La regla es la del testimonio, no la del camino: **un intento se declara UNA vez**. Si ya hay uno local, ése manda
+    // —se replica si es el mismo cuerpo, se rechaza si es otro— y no se abre un segundo.
+    const declaracionLocalPrevia = requestId ? await tx.terminalAttemptResolution.findUnique({ where: { attemptId } }) : null
+    if (declaracionLocalPrevia) {
+      if (declaracionLocalPrevia.venueId !== identity.venueId || normalizeTerminalId(declaracionLocalPrevia.terminalId) !== terminalId)
+        throw new NoInstrumentResolutionError('ATTEMPT_NOT_FOUND', 404)
+      const existenteLocal = readOperatorResolution(declaracionLocalPrevia.resolution)
+      if (!existenteLocal || existenteLocal.id !== declaration.resolutionId || existenteLocal.bodyHash !== bodyHash)
+        throw new NoInstrumentResolutionError('RESOLUTION_CONFLICT')
+      return { resolution: existenteLocal, requestId: null }
+    }
+
+    // ─── Camino LOCAL (22-sep, «ninguna terminal muerta»): un Pago rápido, sin solicitud del POS ───
+    // No hay fila que cerrar, orden que bloquear ni POS que despertar; el testimonio vive en su propia tabla. Lo que SÍ se
+    // conserva, porque es lo que protege el dinero: la MISMA autorización (sesión o PIN de supervisor) y el MISMO veto por
+    // evidencia. De las cuatro identidades que vetan con solicitud, aquí sobrevive la única que existe —el Payment con la
+    // llave del intento— y juntas son TODA la evidencia que el servidor tiene de un cobro local.
+    if (!requestId) {
+      const yaDeclarado = await tx.terminalAttemptResolution.findUnique({ where: { attemptId } })
+      if (yaDeclarado) {
+        // 🔴 Codex P2-5: la lectura es por `attemptId` (único global), así que ANTES de responder hay que comprobar que
+        // ese testimonio es de ESTA terminal y de ESTE negocio. Sin esto, quien conociera el intento, el `resolutionId`
+        // y el cuerpo recibía como respuesta la declaración de otra terminal — la misma pertenencia que el camino con
+        // solicitud exige a su vínculo.
+        if (yaDeclarado.venueId !== identity.venueId || normalizeTerminalId(yaDeclarado.terminalId) !== terminalId)
+          throw new NoInstrumentResolutionError('ATTEMPT_NOT_FOUND', 404)
+        const existente = readOperatorResolution(yaDeclarado.resolution)
+        // Replay idempotente sólo si es LA MISMA declaración; otra es un conflicto, nunca un segundo testimonio.
+        if (!existente || existente.id !== declaration.resolutionId || existente.bodyHash !== bodyHash)
+          throw new NoInstrumentResolutionError('RESOLUTION_CONFLICT')
+        return { resolution: existente, requestId: null }
+      }
+
+      const actorLocal = automatica ? await actorDeLaTerminal(tx, identity) : await autorizarDeclaracion(tx, identity, supervisorPin)
+
+      // 🔴 Codex P1-1: el veto por dinero es GLOBAL y tolerante a la llave sin recortar. Dos huecos medidos: un
+      // `Payment` cuya `idempotencyKey` se guardó CON espacios (el registro de la terminal los admite) no casaba con la
+      // llave normalizada; y un `Payment` de OTRO negocio quedaba oculto por el filtro de venue, cuando el camino con
+      // solicitud sí lo ve —busca la llave globalmente— y lo trata como contradicción. El local no puede ser más débil:
+      // dinero con esta llave, esté donde esté, prohíbe declarar. No se devuelve ningún dato de ese pago ajeno.
+      // (Coste: `btrim` no usa el índice, pero esta consulta corre una vez por declaración —un caso raro— y no en el
+      // camino de una venta.)
+      if (await hayDineroConEstaLlave(tx, attemptId)) throw new NoInstrumentResolutionError('POSITIVE_EVIDENCE_EXISTS')
+      if ((await evidenciaQueVetaLaDeclaracion(tx, attemptId, identity.venueId, terminalId)).length)
+        throw new NoInstrumentResolutionError('POSITIVE_EVIDENCE_EXISTS')
+      // Ronda 20: DESPUÉS del dinero, a propósito — si hay dinero, la terminal tiene que decir «hay evidencia de cobro», no
+      // ofrecerle al cajero un botón que el servidor le rechazaría.
+      if (automatica) {
+        const comprobado = await avisoDelBancoComprobado(tx, identity.venueId, declaration.merchantAccountId!)
+        if (comprobado === null) throw new NoInstrumentResolutionError('ATTEMPT_NOT_ELIGIBLE')
+        if (!comprobado) throw new NoInstrumentResolutionError('WEBHOOK_NOT_CONFIRMED')
+      }
+
+      const savedLocal: OperatorResolution = {
+        id: declaration.resolutionId,
+        kind: declaration.statement,
+        acceptedAt: new Date().toISOString(),
+        bodyHash,
+        staffId: actorLocal.actor.staffId,
+        staffVenueId: actorLocal.actor.id,
+        by: actorLocal.by,
+        statementVersion: declaration.statementVersion,
+      }
+      // La INMUTABILIDAD la da el índice único sobre `attemptId`, no un trigger: una carrera pierde con P2002, que es
+      // «ya declarado» — se relee y se resuelve como replay o conflicto, nunca se sobrescribe un testimonio.
+      try {
+        await tx.terminalAttemptResolution.create({
+          data: {
+            attemptId,
+            venueId: identity.venueId,
+            terminalId,
+            resolution: savedLocal as unknown as Prisma.InputJsonValue,
+          },
+        })
+      } catch (e) {
+        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002')
+          throw new NoInstrumentResolutionError('RESOLUTION_CONFLICT')
+        throw e
+      }
+      // 🔴 Codex P1-2: el candado de intento es CONSULTIVO — serializa a quien toma la MISMA llave, pero no bloquea las
+      // escrituras en `Payment` ni en `ProviderEventLog`, y el fallback del webhook escribe sin tomarlo. Entre el veto y
+      // esta escritura cabía, por tanto, una aprobación del banco. Se revalida AQUÍ, ya escrito: un `throw` revierte la
+      // transacción entera y el testimonio no queda. Es el equivalente al CAS que revalida en el UPDATE del camino con
+      // solicitud. ⚠️ Residual declarado, idéntico al de aquel: algo que se confirme entre esta comprobación y el COMMIT
+      // no se ve; lo recoge después la contradicción que publica S6.
+      if (await hayDineroConEstaLlave(tx, attemptId)) throw new NoInstrumentResolutionError('POSITIVE_EVIDENCE_EXISTS')
+      if ((await evidenciaQueVetaLaDeclaracion(tx, attemptId, identity.venueId, terminalId)).length)
+        throw new NoInstrumentResolutionError('POSITIVE_EVIDENCE_EXISTS')
+      await tx.activityLog.create({
+        data: {
+          action: automatica ? 'TERMINAL_PAYMENT_AUTO_RELEASED_NO_BANK_TRACE' : 'TERMINAL_PAYMENT_NO_INSTRUMENT_RESOLVED',
+          entity: 'TerminalAttemptResolution',
+          entityId: attemptId,
+          venueId: identity.venueId,
+          staffId: actorLocal.actor.staffId,
+          // 🔴 Codex P2-6: con PIN de supervisor, `staffId` es el AUTORIZANTE; sin `sessionStaffId` se perdía quién
+          // operaba la terminal. El camino con solicitud ya lo conserva; aquí faltaba, y sin él el dueño no puede
+          // saber en qué caja ocurrió. También el `resolutionId`, para poder atar el asiento al testimonio.
+          data: {
+            attemptId,
+            terminalId,
+            by: actorLocal.by,
+            sinSolicitud: true,
+            sessionStaffId: identity.actorStaffId,
+            resolutionId: savedLocal.id,
+            ...(automatica ? { merchantAccountId: declaration.merchantAccountId } : {}),
+          },
+        },
+      })
+      return { resolution: savedLocal, requestId: null }
+    }
+
     const inicial = await tx.terminalPaymentRequest.findFirst({
-      where: { requestId: declaration.requestId, venueId: identity.venueId, terminalId },
+      where: { requestId: requestId, venueId: identity.venueId, terminalId },
     })
     if (!inicial) throw new NoInstrumentResolutionError('ATTEMPT_NOT_FOUND', 404)
     // El candado de la orden va acotado al venue y su resultado decide la pertenencia: una orden de OTRO venue no se bloquea ni se
@@ -169,15 +463,15 @@ export async function resolveNoInstrument(
           { id: string }[]
         >`SELECT "id" FROM "Order" WHERE "id" = ${inicial.orderId} AND "venueId" = ${identity.venueId} FOR UPDATE`
       : null
-    await tx.$queryRaw`SELECT "id" FROM "TerminalPaymentRequest" WHERE "requestId" = ${declaration.requestId} AND "venueId" = ${identity.venueId} FOR UPDATE`
+    await tx.$queryRaw`SELECT "id" FROM "TerminalPaymentRequest" WHERE "requestId" = ${requestId} AND "venueId" = ${identity.venueId} FOR UPDATE`
     const row = await tx.terminalPaymentRequest.findFirst({
-      where: { requestId: declaration.requestId, venueId: identity.venueId, terminalId },
+      where: { requestId: requestId, venueId: identity.venueId, terminalId },
     })
     const link = await tx.terminalPaymentAttemptLink.findUnique({ where: { attemptId } })
     if (
       !row ||
       !link ||
-      link.requestId !== declaration.requestId ||
+      link.requestId !== requestId ||
       link.venueId !== identity.venueId ||
       normalizeTerminalId(link.terminalId) !== terminalId
     )
@@ -189,30 +483,16 @@ export async function resolveNoInstrument(
     if (existing) {
       if (existing.id !== declaration.resolutionId || existing.bodyHash !== bodyHash)
         throw new NoInstrumentResolutionError('RESOLUTION_CONFLICT')
-      return existing // replay idempotente: nada se reescribe
+      return { resolution: existing, requestId } // replay idempotente: nada se reescribe
     }
 
     // AUTORIZACIÓN: la persona de la SESIÓN (el PIN con el que entró a la terminal) tiene que ser miembro VÁLIDO de este venue —
     // si no lo es, nadie la rescata con un PIN—; y si lo es pero no tiene el permiso, el PIN de otra persona que sí lo tenga.
-    const sesion = identity.actorStaffId ? await miembroDelVenue(tx, identity.venueId, identity.actorStaffId) : null
-    if (!sesion) throw new NoInstrumentResolutionError('SESSION_NOT_IN_VENUE', 403)
-    let actor: { id: string; staffId: string } = sesion
-    let by: OperatorResolution['by'] = 'SESSION'
-    if (!sesion.permitido) {
-      if (!supervisorPin) throw new NoInstrumentResolutionError('SUPERVISOR_AUTHORIZATION_REQUIRED', 403)
-      const porPin = await tx.staffVenue.findFirst({
-        where: { venueId: identity.venueId, pin: supervisorPin, active: true, staff: { active: true } },
-        select: { staffId: true },
-      })
-      const supervisor = porPin ? await miembroDelVenue(tx, identity.venueId, porPin.staffId) : null
-      if (!supervisor?.permitido) throw new NoInstrumentResolutionError('SUPERVISOR_AUTHORIZATION_REQUIRED', 403)
-      actor = supervisor
-      by = 'SUPERVISOR_PIN'
-    }
+    const { actor, by } = await autorizarDeclaracion(tx, identity, supervisorPin)
 
     // ELEGIBILIDAD (la de Codex, sin la valla): un solo intento por solicitud; sin Payment por ninguna de las tres identidades;
     // sin señal positiva en el sobre; sin evidencia bancaria/de procedencia que vete; desenlace no acreditado y no PENDING.
-    if ((await tx.terminalPaymentAttemptLink.count({ where: { requestId: declaration.requestId } })) !== 1)
+    if ((await tx.terminalPaymentAttemptLink.count({ where: { requestId: requestId } })) !== 1)
       throw new NoInstrumentResolutionError('OTHER_ATTEMPT_UNRESOLVED')
     // Codex r1 (P1-E): la CUARTA identidad es la legacy — la etiqueta `processorData.terminalPaymentRequestId` que deja la cola
     // vieja (sin puntero ni llave de intento); acotada al venue. Es la misma que retiene G1 en la ventana.
@@ -220,8 +500,8 @@ export async function resolveNoInstrument(
       where: {
         OR: [
           { idempotencyKey: attemptId },
-          { terminalPaymentRequestId: declaration.requestId },
-          { venueId: identity.venueId, processorData: { path: ['terminalPaymentRequestId'], equals: declaration.requestId } },
+          { terminalPaymentRequestId: requestId },
+          { venueId: identity.venueId, processorData: { path: ['terminalPaymentRequestId'], equals: requestId } },
           ...(row.paymentId ? [{ id: row.paymentId }] : []),
         ],
       },
@@ -236,11 +516,16 @@ export async function resolveNoInstrument(
       sobre.approved === true ||
       SENALES_POSITIVAS_DEL_SOBRE.some(f => typeof sobre[f] === 'string' && sobre[f] !== '') ||
       afirmaCobro(sobre.claimedSuccess)
+    // 🔴 Codex r5-1 (22-sep): la regla de dinero es UNA, y aquí faltaba. Este camino comparaba la llave EXACTA, así que
+    // un pago de ESTE intento guardado con espacios (o en otro negocio) se le escapaba —y entonces escribía
+    // `FAILED / OPERATOR_RECONCILED_NO_CHARGE`, que el POS lee como «no se cobró». `hayDineroConEstaLlave` es la MISMA
+    // función que usa el camino local: una sola definición de «¿existe dinero de este intento?» para los dos.
     if (
       positivo ||
       row.paymentId ||
       senalPositiva ||
-      (await evidenciaQueVetaLaDeclaracion(tx, attemptId, identity.venueId, terminalId)).length
+      (await hayDineroConEstaLlave(tx, attemptId)) ||
+      (await evidenciaQueVetaLaDeclaracion(tx, attemptId, identity.venueId, terminalId, true)).length
     )
       throw new NoInstrumentResolutionError('POSITIVE_EVIDENCE_EXISTS')
     const { desenlaceCanonico } = await import('../terminal-payment.service')
@@ -270,7 +555,7 @@ export async function resolveNoInstrument(
     // crudo no pasa por `@updatedAt`.
     const sobreDeclarado = {
       ...sobre,
-      requestId: declaration.requestId,
+      requestId: requestId,
       status: 'failed',
       outcomeEvidence: 'OPERATOR_RECONCILED',
       errorMessage: 'La terminal confirmó que no se presentó tarjeta. Se puede volver a cobrar.',
@@ -281,7 +566,9 @@ export async function resolveNoInstrument(
       SET "status" = 'FAILED', "failureCode" = 'OPERATOR_RECONCILED_NO_CHARGE', "cancelDisposition" = NULL,
           "resultJson" = ${JSON.stringify(sobreDeclarado)}::jsonb, "updatedAt" = (NOW() AT TIME ZONE 'UTC')
       WHERE "id" = ${row.id} AND "status" = ${row.status}::"TerminalPaymentRequestStatus" AND "paymentId" IS NULL
-        AND ${sinEvidenciaPositivaSql(declaration.requestId, identity.venueId)}`
+        AND ${sinEvidenciaPositivaSql(requestId, identity.venueId)}
+        AND ${sinDineroConEstaLlaveSql(attemptId)}
+        AND ${sinEventoQueVetaSql(attemptId, identity.venueId, terminalId, true)}`
     if (cas !== 1) throw new NoInstrumentResolutionError('ATTEMPT_NOT_ELIGIBLE')
     await tx.terminalPaymentAttemptLink.update({
       where: { attemptId },
@@ -296,7 +583,7 @@ export async function resolveNoInstrument(
         venueId: identity.venueId,
         staffId: actor.staffId,
         data: {
-          requestId: declaration.requestId,
+          requestId: requestId,
           attemptId,
           terminalId,
           by,
@@ -305,7 +592,7 @@ export async function resolveNoInstrument(
         },
       },
     })
-    return saved
+    return { resolution: saved, requestId }
   }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
 
   // La respuesta es la MISMA proyección durable de S6 (contrato con las apps publicadas: nada se quita) más la resolución.
@@ -315,11 +602,14 @@ export async function resolveNoInstrument(
   // el replay idempotente: si el primer aviso se perdió, el reintento del cajero lo repite. Un fallo aquí no deshace ni oculta la
   // declaración ya confirmada: el POS la lee por el GET. (El log lleva nombre y código, nunca el mensaje: misma regla que el
   // controlador de esta ruta, cuyo cuerpo puede traer un PIN.)
+  // 🔴 En el camino LOCAL no hay POS esperando: no hay solicitud, no hay long-poll y no hay a quién despertar. Llamar aquí
+  // con `undefined` sería, en el mejor caso, ruido; en el peor, tocar una fila ajena. La respuesta sigue siendo la MISMA
+  // forma (proyección de S6 + `resolution`), para que el cliente use un solo parser en los dos caminos.
   try {
-    await terminalPaymentService.resolverEsperaDelPos(declaration.requestId, identity.venueId)
+    if (resolution.requestId) await terminalPaymentService.resolverEsperaDelPos(resolution.requestId, identity.venueId)
   } catch (err) {
     logger.warn('⚠️ [NoInstrument] could not answer the waiting POS after the declaration — it reads the result by GET', {
-      requestId: declaration.requestId,
+      requestId: resolution.requestId,
       venueId: identity.venueId,
       errorName: err instanceof Error ? err.name : typeof err,
       ...(err instanceof Prisma.PrismaClientKnownRequestError ? { errorCode: err.code } : {}),
@@ -331,5 +621,6 @@ export async function resolveNoInstrument(
     terminalSerial: identity.terminalSerial,
   })
   if (!current) throw new NoInstrumentResolutionError('RESOLUTION_UNAVAILABLE', 503)
-  return { ...current, resolution: { id: resolution.id, acceptedAt: resolution.acceptedAt, by: resolution.by } }
+  const declarada = resolution.resolution
+  return { ...current, resolution: { id: declarada.id, acceptedAt: declarada.acceptedAt, by: declarada.by } }
 }

@@ -30,6 +30,7 @@ import mainApiRouter from './routes' // Esto importa el 'router' exportado por d
 import { getCorsConfig, Environment } from './config/corsOptions'
 import { handleMcpRequest } from './mcp/server'
 import { mcpRateLimitMiddleware } from './middlewares/mcp-rate-limit.middleware'
+import { mcpRequestGuardMiddleware } from './middlewares/mcp-request-guard.middleware'
 import { mountCustomerMcpAuth } from './mcp/oauth/router'
 import { provider as mcpOAuthProvider } from './mcp/oauth/provider'
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js'
@@ -42,13 +43,13 @@ import { eventLoopGuardMiddleware, startEventLoopMonitor } from './middlewares/e
 import webhookRoutes from './routes/webhook.routes'
 import { handleGoogleCalendarWebhook } from './controllers/webhook/google-calendar.webhook.controller'
 import { handleMercadoPagoWebhook } from './controllers/webhook/mercadoPago.webhook.controller'
-import { startUberOAuth, uberOAuthCallback } from './controllers/delivery-channels/uber.oauth.controller'
+import { activarUberOAuth, startUberOAuth, uberOAuthCallback } from './controllers/delivery-channels/uber.oauth.controller'
 import publicRoutes from './routes/public.routes'
 import appUpdateRoutes from './routes/superadmin/appUpdate.routes'
 import settlementReportRoutes from './routes/settlement-report.routes'
 import { authenticateTokenMiddleware } from './middlewares/authenticateToken.middleware'
 import { authorizeRole } from './middlewares/authorizeRole.middleware'
-import { requestLoggerMiddleware } from './middlewares/requestLogger'
+import { redactUrlSecrets, requestLoggerMiddleware } from './middlewares/requestLogger'
 import { isJsonBodyParseError } from './utils/httpErrors'
 
 // Types (could be moved to a central types file)
@@ -96,7 +97,12 @@ app.use((req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
 // justo las que no queremos que se queden formadas sin que nadie se entere.
 // Incidente 2026-08-04: /dashboard/auth/status tardó 33.7 s y nada avisó.
 app.use(eventLoopGuardMiddleware)
-startEventLoopMonitor()
+/**
+ * 🔴 Se CONSERVA el cierre. Descartarlo (como estaba) deja el muestreo sin forma de vaciar el
+ * tramo detectado y aún no emitido: al reiniciar el proceso entre la detección y su aviso, ese
+ * aviso —el de una retención real— se perdía en silencio. `server.ts` lo llama al apagar.
+ */
+export const detenerMonitorDeEventLoop = startEventLoopMonitor()
 
 // Getters for the metrics service to read live values
 export function getAppCpuPercent() {
@@ -159,6 +165,13 @@ app.use('/api/v1/public', requestLoggerMiddleware, express.json(), cookieParser(
 // dueño autorice aquí; sin este flujo cada alta dependería de un ticket a soporte de Uber.
 app.get('/api/v1/delivery/uber/oauth/start', requestLoggerMiddleware, startUberOAuth)
 app.get('/api/v1/delivery/uber/oauth/callback', requestLoggerMiddleware, uberOAuthCallback)
+// La página de selección de tiendas publica aquí (form HTML): `state2` firmado + las tiendas marcadas.
+app.post(
+  '/api/v1/delivery/uber/oauth/activate',
+  requestLoggerMiddleware,
+  express.urlencoded({ extended: false, limit: '16kb' }),
+  activarUberOAuth,
+)
 
 // Customer-facing MCP OAuth 2.1 Authorization Server: DCR, /authorize (bcrypt consent), /token,
 // /revoke, and discovery metadata — all at the app root (required by the SDK).
@@ -176,6 +189,9 @@ app.post(
   // WHO calls; nothing limited HOW MUCH, leaving ~250 tools open to fuzzing at full speed.
   mcpRateLimitMiddleware,
   express.json(),
+  // The brake from the 2026-09-23 freeze: one tool call at a time per person, a deadline that cancels
+  // the work at its next read, and the tool logged when it STARTS (with an execution context).
+  mcpRequestGuardMiddleware,
   handleMcpRequest,
 )
 
@@ -395,7 +411,7 @@ export function globalErrorHandler(err: Error, req: ExpressRequest, res: Express
       correlationId,
       request: {
         method: req.method,
-        url: req.originalUrl,
+        url: redactUrlSecrets(req.originalUrl),
         ip: req.ip,
       },
     })
@@ -419,7 +435,7 @@ export function globalErrorHandler(err: Error, req: ExpressRequest, res: Express
       correlationId,
       request: {
         method: req.method,
-        url: req.originalUrl,
+        url: redactUrlSecrets(req.originalUrl),
         ip: req.ip,
       },
     })
@@ -440,7 +456,7 @@ export function globalErrorHandler(err: Error, req: ExpressRequest, res: Express
     isOperational: false,
     request: {
       method: req.method,
-      url: req.originalUrl,
+      url: redactUrlSecrets(req.originalUrl),
       ip: req.ip,
     },
   })

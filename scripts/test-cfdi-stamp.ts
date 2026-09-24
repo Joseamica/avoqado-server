@@ -45,6 +45,19 @@ const testDeps: IssueCfdiDeps = {
   loadOrderForCfdi: loadOrderForCfdiFromDb,
   resolveProvider: resolveFiscalProvider,
   reserveCfdi: data => prisma.cfdi.create({ data: data as any }),
+  // Reclamo atómico de un intento previo — igual que los defaults de producción.
+  claimCfdi: async (cfdiId, desdeEstados, version) => {
+    const { count } = await prisma.cfdi.updateMany({
+      where: { id: cfdiId, status: { in: desdeEstados as any }, attempts: version },
+      data: { status: 'STAMPING', attempts: { increment: 1 }, updatedAt: new Date() },
+    })
+    return count === 1
+  },
+  // Sólo URLs, nunca el estado fiscal — igual que los defaults de producción.
+  persistArtifacts: async (idempotencyKey, urls) => {
+    await prisma.cfdi.updateMany({ where: { idempotencyKey, status: 'STAMPED' }, data: urls })
+    return prisma.cfdi.findUnique({ where: { idempotencyKey } })
+  },
   persistCfdi: data =>
     prisma.cfdi.upsert({
       where: { idempotencyKey: data.idempotencyKey },

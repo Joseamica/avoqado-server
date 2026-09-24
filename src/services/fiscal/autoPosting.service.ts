@@ -9,6 +9,7 @@ import { postJournalEntry } from './journalEntry.service'
 import { splitPaymentIvaByOrderRates, grossByRateFromItems } from './ivaMath'
 import { paymentInFiscalScope } from './fiscalScope'
 import { generateCogsPolicyForVenue } from './cogs.service'
+import { ivaDeDevolucion, processorDataDeDevoluciones } from './deliveryFiscalDelta'
 import logger from '../../config/logger'
 
 /**
@@ -66,7 +67,7 @@ export interface GenerateResult {
   cogsCents?: number
 }
 
-interface OrderItemRow {
+export interface OrderItemRow {
   quantity: number
   unitPrice: Prisma.Decimal
   discountAmount: Prisma.Decimal
@@ -92,7 +93,7 @@ interface PaymentRow {
  * truth for reading each product's rate, so auto-posting, the income-statement read-model and the CFDI
  * all group identically. Empty (custom-amount sale) → [], and callers fall back to flat 16%.
  */
-function grossByRateForOrder(items: OrderItemRow[] | undefined): { rate: number; grossCents: number }[] {
+export function grossByRateForOrder(items: OrderItemRow[] | undefined): { rate: number; grossCents: number }[] {
   return grossByRateFromItems(
     (items ?? []).map(it => ({
       unitPrice: Number(it.unitPrice),
@@ -130,16 +131,20 @@ function buildSaleLines(
   return lines.length >= 2 ? { lines } : null
 }
 
-/** Líneas de una DEVOLUCIÓN (espejo invertido). Usa los montos de la propia fila refund. */
+/**
+ * Líneas de una DEVOLUCIÓN (espejo invertido). Usa los montos de la propia fila refund.
+ * El IVA sale de `ivaDeDevolucion` — la MISMA regla que el estado de resultados: la mezcla de la orden,
+ * salvo el ajuste del proveedor de reparto con su `fiscalByRateCents` (spec KDS Uber [N-13]).
+ */
 function buildRefundLines(
   p: PaymentRow,
   acct: (m: string) => string,
+  processorData?: unknown,
 ): { lines: { ledgerAccountId: string; debitCents: number; creditCents: number }[] } | null {
   const rG = Math.abs(toCents(p.amount))
   const rT = Math.abs(toCents(p.tipAmount))
   const rF = Math.abs(toCents(p.feeAmount)) // normalmente 0: el procesador conserva la comisión
-  // IVA por tasa real de la orden (espejo de la venta) — cuadra al centavo.
-  const { netCents, taxCents } = splitPaymentIvaByOrderRates(rG, grossByRateForOrder(p.order?.items))
+  const { netCents, taxCents } = ivaDeDevolucion(p.id, rG, processorData, grossByRateForOrder(p.order?.items))
   const isCash = p.method === PaymentMethod.CASH
   const refundCents = rG + rT - rF
   if (refundCents < 0) return null
@@ -261,6 +266,11 @@ export async function generatePoliciesForVenue(
     ).map(e => e.idempotencyKey),
   )
 
+  const processorDataDeAjustes = await processorDataDeDevoluciones(
+    venueId,
+    eligible.filter(p => (toCents(p.amount) < 0 || p.type === PaymentType.REFUND) && !existing.has(`refund:${p.id}:v1`)).map(p => p.id),
+  )
+
   for (const p of eligible) {
     // Alcance fiscal configurable: merchant excluido o efectivo sin opt-in → no se postea a los libros
     // (el gerencial lo sigue mostrando). Mismo predicado que el read-model de ingresos.
@@ -277,7 +287,7 @@ export async function generatePoliciesForVenue(
       base.alreadyPosted++
       continue
     }
-    const built = isRefund ? buildRefundLines(p, acct) : buildSaleLines(p, acct)
+    const built = isRefund ? buildRefundLines(p, acct, processorDataDeAjustes.get(p.id)) : buildSaleLines(p, acct)
     if (!built) {
       base.skipped++ // anomalía no balanceable (ej. comisión > cobro)
       continue

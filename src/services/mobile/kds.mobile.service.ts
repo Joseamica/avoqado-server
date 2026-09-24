@@ -7,10 +7,13 @@
  */
 
 import logger from '../../config/logger'
-import { BadRequestError, NotFoundError } from '../../errors/AppError'
-import { markDeliveryOrderReady } from '@/services/delivery-channels/core/respondToDeliveryOrder.service'
+import { BadRequestError, NotFoundError, ProviderUnavailableError } from '../../errors/AppError'
+import { contexto, markDeliveryOrderReady } from '@/services/delivery-channels/core/respondToDeliveryOrder.service'
+import type { CourierInfo } from '@/services/delivery-channels/core/types'
 import prisma from '../../utils/prismaClient'
+import { OrderStatus } from '@prisma/client'
 import type { KdsOrderStatus } from '@prisma/client'
+import { anexarCapacidades, ventasDeComandas, type EstadoRetiro, type VentaDeComanda } from './kdsCapacidades'
 
 // Use string constants instead of Prisma enum to avoid runtime import issues with tsx
 const KdsStatus = {
@@ -100,12 +103,27 @@ export interface KdsOrderResponse {
   needsAcceptance?: boolean
   /** ¿Falta que un aparato reclame e imprima esta comanda? Sólo para pedidos de marketplace. */
   needsPrint?: boolean
+  /**
+   * Nombre y contacto (con PIN) del cliente, para pedidos de delivery — la cocina lee esta
+   * pantalla y no el detalle de la orden. `null` en comandas que no son de reparto.
+   */
+  customerName?: string | null
+  customerContact?: string | null
+  /** Reparto (Tarea 16): lo decide el servidor, las apps sólo leen. Ausentes fuera de reparto. */
+  canCancelDelivery?: boolean
+  deliveryOpInFlight?: string | null
+  hasLineActionInProgress?: boolean
   items: Array<{
     id: string
     productName: string
     quantity: number
     modifiers: string[]
     notes: string | null
+    removedAt?: string | null
+    canReportOutOfStock?: boolean
+    lineActionState?: EstadoRetiro | null
+    lineActionAttempts?: number | null
+    canRetryAt?: string | null
   }>
   startedAt: string | null
   completedAt: string | null
@@ -141,26 +159,39 @@ export async function listKdsOrders(venueId: string, statusFilter?: string): Pro
     orderBy: { createdAt: 'asc' },
   })
 
-  // 🔴 Segunda consulta y no un `include`: `KdsOrder.orderId` es un `String?` SUELTO, sin
-  // relación con `Order` en el schema — un `include` revienta en runtime. (Que no haya
-  // relación también significa que un ticket puede apuntar a una orden borrada; por eso
-  // abajo la ausencia se trata como "no falta aceptar" y no como un error.)
-  //
-  // Sin esto el POS NO puede saber cuáles pedidos de delivery falta aceptar, y el botón que
-  // la cocina necesita no puede existir. `Order.status` es la única verdad: PENDING = nadie
-  // le ha dicho que sí al proveedor todavía, y el reloj de ~11.5 min ya corre.
-  const orderIds = orders.map(o => o.orderId).filter((id): id is string => Boolean(id))
-  const ventas = orderIds.length
-    ? await prisma.order.findMany({ where: { id: { in: orderIds } }, select: { id: true, status: true, type: true } })
-    : []
-  const porId = new Map(ventas.map(v => [v.id, v]))
+  // 🔴 Consultas aparte y no un `include`: `KdsOrder.orderId` es un `String?` SUELTO, sin relación con
+  // `Order` — un `include` revienta en runtime (y la orden puede estar borrada: ausencia = "no falta
+  // aceptar", no error). `Order.status` PENDING = nadie le ha dicho que sí al proveedor y el reloj de
+  // ~11.5 min ya corre. Las capacidades del reparto (Tarea 16) salen del MISMO lote: consultas fijas.
+  const ventas = await ventasDeComandas(prisma, venueId, orders)
 
-  return orders.map(o => {
-    const venta = o.orderId ? porId.get(o.orderId) : undefined
-    // `type === 'DELIVERY'` es lo que separa "llegó solo" de "lo mandó un mesero". Sólo lo
-    // primero necesita que alguien reclame la impresión.
-    return formatKdsOrder({ ...o, esDeMarketplace: venta?.type === 'DELIVERY' }, venta?.type === 'DELIVERY' && venta?.status === 'PENDING')
-  })
+  return orders.map(o => formatKdsOrderConVenta(o, o.orderId ? ventas.get(o.orderId) : undefined))
+}
+
+/**
+ * La comanda con lo que depende de su VENTA, calculado en UN solo sitio (el tablero y la ruta
+ * «no tengo este artículo» devuelven la misma comanda y no pueden contestar distinto).
+ * `type === 'DELIVERY'` es lo que separa "llegó solo" de "lo mandó un mesero": sólo lo primero
+ * necesita que alguien reclame la impresión, y sólo un reparto PENDING necesita que lo acepten.
+ * Un reparto trae además sus capacidades (spec «Apps»), opcionales y ausentes fuera de reparto.
+ */
+export function formatKdsOrderConVenta(o: any, venta?: VentaDeComanda | null): KdsOrderResponse {
+  const esReparto = venta?.type === 'DELIVERY'
+  const base = formatKdsOrder({ ...o, esDeMarketplace: esReparto }, esReparto && venta?.status === 'PENDING')
+  return venta ? anexarCapacidades(base, o, venta) : base
+}
+
+/** La comanda recién escrita, con su venta: `PUT …/status` y `bump` contestan lo mismo que el tablero (una carga por lote). */
+async function comandaConVenta(venueId: string, k: { orderId: string | null }): Promise<KdsOrderResponse> {
+  // La comanda YA se escribió: si esta lectura falla, la cocina recibe su comanda sin capacidades
+  // (campos opcionales, llegan en el siguiente sondeo) y el aviso de «listo» al proveedor sale igual.
+  try {
+    const ventas = await ventasDeComandas(prisma, venueId, [k])
+    return formatKdsOrderConVenta(k, k.orderId ? ventas.get(k.orderId) : undefined)
+  } catch (error) {
+    logger.warn('KDS: no se pudieron leer las capacidades de la comanda; se contesta sin ellas', { venueId, orderId: k.orderId, error })
+    return formatKdsOrder(k)
+  }
 }
 
 // MARK: - Create KDS Order
@@ -238,6 +269,8 @@ export async function updateKdsOrderStatus(venueId: string, orderId: string, new
   })
 
   logger.info(`KDS order #${updated.orderNumber} status -> ${upperStatus}`)
+  // Antes del aviso al marketplace: la respuesta describe el estado que ESTA escritura dejó.
+  const respuesta = await comandaConVenta(venueId, updated)
 
   // "Listo" en la cocina = avisarle al marketplace que mande al repartidor. Best-effort y
   // FUERA del camino del tablero: un marketplace caído no puede impedir que la cocina
@@ -246,7 +279,7 @@ export async function updateKdsOrderStatus(venueId: string, orderId: string, new
     avisarListoAlMarketplace(venueId, updated.orderId, updated.orderNumber)
   }
 
-  return formatKdsOrder(updated)
+  return respuesta
 }
 
 /**
@@ -288,6 +321,7 @@ export async function bumpKdsOrder(venueId: string, orderId: string): Promise<Kd
   })
 
   logger.info(`KDS order #${updated.orderNumber} bumped to COMPLETED`)
+  const respuesta = await comandaConVenta(venueId, updated)
 
   // El bump salta directo a COMPLETED sin pasar por READY — el aviso al marketplace no se
   // puede perder por tomar el atajo.
@@ -295,7 +329,7 @@ export async function bumpKdsOrder(venueId: string, orderId: string): Promise<Kd
     avisarListoAlMarketplace(venueId, updated.orderId, updated.orderNumber)
   }
 
-  return formatKdsOrder(updated)
+  return respuesta
 }
 
 // MARK: - Helper
@@ -307,6 +341,8 @@ function formatKdsOrder(order: any, needsAcceptance = false): KdsOrderResponse {
     orderType: order.orderType,
     orderId: order.orderId,
     status: order.status,
+    customerName: order.customerName ?? null,
+    customerContact: order.customerContact ?? null,
     items: (order.items || []).map((item: any) => ({
       id: item.id,
       productName: item.productName,
@@ -421,6 +457,52 @@ export async function confirmKdsPrinted(venueId: string, kdsOrderId: string, dev
     data: { printedAt: new Date() },
   })
   return { ok: r.count > 0 }
+}
+
+// MARK: - "¿Quién trae este pedido?" (Tarea 8, KDS de Uber)
+
+export interface KdsCourierResponse {
+  supported: boolean
+  assigned: boolean
+  courier?: CourierInfo
+}
+
+/**
+ * A botón desde la cocina, nunca en cada refresco del tablero: preguntarle al proveedor por
+ * el repartidor en cada poll sería una llamada de más por comanda para un dato que casi
+ * nunca cambia.
+ *
+ * `supported:false` = el proveedor de esta comanda no tiene esta capacidad (no es un error,
+ * es "aquí no aplica"). `assigned:false` = sí aplica pero nadie ha tomado el pedido todavía,
+ * o ya se cerró (COMPLETED/CANCELLED) y no vale la pena preguntar.
+ */
+export async function fetchKdsCourier(venueId: string, kdsOrderId: string): Promise<KdsCourierResponse> {
+  const kdsOrder = await prisma.kdsOrder.findFirst({ where: { id: kdsOrderId, venueId }, select: { orderId: true } })
+  if (!kdsOrder?.orderId) throw new NotFoundError('Orden KDS no encontrada')
+
+  // Misma resolución de canal que accept/deny/ready: si esta comanda no es de reparto (o es
+  // de otro venue), `contexto` no encuentra nada que preguntar.
+  const ctx = await contexto(venueId, kdsOrder.orderId)
+  if (!ctx) throw new NotFoundError('Orden KDS no encontrada')
+
+  if (typeof ctx.adapter.fetchCourier !== 'function') return { supported: false, assigned: false }
+
+  if (ctx.order.status === OrderStatus.COMPLETED || ctx.order.status === OrderStatus.CANCELLED) {
+    return { supported: true, assigned: false }
+  }
+
+  let courier: CourierInfo | null
+  try {
+    courier = await ctx.adapter.fetchCourier(ctx.externalOrderId, ctx.storeId)
+  } catch (error) {
+    logger.warn('No se pudo consultar al repartidor con el proveedor de delivery', {
+      orderId: kdsOrder.orderId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    throw new ProviderUnavailableError()
+  }
+
+  return courier ? { supported: true, assigned: true, courier } : { supported: true, assigned: false }
 }
 
 /**

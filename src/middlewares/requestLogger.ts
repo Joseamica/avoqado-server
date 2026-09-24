@@ -8,6 +8,7 @@ import { normalizeEntrypoint } from '../observability/entrypoint'
 const PARAMS_SENSIBLES = new Set([
   'code', // 🔴 el de OAuth: canjea un token mientras no expire
   'state',
+  'intent', // 🔴 el enlace firmado de conexión de Uber (`/oauth/start?intent=`): con él se conectan tiendas a un negocio
   'access_token',
   'refresh_token',
   'id_token',

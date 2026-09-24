@@ -5,23 +5,33 @@
  * un PUT /menus modificó el menú EN VIVO de un restaurante real (verificado
  * 2026-08-17). El dominio del entorno no garantiza aislamiento, así que ninguna
  * escritura (accept/deny/cancel/menú/status/pos_data) sale sin que la tienda esté
- * EXPLÍCITAMENTE autorizada por env var. Vacío ⇒ cero escrituras (default-deny).
+ * EXPLÍCITAMENTE autorizada. SANDBOX: por env var (vacío ⇒ cero escrituras, default-deny).
+ * PRODUCTION: por el consentimiento vigente del dueño en la base, resuelto en cada
+ * escritura por `getWritableStores` (`uber.client.ts`); la env var sólo restringe.
  * Las lecturas (GET) quedan fuera del candado a propósito.
  *
  * Módulo PURO sin efectos secundarios (regla del repo: importable desde tests sin
  * arrastrar @/config/env). El caller resuelve el env var y pasa el valor crudo.
  */
+import { DeliveryWriteNotSentError } from '../../core/types'
+
 export type UberEnvironment = 'SANDBOX' | 'PRODUCTION'
 
-export class UberStoreWriteBlockedError extends Error {
+/** Pre-envío: el bloqueo salta antes de la red, así que es un «no se envió» (`STORE_NOT_AUTHORIZED`). */
+export class UberStoreWriteBlockedError extends DeliveryWriteNotSentError {
   readonly storeId: string
   readonly environment: UberEnvironment
   constructor(storeId: string, environment: UberEnvironment) {
     const envVar = `UBER_WRITABLE_STORE_IDS_${environment}`
     super(
-      `Escritura a Uber BLOQUEADA por el candado de tiendas: store "${storeId || '(vacío)'}" no está ` +
-        `en ${envVar}. Default-deny: sin lista no hay escrituras. Si es una tienda de PRUEBA legítima, ` +
-        `agrégala a ${envVar}; si no lo es, este bloqueo acaba de evitar tocar un comercio real.`,
+      'STORE_NOT_AUTHORIZED',
+      environment === 'PRODUCTION'
+        ? `Escritura a Uber BLOQUEADA por el candado de tiendas: store "${storeId || '(vacío)'}" no tiene ` +
+            `consentimiento vigente del dueño (conéctala por OAuth con la app de Uber actual; revocada, ` +
+            `DISABLED o PENDING no escriben) o está fuera de ${envVar}.`
+        : `Escritura a Uber BLOQUEADA por el candado de tiendas: store "${storeId || '(vacío)'}" no está ` +
+            `en ${envVar}. Default-deny: sin lista no hay escrituras. Si es una tienda de PRUEBA legítima, ` +
+            `agrégala a ${envVar}; si no lo es, este bloqueo acaba de evitar tocar un comercio real.`,
     )
     this.name = 'UberStoreWriteBlockedError'
     this.storeId = storeId

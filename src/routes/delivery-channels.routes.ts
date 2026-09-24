@@ -186,6 +186,9 @@ router.get(
   '/venues/:venueId/channels/uber/connect-url',
   authenticateTokenMiddleware,
   checkPermission('delivery-channels:manage'),
+  // Conectar tiendas es PREMIUM (spec §4.4): se revalida además en cada paso del OAuth.
+  withDeliveryPremiumMessage,
+  checkFeatureAccess('DELIVERY_CHANNELS'),
   ctrl.getUberConnectUrl,
 )
 

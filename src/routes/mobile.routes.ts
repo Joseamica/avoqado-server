@@ -3132,6 +3132,46 @@ router.post(
 )
 
 /**
+ * GET /api/v1/mobile/venues/:venueId/kds/orders/:kdsOrderId/courier
+ * "¿Quién trae este pedido?" — nombre, teléfono (con su código) y vehículo del repartidor,
+ * cuando el proveedor ya asignó a alguien. `orders:read`, igual que ver el tablero: es una
+ * lectura, no una acción sobre la comanda.
+ */
+router.get(
+  '/venues/:venueId/kds/orders/:kdsOrderId/courier',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('orders:read'),
+  kdsMobileController.fetchKdsCourier,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/kds/orders/:kdsOrderId/items/:itemId/out-of-stock
+ * «No tengo este artículo»: pide al proveedor retirar el renglón de un pedido de reparto (el
+ * cliente recibe el aviso en su app). `orders:update`, el mismo que avanzar la comanda: es la
+ * cocina la que sabe que se acabó. 200 · 202 · 409 · 502 (spec KDS Uber §3.3).
+ */
+router.post(
+  '/venues/:venueId/kds/orders/:kdsOrderId/items/:itemId/out-of-stock',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('orders:update'),
+  kdsMobileController.reportKdsItemOutOfStock,
+)
+
+/**
+ * POST …/out-of-stock/retry `{ expectedAttempt }` — reintento HUMANO de un aviso que el proveedor
+ * no confirmó, a partir de `canRetryAt` (§3.5). Dos cajeros a la vez producen UN solo intento.
+ */
+router.post(
+  '/venues/:venueId/kds/orders/:kdsOrderId/items/:itemId/out-of-stock/retry',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('orders:update'),
+  kdsMobileController.retryKdsItemOutOfStock,
+)
+
+/**
  * PUT /api/v1/mobile/venues/:venueId/kds/orders/:id/status
  * Update KDS order status.
  * Body: { status: "PREPARING" | "READY" | "COMPLETED" }

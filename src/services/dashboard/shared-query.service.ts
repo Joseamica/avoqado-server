@@ -1024,6 +1024,7 @@ export class SharedQueryService {
       WHERE o."venueId"::text = ${venueId}
         AND o."createdAt" >= ${utcTs(from)}
         AND o."createdAt" <= ${utcTs(to)}
+        AND oi."removedAt" IS NULL -- a line the delivery provider removed sold nothing
       GROUP BY p."id", p."name", c."name"
       ORDER BY "revenue" DESC
       LIMIT ${limit}
@@ -1118,6 +1119,7 @@ export class SharedQueryService {
         AND o."createdAt" >= ${utcTs(from)}
         AND o."createdAt" <= ${utcTs(to)}
         AND (${Prisma.join(productFilters, ' OR ')})
+        AND oi."removedAt" IS NULL
       GROUP BY COALESCE(oi."productName", p."name", 'Producto sin nombre')
       ORDER BY "revenue" DESC
       LIMIT 5
@@ -1213,6 +1215,7 @@ export class SharedQueryService {
         AND o."createdAt" >= ${utcTs(from)}
         AND o."createdAt" <= ${utcTs(to)}
         AND (${Prisma.join(productNameFilters, ' OR ')})
+        AND oi."removedAt" IS NULL
         ${weekendFilter}
         ${nightFilter}
       GROUP BY COALESCE(oi."productName", p."name", 'Producto sin nombre')
@@ -1861,6 +1864,7 @@ export class SharedQueryService {
       WHERE o."venueId"::text = ${venueId}
         AND o."createdAt" >= ${utcTs(from)}
         AND o."createdAt" <= ${utcTs(to)}
+        AND oi."removedAt" IS NULL
       GROUP BY p."id", p."name"
       ORDER BY (SUM(${Prisma.raw(lineRevenueSql())}) - COALESCE(SUM(oi."quantity" * r."totalCost"), 0)) DESC
       LIMIT ${limit}

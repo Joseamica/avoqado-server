@@ -7,6 +7,7 @@ import { env } from '../../config/env'
 import * as deliveryChannelLinkService from '../../services/delivery-channels/core/deliveryChannelLink.service'
 import * as activationService from '../../services/delivery-channels/core/deliveryActivation.service'
 import * as deliverySummaryService from '../../services/delivery-channels/core/deliverySummary.service'
+import * as connectIntentService from '../../services/delivery-channels/core/deliveryConnectIntent.service'
 
 /** GET /venues/:venueId/channels */
 export async function listChannels(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -108,14 +109,18 @@ export const getSummary = async (req: Request, res: Response): Promise<void> => 
 export const getUberConnectUrl = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId } = req.params
+    const { userId } = (req as any).authContext
     const base = env.UBER_OAUTH_REDIRECT_BASE || `${req.protocol}://${req.get('host')}`
+    // 🔴 El enlace lleva una INTENCIÓN firmada (spec §4.1), nunca el `venueId` suelto: con el
+    // venue en la URL pública cualquiera podía conectar tiendas a un negocio ajeno.
+    const { firmado } = await connectIntentService.crearIntent({ venueId, staffId: userId })
     // Se devuelve el enlace en vez de redirigir: quien llama es el dashboard, y necesita
     // poder mostrarlo, copiarlo o mandárselo al dueño por correo — no saltar de inmediato.
     return res.json({
       ok: true,
-      url: `${base}/api/v1/delivery/uber/oauth/start?venueId=${encodeURIComponent(venueId)}`,
+      url: `${base}/api/v1/delivery/uber/oauth/start?intent=${encodeURIComponent(firmado)}`,
       instrucciones:
-        'Abre este enlace con la cuenta de Uber Eats Manager del negocio. Al autorizar, sus tiendas quedan conectadas a Avoqado automáticamente.',
+        'Abre este enlace con la cuenta de Uber Eats Manager del negocio (vence en 10 minutos). Al autorizar, eliges qué tiendas conectar a Avoqado.',
     })
   } catch (e) {
     return next(e)

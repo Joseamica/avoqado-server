@@ -1493,3 +1493,35 @@ del aparato que documenta la regla.
   «Fiabilidad del circuito de cobro Testarudo», con una fila nueva y el enlace a la crónica en `docs/proyectos/`.
 - El caso de la **aprobación tardía** (la fila vuelve a `TIMED_OUT/BANK_APPROVED_AWAITING_PAYMENT` y bloquea de nuevo) es comportamiento
   correcto y ya está en el spec: no «arreglarlo».
+
+---
+
+## Ronda FINAL de Codex (20-sep, gpt-6-astra max): 5 P1 + 1 P2, los seis cerrados
+
+Auditoría guardada en `docs/auditorias/2026-09-20-auditoria-codex-final-5P1.md`. Contestó **«Sí»** a la pregunta
+de si el commit `1fae9a74` —el que pasó la barrera de «acusó» a «consta que salió» tras el QA en la Sunmi— había
+reabierto el hueco que la ronda 4 hizo cerrar. Tenía razón, y en los cinco P1.
+
+| # | Qué era | Dónde vive el arreglo |
+|---|---|---|
+| P1-1 | La emisión del cobro podía salir **después** de aceptada la declaración: grabar la procedencia y emitir eran dos pasos con una suspensión en medio | `terminal-payment.service.ts` → `entregarBajoCandado`, que hace las dos cosas bajo el MISMO `candadoDeSolicitud` que toma la declaración. El UPDATE de la procedencia ya exige `PENDING/SENT/CANCEL_REQUESTED`, así que ESA condición es la comprobación del estado vigente: si la declaración ganó la carrera, `count === 0` y no se emite nada |
+| P1-2 | Un sobre escrito por el **servidor** (`failUndelivered`, `UNKNOWN/SOCKET_NOT_FOUND`) se leía como «la terminal contestó algo» ⇒ se declaraba con todas las entregas DURABLE y sin un solo ACK del aparato | el sobre sintético lleva `origin: 'SERVER'` y la barrera lo descuenta (`sobreCrudo.origin !== 'SERVER'`) |
+| P1-3 | El **replay** respondía `released: true` con un aprobado del MISMO intento recibido por OTRO venue (`LINK_VENUE_MISMATCH`, que no crea `Payment` ni mueve la fila): la revalidación miraba aprobaciones sólo de ESTE venue | `hayContradiccionDeProcedencia` exportada y aplicada en la revalidación del replay |
+| P1-4 | **iOS** podía descartar un éxito tardío y devolver «no se cobró»: el ganador cacheado se consultaba ANTES de leer la respuesta del POST | el ganador se consulta después del guard de éxito, y un cobro acreditado sustituye a un ganador contrario. Misma regla en `result(from:)` |
+| P1-5 | **OkHttp reenviaba la declaración**: su `RetryAndFollowUpInterceptor` repite ante un 408 y ante un 503 con `Retry-After: 0`, y ninguna bandera lo apaga (`retryOnConnectionFailure` sólo cubre fallos de conexión) | cuerpo `isOneShot()` (`unSoloEnvio`) + cliente propio sin redirecciones. Medido con MockWebServer: con el arreglo UNA petición, sin él DOS |
+| P2-6 | El rearmado de la llave tras declarar corría por la ruta del resultado obsoleto, que no tenía la guarda | `rearmUnresolvedCharge(requestId, aunSiFueDeclarado)` |
+
+### Los dos defectos que Codex NO vio y sí vieron las pruebas
+
+1. **El indulto del éxito tardío se aplicaba a la llave equivocada.** `aunSiFueDeclarado` se calculaba del desenlace,
+   pero la llave que se repone puede ser la de **otra** solicitud (`unresolvedKeyAfterStaleResult` devuelve `armedKey`
+   cuando otra gobierna la ranura). Un éxito de `req-viejo` habría resucitado la llave de `req-nuevo`, que el cajero ya
+   había declarado y resuelto. El indulto es **por solicitud**: `pending == requestId`.
+2. **El mismo «la declaración tapa el cobro» existía en Android**, en `handleStaleCardResult`: un veredicto de
+   `NoSeCobro` convertía un `Charged` con `paymentId` en `NotCharged` ⇒ la llave se soltaba y el cobro real
+   desaparecía de la vista. La regla vive ahora en `CardChargeDecision.staleOutcome`, pura y con cuatro pruebas.
+
+🔑 **Por qué el dinero manda sobre la declaración, y no al revés:** el `paymentId` lo emite el servidor al registrar el
+`Payment`. Si llega, el dinero salió, y el veredicto sólo significa que se emitió antes de que ese registro existiera.
+Taparlo deja la venta impaga con el cargo encima y al cajero pasando la tarjeta otra vez — **el cobro doble es el
+límite duro del founder**, y pesa más que una venta marcada de más, que el arqueo sí ve.

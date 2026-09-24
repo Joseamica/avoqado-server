@@ -137,7 +137,8 @@ const INVENTARIO: Record<string, number> = {
   'src/services/mobile/areaTicketV7.mobile.service.ts': 2,
   'src/services/mobile/comp-item.mobile.service.ts': 2,
   'src/services/mobile/end-of-day.mobile.service.ts': 3,
-  'src/services/mobile/kds.mobile.service.ts': 1,
+  // 1 → 0 (2026-09-23, KDS Uber T16): la venta de cada comanda se carga por lote en
+  // `kdsCapacidades.ts`, con `take` = número de ids pedidos.
   'src/services/mobile/order.mobile.service.ts': 3,
   'src/services/mobile/sync.mobile.service.ts': 1,
   'src/services/mobile/transaction.mobile.service.ts': 1,

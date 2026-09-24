@@ -1,0 +1,31 @@
+-- 🔴 Índice funcional para la búsqueda de dinero por llave NORMALIZADA (Codex r5-7, 22-sep-2026).
+--
+-- El veto de la declaración y la consulta S6 comparan `idempotencyKey` con la llave canónica recortada — la misma
+-- regla que `String.trim()` en la aplicación (`PATRON_SQL_TRIM_COMO_JS`). Ese predicado funcional no puede usar el
+-- índice de igualdad exacta, así que para DEMOSTRAR que ningún pago coincide habría que recorrer las llaves; y desde
+-- la ventana de confirmación eso corre en el sondeo interactivo cada 5 s, no sólo al declarar.
+--
+-- `regexp_replace(text, text, text, text)` es IMMUTABLE, así que se puede indexar. El índice sólo cubre las filas
+-- con llave (las demás no participan nunca en esta búsqueda).
+--
+-- 🔴 Codex r6 (P2-10): el patrón lleva las SECUENCIAS LITERALES con barra invertida, byte a byte igual a la constante
+-- que manda la aplicación. Antes traía los caracteres Unicode REALES: las dos regex son equivalentes, pero PostgreSQL
+-- decide si un predicado puede usar un índice funcional comparando la EXPRESIÓN de forma ESTRUCTURAL, y dos
+-- constantes distintas no son la misma expresión — el índice existía y la consulta real no lo usaba. Hay una prueba
+-- que compara este texto con la constante para que no vuelvan a separarse.
+--
+-- 🔴 Y el índice sólo sirve si la consulta NO usa `OR`: la regla de dinero se escribe como UNION de dos ramas, cada
+-- una por su índice (el mismo patrón que `pagoLigadoSql` ya usaba por la misma razón, medido allí en 1092 ms → 3.7 ms).
+--
+-- ⚠️ EN PRODUCCIÓN, SI "Payment" ES GRANDE: un `CREATE INDEX` normal toma un lock que BLOQUEA las escrituras de la
+-- tabla mientras construye. Si eso no es aceptable en la ventana de despliegue, NO se corre esta migración tal cual:
+-- se marca como aplicada (`prisma migrate resolve --applied`) y se crea a mano, fuera de transacción, con:
+--
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS "Payment_idempotencyKey_trimmed_idx"
+--     ON "Payment" (regexp_replace("idempotencyKey", '^[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+|[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+$', '', 'g'))
+--     WHERE "idempotencyKey" IS NOT NULL;
+--
+-- (`CONCURRENTLY` no puede ir dentro de una transacción, y Prisma envuelve cada migración en una.)
+CREATE INDEX IF NOT EXISTS "Payment_idempotencyKey_trimmed_idx"
+  ON "Payment" (regexp_replace("idempotencyKey", '^[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+|[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+$', '', 'g'))
+  WHERE "idempotencyKey" IS NOT NULL;

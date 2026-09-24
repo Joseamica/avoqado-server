@@ -24,6 +24,8 @@ import { assertDeliveryMoneyInvariants } from './money'
 import { computeTenderCommission } from '../../dashboard/tenderType.dashboard.service'
 import { ensureDeliveryTenderType } from './deliveryTenderProvisioning.service'
 import { toKdsModifierLabels } from '../../mobile/kds.mobile.service'
+import { withDeliveryOrderLock } from './deliveryOrderLock'
+import { marcarRetirosEnComandas } from './lineRemoval.service'
 import {
   assertLegacyCatalogGovernanceForVenue,
   writeLegacyServiceProductCreationAuditForVenue,
@@ -32,6 +34,16 @@ import {
 const PLACEHOLDER_CATEGORY_SLUG = 'delivery-desconocido'
 
 const D = (v: string) => new Prisma.Decimal(v)
+
+/**
+ * Texto de contacto listo para el KDS: cocina no abre el detalle de la orden, así que
+ * necesita ver a quién es el pedido de un vistazo. Sin PIN (Rappi/DiDi, o Uber si algún
+ * día deja de mandarlo) es sólo el número — nunca se inventa un PIN vacío.
+ */
+export function contactoParaComanda(phone?: string | null, pin?: string | null): string | null {
+  if (!phone) return null
+  return pin ? `${phone} · PIN ${pin}` : phone
+}
 
 /**
  * Slug determinístico para el sku placeholder de un item sin externalId: lowercase,
@@ -197,7 +209,7 @@ export async function ingestDeliveryOrder(
   const postingState: { id: string | null } = { id: null }
   // Fuera de la transacción a propósito: la comanda se arma DESPUÉS y necesita los productos
   // que se resolvieron adentro, para poder rutear cada renglón a su estación.
-  const renglonesCreados: Array<{ productId: string | null }> = []
+  const renglonesCreados: Array<{ id: string | null; productId: string | null }> = []
 
   const order = await prisma.$transaction(
     async tx => {
@@ -216,9 +228,22 @@ export async function ingestDeliveryOrder(
       // ese instante le cargaría a un cajero una venta que nunca tocó.
       const order = await tx.order.upsert({
         where: { venueId_externalId: { venueId: venue.id, externalId: externalIdNamespaceado } },
-        update: { posRawData: normalized.raw as Prisma.InputJsonValue, syncedAt: new Date() },
+        update: {
+          posRawData: normalized.raw as Prisma.InputJsonValue,
+          syncedAt: new Date(),
+          // Un reintento/actualización del mismo pedido puede traer contacto nuevo (Uber
+          // reenvía el evento tras enmascarar el teléfono) — se refresca igual que el crudo.
+          customerName: normalized.customer?.name ?? undefined,
+          customerPhone: normalized.customer?.phone ?? undefined,
+          customerPhonePin: normalized.customer?.phonePin ?? undefined,
+          deliveryChannelLinkId: link.id,
+        },
         create: {
           externalId: externalIdNamespaceado,
+          customerName: normalized.customer?.name ?? undefined,
+          customerPhone: normalized.customer?.phone ?? undefined,
+          customerPhonePin: normalized.customer?.phonePin ?? undefined,
+          deliveryChannelLinkId: link.id,
           orderNumber: normalized.displayId,
           source: normalized.source,
           originSystem: OriginSystem.DELIVERY_PLATFORM,
@@ -250,6 +275,15 @@ export async function ingestDeliveryOrder(
           venue: { connect: { id: venue.id } },
         },
       })
+
+      // La lectura del proveedor dice "ya aceptado": es la evidencia que recupera un 2xx
+      // perdido (AUTO que se cayó entre aceptar e ingerir). Nunca pisa una marca previa.
+      if (normalized.providerAccepted && !order.providerAcceptedAt) {
+        await tx.order.updateMany({
+          where: { id: order.id, providerAcceptedAt: null },
+          data: { providerAcceptedAt: new Date(), providerAcceptedEvidence: 'PROVIDER_STATE' },
+        })
+      }
 
       if (esNueva) {
         // Renglones recién creados: el vale de inventario se arma con ELLOS (ids
@@ -297,10 +331,13 @@ export async function ingestDeliveryOrder(
               // Nace del canal de delivery, no del POS: los reportes por origen lo separan.
               originSystem: OriginSystem.DELIVERY_PLATFORM,
               externalId: `${externalIdNamespaceado}-${item.externalId || 'noplu'}-${idx}`,
+              // KDS de Uber: id de LÍNEA del proveedor (cart_item_id) — distinto del
+              // externalId de arriba, que es del sync del POS.
+              externalLineId: item.lineId ?? null,
             },
           })
           createdItems.push(createdItem)
-          renglonesCreados.push({ productId: createdItem.productId })
+          renglonesCreados.push({ id: createdItem.id, productId: createdItem.productId })
 
           // Modifiers: filas OrderItemModifier reales (contrato unificado, igual que
           // — ya NO texto concatenado en notes (v1 legacy).
@@ -471,20 +508,30 @@ export async function ingestDeliveryOrder(
     try {
       // 🔴 NO por `createdAt`: los renglones se crean dentro de UNA transacción y pueden
       // compartir marca de tiempo, así que ese orden no es estable — y si se desordena, la
-      // comanda rutea el renglón equivocado a la estación equivocada. Se aparea por el
-      // ÍNDICE que el propio `externalId` lleva al final (`…-<idx>`), que es determinista.
+      // comanda rutea el renglón equivocado a la estación equivocada. Se aparea por el id de
+      // LÍNEA del proveedor; el ÍNDICE del `externalId` (`…-<idx>`) sólo si nadie trae id.
       const yaExistentes = await prisma.orderItem.findMany({
         where: { orderId: order.id },
-        select: { productId: true, externalId: true },
+        select: { id: true, productId: true, externalId: true, externalLineId: true },
       })
-      const porIndice = new Map<number, string | null>()
+      const porIndice = new Map<number, { id: string; productId: string | null }>()
+      const porLinea = new Map<string, { id: string; productId: string | null }>()
       for (const r of yaExistentes) {
         const m = /-(\d+)$/.exec(r.externalId ?? '')
-        if (m) porIndice.set(Number(m[1]), r.productId)
+        if (m) porIndice.set(Number(m[1]), { id: r.id, productId: r.productId })
+        if (r.externalLineId) porLinea.set(r.externalLineId, { id: r.id, productId: r.productId })
       }
-      for (let idx = 0; idx < normalized.items.length; idx++) {
-        renglonesCreados.push({ productId: porIndice.get(idx) ?? null })
-      }
+      // 🔴 Por el id de LÍNEA del proveedor, nunca por índice contra una foto fresca: si el
+      // proveedor retiró el renglón 0, el que era 1 queda en 0 y heredaría el `orderItemId` del
+      // retirado — «RETIRADO · Horchata», un platillo pagado que la cocina no prepararía. El
+      // índice sólo aplica si ningún lado trae id de línea (proveedores sin retiro por renglón,
+      // o ventas previas a la columna, que por eso nunca pudieron retirarse).
+      normalized.items.forEach((it, idx) => {
+        // Si ALGÚN renglón guardado trae id de línea, un renglón de la foto sin id no se aparea
+        // por índice: una foto más corta lo correría de lugar (sin id ⇒ sin ruteo, nunca mal ruteado).
+        const r = porLinea.size ? (it.lineId ? porLinea.get(it.lineId) : undefined) : porIndice.get(idx)
+        renglonesCreados.push({ id: r?.id ?? null, productId: r?.productId ?? null })
+      })
     } catch {
       // Mismo criterio que abajo: sin ruteo se imprime igual; sin comanda, no.
     }
@@ -509,9 +556,9 @@ export async function ingestDeliveryOrder(
   // las dos, el reintento ve la orden ya existente (`isNew=false`), se salta la comanda y
   // marca el evento como procesado. Resultado: un pedido cobrado que la cocina nunca ve, sin
   // un solo error en el log. Se repone comprobando si la comanda existe de verdad.
-  // (`KdsOrder.orderId` no es único, así que dos procesadores simultáneos podrían crear dos;
-  //  es un empate mucho menos dañino que no imprimir nada, y el mismo que ya existía.)
-  const comandaYaExiste = isNew ? false : (await prisma.kdsOrder.count({ where: { orderId: order.id } })) > 0
+  // (`KdsOrder.orderId` no es único: la relectura DENTRO del candado, más abajo, es la que
+  //  impide que dos procesadores simultáneos creen dos.)
+  let comandaYaExiste = isNew ? false : (await prisma.kdsOrder.count({ where: { orderId: order.id } })) > 0
 
   // 🔴 Y la tercera pregunta, que faltaba: ¿el pedido sigue VIVO? Cancelar BORRA las filas de
   // KDS (`cancelDeliveryOrder`), así que al reprocesar un evento de un pedido ya cancelado
@@ -530,35 +577,54 @@ export async function ingestDeliveryOrder(
 
   if (!comandaYaExiste && !pedidoCancelado && !normalized.scheduledFor) {
     try {
-      await prisma.kdsOrder.create({
-        data: {
-          venueId: venue.id,
-          orderNumber: order.orderNumber,
-          orderType: 'DELIVERY',
-          orderId: order.id,
-          items: {
-            create: normalized.items.map((it, idx) => ({
-              productName: it.name,
-              quantity: it.quantity,
-              // Los ids que hacen RUTEABLE la comanda: sin ellos, los tacos y la cerveza
-              // salen en el mismo papel. `renglonesCreados` ya trae el producto que resolvió la
-              // transacción de arriba — no se vuelve a buscar. Se aparean por índice porque
-              // se crearon recorriendo `normalized.items` en este mismo orden.
-              productId: renglonesCreados[idx]?.productId ?? null,
-              categoryId: categoriaPorProducto.get(renglonesCreados[idx]?.productId ?? '') ?? null,
-              // 🔴 Por el normalizador COMPARTIDO, nunca serializando la forma del proveedor.
-              // Guardar aquí `[{name, quantity}]` mientras el POS guardaba `["texto"]` en la
-              // MISMA columna llegó hasta la cocina: Android pintó el JSON crudo y iOS perdió
-              // el modificador en silencio (visto en una Sunmi D3 con un pedido real de Uber).
-              modifiers: it.modifiers?.length ? JSON.stringify(toKdsModifierLabels(it.modifiers)) : null,
-              // Lo que el cliente escribió para este renglón. Es lo que separa servir bien
-              // de servir mal, y el único lugar del sistema donde hoy sobrevive.
-              notes: it.notes ?? null,
-            })),
+      // 🔴 Bajo el candado del pedido [N-21]: si el proveedor retiró un renglón entre la venta
+      // y esta comanda, `marcarRetirosEnComandas` la hace nacer con el renglón RETIRADO.
+      await withDeliveryOrderLock(order.id, async tx => {
+        // Relectura dentro del candado: dos reprocesos simultáneos ya no imprimen dos comandas.
+        if ((await tx.kdsOrder.count({ where: { orderId: order.id } })) > 0) {
+          comandaYaExiste = true
+          return
+        }
+        await tx.kdsOrder.create({
+          data: {
+            venueId: venue.id,
+            orderNumber: order.orderNumber,
+            orderType: 'DELIVERY',
+            orderId: order.id,
+            // KDS de Uber: la cocina lee esta pantalla, no el detalle de la orden — sin
+            // nombre/contacto aquí no tiene forma de identificar el pedido de un vistazo.
+            customerName: normalized.customer?.name ?? null,
+            customerContact: contactoParaComanda(normalized.customer?.phone, normalized.customer?.phonePin),
+            items: {
+              create: normalized.items.map((it, idx) => ({
+                productName: it.name,
+                quantity: it.quantity,
+                // Los ids que hacen RUTEABLE la comanda: sin ellos, los tacos y la cerveza
+                // salen en el mismo papel. `renglonesCreados` ya trae el producto que resolvió la
+                // transacción de arriba — no se vuelve a buscar. Se aparean por índice porque
+                // se crearon recorriendo `normalized.items` en este mismo orden.
+                productId: renglonesCreados[idx]?.productId ?? null,
+                categoryId: categoriaPorProducto.get(renglonesCreados[idx]?.productId ?? '') ?? null,
+                // Liga floja al OrderItem real (misma razón que productId/categoryId arriba: la
+                // comanda es una foto del momento, no una relación) + el id de línea del
+                // proveedor, para retiro/edición por renglón (KDS de Uber).
+                orderItemId: renglonesCreados[idx]?.id ?? null,
+                externalLineId: it.lineId ?? null,
+                // 🔴 Por el normalizador COMPARTIDO, nunca serializando la forma del proveedor.
+                // Guardar aquí `[{name, quantity}]` mientras el POS guardaba `["texto"]` en la
+                // MISMA columna llegó hasta la cocina: Android pintó el JSON crudo y iOS perdió
+                // el modificador en silencio (visto en una Sunmi D3 con un pedido real de Uber).
+                modifiers: it.modifiers?.length ? JSON.stringify(toKdsModifierLabels(it.modifiers)) : null,
+                // Lo que el cliente escribió para este renglón. Es lo que separa servir bien
+                // de servir mal, y el único lugar del sistema donde hoy sobrevive.
+                notes: it.notes ?? null,
+              })),
+            },
           },
-        },
+        })
+        await marcarRetirosEnComandas(tx, order.id, venue.id)
       })
-      kitchenTicketCreated = true
+      kitchenTicketCreated = !comandaYaExiste
     } catch (error) {
       logger.error('[❌ DeliveryIngest] el pedido NO llegó a la cocina (venta guardada, comanda no)', {
         orderId: order.id,

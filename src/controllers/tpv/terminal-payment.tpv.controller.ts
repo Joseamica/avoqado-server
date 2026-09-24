@@ -51,6 +51,48 @@ export const getAttemptStatus = async (req: Request, res: Response) => {
 }
 
 /**
+ * GET /api/v1/tpv/venues/:venueId/terminal-payment/requests/:requestId  (pieza D, 22-sep)
+ *
+ * La hermana de S6, pero por SOLICITUD. Existe por un hallazgo en hardware: una terminal llevaba 25 h mostrando
+ * «quedó un cobro sin confirmar» sobre una solicitud que el servidor YA había resuelto; su bandeja seguía en
+ * PROCESSING y su libreta no tenía ningún intento de esa solicitud, así que nada podía alcanzarla — toda la
+ * recuperación consulta por intento. Con esto la terminal puede cerrar esa fila y quitar el aviso.
+ *
+ *  · 403 `TERMINAL_IDENTITY_REQUIRED` si el token no es de una terminal.
+ *  · 404 `REQUEST_NOT_FOUND` si la solicitud no es de esta terminal y este venue. 🔴 No acredita nada del cobro.
+ *  · 200 con `request` (la proyección de siempre) y `resuelta` — si el servidor ya no la cuenta como pendiente.
+ */
+export const getRequestStatus = async (req: Request, res: Response) => {
+  const { venueId, requestId } = req.params
+  const terminalSerial = req.authContext?.terminalSerialNumber
+  if (!terminalSerial) {
+    return res.status(403).json({
+      success: false,
+      status: 'TERMINAL_IDENTITY_REQUIRED',
+      message: 'Esta consulta es de la terminal: el token no lleva identidad de terminal.',
+    })
+  }
+  try {
+    const estado = await terminalPaymentService.consultarSolicitudDeTerminal({ requestId, venueId, terminalSerial })
+    if (!estado) {
+      return res.status(404).json({
+        success: false,
+        status: 'REQUEST_NOT_FOUND',
+        message: 'El servidor no conoce esa solicitud para esta terminal. No acredita nada sobre el cobro.',
+      })
+    }
+    return res.status(200).json({ success: true, requestId, ...estado })
+  } catch (error) {
+    logger.error('Error in getRequestStatus', {
+      error: error instanceof Error ? error.message : 'Error desconocido',
+      venueId,
+      requestId,
+    })
+    return res.status(500).json({ success: false, message: 'No se pudo consultar la solicitud' })
+  }
+}
+
+/**
  * POST /api/v1/tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-instrument-resolution
  *
  * La declaración del cajero «no se presentó tarjeta» (plan 16-sep, Task 4), en UN paso. La identidad es la de la
@@ -78,6 +120,14 @@ export const resolveNoInstrument = async (req: Request, res: Response) => {
     return res.status(200).json({ success: true, ...result })
   } catch (error) {
     if (error instanceof service.NoInstrumentResolutionError) {
+      // Sólo el CÓDIGO (nunca el cuerpo: puede traer un PIN): sin esto el log decía «409» y no por qué — un «sin aviso
+      // comprobado» (ronda 20) y una evidencia de dinero se veían idénticos.
+      logger.warn('No-instrument resolution rejected', {
+        venueId: req.params.venueId,
+        attemptId: req.params.attemptId,
+        code: error.code,
+        statusCode: error.statusCode,
+      })
       if (error.statusCode === 403) {
         void logAction({
           staffId: req.authContext?.userId ?? null,

@@ -4,6 +4,7 @@ import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { parseDbDateRange } from '../../utils/datetime'
 import { splitPaymentIvaByOrderRates, grossByRateFromItems } from '../fiscal/ivaMath'
+import { ivaDeDevolucion, processorDataDeDevoluciones } from '../fiscal/deliveryFiscalDelta'
 import { paymentInFiscalScope } from '../fiscal/fiscalScope'
 import { computePeriodCogsCents } from '../fiscal/cogs.service'
 
@@ -120,6 +121,7 @@ export async function getIncomeStatement(venueId: string, filters: IncomeStateme
       order: { status: { not: OrderStatus.CANCELLED } },
     },
     select: {
+      id: true,
       amount: true,
       tipAmount: true,
       type: true,
@@ -135,6 +137,13 @@ export async function getIncomeStatement(venueId: string, filters: IncomeStateme
       },
     },
   })
+
+  // El IVA de una devolución sigue la MISMA regla que la póliza (`ivaDeDevolucion`): el ajuste del proveedor
+  // de reparto trae su propio reparto por tasa. Su processorData se lee aparte, sólo de las devoluciones.
+  const processorDataDeAjustes = await processorDataDeDevoluciones(
+    venueId,
+    rows.filter(r => r.type === PaymentType.REFUND).map(r => r.id),
+  )
 
   // Acumuladores GERENCIALES (todo) y FISCALES (subconjunto en alcance). Cada pago suma al gerencial
   // siempre, y al fiscal solo si `paymentInFiscalScope` lo permite.
@@ -166,7 +175,7 @@ export async function getIncomeStatement(venueId: string, filters: IncomeStateme
 
     if (r.type === PaymentType.REFUND) {
       const magnitudeCents = Math.abs(amountCents)
-      const s = splitPaymentIvaByOrderRates(magnitudeCents, grossByRate, DEFAULT_IVA_RATE)
+      const s = ivaDeDevolucion(r.id, magnitudeCents, processorDataDeAjustes.get(r.id), grossByRate, { avisar: false })
       ger.refunds += magnitudeCents
       ger.base -= s.netCents
       ger.iva -= s.taxCents

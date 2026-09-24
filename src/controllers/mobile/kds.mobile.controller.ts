@@ -8,6 +8,8 @@
 import { NextFunction, Request, Response } from 'express'
 import logger from '../../config/logger'
 import * as kdsMobileService from '../../services/mobile/kds.mobile.service'
+import { reportOutOfStock, retryOutOfStock, type ResultadoRetiro } from '../../services/mobile/kdsOutOfStock.mobile.service'
+import { OPERACION_EN_CURSO } from './deliveryOrder.mobile.controller'
 
 /**
  * List active KDS orders for a venue
@@ -166,6 +168,20 @@ export const confirmKdsPrinted = async (req: Request, res: Response, next: NextF
   }
 }
 
+/**
+ * GET /mobile/venues/:venueId/kds/orders/:kdsOrderId/courier — "¿quién trae esto?", a botón.
+ */
+export const fetchKdsCourier = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, kdsOrderId } = req.params
+    const data = await kdsMobileService.fetchKdsCourier(venueId, kdsOrderId)
+    res.status(200).json({ success: true, data })
+  } catch (error) {
+    logger.error('Error in fetchKdsCourier controller:', error)
+    next(error)
+  }
+}
+
 /** POST .../release-print — "no pude"; la suelta YA para que otro aparato lo intente. */
 export const releaseKdsPrint = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -174,6 +190,56 @@ export const releaseKdsPrint = async (req: Request, res: Response, next: NextFun
     if (!deviceId) return res.status(400).json({ ok: false, error: 'Falta identificar el aparato (deviceId).' })
     const r = await kdsMobileService.releaseKdsPrint(venueId, id, deviceId)
     return res.json({ ok: r.ok })
+  } catch (e) {
+    return next(e)
+  }
+}
+
+// ── «No tengo este artículo» (spec KDS Uber §3.3 / §3.5) ────────────────────────────
+// 200 retirado (o ya lo estaba) · 202 esperando al proveedor · 409 precondición · 502 el proveedor
+// lo rechazó · 503 no se le pudo hablar (nada salió; se puede volver a pedir).
+// Las apps muestran `error` tal cual: el texto lo escribe el servidor.
+
+function responderRetiro(res: Response, r: ResultadoRetiro) {
+  switch (r.kind) {
+    case 'HECHO':
+      return res.status(200).json({ success: true, data: r.comanda })
+    case 'EN_CURSO':
+      return res
+        .status(202)
+        .json({ success: true, data: { state: r.state, attempts: r.attempts, since: r.since, canRetryAt: r.canRetryAt } })
+    case 'CONFLICTO': {
+      const que = r.ocupadaPor && OPERACION_EN_CURSO[r.ocupadaPor]
+      return res.status(409).json({ success: false, code: r.code, error: que ? `Espera: ${que}. Intenta en un momento.` : r.error })
+    }
+    case 'RECHAZADO':
+      return res.status(502).json({ success: false, code: 'PROVIDER_REJECTED', ...(r.reason ? { reason: r.reason } : {}), error: r.error })
+    case 'NO_ENVIADO':
+      return res.status(503).json({ success: false, code: 'PROVIDER_NOT_CONTACTED', error: r.error })
+  }
+}
+
+/** POST /mobile/venues/:venueId/kds/orders/:kdsOrderId/items/:itemId/out-of-stock */
+export const reportKdsItemOutOfStock = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, kdsOrderId, itemId } = req.params
+    const { userId } = (req as any).authContext
+    return responderRetiro(res, await reportOutOfStock(venueId, kdsOrderId, itemId, userId))
+  } catch (e) {
+    return next(e)
+  }
+}
+
+/** POST …/out-of-stock/retry `{ expectedAttempt }` — una persona vuelve a pedirlo, 15 min después. */
+export const retryKdsItemOutOfStock = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, kdsOrderId, itemId } = req.params
+    const { userId } = (req as any).authContext
+    const expectedAttempt = (req.body ?? {}).expectedAttempt
+    if (!Number.isInteger(expectedAttempt) || expectedAttempt < 1) {
+      return res.status(400).json({ success: false, error: 'Falta el número de intento (expectedAttempt) que se quiere reintentar.' })
+    }
+    return responderRetiro(res, await retryOutOfStock(venueId, kdsOrderId, itemId, userId, expectedAttempt))
   } catch (e) {
     return next(e)
   }

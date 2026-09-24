@@ -21,6 +21,7 @@ import { PaymentFundsFlow, Prisma, TransactionStatus } from '@prisma/client'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 
 export type RefundOutcome = 'APPLIED' | 'ALREADY_APPLIED' | 'ORDER_NOT_FOUND' | 'NOTHING_TO_APPLY'
 
@@ -59,47 +60,98 @@ export async function applyDeliveryRefund(params: {
   // reembolso va a llegar muchas veces. Sin esta llave, cada corrida restaría otra vez y el
   // ingreso del comercio se hundiría solo, un poco cada día, sin que nada fallara.
   const idempotencyKey = `uber-refund:${params.externalOrderId}`
-  const yaAplicado = await prisma.payment.findFirst({ where: { orderId: order.id, idempotencyKey }, select: { id: true } })
-  if (yaAplicado) return { outcome: 'ALREADY_APPLIED', orderId: order.id }
+  const r = await prisma.$transaction(async tx => {
+    // Serializa con la reconciliación del retiro (toma la MISMA fila `Order FOR UPDATE`): así la
+    // reconciliación ve este chargeback al calcular su Δ, y la duda de abajo ve un ajuste recién escrito.
+    await lockExistingOrderForPayment(tx, { venueId: order.venueId, orderId: order.id })
+    const yaAplicado = await tx.payment.findFirst({ where: { orderId: order.id, idempotencyKey }, select: { id: true } })
+    if (yaAplicado) return { outcome: 'ALREADY_APPLIED' as const }
 
-  const original = await prisma.payment.findFirst({
-    where: { orderId: order.id, type: 'REGULAR' },
-    select: { method: true, source: true, tenderTypeId: true, fundsFlow: true },
+    // N-1 (2ª pasada de Codex): el chargeback se escribe COMPLETO. Un ajuste previo del retiro
+    // (REFUND `PROVIDER_ADJUSTMENT`) NO prueba que este chargeback sea ese mismo dinero — puede ser
+    // la queja por OTRO artículo. Restarlo dejaba ingresos sobrevaluados en silencio; aquí, si
+    // coexisten, se escribe todo y se levanta la duda para una persona (errar a subvaluado y visible).
+    const ajustes = await tx.payment.findMany({
+      where: {
+        orderId: order.id,
+        venueId: order.venueId,
+        type: 'REFUND',
+        status: TransactionStatus.COMPLETED,
+        processorData: { path: ['provenance'], equals: 'PROVIDER_ADJUSTMENT' },
+      },
+      select: { id: true, amount: true },
+      take: 500,
+    })
+    const compensado = ajustes.reduce((s, a) => s.plus(a.amount.abs()), new Prisma.Decimal(0))
+
+    const original = await tx.payment.findFirst({
+      where: { orderId: order.id, type: 'REGULAR' },
+      select: { method: true, source: true, tenderTypeId: true, fundsFlow: true },
+    })
+
+    const escrito = await tx.payment.create({
+      data: {
+        venueId: order.venueId,
+        orderId: order.id,
+        // Negativo, como el reembolso del TPV: es la forma que los reportes ya netean.
+        amount: monto.neg(),
+        tipAmount: new Prisma.Decimal(0),
+        // 🔴 Cero, y NO es un placeholder: estos tres son la comisión del PROCESADOR de pagos,
+        // y aquí Avoqado no procesa nada — el dinero lo mueve el marketplace. El propio schema
+        // lo advierte: "Commercial tender commission (Uber's ~30%) lives in tenderCommission*
+        // below — never here". Meter el 30% de Uber en estos campos mezclaría dos costos
+        // distintos y rompería el reporte de comisiones de tarjeta.
+        feePercentage: new Prisma.Decimal(0),
+        feeAmount: new Prisma.Decimal(0),
+        netAmount: monto.neg(),
+        type: 'REFUND',
+        status: TransactionStatus.COMPLETED,
+        method: original?.method ?? 'OTHER',
+        source: original?.source ?? 'DELIVERY_PLATFORM',
+        // Hereda la SEMÁNTICA del cobro original: este dinero tampoco sale del cajón, lo
+        // descuenta el proveedor de su depósito. Sin heredarlo, el arqueo pediría un efectivo
+        // que nunca estuvo ahí.
+        // Explícitos y no con spreads condicionales: un `...(cond ? {a} : {})` produce una
+        // llave OPCIONAL, y eso rompe la discriminación de tipos de Prisma entre su forma
+        // escalar y la relacional.
+        tenderTypeId: original?.tenderTypeId ?? null,
+        fundsFlow: original?.fundsFlow ?? PaymentFundsFlow.EXTERNAL_RECORDED,
+        // 🔴 La COMISIÓN no se hereda, a propósito: que el proveedor devuelva el dinero al
+        // cliente NO significa que devuelva su porcentaje al comercio. Copiarla aquí le
+        // acreditaría al negocio una comisión que nadie le regresó.
+        idempotencyKey,
+      },
+      select: { id: true },
+    })
+    if (ajustes.length > 0) {
+      await tx.activityLog.create({
+        data: {
+          venueId: order.venueId,
+          staffId: null,
+          action: 'DELIVERY_REFUND_POSSIBLE_DUPLICATE',
+          entity: 'Order',
+          entityId: order.id,
+          data: {
+            mensaje: 'posible doble registro: revisar contra el reporte de Uber',
+            chargebackPaymentId: escrito.id,
+            chargeback: monto.toString(),
+            ajustesPaymentIds: ajustes.map(a => a.id),
+            ajustes: compensado.toString(),
+          },
+        },
+      })
+    }
+    return { outcome: 'APPLIED' as const, compensado, duda: ajustes.length > 0 }
   })
 
-  await prisma.payment.create({
-    data: {
-      venueId: order.venueId,
+  if (r.outcome === 'ALREADY_APPLIED') return { outcome: 'ALREADY_APPLIED', orderId: order.id }
+  if (r.duda) {
+    logger.error('🚨 [💸 DeliveryRefund] posible doble registro: el chargeback llegó sobre una orden con retiro ya compensado — revisar contra el reporte de Uber', {
       orderId: order.id,
-      // Negativo, como el reembolso del TPV: es la forma que los reportes ya netean.
-      amount: monto.neg(),
-      tipAmount: new Prisma.Decimal(0),
-      // 🔴 Cero, y NO es un placeholder: estos tres son la comisión del PROCESADOR de pagos,
-      // y aquí Avoqado no procesa nada — el dinero lo mueve el marketplace. El propio schema
-      // lo advierte: "Commercial tender commission (Uber's ~30%) lives in tenderCommission*
-      // below — never here". Meter el 30% de Uber en estos campos mezclaría dos costos
-      // distintos y rompería el reporte de comisiones de tarjeta.
-      feePercentage: new Prisma.Decimal(0),
-      feeAmount: new Prisma.Decimal(0),
-      netAmount: monto.neg(),
-      type: 'REFUND',
-      status: TransactionStatus.COMPLETED,
-      method: original?.method ?? 'OTHER',
-      source: original?.source ?? 'DELIVERY_PLATFORM',
-      // Hereda la SEMÁNTICA del cobro original: este dinero tampoco sale del cajón, lo
-      // descuenta el proveedor de su depósito. Sin heredarlo, el arqueo pediría un efectivo
-      // que nunca estuvo ahí.
-      // Explícitos y no con spreads condicionales: un `...(cond ? {a} : {})` produce una
-      // llave OPCIONAL, y eso rompe la discriminación de tipos de Prisma entre su forma
-      // escalar y la relacional.
-      tenderTypeId: original?.tenderTypeId ?? null,
-      fundsFlow: original?.fundsFlow ?? PaymentFundsFlow.EXTERNAL_RECORDED,
-      // 🔴 La COMISIÓN no se hereda, a propósito: que el proveedor devuelva el dinero al
-      // cliente NO significa que devuelva su porcentaje al comercio. Copiarla aquí le
-      // acreditaría al negocio una comisión que nadie le regresó.
-      idempotencyKey,
-    },
-  })
+      chargeback: monto.toString(),
+      ajustes: r.compensado.toString(),
+    })
+  }
 
   void logAction({
     action: 'DELIVERY_REFUND_APPLIED',

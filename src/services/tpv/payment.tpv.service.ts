@@ -978,7 +978,9 @@ export async function resolveAutofacturaAvailable(orderId: string | null | undef
   if (!orderId) return false
   try {
     const bundle = await loadOrderForCfdiFromDb(orderId)
-    return !!bundle && bundle.facturacionEnabled && bundle.autofacturaEnabled
+    // Fuera del sobre seguro (promoción, cargo por servicio…) el motor rechazaría el documento: el
+    // ticket no ofrece una autofactura que después va a fallar.
+    return !!bundle && bundle.facturacionEnabled && bundle.autofacturaEnabled && !bundle.unsupportedReasons?.length
   } catch (error) {
     logger.error('[payment.tpv.service] resolveAutofacturaAvailable lookup failed — defaulting to false', {
       orderId,

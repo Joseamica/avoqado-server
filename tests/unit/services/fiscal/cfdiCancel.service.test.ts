@@ -160,3 +160,66 @@ describe('getCfdiStatus', () => {
     await expect(getCfdiStatus({ cfdiId: 'missing', expectedVenueId: 'v1' }, deps)).rejects.toThrow(/not found/i)
   })
 })
+
+// ─── R4: la cancelación nunca miente ────────────────────────────────────────────
+// Codex (v4): el adaptador daba por cancelada cualquier respuesta que no fuera `canceled`. En una
+// SUSTITUCIÓN eso deja dos facturas vigentes ante el SAT.
+describe('cancelCfdi — sólo marca CANCELLED cuando consta', () => {
+  const stampedCfdi = {
+    id: 'c1',
+    venueId: 'v1',
+    status: 'STAMPED',
+    facturapiId: 'fa1',
+    uuid: 'UUID-1',
+    fiscalEmisor: { id: 'e1', provider: 'FACTURAPI', providerKeyEnc: null, csdStatus: 'ACTIVE' },
+  }
+  function cancelDeps(status: string, over: Record<string, any> = {}) {
+    const updateCfdi = jest.fn().mockImplementation(async (_id, data) => ({ ...stampedCfdi, ...data }))
+    return {
+      deps: {
+        loadCfdi: jest.fn().mockResolvedValue({ ...stampedCfdi, ...over }),
+        resolveProvider: jest.fn().mockReturnValue({
+          name: 'facturapi',
+          cancelInvoice: jest
+            .fn()
+            .mockResolvedValue({ status, cancelledAt: status === 'canceled' || status === 'accepted' ? new Date() : null }),
+        } as any),
+        updateCfdi,
+      } as any,
+      updateCfdi,
+    }
+  }
+
+  it.each([
+    ['canceled', 'CANCELLED', 'CANCELLED'],
+    ['accepted', 'ACCEPTED', 'CANCELLED'],
+  ])('%s ⇒ cancelStatus %s y el CFDI pasa a %s', async (provider, cancelStatus, cfdiStatus) => {
+    const { deps, updateCfdi } = cancelDeps(provider)
+    const res = await cancelCfdi({ cfdiId: 'c1', motivo: '02', sandbox: true, expectedVenueId: 'v1' }, deps)
+    expect(res.cancelStatus).toBe(cancelStatus)
+    expect(updateCfdi.mock.calls[0][1].status).toBe(cfdiStatus)
+  })
+
+  it.each([
+    ['pending', 'REQUESTED'],
+    ['rejected', 'REJECTED'],
+    ['expired', 'REJECTED'],
+    ['none', 'REJECTED'],
+  ])('%s ⇒ cancelStatus %s y el CFDI SIGUE STAMPED (no se inventa la cancelación)', async (provider, cancelStatus) => {
+    const { deps, updateCfdi } = cancelDeps(provider)
+    const res = await cancelCfdi({ cfdiId: 'c1', motivo: '02', sandbox: true, expectedVenueId: 'v1' }, deps)
+    expect(res.cancelStatus).toBe(cancelStatus)
+    expect(updateCfdi.mock.calls[0][1].status).toBe('STAMPED')
+  })
+
+  it('`none` y `expired` dejan escrito POR QUÉ, para que la pantalla no diga sólo «rechazada»', async () => {
+    for (const [provider, texto] of [
+      ['none', /no registró/i],
+      ['expired', /caduc/i],
+    ] as const) {
+      const { updateCfdi, deps } = cancelDeps(provider)
+      await cancelCfdi({ cfdiId: 'c1', motivo: '02', sandbox: true, expectedVenueId: 'v1' }, deps)
+      expect(updateCfdi.mock.calls[0][1].lastError).toMatch(texto)
+    }
+  })
+})

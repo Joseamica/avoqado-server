@@ -19,6 +19,13 @@ describe('redactUrlSecrets', () => {
     expect(redactUrlSecrets('/x?state=abc123.mac')).not.toContain('abc123.mac')
   })
 
+  it('🔴 redacta el `intent` de la conexión de Uber: el enlace firmado es una credencial durante 10 minutos', () => {
+    const r = redactUrlSecrets('/api/v1/delivery/uber/oauth/start?intent=cmint123.firmaHmacBase64url')
+    expect(r).not.toContain('cmint123')
+    expect(r).not.toContain('firmaHmacBase64url')
+    expect(r).toContain('intent=%5Bredactado%5D')
+  })
+
   it('redacta tokens, secretos y contraseñas por cualquiera de sus nombres comunes', () => {
     const r = redactUrlSecrets('/x?access_token=A&refresh_token=B&client_secret=C&password=D&api_key=E&signature=F')
     for (const secreto of ['=A', '=B', '=C', '=D', '=E', '=F']) expect(r).not.toContain(secreto)

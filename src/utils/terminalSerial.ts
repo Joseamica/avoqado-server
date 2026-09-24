@@ -63,7 +63,12 @@ export function terminalIdentityKey(serial: string): string {
  * la MISMA regla que `terminalIdentityKey`. `trim()` de PostgreSQL sólo quita el espacio ASCII y `[[:space:]]` depende del
  * locale: un serial con un tabulador o un NBSP pegado se leía como OTRA terminal en SQL y como la misma en JS.
  */
-const ESPACIOS_COMO_TRIM_JS = '\\s\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff'
+// 🔴 Codex r5-8 (22-sep): `\\s` NO servía aquí. En PostgreSQL equivale a la clase `space`, que **depende del locale**:
+// bajo ICU incluye U+0085 (NEL), que `String.prototype.trim()` de JavaScript NO recorta. Con ese locale, un valor
+// guardado como `"\u0085abc"` se recortaba en SQL y no en JS ⇒ las dos capas dejaban de hablar de la misma llave, que es
+// exactamente lo que esta constante existe para impedir. Se listan los seis ASCII explícitos (tab, LF, VT, FF, CR y
+// espacio) y se conserva la lista Unicode: así el patrón es equivalente EXACTO a `trim()` en cualquier locale.
+const ESPACIOS_COMO_TRIM_JS = '\\t\\n\\v\\f\\r \\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff'
 export const PATRON_SQL_TRIM_COMO_JS = `^[${ESPACIOS_COMO_TRIM_JS}]+|[${ESPACIOS_COMO_TRIM_JS}]+$`
 
 /**

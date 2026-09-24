@@ -15,10 +15,10 @@ import logger from '@/config/logger'
 import { uberApi, fetchUberOrder } from './uber.client'
 import { orderIdFromResourceHref } from './uber.http'
 import { verifyUberSignature } from './uber.signature'
-import { mapUberOrder } from './uber.mapper'
+import { mapCourier, mapUberOrder } from './uber.mapper'
 import { aDisponibilidadUber, mapSnapshotToUberMenu, type UberMenuOptions } from './uber.menuMapper'
 import type { MenuSnapshot } from '../../core/menuSnapshot.service'
-import type { CanonicalDeliveryEvent, DirectDeliveryAdapter, NormalizedDeliveryOrder } from '../../core/types'
+import type { CanonicalDeliveryEvent, CourierInfo, DirectDeliveryAdapter, NormalizedDeliveryOrder } from '../../core/types'
 
 export type UberDenyReason = 'OUT_OF_ITEMS' | 'STORE_CLOSED' | 'TOO_BUSY' | 'OTHER'
 
@@ -116,8 +116,8 @@ export const uberAdapter = {
    * Trae el pedido completo. Uber manda un PUNTERO en el webhook, no el contenido: sin este
    * GET no hay nada que ingerir.
    */
-  async fetchOrder(orderId: string): Promise<unknown> {
-    const r = await fetchUberOrder(orderId)
+  async fetchOrder(orderId: string, signal?: AbortSignal): Promise<unknown> {
+    const r = await fetchUberOrder(orderId, signal)
     if (r.status >= 400) {
       throw new Error(`Uber devolvió HTTP ${r.status} al traer el pedido ${orderId}: ${r.text.slice(0, 200)}`)
     }
@@ -127,6 +127,20 @@ export const uberAdapter = {
   /** Traduce el pedido crudo al contrato interno. Aquí vive TODA la diferencia de formato. */
   normalizeOrder(raw: unknown): NormalizedDeliveryOrder {
     return mapUberOrder(raw)
+  },
+
+  /**
+   * "¿Quién trae este pedido?" Reusa el MISMO GET que `fetchOrder` — el pedido completo ya
+   * trae `deliveries[]` cuando Uber asignó a alguien, así que pedir un endpoint aparte sería
+   * una llamada de más para un dato que el pedido ya trae. `storeId` no se usa: el GET no
+   * necesita alcance de tienda (igual que `fetchOrder`).
+   */
+  async fetchCourier(orderId: string): Promise<CourierInfo | null> {
+    const r = await fetchUberOrder(orderId)
+    if (r.status >= 400) {
+      throw new Error(`Uber devolvió HTTP ${r.status} al traer el pedido ${orderId}: ${r.text.slice(0, 200)}`)
+    }
+    return mapCourier(r.json)
   },
 
   /**
@@ -250,8 +264,9 @@ export const uberAdapter = {
    * y hubo que restaurarlo desde respaldo—, porque el aislamiento del sandbox que Uber
    * documenta NO se cumple cuando la cuenta no tiene tienda de prueba asignada.
    *
-   * Lo único que lo hace seguro es `assertStoreWritable` en `uber.http.ts`, que corre ANTES
-   * de cualquier escritura y sólo deja pasar las tiendas de `UBER_WRITABLE_STORE_IDS_*`.
+   * Lo único que lo hace seguro es el candado: `uberApi` resuelve en CADA escritura las tiendas
+   * escribibles (consentimiento vigente del dueño en producción; `UBER_WRITABLE_STORE_IDS_SANDBOX`
+   * en sandbox) y `assertStoreWritable` en `uber.http.ts` rechaza cualquier otra ANTES de la red.
    * **Nunca quites ese candado ni lo muevas más arriba en la pila.**
    *
    * Para marcar UN producto agotado NO se usa esto: hay un update puntual

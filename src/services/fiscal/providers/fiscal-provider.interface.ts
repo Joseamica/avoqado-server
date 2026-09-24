@@ -108,6 +108,12 @@ export interface CreateInvoiceParams {
   idempotencyKey: string
   /** Stamped as `external_id` on the PAC document — enables deterministic orphan lookup in reconcile. */
   externalId?: string
+  /**
+   * CFDI relacionado (c_TipoRelacion). Hoy sólo se usa '04' = "Sustitución de los CFDI previos":
+   * la factura CORREGIDA declara a cuál sustituye, y la original se cancela con motivo 01 apuntando
+   * a ésta. Sin la relación, el SAT ve dos ingresos por la misma venta.
+   */
+  relation?: { tipoRelacion: '04'; relatedUuids: string[] }
 }
 
 /**
@@ -223,7 +229,13 @@ export interface CancelInvoiceParams {
 }
 
 export interface CancelInvoiceResult {
-  status: 'pending' | 'accepted' | 'canceled' | 'rejected'
+  /**
+   * Desenlace de la SOLICITUD de cancelación ante el PAC/SAT.
+   * 🔴 `none` = el PAC NO registró ninguna cancelación (la factura sigue viva) y `expired` = la
+   * solicitud caducó sin respuesta del receptor. Ninguno de los dos puede leerse como cancelado:
+   * darlos por buenos deja DOS facturas vigentes en una sustitución.
+   */
+  status: 'pending' | 'accepted' | 'canceled' | 'rejected' | 'expired' | 'none'
   cancelledAt: Date | null
 }
 
@@ -265,6 +277,8 @@ export interface FiscalProvider {
   uploadCsd(params: UploadCsdParams): Promise<UploadCsdResult>
   /** Consulta el estado de onboarding de la org en el PAC (pasos pendientes, p.ej. la Carta Manifiesto). */
   getOrganizationStatus(providerOrgId: string): Promise<OrgStatusResult>
+  /** Sube el logo del negocio a la org del PAC: es lo que imprime en el PDF de cada factura. */
+  uploadLogo(providerOrgId: string, image: Buffer): Promise<void>
   // NOTA: la validación de formato del receptor NO vive aquí. `validateBeforeStamp()`
   // (src/services/fiscal/cfdiValidation.ts) es el único pre-check antes de timbrar y ya
   // cubre RFC, CP, razón social, régimen y uso de CFDI — además de CSD, forma de pago,

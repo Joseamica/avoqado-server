@@ -10,6 +10,7 @@ import prisma from '@/utils/prismaClient'
 import { processUberEvent } from '@/services/delivery-channels/providers/uber-eats/uber.eventProcessor'
 import { uberAdapter } from '@/services/delivery-channels/providers/uber-eats/uber.adapter'
 import { listKdsOrders } from '@/services/mobile/kds.mobile.service'
+import * as deliveryOrderLock from '@/services/delivery-channels/core/deliveryOrderLock'
 import fixtureUapi from '../../fixtures/delivery/uber/pedido-real-uapi.json'
 
 // El pedido PELÓN, sin el sobre `{order}`: el mapper acepta ambos, y así los spreads de los
@@ -330,10 +331,11 @@ describe('procesador de eventos de Uber: aviso → pedido → venta aceptada', (
       ],
     }
     const cancelados: string[] = []
-    // Se simula el fallo de la comanda tirando la tabla de KDS con un venue inexistente NO
-    // sirve; se fuerza con un espía sobre prisma.kdsOrder.create.
-    const original = prisma.kdsOrder.create
-    ;(prisma as any).kdsOrder.create = jest.fn().mockRejectedValue(new Error('KDS caído'))
+    // La comanda se crea DENTRO de `withDeliveryOrderLock` (Task 12), en una transacción
+    // interactiva — mockear `prisma.kdsOrder.create` en el cliente GLOBAL ya no intercepta
+    // nada (el `tx` es otro objeto). Se fuerza el fallo espiando el candado mismo, que es
+    // exactamente lo que ve el `catch` de `deliveryOrderIngestion.service.ts`.
+    const spyLock = jest.spyOn(deliveryOrderLock, 'withDeliveryOrderLock').mockRejectedValue(new Error('KDS caído'))
     const spyCancel = jest.spyOn(uberAdapter, 'cancelOrder').mockImplementation(async (id: string) => {
       cancelados.push(id)
       return { ok: true, status: 200, raw: '' }
@@ -349,7 +351,7 @@ describe('procesador de eventos de Uber: aviso → pedido → venta aceptada', (
       const order = await prisma.order.findUniqueOrThrow({ where: { id: r.orderId! } })
       expect(order.status).toBe('CANCELLED')
     } finally {
-      ;(prisma as any).kdsOrder.create = original
+      spyLock.mockRestore()
       spyCancel.mockRestore()
     }
   })
@@ -367,15 +369,16 @@ describe('procesador de eventos de Uber: aviso → pedido → venta aceptada', (
       id: `sinnota-${Date.now()}`,
       carts: [{ ...pedidoReal.carts[0], items: [{ ...pedidoReal.carts[0].items[0], customer_request: undefined }] }],
     }
-    const original = prisma.kdsOrder.create
-    ;(prisma as any).kdsOrder.create = jest.fn().mockRejectedValue(new Error('KDS caído'))
+    // Mismo motivo que arriba: la comanda se crea dentro de la transacción del candado, no
+    // sobre el cliente global de Prisma.
+    const spyLock = jest.spyOn(deliveryOrderLock, 'withDeliveryOrderLock').mockRejectedValue(new Error('KDS caído'))
     try {
       const id = `ev-sinnota-${Date.now()}`
       const r = await processUberEvent(await nuevoEvento(id, aviso(id, sinNota.id)), { ...deps, fetchOrder: async () => sinNota })
       expect(r.outcome).toBe('PROCESSED')
       expect((await prisma.order.findUniqueOrThrow({ where: { id: r.orderId! } })).status).toBe('CONFIRMED')
     } finally {
-      ;(prisma as any).kdsOrder.create = original
+      spyLock.mockRestore()
     }
   })
 
@@ -538,22 +541,29 @@ describe('procesador de eventos de Uber: aviso → pedido → venta aceptada', (
       await prisma.deliveryChannelLink.update({ where: { id: linkId }, data: { status: 'ACTIVE' } })
     })
 
-    it('🔴 el cliente CAMBIA el pedido: se vuelve a traer y se guarda para revisar', async () => {
-      // v1 NO muta la venta —reconciliar artículos + cobro + inventario a medias es peor que
-      // no hacerlo— pero el pedido nuevo queda guardado y se grita, porque alguien tiene que
-      // mirarlo antes de que la cocina prepare lo que ya no es.
-      const cambiado = { ...pedidoReal, display_id: 'CAMBIADO' }
+    it('🔴 el cliente CAMBIA el pedido: la venta se RECONCILIA contra una foto fresca, sin crear otra', async () => {
+      // Antes: se guardaba el pedido nuevo y se gritaba, pero la venta seguía reportando lo que el
+      // cliente ya no pagó (spec H11). Ahora pasa por la MISMA reconciliación que el retiro del KDS;
+      // su dinero se prueba en `lineActionReconciler.test.ts` y `reconciliacionDinero.test.ts`.
+      // Un pedido propio: el de `pedidoReal` ya lo cancelaron las pruebas de arriba, y una venta
+      // cancelada no se reconcilia (no se lee al proveedor).
+      const propio = { ...pedidoReal, id: `fc-${Date.now()}` }
+      const idN = `ev-fc-alta-${Date.now()}`
+      const alta = await processUberEvent(await nuevoEvento(idN, aviso(idN, propio.id)), { ...deps, fetchOrder: async () => propio })
+      const existente = await prisma.order.findUniqueOrThrow({ where: { id: alta.orderId! } })
+      const lectura = jest.spyOn(uberAdapter, 'fetchOrder').mockResolvedValue(propio)
       const id = `ev-fulfill-${Date.now()}`
-      const r = await processUberEvent(await nuevoEvento(id, avisoTipo(id, 'order.fulfillment_issues.resolved')), {
-        ...deps,
-        fetchOrder: async () => cambiado,
-      })
+      try {
+        const r = await processUberEvent(await nuevoEvento(id, avisoTipo(id, 'order.fulfillment_issues.resolved', propio.id)), deps)
 
-      expect(r.outcome).toBe('NOT_AN_ORDER') // no crea otra venta
-      const ev = await prisma.deliveryOrderEvent.findUniqueOrThrow({
-        where: { id: (await prisma.deliveryOrderEvent.findFirstOrThrow({ where: { externalEventId: id } })).id },
-      })
-      expect(ev.resourcePayload).toMatchObject({ display_id: 'CAMBIADO' }) // el pedido NUEVO quedó guardado
+        expect(r).toMatchObject({ outcome: 'RECONCILED', orderId: existente.id })
+        expect(lectura).toHaveBeenCalledWith(propio.id, expect.anything())
+        const ev = await prisma.deliveryOrderEvent.findFirstOrThrow({ where: { externalEventId: id } })
+        expect(ev.status).toBe(DeliveryOrderEventStatus.PROCESSED)
+        expect(await prisma.order.count({ where: { venueId, externalId: `UBER_EATS:${propio.id}` } })).toBe(1) // no crea otra venta
+      } finally {
+        lectura.mockRestore()
+      }
     })
   })
 })

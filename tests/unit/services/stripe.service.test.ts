@@ -16,6 +16,8 @@ import { Feature } from '@prisma/client'
 import * as retryUtils from '@/utils/retry'
 
 // Mock dependencies
+// Estas pruebas cubren la compra con la venta suelta ABIERTA.
+jest.mock('@/services/access/ventaSuelta', () => ({ ventaSueltaAbierta: () => true }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
@@ -36,6 +38,11 @@ jest.mock('@/utils/prismaClient', () => ({
       updateMany: jest.fn(),
       upsert: jest.fn(),
     },
+    // La compra de una suelta va dentro de una transacción con candado (Codex, 21-sep, ronda 4).
+    // Función pelona, no jest.fn: sobrevive a los reset de mocks.
+    $queryRaw: () => Promise.resolve([{ tomado: true }]),
+    $executeRaw: () => Promise.resolve(0),
+    $transaction: (fn: (tx: unknown) => unknown) => fn(jest.requireMock('@/utils/prismaClient').default),
   },
 }))
 
@@ -166,6 +173,29 @@ describe('Stripe Service - Comprehensive Tests', () => {
         expect(mockStripeInstance.customers.del).toHaveBeenCalledWith('cus_duplicate')
       })
 
+      it.each([
+        [
+          'se pudo borrar el duplicado',
+          () => mockStripeInstance.customers.del.mockResolvedValueOnce({ id: 'cus_huerfano', deleted: true }),
+        ],
+        ['no se pudo borrar el duplicado', () => mockStripeInstance.customers.del.mockRejectedValueOnce(new Error('socket hang up'))],
+      ])('🔴 si el negocio desapareció mientras se creaba el cliente (%s): 404, nunca devuelve el cliente huérfano', async (_n, del) => {
+        // R0 ronda 4 (Codex): el borrado del negocio gana el candado de la fila; el reclamo no encuentra
+        // nada y la relectura tampoco. Devolver el cliente recién creado dejaba al llamador creando un
+        // SetupIntent o una suscripción para un negocio que ya no existe.
+        ;(prisma.venue.findUnique as jest.Mock).mockResolvedValueOnce({ id: 'venue_borrado', stripeCustomerId: null })
+        mockStripeInstance.customers.create.mockResolvedValueOnce({ id: 'cus_huerfano' })
+        ;(prisma.venue.updateMany as jest.Mock).mockResolvedValueOnce({ count: 0 })
+        ;(prisma.venue.findUnique as jest.Mock).mockResolvedValueOnce(null)
+        del()
+
+        await expect(stripeService.getOrCreateStripeCustomer('venue_borrado', 'test@example.com', 'Test User')).rejects.toMatchObject({
+          statusCode: 404,
+          code: 'VENUE_NOT_FOUND',
+        })
+        expect(mockStripeInstance.customers.del).toHaveBeenCalledWith('cus_huerfano')
+      })
+
       it('should return existing customer ID without creating new one', async () => {
         const mockVenueId = 'venue_existing'
         const existingCustomerId = 'cus_existing_123'
@@ -284,13 +314,13 @@ describe('Stripe Service - Comprehensive Tests', () => {
         })
 
         // Mock: VenueFeature upsert
-        ;(prisma.venueFeature.upsert as jest.Mock).mockResolvedValue({})
+        ;(prisma.venueFeature.create as jest.Mock).mockResolvedValue({}) // vínculo nuevo: sin fila previa se CREA (CAS, 21-sep)
 
         const result = await stripeService.createTrialSubscriptions(mockCustomerId, mockVenueId, mockFeatureCodes, trialDays)
 
         expect(result).toEqual(['sub_analytics_123', 'sub_pos_123'])
         expect(mockStripeInstance.subscriptions.create).toHaveBeenCalledTimes(2)
-        expect(prisma.venueFeature.upsert).toHaveBeenCalledTimes(2)
+        expect(prisma.venueFeature.create).toHaveBeenCalledTimes(2)
 
         // Verify trial subscription parameters
         expect(mockStripeInstance.subscriptions.create).toHaveBeenCalledWith(
@@ -302,6 +332,11 @@ describe('Stripe Service - Comprehensive Tests', () => {
               venueId: mockVenueId,
               featureCode: 'ANALYTICS',
             }),
+          }),
+          // 🔴 Y con llave de idempotencia: sin ella dos compras simultáneas —o el propio retry—
+          // creaban dos suscripciones (Codex, 21-sep, #2).
+          expect.objectContaining({
+            idempotencyKey: expect.stringMatching(/^venue-feature-sub:venue_123:feature_analytics:[0-9a-f-]{36}$/),
           }),
         )
       })
@@ -348,7 +383,7 @@ describe('Stripe Service - Comprehensive Tests', () => {
         // First subscription fails, second succeeds
         mockStripeInstance.subscriptions.create.mockRejectedValueOnce(new Error('Payment method required'))
         mockStripeInstance.subscriptions.create.mockResolvedValueOnce({ id: 'sub_2' })
-        ;(prisma.venueFeature.upsert as jest.Mock).mockResolvedValue({})
+        ;(prisma.venueFeature.create as jest.Mock).mockResolvedValue({}) // vínculo nuevo: sin fila previa se CREA (CAS, 21-sep)
 
         // Should throw error with details about failed subscription
         await expect(stripeService.createTrialSubscriptions(mockCustomerId, mockVenueId, ['FEATURE_1', 'FEATURE_2'])).rejects.toThrow(
@@ -358,7 +393,7 @@ describe('Stripe Service - Comprehensive Tests', () => {
         // Should still attempt to create all subscriptions
         expect(mockStripeInstance.subscriptions.create).toHaveBeenCalledTimes(2)
         // But only successful ones should create VenueFeature
-        expect(prisma.venueFeature.upsert).toHaveBeenCalledTimes(1)
+        expect(prisma.venueFeature.create).toHaveBeenCalledTimes(1)
       })
 
       it('should set endDate to null for paid subscriptions (trialDays = 0)', async () => {
@@ -384,18 +419,15 @@ describe('Stripe Service - Comprehensive Tests', () => {
           id: 'sub_paid_123',
           status: 'active',
         })
-        ;(prisma.venueFeature.upsert as jest.Mock).mockResolvedValue({})
+        ;(prisma.venueFeature.create as jest.Mock).mockResolvedValue({}) // vínculo nuevo: sin fila previa se CREA (CAS, 21-sep)
 
         await stripeService.createTrialSubscriptions(mockCustomerId, mockVenueId, ['PAID_FEATURE'], 0) // No trial
 
         // Verify endDate is null for paid subscription
-        expect(prisma.venueFeature.upsert).toHaveBeenCalledWith(
+        expect(prisma.venueFeature.create).toHaveBeenCalledWith(
           expect.objectContaining({
-            create: expect.objectContaining({
+            data: expect.objectContaining({
               endDate: null, // Paid subscription forever
-            }),
-            update: expect.objectContaining({
-              endDate: null,
             }),
           }),
         )
@@ -693,10 +725,11 @@ describe('Stripe Service - Comprehensive Tests', () => {
 
         mockStripeInstance.invoices.retrieve.mockResolvedValueOnce({
           id: mockInvoiceId,
+          customer: 'cus_123',
           invoice_pdf: mockPdfUrl,
         })
 
-        const result = await stripeService.getInvoicePdfUrl(mockInvoiceId)
+        const result = await stripeService.getInvoicePdfUrl(mockInvoiceId, 'cus_123')
 
         expect(result).toBe(mockPdfUrl)
         expect(mockStripeInstance.invoices.retrieve).toHaveBeenCalledWith(mockInvoiceId)
@@ -707,10 +740,13 @@ describe('Stripe Service - Comprehensive Tests', () => {
 
         mockStripeInstance.invoices.retrieve.mockResolvedValueOnce({
           id: mockInvoiceId,
+          customer: 'cus_123',
           invoice_pdf: null, // No PDF available
         })
 
-        await expect(stripeService.getInvoicePdfUrl(mockInvoiceId)).rejects.toThrow('Invoice in_no_pdf_123 does not have a PDF available')
+        await expect(stripeService.getInvoicePdfUrl(mockInvoiceId, 'cus_123')).rejects.toThrow(
+          'Invoice in_no_pdf_123 does not have a PDF available',
+        )
       })
     })
   })
@@ -1015,7 +1051,57 @@ describe('Stripe Service - Comprehensive Tests', () => {
           hasActiveDiscount: true,
           interval: 'month',
           grossAmountCents: 115884,
+          pausedUntil: null,
         })
+      })
+
+      /**
+       * 🔴 Codex N3 (ronda 4, P1): nadie leía `pause_collection`, y por eso el servidor no sabía que la cobranza ya
+       * estaba pausada — pedir la pausa otra vez la EXTENDÍA dos meses más, sin límite, conservando el acceso.
+       */
+      it('🔴 expone hasta cuándo está PAUSADA la cobranza', async () => {
+        const reanuda = 1893456000
+        mockStripeInstance.subscriptions.retrieve.mockResolvedValueOnce({
+          id: 'sub_pausada',
+          status: 'active',
+          cancel_at_period_end: false,
+          current_period_end: reanuda,
+          created: 1735689600,
+          pause_collection: { behavior: 'mark_uncollectible', resumes_at: reanuda },
+          items: { data: [{ price: { recurring: { interval: 'month' }, unit_amount: 115884 } }] },
+        })
+
+        const r = await stripeService.retrievePlanSubscription('sub_pausada')
+        expect(r.pausedUntil).toEqual(new Date(reanuda * 1000))
+      })
+
+      it('🔴 una pausa INDEFINIDA (sin fecha de reanudación) también cuenta como pausada', async () => {
+        mockStripeInstance.subscriptions.retrieve.mockResolvedValueOnce({
+          id: 'sub_pausada_sin_fin',
+          status: 'active',
+          cancel_at_period_end: false,
+          current_period_end: 1893456000,
+          created: 1735689600,
+          pause_collection: { behavior: 'mark_uncollectible' },
+          items: { data: [{ price: { recurring: { interval: 'month' }, unit_amount: 115884 } }] },
+        })
+
+        const r = await stripeService.retrievePlanSubscription('sub_pausada_sin_fin')
+        expect(r.pausedUntil).not.toBeNull()
+      })
+
+      it('sin pausa, `pausedUntil` es null', async () => {
+        mockStripeInstance.subscriptions.retrieve.mockResolvedValueOnce({
+          id: 'sub_normal',
+          status: 'active',
+          cancel_at_period_end: false,
+          current_period_end: 1893456000,
+          created: 1735689600,
+          items: { data: [{ price: { recurring: { interval: 'month' }, unit_amount: 115884 } }] },
+        })
+
+        const r = await stripeService.retrievePlanSubscription('sub_normal')
+        expect(r.pausedUntil).toBeNull()
       })
 
       it('should detect an active discount from the discounts[] array form', async () => {
@@ -1069,6 +1155,7 @@ describe('Stripe Service - Comprehensive Tests', () => {
           hasActiveDiscount: false,
           interval: null, // 'week' is neither month nor year
           grossAmountCents: null,
+          pausedUntil: null,
         })
       })
 

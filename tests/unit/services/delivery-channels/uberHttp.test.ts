@@ -104,6 +104,18 @@ describe('uber.http', () => {
       expect((llamadas[0].init.headers as Record<string, string>).Authorization).toBe('Bearer tok')
     })
 
+    it('el corte del llamador llega al fetch (la reconciliación lee bajo candado a 8 s)', async () => {
+      const { impl, llamadas } = fakeFetch({ body: { id: 'ord-1' } })
+      const corte = new AbortController()
+      await uberRequest(
+        { environment: 'SANDBOX', token: 'tok', writableStores: new Set(), fetchImpl: impl },
+        { method: 'GET', path: '/v1/delivery/order/ord-1', signal: corte.signal },
+      )
+      expect(llamadas[0].init.signal?.aborted).toBe(false)
+      corte.abort()
+      expect(llamadas[0].init.signal?.aborted).toBe(true)
+    })
+
     it('una ESCRITURA a una tienda AUTORIZADA pasa', async () => {
       const { impl, llamadas } = fakeFetch({ status: 204, texto: '' })
       const r = await uberRequest(

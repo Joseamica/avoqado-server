@@ -280,8 +280,16 @@ export async function updateChannelLink(
       config = mezclarConfig(actual?.config, data.config)
     }
 
+    // 🔴 Con consentimiento del dueño, la identidad de la tienda NO se cambia a mano (spec §4.2):
+    // el consentimiento es de ESA tienda. Condición en el mismo UPDATE (sin ventana): sólo pasa si
+    // no hay consentimiento o si los valores pedidos son los que ya tiene.
+    const identidad = {
+      ...(data.externalLocationId !== undefined && { externalLocationId: data.externalLocationId }),
+      ...(data.externalAccountId !== undefined && { externalAccountId: data.externalAccountId }),
+    }
+    const tocaIdentidad = Object.keys(identidad).length > 0
     const result = await tx.deliveryChannelLink.updateMany({
-      where: { id: linkId, venueId },
+      where: { id: linkId, venueId, ...(tocaIdentidad && { OR: [{ ownerAuthorizedAt: null }, identidad] }) },
       data: {
         ...(data.externalLocationId !== undefined && { externalLocationId: data.externalLocationId }),
         ...(data.externalAccountId !== undefined && { externalAccountId: data.externalAccountId }),
@@ -292,6 +300,12 @@ export async function updateChannelLink(
     })
 
     if (result.count === 0) {
+      if (tocaIdentidad && (await tx.deliveryChannelLink.count({ where: { id: linkId, venueId } }))) {
+        throw new ConflictError(
+          'Esta tienda la autorizó su dueño desde Uber: no se puede cambiar su identificador. Para conectar otra tienda, usa «Conectar Uber Eats».',
+          'IDENTITY_LOCKED',
+        )
+      }
       throw new NotFoundError('Canal de delivery no encontrado')
     }
 
@@ -320,8 +334,8 @@ export async function updateChannelLink(
  * link ya conectado-pero-pausado (PAUSED) — un link PENDING (nunca confirmado por el
  * proveedor) o DISABLED saltando directo a ACTIVE se brincaría el lifecycle de
  * confirmación del proveedor; este endpoint no es el paso de "confirmar conexión".
- * Pausar (→PAUSED) NO tiene esta restricción — cualquier estado puede pausarse, sin
- * cambio de comportamiento. El gate vive en el WHERE del updateMany (filtro atómico,
+ * Pausar (→PAUSED) sólo desde ACTIVE o PAUSED (spec KDS Uber §4.2): un DISABLED pausado y
+ * luego reanudado volvería a ACTIVE por encima de una revocación. El gate vive en el WHERE del updateMany (filtro atómico,
  * evita una carrera entre leer el status y mutar); si el count sale 0 por el gate (no
  * por tenant), un segundo lookup da el mensaje de validación correcto en vez de un
  * 404 genérico.
@@ -331,34 +345,56 @@ export async function pauseChannelLink(
   linkId: string,
   paused: boolean,
   performedBy?: string,
+  /**
+   * Reanudar SÓLO una pausa con reloj (el POS o el job), leído en el mismo estado previo que usa el
+   * CAS: si entre la revisión del llamador y esta lectura el dueño la volvió indefinida, no se reabre.
+   * `VENCIDO` exige además que el reloj ya haya pasado (un re-snooze a futuro tampoco se reabre).
+   */
+  soloSnooze?: 'CUALQUIERA' | 'VENCIDO',
 ): Promise<DeliveryChannelLinkSafe> {
   const newStatus = paused ? DeliveryChannelStatus.PAUSED : DeliveryChannelStatus.ACTIVE
 
+  // El estado PREVIO COMPLETO (status + reloj) se lee ANTES de escribir (spec §4.2, H18): es a lo
+  // que se revierte si el proveedor dice que no. Pausar sólo desde un canal vivo ([C-4]): pausar un
+  // DISABLED —revocado por el proveedor— y luego reanudarlo lo resucitaría. PAUSED→PAUSED sí: es
+  // cómo el dueño vuelve indefinida una pausa del POS.
+  const previo = await prisma.deliveryChannelLink.findFirst({
+    where: { id: linkId, venueId },
+    select: { status: true, snoozedUntil: true },
+  })
+  if (!previo) throw new NotFoundError('Canal de delivery no encontrado')
+  const desde: DeliveryChannelStatus[] = paused
+    ? [DeliveryChannelStatus.ACTIVE, DeliveryChannelStatus.PAUSED]
+    : [DeliveryChannelStatus.PAUSED]
+  if (!desde.includes(previo.status)) {
+    if (!paused) {
+      throw new ValidationError(
+        `No se puede reactivar un canal en estado ${previo.status}. Solo un canal en estado PAUSED puede reactivarse.`,
+      )
+    }
+    throw new ConflictError(`No se puede pausar un canal en estado ${previo.status}: sólo un canal activo se pausa.`)
+  }
+  if (!paused && soloSnooze) {
+    if (previo.snoozedUntil === null) {
+      throw new ValidationError(
+        'Este canal lo pausaron desde el dashboard, sin fecha de reactivación. Para volver a recibir pedidos, pídeselo a quien administra el negocio.',
+      )
+    }
+    if (soloSnooze === 'VENCIDO' && previo.snoozedUntil > new Date()) {
+      throw new ConflictError('La pausa de este canal se extendió; se reanudará cuando venza.')
+    }
+  }
+
+  // CAS sobre ese estado exacto. 🔴 `snoozedUntil: null` SIEMPRE, en las dos direcciones. Esta
+  // es la pausa INDEFINIDA (la del dashboard): la decidió una persona a propósito y no se
+  // reactiva sola. Si no se limpiara, un snooze del POS que quedó vivo reanudaría la tienda que
+  // el dueño acaba de apagar — el peor error posible de esta feature. `snoozeChannelLink`
+  // vuelve a poner el reloj DESPUÉS, encima de esta escritura.
   const result = await prisma.deliveryChannelLink.updateMany({
-    where: {
-      id: linkId,
-      venueId,
-      ...(paused ? {} : { status: DeliveryChannelStatus.PAUSED }),
-    },
-    // 🔴 `snoozedUntil: null` SIEMPRE, en las dos direcciones. Esta es la pausa
-    // INDEFINIDA (la del dashboard): la decidió una persona a propósito y no se
-    // reactiva sola. Si no se limpiara, un snooze del POS que quedó vivo reanudaría
-    // la tienda que el dueño acaba de apagar — el peor error posible de esta feature.
-    // `snoozeChannelLink` vuelve a poner el reloj DESPUÉS, encima de esta escritura.
+    where: { id: linkId, venueId, status: previo.status, snoozedUntil: previo.snoozedUntil },
     data: { status: newStatus, snoozedUntil: null },
   })
-
-  if (result.count === 0) {
-    if (!paused) {
-      const current = await prisma.deliveryChannelLink.findFirst({ where: { id: linkId, venueId }, select: { status: true } })
-      if (current) {
-        throw new ValidationError(
-          `No se puede reactivar un canal en estado ${current.status}. Solo un canal en estado PAUSED puede reactivarse.`,
-        )
-      }
-    }
-    throw new NotFoundError('Canal de delivery no encontrado')
-  }
+  if (result.count === 0) throw new ConflictError('El canal cambió mientras se procesaba la pausa. Recarga e inténtalo de nuevo.')
 
   // Registro completo (incluye webhookSecret) — lo necesita el adapter, pero NUNCA se
   // devuelve tal cual al caller (se strippea el secret antes de retornar, abajo).
@@ -394,7 +430,14 @@ export async function pauseChannelLink(
         // PAUSADO cuando él dijo que no. Se revierte el estado local y se lanza, para que el
         // dueño se entere y pueda hacer otra cosa —apagar el menú, hablar a soporte— en vez
         // de creerse protegido mientras le siguen entrando pedidos.
-        await prisma.deliveryChannelLink.updateMany({ where: { id: linkId, venueId }, data: { status: fullLink.status } })
+        // Reversión CONDICIONAL al estado del que se partió: sólo si nadie lo movió entretanto —
+        // un DISABLED concurrente (revocación del proveedor) no se pisa.
+        // Se restaura el estado COMPLETO: un reanudar rechazado conserva su reloj (el job lo
+        // reintenta) y una pausa indefinida rechazada no le borra el reloj a la del POS.
+        await prisma.deliveryChannelLink.updateMany({
+          where: { id: linkId, venueId, status: newStatus, snoozedUntil: null },
+          data: { status: previo.status, snoozedUntil: previo.snoozedUntil },
+        })
         logger.error('🚨 [DeliveryChannel] el proveedor NO aceptó la pausa — estado local revertido', {
           linkId,
           venueId,
@@ -404,9 +447,11 @@ export async function pauseChannelLink(
           cuerpo: r.raw.slice(0, 300),
         })
         throw new ConflictError(
-          paused
-            ? 'No se pudo pausar el canal en el proveedor: sigue recibiendo pedidos. Reintenta o pausa desde su portal.'
-            : 'No se pudo reactivar el canal en el proveedor. Reintenta o reactívalo desde su portal.',
+          !paused
+            ? 'No se pudo reactivar el canal en el proveedor. Reintenta o reactívalo desde su portal.'
+            : previo.status === DeliveryChannelStatus.PAUSED
+              ? 'El proveedor no confirmó la pausa indefinida: el canal sigue pausado como estaba. Reintenta.'
+              : 'No se pudo pausar el canal en el proveedor: sigue recibiendo pedidos. Reintenta o pausa desde su portal.',
         )
       }
     }
@@ -508,20 +553,7 @@ export async function snoozeChannelLink(
  * avería, por falta de personal, o por lo que sea. Reabrir sigue siendo suyo.
  */
 export async function cancelarSnooze(venueId: string, linkId: string, performedBy?: string): Promise<DeliveryChannelLinkSafe> {
-  const actual = await prisma.deliveryChannelLink.findFirst({
-    where: { id: linkId, venueId },
-    select: { snoozedUntil: true },
-  })
-
-  if (!actual) throw new NotFoundError('Canal de delivery no encontrado')
-
-  if (actual.snoozedUntil === null) {
-    throw new ValidationError(
-      'Este canal lo pausaron desde el dashboard, sin fecha de reactivación. Para volver a recibir pedidos, pídeselo a quien administra el negocio.',
-    )
-  }
-
-  return pauseChannelLink(venueId, linkId, false, performedBy)
+  return pauseChannelLink(venueId, linkId, false, performedBy, 'CUALQUIERA')
 }
 
 /**
@@ -543,7 +575,7 @@ export async function reanudarSnoozesVencidos(): Promise<{ reanudados: number; f
 
   for (const canal of vencidos) {
     try {
-      await pauseChannelLink(canal.venueId, canal.id, false)
+      await pauseChannelLink(canal.venueId, canal.id, false, undefined, 'VENCIDO')
       reanudados++
       logger.info('⏰ [DeliveryChannel] se acabó la pausa: canal reactivado', {
         linkId: canal.id,

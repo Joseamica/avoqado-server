@@ -39,7 +39,7 @@ const nuevoJob = () => new PlanAccessReconciliationJob({ cron: { start: jest.fn(
 beforeEach(() => {
   jest.clearAllMocks()
   process.env.STRIPE_SECRET_KEY = 'sk_test_x'
-  conceder = jest.fn().mockResolvedValue(undefined)
+  conceder = jest.fn().mockResolvedValue(true)
   ;(prisma.venueFeature.findMany as jest.Mock).mockResolvedValue([])
 })
 
@@ -53,6 +53,18 @@ describe('plan-access-reconciliation', () => {
     expect(conceder).toHaveBeenCalledTimes(1)
     expect(conceder.mock.calls[0][0]).toMatchObject({ id: 'sub_1', status: 'active' })
     expect(r.recuperados).toBe(1)
+  })
+
+  it('🔴 V5-A paso 6: si el manejador NO concedió (la suscripción ya vende otro plan y decide la entrega), no cuenta ni audita una recuperación', async () => {
+    ;(prisma.venueFeature.findMany as jest.Mock).mockResolvedValue([fila()])
+    mockRetrieve.mockResolvedValue({ id: 'sub_1', status: 'active' })
+    conceder.mockResolvedValue(false)
+
+    const r = await nuevoJob().runNow()
+
+    expect(conceder).toHaveBeenCalledTimes(1)
+    expect(r.recuperados).toBe(0)
+    expect(logAction).not.toHaveBeenCalled()
   })
 
   it('un trial vigente también cuenta', async () => {
@@ -121,7 +133,10 @@ describe('plan-access-reconciliation', () => {
   })
 
   it('🔴 un fallo con una fila no detiene el barrido de las demás', async () => {
-    ;(prisma.venueFeature.findMany as jest.Mock).mockResolvedValue([fila({ id: 'a', stripeSubscriptionId: 'sub_a' }), fila({ id: 'b', stripeSubscriptionId: 'sub_b' })])
+    ;(prisma.venueFeature.findMany as jest.Mock).mockResolvedValue([
+      fila({ id: 'a', stripeSubscriptionId: 'sub_a' }),
+      fila({ id: 'b', stripeSubscriptionId: 'sub_b' }),
+    ])
     mockRetrieve.mockRejectedValueOnce(new Error('Stripe caído')).mockResolvedValueOnce({ id: 'sub_b', status: 'active' })
 
     const r = await nuevoJob().runNow()

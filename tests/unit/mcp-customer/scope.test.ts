@@ -63,6 +63,30 @@ describe('resolveScope', () => {
     expect(where).toMatchObject({ role: 'SUPERADMIN', active: true, staff: { active: true } })
   })
 
+  // Freno del incidente del 23-sep-2026: el catch por tienda existe para saltar las tiendas SIN acceso.
+  // Un corte por tope vencido NO es "sin acceso": tragárselo dejaría un alcance incompleto que parece bueno.
+  it('un corte por tope vencido en una tienda NO se confunde con "sin acceso": se propaga', async () => {
+    const { RequestCancelledError } = jest.requireActual('@/utils/requestCancellation') as typeof import('@/utils/requestCancellation')
+    m.staffOrganization.findUnique.mockResolvedValue({ role: 'OWNER', isActive: true })
+    m.venue.findMany.mockResolvedValue([{ id: 'A' }, { id: 'B' }])
+    mockGetUserAccess.mockImplementation(async (_s: string, venueId: string) => {
+      if (venueId === 'B') throw new RequestCancelledError('timeout', 25_000)
+      return { venueId, corePermissions: ['venue:read'] }
+    })
+    await expect(resolveScope('owner', 'org-1')).rejects.toBeInstanceOf(RequestCancelledError)
+  })
+
+  it('REGRESIÓN: una tienda sin acceso se sigue saltando en silencio', async () => {
+    m.staffOrganization.findUnique.mockResolvedValue({ role: 'OWNER', isActive: true })
+    m.venue.findMany.mockResolvedValue([{ id: 'A' }, { id: 'B' }])
+    mockGetUserAccess.mockImplementation(async (_s: string, venueId: string) => {
+      if (venueId === 'B') throw new Error('Staff has no access to this venue')
+      return { venueId, corePermissions: ['venue:read'] }
+    })
+    const scope = await resolveScope('owner', 'org-1')
+    expect(scope.allowedVenueIds).toEqual(['A'])
+  })
+
   it('org OWNER -> all venues in the org', async () => {
     m.staffOrganization.findUnique.mockResolvedValue({ role: 'OWNER', isActive: true })
     m.venue.findMany.mockResolvedValue([{ id: 'A' }, { id: 'B' }])

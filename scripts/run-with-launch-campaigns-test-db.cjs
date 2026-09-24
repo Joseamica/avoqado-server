@@ -1,4 +1,4 @@
-/* eslint-disable */
+ 
 /**
  * Corre un comando contra una base DESECHABLE para las campañas ligeras de lanzamiento
  * (spec 2026-09-17 § 8.3). Crea → `prisma migrate deploy` → comando → `DROP … WITH (FORCE)` →

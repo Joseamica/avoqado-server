@@ -197,6 +197,13 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
 
   const refundedTotal = refunds.reduce((sum, refund) => sum + Math.abs(Number(refund.amount) || 0), 0)
   const remainingRefundable = Math.max(0, Number(payment.amount) + Number(payment.tipAmount) - refundedTotal)
+  // Saldo POR COMPONENTE (aditivo): con «Incluir propina» apagada el POS sólo puede ofrecer la VENTA restante — el tope total
+  // dejaba mandar $220 con `tipRefundCents: 0` sobre una venta de $200 y el servidor lo rechazaba (Testarudo, 17-sep-2026).
+  // Un reembolso histórico sin reparto viene con todo en `saleAmount`: se descuenta de la venta, la app ofrece de menos.
+  const refundedSale = refunds.reduce((sum, refund) => sum + Math.abs(Number(refund.saleAmount) || 0), 0)
+  const refundedTip = refunds.reduce((sum, refund) => sum + Math.abs(Number(refund.tipAmount) || 0), 0)
+  const remainingRefundableSale = Math.max(0, Math.round((Number(payment.amount) - refundedSale) * 100) / 100)
+  const remainingRefundableTip = Math.max(0, Math.round((Number(payment.tipAmount) - refundedTip) * 100) / 100)
 
   // Aggregate per-orderItemId refund totals across all refunds for this payment.
   // Used by the mobile UI to mark lines as "Reembolsado" / "N de X ya reembolsado"
@@ -233,11 +240,15 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
     orderNumber: payment.order?.orderNumber ?? null,
     staffName: payment.processedBy ? `${payment.processedBy.firstName ?? ''} ${payment.processedBy.lastName ?? ''}`.trim() : null,
     remainingRefundable,
+    remainingRefundableSale,
+    remainingRefundableTip,
     refunds: refunds.map(refund => {
       const processorData = (refund.processorData as Record<string, unknown>) || {}
       return {
         id: refund.id,
         amount: Math.abs(Number(refund.amount) || 0),
+        saleAmount: Math.abs(Number(refund.saleAmount) || 0),
+        tipAmount: Math.abs(Number(refund.tipAmount) || 0),
         reason: typeof processorData.refundReason === 'string' ? processorData.refundReason : null,
         createdAt: refund.createdAt.toISOString(),
         status: refund.status,

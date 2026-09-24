@@ -8,15 +8,33 @@
  * - Payment method updates
  */
 
+import { randomUUID } from 'crypto'
 import Stripe from 'stripe'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
-import { Feature } from '@prisma/client'
+import { Feature, Prisma } from '@prisma/client'
 import { retry, shouldRetryStripeError } from '@/utils/retry'
 import { addDays } from 'date-fns'
 import emailService from './email.service'
 import { resolvePlanNotificationTarget } from './access/planNotification.service'
-import AppError from '@/errors/AppError'
+import AppError, { ConflictError } from '@/errors/AppError'
+import { ventaSueltaAbierta } from './access/ventaSuelta'
+import {
+  avisarConflictoCreado,
+  cerrarConflictoEntregado,
+  cerrarConflictoTerminado,
+  registrarConflictoDeObligacion,
+} from './access/conflictosDeObligacion.service'
+import {
+  clasificarEstado,
+  clasificarSuscripcion,
+  decidirEntregaDePlan,
+  type CatalogoDeCobro,
+  type Cobrable,
+  type ItemDeSuscripcion,
+  type OperacionDeFila,
+  type Tier,
+} from './access/obligacionesDeCobro'
 
 // Initialize Stripe
 // Using default API version from SDK (automatically uses the latest compatible version)
@@ -126,6 +144,9 @@ export async function getOrCreateStripeCustomer(
       logger.warn(`getOrCreateStripeCustomer: could not delete duplicate customer ${customer.id}`, delErr)
     }
     if (winner) return winner
+    // Sin ganador: el negocio se borró mientras se creaba el cliente (el borrado bloquea la fila). Quien
+    // llamó NO debe seguir: crearía un SetupIntent o una suscripción para un negocio que ya no existe.
+    throw new AppError(`El negocio ${venueId} ya no existe.`, 404, true, 'VENUE_NOT_FOUND')
   }
 
   logger.info(`✅ Created Stripe customer ${customer.id} for venue ${venueId}`)
@@ -258,6 +279,13 @@ export function stripeAfirmaQueNoExiste(error: unknown): boolean {
   return e.code === 'resource_missing' || (e.type === 'StripeInvalidRequestError' && e.statusCode === 404)
 }
 
+/**
+ * Opciones de cada llamada a Stripe hecha CON el candado de compra tomado: tiempo máximo propio y sin
+ * los reintentos internos del SDK (80 s × 2 por defecto), para que el peor caso quepa en la
+ * transacción. Los reintentos los decide `retry`, con la llave de idempotencia de la invocación.
+ */
+export const STRIPE_DENTRO_DEL_CANDADO = { timeout: 15_000, maxNetworkRetries: 0 } as const
+
 export async function createTrialSubscriptions(
   customerId: string,
   venueId: string,
@@ -267,6 +295,12 @@ export async function createTrialSubscriptions(
   venueSlug?: string,
   paymentMethodId?: string,
 ): Promise<string[]> {
+  // 🔴 Venta suelta CERRADA (founder, 21-sep): el candado vive AQUÍ, en el único punto que crea
+  // suscripciones sueltas, para que ningún camino —de hoy o futuro— se lo salte.
+  if (!ventaSueltaAbierta()) {
+    throw new Error('La venta de funciones sueltas está cerrada por ahora; se contratan con nuestro equipo.')
+  }
+
   logger.info(`🎯 Creating trial subscriptions for venue ${venueId}, features: ${featureCodes.join(', ')}`, {
     paymentMethodId: paymentMethodId || 'default',
   })
@@ -302,116 +336,19 @@ export async function createTrialSubscriptions(
 
   // Create individual subscription for each feature
   for (const feature of features) {
+    // 🔴 Lo que ESTA llamada crea en Stripe es suyo y de nadie más (Codex, 21-sep, ronda 4): si algo
+    // falla antes de quedar ligado, se cancela aquí. La llave de idempotencia es de esta invocación
+    // —nunca se deriva del vínculo leído— así que ninguna otra compra puede recibir esta misma
+    // suscripción, y compensarla no toca la de nadie.
+    let creadaAqui: string | null = null
     try {
-      // ✅ FIX: Check if VenueFeature already exists with a subscription
-      // If it does, reuse the existing subscription instead of creating a new one
-      const existingVenueFeature = await prisma.venueFeature.findUnique({
-        where: {
-          venueId_featureId: {
-            venueId,
-            featureId: feature.id,
-          },
-        },
-        select: {
-          id: true,
-          stripeSubscriptionId: true,
-        },
-      })
-
-      let subscription: Stripe.Subscription
-
-      if (existingVenueFeature?.stripeSubscriptionId) {
-        // VenueFeature exists with a subscription - check if it's still valid
-        logger.info(`  🔍 Found existing subscription ${existingVenueFeature.stripeSubscriptionId} for feature ${feature.code}`)
-
-        try {
-          // Retrieve the existing subscription from Stripe
-          const existingSubscription = await stripe.subscriptions.retrieve(existingVenueFeature.stripeSubscriptionId)
-
-          // If subscription is incomplete or past_due, reuse it and attempt payment
-          if (existingSubscription.status === 'incomplete' || existingSubscription.status === 'past_due') {
-            logger.info(`  ♻️ Reusing existing ${existingSubscription.status} subscription ${existingSubscription.id}`)
-            subscription = existingSubscription
-
-            // ✅ FIX: Attempt to charge the latest invoice immediately
-            // This triggers webhooks and provides immediate feedback
-            try {
-              const latestInvoice = existingSubscription.latest_invoice
-              if (latestInvoice) {
-                const invoiceId = typeof latestInvoice === 'string' ? latestInvoice : latestInvoice.id
-                logger.info(`  💳 Attempting to charge invoice ${invoiceId}...`)
-
-                // Attempt payment - this will trigger webhooks (success or failure)
-                const paidInvoice = await stripe.invoices.pay(invoiceId)
-
-                if (paidInvoice.status === 'paid') {
-                  logger.info(`  ✅ Payment successful! Invoice ${invoiceId} paid`)
-                } else {
-                  logger.warn(`  ⚠️ Payment incomplete. Invoice ${invoiceId} status: ${paidInvoice.status}`)
-                }
-              }
-            } catch (paymentError: any) {
-              // Payment failed - this is expected, webhook will handle it
-              logger.warn(`  ❌ Payment failed: ${paymentError.message}`)
-              logger.warn(`  📧 User will receive email notification to update payment method`)
-              // Don't throw - feature should show as inactive, but record should be created
-            }
-          } else if (existingSubscription.status === 'canceled') {
-            // If canceled, create a new one
-            logger.info(`  🆕 Existing subscription canceled, creating new one`)
-            subscription = await retry(
-              () =>
-                stripe.subscriptions.create({
-                  customer: customerId,
-                  items: [{ price: feature.stripePriceId! }],
-                  trial_period_days: trialPeriodDays,
-                  description: venueNameToUse ? `${feature.name} - ${venueNameToUse}` : undefined,
-                  ...(paymentMethodId && { default_payment_method: paymentMethodId }),
-                  metadata: {
-                    venueId,
-                    featureId: feature.id,
-                    featureCode: feature.code,
-                    ...(venueNameToUse && { venueName: venueNameToUse }),
-                    ...(venueSlugToUse && { venueSlug: venueSlugToUse }),
-                  },
-                  collection_method: 'charge_automatically',
-                  payment_behavior: 'default_incomplete',
-                  payment_settings: {
-                    save_default_payment_method: 'on_subscription',
-                    payment_method_types: ['card'],
-                  },
-                }),
+      const claveDelCandado = `venue-feature-sub:${venueId}:${feature.id}`
+      const llaveDeEstaCompra = `${claveDelCandado}:${randomUUID()}`
+      const crearSuscripcion = async (): Promise<Stripe.Subscription> => {
+        const creada = await retry(
+          () =>
+            stripe.subscriptions.create(
               {
-                retries: 3,
-                shouldRetry: shouldRetryStripeError,
-                context: 'stripe.createSubscription',
-              },
-            )
-          } else {
-            // Active subscription - reuse it
-            logger.info(`  ✅ Reusing existing active subscription ${existingSubscription.id}`)
-            subscription = existingSubscription
-          }
-        } catch (error: any) {
-          // 🔴 Sólo se crea otra si Stripe AFIRMA que la anterior no existe. Cualquier otro error
-          // («no pude consultarla») se propaga: el feature queda sin suscripción y alguien lo
-          // reintenta, que es infinitamente mejor que dejar DOS cobrando.
-          if (!stripeAfirmaQueNoExiste(error)) {
-            logger.error(`  🚨 No se pudo consultar la suscripción ${existingVenueFeature.stripeSubscriptionId}: NO se crea otra`, {
-              venueId,
-              featureCode: feature.code,
-              subscriptionId: existingVenueFeature.stripeSubscriptionId,
-              errorType: error?.type,
-              errorCode: error?.code,
-              statusCode: error?.statusCode,
-            })
-            throw error
-          }
-          // Subscription not found in Stripe - create new one
-          logger.warn(`  ⚠️ Subscription ${existingVenueFeature.stripeSubscriptionId} not found in Stripe, creating new one`)
-          subscription = await retry(
-            () =>
-              stripe.subscriptions.create({
                 customer: customerId,
                 items: [{ price: feature.stripePriceId! }],
                 trial_period_days: trialPeriodDays,
@@ -424,106 +361,200 @@ export async function createTrialSubscriptions(
                   ...(venueNameToUse && { venueName: venueNameToUse }),
                   ...(venueSlugToUse && { venueSlug: venueSlugToUse }),
                 },
+                // Stripe debe REINTENTAR la misma invoice en lugar de crear nuevas.
                 collection_method: 'charge_automatically',
+                // Sin cobro automático al crear: si hubiera que compensar, no hay cargo que devolver.
                 payment_behavior: 'default_incomplete',
                 payment_settings: {
                   save_default_payment_method: 'on_subscription',
                   payment_method_types: ['card'],
                 },
-              }),
-            {
-              retries: 3,
-              shouldRetry: shouldRetryStripeError,
-              context: 'stripe.createSubscription',
-            },
-          )
-        }
-      } else {
-        // No existing VenueFeature or no subscription - create new subscription
-        logger.info(`  🆕 Creating new subscription for feature ${feature.code}`)
-        subscription = await retry(
-          () =>
-            stripe.subscriptions.create({
-              customer: customerId,
-              items: [
-                {
-                  price: feature.stripePriceId!,
-                },
-              ],
-              trial_period_days: trialPeriodDays,
-              description: venueNameToUse ? `${feature.name} - ${venueNameToUse}` : undefined,
-              ...(paymentMethodId && { default_payment_method: paymentMethodId }),
-              metadata: {
-                venueId,
-                featureId: feature.id,
-                featureCode: feature.code,
-                ...(venueNameToUse && { venueName: venueNameToUse }),
-                ...(venueSlugToUse && { venueSlug: venueSlugToUse }),
               },
-              // ✅ FIX: Configuración para evitar múltiples invoices en fallos de pago
-              // Stripe debe REINTENTAR la misma invoice en lugar de crear nuevas
-              collection_method: 'charge_automatically',
-              payment_behavior: 'default_incomplete',
-              payment_settings: {
-                save_default_payment_method: 'on_subscription',
-                payment_method_types: ['card'],
-              },
-            }),
-          {
-            retries: 3,
-            shouldRetry: shouldRetryStripeError,
-            context: 'stripe.createSubscription',
-          },
+              // Sólo deduplica los REINTENTOS de red de esta misma llamada. Tiempo máximo propio y sin
+              // reintentos internos del SDK (80 s × 2 por defecto): todo tiene que caber en la transacción.
+              { idempotencyKey: llaveDeEstaCompra, ...STRIPE_DENTRO_DEL_CANDADO },
+            ),
+          { retries: 2, shouldRetry: shouldRetryStripeError, context: 'stripe.createSubscription' },
         )
+        creadaAqui = creada.id
+        return creada
       }
 
-      // Create or update VenueFeature record (upsert for renewals)
-      // endDate logic:
-      // - If trialPeriodDays > 0: set endDate to trial end (trial subscription)
-      // - If trialPeriodDays = 0: set endDate to null (paid subscription, no trial)
-      const endDate =
-        trialPeriodDays > 0
-          ? (() => {
-              const date = new Date()
-              date.setDate(date.getDate() + trialPeriodDays)
-              return date
-            })()
-          : null
+      // 🔴 Dos compras de la MISMA función se SERIALIZAN (Codex, 21-sep, #2 y ronda 4). El candado
+      // cubre leer → crear o reusar → ligar: la segunda compra espera y lee lo que dejó la primera.
+      // Deduplicar con una llave compartida entre compras reabría tres huecos (cuerpo guardado de una
+      // suscripción ya cancelada, `idempotency_error` al cambiar de tarjeta, y compensar la ajena).
+      const { subscription, isActive } = await prisma.$transaction(
+        async tx => {
+          // 🔴 SIN espera (Codex, ronda 5, P2-7): esperar el candado retenía una conexión del pool por
+          // cada compra encolada detrás de una llamada a Stripe. La segunda compra falla YA y reintenta.
+          const [{ tomado }] = await tx.$queryRaw<
+            { tomado: boolean }[]
+          >`SELECT pg_try_advisory_xact_lock(hashtextextended(${claveDelCandado}, 0)) AS tomado`
+          if (!tomado) {
+            throw new Error(`Ya hay una compra de ${feature.name} en curso para este negocio. Espera unos segundos y vuelve a intentarlo.`)
+          }
 
-      // Active logic:
-      // - If trialPeriodDays > 0: active=true (trial, no payment required yet)
-      // - If subscription.status is 'active' or 'trialing': active=true (already paid/valid in Stripe)
-      // - Otherwise: active=false (wait for payment confirmation via webhook)
-      const isActive = trialPeriodDays > 0 || subscription.status === 'active' || subscription.status === 'trialing'
+          const existingVenueFeature = await tx.venueFeature.findUnique({
+            where: {
+              venueId_featureId: {
+                venueId,
+                featureId: feature.id,
+              },
+            },
+            select: {
+              id: true,
+              stripeSubscriptionId: true,
+            },
+          })
+          const previa = existingVenueFeature?.stripeSubscriptionId ?? null
 
-      await prisma.venueFeature.upsert({
-        where: {
-          venueId_featureId: {
-            venueId,
-            featureId: feature.id,
-          },
+          let subscription: Stripe.Subscription
+
+          if (previa) {
+            // VenueFeature exists with a subscription - check if it's still valid
+            logger.info(`  🔍 Found existing subscription ${previa} for feature ${feature.code}`)
+
+            try {
+              // Retrieve the existing subscription from Stripe
+              const existingSubscription = await stripe.subscriptions.retrieve(previa, {}, STRIPE_DENTRO_DEL_CANDADO)
+
+              // If subscription is incomplete or past_due, reuse it and attempt payment
+              if (existingSubscription.status === 'incomplete' || existingSubscription.status === 'past_due') {
+                logger.info(`  ♻️ Reusing existing ${existingSubscription.status} subscription ${existingSubscription.id}`)
+                subscription = existingSubscription
+
+                // ✅ FIX: Attempt to charge the latest invoice immediately
+                // This triggers webhooks and provides immediate feedback
+                try {
+                  const latestInvoice = existingSubscription.latest_invoice
+                  if (latestInvoice) {
+                    const invoiceId = typeof latestInvoice === 'string' ? latestInvoice : latestInvoice.id
+                    logger.info(`  💳 Attempting to charge invoice ${invoiceId}...`)
+
+                    // Attempt payment - this will trigger webhooks (success or failure)
+                    const paidInvoice = await stripe.invoices.pay(invoiceId, {}, STRIPE_DENTRO_DEL_CANDADO)
+
+                    if (paidInvoice.status === 'paid') {
+                      logger.info(`  ✅ Payment successful! Invoice ${invoiceId} paid`)
+                    } else {
+                      logger.warn(`  ⚠️ Payment incomplete. Invoice ${invoiceId} status: ${paidInvoice.status}`)
+                    }
+                  }
+                } catch (paymentError: any) {
+                  // Payment failed - this is expected, webhook will handle it
+                  logger.warn(`  ❌ Payment failed: ${paymentError.message}`)
+                  logger.warn(`  📧 User will receive email notification to update payment method`)
+                  // Don't throw - feature should show as inactive, but record should be created
+                }
+
+                // 🔴 «¿Quedó activa?» se decide con el estado VIGENTE, no con la foto de antes de pagar
+                // (Codex, 21-sep, #7). Con la vieja (`past_due`) se escribía `active:false` y se pisaba
+                // lo que el webhook acababa de activar al cobrarse la factura: pagaba y perdía el acceso.
+                //
+                // 🔴 Y si la relectura FALLA no se escribe nada (Codex, ronda 5, P1-6): la foto de antes de
+                // pagar dice `past_due` y pisaría con `active:false` la fila que el webhook del cobro ya
+                // activó. Sin estado vigente no hay veredicto: se aborta y manda el webhook.
+                try {
+                  subscription = await stripe.subscriptions.retrieve(existingSubscription.id, {}, STRIPE_DENTRO_DEL_CANDADO)
+                } catch (lecturaError: any) {
+                  logger.warn(`  ⚠️ No se pudo releer la suscripción tras el pago; no se toca el vínculo`, {
+                    subscriptionId: existingSubscription.id,
+                    error: lecturaError?.message,
+                  })
+                  throw new Error(
+                    `Se intentó cobrar la factura pendiente de ${feature.name} pero no pudimos confirmar el resultado; se reflejará en unos minutos.`,
+                  )
+                }
+              } else if (existingSubscription.status === 'canceled') {
+                // If canceled, create a new one
+                logger.info(`  🆕 Existing subscription canceled, creating new one`)
+                subscription = await crearSuscripcion()
+              } else {
+                // Active subscription - reuse it
+                logger.info(`  ✅ Reusing existing active subscription ${existingSubscription.id}`)
+                subscription = existingSubscription
+              }
+            } catch (error: any) {
+              // 🔴 Sólo se crea otra si Stripe AFIRMA que la anterior no existe. Cualquier otro error
+              // («no pude consultarla») se propaga: el feature queda sin suscripción y alguien lo
+              // reintenta, que es infinitamente mejor que dejar DOS cobrando.
+              if (!stripeAfirmaQueNoExiste(error)) {
+                logger.error(`  🚨 No se pudo consultar la suscripción ${previa}: NO se crea otra`, {
+                  venueId,
+                  featureCode: feature.code,
+                  subscriptionId: previa,
+                  errorType: error?.type,
+                  errorCode: error?.code,
+                  statusCode: error?.statusCode,
+                })
+                throw error
+              }
+              // Subscription not found in Stripe - create new one
+              logger.warn(`  ⚠️ Subscription ${previa} not found in Stripe, creating new one`)
+              subscription = await crearSuscripcion()
+            }
+          } else {
+            // No existing VenueFeature or no subscription - create new subscription
+            logger.info(`  🆕 Creating new subscription for feature ${feature.code}`)
+            subscription = await crearSuscripcion()
+          }
+
+          // Create or update VenueFeature record
+          // endDate logic:
+          // - If trialPeriodDays > 0: set endDate to trial end (trial subscription)
+          // - If trialPeriodDays = 0: set endDate to null (paid subscription, no trial)
+          const endDate =
+            trialPeriodDays > 0
+              ? (() => {
+                  const date = new Date()
+                  date.setDate(date.getDate() + trialPeriodDays)
+                  return date
+                })()
+              : null
+
+          // Active logic:
+          // - If trialPeriodDays > 0: active=true (trial, no payment required yet)
+          // - If subscription.status is 'active' or 'trialing': active=true (already paid/valid in Stripe)
+          // - Otherwise: active=false (wait for payment confirmation via webhook)
+          const isActive = trialPeriodDays > 0 || subscription.status === 'active' || subscription.status === 'trialing'
+
+          // 🔴 Una suscripción NUEVA, o una que Stripe ya da por cobrada, no arrastra la cobranza del
+          // ciclo anterior (Codex, 21-sep, R4-7). La suspensión que dejó el job de impago seguía en la
+          // fila y el resolver negaba el acceso que el cliente acababa de pagar. Si la reusada SIGUE
+          // atrasada, las banderas se quedan: la cobranza está viva.
+          const cobranzaAlDia = subscription.id === creadaAqui || subscription.status === 'active' || subscription.status === 'trialing'
+
+          // 🔴 El vínculo sólo se escribe si sigue apuntando a la suscripción que se LEYÓ (Codex,
+          // 21-sep, #2). El candado serializa las compras; el CAS cubre a los escritores que no lo
+          // toman (webhooks, superadmin, jobs).
+          const datosDelVinculo = {
+            active: isActive,
+            monthlyPrice: feature.monthlyPrice,
+            startDate: new Date(),
+            endDate,
+            stripeSubscriptionId: subscription.id,
+            stripePriceId: feature.stripePriceId,
+            ...(cobranzaAlDia && { suspendedAt: null, gracePeriodEndsAt: null, paymentFailureCount: 0 }),
+          }
+          if (existingVenueFeature) {
+            const { count } = await tx.venueFeature.updateMany({
+              where: { id: existingVenueFeature.id, stripeSubscriptionId: previa },
+              data: datosDelVinculo,
+            })
+            if (count === 0) throw new Error(`Otro proceso cambió el vínculo de ${feature.code} mientras se contrataba`)
+          } else {
+            // Un P2002 aquí sólo puede venir de un escritor sin candado; aborta la transacción y se
+            // reporta como fallo (la compensación de abajo decide si cancelar lo creado).
+            await tx.venueFeature.create({ data: { venueId, featureId: feature.id, ...datosDelVinculo } })
+          }
+
+          return { subscription, isActive }
         },
-        update: {
-          // Reactivate existing subscription (renewal after cancellation)
-          active: isActive,
-          monthlyPrice: feature.monthlyPrice,
-          startDate: new Date(),
-          endDate,
-          stripeSubscriptionId: subscription.id,
-          stripePriceId: feature.stripePriceId,
-        },
-        create: {
-          // First-time subscription
-          venueId,
-          featureId: feature.id,
-          active: isActive,
-          monthlyPrice: feature.monthlyPrice,
-          startDate: new Date(),
-          endDate,
-          stripeSubscriptionId: subscription.id,
-          stripePriceId: feature.stripePriceId,
-        },
-      })
+        // El candado se sostiene durante las llamadas a Stripe. Peor caso: releer (15 s) + crear con 3
+        // intentos de 15 s y 3 s de espera ≈ 63 s; o releer + pagar + releer = 45 s. 90 s deja margen.
+        { maxWait: 10_000, timeout: 90_000 },
+      )
 
       subscriptionIds.push(subscription.id)
       if (isActive) {
@@ -579,6 +610,50 @@ export async function createTrialSubscriptions(
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
       logger.error(`  ❌ Error creating subscription for feature ${feature.code}: ${errorMessage}`)
+      // 🔴 Lo creado aquí y NO ligado se cancela (Codex, 21-sep, R4-1). Se relee FUERA de la
+      // transacción: si la escritura sí llegó a la base (el fallo vino después), la suscripción es
+      // la del cliente y no se toca. Como se creó con `default_incomplete` y la primera factura aún
+      // no se intentó cobrar, cancelarla no deja ningún cargo que devolver.
+      const huerfana: string | null = creadaAqui
+      if (huerfana) {
+        let ligada: string | null | undefined
+        try {
+          // 🔴 Antes de releer se vuelve a tomar el MISMO candado, esperando (Codex, ronda 5, P1-5): si el
+          // COMMIT de la transacción anterior sigue en vuelo, un SELECT suelto vería el vínculo viejo y
+          // cancelaríamos una suscripción que sí quedó ligada. Postgres suelta el candado al terminar
+          // esa transacción, así que tomarlo prueba que ya terminó. Espera acotada a 15 s.
+          const vigente = await prisma.$transaction(async tx => {
+            await tx.$executeRaw`SET LOCAL lock_timeout = '15s'`
+            await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`venue-feature-sub:${venueId}:${feature.id}`}, 0))::text`
+            return tx.venueFeature.findUnique({
+              where: { venueId_featureId: { venueId, featureId: feature.id } },
+              select: { stripeSubscriptionId: true },
+            })
+          })
+          ligada = vigente?.stripeSubscriptionId ?? null
+        } catch {
+          ligada = undefined // no se sabe: no se cancela algo que quizá sí quedó ligado
+        }
+        if (ligada === undefined) {
+          logger.error(`  🚨 No se pudo verificar si la suscripción ${huerfana} quedó ligada: revisar en Stripe`, {
+            venueId,
+            featureCode: feature.code,
+            subscriptionId: huerfana,
+          })
+        } else if (ligada !== huerfana) {
+          try {
+            await stripe.subscriptions.cancel(huerfana)
+            logger.warn(`  ↩️ Se canceló la suscripción ${huerfana}: se creó pero no quedó ligada`, { venueId, featureCode: feature.code })
+          } catch (cancelError: any) {
+            logger.error(`  🚨 Suscripción huérfana SIN cancelar: revisar en Stripe`, {
+              venueId,
+              featureCode: feature.code,
+              subscriptionId: huerfana,
+              error: cancelError?.message,
+            })
+          }
+        }
+      }
       errors.push({
         featureCode: feature.code,
         error: error instanceof Error ? error : new Error(errorMessage),
@@ -622,6 +697,19 @@ export interface CreatePlanSubscriptionInput {
   paymentBehavior?: 'error_if_incomplete'
   /** Metadatos extra (campaña, intento) para poder RECUPERAR un resultado desconocido. */
   extraMetadata?: Record<string, string>
+  /**
+   * 🔴 Se invoca en el INSTANTE siguiente a crear la suscripción en Stripe, antes de cualquier
+   * otra escritura. Existe porque entre el cargo y el retorno de esta función (y la entrega que el
+   * llamador corre después) hay trabajo que puede fallar: si falla, el llamador nunca ve el id y pierde el
+   * rastro del cobro que YA ocurrió — y su reintento acaba creando un segundo cargo (Codex,
+   * 21-sep). Lo que este gancho haga NO puede tumbar el cobro: se invoca protegido.
+   */
+  alCrearEnStripe?: (subscriptionId: string) => Promise<void>
+  /**
+   * Se invoca JUSTO antes del POST a Stripe (Codex C15): la frontera entre «preparar» (catálogo, precio, reuso — un fallo
+   * aquí es seguro: nada pudo cobrarse) y «pudo cobrarse». El llamador la usa para decidir qué suelta ante un error.
+   */
+  antesDeCobrar?: () => void
 }
 
 /**
@@ -675,8 +763,52 @@ export interface CreatePlanSubscriptionResult {
  * el cron `stripe-webhook-reconciliation`, que reprocesa las filas `FAILED` hasta
  * `STRIPE_WEBHOOK_MAX_RETRIES`.
  */
-export async function estadoDeLaSuscripcion(subscriptionId: string): Promise<Stripe.Subscription.Status> {
-  return (await suscripcionVigente(subscriptionId)).status
+export async function estadoDeLaSuscripcion(subscriptionId: string, opciones?: Stripe.RequestOptions): Promise<Stripe.Subscription.Status> {
+  return (await suscripcionVigente(subscriptionId, opciones)).status
+}
+
+/**
+ * ¿Esta suscripción puede cobrar (o recuperarse y cobrar)? TRES respuestas, no dos (R0, Codex 21-sep):
+ * `SI` para todo estado no terminal —también `past_due`, `unpaid`, `incomplete` y `paused`, que pueden
+ * volver—; `NO` sólo si Stripe la da por terminada o AFIRMA que no existe; `INCIERTO` si no contestó.
+ * Un `INCIERTO` nunca se trata como `NO`.
+ */
+export async function suscripcionPuedeCobrar(
+  subscriptionId: string | null | undefined,
+  opciones?: Stripe.RequestOptions,
+): Promise<'SI' | 'NO' | 'INCIERTO'> {
+  if (!subscriptionId) return 'NO'
+  try {
+    const estado = await estadoDeLaSuscripcion(subscriptionId, opciones)
+    return estado === 'canceled' || estado === 'incomplete_expired' ? 'NO' : 'SI'
+  } catch (error) {
+    return stripeAfirmaQueNoExiste(error) ? 'NO' : 'INCIERTO'
+  }
+}
+
+/**
+ * 🔴 R0 (Codex, 21-sep): una escritura LOCAL que borra o apaga el vínculo de una suscripción que sigue
+ * cobrando deja al negocio pagando sin acceso, o a la suscripción sin representación local. Se RECHAZA
+ * —nunca se cancela por debajo: cancelar es otra operación, con su propio resultado—.
+ */
+export async function exigirSinObligacionViva(subscriptionId: string | null | undefined, accion: string): Promise<void> {
+  const puede = await suscripcionPuedeCobrar(subscriptionId)
+  if (puede === 'SI') {
+    throw new AppError(
+      `No se puede ${accion}: el negocio tiene una suscripción en Stripe que sigue cobrando (${subscriptionId}). Cancélala primero en Stripe, o haz el cambio desde el flujo de planes.`,
+      409,
+      true,
+      'LIVE_SUBSCRIPTION_LINKED',
+    )
+  }
+  if (puede === 'INCIERTO') {
+    throw new AppError(
+      'No pudimos confirmar el estado de la suscripción en Stripe. Inténtalo de nuevo en unos minutos.',
+      503,
+      true,
+      'SUBSCRIPTION_STATE_UNVERIFIED',
+    )
+  }
 }
 
 /**
@@ -686,48 +818,97 @@ export async function estadoDeLaSuscripcion(subscriptionId: string): Promise<Str
  * de `trialing` sobre un plan que hoy está pagado volvía a escribir el vencimiento viejo y, si ya
  * había pasado, le quitaba el acceso a quien paga. (8ª auditoría de Codex, 19-sep.)
  */
-export async function suscripcionVigente(subscriptionId: string): Promise<{ status: Stripe.Subscription.Status; trialEnd: Date | null }> {
-  const suscripcion = await stripe.subscriptions.retrieve(subscriptionId)
+export async function suscripcionVigente(subscriptionId: string, opciones?: Stripe.RequestOptions): Promise<SuscripcionVigente> {
+  const suscripcion = opciones
+    ? await stripe.subscriptions.retrieve(subscriptionId, {}, opciones)
+    : await stripe.subscriptions.retrieve(subscriptionId)
   return {
     status: suscripcion.status,
     trialEnd: suscripcion.trial_end ? new Date(suscripcion.trial_end * 1000) : null,
+    ...itemsDeSuscripcion(suscripcion),
   }
 }
 
-export async function asegurarAccesoDelPlan(input: {
-  venueId: string
-  tierCode: string
-  subscriptionId: string
-  stripePriceId?: string | null
-  trialEnd?: Date | null
-}): Promise<void> {
-  const feature = await prisma.feature.findFirst({ where: { code: input.tierCode, active: true } })
-  if (!feature) throw new Error(`Feature ${input.tierCode} not found or inactive`)
+/** Estado, vencimiento e ítems de UNA misma consulta a Stripe: quien decide con uno no puede escribir con otra foto. */
+export interface SuscripcionVigente {
+  status: Stripe.Subscription.Status
+  trialEnd: Date | null
+  items: ItemDeSuscripcion[]
+  /** `false` si Stripe dejó ítems fuera de la página: lo que vende no se conoce entero. */
+  itemsCompletos: boolean
+}
 
-  const trialEnd = input.trialEnd ?? null
-  await prisma.venueFeature.upsert({
-    where: { venueId_featureId: { venueId: input.venueId, featureId: feature.id } },
-    update: {
-      active: true,
-      stripeSubscriptionId: input.subscriptionId,
-      ...(input.stripePriceId ? { stripePriceId: input.stripePriceId } : {}),
-      monthlyPrice: feature.monthlyPrice,
-      endDate: trialEnd,
-      trialEndDate: trialEnd,
-      suspendedAt: null,
-      paymentFailureCount: 0,
-    },
-    create: {
-      venueId: input.venueId,
-      featureId: feature.id,
-      active: true,
-      monthlyPrice: feature.monthlyPrice,
-      stripeSubscriptionId: input.subscriptionId,
-      ...(input.stripePriceId ? { stripePriceId: input.stripePriceId } : {}),
-      endDate: trialEnd,
-      trialEndDate: trialEnd,
-    },
+/** Los ítems de una suscripción, como los clasifica el núcleo de obligaciones (por precio, producto y lookup_key). */
+function itemsDeSuscripcion(subscription: Stripe.Subscription): { items: ItemDeSuscripcion[]; itemsCompletos: boolean } {
+  return {
+    items: (subscription.items?.data ?? []).map(it => ({
+      priceId: it.price?.id ?? '',
+      productId: (typeof it.price?.product === 'string' ? it.price.product : (it.price?.product as { id?: string } | undefined)?.id) ?? '',
+      lookupKey: it.price?.lookup_key ?? null,
+    })),
+    itemsCompletos: subscription.items?.has_more !== true,
+  }
+}
+
+/** Tope de lectura del catálogo en la entrega: si no cabe entero, no se clasifica nada (mismo criterio del inventario). */
+const TOPE_CATALOGO_DE_ENTREGA = 200
+
+/**
+ * El catálogo COMPLETO de cobro (Codex R11): todo `Feature` con producto de Stripe, no sólo los planes. Lo que el
+ * catálogo reconoce deja de ser «desconocido», y por tanto la retirada demostrable puede correr.
+ */
+function catalogoCompleto(funciones: { code: string; stripeProductId: string | null }[]): CatalogoDeCobro {
+  return {
+    productoAFuncion: Object.fromEntries(funciones.filter(f => f.stripeProductId).map(f => [f.stripeProductId as string, f.code])),
+    productosAjenos: new Set(),
+  }
+}
+
+/** El catálogo de cobro de los PLANES (la clasificación por lookup_key cubre también los precios históricos). */
+function catalogoDePlanes(planes: { code: string; stripeProductId: string | null }[]): CatalogoDeCobro {
+  return {
+    productoAFuncion: Object.fromEntries(planes.filter(p => p.stripeProductId).map(p => [p.stripeProductId as string, p.code])),
+    productosAjenos: new Set(),
+  }
+}
+
+/**
+ * 🔴 Codex R13: ¿qué TIER vende hoy esta suscripción? Es la única fuente honesta de «qué se cobró» cuando el alta
+ * recupera un cobro anterior: el formulario del reintento puede pedir otro plan, y contestarle con lo que pidió
+ * anunciaba PREMIUM sobre un cobro PRO. `null` = no se pudo determinar (no se adivina).
+ */
+export async function tierQueVendeLaSuscripcion(subscription: Stripe.Subscription): Promise<Tier | null> {
+  const { items, itemsCompletos } = itemsDeSuscripcion(subscription)
+  if (!itemsCompletos) return null
+  const planes = await prisma.feature.findMany({
+    where: { code: { in: ['PLAN_PRO', 'PLAN_PREMIUM'] } },
+    select: { code: true, stripeProductId: true },
+    take: 2,
   })
+  const { proyecciones } = clasificarSuscripcion(items, catalogoDePlanes(planes))
+  const tiers = proyecciones.flatMap(p => (p.tipo === 'PLAN' ? [p.tier] : []))
+  return tiers.length === 1 ? tiers[0] : null
+}
+
+/**
+ * 🔴 V5-A paso 6 (Codex, P1-3): ¿vende HOY esta suscripción exactamente ese plan, y nada más?
+ *
+ * Los manejadores viejos (`subscription.updated`, `invoice.payment_succeeded` y el barrido que los reusa) encuentran la
+ * fila POR EL VÍNCULO. Si la suscripción cambió de plan, esa fila ya no la respalda: sólo cuando esto contesta que sí
+ * pueden seguir escribiéndola. Si no, decide la entrega, que ve las dos filas bajo el candado del negocio.
+ */
+export async function suscripcionVendeElPlan(
+  vigente: Pick<SuscripcionVigente, 'items' | 'itemsCompletos'>,
+  planCode: string,
+): Promise<boolean> {
+  if (!vigente.itemsCompletos) return false
+  const planes = await prisma.feature.findMany({
+    where: { code: { in: ['PLAN_PRO', 'PLAN_PREMIUM'] } },
+    select: { code: true, stripeProductId: true },
+    take: 2,
+  })
+  const { proyecciones } = clasificarSuscripcion(vigente.items, catalogoDePlanes(planes))
+  return proyecciones.length === 1 && proyecciones[0].tipo === 'PLAN' && CODIGO_DEL_TIER[proyecciones[0].tier] === planCode
 }
 
 export async function createPlanSubscription(input: CreatePlanSubscriptionInput): Promise<CreatePlanSubscriptionResult> {
@@ -739,7 +920,20 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
     where: { venueId_featureId: { venueId: input.venueId, featureId: feature.id } },
     select: { stripeSubscriptionId: true },
   })
-  if (existing?.stripeSubscriptionId) {
+  // 🔴 Sólo se reusa lo que todavía puede cobrar: reusar una suscripción que Stripe ya dio por terminada cerraba el alta
+  // con un plan muerto. Sin respuesta de Stripe no se decide a ciegas (ni reusar ni cobrar otra vez).
+  const reusable = existing?.stripeSubscriptionId
+    ? await suscripcionPuedeCobrar(existing.stripeSubscriptionId, STRIPE_DENTRO_DEL_CANDADO)
+    : 'NO'
+  if (reusable === 'INCIERTO') {
+    throw new AppError(
+      'No pudimos confirmar el estado de la suscripción en Stripe. Inténtalo de nuevo en unos minutos.',
+      503,
+      true,
+      'SUBSCRIPTION_STATE_UNVERIFIED',
+    )
+  }
+  if (existing?.stripeSubscriptionId && reusable === 'SI') {
     logger.info(`createPlanSubscription: reusing existing sub ${existing.stripeSubscriptionId} for venue ${input.venueId}`)
     // 🔴 Se DICE que se reusó. El llamador decide si eso es legítimo (un reintento idempotente
     // del mismo cobro) o si tiene que negarse a cerrar (una oferta que nunca se cobró).
@@ -747,10 +941,12 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
   }
 
   const lookupKey = planLookupKey(input.tierCode, input.interval)
-  const prices = await stripe.prices.list({ lookup_keys: [lookupKey], limit: 1 })
+  // 🔴 Corre bajo el candado de la regla común (Codex C3): cada llamada con tiempo propio y sin reintentos del SDK.
+  const prices = await stripe.prices.list({ lookup_keys: [lookupKey], limit: 1 }, STRIPE_DENTRO_DEL_CANDADO)
   const price = prices.data[0]
   if (!price) throw new Error(`Stripe price not found for lookup_key ${lookupKey} — run scripts/seed-plan-pro.ts`)
 
+  input.antesDeCobrar?.()
   const subscription = await retry(
     () =>
       stripe.subscriptions.create(
@@ -781,19 +977,25 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
         },
         // La llave hace que el `retry(3)` de arriba sea seguro: sin ella, un intento perdido en
         // la red y reintentado crea DOS suscripciones y DOS cobros.
-        input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : undefined,
+        input.idempotencyKey ? { idempotencyKey: input.idempotencyKey, ...STRIPE_DENTRO_DEL_CANDADO } : STRIPE_DENTRO_DEL_CANDADO,
       ),
     { retries: 3, shouldRetry: shouldRetryStripeError, context: 'stripe.createPlanSubscription' },
   )
 
-  const trialEnd = input.trialPeriodDays > 0 ? new Date(Date.now() + input.trialPeriodDays * 86400000) : null
-  await asegurarAccesoDelPlan({
-    venueId: input.venueId,
-    tierCode: input.tierCode,
-    subscriptionId: subscription.id,
-    stripePriceId: price.id,
-    trialEnd,
-  })
+  // 🔴 ANTES que cualquier otra escritura: el cargo ya ocurrió y el llamador necesita su rastro
+  // aunque lo de abajo falle.
+  if (input.alCrearEnStripe) {
+    await input.alCrearEnStripe(subscription.id).catch(error => {
+      logger.error('🚨 createPlanSubscription: el gancho posterior al cargo falló', {
+        subscriptionId: subscription.id,
+        venueId: input.venueId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    })
+  }
+
+  // 🔴 V5-A paso 6: aquí sólo se COBRA. El acceso lo escribe `entregarSuscripcionDePlan`, que el llamador corre después
+  // (fuera del candado de la regla común, que la entrega también toma).
 
   logger.info(
     `✅ createPlanSubscription: ${subscription.id} (${input.interval}, trial=${input.trialPeriodDays}d) for venue ${input.venueId}`,
@@ -865,7 +1067,8 @@ export async function createPlanCheckoutSession(input: CreatePlanCheckoutSession
   if (!feature) throw new Error(`Feature ${tierCode} not found or inactive`)
 
   const lookupKey = planLookupKey(tierCode, input.interval)
-  const prices = await stripe.prices.list({ lookup_keys: [lookupKey], limit: 1 })
+  // 🔴 Corre bajo el candado de la regla común (Codex C3): cada llamada con tiempo propio y sin reintentos del SDK.
+  const prices = await stripe.prices.list({ lookup_keys: [lookupKey], limit: 1 }, STRIPE_DENTRO_DEL_CANDADO)
   const price = prices.data[0]
   if (!price) throw new Error(`Stripe price not found for lookup_key ${lookupKey} — run scripts/seed-plan-pro.ts`)
 
@@ -873,31 +1076,41 @@ export async function createPlanCheckoutSession(input: CreatePlanCheckoutSession
 
   const session = await retry(
     () =>
-      stripe.checkout.sessions.create({
-        mode: 'subscription',
-        customer: input.customerId,
-        line_items: [{ price: price.id, quantity: 1 }],
-        allow_promotion_codes: true,
-        subscription_data: {
-          description,
+      stripe.checkout.sessions.create(
+        {
+          mode: 'subscription',
+          customer: input.customerId,
+          line_items: [{ price: price.id, quantity: 1 }],
+          allow_promotion_codes: true,
+          // V5-A: sólo tarjeta (un pago diferido dejaría `active` sin haber cobrado) y caducidad de 30 min, el mínimo que
+          // Stripe permite: una sesión que nadie abrió no queda viva para siempre.
+          payment_method_types: ['card'],
+          expires_at: Math.floor(Date.now() / 1000) + 30 * 60,
+          subscription_data: {
+            description,
+            metadata: {
+              kind: 'PLAN_CHECKOUT',
+              venueId: input.venueId,
+              tierCode,
+              featureId: feature.id,
+              featureCode: feature.code,
+              interval: input.interval,
+              ...(input.venueName ? { venueName: input.venueName } : {}),
+              ...(input.venueSlug ? { venueSlug: input.venueSlug } : {}),
+            },
+          },
+          // `kind` la marca como NUESTRA para la regla común de compra, que expira las abiertas antes de abrir otra.
           metadata: {
+            kind: 'PLAN_CHECKOUT',
             venueId: input.venueId,
             tierCode,
-            featureId: feature.id,
-            featureCode: feature.code,
             interval: input.interval,
-            ...(input.venueName ? { venueName: input.venueName } : {}),
-            ...(input.venueSlug ? { venueSlug: input.venueSlug } : {}),
           },
+          success_url: input.successUrl,
+          cancel_url: input.cancelUrl,
         },
-        metadata: {
-          venueId: input.venueId,
-          tierCode,
-          interval: input.interval,
-        },
-        success_url: input.successUrl,
-        cancel_url: input.cancelUrl,
-      }),
+        STRIPE_DENTRO_DEL_CANDADO,
+      ),
     { retries: 3, shouldRetry: shouldRetryStripeError, context: 'stripe.createPlanCheckoutSession' },
   )
 
@@ -940,10 +1153,6 @@ export async function fulfillPlanCheckout(session: Stripe.Checkout.Session): Pro
     return null
   }
 
-  // Resolve the tier from the session metadata (set by createPlanCheckoutSession). Default to
-  // PLAN_PRO for back-compat with any in-flight session created before tier was threaded through.
-  const tierCode: PlanTierCode = session.metadata?.tierCode === 'PLAN_PREMIUM' ? 'PLAN_PREMIUM' : 'PLAN_PRO'
-
   // On a completed subscription-mode session, `subscription` is the created subscription id (string).
   let subscriptionId = typeof session.subscription === 'string' ? session.subscription : (session.subscription?.id ?? null)
   if (!subscriptionId) {
@@ -963,199 +1172,305 @@ export async function fulfillPlanCheckout(session: Stripe.Checkout.Session): Pro
     return null
   }
 
-  const feature = await prisma.feature.findFirst({ where: { code: tierCode, active: true } })
-  if (!feature) throw new Error(`Feature ${tierCode} not found or inactive`)
+  return entregarSuscripcionDePlan({ venueId, subscriptionId, detectedBy: 'checkout.session.completed' })
+}
 
-  // Pull the real price + trial state from the subscription Stripe created so monthlyPrice/
-  // stripePriceId/endDate reflect what the customer actually subscribed to.
-  // 🔴 El registro se lee ANTES de consultar Stripe, y NO al revés. Con el orden invertido el CAS
-  // vigilaba la ventana equivocada: una cancelación que llegaba entre el `retrieve` y esta lectura
-  // ya estaba escrita cuando leíamos, el CAS coincidía y la reactivábamos (medido por Codex,
-  // 19-sep). Leyendo primero, cualquier escritura ajena posterior hace fallar el CAS, y el estado
-  // que trae Stripe es por construcción más nuevo que lo que comparamos.
-  const previo = await prisma.venueFeature.findUnique({
-    where: { venueId_featureId: { venueId, featureId: feature.id } },
-    select: { id: true, active: true, stripeSubscriptionId: true, updatedAt: true },
-  })
+const CODIGO_DEL_TIER: Record<Tier, PlanTierCode> = { PRO: 'PLAN_PRO', PREMIUM: 'PLAN_PREMIUM' }
 
-  const subscription = await retry(() => stripe.subscriptions.retrieve(subscriptionId as string), {
-    retries: 3,
-    shouldRetry: shouldRetryStripeError,
-    context: 'stripe.fulfillPlanCheckout.retrieveSubscription',
-  })
-  // 🔴 El estado VIGENTE decide si se concede el acceso, no el hecho de que llegara un
-  // `checkout.session.completed` (11ª auditoría de Codex, 19-sep). Stripe no ordena las entregas y
-  // este manejador se reprocesa, así que un aviso tardío sobre una suscripción ya muerta devolvía
-  // el plan completo. Misma familia que las auditorías 7ª-10ª cerraron en `subscription.updated`.
-  //
-  // 🔑 Y la ESCRITURA es tan importante como la decisión. Entre consultar Stripe y escribir cabe
-  // otro webhook: una cancelación podía desactivar el registro y el `upsert` ciego lo reactivaba.
-  // Por eso todas las escrituras de aquí abajo son CAS sobre `updatedAt`, que Prisma mueve en CADA
-  // escritura —incluso cuando reescribe el MISMO valor, que es el caso que una comparación por
-  // campos NO detecta (Codex, 19-sep)—: si alguien tocó la fila, no escribimos y se reintenta.
-  const stripePriceId = subscription.items?.data?.[0]?.price?.id ?? null
+/**
+ * 🔴 V5-A (diseño v5.2): entrega una suscripción de PLAN sin pisar nunca otra obligación viva.
+ *
+ * Sustituye la lógica de `fulfillPlanCheckout`, que miraba sólo la fila del tier de la METADATA: con dos pestañas
+ * pagadas, la segunda REAPUNTABA la fila a su suscripción y la primera quedaba cobrando sin representación. Ahora:
+ *   - el tier sale del PRECIO vigente (la metadata queda vieja tras un cambio de plan);
+ *   - se leen las filas de LOS DOS tiers ANTES de consultar Stripe (el CAS sobre `updatedAt` vigila la ventana buena);
+ *   - `decidirEntregaDePlan` (núcleo puro, auditado) dice qué operación va en cada fila;
+ *   - todo se aplica en UNA transacción con CAS; una obligación que no se puede representar queda en
+ *     `BillingObligationConflict` (durable), y se audita después de confirmar;
+ *   - si faltó una respuesta de Stripe, lo que sí se sabe se aplica y el evento se reprocesa (se lanza).
+ */
+export async function entregarSuscripcionDePlan(entrada: {
+  venueId: string
+  subscriptionId: string
+  detectedBy: string
+}): Promise<FulfillPlanCheckoutResult | null> {
+  const { venueId, subscriptionId, detectedBy } = entrada
+  const reintentar = (motivo: string) => new Error(`entregarSuscripcionDePlan: ${motivo} de ${venueId}; se reintentará`)
+  const LECTURA_EN_CANDADO = STRIPE_DENTRO_DEL_CANDADO
 
-  if (subscription.status !== 'active' && subscription.status !== 'trialing') {
-    // Terminal (`canceled`, `incomplete_expired`): no hay nada que esperar, y reintentar sólo
-    // gastaría los 5 intentos del cron.
-    const recuperable =
-      subscription.status === 'past_due' ||
-      subscription.status === 'unpaid' ||
-      subscription.status === 'incomplete' ||
-      subscription.status === 'paused' // `paused` se reanuda (pause_collection): NO es terminal
-    if (!recuperable) {
-      logger.warn('🚨 fulfillPlanCheckout: la suscripción está en un estado terminal — NO se concede acceso', {
-        sessionId: session.id,
-        venueId,
-        subscriptionId: subscription.id,
-        status: subscription.status,
-        tierCode,
-      })
-      return null
-    }
-
-    // Recuperable: el cobro todavía puede prosperar. NO se concede acceso, pero se guarda el
-    // VÍNCULO — sin él, `customer.subscription.updated` e `invoice.payment_succeeded` no
-    // encuentran el registro y el cliente que paga tarde se queda sin plan para siempre.
-    //
-    // 🔴 Y NO se lanza: lanzar consumía los 5 reintentos del cron en ~15-20 min, así que quien
-    // pagaba dos horas después ya no tenía rescate (14ª pasada de Codex). El vínculo guardado no
-    // caduca; el rescate llega cuando llegue.
-    if (previo?.active) {
-      logger.warn('🚨 fulfillPlanCheckout: el venue ya tiene el plan ACTIVO — no se toca', {
-        venueId,
-        tierCode,
-        suscripcionViva: previo.stripeSubscriptionId,
-        suscripcionDelCheckout: subscription.id,
-        status: subscription.status,
-      })
-      return null
-    }
-    if (previo?.stripeSubscriptionId && previo.stripeSubscriptionId !== subscription.id) {
-      // Reapuntar el vínculo le quitaría el rescate a la OTRA suscripción, que puede estar
-      // igualmente a punto de pagar.
-      logger.warn('🚨 fulfillPlanCheckout: el registro ya apunta a otra suscripción — no se sustituye', {
-        venueId,
-        tierCode,
-        vinculoActual: previo.stripeSubscriptionId,
-        suscripcionDelCheckout: subscription.id,
-      })
-      return null
-    }
-
-    logger.warn('🚨 fulfillPlanCheckout: la suscripción no está vigente todavía — se guarda el vínculo sin conceder acceso', {
-      sessionId: session.id,
-      venueId,
-      subscriptionId: subscription.id,
-      status: subscription.status,
-      tierCode,
-    })
-
-    if (previo) {
-      const { count } = await prisma.venueFeature.updateMany({
-        where: { id: previo.id, updatedAt: previo.updatedAt },
-        data: { stripeSubscriptionId: subscription.id, stripePriceId },
-      })
-      // 🔴 Un `count: 0` NO se puede tragar aquí: sin vínculo guardado, el barrido
-      // `plan-access-reconciliation` no ve esta fila y el cliente que pague después se queda sin
-      // plan. Se lanza para que el evento quede FAILED y el cron lo reprocese con lectura fresca
-      // (Codex, 19-sep: «termina sin error y el barrido excluye esa fila»).
-      if (count === 0) {
-        logger.warn('🚨 fulfillPlanCheckout: no se pudo guardar el vínculo (la fila cambió) — se reintentará', {
-          sessionId: session.id,
-          venueId,
-          subscriptionId: subscription.id,
-          tierCode,
-        })
-        throw new Error(`fulfillPlanCheckout: no se pudo guardar el vínculo de ${venueId}/${tierCode}; se reintentará`)
+  type Salida =
+    | { tipo: 'NADA' }
+    /** 🔴 Codex R6: la suscripción no es de este negocio. No concede nada y no se registra como conflicto suyo. */
+    | { tipo: 'AJENA'; venueDeLaMetadata: string | null; customerId: string | null }
+    | { tipo: 'DESCONOCIDA'; conflictoCreado: boolean; proyecciones: unknown }
+    | {
+        tipo: 'DECIDIDA'
+        decision: ReturnType<typeof decidirEntregaDePlan>
+        concedido: FulfillPlanCheckoutResult | null
+        conflictoCreado: boolean
       }
-    } else {
-      try {
-        await prisma.venueFeature.create({
+
+  // 🔴 Todo bajo el candado del NEGOCIO (el mismo de la regla común), tomado ANTES de leer las filas y de consultar
+  // Stripe (Codex, pasos 2-5, P1-1): dos entregas simultáneas de PRO y PREMIUM leían «no hay filas» y cada una creaba
+  // la suya. El CAS sobre `updatedAt` se conserva frente a los escritores que todavía no comparten el candado.
+  const salida: Salida = await prisma.$transaction(
+    async tx => {
+      await tx.$executeRaw`SET LOCAL lock_timeout = '15s'`
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`stripe-obligaciones:${venueId}`}))`
+
+      // 1. Las filas de los DOS tiers, ANTES de Stripe.
+      const planes = await tx.feature.findMany({
+        where: { code: { in: ['PLAN_PRO', 'PLAN_PREMIUM'] } },
+        select: { id: true, code: true, monthlyPrice: true, stripeProductId: true },
+        take: 2,
+      })
+      // 🔴 Codex R11: la entrega clasificaba con un catálogo de SÓLO los dos planes, así que una función normal
+      // (Inventario) salía `DESCONOCIDO` y la retirada demostrable se saltaba: una fila PREMIUM ligada a una
+      // suscripción que hoy vende PRO + Inventario conservaba PREMIUM. Se clasifica con el catálogo COMPLETO y
+      // acotado —el mismo criterio del inventario de obligaciones—; la forma mixta se sigue bloqueando igual.
+      const funcionesDelCatalogo = await tx.feature.findMany({
+        where: { stripeProductId: { not: null } },
+        select: { code: true, stripeProductId: true },
+        orderBy: { id: 'asc' },
+        take: TOPE_CATALOGO_DE_ENTREGA + 1,
+      })
+      if (funcionesDelCatalogo.length > TOPE_CATALOGO_DE_ENTREGA) throw reintentar('el catálogo es más grande de lo que se lee')
+      const filas = await tx.venueFeature.findMany({
+        where: { venueId, featureId: { in: planes.map(p => p.id) } },
+        select: {
+          id: true,
+          featureId: true,
+          active: true,
+          stripeSubscriptionId: true,
+          suspendedAt: true,
+          gracePeriodEndsAt: true,
+          paymentFailureCount: true,
+          updatedAt: true,
+        },
+        take: 2,
+      })
+      const planDeTier = (t: Tier) => planes.find(p => p.code === CODIGO_DEL_TIER[t])
+      const filaDeTier = (t: Tier) => filas.find(f => f.featureId === planDeTier(t)?.id)
+      const cas = async (fila: { id: string; updatedAt: Date }, data: Prisma.VenueFeatureUpdateManyMutationInput) => {
+        const { count } = await tx.venueFeature.updateMany({ where: { id: fila.id, updatedAt: fila.updatedAt }, data })
+        if (count === 0) throw reintentar('un registro de plan cambió mientras consultábamos Stripe')
+      }
+
+      // 2. El estado VIGENTE en Stripe y qué vende (por el precio, no por la metadata).
+      const subscription = await retry(() => stripe.subscriptions.retrieve(subscriptionId, {}, LECTURA_EN_CANDADO), {
+        retries: 2,
+        shouldRetry: shouldRetryStripeError,
+        context: 'stripe.entregarSuscripcionDePlan.retrieveSubscription',
+      })
+      const estado = clasificarEstado(subscription.status)
+      const { items, itemsCompletos } = itemsDeSuscripcion(subscription)
+      const { proyecciones } = clasificarSuscripcion(items, catalogoCompleto(funcionesDelCatalogo))
+      const planesVendidos = proyecciones.flatMap(p => (p.tipo === 'PLAN' ? [p.tier] : []))
+      const customerId = typeof subscription.customer === 'string' ? subscription.customer : (subscription.customer?.id ?? null)
+
+      // 🔴 Codex R6: sólo se entrega lo que ES del negocio. Nuestras suscripciones llevan su `venueId` en la metadata
+      // (la ponemos al crearlas); una vieja sin él se reconoce por el cliente de Stripe del negocio. Una ajena no concede
+      // nada aquí ni se registra como conflicto de ESTE negocio: el 🚨 del log la señala.
+      const venue = await tx.venue.findUnique({ where: { id: venueId }, select: { stripeCustomerId: true } })
+      const venueDeLaMetadata = subscription.metadata?.venueId
+      const esDelNegocio = venueDeLaMetadata ? venueDeLaMetadata === venueId : !!customerId && customerId === venue?.stripeCustomerId
+      if (!esDelNegocio) return { tipo: 'AJENA' as const, venueDeLaMetadata: venueDeLaMetadata ?? null, customerId }
+
+      // Un ítem fuera de la página puede ser justo el incompatible: lo que no se vio entero no se entiende (Codex P2-7).
+      if (!itemsCompletos || proyecciones.length !== 1 || planesVendidos.length !== 1) {
+        // Una TERMINADA pierde el acceso de las filas que la ligan aunque no se sepa qué vendía (Codex, P2-5).
+        if (estado === 'TERMINAL') {
+          for (const f of filas) if (f.stripeSubscriptionId === subscriptionId && f.active) await cas(f, { active: false })
+          // 🔴 Codex R12: y su conflicto pendiente se cierra — ya no cobra, así que no puede seguir bloqueando compras.
+          await cerrarConflictoTerminado(tx, subscriptionId)
+          return { tipo: 'NADA' }
+        }
+        // Lo DEMOSTRABLE se retira aunque la suscripción quede en conflicto (Codex C10): con todos sus ítems leídos y
+        // reconocidos, una fila ligada a ella cuyo tier ya no vende no está respaldada. Con un ítem desconocido no se sabe.
+        if (itemsCompletos && !proyecciones.some(p => p.tipo === 'DESCONOCIDO')) {
+          for (const t of ['PRO', 'PREMIUM'] as Tier[]) {
+            const f = filaDeTier(t)
+            if (f?.stripeSubscriptionId === subscriptionId && f.active && !planesVendidos.includes(t)) await cas(f, { active: false })
+          }
+        }
+        // Si no vende ningún plan, no es de este camino; si lo vende junto con otra cosa (o no se sabe qué vende), no se
+        // representa y queda como conflicto: nunca se concede lo que no se entiende.
+        if (itemsCompletos && planesVendidos.length === 0 && !proyecciones.some(p => p.tipo === 'DESCONOCIDO')) return { tipo: 'NADA' }
+        const r = await registrarConflictoDeObligacion(tx, {
+          venueId,
+          subscriptionId,
+          customerId,
+          kind: 'UNKNOWN_PRODUCT',
+          conflictsWith: [],
+          detectedBy,
+        })
+        return { tipo: 'DESCONOCIDA', conflictoCreado: r === 'CREADO', proyecciones }
+      }
+      const tier = planesVendidos[0]
+      const plan = planDeTier(tier)
+      if (!plan) throw new Error(`Feature ${CODIGO_DEL_TIER[tier]} not found`)
+
+      // 3. ¿Pueden cobrar los vínculos AJENOS que aparecen en las filas? (sin respuesta ⇒ INCIERTO, nunca terminado)
+      const puedeCobrar: Record<string, Cobrable> = {}
+      for (const f of filas) {
+        if (f.stripeSubscriptionId && f.stripeSubscriptionId !== subscriptionId)
+          puedeCobrar[f.stripeSubscriptionId] = await suscripcionPuedeCobrar(f.stripeSubscriptionId, LECTURA_EN_CANDADO)
+      }
+
+      // 4. Decidir con el núcleo auditado.
+      const aFila = (t: Tier) => {
+        const f = filaDeTier(t)
+        return f ? { vinculo: f.stripeSubscriptionId, active: f.active } : undefined
+      }
+      const decision = decidirEntregaDePlan({
+        subscriptionId,
+        tier,
+        estado,
+        filas: { PRO: aFila('PRO'), PREMIUM: aFila('PREMIUM') },
+        puedeCobrar,
+      })
+
+      // 5. Aplicar TODO con CAS. SOLTAR y RETIRAR van primero (el vínculo es único).
+      const trialEnd = subscription.status === 'trialing' && subscription.trial_end ? new Date(subscription.trial_end * 1000) : null
+      const stripePriceId = subscription.items?.data?.[0]?.price?.id ?? null
+      const concesion = {
+        active: true,
+        stripeSubscriptionId: subscriptionId,
+        stripePriceId,
+        monthlyPrice: plan.monthlyPrice,
+        endDate: trialEnd,
+        trialEndDate: trialEnd,
+        suspendedAt: null,
+        gracePeriodEndsAt: null,
+        paymentFailureCount: 0,
+      }
+      // Una obligación NUEVA en la fila (LIGAR/SUSTITUIR) arranca con su propia cobranza y vigencia: heredar el
+      // `suspendedAt` o la gracia de la anterior haría que el job de cancelación cancelara la NUEVA (Codex, P1-2).
+      const obligacionNueva = (activar: boolean) =>
+        activar
+          ? { ...concesion, stripeSubscriptionItemId: null }
+          : {
+              stripeSubscriptionId: subscriptionId,
+              stripeSubscriptionItemId: null,
+              stripePriceId,
+              monthlyPrice: plan.monthlyPrice,
+              active: false,
+              endDate: null,
+              trialEndDate: trialEnd,
+              suspendedAt: null,
+              gracePeriodEndsAt: null,
+              paymentFailureCount: 0,
+            }
+      // 🔴 Codex C9: si ESTA suscripción ya estaba en la fila del otro tier, cambiar de precio la TRASLADA — no nace una
+      // obligación nueva. Su cobranza viaja con ella, y una suspensión por impago sólo la levanta `active` (una prueba no
+      // salda una deuda); limpiar sus marcas aquí le perdonaba el impago al cambiar de plan.
+      const trasladada = filas.find(f => f.stripeSubscriptionId === subscriptionId && f.featureId !== plan.id)
+      const datosDelDestino = (activar: boolean) => {
+        if (!trasladada) return { data: obligacionNueva(activar), concede: activar }
+        const levanta = activar && !(trasladada.suspendedAt && subscription.status !== 'active')
+        if (levanta) return { data: { ...concesion, stripeSubscriptionItemId: null }, concede: true }
+        return {
           data: {
-            venueId,
-            featureId: feature.id,
-            active: false,
-            monthlyPrice: feature.monthlyPrice,
-            stripeSubscriptionId: subscription.id,
+            stripeSubscriptionId: subscriptionId,
+            stripeSubscriptionItemId: null,
             stripePriceId,
+            monthlyPrice: plan.monthlyPrice,
+            active: false,
+            endDate: null,
+            trialEndDate: trialEnd,
+            suspendedAt: trasladada.suspendedAt,
+            gracePeriodEndsAt: trasladada.gracePeriodEndsAt,
+            paymentFailureCount: trasladada.paymentFailureCount,
           },
-        })
-      } catch (error: any) {
-        if (error?.code !== 'P2002') throw error
-        // 🔴 Otro evento creó el registro mientras tanto. NO se puede dar por bueno en silencio:
-        // si ese registro quedó SIN el vínculo, el barrido no ve esta fila y el cliente que pague
-        // después se queda sin plan (Codex, 19-sep). Se reintenta para releer y decidir de nuevo.
-        logger.warn('🚨 fulfillPlanCheckout: otro evento creó el registro a la vez — se reintentará', {
-          sessionId: session.id,
-          venueId,
-          subscriptionId: subscription.id,
-          tierCode,
-        })
-        throw new Error(`fulfillPlanCheckout: el registro de ${venueId}/${tierCode} lo creó otro evento; se reintentará`)
+          concede: false,
+        }
       }
-    }
+      const ordenDeOps = (['SOLTAR', 'RETIRAR_ACCESO', 'APLICAR_ESTADO', 'SUSTITUIR', 'LIGAR'] as const).flatMap(op =>
+        (['PRO', 'PREMIUM'] as Tier[]).flatMap(t =>
+          decision.filas[t]?.op === op ? [[t, decision.filas[t] as OperacionDeFila] as const] : [],
+        ),
+      )
+      let concedido = false
+      for (const [t, op] of ordenDeOps) {
+        const fila = filaDeTier(t)
+        if (op.op === 'SOLTAR') await cas(fila!, { stripeSubscriptionId: null, stripeSubscriptionItemId: null, active: false })
+        else if (op.op === 'RETIRAR_ACCESO') await cas(fila!, { active: false })
+        else if (op.op === 'APLICAR_ESTADO') {
+          // Mismo vínculo: si habilita, se concede como siempre; si es recuperable, la cobranza (gracia, suspensión) la
+          // gobierna su propio manejador y aquí no se toca. Y una suspensión por impago sólo la levanta `active`: una
+          // prueba no salda una deuda (la misma regla de `veredictoDeActivacion` en los webhooks).
+          if (estado === 'HABILITANTE' && !(fila!.suspendedAt && subscription.status !== 'active')) {
+            await cas(fila!, concesion)
+            concedido = true
+          }
+        } else {
+          const { data, concede } = datosDelDestino(op.activar)
+          if (fila) await cas(fila, data)
+          else
+            // Otro escritor (sin este candado) creó la fila primero: la transacción ya quedó abortada, se reintenta entera.
+            await tx.venueFeature.create({ data: { venueId, featureId: plan.id, ...data } }).catch(e => {
+              throw (e as { code?: string })?.code === 'P2002' ? reintentar('otro evento creó el registro del plan') : e
+            })
+          if (concede) concedido = true
+        }
+      }
+      if (concedido) await cerrarConflictoEntregado(tx, subscriptionId)
+      let conflictoCreado = false
+      if (decision.conflictoCon?.length) {
+        const r = await registrarConflictoDeObligacion(tx, {
+          venueId,
+          subscriptionId,
+          customerId,
+          kind: 'DUPLICATE_PLAN',
+          conflictsWith: decision.conflictoCon,
+          featureCode: CODIGO_DEL_TIER[tier],
+          detectedBy,
+        })
+        conflictoCreado = r === 'CREADO'
+      }
+      return {
+        tipo: 'DECIDIDA',
+        decision,
+        conflictoCreado,
+        concedido: concedido ? { venueId, featureId: plan.id, featureCode: plan.code, subscriptionId, endDate: trialEnd } : null,
+      }
+    },
+    // Peor caso (Codex C3): la consulta con `retry` (3 × 15 s) + dos vínculos ajenos (2 × 15 s) + la base: 120 s bastan.
+    { maxWait: 10_000, timeout: 120_000 },
+  )
+
+  // Después de confirmar: auditoría, alertas y, si faltó una respuesta de Stripe, el reintento.
+  if (salida.tipo === 'NADA') return null
+  if (salida.tipo === 'AJENA') {
+    logger.error('🚨 entregarSuscripcionDePlan: la suscripción NO es de este negocio — no se concede', {
+      venueId,
+      subscriptionId,
+      venueDeLaMetadata: salida.venueDeLaMetadata,
+      customerId: salida.customerId,
+    })
     return null
   }
-
-  // trial_end is unix-seconds while the subscription is trialing; mirrors createPlanSubscription's
-  // endDate/trialEndDate semantics (not-null = trial window, null = paid subscription).
-  const trialEnd = subscription.status === 'trialing' && subscription.trial_end ? new Date(subscription.trial_end * 1000) : null
-
-  const concesion = {
-    active: true,
-    stripeSubscriptionId: subscription.id,
-    stripePriceId,
-    monthlyPrice: feature.monthlyPrice,
-    endDate: trialEnd,
-    trialEndDate: trialEnd,
-    suspendedAt: null,
-    paymentFailureCount: 0,
-  }
-
-  if (previo) {
-    const { count } = await prisma.venueFeature.updateMany({
-      where: { id: previo.id, updatedAt: previo.updatedAt },
-      data: concesion,
+  if (salida.tipo === 'DESCONOCIDA') {
+    if (salida.conflictoCreado) avisarConflictoCreado({ venueId, subscriptionId, kind: 'UNKNOWN_PRODUCT', detectedBy })
+    logger.error('🚨 entregarSuscripcionDePlan: suscripción con una forma que no se puede representar — queda en conflicto', {
+      venueId,
+      subscriptionId,
+      proyecciones: salida.proyecciones,
     })
-    if (count === 0) {
-      // El registro cambió entre la consulta a Stripe y esta escritura (típicamente una
-      // cancelación que llegó en medio). No se pisa: el evento queda FAILED y el cron lo
-      // reprocesa leyendo el estado fresco.
-      logger.warn('🚨 fulfillPlanCheckout: el registro cambió mientras consultábamos Stripe — se reintentará', {
-        sessionId: session.id,
-        venueId,
-        subscriptionId: subscription.id,
-        tierCode,
-      })
-      throw new Error(`fulfillPlanCheckout: el registro de ${venueId}/${tierCode} cambió bajo nosotros; se reintentará`)
-    }
-  } else {
-    try {
-      await prisma.venueFeature.create({
-        data: { venueId, featureId: feature.id, ...concesion },
-      })
-    } catch (error: any) {
-      if (error?.code !== 'P2002') throw error
-      logger.warn('🚨 fulfillPlanCheckout: otro evento creó el registro primero — se reintentará', {
-        sessionId: session.id,
-        venueId,
-        subscriptionId: subscription.id,
-        tierCode,
-      })
-      throw new Error(`fulfillPlanCheckout: el registro de ${venueId}/${tierCode} lo creó otro evento; se reintentará`)
-    }
+    return null
   }
-
-  logger.info(`✅ fulfillPlanCheckout: ${tierCode} activated for venue ${venueId} (sub ${subscription.id}, trial=${!!trialEnd})`)
-
-  return {
-    venueId,
-    featureId: feature.id,
-    featureCode: feature.code,
-    subscriptionId: subscription.id,
-    endDate: trialEnd,
+  if (salida.decision.conflictoCon?.length) {
+    logger.error('🚨 entregarSuscripcionDePlan: dos planes vivos — la suscripción queda en conflicto, sin pisar la otra', {
+      venueId,
+      subscriptionId,
+      conflictoCon: salida.decision.conflictoCon,
+    })
+    if (salida.conflictoCreado)
+      avisarConflictoCreado({ venueId, subscriptionId, kind: 'DUPLICATE_PLAN', conflictsWith: salida.decision.conflictoCon, detectedBy })
   }
+  if (salida.decision.reintentar) throw reintentar('no se pudo verificar en Stripe un vínculo existente')
+  if (salida.concedido) logger.info(`✅ entregarSuscripcionDePlan: ${salida.concedido.featureCode} para ${venueId} (sub ${subscriptionId})`)
+  return salida.concedido
 }
 
 /**
@@ -1352,6 +1667,16 @@ export async function createWinbackPromotionCode(
  *
  * @param subscriptionId - Stripe subscription ID
  */
+/**
+ * 🔴 Codex N3: la pausa de cobranza vigente de una suscripción. Una pausa SIN `resumes_at` (indefinida) cuenta como
+ * vigente: es la más peligrosa de todas, no la más inocente.
+ */
+function pausaDe(sub: Stripe.Subscription): Date | null {
+  const pausa = (sub as unknown as { pause_collection?: { resumes_at?: number | null } | null }).pause_collection
+  if (!pausa) return null
+  return pausa.resumes_at ? new Date(pausa.resumes_at * 1000) : new Date(8640000000000000)
+}
+
 export async function retrievePlanSubscription(subscriptionId: string): Promise<{
   status: string
   cancelAtPeriodEnd: boolean
@@ -1360,6 +1685,11 @@ export async function retrievePlanSubscription(subscriptionId: string): Promise<
   createdAt: Date | null
   /** Whether the subscription currently carries an active discount (single `discount` or `discounts[]`). */
   hasActiveDiscount: boolean
+  /**
+   * 🔴 Codex N3: hasta cuándo está PAUSADA la cobranza (`pause_collection.resumes_at`), o `null` si no lo está.
+   * Nadie lo leía, y por eso una pausa se podía extender indefinidamente pidiéndola otra vez antes de que venciera.
+   */
+  pausedUntil: Date | null
   interval: 'month' | 'year' | null
   grossAmountCents: number | null
 }> {
@@ -1380,6 +1710,7 @@ export async function retrievePlanSubscription(subscriptionId: string): Promise<
     currentPeriodEnd: periodEndRaw ? new Date(periodEndRaw * 1000) : null,
     createdAt: createdRaw ? new Date(createdRaw * 1000) : null,
     hasActiveDiscount: Boolean(singleDiscount) || (Array.isArray(discountList) && discountList.length > 0),
+    pausedUntil: pausaDe(sub),
     interval: rawInterval === 'year' ? 'year' : rawInterval === 'month' ? 'month' : null,
     grossAmountCents: sub.items.data[0]?.price.unit_amount ?? null,
   }
@@ -1429,10 +1760,22 @@ export async function updatePaymentMethod(customerId: string, paymentMethodId: s
  * @param returnUrl - URL to redirect user after they're done
  * @returns Session URL for the customer portal
  */
+/**
+ * 🔴 R0 (Codex, 21-sep): la configuración del Billing Portal que usan LAS DOS puertas que lo abren. Sin
+ * fijarla, Stripe usa la de la cuenta — y si ésa deja cambiar de plan o de precio, el cliente se salta la
+ * coordinación de la compra. Se crea UNA vez en la cuenta (sin «cambiar suscripción») y su id va en
+ * `STRIPE_BILLING_PORTAL_CONFIGURATION_ID`. Sin la variable, todo sigue como antes.
+ */
+function configuracionDelPortal(): { configuration: string } | Record<string, never> {
+  const id = process.env.STRIPE_BILLING_PORTAL_CONFIGURATION_ID
+  return id ? { configuration: id } : {}
+}
+
 export async function createCustomerPortalSession(customerId: string, returnUrl: string): Promise<string> {
   const session = await stripe.billingPortal.sessions.create({
     customer: customerId,
     return_url: returnUrl,
+    ...configuracionDelPortal(),
   })
 
   logger.info(`✅ Created customer portal session for customer ${customerId}`)
@@ -1503,8 +1846,22 @@ export async function getCustomerInvoices(
  * @param invoiceId - Stripe invoice ID
  * @returns Invoice PDF URL
  */
-export async function getInvoicePdfUrl(invoiceId: string): Promise<string> {
+/**
+ * 🔴 ¿Es esta factura del cliente de Stripe de ESTE negocio? El id llega en la URL: sin esto, con el id
+ * de una factura ajena se entregaba su PDF o se cobraba a la tarjeta de otro negocio (21-sep-2026).
+ * Se responde 404, no 403: no se confirma que la factura exista.
+ */
+function exigirFacturaDelCliente(invoice: Stripe.Invoice, customerId: string): void {
+  const dueño = typeof invoice.customer === 'string' ? invoice.customer : invoice.customer?.id
+  if (!dueño || dueño !== customerId) {
+    logger.warn('🚨 Se pidió una factura de OTRO cliente de Stripe; se niega', { invoiceId: invoice.id, customerId })
+    throw new AppError('Factura no encontrada', 404, true, 'INVOICE_NOT_FOUND')
+  }
+}
+
+export async function getInvoicePdfUrl(invoiceId: string, customerId: string): Promise<string> {
   const invoice = await stripe.invoices.retrieve(invoiceId)
+  exigirFacturaDelCliente(invoice, customerId)
 
   if (!invoice.invoice_pdf) {
     throw new Error(`Invoice ${invoiceId} does not have a PDF available`)
@@ -1627,27 +1984,67 @@ export async function previewSubscriptionProration(
  * @param newPriceId - New Stripe price ID
  * @returns Updated subscription
  */
-export async function updateSubscriptionPrice(subscriptionId: string, newPriceId: string): Promise<Stripe.Subscription> {
-  const subscription = await stripe.subscriptions.retrieve(subscriptionId)
+export async function updateSubscriptionPrice(
+  subscriptionId: string,
+  newPriceId: string,
+  opciones?: {
+    /**
+     * 🔴 Codex R7: se llama JUSTO antes del POST que puede cobrar. Quien llama lo usa para saber si un error posterior
+     * ya no demuestra que el cambio no ocurrió; marcarlo antes convertía un fallo de la CONSULTA —que no manda nada— en
+     * un desenlace dudoso, y el negocio recibía un 202 por algo que nunca salió.
+     */
+    antesDeEnviar?: () => void | Promise<void>
+    /** El plan que quien llama cree que vende hoy esta suscripción. Si ya no es ése, no se cambia nada. */
+    planOrigen?: string
+    /**
+     * 🔴 Codex R5: llave ESTABLE del cambio. Un desenlace incierto se responde 202 y el cambio puede repetirse; sin
+     * llave, repetirlo factura OTRO prorrateo con `always_invoice`. Con ella, Stripe devuelve el mismo resultado.
+     */
+    idempotencyKey?: string
+  },
+): Promise<Stripe.Subscription> {
+  // 🔴 Corre bajo el candado de la regla común (Codex C3): cada llamada con tiempo propio y sin reintentos del SDK — un
+  // reintento automático del cambio mientras el candado ya se soltó es justo lo que no puede pasar.
+  const subscription = await stripe.subscriptions.retrieve(subscriptionId, {}, STRIPE_DENTRO_DEL_CANDADO)
 
   if (!subscription.items.data[0]) {
     throw new Error('Subscription has no items')
+  }
+
+  // 🔴 Codex R9: se cambiaba el PRIMER ítem sin mirar la forma. Con dos conceptos —o con la página incompleta— «el
+  // primero» es el que Stripe devolvió de primeras: se podía sustituir el precio de una función suelta creyendo cambiar
+  // el plan, y cobrarlo con `always_invoice`. Lo que no se puede identificar ENTERO no se toca.
+  const { items, itemsCompletos } = itemsDeSuscripcion(subscription)
+  if (!itemsCompletos || items.length !== 1) {
+    throw new ConflictError('Tu suscripción tiene más de un concepto; escríbenos para cambiar de plan.', 'CAMBIO_AMBIGUO')
+  }
+  if (opciones?.planOrigen && !(await suscripcionVendeElPlan({ items, itemsCompletos }, opciones.planOrigen))) {
+    throw new ConflictError('Tu suscripción ya no vende el plan que se quiere cambiar; escríbenos.', 'CAMBIO_AMBIGUO')
   }
 
   const currentItem = subscription.items.data[0]
 
   logger.info(`🔄 Updating subscription ${subscriptionId} to new price ${newPriceId}`)
 
-  const updatedSubscription = await stripe.subscriptions.update(subscriptionId, {
-    items: [
-      {
-        id: currentItem.id,
-        price: newPriceId,
-      },
-    ],
-    proration_behavior: 'always_invoice',
-    proration_date: Math.floor(Date.now() / 1000),
-  })
+  await opciones?.antesDeEnviar?.()
+  const updatedSubscription = await stripe.subscriptions.update(
+    subscriptionId,
+    {
+      items: [
+        {
+          id: currentItem.id,
+          price: newPriceId,
+        },
+      ],
+      proration_behavior: 'always_invoice',
+      // 🔴 Codex R5: NO se manda `proration_date`. La llave de idempotencia exige que el cuerpo sea idéntico en un
+      // reintento, y un `Date.now()` cambia entre intentos: Stripe rechazaría la repetición por «parámetros
+      // distintos». Omitirlo deja que Stripe use la hora de la petición, que es EXACTAMENTE lo que hacía antes —
+      // se cobran los días que faltan del periodo. 🔴 Anclarlo al inicio del periodo también estabilizaría el
+      // cuerpo, pero cambia el DINERO: cobraría el periodo completo en vez del remanente.
+    },
+    { ...STRIPE_DENTRO_DEL_CANDADO, ...(opciones?.idempotencyKey ? { idempotencyKey: opciones.idempotencyKey } : {}) },
+  )
 
   logger.info(`✅ Subscription updated successfully`, {
     subscriptionId,
@@ -1666,9 +2063,10 @@ export async function updateSubscriptionPrice(subscriptionId: string, newPriceId
  * @returns Paid invoice object
  * @throws Error if invoice is already paid or cannot be paid
  */
-export async function retryInvoicePayment(invoiceId: string): Promise<Stripe.Invoice> {
+export async function retryInvoicePayment(invoiceId: string, customerId: string): Promise<Stripe.Invoice> {
   // First retrieve the invoice to check its status
   const invoice = await stripe.invoices.retrieve(invoiceId)
+  exigirFacturaDelCliente(invoice, customerId)
 
   // Validate invoice can be paid
   if (invoice.status === 'paid') {
@@ -1787,6 +2185,7 @@ export async function generateBillingPortalUrl(customerId: string, returnUrl?: s
     const session = await stripe.billingPortal.sessions.create({
       customer: customerId,
       return_url: returnUrl || `${process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'}/dashboard`,
+      ...configuracionDelPortal(),
     })
     return session.url
   } catch (error) {

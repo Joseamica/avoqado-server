@@ -51,7 +51,9 @@ describe('GET progress — la fuga de la CLABE', () => {
   })
 
   it('🔴 el OWNER de OTRA organización recibe 403, no los datos', async () => {
-    const res = await request(app).get(`${BASE}/progress`).set('Authorization', `Bearer ${token('OWNER')}`)
+    const res = await request(app)
+      .get(`${BASE}/progress`)
+      .set('Authorization', `Bearer ${token('OWNER')}`)
     expect(res.status).toBe(403)
     expect(res.body.code ?? res.body.message).toBeTruthy()
     expect(prismaMock.onboardingProgress.findUnique).not.toHaveBeenCalled()
@@ -79,7 +81,9 @@ describe('los demás endpoints del alta exigen ser dueño', () => {
 describe('SUPERADMIN pasa el guardia', () => {
   it('no recibe 403 (es quien resuelve altas atoradas)', async () => {
     ;(prismaMock.onboardingProgress.findUnique as jest.Mock).mockResolvedValue(null)
-    const res = await request(app).get(`${BASE}/progress`).set('Authorization', `Bearer ${token('SUPERADMIN', 'sa')}`)
+    const res = await request(app)
+      .get(`${BASE}/progress`)
+      .set('Authorization', `Bearer ${token('SUPERADMIN', 'sa')}`)
     expect(res.status).not.toBe(403)
   })
 })

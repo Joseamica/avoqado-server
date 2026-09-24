@@ -223,7 +223,7 @@ export async function getAutofacturaStatusController(req: Request<{ accessKey: s
     // resolver (most-recent COMPLETED payment → merchant → MerchantFiscalConfig
     // → venue-matched emisor); it returns null when invoicing isn't possible.
     const bundle = await loadOrderForCfdiFromDb(order.id)
-    const autofacturaAvailable = !!bundle && bundle.facturacionEnabled && bundle.autofacturaEnabled
+    const autofacturaAvailable = !!bundle && bundle.facturacionEnabled && bundle.autofacturaEnabled && !bundle.unsupportedReasons?.length
 
     res.status(200).json({ cfdi: cfdi ?? null, autofacturaAvailable })
   } catch (err: unknown) {

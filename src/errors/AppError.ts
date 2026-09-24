@@ -114,6 +114,17 @@ export class SatCatalogUnavailableError extends AppError {
   }
 }
 
+/**
+ * 502 — un proveedor de delivery (Uber, etc.) no contestó a una consulta de LECTURA (p.ej.
+ * "¿quién trae este pedido?"). Distinto de `PaymentOutcomeUnknownError`: aquí no hay dinero
+ * en vuelo, así que reintentar es simplemente seguro — el 502 sólo dice "vuelve a intentar".
+ */
+export class ProviderUnavailableError extends AppError {
+  constructor(message: string = 'El proveedor de delivery no contestó. Intenta de nuevo.') {
+    super(message, 502, true, 'PROVIDER_UNAVAILABLE')
+  }
+}
+
 // Consider re-adding other specific error classes if they were used elsewhere and are now missing:
 export class AuthenticationError extends AppError {
   constructor(message: string = 'No autenticado') {

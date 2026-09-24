@@ -19,6 +19,7 @@ import { createRefundCommission } from './commission/commission-calculation.serv
 import { asegurarObligacionDeCostoNegativo, costearYProyectarReembolso } from '../payments/deferredTransactionCost.service'
 import { logAction } from './activity-log.service'
 import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
+import { computeTenderCommission } from './tenderType.dashboard.service'
 import {
   claimShiftForRefund,
   lockExistingOrderForPayment,
@@ -36,7 +37,14 @@ import {
   esCantidadPositivaEnCentavos,
 } from '../shared/devueltoDeUnCobro'
 
-export type RefundReason = 'RETURNED_GOODS' | 'ACCIDENTAL_CHARGE' | 'CANCELLED_ORDER' | 'FRAUDULENT_CHARGE' | 'OTHER'
+export type RefundReason =
+  | 'RETURNED_GOODS'
+  | 'ACCIDENTAL_CHARGE'
+  | 'CANCELLED_ORDER'
+  | 'FRAUDULENT_CHARGE'
+  | 'OTHER'
+  // Ajuste compensatorio cuando la app de reparto retira un renglón (spec KDS Uber §3.1).
+  | 'DELIVERY_ITEM_REMOVED'
 
 /**
  * El motivo, en español, para la nota del movimiento de caja: ese texto lo IMPRIME el
@@ -49,6 +57,7 @@ const REFUND_REASON_LABEL_ES: Record<RefundReason, string> = {
   CANCELLED_ORDER: 'Pedido cancelado',
   FRAUDULENT_CHARGE: 'Cargo fraudulento',
   OTHER: 'Otro motivo',
+  DELIVERY_ITEM_REMOVED: 'Artículo retirado por la app de reparto',
 }
 
 export interface RefundItemInput {
@@ -118,6 +127,8 @@ interface LockedPaymentRow {
   tenderLabel: string | null
   tenderCaptureTip: boolean | null
   tenderSatFormaPago: string | null
+  /** % de comisión CONGELADO en el cobro: el núcleo lo usa para revertirla en proporción. */
+  tenderCommissionPercent: Prisma.Decimal | null
 }
 
 interface RefundPaymentRow {
@@ -266,6 +277,401 @@ export function assertRefundableLines(lines: RefundableLine[], selectedIds: stri
   }
 }
 
+function refundAuthorityUnavailable(): ConflictError {
+  return new ConflictError(
+    'El cobro cambió mientras iniciaba el reembolso. Verifica su asignación antes de continuar.',
+    'REFUND_AUTHORITY_UNAVAILABLE',
+  )
+}
+
+/** El cobro original bloqueado y lo ya devuelto de él, leído dentro del tx del reembolso. */
+export interface CobroBloqueado {
+  original: LockedPaymentRow & { orderId: string }
+  existingRefunds: RefundPaymentRow[]
+  alreadyRefundedCents: number
+  refundedSalesCents: number
+  refundedTipsCents: number
+  unclassifiedPriorRefundCents: number
+  remainingBeforeCents: number
+}
+
+/**
+ * Bloquea el cobro original en el orden de siempre (`Order → Payment`; el `Shift` lo toma
+ * después el reclamo) y lee cuánto se ha devuelto ya. Es el tramo que comparten el reembolso
+ * del dashboard y el núcleo `writeRefundInTx`.
+ */
+export async function bloquearCobroParaReembolso(
+  tx: Prisma.TransactionClient,
+  input: { venueId: string; paymentId: string; expectedOrderId: string | null },
+): Promise<CobroBloqueado> {
+  if (input.expectedOrderId) {
+    const orderStillBelongsToVenue = await lockExistingOrderForPayment(tx, {
+      venueId: input.venueId,
+      orderId: input.expectedOrderId,
+    })
+    if (!orderStillBelongsToVenue) throw refundAuthorityUnavailable()
+  }
+  const expectedOrder = input.expectedOrderId ? Prisma.sql`"orderId" = ${input.expectedOrderId}` : Prisma.sql`"orderId" IS NULL`
+  const lockedOriginalRows = await tx.$queryRaw<LockedPaymentRow[]>(Prisma.sql`
+    SELECT
+      id,
+      "venueId",
+      status,
+      type,
+      method,
+      source,
+      amount,
+      "tipAmount",
+      "orderId",
+      "shiftId",
+      "merchantAccountId",
+      "processorData",
+      "fundsFlow",
+      "tenderTypeId",
+      "tenderCountsAsCash",
+      "tenderRevision",
+      "tenderLabel",
+      "tenderCaptureTip",
+      "tenderSatFormaPago",
+      "tenderCommissionPercent"
+    FROM "Payment"
+    WHERE id = ${input.paymentId}
+      AND "venueId" = ${input.venueId}
+      AND ${expectedOrder}
+    FOR UPDATE
+  `)
+
+  const original = lockedOriginalRows[0]
+  if (!original) {
+    throw refundAuthorityUnavailable()
+  }
+  if (original.venueId !== input.venueId || original.orderId !== input.expectedOrderId) {
+    throw refundAuthorityUnavailable()
+  }
+  if (original.status !== 'COMPLETED') {
+    throw new BadRequestError(`Cannot refund payment with status: ${original.status}`)
+  }
+  if (original.type === PaymentType.REFUND) {
+    throw new BadRequestError('Cannot refund a refund')
+  }
+  if (!original.orderId) {
+    throw new BadRequestError('Original payment is missing an associated order')
+  }
+
+  const existingRefunds = await tx.$queryRaw<RefundPaymentRow[]>(Prisma.sql`
+    SELECT id, amount, "tipAmount", "processorData", "createdAt", status
+    FROM "Payment"
+    WHERE
+      "venueId" = ${input.venueId}
+      AND type = CAST(${PaymentType.REFUND} AS "PaymentType")
+      AND "processorData"->>'originalPaymentId' = ${input.paymentId}
+    ORDER BY "createdAt" ASC, id ASC
+  `)
+
+  // ¿Cuánto se ha devuelto ya de este cobro? La definición vive UNA sola vez, en
+  // `shared/devueltoDeUnCobro.ts`, y es la misma que usa el riel de la terminal:
+  // **venta + propina**. Aquí se le pasan las DOS evidencias —el acumulado persistido y
+  // las filas de reembolso, que este camino ya tenía a la mano— y gana la mayor; el
+  // porqué está en la cabecera de ese archivo. La cuenta se hace en CENTAVOS enteros.
+  //
+  // ⚠️ El `SELECT` de arriba NO filtra por `status` a propósito, y no es un descuido: sus
+  // filas alimentan también a `collectExistingRefundedItems`, que lleva las CANTIDADES ya
+  // devueltas por artículo. Restringirlo ahí dejaría re-reembolsar los artículos de un
+  // reembolso no completado — un aflojamiento, y en la dirección que cuesta dinero. Del
+  // lado del DINERO el filtro sí aplica, y vive dentro de `centavosDevueltosDeFilas`: sólo
+  // cuentan los `COMPLETED`, igual que `summarizeRefunds`.
+  //
+  // 🔴 Esto sustituye a un `reduce` que sumaba sólo `Math.abs(refund.amount)`: la propina
+  // ya devuelta no contaba, así que un cobro de $100 + $20 admitía dos reembolsos de $60
+  // ($120 entregados) y todavía declaraba $10 reembolsables. Prueba:
+  // `tests/unit/services/dashboard/refund.propinaEnElAcumulado.test.ts`, donde el cobro
+  // lleva propina a propósito — con `tipAmount = 0` las dos semánticas coinciden y una
+  // prueba así pasaría con el defecto vivo.
+  const alreadyRefundedCents = centavosYaDevueltos({ processorData: original.processorData, filas: existingRefunds })
+  const { salesCents: refundedSalesCents, tipCents: refundedTipsCents } = centavosDevueltosPorComponente(existingRefunds)
+  const unclassifiedPriorRefundCents = Math.max(0, alreadyRefundedCents - (refundedSalesCents + refundedTipsCents))
+  const totalOriginalCents = toCents(original.amount) + toCents(original.tipAmount)
+
+  return {
+    original: { ...original, orderId: original.orderId },
+    existingRefunds,
+    alreadyRefundedCents,
+    refundedSalesCents,
+    refundedTipsCents,
+    unclassifiedPriorRefundCents,
+    remainingBeforeCents: Math.max(0, totalOriginalCents - alreadyRefundedCents),
+  }
+}
+
+/**
+ * Contrato del núcleo de reembolso (spec KDS Uber §3.1). Todo en CENTAVOS enteros ≥ 0.
+ * `issueRefund` lo llama con los defaults de siempre (`NONE` · `CLAIM_LIVE` · `MANUAL`).
+ */
+interface WriteRefundBase {
+  originalPaymentId: string
+  venueId: string
+  salesRefundCents: number
+  tipRefundCents: number
+  /** Viaja tal cual a `processorData.refundedItems` (el dashboard añade nombre y producto). */
+  refundedItems: Array<{ orderItemId: string; quantity: number; amountCents: number }>
+  reason: RefundReason
+  note?: string | null
+  staffId?: string | null
+  idempotencyKey?: string
+  tenderCommission: 'NONE' | 'REVERSE_PROPORTIONAL'
+  shift: 'CLAIM_LIVE' | 'INHERIT_ORIGINAL'
+  /** @internal `issueRefund` ya bloqueó y leyó el cobro en ESTE tx: no se repite. */
+  bloqueado?: CobroBloqueado
+}
+
+/**
+ * Un ajuste del proveedor SIN su generación o su reparto fiscal no compila: sin ellos la póliza
+ * caería a la mezcla de la orden y la llave `dlr:` no tendría con qué numerarse.
+ */
+export type WriteRefundInput = WriteRefundBase &
+  (
+    | { provenance?: 'MANUAL'; generation?: undefined; fiscalByRateCents?: undefined }
+    | {
+        provenance: 'PROVIDER_ADJUSTMENT'
+        /** La generación del ajuste, que estampa el reconciliador. */
+        generation: number
+        fiscalByRateCents: Record<string, number>
+      }
+  )
+
+/**
+ * El núcleo del reembolso: replay por llave → bloquear el cobro original → validar → reclamar
+ * (o heredar) el turno → crear la fila REFUND con su `processorData` → acumulado en el original.
+ *
+ * 🔴 Vive en este archivo, no en `shared/`, a propósito: el guardia AST de turnos
+ * (`tests/unit/services/shared/paymentShiftClaim.callers.guard.test.ts`) exige que el `create`
+ * del Payment, su reclamo de turno y su auditoría se rastreen hasta un `prisma.$transaction` del
+ * MISMO archivo — y ése es el de `issueRefund`. `shared/writeRefundInTx.ts` sólo lo re-exporta.
+ */
+export async function writeRefundInTx(
+  tx: Prisma.TransactionClient,
+  input: WriteRefundInput,
+): Promise<{ refundPaymentId: string; replay: boolean }> {
+  // El replay va PRIMERO, antes de validar saldo o cantidades: un reintento de algo que ya se
+  // devolvió no puede morir en la validación (spec [N-11]).
+  if (input.idempotencyKey) {
+    const previo = await tx.payment.findUnique({
+      where: { venueId_idempotencyKey: { venueId: input.venueId, idempotencyKey: input.idempotencyKey } },
+      select: { id: true, type: true, processorData: true },
+    })
+    if (previo) {
+      // Una llave que ya pertenece a OTRO movimiento —un cobro, o el reembolso de otro cobro— no
+      // es un replay: devolverla le diría al llamador «ya quedó» sobre un cobro intacto.
+      if (previo.type !== PaymentType.REFUND || asRecord(previo.processorData).originalPaymentId !== input.originalPaymentId) {
+        throw new ConflictError('La llave de idempotencia ya pertenece a otro movimiento', 'IDEMPOTENCY_KEY_REUSED')
+      }
+      return { refundPaymentId: previo.id, replay: true }
+    }
+  }
+
+  // Un ajuste de signos mixtos no existe como REFUND (spec [N-25]).
+  if (!esCantidadNoNegativaEnCentavos(input.salesRefundCents) || !esCantidadNoNegativaEnCentavos(input.tipRefundCents)) {
+    throw new BadRequestError('Los componentes del reembolso deben ser enteros no negativos expresados en centavos')
+  }
+  const refundCents = input.salesRefundCents + input.tipRefundCents
+  if (refundCents <= 0) {
+    throw new BadRequestError('Refund amount must be greater than zero')
+  }
+
+  let cobro = input.bloqueado
+  if (!cobro) {
+    const previo = await tx.payment.findFirst({
+      where: { id: input.originalPaymentId, venueId: input.venueId },
+      select: { orderId: true },
+    })
+    if (!previo) throw new NotFoundError('Payment not found')
+    cobro = await bloquearCobroParaReembolso(tx, {
+      venueId: input.venueId,
+      paymentId: input.originalPaymentId,
+      expectedOrderId: previo.orderId,
+    })
+  }
+  const { original, alreadyRefundedCents, unclassifiedPriorRefundCents, remainingBeforeCents } = cobro
+  if (refundCents > remainingBeforeCents) {
+    throw new BadRequestError(
+      `Refund (${centsToNumber(refundCents).toFixed(2)}) exceeds remaining refundable (${centsToNumber(remainingBeforeCents).toFixed(2)})`,
+    )
+  }
+  const provenance = input.provenance ?? 'MANUAL'
+  const sinClasificar = input.shift === 'CLAIM_LIVE' && unclassifiedPriorRefundCents > 0
+  // ── ¿DE QUÉ TURNO SALE ESTE REEMBOLSO? ────────────────────────────────────────────────
+  //
+  // `claimedAt`/CLOSING es el corte. Se observa el candidato más reciente del NEGOCIO,
+  // aunque ya esté CLOSING, dentro de la misma transacción. Sólo OPEN puede ganar el CAS
+  // tenant-safe que decrementa venta/propina y autoriza `shiftId`; nunca se cae al turno
+  // histórico de `original`, ni se espera/reintenta para reescribir un cierre firmado.
+  // CLOSING y claim-lost quedan sin turno y se explican con una conciliación atómica creada
+  // después del Payment real. Sin candidato se conserva por ahora el comportamiento previo,
+  // salvo que el total histórico tenga un delta venta/propina sin clasificar: esa anomalía
+  // exige conciliación aun sin candidato y nunca puede tocar un Shift.
+  //
+  // El efectivo físico no se pierde en ningún caso: el `PAY_OUT` al cajón se publica post-commit
+  // contra la `CashDrawerSession` abierta del venue, que no depende del `Shift`.
+  const salesRefundPesos = centsToDecimal(input.salesRefundCents)
+  const tipRefundPesos = centsToDecimal(input.tipRefundCents)
+  const shiftClaim = await claimShiftForRefund(tx, {
+    venueId: input.venueId,
+    salesRefundPesos,
+    tipRefundPesos,
+    forcePendingReason: sinClasificar ? ('UNCLASSIFIED_REFUND_COMPONENT_HISTORY' as const) : undefined,
+    // `INHERIT_ORIGINAL`: el turno del cobro original, sin reclamar ni descontar ninguno.
+    inherit: input.shift === 'INHERIT_ORIGINAL' ? { shiftId: original.shiftId } : undefined,
+  })
+  const shiftId = shiftClaim.shiftId
+
+  // `REVERSE_PROPORTIONAL`: la comisión del tipo de pago se devuelve con el % CONGELADO en el cobro
+  // original, sobre la VENTA devuelta en PESOS (`computeTenderCommission` recibe Decimal en pesos;
+  // con los centavos crudos, $50 al 30 % revertirían $1,500). `NONE` = el dashboard de siempre.
+  const comisionRevertida =
+    input.tenderCommission === 'REVERSE_PROPORTIONAL' ? computeTenderCommission(original.tenderCommissionPercent, salesRefundPesos) : null
+
+  const originalProcessorData = asRecord(original.processorData)
+  const refundPayment = await tx.payment.create({
+    data: {
+      venueId: input.venueId,
+      orderId: original.orderId,
+      shiftId: shiftId || undefined,
+      processedById: input.staffId || undefined,
+      idempotencyKey: input.idempotencyKey,
+      merchantAccountId: original.merchantAccountId || undefined,
+
+      // Negative amount/tip so that sum(refunds) mirrors the original split.
+      amount: centsToDecimal(-input.salesRefundCents),
+      tipAmount: centsToDecimal(-input.tipRefundCents),
+      netAmount: centsToDecimal(-refundCents),
+      feeAmount: new Prisma.Decimal(0),
+      feePercentage: 0,
+
+      method: original.method as PaymentMethod,
+      // 🔴 El reembolso hereda la IDENTIDAD y la SEMÁNTICA del tipo original, no sólo el
+      // `method`. Sin esto, devolver un vale que SÍ entraba al cajón caía al fallback
+      // legacy (`method === 'CASH'` = false) y el arqueo seguía exigiendo un efectivo que
+      // YA salió — un faltante inventado, en la dirección que acusa al cajero.
+      //
+      // Con `tenderCommission: 'NONE'` (el dashboard) la COMISIÓN no se hereda a propósito: que
+      // Uber devuelva su 30% cuando el cliente cancela es un acuerdo comercial que no conocemos,
+      // e inventarlo daría un costo o un ingreso falso. Sólo el ajuste del proveedor la revierte
+      // (`REVERSE_PROPORTIONAL`, abajo): ahí Uber SÍ recalcula su comisión sobre lo que cobró.
+      tenderTypeId: original.tenderTypeId || undefined,
+      tenderRevision: original.tenderTypeId && original.tenderRevision != null ? original.tenderRevision : undefined,
+      tenderLabel: original.tenderTypeId && original.tenderLabel != null ? original.tenderLabel : undefined,
+      tenderCountsAsCash: original.tenderTypeId && original.tenderCountsAsCash != null ? original.tenderCountsAsCash : undefined,
+      tenderCaptureTip: original.tenderTypeId && original.tenderCaptureTip != null ? original.tenderCaptureTip : undefined,
+      tenderSatFormaPago: original.tenderTypeId && original.tenderSatFormaPago != null ? original.tenderSatFormaPago : undefined,
+      tenderCommissionPercent: comisionRevertida ? (original.tenderCommissionPercent ?? undefined) : undefined,
+      tenderCommissionAmount: comisionRevertida ? comisionRevertida.negated() : undefined,
+      // `fundsFlow` va aparte del bloque de arriba: un pago SIN tender también lo tiene
+      // (lo estampa su punto de entrada), y es la autoridad de "¿esto estaba en el cajón?".
+      fundsFlow: original.fundsFlow ? (original.fundsFlow as PaymentFundsFlow) : undefined,
+      source: original.source ? (original.source as PaymentSource) : undefined,
+      status: 'COMPLETED',
+      type: PaymentType.REFUND,
+
+      processor: 'dashboard',
+      processorData: {
+        originalPaymentId: original.id,
+        refundReason: input.reason,
+        note: input.note ?? null,
+        amountCents: refundCents,
+        amount: centsToNumber(refundCents),
+        // El dashboard la omite si va vacía (así ha sido siempre); el ajuste del proveedor la lleva
+        // SIEMPRE, aunque vaya vacía (spec [N-24]: sólo bajó la propina, o el retiro no está acreditado).
+        refundedItems: input.refundedItems.length > 0 || provenance === 'PROVIDER_ADJUSTMENT' ? input.refundedItems : undefined,
+        // Sólo `true` cuando el decremento inline realmente ganó el claim. El backfill
+        // exige además `shiftId`, así que un pendiente sin turno no puede atribuirse dos veces.
+        // Con `INHERIT_ORIGINAL` y turno heredado también es `true`: así el backfill jamás
+        // descuenta de ese turno un reembolso que a propósito no pertenece a su corte.
+        shiftBackfilled: shiftId !== null,
+        ...(sinClasificar
+          ? {
+              shiftAttributionStatus: 'PENDING',
+              shiftAttributionPendingReason: 'UNCLASSIFIED_REFUND_COMPONENT_HISTORY',
+            }
+          : {}),
+        // Toda fila dice de dónde salió; las marcas del ajuste del proveedor sólo las lleva ése
+        // (spec [N-24]): el reporte de comisiones y la póliza las leen para no mezclarlas.
+        provenance,
+        ...(provenance === 'PROVIDER_ADJUSTMENT'
+          ? { providerAdjustment: true, generation: input.generation, fiscalByRateCents: input.fiscalByRateCents }
+          : {}),
+      } as Prisma.InputJsonValue,
+    },
+  })
+
+  if (shiftClaim.pendingReason) {
+    // Se lee aquí, con `tx`, y no se recibe del llamador: el guardia AST de turnos exige que el gate
+    // de la conciliación salga de una llamada canónica a `resolvePaymentShiftReconciliationEnabled`.
+    // (Antes del refactor el dashboard lo leía ANTES de abrir su transacción; mismo valor.)
+    const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(tx, input.venueId)
+    await recordPendingPaymentShiftReconciliation(tx, {
+      reconciliationEnabled,
+      claim: shiftClaim,
+      venueId: input.venueId,
+      paymentId: refundPayment.id,
+      orderId: original.orderId,
+      staffId: input.staffId ?? null,
+      channel: 'issueRefund',
+      amountPesos: salesRefundPesos.negated(),
+      tipPesos: tipRefundPesos.negated(),
+      unclassifiedPriorRefundPesos: unclassifiedPriorRefundCents > 0 ? centsToDecimal(unclassifiedPriorRefundCents) : undefined,
+    })
+  }
+
+  // Bump refundedAmount on the original payment's processorData.
+  // Los dos campos salen del MISMO entero de centavos (`acumuladoPersistido`): derivarlos
+  // por separado es cómo empiezan a divergir. Semántica: venta + propina.
+  const updatedProcessorData = {
+    ...originalProcessorData,
+    ...acumuladoPersistido(alreadyRefundedCents + refundCents),
+    refunds: [
+      ...((Array.isArray(originalProcessorData.refunds) ? originalProcessorData.refunds : []) as any[]),
+      {
+        refundPaymentId: refundPayment.id,
+        amount: centsToNumber(refundCents),
+        amountCents: refundCents,
+        reason: input.reason,
+        at: new Date().toISOString(),
+      },
+    ],
+  }
+  await tx.payment.update({
+    where: {
+      id: original.id,
+      venueId: input.venueId,
+      orderId: original.orderId,
+      status: TransactionStatus.COMPLETED,
+      type: original.type,
+    },
+    data: { processorData: updatedProcessorData as any },
+  })
+
+  // Venue transaction for financial tracking
+  await tx.venueTransaction.create({
+    data: {
+      venueId: input.venueId,
+      paymentId: refundPayment.id,
+      type: 'REFUND',
+      grossAmount: centsToDecimal(-refundCents),
+      feeAmount: new Prisma.Decimal(0),
+      netAmount: centsToDecimal(-refundCents),
+      status: 'SETTLED',
+    },
+  })
+
+  // El decremento del turno YA ocurrió arriba: el claim ES el decremento, y sellar el `Payment`
+  // después es lo que garantiza que nunca haya un REFUND en un turno al que no se le restó.
+
+  // Codex R12-15: el costo negativo del reembolso es una obligación DURABLE (misma transacción, mutex del original).
+  await asegurarObligacionDeCostoNegativo(tx, original.id, refundPayment.id)
+
+  return { refundPaymentId: refundPayment.id, replay: false }
+}
+
 export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundResult> {
   if (input.amount !== undefined && !esCantidadPositivaEnCentavos(input.amount)) {
     throw new BadRequestError('amount debe ser un entero seguro positivo expresado en centavos')
@@ -293,7 +699,6 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
     throw new BadRequestError('Either amount (cents) or items[] is required')
   }
 
-  const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, input.venueId)
   // El pago original sólo revela la Order que debe tomar el primer candado. La
   // fila Payment se vuelve a leer y valida bajo FOR UPDATE dentro de la tx.
   const originalOrder = await prisma.payment.findFirst({
@@ -302,104 +707,26 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
   })
   if (!originalOrder) throw new NotFoundError('Payment not found')
 
-  const authorityUnavailable = () =>
-    new ConflictError(
-      'El cobro cambió mientras iniciaba el reembolso. Verifica su asignación antes de continuar.',
-      'REFUND_AUTHORITY_UNAVAILABLE',
-    )
-  const expectedOrder = originalOrder.orderId ? Prisma.sql`"orderId" = ${originalOrder.orderId}` : Prisma.sql`"orderId" IS NULL`
   let result: RefundTransactionResult
   try {
     result = await prisma.$transaction(async tx => {
-      if (originalOrder?.orderId) {
-        const orderStillBelongsToVenue = await lockExistingOrderForPayment(tx, {
-          venueId: input.venueId,
-          orderId: originalOrder.orderId,
-        })
-        if (!orderStillBelongsToVenue) throw authorityUnavailable()
-      }
-      const lockedOriginalRows = await tx.$queryRaw<LockedPaymentRow[]>(Prisma.sql`
-      SELECT
-        id,
-        "venueId",
-        status,
-        type,
-        method,
-        source,
-        amount,
-        "tipAmount",
-        "orderId",
-        "shiftId",
-        "merchantAccountId",
-        "processorData",
-        "fundsFlow",
-        "tenderTypeId",
-        "tenderCountsAsCash",
-        "tenderRevision",
-        "tenderLabel",
-        "tenderCaptureTip",
-        "tenderSatFormaPago"
-      FROM "Payment"
-      WHERE id = ${input.paymentId}
-        AND "venueId" = ${input.venueId}
-        AND ${expectedOrder}
-      FOR UPDATE
-    `)
-
-      const original = lockedOriginalRows[0]
-      if (!original) {
-        throw authorityUnavailable()
-      }
-      if (original.venueId !== input.venueId || original.orderId !== originalOrder.orderId) {
-        throw authorityUnavailable()
-      }
-      if (original.status !== 'COMPLETED') {
-        throw new BadRequestError(`Cannot refund payment with status: ${original.status}`)
-      }
-      if (original.type === PaymentType.REFUND) {
-        throw new BadRequestError('Cannot refund a refund')
-      }
-      if (!original.orderId) {
-        throw new BadRequestError('Original payment is missing an associated order')
-      }
-
-      const existingRefunds = await tx.$queryRaw<RefundPaymentRow[]>(Prisma.sql`
-      SELECT id, amount, "tipAmount", "processorData", "createdAt", status
-      FROM "Payment"
-      WHERE
-        "venueId" = ${input.venueId}
-        AND type = CAST(${PaymentType.REFUND} AS "PaymentType")
-        AND "processorData"->>'originalPaymentId' = ${input.paymentId}
-      ORDER BY "createdAt" ASC, id ASC
-    `)
-
-      // ¿Cuánto se ha devuelto ya de este cobro? La definición vive UNA sola vez, en
-      // `shared/devueltoDeUnCobro.ts`, y es la misma que usa el riel de la terminal:
-      // **venta + propina**. Aquí se le pasan las DOS evidencias —el acumulado persistido y
-      // las filas de reembolso, que este camino ya tenía a la mano— y gana la mayor; el
-      // porqué está en la cabecera de ese archivo. La cuenta se hace en CENTAVOS enteros.
-      //
-      // ⚠️ El `SELECT` de arriba NO filtra por `status` a propósito, y no es un descuido: sus
-      // filas alimentan también a `collectExistingRefundedItems`, que lleva las CANTIDADES ya
-      // devueltas por artículo. Restringirlo ahí dejaría re-reembolsar los artículos de un
-      // reembolso no completado — un aflojamiento, y en la dirección que cuesta dinero. Del
-      // lado del DINERO el filtro sí aplica, y vive dentro de `centavosDevueltosDeFilas`: sólo
-      // cuentan los `COMPLETED`, igual que `summarizeRefunds`.
-      //
-      // 🔴 Esto sustituye a un `reduce` que sumaba sólo `Math.abs(refund.amount)`: la propina
-      // ya devuelta no contaba, así que un cobro de $100 + $20 admitía dos reembolsos de $60
-      // ($120 entregados) y todavía declaraba $10 reembolsables. Prueba:
-      // `tests/unit/services/dashboard/refund.propinaEnElAcumulado.test.ts`, donde el cobro
-      // lleva propina a propósito — con `tipAmount = 0` las dos semánticas coinciden y una
-      // prueba así pasaría con el defecto vivo.
-      const alreadyRefundedCents = centavosYaDevueltos({ processorData: original.processorData, filas: existingRefunds })
-      const { salesCents: refundedSalesCents, tipCents: refundedTipsCents } = centavosDevueltosPorComponente(existingRefunds)
+      const cobro = await bloquearCobroParaReembolso(tx, {
+        venueId: input.venueId,
+        paymentId: input.paymentId,
+        expectedOrderId: originalOrder.orderId,
+      })
+      const {
+        original,
+        existingRefunds,
+        alreadyRefundedCents,
+        refundedSalesCents,
+        refundedTipsCents,
+        unclassifiedPriorRefundCents,
+        remainingBeforeCents,
+      } = cobro
       const classifiedRefundedCents = refundedSalesCents + refundedTipsCents
-      const unclassifiedPriorRefundCents = Math.max(0, alreadyRefundedCents - classifiedRefundedCents)
       const totalOriginalCents = toCents(original.amount) + toCents(original.tipAmount)
-      const remainingBeforeCents = Math.max(0, totalOriginalCents - alreadyRefundedCents)
       const refundedItemsByOrderItemId = collectExistingRefundedItems(existingRefunds)
-
       let refundCents = 0
       const refundedItems: RefundedItemSnapshot[] = []
 
@@ -609,152 +936,26 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         })
       }
 
-      // ── ¿DE QUÉ TURNO SALE ESTE REEMBOLSO? ────────────────────────────────────────────────
-      //
-      // `claimedAt`/CLOSING es el corte. Se observa el candidato más reciente del NEGOCIO,
-      // aunque ya esté CLOSING, dentro de la misma transacción. Sólo OPEN puede ganar el CAS
-      // tenant-safe que decrementa venta/propina y autoriza `shiftId`; nunca se cae al turno
-      // histórico de `original`, ni se espera/reintenta para reescribir un cierre firmado.
-      // CLOSING y claim-lost quedan sin turno y se explican con una conciliación atómica creada
-      // después del Payment real. Sin candidato se conserva por ahora el comportamiento previo,
-      // salvo que el total histórico tenga un delta venta/propina sin clasificar: esa anomalía
-      // exige conciliación aun sin candidato y nunca puede tocar un Shift.
-      //
-      // El efectivo físico no se pierde en ningún caso: el `PAY_OUT` al cajón se publica post-commit
-      // contra la `CashDrawerSession` abierta del venue, que no depende del `Shift`.
-      const salesRefundPesos = centsToDecimal(salesRefundCents)
-      const tipRefundPesos = centsToDecimal(tipRefundCents)
-      const shiftClaim = await claimShiftForRefund(tx, {
+      // El tramo que ESCRIBE —turno, fila REFUND, acumulado del original, VenueTransaction y
+      // obligación de costo— es el núcleo compartido con el ajuste de reparto. El dashboard lo
+      // llama con los defaults de siempre: no revierte comisión, reclama el turno vivo, MANUAL.
+      const { refundPaymentId } = await writeRefundInTx(tx, {
+        originalPaymentId: original.id,
         venueId: input.venueId,
-        salesRefundPesos,
-        tipRefundPesos,
-        forcePendingReason: unclassifiedPriorRefundCents > 0 ? ('UNCLASSIFIED_REFUND_COMPONENT_HISTORY' as const) : undefined,
+        salesRefundCents,
+        tipRefundCents,
+        refundedItems,
+        reason: input.reason,
+        note: input.note,
+        staffId: input.staffId,
+        tenderCommission: 'NONE',
+        shift: 'CLAIM_LIVE',
+        provenance: 'MANUAL',
+        bloqueado: cobro,
       })
-      const shiftId = shiftClaim.shiftId
-
-      const originalProcessorData = asRecord(original.processorData)
-      const refundPayment = await tx.payment.create({
-        data: {
-          venueId: input.venueId,
-          orderId: original.orderId,
-          shiftId: shiftId || undefined,
-          processedById: input.staffId || undefined,
-          merchantAccountId: original.merchantAccountId || undefined,
-
-          // Negative amount/tip so that sum(refunds) mirrors the original split.
-          amount: centsToDecimal(-salesRefundCents),
-          tipAmount: centsToDecimal(-tipRefundCents),
-          netAmount: centsToDecimal(-refundCents),
-          feeAmount: new Prisma.Decimal(0),
-          feePercentage: 0,
-
-          method: original.method as PaymentMethod,
-          // 🔴 El reembolso hereda la IDENTIDAD y la SEMÁNTICA del tipo original, no sólo el
-          // `method`. Sin esto, devolver un vale que SÍ entraba al cajón caía al fallback
-          // legacy (`method === 'CASH'` = false) y el arqueo seguía exigiendo un efectivo que
-          // YA salió — un faltante inventado, en la dirección que acusa al cajero.
-          //
-          // La COMISIÓN no se hereda a propósito: que Uber devuelva su 30% cuando el cliente
-          // cancela es un acuerdo comercial que no conocemos, e inventarlo daría un costo o un
-          // ingreso falso. Queda vacía hasta que haya una decisión.
-          tenderTypeId: original.tenderTypeId || undefined,
-          tenderRevision: original.tenderTypeId && original.tenderRevision != null ? original.tenderRevision : undefined,
-          tenderLabel: original.tenderTypeId && original.tenderLabel != null ? original.tenderLabel : undefined,
-          tenderCountsAsCash: original.tenderTypeId && original.tenderCountsAsCash != null ? original.tenderCountsAsCash : undefined,
-          tenderCaptureTip: original.tenderTypeId && original.tenderCaptureTip != null ? original.tenderCaptureTip : undefined,
-          tenderSatFormaPago: original.tenderTypeId && original.tenderSatFormaPago != null ? original.tenderSatFormaPago : undefined,
-          // `fundsFlow` va aparte del bloque de arriba: un pago SIN tender también lo tiene
-          // (lo estampa su punto de entrada), y es la autoridad de "¿esto estaba en el cajón?".
-          fundsFlow: original.fundsFlow ? (original.fundsFlow as PaymentFundsFlow) : undefined,
-          source: original.source ? (original.source as PaymentSource) : undefined,
-          status: 'COMPLETED',
-          type: PaymentType.REFUND,
-
-          processor: 'dashboard',
-          processorData: {
-            originalPaymentId: original.id,
-            refundReason: input.reason,
-            note: input.note ?? null,
-            amountCents: refundCents,
-            amount: centsToNumber(refundCents),
-            refundedItems: refundedItems.length > 0 ? refundedItems : undefined,
-            // Sólo `true` cuando el decremento inline realmente ganó el claim. El backfill
-            // exige además `shiftId`, así que un pendiente sin turno no puede atribuirse dos veces.
-            shiftBackfilled: shiftId !== null,
-            ...(unclassifiedPriorRefundCents > 0
-              ? {
-                  shiftAttributionStatus: 'PENDING',
-                  shiftAttributionPendingReason: 'UNCLASSIFIED_REFUND_COMPONENT_HISTORY',
-                }
-              : {}),
-          } as Prisma.InputJsonValue,
-        },
-      })
-
-      if (shiftClaim.pendingReason) {
-        await recordPendingPaymentShiftReconciliation(tx, {
-          reconciliationEnabled,
-          claim: shiftClaim,
-          venueId: input.venueId,
-          paymentId: refundPayment.id,
-          orderId: original.orderId,
-          staffId: input.staffId ?? null,
-          channel: 'issueRefund',
-          amountPesos: salesRefundPesos.negated(),
-          tipPesos: tipRefundPesos.negated(),
-          unclassifiedPriorRefundPesos: unclassifiedPriorRefundCents > 0 ? centsToDecimal(unclassifiedPriorRefundCents) : undefined,
-        })
-      }
-
-      // Bump refundedAmount on the original payment's processorData.
-      // Los dos campos salen del MISMO entero de centavos (`acumuladoPersistido`): derivarlos
-      // por separado es cómo empiezan a divergir. Semántica: venta + propina.
-      const updatedProcessorData = {
-        ...originalProcessorData,
-        ...acumuladoPersistido(alreadyRefundedCents + refundCents),
-        refunds: [
-          ...((Array.isArray(originalProcessorData.refunds) ? originalProcessorData.refunds : []) as any[]),
-          {
-            refundPaymentId: refundPayment.id,
-            amount: centsToNumber(refundCents),
-            amountCents: refundCents,
-            reason: input.reason,
-            at: new Date().toISOString(),
-          },
-        ],
-      }
-      await tx.payment.update({
-        where: {
-          id: original.id,
-          venueId: input.venueId,
-          orderId: originalOrder.orderId,
-          status: TransactionStatus.COMPLETED,
-          type: original.type,
-        },
-        data: { processorData: updatedProcessorData as any },
-      })
-
-      // Venue transaction for financial tracking
-      await tx.venueTransaction.create({
-        data: {
-          venueId: input.venueId,
-          paymentId: refundPayment.id,
-          type: 'REFUND',
-          grossAmount: centsToDecimal(-refundCents),
-          feeAmount: new Prisma.Decimal(0),
-          netAmount: centsToDecimal(-refundCents),
-          status: 'SETTLED',
-        },
-      })
-
-      // El decremento del turno YA ocurrió arriba: el claim ES el decremento, y sellar el `Payment`
-      // después es lo que garantiza que nunca haya un REFUND en un turno al que no se le restó.
-
-      // Codex R12-15: el costo negativo del reembolso es una obligación DURABLE (misma transacción, mutex del original).
-      await asegurarObligacionDeCostoNegativo(tx, original.id, refundPayment.id)
 
       return {
-        refundPaymentId: refundPayment.id,
+        refundPaymentId,
         originalPaymentId: original.id,
         originalOrderId: original.orderId,
         refundedItems,

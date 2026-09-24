@@ -145,14 +145,20 @@ export class SubscriptionCancellationJob {
             daysPastExpiration: Math.floor((now.getTime() - (venueFeature.endDate?.getTime() || 0)) / (1000 * 60 * 60 * 24)),
           })
 
-          // Deactivate the feature
-          await prisma.venueFeature.update({
-            where: { id: venueFeature.id },
-            data: {
-              active: false,
-              // Keep endDate for historical tracking
-            },
+          // 🔴 Se apaga SÓLO si sigue siendo el trial local vencido que se leyó (R0, Codex 21-sep): si entre
+          // la lectura y aquí una compra lo convirtió en pagado, apagarlo por `id` le quitaba el acceso
+          // recién comprado y le avisaba «tu prueba terminó».
+          const { count: apagadas } = await prisma.venueFeature.updateMany({
+            where: { id: venueFeature.id, stripeSubscriptionId: null, active: true, endDate: { lt: now } },
+            data: { active: false },
           })
+          if (apagadas === 0) {
+            logger.warn('Trial local vencido que cambió desde la lectura (¿se compró?): no se toca', {
+              venueFeatureId: venueFeature.id,
+              venueId: venueFeature.venueId,
+            })
+            continue
+          }
 
           // Send trial expired email
           try {
@@ -302,9 +308,11 @@ export class SubscriptionCancellationJob {
             logger.info(`✅ Stripe subscription canceled: ${venueFeature.stripeSubscriptionId}`)
           }
 
-          // Update VenueFeature record (keep as inactive, clear Stripe IDs)
-          await prisma.venueFeature.update({
-            where: { id: venueFeature.id },
+          // 🔴 El vínculo se limpia SÓLO si sigue apuntando a la suscripción que se canceló (R0, Codex 21-sep).
+          // Por `id` a secas borraba el de una recompra ligada entre la cancelación y esta escritura: la
+          // suscripción nueva quedaba cobrando sin que nada local la apuntara.
+          const { count: limpiadas } = await prisma.venueFeature.updateMany({
+            where: { id: venueFeature.id, stripeSubscriptionId: venueFeature.stripeSubscriptionId },
             data: {
               active: false, // Keep inactive
               stripeSubscriptionId: null, // Clear subscription
@@ -312,6 +320,15 @@ export class SubscriptionCancellationJob {
               // Keep suspendedAt and gracePeriodEndsAt for historical tracking
             },
           })
+          if (limpiadas === 0) {
+            logger.warn('🚨 El vínculo cambió desde la lectura (¿recompra?): se canceló la suscripción vieja y NO se toca la fila', {
+              venueFeatureId: venueFeature.id,
+              venueId: venueFeature.venueId,
+              canceledSubscriptionId: venueFeature.stripeSubscriptionId,
+            })
+            // Ni el correo de «tu suscripción se canceló»: el negocio acaba de recomprar (Codex, ronda 3).
+            continue
+          }
 
           // Send cancellation email
           try {

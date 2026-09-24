@@ -2,6 +2,7 @@ import { CronJob } from 'cron'
 import cron from 'node-cron'
 import { runWithContext } from './executionContext'
 import { newCorrelationId } from './correlationId'
+import { registroDeJobs, type RegistroDeJobs } from './registroDeJobs'
 
 /**
  * Opens an execution context for one cron tick.
@@ -26,6 +27,58 @@ import { newCorrelationId } from './correlationId'
 export function runInJobContext<T>(jobName: string, fn: () => T): T {
   return runWithContext({ correlationId: newCorrelationId(), source: 'job', entrypoint: jobName }, fn)
 }
+
+/**
+ * Anota que este tick está corriendo, para que el guardia del event loop pueda decir QUÉ jobs
+ * se SOLAPARON con la retención.
+ *
+ * 🔴 Solaparse no es tener el hilo: un tick que pasó ese rato esperando a Postgres cuenta igual
+ * que uno calculando. Es una pista de dónde mirar, no una acusación.
+ *
+ * 🔴 Devuelve la promesa DERIVADA del `.finally()`, nunca la original, y esto no es estilo:
+ * encadenar crea una segunda promesa, y si se devolviera la original la derivada quedaría
+ * suelta. Un tick que rechaza produciría entonces un `unhandledRejection` EXTRA sobre una
+ * promesa que nadie puede manejar — y aquí ese evento no es ruido: `server.ts` lo trata como
+ * fatal y arranca el apagado.
+ *
+ * 🔴 **Pero el contrato NO queda idéntico en general, y decirlo sería mentir.** Node cuenta los
+ * rechazos sin manejar POR PROMESA: manejar una rama no maneja la otra. Medido en un proceso
+ * real (`tests/unit/observability/contratoDeErroresDeJobs.test.ts`):
+ *
+ * | El tick devuelve… | Sin envoltorio | Con envoltorio |
+ * |---|---:|---:|
+ * | promesa nueva, el llamador la descarta | 1 | 1 |
+ * | promesa nueva, el llamador la maneja | 0 | 0 |
+ * | una promesa que él mismo YA manejó | 0 | **1** |
+ * | la MISMA promesa en dos ticks | 1 | **2** |
+ *
+ * La equivalencia se sostiene mientras el tick devuelva una promesa **nueva y no compartida**,
+ * que es la forma de todos los callbacks del repo hoy (los que devuelven promesa la crean con
+ * funciones `async`). Un tick que devuelva una promesa compartida o ya manejada queda FUERA de
+ * esa garantía; los dos casos están fijados por prueba para que deje de ser un comentario.
+ * También cambia el orden observable: `catch → queueMicrotask` pasa a `queueMicrotask → catch`.
+ *
+ * Un `throw` en seco también se da de baja, porque si no el job quedaría «corriendo» para
+ * siempre y el aviso culparía a un tick que murió hace horas.
+ */
+function conRegistroDeJob<T>(jobName: string, fn: () => T, registro: RegistroDeJobs = registroDeJobs): T {
+  const id = registro.iniciar(jobName)
+  let resultado: T
+  try {
+    resultado = fn()
+  } catch (error) {
+    registro.terminar(id)
+    throw error
+  }
+  if (resultado && typeof (resultado as { then?: unknown }).then === 'function') {
+    return (resultado as unknown as Promise<unknown>).finally(() => registro.terminar(id)) as unknown as T
+  }
+  registro.terminar(id)
+  return resultado
+}
+
+/** Sólo para pruebas: el registro es inyectable para no depender del reloj real. */
+export const __conRegistroDeJobParaPruebas = conRegistroDeJob
 
 /** What both schedulers accept as a tick. */
 type Tick = () => void | Promise<void>
@@ -52,11 +105,17 @@ export function scheduleJob(
   start = false,
   timeZone = 'America/Mexico_City',
 ): CronJob {
-  return new CronJob(cronTime, () => runInJobContext(jobName, onTick), onComplete, start, timeZone)
+  return new CronJob(cronTime, () => runInJobContext(jobName, () => conRegistroDeJob(jobName, onTick)), onComplete, start, timeZone)
 }
 
 /**
  * The same idea for the three jobs that use `node-cron` instead of `cron`.
+ *
+ * 🔴 A PROPÓSITO **sin** el registro de jobs en vuelo: el corredor de `node-cron@4.2.1` SÍ
+ * espera el resultado del tick (`runner.js:70`), así que devolverle una promesa distinta —la
+ * derivada del `.finally()`— cambiaría su detección de solapes. `cron@4.3.3` no espera nada
+ * (`waitForCompletion` es false por default) y por eso ahí sí es seguro. La consecuencia se
+ * declara en el aviso del guardia como cobertura PARCIAL, no se esconde.
  */
 export function scheduleCron(
   jobName: string,

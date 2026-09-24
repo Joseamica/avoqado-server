@@ -8,7 +8,7 @@ import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { parseDeliverectOrder } from '../services/delivery-channels/providers/deliverect/deliverect.mapper'
 import { ingestDeliveryOrder } from '../services/delivery-channels/core/deliveryOrderIngestion.service'
 import { markEventResult } from '../services/delivery-channels/core/deliveryWebhookEvent.service'
-import { processUberEvent } from '../services/delivery-channels/providers/uber-eats/uber.eventProcessor'
+import { CAMBIO_SIN_CONFIRMAR, processUberEvent } from '../services/delivery-channels/providers/uber-eats/uber.eventProcessor'
 import { processRappiEvent } from '../services/delivery-channels/providers/rappi/rappi.eventProcessor'
 import { scheduleJob } from '../observability/jobContext'
 
@@ -96,6 +96,23 @@ export class DeliveryWebhookReconciliationJob {
   /** Backoff cap in minutes for `nextAttemptAt` scheduling (exponential: 2^attemptCount, capped here). */
   private readonly BACKOFF_CAP_MINUTES = 60
 
+  /**
+   * N-5: eventos de SEGUIMIENTO — sin plazo de aceptación. Hoy sólo el aviso de cambio de Uber
+   * (`FULFILLMENT_CHANGED`), que se relee hasta 3 h mientras el pedido no cierra. Van en su propio
+   * carril, DESPUÉS de todo lo demás: un pedido nuevo tiene ~11.5 min antes de que Uber lo cancele.
+   */
+  private static readonly EVENTOS_DE_SEGUIMIENTO = ['order.fulfillment_issues.resolved']
+
+  /**
+   * Tope de relecturas de seguimiento por pasada. ponytail: con la lectura acotada a 8 s son ≤ 80 s,
+   * así la pasada termina antes del siguiente tick (2 min) y un pedido nuevo nunca espera una pasada
+   * entera de relecturas; si los avisos abiertos crecen, subirlo o dar al seguimiento su propio job.
+   */
+  private readonly SEGUIMIENTO_POR_PASADA = 10
+
+  /** N-8: mínimo de relecturas de seguimiento por pasada, aunque el carril urgente llene el lote. */
+  private readonly SEGUIMIENTO_GARANTIZADO = 5
+
   /** Candado en memoria: una sola pasada a la vez (ver `runOnce`). */
   private enCurso = false
 
@@ -170,121 +187,168 @@ export class DeliveryWebhookReconciliationJob {
     const orphanCutoff = new Date(now - this.ORPHAN_TTL_MS)
     const receivedCutoff = new Date(now - this.RECEIVED_MIN_AGE_MS)
 
-    const events = await retry(
-      () =>
-        prisma.deliveryOrderEvent.findMany({
-          where: {
-            AND: [
-              // 🔴 Cada proveedor se reprocesa por SU camino (`reprocesarSegunProveedor`).
-              // Antes esto decía sólo DELIVERECT porque abajo se llamaba `parseDeliverectOrder`
-              // sobre CUALQUIER fila: un evento de Uber reventaba con "payload sin
-              // channelOrderId/items" y se perdía un pedido real (observado el 2026-08-20).
-              // La solución no era excluir a Uber —eso lo dejaba SIN NINGÚN reintento, que es
-              // peor: su webhook contesta 200 y procesa en segundo plano, así que este job es
-              // lo único que lo puede rescatar— sino enrutar por proveedor.
-              { provider: { in: DeliveryWebhookReconciliationJob.RECONCILABLE_PROVIDERS } },
-              // Never re-pick a row the ORPHANED sweep already gave up on. Written as an
-              // explicit null-tolerant OR (rather than a bare `error: { not: 'ORPHANED' }`)
-              // so rows with error=null (never failed before) are NOT accidentally excluded —
-              // same pattern as blumon-webhook-reconciliation.job.ts's REVERSAL_OPERATION_TYPES guard.
-              { OR: [{ error: null }, { error: { notIn: DeliveryWebhookReconciliationJob.TERMINAL_ERRORS } }] },
-              {
-                OR: [
-                  { status: DeliveryOrderEventStatus.FAILED, receivedAt: { gte: orphanCutoff } },
-                  { status: DeliveryOrderEventStatus.RECEIVED, receivedAt: { gte: orphanCutoff, lt: receivedCutoff } },
-                ],
-              },
-              // Fix B2: never re-select a poison event (maxed out its retry budget) —
-              // it stays FAILED forever, excluded here rather than re-touched every pass.
-              { attemptCount: { lt: this.MAX_ATTEMPTS } },
-              // Fix B2: respect the backoff window — a row that just failed schedules
-              // nextAttemptAt in the future and must not be re-picked before then.
-              // Null-tolerant (never-yet-retried rows have nextAttemptAt=null by default).
-              { OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: new Date(now) } }] },
-            ],
-          },
-          orderBy: { receivedAt: 'asc' },
-          take: this.BATCH_SIZE,
-          include: { channelLink: true },
-        }),
-      { shouldRetry: shouldRetryDbConnectionError, context: 'deliveryWebhookReconciliation.scan' },
-    )
-
-    if (events.length === 0) return { reprocessed: 0, orphanedImmediate: 0 }
+    const base: Prisma.DeliveryOrderEventWhereInput[] = [
+      // 🔴 Cada proveedor se reprocesa por SU camino (`reprocesarSegunProveedor`).
+      // Antes esto decía sólo DELIVERECT porque abajo se llamaba `parseDeliverectOrder`
+      // sobre CUALQUIER fila: un evento de Uber reventaba con "payload sin
+      // channelOrderId/items" y se perdía un pedido real (observado el 2026-08-20).
+      // La solución no era excluir a Uber —eso lo dejaba SIN NINGÚN reintento, que es
+      // peor: su webhook contesta 200 y procesa en segundo plano, así que este job es
+      // lo único que lo puede rescatar— sino enrutar por proveedor.
+      { provider: { in: DeliveryWebhookReconciliationJob.RECONCILABLE_PROVIDERS } },
+      // Never re-pick a row the ORPHANED sweep already gave up on. Written as an
+      // explicit null-tolerant OR (rather than a bare `error: { not: 'ORPHANED' }`)
+      // so rows with error=null (never failed before) are NOT accidentally excluded —
+      // same pattern as blumon-webhook-reconciliation.job.ts's REVERSAL_OPERATION_TYPES guard.
+      { OR: [{ error: null }, { error: { notIn: DeliveryWebhookReconciliationJob.TERMINAL_ERRORS } }] },
+      // Fix B2: never re-select a poison event (maxed out its retry budget) —
+      // it stays FAILED forever, excluded here rather than re-touched every pass.
+      { attemptCount: { lt: this.MAX_ATTEMPTS } },
+      // Fix B2: respect the backoff window — a row that just failed schedules
+      // nextAttemptAt in the future and must not be re-picked before then.
+      // Null-tolerant (never-yet-retried rows have nextAttemptAt=null by default).
+      { OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: new Date(now) } }] },
+    ]
+    // Acotadas (take) y servidas por los índices `[status, receivedAt]` / `[status, nextAttemptAt]`.
+    const leer = (carril: Prisma.DeliveryOrderEventWhereInput, take: number) =>
+      retry(
+        () =>
+          prisma.deliveryOrderEvent.findMany({
+            where: { AND: [...base, carril] },
+            orderBy: { receivedAt: 'asc' },
+            take,
+            include: { channelLink: true },
+          }),
+        { shouldRetry: shouldRetryDbConnectionError, context: 'deliveryWebhookReconciliation.scan' },
+      )
 
     let reprocessed = 0
     let orphanedImmediate = 0
 
-    for (const event of events) {
-      const { channelLink } = event
-      try {
-        if (!channelLink) {
-          // Same per-event alert shape/prefix as the 24h sweep below — BetterStack
-          // alerts on the '🚨 [Delivery recon] ORPHANED' pattern. Without this, a
-          // deleted DeliveryChannelLink (venue turning off its integration) would
-          // orphan events silently, with only an aggregate info-level count.
-          logger.error('🚨 [Delivery recon] ORPHANED delivery event — channel link deleted, nothing to re-parse against', {
-            eventId: event.id,
-            provider: event.provider,
-            externalEventId: event.externalEventId,
-            venueId: event.venueId,
-            reason: 'CHANNEL_LINK_DELETED',
-            ageHours: Math.round((Date.now() - new Date(event.receivedAt).getTime()) / 3_600_000),
-          })
-          await markEventResult(event.id, DeliveryOrderEventStatus.FAILED, undefined, DeliveryWebhookReconciliationJob.ORPHANED_MARKER)
-          orphanedImmediate++
-          continue
-        }
-
-        if (await this.reprocesarSegunProveedor(event, channelLink)) reprocessed++
-      } catch (err) {
-        // Fix B2: track this job's own retry attempts + schedule exponential
-        // backoff so a poison event doesn't occupy every 2-minute pass forever.
-        // The row itself is left FAILED/RECEIVED either way — only the
-        // attemptCount/nextAttemptAt bookkeeping changes here.
-        const attemptCount = (event.attemptCount ?? 0) + 1
-        const isPoison = attemptCount >= this.MAX_ATTEMPTS
-        const nextAttemptAt = isPoison ? null : new Date(now + this.backoffMs(attemptCount))
-
+    // N-5: carril URGENTE primero, con el lote completo reservado (pedidos nuevos, programados,
+    // cancelaciones, tiendas…); las relecturas de SEGUIMIENTO sólo usan el sobrante, con tope, y
+    // se leen DESPUÉS de procesar las urgentes. Un solo carril por antigüedad dejaba un pedido nuevo
+    // detrás de 50 avisos viejos hasta el minuto 12 (Codex, 4.ª pasada) y Uber lo cancelaba.
+    const urgentes = await leer(
+      {
+        eventType: { notIn: DeliveryWebhookReconciliationJob.EVENTOS_DE_SEGUIMIENTO },
+        OR: [
+          { status: DeliveryOrderEventStatus.FAILED, receivedAt: { gte: orphanCutoff } },
+          { status: DeliveryOrderEventStatus.RECEIVED, receivedAt: { gte: orphanCutoff, lt: receivedCutoff } },
+        ],
+      },
+      this.BATCH_SIZE,
+    )
+    const procesar = async (events: typeof urgentes) => {
+      for (const event of events) {
+        const { channelLink } = event
+        // P1-3: una revocación de tienda se registra POR TIENDA aunque aún no exista su vínculo
+        // (`DeliveryStoreRevocation`, lo hace el procesador). Tirarla aquí como ORPHANED la perdía y una
+        // conexión en curso podía re-otorgar la tienda.
+        const revocacionSinVinculo =
+          !channelLink && event.provider === DeliveryProvider.UBER_EATS && event.eventType === 'store.deprovisioned'
         try {
-          await prisma.deliveryOrderEvent.update({
-            where: { id: event.id },
-            data: { attemptCount, nextAttemptAt },
-          })
-        } catch (bookErr) {
-          // Best-effort — same per-event isolation guarantee as the rest of this
-          // loop: a failed bookkeeping write must NEVER abort the batch. Worst
-          // case the row keeps its old attemptCount/nextAttemptAt and gets
-          // reselected next pass with no backoff applied yet (never worse than
-          // pre-fix behavior).
-          logger.error('❌ [Delivery recon] Failed to persist attemptCount/nextAttemptAt backoff bookkeeping (event stays for next pass)', {
-            eventId: event.id,
-            error: bookErr instanceof Error ? bookErr.message : bookErr,
-          })
-        }
+          if (!channelLink && !revocacionSinVinculo) {
+            // Same per-event alert shape/prefix as the 24h sweep below — BetterStack
+            // alerts on the '🚨 [Delivery recon] ORPHANED' pattern. Without this, a
+            // deleted DeliveryChannelLink (venue turning off its integration) would
+            // orphan events silently, with only an aggregate info-level count.
+            logger.error('🚨 [Delivery recon] ORPHANED delivery event — channel link deleted, nothing to re-parse against', {
+              eventId: event.id,
+              provider: event.provider,
+              externalEventId: event.externalEventId,
+              venueId: event.venueId,
+              reason: 'CHANNEL_LINK_DELETED',
+              ageHours: Math.round((Date.now() - new Date(event.receivedAt).getTime()) / 3_600_000),
+            })
+            await markEventResult(event.id, DeliveryOrderEventStatus.FAILED, undefined, DeliveryWebhookReconciliationJob.ORPHANED_MARKER)
+            orphanedImmediate++
+            continue
+          }
 
-        if (isPoison) {
-          // Logged exactly ONCE: the pass that pushes attemptCount to MAX_ATTEMPTS
-          // is the last one that will ever select this row again (excluded by the
-          // scan's attemptCount filter from here on) — no repeat alerts.
-          logger.error('🚨 [Delivery recon] POISON delivery event — reached MAX_ATTEMPTS, giving up (stays FAILED, never retried again)', {
-            eventId: event.id,
-            provider: event.provider,
-            externalEventId: event.externalEventId,
-            venueId: event.venueId,
-            attemptCount,
-          })
-        } else {
-          logger.error('❌ [Delivery recon] Failed to reprocess event (stays for next pass, unless >24h old)', {
-            eventId: event.id,
-            status: event.status,
-            attemptCount,
-            nextAttemptAt,
-            error: err instanceof Error ? err.message : err,
-          })
+          if (await this.reprocesarSegunProveedor(event, channelLink)) reprocessed++
+        } catch (err) {
+          // Fix B2: track this job's own retry attempts + schedule exponential
+          // backoff so a poison event doesn't occupy every 2-minute pass forever.
+          // The row itself is left FAILED/RECEIVED either way — only the
+          // attemptCount/nextAttemptAt bookkeeping changes here.
+          const attemptCount = (event.attemptCount ?? 0) + 1
+          const isPoison = attemptCount >= this.MAX_ATTEMPTS
+          // N-5: la espera cuenta desde que ESTE evento terminó, no desde el inicio del lote.
+          const nextAttemptAt = isPoison ? null : new Date(Date.now() + this.backoffMs(attemptCount))
+
+          try {
+            await prisma.deliveryOrderEvent.update({
+              where: { id: event.id },
+              data: { attemptCount, nextAttemptAt },
+            })
+          } catch (bookErr) {
+            // Best-effort — same per-event isolation guarantee as the rest of this
+            // loop: a failed bookkeeping write must NEVER abort the batch. Worst
+            // case the row keeps its old attemptCount/nextAttemptAt and gets
+            // reselected next pass with no backoff applied yet (never worse than
+            // pre-fix behavior).
+            logger.error(
+              '❌ [Delivery recon] Failed to persist attemptCount/nextAttemptAt backoff bookkeeping (event stays for next pass)',
+              {
+                eventId: event.id,
+                error: bookErr instanceof Error ? bookErr.message : bookErr,
+              },
+            )
+          }
+
+          if (isPoison) {
+            // Logged exactly ONCE: the pass that pushes attemptCount to MAX_ATTEMPTS
+            // is the last one that will ever select this row again (excluded by the
+            // scan's attemptCount filter from here on) — no repeat alerts.
+            logger.error(
+              '🚨 [Delivery recon] POISON delivery event — reached MAX_ATTEMPTS, giving up (stays FAILED, never retried again)',
+              {
+                eventId: event.id,
+                provider: event.provider,
+                externalEventId: event.externalEventId,
+                venueId: event.venueId,
+                attemptCount,
+              },
+            )
+          } else if (err instanceof Error && err.message === CAMBIO_SIN_CONFIRMAR) {
+            // Espera acotada, no falla: el procesador lo cierra cuando el pedido cierra en Uber o al
+            // agotarse su vida, con incidencia (P1-2).
+            logger.warn('[Delivery recon] cambio de pedido aún sin reflejar en el proveedor: se relee con backoff', {
+              motivo: err.message,
+              eventId: event.id,
+              attemptCount,
+              nextAttemptAt,
+            })
+          } else {
+            logger.error('❌ [Delivery recon] Failed to reprocess event (stays for next pass, unless >24h old)', {
+              eventId: event.id,
+              status: event.status,
+              attemptCount,
+              nextAttemptAt,
+              error: err instanceof Error ? err.message : err,
+            })
+          }
         }
       }
     }
+    await procesar(urgentes)
+    // N-8: aunque el carril urgente llene el lote, el seguimiento tiene un mínimo garantizado por
+    // pasada (va DESPUÉS de las urgentes); si no, un aviso nunca tenía turno y caducaba sin lectura.
+    const cupo = Math.max(this.SEGUIMIENTO_GARANTIZADO, Math.min(this.BATCH_SIZE - urgentes.length, this.SEGUIMIENTO_POR_PASADA))
+    // Sin el piso de 24 h: un seguimiento se cierra solo (incidencia a las 3 h, en su primera lectura
+    // pasada esa vida), así que uno que nunca tuvo turno se lee aunque sea viejo — no caduca por edad.
+    const seguimiento = await leer(
+      {
+        eventType: { in: DeliveryWebhookReconciliationJob.EVENTOS_DE_SEGUIMIENTO },
+        OR: [
+          { status: DeliveryOrderEventStatus.FAILED },
+          { status: DeliveryOrderEventStatus.RECEIVED, receivedAt: { lt: receivedCutoff } },
+        ],
+      },
+      cupo,
+    )
+    await procesar(seguimiento)
 
     return { reprocessed, orphanedImmediate }
   }
@@ -301,7 +365,7 @@ export class DeliveryWebhookReconciliationJob {
    */
   private async reprocesarSegunProveedor(
     event: { id: string; provider: DeliveryProvider; payload: unknown; externalEventId: string; venueId: string | null },
-    channelLink: Parameters<typeof ingestDeliveryOrder>[1],
+    channelLink: Parameters<typeof ingestDeliveryOrder>[1] | null,
   ): Promise<boolean> {
     if (event.provider === DeliveryProvider.RAPPI) {
       const r = await processRappiEvent(event.id)
@@ -325,7 +389,14 @@ export class DeliveryWebhookReconciliationJob {
       // NO lanza: reporta el desenlace. Traducirlo es lo que decide reintento vs. rendición.
       const r = await processUberEvent(event.id)
 
-      if (r.outcome === 'PROCESSED' || r.outcome === 'ALREADY_DONE' || r.outcome === 'NOT_AN_ORDER') return true
+      if (
+        r.outcome === 'PROCESSED' ||
+        r.outcome === 'ALREADY_DONE' ||
+        r.outcome === 'NOT_AN_ORDER' ||
+        r.outcome === 'RECONCILED' ||
+        r.outcome === 'STORE_STATE'
+      )
+        return true
 
       // Sin vínculo no hay a quién ingerirle: el procesador ya lo dejó visible y no hay
       // nada que reintentar. (En la práctica el guard de `channelLink` del llamador lo
@@ -346,6 +417,7 @@ export class DeliveryWebhookReconciliationJob {
       throw new Error(r.error ?? 'Uber: fallo desconocido al reprocesar')
     }
 
+    if (!channelLink) return false // sólo una revocación de Uber llega aquí sin vínculo, y ya salió arriba
     const normalized = parseDeliverectOrder(Buffer.from(JSON.stringify(event.payload)), channelLink)
     const { order } = await ingestDeliveryOrder(normalized, channelLink)
     await markEventResult(event.id, DeliveryOrderEventStatus.PROCESSED, order.id)
@@ -373,6 +445,9 @@ export class DeliveryWebhookReconciliationJob {
       // Idempotent — never re-log/re-touch a row already marked ORPHANED. Null-tolerant
       // OR (not a bare `not: 'ORPHANED'`) so error=null rows (first time aging out) still match.
       OR: [{ error: null }, { error: { notIn: DeliveryWebhookReconciliationJob.TERMINAL_ERRORS } }],
+      // N-8: un seguimiento que este job nunca intentó no caduca por edad: su carril lo lee sin piso
+      // de 24 h y el procesador lo cierra (con incidencia si pasó su vida).
+      NOT: { eventType: { in: DeliveryWebhookReconciliationJob.EVENTOS_DE_SEGUIMIENTO }, attemptCount: 0 },
     } satisfies Prisma.DeliveryOrderEventWhereInput
 
     // Fetch rows BEFORE flipping them so we can emit a per-event alert with enough detail

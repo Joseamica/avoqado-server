@@ -229,6 +229,8 @@ export interface UberRequestOptions {
   /** OBLIGATORIO en cualquier método distinto de GET: es lo que el candado autoriza. */
   storeId?: string
   body?: unknown
+  /** Corte del llamador (la reconciliación lee bajo candado con 8 s); se suma al timeout propio. */
+  signal?: AbortSignal
 }
 
 export interface UberResponse {
@@ -297,7 +299,7 @@ export async function uberRequest(deps: UberRequestDeps, opts: UberRequestOption
     method: opts.method,
     headers,
     body: cuerpo,
-    signal: AbortSignal.timeout(TIMEOUT_MS),
+    signal: opts.signal ? AbortSignal.any([AbortSignal.timeout(TIMEOUT_MS), opts.signal]) : AbortSignal.timeout(TIMEOUT_MS),
   })
   const texto = await r.text()
 

@@ -412,7 +412,7 @@ export class NightlySalesSummaryJob {
 /**
  * Get sales breakdown by category
  */
-async function getCategoryBreakdown(
+export async function getCategoryBreakdown(
   venueId: string,
   startDate: Date,
   endDate: Date,
@@ -434,6 +434,7 @@ async function getCategoryBreakdown(
       AND o."createdAt" <= ${utcTs(endDate)}
       AND o.status NOT IN ('CANCELLED')
       AND o."paymentStatus" NOT IN ('REFUNDED')
+      AND oi."removedAt" IS NULL -- a line the delivery provider removed sold nothing
     GROUP BY c.name
     ORDER BY net_sales DESC
     LIMIT 10

@@ -130,7 +130,11 @@ function seedFailedSale() {
   prismaMock.payment.findFirst.mockResolvedValue({ id: PAYMENT_ID, type: 'CREDIT', processorData: {} } as any)
   prismaMock.$executeRaw.mockResolvedValue(0)
 }
-/** Un cobro DEL PROTOCOLO de costo ($100 con tarjeta): `cobrosDelProtocolo` (SQL sobre "Payment" p) lo devuelve; el candado no devuelve filas útiles. */
+/**
+ * Un cobro DEL PROTOCOLO de costo ($100 con tarjeta): `cobrosDelProtocolo` (SQL sobre "Payment" p) lo devuelve; el candado no devuelve
+ * filas útiles; y la excepción de efectivo manual (`efectivoManualEditable`, la consulta con `"merchantAccountId" IS NULL`) NO lo
+ * devuelve — es un cobro con tarjeta. La verdad contra Postgres vive en `saleVerificationEdit.protocolo.integration.test.ts`.
+ */
 function seedProtocolSale() {
   seedFailedSale()
   prismaMock.saleVerification.findUnique.mockResolvedValue({
@@ -146,9 +150,10 @@ function seedProtocolSale() {
     venue: { organizationId: ORG_ID },
   })
   prismaMock.payment.findUniqueOrThrow.mockResolvedValue({ amount: '100', method: 'CREDIT_CARD' } as any)
-  prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray) =>
-    strings.join('?').includes('FROM "Payment" p') ? [{ id: PAYMENT_ID }] : [],
-  )
+  prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+    const sql = strings.join('?')
+    return sql.includes('FROM "Payment" p') && !sql.includes('"merchantAccountId" IS NULL') ? [{ id: PAYMENT_ID }] : []
+  })
 }
 
 describe('PATCH /api/v1/dashboard/organizations/:orgId/sale-verifications/:id (edit)', () => {

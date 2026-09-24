@@ -41,6 +41,12 @@ jest.mock('../../../src/services/stripe.service', () => ({
   createPlanSetupIntent: jest.fn(),
   createPlanSubscription: jest.fn().mockResolvedValue({ subscriptionId: 'sub_123' }),
   getOrCreateStripeCustomer: jest.fn().mockResolvedValue('cus_123'),
+  entregarSuscripcionDePlan: jest.fn(),
+}))
+// V5-A paso 6: el cobro legacy pasa por la regla común (probada en su suite); por defecto deja pasar.
+const mockAutorizar = jest.fn()
+jest.mock('../../../src/services/access/autorizarObligacionNueva', () => ({
+  autorizarObligacionNueva: (...a: unknown[]) => mockAutorizar(...a),
 }))
 
 jest.mock('../../../src/services/access/planNotification.service', () => ({
@@ -74,6 +80,7 @@ import * as venueCreationService from '../../../src/services/onboarding/venueCre
 import { resolvePlanNotificationTarget } from '../../../src/services/access/planNotification.service'
 import emailService from '../../../src/services/email.service'
 import prisma from '../../../src/utils/prismaClient'
+import AppError from '../../../src/errors/AppError'
 
 const VENUE = { id: 'venue_1', slug: 'bar-test', name: 'Bar Test' }
 
@@ -131,13 +138,21 @@ function primeHappyPath(planOverrides: Record<string, any> = {}, targetOverrides
   })
 }
 
-
 describe('completeV2Onboarding — candados del lanzamiento (S7) y fugas del legacy (S9)', () => {
   const ORIGINAL_FLAG = process.env.ENABLE_VENUE_BASE_SUBSCRIPTION
 
   beforeEach(() => {
     jest.clearAllMocks()
     process.env.ENABLE_VENUE_BASE_SUBSCRIPTION = 'true'
+    mockAutorizar.mockReset().mockImplementation(async (_v: string, _c: string, _i: unknown, crear: () => Promise<unknown>) => crear())
+    ;(stripeService.createPlanSubscription as jest.Mock).mockResolvedValue({ subscriptionId: 'sub_123' })
+    ;(stripeService.entregarSuscripcionDePlan as jest.Mock).mockResolvedValue({
+      venueId: 'venue_1',
+      featureId: 'feat-pro',
+      featureCode: 'PLAN_PRO',
+      subscriptionId: 'sub_123',
+      endDate: null,
+    })
   })
 
   afterAll(() => {
@@ -175,7 +190,7 @@ describe('completeV2Onboarding — candados del lanzamiento (S7) y fugas del leg
   })
 
   it('🔴 con un cobro EN CURSO: 409 y tampoco se toma el lock', async () => {
-    conProgreso({ planActivationStatus: 'IN_PROGRESS' })
+    conProgreso({ planActivationStatus: 'IN_PROGRESS', planActivationLeaseUntil: new Date(Date.now() + 60_000) })
 
     const next = await correr()
 
@@ -183,6 +198,21 @@ describe('completeV2Onboarding — candados del lanzamiento (S7) y fugas del leg
     expect(prisma.onboardingProgress.updateMany).not.toHaveBeenCalled()
     expect(stripeService.createPlanSubscription).not.toHaveBeenCalled()
   })
+
+  it.each([
+    ['vencido', new Date(Date.now() - 60_000)],
+    ['sin lease', null],
+  ])(
+    '🔴 Codex R3: un cobro EN CURSO con el lease %s (el que deja un desenlace dudoso) NO atora el alta: entra y lo recupera',
+    async (_n, lease) => {
+      conProgreso({ planActivationStatus: 'IN_PROGRESS', planActivationLeaseUntil: lease })
+
+      const next = await correr()
+
+      expect(next).not.toHaveBeenCalledWith(expect.objectContaining({ code: 'PLAN_ACTIVATION_IN_PROGRESS' }))
+      expect(prisma.onboardingProgress.updateMany).toHaveBeenCalled()
+    },
+  )
 
   it('🔴 si activate-plan YA cobró: el local se crea pero NO se cobra otra vez ni se manda correo', async () => {
     conProgreso({ planActivationStatus: 'ACTIVE' }, { payNow: true })
@@ -243,5 +273,190 @@ describe('completeV2Onboarding — candados del lanzamiento (S7) y fugas del leg
       'bar@test.com',
       expect.objectContaining({ introAmountCents: undefined, nextChargeAmountCents: 1158840 }),
     )
+  })
+
+  it('🔴 si el negocio desaparece mientras se crea su cliente de Stripe: 404, se suelta la marca y NO se da el alta por terminada', async () => {
+    // R0 ronda 5 (Codex): `getOrCreateStripeCustomer` ya no devuelve un cliente huérfano, pero este
+    // `catch` se tragaba su 404 y respondía 201 con un negocio borrado.
+    conProgreso({}, { payNow: true })
+    ;(stripeService.getOrCreateStripeCustomer as jest.Mock).mockRejectedValueOnce(
+      new AppError('El negocio venue_1 ya no existe.', 404, true, 'VENUE_NOT_FOUND'),
+    )
+    const res = buildRes()
+    const next = jest.fn() as unknown as NextFunction
+
+    await completeV2Onboarding(buildReq() as Request, res as Response, next)
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 404, code: 'VENUE_NOT_FOUND' }))
+    expect(res.status).not.toHaveBeenCalledWith(201)
+    expect(stripeService.createPlanSubscription).not.toHaveBeenCalled()
+    expect(prisma.organization.update).not.toHaveBeenCalled()
+    expect(prisma.onboardingProgress.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ organizationId: 'org_1' }), data: { completedAt: null } }),
+    )
+  })
+
+  it('🔴 V5-A paso 6: el cobro legacy pasa por la regla común (como alta) y el acceso lo escribe la entrega', async () => {
+    conProgreso({}, { payNow: true })
+
+    await correr()
+
+    expect(mockAutorizar).toHaveBeenCalledWith('venue_1', 'cus_123', { tipo: 'PLAN', tier: 'PRO' }, expect.any(Function), {
+      desdeElAlta: true,
+    })
+    expect(stripeService.createPlanSubscription).toHaveBeenCalledTimes(1)
+    expect(stripeService.entregarSuscripcionDePlan).toHaveBeenCalledWith({
+      venueId: 'venue_1',
+      subscriptionId: 'sub_123',
+      detectedBy: 'onboarding.completeV2',
+    })
+  })
+
+  it('🔴 si el negocio YA tiene un plan cobrando (p. ej. el reintento de esta misma alta, o lo pagó por el dashboard): NO cobra encima, lo entrega y termina', async () => {
+    conProgreso({}, { payNow: true })
+    mockAutorizar.mockRejectedValue(
+      Object.assign(new AppError('Ya hay un plan cobrando', 409, true, 'PLAN_YA_CONTRATADO'), { suscripciones: ['sub_vivo'] }),
+    )
+    const res = buildRes()
+
+    await completeV2Onboarding(buildReq() as Request, res as Response, jest.fn() as unknown as NextFunction)
+
+    expect(stripeService.createPlanSubscription).not.toHaveBeenCalled()
+    expect(stripeService.entregarSuscripcionDePlan).toHaveBeenCalledWith({
+      venueId: 'venue_1',
+      subscriptionId: 'sub_vivo',
+      detectedBy: 'onboarding.completeV2',
+    })
+    expect(res.status).toHaveBeenCalledWith(201)
+  })
+
+  it('🔴 resultado DESCONOCIDO del cobro: NO se da el alta por terminada; 503 y se suelta la marca (el reintento reusa el MISMO cobro por su llave)', async () => {
+    conProgreso({}, { payNow: true })
+    // Como el real: avisa que va a mandar el cobro y DESPUÉS falla sin respuesta.
+    ;(stripeService.createPlanSubscription as jest.Mock).mockImplementation(async (a: { antesDeCobrar?: () => void }) => {
+      a.antesDeCobrar?.()
+      throw new Error('Stripe no contestó')
+    })
+    const res = buildRes()
+    const next = jest.fn() as unknown as NextFunction
+
+    await completeV2Onboarding(buildReq() as Request, res as Response, next)
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 503, code: 'PLAN_ACTIVATION_PENDING' }))
+    expect(res.status).not.toHaveBeenCalledWith(201)
+    expect(prisma.organization.update).not.toHaveBeenCalled()
+    // 🔴 Codex C4: suelta la marca del asistente PERO deja el cobro EN CURSO (la barrera económica sigue puesta).
+    expect(prisma.onboardingProgress.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ organizationId: 'org_1' }),
+        data: expect.objectContaining({
+          completedAt: null,
+          planActivationStatus: 'IN_PROGRESS',
+          planActivationLeaseUntil: expect.any(Date),
+        }),
+      }),
+    )
+  })
+
+  it('🔴 Codex C4: el id de la suscripción se guarda en el INSTANTE del cobro (el siguiente intento la recupera por id)', async () => {
+    conProgreso({}, { payNow: true })
+
+    await correr()
+
+    const { alCrearEnStripe } = (stripeService.createPlanSubscription as jest.Mock).mock.calls[0][0]
+    await alCrearEnStripe('sub_recien')
+    expect(prisma.onboardingProgress.updateMany).toHaveBeenLastCalledWith({
+      where: { organizationId: 'org_1' },
+      data: { planStripeSubscriptionId: 'sub_recien' },
+    })
+  })
+
+  it('🔴 Codex C4: al cobrar y conceder, el alta queda con su cobro ACTIVE y ligado', async () => {
+    conProgreso({}, { payNow: true })
+
+    await correr()
+
+    expect(prisma.onboardingProgress.updateMany).toHaveBeenCalledWith({
+      where: { organizationId: 'org_1' },
+      data: { planActivationStatus: 'ACTIVE', planActivationLeaseUntil: null, planStripeSubscriptionId: 'sub_123' },
+    })
+  })
+
+  it.each([
+    [
+      'la entrega FALLA después de cobrar',
+      () => (stripeService.entregarSuscripcionDePlan as jest.Mock).mockRejectedValue(new Error('lock timeout')),
+    ],
+    ['la entrega NO concede (conflicto)', () => (stripeService.entregarSuscripcionDePlan as jest.Mock).mockResolvedValue(null)],
+  ])('🔴 Codex C5: si %s, no se termina el alta ni se pone el plan: cobro EN CURSO y 503', async (_n, preparar) => {
+    conProgreso({}, { payNow: true })
+    ;(stripeService.createPlanSubscription as jest.Mock).mockImplementation(async (a: { antesDeCobrar?: () => void }) => {
+      a.antesDeCobrar?.()
+      return { subscriptionId: 'sub_123' }
+    })
+    preparar()
+    const next = await correr()
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 503, code: 'PLAN_ACTIVATION_PENDING' }))
+    expect(prisma.organization.update).not.toHaveBeenCalled()
+    expect(prisma.venue.update).not.toHaveBeenCalledWith(expect.objectContaining({ data: { planTier: 'PRO' } }))
+    // Nunca se registra como cobrado ACTIVE lo que no se concedió (ni por un instante).
+    expect(prisma.onboardingProgress.updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ planActivationStatus: 'ACTIVE' }) }),
+    )
+    expect(prisma.onboardingProgress.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ completedAt: null, planActivationStatus: 'IN_PROGRESS' }) }),
+    )
+  })
+
+  it('🔴 Codex C5: si RECUPERAR el plan que ya cobra falla, tampoco queda una marca temprana sin salida', async () => {
+    conProgreso({}, { payNow: true })
+    mockAutorizar.mockRejectedValue(
+      Object.assign(new AppError('Ya hay un plan cobrando', 409, true, 'PLAN_YA_CONTRATADO'), { suscripciones: ['sub_vivo'] }),
+    )
+    ;(stripeService.entregarSuscripcionDePlan as jest.Mock).mockRejectedValue(new Error('lock timeout'))
+
+    const next = await correr()
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 503, code: 'PLAN_ACTIVATION_PENDING' }))
+    expect(prisma.organization.update).not.toHaveBeenCalled()
+    expect(prisma.onboardingProgress.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ completedAt: null, planActivationStatus: 'IN_PROGRESS' }) }),
+    )
+  })
+
+  it('un RECHAZO de tarjeta sigue sin bloquear el alta (no hubo cobro; el negocio queda en Gratis)', async () => {
+    conProgreso({}, { payNow: true })
+    ;(stripeService.createPlanSubscription as jest.Mock).mockImplementation(async (a: { antesDeCobrar?: () => void }) => {
+      a.antesDeCobrar?.()
+      throw Object.assign(new Error('Your card was declined.'), { type: 'StripeCardError', code: 'card_declined' })
+    })
+    const res = buildRes()
+
+    await completeV2Onboarding(buildReq() as Request, res as Response, jest.fn() as unknown as NextFunction)
+
+    expect(res.status).toHaveBeenCalledWith(201)
+    expect(stripeService.entregarSuscripcionDePlan).not.toHaveBeenCalled()
+  })
+
+  it('🔴 Codex C15: un fallo ANTES de mandar el cobro (nada pudo cobrarse) no bloquea el alta', async () => {
+    conProgreso({}, { payNow: true })
+    ;(stripeService.createPlanSubscription as jest.Mock).mockRejectedValue(new Error('Feature PLAN_PRO not found'))
+    const res = buildRes()
+
+    await completeV2Onboarding(buildReq() as Request, res as Response, jest.fn() as unknown as NextFunction)
+
+    expect(res.status).toHaveBeenCalledWith(201)
+  })
+
+  it('un tropiezo de Stripe cualquiera sigue sin bloquear el alta (el negocio existe)', async () => {
+    conProgreso({}, { payNow: true })
+    ;(stripeService.getOrCreateStripeCustomer as jest.Mock).mockRejectedValueOnce(new Error('socket hang up'))
+    const res = buildRes()
+
+    await completeV2Onboarding(buildReq() as Request, res as Response, jest.fn() as unknown as NextFunction)
+
+    expect(res.status).toHaveBeenCalledWith(201)
+    expect(prisma.organization.update).toHaveBeenCalled()
   })
 })

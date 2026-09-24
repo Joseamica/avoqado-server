@@ -24,6 +24,8 @@ import { asegurarCostoSincrono } from '@/services/payments/deferredTransactionCo
 import * as costoDiferido from '@/services/payments/deferredTransactionCost.service'
 import * as moduloDelProtocolo from '@/services/shared/cobroDelProtocolo'
 import { recordRefund } from '@/services/tpv/refund.tpv.service'
+import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
+import { updatePayment } from '@/services/dashboard/payment.dashboard.service'
 import { createSaleVerification } from '@/services/tpv/sale-verification.service'
 import { editOrgSaleVerification } from '@/services/dashboard/sale-verification.org.dashboard.service'
 import socketManager from '@/communication/sockets/managers/socketManager'
@@ -428,5 +430,134 @@ describe('Codex R16-1 · el editor de verificaciones sobre un REEMBOLSO protege 
       expect(await efectoDe(P.id)).not.toBeNull()
       expect(await prisma.activityLog.count({ where: { entityId: sv.id, action: 'SALE_VERIFICATION_EDIT' } })).toBe(1)
     })
+  })
+})
+
+/**
+ * Excepción de EFECTIVO MANUAL (2026-09-21, tras la auditoría de Codex gpt-6-astra del 20-sep): desde el deploy del 18-sep TODO
+ * cobro registrado por la terminal lleva la llave `pricing` —en efectivo sin afiliación vale `null`— y `cobrosDelProtocolo`
+ * clasifica «llave presente» como protegido. Un SIM de $0 en efectivo de PlayTelecom quedaba así bajo el protocolo de costo sin
+ * tener tarifa, evidencia bancaria ni obligación que proteger (162 cobros en dos días; Daniel Samperio: 2 × 409 el 18-sep; PT
+ * corrige 41-58 verificaciones al mes, 77 de 119 de FORMA de pago). La pertenencia GLOBAL no cambia (el PUT y el DELETE del
+ * dashboard siguen protegiendo ese cobro): sólo el editor de verificaciones deja pasar el cobro CASH sin afiliación, con
+ * snapshot exactamente nulo, sin costo, sin obligación TRANSACTION_COST en ningún estado y sin reembolsos que lo apunten.
+ * Un `pricing: null` CON afiliación es una captura INVÁLIDA (R10-1) y sigue protegido. La forma sólo se mueve entre EFECTIVO y OTRO
+ * (77 de las 119 correcciones de PT son CASH → OTHER): pasar a TARJETA afirmaría dinero bancario que Avoqado no ve, y se rechaza.
+ * Al cambiar la forma de pago se estampa
+ * `fundsFlow` coherente (CASH → CASH_DRAWER; lo demás → EXTERNAL_RECORDED): la caja y el saldo disponible leen `fundsFlow`
+ * por encima de `method` (`tenderSemantics`), y dejarlo en CASH_DRAWER con método OTHER era la incoherencia que señaló Codex.
+ */
+describe('Excepción de efectivo manual · un cobro CASH sin afiliación (pricing null) se corrige desde la verificación, y sólo desde ahí', () => {
+  /** El cobro exacto de PlayTelecom: CASH desde la terminal, sin afiliación ⇒ `pricing: null` con la llave PRESENTE, sin slot ni costo. */
+  const efectivoSinAfiliacion = async (amount = 10000) => {
+    const p = await recordFastPayment(
+      f.venueId,
+      { ...f.registroDeLaTerminal({ attemptId: randomUUID(), sinMerchant: true, amount }), method: 'CASH' },
+      f.staffId,
+    )
+    const fila = await pago(p.id)
+    const pd = fila.processorData as Record<string, unknown>
+    expect(fila).toMatchObject({ method: 'CASH', merchantAccountId: null, terminalPaymentRequestId: null })
+    expect(Object.prototype.hasOwnProperty.call(pd, 'pricing')).toBe(true)
+    expect(pd.pricing).toBeNull()
+    expect(await prisma.paymentEffect.count({ where: { paymentId: p.id, kind: 'TRANSACTION_COST' } })).toBe(0)
+    expect(await prisma.transactionCost.count({ where: { paymentId: p.id } })).toBe(0)
+    return p
+  }
+  const bitacoras = (sv: { id: string }) => prisma.activityLog.count({ where: { entityId: sv.id, action: 'SALE_VERIFICATION_EDIT' } })
+
+  it('CASH sin afiliación · cambiar la FORMA DE PAGO (CASH → OTRO) pasa: método OTHER, fundsFlow EXTERNAL_RECORDED y bitácora', async () => {
+    const p = await efectivoSinAfiliacion()
+    const sv = await verificacionDe(p)
+    const editada = await editar(sv, { paymentForm: 'OTHER' })
+    expect(editada.payment).toMatchObject({ method: 'OTHER' })
+    expect(await pago(p.id)).toMatchObject({ method: 'OTHER', fundsFlow: 'EXTERNAL_RECORDED', merchantAccountId: null })
+    expect(Number((await pago(p.id)).amount)).toBe(100)
+    expect(await bitacoras(sv)).toBe(1)
+    const bitacora = await exigir(prisma.activityLog.findFirst({ where: { entityId: sv.id, action: 'SALE_VERIFICATION_EDIT' } }))
+    expect(bitacora.data).toMatchObject({ viaExcepcionEfectivoManual: true, after: { method: 'OTHER' } })
+  })
+
+  it('CASH sin afiliación · cambiar el IMPORTE ($100 → $120) pasa y el método (y su fundsFlow) no se tocan', async () => {
+    const p = await efectivoSinAfiliacion()
+    const antes = await pago(p.id)
+    const sv = await verificacionDe(p)
+    const editada = await editar(sv, { amount: 120 })
+    expect(Number(editada.payment.amount)).toBe(120)
+    const despues = await pago(p.id)
+    expect(despues).toMatchObject({ method: 'CASH', fundsFlow: antes.fundsFlow })
+    expect(Number(despues.amount)).toBe(120)
+    expect(await bitacoras(sv)).toBe(1)
+  })
+
+  it('CASH sin afiliación · volver a EFECTIVO (OTRO → CASH) estampa fundsFlow CASH_DRAWER', async () => {
+    const p = await efectivoSinAfiliacion()
+    const sv = await verificacionDe(p)
+    await editar(sv, { paymentForm: 'OTHER' })
+    expect(await pago(p.id)).toMatchObject({ method: 'OTHER', fundsFlow: 'EXTERNAL_RECORDED' })
+    // El cobro ya no es CASH: la excepción lo vuelve a examinar y lo deja pasar SÓLO porque sigue sin afiliación, sin costo y sin
+    // reembolsos (la forma corregida no lo mete al protocolo). Regresar a efectivo lo devuelve al cajón.
+    await editar(sv, { paymentForm: 'CASH' })
+    expect(await pago(p.id)).toMatchObject({ method: 'CASH', fundsFlow: 'CASH_DRAWER' })
+    expect(await bitacoras(sv)).toBe(2)
+  })
+
+  it('CONTROL · pasar a TARJETA (CASH → CARD) ⇒ 409: la excepción sólo mueve la forma entre efectivo y otro', async () => {
+    const p = await efectivoSinAfiliacion()
+    const sv = await verificacionDe(p)
+    const antes = await foto(p.id)
+    await rechazo(editar(sv, { paymentForm: 'CARD' }), ['method'])
+    expect(await foto(p.id)).toEqual(antes)
+    expect(await bitacoras(sv)).toBe(0)
+  })
+
+  it('CONTROL · el mismo cobro con un REEMBOLSO que lo apunta (cualquier estado) ⇒ 409 y nada cambia', async () => {
+    const p = await efectivoSinAfiliacion()
+    await issueRefund({ venueId: f.venueId, paymentId: p.id, amount: 2000, reason: 'OTHER', staffId: f.staffId })
+    const sv = await verificacionDe(p)
+    const antes = await foto(p.id)
+    await rechazo(editar(sv, { amount: 120 }), ['amount'])
+    await rechazo(editar(sv, { paymentForm: 'OTHER' }), ['method'])
+    expect(await foto(p.id)).toEqual(antes)
+    expect(await bitacoras(sv)).toBe(0)
+  })
+
+  it('CONTROL · pricing null CON afiliación (captura INVÁLIDA, R10-1) ⇒ 409: la excepción es sólo para el efectivo sin afiliación', async () => {
+    const p = await recordFastPayment(f.venueId, { ...f.registroDeLaTerminal({ attemptId: randomUUID() }), method: 'CASH' }, f.staffId)
+    // Sólo la afiliación distingue este cobro del elegible: snapshot nulo, sin slot, sin costo ni obligación — como el de PT.
+    await prisma.$executeRaw`UPDATE "Payment" SET "processorData" = jsonb_set(jsonb_set("processorData", '{pricing}', 'null'::jsonb), '{pricingSlot}', 'null'::jsonb) WHERE "id" = ${p.id}`
+    await prisma.paymentEffect.deleteMany({ where: { paymentId: p.id, kind: 'TRANSACTION_COST' } })
+    await prisma.transactionCost.deleteMany({ where: { paymentId: p.id } })
+    const fila = await pago(p.id)
+    expect(fila.merchantAccountId).not.toBeNull()
+    expect((fila.processorData as Record<string, unknown>).pricing).toBeNull()
+    const sv = await verificacionDe(p)
+    const antes = await foto(p.id)
+    await rechazo(editar(sv, { amount: 120 }), ['amount'])
+    expect(await foto(p.id)).toEqual(antes)
+  })
+
+  it('CONTROL · con una obligación TRANSACTION_COST (aunque esté FAILED) ⇒ 409', async () => {
+    const p = await efectivoSinAfiliacion()
+    await prisma.paymentEffect.create({
+      data: { venueId: f.venueId, paymentId: p.id, kind: 'TRANSACTION_COST', dedupeKey: `tc:${p.id}`, payload: {}, status: 'FAILED' },
+    })
+    const sv = await verificacionDe(p)
+    const antes = await foto(p.id)
+    await rechazo(editar(sv, { paymentForm: 'OTHER' }), ['method'])
+    expect(await foto(p.id)).toEqual(antes)
+  })
+
+  it('CONTROL · la pertenencia GLOBAL no cambia: el PUT genérico del dashboard sigue rechazando ese mismo cobro con 409', async () => {
+    const p = await efectivoSinAfiliacion()
+    const antes = await foto(p.id)
+    await rechazo(updatePayment(f.venueId, p.id, { amount: 120 }), ['amount'])
+    expect(await foto(p.id)).toEqual(antes)
+  })
+
+  it('CONTROL · el CONTRATO no cambia para el cobro con tarjeta: un cobro convergido sigue en 409 (regresión de R13-3)', async () => {
+    const p = await cobroConvergido()
+    const sv = await verificacionDe(p)
+    await rechazo(editar(sv, { paymentForm: 'CASH' }), ['method'])
   })
 })

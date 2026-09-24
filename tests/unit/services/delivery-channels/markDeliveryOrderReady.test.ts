@@ -14,11 +14,20 @@ jest.mock('../../../../src/services/delivery-channels/core/adapterRegistry', () 
   adapterFor: jest.fn(),
 }))
 
+// La reserva simétrica (spec §3.2) se prueba contra Postgres en
+// tests/integration/delivery-channels/aceptacionAcreditada.test.ts; aquí se deja pasar.
+jest.mock('../../../../src/services/delivery-channels/core/deliveryOrderLock', () => ({
+  tomarReserva: jest.fn(async () => ({ ok: true, token: 'tok' })),
+  soltarReserva: jest.fn(async () => true),
+  withDeliveryOrderLock: jest.fn(async (_id: string, fn: (tx: unknown) => unknown) => fn({ order: { updateMany: jest.fn() } })),
+}))
+
 const markOrderReady = jest.fn()
 
 describe('markDeliveryOrderReady', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    ;(prisma as any).deliveryLineAction = { count: jest.fn().mockResolvedValue(0) }
     ;(hasAdapter as jest.Mock).mockReturnValue(true)
     ;(adapterFor as jest.Mock).mockReturnValue({ markOrderReady })
     ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({
@@ -26,8 +35,12 @@ describe('markDeliveryOrderReady', () => {
       externalId: 'UBER_EATS:uuid-uber-1',
       status: 'CONFIRMED',
       orderNumber: 'A-1',
+      deliveryChannelLinkId: 'link1',
     })
-    ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({ externalLocationId: 'store-uuid' })
+    ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({
+      provider: 'UBER_EATS',
+      externalLocationId: 'store-uuid',
+    })
     markOrderReady.mockResolvedValue({ ok: true, status: 200, raw: '' })
   })
 

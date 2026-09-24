@@ -161,14 +161,14 @@ describe('issueGlobalForEmisor', () => {
       const deps = makeDeps()
       await issueGlobalForEmisor({ emisorId: 'e1', now: NOW, sandbox: true }, deps)
       // 4th arg = emisor.invoiceCashSales — false by default → the candidate query drops cash orders.
-      expect(deps.loadGlobalCandidates).toHaveBeenCalledWith('e1', expect.any(Date), expect.any(Date), false)
+      expect(deps.loadGlobalCandidates).toHaveBeenCalledWith('e1', expect.any(Date), expect.any(Date), false, 'v1')
     })
 
     it('forwards invoiceCashSales=true when the emisor opted in (cash swept into the global)', async () => {
       const optedIn: GlobalEmisor = { ...ACTIVE_EMISOR, invoiceCashSales: true }
       const deps = makeDeps({ loadEmisor: jest.fn().mockResolvedValue(optedIn) })
       await issueGlobalForEmisor({ emisorId: 'e1', now: NOW, sandbox: true }, deps)
-      expect(deps.loadGlobalCandidates).toHaveBeenCalledWith('e1', expect.any(Date), expect.any(Date), true)
+      expect(deps.loadGlobalCandidates).toHaveBeenCalledWith('e1', expect.any(Date), expect.any(Date), true, 'v1')
     })
   })
 
@@ -337,5 +337,122 @@ describe('issueGlobalForEmisor', () => {
       expect(result.status).toBe('STAMPED')
       expect(deps.resolveProvider).toHaveBeenCalled()
     })
+  })
+})
+
+// ── Extras y peso también en la GLOBAL (mismo defecto que la individual, Testarudo 21-sep-2026) ──
+import { globalLinesFromOrder } from '../../../../src/services/fiscal/cfdiGlobal.service'
+
+describe('globalLinesFromOrder — la línea global cuadra con el ticket (misma verdad de dinero que la individual)', () => {
+  const Dc = (n: number) => new Prisma.Decimal(n)
+  const base = { id: 'o1', orderNumber: 'ORD-1', subtotal: Dc(110), taxAmount: Dc(0), total: Dc(126.5), discountAmount: Dc(0) }
+  const itemP = (over: Record<string, any>) => ({
+    productName: 'X',
+    quantity: 1,
+    unitPrice: Dc(0),
+    discountAmount: Dc(0),
+    taxAmount: Dc(0),
+    total: Dc(0),
+    weightQuantity: null,
+    modifiers: [],
+    product: { taxRate: Dc(0.16), objetoImp: '02', satProductKey: '90101501', satUnitKey: 'E48', category: null },
+    ...over,
+  })
+  const pagos = (amount: number, type = 'REGULAR') => [{ method: 'CREDIT_CARD', tenderSatFormaPago: null, amount: Dc(amount), type }]
+  const suma = (lines: Array<{ totalCents: number }>) => lines.reduce((s, l) => s + l.totalCents, 0)
+
+  it('GROSS con modificador con precio (guardado por unidad): la línea vale OrderItem.total, igual que la individual', () => {
+    const lines = globalLinesFromOrder({
+      ...base,
+      payments: pagos(110),
+      items: [
+        itemP({
+          productName: 'CAPUCCINO',
+          unitPrice: Dc(65),
+          total: Dc(70),
+          modifiers: [{ name: 'Deslactosada', price: Dc(5), quantity: 1 }],
+        }),
+        itemP({ productName: 'TOPOCHICO', unitPrice: Dc(40), total: Dc(40) }),
+      ],
+    } as any)
+    expect(suma(lines)).toBe(11000) // 70 + 40, no 105
+  })
+
+  it('GROSS venta por peso: la línea vale lo cobrado (precio × kilos)', () => {
+    const lines = globalLinesFromOrder({
+      ...base,
+      subtotal: Dc(87),
+      total: Dc(87),
+      payments: pagos(87),
+      items: [
+        itemP({
+          productName: 'JAMÓN',
+          unitPrice: Dc(200),
+          total: Dc(87),
+          weightQuantity: Dc(0.435),
+          product: { taxRate: Dc(0.16), objetoImp: '02', satProductKey: '50112000', satUnitKey: 'KGM', category: null },
+        }),
+      ],
+    } as any)
+    expect(suma(lines)).toBe(8700)
+  })
+
+  it('DESCUENTO de orden sobre varios renglones: la global la EXCLUYE (alcance del descuento indemostrable)', () => {
+    const lines = globalLinesFromOrder({
+      ...base,
+      subtotal: Dc(100),
+      total: Dc(90),
+      discountAmount: Dc(10),
+      payments: pagos(90),
+      items: [itemP({ unitPrice: Dc(60), total: Dc(60) }), itemP({ unitPrice: Dc(40), total: Dc(40) })],
+    } as any)
+    expect(lines).toEqual([])
+  })
+
+  it('BARRERA en la global: una orden cuyo documento ≠ lo cobrado se EXCLUYE (nunca se declara mal)', () => {
+    const lines = globalLinesFromOrder({
+      ...base,
+      payments: pagos(140), // cobrados 140, pero los renglones sólo explican 135
+      items: [itemP({ productName: 'CAPUCCINO', quantity: 2, unitPrice: Dc(65), total: Dc(135) })],
+    } as any)
+    expect(lines).toEqual([])
+  })
+
+  it('sin renglones (importe libre): una línea por lo PAGADO, no por order.total (que trae propina)', () => {
+    const lines = globalLinesFromOrder({ ...base, subtotal: Dc(100), total: Dc(115), payments: pagos(100, 'FAST'), items: [] } as any)
+    expect(lines).toHaveLength(1)
+    expect(lines[0].totalCents).toBe(10000)
+  })
+
+  it('pagos TEST no cuentan como cobro de la global', () => {
+    const lines = globalLinesFromOrder({ ...base, subtotal: Dc(100), total: Dc(100), payments: pagos(100, 'TEST'), items: [] } as any)
+    expect(lines).toEqual([])
+  })
+})
+
+describe('loadGlobalCandidates filtra por venue del emisor', () => {
+  it('issueGlobalForEmisor pasa emisor.venueId al cargador de candidatos', async () => {
+    const loadGlobalCandidates = jest.fn().mockResolvedValue([])
+    const deps = makeDeps({ loadGlobalCandidates })
+    await issueGlobalForEmisor({ emisorId: 'e1', now: NOW, sandbox: true }, deps)
+    expect(loadGlobalCandidates).toHaveBeenCalledWith('e1', expect.any(Date), expect.any(Date), expect.any(Boolean), 'v1')
+  })
+})
+
+describe('globalLinesFromOrder — sin renglones tampoco se salta las exclusiones de orden', () => {
+  it('orden vacía con cargo por servicio: excluida (no se inventa una «Venta» al 16 %)', () => {
+    const Dc = (n: number) => new Prisma.Decimal(n)
+    const lines = globalLinesFromOrder({
+      id: 'o1',
+      orderNumber: 'ORD-1',
+      subtotal: Dc(0),
+      taxAmount: Dc(0),
+      total: Dc(100),
+      discountAmount: Dc(0),
+      serviceChargeAmount: Dc(100),
+      payments: [{ method: 'CREDIT_CARD', tenderSatFormaPago: null, amount: Dc(100), type: 'FAST' }],
+      items: [],
+    } as any)
+    expect(lines).toEqual([])
   })
 })

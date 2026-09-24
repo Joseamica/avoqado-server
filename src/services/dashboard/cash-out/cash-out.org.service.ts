@@ -5,6 +5,7 @@
  */
 import { Prisma, CashOutWithdrawalStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { endOfWriteUnit } from '@/utils/requestCancellation'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { assertCashOutEnabledForOrg } from './cash-out.config.service'
 import { materializeEntries, reconcileClawbacks } from './cash-out.ledger.service'
@@ -118,6 +119,10 @@ export async function getSaldosForOrg(
   for (const venueId of venueIds) {
     await materializeEntries(venueId)
     await reconcileClawbacks(venueId)
+    // Each venue's materialize + reconcile is complete and idempotent (existing entries are skipped on the
+    // next read), so an MCP request cut by the 2026-09-23 brake may stop BETWEEN venues — never inside one —
+    // and the cutoff surfaces as an error, never as a partial roll-up. A no-op outside an MCP request.
+    endOfWriteUnit()
   }
 
   const grouped = await prisma.promoterCommissionEntry.groupBy({

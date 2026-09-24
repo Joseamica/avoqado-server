@@ -77,6 +77,17 @@ describe('eventLoopGuardMiddleware', () => {
     expect(getInFlightRequests().length).toBeLessThanOrEqual(500)
   })
 
+  it('🔴 nunca entrega credenciales del query: el aviso del hilo retenido las escribiría en el log', () => {
+    // El callback de OAuth de Uber trae `?code=&state=` y el enlace de conexión `?intent=`.
+    const { req, res } = fakeReqRes('GET', '/api/v1/delivery/uber/oauth/start?intent=cmint1.firmaSecreta&page=2')
+    eventLoopGuardMiddleware(req, res, jest.fn())
+
+    const [r] = getInFlightRequests()
+    expect(r.url).toContain('/api/v1/delivery/uber/oauth/start?')
+    expect(r.url).toContain('page=2')
+    expect(r.url).not.toContain('firmaSecreta')
+  })
+
   it('nunca estorba a la petición: siempre llama a next()', () => {
     const next = jest.fn()
     const { req, res } = fakeReqRes('POST', '/api/v1/tpv/venues/v1/payments')

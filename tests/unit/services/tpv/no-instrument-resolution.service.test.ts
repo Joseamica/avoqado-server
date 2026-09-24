@@ -483,8 +483,15 @@ describe('resolveNoInstrument — la declaración del cajero cierra el intento c
     })
 
     it('hay un ProviderEventLog del intento APROBADO por el banco, o con contradicción de procedencia', async () => {
-      prismaMock.$queryRaw.mockImplementation(async (tpl: any) =>
-        sqlDe([tpl]).includes('"ProviderEventLog"') ? [{ id: 'e1' }] : sqlDe([tpl]).includes('"Order"') ? [{ id: 'order-1' }] : [],
+      // Desde Codex r7 (P1-3) la consulta del veto es el fragmento COMPARTIDO `eventosQueVetanSql`, que viaja ANIDADO
+      // (`$queryRaw\`${fragmento}\``): el texto exterior está vacío. Mirar sólo el exterior dejaba esta prueba sin veto.
+      const conAnidados = (tpl: any, values: any[]) => [sqlDe([tpl]), ...values.map(v => (v as { sql?: string })?.sql ?? '')].join(' ')
+      prismaMock.$queryRaw.mockImplementation(async (tpl: any, ...values: any[]) =>
+        conAnidados(tpl, values).includes('"ProviderEventLog"')
+          ? [{ id: 'e1' }]
+          : sqlDe([tpl]).includes('"Order"')
+            ? [{ id: 'order-1' }]
+            : [],
       )
       await rechaza(resolveNoInstrument(identidad, declaracion()), 'POSITIVE_EVIDENCE_EXISTS')
       nadaEscrito()

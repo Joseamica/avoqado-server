@@ -16,12 +16,20 @@ jest.mock('@/services/dashboard/creditPack.public.service', () => ({
   fulfillPurchase: jest.fn(),
 }))
 
+// 🔴 Codex R14: `customer.deleted` pregunta a Stripe qué suscripciones respaldaba ESE cliente (patrón local del
+// archivo: `require('stripe')(...)`), así que el SDK se mockea aquí.
+const listarSuscripciones = jest.fn().mockResolvedValue({ data: [] })
+jest.mock('stripe', () => jest.fn().mockImplementation(() => ({ subscriptions: { list: (...a: unknown[]) => listarSuscripciones(...a) } })))
+
 // Mock Stripe service BEFORE importing webhook service to prevent Stripe SDK initialization error
 jest.mock('@/services/stripe.service', () => ({
   // 6ª auditoría: los handlers consultan el estado VIGENTE antes de activar.
   estadoDeLaSuscripcion: jest.fn().mockResolvedValue('active'),
   // 8ª auditoría: el handler lee la suscripción VIGENTE (status + trial_end). Este mock DELEGA en
   // `estadoDeLaSuscripcion`, así que un test que fije el estado controla los dos sin tocar nada más.
+  // V5-A paso 6: la fila de plan sigue su camino sólo si la suscripción vende ese plan (por defecto, sí).
+  suscripcionVendeElPlan: jest.fn().mockResolvedValue(true),
+  entregarSuscripcionDePlan: jest.fn().mockResolvedValue(null),
   suscripcionVigente: jest.fn(async function (this: unknown, id: string) {
     const m = jest.requireMock('@/services/stripe.service') as { estadoDeLaSuscripcion: jest.Mock }
     return { status: await m.estadoDeLaSuscripcion(id), trialEnd: null }
@@ -68,6 +76,7 @@ import { handleStripeWebhookEvent, handleCustomerDeleted, handleSubscriptionUpda
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    billingObligationConflict: { findUnique: jest.fn() },
     webhookEvent: {
       findUnique: jest.fn(),
       create: jest.fn(),
@@ -85,9 +94,16 @@ jest.mock('@/utils/prismaClient', () => ({
       findUnique: jest.fn(),
       findFirst: jest.fn(),
       update: jest.fn(),
+      updateMany: jest.fn(),
     },
   },
 }))
+
+// 🔴 Codex R14: `customer.deleted` escribe bajo el candado del negocio. El `tx` es el mismo cliente mockeado.
+const prismaMockado = jest.requireMock('@/utils/prismaClient').default as Record<string, unknown>
+prismaMockado.$transaction = (cb: (tx: unknown) => unknown) => cb(prismaMockado)
+prismaMockado.$executeRaw = jest.fn()
+prismaMockado.$queryRaw = jest.fn()
 
 jest.mock('@/config/logger', () => ({
   __esModule: true,
@@ -254,25 +270,48 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         slug: 'test-venue',
         stripeCustomerId: 'cus_test_123',
       })
-      ;(prisma.venue.update as jest.Mock).mockResolvedValueOnce({})
+      ;(prisma.venue.updateMany as jest.Mock).mockResolvedValueOnce({ count: 1 })
       ;(prisma.venueFeature.updateMany as jest.Mock).mockResolvedValueOnce({ count: 5 })
+      listarSuscripciones.mockResolvedValueOnce({ data: [{ id: 'sub_a' }, { id: 'sub_b' }] })
 
       await handleCustomerDeleted(mockCustomer)
 
-      // Should clear customer ID
-      expect(prisma.venue.update).toHaveBeenCalledWith({
-        where: { id: 'venue_1' },
+      // 🔴 Codex R14: el id se limpia CONDICIONADO a que siga siendo el borrado (si ya hay otro, no se pisa).
+      expect(prisma.venue.updateMany).toHaveBeenCalledWith({
+        where: { id: 'venue_1', stripeCustomerId: 'cus_test_123' },
         data: { stripeCustomerId: null },
       })
 
-      // Should deactivate venue's features
+      // 🔴 Codex R14: sólo se retira lo que ESE cliente respaldaba, nunca todas las funciones activas del negocio.
       expect(prisma.venueFeature.updateMany).toHaveBeenCalledWith({
         where: {
           venueId: 'venue_1',
           active: true,
+          stripeSubscriptionId: { in: ['sub_a', 'sub_b'] },
         },
         data: { active: false },
       })
+    })
+
+    it('🔴 R14: una cortesía SIN Stripe concedida mientras llegaba el aviso no se apaga', async () => {
+      ;(prisma.venue.findFirst as jest.Mock).mockResolvedValueOnce({ id: 'venue_1', name: 'V', slug: 'v' })
+      ;(prisma.venue.updateMany as jest.Mock).mockResolvedValueOnce({ count: 1 })
+      listarSuscripciones.mockResolvedValueOnce({ data: [] })
+
+      await handleCustomerDeleted({ id: 'cus_x', object: 'customer' } as Stripe.Customer)
+
+      // Sin suscripciones del cliente borrado no hay NADA demostrablemente respaldado por él: no se apaga ninguna fila.
+      expect(prisma.venueFeature.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('🔴 R14: si no se puede preguntar a Stripe, no se retira nada (no poder ver ≠ no respaldaba)', async () => {
+      ;(prisma.venue.findFirst as jest.Mock).mockResolvedValueOnce({ id: 'venue_1', name: 'V', slug: 'v' })
+      ;(prisma.venue.updateMany as jest.Mock).mockResolvedValueOnce({ count: 1 })
+      listarSuscripciones.mockRejectedValueOnce(new Error('timeout'))
+
+      await handleCustomerDeleted({ id: 'cus_y', object: 'customer' } as Stripe.Customer)
+
+      expect(prisma.venueFeature.updateMany).not.toHaveBeenCalled()
     })
 
     it('should handle missing venue gracefully', async () => {
@@ -290,7 +329,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       await handleCustomerDeleted(mockCustomer)
 
       // Should NOT throw error, just log warning
-      expect(prisma.venue.update).not.toHaveBeenCalled()
+      expect(prisma.venue.updateMany).not.toHaveBeenCalled()
       expect(prisma.venueFeature.updateMany).not.toHaveBeenCalled()
     })
   })

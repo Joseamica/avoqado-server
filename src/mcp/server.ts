@@ -2,10 +2,12 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import type { Request, Response } from 'express'
 import { verifyMcpToken } from './mcpToken'
-import { resolveScope, type McpScope } from './scope'
+import { isActiveSuperAdmin, resolveScope, type McpScope } from './scope'
 import logger from '@/config/logger'
+import { describeMcpMessage, MCP_HANDSHAKE_METHODS, respondMcpCancelled } from '@/middlewares/mcp-request-guard.middleware'
 import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
-import { instrumentTools } from './instrument'
+import { beginWork, isRequestCancelledError, pendingCancellation } from '@/utils/requestCancellation'
+import { instrumentTools, recordCancelledToolCall } from './instrument'
 import { registerVenueTools } from './tools/venues'
 import { registerSalesTools } from './tools/sales'
 import { registerOrderTools } from './tools/orders'
@@ -38,6 +40,8 @@ import { registerTableTools } from './tools/tables'
 import { registerFeatureTools } from './tools/features'
 import { registerDeliveryChannelTools } from './tools/deliveryChannels'
 import { registerDeliveryActivationTools } from './tools/deliveryActivation'
+import { registerDeliveryCourierTools } from './tools/deliveryCourier'
+import { registerDeliveryLineActionTools } from './tools/deliveryLineActions'
 import { registerProductTools } from './tools/products'
 import { registerTrendTools } from './tools/trends'
 import { registerOrganizationTools } from './tools/organizations'
@@ -117,6 +121,8 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerFeatureTools(server, scope)
   registerDeliveryChannelTools(server, scope)
   registerDeliveryActivationTools(server, scope)
+  registerDeliveryCourierTools(server, scope)
+  registerDeliveryLineActionTools(server, scope)
   registerProductTools(server, scope)
   registerTrendTools(server, scope)
   registerOrganizationTools(server, scope)
@@ -157,6 +163,28 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   }
 }
 
+/**
+ * What every MCP server of this process announces in `initialize`. The SDK declares `tools` when the first tool is
+ * registered; declaring it up front makes the handshake server — which registers none — announce the same thing. A
+ * server that announced no tools would never be asked for its list. Pinned against a full build in the tests.
+ */
+const SERVER_INFO = { name: 'avoqado-customer-mcp', version: '0.1.0' }
+const SERVER_CAPABILITIES = { tools: { listChanged: true } }
+
+/** A bare MCP server with the process-wide identity, capabilities and instructions. */
+export function createMcpServer(isSuperAdmin: boolean): McpServer {
+  return new McpServer(SERVER_INFO, { instructions: buildMcpInstructions({ isSuperAdmin }), capabilities: SERVER_CAPABILITIES })
+}
+
+/**
+ * The server for the handshake (`initialize`, `ping`): it needs to know only whether the caller is a superadmin (the
+ * one thing that changes its answer) — one indexed query instead of the whole scope. That is what lets the MCP guard
+ * give the handshake no slot, so a new conversation can always connect (Codex, round 3).
+ */
+export async function buildHandshakeServer(staffId: string): Promise<McpServer> {
+  return createMcpServer(await isActiveSuperAdmin(staffId))
+}
+
 /** Build a per-request MCP server bound to the caller's resolved scope. */
 async function buildServerForIdentity(staffId: string, activeOrg: string, scopes?: string[]): Promise<McpServer> {
   const scope = await resolveScope(staffId, activeOrg)
@@ -165,7 +193,7 @@ async function buildServerForIdentity(staffId: string, activeOrg: string, scopes
   if (scopes && scopes.length) scope.scopes = scopes
 
   const isSuperAdmin = scope.isSuperAdmin === true
-  const server = new McpServer({ name: 'avoqado-customer-mcp', version: '0.1.0' }, { instructions: buildMcpInstructions({ isSuperAdmin }) })
+  const server = createMcpServer(isSuperAdmin)
   // Log every tool call (must run BEFORE registering tools). isSuperAdmin: raw errors for staff,
   // sanitized (generic message + ref) for customers — see sanitizeThrownError.
   instrumentTools(server, { staffId, org: activeOrg, isSuperAdmin })
@@ -182,6 +210,11 @@ async function buildServerForIdentity(staffId: string, activeOrg: string, scopes
         })
       : Promise.resolve(null),
   ])
+  // The 2026-09-23 brake: a `catch` on this path (per-venue access, catalog access) may have swallowed the
+  // cutoff of one of its reads and answered "no access". A server built from that would list fewer tools than
+  // the caller is entitled to, and tools/list would hand it over as good. Never deliver a partial build.
+  const cut = pendingCancellation()
+  if (cut) throw cut
   registerAllTools(server, scope, { serializedEnabled, whiteLabelEnabled, catalogEnabled: catalogAccess?.canRead === true })
   return server
 }
@@ -192,6 +225,10 @@ async function buildServerForIdentity(staffId: string, activeOrg: string, scopes
  * provider.verifyAccessToken. Phase-0 dev server passes a raw bearer header instead.
  */
 export async function handleMcpRequest(req: Request, res: Response): Promise<void> {
+  // Running work of this request: the MCP guard frees the caller's slot only when it (and every tool it
+  // started) is over — a closed connection does not stop it.
+  const endWork = beginWork()
+  const startedAt = Date.now()
   try {
     let staffId: string
     let activeOrg: string
@@ -209,7 +246,9 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
       activeOrg = payload.org
       scopes = payload.scp
     }
-    const server = await buildServerForIdentity(staffId, activeOrg, scopes)
+    const message = describeMcpMessage(req.body)
+    const isHandshake = message.kind === 'request' && MCP_HANDSHAKE_METHODS.has(message.method ?? '')
+    const server = isHandshake ? await buildHandshakeServer(staffId) : await buildServerForIdentity(staffId, activeOrg, scopes)
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
     res.on('close', () => {
       void transport.close()
@@ -217,6 +256,27 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
     await server.connect(transport)
     await transport.handleRequest(req, res, req.body)
   } catch (err) {
+    // The 2026-09-23 brake cut the request (deadline passed or client gone) while the scope was being
+    // resolved. That is the brake working, not a server failure: warn, and tell the assistant why.
+    if (isRequestCancelledError(err)) {
+      logger.warn('[MCP] petición cancelada', { mcp: true, reason: err.reason })
+      // No tool ran, so its wrapper never wrote the audit row: record each cut tool call here.
+      const summary = describeMcpMessage(req.body)
+      const extra = (req as { auth?: { extra?: Record<string, unknown> } }).auth?.extra
+      for (const message of summary.kind === 'batch' ? (summary.items ?? []) : [summary]) {
+        if (message.kind !== 'request' || message.method !== 'tools/call' || !message.tool) continue
+        recordCancelledToolCall({
+          toolName: message.tool,
+          staffId: typeof extra?.staffId === 'string' ? extra.staffId : null,
+          orgId: typeof extra?.activeOrg === 'string' ? extra.activeOrg : null,
+          venueId: message.venueId ?? null,
+          reason: err.reason,
+          durationMs: Date.now() - startedAt,
+        })
+      }
+      respondMcpCancelled(req, res, err)
+      return
+    }
     // The old bare `catch {}` swallowed EVERY error as a silent 401 — which made connect
     // failures invisible (a bad token and a server-side error looked identical). Log it, and
     // return 401 only for genuine auth failures; everything else (scope resolution, DB,
@@ -225,5 +285,7 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
     const isAuth = /token|unauthorized|audience|expired|jwt|invalid_grant/i.test(message)
     logger.error('[MCP] connect failed', { mcp: true, status: isAuth ? 401 : 500, message })
     if (!res.headersSent) res.status(isAuth ? 401 : 500).json({ error: isAuth ? 'unauthorized' : 'server_error' })
+  } finally {
+    endWork()
   }
 }

@@ -1,4 +1,4 @@
-import { PaymentStatus } from '@prisma/client'
+import { PaymentStatus, StaffRole } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 import express, { NextFunction, Request, Response } from 'express'
 import logger from '../config/logger'
@@ -37,11 +37,14 @@ import * as venueController from '../controllers/tpv/venue.tpv.controller'
 import * as angelpayValidationController from '../controllers/tpv/angelpayValidation.tpv.controller'
 import AppError from '../errors/AppError'
 import { getPromoterCashOut, withdrawAsPromoter } from '../services/dashboard/cash-out/cash-out.promoter.service'
-import { DEFAULT_PERMISSIONS, expandWildcards, resolvePermissions } from '../lib/permissions'
+import { expandWildcards, resolvePermissions } from '../lib/permissions'
+import { resolveStaffVenuePermissions } from '../lib/resolveEffectivePermissions'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import * as kioskCheckInController from '../controllers/kiosk/kioskCheckIn.controller'
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
-import { checkPermission } from '../middlewares/checkPermission.middleware'
+import { checkPermission, resolveUserRoleForVenue } from '../middlewares/checkPermission.middleware'
+import { MASTER_ADMIN_PRINCIPAL_ID } from '../lib/authPrincipals'
+import { NO_INSTRUMENT_PERMISSION } from '../services/tpv/no-instrument-resolution.service'
 import { noInstrumentPinRateLimiter, pinLoginRateLimiter } from '../middlewares/pin-login-rate-limit.middleware'
 import { touchTerminalHeartbeatMiddleware } from '../middlewares/touchTerminalHeartbeat.middleware'
 import { validateVenueAccess } from '../middlewares/validateVenueAccess.middleware'
@@ -2723,12 +2726,10 @@ router.post('/auth/logout', validateRequest(logoutSchema), authController.staffL
  *     description: |
  *       Retrieves the complete list of resolved permissions for the authenticated staff member.
  *
- *       **Permission Resolution:**
- *       1. Fetches base permissions for the staff role from DEFAULT_PERMISSIONS
- *       2. Fetches custom permissions assigned via dashboard (if any)
- *       3. Merges base + custom permissions
- *       4. Resolves implicit permission dependencies
- *       5. Returns deduplicated set of all permissions
+ *       **Permission Resolution:** the EFFECTIVE permissions the server itself enforces
+ *       (`resolveStaffVenuePermissions`): the assigned PermissionSet if any; otherwise the role
+ *       defaults plus what the venue added and minus what it denied, with implicit dependencies
+ *       resolved and wildcards expanded.
  *
  *       **Use Cases:**
  *       - TPV UI: Show/hide features based on permissions
@@ -2771,6 +2772,21 @@ router.post('/auth/logout', validateRequest(logoutSchema), authController.staffL
  *       500:
  *         description: Internal server error
  */
+/**
+ * Codex r9 (P2-6): el rol con el que el servidor autoriza a quien NO es miembro de este negocio, con la MISMA regla que
+ * `checkPermission`: el acceso maestro de la terminal (token de TOTP), un SUPERADMIN acreditado en cualquier `StaffVenue`
+ * (salvo suplantando, igual que el middleware) y el OWNER activo de la organización del negocio. `null` ⇒ 403.
+ */
+async function rolAutorizadoSinMembresia(staffId: string, venueId: string, isImpersonating: boolean): Promise<StaffRole | null> {
+  if (staffId === MASTER_ADMIN_PRINCIPAL_ID) return StaffRole.SUPERADMIN
+  if (!isImpersonating) {
+    const superAdmin = await prisma.staffVenue.findFirst({ where: { staffId, role: StaffRole.SUPERADMIN }, select: { id: true } })
+    if (superAdmin) return StaffRole.SUPERADMIN
+  }
+  const { source } = await resolveUserRoleForVenue({ userId: staffId, targetVenueId: venueId })
+  return source === 'orgOwner' ? StaffRole.OWNER : null
+}
+
 router.get('/auth/permissions', authenticateTokenMiddleware, async (req: Request, res: Response) => {
   try {
     // Get authenticated user from authContext (set by authenticateTokenMiddleware)
@@ -2782,43 +2798,69 @@ router.get('/auth/permissions', authenticateTokenMiddleware, async (req: Request
       })
     }
 
-    const { venueId, role } = authContext
+    const { venueId } = authContext
     const staffId = authContext.userId
 
-    // Check if staff has a permission set assigned
+    // 🔴 Codex r8 (P2-5, 22-sep): la identidad sale de `StaffVenue`, NO del token. El token no se entera de los cambios: un
+    // OWNER bajado a CASHIER seguía descargando —con éxito— la lista de OWNER, y la terminal la usa SIN RED para el respaldo
+    // de «no se presentó tarjeta», mientras la declaración en el servidor (`miembroDelVenue`) ya lo rechazaba con su rol
+    // vigente. Misma membresía que aquélla: activo en el negocio y activo en Avoqado.
     const staffVenue = await prisma.staffVenue.findUnique({
       where: {
         staffId_venueId: { staffId, venueId },
       },
       select: {
+        role: true,
+        active: true,
         permissionSetId: true,
         permissionSet: true,
+        staff: { select: { active: true } },
       },
     })
 
+    if (!staffVenue) {
+      // 🔴 Codex r9 (P2-6, 23-sep): sin membresía en el negocio, el servidor SÍ autoriza a tres identidades (`checkPermission`):
+      // el acceso maestro de la terminal, un SUPERADMIN acreditado en cualquier `StaffVenue` y el OWNER activo de la organización.
+      // El 403 de la ronda 8 les quitaba Ajustes y el modo kiosco local. Reciben la lista de su rol MENOS la declaración «no se
+      // presentó tarjeta»: ésa el servidor la exige de un MIEMBRO (`miembroDelVenue`), y sin red la terminal decide con esta lista.
+      const rolSinMembresia = await rolAutorizadoSinMembresia(staffId, venueId, authContext.isImpersonating === true)
+      if (!rolSinMembresia) {
+        return res.status(403).json({
+          success: false,
+          error: 'No access to this venue',
+        })
+      }
+      const customPermsSinMembresia = await rolePermissionService.getRolePermissions(venueId, rolSinMembresia)
+      const permissionsSinMembresia = expandWildcards(resolveStaffVenuePermissions({ role: rolSinMembresia }, customPermsSinMembresia)).filter(
+        p => p !== NO_INSTRUMENT_PERMISSION,
+      )
+      logger.info(`[TPV] Permissions fetched for ${staffId} WITHOUT venue membership (${rolSinMembresia}): ${permissionsSinMembresia.length}`)
+      return res.json({
+        success: true,
+        data: { staffId, venueId, role: rolSinMembresia, permissions: permissionsSinMembresia },
+      })
+    }
+    const role = staffVenue.role
+
     let expandedPermissions: string[]
 
-    if (staffVenue?.permissionSetId && staffVenue?.permissionSet) {
+    if (!staffVenue.active || !staffVenue.staff?.active) {
+      // Dado de baja: la lista VACÍA es la respuesta, y es autoritativa. Un error aquí haría que la terminal siguiera
+      // usando la lista vieja de esa misma persona (su respaldo sin red cae a lo guardado).
+      expandedPermissions = []
+    } else if (staffVenue.permissionSetId && staffVenue.permissionSet) {
       // Permission set assigned: use its permissions directly
       const resolvedPermissionsSet = resolvePermissions(staffVenue.permissionSet.permissions)
       expandedPermissions = expandWildcards(Array.from(resolvedPermissionsSet))
     } else {
-      // No permission set: use role-based resolution
-      // 1. Get base permissions for this role
-      const basePermissions = DEFAULT_PERMISSIONS[role as keyof typeof DEFAULT_PERMISSIONS] || []
-
-      // 2. Get custom permissions (if any) from VenueRolePermission table
+      // Sin Conjunto: los permisos del ROL con lo que el local AGREGÓ y lo que QUITÓ (`deniedPermissions`), por la regla
+      // canónica `resolveStaffVenuePermissions` — la MISMA con la que el servidor autoriza.
+      // 🔴 Codex r7 (P2-1, 22-sep): esta ruta tenía su propia copia de la regla, que SUMABA base + agregados sin restar lo
+      // quitado ni aplicar el reemplazo de los roles con comodín. La terminal mostraba botones que el servidor rechazaba,
+      // y el respaldo SIN RED de «no se presentó tarjeta» —que no pasa por el servidor— depende de esta lista para decidir
+      // quién puede declarar: un permiso negado en el dashboard tenía que seguir negado sin conexión.
       const customPerms = await rolePermissionService.getRolePermissions(venueId, role)
-
-      // 3. Merge base + custom permissions
-      const allPermissions = customPerms ? [...basePermissions, ...customPerms.permissions] : basePermissions
-
-      // 4. Resolve implicit dependencies
-      const resolvedPermissionsSet = resolvePermissions(allPermissions)
-      const resolvedPermissions = Array.from(resolvedPermissionsSet)
-
-      // 5. Expand wildcards to individual permissions (for TPV client)
-      expandedPermissions = expandWildcards(resolvedPermissions)
+      expandedPermissions = expandWildcards(resolveStaffVenuePermissions({ role }, customPerms))
     }
 
     logger.info(`[TPV] Permissions fetched for staff ${staffId} (${role}): ${expandedPermissions.length} permissions`)
@@ -3479,7 +3521,17 @@ router.get(
  *           type: string
  *     responses:
  *       200:
- *         description: "{ success, attemptId, requestId, attempt: { outcome, paymentId, paymentStatus, recordedVia, amountCents, tipCents, isWinner, winnerPaymentId, processorEvidence, processorEvidenceAt, linkedAt }, request: { …estado de la solicitud, closedVia, winnerAttemptId } }"
+ *         description: >
+ *           "{ success, attemptId, requestId, attempt: { outcome, paymentId, paymentStatus, recordedVia, amountCents,
+ *           tipCents, isWinner, winnerPaymentId, processorEvidence, processorEvidenceAt, paymentContradiction,
+ *           evidenceContradiction, unattributedEvidence, resolution, linkedAt }, request: { …estado de la solicitud,
+ *           closedVia, winnerAttemptId } }".
+ *           🔴 En un cobro LOCAL (Pago rápido, iniciado EN la terminal, sin solicitud del POS) `requestId`, `request` y
+ *           `linkedAt` son **null** — no hay solicitud que proyectar — y la declaración del cajero viaja en
+ *           `attempt.resolution` en lugar de en `request.outcome`. `attempt.unattributedEvidence` avisa de evidencia del
+ *           procesador que el servidor no pudo atribuir a nadie: mientras esté en true, NINGUNA declaración sirve para
+ *           liberar la venta, igual que `paymentContradiction` y `evidenceContradiction`. Ningún dato del pago o del
+ *           negocio ajeno se publica: sólo que existe algo que contradice.
  *       403:
  *         description: El token no lleva identidad de terminal (TERMINAL_IDENTITY_REQUIRED) o el venue no es el del token
  *       404:
@@ -3492,6 +3544,49 @@ router.get(
   authenticateTokenMiddleware,
   validateVenueAccess,
   terminalPaymentTpvController.getAttemptStatus,
+)
+
+/**
+ * @openapi
+ * /api/v1/tpv/venues/{venueId}/terminal-payment/requests/{requestId}:
+ *   get:
+ *     tags: [TPV - Terminal Payment]
+ *     summary: Estado de UNA solicitud de cobro, para la terminal dueña (pieza D)
+ *     description: >
+ *       La hermana de la consulta por intento, pero por SOLICITUD. Existe porque una fila de la bandeja de la
+ *       terminal puede quedar sin intento correlacionado: entonces nada la alcanza —toda la recuperación pregunta
+ *       por intento— y el aviso de «cobro sin confirmar» se queda para siempre, aunque el servidor ya lo haya
+ *       resuelto. Sólo lectura, con la misma pertenencia que la consulta por intento: venue del token y terminal
+ *       del JWT. Devuelve `{ success, requestId, request: {…la proyección de siempre…, closedVia}, resuelta }`.
+ *       🔴 `resuelta` dice que el servidor ya NO cuenta esa solicitud como desenlace pendiente — se calcula con el
+ *       MISMO predicado que retiene la ranura. NUNCA acredita por sí sola ausencia de cobro: eso lo dicen `outcome`
+ *       y `outcomeEvidence`.
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: requestId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: "{ success, requestId, request: { …, closedVia }, resuelta }"
+ *       403:
+ *         description: El token no lleva identidad de terminal (TERMINAL_IDENTITY_REQUIRED) o el venue no es el del token
+ *       404:
+ *         description: "{ status: REQUEST_NOT_FOUND } — no es de esta terminal. No acredita nada sobre el cobro"
+ *       401:
+ *         description: Unauthorized
+ */
+router.get(
+  '/venues/:venueId/terminal-payment/requests/:requestId',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  terminalPaymentTpvController.getRequestStatus,
 )
 
 /**
@@ -3534,17 +3629,33 @@ router.get(
  *         application/json:
  *           schema:
  *             type: object
- *             required: [requestId, resolutionId, statement, statementVersion]
+ *             required: [resolutionId, statement, statementVersion]
  *             properties:
  *               requestId:
  *                 type: string
+ *                 description: >
+ *                   La solicitud del POS. OPCIONAL desde el 22-sep («ninguna terminal muerta»): un Pago rápido —cobro
+ *                   iniciado EN la terminal— no tiene solicitud, y exigirla dejaba al cajero sin salida con el aparato
+ *                   apartado. Omitirla NO elige el camino: si el intento tiene vínculo, el servidor aplica igualmente
+ *                   las guardas de su solicitud, y un valor que contradiga al vínculo es un 404.
  *               resolutionId:
  *                 type: string
  *                 format: uuid
  *                 description: Lo genera la terminal UNA vez por declaración; el replay con el mismo id es idempotente
  *               statement:
  *                 type: string
- *                 enum: [NO_INSTRUMENT_PRESENTED]
+ *                 enum: [NO_INSTRUMENT_PRESENTED, NO_BANK_TRACE_AFTER_WINDOW]
+ *                 description: >
+ *                   `NO_BANK_TRACE_AFTER_WINDOW` (ronda 20, 23-sep) = la TERMINAL, no una persona: esperó el aviso del banco
+ *                   y no llegó. Sólo en un Pago rápido (sin solicitud del POS), sin `supervisorPin`, sin pedir permiso de
+ *                   declarar, y sólo donde el aviso del banco del comercio de ESE cobro (`merchantAccountId`) está
+ *                   comprobado: cada uno de sus últimos 10 cobros con tarjeta trajo su aviso. Mismo veto de dinero; la
+ *                   sesión tiene que ser miembro activo del negocio.
+ *               merchantAccountId:
+ *                 type: string
+ *                 description: >
+ *                   Ronda 21. Obligatorio con `NO_BANK_TRACE_AFTER_WINDOW`: el comercio con el que se hizo ese cobro. Tiene
+ *                   que ser AngelPay y del negocio; si no, 409 ATTEMPT_NOT_ELIGIBLE.
  *               statementVersion:
  *                 type: integer
  *                 enum: [1]
@@ -3553,13 +3664,13 @@ router.get(
  *                 description: Sólo cuando la sesión NO tiene el permiso — el PIN de alguien que sí lo tiene. Nunca se guarda
  *     responses:
  *       200:
- *         description: "{ success, …la respuesta del GET del intento (S6), resolution: { id, acceptedAt, by: SESSION | SUPERVISOR_PIN } }"
+ *         description: "{ success, …la respuesta del GET del intento (S6), resolution: { id, acceptedAt, by: SESSION | SUPERVISOR_PIN | AUTOMATIC } }"
  *       403:
  *         description: "{ success: false, code: TERMINAL_IDENTITY_REQUIRED | SUPERVISOR_AUTHORIZATION_REQUIRED | SESSION_NOT_IN_VENUE }"
  *       404:
  *         description: "{ success: false, code: ATTEMPT_NOT_FOUND } — intento desconocido, de otra terminal o de otro venue"
  *       409:
- *         description: "{ success: false, code: ATTEMPT_NOT_ELIGIBLE | POSITIVE_EVIDENCE_EXISTS | RESOLUTION_CONFLICT | OTHER_ATTEMPT_UNRESOLVED }"
+ *         description: "{ success: false, code: ATTEMPT_NOT_ELIGIBLE | POSITIVE_EVIDENCE_EXISTS | RESOLUTION_CONFLICT | OTHER_ATTEMPT_UNRESOLVED | WEBHOOK_NOT_CONFIRMED }"
  *       429:
  *         description: Demasiados intentos de autorización — sólo cuenta las llamadas CON supervisorPin (mismos topes que el PIN de gerente)
  *       503:

@@ -160,6 +160,9 @@ const prismaMock: any = {
   terminalPaymentRequest: createMockModel(),
   // S1 (checkpoint 1 del webhook, 13-sep): vínculo intento → solicitud; lo consulta el webhook y el arbitraje.
   terminalPaymentAttemptLink: createMockModel(),
+  // «Ninguna terminal muerta» (22-sep): sin esta entrada, la consulta S6 de un cobro LOCAL ejecuta `.findFirst` sobre
+  // `undefined` y el controlador convierte ese TypeError en un 500 (Codex P2-7).
+  terminalAttemptResolution: createMockModel(),
   providerEventLog: createMockModel(),
   paymentAllocation: createMockModel(),
   posCommand: createMockModel(),
@@ -182,6 +185,7 @@ const prismaMock: any = {
   // Stripe-related models
   feature: createMockModel(),
   venueFeature: createMockModel(),
+  billingObligationConflict: createMockModel(),
   webhookEvent: createMockModel(),
   // Platform billing CFDI (Avoqado factura a sus propios clientes)
   platformEmisor: createMockModel(),

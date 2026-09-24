@@ -6,8 +6,10 @@
 
     · sin token → 401; un token SIN identidad de terminal (dashboard/POS) → 403: la consulta es de la TERMINAL, no del rol;
     · el venue de la URL tiene que ser el del token (403);
-    · un intento que el servidor no conoce, o que no es de esta terminal, es 404 con `outcome: NO_EVIDENCE`, y el cuerpo
-      NUNCA dice «no cobrado» — es la misma regla que el GET 404 del POS: sin evidencia no hay veredicto;
+    · un intento de OTRA terminal (vínculo ajeno) sigue siendo 404 con `outcome: NO_EVIDENCE`: el aislamiento no cambia;
+    · un intento que el servidor NO conoce es 200 con `NOT_RECORDED`/`NONE` y `request: null` (22-sep, «ninguna terminal
+      muerta»): un Pago rápido no puede tener vínculo, y el 404 lo dejaba sin veredicto ni ventana con el aparato apartado.
+      En los dos casos el cuerpo NUNCA dice «no cobrado» — sin evidencia no hay veredicto, y eso es lo que se conserva;
     · con la terminal dueña, 200 con el intento y la solicitud por separado.
 */
 
@@ -104,12 +106,22 @@ describe('GET /tpv/venues/:venueId/terminal-payment/attempts/:attemptId', () => 
     expect(prismaMock.terminalPaymentAttemptLink.findUnique).not.toHaveBeenCalled()
   })
 
-  it('404 NO_EVIDENCE para un intento que el servidor no conoce — y el cuerpo nunca dice «no cobrado»', async () => {
+  it('200 NOT_RECORDED para un intento que el servidor no conoce — y el cuerpo SIGUE sin decir «no cobrado»', async () => {
+    // Cambió el VEHÍCULO, no la garantía (22-sep, «ninguna terminal muerta»): un **Pago rápido** no puede tener vínculo
+    // —`TerminalPaymentAttemptLink.requestId` es obligatorio con FK—, así que el 404 dejaba a la terminal sin veredicto,
+    // sin ventana y sin botón, con el aparato entero apartado. Ahora se contesta con lo que consta: nada.
+    // 🔴 Lo que NO puede cambiar y esta prueba fija: esto no es una negación del cargo. Sin `request` no hay liberación
+    // posible en el cliente (`LiberacionDelServidor` exige `request.outcome === 'NOT_CHARGED'` + evidencia permitida).
     const res = await request(app)
       .get(RUTA)
       .set('Authorization', `Bearer ${token({ terminalSerialNumber: serial })}`)
-    expect(res.status).toBe(404)
-    expect(res.body).toMatchObject({ success: false, status: 'ATTEMPT_NOT_FOUND', outcome: 'NO_EVIDENCE' })
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({
+      success: true,
+      requestId: null,
+      request: null,
+      attempt: { outcome: 'NOT_RECORDED', processorEvidence: 'NONE', paymentId: null },
+    })
     expect(JSON.stringify(res.body)).not.toContain('NOT_CHARGED')
   })
 

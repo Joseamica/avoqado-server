@@ -50,7 +50,7 @@ export function registerTenderTypeTools(server: McpServer, scope: McpScope): voi
 
   server.tool(
     'tender_commissions',
-    "Report how much commission the business PAID per tender type over a date range — answers \"how much did Uber Eats charge me this month?\". Returns, per tender: number of charges, gross sales (tip excluded), commission paid, and net kept. Amounts are in PESOS (major units). The commission is the amount FROZEN on each charge at the time it was taken, never recalculated with today's percentage — so changing a tender's commission does not rewrite last month's cost. Counts every completed charge that is not a refund — INCLUDING the counter quick-sale (FAST), which is where these tender types are used most; refunds are excluded because they do not carry a commission today. Dates are VENUE-LOCAL (YYYY-MM-DD); omit them for the last 30 days. Read-only — requires tender-types:read.",
+    "Report how much commission the business PAID per tender type over a date range — answers \"how much did Uber Eats charge me this month?\". Returns, per tender: number of charges, gross sales (tip excluded), commission paid, and net kept. Amounts are in PESOS (major units). The commission is the amount FROZEN on each charge at the time it was taken, never recalculated with today's percentage — so changing a tender's commission does not rewrite last month's cost. Counts every completed charge that is not a refund — INCLUDING the counter quick-sale (FAST), which is where these tender types are used most. Manual refunds are excluded because they do not carry a commission; the delivery platform's own compensation for an item it removed IS included, with a negative sign on sales and commission (the platform returned its share). The charge count counts charges only, never compensations. Dates are VENUE-LOCAL (YYYY-MM-DD); omit them for the last 30 days. Read-only — requires tender-types:read.",
     {
       venueId: z.string().describe('Venue to inspect (must be in your scope)'),
       from: z.string().optional().describe('Start date YYYY-MM-DD, venue-local. Omit for the last 30 days.'),
@@ -72,7 +72,7 @@ export function registerTenderTypeTools(server: McpServer, scope: McpScope): voi
           neto: r.net,
         })),
         totales: { ventaBruta: report.totalGross, comisionPagada: report.totalCommission, neto: report.totalNet },
-        nota: 'Montos en PESOS. La comisión es la CONGELADA en cada cobro, no un recálculo con el porcentaje actual. No incluye reembolsos.',
+        nota: 'Montos en PESOS. La comisión es la CONGELADA en cada cobro, no un recálculo con el porcentaje actual. No incluye reembolsos manuales; la compensación de la plataforma de reparto por un artículo que retiró sí se incluye, restando venta y comisión. «cobros» cuenta sólo cobros.',
       })
     },
   )

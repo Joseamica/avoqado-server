@@ -492,9 +492,13 @@ describe('ingestDeliveryOrder', () => {
 
     it('aplica el vale DESPUÉS del commit, no dentro de la transacción', async () => {
       let aplicadoDentroDeLaTx = false
+      // Sólo la PRIMERA transacción es la de la venta; la segunda es el candado de la comanda
+      // (Tarea 12), que corre después del commit y del vale.
+      let llamadas = 0
       ;(prisma.$transaction as jest.Mock).mockImplementation(async (fn: any) => {
+        const esLaVenta = llamadas++ === 0
         const r = await fn(prisma)
-        aplicadoDentroDeLaTx = applySalePostingMock.mock.calls.length > 0
+        if (esLaVenta) aplicadoDentroDeLaTx = applySalePostingMock.mock.calls.length > 0
         return r
       })
 

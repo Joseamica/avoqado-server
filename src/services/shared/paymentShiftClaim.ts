@@ -282,6 +282,12 @@ interface ClaimRefundShiftInput {
   tipRefundPesos: Prisma.Decimal
   /** Fuerza no atribuir cuando el total previo no puede clasificarse con seguridad entre venta/propina. */
   forcePendingReason?: 'UNCLASSIFIED_REFUND_COMPONENT_HISTORY'
+  /**
+   * El reembolso HEREDA el turno del cobro original y no toca ningún turno (ajuste de reparto,
+   * spec KDS Uber §3.1): la venta nació fuera del corte, y descontarla del turno vivo le restaría
+   * al cajero de hoy dinero que nunca pasó por su caja. Sin lectura ni CAS ni pendiente.
+   */
+  inherit?: { shiftId: string | null }
 }
 
 /**
@@ -292,6 +298,13 @@ interface ClaimRefundShiftInput {
  * decremento ocurre en ese mismo CAS y nunca reescribe un turno firmado.
  */
 export async function claimShiftForRefund(tx: PaymentShiftTransaction, input: ClaimRefundShiftInput): Promise<CapturedPaymentShiftClaim> {
+  if (input.inherit) {
+    // El turno HEREDADO sale de la fila del cobro original, leída bajo candado por `writeRefundInTx`
+    // — nunca del cuerpo de la petición (la guarda «nadie toma el turno del input del cliente»).
+    const delCobroOriginal = input.inherit
+    return { shiftId: delCobroOriginal.shiftId, candidateShiftId: null, observedStatus: null, pendingReason: null }
+  }
+
   // Mismo predicado que el cobro: el turno VIVO (OPEN o CLOSING, `endTime` nulo). CLOSING sigue
   // entrando a propósito para poder explicar por qué el dinero quedó fuera del corte; CLOSED no.
   const candidate = await tx.shift.findFirst({

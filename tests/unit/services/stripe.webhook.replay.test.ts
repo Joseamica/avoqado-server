@@ -46,6 +46,9 @@ jest.mock('@/services/stripe.service', () => ({
   estadoDeLaSuscripcion: jest.fn().mockResolvedValue('active'),
   // 8ª auditoría: el handler lee la suscripción VIGENTE (status + trial_end). Este mock DELEGA en
   // `estadoDeLaSuscripcion`, así que un test que fije el estado controla los dos sin tocar nada más.
+  // V5-A paso 6: la fila de plan sigue su camino sólo si la suscripción vende ese plan (por defecto, sí).
+  suscripcionVendeElPlan: jest.fn().mockResolvedValue(true),
+  entregarSuscripcionDePlan: jest.fn().mockResolvedValue(null),
   suscripcionVigente: jest.fn(async function (this: unknown, id: string) {
     const m = jest.requireMock('@/services/stripe.service') as { estadoDeLaSuscripcion: jest.Mock }
     return { status: await m.estadoDeLaSuscripcion(id), trialEnd: null }

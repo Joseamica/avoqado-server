@@ -55,15 +55,23 @@
  * report needs one revenue number.
  */
 
-/** Units actually sold on a line: kilos when sold by weight, else quantity. */
-export const lineUnitsSql = (alias = 'oi'): string => `COALESCE(${alias}."weightQuantity", ${alias}."quantity")`
+/**
+ * A line the delivery provider REMOVED (`removedAt`, spec KDS Uber [N-3]) is kept for audit with its
+ * original quantity and price, but it sold nothing: every per-line figure below is 0 for it.
+ */
+const aliveSql = (alias: string, expr: string): string => `(CASE WHEN ${alias}."removedAt" IS NULL THEN ${expr} ELSE 0 END)`
+
+const rawUnitsSql = (alias: string): string => `COALESCE(${alias}."weightQuantity", ${alias}."quantity")`
+
+/** Units actually sold on a line: kilos when sold by weight, else quantity (0 once removed). */
+export const lineUnitsSql = (alias = 'oi'): string => aliveSql(alias, rawUnitsSql(alias))
 
 /**
  * The line WITHOUT its modifiers: price × units sold, net of the line discount.
  * Exists only for `isItemLevelDiscountSql`, which compares against
  * `OrderItem.total` — a column that excludes the modifiers on most rows.
  */
-export const lineBaseSql = (alias = 'oi'): string => `(${alias}."unitPrice" * ${lineUnitsSql(alias)} - ${alias}."discountAmount")`
+export const lineBaseSql = (alias = 'oi'): string => `(${alias}."unitPrice" * ${rawUnitsSql(alias)} - ${alias}."discountAmount")`
 
 /**
  * Σ of the line's modifiers. They live in their own table, so this is a
@@ -72,13 +80,15 @@ export const lineBaseSql = (alias = 'oi'): string => `(${alias}."unitPrice" * ${
 export const lineModifiersSql = (alias = 'oi'): string =>
   `COALESCE((SELECT SUM(m."price" * m."quantity") FROM "OrderItemModifier" m WHERE m."orderItemId" = ${alias}."id"), 0)`
 
+const rawGrossSql = (alias: string): string => `${alias}."unitPrice" * ${rawUnitsSql(alias)} + ${lineModifiersSql(alias)}`
+
 /**
  * LIST value of what the line sold, BEFORE its discount: price × units, plus the
  * modifiers the customer added. This is the "gross sales" figure a report shows
  * next to a separate discounts column, so that `net = gross − discounts` holds
  * exactly. Modifiers belong on BOTH sides or that identity breaks.
  */
-export const lineGrossSql = (alias = 'oi'): string => `(${alias}."unitPrice" * ${lineUnitsSql(alias)} + ${lineModifiersSql(alias)})`
+export const lineGrossSql = (alias = 'oi'): string => aliveSql(alias, rawGrossSql(alias))
 
 /**
  * SQL expression for what a line earned. Safe inside `SUM(...)` — every term is
@@ -86,7 +96,7 @@ export const lineGrossSql = (alias = 'oi'): string => `(${alias}."unitPrice" * $
  *
  * @param alias - the `OrderItem` alias in the query (every call site uses `oi`).
  */
-export const lineRevenueSql = (alias = 'oi'): string => `(${lineGrossSql(alias)} - ${alias}."discountAmount")`
+export const lineRevenueSql = (alias = 'oi'): string => aliveSql(alias, `${rawGrossSql(alias)} - ${alias}."discountAmount"`)
 
 /**
  * SQL twin of `isItemLevelDiscount`: true when the line total is already net of
@@ -126,6 +136,9 @@ export function lineGross(item: LineLike): number {
 
 /**
  * What a line earned, modifiers included.
+ *
+ * Unlike the SQL twin it does not look at `removedAt`: its only caller is the shift report, and a
+ * delivery order (the only kind whose lines get removed) never belongs to a shift.
  *
  * 🔴 The caller MUST have loaded `modifiers` (and `weightQuantity`) in its
  * Prisma select, or the modifier revenue silently disappears again. An absent

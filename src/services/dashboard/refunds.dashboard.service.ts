@@ -26,7 +26,13 @@ export interface RefundsReportFilters {
   endDate: string
 }
 
-export type RefundReason = 'RETURNED_GOODS' | 'ACCIDENTAL_CHARGE' | 'CANCELLED_ORDER' | 'FRAUDULENT_CHARGE' | 'OTHER'
+export type RefundReason =
+  | 'RETURNED_GOODS'
+  | 'ACCIDENTAL_CHARGE'
+  | 'CANCELLED_ORDER'
+  | 'FRAUDULENT_CHARGE'
+  | 'OTHER'
+  | 'DELIVERY_ITEM_REMOVED'
 
 export interface RefundRecord {
   id: string
