@@ -588,6 +588,7 @@ export async function reconcileUncharged(
 function textoSeguro(valor: string | null | undefined, tope: number): string {
   if (typeof valor !== 'string') return ''
   // Sin caracteres de control (el NUL incluido: Postgres lo rechaza dentro de jsonb).
+  // eslint-disable-next-line no-control-regex -- a propósito: este regex EXISTE para quitar los caracteres de control
   const limpio = valor.replace(/[\u0000-\u001f\u007f]/g, ' ').trim()
   // 🔴 Cortar por CODE POINTS, no por unidades UTF-16 (P2 de Codex, 2ª pasada, reproducido el 21-sep):
   // `.slice()` parte un par sustituto y deja un `\ud83d` suelto. Postgres exige pares válidos dentro de

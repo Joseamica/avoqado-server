@@ -391,7 +391,9 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
       // Revisión final (17-sep, B): y CUATRO con la RE-RETENCIÓN de una solicitud liberada cuando el banco aprobó después
       // (`retenerSolicitudLiberadaPorAprobacion`: el mismo orden que la ventana). Ronda 2 (P1): la re-retención por un cobro
       // SIN LIGAR usa esa MISMA transacción (el núcleo `reRetenerSolicitudLiberada`), así que siguen siendo CUATRO.
-      'services/terminal-payment.service.ts': 4,
+      // Conciliación operable (Codex 5P1, 21-sep): y CINCO con `entregarBajoCandado` — la EMISIÓN de la solicitud a la
+      // terminal va bajo el mismo `candadoDeSolicitud` que toma la declaración del cajero (marca durable antes, emit dentro).
+      'services/terminal-payment.service.ts': 5,
       // Codex R14-1: el INGRESO del evento también es una transacción del protocolo (candado del intento → createdAt
       // monótono → INSERT), así que son TRES en el webhook: ingreso, publicación del vínculo y escritor por identidad débil.
       // Codex R15-1: y CUATRO con la recuperación de los ingresos sin candado desde S4 (`ordenarIngresosSinCandado`, transacción
