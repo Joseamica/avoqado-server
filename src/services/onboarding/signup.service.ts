@@ -10,7 +10,7 @@ import crypto from 'crypto'
 import prisma from '@/utils/prismaClient'
 import { claimLaunchCampaign } from '../launchCampaigns/launchCampaignClaim.service'
 import { findClaimableByCodeOrSlug } from '../launchCampaigns/launchCampaign.service'
-import { isAcceptedLegalVersion } from '../../config/legal'
+import { crearNegocioNuevo, resolverAtribucionDelAlta } from './nuevoNegocio'
 import { BadRequestError } from '@/errors/AppError'
 import * as jwtService from '@/jwt.service'
 import { StaffRole, OrgRole } from '@prisma/client'
@@ -113,72 +113,26 @@ export async function signupUser(input: SignupInput): Promise<SignupResult> {
 
   // 🔴 La campaña se resuelve FUERA de la transacción, igual que en el alta por la landing: es
   // una lectura de red que no puede alargar la transacción del alta. Si falla, el alta sigue.
-  const campanaReclamada = launchCampaignCode ? await findClaimableByCodeOrSlug(launchCampaignCode).catch(() => null) : null
-  const utmParaProgreso = utm && Object.keys(utm).length > 0 ? utm : undefined
   // 🔴 Una versión legal DESCONOCIDA se ignora en silencio: el asistente vuelve a pedir la
   // casilla. Guardarla dejaría un consentimiento firmado contra un texto que nadie puede
   // identificar, que es peor que no tenerlo.
-  const consintio = isAcceptedLegalVersion(legalVersion)
+  const atribucion = await resolverAtribucionDelAlta({ legalVersion, launchCampaignCode, utm })
 
-  // 4. Create organization and staff in a transaction
-  const result = await prisma.$transaction(async tx => {
-    // Create organization
-    const organization = await tx.organization.create({
-      data: {
-        name: organizationName || 'Nuevo Negocio',
-        email: email.toLowerCase(), // Use user's email as organization email
-        phone: '', // Placeholder, will be updated in onboarding Step 3
-      },
-    })
-
-    // Create staff member as OWNER of the organization
-    const staff = await tx.staff.create({
-      data: {
-        email: email.toLowerCase(),
-        password: hashedPassword,
-        firstName,
-        lastName,
-        active: true,
-        emailVerified: false,
-        lastLoginAt: new Date(),
-      },
-    })
-
-    // Create StaffOrganization junction table entry (multi-org support)
-    await tx.staffOrganization.create({
-      data: {
-        staffId: staff.id,
-        organizationId: organization.id,
-        role: OrgRole.OWNER,
-        isPrimary: true,
-        isActive: true,
-      },
-    })
-
-    // Create OnboardingProgress (V2 wizard sets wizardVersion: 2)
-    await tx.onboardingProgress.create({
-      data: {
-        organizationId: organization.id,
-        currentStep: 0,
-        completedSteps: [],
-        ...(wizardVersion ? { wizardVersion } : {}),
-        // Atribución y consentimiento, en la MISMA transacción que el alta (spec § 3.5).
-        acquisitionSource: 'dashboard_signup',
-        ...(utmParaProgreso ? { acquisitionUtm: utmParaProgreso } : {}),
-        ...(campanaReclamada ? { launchCampaignId: campanaReclamada.id, launchCampaignClaimedAt: new Date() } : {}),
-        ...(consintio
-          ? {
-              termsAcceptedAt: new Date(),
-              privacyAcceptedAt: new Date(),
-              termsVersion: legalVersion,
-              termsIpAddress: ipAddress ?? null,
-            }
-          : {}),
-      },
-    })
-
-    return { organization, staff }
-  })
+  // 4. Create organization and staff in a transaction — la MISMA función que el alta con Google.
+  const result = await prisma.$transaction(tx =>
+    crearNegocioNuevo(tx, {
+      email,
+      hashedPassword,
+      firstName,
+      lastName,
+      organizationName,
+      emailVerified: false,
+      wizardVersion,
+      acquisitionSource: 'dashboard_signup',
+      atribucion,
+      ipAddress,
+    }),
+  )
 
   // 5. Generate 6-digit cryptographically secure verification code and send email
   const verificationCode = crypto.randomInt(100000, 999999).toString()

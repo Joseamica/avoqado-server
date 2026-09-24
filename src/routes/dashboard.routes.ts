@@ -878,6 +878,16 @@ router.get('/auth/google/url', googleOAuthController.getGoogleAuthUrl)
  *               token:
  *                 type: string
  *                 description: Google ID token (alternative to code)
+ *               signup:
+ *                 type: object
+ *                 description: >
+ *                   Sólo desde /signup («Continuar con Google»). Con este sobre, un correo sin
+ *                   cuenta ni invitación CREA un negocio nuevo (organización + dueño) con la
+ *                   campaña del anuncio, los UTM y el consentimiento. Sin él, ese correo recibe 403.
+ *                 properties:
+ *                   legalVersion: { type: string, maxLength: 40 }
+ *                   launchCampaignCode: { type: string, description: Código o slug de la campaña }
+ *                   utm: { type: object, additionalProperties: { type: string } }
  *     responses:
  *       200:
  *         description: Successfully authenticated with Google

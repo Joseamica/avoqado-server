@@ -11,6 +11,14 @@ import { getPrimaryOrganizationId } from '../staffOrganization.service'
 import { assertCanAddSeatsBulk } from '../access/seatCap.service'
 import { logAction } from './activity-log.service'
 import { createSession } from '@/services/auth/session.service'
+import { crearNegocioNuevo, resolverAtribucionDelAlta, type AtribucionDelAlta } from '../onboarding/nuevoNegocio'
+
+/**
+ * El sobre que SÓLO manda la pantalla de alta (`/signup` → «Continuar con Google»). Es lo que
+ * distingue «quiero crear mi negocio» de «quiero entrar»: sin él, un correo desconocido sigue
+ * recibiendo el 403 de siempre.
+ */
+export type GoogleSignupIntent = AtribucionDelAlta & { ipAddress?: string | null }
 
 // Validate Google OAuth configuration
 if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET || !process.env.FRONTEND_URL) {
@@ -106,6 +114,7 @@ async function getGoogleUserFromCode(code: string): Promise<GoogleUserInfo> {
 export async function loginWithGoogle(
   codeOrToken: string,
   isCode: boolean = true,
+  signup?: GoogleSignupIntent,
 ): Promise<{
   accessToken: string
   refreshToken: string
@@ -188,151 +197,196 @@ export async function loginWithGoogle(
       },
     })
 
-    if (!invitation) {
-      throw new ForbiddenError('No invitation found for this email. Please contact your administrator to get invited.')
-    }
-
-    if (!invitation.venue) {
-      throw new ForbiddenError('Invitation is missing venue information. Please contact your administrator.')
-    }
-
-    // Validate invitation data consistency
-    if (invitation.venue.organizationId !== invitation.organizationId) {
-      throw new ForbiddenError('Invitation data inconsistency: venue organization mismatch. Please contact your administrator.')
-    }
-
-    const primaryVenueId = invitation.venueId || invitation.venue.id
-
-    // 🔴 A PIN cannot be captured during an OAuth redirect. When the inviter required one we still
-    // create the account (so the person can get in at all) but leave the invitation PENDING — the
-    // `venues.length === 0` branch below returns it as a pending invitation and the frontend routes
-    // them to /invite/:token, which collects the PIN. Auto-accepting here would silently drop the
-    // PIN requirement and leave them unable to log into the TPV.
-    const canAutoAccept = !invitation.requirePin
-
-    // Parity with invitation.service.ts: an OWNER invitation carrying `inviteToAllVenues` grants
-    // EVERY venue in the org, not just the invitation's own venue.
-    const permissions = invitation.permissions as { inviteToAllVenues?: boolean } | null
-    let venueIdsToAssign: string[] = [primaryVenueId]
-    if (canAutoAccept && permissions?.inviteToAllVenues === true) {
-      const orgVenues = await prisma.venue.findMany({
-        where: { organizationId: invitation.organizationId },
-        select: { id: true },
-      })
-      venueIdsToAssign = orgVenues.map(v => v.id)
-    }
-
-    // Free-tier seat cap: every venue here gets a BRAND-NEW seat. Checked BEFORE the transaction
-    // because seatCap.service runs on the global client. Cap usage counts pending invitations and
-    // this very invite is still PENDING, so exclude it for its own venue (off-by-one).
-    if (canAutoAccept) {
-      await assertCanAddSeatsBulk(venueIdsToAssign, { primaryVenueId, excludeInvitationId: invitation.id })
-    }
-
-    // Parity with invitation.service.ts: an OWNER invitation must become an OWNER at the
-    // ORGANIZATION level too. Hardcoding MEMBER here left every Google-signup owner unable to
-    // administer their own org.
-    const orgRole = invitation.role === StaffRole.OWNER ? OrgRole.OWNER : OrgRole.MEMBER
-
-    // One transaction: a half-applied signup leaves an orphan Staff row that owns the (globally
-    // unique) email but has no org and no venue — the person can then never be invited again.
-    const createdStaffId = await prisma.$transaction(async tx => {
-      const created = await tx.staff.create({
-        data: {
+    if (!invitation && signup) {
+      // 🔴 ALTA DE NEGOCIO NUEVO con Google. La MISMA función que el alta por correo: organización +
+      // dueño + progreso con la campaña del anuncio, los UTM y el consentimiento. Sin esto, quien
+      // llegaba de un anuncio y elegía Google se quedaba sin la oferta y pagaba precio de lista.
+      const { ipAddress, ...atribucionPedida } = signup
+      const atribucion = await resolverAtribucionDelAlta(atribucionPedida)
+      const creado = await prisma.$transaction(tx =>
+        crearNegocioNuevo(tx, {
           email: googleUser.email.toLowerCase(),
-          firstName: googleUser.given_name || googleUser.name.split(' ')[0] || 'Unknown',
+          hashedPassword: null,
+          firstName: googleUser.given_name || googleUser.name.split(' ')[0] || '',
           lastName: googleUser.family_name || googleUser.name.split(' ').slice(1).join(' ') || '',
+          organizationName: '',
+          emailVerified: true, // Google ya lo verificó: no hace falta el código por correo
           photoUrl: googleUser.picture,
-          emailVerified: true,
           googleId: googleUser.id,
-          active: true,
-          lastLoginAt: new Date(),
+          wizardVersion: 2,
+          acquisitionSource: 'dashboard_signup_google',
+          atribucion,
+          ipAddress,
+        }),
+      )
+      staff = await prisma.staff.findUniqueOrThrow({
+        where: { id: creado.staff.id },
+        include: {
+          organizations: { where: { isPrimary: true, isActive: true }, include: { organization: true }, take: 1 },
+          venues: {
+            where: { active: true },
+            include: { venue: { select: { id: true, name: true, slug: true, logo: true, status: true, organizationId: true } } },
+          },
         },
-        select: { id: true },
       })
+      void logAction({
+        staffId: creado.staff.id,
+        action: 'ACCOUNT_SIGNUP',
+        entity: 'Staff',
+        entityId: creado.staff.id,
+        data: { method: 'google', organizationId: creado.organization.id, launchCampaignId: atribucion.campanaId },
+      })
+      logger.info('Google OAuth: negocio nuevo creado desde el alta', {
+        staffId: creado.staff.id,
+        organizationId: creado.organization.id,
+        conCampana: !!atribucion.campanaId,
+      })
+      isNewUser = true
+    } else if (!invitation) {
+      throw new ForbiddenError('No invitation found for this email. Please contact your administrator to get invited.')
+    } else {
+      if (!invitation.venue) {
+        throw new ForbiddenError('Invitation is missing venue information. Please contact your administrator.')
+      }
 
-      await tx.staffOrganization.create({
-        data: {
-          staffId: created.id,
-          organizationId: invitation.organizationId,
-          role: orgRole,
-          isPrimary: true,
-          isActive: true,
-          joinedById: invitation.invitedById,
-        },
+      // Validate invitation data consistency
+      if (invitation.venue.organizationId !== invitation.organizationId) {
+        throw new ForbiddenError('Invitation data inconsistency: venue organization mismatch. Please contact your administrator.')
+      }
+
+      const primaryVenueId = invitation.venueId || invitation.venue.id
+
+      // 🔴 A PIN cannot be captured during an OAuth redirect. When the inviter required one we still
+      // create the account (so the person can get in at all) but leave the invitation PENDING — the
+      // `venues.length === 0` branch below returns it as a pending invitation and the frontend routes
+      // them to /invite/:token, which collects the PIN. Auto-accepting here would silently drop the
+      // PIN requirement and leave them unable to log into the TPV.
+      const canAutoAccept = !invitation.requirePin
+
+      // Parity with invitation.service.ts: an OWNER invitation carrying `inviteToAllVenues` grants
+      // EVERY venue in the org, not just the invitation's own venue.
+      const permissions = invitation.permissions as { inviteToAllVenues?: boolean } | null
+      let venueIdsToAssign: string[] = [primaryVenueId]
+      if (canAutoAccept && permissions?.inviteToAllVenues === true) {
+        const orgVenues = await prisma.venue.findMany({
+          where: { organizationId: invitation.organizationId },
+          select: { id: true },
+        })
+        venueIdsToAssign = orgVenues.map(v => v.id)
+      }
+
+      // Free-tier seat cap: every venue here gets a BRAND-NEW seat. Checked BEFORE the transaction
+      // because seatCap.service runs on the global client. Cap usage counts pending invitations and
+      // this very invite is still PENDING, so exclude it for its own venue (off-by-one).
+      if (canAutoAccept) {
+        await assertCanAddSeatsBulk(venueIdsToAssign, { primaryVenueId, excludeInvitationId: invitation.id })
+      }
+
+      // Parity with invitation.service.ts: an OWNER invitation must become an OWNER at the
+      // ORGANIZATION level too. Hardcoding MEMBER here left every Google-signup owner unable to
+      // administer their own org.
+      const orgRole = invitation.role === StaffRole.OWNER ? OrgRole.OWNER : OrgRole.MEMBER
+
+      // One transaction: a half-applied signup leaves an orphan Staff row that owns the (globally
+      // unique) email but has no org and no venue — the person can then never be invited again.
+      const createdStaffId = await prisma.$transaction(async tx => {
+        const created = await tx.staff.create({
+          data: {
+            email: googleUser.email.toLowerCase(),
+            firstName: googleUser.given_name || googleUser.name.split(' ')[0] || 'Unknown',
+            lastName: googleUser.family_name || googleUser.name.split(' ').slice(1).join(' ') || '',
+            photoUrl: googleUser.picture,
+            emailVerified: true,
+            googleId: googleUser.id,
+            active: true,
+            lastLoginAt: new Date(),
+          },
+          select: { id: true },
+        })
+
+        await tx.staffOrganization.create({
+          data: {
+            staffId: created.id,
+            organizationId: invitation.organizationId,
+            role: orgRole,
+            isPrimary: true,
+            isActive: true,
+            joinedById: invitation.invitedById,
+          },
+        })
+
+        if (canAutoAccept) {
+          await tx.staffVenue.createMany({
+            data: venueIdsToAssign.map(venueId => ({
+              staffId: created.id,
+              venueId,
+              role: invitation.role,
+              active: true,
+            })),
+          })
+
+          await tx.invitation.update({
+            where: { id: invitation.id },
+            data: {
+              status: InvitationStatus.ACCEPTED,
+              acceptedAt: new Date(),
+              acceptedById: created.id,
+            },
+          })
+        }
+
+        return created.id
       })
 
       if (canAutoAccept) {
-        await tx.staffVenue.createMany({
-          data: venueIdsToAssign.map(venueId => ({
-            staffId: created.id,
-            venueId,
-            role: invitation.role,
-            active: true,
-          })),
-        })
+        acceptedInvitation = {
+          invitationId: invitation.id,
+          staffId: createdStaffId,
+          venueId: primaryVenueId,
+          role: invitation.role,
+          venueCount: venueIdsToAssign.length,
+        }
+      }
 
-        await tx.invitation.update({
-          where: { id: invitation.id },
-          data: {
-            status: InvitationStatus.ACCEPTED,
-            acceptedAt: new Date(),
-            acceptedById: created.id,
+      // Refetch in the exact shape the rest of this function expects. The previous code hand-built
+      // `organizations`/`venues` (cast through `as any`) to save a query; that stopped being safe
+      // once one accept can grant N venues (inviteToAllVenues) or zero (requirePin).
+      staff = await prisma.staff.findUniqueOrThrow({
+        where: { id: createdStaffId },
+        include: {
+          organizations: {
+            where: { isPrimary: true, isActive: true },
+            include: { organization: true },
+            take: 1,
           },
-        })
-      }
-
-      return created.id
-    })
-
-    if (canAutoAccept) {
-      acceptedInvitation = {
-        invitationId: invitation.id,
-        staffId: createdStaffId,
-        venueId: primaryVenueId,
-        role: invitation.role,
-        venueCount: venueIdsToAssign.length,
-      }
-    }
-
-    // Refetch in the exact shape the rest of this function expects. The previous code hand-built
-    // `organizations`/`venues` (cast through `as any`) to save a query; that stopped being safe
-    // once one accept can grant N venues (inviteToAllVenues) or zero (requirePin).
-    staff = await prisma.staff.findUniqueOrThrow({
-      where: { id: createdStaffId },
-      include: {
-        organizations: {
-          where: { isPrimary: true, isActive: true },
-          include: { organization: true },
-          take: 1,
-        },
-        venues: {
-          where: { active: true },
-          include: {
-            venue: {
-              select: {
-                id: true,
-                name: true,
-                slug: true,
-                logo: true,
-                status: true,
-                organizationId: true,
+          venues: {
+            where: { active: true },
+            include: {
+              venue: {
+                select: {
+                  id: true,
+                  name: true,
+                  slug: true,
+                  logo: true,
+                  status: true,
+                  organizationId: true,
+                },
               },
             },
           },
         },
-      },
-    })
+      })
 
-    logger.info('Google OAuth: staff created from invitation', {
-      staffId: createdStaffId,
-      email: googleUser.email.toLowerCase(),
-      invitationId: invitation.id,
-      autoAccepted: canAutoAccept,
-      venueCount: canAutoAccept ? venueIdsToAssign.length : 0,
-    })
+      logger.info('Google OAuth: staff created from invitation', {
+        staffId: createdStaffId,
+        email: googleUser.email.toLowerCase(),
+        invitationId: invitation.id,
+        autoAccepted: canAutoAccept,
+        venueCount: canAutoAccept ? venueIdsToAssign.length : 0,
+      })
 
-    isNewUser = true
+      isNewUser = true
+    }
   } else {
     // Update existing staff with Google info if not already set
     const updateData: any = {

@@ -1,6 +1,22 @@
 import { NextFunction, Request, Response } from 'express'
 import * as googleOAuthService from '../../services/dashboard/googleOAuth.service'
+import { z } from 'zod'
 import { ValidationError } from '../../errors/AppError'
+import { optionalLaunchCampaignCode, utmSchema } from '../../schemas/acquisition.schema'
+import { ipDelCliente } from '../../utils/clientIp'
+
+/**
+ * El sobre de ALTA que sólo manda `/signup` → «Continuar con Google». Mismas reglas que el alta por
+ * correo (`SignupSchema`): un código o unos UTM mal formados se DESCARTAN en silencio —la
+ * atribución vale menos que la cuenta— y nunca tumban el alta con un 400.
+ */
+const signupIntentSchema = z
+  .object({
+    legalVersion: z.string().trim().max(40).optional(),
+    launchCampaignCode: optionalLaunchCampaignCode,
+    utm: utmSchema,
+  })
+  .optional()
 
 /**
  * Get Google OAuth authorization URL
@@ -29,9 +45,15 @@ export async function googleOAuthCallback(req: Request, res: Response, next: Nex
       throw new ValidationError('Either authorization code or ID token is required')
     }
 
+    // Un sobre que no es un objeto (o que no valida) se trata como AUSENTE: entonces el callback es
+    // un inicio de sesión normal y un correo desconocido recibe el 403 de siempre.
+    const sobre = signupIntentSchema.safeParse(req.body?.signup)
+    const signup = sobre.success && sobre.data ? { ...sobre.data, ipAddress: ipDelCliente(req) ?? null } : undefined
+
     const result = await googleOAuthService.loginWithGoogle(
       code || token,
       !!code, // isCode = true if code is provided
+      signup,
     )
 
     // Cookie maxAge must match JWT expiration (24h default for OAuth login)
