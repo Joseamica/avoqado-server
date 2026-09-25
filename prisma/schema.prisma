@@ -40,6 +40,10 @@ model Organization {
   // never read this column on its own, or a caller will answer the question differently.
   seatCapExempt Boolean @default(false)
 
+  // Marca PEGAJOSA: alguna vez tuvo un producto (o un sello) con IVA ≠ 16 %. No se apaga en la v1: con ella la
+  // contabilidad automática, el posteo manual y el cierre de periodo quedan apagados hasta la fase 4 (plan 4).
+  ivaMixtoAlgunaVez Boolean @default(false)
+
   venues      Venue[]
   invitations Invitation[]
   invoices    Invoice[]
@@ -364,6 +368,9 @@ model Venue {
   // Features & Settings
   features VenueFeature[]
   settings VenueSettings?
+
+  // IVA por producto (plan 1): presente = encendido. Ver model VenueIvaPorProducto.
+  ivaPorProducto VenueIvaPorProducto?
 
   // Relations
   posCommands           PosCommand[]
@@ -944,6 +951,14 @@ model VenueSettings {
   hiddenSidebarItems String[] @default([]) // URL paths hidden from non-superadmin users
 
   updatedAt DateTime @updatedAt
+}
+
+/// Negocio con el IVA por producto ENCENDIDO. Ausente = apagado. Sólo la escribe la operación de encendido (plan 6).
+model VenueIvaPorProducto {
+  venueId              String   @id
+  venue                Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  habilitadoAt         DateTime @default(now())
+  habilitadoPorStaffId String?
 }
 
 model PosConnectionStatus {
@@ -1774,6 +1789,10 @@ model Product {
   satProductKey String? // ClaveProdServ (8 digits)
   satUnitKey    String? // ClaveUnidad (e.g. E48, H87)
   objetoImp     String  @default("02") // 02 = sí objeto de impuesto
+
+  // Tratamiento de IVA: la VERDAD fiscal del producto. taxRate/objetoImp se derivan de él (apps viejas los leen).
+  // Lo mantiene coherente el trigger "Product_ivaTratamiento_guard". Ver src/services/fiscal/ivaTratamiento.ts.
+  ivaTratamiento IvaTratamiento?
 
   // Print routing (PRINT_STATIONS): product-level station override (wins over category default).
   printStationId String?
@@ -17251,6 +17270,18 @@ enum PlatformCfdiStatus {
 enum PlatformCfdiType {
   INGRESO // CFDI tipo I (la factura)
   PAGO // CFDI tipo P (complemento de pago / REP) — fase 2
+}
+
+/// Tratamiento de IVA de un producto (plan "IVA por producto"). Ver src/services/fiscal/ivaTratamiento.ts
+/// y el trigger "Product_ivaTratamiento_guard" — las dos réplicas deben coincidir exactamente.
+enum IvaTratamiento {
+  IVA_16
+  IVA_8
+  IVA_0
+  EXENTO
+  NO_OBJETO
+  BLOQUEADO_03
+  BLOQUEADO_04
 }
 
 enum BillingCustomerType {
