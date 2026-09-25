@@ -350,6 +350,38 @@ describe('la membresía nace al ACEPTAR, no al invitar', () => {
     expect(sv.role).toBe(StaffRole.WAITER)
   })
 
+  it('🔴 S6: re-invitar como mesero a un ex-admin DADO DE BAJA no le devuelve su juego de permisos privilegiado', async () => {
+    const hash = await bcrypt.hash('ExAdmin1234', 4)
+    const exAdmin = await persona('ex-admin-ps', { password: hash })
+    const ps = await prisma.permissionSet.create({
+      data: { venueId, name: `privilegiado-${Date.now()}`, permissions: ['venues:manage', 'settings:manage'] },
+    })
+    await prisma.staffVenue.create({
+      data: { staffId: exAdmin.id, venueId, role: StaffRole.ADMIN, active: false, permissionSetId: ps.id },
+    })
+    const token = await invitar(exAdmin.email) // invitación de MESERO
+    await acceptInvitation(token, { password: 'ExAdmin1234' })
+    const sv = await prisma.staffVenue.findFirstOrThrow({ where: { staffId: exAdmin.id, venueId } })
+    expect(sv.role).toBe(StaffRole.WAITER)
+    expect(sv.permissionSetId).toBeNull()
+  })
+
+  it('un empleado ACTIVO con juego de permisos re-invitado lo CONSERVA (regresión)', async () => {
+    const hash = await bcrypt.hash('Activo12345', 4)
+    const activo = await persona('activo-ps', { password: hash })
+    await prisma.staffOrganization.create({
+      data: { staffId: activo.id, organizationId: orgId, role: 'MEMBER', isActive: true, isPrimary: true },
+    })
+    const ps = await prisma.permissionSet.create({ data: { venueId, name: `vigente-${Date.now()}`, permissions: ['orders:read'] } })
+    await prisma.staffVenue.create({
+      data: { staffId: activo.id, venueId, role: StaffRole.WAITER, active: true, permissionSetId: ps.id },
+    })
+    const token = await invitar(activo.email)
+    await acceptInvitation(token, { password: 'Activo12345' })
+    const sv = await prisma.staffVenue.findFirstOrThrow({ where: { staffId: activo.id, venueId } })
+    expect(sv.permissionSetId).toBe(ps.id)
+  })
+
   it('un gerente ACTIVO invitado como mesero a su misma sucursal sigue de gerente (regresión: no se degrada)', async () => {
     const hash = await bcrypt.hash('Gerente1234', 4)
     const gerente = await persona('gerente-activo', { password: hash })
