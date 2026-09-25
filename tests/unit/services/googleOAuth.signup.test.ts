@@ -185,3 +185,36 @@ describe('loginWithGoogle — alta de negocio nuevo', () => {
     expect(r.businessCreated).toBe(false)
   })
 })
+
+// ── Cuenta EXISTENTE sin verificar: Google demuestra el correo, la contraseña previa NO ──
+// 🔴 Toma de cuenta por registro previo (Codex gpt-6-astra, 24-sep; verificado en el código):
+// alguien registra TU correo con SU contraseña y la cuenta queda sin verificar. Cuando tú entras
+// con Google, la cuenta pasaba a verificada CONSERVANDO esa contraseña, y el login con contraseña
+// sólo exige correo verificado ⇒ el intruso entraba.
+describe('loginWithGoogle — cuenta existente sin verificar', () => {
+  const prismaMock = jest.requireMock('../../../src/utils/prismaClient').default
+
+  it('🔴 al verificarla con Google, la contraseña que puso quien la creó deja de servir', async () => {
+    state.existingStaff = { ...duenoNuevo(), emailVerified: false, password: 'hash-del-intruso', googleId: null }
+    await loginWithGoogle('code-1', true)
+    expect(prismaMock.staff.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ emailVerified: true, password: null }) }),
+    )
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'STAFF_PASSWORD_INVALIDATED_BY_GOOGLE', entityId: 'staff-new' }),
+    )
+  })
+
+  it('una cuenta YA verificada conserva su contraseña (regresión: no se borra a nadie)', async () => {
+    state.existingStaff = { ...duenoNuevo(), emailVerified: true, password: 'hash-propio', googleId: null }
+    await loginWithGoogle('code-1', true)
+    const data = prismaMock.staff.update.mock.calls.map((c: any[]) => c[0].data)
+    expect(data.some((d: any) => 'password' in d)).toBe(false)
+  })
+
+  it('🔴 una cuenta DESACTIVADA se rechaza antes de tocar nada (ni vínculo con Google ni verificación)', async () => {
+    state.existingStaff = { ...duenoNuevo(), active: false, emailVerified: false, password: 'x', googleId: null }
+    await expect(loginWithGoogle('code-1', true)).rejects.toThrow()
+    expect(prismaMock.staff.update).not.toHaveBeenCalled()
+  })
+})

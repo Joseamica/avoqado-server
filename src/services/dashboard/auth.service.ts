@@ -8,7 +8,7 @@ import * as jwtService from '../../jwt.service'
 import { getEffectiveRolePermissions } from '../../lib/permissions'
 import emailService from '../email.service'
 import logger from '@/config/logger'
-import { getPrimaryOrganizationId, hasOrganizationAccess } from '../staffOrganization.service'
+import { esDuenoDeLaOrganizacion, getPrimaryOrganizationId } from '../staffOrganization.service'
 import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import { logAction } from './activity-log.service'
 import { getRoleDisplayNames, DEFAULT_ROLE_DISPLAY_NAMES } from './venueRoleConfig.dashboard.service'
@@ -631,8 +631,9 @@ export async function switchVenueForStaff(staffId: string, orgId: string, target
     // Los SUPERADMINs mantienen su rol SUPERADMIN incluso al cambiar de venue
     roleInNewVenue = StaffRole.SUPERADMIN
   }
-  // Si es OWNER, permitir acceso a cualquier venue de su organización (multi-org aware)
-  else if (isOwner && (await hasOrganizationAccess(staffId, targetVenue.organizationId))) {
+  // Si es DUEÑO de la organización DESTINO, entra a cualquier sucursal de ella como OWNER.
+  // 🔴 De ESA organización: ser dueño en otra no convierte a un mesero en dueño aquí.
+  else if (isOwner && (await esDuenoDeLaOrganizacion(staffId, targetVenue.organizationId))) {
     roleInNewVenue = StaffRole.OWNER
   }
   // Para otros usuarios, verificar acceso normal al venue

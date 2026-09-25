@@ -115,18 +115,44 @@ export async function userHasVenueAccess(staffId: string, venueId: string): Prom
   const isSuperAdmin = memberships.some(m => m.role === 'SUPERADMIN')
   if (isSuperAdmin) return true
 
-  const isOwner = memberships.some(m => m.role === 'OWNER')
-  if (isOwner) {
+  // 🔴 Dueño de ESA organización, no «dueño en algún lado»: ver `esDuenoDeLaOrganizacion`.
+  if (memberships.some(m => m.role === 'OWNER')) {
     const venue = await prisma.venue.findUnique({
       where: { id: venueId },
       select: { organizationId: true },
     })
-    if (venue && (await hasOrganizationAccess(staffId, venue.organizationId))) {
+    if (venue && (await esDuenoDeLaOrganizacion(staffId, venue.organizationId))) {
       return true
     }
   }
 
   return false
+}
+
+/**
+ * ¿Es esta persona DUEÑA de ESTA organización? La única regla para heredar el rol OWNER en una
+ * sucursal donde no tiene fila propia.
+ *
+ * 🔴 Antes se calculaba «dueño» sobre TODAS sus sucursales y luego bastaba una membresía activa
+ * en la organización destino, con cualquier rol: dueña en A + mesera en B ⇒ token de DUEÑA en B
+ * (Codex gpt-6-astra, 24-sep; reproducido contra Postgres). Es la misma regla que ya usa la lista
+ * de negocios del dashboard (`auth.dashboard.controller`):
+ *   - `StaffOrganization.role = OWNER` ACTIVA en esa organización, o
+ *   - cuentas viejas: una sucursal PROPIA y activa con rol OWNER dentro de esa organización.
+ */
+export async function esDuenoDeLaOrganizacion(staffId: string, organizationId: string): Promise<boolean> {
+  const membresia = await prisma.staffOrganization.findUnique({
+    where: { staffId_organizationId: { staffId, organizationId } },
+    select: { isActive: true, role: true },
+  })
+  if (!membresia?.isActive) return false
+  if (membresia.role === 'OWNER') return true
+
+  const sucursalPropia = await prisma.staffVenue.findFirst({
+    where: { staffId, active: true, role: 'OWNER', venue: { organizationId } },
+    select: { id: true },
+  })
+  return sucursalPropia !== null
 }
 
 /**
