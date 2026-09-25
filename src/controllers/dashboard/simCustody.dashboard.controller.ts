@@ -88,11 +88,12 @@ async function requireOrgMembership(userId: string, orgId: string): Promise<Staf
   // 🔴 Codex ronda 4: antes tomaba la fila más vieja aunque estuviera dada de baja, así que un gerente
   // (o un superadmin) dado de baja seguía leyendo el timeline. SUPERADMIN no cuenta aquí: eso lo decide
   // `esSuperadminDeLaSesion`, que es la única fuente de «superadmin de verdad».
-  const filas = await prisma.staffVenue.findMany({
+  // Roles DISTINTOS agrupados en PostgreSQL (son 9 como máximo): el máximo sale de todos, no de una muestra,
+  // y la consulta queda acotada (con `distinct`, Prisma cargaba TODAS las filas y agrupaba en memoria).
+  const filas = await prisma.staffVenue.groupBy({
+    by: ['role'],
     where: { staffId: userId, active: true, staff: { active: true }, venue: { organizationId: orgId } },
-    select: { role: true },
-    // Roles DISTINTOS (son 9 como máximo): el máximo se calcula sobre todos, no sobre una muestra (Codex ronda 5).
-    distinct: ['role'],
+    orderBy: { role: 'asc' },
     take: 20,
   })
   const roles = filas.map(f => f.role).filter(r => r !== StaffRole.SUPERADMIN)

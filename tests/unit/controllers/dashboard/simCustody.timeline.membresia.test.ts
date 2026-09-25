@@ -30,7 +30,7 @@ function soloFilasDadasDeBaja(rolHistorico: string) {
   const honra = (where: any) => (where?.active === true ? [] : filas)
   prismaMock.staffVenue.findFirst.mockImplementation((({ where }: any) =>
     Promise.resolve(where?.role === 'SUPERADMIN' ? null : (honra(where)[0] ?? null))) as any)
-  prismaMock.staffVenue.findMany.mockImplementation((({ where }: any) => Promise.resolve(honra(where))) as any)
+  prismaMock.staffVenue.groupBy.mockImplementation((({ where }: any) => Promise.resolve(honra(where))) as any)
 }
 
 it('🔴 una fila de GERENTE dada de baja no deja leer el timeline', async () => {
@@ -45,20 +45,20 @@ it('🔴 una fila SUPERADMIN dada de baja tampoco (no es superadmin real ni memb
 
 it('usa el rol MÁS ALTO de las asignaciones activas (un gerente que también es cajero entra)', async () => {
   prismaMock.staffVenue.findFirst.mockResolvedValue(null as never)
-  prismaMock.staffVenue.findMany.mockResolvedValue([{ role: 'CASHIER' }, { role: 'MANAGER' }] as never)
+  prismaMock.staffVenue.groupBy.mockResolvedValue([{ role: 'CASHIER' }, { role: 'MANAGER' }] as never)
   const r = await correr({ userId: 'u', orgId: ORG, role: 'CASHIER' })
   expect(prohibido(r)).toBe(false)
-  expect(prismaMock.staffVenue.findMany).toHaveBeenCalledWith(
-    expect.objectContaining({ where: expect.objectContaining({ active: true, staff: { active: true } }), distinct: ['role'] }),
+  expect(prismaMock.staffVenue.groupBy).toHaveBeenCalledWith(
+    expect.objectContaining({ by: ['role'], where: expect.objectContaining({ active: true, staff: { active: true } }) }),
   )
 })
 
 it('🔴 el máximo sale de los roles DISTINTOS: 100 asignaciones de cajero no esconden la de gerente (Codex ronda 5)', async () => {
   prismaMock.staffVenue.findFirst.mockResolvedValue(null as never)
-  // El doble honra `distinct`: sin él, las primeras 20 filas son de cajero y la de gerente queda fuera.
   const filas = [...Array.from({ length: 100 }, () => ({ role: 'CASHIER' })), { role: 'MANAGER' }]
-  prismaMock.staffVenue.findMany.mockImplementation((({ distinct, take }: any) => {
-    const base = distinct?.includes('role') ? filas.filter((f, i) => filas.findIndex(g => g.role === f.role) === i) : filas
+  // El doble agrupa como Postgres cuando se pide `by: ['role']`; sin agrupar, las primeras 20 son de cajero.
+  prismaMock.staffVenue.groupBy.mockImplementation((({ by, take }: any) => {
+    const base = by?.includes('role') ? filas.filter((f, i) => filas.findIndex(g => g.role === f.role) === i) : filas
     return Promise.resolve(base.slice(0, take ?? base.length))
   }) as any)
   expect(prohibido(await correr({ userId: 'u', orgId: ORG, role: 'CASHIER' }))).toBe(false)
