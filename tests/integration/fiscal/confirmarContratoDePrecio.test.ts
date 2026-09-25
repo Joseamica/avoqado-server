@@ -6,9 +6,12 @@
 // un séptimo caso que prueba que el registro de auditoría vive en la MISMA transacción que el
 // cambio de contrato — si el log no se puede escribir, el contrato tampoco cambia.
 import { randomUUID } from 'crypto'
+import { Client } from 'pg'
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { vistaPreviaContrato, confirmarContratoIvaIncluido } from '@/services/fiscal/confirmarContratoDePrecio.service'
+
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
 describe('confirmarContratoDePrecio (integración)', () => {
   beforeAll(() => {
@@ -50,6 +53,9 @@ describe('confirmarContratoDePrecio (integración)', () => {
     taxAmount?: number
     source?: 'TPV' | 'POS'
     contratoDePrecio?: 'DESCONOCIDO' | 'IVA_INCLUIDO'
+    status?: 'PENDING' | 'CONFIRMED' | 'COMPLETED' | 'CANCELLED' | 'DELETED'
+    paymentStatus?: 'PENDING' | 'PARTIAL' | 'PAID' | 'REFUNDED'
+    paidAmount?: number
   }) {
     const orden = await prisma.order.create({
       data: {
@@ -59,6 +65,9 @@ describe('confirmarContratoDePrecio (integración)', () => {
         taxAmount: new Prisma.Decimal(opts.taxAmount ?? 0),
         total: new Prisma.Decimal(100 + (opts.taxAmount ?? 0)),
         source: opts.source ?? 'TPV',
+        status: opts.status ?? 'PENDING',
+        paymentStatus: opts.paymentStatus ?? 'PENDING',
+        paidAmount: new Prisma.Decimal(opts.paidAmount ?? 0),
       } as Prisma.OrderUncheckedCreateInput,
     })
     if (opts.contratoDePrecio && opts.contratoDePrecio !== 'DESCONOCIDO') {
@@ -227,6 +236,159 @@ describe('confirmarContratoDePrecio (integración)', () => {
     const row = await ordenActual(orden.id)
     expect(row.contratoDePrecio).toBe('DESCONOCIDO')
     expect(row.version).toBe(orden.version)
+    expect(await logDe(orden.id)).toHaveLength(0)
+  })
+
+  // ─── F1 (revisión final): taxAmount < 0 tiene SU PROPIO mensaje ────────────────────────────
+  //
+  // El motor de descuentos viejo le resta un 16% estimado a `taxAmount` aunque la venta haya
+  // cobrado con IVA incluido, dejando `taxAmount < 0`. Decir «separó el impuesto» (el mensaje de
+  // taxAmount > 0) ahí sería mentira: son dos causas distintas.
+  it('8. (F1) taxAmount NEGATIVO (ajuste del motor de descuentos viejo) ⇒ NO_CONFIRMABLE con SU PROPIO mensaje, distinto de «separó el impuesto»', async () => {
+    const orden = await nuevaOrden({ taxAmount: -5 })
+
+    const preview = await vistaPreviaContrato(venueId, orden.id)
+    expect(preview!.confirmable).toBe(false)
+    expect(preview!.motivo).toMatch(/motor de descuentos/i)
+    expect(preview!.motivo).not.toMatch(/separó el impuesto/i)
+
+    const r = await confirmarContratoIvaIncluido({
+      venueId,
+      orderId: orden.id,
+      versionVista: preview!.version,
+      staffId,
+      motivo: 'motivo',
+    })
+    expect(r).toMatchObject({ ok: false, code: 'NO_CONFIRMABLE' })
+    expect((r as { message: string }).message).toMatch(/motor de descuentos/i)
+    expect(await ordenActual(orden.id)).toMatchObject({ contratoDePrecio: 'DESCONOCIDO' })
+  })
+
+  // ─── F3: una venta cancelada o borrada nunca se confirma ───────────────────────────────────
+  it('9. (F3) orden CANCELLED ⇒ NO_CONFIRMABLE, «Esta venta está cancelada; no se factura.»', async () => {
+    const orden = await nuevaOrden({ status: 'CANCELLED' })
+
+    const preview = await vistaPreviaContrato(venueId, orden.id)
+    expect(preview!.confirmable).toBe(false)
+    expect(preview!.motivo).toBe('Esta venta está cancelada; no se factura.')
+    expect(preview!.status).toBe('CANCELLED')
+
+    const r = await confirmarContratoIvaIncluido({
+      venueId,
+      orderId: orden.id,
+      versionVista: preview!.version,
+      staffId,
+      motivo: 'motivo',
+    })
+    expect(r).toMatchObject({ ok: false, code: 'NO_CONFIRMABLE', message: 'Esta venta está cancelada; no se factura.' })
+    expect(await ordenActual(orden.id)).toMatchObject({ contratoDePrecio: 'DESCONOCIDO' })
+  })
+
+  // ─── F3: la vista previa nunca dice «cobrada» de una venta que no se ha cobrado ────────────
+  it('10. (F3) orden SIN COBRAR (paymentStatus PENDING) ⇒ sigue confirmable, y la vista previa trae los datos para NO decir «cobrada»', async () => {
+    const orden = await nuevaOrden({ paymentStatus: 'PENDING', paidAmount: 0 })
+
+    const preview = await vistaPreviaContrato(venueId, orden.id)
+    expect(preview!.confirmable).toBe(true)
+    expect(preview!.status).toBe('PENDING')
+    expect(preview!.paymentStatus).toBe('PENDING')
+    expect(preview!.paidAmountMxn).toBe(0)
+
+    // Sigue siendo confirmable — no cobrar no es motivo para bloquear el contrato de precio.
+    const r = await confirmarContratoIvaIncluido({
+      venueId,
+      orderId: orden.id,
+      versionVista: preview!.version,
+      staffId,
+      motivo: 'motivo',
+    })
+    expect(r).toEqual({ ok: true })
+  })
+
+  it('11. (F3) orden PAGADA ⇒ la vista previa trae paymentStatus/paidAmountMxn correctos', async () => {
+    const orden = await nuevaOrden({ paymentStatus: 'PAID', paidAmount: 100 })
+
+    const preview = await vistaPreviaContrato(venueId, orden.id)
+    expect(preview!.confirmable).toBe(true)
+    expect(preview!.paymentStatus).toBe('PAID')
+    expect(preview!.paidAmountMxn).toBe(100)
+  })
+
+  // ─── F8: la bitácora lleva el snapshot de la venta ─────────────────────────────────────────
+  it('12. (F8) el log de auditoría lleva orderNumber/total/paidAmount de la venta confirmada', async () => {
+    const orden = await nuevaOrden({ paymentStatus: 'PAID', paidAmount: 100 })
+    const preview = await vistaPreviaContrato(venueId, orden.id)
+
+    const r = await confirmarContratoIvaIncluido({
+      venueId,
+      orderId: orden.id,
+      versionVista: preview!.version,
+      staffId,
+      motivo: 'motivo',
+    })
+    expect(r).toEqual({ ok: true })
+
+    const logs = await logDe(orden.id)
+    expect(logs).toHaveLength(1)
+    expect(logs[0].data).toMatchObject({
+      orderNumber: orden.orderNumber,
+      total: 100,
+      paidAmount: 100,
+    })
+  })
+
+  // ─── F2 (TOCTOU): el CAS se re-comprueba contra el dato COMMITEADO, no contra el que se leyó ──
+  //
+  // Reproduce con una carrera de Postgres REAL (no un mock): un segundo cliente toma el candado
+  // de la fila ANTES de arrancar la confirmación, así que el SELECT de `confirmarContratoIvaIncluido`
+  // lee taxAmount=0 (todavía no comprometido el cambio) y decide "confirmable", pero su propio
+  // UPDATE se queda BLOQUEADO esperando el candado — exactamente la ventana entre la vista previa
+  // y el CAS que el motor de descuentos viejo (que no toca `version`) puede colar un taxAmount
+  // distinto de cero. Al soltar el candado, Postgres vuelve a evaluar el WHERE del UPDATE contra
+  // el dato YA comprometido (EvalPlanQual bajo READ COMMITTED): si el WHERE no incluye taxAmount,
+  // el viejo CAS lo deja pasar de todas formas.
+  it('13. (F2) el motor de descuentos cambia taxAmount SIN tocar version, exactamente entre la lectura y el CAS ⇒ no confirma', async () => {
+    const orden = await nuevaOrden({})
+    const preview = await vistaPreviaContrato(venueId, orden.id)
+    expect(preview!.confirmable).toBe(true)
+
+    const racer = new Client({ connectionString: process.env.TEST_DATABASE_URL })
+    await racer.connect()
+    let confirmSettled = false
+    try {
+      await racer.query('BEGIN')
+      // Toma el candado de la fila y deja taxAmount=16 SIN COMMITEAR — y sin tocar `version`,
+      // que es justo el bug del motor de descuentos viejo (F1).
+      await racer.query('UPDATE "Order" SET "taxAmount" = 16 WHERE id = $1', [orden.id])
+
+      const confirmPromise = confirmarContratoIvaIncluido({
+        venueId,
+        orderId: orden.id,
+        versionVista: preview!.version,
+        staffId,
+        motivo: 'motivo',
+      }).finally(() => {
+        confirmSettled = true
+      })
+
+      // Confirma que la confirmación de verdad está BLOQUEADA esperando el candado de la fila
+      // — si esto no fuera cierto, la carrera no estaría probando nada.
+      await delay(75)
+      expect(confirmSettled).toBe(false)
+
+      // Suelta el candado: taxAmount=16 pasa a ser el valor COMMITEADO justo cuando el UPDATE
+      // de la confirmación por fin se ejecuta.
+      await racer.query('COMMIT')
+
+      const r = await confirmPromise
+      expect(r.ok).toBe(false)
+      expect((r as { code: string }).code).toBe('CAMBIO_DESDE_LA_VISTA')
+    } finally {
+      await racer.end()
+    }
+
+    const row = await ordenActual(orden.id)
+    expect(row.contratoDePrecio).toBe('DESCONOCIDO')
     expect(await logDe(orden.id)).toHaveLength(0)
   })
 })
