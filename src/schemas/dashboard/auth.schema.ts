@@ -78,6 +78,16 @@ export const resetPasswordSchema = z.object({
   }),
 })
 
+/** El enlace del cambio de correo: sólo su forma; la firma y el resto lo revisa el servicio. */
+export const confirmEmailChangeSchema = z.object({
+  body: z.object({
+    token: z
+      .string({ required_error: 'El enlace no trae su código.' })
+      .min(20, { message: 'El enlace no es válido.' })
+      .max(2048, { message: 'El enlace no es válido.' }),
+  }),
+})
+
 // Inferimos el tipo para usarlo en el controlador y servicio
 export type LoginDto = z.infer<typeof loginSchema.shape.body>
 export type SwitchVenueDto = z.infer<typeof switchVenueSchema.shape.body>

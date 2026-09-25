@@ -1,4 +1,5 @@
 import { NextFunction, Request, Response } from 'express'
+import { confirmarCambioDeCorreo, solicitarCambioDeCorreo } from '../../services/dashboard/cambioDeCorreo.service'
 import jwt from 'jsonwebtoken'
 import prisma from '../../utils/prismaClient' // Corrected import path
 import { AuthenticationError } from '../../errors/AppError'
@@ -1073,10 +1074,12 @@ export async function updateAccountController(req: Request, res: Response, next:
     if (updateData.firstName) updateFields.firstName = updateData.firstName
     if (updateData.lastName) updateFields.lastName = updateData.lastName
     if (updateData.phone) updateFields.phone = updateData.phone
-    if (updateData.email && updateData.email !== currentStaff.email) {
-      // Verificar que el nuevo email no esté en uso
+    // 🔴 El correo NO se cambia aquí: se manda un enlace al correo NUEVO y cambia al abrirlo
+    // (`cambioDeCorreo.service`). Cambiarlo al instante permitía ponerse el correo de otra persona.
+    let correoPendiente: string | null = null
+    if (updateData.email && updateData.email.trim().toLowerCase() !== currentStaff.email) {
       const existingStaff = await prisma.staff.findUnique({
-        where: { email: updateData.email },
+        where: { email: updateData.email.trim().toLowerCase() },
       })
       if (existingStaff && existingStaff.id !== staffId) {
         res.status(400).json({
@@ -1085,7 +1088,7 @@ export async function updateAccountController(req: Request, res: Response, next:
         })
         return
       }
-      updateFields.email = updateData.email
+      correoPendiente = (await solicitarCambioDeCorreo(staffId, updateData.email)).correoNuevo
     }
 
     // Manejar cambio de contraseña
@@ -1160,11 +1163,29 @@ export async function updateAccountController(req: Request, res: Response, next:
 
     res.status(200).json({
       success: true,
-      message: 'Perfil actualizado correctamente.',
+      message: correoPendiente
+        ? `Perfil actualizado. Te enviamos un enlace a ${correoPendiente} para confirmar tu nuevo correo.`
+        : 'Perfil actualizado correctamente.',
       user: updatedStaff,
+      // Aditivo: el correo nuevo que espera confirmación (null si no se pidió cambio).
+      emailChangePending: correoPendiente,
     })
   } catch (error) {
     logger.error('Error updating staff profile:', error)
+    next(error)
+  }
+}
+
+/**
+ * Confirma un cambio de correo desde el enlace que llegó al correo NUEVO.
+ * PÚBLICO a propósito: se abre desde el correo, con o sin sesión. El enlace es la prueba.
+ */
+export async function confirmEmailChange(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { token } = req.body as { token: string }
+    const { correoNuevo } = await confirmarCambioDeCorreo(token)
+    res.status(200).json({ success: true, message: 'Tu correo quedó actualizado.', email: correoNuevo })
+  } catch (error) {
     next(error)
   }
 }

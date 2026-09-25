@@ -161,6 +161,7 @@ import {
   loginSchema,
   requestPasswordResetSchema,
   resetPasswordSchema,
+  confirmEmailChangeSchema,
   switchVenueSchema,
   updateAccountSchema,
 } from '../schemas/dashboard/auth.schema'
@@ -1127,6 +1128,28 @@ router.get('/auth/validate-reset-token/:token', authDashboardController.validate
  *         description: Invalid token or password does not meet requirements
  */
 router.post('/auth/reset-password', validateRequest(resetPasswordSchema), authDashboardController.resetPassword)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/auth/confirm-email-change:
+ *   post:
+ *     tags: [Dashboard - Auth]
+ *     summary: Confirma el cambio de correo con el enlace que llegó al correo NUEVO (público)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [token]
+ *             properties:
+ *               token: { type: string }
+ *     responses:
+ *       200: { description: Correo actualizado }
+ *       400: { description: Enlace inválido, vencido o viejo }
+ *       409: { description: El correo ya lo usa otra cuenta }
+ */
+router.post('/auth/confirm-email-change', validateRequest(confirmEmailChangeSchema), authDashboardController.confirmEmailChange)
 
 // --- Menu Category Routes ---
 
