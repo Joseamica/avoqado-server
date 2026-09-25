@@ -149,6 +149,9 @@ export const verifyAccess = (options: VerifyAccessOptions = {}) => {
                 where: {
                   staffId: userId,
                   role: StaffRole.SUPERADMIN,
+                  // 🔴 Superadmin de verdad: fila ACTIVA de una persona ACTIVA (Codex, 24-sep).
+                  active: true,
+                  staff: { active: true },
                 },
                 select: { id: true },
               }),

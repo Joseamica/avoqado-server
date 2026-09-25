@@ -22,7 +22,8 @@ interface SesionParaRol {
   realUserId?: string
 }
 
-async function esSuperadminReal(staffId: string): Promise<boolean> {
+/** Superadmin DE VERDAD: fila SUPERADMIN activa de una persona activa (no lo que diga un token). */
+export async function esSuperadminReal(staffId: string): Promise<boolean> {
   const fila = await prisma.staffVenue.findFirst({
     where: { staffId, active: true, role: StaffRole.SUPERADMIN, staff: { active: true } },
     select: { id: true },

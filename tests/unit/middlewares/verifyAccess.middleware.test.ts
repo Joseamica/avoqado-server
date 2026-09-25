@@ -109,6 +109,20 @@ describe('verifyAccess Middleware', () => {
   })
 
   describe('SUPERADMIN Bypass', () => {
+    it('🔴 el atajo de superadmin sólo cuenta filas ACTIVAS de personas ACTIVAS (Codex, 24-sep)', async () => {
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValueOnce({ id: 'sv_sa' })
+      await verifyAccess({ permission: 'admin:delete', featureCode: 'RESTRICTED_FEATURE' })(
+        mockReq as Request,
+        mockRes as Response,
+        mockNext,
+      )
+      expect(prisma.staffVenue.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ role: StaffRole.SUPERADMIN, active: true, staff: { active: true } }),
+        }),
+      )
+    })
+
     it('should allow SUPERADMIN to bypass all checks', async () => {
       // Mock user is SUPERADMIN
       ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv_1' })

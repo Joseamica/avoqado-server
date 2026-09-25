@@ -295,6 +295,9 @@ export const checkPermission = (requiredPermission: string) => {
             where: {
               staffId: authContext.userId,
               role: StaffRole.SUPERADMIN,
+              // 🔴 Superadmin de verdad: fila ACTIVA de una persona ACTIVA (Codex, 24-sep).
+              active: true,
+              staff: { active: true },
             },
             select: { id: true },
           })

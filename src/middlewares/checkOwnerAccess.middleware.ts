@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express'
 import { StaffRole } from '../security'
 import prisma from '@/utils/prismaClient'
+import { esSuperadminReal } from '@/services/access/rolVigente'
 
 /**
  * Middleware to check if the user has OWNER access to the requested organization.
@@ -36,8 +37,8 @@ export const checkOwnerAccess = async (req: Request, res: Response, next: NextFu
       return
     }
 
-    // SUPERADMIN can access any organization
-    if (role === StaffRole.SUPERADMIN) {
+    // SUPERADMIN can access any organization — si LO ES de verdad (el token sólo dice qué sesión es).
+    if (role === StaffRole.SUPERADMIN && (await esSuperadminReal(userId))) {
       return next()
     }
 
@@ -50,6 +51,9 @@ export const checkOwnerAccess = async (req: Request, res: Response, next: NextFu
       where: {
         staffId: userId,
         role: StaffRole.OWNER,
+        // 🔴 Sólo filas ACTIVAS de personas ACTIVAS: un dueño dado de baja seguía entrando (Codex, 24-sep).
+        active: true,
+        staff: { active: true },
         venue: {
           organizationId: requestedOrgId,
         },
@@ -103,8 +107,8 @@ export const checkOrganizationAccess = (allowAdmin: boolean = false) => {
         return
       }
 
-      // SUPERADMIN always has access
-      if (role === StaffRole.SUPERADMIN) {
+      // SUPERADMIN always has access — si LO ES de verdad (el token sólo dice qué sesión es).
+      if (role === StaffRole.SUPERADMIN && (await esSuperadminReal(userId))) {
         return next()
       }
 
@@ -118,6 +122,9 @@ export const checkOrganizationAccess = (allowAdmin: boolean = false) => {
         where: {
           staffId: userId,
           role: { in: allowedRoles },
+          // 🔴 Sólo filas ACTIVAS de personas ACTIVAS (Codex, 24-sep).
+          active: true,
+          staff: { active: true },
           venue: {
             organizationId: requestedOrgId,
           },

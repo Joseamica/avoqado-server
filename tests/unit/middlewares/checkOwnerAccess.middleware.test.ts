@@ -92,11 +92,27 @@ describe('checkOwnerAccess Middleware', () => {
   // REGRESSION: existing behavior unchanged
   // ──────────────────────────────────────────────────────────────────
   describe('regression: normal flows', () => {
-    it('SUPERADMIN bypasses the DB check and calls next()', async () => {
+    it('SUPERADMIN real (fila activa) pasa', async () => {
       ;(mockReq as any).authContext.role = 'SUPERADMIN'
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValueOnce({ id: 'sv_sa' })
       await checkOwnerAccess(mockReq as Request, mockRes as Response, mockNext)
       expect(mockNext).toHaveBeenCalledWith()
-      expect(prisma.staffVenue.findFirst).not.toHaveBeenCalled()
+    })
+
+    it('🔴 un token que DICE superadmin sin fila activa de superadmin NO pasa (Codex, 24-sep)', async () => {
+      ;(mockReq as any).authContext.role = 'SUPERADMIN'
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValueOnce(null)
+      await checkOwnerAccess(mockReq as Request, mockRes as Response, mockNext)
+      expect(statusMock).toHaveBeenCalledWith(403)
+      expect(mockNext).not.toHaveBeenCalled()
+    })
+
+    it('🔴 la fila de DUEÑO se busca sólo ACTIVA y de una persona ACTIVA', async () => {
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValueOnce({ id: 'sv_1' })
+      await checkOwnerAccess(mockReq as Request, mockRes as Response, mockNext)
+      expect(prisma.staffVenue.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ active: true, staff: { active: true } }) }),
+      )
     })
 
     it('OWNER in the org calls next()', async () => {
@@ -162,6 +178,21 @@ describe('checkOrganizationAccess Middleware (factory)', () => {
     await mw(mockReq as Request, mockRes as Response, mockNext)
     expect(mockNext).toHaveBeenCalledWith()
     expect(statusMock).not.toHaveBeenCalled()
+  })
+
+  it('🔴 checkOrganizationAccess también exige fila ACTIVA de persona ACTIVA', async () => {
+    ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValueOnce({ id: 'sv_admin' })
+    await checkOrganizationAccess(true)(mockReq as Request, mockRes as Response, mockNext)
+    expect(prisma.staffVenue.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ active: true, staff: { active: true } }) }),
+    )
+  })
+
+  it('🔴 checkOrganizationAccess: un superadmin de token sin fila activa NO pasa', async () => {
+    ;(mockReq as any).authContext.role = 'SUPERADMIN'
+    ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValueOnce(null)
+    await checkOrganizationAccess(false)(mockReq as Request, mockRes as Response, mockNext)
+    expect(statusMock).toHaveBeenCalledWith(403)
   })
 
   it('regression: no matching role → 403', async () => {
