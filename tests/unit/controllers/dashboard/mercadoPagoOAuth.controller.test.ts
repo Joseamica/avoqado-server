@@ -3,6 +3,7 @@ import * as guardService from '@/services/mercado-pago/merchant-guard.service'
 import * as oauthService from '@/services/mercado-pago/oauth.service'
 import * as connectionService from '@/services/mercado-pago/connection.service'
 import { userHasVenueAccess } from '@/services/staffOrganization.service'
+import { puedeAdministrarCobros } from '@/services/access/permisoDeCobros'
 import { UnauthorizedError, NotFoundError } from '@/errors/AppError'
 import type { Response } from 'express'
 import { prismaMock } from '../../../__helpers__/setup'
@@ -11,6 +12,7 @@ jest.mock('@/services/mercado-pago/merchant-guard.service')
 jest.mock('@/services/mercado-pago/oauth.service')
 jest.mock('@/services/mercado-pago/connection.service')
 jest.mock('@/services/staffOrganization.service')
+jest.mock('@/services/access/permisoDeCobros')
 
 function buildRes(): Response {
   const res: any = {}
@@ -27,6 +29,8 @@ beforeEach(() => {
   // Default: the authenticated staff HAS access to the venue. Individual
   // tests override this to false to exercise the access-denied path.
   ;(userHasVenueAccess as jest.Mock).mockResolvedValue(true)
+  // Por defecto también tiene el permiso de administrar cobros (`venues:manage`).
+  ;(puedeAdministrarCobros as jest.Mock).mockResolvedValue(true)
 })
 
 describe('initiate', () => {
@@ -128,6 +132,30 @@ describe('initiate', () => {
     const res = buildRes()
     await initiate(req, res)
     expect(res.status).toHaveBeenCalledWith(401)
+  })
+})
+
+describe('permiso para administrar cobros (Codex gpt-6-astra, 24-sep)', () => {
+  // 🔴 Bastaba PERTENECER al negocio: un mesero podía conectar la cuenta de Mercado Pago de otra
+  // persona o desconectar la del negocio. Ahora se exige `venues:manage`, igual que el resto de la
+  // administración de comercios en línea.
+  it('🔴 un mesero (sin venues:manage) NO puede iniciar la conexión', async () => {
+    ;(puedeAdministrarCobros as jest.Mock).mockResolvedValue(false)
+    const req: any = { query: { venueId: 'v_1', ecommerceMerchantId: 'em_1' }, authContext: { userId: 's_1' } }
+    const res = buildRes()
+    await initiate(req, res)
+    expect(puedeAdministrarCobros).toHaveBeenCalledWith('s_1', 'v_1')
+    expect(res.status).toHaveBeenCalledWith(403)
+    expect(oauthService.buildAuthUrl).not.toHaveBeenCalled()
+  })
+
+  it('🔴 un mesero NO puede desconectar la cuenta del negocio', async () => {
+    ;(puedeAdministrarCobros as jest.Mock).mockResolvedValue(false)
+    const req: any = { params: { venueId: 'v_1', merchantId: 'em_1' }, authContext: { userId: 's_1' } }
+    const res = buildRes()
+    await disconnect(req, res)
+    expect(res.status).toHaveBeenCalledWith(403)
+    expect(connectionService.clearCredentials).not.toHaveBeenCalled()
   })
 })
 

@@ -9,11 +9,13 @@ import { initiate } from '@/controllers/dashboard/mercadoPagoOAuth.controller'
 import * as oauthService from '@/services/mercado-pago/oauth.service'
 import * as guardService from '@/services/mercado-pago/merchant-guard.service'
 import { userHasVenueAccess } from '@/services/staffOrganization.service'
+import { puedeAdministrarCobros } from '@/services/access/permisoDeCobros'
 import type { Response } from 'express'
 
 jest.mock('@/services/mercado-pago/oauth.service')
 jest.mock('@/services/mercado-pago/merchant-guard.service')
 jest.mock('@/services/staffOrganization.service')
+jest.mock('@/services/access/permisoDeCobros')
 
 function buildRes(): Response {
   const res: any = {}
@@ -28,6 +30,8 @@ const baseQuery = { venueId: 'v_1', ecommerceMerchantId: 'em_1' }
 beforeEach(() => {
   jest.clearAllMocks()
   ;(userHasVenueAccess as jest.Mock).mockResolvedValue(true)
+  // Por defecto también tiene el permiso de administrar cobros (`venues:manage`).
+  ;(puedeAdministrarCobros as jest.Mock).mockResolvedValue(true)
   ;(guardService.getMercadoPagoMerchant as jest.Mock).mockResolvedValue({ id: 'em_1' })
   ;(oauthService.signState as jest.Mock).mockReturnValue('fake-state-token')
   ;(oauthService.buildAuthUrl as jest.Mock).mockReturnValue('https://auth.mercadopago.com.mx/authorization?state=fake-state-token')

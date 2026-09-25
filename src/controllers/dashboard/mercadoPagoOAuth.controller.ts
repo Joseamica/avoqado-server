@@ -22,6 +22,7 @@ import * as guardService from '@/services/mercado-pago/merchant-guard.service'
 import * as oauthService from '@/services/mercado-pago/oauth.service'
 import * as connectionService from '@/services/mercado-pago/connection.service'
 import { userHasVenueAccess } from '@/services/staffOrganization.service'
+import { puedeAdministrarCobros } from '@/services/access/permisoDeCobros'
 import { initiateQuerySchema, callbackQuerySchema, disconnectParamsSchema } from '@/schemas/dashboard/mercadoPagoOAuth.schema'
 import type { MercadoPagoOAuthState } from '@/services/mercado-pago/types'
 
@@ -65,6 +66,10 @@ export async function initiate(req: Request, res: Response) {
   // users who genuinely lack access to this venue.
   if (!(await userHasVenueAccess(staffId, venueId))) {
     return res.status(403).json({ success: false, error: 'No tienes acceso a este venue' })
+  }
+  // Pertenecer no basta: conectar la cuenta de cobro exige `venues:manage` (ver permisoDeCobros).
+  if (!(await puedeAdministrarCobros(staffId, venueId))) {
+    return res.status(403).json({ success: false, error: 'Necesitas permiso para administrar los cobros de este negocio.' })
   }
 
   try {
@@ -218,6 +223,10 @@ export async function disconnect(req: Request, res: Response) {
   // Authorize against real venue access before mutating credentials.
   if (!(await userHasVenueAccess(staffId, venueId))) {
     return res.status(403).json({ success: false, error: 'No tienes acceso a este venue' })
+  }
+  // Pertenecer no basta: desconectar la cuenta de cobro exige `venues:manage` (ver permisoDeCobros).
+  if (!(await puedeAdministrarCobros(staffId, venueId))) {
+    return res.status(403).json({ success: false, error: 'Necesitas permiso para administrar los cobros de este negocio.' })
   }
 
   try {
