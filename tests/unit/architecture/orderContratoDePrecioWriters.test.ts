@@ -39,7 +39,12 @@ function llamada(lineas: string[], i: number): string {
 /** Nombre de la función de primer nivel que contiene la línea i (la declaración más cercana hacia arriba). */
 function funcionQueContiene(lineas: string[], i: number): string | null {
   for (let j = i; j >= 0; j--) {
-    const m = lineas[j].match(/^(?:export\s+)?(?:async\s+)?function\s+(\w+)/) ?? lineas[j].match(/^(?:export\s+)?const\s+(\w+)\s*=\s*async/)
+    // F6 (revisión final): cualquier `const nombre =` de primer nivel cuenta, no sólo
+    // `= async` — un escritor declarado como `export const foo: Tipo = (...) => {}` (sin
+    // "async" pegado al "=", por una anotación de tipo de por medio, o simplemente síncrono)
+    // se perdía antes como `funcion: null`, lo que lo dejaba SIEMPRE fuera de
+    // REESCRITURA_AUTORIZADA sin importar su nombre real.
+    const m = lineas[j].match(/^(?:export\s+)?(?:async\s+)?function\s+(\w+)/) ?? lineas[j].match(/^(?:export\s+)?const\s+(\w+)\s*=/)
     if (m) return m[1]
   }
   return null

@@ -147,6 +147,10 @@ describe('ingestDeliveryOrder', () => {
     expect(callArg.create.contratoDePrecio).toBe('IVA_INCLUIDO') // IVA por producto (plan 2)
     expect(callArg.create.total.toString()).toBe('90') // saleAmount + merchantFees, SIN propina
     expect(callArg.create.tipAmount.toString()).toBe('10')
+    // T4-minor (IVA por producto, plan 2): el `update:` del upsert NUNCA toca el contrato —
+    // reingerir un pedido (reintento del webhook) no puede reabrir ni cambiar lo que el `create:`
+    // ya fijó una sola vez.
+    expect(callArg.update).not.toHaveProperty('contratoDePrecio')
   })
 
   it('lanza si el venue del channel link no existe', async () => {
