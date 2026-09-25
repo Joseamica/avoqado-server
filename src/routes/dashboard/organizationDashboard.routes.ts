@@ -1563,8 +1563,7 @@ router.post(
   '/:orgId/users/:userId/reset-password',
   authenticateTokenMiddleware,
   checkOrgAccess,
-  // Owner-only: resetting another user's password returns a temporary password and
-  // is a full account-takeover primitive. checkOrgAccess alone only proves org
+  // Owner-only: aunque ya no devuelve contraseña (decisión B), manda correos a nombre del negocio. checkOrgAccess alone only proves org
   // membership, so without this ANY member (a cashier/waiter) could reset the OWNER.
   requireOrgOwner,
   async (req: Request, res: Response, next: NextFunction) => {
@@ -1574,9 +1573,14 @@ router.post(
 
       const result = await organizationDashboardService.resetUserPassword(orgId, req.params.userId, authContext?.userId)
 
+      // Decisión B (24-sep): el dueño ya no recibe contraseña; le llega un enlace al correo del empleado.
       res.json({
         success: true,
-        data: result,
+        data: {
+          emailSent: result.emailSent,
+          email: result.email,
+          message: `Le enviamos a ${result.email} un enlace para elegir una contraseña nueva. Vence en 1 hora.`,
+        },
       })
     } catch (error) {
       next(error)

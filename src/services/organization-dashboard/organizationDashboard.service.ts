@@ -18,7 +18,7 @@ import { Prisma, StaffRole } from '@prisma/client'
 import { endOfDay, endOfMonth, format, startOfDay, subDays } from 'date-fns'
 import { formatInTimeZone, fromZonedTime, toZonedTime } from 'date-fns-tz'
 import { localWallClock, utcTs } from '../../utils/sqlDates'
-import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError, ServiceUnavailableError } from '../../errors/AppError'
 import { ROLE_HIERARCHY } from '../../lib/permissions'
 import {
   DEFAULT_TIMEZONE,
@@ -33,7 +33,7 @@ import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
 import { countUpdatedTerminals, scopedTerminalWhere } from '../shared/terminalScopedWrites'
 import { computeTerminalMigration, type MigrationCommandLike } from '../dashboard/terminals.superadmin.service'
-import { cerrarSesionesNuevasPorCambioDeContrasena } from '../../utils/passwordChangeGuard'
+import { enmascararCorreo, enviarEnlaceDeRestablecimiento } from '../dashboard/enlaceDeRestablecimiento'
 
 // Types for organization dashboard
 export interface OrgCategoryBreakdown {
@@ -2960,75 +2960,56 @@ class OrganizationDashboardService {
   // ADMIN PASSWORD RESET
   // ==========================================
 
-  async resetUserPassword(orgId: string, userId: string, performedBy?: string) {
-    // Membresía VIGENTE en la org. Sin `isActive`, el dueño de la org A podía resetear la
-    // contraseña (global) de alguien que ya se fue y hoy trabaja en la org B: apropiación de
-    // cuenta (IDOR cross-tenant, 2026-09-01). 404 para no confirmar la existencia del id.
+  async resetUserPassword(orgId: string, userId: string, performedBy?: string, venueId?: string) {
+    // 🔴 DECISIÓN DEL FOUNDER (24-sep, opción B tras la 3ª auditoría de Codex) — sustituye la opción C del
+    // 1-sep: el dueño ya NO recibe una contraseña temporal. Se manda al correo del EMPLEADO el mismo enlace del
+    // «olvidé mi contraseña», y el dueño sólo ve a dónde se fue (enmascarado). La contraseña es UNA por persona
+    // (`Staff.password`), así que cualquier candado sobre QUIÉN puede recibirla se podía fabricar (R1: el dueño
+    // de A le creaba una sucursal a la víctima). Con el enlace, lo peor que logra es que a la víctima le llegue
+    // un correo. Para echar a alguien que se fue, se da de BAJA: cada request revisa la asignación activa.
     //
-    // 🔴 RIESGO ACEPTADO por el founder (2026-09-01, opción C): la contraseña es UNA por persona
-    // (`Staff.password`), así que un OWNER que resetea a un empleado activo en DOS orgs obtiene
-    // acceso a la otra con la contraseña temporal. Medido en producción ese día: 7 cuentas con
-    // acceso a 2+ organizaciones (1 nuestra, 1-2 de clientes reales). Mitiga: owner-only en las
-    // tres rutas, la víctima queda fuera al instante (sello `lastPasswordReset` + cierre de
-    // sesiones) y el reset queda en ActivityLog con quién lo hizo. Si se reabre: (B) rechazar el
-    // reset cuando la persona tenga otra org activa, o (A) enlace de restablecimiento por correo
-    // en vez de contraseña temporal en pantalla.
-    // 🔴 Y la PERSONA activa: una cuenta inactiva (la provisional de una invitación que nadie ha
-    // aceptado, o alguien dado de baja) no se resetea — no hay a quién devolverle el acceso.
-    const staffOrg = await prisma.staffOrganization.findFirst({
-      // 🔴 R1 (Codex, 2ª pasada): además, que TRABAJE en una sucursal de ESTA organización. Una
-      // invitación que nadie aceptó no crea esa asignación — cubre también las membresías viejas
-      // que las invitaciones dejaban activas antes de aceptar.
+    // Membresía VIGENTE y trabajo activo en ESTA organización (404 para no confirmar que el id existe).
+    const membresia = await prisma.staffOrganization.findFirst({
       where: {
         staffId: userId,
         organizationId: orgId,
         isActive: true,
         staff: { active: true, venues: { some: { active: true, venue: { organizationId: orgId } } } },
       },
-      select: { id: true },
+      select: { id: true, staff: { select: { id: true, email: true, firstName: true, emailVerified: true } } },
     })
 
-    if (!staffOrg) {
+    if (!membresia?.staff) {
       throw new NotFoundError('El usuario no pertenece a esta organización')
     }
+    const persona = membresia.staff
 
-    // Generate a temp password
-    const tempPassword = Math.random().toString(36).slice(-8)
-    const bcrypt = await import('bcryptjs')
-    const hashedPassword = await bcrypt.hash(tempPassword, 12)
+    // Igual que el «olvidé mi contraseña»: sólo a un correo que la persona demostró que es suyo (aceptar la
+    // invitación lo verifica). Aquí sí se dice por qué, porque quien pregunta es su dueño, no un desconocido.
+    if (persona.emailVerified === false) {
+      throw new ConflictError(
+        'Esta persona no ha verificado su correo, así que no podemos mandarle el enlace. Pídele que acepte su invitación.',
+      )
+    }
 
-    await prisma.staff.update({
-      where: { id: userId },
-      data: {
-        password: hashedPassword,
-        // 🔴 Sella el cambio para que las sesiones abiertas de esa persona se
-        // caigan (ver passwordChangeGuard). Este es JUSTO el caso que motivo el
-        // guard: el dueno le resetea la contrasena a un empleado que acaba de
-        // correr. Sin este sello el empleado se queda dentro desde su celular
-        // hasta que venza su refresh token — hasta 90 dias.
-        lastPasswordReset: new Date(),
-      },
-    })
+    const enviado = await enviarEnlaceDeRestablecimiento(persona)
+    if (!enviado) {
+      throw new ServiceUnavailableError('No pudimos enviar el correo con el enlace. Intenta de nuevo en unos minutos.')
+    }
 
-    // 🔴 Same reset, second lever (Task 7): also close the new `Session` rows
-    // (T1-T6), so a token carrying `sid` dies the same way as one that
-    // doesn't. Best-effort — see `cerrarSesionesNuevasPorCambioDeContrasena`.
-    await cerrarSesionesNuevasPorCambioDeContrasena(userId)
-
-    // Audit WHO reset WHOM. `performedBy` (the caller's staffId) is required for a
-    // meaningful trail — a password reset without it is unattributable. Authorization
-    // is enforced at the route layer (owner-only), never here.
+    // Quién pidió el enlace, para quién y en qué organización (en la COLUMNA: la bitácora del dueño filtra por ella).
     logAction({
       staffId: performedBy || null,
-      action: 'USER_PASSWORD_RESET',
+      action: 'USER_PASSWORD_RESET_LINK_SENT',
       entity: 'Staff',
       entityId: userId,
-      // En la COLUMNA, no sólo en data: la bitácora del dueño filtra por ella (Codex H9, 24-sep).
       organizationId: orgId,
+      // Si se pidió desde la pantalla de una sucursal, también sale en la bitácora de ESA sucursal.
+      ...(venueId ? { venueId } : {}),
       data: { organizationId: orgId },
     })
 
-    return { tempPassword, message: 'Password reset successfully. Share the temporary password securely.' }
+    return { emailSent: true, email: enmascararCorreo(persona.email) }
   }
 
   // ==========================================

@@ -23,8 +23,10 @@ jest.mock('../../../src/services/email.service', () => ({
     sendInvitationEmail: jest.fn().mockResolvedValue(true),
     sendTeamInvitation: jest.fn().mockResolvedValue(true),
     sendEmail: jest.fn().mockResolvedValue(true),
+    sendPasswordResetEmail: (...a: unknown[]) => mockEnlace(...a),
   },
 }))
+const mockEnlace = jest.fn().mockResolvedValue(true)
 
 const sufijo = `it${Date.now()}`
 const ids: { orgs: string[]; venues: string[]; staff: string[] } = { orgs: [], venues: [], staff: [] }
@@ -314,6 +316,27 @@ describe('la membresía nace al ACEPTAR, no al invitar', () => {
     await acceptInvitation(invB.token, { firstName: 'Vi', lastName: 'Ctima', password: 'SoloAceptoB1' })
 
     await expect(organizationDashboardService.resetUserPassword(orgId, victima.id, invitador)).rejects.toMatchObject({ statusCode: 404 })
+  })
+
+  it('🔴 R1 (3ª pasada) + decisión B: aunque el dueño FABRIQUE la membresía, el reset no le da la cuenta — sólo le llega un enlace a la víctima', async () => {
+    const hash = await bcrypt.hash('DeLaVictima1', 4)
+    const victima = await persona('victima-b', { password: hash, active: true })
+    // Lo que Codex reprodujo: el dueño de A le crea una asignación ACTIVA con PATCH /team/:staffId/venues.
+    await prisma.staffOrganization.create({
+      data: { staffId: victima.id, organizationId: orgId, role: 'MEMBER', isActive: true, isPrimary: false },
+    })
+    await prisma.staffVenue.create({ data: { staffId: victima.id, venueId, role: StaffRole.WAITER, active: true } })
+    mockEnlace.mockClear()
+
+    const r = await organizationDashboardService.resetUserPassword(orgId, victima.id, invitador)
+
+    const despues = await prisma.staff.findUniqueOrThrow({ where: { id: victima.id }, select: { password: true, resetToken: true } })
+    expect(despues.password).toBe(hash) // la contraseña NO cambió: el dueño no la conoce ni la puede elegir
+    expect(despues.resetToken).toMatch(/^[0-9a-f]{64}$/) // se guardó el HASH del token, nunca el token
+    expect(mockEnlace).toHaveBeenCalledTimes(1)
+    expect(mockEnlace.mock.calls[0][0]).toBe(victima.email) // el enlace va al correo de la PERSONA
+    expect(r).not.toHaveProperty('tempPassword')
+    expect(JSON.stringify(r)).not.toContain(victima.email)
   })
 
   it('N2: un miembro activo que acepta una invitación de DUEÑO queda como dueño también en la organización', async () => {

@@ -1009,29 +1009,23 @@ router.patch('/team/:staffId/employee-code', orgOwnerAccess, async (req: Request
 
 /**
  * POST /dashboard/organizations/:orgId/team/:staffId/reset-password
- * Reset password for a staff member and return a temporary password.
+ * Manda al correo del empleado un enlace para elegir una contraseña nueva (decisión B, 24-sep).
  */
 router.post('/team/:staffId/reset-password', orgOwnerAccess, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { orgId, staffId } = req.params
     const authContext = (req as any).authContext
 
+    // La bitácora la escribe el servicio (con la organización en su columna).
     const result = await organizationDashboardService.resetUserPassword(orgId, staffId, authContext?.userId)
 
-    logAction({
-      staffId: authContext?.userId || null,
-      venueId: null,
-      action: 'PASSWORD_RESET',
-      entity: 'Staff',
-      entityId: staffId,
-      data: { orgId },
-    })
-
+    // Decisión B (24-sep): el dueño ya no recibe contraseña; le llega un enlace al correo del empleado.
     res.json({
       success: true,
       data: {
-        temporaryPassword: result.tempPassword,
-        message: result.message,
+        emailSent: result.emailSent,
+        email: result.email,
+        message: `Le enviamos a ${result.email} un enlace para elegir una contraseña nueva. Vence en 1 hora.`,
       },
     })
   } catch (error) {
