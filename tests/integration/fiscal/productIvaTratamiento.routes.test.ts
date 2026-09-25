@@ -16,6 +16,7 @@ import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import app from '@/app'
 import prisma from '@/utils/prismaClient'
+import { traducirErrorDeIva } from '@/services/fiscal/normalizarIvaDeProducto'
 
 describe('PUT /mobile/venues/:venueId/products/:productId — IVA por producto (Tarea 5)', () => {
   let server: Server
@@ -121,5 +122,37 @@ describe('PUT /mobile/venues/:venueId/products/:productId — IVA por producto (
     expect(producto.ivaTratamiento).toBe('IVA_0')
     expect(Number(producto.taxRate)).toBe(0)
     expect(producto.objetoImp).toBe('02')
+  })
+
+  it('Minor 1 (Ruling R9): el TRIGGER mismo rechaza sin pasar por el normalizador, y traducirErrorDeIva lo vuelve el mismo 409', async () => {
+    // Bypass TOTAL de normalizarIvaDeProducto: escritura de MODELO directa (como haría un script
+    // de migración, un import masivo, o cualquier código futuro que olvide pasar por el
+    // normalizador). El flag sigue apagado (beforeEach lo borra) — el trigger de Postgres
+    // (`Product_ivaTratamiento_1_explicito`) tiene que rechazar por su cuenta, con el MISMO texto
+    // ('IVA_POR_PRODUCTO_APAGADO') que el normalizador ya conoce.
+    // Verificado en vivo (2026-09-25): el error real es un `PrismaClientUnknownRequestError` con
+    // `code`/`meta` en `undefined` — el P0001 sólo viaja como TEXTO dentro de `.message`
+    // ('...PostgresError { code: "P0001", message: "IVA_POR_PRODUCTO_APAGADO", ... }'). El match
+    // por substring de `traducirErrorDeIva` ya lo cubre sin cambios.
+    let errorReal: unknown
+    try {
+      await prisma.product.update({ where: { id: productId }, data: { ivaTratamiento: 'EXENTO' } })
+      throw new Error('se esperaba que el trigger rechazara la escritura')
+    } catch (e) {
+      errorReal = e
+    }
+
+    expect(() => traducirErrorDeIva(errorReal)).toThrow(
+      expect.objectContaining({
+        statusCode: 409,
+        code: 'IVA_POR_PRODUCTO_APAGADO',
+        message: expect.stringContaining('IVA por producto no está activado'),
+      }),
+    )
+
+    // La escritura NUNCA ocurrió: el producto sigue IVA_16 / 0.16.
+    const producto = await prisma.product.findUniqueOrThrow({ where: { id: productId } })
+    expect(producto.ivaTratamiento).toBe('IVA_16')
+    expect(Number(producto.taxRate)).toBe(0.16)
   })
 })

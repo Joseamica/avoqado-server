@@ -1,8 +1,11 @@
 // tests/unit/services/fiscal/normalizarIvaDeProducto.test.ts
 import { normalizarIvaDeProducto, traducirErrorDeIva } from '@/services/fiscal/normalizarIvaDeProducto'
 
-const actual16 = { ivaTratamiento: 'IVA_16' as const, taxRate: 0.16 }
-const actualExento = { ivaTratamiento: 'EXENTO' as const, taxRate: 0 }
+const actual16 = { ivaTratamiento: 'IVA_16' as const, taxRate: 0.16, objetoImp: '02' }
+const actualExento = { ivaTratamiento: 'EXENTO' as const, taxRate: 0, objetoImp: '02' }
+// Heredado: un producto que ya traía objetoImp '04' (BLOQUEADO_04) antes de esta feature — el
+// trigger lo permite tal cual (migración `iva_tratamiento_columnas`); ver Ruling R9.
+const actualBloqueado04 = { ivaTratamiento: 'BLOQUEADO_04' as const, taxRate: 0.16, objetoImp: '04' }
 
 describe('normalizarIvaDeProducto', () => {
   it('sin campos de IVA no escribe nada', () => {
@@ -56,6 +59,27 @@ describe('normalizarIvaDeProducto', () => {
 
   it('producto nuevo (sin actual) sin campos de IVA ⇒ nada (nace IVA_16 por el default)', () => {
     expect(normalizarIvaDeProducto({}, null, false)).toEqual({})
+  })
+
+  // Ruling R9: el dashboard reenvía el `objetoImp` de la fila en CADA guardado (prefiltrado del
+  // propio renglón, ProductWizardDialog.tsx). Eso NO es un cambio y no debe disparar ni un 409 ni
+  // una derivación — sea cual sea el objetoImp heredado, y esté la bandera prendida o no.
+  it('reenviar el objetoImp heredado (BLOQUEADO_04) sin tocar la tasa, con la bandera apagada ⇒ nada', () => {
+    expect(normalizarIvaDeProducto({ objetoImp: '04' }, actualBloqueado04, false)).toEqual({})
+  })
+
+  it('reenviar la tupla EXENTA completa (0 / 02), con la bandera encendida ⇒ nada', () => {
+    expect(normalizarIvaDeProducto({ objetoImp: '02', taxRate: 0 }, actualExento, true)).toEqual({})
+  })
+
+  it('reenviar la tupla IVA_16 completa (0.16 / 02) ⇒ nada', () => {
+    expect(normalizarIvaDeProducto({ objetoImp: '02', taxRate: 0.16 }, actual16, false)).toEqual({})
+  })
+
+  it('un objetoImp REALMENTE distinto al de la fila SÍ es un cambio y sigue vetado con la bandera apagada', () => {
+    expect(() => normalizarIvaDeProducto({ objetoImp: '01' }, actual16, false)).toThrow(
+      expect.objectContaining({ statusCode: 409, code: 'IVA_POR_PRODUCTO_APAGADO' }),
+    )
   })
 })
 

@@ -466,7 +466,7 @@ prismaMock.venueIvaPorProducto.count.mockResolvedValue(0)
 // `updateProduct` (dashboard) lee el tratamiento ACTUAL del producto dentro de la transacción
 // para normalizarIvaDeProducto. Default = el estado de fábrica de cualquier Product (IVA_16 /
 // 0.16), así que un test que no manda campos de IVA no ve ningún efecto de esto.
-prismaMock.product.findFirstOrThrow.mockResolvedValue({ ivaTratamiento: 'IVA_16', taxRate: 0.16 })
+prismaMock.product.findFirstOrThrow.mockResolvedValue({ ivaTratamiento: 'IVA_16', taxRate: 0.16, objetoImp: '02' })
 // Plan-tier gating (checkFeatureAccess middleware → getVenueBaseTier in
 // src/services/access/basePlan.service.ts) iterates the rows returned by
 // prisma.venueFeature.findMany. A bare jest.fn() resolves undefined and the

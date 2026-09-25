@@ -904,14 +904,14 @@ export async function updateProduct(
     // directo) — el trigger de Product deriva la tupla desde ese único valor.
     const actual = await tx.product.findFirstOrThrow({
       where: { id: productId, venueId },
-      select: { ivaTratamiento: true, taxRate: true },
+      select: { ivaTratamiento: true, taxRate: true, objetoImp: true },
     })
     const encendido = (await tx.venueIvaPorProducto.count({ where: { venueId } })) > 0
     Object.assign(
       updateData,
       normalizarIvaDeProducto(
         { ivaTratamiento: productFields.ivaTratamiento, taxRate: productFields.taxRate, objetoImp: productFields.objetoImp },
-        { ivaTratamiento: actual.ivaTratamiento, taxRate: Number(actual.taxRate) },
+        { ivaTratamiento: actual.ivaTratamiento, taxRate: Number(actual.taxRate), objetoImp: actual.objetoImp },
         encendido,
       ),
     )

@@ -18,7 +18,7 @@ const mismaTasa = (a: unknown, b: number) => Math.round(Number(a) * 10000) === M
  */
 export function normalizarIvaDeProducto(
   entrada: { ivaTratamiento?: unknown; taxRate?: unknown; objetoImp?: unknown },
-  actual: { ivaTratamiento: IvaTratamiento; taxRate: number } | null,
+  actual: { ivaTratamiento: IvaTratamiento; taxRate: number; objetoImp: string } | null,
   encendido: boolean,
 ): { ivaTratamiento?: IvaTratamiento } {
   const pideTratamiento = entrada.ivaTratamiento !== undefined && entrada.ivaTratamiento !== null
@@ -44,12 +44,23 @@ export function normalizarIvaDeProducto(
 
   if (!mandaTasa && !mandaObjeto) return {}
 
-  // Cliente viejo: si la tupla no cambia respecto a la fila, no se toca nada (un EXENTO no se degrada a IVA_0).
+  // Cliente viejo: si la tupla ENTERA (tasa Y objetoImp) no cambia respecto a la fila, no se toca
+  // nada. Ruling R9: reenviar el `objetoImp` ACTUAL de la fila (lo que hace el dashboard de hoy en
+  // CADA guardado, prefiltrado del propio renglón) no es un cambio — ni para un EXENTO (no se
+  // degrada a IVA_0) ni para un heredado BLOQUEADO_04 (el trigger ya lo permite: migración
+  // `iva_tratamiento_columnas`). Comparar sólo la tasa dejaba pasar un objetoImp distinto sin
+  // vetarlo, y comparar "manda objetoImp ⇒ siempre cambio" disparaba un 409 en cada edición normal.
   const tasaActual = actual?.taxRate ?? 0.16
-  const sinCambio = (!mandaTasa || mismaTasa(entrada.taxRate, tasaActual)) && !mandaObjeto
+  const objetoActual = actual?.objetoImp ?? '02'
+  const sinCambio = (!mandaTasa || mismaTasa(entrada.taxRate, tasaActual)) && (!mandaObjeto || entrada.objetoImp === objetoActual)
   if (sinCambio) return {}
 
-  const derivado = tratamientoDesdeTupla(mandaTasa ? Number(entrada.taxRate) : tasaActual, mandaObjeto ? String(entrada.objetoImp) : '02')
+  // Deriva con la parte que SÍ cambió y el valor de la FILA para la que no se mandó — nunca '02' a
+  // ciegas: un producto heredado BLOQUEADO_03/04 que sólo cambia la tasa no debe brincar a otro objeto.
+  const derivado = tratamientoDesdeTupla(
+    mandaTasa ? Number(entrada.taxRate) : tasaActual,
+    mandaObjeto ? String(entrada.objetoImp) : objetoActual,
+  )
   if (derivado === 'IVA_16') return { ivaTratamiento: 'IVA_16' }
   if (!encendido) throw new ConflictError(MENSAJES.IVA_POR_PRODUCTO_APAGADO, 'IVA_POR_PRODUCTO_APAGADO')
   // Encendido: una tupla vieja no distingue tasa 0 de exento ⇒ no se adivina.

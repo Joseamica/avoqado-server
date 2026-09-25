@@ -130,12 +130,13 @@ describe('Product SAT fiscal fields', () => {
       const createCall = prismaMock.product.create.mock.calls[0][0]
       expect(createCall.data.satProductKey).toBe('81111500')
       expect(createCall.data.satUnitKey).toBe('E48')
-      // Tarea 5 (IVA por producto): `objetoImp` ya no se escribe directo — sólo
-      // `ivaTratamiento` (el trigger de Product deriva la tupla). '02' con la tasa por
-      // default (0.16) es exactamente la tupla de IVA_16, así que normalizarIvaDeProducto
-      // lo colapsa a ese único valor; el `objetoImp` de la fila sigue siendo '02' (ver la
-      // aserción sobre `result` más abajo, que lee el producto YA escrito).
-      expect(createCall.data.ivaTratamiento).toBe('IVA_16')
+      // Tarea 5 (IVA por producto) + Ruling R9: `objetoImp` ya no se escribe directo — sólo
+      // `ivaTratamiento` (el trigger de Product deriva la tupla), y SÓLO cuando cambia algo
+      // respecto a la fila. Al crear, la "fila" es el default del esquema (IVA_16/0.16/'02');
+      // mandar '02' —el mismo objetoImp con el que nace todo producto— es un no-op fiscal: no
+      // se escribe ni `ivaTratamiento` ni `objetoImp`, y el default del esquema hace el trabajo.
+      // El `objetoImp` de la fila sigue siendo '02' (ver la aserción sobre `result` más abajo).
+      expect(createCall.data).not.toHaveProperty('ivaTratamiento')
       expect(createCall.data).not.toHaveProperty('objetoImp')
 
       // Assert the returned product contains them
@@ -174,24 +175,26 @@ describe('Product SAT fiscal fields', () => {
   // UPDATE
   // ──────────────────────────────────────────────────────────────
   describe('updateProduct — SAT fields', () => {
-    it('persists SAT fields when updating a product with them', async () => {
+    it('persists SAT fields when updating a product with them (reenviar el objetoImp PROPIO — heredado, no "02" — de la fila es un no-op)', async () => {
       const existing = makeMockProduct()
       const updated = makeMockProduct({
         name: 'Producto Test',
         satProductKey: '81111500',
         satUnitKey: 'H87',
-        objetoImp: '02',
+        objetoImp: '04',
       })
 
       prismaMock.product.findFirst.mockResolvedValue(existing)
+      // Ruling R9: el producto YA es heredado con objetoImp '04' (BLOQUEADO_04 — p.ej. una
+      // excepción fiscal que el negocio ya traía antes de esta feature; el trigger la permite
+      // tal cual, migración `iva_tratamiento_columnas`). El dashboard reenvía ESE MISMO objetoImp
+      // en cada guardado (ProductWizardDialog.tsx) — no es un cambio, y no debe escribir ni
+      // `objetoImp` ni `ivaTratamiento`. A propósito NO es '02' (el default): antes de R9, sólo
+      // el caso "coincide con el default" quedaba sin escribir; el caso heredado seguía
+      // reventando con un 409 en CADA guardado normal del dashboard.
+      prismaMock.product.findFirstOrThrow.mockResolvedValueOnce({ ivaTratamiento: 'BLOQUEADO_04', taxRate: 0.16, objetoImp: '04' })
       prismaMock.product.update.mockResolvedValue(updated)
 
-      // Tarea 5 (IVA por producto): `objetoImp` ya no es un campo SAT libre — pasa por
-      // normalizarIvaDeProducto, que lo veta si cambia la tupla fiscal y el negocio no tiene
-      // el flag encendido (default del mock: apagado). Se manda '02' — el mismo objetoImp que
-      // el tratamiento ACTUAL (IVA_16/0.16, default global del mock de `findFirstOrThrow`) — un
-      // no-op fiscal, para que esta prueba siga protegiendo lo que le toca: satProductKey y
-      // satUnitKey persisten independientemente del IVA.
       const result = await productService.updateProduct(
         'venue-xyz',
         'product-abc',
@@ -199,7 +202,7 @@ describe('Product SAT fiscal fields', () => {
           name: 'Producto Test',
           satProductKey: '81111500',
           satUnitKey: 'H87',
-          objetoImp: '02',
+          objetoImp: '04',
         },
         humanActor,
       )
@@ -207,15 +210,12 @@ describe('Product SAT fiscal fields', () => {
       const updateCall = prismaMock.product.update.mock.calls[0][0]
       expect(updateCall.data.satProductKey).toBe('81111500')
       expect(updateCall.data.satUnitKey).toBe('H87')
-      // Mandar `objetoImp` (aunque no cambie) fuerza la evaluación completa de la tupla en
-      // normalizarIvaDeProducto, que la resuelve a IVA_16 (el tratamiento ya vigente) — nunca
-      // escribe `objetoImp` directo.
       expect(updateCall.data).not.toHaveProperty('objetoImp')
-      expect(updateCall.data.ivaTratamiento).toBe('IVA_16')
+      expect(updateCall.data).not.toHaveProperty('ivaTratamiento')
 
       expect(result.satProductKey).toBe('81111500')
       expect(result.satUnitKey).toBe('H87')
-      expect(result.objetoImp).toBe('02')
+      expect(result.objetoImp).toBe('04')
     })
 
     it('REGRESSION — updating without SAT fields does not overwrite existing SAT values', async () => {
