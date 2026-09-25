@@ -8,6 +8,8 @@ import { prismaMock } from '../../__helpers__/setup'
 jest.mock('@/services/mercado-pago/merchant-guard.service')
 jest.mock('@/services/mercado-pago/oauth.service')
 jest.mock('@/services/mercado-pago/connection.service')
+// El regreso revalida el permiso de cobros (Codex H5); aquí el operador lo conserva.
+jest.mock('@/services/access/permisoDeCobros', () => ({ puedeAdministrarCobros: jest.fn(async () => true) }))
 
 function buildRes(): Response {
   const res: any = {}

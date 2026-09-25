@@ -120,6 +120,8 @@ function tpvUpdatedAudit() {
 beforeEach(() => {
   jest.clearAllMocks()
   terminals = freshTerminals()
+  // El resolutor de rol confirma que la persona siga ACTIVA (Codex H2, 24-sep).
+  prismaMock.staff.findUnique.mockResolvedValue({ active: true } as any)
 
   prismaMock.terminal.findFirst.mockImplementation((({ where }: any) =>
     Promise.resolve(terminals.find(t => matches(t, where)) ?? null)) as any)
