@@ -44,6 +44,7 @@ import {
 import { encryptToken } from '@/services/google-calendar/encryption.service'
 import { stopChannel } from '@/services/google-calendar/watch-channel.service'
 import prisma from '@/utils/prismaClient'
+import { motivoDeConcesionInvalidada } from '@/utils/passwordChangeGuard'
 
 const DASHBOARD_BASE = process.env.DASHBOARD_URL ?? 'https://dashboard.avoqado.io'
 
@@ -135,6 +136,11 @@ export async function oauthCallback(req: Request, res: Response, next: NextFunct
     } catch (err) {
       logger.warn('gcal oauth callback: invalid state JWT', { err: (err as Error).message })
       throw new BadRequestError('state inválido o expirado')
+    }
+    // Codex S5 (hermano de Mercado Pago): el state muere si la persona cambió su contraseña o cerró
+    // sus sesiones después de iniciar la conexión.
+    if (await motivoDeConcesionInvalidada(decoded.authUserId, (decoded as { iat?: number }).iat)) {
+      throw new BadRequestError('La sesión se cerró. Vuelve a conectar tu calendario.')
     }
 
     const tokens = await exchangeCodeForTokens(code)

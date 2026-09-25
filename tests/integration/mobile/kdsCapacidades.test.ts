@@ -135,6 +135,9 @@ describe('El DTO del KDS decide por las apps (Tarea 16)', () => {
     })
     orgId = org.id
     venueId = (await prisma.venue.create({ data: { organizationId: orgId, name: `V cap ${Date.now()}`, slug: `v-cap-${Date.now()}` } })).id
+    // Desde la etapa 1 de la pantalla de cocina (spec 2026-09-24), el POS sólo crea comandas si el negocio
+    // tiene una estación activa con pantalla. Esta suite prueba comandas del POS, así que la necesita.
+    await prisma.printStation.create({ data: { venueId, name: 'Cocina', hasKitchenDisplay: true } })
     link = await prisma.deliveryChannelLink.create({
       data: { venueId, provider: DeliveryProvider.UBER_EATS, externalLocationId: `store-cap-${Date.now()}`, webhookSecret: 'x' },
     })
@@ -173,6 +176,7 @@ describe('El DTO del KDS decide por las apps (Tarea 16)', () => {
       await prisma.venueTenderType.deleteMany({ where: { venueId } })
       await prisma.product.deleteMany({ where: { venueId } })
       await prisma.menuCategory.deleteMany({ where: { venueId } })
+      await prisma.printStation.deleteMany({ where: { venueId } })
       await prisma.staffVenue.deleteMany({ where: { staffId } })
       await prisma.venue.deleteMany({ where: { id: venueId } })
       await prisma.organization.deleteMany({ where: { id: orgId } })

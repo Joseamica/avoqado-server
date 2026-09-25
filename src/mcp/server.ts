@@ -70,6 +70,7 @@ import { registerMasterCatalogTools } from './tools/masterCatalog'
 import { resolveMasterCatalogAccess } from '@/services/master-catalog/masterCatalogAccess.service'
 import { buildMcpInstructions } from './instructions'
 import { registerHelpTools } from './tools/help'
+import { motivoDeSesionInvalidada } from '@/utils/passwordChangeGuard'
 
 /** Flags gating PlayTelecom / white-label-only tool groups, computed once per connection. */
 export interface ToolRegistrationFlags {
@@ -242,6 +243,9 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
     } else {
       const token = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')
       const payload = verifyMcpToken(token) // throws on bad / expired / wrong-audience → 401 below
+      // Codex S4: el mismo corte de sesión que en `provider.verifyAccessToken` (este es el camino del
+      // servidor de desarrollo, sin `requireBearerAuth`). El mensaje dice «token» → 401 abajo.
+      if (await motivoDeSesionInvalidada(payload.sub, payload.iat)) throw new Error('MCP token revoked by session cutoff')
       staffId = payload.sub
       activeOrg = payload.org
       scopes = payload.scp

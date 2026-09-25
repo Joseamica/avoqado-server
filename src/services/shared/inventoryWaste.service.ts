@@ -255,13 +255,17 @@ async function serializable<T>(operation: (tx: Prisma.TransactionClient) => Prom
 }
 
 export async function getWasteAccess(staffId: string, venueId: string): Promise<UserAccess> {
-  const { role } = await resolveUserRoleForVenue({ userId: staffId, targetVenueId: venueId })
-  if (!role) throw new ForbiddenError('Ya no tienes acceso a este establecimiento.', 'WASTE_ACCESS_REVOKED')
+  // 🔴 La cuenta se revisa ANTES que el rol. Desde 01d92eb6 (H2) el resolutor de rol ya no le da
+  // rol a una persona desactivada, así que en el orden inverso una cuenta dada de baja recibía
+  // «ya no tienes acceso a este establecimiento» en vez de «la cuenta ya no está activa». Los dos
+  // casos se rechazan igual; lo que cambia es que el cajero lea el motivo verdadero.
   const staff = await prisma.staff.findUnique({
     where: { id: staffId },
     select: { active: true },
   })
   if (!staff?.active) throw new ForbiddenError('La cuenta ya no está activa.', 'WASTE_ACCOUNT_INACTIVE')
+  const { role } = await resolveUserRoleForVenue({ userId: staffId, targetVenueId: venueId })
+  if (!role) throw new ForbiddenError('Ya no tienes acceso a este establecimiento.', 'WASTE_ACCESS_REVOKED')
   return getUserAccess(staffId, venueId)
 }
 

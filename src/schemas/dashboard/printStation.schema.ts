@@ -225,6 +225,14 @@ export const stationParamSchema = z.object({
     .passthrough(),
 })
 
+/** Casilla «Se atiende con pantalla de cocina». Estricto: sólo `enabled`. */
+export const setKitchenDisplaySchema = z.object({
+  body: z.object({ enabled: z.boolean() }).strict(),
+  params: z
+    .object({ venueId: z.string().min(1, 'El venue es requerido'), stationId: z.string().min(1, 'La estación es requerida') })
+    .passthrough(),
+})
+
 export type CreatePrinterInput = z.infer<typeof createPrinterSchema>['body']
 export type UpdatePrinterInput = z.infer<typeof updatePrinterSchema>['body']
 export type CreateStationInput = z.infer<typeof createStationSchema>['body']

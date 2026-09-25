@@ -87,6 +87,16 @@ describe('getAuthStatus', () => {
     expect(staffMock.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'staff-1' } }))
   })
 
+  it('🔴 Codex S2: an MCP token (same signing key) is NOT a dashboard session', async () => {
+    const { issueMcpToken } = await import('@/mcp/mcpToken')
+    const res = fakeResponse()
+
+    await getAuthStatus(request(issueMcpToken('staff-1', 'org-1', 600, 'cli', ['mcp:read'])), res)
+
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ authenticated: false, user: null }))
+    expect(staffMock.findUnique).not.toHaveBeenCalled()
+  })
+
   it('still answers unauthenticated with no token at all', async () => {
     const res = fakeResponse()
 

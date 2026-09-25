@@ -22,12 +22,15 @@ jest.mock('../../../src/config/swagger', () => ({ __esModule: true, setupSwagger
 import request from 'supertest'
 import jwt from 'jsonwebtoken'
 import { prismaMock } from '@tests/__helpers__/setup'
+import { simularSuperadminReal } from '@tests/__helpers__/venueRoleMock'
 
 const app = require('../../../src/app').default
 
 const PATH = '/api/v1/superadmin/launch-campaigns'
 
 function token(role: string) {
+  // El SUPERADMIN del token sólo vale si la base lo confirma (Codex H6/S5).
+  simularSuperadminReal(role === 'SUPERADMIN')
   return jwt.sign({ sub: 'user_test', orgId: 'org_test', venueId: 'venue_test', role }, process.env.ACCESS_TOKEN_SECRET as string, {
     expiresIn: '15m',
   })

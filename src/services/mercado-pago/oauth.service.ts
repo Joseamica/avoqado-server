@@ -33,12 +33,12 @@ function requireEnv(name: string): string {
 }
 
 export function signState(payload: MercadoPagoOAuthState): string {
-  const opts: SignOptions = { expiresIn: STATE_TTL_SECONDS }
+  const opts: SignOptions = { expiresIn: STATE_TTL_SECONDS, algorithm: 'HS256' }
   return jwt.sign(payload, requireEnv('OAUTH_STATE_SECRET'), opts)
 }
 
 export function verifyState(token: string): MercadoPagoOAuthState {
-  return jwt.verify(token, requireEnv('OAUTH_STATE_SECRET')) as MercadoPagoOAuthState
+  return jwt.verify(token, requireEnv('OAUTH_STATE_SECRET'), { algorithms: ['HS256'] }) as MercadoPagoOAuthState
 }
 
 /**

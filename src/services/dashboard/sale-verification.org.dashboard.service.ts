@@ -1454,7 +1454,10 @@ export async function editOrgSaleVerification(
             ? { reviewedById: null, reviewedAt: null, reviewNotes: null, rejectionReasons: [] }
             : nextStatus === 'COMPLETED'
               ? { ...reviewerStamp, rejectionReasons: [] }
-              : { ...reviewerStamp, reviewNotes: null, rejectionReasons: [] } // REJECTED (terminal): sin feedback de corrección
+              : // REJECTED (terminal): sin motivos de corrección, pero el PORQUÉ del rechazo sí queda en la venta.
+                // Asana 1218872033233773: antes se borraba y el motivo vivía sólo en la bitácora, así que la
+                // columna «Razón» del dashboard salía en «—». Gana el comentario explícito; si no, el motivo de la edición.
+                { ...reviewerStamp, reviewNotes: params.reviewNotes?.trim() || trimmedReason, rejectionReasons: [] }
 
     const sv = await tx.saleVerification.update({
       where: { id: existing.id },

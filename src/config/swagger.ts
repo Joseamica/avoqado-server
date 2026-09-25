@@ -3,6 +3,7 @@ import swaggerUi from 'swagger-ui-express'
 import { PORT } from './env' // Assuming PORT is exported from env.ts
 import { Request, Response, NextFunction } from 'express'
 import jwt from 'jsonwebtoken'
+import { esTokenDeLaApi } from '../utils/tokenDeLaApi'
 
 const swaggerOptions: swaggerJsdoc.Options = {
   definition: {
@@ -298,7 +299,8 @@ const swaggerAuthMiddleware = (req: Request, res: Response, next: NextFunction) 
     }
 
     // Verify the token
-    jwt.verify(token, process.env.ACCESS_TOKEN_SECRET!)
+    const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET!, { algorithms: ['HS256'] })
+    if (!esTokenDeLaApi(decoded)) throw new Error('Token no válido para esta API')
     next()
   } catch {
     // Clear cookie if it exists but is invalid

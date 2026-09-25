@@ -85,9 +85,16 @@ export const createKdsOrder = async (req: Request, res: Response, next: NextFunc
       items,
     })
 
+    // Sin pantalla de cocina no se guarda comanda (etapa 1). 200 y no 204: Android sólo mira el 2xx,
+    // iOS descarta el cuerpo y la caja de Windows lo llama dentro de runCatching.
+    if (order === null) {
+      return res.status(200).json({ success: true, data: null, created: false })
+    }
+
     res.status(201).json({
       success: true,
       data: order,
+      created: true,
     })
   } catch (error) {
     logger.error('Error in createKdsOrder controller:', error)

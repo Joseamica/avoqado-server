@@ -10,6 +10,7 @@ jest.mock('@/services/mercado-pago/oauth.service')
 jest.mock('@/services/mercado-pago/connection.service')
 // El regreso revalida el permiso de cobros (Codex H5); aquí el operador lo conserva.
 jest.mock('@/services/access/permisoDeCobros', () => ({ puedeAdministrarCobros: jest.fn(async () => true) }))
+jest.mock('@/utils/passwordChangeGuard', () => ({ motivoDeConcesionInvalidada: jest.fn(async () => null) }))
 
 function buildRes(): Response {
   const res: any = {}

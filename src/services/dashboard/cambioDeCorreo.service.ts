@@ -18,7 +18,7 @@ import prisma from '../../utils/prismaClient'
 import emailService from '../email.service'
 import logger from '@/config/logger'
 import { BadRequestError, ConflictError, NotFoundError, ServiceUnavailableError } from '../../errors/AppError'
-import { motivoDeSesionInvalidada } from '../../utils/passwordChangeGuard'
+import { motivoDeConcesionInvalidada } from '../../utils/passwordChangeGuard'
 import { logAction } from './activity-log.service'
 
 const VIGENCIA = '1h'
@@ -39,6 +39,16 @@ function llaveDelEnlace(): string {
 }
 
 const normalizar = (correo: string) => correo.trim().toLowerCase()
+
+/** La organización con la que se ata el asiento de bitácora (N4: sin ella el dueño no lo ve). */
+async function organizacionPrincipal(staffId: string): Promise<string | null> {
+  const primaria = await prisma.staffOrganization.findFirst({
+    where: { staffId, isActive: true },
+    orderBy: [{ isPrimary: 'desc' }, { joinedAt: 'asc' }],
+    select: { organizationId: true },
+  })
+  return primaria?.organizationId ?? null
+}
 
 async function correoOcupadoPorOtra(correo: string, staffId: string): Promise<boolean> {
   const duena = await prisma.staff.findUnique({ where: { email: correo }, select: { id: true } })
@@ -73,6 +83,16 @@ export async function solicitarCambioDeCorreo(staffId: string, correoPedido: str
     throw new ServiceUnavailableError('No pudimos enviar el correo de confirmación. Intenta de nuevo en unos minutos.')
   }
   logger.info('Cambio de correo pedido: enlace enviado al correo nuevo', { staffId })
+  // Hallazgo del /full-testing (25-sep): pedir el cambio no dejaba rastro. Si el enlace nunca se abre,
+  // la bitácora era la única forma de saber que alguien intentó mover la cuenta a otro buzón.
+  void logAction({
+    staffId: staff.id,
+    organizationId: await organizacionPrincipal(staff.id),
+    action: 'STAFF_EMAIL_CHANGE_REQUESTED',
+    entity: 'Staff',
+    entityId: staff.id,
+    data: { correoAnterior: staff.email, correoNuevo, via: 'enlace-al-correo-nuevo' },
+  })
   return { correoNuevo }
 }
 
@@ -95,7 +115,7 @@ export async function confirmarCambioDeCorreo(token: string): Promise<{ correoNu
   }
   // N1 (Codex): si la dueña cambió su contraseña o cerró todas sus sesiones DESPUÉS de pedirse el
   // cambio, el enlace muere — quien robó una sesión no se queda con el correo tras recuperarla.
-  if (await motivoDeSesionInvalidada(staff.id, enlace.iat)) {
+  if (await motivoDeConcesionInvalidada(staff.id, enlace.iat)) {
     throw new BadRequestError('Este enlace ya no es válido. Pide el cambio de correo otra vez.', 'EMAIL_CHANGE_LINK_STALE')
   }
   if (await correoOcupadoPorOtra(enlace.correoNuevo, staff.id)) {
@@ -112,14 +132,9 @@ export async function confirmarCambioDeCorreo(token: string): Promise<{ correoNu
   }
 
   // N4 (Codex): con su organización en la COLUMNA; sin ella la bitácora del cliente no la muestra.
-  const primaria = await prisma.staffOrganization.findFirst({
-    where: { staffId: staff.id, isActive: true },
-    orderBy: [{ isPrimary: 'desc' }, { joinedAt: 'asc' }],
-    select: { organizationId: true },
-  })
   void logAction({
     staffId: staff.id,
-    organizationId: primaria?.organizationId ?? null,
+    organizationId: await organizacionPrincipal(staff.id),
     action: 'STAFF_EMAIL_CHANGED',
     entity: 'Staff',
     entityId: staff.id,

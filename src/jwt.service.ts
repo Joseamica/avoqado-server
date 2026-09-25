@@ -1,4 +1,5 @@
 import jwt, { Secret, SignOptions } from 'jsonwebtoken'
+import { esTokenDeLaApi } from './utils/tokenDeLaApi'
 import { StaffRole } from '@prisma/client'
 import crypto from 'crypto'
 import dotenv from 'dotenv'
@@ -205,9 +206,10 @@ export function verifyAccessToken(token: string): AccessTokenPayload {
   const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET!, {
     algorithms: ['HS256'],
   }) as AccessTokenPayload
-  // An MCP-audience token must never authenticate against the dashboard / /api/v1.
-  if ((decoded as jwt.JwtPayload).aud === 'avoqado-mcp') {
-    throw new jwt.JsonWebTokenError('MCP token not valid for the dashboard API')
+  // Codex S2: la misma llave firma tokens que no son de acceso (MCP, selector de organización,
+  // clientes, consumidores, refresh de la TPV). Ninguno autentica contra la API.
+  if (!esTokenDeLaApi(decoded)) {
+    throw new jwt.JsonWebTokenError('Token no válido para esta API')
   }
   // Validaciones adicionales del payload si es necesario
   if (!decoded.sub || !decoded.orgId || !decoded.venueId || !decoded.role) {

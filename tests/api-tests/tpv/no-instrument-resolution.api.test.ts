@@ -79,6 +79,11 @@ let link: any
 
 beforeEach(() => {
   jest.clearAllMocks()
+  // `clearAllMocks` NO vacía la cola de `mockRejectedValueOnce`: si una prueba que la encola termina antes
+  // de llegar a `$transaction` (p. ej. un 429 de la cubeta de PIN), la falla se hereda a la siguiente y la
+  // suite sale roja o verde según el orden. Se vuelve al comportamiento por defecto del setup en cada prueba.
+  prismaMock.$transaction.mockReset()
+  prismaMock.$transaction.mockImplementation((callback: any) => callback(prismaMock))
   const ahora = new Date()
   fila = {
     id: 'row-1',
@@ -388,13 +393,16 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
     // DEV: 100 por minuto por IP (prod: 10 cada 15 min). Las de esta ruta con PIN cuentan; las respuestas del servicio dan igual.
     const agotadas: number[] = []
     let primer429: request.Response | null = null
-    for (let i = 0; i < 100; i++) {
+    // Se pide HASTA el primer 429, no exactamente 100: la ventana es fija de 1 min, y si el minuto se
+    // cumple a media corrida el contador vuelve a cero y 100 ya no alcanzan (salía rojo por el reloj).
+    // 250 cubre una vuelta completa de ventana. En cuanto hay 429, dejar de pedir.
+    for (let i = 0; i < 250 && !primer429; i++) {
       const res = await request(app)
         .post(RUTA)
         .set('Authorization', `Bearer ${tokenDeTerminal('staff-cashier', 'CASHIER')}`)
         .send(cuerpo({ supervisorPin: '1234' }))
       agotadas.push(res.status)
-      if (res.status === 429 && !primer429) primer429 = res
+      if (res.status === 429) primer429 = res
     }
     expect(agotadas.some(s => s === 429)).toBe(true) // el tope de esta misma ruta ya se alcanzó
     // Revisión final (17-sep, D): el 429 lleva `code` (la terminal decide por él) SIN perder `retryAfter` ni `Retry-After`.

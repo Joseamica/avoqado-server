@@ -355,7 +355,7 @@ export async function updateRolePermissions(
 /**
  * Delete custom permissions for a role (revert to defaults)
  */
-export async function deleteRolePermissions(venueId: string, role: StaffRole, modifierRole: StaffRole) {
+export async function deleteRolePermissions(venueId: string, role: StaffRole, modifierRole: StaffRole, performedBy?: string) {
   // Check hierarchy
   if (!canModifyRole(modifierRole, role)) {
     throw new ForbiddenError(`${modifierRole} cannot modify permissions for ${role}`)
@@ -370,6 +370,7 @@ export async function deleteRolePermissions(venueId: string, role: StaffRole, mo
   })
 
   logAction({
+    staffId: performedBy ?? null, // quién restableció el rol — sin esto el asiento no tenía autor
     venueId,
     action: 'ROLE_PERMISSIONS_RESET',
     entity: 'VenueRolePermission',

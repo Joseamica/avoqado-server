@@ -22,6 +22,7 @@ import prisma from '../../utils/prismaClient'
 import { simCustodyService } from '../../services/serialized-inventory/custody.service'
 import { SIM_CUSTODY_ERROR_CODES, SimCustodyError } from '../../lib/sim-custody-error-codes'
 import { esSuperadminDeLaSesion } from '../../services/access/rolVigente'
+import { ROLE_HIERARCHY } from '../../lib/permissions'
 
 // ==========================================
 // SCHEMAS (Zod, Spanish messages per project rule)
@@ -83,13 +84,21 @@ function respondSimCustodyError(res: Response, err: unknown): boolean {
 }
 
 async function requireOrgMembership(userId: string, orgId: string): Promise<StaffRole | null> {
-  // Returns the highest venue-role the user holds within this org, or null.
-  const sv = await prisma.staffVenue.findFirst({
-    where: { staffId: userId, venue: { organizationId: orgId } },
-    orderBy: { startDate: 'asc' },
-    select: { role: true },
+  // El rol MÁS ALTO que la persona tiene HOY en una sucursal de esta organización, o null.
+  // 🔴 Codex ronda 4: antes tomaba la fila más vieja aunque estuviera dada de baja, así que un gerente
+  // (o un superadmin) dado de baja seguía leyendo el timeline. SUPERADMIN no cuenta aquí: eso lo decide
+  // `esSuperadminDeLaSesion`, que es la única fuente de «superadmin de verdad».
+  // Roles DISTINTOS agrupados en PostgreSQL (son 9 como máximo): el máximo sale de todos, no de una muestra,
+  // y la consulta queda acotada (con `distinct`, Prisma cargaba TODAS las filas y agrupaba en memoria).
+  const filas = await prisma.staffVenue.groupBy({
+    by: ['role'],
+    where: { staffId: userId, active: true, staff: { active: true }, venue: { organizationId: orgId } },
+    orderBy: { role: 'asc' },
+    take: 20,
   })
-  return sv?.role ?? null
+  const roles = filas.map(f => f.role).filter(r => r !== StaffRole.SUPERADMIN)
+  if (roles.length === 0) return null
+  return roles.reduce((alto, r) => ((ROLE_HIERARCHY[r] ?? 0) > (ROLE_HIERARCHY[alto] ?? 0) ? r : alto))
 }
 
 function mapZodError(res: Response, err: z.ZodError) {

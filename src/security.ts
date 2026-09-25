@@ -1,6 +1,7 @@
 import { StaffRole } from '@prisma/client'
 export { StaffRole } // Re-export StaffRole
 import jwt from 'jsonwebtoken'
+import { esTokenDeLaApi } from './utils/tokenDeLaApi'
 import { Request, Response, NextFunction } from 'express'
 import { IncomingHttpHeaders } from 'http'
 import logger from './config/logger'
@@ -196,7 +197,10 @@ function authenticate(
   }
 
   try {
-    const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET) as AvoqadoJwtPayload
+    const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET, { algorithms: ['HS256'] }) as AvoqadoJwtPayload
+    if (!esTokenDeLaApi(decoded)) {
+      throw new Error('Token no válido para esta API.')
+    }
 
     // Validaciones adicionales del payload si es necesario (ej. campos requeridos)
     if (!decoded.sub || !decoded.orgId || !decoded.venueId || !decoded.role) {

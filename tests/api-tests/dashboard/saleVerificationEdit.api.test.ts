@@ -69,6 +69,8 @@ beforeAll(async () => {
  */
 const makeToken = (role: string) => {
   mirrorTokenRoleOnStaffVenue(role, VENUE_ID)
+  // El candado de organización exige membresía ACTIVA en la base (Codex ronda 3): la del token.
+  prismaMock.staffOrganization.findFirst.mockResolvedValue({ id: 'so-miembro' } as any)
   return jwt.sign(
     {
       sub: STAFF_ID,

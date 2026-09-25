@@ -7,7 +7,12 @@ import { prismaClientsStore } from './clientsStore'
 import { consumeAuthCode, peekAuthCodeChallenge, createRefreshToken, consumeRefreshToken, revokeRefreshToken } from './tokenStore'
 import { renderLoginPage } from './loginPage'
 import { ACCESS_TTL_SECONDS, MCP_RESOURCE_URL, MCP_SCOPES_SUPPORTED } from './config'
-import { InvalidGrantError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
+import { InvalidGrantError, InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
+import { motivoDeConcesionInvalidada, motivoDeSesionInvalidada } from '../../utils/passwordChangeGuard'
+
+// Codex S4: cambiar la contraseña o «cerrar sesión en todos mis dispositivos» mata también lo que el
+// asistente tiene guardado — el código sin canjear y el refresh de 30 días —, no sólo el dashboard.
+const SESION_CORTADA = 'la sesión se cerró (cambio de contraseña o cierre de sesiones); vuelve a conectar'
 
 export const provider: OAuthServerProvider = {
   get clientsStore() {
@@ -47,6 +52,7 @@ export const provider: OAuthServerProvider = {
     if (!data) throw new InvalidGrantError('invalid or expired authorization code')
     if (data.clientId !== client.client_id) throw new InvalidGrantError('code was issued to a different client')
     if (redirectUri !== undefined && redirectUri !== data.redirectUri) throw new InvalidGrantError('redirect_uri mismatch')
+    if (await motivoDeConcesionInvalidada(data.staffId, data.issuedAt)) throw new InvalidGrantError(SESION_CORTADA)
 
     const access_token = issueMcpToken(data.staffId, data.activeOrg, ACCESS_TTL_SECONDS, client.client_id, data.scopes)
     const { token: refresh_token } = await createRefreshToken({
@@ -62,6 +68,7 @@ export const provider: OAuthServerProvider = {
     const data = await consumeRefreshToken(refreshToken)
     if (!data) throw new InvalidGrantError('invalid or expired refresh token')
     if (data.clientId !== client.client_id) throw new InvalidGrantError('refresh token was issued to a different client')
+    if (await motivoDeConcesionInvalidada(data.staffId, data.issuedAt)) throw new InvalidGrantError(SESION_CORTADA)
 
     const grantedScopes = scopes && scopes.length ? scopes.filter(s => data.scopes.includes(s)) : data.scopes
     const access_token = issueMcpToken(data.staffId, data.activeOrg, ACCESS_TTL_SECONDS, client.client_id, grantedScopes)
@@ -83,7 +90,9 @@ export const provider: OAuthServerProvider = {
   },
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
-    const { sub, org, cid, scp, exp } = verifyMcpToken(token) // throws on bad/expired/wrong-audience
+    const { sub, org, cid, scp, exp, iat } = verifyMcpToken(token) // throws on bad/expired/wrong-audience
+    // Mismo corte y mismo margen que cualquier token de acceso (el `iat` va en segundos).
+    if (await motivoDeSesionInvalidada(sub, iat)) throw new InvalidTokenError(SESION_CORTADA)
     return {
       token,
       clientId: cid ?? sub, // dev-server tokens have no cid; fall back to the subject

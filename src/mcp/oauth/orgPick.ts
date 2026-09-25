@@ -1,7 +1,7 @@
 import jwt from 'jsonwebtoken'
 import { ACCESS_TOKEN_SECRET } from '@/config/env'
 import prisma from '@/utils/prismaClient'
-import { motivoDeSesionInvalidada } from '@/utils/passwordChangeGuard'
+import { motivoDeConcesionInvalidada } from '@/utils/passwordChangeGuard'
 
 /**
  * Org picker for the MCP OAuth consent flow. A connection is bound to ONE active
@@ -20,7 +20,7 @@ export function issueOrgPickToken(staffId: string): string {
  *
  * 🔴 H4 (Codex gpt-6-astra, 2ª pasada): firma y caducidad no bastan. Si la persona cambió su
  * contraseña o cerró sus sesiones DESPUÉS de emitirse el token, o la dieron de baja, ya no sirve —
- * las mismas reglas que cualquier sesión (`motivoDeSesionInvalidada`).
+ * el corte ESTRICTO de las concesiones diferidas (`motivoDeConcesionInvalidada`, sin margen).
  */
 export async function verifyOrgPickToken(token: string): Promise<string | null> {
   let decoded: { sub?: string; iat?: number }
@@ -35,7 +35,7 @@ export async function verifyOrgPickToken(token: string): Promise<string | null> 
   if (!decoded.sub) return null
   const staff = await prisma.staff.findUnique({ where: { id: decoded.sub }, select: { active: true } })
   if (!staff?.active) return null
-  if (await motivoDeSesionInvalidada(decoded.sub, decoded.iat)) return null
+  if (await motivoDeConcesionInvalidada(decoded.sub, decoded.iat)) return null
   return decoded.sub
 }
 

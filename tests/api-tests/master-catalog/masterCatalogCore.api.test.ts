@@ -74,6 +74,7 @@ import superadminCatalogRoutes from '@/routes/superadmin/masterCatalog.routes'
 import superadminRoutes from '@/routes/superadmin.routes'
 import './masterCatalogRealAdapters.api'
 import './masterCatalogProductionAuth.api'
+import { simularSuperadminReal } from '@tests/__helpers__/venueRoleMock'
 
 const base = '/api/v1/dashboard/organizations/org-pits/master-catalog'
 
@@ -223,11 +224,14 @@ describe('H1A venue master-catalog route surface', () => {
 
 describe('H1A superadmin master-catalog route surface', () => {
   const adminBase = '/api/v1/superadmin/master-catalog'
-  const adminToken = () =>
-    jwt.sign({ sub: 'staff-root', orgId: 'platform', venueId: 'platform', role: 'SUPERADMIN' }, process.env.ACCESS_TOKEN_SECRET!, {
+  const adminToken = () => {
+    // El SUPERADMIN del token sólo vale si la base lo confirma (Codex H6/S5).
+    simularSuperadminReal(true)
+    return jwt.sign({ sub: 'staff-root', orgId: 'platform', venueId: 'platform', role: 'SUPERADMIN' }, process.env.ACCESS_TOKEN_SECRET!, {
       algorithm: 'HS256',
       expiresIn: '1h',
     })
+  }
 
   it('is mounted only beneath the authenticated production superadmin router', async () => {
     await request(superadminApp(true)).get(`${adminBase}/organizations`).expect(401)

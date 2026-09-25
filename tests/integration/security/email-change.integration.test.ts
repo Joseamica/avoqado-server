@@ -141,3 +141,28 @@ describe('segunda pasada de Codex', () => {
     expect((await prisma.staff.findUniqueOrThrow({ where: { id: yo.id } })).email).toBe(yo.email)
   })
 })
+
+describe('tercera pasada (25-sep)', () => {
+  it('🔴 N1/H4: un cambio de contraseña 2 s DESPUÉS del enlace también lo mata (el margen de 5 s de las sesiones no aplica)', async () => {
+    const yo = await persona('n1b')
+    await solicitarCambioDeCorreo(yo.id, `n1b-ladron-${sufijo}@test.mx`)
+    const token = tokenDelCorreo()
+    await prisma.staff.update({ where: { id: yo.id }, data: { lastPasswordReset: new Date(Date.now() + 2_000) } })
+    await expect(confirmarCambioDeCorreo(token)).rejects.toMatchObject({ statusCode: 400 })
+    expect((await prisma.staff.findUniqueOrThrow({ where: { id: yo.id } })).email).toBe(yo.email)
+  })
+
+  it('🔴 PEDIR el cambio ya deja rastro en la bitácora, aunque el enlace nunca se abra', async () => {
+    const yo = await persona('pedido')
+    const nuevo = `pedido-nuevo-${sufijo}@test.mx`
+    await solicitarCambioDeCorreo(yo.id, nuevo)
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'STAFF_EMAIL_CHANGE_REQUESTED',
+        staffId: yo.id,
+        entityId: yo.id,
+        data: expect.objectContaining({ correoAnterior: yo.email, correoNuevo: nuevo }),
+      }),
+    )
+  })
+})

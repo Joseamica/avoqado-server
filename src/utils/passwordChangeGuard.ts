@@ -142,6 +142,38 @@ export async function motivoDeSesionInvalidada(
 }
 
 /**
+ * ¿Esta CONCESION diferida nacio antes del corte? Para lo que se guarda y se canjea despues:
+ * codigos y refresh del MCP, enlaces de cambio de correo, el pase del selector de organizacion.
+ *
+ * Dos diferencias con `motivoDeSesionInvalidada`, las dos a proposito (Codex N1/H4, S4):
+ *
+ * - **Sin el margen de 5 s.** El margen existe porque el `iat` de un JWT va en segundos enteros y
+ *   la sesion NUEVA que abre el propio cambio de contrasena nace en el mismo segundo que el corte.
+ *   Nadie emite una concesion diferida dentro de ese flujo, asi que el margen solo servia para que
+ *   un codigo emitido 4 s ANTES del cambio sobreviviera. Aqui la comparacion es estricta: lo que
+ *   nacio antes del corte (o en el mismo instante) muere.
+ * - **Falla CERRADO.** Si no se puede leer el corte, la concesion no se honra: la persona repite el
+ *   paso (vuelve a pedir el enlace, vuelve a conectar el asistente). Con las sesiones es al reves,
+ *   porque ahi fallar cerrado sacaria a todos los clientes a la vez.
+ *
+ * `emitida` puede ser una fecha (columna `createdAt`, ms) o el `iat` de un JWT en segundos.
+ */
+export async function motivoDeConcesionInvalidada(
+  staffId: string | undefined,
+  emitida: Date | number | undefined,
+): Promise<MotivoDeCorte | null> {
+  if (!staffId) return 'SESSIONS_REVOKED'
+  const emitidaMs = emitida instanceof Date ? emitida.getTime() : typeof emitida === 'number' ? emitida * 1000 : NaN
+  if (!Number.isFinite(emitidaMs)) return 'SESSIONS_REVOKED'
+  try {
+    const corte = await ultimoCambio(staffId)
+    return corte && emitidaMs <= corte.fecha.getTime() ? corte.motivo : null
+  } catch {
+    return 'SESSIONS_REVOKED'
+  }
+}
+
+/**
  * ¿Hay que echar esta sesion? Se usa en el middleware de autenticacion.
  *
  * Si la consulta falla, deja pasar: la base caida no puede convertirse en un

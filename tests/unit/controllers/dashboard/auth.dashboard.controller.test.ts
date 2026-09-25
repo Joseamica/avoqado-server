@@ -123,7 +123,7 @@ describe('Dashboard Auth Controller', () => {
 
       await authController.getAuthStatus(req as Request, res as Response)
 
-      expect(jwt.verify).toHaveBeenCalledWith('invalid-token', process.env.ACCESS_TOKEN_SECRET!)
+      expect(jwt.verify).toHaveBeenCalledWith('invalid-token', process.env.ACCESS_TOKEN_SECRET!, { algorithms: ['HS256'] })
       // Since jwt.verify throws, it should be caught and handled
       // Depending on exact error handling, this might clear cookie and return 200 or call next(error)
       // For this example, let's assume it clears cookie and returns 200 based on controller logic
@@ -227,7 +227,7 @@ describe('Dashboard Auth Controller', () => {
 
       await authController.getAuthStatus(req as Request, res as Response)
 
-      expect(jwt.verify).toHaveBeenCalledWith('valid-token', process.env.ACCESS_TOKEN_SECRET!)
+      expect(jwt.verify).toHaveBeenCalledWith('valid-token', process.env.ACCESS_TOKEN_SECRET!, { algorithms: ['HS256'] })
       expect(prisma.staff.findUnique).toHaveBeenCalledWith({
         where: { id: mockStaffId },
         select: expect.any(Object), // Verify exact select in actual test

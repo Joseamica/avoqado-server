@@ -212,14 +212,35 @@ async function comandaConVenta(venueId: string, k: { orderId: string | null }): 
 // MARK: - Create KDS Order
 
 /**
- * Create a new KDS order after payment succeeds.
+ * ¿El negocio atiende alguna estación con PANTALLA de cocina? (spec 2026-09-24, etapa 1).
+ * Sin ninguna estación ACTIVA con `hasKitchenDisplay`, las ventas de la caja no guardan comanda:
+ * nadie la vería y se acumulaban (Testarudo llegó a 3,068). La hoja impresa no depende de esto.
+ * `findFirst` con índice por venueId: una consulta acotada por venta.
  */
-export async function createKdsOrder(venueId: string, input: CreateKdsOrderInput): Promise<KdsOrderResponse> {
+export async function venueTienePantallaDeCocina(venueId: string): Promise<boolean> {
+  const estacion = await prisma.printStation.findFirst({
+    where: { venueId, active: true, hasKitchenDisplay: true },
+    select: { id: true },
+  })
+  return estacion !== null
+}
+
+/**
+ * Create a new KDS order after payment succeeds.
+ * Devuelve `null` cuando el negocio no tiene pantalla de cocina: no se guardó nada (etapa 1).
+ */
+export async function createKdsOrder(venueId: string, input: CreateKdsOrderInput): Promise<KdsOrderResponse | null> {
   if (!input.orderNumber) {
     throw new BadRequestError('Se requiere orderNumber')
   }
   if (!input.items || input.items.length === 0) {
     throw new BadRequestError('Se requiere al menos un item')
+  }
+
+  // Etapa 1: sin pantalla de cocina, la venta no guarda comanda. Los pedidos de Uber NO pasan por aquí.
+  if (!(await venueTienePantallaDeCocina(venueId))) {
+    logger.debug(`KDS: venta sin comanda — el venue ${venueId} no tiene estación con pantalla de cocina`)
+    return null
   }
 
   const order = await prisma.kdsOrder.create({

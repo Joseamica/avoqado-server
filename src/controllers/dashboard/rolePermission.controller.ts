@@ -160,7 +160,12 @@ export async function deleteRolePermissions(req: Request, res: Response, next: N
       return
     }
 
-    const result = await rolePermissionService.deleteRolePermissions(venueId, role as StaffRole, modifierRole as StaffRole)
+    const result = await rolePermissionService.deleteRolePermissions(
+      venueId,
+      role as StaffRole,
+      modifierRole as StaffRole,
+      (req as any).authContext?.userId,
+    )
 
     logger.info(`Role permissions deleted (reverted to defaults)`, {
       venueId,

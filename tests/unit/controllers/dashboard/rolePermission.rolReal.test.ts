@@ -36,7 +36,8 @@ it('🔴 borrar usa el rol resuelto en el venue (MANAGER), no el del token (OWNE
     resolvedRole: 'MANAGER',
   } as any
   await deleteRolePermissions(req, res(), jest.fn())
-  expect(borrar).toHaveBeenCalledWith('venue-B', 'ADMIN', 'MANAGER')
+  // El 4º argumento es el autor del asiento de bitácora (hallazgo del /full-testing del 25-sep).
+  expect(borrar).toHaveBeenCalledWith('venue-B', 'ADMIN', 'MANAGER', 'u1')
 })
 
 it('🔴 sin rol resuelto se rechaza: nunca cae al rol del token', async () => {

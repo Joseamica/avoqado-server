@@ -64,12 +64,12 @@ export function buildAuthUrl(state: string, forceConsent: boolean): string {
 }
 
 export function signState(payload: OAuthState): string {
-  const opts: SignOptions = { expiresIn: STATE_TTL_SECONDS }
+  const opts: SignOptions = { expiresIn: STATE_TTL_SECONDS, algorithm: 'HS256' }
   return jwt.sign(payload, requireEnv('OAUTH_STATE_SECRET'), opts)
 }
 
 export function verifyState(token: string): OAuthState {
-  return jwt.verify(token, requireEnv('OAUTH_STATE_SECRET')) as OAuthState
+  return jwt.verify(token, requireEnv('OAUTH_STATE_SECRET'), { algorithms: ['HS256'] }) as OAuthState
 }
 
 /**

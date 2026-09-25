@@ -14,6 +14,7 @@ export interface McpTokenPayload {
   cid?: string // OAuth client id (Phase 1); absent for dev-server tokens
   scp?: string[] // granted OAuth scopes; absent for dev-server/legacy tokens (→ treated as full)
   exp?: number // expiry (epoch seconds) — required by the SDK bearer middleware
+  iat?: number // emisión (segundos): el corte de sesión se compara contra esto
 }
 
 /**
@@ -42,5 +43,6 @@ export function verifyMcpToken(token: string): McpTokenPayload {
     cid: typeof cid === 'string' ? cid : undefined,
     scp: Array.isArray(scp) ? scp.filter((s): s is string => typeof s === 'string') : undefined,
     exp: decoded.exp,
+    iat: decoded.iat,
   }
 }

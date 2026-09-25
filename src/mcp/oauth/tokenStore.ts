@@ -13,6 +13,8 @@ export interface AuthCodeData {
   redirectUri: string
   scopes: string[]
   resource?: string
+  /** Sólo al LEER (`createdAt` de la fila): el corte de sesión se compara contra esto. */
+  issuedAt?: Date
 }
 
 export async function createAuthCode(d: AuthCodeData): Promise<{ code: string }> {
@@ -55,6 +57,7 @@ export async function consumeAuthCode(code: string): Promise<AuthCodeData | null
     redirectUri: row.redirectUri,
     scopes: row.scopes,
     resource: row.resource ?? undefined,
+    issuedAt: row.createdAt,
   }
 }
 
@@ -73,6 +76,8 @@ export interface RefreshData {
   staffId: string
   activeOrg: string
   scopes: string[]
+  /** Sólo al LEER (`createdAt` de la fila): el corte de sesión se compara contra esto. */
+  issuedAt?: Date
 }
 
 export async function createRefreshToken(d: RefreshData): Promise<{ token: string }> {
@@ -106,7 +111,7 @@ export async function consumeRefreshToken(token: string): Promise<RefreshData | 
   if (claimed.count !== 1) return null // missing, expired, or already consumed by a concurrent refresh
   const row = await prisma.mcpRefreshToken.findUnique({ where: { tokenHash } })
   if (!row) return null // defensive
-  return { clientId: row.clientId, staffId: row.staffId, activeOrg: row.activeOrg, scopes: row.scopes }
+  return { clientId: row.clientId, staffId: row.staffId, activeOrg: row.activeOrg, scopes: row.scopes, issuedAt: row.createdAt }
 }
 
 export async function revokeRefreshToken(token: string): Promise<void> {
