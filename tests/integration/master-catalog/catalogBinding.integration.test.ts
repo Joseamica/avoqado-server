@@ -3,6 +3,7 @@
  * Run only through the disposable H1 wrapper named in the Task 8 report.
  */
 import type { PrismaClient } from '@prisma/client'
+import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 import { randomBytes, randomUUID } from 'node:crypto'
 import type { CatalogCommandContext } from '@/types/master-catalog'
 import {
@@ -88,6 +89,8 @@ async function createVenueFixture(suffix: string, organization = organizationId,
     data: { venueId: venue.id, name: `Binding ${suffix}`, slug: `binding-${fixtureKey}-${suffix}`.toLowerCase(), availableDays: [] },
   })
   if (!withProduct) return { id: venue.id, categoryId: category.id, productId: null }
+  // Ruling R12: el producto local es al 8 %; el venue representa un negocio con IVA por producto encendido.
+  await encenderIvaPorProducto(venue.id, client)
   const product = await client.product.create({
     data: {
       venueId: venue.id,

@@ -6,6 +6,7 @@
  */
 import { DeliveryChannelLink, DeliveryProvider, OrderSource, Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 import logger from '@/config/logger'
 import { ingestDeliveryOrder } from '@/services/delivery-channels/core/deliveryOrderIngestion.service'
 import { applyDeliveryRefund } from '@/services/delivery-channels/core/applyDeliveryRefund.service'
@@ -136,6 +137,9 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
     orgId = org.id
     const v = await prisma.venue.create({ data: { organizationId: orgId, name: `V recon ${Date.now()}`, slug: `v-recon-${Date.now()}` } })
     venueId = v.id
+    // Ruling R12: hay renglones al 0 % para probar el reparto por tasa; el venue representa un negocio con IVA
+    // por producto encendido.
+    await encenderIvaPorProducto(venueId)
     link = await prisma.deliveryChannelLink.create({
       data: { venueId, provider: DeliveryProvider.UBER_EATS, externalLocationId: `store-recon-${Date.now()}`, webhookSecret: 'x' },
     })

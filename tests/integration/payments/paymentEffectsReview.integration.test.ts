@@ -2,6 +2,7 @@
 import { randomUUID } from 'crypto'
 import { Prisma, PrismaClient } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 import {
   enqueuePaymentEffect,
   enqueuePaymentCommissionInTx,
@@ -44,6 +45,8 @@ beforeEach(async () => {
     data: { id: organizationId, name: organizationId, email: organizationId + '@example.test', phone: '5500000000' },
   })
   venueId = (await prisma.venue.create({ data: { organizationId, name: organizationId, slug: organizationId } })).id
+  // Ruling R12: la categoría fixture usa un producto al 0 %; el venue representa un negocio con IVA por producto encendido.
+  await encenderIvaPorProducto(venueId)
   staffId = (await prisma.staff.create({ data: { email: organizationId + '@example.test', firstName: 'Review', lastName: 'Fixture' } })).id
   await prisma.staffVenue.create({ data: { staffId, venueId, role: 'CASHIER' } })
   orderId = (

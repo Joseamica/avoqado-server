@@ -1,4 +1,5 @@
 import type { PrismaClient } from '@prisma/client'
+import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 
 const DISPOSABLE_DATABASE = '/avoqado_h1a_test_20260808'
 
@@ -182,6 +183,8 @@ export async function createCatalogPublicationFixture(client: PrismaClient, suit
   const category = await client.menuCategory.create({
     data: { venueId: venue.id, name: 'Publication', slug: `publication-${key}`.toLowerCase() },
   })
+  // Ruling R12: el producto local es al 8 %; el venue representa un negocio con IVA por producto encendido.
+  await encenderIvaPorProducto(venue.id, client)
   const product = await client.product.create({
     data: {
       venueId: venue.id,

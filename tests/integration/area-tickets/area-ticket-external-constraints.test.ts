@@ -12,6 +12,7 @@ import {
 } from '@prisma/client'
 
 import prisma from '@/utils/prismaClient'
+import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 
 /**
  * Los dos CHECK de la ruta externa (`area_ticket_external_no_avoqado_circuit` en
@@ -50,6 +51,8 @@ describe('CHECK constraints de la ruta externa', () => {
       },
     })
     venueId = venue.id
+    // Ruling R12: el producto fixture es al 0 %; el venue representa un negocio con IVA por producto encendido.
+    await encenderIvaPorProducto(venueId)
 
     const staff = await prisma.staff.create({
       data: {

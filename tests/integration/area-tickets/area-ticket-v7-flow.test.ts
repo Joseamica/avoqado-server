@@ -26,6 +26,7 @@ import {
 } from '@/services/mobile/areaTicketV7.mobile.service'
 import { payCashOrder } from '@/services/mobile/order.mobile.service'
 import prisma from '@/utils/prismaClient'
+import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 
 describe('Area tickets v7 — PostgreSQL state machine', () => {
   const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -61,6 +62,8 @@ describe('Area tickets v7 — PostgreSQL state machine', () => {
       },
     })
     venueId = venue.id
+    // Ruling R12: el producto fixture es al 0 %; el venue representa un negocio con IVA por producto encendido.
+    await encenderIvaPorProducto(venueId)
 
     const staff = await prisma.staff.create({
       data: {

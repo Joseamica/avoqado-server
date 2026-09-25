@@ -12,6 +12,7 @@ import {
 import { runAreaTicketExternalReconciliation } from '@/jobs/areaTicketExternalReconciliation.job'
 import { issueAreaTicket } from '@/services/mobile/areaTicketV7.mobile.service'
 import prisma from '@/utils/prismaClient'
+import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 
 /**
  * Task 12 — el job de conciliación, contra Postgres real.
@@ -57,6 +58,8 @@ describe('runAreaTicketExternalReconciliation — contra Postgres real', () => {
       },
     })
     venueId = venue.id
+    // Ruling R12: el producto fixture es al 0 %; el venue representa un negocio con IVA por producto encendido.
+    await encenderIvaPorProducto(venueId)
 
     const staff = await prisma.staff.create({
       data: {

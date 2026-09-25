@@ -11,6 +11,7 @@
  *  - estado de resultados: el IVA de la compensación es el MISMO que posteó la póliza.
  */
 import prisma from '@/utils/prismaClient'
+import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 import { Prisma } from '@prisma/client'
 import { setupTestData, teardownTestData } from '@tests/helpers/test-data-setup'
 import { writeRefundInTx } from '@/services/shared/writeRefundInTx'
@@ -67,6 +68,9 @@ describe('lectores con un renglón retirado por el proveedor', () => {
     const [latte, pan] = testData.products
     producto = { vivo: latte.name, retirado: pan.name }
     await prisma.product.update({ where: { id: latte.id }, data: { taxRate: new Prisma.Decimal('0.16') } })
+    // Ruling R12: el reparto por tasa necesita un producto al 0 %; el venue representa un negocio con IVA
+    // por producto encendido (la fila cae con el venue en teardownTestData, FK en cascada).
+    await encenderIvaPorProducto(venueId)
     await prisma.product.update({ where: { id: pan.id }, data: { taxRate: new Prisma.Decimal('0') } })
     await seedBaseChart(venueId, { staffId })
     await seedDefaultMappings(venueId, { staffId })

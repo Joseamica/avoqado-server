@@ -2,6 +2,7 @@
 import { randomUUID } from 'crypto'
 import { PrismaClient } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 import {
   enqueuePaymentEffect,
   enqueuePaymentCommissionInTx,
@@ -30,6 +31,8 @@ beforeAll(async () => {
   other = new PrismaClient({ datasources: { db: { url: url.toString() } } })
   await prisma.organization.create({ data: { id: fixture, name: fixture, email: fixture + '@example.test', phone: '5500000000' } })
   venueId = (await prisma.venue.create({ data: { organizationId: fixture, name: fixture, slug: fixture } })).id
+  // Ruling R12: el producto fixture es al 0 %; el venue representa un negocio con IVA por producto encendido.
+  await encenderIvaPorProducto(venueId)
   staffId = (await prisma.staff.create({ data: { email: fixture + '@example.test', firstName: 'Effect', lastName: 'Fixture' } })).id
   await prisma.staffVenue.create({ data: { venueId, staffId, role: 'CASHIER' } })
 })

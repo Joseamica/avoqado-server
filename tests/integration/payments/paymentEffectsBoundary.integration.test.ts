@@ -2,6 +2,7 @@
 import { randomUUID } from 'crypto'
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 import { recordOrderPayment, recordFastPayment, ensureDigitalReceiptResponse } from '@/services/tpv/payment.tpv.service'
 import { postCashSaleToDrawer } from '@/services/shared/cashDrawerPosting'
 
@@ -29,6 +30,8 @@ beforeAll(async () => {
   await prisma.organization.create({ data: { id: fixture, name: fixture, email: fixture + '@example.test', phone: '5500000000' } })
   const venue = await prisma.venue.create({ data: { organizationId: fixture, name: fixture, slug: fixture } })
   venueId = venue.id
+  // Ruling R12: el producto rastreado es al 0 %; el venue representa un negocio con IVA por producto encendido.
+  await encenderIvaPorProducto(venueId)
   const staff = await prisma.staff.create({ data: { email: fixture + '@example.test', firstName: 'Payment', lastName: 'Fixture' } })
   staffId = staff.id
   await prisma.staffVenue.create({ data: { venueId, staffId, role: 'CASHIER' } })

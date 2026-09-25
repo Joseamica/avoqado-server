@@ -11,6 +11,7 @@
  * Vive junto a `sembrarCobroParaReembolso.ts`, que reutiliza (no hay carpeta `tests/integration/fiscal/`).
  */
 import prisma from '@/utils/prismaClient'
+import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 import logger from '@/config/logger'
 import { Prisma } from '@prisma/client'
 import { setupTestData, teardownTestData } from '@tests/helpers/test-data-setup'
@@ -42,6 +43,9 @@ describe('autoPosting — REFUND de reparto con fiscalByRateCents', () => {
     await prisma.venue.update({ where: { id: venueId }, data: { rfc } })
     ;[gravado, exento] = testData.products
     await prisma.product.update({ where: { id: gravado.id }, data: { taxRate: new Prisma.Decimal('0.16') } })
+    // Ruling R12: el reparto por tasa necesita un producto al 0 %; el venue representa un negocio con IVA
+    // por producto encendido (la fila cae con el venue en teardownTestData, FK en cascada).
+    await encenderIvaPorProducto(venueId)
     await prisma.product.update({ where: { id: exento.id }, data: { taxRate: new Prisma.Decimal('0') } })
     await seedBaseChart(venueId, { staffId })
     await seedDefaultMappings(venueId, { staffId })

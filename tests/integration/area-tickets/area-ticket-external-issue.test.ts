@@ -15,6 +15,7 @@ import {
 import { createStockBatch } from '@/services/dashboard/fifoBatch.service'
 import { issueAreaTicket } from '@/services/mobile/areaTicketV7.mobile.service'
 import prisma from '@/utils/prismaClient'
+import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 
 /**
  * Task 4 — la rama externa de `issueAreaTicket`. A diferencia de
@@ -58,6 +59,8 @@ describe('Emisión en un área con ruta externa', () => {
       },
     })
     venueId = venue.id
+    // Ruling R12: el producto fixture es al 0 %; el venue representa un negocio con IVA por producto encendido.
+    await encenderIvaPorProducto(venueId)
 
     const staff = await prisma.staff.create({
       data: {
