@@ -12,7 +12,14 @@ import { DEFAULT_PERMISSIONS, getEffectiveRolePermissions } from '../../lib/perm
 import { getRoleDisplayNames, DEFAULT_ROLE_DISPLAY_NAMES } from '../../services/dashboard/venueRoleConfig.dashboard.service'
 import { logAction } from '../../services/dashboard/activity-log.service'
 import { verifyAccessToken } from '../../jwt.service'
-import { mensajeDeCorte, motivoDeSesionInvalidada, revokeAllSessions, cerrarSesionesDeStaff } from '../../utils/passwordChangeGuard'
+import {
+  mensajeDeCorte,
+  motivoDeSesionInvalidada,
+  revokeAllSessions,
+  cerrarSesionesDeStaff,
+  cerrarSesionesNuevasPorCambioDeContrasena,
+  olvidarCorteEnCache,
+} from '../../utils/passwordChangeGuard'
 import { revokeSession } from '@/services/auth/session.service'
 import { invalidateSession } from '@/services/auth/sessionCache'
 import socketManager from '@/communication/sockets/managers/socketManager'
@@ -1005,6 +1012,23 @@ export const dashboardLogoutController = async (req: Request, res: Response) => 
   }
 }
 
+/**
+ * Cookies de sesión del dashboard tras reemitir tokens (cambio de sucursal, cambio de contraseña).
+ * maxAge igual a la vida del JWT (24 h; sin contexto de «recordarme» aquí).
+ */
+function ponerCookiesDeSesion(res: Response, accessToken: string, refreshToken: string): void {
+  const entornoRemoto = process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging'
+  const base = {
+    httpOnly: true,
+    secure: entornoRemoto,
+    sameSite: entornoRemoto ? ('none' as const) : ('lax' as const), // 'none' para cross-domain en producción y staging
+    path: '/',
+    // Sin domain: despliegue cross-domain (Cloudflare + Render)
+  }
+  res.cookie('accessToken', accessToken, { ...base, maxAge: 24 * 60 * 60 * 1000 })
+  res.cookie('refreshToken', refreshToken, { ...base, maxAge: 7 * 24 * 60 * 60 * 1000 })
+}
+
 export async function switchVenueController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId: targetVenueId } = req.body
@@ -1019,28 +1043,8 @@ export async function switchVenueController(req: Request, res: Response, next: N
     // Llamar al servicio para realizar la lógica y obtener los nuevos tokens
     const { accessToken, refreshToken } = await authService.switchVenueForStaff(staffId, orgId, targetVenueId)
 
-    // Cookie maxAge must match JWT expiration (24h default since no rememberMe context here)
-    const accessTokenMaxAge = 24 * 60 * 60 * 1000 // 24 hours
-    const refreshTokenMaxAge = 7 * 24 * 60 * 60 * 1000 // 7 days
-
     // Establecer las nuevas cookies, sobrescribiendo las anteriores
-    res.cookie('accessToken', accessToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging',
-      sameSite: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging' ? 'none' : 'lax', // Use 'none' for cross-domain in production and staging
-      maxAge: accessTokenMaxAge,
-      path: '/',
-      // No domain specified for cross-domain deployment (Cloudflare + Render)
-    })
-
-    res.cookie('refreshToken', refreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging',
-      sameSite: process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging' ? 'none' : 'lax', // Use 'none' for cross-domain in production and staging
-      maxAge: refreshTokenMaxAge,
-      path: '/', // Ajusta el path si tu ruta de refresh es específica
-      // No domain specified for cross-domain deployment (Cloudflare + Render)
-    })
+    ponerCookiesDeSesion(res, accessToken, refreshToken)
 
     res.status(200).json({ success: true, message: 'Contexto de venue actualizado correctamente.' })
   } catch (error) {
@@ -1107,6 +1111,9 @@ export async function updateAccountController(req: Request, res: Response, next:
       const saltRounds = 10
       const hashedPassword = await bcrypt.hash(updateData.password, saltRounds)
       updateFields.password = hashedPassword
+      // El mismo corte que el restablecimiento por correo: todo token emitido antes muere
+      // (Codex H7, 24-sep). Sin esto, quien ya tenía la sesión —el motivo típico del cambio— seguía dentro.
+      updateFields.lastPasswordReset = new Date()
     }
 
     // Actualizar el staff
@@ -1125,6 +1132,24 @@ export async function updateAccountController(req: Request, res: Response, next:
         updatedAt: true,
       },
     })
+
+    // Contraseña cambiada: cerrar las demás sesiones y darle tokens NUEVOS a ésta, emitidos después
+    // del corte, para no echar a la persona de la pantalla desde la que la cambió.
+    if (updateFields.lastPasswordReset) {
+      olvidarCorteEnCache(staffId)
+      await cerrarSesionesNuevasPorCambioDeContrasena(staffId)
+      const orgIdActual = req.authContext?.orgId
+      const venueIdActual = req.authContext?.venueId
+      if (orgIdActual && venueIdActual && venueIdActual !== 'pending' && !req.authContext?.isImpersonating) {
+        try {
+          const tokens = await authService.switchVenueForStaff(staffId, orgIdActual, venueIdActual)
+          ponerCookiesDeSesion(res, tokens.accessToken, tokens.refreshToken)
+        } catch (err) {
+          // Sin tokens nuevos la persona vuelve a iniciar sesión: incómodo, nunca inseguro.
+          logger.warn('[AUTH] No se pudo renovar la sesión tras cambiar la contraseña', { staffId, err })
+        }
+      }
+    }
 
     // Handle PIN update (stored on StaffVenue, not Staff)
     const venueId = req.authContext?.venueId

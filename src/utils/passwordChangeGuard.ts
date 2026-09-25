@@ -87,6 +87,14 @@ function corteEfectivo(reset: Date | null | undefined, revocacion: Date | null |
     : { fecha: revocacion, motivo: 'SESSIONS_REVOKED' }
 }
 
+/**
+ * Olvida el corte cacheado de UNA persona, para que su corte nuevo se vea ya en esta instancia
+ * (sin esto, las demás sesiones vivirían hasta `TTL_MS` más tras cambiar la contraseña).
+ */
+export function olvidarCorteEnCache(staffId: string): void {
+  cache.delete(staffId)
+}
+
 /** Solo para tests: deja la cache como recien arrancada. */
 export function _limpiarCacheDeCambiosDeContrasena(): void {
   cache.clear()
