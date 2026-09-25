@@ -108,3 +108,36 @@ it('🔴 el enlace NO sirve como sesión: no lo firma la llave de las sesiones',
   await solicitarCambioDeCorreo(yo.id, `sesion-${sufijo}@test.mx`)
   expect(() => jwt.verify(tokenDelCorreo(), process.env.ACCESS_TOKEN_SECRET!, { algorithms: ['HS256'] })).toThrow()
 })
+
+describe('segunda pasada de Codex', () => {
+  it('🔴 N3: si el correo NO se pudo enviar, pedir el cambio falla (no se promete un enlace que no existe)', async () => {
+    const yo = await persona('n3')
+    enviar.mockResolvedValueOnce(false)
+    await expect(solicitarCambioDeCorreo(yo.id, `n3-nuevo-${sufijo}@test.mx`)).rejects.toMatchObject({ statusCode: 503 })
+  })
+
+  it('🔴 N4: el cambio queda en la bitácora CON su organización (si no, el dueño no lo ve)', async () => {
+    const yo = await persona('n4')
+    const org = await prisma.organization.create({ data: { name: `N4 ${sufijo}`, email: `n4org-${sufijo}@test.mx`, phone: '5555555555' } })
+    await prisma.staffOrganization.create({
+      data: { staffId: yo.id, organizationId: org.id, role: 'OWNER', isActive: true, isPrimary: true },
+    })
+    await solicitarCambioDeCorreo(yo.id, `n4-nuevo-${sufijo}@test.mx`)
+    await confirmarCambioDeCorreo(tokenDelCorreo())
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'STAFF_EMAIL_CHANGED', staffId: yo.id, organizationId: org.id }),
+    )
+    await prisma.staffOrganization.deleteMany({ where: { organizationId: org.id } })
+    await prisma.organization.delete({ where: { id: org.id } })
+  })
+
+  it('🔴 N1: si la dueña cambió su contraseña DESPUÉS de pedirse el cambio, el enlace ya no sirve', async () => {
+    // Quien robó una sesión pide cambiar el correo a SU buzón; la dueña recupera su cuenta.
+    const yo = await persona('n1')
+    await solicitarCambioDeCorreo(yo.id, `n1-ladron-${sufijo}@test.mx`)
+    const token = tokenDelCorreo()
+    await prisma.staff.update({ where: { id: yo.id }, data: { lastPasswordReset: new Date(Date.now() + 60_000) } })
+    await expect(confirmarCambioDeCorreo(token)).rejects.toMatchObject({ statusCode: 400 })
+    expect((await prisma.staff.findUniqueOrThrow({ where: { id: yo.id } })).email).toBe(yo.email)
+  })
+})
