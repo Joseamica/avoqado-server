@@ -27,8 +27,13 @@ jest.mock('@/middlewares/authenticateToken.middleware', () => ({
 }))
 
 // White-label gate: pass-through in tests (access is exercised elsewhere)
+// …y deja en `req.access` el rol RESUELTO para este negocio, como el middleware real.
 jest.mock('@/middlewares/verifyAccess.middleware', () => ({
-  verifyAccess: () => (_req: any, _res: any, next: any) => next(),
+  verifyAccess: () => (req: any, _res: any, next: any) => {
+    const rol = req.headers['x-test-access-role']
+    req.access = { role: rol ?? req.authContext?.role }
+    next()
+  },
 }))
 
 import storesAnalysisRouter from '@/routes/dashboard/storesAnalysis.routes'
@@ -86,6 +91,30 @@ describe('Stores-Analysis GET /team', () => {
       expect.objectContaining({
         where: expect.objectContaining({ organizationId: ORG_ID, isActive: true }),
       }),
+    )
+  })
+
+  // 🔴 (Codex gpt-6-astra, 24-sep) El listado de TODA la organización (correos y teléfonos) se
+  // decidía con el rol del TOKEN: dueña de A con token de A + mesera en B ⇒ veía el personal de B.
+  it('🔴 token que dice OWNER pero en ESTE negocio es mesera (y no es dueña de la org): NO ve toda la organización', async () => {
+    prismaMock.staffOrganization.findFirst.mockResolvedValueOnce(null)
+    const res = await request(app)
+      .get(`/dashboard/venues/${VENUE_ID}/stores-analysis/team?scope=org`)
+      .set(...authHeader(ownerContext))
+      .set('x-test-access-role', 'WAITER')
+
+    expect(res.status).toBe(200)
+    expect(prismaMock.staffOrganization.findMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({ where: { organizationId: ORG_ID, isActive: true } }),
+    )
+  })
+
+  it('🔴 «dueña de la organización» exige su membresía ACTIVA', async () => {
+    await request(app)
+      .get(`/dashboard/venues/${VENUE_ID}/stores-analysis/team?scope=org`)
+      .set(...authHeader(ownerContext))
+    expect(prismaMock.staffOrganization.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ staffId: USER_ID, organizationId: ORG_ID, isActive: true }) }),
     )
   })
 })

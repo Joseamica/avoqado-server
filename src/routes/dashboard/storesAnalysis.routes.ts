@@ -762,13 +762,16 @@ router.get('/team', whiteLabelAccess, async (req: Request, res: Response, next: 
 
     // Check if the requesting user is an org-level OWNER
     const staffOrg = await prisma.staffOrganization.findFirst({
-      where: { staffId: userId, organizationId: orgId },
+      // 🔴 Membresía ACTIVA: un dueño dado de baja no ve el personal (Codex, 24-sep).
+      where: { staffId: userId, organizationId: orgId, isActive: true },
       select: { role: true },
     })
     const isOrgOwner = staffOrg?.role === 'OWNER'
 
-    // Also check venue-level role (OWNER or SUPERADMIN see all)
-    const venueRole = (req as any).authContext?.role
+    // Also check venue-level role (OWNER or SUPERADMIN see all).
+    // 🔴 El rol RESUELTO para ESTE negocio (`req.access`, de verifyAccess), no el del token: con el
+    // token de otra organización, una mesera de aquí veía correos y teléfonos de todo el personal.
+    const venueRole = (req as any).access?.role
     const isVenueOwner = venueRole === 'OWNER' || venueRole === 'SUPERADMIN'
 
     const canViewAllOrgStaff = isOrgOwner || isVenueOwner
