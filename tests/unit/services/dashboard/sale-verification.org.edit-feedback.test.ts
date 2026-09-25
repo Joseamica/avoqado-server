@@ -171,6 +171,62 @@ describe('editOrgSaleVerification — candado "Revisar por promotor"', () => {
     ).resolves.toBeDefined()
   })
 
+  // Asana 1218872033233773 (Isaac): al rechazar por «Editar», el motivo se iba SÓLO a la bitácora y la
+  // columna «Razón» del dashboard quedaba en «—». El motivo se guarda como comentario de la venta.
+  it('al pasar a REJECTED guarda el motivo de la edición como comentario de la venta', async () => {
+    mockedFindUnique.mockResolvedValue(existingSale({ status: 'COMPLETED' }))
+
+    await editOrgSaleVerification(ORG_ID, {
+      saleVerificationId: SV_ID,
+      editedById: EDITOR_ID,
+      status: 'REJECTED',
+      reason: '  Vinculación duplicada con otra venta  ',
+    })
+
+    expect(tx.saleVerification.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'REJECTED',
+          reviewNotes: 'Vinculación duplicada con otra venta',
+          rejectionReasons: [],
+        }),
+      }),
+    )
+  })
+
+  it('al pasar a REJECTED prefiere el comentario explícito sobre el motivo de la edición', async () => {
+    mockedFindUnique.mockResolvedValue(existingSale({ status: 'FAILED', reviewNotes: 'Falta imagen' }))
+
+    await editOrgSaleVerification(ORG_ID, {
+      saleVerificationId: SV_ID,
+      editedById: EDITOR_ID,
+      status: 'REJECTED',
+      reviewNotes: 'El cliente no quiso vincular la línea',
+      reason: 'Cierre de la venta',
+    })
+
+    expect(tx.saleVerification.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'REJECTED', reviewNotes: 'El cliente no quiso vincular la línea' }),
+      }),
+    )
+  })
+
+  it('editar sólo el monto de una venta ya REJECTED no reescribe su comentario', async () => {
+    mockedFindUnique.mockResolvedValue(existingSale({ status: 'REJECTED', reviewNotes: 'Vinculación duplicada' }))
+
+    await editOrgSaleVerification(ORG_ID, {
+      saleVerificationId: SV_ID,
+      editedById: EDITOR_ID,
+      status: 'REJECTED',
+      amount: 0,
+      reason: 'Ajuste de monto a cero',
+    })
+
+    const data = tx.saleVerification.update.mock.calls[0][0].data
+    expect(data).not.toHaveProperty('reviewNotes')
+  })
+
   it('NO exige comentario al pasar a COMPLETED', async () => {
     mockedFindUnique.mockResolvedValue(existingSale())
 
