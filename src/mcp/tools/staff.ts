@@ -1,4 +1,5 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { enlaceParaQuienInvita } from '@/services/dashboard/enlaceDeInvitacion'
 import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
@@ -449,7 +450,8 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
             name: `${firstName} ${lastName}`.trim(),
             role: mappedRole,
             emailSent: result.emailSent,
-            inviteLink: result.inviteLink ?? null,
+            // Sólo si el correo falló (para compartirlo a mano): ver `enlaceParaQuienInvita`.
+            inviteLink: enlaceParaQuienInvita(result),
           },
         })
       } catch (err) {

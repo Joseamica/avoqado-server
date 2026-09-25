@@ -2972,8 +2972,10 @@ class OrganizationDashboardService {
     // sesiones) y el reset queda en ActivityLog con quién lo hizo. Si se reabre: (B) rechazar el
     // reset cuando la persona tenga otra org activa, o (A) enlace de restablecimiento por correo
     // en vez de contraseña temporal en pantalla.
+    // 🔴 Y la PERSONA activa: una cuenta inactiva (la provisional de una invitación que nadie ha
+    // aceptado, o alguien dado de baja) no se resetea — no hay a quién devolverle el acceso.
     const staffOrg = await prisma.staffOrganization.findFirst({
-      where: { staffId: userId, organizationId: orgId, isActive: true },
+      where: { staffId: userId, organizationId: orgId, isActive: true, staff: { active: true } },
       select: { id: true },
     })
 

@@ -738,26 +738,11 @@ export async function inviteTeamMember(
         joinedById: inviterStaffId,
       },
     })
-  } else {
-    // Staff already exists — ensure they have StaffOrganization for this venue's org
-    await prisma.staffOrganization.upsert({
-      where: {
-        staffId_organizationId: {
-          staffId: staff.id,
-          organizationId: venue.organizationId,
-        },
-      },
-      update: { isActive: true, leftAt: null, role: orgRoleForEmail },
-      create: {
-        staffId: staff.id,
-        organizationId: venue.organizationId,
-        role: orgRoleForEmail,
-        isPrimary: false,
-        isActive: true,
-        joinedById: inviterStaffId,
-      },
-    })
   }
+  // 🔴 Cuenta que YA existe: NO se le crea ni reactiva membresía al invitar — nace cuando ACEPTA
+  // (`invitation.service`). Antes se hacía aquí, sin su consentimiento: el dueño quedaba habilitado
+  // para el reset de contraseña de su organización (temporal y GLOBAL) y podía quedarse con la
+  // cuenta de cualquiera por correo (Codex gpt-6-astra, 24-sep). De paso le pisaba el rol.
 
   // Send invitation email
   const inviteLink = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/invite/${invitation.token}`

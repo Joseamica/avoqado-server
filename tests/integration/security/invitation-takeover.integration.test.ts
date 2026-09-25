@@ -14,8 +14,17 @@ import bcrypt from 'bcrypt'
 import { StaffRole } from '@prisma/client'
 import prisma from '../../../src/utils/prismaClient'
 import { acceptInvitation } from '../../../src/services/invitation.service'
+import { inviteTeamMember } from '../../../src/services/dashboard/team.dashboard.service'
+import { organizationDashboardService } from '../../../src/services/organization-dashboard/organizationDashboard.service'
 
-jest.mock('../../../src/services/email.service', () => ({ __esModule: true, default: { sendInvitationEmail: jest.fn() } }))
+jest.mock('../../../src/services/email.service', () => ({
+  __esModule: true,
+  default: {
+    sendInvitationEmail: jest.fn().mockResolvedValue(true),
+    sendTeamInvitation: jest.fn().mockResolvedValue(true),
+    sendEmail: jest.fn().mockResolvedValue(true),
+  },
+}))
 
 const sufijo = `it${Date.now()}`
 const ids: { orgs: string[]; venues: string[]; staff: string[] } = { orgs: [], venues: [], staff: [] }
@@ -109,6 +118,24 @@ describe('cuenta EXISTENTE sin contraseña (Google)', () => {
 })
 
 describe('regresiones', () => {
+  it('🔴 persona NUEVA invitada desde el dashboard (cuenta PROVISIONAL creada por la invitación): acepta con su contraseña', async () => {
+    // Así la deja `team.dashboard.service` al invitar un correo sin cuenta: inactiva, sin verificar,
+    // sin contraseña, sin Google. El candado de S1 NO debe tratarla como una cuenta ajena.
+    const provisional = await persona('provisional', { active: false, emailVerified: false, password: null })
+    const token = await invitar(provisional.email)
+    const r = await acceptInvitation(token, { firstName: 'Nueva', lastName: 'Invitada', password: 'Provisional1' })
+    expect(r.user.id).toBe(provisional.id)
+    const despues = await prisma.staff.findUniqueOrThrow({ where: { id: provisional.id } })
+    expect(despues.password).not.toBeNull()
+    expect(despues.active).toBe(true)
+  })
+
+  it('🔴 una cuenta que YA se usó (entró alguna vez) no cuenta como provisional aunque no tenga contraseña', async () => {
+    const usada = await persona('usada-sin-pass', { active: true, emailVerified: true, password: null, lastLoginAt: new Date() })
+    const token = await invitar(usada.email)
+    await expect(acceptInvitation(token, { password: 'Atacante123' })).rejects.toMatchObject({ statusCode: 401 })
+  })
+
   it('cuenta con contraseña: aceptar con SU contraseña funciona sin sesión', async () => {
     const hash = await bcrypt.hash('MiContrasena1', 4)
     const con = await persona('con-contrasena', { password: hash })
@@ -176,5 +203,76 @@ describe('el rol en la organización sale de la INVITACIÓN, no de otros negocio
       where: { staffId_organizationId: { staffId: duena.id, organizationId: otraOrg.id } },
     })
     expect(suya.role).toBe('OWNER')
+  })
+})
+
+describe('la membresía nace al ACEPTAR, no al invitar', () => {
+  // 🔴 (Codex gpt-6-astra, 24-sep) Invitar a alguien que YA tiene cuenta le creaba/reactivaba al
+  // instante una membresía activa en la organización de quien invita. Con eso, sin que la persona
+  // aceptara nada, el dueño quedaba habilitado para el reset de contraseña de su organización — que
+  // devuelve una contraseña temporal GLOBAL: podía quedarse con la cuenta de cualquiera por correo.
+  it('🔴 invitar a alguien con cuenta NO le da membresía, y por eso NO se le puede resetear la contraseña', async () => {
+    const hash = await bcrypt.hash('SuyaPropia1', 4)
+    const ajena = await persona('ajena', { password: hash })
+
+    await inviteTeamMember(venueId, invitador, { email: ajena.email, firstName: 'Aj', lastName: 'Ena', role: StaffRole.WAITER })
+
+    const membresia = await prisma.staffOrganization.findUnique({
+      where: { staffId_organizationId: { staffId: ajena.id, organizationId: orgId } },
+    })
+    expect(membresia?.isActive ?? false).toBe(false)
+    await expect(organizationDashboardService.resetUserPassword(orgId, ajena.id, invitador)).rejects.toMatchObject({ statusCode: 404 })
+  })
+
+  it('al ACEPTAR (con su contraseña) sí queda como miembro activo', async () => {
+    const hash = await bcrypt.hash('AceptoYo123', 4)
+    const acepta = await persona('acepta', { password: hash })
+    await inviteTeamMember(venueId, invitador, { email: acepta.email, firstName: 'Ac', lastName: 'Epta', role: StaffRole.WAITER })
+    const inv = await prisma.invitation.findFirstOrThrow({
+      where: { email: acepta.email, organizationId: orgId },
+      orderBy: { createdAt: 'desc' },
+    })
+    await acceptInvitation(inv.token, { password: 'AceptoYo123' })
+    const membresia = await prisma.staffOrganization.findUniqueOrThrow({
+      where: { staffId_organizationId: { staffId: acepta.id, organizationId: orgId } },
+    })
+    expect(membresia.isActive).toBe(true)
+    expect(membresia.role).toBe('MEMBER')
+  })
+
+  it('ex-empleado (membresía INACTIVA) re-invitado: sigue inactiva hasta que acepta, y al aceptar se reactiva', async () => {
+    const hash = await bcrypt.hash('Regreso1234', 4)
+    const ex = await persona('ex', { password: hash })
+    await prisma.staffOrganization.create({
+      data: { staffId: ex.id, organizationId: orgId, role: 'MEMBER', isActive: false, isPrimary: false },
+    })
+    await inviteTeamMember(venueId, invitador, { email: ex.email, firstName: 'Ex', lastName: 'Emp', role: StaffRole.WAITER })
+    const antes = await prisma.staffOrganization.findUniqueOrThrow({
+      where: { staffId_organizationId: { staffId: ex.id, organizationId: orgId } },
+    })
+    expect(antes.isActive).toBe(false)
+    const inv = await prisma.invitation.findFirstOrThrow({
+      where: { email: ex.email, organizationId: orgId },
+      orderBy: { createdAt: 'desc' },
+    })
+    await acceptInvitation(inv.token, { password: 'Regreso1234' })
+    const despues = await prisma.staffOrganization.findUniqueOrThrow({
+      where: { staffId_organizationId: { staffId: ex.id, organizationId: orgId } },
+    })
+    expect(despues.isActive).toBe(true)
+  })
+
+  it('el reset de contraseña no aplica a una cuenta INACTIVA (p. ej. la provisional de una invitación sin aceptar)', async () => {
+    await inviteTeamMember(venueId, invitador, {
+      email: `sin-cuenta-${sufijo}@test.mx`,
+      firstName: 'Sin',
+      lastName: 'Cuenta',
+      role: StaffRole.WAITER,
+    })
+    const provisional = await prisma.staff.findUniqueOrThrow({ where: { email: `sin-cuenta-${sufijo}@test.mx` } })
+    ids.staff.push(provisional.id)
+    await expect(organizationDashboardService.resetUserPassword(orgId, provisional.id, invitador)).rejects.toMatchObject({
+      statusCode: 404,
+    })
   })
 })

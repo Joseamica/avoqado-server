@@ -62,6 +62,19 @@ describe('invite_staff (critical write, confirm-gated)', () => {
     expect(mockAudit.mock.calls[0][1]).toMatchObject({ action: 'STAFF_INVITED', entityId: 'inv-1' })
   })
 
+  it('🔴 si el correo SÍ salió, el enlace NO se le entrega a quien invita (Codex, 24-sep)', async () => {
+    // Con el enlace en mano, quien invita podía aceptar por la persona invitada.
+    mockInvite.mockResolvedValueOnce({ invitation: { id: 'inv-1' }, emailSent: true, isTPVOnly: false, inviteLink: 'http://x/invite' })
+    const out = parse(await call({ ...base, confirm: true }))
+    expect(out.invited.inviteLink).toBeNull()
+  })
+
+  it('si el correo NO salió, el enlace sí se entrega para compartirlo a mano (regresión)', async () => {
+    mockInvite.mockResolvedValueOnce({ invitation: { id: 'inv-1' }, emailSent: false, isTPVOnly: false, inviteLink: 'http://x/invite' })
+    const out = parse(await call({ ...base, confirm: true }))
+    expect(out.invited.inviteLink).toBe('http://x/invite')
+  })
+
   it('does not offer superadmin as a role option', () => {
     // the enum on the tool excludes superadmin — a sanity guard on the role map
     expect(['owner', 'admin', 'manager', 'cashier', 'waiter', 'kitchen', 'host', 'viewer']).not.toContain('superadmin')

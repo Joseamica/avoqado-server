@@ -124,6 +124,22 @@ export async function getInvitationByToken(token: string) {
   }
 }
 
+/**
+ * La cuenta PROVISIONAL que crea la propia invitación al invitar un correo sin cuenta
+ * (`team.dashboard.service`): inactiva, sin verificar, sin contraseña, sin Google y nunca usada.
+ * Ésa sí fija su contraseña al aceptar — es la persona nueva terminando su alta. Cualquier otra
+ * cuenta sin contraseña es REAL (Google, PIN) y sólo acepta desde su propia sesión.
+ */
+function esCuentaProvisional(staff: {
+  active: boolean
+  emailVerified: boolean
+  password: string | null
+  googleId: string | null
+  lastLoginAt: Date | null
+}): boolean {
+  return !staff.active && !staff.emailVerified && !staff.password && !staff.googleId && !staff.lastLoginAt
+}
+
 export async function acceptInvitation(
   token: string,
   userData: AcceptInvitationData,
@@ -240,7 +256,7 @@ export async function acceptInvitation(
         } else if (existingStaff.password && !userData.password) {
           // User has a password but didn't provide one - they need to verify
           throw new AppError('Se requiere contraseña para verificar tu identidad', 400)
-        } else if (!existingStaff.password && opciones.sesionStaffId !== existingStaff.id) {
+        } else if (!existingStaff.password && !esCuentaProvisional(existingStaff) && opciones.sesionStaffId !== existingStaff.id) {
           // 🔴 Cuenta existente SIN contraseña (toda cuenta de Google): el enlace no demuestra nada
           // —quien invita lo recibe en la respuesta y esta ruta es pública—. Antes se aceptaba la
           // contraseña que escribiera quien abriera el enlace: cualquier dueño podía invitar el
@@ -278,8 +294,10 @@ export async function acceptInvitation(
           data: updateData,
         })
 
-        // If cross-org invitation, create StaffOrganization for the new org
-        if (isCrossOrgInvitation) {
+        // La membresía en ESTA organización nace (o se reactiva) al ACEPTAR — invitar ya no la crea.
+        // Sólo si no es ya miembro activo: a un miembro activo no se le toca el rol.
+        const yaEsMiembroActivo = existingStaff.organizations.some(o => o.organizationId === invitation.organizationId)
+        if (!yaEsMiembroActivo) {
           // 🔴 El rol en ESTA organización sale de la INVITACIÓN, como en las otras altas
           // (`orgRoleForNewStaff`, `team.dashboard.service`, Google). Antes se derivaba de sus
           // sucursales en OTRAS organizaciones: dueña allá + invitada como mesera aquí ⇒ ADMIN aquí,

@@ -1,4 +1,5 @@
 import { NextFunction, Request, Response } from 'express'
+import { enlaceParaQuienInvita } from '@/services/dashboard/enlaceDeInvitacion'
 import * as teamService from '../../services/dashboard/team.dashboard.service'
 import { StaffRole } from '@prisma/client'
 
@@ -107,7 +108,8 @@ export async function inviteTeamMember(req: Request, res: Response, next: NextFu
       invitation: result.invitation,
       emailSent: result.emailSent,
       isTPVOnly: result.isTPVOnly,
-      inviteLink: result.inviteLink,
+      // Sólo si el correo falló (para compartirlo a mano): ver `enlaceParaQuienInvita`.
+      inviteLink: enlaceParaQuienInvita(result),
       pinConflicts: result.pinConflicts,
       venuesAssigned: result.venuesAssigned,
     })
