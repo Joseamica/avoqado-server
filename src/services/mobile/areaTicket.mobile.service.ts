@@ -514,6 +514,7 @@ export async function openAreaTicket(venueId: string, input: OpenAreaTicketInput
           subtotal: new Prisma.Decimal(subtotal),
           discountAmount: new Prisma.Decimal(itemDiscountTotal),
           taxAmount: new Prisma.Decimal(0),
+          contratoDePrecio: 'IVA_INCLUIDO',
           tipAmount: new Prisma.Decimal(0),
           total: new Prisma.Decimal(total),
           remainingBalance: new Prisma.Decimal(total),

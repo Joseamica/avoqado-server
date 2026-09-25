@@ -444,6 +444,7 @@ export async function createOrder(venueId: string, input: CreateOrderInput): Pro
       discountAmount: 0,
       taxAmount: 0,
       total: 0,
+      contratoDePrecio: 'IVA_INCLUIDO', // nace vacía; todo renglón que entra después trae IVA incluido (plan 2)
       version: 1,
     },
     include: {
@@ -1163,6 +1164,7 @@ export async function createOrderWithItems(
           subtotal: decimalFromPesos(grossSubtotalPesos),
           discountAmount: decimalFromPesos(discountAmountPesos),
           taxAmount: 0,
+          contratoDePrecio: 'IVA_INCLUIDO',
           tipAmount: 0,
           total: decimalFromPesos(totalPesos),
           paidAmount: 0,
@@ -3893,6 +3895,7 @@ export async function sellSerializedItem(
         paymentStatus: 'PENDING',
         subtotal: input.price,
         taxAmount: 0, // No tax by default for serialized items
+        contratoDePrecio: 'IVA_INCLUIDO',
         total: input.price,
         remainingBalance: input.price,
         createdById: staffId,

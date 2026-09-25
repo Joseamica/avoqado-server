@@ -144,6 +144,7 @@ describe('ingestDeliveryOrder', () => {
     // subtotal/total ya NO se derivan de los items — vienen de payment.saleAmount/merchantFees.
     expect(callArg.create.subtotal.toString()).toBe('90')
     expect(callArg.create.taxAmount.toString()).toBe('0') // México: IVA incluido, nunca fuente fiscal el del proveedor
+    expect(callArg.create.contratoDePrecio).toBe('IVA_INCLUIDO') // IVA por producto (plan 2)
     expect(callArg.create.total.toString()).toBe('90') // saleAmount + merchantFees, SIN propina
     expect(callArg.create.tipAmount.toString()).toBe('10')
   })

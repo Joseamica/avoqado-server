@@ -294,6 +294,7 @@ export async function assignTable(
       discountAmount: 0,
       taxAmount: 0,
       total: 0,
+      contratoDePrecio: 'IVA_INCLUIDO', // nace vacía; todo renglón que entra después trae IVA incluido (plan 2)
       version: 1,
     },
     include: {

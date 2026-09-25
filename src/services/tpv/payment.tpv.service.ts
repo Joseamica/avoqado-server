@@ -4884,6 +4884,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
             shiftId: shiftClaim?.shiftId ?? null,
             subtotal: totalAmount, // Base amount (without tip)
             taxAmount: 0, // No tax for fast payments
+            contratoDePrecio: 'IVA_INCLUIDO',
             total: totalAmount + tipAmount, // ✅ FIX: Total = subtotal + tax + tip
             // ✅ FIX: Include tip and paid amounts for fast orders
             tipAmount, // Tip amount from this payment

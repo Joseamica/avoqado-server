@@ -122,6 +122,7 @@ describe('order.mobile.service', () => {
           tipAmount: new Decimal(5),
           total: new Decimal(120),
           remainingBalance: new Decimal(120),
+          contratoDePrecio: 'IVA_INCLUIDO',
         }),
       }),
     )

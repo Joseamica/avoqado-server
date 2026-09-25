@@ -360,6 +360,7 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
           status: 'PENDING', // Will be updated to COMPLETED when payment confirms
           subtotal: amount / 100, // Convert centavos to decimal
           taxAmount: 0,
+          contratoDePrecio: 'IVA_INCLUIDO',
           total: totalAmount / 100,
           tipAmount: tip / 100,
           paidAmount: 0, // Will be updated when payment confirms

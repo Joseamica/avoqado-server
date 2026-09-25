@@ -52,6 +52,8 @@ describe('createOrder (orden de mostrador) — cae en el turno del NEGOCIO', () 
     expect(datosDeLaOrden().shiftId).toBe('turno-negocio')
     // Por NEGOCIO, no por quien la abre: el selector «Vendedor» cambia ese staffId en cada cobro.
     expect((prismaMock.shift.findFirst as jest.Mock).mock.calls[0][0].where).toEqual(TURNO)
+    // IVA por producto (plan 2): la orden de mostrador nace vacía con IVA incluido.
+    expect(datosDeLaOrden().contratoDePrecio).toBe('IVA_INCLUIDO')
   })
 
   it('sin turno abierto la orden SE CREA igual, sin turno', async () => {
@@ -106,6 +108,8 @@ describe('createOrderWithItems (TPV Cobrar) — la orden y su cobro comparten tu
     // medio, y entonces la orden y su cobro caerían en turnos distintos.
     expect(prismaMock.shift.findFirst).toHaveBeenCalledTimes(1)
     expect((prismaMock.shift.findFirst as jest.Mock).mock.calls[0][0].where).toEqual(TURNO)
+    // IVA por producto (plan 2): Cobrar V1 nace vacía con IVA incluido.
+    expect(datosDeLaOrden().contratoDePrecio).toBe('IVA_INCLUIDO')
   })
 
   it('sin turno abierto la venta SIGUE ocurriendo, con la orden sin turno', async () => {
@@ -175,6 +179,8 @@ describe('assignTable (abrir mesa) — cae en el turno del NEGOCIO', () => {
 
     expect(datosDeLaOrden().shiftId).toBe('turno-negocio')
     expect((prismaMock.shift.findFirst as jest.Mock).mock.calls[0][0].where).toEqual(TURNO)
+    // IVA por producto (plan 2): abrir mesa nace vacía con IVA incluido.
+    expect(datosDeLaOrden().contratoDePrecio).toBe('IVA_INCLUIDO')
   })
 
   it('sin turno abierto la mesa SE ABRE igual, sin turno', async () => {

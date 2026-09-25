@@ -567,6 +567,7 @@ export async function finalizeVenueCheckout(args: {
         subtotal: gross,
         discountAmount: 0,
         taxAmount: 0,
+        contratoDePrecio: 'IVA_INCLUIDO',
         tipAmount: 0,
         total: gross,
         paidAmount: gross,

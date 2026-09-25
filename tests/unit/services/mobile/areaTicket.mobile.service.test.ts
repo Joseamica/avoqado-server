@@ -540,6 +540,10 @@ describe('vales por área — apertura de la cuenta (§5.1, §5.2)', () => {
         data: { areaTicketLastCounter: 12 },
       }),
     )
+    // IVA por producto (plan 2): el vale nace con precios que ya traen el IVA incluido.
+    expect(prismaMock.order.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ contratoDePrecio: 'IVA_INCLUIDO' }) }),
+    )
   })
 
   it('🔴 los importes por peso cuadran al centavo con el sistema del cliente (§4.3)', async () => {

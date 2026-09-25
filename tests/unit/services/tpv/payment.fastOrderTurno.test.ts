@@ -330,6 +330,8 @@ describe('recordFastPayment — la orden FAST cae en el turno de caja del NEGOCI
     expect(prismaMock.shift.update).not.toHaveBeenCalled()
     expect(tx.ops.indexOf('shift.updateMany')).toBeLessThan(tx.ops.indexOf('order.create'))
     expect(tx.ops.indexOf('order.create')).toBeLessThan(tx.ops.indexOf('payment.create'))
+    // IVA por producto (plan 2): la venta rápida nace con IVA incluido.
+    expect(datosDeLaOrden().contratoDePrecio).toBe('IVA_INCLUIDO')
   })
 
   it('sin turno la venta SIGUE ocurriendo, ambos ids quedan null y nace una anomalía atómica', async () => {

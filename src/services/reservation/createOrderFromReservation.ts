@@ -232,6 +232,7 @@ export async function createOrderFromReservation(
       ...(reservation.assignedStaffId !== null && { servedById: reservation.assignedStaffId }),
       subtotal,
       taxAmount: SIN_IMPUESTO_SEPARADO,
+      contratoDePrecio: 'IVA_INCLUIDO',
       total,
       remainingBalance: total,
       // PENDING / kitchen PENDING / paymentStatus PENDING — cashier picks up

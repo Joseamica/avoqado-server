@@ -87,6 +87,8 @@ describe('initiateCryptoPayment — la orden testigo cae en el turno del NEGOCIO
     expect(datosDeLaOrden().shiftId).toBe('turno-real-del-negocio')
     // 🔴 La consulta va acotada al venue: un `shiftId` ajeno simplemente no existe aquí.
     expect(mockPrisma.shift.findFirst.mock.calls[0][0].where).toEqual({ venueId: VENUE_ID, status: 'OPEN', endTime: null })
+    // IVA por producto (plan 2): el cobro cripto testigo nace con IVA incluido.
+    expect(datosDeLaOrden().contratoDePrecio).toBe('IVA_INCLUIDO')
   })
 
   it('sin turno abierto del negocio, la orden nace sin turno (el cobro no se detiene)', async () => {

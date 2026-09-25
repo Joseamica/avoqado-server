@@ -701,6 +701,7 @@ describe('PaymentLink Service', () => {
             source: 'PAYMENT_LINK',
             status: 'COMPLETED',
             paymentStatus: 'PAID',
+            contratoDePrecio: 'IVA_INCLUIDO',
           }),
         }),
       )
@@ -907,6 +908,10 @@ describe('PaymentLink Service', () => {
       expect(mockCreateSalePostingInTx.mock.calls[0][0]).toBe(txClient)
       expect(mockCreateSalePostingInTx.mock.calls[0][1]).toEqual(expect.objectContaining({ orderId: 'order-stripe-1' }))
       expect(mockApplySalePosting).toHaveBeenCalledWith('posting-pl-1', expect.anything())
+      // IVA por producto (plan 2): la liga de Stripe materializa precios con IVA incluido.
+      expect(prismaMock.order.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ contratoDePrecio: 'IVA_INCLUIDO' }) }),
+      )
     })
 
     // MercadoPago era el caso más roto de los tres: creaba SIEMPRE una orden
@@ -961,7 +966,7 @@ describe('PaymentLink Service', () => {
         await finalizeMercadoPagoCheckout({ sessionId: 'mp_sess_1', mpPaymentId: 777 })
 
         expect(prismaMock.order.create).toHaveBeenCalledWith(
-          expect.objectContaining({ data: expect.objectContaining({ type: 'TAKEOUT' }) }),
+          expect.objectContaining({ data: expect.objectContaining({ type: 'TAKEOUT', contratoDePrecio: 'IVA_INCLUIDO' }) }),
         )
       })
 

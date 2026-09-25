@@ -882,6 +882,7 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
           subtotal: new Prisma.Decimal(subtotal),
           discountAmount: new Prisma.Decimal(discountDecimal),
           taxAmount: new Prisma.Decimal(0),
+          contratoDePrecio: 'IVA_INCLUIDO',
           tipAmount: new Prisma.Decimal(tipDecimal),
           total: new Prisma.Decimal(total),
           remainingBalance: new Prisma.Decimal(total),

@@ -1561,6 +1561,7 @@ export async function materializeAreaTicketCheckout(venueId: string, sessionId: 
               subtotal,
               discountAmount,
               taxAmount: new Prisma.Decimal(0),
+              contratoDePrecio: 'IVA_INCLUIDO',
               tipAmount: new Prisma.Decimal(0),
               total,
               paidAmount: new Prisma.Decimal(0),

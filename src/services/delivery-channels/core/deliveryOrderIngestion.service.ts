@@ -262,6 +262,7 @@ export async function ingestDeliveryOrder(
           // México: el IVA ya va incluido en el precio — el impuesto que reporta el
           // proveedor no es fuente fiscal (spec §5 de Uber, aplicado igual aquí).
           taxAmount: new Prisma.Decimal(0),
+          contratoDePrecio: 'IVA_INCLUIDO',
           discountAmount: descuento,
           tipAmount: tip,
           total,
