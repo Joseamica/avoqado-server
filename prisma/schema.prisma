@@ -3754,6 +3754,9 @@ model Order {
   orderNumber String
   type        OrderType   @default(DINE_IN)
   source      OrderSource @default(TPV)
+  // ¿El precio cobrado ya traía el IVA? Lo declara cada escritor al crear (prueba de arquitectura
+  // orderContratoDePrecioWriters). Ventas anteriores: DESCONOCIDO (sin backfill). Lo lee la facturación (plan 3).
+  contratoDePrecio ContratoDePrecio @default(DESCONOCIDO)
 
   // Terminal that created this order (for sales attribution by device)
   terminalId String?
@@ -9231,6 +9234,12 @@ enum OrderType {
   /// without items, distinguished by `source` rather than a special type.
   /// Same separation here: `OrderSource` differentiates the channel.
   MANUAL_ENTRY
+}
+
+enum ContratoDePrecio {
+  IVA_INCLUIDO
+  IVA_APARTE
+  DESCONOCIDO
 }
 
 enum OrderSource {
