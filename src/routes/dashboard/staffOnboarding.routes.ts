@@ -13,6 +13,7 @@ import { Router, Request, Response, NextFunction } from 'express'
 import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken.middleware'
 import * as staffOnboardingService from '../../services/dashboard/staffOnboarding.service'
 import prisma from '../../utils/prismaClient'
+import { esSuperadminDeLaSesion } from '../../services/access/rolVigente'
 
 const router = Router({ mergeParams: true })
 
@@ -33,14 +34,16 @@ async function requireVenueAccess(req: Request, res: Response, next: NextFunctio
       return res.status(400).json({ success: false, error: 'bad_request', message: 'venueId es requerido' })
     }
 
-    if (role === 'SUPERADMIN') return next()
+    // SUPERADMIN sólo si LO ES en la base (Codex ronda 3).
+    if (await esSuperadminDeLaSesion({ userId, role })) return next()
 
     const assignment = await prisma.staffVenue.findUnique({
       where: { staffId_venueId: { staffId: userId, venueId } },
-      select: { id: true },
+      select: { id: true, active: true, staff: { select: { active: true } } },
     })
 
-    if (!assignment) {
+    // La asignación y la persona deben SEGUIR activas.
+    if (!assignment?.active || !assignment.staff?.active) {
       return res.status(403).json({ success: false, error: 'forbidden', message: 'Sin acceso a este venue' })
     }
 

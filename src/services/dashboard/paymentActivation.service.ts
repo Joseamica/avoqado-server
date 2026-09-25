@@ -15,6 +15,7 @@ import prisma from '../../utils/prismaClient'
 import { BadRequestError, ForbiddenError, NotFoundError } from '../../errors/AppError'
 import { getBankNameFromCLABE, validateCLABE } from '../../utils/clabeValidator'
 import { logAction } from './activity-log.service'
+import { esSuperadminDeLaSesion } from '../access/rolVigente'
 
 /** RFC de persona física (13) o moral (12), en mayúsculas. */
 const RFC_RE = /^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/
@@ -47,10 +48,11 @@ export interface PaymentActivationProfileInput {
 export async function assertPaymentActivationAccess(venueId: string, staffId: string, role?: string): Promise<{ organizationId: string }> {
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { id: true, organizationId: true } })
   if (!venue) throw new NotFoundError('No encontramos este negocio')
-  if (role === 'SUPERADMIN') return { organizationId: venue.organizationId }
+  // SUPERADMIN sólo si LO ES en la base (Codex ronda 3).
+  if (await esSuperadminDeLaSesion({ userId: staffId, role })) return { organizationId: venue.organizationId }
 
   const asignacion = await prisma.staffVenue.findFirst({
-    where: { venueId, staffId, active: true, role: { in: ['OWNER', 'ADMIN'] } },
+    where: { venueId, staffId, active: true, staff: { active: true }, role: { in: ['OWNER', 'ADMIN'] } },
     select: { id: true },
   })
   if (!asignacion) throw new ForbiddenError('Solo el dueño o un administrador de este negocio puede activar los cobros')

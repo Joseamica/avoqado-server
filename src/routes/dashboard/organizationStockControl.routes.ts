@@ -34,6 +34,7 @@ import {
   getOrgInventoryByResponsible,
 } from '../../controllers/dashboard/organizationStockControl.controller'
 import { esSuperadminReal } from '../../services/access/rolVigente'
+import { esSuperadminDeLaSesion } from '../../services/access/rolVigente'
 
 const router = Router({ mergeParams: true })
 
@@ -82,7 +83,8 @@ export function requireOrgRole(allowedRoles: StaffRole[], forbiddenMessage: stri
       const { userId, role } = (req as any).authContext ?? {}
       const { orgId } = req.params
 
-      if (role === 'SUPERADMIN') return next()
+      // SUPERADMIN sólo si LO ES en la base (Codex ronda 3, S3).
+      if (await esSuperadminDeLaSesion({ userId, role })) return next()
 
       if (!userId) {
         return res.status(401).json({ success: false, error: 'unauthorized', message: 'Autenticación requerida' })

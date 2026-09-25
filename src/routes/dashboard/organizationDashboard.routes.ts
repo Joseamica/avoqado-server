@@ -44,7 +44,7 @@ const router = Router()
  */
 export async function checkOrgAccess(req: Request, res: Response, next: NextFunction) {
   try {
-    const { orgId, role, userId } = (req as any).authContext
+    const { orgId, role, userId, isImpersonating, realUserId, impersonation } = (req as any).authContext
     const requestedOrgId = req.params.orgId
 
     // SUPERADMIN has access to all organizations — si LO ES de verdad (H1, Codex): el token sólo
@@ -53,14 +53,26 @@ export async function checkOrgAccess(req: Request, res: Response, next: NextFunc
       return next()
     }
 
+    // Impersonación de ROL (Codex G1): el `userId` sigue siendo el del superadmin y el rol es el
+    // impersonado, así que no tiene membresía propia. Vale sólo en la organización del token y sólo
+    // si quien actúa sigue siendo superadmin de verdad.
+    if (isImpersonating && impersonation?.mode === 'role' && orgId === requestedOrgId && (await esSuperadminReal(realUserId ?? userId))) {
+      return next()
+    }
+
     // User must belong to the organization they're querying — y la membresía debe SEGUIR activa
-    // en la base, no sólo haberlo estado cuando se emitió el token.
+    // en la base, no sólo haberlo estado cuando se emitió el token. Cuenta la fila de organización o,
+    // para el personal que sólo tiene sucursal (Codex G1), una sucursal ACTIVA de esta organización.
     const membresia =
       orgId === requestedOrgId
-        ? await prisma.staffOrganization.findFirst({
+        ? ((await prisma.staffOrganization.findFirst({
             where: { staffId: userId, organizationId: requestedOrgId, isActive: true, staff: { active: true } },
             select: { id: true },
-          })
+          })) ??
+          (await prisma.staffVenue.findFirst({
+            where: { staffId: userId, active: true, staff: { active: true }, venue: { organizationId: requestedOrgId } },
+            select: { id: true },
+          })))
         : null
     if (!membresia) {
       return res.status(403).json({

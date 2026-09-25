@@ -63,14 +63,23 @@ describe('quién puede activar cobros', () => {
     prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1' } as never)
     await expect(assertPaymentActivationAccess('venue-1', 'staff-1', 'OWNER')).resolves.toEqual({ organizationId: 'org-1' })
     expect(prismaMock.staffVenue.findFirst).toHaveBeenCalledWith({
-      where: { venueId: 'venue-1', staffId: 'staff-1', active: true, role: { in: ['OWNER', 'ADMIN'] } },
+      where: { venueId: 'venue-1', staffId: 'staff-1', active: true, staff: { active: true }, role: { in: ['OWNER', 'ADMIN'] } },
       select: { id: true },
     })
   })
 
-  it('SUPERADMIN pasa sin consultar la asignación', async () => {
+  it('un SUPERADMIN real (fila activa en la base) pasa sin necesitar asignación en el local', async () => {
+    prismaMock.staffVenue.findFirst.mockResolvedValueOnce({ id: 'sv-sa' } as never)
     await expect(assertPaymentActivationAccess('venue-1', 'sa', 'SUPERADMIN')).resolves.toEqual({ organizationId: 'org-1' })
-    expect(prismaMock.staffVenue.findFirst).not.toHaveBeenCalled()
+    expect(prismaMock.staffVenue.findFirst).toHaveBeenCalledTimes(1)
+    expect(prismaMock.staffVenue.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ staffId: 'sa', role: 'SUPERADMIN', active: true }) }),
+    )
+  })
+
+  it('🔴 un token que DICE superadmin sin fila activa NO pasa (Codex ronda 3)', async () => {
+    prismaMock.staffVenue.findFirst.mockResolvedValue(null as never)
+    await expect(assertPaymentActivationAccess('venue-1', 'ex-sa', 'SUPERADMIN')).rejects.toThrow()
   })
 })
 
