@@ -133,3 +133,48 @@ describe('regresiones', () => {
     expect(creada.password).not.toBeNull()
   })
 })
+
+describe('el rol en la organización sale de la INVITACIÓN, no de otros negocios', () => {
+  // 🔴 (Codex gpt-6-astra, 24-sep) Aceptar una invitación de MESERO en otra organización guardaba
+  // `StaffOrganization.role = ADMIN` si la persona era dueña o admin en CUALQUIER otro negocio, y
+  // `requireOrgAdmin` la dejaba administrar la organización ajena (p. ej. borrar terminales).
+  it('🔴 dueña de su negocio, invitada como mesera aquí: aquí es MIEMBRO, no admin', async () => {
+    const otraOrg = await prisma.organization.create({
+      data: { name: `Suya ${sufijo}`, email: `suya-${sufijo}@test.mx`, phone: '5555555555' },
+    })
+    ids.orgs.push(otraOrg.id)
+    const suVenue = await prisma.venue.create({
+      data: {
+        name: `SuVenue ${sufijo}`,
+        slug: `suvenue-${sufijo}`,
+        organizationId: otraOrg.id,
+        address: 'x',
+        city: 'CDMX',
+        country: 'Mexico',
+        timezone: 'America/Mexico_City',
+        currency: 'MXN',
+        status: 'ACTIVE',
+      },
+    })
+    ids.venues.push(suVenue.id)
+    const hash = await bcrypt.hash('DuenaSuya1', 4)
+    const duena = await persona('duena-de-otra', { password: hash })
+    await prisma.staffOrganization.create({
+      data: { staffId: duena.id, organizationId: otraOrg.id, role: 'OWNER', isActive: true, isPrimary: true },
+    })
+    await prisma.staffVenue.create({ data: { staffId: duena.id, venueId: suVenue.id, role: StaffRole.OWNER, active: true } })
+
+    const token = await invitar(duena.email) // invitación de MESERA en la organización de prueba
+    await acceptInvitation(token, { password: 'DuenaSuya1' })
+
+    const aqui = await prisma.staffOrganization.findUniqueOrThrow({
+      where: { staffId_organizationId: { staffId: duena.id, organizationId: orgId } },
+    })
+    expect(aqui.role).toBe('MEMBER')
+    // y su negocio no cambia
+    const suya = await prisma.staffOrganization.findUniqueOrThrow({
+      where: { staffId_organizationId: { staffId: duena.id, organizationId: otraOrg.id } },
+    })
+    expect(suya.role).toBe('OWNER')
+  })
+})

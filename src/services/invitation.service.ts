@@ -280,15 +280,11 @@ export async function acceptInvitation(
 
         // If cross-org invitation, create StaffOrganization for the new org
         if (isCrossOrgInvitation) {
-          // Use OWNER OrgRole if invitation role is OWNER, otherwise derive from existing roles
-          let orgRoleForCrossOrg: OrgRole = OrgRole.MEMBER
-          if (invitation.role === StaffRole.OWNER) {
-            orgRoleForCrossOrg = OrgRole.OWNER
-          } else {
-            const venueRoles = existingStaff.venues.map(v => v.role as StaffRole)
-            orgRoleForCrossOrg =
-              venueRoles.includes(StaffRole.OWNER) || venueRoles.includes(StaffRole.ADMIN) ? OrgRole.ADMIN : OrgRole.MEMBER
-          }
+          // 🔴 El rol en ESTA organización sale de la INVITACIÓN, como en las otras altas
+          // (`orgRoleForNewStaff`, `team.dashboard.service`, Google). Antes se derivaba de sus
+          // sucursales en OTRAS organizaciones: dueña allá + invitada como mesera aquí ⇒ ADMIN aquí,
+          // y `requireOrgAdmin` la dejaba administrar esta organización (Codex, 24-sep).
+          const orgRoleForCrossOrg: OrgRole = invitation.role === StaffRole.OWNER ? OrgRole.OWNER : OrgRole.MEMBER
           await createStaffOrganizationMembership({
             staffId: staff.id,
             organizationId: invitation.organizationId,
