@@ -1,5 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
+import { formatInTimeZone } from 'date-fns-tz'
 import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
@@ -8,6 +9,8 @@ import { auditMcpWrite } from '../audit'
 import { venuesWithFeatureAccess } from '@/services/access/basePlan.service'
 import { hasPermission } from '@/services/access/access.service'
 import { emitRefundCreditNote, getRefundCreditNoteStatus } from '@/services/fiscal/cfdiCreditNote.service'
+import { vistaPreviaContrato, confirmarContratoIvaIncluido } from '@/services/fiscal/confirmarContratoDePrecio.service'
+import { DEFAULT_TIMEZONE } from '@/utils/datetime'
 
 export function registerCfdiTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
@@ -219,6 +222,79 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }
+    },
+  )
+
+  // ─── Confirmar el contrato de precio de una venta VIEJA (IVA por producto, plan 2) ─────────
+  //
+  // Sólo corrige el DATO que la facturación va a leer: no emite, cancela ni toca ningún CFDI. Dos
+  // pasos, igual que la nota de crédito de arriba, porque otra persona puede tocar la venta entre
+  // la vista previa y la confirmación — el candado es la versión que la persona vio.
+  server.tool(
+    'confirm_order_price_contract',
+    'Confirma que una venta VIEJA — de antes de que este negocio empezara a marcar el IVA por producto — se cobró con el IVA YA incluido en el precio (como se cobra normalmente en México). Sólo aplica a ventas cuyo tratamiento de IVA se desconoce; una vez confirmada, esa venta se puede facturar con el IVA de cada producto. NO emite, cancela ni modifica ninguna factura — sólo corrige el dato. Sin confirm, sólo devuelve la vista previa.',
+    {
+      venueId: z.string().describe('El local de la venta (debe estar en tu alcance)'),
+      orderId: z.string().describe('Id de la venta a confirmar'),
+      confirm: z.boolean().optional().describe('true para ejecutar; sin él sólo devuelve la vista previa'),
+      version: z.number().int().optional().describe('La versión que viste en la vista previa (obligatoria con confirm:true)'),
+      motivo: z.string().optional().describe('Por qué se sabe que esta venta cobró el IVA incluido (obligatorio con confirm:true)'),
+    },
+    async ({ venueId, orderId, confirm, version, motivo }) => {
+      guard.venueFilter(venueId)
+      // Mismo permiso que emitir un CFDI: corregir este dato es lo que habilita facturar la venta.
+      guard.requirePermission('cfdi:issue', venueId)
+      // CFDI es feature de pago — el MCP no puede ser un atajo al paywall.
+      const entitled = await venuesWithFeatureAccess([venueId], 'CFDI')
+      if (!entitled.has(venueId)) {
+        return text({
+          ok: false,
+          planRequired: true,
+          feature: 'CFDI',
+          error: 'CFDI (facturación) no está activo en este local. Requiere la feature CFDI o un plan Avoqado activo.',
+        })
+      }
+
+      if (!confirm) {
+        const preview = await vistaPreviaContrato(venueId, orderId)
+        if (!preview) return text({ ok: false, error: 'No encontré esa venta en este negocio.' })
+        if (!preview.confirmable) return text({ ok: false, error: preview.motivo })
+
+        const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+        const fechaLocal = formatInTimeZone(preview.createdAt, venue?.timezone ?? DEFAULT_TIMEZONE, 'dd/MM/yyyy')
+
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview,
+          message:
+            `Esto marcará la venta #${preview.orderNumber} (cobrada $${preview.totalMxn.toFixed(2)} el ${fechaLocal}) como cobrada ` +
+            'con IVA incluido. Con eso podrá facturarse con el IVA de cada producto. No emite ni cancela ninguna factura. ' +
+            `Para confirmar, llama otra vez con confirm: true, version: ${preview.version} y un motivo.`,
+        })
+      }
+
+      if (version === undefined) {
+        return text({
+          ok: false,
+          error: 'Falta version: pide la vista previa primero (sin confirm) y usa el número que te devuelva.',
+        })
+      }
+      if (!motivo || !motivo.trim()) {
+        return text({ ok: false, error: 'Falta motivo: di en una frase por qué se sabe que esta venta cobró el IVA incluido.' })
+      }
+
+      const result = await confirmarContratoIvaIncluido({ venueId, orderId, versionVista: version, staffId: scope.staffId, motivo })
+      if (!result.ok) return text({ ok: false, error: result.message })
+
+      await auditMcpWrite(scope, {
+        action: 'ORDER_PRICE_CONTRACT_CONFIRMED_MCP',
+        entity: 'Order',
+        entityId: orderId,
+        venueId,
+        data: { motivo, version },
+      })
+      return text({ ok: true })
     },
   )
 }
