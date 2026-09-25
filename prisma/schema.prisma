@@ -15311,6 +15311,11 @@ model PrintStation {
   /// de `isDefault` a propósito — mandar el consolidado a la estación por default haría que
   /// la cocina reciba DOS papeles del mismo pedido, que es el doble-impreso clásico.
   isPacking    Boolean @default(false)
+
+  /// ¿Esta estación se atiende con PANTALLA de cocina (KDS)? Si NINGUNA estación activa del venue la
+  /// tiene, las ventas de la caja NO crean `KdsOrder` (spec 2026-09-24, etapa 1). La hoja impresa no
+  /// depende de esto. En la etapa 1 sólo SUPERADMIN la cambia; la etapa 3 la abre a clientes.
+  hasKitchenDisplay Boolean @default(false)
   active       Boolean @default(true)
   displayOrder Int     @default(0)
 
