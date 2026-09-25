@@ -2,6 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { formatInTimeZone } from 'date-fns-tz'
 import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
@@ -242,8 +243,11 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, orderId, confirm, version, motivo }) => {
       guard.venueFilter(venueId)
-      // Mismo permiso que emitir un CFDI: corregir este dato es lo que habilita facturar la venta.
-      guard.requirePermission('cfdi:issue', venueId)
+      // Revisión final (F4): corregir el contrato de precio de una venta VIEJA es una decisión de
+      // configuración fiscal del negocio (no un timbrado del día a día) — el spec la reserva al
+      // dueño (OWNER/ADMIN) o al superadmin. `cfdi:configure` es exactamente ese permiso; MANAGER
+      // NO lo tiene (ver src/lib/permissions.ts).
+      guard.requirePermission('cfdi:configure', venueId)
       // CFDI es feature de pago — el MCP no puede ser un atajo al paywall.
       const entitled = await venuesWithFeatureAccess([venueId], 'CFDI')
       if (!entitled.has(venueId)) {
@@ -261,15 +265,25 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
         if (!preview.confirmable) return text({ ok: false, error: preview.motivo })
 
         const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+        // El servicio no conoce el timezone del venue (F3) — se calcula aquí y se agrega al
+        // objeto que se devuelve, para que quien lea `preview` tenga la fecha local sin tener
+        // que parsear el mensaje.
         const fechaLocal = formatInTimeZone(preview.createdAt, venue?.timezone ?? DEFAULT_TIMEZONE, 'dd/MM/yyyy')
+
+        // F3: nunca decir «cobrada» de una venta que no se ha cobrado — el monto y la palabra
+        // dependen de `paymentStatus`, no del total de la orden.
+        const montoTexto =
+          preview.paymentStatus === 'PAID'
+            ? `pagada $${preview.paidAmountMxn.toFixed(2)}`
+            : `sin cobrar (total $${preview.totalMxn.toFixed(2)})`
 
         return text({
           ok: false,
           requiresConfirmation: true,
-          preview,
+          preview: { ...preview, fechaLocal },
           message:
-            `Esto marcará la venta #${preview.orderNumber} (cobrada $${preview.totalMxn.toFixed(2)} el ${fechaLocal}) como cobrada ` +
-            'con IVA incluido. Con eso podrá facturarse con el IVA de cada producto. No emite ni cancela ninguna factura. ' +
+            `Esto marcará la venta #${preview.orderNumber} (${montoTexto}, ${fechaLocal}) con el IVA YA incluido en el precio. ` +
+            'Con eso podrá facturarse con el IVA de cada producto. No emite ni cancela ninguna factura. ' +
             `Para confirmar, llama otra vez con confirm: true, version: ${preview.version} y un motivo.`,
         })
       }
@@ -284,7 +298,20 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
         return text({ ok: false, error: 'Falta motivo: di en una frase por qué se sabe que esta venta cobró el IVA incluido.' })
       }
 
-      const result = await confirmarContratoIvaIncluido({ venueId, orderId, versionVista: version, staffId: scope.staffId, motivo })
+      // F9: si el servicio lanza (p. ej. la escritura de auditoría revienta por FK, o se cae la
+      // conexión a media transacción), el tool no debe tronar — responde ok:false, como hace
+      // `emit_refund_credit_note` arriba.
+      let result: Awaited<ReturnType<typeof confirmarContratoIvaIncluido>>
+      try {
+        result = await confirmarContratoIvaIncluido({ venueId, orderId, versionVista: version, staffId: scope.staffId, motivo })
+      } catch (err) {
+        logger.error('[mcp] confirm_order_price_contract: fallo inesperado al confirmar el contrato', {
+          venueId,
+          orderId,
+          error: (err as Error).message,
+        })
+        return text({ ok: false, error: 'No se pudo confirmar el contrato de precio de esta venta. Intenta de nuevo.' })
+      }
       if (!result.ok) return text({ ok: false, error: result.message })
 
       await auditMcpWrite(scope, {

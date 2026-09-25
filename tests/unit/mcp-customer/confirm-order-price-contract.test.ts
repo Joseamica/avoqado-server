@@ -12,9 +12,11 @@ import type { McpScope } from '../../../src/mcp/scope'
 const mockVistaPreviaContrato = jest.fn()
 const mockConfirmarContratoIvaIncluido = jest.fn()
 const mockAudit = jest.fn()
+const mockVenueFilter = jest.fn((v?: string) => ({ venueId: { in: [v ?? 'v1'] } }))
 const mockRequirePermission = jest.fn()
 const mockVenuesWithFeatureAccess = jest.fn()
 const mockVenueFindUnique = jest.fn()
+const mockLoggerError = jest.fn()
 
 jest.mock('@/services/fiscal/confirmarContratoDePrecio.service', () => ({
   vistaPreviaContrato: (...a: unknown[]) => mockVistaPreviaContrato(...(a as [])),
@@ -33,13 +35,26 @@ jest.mock('@/services/access/basePlan.service', () => ({
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => mockAudit(...(a as [])) }))
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
-    venueFilter: (v?: string) => ({ venueId: { in: [v ?? 'v1'] } }),
+    venueFilter: (...a: unknown[]) => mockVenueFilter(...(a as [string | undefined])),
     requirePermission: (...a: unknown[]) => mockRequirePermission(...(a as [])),
   }),
 }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: { venue: { findUnique: (...a: unknown[]) => mockVenueFindUnique(...(a as [])) } },
+}))
+// F9: el tool loguea con `logger.error` si el servicio de confirmar lanza. `@/config/logger` ya
+// está mockeado GLOBALMENTE en tests/__helpers__/setup.ts (default.error = jest.fn()) — aquí sólo
+// tomamos una referencia a ESE mismo mock para poder inspeccionarlo por test.
+jest.mock('@/config/logger', () => ({
+  __esModule: true,
+  default: {
+    info: jest.fn(),
+    error: (...a: unknown[]) => mockLoggerError(...(a as [])),
+    warn: jest.fn(),
+    debug: jest.fn(),
+    log: jest.fn(),
+  },
 }))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
@@ -67,6 +82,9 @@ const PREVIEW_CONFIRMABLE = {
   source: 'TPV',
   contratoActual: 'DESCONOCIDO',
   version: 3,
+  status: 'COMPLETED',
+  paymentStatus: 'PAID',
+  paidAmountMxn: 150.5,
   confirmable: true,
 }
 
@@ -77,12 +95,31 @@ describe('confirm_order_price_contract — confirm-gated (IVA por producto, plan
     const out = parse(await call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1' }))
 
     expect(out.requiresConfirmation).toBe(true)
-    // El transporte JSON serializa `createdAt` a ISO string; el resto viaja igual.
-    expect(out.preview).toEqual({ ...PREVIEW_CONFIRMABLE, createdAt: PREVIEW_CONFIRMABLE.createdAt.toISOString() })
+    // El transporte JSON serializa `createdAt` a ISO string; el resto viaja igual, MÁS
+    // `fechaLocal` (F3), que el TOOL agrega porque el servicio no conoce el timezone del venue.
+    expect(out.preview).toEqual({
+      ...PREVIEW_CONFIRMABLE,
+      createdAt: PREVIEW_CONFIRMABLE.createdAt.toISOString(),
+      fechaLocal: '01/09/2026',
+    })
     expect(out.message).toMatch(/ORD-1/)
     expect(out.message).toMatch(/version: 3/)
+    // F3: PAID ⇒ «pagada $X», nunca «cobrada» a secas.
+    expect(out.message).toMatch(/pagada \$150\.50/)
+    expect(out.message).not.toMatch(/\bcobrada\b/)
     expect(mockConfirmarContratoIvaIncluido).not.toHaveBeenCalled()
     expect(mockAudit).not.toHaveBeenCalled()
+  })
+
+  it('(F3) venta SIN COBRAR ⇒ el mensaje dice «sin cobrar (total $X)», nunca «cobrada» ni «pagada»', async () => {
+    mockVistaPreviaContrato.mockResolvedValueOnce({ ...PREVIEW_CONFIRMABLE, paymentStatus: 'PENDING', paidAmountMxn: 0 })
+
+    const out = parse(await call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1' }))
+
+    expect(out.requiresConfirmation).toBe(true)
+    expect(out.message).toMatch(/sin cobrar \(total \$150\.50\)/)
+    expect(out.message).not.toMatch(/\bcobrada\b/)
+    expect(out.message).not.toMatch(/\bpagada\b/)
   })
 
   it('sin confirm, no confirmable ⇒ devuelve el motivo y tampoco llama a nada más', async () => {
@@ -188,12 +225,42 @@ describe('confirm_order_price_contract — confirm-gated (IVA por producto, plan
     expect(mockConfirmarContratoIvaIncluido).not.toHaveBeenCalled()
   })
 
-  it('guardas en orden: venueFilter → requirePermission(cfdi:issue) → feature CFDI', async () => {
+  it('(F4) guarda con cfdi:configure (del dueño/OWNER o superadmin), no cfdi:issue', async () => {
     mockVistaPreviaContrato.mockResolvedValueOnce(PREVIEW_CONFIRMABLE)
 
     await call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1' })
 
-    expect(mockRequirePermission).toHaveBeenCalledWith('cfdi:issue', 'v1')
+    expect(mockRequirePermission).toHaveBeenCalledWith('cfdi:configure', 'v1')
+    expect(mockRequirePermission).not.toHaveBeenCalledWith('cfdi:issue', expect.anything())
+  })
+
+  it('(F10) guardas en orden REAL: venueFilter → requirePermission(cfdi:configure) → feature CFDI', async () => {
+    mockVistaPreviaContrato.mockResolvedValueOnce(PREVIEW_CONFIRMABLE)
+
+    await call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1' })
+
+    expect(mockVenueFilter).toHaveBeenCalledWith('v1')
+    expect(mockRequirePermission).toHaveBeenCalledWith('cfdi:configure', 'v1')
     expect(mockVenuesWithFeatureAccess).toHaveBeenCalledWith(['v1'], 'CFDI')
+
+    // El orden de llamada, no sólo que las tres se llamaron: si alguna se adelanta o se atrasa,
+    // una guarda deja de proteger a la siguiente.
+    const ordenVenueFilter = mockVenueFilter.mock.invocationCallOrder[0]
+    const ordenRequirePermission = mockRequirePermission.mock.invocationCallOrder[0]
+    const ordenFeatureAccess = mockVenuesWithFeatureAccess.mock.invocationCallOrder[0]
+    expect(ordenVenueFilter).toBeLessThan(ordenRequirePermission)
+    expect(ordenRequirePermission).toBeLessThan(ordenFeatureAccess)
+  })
+
+  it('(F9) si el servicio de confirmar LANZA (no rechaza), el tool no truena: responde ok:false y loguea con logger.error', async () => {
+    mockConfirmarContratoIvaIncluido.mockRejectedValueOnce(new Error('conexión perdida a media transacción'))
+
+    const out = parse(await call('confirm_order_price_contract', { venueId: 'v1', orderId: 'o1', confirm: true, version: 3, motivo: 'x' }))
+
+    expect(out.ok).toBe(false)
+    expect(typeof out.error).toBe('string')
+    expect(out.error.length).toBeGreaterThan(0)
+    expect(mockLoggerError).toHaveBeenCalled()
+    expect(mockAudit).not.toHaveBeenCalled()
   })
 })
