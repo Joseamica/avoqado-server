@@ -161,6 +161,16 @@ module.exports = {
         // the allowlist above).
         '^ultrahtml$': '<rootDir>/node_modules/ultrahtml/dist/index.js',
         '^ultrahtml/transformers/(.*)$': '<rootDir>/node_modules/ultrahtml/dist/transformers/$1.js',
+        // Generated Prisma Client's own `@prisma/client/default.js` self-requires the bare
+        // specifier `.prisma/client/default`. Node's real module walk-up for that request
+        // (verified with NODE_DEBUG=module) lists this worktree's own `<rootDir>/node_modules`
+        // as a candidate BEFORE any ancestor directory, yet in this worktree (nested under the
+        // main checkout at `.claude/worktrees/<name>`, itself a sibling Prisma client on a
+        // DIFFERENT schema/branch) resolution still lands on the ANCESTOR checkout's stale
+        // `.prisma/client` — verified even with plain `node -e` + `createRequire`, so it is a
+        // Node resolution quirk, not a Jest one. Pin it here so the migration's new columns/
+        // models are visible to the client jest actually loads.
+        '^\\.prisma/client/(.*)$': '<rootDir>/node_modules/.prisma/client/$1',
       },
     },
   ],
