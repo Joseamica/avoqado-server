@@ -68,6 +68,16 @@ export async function updateStation(req: Request, res: Response, next: NextFunct
   }
 }
 
+/** Casilla «pantalla de cocina» de una estación — la ruta la restringe a SUPERADMIN (etapa 1). */
+export async function setKitchenDisplay(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const data = await printStationService.setKitchenDisplay(req.params.venueId, req.params.stationId, req.body.enabled, actor(req))
+    res.status(200).json({ success: true, data })
+  } catch (error) {
+    next(error)
+  }
+}
+
 export async function deleteStation(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const data = await printStationService.deleteStation(req.params.venueId, req.params.stationId, actor(req))

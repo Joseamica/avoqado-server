@@ -258,6 +258,30 @@ export async function updateStation(venueId: string, stationId: string, input: U
   return station
 }
 
+/** Aviso que acompaña a la casilla mientras la etapa 3 no exista (spec 2026-09-24 §4 y §6). */
+export const KITCHEN_DISPLAY_NOT_READY_NOTICE =
+  'La pantalla de cocina todavía no está lista para clientes. Antes de prenderla a un cliente, falta la etapa 3 ' +
+  '(docs/superpowers/specs/2026-09-24-pantalla-de-cocina-como-estacion-design.md §6).'
+
+/**
+ * Prende o apaga «Se atiende con pantalla de cocina» en UNA estación. Endpoint aparte (no el PUT de la
+ * estación) para que el candado de rol viva en la ruta: en la etapa 1 sólo SUPERADMIN.
+ */
+export async function setKitchenDisplay(venueId: string, stationId: string, enabled: boolean, performedBy?: string) {
+  const previous = await prisma.printStation.findFirst({ where: { id: stationId, venueId } })
+  if (!previous) throw new NotFoundError('Estación no encontrada')
+  const station = await prisma.printStation.update({ where: { id: stationId }, data: { hasKitchenDisplay: enabled } })
+  void logAction({
+    staffId: performedBy ?? null,
+    venueId,
+    action: 'PRINT_STATION_KITCHEN_DISPLAY_SET',
+    entity: 'PrintStation',
+    entityId: station.id,
+    data: { enabled, previous: previous.hasKitchenDisplay } as Prisma.InputJsonValue,
+  })
+  return station
+}
+
 export async function deleteStation(venueId: string, stationId: string, performedBy?: string) {
   const station = await prisma.printStation.findFirst({ where: { id: stationId, venueId } })
   if (!station) throw new NotFoundError('Estación no encontrada')
