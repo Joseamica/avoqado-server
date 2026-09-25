@@ -31,6 +31,7 @@ import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { assertNoLiveTerminalCharge, assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared/orderCancelGuard'
+import { combinarContratos } from '../fiscal/contratoDePrecio'
 import {
   claimShiftForCapturedPayment,
   lockExistingOrderForPayment,
@@ -1570,6 +1571,7 @@ export async function splitOrderItems(venueId: string, orderId: string, itemIds:
       type: true,
       paidAmount: true,
       shiftId: true,
+      contratoDePrecio: true,
       items: { select: { id: true, orderPromotionId: true } },
       orderDiscounts: { select: { id: true } },
       serviceCharges: { select: { id: true, isAutomatic: true } },
@@ -1646,6 +1648,9 @@ export async function splitOrderItems(venueId: string, orderId: string, itemIds:
         taxAmount: 0,
         total: 0,
         version: 1,
+        // Separar cuenta no cambia el precio que el cliente ya vio: la cuenta nueva
+        // hereda el mismo contrato del origen, nunca se resuelve de nuevo.
+        contratoDePrecio: source.contratoDePrecio,
       },
       select: { id: true, orderNumber: true, version: true },
     })
@@ -1712,6 +1717,7 @@ export async function splitOrderBySeat(venueId: string, orderId: string, staffId
       type: true,
       paidAmount: true,
       shiftId: true,
+      contratoDePrecio: true,
       items: { select: { id: true, seat: true } },
       orderDiscounts: { select: { id: true } },
       serviceCharges: { select: { id: true, isAutomatic: true } },
@@ -1778,6 +1784,9 @@ export async function splitOrderBySeat(venueId: string, orderId: string, staffId
           taxAmount: 0,
           total: 0,
           version: 1,
+          // Dividir por puesto no cambia el precio que el cliente ya vio: cada
+          // cheque por asiento hereda el mismo contrato del origen.
+          contratoDePrecio: source.contratoDePrecio,
         },
         select: { id: true, orderNumber: true },
       })
@@ -1913,6 +1922,7 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
         select: {
           id: true,
           specialRequests: true,
+          contratoDePrecio: true,
           orderDiscounts: { select: { id: true } },
           serviceCharges: { select: { id: true, isAutomatic: true } },
         },
@@ -1924,7 +1934,7 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
           status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
           paymentStatus: { notIn: ['PAID', 'PARTIAL'] },
         },
-        select: { id: true, specialRequests: true },
+        select: { id: true, specialRequests: true, contratoDePrecio: true },
       })
       if (!freshSource || !freshTarget) {
         throw new BadRequestError('La cuenta cambió mientras se fusionaba — vuelve a intentar')
@@ -1952,15 +1962,18 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
       // los suyos por comensales en el recálculo.
       await tx.orderServiceCharge.deleteMany({ where: { orderId: source.id } })
 
-      // Las notas de cocina del origen NO se pierden: se anexan al destino.
-      if (freshSource.specialRequests?.trim()) {
-        await tx.order.update({
-          where: { id: target.id },
-          data: {
-            specialRequests: [freshTarget.specialRequests, freshSource.specialRequests].filter(Boolean).join(' · '),
-          },
-        })
-      }
+      // El destino se queda con el contrato COMBINADO (spec v5, `combinarContratos`): si origen y
+      // destino coinciden, se conserva; si difieren, pasa a DESCONOCIDO — la fusión NUNCA se
+      // bloquea por esto. Las notas de cocina del origen, de paso, NO se pierden: se anexan.
+      await tx.order.update({
+        where: { id: target.id },
+        data: {
+          contratoDePrecio: combinarContratos(freshTarget.contratoDePrecio, freshSource.contratoDePrecio),
+          ...(freshSource.specialRequests?.trim()
+            ? { specialRequests: [freshTarget.specialRequests, freshSource.specialRequests].filter(Boolean).join(' · ') }
+            : {}),
+        },
+      })
 
       await tx.order.update({
         where: { id: source.id },

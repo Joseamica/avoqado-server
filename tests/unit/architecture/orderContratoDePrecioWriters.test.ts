@@ -49,10 +49,7 @@ const CREA = /\.order\s*\.\s*(create|upsert)\s*\(/
 const ACTUALIZA = /\.order\s*\.\s*(update|updateMany)\s*\(/
 
 /** Pendientes: la Tarea 5 quita las funciones de split. Esta lista sólo encoge. */
-const PENDIENTES: Array<{ archivo: string; funcion?: string }> = [
-  { archivo: 'services/mobile/order.mobile.service.ts', funcion: 'splitOrderItems' },
-  { archivo: 'services/mobile/order.mobile.service.ts', funcion: 'splitOrderBySeat' },
-]
+const PENDIENTES: Array<{ archivo: string; funcion?: string }> = []
 
 /** Únicos lugares autorizados a CAMBIAR el contrato después de crear. */
 const REESCRITURA_AUTORIZADA = new Set(['mergeOrders', 'confirmarContratoIvaIncluido'])
