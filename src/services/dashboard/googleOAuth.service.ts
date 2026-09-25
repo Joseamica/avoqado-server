@@ -120,6 +120,11 @@ export async function loginWithGoogle(
   refreshToken: string
   staff: any
   isNewUser: boolean
+  /**
+   * true SÓLO si esta llamada creó un negocio (el alta desde /signup). `isNewUser` también es true
+   * cuando la cuenta nace de una INVITACIÓN, y la pantalla no puede usarlo para contar una alta.
+   */
+  businessCreated?: boolean
   pendingInvitations?: {
     id: string
     token: string
@@ -166,6 +171,7 @@ export async function loginWithGoogle(
   })
 
   let isNewUser = false
+  let businessCreated = false
 
   // Audit context for an invitation this login auto-accepted. Written AFTER the transaction:
   // logAction is fire-and-forget and must never be able to roll back a signup.
@@ -244,6 +250,7 @@ export async function loginWithGoogle(
         conCampana: !!atribucion.campanaId,
       })
       isNewUser = true
+      businessCreated = true
     } else if (!invitation) {
       throw new ForbiddenError('No invitation found for this email. Please contact your administrator to get invited.')
     } else {
@@ -461,6 +468,7 @@ export async function loginWithGoogle(
           venues: [], // Empty venues array (user needs to complete onboarding)
         },
         isNewUser,
+        businessCreated,
       }
     }
 
@@ -512,6 +520,7 @@ export async function loginWithGoogle(
           venues: [],
         },
         isNewUser,
+        businessCreated,
         // Include pending invitations for frontend to handle
         pendingInvitations: pendingInvitations.map(inv => ({
           id: inv.id,
@@ -600,6 +609,7 @@ export async function loginWithGoogle(
     refreshToken,
     staff: sanitizedStaff,
     isNewUser,
+    businessCreated,
   }
 }
 

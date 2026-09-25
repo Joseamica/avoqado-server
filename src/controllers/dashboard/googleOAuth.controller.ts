@@ -82,6 +82,11 @@ export async function googleOAuthCallback(req: Request, res: Response, next: Nex
       message: result.isNewUser ? 'Welcome! Account created successfully.' : 'Login successful',
       user: result.staff,
       isNewUser: result.isNewUser,
+      // 🔴 Lo que la pantalla usa para contar una ALTA: `isNewUser` también es true al aceptar una
+      // invitación, y un empleado invitado no es una conversión del anuncio.
+      businessCreated: result.businessCreated === true,
+      // El servicio ya las calculaba; sin esto la pantalla nunca llevaba a la invitación pendiente.
+      ...(result.pendingInvitations ? { pendingInvitations: result.pendingInvitations } : {}),
     })
   } catch (error) {
     next(error)

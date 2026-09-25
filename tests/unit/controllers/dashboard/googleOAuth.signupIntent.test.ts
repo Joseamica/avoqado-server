@@ -53,3 +53,25 @@ it('🔴 la IP del consentimiento es la del visitante, no la del borde de Cloudf
   await llamar({ code: 'c-1', signup: { legalVersion: 'v1-2026-09-17' } })
   expect(login.mock.calls[0][2]).toMatchObject({ ipAddress: '201.1.2.3' })
 })
+
+// ── Lo que la pantalla necesita para NO adivinar ──
+// 🔴 La pantalla decidía «alta nueva» con `isNewUser`, que también es true cuando la cuenta nace de
+// una INVITACIÓN: un empleado invitado que entraba con Google desde /signup contaba como conversión
+// del anuncio y lo mandaban a configurar un negocio que no tiene.
+it('🔴 responde `businessCreated` tal cual lo decide el servicio (una invitación NO es un negocio)', async () => {
+  login.mockResolvedValue({ accessToken: 'a', refreshToken: 'r', staff: { id: 's' }, isNewUser: true, businessCreated: false })
+  const { res } = await llamar({ code: 'c-1' })
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ isNewUser: true, businessCreated: false }))
+})
+
+it('un servicio que no dice nada se lee como «no se creó negocio», nunca como alta', async () => {
+  const { res } = await llamar({ code: 'c-1' })
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ businessCreated: false }))
+})
+
+it('las invitaciones pendientes llegan a la pantalla (antes el controlador las tiraba)', async () => {
+  const pendientes = [{ id: 'inv-1', token: 't-1', role: 'WAITER', venueName: 'Café', venueId: 'v-1' }]
+  login.mockResolvedValue({ accessToken: 'a', refreshToken: 'r', staff: { id: 's' }, isNewUser: false, pendingInvitations: pendientes })
+  const { res } = await llamar({ code: 'c-1' })
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ pendingInvitations: pendientes }))
+})
