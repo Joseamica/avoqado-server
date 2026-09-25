@@ -1,5 +1,6 @@
 import express from 'express'
 import { validateRequest } from '../middlewares/validation'
+import { autenticacionOpcional } from '../middlewares/autenticacionOpcional.middleware'
 import * as invitationController from '../controllers/invitation.controller'
 import { InvitationTokenParamsSchema, AcceptInvitationSchema } from '../schemas/invitation.schema'
 
@@ -86,6 +87,8 @@ router.get('/:token', validateRequest(InvitationTokenParamsSchema), invitationCo
  *       410:
  *         description: Invitation has expired
  */
-router.post('/:token/accept', validateRequest(AcceptInvitationSchema), invitationController.acceptInvitation)
+// `autenticacionOpcional`: la ruta sigue pública, pero si trae sesión se sabe de QUIÉN es. Una
+// cuenta existente sin contraseña sólo se acepta desde su propia sesión (robo de cuentas por invitación).
+router.post('/:token/accept', autenticacionOpcional, validateRequest(AcceptInvitationSchema), invitationController.acceptInvitation)
 
 export default router

@@ -20,12 +20,18 @@ export async function acceptInvitation(req: Request, res: Response, next: NextFu
     const token: string = req.params.token
     const { firstName, lastName, password, pin } = req.body
 
-    const result = await invitationService.acceptInvitation(token, {
-      firstName,
-      lastName,
-      password,
-      pin,
-    })
+    // La sesión (si la trae) la pone `autenticacionOpcional`: una cuenta sin contraseña sólo la acepta su dueña.
+    const sesionStaffId: string | undefined = (req as any).authContext?.userId
+    const result = await invitationService.acceptInvitation(
+      token,
+      {
+        firstName,
+        lastName,
+        password,
+        pin,
+      },
+      { sesionStaffId },
+    )
 
     res.status(200).json({
       message: 'Invitation accepted successfully',

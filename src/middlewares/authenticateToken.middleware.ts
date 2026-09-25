@@ -70,7 +70,7 @@ export function faseDelRolloutLegacy(): FaseDelRolloutLegacy {
 }
 
 /** Cookie primero (Dashboard Web); si no hay, header `Authorization: Bearer` (TPV/API/móvil). */
-function extraerToken(req: Request): string | undefined {
+export function extraerToken(req: Request): string | undefined {
   const cookieToken = req.cookies?.accessToken
   if (cookieToken) return cookieToken
   const authHeader = req.headers['authorization']

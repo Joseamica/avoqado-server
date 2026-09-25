@@ -124,7 +124,11 @@ export async function getInvitationByToken(token: string) {
   }
 }
 
-export async function acceptInvitation(token: string, userData: AcceptInvitationData): Promise<AcceptInvitationResult> {
+export async function acceptInvitation(
+  token: string,
+  userData: AcceptInvitationData,
+  opciones: { sesionStaffId?: string } = {},
+): Promise<AcceptInvitationResult> {
   // Capture venueId, staffId, and role for activity log (outside transaction)
   let acceptedVenueId: string | null = null
   let acceptedStaffId: string | null = null
@@ -236,6 +240,16 @@ export async function acceptInvitation(token: string, userData: AcceptInvitation
         } else if (existingStaff.password && !userData.password) {
           // User has a password but didn't provide one - they need to verify
           throw new AppError('Se requiere contraseña para verificar tu identidad', 400)
+        } else if (!existingStaff.password && opciones.sesionStaffId !== existingStaff.id) {
+          // 🔴 Cuenta existente SIN contraseña (toda cuenta de Google): el enlace no demuestra nada
+          // —quien invita lo recibe en la respuesta y esta ruta es pública—. Antes se aceptaba la
+          // contraseña que escribiera quien abriera el enlace: cualquier dueño podía invitar el
+          // correo de otra persona y quedarse con su cuenta. Ahora sólo acepta la sesión de ESA
+          // cuenta (quien entra con Google ya trae la suya).
+          throw new AppError(
+            'Ya tienes una cuenta en Avoqado. Inicia sesión con ella (con Google o creando tu contraseña en «¿Olvidaste tu contraseña?») para aceptar la invitación.',
+            401,
+          )
         }
 
         // User already exists in this organization
