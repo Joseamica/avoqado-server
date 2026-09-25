@@ -1,23 +1,58 @@
-import { issueOrgPickToken, verifyOrgPickToken, listActiveOrganizations } from '../../../src/mcp/oauth/orgPick'
+import { issueOrgPickToken, verifyOrgPickToken, listActiveOrganizations, tokenParaElSelector } from '../../../src/mcp/oauth/orgPick'
 import { renderLoginPage } from '../../../src/mcp/oauth/loginPage'
 import prisma from '@/utils/prismaClient'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
-  default: { staffOrganization: { findMany: jest.fn() } },
+  default: { staffOrganization: { findMany: jest.fn() }, staff: { findUnique: jest.fn() } },
 }))
-const m = prisma as unknown as { staffOrganization: { findMany: jest.Mock } }
+// El corte de sesión (cambio de contraseña / cerrar todo) lo decide la regla real; aquí su veredicto.
+let mockCorte: string | null = null
+jest.mock('@/utils/passwordChangeGuard', () => ({ motivoDeSesionInvalidada: async () => mockCorte }))
+const m = prisma as unknown as { staffOrganization: { findMany: jest.Mock }; staff: { findUnique: jest.Mock } }
+
+beforeEach(() => {
+  mockCorte = null
+  m.staff.findUnique.mockReset().mockResolvedValue({ active: true })
+})
 
 describe('org-pick token (carries step-1 identity to step-2 consent)', () => {
-  it('round-trips the staffId', () => {
+  it('round-trips the staffId', async () => {
     const token = issueOrgPickToken('staff-123')
-    expect(verifyOrgPickToken(token)).toBe('staff-123')
+    expect(await verifyOrgPickToken(token)).toBe('staff-123')
   })
 
-  it('rejects a tampered token', () => {
+  it('rejects a tampered token', async () => {
     const token = issueOrgPickToken('staff-123')
-    expect(verifyOrgPickToken(token.slice(0, -3) + 'xxx')).toBeNull()
-    expect(verifyOrgPickToken('garbage')).toBeNull()
+    expect(await verifyOrgPickToken(token.slice(0, -3) + 'xxx')).toBeNull()
+    expect(await verifyOrgPickToken('garbage')).toBeNull()
+  })
+
+  // H4 (Codex gpt-6-astra, 2ª pasada): el token sólo llevaba identidad y caducidad.
+  it('🔴 si la persona cambió su contraseña o cerró sus sesiones DESPUÉS de emitirse, ya no sirve', async () => {
+    const token = issueOrgPickToken('staff-123')
+    mockCorte = 'PASSWORD_CHANGED'
+    expect(await verifyOrgPickToken(token)).toBeNull()
+  })
+
+  it('🔴 una cuenta desactivada ya no sirve', async () => {
+    const token = issueOrgPickToken('staff-123')
+    m.staff.findUnique.mockResolvedValue({ active: false })
+    expect(await verifyOrgPickToken(token)).toBeNull()
+  })
+})
+
+describe('tokenParaElSelector (H4: no se renueva)', () => {
+  it('🔴 si ya venía de un token de selección, se reusa ESE (no se emite uno nuevo con reloj nuevo)', () => {
+    // Distinguible a propósito: dos tokens de la misma persona en el mismo segundo salen IDÉNTICOS,
+    // y la prueba pasaría aunque se reemitiera.
+    const previo = 'token-de-seleccion-previo'
+    expect(tokenParaElSelector(previo, 'staff-123')).toBe(previo)
+  })
+
+  it('en el paso 1 (sin token previo) se emite uno', async () => {
+    const nuevo = tokenParaElSelector(undefined, 'staff-9')
+    expect(await verifyOrgPickToken(nuevo)).toBe('staff-9')
   })
 })
 

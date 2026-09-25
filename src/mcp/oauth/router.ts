@@ -10,7 +10,7 @@ import { provider } from './provider'
 import { prismaClientsStore } from './clientsStore'
 import { MCP_ISSUER_URL, MCP_RESOURCE_URL, MCP_SCOPES_SUPPORTED } from './config'
 import { staffIdFromDashboardSession } from './session'
-import { issueOrgPickToken, verifyOrgPickToken, listActiveOrganizations } from './orgPick'
+import { verifyOrgPickToken, listActiveOrganizations, tokenParaElSelector } from './orgPick'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 
@@ -123,7 +123,7 @@ function approveHandler() {
           }).toString(),
       )
 
-    const staffId = token ? verifyOrgPickToken(token) : null
+    const staffId = token ? await verifyOrgPickToken(token) : null
     if (!staffId) return backToLogin() // expired/tampered → re-authenticate
     const client = await prismaClientsStore.getClient(clientId)
     if (!client || !(client.redirect_uris ?? []).includes(redirectUri)) return backToLogin()
@@ -184,7 +184,7 @@ function approveHandler() {
     let staffId: string
     if (typeof orgPickToken === 'string' && orgPickToken) {
       // Step-2 (org picker) submit: identity carried by the short-lived signed token, never re-typed credentials.
-      const sid = verifyOrgPickToken(orgPickToken)
+      const sid = await verifyOrgPickToken(orgPickToken)
       if (!sid) {
         logger.warn('[MCP OAuth] org-pick token invalid/expired', { mcpOAuth: true, clientId: String(client_id) })
         return reRender('La selección de organización expiró. Vuelve a iniciar sesión.')
@@ -226,7 +226,9 @@ function approveHandler() {
         const pickUrl =
           '/mcp-oauth/pick-org?' +
           new URLSearchParams({
-            token: issueOrgPickToken(staffId),
+            // 🔴 H4: si ya venía de un token de selección, se REUSA — reemitir uno nuevo en cada
+            // paso lo volvía renovable sin volver a autenticarse.
+            token: tokenParaElSelector(orgPickToken, staffId),
             client_id: String(client_id),
             redirect_uri: String(redirect_uri),
             code_challenge: String(code_challenge),
