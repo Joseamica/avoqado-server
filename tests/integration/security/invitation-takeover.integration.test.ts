@@ -275,4 +275,67 @@ describe('la membresía nace al ACEPTAR, no al invitar', () => {
       statusCode: 404,
     })
   })
+
+  it('🔴 R1: cuenta NUEVA invitada por A que acepta SÓLO la invitación de B: A no puede resetearle la contraseña', async () => {
+    // (Codex, 2ª pasada) La invitación de A dejó membresía en A; aceptar B activó la cuenta global.
+    const correo = `victima-r1-${sufijo}@test.mx`
+    await inviteTeamMember(venueId, invitador, { email: correo, firstName: 'Vi', lastName: 'Ctima', role: StaffRole.WAITER })
+    const victima = await prisma.staff.findUniqueOrThrow({ where: { email: correo } })
+    ids.staff.push(victima.id)
+
+    const orgB = await prisma.organization.create({
+      data: { name: `B ${sufijo}`, email: `b-${sufijo}@test.mx`, phone: '5555555555', seatCapExempt: true },
+    })
+    ids.orgs.push(orgB.id)
+    const venueB = await prisma.venue.create({
+      data: {
+        name: `VB ${sufijo}`,
+        slug: `vb-${sufijo}`,
+        organizationId: orgB.id,
+        address: 'x',
+        city: 'CDMX',
+        country: 'Mexico',
+        timezone: 'America/Mexico_City',
+        currency: 'MXN',
+        status: 'ACTIVE',
+      },
+    })
+    ids.venues.push(venueB.id)
+    const invB = await prisma.invitation.create({
+      data: {
+        email: correo,
+        role: StaffRole.WAITER,
+        organizationId: orgB.id,
+        venueId: venueB.id,
+        invitedById: invitador,
+        expiresAt: new Date(Date.now() + 86_400_000),
+      },
+    })
+    await acceptInvitation(invB.token, { firstName: 'Vi', lastName: 'Ctima', password: 'SoloAceptoB1' })
+
+    await expect(organizationDashboardService.resetUserPassword(orgId, victima.id, invitador)).rejects.toMatchObject({ statusCode: 404 })
+  })
+
+  it('N2: un miembro activo que acepta una invitación de DUEÑO queda como dueño también en la organización', async () => {
+    const hash = await bcrypt.hash('MiembroYa12', 4)
+    const miembro = await persona('miembro-a-dueno', { password: hash })
+    await prisma.staffOrganization.create({
+      data: { staffId: miembro.id, organizationId: orgId, role: 'MEMBER', isActive: true, isPrimary: true },
+    })
+    const inv = await prisma.invitation.create({
+      data: {
+        email: miembro.email,
+        role: StaffRole.OWNER,
+        organizationId: orgId,
+        venueId,
+        invitedById: invitador,
+        expiresAt: new Date(Date.now() + 86_400_000),
+      },
+    })
+    await acceptInvitation(inv.token, { password: 'MiembroYa12' })
+    const m = await prisma.staffOrganization.findUniqueOrThrow({
+      where: { staffId_organizationId: { staffId: miembro.id, organizationId: orgId } },
+    })
+    expect(m.role).toBe('OWNER')
+  })
 })

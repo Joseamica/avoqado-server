@@ -2975,7 +2975,15 @@ class OrganizationDashboardService {
     // 🔴 Y la PERSONA activa: una cuenta inactiva (la provisional de una invitación que nadie ha
     // aceptado, o alguien dado de baja) no se resetea — no hay a quién devolverle el acceso.
     const staffOrg = await prisma.staffOrganization.findFirst({
-      where: { staffId: userId, organizationId: orgId, isActive: true, staff: { active: true } },
+      // 🔴 R1 (Codex, 2ª pasada): además, que TRABAJE en una sucursal de ESTA organización. Una
+      // invitación que nadie aceptó no crea esa asignación — cubre también las membresías viejas
+      // que las invitaciones dejaban activas antes de aceptar.
+      where: {
+        staffId: userId,
+        organizationId: orgId,
+        isActive: true,
+        staff: { active: true, venues: { some: { active: true, venue: { organizationId: orgId } } } },
+      },
       select: { id: true },
     })
 

@@ -297,6 +297,14 @@ export async function acceptInvitation(
         // La membresía en ESTA organización nace (o se reactiva) al ACEPTAR — invitar ya no la crea.
         // Sólo si no es ya miembro activo: a un miembro activo no se le toca el rol.
         const yaEsMiembroActivo = existingStaff.organizations.some(o => o.organizationId === invitation.organizationId)
+        if (yaEsMiembroActivo && invitation.role === StaffRole.OWNER) {
+          // N2 (Codex): una invitación de DUEÑO (que sólo emite quien puede otorgarlo) promueve también
+          // la membresía; sin esto quedaba OWNER en la sucursal y MEMBER en la organización.
+          await tx.staffOrganization.update({
+            where: { staffId_organizationId: { staffId: existingStaff.id, organizationId: invitation.organizationId } },
+            data: { role: OrgRole.OWNER },
+          })
+        }
         if (!yaEsMiembroActivo) {
           // 🔴 El rol en ESTA organización sale de la INVITACIÓN, como en las otras altas
           // (`orgRoleForNewStaff`, `team.dashboard.service`, Google). Antes se derivaba de sus
