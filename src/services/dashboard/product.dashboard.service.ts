@@ -13,6 +13,7 @@ import {
   assertLegacyCatalogProductUpdateGovernance,
   writeLegacyServiceProductCreationAuditForVenue,
 } from '../master-catalog/catalogGovernance.service'
+import { normalizarIvaDeProducto, traducirErrorDeIva } from '../fiscal/normalizarIvaDeProducto'
 
 export interface CreateProductDto {
   name: string
@@ -63,6 +64,11 @@ export interface CreateProductDto {
   satProductKey?: string | null
   satUnitKey?: string | null
   objetoImp?: '01' | '02' | '03' | '04'
+  // IVA por producto: el único valor que se escribe (ver normalizarIvaDeProducto).
+  // `taxRate` sigue existiendo aquí sólo para que un cliente viejo (que aún manda la
+  // tasa cruda) pueda seguir siendo interpretado — nunca se escribe directo a la BD.
+  taxRate?: number
+  ivaTratamiento?: string
 
   // Estación de impresión (ruteo de comandas)
   printStationId?: string | null
@@ -122,6 +128,9 @@ export interface UpdateProductDto {
   satProductKey?: string | null
   satUnitKey?: string | null
   objetoImp?: '01' | '02' | '03' | '04'
+  // IVA por producto: ver el comentario homólogo en CreateProductDto.
+  taxRate?: number
+  ivaTratamiento?: string
 
   // Estación de impresión (ruteo de comandas)
   printStationId?: string | null
@@ -601,84 +610,99 @@ export async function createProduct(venueId: string, productData: CreateProductD
 
         const displayOrder = (maxOrder?.displayOrder || 0) + 1
 
-        const product = await tx.product.create({
-          data: {
-            // Basic fields
-            name: productFields.name,
-            description: productFields.description,
-            price: productFields.price,
-            type: productFields.type,
-            imageUrl: productFields.imageUrl,
-            sku: productFields.sku,
-            gtin: productFields.gtin,
-            categoryId: productFields.categoryId,
-            printStationId: productFields.printStationId ?? null,
-            venueId,
-            createdById: actor.type === 'HUMAN' ? actor.staffId : null,
-            displayOrder,
-            active: true,
+        // IVA por producto: sólo se escribe `ivaTratamiento` (nunca `taxRate`/`objetoImp`
+        // directo) — el trigger de Product deriva la tupla. `actual = null` porque el
+        // producto todavía no existe.
+        const encendido = (await tx.venueIvaPorProducto.count({ where: { venueId } })) > 0
 
-            // ═══════════════════════════════════════════════════════════════
-            // Square-aligned contextual fields
-            // ═══════════════════════════════════════════════════════════════
-            isAlcoholic: productFields.isAlcoholic ?? false,
-            kitchenName: productFields.kitchenName,
-            abbreviation: productFields.abbreviation,
-            duration: productFields.duration,
-            bufferAfterMin: productFields.bufferAfterMin,
+        let product: CreatedProductWithRelations
+        try {
+          product = await tx.product.create({
+            data: {
+              // Basic fields
+              name: productFields.name,
+              description: productFields.description,
+              price: productFields.price,
+              type: productFields.type,
+              imageUrl: productFields.imageUrl,
+              sku: productFields.sku,
+              gtin: productFields.gtin,
+              categoryId: productFields.categoryId,
+              printStationId: productFields.printStationId ?? null,
+              venueId,
+              createdById: actor.type === 'HUMAN' ? actor.staffId : null,
+              displayOrder,
+              active: true,
 
-            // Venta por peso: price is the price PER KG; unit pinned to KILOGRAM.
-            soldByWeight: productFields.soldByWeight ?? false,
-            ...(productFields.soldByWeight ? { unit: 'KILOGRAM' as const } : {}),
+              // ═══════════════════════════════════════════════════════════════
+              // Square-aligned contextual fields
+              // ═══════════════════════════════════════════════════════════════
+              isAlcoholic: productFields.isAlcoholic ?? false,
+              kitchenName: productFields.kitchenName,
+              abbreviation: productFields.abbreviation,
+              duration: productFields.duration,
+              bufferAfterMin: productFields.bufferAfterMin,
 
-            // Event fields
-            eventDate: productFields.eventDate ? new Date(productFields.eventDate) : undefined,
-            eventTime: productFields.eventTime,
-            eventEndTime: productFields.eventEndTime,
-            eventCapacity: productFields.eventCapacity,
-            eventLocation: productFields.eventLocation,
+              // Venta por peso: price is the price PER KG; unit pinned to KILOGRAM.
+              soldByWeight: productFields.soldByWeight ?? false,
+              ...(productFields.soldByWeight ? { unit: 'KILOGRAM' as const } : {}),
 
-            // Digital fields
-            downloadUrl: productFields.downloadUrl,
-            downloadLimit: productFields.downloadLimit,
-            fileSize: productFields.fileSize,
+              // Event fields
+              eventDate: productFields.eventDate ? new Date(productFields.eventDate) : undefined,
+              eventTime: productFields.eventTime,
+              eventEndTime: productFields.eventEndTime,
+              eventCapacity: productFields.eventCapacity,
+              eventLocation: productFields.eventLocation,
 
-            // Donation fields
-            suggestedAmounts: productFields.suggestedAmounts,
-            allowCustomAmount: productFields.allowCustomAmount ?? true,
-            donationCause: productFields.donationCause,
+              // Digital fields
+              downloadUrl: productFields.downloadUrl,
+              downloadLimit: productFields.downloadLimit,
+              fileSize: productFields.fileSize,
 
-            // Credit Packs
-            allowCreditRedemption: productFields.allowCreditRedemption ?? true,
-            requireCreditForBooking: productFields.requireCreditForBooking ?? false,
+              // Donation fields
+              suggestedAmounts: productFields.suggestedAmounts,
+              allowCustomAmount: productFields.allowCustomAmount ?? true,
+              donationCause: productFields.donationCause,
 
-            // General-purpose duration
-            durationMinutes: productFields.durationMinutes,
+              // Credit Packs
+              allowCreditRedemption: productFields.allowCreditRedemption ?? true,
+              requireCreditForBooking: productFields.requireCreditForBooking ?? false,
 
-            // Campos fiscales SAT (CFDI 4.0)
-            ...(productFields.satProductKey !== undefined && { satProductKey: productFields.satProductKey }),
-            ...(productFields.satUnitKey !== undefined && { satUnitKey: productFields.satUnitKey }),
-            ...(productFields.objetoImp !== undefined && { objetoImp: productFields.objetoImp }),
+              // General-purpose duration
+              durationMinutes: productFields.durationMinutes,
 
-            // Modifier groups
-            modifierGroups: modifierGroupIds?.length
-              ? {
-                  create: modifierGroupIds.map((groupId, index) => ({
-                    groupId,
-                    displayOrder: index,
-                  })),
-                }
-              : undefined,
-          },
-          include: {
-            category: true,
-            modifierGroups: {
-              include: {
-                group: true,
+              // Campos fiscales SAT (CFDI 4.0)
+              ...(productFields.satProductKey !== undefined && { satProductKey: productFields.satProductKey }),
+              ...(productFields.satUnitKey !== undefined && { satUnitKey: productFields.satUnitKey }),
+              ...normalizarIvaDeProducto(
+                { ivaTratamiento: productFields.ivaTratamiento, taxRate: productFields.taxRate, objetoImp: productFields.objetoImp },
+                null,
+                encendido,
+              ),
+
+              // Modifier groups
+              modifierGroups: modifierGroupIds?.length
+                ? {
+                    create: modifierGroupIds.map((groupId, index) => ({
+                      groupId,
+                      displayOrder: index,
+                    })),
+                  }
+                : undefined,
+            },
+            include: {
+              category: true,
+              modifierGroups: {
+                include: {
+                  group: true,
+                },
               },
             },
-          },
-        })
+          })
+        } catch (e) {
+          traducirErrorDeIva(e)
+          throw e
+        }
 
         // WHY: SERVICE callers have no Staff FK, so their durable provenance must
         // commit atomically with the Product instead of fabricating a HUMAN actor.
@@ -805,6 +829,13 @@ export async function updateProduct(
   // If modifierGroupIds is provided, update the relationships
   const updateData: any = { ...productFields }
 
+  // IVA por producto: `taxRate`/`objetoImp`/`ivaTratamiento` NUNCA se escriben directo —
+  // el spread de arriba los habría copiado tal cual. Se borran aquí y se recalculan más
+  // abajo, YA vetados por normalizarIvaDeProducto, dentro de la transacción.
+  delete updateData.taxRate
+  delete updateData.objetoImp
+  delete updateData.ivaTratamiento
+
   // ✅ WORLD-CLASS: If trackInventory is set to false, clear inventoryMethod
   if (productData.trackInventory === false) {
     updateData.inventoryMethod = null
@@ -868,18 +899,40 @@ export async function updateProduct(
       categoryId: productData.categoryId,
       printStationId: productData.printStationId,
     })
-    return tx.product.update({
-      where: { id: productId },
-      data: updateData,
-      include: {
-        category: true,
-        modifierGroups: {
-          include: {
-            group: true,
+
+    // IVA por producto: sólo se escribe `ivaTratamiento` (nunca `taxRate`/`objetoImp`
+    // directo) — el trigger de Product deriva la tupla desde ese único valor.
+    const actual = await tx.product.findFirstOrThrow({
+      where: { id: productId, venueId },
+      select: { ivaTratamiento: true, taxRate: true },
+    })
+    const encendido = (await tx.venueIvaPorProducto.count({ where: { venueId } })) > 0
+    Object.assign(
+      updateData,
+      normalizarIvaDeProducto(
+        { ivaTratamiento: productFields.ivaTratamiento, taxRate: productFields.taxRate, objetoImp: productFields.objetoImp },
+        { ivaTratamiento: actual.ivaTratamiento, taxRate: Number(actual.taxRate) },
+        encendido,
+      ),
+    )
+
+    try {
+      return await tx.product.update({
+        where: { id: productId },
+        data: updateData,
+        include: {
+          category: true,
+          modifierGroups: {
+            include: {
+              group: true,
+            },
           },
         },
-      },
-    })
+      })
+    } catch (e) {
+      traducirErrorDeIva(e)
+      throw e
+    }
   })
 
   // 🔌 REAL-TIME: Broadcast product update via Socket.IO

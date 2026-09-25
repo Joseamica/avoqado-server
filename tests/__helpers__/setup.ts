@@ -174,6 +174,11 @@ const prismaMock: any = {
   cashDrawerSession: createMockModel(),
   cashDrawerEvent: createMockModel(),
   product: createMockModel(),
+  // IVA por producto (plan 1): `createProduct`/`updateProduct` consultan este modelo para
+  // saber si el flag está encendido ANTES de escribir `ivaTratamiento` (normalizarIvaDeProducto).
+  // Sin esta entrada, cualquier test que ejercite esos escritores revienta con "Cannot read
+  // properties of undefined (reading 'count')" — misma clase de bug que los demás de esta lista.
+  venueIvaPorProducto: createMockModel(),
   menu: createMockModel(),
   menuCategory: createMockModel(),
   menuCategoryAssignment: createMockModel(),
@@ -455,6 +460,13 @@ prismaMock.tpvCommandQueue.findMany.mockResolvedValue([])
 prismaMock.orderItem.findMany.mockResolvedValue([])
 prismaMock.inventoryPosting.create.mockResolvedValue({ id: 'posting-default', status: 'PENDING' })
 prismaMock.inventoryPosting.updateMany.mockResolvedValue({ count: 0 })
+// IVA por producto: por default el flag está APAGADO (ningún VenueIvaPorProducto sembrado) —
+// el estado real de casi todo negocio hoy. Tests que lo necesitan encendido lo sobrescriben.
+prismaMock.venueIvaPorProducto.count.mockResolvedValue(0)
+// `updateProduct` (dashboard) lee el tratamiento ACTUAL del producto dentro de la transacción
+// para normalizarIvaDeProducto. Default = el estado de fábrica de cualquier Product (IVA_16 /
+// 0.16), así que un test que no manda campos de IVA no ve ningún efecto de esto.
+prismaMock.product.findFirstOrThrow.mockResolvedValue({ ivaTratamiento: 'IVA_16', taxRate: 0.16 })
 // Plan-tier gating (checkFeatureAccess middleware → getVenueBaseTier in
 // src/services/access/basePlan.service.ts) iterates the rows returned by
 // prisma.venueFeature.findMany. A bare jest.fn() resolves undefined and the

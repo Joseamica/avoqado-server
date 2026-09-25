@@ -19,6 +19,7 @@ import {
   resolveLegacyCatalogActor,
   writeLegacyServiceProductCreationAuditForVenue,
 } from '../../services/master-catalog/catalogGovernance.service'
+import { normalizarIvaDeProducto, traducirErrorDeIva } from '../../services/fiscal/normalizarIvaDeProducto'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -117,6 +118,7 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
       type,
       description,
       taxRate,
+      ivaTratamiento,
       trackInventory,
       duration,
       durationMinutes,
@@ -160,34 +162,43 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
         actor,
       })
       await assertLegacyProductReferencesForVenue(tx, { venueId, categoryId: finalCategoryId })
-      const created = await tx.product.create({
-        data: {
-          name: name.trim(),
-          venueId,
-          createdById: actor.type === 'HUMAN' ? actor.staffId : null,
-          sku: finalSku,
-          gtin: gtin?.trim() || null,
-          description: description || null,
-          categoryId: finalCategoryId,
-          type: type || 'FOOD_AND_BEV',
-          price: price ? parseFloat(price) : 0,
-          taxRate: taxRate ?? 0.16,
-          trackInventory: trackInventory ?? false,
-          duration: duration ?? null,
-          durationMinutes: durationMinutes || null,
-          maxParticipants: maxParticipants ?? null,
-          layoutConfig: layoutConfig ?? undefined,
-          // Optional measurement unit (validated against the Prisma Unit enum;
-          // invalid values are ignored, not fatal — additive field, older
-          // clients that don't send it are unaffected).
-          unit: parsedUnit,
-          // Venta por peso: price becomes precio POR KG; the POS captures the
-          // weight at sale time. Forces KILOGRAM as unit when enabled.
-          soldByWeight: soldByWeight === true,
-          ...(soldByWeight === true ? { unit: 'KILOGRAM' as Unit } : {}),
-        },
-        include: productInclude,
-      })
+      // IVA por producto: sólo se escribe `ivaTratamiento` (el trigger deriva taxRate/objetoImp).
+      // `actual = null` porque el producto todavía no existe.
+      const encendido = (await tx.venueIvaPorProducto.count({ where: { venueId } })) > 0
+      let created
+      try {
+        created = await tx.product.create({
+          data: {
+            name: name.trim(),
+            venueId,
+            createdById: actor.type === 'HUMAN' ? actor.staffId : null,
+            sku: finalSku,
+            gtin: gtin?.trim() || null,
+            description: description || null,
+            categoryId: finalCategoryId,
+            type: type || 'FOOD_AND_BEV',
+            price: price ? parseFloat(price) : 0,
+            trackInventory: trackInventory ?? false,
+            duration: duration ?? null,
+            durationMinutes: durationMinutes || null,
+            maxParticipants: maxParticipants ?? null,
+            layoutConfig: layoutConfig ?? undefined,
+            // Optional measurement unit (validated against the Prisma Unit enum;
+            // invalid values are ignored, not fatal — additive field, older
+            // clients that don't send it are unaffected).
+            unit: parsedUnit,
+            // Venta por peso: price becomes precio POR KG; the POS captures the
+            // weight at sale time. Forces KILOGRAM as unit when enabled.
+            soldByWeight: soldByWeight === true,
+            ...(soldByWeight === true ? { unit: 'KILOGRAM' as Unit } : {}),
+            ...normalizarIvaDeProducto({ ivaTratamiento, taxRate }, null, encendido),
+          },
+          include: productInclude,
+        })
+      } catch (e) {
+        traducirErrorDeIva(e)
+        throw e
+      }
       if (actor.type === 'SERVICE') {
         await writeLegacyServiceProductCreationAuditForVenue(tx, { venueId, productId: created.id, actor })
       }
@@ -230,6 +241,8 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
 
     // Whitelist: only these fields may be updated via the mobile endpoint.
     // Anything else in req.body (e.g. `priceType`, `id`, relations) is ignored.
+    // `taxRate` NO está en esta lista: el IVA se escribe SÓLO como `ivaTratamiento`
+    // (ver normalizarIvaDeProducto más abajo) — el trigger de Product deriva la tupla.
     const allowed = [
       'name',
       'description',
@@ -239,7 +252,6 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
       'imageUrl',
       'price',
       'cost',
-      'taxRate',
       'active',
       'featured',
       'trackInventory',
@@ -269,7 +281,6 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
     // Coerce numeric fields that may arrive as strings from older mobile builds.
     if (data.price !== undefined && data.price !== null) data.price = parseFloat(String(data.price))
     if (data.cost !== undefined && data.cost !== null) data.cost = parseFloat(String(data.cost))
-    if (data.taxRate !== undefined && data.taxRate !== null) data.taxRate = parseFloat(String(data.taxRate))
 
     const actor = resolveLegacyCatalogActor(req.authContext!.userId, Boolean(req.authContext?.isImpersonating))
     const product = await prisma.$transaction(async tx => {
@@ -283,7 +294,27 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
         venueId,
         categoryId: typeof data.categoryId === 'string' ? data.categoryId : undefined,
       })
-      return tx.product.update({ where: { id: productId }, data, include: productInclude })
+      // IVA por producto: sólo se escribe `ivaTratamiento` (nunca `taxRate`/`objetoImp`
+      // directo) — el trigger de Product deriva la tupla desde ese único valor.
+      const actual = await tx.product.findFirstOrThrow({
+        where: { id: productId, venueId },
+        select: { ivaTratamiento: true, taxRate: true },
+      })
+      const encendido = (await tx.venueIvaPorProducto.count({ where: { venueId } })) > 0
+      Object.assign(
+        data,
+        normalizarIvaDeProducto(
+          { ivaTratamiento: req.body?.ivaTratamiento, taxRate: req.body?.taxRate },
+          { ivaTratamiento: actual.ivaTratamiento, taxRate: Number(actual.taxRate) },
+          encendido,
+        ),
+      )
+      try {
+        return await tx.product.update({ where: { id: productId }, data, include: productInclude })
+      } catch (e) {
+        traducirErrorDeIva(e)
+        throw e
+      }
     })
 
     return res.json({ success: true, data: withAvailableQuantity(product) })

@@ -103,7 +103,11 @@ export const ProductSchema = z.object({
   type: z.nativeEnum(ProductType),
   price: z.number().positive('Price must be positive').multipleOf(0.01),
   cost: z.number().positive('Cost must be positive').multipleOf(0.01).nullable().optional(),
-  taxRate: z.number().min(0).max(1).default(0.16), // 16% default tax
+  // Sin `.default(0.16)`: un default de esquema haría que TODO create mande `taxRate`
+  // y dispare la comparación de normalizarIvaDeProducto. El default fiscal real vive en
+  // `Product.ivaTratamiento @default(IVA_16)` (ver src/services/fiscal/ivaTratamiento.ts).
+  taxRate: z.number().min(0).max(1).optional(),
+  ivaTratamiento: z.enum(['IVA_16', 'IVA_0', 'EXENTO'], { invalid_type_error: 'IVA inválido' }).optional(),
   imageUrl: z.string().url().nullable().optional(),
   displayOrder: z.number().int().min(0).default(0),
   featured: z.boolean().default(false),
@@ -133,6 +137,7 @@ const ProductBodyBase = z.object({
   price: z.number().positive('Price must be positive').multipleOf(0.01),
   cost: z.number().positive('Cost must be positive').multipleOf(0.01).optional().nullable(),
   taxRate: z.number().min(0).max(1).optional(),
+  ivaTratamiento: z.enum(['IVA_16', 'IVA_0', 'EXENTO'], { invalid_type_error: 'IVA inválido' }).optional(),
   imageUrl: z.string().url().nullable().optional(),
   displayOrder: z.number().int().min(0).optional(),
   featured: z.boolean().optional(),
