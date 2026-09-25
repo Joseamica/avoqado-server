@@ -5,6 +5,14 @@ import { AuthenticationError } from '../../errors/AppError'
 import logger from '@/config/logger'
 
 /**
+ * El rol de quien modifica EN ESTE venue, tal como lo resolvió `checkPermission('settings:manage')`.
+ * 🔴 Nunca `authContext.role`: el token lleva el rol del venue en que se emitió (Codex H8, 24-sep).
+ */
+function rolResuelto(req: Request): StaffRole | undefined {
+  return (req as unknown as { resolvedRole?: StaffRole }).resolvedRole
+}
+
+/**
  * Get all role permissions for a venue
  * Returns both custom and default permissions for each role
  */
@@ -69,7 +77,8 @@ export async function updateRolePermissions(req: Request, res: Response, next: N
     // Use the role RESOLVED for :venueId by checkPermission('settings:manage'),
     // NOT the raw JWT role — the JWT role may belong to a different venue, which
     // would let a user edit permissions in a venue where they hold a lower role.
-    const modifierRole = (req as any).resolvedRole ?? req.authContext?.role
+    // Sin rol resuelto se rechaza: nunca se cae al del token (Codex H8, 24-sep).
+    const modifierRole = rolResuelto(req)
 
     if (!modifiedById || !modifierRole) {
       throw new AuthenticationError('Authentication context missing')
@@ -133,7 +142,8 @@ export async function updateRolePermissions(req: Request, res: Response, next: N
 export async function deleteRolePermissions(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId, role } = req.params
-    const modifierRole = req.authContext?.role
+    // El rol en ESTE venue (checkPermission), no el del token (Codex H8, 24-sep).
+    const modifierRole = rolResuelto(req)
 
     if (!modifierRole) {
       throw new AuthenticationError('Authentication context missing')
@@ -174,7 +184,7 @@ export async function deleteRolePermissions(req: Request, res: Response, next: N
  */
 export async function getRoleHierarchyInfo(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const modifierRole = req.authContext?.role
+    const modifierRole = rolResuelto(req)
 
     if (!modifierRole) {
       throw new AuthenticationError('Authentication context missing')
