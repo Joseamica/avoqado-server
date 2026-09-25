@@ -16,6 +16,7 @@ import jwt from 'jsonwebtoken'
 import prisma from '../../../src/utils/prismaClient'
 import { switchVenueForStaff } from '../../../src/services/dashboard/auth.service'
 import { userHasVenueAccess } from '../../../src/services/staffOrganization.service'
+import { authorizeRole } from '../../../src/middlewares/authorizeRole.middleware'
 
 /** El rol viaja DENTRO del token: es lo que después leen `authorizeRole` y el dashboard. */
 const rolDelToken = (r: { accessToken: string }) => (jwt.decode(r.accessToken) as { role: StaffRole }).role
@@ -129,5 +130,61 @@ describe('userHasVenueAccess — la misma regla', () => {
 
   it('cuenta vieja: acceso a toda su organización (regresión)', async () => {
     expect(await userHasVenueAccess(legacy, a2)).toBe(true)
+  })
+})
+
+/** Corre el middleware REAL con un authContext dado y dice si dejó pasar. */
+async function pasa(allowed: StaffRole[], authContext: Record<string, unknown>): Promise<boolean> {
+  let paso = false
+  const res = { status: () => res, json: () => res } as any
+  await (authorizeRole(allowed) as any)({ authContext } as any, res, (err?: unknown) => {
+    paso = !err
+  })
+  return paso
+}
+
+describe('authorizeRole — el rol se relee de la base, no se le cree al token', () => {
+  // 🔴 (Codex gpt-6-astra, 24-sep) `authorizeRole` sólo miraba `authContext.role`, o sea lo escrito
+  // en el token. Un token de DUEÑO emitido por el defecto del cambio de sucursal (vive 24 h) seguía
+  // pasando, y la compra de tokens de IA cobra con la tarjeta guardada del negocio.
+  it('🔴 un token que DICE dueño en B, de alguien que en B es mesera, no pasa', async () => {
+    expect(await pasa([StaffRole.OWNER, StaffRole.ADMIN], { userId: mixta, orgId: orgB, venueId: b1, role: StaffRole.OWNER })).toBe(false)
+  })
+
+  it('la dueña real de A pasa en A, también en una sucursal donde no tiene fila (regresión)', async () => {
+    expect(await pasa([StaffRole.OWNER], { userId: mixta, orgId: orgA, venueId: a1, role: StaffRole.OWNER })).toBe(true)
+    expect(await pasa([StaffRole.OWNER], { userId: mixta, orgId: orgA, venueId: a2, role: StaffRole.OWNER })).toBe(true)
+  })
+
+  it('🔴 un token que DICE superadmin, de alguien que no lo es, no pasa', async () => {
+    expect(await pasa([StaffRole.SUPERADMIN], { userId: mixta, orgId: orgA, venueId: a1, role: StaffRole.SUPERADMIN })).toBe(false)
+  })
+
+  it('🔴 una cuenta DESACTIVADA no pasa aunque su token diga dueño', async () => {
+    const baja = await persona('baja')
+    await prisma.staffOrganization.create({ data: { staffId: baja, organizationId: orgA, role: 'OWNER', isActive: true, isPrimary: true } })
+    await prisma.staffVenue.create({ data: { staffId: baja, venueId: a1, role: StaffRole.OWNER, active: true } })
+    expect(await pasa([StaffRole.OWNER], { userId: baja, orgId: orgA, venueId: a1, role: StaffRole.OWNER })).toBe(true)
+    await prisma.staff.update({ where: { id: baja }, data: { active: false } })
+    expect(await pasa([StaffRole.OWNER], { userId: baja, orgId: orgA, venueId: a1, role: StaffRole.OWNER })).toBe(false)
+  })
+
+  it('un superadmin real pasa (regresión)', async () => {
+    const sa = await persona('superadmin')
+    await prisma.staffVenue.create({ data: { staffId: sa, venueId: a1, role: StaffRole.SUPERADMIN, active: true } })
+    expect(await pasa([StaffRole.SUPERADMIN], { userId: sa, orgId: orgA, venueId: b2, role: StaffRole.SUPERADMIN })).toBe(true)
+  })
+
+  it('dueña en alta (sucursal «pending»): pasa como dueña de su organización (regresión)', async () => {
+    expect(await pasa([StaffRole.OWNER], { userId: mixta, orgId: orgA, venueId: 'pending', role: StaffRole.OWNER })).toBe(true)
+  })
+
+  it('impersonación: vale si quien actúa es un superadmin real (regresión)', async () => {
+    const sa2 = await persona('superadmin2')
+    await prisma.staffVenue.create({ data: { staffId: sa2, venueId: a1, role: StaffRole.SUPERADMIN, active: true } })
+    const ctx = { userId: sa2, realUserId: sa2, orgId: orgB, venueId: b1, role: StaffRole.OWNER, isImpersonating: true }
+    expect(await pasa([StaffRole.OWNER], ctx)).toBe(true)
+    // y un «impersonador» que no es superadmin, no
+    expect(await pasa([StaffRole.OWNER], { ...ctx, userId: mixta, realUserId: mixta })).toBe(false)
   })
 })

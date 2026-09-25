@@ -24,7 +24,7 @@ function ssoAuthorizeHandler() {
   router.use(cookieParser())
   router.get('/authorize', async (req: Request, res: Response, next: NextFunction) => {
     if (req.query.prompt === 'login') return next() // user picked "use another account"
-    const staffId = staffIdFromDashboardSession(req)
+    const staffId = await staffIdFromDashboardSession(req)
     if (!staffId) return next()
 
     const clientId = req.query.client_id ? String(req.query.client_id) : ''
@@ -192,7 +192,7 @@ function approveHandler() {
       staffId = sid
     } else if (sso === '1') {
       // One-click connect: trust ONLY a freshly re-verified session cookie, never the form flag alone.
-      const sid = staffIdFromDashboardSession(req)
+      const sid = await staffIdFromDashboardSession(req)
       if (!sid) {
         logger.warn('[MCP OAuth] SSO approve without a valid session cookie', { mcpOAuth: true, clientId: String(client_id) })
         return reRender('Tu sesión expiró. Inicia sesión con tu correo y contraseña.')
