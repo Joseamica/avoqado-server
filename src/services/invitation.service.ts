@@ -425,7 +425,11 @@ export async function acceptInvitation(
           if (existingAssignment) {
             // Only upgrade role, never downgrade (protects existing higher-role assignments)
             const effectiveRole =
-              ROLE_HIERARCHY[existingAssignment.role] > ROLE_HIERARCHY[invitation.role] ? existingAssignment.role : invitation.role
+              // 🔴 H3 (Codex): sólo una asignación ACTIVA se protege de bajar de rol. Una dada de baja
+              // no es un rol vigente: reinvitar como mesero a un ex-dueño no le revive la propiedad.
+              existingAssignment.active && ROLE_HIERARCHY[existingAssignment.role] > ROLE_HIERARCHY[invitation.role]
+                ? existingAssignment.role
+                : invitation.role
 
             // Update existing assignment
             await tx.staffVenue.update({

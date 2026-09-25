@@ -338,4 +338,28 @@ describe('la membresía nace al ACEPTAR, no al invitar', () => {
     })
     expect(m.role).toBe('OWNER')
   })
+
+  it('🔴 H3: ex-dueño DADO DE BAJA re-invitado como mesero vuelve como MESERO, no como dueño', async () => {
+    const hash = await bcrypt.hash('ExDueno1234', 4)
+    const exDueno = await persona('ex-dueno', { password: hash })
+    await prisma.staffVenue.create({ data: { staffId: exDueno.id, venueId, role: StaffRole.OWNER, active: false } })
+    const token = await invitar(exDueno.email) // invitación de MESERO
+    await acceptInvitation(token, { password: 'ExDueno1234' })
+    const sv = await prisma.staffVenue.findFirstOrThrow({ where: { staffId: exDueno.id, venueId } })
+    expect(sv.active).toBe(true)
+    expect(sv.role).toBe(StaffRole.WAITER)
+  })
+
+  it('un gerente ACTIVO invitado como mesero a su misma sucursal sigue de gerente (regresión: no se degrada)', async () => {
+    const hash = await bcrypt.hash('Gerente1234', 4)
+    const gerente = await persona('gerente-activo', { password: hash })
+    await prisma.staffOrganization.create({
+      data: { staffId: gerente.id, organizationId: orgId, role: 'MEMBER', isActive: true, isPrimary: true },
+    })
+    await prisma.staffVenue.create({ data: { staffId: gerente.id, venueId, role: StaffRole.MANAGER, active: true } })
+    const token = await invitar(gerente.email)
+    await acceptInvitation(token, { password: 'Gerente1234' })
+    const sv = await prisma.staffVenue.findFirstOrThrow({ where: { staffId: gerente.id, venueId } })
+    expect(sv.role).toBe(StaffRole.MANAGER)
+  })
 })
