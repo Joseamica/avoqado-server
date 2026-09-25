@@ -1862,6 +1862,7 @@ class OrganizationDashboardService {
       action: 'ORG_GOAL_UPDATED',
       entity: 'OrganizationGoal',
       entityId: goal.id,
+      organizationId: goal.organizationId,
       data: { period, salesTarget, volumeTarget },
     })
 
@@ -3022,6 +3023,8 @@ class OrganizationDashboardService {
       action: 'USER_PASSWORD_RESET',
       entity: 'Staff',
       entityId: userId,
+      // En la COLUMNA, no sólo en data: la bitácora del dueño filtra por ella (Codex H9, 24-sep).
+      organizationId: orgId,
       data: { organizationId: orgId },
     })
 

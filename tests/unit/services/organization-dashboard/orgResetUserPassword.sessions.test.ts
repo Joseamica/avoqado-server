@@ -13,6 +13,11 @@ import { organizationDashboardService } from '@/services/organization-dashboard/
 import * as guard from '@/utils/passwordChangeGuard'
 
 jest.mock('@/utils/passwordChangeGuard')
+const mockLogAction = jest.fn()
+jest.mock('@/services/dashboard/activity-log.service', () => ({
+  ...jest.requireActual('@/services/dashboard/activity-log.service'),
+  logAction: (...a: unknown[]) => mockLogAction(...a),
+}))
 
 beforeEach(() => {
   jest.clearAllMocks()
@@ -25,6 +30,16 @@ describe('organizationDashboardService.resetUserPassword', () => {
     await organizationDashboardService.resetUserPassword('org_1', 'staff_1', 'owner_1')
 
     expect(guard.cerrarSesionesNuevasPorCambioDeContrasena).toHaveBeenCalledWith('staff_1')
+  })
+
+  // 🔴 Codex H9 (24-sep): la bitácora filtra por la COLUMNA organizationId; con el org sólo en
+  // `data` el reset administrativo era invisible para el dueño en su pantalla de actividad.
+  it('🔴 la bitácora del reset lleva organizationId en la columna, no sólo en data', async () => {
+    await organizationDashboardService.resetUserPassword('org_1', 'staff_1', 'owner_1')
+
+    expect(mockLogAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'USER_PASSWORD_RESET', staffId: 'owner_1', entityId: 'staff_1', organizationId: 'org_1' }),
+    )
   })
 
   // REGRESSION — a user outside the org must not have anything reset or closed.
