@@ -181,7 +181,13 @@ describe('GET /tpv/auth/permissions · identidades autorizadas sin membresía (C
     expect(r.body.data.role).toBe(StaffRole.SUPERADMIN)
     expect(r.body.data.permissions).toContain(ajustes)
     expect(r.body.data.permissions).not.toContain(PERMISO)
-    expect(staffVenueFindFirst.mock.calls[0][0].where).toEqual({ staffId: STAFF, role: StaffRole.SUPERADMIN })
+    // Superadmin DE VERDAD: fila activa de persona activa (Codex H6, 24-sep).
+    expect(staffVenueFindFirst.mock.calls[0][0].where).toEqual({
+      staffId: STAFF,
+      role: StaffRole.SUPERADMIN,
+      active: true,
+      staff: { active: true },
+    })
   })
 
   it('el OWNER activo de la organización recibe la lista de OWNER, sin la declaración', async () => {

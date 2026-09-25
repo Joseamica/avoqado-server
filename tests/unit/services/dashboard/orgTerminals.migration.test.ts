@@ -25,6 +25,8 @@ jest.mock('@/utils/prismaClient', () => ({
     venue: { findFirst: jest.fn(), findMany: jest.fn() },
     merchantAccount: { findMany: jest.fn() },
     staffOrganization: { findFirst: jest.fn() },
+    // esSuperadminReal: el SUPERADMIN del token se confirma en la base (Codex H1/H6, 24-sep).
+    staffVenue: { findFirst: jest.fn() },
   },
 }))
 
@@ -343,7 +345,8 @@ describe('requireOrgOwner middleware', () => {
     expect(next).not.toHaveBeenCalled()
   })
 
-  it('bypasses the OWNER check for SUPERADMIN (no DB lookup, calls next)', async () => {
+  it('bypasses the OWNER check for a REAL SUPERADMIN (active row in DB), calls next', async () => {
+    ;(prisma as any).staffVenue.findFirst.mockResolvedValue({ id: 'fila-sa' })
     const req: any = { params: { orgId: ORG_ID }, authContext: { userId: 'super-1', role: 'SUPERADMIN' } }
     const res = makeRes()
     const next = jest.fn()

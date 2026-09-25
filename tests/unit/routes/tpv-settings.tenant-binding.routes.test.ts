@@ -123,6 +123,8 @@ beforeEach(() => {
     Promise.resolve({ id: where?.id, organizationId: `org-${where?.id}` })) as any)
   prismaMock.staffOrganization.findUnique.mockResolvedValue(null)
   prismaMock.venueRolePermission.findUnique.mockResolvedValue(null)
+  // El resolutor de rol confirma que la persona siga ACTIVA (Codex H2, 24-sep).
+  prismaMock.staff.findUnique.mockResolvedValue({ active: true } as any)
 })
 
 describe('Ajustes de una terminal: la autorización REAL se evalúa en el venue de la terminal', () => {

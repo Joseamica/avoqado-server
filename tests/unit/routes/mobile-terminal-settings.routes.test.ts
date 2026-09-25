@@ -108,6 +108,8 @@ function auditCalls() {
 beforeEach(() => {
   jest.clearAllMocks()
   mockedUpdate.mockResolvedValue({ showReviewScreen: false, showTipScreen: true } as any)
+  // El resolutor de rol confirma que la persona siga ACTIVA (Codex H2, 24-sep).
+  prismaMock.staff.findUnique.mockResolvedValue({ active: true } as any)
 
   // Honra el `where`: si el controlador no acota por venue o por aparato, no encuentra nada.
   prismaMock.terminal.findFirst.mockImplementation((({ where }: any) => {
