@@ -91,7 +91,9 @@ async function requireOrgMembership(userId: string, orgId: string): Promise<Staf
   const filas = await prisma.staffVenue.findMany({
     where: { staffId: userId, active: true, staff: { active: true }, venue: { organizationId: orgId } },
     select: { role: true },
-    take: 100, // una persona no tiene más sucursales que ésas en una organización
+    // Roles DISTINTOS (son 9 como máximo): el máximo se calcula sobre todos, no sobre una muestra (Codex ronda 5).
+    distinct: ['role'],
+    take: 20,
   })
   const roles = filas.map(f => f.role).filter(r => r !== StaffRole.SUPERADMIN)
   if (roles.length === 0) return null

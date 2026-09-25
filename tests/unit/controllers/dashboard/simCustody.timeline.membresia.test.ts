@@ -49,6 +49,17 @@ it('usa el rol MÁS ALTO de las asignaciones activas (un gerente que también es
   const r = await correr({ userId: 'u', orgId: ORG, role: 'CASHIER' })
   expect(prohibido(r)).toBe(false)
   expect(prismaMock.staffVenue.findMany).toHaveBeenCalledWith(
-    expect.objectContaining({ where: expect.objectContaining({ active: true, staff: { active: true } }) }),
+    expect.objectContaining({ where: expect.objectContaining({ active: true, staff: { active: true } }), distinct: ['role'] }),
   )
+})
+
+it('🔴 el máximo sale de los roles DISTINTOS: 100 asignaciones de cajero no esconden la de gerente (Codex ronda 5)', async () => {
+  prismaMock.staffVenue.findFirst.mockResolvedValue(null as never)
+  // El doble honra `distinct`: sin él, las primeras 20 filas son de cajero y la de gerente queda fuera.
+  const filas = [...Array.from({ length: 100 }, () => ({ role: 'CASHIER' })), { role: 'MANAGER' }]
+  prismaMock.staffVenue.findMany.mockImplementation((({ distinct, take }: any) => {
+    const base = distinct?.includes('role') ? filas.filter((f, i) => filas.findIndex(g => g.role === f.role) === i) : filas
+    return Promise.resolve(base.slice(0, take ?? base.length))
+  }) as any)
+  expect(prohibido(await correr({ userId: 'u', orgId: ORG, role: 'CASHIER' }))).toBe(false)
 })
