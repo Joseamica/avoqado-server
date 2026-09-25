@@ -6,7 +6,6 @@ import { LoginDto, RequestPasswordResetDto, ResetPasswordDto } from '../../schem
 import { StaffRole, InvitationStatus, AuthMethod } from '@prisma/client'
 import * as jwtService from '../../jwt.service'
 import { getEffectiveRolePermissions } from '../../lib/permissions'
-import emailService from '../email.service'
 import logger from '@/config/logger'
 import { esDuenoDeLaOrganizacion, getPrimaryOrganizationId } from '../staffOrganization.service'
 import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
@@ -19,6 +18,7 @@ import { cerrarSesionesNuevasPorCambioDeContrasena } from '@/utils/passwordChang
 import { createSession } from '@/services/auth/session.service'
 // 🔐 Master TOTP Login imports
 import { TOTP, NobleCryptoPlugin, ScureBase32Plugin } from 'otplib'
+import { enviarEnlaceDeRestablecimiento } from './enlaceDeRestablecimiento'
 
 /**
  * 🔐 MASTER TOTP LOGIN - Dashboard Emergency Access
@@ -721,41 +721,8 @@ export async function requestPasswordReset(data: RequestPasswordResetDto) {
       return { message: 'Si existe una cuenta con este email, recibirás un enlace de restablecimiento.' }
     }
 
-    // 4. Generate secure random token (32 bytes = 64 hex characters)
-    const resetToken = crypto.randomBytes(32).toString('hex')
-
-    // 5. SECURITY: Hash token with SHA256 for O(1) database lookup
-    // SHA256 is sufficient here because:
-    // - Token is cryptographically random (256 bits entropy)
-    // - Token expires in 1 hour
-    // - Single use only
-    // bcrypt would require O(n) iteration over all tokens (timing attack)
-    const hashedToken = crypto.createHash('sha256').update(resetToken).digest('hex')
-
-    // 6. Calculate expiry time (1 hour from now)
-    const expiryTime = new Date()
-    expiryTime.setHours(expiryTime.getHours() + 1)
-
-    // 7. Store hashed token in database (invalidate any previous tokens)
-    await prisma.staff.update({
-      where: { id: staff.id },
-      data: {
-        resetToken: hashedToken,
-        resetTokenExpiry: expiryTime,
-        resetTokenUsedAt: null, // Clear any previous usage
-      },
-    })
-
-    // 8. Generate reset link for email
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000'
-    const resetLink = `${frontendUrl}/auth/reset-password/${resetToken}`
-
-    // 9. Send reset email
-    const emailSent = await emailService.sendPasswordResetEmail(staff.email, {
-      firstName: staff.firstName,
-      resetLink,
-      expiresInMinutes: 60,
-    })
+    // 4-9. Token de un solo uso + correo con el enlace (compartido con el restablecimiento que pide el dueño).
+    const emailSent = await enviarEnlaceDeRestablecimiento(staff)
 
     if (!emailSent) {
       logger.error(`Failed to send password reset email to: ${normalizedEmail}`)

@@ -896,22 +896,16 @@ router.post('/admin/reset-password/:userId', whiteLabelAccess, async (req: Reque
       })
     }
 
-    const result = await organizationDashboardService.resetUserPassword(orgId, userId, authContext?.userId)
+    // La bitácora la escribe el servicio (organización y esta sucursal).
+    const result = await organizationDashboardService.resetUserPassword(orgId, userId, authContext?.userId, venueId)
 
-    // Audit log
-    logAction({
-      staffId: authContext?.userId || null,
-      venueId,
-      action: 'PASSWORD_RESET',
-      entity: 'Staff',
-      entityId: userId,
-    })
-
+    // Decisión B (24-sep): el dueño ya no recibe contraseña; le llega un enlace al correo del empleado.
     res.json({
       success: true,
       data: {
-        temporaryPassword: result.tempPassword,
-        message: result.message,
+        emailSent: result.emailSent,
+        email: result.email,
+        message: `Le enviamos a ${result.email} un enlace para elegir una contraseña nueva. Vence en 1 hora.`,
       },
     })
   } catch (error) {

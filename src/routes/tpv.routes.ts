@@ -120,7 +120,7 @@ import {
 } from '../services/master-catalog/catalogGovernance.service'
 
 import * as walletScanController from '../controllers/tpv/walletScan.tpv.controller'
-import { esSuperadminReal } from '../services/access/rolVigente'
+import { esSuperadminDeLaSesion, esSuperadminReal } from '../services/access/rolVigente'
 
 const router = express.Router()
 
@@ -7269,7 +7269,8 @@ router.post('/superadmin/modules/toggle', authenticateTokenMiddleware, async (re
     const authContext = (req as any).authContext
     const { venueId, userId: staffId, role } = authContext
 
-    if (role !== 'SUPERADMIN') {
+    // SUPERADMIN sólo si LO ES en la base (Codex ronda 3).
+    if (!(await esSuperadminDeLaSesion({ userId: staffId, role }))) {
       throw new AppError('Solo SUPERADMIN puede cambiar módulos desde TPV', 403)
     }
 

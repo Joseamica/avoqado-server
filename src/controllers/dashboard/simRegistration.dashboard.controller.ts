@@ -6,6 +6,7 @@
 import { Request, Response, NextFunction } from 'express'
 import { z } from 'zod'
 import { simRegistrationService } from '../../services/serialized-inventory/simRegistration.service'
+import { esSuperadminDeLaSesion } from '../../services/access/rolVigente'
 
 // ==========================================
 // SCHEMAS (Zod, Spanish messages per project rule)
@@ -37,9 +38,10 @@ function mapZodError(res: Response, error: z.ZodError) {
   })
 }
 
-function tenantOk(req: Request): boolean {
-  const { orgId, role } = (req as any).authContext ?? {}
-  return orgId === req.params.orgId || role === 'SUPERADMIN'
+async function tenantOk(req: Request): Promise<boolean> {
+  const { orgId, role, userId } = (req as any).authContext ?? {}
+  // SUPERADMIN sólo si LO ES en la base, no porque lo diga el token (Codex ronda 3).
+  return orgId === req.params.orgId || (await esSuperadminDeLaSesion({ userId, role }))
 }
 
 // ==========================================
@@ -48,7 +50,7 @@ function tenantOk(req: Request): boolean {
 
 export async function listRequests(req: Request, res: Response, next: NextFunction) {
   try {
-    if (!tenantOk(req)) {
+    if (!(await tenantOk(req))) {
       return res.status(403).json({ error: 'TENANT_MISMATCH', message: 'Organización no coincide' })
     }
     const data = await simRegistrationService.listPending(req.params.orgId)
@@ -60,7 +62,7 @@ export async function listRequests(req: Request, res: Response, next: NextFuncti
 
 export async function countRequests(req: Request, res: Response, next: NextFunction) {
   try {
-    if (!tenantOk(req)) {
+    if (!(await tenantOk(req))) {
       return res.status(403).json({ error: 'TENANT_MISMATCH', message: 'Organización no coincide' })
     }
     const count = await simRegistrationService.countPending(req.params.orgId)
@@ -72,7 +74,7 @@ export async function countRequests(req: Request, res: Response, next: NextFunct
 
 export async function approveRequest(req: Request, res: Response, next: NextFunction) {
   try {
-    if (!tenantOk(req)) {
+    if (!(await tenantOk(req))) {
       return res.status(403).json({ error: 'TENANT_MISMATCH', message: 'Organización no coincide' })
     }
     const parse = ApproveBody.safeParse(req.body)
@@ -96,7 +98,7 @@ export async function approveRequest(req: Request, res: Response, next: NextFunc
 
 export async function rejectRequest(req: Request, res: Response, next: NextFunction) {
   try {
-    if (!tenantOk(req)) {
+    if (!(await tenantOk(req))) {
       return res.status(403).json({ error: 'TENANT_MISMATCH', message: 'Organización no coincide' })
     }
     const parse = RejectBody.safeParse(req.body)
@@ -124,7 +126,7 @@ export async function rejectRequest(req: Request, res: Response, next: NextFunct
 
 export async function listStockApprovals(req: Request, res: Response, next: NextFunction) {
   try {
-    if (!tenantOk(req)) {
+    if (!(await tenantOk(req))) {
       return res.status(403).json({ error: 'TENANT_MISMATCH', message: 'Organización no coincide' })
     }
     const { cursor, limit, search } = req.query as { cursor?: string; limit?: string; search?: string }
@@ -141,7 +143,7 @@ export async function listStockApprovals(req: Request, res: Response, next: Next
 
 export async function countStockApprovals(req: Request, res: Response, next: NextFunction) {
   try {
-    if (!tenantOk(req)) {
+    if (!(await tenantOk(req))) {
       return res.status(403).json({ error: 'TENANT_MISMATCH', message: 'Organización no coincide' })
     }
     const count = await simRegistrationService.countPendingStockApprovals(req.params.orgId)
@@ -153,7 +155,7 @@ export async function countStockApprovals(req: Request, res: Response, next: Nex
 
 export async function approveStockItems(req: Request, res: Response, next: NextFunction) {
   try {
-    if (!tenantOk(req)) {
+    if (!(await tenantOk(req))) {
       return res.status(403).json({ error: 'TENANT_MISMATCH', message: 'Organización no coincide' })
     }
     const parse = ApproveStockBody.safeParse(req.body)

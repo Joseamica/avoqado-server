@@ -1,53 +1,66 @@
 /**
- * Same lever as `staffPasswordReset.sessions.test.ts` (superadmin) and
- * `authResetPassword.sessions.test.ts` (dashboard forgot-password): the
- * ORG owner-facing reset (`resetUserPassword`) has to close the new `Session`
- * rows too — see `cerrarSesionesNuevasPorCambioDeContrasena` in
- * `passwordChangeGuard.ts` for the mechanism itself and its own tests.
+ * Decisión del founder (24-sep, opción B tras la 3ª auditoría de Codex): el «restablecer contraseña» del
+ * DUEÑO ya no genera una contraseña temporal que el dueño ve en pantalla. Manda un ENLACE al correo del
+ * empleado — el mismo del «olvidé mi contraseña». El dueño nunca conoce la contraseña, así que ya no
+ * importa si logra fabricar una membresía (R1): lo único que consigue es que le llegue un correo a la víctima.
  *
- * This is literally the docstring's own example scenario: "el dueño le
- * resetea la contraseña a un empleado que acaba de correr."
+ * Reemplaza la decisión C del 1-sep (contraseña temporal global). Echar a quien se fue es «dar de baja».
  */
 import { prismaMock } from '@tests/__helpers__/setup'
-import { organizationDashboardService } from '@/services/organization-dashboard/organizationDashboard.service'
-import * as guard from '@/utils/passwordChangeGuard'
 
-jest.mock('@/utils/passwordChangeGuard')
+const mockEnviar = jest.fn()
+jest.mock('@/services/dashboard/enlaceDeRestablecimiento', () => ({
+  ...jest.requireActual('@/services/dashboard/enlaceDeRestablecimiento'),
+  enviarEnlaceDeRestablecimiento: (...a: unknown[]) => mockEnviar(...a),
+}))
 const mockLogAction = jest.fn()
 jest.mock('@/services/dashboard/activity-log.service', () => ({
   ...jest.requireActual('@/services/dashboard/activity-log.service'),
   logAction: (...a: unknown[]) => mockLogAction(...a),
 }))
 
+import { organizationDashboardService } from '@/services/organization-dashboard/organizationDashboard.service'
+
+const persona = { id: 'staff_1', email: 'juana.perez@correo.mx', firstName: 'Juana' }
+
 beforeEach(() => {
   jest.clearAllMocks()
-  prismaMock.staffOrganization.findFirst.mockResolvedValue({ id: 'so_1', staffId: 'staff_1', organizationId: 'org_1' })
-  prismaMock.staff.update.mockResolvedValue({ id: 'staff_1' })
+  prismaMock.staffOrganization.findFirst.mockResolvedValue({ id: 'so_1', staff: persona } as any)
+  mockEnviar.mockResolvedValue(true)
 })
 
-describe('organizationDashboardService.resetUserPassword', () => {
-  it('🔴 also closes the new Session rows — same reset, both mechanisms in sync', async () => {
-    await organizationDashboardService.resetUserPassword('org_1', 'staff_1', 'owner_1')
+describe('organizationDashboardService.resetUserPassword (enlace por correo)', () => {
+  it('🔴 NO cambia la contraseña ni devuelve una temporal: manda el enlace al correo del empleado', async () => {
+    const r = await organizationDashboardService.resetUserPassword('org_1', 'staff_1', 'owner_1')
 
-    expect(guard.cerrarSesionesNuevasPorCambioDeContrasena).toHaveBeenCalledWith('staff_1')
+    expect(mockEnviar).toHaveBeenCalledWith(expect.objectContaining({ id: 'staff_1', email: 'juana.perez@correo.mx' }))
+    expect(prismaMock.staff.update).not.toHaveBeenCalled()
+    expect(r).not.toHaveProperty('tempPassword')
+    expect(JSON.stringify(r)).not.toContain('juana.perez@correo.mx')
+    expect(r).toEqual(expect.objectContaining({ emailSent: true, email: 'j•••@correo.mx' }))
   })
 
-  // 🔴 Codex H9 (24-sep): la bitácora filtra por la COLUMNA organizationId; con el org sólo en
-  // `data` el reset administrativo era invisible para el dueño en su pantalla de actividad.
-  it('🔴 la bitácora del reset lleva organizationId en la columna, no sólo en data', async () => {
-    await organizationDashboardService.resetUserPassword('org_1', 'staff_1', 'owner_1')
+  it('🔴 si el correo no sale, lo DICE (503) en vez de fingir que se envió', async () => {
+    mockEnviar.mockResolvedValue(false)
+    await expect(organizationDashboardService.resetUserPassword('org_1', 'staff_1', 'owner_1')).rejects.toMatchObject({ statusCode: 503 })
+  })
 
+  it('la bitácora dice quién pidió el enlace, para quién y en qué organización', async () => {
+    await organizationDashboardService.resetUserPassword('org_1', 'staff_1', 'owner_1')
     expect(mockLogAction).toHaveBeenCalledWith(
-      expect.objectContaining({ action: 'USER_PASSWORD_RESET', staffId: 'owner_1', entityId: 'staff_1', organizationId: 'org_1' }),
+      expect.objectContaining({
+        action: 'USER_PASSWORD_RESET_LINK_SENT',
+        staffId: 'owner_1',
+        entityId: 'staff_1',
+        organizationId: 'org_1',
+      }),
     )
   })
 
-  // REGRESSION — a user outside the org must not have anything reset or closed.
-  it('does not touch sessions when the user is not in this org', async () => {
+  // REGRESIÓN — alguien fuera de la organización no recibe nada.
+  it('no manda nada si la persona no pertenece a esta organización', async () => {
     prismaMock.staffOrganization.findFirst.mockResolvedValue(null)
-
-    await expect(organizationDashboardService.resetUserPassword('org_1', 'staff_1', 'owner_1')).rejects.toThrow()
-
-    expect(guard.cerrarSesionesNuevasPorCambioDeContrasena).not.toHaveBeenCalled()
+    await expect(organizationDashboardService.resetUserPassword('org_1', 'staff_1', 'owner_1')).rejects.toMatchObject({ statusCode: 404 })
+    expect(mockEnviar).not.toHaveBeenCalled()
   })
 })

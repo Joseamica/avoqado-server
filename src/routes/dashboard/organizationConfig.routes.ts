@@ -7,7 +7,7 @@
  * instead of venueId, eliminating the venue->org lookup hack.
  */
 import { Router, Request, Response, NextFunction } from 'express'
-import { esSuperadminReal } from '@/services/access/rolVigente'
+import { esSuperadminDeLaSesion, esSuperadminReal } from '@/services/access/rolVigente'
 import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken.middleware'
 import { organizationDashboardService } from '../../services/organization-dashboard/organizationDashboard.service'
 import * as goalResolutionService from '../../services/dashboard/commission/goal-resolution.service'
@@ -588,7 +588,9 @@ router.patch('/team/:staffId/role', orgOwnerAccess, async (req: Request, res: Re
     // below their own level, and NEVER SUPERADMIN — otherwise any OWNER could set
     // role=SUPERADMIN on themselves and become a platform-wide superadmin on the
     // next request (checkPermission treats ANY StaffVenue SUPERADMIN row as global *:*).
-    const callerRole = authContext?.role === StaffRole.SUPERADMIN ? StaffRole.SUPERADMIN : StaffRole.OWNER
+    // 🔴 El rol de quien asigna sale de la BASE, no del token (Codex ronda 3, S1): un exsuperadmin con
+    // token vigente que además es dueño pasaba requireOrgOwner como OWNER y aquí volvía a ser SUPERADMIN.
+    const callerRole = (await esSuperadminDeLaSesion(authContext)) ? StaffRole.SUPERADMIN : StaffRole.OWNER
     if (!canAssignRole(callerRole, role)) {
       return res.status(403).json({ success: false, error: 'forbidden', message: `No puedes asignar el rol ${role}` })
     }
@@ -1007,29 +1009,23 @@ router.patch('/team/:staffId/employee-code', orgOwnerAccess, async (req: Request
 
 /**
  * POST /dashboard/organizations/:orgId/team/:staffId/reset-password
- * Reset password for a staff member and return a temporary password.
+ * Manda al correo del empleado un enlace para elegir una contraseña nueva (decisión B, 24-sep).
  */
 router.post('/team/:staffId/reset-password', orgOwnerAccess, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { orgId, staffId } = req.params
     const authContext = (req as any).authContext
 
+    // La bitácora la escribe el servicio (con la organización en su columna).
     const result = await organizationDashboardService.resetUserPassword(orgId, staffId, authContext?.userId)
 
-    logAction({
-      staffId: authContext?.userId || null,
-      venueId: null,
-      action: 'PASSWORD_RESET',
-      entity: 'Staff',
-      entityId: staffId,
-      data: { orgId },
-    })
-
+    // Decisión B (24-sep): el dueño ya no recibe contraseña; le llega un enlace al correo del empleado.
     res.json({
       success: true,
       data: {
-        temporaryPassword: result.tempPassword,
-        message: result.message,
+        emailSent: result.emailSent,
+        email: result.email,
+        message: `Le enviamos a ${result.email} un enlace para elegir una contraseña nueva. Vence en 1 hora.`,
       },
     })
   } catch (error) {

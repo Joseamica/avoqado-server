@@ -21,6 +21,7 @@ import { StaffRole } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { simCustodyService } from '../../services/serialized-inventory/custody.service'
 import { SIM_CUSTODY_ERROR_CODES, SimCustodyError } from '../../lib/sim-custody-error-codes'
+import { esSuperadminDeLaSesion } from '../../services/access/rolVigente'
 
 // ==========================================
 // SCHEMAS (Zod, Spanish messages per project rule)
@@ -107,7 +108,8 @@ export async function assignToSupervisor(req: Request, res: Response, next: Next
   try {
     const { userId, orgId, role } = (req as any).authContext ?? {}
     const { orgId: paramOrgId } = req.params
-    if (orgId !== paramOrgId && role !== 'SUPERADMIN') {
+    // SUPERADMIN sólo si LO ES en la base, no porque lo diga el token (Codex ronda 3).
+    if (orgId !== paramOrgId && !(await esSuperadminDeLaSesion({ userId, role }))) {
       const entry = SIM_CUSTODY_ERROR_CODES.TENANT_MISMATCH
       return res.status(entry.httpStatus).json({ error: entry.code, message: entry.messages.es })
     }
@@ -133,7 +135,8 @@ export async function assignToPromoter(req: Request, res: Response, next: NextFu
   try {
     const { userId, orgId, role } = (req as any).authContext ?? {}
     const { orgId: paramOrgId } = req.params
-    if (orgId !== paramOrgId && role !== 'SUPERADMIN') {
+    // SUPERADMIN sólo si LO ES en la base, no porque lo diga el token (Codex ronda 3).
+    if (orgId !== paramOrgId && !(await esSuperadminDeLaSesion({ userId, role }))) {
       const entry = SIM_CUSTODY_ERROR_CODES.TENANT_MISMATCH
       return res.status(entry.httpStatus).json({ error: entry.code, message: entry.messages.es })
     }
@@ -163,7 +166,8 @@ export async function assignToPromoterDirect(req: Request, res: Response, next: 
   try {
     const { userId, orgId, role } = (req as any).authContext ?? {}
     const { orgId: paramOrgId } = req.params
-    if (orgId !== paramOrgId && role !== 'SUPERADMIN') {
+    // SUPERADMIN sólo si LO ES en la base, no porque lo diga el token (Codex ronda 3).
+    if (orgId !== paramOrgId && !(await esSuperadminDeLaSesion({ userId, role }))) {
       const entry = SIM_CUSTODY_ERROR_CODES.TENANT_MISMATCH
       return res.status(entry.httpStatus).json({ error: entry.code, message: entry.messages.es })
     }
@@ -188,7 +192,8 @@ export async function collectFromPromoter(req: Request, res: Response, next: Nex
   try {
     const { userId, orgId, role } = (req as any).authContext ?? {}
     const { orgId: paramOrgId } = req.params
-    if (orgId !== paramOrgId && role !== 'SUPERADMIN') {
+    // SUPERADMIN sólo si LO ES en la base, no porque lo diga el token (Codex ronda 3).
+    if (orgId !== paramOrgId && !(await esSuperadminDeLaSesion({ userId, role }))) {
       const entry = SIM_CUSTODY_ERROR_CODES.TENANT_MISMATCH
       return res.status(entry.httpStatus).json({ error: entry.code, message: entry.messages.es })
     }
@@ -212,7 +217,8 @@ export async function collectFromSupervisor(req: Request, res: Response, next: N
   try {
     const { userId, orgId, role } = (req as any).authContext ?? {}
     const { orgId: paramOrgId } = req.params
-    if (orgId !== paramOrgId && role !== 'SUPERADMIN') {
+    // SUPERADMIN sólo si LO ES en la base, no porque lo diga el token (Codex ronda 3).
+    if (orgId !== paramOrgId && !(await esSuperadminDeLaSesion({ userId, role }))) {
       const entry = SIM_CUSTODY_ERROR_CODES.TENANT_MISMATCH
       return res.status(entry.httpStatus).json({ error: entry.code, message: entry.messages.es })
     }
@@ -240,7 +246,8 @@ export async function reassignPromoter(req: Request, res: Response, next: NextFu
   try {
     const { userId, orgId, role } = (req as any).authContext ?? {}
     const { orgId: paramOrgId } = req.params
-    if (orgId !== paramOrgId && role !== 'SUPERADMIN') {
+    // SUPERADMIN sólo si LO ES en la base, no porque lo diga el token (Codex ronda 3).
+    if (orgId !== paramOrgId && !(await esSuperadminDeLaSesion({ userId, role }))) {
       const entry = SIM_CUSTODY_ERROR_CODES.TENANT_MISMATCH
       return res.status(entry.httpStatus).json({ error: entry.code, message: entry.messages.es })
     }
@@ -271,7 +278,8 @@ export async function reassignSupervisor(req: Request, res: Response, next: Next
   try {
     const { userId, orgId, role } = (req as any).authContext ?? {}
     const { orgId: paramOrgId } = req.params
-    if (orgId !== paramOrgId && role !== 'SUPERADMIN') {
+    // SUPERADMIN sólo si LO ES en la base, no porque lo diga el token (Codex ronda 3).
+    if (orgId !== paramOrgId && !(await esSuperadminDeLaSesion({ userId, role }))) {
       const entry = SIM_CUSTODY_ERROR_CODES.TENANT_MISMATCH
       return res.status(entry.httpStatus).json({ error: entry.code, message: entry.messages.es })
     }
@@ -303,7 +311,8 @@ export async function changeCategory(req: Request, res: Response, next: NextFunc
   try {
     const { userId, orgId, role } = (req as any).authContext ?? {}
     const { orgId: paramOrgId } = req.params
-    if (orgId !== paramOrgId && role !== 'SUPERADMIN') {
+    // SUPERADMIN sólo si LO ES en la base, no porque lo diga el token (Codex ronda 3).
+    if (orgId !== paramOrgId && !(await esSuperadminDeLaSesion({ userId, role }))) {
       const entry = SIM_CUSTODY_ERROR_CODES.TENANT_MISMATCH
       return res.status(entry.httpStatus).json({ error: entry.code, message: entry.messages.es })
     }
@@ -330,12 +339,13 @@ export async function listEvents(req: Request, res: Response, next: NextFunction
   try {
     const { userId, orgId, role } = (req as any).authContext ?? {}
     const { orgId: paramOrgId } = req.params
-    if (orgId !== paramOrgId && role !== 'SUPERADMIN') {
+    // SUPERADMIN sólo si LO ES en la base, no porque lo diga el token (Codex ronda 3).
+    if (orgId !== paramOrgId && !(await esSuperadminDeLaSesion({ userId, role }))) {
       const entry = SIM_CUSTODY_ERROR_CODES.TENANT_MISMATCH
       return res.status(entry.httpStatus).json({ error: entry.code, message: entry.messages.es })
     }
 
-    const venueRole = role === 'SUPERADMIN' ? 'SUPERADMIN' : await requireOrgMembership(userId, paramOrgId)
+    const venueRole = (await esSuperadminDeLaSesion({ userId, role })) ? 'SUPERADMIN' : await requireOrgMembership(userId, paramOrgId)
     if (!venueRole || !['OWNER', 'ADMIN', 'MANAGER', 'SUPERADMIN'].includes(venueRole)) {
       return res.status(403).json({ error: 'FORBIDDEN', message: 'No tienes acceso al timeline de custodia' })
     }

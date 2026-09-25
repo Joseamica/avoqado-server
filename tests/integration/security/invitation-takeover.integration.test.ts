@@ -23,8 +23,10 @@ jest.mock('../../../src/services/email.service', () => ({
     sendInvitationEmail: jest.fn().mockResolvedValue(true),
     sendTeamInvitation: jest.fn().mockResolvedValue(true),
     sendEmail: jest.fn().mockResolvedValue(true),
+    sendPasswordResetEmail: (...a: unknown[]) => mockEnlace(...a),
   },
 }))
+const mockEnlace = jest.fn().mockResolvedValue(true)
 
 const sufijo = `it${Date.now()}`
 const ids: { orgs: string[]; venues: string[]; staff: string[] } = { orgs: [], venues: [], staff: [] }
@@ -316,6 +318,27 @@ describe('la membresía nace al ACEPTAR, no al invitar', () => {
     await expect(organizationDashboardService.resetUserPassword(orgId, victima.id, invitador)).rejects.toMatchObject({ statusCode: 404 })
   })
 
+  it('🔴 R1 (3ª pasada) + decisión B: aunque el dueño FABRIQUE la membresía, el reset no le da la cuenta — sólo le llega un enlace a la víctima', async () => {
+    const hash = await bcrypt.hash('DeLaVictima1', 4)
+    const victima = await persona('victima-b', { password: hash, active: true })
+    // Lo que Codex reprodujo: el dueño de A le crea una asignación ACTIVA con PATCH /team/:staffId/venues.
+    await prisma.staffOrganization.create({
+      data: { staffId: victima.id, organizationId: orgId, role: 'MEMBER', isActive: true, isPrimary: false },
+    })
+    await prisma.staffVenue.create({ data: { staffId: victima.id, venueId, role: StaffRole.WAITER, active: true } })
+    mockEnlace.mockClear()
+
+    const r = await organizationDashboardService.resetUserPassword(orgId, victima.id, invitador)
+
+    const despues = await prisma.staff.findUniqueOrThrow({ where: { id: victima.id }, select: { password: true, resetToken: true } })
+    expect(despues.password).toBe(hash) // la contraseña NO cambió: el dueño no la conoce ni la puede elegir
+    expect(despues.resetToken).toMatch(/^[0-9a-f]{64}$/) // se guardó el HASH del token, nunca el token
+    expect(mockEnlace).toHaveBeenCalledTimes(1)
+    expect(mockEnlace.mock.calls[0][0]).toBe(victima.email) // el enlace va al correo de la PERSONA
+    expect(r).not.toHaveProperty('tempPassword')
+    expect(JSON.stringify(r)).not.toContain(victima.email)
+  })
+
   it('N2: un miembro activo que acepta una invitación de DUEÑO queda como dueño también en la organización', async () => {
     const hash = await bcrypt.hash('MiembroYa12', 4)
     const miembro = await persona('miembro-a-dueno', { password: hash })
@@ -348,6 +371,38 @@ describe('la membresía nace al ACEPTAR, no al invitar', () => {
     const sv = await prisma.staffVenue.findFirstOrThrow({ where: { staffId: exDueno.id, venueId } })
     expect(sv.active).toBe(true)
     expect(sv.role).toBe(StaffRole.WAITER)
+  })
+
+  it('🔴 S6: re-invitar como mesero a un ex-admin DADO DE BAJA no le devuelve su juego de permisos privilegiado', async () => {
+    const hash = await bcrypt.hash('ExAdmin1234', 4)
+    const exAdmin = await persona('ex-admin-ps', { password: hash })
+    const ps = await prisma.permissionSet.create({
+      data: { venueId, name: `privilegiado-${Date.now()}`, permissions: ['venues:manage', 'settings:manage'] },
+    })
+    await prisma.staffVenue.create({
+      data: { staffId: exAdmin.id, venueId, role: StaffRole.ADMIN, active: false, permissionSetId: ps.id },
+    })
+    const token = await invitar(exAdmin.email) // invitación de MESERO
+    await acceptInvitation(token, { password: 'ExAdmin1234' })
+    const sv = await prisma.staffVenue.findFirstOrThrow({ where: { staffId: exAdmin.id, venueId } })
+    expect(sv.role).toBe(StaffRole.WAITER)
+    expect(sv.permissionSetId).toBeNull()
+  })
+
+  it('un empleado ACTIVO con juego de permisos re-invitado lo CONSERVA (regresión)', async () => {
+    const hash = await bcrypt.hash('Activo12345', 4)
+    const activo = await persona('activo-ps', { password: hash })
+    await prisma.staffOrganization.create({
+      data: { staffId: activo.id, organizationId: orgId, role: 'MEMBER', isActive: true, isPrimary: true },
+    })
+    const ps = await prisma.permissionSet.create({ data: { venueId, name: `vigente-${Date.now()}`, permissions: ['orders:read'] } })
+    await prisma.staffVenue.create({
+      data: { staffId: activo.id, venueId, role: StaffRole.WAITER, active: true, permissionSetId: ps.id },
+    })
+    const token = await invitar(activo.email)
+    await acceptInvitation(token, { password: 'Activo12345' })
+    const sv = await prisma.staffVenue.findFirstOrThrow({ where: { staffId: activo.id, venueId } })
+    expect(sv.permissionSetId).toBe(ps.id)
   })
 
   it('un gerente ACTIVO invitado como mesero a su misma sucursal sigue de gerente (regresión: no se degrada)', async () => {

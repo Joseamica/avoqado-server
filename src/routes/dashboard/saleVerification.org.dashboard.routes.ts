@@ -8,37 +8,15 @@
  * Pipeline per endpoint: authenticateToken → checkOrgAccess → checkPermission → controller
  */
 
-import { Router, Request, Response, NextFunction } from 'express'
+import { Router } from 'express'
 import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken.middleware'
 import { checkPermission } from '../../middlewares/checkPermission.middleware'
 import * as ctrl from '../../controllers/dashboard/sale-verification.org.dashboard.controller'
+// Mismo candado que el resto de las rutas de organización: membresía ACTIVA en la base y SUPERADMIN
+// sólo si lo es de verdad (Codex ronda 3; antes era una copia que le creía al token).
+import { checkOrgAccess } from './organizationDashboard.routes'
 
 const router = Router({ mergeParams: true })
-
-/**
- * Middleware: verify the authed staff has access to the requested org.
- * SUPERADMIN bypasses. Other users must have orgId in their authContext.
- */
-async function checkOrgAccess(req: Request, res: Response, next: NextFunction) {
-  try {
-    const { orgId: authOrgId, role } = (req as any).authContext ?? {}
-    const requestedOrgId = req.params.orgId
-
-    if (role === 'SUPERADMIN') return next()
-
-    if (!authOrgId || authOrgId !== requestedOrgId) {
-      return res.status(403).json({
-        success: false,
-        error: 'access_denied',
-        message: 'You do not have access to this organization',
-      })
-    }
-
-    next()
-  } catch (err) {
-    next(err)
-  }
-}
 
 router.use(authenticateTokenMiddleware)
 router.use(checkOrgAccess)

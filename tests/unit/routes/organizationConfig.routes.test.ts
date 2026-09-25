@@ -17,7 +17,10 @@ import { prismaMock } from '@tests/__helpers__/setup'
 
 // Los tokens de superadmin de este archivo son de un superadmin REAL: se simula ese veredicto.
 // El caso contrario (token que DICE superadmin sin serlo) lo fija `candadosDeOrganizacion.test.ts`.
-jest.mock('@/services/access/rolVigente', () => ({ esSuperadminReal: jest.fn(async () => true) }))
+jest.mock('@/services/access/rolVigente', () => ({
+  esSuperadminReal: jest.fn(async () => true),
+  esSuperadminDeLaSesion: jest.fn(async (s: any) => s?.role === 'SUPERADMIN'),
+}))
 
 // Mock authenticateTokenMiddleware — injects authContext from req header or defaults
 jest.mock('@/middlewares/authenticateToken.middleware', () => ({

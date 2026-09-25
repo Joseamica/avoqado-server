@@ -439,6 +439,9 @@ export async function acceptInvitation(
                 pin: v.id === invitation.venueId ? validatedPin : null, // PIN only for primary venue
                 active: true,
                 startDate: new Date(),
+                // 🔴 S6 (Codex ronda 3): el juego de permisos SUSTITUYE los del rol. Una asignación dada de
+                // baja no conserva el suyo: reinvitar como mesero a un ex-admin no le devuelve `venues:manage`.
+                ...(existingAssignment.active ? {} : { permissionSetId: null }),
               },
             })
           } else {

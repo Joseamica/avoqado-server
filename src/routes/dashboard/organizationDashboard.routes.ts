@@ -44,7 +44,7 @@ const router = Router()
  */
 export async function checkOrgAccess(req: Request, res: Response, next: NextFunction) {
   try {
-    const { orgId, role, userId } = (req as any).authContext
+    const { orgId, role, userId, isImpersonating, realUserId, impersonation } = (req as any).authContext
     const requestedOrgId = req.params.orgId
 
     // SUPERADMIN has access to all organizations — si LO ES de verdad (H1, Codex): el token sólo
@@ -53,14 +53,26 @@ export async function checkOrgAccess(req: Request, res: Response, next: NextFunc
       return next()
     }
 
+    // Impersonación de ROL (Codex G1): el `userId` sigue siendo el del superadmin y el rol es el
+    // impersonado, así que no tiene membresía propia. Vale sólo en la organización del token y sólo
+    // si quien actúa sigue siendo superadmin de verdad.
+    if (isImpersonating && impersonation?.mode === 'role' && orgId === requestedOrgId && (await esSuperadminReal(realUserId ?? userId))) {
+      return next()
+    }
+
     // User must belong to the organization they're querying — y la membresía debe SEGUIR activa
-    // en la base, no sólo haberlo estado cuando se emitió el token.
+    // en la base, no sólo haberlo estado cuando se emitió el token. Cuenta la fila de organización o,
+    // para el personal que sólo tiene sucursal (Codex G1), una sucursal ACTIVA de esta organización.
     const membresia =
       orgId === requestedOrgId
-        ? await prisma.staffOrganization.findFirst({
+        ? ((await prisma.staffOrganization.findFirst({
             where: { staffId: userId, organizationId: requestedOrgId, isActive: true, staff: { active: true } },
             select: { id: true },
-          })
+          })) ??
+          (await prisma.staffVenue.findFirst({
+            where: { staffId: userId, active: true, staff: { active: true }, venue: { organizationId: requestedOrgId } },
+            select: { id: true },
+          })))
         : null
     if (!membresia) {
       return res.status(403).json({
@@ -1551,8 +1563,7 @@ router.post(
   '/:orgId/users/:userId/reset-password',
   authenticateTokenMiddleware,
   checkOrgAccess,
-  // Owner-only: resetting another user's password returns a temporary password and
-  // is a full account-takeover primitive. checkOrgAccess alone only proves org
+  // Owner-only: aunque ya no devuelve contraseña (decisión B), manda correos a nombre del negocio. checkOrgAccess alone only proves org
   // membership, so without this ANY member (a cashier/waiter) could reset the OWNER.
   requireOrgOwner,
   async (req: Request, res: Response, next: NextFunction) => {
@@ -1562,9 +1573,14 @@ router.post(
 
       const result = await organizationDashboardService.resetUserPassword(orgId, req.params.userId, authContext?.userId)
 
+      // Decisión B (24-sep): el dueño ya no recibe contraseña; le llega un enlace al correo del empleado.
       res.json({
         success: true,
-        data: result,
+        data: {
+          emailSent: result.emailSent,
+          email: result.email,
+          message: `Le enviamos a ${result.email} un enlace para elegir una contraseña nueva. Vence en 1 hora.`,
+        },
       })
     } catch (error) {
       next(error)

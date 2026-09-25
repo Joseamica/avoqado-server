@@ -37,6 +37,8 @@ jest.mock('@/utils/prismaClient', () => ({
     venueSettings: { findUnique: jest.fn() },
     order: { findFirst: jest.fn(), findMany: jest.fn() },
     staffVenue: { findFirst: jest.fn(), findUnique: jest.fn() },
+    // El resolutor de rol confirma que la persona siga ACTIVA (Codex H2, 24-sep).
+    staff: { findUnique: jest.fn(async () => ({ active: true })) },
     venue: { findUnique: jest.fn() },
     staffOrganization: { findUnique: jest.fn() },
     venueRolePermission: { findUnique: jest.fn() },
