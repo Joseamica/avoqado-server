@@ -343,6 +343,9 @@ export async function convertToOrder(estimateId: string, venueId: string, staffI
       kitchenStatus: 'PENDING',
       type: 'TAKEOUT',
       source: 'AVOQADO_IOS',
+      // `createEstimate` suma el 16 % ENCIMA del subtotal: el presupuesto es el caso
+      // canónico de IVA aparte (ver `services/fiscal/contratoDePrecio.ts`).
+      contratoDePrecio: 'IVA_APARTE',
       subtotal: estimate.subtotal,
       discountAmount: new Prisma.Decimal(0),
       taxAmount: estimate.taxAmount,

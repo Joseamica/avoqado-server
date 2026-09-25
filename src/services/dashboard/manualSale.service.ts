@@ -203,6 +203,9 @@ export async function createOneManualSale(
               source: 'DASHBOARD_MANUAL',
               status: 'COMPLETED',
               paymentStatus: 'PAID',
+              // Fuente = hoja de Excel del cliente: no se sabe si el precio ya
+              // incluía IVA o no, así que no se adivina.
+              contratoDePrecio: 'DESCONOCIDO',
               subtotal: amount,
               taxAmount: zero,
               total: amount,

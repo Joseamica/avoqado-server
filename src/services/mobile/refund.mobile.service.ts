@@ -95,6 +95,8 @@ export async function createRefund(params: CreateRefundParams) {
         orderNumber,
         type: 'TAKEOUT',
         source: 'AVOQADO_IOS',
+        // Reembolso standalone: no hay orden de origen de la cual heredar el contrato.
+        contratoDePrecio: 'DESCONOCIDO',
         subtotal: negativeAmount,
         taxAmount: new Decimal('0.00'),
         total: negativeAmount,

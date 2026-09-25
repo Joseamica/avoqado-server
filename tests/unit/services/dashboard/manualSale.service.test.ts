@@ -146,6 +146,9 @@ describe('manualSale.service — createOneManualSale', () => {
       type: 'MANUAL_ENTRY',
       source: 'DASHBOARD_MANUAL',
       status: 'COMPLETED',
+      // IVA por producto, plan 2: la fuente es la hoja de Excel del cliente — no se sabe
+      // si el precio ya incluía IVA o no, así que no se adivina.
+      contratoDePrecio: 'DESCONOCIDO',
     })
     expect(new Prisma.Decimal(orderData.total).toString()).toBe('150')
     expect(orderData.posRawData.manualSerializedSale).toBe(true)

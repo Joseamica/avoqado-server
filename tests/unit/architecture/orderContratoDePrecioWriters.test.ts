@@ -48,14 +48,8 @@ function funcionQueContiene(lineas: string[], i: number): string | null {
 const CREA = /\.order\s*\.\s*(create|upsert)\s*\(/
 const ACTUALIZA = /\.order\s*\.\s*(update|updateMany)\s*\(/
 
-/** Pendientes: la Tarea 4 quita los archivos, la Tarea 5 quita las funciones de split. Esta lista sólo encoge. */
+/** Pendientes: la Tarea 5 quita las funciones de split. Esta lista sólo encoge. */
 const PENDIENTES: Array<{ archivo: string; funcion?: string }> = [
-  { archivo: 'services/mobile/estimate.mobile.service.ts' },
-  { archivo: 'services/pos-sync/posSyncOrder.service.ts' },
-  { archivo: 'services/dashboard/manualPayment.service.ts' },
-  { archivo: 'services/dashboard/manualSale.service.ts' },
-  { archivo: 'services/mobile/refund.mobile.service.ts' },
-  { archivo: 'services/onboarding/demoSeed.service.ts' },
   { archivo: 'services/mobile/order.mobile.service.ts', funcion: 'splitOrderItems' },
   { archivo: 'services/mobile/order.mobile.service.ts', funcion: 'splitOrderBySeat' },
 ]

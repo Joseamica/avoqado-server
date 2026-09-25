@@ -18,6 +18,7 @@ import {
   resolvePaymentShiftReconciliationEnabled,
 } from '@/services/shared/paymentShiftClaim'
 import { countPriorCompletedPayments } from '@/services/shared/priorCompletedPayments'
+import { contratoDePagoManual } from '@/services/fiscal/contratoDePrecio'
 
 /**
  * Record a manual payment (admin-only). Two modes:
@@ -302,6 +303,9 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
             source: 'DASHBOARD_MANUAL',
             status: 'COMPLETED',
             paymentStatus: 'PAID',
+            // Única ruta donde un humano teclea el IVA a mano: sólo un valor > 0
+            // demuestra "aparte" (`contratoDePagoManual`). 0 o ausente no se adivina.
+            contratoDePrecio: contratoDePagoManual(taxAmount.toFixed(2)),
             subtotal: amount,
             taxAmount,
             discountAmount,

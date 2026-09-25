@@ -495,6 +495,68 @@ describe('manualPayment.service', () => {
       expect(paymentCreate.mock.calls[0][0].data.shiftId).toBeNull()
     })
 
+    // IVA por producto, plan 2, tarea 4: el pago manual sin `orderId` (modo 2, orden sombra)
+    // es la ÚNICA ruta donde un humano teclea el IVA a mano. Sólo un IVA > 0 demuestra
+    // "aparte" — 0 o ausente no se adivina como "incluido" (`contratoDePagoManual`).
+    describe('contratoDePrecio de la orden sombra (modo 2)', () => {
+      it('con taxAmount tecleado > 0, la orden sombra nace IVA_APARTE', async () => {
+        const orderCreate = jest.fn().mockResolvedValue({ id: 'shadow-iva-aparte' })
+        ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+          txMock({
+            order: { findFirst: jest.fn(), update: jest.fn(), create: orderCreate },
+            payment: { count: jest.fn().mockResolvedValue(0), create: jest.fn().mockResolvedValue({ id: 'pay-x' }) },
+            shift: {
+              findFirst: jest.fn().mockResolvedValue(null),
+              update: jest.fn(),
+              updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+            },
+            orderCustomer: { create: jest.fn() },
+            venueTransaction: { create: jest.fn() },
+            paymentAllocation: { create: jest.fn() },
+          }),
+        )
+
+        await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+          amount: '100.00',
+          taxAmount: '16.00',
+          tipAmount: '0',
+          method: 'CASH',
+          source: 'OTHER',
+          externalSource: 'BUQ',
+        })
+
+        expect(orderCreate.mock.calls[0][0].data.contratoDePrecio).toBe('IVA_APARTE')
+      })
+
+      it('sin taxAmount (default 0), la orden sombra nace DESCONOCIDO', async () => {
+        const orderCreate = jest.fn().mockResolvedValue({ id: 'shadow-desconocido' })
+        ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+          txMock({
+            order: { findFirst: jest.fn(), update: jest.fn(), create: orderCreate },
+            payment: { count: jest.fn().mockResolvedValue(0), create: jest.fn().mockResolvedValue({ id: 'pay-x' }) },
+            shift: {
+              findFirst: jest.fn().mockResolvedValue(null),
+              update: jest.fn(),
+              updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+            },
+            orderCustomer: { create: jest.fn() },
+            venueTransaction: { create: jest.fn() },
+            paymentAllocation: { create: jest.fn() },
+          }),
+        )
+
+        await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+          amount: '100.00',
+          tipAmount: '0',
+          method: 'CASH',
+          source: 'OTHER',
+          externalSource: 'BUQ',
+        })
+
+        expect(orderCreate.mock.calls[0][0].data.contratoDePrecio).toBe('DESCONOCIDO')
+      })
+    })
+
     it('does NOT subtract REFUND payments when computing paidSoFar (over-pay risk)', async () => {
       // Scenario: order $100, prior payment $80 (COMPLETED), refund $-50 (COMPLETED).
       // Net paid should be $30 → can accept up to $70 more.

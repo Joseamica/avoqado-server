@@ -1312,6 +1312,8 @@ async function seedOrders(
         type: OrderType.DINE_IN,
         status: OrderStatus.COMPLETED,
         paymentStatus: PaymentStatus.PAID,
+        // El demo usa precios con IVA incluido (la norma en México).
+        contratoDePrecio: 'IVA_INCLUIDO',
         subtotal,
         taxAmount,
         total,

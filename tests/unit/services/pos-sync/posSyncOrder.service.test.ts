@@ -149,6 +149,10 @@ describe('POS Sync Order Service (posSyncOrder.service.ts)', () => {
             createdBy: { connect: { id: mockStaffId } },
             table: { connect: { id: mockTableId } },
             shift: { connect: { id: mockShiftId } },
+            // IVA por producto, plan 2: SoftRestaurant manda el impuesto APARTE del
+            // subtotal (PosOrderData.taxAmount es un campo separado). Sólo la rama
+            // `create:` declara el contrato — el `update:` de arriba NO debe llevarlo.
+            contratoDePrecio: 'IVA_APARTE',
           }),
         }),
       )
@@ -157,6 +161,10 @@ describe('POS Sync Order Service (posSyncOrder.service.ts)', () => {
         `[🥾 PosSyncOrder] Orden order-prisma-id (externalId: ${orderData.externalId}) guardada/actualizada.`,
       )
       expect(result).toEqual(mockUpsertedOrder)
+
+      // El `update:` NUNCA reescribe el contrato — sólo el `create:` lo declara.
+      const upsertArgs = mockPrismaOrderUpsert.mock.calls[0][0]
+      expect(upsertArgs.update.contratoDePrecio).toBeUndefined()
     })
 
     it('should throw NotFoundError if venue is not found', async () => {

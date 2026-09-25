@@ -96,6 +96,15 @@ describe('createRefund (móvil) — convención canónica de reembolso', () => {
     )
   })
 
+  // IVA por producto, plan 2: sin orden de origen no hay de dónde heredar el contrato.
+  it('la orden testigo nace DESCONOCIDO (no hay orden de origen de la cual heredar)', async () => {
+    await refundCash()
+
+    expect(prismaMock.order.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ contratoDePrecio: 'DESCONOCIDO' }) }),
+    )
+  })
+
   /**
    * 🔴 Migrado al helper compartido `postCashRefundToDrawer` (2026-08-16) para que
    * exista UN solo lugar que sabe restar del cajón — el otro camino de reembolso

@@ -160,7 +160,15 @@ async function lockPosOrderNaturalKey(
   const canonicalExternalIdentity =
     parts.length === 3 && parts[0] && /^\d+$/.test(parts[1]) && parts[2] ? `${parts[0]}:*:${parts[2]}` : input.externalId
   const key = `pos-order:${input.venueId}:${canonicalExternalIdentity}`
-  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`
+  // `pg_advisory_xact_lock` devuelve `void`, y Prisma NO sabe deserializar una columna `void`
+  // por `$queryRaw` («Failed to deserialize column of type 'void'») — el MISMO defecto que
+  // `shiftLifecycleLock.ts` ya documenta y arregla con este cast. Hallado el 25-sep escribiendo
+  // la integración de `contratoDePrecio` (IVA por producto, plan 2, tarea 4): sin el cast, TODO
+  // evento de pos-sync contra un Postgres real revienta ANTES de tocar la orden — no es un
+  // defecto de esta tarea, pero bloqueaba por completo poder probarla contra la base real.
+  // Se mantiene la forma de plantilla (no `Prisma.sql`) para no cambiar la forma de llamada
+  // que `posSyncOrder.shiftCloseRace.test.ts` inspecciona (strings + valores interpolados).
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))::text`
 }
 
 /**
@@ -346,6 +354,10 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
         orderNumber: orderData.orderNumber,
         source: OrderSource.POS,
         originSystem: OriginSystem.POS_SOFTRESTAURANT,
+        // SoftRestaurant manda el impuesto APARTE del subtotal (PosOrderData.taxAmount
+        // es un campo separado). Sólo esta rama de creación lo declara — la rama
+        // `update:` de arriba NUNCA reescribe el contrato de una orden ya nacida.
+        contratoDePrecio: 'IVA_APARTE',
         createdAt: new Date(orderData.createdAt),
         syncedAt: new Date(),
         status: orderData.status,
