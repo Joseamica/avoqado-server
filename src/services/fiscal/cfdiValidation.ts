@@ -16,6 +16,8 @@ export interface PreStampInput {
 
 const RFC_RE = /^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/i
 
+export const SIN_CONCEPTOS = 'El CFDI no tiene conceptos.'
+
 /** Pure, deterministic pre-timbrado validation. Returns Spanish reasons (shown to staff/customer). */
 export function validateBeforeStamp(input: PreStampInput): ReceptorValidationResult {
   const reasons: string[] = []
@@ -38,7 +40,7 @@ export function validateBeforeStamp(input: PreStampInput): ReceptorValidationRes
   if (!input.formaPago || input.formaPago === '99') reasons.push('La forma de pago no está definida para este CFDI.')
 
   // Conceptos
-  if (input.items.length === 0) reasons.push('El CFDI no tiene conceptos.')
+  if (input.items.length === 0) reasons.push(SIN_CONCEPTOS)
   input.items.forEach((it, i) => {
     const n = i + 1
     if (!it.satProductKey?.trim()) reasons.push(`Concepto ${n} ("${it.description}") sin clave de producto SAT (ClaveProdServ).`)

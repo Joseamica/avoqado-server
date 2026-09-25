@@ -6,7 +6,7 @@ import { venueStartOfDay, venueEndOfDay, DEFAULT_TIMEZONE } from '../../utils/da
 import { buildStoragePath, uploadFileToStorage } from '../storage.service'
 import { resolveFiscalProvider } from './fiscalProvider.factory'
 import { buildCreateInvoiceParams } from './cfdiPayloadBuilder'
-import { validateBeforeStamp } from './cfdiValidation'
+import { SIN_CONCEPTOS, validateBeforeStamp } from './cfdiValidation'
 import { assembleSaleInput, LoadedOrderForCfdi } from './assembleSaleInput'
 import { splitIvaIncluded } from './ivaMath'
 import { logAction, LogActionParams } from '../dashboard/activity-log.service'
@@ -401,7 +401,7 @@ export async function issueCfdiForOrder(
     expectedTotalCents: bundle.totalCents,
     isGlobal: false, // individual issuance — XAXX010101000 ("Público en General") is blocked here
   })
-  const reasons = [...validation.reasons, ...(bundle.unsupportedReasons ?? [])]
+  const reasons = motivosParaMostrar(validation.reasons, bundle.unsupportedReasons ?? [])
   // 🔴 Barrera de dinero: la factura tiene que decir EXACTAMENTE lo que el cliente pagó (sin propina).
   // Testarudo (21-sep-2026) recibió 5 facturas por menos de lo cobrado; un CFDI que no cuadra con el
   // ticket es peor que ninguno — no se timbra, y la razón se le enseña a quien factura.
@@ -602,6 +602,16 @@ export function claimWhere(cfdiId: string, desdeEstados: string[], version: numb
   return { id: cfdiId, status: { in: desdeEstados }, attempts: version }
 }
 
+/**
+ * Motivos que se le enseñan a quien factura. Si el sobre seguro ya explicó por qué se quitaron los
+ * renglones, «sin conceptos» es sólo su consecuencia (y en jerga): se omite para que la primera línea
+ * sea una causa que se puede corregir.
+ */
+export function motivosParaMostrar(validacion: string[], delSobre: string[]): string[] {
+  const base = delSobre.length > 0 ? validacion.filter(m => m !== SIN_CONCEPTOS) : validacion
+  return [...base, ...delSobre]
+}
+
 export type RenglonParaCfdi = {
   productName: string | null
   quantity: number
@@ -702,7 +712,9 @@ const pesosTxt = (cents: number) => `$${(cents / 100).toFixed(2)}`
  */
 export function conceptosDesdeRenglon(it: RenglonParaCfdi, _orderId: string): ConceptosDeRenglon {
   const extras = it.modifiers ?? []
-  const nombreProducto = it.productName ?? 'Producto'
+  // El nombre guardado en la venta manda; si el camino de venta no lo guardó, el del catálogo (como en
+  // el ticket y el inventario). «Producto» sólo si no hay ninguno de los dos.
+  const nombreProducto = it.productName?.trim() || it.product?.name?.trim() || 'Producto'
   const nombresSinPrecio = extras
     .filter(m => centavos(m.price) === 0)
     .map(m => m.name?.trim())
@@ -974,6 +986,7 @@ export async function loadOrderForCfdiFromDb(orderId: string, opts: LoadOrderFor
           modifiers: { select: { name: true, price: true, quantity: true } },
           product: {
             select: {
+              name: true,
               satProductKey: true,
               satUnitKey: true,
               objetoImp: true,
