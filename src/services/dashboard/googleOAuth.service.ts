@@ -435,6 +435,8 @@ export async function loginWithGoogle(
       // Cambio de ACCESO: queda en la bitácora (quién, cuándo y por qué ya no sirve su contraseña).
       void logAction({
         staffId: staff.id,
+        // En su COLUMNA: sin organización la bitácora del cliente no la muestra (filtra por ella).
+        organizationId: staff.organizations[0]?.organizationId ?? null,
         action: 'STAFF_PASSWORD_INVALIDATED_BY_GOOGLE',
         entity: 'Staff',
         entityId: staff.id,

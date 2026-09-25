@@ -201,7 +201,8 @@ describe('loginWithGoogle — cuenta existente sin verificar', () => {
       expect.objectContaining({ data: expect.objectContaining({ emailVerified: true, password: null }) }),
     )
     expect(logAction).toHaveBeenCalledWith(
-      expect.objectContaining({ action: 'STAFF_PASSWORD_INVALIDATED_BY_GOOGLE', entityId: 'staff-new' }),
+      // con su organización en la columna: sin ella la bitácora del cliente no la muestra
+      expect.objectContaining({ action: 'STAFF_PASSWORD_INVALIDATED_BY_GOOGLE', entityId: 'staff-new', organizationId: 'org-new' }),
     )
   })
 
