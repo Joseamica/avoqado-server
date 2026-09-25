@@ -29,6 +29,8 @@ const rolEnLaBase = { valor: 'OWNER' }
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    // La persona existe y está ACTIVA (H2: sin eso el resolutor niega). Función normal: sobrevive a los reset de mocks.
+    staff: { findUnique: async () => ({ active: true }) },
     staffVenue: {
       findUnique: jest.fn(async () => ({ role: rolEnLaBase.valor, active: true, permissionSetId: null, permissionSet: null })),
       findFirst: jest.fn(async () => null),

@@ -47,6 +47,8 @@ function armar(caso: Caso) {
     ),
   }
   ;(prismaMock as any).venue = { findUnique: jest.fn(async () => ({ organizationId: 'org-1' })) }
+  // La persona existe y está ACTIVA (H2: sin eso el resolutor niega).
+  ;(prismaMock as any).staff = { findUnique: async () => ({ active: true }) }
   ;(prismaMock as any).staffOrganization = { findFirst: jest.fn(async () => null), findUnique: jest.fn(async () => null) }
 }
 

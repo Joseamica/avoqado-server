@@ -1,4 +1,5 @@
 import { OrgRole, Prisma, StaffRole } from '@prisma/client'
+import { cerrarSesionesDeStaff, revokeAllSessions } from '@/utils/passwordChangeGuard'
 import bcrypt from 'bcryptjs'
 
 import logger from '../../config/logger'
@@ -317,6 +318,13 @@ export async function updateStaff(staffId: string, data: UpdateStaffData, perfor
   })
 
   logger.info(`[STAFF-SUPERADMIN] Updated staff: ${updated.email}`, { staffId })
+
+  // 🔴 H2 (Codex, 2ª pasada): desactivar la cuenta corta TAMBIÉN lo que ya tenía abierto — sin
+  // esto sus tokens seguían sirviendo en las rutas que sólo piden estar autenticado.
+  if (staff.active && data.active === false) {
+    await revokeAllSessions(staffId)
+    await cerrarSesionesDeStaff(staffId, 'STAFF_DEACTIVATED')
+  }
 
   void logAction({
     staffId: performedBy ?? null,

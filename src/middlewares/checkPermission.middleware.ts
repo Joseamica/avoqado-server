@@ -170,6 +170,13 @@ export async function resolveUserRoleForVenue(params: {
   void tokenVenueId
   void tokenRole
 
+  // 🔴 H2 (Codex, 2ª pasada): la PERSONA tiene que seguir activa. Antes sólo se miraba su fila en
+  // la sucursal: dar de baja la cuenta (Staff.active=false) no le quitaba el rol, cobros incluidos.
+  const persona = await prisma.staff.findUnique({ where: { id: userId }, select: { active: true } })
+  if (!persona?.active) {
+    return recordar({ role: null, source: 'none' })
+  }
+
   const staffVenue = await prisma.staffVenue.findUnique({
     where: {
       staffId_venueId: {

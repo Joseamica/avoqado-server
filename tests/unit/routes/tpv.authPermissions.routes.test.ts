@@ -32,6 +32,8 @@ jest.mock('@/middlewares/validation', () => ({
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    // La persona existe y está ACTIVA (H2: sin eso el resolutor niega). Función normal: sobrevive a los reset de mocks.
+    staff: { findUnique: async () => ({ active: true }) },
     staffVenue: { findFirst: jest.fn(), findUnique: jest.fn() },
     venueRolePermission: { findUnique: jest.fn() },
     venue: { findUnique: jest.fn() },

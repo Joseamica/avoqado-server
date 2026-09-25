@@ -17,6 +17,8 @@ import prisma from '../../../src/utils/prismaClient'
 import { switchVenueForStaff } from '../../../src/services/dashboard/auth.service'
 import { userHasVenueAccess } from '../../../src/services/staffOrganization.service'
 import { authorizeRole } from '../../../src/middlewares/authorizeRole.middleware'
+import { resolveUserRoleForVenue } from '../../../src/middlewares/checkPermission.middleware'
+import { getUserAccess } from '../../../src/services/access/access.service'
 
 /** El rol viaja DENTRO del token: es lo que después leen `authorizeRole` y el dashboard. */
 const rolDelToken = (r: { accessToken: string }) => (jwt.decode(r.accessToken) as { role: StaffRole }).role
@@ -186,5 +188,34 @@ describe('authorizeRole — el rol se relee de la base, no se le cree al token',
     expect(await pasa([StaffRole.OWNER], ctx)).toBe(true)
     // y un «impersonador» que no es superadmin, no
     expect(await pasa([StaffRole.OWNER], { ...ctx, userId: mixta, realUserId: mixta })).toBe(false)
+  })
+})
+
+describe('H2 — una persona DESACTIVADA pierde el acceso en todos los resolutores', () => {
+  // (Codex, 2ª pasada) `resolveUserRoleForVenue` y `getUserAccess` miraban la fila de la sucursal
+  // (activa) pero no a la PERSONA: dar de baja la cuenta no le quitaba el rol, cobros incluidos.
+  it('🔴 mesera con fila activa pero cuenta desactivada: sin rol y sin acceso', async () => {
+    const baja = await persona('baja-h2')
+    await prisma.staffOrganization.create({
+      data: { staffId: baja, organizationId: orgA, role: 'MEMBER', isActive: true, isPrimary: true },
+    })
+    await prisma.staffVenue.create({ data: { staffId: baja, venueId: a1, role: StaffRole.WAITER, active: true } })
+
+    expect((await resolveUserRoleForVenue({ userId: baja, targetVenueId: a1 })).role).toBe(StaffRole.WAITER)
+    await expect(getUserAccess(baja, a1)).resolves.toMatchObject({ role: StaffRole.WAITER })
+
+    await prisma.staff.update({ where: { id: baja }, data: { active: false } })
+    expect((await resolveUserRoleForVenue({ userId: baja, targetVenueId: a1 })).role).toBeNull()
+    await expect(getUserAccess(baja, a1)).rejects.toThrow()
+  })
+
+  it('🔴 dueña de la organización con la cuenta desactivada: tampoco', async () => {
+    const duenaBaja = await persona('duena-baja-h2')
+    await prisma.staffOrganization.create({
+      data: { staffId: duenaBaja, organizationId: orgA, role: 'OWNER', isActive: true, isPrimary: true },
+    })
+    await prisma.staff.update({ where: { id: duenaBaja }, data: { active: false } })
+    await expect(getUserAccess(duenaBaja, a2)).rejects.toThrow()
+    expect((await resolveUserRoleForVenue({ userId: duenaBaja, targetVenueId: a2 })).role).toBeNull()
   })
 })

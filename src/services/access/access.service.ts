@@ -365,6 +365,16 @@ export async function getUserAccess(
   // Check if user is org-level OWNER for this venue's organization
   const isOrgOwner = ownerOrgs.some(o => o.organizationId === resolvedOrgId)
 
+  // 🔴 H2 (Codex, 2ª pasada): fuera del superadmin (que ya filtra `staff.active`) y de la
+  // impersonación (el actor es el superadmin), la PERSONA tiene que seguir activa: la fila de la
+  // sucursal o la membresía de dueño activas no bastan si dieron de baja la cuenta.
+  if (!isSuperAdmin && !impersonation) {
+    const persona = await prisma.staff.findUnique({ where: { id: userId }, select: { active: true } })
+    if (!persona?.active) {
+      throw new Error(`User ${userId} has no access to venue ${venueId}`)
+    }
+  }
+
   if (isSuperAdmin) {
     // SUPERADMIN has access to all venues
     role = StaffRole.SUPERADMIN

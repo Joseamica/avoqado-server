@@ -27,6 +27,8 @@ import prisma from '@/utils/prismaClient'
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    // La persona existe y está ACTIVA (H2: sin eso el resolutor niega). Función normal: sobrevive a los reset de mocks.
+    staff: { findUnique: async () => ({ active: true }) },
     staffVenue: { findUnique: jest.fn(), findFirst: jest.fn() },
     venue: { findUnique: jest.fn() },
     staffOrganization: { findUnique: jest.fn() },
