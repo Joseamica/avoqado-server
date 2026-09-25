@@ -4,6 +4,7 @@
  * for the PlayTelecom/White-Label dashboard.
  */
 import { Router, Request, Response, NextFunction } from 'express'
+import { esSuperadminReal } from '@/services/access/rolVigente'
 import { z } from 'zod'
 import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken.middleware'
 import { validateRequest } from '../../middlewares/validation'
@@ -41,18 +42,27 @@ const router = Router()
 /**
  * Middleware to verify user has access to the organization
  */
-async function checkOrgAccess(req: Request, res: Response, next: NextFunction) {
+export async function checkOrgAccess(req: Request, res: Response, next: NextFunction) {
   try {
-    const { orgId, role } = (req as any).authContext
+    const { orgId, role, userId } = (req as any).authContext
     const requestedOrgId = req.params.orgId
 
-    // SUPERADMIN has access to all organizations
-    if (role === 'SUPERADMIN') {
+    // SUPERADMIN has access to all organizations — si LO ES de verdad (H1, Codex): el token sólo
+    // dice qué sesión es; un exsuperadmin con token vigente no entra.
+    if (role === 'SUPERADMIN' && (await esSuperadminReal(userId))) {
       return next()
     }
 
-    // User must belong to the organization they're querying
-    if (orgId !== requestedOrgId) {
+    // User must belong to the organization they're querying — y la membresía debe SEGUIR activa
+    // en la base, no sólo haberlo estado cuando se emitió el token.
+    const membresia =
+      orgId === requestedOrgId
+        ? await prisma.staffOrganization.findFirst({
+            where: { staffId: userId, organizationId: requestedOrgId, isActive: true, staff: { active: true } },
+            select: { id: true },
+          })
+        : null
+    if (!membresia) {
       return res.status(403).json({
         success: false,
         error: 'access_denied',
@@ -83,8 +93,8 @@ export async function requireOrgOwner(req: Request, res: Response, next: NextFun
     const authContext = (req as any).authContext
     const orgId = req.params.orgId
 
-    // SUPERADMIN has full access to all organizations.
-    if (authContext?.role === 'SUPERADMIN') {
+    // SUPERADMIN has full access to all organizations — si LO ES de verdad (H1, Codex).
+    if (authContext?.role === 'SUPERADMIN' && (await esSuperadminReal(authContext.userId))) {
       return next()
     }
 
@@ -94,6 +104,7 @@ export async function requireOrgOwner(req: Request, res: Response, next: NextFun
         organizationId: orgId,
         isActive: true,
         role: 'OWNER',
+        staff: { active: true },
       },
       select: { id: true },
     })

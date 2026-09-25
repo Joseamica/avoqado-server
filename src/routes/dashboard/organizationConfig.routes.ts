@@ -7,6 +7,7 @@
  * instead of venueId, eliminating the venue->org lookup hack.
  */
 import { Router, Request, Response, NextFunction } from 'express'
+import { esSuperadminReal } from '@/services/access/rolVigente'
 import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken.middleware'
 import { organizationDashboardService } from '../../services/organization-dashboard/organizationDashboard.service'
 import * as goalResolutionService from '../../services/dashboard/commission/goal-resolution.service'
@@ -21,20 +22,23 @@ const router = Router({ mergeParams: true })
  * Middleware: Verify the authenticated user is OWNER+ in the target organization.
  * Uses authContext.userId to check StaffVenue role in any venue of the org.
  */
-async function requireOrgOwner(req: Request, res: Response, next: NextFunction) {
+export async function requireOrgOwner(req: Request, res: Response, next: NextFunction) {
   try {
     const { userId, role } = (req as any).authContext
     const { orgId } = req.params
 
-    // SUPERADMIN bypasses
-    if (role === 'SUPERADMIN') return next()
+    // SUPERADMIN bypasses — si LO ES de verdad (H1, Codex).
+    if (role === 'SUPERADMIN' && (await esSuperadminReal(userId))) return next()
 
-    // Check if user is OWNER in any venue of this org
+    // Check if user is OWNER in any venue of this org — fila ACTIVA de persona ACTIVA (H1): antes
+    // un dueño dado de baja seguía entrando, y esta ruta deja reactivar asignaciones.
     const ownerVenue = await prisma.staffVenue.findFirst({
       where: {
         staffId: userId,
         venue: { organizationId: orgId },
         role: StaffRole.OWNER,
+        active: true,
+        staff: { active: true },
       },
     })
 
@@ -57,18 +61,19 @@ const orgOwnerAccess = [authenticateTokenMiddleware, requireOrgOwner]
  * list of WAITER/CASHIER staff to assign SIMs to.
  * SUPERADMIN bypasses.
  */
-async function requireOrgStaff(req: Request, res: Response, next: NextFunction) {
+export async function requireOrgStaff(req: Request, res: Response, next: NextFunction) {
   try {
     const { userId, role } = (req as any).authContext
     const { orgId } = req.params
 
-    if (role === 'SUPERADMIN') return next()
+    if (role === 'SUPERADMIN' && (await esSuperadminReal(userId))) return next()
 
     const assignment = await prisma.staffVenue.findFirst({
       where: {
         staffId: userId,
         venue: { organizationId: orgId },
         active: true,
+        staff: { active: true },
       },
       select: { id: true },
     })
