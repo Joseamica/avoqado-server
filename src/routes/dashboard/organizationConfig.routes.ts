@@ -7,7 +7,7 @@
  * instead of venueId, eliminating the venue->org lookup hack.
  */
 import { Router, Request, Response, NextFunction } from 'express'
-import { esSuperadminReal } from '@/services/access/rolVigente'
+import { esSuperadminDeLaSesion, esSuperadminReal } from '@/services/access/rolVigente'
 import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken.middleware'
 import { organizationDashboardService } from '../../services/organization-dashboard/organizationDashboard.service'
 import * as goalResolutionService from '../../services/dashboard/commission/goal-resolution.service'
@@ -588,7 +588,9 @@ router.patch('/team/:staffId/role', orgOwnerAccess, async (req: Request, res: Re
     // below their own level, and NEVER SUPERADMIN — otherwise any OWNER could set
     // role=SUPERADMIN on themselves and become a platform-wide superadmin on the
     // next request (checkPermission treats ANY StaffVenue SUPERADMIN row as global *:*).
-    const callerRole = authContext?.role === StaffRole.SUPERADMIN ? StaffRole.SUPERADMIN : StaffRole.OWNER
+    // 🔴 El rol de quien asigna sale de la BASE, no del token (Codex ronda 3, S1): un exsuperadmin con
+    // token vigente que además es dueño pasaba requireOrgOwner como OWNER y aquí volvía a ser SUPERADMIN.
+    const callerRole = (await esSuperadminDeLaSesion(authContext)) ? StaffRole.SUPERADMIN : StaffRole.OWNER
     if (!canAssignRole(callerRole, role)) {
       return res.status(403).json({ success: false, error: 'forbidden', message: `No puedes asignar el rol ${role}` })
     }
