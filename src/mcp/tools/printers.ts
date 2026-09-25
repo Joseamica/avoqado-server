@@ -1,15 +1,25 @@
 /**
  * PRINT_STATIONS — MCP read tools (feature gratis/core, sin plan gate).
  *
- * Solo lectura en v1 (list_printers · list_print_stations · print_routing_preview).
- * La escritura (configurar impresoras/estaciones/ruteo) se hace desde el dashboard;
- * cuando se exponga por MCP será confirm-gated en 2 pasos (invariante MCP #4).
+ * Lectura (list_printers · list_print_stations · print_routing_preview) + UNA escritura: la casilla de
+ * pantalla de cocina (set_print_station_kitchen_display), sólo Avoqado y en 2 pasos (invariante MCP #4).
+ * El resto de la configuración (impresoras/estaciones/ruteo) se hace desde el dashboard.
  * Todo scoped al venue del operador (guard.venueFilter) + requirePermission('printers:read').
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
-import { getGateway, getRouting, listPrinters, listStations, previewRouting } from '@/services/dashboard/printStation.dashboard.service'
+import {
+  getGateway,
+  getRouting,
+  KITCHEN_DISPLAY_NOT_READY_NOTICE,
+  listPrinters,
+  listStations,
+  previewRouting,
+  setKitchenDisplay,
+} from '@/services/dashboard/printStation.dashboard.service'
+import { auditMcpWrite } from '../audit'
 import { createGuard } from '../guard'
+import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { text } from '../respond'
 import type { McpScope } from '../scope'
 
@@ -60,9 +70,11 @@ export function registerPrinterTools(server: McpServer, scope: McpScope): void {
           copies: s.copies,
           isDefault: s.isDefault,
           active: s.active,
+          hasKitchenDisplay: s.hasKitchenDisplay,
         })),
         hasDefault: routing.hasDefault,
         unroutedCategories: routing.unroutedCategories,
+        pantallaDeCocina: stations.some(s => s.hasKitchenDisplay) ? KITCHEN_DISPLAY_NOT_READY_NOTICE : undefined,
         nota:
           !routing.hasDefault && routing.unroutedCategories > 0
             ? `${routing.unroutedCategories} categoría(s) sin ruta y sin estación default: sus productos imprimirían una comanda marcada "SIN ESTACIÓN". Asigna una estación o marca un default.`
@@ -91,6 +103,57 @@ export function registerPrinterTools(server: McpServer, scope: McpScope): void {
         nota: result.unrouted
           ? 'Al menos un producto no tiene ruta ni estación default: imprimiría una comanda marcada "SIN ESTACIÓN".'
           : undefined,
+      })
+    },
+  )
+
+  server.tool(
+    'set_print_station_kitchen_display',
+    'Turn ON/OFF "Se atiende con pantalla de cocina" (kitchen display) for ONE print station. While NO active station of the venue has it, sales from the POS do NOT create kitchen-display tickets (the printed kitchen ticket is unaffected). Stage 1: ONLY Avoqado staff (superadmin) may change it, because the kitchen display is not finished for customers yet. Two steps: the first call only previews; call again with confirm:true to save.',
+    {
+      venueId: z.string().describe('Venue (must be in your scope)'),
+      stationId: z.string().describe('Print station id (see list_print_stations)'),
+      enabled: z.boolean().describe('true = the station is served with a kitchen display'),
+      confirm: z.boolean().optional().describe('Set true on the SECOND call to actually save'),
+    },
+    async ({ venueId, stationId, enabled, confirm }) => {
+      guard.venueFilter(venueId)
+      if (!scope.isSuperAdmin) {
+        return text({
+          ok: false,
+          error: 'Sólo Avoqado puede cambiar la pantalla de cocina en esta etapa.',
+          aviso: KITCHEN_DISPLAY_NOT_READY_NOTICE,
+        })
+      }
+      guard.requirePermission('printers:manage', venueId)
+      requireWriteScopeAlways(scope, 'printers:manage', 'decide si las ventas de este negocio crean comandas para la pantalla de cocina')
+
+      const estacion = (await listStations(venueId)).find(s => s.id === stationId)
+      if (!estacion) return text({ ok: false, error: 'Esa estación no existe en este negocio.' })
+
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          mensaje: `Vas a ${enabled ? 'PRENDER' : 'APAGAR'} la pantalla de cocina en «${estacion.name}». Vuelve a llamar con confirm:true para guardarlo.`,
+          antes: { hasKitchenDisplay: estacion.hasKitchenDisplay },
+          despues: { hasKitchenDisplay: enabled },
+          aviso: KITCHEN_DISPLAY_NOT_READY_NOTICE,
+        })
+      }
+
+      const guardada = await setKitchenDisplay(venueId, stationId, enabled, scope.staffId)
+      await auditMcpWrite(scope, {
+        action: 'PRINT_STATION_KITCHEN_DISPLAY_SET',
+        entity: 'PrintStation',
+        entityId: stationId,
+        venueId,
+        data: { enabled, previous: estacion.hasKitchenDisplay },
+      })
+      return text({
+        ok: true,
+        station: { id: guardada.id, name: guardada.name, hasKitchenDisplay: guardada.hasKitchenDisplay },
+        aviso: KITCHEN_DISPLAY_NOT_READY_NOTICE,
       })
     },
   )
