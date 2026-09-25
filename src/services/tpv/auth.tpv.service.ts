@@ -9,6 +9,7 @@ import { getRoleDisplayName, DEFAULT_ROLE_DISPLAY_NAMES } from '../dashboard/ven
 import { TOTP, NobleCryptoPlugin, ScureBase32Plugin } from 'otplib'
 import { MASTER_ADMIN_PRINCIPAL_ID } from '@/lib/authPrincipals'
 import { mensajeDeCorte, motivoDeSesionInvalidada } from '@/utils/passwordChangeGuard'
+import { esTokenDeLaApi } from '../../utils/tokenDeLaApi'
 
 const TPV_ACCESS_TOKEN_EXPIRES_IN_SECONDS = 60 * 60 * 24 * 30 // 30 days
 
@@ -344,7 +345,9 @@ export async function staffLogout(accessToken: string) {
 
   // Verify access token
   const decoded = verifyToken(accessToken)
-  if (!decoded) {
+  // `verifyToken` también acepta el REFRESH (misma llave y audiencia); cerrar sesión exige un token de
+  // ACCESO (Codex ronda 7, P3). No se endurece `verifyToken` mismo: el refresco legítimo pasa por ahí.
+  if (!decoded || !esTokenDeLaApi(decoded)) {
     throw new UnauthorizedError('Invalid or expired access token')
   }
 

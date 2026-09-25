@@ -8,7 +8,10 @@ jest.mock('@/utils/prismaClient', () => ({
 }))
 // El corte de sesión (cambio de contraseña / cerrar todo) lo decide la regla real; aquí su veredicto.
 let mockCorte: string | null = null
-jest.mock('@/utils/passwordChangeGuard', () => ({ motivoDeConcesionInvalidada: async () => mockCorte }))
+jest.mock('@/utils/passwordChangeGuard', () => ({
+  motivoDeConcesionInvalidada: async () => mockCorte,
+  emisionDelToken: jest.requireActual('@/utils/passwordChangeGuard').emisionDelToken,
+}))
 const m = prisma as unknown as { staffOrganization: { findMany: jest.Mock }; staff: { findUnique: jest.Mock } }
 
 beforeEach(() => {

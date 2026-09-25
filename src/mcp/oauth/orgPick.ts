@@ -1,7 +1,7 @@
 import jwt from 'jsonwebtoken'
 import { ACCESS_TOKEN_SECRET } from '@/config/env'
 import prisma from '@/utils/prismaClient'
-import { motivoDeConcesionInvalidada } from '@/utils/passwordChangeGuard'
+import { emisionDelToken, motivoDeConcesionInvalidada } from '@/utils/passwordChangeGuard'
 
 /**
  * Org picker for the MCP OAuth consent flow. A connection is bound to ONE active
@@ -12,7 +12,11 @@ import { motivoDeConcesionInvalidada } from '@/utils/passwordChangeGuard'
 const ORG_PICK_AUDIENCE = 'avoqado-mcp-orgpick'
 
 export function issueOrgPickToken(staffId: string): string {
-  return jwt.sign({ sub: staffId }, ACCESS_TOKEN_SECRET, { audience: ORG_PICK_AUDIENCE, expiresIn: '5m', algorithm: 'HS256' })
+  return jwt.sign({ sub: staffId, emitidoMs: Date.now() }, ACCESS_TOKEN_SECRET, {
+    audience: ORG_PICK_AUDIENCE,
+    expiresIn: '5m',
+    algorithm: 'HS256',
+  })
 }
 
 /**
@@ -23,11 +27,12 @@ export function issueOrgPickToken(staffId: string): string {
  * el corte ESTRICTO de las concesiones diferidas (`motivoDeConcesionInvalidada`, sin margen).
  */
 export async function verifyOrgPickToken(token: string): Promise<string | null> {
-  let decoded: { sub?: string; iat?: number }
+  let decoded: { sub?: string; iat?: number; emitidoMs?: number }
   try {
     decoded = jwt.verify(token, ACCESS_TOKEN_SECRET, { audience: ORG_PICK_AUDIENCE, algorithms: ['HS256'] }) as {
       sub?: string
       iat?: number
+      emitidoMs?: number
     }
   } catch {
     return null // expired / tampered / wrong audience
@@ -35,7 +40,7 @@ export async function verifyOrgPickToken(token: string): Promise<string | null> 
   if (!decoded.sub) return null
   const staff = await prisma.staff.findUnique({ where: { id: decoded.sub }, select: { active: true } })
   if (!staff?.active) return null
-  if (await motivoDeConcesionInvalidada(decoded.sub, decoded.iat)) return null
+  if (await motivoDeConcesionInvalidada(decoded.sub, emisionDelToken(decoded))) return null
   return decoded.sub
 }
 

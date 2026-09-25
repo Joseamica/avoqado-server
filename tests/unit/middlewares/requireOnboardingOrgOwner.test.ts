@@ -114,16 +114,22 @@ describe('auditoría de los rechazos del alta', () => {
     return { req, res: {} as never, next: jest.fn() }
   }
 
+  const alTerminarLaBitacora = () => new Promise(r => setImmediate(r))
+
   it('🔴 el 403 de un OWNER ajeno queda en ActivityLog como PERMISSION_DENIED', async () => {
     prismaMock.staffOrganization.findFirst.mockResolvedValue(null as never)
+    prismaMock.organization.findUnique.mockResolvedValue({ id: 'org-ajena' } as never)
     const { req, res, next } = ctxHttp({ userId: 'staff-otro', role: 'OWNER' }, { organizationId: 'org-ajena' })
 
     await requireOnboardingOrgOwner(req, res, next)
+    await alTerminarLaBitacora()
 
     expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 403 }))
     expect(logAction).toHaveBeenCalledWith(
       expect.objectContaining({
         staffId: 'staff-otro',
+        // Codex ronda 7, P2: en la COLUMNA, o la bitácora del negocio atacado no lo muestra.
+        organizationId: 'org-ajena',
         action: 'PERMISSION_DENIED',
         entity: 'onboarding',
         data: expect.objectContaining({ reason: 'ORG_OWNER_REQUIRED', organizationId: 'org-ajena', method: 'PUT' }),
@@ -137,13 +143,33 @@ describe('auditoría de los rechazos del alta', () => {
     const { req, res, next } = ctxHttp({ userId: 'staff-otro', role: 'OWNER' }, { venueId: 'v-ajeno' })
 
     await requireOnboardingVenueOwner(req, res, next)
+    await alTerminarLaBitacora()
 
     expect(logAction).toHaveBeenCalledWith(
-      expect.objectContaining({ action: 'PERMISSION_DENIED', data: expect.objectContaining({ venueId: 'v-ajeno' }) }),
+      expect.objectContaining({
+        action: 'PERMISSION_DENIED',
+        venueId: 'v-ajeno',
+        organizationId: 'org-ajena',
+        data: expect.objectContaining({ venueId: 'v-ajeno' }),
+      }),
     )
   })
 
+  it('🔴 un id inventado NO va a las columnas (rompería la llave foránea): sólo al detalle', async () => {
+    prismaMock.staffOrganization.findFirst.mockResolvedValue(null as never)
+    prismaMock.organization.findUnique.mockResolvedValue(null as never)
+    const { req, res, next } = ctxHttp({ userId: 'staff-otro', role: 'OWNER' }, { organizationId: 'org-inventada' })
+
+    await requireOnboardingOrgOwner(req, res, next)
+    await alTerminarLaBitacora()
+
+    const asiento = (logAction as jest.Mock).mock.calls.at(-1)[0]
+    expect(asiento.organizationId ?? null).toBeNull()
+    expect(asiento.data).toMatchObject({ organizationId: 'org-inventada' })
+  })
+
   it('sin sesión (401) o con acceso, no se escribe nada', async () => {
+    ;(logAction as jest.Mock).mockClear()
     const anon = ctxHttp(undefined, { organizationId: 'org-1' })
     await requireOnboardingOrgOwner(anon.req, anon.res, anon.next)
     prismaMock.staffOrganization.findFirst.mockResolvedValue({ id: 'so-1' } as never)

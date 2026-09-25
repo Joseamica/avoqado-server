@@ -18,7 +18,7 @@ import prisma from '../../utils/prismaClient'
 import emailService from '../email.service'
 import logger from '@/config/logger'
 import { BadRequestError, ConflictError, NotFoundError, ServiceUnavailableError } from '../../errors/AppError'
-import { motivoDeConcesionInvalidada } from '../../utils/passwordChangeGuard'
+import { emisionDelToken, motivoDeConcesionInvalidada } from '../../utils/passwordChangeGuard'
 import { logAction } from './activity-log.service'
 
 const VIGENCIA = '1h'
@@ -27,6 +27,8 @@ const PROPOSITO = 'avoqado:cambio-de-correo'
 interface EnlaceDeCambio {
   sub: string
   iat?: number
+  /** Emisión en milisegundos: el corte de sesión se compara contra esto (ver `emisionDelToken`). */
+  emitidoMs?: number
   correoAnterior: string
   correoNuevo: string
   proposito: typeof PROPOSITO
@@ -65,7 +67,7 @@ export async function solicitarCambioDeCorreo(staffId: string, correoPedido: str
     throw new ConflictError('El correo electrónico ya está en uso por otro usuario.', 'EMAIL_IN_USE')
   }
 
-  const payload: EnlaceDeCambio = { sub: staff.id, correoAnterior: staff.email, correoNuevo, proposito: PROPOSITO }
+  const payload: EnlaceDeCambio = { sub: staff.id, correoAnterior: staff.email, correoNuevo, proposito: PROPOSITO, emitidoMs: Date.now() }
   const token = jwt.sign(payload, llaveDelEnlace(), { algorithm: 'HS256', expiresIn: VIGENCIA })
   const frontend = process.env.FRONTEND_URL || 'http://localhost:3000'
   const enlace = `${frontend}/auth/confirm-email-change?token=${encodeURIComponent(token)}`
@@ -115,7 +117,7 @@ export async function confirmarCambioDeCorreo(token: string): Promise<{ correoNu
   }
   // N1 (Codex): si la dueña cambió su contraseña o cerró todas sus sesiones DESPUÉS de pedirse el
   // cambio, el enlace muere — quien robó una sesión no se queda con el correo tras recuperarla.
-  if (await motivoDeConcesionInvalidada(staff.id, enlace.iat)) {
+  if (await motivoDeConcesionInvalidada(staff.id, emisionDelToken(enlace))) {
     throw new BadRequestError('Este enlace ya no es válido. Pide el cambio de correo otra vez.', 'EMAIL_CHANGE_LINK_STALE')
   }
   if (await correoOcupadoPorOtra(enlace.correoNuevo, staff.id)) {
