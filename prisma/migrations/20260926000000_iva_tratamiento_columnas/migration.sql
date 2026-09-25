@@ -15,7 +15,7 @@
 --               coherencia. Si el enum no cambió, es la ruta del escritor viejo (deriva o conserva).
 -- El INSERT sigue en su propio trigger, sin revisión de contradicción: un DEFAULT de la base es
 -- indistinguible de una elección explícita en ese momento.
-SET lock_timeout = '5s';
+SET LOCAL lock_timeout = '5s';
 
 DO $$ BEGIN
   CREATE TYPE "IvaTratamiento" AS ENUM ('IVA_16','IVA_8','IVA_0','EXENTO','NO_OBJETO','BLOQUEADO_03','BLOQUEADO_04');

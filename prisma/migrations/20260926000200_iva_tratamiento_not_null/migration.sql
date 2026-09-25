@@ -13,7 +13,7 @@
 --
 -- Nota: Prisma envuelve cada archivo de migración en su propia transacción; por eso el backfill (paso 2) y este
 -- paso 3 van en carpetas distintas — el backfill y este ALTER no deben compartir transacción entre sí.
-SET lock_timeout = '5s';
+SET LOCAL lock_timeout = '5s';
 ALTER TABLE "Product" ADD CONSTRAINT "Product_ivaTratamiento_not_null" CHECK ("ivaTratamiento" IS NOT NULL) NOT VALID;
 ALTER TABLE "Product" VALIDATE CONSTRAINT "Product_ivaTratamiento_not_null";
 ALTER TABLE "Product" ALTER COLUMN "ivaTratamiento" SET NOT NULL;

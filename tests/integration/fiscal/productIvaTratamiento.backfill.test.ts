@@ -32,7 +32,9 @@ async function ejecutarBackfill(): Promise<void> {
 // ROLLBACK en try/finally), conectada sólo a TEST_DATABASE_URL, para poder sembrar filas legacy con
 // "ivaTratamiento" NULL (los triggers de la Tarea 2 lo impedirían con las tres barreras encendidas) y correr
 // el archivo REAL del relleno contra ellas. Nada de esto sobrevive: el ROLLBACK deshace tanto el DDL
-// (ALTER TABLE es transaccional en Postgres) como el DML.
+// (ALTER TABLE es transaccional en Postgres) como el DML. Ojo: ese ALTER/DISABLE TRIGGER USER toma ACCESS
+// EXCLUSIVE sobre "Product" hasta el ROLLBACK, y sólo es seguro porque el proyecto de integración corre con
+// --runInBand (ninguna otra suite toca "Product" en paralelo mientras la transacción vive).
 async function conTransaccionDesechable<T>(fn: (client: Client) => Promise<T>): Promise<T> {
   const client = new Client({ connectionString: process.env.TEST_DATABASE_URL })
   await client.connect()

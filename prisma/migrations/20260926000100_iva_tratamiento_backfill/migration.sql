@@ -14,7 +14,7 @@
 -- en (0.16, '04') — cero productos con objetoImp '01' en toda la tabla. Se acepta el comportamiento (Ruling
 -- R8: no se toca la lógica del UPDATE ni del trigger); este comentario sólo se corrige para no afirmar algo
 -- que el código no hace. Idempotente. Sin DDL propio: ROW EXCLUSIVE del UPDATE (el trigger no agrega DDL).
-SET lock_timeout = '5s';
+SET LOCAL lock_timeout = '5s';
 
 UPDATE "Product" SET "ivaTratamiento" = "derivarIvaTratamiento"("taxRate", "objetoImp")
 WHERE "ivaTratamiento" IS NULL AND "derivarIvaTratamiento"("taxRate", "objetoImp") IS NOT NULL;

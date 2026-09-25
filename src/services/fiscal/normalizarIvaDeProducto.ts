@@ -4,6 +4,7 @@ import { IvaTratamiento, TRATAMIENTOS_OFRECIDOS_V1, tratamientoDesdeTupla, tupla
 const MENSAJES = {
   IVA_POR_PRODUCTO_APAGADO:
     'El IVA por producto no está activado para este negocio. Todos los productos se venden con IVA 16 %. Pídele a Avoqado que lo active.',
+  // La pantalla «Productos → IVA» llega en el plan 6; mientras la bandera esté apagada este mensaje es inalcanzable.
   IVA_REQUIERE_APP_NUEVA: 'Para cambiar el IVA de un producto actualiza la app o hazlo desde el dashboard (Productos → IVA).',
   IVA_TRATAMIENTO_CONTRADICTORIO: 'El IVA elegido no es válido. Usa 16 %, tasa 0 % o exento.',
 } as const
