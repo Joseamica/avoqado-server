@@ -1312,8 +1312,11 @@ async function seedOrders(
         type: OrderType.DINE_IN,
         status: OrderStatus.COMPLETED,
         paymentStatus: PaymentStatus.PAID,
-        // El demo usa precios con IVA incluido (la norma en México).
-        contratoDePrecio: 'IVA_INCLUIDO',
+        // El demo suma el IVA ENCIMA del precio del producto (`taxAmount = subtotal * 0.16`,
+        // `total = subtotal + taxAmount`, arriba) — no es el precio con IVA incluido que es
+        // la norma en México. Es dato ficticio de demostración, pero el contrato describe la
+        // aritmética real de este bloque, no lo que "debería" ser.
+        contratoDePrecio: 'IVA_APARTE',
         subtotal,
         taxAmount,
         total,
