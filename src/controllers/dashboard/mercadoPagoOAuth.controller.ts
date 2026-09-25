@@ -167,6 +167,21 @@ export async function callback(req: Request, res: Response) {
     )
   }
 
+  // 3b. El permiso se revalida AL VOLVER, no sólo al iniciar: el state vive 10 min y en ese rato
+  //     pueden haberle quitado `venues:manage` o dado de baja (Codex H5, 24-sep).
+  if (!(await puedeAdministrarCobros(statePayload.staffId, statePayload.venueId))) {
+    logger.warn('[MP OAuth] callback rechazado: permiso revocado tras iniciar', {
+      venueId: statePayload.venueId,
+      staffId: statePayload.staffId,
+    })
+    return res.redirect(
+      buildCallbackRedirect(dashboardUrl, statePayload, merchantPath, {
+        mp_status: 'error',
+        reason: 'permission_revoked',
+      }),
+    )
+  }
+
   // 4. Exchange code → tokens, persist (encrypted).
   try {
     const tokens = await oauthService.exchangeCodeForTokens(parsed.data.code)

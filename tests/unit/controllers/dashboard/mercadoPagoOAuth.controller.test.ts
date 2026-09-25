@@ -191,6 +191,28 @@ describe('callback', () => {
     expect(res.redirect).toHaveBeenCalledWith(expect.stringContaining('ecommerceMerchantId=em_1'))
   })
 
+  it('🔴 si le quitaron el permiso entre iniciar y volver de Mercado Pago, NO guarda la cuenta (Codex H5)', async () => {
+    ;(oauthService.verifyState as jest.Mock).mockReturnValue({
+      intent: 'connect_merchant',
+      ecommerceMerchantId: 'em_1',
+      venueId: 'v_1',
+      staffId: 's_1',
+    })
+    ;(guardService.getMercadoPagoMerchant as jest.Mock).mockResolvedValue({ id: 'em_1' })
+    ;(puedeAdministrarCobros as jest.Mock).mockResolvedValue(false)
+    prismaMock.venue.findUnique.mockResolvedValue({ slug: 'venue-one' })
+
+    const req: any = { query: { code: 'auth-code-123', state: 'state-jwt' } }
+    const res = buildRes()
+    await callback(req, res)
+
+    expect(puedeAdministrarCobros).toHaveBeenCalledWith('s_1', 'v_1')
+    expect(oauthService.exchangeCodeForTokens).not.toHaveBeenCalled()
+    expect(connectionService.persistTokens).not.toHaveBeenCalled()
+    expect(res.redirect).toHaveBeenCalledWith(expect.stringContaining('mp_status=error'))
+    expect(res.redirect).toHaveBeenCalledWith(expect.stringContaining('reason=permission_revoked'))
+  })
+
   it('redirects with error when MP returns error param (e.g. user cancelled)', async () => {
     const req: any = {
       query: {
