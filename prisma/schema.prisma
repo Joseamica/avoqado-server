@@ -1791,8 +1791,9 @@ model Product {
   objetoImp     String  @default("02") // 02 = sí objeto de impuesto
 
   // Tratamiento de IVA: la VERDAD fiscal del producto. taxRate/objetoImp se derivan de él (apps viejas los leen).
-  // Lo mantiene coherente el trigger "Product_ivaTratamiento_guard". Ver src/services/fiscal/ivaTratamiento.ts.
-  ivaTratamiento IvaTratamiento?
+  // Lo mantienen coherente los tres triggers "Product_ivaTratamiento_ins" / "_1_explicito" / "_2_tupla".
+  // Ver src/services/fiscal/ivaTratamiento.ts.
+  ivaTratamiento IvaTratamiento @default(IVA_16)
 
   // Print routing (PRINT_STATIONS): product-level station override (wins over category default).
   printStationId String?
@@ -17273,7 +17274,7 @@ enum PlatformCfdiType {
 }
 
 /// Tratamiento de IVA de un producto (plan "IVA por producto"). Ver src/services/fiscal/ivaTratamiento.ts
-/// y el trigger "Product_ivaTratamiento_guard" — las dos réplicas deben coincidir exactamente.
+/// y los triggers "Product_ivaTratamiento_ins" / "_1_explicito" / "_2_tupla" — las réplicas deben coincidir exactamente.
 enum IvaTratamiento {
   IVA_16
   IVA_8
