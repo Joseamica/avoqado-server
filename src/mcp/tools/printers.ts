@@ -23,7 +23,15 @@ import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { text } from '../respond'
 import type { McpScope } from '../scope'
 
+/**
+ * Aviso para conexiones de CLIENTE: sin rutas internas del repo (el catálogo y las respuestas los lee
+ * cualquier cliente conectado). La versión con la ruta del spec es sólo para el equipo de Avoqado.
+ */
+const AVISO_PANTALLA_PARA_CLIENTES =
+  'La pantalla de cocina todavía no está lista para clientes. Por ahora sólo el equipo de Avoqado puede activarla.'
+
 export function registerPrinterTools(server: McpServer, scope: McpScope): void {
+  const avisoPantalla = scope.isSuperAdmin ? KITCHEN_DISPLAY_NOT_READY_NOTICE : AVISO_PANTALLA_PARA_CLIENTES
   const guard = createGuard(scope)
 
   server.tool(
@@ -74,7 +82,7 @@ export function registerPrinterTools(server: McpServer, scope: McpScope): void {
         })),
         hasDefault: routing.hasDefault,
         unroutedCategories: routing.unroutedCategories,
-        pantallaDeCocina: stations.some(s => s.hasKitchenDisplay) ? KITCHEN_DISPLAY_NOT_READY_NOTICE : undefined,
+        pantallaDeCocina: stations.some(s => s.hasKitchenDisplay) ? avisoPantalla : undefined,
         nota:
           !routing.hasDefault && routing.unroutedCategories > 0
             ? `${routing.unroutedCategories} categoría(s) sin ruta y sin estación default: sus productos imprimirían una comanda marcada "SIN ESTACIÓN". Asigna una estación o marca un default.`
@@ -122,7 +130,7 @@ export function registerPrinterTools(server: McpServer, scope: McpScope): void {
         return text({
           ok: false,
           error: 'Sólo Avoqado puede cambiar la pantalla de cocina en esta etapa.',
-          aviso: KITCHEN_DISPLAY_NOT_READY_NOTICE,
+          aviso: avisoPantalla,
         })
       }
       guard.requirePermission('printers:manage', venueId)
@@ -138,7 +146,7 @@ export function registerPrinterTools(server: McpServer, scope: McpScope): void {
           mensaje: `Vas a ${enabled ? 'PRENDER' : 'APAGAR'} la pantalla de cocina en «${estacion.name}». Vuelve a llamar con confirm:true para guardarlo.`,
           antes: { hasKitchenDisplay: estacion.hasKitchenDisplay },
           despues: { hasKitchenDisplay: enabled },
-          aviso: KITCHEN_DISPLAY_NOT_READY_NOTICE,
+          aviso: avisoPantalla,
         })
       }
 
@@ -153,7 +161,7 @@ export function registerPrinterTools(server: McpServer, scope: McpScope): void {
       return text({
         ok: true,
         station: { id: guardada.id, name: guardada.name, hasKitchenDisplay: guardada.hasKitchenDisplay },
-        aviso: KITCHEN_DISPLAY_NOT_READY_NOTICE,
+        aviso: avisoPantalla,
       })
     },
   )

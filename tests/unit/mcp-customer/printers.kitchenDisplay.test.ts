@@ -80,6 +80,12 @@ describe('set_print_station_kitchen_display', () => {
     expect(mockAudit).not.toHaveBeenCalled()
   })
 
+  it('a una conexión de cliente nunca se le enseña una ruta interna del repo', async () => {
+    const r = parse(await cliente('set_print_station_kitchen_display', { venueId: 'v1', stationId: 's1', enabled: true }))
+    expect(r.aviso).toContain(AVISO)
+    expect(JSON.stringify(r)).not.toContain('docs/')
+  })
+
   it('estación que no es de ese venue: error claro, sin escribir', async () => {
     const r = parse(await avoqado('set_print_station_kitchen_display', { venueId: 'v1', stationId: 'otra', enabled: true, confirm: true }))
     expect(r.ok).toBe(false)
@@ -93,6 +99,7 @@ describe('list_print_stations', () => {
     const r = parse(await cliente('list_print_stations', { venueId: 'v1' }))
     expect(r.stations[0].hasKitchenDisplay).toBe(true)
     expect(r.pantallaDeCocina).toContain(AVISO)
+    expect(r.pantallaDeCocina).not.toContain('docs/')
   })
 
   it('regresión: sin ninguna, no hay aviso y lo demás sale igual', async () => {
