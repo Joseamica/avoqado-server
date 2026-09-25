@@ -1,6 +1,7 @@
 import { NextFunction, Request, Response } from 'express'
 import { confirmarCambioDeCorreo, solicitarCambioDeCorreo } from '../../services/dashboard/cambioDeCorreo.service'
 import jwt from 'jsonwebtoken'
+import { esTokenDeLaApi } from '../../utils/tokenDeLaApi'
 import prisma from '../../utils/prismaClient' // Corrected import path
 import { AuthenticationError } from '../../errors/AppError'
 import { StaffRole, VenueStatus } from '@prisma/client'
@@ -118,7 +119,13 @@ export const getAuthStatus = async (req: Request, res: Response) => {
   }
 
   try {
-    const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET!) as any
+    const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET!, { algorithms: ['HS256'] }) as any
+
+    // Codex S2: la misma llave firma tokens que no son de acceso (MCP, clientes, refresh TPV).
+    if (!esTokenDeLaApi(decoded)) {
+      res.clearCookie('accessToken')
+      return res.status(200).json({ authenticated: false, user: null })
+    }
 
     // 🔴 Esta ruta NO lleva `authenticateTokenMiddleware` a proposito ("controller
     // handles token presence internally for flexibility"), asi que el corte de
@@ -1138,6 +1145,20 @@ export async function updateAccountController(req: Request, res: Response, next:
     if (updateFields.lastPasswordReset) {
       olvidarCorteEnCache(staffId)
       await cerrarSesionesNuevasPorCambioDeContrasena(staffId)
+      // Hallazgo del /full-testing (25-sep): el cambio de contraseña —que echa a todas las demás
+      // sesiones— no quedaba en la bitácora. Nunca se guarda nada de la contraseña, sólo el hecho.
+      const venueDelCambio = req.authContext?.venueId
+      void logAction({
+        staffId,
+        organizationId: req.authContext?.orgId ?? null,
+        venueId: venueDelCambio && venueDelCambio !== 'pending' ? venueDelCambio : null,
+        action: 'STAFF_PASSWORD_CHANGED',
+        entity: 'Staff',
+        entityId: staffId,
+        data: { via: 'perfil', sesionesCerradas: true },
+        ipAddress: req.ip,
+        userAgent: typeof req.get === 'function' ? req.get('user-agent') : undefined,
+      })
       const orgIdActual = req.authContext?.orgId
       const venueIdActual = req.authContext?.venueId
       if (orgIdActual && venueIdActual && venueIdActual !== 'pending' && !req.authContext?.isImpersonating) {

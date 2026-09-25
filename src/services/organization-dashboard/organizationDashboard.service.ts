@@ -1836,6 +1836,7 @@ class OrganizationDashboardService {
     periodDate: Date,
     salesTarget: number,
     volumeTarget: number,
+    performedBy?: string,
   ): Promise<OrganizationGoalData> {
     const goal = await prisma.organizationGoal.upsert({
       where: {
@@ -1859,6 +1860,7 @@ class OrganizationDashboardService {
     })
 
     logAction({
+      staffId: performedBy ?? null, // quién cambió la meta — sin esto el asiento no tenía autor
       action: 'ORG_GOAL_UPDATED',
       entity: 'OrganizationGoal',
       entityId: goal.id,

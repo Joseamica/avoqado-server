@@ -577,7 +577,14 @@ router.put('/:orgId/goals', authenticateTokenMiddleware, checkOrgAccess, async (
       })
     }
 
-    const goal = await organizationDashboardService.updateOrganizationGoal(orgId, period, new Date(periodDate), salesTarget, volumeTarget)
+    const goal = await organizationDashboardService.updateOrganizationGoal(
+      orgId,
+      period,
+      new Date(periodDate),
+      salesTarget,
+      volumeTarget,
+      (req as any).authContext?.userId,
+    )
 
     res.json({
       success: true,

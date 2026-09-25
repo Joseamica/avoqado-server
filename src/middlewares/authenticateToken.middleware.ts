@@ -4,6 +4,7 @@ import { AuthContext, AvoqadoJwtPayload, buildAuthContextFromPayload } from '../
 import { IMPERSONATION_ERROR_CODES } from '../types/impersonation'
 import * as liveDemoService from '../services/liveDemo.service'
 import { isJtiRevoked } from '../utils/tokenRevocation'
+import { esTokenDeLaApi } from '../utils/tokenDeLaApi'
 import { mensajeDeCorte, motivoDeSesionInvalidada } from '../utils/passwordChangeGuard'
 import { enforceImpersonationRules } from './impersonationGuard.middleware'
 import { enrichContext } from '../observability/executionContext'
@@ -97,6 +98,16 @@ export const authenticateTokenMiddleware = async (req: Request, res: Response, n
     const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET!, {
       algorithms: ['HS256'],
     }) as AvoqadoJwtPayload
+
+    // SEGURIDAD (Codex S2): la misma llave firma tokens que NO son de acceso (MCP, selector de
+    // organización, clientes, consumidores, refresh de la TPV). La firma sola no basta.
+    if (!esTokenDeLaApi(decoded)) {
+      res.status(401).json({
+        error: 'Unauthorized',
+        message: 'Token no válido para esta API',
+      })
+      return
+    }
 
     // SECURITY: Check JTI revocation list (defense-in-depth for impersonation stop/extend).
     // This enforces that old impersonation tokens can't be replayed after a /stop or /extend.
@@ -280,6 +291,11 @@ export const requireVersionedSession = async (req: Request, res: Response, next:
     const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET!, {
       algorithms: ['HS256'],
     }) as AvoqadoJwtPayload
+
+    if (!esTokenDeLaApi(decoded)) {
+      res.status(401).json({ error: 'Unauthorized', message: 'Token no válido para esta API' })
+      return
+    }
 
     if (!decoded.sid) {
       return next(

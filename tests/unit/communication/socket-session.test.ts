@@ -102,6 +102,19 @@ describe('socketAuthenticationMiddleware — sesiones revocables', () => {
     ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ id: 'v1', status: 'ACTIVE' })
   })
 
+  it('🔴 Codex S2: un token del MCP o de cliente (misma llave) no abre socket', async () => {
+    for (const payload of [
+      { sub: 'st1', org: 'o1', aud: 'avoqado-mcp' },
+      { sub: 'cust-1', venueId: 'v1', type: 'customer' },
+      { sub: 'st1', venueId: 'v1', aud: 'avoqado-clients', type: 'refresh' },
+    ]) {
+      const next = jest.fn()
+      await socketAuthenticationMiddleware(handshake(payload), next)
+      expect(next).toHaveBeenCalledWith(expect.any(Error))
+    }
+    expect(prisma.venue.findUnique).not.toHaveBeenCalled()
+  })
+
   it('rechaza el handshake si la sesion fue revocada', async () => {
     ;(sessionCache.isSessionAliveCached as jest.Mock).mockResolvedValue(false)
     const next = jest.fn()

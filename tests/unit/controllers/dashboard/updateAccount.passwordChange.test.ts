@@ -19,6 +19,8 @@ jest.mock('../../../../src/services/dashboard/auth.service', () => ({
   switchVenueForStaff: (...a: unknown[]) => switchVenue(...a),
 }))
 
+jest.mock('../../../../src/services/dashboard/activity-log.service', () => ({ logAction: jest.fn(async () => undefined) }))
+import { logAction } from '../../../../src/services/dashboard/activity-log.service'
 import bcrypt from 'bcryptjs'
 import prisma from '../../../../src/utils/prismaClient'
 import { updateAccountController } from '../../../../src/controllers/dashboard/auth.dashboard.controller'
@@ -80,4 +82,25 @@ it('cambiar sólo el nombre NO corta sesiones ni emite cookies (regresión)', as
   expect(p.staff.update.mock.calls[0][0].data).not.toHaveProperty('lastPasswordReset')
   expect(cerrarSesiones).not.toHaveBeenCalled()
   expect(switchVenue).not.toHaveBeenCalled()
+})
+
+it('🔴 el cambio de contraseña queda en la bitácora (sin guardar nada de la contraseña)', async () => {
+  await llamar({ old_password: 'vieja-123', password: 'nueva-456' })
+
+  expect(logAction).toHaveBeenCalledWith(
+    expect.objectContaining({
+      staffId: 'staff-1',
+      organizationId: 'org-1',
+      venueId: 'v-1',
+      action: 'STAFF_PASSWORD_CHANGED',
+      entityId: 'staff-1',
+    }),
+  )
+  const asiento = JSON.stringify((logAction as jest.Mock).mock.calls[0][0])
+  expect(asiento).not.toMatch(/nueva-456|vieja-123/)
+})
+
+it('cambiar sólo el nombre no escribe STAFF_PASSWORD_CHANGED (regresión)', async () => {
+  await llamar({ firstName: 'Ana' })
+  expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'STAFF_PASSWORD_CHANGED' }))
 })

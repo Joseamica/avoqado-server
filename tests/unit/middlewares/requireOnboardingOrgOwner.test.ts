@@ -96,3 +96,59 @@ describe('requireOnboardingVenueOwner', () => {
     expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 403 }))
   })
 })
+
+// ─── Auditoría (hallazgo del /full-testing del 25-sep): un 403 del alta no dejaba rastro ─────────
+jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn(async () => undefined) }))
+import { logAction } from '@/services/dashboard/activity-log.service'
+
+describe('auditoría de los rechazos del alta', () => {
+  function ctxHttp(authContext: unknown, params: Record<string, string>) {
+    const req = {
+      authContext,
+      params,
+      method: 'PUT',
+      originalUrl: '/api/v1/onboarding/organizations/org-ajena/step/1',
+      ip: '1.2.3.4',
+      get: () => 'ua',
+    } as never
+    return { req, res: {} as never, next: jest.fn() }
+  }
+
+  it('🔴 el 403 de un OWNER ajeno queda en ActivityLog como PERMISSION_DENIED', async () => {
+    prismaMock.staffOrganization.findFirst.mockResolvedValue(null as never)
+    const { req, res, next } = ctxHttp({ userId: 'staff-otro', role: 'OWNER' }, { organizationId: 'org-ajena' })
+
+    await requireOnboardingOrgOwner(req, res, next)
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 403 }))
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        staffId: 'staff-otro',
+        action: 'PERMISSION_DENIED',
+        entity: 'onboarding',
+        data: expect.objectContaining({ reason: 'ORG_OWNER_REQUIRED', organizationId: 'org-ajena', method: 'PUT' }),
+      }),
+    )
+  })
+
+  it('🔴 el 403 por venue ajeno también', async () => {
+    prismaMock.venue.findUnique.mockResolvedValue({ organizationId: 'org-ajena' } as never)
+    prismaMock.staffOrganization.findFirst.mockResolvedValue(null as never)
+    const { req, res, next } = ctxHttp({ userId: 'staff-otro', role: 'OWNER' }, { venueId: 'v-ajeno' })
+
+    await requireOnboardingVenueOwner(req, res, next)
+
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'PERMISSION_DENIED', data: expect.objectContaining({ venueId: 'v-ajeno' }) }),
+    )
+  })
+
+  it('sin sesión (401) o con acceso, no se escribe nada', async () => {
+    const anon = ctxHttp(undefined, { organizationId: 'org-1' })
+    await requireOnboardingOrgOwner(anon.req, anon.res, anon.next)
+    prismaMock.staffOrganization.findFirst.mockResolvedValue({ id: 'so-1' } as never)
+    const ok = ctxHttp({ userId: 'staff-1', role: 'OWNER' }, { organizationId: 'org-1' })
+    await requireOnboardingOrgOwner(ok.req, ok.res, ok.next)
+    expect(logAction).not.toHaveBeenCalled()
+  })
+})

@@ -13,6 +13,8 @@ jest.mock('@/services/mercado-pago/oauth.service')
 jest.mock('@/services/mercado-pago/connection.service')
 jest.mock('@/services/staffOrganization.service')
 jest.mock('@/services/access/permisoDeCobros')
+jest.mock('@/utils/passwordChangeGuard', () => ({ motivoDeConcesionInvalidada: jest.fn() }))
+import { motivoDeConcesionInvalidada } from '@/utils/passwordChangeGuard'
 
 function buildRes(): Response {
   const res: any = {}
@@ -31,6 +33,8 @@ beforeEach(() => {
   ;(userHasVenueAccess as jest.Mock).mockResolvedValue(true)
   // Por defecto también tiene el permiso de administrar cobros (`venues:manage`).
   ;(puedeAdministrarCobros as jest.Mock).mockResolvedValue(true)
+  // Por defecto no hubo corte de sesión entre iniciar y volver.
+  ;(motivoDeConcesionInvalidada as jest.Mock).mockResolvedValue(null)
 })
 
 describe('initiate', () => {
@@ -211,6 +215,27 @@ describe('callback', () => {
     expect(connectionService.persistTokens).not.toHaveBeenCalled()
     expect(res.redirect).toHaveBeenCalledWith(expect.stringContaining('mp_status=error'))
     expect(res.redirect).toHaveBeenCalledWith(expect.stringContaining('reason=permission_revoked'))
+  })
+
+  it('🔴 si la persona cambió su contraseña o cerró sus sesiones tras iniciar, NO guarda la cuenta (Codex S5)', async () => {
+    ;(oauthService.verifyState as jest.Mock).mockReturnValue({
+      intent: 'connect_merchant',
+      ecommerceMerchantId: 'em_1',
+      venueId: 'v_1',
+      staffId: 's_1',
+      iat: 1_790_000_000,
+    })
+    ;(guardService.getMercadoPagoMerchant as jest.Mock).mockResolvedValue({ id: 'em_1' })
+    ;(motivoDeConcesionInvalidada as jest.Mock).mockResolvedValue('PASSWORD_CHANGED')
+    prismaMock.venue.findUnique.mockResolvedValue({ slug: 'venue-one' })
+
+    const res = buildRes()
+    await callback({ query: { code: 'auth-code-123', state: 'state-jwt' } } as any, res)
+
+    expect(motivoDeConcesionInvalidada).toHaveBeenCalledWith('s_1', 1_790_000_000)
+    expect(oauthService.exchangeCodeForTokens).not.toHaveBeenCalled()
+    expect(connectionService.persistTokens).not.toHaveBeenCalled()
+    expect(res.redirect).toHaveBeenCalledWith(expect.stringContaining('reason=session_revoked'))
   })
 
   it('redirects with error when MP returns error param (e.g. user cancelled)', async () => {

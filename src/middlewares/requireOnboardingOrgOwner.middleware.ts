@@ -16,6 +16,7 @@ import { NextFunction, Request, Response } from 'express'
 import prisma from '../utils/prismaClient'
 import { ForbiddenError, UnauthorizedError } from '../errors/AppError'
 import { esSuperadminDeLaSesion } from '../services/access/rolVigente'
+import { logAction } from '../services/dashboard/activity-log.service'
 
 interface AuthContextShape {
   userId?: string
@@ -40,11 +41,32 @@ async function exigeOwner(authContext: AuthContextShape | undefined, organizatio
   }
 }
 
+/**
+ * Un 403 del alta deja rastro, como cualquier otro rechazo de permisos (`checkPermission`): alguien con
+ * sesión intentó tocar el alta de un negocio que no es suyo. El 401 no — no hay a quién atribuirlo.
+ * Los ids pedidos van en `data` y no en las columnas: un id inventado rompería la llave foránea.
+ */
+function auditarRechazo(req: Request, error: unknown, pedido: { organizationId?: string; venueId?: string }): void {
+  if (!(error instanceof ForbiddenError)) return
+  const authContext = (req as unknown as { authContext?: AuthContextShape }).authContext
+  if (!authContext?.userId) return
+  void logAction({
+    staffId: authContext.userId,
+    action: 'PERMISSION_DENIED',
+    entity: 'onboarding',
+    entityId: pedido.organizationId ?? pedido.venueId,
+    data: { reason: error.code ?? 'ORG_OWNER_REQUIRED', ...pedido, method: req.method, path: req.originalUrl },
+    ipAddress: req.ip,
+    userAgent: typeof req.get === 'function' ? req.get('user-agent') : undefined,
+  })
+}
+
 export async function requireOnboardingOrgOwner(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     await exigeOwner((req as unknown as { authContext?: AuthContextShape }).authContext, req.params.organizationId)
     next()
   } catch (error) {
+    auditarRechazo(req, error, { organizationId: req.params.organizationId })
     next(error)
   }
 }
@@ -67,6 +89,7 @@ export async function requireOnboardingVenueOwner(req: Request, res: Response, n
     await exigeOwner(authContext, venue?.organizationId)
     next()
   } catch (error) {
+    auditarRechazo(req, error, { venueId: req.params.venueId })
     next(error)
   }
 }

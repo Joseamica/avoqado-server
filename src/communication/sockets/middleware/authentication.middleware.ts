@@ -1,4 +1,5 @@
 import jwt from 'jsonwebtoken'
+import { esTokenDeLaApi } from '../../../utils/tokenDeLaApi'
 import { AuthenticatedSocket, SocketAuthenticationError, SocketAuthorizationError, SocketAuthContext } from '../types'
 import { AvoqadoJwtPayload } from '../../../security'
 import logger from '../../../config/logger'
@@ -148,7 +149,13 @@ export const socketAuthenticationMiddleware = async (socket: AuthenticatedSocket
       return next(new SocketAuthenticationError('Server authentication configuration error', socket.id, correlationId))
     }
 
-    const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET) as AvoqadoJwtPayload
+    const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET, { algorithms: ['HS256'] }) as AvoqadoJwtPayload
+
+    // Codex S2: la misma llave firma tokens que no son de acceso (MCP, clientes, refresh TPV).
+    if (!esTokenDeLaApi(decoded)) {
+      logger.warn('Socket connection rejected: token is not an API access token', { correlationId, socketId: socket.id })
+      return next(new SocketAuthenticationError('Token no válido para esta API', socket.id, correlationId))
+    }
 
     // SESIONES REVOCABLES: si el token trae `sid`, la sesión debe seguir viva.
     //
