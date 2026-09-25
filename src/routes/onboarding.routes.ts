@@ -308,6 +308,7 @@ const documentUpload = multer({
 router.post(
   '/organizations/:organizationId/start',
   authenticateTokenMiddleware,
+  requireOnboardingOrgOwner,
   validateRequest(StartOnboardingSchema),
   onboardingController.startOnboarding,
 )
@@ -368,7 +369,13 @@ router.get(
  *       200:
  *         description: Step 1 completed successfully
  */
-router.put('/organizations/:organizationId/step/1', validateRequest(UpdateStep1Schema), onboardingController.updateStep1)
+router.put(
+  '/organizations/:organizationId/step/1',
+  authenticateTokenMiddleware,
+  requireOnboardingOrgOwner,
+  validateRequest(UpdateStep1Schema),
+  onboardingController.updateStep1,
+)
 
 /**
  * @openapi
@@ -397,6 +404,7 @@ router.put('/organizations/:organizationId/step/1', validateRequest(UpdateStep1S
 router.put(
   '/organizations/:organizationId/step/2',
   authenticateTokenMiddleware,
+  requireOnboardingOrgOwner,
   validateRequest(UpdateStep2Schema),
   onboardingController.updateStep2,
 )
@@ -438,6 +446,7 @@ router.put(
 router.put(
   '/organizations/:organizationId/step/3',
   authenticateTokenMiddleware,
+  requireOnboardingOrgOwner,
   validateRequest(UpdateStep3Schema),
   onboardingController.updateStep3,
 )
@@ -485,7 +494,13 @@ router.put(
  *       200:
  *         description: Step 4 completed successfully
  */
-router.put('/organizations/:organizationId/step/4', validateRequest(UpdateStep4Schema), onboardingController.updateStep4)
+router.put(
+  '/organizations/:organizationId/step/4',
+  authenticateTokenMiddleware,
+  requireOnboardingOrgOwner,
+  validateRequest(UpdateStep4Schema),
+  onboardingController.updateStep4,
+)
 
 /**
  * @openapi
@@ -515,7 +530,13 @@ router.put('/organizations/:organizationId/step/4', validateRequest(UpdateStep4S
  *       400:
  *         description: CSV validation failed
  */
-router.post('/organizations/:organizationId/upload-menu-csv', preserveContext(upload.single('file')), onboardingController.uploadMenuCSV)
+router.post(
+  '/organizations/:organizationId/upload-menu-csv',
+  authenticateTokenMiddleware,
+  requireOnboardingOrgOwner,
+  preserveContext(upload.single('file')),
+  onboardingController.uploadMenuCSV,
+)
 
 /**
  * @openapi
@@ -567,7 +588,13 @@ router.get('/menu-template', validateRequest(GetMenuTemplateSchema), onboardingC
  *       200:
  *         description: Step 5 completed successfully
  */
-router.put('/organizations/:organizationId/step/5', validateRequest(UpdateStep5Schema), onboardingController.updateStep5)
+router.put(
+  '/organizations/:organizationId/step/5',
+  authenticateTokenMiddleware,
+  requireOnboardingOrgOwner,
+  validateRequest(UpdateStep5Schema),
+  onboardingController.updateStep5,
+)
 
 /**
  * @openapi
@@ -594,7 +621,13 @@ router.put('/organizations/:organizationId/step/5', validateRequest(UpdateStep5S
  *       200:
  *         description: Step 6 completed successfully
  */
-router.put('/organizations/:organizationId/step/6', validateRequest(UpdateStep6Schema), onboardingController.updateStep6)
+router.put(
+  '/organizations/:organizationId/step/6',
+  authenticateTokenMiddleware,
+  requireOnboardingOrgOwner,
+  validateRequest(UpdateStep6Schema),
+  onboardingController.updateStep6,
+)
 
 /**
  * @openapi
@@ -632,6 +665,7 @@ router.put('/organizations/:organizationId/step/6', validateRequest(UpdateStep6S
 router.put(
   '/organizations/:organizationId/step/7',
   authenticateTokenMiddleware,
+  requireOnboardingOrgOwner,
   validateRequest(UpdateStep7Schema),
   onboardingController.updateStep7,
 )
@@ -685,6 +719,7 @@ router.put(
 router.put(
   '/organizations/:organizationId/kyc/document/:documentKey',
   authenticateTokenMiddleware,
+  requireOnboardingOrgOwner,
   preserveContext(documentUpload.single('file')),
   onboardingController.uploadKycDocument,
 )
@@ -720,6 +755,7 @@ router.put(
 router.put(
   '/organizations/:organizationId/step/8',
   authenticateTokenMiddleware,
+  requireOnboardingOrgOwner,
   validateRequest(UpdateStep8Schema),
   onboardingController.updateStep8,
 )
@@ -766,6 +802,7 @@ router.put(
 router.post(
   '/organizations/:organizationId/complete',
   authenticateTokenMiddleware,
+  requireOnboardingOrgOwner,
   validateRequest(CompleteOnboardingSchema),
   onboardingController.completeOnboarding,
 )
@@ -825,7 +862,13 @@ router.post(
  * registration time — if the flag is off, the endpoint simply doesn't exist (404).
  */
 if (process.env.ENABLE_ONBOARDING_PAYMENT_PROVIDERS === 'true') {
-  router.post('/venues/:venueId/test-payment-link', authenticateTokenMiddleware, onboardingController.testPaymentLink)
+  // Sólo el dueño de ESE negocio (antes bastaba cualquier sesión: creaba ligas de cobro reales en negocios ajenos).
+  router.post(
+    '/venues/:venueId/test-payment-link',
+    authenticateTokenMiddleware,
+    requireOnboardingVenueOwner,
+    onboardingController.testPaymentLink,
+  )
 }
 
 /**

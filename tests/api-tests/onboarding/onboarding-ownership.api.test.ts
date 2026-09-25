@@ -16,6 +16,8 @@ process.env.ACCESS_TOKEN_SECRET = process.env.ACCESS_TOKEN_SECRET || 'test-acces
 process.env.SESSION_SECRET = process.env.SESSION_SECRET || 'test-session-secret'
 process.env.COOKIE_SECRET = process.env.COOKIE_SECRET || 'test-cookie-secret'
 process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgresql://user:pass@localhost:5432/testdb?schema=public'
+// La ruta de cobro de prueba sólo se registra con este interruptor; se prende para poder probar su candado.
+process.env.ENABLE_ONBOARDING_PAYMENT_PROVIDERS = 'true'
 
 jest.mock('../../../src/config/session', () => {
   const noop = (req: any, _res: any, next: any) => next()
@@ -80,10 +82,70 @@ describe('los demás endpoints del alta exigen ser dueño', () => {
 
 describe('SUPERADMIN pasa el guardia', () => {
   it('no recibe 403 (es quien resuelve altas atoradas)', async () => {
+    // Superadmin DE VERDAD: la base lo confirma (Codex H6/ronda 3), no basta con que el token lo diga.
+    ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'fila-sa' })
     ;(prismaMock.onboardingProgress.findUnique as jest.Mock).mockResolvedValue(null)
     const res = await request(app)
       .get(`${BASE}/progress`)
       .set('Authorization', `Bearer ${token('SUPERADMIN', 'sa')}`)
     expect(res.status).not.toBe(403)
+  })
+})
+
+/*
+  El asistente V1 (25-sep): cinco rutas NO pedían ni token (step/1, 4, 5, 6 y upload-menu-csv) y el resto
+  pedía token pero no comprobaba la organización. Lo grave era `complete`: cualquier usuario con sesión
+  llenaba los pasos de OTRA organización, la completaba y quedaba como OWNER de una sucursal nueva dentro
+  de ella. Todas exigen ahora sesión Y ser dueño de ESA organización.
+*/
+describe('asistente V1: todas sus rutas exigen sesión y ser dueño de esa organización', () => {
+  const casos: Array<[string, () => request.Test]> = [
+    ['POST start', () => request(app).post(`${BASE}/start`).send({})],
+    ['PUT step/1', () => request(app).put(`${BASE}/step/1`).send({ email: 'x@x.mx', firstName: 'X', lastName: 'Y' })],
+    ['PUT step/2', () => request(app).put(`${BASE}/step/2`).send({ type: 'REAL' })],
+    ['PUT step/3', () => request(app).put(`${BASE}/step/3`).send({ name: 'X' })],
+    ['PUT step/4', () => request(app).put(`${BASE}/step/4`).send({ method: 'manual' })],
+    ['POST upload-menu-csv', () => request(app).post(`${BASE}/upload-menu-csv`)],
+    ['PUT step/5', () => request(app).put(`${BASE}/step/5`).send({ teamInvites: [] })],
+    ['PUT step/6', () => request(app).put(`${BASE}/step/6`).send({ selectedFeatures: [] })],
+    ['PUT step/7', () => request(app).put(`${BASE}/step/7`).send({ entityType: 'PERSONA_FISICA' })],
+    ['PUT kyc/document', () => request(app).put(`${BASE}/kyc/document/ineUrl`)],
+    ['PUT step/8', () => request(app).put(`${BASE}/step/8`).send({ clabe: '002010077777777771' })],
+    ['POST complete', () => request(app).post(`${BASE}/complete`).send({})],
+  ]
+
+  it.each(casos)('🔴 %s → 401 sin token', async (_nombre, hacer) => {
+    expect((await hacer()).status).toBe(401)
+    expect(prismaMock.onboardingProgress.upsert).not.toHaveBeenCalled()
+    expect(prismaMock.onboardingProgress.update).not.toHaveBeenCalled()
+  })
+
+  it.each(casos)('🔴 %s → 403 para el OWNER de otra organización', async (_nombre, hacer) => {
+    const res = await hacer().set('Authorization', `Bearer ${token('OWNER')}`)
+    expect(res.status).toBe(403)
+    expect(prismaMock.onboardingProgress.upsert).not.toHaveBeenCalled()
+    expect(prismaMock.onboardingProgress.update).not.toHaveBeenCalled()
+    expect(prismaMock.venue.create).not.toHaveBeenCalled()
+  })
+
+  it.each(casos)('%s → el dueño de ESA organización pasa el candado (regresión)', async (_nombre, hacer) => {
+    ;(prismaMock.staffOrganization.findFirst as jest.Mock).mockResolvedValue({ id: 'so-dueno' })
+    const res = await hacer().set('Authorization', `Bearer ${token('OWNER', 'dueno')}`)
+    expect([401, 403]).not.toContain(res.status)
+  })
+})
+
+describe('cobro de prueba del alta: exige ser dueño del negocio', () => {
+  const VENUE = 'clvvvvvvvvvvvvvvvvvvvvvvvv'
+  const hacer = () => request(app).post(`/api/v1/onboarding/venues/${VENUE}/test-payment-link`).send({ amount: 10 })
+
+  it('🔴 401 sin token', async () => {
+    expect((await hacer()).status).toBe(401)
+  })
+
+  it('🔴 403 para el dueño de OTRA organización', async () => {
+    ;(prismaMock.venue.findUnique as jest.Mock).mockResolvedValue({ organizationId: ORG })
+    const res = await hacer().set('Authorization', `Bearer ${token('OWNER')}`)
+    expect(res.status).toBe(403)
   })
 })
