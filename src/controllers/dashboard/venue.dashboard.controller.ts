@@ -31,6 +31,7 @@ import { CreateVenueDto, ListVenuesQueryDto, ConvertDemoVenueDto } from '../../s
 import { EnhancedCreateVenueBody } from '../../schemas/dashboard/cost-management.schema'
 import logger from '../../config/logger'
 import { toLegacyVenuePayload } from '../../utils/legacyProductPayload'
+import { esSuperadminDeLaSesion } from '../../services/access/rolVigente'
 
 export async function listVenues(req: Request<{}, any, any, ListVenuesQueryDto>, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -79,7 +80,7 @@ export async function getVenueById(req: Request<{ venueId: string }>, res: Respo
 
     // 4. Llamada al servicio con datos limpios (Controller delega)
     // SUPERADMIN can access any venue across organizations
-    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+    const skipOrgCheck = await esSuperadminDeLaSesion(req.authContext)
     const venue = await venueDashboardService.getVenueById(orgId, venueId, { skipOrgCheck })
 
     res.status(200).json(toLegacyVenuePayload(venue)) // 5. Enviar respuesta HTTP (Controller)
@@ -97,7 +98,7 @@ export async function getVenueBySlug(req: Request<{ slug: string }>, res: Respon
     const slug: string = req.params.slug
 
     // SUPERADMIN can access any venue across organizations
-    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+    const skipOrgCheck = await esSuperadminDeLaSesion(req.authContext)
     const venue = await venueDashboardService.getVenueBySlug(orgId, slug, { skipOrgCheck })
 
     res.status(200).json({
@@ -120,7 +121,7 @@ export async function updateVenue(req: Request<{ venueId: string }, any, any>, r
     const updateData = req.body
 
     // SUPERADMIN can update any venue across organizations
-    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+    const skipOrgCheck = await esSuperadminDeLaSesion(req.authContext)
     const updatedVenue = await venueDashboardService.updateVenue(orgId, venueId, updateData, { skipOrgCheck })
 
     res.status(200).json({
@@ -143,7 +144,7 @@ export async function deleteVenue(req: Request<{ venueId: string }>, res: Respon
     const venueId: string = req.params.venueId
 
     // SUPERADMIN can delete any venue across organizations
-    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+    const skipOrgCheck = await esSuperadminDeLaSesion(req.authContext)
     await venueDashboardService.deleteVenue(orgId, venueId, { skipOrgCheck })
 
     res.status(200).json({
@@ -238,7 +239,7 @@ export async function convertDemoVenue(
     })
 
     // SUPERADMIN can convert any venue across organizations
-    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+    const skipOrgCheck = await esSuperadminDeLaSesion(req.authContext)
     const updatedVenue = await venueDashboardService.convertDemoVenue(orgId, venueId, staffId, conversionData, { skipOrgCheck })
 
     res.status(200).json({
@@ -383,7 +384,7 @@ export async function updateVenuePaymentMethod(
     const { paymentMethodId } = req.body
 
     // Call service to update payment method
-    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+    const skipOrgCheck = await esSuperadminDeLaSesion(req.authContext)
     await venueDashboardService.updateVenuePaymentMethod(orgId, venueId, paymentMethodId, { skipOrgCheck })
 
     res.status(200).json({
@@ -419,7 +420,7 @@ export async function createBillingPortalSession(
     const { returnUrl } = req.body
 
     // Call service to create billing portal session
-    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+    const skipOrgCheck = await esSuperadminDeLaSesion(req.authContext)
     const portalUrl = await venueDashboardService.createVenueBillingPortalSession(orgId, venueId, returnUrl, { skipOrgCheck })
 
     res.status(200).json({
@@ -447,7 +448,7 @@ export async function listVenuePaymentMethods(req: Request<{ venueId: string }>,
     }
 
     const venueId: string = req.params.venueId
-    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+    const skipOrgCheck = await esSuperadminDeLaSesion(req.authContext)
     const paymentMethods = await venueDashboardService.listVenuePaymentMethods(orgId, venueId, { skipOrgCheck })
 
     res.status(200).json({
@@ -480,7 +481,7 @@ export async function detachVenuePaymentMethod(
 
     const venueId: string = req.params.venueId
     const paymentMethodId: string = req.params.paymentMethodId
-    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+    const skipOrgCheck = await esSuperadminDeLaSesion(req.authContext)
 
     await venueDashboardService.detachVenuePaymentMethod(orgId, venueId, paymentMethodId, { skipOrgCheck })
 
@@ -688,7 +689,7 @@ export async function createVenuePlanCheckoutSession(
     const interval = req.body.interval ?? 'monthly'
     const tier = req.body.tier ?? 'PRO'
 
-    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+    const skipOrgCheck = await esSuperadminDeLaSesion(req.authContext)
     const checkoutUrl = await venueDashboardService.createVenuePlanCheckoutSession(orgId, venueId, interval, tier, { skipOrgCheck })
 
     res.status(200).json({
@@ -721,7 +722,7 @@ export async function setVenueDefaultPaymentMethod(
 
     const venueId: string = req.params.venueId
     const { paymentMethodId } = req.body
-    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+    const skipOrgCheck = await esSuperadminDeLaSesion(req.authContext)
 
     await venueDashboardService.setVenueDefaultPaymentMethod(orgId, venueId, paymentMethodId, { skipOrgCheck })
 
@@ -750,7 +751,7 @@ export async function createVenueSetupIntent(req: Request<{ venueId: string }>, 
     }
 
     const venueId: string = req.params.venueId
-    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+    const skipOrgCheck = await esSuperadminDeLaSesion(req.authContext)
 
     const clientSecret = await venueDashboardService.createVenueSetupIntent(orgId, venueId, { skipOrgCheck })
 
@@ -797,7 +798,7 @@ export async function suspendVenue(
 
     logger.info('Suspending venue', { orgId, venueId, userId, reason })
 
-    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+    const skipOrgCheck = await esSuperadminDeLaSesion(req.authContext)
     const updatedVenue = await venueDashboardService.suspendVenue(orgId, venueId, userId, reason, { skipOrgCheck })
 
     res.status(200).json({
@@ -841,7 +842,7 @@ export async function closeVenue(
 
     logger.info('Closing venue permanently', { orgId, venueId, userId, reason })
 
-    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+    const skipOrgCheck = await esSuperadminDeLaSesion(req.authContext)
     const updatedVenue = await venueDashboardService.closeVenue(orgId, venueId, userId, reason, { skipOrgCheck })
 
     res.status(200).json({
@@ -876,7 +877,7 @@ export async function reactivateVenue(req: Request<{ venueId: string }>, res: Re
 
     logger.info('Reactivating venue', { orgId, venueId, userId })
 
-    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+    const skipOrgCheck = await esSuperadminDeLaSesion(req.authContext)
     const updatedVenue = await venueDashboardService.reactivateVenue(orgId, venueId, userId, { skipOrgCheck })
 
     res.status(200).json({
@@ -906,7 +907,7 @@ export async function getVenueStatusHistory(req: Request<{ venueId: string }>, r
 
     const venueId: string = req.params.venueId
 
-    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+    const skipOrgCheck = await esSuperadminDeLaSesion(req.authContext)
     const venue = await venueDashboardService.getVenueById(orgId, venueId, { skipOrgCheck })
 
     // Return current status info (history would require a separate audit log table)

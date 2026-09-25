@@ -26,6 +26,7 @@ import {
   generateReportSchema,
   listWithdrawalsSchema,
 } from '@/schemas/dashboard/cash-out.schema'
+import { esSuperadminDeLaSesion } from '../../services/access/rolVigente'
 
 const router = Router({ mergeParams: true })
 
@@ -40,7 +41,7 @@ function requireOrgRole(allowedRoles: StaffRole[], forbiddenMessage: string) {
       const { userId, role } = (req as any).authContext ?? {}
       const { orgId } = req.params
 
-      if (role === 'SUPERADMIN') return next()
+      if (await esSuperadminDeLaSesion({ userId, role })) return next()
 
       if (!userId) {
         return res.status(401).json({ success: false, error: 'unauthorized', message: 'Autenticación requerida' })
@@ -49,6 +50,8 @@ function requireOrgRole(allowedRoles: StaffRole[], forbiddenMessage: string) {
       const membership = await prisma.staffVenue.findFirst({
         where: {
           staffId: userId,
+          active: true,
+          staff: { active: true },
           venue: { organizationId: orgId },
           role: { in: allowedRoles },
         },

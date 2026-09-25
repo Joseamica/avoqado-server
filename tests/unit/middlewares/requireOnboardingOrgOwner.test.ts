@@ -44,11 +44,20 @@ describe('requireOnboardingOrgOwner', () => {
     expect(next).toHaveBeenCalledWith()
   })
 
-  it('SUPERADMIN pasa sin consultar', async () => {
+  it('SUPERADMIN real (fila activa en la base) pasa sin consultar la organización', async () => {
+    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'fila-sa' } as never)
     const { req, res, next } = ctx({ userId: 'sa', role: 'SUPERADMIN' }, { organizationId: 'org-1' })
     await requireOnboardingOrgOwner(req, res, next)
     expect(next).toHaveBeenCalledWith()
     expect(prismaMock.staffOrganization.findFirst).not.toHaveBeenCalled()
+  })
+
+  it('🔴 un token que DICE SUPERADMIN sin fila activa en la base NO pasa (Codex H6)', async () => {
+    prismaMock.staffVenue.findFirst.mockResolvedValue(null as never)
+    prismaMock.staffOrganization.findFirst.mockResolvedValue(null as never)
+    const { req, res, next } = ctx({ userId: 'ex-sa', role: 'SUPERADMIN' }, { organizationId: 'org-1' })
+    await requireOnboardingOrgOwner(req, res, next)
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 403 }))
   })
 
   it('🔴 un miembro NO-OWNER de la misma organización también recibe 403', async () => {

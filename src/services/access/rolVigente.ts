@@ -28,7 +28,17 @@ export async function esSuperadminReal(staffId: string): Promise<boolean> {
     where: { staffId, active: true, role: StaffRole.SUPERADMIN, staff: { active: true } },
     select: { id: true },
   })
-  return fila !== null
+  return !!fila
+}
+
+/**
+ * ¿La sesión pide pasar como superadmin Y lo es de verdad? Para los candados que antes se fiaban
+ * de `authContext.role === 'SUPERADMIN'`: el token dice lo que ERA al emitirse (24 h), la base dice
+ * lo que ES. Sin el rol en el token no se consulta nada (cero costo para el resto de los roles).
+ */
+export async function esSuperadminDeLaSesion(sesion: { userId?: string; role?: string } | undefined | null): Promise<boolean> {
+  if (!sesion?.userId || sesion.role !== StaffRole.SUPERADMIN) return false
+  return esSuperadminReal(sesion.userId)
 }
 
 export async function rolVigente(sesion: SesionParaRol): Promise<StaffRole | null> {

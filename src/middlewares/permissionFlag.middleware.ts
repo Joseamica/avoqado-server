@@ -16,12 +16,12 @@
 // PIN autoriza UNA acción puntual; revelar el esperado no es una acción, es un dato que se
 // quedaría visible el resto del turno.
 
-import { StaffRole } from '@prisma/client'
 import { NextFunction, Request, Response } from 'express'
 import logger from '../config/logger'
 import { evaluatePermissionList, hasPermission } from '../lib/permissions'
 import prisma from '../utils/prismaClient'
 import { resolveRequestVenueId, resolveUserRoleForVenue } from './checkPermission.middleware'
+import { esSuperadminReal } from '@/services/access/rolVigente'
 
 /** El permiso que gobierna ver el efectivo esperado del cajón (MANAGER+). */
 export const PERMISO_VER_ESPERADO = 'cash-drawer:view-expected'
@@ -42,13 +42,8 @@ export async function tienePermisoEnVenue(req: Request, permiso: string): Promis
 
   // SUPERADMIN lo ve todo, salvo mientras impersona: ahí manda el rol efectivo, igual
   // que en `checkPermission`.
-  const superAdminVenue = authContext.isImpersonating
-    ? null
-    : await prisma.staffVenue.findFirst({
-        where: { staffId: authContext.userId, role: StaffRole.SUPERADMIN },
-        select: { id: true },
-      })
-  if (superAdminVenue) return true
+  // Superadmin de verdad: fila activa de una persona activa (Codex H6, 24-sep).
+  if (!authContext.isImpersonating && (await esSuperadminReal(authContext.userId))) return true
 
   const { role: userRole, permissionSet } = await resolveUserRoleForVenue({
     userId: authContext.userId,

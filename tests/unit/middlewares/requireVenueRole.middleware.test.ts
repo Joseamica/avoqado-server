@@ -15,6 +15,7 @@ jest.mock('@/middlewares/checkPermission.middleware', () => ({
 }))
 
 import { requireVenueRole } from '@/middlewares/requireVenueRole.middleware'
+import { prismaMock } from '@tests/__helpers__/setup'
 import { StaffRole } from '@prisma/client'
 
 const req = (over: Partial<any> = {}) =>
@@ -57,11 +58,26 @@ describe('requireVenueRole', () => {
     expect(r.status).toHaveBeenCalledWith(403)
   })
 
-  it('SUPERADMIN pasa sin consultar membresía', async () => {
+  it('SUPERADMIN real pasa sin consultar membresía', async () => {
+    prismaMock.staffVenue.findFirst.mockResolvedValueOnce({ id: 'fila-sa' } as never)
     await requireVenueRole([StaffRole.OWNER])(req({ authContext: { userId: 's', role: 'SUPERADMIN' } }), res(), next)
 
+    expect(prismaMock.staffVenue.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ staffId: 's', active: true, staff: { active: true } }) }),
+    )
     expect(mockResolve).not.toHaveBeenCalled()
     expect(next).toHaveBeenCalledWith()
+  })
+
+  it('🔴 un token que DICE SUPERADMIN sin fila activa cae a la membresía real del venue (Codex H6)', async () => {
+    prismaMock.staffVenue.findFirst.mockResolvedValueOnce(null as never)
+    mockResolve.mockResolvedValueOnce({ role: null })
+    const r = res()
+    await requireVenueRole([StaffRole.OWNER])(req({ authContext: { userId: 'ex', role: 'SUPERADMIN' } }), r, next)
+
+    expect(mockResolve).toHaveBeenCalled()
+    expect(r.status).toHaveBeenCalledWith(403)
+    expect(next).not.toHaveBeenCalled()
   })
 
   it('sin authContext responde 401, no truena', async () => {

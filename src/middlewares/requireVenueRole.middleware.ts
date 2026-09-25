@@ -2,6 +2,7 @@ import { NextFunction, Request, Response } from 'express'
 import { StaffRole } from '@prisma/client'
 
 import { resolveUserRoleForVenue } from './checkPermission.middleware'
+import { esSuperadminDeLaSesion } from '../services/access/rolVigente'
 
 /**
  * Exige un rol mínimo EN EL VENUE DE LA URL.
@@ -22,7 +23,7 @@ export const requireVenueRole = (allowedRoles: StaffRole[]) => {
         return
       }
 
-      if (auth.role === StaffRole.SUPERADMIN) {
+      if (await esSuperadminDeLaSesion(auth)) {
         next()
         return
       }

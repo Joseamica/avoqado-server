@@ -1,9 +1,9 @@
 import { Request, Response, NextFunction } from 'express'
-import { StaffRole } from '@prisma/client'
 import { evaluatePermissionList, hasPermission } from '@/lib/permissions'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { resolveUserRoleForVenue } from './checkPermission.middleware'
+import { esSuperadminReal } from '@/services/access/rolVigente'
 
 /**
  * Propiedad de mesa — "Solo el propietario puede modificar sus mesas".
@@ -54,11 +54,8 @@ export async function staffCanManageAllTables(
   req?: Request,
 ): Promise<boolean> {
   // SUPERADMIN bypass (mismo criterio que checkPermission)
-  const superAdminVenue = await prisma.staffVenue.findFirst({
-    where: { staffId: userId, role: StaffRole.SUPERADMIN },
-    select: { id: true },
-  })
-  if (superAdminVenue) return true
+  // Superadmin de verdad: fila activa de una persona activa (Codex H6, 24-sep).
+  if (await esSuperadminReal(userId)) return true
 
   const { role: userRole, permissionSet } = await resolveUserRoleForVenue({
     userId,

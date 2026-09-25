@@ -120,6 +120,7 @@ import {
 } from '../services/master-catalog/catalogGovernance.service'
 
 import * as walletScanController from '../controllers/tpv/walletScan.tpv.controller'
+import { esSuperadminReal } from '../services/access/rolVigente'
 
 const router = express.Router()
 
@@ -2780,8 +2781,7 @@ router.post('/auth/logout', validateRequest(logoutSchema), authController.staffL
 async function rolAutorizadoSinMembresia(staffId: string, venueId: string, isImpersonating: boolean): Promise<StaffRole | null> {
   if (staffId === MASTER_ADMIN_PRINCIPAL_ID) return StaffRole.SUPERADMIN
   if (!isImpersonating) {
-    const superAdmin = await prisma.staffVenue.findFirst({ where: { staffId, role: StaffRole.SUPERADMIN }, select: { id: true } })
-    if (superAdmin) return StaffRole.SUPERADMIN
+    if (await esSuperadminReal(staffId)) return StaffRole.SUPERADMIN
   }
   const { source } = await resolveUserRoleForVenue({ userId: staffId, targetVenueId: venueId })
   return source === 'orgOwner' ? StaffRole.OWNER : null

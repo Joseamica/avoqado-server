@@ -15,7 +15,6 @@
  */
 
 import { Request, Response, NextFunction } from 'express'
-import { StaffRole } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import {
@@ -27,6 +26,7 @@ import {
   venueIsExemptFromPlanGating,
 } from '@/services/access/basePlan.service'
 import { resolveRequestVenueId } from './checkPermission.middleware'
+import { esSuperadminReal } from '@/services/access/rolVigente'
 
 /**
  * Platform SUPERADMIN bypass — mirrors checkPermission's superadmin rule (any StaffVenue with role
@@ -36,11 +36,8 @@ import { resolveRequestVenueId } from './checkPermission.middleware'
  */
 async function requestIsSuperAdmin(authContext: { userId: string; isImpersonating?: boolean }): Promise<boolean> {
   if (authContext.isImpersonating) return false
-  const superAdminVenue = await prisma.staffVenue.findFirst({
-    where: { staffId: authContext.userId, role: StaffRole.SUPERADMIN },
-    select: { id: true },
-  })
-  return !!superAdminVenue
+  // Superadmin de verdad: fila activa de una persona activa (Codex H6, 24-sep).
+  return esSuperadminReal(authContext.userId)
 }
 
 /**

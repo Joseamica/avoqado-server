@@ -15,6 +15,7 @@
 import { NextFunction, Request, Response } from 'express'
 import prisma from '../utils/prismaClient'
 import { ForbiddenError, UnauthorizedError } from '../errors/AppError'
+import { esSuperadminDeLaSesion } from '../services/access/rolVigente'
 
 interface AuthContextShape {
   userId?: string
@@ -26,7 +27,7 @@ async function exigeOwner(authContext: AuthContextShape | undefined, organizatio
   if (!authContext?.userId) throw new UnauthorizedError('Necesitas iniciar sesión', 'AUTH_REQUIRED')
 
   // SUPERADMIN pasa, igual que en `requireOrgOwner`: es quien resuelve altas atoradas.
-  if (authContext.role === 'SUPERADMIN') return
+  if (await esSuperadminDeLaSesion(authContext)) return
 
   if (!organizationId) throw new ForbiddenError('Solo el propietario de este negocio puede hacer esto', 'ORG_OWNER_REQUIRED')
 
@@ -60,7 +61,7 @@ export async function requireOnboardingVenueOwner(req: Request, res: Response, n
   try {
     const authContext = (req as unknown as { authContext?: AuthContextShape }).authContext
     if (!authContext?.userId) throw new UnauthorizedError('Necesitas iniciar sesión', 'AUTH_REQUIRED')
-    if (authContext.role === 'SUPERADMIN') return next()
+    if (await esSuperadminDeLaSesion(authContext)) return next()
 
     const venue = await prisma.venue.findUnique({ where: { id: req.params.venueId }, select: { organizationId: true } })
     await exigeOwner(authContext, venue?.organizationId)

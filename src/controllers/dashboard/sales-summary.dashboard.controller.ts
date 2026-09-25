@@ -34,6 +34,7 @@ import { MINDFORM_NEW_VENUE_ID } from '@/services/legacy/qrPayments.legacy.servi
 import { resolveRequestVenueId } from '@/middlewares/checkPermission.middleware'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import prisma from '@/utils/prismaClient'
+import { esSuperadminDeLaSesion } from '../../services/access/rolVigente'
 
 /**
  * GET /api/v1/dashboard/reports/sales-summary
@@ -129,7 +130,7 @@ export async function salesSummaryReport(req: Request, res: Response, next: Next
     // SUPERADMIN bypasses, mirroring the platform-wide guard rule.
     const wantsReconciliation = includeMerchantBreakdown === 'true' || includeSettlementProjection === 'true'
     const reconciliationAllowed =
-      wantsReconciliation && (req.authContext?.role === 'SUPERADMIN' || (await venueHasFeatureAccess(venueId, 'ADVANCED_REPORTS')))
+      wantsReconciliation && ((await esSuperadminDeLaSesion(req.authContext)) || (await venueHasFeatureAccess(venueId, 'ADVANCED_REPORTS')))
 
     const filters: SalesSummaryFilters = {
       startDate,
@@ -224,7 +225,7 @@ export async function salesSummaryExport(req: Request, res: Response, next: Next
         )
       }
 
-      const allowed = req.authContext?.role === 'SUPERADMIN' || (await venueHasFeatureAccess(venueId, 'TRANSACTION_EXPORT'))
+      const allowed = (await esSuperadminDeLaSesion(req.authContext)) || (await venueHasFeatureAccess(venueId, 'TRANSACTION_EXPORT'))
       if (!allowed) {
         // REUSE the platform-wide feature-gate 403 contract (verbatim shape from
         // checkFeatureAccess.middleware.ts:113-118) — NOT an invented `code`. The dashboard's
@@ -325,7 +326,8 @@ export async function salesSummaryExport(req: Request, res: Response, next: Next
     // (mirrors the report's additive "silently drop the flag" behavior — no 403 in summary mode).
     const wantsMerchantBreakdown = sections.includes('merchantAccounts')
     const reconciliationAllowed =
-      wantsMerchantBreakdown && (req.authContext?.role === 'SUPERADMIN' || (await venueHasFeatureAccess(venueId, 'ADVANCED_REPORTS')))
+      wantsMerchantBreakdown &&
+      ((await esSuperadminDeLaSesion(req.authContext)) || (await venueHasFeatureAccess(venueId, 'ADVANCED_REPORTS')))
 
     const filters: SalesSummaryFilters = {
       startDate,

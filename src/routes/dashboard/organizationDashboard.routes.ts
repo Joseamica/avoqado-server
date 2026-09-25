@@ -4,7 +4,7 @@
  * for the PlayTelecom/White-Label dashboard.
  */
 import { Router, Request, Response, NextFunction } from 'express'
-import { esSuperadminReal } from '@/services/access/rolVigente'
+import { esSuperadminDeLaSesion, esSuperadminReal } from '@/services/access/rolVigente'
 import { z } from 'zod'
 import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken.middleware'
 import { validateRequest } from '../../middlewares/validation'
@@ -140,7 +140,7 @@ async function requireOrgManager(req: Request, res: Response, next: NextFunction
     const authContext = (req as any).authContext
     const orgId = req.params.orgId
 
-    if (authContext?.role === 'SUPERADMIN') return next()
+    if (await esSuperadminDeLaSesion(authContext)) return next()
 
     const [venueRole, orgRole] = await Promise.all([
       prisma.staffVenue.findFirst({
@@ -188,7 +188,7 @@ async function requireOrgAdmin(req: Request, res: Response, next: NextFunction) 
     const authContext = (req as any).authContext
     const orgId = req.params.orgId
 
-    if (authContext?.role === 'SUPERADMIN') return next()
+    if (await esSuperadminDeLaSesion(authContext)) return next()
 
     const [venueRole, orgRole] = await Promise.all([
       prisma.staffVenue.findFirst({

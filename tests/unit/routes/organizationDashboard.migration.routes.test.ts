@@ -48,6 +48,7 @@ jest.mock('@/services/organization-dashboard/orgTerminals.service', () => ({
 
 // ─── Import router AFTER mocks (real router, real Zod schemas, real validateRequest) ──
 import organizationDashboardRoutes from '@/routes/dashboard/organizationDashboard.routes'
+import { prismaMock } from '@tests/__helpers__/setup'
 
 function makeApp() {
   const app = express()
@@ -72,6 +73,13 @@ const TO_VENUE_ID = 'venue-new'
 // the migrateMerchant wiring, not the ownership-gate logic (already covered by
 // orgTerminals.migration.test.ts's `requireOrgOwner middleware` describe block).
 const superadminCtx = { userId: 'staff-1', orgId: ORG_ID, venueId: 'venue-x', role: 'SUPERADMIN' }
+
+// El token ya no basta (Codex H1/H6, 24-sep): el superadmin debe EXISTIR en la base con su fila
+// activa. Antes esta suite pasaba sólo porque el mock devolvía `undefined` y `!== null` lo leía
+// como superadmin.
+beforeEach(() => {
+  prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'fila-superadmin' } as any)
+})
 
 function authHeader(ctx: object): Record<string, string> {
   return { 'x-test-auth-context': JSON.stringify(ctx) }

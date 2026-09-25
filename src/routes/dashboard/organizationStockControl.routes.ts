@@ -33,6 +33,7 @@ import {
   exportOrgStockExcel,
   getOrgInventoryByResponsible,
 } from '../../controllers/dashboard/organizationStockControl.controller'
+import { esSuperadminReal } from '../../services/access/rolVigente'
 
 const router = Router({ mergeParams: true })
 
@@ -49,11 +50,8 @@ export async function requireVenueInTargetOrg(req: Request, res: Response, next:
     // The token role is not authorization. Confirm the global role in DB, then
     // preserve the historical cross-organization SUPERADMIN behavior.
     if (authContext.userId) {
-      const superAdminMembership = await prisma.staffVenue.findFirst({
-        where: { staffId: authContext.userId, role: StaffRole.SUPERADMIN },
-        select: { id: true },
-      })
-      if (superAdminMembership) return next()
+      // Superadmin de verdad: fila activa de una persona activa (Codex H6, 24-sep).
+      if (await esSuperadminReal(authContext.userId)) return next()
     }
 
     const venueId = resolveRequestVenueId(req, authContext)
