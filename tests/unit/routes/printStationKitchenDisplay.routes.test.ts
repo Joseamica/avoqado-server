@@ -12,6 +12,12 @@ jest.mock('@/services/dashboard/printStation.dashboard.service', () => ({
   setKitchenDisplay: (...a: unknown[]) => mockSet(...a),
   updateStation: (...a: unknown[]) => mockUpdate(...a),
 }))
+// authorizeRole relee el rol de la BASE en cada petición (`rolVigente`, d0de5f39); aquí la base confirma
+// el rol del token. El caso «token que dice SUPERADMIN sin serlo» lo fija la suite de `rolVigente`.
+jest.mock('@/services/access/rolVigente', () => ({
+  ...jest.requireActual('@/services/access/rolVigente'),
+  rolVigente: jest.fn(async (s: { role?: string }) => s?.role ?? null),
+}))
 // checkPermission deja pasar: esta prueba mide el candado de ROL de la ruta nueva, no los permisos.
 jest.mock('@/middlewares/checkPermission.middleware', () => ({
   checkPermission: () => (_req: unknown, _res: unknown, next: () => void) => next(),
