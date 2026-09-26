@@ -19,6 +19,21 @@
 - **Reportes (estado de resultados, IVA de flujo) y pólizas:** plan 4.
 - **Global con IVA mixto, egreso mixto, egreso calculado desde el XML:** futuro, cuando alguien los use.
 
+## Pantalla aprobada (26-sep) — la construye el plan 6, no éste
+
+El founder eligió, entre tres maquetas, la **A · «Lista de requisitos»** para el diálogo «Facturar venta» cuando una venta
+con IVA mixto está bloqueada (maquetas: `~/.gstack/projects/Joseamica-avoqado-workspace/designs/facturar-venta-iva-mixto-20260926/design-board.html`,
+elección en `approved.json`): arriba del formulario, los tres candados (pagada · cuadra con lo cobrado · IVA incluido
+confirmado) con palomita; el que falta trae su botón en el mismo renglón; el formulario del cliente se ve apagado
+hasta cumplirlos. Dos consecuencias que el plan 6 debe construir (este plan sólo deja los motivos en el servidor):
+
+- **El bloqueo se ve ANTES de llenar el formulario.** Hoy los motivos llegan en el 422 del timbrado, después de que el
+  dueño capturó RFC y razón social. Hace falta una lectura previa (`GET …/orders/:orderId/cfdi/requisitos`) que devuelva
+  los tres candados y los motivos del sobre, calculados con la MISMA función que usa la emisión.
+- **«Confirmar IVA incluido» desde el dashboard.** Hoy esa confirmación existe sólo en el MCP (plan 2). Hace falta la
+  ruta del dashboard que llame a `confirmarContratoIvaIncluido` con el mismo permiso (`cfdi:configure`), la misma vista
+  previa y el mismo candado por versión.
+
 ## Global Constraints
 
 - 🔴 **Con todos los renglones en IVA_16, el payload al PAC, los montos guardados en `Cfdi` y los motivos son IDÉNTICOS a los de hoy.** Mientras la bandera `IVA_POR_PRODUCTO` esté apagada ningún producto puede ser ≠ IVA_16 (trigger del plan 1), así que en producción todo es 16 %: cualquier diferencia en esa rama es un defecto de la tarea. Hay pruebas «golden» que lo fijan (Tarea 3).
