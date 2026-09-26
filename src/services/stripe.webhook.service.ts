@@ -1126,7 +1126,7 @@ export async function handleCustomerDeleted(customer: Stripe.Customer) {
 
   const deactivatedCount = await prisma.$transaction(async tx => {
     await tx.$executeRaw`SET LOCAL lock_timeout = '15s'`
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`stripe-obligaciones:${venue.id}`}))`
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`stripe-obligaciones:${venue.id}`}))::text`
 
     // El id del cliente se limpia CONDICIONADO a que siga siendo el borrado: si el negocio ya tiene otro, no se pisa.
     await tx.venue.updateMany({ where: { id: venue.id, stripeCustomerId: customerId }, data: { stripeCustomerId: null } })

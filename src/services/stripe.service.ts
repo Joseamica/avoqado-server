@@ -1216,7 +1216,7 @@ export async function entregarSuscripcionDePlan(entrada: {
   const salida: Salida = await prisma.$transaction(
     async tx => {
       await tx.$executeRaw`SET LOCAL lock_timeout = '15s'`
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`stripe-obligaciones:${venueId}`}))`
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`stripe-obligaciones:${venueId}`}))::text`
 
       // 1. Las filas de los DOS tiers, ANTES de Stripe.
       const planes = await tx.feature.findMany({

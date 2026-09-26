@@ -826,7 +826,7 @@ export async function grantTrialForVenue(venueId: string, featureCode: string, t
     const conceder = async (tx: Prisma.TransactionClient) => {
       if (esPlan) {
         await tx.$executeRaw`SET LOCAL lock_timeout = '15s'`
-        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`stripe-obligaciones:${venueId}`}))`
+        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`stripe-obligaciones:${venueId}`}))::text`
         const filasDePlan = await tx.venueFeature.findMany({
           where: { venueId, feature: { code: { in: [...PAID_PLAN_TIER_CODES] } } },
           select: { featureId: true, active: true, stripeSubscriptionId: true },
@@ -1042,7 +1042,7 @@ export async function assignCompPlan(venueId: string, tier: PlanAdminTier) {
     // 🔴 Codex C2: primero el MISMO candado del negocio que la entrega de Stripe y la regla común (la fila del Venue sola
     // no serializa con ellas: una entrega podía crear el otro tier mientras la cortesía creaba el suyo).
     await tx.$executeRaw`SET LOCAL lock_timeout = '15s'`
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`stripe-obligaciones:${venueId}`}))`
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`stripe-obligaciones:${venueId}`}))::text`
     await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR UPDATE`
     const vigentes = await leerFilas(tx)
     const huella = (xs: typeof filas) => JSON.stringify(xs.map(x => [x.id, x.featureId, x.active, x.stripeSubscriptionId]))

@@ -240,7 +240,7 @@ async function runAuditedPlanMutation(
     // Sin él, una mutación de superadmin y una entrega leían «no hay fila» a la vez y dejaban dos planes, o reactivaban
     // uno que la entrega acababa de retirar. El CAS no protege una fila AUSENTE.
     await tx.$executeRaw`SET LOCAL lock_timeout = '15s'`
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`stripe-obligaciones:${venueId}`}))`
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`stripe-obligaciones:${venueId}`}))::text`
     const feature = await requirePlanFeatureTx(tx, venueId)
     const { auditData } = await mutate(tx, feature)
 

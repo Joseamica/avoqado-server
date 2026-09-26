@@ -160,7 +160,7 @@ async function lockPosOrderNaturalKey(
   const canonicalExternalIdentity =
     parts.length === 3 && parts[0] && /^\d+$/.test(parts[1]) && parts[2] ? `${parts[0]}:*:${parts[2]}` : input.externalId
   const key = `pos-order:${input.venueId}:${canonicalExternalIdentity}`
-  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))::text`
 }
 
 /**
