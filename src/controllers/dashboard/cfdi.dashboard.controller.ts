@@ -408,7 +408,7 @@ export async function replaceCfdiController(req: Request, res: Response): Promis
       return
     }
     // Reglas de negocio y carreras → 409 (mismo criterio que cancelar)
-    if (/en proceso|timbrada|global|emisor|folio fiscal/i.test(message)) {
+    if (err instanceof ConflictError || /en proceso|timbrada|global|emisor|folio fiscal/i.test(message)) {
       logger.warn(aviso)
       res.status(409).json({ error: message })
       return

@@ -471,7 +471,13 @@ const PROCESANDO = 'La factura de esta venta se está procesando; intenta de nue
 type IssueParams = Parameters<typeof issueCfdiForOrder>[0]
 
 /** Reservar y recapturar son las únicas rutas que leen la venta viva. El PAC sólo recibe la foto. */
-async function emitirConEntrada(params: IssueParams, idempotencyKey: string, deps: IssueCfdiDeps): Promise<IssueCfdiResult> {
+export async function emitirConEntrada(
+  params: IssueParams,
+  idempotencyKey: string,
+  overrides: Partial<IssueCfdiDeps> = {},
+  sustitucion?: { id: string; uuid: string; fiscalEmisorId: string },
+): Promise<IssueCfdiResult> {
+  const deps = { ...defaultDeps, ...overrides }
   const transaction = deps.runInTransaction ?? defaultDeps.runInTransaction!
   async function admission(tx: Prisma.TransactionClient) {
     const order = await bloquearOrdenParaFacturar(tx, params.orderId)
@@ -486,6 +492,7 @@ async function emitirConEntrada(params: IssueParams, idempotencyKey: string, dep
         venueId: order.venueId,
         isGlobal: false,
         type: 'INGRESO',
+        ...(sustitucion ? { id: { not: sustitucion.id } } : {}),
         AND: [
           { OR: [{ idempotencyKey: null }, { idempotencyKey: { not: idempotencyKey } }] },
           { status: { not: 'VALIDATION_FAILED' } },
@@ -497,12 +504,37 @@ async function emitirConEntrada(params: IssueParams, idempotencyKey: string, dep
     if (alive) throw new ConflictError('CFDI en proceso para esta orden')
   }
   async function capture(tx: Prisma.TransactionClient) {
-    const bundle = await deps.loadOrderForCfdi(params.orderId, { permitirEfectivo: (params.flow ?? 'STAFF_B') === 'STAFF_B' }, tx)
+    // La original sólo debe seguir vigente al reservar/recapturar; recuperar un envío no depende de ello.
+    if (sustitucion) {
+      const original = await tx.cfdi.findUnique({ where: { id: sustitucion.id } })
+      if (
+        !original ||
+        original.orderId !== params.orderId ||
+        original.venueId !== params.expectedVenueId ||
+        original.status !== 'STAMPED' ||
+        ['ACCEPTED', 'CANCELLED'].includes(original.cancelStatus ?? '') ||
+        original.uuid !== sustitucion.uuid ||
+        original.fiscalEmisorId !== sustitucion.fiscalEmisorId
+      )
+        throw new ConflictError('Solo se puede sustituir una factura timbrada y vigente.')
+    }
+    const bundle = await deps.loadOrderForCfdi(
+      params.orderId,
+      { permitirEfectivo: !!sustitucion || (params.flow ?? 'STAFF_B') === 'STAFF_B' },
+      tx,
+    )
     if (!bundle) throw new Error(`Order ${params.orderId} not found or has no fiscal emisor configured`)
     if (params.expectedVenueId && bundle.venueId !== params.expectedVenueId) throw new Error(`Order ${params.orderId} not found`)
     if (!bundle.facturacionEnabled) throw new Error('Facturación no habilitada para este comercio')
-    if (params.flow === 'AUTOFACTURA_A' && !bundle.autofacturaEnabled) throw new Error('Autofactura no habilitada para este comercio')
-    const entrada = capturarEntrada(bundle, params.receptor, params.orderId)
+    if (!sustitucion && params.flow === 'AUTOFACTURA_A' && !bundle.autofacturaEnabled)
+      throw new Error('Autofactura no habilitada para este comercio')
+    if (sustitucion && bundle.emisor.id !== sustitucion.fiscalEmisorId) {
+      throw new ConflictError(
+        'El emisor fiscal de esta cuenta cambió desde que se emitió la factura; no se puede sustituir automáticamente.',
+      )
+    }
+    const entrada = capturarEntrada(bundle, params.receptor, params.orderId, { replacesCfdiId: sustitucion?.id })
+    if (sustitucion) entrada.params.relation = { tipoRelacion: '04', relatedUuids: [sustitucion.uuid] }
     const validation = validateBeforeStamp({
       csdStatus: bundle.emisor.csdStatus,
       formaPago: entrada.params.formaPago,
@@ -518,7 +550,9 @@ async function emitirConEntrada(params: IssueParams, idempotencyKey: string, dep
     if (!bundle.unsupportedReasons?.length && bundle.paidCents !== undefined && bundle.paidCents !== documentoCents) {
       const pesos = (c: number) => `$${(c / 100).toFixed(2)}`
       reasons.push(
-        `El total de la factura (${pesos(documentoCents)}) no coincide con lo cobrado (${pesos(bundle.paidCents)}). No se timbró; revisa la cuenta o repórtala a soporte.`,
+        sustitucion
+          ? `El total de la factura corregida (${pesos(documentoCents)}) no coincide con lo cobrado (${pesos(bundle.paidCents)}). No se sustituyó; revisa la cuenta o repórtala a soporte.`
+          : `El total de la factura (${pesos(documentoCents)}) no coincide con lo cobrado (${pesos(bundle.paidCents)}). No se timbró; revisa la cuenta o repórtala a soporte.`,
       )
     }
     const data = baseCfdiData(
@@ -530,6 +564,7 @@ async function emitirConEntrada(params: IssueParams, idempotencyKey: string, dep
       {
         entrada,
         entradaHuella: huellaDeEntrada(entrada),
+        ...(sustitucion ? { replacesCfdiId: sustitucion.id } : {}),
         protocoloIva: 1,
         enviadoAt: null,
         falloDefinitivo: false,
@@ -565,6 +600,13 @@ async function emitirConEntrada(params: IssueParams, idempotencyKey: string, dep
     !entrada ||
     entrada.fiscalEmisorId !== cfdi.fiscalEmisorId ||
     entrada.orderId !== params.orderId ||
+    (sustitucion &&
+      (entrada.replacesCfdiId !== sustitucion.id ||
+        cfdi.replacesCfdiId !== sustitucion.id ||
+        entrada.params.relation?.tipoRelacion !== '04' ||
+        !Array.isArray(entrada.params.relation.relatedUuids) ||
+        entrada.params.relation.relatedUuids.length !== 1 ||
+        entrada.params.relation.relatedUuids[0] !== sustitucion.uuid)) ||
     huellaDeEntrada(entrada) !== cfdi.entradaHuella
   ) {
     throw new ConflictError('La entrada fiscal de esta factura requiere revisión de soporte.')
@@ -733,12 +775,12 @@ async function reconciliarIntentoPrevio(
 }
 
 /** Todas las respuestas válidas pasan por la misma finalización, incluidas las recuperadas. */
-async function finalizarEmision(
+export async function finalizarEmision(
   reservation: any,
   invoice: StampedInvoice | ProviderInvoiceSummary,
   provider: Pick<import('./providers/fiscal-provider.interface').FiscalProvider, 'downloadXml' | 'downloadPdf'>,
   venueSlug: string,
-  deps: IssueCfdiDeps,
+  deps: Pick<IssueCfdiDeps, 'runInTransaction' | 'findExistingCfdi' | 'storeArtifact' | 'persistArtifacts'>,
 ): Promise<IssueCfdiResult> {
   const identity = {
     status: invoice.status,

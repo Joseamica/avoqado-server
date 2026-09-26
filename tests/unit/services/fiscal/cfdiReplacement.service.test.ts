@@ -57,6 +57,8 @@ function bundle(over: Record<string, any> = {}) {
     totalCents: 13500,
     paidCents: 13500,
     order: {
+      clasificacion: 'TODO_16',
+      renglonesOrigen: [],
       venueType: 'RESTAURANT',
       tipAmount: D(0),
       pricesIncludeIva: true,
@@ -85,14 +87,14 @@ const timbrada = {
 }
 
 function makeDeps(over: Partial<ReplaceCfdiDeps> = {}): ReplaceCfdiDeps {
-  return {
+  const deps: ReplaceCfdiDeps = {
     loadCfdi: jest.fn().mockResolvedValue(original),
     findSustituta: jest.fn().mockResolvedValue(null),
     loadOrderForCfdi: jest.fn().mockResolvedValue(bundle()),
     resolveProvider: jest.fn().mockReturnValue({
       name: 'facturapi',
       createInvoice: jest.fn().mockResolvedValue(timbrada),
-      downloadXml: jest.fn().mockResolvedValue(Buffer.from('<xml/>')),
+      downloadXml: jest.fn().mockResolvedValue(Buffer.from('<Comprobante/>')),
       downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
       cancelInvoice: jest.fn().mockResolvedValue({ status: 'accepted', cancelledAt: new Date() }),
     } as any),
@@ -110,6 +112,20 @@ function makeDeps(over: Partial<ReplaceCfdiDeps> = {}): ReplaceCfdiDeps {
     updateCfdi: jest.fn().mockImplementation(async (id, data) => ({ ...original, id, ...data })),
     ...over,
   }
+  const tx = {
+    $queryRaw: jest.fn().mockResolvedValue([{ venueId: 'v1', organizationId: 'org1' }]),
+    $executeRaw: jest.fn().mockResolvedValue(1),
+    cfdi: {
+      findFirst: jest.fn().mockResolvedValue(null),
+      findUnique: jest.fn(({ where }) => (where.id === original.id ? deps.loadCfdi(where.id) : deps.findSustituta(original.id))),
+      updateMany: jest.fn(async ({ where, data }) => {
+        if (data.status === 'STAMPED') return { count: (await deps.persistCfdi(data, where)) ? 1 : 0 }
+        return { count: 1 }
+      }),
+    },
+  }
+  deps.runInTransaction ??= async work => work(tx as any)
+  return deps
 }
 
 const params = { cfdiId: 'cfdi-orig', sandbox: true, expectedVenueId: 'v1' }
@@ -161,7 +177,7 @@ describe('replaceCfdi — camino feliz', () => {
 
     const reservada = (deps.reserveCfdi as jest.Mock).mock.calls[0][0]
     expect(reservada.idempotencyKey).toBe('cfdi-order-o1-r1')
-    expect(providerDe(deps).createInvoice.mock.calls[0][0].externalId).toBe('cfdi-order-o1-r1')
+    expect(providerDe(deps).createInvoice.mock.calls[0][0].externalId).toBe('cfdi-order-o1-r1#1')
   })
 
   it('el importe timbrado es el CORREGIDO, tomado de la orden actual', async () => {
@@ -189,7 +205,7 @@ describe('replaceCfdi — durabilidad', () => {
           orden.push('pac')
           return timbrada
         }),
-        downloadXml: jest.fn().mockResolvedValue(Buffer.from('<xml/>')),
+        downloadXml: jest.fn().mockResolvedValue(Buffer.from('<Comprobante/>')),
         downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
         cancelInvoice: jest.fn().mockResolvedValue({ status: 'accepted', cancelledAt: new Date() }),
       } as any),
@@ -230,7 +246,7 @@ describe('replaceCfdi — la cancelación NUNCA se da por hecha', () => {
       resolveProvider: jest.fn().mockReturnValue({
         name: 'facturapi',
         createInvoice: jest.fn().mockResolvedValue(timbrada),
-        downloadXml: jest.fn().mockResolvedValue(Buffer.from('<xml/>')),
+        downloadXml: jest.fn().mockResolvedValue(Buffer.from('<Comprobante/>')),
         downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
         cancelInvoice: jest.fn().mockResolvedValue({ status: 'pending', cancelledAt: null }),
       } as any),
@@ -249,7 +265,7 @@ describe('replaceCfdi — la cancelación NUNCA se da por hecha', () => {
       resolveProvider: jest.fn().mockReturnValue({
         name: 'facturapi',
         createInvoice: jest.fn().mockResolvedValue(timbrada),
-        downloadXml: jest.fn().mockResolvedValue(Buffer.from('<xml/>')),
+        downloadXml: jest.fn().mockResolvedValue(Buffer.from('<Comprobante/>')),
         downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
         cancelInvoice: jest.fn().mockResolvedValue({ status: 'rejected', cancelledAt: null }),
       } as any),
@@ -266,7 +282,7 @@ describe('replaceCfdi — la cancelación NUNCA se da por hecha', () => {
       resolveProvider: jest.fn().mockReturnValue({
         name: 'facturapi',
         createInvoice: jest.fn().mockResolvedValue(timbrada),
-        downloadXml: jest.fn().mockResolvedValue(Buffer.from('<xml/>')),
+        downloadXml: jest.fn().mockResolvedValue(Buffer.from('<Comprobante/>')),
         downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
         cancelInvoice: jest.fn().mockRejectedValue(new Error('PAC caído')),
       } as any),
@@ -288,7 +304,10 @@ describe('replaceCfdi — no se timbra un segundo documento equivocado', () => {
 
     expect(res.status).toBe('VALIDATION_FAILED')
     expect(res.reasons?.join(' ')).toMatch(/no coincide con lo cobrado/)
-    expect(deps.reserveCfdi).not.toHaveBeenCalled()
+    expect(deps.reserveCfdi).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'VALIDATION_FAILED', attempts: 0, protocoloIva: 1 }),
+      expect.anything(),
+    )
     expect(deps.resolveProvider).not.toHaveBeenCalled()
   })
 
@@ -392,6 +411,7 @@ describe('replaceCfdi — reanudar y concurrencia', () => {
       findSustituta: jest
         .fn()
         .mockResolvedValueOnce(null) // primera mirada: no hay
+        .mockResolvedValueOnce(null) // reserva bajo transacción
         .mockResolvedValue({ id: 'cfdi-sub', status: 'STAMPING', updatedAt: new Date(), replacesCfdiId: 'cfdi-orig' }),
     })
     await expect(replaceCfdi(params, deps)).rejects.toThrow(/en proceso/i)
@@ -499,7 +519,7 @@ describe('replaceCfdi — P1/P2 de la auditoría', () => {
         name: 'facturapi',
         findByExternalId,
         createInvoice,
-        downloadXml: jest.fn().mockResolvedValue(Buffer.from('<xml/>')),
+        downloadXml: jest.fn().mockResolvedValue(Buffer.from('<Comprobante/>')),
         downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
         cancelInvoice: jest.fn().mockResolvedValue({ status: 'accepted', cancelledAt: new Date() }),
       } as any),
@@ -540,7 +560,7 @@ describe('replaceCfdi — P1/P2 de la auditoría', () => {
     await replaceCfdi(params, deps)
     expect(deps.persistArtifacts).toHaveBeenCalledTimes(1)
     const [, artefactos] = (deps.persistArtifacts as jest.Mock).mock.calls[0]
-    expect(Object.keys(artefactos).sort()).toEqual(['pdfUrl', 'xmlUrl'])
+    expect(Object.keys(artefactos).sort()).toEqual(['pdfUrl', 'taxBreakdown', 'xmlUrl'])
     // Y el único persistCfdi del camino feliz es el del TIMBRE.
     expect((deps.persistCfdi as jest.Mock).mock.calls).toHaveLength(1)
   })
@@ -557,7 +577,7 @@ describe('replaceCfdi — P1/P2 de la auditoría', () => {
         createInvoice: jest.fn().mockResolvedValue(timbrada),
         downloadXml: jest.fn().mockImplementation(async () => {
           orden.push('downloadXml')
-          return Buffer.from('<xml/>')
+          return Buffer.from('<Comprobante/>')
         }),
         downloadPdf: jest.fn().mockImplementation(async () => {
           orden.push('downloadPdf')
@@ -590,13 +610,15 @@ describe('replaceCfdi — P1/P2 de la auditoría', () => {
         name: 'facturapi',
         findByExternalId: jest.fn().mockResolvedValue(null),
         createInvoice: jest.fn().mockResolvedValue(timbrada),
-        downloadXml: jest.fn().mockResolvedValue(Buffer.from('<xml/>')),
+        downloadXml: jest.fn().mockResolvedValue(Buffer.from('<Comprobante/>')),
         downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
         cancelInvoice: jest.fn().mockResolvedValue({ status: 'accepted', cancelledAt: new Date() }),
       } as any),
     })
     await replaceCfdi(params, deps)
-    const guardada = (deps.persistCfdi as jest.Mock).mock.calls.at(-1)[0]
+    const [guardada, where] = (deps.persistCfdi as jest.Mock).mock.calls.find(([data]) => data.status === 'STAMPING')!
+    expect(where).toMatchObject({ id: 'cfdi-sub', attempts: 2, status: 'STAMPING' })
+    expect((deps.persistCfdi as jest.Mock).mock.calls.at(-1)[0].totalCents).toBeUndefined()
     expect(guardada.totalCents).toBe(13500)
     expect(guardada.subtotalCents).toBe(13500)
   })
@@ -681,4 +703,13 @@ describe('claimWhere — el predicado del reclamo', () => {
     expect(w.attempts).toBe(0)
     expect(Object.prototype.hasOwnProperty.call(w, 'attempts')).toBe(true)
   })
+})
+
+it('sustituir una autofactura sigue siendo acción del personal y permite efectivo con autofactura apagada', async () => {
+  const deps = makeDeps({
+    loadCfdi: jest.fn().mockResolvedValue({ ...original, flow: 'AUTOFACTURA_A' }),
+    loadOrderForCfdi: jest.fn().mockResolvedValue(bundle({ autofacturaEnabled: false })),
+  })
+  expect((await replaceCfdi(params, deps)).status).toBe('REPLACED')
+  expect(deps.loadOrderForCfdi).toHaveBeenCalledWith('o1', { permitirEfectivo: true }, expect.anything())
 })

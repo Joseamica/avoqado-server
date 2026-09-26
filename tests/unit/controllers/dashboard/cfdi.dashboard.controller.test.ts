@@ -31,6 +31,11 @@ jest.mock('../../../../src/services/fiscal/satCatalogLookup.service', () => ({
   searchSatCatalog: (...a: any[]) => mockSearchSatCatalog(...a),
 }))
 
+const mockReplace = jest.fn()
+jest.mock('../../../../src/services/fiscal/cfdiReplacement.service', () => ({
+  replaceCfdi: (...a: any[]) => mockReplace(...a),
+}))
+
 const mockIssueGlobal = jest.fn()
 jest.mock('../../../../src/services/fiscal/cfdiGlobal.service', () => ({
   issueGlobalForEmisor: (...a: any[]) => mockIssueGlobal(...a),
@@ -85,6 +90,7 @@ jest.mock('../../../../src/config/env', () => ({
 
 import {
   issueCfdiForOrderController,
+  replaceCfdiController,
   listCfdisController,
   cancelCfdiController,
   getCfdiStatusController,
@@ -1590,4 +1596,11 @@ it.each([
   await issueCfdiForOrderController(mockReq(), res)
   expect(res.status).toHaveBeenCalledWith(409)
   expect(res.json).toHaveBeenCalledWith({ error: message })
+})
+
+it('replacement preserves shared ConflictError as409', async () => {
+  mockReplace.mockRejectedValueOnce(new ConflictError('La factura de esta venta se está procesando; intenta de nuevo en unos minutos.'))
+  const res = { status: jest.fn().mockReturnThis(), json: jest.fn() }
+  await replaceCfdiController({ params: { venueId: 'v1', cfdiId: 'c1' }, authContext: { venueId: 'v1' } } as any, res as any)
+  expect(res.status).toHaveBeenCalledWith(409)
 })

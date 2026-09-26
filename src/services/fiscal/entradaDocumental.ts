@@ -14,7 +14,7 @@ export interface EntradaDocumentalV1 {
   version: 1
   orderId: string
   fiscalEmisorId: string
-  /** UUID del CFDI que esta entrada sustituye, o `null` si es una emisión normal. */
+  /** ID de la fila Cfdi que esta entrada sustituye, o `null` si es una emisión normal. */
   replacesCfdiId: string | null
   /** Foto congelada: lo que el contrato de precio DECÍA al capturar, no lo que diga después. */
   contratoDePrecio: string | null

@@ -20,13 +20,17 @@
 import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { buildStoragePath, uploadFileToStorage } from '../storage.service'
+import { ConflictError } from '../../errors/AppError'
+import { uploadFileToStorage } from '../storage.service'
 import { resolveFiscalProvider } from './fiscalProvider.factory'
 import { buildCreateInvoiceParams } from './cfdiPayloadBuilder'
 import { validateBeforeStamp } from './cfdiValidation'
 import { assembleSaleInput } from './assembleSaleInput'
 import {
   cancelCfdi,
+  emitirConEntrada,
+  finalizarEmision,
+  type IssueCfdiDeps,
   aplicarCancelacion,
   type CancelCfdiDeps,
   claimWhere,
@@ -34,7 +38,6 @@ import {
   totalDelDocumentoCents,
   STAMPING_TTL_MS,
   type LoadedOrderBundle,
-  type LoadOrderForCfdiOpts,
   type IssueReceptor,
 } from './cfdi.service'
 
@@ -43,15 +46,16 @@ export interface ReplaceCfdiDeps {
   loadCfdi: (cfdiId: string) => Promise<any | null>
   /** La sustituta que ya exista para esta original — el intento durable de una corrida anterior. */
   findSustituta: (originalCfdiId: string) => Promise<any | null>
-  loadOrderForCfdi: (orderId: string, opts?: LoadOrderForCfdiOpts) => Promise<LoadedOrderBundle | null>
+  loadOrderForCfdi: IssueCfdiDeps['loadOrderForCfdi']
+  runInTransaction?: IssueCfdiDeps['runInTransaction']
   resolveProvider: typeof resolveFiscalProvider
   /** INSERT que reserva la llave de la sustituta. Un P2002 es la carrera con otra petición. */
-  reserveCfdi: (data: Record<string, any>) => Promise<any>
-  persistCfdi: (data: Record<string, any>) => Promise<any>
+  reserveCfdi: IssueCfdiDeps['reserveCfdi']
+  persistCfdi: IssueCfdiDeps['persistCfdi']
   /** Reclamo con la VERSIÓN leída (`attempts`) — ver `claimCfdi` en cfdi.service (Codex P1-1). */
   claimCfdi: (cfdiId: string, desdeEstados: string[], version: number) => Promise<boolean>
   /** Guarda SÓLO las URLs de los archivos; nunca el estado fiscal (Codex P1-4). */
-  persistArtifacts: (idempotencyKey: string, urls: { xmlUrl: string; pdfUrl: string }) => Promise<any>
+  persistArtifacts: (idempotencyKey: string, urls: { xmlUrl: string; pdfUrl: string }, version?: number) => Promise<any>
   storeArtifact: (buffer: Buffer, path: string, contentType: string) => Promise<string>
   updateCfdi: CancelCfdiDeps['updateCfdi']
 }
@@ -82,8 +86,9 @@ export function siguienteLlaveDeSustitucion(llaveOriginal: string | null | undef
 
 export async function replaceCfdi(
   params: { cfdiId: string; sandbox: boolean; expectedVenueId?: string },
-  deps: ReplaceCfdiDeps = defaultReplaceDeps,
+  overrides: Partial<ReplaceCfdiDeps> = {},
 ): Promise<ReplaceCfdiResult> {
+  const deps = { ...defaultReplaceDeps, ...overrides }
   // 1. Cargar la original + aislamiento de inquilino (mismo patrón que cancelCfdi).
   const original = await deps.loadCfdi(params.cfdiId)
   if (!original) throw new Error(`CFDI ${params.cfdiId} not found`)
@@ -109,9 +114,6 @@ export async function replaceCfdi(
   //    🔴 Se mira ANTES del guardado por estado: si la sustitución ya terminó, la original está
   //    CANCELLED y contestar 409 sería castigar a quien sólo perdió la respuesta (Codex P2-5).
   const previa = await deps.findSustituta(original.id)
-  let sustituta: any | null = null
-  let llave: string
-  let filaReservada = false
 
   if (previa) {
     // Aislamiento: una sustituta SIEMPRE nace con el venue de su original. Una fila que diga otra cosa
@@ -125,7 +127,7 @@ export async function replaceCfdi(
     if (!previa.uuid) throw new Error('La factura sustituta quedó sin folio fiscal; espera la conciliación antes de reintentar.')
     return { status: 'REPLACED', sustituta: previa, original, cancelStatus: original.cancelStatus ?? 'CANCELLED', cancelPendiente: false }
   }
-  if (original.status !== 'STAMPED') {
+  if (original.status !== 'STAMPED' && !(previa?.protocoloIva === 1 && previa.enviadoAt)) {
     throw new Error('Solo se puede sustituir una factura timbrada y vigente.')
   }
   if (previa?.status === 'STAMPED') {
@@ -137,21 +139,47 @@ export async function replaceCfdi(
     // Ya se timbró: NO se vuelve a timbrar. Lo que falta es la cancelación — se reanuda ahí.
     return await cancelarOriginal(params, original, previa, deps, 'REPLACED')
   }
+  const emissionDeps = { ...deps, findExistingCfdi: () => deps.findSustituta(original.id) }
+  if (!previa || previa.protocoloIva === 1) {
+    const receptor: IssueReceptor = {
+      rfc: original.receptorRfc,
+      razonSocial: original.receptorNombre,
+      regimenFiscal: original.receptorRegimen,
+      codigoPostal: original.receptorCp,
+      usoCfdi: original.usoCfdi,
+    }
+    const result = await emitirConEntrada(
+      { orderId: original.orderId, receptor, sandbox: params.sandbox, flow: original.flow ?? 'STAFF_B', expectedVenueId: original.venueId },
+      previa?.idempotencyKey ?? siguienteLlaveDeSustitucion(original.idempotencyKey, original.orderId),
+      emissionDeps,
+      { id: original.id, uuid: original.uuid, fiscalEmisorId: original.fiscalEmisorId },
+    ).catch((err: unknown) => {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002')
+        throw new ConflictError('Sustitución en proceso para esta factura')
+      throw err
+    })
+    if (result.status === 'STAMPED') return cancelarOriginal(params, original, result.cfdi, deps, 'REPLACED')
+    return {
+      status: result.status,
+      sustituta: result.status === 'VALIDATION_FAILED' ? null : result.cfdi,
+      original,
+      cancelStatus: null,
+      cancelPendiente: true,
+      ...(result.reasons ? { reasons: result.reasons } : {}),
+    }
+  }
+  // Sólo las filas históricas persistidas sin protocolo conservan el ciclo anterior.
   if (previa && previa.status === 'STAMPING') {
     const ageMs = Date.now() - new Date(previa.updatedAt ?? previa.createdAt ?? Date.now()).getTime()
     if (ageMs < STAMPING_TTL_MS) throw new Error('Sustitución en proceso para esta factura') // → 409
     logger.warn(`[cfdi] reclamando sustitución STAMPING vieja de ${original.id} (${Math.round(ageMs / 1000)}s)`)
   }
-  if (previa) {
-    // Reclamo atómico: quien pierde recibe 409 y nunca llama al PAC.
-    const mio = await deps.claimCfdi(previa.id, ['STAMPING', 'STAMP_FAILED', 'VALIDATION_FAILED'], previa.attempts ?? 0)
-    if (!mio) throw new Error('Sustitución en proceso para esta factura') // → 409
-    sustituta = previa
-    llave = previa.idempotencyKey ?? siguienteLlaveDeSustitucion(original.idempotencyKey, original.orderId)
-    filaReservada = true
-  } else {
-    llave = siguienteLlaveDeSustitucion(original.idempotencyKey, original.orderId)
-  }
+  // El reclamo legacy conserva su incremento y su identidad PAC sin sufijo de versión.
+  const mio = await deps.claimCfdi(previa.id, ['STAMPING', 'STAMP_FAILED', 'VALIDATION_FAILED'], previa.attempts ?? 0)
+  if (!mio) throw new ConflictError('Sustitución en proceso para esta factura')
+  const llave = previa.idempotencyKey ?? siguienteLlaveDeSustitucion(original.idempotencyKey, original.orderId)
+  let legacyReservation = { ...previa, idempotencyKey: llave, status: 'STAMPING', attempts: (previa.attempts ?? 0) + 1 }
+  const legacyWhere = { id: previa.id, attempts: legacyReservation.attempts, status: 'STAMPING' as const }
 
   // 4. Armar el documento CORREGIDO con los datos ACTUALES de la orden.
   // La sustitución la hace el personal a propósito: el interruptor de efectivo es de la autofactura.
@@ -210,21 +238,8 @@ export async function replaceCfdi(
     return { status: 'VALIDATION_FAILED', sustituta: null, original, cancelStatus: null, cancelPendiente: true, reasons }
   }
 
-  // 6. Reservar la sustituta ANTES del PAC — éste es el intento durable.
+  // La fila histórica ya fue reclamada; sólo un envío nuevo refresca su dinero.
   const datosBase = baseSustitutaData(original, bundle, llave, receptor, invoiceParams)
-  if (!filaReservada) {
-    try {
-      sustituta = await deps.reserveCfdi({ ...datosBase, status: 'STAMPING' })
-    } catch (err: unknown) {
-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
-        // Carrera: otra petición reservó la misma llave. Nunca se timbra un segundo documento.
-        const ahora = await deps.findSustituta(original.id)
-        if (ahora?.status === 'STAMPED') return await cancelarOriginal(params, original, ahora, deps, 'REPLACED')
-        throw new Error('Sustitución en proceso para esta factura') // → 409
-      }
-      throw err
-    }
-  }
 
   // 7. Timbrar.
   const provider = deps.resolveProvider(bundle.emisor as any, { sandbox: params.sandbox })
@@ -232,7 +247,7 @@ export async function replaceCfdi(
   // 🔴 Si esta fila viene de un intento anterior, ese intento PUDO haber timbrado y perder la
   // respuesta (un timeout después de que el PAC contestó). Re-timbrar sin preguntar produciría un
   // TERCER documento fiscal por la misma venta (Codex P1-2).
-  if (filaReservada && typeof provider.findByExternalId === 'function') {
+  if (typeof provider.findByExternalId === 'function') {
     let previo
     try {
       previo = await provider.findByExternalId(llave)
@@ -243,17 +258,13 @@ export async function replaceCfdi(
       throw new Error('Sustitución en proceso para esta factura') // → 409; nunca se timbra a ciegas
     }
     if (previo && previo.status !== 'canceled') {
+      if (previo.status !== 'valid' || !previo.uuid) {
+        await deps.persistCfdi({ idempotencyKey: llave, facturapiId: previo.providerInvoiceId }, legacyWhere)
+        throw new ConflictError('Sustitución en proceso para esta factura')
+      }
       logger.warn(`[cfdi] el PAC ya tenía ${previo.uuid} para ${llave}: se completa sin volver a timbrar`)
-      const recuperada = await deps.persistCfdi({
-        ...datosBase,
-        status: 'STAMPED',
-        facturapiId: previo.providerInvoiceId,
-        uuid: previo.uuid,
-        serie: previo.serie,
-        folio: previo.folio,
-        stampedAt: previo.stampedAt ?? new Date(),
-      })
-      return await cancelarOriginal(params, original, recuperada, deps, 'REPLACED')
+      const recuperada = await finalizarEmision(legacyReservation, previo, provider, bundle.venueSlug, emissionDeps)
+      return cancelarOriginal(params, original, recuperada.cfdi, deps, 'REPLACED')
     }
     if (previo?.status === 'canceled') {
       throw new Error(
@@ -262,51 +273,28 @@ export async function replaceCfdi(
     }
   }
 
+  const refreshed = await deps.persistCfdi({ ...datosBase, status: 'STAMPING' }, legacyWhere)
+  if (!refreshed) throw new ConflictError('Sustitución en proceso para esta factura')
+  legacyReservation = { ...legacyReservation, ...datosBase }
+
   let timbrada
   try {
     timbrada = await provider.createInvoice(invoiceParams)
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     logger.error(`[cfdi] falló el timbrado de la sustituta de ${original.id}: ${message}`)
-    const fallida = await deps.persistCfdi({ ...datosBase, status: 'STAMP_FAILED', lastError: message })
+    const fallida = await deps.persistCfdi({ idempotencyKey: llave, status: 'STAMP_FAILED', lastError: message }, legacyWhere)
+    if (!fallida) throw new ConflictError('Sustitución en proceso para esta factura')
     // 🔴 La original NO se cancela: sin sustituta, cancelarla dejaría la venta sin ningún comprobante.
     return { status: 'STAMP_FAILED', sustituta: fallida, original, cancelStatus: null, cancelPendiente: true }
   }
 
-  // 8. La identidad del timbre se persiste ANTES de los archivos: el documento ya existe ante el SAT.
-  const identidad = {
-    facturapiId: timbrada.providerInvoiceId,
-    uuid: timbrada.uuid,
-    serie: timbrada.serie,
-    folio: timbrada.folio,
-    stampedAt: timbrada.stampedAt,
+  if (timbrada.status !== 'valid' || !timbrada.uuid) {
+    await deps.persistCfdi({ idempotencyKey: llave, facturapiId: timbrada.providerInvoiceId }, legacyWhere)
+    throw new ConflictError('Sustitución en proceso para esta factura')
   }
-  let fila = await deps.persistCfdi({ ...datosBase, status: 'STAMPED', ...identidad })
-
-  try {
-    const [xmlBuf, pdfBuf] = await Promise.all([
-      provider.downloadXml(timbrada.providerInvoiceId),
-      provider.downloadPdf(timbrada.providerInvoiceId),
-    ])
-    const base = `venues/${bundle.venueSlug}/cfdi/${timbrada.uuid}`
-    const [xmlUrl, pdfUrl] = await Promise.all([
-      deps.storeArtifact(xmlBuf, buildStoragePath(`${base}.xml`), 'application/xml'),
-      deps.storeArtifact(pdfBuf, buildStoragePath(`${base}.pdf`), 'application/pdf'),
-    ])
-    const guardada = await deps.persistArtifacts(llave, { xmlUrl, pdfUrl })
-    // Se FUNDE sobre la fila que ya traía el timbre: `persistArtifacts` sólo escribe URLs y
-    // podría devolver una vista parcial; perder aquí el uuid rompería la cancelación de abajo.
-    fila = { ...fila, ...(guardada ?? {}), xmlUrl, pdfUrl }
-  } catch (err: unknown) {
-    // El timbre YA vale; faltan los archivos y NADIE los repone solo (el job de conciliación sólo
-    // mira filas `STAMPING`). Hasta que alguien los baje, su descarga contestará 404 (Codex P2-8).
-    logger.error(
-      `[cfdi] sustituta ${timbrada.uuid} timbrada pero fallaron sus archivos: ${err instanceof Error ? err.message : String(err)}`,
-    )
-  }
-
-  // 9. Cancelar la original. Un fallo aquí NO pierde la sustituta: queda pendiente y se reanuda.
-  return await cancelarOriginal(params, original, fila, deps, 'REPLACED')
+  const result = await finalizarEmision(legacyReservation, timbrada, provider, bundle.venueSlug, emissionDeps)
+  return cancelarOriginal(params, original, result.cfdi, deps, 'REPLACED')
 }
 
 /**
@@ -413,9 +401,14 @@ const defaultReplaceDeps: ReplaceCfdiDeps = {
   findSustituta: originalCfdiId => prisma.cfdi.findFirst({ where: { replacesCfdiId: originalCfdiId }, orderBy: { createdAt: 'desc' } }),
   loadOrderForCfdi: loadOrderForCfdiFromDb,
   resolveProvider: resolveFiscalProvider,
-  reserveCfdi: data => prisma.cfdi.create({ data: data as any }),
-  persistCfdi: data =>
-    prisma.cfdi.upsert({
+  reserveCfdi: (data, tx = prisma) => tx.cfdi.create({ data: data as any }),
+  persistCfdi: async (data, where) => {
+    if (where) {
+      const { idempotencyKey, ...changes } = data
+      const { count } = await prisma.cfdi.updateMany({ where, data: changes })
+      return count === 1 ? prisma.cfdi.findUnique({ where: { idempotencyKey } }) : null
+    }
+    return prisma.cfdi.upsert({
       where: { idempotencyKey: data.idempotencyKey },
       create: data as any,
       // El dinero se REFRESCA: la fila describe el documento que de verdad se timbró (Codex P2-6).
@@ -426,7 +419,8 @@ const defaultReplaceDeps: ReplaceCfdiDeps = {
         ...moneyFields(data),
         ...stampedFields(data),
       },
-    }),
+    })
+  },
   claimCfdi: async (cfdiId, desdeEstados, version) => {
     const { count } = await prisma.cfdi.updateMany({
       where: claimWhere(cfdiId, desdeEstados, version) as any,
@@ -434,8 +428,11 @@ const defaultReplaceDeps: ReplaceCfdiDeps = {
     })
     return count === 1
   },
-  persistArtifacts: async (idempotencyKey, urls) => {
-    const { count } = await prisma.cfdi.updateMany({ where: { idempotencyKey, status: 'STAMPED' }, data: urls })
+  persistArtifacts: async (idempotencyKey, urls, version) => {
+    const { count } = await prisma.cfdi.updateMany({
+      where: { idempotencyKey, status: 'STAMPED', ...(version !== undefined ? { attempts: version } : {}) },
+      data: urls,
+    })
     if (count === 0) logger.warn(`[cfdi] no se guardaron los archivos de ${idempotencyKey}: la fila ya no está timbrada`)
     return prisma.cfdi.findUnique({ where: { idempotencyKey } })
   },
