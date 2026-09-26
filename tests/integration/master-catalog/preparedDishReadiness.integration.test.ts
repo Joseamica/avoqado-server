@@ -1,3 +1,4 @@
+const { isDisposableH1Url } = require('../../../scripts/h1-test-database.cjs')
 /**
  * Real PostgreSQL proof that one corporate PREPARED_DISH can diverge safely by
  * Venue while readiness remains a read-only view over each local Recipe.
@@ -43,8 +44,7 @@ function assertDisposableH1Database(): void {
   // WHY: Every destructive setup/cleanup is pinned independently to the H1
   // disposable database so a bypassed wrapper cannot reach dev or production.
   for (const candidate of [effective, declaredTestUrl]) {
-    expect(['localhost', '127.0.0.1']).toContain(candidate.hostname)
-    expect(candidate.pathname).toBe('/avoqado_h1a_test_20260808')
+    expect(isDisposableH1Url(candidate)).toBe(true)
   }
   expect(declaredTestUrl.toString()).toBe(effective.toString())
 }

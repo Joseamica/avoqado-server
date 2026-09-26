@@ -1,3 +1,4 @@
+const { isDisposableH1Url } = require('../../../scripts/h1-test-database.cjs')
 /**
  * Real PostgreSQL proof for the complete Task 5 aggregate boundary.
  *
@@ -39,8 +40,7 @@ function assertDisposableH1Database(): void {
   // WHY: The test and wrapper independently verify both aliases before any
   // connection or cleanup, so bypassing either guard cannot target dev/remote.
   for (const candidate of [effective, declaredTestUrl]) {
-    expect(['localhost', '127.0.0.1']).toContain(candidate.hostname)
-    expect(candidate.pathname).toBe('/avoqado_h1a_test_20260808')
+    expect(isDisposableH1Url(candidate)).toBe(true)
   }
   expect(declaredTestUrl.toString()).toBe(effective.toString())
 }

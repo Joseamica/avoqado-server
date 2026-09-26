@@ -54,8 +54,8 @@ function cargarEnv() {
 cargarEnv()
 
 const LOOPBACK = ['localhost', '127.0.0.1', '::1']
-// Sufijo fijo + el pid, para que dos corridas simultáneas nunca compartan base.
-const DB_NAME = `avq_launch_campaigns_test_${process.pid}`
+// Nombre permitido por H1 y pagos; timestamp + pid aísla cada corrida.
+const DB_NAME = `avoqado_h1a_test_${Date.now()}_${process.pid}`
 
 async function main() {
   const raw = process.env.DATABASE_URL
@@ -97,9 +97,10 @@ async function main() {
   await admin.connect()
 
   let commandStatus = 1
+  let created = false
   try {
-    await admin.query(`DROP DATABASE IF EXISTS "${DB_NAME}" WITH (FORCE)`)
     await admin.query(`CREATE DATABASE "${DB_NAME}"`)
+    created = true
     console.log(`[desechable] creada ${DB_NAME}`)
 
     // Entorno hijo BLINDADO: ninguna variable heredada puede redirigir esto a Render ni a la
@@ -109,6 +110,7 @@ async function main() {
       USE_RENDER_DB: 'false',
       DATABASE_URL: targetUrl,
       TEST_DATABASE_URL: targetUrl,
+      H1_TEST_DATABASE_URL: targetUrl,
       SHADOW_DATABASE_URL: '',
       RENDER_DATABASE_URL: '',
       DIRECT_URL: '',
@@ -126,11 +128,16 @@ async function main() {
   } finally {
     // El borrado va en `finally`: una prueba roja NO puede dejar una base huérfana con el
     // esquema entero dentro.
-    await admin.query(`DROP DATABASE IF EXISTS "${DB_NAME}" WITH (FORCE)`)
-    const check = await admin.query('SELECT 1 FROM pg_database WHERE datname = $1', [DB_NAME])
-    if (check.rowCount !== 0) throw new Error(`la base desechable ${DB_NAME} SIGUE EXISTIENDO tras el DROP`)
-    console.log(`[desechable] borrada y verificada: ${DB_NAME} ya no existe`)
-    await admin.end()
+    try {
+      if (created) {
+        await admin.query(`DROP DATABASE IF EXISTS "${DB_NAME}" WITH (FORCE)`)
+        const check = await admin.query('SELECT 1 FROM pg_database WHERE datname = $1', [DB_NAME])
+        if (check.rowCount !== 0) throw new Error(`la base desechable ${DB_NAME} SIGUE EXISTIENDO tras el DROP`)
+        console.log(`[desechable] borrada y verificada: ${DB_NAME} ya no existe`)
+      }
+    } finally {
+      await admin.end()
+    }
   }
 
   process.exit(commandStatus)

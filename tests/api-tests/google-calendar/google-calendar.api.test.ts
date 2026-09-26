@@ -20,7 +20,7 @@
  * Regression coverage (per .claude/rules/testing-and-git.md) lives in the
  * "REGRESSION" describe block at the bottom of the file.
  */
-import request from 'supertest'
+import { api, startApiServer } from '@tests/__helpers__/apiServer'
 import jwt from 'jsonwebtoken'
 import type { Express } from 'express'
 
@@ -138,8 +138,11 @@ beforeAll(async () => {
   oauthService = (await import('@/services/google-calendar/oauth.service')) as any
 })
 
+startApiServer(() => app)
+
 beforeEach(() => {
-  accessService.getUserAccess.mockResolvedValue({ ...mockUserAccessFixture })
+  accessService.getUserAccess.mockReset().mockResolvedValue({ ...mockUserAccessFixture })
+  oauthService.exchangeCodeForTokens.mockReset()
 })
 
 const makeToken = (overrides: Partial<{ sub: string; venueId: string; role: string }> = {}) =>
@@ -159,26 +162,29 @@ const makeToken = (overrides: Partial<{ sub: string; venueId: string; role: stri
 // ============================================================
 describe('GET /api/v1/google-calendar/oauth/init', () => {
   it('returns 401 without auth', async () => {
-    const res = await request(app).get('/api/v1/google-calendar/oauth/init?intent=staff_personal')
+    // A rejected request leaves this response unused; the next test must not inherit it.
+    accessService.getUserAccess.mockResolvedValueOnce({ ...mockUserAccessFixture, corePermissions: [] })
+    const res = await api().get('/api/v1/google-calendar/oauth/init?intent=staff_personal')
     expect(res.status).toBe(401)
+    expect(accessService.getUserAccess).not.toHaveBeenCalled()
   })
 
   it('returns 400 for missing intent', async () => {
-    const res = await request(app)
+    const res = await api()
       .get('/api/v1/google-calendar/oauth/init')
       .set('Cookie', [`accessToken=${makeToken()}`])
     expect(res.status).toBe(400)
   })
 
   it('returns 400 for invalid intent', async () => {
-    const res = await request(app)
+    const res = await api()
       .get('/api/v1/google-calendar/oauth/init?intent=foo')
       .set('Cookie', [`accessToken=${makeToken()}`])
     expect(res.status).toBe(400)
   })
 
   it('returns 200 with a Google authorization URL for staff_personal', async () => {
-    const res = await request(app)
+    const res = await api()
       .get('/api/v1/google-calendar/oauth/init?intent=staff_personal')
       .set('Cookie', [`accessToken=${makeToken()}`])
     expect(res.status).toBe(200)
@@ -190,7 +196,7 @@ describe('GET /api/v1/google-calendar/oauth/init', () => {
   })
 
   it('returns 200 with URL for venue_master', async () => {
-    const res = await request(app)
+    const res = await api()
       .get('/api/v1/google-calendar/oauth/init?intent=venue_master')
       .set('Cookie', [`accessToken=${makeToken()}`])
     expect(res.status).toBe(200)
@@ -203,7 +209,7 @@ describe('GET /api/v1/google-calendar/oauth/init', () => {
       role: 'WAITER',
       corePermissions: ['calendar:connect_self'],
     })
-    const res = await request(app)
+    const res = await api()
       .get('/api/v1/google-calendar/oauth/init?intent=venue_master')
       .set('Cookie', [`accessToken=${makeToken({ role: 'WAITER' })}`])
     expect(res.status).toBe(403)
@@ -215,7 +221,7 @@ describe('GET /api/v1/google-calendar/oauth/init', () => {
       role: 'HOST',
       corePermissions: [],
     })
-    const res = await request(app)
+    const res = await api()
       .get('/api/v1/google-calendar/oauth/init?intent=staff_personal')
       .set('Cookie', [`accessToken=${makeToken({ role: 'HOST' })}`])
     expect(res.status).toBe(403)
@@ -241,12 +247,12 @@ describe('GET /api/v1/google-calendar/oauth/callback', () => {
   })
 
   it('returns 400 when state is missing', async () => {
-    const res = await request(app).get('/api/v1/google-calendar/oauth/callback?code=abc')
+    const res = await api().get('/api/v1/google-calendar/oauth/callback?code=abc')
     expect(res.status).toBe(400)
   })
 
   it('returns 400 when state JWT is invalid', async () => {
-    const res = await request(app).get('/api/v1/google-calendar/oauth/callback?code=abc&state=garbage')
+    const res = await api().get('/api/v1/google-calendar/oauth/callback?code=abc&state=garbage')
     expect(res.status).toBe(400)
   })
 
@@ -258,7 +264,7 @@ describe('GET /api/v1/google-calendar/oauth/callback', () => {
       expiry_date: Date.now() + 3_600_000,
     })
 
-    const res = await request(app).get(`/api/v1/google-calendar/oauth/callback?code=abc&state=${state}`)
+    const res = await api().get(`/api/v1/google-calendar/oauth/callback?code=abc&state=${state}`)
 
     expect(res.status).toBe(303)
     expect(res.header.location).toMatch(/^https:\/\/dashboardv2\.avoqado\.io\/google-calendar\/picker\?session=[a-f0-9]{64}$/)
@@ -272,7 +278,7 @@ describe('GET /api/v1/google-calendar/oauth/callback', () => {
       id_token: 'idt',
       expiry_date: Date.now() + 3_600_000,
     })
-    const res = await request(app).get(`/api/v1/google-calendar/oauth/callback?code=abc&state=${state}`)
+    const res = await api().get(`/api/v1/google-calendar/oauth/callback?code=abc&state=${state}`)
     // 303 success, not 401.
     expect(res.status).toBe(303)
   })
@@ -285,7 +291,7 @@ describe('GET /api/v1/google-calendar/oauth/callback', () => {
       // refresh_token deliberately missing — Google's re-consent behavior
     })
 
-    const res = await request(app).get(`/api/v1/google-calendar/oauth/callback?code=abc&state=${state}`)
+    const res = await api().get(`/api/v1/google-calendar/oauth/callback?code=abc&state=${state}`)
 
     expect(res.status).toBe(303)
     expect(res.header.location).toMatch(/^https:\/\/accounts\.google\.com\//)
@@ -329,12 +335,12 @@ describe('GET /api/v1/google-calendar/oauth/calendars', () => {
   })
 
   it('returns 401 without auth', async () => {
-    const res = await request(app).get('/api/v1/google-calendar/oauth/calendars?session=foo')
+    const res = await api().get('/api/v1/google-calendar/oauth/calendars?session=foo')
     expect(res.status).toBe(401)
   })
 
   it('returns 400 when session param missing', async () => {
-    const res = await request(app)
+    const res = await api()
       .get('/api/v1/google-calendar/oauth/calendars')
       .set('Cookie', [`accessToken=${makeToken()}`])
     expect(res.status).toBe(400)
@@ -342,7 +348,7 @@ describe('GET /api/v1/google-calendar/oauth/calendars', () => {
 
   it('returns 404 when session not found', async () => {
     ;(prismaMock.googleOAuthSession.findUnique as jest.Mock).mockResolvedValueOnce(null)
-    const res = await request(app)
+    const res = await api()
       .get('/api/v1/google-calendar/oauth/calendars?session=unknown')
       .set('Cookie', [`accessToken=${makeToken()}`])
     expect(res.status).toBe(404)
@@ -353,14 +359,14 @@ describe('GET /api/v1/google-calendar/oauth/calendars', () => {
       ...sessionRow,
       authUserId: 'other-user',
     })
-    const res = await request(app)
+    const res = await api()
       .get('/api/v1/google-calendar/oauth/calendars?session=stolen')
       .set('Cookie', [`accessToken=${makeToken()}`])
     expect(res.status).toBe(403)
   })
 
   it('returns only owner|writer calendars for staff_personal intent', async () => {
-    const res = await request(app)
+    const res = await api()
       .get('/api/v1/google-calendar/oauth/calendars?session=ok')
       .set('Cookie', [`accessToken=${makeToken()}`])
     expect(res.status).toBe(200)
@@ -378,7 +384,7 @@ describe('GET /api/v1/google-calendar/oauth/calendars', () => {
       venueId: VENUE_ID,
       staffId: null,
     })
-    const res = await request(app)
+    const res = await api()
       .get('/api/v1/google-calendar/oauth/calendars?session=venue-tok')
       .set('Cookie', [`accessToken=${makeToken()}`])
     expect(res.status).toBe(200)
@@ -437,12 +443,12 @@ describe('POST /api/v1/google-calendar/connections', () => {
   })
 
   it('returns 401 without auth', async () => {
-    const res = await request(app).post('/api/v1/google-calendar/connections').send({ session: 'tok', selectedCalendarId: 'cal-1' })
+    const res = await api().post('/api/v1/google-calendar/connections').send({ session: 'tok', selectedCalendarId: 'cal-1' })
     expect(res.status).toBe(401)
   })
 
   it('returns 400 when session is missing', async () => {
-    const res = await request(app)
+    const res = await api()
       .post('/api/v1/google-calendar/connections')
       .set('Cookie', [`accessToken=${makeToken()}`])
       .send({ selectedCalendarId: 'cal-1' })
@@ -450,7 +456,7 @@ describe('POST /api/v1/google-calendar/connections', () => {
   })
 
   it('returns 400 when selectedCalendarId is missing', async () => {
-    const res = await request(app)
+    const res = await api()
       .post('/api/v1/google-calendar/connections')
       .set('Cookie', [`accessToken=${makeToken()}`])
       .send({ session: 'tok' })
@@ -458,7 +464,7 @@ describe('POST /api/v1/google-calendar/connections', () => {
   })
 
   it('creates the connection atomically with channel and returns 201', async () => {
-    const res = await request(app)
+    const res = await api()
       .post('/api/v1/google-calendar/connections')
       .set('Cookie', [`accessToken=${makeToken()}`])
       .send({ session: 'tok', selectedCalendarId: 'cal-1' })
@@ -477,7 +483,7 @@ describe('POST /api/v1/google-calendar/connections', () => {
     mockCalendarListGet.mockResolvedValueOnce({
       data: { summary: 'Read-only', timeZone: 'America/Mexico_City', accessRole: 'reader' },
     })
-    const res = await request(app)
+    const res = await api()
       .post('/api/v1/google-calendar/connections')
       .set('Cookie', [`accessToken=${makeToken()}`])
       .send({ session: 'tok', selectedCalendarId: 'cal-readonly' })
@@ -489,7 +495,7 @@ describe('POST /api/v1/google-calendar/connections', () => {
 
   it('returns 409 when session was already consumed (concurrent commit won)', async () => {
     ;(prismaMock.googleOAuthSession.updateMany as jest.Mock).mockResolvedValueOnce({ count: 0 })
-    const res = await request(app)
+    const res = await api()
       .post('/api/v1/google-calendar/connections')
       .set('Cookie', [`accessToken=${makeToken()}`])
       .send({ session: 'tok', selectedCalendarId: 'cal-1' })
@@ -501,7 +507,7 @@ describe('POST /api/v1/google-calendar/connections', () => {
       ...sessionRow,
       authUserId: 'someone-else',
     })
-    const res = await request(app)
+    const res = await api()
       .post('/api/v1/google-calendar/connections')
       .set('Cookie', [`accessToken=${makeToken()}`])
       .send({ session: 'tok', selectedCalendarId: 'cal-1' })
@@ -514,7 +520,7 @@ describe('POST /api/v1/google-calendar/connections', () => {
 // ============================================================
 describe('GET /api/v1/google-calendar/connections', () => {
   it('returns 401 without auth', async () => {
-    const res = await request(app).get('/api/v1/google-calendar/connections')
+    const res = await api().get('/api/v1/google-calendar/connections')
     expect(res.status).toBe(401)
   })
 
@@ -536,7 +542,7 @@ describe('GET /api/v1/google-calendar/connections', () => {
         disconnectedAt: null,
       },
     ])
-    const res = await request(app)
+    const res = await api()
       .get('/api/v1/google-calendar/connections')
       .set('Cookie', [`accessToken=${makeToken()}`])
     expect(res.status).toBe(200)
@@ -550,7 +556,7 @@ describe('GET /api/v1/google-calendar/connections', () => {
 
   it('select does NOT expose refreshTokenCiphertext or syncToken', async () => {
     ;(prismaMock.googleCalendarConnection.findMany as jest.Mock).mockResolvedValue([])
-    await request(app)
+    await api()
       .get('/api/v1/google-calendar/connections')
       .set('Cookie', [`accessToken=${makeToken()}`])
     const select = (prismaMock.googleCalendarConnection.findMany as jest.Mock).mock.calls[0][0].select
@@ -570,13 +576,13 @@ describe('DELETE /api/v1/google-calendar/connections/:id', () => {
   })
 
   it('returns 401 without auth', async () => {
-    const res = await request(app).delete('/api/v1/google-calendar/connections/conn-1')
+    const res = await api().delete('/api/v1/google-calendar/connections/conn-1')
     expect(res.status).toBe(401)
   })
 
   it('returns 404 for unknown id', async () => {
     ;(prismaMock.googleCalendarConnection.findUnique as jest.Mock).mockResolvedValueOnce(null)
-    const res = await request(app)
+    const res = await api()
       .delete('/api/v1/google-calendar/connections/conn-missing')
       .set('Cookie', [`accessToken=${makeToken()}`])
     expect(res.status).toBe(404)
@@ -593,7 +599,7 @@ describe('DELETE /api/v1/google-calendar/connections/:id', () => {
       channels: [{ channelId: 'ch1', resourceId: 'r1', status: 'ACTIVE' }],
     })
 
-    const res = await request(app)
+    const res = await api()
       .delete('/api/v1/google-calendar/connections/conn-1')
       .set('Cookie', [`accessToken=${makeToken()}`])
 
@@ -616,7 +622,7 @@ describe('DELETE /api/v1/google-calendar/connections/:id', () => {
       channels: [],
     })
 
-    const res = await request(app)
+    const res = await api()
       .delete('/api/v1/google-calendar/connections/conn-2')
       .set('Cookie', [`accessToken=${makeToken()}`])
 
@@ -638,7 +644,7 @@ describe('DELETE /api/v1/google-calendar/connections/:id', () => {
       channels: [],
     })
 
-    const res = await request(app)
+    const res = await api()
       .delete('/api/v1/google-calendar/connections/conn-3')
       .set('Cookie', [`accessToken=${makeToken()}`])
 
@@ -658,7 +664,7 @@ describe('DELETE /api/v1/google-calendar/connections/:id', () => {
       channels: [{ channelId: 'ch1', resourceId: 'r1', status: 'ACTIVE' }],
     })
 
-    const res = await request(app)
+    const res = await api()
       .delete('/api/v1/google-calendar/connections/conn-4')
       .set('Cookie', [`accessToken=${makeToken()}`])
 
@@ -675,27 +681,27 @@ describe('DELETE /api/v1/google-calendar/connections/:id', () => {
 describe('REGRESSION — guard rails the rest of Phase 1 depends on', () => {
   it('REGRESSION: /oauth/callback is the ONLY endpoint that bypasses authentication', async () => {
     // /oauth/init
-    let res = await request(app).get('/api/v1/google-calendar/oauth/init?intent=staff_personal')
+    let res = await api().get('/api/v1/google-calendar/oauth/init?intent=staff_personal')
     expect(res.status).toBe(401)
     // /oauth/calendars
-    res = await request(app).get('/api/v1/google-calendar/oauth/calendars?session=x')
+    res = await api().get('/api/v1/google-calendar/oauth/calendars?session=x')
     expect(res.status).toBe(401)
     // POST /connections
-    res = await request(app).post('/api/v1/google-calendar/connections').send({ session: 'x', selectedCalendarId: 'cal' })
+    res = await api().post('/api/v1/google-calendar/connections').send({ session: 'x', selectedCalendarId: 'cal' })
     expect(res.status).toBe(401)
     // GET /connections
-    res = await request(app).get('/api/v1/google-calendar/connections')
+    res = await api().get('/api/v1/google-calendar/connections')
     expect(res.status).toBe(401)
     // DELETE /connections/:id
-    res = await request(app).delete('/api/v1/google-calendar/connections/cid')
+    res = await api().delete('/api/v1/google-calendar/connections/cid')
     expect(res.status).toBe(401)
     // /oauth/callback — no auth, just bad params → 400
-    res = await request(app).get('/api/v1/google-calendar/oauth/callback?code=')
+    res = await api().get('/api/v1/google-calendar/oauth/callback?code=')
     expect(res.status).toBe(400)
   })
 
   it('REGRESSION: GET /oauth/init URL always includes access_type=offline (refresh_token guarantee)', async () => {
-    const res = await request(app)
+    const res = await api()
       .get('/api/v1/google-calendar/oauth/init?intent=staff_personal')
       .set('Cookie', [`accessToken=${makeToken()}`])
     expect(res.body.url).toContain('access_type=offline')
@@ -714,7 +720,7 @@ describe('REGRESSION — guard rails the rest of Phase 1 depends on', () => {
       id_token: 'idt',
       expiry_date: Date.now() + 3_600_000,
     })
-    const res1 = await request(app).get(`/api/v1/google-calendar/oauth/callback?code=abc&state=${state}`)
+    const res1 = await api().get(`/api/v1/google-calendar/oauth/callback?code=abc&state=${state}`)
     expect(res1.status).toBe(303)
     expect(prismaMock.googleOAuthSession.create).not.toHaveBeenCalled()
 
@@ -727,7 +733,7 @@ describe('REGRESSION — guard rails the rest of Phase 1 depends on', () => {
     })
     ;(prismaMock.googleOAuthSession.create as jest.Mock).mockResolvedValueOnce({ id: 'session-2', tokenHash: 'h' })
 
-    const res2 = await request(app).get(`/api/v1/google-calendar/oauth/callback?code=abc&state=${state}`)
+    const res2 = await api().get(`/api/v1/google-calendar/oauth/callback?code=abc&state=${state}`)
     expect(res2.status).toBe(303)
     expect(prismaMock.googleOAuthSession.create).toHaveBeenCalled()
   })

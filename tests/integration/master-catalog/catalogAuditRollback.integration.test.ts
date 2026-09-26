@@ -1,3 +1,4 @@
+const { isDisposableH1Url } = require('../../../scripts/h1-test-database.cjs')
 /**
  * Real PostgreSQL proof for the H1A audit atomicity boundary.
  *
@@ -24,8 +25,7 @@ function assertDisposableH1Database(): void {
   // caller bypasses the wrapper or points the test alias away from Prisma's
   // effective connection string.
   for (const candidate of [effective, declaredTestUrl]) {
-    expect(['localhost', '127.0.0.1']).toContain(candidate.hostname)
-    expect(candidate.pathname).toBe('/avoqado_h1a_test_20260808')
+    expect(isDisposableH1Url(candidate)).toBe(true)
   }
   expect(declaredTestUrl.toString()).toBe(effective.toString())
 }

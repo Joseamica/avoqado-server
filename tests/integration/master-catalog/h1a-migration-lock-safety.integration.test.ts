@@ -147,7 +147,7 @@ describe('H1A deployed lock-safe migration chain', () => {
   it('keeps legacy Product/ActivityLog writes live while CIC waits on an old snapshot', () => {
     expect(cicWriterAcceptance).toMatchObject({
       mode: 'lock-safety',
-      database: { pathname: '/avoqado_h1a_test_20260808' },
+      database: { pathname: new URL(process.env.DATABASE_URL!).pathname },
       snapshot: {
         heldOpenDuringWriter: true,
         updatedProductVisible: false,
@@ -238,7 +238,7 @@ describe('H1A deployed lock-safe migration chain', () => {
 
   it('runs only on the asserted disposable database and records the exact chain once', async () => {
     const target = await client.query<{ database: string }>(`SELECT current_database() AS database`)
-    expect(target.rows).toEqual([{ database: 'avoqado_h1a_test_20260808' }])
+    expect(target.rows).toEqual([{ database: new URL(process.env.DATABASE_URL!).pathname.slice(1) }])
 
     const applied = await client.query<{ migration_name: string; count: number }>(
       `SELECT migration_name, COUNT(*)::int AS count
