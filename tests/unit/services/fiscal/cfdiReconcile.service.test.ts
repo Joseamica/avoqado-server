@@ -38,6 +38,10 @@ const STUCK_INDIVIDUAL: StuckCfdi = {
   totalCents: 11600,
   createdAt: CREATED_AT,
   updatedAt: STALE_UPDATED,
+  attempts: 1,
+  protocoloIva: null,
+  falloDefinitivo: false,
+  enviadoAt: null,
 }
 
 /** Global STAMPING row (receptor XAXX, no order). */
@@ -86,7 +90,7 @@ function makeProvider(over: Record<string, any> = {}) {
     getInvoice: jest.fn().mockResolvedValue(STAMPED_BY_ID),
     searchInvoices: jest.fn().mockResolvedValue({ invoices: [], truncated: false }),
     findByExternalId: jest.fn().mockResolvedValue(null), // default: external_id miss → fall through
-    downloadXml: jest.fn().mockResolvedValue(Buffer.from('<xml/>')),
+    downloadXml: jest.fn().mockResolvedValue(Buffer.from('<Comprobante/>')),
     downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
     ...over,
   }
@@ -98,8 +102,9 @@ function makeDeps(provider: any, over: Partial<ReconcileCfdiDeps> = {}): Reconci
     loadVenueSlug: jest.fn().mockResolvedValue('demo-venue'),
     resolveProvider: jest.fn().mockReturnValue(provider),
     storeArtifact: jest.fn().mockImplementation(async (_b, path) => `https://cdn/${path}`),
-    completeCfdi: jest.fn().mockImplementation(async (id, data) => ({ id, ...data })),
-    failCfdi: jest.fn().mockImplementation(async (id, lastError) => ({ id, status: 'STAMP_FAILED', lastError })),
+    completeCfdi: jest.fn().mockResolvedValue('FINALIZADO'),
+    escalate: jest.fn().mockResolvedValue(undefined),
+    failCfdi: jest.fn().mockResolvedValue(true),
     // Default: delegates to provider.findByExternalId (mirrors defaultDeps)
     findByExternalId: jest
       .fn()
@@ -130,8 +135,8 @@ describe('reconcileStuckCfdi', () => {
       expect(provider.downloadXml).toHaveBeenCalledWith('fp1')
       expect(provider.downloadPdf).toHaveBeenCalledWith('fp1')
       expect(deps.completeCfdi).toHaveBeenCalledTimes(1)
-      const [, data] = (deps.completeCfdi as jest.Mock).mock.calls[0]
-      expect(data.status).toBe('STAMPED')
+      const [{ identidad: data }] = (deps.completeCfdi as jest.Mock).mock.calls[0]
+      expect(data.status).toBe('valid')
       expect(data.facturapiId).toBe('fp1')
       expect(data.uuid).toBe('UUID-1')
       expect(deps.failCfdi).not.toHaveBeenCalled()
@@ -161,7 +166,7 @@ describe('reconcileStuckCfdi', () => {
       const result = await reconcileStuckCfdi({ cfdi: STUCK_GLOBAL, now: NOW, sandbox: true }, deps)
 
       expect(result.outcome).toBe('COMPLETED')
-      const [, data] = (deps.completeCfdi as jest.Mock).mock.calls[0]
+      const [{ identidad: data }] = (deps.completeCfdi as jest.Mock).mock.calls[0]
       expect(data.uuid).toBe('GLOBAL-UUID')
       expect(data.facturapiId).toBe('fpg1')
     })
@@ -246,12 +251,12 @@ describe('reconcileStuckCfdi', () => {
       expect(provider.downloadPdf).toHaveBeenCalledWith('fp1')
       expect(deps.storeArtifact).toHaveBeenCalledTimes(2)
       // persisted STAMPED with recovered identifiers
-      const [cfdiId, data] = (deps.completeCfdi as jest.Mock).mock.calls[0]
+      const [{ cfdiId, version, identidad: data }] = (deps.completeCfdi as jest.Mock).mock.calls[0]
+      expect(version).toBe(1)
       expect(cfdiId).toBe('c1')
-      expect(data.status).toBe('STAMPED')
+      expect(data.status).toBe('valid')
       expect(data.facturapiId).toBe('fp1')
       expect(data.uuid).toBe('UUID-1')
-      expect(data.lastError).toBeNull()
       // never reset
       expect(deps.failCfdi).not.toHaveBeenCalled()
     })
@@ -290,7 +295,8 @@ describe('reconcileStuckCfdi', () => {
       const result = await reconcileStuckCfdi({ cfdi: STUCK_INDIVIDUAL, now: NOW, sandbox: true }, deps)
 
       expect(result.outcome).toBe('RESET')
-      const [cfdiId, lastError] = (deps.failCfdi as jest.Mock).mock.calls[0]
+      const [cfdiId, version, lastError] = (deps.failCfdi as jest.Mock).mock.calls[0]
+      expect(version).toBe(1)
       expect(cfdiId).toBe('c1')
       expect(lastError).toMatch(/no document found at PAC/i)
       expect(deps.completeCfdi).not.toHaveBeenCalled()
@@ -432,7 +438,7 @@ describe('reconcileStuckCfdi', () => {
       const result = await reconcileStuckCfdi({ cfdi: STUCK_GLOBAL, now: NOW, sandbox: true }, deps)
 
       expect(result.outcome).toBe('COMPLETED')
-      const [, data] = (deps.completeCfdi as jest.Mock).mock.calls[0]
+      const [{ identidad: data }] = (deps.completeCfdi as jest.Mock).mock.calls[0]
       expect(data.uuid).toBe('GLOBAL-UUID')
       expect(data.facturapiId).toBe('fpg1')
     })
@@ -455,5 +461,27 @@ describe('reconcileStuckCfdi', () => {
       expect(d2.failCfdi).toHaveBeenCalledTimes(1)
       expect(d2.completeCfdi).not.toHaveBeenCalled()
     })
+  })
+  it.each([
+    { status: 'pending', uuid: null },
+    { status: 'valid', uuid: null },
+  ])('external_id incompleto no completa ni resetea: %p', async response => {
+    const provider = makeProvider({ findByExternalId: jest.fn().mockResolvedValue({ ...MATCH_INDIVIDUAL, ...response }) })
+    const deps = makeDeps(provider)
+    const result = await reconcileStuckCfdi(
+      { cfdi: { ...STUCK_INDIVIDUAL, protocoloIva: 1, enviadoAt: CREATED_AT }, now: NOW, sandbox: true },
+      deps,
+    )
+    expect(result.outcome).toBe('INCONCLUSIVE')
+    expect(deps.completeCfdi).not.toHaveBeenCalled()
+    expect(deps.failCfdi).not.toHaveBeenCalled()
+    expect(provider.searchInvoices).not.toHaveBeenCalled()
+    expect(deps.findByExternalId).toHaveBeenCalledWith(provider, 'cfdi-order-o1#1')
+  })
+  it('un finalizador que detecta duplicado nunca produce COMPLETED ni descarga', async () => {
+    const provider = makeProvider({ findByExternalId: jest.fn().mockResolvedValue(MATCH_INDIVIDUAL) })
+    const deps = makeDeps(provider, { completeCfdi: jest.fn().mockResolvedValue('DUPLICADO') })
+    expect((await reconcileStuckCfdi({ cfdi: STUCK_INDIVIDUAL, now: NOW, sandbox: true }, deps)).outcome).toBe('INCONCLUSIVE')
+    expect(provider.downloadXml).not.toHaveBeenCalled()
   })
 })

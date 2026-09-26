@@ -44,7 +44,7 @@ function depsDelMotor(createInvoice: jest.Mock): IssueCfdiDeps {
     resolveProvider: jest.fn().mockReturnValue({
       name: 'facturapi',
       createInvoice,
-      downloadXml: jest.fn().mockResolvedValue(Buffer.from('<xml/>')),
+      downloadXml: jest.fn().mockResolvedValue(Buffer.from('<Comprobante/>')),
       downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
     } as any),
     storeArtifact: jest.fn().mockImplementation(async (_b, path) => `https://cdn/${path}`),

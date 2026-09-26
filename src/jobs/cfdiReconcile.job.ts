@@ -1,26 +1,12 @@
 /**
- * CFDI Reconcile Job
- *
- * Closes the one residual double-stamp gap left by the STAMPING-reservation pattern:
- * a process crash / rolling deploy that lands AFTER facturapi stamped but BEFORE we persisted.
- * Such a row sits in `STAMPING` forever; the issuance reclaim path (3-min TTL) would re-stamp it
- * at the PAC → two real fiscal documents. This job reconciles those rows against facturapi first.
- *
- * Each tick: find `Cfdi` rows stuck in `STAMPING` older than the stuck-threshold and, per row,
- * ask the PAC whether a document actually exists (reconcileStuckCfdi):
- *   - COMPLETED   → a stamp was found; row marked STAMPED with downloaded XML/PDF.
- *   - RESET       → the PAC definitively has none; row reset to STAMP_FAILED (retryable).
- *   - INCONCLUSIVE→ PAC unreachable / ambiguous; row left STAMPING for the next tick.
- *
- * Schedule: every 5 minutes (offset to :02 to reduce top-of-hour stampede overlap).
- *
- * Rules:
- *   - Entry DB read MUST be wrapped with retry(fn, shouldRetryDbConnectionError) per
- *     .claude/rules/cron-jobs.md (prevents P1001 stampede deaths at top-of-hour).
- *   - Per-row try/catch: one row's failure must not abort the rest.
- *   - Job does NOT start in test environments (NODE_ENV guard in server.ts).
+ * Cada cinco minutos: concilia intentos inciertos y repara archivos de timbres confirmados.
+ * Consultas de entrada con retry de conexión, páginas acotadas y fallos aislados por CFDI.
+ * RESET conserva versión/sellos; nunca autoriza un nuevo envío por el mero paso del tiempo.
  */
 
+import { Prisma } from '@prisma/client'
+import { completarArchivos } from '../services/fiscal/finalizadorCfdi'
+import { resolveFiscalProvider } from '../services/fiscal/fiscalProvider.factory'
 import { CronJob } from 'cron'
 import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
@@ -36,9 +22,7 @@ import { NODE_ENV } from '../config/env'
 import { asegurarWebhooksFaltantes, defaultAsegurarFaltantesDeps } from '../services/fiscal/facturapiWebhook.service'
 import { scheduleJob } from '../observability/jobContext'
 
-// Only reconcile rows that have been STAMPING for longer than this. Comfortably larger than the
-// 3-min issuance reclaim TTL (STAMPING_TTL_MS / GLOBAL_STAMPING_TTL_MS) plus a normal stamp's
-// duration, so we never race a slow-but-alive stamp — only genuinely crashed reservations qualify.
+// Antigüedad mínima; el CAS igualmente protege las respuestas concurrentes.
 const STUCK_THRESHOLD_MS = 10 * 60_000
 
 // Bound how many stuck rows a single tick processes (defensive — there should rarely be any).
@@ -47,6 +31,9 @@ const MAX_PER_TICK = 200
 export class CfdiReconcileJob {
   private job: CronJob | null = null
   private isRunning = false
+  // ponytail: cursores de una instancia, reinician con el proceso; persistir si reinicios/múltiples workers frenan el avance.
+  private reconcileCursor: { updatedAt: Date; id: string } | null = null
+  private artifactCursor: { stampedAt: Date; id: string } | null = null
   /** Última pasada del barrido de cancelaciones (en memoria: el server corre UNA instancia). */
   private ultimaRevisionDeCancelaciones: number | null = null
 
@@ -105,14 +92,33 @@ export class CfdiReconcileJob {
       const stuck = (await retry(
         () =>
           prisma.cfdi.findMany({
-            where: { status: 'STAMPING', updatedAt: { lt: cutoff } },
-            orderBy: { updatedAt: 'asc' },
+            where: {
+              OR: [{ status: 'STAMPING' }, { status: 'STAMP_FAILED', protocoloIva: 1, falloDefinitivo: false, enviadoAt: { not: null } }],
+              updatedAt: { lt: cutoff },
+              ...(this.reconcileCursor
+                ? {
+                    AND: [
+                      {
+                        OR: [
+                          { updatedAt: { gt: this.reconcileCursor.updatedAt } },
+                          { updatedAt: this.reconcileCursor.updatedAt, id: { gt: this.reconcileCursor.id } },
+                        ],
+                      },
+                    ],
+                  }
+                : {}),
+            },
+            orderBy: [{ updatedAt: 'asc' }, { id: 'asc' }],
             take: MAX_PER_TICK,
             select: {
               id: true,
               venueId: true,
               fiscalEmisorId: true,
               status: true,
+              attempts: true,
+              protocoloIva: true,
+              falloDefinitivo: true,
+              enviadoAt: true,
               isGlobal: true,
               orderId: true,
               facturapiId: true,
@@ -131,13 +137,8 @@ export class CfdiReconcileJob {
         },
       )) as StuckCfdi[]
 
-      if (stuck.length === 0) {
-        this.isRunning = false
-        return // nothing to do — keep quiet on the happy path
-      }
-
-      logger.info(`[cfdiReconcile] tick started — ${stuck.length} stuck STAMPING row(s)`)
-
+      const last = stuck.at(-1)
+      this.reconcileCursor = last ? { updatedAt: last.updatedAt, id: last.id } : null
       const sandbox = NODE_ENV !== 'production'
       const now = new Date()
       const tally: Record<string, number> = { COMPLETED: 0, RESET: 0, INCONCLUSIVE: 0, SKIPPED: 0, ERROR: 0 }
@@ -155,12 +156,70 @@ export class CfdiReconcileJob {
         }
       }
 
+      await this.repairArtifacts(cutoff)
+
       const durationMs = Date.now() - startTime
-      logger.info(`[cfdiReconcile] tick complete — ${stuck.length} row(s) in ${durationMs}ms`, { tally })
+      if (stuck.length) logger.info(`[cfdiReconcile] tick complete — ${stuck.length} row(s) in ${durationMs}ms`, { tally })
     } catch (err) {
       logger.error('[cfdiReconcile] tick failed (top-level)', err)
     } finally {
       this.isRunning = false
+    }
+  }
+
+  private async repairArtifacts(cutoff: Date): Promise<void> {
+    const rows = await retry(
+      () =>
+        prisma.cfdi.findMany({
+          where: {
+            status: 'STAMPED',
+            stampedAt: { lt: cutoff },
+            OR: [{ taxBreakdown: { equals: Prisma.DbNull } }, { xmlUrl: null }],
+            ...(this.artifactCursor
+              ? {
+                  AND: [
+                    {
+                      OR: [
+                        { stampedAt: { gt: this.artifactCursor.stampedAt } },
+                        { stampedAt: this.artifactCursor.stampedAt, id: { gt: this.artifactCursor.id } },
+                      ],
+                    },
+                  ],
+                }
+              : {}),
+          },
+          orderBy: [{ stampedAt: 'asc' }, { id: 'asc' }],
+          take: 20,
+          select: {
+            id: true,
+            stampedAt: true,
+            idempotencyKey: true,
+            attempts: true,
+            facturapiId: true,
+            uuid: true,
+            venue: { select: { slug: true } },
+            fiscalEmisor: { select: { id: true, provider: true, providerKeyEnc: true } },
+          },
+        }),
+      { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'cfdiReconcile.findMissingArtifacts' },
+    )
+    const last = rows.at(-1)
+    this.artifactCursor = last?.stampedAt ? { stampedAt: last.stampedAt, id: last.id } : null
+    for (const row of rows) {
+      try {
+        if (!row.facturapiId || !row.uuid) continue
+        await completarArchivos({
+          cfdiId: row.id,
+          idempotencyKey: row.idempotencyKey,
+          version: row.attempts,
+          providerInvoiceId: row.facturapiId,
+          uuid: row.uuid,
+          venueSlug: row.venue.slug,
+          provider: resolveFiscalProvider(row.fiscalEmisor, { sandbox: NODE_ENV !== 'production' }),
+        })
+      } catch (err) {
+        logger.error(`[cfdiReconcile] reparación de archivos falló cfdi=${row.id}`, err)
+      }
     }
   }
 

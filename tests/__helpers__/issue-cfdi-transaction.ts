@@ -9,7 +9,10 @@ export function withIssueTransaction<T extends IssueCfdiDeps>(deps: T): T {
     cfdi: {
       findUnique: jest.fn(({ where }) => deps.findExistingCfdi(where.idempotencyKey)),
       findFirst: jest.fn().mockResolvedValue(null),
-      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      updateMany: jest.fn(async ({ where, data }) => {
+        if (data.status === 'STAMPED') return { count: (await deps.persistCfdi(data, where)) ? 1 : 0 }
+        return { count: 1 }
+      }),
     },
   }
   deps.runInTransaction = async work => work(tx as any)

@@ -40,7 +40,7 @@ function makeDeps(over: Partial<IssueCfdiDeps> = {}): IssueCfdiDeps {
     // Por default este proceso gana el reclamo del intento (la carrera se prueba aparte)
     claimCfdi: jest.fn().mockResolvedValue(true),
     // Como el dep real: escribe sólo las URLs (jamás el estado) y devuelve la fila completa.
-    persistArtifacts: jest.fn().mockImplementation(async (_llave, urls) => ({ id: 'cfdi1', uuid: 'UUID-1', status: 'STAMPED', ...urls })),
+    persistArtifacts: jest.fn().mockImplementation(async (_llave, urls) => ({ id: 'cfdi1', status: 'STAMPED', ...urls })),
     loadOrderForCfdi: jest.fn().mockResolvedValue({
       venueId: 'v1',
       venueSlug: 'demo',
@@ -73,7 +73,7 @@ function makeDeps(over: Partial<IssueCfdiDeps> = {}): IssueCfdiDeps {
     resolveProvider: jest.fn().mockReturnValue({
       name: 'facturapi',
       createInvoice: jest.fn().mockResolvedValue(stamped),
-      downloadXml: jest.fn().mockResolvedValue(Buffer.from('<xml/>')),
+      downloadXml: jest.fn().mockResolvedValue(Buffer.from('<Comprobante/>')),
       downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
     } as any),
     storeArtifact: jest.fn().mockImplementation(async (_b, path) => `https://cdn/${path}`),
@@ -97,7 +97,7 @@ describe('issueCfdiForOrder', () => {
     expect(calls[0].xmlUrl ?? null).toBeNull()
     const [llave, urls] = (deps.persistArtifacts as jest.Mock).mock.calls[0]
     expect(llave).toBe('cfdi-order-o1')
-    expect(Object.keys(urls).sort()).toEqual(['pdfUrl', 'xmlUrl'])
+    expect(Object.keys(urls).sort()).toEqual(['pdfUrl', 'taxBreakdown', 'xmlUrl'])
     expect(urls.xmlUrl).toMatch(/\.xml$/)
   })
 
@@ -115,7 +115,7 @@ describe('issueCfdiForOrder', () => {
       resolveProvider: jest.fn().mockReturnValue({
         name: 'facturapi',
         createInvoice,
-        downloadXml: jest.fn().mockResolvedValue(Buffer.from('<xml/>')),
+        downloadXml: jest.fn().mockResolvedValue(Buffer.from('<Comprobante/>')),
         downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
       } as any),
     })
@@ -174,7 +174,7 @@ describe('issueCfdiForOrder', () => {
       resolveProvider: jest.fn().mockReturnValue({
         name: 'facturapi',
         createInvoice,
-        downloadXml: jest.fn().mockResolvedValue(Buffer.from('<xml/>')),
+        downloadXml: jest.fn().mockResolvedValue(Buffer.from('<Comprobante/>')),
         downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
       } as any),
     })
@@ -186,7 +186,7 @@ describe('issueCfdiForOrder', () => {
     expect(sentItem.taxIncluded).toBe(true) // PAC keeps the gross → stamped total stays 116, not 134.56
     expect(sentItem.unitPriceCents).toBe(11600) // sends the IVA-included price the customer actually paid
     // and the persisted row records the real split (taxCents ≠ 0), cuadra al centavo
-    const persisted = (deps.persistCfdi as jest.Mock).mock.calls.at(-1)[0]
+    const persisted = (deps.reserveCfdi as jest.Mock).mock.calls[0][0]
     expect(persisted.subtotalCents + persisted.taxCents).toBe(persisted.totalCents)
     expect(persisted.totalCents).toBe(11600)
   })
@@ -443,7 +443,7 @@ describe('issueCfdiForOrder — recuperación de intentos', () => {
     const provider = {
       name: 'facturapi',
       createInvoice,
-      downloadXml: jest.fn().mockResolvedValue(Buffer.from('<xml/>')),
+      downloadXml: jest.fn().mockResolvedValue(Buffer.from('<Comprobante/>')),
       downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
       findByExternalId: jest
         .fn()

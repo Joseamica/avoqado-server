@@ -109,7 +109,7 @@ function makeIssueDeps(over: Partial<IssueCfdiDeps> = {}): IssueCfdiDeps & { cre
       name: 'facturapi',
       createInvoice,
       findByExternalId: jest.fn().mockResolvedValue(null),
-      downloadXml: jest.fn().mockResolvedValue(Buffer.from('<xml/>')),
+      downloadXml: jest.fn().mockResolvedValue(Buffer.from('<Comprobante/>')),
       downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
     } as any),
     storeArtifact: jest.fn().mockImplementation(async (_b, path) => `https://cdn/${path}`),
@@ -186,7 +186,8 @@ describe('issueCfdiForOrder — venta con facturas previas', () => {
     expect(deps.createInvoice).toHaveBeenCalledTimes(1)
     expect(deps.createInvoice.mock.calls[0][0].externalId).toBe('cfdi-order-o1-n2#1')
     expect((deps.reserveCfdi as jest.Mock).mock.calls[0][0].idempotencyKey).toBe('cfdi-order-o1-n2')
-    expect((deps.persistCfdi as jest.Mock).mock.calls[0][0]).toMatchObject({ status: 'STAMPED', idempotencyKey: 'cfdi-order-o1-n2' })
+    expect((deps.persistCfdi as jest.Mock).mock.calls[0][0]).toMatchObject({ status: 'STAMPED' })
+    expect((deps.persistCfdi as jest.Mock).mock.calls[0][1]).toMatchObject({ idempotencyKey: 'cfdi-order-o1-n2', attempts: 1 })
   })
 
   it('a OTRA razón social tras cancelar: el receptor nuevo es el que se timbra', async () => {
@@ -195,7 +196,7 @@ describe('issueCfdiForOrder — venta con facturas previas', () => {
     })
     const otro = { ...receptor, rfc: 'XIA190128J61', razonSocial: 'XENON INDUSTRIAL ARTICLES' }
     await issueCfdiForOrder({ orderId: 'o1', receptor: otro, sandbox: true, expectedVenueId: 'v1' }, deps)
-    expect((deps.persistCfdi as jest.Mock).mock.calls[0][0]).toMatchObject({ receptorRfc: 'XIA190128J61' })
+    expect((deps.reserveCfdi as jest.Mock).mock.calls[0][0]).toMatchObject({ receptorRfc: 'XIA190128J61' })
   })
 
   it('si la sustituta (-r1) es la vigente, ésa es la factura de la venta', async () => {

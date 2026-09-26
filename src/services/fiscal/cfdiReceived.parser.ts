@@ -1,4 +1,4 @@
-import { XMLParser } from 'fast-xml-parser'
+import { XMLParser, XMLValidator } from 'fast-xml-parser'
 
 import { BadRequestError } from '../../errors/AppError'
 import type { CreateExpenseInput } from './expense.service'
@@ -50,6 +50,19 @@ export interface CfdiReceived {
 const pesos = (s: string | number | undefined): number => Math.round(parseFloat(String(s ?? '0')) * 100)
 const toArray = <T>(x: T | T[] | undefined): T[] => (x == null ? [] : Array.isArray(x) ? x : [x])
 
+/** Comparte el lector del comprobante; nunca suma impuestos de cada concepto. */
+function comprobanteDesdeXml(xml: string): any {
+  if (!xml?.trim()) throw new BadRequestError('El XML del CFDI está vacío.')
+  if (XMLValidator.validate(xml) !== true) throw new BadRequestError('El archivo no es un XML válido.')
+  const doc = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_', removeNSPrefix: true }).parse(xml)
+  if (doc?.Comprobante === undefined) throw new BadRequestError('El XML no es un CFDI (no se encontró el nodo Comprobante).')
+  return doc.Comprobante
+}
+
+export function trasladosDesdeXml(xml: string): Array<Record<string, string>> {
+  return toArray(comprobanteDesdeXml(xml).Impuestos?.Traslados?.Traslado)
+}
+
 /**
  * Parsea un CFDI 4.0 recibido. `ourRfc` = RFC del contribuyente receptor (debe coincidir).
  *
@@ -62,18 +75,7 @@ export function parseCfdiXml(xml: string, ourRfc: string): CreateExpenseInput {
 
 /** Igual que `parseCfdiXml`, más el detalle de renglones que la conciliación necesita. */
 export function parseCfdiReceived(xml: string, ourRfc: string): CfdiReceived {
-  if (!xml || !xml.trim()) throw new BadRequestError('El XML del CFDI está vacío.')
-
-  const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_', removeNSPrefix: true })
-  let doc: any
-  try {
-    doc = parser.parse(xml)
-  } catch {
-    throw new BadRequestError('El archivo no es un XML válido.')
-  }
-
-  const c = doc?.Comprobante
-  if (!c) throw new BadRequestError('El XML no es un CFDI (no se encontró el nodo Comprobante).')
+  const c = comprobanteDesdeXml(xml)
 
   const emisor = c.Emisor
   const receptor = c.Receptor
