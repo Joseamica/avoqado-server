@@ -4,7 +4,7 @@
 
 **Goal:** Que la factura individual timbre cada renglón con su IVA real (16 %, 0 %, exento), armada SÓLO desde una foto congelada al reservar y con los renglones «sellados» por el documento; que una venta nunca esté en la global y en una factura propia a la vez; y que la global y la nota de crédito bloqueen con motivo las ventas con IVA distinto de 16 % — sin cambiar un solo byte de lo que hoy se factura cuando todo es 16 %.
 
-**Architecture:** Un módulo puro resuelve el tratamiento de cada renglón (sellado > producto > 16 %) y lo traduce a lo que pide el SAT. La reserva de cada documento corre en UNA transacción con candado compartido de admisión por organización, la orden `FOR UPDATE` y los productos `FOR SHARE`: captura la **entrada documental** (JSON versionado con huella) en `Cfdi.entrada`, escribe los **sellos** (tabla de causas + `OrderItem.ivaTratamiento`) y la fila del intento. El payload al PAC se arma después del commit y sólo desde esa entrada. Los sellos se liberan con una única función cuando el intento termina sin documento o la cancelación queda confirmada. La global escribe su lista de ventas (manifiesto) y la exclusión con la individual es simétrica.
+**Architecture:** Un módulo puro resuelve el tratamiento de cada renglón (sellado > producto > 16 %) y lo traduce a lo que pide el SAT. La reserva de cada documento corre en UNA transacción con candado compartido de admisión por organización, la orden `FOR UPDATE` y los productos `FOR SHARE`: captura la **entrada documental** (JSON versionado con huella) en `Cfdi.entrada`, escribe los **sellos** (tabla renglón ↔ CFDI + `OrderItem.ivaTratamiento`) y la fila del intento. El payload al PAC se arma después del commit y sólo desde esa entrada. Los sellos se liberan con una única función cuando el intento termina sin documento o la cancelación queda confirmada. La global escribe su lista de ventas (manifiesto) y la exclusión con la individual es simétrica.
 
 **Tech Stack:** TypeScript, Express, Prisma 6.19, PostgreSQL (advisory locks, `FOR UPDATE`/`FOR SHARE`), Jest (`unit` / `integration`), Facturapi (sandbox para la verificación real).
 
@@ -12,10 +12,22 @@
 
 **Rama/worktree:** `iva-por-producto` (worktree `avoqado-server/.claude/worktrees/iva-por-producto`), encima de los planes 1 y 2.
 
+**v2 (26-sep) — cierres de la auditoría de Codex** (`docs/investigations/iva-por-producto-plan-3/informe-codex-plan-3.md`: RECHAZO
+con 6 P1 + 2 P2, B+ se mantiene). Ya incorporados en cada tarea: recaptura sólo con rechazo definitivo o ventana segura, versión
+del intento en todas las escrituras, recuperación sólo por identidad para intentos nuevos, egreso con 16 % de la original y no del
+catálogo, exclusión global ↔ individual releída bajo el bloqueo de cada orden, reintentos seguros en global y egreso, nunca una
+entrada inventada para un documento viejo, motivo del egreso por la ruta real, CAS nuevo en la cancelación directa, golden también
+de montos y motivos. Quitado: el enum de causas de sello (la relación renglón ↔ CFDI se queda). Simplificado: la entrada guarda los
+parámetros YA resueltos del documento. Delivery pasa a **condición de encendido** (plan 6).
+
 ## Qué NO entra en este plan (declarado)
 
 - **Plan 3b (siguiente): escritores de renglones con candado de orden** (condición 2 de Codex r6). El mapa C mide que `addItemsToOrder` (TPV) corre sin transacción y que `recalculateOrderTotals` escribe sin CAS. Es obligatorio **antes de encender la bandera** (plan 6), no antes de este plan: aquí la reserva ya toma `FOR UPDATE` y la barrera «documento = cobrado» bloquea una captura incoherente.
-- **Delivery:** sin cambios. Sus devoluciones usan la tasa de cada producto, y tasa 0 y exento dan IVA 0 los dos: el monto sale bien. La distinción tasa 0 / exento en reportes y pólizas es del **plan 4**.
+- **Delivery:** sin cambios de código en este plan, pero es **CONDICIÓN DE ENCENDIDO (plan 6)**: `deliveryFiscalDelta.ts:113`
+  recalcula la venta con las tasas ACTUALES y le resta devoluciones con IVA congelado; si el producto cambia de tasa entre dos
+  retiros de Uber, sale IVA negativo y `deliveryReconciliation.service.ts:360` corta en `FISCAL_PENDING` antes de registrar la
+  segunda devolución (escenario de Codex P1-6). Hasta que el plan 4 lo arregle, el encendido del IVA por producto se NIEGA, con
+  motivo visible, a un negocio con canales de delivery activos.
 - **Reportes (estado de resultados, IVA de flujo) y pólizas:** plan 4.
 - **Global con IVA mixto, egreso mixto, egreso calculado desde el XML:** futuro, cuando alguien los use.
 
@@ -42,7 +54,11 @@ hasta cumplirlos. Dos consecuencias que el plan 6 debe construir (este plan sól
 - **Rama mixta** (algún renglón ≠ IVA_16) exige las TRES: `Order.contratoDePrecio = IVA_INCLUIDO` + `Order.paymentStatus = PAID` + la barrera «documento = cobrado» actual. Si falta cualquiera ⇒ bloqueada con motivo en español. **Nunca se bloquea una venta**, sólo su factura.
 - La rama todo-16 sigue decidiendo «precio con IVA incluido» con la heurística de hoy (`taxAmount == 0`); la rama mixta usa el contrato (siempre IVA incluido).
 - **La entrada se captura en la transacción de reserva y el payload SÓLO la lee** (nunca la orden viva ni el producto después del commit). Se recaptura únicamente cuando el PAC confirmó que ese intento NO produjo documento.
-- **Sellar** = escribir, en la misma transacción que la reserva, `OrderItem.ivaTratamiento` (si era NULL) + una fila de causa en `OrderItemSelloIva` (tipo + dependencia + intento). **Liberar** = borrar las causas de UNA dependencia y poner `ivaTratamiento = NULL` sólo en los renglones que se quedan sin ninguna causa. Una sola función para liberar.
+- **Sellar** = escribir, en la misma transacción que la reserva, `OrderItem.ivaTratamiento` (si era NULL) + una fila en `OrderItemSelloIva` (renglón + CFDI que lo usa + versión del intento). **Liberar** = borrar las filas de UN CFDI y poner `ivaTratamiento = NULL` sólo en los renglones que se quedan sin ninguna. Una sola función para liberar.
+- 🔴 **Recapturar la entrada (y liberar sus sellos) sólo si consta que el intento anterior NO puede producir un documento:** (a) el PAC respondió con un rechazo DEFINITIVO (respuesta de error del PAC, no un timeout ni un fallo de red), o (b) una búsqueda por `external_id` negativa **y** han pasado `VENTANA_SEGURA_MS = 10 * 60_000` desde el último envío (`Cfdi.enviadoAt`). Cualquier otro caso ⇒ 409 «CFDI en proceso», sin tocar entrada ni sellos.
+- 🔴 **Versión del intento = `Cfdi.attempts`** en TODAS las escrituras del intento (reclamo, fallo, liberación, finalización, barrido): `updateMany … WHERE id = … AND attempts = <versión del envío>`. Una respuesta de una versión vieja nunca pisa la fila; si trae un documento real, se registra como duplicado fiscal (`logger.error('🚨 …')` + `ActivityLog` `CFDI_TIMBRE_DUPLICADO`) para cancelarlo a mano. El finalizador nunca resucita una cancelación confirmada.
+- 🔴 **Intentos nuevos (`protocoloIva = 1`) se recuperan SÓLO por identidad** (`external_id` = llave del intento). Coincidir en RFC + total + fecha no prueba identidad: ese respaldo queda sólo para filas viejas (como hoy).
+- **Nunca se inventa una entrada** para un documento anterior al plan 3 a partir de la orden actual: se finaliza con `entrada = NULL`, desglose leído de su XML y sin sellos (sellar lo histórico desde el XML es el script del plan 6).
 - Toda reserva (individual, sustitución, global, egreso) toma `pg_advisory_xact_lock_shared(hashtextextended('iva-emision:' || <organizationId>, 0))` y escribe `Cfdi.protocoloIva = 1`. `protocoloIva` **no tiene default** en la base (filas viejas quedan NULL a propósito: el encendido del plan 6 las cuenta).
 - Motivos al usuario en español, en el mismo estilo que los actuales. Centavos sólo en el borde CFDI (como hoy).
 - Migraciones a mano, aditivas, con `SET LOCAL lock_timeout = '5s'`; `OrderItem` es tabla caliente: sólo `ADD COLUMN` nullable, **sin backfill ni NOT NULL**. `docs/SCHEMA_MAP.md` regenerado en el mismo commit; modelos nuevos agregados a `scripts/generate-schema-map.ts` → `MODEL_TO_DOMAIN`.
@@ -51,11 +67,11 @@ hasta cumplirlos. Dos consecuencias que el plan 6 debe construir (este plan sól
 
 ## Review Focus
 
-1. **Un timbrado que termina DESPUÉS de que el barrido reseteó el intento** (el PAC contestó tarde) ⇒ el documento timbrado queda con sus renglones sellados otra vez desde su entrada, nunca «timbrado sin sello». Prueba en la Tarea 7.
+1. **Un timbrado que termina tarde** (el PAC contestó después de un timeout) ⇒ mientras no pase la ventana segura nadie recaptura ni libera, así que nunca hay dos documentos por la misma venta; si una respuesta de una versión vieja llega de todos modos, no pisa la fila y queda la alerta de duplicado. Pruebas con pausas controladas en las Tareas 6 y 7.
 2. **Alguien corrige el IVA del producto entre la reserva y el timbrado** ⇒ la factura sale con el tratamiento de la entrada, no con el nuevo. Prueba en la Tarea 6.
 3. **Mavericks: un intento fallido y se corrige el producto** ⇒ al reintentar, el PAC confirma que no hay documento, se recaptura la entrada y la factura sale con el IVA corregido. Prueba en la Tarea 6.
 4. **Una venta que ya está en una global vigente y alguien pide su factura propia** (y al revés) ⇒ se rechaza con motivo; con la global cancelada y confirmada, sí se puede. Prueba en la Tarea 10.
-5. **Todo al 16 %** (con extras, venta por peso, descuento de renglón, sin renglones) ⇒ el payload es byte a byte el de hoy. Prueba en la Tarea 3.
+5. **Todo al 16 %** (con extras, venta por peso, descuento de renglón, sin renglones, e IVA separado con `taxAmount > 0`) ⇒ el payload, los montos que se guardan y los motivos son los de hoy. Única excepción deliberada: el motivo nuevo «ya está incluida en la factura global». Prueba en la Tarea 3.
 
 ---
 
@@ -197,7 +213,7 @@ export function hayBloqueados(ts: IvaTratamiento[]): boolean {
 ### Task 2: Esquema — sellos, entrada, protocolo y manifiesto de la global
 
 **Files:**
-- Modify: `prisma/schema.prisma` — `model OrderItem` (campo nuevo), `model Cfdi` (3 campos), modelos nuevos `OrderItemSelloIva` y `CfdiGlobalOrden`, enum `SelloIvaCausa`.
+- Modify: `prisma/schema.prisma` — `model OrderItem` (campo nuevo), `model Cfdi` (5 campos), modelos nuevos `OrderItemSelloIva` y `CfdiGlobalOrden`.
 - Create: `prisma/migrations/20260926000400_iva_sellos_entrada_manifiesto/migration.sql`
 - Modify: `scripts/generate-schema-map.ts` (`MODEL_TO_DOMAIN`: `OrderItemSelloIva` y `CfdiGlobalOrden` en el dominio donde vive `Cfdi`), `docs/SCHEMA_MAP.md` (regenerado)
 - Test: `tests/integration/fiscal/ivaSellos.schema.test.ts`
@@ -205,9 +221,8 @@ export function hayBloqueados(ts: IvaTratamiento[]): boolean {
 **Interfaces:**
 - Produces:
   - `OrderItem.ivaTratamiento IvaTratamiento?` — NULL = sigue al producto; no NULL = sellado.
-  - `enum SelloIvaCausa { CFDI_INDIVIDUAL CFDI_GLOBAL }`
-  - `model OrderItemSelloIva { id String @id @default(cuid()); orderItemId String; orderItem OrderItem @relation(fields:[orderItemId], references:[id], onDelete: Restrict); causa SelloIvaCausa; cfdiId String; cfdi Cfdi @relation(fields:[cfdiId], references:[id], onDelete: Restrict); intento String; createdAt DateTime @default(now()); @@unique([orderItemId, causa, cfdiId]); @@index([cfdiId]) }`
-  - `Cfdi.entrada Json?`, `Cfdi.entradaHuella String?`, `Cfdi.protocoloIva Int?` (sin default).
+  - `model OrderItemSelloIva { id String @id @default(cuid()); orderItemId String; orderItem OrderItem @relation(fields:[orderItemId], references:[id], onDelete: Restrict); cfdiId String; cfdi Cfdi @relation(fields:[cfdiId], references:[id], onDelete: Restrict); intento Int; createdAt DateTime @default(now()); @@unique([orderItemId, cfdiId]); @@index([cfdiId]) }` — `intento` = `Cfdi.attempts` del envío que selló. Si es individual o global se deduce del CFDI (sin enum).
+  - `Cfdi.entrada Json?`, `Cfdi.entradaHuella String?`, `Cfdi.protocoloIva Int?` (sin default), `Cfdi.enviadoAt DateTime?` (cuándo salió el último envío al PAC; lo usa la ventana segura), `Cfdi.falloDefinitivo Boolean @default(false)` (el PAC RESPONDIÓ con un rechazo: ese intento no dejó documento).
   - `model CfdiGlobalOrden { id String @id @default(cuid()); cfdiId String; cfdi Cfdi @relation(fields:[cfdiId], references:[id], onDelete: Restrict); orderId String; order Order @relation(fields:[orderId], references:[id], onDelete: Restrict); huella String; createdAt DateTime @default(now()); @@unique([cfdiId, orderId]); @@index([orderId]) }`
   - Relaciones inversas: `OrderItem.sellosIva OrderItemSelloIva[]`, `Cfdi.sellosIva OrderItemSelloIva[]`, `Cfdi.manifiestoGlobal CfdiGlobalOrden[]`, `Order.enGlobales CfdiGlobalOrden[]`.
 
@@ -250,13 +265,15 @@ describe('esquema de sellos, entrada y manifiesto (plan 3)', () => {
       `SELECT indexdef FROM pg_indexes WHERE tablename IN ('OrderItemSelloIva','CfdiGlobalOrden')`,
     )
     const defs = idx.map(i => i.indexdef).join('\n')
-    expect(defs).toMatch(/UNIQUE.*"orderItemId", "causa", "cfdiId"/)
+    expect(defs).toMatch(/UNIQUE.*"orderItemId", "cfdiId"/)
     expect(defs).toMatch(/UNIQUE.*"cfdiId", "orderId"/)
   })
 
-  it('el enum SelloIvaCausa trae exactamente CFDI_INDIVIDUAL y CFDI_GLOBAL', async () => {
-    const v = await prisma.$queryRawUnsafe<{ v: string }[]>(`SELECT unnest(enum_range(NULL::"SelloIvaCausa"))::text AS v`)
-    expect(v.map(x => x.v).sort()).toEqual(['CFDI_GLOBAL', 'CFDI_INDIVIDUAL'])
+  it('Cfdi.enviadoAt (nullable) y Cfdi.falloDefinitivo (NOT NULL, default false) existen', async () => {
+    expect((await col('Cfdi', 'enviadoAt'))[0].is_nullable).toBe('YES')
+    const f = await col('Cfdi', 'falloDefinitivo')
+    expect(f[0].is_nullable).toBe('NO')
+    expect(f[0].column_default).toContain('false')
   })
 })
 ```
@@ -272,29 +289,26 @@ Run: `TEST_DATABASE_URL=… DATABASE_URL=… npx jest --selectProjects integrati
 -- de la global. Todo aditivo. "OrderItem" es tabla caliente: sólo una columna nullable, sin backfill ni NOT NULL.
 SET LOCAL lock_timeout = '5s';
 
-DO $$ BEGIN
-  CREATE TYPE "SelloIvaCausa" AS ENUM ('CFDI_INDIVIDUAL', 'CFDI_GLOBAL');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
 ALTER TABLE "OrderItem" ADD COLUMN IF NOT EXISTS "ivaTratamiento" "IvaTratamiento";
 
 ALTER TABLE "Cfdi" ADD COLUMN IF NOT EXISTS "entrada" JSONB;
 ALTER TABLE "Cfdi" ADD COLUMN IF NOT EXISTS "entradaHuella" TEXT;
 -- Sin default A PROPÓSITO: una reserva hecha por código anterior al plan 3 queda NULL y el encendido lo detecta.
 ALTER TABLE "Cfdi" ADD COLUMN IF NOT EXISTS "protocoloIva" INTEGER;
+ALTER TABLE "Cfdi" ADD COLUMN IF NOT EXISTS "enviadoAt" TIMESTAMP(3);
+ALTER TABLE "Cfdi" ADD COLUMN IF NOT EXISTS "falloDefinitivo" BOOLEAN NOT NULL DEFAULT false;
 
 CREATE TABLE IF NOT EXISTS "OrderItemSelloIva" (
   "id" TEXT NOT NULL,
   "orderItemId" TEXT NOT NULL,
-  "causa" "SelloIvaCausa" NOT NULL,
   "cfdiId" TEXT NOT NULL,
-  "intento" TEXT NOT NULL,
+  "intento" INTEGER NOT NULL,
   "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT "OrderItemSelloIva_pkey" PRIMARY KEY ("id"),
   CONSTRAINT "OrderItemSelloIva_orderItemId_fkey" FOREIGN KEY ("orderItemId") REFERENCES "OrderItem"("id") ON DELETE RESTRICT ON UPDATE CASCADE,
   CONSTRAINT "OrderItemSelloIva_cfdiId_fkey" FOREIGN KEY ("cfdiId") REFERENCES "Cfdi"("id") ON DELETE RESTRICT ON UPDATE CASCADE
 );
-CREATE UNIQUE INDEX IF NOT EXISTS "OrderItemSelloIva_orderItemId_causa_cfdiId_key" ON "OrderItemSelloIva"("orderItemId", "causa", "cfdiId");
+CREATE UNIQUE INDEX IF NOT EXISTS "OrderItemSelloIva_orderItemId_cfdiId_key" ON "OrderItemSelloIva"("orderItemId", "cfdiId");
 CREATE INDEX IF NOT EXISTS "OrderItemSelloIva_cfdiId_idx" ON "OrderItemSelloIva"("cfdiId");
 
 CREATE TABLE IF NOT EXISTS "CfdiGlobalOrden" (
@@ -340,7 +354,7 @@ Aplicar sólo a la base de pruebas (imprime la URL antes), `npx prisma generate`
 5. `repartirDescuentoDeOrden`: agrupa por `tratamiento` (si falta, por `taxRate` como hoy). IVA_0 y EXENTO son grupos DISTINTOS aunque los dos tengan tasa 0.
 6. Venta sin renglones: el concepto «Venta» lleva `tratamiento: 'IVA_16'` (igual que hoy).
 
-- [ ] **Step 1: Golden de la rama todo-16 (RED sólo por la prueba nueva, no por las golden)** — en `cfdiConceptosPorTratamiento.test.ts`, construye 4 órdenes fijas (con extras con precio; venta por peso KGM exacta; descuento de renglón; sin renglones) y, ANTES de tocar el código, captura con el código actual el `CreateInvoiceParams` que sale de `buildCreateInvoiceParams(assembleSaleInput(bundle.order, opts))` sobre el bundle que produce `loadOrderForCfdiFromDb` con Prisma mockeado (reusa el arnés de `tests/unit/services/fiscal/loadOrderForCfdi.test.ts`). Guarda esos 4 objetos como literales en la prueba (`expect(...).toEqual(<literal>)`). Esta parte debe PASAR con el código viejo y seguir pasando al final: es la red de la rama todo-16.
+- [ ] **Step 1: Golden de la rama todo-16 (RED sólo por la prueba nueva, no por las golden)** — en `cfdiConceptosPorTratamiento.test.ts`, construye 5 órdenes fijas (con extras con precio; venta por peso KGM exacta; descuento de renglón; sin renglones; **IVA separado con `taxAmount > 0`**) y, ANTES de tocar el código, captura con el código actual, por orden: (a) el `CreateInvoiceParams` que sale de `buildCreateInvoiceParams(assembleSaleInput(bundle.order, opts))` sobre el bundle que produce `loadOrderForCfdiFromDb` con Prisma mockeado (reusa el arnés de `tests/unit/services/fiscal/loadOrderForCfdi.test.ts`); (b) los montos que se GUARDAN en la fila (`subtotal`, `taxAmount`, `total` de `baseCfdiData`); (c) la lista de motivos de `validateBeforeStamp` + barrera de dinero. Agrega además dos órdenes bloqueadas de hoy (renglón con tasa 0 y objeto 02 SIN tratamiento; descuento general sobre dos tasas) y captura sus motivos exactos. Guarda todo como literales en la prueba (`expect(...).toEqual(<literal>)`). Esta parte debe PASAR con el código viejo y seguir pasando al final: es la red de la rama todo-16.
 - [ ] **Step 2: Pruebas de la rama mixta (RED)** en el mismo archivo:
   - renglón con producto `ivaTratamiento: 'IVA_0'` + contrato IVA_INCLUIDO + PAID ⇒ sin motivos; su `CfdiItemInput` lleva `objetoImp: '02'`, `taxes: [{ type:'IVA', factor:'Tasa', rate:0, withholding:false }]`, `taxIncluded: true`;
   - EXENTO ⇒ `taxes: [{ type:'IVA', factor:'Exento', rate:0, withholding:false }]`;
@@ -363,20 +377,21 @@ Aplicar sólo a la base de pruebas (imprime la URL antes), `npx prisma generate`
 **Interfaces:**
 - Consumes: `LoadedOrderBundle` (con `order.clasificacion` de la Tarea 3), `IssueReceptor`, `assembleSaleInput`, `buildCreateInvoiceParams`.
 - Produces:
-  - `interface EntradaDocumentalV1 { version: 1; orderId: string; fiscalEmisorId: string; contratoDePrecio: string | null; paymentStatus: string | null; clasificacion: 'TODO_16' | 'MIXTA'; pricesIncludeIva: boolean; paidCents: number; subtotalCents: number; taxCents: number; totalCents: number; receptor: IssueReceptor; paymentMethod: string; tenderSatFormaPago: string | null; metodoPago: 'PUE' | 'PPD'; serie: string | null; venueType: string; tipCents: number; renglones: Array<{ orderItemId: string | null; tratamiento: IvaTratamiento }>; conceptos: AvoqadoSaleItemInput[] }`
-  - `capturarEntrada(bundle: LoadedOrderBundle, receptor: IssueReceptor, orderId: string): EntradaDocumentalV1`
+  - `interface EntradaDocumentalV1 { version: 1; orderId: string; fiscalEmisorId: string; replacesCfdiId: string | null; contratoDePrecio: string | null; paymentStatus: string | null; clasificacion: 'TODO_16' | 'MIXTA'; paidCents: number; montos: { subtotalCents: number; taxCents: number; totalCents: number }; renglones: Array<{ orderItemId: string; tratamiento: IvaTratamiento }>; params: Omit<CreateInvoiceParams, 'externalId'> }` — **los parámetros YA resueltos** que se mandarán al PAC (claves SAT, receptor, forma y método de pago, conceptos con sus impuestos); nada se vuelve a resolver después (simplificación pedida por Codex).
+  - `capturarEntrada(bundle: LoadedOrderBundle, receptor: IssueReceptor, orderId: string, opts?: { replacesCfdiId?: string }): EntradaDocumentalV1` — arma `params` con `buildCreateInvoiceParams(assembleSaleInput(bundle.order, …))` una sola vez, sin `externalId`.
   - `huellaDeEntrada(e: EntradaDocumentalV1): string` — sha256 hex del JSON canónico (llaves ordenadas recursivamente).
-  - `paramsDesdeEntrada(e: EntradaDocumentalV1, idempotencyKey: string): CreateInvoiceParams` — reconstruye `AvoqadoSaleInput` desde la entrada y llama a `buildCreateInvoiceParams`; pone `externalId = idempotencyKey`.
+  - `paramsDesdeEntrada(e: EntradaDocumentalV1, idempotencyKey: string): CreateInvoiceParams` — `{ ...structuredClone(e.params), externalId: idempotencyKey }`. Nada más.
   - `leerEntrada(json: unknown): EntradaDocumentalV1 | null` — valida `version === 1` y forma mínima; `null` si no es válida (filas viejas).
 
 **Por qué `renglones` además de `conceptos`:** los conceptos de extras no tienen `orderItemId`; `renglones` es lo que se SELLA (un renglón por `OrderItem` real, con su tratamiento resuelto). `LoadedOrderBundle` debe exponer, por renglón original, `orderItemId` y `tratamiento` (agrégalo en `loadOrderForCfdiFromDb` como `order.renglonesOrigen: Array<{ orderItemId: string; tratamiento: IvaTratamiento }>`; la venta sin renglones da `[]`).
 
 - [ ] **Step 1: Pruebas (RED):**
-  - `paramsDesdeEntrada(capturarEntrada(b, r, id), key)` es `toEqual` al `buildCreateInvoiceParams(assembleSaleInput(b.order, …))` de hoy + `externalId: key`, para las 4 órdenes golden de la Tarea 3 (misma foto ⇒ mismo payload);
+  - `paramsDesdeEntrada(capturarEntrada(b, r, id), key)` es `toEqual` al `buildCreateInvoiceParams(assembleSaleInput(b.order, …))` de hoy + `externalId: key`, para las 5 órdenes golden de la Tarea 3 (misma foto ⇒ mismo payload); y `montos` coincide con los montos guardados de esas golden;
+  - con `replacesCfdiId`, la entrada lo conserva y la huella cambia;
   - la huella es estable ante reordenar llaves y cambia si cambia un centavo, un tratamiento o el receptor;
   - `leerEntrada` rechaza `null`, `{}` y `{ version: 2 }`; acepta una entrada capturada;
   - mutar el bundle DESPUÉS de capturar no cambia `paramsDesdeEntrada` (la entrada es una copia profunda: usa `structuredClone`).
-- [ ] **Step 2: Implementar** (JSON canónico: función recursiva que ordena llaves; `Prisma.Decimal` ya convertido a centavos por `assembleSaleInput`, así que la entrada sólo tiene números, strings y null).
+- [ ] **Step 2: Implementar** (JSON canónico: función recursiva que ordena llaves; la entrada sólo debe tener números, strings, booleanos y null: si `CreateInvoiceParams` trae algún `Decimal` o `Date`, conviértelo a string al capturar y pruébalo).
 - [ ] **Step 3: Verify** + commit con pathspec.
 
 ---
@@ -391,18 +406,18 @@ Aplicar sólo a la base de pruebas (imprime la URL antes), `npx prisma generate`
 - Consumes: modelos de la Tarea 2.
 - Produces:
   - `type Tx = Prisma.TransactionClient`
-  - `sellarRenglones(tx: Tx, p: { cfdiId: string; intento: string; causa: 'CFDI_INDIVIDUAL' | 'CFDI_GLOBAL'; renglones: Array<{ orderItemId: string; tratamiento: IvaTratamiento }> }): Promise<void>` — por renglón: `UPDATE "OrderItem" SET "ivaTratamiento" = $t WHERE id = $id AND "ivaTratamiento" IS NULL` (un renglón ya sellado conserva su valor; si su valor sellado es DISTINTO del que la entrada resolvió, lanza `Error('SELLO_DIVERGENTE')` — no puede pasar si la entrada se capturó bajo el candado, y si pasa es un defecto que no se debe tapar) y `INSERT … ON CONFLICT ("orderItemId","causa","cfdiId") DO NOTHING` de la causa.
-  - `liberarSellosDe(tx: Tx, cfdiId: string): Promise<{ liberados: number }>` — borra las causas con ese `cfdiId` y, en la MISMA sentencia o transacción, pone `ivaTratamiento = NULL` en los renglones afectados que ya no tienen NINGUNA causa.
-  - `renglonesSellados(tx: Tx, orderId: string): Promise<Array<{ orderItemId: string; tratamiento: IvaTratamiento | null; causas: number }>>` (para pruebas y el encendido del plan 6).
+  - `sellarRenglones(tx: Tx, p: { cfdiId: string; intento: number; renglones: Array<{ orderItemId: string; tratamiento: IvaTratamiento }> }): Promise<void>` — por renglón: `UPDATE "OrderItem" SET "ivaTratamiento" = $t WHERE id = $id AND "ivaTratamiento" IS NULL` (un renglón ya sellado conserva su valor; si su valor sellado es DISTINTO del que la entrada resolvió, lanza `Error('SELLO_DIVERGENTE')` — no puede pasar si la entrada se capturó bajo el candado, y si pasa es un defecto que no se debe tapar) y `INSERT … ON CONFLICT ("orderItemId","cfdiId") DO NOTHING` de la fila renglón ↔ CFDI.
+  - `liberarSellosDe(tx: Tx, cfdiId: string): Promise<{ liberados: number }>` — borra las filas renglón ↔ CFDI de ese `cfdiId` y, en la MISMA transacción, pone `ivaTratamiento = NULL` en los renglones afectados que ya no tienen NINGUNA fila.
+  - `renglonesSellados(tx: Tx, orderId: string): Promise<Array<{ orderItemId: string; tratamiento: IvaTratamiento | null; cfdis: number }>>` (para pruebas y el encendido del plan 6).
 
 - [ ] **Step 1: Pruebas de integración (RED)** — siembra organización, venue, producto, orden con 2 renglones y 2 filas `Cfdi` de prueba (A y B):
-  1. sellar con A ⇒ los 2 renglones quedan con tratamiento y 1 causa cada uno;
-  2. sellar otra vez con A ⇒ idempotente (sigue 1 causa);
-  3. sellar con B (sustituta) ⇒ 2 causas por renglón;
-  4. liberar A ⇒ los renglones SIGUEN sellados (queda la causa de B);
+  1. sellar con A ⇒ los 2 renglones quedan con tratamiento y 1 CFDI cada uno;
+  2. sellar otra vez con A ⇒ idempotente (sigue 1);
+  3. sellar con B (sustituta) ⇒ 2 CFDI por renglón;
+  4. liberar A ⇒ los renglones SIGUEN sellados (queda B);
   5. liberar B ⇒ `ivaTratamiento` vuelve a NULL;
   6. sellar con una entrada cuyo tratamiento difiere del ya sellado ⇒ `SELLO_DIVERGENTE` y nada cambia (la transacción revierte);
-  7. liberar un `cfdiId` sin causas ⇒ `{ liberados: 0 }`, sin error.
+  7. liberar un `cfdiId` sin filas ⇒ `{ liberados: 0 }`, sin error.
 - [ ] **Step 2: Implementar** con SQL parametrizado (`tx.$executeRaw` con plantilla de Prisma).
 - [ ] **Step 3: Verify** + commit con pathspec.
 
@@ -427,25 +442,36 @@ Aplicar sólo a la base de pruebas (imprime la URL antes), `npx prisma generate`
 1. **Previo (fuera de transacción, igual que hoy):** facturas previas de la orden, vigente / en trámite, `llaveDeEmision`, otro carril en curso.
 2. **Transacción A** (`prisma.$transaction(fn, { timeout: 15_000, maxWait: 5_000 })`):
    a. `bloquearOrdenParaFacturar` (orden inexistente ⇒ 404 como hoy) y `tomarAdmisionCompartida(organizationId)`.
-   b. **Exclusión con la global** (Tarea 10 agrega la consulta; aquí deja el punto de llamada `await excluirSiEstaEnGlobal(tx, orderId)` como función importada de `src/services/fiscal/exclusionGlobal.ts` que en esta tarea devuelve `null` siempre; la Tarea 10 la implementa).
+   b. **Exclusión con la global:** `const motivoGlobal = await excluirSiEstaEnGlobal(tx, orderId)` (función de `src/services/fiscal/exclusionGlobal.ts`; en esta tarea devuelve `null`, la Tarea 10 la implementa). **Se consume:** con motivo ⇒ la transacción termina sin crear fila ni sellos y se responde 409 con ese motivo (es un estado, no un defecto de datos: al cancelarse la global, el reintento entra limpio).
    c. Leer la fila existente por `idempotencyKey` DENTRO de la transacción: `STAMPED` ⇒ salir con éxito idempotente (con el guard de tenant); `STAMPING` fresca ⇒ 409; `STAMPING` vieja o `STAMP_FAILED`/`VALIDATION_FAILED` ⇒ reclamo CAS (`claimWhere`) y **sin tocar su entrada** ⇒ salir de la transacción marcando «reclamado» (el paso 3 decide si recapturar).
-   d. Sin fila: `loadOrderForCfdiFromDb(orderId, opts, tx)`, gates de comercio, `capturarEntrada`, `validateBeforeStamp` + motivos + barrera de dinero **sobre los conceptos de la entrada** (misma lógica de hoy).
+   d. Sin fila: `loadOrderForCfdiFromDb(orderId, opts, tx)`, gates de comercio, `capturarEntrada`, `validateBeforeStamp` + motivos + barrera de dinero sobre el MISMO bundle que produjo la entrada, dentro de la misma transacción (misma lógica de hoy).
       - Con motivos ⇒ crear la fila `VALIDATION_FAILED` con `entrada`, `entradaHuella`, `protocoloIva: 1`, **sin sellos**, y devolver `VALIDATION_FAILED` como hoy.
-      - Sin motivos ⇒ crear la fila `STAMPING` con `entrada`, `entradaHuella`, `protocoloIva: 1` y `sellarRenglones(tx, { cfdiId, intento: idempotencyKey, causa: 'CFDI_INDIVIDUAL', renglones: entrada.renglones con orderItemId })`.
-3. **Si se reclamó un intento existente:** `reconciliarIntentoPrevio` (PAC) como hoy. Documento encontrado ⇒ finalizar (Tarea 7) con la entrada de la fila (si la fila vieja no tiene entrada válida, capturar una en una transacción corta bajo el mismo candado; la bandera apagada garantiza todo-16). Documento NO encontrado ⇒ **Transacción B**: mismo candado y bloqueo, `liberarSellosDe(tx, cfdiId)`, recapturar entrada, validar; con motivos ⇒ fila a `VALIDATION_FAILED` con la entrada nueva y sin sellos; sin motivos ⇒ escribir entrada nueva + `protocoloIva: 1` con CAS sobre `attempts` (la versión que dejó el reclamo) y sellar.
-4. **Timbrar desde la entrada:** `provider.createInvoice(paramsDesdeEntrada(entrada, idempotencyKey))`. Error ⇒ `STAMP_FAILED` (los sellos se QUEDAN: el PAC pudo haber timbrado; sólo se liberan cuando el PAC confirma que no — paso 3 o el barrido de la Tarea 7).
-5. **Éxito:** finalizador de la Tarea 7 (en esta tarea, deja el `persistCfdi` STAMPED como hoy; la Tarea 7 lo envuelve).
+      - Sin motivos ⇒ crear la fila `STAMPING` con `entrada`, `entradaHuella`, `protocoloIva: 1` y `sellarRenglones(tx, { cfdiId, intento: <attempts de la fila>, renglones: entrada.renglones con orderItemId })`.
+3. **Si se reclamó un intento existente:** `reconciliarIntentoPrevio` (PAC) como hoy, pero para filas `protocoloIva = 1` **sólo por identidad** (`external_id`); el respaldo por RFC + total queda para filas viejas.
+   - Documento encontrado ⇒ finalizar (Tarea 7) con la entrada de la fila. Si la fila es vieja y no tiene entrada válida ⇒ finalizar con `entrada = NULL` y sin sellos (**nunca** capturar la orden actual como si fuera la entrada de ese documento).
+   - Documento NO encontrado ⇒ **sólo se recaptura si consta que el intento anterior no puede producir documento** (Global Constraints): `falloDefinitivo = true`, o búsqueda negativa **y** `ahora − enviadoAt ≥ VENTANA_SEGURA_MS`. Si no se cumple ⇒ devolver el reclamo (`status` a `STAMP_FAILED` con CAS) y responder 409 «La factura de esta venta se está procesando; intenta de nuevo en unos minutos.», sin tocar entrada ni sellos.
+   - Si se cumple ⇒ **Transacción B**: mismo candado y bloqueo, `liberarSellosDe(tx, cfdiId)`, recapturar entrada, validar; con motivos ⇒ fila a `VALIDATION_FAILED` con la entrada nueva y sin sellos; sin motivos ⇒ escribir entrada nueva + `protocoloIva: 1` + `falloDefinitivo = false` con CAS sobre `attempts` (la versión que dejó el reclamo) y sellar.
+4. **Timbrar desde la entrada:** antes de enviar, `enviadoAt = now()` con CAS sobre `attempts`. Luego `provider.createInvoice(paramsDesdeEntrada(entrada, idempotencyKey))`. Errores, siempre con CAS sobre `attempts`:
+   - el PAC RESPONDIÓ con un rechazo (error del proveedor con cuerpo de respuesta, no timeout ni red) ⇒ `STAMP_FAILED` + `falloDefinitivo = true`;
+   - timeout, red o respuesta ilegible ⇒ `STAMP_FAILED` + `falloDefinitivo = false`.
+   En los dos casos los sellos se QUEDAN; sólo se liberan en la Transacción B del paso 3.
+5. **Éxito:** finalizador de la Tarea 7 con `version = attempts` (en esta tarea, deja el `persistCfdi` STAMPED como hoy pero con CAS sobre `attempts`; la Tarea 7 lo envuelve). Si el CAS no escribe (la fila ya es de otra versión), no se pisa: `logger.error('🚨 …')` + `ActivityLog` `CFDI_TIMBRE_DUPLICADO` con los dos UUID.
 
-`baseCfdiData` deja de leer montos del bundle cuando hay entrada: los toma de la entrada (`subtotalCents`, `taxCents`, `totalCents`, `formaPago`, `metodoPago` del params construido desde ella).
+`baseCfdiData` deja de leer montos del bundle cuando hay entrada: los toma de la entrada (`entrada.montos` y la forma y el método de pago de `entrada.params`).
 
+- [ ] **Step 0: Sonda del contrato del PAC (sandbox, sin tocar producción)** — script temporal `scripts/temp-sonda-facturapi-idempotency.ts`: dos `invoices.create` idénticos con `idempotency_key` en el CUERPO. Anota en el reporte si Facturapi devuelve el mismo documento. Si sí, el adaptador lo manda con valor `${idempotencyKey}#${attempts}` (protege reintentos de red dentro de un mismo intento); **la regla de recaptura NO cambia** en ningún caso. Borra el script antes del commit.
 - [ ] **Step 1: Pruebas de integración (RED)** contra `av_db_25_iva_test`, con `deps.resolveProvider` inyectado (proveedor falso que registra el payload y responde un timbre fijo), sembrando un emisor + comercio con facturación encendida y una orden PAID:
-  1. emisión feliz ⇒ fila `STAMPED` con `entrada` válida, `entradaHuella`, `protocoloIva = 1`, renglones sellados con causa `CFDI_INDIVIDUAL` y el payload enviado igual a `paramsDesdeEntrada(entrada)`;
+  1. emisión feliz ⇒ fila `STAMPED` con `entrada` válida, `entradaHuella`, `protocoloIva = 1`, renglones sellados con ese CFDI y el payload enviado igual a `paramsDesdeEntrada(entrada)`;
   2. **(Review Focus 2)** el proveedor falso, al recibir la llamada, cambia en la base el `ivaTratamiento` del producto (con la bandera del negocio encendida en la prueba vía `encenderIvaPorProducto` de `tests/__helpers__/iva-por-producto.ts`) ⇒ el payload YA enviado conserva el tratamiento viejo y la fila sigue sellada con el viejo;
-  3. **(Review Focus 3 · Mavericks)** primer intento con el proveedor que lanza error ⇒ `STAMP_FAILED` con renglones sellados en IVA_16; se cambia el producto a IVA_0 (contrato IVA_INCLUIDO); segundo intento con `findByExternalId` que devuelve `null` ⇒ sellos liberados, entrada recapturada con IVA_0 y el payload lleva Tasa 0;
+  3. **(Review Focus 3 · Mavericks)** primer intento con el proveedor que responde un RECHAZO ⇒ `STAMP_FAILED` + `falloDefinitivo = true` con renglones sellados en IVA_16; se cambia el producto a IVA_0 (contrato IVA_INCLUIDO); segundo intento con `findByExternalId` que devuelve `null` ⇒ sellos liberados, entrada recapturada con IVA_0 y el payload lleva Tasa 0;
   4. segundo intento con `findByExternalId` que devuelve un documento ⇒ se completa SIN volver a timbrar y la entrada NO se recaptura;
   5. validación fallida (p. ej. contrato DESCONOCIDO en mixta) ⇒ `VALIDATION_FAILED`, con entrada, **sin** sellos;
   6. dos emisiones concurrentes de la misma orden (dos `issueCfdiForOrder` en `Promise.all`) ⇒ UN solo `createInvoice` y el otro recibe 409 o el éxito idempotente;
-  7. una orden de OTRO venue ⇒ 404 sin fuga (regresión del guard).
+  7. una orden de OTRO venue ⇒ 404 sin fuga (regresión del guard);
+  8. **(Review Focus 1)** primer intento con TIMEOUT ⇒ `falloDefinitivo = false`; reintento con búsqueda negativa ANTES de la ventana ⇒ 409 «se está procesando», entrada y sellos intactos, ningún `createInvoice` nuevo;
+  9. mismo caso con `enviadoAt` movido a hace 11 min ⇒ se recaptura y se timbra;
+  10. **(Review Focus 1, con pausa controlada)** tras la recaptura del caso 9, llega la respuesta tardía de la versión vieja con un documento ⇒ la fila conserva la versión nueva, no se pisa, y queda `CFDI_TIMBRE_DUPLICADO` en `ActivityLog`;
+  11. `excluirSiEstaEnGlobal` simulado para devolver un motivo ⇒ 409 con ese motivo, sin fila ni sellos.
 - [ ] **Step 2: Ajustar las pruebas unitarias existentes** de `cfdi.service.test.ts` que inyectan `deps` en memoria: si el nuevo flujo necesita un `runInTransaction` inyectable, agrégalo a `IssueCfdiDeps` (default: `prisma.$transaction`) para que esas pruebas sigan corriendo sin base. Ninguna aserción existente se afloja.
 - [ ] **Step 3: Implementar.**
 - [ ] **Step 4: Verify** — integración nueva en verde; `cfdi.service.test.ts`, `cfdiRefacturar.service.test.ts`, `loadOrderForCfdi.test.ts`, controladores de CFDI (dashboard y público) en verde por ruta; typecheck del CI por avq-verify.
@@ -464,13 +490,17 @@ Aplicar sólo a la base de pruebas (imprime la URL antes), `npx prisma generate`
 - Consumes: Tareas 4 y 5; el lector de XML existente `src/services/fiscal/cfdiReceived.parser.ts` (reúsalo si expone los `Traslados`; si no, agrega ahí una función pura `trasladosDesdeXml(xml: string)` sin romper sus usos actuales).
 - Produces:
   - `desgloseDesdeXml(xml: string): Array<{ impuesto: '002'; tipoFactor: 'Tasa' | 'Exento'; tasa: string | null; base: string; importe: string | null }>` — de los `cfdi:Traslado` del nodo `cfdi:Impuestos` del comprobante (no de cada concepto).
-  - `finalizarTimbre(p: { cfdiId: string; idempotencyKey: string; identidad: { facturapiId; uuid; serie; folio; stampedAt }; entrada: EntradaDocumentalV1 | null }): Promise<void>` — en UNA transacción: persiste `STAMPED` + identidad (como hoy) y, si hay entrada, `sellarRenglones` otra vez desde la entrada (idempotente). **Esto cierra el Review Focus 1.**
+  - `finalizarTimbre(p: { cfdiId: string; idempotencyKey: string; version: number; identidad: { facturapiId; uuid; serie; folio; stampedAt }; entrada: EntradaDocumentalV1 | null }): Promise<'FINALIZADO' | 'DUPLICADO' | 'YA_FINALIZADO'>` — en UNA transacción: `updateMany … WHERE id = cfdiId AND attempts = version AND status IN ('STAMPING','STAMP_FAILED')` a `STAMPED` + identidad; si escribió y hay entrada, `sellarRenglones` otra vez desde la entrada (idempotente). Si no escribió: misma identidad ya guardada ⇒ `YA_FINALIZADO`; otra identidad, otra versión o una fila ya cancelada ⇒ `DUPLICADO` (alerta `🚨` + `ActivityLog` `CFDI_TIMBRE_DUPLICADO`) y **nunca** se revive una cancelación confirmada.
+  - `cfdiReconcile.service.ts`: `completeCfdi` y `failCfdi` pasan a `updateMany` con `attempts` en el `where` (hoy escriben por id sin versión, `:328`); `RESET` de una `STAMPING` vieja ⇒ `STAMP_FAILED` con `falloDefinitivo = false` **sin liberar sellos y sin cambiar `attempts`**; la recuperación por RFC + total sólo para filas con `protocoloIva IS NULL`.
   - `completarArchivos(p: { cfdiId; idempotencyKey; providerInvoiceId; venueSlug; uuid; provider }): Promise<'OK' | 'FALLO'>` — descarga XML y PDF, sube, guarda URLs y `taxBreakdown = desgloseDesdeXml(xml)` con `updateMany … WHERE status = 'STAMPED'` (como `persistArtifacts`).
   - Pasada del job: filas `STAMPED` con `taxBreakdown IS NULL` o `xmlUrl IS NULL`, `stampedAt < ahora − 10 min`, tope 20 por corrida, orden `stampedAt ASC, id ASC` ⇒ `completarArchivos`.
 
 - [ ] **Step 1: Pruebas (RED):**
   - unit: `desgloseDesdeXml` sobre tres XML de ejemplo guardados como fixtures en `tests/fixtures/cfdi/` (16 %; 16 % + tasa 0; 16 % + exento) — el exento sale con `tipoFactor: 'Exento'`, `tasa: null`, `importe: null`;
-  - integración **(Review Focus 1)**: una fila `STAMPING` sellada; el barrido la resetea (`RESET` ⇒ `STAMP_FAILED` + sellos liberados); después llega el timbre tardío y se llama `finalizarTimbre` ⇒ fila `STAMPED` y renglones sellados otra vez desde la entrada;
+  - integración **(Review Focus 1)**: una fila `STAMPING` sellada; el barrido la resetea (`RESET` ⇒ `STAMP_FAILED`, sellos intactos, misma versión); llega el timbre tardío de esa versión ⇒ `finalizarTimbre` devuelve `FINALIZADO` y la fila queda `STAMPED` sellada;
+  - integración: `finalizarTimbre` con una versión vieja (la fila ya se recapturó) ⇒ `DUPLICADO`, la fila no cambia, `ActivityLog` `CFDI_TIMBRE_DUPLICADO`;
+  - integración: `finalizarTimbre` sobre una fila `CANCELLED` ⇒ `DUPLICADO`, sigue `CANCELLED`, sin sellos nuevos;
+  - integración: una fila `protocoloIva = 1` sin documento por `external_id` y otro documento en el PAC con el mismo RFC y total ⇒ el barrido NO la asocia (sigue sin identidad);
   - integración: `completarArchivos` con el proveedor falso escribe `xmlUrl`, `pdfUrl` y `taxBreakdown`; si la fila ya no está `STAMPED` (se canceló) no escribe nada;
   - unit del barrido: toma sólo `STAMPED` con desglose o XML faltante, respeta el tope y el orden, y un fallo de una fila no detiene las demás.
 - [ ] **Step 2: Implementar.** El job sigue la regla de `cron-jobs.md` (lectura de entrada envuelta en `retry(..., shouldRetryDbConnectionError)`) y usa `scheduleJob` (la pasada nueva va dentro del job existente, no uno nuevo).
@@ -486,9 +516,9 @@ Aplicar sólo a la base de pruebas (imprime la URL antes), `npx prisma generate`
 
 **Interfaces:**
 - Consumes: `liberarSellosDe` (Tarea 5).
-- Produces: en los tres caminos, cuando el estado escrito es `CANCELLED` (cancelStatus `CANCELLED` o `ACCEPTED`), la escritura del estado y `liberarSellosDe(tx, cfdiId)` van en la MISMA transacción, conservando el CAS actual (`updateMany … WHERE …`): si el CAS no escribe (`count === 0`), NO se libera nada. `REQUESTED` y `REJECTED` no liberan.
+- Produces: en los tres caminos, cuando el estado escrito es `CANCELLED` (cancelStatus `CANCELLED` o `ACCEPTED`), la escritura del estado y `liberarSellosDe(tx, cfdiId)` van en la MISMA transacción, con CAS (`updateMany … WHERE …`): si el CAS no escribe (`count === 0`), NO se libera nada. `REQUESTED` y `REJECTED` no liberan. 🔴 **La cancelación directa hoy escribe sin CAS** (`defaultCancelDeps.updateCfdi` = `prisma.cfdi.update` por id, `cfdi.service.ts:~1308`): aquí se **crea** el CAS (`WHERE id = … AND status = 'STAMPED' AND "cancelStatus" IS DISTINCT FROM 'CANCELLED'`), no sólo se conserva el de los otros dos caminos.
 
-- [ ] **Step 1: Pruebas (RED):** para cada camino (directo, consulta de pendiente, externo): cancelación confirmada ⇒ sellos de ESA factura liberados y los de una sustituta intactos; `REQUESTED` ⇒ siguen; `REJECTED` ⇒ siguen; dos confirmaciones concurrentes ⇒ una sola bitácora y una sola liberación (la segunda no escribe). Después de liberar, `issueCfdiForOrder` con llave `-n2` recaptura con el tratamiento ACTUAL del producto (el «refacturar tras cancelar» usa el IVA corregido).
+- [ ] **Step 1: Pruebas (RED):** para cada camino (directo, consulta de pendiente, externo): cancelación confirmada ⇒ sellos de ESA factura liberados y los de una sustituta intactos; `REQUESTED` ⇒ siguen; `REJECTED` ⇒ siguen; dos confirmaciones concurrentes ⇒ una sola bitácora y una sola liberación (la segunda no escribe) — incluido el camino directo, que hoy no tiene CAS; una respuesta vieja del finalizador después de la cancelación confirmada no la revive (Tarea 7). Después de liberar, `issueCfdiForOrder` con llave `-n2` recaptura con el tratamiento ACTUAL del producto (el «refacturar tras cancelar» usa el IVA corregido).
 - [ ] **Step 2: Implementar.**
 - [ ] **Step 3: Verify** + commit con pathspec.
 
@@ -502,9 +532,9 @@ Aplicar sólo a la base de pruebas (imprime la URL antes), `npx prisma generate`
 
 **Interfaces:**
 - Consumes: Tareas 3–6 (`tomarAdmisionCompartida`, `bloquearOrdenParaFacturar`, `capturarEntrada`, `paramsDesdeEntrada`, `sellarRenglones`), Tarea 7 (`finalizarTimbre`).
-- Produces: la sustituta nace en una transacción con el mismo candado y bloqueo que la individual, con su `entrada`, `protocoloIva: 1` y sus sellos (`causa: 'CFDI_INDIVIDUAL'`, `cfdiId` = la sustituta); timbra desde su entrada. La original conserva SU entrada y SUS sellos hasta que su cancelación quede confirmada (Tarea 8 los libera). Todas las reglas actuales de la sustitución se conservan (intento durable por `replacesCfdiId`, receptor de la original, emisor igual, reanudación sin re-timbrar, respuesta que nunca afirma la cancelación).
+- Produces: la sustituta nace en una transacción con el mismo candado y bloqueo que la individual, con su `entrada` (con `replacesCfdiId` de la original), `protocoloIva: 1` y sus sellos (`cfdiId` = la sustituta); timbra desde su entrada con las mismas reglas de versión, ventana segura y recuperación por identidad de la Tarea 6. La original conserva SU entrada y SUS sellos hasta que su cancelación quede confirmada (Tarea 8 los libera). Todas las reglas actuales de la sustitución se conservan (intento durable por `replacesCfdiId`, receptor de la original, emisor igual, reanudación sin re-timbrar, respuesta que nunca afirma la cancelación).
 
-- [ ] **Step 1: Pruebas (RED):** la sustituta queda sellada con su propia causa; con la original todavía vigente cada renglón tiene 2 causas; al confirmarse la cancelación de la original queda 1 causa; una sustitución reanudada no recaptura ni vuelve a timbrar; el payload de la sustituta sale de su entrada.
+- [ ] **Step 1: Pruebas (RED):** la sustituta queda sellada con su propia fila; con la original todavía vigente cada renglón tiene 2 CFDI; al confirmarse la cancelación de la original queda 1; una sustitución reanudada no recaptura ni vuelve a timbrar; el payload de la sustituta sale de su entrada.
 - [ ] **Step 2: Implementar.**
 - [ ] **Step 3: Verify** + commit con pathspec.
 
@@ -522,7 +552,8 @@ Aplicar sólo a la base de pruebas (imprime la URL antes), `npx prisma generate`
 - Produces:
   - `excluirSiEstaEnGlobal(tx, orderId): Promise<string | null>` — motivo en español si la orden está en el manifiesto de una global VIVA (status `STAMPING`, `STAMPED` sin cancelación confirmada, `STAMP_FAILED` sin consulta negativa, o con cancelación `REQUESTED`): «Esta venta ya está incluida en la factura global {serie-folio o periodo}; para facturarla aparte primero hay que cancelar esa global.» `null` si no.
   - Selección de la global: además de lo actual, excluye órdenes con una factura individual VIVA (no sólo `STAMPED`: también `STAMPING`, `STAMP_FAILED` sin consulta negativa y cancelación `REQUESTED`), órdenes en el manifiesto de OTRA global viva, y órdenes cuya clasificación sea `MIXTA` (cuenta aparte: `excluidasPorIvaMixto`).
-  - Reserva de la global: en UNA transacción con `tomarAdmisionCompartida`, crea la fila con `protocoloIva: 1`, escribe `CfdiGlobalOrden` (una por orden incluida, `huella` = sha256 de los renglones y tratamientos de esa orden) y sella sus renglones (`causa: 'CFDI_GLOBAL'`, todos IVA_16).
+  - Reserva de la global: en UNA transacción con `tomarAdmisionCompartida`, **bloquea las órdenes candidatas `FOR UPDATE` en orden estable (`id ASC`) y RELEE su elegibilidad** (individual viva, otra global viva, `MIXTA`) bajo ese bloqueo; con la selección DEFINITIVA crea la fila con `protocoloIva: 1`, escribe `CfdiGlobalOrden` (una por orden incluida, `huella` = sha256 de los renglones y tratamientos de esa orden), sella sus renglones con la global (todos IVA_16) y construye el documento desde esa misma selección. Hoy los candidatos se cargan antes de reservar (`cfdiGlobal.service.ts:130`): eso es lo que se cambia.
+  - Reintentos de la global: el camino que hoy vuelve a emitir al encontrar una reserva `STAMP_FAILED` o vencida (`cfdiGlobal.service.ts:207`) pasa a las MISMAS reglas de la individual: reclamo con versión `attempts`, recuperación sólo por identidad, ventana segura antes de re-emitir, identidad persistida antes de descargar archivos.
   - Cancelación confirmada de una global ⇒ `liberarSellosDe` (la Tarea 8 ya lo hace por `cfdiId`; verifica que el camino de la global pase por ahí). Las filas del manifiesto se CONSERVAN (historia); la «vida» se decide por el estado de la global.
   - `issueGlobalForEmisor` devuelve además `excluidasPorIvaMixto: number`, y la respuesta del disparo manual del dashboard lo incluye (campo nuevo, opcional).
 
@@ -532,7 +563,10 @@ Aplicar sólo a la base de pruebas (imprime la URL antes), `npx prisma generate`
   3. orden con factura individual `STAMPING` ⇒ no entra a la global;
   4. orden en el manifiesto de una global `STAMPING` ⇒ no entra a otra global;
   5. orden con un renglón IVA_0 ⇒ fuera de la global, contada en `excluidasPorIvaMixto`;
-  6. la global crea su manifiesto y sella; una global de sólo órdenes todo-16 produce el MISMO payload que hoy (golden con dos órdenes).
+  6. la global crea su manifiesto y sella; una global de sólo órdenes todo-16 produce el MISMO payload que hoy (golden con dos órdenes);
+  7. **carrera (pausa controlada):** la global selecciona una orden, la individual la reserva y confirma, y luego la global reserva ⇒ la global la excluye al releer bajo el bloqueo y no la timbra;
+  8. reintento de una global con la respuesta perdida (el PAC sí timbró) ⇒ se recupera por identidad, sin un segundo documento.
+- Nota: el motivo «ya está incluida en la factura global» es la única excepción deliberada a «idéntico a hoy» (Review Focus 5).
 - [ ] **Step 2: Implementar.**
 - [ ] **Step 3: Verify** + commit con pathspec.
 
@@ -548,10 +582,11 @@ Aplicar sólo a la base de pruebas (imprime la URL antes), `npx prisma generate`
 - Consumes: `leerEntrada` (Tarea 4), `tomarAdmisionCompartida` (Tarea 6).
 - Produces:
   - `CreditNoteBlockReason` gana `'ORIGINAL_IVA_MIXTO'`: la factura original tiene una entrada válida con algún renglón `tratamiento !== 'IVA_16'`. Mensaje: «La factura original tiene productos con IVA distinto de 16 %; la nota de crédito para esas ventas todavía no está disponible aquí. Emítela desde el portal del SAT o de tu PAC.» Una original SIN entrada (anterior al plan 3) se trata como todo-16 (la bandera apagada lo garantiza): comportamiento de hoy.
-  - La reserva de la nota de crédito toma `tomarAdmisionCompartida` y escribe `protocoloIva: 1`.
-  - El botón del dashboard y el MCP ya consultan `checkCreditNoteEligibility`: el motivo nuevo sale solo por ahí.
+  - **El reparto del IVA del egreso sale de la ORIGINAL, no del catálogo:** hoy `byRate` usa `it.product?.taxRate` en vivo (`cfdiCreditNote.service.ts:~563`); como en B+ sólo pasan originales todo-16, el egreso se reparte al 16 % sin consultar el producto. Escenario que cierra: original de $116 sellada al 16 %, el producto se corrige a IVA_0 y se devuelven $116 ⇒ el egreso sale con base $100 e IVA $16, no sin IVA.
+  - La reserva de la nota de crédito toma `tomarAdmisionCompartida`, escribe `protocoloIva: 1` y sus reintentos siguen las reglas de la individual (versión, ventana segura, identidad antes de archivos): el camino que hoy vuelve a emitir al encontrar `STAMP_FAILED` (`cfdiCreditNote.service.ts:309`) se cambia.
+  - El botón del dashboard y el MCP consultan `checkCreditNoteEligibility`; y el controlador (`cfdi.dashboard.controller.ts:~485`) **mapea** el motivo nuevo a una respuesta de negocio (409 con el mensaje), no a 500.
 
-- [ ] **Step 1: Pruebas (RED):** original con entrada mixta ⇒ bloqueada con el motivo; original todo-16 con entrada ⇒ igual que hoy; original sin entrada ⇒ igual que hoy; la fila de la nota nace con `protocoloIva = 1`.
+- [ ] **Step 1: Pruebas (RED):** original con entrada mixta ⇒ bloqueada con el motivo; original todo-16 con entrada ⇒ igual que hoy; original sin entrada ⇒ igual que hoy; la fila de la nota nace con `protocoloIva = 1`; **producto corregido a IVA_0 después de la original ⇒ el egreso sale al 16 %**; egreso con la respuesta perdida (el PAC sí timbró) ⇒ se recupera por identidad, sin un segundo egreso; **por la ruta real** del dashboard, un egreso de original mixta responde 409 con el mensaje en español (no 500).
 - [ ] **Step 2: Implementar.**
 - [ ] **Step 3: Verify** + commit con pathspec.
 
