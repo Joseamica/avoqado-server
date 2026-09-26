@@ -788,6 +788,27 @@ describe('recordFastPayment — venta rápida con un tipo de pago del catálogo'
     expect(payments[0].fundsFlow).toBe('EXTERNAL_RECORDED')
   })
 
+  it.each(['CREDIT_CARD', 'DEBIT_CARD', 'BANK_TRANSFER', 'OTHER'])(
+    'un cobro externo %s no genera una obligación de comisión de Avoqado',
+    async baseMethod => {
+      prismaMock.venueTenderType.findFirst.mockResolvedValue({
+        id: 'tender-uber',
+        baseMethod,
+        active: true,
+        revision: 3,
+        name: 'Terminal externa',
+      })
+
+      await recordFastPayment('venue-1', cobroUber as any, 'user-1')
+
+      expect(payments[0].fundsFlow).toBe('EXTERNAL_RECORDED')
+      expect(prismaMock.paymentEffect.createMany).not.toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.arrayContaining([expect.objectContaining({ kind: 'TRANSACTION_COST' })]) }),
+      )
+      expect(payments[0].processorData.costPending).not.toBe(true)
+    },
+  )
+
   it('congela la comisión como MONTO ($50 × 30% = $15), no como porcentaje vivo', async () => {
     await recordFastPayment('venue-1', cobroUber as any, 'user-1')
 
@@ -833,6 +854,10 @@ describe('recordFastPayment — venta rápida con un tipo de pago del catálogo'
       expect(payments).toHaveLength(1)
       expect(payments[0].tenderRevision).toBe(3)
       expect(Number(payments[0].tenderCommissionAmount)).toBe(15)
+      expect(payments[0].processorData.costPending).not.toBe(true)
+      expect(prismaMock.paymentEffect.createMany).not.toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.arrayContaining([expect.objectContaining({ kind: 'TRANSACTION_COST' })]) }),
+      )
     })
   })
 
@@ -916,10 +941,14 @@ describe('recordFastPayment — qué queda "por depositar" en VenueTransaction',
   it('la tarjeta sigue quedando PENDING (eso sí lo deposita Avoqado)', async () => {
     await recordFastPayment(
       'venue-1',
-      { amount: 5000, tip: 0, method: 'CREDIT_CARD', staffId: 'staff-1', merchantAccountId: 'merch-1' } as any,
+      { amount: 5000, tip: 0, method: 'CREDIT_CARD', status: 'COMPLETED', staffId: 'staff-1', merchantAccountId: 'merch-1' } as any,
       'user-1',
     )
 
     expect(transacciones[0].status).toBe('PENDING')
+    expect(payments[0].processorData.costPending).toBe(true)
+    expect(prismaMock.paymentEffect.createMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.arrayContaining([expect.objectContaining({ kind: 'TRANSACTION_COST' })]) }),
+    )
   })
 })

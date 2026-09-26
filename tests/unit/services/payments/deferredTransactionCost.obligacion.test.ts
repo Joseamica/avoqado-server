@@ -8,8 +8,10 @@ import { prismaMock } from '@tests/__helpers__/setup'
 import {
   anotarCostoNoCalculado,
   asegurarCostoSincrono,
+  asegurarObligacionDeCostoNegativo,
   cerrarObligacionDeCosto,
   convergerCostoDeTransaccion,
+  settleDeferredTransactionCost,
 } from '@/services/payments/deferredTransactionCost.service'
 
 beforeEach(() => {
@@ -83,6 +85,35 @@ it('Codex R6 (h): la CONTENCIÓN (55P03, otra corrida tiene la fila) es un desen
   expect((prismaMock as any).paymentEffect.updateMany).not.toHaveBeenCalled()
 })
 
+it.each([false, true])(
+  'el worker termina una obligación externa anterior sin calcular ni proyectar comisiones (método provisional=%s)',
+  async methodProvisional => {
+    const payment = {
+      id: 'p1',
+      status: 'COMPLETED',
+      method: 'CREDIT_CARD',
+      fundsFlow: 'EXTERNAL_RECORDED',
+      processorData: { costPending: true, methodProvisional },
+    }
+    ;(prismaMock as any).payment.findUnique.mockResolvedValue(payment)
+    ;(prismaMock as any).payment.findUniqueOrThrow.mockResolvedValue(payment)
+
+    await expect(
+      settleDeferredTransactionCost('p1', null, new Date(), { tipo: 'WORKER', effectId: 'effect-1', claimToken: 'claim-1' }),
+    ).resolves.toBe(true)
+
+    expect((prismaMock as any).transactionCost.findUnique).not.toHaveBeenCalled()
+    expect((prismaMock as any).transactionCost.create).not.toHaveBeenCalled()
+    expect((prismaMock as any).payment.update).not.toHaveBeenCalled()
+    expect((prismaMock as any).venueTransaction.updateMany).not.toHaveBeenCalled()
+    expect((prismaMock as any).$executeRaw).toHaveBeenCalledWith(expect.anything(), JSON.stringify({ costPending: false }), 'p1')
+    expect((prismaMock as any).paymentEffect.updateMany).toHaveBeenCalledWith({
+      where: { id: 'effect-1', claimToken: 'claim-1', status: 'PROCESSING' },
+      data: { status: 'DONE', completedAt: expect.any(Date), lastError: null, claimToken: null, leaseUntil: null },
+    })
+  },
+)
+
 it('un error operativo (no es contención) se PROPAGA desde la unidad; asegurarCostoSincrono lo anota y devuelve PENDIENTE sin lanzar', async () => {
   ;(prismaMock as any).$queryRaw.mockRejectedValueOnce(new Error('db down'))
   await expect(convergerCostoDeTransaccion('p1', { tipo: 'REST' })).rejects.toThrow('db down')
@@ -105,6 +136,21 @@ it('cerrar la obligación (REST) sólo toca el efecto PENDING (uno ya reclamado 
 it('anotar nunca lanza: un fallo al anotar no interrumpe el cobro', async () => {
   ;(prismaMock as any).paymentEffect.updateMany.mockRejectedValueOnce(new Error('db down'))
   await expect(anotarCostoNoCalculado('p1', new Error('x'))).resolves.toBeUndefined()
+})
+
+it('un reembolso externo no reabre una obligación de costo que nunca correspondió a Avoqado', async () => {
+  ;(prismaMock as any).payment.findUnique.mockResolvedValue({
+    id: 'p1',
+    status: 'COMPLETED',
+    method: 'CREDIT_CARD',
+    fundsFlow: 'EXTERNAL_RECORDED',
+  })
+  ;(prismaMock as any).paymentEffect.findFirst.mockResolvedValue({ id: 'effect-1', status: 'DONE', payload: {} })
+
+  await expect(asegurarObligacionDeCostoNegativo(prismaMock as any, 'p1', 'refund-1')).resolves.toBe('SIN_OBLIGACION')
+  expect((prismaMock as any).paymentEffect.findFirst).not.toHaveBeenCalled()
+  expect((prismaMock as any).paymentEffect.updateMany).not.toHaveBeenCalled()
+  expect((prismaMock as any).$executeRaw).not.toHaveBeenCalled()
 })
 
 it('Codex R12-3 · un método provisional anota AWAITING_ACCREDITED_CARD_DATA (obligación con nombre, visible, sin consumir intentos)', async () => {

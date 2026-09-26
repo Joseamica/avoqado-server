@@ -24,6 +24,7 @@ import { createRefundTransactionCost, createTransactionCost, leerTarifaCongelada
 import { proyectarComisionYNeto } from './proyeccionMonetaria'
 import { calculatePaymentSettlement } from './settlementCalculation.service'
 import { utcTs } from '@/utils/sqlDates'
+import { paymentIsAvoqadoSettled, TENDER_SEMANTICS_SELECT } from '../shared/tenderSemantics'
 
 export const COSTO_PENDIENTE_PLAZO_MS = 2 * 60 * 60 * 1000
 /** Codex R4 (P3): presupuesto de reembolsos por ejecución, configurable (las pruebas cortan en la 2ª página con 10 por página). */
@@ -147,9 +148,9 @@ export async function asegurarObligacionDeCostoNegativo(
 ): Promise<'REABIERTA' | 'ENCOLADA' | 'VIGENTE' | 'SIN_OBLIGACION'> {
   const original = await tx.payment.findUnique({
     where: { id: originalPaymentId },
-    select: { id: true, venueId: true, orderId: true, status: true, method: true },
+    select: { id: true, venueId: true, orderId: true, status: true, ...TENDER_SEMANTICS_SELECT },
   })
-  if (!original || original.status !== 'COMPLETED' || original.method === 'CASH') return 'SIN_OBLIGACION'
+  if (!original || original.status !== 'COMPLETED' || !paymentIsAvoqadoSettled(original)) return 'SIN_OBLIGACION'
   const efecto = await tx.paymentEffect.findFirst({
     where: { paymentId: originalPaymentId, kind: 'TRANSACTION_COST' },
     select: { id: true, status: true, payload: true },
@@ -300,7 +301,7 @@ export async function settleDeferredTransactionCost(
   const payment = await prisma.payment.findUnique({ where: { id: paymentId } })
   if (!payment) return true
   if (payment.status !== 'COMPLETED') return true
-  if (!costoListoParaCalcular(payment, payload, now)) {
+  if (paymentIsAvoqadoSettled(payment) && !costoListoParaCalcular(payment, payload, now)) {
     // Codex R12-3: la espera queda ESCRITA en la obligación (visible en la cola) y, vencido el plazo, ESCALADA — nunca resuelta
     // calculando con un método que nadie acreditó. La misma decisión se repite bajo el mutex, dentro de la unidad. Si el
     // snapshot ya dice algo PERMANENTE (sin tarifa contratada, captura fallida, ilegible), ese motivo manda sobre la espera:
@@ -365,7 +366,13 @@ export async function convergerCostoDeTransaccion(
         >`SELECT "id" FROM "Payment" /* convergencia */ WHERE "id" = ${paymentId} FOR NO KEY UPDATE NOWAIT`
         if (filas.length !== 1) return 'NO_APLICA' as const
         const payment = await tx.payment.findUniqueOrThrow({ where: { id: paymentId } })
-        if (payment.status !== 'COMPLETED' || payment.method === 'CASH') {
+        if (payment.status !== 'COMPLETED') {
+          await cerrarSegunElCierre(tx, paymentId, cierre)
+          return 'NO_APLICA' as const
+        }
+        if (!paymentIsAvoqadoSettled(payment)) {
+          // También resuelve obligaciones externas creadas antes de filtrar por fundsFlow.
+          await marcarCostPending(tx, paymentId, false)
           await cerrarSegunElCierre(tx, paymentId, cierre)
           return 'NO_APLICA' as const
         }

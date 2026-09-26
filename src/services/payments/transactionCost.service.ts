@@ -8,6 +8,7 @@ export { proyectarComisionYNeto } from './proyeccionMonetaria'
 import { NotFoundError, BadRequestError } from '../../errors/AppError'
 import { getEffectivePaymentConfig, getEffectivePricingForSlot } from '../organization-payment-config.service'
 import { calculatePaymentSettlement } from './settlementCalculation.service'
+import { paymentIsAvoqadoSettled } from '../shared/tenderSemantics'
 
 /** Codex R6 (g): TODA lectura y escritura de la unidad de convergencia va con el MISMO cliente (`tx`), nunca con el global. */
 type Cliente = Prisma.TransactionClient | typeof prisma
@@ -23,8 +24,8 @@ type Cliente = Prisma.TransactionClient | typeof prisma
  *
  * CRITICAL BUSINESS RULE:
  * Only create TransactionCost for payments where:
- * 1. originSystem = AVOQADO (Avoqado processed the payment)
- * 2. method ≠ CASH (processor involved)
+ * 1. originSystem = AVOQADO
+ * 2. paymentIsAvoqadoSettled (excludes cash and externally recorded tenders)
  * 3. type ≠ TEST (real payments only, or zero-cost for audit)
  */
 
@@ -537,9 +538,9 @@ export async function createTransactionCost(
     return null
   }
 
-  // Skip if CASH (no processor involved)
-  if (payment.method === PaymentMethod.CASH) {
-    logger.info('Skipping TransactionCost: Cash payment (no processor cost)', { paymentId })
+  // Registrar un pago en Avoqado no significa que Avoqado procesó sus fondos.
+  if (!paymentIsAvoqadoSettled(payment)) {
+    logger.info('Skipping TransactionCost: Payment funds not processed by Avoqado', { paymentId, fundsFlow: payment.fundsFlow })
     return null
   }
 

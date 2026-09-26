@@ -373,7 +373,7 @@ import { runAutoReorderForVenue } from '../dashboard/autoReorder.service'
 import { serializedInventoryService } from '../serialized-inventory/serializedInventory.service'
 import { getEffectivePaymentConfig } from '../organization-payment-config.service'
 import { logAction } from '../dashboard/activity-log.service'
-import { paymentIsAvoqadoSettled } from '../shared/tenderSemantics'
+import { paymentIsAvoqadoSettled, type TenderSemanticsPayment } from '../shared/tenderSemantics'
 // La ÚNICA definición de "qué cuenta como pagado" — la comparten los cuatro
 // caminos de cobro, para que un reembolso no reabra saldo en ninguno.
 import { summarizeRefunds, computeOrderBalance, REFUND_PAYMENT_TYPE } from '../shared/orderBalance'
@@ -699,16 +699,16 @@ async function arbitrarSinPerderElCobro(
 
 /**
  * S2 + Codex R4-4: la OBLIGACIÓN de costo se encola DENTRO de la transacción financiera (durable aunque el proceso muera)
- * para TODO cobro COMPLETED que no sea efectivo — no sólo el nacido del webhook. Para el REST de la terminal el costo se
+ * para TODO cobro COMPLETED procesado por Avoqado — no sólo el nacido del webhook. Para el REST de la terminal el costo se
  * calcula enseguida y cierra la obligación; si ese cálculo falla (tarifa no acreditable, configuración incompleta, fallo
  * operativo) la obligación sigue PENDIENTE y visible en la cola, en vez de un `log.error` que nadie retoma.
  */
 async function encolarObligacionDeCosto(
   tx: Prisma.TransactionClient,
-  payment: { id: string; venueId: string; orderId: string; status: string; method: string },
+  payment: TenderSemanticsPayment & { id: string; venueId: string; orderId: string; status: string },
   via: 'webhook' | 'terminal',
 ): Promise<void> {
-  if (payment.status !== 'COMPLETED' || payment.method === 'CASH') return
+  if (payment.status !== 'COMPLETED' || !paymentIsAvoqadoSettled(payment)) return
   await enqueuePaymentEffect(tx, {
     venueId: payment.venueId,
     paymentId: payment.id,
@@ -3454,8 +3454,8 @@ export async function recordOrderPayment(
               // S2: nacido del webhook ⇒ método provisional y costo pendiente hasta acreditar la marca (o vencer el plazo).
               ...(paymentData.registradoVia === 'webhook' ? { registradoVia: 'webhook', methodProvisional: true } : {}),
               // Codex R6 (diseño B): `costPending` = «la obligación de costo todavía no ha convergido» — nace con la obligación
-              // (todo cobro COMPLETED que no es efectivo, por REST o por webhook) y sólo la convergencia lo pone en false.
-              ...(paymentStatusSnapshot === 'COMPLETED' && paymentData.method !== 'CASH' ? { costPending: true } : {}),
+              // (cobro COMPLETED procesado por Avoqado, por REST o webhook) y sólo la convergencia lo pone en false.
+              ...(paymentStatusSnapshot === 'COMPLETED' && paymentIsAvoqadoSettled({ method: classicMethod }) ? { costPending: true } : {}),
               ...(afiliacion.merchantAccountIdDelApk !== afiliacion.merchantAccountId
                 ? { merchantAccountIdFromApk: afiliacion.merchantAccountIdDelApk ?? null, merchantResolvedVia: afiliacion.via }
                 : {}),
@@ -3870,7 +3870,7 @@ export async function recordOrderPayment(
       amountCents: paymentData.amount,
       tipCents: paymentData.tip ?? 0,
     })
-  } else {
+  } else if (paymentIsAvoqadoSettled(payment)) {
     // Codex R4-4 / R5-3: UN solo criterio de cumplimiento para el costo síncrono — el MISMO del worker (costo persistido →
     // proyecciones en Payment y VenueTransaction → liquidación → reembolsos). La obligación se cierra SÓLO al converger; si
     // falta la liquidación o la tarifa no es acreditable, queda PENDIENTE y visible con su motivo. Nunca interrumpe el cobro.
@@ -4993,8 +4993,10 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
               // S2: nacido del webhook ⇒ método provisional y costo pendiente hasta acreditar la marca (o vencer el plazo).
               ...(paymentData.registradoVia === 'webhook' ? { registradoVia: 'webhook', methodProvisional: true } : {}),
               // Codex R6 (diseño B): `costPending` = «la obligación de costo todavía no ha convergido» — nace con la obligación
-              // (todo cobro COMPLETED que no es efectivo, por REST o por webhook) y sólo la convergencia lo pone en false.
-              ...(paymentStatusSnapshot === 'COMPLETED' && paymentData.method !== 'CASH' ? { costPending: true } : {}),
+              // (cobro COMPLETED procesado por Avoqado, por REST o webhook) y sólo la convergencia lo pone en false.
+              ...(paymentStatusSnapshot === 'COMPLETED' && paymentIsAvoqadoSettled(resolvedTender ?? { method: effectiveMethod })
+                ? { costPending: true }
+                : {}),
               ...(afiliacion.merchantAccountIdDelApk !== afiliacion.merchantAccountId
                 ? { merchantAccountIdFromApk: afiliacion.merchantAccountIdDelApk ?? null, merchantResolvedVia: afiliacion.via }
                 : {}),
@@ -5277,7 +5279,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       amountCents: paymentData.amount,
       tipCents: paymentData.tip ?? 0,
     })
-  } else {
+  } else if (paymentIsAvoqadoSettled(payment)) {
     // Codex R4-4 / R5-3: UN solo criterio de cumplimiento para el costo síncrono — el MISMO del worker (costo persistido →
     // proyecciones en Payment y VenueTransaction → liquidación → reembolsos). La obligación se cierra SÓLO al converger; si
     // falta la liquidación o la tarifa no es acreditable, queda PENDIENTE y visible con su motivo. Nunca interrumpe el cobro.
