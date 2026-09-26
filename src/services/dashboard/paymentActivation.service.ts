@@ -16,6 +16,7 @@ import { BadRequestError, ForbiddenError, NotFoundError } from '../../errors/App
 import { getBankNameFromCLABE, validateCLABE } from '../../utils/clabeValidator'
 import { logAction } from './activity-log.service'
 import { esSuperadminDeLaSesion } from '../access/rolVigente'
+import { auditarAccesoNegado } from './accesoNegado'
 
 /** RFC de persona física (13) o moral (12), en mayúsculas. */
 const RFC_RE = /^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/
@@ -55,7 +56,16 @@ export async function assertPaymentActivationAccess(venueId: string, staffId: st
     where: { venueId, staffId, active: true, staff: { active: true }, role: { in: ['OWNER', 'ADMIN'] } },
     select: { id: true },
   })
-  if (!asignacion) throw new ForbiddenError('Solo el dueño o un administrador de este negocio puede activar los cobros')
+  if (!asignacion) {
+    auditarAccesoNegado({
+      staffId,
+      venueId,
+      organizationId: venue.organizationId,
+      entity: 'payment-activation',
+      reason: 'NOT_OWNER_OR_ADMIN',
+    })
+    throw new ForbiddenError('Solo el dueño o un administrador de este negocio puede activar los cobros')
+  }
   return { organizationId: venue.organizationId }
 }
 

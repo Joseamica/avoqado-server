@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import type { Request, Response } from 'express'
-import { verifyMcpToken } from './mcpToken'
+import { emisionDeCadena, verifyMcpToken } from './mcpToken'
 import { isActiveSuperAdmin, resolveScope, type McpScope } from './scope'
 import logger from '@/config/logger'
 import { describeMcpMessage, MCP_HANDSHAKE_METHODS, respondMcpCancelled } from '@/middlewares/mcp-request-guard.middleware'
@@ -245,7 +245,7 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
       const payload = verifyMcpToken(token) // throws on bad / expired / wrong-audience → 401 below
       // Codex S4: el mismo corte de sesión que en `provider.verifyAccessToken` (este es el camino del
       // servidor de desarrollo, sin `requireBearerAuth`). El mensaje dice «token» → 401 abajo.
-      if (await motivoDeSesionInvalidada(payload.sub, payload.iat)) throw new Error('MCP token revoked by session cutoff')
+      if (await motivoDeSesionInvalidada(payload.sub, emisionDeCadena(payload))) throw new Error('MCP token revoked by session cutoff')
       staffId = payload.sub
       activeOrg = payload.org
       scopes = payload.scp

@@ -41,6 +41,14 @@ export function issueMcpToken(
   return jwt.sign(payload, getSecret(), { audience: MCP_AUDIENCE, expiresIn: ttlSeconds })
 }
 
+/**
+ * La fecha con la que se juzga el corte de sesión: la MÁS VIEJA que trae el token — la de la autorización
+ * original de su cadena (`gat`), si la tiene. Un `gat` posterior nunca rejuvenece al token.
+ */
+export function emisionDeCadena(payload: Pick<McpTokenPayload, 'iat' | 'gat'>): number | undefined {
+  return typeof payload.gat === 'number' && typeof payload.iat === 'number' ? Math.min(payload.iat, payload.gat) : payload.iat
+}
+
 /** Verify an MCP token. Rejects any token NOT minted for the MCP audience. */
 export function verifyMcpToken(token: string): McpTokenPayload {
   const decoded = jwt.verify(token, getSecret(), { audience: MCP_AUDIENCE }) as jwt.JwtPayload

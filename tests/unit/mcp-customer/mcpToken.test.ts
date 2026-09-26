@@ -18,3 +18,27 @@ describe('mcpToken', () => {
     expect(() => verifyMcpToken(dashboardToken)).toThrow()
   })
 })
+
+describe('emisionDeCadena — la fecha con la que se juzga el corte de sesión', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { emisionDeCadena } = require('../../../src/mcp/mcpToken')
+  const fs = require('fs')
+  const path = require('path')
+
+  it('usa la concesión original cuando es más vieja que la emisión', () => {
+    expect(emisionDeCadena({ iat: 2_000, gat: 1_000 })).toBe(1_000)
+  })
+  it('nunca rejuvenece: un gat posterior no gana al iat', () => {
+    expect(emisionDeCadena({ iat: 1_000, gat: 2_000 })).toBe(1_000)
+  })
+  it('tokens viejos o de desarrollo sin gat: el iat', () => {
+    expect(emisionDeCadena({ iat: 1_500 })).toBe(1_500)
+    expect(emisionDeCadena({})).toBeUndefined()
+  })
+  it('🔴 los DOS caminos (OAuth y servidor de desarrollo) juzgan con la misma fecha', () => {
+    const server = fs.readFileSync(path.join(__dirname, '../../../src/mcp/server.ts'), 'utf8')
+    const provider = fs.readFileSync(path.join(__dirname, '../../../src/mcp/oauth/provider.ts'), 'utf8')
+    expect(server).toMatch(/motivoDeSesionInvalidada\(payload\.sub, emisionDeCadena\(payload\)\)/)
+    expect(provider).toMatch(/emisionDeCadena\(/)
+  })
+})

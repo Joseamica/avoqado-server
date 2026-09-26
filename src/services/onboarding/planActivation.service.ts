@@ -300,6 +300,60 @@ async function buscarSuscripcionDelIntento(
   return { encontrada, cubrioTodo }
 }
 
+/** ¿El cliente tiene alguna suscripción cobrando o a medio cobrar? (`canceled` e `incomplete_expired` ya no cobran.) */
+async function clienteTieneSuscripcionViva(customerId: string): Promise<boolean> {
+  let viva = false
+  await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 100 }).autoPagingEach(sub => {
+    if (sub.status !== 'canceled' && sub.status !== 'incomplete_expired') {
+      viva = true
+      return false
+    }
+    return true
+  })
+  return viva
+}
+
+/**
+ * ¿Queda un cobro de plan del alta SIN cerrar? Lo pregunta `complete` antes de dejar terminar el alta en Gratis.
+ *
+ * 🔴 Codex R12: exigir sólo `planStripeSubscriptionId` dejaba pasar el caso peor — Stripe cobró pero la respuesta se
+ * perdió ANTES de guardar el id. Aquí se busca igual que la recuperación de `activatePlan` (paso 6): por id si lo hay,
+ * y si no, por la llave del intento entre TODAS las suscripciones del cliente. «No pude ver» nunca es «no existe».
+ */
+export async function hayCobroDelAltaSinCerrar(progress: {
+  organizationId: string
+  planActivationStatus: string | null
+  planActivationAttempt: number
+  planStripeSubscriptionId: string | null
+}): Promise<boolean> {
+  if (progress.planActivationStatus !== PLAN_ACTIVATION_STATUS.IN_PROGRESS) return false
+  if (progress.planStripeSubscriptionId) return true
+  const conCliente = await prisma.venue.findMany({
+    where: { organizationId: progress.organizationId, stripeCustomerId: { not: null } },
+    select: { stripeCustomerId: true },
+  })
+  // Sin cliente de Stripe no pudo crearse ninguna suscripción: el cliente se crea ANTES de cobrar (paso 4).
+  const llave = `plan-activation:${progress.organizationId}:${progress.planActivationAttempt}`
+  for (const { stripeCustomerId } of conCliente) {
+    try {
+      const { encontrada, cubrioTodo } = await buscarSuscripcionDelIntento(stripeCustomerId as string, llave)
+      if (!cubrioTodo) return true
+      if (encontrada && (encontrada as Stripe.Subscription).status !== 'incomplete_expired') return true
+      // 🔴 Codex R13: el carril viejo de `complete` cobra con otra llave (`onboarding-complete:<org>`) y sin ese metadata,
+      // y su cobro dudoso también deja IN_PROGRESS. Un negocio que aún no termina su alta no tiene por qué tener NINGUNA
+      // suscripción viva: cualquiera que esté cobrando (o a medio cobrar) cuenta como abierta.
+      if (await clienteTieneSuscripcionViva(stripeCustomerId as string)) return true
+    } catch (error) {
+      logger.warn('complete: no se pudo consultar Stripe por un cobro del alta sin cerrar — se trata como abierto', {
+        organizationId: progress.organizationId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return true
+    }
+  }
+  return false
+}
+
 /**
  * PASO 7 — apartar el lugar del cupo. Una sola transacción.
  *
@@ -512,7 +566,9 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
         throw new ConflictError(
           'Tu plan ya está activo sin esta oferta, así que no se puede aplicar encima.',
           'PLAN_ACTIVE_WITHOUT_OFFER',
-          { currentTier: activo?.tier ?? null, currentInterval: activo?.interval ?? null },
+          // `charged`: si ese plan activo se PAGÓ (no es prueba gratis). La pantalla no puede decir «no te cobramos nada»
+          // a quien ya pagó en un intento anterior.
+          { currentTier: activo?.tier ?? null, currentInterval: activo?.interval ?? null, charged: activo?.payNow === true },
         )
       }
     }
@@ -837,12 +893,23 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
   // con Pro y «Pagar hoy» aunque lo cobrado fuera Premium, y exigirle INTRO_PRO_3M cerraba el alta con
   // PLAN_ACTIVE_WITHOUT_OFFER SIN conceder nada: cobrado y sin acceso (lo vivió el founder, 26-sep).
   const cuponExigible = campaign ? cuponEsperado : suscripcionRecuperada ? null : cuponEsperado
+  // 🔴 Una suscripción RECUPERADA sin el cupón de la campaña es un cobro de un intento ANTERIOR que nunca se entregó
+  // (p. ej. «Ver otros planes» → Premium, falla la entrega, vuelve y toca la oferta). Cerrar el intento y contestar 409
+  // lo dejaba cobrado y sin acceso, con «no te cobramos nada» en pantalla. Ahora se entrega LO COBRADO, se libera el
+  // lugar de la oferta en el mismo cierre, y sólo entonces se le dice que la oferta no aplicó.
+  let ofertaNoAplicada = false
   if (noLaCreamosConElCupon && cuponExigible) {
     const sub = await stripe.subscriptions.retrieve(subscriptionId, { expand: ['discounts'] })
     const descuentos = (sub as unknown as { discounts?: unknown[] }).discounts ?? []
     // 🔴 El cupón vive en `source.coupon` con la API actual; leer `d.coupon` lo daba por ausente SIEMPRE (26-sep).
     const lleva = descuentos.some(d => idDelCuponDelDescuento(d) === cuponExigible)
-    if (!lleva) {
+    if (!lleva && campaign && suscripcionRecuperada && !reused) {
+      logger.error('🚨 activate-plan: se recuperó un cobro anterior SIN el cupón de la oferta — se entrega lo cobrado', {
+        organizationId,
+        subscriptionId,
+      })
+      ofertaNoAplicada = true
+    } else if (!lleva) {
       logger.error('🚨 activate-plan: se reusó una suscripción sin el cupón de la oferta', { organizationId, subscriptionId })
       await cerrarIntentoYLiberarLugar({
         organizationId,
@@ -915,7 +982,8 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
       interval: cobrado.interval,
       payNow: payNowCobrado,
       acceptedAt: now.toISOString(),
-      offer: input.offer,
+      // Lo guardado describe lo COBRADO: si la oferta no aplicó, no queda como alta con oferta.
+      offer: ofertaNoAplicada ? ({ kind: 'STANDARD', expectedFirstChargeCents: primerCobroDe(sub, expected) } as const) : input.offer,
     }
     const v2 = ((progress.v2SetupData as Record<string, unknown> | null) ?? {}) as Record<string, unknown>
     const cerrado = await tx.onboardingProgress.updateMany({
@@ -938,7 +1006,10 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
     // 🔴 Cada cierre tiene que TOCAR su fila (Codex C6): si el intento ya no es de esta petición o el lugar de la oferta
     // ya no estaba apartado, no se da por aplicada el alta — el cargo quedó registrado y el siguiente intento lo recupera.
     if (cerrado.count === 0) throw pendiente('el intento ya no era de esta petición al cerrarlo')
-    if (redemption && campaign) {
+    if (redemption && campaign && ofertaNoAplicada) {
+      // El cierre de arriba acreditó que el intento es nuestro: el lugar se libera en la MISMA transacción (Codex #14).
+      await liberarLugarEn(tx, redemption.id, campaign.id, 'RECOVERED_WITHOUT_COUPON')
+    } else if (redemption && campaign) {
       const aplicada = await tx.launchCampaignRedemption.updateMany({
         where: { id: redemption.id, status: REDEMPTION_STATUS.RESERVED },
         data: { status: REDEMPTION_STATUS.APPLIED, appliedAt: now, stripeSubscriptionId: subscriptionId, cardFingerprint: fingerprint },
@@ -952,6 +1023,23 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
   })
 
   const firstChargeCents = primerCobroDe(sub, expected)
+
+  if (ofertaNoAplicada) {
+    await logAction({
+      staffId,
+      organizationId,
+      action: 'PLAN_ACTIVATED_ONBOARDING',
+      entity: 'OnboardingProgress',
+      entityId: progress.id,
+      data: { tier: cobrado.tier, interval: cobrado.interval, subscriptionId, offerNotApplied: true, reason: 'RECOVERED_WITHOUT_COUPON' },
+    })
+    // Sin correo de la oferta: prometería un precio que no se cobró. El plan quedó activo; la pantalla lo dice.
+    throw new ConflictError(
+      'Ya tienes activo el plan que pagaste en un intento anterior, así que la oferta no se puede aplicar encima. No te cobramos otra vez.',
+      'PLAN_ACTIVE_WITHOUT_OFFER',
+      { currentTier: cobrado.tier, currentInterval: cobrado.interval, charged: yaCobrada },
+    )
+  }
 
   await logAction({
     staffId,

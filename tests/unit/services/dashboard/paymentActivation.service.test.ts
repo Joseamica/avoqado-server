@@ -54,6 +54,15 @@ beforeEach(() => {
 })
 
 describe('quién puede activar cobros', () => {
+  it('🔴 full-testing 26-sep: negar el acceso deja PERMISSION_DENIED en la bitácora', async () => {
+    prismaMock.staffVenue.findFirst.mockResolvedValue(null as never)
+    await expect(assertPaymentActivationAccess('venue-1', 'staff-1', 'CASHIER')).rejects.toMatchObject({ statusCode: 403 })
+    await new Promise(r => setImmediate(r))
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'PERMISSION_DENIED', entity: 'payment-activation', venueId: 'venue-1', staffId: 'staff-1' }),
+    )
+  })
+
   it.each([['CASHIER'], ['MANAGER'], ['WAITER']])('🔴 un %s recibe 403', async () => {
     prismaMock.staffVenue.findFirst.mockResolvedValue(null as never)
     await expect(assertPaymentActivationAccess('venue-1', 'staff-1', 'CASHIER')).rejects.toMatchObject({ statusCode: 403 })

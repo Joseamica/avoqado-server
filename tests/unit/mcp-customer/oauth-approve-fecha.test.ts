@@ -39,7 +39,11 @@ mountCustomerMcpAuth(app)
 
 const OAUTH = { client_id: 'c1', redirect_uri: 'http://cb', code_challenge: 'cc' }
 const aprobar = (campos: Record<string, string>) =>
-  request(app).post('/mcp-oauth/approve').set('Origin', MCP_ISSUER_URL.origin).type('form').send({ ...OAUTH, ...campos })
+  request(app)
+    .post('/mcp-oauth/approve')
+    .set('Origin', MCP_ISSUER_URL.origin)
+    .type('form')
+    .send({ ...OAUTH, ...campos })
 
 const verificadaAntes = new Date('2026-09-20T10:00:00Z')
 

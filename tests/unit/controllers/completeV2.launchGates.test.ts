@@ -76,6 +76,7 @@ jest.mock('../../../src/utils/prismaClient', () => ({
 import { completeV2Onboarding } from '../../../src/controllers/onboarding.controller'
 import * as onboardingProgressService from '../../../src/services/onboarding/onboardingProgress.service'
 import * as stripeService from '../../../src/services/stripe.service'
+import * as planActivationService from '../../../src/services/onboarding/planActivation.service'
 import * as venueCreationService from '../../../src/services/onboarding/venueCreation.service'
 import { resolvePlanNotificationTarget } from '../../../src/services/access/planNotification.service'
 import emailService from '../../../src/services/email.service'
@@ -213,6 +214,77 @@ describe('completeV2Onboarding — candados del lanzamiento (S7) y fugas del leg
       expect(prisma.onboardingProgress.updateMany).toHaveBeenCalled()
     },
   )
+
+  it('🔴 revisión 26-sep: Free NO puede cerrar el alta encima de un cobro sin cerrar que YA tiene suscripción', async () => {
+    // El lease venció y quedó IN_PROGRESS con la suscripción guardada: Free se salta Stripe entero, así que cerrarlo como
+    // Free dejaba una suscripción COBRANDO en un negocio Free (huérfana). Se responde 409 y NO se toma el lock.
+    conProgreso(
+      {
+        planActivationStatus: 'IN_PROGRESS',
+        planActivationLeaseUntil: new Date(Date.now() - 60_000),
+        planStripeSubscriptionId: 'sub_cobrada',
+      },
+      { tier: 'FREE', paymentMethodId: undefined },
+    )
+
+    const next = await correr()
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 409, code: 'PLAN_CHARGE_PENDING' }))
+    expect(prisma.onboardingProgress.updateMany).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['Stripe tiene la suscripción del intento', true, 409],
+    ['Stripe confirma que no existe', false, null],
+  ])('🔴 Codex R12: Free sobre un cobro IN_PROGRESS SIN id guardado — %s', async (_n, abierto, esperado) => {
+    // La respuesta de Stripe se perdió ANTES de guardar el id: el guard viejo sólo miraba el id y dejaba cerrar en Free.
+    const espia = jest.spyOn(planActivationService, 'hayCobroDelAltaSinCerrar').mockResolvedValue(abierto)
+    conProgreso(
+      { planActivationStatus: 'IN_PROGRESS', planActivationLeaseUntil: new Date(Date.now() - 60_000), planStripeSubscriptionId: null },
+      { tier: 'FREE', paymentMethodId: undefined },
+    )
+
+    const next = await correr()
+
+    expect(espia).toHaveBeenCalledWith(expect.objectContaining({ organizationId: expect.any(String), planStripeSubscriptionId: null }))
+    if (esperado) {
+      expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 409, code: 'PLAN_CHARGE_PENDING' }))
+      expect(prisma.onboardingProgress.updateMany).not.toHaveBeenCalled()
+    } else {
+      expect(next).not.toHaveBeenCalledWith(expect.objectContaining({ code: 'PLAN_CHARGE_PENDING' }))
+    }
+    espia.mockRestore()
+  })
+
+  it.each([
+    ['PRO con campaña reclamada (el carril de pago se salta)', { launchCampaignId: 'lc_1' }, {}, true],
+    ['PRO con tarjeta y sin campaña (el carril de pago lo RECUPERA)', {}, {}, false],
+  ])('🔴 Codex R13: cobro abierto + %s', async (_n, extraProgreso, extraPlan, bloquea) => {
+    const espia = jest.spyOn(planActivationService, 'hayCobroDelAltaSinCerrar').mockResolvedValue(true)
+    conProgreso(
+      { planActivationStatus: 'IN_PROGRESS', planActivationLeaseUntil: new Date(Date.now() - 60_000), ...extraProgreso },
+      { tier: 'PRO', payNow: true, ...extraPlan },
+    )
+
+    const next = await correr()
+
+    if (bloquea) {
+      expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 409, code: 'PLAN_CHARGE_PENDING' }))
+      expect(prisma.onboardingProgress.updateMany).not.toHaveBeenCalled()
+    } else {
+      expect(next).not.toHaveBeenCalledWith(expect.objectContaining({ code: 'PLAN_CHARGE_PENDING' }))
+    }
+    espia.mockRestore()
+  })
+
+  it('Free sin ningún cobro de por medio sigue cerrando el alta (regresión)', async () => {
+    conProgreso({ planActivationStatus: 'NONE' }, { tier: 'FREE', paymentMethodId: undefined })
+
+    const next = await correr()
+
+    expect(next).not.toHaveBeenCalledWith(expect.objectContaining({ code: 'PLAN_CHARGE_PENDING' }))
+    expect(prisma.onboardingProgress.updateMany).toHaveBeenCalled()
+  })
 
   it('🔴 si activate-plan YA cobró: el local se crea pero NO se cobra otra vez ni se manda correo', async () => {
     conProgreso({ planActivationStatus: 'ACTIVE' }, { payNow: true })

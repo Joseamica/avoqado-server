@@ -2,7 +2,7 @@ import type { Response } from 'express'
 import type { OAuthServerProvider, AuthorizationParams } from '@modelcontextprotocol/sdk/server/auth/provider.js'
 import type { OAuthClientInformationFull, OAuthTokens, OAuthTokenRevocationRequest } from '@modelcontextprotocol/sdk/shared/auth.js'
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js'
-import { issueMcpToken, verifyMcpToken } from '../mcpToken'
+import { emisionDeCadena, issueMcpToken, verifyMcpToken } from '../mcpToken'
 import { prismaClientsStore } from './clientsStore'
 import { consumeAuthCode, peekAuthCodeChallenge, createRefreshToken, consumeRefreshToken, revokeRefreshToken } from './tokenStore'
 import { renderLoginPage } from './loginPage'
@@ -98,7 +98,7 @@ export const provider: OAuthServerProvider = {
     const { sub, org, cid, scp, exp, iat, gat } = verifyMcpToken(token) // throws on bad/expired/wrong-audience
     // Mismo corte y mismo margen que cualquier token de acceso (segundos). Se juzga con la fecha MÁS
     // VIEJA que trae: la de la autorización original de su cadena, si la tiene (Codex ronda 8).
-    const emision = typeof gat === 'number' && typeof iat === 'number' ? Math.min(iat, gat) : iat
+    const emision = emisionDeCadena({ iat, gat })
     if (await motivoDeSesionInvalidada(sub, emision)) throw new InvalidTokenError(SESION_CORTADA)
     return {
       token,

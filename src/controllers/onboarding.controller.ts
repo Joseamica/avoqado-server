@@ -709,6 +709,23 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
       throw new BadRequestError('Step 3 (Business Info) must be completed')
     }
 
+    // 🔴 Codex R13: este carril viejo NO cobra ni recupera nada en Stripe. Si el alta V2 dejó un cobro de plan sin
+    // cerrar, terminar aquí fijaba `completedAt` y `activate-plan` ya no podía recuperarlo: cobrado y sin acceso.
+    if (
+      progress.planActivationStatus === PLAN_ACTIVATION_STATUS.IN_PROGRESS &&
+      (await planActivationService.hayCobroDelAltaSinCerrar({
+        organizationId,
+        planActivationStatus: progress.planActivationStatus,
+        planActivationAttempt: progress.planActivationAttempt,
+        planStripeSubscriptionId: progress.planStripeSubscriptionId,
+      }))
+    ) {
+      throw new ConflictError(
+        'Tienes un pago de plan sin confirmar. Confírmalo antes de terminar tu alta: no se te cobrará dos veces.',
+        'PLAN_CHARGE_PENDING',
+      )
+    }
+
     // OPTIMISTIC LOCKING: Atomically mark as completing BEFORE creating venue
     // This prevents race condition where double-click creates 2 venues
     const lockResult = await prisma.onboardingProgress.updateMany({
@@ -1148,6 +1165,31 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
       progress.planActivationLeaseUntil > new Date()
     ) {
       throw new ConflictError('Tu pago se está confirmando. Vuelve a intentar en unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
+    }
+
+    // 🔴 FREE ENCIMA DE UN COBRO SIN CERRAR (revisión independiente, 26-sep). Con el lease vencido se deja entrar porque el
+    // carril de pago recupera en Stripe lo que ya se cobró — pero FREE se salta Stripe entero: cerrarlo así dejaría una
+    // suscripción COBRANDO en un negocio Free. Si el intento dudoso alcanzó a crear su suscripción, primero se cierra ESE
+    // cobro (el dashboard lo ofrece: «Volver a comprobar» / confirmar con la tarjeta); Free no pasa por encima.
+    // 🔴 Codex R13: no sólo FREE. Cualquier carril que NO sea el de pago que recupera (pago + tarjeta + sin campaña, abajo)
+    // cierra el alta sin mirar Stripe: con una campaña reclamada el carril de pago se salta, y sin tarjeta nunca entra.
+    const vaAlCarrilQueRecupera =
+      planEnabled && !!planData && planData.tier !== 'FREE' && !!planData.paymentMethodId && !progress.launchCampaignId
+    if (
+      !vaAlCarrilQueRecupera &&
+      progress.planActivationStatus === PLAN_ACTIVATION_STATUS.IN_PROGRESS &&
+      // Codex R12: también sin id guardado (la respuesta de Stripe se perdió antes de guardarlo): se busca en Stripe.
+      (await planActivationService.hayCobroDelAltaSinCerrar({
+        organizationId,
+        planActivationStatus: progress.planActivationStatus,
+        planActivationAttempt: progress.planActivationAttempt,
+        planStripeSubscriptionId: progress.planStripeSubscriptionId,
+      }))
+    ) {
+      throw new ConflictError(
+        'Tienes un pago de plan sin confirmar. Confírmalo antes de terminar tu alta: no se te cobrará dos veces.',
+        'PLAN_CHARGE_PENDING',
+      )
     }
 
     // Si `activate-plan` YA cobró, el bloque de Stripe y el correo de abajo se saltan: ese

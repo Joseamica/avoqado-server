@@ -12,6 +12,7 @@ import { notifySuperadminsNewKycSubmission } from '@/services/superadmin/kycRevi
 import { sendKycDocumentUploadedNotification } from '@/services/resend.service'
 import { BadRequestError, ForbiddenError } from '@/errors/AppError'
 import { logAction } from './activity-log.service'
+import { auditarAccesoNegado } from './accesoNegado'
 
 interface UploadedFile {
   buffer: Buffer
@@ -97,7 +98,8 @@ export async function uploadSingleKycDocument(venueId: string, userId: string, d
 
     // Verify user has permission (superadmin or venue owner/admin)
     if (!isSuperadmin && (!venue.staff || venue.staff.length === 0)) {
-      throw new ForbiddenError('Only superadmins, venue owners, or admins can upload KYC documents')
+      auditarAccesoNegado({ staffId: userId, venueId, entity: 'kyc', reason: 'UPLOAD_NOT_OWNER_OR_ADMIN' })
+      throw new ForbiddenError('Solo el dueño o un administrador de este negocio puede subir sus documentos')
     }
 
     // Uploading a document is allowed in EVERY KYC status, on purpose.
@@ -215,7 +217,8 @@ export async function submitKycForReview(venueId: string, userId: string, userRo
 
     // Verify user has permission (superadmin or venue owner/admin)
     if (!isSuperadmin && (!venue.staff || venue.staff.length === 0)) {
-      throw new ForbiddenError('Only superadmins, venue owners, or admins can submit KYC')
+      auditarAccesoNegado({ staffId: userId, venueId, entity: 'kyc', reason: 'SUBMIT_NOT_OWNER_OR_ADMIN' })
+      throw new ForbiddenError('Solo el dueño o un administrador de este negocio puede enviar sus documentos a revisión')
     }
 
     // Verify venue KYC is in a status that allows submission
@@ -306,7 +309,8 @@ export async function resubmitKycDocuments(venueId: string, userId: string, file
 
     // Verify user is venue owner
     if (venue.staff.length === 0) {
-      throw new ForbiddenError('Only venue owners can resubmit KYC documents')
+      auditarAccesoNegado({ staffId: userId, venueId, entity: 'kyc', reason: 'RESUBMIT_NOT_OWNER' })
+      throw new ForbiddenError('Solo el dueño de este negocio puede volver a enviar sus documentos')
     }
 
     // Verify venue KYC is in a status that allows document submission

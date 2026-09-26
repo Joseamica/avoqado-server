@@ -31,15 +31,35 @@ export const createVenueSchema = z.object({
     timezone: zTimezone,
     currency: z.string().min(3).max(3).optional().default('MXN'),
 
-    address: z.string().min(5, { message: 'La dirección debe tener al menos 5 caracteres.' }).optional().nullable(),
+    address: z
+      .string()
+      .min(5, { message: 'La dirección debe tener al menos 5 caracteres.' })
+      .max(200, { message: 'La dirección no puede pasar de 200 caracteres.' })
+      .optional()
+      .nullable(),
 
-    city: z.string().min(2, { message: 'La ciudad debe tener al menos 2 caracteres.' }).optional().nullable(),
+    city: z
+      .string()
+      .min(2, { message: 'La ciudad debe tener al menos 2 caracteres.' })
+      .max(100, { message: 'La ciudad no puede pasar de 100 caracteres.' })
+      .optional()
+      .nullable(),
 
-    state: z.string().min(2, { message: 'El estado/provincia debe tener al menos 2 caracteres.' }).optional().nullable(),
+    state: z
+      .string()
+      .min(2, { message: 'El estado/provincia debe tener al menos 2 caracteres.' })
+      .max(100, { message: 'El estado no puede pasar de 100 caracteres.' })
+      .optional()
+      .nullable(),
 
     country: z.string().min(2).max(2).optional().default('MX'),
 
-    zipCode: z.string().min(4, { message: 'El código postal debe tener al menos 4 caracteres.' }).optional().nullable(),
+    zipCode: z
+      .string()
+      .min(4, { message: 'El código postal debe tener al menos 4 caracteres.' })
+      .max(10, { message: 'El código postal no puede pasar de 10 caracteres.' })
+      .optional()
+      .nullable(),
 
     latitude: z.number({ invalid_type_error: 'La latitud debe ser un número.' }).min(-90).max(90).optional().nullable(),
 
