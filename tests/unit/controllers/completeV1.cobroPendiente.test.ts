@@ -21,14 +21,16 @@ jest.mock('../../../src/config/logger', () => ({
 jest.mock('../../../src/utils/prismaClient', () => ({
   __esModule: true,
   default: {
-    onboardingProgress: { updateMany: jest.fn().mockResolvedValue({ count: 0 }), findUnique: jest.fn() },
+    onboardingProgress: { updateMany: jest.fn().mockResolvedValue({ count: 0 }), findUnique: jest.fn(), update: jest.fn() },
     venue: { findFirst: jest.fn() },
+    organization: { update: jest.fn() },
   },
 }))
 
 import { completeOnboarding } from '../../../src/controllers/onboarding.controller'
 import * as onboardingProgressService from '../../../src/services/onboarding/onboardingProgress.service'
 import prisma from '../../../src/utils/prismaClient'
+import { createVenueFromOnboarding } from '../../../src/services/onboarding/venueCreation.service'
 
 const req = {
   params: { organizationId: 'org_1' },
@@ -50,7 +52,47 @@ function progreso(extra: Record<string, unknown>) {
 
 describe('completeOnboarding (V1) con un cobro del alta sin cerrar', () => {
   afterEach(() => jest.restoreAllMocks())
-  beforeEach(() => jest.clearAllMocks())
+  beforeEach(() => {
+    jest.clearAllMocks()
+    ;(prisma.onboardingProgress.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+  })
+
+  it.each([null, { id: 'venue_1' }])('R15: perder el candado con local %p conserva el trabajo del ganador', async venue => {
+    progreso({})
+    ;(prisma.onboardingProgress.findUnique as jest.Mock).mockResolvedValue({
+      completedAt: new Date(),
+      organization: { onboardingCompletedAt: null },
+    })
+    ;(prisma.venue.findFirst as jest.Mock).mockResolvedValue(venue)
+    const next = jest.fn()
+    await completeOnboarding(req, res, next)
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 409 }))
+    expect(prisma.onboardingProgress.update).not.toHaveBeenCalled()
+    expect(res.status).not.toHaveBeenCalled()
+    expect(createVenueFromOnboarding).not.toHaveBeenCalled()
+  })
+
+  it('R15: termina y luego permite repetir la respuesta sin crear otro local', async () => {
+    progreso({})
+    const venue = { id: 'venue_1', slug: 'bar', name: 'Bar' }
+    ;(prisma.onboardingProgress.updateMany as jest.Mock).mockResolvedValueOnce({ count: 1 })
+    ;(createVenueFromOnboarding as jest.Mock).mockResolvedValue({ venue })
+    const next = jest.fn()
+    await completeOnboarding(req, res, next)
+    expect(next).not.toHaveBeenCalled()
+    expect(prisma.organization.update).toHaveBeenCalledWith({
+      where: { id: 'org_1' },
+      data: { onboardingCompletedAt: expect.any(Date) },
+    })
+    ;(prisma.onboardingProgress.findUnique as jest.Mock).mockResolvedValue({
+      completedAt: new Date(),
+      organization: { onboardingCompletedAt: new Date() },
+    })
+    ;(prisma.venue.findFirst as jest.Mock).mockResolvedValue(venue)
+    await completeOnboarding(req, res, next)
+    expect(res.status).toHaveBeenLastCalledWith(200)
+    expect(createVenueFromOnboarding).toHaveBeenCalledTimes(1)
+  })
 
   it('🔴 cobro abierto: 409 PLAN_CHARGE_PENDING y NO se toma el lock', async () => {
     progreso({ planActivationStatus: 'IN_PROGRESS', planStripeSubscriptionId: 'sub_1' })

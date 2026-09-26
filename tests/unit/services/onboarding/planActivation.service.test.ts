@@ -1626,7 +1626,10 @@ describe('🔴 Codex R12: hayCobroDelAltaSinCerrar — lo que consulta `complete
     })
 
   beforeEach(() => {
-    prismaMock.venue.findMany.mockResolvedValue([{ stripeCustomerId: 'cus_1' }] as never)
+    prismaMock.venue.findMany.mockResolvedValue([{ id: 'venue-1', stripeCustomerId: 'cus_1' }] as never)
+    prismaMock.venueFeature.findMany.mockResolvedValue([])
+    prismaMock.billingObligationConflict.findMany.mockResolvedValue([])
+    prismaMock.feature.findMany.mockResolvedValue([{ code: 'CFDI', stripeProductId: 'prod_cfdi' }] as never)
   })
 
   it('sin intento en curso: no hay nada abierto (ni se consulta Stripe)', async () => {
@@ -1653,8 +1656,42 @@ describe('🔴 Codex R12: hayCobroDelAltaSinCerrar — lo que consulta `complete
     expect(await hayCobroDelAltaSinCerrar(base)).toBe(true)
   })
   it('🔴 Codex R14: una suscripción viva de OTRA cosa (CFDI) no es un cobro del alta: no bloquea Gratis', async () => {
-    lista([{ id: 'sub_cfdi', status: 'active', metadata: { featureCode: 'CFDI' } }])
+    lista([
+      {
+        id: 'sub_cfdi',
+        status: 'active',
+        metadata: { featureCode: 'CFDI' },
+        items: { data: [{ price: { id: 'price_cfdi', product: 'prod_cfdi' } }] },
+      },
+    ])
     expect(await hayCobroDelAltaSinCerrar(base)).toBe(false)
+  })
+  it.each([
+    [
+      'dos planes',
+      {
+        data: [
+          { price: { id: 'price_pro', product: 'prod_pro', lookup_key: 'plan_pro_monthly' } },
+          { price: { id: 'price_premium', product: 'prod_premium', lookup_key: 'plan_premium_monthly' } },
+        ],
+      },
+    ],
+    ['ítems incompletos', { has_more: true, data: [{ price: { id: 'price_cfdi', product: 'prod_cfdi' } }] }],
+    ['producto desconocido', { data: [{ price: { id: 'price_unknown', product: 'prod_unknown' } }] }],
+  ])('R15: %s no demuestra ausencia de un cobro pendiente', async (_caso, items) => {
+    lista([{ id: 'sub_legacy', status: 'active', metadata: {}, items }])
+    expect(await hayCobroDelAltaSinCerrar(base)).toBe(true)
+  })
+  it('R15: el precio de plan prevalece sobre metadata que dice CFDI', async () => {
+    lista([
+      {
+        id: 'sub_legacy',
+        status: 'active',
+        metadata: { featureCode: 'CFDI' },
+        items: { data: [{ price: { id: 'price_pro', product: 'prod_pro', lookup_key: 'plan_pro_monthly' } }] },
+      },
+    ])
+    expect(await hayCobroDelAltaSinCerrar(base)).toBe(true)
   })
   it('una suscripción sin la llave que ya NO cobra (cancelada) no bloquea', async () => {
     lista([{ id: 'sub_vieja', status: 'canceled', metadata: {} }])

@@ -696,11 +696,14 @@ function candadoSiElCobroNoSeMovio(
   }
 }
 
-/** El candado no se tomó: si el alta NO está terminada, lo que cambió fue el cobro — se responde como cobro en curso. */
-async function siNoTerminoEsUnCobroEnCurso(organizationId: string): Promise<void> {
-  const actual = await prisma.onboardingProgress.findUnique({ where: { organizationId }, select: { completedAt: true } })
-  if (actual && !actual.completedAt) {
-    throw new ConflictError('Tu pago se está confirmando. Vuelve a intentar en unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
+/** `completedAt` también es el candado temprano; sólo la marca de la organización acredita el cierre final. */
+async function exigirAltaTerminada(organizationId: string): Promise<void> {
+  const actual = await prisma.onboardingProgress.findUnique({
+    where: { organizationId },
+    select: { completedAt: true, organization: { select: { onboardingCompletedAt: true } } },
+  })
+  if (!actual?.completedAt || !actual.organization.onboardingCompletedAt) {
+    throw new ConflictError('Tu registro se está terminando. Vuelve a intentar en unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
   }
 }
 
@@ -771,9 +774,9 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
       },
     })
 
-    // If no rows updated, another request already completed onboarding
+    // Otra petición tiene el candado, terminó el alta o movió el cobro desde nuestra lectura.
     if (lockResult.count === 0) {
-      await siNoTerminoEsUnCobroEnCurso(organizationId)
+      await exigirAltaTerminada(organizationId)
       const existingVenue = await prisma.venue.findFirst({
         where: { organizationId },
         select: { id: true, slug: true, name: true, status: true },
@@ -795,15 +798,7 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
         return
       }
 
-      // Rare edge case: completedAt is set but no venue exists
-      // This could happen if previous venue creation failed after setting completedAt
-      // Reset the lock and let them retry
-      logger.warn(`⚠️ Onboarding marked complete but no venue found for organization ${organizationId} - resetting lock`)
-      await prisma.onboardingProgress.update({
-        where: { organizationId },
-        data: { completedAt: null },
-      })
-      throw new BadRequestError('Previous onboarding attempt failed. Please try again.')
+      throw new ConflictError('Tu registro se está terminando. Vuelve a intentar en unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
     }
 
     logger.info(`🔒 Acquired onboarding lock for organization ${organizationId}`)
@@ -845,7 +840,10 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
       throw venueError
     }
 
-    // No need to call completeOnboarding - we already set completedAt above
+    await prisma.organization.update({
+      where: { id: organizationId },
+      data: { onboardingCompletedAt: new Date() },
+    })
 
     logger.info(`✅ Onboarding completed for organization: ${organizationId}, venue: ${result.venue.id}, user: ${authContext.userId}`)
 
@@ -1240,9 +1238,9 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
       },
     })
 
-    // If no rows updated, another request already completed onboarding
+    // Otra petición tiene el candado, terminó el alta o movió el cobro desde nuestra lectura.
     if (lockResult.count === 0) {
-      await siNoTerminoEsUnCobroEnCurso(organizationId)
+      await exigirAltaTerminada(organizationId)
       const existingVenue = await prisma.venue.findFirst({
         where: { organizationId },
         select: { id: true, slug: true, name: true, status: true },
@@ -1260,13 +1258,7 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
         return
       }
 
-      // Rare edge case: completedAt is set but no venue exists — reset lock
-      logger.warn(`⚠️ V2 Onboarding marked complete but no venue found for organization ${organizationId} - resetting lock`)
-      await prisma.onboardingProgress.update({
-        where: { organizationId },
-        data: { completedAt: null },
-      })
-      throw new BadRequestError('Previous setup attempt failed. Please try again.')
+      throw new ConflictError('Tu registro se está terminando. Vuelve a intentar en unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
     }
 
     logger.info(`🔒 Acquired V2 onboarding lock for organization ${organizationId}`)
@@ -1357,8 +1349,7 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
     // per the tier chosen in the wizard). FREE skips this entirely — no base
     // subscription, the venue resolves as Free. The hard gate above already
     // guaranteed a paymentMethodId for paid tiers when the feature is enabled.
-    // Wrapped in try/catch so a Stripe hiccup never blocks onboarding completion
-    // (the venue already exists at this point).
+    // Un fallo sin cobro puede terminar en Gratis; un cobro anterior o incierto debe quedar recuperable.
     // 🔴 Quien trae una CAMPAÑA reclamada NO se cobra por aquí (auditoría de Codex, 18-sep).
     // Este carril aplica la promoción legacy de $694.84 y no sabe nada de la ficha de campaña: si
     // cobrara, el negocio que llegó por el anuncio de $22 pagaría otro precio y su redención
@@ -1374,9 +1365,11 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
       // Its shape lives in planPricing.constants.ts (LEGACY_INTRO_OFFER), the single source that
       // mirrors the Stripe coupon seeded by scripts/seed-plan-pro.ts.
       const introPromo = isLegacyIntroEligible(paidTier, planData.interval, planData.payNow)
-      // 🔴 V5-A paso 6: el cobro pasa por la regla común (candado por negocio + lo VIVO en Stripe) y el acceso lo escribe
-      // la entrega. `intentoCobrar` separa «la regla no dejó cobrar» (nada se cobró) de «el cobro falló» (pudo cobrarse).
+      // La regla común autoriza el cobro y la entrega escribe el acceso. `intentoCobrar` sólo describe esta petición;
+      // un cobro anterior o reusado sigue pendiente hasta que la entrega termine, aunque aquí no se cobre otra vez.
       let intentoCobrar = false
+      let cobroSinEntregar =
+        progress.planActivationStatus === PLAN_ACTIVATION_STATUS.IN_PROGRESS || Boolean(progress.planStripeSubscriptionId)
       try {
         const venueRecord = await prisma.venue.findUnique({
           where: { id: result.venue.id },
@@ -1435,6 +1428,7 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
         )
         // Fuera del candado de la regla (la entrega toma el mismo): ve las dos filas de plan y deriva el tier del precio.
         // Si falla o NO concede, el cargo ya ocurrió: lo trata el `catch` como cobro en curso (Codex C5).
+        cobroSinEntregar = true
         const concedido = await entregarSuscripcionDePlan({
           venueId: venue.id,
           subscriptionId: cobro.subscriptionId,
@@ -1511,10 +1505,10 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
           await marcarPlanCobrado(organizationId, vivas[0])
           await prisma.venue.update({ where: { id: result.venue.id }, data: { planTier: tierDe(recuperado!.featureCode, paidTier) } })
           logger.warn(`⚠️ V2 completion: el negocio ya tenía un plan cobrando (${vivas[0]}); se entregó sin cobrar otra vez`)
-        } else if (!intentoCobrar) {
+        } else if (!intentoCobrar && !cobroSinEntregar) {
           // La regla no dejó cobrar por otra razón (otra compra en curso, algo que no reconoce): no hubo cargo.
           logger.error(`⚠️ ${tierCode}: la regla común no dejó cobrar al terminar el alta de ${result.venue.id}`, planErr)
-        } else if (planActivationService.esErrorDeTarjeta(planErr)) {
+        } else if (!cobroSinEntregar && planActivationService.esErrorDeTarjeta(planErr)) {
           // El banco rechazó: no hubo cobro. El negocio queda en Gratis, como siempre.
           logger.error(`⚠️ ${tierCode} subscription declined for venue ${result.venue.id}`, planErr)
         } else {

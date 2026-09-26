@@ -39,6 +39,7 @@ import {
   planLookupKey,
 } from '../stripe.service'
 import { autorizarObligacionNueva } from '../access/autorizarObligacionNueva'
+import { inventarioDeObligaciones } from '../access/inventarioDeObligaciones'
 import { ensureVenueForOnboarding } from './ensureVenue.service'
 import { parseV2Plan } from './onboardingProgress.service'
 import {
@@ -301,24 +302,6 @@ async function buscarSuscripcionDelIntento(
 }
 
 /**
- * ¿El cliente tiene alguna suscripción DE PLAN cobrando o a medio cobrar? (`canceled` e `incomplete_expired` ya no
- * cobran.) Sólo de PLAN (Codex R14): una función suelta viva —CFDI, por ejemplo— no es un cobro del alta y bloquearía
- * la salida a Gratis para siempre. Las de plan traen `metadata.featureCode` PLAN_*; sin metadata decide el precio.
- */
-async function clienteTieneSuscripcionDePlanViva(customerId: string): Promise<boolean> {
-  const vivas: Stripe.Subscription[] = []
-  await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 100 }).autoPagingEach(sub => {
-    if (sub.status !== 'canceled' && sub.status !== 'incomplete_expired') vivas.push(sub)
-    return true
-  })
-  for (const sub of vivas) {
-    const codigo = sub.metadata?.featureCode
-    if (codigo ? codigo.startsWith('PLAN_') : (await tierQueVendeLaSuscripcion(sub)) !== null) return true
-  }
-  return false
-}
-
-/**
  * ¿Queda un cobro de plan del alta SIN cerrar? Lo pregunta `complete` antes de dejar terminar el alta en Gratis.
  *
  * 🔴 Codex R12: exigir sólo `planStripeSubscriptionId` dejaba pasar el caso peor — Stripe cobró pero la respuesta se
@@ -344,7 +327,7 @@ export async function hayCobroDelAltaSinCerrar(progress: {
       orderBy: { id: 'asc' },
       take: 100,
     })
-    for (const { stripeCustomerId } of conCliente) {
+    for (const { id, stripeCustomerId } of conCliente) {
       try {
         const { encontrada, cubrioTodo } = await buscarSuscripcionDelIntento(stripeCustomerId as string, llave)
         if (!cubrioTodo) return true
@@ -352,7 +335,14 @@ export async function hayCobroDelAltaSinCerrar(progress: {
         // 🔴 Codex R13: el carril viejo de `complete` cobra con otra llave (`onboarding-complete:<org>`) y sin ese metadata,
         // y su cobro dudoso también deja IN_PROGRESS. Un negocio que aún no termina su alta no tiene por qué tener NINGUNA
         // suscripción de plan viva: cualquiera que esté cobrando (o a medio cobrar) cuenta como abierta.
-        if (await clienteTieneSuscripcionDePlanViva(stripeCustomerId as string)) return true
+        // El inventario común distingue una función conocida de un plan, de varios planes y de lo desconocido.
+        // No poder determinar UN tier nunca demuestra que no haya cobro; los ítems incompletos también bloquean.
+        const inventario = await inventarioDeObligaciones(id)
+        if (
+          inventario.conCambiosProgramados.length ||
+          inventario.vivas.some(sub => sub.proyecciones.some(p => p.tipo === 'PLAN' || p.tipo === 'DESCONOCIDO'))
+        )
+          return true
       } catch (error) {
         logger.warn('complete: no se pudo consultar Stripe por un cobro del alta sin cerrar — se trata como abierto', {
           organizationId: progress.organizationId,
