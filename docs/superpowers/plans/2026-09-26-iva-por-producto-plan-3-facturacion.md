@@ -28,6 +28,8 @@ recaptura si **nunca se envió** o si el PAC lo **rechazó** con un código de r
 que Facturapi deduplica). Además: `pending` (202) ya no se toma por timbrado, consultar no invalida el envío en curso, delivery se
 bloquea también al conectarlo, y se quita el re-sellado del finalizador.
 
+**v4.1 (26-sep): AUTORIZADO por Codex en la ronda 4** (`informe-codex-plan-3-ronda4.md`), con el rechazo tardío tras `RESET` y la prueba 9 ya ajustados.
+
 **v4 (26-sep) — cierres de la ronda 3 de Codex** (`informe-codex-plan-3-ronda3.md`: RECHAZO, 4 P1 + 2 P2). Se QUITA la declaración
 humana de los 60 minutos (convertía incertidumbre en rechazo: un incierto sin deduplicación queda escalado a soporte, no liberado). La
 recaptura repite la exclusión con la global y comprueba «nunca enviado o rechazado» dentro de su propio CAS. «Rechazado» es una lista
@@ -482,7 +484,7 @@ Aplicar sólo a la base de pruebas (imprime la URL antes), `npx prisma generate`
 4. **Timbrar desde la entrada:** si `enviadoAt IS NULL`, fijarlo con CAS sobre `attempts`. Luego `provider.createInvoice({ ...paramsDesdeEntrada(entrada, idempotencyKey + '#' + attempts), idempotencyKey: <la misma llave> })`. El adaptador (`facturapi.provider.ts`) debe **conservar el código HTTP y el código de error** del PAC — el SDK 4.17 los descarta (`node_modules/facturapi/dist/index.es.js:~799`), así que `invoices.create` va por una llamada HTTP propia del adaptador que lance `ProviderHttpError { status, code, message }`. Errores, siempre con CAS sobre `attempts`:
    - `ProviderHttpError` con `code` en `RECHAZOS_CONFIRMADOS` **en el primer envío de la versión** ⇒ `STAMP_FAILED` + `falloDefinitivo = true` (Rechazado);
    - cualquier otro (código desconocido, rechazo de un reenvío, 5xx, red, timeout, respuesta ilegible) ⇒ `STAMP_FAILED` + `falloDefinitivo = false` (Incierto).
-   Ambas escrituras: `WHERE id AND attempts = <versión> AND status = 'STAMPING'`.
+   Ambas escrituras: `WHERE id AND attempts = <versión> AND status = 'STAMPING'`. **Excepción (Codex r4):** el rechazo confirmado del primer envío también se guarda si la fila ya pasó a `STAMP_FAILED` por un `RESET` de la MISMA versión (`WHERE id AND attempts = <versión> AND status IN ('STAMPING','STAMP_FAILED') AND falloDefinitivo = false`); nunca sobre `STAMPED`, `CANCELLED` ni otra versión.
    Los sellos se QUEDAN; sólo se liberan en la Transacción B del paso 3.
    Respuesta `pending` (202) ⇒ guardar `facturapiId`, la fila sigue `STAMPING`; nada de `STAMPED` sin UUID. `toStamped` y `toSummary` dejan de convertir cualquier estado no cancelado en `valid`: `pending` se reporta como `pending`.
 5. **Éxito (`valid` con UUID):** finalizador de la Tarea 7 con `version = attempts` (en esta tarea, deja el `persistCfdi` STAMPED como hoy pero con CAS sobre `attempts`; la Tarea 7 lo envuelve). Si el CAS no escribe (otra versión), no se pisa: `logger.error('🚨 …')` + `ActivityLog` `CFDI_TIMBRE_DUPLICADO` con los dos UUID.
@@ -499,7 +501,8 @@ Aplicar sólo a la base de pruebas (imprime la URL antes), `npx prisma generate`
   6. dos emisiones concurrentes de la misma orden (dos `issueCfdiForOrder` en `Promise.all`) ⇒ UN solo `createInvoice` y el otro recibe 409 o el éxito idempotente;
   7. una orden de OTRO venue ⇒ 404 sin fuga (regresión del guard);
   8. **(Review Focus 1)** primer intento con TIMEOUT ⇒ Incierto; reintento con búsqueda negativa, **aunque hayan pasado horas** ⇒ nunca recaptura: con la deduplicación probada, reenvía la MISMA entrada con el mismo `external_id` e `idempotency_key` y sin subir `attempts`; sin ella, 409 sin ningún `createInvoice` nuevo;
-  9. respuesta 500 con cuerpo JSON ⇒ Incierto (no Rechazado); respuesta 422 ⇒ Rechazado y el siguiente intento recaptura;
+  9. respuesta 500 con cuerpo JSON ⇒ Incierto (no Rechazado); respuesta con un `code` de `RECHAZOS_CONFIRMADOS` en el primer envío ⇒ Rechazado y el siguiente intento recaptura;
+  9b. **(pausa controlada)** el barrido hace `RESET` (misma versión) y DESPUÉS llega el rechazo confirmado del primer envío ⇒ se guarda `falloDefinitivo = true` y el siguiente intento recaptura; el mismo rechazo sobre una fila `STAMPED` ⇒ no escribe;
   10. **(pausa controlada)** A se está procesando; B consulta (búsqueda negativa, 409); luego A termina ⇒ A se finaliza normalmente: la consulta de B no subió `attempts` y NO hay `CFDI_TIMBRE_DUPLICADO`;
   10b. respuesta `pending` sin UUID ⇒ la fila sigue `STAMPING` con `facturapiId`, no `STAMPED`; la conciliación la completa cuando el PAC da el UUID;
   10c. `VALIDATION_FAILED` por contrato DESCONOCIDO; se confirma el contrato y se reintenta ⇒ «nunca enviado»: recaptura y timbra;
