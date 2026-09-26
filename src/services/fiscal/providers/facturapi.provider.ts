@@ -27,12 +27,37 @@ import {
 const toPesos = (cents: number): number => Math.round(cents) / 100
 const toCents = (pesos: number): number => Math.round(pesos * 100)
 
+/** Sandbox probe 2026-09-26: duplicate POST returns 409, not the existing document. */
+export const FACTURAPI_DEDUPLICA = false
+export const RECHAZOS_CONFIRMADOS = ['invalid_request', 'product_key_not_found', 'invoice_stamping_validation_error'] as const
+
+export class ProviderHttpError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly code: string | null,
+    message: string,
+  ) {
+    super(message)
+    this.name = 'ProviderHttpError'
+  }
+}
+
+export function esRechazoConfirmado(error: unknown, primerEnvio: boolean): boolean {
+  return (
+    primerEnvio &&
+    error instanceof ProviderHttpError &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    RECHAZOS_CONFIRMADOS.some(code => code === error.code)
+  )
+}
+
 /** facturapi adapter. Instantiate per-emisor with that org's secret key (or the test key in sandbox). */
 export class FacturapiProvider implements FiscalProvider {
   readonly name = 'facturapi'
   private client: Facturapi
 
-  constructor(apiKey: string) {
+  constructor(private readonly apiKey: string) {
     if (!apiKey) throw new Error('FacturapiProvider requires an API key')
     this.client = new Facturapi(apiKey)
   }
@@ -172,15 +197,7 @@ export class FacturapiProvider implements FiscalProvider {
       payment_form: params.formaPago,
       payment_method: params.metodoPago,
       series: params.serie,
-      // NOTE: facturapi rejects idempotency fields on invoices.create (neither query `idempotency_key`
-      // nor body `i_key` are accepted inputs — verified live in sandbox). Idempotency is enforced at
-      // our service layer via the unique `Cfdi.idempotencyKey` (pre-check before calling the PAC).
-      // `params.idempotencyKey` stays in the interface for that orchestration use; not forwarded here.
-      //
-      // external_id, however, IS accepted as a body field on invoices.create and is stored on the
-      // PAC document — confirmed via facturapi Invoice type (external_id?: string | null). We use it
-      // to stamp our idempotencyKey onto the document so the reconcile job can look it up
-      // deterministically via GET /v2/invoices?external_id= instead of relying on attribute search.
+      idempotency_key: params.idempotencyKey,
       ...(params.externalId ? { external_id: params.externalId } : {}),
       // CFDI relacionado — mismo campo que usa la nota de crédito (`related_documents`), con
       // relationship '04' (sustitución). Se omite cuando no hay relación: mandarlo vacío lo rechaza.
@@ -210,7 +227,22 @@ export class FacturapiProvider implements FiscalProvider {
       })),
     }
     try {
-      const inv = await this.client.invoices.create(payload)
+      const response = await fetch('https://www.facturapi.io/v2/invoices', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(30_000),
+      })
+      // The SDK discards HTTP status and PAC code; neither may be guessed from message text.
+      const inv = await response.json()
+      if (!response.ok)
+        throw new ProviderHttpError(
+          response.status,
+          typeof inv.code === 'string' ? inv.code : null,
+          inv.message ?? `Facturapi HTTP ${response.status}`,
+        )
+      if (!inv || typeof inv.id !== 'string' || !['valid', 'pending', 'canceled'].includes(inv.status))
+        throw new Error('Respuesta ilegible de Facturapi')
       return this.toStamped(inv)
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
@@ -511,7 +543,7 @@ export class FacturapiProvider implements FiscalProvider {
     const data = res?.data ?? []
     if (data.length === 0) return null
     // Prefer the first valid document; fall back to the first result (e.g. canceled)
-    const valid = data.find((inv: any) => inv.status !== 'canceled')
+    const valid = data.find((inv: any) => inv.status === 'valid' && inv.uuid)
     return this.toSummary(valid ?? data[0])
   }
 
@@ -604,12 +636,12 @@ export class FacturapiProvider implements FiscalProvider {
   private toStamped(inv: Awaited<ReturnType<typeof this.client.invoices.retrieve>>): StampedInvoice {
     return {
       providerInvoiceId: inv.id,
-      uuid: inv.uuid,
+      uuid: inv.uuid ?? null,
       serie: inv.series ?? null,
       folio: inv.folio_number != null ? String(inv.folio_number) : null,
       totalCents: toCents(Number(inv.total ?? 0)),
       stampedAt: inv.stamp?.date ? new Date(inv.stamp.date) : new Date(),
-      status: inv.status === 'canceled' ? 'canceled' : 'valid',
+      status: inv.status === 'valid' ? 'valid' : inv.status === 'canceled' ? 'canceled' : 'pending',
     }
   }
 
@@ -620,7 +652,7 @@ export class FacturapiProvider implements FiscalProvider {
       serie: inv.series ?? null,
       folio: inv.folio_number != null ? String(inv.folio_number) : null,
       totalCents: toCents(Number(inv.total ?? 0)),
-      status: inv.status === 'canceled' ? 'canceled' : 'valid',
+      status: inv.status === 'valid' ? 'valid' : inv.status === 'canceled' ? 'canceled' : 'pending',
       customerTaxId: inv.customer?.tax_id ?? null,
       isGlobal: inv.global != null,
       stampedAt: inv.stamp?.date ? new Date(inv.stamp.date) : null,

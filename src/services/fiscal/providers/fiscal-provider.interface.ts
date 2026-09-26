@@ -175,12 +175,12 @@ export interface GlobalInvoiceParams {
 
 export interface StampedInvoice {
   providerInvoiceId: string
-  uuid: string // folio fiscal
+  uuid: string | null // null mientras el PAC sigue procesando
   serie: string | null
   folio: string | null
   totalCents: number
   stampedAt: Date
-  status: 'valid' | 'canceled'
+  status: 'valid' | 'canceled' | 'pending'
 }
 
 /**
@@ -195,7 +195,7 @@ export interface ProviderInvoiceSummary {
   serie: string | null
   folio: string | null
   totalCents: number
-  status: 'valid' | 'canceled'
+  status: 'valid' | 'canceled' | 'pending'
   /** receptor RFC (tax_id) — used to match individual CFDIs by RFC, globals by XAXX010101000 */
   customerTaxId: string | null
   /** true when the PAC document is a factura global (has a global period block) */

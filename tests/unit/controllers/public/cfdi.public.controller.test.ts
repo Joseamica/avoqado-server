@@ -1,3 +1,4 @@
+import { ConflictError } from '../../../../src/errors/AppError'
 // tests/unit/controllers/public/cfdi.public.controller.test.ts
 //
 // Unit tests for the public autofactura controller (Flow A).
@@ -470,4 +471,17 @@ describe('getAutofacturaStatusController (GET /receipt/:accessKey/cfdi)', () => 
     // Availability must not be probed when there's no order
     expect(mockLoadOrder).not.toHaveBeenCalled()
   })
+})
+
+it.each([
+  'La factura de esta venta se está procesando; intenta de nuevo en unos minutos.',
+  'La venta está incluida en una factura global.',
+])('autofactura conserva el 409 tipado: %s', async message => {
+  mockFindReceipt.mockResolvedValue(makeReceipt())
+  mockFindCfdi.mockResolvedValue(null)
+  mockIssueCfdi.mockRejectedValue(new ConflictError(message))
+  const res = makeRes()
+  await autofacturaController(makeReq({ accessKey: 'key-abc' }) as any, res as any)
+  expect(res.status).toHaveBeenCalledWith(409)
+  expect(res.json).toHaveBeenCalledWith({ error: message })
 })

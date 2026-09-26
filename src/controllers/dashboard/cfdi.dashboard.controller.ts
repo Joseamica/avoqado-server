@@ -1,3 +1,4 @@
+import { ConflictError } from '../../errors/AppError'
 /**
  * CFDI Dashboard Controller
  *
@@ -118,6 +119,10 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
       },
     })
   } catch (err: unknown) {
+    if (err instanceof ConflictError) {
+      res.status(409).json({ error: err.message })
+      return
+    }
     const message = err instanceof Error ? err.message : String(err)
     // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
     const aviso = `[cfdi.controller] issue failed for order ${orderId}: ${message}`

@@ -24,7 +24,7 @@ jest.mock('../../../../src/middlewares/checkPermission.middleware', () => ({
   },
 }))
 
-import { SatCatalogUnavailableError } from '../../../../src/errors/AppError'
+import { SatCatalogUnavailableError, ConflictError } from '../../../../src/errors/AppError'
 
 const mockSearchSatCatalog = jest.fn()
 jest.mock('../../../../src/services/fiscal/satCatalogLookup.service', () => ({
@@ -1571,4 +1571,15 @@ describe('nivel del log en los fallos de facturación', () => {
     expect(log.error).toHaveBeenCalled()
     expect(log.warn).not.toHaveBeenCalled()
   })
+})
+
+it.each([
+  'La factura de esta venta se está procesando; intenta de nuevo en unos minutos.',
+  'La venta está incluida en una factura global.',
+])('emisión devuelve el 409 tipado sin depender del texto: %s', async message => {
+  mockIssue.mockRejectedValue(new ConflictError(message))
+  const res = mockRes()
+  await issueCfdiForOrderController(mockReq(), res)
+  expect(res.status).toHaveBeenCalledWith(409)
+  expect(res.json).toHaveBeenCalledWith({ error: message })
 })

@@ -1,3 +1,4 @@
+import { ConflictError } from '../../errors/AppError'
 // src/controllers/public/cfdi.public.controller.ts
 /**
  * Public autofactura controller — Flow A customer self-service CFDI.
@@ -154,6 +155,10 @@ export async function autofacturaController(req: Request<{ accessKey: string }>,
       },
     })
   } catch (err: unknown) {
+    if (err instanceof ConflictError) {
+      res.status(409).json({ error: err.message })
+      return
+    }
     const message = err instanceof Error ? err.message : String(err)
 
     // Merchant disabled autofactura/facturacion — surface as 403, not 500

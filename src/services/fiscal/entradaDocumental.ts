@@ -61,10 +61,8 @@ export function capturarEntrada(
     )
   }
 
-  // `params.idempotencyKey` (el campo, no `externalId`) es sólo para orquestación interna del PAC —
-  // NUNCA se manda a facturapi (ver `facturapi.provider.ts::createInvoice`). Usar el orderId a secas
-  // es determinista y basta: la versión real (`<idempotencyKey>#<attempts>`) la pone `paramsDesdeEntrada`
-  // al reconstruir `externalId` para CADA intento.
+  // El orderId hace determinista la foto; cada envío sobreescribe AMBAS identidades
+  // (idempotencyKey y externalId) con la llave versionada del intento.
   const params = buildCreateInvoiceParams(
     assembleSaleInput(bundle.order, {
       receptor,

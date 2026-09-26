@@ -1,3 +1,4 @@
+import { withIssueTransaction } from '../../../__helpers__/issue-cfdi-transaction'
 // tests/unit/services/fiscal/cfdiConceptosPorTratamiento.test.ts
 // Plan 3 (IVA por producto), Tarea 3: conceptos por tratamiento.
 //
@@ -34,12 +35,12 @@ const orderMock = prisma.order.findUnique as jest.Mock
 const cfgMock = prisma.merchantFiscalConfig.findUnique as jest.Mock
 
 function depsDelMotor(createInvoice: jest.Mock): IssueCfdiDeps {
-  return {
+  return withIssueTransaction({
     findExistingCfdi: jest.fn().mockResolvedValue(null),
-    reserveCfdi: jest.fn().mockResolvedValue({}),
+    reserveCfdi: jest.fn().mockImplementation(async data => ({ id: 'cfdi1', ...data })),
     claimCfdi: jest.fn().mockResolvedValue(true),
     persistArtifacts: jest.fn().mockResolvedValue({}),
-    loadOrderForCfdi: loadOrderForCfdiFromDb,
+    loadOrderForCfdi: (id, opts) => loadOrderForCfdiFromDb(id, opts),
     resolveProvider: jest.fn().mockReturnValue({
       name: 'facturapi',
       createInvoice,
@@ -48,7 +49,7 @@ function depsDelMotor(createInvoice: jest.Mock): IssueCfdiDeps {
     } as any),
     storeArtifact: jest.fn().mockImplementation(async (_b, path) => `https://cdn/${path}`),
     persistCfdi: jest.fn().mockImplementation(async data => ({ id: 'cfdi1', ...data })),
-  }
+  })
 }
 
 /** Lo que la golden fija de UNA orden: payload, montos guardados y motivos (motor completo). */
@@ -83,7 +84,7 @@ async function resultadoDe(caso: any) {
   const fila = (deps.reserveCfdi as jest.Mock).mock.calls[0][0]
   // El motor manda al PAC exactamente el payload de (a), más su external_id.
   if (res.status === 'STAMPED') {
-    expect(createInvoice).toHaveBeenCalledWith({ ...payload, externalId: 'cfdi-order-o1' })
+    expect(createInvoice).toHaveBeenCalledWith({ ...payload, idempotencyKey: 'cfdi-order-o1#1', externalId: 'cfdi-order-o1#1' })
   } else {
     expect(createInvoice).not.toHaveBeenCalled()
   }

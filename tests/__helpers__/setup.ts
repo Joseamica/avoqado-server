@@ -438,6 +438,9 @@ const prismaMock: any = {
   // Lo demás que BLOQUEA el borrado de un venue desechable (ver liveDemoCleanup.service).
   commissionClawback: createMockModel(),
   merchantFiscalConfig: createMockModel(),
+  cfdi: createMockModel(),
+  orderItemSelloIva: createMockModel(),
+  cfdiGlobalOrden: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),

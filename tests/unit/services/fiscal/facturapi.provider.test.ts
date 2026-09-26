@@ -71,7 +71,14 @@ const BASE_CREATE_PARAMS = {
 }
 
 describe('FacturapiProvider', () => {
-  beforeEach(() => jest.clearAllMocks())
+  beforeEach(() => {
+    jest.clearAllMocks()
+    jest.spyOn(global, 'fetch').mockImplementation(async (_url, init) => {
+      const body = await mockCreate(JSON.parse(init!.body as string))
+      return new Response(JSON.stringify(body), { status: body?.status === 'pending' ? 202 : 200 })
+    })
+  })
+  afterEach(() => jest.restoreAllMocks())
 
   // ── createInvoice ──────────────────────────────────────────────────────────
 
@@ -82,11 +89,10 @@ describe('FacturapiProvider', () => {
     expect(result.uuid).toBe('UUID-123')
     expect(result.totalCents).toBe(11600)
     expect(mockCreate).toHaveBeenCalledTimes(1)
-    // facturapi rejects idempotency on create (query OR body, verified live) → adapter must NOT forward
-    // it; idempotency is enforced at our service layer via the unique Cfdi.idempotencyKey.
+    // The direct HTTP body carries the dedicated duplicate-prevention key.
     const body = mockCreate.mock.calls[0][0]
     expect(body.i_key).toBeUndefined()
-    expect(body.idempotency_key).toBeUndefined()
+    expect(body.idempotency_key).toBe('idem-1')
     expect(mockCreate.mock.calls[0][1]).toBeUndefined() // no second-arg query param
     // unit price sent to SDK is pesos, not cents
     const sentItems = body.items
@@ -271,6 +277,14 @@ describe('FacturapiProvider', () => {
     expect(result!.status).toBe('valid')
     // list was called with the external_id filter
     expect(mockList).toHaveBeenCalledWith(expect.objectContaining({ external_id: 'cfdi-order-o1' }))
+  })
+
+  it('getInvoice y findByExternalId conservan pending sin UUID', async () => {
+    mockRetrieve.mockResolvedValue({ id: 'pending-id', status: 'pending' })
+    mockList.mockResolvedValue({ data: [{ id: 'pending-id', status: 'pending' }] })
+    const provider = new FacturapiProvider('sk_test_x')
+    expect(await provider.getInvoice('pending-id')).toMatchObject({ status: 'pending', uuid: null })
+    expect(await provider.findByExternalId('identity')).toMatchObject({ status: 'pending', uuid: null })
   })
 
   it('findByExternalId returns null when the PAC returns an empty list', async () => {

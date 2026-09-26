@@ -1,3 +1,4 @@
+import { withIssueTransaction } from '../../../__helpers__/issue-cfdi-transaction'
 // tests/unit/services/fiscal/cfdi.service.test.ts
 import { Prisma } from '@prisma/client'
 import { issueCfdiForOrder, IssueCfdiDeps } from '../../../../src/services/fiscal/cfdi.service'
@@ -32,10 +33,10 @@ function makeDeps(over: Partial<IssueCfdiDeps> = {}): IssueCfdiDeps {
     stampedAt: new Date(),
     status: 'valid' as const,
   }
-  return {
+  return withIssueTransaction({
     findExistingCfdi: jest.fn().mockResolvedValue(null),
     // By default, reservation succeeds (no conflict)
-    reserveCfdi: jest.fn().mockResolvedValue({}),
+    reserveCfdi: jest.fn().mockImplementation(async data => ({ id: 'cfdi1', ...data })),
     // Por default este proceso gana el reclamo del intento (la carrera se prueba aparte)
     claimCfdi: jest.fn().mockResolvedValue(true),
     // Como el dep real: escribe sólo las URLs (jamás el estado) y devuelve la fila completa.
@@ -52,7 +53,10 @@ function makeDeps(over: Partial<IssueCfdiDeps> = {}): IssueCfdiDeps {
       subtotalCents: 10000,
       taxCents: 1600,
       totalCents: 11600,
+      paidCents: 11600,
       order: {
+        clasificacion: 'TODO_16',
+        renglonesOrigen: [],
         venueType: 'RESTAURANT',
         tipAmount: D(0),
         items: [
@@ -75,7 +79,7 @@ function makeDeps(over: Partial<IssueCfdiDeps> = {}): IssueCfdiDeps {
     storeArtifact: jest.fn().mockImplementation(async (_b, path) => `https://cdn/${path}`),
     persistCfdi: jest.fn().mockImplementation(async data => ({ id: 'cfdi1', ...data })),
     ...over,
-  }
+  })
 }
 
 describe('issueCfdiForOrder', () => {
@@ -119,7 +123,8 @@ describe('issueCfdiForOrder', () => {
     expect(createInvoice).toHaveBeenCalledTimes(1)
     const invoiceParams = createInvoice.mock.calls[0][0]
     // externalId must equal the idempotencyKey built from orderId
-    expect(invoiceParams.externalId).toBe('cfdi-order-o1')
+    expect(invoiceParams.externalId).toBe('cfdi-order-o1#1')
+    expect(invoiceParams.idempotencyKey).toBe('cfdi-order-o1#1')
   })
 
   it('REGRESSION: a GROSS (IVA-included) order stamps tax_included so the CFDI total == what was paid', async () => {
@@ -148,7 +153,10 @@ describe('issueCfdiForOrder', () => {
         subtotalCents: 10000,
         taxCents: 1600,
         totalCents: 11600,
+        paidCents: 11600,
         order: {
+          clasificacion: 'TODO_16',
+          renglonesOrigen: [],
           venueType: 'RESTAURANT',
           tipAmount: D(0),
           pricesIncludeIva: true, // ← gross convention
@@ -217,7 +225,7 @@ describe('issueCfdiForOrder', () => {
     expect(res.status).toBe('VALIDATION_FAILED')
     expect(res.reasons?.join(' ')).toMatch(/\$116\.00.*\$121\.80/)
     expect(deps.resolveProvider).not.toHaveBeenCalled()
-    expect((deps.persistCfdi as jest.Mock).mock.calls[0][0].status).toBe('VALIDATION_FAILED')
+    expect((deps.reserveCfdi as jest.Mock).mock.calls[0][0].status).toBe('VALIDATION_FAILED')
   })
 
   it('SOBRE SEGURO: una orden con unsupportedReasons NO llama al PAC y responde VALIDATION_FAILED con esa razón', async () => {

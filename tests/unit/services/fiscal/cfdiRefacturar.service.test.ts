@@ -1,3 +1,4 @@
+import { withIssueTransaction } from '../../../__helpers__/issue-cfdi-transaction'
 // tests/unit/services/fiscal/cfdiRefacturar.service.test.ts
 //
 // Testarudo, 24-sep-2026. Dos defectos que se veían como «Facturar dice éxito y no sale nada»:
@@ -72,7 +73,7 @@ function makeIssueDeps(over: Partial<IssueCfdiDeps> = {}): IssueCfdiDeps & { cre
     findExistingCfdi: jest.fn().mockResolvedValue(null),
     findOrderInvoices: jest.fn().mockResolvedValue([]),
     refreshPendingCancellation: jest.fn().mockImplementation(async (c: any) => c),
-    reserveCfdi: jest.fn().mockResolvedValue({}),
+    reserveCfdi: jest.fn().mockImplementation(async data => ({ id: 'nueva', ...data })),
     claimCfdi: jest.fn().mockResolvedValue(true),
     persistArtifacts: jest.fn().mockImplementation(async (_llave, urls) => ({ id: 'nueva', ...urls })),
     loadOrderForCfdi: jest.fn().mockResolvedValue({
@@ -87,7 +88,10 @@ function makeIssueDeps(over: Partial<IssueCfdiDeps> = {}): IssueCfdiDeps & { cre
       subtotalCents: 10000,
       taxCents: 1600,
       totalCents: 11600,
+      paidCents: 11600,
       order: {
+        clasificacion: 'TODO_16',
+        renglonesOrigen: [],
         venueType: 'RESTAURANT',
         tipAmount: D(0),
         items: [
@@ -112,7 +116,7 @@ function makeIssueDeps(over: Partial<IssueCfdiDeps> = {}): IssueCfdiDeps & { cre
     persistCfdi: jest.fn().mockImplementation(async data => ({ id: 'nueva', ...data })),
     ...over,
   }
-  return Object.assign(deps, { createInvoice })
+  return Object.assign(withIssueTransaction(deps), { createInvoice })
 }
 
 // ─── llaveDeEmision ────────────────────────────────────────────────────────────
@@ -180,7 +184,7 @@ describe('issueCfdiForOrder — venta con facturas previas', () => {
     expect(res.status).toBe('STAMPED')
     expect(res.alreadyIssued).toBeFalsy()
     expect(deps.createInvoice).toHaveBeenCalledTimes(1)
-    expect(deps.createInvoice.mock.calls[0][0].externalId).toBe('cfdi-order-o1-n2')
+    expect(deps.createInvoice.mock.calls[0][0].externalId).toBe('cfdi-order-o1-n2#1')
     expect((deps.reserveCfdi as jest.Mock).mock.calls[0][0].idempotencyKey).toBe('cfdi-order-o1-n2')
     expect((deps.persistCfdi as jest.Mock).mock.calls[0][0]).toMatchObject({ status: 'STAMPED', idempotencyKey: 'cfdi-order-o1-n2' })
   })
@@ -254,7 +258,7 @@ describe('issueCfdiForOrder — venta con facturas previas', () => {
     const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true, expectedVenueId: 'v1' }, deps)
     expect(res.status).toBe('STAMPED')
     expect(res.alreadyIssued).toBeFalsy()
-    expect(deps.createInvoice.mock.calls[0][0].externalId).toBe('cfdi-order-o1')
+    expect(deps.createInvoice.mock.calls[0][0].externalId).toBe('cfdi-order-o1#1')
   })
 })
 
@@ -266,19 +270,19 @@ describe('issueCfdiForOrder — permitir efectivo según quién factura', () => 
   it('el PERSONAL (STAFF_B, o sin flujo) pide permitir efectivo', async () => {
     const deps = makeIssueDeps()
     await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true, expectedVenueId: 'v1', flow: 'STAFF_B' }, deps)
-    expect(deps.loadOrderForCfdi).toHaveBeenCalledWith('o1', { permitirEfectivo: true })
+    expect(deps.loadOrderForCfdi).toHaveBeenCalledWith('o1', { permitirEfectivo: true }, expect.anything())
     ;(deps.loadOrderForCfdi as jest.Mock).mockClear()
     await issueCfdiForOrder(
       { orderId: 'o2', receptor, sandbox: true, expectedVenueId: 'v1' },
       makeIssueDeps({ loadOrderForCfdi: deps.loadOrderForCfdi }),
     )
-    expect(deps.loadOrderForCfdi).toHaveBeenCalledWith('o2', { permitirEfectivo: true })
+    expect(deps.loadOrderForCfdi).toHaveBeenCalledWith('o2', { permitirEfectivo: true }, expect.anything())
   })
 
   it('la AUTOFACTURA del cliente NO: respeta el interruptor del negocio', async () => {
     const deps = makeIssueDeps()
     await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true, expectedVenueId: 'v1', flow: 'AUTOFACTURA_A' }, deps)
-    expect(deps.loadOrderForCfdi).toHaveBeenCalledWith('o1', { permitirEfectivo: false })
+    expect(deps.loadOrderForCfdi).toHaveBeenCalledWith('o1', { permitirEfectivo: false }, expect.anything())
   })
 })
 

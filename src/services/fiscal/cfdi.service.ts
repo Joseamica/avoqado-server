@@ -1,4 +1,11 @@
 // src/services/fiscal/cfdi.service.ts
+import { ConflictError } from '../../errors/AppError'
+import { bloquearOrdenParaFacturar, tomarAdmisionCompartida } from './admisionIva'
+import { excluirSiEstaEnGlobal } from './exclusionGlobal'
+import { capturarEntrada, huellaDeEntrada, leerEntrada, paramsDesdeEntrada, EntradaDocumentalV1 } from './entradaDocumental'
+import { sellarRenglones, liberarSellosDe } from './sellosIva'
+import { FACTURAPI_DEDUPLICA, esRechazoConfirmado } from './providers/facturapi.provider'
+import type { StampedInvoice, ProviderInvoiceSummary } from './providers/fiscal-provider.interface'
 import { CsdStatus, FiscalProviderType, PaymentMethod, VenueType, CfdiStatus, CfdiFlow, Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
@@ -190,15 +197,16 @@ export interface IssueCfdiDeps {
   findOrderInvoices?: (orderId: string) => Promise<any[]>
   /** Le pregunta al PAC cómo va una cancelación que quedó «en trámite» (ver `refreshPendingCancellation`). */
   refreshPendingCancellation?: (cfdi: any, opts: { sandbox: boolean }) => Promise<any>
-  loadOrderForCfdi: (orderId: string, opts?: LoadOrderForCfdiOpts) => Promise<LoadedOrderBundle | null>
+  loadOrderForCfdi: (orderId: string, opts?: LoadOrderForCfdiOpts, tx?: Prisma.TransactionClient) => Promise<LoadedOrderBundle | null>
   resolveProvider: typeof resolveFiscalProvider
   storeArtifact: (buffer: Buffer, path: string, contentType: string) => Promise<string>
-  persistCfdi: (data: Record<string, any>) => Promise<any>
+  persistCfdi: (data: Record<string, any>, where?: Prisma.CfdiWhereInput) => Promise<any>
   /**
    * Reserves the idempotency slot BEFORE calling the PAC — prevents concurrent double-stamp.
    * Must INSERT a row with status:'STAMPING'. On unique-key conflict the caller handles P2002.
    */
-  reserveCfdi: (data: Record<string, any>) => Promise<any>
+  reserveCfdi: (data: Record<string, any>, tx?: Prisma.TransactionClient) => Promise<any>
+  runInTransaction?: <T>(work: (tx: Prisma.TransactionClient) => Promise<T>) => Promise<T>
   /**
    * RECLAMA un intento existente para reintentarlo. Devuelve si ESTE proceso se lo llevó.
    *
@@ -212,7 +220,7 @@ export interface IssueCfdiDeps {
    * Guarda SÓLO las URLs de los archivos. Nunca toca `status`: entre el timbre y la descarga otra
    * petición pudo cancelar el CFDI, y reescribir el estado aquí lo resucitaría (Codex P1-4).
    */
-  persistArtifacts: (idempotencyKey: string, urls: { xmlUrl: string; pdfUrl: string }) => Promise<any>
+  persistArtifacts: (idempotencyKey: string, urls: { xmlUrl: string; pdfUrl: string }, version?: number) => Promise<any>
 }
 
 export interface IssueCfdiResult {
@@ -260,8 +268,9 @@ export const STAMPING_TTL_MS = 3 * 60_000
 
 export async function issueCfdiForOrder(
   params: { orderId: string; receptor: IssueReceptor; sandbox: boolean; flow?: 'STAFF_B' | 'AUTOFACTURA_A'; expectedVenueId?: string },
-  deps: IssueCfdiDeps = defaultDeps,
+  overrides: Partial<IssueCfdiDeps> = {},
 ): Promise<IssueCfdiResult> {
+  const deps = { ...defaultDeps, ...overrides }
   let idempotencyKey = `cfdi-order-${params.orderId}`
 
   // 0. ¿La venta ya tuvo factura? Una sola factura VIGENTE por venta; después de cancelarla (confirmado
@@ -306,7 +315,7 @@ export async function issueCfdiForOrder(
     if (enCurso) throw new Error('CFDI en proceso para esta orden') // → 409
   }
 
-  // 1. Idempotency — never double-stamp (facturapi has no idempotency; we own it)
+  // 1. Idempotency — consult the local reservation before selecting its protocol.
   const existing = await deps.findExistingCfdi(idempotencyKey)
   if (existing && existing.status === 'STAMPED') {
     // Tenant isolation ANTES del retorno idempotente: sin esto, venue B obtenía las URLs del CFDI de A
@@ -317,7 +326,9 @@ export async function issueCfdiForOrder(
     return { status: 'STAMPED', cfdi: existing }
   }
 
-  // 2. Load
+  if (!existing || existing.protocoloIva === 1) return emitirConEntrada(params, idempotencyKey, deps)
+
+  // 2. Load (legacy rows only)
   // El personal (Pedidos → Facturar) factura a propósito; la autofactura del cliente respeta el interruptor.
   const bundle = await deps.loadOrderForCfdi(params.orderId, { permitirEfectivo: (params.flow ?? 'STAFF_B') === 'STAFF_B' })
   if (!bundle) throw new Error(`Order ${params.orderId} not found or has no fiscal emisor configured`)
@@ -437,6 +448,13 @@ export async function issueCfdiForOrder(
     return { status: 'STAMP_FAILED', cfdi }
   }
 
+  if (stamped.status !== 'valid' || !stamped.uuid) {
+    await deps.persistCfdi(
+      baseCfdiData(params, bundle, idempotencyKey, invoiceParams, 'STAMPING', { facturapiId: stamped.providerInvoiceId }),
+    )
+    throw new ConflictError('CFDI en proceso para esta orden')
+  }
+
   // 6. 🔴 Persistir el TIMBRE de inmediato, ANTES de tocar Storage. El documento ya existe ante el SAT:
   //    si la descarga o la subida fallan, la fila tiene que conservar uuid/serie/folio o quedamos con un
   //    CFDI real que no sabemos identificar (pasó el 21-sep con la factura de Laura: 13 min en STAMPING
@@ -476,6 +494,324 @@ export async function issueCfdiForOrder(
   return { status: 'STAMPED', cfdi }
 }
 
+const PROCESANDO = 'La factura de esta venta se está procesando; intenta de nuevo en unos minutos.'
+type IssueParams = Parameters<typeof issueCfdiForOrder>[0]
+
+/** Reservar y recapturar son las únicas rutas que leen la venta viva. El PAC sólo recibe la foto. */
+async function emitirConEntrada(params: IssueParams, idempotencyKey: string, deps: IssueCfdiDeps): Promise<IssueCfdiResult> {
+  const transaction = deps.runInTransaction ?? defaultDeps.runInTransaction!
+  async function admission(tx: Prisma.TransactionClient) {
+    const order = await bloquearOrdenParaFacturar(tx, params.orderId)
+    if (!order || (params.expectedVenueId && order.venueId !== params.expectedVenueId)) throw new Error(`Order ${params.orderId} not found`)
+    await tomarAdmisionCompartida(tx, order.organizationId)
+    const motivo = await excluirSiEstaEnGlobal(tx, params.orderId)
+    if (motivo) throw new ConflictError(motivo)
+    // findFirst answers existence without silently truncating the order's invoice history.
+    const alive = await tx.cfdi.findFirst({
+      where: {
+        orderId: params.orderId,
+        venueId: order.venueId,
+        isGlobal: false,
+        type: 'INGRESO',
+        AND: [
+          { OR: [{ idempotencyKey: null }, { idempotencyKey: { not: idempotencyKey } }] },
+          { status: { not: 'VALIDATION_FAILED' } },
+          { OR: [{ status: { not: 'STAMP_FAILED' } }, { falloDefinitivo: false }] },
+          { OR: [{ status: { not: 'CANCELLED' } }, { cancelStatus: null }, { cancelStatus: { notIn: ['ACCEPTED', 'CANCELLED'] } }] },
+        ],
+      },
+    })
+    if (alive) throw new ConflictError('CFDI en proceso para esta orden')
+  }
+  async function capture(tx: Prisma.TransactionClient) {
+    const bundle = await deps.loadOrderForCfdi(params.orderId, { permitirEfectivo: (params.flow ?? 'STAFF_B') === 'STAFF_B' }, tx)
+    if (!bundle) throw new Error(`Order ${params.orderId} not found or has no fiscal emisor configured`)
+    if (params.expectedVenueId && bundle.venueId !== params.expectedVenueId) throw new Error(`Order ${params.orderId} not found`)
+    if (!bundle.facturacionEnabled) throw new Error('Facturación no habilitada para este comercio')
+    if (params.flow === 'AUTOFACTURA_A' && !bundle.autofacturaEnabled) throw new Error('Autofactura no habilitada para este comercio')
+    const entrada = capturarEntrada(bundle, params.receptor, params.orderId)
+    const validation = validateBeforeStamp({
+      csdStatus: bundle.emisor.csdStatus,
+      formaPago: entrada.params.formaPago,
+      receptor: params.receptor,
+      items: entrada.params.items,
+      expectedSubtotalCents: entrada.montos.subtotalCents,
+      expectedTaxCents: entrada.montos.taxCents,
+      expectedTotalCents: entrada.montos.totalCents,
+      isGlobal: false,
+    })
+    const reasons = motivosParaMostrar(validation.reasons, bundle.unsupportedReasons ?? [])
+    const documentoCents = totalDelDocumentoCents(bundle.order)
+    if (!bundle.unsupportedReasons?.length && bundle.paidCents !== undefined && bundle.paidCents !== documentoCents) {
+      const pesos = (c: number) => `$${(c / 100).toFixed(2)}`
+      reasons.push(
+        `El total de la factura (${pesos(documentoCents)}) no coincide con lo cobrado (${pesos(bundle.paidCents)}). No se timbró; revisa la cuenta o repórtala a soporte.`,
+      )
+    }
+    const data = baseCfdiData(
+      params,
+      bundle,
+      idempotencyKey,
+      entrada.params,
+      reasons.length ? 'VALIDATION_FAILED' : 'STAMPING',
+      {
+        entrada,
+        entradaHuella: huellaDeEntrada(entrada),
+        protocoloIva: 1,
+        enviadoAt: null,
+        falloDefinitivo: false,
+        lastError: reasons.length ? reasons.join(' | ') : null,
+      },
+      entrada,
+    )
+    return { bundle, entrada, reasons, data }
+  }
+  let reserved = await transaction(async tx => {
+    await admission(tx)
+    const existing = await tx.cfdi.findUnique({
+      where: { idempotencyKey },
+      include: { fiscalEmisor: true, venue: { select: { slug: true } } },
+    })
+    if (existing) return { cfdi: existing, fresh: false, emisor: existing.fiscalEmisor, slug: existing.venue.slug, reasons: [] as string[] }
+    const captured = await capture(tx)
+    const data = { ...captured.data, attempts: captured.reasons.length ? 0 : 1 }
+    const cfdi = await deps.reserveCfdi(data, tx)
+    if (!captured.reasons.length)
+      await sellarRenglones(tx, { cfdiId: cfdi.id, intento: cfdi.attempts, renglones: captured.entrada.renglones })
+    return { cfdi, fresh: true, emisor: captured.bundle.emisor, slug: captured.bundle.venueSlug, reasons: captured.reasons }
+  })
+  let cfdi = reserved.cfdi
+  if (params.expectedVenueId && cfdi.venueId !== params.expectedVenueId) throw new Error(`Order ${params.orderId} not found`)
+  if (cfdi.status === 'STAMPED') return { status: 'STAMPED', cfdi }
+  if (!['STAMPING', 'STAMP_FAILED', 'VALIDATION_FAILED'].includes(cfdi.status)) throw new ConflictError(PROCESANDO)
+  if (reserved.fresh && reserved.reasons.length) return { status: 'VALIDATION_FAILED', cfdi, reasons: reserved.reasons }
+  // A concurrent legacy row is retried through its existing, explicitly legacy route.
+  if (cfdi.protocoloIva !== 1) throw new ConflictError('CFDI en proceso para esta orden')
+  let entrada = leerEntrada(cfdi.entrada)
+  if (
+    !entrada ||
+    entrada.fiscalEmisorId !== cfdi.fiscalEmisorId ||
+    entrada.orderId !== params.orderId ||
+    huellaDeEntrada(entrada) !== cfdi.entradaHuella
+  ) {
+    throw new ConflictError('La entrada fiscal de esta factura requiere revisión de soporte.')
+  }
+  const provider = deps.resolveProvider(reserved.emisor as any, { sandbox: params.sandbox })
+  async function escalate() {
+    if (cfdi.enviadoAt && !cfdi.falloDefinitivo && Date.now() - new Date(cfdi.enviadoAt).getTime() >= 60 * 60_000) {
+      await transaction(async tx => {
+        await bloquearOrdenParaFacturar(tx, params.orderId)
+        const current = await tx.cfdi.findUnique({ where: { id: cfdi.id } })
+        if (
+          !current ||
+          current.attempts !== cfdi.attempts ||
+          !['STAMPING', 'STAMP_FAILED'].includes(current.status) ||
+          current.falloDefinitivo
+        )
+          return
+        const action = 'CFDI_INTENTO_INCIERTO_ESCALADO'
+        if (
+          await tx.activityLog.findFirst({
+            where: { venueId: cfdi.venueId, entityId: cfdi.id, action, data: { path: ['attempts'], equals: cfdi.attempts } },
+          })
+        )
+          return
+        await tx.activityLog.create({
+          data: {
+            venueId: cfdi.venueId,
+            action,
+            entity: 'Cfdi',
+            entityId: cfdi.id,
+            data: { orderId: params.orderId, idempotencyKey, attempts: cfdi.attempts },
+          },
+        })
+        logger.error('🚨 CFDI_INTENTO_INCIERTO_ESCALADO', {
+          venueId: cfdi.venueId,
+          orderId: params.orderId,
+          idempotencyKey,
+          attempts: cfdi.attempts,
+        })
+      })
+    }
+  }
+  let recovered: StampedInvoice | ProviderInvoiceSummary | null = null
+  if (!reserved.fresh) {
+    try {
+      recovered = cfdi.facturapiId
+        ? await provider.getInvoice(cfdi.facturapiId)
+        : await provider.findByExternalId(`${idempotencyKey}#${cfdi.attempts}`)
+    } catch {
+      await escalate()
+      throw new ConflictError(PROCESANDO)
+    }
+    if (recovered?.status === 'canceled')
+      throw new ConflictError('Esta cuenta ya tiene una factura cancelada en el PAC; revísala antes de volver a facturar.')
+    if (recovered && (recovered.status !== 'valid' || !recovered.uuid)) {
+      await escalate()
+      throw new ConflictError(PROCESANDO)
+    }
+    if (!recovered) {
+      const recapturable = cfdi.enviadoAt === null || cfdi.falloDefinitivo === true
+      if (!recapturable) {
+        // The sandbox refuses repeated keys instead of returning the original document. No automatic resend.
+        if (!FACTURAPI_DEDUPLICA) {
+          await escalate()
+          throw new ConflictError(PROCESANDO)
+        }
+        throw new ConflictError(PROCESANDO)
+      }
+      const previous = cfdi
+      reserved = await transaction(async tx => {
+        await admission(tx)
+        const where = {
+          id: previous.id,
+          status: previous.status,
+          attempts: previous.attempts,
+          OR: [{ enviadoAt: null }, { falloDefinitivo: true }],
+        }
+        const claimed = await tx.cfdi.updateMany({ where, data: { status: 'STAMPING' } })
+        if (claimed.count !== 1) throw new ConflictError(PROCESANDO)
+        await liberarSellosDe(tx, previous.id)
+        const captured = await capture(tx)
+        const attempts = previous.attempts + (captured.reasons.length ? 0 : 1)
+        const { count } = await tx.cfdi.updateMany({
+          where: { id: previous.id, status: 'STAMPING', attempts: previous.attempts },
+          data: {
+            ...captured.data,
+            entrada: captured.entrada as unknown as Prisma.InputJsonValue,
+            attempts,
+            facturapiId: null,
+            uuid: null,
+          },
+        })
+        if (count !== 1) throw new ConflictError(PROCESANDO)
+        const updated = await tx.cfdi.findUniqueOrThrow({ where: { id: previous.id } })
+        if (!captured.reasons.length)
+          await sellarRenglones(tx, { cfdiId: previous.id, intento: attempts, renglones: captured.entrada.renglones })
+        return { cfdi: updated, fresh: true, emisor: captured.bundle.emisor, slug: captured.bundle.venueSlug, reasons: captured.reasons }
+      })
+      cfdi = reserved.cfdi
+      entrada = leerEntrada(cfdi.entrada)!
+      if (reserved.reasons.length) return { status: 'VALIDATION_FAILED', cfdi, reasons: reserved.reasons }
+    }
+  }
+  // Resolve from the captured emisor after recapture; no live order/product reads after commit.
+  const sendingProvider = deps.resolveProvider(reserved.emisor as any, { sandbox: params.sandbox })
+  const version = cfdi.attempts
+  async function reportConflictingVersion(current: any, uuid: string | null) {
+    if (current?.attempts === version && (!uuid || !current.uuid || current.uuid === uuid)) return
+    const data = {
+      attempts: version,
+      currentAttempts: current?.attempts ?? null,
+      uuid,
+      currentUuid: current?.uuid ?? null,
+      orderId: params.orderId,
+      idempotencyKey,
+    }
+    logger.error('🚨 CFDI_TIMBRE_DUPLICADO', { venueId: cfdi.venueId, ...data })
+    await transaction(tx =>
+      tx.activityLog.create({ data: { venueId: cfdi.venueId, action: 'CFDI_TIMBRE_DUPLICADO', entity: 'Cfdi', entityId: cfdi.id, data } }),
+    )
+  }
+  let stamped = recovered
+  if (!stamped) {
+    const sent = await transaction(tx =>
+      tx.cfdi.updateMany({
+        where: { id: cfdi.id, status: 'STAMPING', attempts: version, enviadoAt: null },
+        data: { enviadoAt: new Date() },
+      }),
+    )
+    if (sent.count !== 1) throw new ConflictError(PROCESANDO)
+    const identity = `${idempotencyKey}#${version}`
+    try {
+      stamped = await sendingProvider.createInvoice({ ...paramsDesdeEntrada(entrada, identity), idempotencyKey: identity })
+    } catch (err) {
+      const definitive = esRechazoConfirmado(err, true)
+      const where: Prisma.CfdiWhereInput = {
+        id: cfdi.id,
+        attempts: version,
+        ...(definitive ? { status: { in: ['STAMPING', 'STAMP_FAILED'] }, falloDefinitivo: false } : { status: 'STAMPING' }),
+      }
+      const updated = await deps.persistCfdi(
+        {
+          idempotencyKey,
+          status: 'STAMP_FAILED',
+          attempts: version,
+          falloDefinitivo: definitive,
+          lastError: err instanceof Error ? err.message : String(err),
+        },
+        where,
+      )
+      const current = updated ?? (await deps.findExistingCfdi(idempotencyKey))
+      if (!updated) await reportConflictingVersion(current, null)
+      if (current?.status === 'STAMPED') return { status: 'STAMPED', cfdi: current }
+      if (!current || current.attempts !== version || current.status !== 'STAMP_FAILED') throw new ConflictError(PROCESANDO)
+      return { status: 'STAMP_FAILED', cfdi: current }
+    }
+  }
+  if (stamped.status !== 'valid' || !stamped.uuid) {
+    const pending = await deps.persistCfdi(
+      { idempotencyKey, facturapiId: stamped.providerInvoiceId },
+      { id: cfdi.id, attempts: version, status: 'STAMPING' },
+    )
+    if (!pending) await reportConflictingVersion(await deps.findExistingCfdi(idempotencyKey), stamped.uuid)
+    throw new ConflictError(PROCESANDO)
+  }
+  const identity = {
+    facturapiId: stamped.providerInvoiceId,
+    uuid: stamped.uuid,
+    serie: stamped.serie,
+    folio: stamped.folio,
+    stampedAt: stamped.stampedAt ?? new Date(),
+  }
+  const saved = await deps.persistCfdi(
+    {
+      idempotencyKey,
+      status: 'STAMPED',
+      lastError: null,
+      ...identity,
+      venueId: cfdi.venueId,
+      fiscalEmisorId: entrada.fiscalEmisorId,
+      orderId: entrada.orderId,
+      ...entrada.montos,
+      formaPago: entrada.params.formaPago,
+      metodoPago: entrada.params.metodoPago,
+      receptorRfc: entrada.params.receptor.rfc,
+      receptorNombre: entrada.params.receptor.razonSocial,
+      receptorRegimen: entrada.params.receptor.regimenFiscal,
+      receptorCp: entrada.params.receptor.codigoPostal,
+      usoCfdi: entrada.params.receptor.usoCfdi,
+    },
+    {
+      id: cfdi.id,
+      attempts: version,
+      status: { in: ['STAMPING', 'STAMP_FAILED'] },
+    },
+  )
+  if (!saved) {
+    const current = await deps.findExistingCfdi(idempotencyKey)
+    await reportConflictingVersion(current, stamped.uuid)
+    if (current?.status === 'STAMPED' && current.uuid === stamped.uuid) return { status: 'STAMPED', cfdi: current }
+    throw new ConflictError(PROCESANDO)
+  }
+  cfdi = saved
+  try {
+    const [xml, pdf] = await Promise.all([
+      sendingProvider.downloadXml(stamped.providerInvoiceId),
+      sendingProvider.downloadPdf(stamped.providerInvoiceId),
+    ])
+    const base = `venues/${reserved.slug}/cfdi/${stamped.uuid}`
+    const [xmlUrl, pdfUrl] = await Promise.all([
+      deps.storeArtifact(xml, buildStoragePath(`${base}.xml`), 'application/xml'),
+      deps.storeArtifact(pdf, buildStoragePath(`${base}.pdf`), 'application/pdf'),
+    ])
+    cfdi = { ...cfdi, ...(await deps.persistArtifacts(idempotencyKey, { xmlUrl, pdfUrl }, version)), xmlUrl, pdfUrl }
+  } catch (err) {
+    logger.error(`[cfdi] timbrado OK pero fallaron los archivos de ${stamped.uuid}: ${err instanceof Error ? err.message : String(err)}`)
+  }
+  return { status: 'STAMPED', cfdi }
+}
+
 /**
  * Antes de re-timbrar un intento reclamado, le pregunta al PAC si NUESTRO `external_id` ya tiene
  * documento. Tres desenlaces: existe y es válido ⇒ se completa la fila sin volver a timbrar; existe y
@@ -501,6 +837,7 @@ async function reconciliarIntentoPrevio(
     throw new Error('CFDI en proceso para esta orden')
   }
   if (!previo) return null
+  if (previo.status !== 'canceled' && (previo.status !== 'valid' || !previo.uuid)) throw new ConflictError(PROCESANDO)
   if (previo.status === 'canceled') {
     throw new Error(
       `Esta cuenta ya tiene una factura cancelada en el PAC (${previo.uuid ?? previo.providerInvoiceId}); revísala antes de volver a facturar`,
@@ -520,12 +857,13 @@ async function reconciliarIntentoPrevio(
 }
 
 function baseCfdiData(
-  params: { orderId: string; receptor: IssueReceptor; flow?: string },
+  params: { orderId: string; receptor: IssueReceptor; flow?: CfdiFlow },
   bundle: LoadedOrderBundle,
   idempotencyKey: string,
   invoiceParams: ReturnType<typeof buildCreateInvoiceParams>,
-  status: string,
+  status: CfdiStatus,
   extra: Record<string, any>,
+  entrada?: EntradaDocumentalV1,
 ) {
   return {
     venueId: bundle.venueId,
@@ -541,9 +879,9 @@ function baseCfdiData(
     usoCfdi: params.receptor.usoCfdi,
     formaPago: invoiceParams.formaPago,
     metodoPago: invoiceParams.metodoPago,
-    subtotalCents: bundle.subtotalCents,
-    taxCents: bundle.taxCents,
-    totalCents: bundle.totalCents,
+    subtotalCents: entrada?.montos.subtotalCents ?? bundle.subtotalCents,
+    taxCents: entrada?.montos.taxCents ?? bundle.taxCents,
+    totalCents: entrada?.montos.totalCents ?? bundle.totalCents,
     ...extra,
   }
 }
@@ -563,9 +901,15 @@ const defaultDeps: IssueCfdiDeps = {
   storeArtifact: (buffer, path, contentType) => uploadFileToStorage(buffer, path, contentType),
   resolveProvider: resolveFiscalProvider,
   // Reserves the idempotency slot (INSERT only — raises P2002 on conflict).
-  reserveCfdi: data => prisma.cfdi.create({ data: data as any }),
-  persistCfdi: data =>
-    prisma.cfdi.upsert({
+  runInTransaction: work => prisma.$transaction(work, { timeout: 15_000, maxWait: 5_000 }),
+  reserveCfdi: (data, tx = prisma) => tx.cfdi.create({ data: data as any }),
+  persistCfdi: async (data, where) => {
+    if (where) {
+      const { idempotencyKey: _key, ...changes } = data
+      const { count } = await prisma.cfdi.updateMany({ where, data: changes })
+      return count === 1 ? prisma.cfdi.findUnique({ where: { idempotencyKey: data.idempotencyKey } }) : null
+    }
+    return prisma.cfdi.upsert({
       where: { idempotencyKey: data.idempotencyKey },
       create: data as any,
       // 🔴 El dinero se REFRESCA: entre una reserva fallida y el reintento la cuenta pudo corregirse,
@@ -577,7 +921,8 @@ const defaultDeps: IssueCfdiDeps = {
         ...moneyFields(data),
         ...stampedFields(data),
       },
-    }),
+    })
+  },
   loadOrderForCfdi: loadOrderForCfdiFromDb,
   claimCfdi: async (cfdiId, desdeEstados, version) => {
     const { count } = await prisma.cfdi.updateMany({
@@ -586,10 +931,13 @@ const defaultDeps: IssueCfdiDeps = {
     })
     return count === 1
   },
-  persistArtifacts: async (idempotencyKey, urls) => {
+  persistArtifacts: async (idempotencyKey, urls, version) => {
     // Sólo las URLs, y sólo sobre una fila que siga timbrada. Un `update` normal reescribiría el
     // estado que otra petición acaba de cambiar.
-    const { count } = await prisma.cfdi.updateMany({ where: { idempotencyKey, status: 'STAMPED' }, data: urls })
+    const { count } = await prisma.cfdi.updateMany({
+      where: { idempotencyKey, status: 'STAMPED', ...(version !== undefined ? { attempts: version } : {}) },
+      data: urls,
+    })
     if (count === 0) logger.warn(`[cfdi] no se guardaron los archivos de ${idempotencyKey}: la fila ya no está timbrada`)
     return prisma.cfdi.findUnique({ where: { idempotencyKey } })
   },
@@ -969,7 +1317,11 @@ export interface LoadOrderForCfdiOpts {
   permitirEfectivo?: boolean
 }
 
-export async function loadOrderForCfdiFromDb(orderId: string, opts: LoadOrderForCfdiOpts = {}): Promise<LoadedOrderBundle | null> {
+export async function loadOrderForCfdiFromDb(
+  orderId: string,
+  opts: LoadOrderForCfdiOpts = {},
+  db: Prisma.TransactionClient | typeof prisma = prisma,
+): Promise<LoadedOrderBundle | null> {
   // Tenant-safe load: order + items + product(+category) + venue.
   // Emisor is now resolved via the most-recent payment's merchant → MerchantFiscalConfig → fiscalEmisor.
   // Schema-verified field names:
@@ -979,7 +1331,7 @@ export async function loadOrderForCfdiFromDb(orderId: string, opts: LoadOrderFor
   //   MenuCategory → defaultSatProductKey, defaultSatUnitKey
   //   Payment → method  (NOT paymentMethod — schema field is "method")
   //   MerchantFiscalConfig → facturacionEnabled, autofacturaEnabled, fiscalEmisor (unique on merchantAccountId XOR ecommerceMerchantId)
-  const order = await prisma.order.findUnique({
+  const order = await db.order.findUnique({
     where: { id: orderId },
     select: {
       venueId: true,
@@ -1072,7 +1424,7 @@ export async function loadOrderForCfdiFromDb(orderId: string, opts: LoadOrderFor
 
   if (pay.merchantAccountId || pay.ecommerceMerchantId) {
     // Resolve MerchantFiscalConfig via the unique merchantAccountId XOR ecommerceMerchantId
-    cfg = await prisma.merchantFiscalConfig.findUnique({
+    cfg = await db.merchantFiscalConfig.findUnique({
       where: pay.merchantAccountId ? { merchantAccountId: pay.merchantAccountId } : { ecommerceMerchantId: pay.ecommerceMerchantId! },
       select: { facturacionEnabled: true, autofacturaEnabled: true, fiscalEmisor: { select: EMISOR_SELECT } },
     })
@@ -1082,7 +1434,7 @@ export async function loadOrderForCfdiFromDb(orderId: string, opts: LoadOrderFor
     // emisor sólo se sacaba del comercio de la terminal. El emisor es el del NEGOCIO, y sólo cuando es
     // inequívoco: con UN solo RFC. Con dos o más no se adivina (queda como antes).
     if (pays.some(pp => !METODOS_SIN_COMERCIO.has(pp.method))) return null
-    const emisores = await prisma.fiscalEmisor.findMany({
+    const emisores = await db.fiscalEmisor.findMany({
       where: { venueId: order.venueId },
       select: { ...EMISOR_SELECT, merchantConfigs: { select: { facturacionEnabled: true, autofacturaEnabled: true }, take: 50 } },
       take: 2,
@@ -1108,7 +1460,7 @@ export async function loadOrderForCfdiFromDb(orderId: string, opts: LoadOrderFor
   const motivosComercios: string[] = []
   let autofacturaTodos = cfg.autofacturaEnabled
   for (const otro of pays.filter(pp => pp !== pay && (pp.merchantAccountId || pp.ecommerceMerchantId))) {
-    const cfgOtro = await prisma.merchantFiscalConfig.findUnique({
+    const cfgOtro = await db.merchantFiscalConfig.findUnique({
       where: otro.merchantAccountId ? { merchantAccountId: otro.merchantAccountId } : { ecommerceMerchantId: otro.ecommerceMerchantId! },
       select: { facturacionEnabled: true, autofacturaEnabled: true, fiscalEmisor: { select: { id: true } } },
     })
