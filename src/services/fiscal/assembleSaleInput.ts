@@ -1,6 +1,7 @@
 // src/services/fiscal/assembleSaleInput.ts
 import { Prisma, PaymentMethod, VenueType } from '@prisma/client'
 import { AvoqadoSaleInput, AvoqadoSaleItemInput } from './cfdiPayloadBuilder'
+import type { IvaTratamiento } from './ivaTratamiento'
 
 const centsOf = (d: Prisma.Decimal): number => Math.round(Number(d) * 100)
 
@@ -16,6 +17,8 @@ export interface LoadedOrderItemForCfdi {
     taxRate: Prisma.Decimal
     category: { defaultSatProductKey: string | null; defaultSatUnitKey: string | null } | null
   } | null
+  /** IVA del renglón (plan 3). Con él, el concepto toma ObjetoImp y traslados de `impuestosSatDe`. */
+  tratamiento?: IvaTratamiento
 }
 
 export interface LoadedOrderForCfdi {
@@ -28,6 +31,8 @@ export interface LoadedOrderForCfdi {
    * the customer paid. Omitted/false → NET prices (separated-tax sources: reservations, pos-sync).
    */
   pricesIncludeIva?: boolean
+  /** Rama de la factura (plan 3): todos los renglones en IVA_16, o alguno distinto. Aditivo. */
+  clasificacion?: 'TODO_16' | 'MIXTA'
 }
 
 export interface AssembleOptions {
@@ -61,6 +66,7 @@ export function assembleSaleInput(order: LoadedOrderForCfdi, opts: AssembleOptio
       categoryDefaultProductKey: it.product?.category?.defaultSatProductKey ?? null,
       categoryDefaultUnitKey: it.product?.category?.defaultSatUnitKey ?? null,
       objetoImp: it.product?.objetoImp ?? null,
+      ...(it.tratamiento ? { tratamiento: it.tratamiento } : {}),
     }
   })
   return {

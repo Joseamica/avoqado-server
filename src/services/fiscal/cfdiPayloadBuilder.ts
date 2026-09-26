@@ -11,6 +11,8 @@ import {
 import { mapFormaPago, sectorSatDefaults } from './satCatalog'
 import { splitIvaIncluded } from './ivaMath'
 import type { ClosedPeriod } from './globalPeriod'
+import type { IvaTratamiento } from './ivaTratamiento'
+import { impuestosSatDe } from './ivaDeRenglon'
 
 export interface AvoqadoSaleItemInput {
   description: string
@@ -31,6 +33,11 @@ export interface AvoqadoSaleItemInput {
   categoryDefaultProductKey: string | null
   categoryDefaultUnitKey: string | null
   objetoImp: string | null
+  /**
+   * IVA del renglón (plan 3). Con él, ObjetoImp y traslados salen de `impuestosSatDe` (IVA_16 produce el
+   * mismo concepto que la tupla vieja). Sin él (egreso, global de importe libre) todo queda como antes.
+   */
+  tratamiento?: IvaTratamiento
 }
 
 export interface AvoqadoSaleInput {
@@ -53,8 +60,18 @@ function resolveItem(it: AvoqadoSaleItemInput, venueType: VenueType): CfdiItemIn
   const sector = sectorSatDefaults(venueType)
   const satProductKey = it.satProductKey ?? it.categoryDefaultProductKey ?? sector.productKey
   const satUnitKey = it.satUnitKey ?? it.categoryDefaultUnitKey ?? sector.unitKey
-  const objetoImp = it.objetoImp ?? (it.taxExempt ? '01' : '02')
-  const taxes: CfdiItemTax[] = it.taxExempt ? [] : [{ type: 'IVA', factor: 'Tasa', rate: it.taxRate, withholding: false }]
+  let objetoImp: string
+  let taxes: CfdiItemTax[]
+  if (it.tratamiento) {
+    const sat = impuestosSatDe(it.tratamiento)
+    // Un tratamiento no timbrable ya bloqueó la factura con su motivo; si aun así llegara aquí, nunca al PAC.
+    if ('bloqueado' in sat) throw new Error(sat.motivo)
+    objetoImp = sat.objetoImp
+    taxes = sat.taxes
+  } else {
+    objetoImp = it.objetoImp ?? (it.taxExempt ? '01' : '02')
+    taxes = it.taxExempt ? [] : [{ type: 'IVA', factor: 'Tasa', rate: it.taxRate, withholding: false }]
+  }
   return {
     satProductKey,
     satUnitKey,

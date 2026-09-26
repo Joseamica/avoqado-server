@@ -9,6 +9,8 @@ import { buildCreateInvoiceParams } from './cfdiPayloadBuilder'
 import { SIN_CONCEPTOS, validateBeforeStamp } from './cfdiValidation'
 import { assembleSaleInput, LoadedOrderForCfdi } from './assembleSaleInput'
 import { splitIvaIncluded } from './ivaMath'
+import { clasificarOrden, hayBloqueados, impuestosSatDe, resolverTratamiento } from './ivaDeRenglon'
+import { IvaTratamiento, tuplaDesdeTratamiento } from './ivaTratamiento'
 import { logAction, LogActionParams } from '../dashboard/activity-log.service'
 
 // ─── List CFDIs ───────────────────────────────────────────────────────────────
@@ -621,9 +623,28 @@ export type RenglonParaCfdi = {
   weightQuantity?: any
   modifiers?: Array<{ name: string | null; price: any; quantity: number }> | null
   product: any
+  /**
+   * IVA del renglón (plan 3): sellado > producto > IVA_16 sin producto. Lo pone `loadOrderForCfdiFromDb`;
+   * los conceptos de extras heredan el del padre. Ausente = entrada legacy (se decide por la tupla vieja
+   * `taxRate` + `objetoImp` del producto, exactamente como antes del plan 3).
+   */
+  tratamiento?: IvaTratamiento
 }
 
 const centavos = (d: any) => Math.round(Number(d ?? 0) * 100)
+
+/**
+ * Tasa con la que el PAC calculará el concepto. Con tratamiento, la de su traslado (IVA_0/EXENTO/NO_OBJETO = 0);
+ * sin él (legacy), la del producto, y 16 % sin producto — la regla de siempre. Un bloqueado no llega al PAC
+ * (lo detiene su motivo); aquí sólo conserva la tasa guardada.
+ */
+function tasaDelConcepto(it: { tratamiento?: IvaTratamiento; product: { taxRate: any } | null }): number {
+  if (it.tratamiento) {
+    const sat = impuestosSatDe(it.tratamiento)
+    if (!('bloqueado' in sat)) return sat.rate
+  }
+  return it.product ? Number(it.product.taxRate) : 0.16
+}
 
 /**
  * Total que el PAC va a calcular para estos conceptos: `Σ (unitario × cantidad − descuento)`, y si los
@@ -631,14 +652,13 @@ const centavos = (d: any) => Math.round(Number(d ?? 0) * 100)
  * que se compara lo cobrado antes de timbrar.
  */
 export function totalDelDocumentoCents(order: {
-  items: Array<{ unitPrice: any; quantity: number; discountAmount: any; product: { taxRate: any } | null }>
+  items: Array<{ unitPrice: any; quantity: number; discountAmount: any; product: { taxRate: any } | null; tratamiento?: IvaTratamiento }>
   pricesIncludeIva?: boolean
 }): number {
   return order.items.reduce((sum, it) => {
     const neto = importeConceptoCents(it) - centavos(it.discountAmount)
     if (order.pricesIncludeIva) return sum + neto
-    const rate = it.product ? Number(it.product.taxRate) : 0.16
-    return sum + Math.round(neto * (1 + rate))
+    return sum + Math.round(neto * (1 + tasaDelConcepto(it)))
   }, 0)
 }
 
@@ -737,6 +757,12 @@ export function conceptosDesdeRenglon(it: RenglonParaCfdi, _orderId: string): Co
       ],
     }
   }
+  // Con tratamiento (plan 3) el IVA del renglón ya está decidido sin ambigüedad; un tratamiento no
+  // timbrable (objeto 03/04) se detiene con el motivo de `impuestosSatDe`.
+  if (it.tratamiento) {
+    const sat = impuestosSatDe(it.tratamiento)
+    if ('bloqueado' in sat) return { items: [], motivos: [sat.motivo] }
+  }
   // Tasa 0 con «sí objeto de impuesto» es ambigua (¿tasa cero o exento?) y el constructor la convierte en
   // exento: hasta distinguirlas, fuera del sobre.
   const tasa = Number(it.product?.taxRate ?? 0.16)
@@ -747,7 +773,8 @@ export function conceptosDesdeRenglon(it: RenglonParaCfdi, _orderId: string): Co
   if (objeto === '01' && tasa !== 0) {
     return { items: [], motivos: [`«${nombreProducto}»: producto «no objeto de impuesto» (01) con tasa ${tasa}; catálogo inconsistente.`] }
   }
-  if (tasa === 0 && objeto === '02') {
+  // Sólo en la entrada LEGACY (sin tratamiento): con tratamiento, IVA_0 y EXENTO son distintos y válidos.
+  if (!it.tratamiento && tasa === 0 && objeto === '02') {
     return {
       items: [],
       motivos: [`«${nombreProducto}»: producto con tasa 0 y objeto de impuesto 02 (tasa cero vs exento sin distinguir).`],
@@ -810,6 +837,7 @@ export function conceptosDesdeRenglon(it: RenglonParaCfdi, _orderId: string): Co
     weightQuantity: null,
     modifiers: [],
     product: it.product, // mismas claves SAT y misma tasa que el producto al que acompañan
+    ...(it.tratamiento ? { tratamiento: it.tratamiento } : {}), // y el mismo IVA que su renglón
   }))
   const items = [producto, ...conceptosExtras]
   // El descuento del renglón se reparte en proporción al importe de cada concepto (cortesía = 100 % de cada uno).
@@ -824,12 +852,13 @@ export function conceptosDesdeRenglon(it: RenglonParaCfdi, _orderId: string): Co
  * Reparte el descuento GENERAL de la orden entre los conceptos como descuento de concepto (el CFDI no
  * tiene descuento global), en proporción al neto de cada uno: Σ netos == lo cobrado. Sólo cuando todos
  * los conceptos llevan la MISMA tasa: repartirlo entre tasas distintas cuadra el total pero mueve base
- * gravable de una tasa a otra (Codex, pasada 4).
+ * gravable de una tasa a otra (Codex, pasada 4). Con tratamiento se agrupa por tratamiento: IVA_0 y
+ * EXENTO son grupos DISTINTOS aunque los dos tengan tasa 0 (uno acredita y el otro no).
  */
 export function repartirDescuentoDeOrden(items: RenglonParaCfdi[], orderDiscountCents: number): ConceptosDeRenglon {
   if (orderDiscountCents <= 0) return { items, motivos: [] }
-  const tasas = new Set(items.map(it => Number(it.product?.taxRate ?? 0.16)))
-  if (tasas.size > 1) {
+  const grupos = new Set(items.map(it => it.tratamiento ?? `tasa:${Number(it.product?.taxRate ?? 0.16)}`))
+  if (grupos.size > 1) {
     return {
       items,
       motivos: [
@@ -959,6 +988,9 @@ export async function loadOrderForCfdiFromDb(orderId: string, opts: LoadOrderFor
       tipAmount: true,
       discountAmount: true,
       serviceChargeAmount: true,
+      // Candados de la rama mixta (plan 3): cómo se cobró el precio y si la venta está liquidada.
+      contratoDePrecio: true,
+      paymentStatus: true,
       promotions: { select: { id: true }, take: 1 },
       venue: {
         select: {
@@ -977,6 +1009,9 @@ export async function loadOrderForCfdiFromDb(orderId: string, opts: LoadOrderFor
       },
       items: {
         select: {
+          id: true,
+          // NULL = sigue el tratamiento vivo del producto; con valor = sellado por un documento (manda).
+          ivaTratamiento: true,
           productName: true,
           quantity: true,
           unitPrice: true,
@@ -991,6 +1026,7 @@ export async function loadOrderForCfdiFromDb(orderId: string, opts: LoadOrderFor
               satUnitKey: true,
               objetoImp: true,
               taxRate: true,
+              ivaTratamiento: true,
               category: {
                 select: { defaultSatProductKey: true, defaultSatUnitKey: true },
               },
@@ -1114,6 +1150,7 @@ export async function loadOrderForCfdiFromDb(orderId: string, opts: LoadOrderFor
   // 🔴 Lo pagado, no `order.total`: en varias fuentes `Order.total` ya trae la propina dentro, y la
   // propina jamás va en el CFDI.
   const sinRenglones = order.items.length === 0
+  const renglones = order.items.map(renglonConTratamiento)
   const { items: itemsReconstruidos, motivos: unsupportedReasons } = sinRenglones
     ? {
         items: [
@@ -1123,21 +1160,53 @@ export async function loadOrderForCfdiFromDb(orderId: string, opts: LoadOrderFor
             unitPrice: new Prisma.Decimal(paidCents / 100),
             discountAmount: 0,
             product: { satProductKey: '01010101', satUnitKey: 'ACT', objetoImp: '02', taxRate: 0.16, category: null },
+            tratamiento: 'IVA_16',
           } as unknown as RenglonParaCfdi,
         ],
         // Las exclusiones de ORDEN (promoción, cargo por servicio) aplican también sin renglones.
         motivos: motivosDeOrden(order as OrdenParaConceptos),
       }
-    : reconstruirConceptos(order as OrdenParaConceptos, orderId)
+    : reconstruirConceptos({ ...order, items: renglones } as OrdenParaConceptos, orderId)
   unsupportedReasons.push(...Array.from(new Set(motivosComercios)))
   const items = itemsReconstruidos as unknown as typeof order.items
+
+  // 🔴 Rama todo-16 vs rama mixta (plan 3). Un renglón legacy (sin tratamiento) sigue el camino de hoy,
+  // igual que uno en IVA_16. La mixta sólo se factura con TRES candados: precio cobrado con IVA incluido
+  // (el contrato, no la heurística), la venta liquidada, y la barrera «documento = cobrado» de abajo.
+  const tratamientos: IvaTratamiento[] = renglones.map(r => r.tratamiento ?? 'IVA_16')
+  const clasificacion = clasificarOrden(tratamientos)
+  if (clasificacion === 'MIXTA') {
+    if (hayBloqueados(tratamientos)) {
+      for (const t of new Set(tratamientos)) {
+        const sat = impuestosSatDe(t)
+        if ('bloqueado' in sat) unsupportedReasons.push(sat.motivo)
+      }
+    }
+    if (order.contratoDePrecio !== 'IVA_INCLUIDO') {
+      unsupportedReasons.push(
+        'Esta venta tiene productos con IVA distinto de 16 % y no consta que se cobró con IVA incluido; confírmalo antes de facturar.',
+      )
+    }
+    if (order.paymentStatus !== 'PAID') {
+      unsupportedReasons.push(
+        'Esta venta tiene productos con IVA distinto de 16 % y no está pagada por completo; se factura cuando se liquide.',
+      )
+    }
+    // El motivo de un bloqueado lo dan su concepto y el candado: se enseña una vez. (Sólo en la mixta:
+    // la rama todo-16 conserva sus motivos exactamente como hoy.)
+    const unicos = Array.from(new Set(unsupportedReasons))
+    unsupportedReasons.splice(0, unsupportedReasons.length, ...unicos)
+  }
 
   // Mexican POS prices are IVA-included (gross): the customer's out-of-pocket already contains the
   // tax, and these orders carry taxAmount=0 (e.g. TPV). A non-zero taxAmount means a separated-tax
   // source (reservations, pos-sync) whose subtotal/taxAmount/total are already the real split.
   // 🔴 El concepto de respaldo (sin renglones) es SIEMPRE «lo pagado, IVA incluido»: si se mandara como
   // neto en una orden NET, el PAC le sumaría el 16 % encima de lo que el cliente ya pagó.
-  const pricesIncludeIva = peso(order.taxAmount) === 0 || sinRenglones
+  // En la rama mixta manda el CONTRATO: con IVA_INCLUIDO los precios son brutos aunque `taxAmount` diga otra
+  // cosa; sin él la factura ya quedó bloqueada arriba y se conserva la heurística para los importes de la fila.
+  const pricesIncludeIva =
+    (clasificacion === 'MIXTA' && order.contratoDePrecio === 'IVA_INCLUIDO') || peso(order.taxAmount) === 0 || sinRenglones
 
   let subtotalCents: number
   let taxCents: number
@@ -1149,7 +1218,7 @@ export async function loadOrderForCfdiFromDb(orderId: string, opts: LoadOrderFor
     taxCents = 0
     totalCents = 0
     for (const it of items) {
-      const rate = it.product ? Number(it.product.taxRate) : 0.16
+      const rate = tasaDelConcepto(it as RenglonParaCfdi)
       const grossLine = importeConceptoCents(it) - peso(it.discountAmount)
       const split = splitIvaIncluded(grossLine, rate)
       subtotalCents += split.netCents
@@ -1188,8 +1257,25 @@ export async function loadOrderForCfdiFromDb(orderId: string, opts: LoadOrderFor
     paidCents,
     totalCents,
     ...(unsupportedReasons.length > 0 ? { unsupportedReasons } : {}),
-    order: { venueType: order.venue.type, tipAmount: order.tipAmount, items: items as any, pricesIncludeIva },
+    order: { venueType: order.venue.type, tipAmount: order.tipAmount, items: items as any, pricesIncludeIva, clasificacion },
   }
+}
+
+/**
+ * Pone el `tratamiento` de un renglón (sellado > producto > IVA_16 sin producto) y DERIVA de él la tupla
+ * vieja del producto (`taxRate` + `objetoImp`), para que montos, reparto y barrera sigan calculándose igual.
+ * Con IVA_16 la tupla derivada es la misma que la guardada (el trigger del plan 1 las mantiene coherentes).
+ * Un renglón con producto pero sin ningún tratamiento a la vista es entrada legacy: se deja como hoy.
+ */
+function renglonConTratamiento<
+  T extends { ivaTratamiento?: IvaTratamiento | null; product: { taxRate: any; ivaTratamiento?: IvaTratamiento | null } | null },
+>(it: T): T & { tratamiento?: IvaTratamiento } {
+  const tieneProducto = it.product != null
+  if (tieneProducto && it.ivaTratamiento == null && it.product?.ivaTratamiento == null) return it
+  const tratamiento = resolverTratamiento({ selladoIva: it.ivaTratamiento, productoIva: it.product?.ivaTratamiento, tieneProducto })
+  if (!it.product) return { ...it, tratamiento }
+  const tupla = tuplaDesdeTratamiento(tratamiento, Number(it.product.taxRate))
+  return { ...it, tratamiento, product: { ...it.product, taxRate: new Prisma.Decimal(tupla.taxRate), objetoImp: tupla.objetoImp } }
 }
 
 /** Importes y clasificación de pago del documento realmente emitido. */
