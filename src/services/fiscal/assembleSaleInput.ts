@@ -33,6 +33,27 @@ export interface LoadedOrderForCfdi {
   pricesIncludeIva?: boolean
   /** Rama de la factura (plan 3): todos los renglones en IVA_16, o alguno distinto. Aditivo. */
   clasificacion?: 'TODO_16' | 'MIXTA'
+  /**
+   * Renglones originales de la orden con su tratamiento resuelto (plan 3, Tarea 4): lo que SELLA la
+   * entrada documental (`entradaDocumental.ts`). `loadOrderForCfdiFromDb` SIEMPRE lo pone (venta sin
+   * renglones ⇒ `[]`); ausente sólo en bundles construidos a mano por pruebas anteriores a la Tarea 4.
+   */
+  renglonesOrigen?: Array<{ orderItemId: string; tratamiento: IvaTratamiento }>
+  /** Contrato de precio de la orden AL MOMENTO de cargar el bundle (plan 3, Tarea 4: foto congelada). */
+  contratoDePrecio?: string | null
+  /** Estado de pago de la orden AL MOMENTO de cargar el bundle (plan 3, Tarea 4: foto congelada). */
+  paymentStatus?: string | null
+}
+
+/**
+ * El bundle REAL que arma `loadOrderForCfdiFromDb` (Tarea 4): `clasificacion` y `renglonesOrigen`
+ * SIEMPRE vienen resueltos — la entrada documental nunca se sella a ciegas (`capturarEntrada` falla
+ * cerrado si le falta cualquiera). Los bundles construidos a mano en pruebas anteriores a la Tarea 4
+ * siguen usando `LoadedOrderForCfdi` con estos campos opcionales.
+ */
+export interface LoadedOrderForCfdiResuelto extends LoadedOrderForCfdi {
+  clasificacion: 'TODO_16' | 'MIXTA'
+  renglonesOrigen: Array<{ orderItemId: string; tratamiento: IvaTratamiento }>
 }
 
 export interface AssembleOptions {

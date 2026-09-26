@@ -7,7 +7,7 @@ import { buildStoragePath, uploadFileToStorage } from '../storage.service'
 import { resolveFiscalProvider } from './fiscalProvider.factory'
 import { buildCreateInvoiceParams } from './cfdiPayloadBuilder'
 import { SIN_CONCEPTOS, validateBeforeStamp } from './cfdiValidation'
-import { assembleSaleInput, LoadedOrderForCfdi } from './assembleSaleInput'
+import { assembleSaleInput, LoadedOrderForCfdiResuelto } from './assembleSaleInput'
 import { splitIvaIncluded } from './ivaMath'
 import { clasificarOrden, hayBloqueados, impuestosSatDe, resolverTratamiento } from './ivaDeRenglon'
 import { IvaTratamiento, tuplaDesdeTratamiento } from './ivaTratamiento'
@@ -177,7 +177,7 @@ export interface LoadedOrderBundle {
    * VALIDATION_FAILED con el texto, y el ticket/recibo no ofrecen autofactura.
    */
   unsupportedReasons?: string[]
-  order: LoadedOrderForCfdi
+  order: LoadedOrderForCfdiResuelto
 }
 
 export interface IssueCfdiDeps {
@@ -758,10 +758,11 @@ export function conceptosDesdeRenglon(it: RenglonParaCfdi, _orderId: string): Co
     }
   }
   // Con tratamiento (plan 3) el IVA del renglón ya está decidido sin ambigüedad; un tratamiento no
-  // timbrable (objeto 03/04) se detiene con el motivo de `impuestosSatDe`.
+  // timbrable (objeto 03/04) se detiene con el motivo de `impuestosSatDe`, nombrando el producto (como
+  // hacía el mensaje legacy de abajo) para que quien factura sepa CUÁL corregir.
   if (it.tratamiento) {
     const sat = impuestosSatDe(it.tratamiento)
-    if ('bloqueado' in sat) return { items: [], motivos: [sat.motivo] }
+    if ('bloqueado' in sat) return { items: [], motivos: [`«${nombreProducto}»: ${sat.motivo}`] }
   }
   // Tasa 0 con «sí objeto de impuesto» es ambigua (¿tasa cero o exento?) y el constructor la convierte en
   // exento: hasta distinguirlas, fuera del sobre.
@@ -1176,24 +1177,22 @@ export async function loadOrderForCfdiFromDb(orderId: string, opts: LoadOrderFor
   const tratamientos: IvaTratamiento[] = renglones.map(r => r.tratamiento ?? 'IVA_16')
   const clasificacion = clasificarOrden(tratamientos)
   if (clasificacion === 'MIXTA') {
-    if (hayBloqueados(tratamientos)) {
-      for (const t of new Set(tratamientos)) {
-        const sat = impuestosSatDe(t)
-        if ('bloqueado' in sat) unsupportedReasons.push(sat.motivo)
+    // Un renglón bloqueado (03/04) ya puso SU motivo, con nombre, al reconstruir conceptos arriba
+    // (`conceptosDesdeRenglon`). Con un bloqueado a la vista, ESO es lo único que se enseña: el
+    // contrato/liquidación no aportan nada nuevo (nunca se timbraría de todos modos) y sólo
+    // distraerían de la causa real, que es corregir el producto.
+    if (!hayBloqueados(tratamientos)) {
+      if (order.contratoDePrecio !== 'IVA_INCLUIDO') {
+        unsupportedReasons.push(
+          'Esta venta tiene productos con IVA distinto de 16 % y no consta que se cobró con IVA incluido; confírmalo antes de facturar.',
+        )
+      }
+      if (order.paymentStatus !== 'PAID') {
+        unsupportedReasons.push(
+          'Esta venta tiene productos con IVA distinto de 16 % y no está pagada por completo; se factura cuando se liquide.',
+        )
       }
     }
-    if (order.contratoDePrecio !== 'IVA_INCLUIDO') {
-      unsupportedReasons.push(
-        'Esta venta tiene productos con IVA distinto de 16 % y no consta que se cobró con IVA incluido; confírmalo antes de facturar.',
-      )
-    }
-    if (order.paymentStatus !== 'PAID') {
-      unsupportedReasons.push(
-        'Esta venta tiene productos con IVA distinto de 16 % y no está pagada por completo; se factura cuando se liquide.',
-      )
-    }
-    // El motivo de un bloqueado lo dan su concepto y el candado: se enseña una vez. (Sólo en la mixta:
-    // la rama todo-16 conserva sus motivos exactamente como hoy.)
     const unicos = Array.from(new Set(unsupportedReasons))
     unsupportedReasons.splice(0, unsupportedReasons.length, ...unicos)
   }
@@ -1257,7 +1256,19 @@ export async function loadOrderForCfdiFromDb(orderId: string, opts: LoadOrderFor
     paidCents,
     totalCents,
     ...(unsupportedReasons.length > 0 ? { unsupportedReasons } : {}),
-    order: { venueType: order.venue.type, tipAmount: order.tipAmount, items: items as any, pricesIncludeIva, clasificacion },
+    order: {
+      venueType: order.venue.type,
+      tipAmount: order.tipAmount,
+      items: items as any,
+      pricesIncludeIva,
+      clasificacion,
+      // Lo que la entrada documental (Tarea 4) SELLA: un renglón por OrderItem real con su tratamiento
+      // resuelto. Los conceptos de extras no tienen `orderItemId`, por eso no van aquí.
+      renglonesOrigen: renglones.map(r => ({ orderItemId: r.id, tratamiento: r.tratamiento ?? 'IVA_16' })),
+      // Foto congelada (Tarea 4): lo que el contrato/pago DECÍAN al cargar el bundle, no lo que digan después.
+      contratoDePrecio: order.contratoDePrecio,
+      paymentStatus: order.paymentStatus,
+    },
   }
 }
 

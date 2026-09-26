@@ -5,8 +5,6 @@
 // (commit 0e5c7c40) y fijan, por orden, el payload al PAC, los montos que se guardan en la fila y los
 // motivos. En producción todo es IVA_16 mientras la bandera esté apagada: si una golden cambia, el
 // defecto es del cambio, nunca de la golden.
-import { Prisma } from '@prisma/client'
-
 jest.mock('../../../../src/utils/prismaClient', () => ({
   __esModule: true,
   default: {
@@ -30,190 +28,10 @@ import {
 } from '../../../../src/services/fiscal/cfdi.service'
 import { assembleSaleInput } from '../../../../src/services/fiscal/assembleSaleInput'
 import { buildCreateInvoiceParams } from '../../../../src/services/fiscal/cfdiPayloadBuilder'
+import { D, receptor, CONFIG, producto, renglon, orden, CASOS } from './fixtures/ivaPorProductoGoldenOrders'
 
-const D = (n: number) => new Prisma.Decimal(n)
 const orderMock = prisma.order.findUnique as jest.Mock
 const cfgMock = prisma.merchantFiscalConfig.findUnique as jest.Mock
-
-const receptor = {
-  rfc: 'EKU9003173C9',
-  razonSocial: 'ESCUELA KEMPER URGATE SA DE CV',
-  regimenFiscal: '601',
-  codigoPostal: '64000',
-  usoCfdi: 'G03',
-}
-
-const CONFIG = {
-  facturacionEnabled: true,
-  autofacturaEnabled: true,
-  fiscalEmisor: {
-    id: 'e1',
-    venueId: 'v1',
-    provider: 'FACTURAPI',
-    providerKeyEnc: null,
-    csdStatus: 'ACTIVE',
-    serie: 'F',
-    invoiceCashSales: false,
-  },
-}
-
-type Prod = Record<string, any>
-function producto(over: Prod = {}): Prod {
-  return {
-    name: 'Producto',
-    satProductKey: '90101501',
-    satUnitKey: 'H87',
-    objetoImp: '02',
-    taxRate: D(0.16),
-    ivaTratamiento: 'IVA_16',
-    category: null,
-    ...over,
-  }
-}
-
-function renglon(over: Record<string, any> = {}) {
-  return {
-    id: 'oi-1',
-    ivaTratamiento: null,
-    productName: 'Producto',
-    quantity: 1,
-    unitPrice: D(100),
-    discountAmount: D(0),
-    total: D(100),
-    weightQuantity: null,
-    modifiers: [],
-    product: producto(),
-    ...over,
-  }
-}
-
-function orden(pagado: number, over: Record<string, any> = {}) {
-  return {
-    venueId: 'v1',
-    subtotal: D(pagado),
-    taxAmount: D(0),
-    total: D(pagado),
-    tipAmount: D(0),
-    discountAmount: D(0),
-    serviceChargeAmount: D(0),
-    promotions: [],
-    contratoDePrecio: 'IVA_INCLUIDO',
-    paymentStatus: 'PAID',
-    venue: { slug: 'demo', type: 'RESTAURANT' },
-    payments: [
-      {
-        method: 'CREDIT_CARD',
-        merchantAccountId: 'm1',
-        ecommerceMerchantId: null,
-        tenderSatFormaPago: null,
-        amount: D(pagado),
-        type: 'REGULAR',
-      },
-    ],
-    items: [renglon({ unitPrice: D(pagado), total: D(pagado) })],
-    ...over,
-  }
-}
-
-// ─── Las 5 órdenes de la rama todo-16 + las 2 bloqueadas de hoy ──────────────────────────────────────
-const CASOS: Record<string, any> = {
-  // 1. Extras con precio (y uno de $0 que se queda en el nombre) + un producto con claves de su categoría.
-  //    Contrato DESCONOCIDO y pago PENDING a propósito: en la rama todo-16 los candados NO aplican.
-  extras: orden(175, {
-    contratoDePrecio: 'DESCONOCIDO',
-    paymentStatus: 'PENDING',
-    items: [
-      renglon({
-        id: 'oi-cap',
-        productName: 'CAPUCCINO',
-        quantity: 2,
-        unitPrice: D(65),
-        total: D(140),
-        modifiers: [
-          { name: 'Deslactosada', price: D(5), quantity: 1 },
-          { name: 'Canela', price: D(0), quantity: 1 },
-        ],
-        product: producto({ name: 'CAPUCCINO' }),
-      }),
-      renglon({
-        id: 'oi-pan',
-        productName: 'Pan dulce',
-        unitPrice: D(35),
-        total: D(35),
-        product: producto({
-          name: 'Pan dulce',
-          satProductKey: null,
-          satUnitKey: null,
-          category: { defaultSatProductKey: '50181900', defaultSatUnitKey: 'H87' },
-        }),
-      }),
-    ],
-  }),
-  // 2. Venta por peso con centavos exactos: 0.250 kg × $180 = $45.00.
-  peso: orden(45, {
-    items: [
-      renglon({
-        id: 'oi-queso',
-        productName: 'Queso Oaxaca',
-        quantity: 1,
-        weightQuantity: D(0.25),
-        unitPrice: D(180),
-        total: D(45),
-        product: producto({ name: 'Queso Oaxaca', satProductKey: '50131700', satUnitKey: 'KGM' }),
-      }),
-    ],
-  }),
-  // 3. Descuento de renglón ($20 sobre $120).
-  descuentoRenglon: orden(100, {
-    discountAmount: D(20),
-    items: [renglon({ id: 'oi-hamb', productName: 'Hamburguesa', unitPrice: D(120), total: D(120), discountAmount: D(20) })],
-  }),
-  // 4. Venta sin renglones (importe libre): un concepto «Venta» por lo pagado.
-  sinRenglones: orden(50, { items: [] }),
-  // 5. IVA separado (taxAmount > 0): precios NETOS, el PAC suma el IVA.
-  ivaSeparado: orden(232, {
-    subtotal: D(200),
-    taxAmount: D(32),
-    total: D(232),
-    contratoDePrecio: 'IVA_APARTE',
-    items: [renglon({ id: 'oi-clase', productName: 'Clase de yoga', unitPrice: D(200), total: D(200) })],
-  }),
-  // B1. Bloqueada hoy: tasa 0 + objeto 02 SIN tratamiento (entrada legacy).
-  bloqueadaTasa0Objeto02: orden(30, {
-    items: [
-      renglon({
-        id: undefined,
-        ivaTratamiento: undefined,
-        productName: 'Agua',
-        unitPrice: D(30),
-        total: D(30),
-        product: { name: 'Agua', satProductKey: '50202301', satUnitKey: 'H87', objetoImp: '02', taxRate: D(0), category: null },
-      }),
-    ],
-  }),
-  // B2. Bloqueada hoy: descuento general sobre dos tasas (16 % y no objeto), entrada legacy.
-  bloqueadaDescuentoDosTasas: orden(140, {
-    discountAmount: D(10),
-    items: [
-      renglon({
-        id: undefined,
-        ivaTratamiento: undefined,
-        productName: 'Café',
-        unitPrice: D(100),
-        total: D(100),
-        product: { name: 'Café', satProductKey: '90101501', satUnitKey: 'H87', objetoImp: '02', taxRate: D(0.16), category: null },
-      }),
-      renglon({
-        id: undefined,
-        ivaTratamiento: undefined,
-        productName: 'Propina de barra',
-        unitPrice: D(50),
-        total: D(50),
-        product: { name: 'Propina de barra', satProductKey: '84111506', satUnitKey: 'ACT', objetoImp: '01', taxRate: D(0), category: null },
-      }),
-    ],
-  }),
-}
 
 function depsDelMotor(createInvoice: jest.Mock): IssueCfdiDeps {
   return {
@@ -754,12 +572,36 @@ describe('rama mixta (algún renglón ≠ IVA_16)', () => {
     expect(r.motivos).toEqual([MOTIVO_CONTRATO, MOTIVO_LIQUIDACION])
   })
 
-  it('producto BLOQUEADO_04 ⇒ motivo de objeto de impuesto (una sola vez), no se timbra', async () => {
+  it('producto BLOQUEADO_04 repetido (mismo producto dos veces) ⇒ un motivo CON el nombre, una sola vez, no se timbra', async () => {
     const r = await resultadoDe(
-      orden(200, { items: [conTratamiento('BLOQUEADO_04', 'Servicio A', 100), conTratamiento('BLOQUEADO_04', 'Servicio B', 100)] }),
+      orden(200, { items: [conTratamiento('BLOQUEADO_04', 'Servicio', 100), conTratamiento('BLOQUEADO_04', 'Servicio', 100)] }),
     )
     expect(r.status).toBe('VALIDATION_FAILED')
-    expect(r.motivos).toEqual([MOTIVO_OBJETO_04])
+    expect(r.motivos).toEqual([`«Servicio»: ${MOTIVO_OBJETO_04}`])
+  })
+
+  // R5b (regresión de la Tarea 3): el motivo de un renglón bloqueado debe nombrar el PRODUCTO, como
+  // hacía el mensaje legacy («<Nombre>: objeto de impuesto N no soportado»), no sólo el objeto genérico.
+  it('el motivo de un renglón BLOQUEADO nombra el producto', async () => {
+    const r = await resultadoDe(orden(100, { items: [conTratamiento('BLOQUEADO_03', 'Servicio raro', 100)] }))
+    expect(r.status).toBe('VALIDATION_FAILED')
+    expect(r.motivos).toEqual([
+      '«Servicio raro»: Hay un producto con objeto de impuesto 03, que la facturación todavía no soporta; corrígelo en el producto antes de facturar.',
+    ])
+  })
+
+  // R5b: con un renglón bloqueado, la mixta NO debe además enseñar los motivos de contrato/liquidación
+  // (nunca se timbraría de todos modos; el único motivo útil es corregir el producto bloqueado).
+  it('con un renglón bloqueado, la mixta muestra SÓLO el motivo del bloqueo (no también contrato/liquidación)', async () => {
+    const r = await resultadoDe(
+      orden(100, {
+        contratoDePrecio: 'DESCONOCIDO',
+        paymentStatus: 'PENDING',
+        items: [conTratamiento('BLOQUEADO_04', 'Servicio', 100)],
+      }),
+    )
+    expect(r.status).toBe('VALIDATION_FAILED')
+    expect(r.motivos).toEqual([`«Servicio»: ${MOTIVO_OBJETO_04}`])
   })
 
   it('con contrato IVA_INCLUIDO la mixta manda precios con IVA incluido aunque taxAmount > 0 (el contrato gana a la heurística)', async () => {
