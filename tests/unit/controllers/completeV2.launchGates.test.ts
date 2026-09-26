@@ -67,7 +67,7 @@ jest.mock('../../../src/config/logger', () => ({
 jest.mock('../../../src/utils/prismaClient', () => ({
   __esModule: true,
   default: {
-    onboardingProgress: { updateMany: jest.fn(), update: jest.fn() },
+    onboardingProgress: { updateMany: jest.fn(), update: jest.fn(), findUnique: jest.fn() },
     venue: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
     organization: { update: jest.fn() },
   },
@@ -275,6 +275,30 @@ describe('completeV2Onboarding — candados del lanzamiento (S7) y fugas del leg
       expect(next).not.toHaveBeenCalledWith(expect.objectContaining({ code: 'PLAN_CHARGE_PENDING' }))
     }
     espia.mockRestore()
+  })
+
+  it('🔴 Codex R14: si entre leer y tomar el candado activate-plan tomó el lease, NO se cierra encima: 409', async () => {
+    conProgreso(
+      { planActivationStatus: 'NONE', planActivationAttempt: 2, planActivationLeaseUntil: null },
+      { tier: 'FREE', paymentMethodId: undefined },
+    )
+    ;(prisma.onboardingProgress.updateMany as jest.Mock).mockResolvedValueOnce({ count: 0 })
+    ;(prisma.onboardingProgress.findUnique as jest.Mock).mockResolvedValueOnce({ completedAt: null })
+
+    const next = await correr()
+
+    expect(prisma.onboardingProgress.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          completedAt: null,
+          planActivationStatus: 'NONE',
+          planActivationAttempt: 2,
+          planActivationLeaseUntil: null,
+        }),
+      }),
+    )
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 409, code: 'PLAN_ACTIVATION_IN_PROGRESS' }))
+    expect(venueCreationService.createVenueFromOnboarding).not.toHaveBeenCalled()
   })
 
   it('Free sin ningún cobro de por medio sigue cerrando el alta (regresión)', async () => {

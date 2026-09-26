@@ -679,6 +679,32 @@ export async function updateStep8(req: Request, res: Response, next: NextFunctio
 }
 
 /**
+ * 🔴 Codex R14: el candado de finalización exige que el cobro del plan siga EXACTAMENTE como se evaluó (estado, intento y
+ * lease). Con sólo `completedAt: null`, entre leer el progreso y tomar el candado `activate-plan` podía tomar el lease y
+ * cobrar, y esta finalización —decidida sobre la lectura vieja— cerraba el alta encima: cobrado y sin poder recuperarlo.
+ */
+function candadoSiElCobroNoSeMovio(
+  organizationId: string,
+  progress: { planActivationStatus?: unknown; planActivationAttempt?: number | null; planActivationLeaseUntil?: Date | null },
+) {
+  return {
+    organizationId,
+    completedAt: null,
+    planActivationStatus: progress.planActivationStatus as never,
+    planActivationAttempt: progress.planActivationAttempt ?? undefined,
+    planActivationLeaseUntil: progress.planActivationLeaseUntil,
+  }
+}
+
+/** El candado no se tomó: si el alta NO está terminada, lo que cambió fue el cobro — se responde como cobro en curso. */
+async function siNoTerminoEsUnCobroEnCurso(organizationId: string): Promise<void> {
+  const actual = await prisma.onboardingProgress.findUnique({ where: { organizationId }, select: { completedAt: true } })
+  if (actual && !actual.completedAt) {
+    throw new ConflictError('Tu pago se está confirmando. Vuelve a intentar en unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
+  }
+}
+
+/**
  * POST /api/v1/onboarding/organizations/:organizationId/complete
  *
  * Completes onboarding and creates the venue
@@ -709,6 +735,16 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
       throw new BadRequestError('Step 3 (Business Info) must be completed')
     }
 
+    // 🔴 Codex R14: con el lease VIVO el cobro está en vuelo — Stripe todavía no muestra nada, así que la búsqueda de
+    // abajo no lo vería. Mismo 409 que la finalización V2.
+    if (
+      progress.planActivationStatus === PLAN_ACTIVATION_STATUS.IN_PROGRESS &&
+      progress.planActivationLeaseUntil &&
+      progress.planActivationLeaseUntil > new Date()
+    ) {
+      throw new ConflictError('Tu pago se está confirmando. Vuelve a intentar en unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
+    }
+
     // 🔴 Codex R13: este carril viejo NO cobra ni recupera nada en Stripe. Si el alta V2 dejó un cobro de plan sin
     // cerrar, terminar aquí fijaba `completedAt` y `activate-plan` ya no podía recuperarlo: cobrado y sin acceso.
     if (
@@ -729,10 +765,7 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
     // OPTIMISTIC LOCKING: Atomically mark as completing BEFORE creating venue
     // This prevents race condition where double-click creates 2 venues
     const lockResult = await prisma.onboardingProgress.updateMany({
-      where: {
-        organizationId,
-        completedAt: null, // Only update if not already completed
-      },
+      where: candadoSiElCobroNoSeMovio(organizationId, progress),
       data: {
         completedAt: new Date(),
       },
@@ -740,6 +773,7 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
 
     // If no rows updated, another request already completed onboarding
     if (lockResult.count === 0) {
+      await siNoTerminoEsUnCobroEnCurso(organizationId)
       const existingVenue = await prisma.venue.findFirst({
         where: { organizationId },
         select: { id: true, slug: true, name: true, status: true },
@@ -1199,10 +1233,7 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
     // OPTIMISTIC LOCKING: Atomically mark as completing BEFORE creating venue
     // This prevents race condition where double-click creates 2 venues
     const lockResult = await prisma.onboardingProgress.updateMany({
-      where: {
-        organizationId,
-        completedAt: null, // Only update if not already completed
-      },
+      where: candadoSiElCobroNoSeMovio(organizationId, progress),
       data: {
         completedAt: new Date(),
         currentStep: 7,
@@ -1211,6 +1242,7 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
 
     // If no rows updated, another request already completed onboarding
     if (lockResult.count === 0) {
+      await siNoTerminoEsUnCobroEnCurso(organizationId)
       const existingVenue = await prisma.venue.findFirst({
         where: { organizationId },
         select: { id: true, slug: true, name: true, status: true },

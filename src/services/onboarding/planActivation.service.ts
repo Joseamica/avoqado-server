@@ -300,17 +300,22 @@ async function buscarSuscripcionDelIntento(
   return { encontrada, cubrioTodo }
 }
 
-/** ¿El cliente tiene alguna suscripción cobrando o a medio cobrar? (`canceled` e `incomplete_expired` ya no cobran.) */
-async function clienteTieneSuscripcionViva(customerId: string): Promise<boolean> {
-  let viva = false
+/**
+ * ¿El cliente tiene alguna suscripción DE PLAN cobrando o a medio cobrar? (`canceled` e `incomplete_expired` ya no
+ * cobran.) Sólo de PLAN (Codex R14): una función suelta viva —CFDI, por ejemplo— no es un cobro del alta y bloquearía
+ * la salida a Gratis para siempre. Las de plan traen `metadata.featureCode` PLAN_*; sin metadata decide el precio.
+ */
+async function clienteTieneSuscripcionDePlanViva(customerId: string): Promise<boolean> {
+  const vivas: Stripe.Subscription[] = []
   await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 100 }).autoPagingEach(sub => {
-    if (sub.status !== 'canceled' && sub.status !== 'incomplete_expired') {
-      viva = true
-      return false
-    }
+    if (sub.status !== 'canceled' && sub.status !== 'incomplete_expired') vivas.push(sub)
     return true
   })
-  return viva
+  for (const sub of vivas) {
+    const codigo = sub.metadata?.featureCode
+    if (codigo ? codigo.startsWith('PLAN_') : (await tierQueVendeLaSuscripcion(sub)) !== null) return true
+  }
+  return false
 }
 
 /**
@@ -328,30 +333,37 @@ export async function hayCobroDelAltaSinCerrar(progress: {
 }): Promise<boolean> {
   if (progress.planActivationStatus !== PLAN_ACTIVATION_STATUS.IN_PROGRESS) return false
   if (progress.planStripeSubscriptionId) return true
-  const conCliente = await prisma.venue.findMany({
-    where: { organizationId: progress.organizationId, stripeCustomerId: { not: null } },
-    select: { stripeCustomerId: true },
-  })
   // Sin cliente de Stripe no pudo crearse ninguna suscripción: el cliente se crea ANTES de cobrar (paso 4).
   const llave = `plan-activation:${progress.organizationId}:${progress.planActivationAttempt}`
-  for (const { stripeCustomerId } of conCliente) {
-    try {
-      const { encontrada, cubrioTodo } = await buscarSuscripcionDelIntento(stripeCustomerId as string, llave)
-      if (!cubrioTodo) return true
-      if (encontrada && (encontrada as Stripe.Subscription).status !== 'incomplete_expired') return true
-      // 🔴 Codex R13: el carril viejo de `complete` cobra con otra llave (`onboarding-complete:<org>`) y sin ese metadata,
-      // y su cobro dudoso también deja IN_PROGRESS. Un negocio que aún no termina su alta no tiene por qué tener NINGUNA
-      // suscripción viva: cualquiera que esté cobrando (o a medio cobrar) cuenta como abierta.
-      if (await clienteTieneSuscripcionViva(stripeCustomerId as string)) return true
-    } catch (error) {
-      logger.warn('complete: no se pudo consultar Stripe por un cobro del alta sin cerrar — se trata como abierto', {
-        organizationId: progress.organizationId,
-        error: error instanceof Error ? error.message : String(error),
-      })
-      return true
+  let afterId: string | undefined
+  while (true) {
+    // Paginar, no truncar: un cobro en otra página también impide terminar el alta.
+    const conCliente = await prisma.venue.findMany({
+      where: { organizationId: progress.organizationId, stripeCustomerId: { not: null }, ...(afterId ? { id: { gt: afterId } } : {}) },
+      select: { id: true, stripeCustomerId: true },
+      orderBy: { id: 'asc' },
+      take: 100,
+    })
+    for (const { stripeCustomerId } of conCliente) {
+      try {
+        const { encontrada, cubrioTodo } = await buscarSuscripcionDelIntento(stripeCustomerId as string, llave)
+        if (!cubrioTodo) return true
+        if (encontrada && (encontrada as Stripe.Subscription).status !== 'incomplete_expired') return true
+        // 🔴 Codex R13: el carril viejo de `complete` cobra con otra llave (`onboarding-complete:<org>`) y sin ese metadata,
+        // y su cobro dudoso también deja IN_PROGRESS. Un negocio que aún no termina su alta no tiene por qué tener NINGUNA
+        // suscripción de plan viva: cualquiera que esté cobrando (o a medio cobrar) cuenta como abierta.
+        if (await clienteTieneSuscripcionDePlanViva(stripeCustomerId as string)) return true
+      } catch (error) {
+        logger.warn('complete: no se pudo consultar Stripe por un cobro del alta sin cerrar — se trata como abierto', {
+          organizationId: progress.organizationId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+        return true
+      }
     }
+    if (conCliente.length < 100) return false
+    afterId = conCliente[conCliente.length - 1].id
   }
-  return false
 }
 
 /**

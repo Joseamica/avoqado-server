@@ -1649,8 +1649,12 @@ describe('🔴 Codex R12: hayCobroDelAltaSinCerrar — lo que consulta `complete
     expect(await hayCobroDelAltaSinCerrar(base)).toBe(false)
   })
   it('🔴 Codex R13: una suscripción VIVA sin la llave (la del carril viejo de `complete`) cuenta como abierta', async () => {
-    lista([{ id: 'sub_legacy', status: 'active', metadata: {} }])
+    lista([{ id: 'sub_legacy', status: 'active', metadata: { featureCode: 'PLAN_PRO' } }])
     expect(await hayCobroDelAltaSinCerrar(base)).toBe(true)
+  })
+  it('🔴 Codex R14: una suscripción viva de OTRA cosa (CFDI) no es un cobro del alta: no bloquea Gratis', async () => {
+    lista([{ id: 'sub_cfdi', status: 'active', metadata: { featureCode: 'CFDI' } }])
+    expect(await hayCobroDelAltaSinCerrar(base)).toBe(false)
   })
   it('una suscripción sin la llave que ya NO cobra (cancelada) no bloquea', async () => {
     lista([{ id: 'sub_vieja', status: 'canceled', metadata: {} }])
@@ -1663,5 +1667,34 @@ describe('🔴 Codex R12: hayCobroDelAltaSinCerrar — lo que consulta `complete
   it('sin cliente de Stripe no pudo crearse ninguna suscripción', async () => {
     prismaMock.venue.findMany.mockResolvedValue([] as never)
     expect(await hayCobroDelAltaSinCerrar(base)).toBe(false)
+  })
+
+  it.each([true, false])('revisa también la siguiente página de sucursales antes de cerrar (cobro pendiente: %s)', async pending => {
+    const firstPage = Array.from({ length: 100 }, (_, i) => ({ id: `venue-${String(i).padStart(3, '0')}`, stripeCustomerId: 'cus_empty' }))
+    prismaMock.venue.findMany
+      .mockResolvedValueOnce(firstPage as never)
+      .mockResolvedValueOnce([{ id: 'venue-last', stripeCustomerId: 'cus_last' }] as never)
+    mockSubList.mockImplementation(({ customer }: { customer: string }) => ({
+      autoPagingEach: async (cb: (s: unknown) => boolean) => {
+        if (pending && customer === 'cus_last') {
+          cb({ id: 'sub_pending', status: 'active', metadata: { planActivationKey: 'plan-activation:org-1:2' } })
+        }
+      },
+    }))
+
+    expect(await hayCobroDelAltaSinCerrar(base)).toBe(pending)
+    expect(prismaMock.venue.findMany).toHaveBeenCalledTimes(2)
+    expect(prismaMock.venue.findMany).toHaveBeenNthCalledWith(1, {
+      where: { organizationId: 'org-1', stripeCustomerId: { not: null } },
+      select: { id: true, stripeCustomerId: true },
+      orderBy: { id: 'asc' },
+      take: 100,
+    })
+    expect(prismaMock.venue.findMany).toHaveBeenNthCalledWith(2, {
+      where: { organizationId: 'org-1', stripeCustomerId: { not: null }, id: { gt: 'venue-099' } },
+      select: { id: true, stripeCustomerId: true },
+      orderBy: { id: 'asc' },
+      take: 100,
+    })
   })
 })

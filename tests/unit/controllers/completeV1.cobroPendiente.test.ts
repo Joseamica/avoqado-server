@@ -20,7 +20,10 @@ jest.mock('../../../src/config/logger', () => ({
 }))
 jest.mock('../../../src/utils/prismaClient', () => ({
   __esModule: true,
-  default: { onboardingProgress: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) }, venue: { findFirst: jest.fn() } },
+  default: {
+    onboardingProgress: { updateMany: jest.fn().mockResolvedValue({ count: 0 }), findUnique: jest.fn() },
+    venue: { findFirst: jest.fn() },
+  },
 }))
 
 import { completeOnboarding } from '../../../src/controllers/onboarding.controller'
@@ -47,6 +50,7 @@ function progreso(extra: Record<string, unknown>) {
 
 describe('completeOnboarding (V1) con un cobro del alta sin cerrar', () => {
   afterEach(() => jest.restoreAllMocks())
+  beforeEach(() => jest.clearAllMocks())
 
   it('🔴 cobro abierto: 409 PLAN_CHARGE_PENDING y NO se toma el lock', async () => {
     progreso({ planActivationStatus: 'IN_PROGRESS', planStripeSubscriptionId: 'sub_1' })
@@ -66,5 +70,35 @@ describe('completeOnboarding (V1) con un cobro del alta sin cerrar', () => {
 
     expect(next).not.toHaveBeenCalledWith(expect.objectContaining({ code: 'PLAN_CHARGE_PENDING' }))
     expect(prisma.onboardingProgress.updateMany).toHaveBeenCalled()
+  })
+
+  it('🔴 Codex R14: con el lease VIVO (cobro en vuelo, Stripe aún no lo muestra) tampoco se termina', async () => {
+    progreso({ planActivationStatus: 'IN_PROGRESS', planActivationLeaseUntil: new Date(Date.now() + 60_000) })
+    const next = jest.fn() as unknown as NextFunction
+
+    await completeOnboarding(req, res, next)
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 409, code: 'PLAN_ACTIVATION_IN_PROGRESS' }))
+    expect(prisma.onboardingProgress.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('🔴 Codex R14: el candado exige que el cobro siga como se leyó; si se movió, es un cobro en curso', async () => {
+    progreso({ planActivationStatus: 'NONE', planActivationAttempt: 3, planActivationLeaseUntil: null })
+    ;(prisma.onboardingProgress.findUnique as jest.Mock).mockResolvedValue({ completedAt: null })
+    const next = jest.fn() as unknown as NextFunction
+
+    await completeOnboarding(req, res, next)
+
+    expect(prisma.onboardingProgress.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          completedAt: null,
+          planActivationStatus: 'NONE',
+          planActivationAttempt: 3,
+          planActivationLeaseUntil: null,
+        }),
+      }),
+    )
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 409, code: 'PLAN_ACTIVATION_IN_PROGRESS' }))
   })
 })
