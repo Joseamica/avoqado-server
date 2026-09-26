@@ -389,6 +389,14 @@ describe('cancelCfdiController', () => {
     expect(mockLogAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'CFDI_CANCELLED', entity: 'Cfdi', entityId: 'c1' }))
   })
 
+  it('CAS perdido: responde sin duplicar la bitácora ni exponer metadata interna', async () => {
+    mockCancel.mockResolvedValue({ cancelStatus: 'CANCELLED', cancelledAt: null, cfdi: { id: 'c1' }, applied: false })
+    const res = mockRes()
+    await cancelCfdiController(cancelReq(), res)
+    expect(mockLogAction).not.toHaveBeenCalled()
+    expect(res.json).toHaveBeenCalledWith({ cancelStatus: 'CANCELLED', cancelledAt: null, cfdiId: 'c1' })
+  })
+
   it('returns 409 when the cfdi is not STAMPED', async () => {
     mockCancel.mockRejectedValue(new Error('Solo se puede cancelar un CFDI timbrado (STAMPED)'))
 

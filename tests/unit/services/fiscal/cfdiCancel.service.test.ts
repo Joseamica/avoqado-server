@@ -21,6 +21,7 @@ import type { CancelCfdiDeps, GetCfdiStatusDeps } from '../../../../src/services
 
 const stampedCfdi = {
   id: 'c1',
+  attempts: 2,
   venueId: 'v1',
   status: 'STAMPED',
   uuid: 'U1',
@@ -57,6 +58,17 @@ describe('cancelCfdi', () => {
     expect(update.cancelMotivo).toBe('02')
     expect(['ACCEPTED', 'CANCELLED', 'REQUESTED']).toContain(update.cancelStatus)
     expect(res.cancelStatus).toBeDefined()
+  })
+
+  it('captura la versión antes del PAC y devuelve el estado actual al perder CAS', async () => {
+    const current = { ...stampedCfdi, status: 'CANCELLED', cancelStatus: 'ACCEPTED', cancelledAt: null }
+    const deps = cancelDeps({
+      loadCfdi: jest.fn().mockResolvedValueOnce(stampedCfdi).mockResolvedValueOnce(current),
+      updateCfdi: jest.fn().mockResolvedValue(null),
+    })
+    const result = await cancelCfdi({ cfdiId: 'c1', motivo: '02', sandbox: true }, deps)
+    expect(deps.updateCfdi).toHaveBeenCalledWith('c1', expect.any(Object), 2)
+    expect(result).toMatchObject({ applied: false, cancelStatus: 'ACCEPTED', cfdi: current })
   })
 
   it('tenant isolation: throws (→404) when the cfdi belongs to another venue', async () => {

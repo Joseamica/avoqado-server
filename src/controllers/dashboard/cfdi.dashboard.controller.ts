@@ -287,14 +287,15 @@ export async function cancelCfdiController(req: Request, res: Response): Promise
       expectedVenueId: venueId,
     })
 
-    logAction({
-      staffId: authContext.userId,
-      venueId,
-      action: 'CFDI_CANCELLED',
-      entity: 'Cfdi',
-      entityId: cfdiId,
-      data: { motivo, substituteUuid: substituteUuid ?? null, cancelStatus: result.cancelStatus },
-    })
+    if (result.applied !== false)
+      await logAction({
+        staffId: authContext.userId,
+        venueId,
+        action: 'CFDI_CANCELLED',
+        entity: 'Cfdi',
+        entityId: cfdiId,
+        data: { motivo, substituteUuid: substituteUuid ?? null, cancelStatus: result.cancelStatus },
+      })
 
     res.status(200).json({
       cancelStatus: result.cancelStatus,

@@ -628,6 +628,24 @@ describe('replaceCfdi — P1/P2 de la auditoría', () => {
     expect(providerDe(deps)?.cancelInvoice).toBeUndefined()
   })
 
+  it('cancelación concurrente: al perder CAS relee la original y no deja pendiente una cancelación confirmada', async () => {
+    const loadCfdi = jest.fn().mockResolvedValue(original)
+    const deps = makeDeps({
+      loadCfdi,
+      findSustituta: jest
+        .fn()
+        .mockResolvedValue({ id: 'cfdi-sub', status: 'STAMPED', uuid: 'UUID-SUB', venueId: 'v1', replacesCfdiId: original.id }),
+      updateCfdi: jest.fn().mockImplementation(async () => {
+        loadCfdi.mockResolvedValue({ ...original, status: 'CANCELLED', cancelStatus: 'ACCEPTED' })
+        return null
+      }),
+    })
+    const res = await replaceCfdi(params, deps)
+    expect(res.cancelStatus).toBe('ACCEPTED')
+    expect(res.cancelPendiente).toBe(false)
+    expect(res.original.status).toBe('CANCELLED')
+  })
+
   // P2-5b · Al reanudar, la original se RELEE: entre una corrida y otra pudo cambiar de estado.
   it('al reanudar la cancelación relee la original en vez de usar la foto vieja', async () => {
     const loadCfdi = jest

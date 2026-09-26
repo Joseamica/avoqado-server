@@ -27,6 +27,8 @@ import { validateBeforeStamp } from './cfdiValidation'
 import { assembleSaleInput } from './assembleSaleInput'
 import {
   cancelCfdi,
+  aplicarCancelacion,
+  type CancelCfdiDeps,
   claimWhere,
   loadOrderForCfdiFromDb,
   totalDelDocumentoCents,
@@ -51,7 +53,7 @@ export interface ReplaceCfdiDeps {
   /** Guarda SÓLO las URLs de los archivos; nunca el estado fiscal (Codex P1-4). */
   persistArtifacts: (idempotencyKey: string, urls: { xmlUrl: string; pdfUrl: string }) => Promise<any>
   storeArtifact: (buffer: Buffer, path: string, contentType: string) => Promise<string>
-  updateCfdi: (cfdiId: string, data: Record<string, any>) => Promise<any>
+  updateCfdi: CancelCfdiDeps['updateCfdi']
 }
 
 export interface ReplaceCfdiResult {
@@ -327,6 +329,7 @@ async function cancelarOriginal(
     if (vigente.status === 'CANCELLED') {
       return { status, sustituta, original: vigente, cancelStatus: vigente.cancelStatus ?? 'CANCELLED', cancelPendiente: false }
     }
+    let primeraLectura = true
     const res = await cancelCfdi(
       {
         cfdiId: vigente.id,
@@ -335,7 +338,16 @@ async function cancelarOriginal(
         sandbox: params.sandbox,
         expectedVenueId: params.expectedVenueId,
       },
-      { loadCfdi: async () => vigente, resolveProvider: deps.resolveProvider, updateCfdi: deps.updateCfdi },
+      {
+        // Reutiliza la lectura de arriba; si pierde el CAS, devuelve la fila actual.
+        loadCfdi: async id => {
+          if (!primeraLectura) return deps.loadCfdi(id)
+          primeraLectura = false
+          return vigente
+        },
+        resolveProvider: deps.resolveProvider,
+        updateCfdi: deps.updateCfdi,
+      },
     )
     return {
       status,
@@ -428,5 +440,5 @@ const defaultReplaceDeps: ReplaceCfdiDeps = {
     return prisma.cfdi.findUnique({ where: { idempotencyKey } })
   },
   storeArtifact: (buffer, path, contentType) => uploadFileToStorage(buffer, path, contentType),
-  updateCfdi: (id, data) => prisma.cfdi.update({ where: { id }, data }),
+  updateCfdi: aplicarCancelacion,
 }

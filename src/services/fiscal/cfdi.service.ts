@@ -1587,10 +1587,12 @@ function stampedFields(data: Record<string, any>) {
 export interface CancelCfdiDeps {
   loadCfdi: (cfdiId: string) => Promise<any | null>
   resolveProvider: typeof resolveFiscalProvider
-  updateCfdi: (cfdiId: string, data: Record<string, any>) => Promise<any>
+  updateCfdi: (cfdiId: string, data: Record<string, any>, version: number) => Promise<any | null>
 }
 
 export interface CancelCfdiResult {
+  /** Sólo el ganador del CAS debe escribir la bitácora del controlador. */
+  applied: boolean
   cancelStatus: 'REQUESTED' | 'ACCEPTED' | 'REJECTED' | 'CANCELLED'
   cancelledAt: Date | null
   cfdi: any
@@ -1622,6 +1624,7 @@ export async function cancelCfdi(
   }
 
   // 3. Call the PAC via the provider interface
+  const version = cfdi.attempts
   const provider = deps.resolveProvider(cfdi.fiscalEmisor, { sandbox: params.sandbox })
   const result = await provider.cancelInvoice({
     providerInvoiceId: cfdi.facturapiId,
@@ -1642,20 +1645,28 @@ export async function cancelCfdi(
         : null
 
   // 5. Persist — update cancel fields + flip cfdi.status when definitively resolved
-  const updated = await deps.updateCfdi(cfdi.id, {
-    cancelMotivo: params.motivo,
-    // 🔴 Nunca se BORRA lo que ya constaba: una respuesta `pending` que llega tarde no puede tirar
-    // el sustituto ni la fecha de una cancelación que el SAT ya confirmó (Codex P2-5).
-    ...(params.substituteUuid ? { cancelSubstituteUuid: params.substituteUuid } : {}),
-    cancelStatus,
-    cancelRequestedAt: new Date(),
-    ...(result.cancelledAt ? { cancelledAt: result.cancelledAt } : {}),
-    ...(porQue ? { lastError: porQue } : {}),
-    // Sólo se marca CANCELLED cuando el PAC lo confirma — y nunca se baja de CANCELLED.
-    status: cancelStatus === 'CANCELLED' || cancelStatus === 'ACCEPTED' || cfdi.status === 'CANCELLED' ? 'CANCELLED' : cfdi.status,
-  })
+  const updated = await deps.updateCfdi(
+    cfdi.id,
+    {
+      cancelMotivo: params.motivo,
+      // 🔴 Nunca se BORRA lo que ya constaba: una respuesta `pending` que llega tarde no puede tirar
+      // el sustituto ni la fecha de una cancelación que el SAT ya confirmó (Codex P2-5).
+      ...(params.substituteUuid ? { cancelSubstituteUuid: params.substituteUuid } : {}),
+      cancelStatus,
+      cancelRequestedAt: new Date(),
+      ...(result.cancelledAt ? { cancelledAt: result.cancelledAt } : {}),
+      ...(porQue ? { lastError: porQue } : {}),
+      // Sólo se marca CANCELLED cuando el PAC lo confirma — y nunca se baja de CANCELLED.
+      status: cancelStatus === 'CANCELLED' || cancelStatus === 'ACCEPTED' || cfdi.status === 'CANCELLED' ? 'CANCELLED' : cfdi.status,
+    },
+    version,
+  )
 
-  return { cancelStatus, cancelledAt: result.cancelledAt, cfdi: updated }
+  if (!updated) {
+    const current = (await deps.loadCfdi(cfdi.id)) ?? cfdi
+    return { applied: false, cancelStatus: current.cancelStatus ?? 'REQUESTED', cancelledAt: current.cancelledAt ?? null, cfdi: current }
+  }
+  return { applied: true, cancelStatus, cancelledAt: result.cancelledAt, cfdi: updated }
 }
 
 function mapProviderCancelStatus(s: string): 'REQUESTED' | 'ACCEPTED' | 'REJECTED' | 'CANCELLED' {
@@ -1680,7 +1691,43 @@ function mapProviderCancelStatus(s: string): 'REQUESTED' | 'ACCEPTED' | 'REJECTE
 const defaultCancelDeps: CancelCfdiDeps = {
   loadCfdi: id => prisma.cfdi.findUnique({ where: { id }, include: { fiscalEmisor: true } }),
   resolveProvider: resolveFiscalProvider,
-  updateCfdi: (id, data) => prisma.cfdi.update({ where: { id }, data }),
+  updateCfdi: aplicarCancelacion,
+}
+
+/** Estado y sellos cambian juntos; el orden de locks coincide con la reserva de emisión. */
+export async function aplicarCancelacion(
+  cfdiId: string,
+  data: Record<string, any>,
+  version: number,
+  origen: 'DIRECTA' | 'PENDIENTE' | 'EXTERNA' = 'DIRECTA',
+): Promise<any | null> {
+  return prisma.$transaction(async tx => {
+    // El manifiesto cubre globales, cuyo orderId es NULL. UNION evita tomar dos veces una orden.
+    const orders = await tx.$queryRaw<Array<{ orderId: string }>>`
+      SELECT "orderId" FROM "Cfdi" WHERE id = ${cfdiId} AND "orderId" IS NOT NULL
+      UNION SELECT "orderId" FROM "CfdiGlobalOrden" WHERE "cfdiId" = ${cfdiId}
+      ORDER BY "orderId"
+    `
+    for (const order of orders) await bloquearOrdenParaFacturar(tx, order.orderId)
+    const cancelWhere: Prisma.CfdiWhereInput =
+      origen === 'PENDIENTE'
+        ? { cancelStatus: 'REQUESTED' }
+        : {
+            OR: [
+              { cancelStatus: null },
+              { cancelStatus: { notIn: origen === 'EXTERNA' ? ['REQUESTED', 'CANCELLED', 'ACCEPTED'] : ['CANCELLED', 'ACCEPTED'] } },
+            ],
+          }
+    const { count } = await tx.cfdi.updateMany({
+      where: { id: cfdiId, status: 'STAMPED', attempts: version, ...cancelWhere },
+      data,
+    })
+    if (count === 0) return null
+    if (data.status === 'CANCELLED' && (data.cancelStatus === 'CANCELLED' || data.cancelStatus === 'ACCEPTED')) {
+      await liberarSellosDe(tx, cfdiId)
+    }
+    return tx.cfdi.findUnique({ where: { id: cfdiId }, include: { fiscalEmisor: true } })
+  })
 }
 
 // ─── Cancelaciones que el SAT dejó «en trámite» ───────────────────────────────
@@ -1696,7 +1743,7 @@ export interface RefreshCancellationDeps {
    * Escribe el desenlace SÓLO si la fila sigue en trámite (CAS). Devuelve la fila actualizada, o `null`
    * si otra petición ya la había resuelto — así nunca se escribe la bitácora dos veces.
    */
-  applyCancelOutcome: (cfdiId: string, data: Record<string, any>) => Promise<any | null>
+  applyCancelOutcome: (cfdiId: string, data: Record<string, any>, version: number) => Promise<any | null>
   logAction: (params: LogActionParams) => Promise<void>
 }
 
@@ -1720,6 +1767,7 @@ export async function refreshPendingCancellation(
   deps: RefreshCancellationDeps = defaultRefreshDeps,
 ): Promise<any> {
   if (cfdi.cancelStatus !== 'REQUESTED' || !cfdi.facturapiId) return cfdi
+  const version = cfdi.attempts
   const emisor = cfdi.fiscalEmisor ?? (cfdi.fiscalEmisorId ? await deps.loadEmisor(cfdi.fiscalEmisorId) : null)
   if (!emisor) return cfdi
   const provider = deps.resolveProvider(emisor, { sandbox: opts.sandbox })
@@ -1731,14 +1779,18 @@ export async function refreshPendingCancellation(
 
   const cancelada = cancelStatus === 'CANCELLED' || cancelStatus === 'ACCEPTED'
   const razon = cancelada ? null : porQueNoQuedoCancelada(res.status)
-  const updated = await deps.applyCancelOutcome(cfdi.id, {
-    cancelStatus,
-    // Sólo se marca CANCELLED cuando el PAC lo confirma — y nunca se baja de CANCELLED.
-    status: cancelada || cfdi.status === 'CANCELLED' ? 'CANCELLED' : cfdi.status,
-    // La fecha es la que registró el PAC; sin ella se deja vacía en vez de inventar una.
-    ...(res.cancelledAt ? { cancelledAt: res.cancelledAt } : {}),
-    ...(razon ? { lastError: razon } : {}),
-  })
+  const updated = await deps.applyCancelOutcome(
+    cfdi.id,
+    {
+      cancelStatus,
+      // Sólo se marca CANCELLED cuando el PAC lo confirma — y nunca se baja de CANCELLED.
+      status: cancelada || cfdi.status === 'CANCELLED' ? 'CANCELLED' : cfdi.status,
+      // La fecha es la que registró el PAC; sin ella se deja vacía en vez de inventar una.
+      ...(res.cancelledAt ? { cancelledAt: res.cancelledAt } : {}),
+      ...(razon ? { lastError: razon } : {}),
+    },
+    version,
+  )
   if (!updated) return cfdi
 
   await deps.logAction({
@@ -1755,11 +1807,7 @@ export async function refreshPendingCancellation(
 const defaultRefreshDeps: RefreshCancellationDeps = {
   loadEmisor: id => prisma.fiscalEmisor.findUnique({ where: { id } }),
   resolveProvider: resolveFiscalProvider,
-  applyCancelOutcome: async (id, data) => {
-    const { count } = await prisma.cfdi.updateMany({ where: { id, cancelStatus: 'REQUESTED' }, data })
-    if (count === 0) return null
-    return prisma.cfdi.findUnique({ where: { id }, include: { fiscalEmisor: true } })
-  },
+  applyCancelOutcome: (id, data, version) => aplicarCancelacion(id, data, version, 'PENDIENTE'),
   logAction,
 }
 
@@ -1767,7 +1815,7 @@ export interface SincronizarExternaDeps {
   loadEmisor: RefreshCancellationDeps['loadEmisor']
   resolveProvider: RefreshCancellationDeps['resolveProvider']
   /** Marca cancelada SÓLO si sigue timbrada y sin cancelación en trámite (CAS). `null` si alguien ganó. */
-  applyExternalCancel: (cfdiId: string, data: Record<string, any>) => Promise<any | null>
+  applyExternalCancel: (cfdiId: string, data: Record<string, any>, version: number) => Promise<any | null>
   logAction: RefreshCancellationDeps['logAction']
 }
 
@@ -1783,6 +1831,7 @@ export async function sincronizarCancelacionExterna(
   deps: SincronizarExternaDeps = defaultExternaDeps,
 ): Promise<any> {
   if (cfdi.status !== 'STAMPED' || cfdi.cancelStatus === 'REQUESTED' || !cfdi.facturapiId) return cfdi
+  const version = cfdi.attempts
   const emisor = cfdi.fiscalEmisor ?? (cfdi.fiscalEmisorId ? await deps.loadEmisor(cfdi.fiscalEmisorId) : null)
   if (!emisor) return cfdi
   const provider = deps.resolveProvider(emisor, { sandbox: opts.sandbox })
@@ -1792,11 +1841,15 @@ export async function sincronizarCancelacionExterna(
   const cancelStatus = mapProviderCancelStatus(res.status)
   if (cancelStatus !== 'CANCELLED' && cancelStatus !== 'ACCEPTED') return cfdi
 
-  const updated = await deps.applyExternalCancel(cfdi.id, {
-    status: 'CANCELLED',
-    cancelStatus,
-    ...(res.cancelledAt ? { cancelledAt: res.cancelledAt } : {}),
-  })
+  const updated = await deps.applyExternalCancel(
+    cfdi.id,
+    {
+      status: 'CANCELLED',
+      cancelStatus,
+      ...(res.cancelledAt ? { cancelledAt: res.cancelledAt } : {}),
+    },
+    version,
+  )
   if (!updated) return cfdi
 
   await deps.logAction({
@@ -1813,14 +1866,7 @@ export async function sincronizarCancelacionExterna(
 const defaultExternaDeps: SincronizarExternaDeps = {
   loadEmisor: id => prisma.fiscalEmisor.findUnique({ where: { id } }),
   resolveProvider: resolveFiscalProvider,
-  applyExternalCancel: async (id, data) => {
-    const { count } = await prisma.cfdi.updateMany({
-      where: { id, status: 'STAMPED', OR: [{ cancelStatus: null }, { cancelStatus: { not: 'REQUESTED' } }] },
-      data,
-    })
-    if (count === 0) return null
-    return prisma.cfdi.findUnique({ where: { id }, include: { fiscalEmisor: true } })
-  },
+  applyExternalCancel: (id, data, version) => aplicarCancelacion(id, data, version, 'EXTERNA'),
   logAction,
 }
 
