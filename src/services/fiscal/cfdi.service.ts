@@ -1,11 +1,11 @@
 // src/services/fiscal/cfdi.service.ts
 import { ConflictError } from '../../errors/AppError'
 import { bloquearOrdenParaFacturar, tomarAdmisionCompartida } from './admisionIva'
-import { excluirSiEstaEnGlobal } from './exclusionGlobal'
-import { capturarEntrada, huellaDeEntrada, leerEntrada, paramsDesdeEntrada, EntradaDocumentalV1 } from './entradaDocumental'
+import { excluirSiEstaEnGlobal, CFDI_VIVO } from './exclusionGlobal'
+import { capturarEntrada, huellaDeEntrada, leerEntrada, EntradaDocumentalV1 } from './entradaDocumental'
 import { finalizarTimbre, completarArchivos, escalarIntentoIncierto, ArchivosCfdi } from './finalizadorCfdi'
 import { sellarRenglones, liberarSellosDe } from './sellosIva'
-import { FACTURAPI_DEDUPLICA, esRechazoConfirmado } from './providers/facturapi.provider'
+import { esRechazoConfirmado } from './providers/facturapi.provider'
 import type { StampedInvoice, ProviderInvoiceSummary } from './providers/fiscal-provider.interface'
 import { CsdStatus, FiscalProviderType, PaymentMethod, VenueType, CfdiStatus, CfdiFlow, Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
@@ -493,12 +493,7 @@ export async function emitirConEntrada(
         isGlobal: false,
         type: 'INGRESO',
         ...(sustitucion ? { id: { not: sustitucion.id } } : {}),
-        AND: [
-          { OR: [{ idempotencyKey: null }, { idempotencyKey: { not: idempotencyKey } }] },
-          { status: { not: 'VALIDATION_FAILED' } },
-          { OR: [{ status: { not: 'STAMP_FAILED' } }, { falloDefinitivo: false }] },
-          { OR: [{ status: { not: 'CANCELLED' } }, { cancelStatus: null }, { cancelStatus: { notIn: ['ACCEPTED', 'CANCELLED'] } }] },
-        ],
+        AND: [{ OR: [{ idempotencyKey: null }, { idempotencyKey: { not: idempotencyKey } }] }, CFDI_VIVO],
       },
     })
     if (alive) throw new ConflictError('CFDI en proceso para esta orden')
@@ -612,33 +607,10 @@ export async function emitirConEntrada(
     throw new ConflictError('La entrada fiscal de esta factura requiere revisión de soporte.')
   }
   const provider = deps.resolveProvider(reserved.emisor as any, { sandbox: params.sandbox })
-  const escalate = () => escalarIntentoIncierto(cfdi, new Date(), { runInTransaction: transaction })
   let recovered: StampedInvoice | ProviderInvoiceSummary | null = null
   if (!reserved.fresh) {
-    try {
-      recovered = cfdi.facturapiId
-        ? await provider.getInvoice(cfdi.facturapiId)
-        : await provider.findByExternalId(`${idempotencyKey}#${cfdi.attempts}`)
-    } catch {
-      await escalate()
-      throw new ConflictError(PROCESANDO)
-    }
-    if (recovered?.status === 'canceled')
-      throw new ConflictError('Esta cuenta ya tiene una factura cancelada en el PAC; revísala antes de volver a facturar.')
-    if (recovered && (recovered.status !== 'valid' || !recovered.uuid)) {
-      await escalate()
-      throw new ConflictError(PROCESANDO)
-    }
+    recovered = await consultarIntentoCapturado(cfdi, provider, transaction)
     if (!recovered) {
-      const recapturable = cfdi.enviadoAt === null || cfdi.falloDefinitivo === true
-      if (!recapturable) {
-        // The sandbox refuses repeated keys instead of returning the original document. No automatic resend.
-        if (!FACTURAPI_DEDUPLICA) {
-          await escalate()
-          throw new ConflictError(PROCESANDO)
-        }
-        throw new ConflictError(PROCESANDO)
-      }
       const previous = cfdi
       reserved = await transaction(async tx => {
         await admission(tx)
@@ -676,6 +648,51 @@ export async function emitirConEntrada(
   }
   // Resolve from the captured emisor after recapture; no live order/product reads after commit.
   const sendingProvider = deps.resolveProvider(reserved.emisor as any, { sandbox: params.sandbox })
+  return enviarIntentoCapturado(cfdi, { tipo: 'INDIVIDUAL', params: entrada.params }, recovered, sendingProvider, reserved.slug, deps)
+}
+
+/** Consulta sin reclamar ni recapturar. Un resultado negativo no prueba rechazo del PAC. */
+export async function consultarIntentoCapturado(
+  cfdi: any,
+  provider: Pick<import('./providers/fiscal-provider.interface').FiscalProvider, 'getInvoice' | 'findByExternalId'>,
+  transaction: NonNullable<IssueCfdiDeps['runInTransaction']>,
+): Promise<StampedInvoice | ProviderInvoiceSummary | null> {
+  const escalate = () => escalarIntentoIncierto(cfdi, new Date(), { runInTransaction: transaction })
+  let recovered
+  try {
+    recovered = cfdi.facturapiId
+      ? await provider.getInvoice(cfdi.facturapiId)
+      : await provider.findByExternalId(`${cfdi.idempotencyKey}#${cfdi.attempts}`)
+  } catch {
+    await escalate()
+    throw new ConflictError(PROCESANDO)
+  }
+  if (recovered?.status === 'canceled')
+    throw new ConflictError('Esta cuenta ya tiene una factura cancelada en el PAC; revísala antes de volver a facturar.')
+  if (
+    (recovered && (recovered.status !== 'valid' || !recovered.uuid)) ||
+    (!recovered && cfdi.enviadoAt !== null && !cfdi.falloDefinitivo)
+  ) {
+    await escalate()
+    throw new ConflictError(PROCESANDO)
+  }
+  return recovered
+}
+
+/** Sólo transporte y desenlace de una reserva protocolo1; cada emisor conserva su propia captura. */
+export async function enviarIntentoCapturado(
+  cfdi: any,
+  documento:
+    | { tipo: 'INDIVIDUAL'; params: import('./providers/fiscal-provider.interface').CreateInvoiceParams }
+    | { tipo: 'GLOBAL'; params: import('./providers/fiscal-provider.interface').GlobalInvoiceParams },
+  recovered: StampedInvoice | ProviderInvoiceSummary | null,
+  sendingProvider: import('./providers/fiscal-provider.interface').FiscalProvider,
+  venueSlug: string,
+  deps: Pick<IssueCfdiDeps, 'runInTransaction' | 'findExistingCfdi' | 'persistCfdi' | 'persistArtifacts' | 'storeArtifact'>,
+): Promise<IssueCfdiResult> {
+  if (cfdi.protocoloIva !== 1) throw new ConflictError(PROCESANDO)
+  const transaction = deps.runInTransaction ?? defaultDeps.runInTransaction!
+  const idempotencyKey = cfdi.idempotencyKey
   const version = cfdi.attempts
   async function reportConflictingVersion(current: any, uuid: string | null) {
     if (current?.attempts === version && (!uuid || !current.uuid || current.uuid === uuid)) return
@@ -684,7 +701,7 @@ export async function emitirConEntrada(
       currentAttempts: current?.attempts ?? null,
       uuid,
       currentUuid: current?.uuid ?? null,
-      orderId: params.orderId,
+      orderId: cfdi.orderId,
       idempotencyKey,
     }
     logger.error('🚨 CFDI_TIMBRE_DUPLICADO', { venueId: cfdi.venueId, ...data })
@@ -703,7 +720,9 @@ export async function emitirConEntrada(
     if (sent.count !== 1) throw new ConflictError(PROCESANDO)
     const identity = `${idempotencyKey}#${version}`
     try {
-      stamped = await sendingProvider.createInvoice({ ...paramsDesdeEntrada(entrada, identity), idempotencyKey: identity })
+      stamped = await (documento.tipo === 'GLOBAL'
+        ? sendingProvider.createGlobalInvoice({ ...structuredClone(documento.params), externalId: identity, idempotencyKey: identity })
+        : sendingProvider.createInvoice({ ...structuredClone(documento.params), externalId: identity, idempotencyKey: identity }))
     } catch (err) {
       const definitive = esRechazoConfirmado(err, true)
       const where: Prisma.CfdiWhereInput = {
@@ -736,7 +755,7 @@ export async function emitirConEntrada(
     if (!pending) await reportConflictingVersion(await deps.findExistingCfdi(idempotencyKey), stamped.uuid)
     throw new ConflictError(PROCESANDO)
   }
-  return finalizarEmision(cfdi, stamped, sendingProvider, reserved.slug, deps)
+  return finalizarEmision(cfdi, stamped, sendingProvider, venueSlug, deps)
 }
 
 /**
@@ -1598,7 +1617,7 @@ export async function loadOrderForCfdiFromDb(
  * Con IVA_16 la tupla derivada es la misma que la guardada (el trigger del plan 1 las mantiene coherentes).
  * Un renglón con producto pero sin ningún tratamiento a la vista es entrada legacy: se deja como hoy.
  */
-function renglonConTratamiento<
+export function renglonConTratamiento<
   T extends { ivaTratamiento?: IvaTratamiento | null; product: { taxRate: any; ivaTratamiento?: IvaTratamiento | null } | null },
 >(it: T): T & { tratamiento?: IvaTratamiento } {
   const tieneProducto = it.product != null

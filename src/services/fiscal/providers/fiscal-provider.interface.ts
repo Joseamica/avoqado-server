@@ -171,6 +171,8 @@ export interface GlobalInvoiceParams {
   }
   /** Stamped as `external_id` on the PAC document — enables deterministic orphan lookup in reconcile. */
   externalId?: string
+  /** Sólo envíos explícitos protocolo1: llave versionada del intento. */
+  idempotencyKey?: string
 }
 
 export interface StampedInvoice {

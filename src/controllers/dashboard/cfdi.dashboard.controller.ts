@@ -961,7 +961,11 @@ export async function triggerGlobalCfdiController(req: Request, res: Response): 
 
     switch (result.status) {
       case 'NOTHING_TO_INVOICE':
-        res.status(200).json({ status: 'NOTHING_TO_INVOICE', message: 'No hay tickets por facturar en el periodo.' })
+        res.status(200).json({
+          status: 'NOTHING_TO_INVOICE',
+          message: 'No hay tickets por facturar en el periodo.',
+          excluidasPorIvaMixto: result.excluidasPorIvaMixto,
+        })
         return
 
       case 'SKIPPED':
@@ -969,11 +973,19 @@ export async function triggerGlobalCfdiController(req: Request, res: Response): 
         return
 
       case 'VALIDATION_FAILED':
-        res.status(422).json({ error: 'No se pudo generar la factura global', reasons: result.reasons })
+        res.status(422).json({
+          error: 'No se pudo generar la factura global',
+          reasons: result.reasons,
+          excluidasPorIvaMixto: result.excluidasPorIvaMixto,
+        })
         return
 
       case 'STAMP_FAILED':
-        res.status(502).json({ error: 'El PAC rechazó el timbrado de la factura global', message: result.cfdi?.lastError })
+        res.status(502).json({
+          error: 'El PAC rechazó el timbrado de la factura global',
+          message: result.cfdi?.lastError,
+          excluidasPorIvaMixto: result.excluidasPorIvaMixto,
+        })
         return
 
       case 'STAMPED': {
@@ -993,6 +1005,7 @@ export async function triggerGlobalCfdiController(req: Request, res: Response): 
         })
 
         res.status(201).json({
+          excluidasPorIvaMixto: result.excluidasPorIvaMixto,
           cfdi: {
             id: result.cfdi.id,
             uuid: result.cfdi.uuid,
@@ -1017,7 +1030,7 @@ export async function triggerGlobalCfdiController(req: Request, res: Response): 
     }
 
     // Concurrent in-flight reservation — surface as 409 so the client can retry
-    if (/en proceso/i.test(message)) {
+    if (err instanceof ConflictError || /en proceso/i.test(message)) {
       logger.warn(aviso)
       res.status(409).json({ error: message })
       return

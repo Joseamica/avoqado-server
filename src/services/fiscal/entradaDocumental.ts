@@ -108,7 +108,7 @@ function conLlavesOrdenadas(valor: unknown): unknown {
 }
 
 /** sha256 hex del JSON canónico de la entrada (llaves ordenadas recursivamente). */
-export function huellaDeEntrada(e: EntradaDocumentalV1): string {
+export function huellaDeEntrada(e: unknown): string {
   return createHash('sha256')
     .update(JSON.stringify(conLlavesOrdenadas(e)))
     .digest('hex')

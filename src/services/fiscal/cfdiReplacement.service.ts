@@ -259,7 +259,6 @@ export async function replaceCfdi(
     }
     if (previo && previo.status !== 'canceled') {
       if (previo.status !== 'valid' || !previo.uuid) {
-        await deps.persistCfdi({ idempotencyKey: llave, facturapiId: previo.providerInvoiceId }, legacyWhere)
         throw new ConflictError('Sustitución en proceso para esta factura')
       }
       logger.warn(`[cfdi] el PAC ya tenía ${previo.uuid} para ${llave}: se completa sin volver a timbrar`)

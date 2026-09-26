@@ -970,6 +970,7 @@ describe('triggerGlobalCfdiController', () => {
       },
       period: { meses: '05', anio: 2026, satPeriodicidad: '04' },
       candidateCount: 3,
+      excluidasPorIvaMixto: 2,
     })
 
     const res = mockRes()
@@ -979,6 +980,7 @@ describe('triggerGlobalCfdiController', () => {
     expect(res.json).toHaveBeenCalledWith(
       expect.objectContaining({
         cfdi: expect.objectContaining({ uuid: 'GLOBAL-UUID-1', globalPeriod: expect.objectContaining({ meses: '05' }) }),
+        excluidasPorIvaMixto: 2,
       }),
     )
     expect(mockLogAction).toHaveBeenCalledWith(
@@ -993,15 +995,23 @@ describe('triggerGlobalCfdiController', () => {
   })
 
   it('returns 200 with NOTHING_TO_INVOICE message when no candidates in period', async () => {
-    mockIssueGlobal.mockResolvedValue({ status: 'NOTHING_TO_INVOICE' })
+    mockIssueGlobal.mockResolvedValue({ status: 'NOTHING_TO_INVOICE', excluidasPorIvaMixto: 2 })
 
     const res = mockRes()
     await triggerGlobalCfdiController(globalReq(), res)
 
     expect(res.status).toHaveBeenCalledWith(200)
     expect(res.json).toHaveBeenCalledWith(
-      expect.objectContaining({ status: 'NOTHING_TO_INVOICE', message: expect.stringContaining('No hay') }),
+      expect.objectContaining({ status: 'NOTHING_TO_INVOICE', message: expect.stringContaining('No hay'), excluidasPorIvaMixto: 2 }),
     )
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+
+  it('maps shared processing conflicts to 409 without an issue audit', async () => {
+    mockIssueGlobal.mockRejectedValueOnce(new ConflictError('La factura se está procesando'))
+    const res = mockRes()
+    await triggerGlobalCfdiController(globalReq(), res)
+    expect(res.status).toHaveBeenCalledWith(409)
     expect(mockLogAction).not.toHaveBeenCalled()
   })
 

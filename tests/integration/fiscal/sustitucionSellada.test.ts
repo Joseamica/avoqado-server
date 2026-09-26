@@ -390,9 +390,14 @@ describe('sustitución sellada', () => {
   it.each(['pending', 'valid'] as const)('legacy consulta %s sinUUID no finaliza ni cancela', async status => {
     const { cfdi } = await original()
     const sub = await historicalReplacement(cfdi)
-    provider.findByExternalId.mockResolvedValue({ ...stamped, status, uuid: null })
+    let atLookup: any
+    provider.findByExternalId.mockImplementation(async () => {
+      atLookup = await replacementRow(cfdi.id)
+      return { ...stamped, status, uuid: null }
+    })
     await expect(replacement(cfdi.id)).rejects.toThrow(/proceso|procesando/)
     expect(await replacementRow(cfdi.id)).toMatchObject({ status: 'STAMPING', attempts: 3, uuid: null, entrada: null, protocoloIva: null })
+    expect(await replacementRow(cfdi.id)).toEqual(atLookup)
     expect(provider.findByExternalId).toHaveBeenCalledWith(sub.idempotencyKey)
     expect(provider.createInvoice).not.toHaveBeenCalled()
     expect(provider.downloadXml).not.toHaveBeenCalled()

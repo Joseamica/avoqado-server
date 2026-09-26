@@ -6,7 +6,7 @@
 // del cliente final, una llamada directa a la API). Este archivo cubre:
 //   1. El helper puro `normalizeReceptorName` (trim + colapso de espacios + MAYÚSCULAS).
 //   2. Que `createInvoice` y `createPaymentComplement` lo apliquen al `legal_name`
-//      que reciben del SDK de Facturapi (integración, cliente SDK falso inyectado).
+//      que reciben los transportes HTTP/SDK de Facturapi (ambos simulados).
 
 const mockCreate = jest.fn()
 
@@ -63,10 +63,13 @@ const MOCK_INVOICE_RESPONSE = {
 }
 
 describe('FacturapiProvider — normalización del receptor en el boundary del PAC', () => {
-  beforeEach(() => jest.clearAllMocks())
+  beforeEach(() => {
+    jest.clearAllMocks()
+    jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, status: 200, json: async () => MOCK_INVOICE_RESPONSE } as Response)
+  })
+  afterEach(() => jest.restoreAllMocks())
 
-  it('createInvoice envía legal_name normalizado al SDK aunque el receptor venga mal escrito', async () => {
-    mockCreate.mockResolvedValue(MOCK_INVOICE_RESPONSE)
+  it('createInvoice envía legal_name normalizado por HTTP aunque el receptor venga mal escrito', async () => {
     const provider = new FacturapiProvider('sk_test_x')
 
     await provider.createInvoice({
@@ -94,7 +97,7 @@ describe('FacturapiProvider — normalización del receptor en el boundary del P
       idempotencyKey: 'idem-1',
     })
 
-    const body = mockCreate.mock.calls[0][0]
+    const body = JSON.parse(jest.mocked(global.fetch).mock.calls[0][1]!.body as string)
     expect(body.customer.legal_name).toBe('LA GALETERIE')
   })
 

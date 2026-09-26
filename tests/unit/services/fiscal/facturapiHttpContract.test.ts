@@ -41,4 +41,39 @@ describe('contrato HTTP de timbrado', () => {
     expect(esRechazoConfirmado(new ProviderHttpError(400, 'invalid_request', 'bad'), false)).toBe(false)
     expect(esRechazoConfirmado(new Error('network'), true)).toBe(false)
   })
+  const globalParams = {
+    receptor: {
+      legal_name: 'PÚBLICO EN GENERAL' as const,
+      tax_id: 'XAXX010101000' as const,
+      tax_system: '616' as const,
+      address: { zip: '64000' },
+    },
+    items: [],
+    payment_form: '04',
+    use: 'S01' as const,
+    global: { periodicity: 'month' as const, months: '05', year: 2026 },
+    externalId: 'global#1',
+    idempotencyKey: 'global#1',
+  }
+  it.each([400, 422, 500])('global conserva HTTP%s y code', async status => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ code: 'invalid_request', message: 'bad' }), { status }))
+    await expect(new FacturapiProvider('sk_test_fake').createGlobalInvoice(globalParams)).rejects.toMatchObject({
+      status,
+      code: 'invalid_request',
+    })
+  })
+  it('global pending conserva ambas identidades protocolo1', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ id: 'pending', status: 'pending' }), { status: 202 }))
+    expect(await new FacturapiProvider('sk_test_fake').createGlobalInvoice(globalParams)).toMatchObject({ status: 'pending', uuid: null })
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({ type: 'I', external_id: 'global#1', idempotency_key: 'global#1' })
+  })
+  it('global legacy no inventa idempotency_key', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ id: 'pending', status: 'pending' }), { status: 202 }))
+    await new FacturapiProvider('sk_test_fake').createGlobalInvoice({
+      ...globalParams,
+      idempotencyKey: undefined,
+      externalId: 'legacy-global',
+    })
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).idempotency_key).toBeUndefined()
+  })
 })

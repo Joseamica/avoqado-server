@@ -1,0 +1,442 @@
+jest.mock('@/services/fiscal/fiscalProvider.factory', () => ({ resolveFiscalProvider: jest.fn() }))
+jest.mock('@/services/storage.service', () => ({
+  buildStoragePath: (s: string) => s,
+  uploadFileToStorage: jest.fn(async () => 'https://test/file'),
+}))
+import { Prisma } from '@prisma/client'
+import { huellaDeEntrada } from '@/services/fiscal/entradaDocumental'
+import { liberarSellosDe } from '@/services/fiscal/sellosIva'
+import { randomUUID } from 'crypto'
+import prisma from '@/utils/prismaClient'
+import { issueGlobalForEmisor } from '@/services/fiscal/cfdiGlobal.service'
+import { issueCfdiForOrder, cancelCfdi } from '@/services/fiscal/cfdi.service'
+import { resolveFiscalProvider } from '@/services/fiscal/fiscalProvider.factory'
+import { ProviderHttpError } from '@/services/fiscal/providers/facturapi.provider'
+import { encenderIvaPorProducto } from '../../__helpers__/iva-por-producto'
+
+const database = new URL(process.env.TEST_DATABASE_URL ?? '')
+if (!['localhost', '127.0.0.1'].includes(database.hostname) || database.pathname !== '/av_db_25_iva_test')
+  throw new Error('Dedicated test DB required')
+const NOW = new Date('2026-06-03T17:00:00Z')
+const receptor = { rfc: 'EKU9003173C9', razonSocial: 'ESCUELA KEMPER URGATE', regimenFiscal: '601', codigoPostal: '64000', usoCfdi: 'G03' }
+const valid = () => ({
+  providerInvoiceId: randomUUID(),
+  uuid: randomUUID(),
+  serie: 'F',
+  folio: '1',
+  totalCents: 11600,
+  stampedAt: new Date(),
+  status: 'valid' as const,
+})
+
+describe('global con manifiesto y entrada congelada', () => {
+  const fixture = `global-iva-${randomUUID()}`
+  let venueId: string
+  let productId: string
+  let fiscalEmisorId: string
+  const provider = {
+    name: 'facturapi',
+    createInvoice: jest.fn(),
+    createGlobalInvoice: jest.fn(),
+    cancelInvoice: jest.fn(),
+    findByExternalId: jest.fn(),
+    getInvoice: jest.fn(),
+    downloadXml: jest.fn(),
+    downloadPdf: jest.fn(),
+  }
+  const issue = (orderId: string) => issueCfdiForOrder({ orderId, receptor, sandbox: true, expectedVenueId: venueId })
+  const global = () => issueGlobalForEmisor({ emisorId: fiscalEmisorId, now: NOW, sandbox: true })
+  const row = () => prisma.cfdi.findUniqueOrThrow({ where: { idempotencyKey: `cfdi-global-${fiscalEmisorId}-2026-05-04` } })
+  beforeAll(async () => {
+    await prisma.organization.create({ data: { id: fixture, name: fixture, email: `${fixture}@example.test`, phone: '5500000000' } })
+    venueId = (await prisma.venue.create({ data: { id: fixture, organizationId: fixture, name: fixture, slug: fixture } })).id
+    await encenderIvaPorProducto(venueId)
+    const category = await prisma.menuCategory.create({ data: { venueId, name: fixture, slug: fixture } })
+    productId = (await prisma.product.create({ data: { venueId, categoryId: category.id, name: fixture, sku: fixture, price: 116 } })).id
+    fiscalEmisorId = (
+      await prisma.fiscalEmisor.create({
+        data: {
+          venueId,
+          rfc: 'AAA010101AAA',
+          legalName: fixture,
+          regimenFiscal: '601',
+          lugarExpedicion: '01000',
+          csdStatus: 'ACTIVE',
+          globalPeriodicity: 'MENSUAL',
+          invoiceCashSales: true,
+        },
+      })
+    ).id
+    await prisma.paymentProvider.create({
+      data: { id: fixture, code: fixture, name: fixture, type: 'PAYMENT_PROCESSOR', countryCode: ['MX'] },
+    })
+    await prisma.merchantAccount.create({
+      data: { id: fixture, providerId: fixture, externalMerchantId: fixture, credentialsEncrypted: {} },
+    })
+    await prisma.merchantFiscalConfig.create({
+      data: { merchantAccountId: fixture, fiscalEmisorId, facturacionEnabled: true, autofacturaEnabled: true, includeInGlobal: true },
+    })
+  })
+
+  async function cleanOrders() {
+    await prisma.activityLog.deleteMany({ where: { venueId } })
+    await prisma.orderItemSelloIva.deleteMany({ where: { cfdi: { venueId } } })
+    await prisma.cfdiGlobalOrden.deleteMany({ where: { cfdi: { venueId } } })
+    await prisma.cfdi.deleteMany({ where: { venueId } })
+    await prisma.payment.deleteMany({ where: { venueId } })
+    await prisma.orderItem.deleteMany({ where: { order: { venueId } } })
+    await prisma.order.deleteMany({ where: { venueId } })
+  }
+  beforeEach(async () => {
+    await cleanOrders()
+    jest.resetAllMocks()
+    jest.mocked(resolveFiscalProvider).mockReturnValue(provider as any)
+    provider.createInvoice.mockImplementation(async () => valid())
+    provider.createGlobalInvoice.mockImplementation(async () => valid())
+    provider.cancelInvoice.mockResolvedValue({ status: 'canceled', cancelledAt: new Date() })
+    provider.findByExternalId.mockResolvedValue(null)
+    provider.downloadXml.mockResolvedValue(Buffer.from('<Comprobante/>'))
+    provider.downloadPdf.mockResolvedValue(Buffer.from('%PDF'))
+    await prisma.product.update({ where: { id: productId }, data: { ivaTratamiento: 'IVA_16' } })
+  })
+  afterEach(() => jest.restoreAllMocks())
+  afterAll(async () => {
+    if (!venueId) return
+    await cleanOrders()
+    await prisma.product.deleteMany({ where: { venueId } })
+    await prisma.menuCategory.deleteMany({ where: { venueId } })
+    await prisma.merchantFiscalConfig.deleteMany({ where: { fiscalEmisorId } })
+    await prisma.fiscalEmisor.deleteMany({ where: { venueId } })
+    await prisma.merchantAccount.deleteMany({ where: { id: fixture } })
+    await prisma.paymentProvider.deleteMany({ where: { id: fixture } })
+    await prisma.venue.delete({ where: { id: venueId } })
+    await prisma.organization.delete({ where: { id: fixture } })
+  })
+  async function order(amount = 116) {
+    return prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: randomUUID(),
+        subtotal: amount,
+        taxAmount: 0,
+        total: amount,
+        updatedAt: new Date('2026-05-15T12:00:00Z'),
+        paymentStatus: 'PAID',
+        contratoDePrecio: 'IVA_INCLUIDO',
+        items: { create: { productId, productName: 'Producto', quantity: 1, unitPrice: amount, taxAmount: 0, total: amount } },
+        payments: {
+          create: {
+            venueId,
+            merchantAccountId: fixture,
+            amount,
+            feePercentage: 0,
+            feeAmount: 0,
+            netAmount: amount,
+            method: 'CREDIT_CARD',
+            status: 'COMPLETED',
+          },
+        },
+      },
+      include: { items: true },
+    })
+  }
+  it('todo16 conserva payload y dinero; reserva protocolo1, manifiesto y sellos antes del PAC', async () => {
+    const a = await order()
+    const b = await order(58)
+    provider.createGlobalInvoice.mockImplementation(async params => {
+      const c = await row()
+      expect(c).toMatchObject({ protocoloIva: 1, attempts: 1, subtotalCents: 15000, taxCents: 2400, totalCents: 17400 })
+      expect(c.enviadoAt).not.toBeNull()
+      expect(await prisma.cfdiGlobalOrden.count({ where: { cfdiId: c.id } })).toBe(2)
+      expect(await prisma.orderItemSelloIva.count({ where: { cfdiId: c.id } })).toBe(2)
+      expect(params).toEqual({
+        receptor: { legal_name: 'PÚBLICO EN GENERAL', tax_id: 'XAXX010101000', tax_system: '616', address: { zip: '01000' } },
+        items: [11600, 5800].map(unitPriceCents => ({
+          satProductKey: '01010101',
+          satUnitKey: 'ACT',
+          description: 'Venta',
+          quantity: 1,
+          unitPriceCents,
+          discountCents: 0,
+          objetoImp: '02',
+          taxes: [{ type: 'IVA', factor: 'Tasa', rate: 0.16, withholding: false }],
+          taxIncluded: true,
+        })),
+        payment_form: '04',
+        use: 'S01',
+        global: { periodicity: 'month', months: '05', year: 2026 },
+        externalId: `${c.idempotencyKey}#1`,
+        idempotencyKey: `${c.idempotencyKey}#1`,
+      })
+      return valid()
+    })
+    expect((await global()).status).toBe('STAMPED')
+    await expect(issue(a.id)).rejects.toThrow('ya está incluida en la factura global')
+    await cancelCfdi({ cfdiId: (await row()).id, motivo: '02', sandbox: true, expectedVenueId: venueId })
+    expect(await prisma.cfdiGlobalOrden.count({ where: { cfdiId: (await row()).id } })).toBe(2)
+    expect((await issue(b.id)).status).toBe('STAMPED')
+  })
+  it('MIXTA se excluye y se cuenta; ningún PAC ni reserva vacía', async () => {
+    await order()
+    await prisma.product.update({ where: { id: productId }, data: { ivaTratamiento: 'IVA_0' } })
+    expect(await global()).toMatchObject({ status: 'NOTHING_TO_INVOICE', excluidasPorIvaMixto: 1 })
+    expect(provider.createGlobalInvoice).not.toHaveBeenCalled()
+  })
+  it('individual incierta y manifiesto global incierto excluyen la venta', async () => {
+    const o = await order()
+    provider.createInvoice.mockRejectedValue(new Error('timeout'))
+    await issue(o.id)
+    expect((await global()).status).toBe('NOTHING_TO_INVOICE')
+    const c = await prisma.cfdi.findFirstOrThrow({ where: { venueId } })
+    await prisma.cfdi.update({ where: { id: c.id }, data: { orderId: null, isGlobal: true } })
+    await prisma.cfdiGlobalOrden.create({ data: { cfdiId: c.id, orderId: o.id, huella: 'historical' } })
+    expect((await global()).status).toBe('NOTHING_TO_INVOICE')
+  })
+  it('respuesta perdida recupera identidad sin recapturar ni segundo envío', async () => {
+    await order()
+    const stamped = valid()
+    provider.createGlobalInvoice.mockRejectedValueOnce(new Error('timeout'))
+    expect((await global()).status).toBe('STAMP_FAILED')
+    const before = await row()
+    await prisma.product.update({ where: { id: productId }, data: { ivaTratamiento: 'IVA_0' } })
+    provider.findByExternalId.mockResolvedValue(stamped)
+    expect((await global()).status).toBe('STAMPED')
+    expect(provider.createGlobalInvoice).toHaveBeenCalledTimes(1)
+    expect(provider.findByExternalId).toHaveBeenCalledWith(`${before.idempotencyKey}#1`)
+    expect((await row()).entrada).toEqual(before.entrada)
+  })
+  it('incierto negativo nunca reenvía, ni siquiera tras60min; escala una vez', async () => {
+    await order()
+    provider.createGlobalInvoice.mockRejectedValue(new Error('timeout'))
+    await global()
+    await prisma.cfdi.update({ where: { id: (await row()).id }, data: { enviadoAt: new Date(Date.now() - 61 * 60000) } })
+    await expect(global()).rejects.toThrow(/procesando/)
+    await expect(global()).rejects.toThrow(/procesando/)
+    expect(provider.createGlobalInvoice).toHaveBeenCalledTimes(1)
+    expect(await prisma.activityLog.count({ where: { venueId, action: 'CFDI_INTENTO_INCIERTO_ESCALADO' } })).toBe(1)
+  })
+  it('pending guarda sólo identidad y recupera por provider id; XML falla después de STAMPED', async () => {
+    await order()
+    provider.createGlobalInvoice.mockResolvedValue({ ...valid(), providerInvoiceId: 'pending-global', status: 'pending', uuid: null })
+    await expect(global()).rejects.toThrow(/procesando/)
+    expect(await row()).toMatchObject({ status: 'STAMPING', facturapiId: 'pending-global', attempts: 1 })
+    provider.getInvoice.mockResolvedValue({ ...valid(), providerInvoiceId: 'pending-global' })
+    provider.downloadXml.mockImplementation(async () => {
+      expect((await row()).status).toBe('STAMPED')
+      throw new Error('storage')
+    })
+    expect((await global()).status).toBe('STAMPED')
+    expect(provider.getInvoice).toHaveBeenCalledWith('pending-global')
+  })
+  it('rechazo confirmado recaptura y reemplaza miembros; conserva otra factura viva', async () => {
+    const first = await order()
+    provider.createGlobalInvoice.mockRejectedValueOnce(new ProviderHttpError(400, 'invalid_request', 'bad'))
+    await global()
+    const before = await row()
+    expect(before.falloDefinitivo).toBe(true)
+    await issue(first.id)
+    const second = await order(58)
+    expect((await global()).status).toBe('STAMPED')
+    expect((await row()).attempts).toBe(2)
+    expect(await prisma.cfdiGlobalOrden.findMany({ where: { cfdiId: before.id }, take: 10, select: { orderId: true } })).toEqual([
+      { orderId: second.id },
+    ])
+  })
+  it('relee elegibilidad bajo lock: una individual entre selección y reserva gana', async () => {
+    const o = await order()
+    const read = prisma.order.findMany.bind(prisma.order)
+    let paused = false
+    jest.spyOn(prisma.order, 'findMany').mockImplementation((async (args: Prisma.OrderFindManyArgs) => {
+      const result = await read(args as any)
+      if (!paused && result.some(r => r.id === o.id)) {
+        paused = true
+        await issue(o.id)
+      }
+      return result
+    }) as any)
+    expect((await global()).status).toBe('NOTHING_TO_INVOICE')
+    expect(provider.createGlobalInvoice).not.toHaveBeenCalled()
+  })
+  it('validación fallida nunca enviada puede corregirse sin tratarla como entrada corrupta', async () => {
+    await order()
+    await prisma.fiscalEmisor.update({ where: { id: fiscalEmisorId }, data: { lugarExpedicion: 'BADCP' } })
+    try {
+      expect((await global()).status).toBe('VALIDATION_FAILED')
+      expect(await row()).toMatchObject({ attempts: 0, enviadoAt: null, protocoloIva: 1 })
+    } finally {
+      await prisma.fiscalEmisor.update({ where: { id: fiscalEmisorId }, data: { lugarExpedicion: '01000' } })
+    }
+    expect((await global()).status).toBe('STAMPED')
+    expect((await row()).attempts).toBe(1)
+  })
+  it('hash correcto no autoriza params cuyo importe diverge de la foto', async () => {
+    await order()
+    provider.createGlobalInvoice.mockRejectedValueOnce(new Error('timeout'))
+    await global()
+    const c = await row()
+    const entrada = c.entrada as any
+    entrada.params.items[0].unitPriceCents += 11600
+    await prisma.cfdi.update({ where: { id: c.id }, data: { entrada, entradaHuella: huellaDeEntrada(entrada) } })
+    await expect(global()).rejects.toThrow(/entrada fiscal/)
+    expect(provider.findByExternalId).not.toHaveBeenCalled()
+  })
+  it('respeta el opt-in de efectivo en la selección real', async () => {
+    const o = await order()
+    await prisma.payment.updateMany({ where: { orderId: o.id }, data: { method: 'CASH' } })
+    await prisma.fiscalEmisor.update({ where: { id: fiscalEmisorId }, data: { invoiceCashSales: false } })
+    try {
+      expect((await global()).status).toBe('NOTHING_TO_INVOICE')
+      expect(provider.createGlobalInvoice).not.toHaveBeenCalled()
+    } finally {
+      await prisma.fiscalEmisor.update({ where: { id: fiscalEmisorId }, data: { invoiceCashSales: true } })
+    }
+    expect((await global()).status).toBe('STAMPED')
+  })
+  it('enumera más de una página y reserva todos los tickets sin truncar', async () => {
+    for (let i = 0; i < 102; i++) await order()
+    const spy = jest.spyOn(prisma.order, 'findMany')
+    const result = await global()
+    expect(result).toMatchObject({ status: 'STAMPED', candidateCount: 102 })
+    expect(provider.createGlobalInvoice.mock.calls[0][0].items).toHaveLength(102)
+    expect(await prisma.cfdiGlobalOrden.count({ where: { cfdiId: result.cfdi.id } })).toBe(102)
+    expect(spy.mock.calls.length).toBeGreaterThanOrEqual(2)
+    for (const [args] of spy.mock.calls) expect(args?.take).toBeLessThanOrEqual(100)
+  })
+  it('dos solicitudes concurrentes producen un solo envío', async () => {
+    await order()
+    const results = await Promise.allSettled([global(), global()])
+    expect(results.some(r => r.status === 'fulfilled' && r.value.status === 'STAMPED')).toBe(true)
+    expect(provider.createGlobalInvoice).toHaveBeenCalledTimes(1)
+  })
+  it('usa params congelados aunque el catálogo cambie después del commit', async () => {
+    await order()
+    const result = await issueGlobalForEmisor(
+      { emisorId: fiscalEmisorId, now: NOW, sandbox: true },
+      {
+        loadVenueSlug: async () => {
+          await prisma.product.update({ where: { id: productId }, data: { ivaTratamiento: 'IVA_0' } })
+          return fixture
+        },
+      },
+    )
+    expect(result.status).toBe('STAMPED')
+    expect(provider.createGlobalInvoice.mock.calls[0][0].items[0].taxes[0].rate).toBe(0.16)
+  })
+  it.each(['valid', 'pending', 'failure'])('respuesta %s de otra versión no pisa ni finaliza', async outcome => {
+    await order()
+    provider.createGlobalInvoice.mockImplementation(async () => {
+      await prisma.cfdi.update({ where: { id: (await row()).id }, data: { attempts: 2 } })
+      if (outcome === 'failure') throw new ProviderHttpError(400, 'invalid_request', 'late')
+      return outcome === 'valid' ? valid() : { ...valid(), status: 'pending', uuid: null }
+    })
+    await expect(global()).rejects.toThrow(/procesando/)
+    expect(await row()).toMatchObject({ attempts: 2, status: 'STAMPING', uuid: null, falloDefinitivo: false, facturapiId: null })
+    expect(await prisma.activityLog.count({ where: { venueId, action: 'CFDI_TIMBRE_DUPLICADO' } })).toBe(1)
+  })
+  it('rechazo del primer envío tras RESET marca definitivo sin subir versión', async () => {
+    await order()
+    provider.createGlobalInvoice.mockImplementation(async () => {
+      await prisma.cfdi.update({ where: { id: (await row()).id }, data: { status: 'STAMP_FAILED' } })
+      throw new ProviderHttpError(400, 'invalid_request', 'rejected')
+    })
+    expect((await global()).status).toBe('STAMP_FAILED')
+    expect(await row()).toMatchObject({ attempts: 1, falloDefinitivo: true })
+  })
+  async function legacy() {
+    await order()
+    provider.createGlobalInvoice.mockRejectedValueOnce(new Error('timeout'))
+    await global()
+    const c = await row()
+    await prisma.$transaction(async tx => {
+      await liberarSellosDe(tx, c.id)
+      await tx.cfdiGlobalOrden.deleteMany({ where: { cfdiId: c.id } })
+      await tx.cfdi.update({
+        where: { id: c.id },
+        data: { protocoloIva: null, entrada: Prisma.DbNull, entradaHuella: null, enviadoAt: null },
+      })
+    })
+    provider.createGlobalInvoice.mockClear()
+    return row()
+  }
+  it('legacy STAMPING consulta pending sin escribir identidad ni timestamp', async () => {
+    const c = await legacy()
+    const before = await prisma.cfdi.update({ where: { id: c.id }, data: { status: 'STAMPING' } })
+    provider.findByExternalId.mockResolvedValue({ ...valid(), status: 'pending', uuid: null })
+    await expect(global()).rejects.toThrow(/procesando/)
+    expect(await row()).toEqual(before)
+    expect(provider.createGlobalInvoice).not.toHaveBeenCalled()
+  })
+  it('legacy sin órdenes elegibles conserva el conteo de mixtas', async () => {
+    const before = await legacy()
+    await prisma.product.update({ where: { id: productId }, data: { ivaTratamiento: 'IVA_0' } })
+    expect(await global()).toMatchObject({ status: 'NOTHING_TO_INVOICE', candidateCount: 0, excluidasPorIvaMixto: 1 })
+    expect(await row()).toEqual(before)
+    expect(provider.createGlobalInvoice).not.toHaveBeenCalled()
+  })
+  it('un fallo después de manifiesto y sellos revierte toda la reserva global', async () => {
+    const o = await order()
+    await expect(
+      issueGlobalForEmisor(
+        { emisorId: fiscalEmisorId, now: NOW, sandbox: true },
+        {
+          runInTransaction: work =>
+            prisma.$transaction(async tx => {
+              await work(tx)
+              const c = await tx.cfdi.findUniqueOrThrow({ where: { idempotencyKey: `cfdi-global-${fiscalEmisorId}-2026-05-04` } })
+              expect(await tx.cfdiGlobalOrden.count({ where: { cfdiId: c.id } })).toBe(1)
+              expect(await tx.orderItemSelloIva.count({ where: { cfdiId: c.id } })).toBe(1)
+              throw new Error('fallo inyectado después de sellar')
+            }),
+        },
+      ),
+    ).rejects.toThrow('fallo inyectado después de sellar')
+    expect(await prisma.cfdi.count({ where: { venueId } })).toBe(0)
+    expect(await prisma.cfdiGlobalOrden.count({ where: { orderId: o.id } })).toBe(0)
+    expect(await prisma.orderItemSelloIva.count({ where: { orderItem: { orderId: o.id } } })).toBe(0)
+    expect(provider.createGlobalInvoice).not.toHaveBeenCalled()
+  })
+  it('legacy recupera identidad sin inventar foto ni reescribir montos históricos', async () => {
+    const c = await legacy()
+    const stamped = valid()
+    provider.findByExternalId.mockResolvedValue(stamped)
+    provider.downloadXml.mockImplementation(async () => {
+      expect((await row()).status).toBe('STAMPED')
+      return Buffer.from('<Comprobante/>')
+    })
+    expect((await global()).status).toBe('STAMPED')
+    expect(provider.findByExternalId).toHaveBeenCalledWith(c.idempotencyKey)
+    expect(provider.createGlobalInvoice).not.toHaveBeenCalled()
+    expect(await row()).toMatchObject({ entrada: null, protocoloIva: null, subtotalCents: c.subtotalCents, taxCents: c.taxCents })
+    expect(await prisma.cfdiGlobalOrden.count({ where: { cfdiId: c.id } })).toBe(0)
+  })
+  it('legacy reintenta con identidad histórica y escribe versión antes del PAC', async () => {
+    const c = await legacy()
+    provider.createGlobalInvoice.mockImplementation(async params => {
+      expect(params.externalId).toBe(c.idempotencyKey)
+      expect(params.idempotencyKey).toBeUndefined()
+      expect((await row()).attempts).toBe(c.attempts + 1)
+      return valid()
+    })
+    expect((await global()).status).toBe('STAMPED')
+    expect(await row()).toMatchObject({ entrada: null, protocoloIva: null })
+  })
+  it.each(['valid', 'pending', 'failure'])('legacy ignora respuesta %s después de cambiar la versión', async outcome => {
+    await legacy()
+    provider.createGlobalInvoice.mockImplementation(async () => {
+      const c = await row()
+      await prisma.cfdi.update({ where: { id: c.id }, data: { attempts: c.attempts + 1 } })
+      if (outcome === 'failure') throw new Error('late')
+      return outcome === 'valid' ? valid() : { ...valid(), status: 'pending', uuid: null }
+    })
+    await expect(global()).rejects.toThrow(/procesando/)
+    expect(await row()).toMatchObject({ attempts: 3, status: 'STAMPING', uuid: null, facturapiId: null, protocoloIva: null })
+    expect(provider.downloadXml).not.toHaveBeenCalled()
+  })
+  it.each(['pending', 'valid'])('legacy %s sinUUID no finaliza ni reenvía', async status => {
+    await legacy()
+    provider.findByExternalId.mockResolvedValue({ ...valid(), status, uuid: null })
+    await expect(global()).rejects.toThrow(/procesando/)
+    expect((await row()).status).toBe('STAMP_FAILED')
+    expect(provider.createGlobalInvoice).not.toHaveBeenCalled()
+  })
+})

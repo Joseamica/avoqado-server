@@ -184,6 +184,27 @@ export class FacturapiProvider implements FiscalProvider {
     }
   }
 
+  /** El SDK descarta status/code; conservarlos permite distinguir rechazo de incertidumbre. */
+  private async postInvoice(payload: unknown): Promise<any> {
+    const response = await fetch('https://www.facturapi.io/v2/invoices', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(30_000),
+    })
+    // The SDK discards HTTP status and PAC code; neither may be guessed from message text.
+    const inv = await response.json()
+    if (!response.ok)
+      throw new ProviderHttpError(
+        response.status,
+        typeof inv.code === 'string' ? inv.code : null,
+        inv.message ?? `Facturapi HTTP ${response.status}`,
+      )
+    if (!inv || typeof inv.id !== 'string' || !['valid', 'pending', 'canceled'].includes(inv.status))
+      throw new Error('Respuesta ilegible de Facturapi')
+    return inv
+  }
+
   async createInvoice(params: CreateInvoiceParams): Promise<StampedInvoice> {
     const payload = {
       customer: {
@@ -227,22 +248,7 @@ export class FacturapiProvider implements FiscalProvider {
       })),
     }
     try {
-      const response = await fetch('https://www.facturapi.io/v2/invoices', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(30_000),
-      })
-      // The SDK discards HTTP status and PAC code; neither may be guessed from message text.
-      const inv = await response.json()
-      if (!response.ok)
-        throw new ProviderHttpError(
-          response.status,
-          typeof inv.code === 'string' ? inv.code : null,
-          inv.message ?? `Facturapi HTTP ${response.status}`,
-        )
-      if (!inv || typeof inv.id !== 'string' || !['valid', 'pending', 'canceled'].includes(inv.status))
-        throw new Error('Respuesta ilegible de Facturapi')
+      const inv = await this.postInvoice(payload)
       return this.toStamped(inv)
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
@@ -466,8 +472,8 @@ export class FacturapiProvider implements FiscalProvider {
    *   - global.months: string — SAT c_Meses code (e.g. '05' = May, '13' = Jan+Feb bimestral)
    *   - global.year: number
    *
-   * NOTE: idempotency is NOT forwarded to facturapi (it rejects it). We own idempotency
-   * via the unique Cfdi.idempotencyKey pre-check before calling this method.
+   * Protocol 1 forwards its explicit versioned idempotency key. Historical callers
+   * omit that optional field and retain their unversioned external identity.
    */
   async createGlobalInvoice(params: GlobalInvoiceParams): Promise<StampedInvoice> {
     const payload = {
@@ -483,6 +489,7 @@ export class FacturapiProvider implements FiscalProvider {
       payment_method: 'PUE', // global invoices are always single-payment (PUE)
       ...(params.serie ? { series: params.serie } : {}),
       ...(params.externalId ? { external_id: params.externalId } : {}),
+      ...(params.idempotencyKey ? { idempotency_key: params.idempotencyKey } : {}),
       global: {
         periodicity: params.global.periodicity,
         months: params.global.months,
@@ -511,7 +518,7 @@ export class FacturapiProvider implements FiscalProvider {
       })),
     }
     try {
-      const inv = await this.client.invoices.create(payload)
+      const inv = await this.postInvoice(payload)
       return this.toStamped(inv)
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
@@ -535,7 +542,7 @@ export class FacturapiProvider implements FiscalProvider {
    * Contract:
    *   - Returns the first 'valid' match if any exist.
    *   - Returns the first match (whatever status) when no 'valid' exists but results were returned.
-   *   - Returns null when the list is empty (no document with that external_id — definitive NONE).
+   *   - Returns null when the list is empty (no match observed).
    *   - Does NOT suppress errors: PAC network errors bubble to the caller (→ INCONCLUSIVE, not RESET).
    */
   async findByExternalId(externalId: string): Promise<ProviderInvoiceSummary | null> {
