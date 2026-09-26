@@ -3887,6 +3887,9 @@ model Order {
   // Facturación CFDI 4.0
   cfdis Cfdi[]
 
+  /// IVA por producto, plan 3: manifiesto de en qué CFDI global(es) quedó esta orden.
+  enGlobales CfdiGlobalOrden[]
+
   // ==========================================
   // VALES POR ÁREA (AREA_TICKETS)
   // ==========================================
@@ -4043,6 +4046,13 @@ model OrderItem {
   taxAmount      Decimal @db.Decimal(10, 2)
   total          Decimal @db.Decimal(10, 2)
 
+  /// IVA por producto, plan 3: el TRATAMIENTO de este renglón, sellado al facturar.
+  /// NULL = sigue el `ivaTratamiento` VIVO del producto (todavía no se facturó, o el
+  /// producto no ha cambiado desde entonces); no NULL = sellado — el renglón ya se
+  /// facturó y su tratamiento queda congelado aunque el producto cambie después.
+  /// Ver `src/services/fiscal/ivaDeRenglon.ts`.
+  ivaTratamiento IvaTratamiento?
+
   // Venta por peso: kilos pesados para líneas de productos soldByWeight
   // (quantity stays 1; total = round(unitPrice × weightQuantity, 2), computed
   // server-side). Null for every non-weighted line. Weighted lines NEVER merge
@@ -4090,6 +4100,9 @@ model OrderItem {
 
   modifiers          OrderItemModifier[]
   paymentAllocations PaymentAllocation[] // ✅ LÍNEA AGREGADA
+
+  /// IVA por producto, plan 3: los sellos de este renglón (uno por CFDI que lo facturó).
+  sellosIva OrderItemSelloIva[]
 
   //POS sync
   originSystem OriginSystem @default(AVOQADO)
@@ -16441,6 +16454,26 @@ model Cfdi {
   totalCents    Int
   taxBreakdown  Json? // [{ impuesto:002, tipo:Traslado, base, tasa, importe }, ...]
 
+  /// IVA por producto, plan 3: la ENTRADA documental del intento — lo que se le mandó
+  /// al PAC (o se congeló para mandarle), reconstruible sin volver a leer las órdenes.
+  /// `entradaHuella` es su huella para detectar reintentos con datos distintos.
+  entrada       Json?
+  entradaHuella String?
+
+  /// Versión del protocolo de emisión con el que se armó `entrada`. SIN default a
+  /// propósito: una reserva hecha por código anterior al plan 3 queda NULL, y el
+  /// encendido del plan 3 lo detecta (no se le atribuye un protocolo que no corrió).
+  protocoloIva Int?
+
+  /// Cuándo salió el PRIMER envío de la versión actual de este CFDI al PAC. NULL =
+  /// nunca se ha enviado. Distingue "nunca enviado" de "se envió y aún no hay
+  /// desenlace", y fecha el escalamiento cuando el reintento se demora.
+  enviadoAt DateTime?
+
+  /// El PAC rechazó el PRIMER envío con un `code` confirmado (no un timeout/red):
+  /// ese intento no dejó documento. Un fallo definitivo no reintenta solo.
+  falloDefinitivo Boolean @default(false)
+
   // Provider + fiscal identifiers
   facturapiId String?
   uuid        String?   @unique // folio fiscal (timbre)
@@ -16474,12 +16507,57 @@ model Cfdi {
   replaces       Cfdi?   @relation("CfdiSustitucion", fields: [replacesCfdiId], references: [id], onDelete: SetNull)
   replacedBy     Cfdi[]  @relation("CfdiSustitucion")
 
+  /// IVA por producto, plan 3: sellos por renglón y manifiesto de qué órdenes cubre
+  /// esta factura global.
+  sellosIva        OrderItemSelloIva[]
+  manifiestoGlobal CfdiGlobalOrden[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([venueId, status])
   @@index([fiscalEmisorId, isGlobal, createdAt])
   @@index([replacesCfdiId])
+}
+
+/// IVA por producto, plan 3: el sello de un renglón (`OrderItem`) al facturarlo — a
+/// qué CFDI quedó ligado y con qué intento de ese CFDI. Si el CFDI es individual o
+/// global se deduce de `Cfdi.isGlobal`; no se duplica aquí con un enum.
+model OrderItemSelloIva {
+  id String @id @default(cuid())
+
+  orderItemId String
+  orderItem   OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+
+  cfdiId String
+  cfdi   Cfdi   @relation(fields: [cfdiId], references: [id], onDelete: Restrict)
+
+  /// `Cfdi.attempts` del envío que selló este renglón.
+  intento Int
+
+  createdAt DateTime @default(now())
+
+  @@unique([orderItemId, cfdiId])
+  @@index([cfdiId])
+}
+
+/// IVA por producto, plan 3: manifiesto de una factura GLOBAL — qué órdenes cubre y
+/// con qué huella quedó cada una al momento de incluirse.
+model CfdiGlobalOrden {
+  id String @id @default(cuid())
+
+  cfdiId String
+  cfdi   Cfdi   @relation(fields: [cfdiId], references: [id], onDelete: Restrict)
+
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  huella String
+
+  createdAt DateTime @default(now())
+
+  @@unique([cfdiId, orderId])
+  @@index([orderId])
 }
 
 /// Receptor fiscal data. A Customer may have several; guests/autofactura create a one-off.

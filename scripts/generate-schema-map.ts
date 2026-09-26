@@ -388,6 +388,8 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   FiscalEmisor: 'Facturación (CFDI)',
   MerchantFiscalConfig: 'Facturación (CFDI)',
   Cfdi: 'Facturación (CFDI)',
+  OrderItemSelloIva: 'Facturación (CFDI)',
+  CfdiGlobalOrden: 'Facturación (CFDI)',
   CustomerTaxProfile: 'Facturación (CFDI)',
   LedgerAccount: 'Facturación (CFDI)',
   AccountMapping: 'Facturación (CFDI)',
