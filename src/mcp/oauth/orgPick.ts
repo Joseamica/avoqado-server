@@ -11,8 +11,13 @@ import { emisionDelToken, motivoDeConcesionInvalidada } from '@/utils/passwordCh
  */
 const ORG_PICK_AUDIENCE = 'avoqado-mcp-orgpick'
 
-export function issueOrgPickToken(staffId: string): string {
-  return jwt.sign({ sub: staffId, emitidoMs: Date.now() }, ACCESS_TOKEN_SECRET, {
+/**
+ * `verificadoEn`: cuándo se comprobó la identidad (contraseña o sesión). 🔴 El token lleva ESA hora,
+ * no la de su emisión: con la de emisión, un cambio de contraseña entre verificar y emitir dejaba al
+ * selector —y a la autorización que nace de él— «posterior» al corte (Codex ronda 9, P1).
+ */
+export function issueOrgPickToken(staffId: string, verificadoEn?: Date): string {
+  return jwt.sign({ sub: staffId, emitidoMs: verificadoEn?.getTime() ?? Date.now() }, ACCESS_TOKEN_SECRET, {
     audience: ORG_PICK_AUDIENCE,
     expiresIn: '5m',
     algorithm: 'HS256',
@@ -27,6 +32,11 @@ export function issueOrgPickToken(staffId: string): string {
  * el corte ESTRICTO de las concesiones diferidas (`motivoDeConcesionInvalidada`, sin margen).
  */
 export async function verifyOrgPickToken(token: string): Promise<string | null> {
+  return (await verificarTokenDelSelector(token))?.staffId ?? null
+}
+
+/** Como `verifyOrgPickToken`, y además entrega la hora en que se verificó la identidad. */
+export async function verificarTokenDelSelector(token: string): Promise<{ staffId: string; verificadoEn: Date } | null> {
   let decoded: { sub?: string; iat?: number; emitidoMs?: number }
   try {
     decoded = jwt.verify(token, ACCESS_TOKEN_SECRET, { audience: ORG_PICK_AUDIENCE, algorithms: ['HS256'] }) as {
@@ -40,8 +50,10 @@ export async function verifyOrgPickToken(token: string): Promise<string | null> 
   if (!decoded.sub) return null
   const staff = await prisma.staff.findUnique({ where: { id: decoded.sub }, select: { active: true } })
   if (!staff?.active) return null
-  if (await motivoDeConcesionInvalidada(decoded.sub, emisionDelToken(decoded))) return null
-  return decoded.sub
+  const emision = emisionDelToken(decoded)
+  if (await motivoDeConcesionInvalidada(decoded.sub, emision)) return null
+  const verificadoEn = emision instanceof Date ? emision : new Date(typeof emision === 'number' ? emision * 1000 : 0)
+  return { staffId: decoded.sub, verificadoEn }
 }
 
 /**
@@ -49,8 +61,8 @@ export async function verifyOrgPickToken(token: string): Promise<string | null> 
  * selección, se REUSA ése — reemitir uno nuevo en cada paso lo volvía renovable indefinidamente
  * sin volver a autenticarse. Sólo el paso 1 (contraseña o SSO recién validados) emite uno nuevo.
  */
-export function tokenParaElSelector(tokenPrevio: unknown, staffId: string): string {
-  return typeof tokenPrevio === 'string' && tokenPrevio ? tokenPrevio : issueOrgPickToken(staffId)
+export function tokenParaElSelector(tokenPrevio: unknown, staffId: string, verificadoEn?: Date): string {
+  return typeof tokenPrevio === 'string' && tokenPrevio ? tokenPrevio : issueOrgPickToken(staffId, verificadoEn)
 }
 
 /** The staff's ACTIVE org memberships, primary first — the picker's option list. */

@@ -42,6 +42,21 @@ describe('auth codes', () => {
     expect(JSON.stringify(arg)).not.toContain(code)
   })
 
+  it('🔴 el código nace con la hora de la verificación de identidad (Codex ronda 9), no con la del insert', async () => {
+    db.mcpAuthCode.create.mockResolvedValue({})
+    const verificada = new Date('2026-09-20T10:00:00Z')
+    await createAuthCode({
+      clientId: 'c1',
+      staffId: 's1',
+      activeOrg: 'o1',
+      codeChallenge: 'cc',
+      redirectUri: 'http://x',
+      scopes: [],
+      grantedAt: verificada,
+    })
+    expect(db.mcpAuthCode.create.mock.calls[0][0].data.createdAt).toEqual(verificada)
+  })
+
   it('claims the code ATOMICALLY (updateMany gated on consumedAt:null), then reads it', async () => {
     db.mcpAuthCode.updateMany.mockResolvedValue({ count: 1 }) // we won the claim
     db.mcpAuthCode.findUnique.mockResolvedValue(authRow())
@@ -75,6 +90,19 @@ describe('refresh tokens', () => {
     db.mcpRefreshToken.create.mockResolvedValue({})
     const { token } = await createRefreshToken({ clientId: 'c1', staffId: 's1', activeOrg: 'o1', scopes: [] })
     expect(db.mcpRefreshToken.create.mock.calls[0][0].data.tokenHash).toBe(sha(token))
+  })
+
+  it('🔴 un reemplazo guarda la fecha de la autorización ORIGINAL (Codex ronda 8): el corte se juzga contra ella', async () => {
+    db.mcpRefreshToken.create.mockResolvedValue({})
+    const original = new Date('2026-09-20T10:00:00Z')
+    await createRefreshToken({ clientId: 'c1', staffId: 's1', activeOrg: 'o1', scopes: [], grantedAt: original })
+    expect(db.mcpRefreshToken.create.mock.calls[0][0].data.createdAt).toEqual(original)
+  })
+
+  it('sin fecha heredada, la fila toma la de la base (no se manda createdAt)', async () => {
+    db.mcpRefreshToken.create.mockResolvedValue({})
+    await createRefreshToken({ clientId: 'c1', staffId: 's1', activeOrg: 'o1', scopes: [] })
+    expect(db.mcpRefreshToken.create.mock.calls[0][0].data).not.toHaveProperty('createdAt')
   })
 
   it('consumes ATOMICALLY: updateMany gated on revokedAt:null flips it, then reads the row', async () => {

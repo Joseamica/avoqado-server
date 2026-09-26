@@ -9,7 +9,7 @@ jest.mock('@/middlewares/autenticacionOpcional.middleware', () => ({
   },
 }))
 
-import { staffIdFromDashboardSession } from '../../../src/mcp/oauth/session'
+import { staffIdFromDashboardSession, sesionDelDashboard } from '../../../src/mcp/oauth/session'
 
 beforeEach(() => {
   mockSesionViva = true
@@ -51,5 +51,22 @@ describe('staffIdFromDashboardSession', () => {
     mockSesionViva = false
     const token = sign({ sub: 'staff-1', orgId: 'o1', venueId: 'v1', role: 'OWNER' })
     expect(await staffIdFromDashboardSession({ cookies: { accessToken: token } })).toBeNull()
+  })
+})
+
+describe('Codex ronda 9 — la sesión entrega la hora en que se emitió', () => {
+  it('🔴 la conexión de un clic hereda la hora de la sesión del dashboard, no la de hoy', async () => {
+    const iat = Math.floor(Date.now() / 1000) - 3600
+    const token = sign({ sub: 'staff-1', orgId: 'o1', venueId: 'v1', role: 'OWNER', iat })
+    expect(await sesionDelDashboard({ cookies: { accessToken: token } })).toEqual({
+      staffId: 'staff-1',
+      verificadoEn: new Date(iat * 1000),
+    })
+  })
+
+  it('una sesión cerrada no entrega nada', async () => {
+    mockSesionViva = false
+    const token = sign({ sub: 'staff-1', orgId: 'o1', venueId: 'v1', role: 'OWNER' })
+    expect(await sesionDelDashboard({ cookies: { accessToken: token } })).toBeNull()
   })
 })

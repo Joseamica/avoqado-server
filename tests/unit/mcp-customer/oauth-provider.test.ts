@@ -130,3 +130,59 @@ describe('Codex S4 — corte de sesión', () => {
     await expect(provider.verifyAccessToken(issueMcpToken('s1', 'o1', 3600, 'c1'))).resolves.toBeTruthy()
   })
 })
+
+// ─── Codex ronda 8, P1: la carrera validar → cambiar contraseña → emitir ───────────────────────
+// La renovación comprobaba el corte y DESPUÉS creaba el reemplazo con la fecha de HOY. Si la
+// contraseña cambiaba entre las dos cosas, el reemplazo nacía «después» del corte y seguía rotando.
+// Ahora la cadena HEREDA la fecha de la autorización original: ningún corte posterior se la salta.
+describe('Codex ronda 8 — la cadena de renovación hereda la fecha original', () => {
+  const autorizada = new Date('2026-09-20T10:00:00Z')
+  const datos = (issuedAt: Date) => ({ clientId: 'c1', staffId: 's1', activeOrg: 'o1', scopes: [], issuedAt })
+
+  it('el refresh que reemplaza al consumido lleva la fecha ORIGINAL, no la de hoy', async () => {
+    ;(store.consumeRefreshToken as jest.Mock).mockResolvedValue(datos(autorizada))
+    ;(store.createRefreshToken as jest.Mock).mockResolvedValue({ token: 'nuevo' })
+    await provider.exchangeRefreshToken({ client_id: 'c1' } as never, 'r')
+    expect((store.createRefreshToken as jest.Mock).mock.calls[0][0].grantedAt).toEqual(autorizada)
+  })
+
+  it('el primer refresh (al canjear el código) lleva la fecha del código', async () => {
+    ;(store.consumeAuthCode as jest.Mock).mockResolvedValue({ ...datos(autorizada), codeChallenge: 'cc', redirectUri: 'http://cb' })
+    ;(store.createRefreshToken as jest.Mock).mockResolvedValue({ token: 'r1' })
+    await provider.exchangeAuthorizationCode({ client_id: 'c1' } as never, 'x')
+    expect((store.createRefreshToken as jest.Mock).mock.calls[0][0].grantedAt).toEqual(autorizada)
+  })
+
+  it('🔴 la carrera de Codex: renovar → cambia la contraseña → la siguiente renovación YA NO rota', async () => {
+    let corte: Date | null = null
+    corteSpy.mockImplementation(async (_s: string, emitida: Date) =>
+      corte && emitida.getTime() <= corte.getTime() ? 'PASSWORD_CHANGED' : null,
+    )
+    // El almacén modelado como la base: el reemplazo guarda la fecha que le pasen, o la de HOY.
+    let guardada: Date = autorizada
+    ;(store.consumeRefreshToken as jest.Mock).mockImplementation(async () => datos(guardada))
+    ;(store.createRefreshToken as jest.Mock).mockImplementation(async (d: { grantedAt?: Date }) => {
+      guardada = d.grantedAt ?? new Date(Date.now() + 1000)
+      return { token: 'siguiente' }
+    })
+
+    await provider.exchangeRefreshToken({ client_id: 'c1' } as never, 'r') // pasa: aún no hay corte
+    corte = new Date() // la contraseña cambia justo después de la validación
+    await expect(provider.exchangeRefreshToken({ client_id: 'c1' } as never, 'siguiente')).rejects.toThrow(/sesión|session/i)
+  })
+
+  it('🔴 el acceso de 1 h emitido en esa carrera también muere: se juzga con la fecha original', async () => {
+    ;(store.consumeRefreshToken as jest.Mock).mockResolvedValue(datos(autorizada))
+    ;(store.createRefreshToken as jest.Mock).mockResolvedValue({ token: 'nuevo' })
+    const { access_token } = await provider.exchangeRefreshToken({ client_id: 'c1' } as never, 'r')
+    await provider.verifyAccessToken(access_token)
+    expect(accesoSpy).toHaveBeenCalledWith('s1', Math.floor(autorizada.getTime() / 1000))
+  })
+
+  it('un acceso sin fecha de concesión (tokens viejos o del servidor de desarrollo) se juzga como siempre, por su iat', async () => {
+    const token = issueMcpToken('s1', 'o1', 3600, 'c1')
+    await provider.verifyAccessToken(token)
+    const iat = accesoSpy.mock.calls[0][1]
+    expect(Math.abs(iat - Math.floor(Date.now() / 1000))).toBeLessThanOrEqual(2)
+  })
+})

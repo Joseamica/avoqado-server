@@ -54,12 +54,14 @@ export const provider: OAuthServerProvider = {
     if (redirectUri !== undefined && redirectUri !== data.redirectUri) throw new InvalidGrantError('redirect_uri mismatch')
     if (await motivoDeConcesionInvalidada(data.staffId, data.issuedAt)) throw new InvalidGrantError(SESION_CORTADA)
 
-    const access_token = issueMcpToken(data.staffId, data.activeOrg, ACCESS_TTL_SECONDS, client.client_id, data.scopes)
+    const access_token = issueMcpToken(data.staffId, data.activeOrg, ACCESS_TTL_SECONDS, client.client_id, data.scopes, data.issuedAt)
     const { token: refresh_token } = await createRefreshToken({
       clientId: client.client_id,
       staffId: data.staffId,
       activeOrg: data.activeOrg,
       scopes: data.scopes,
+      // La cadena nace con la fecha del código: ése es el momento en que el dueño autorizó.
+      grantedAt: data.issuedAt,
     })
     return { access_token, token_type: 'Bearer', expires_in: ACCESS_TTL_SECONDS, scope: data.scopes.join(' ') || undefined, refresh_token }
   },
@@ -71,14 +73,17 @@ export const provider: OAuthServerProvider = {
     if (await motivoDeConcesionInvalidada(data.staffId, data.issuedAt)) throw new InvalidGrantError(SESION_CORTADA)
 
     const grantedScopes = scopes && scopes.length ? scopes.filter(s => data.scopes.includes(s)) : data.scopes
-    const access_token = issueMcpToken(data.staffId, data.activeOrg, ACCESS_TTL_SECONDS, client.client_id, grantedScopes)
+    const access_token = issueMcpToken(data.staffId, data.activeOrg, ACCESS_TTL_SECONDS, client.client_id, grantedScopes, data.issuedAt)
     // Rotate: consumeRefreshToken already atomically revoked the presented token (single-use);
     // just issue the replacement. (No separate revoke call — that would be a redundant no-op now.)
+    // 🔴 El reemplazo HEREDA la fecha original (Codex ronda 8): validar y emitir no son atómicos, y un
+    // cambio de contraseña en medio no puede dejar viva una cadena que ya se autorizó antes del corte.
     const { token: refresh_token } = await createRefreshToken({
       clientId: client.client_id,
       staffId: data.staffId,
       activeOrg: data.activeOrg,
       scopes: grantedScopes,
+      grantedAt: data.issuedAt,
     })
     return {
       access_token,
@@ -90,9 +95,11 @@ export const provider: OAuthServerProvider = {
   },
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
-    const { sub, org, cid, scp, exp, iat } = verifyMcpToken(token) // throws on bad/expired/wrong-audience
-    // Mismo corte y mismo margen que cualquier token de acceso (el `iat` va en segundos).
-    if (await motivoDeSesionInvalidada(sub, iat)) throw new InvalidTokenError(SESION_CORTADA)
+    const { sub, org, cid, scp, exp, iat, gat } = verifyMcpToken(token) // throws on bad/expired/wrong-audience
+    // Mismo corte y mismo margen que cualquier token de acceso (segundos). Se juzga con la fecha MÁS
+    // VIEJA que trae: la de la autorización original de su cadena, si la tiene (Codex ronda 8).
+    const emision = typeof gat === 'number' && typeof iat === 'number' ? Math.min(iat, gat) : iat
+    if (await motivoDeSesionInvalidada(sub, emision)) throw new InvalidTokenError(SESION_CORTADA)
     return {
       token,
       clientId: cid ?? sub, // dev-server tokens have no cid; fall back to the subject
