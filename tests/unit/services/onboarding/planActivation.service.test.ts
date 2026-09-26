@@ -1069,6 +1069,35 @@ describe('la recuperación honra lo que SE COBRÓ, no lo que pide el reintento',
     expect(prismaMock.venue.update).toHaveBeenCalledWith(expect.objectContaining({ data: { planTier: 'PREMIUM' } }))
   })
 
+  it('🔴 26-sep: un reintento «Pagar hoy» (cupón INTRO) sobre un cobro de Premium SIN cupón entrega lo cobrado, no 409', async () => {
+    // Lo vio el founder: pagó Premium ($1,970.84), la entrega falló, recargó, la pantalla volvió con Pro y «Pagar hoy».
+    // El server juzgaba el cobro RECUPERADO contra el cupón del REINTENTO («INTRO_PRO_3M»), no lo encontraba y cerraba
+    // con PLAN_ACTIVE_WITHOUT_OFFER SIN conceder nada: cobrado y sin acceso, con «no te cobramos nada» en pantalla.
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(
+      progreso({
+        launchCampaignId: null,
+        planActivationStatus: 'IN_PROGRESS',
+        planActivationAttempt: 1,
+        planActivationLeaseUntil: new Date(Date.now() - 60_000),
+      }) as never,
+    )
+    listar(recuperada({ metadata: { planActivationKey: 'plan-activation:org-1:1', featureCode: 'PLAN_PREMIUM' } }))
+    mockEntregar.mockResolvedValue({ ...CONCEDIDO_PRO, featureCode: 'PLAN_PREMIUM', subscriptionId: 'sub_buena' })
+    mockSubRetrieve.mockResolvedValue({
+      id: 'sub_buena',
+      status: 'active',
+      current_period_end: Math.floor(new Date('2026-10-17T00:00:00Z').getTime() / 1000),
+      latest_invoice: { amount_paid: 197084 },
+      discounts: [],
+    })
+
+    const r = await activatePlan({ ...BASE, offer: { kind: 'STANDARD', expectedFirstChargeCents: 69484 }, payNow: true })
+
+    expect(mockSubCreate).not.toHaveBeenCalled() // nunca un segundo cobro
+    expect(mockEntregar).toHaveBeenCalledWith({ venueId: 'venue-1', subscriptionId: 'sub_buena', detectedBy: 'onboarding.activatePlan' })
+    expect(r).toMatchObject({ status: 'ACTIVE', tier: 'PREMIUM' })
+  })
+
   it('🔴 Codex C12: lo que se GUARDA y se RESPONDE es lo cobrado (tier e intervalo), no lo que pide el reintento', async () => {
     prismaMock.onboardingProgress.findUnique.mockResolvedValue(
       progreso({

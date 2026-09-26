@@ -53,6 +53,7 @@ import {
 import { buildLaunchOfferView, launchOfferAvailability, standardFirstChargeCents } from '../launchCampaigns/launchOfferMath'
 import { LAUNCH_CAMPAIGN_SELECT, toOfferRow, type LaunchCampaignRow } from '../launchCampaigns/launchCampaign.service'
 import { PLAN_ACTIVATION_STATUS, REDEMPTION_STATUS } from '../launchCampaigns/launchCampaignEnums'
+import { idDelCuponDelDescuento } from './cuponDelDescuento'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 
@@ -830,10 +831,17 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
   // queda en `false`: el resultado medido por Codex (20-sep) era una campaña `APPLIED` con **$0
   // pagados y renovación anunciada a $22**, mientras en Stripe esa suscripción no tenía descuento.
   const noLaCreamosConElCupon = reused || suscripcionRecuperada != null
-  if (noLaCreamosConElCupon && cuponEsperado) {
+  // 🔴 Qué cupón se le EXIGE a una suscripción que no creamos ahora. El de la CAMPAÑA, siempre: la campaña se reclama
+  // en el alta, no en esta petición, así que es la misma del cobro original. El de la promo legacy SÓLO al reusar:
+  // en una RECUPERACIÓN sin campaña manda lo que SE COBRÓ, no lo que pide el reintento — al recargar, la pantalla vuelve
+  // con Pro y «Pagar hoy» aunque lo cobrado fuera Premium, y exigirle INTRO_PRO_3M cerraba el alta con
+  // PLAN_ACTIVE_WITHOUT_OFFER SIN conceder nada: cobrado y sin acceso (lo vivió el founder, 26-sep).
+  const cuponExigible = campaign ? cuponEsperado : suscripcionRecuperada ? null : cuponEsperado
+  if (noLaCreamosConElCupon && cuponExigible) {
     const sub = await stripe.subscriptions.retrieve(subscriptionId, { expand: ['discounts'] })
-    const descuentos = (sub as unknown as { discounts?: Array<string | { coupon?: { id?: string } }> }).discounts ?? []
-    const lleva = descuentos.some(d => typeof d !== 'string' && d?.coupon?.id === cuponEsperado)
+    const descuentos = (sub as unknown as { discounts?: unknown[] }).discounts ?? []
+    // 🔴 El cupón vive en `source.coupon` con la API actual; leer `d.coupon` lo daba por ausente SIEMPRE (26-sep).
+    const lleva = descuentos.some(d => idDelCuponDelDescuento(d) === cuponExigible)
     if (!lleva) {
       logger.error('🚨 activate-plan: se reusó una suscripción sin el cupón de la oferta', { organizationId, subscriptionId })
       await cerrarIntentoYLiberarLugar({
