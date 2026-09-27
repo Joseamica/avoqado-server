@@ -16,6 +16,7 @@ import type { KdsOrderStatus, Prisma } from '@prisma/client'
 import { anexarCapacidades, ventasDeComandas, type EstadoRetiro, type VentaDeComanda } from './kdsCapacidades'
 import { toKdsModifierLabels } from '../kds/kdsModifierLabels'
 import { venueTienePantallaDeCocina } from '../kds/kitchenDisplayStations'
+import { authorKitchenTickets } from '../kds/kitchenTicketAuthoring.service'
 
 // Use string constants instead of Prisma enum to avoid runtime import issues with tsx
 const KdsStatus = {
@@ -132,7 +133,10 @@ async function filtroDelTablero(venueId: string, statuses: KdsOrderStatus[], sta
   })
   const desde = stationId
     ? (pantallas.find(p => p.id === stationId)?.kitchenDisplaySince ?? null)
-    : pantallas.reduce<Date | null>((min, p) => (p.kitchenDisplaySince && (!min || p.kitchenDisplaySince < min) ? p.kitchenDisplaySince : min), null)
+    : pantallas.reduce<Date | null>(
+        (min, p) => (p.kitchenDisplaySince && (!min || p.kitchenDisplaySince < min) ? p.kitchenDisplaySince : min),
+        null,
+      )
   const condiciones: Prisma.KdsOrderWhereInput[] = [{ fallbackPrintedAt: null }]
   // Borrón y cuenta nueva: sólo lo creado desde que se prendió la pantalla. Uber queda exento: llega solo.
   if (desde) condiciones.push({ OR: [{ orderType: 'DELIVERY' }, { createdAt: { gte: desde } }] })
@@ -268,29 +272,17 @@ export async function createKdsOrder(venueId: string, input: CreateKdsOrderInput
     return null
   }
 
-  const order = await prisma.kdsOrder.create({
-    data: {
-      venueId,
-      orderNumber: input.orderNumber,
-      orderType: input.orderType || 'DINE_IN',
-      orderId: input.orderId || null,
-      status: KdsStatus.NEW,
-      items: {
-        create: input.items.map(item => ({
-          productName: item.productName,
-          quantity: item.quantity,
-          modifiers: item.modifiers?.length ? JSON.stringify(toKdsModifierLabels(item.modifiers)) : null,
-          notes: item.notes || null,
-        })),
-      },
-    },
-    include: {
-      items: true,
-    },
-  })
-
-  logger.info(`KDS order created: #${order.orderNumber} for venue ${venueId}`)
-  return formatKdsOrder(order)
+  // Etapa 3 (spec 2026-09-27 §2): el SERVIDOR arma la comanda. Este POST lo siguen llamando apps viejas (Android,
+  // iOS y la caja de Windows) después de cobrar. Con la venta identificada se delega en el armado —idempotente,
+  // bajo candado—; sin venta NO se escribe nada: una fila suelta saldría en todas las pantallas junto a la oficial.
+  if (!input.orderId) return null
+  const venta = await prisma.order.findFirst({ where: { id: input.orderId, venueId }, select: { id: true } })
+  if (!venta) return null
+  const { ticketIds } = await authorKitchenTickets({ venueId, orderId: venta.id, trigger: 'LEGACY_POST' })
+  if (ticketIds.length === 0) return null
+  const primera = await prisma.kdsOrder.findUniqueOrThrow({ where: { id: ticketIds[0] }, include: { items: true } })
+  logger.info(`KDS: comanda oficial #${primera.orderNumber} armada desde el POST de una app vieja`, { venueId })
+  return formatKdsOrder(primera)
 }
 
 // MARK: - Update KDS Order Status
