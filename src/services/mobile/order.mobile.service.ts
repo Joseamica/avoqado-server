@@ -26,7 +26,7 @@ import {
   validateDiscountActive,
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
-import { applyPromotionToOrder, removeIntentPromotions } from '../promotions/promotion.service'
+import { applyPromotionToOrder } from '../promotions/promotion.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
@@ -855,9 +855,15 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
   // in a single transaction (matches TPV's transactional boundary —
   // order.tpv.service.ts createOrderWithItems writes its OrderDiscount rows
   // inside the same tx as the order/orderItem creation).
+  //
+  // 🔴 Y las promociones de la venta, con la reafirmación de su dinero, van en ESA MISMA transacción (Plan3b, fallo
+  // T4-R1). La orden es privada hasta el commit: nadie —ni la captura fiscal, ni un cobro, ni un reintento con el mismo
+  // externalId— puede verla sin su combo, y si una promoción truena se revierte la venta ENTERA: no queda cuenta a
+  // medias que anular ni llave de idempotencia envenenada, así que el reintento del POS la crea normal.
   let order
+  let promotionTotals: { subtotal: number; discount: number; total: number } | null = null
   try {
-    order = await prisma.$transaction(async tx => {
+    const created = await prisma.$transaction(async tx => {
       // 🔴 La venta se toma en el mostrador: la orden nace en el turno de caja abierto AHORA
       // (`../shared/turnoDeCaja.ts`), resuelto con el MISMO cliente de la transacción — pasar
       // `prisma` aquí se saldría de ella. Desde la fase 1, `getActiveShifts` cuenta las órdenes
@@ -936,8 +942,83 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
         }
       }
 
-      return createdOrder
+      if (promocionesUnicas.length === 0) return { order: createdOrder, promotionTotals: null }
+
+      // Mismo servicio que usa el reducer offline (applyAddItems), con ESTA transacción: crea sus líneas, reparte el
+      // descuento al centavo y recalcula los totales de la orden sin abrir otra transacción. Todo-o-nada: si la #2
+      // truena, la #1 se va con el rollback de la venta.
+      for (const ref of promocionesUnicas) {
+        await applyPromotionToOrder(
+          {
+            venueId,
+            orderId: createdOrder.id,
+            promotionId: ref.promotionId,
+            instanceId: ref.promotionInstanceId,
+            selections: ref.selections,
+            // Venta EN LÍNEA: el instante es ahora. El acotado de reloj
+            // (clampSoldAt) es del camino offline, donde el cliente propone la hora.
+            soldAt: new Date(),
+          },
+          tx,
+        )
+      }
+
+      // 🔴 DINERO. `applyPromotionToOrder` recalcula los totales con
+      // `recalculateOrderTotals`, que es COMPARTIDO y sólo sabe de líneas,
+      // OrderDiscount y cargos por servicio. Ignora dos términos que son propios
+      // de ESTE endpoint, y al sobrescribir `total`/`remainingBalance` los borra:
+      //
+      //   a) la PROPINA (`input.tip`): no existe en esa función, así que el total
+      //      quedaba corto por la propina — la orden se cerraba PAGADA con una
+      //      propina que nadie cobró, y el corte no cuadraba.
+      //   b) el descuento de ORDEN (`input.discount`): sólo se respeta cuando NO
+      //      hay filas OrderDiscount (su fallback). Con un descuento de artículo
+      //      presente hay filas, el fallback no aplica y el descuento de orden se
+      //      perdía — cobrándole de MÁS al cliente.
+      //
+      // Aquí se reafirman los términos que este endpoint sí conoce, releídos en la MISMA transacción. No se toca la
+      // función compartida (la usan comp/split/descuentos), y una venta SIN promociones nunca pasa por aquí: sigue
+      // comportándose igual que siempre.
+      const recalculada = await tx.order.findFirst({
+        where: { id: createdOrder.id, venueId },
+        select: { subtotal: true, serviceChargeAmount: true, paidAmount: true },
+      })
+      if (!recalculada) {
+        throw new NotFoundError('No encontramos esa cuenta en este establecimiento.')
+      }
+      // El subtotal SÍ es autoridad del motor (ya trae las líneas del combo).
+      const subtotalConPromociones = Number(recalculada.subtotal)
+      const serviceChargeAmount = Number(recalculada.serviceChargeAmount ?? 0)
+
+      // 🔴 El tope del descuento de ORDEN se recalcula contra el subtotal CON
+      // promociones. Al crear la orden el combo todavía no existía —en una venta
+      // de puras promociones el subtotal era 0—, así que el descuento del cajero
+      // se capaba al valor de los artículos sueltos, o desaparecía COMPLETO sin
+      // error y sin rastro. Nunca cobraba de menos: cobraba de MÁS que lo que el
+      // cajero aplicó.
+      const topeDescuentoDeOrden = Math.max(0, subtotalConPromociones - itemDiscountTotal)
+      const descuentoDeOrdenFinal = Math.min(topeDescuentoDeOrden, Math.max(0, (input.discount || 0) / 100))
+      const descuentoFinal = itemDiscountTotal + descuentoDeOrdenFinal
+
+      const totalFinal = Math.round((Math.max(0, subtotalConPromociones - descuentoFinal) + serviceChargeAmount + tipDecimal) * 100) / 100
+      const remainingFinal = Math.round(Math.max(0, totalFinal - Number(recalculada.paidAmount ?? 0)) * 100) / 100
+      const reafirmada = await tx.order.update({
+        where: { id: createdOrder.id },
+        data: {
+          discountAmount: new Prisma.Decimal(descuentoFinal),
+          total: new Prisma.Decimal(totalFinal),
+          remainingBalance: new Prisma.Decimal(remainingFinal),
+          version: { increment: 1 },
+        },
+        include: createdOrderInclude,
+      })
+      return {
+        order: reafirmada,
+        promotionTotals: { subtotal: subtotalConPromociones, discount: descuentoFinal, total: totalFinal },
+      }
     })
+    order = created.order
+    promotionTotals = created.promotionTotals
   } catch (error) {
     // Concurrent-retry race: two identical offline retries can both pass the
     // pre-check; the unique index (venueId, externalId) blocks the loser —
@@ -983,137 +1064,9 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
     }
   }
 
-  // Las promociones se aplican sobre la orden YA creada, con el MISMO servicio
-  // transaccional que usa el reducer offline (applyAddItems): crea sus líneas,
-  // reparte el descuento al centavo y RECALCULA los totales de la orden. Va
-  // ANTES del broadcast para que el evento lleve el total con el combo dentro.
-  if (promocionesUnicas.length > 0) {
-    const orderId = order.id
-    const instanceIds = promocionesUnicas.map(ref => ref.promotionInstanceId)
-    try {
-      for (const ref of promocionesUnicas) {
-        await applyPromotionToOrder({
-          venueId,
-          orderId,
-          promotionId: ref.promotionId,
-          instanceId: ref.promotionInstanceId,
-          selections: ref.selections,
-          // Venta EN LÍNEA: el instante es ahora. El acotado de reloj
-          // (clampSoldAt) es del camino offline, donde el cliente propone la hora.
-          soldAt: new Date(),
-        })
-      }
-    } catch (error) {
-      // 🔴 Todo-o-nada, igual que el reducer: cada promoción commitea en SU
-      // propia transacción, así que si la #2 truena la #1 ya quedó viva. Y aquí
-      // nadie la va a reintentar — un retry del POS con el mismo externalId
-      // entra por el corto de idempotencia y devolvería esa orden a medias, con
-      // un combo cobrado y el otro no. Se retiran las de ESTA venta (best-effort,
-      // por instanceId) y se propaga el error original.
-      //
-      // 🔴 La compensación NUNCA puede sustituir al error original: su primera
-      // sentencia es una query, así que si lo que tronó fue la DB, la
-      // compensación truena también y el cajero perdería el único texto
-      // accionable ("Esa promoción no está publicada.", "Falta elegir una
-      // opción de …") a cambio de un error crudo de Prisma.
-      try {
-        await removeIntentPromotions(venueId, orderId, instanceIds)
-      } catch (compensationError) {
-        logger.error('❌ [ORDER.MOBILE] Falló la compensación de promociones — se conserva el error original', {
-          orderId,
-          instanceIds,
-          compensationError: compensationError instanceof Error ? compensationError.message : String(compensationError),
-        })
-      }
-
-      // 🔴 La llave de idempotencia NO puede quedar envenenada. `order.create`
-      // YA commiteó, así que si salimos con un 4xx y el POS corrige y reintenta
-      // con el MISMO externalId —que es exactamente para lo que existe—, el
-      // corto de idempotencia le devolvería 201 con ESTA orden, sin el combo:
-      // en una venta de puras promociones vale $0 y el combo sale gratis; en
-      // una mixta se cobra sólo lo suelto. Y es DURABLE, no una carrera: todos
-      // los reintentos futuros con esa llave repetirían la venta incompleta.
-      //
-      // Se libera la llave Y se anula la orden. Sólo soltar el externalId
-      // dejaría una cuenta viva de $0 en el piso; sólo anularla dejaría la
-      // llave tomada y el reintento chocaría contra el corto igual.
-      // Best-effort: nada de esto puede sustituir al error de negocio original.
-      //
-      // EXENTA de §C.6 (rutas que cancelan órdenes; auditoría Fable 11-sep, P2-7): esta anulación NO pasa por
-      // `orderCancelGuard` a propósito. La orden nace y muere en ESTA misma llamada — se creó arriba, falló su
-      // promoción y se anula antes de devolver su id y antes del aviso por socket—, así que ningún cobro de terminal
-      // pudo apuntarle todavía. Tomar el candado aquí sólo añadiría una espera en el camino del error. La
-      // clasificación vive en `tests/unit/architecture/orderCancelWriters.test.ts`.
-      try {
-        await prisma.order.update({
-          where: { id: orderId },
-          data: {
-            externalId: null,
-            status: 'CANCELLED',
-            specialRequests: 'Cancelled: la promoción no se pudo aplicar',
-          },
-        })
-      } catch (cleanupError) {
-        logger.error('❌ [ORDER.MOBILE] No se pudo liberar la llave de una orden con promoción fallida', {
-          orderId,
-          externalId,
-          cleanupError: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
-        })
-      }
-      throw error
-    }
-
-    // 🔴 DINERO. `applyPromotionToOrder` recalcula los totales con
-    // `recalculateOrderTotals`, que es COMPARTIDO y sólo sabe de líneas,
-    // OrderDiscount y cargos por servicio. Ignora dos términos que son propios
-    // de ESTE endpoint, y al sobrescribir `total`/`remainingBalance` los borra:
-    //
-    //   a) la PROPINA (`input.tip`): no existe en esa función, así que el total
-    //      quedaba corto por la propina — la orden se cerraba PAGADA con una
-    //      propina que nadie cobró, y el corte no cuadraba.
-    //   b) el descuento de ORDEN (`input.discount`): sólo se respeta cuando NO
-    //      hay filas OrderDiscount (su fallback). Con un descuento de artículo
-    //      presente hay filas, el fallback no aplica y el descuento de orden se
-    //      perdía — cobrándole de MÁS al cliente.
-    //
-    // Aquí se reafirman los términos que este endpoint sí conoce. No se toca la
-    // función compartida (la usan comp/split/descuentos), y una venta SIN
-    // promociones nunca pasa por aquí: sigue comportándose igual que siempre.
-    const recalculada = await prisma.order.findFirst({
-      where: { id: orderId, venueId },
-      select: { subtotal: true, serviceChargeAmount: true, paidAmount: true },
-    })
-    if (!recalculada) {
-      throw new NotFoundError('No encontramos esa cuenta en este establecimiento.')
-    }
-    // El subtotal SÍ es autoridad del motor (ya trae las líneas del combo).
-    const subtotalConPromociones = Number(recalculada.subtotal)
-    const serviceChargeAmount = Number(recalculada.serviceChargeAmount ?? 0)
-
-    // 🔴 El tope del descuento de ORDEN se recalcula contra el subtotal CON
-    // promociones. Al crear la orden el combo todavía no existía —en una venta
-    // de puras promociones el subtotal era 0—, así que el descuento del cajero
-    // se capaba al valor de los artículos sueltos, o desaparecía COMPLETO sin
-    // error y sin rastro. Nunca cobraba de menos: cobraba de MÁS que lo que el
-    // cajero aplicó.
-    const topeDescuentoDeOrden = Math.max(0, subtotalConPromociones - itemDiscountTotal)
-    const descuentoDeOrdenFinal = Math.min(topeDescuentoDeOrden, Math.max(0, (input.discount || 0) / 100))
-    const descuentoFinal = itemDiscountTotal + descuentoDeOrdenFinal
-
-    const totalFinal = Math.round((Math.max(0, subtotalConPromociones - descuentoFinal) + serviceChargeAmount + tipDecimal) * 100) / 100
-    const remainingFinal = Math.round(Math.max(0, totalFinal - Number(recalculada.paidAmount ?? 0)) * 100) / 100
-    order = await prisma.order.update({
-      where: { id: orderId },
-      data: {
-        discountAmount: new Prisma.Decimal(descuentoFinal),
-        total: new Prisma.Decimal(totalFinal),
-        remainingBalance: new Prisma.Decimal(remainingFinal),
-        version: { increment: 1 },
-      },
-      include: createdOrderInclude,
-    })
+  if (promotionTotals) {
     logger.info(
-      `🎁 [ORDER.MOBILE] ${promocionesUnicas.length} promoción(es) aplicadas | order=${orderId} | subtotal=${subtotalConPromociones} | descuento=${descuentoFinal} | propina=${tipDecimal} | total=${totalFinal}`,
+      `🎁 [ORDER.MOBILE] ${promocionesUnicas.length} promoción(es) aplicadas | order=${order.id} | subtotal=${promotionTotals.subtotal} | descuento=${promotionTotals.discount} | propina=${tipDecimal} | total=${promotionTotals.total}`,
     )
   }
 
@@ -1438,60 +1391,67 @@ export async function updateOrderDetails(venueId: string, orderId: string, input
  * re-derive consistently).
  */
 export async function applyOrderDiscount(venueId: string, orderId: string, discountId: string, staffId?: string) {
-  const order = await prisma.order.findFirst({
-    where: { id: orderId, venueId },
-    select: { id: true, paymentStatus: true, discountAmount: true, paidAmount: true, subtotal: true },
-  })
-  if (!order) throw new NotFoundError('Order not found')
-  if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
-    throw new BadRequestError('No se puede descontar una orden ya pagada')
-  }
-
-  const discount = await prisma.discount.findFirst({ where: { id: discountId, venueId } })
-  if (!discount) throw new NotFoundError('Descuento no encontrado')
-  validateDiscountActive(discount)
-  if (discount.scope !== 'ORDER') {
-    throw new BadRequestError('Solo descuentos de orden aplican a la cuenta completa')
-  }
-
-  const dup = await prisma.orderDiscount.findFirst({ where: { orderId, discountId } })
-  if (dup) throw new BadRequestError('Ese descuento ya está aplicado a la cuenta')
-
-  const subtotal = Number(order.subtotal)
-  const value = Number(discount.value)
-
-  // 🔴 MONEY: sólo se puede descontar lo que TODAVÍA no está descontado.
-  //
-  // Topar contra el subtotal COMPLETO no basta cuando la cuenta ya trae
-  // descuentos: DOS descuentos fijos de $200 sobre una cuenta de $253 dejaban
-  // `discountAmount` en $425.30 — casi el doble de la mercancía. El total no
-  // sale negativo porque `recalculateOrderTotals` lo clampa, pero el número
-  // GUARDADO miente, y es el que alimenta reportes, comisiones y la factura
-  // (CFDI40111 exige que el descuento del comprobante sea la suma de los
-  // descuentos de los conceptos: $425.30 sobre conceptos que suman $253 es
-  // imposible de timbrar). Reproducido en vivo el 2026-08-09.
-  //
-  // Espejo de `applyDiscount` en order.tpv.service.ts y del
-  // `remainingDiscountable` que ya usan discount.tpv.service.ts y
-  // discountEngine.service.ts.
-  const remainingDiscountable = Math.max(0, subtotal - Number(order.discountAmount || 0))
-  const rawAmount = discount.type === 'PERCENTAGE' ? Math.round(((subtotal * value) / 100) * 100) / 100 : Math.min(value, subtotal)
-  const amount = Math.min(rawAmount, remainingDiscountable)
-
-  const row = await prisma.orderDiscount.create({
-    data: {
-      orderId,
-      discountId,
-      type: discount.type,
-      name: discount.name,
-      value: discount.value,
-      amount,
-    },
-    select: { id: true, name: true, amount: true },
-  })
-
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
-  const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0))
+
+  // 🔴 Candado de la orden (Plan3b) ANTES de leer: estado, subtotal, descuentos ya aplicados y la regla del catálogo
+  // se leen bajo él, y la fila del descuento y los totales se escriben en la MISMA transacción.
+  const { row, totals } = await prisma.$transaction(async tx => {
+    if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+    const order = await tx.order.findFirst({
+      where: { id: orderId, venueId },
+      select: { id: true, paymentStatus: true, discountAmount: true, paidAmount: true, subtotal: true },
+    })
+    if (!order) throw new NotFoundError('Order not found')
+    if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
+      throw new BadRequestError('No se puede descontar una orden ya pagada')
+    }
+
+    const discount = await tx.discount.findFirst({ where: { id: discountId, venueId } })
+    if (!discount) throw new NotFoundError('Descuento no encontrado')
+    validateDiscountActive(discount)
+    if (discount.scope !== 'ORDER') {
+      throw new BadRequestError('Solo descuentos de orden aplican a la cuenta completa')
+    }
+
+    const dup = await tx.orderDiscount.findFirst({ where: { orderId, discountId } })
+    if (dup) throw new BadRequestError('Ese descuento ya está aplicado a la cuenta')
+
+    const subtotal = Number(order.subtotal)
+    const value = Number(discount.value)
+
+    // 🔴 MONEY: sólo se puede descontar lo que TODAVÍA no está descontado.
+    //
+    // Topar contra el subtotal COMPLETO no basta cuando la cuenta ya trae
+    // descuentos: DOS descuentos fijos de $200 sobre una cuenta de $253 dejaban
+    // `discountAmount` en $425.30 — casi el doble de la mercancía. El total no
+    // sale negativo porque `recalculateOrderTotals` lo clampa, pero el número
+    // GUARDADO miente, y es el que alimenta reportes, comisiones y la factura
+    // (CFDI40111 exige que el descuento del comprobante sea la suma de los
+    // descuentos de los conceptos: $425.30 sobre conceptos que suman $253 es
+    // imposible de timbrar). Reproducido en vivo el 2026-08-09.
+    //
+    // Espejo de `applyDiscount` en order.tpv.service.ts y del
+    // `remainingDiscountable` que ya usan discount.tpv.service.ts y
+    // discountEngine.service.ts.
+    const remainingDiscountable = Math.max(0, subtotal - Number(order.discountAmount || 0))
+    const rawAmount = discount.type === 'PERCENTAGE' ? Math.round(((subtotal * value) / 100) * 100) / 100 : Math.min(value, subtotal)
+    const amount = Math.min(rawAmount, remainingDiscountable)
+
+    const row = await tx.orderDiscount.create({
+      data: {
+        orderId,
+        discountId,
+        type: discount.type,
+        name: discount.name,
+        value: discount.value,
+        amount,
+      },
+      select: { id: true, name: true, amount: true },
+    })
+
+    const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
+    return { row, totals }
+  })
 
   void (await import('../dashboard/activity-log.service')).logAction({
     action: 'ORDER_DISCOUNT_APPLIED',
@@ -1507,18 +1467,6 @@ export async function applyOrderDiscount(venueId: string, orderId: string, disco
 
 /** Removes one applied order discount and recomputes totals. */
 export async function removeOrderDiscount(venueId: string, orderId: string, orderDiscountId: string, staffId?: string) {
-  const order = await prisma.order.findFirst({
-    where: { id: orderId, venueId },
-    select: { id: true, paymentStatus: true, paidAmount: true },
-  })
-  if (!order) throw new NotFoundError('Order not found')
-  if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
-    throw new BadRequestError('No se puede modificar una orden ya pagada')
-  }
-
-  const row = await prisma.orderDiscount.findFirst({ where: { id: orderDiscountId, orderId } })
-  if (!row) throw new NotFoundError('Descuento no aplicado a esta orden')
-
   // 🔴 MONEY: a discount that came from redeeming loyalty points must give the
   // points BACK when it is removed — otherwise the customer paid with points
   // for a discount that no longer exists. Both moves share one transaction.
@@ -1529,12 +1477,27 @@ export async function removeOrderDiscount(venueId: string, orderId: string, orde
   // descuento que ya no existe y el premio queda marcado como canjeado para siempre.
   // Va en la MISMA transacción por la misma razón que los puntos.
   const { refundStampRewardForOrderDiscount } = await import('../wallet/redeemStampReward.service')
-  const { refund, stampRefund, totals } = await prisma.$transaction(async tx => {
+  // 🔴 Candado de la orden (Plan3b) antes que el cliente y el premio (Order → Customer/StampReward): se releen la orden
+  // y la fila del descuento bajo él, y devoluciones + borrado + totales van en la misma transacción.
+  const { row, refund, stampRefund, totals } = await prisma.$transaction(async tx => {
+    if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+    const order = await tx.order.findFirst({
+      where: { id: orderId, venueId },
+      select: { id: true, paymentStatus: true, paidAmount: true },
+    })
+    if (!order) throw new NotFoundError('Order not found')
+    if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
+      throw new BadRequestError('No se puede modificar una orden ya pagada')
+    }
+
+    const row = await tx.orderDiscount.findFirst({ where: { id: orderDiscountId, orderId } })
+    if (!row) throw new NotFoundError('Descuento no aplicado a esta orden')
+
     const refunded = await refundLoyaltyForOrderDiscount(tx, venueId, row, staffId)
     const stamp = await refundStampRewardForOrderDiscount(tx, venueId, row)
     await tx.orderDiscount.delete({ where: { id: row.id } })
     const t = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
-    return { refund: refunded, stampRefund: stamp, totals: t }
+    return { row, refund: refunded, stampRefund: stamp, totals: t }
   })
 
   void (await import('../dashboard/activity-log.service')).logAction({
@@ -1567,75 +1530,79 @@ export async function splitOrderItems(venueId: string, orderId: string, itemIds:
     throw new BadRequestError('itemIds es requerido')
   }
 
-  const source = await prisma.order.findFirst({
-    where: { id: orderId, venueId },
-    select: {
-      id: true,
-      orderNumber: true,
-      status: true,
-      paymentStatus: true,
-      tableId: true,
-      covers: true,
-      servedById: true,
-      type: true,
-      paidAmount: true,
-      shiftId: true,
-      contratoDePrecio: true,
-      items: { select: { id: true, orderPromotionId: true } },
-      orderDiscounts: { select: { id: true } },
-      serviceCharges: { select: { id: true, isAutomatic: true } },
-    },
-  })
-  if (!source) throw new NotFoundError('Order not found')
-  if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(source.status)) {
-    throw new BadRequestError('La cuenta ya está cerrada')
-  }
-  if (source.paymentStatus === 'PAID' || source.paymentStatus === 'PARTIAL') {
-    throw new BadRequestError('No se puede separar una cuenta ya pagada')
-  }
-  // 🔴 MONEY (auditoría): mismos guards que fusionar — un descuento/canje/cargo
-  // se calculó sobre la cuenta COMPLETA; partirla cambiaría la base en silencio.
-  if (source.orderDiscounts.length > 0) {
-    throw new BadRequestError(
-      'Quita los descuentos (o la recompensa) antes de separar la cuenta: su monto se calculó sobre la cuenta completa.',
-    )
-  }
-  if (source.serviceCharges.some(sc => !sc.isAutomatic)) {
-    throw new BadRequestError('Quita los cobros por servicio antes de separar la cuenta.')
-  }
-
-  const sourceItemIds = new Set(source.items.map(i => i.id))
-  const toMove = itemIds.filter(id => sourceItemIds.has(id))
-  if (toMove.length === 0) throw new BadRequestError('Los artículos no pertenecen a esta cuenta')
-  if (toMove.length >= sourceItemIds.size) {
-    throw new BadRequestError('Debe quedar al menos un artículo en la cuenta original')
-  }
-
-  // 🔴 Una promoción se mueve COMPLETA o no se mueve (audit 2026-08-13): mover
-  // sólo el refresco de un combo dejaría la instancia (OrderPromotion) en el
-  // origen mientras sus líneas viven en dos cheques — cada uno vería un
-  // subconjunto "completo" y el guard de reembolso dejaría de proteger.
-  const movingSet = new Set(toMove)
-  const promoLineCount = new Map<string, { total: number; moving: number }>()
-  for (const item of source.items) {
-    if (!item.orderPromotionId) continue
-    const entry = promoLineCount.get(item.orderPromotionId) ?? { total: 0, moving: 0 }
-    entry.total += 1
-    if (movingSet.has(item.id)) entry.moving += 1
-    promoLineCount.set(item.orderPromotionId, entry)
-  }
-  const movedPromotionIds: string[] = []
-  for (const [orderPromotionId, count] of promoLineCount) {
-    if (count.moving > 0 && count.moving < count.total) {
-      throw new BadRequestError('Una promoción se mueve completa a la otra cuenta: selecciona todos sus artículos o ninguno.')
-    }
-    if (count.moving === count.total && count.moving > 0) movedPromotionIds.push(orderPromotionId)
-  }
-
   // 🔴 Atómico (auditoría): crear + mover + AMBOS recálculos en UNA transacción.
   // Un crash a medias dejaría el origen sobre-cobrando los items ya movidos.
+  // 🔴 Y bajo el candado del ORIGEN (Plan3b): sus líneas, promociones, descuentos, cargos, turno, contrato y pagos se
+  // leen DESPUÉS de bloquearlo, así que lo que se separa es la cuenta tal como está, no una foto vieja. El cheque nuevo
+  // nace dentro de esta misma transacción: es privado hasta el commit y no necesita candado.
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
-  const { newOrder, sourceTotals, newTotals } = await prisma.$transaction(async tx => {
+  const { source, newOrder, movedCount, sourceTotals, newTotals } = await prisma.$transaction(async tx => {
+    if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+    const source = await tx.order.findFirst({
+      where: { id: orderId, venueId },
+      select: {
+        id: true,
+        orderNumber: true,
+        status: true,
+        paymentStatus: true,
+        tableId: true,
+        covers: true,
+        servedById: true,
+        type: true,
+        paidAmount: true,
+        shiftId: true,
+        contratoDePrecio: true,
+        items: { select: { id: true, orderPromotionId: true } },
+        orderDiscounts: { select: { id: true } },
+        serviceCharges: { select: { id: true, isAutomatic: true } },
+      },
+    })
+    if (!source) throw new NotFoundError('Order not found')
+    if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(source.status)) {
+      throw new BadRequestError('La cuenta ya está cerrada')
+    }
+    if (source.paymentStatus === 'PAID' || source.paymentStatus === 'PARTIAL') {
+      throw new BadRequestError('No se puede separar una cuenta ya pagada')
+    }
+    // 🔴 MONEY (auditoría): mismos guards que fusionar — un descuento/canje/cargo
+    // se calculó sobre la cuenta COMPLETA; partirla cambiaría la base en silencio.
+    if (source.orderDiscounts.length > 0) {
+      throw new BadRequestError(
+        'Quita los descuentos (o la recompensa) antes de separar la cuenta: su monto se calculó sobre la cuenta completa.',
+      )
+    }
+    if (source.serviceCharges.some(sc => !sc.isAutomatic)) {
+      throw new BadRequestError('Quita los cobros por servicio antes de separar la cuenta.')
+    }
+
+    const sourceItemIds = new Set(source.items.map(i => i.id))
+    const toMove = itemIds.filter(id => sourceItemIds.has(id))
+    if (toMove.length === 0) throw new BadRequestError('Los artículos no pertenecen a esta cuenta')
+    if (toMove.length >= sourceItemIds.size) {
+      throw new BadRequestError('Debe quedar al menos un artículo en la cuenta original')
+    }
+
+    // 🔴 Una promoción se mueve COMPLETA o no se mueve (audit 2026-08-13): mover
+    // sólo el refresco de un combo dejaría la instancia (OrderPromotion) en el
+    // origen mientras sus líneas viven en dos cheques — cada uno vería un
+    // subconjunto "completo" y el guard de reembolso dejaría de proteger.
+    const movingSet = new Set(toMove)
+    const promoLineCount = new Map<string, { total: number; moving: number }>()
+    for (const item of source.items) {
+      if (!item.orderPromotionId) continue
+      const entry = promoLineCount.get(item.orderPromotionId) ?? { total: 0, moving: 0 }
+      entry.total += 1
+      if (movingSet.has(item.id)) entry.moving += 1
+      promoLineCount.set(item.orderPromotionId, entry)
+    }
+    const movedPromotionIds: string[] = []
+    for (const [orderPromotionId, count] of promoLineCount) {
+      if (count.moving > 0 && count.moving < count.total) {
+        throw new BadRequestError('Una promoción se mueve completa a la otra cuenta: selecciona todos sus artículos o ninguno.')
+      }
+      if (count.moving === count.total && count.moving > 0) movedPromotionIds.push(orderPromotionId)
+    }
+
     const created = await tx.order.create({
       data: {
         venueId,
@@ -1681,7 +1648,7 @@ export async function splitOrderItems(venueId: string, orderId: string, itemIds:
 
     const src = await recalculateOrderTotals(source.id, 0, Number(source.paidAmount || 0), tx)
     const dst = await recalculateOrderTotals(created.id, 0, 0, tx)
-    return { newOrder: created, sourceTotals: src, newTotals: dst }
+    return { source, newOrder: created, movedCount: toMove.length, sourceTotals: src, newTotals: dst }
   })
 
   void (await import('../dashboard/activity-log.service')).logAction({
@@ -1690,7 +1657,7 @@ export async function splitOrderItems(venueId: string, orderId: string, itemIds:
     entityId: source.id,
     staffId,
     venueId,
-    data: { newOrderId: newOrder.id, newOrderNumber: newOrder.orderNumber, items: toMove.length },
+    data: { newOrderId: newOrder.id, newOrderNumber: newOrder.orderNumber, items: movedCount },
   })
 
   return {
@@ -1713,60 +1680,64 @@ export async function splitOrderItems(venueId: string, orderId: string, itemIds:
  * - Requiere al menos 2 asientos distintos; si no, no hay nada que dividir.
  */
 export async function splitOrderBySeat(venueId: string, orderId: string, staffId?: string) {
-  const source = await prisma.order.findFirst({
-    where: { id: orderId, venueId },
-    select: {
-      id: true,
-      orderNumber: true,
-      status: true,
-      paymentStatus: true,
-      tableId: true,
-      covers: true,
-      servedById: true,
-      type: true,
-      paidAmount: true,
-      shiftId: true,
-      contratoDePrecio: true,
-      items: { select: { id: true, seat: true } },
-      orderDiscounts: { select: { id: true } },
-      serviceCharges: { select: { id: true, isAutomatic: true } },
-    },
-  })
-  if (!source) throw new NotFoundError('Order not found')
-  if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(source.status)) {
-    throw new BadRequestError('La cuenta ya está cerrada')
-  }
-  if (source.paymentStatus === 'PAID' || source.paymentStatus === 'PARTIAL') {
-    throw new BadRequestError('No se puede dividir una cuenta ya pagada')
-  }
-  // 🔴 MONEY (auditoría): mismos guards que fusionar — descuentos/canjes/cargos
-  // se calcularon sobre la cuenta completa; dividirla cambiaría la base.
-  if (source.orderDiscounts.length > 0) {
-    throw new BadRequestError('Quita los descuentos (o la recompensa) antes de dividir por puesto.')
-  }
-  if (source.serviceCharges.some(sc => !sc.isAutomatic)) {
-    throw new BadRequestError('Quita los cobros por servicio antes de dividir por puesto.')
-  }
-
-  // Agrupar por asiento; las líneas sin asiento no se mueven.
-  const bySeat = new Map<number, string[]>()
-  for (const item of source.items) {
-    if (item.seat == null) continue
-    const list = bySeat.get(item.seat) ?? []
-    list.push(item.id)
-    bySeat.set(item.seat, list)
-  }
-
-  const seats = [...bySeat.keys()].sort((a, b) => a - b)
-  if (seats.length < 2) {
-    throw new BadRequestError('Se necesitan al menos dos asientos con artículos para dividir por puesto')
-  }
-
-  // El asiento más bajo se queda en la cuenta original.
-  const seatsToMove = seats.slice(1)
-
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
+  // 🔴 Bajo el candado del ORIGEN (Plan3b): los asientos, el estado, los pagos, los descuentos y los cargos se leen
+  // DESPUÉS de bloquearlo, y los cheques por asiento —privados hasta el commit— nacen, reciben sus líneas y se
+  // recalculan en esta MISMA transacción.
   const created = await prisma.$transaction(async tx => {
+    if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+    const source = await tx.order.findFirst({
+      where: { id: orderId, venueId },
+      select: {
+        id: true,
+        orderNumber: true,
+        status: true,
+        paymentStatus: true,
+        tableId: true,
+        covers: true,
+        servedById: true,
+        type: true,
+        paidAmount: true,
+        shiftId: true,
+        contratoDePrecio: true,
+        items: { select: { id: true, seat: true } },
+        orderDiscounts: { select: { id: true } },
+        serviceCharges: { select: { id: true, isAutomatic: true } },
+      },
+    })
+    if (!source) throw new NotFoundError('Order not found')
+    if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(source.status)) {
+      throw new BadRequestError('La cuenta ya está cerrada')
+    }
+    if (source.paymentStatus === 'PAID' || source.paymentStatus === 'PARTIAL') {
+      throw new BadRequestError('No se puede dividir una cuenta ya pagada')
+    }
+    // 🔴 MONEY (auditoría): mismos guards que fusionar — descuentos/canjes/cargos
+    // se calcularon sobre la cuenta completa; dividirla cambiaría la base.
+    if (source.orderDiscounts.length > 0) {
+      throw new BadRequestError('Quita los descuentos (o la recompensa) antes de dividir por puesto.')
+    }
+    if (source.serviceCharges.some(sc => !sc.isAutomatic)) {
+      throw new BadRequestError('Quita los cobros por servicio antes de dividir por puesto.')
+    }
+
+    // Agrupar por asiento; las líneas sin asiento no se mueven.
+    const bySeat = new Map<number, string[]>()
+    for (const item of source.items) {
+      if (item.seat == null) continue
+      const list = bySeat.get(item.seat) ?? []
+      list.push(item.id)
+      bySeat.set(item.seat, list)
+    }
+
+    const seats = [...bySeat.keys()].sort((a, b) => a - b)
+    if (seats.length < 2) {
+      throw new BadRequestError('Se necesitan al menos dos asientos con artículos para dividir por puesto')
+    }
+
+    // El asiento más bajo se queda en la cuenta original.
+    const seatsToMove = seats.slice(1)
+
     const results: Array<{ id: string; orderNumber: string; seat: number }> = []
     for (const seat of seatsToMove) {
       const itemIds = bySeat.get(seat) as string[]
@@ -1814,7 +1785,7 @@ export async function splitOrderBySeat(venueId: string, orderId: string, staffId
       const t = await recalculateOrderTotals(r.id, 0, 0, tx)
       totalsPerSeat.push({ id: r.id, orderNumber: r.orderNumber, seat: r.seat, total: t.total })
     }
-    return { results: totalsPerSeat, sourceTotals: src }
+    return { source, seats, seatsToMove, results: totalsPerSeat, sourceTotals: src }
   })
 
   const createdTotals = created.results
@@ -1823,14 +1794,14 @@ export async function splitOrderBySeat(venueId: string, orderId: string, staffId
   void (await import('../dashboard/activity-log.service')).logAction({
     action: 'ORDER_SPLIT_BY_SEAT',
     entity: 'Order',
-    entityId: source.id,
+    entityId: created.source.id,
     staffId,
     venueId,
-    data: { seats: seatsToMove, created: created.results.length },
+    data: { seats: created.seatsToMove, created: created.results.length },
   })
 
   return {
-    source: { id: source.id, orderNumber: source.orderNumber, total: sourceTotals.total, seat: seats[0] },
+    source: { id: created.source.id, orderNumber: created.source.orderNumber, total: sourceTotals.total, seat: created.seats[0] },
     created: createdTotals,
   }
 }

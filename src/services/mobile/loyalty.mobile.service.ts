@@ -18,6 +18,7 @@ import { LoyaltyTransactionType, Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { getOrCreateLoyaltyConfig } from '../dashboard/loyalty.dashboard.service'
+import { lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
 
 /** Rounds to cents the way every other money path here does. */
 function money(value: number): number {
@@ -32,9 +33,13 @@ function money(value: number): number {
  * caller has no assignment to this venue we store null rather than fail: the
  * audit attribution is nice to have, the money movement is not optional.
  */
-async function resolveStaffVenueId(venueId: string, staffId?: string): Promise<string | undefined> {
+async function resolveStaffVenueId(
+  db: Pick<Prisma.TransactionClient, 'staffVenue'>,
+  venueId: string,
+  staffId?: string,
+): Promise<string | undefined> {
   if (!staffId) return undefined
-  const sv = await prisma.staffVenue.findUnique({
+  const sv = await db.staffVenue.findUnique({
     where: { staffId_venueId: { staffId, venueId } },
     select: { id: true },
   })
@@ -90,52 +95,61 @@ export async function getCustomerLoyalty(venueId: string, customerId: string, or
  * Redeem points onto an OPEN check: burns the points and applies the matching
  * discount atomically, then recalculates the order the same way cortesía and
  * catalog discounts do.
+ *
+ * 🔴 Order lock FIRST (before the Customer burn), cap/base from the locked read, and
+ * burn + discount + totals in ONE transaction: a failure after the burn gives the
+ * points back with the rollback, and a concurrent writer can never interleave
+ * between the discount and the totals.
  */
 export async function redeemPointsToOrder(venueId: string, orderId: string, customerId: string, points: number, staffId?: string) {
   if (!Number.isInteger(points) || points <= 0) {
     throw new BadRequestError('points debe ser un entero positivo')
   }
 
-  const order = await prisma.order.findFirst({
-    where: { id: orderId, venueId },
-    select: { id: true, total: true, subtotal: true, discountAmount: true, paymentStatus: true, paidAmount: true },
-  })
-  if (!order) throw new NotFoundError('Orden no encontrada')
-  if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
-    throw new BadRequestError('No se puede modificar una orden ya pagada')
-  }
-
+  // Venue configuration is not Order data: read before the lock; its checks keep their original order below.
   const config = await getOrCreateLoyaltyConfig(venueId)
-  if (!config.active) throw new BadRequestError('El programa de lealtad no está activo en esta sucursal')
-  if (points < config.minPointsRedeem) {
-    throw new BadRequestError(`Se requieren al menos ${config.minPointsRedeem} puntos para canjear`)
-  }
+  const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
 
-  const customer = await prisma.customer.findFirst({
-    where: { id: customerId, venueId },
-    select: { id: true, loyaltyPoints: true },
-  })
-  if (!customer) throw new NotFoundError('Cliente no encontrado')
-  if (customer.loyaltyPoints < points) {
-    throw new BadRequestError(`Puntos insuficientes: el cliente tiene ${customer.loyaltyPoints}`)
-  }
+  const { pointsToBurn, discountAmount, totals } = await prisma.$transaction(async tx => {
+    if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
+    const order = await tx.order.findFirst({
+      where: { id: orderId, venueId },
+      select: { id: true, total: true, subtotal: true, discountAmount: true, paymentStatus: true, paidAmount: true },
+    })
+    if (!order) throw new NotFoundError('Orden no encontrada')
+    if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
+      throw new BadRequestError('No se puede modificar una orden ya pagada')
+    }
 
-  const redemptionRate = Number(config.redemptionRate)
-  const rawValue = money(points * redemptionRate)
-  // 🔴 Tope contra la BASE (subtotal − descuentos), NO contra total: el total
-  // incluye cobros por servicio que el descuento no puede compensar — topar
-  // contra total quemaría puntos sin bajar la cuenta (auditoría 2026-07-18).
-  const redeemableBase = Math.max(0, Number(order.subtotal) - Number(order.discountAmount || 0))
-  const discountAmount = money(Math.min(rawValue, redeemableBase))
-  if (discountAmount <= 0) {
-    throw new BadRequestError('El canje no genera descuento sobre esta cuenta')
-  }
-  // If the value was capped, only burn the points actually used.
-  const pointsToBurn = discountAmount < rawValue && redemptionRate > 0 ? Math.ceil(discountAmount / redemptionRate) : points
+    if (!config.active) throw new BadRequestError('El programa de lealtad no está activo en esta sucursal')
+    if (points < config.minPointsRedeem) {
+      throw new BadRequestError(`Se requieren al menos ${config.minPointsRedeem} puntos para canjear`)
+    }
 
-  const staffVenueId = await resolveStaffVenueId(venueId, staffId)
+    const customer = await tx.customer.findFirst({
+      where: { id: customerId, venueId },
+      select: { id: true, loyaltyPoints: true },
+    })
+    if (!customer) throw new NotFoundError('Cliente no encontrado')
+    if (customer.loyaltyPoints < points) {
+      throw new BadRequestError(`Puntos insuficientes: el cliente tiene ${customer.loyaltyPoints}`)
+    }
 
-  await prisma.$transaction(async tx => {
+    const redemptionRate = Number(config.redemptionRate)
+    const rawValue = money(points * redemptionRate)
+    // 🔴 Tope contra la BASE (subtotal − descuentos), NO contra total: el total
+    // incluye cobros por servicio que el descuento no puede compensar — topar
+    // contra total quemaría puntos sin bajar la cuenta (auditoría 2026-07-18).
+    const redeemableBase = Math.max(0, Number(order.subtotal) - Number(order.discountAmount || 0))
+    const discountAmount = money(Math.min(rawValue, redeemableBase))
+    if (discountAmount <= 0) {
+      throw new BadRequestError('El canje no genera descuento sobre esta cuenta')
+    }
+    // If the value was capped, only burn the points actually used.
+    const pointsToBurn = discountAmount < rawValue && redemptionRate > 0 ? Math.ceil(discountAmount / redemptionRate) : points
+
+    const staffVenueId = await resolveStaffVenueId(tx, venueId, staffId)
+
     const transaction = await tx.loyaltyTransaction.create({
       data: {
         customerId,
@@ -147,9 +161,9 @@ export async function redeemPointsToOrder(venueId: string, orderId: string, cust
       },
     })
 
-    // 🔴 Carrera de doble canje: el guard de saldo corre antes de la tx, así
-    // que el decremento debe ser CONDICIONAL — dos canjes concurrentes no
-    // pueden quemar los mismos puntos (auditoría 2026-07-18).
+    // 🔴 Carrera de doble canje: el saldo leído arriba no reserva nada, así que el
+    // decremento debe ser CONDICIONAL — dos canjes concurrentes (sobre órdenes
+    // distintas) no pueden quemar los mismos puntos (auditoría 2026-07-18).
     const burned = await tx.customer.updateMany({
       where: { id: customerId, loyaltyPoints: { gte: pointsToBurn } },
       data: { loyaltyPoints: { decrement: pointsToBurn } },
@@ -170,10 +184,10 @@ export async function redeemPointsToOrder(venueId: string, orderId: string, cust
         loyaltyTransactionId: transaction.id,
       },
     })
-  })
 
-  const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
-  const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0))
+    const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
+    return { pointsToBurn, discountAmount, totals }
+  })
 
   void (await import('../dashboard/activity-log.service')).logAction({
     action: 'LOYALTY_POINTS_REDEEMED',

@@ -9,6 +9,7 @@
 
 import { processIntents, requiredPermissionForIntent } from '@/services/mobile/sync.mobile.service'
 import prisma from '@/utils/prismaClient'
+import { BadRequestError } from '@/errors/AppError'
 import * as tableService from '@/services/tpv/table.tpv.service'
 import * as orderTpvService from '@/services/tpv/order.tpv.service'
 import * as orderMobileService from '@/services/mobile/order.mobile.service'
@@ -1017,5 +1018,64 @@ describe('ADD_ITEMS — la cortesía y las cantidades no se cuelan por el replay
     const acks = await processIntents(addItems([{ productId: 'p1', quantity: 1, weightQuantity: 0.75 }]))
 
     expect(acks[0]).toMatchObject({ status: 'ACKED' })
+  })
+})
+
+/**
+ * Plan3b T4 — la promoción de un ADD_ITEMS ahora espera el candado de la orden y relee bajo él. Su clasificación no
+ * cambia: un rechazo de NEGOCIO sigue siendo REJECTED (con compensación por instanceId), y una espera que agota la
+ * transacción (P2028) es transitoria → RETRY, sin compensar, sin persistir y cortando el batch.
+ */
+describe('ADD_ITEMS con promoción — clasificación tras el candado de la orden (Plan3b T4)', () => {
+  const promo = { promotionRef: { promotionId: 'promo-1', promotionInstanceId: 'uuid-1', selections: [] } }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(null)
+    ;(prisma.posSyncIntent.findFirst as jest.Mock).mockResolvedValue(null)
+    ;(prisma.posSyncIntent.create as jest.Mock).mockResolvedValue({})
+    ;(prisma.posSyncIntent.update as jest.Mock).mockResolvedValue({})
+    ;(prisma.posSyncIntent.delete as jest.Mock).mockResolvedValue({})
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 3, status: 'PENDING' })
+    ;(featureAccess.hasFeatureAccess as jest.Mock).mockResolvedValue({ hasAccess: true })
+    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(false)
+  })
+
+  it('un rechazo de NEGOCIO leído bajo el candado → REJECTED y compensa las promos del intent por instanceId', async () => {
+    ;(promotionService.applyPromotionToOrder as jest.Mock).mockRejectedValue(
+      new BadRequestError('A una cuenta ya pagada no se le pueden agregar promociones.'),
+    )
+
+    const acks = await processIntents(baseParams([{ id: 'i-promo', type: 'ADD_ITEMS', payload: { orderId: 'order-1', items: [promo] } }]))
+
+    expect(acks[0]).toMatchObject({
+      status: 'REJECTED',
+      errorCode: 'BUSINESS_RULE',
+      message: 'A una cuenta ya pagada no se le pueden agregar promociones.',
+    })
+    expect(promotionService.removeIntentPromotions).toHaveBeenCalledWith(VENUE, 'order-1', ['uuid-1'])
+    expect(prisma.posSyncIntent.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'REJECTED' }) }),
+    )
+  })
+
+  it('una espera del candado que agota la transacción (P2028) → RETRY: no compensa, no persiste y corta el batch', async () => {
+    ;(promotionService.applyPromotionToOrder as jest.Mock).mockRejectedValue(
+      Object.assign(new Error('Transaction already closed: the transaction expired while waiting'), { code: 'P2028' }),
+    )
+
+    const acks = await processIntents(
+      baseParams([
+        { id: 'i-promo', seq: 1, type: 'ADD_ITEMS', payload: { orderId: 'order-1', items: [promo] } },
+        { id: 'i-next', seq: 2, type: 'APPLY_DISCOUNT', payload: { orderId: 'order-1', discountId: 'd1' } },
+      ]),
+    )
+
+    expect(acks).toHaveLength(1)
+    expect(acks[0]).toMatchObject({ id: 'i-promo', status: 'RETRY', errorCode: 'P2028' })
+    expect(promotionService.removeIntentPromotions).not.toHaveBeenCalled()
+    expect(prisma.posSyncIntent.delete).toHaveBeenCalled()
+    expect(prisma.posSyncIntent.update).not.toHaveBeenCalled()
+    expect(orderMobileService.applyOrderDiscount).not.toHaveBeenCalled()
   })
 })

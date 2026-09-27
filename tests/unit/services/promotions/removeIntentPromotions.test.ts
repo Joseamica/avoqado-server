@@ -6,6 +6,8 @@ const prismaMock = prisma as any
 beforeEach(() => {
   jest.clearAllMocks()
   prismaMock.$transaction = jest.fn((cb: any) => cb(prismaMock))
+  // Candado canónico de la orden (Plan3b): la orden existe en este venue.
+  prismaMock.$queryRaw.mockResolvedValue([{ id: 'order-1' }])
   prismaMock.orderPromotion.findMany.mockResolvedValue([{ id: 'op-1' }, { id: 'op-2' }])
   prismaMock.orderPromotion.findFirst.mockResolvedValue({
     id: 'op-x',

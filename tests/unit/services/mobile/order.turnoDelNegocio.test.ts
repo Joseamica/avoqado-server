@@ -104,6 +104,9 @@ describe('createOrderWithItems (POS móvil) — cae en el turno del NEGOCIO', ()
 })
 
 describe('separar cheque — el turno se HEREDA del origen, no se resuelve', () => {
+  // Candado canónico del ORIGEN (Plan3b): la cuenta existe en este venue.
+  beforeEach(() => prismaMock.$queryRaw.mockResolvedValue([{ id: 'order-origen' }]))
+
   function cuentaOrigen(shiftId: string | null, items: any[]) {
     return {
       id: 'order-origen',

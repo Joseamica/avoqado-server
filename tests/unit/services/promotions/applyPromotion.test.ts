@@ -64,6 +64,8 @@ const params = (over: Record<string, unknown> = {}) => ({
 beforeEach(() => {
   jest.clearAllMocks()
   prismaMock.$transaction = jest.fn((cb: any) => cb(prismaMock))
+  // Candado canónico de la orden (Plan3b): la orden existe en este venue.
+  prismaMock.$queryRaw.mockResolvedValue([{ id: 'order-1' }])
   prismaMock.promotion.findFirst.mockResolvedValue(promocionEnBase())
   prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' })
   prismaMock.orderPromotion.findUnique.mockResolvedValue(null)

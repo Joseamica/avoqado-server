@@ -42,6 +42,8 @@ const PREMIO_MONTO = {
 describe('redeemStampReward', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    // Candado canónico de la orden (Plan3b): la orden existe en este venue.
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 'o1' }])
     prismaMock.order.findFirst.mockResolvedValue(ORDEN as any)
     prismaMock.stampReward.findFirst.mockResolvedValue(PREMIO_MONTO as any)
     prismaMock.stampReward.updateMany.mockResolvedValue({ count: 1 } as any)
@@ -61,10 +63,11 @@ describe('redeemStampReward', () => {
   })
 
   it('🔴 el MISMO premio no se puede canjear dos veces', async () => {
-    // Dos cajeros tocan "canjear" a la vez. El chequeo de estado corre ANTES de la
-    // transacción, así que los dos lo ven PENDING: lo único que separa un café
-    // regalado de dos es que el cambio de estado sea CONDICIONAL. Aquí se simula que
-    // el otro ganó la carrera — el UPDATE no encuentra la fila en PENDING.
+    // Dos cajeros tocan "canjear" a la vez, cada uno en SU cuenta. El chequeo de estado
+    // corre bajo el candado de cada orden, pero dos órdenes tienen dos candados: los dos
+    // lo ven PENDING, y lo único que separa un café regalado de dos es que el cambio de
+    // estado sea CONDICIONAL. Aquí se simula que el otro ganó la carrera — el UPDATE no
+    // encuentra la fila en PENDING.
     prismaMock.stampReward.updateMany.mockResolvedValue({ count: 0 } as any)
 
     await expect(redeemStampReward('v1', 'o1', 'rw1')).rejects.toThrow(/ya/i)
@@ -169,7 +172,7 @@ describe('redeemStampReward', () => {
       expect(prismaMock.orderDiscount.create).not.toHaveBeenCalled()
     })
 
-    it('un premio ya canjeado se rechaza sin llegar a la transacción', async () => {
+    it('un premio ya canjeado se rechaza sin quemar nada', async () => {
       prismaMock.stampReward.findFirst.mockResolvedValue({ ...PREMIO_MONTO, status: 'REDEEMED' } as any)
 
       await expect(redeemStampReward('v1', 'o1', 'rw1')).rejects.toThrow(/ya/i)
@@ -189,6 +192,8 @@ describe('redeemStampReward', () => {
     })
 
     it('una orden que no existe se rechaza en vez de reventar', async () => {
+      // El candado no ve una orden inexistente (ni la de otro venue).
+      prismaMock.$queryRaw.mockResolvedValue([])
       prismaMock.order.findFirst.mockResolvedValue(null)
 
       await expect(redeemStampReward('v1', 'inexistente', 'rw1')).rejects.toThrow(/orden/i)
@@ -200,7 +205,8 @@ describe('redeemStampReward', () => {
     // La fila del descuento por sí sola no mueve `total` ni `discountAmount`.
     await redeemStampReward('v1', 'o1', 'rw1')
 
-    expect(recalculateOrderTotals).toHaveBeenCalledWith('o1', expect.anything(), expect.anything())
+    // Sobre la MISMA transacción del canje, con el pagado releído bajo el candado.
+    expect(recalculateOrderTotals).toHaveBeenCalledWith('o1', 0, 0, prismaMock)
   })
 
   it('🔴 deja rastro en la bitácora de quién regaló qué', async () => {

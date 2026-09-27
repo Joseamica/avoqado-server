@@ -142,18 +142,15 @@ export async function compWholeOrder(params: { venueId: string; orderId: string;
  * Recomputes subtotal/total from the CURRENT item rows (comped lines contribute
  * 0) and re-derives percentage discounts, mirroring addItemsToOrder's recalc so
  * both paths agree on the order's money.
+ *
+ * `db` is the caller's transaction and is REQUIRED: the caller already holds this
+ * Order's canonical lock in it (or created the Order privately in it) and passes
+ * `paidAmount`/`fallbackDiscount` from that locked read. A standalone recalculation
+ * could never make the caller's earlier child writes atomic with these totals.
+ * Zero fallback deliberately drops an inline discount; comp and promotions pass the
+ * inherited one.
  */
-export async function recalculateOrderTotals(
-  orderId: string,
-  fallbackDiscount: number,
-  paidAmount: number,
-  // Caller must already hold Order's lock (or have created a private Order),
-  // and supply paidAmount/fallback from the fresh locked read. Zero fallback
-  // deliberately drops inline discounts; comp/promotions preserve theirs.
-  // Transitional global default for pending Plan3b T4 callers: it is NOT atomic
-  // with their earlier writes. T4 removes it after closing all 16 call sites.
-  db: Prisma.TransactionClient | typeof prisma = prisma,
-) {
+export async function recalculateOrderTotals(orderId: string, fallbackDiscount: number, paidAmount: number, db: Prisma.TransactionClient) {
   const items = await db.orderItem.findMany({ where: { orderId }, select: { total: true, orderPromotionId: true } })
   const newSubtotal = items.reduce((sum, i) => sum + Number(i.total), 0)
   // 🔴 Las líneas nacidas de una promoción quedan FUERA de la base de los

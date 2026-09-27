@@ -78,13 +78,6 @@ const INVENTARIO: Record<string, Clase> = {
     clase: 'VERDAD_EXTERNA',
     marcadores: VERDAD_EXTERNA_VIGILADA,
   },
-  'services/mobile/order.mobile.service.ts#createOrderWithItems': {
-    clase: 'EXENTA',
-    motivo:
-      'Limpieza de una promoción fallida: la orden nace y muere en la MISMA llamada (se crea, falla la promoción y se ' +
-      'anula antes de devolver su id y antes del aviso por socket), así que ningún cobro de terminal pudo apuntarle.',
-    marcadores: ['EXENTA de §C.6'],
-  },
 }
 
 /** Escritores con el estado en una VARIABLE (el regex no los ve): se vigilan por nombre. */

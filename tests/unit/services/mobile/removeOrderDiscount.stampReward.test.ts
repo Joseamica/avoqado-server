@@ -19,6 +19,8 @@ import { prismaMock } from '../../../__helpers__/setup'
 describe('removeOrderDiscount + premio de sellos', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    // Candado canónico de la orden (Plan3b): la orden existe en este venue.
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 'o1' }])
     prismaMock.order.findFirst.mockResolvedValue({ id: 'o1', paymentStatus: 'PENDING', paidAmount: 0 } as any)
     // Un descuento SIN transacción de puntos: viene de una cartilla, no de puntos.
     prismaMock.orderDiscount.findFirst.mockResolvedValue({

@@ -21,6 +21,8 @@ const fuente = (items: Array<{ id: string; orderPromotionId?: string | null }>) 
 beforeEach(() => {
   jest.clearAllMocks()
   prismaMock.$transaction = jest.fn((cb: any) => cb(prismaMock))
+  // Candado canónico de la orden (Plan3b): la orden existe en este venue.
+  prismaMock.$queryRaw.mockResolvedValue([{ id: 'order-1' }])
   prismaMock.order.create.mockResolvedValue({ id: 'order-2', orderNumber: 'ORD-2', version: 1 })
   prismaMock.orderItem.updateMany.mockResolvedValue({ count: 1 })
   prismaMock.orderPromotion.updateMany.mockResolvedValue({ count: 1 })

@@ -34,7 +34,7 @@ describe('recalculateOrderTotals — base de descuento sin líneas de promoción
       { id: 'd1', type: 'PERCENTAGE', value: 20, amount: 39.8, appliedToItemIds: [] },
     ] as any)
 
-    await recalculateOrderTotals('order-1', 0, 0)
+    await recalculateOrderTotals('order-1', 0, 0, prismaMock)
 
     expect(prismaMock.orderDiscount.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'd1' }, data: { amount: 20 } }))
     const orderData = prismaMock.order.update.mock.calls[0][0].data
@@ -54,7 +54,7 @@ describe('recalculateOrderTotals — base de descuento sin líneas de promoción
       { id: 'd1', type: 'PERCENTAGE', value: 10, amount: 15, appliedToItemIds: [] },
     ] as any)
 
-    await recalculateOrderTotals('order-1', 0, 0)
+    await recalculateOrderTotals('order-1', 0, 0, prismaMock)
 
     expect(prismaMock.orderDiscount.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'd1' }, data: { amount: 15 } }))
   })
