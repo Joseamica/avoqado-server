@@ -242,6 +242,29 @@ describe('global con manifiesto y entrada congelada', () => {
       { orderId: second.id },
     ])
   })
+  it('rechazo global libera todos los miembros y una nueva individual captura IVA actual', async () => {
+    const a = await order()
+    const b = await order()
+    provider.createGlobalInvoice.mockRejectedValueOnce(new ProviderHttpError(400, 'invalid_request', 'bad'))
+    await global()
+    const rejected = await row()
+    await prisma.product.update({ where: { id: productId }, data: { ivaTratamiento: 'IVA_0' } })
+    const individual = await issue(a.id)
+    expect(individual.cfdi).toMatchObject({ subtotalCents: 11600, taxCents: 0, totalCents: 11600 })
+    expect(provider.createInvoice.mock.calls[0][0].items[0].taxes[0].rate).toBe(0)
+    expect(await prisma.orderItemSelloIva.count({ where: { cfdiId: rejected.id } })).toBe(0)
+    expect(await prisma.orderItem.findUnique({ where: { id: b.items[0].id } })).toMatchObject({ ivaTratamiento: null })
+    expect(await row()).toEqual(rejected)
+    expect(await prisma.cfdiGlobalOrden.count({ where: { cfdiId: rejected.id } })).toBe(2)
+  })
+  it('rechazo individual no impone IVA16 a una global posterior: excluye y cuenta la mixta', async () => {
+    const o = await order()
+    provider.createInvoice.mockRejectedValueOnce(new ProviderHttpError(400, 'invalid_request', 'bad'))
+    await issue(o.id)
+    await prisma.product.update({ where: { id: productId }, data: { ivaTratamiento: 'IVA_0' } })
+    expect(await global()).toMatchObject({ status: 'NOTHING_TO_INVOICE', candidateCount: 0, excluidasPorIvaMixto: 1 })
+    expect(provider.createGlobalInvoice).not.toHaveBeenCalled()
+  })
   it('relee elegibilidad bajo lock: una individual entre selección y reserva gana', async () => {
     const o = await order()
     const read = prisma.order.findMany.bind(prisma.order)
@@ -341,6 +364,7 @@ describe('global con manifiesto y entrada congelada', () => {
     })
     expect((await global()).status).toBe('STAMP_FAILED')
     expect(await row()).toMatchObject({ attempts: 1, falloDefinitivo: true })
+    expect(await prisma.orderItemSelloIva.count({ where: { cfdiId: (await row()).id } })).toBe(0)
   })
   async function legacy() {
     await order()

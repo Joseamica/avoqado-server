@@ -1,6 +1,6 @@
 // src/services/fiscal/cfdi.service.ts
 import { ConflictError } from '../../errors/AppError'
-import { bloquearOrdenParaFacturar, tomarAdmisionCompartida } from './admisionIva'
+import { bloquearOrdenParaFacturar, bloquearOrdenesParaFacturar, tomarAdmisionCompartida } from './admisionIva'
 import { excluirSiEstaEnGlobal, CFDI_VIVO } from './exclusionGlobal'
 import { capturarEntrada, huellaDeEntrada, leerEntrada, EntradaDocumentalV1 } from './entradaDocumental'
 import { finalizarTimbre, completarArchivos, escalarIntentoIncierto, ArchivosCfdi } from './finalizadorCfdi'
@@ -406,6 +406,8 @@ export async function issueCfdiForOrder(
     }
   }
 
+  const legacyWhere = { id: legacyReservation.id, attempts: legacyReservation.attempts, status: 'STAMPING' as const }
+
   // 4. Validate (D1) — never send garbage to the PAC
   const validation = validateBeforeStamp({
     csdStatus: bundle.emisor.csdStatus,
@@ -435,13 +437,14 @@ export async function issueCfdiForOrder(
   if (reasons.length > 0) {
     const cfdi = await deps.persistCfdi(
       baseCfdiData(params, bundle, idempotencyKey, invoiceParams, 'VALIDATION_FAILED', { lastError: reasons.join(' | ') }),
+      legacyWhere,
     )
+    if (!cfdi) throw new ConflictError(PROCESANDO)
     return { status: 'VALIDATION_FAILED', cfdi, reasons }
   }
 
   // Legacy has no frozen input: preserve its prior recalculated amounts before sending this version.
   const legacyData = baseCfdiData(params, bundle, idempotencyKey, invoiceParams, 'STAMPING', {})
-  const legacyWhere = { id: legacyReservation.id, attempts: legacyReservation.attempts, status: 'STAMPING' as const }
   const refreshed = await deps.persistCfdi(legacyData, legacyWhere)
   if (!refreshed) throw new ConflictError(PROCESANDO)
   legacyReservation = { ...legacyReservation, ...legacyData }
@@ -740,16 +743,38 @@ export async function enviarIntentoCapturado(
         attempts: version,
         ...(definitive ? { status: { in: ['STAMPING', 'STAMP_FAILED'] }, falloDefinitivo: false } : { status: 'STAMPING' }),
       }
-      const updated = await deps.persistCfdi(
-        {
-          idempotencyKey,
-          status: 'STAMP_FAILED',
-          attempts: version,
-          falloDefinitivo: definitive,
-          lastError: err instanceof Error ? err.message : String(err),
-        },
-        where,
-      )
+      const data = {
+        status: 'STAMP_FAILED' as const,
+        attempts: version,
+        falloDefinitivo: definitive,
+        lastError: err instanceof Error ? err.message : String(err),
+      }
+      const updated = definitive
+        ? await transaction(async tx => {
+            // A rejected global is no longer live: release every member under the same
+            // ordered admission locks as capture, only after winning this version's CAS.
+            const ids = cfdi.orderId ? [cfdi.orderId as string] : []
+            let after: string | undefined
+            for (;;) {
+              const page = await tx.cfdiGlobalOrden.findMany({
+                where: { cfdiId: cfdi.id, ...(after ? { orderId: { gt: after } } : {}) },
+                orderBy: { orderId: 'asc' },
+                take: 100,
+                select: { orderId: true },
+              })
+              ids.push(...page.map(member => member.orderId))
+              if (page.length < 100) break
+              after = page[page.length - 1].orderId
+            }
+            await bloquearOrdenesParaFacturar(tx, [...new Set(ids)].sort(), cfdi.venueId)
+            const venue = await tx.venue.findUniqueOrThrow({ where: { id: cfdi.venueId }, select: { organizationId: true } })
+            await tomarAdmisionCompartida(tx, venue.organizationId)
+            const { count } = await tx.cfdi.updateMany({ where, data })
+            if (count !== 1) return null
+            await liberarSellosDe(tx, cfdi.id)
+            return tx.cfdi.findUniqueOrThrow({ where: { id: cfdi.id } })
+          })
+        : await deps.persistCfdi({ idempotencyKey, ...data }, where)
       const current = updated ?? (await deps.findExistingCfdi(idempotencyKey))
       if (!updated) await reportConflictingVersion(current, null)
       if (current?.status === 'STAMPED') return { status: 'STAMPED', cfdi: current }

@@ -219,6 +219,8 @@ describe('sustitución sellada', () => {
     await replacement(cfdi.id)
     const first = await replacementRow(cfdi.id)
     expect(first.falloDefinitivo).toBe(true)
+    expect(await prisma.orderItemSelloIva.count({ where: { cfdiId: first.id } })).toBe(0)
+    expect(await sellosIva.renglonesSellados(prisma, o.id)).toEqual([expect.objectContaining({ cfdis: 1, tratamiento: 'IVA_16' })])
     await prisma.product.update({ where: { id: productId }, data: { ivaTratamiento: 'IVA_0' } })
     await replacement(cfdi.id)
     const sub = await replacementRow(cfdi.id)

@@ -405,7 +405,11 @@ describe('egreso con entrada congelada', () => {
     const s = await legacy()
     await prisma.payment.update({ where: { id: s.refund.id }, data: { status: 'PENDING', amount: -1 } })
     provider.findByExternalId.mockResolvedValue({ ...stamped, uuid: randomUUID() })
-    expect((await emit(s.refund.id)).status).toBe('STAMPED')
+    const logAction = jest.fn()
+    expect((await emitRefundCreditNote({ venueId, refundPaymentId: s.refund.id, sandbox: true }, { logAction })).status).toBe('STAMPED')
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ relatedUuid: undefined, relatedCfdiId: undefined }) }),
+    )
     expect(provider.findByExternalId).toHaveBeenCalledWith(s.n.idempotencyKey)
     expect(await note(s.refund.id)).toMatchObject({ protocoloIva: null, entrada: null, totalCents: 11600, attempts: s.n.attempts })
     expect(provider.createCreditNote).toHaveBeenCalledTimes(1)
@@ -419,7 +423,14 @@ describe('egreso con entrada congelada', () => {
   })
   it('legacy STAMP_FAILED conserva reintento sin identidad versionada ni entrada', async () => {
     const s = await legacy()
-    await emit(s.refund.id)
+    const logAction = jest.fn()
+    await emitRefundCreditNote({ venueId, refundPaymentId: s.refund.id, sandbox: true }, { logAction })
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'CFDI_CREDIT_NOTE_ISSUED',
+        data: expect.objectContaining({ relatedUuid: s.original.uuid, relatedCfdiId: s.original.id }),
+      }),
+    )
     expect(provider.createCreditNote.mock.calls[1][0]).toMatchObject({ externalId: s.n.idempotencyKey, idempotencyKey: s.n.idempotencyKey })
     expect(provider.createCreditNote.mock.calls[1][0].protocoloIva).toBeUndefined()
     expect(await note(s.refund.id)).toMatchObject({ protocoloIva: null, entrada: null, attempts: s.n.attempts + 1, status: 'STAMPED' })
@@ -433,6 +444,21 @@ describe('egreso con entrada congelada', () => {
     })
     await expect(emit(s.refund.id)).rejects.toThrow(/proces/i)
     expect(await note(s.refund.id)).toMatchObject({ status: 'CANCELLED', cancelStatus: 'ACCEPTED', facturapiId: null })
+  })
+  it('legacy éxito obsoleto no audita el enlace capturado sobre un ganador nuevo', async () => {
+    const s = await legacy()
+    const logAction = jest.fn()
+    let winner: any
+    provider.createCreditNote.mockImplementationOnce(async () => {
+      winner = await prisma.cfdi.update({
+        where: { id: s.n.id },
+        data: { attempts: { increment: 1 }, status: 'STAMPED', uuid: randomUUID(), facturapiId: randomUUID() },
+      })
+      return { ...stamped, uuid: randomUUID() }
+    })
+    await expect(emitRefundCreditNote({ venueId, refundPaymentId: s.refund.id, sandbox: true }, { logAction })).rejects.toThrow(/proces/i)
+    expect(await note(s.refund.id)).toEqual(winner)
+    expect(logAction).not.toHaveBeenCalled()
   })
   it('saldo ignora egreso válido de otra original pero conserva atribución legacy/corrupta', async () => {
     const s = await sale()

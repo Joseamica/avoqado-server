@@ -645,13 +645,25 @@ export async function emitRefundCreditNote(
   return result
 }
 
-async function finalizarNota(cfdi: any, found: any, provider: any, params: EmitRefundCreditNoteParams, deps: EmitRefundCreditNoteDeps) {
+async function finalizarNota(
+  cfdi: any,
+  found: any,
+  provider: any,
+  params: EmitRefundCreditNoteParams,
+  deps: EmitRefundCreditNoteDeps,
+  auditLink?: Pick<EntradaEgreso, 'originalUuid' | 'originalCfdiId'>,
+) {
   const result = await finalizarEmision(cfdi, found, provider, await deps.loadVenueSlug(params.venueId), deps)
   verificarTenant(result.cfdi, params.venueId)
-  auditarNota(result.cfdi, params, deps, cfdi.protocoloIva === 1 ? cfdi.entrada : undefined)
+  auditarNota(result.cfdi, params, deps, cfdi.protocoloIva === 1 ? cfdi.entrada : auditLink)
   return result
 }
-function auditarNota(cfdi: any, params: EmitRefundCreditNoteParams, deps: EmitRefundCreditNoteDeps, entrada?: EntradaEgreso) {
+function auditarNota(
+  cfdi: any,
+  params: EmitRefundCreditNoteParams,
+  deps: EmitRefundCreditNoteDeps,
+  entrada?: Pick<EntradaEgreso, 'originalUuid' | 'originalCfdiId'>,
+) {
   deps.logAction({
     staffId: params.requestedByStaffId ?? null,
     venueId: params.venueId,
@@ -728,7 +740,7 @@ async function emitirLegacy(
     await deps.persistCfdi({ facturapiId: stamped.providerInvoiceId }, where)
     throw new ConflictError(PROCESANDO)
   }
-  return finalizarNota(cfdi, stamped, provider, params, deps)
+  return finalizarNota(cfdi, stamped, provider, params, deps, reserved.entrada)
 }
 
 // ─── Lectura: ¿este reembolso ya tiene nota de crédito? ───────────────────────

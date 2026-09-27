@@ -1,8 +1,9 @@
 import * as exclusionGlobal from '@/services/fiscal/exclusionGlobal'
 import * as sellosIva from '@/services/fiscal/sellosIva'
 import { randomUUID } from 'crypto'
+import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import { issueCfdiForOrder } from '@/services/fiscal/cfdi.service'
+import { issueCfdiForOrder, cancelCfdi, aplicarCancelacion } from '@/services/fiscal/cfdi.service'
 import { huellaDeEntrada, leerEntrada, paramsDesdeEntrada } from '@/services/fiscal/entradaDocumental'
 import { encenderIvaPorProducto } from '../../__helpers__/iva-por-producto'
 
@@ -151,7 +152,7 @@ describe('emisión individual sellada', () => {
     expect((await issue(o.id)).status).toBe('STAMP_FAILED')
     const first = await row(o.id)
     expect(first).toMatchObject({ falloDefinitivo: true, attempts: 1 })
-    expect(await prisma.orderItemSelloIva.count({ where: { cfdiId: first.id } })).toBe(1)
+    expect(await prisma.orderItemSelloIva.count({ where: { cfdiId: first.id } })).toBe(0)
     await prisma.product.update({ where: { id: productId }, data: { ivaTratamiento: 'IVA_0' } })
     expect((await issue(o.id)).status).toBe('STAMPED')
     const second = await row(o.id)
@@ -162,6 +163,77 @@ describe('emisión individual sellada', () => {
       items: [{ taxes: [{ rate: 0 }] }],
     })
     expect(await prisma.orderItemSelloIva.findFirst({ where: { cfdiId: second.id } })).toMatchObject({ intento: 2 })
+  })
+  it.each(['STAMPED', 'CANCELLED'] as const)('legacy validación atrasada no pisa al ganador %s tras vencer el TTL', async winner => {
+    const o = await order()
+    provider.createInvoice.mockRejectedValueOnce(new Error('timeout'))
+    await issue(o.id)
+    const initial = await row(o.id)
+    await prisma.$transaction(async tx => {
+      await sellosIva.liberarSellosDe(tx, initial.id)
+      await tx.cfdi.update({
+        where: { id: initial.id },
+        data: { protocoloIva: null, entrada: Prisma.DbNull, entradaHuella: null, enviadoAt: null },
+      })
+    })
+    await prisma.fiscalEmisor.update({ where: { id: fiscalEmisorId }, data: { csdStatus: 'EXPIRED' } })
+    const entered = deferred()
+    const release = deferred()
+    provider.findByExternalId.mockImplementationOnce(async () => {
+      entered.resolve()
+      await release.promise
+      return null
+    })
+    const stale = issue(o.id).then(
+      value => ({ value }),
+      error => ({ error }),
+    )
+    try {
+      await entered.promise
+      const claimed = await row(o.id)
+      await prisma.cfdi.update({ where: { id: initial.id }, data: { updatedAt: new Date(Date.now() - 4 * 60_000) } })
+      await prisma.fiscalEmisor.update({ where: { id: fiscalEmisorId }, data: { csdStatus: 'ACTIVE' } })
+      await prisma.product.update({ where: { id: productId }, data: { ivaTratamiento: 'IVA_0' } })
+      expect((await issue(o.id)).status).toBe('STAMPED')
+      if (winner === 'CANCELLED') {
+        await cancelCfdi(
+          { cfdiId: initial.id, motivo: '02', sandbox: true, expectedVenueId: venueId },
+          {
+            loadCfdi: id => prisma.cfdi.findUnique({ where: { id }, include: { fiscalEmisor: true } }),
+            updateCfdi: aplicarCancelacion,
+            resolveProvider: () => ({ ...provider, cancelInvoice: async () => ({ status: 'canceled', cancelledAt: new Date() }) }) as any,
+          },
+        )
+      }
+      const before = await row(o.id)
+      expect(before).toMatchObject({ status: winner, attempts: claimed.attempts + 1, protocoloIva: null, taxCents: 0, totalCents: 11600 })
+      release.resolve()
+      expect(await stale).toMatchObject({ error: { statusCode: 409 } })
+      expect(await row(o.id)).toEqual(before)
+      expect(provider.createInvoice).toHaveBeenCalledTimes(2)
+    } finally {
+      release.resolve()
+      await stale
+      await prisma.fiscalEmisor.update({ where: { id: fiscalEmisorId }, data: { csdStatus: 'ACTIVE' } })
+    }
+  })
+  it('rechazo y liberación revierten juntos si falla la liberación', async () => {
+    const o = await order()
+    provider.createInvoice.mockRejectedValueOnce(rejection())
+    const release = sellosIva.liberarSellosDe
+    const spy = jest.spyOn(sellosIva, 'liberarSellosDe').mockImplementationOnce(async (tx, id) => {
+      await release(tx, id)
+      throw new Error('fallo después de liberar')
+    })
+    try {
+      await expect(issue(o.id)).rejects.toThrow('fallo después de liberar')
+      const current = await row(o.id)
+      expect(current).toMatchObject({ status: 'STAMPING', falloDefinitivo: false, attempts: 1 })
+      expect(await prisma.orderItemSelloIva.count({ where: { cfdiId: current.id } })).toBe(1)
+      expect(await prisma.orderItem.findUnique({ where: { id: o.items[0].id } })).toMatchObject({ ivaTratamiento: 'IVA_16' })
+    } finally {
+      spy.mockRestore()
+    }
   })
   it('consulta recupera un timbre con su foto original sin volver a enviar', async () => {
     const o = await order()
@@ -235,6 +307,7 @@ describe('emisión individual sellada', () => {
       falloDefinitivo: false,
     })
     expect(provider.createInvoice).toHaveBeenCalledTimes(1)
+    expect(await prisma.orderItemSelloIva.count({ where: { cfdiId: first.id } })).toBe(1)
     expect(await prisma.activityLog.count({ where: { venueId, entityId: first.id, action: 'CFDI_INTENTO_INCIERTO_ESCALADO' } })).toBe(1)
   })
   it.each(['STAMP_FAILED', 'STAMPED'] as const)('rechazo atrasado tras %s sólo aplica al RESET', async status => {
@@ -246,6 +319,7 @@ describe('emisión individual sellada', () => {
     })
     await issue(o.id)
     expect(await row(o.id)).toMatchObject({ status, falloDefinitivo: status === 'STAMP_FAILED' })
+    expect(await prisma.orderItemSelloIva.count({ where: { cfdiId: (await row(o.id)).id } })).toBe(status === 'STAMP_FAILED' ? 0 : 1)
   })
   it('consultar mientras A procesa no reclama ni impide que A finalice', async () => {
     const o = await order()
@@ -455,6 +529,7 @@ describe('emisión individual sellada', () => {
       lastError: 'otra versión',
       falloDefinitivo: false,
     })
+    expect(await prisma.orderItemSelloIva.count({ where: { cfdiId: current.id } })).toBe(1)
     expect(await prisma.activityLog.findFirst({ where: { venueId, entityId: current.id, action: 'CFDI_TIMBRE_DUPLICADO' } })).toMatchObject(
       {
         data: expect.objectContaining({ attempts: 1, currentAttempts: 2, uuid: mode === 'valid' ? stamped.uuid : null, currentUuid: null }),

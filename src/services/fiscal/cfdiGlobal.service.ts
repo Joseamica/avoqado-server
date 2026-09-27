@@ -30,7 +30,7 @@ import { closedPeriodFor, ClosedPeriod } from './globalPeriod'
 import { validateBeforeStamp } from './cfdiValidation'
 import { mapFormaPago } from './satCatalog'
 import { GlobalInvoiceParams } from './providers/fiscal-provider.interface'
-import { tomarAdmisionCompartida } from './admisionIva'
+import { tomarAdmisionCompartida, bloquearOrdenesParaFacturar } from './admisionIva'
 import { liberarSellosDe, sellarRenglones } from './sellosIva'
 import { CFDI_VIVO } from './exclusionGlobal'
 import { clasificarOrden, resolverTratamiento } from './ivaDeRenglon'
@@ -223,7 +223,7 @@ export async function issueGlobalForEmisor(
         }
       }
       const ids = [...new Set([...oldIds, ...candidateIds])].sort()
-      await bloquearOrdenes(tx, ids, emisor.venueId)
+      await bloquearOrdenesParaFacturar(tx, ids, emisor.venueId)
       await tomarAdmisionCompartida(tx, venue.organizationId)
       const current = await tx.cfdi.findUnique({ where: { idempotencyKey: key } })
       if (!previous && current) return { cfdi: current, fresh: false, reasons: [] as string[], empty: false }
@@ -303,18 +303,6 @@ export async function issueGlobalForEmisor(
       shared,
     )),
     ...counts,
-  }
-}
-
-async function bloquearOrdenes(tx: Prisma.TransactionClient, ids: string[], venueId: string) {
-  for (let at = 0; at < ids.length; at += PAGE) {
-    const page = ids.slice(at, at + PAGE)
-    await tx.$queryRaw`SELECT id FROM "Order" WHERE "venueId" = ${venueId} AND id = ANY(${page}::text[]) ORDER BY id ASC FOR UPDATE`
-  }
-  // Lock products only after ALL orders: same relative order as individual admission/cancellation.
-  for (let at = 0; at < ids.length; at += PAGE) {
-    const page = ids.slice(at, at + PAGE)
-    await tx.$queryRaw`SELECT id FROM "Product" WHERE id IN (SELECT "productId" FROM "OrderItem" WHERE "orderId" = ANY(${page}::text[])) ORDER BY id ASC FOR SHARE`
   }
 }
 
@@ -501,7 +489,7 @@ async function emitirGlobalLegacy(
     throw new ConflictError(PROCESANDO)
   const ids = await deps.loadGlobalCandidates(emisor.id, period.periodStart, period.periodEnd, emisor.invoiceCashSales, emisor.venueId)
   const reserved = await deps.runInTransaction(async tx => {
-    await bloquearOrdenes(tx, ids, emisor.venueId)
+    await bloquearOrdenesParaFacturar(tx, ids, emisor.venueId)
     const venue = await tx.venue.findUniqueOrThrow({ where: { id: emisor.venueId }, select: { organizationId: true } })
     await tomarAdmisionCompartida(tx, venue.organizationId)
     const captured = await capturarGlobal(tx, emisor, period, ids, cfdi.id)
