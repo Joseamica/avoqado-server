@@ -56,9 +56,56 @@ const ordenConCargo = (overrides: Record<string, any> = {}) => ({
   tipAmount: new Decimal(0),
   total: new Decimal(115),
   paidAmount: new Decimal(0),
+  items: [],
   orderDiscounts: [],
   ...overrides,
 })
+
+/**
+ * La regla de catálogo de la que salió cada cálculo: el camino de catálogo la re-evalúa bajo el
+ * candado de la orden, así que la prueba siembra la regla real en vez de confiar en el cálculo.
+ */
+const reglaDeCatalogo = (overrides: Record<string, any> = {}) => ({
+  id: 'd-1',
+  venueId: 'venue-1',
+  name: 'Promo',
+  type: 'FIXED_AMOUNT' as DiscountType,
+  value: new Decimal(20),
+  scope: 'ORDER',
+  targetItemIds: [],
+  targetCategoryIds: [],
+  targetModifierIds: [],
+  targetModifierGroupIds: [],
+  customerGroupId: null,
+  isAutomatic: false,
+  priority: 0,
+  minPurchaseAmount: null,
+  maxDiscountAmount: null,
+  minQuantity: null,
+  buyQuantity: null,
+  getQuantity: null,
+  getDiscountPercent: null,
+  buyItemIds: [],
+  getItemIds: [],
+  validFrom: null,
+  validUntil: null,
+  daysOfWeek: [],
+  timeFrom: null,
+  timeUntil: null,
+  maxTotalUses: null,
+  maxUsesPerCustomer: null,
+  currentUses: 0,
+  isStackable: false,
+  stackPriority: 0,
+  requiresApproval: false,
+  applyBeforeTax: false,
+  active: true,
+  ...overrides,
+})
+
+/** Cortesía de catálogo: 100% de la base, con la reducción de impuesto al 0.16 fijo del motor. */
+const cortesiaDeCatalogo = () =>
+  reglaDeCatalogo({ id: 'd-comp', name: 'Cortesía', type: 'COMP' as DiscountType, value: new Decimal(100), applyBeforeTax: true })
 
 /** Lo último que se escribió en `Order` — donde vive el total guardado. */
 const totalGuardado = (): number => {
@@ -95,6 +142,9 @@ const filaPorcentual = (value: number, amount: number) => ({
 beforeEach(() => {
   jest.clearAllMocks()
   prismaMock.$transaction.mockImplementation(async (cb: (tx: typeof prismaMock) => Promise<any>) => cb(prismaMock))
+  // Todo escritor toma el candado canónico de la orden (SELECT … FOR UPDATE): la fila existe.
+  prismaMock.$queryRaw.mockResolvedValue([{ id: 'order-sc' }] as never)
+  prismaMock.discount.findMany.mockResolvedValue([reglaDeCatalogo()] as never)
   prismaMock.orderDiscount.create.mockResolvedValue({ id: 'od-1' } as never)
   prismaMock.order.update.mockResolvedValue({} as never)
   prismaMock.discount.update.mockResolvedValue({} as never)
@@ -267,6 +317,7 @@ describe('🔴 Un impuesto NEGATIVO nunca resta de la cuenta (regresión de esta
   })
 
   it('🔴 cortesía de $253 sobre una cuenta con impuesto 0: total 0, NUNCA −40.48', async () => {
+    prismaMock.discount.findMany.mockResolvedValue([cortesiaDeCatalogo()] as never)
     prismaMock.order.findUnique.mockResolvedValue(
       ordenConCargo({ subtotal: new Decimal(253), serviceChargeAmount: new Decimal(0), total: new Decimal(253) }) as never,
     )
@@ -289,6 +340,7 @@ describe('🔴 Un impuesto NEGATIVO nunca resta de la cuenta (regresión de esta
   })
 
   it('un impuesto negativo tampoco se come el cargo por servicio ni la propina', async () => {
+    prismaMock.discount.findMany.mockResolvedValue([cortesiaDeCatalogo()] as never)
     prismaMock.order.findUnique.mockResolvedValue(
       ordenConCargo({
         subtotal: new Decimal(253),

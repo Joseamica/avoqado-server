@@ -138,6 +138,8 @@ describe('Discount Engine Service', () => {
   beforeEach(() => {
     // Los caminos de descuento ahora recalculan los cargos por servicio: sin filas, 0.
     prismaMock.orderServiceCharge.findMany.mockResolvedValue([])
+    // Every writer takes the canonical Order lock (SELECT … FOR UPDATE): the existing row answers it.
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 'order-123' }])
     jest.clearAllMocks()
   })
 
@@ -913,18 +915,22 @@ describe('Discount Engine Service', () => {
   })
 
   describe('applyDiscountToOrder', () => {
+    // The writer re-evaluates under its Order lock, so each case seeds the catalog rule its calculation came from.
     it('should apply discount and update order totals', async () => {
       const mockOrder = {
         id: 'order-123',
         venueId: 'venue-123',
+        customerId: null,
         subtotal: new Decimal(100),
         taxAmount: new Decimal(16),
         discountAmount: new Decimal(0),
         tipAmount: new Decimal(0),
         total: new Decimal(116),
         paidAmount: new Decimal(0),
+        items: [],
         orderDiscounts: [],
       }
+      prismaMock.discount.findMany.mockResolvedValue([createMockDbDiscount({ id: 'd1', name: 'Test Discount' })])
 
       const discount = {
         discountId: 'd1',
@@ -959,6 +965,7 @@ describe('Discount Engine Service', () => {
     it('should return error for already applied discount', async () => {
       const mockOrder = {
         id: 'order-123',
+        venueId: 'venue-123',
         total: new Decimal(100),
         orderDiscounts: [{ discountId: 'd1' }], // Already applied
       }
@@ -987,12 +994,19 @@ describe('Discount Engine Service', () => {
     it('should require authorization for approval-required discounts', async () => {
       const mockOrder = {
         id: 'order-123',
+        venueId: 'venue-123',
+        customerId: null,
+        subtotal: new Decimal(100),
         total: new Decimal(100),
+        items: [],
         orderDiscounts: [],
       }
 
       prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<any>) => callback(prismaMock))
       prismaMock.order.findUnique.mockResolvedValue(mockOrder)
+      prismaMock.discount.findMany.mockResolvedValue([
+        createMockDbDiscount({ id: 'd1', name: 'Comp', type: 'COMP', value: new Decimal(100), requiresApproval: true }),
+      ])
 
       const discount = {
         discountId: 'd1',
@@ -1016,17 +1030,22 @@ describe('Discount Engine Service', () => {
       const mockOrder = {
         id: 'order-123',
         venueId: 'venue-123',
+        customerId: null,
         subtotal: new Decimal(100),
         taxAmount: new Decimal(16),
         discountAmount: new Decimal(0),
         tipAmount: new Decimal(0),
         total: new Decimal(116),
         paidAmount: new Decimal(0),
+        items: [],
         orderDiscounts: [],
       }
 
       prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<any>) => callback(prismaMock))
       prismaMock.order.findUnique.mockResolvedValue(mockOrder)
+      prismaMock.discount.findMany.mockResolvedValue([
+        createMockDbDiscount({ id: 'd1', name: 'Comp', type: 'COMP', value: new Decimal(100), requiresApproval: true }),
+      ])
       prismaMock.orderDiscount.create.mockResolvedValue({ id: 'od-1' })
       prismaMock.order.update.mockResolvedValue(mockOrder)
       prismaMock.discount.update.mockResolvedValue({})
@@ -1061,6 +1080,7 @@ describe('Discount Engine Service', () => {
       }
       const mockOrder = {
         id: 'order-123',
+        venueId: 'venue-123',
         subtotal: new Decimal(100),
         taxAmount: new Decimal(14.4), // After discount
         discountAmount: new Decimal(10),
@@ -1109,6 +1129,7 @@ describe('Discount Engine Service', () => {
       }
       const mockOrder = {
         id: 'order-123',
+        venueId: 'venue-123',
         subtotal: new Decimal(35),
         taxAmount: new Decimal(0),
         discountAmount: new Decimal(20),
@@ -1139,6 +1160,7 @@ describe('Discount Engine Service', () => {
 
     it('should return error for non-existent discount', async () => {
       prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<any>) => callback(prismaMock))
+      prismaMock.order.findUnique.mockResolvedValue({ id: 'order-123', venueId: 'venue-123' })
       prismaMock.orderDiscount.findFirst.mockResolvedValue(null)
 
       const result = await removeDiscountFromOrder('order-123', 'nonexistent')
@@ -1156,6 +1178,7 @@ describe('Discount Engine Service', () => {
     it('should apply percentage manual discount', async () => {
       const mockOrder = {
         id: 'order-123',
+        venueId: 'venue-123',
         subtotal: new Decimal(100),
         taxAmount: new Decimal(16),
         discountAmount: new Decimal(0),
@@ -1186,6 +1209,7 @@ describe('Discount Engine Service', () => {
     it('should apply fixed amount manual discount', async () => {
       const mockOrder = {
         id: 'order-123',
+        venueId: 'venue-123',
         subtotal: new Decimal(100),
         taxAmount: new Decimal(16),
         discountAmount: new Decimal(0),
@@ -1208,6 +1232,7 @@ describe('Discount Engine Service', () => {
     it('should require authorization for COMP', async () => {
       const mockOrder = {
         id: 'order-123',
+        venueId: 'venue-123',
         subtotal: new Decimal(100),
         taxAmount: new Decimal(16),
         discountAmount: new Decimal(0),
@@ -1227,6 +1252,7 @@ describe('Discount Engine Service', () => {
     it('should apply COMP with authorization', async () => {
       const mockOrder = {
         id: 'order-123',
+        venueId: 'venue-123',
         subtotal: new Decimal(100),
         taxAmount: new Decimal(16),
         discountAmount: new Decimal(0),
@@ -1266,6 +1292,7 @@ describe('Discount Engine Service', () => {
     it('should reject invalid percentage (> 100)', async () => {
       const mockOrder = {
         id: 'order-123',
+        venueId: 'venue-123',
         subtotal: new Decimal(100),
         total: new Decimal(116),
         paidAmount: new Decimal(0),
@@ -1365,12 +1392,14 @@ describe('Discount Engine — 🔴 acumulación sin tope (regresión del bug de 
   const orderAt = (subtotal: number, discountAmount: number, extra: Record<string, any> = {}) => ({
     id: 'order-neg',
     venueId: 'venue-1',
+    customerId: null,
     subtotal: new Decimal(subtotal),
     taxAmount: new Decimal(0),
     discountAmount: new Decimal(discountAmount),
     tipAmount: new Decimal(0),
     total: new Decimal(subtotal - discountAmount),
     paidAmount: new Decimal(0),
+    items: [],
     orderDiscounts: [],
     ...extra,
   })
@@ -1383,6 +1412,7 @@ describe('Discount Engine — 🔴 acumulación sin tope (regresión del bug de 
   beforeEach(() => {
     jest.clearAllMocks()
     prismaMock.$transaction.mockImplementation(async (cb: (tx: typeof prismaMock) => Promise<any>) => cb(prismaMock))
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 'order-neg' }])
     prismaMock.orderDiscount.create.mockResolvedValue({ id: 'od-x', amount: new Decimal(0) })
     prismaMock.order.update.mockResolvedValue({} as never)
     prismaMock.discount.update.mockResolvedValue({} as never)
@@ -1431,6 +1461,9 @@ describe('Discount Engine — 🔴 acumulación sin tope (regresión del bug de 
 
   it('descuento de CATÁLOGO también se recorta al remanente (no solo el manual)', async () => {
     prismaMock.order.findUnique.mockResolvedValue(orderAt(1000, 800) as never)
+    prismaMock.discount.findMany.mockResolvedValue([
+      createMockDbDiscount({ id: 'd-1', name: 'Promo', value: new Decimal(100), applyBeforeTax: false }),
+    ] as never)
 
     const result = await applyDiscountToOrder('order-neg', {
       discountId: 'd-1',

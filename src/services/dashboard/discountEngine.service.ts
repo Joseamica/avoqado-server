@@ -10,12 +10,13 @@
  */
 
 import logger from '@/config/logger'
-import { NotFoundError } from '@/errors/AppError'
+import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
 import { DEFAULT_TIMEZONE, isWithinVenueSchedule } from '@/utils/datetime'
-import { DiscountScope, DiscountType } from '@prisma/client'
-import { logAction } from './activity-log.service'
+import { DiscountScope, DiscountType, Prisma } from '@prisma/client'
+import { logAction, type LogActionParams } from './activity-log.service'
 import { computeStoredOrderTotal } from '../shared/orderBalance'
+import { lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
 import { baseDeCargos, recalcularCargosPorServicio } from '../shared/serviceCharges'
 
 // ==========================================
@@ -124,20 +125,22 @@ interface ApplyDiscountResult {
  * @param venueId - Venue ID
  * @param customerId - Customer ID (optional, for customer-specific discounts)
  * @param orderTotal - Current order subtotal
+ * @param db - Previews use the global client; writers pass their locked transaction
  */
 export async function getEligibleDiscounts(
   venueId: string,
   customerId?: string,
   orderTotal?: number,
+  db: Prisma.TransactionClient = prisma,
 ): Promise<DiscountCandidate['discount'][]> {
   const now = new Date()
   // La vigencia se evalúa en la hora del NEGOCIO. El server corre en UTC; leer
   // la hora del proceso corría cualquier happy hour 6 horas en México.
-  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+  const venue = await db.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
   const timezone = venue?.timezone || DEFAULT_TIMEZONE
 
   // Get all active discounts for the venue
-  const discounts = await prisma.discount.findMany({
+  const discounts = await db.discount.findMany({
     where: {
       venueId,
       active: true,
@@ -171,7 +174,7 @@ export async function getEligibleDiscounts(
 
     // Check customer-specific usage limit
     if (discount.maxUsesPerCustomer !== null && customerId) {
-      const customerUses = await prisma.orderDiscount.count({
+      const customerUses = await db.orderDiscount.count({
         where: {
           discountId: discount.id,
           order: { customerId },
@@ -184,7 +187,7 @@ export async function getEligibleDiscounts(
 
     // Check customer group eligibility
     if (discount.customerGroupId && customerId) {
-      const customer = await prisma.customer.findUnique({
+      const customer = await db.customer.findUnique({
         where: { id: customerId },
         select: { customerGroupId: true },
       })
@@ -238,12 +241,16 @@ export async function getEligibleDiscounts(
 /**
  * Get customer-assigned discounts
  */
-export async function getCustomerDiscounts(venueId: string, customerId: string): Promise<DiscountCandidate['discount'][]> {
+export async function getCustomerDiscounts(
+  venueId: string,
+  customerId: string,
+  db: Prisma.TransactionClient = prisma,
+): Promise<DiscountCandidate['discount'][]> {
   const now = new Date()
-  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+  const venue = await db.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
   const timezone = venue?.timezone || DEFAULT_TIMEZONE
 
-  const customerDiscounts = await prisma.customerDiscount.findMany({
+  const customerDiscounts = await db.customerDiscount.findMany({
     where: {
       customerId,
       active: true,
@@ -591,6 +598,19 @@ function calculateBOGO(
 // AUTOMATIC DISCOUNT APPLICATION
 // ==========================================
 
+/** Everything the evaluator reads from an Order: lines with product/category and modifiers, plus applied discounts. */
+const ORDER_EVALUATION_INCLUDE = {
+  items: {
+    include: {
+      product: { select: { id: true, categoryId: true, taxRate: true } },
+      modifiers: { include: { modifier: { select: { id: true, groupId: true, price: true } } } },
+    },
+  },
+  orderDiscounts: true,
+} satisfies Prisma.OrderInclude
+
+type EvaluationOrder = Prisma.OrderGetPayload<{ include: typeof ORDER_EVALUATION_INCLUDE }>
+
 /**
  * Evaluate and return all automatic discounts that should be applied to an order
  *
@@ -607,43 +627,29 @@ function calculateBOGO(
  *   discount must be active and eligible (dates, weekdays, minimum), it is skipped
  *   if already applied, and stacking rules are unchanged. Passing an id that is
  *   not eligible still yields nothing — the caller's rejection stays correct.
+ * @param db - Previews use the global client; writers evaluate inside their locked transaction
  * @returns List of discounts to apply, sorted by priority
  */
-export async function evaluateAutomaticDiscounts(orderId: string, forceDiscountId?: string): Promise<DiscountCalculationResult[]> {
-  // Load order with items
-  const order = await prisma.order.findUnique({
-    where: { id: orderId },
-    include: {
-      items: {
-        include: {
-          product: {
-            select: {
-              id: true,
-              categoryId: true,
-              taxRate: true,
-            },
-          },
-          modifiers: {
-            include: {
-              modifier: {
-                select: {
-                  id: true,
-                  groupId: true,
-                  price: true,
-                },
-              },
-            },
-          },
-        },
-      },
-      orderDiscounts: true,
-    },
-  })
+export async function evaluateAutomaticDiscounts(
+  orderId: string,
+  forceDiscountId?: string,
+  db: Prisma.TransactionClient = prisma,
+): Promise<DiscountCalculationResult[]> {
+  const order = await db.order.findUnique({ where: { id: orderId }, include: ORDER_EVALUATION_INCLUDE })
 
   if (!order) {
     throw new NotFoundError('Order not found')
   }
 
+  return evaluateOrderDiscounts(order, forceDiscountId, db)
+}
+
+/** The evaluator proper, over an Order already loaded through `db` (under the writer's lock when it writes). */
+async function evaluateOrderDiscounts(
+  order: EvaluationOrder,
+  forceDiscountId: string | undefined,
+  db: Prisma.TransactionClient,
+): Promise<DiscountCalculationResult[]> {
   // Build order context
   // Note: productId and product can be null if the product was deleted (Toast/Square pattern)
   const context: OrderContext = {
@@ -679,7 +685,7 @@ export async function evaluateAutomaticDiscounts(orderId: string, forceDiscountI
   }
 
   // Get eligible automatic discounts
-  const eligibleDiscounts = await getEligibleDiscounts(order.venueId, order.customerId ?? undefined, context.subtotal)
+  const eligibleDiscounts = await getEligibleDiscounts(order.venueId, order.customerId ?? undefined, context.subtotal, db)
   // A hand-picked catalog discount is eligible but not automatic — keep it too when
   // the caller named it (see `forceDiscountId` in this function's doc).
   const automaticDiscounts = eligibleDiscounts.filter(d => d.isAutomatic || d.id === forceDiscountId)
@@ -687,7 +693,7 @@ export async function evaluateAutomaticDiscounts(orderId: string, forceDiscountI
   // Also get customer-specific discounts if customer is identified
   let customerDiscounts: DiscountCandidate['discount'][] = []
   if (order.customerId) {
-    customerDiscounts = await getCustomerDiscounts(order.venueId, order.customerId)
+    customerDiscounts = await getCustomerDiscounts(order.venueId, order.customerId, db)
   }
 
   // Combine and deduplicate
@@ -730,153 +736,212 @@ export async function evaluateAutomaticDiscounts(orderId: string, forceDiscountI
 }
 
 /**
- * Apply a calculated discount to an order
+ * Canonical Order lock for every discount writer — the same `SELECT … FOR UPDATE` that payments and fiscal
+ * admission take, so a discount never interleaves with a capture that is reading the Order.
+ *
+ * TPV callers pass the authoritative `venueId`. A legacy caller without it may resolve ONLY this Order's tenant
+ * inside the transaction; that pre-lock read is discarded and everything that decides money is reread after the lock.
+ * Returns the locked tenant, or null when the Order is missing or belongs to another venue.
+ */
+async function lockDiscountOrder(tx: Prisma.TransactionClient, orderId: string, venueId?: string): Promise<string | null> {
+  const tenant = venueId ?? (await tx.order.findUnique({ where: { id: orderId }, select: { venueId: true } }))?.venueId
+  if (!tenant) return null
+  return (await lockExistingOrderForPayment(tx, { venueId: tenant, orderId })) ? tenant : null
+}
+
+/** TPV callers (authoritative venue) keep their 404; legacy callers keep the result object they always received. */
+function orderNotFound(venueId?: string): ApplyDiscountResult {
+  if (venueId) throw new NotFoundError('Order not found')
+  return { success: false, amount: 0, newOrderTotal: 0, error: 'Order not found' }
+}
+
+/**
+ * Apply a catalog discount to an order
+ *
+ * 🔴 The engine owns the transaction and the Order lock. `discount` is only INTENT (which catalog rule): a
+ * precomputed calculation was read without this lock and discount writers never bump `Order.version`, so its
+ * amount, tax and eligibility are recomputed here from the locked Order, the same transaction and the evaluator.
  *
  * @param orderId - Order ID
- * @param discount - Calculated discount result
+ * @param discount - The catalog discount id (TPV picker), or a previously calculated result (legacy callers)
  * @param appliedById - Staff ID applying the discount
  * @param authorizedById - Staff ID authorizing (for comps)
+ * @param venueId - Authoritative tenant. With it, a missing Order or an ineligible pick THROWS (TPV contract)
  */
 export async function applyDiscountToOrder(
   orderId: string,
-  discount: DiscountCalculationResult,
+  discount: DiscountCalculationResult | string,
   appliedById?: string,
   authorizedById?: string,
+  venueId?: string,
 ): Promise<ApplyDiscountResult> {
-  return prisma.$transaction(async tx => {
-    // Get current order
-    const order = await tx.order.findUnique({
-      where: { id: orderId },
-      include: { orderDiscounts: true },
-    })
+  const audits: LogActionParams[] = []
+  const result = await prisma.$transaction(async tx => {
+    const tenant = await lockDiscountOrder(tx, orderId, venueId)
+    const order = tenant ? await tx.order.findUnique({ where: { id: orderId, venueId: tenant }, include: ORDER_EVALUATION_INCLUDE }) : null
+    if (!order) return orderNotFound(venueId)
+    if (order.paymentStatus === 'PAID') throw new BadRequestError('Cannot apply discount to a paid order')
 
-    if (!order) {
-      return { success: false, amount: 0, newOrderTotal: 0, error: 'Order not found' }
+    const picked = typeof discount === 'string'
+    const discountId = picked ? discount : discount.discountId
+    if (picked) {
+      const catalog = await tx.discount.findFirst({ where: { id: discountId, venueId: order.venueId, active: true }, select: { id: true } })
+      if (!catalog) throw new NotFoundError('Discount not found or inactive')
+    } else if (order.orderDiscounts.some(od => od.discountId === discountId)) {
+      return { success: false, amount: 0, newOrderTotal: Number(order.total), error: 'Discount already applied to this order' }
     }
 
-    // Check if discount is already applied
-    if (order.orderDiscounts.some(od => od.discountId === discount.discountId)) {
-      return {
-        success: false,
-        amount: 0,
-        newOrderTotal: Number(order.total),
-        error: 'Discount already applied to this order',
-      }
+    // `forceDiscountId`: a hand-picked rule is not automatic; every other eligibility and stacking rule still runs.
+    const fresh = (await evaluateOrderDiscounts(order, discountId, tx)).find(d => d.discountId === discountId)
+    if (!fresh) {
+      if (picked) throw new BadRequestError('This discount cannot be applied to this order')
+      return { success: false, amount: 0, newOrderTotal: Number(order.total), error: 'This discount cannot be applied to this order' }
     }
 
-    // Check if discount requires approval and we don't have authorization
-    if (discount.requiresApproval && !authorizedById) {
-      return {
-        success: false,
-        amount: 0,
-        newOrderTotal: Number(order.total),
-        error: 'This discount requires manager approval',
-      }
+    return applyEvaluatedDiscount(tx, order, fresh, audits, appliedById, authorizedById)
+  })
+  for (const audit of audits) void logAction(audit)
+  return result
+}
+
+/**
+ * Tx-only application of a FRESH evaluation: the caller holds the Order lock and read `order` under it.
+ * Audits are collected, never emitted here — the caller flushes them only after its commit.
+ */
+async function applyEvaluatedDiscount(
+  tx: Prisma.TransactionClient,
+  order: Prisma.OrderGetPayload<{ include: { orderDiscounts: true } }>,
+  discount: DiscountCalculationResult,
+  audits: LogActionParams[],
+  appliedById?: string,
+  authorizedById?: string,
+  deferredUses?: string[],
+): Promise<ApplyDiscountResult> {
+  const orderId = order.id
+  // Check if discount is already applied
+  if (order.orderDiscounts.some(od => od.discountId === discount.discountId)) {
+    return {
+      success: false,
+      amount: 0,
+      newOrderTotal: Number(order.total),
+      error: 'Discount already applied to this order',
     }
+  }
 
-    // 🔴 MONEY: `discount.amount` viene calculado contra el subtotal COMPLETO (calculateDiscountAmount
-    // no conoce los descuentos ya aplicados), así que al apilar varios stackables la suma podía
-    // pasarse del subtotal y dejar `total` NEGATIVO — enmascarado como cuenta pagada por el
-    // Math.max(0,…) de remainingBalance. Recortamos contra lo que queda por descontar.
-    // Ver `applyManualDiscount` (misma defensa) y la memoria descuento-manual-acumula-sin-tope.
-    const subtotal = Number(order.subtotal)
-    const alreadyDiscounted = Number(order.discountAmount)
-    const remainingDiscountable = Math.round(Math.max(0, subtotal - alreadyDiscounted) * 100) / 100
-
-    if (remainingDiscountable <= 0) {
-      return {
-        success: false,
-        amount: 0,
-        newOrderTotal: Number(order.total),
-        error: 'La cuenta ya está completamente descontada; no se puede aplicar otro descuento.',
-      }
+  // Check if discount requires approval and we don't have authorization
+  if (discount.requiresApproval && !authorizedById) {
+    return {
+      success: false,
+      amount: 0,
+      newOrderTotal: Number(order.total),
+      error: 'This discount requires manager approval',
     }
+  }
 
-    const appliedAmount = Math.min(discount.amount, remainingDiscountable)
-    // La reducción de impuesto se recorta en la MISMA proporción que el monto, si no un descuento
-    // recortado seguiría restando el impuesto completo.
-    const appliedTaxReduction =
-      discount.amount > 0 ? Math.round(discount.taxReduction * (appliedAmount / discount.amount) * 100) / 100 : discount.taxReduction
+  // 🔴 MONEY: `discount.amount` viene calculado contra el subtotal COMPLETO (calculateDiscountAmount
+  // no conoce los descuentos ya aplicados), así que al apilar varios stackables la suma podía
+  // pasarse del subtotal y dejar `total` NEGATIVO — enmascarado como cuenta pagada por el
+  // Math.max(0,…) de remainingBalance. Recortamos contra lo que queda por descontar.
+  // Ver `applyManualDiscount` (misma defensa) y la memoria descuento-manual-acumula-sin-tope.
+  const subtotal = Number(order.subtotal)
+  const alreadyDiscounted = Number(order.discountAmount)
+  const remainingDiscountable = Math.round(Math.max(0, subtotal - alreadyDiscounted) * 100) / 100
 
-    // Create order discount record
-    const orderDiscount = await tx.orderDiscount.create({
-      data: {
-        orderId,
-        discountId: discount.discountId,
-        type: discount.type,
-        name: discount.name,
-        value: discount.value,
-        amount: appliedAmount,
-        taxReduction: appliedTaxReduction,
-        isAutomatic: discount.isAutomatic,
-        isComp: discount.type === 'COMP',
-        appliedById,
-        authorizedById,
-      },
-    })
+  if (remainingDiscountable <= 0) {
+    return {
+      success: false,
+      amount: 0,
+      newOrderTotal: Number(order.total),
+      error: 'La cuenta ya está completamente descontada; no se puede aplicar otro descuento.',
+    }
+  }
 
-    // Update order totals
-    const newDiscountAmount = alreadyDiscounted + appliedAmount
-    const newTaxAmount = Number(order.taxAmount) - appliedTaxReduction
-    // 🔴 MONEY: el total sale de `computeStoredOrderTotal` —la ÚNICA definición de la regla—
-    // y no de una suma escrita aquí. Escrita aquí OMITÍA `serviceChargeAmount`, que el schema
-    // define como ingreso gravable que SUMA al total y entra al corte y al CFDI: descontar
-    // borraba el cargo del total guardado hasta que un cobro posterior lo recalculaba.
-    // 🔴 MONEY: un cargo por servicio PORCENTUAL se mueve CON la base (subtotal − descuentos),
-    // y `order.serviceChargeAmount` es el snapshot CONGELADO. Regla compartida en
-    // `shared/serviceCharges.ts`; se persiste abajo porque `computeOrderBalance` —lo que de
-    // verdad se cobra— lee el snapshot y no las filas.
-    const newServiceChargeAmount = await recalcularCargosPorServicio(tx, orderId, baseDeCargos(subtotal, newDiscountAmount))
-    const newTotal = computeStoredOrderTotal({
-      subtotal,
+  const appliedAmount = Math.min(discount.amount, remainingDiscountable)
+  // La reducción de impuesto se recorta en la MISMA proporción que el monto, si no un descuento
+  // recortado seguiría restando el impuesto completo.
+  const appliedTaxReduction =
+    discount.amount > 0 ? Math.round(discount.taxReduction * (appliedAmount / discount.amount) * 100) / 100 : discount.taxReduction
+
+  // Create order discount record
+  const orderDiscount = await tx.orderDiscount.create({
+    data: {
+      orderId,
+      discountId: discount.discountId,
+      type: discount.type,
+      name: discount.name,
+      value: discount.value,
+      amount: appliedAmount,
+      taxReduction: appliedTaxReduction,
+      isAutomatic: discount.isAutomatic,
+      isComp: discount.type === 'COMP',
+      appliedById,
+      authorizedById,
+    },
+  })
+
+  // Update order totals
+  const newDiscountAmount = alreadyDiscounted + appliedAmount
+  const newTaxAmount = Number(order.taxAmount) - appliedTaxReduction
+  // 🔴 MONEY: el total sale de `computeStoredOrderTotal` —la ÚNICA definición de la regla—
+  // y no de una suma escrita aquí. Escrita aquí OMITÍA `serviceChargeAmount`, que el schema
+  // define como ingreso gravable que SUMA al total y entra al corte y al CFDI: descontar
+  // borraba el cargo del total guardado hasta que un cobro posterior lo recalculaba.
+  // 🔴 MONEY: un cargo por servicio PORCENTUAL se mueve CON la base (subtotal − descuentos),
+  // y `order.serviceChargeAmount` es el snapshot CONGELADO. Regla compartida en
+  // `shared/serviceCharges.ts`; se persiste abajo porque `computeOrderBalance` —lo que de
+  // verdad se cobra— lee el snapshot y no las filas.
+  const newServiceChargeAmount = await recalcularCargosPorServicio(tx, orderId, baseDeCargos(subtotal, newDiscountAmount))
+  const newTotal = computeStoredOrderTotal({
+    subtotal,
+    discountAmount: newDiscountAmount,
+    taxAmount: newTaxAmount,
+    serviceChargeAmount: newServiceChargeAmount,
+    tipAmount: order.tipAmount,
+  }).toNumber()
+
+  await tx.order.update({
+    where: { id: orderId },
+    data: {
       discountAmount: newDiscountAmount,
       taxAmount: newTaxAmount,
       serviceChargeAmount: newServiceChargeAmount,
-      tipAmount: order.tipAmount,
-    }).toNumber()
+      total: newTotal,
+      remainingBalance: Math.max(0, newTotal - Number(order.paidAmount)),
+    },
+  })
 
-    await tx.order.update({
-      where: { id: orderId },
-      data: {
-        discountAmount: newDiscountAmount,
-        taxAmount: newTaxAmount,
-        serviceChargeAmount: newServiceChargeAmount,
-        total: newTotal,
-        remainingBalance: Math.max(0, newTotal - Number(order.paidAmount)),
-      },
-    })
-
-    // Increment discount usage counter
+  // Increment discount usage counter — the automatic batch defers it (see `applyAutomaticDiscounts`)
+  if (deferredUses) deferredUses.push(discount.discountId)
+  else
     await tx.discount.update({
       where: { id: discount.discountId },
       data: { currentUses: { increment: 1 } },
     })
 
-    // Reportar SIEMPRE el monto realmente aplicado (recortado), no el solicitado — si no, la
-    // bitácora y el retorno mienten cuando el recorte entra en juego.
-    logger.info(`🎟️ Discount applied to order ${orderId}: ${discount.name} (-$${appliedAmount})`)
+  // Reportar SIEMPRE el monto realmente aplicado (recortado), no el solicitado — si no, la
+  // bitácora y el retorno mienten cuando el recorte entra en juego.
+  logger.info(`🎟️ Discount applied to order ${orderId}: ${discount.name} (-$${appliedAmount})`)
 
-    void logAction({
-      staffId: appliedById ?? authorizedById ?? null,
-      venueId: order.venueId,
-      action: 'DISCOUNT_APPLIED',
-      entity: 'Order',
-      entityId: orderId,
-      data: {
-        discountId: discount.discountId,
-        amount: appliedAmount,
-        ...(appliedAmount < discount.amount ? { requestedAmount: discount.amount, cappedTo: remainingDiscountable } : {}),
-        source: 'catalog',
-      },
-    })
-
-    return {
-      success: true,
-      orderDiscountId: orderDiscount.id,
+  audits.push({
+    staffId: appliedById ?? authorizedById ?? null,
+    venueId: order.venueId,
+    action: 'DISCOUNT_APPLIED',
+    entity: 'Order',
+    entityId: orderId,
+    data: {
+      discountId: discount.discountId,
       amount: appliedAmount,
-      newOrderTotal: newTotal,
-    }
+      ...(appliedAmount < discount.amount ? { requestedAmount: discount.amount, cappedTo: remainingDiscountable } : {}),
+      source: 'catalog',
+    },
   })
+
+  return {
+    success: true,
+    orderDiscountId: orderDiscount.id,
+    amount: appliedAmount,
+    newOrderTotal: newTotal,
+  }
 }
 
 /**
@@ -884,23 +949,28 @@ export async function applyDiscountToOrder(
  *
  * @param orderId - Order ID
  * @param orderDiscountId - OrderDiscount record ID
+ * @param venueId - Authoritative tenant (TPV). With it, a missing Order THROWS instead of returning an error result
  */
-export async function removeDiscountFromOrder(orderId: string, orderDiscountId: string, staffId?: string): Promise<ApplyDiscountResult> {
-  return prisma.$transaction(async tx => {
+export async function removeDiscountFromOrder(
+  orderId: string,
+  orderDiscountId: string,
+  staffId?: string,
+  venueId?: string,
+): Promise<ApplyDiscountResult> {
+  const audits: LogActionParams[] = []
+  const result = await prisma.$transaction(async tx => {
+    // Lock first: the status, totals and the child row that decide the removal are all read under it.
+    const tenant = await lockDiscountOrder(tx, orderId, venueId)
+    const order = tenant ? await tx.order.findUnique({ where: { id: orderId, venueId: tenant } }) : null
+    if (!order) return orderNotFound(venueId)
+    if (order.paymentStatus === 'PAID') throw new BadRequestError('Cannot remove discount from a paid order')
+
     const orderDiscount = await tx.orderDiscount.findFirst({
       where: { id: orderDiscountId, orderId },
     })
 
     if (!orderDiscount) {
       return { success: false, amount: 0, newOrderTotal: 0, error: 'Discount not found on this order' }
-    }
-
-    const order = await tx.order.findUnique({
-      where: { id: orderId },
-    })
-
-    if (!order) {
-      return { success: false, amount: 0, newOrderTotal: 0, error: 'Order not found' }
     }
 
     // Delete the order discount
@@ -957,7 +1027,7 @@ export async function removeDiscountFromOrder(orderId: string, orderDiscountId: 
 
     logger.info(`🗑️ Discount removed from order ${orderId}: ${orderDiscount.name} (+$${orderDiscount.amount})`)
 
-    void logAction({
+    audits.push({
       staffId: staffId ?? null,
       venueId: order.venueId,
       action: 'DISCOUNT_REMOVED',
@@ -972,38 +1042,68 @@ export async function removeDiscountFromOrder(orderId: string, orderDiscountId: 
       newOrderTotal: newTotal,
     }
   })
+  for (const audit of audits) void logAction(audit)
+  return result
 }
 
 /**
  * Apply all eligible automatic discounts to an order
  *
+ * ONE transaction and ONE Order lock for the whole batch: the eligible list is evaluated from the locked Order, each
+ * application reads the totals the previous one left, and a failure rolls back every child, charge and total.
+ *
+ * ⚠️ Known limitation (preserved on purpose): `total` adds each rule's evaluated amount even when the stored
+ * amount was capped against the remaining base; the persisted discounts are the capped ones.
+ *
  * @param orderId - Order ID
  * @param appliedById - Staff ID applying the discounts
+ * @param venueId - Authoritative tenant (TPV)
  */
 export async function applyAutomaticDiscounts(
   orderId: string,
   appliedById?: string,
+  venueId?: string,
 ): Promise<{ applied: DiscountCalculationResult[]; total: number }> {
-  const discounts = await evaluateAutomaticDiscounts(orderId)
+  const audits: LogActionParams[] = []
+  const result = await prisma.$transaction(async tx => {
+    const tenant = await lockDiscountOrder(tx, orderId, venueId)
+    const order = tenant ? await tx.order.findUnique({ where: { id: orderId, venueId: tenant }, include: ORDER_EVALUATION_INCLUDE }) : null
+    if (!order) throw new NotFoundError('Order not found')
+    if (order.paymentStatus === 'PAID') throw new BadRequestError('Cannot apply discounts to a paid order')
 
-  const applied: DiscountCalculationResult[] = []
-  let totalDiscount = 0
+    const discounts = await evaluateOrderDiscounts(order, undefined, tx)
 
-  for (const discount of discounts) {
-    // Skip discounts requiring approval in automatic mode
-    if (discount.requiresApproval) {
-      continue
+    const applied: DiscountCalculationResult[] = []
+    const usedDiscountIds: string[] = []
+    let totalDiscount = 0
+
+    for (const discount of discounts) {
+      // Skip discounts requiring approval in automatic mode
+      if (discount.requiresApproval) {
+        continue
+      }
+
+      const current = await tx.order.findUnique({ where: { id: orderId, venueId: order.venueId }, include: { orderDiscounts: true } })
+      if (!current) throw new NotFoundError('Order not found')
+      const outcome = await applyEvaluatedDiscount(tx, current, discount, audits, appliedById, undefined, usedDiscountIds)
+
+      if (outcome.success) {
+        applied.push(discount)
+        totalDiscount += discount.amount
+      }
     }
 
-    const result = await applyDiscountToOrder(orderId, discount, appliedById)
-
-    if (result.success) {
-      applied.push(discount)
-      totalDiscount += discount.amount
+    // Usage counters go LAST and in ascending id order, so two batches never lock the same Discount rows in opposite
+    // orders (ABBA deadlock). Only when/in which order the counter rows are written changes — application order,
+    // amounts, caps and stacking above are untouched.
+    for (const id of usedDiscountIds.sort()) {
+      await tx.discount.update({ where: { id }, data: { currentUses: { increment: 1 } } })
     }
-  }
 
-  return { applied, total: totalDiscount }
+    return { applied, total: totalDiscount }
+  })
+  for (const audit of audits) void logAction(audit)
+  return result
 }
 
 // ==========================================
@@ -1021,6 +1121,7 @@ export async function applyAutomaticDiscounts(
  * @param appliedById - Staff ID applying
  * @param authorizedById - Manager ID if comp
  * @param compReason - Reason for comp
+ * @param venueId - Authoritative tenant (TPV). With it, a missing Order THROWS instead of returning an error result
  */
 export async function applyManualDiscount(
   orderId: string,
@@ -1030,15 +1131,14 @@ export async function applyManualDiscount(
   appliedById: string,
   authorizedById?: string,
   compReason?: string,
+  venueId?: string,
 ): Promise<ApplyDiscountResult> {
   return prisma.$transaction(async tx => {
-    const order = await tx.order.findUnique({
-      where: { id: orderId },
-    })
-
-    if (!order) {
-      return { success: false, amount: 0, newOrderTotal: 0, error: 'Order not found' }
-    }
+    // The remaining base below comes from THIS read, under the canonical Order lock.
+    const tenant = await lockDiscountOrder(tx, orderId, venueId)
+    const order = tenant ? await tx.order.findUnique({ where: { id: orderId, venueId: tenant } }) : null
+    if (!order) return orderNotFound(venueId)
+    if (order.paymentStatus === 'PAID') throw new BadRequestError('Cannot apply discount to a paid order')
 
     // 🔴 MONEY: cada descuento se calcula contra lo que QUEDA por descontar, nunca contra el
     // subtotal completo. Aplicar 100% dos veces descontaba 200% del subtotal y dejaba `total`

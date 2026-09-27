@@ -8,12 +8,13 @@
  */
 
 import prisma from '@/utils/prismaClient'
-import { BadRequestError, NotFoundError } from '@/errors/AppError'
+import { NotFoundError } from '@/errors/AppError'
 import logger from '@/config/logger'
 import { DiscountType } from '@prisma/client'
 import * as discountEngine from '@/services/dashboard/discountEngine.service'
 import * as couponService from '@/services/dashboard/coupon.dashboard.service'
 import { computeStoredOrderTotal } from '@/services/shared/orderBalance'
+import { lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
 import { baseDeCargos, recalcularCargosPorServicio } from '../shared/serviceCharges'
 
 // ==========================================
@@ -162,21 +163,8 @@ export async function applyAutomaticDiscounts(
 ): Promise<{ applied: number; totalSavings: number; discounts: OrderDiscountSummary[] }> {
   logger.info(`🎟️ TPV Applying automatic discounts`, { venueId, orderId })
 
-  // Verify order exists and belongs to venue
-  const order = await prisma.order.findUnique({
-    where: { id: orderId, venueId },
-  })
-
-  if (!order) {
-    throw new NotFoundError('Order not found')
-  }
-
-  if (order.paymentStatus === 'PAID') {
-    throw new BadRequestError('Cannot apply discounts to a paid order')
-  }
-
-  // Apply automatic discounts via engine
-  const result = await discountEngine.applyAutomaticDiscounts(orderId, staffVenueId)
+  // The engine locks this venue's Order and rechecks existence/PAID on the locked photo (404 / 400 as before).
+  const result = await discountEngine.applyAutomaticDiscounts(orderId, staffVenueId, venueId)
 
   // Get the updated discount summary
   const discounts = await getOrderDiscounts(venueId, orderId)
@@ -216,51 +204,9 @@ export async function applyPredefinedDiscount(
 ): Promise<{ success: boolean; amount: number; newOrderTotal: number; error?: string }> {
   logger.info(`🎟️ TPV Applying predefined discount`, { venueId, orderId, discountId })
 
-  // Verify order exists and belongs to venue
-  const order = await prisma.order.findUnique({
-    where: { id: orderId, venueId },
-  })
-
-  if (!order) {
-    throw new NotFoundError('Order not found')
-  }
-
-  if (order.paymentStatus === 'PAID') {
-    throw new BadRequestError('Cannot apply discount to a paid order')
-  }
-
-  // Get the discount
-  const discount = await prisma.discount.findFirst({
-    where: { id: discountId, venueId, active: true },
-  })
-
-  if (!discount) {
-    throw new NotFoundError('Discount not found or inactive')
-  }
-
-  // Evaluate the discount for this order.
-  //
-  // 🔴 `forceDiscountId` is required here: the waiter PICKED this discount by hand,
-  // so it is not an automatic rule. Without it the engine only returned discounts
-  // flagged `isAutomatic`, the chosen one was never in the list, and EVERY catalog
-  // discount applied from the TPV died on the rejection below. Reproduced on
-  // hardware (NEXGO, 2026-08-06).
-  //
-  // Eligibility is still enforced — dates, weekdays, minimum, already-applied and
-  // stacking rules all run unchanged. An ineligible id still returns nothing and
-  // still lands on the rejection, which is the correct outcome.
-  const discounts = await discountEngine.evaluateAutomaticDiscounts(orderId, discountId)
-  const calculatedDiscount = discounts.find(d => d.discountId === discountId)
-
-  if (!calculatedDiscount) {
-    // Discount exists but doesn't apply to this order
-    throw new BadRequestError('This discount cannot be applied to this order')
-  }
-
-  // Apply the discount
-  const result = await discountEngine.applyDiscountToOrder(orderId, calculatedDiscount, staffVenueId, authorizedById)
-
-  return result
+  // The engine decides everything on the locked Order, in its own transaction: tenant (404), PAID (400), catalog
+  // rule active (404), eligibility with the hand-picked id forced (400, see `forceDiscountId`), amount and tax.
+  return discountEngine.applyDiscountToOrder(orderId, discountId, staffVenueId, authorizedById, venueId)
 }
 
 // ==========================================
@@ -290,23 +236,8 @@ export async function applyManualDiscount(
 ): Promise<{ success: boolean; amount: number; newOrderTotal: number; error?: string }> {
   logger.info(`🎟️ TPV Applying manual discount`, { venueId, orderId, type, value, reason })
 
-  // Verify order exists and belongs to venue
-  const order = await prisma.order.findUnique({
-    where: { id: orderId, venueId },
-  })
-
-  if (!order) {
-    throw new NotFoundError('Order not found')
-  }
-
-  if (order.paymentStatus === 'PAID') {
-    throw new BadRequestError('Cannot apply discount to a paid order')
-  }
-
-  // Apply manual discount via engine
-  const result = await discountEngine.applyManualDiscount(orderId, type, value, reason, staffVenueId, authorizedById)
-
-  return result
+  // The engine locks this venue's Order and rechecks existence/PAID on the locked photo (404 / 400 as before).
+  return discountEngine.applyManualDiscount(orderId, type, value, reason, staffVenueId, authorizedById, undefined, venueId)
 }
 
 // ==========================================
@@ -330,97 +261,101 @@ export async function applyCouponCode(
 ): Promise<ApplyCouponResult> {
   logger.info(`🎟️ TPV Applying coupon code`, { venueId, orderId, couponCode })
 
-  // Get order with customer info
-  const order = await prisma.order.findUnique({
-    where: { id: orderId, venueId },
-    include: { orderDiscounts: true },
-  })
-
-  if (!order) {
-    throw new NotFoundError('Order not found')
-  }
-
-  if (order.paymentStatus === 'PAID') {
-    return {
-      success: false,
-      discountName: '',
-      amount: 0,
-      newOrderTotal: Number(order.total),
-      error: 'Cannot apply coupon to a paid order',
+  // 🔴 Everything that decides the coupon — status, subtotal, applied discounts, customer, the coupon catalog and
+  // its per-customer usage — is read under the canonical Order lock, in the SAME transaction that writes it.
+  const result = await prisma.$transaction(async (tx): Promise<ApplyCouponResult> => {
+    if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
+      throw new NotFoundError('Order not found')
     }
-  }
+    const order = await tx.order.findUnique({
+      where: { id: orderId, venueId },
+      include: { orderDiscounts: true },
+    })
 
-  // Validate coupon
-  const validation = await couponService.validateCouponCode(
-    venueId,
-    couponCode.toUpperCase(),
-    Number(order.subtotal),
-    order.customerId ?? undefined,
-  )
-
-  if (!validation.valid || !validation.coupon) {
-    return {
-      success: false,
-      discountName: '',
-      amount: 0,
-      newOrderTotal: Number(order.total),
-      error: validation.error || 'Invalid coupon',
+    if (!order) {
+      throw new NotFoundError('Order not found')
     }
-  }
 
-  const { coupon } = validation
-  const { discount } = coupon
-
-  // Check if this coupon's discount is already applied
-  const existingCouponDiscount = order.orderDiscounts.find(od => od.couponCodeId === coupon.id)
-  if (existingCouponDiscount) {
-    return {
-      success: false,
-      discountName: discount.name,
-      amount: 0,
-      newOrderTotal: Number(order.total),
-      error: 'This coupon has already been applied to this order',
+    if (order.paymentStatus === 'PAID') {
+      return {
+        success: false,
+        discountName: '',
+        amount: 0,
+        newOrderTotal: Number(order.total),
+        error: 'Cannot apply coupon to a paid order',
+      }
     }
-  }
 
-  // 🔴 MONEY: contra lo que QUEDA por descontar, no contra el subtotal completo. Apilar
-  // descuentos (cupón + predefinido + manual) descontaba más que la cuenta y dejaba `total`
-  // NEGATIVO, enmascarado como pagada por el Math.max(0,…) de remainingBalance. Bug real en prod
-  // (2026-07-30) por el camino gemelo del dashboard; este archivo tenía el defecto DUPLICADO.
-  // La rama COMP ya restaba lo aplicado; ahora las tres comparten base.
-  const subtotal = Number(order.subtotal)
-  const alreadyDiscounted = Number(order.discountAmount)
-  const remainingDiscountable = Math.round(Math.max(0, subtotal - alreadyDiscounted) * 100) / 100
+    // Validate coupon
+    const validation = await couponService.validateCouponCode(
+      venueId,
+      couponCode.toUpperCase(),
+      Number(order.subtotal),
+      order.customerId ?? undefined,
+      tx,
+    )
 
-  if (remainingDiscountable <= 0) {
-    return {
-      success: false,
-      discountName: discount.name,
-      amount: 0,
-      newOrderTotal: Number(order.total),
-      error: 'La cuenta ya está completamente descontada; no se puede aplicar otro descuento.',
+    if (!validation.valid || !validation.coupon) {
+      return {
+        success: false,
+        discountName: '',
+        amount: 0,
+        newOrderTotal: Number(order.total),
+        error: validation.error || 'Invalid coupon',
+      }
     }
-  }
 
-  let discountAmount = 0
-  if (discount.type === 'PERCENTAGE') {
-    discountAmount = (remainingDiscountable * Number(discount.value)) / 100
-  } else if (discount.type === 'FIXED_AMOUNT') {
-    discountAmount = Math.min(Number(discount.value), remainingDiscountable)
-  } else if (discount.type === 'COMP') {
-    discountAmount = remainingDiscountable
-  }
+    const { coupon } = validation
+    const { discount } = coupon
 
-  // Apply max discount cap
-  if (discount.maxDiscountAmount) {
-    discountAmount = Math.min(discountAmount, Number(discount.maxDiscountAmount))
-  }
+    // Check if this coupon's discount is already applied
+    const existingCouponDiscount = order.orderDiscounts.find(od => od.couponCodeId === coupon.id)
+    if (existingCouponDiscount) {
+      return {
+        success: false,
+        discountName: discount.name,
+        amount: 0,
+        newOrderTotal: Number(order.total),
+        error: 'This coupon has already been applied to this order',
+      }
+    }
 
-  // Defensa final: nunca más de lo que queda por descontar.
-  discountAmount = Math.min(Math.round(discountAmount * 100) / 100, remainingDiscountable)
+    // 🔴 MONEY: contra lo que QUEDA por descontar, no contra el subtotal completo. Apilar
+    // descuentos (cupón + predefinido + manual) descontaba más que la cuenta y dejaba `total`
+    // NEGATIVO, enmascarado como pagada por el Math.max(0,…) de remainingBalance. Bug real en prod
+    // (2026-07-30) por el camino gemelo del dashboard; este archivo tenía el defecto DUPLICADO.
+    // La rama COMP ya restaba lo aplicado; ahora las tres comparten base.
+    const subtotal = Number(order.subtotal)
+    const alreadyDiscounted = Number(order.discountAmount)
+    const remainingDiscountable = Math.round(Math.max(0, subtotal - alreadyDiscounted) * 100) / 100
 
-  // Apply the coupon in a transaction
-  const result = await prisma.$transaction(async tx => {
+    if (remainingDiscountable <= 0) {
+      return {
+        success: false,
+        discountName: discount.name,
+        amount: 0,
+        newOrderTotal: Number(order.total),
+        error: 'La cuenta ya está completamente descontada; no se puede aplicar otro descuento.',
+      }
+    }
+
+    let discountAmount = 0
+    if (discount.type === 'PERCENTAGE') {
+      discountAmount = (remainingDiscountable * Number(discount.value)) / 100
+    } else if (discount.type === 'FIXED_AMOUNT') {
+      discountAmount = Math.min(Number(discount.value), remainingDiscountable)
+    } else if (discount.type === 'COMP') {
+      discountAmount = remainingDiscountable
+    }
+
+    // Apply max discount cap
+    if (discount.maxDiscountAmount) {
+      discountAmount = Math.min(discountAmount, Number(discount.maxDiscountAmount))
+    }
+
+    // Defensa final: nunca más de lo que queda por descontar.
+    discountAmount = Math.min(Math.round(discountAmount * 100) / 100, remainingDiscountable)
+
     // Create order discount record
     const orderDiscount = await tx.orderDiscount.create({
       data: {
@@ -474,21 +409,18 @@ export async function applyCouponCode(
     // but only "redeemed" (counted against limits) when payment succeeds.
 
     return {
+      success: true,
       orderDiscountId: orderDiscount.id,
-      newTotal,
+      couponId: coupon.id,
+      discountName: discount.name,
+      amount: discountAmount,
+      newOrderTotal: newTotal,
     }
   })
 
-  logger.info(`✅ Coupon applied: ${couponCode} (-$${discountAmount})`, { venueId, orderId })
+  if (result.success) logger.info(`✅ Coupon applied: ${couponCode} (-$${result.amount})`, { venueId, orderId })
 
-  return {
-    success: true,
-    orderDiscountId: result.orderDiscountId,
-    couponId: coupon.id,
-    discountName: discount.name,
-    amount: discountAmount,
-    newOrderTotal: result.newTotal,
-  }
+  return result
 }
 
 // ==========================================
@@ -510,23 +442,9 @@ export async function removeDiscount(
 ): Promise<{ success: boolean; amount: number; newOrderTotal: number; error?: string }> {
   logger.info(`🗑️ TPV Removing discount`, { venueId, orderId, orderDiscountId })
 
-  // Verify order exists and belongs to venue
-  const order = await prisma.order.findUnique({
-    where: { id: orderId, venueId },
-  })
-
-  if (!order) {
-    throw new NotFoundError('Order not found')
-  }
-
-  if (order.paymentStatus === 'PAID') {
-    throw new BadRequestError('Cannot remove discount from a paid order')
-  }
-
-  // Remove discount via engine (thread the actor for the audit log)
-  const result = await discountEngine.removeDiscountFromOrder(orderId, orderDiscountId, staffId)
-
-  return result
+  // The engine locks this venue's Order and rechecks existence/PAID on the locked photo (404 / 400 as before);
+  // the actor is threaded for the audit log.
+  return discountEngine.removeDiscountFromOrder(orderId, orderDiscountId, staffId, venueId)
 }
 
 // ==========================================

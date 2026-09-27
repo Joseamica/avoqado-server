@@ -40,13 +40,56 @@ function makeOrder(overrides: Record<string, unknown> = {}) {
   return {
     id: 'order-xyz',
     venueId: 'venue-42',
+    customerId: null,
     subtotal: new Decimal(150),
     taxAmount: new Decimal(24),
     discountAmount: new Decimal(0),
     tipAmount: new Decimal(0),
     total: new Decimal(174),
     paidAmount: new Decimal(0),
+    items: [],
     orderDiscounts: [],
+    ...overrides,
+  }
+}
+
+/** The catalog rule `makeDiscount()` was calculated from: the writer re-evaluates it under the Order lock. */
+function makeCatalogRule(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'discount-abc',
+    venueId: 'venue-42',
+    name: 'Happy Hour',
+    type: 'PERCENTAGE' as DiscountType,
+    value: new Decimal(10),
+    scope: 'ORDER',
+    targetItemIds: [],
+    targetCategoryIds: [],
+    targetModifierIds: [],
+    targetModifierGroupIds: [],
+    customerGroupId: null,
+    isAutomatic: true,
+    priority: 0,
+    minPurchaseAmount: null,
+    maxDiscountAmount: null,
+    minQuantity: null,
+    buyQuantity: null,
+    getQuantity: null,
+    getDiscountPercent: null,
+    buyItemIds: [],
+    getItemIds: [],
+    validFrom: null,
+    validUntil: null,
+    daysOfWeek: [],
+    timeFrom: null,
+    timeUntil: null,
+    maxTotalUses: null,
+    maxUsesPerCustomer: null,
+    currentUses: 0,
+    isStackable: false,
+    stackPriority: 0,
+    requiresApproval: false,
+    applyBeforeTax: true,
+    active: true,
     ...overrides,
   }
 }
@@ -59,6 +102,8 @@ describe('discountEngine.applyDiscountToOrder — audit capture', () => {
   beforeEach(() => {
     // Make $transaction synchronously call the callback (mirrors global setup)
     prismaMock.$transaction.mockImplementation(async (cb: (tx: typeof prismaMock) => Promise<unknown>) => cb(prismaMock))
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 'order-xyz' }]) // canonical Order lock row
+    prismaMock.discount.findMany.mockResolvedValue([makeCatalogRule()])
     prismaMock.order.findUnique.mockResolvedValue(makeOrder())
     prismaMock.orderDiscount.create.mockResolvedValue({ id: 'od-new' })
     prismaMock.order.update.mockResolvedValue(makeOrder())
@@ -128,6 +173,7 @@ describe('discountEngine.applyDiscountToOrder — audit capture', () => {
 
   it('does NOT fire logAction when approval is required but not provided', async () => {
     prismaMock.order.findUnique.mockResolvedValue(makeOrder())
+    prismaMock.discount.findMany.mockResolvedValue([makeCatalogRule({ requiresApproval: true })])
 
     const discount = makeDiscount({ requiresApproval: true })
     const result = await applyDiscountToOrder('order-xyz', discount, 'staff-11') // no authorizedById
@@ -163,6 +209,7 @@ describe('discountEngine.removeDiscountFromOrder — audit capture', () => {
 
   beforeEach(() => {
     prismaMock.$transaction.mockImplementation(async (cb: (tx: typeof prismaMock) => Promise<unknown>) => cb(prismaMock))
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 'order-xyz' }]) // canonical Order lock row
     prismaMock.orderDiscount.findFirst.mockResolvedValue(mockOrderDiscount)
     prismaMock.order.findUnique.mockResolvedValue(makeOrder({ discountAmount: new Decimal(15), taxAmount: new Decimal(21.6) }))
     prismaMock.orderDiscount.delete.mockResolvedValue(mockOrderDiscount)

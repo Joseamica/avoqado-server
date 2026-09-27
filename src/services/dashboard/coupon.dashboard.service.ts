@@ -577,17 +577,19 @@ export async function bulkGenerateCouponCodes(venueId: string, data: BulkGenerat
  * @param code - Coupon code to validate
  * @param orderTotal - Order total (for min purchase check)
  * @param customerId - Customer ID (for per-customer limit check)
+ * @param db - Previews use the global client; the TPV apply passes its Order-locked transaction
  */
 export async function validateCouponCode(
   venueId: string,
   code: string,
   orderTotal?: number,
   customerId?: string,
+  db: Prisma.TransactionClient = prisma,
 ): Promise<CouponValidationResult> {
   const normalizedCode = code.toUpperCase().trim()
 
   // Find the coupon
-  const coupon = await prisma.couponCode.findFirst({
+  const coupon = await db.couponCode.findFirst({
     where: {
       code: normalizedCode,
       discount: { venueId },
@@ -679,7 +681,7 @@ export async function validateCouponCode(
 
   // Check per-customer usage limit
   if (coupon.maxUsesPerCustomer !== null && customerId) {
-    const customerRedemptions = await prisma.couponRedemption.count({
+    const customerRedemptions = await db.couponRedemption.count({
       where: {
         couponCodeId: coupon.id,
         customerId,
