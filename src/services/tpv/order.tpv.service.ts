@@ -537,6 +537,23 @@ function normalizeExternalId(externalId?: string | null): string | null {
   return trimmed.length > 0 ? trimmed : null
 }
 
+/**
+ * Crea un renglón con llave de ronda (`externalId`). Si OTRA petición de la MISMA ronda lo creó un instante antes
+ * (la ronda en línea que expiró y su réplica de la cola se cruzaron), el UNIQUE (orderId, externalId) responde
+ * P2002: es un conflicto TRANSITORIO, no un rechazo de negocio. Como VERSION_CONFLICT la cola lo reintenta (RETRY)
+ * y, al reintentar, encuentra el renglón por su llave: una sola ronda (spec 2026-09-27 §5).
+ */
+export async function conLlaveDeRonda<T>(crear: () => Promise<T>): Promise<T> {
+  try {
+    return await crear()
+  } catch (err: any) {
+    if (err?.code === 'P2002') {
+      throw new ConflictError('La ronda ya se estaba guardando en otro intento — vuelve a intentar', 'VERSION_CONFLICT')
+    }
+    throw err
+  }
+}
+
 function normalizeModifierIds(modifierIds?: string[]): string[] {
   return (modifierIds || []).filter(Boolean).sort()
 }
@@ -1457,6 +1474,10 @@ export async function addItemsToOrder(
     throw new BadRequestError('Cannot add items to a paid order')
   }
 
+  // Etapa 3 del KDS: una ronda de MESA manda su comanda a la pantalla (en mostrador nace al pagar). Se resuelve fuera
+  // de toda escritura; la marca viaja en el CAS de versión de abajo.
+  const marcarCocina = order.tableId ? await debeMarcarCocina(venueId) : false
+
   // Fetch products and validate
   // ✅ FIX: Use Set to deduplicate productIds (same product can be added multiple times)
   const uniqueProductIds = [...new Set(items.map(item => item.productId).filter((id): id is string => !!id))]
@@ -1528,39 +1549,52 @@ export async function addItemsToOrder(
     normalizedItems.map(async item => {
       // Custom-amount line: create directly (no catalog product, no modifiers).
       if (!item.productId) {
+        // Replay de la MISMA ronda: el importe libre ya se registró con esta llave — no se cobra dos veces.
+        const customExternalId = normalizeExternalId(item.externalId)
+        if (customExternalId) {
+          const yaRegistrado = await prisma.orderItem.findFirst({
+            where: { orderId: order.id, externalId: customExternalId },
+            include: { product: { select: { id: true, name: true } }, modifiers: { include: { modifier: true } } },
+          })
+          if (yaRegistrado) return yaRegistrado
+        }
         const unitPrice = new Prisma.Decimal((item.customUnitPriceCents ?? 0) / 100)
         const customTotal = unitPrice.mul(item.quantity)
         const customComped = item.isCortesia === true
-        const customItem = await prisma.orderItem.create({
-          data: {
-            orderId: order.id,
-            productId: null,
-            productName: item.customName!.trim(),
-            quantity: item.quantity,
-            unitPrice,
-            discountAmount: customComped ? customTotal : 0,
-            taxAmount: 0,
-            total: customComped ? 0 : customTotal,
-            isCortesia: customComped,
-            cortesiaReason: customComped ? item.cortesiaReason?.trim() || null : null,
-            notes: normalizeNotes(item.notes),
-            course: item.course ?? null,
-            seat: item.seat ?? null,
-          },
-          include: {
-            product: {
-              select: {
-                id: true,
-                name: true,
+        const customItem = await conLlaveDeRonda(() =>
+          prisma.orderItem.create({
+            data: {
+              orderId: order.id,
+              productId: null,
+              productName: item.customName!.trim(),
+              quantity: item.quantity,
+              unitPrice,
+              discountAmount: customComped ? customTotal : 0,
+              taxAmount: 0,
+              total: customComped ? 0 : customTotal,
+              isCortesia: customComped,
+              cortesiaReason: customComped ? item.cortesiaReason?.trim() || null : null,
+              notes: normalizeNotes(item.notes),
+              course: item.course ?? null,
+              seat: item.seat ?? null,
+              externalId: customExternalId,
+              sentToKitchenAt: roundSentAt,
+            },
+            include: {
+              product: {
+                select: {
+                  id: true,
+                  name: true,
+                },
+              },
+              modifiers: {
+                include: {
+                  modifier: true,
+                },
               },
             },
-            modifiers: {
-              include: {
-                modifier: true,
-              },
-            },
-          },
-        })
+          }),
+        )
         logger.info(`✅ [ADD ITEMS] CREATED custom line: ${customItem.productName} | $${customTotal}`)
         return customItem
       }
@@ -1732,53 +1766,57 @@ export async function addItemsToOrder(
         // If externalId provided and no match, create new line (no merge)
         const itemTotal = lineTotalFor(item.quantity)
         const lineComped = item.isCortesia === true
-        const createdItem = await prisma.orderItem.create({
-          data: {
-            orderId: order.id,
-            productId: item.productId,
-            productName: product.name,
-            productSku: product.sku,
-            categoryName: product.category?.name || null,
-            quantity: item.quantity,
-            unitPrice: product.price,
-            weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
-            weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
-            discountAmount: lineComped ? itemTotal : 0,
-            taxAmount: 0,
-            total: lineComped ? 0 : itemTotal,
-            isCortesia: lineComped,
-            cortesiaReason: lineComped ? item.cortesiaReason?.trim() || null : null,
-            notes: normalizedNotes,
-            course: item.course ?? null,
-            seat: item.seat ?? null,
-            externalId: normalizedExternalId,
-            modifiers: {
-              create: itemModifiers.map(modifierId => {
-                const modifier = modifiers.find(m => m.id === modifierId)!
-                logger.info(`  📎 [ADD ITEMS] Creating OrderItemModifier: ${modifier.name} ($${modifier.price})`)
-                return {
-                  modifierId,
-                  name: modifier.name,
-                  quantity: 1,
-                  price: modifier.price,
-                }
-              }),
-            },
-          },
-          include: {
-            product: {
-              select: {
-                id: true,
-                name: true,
+        const createdItem = await conLlaveDeRonda(() =>
+          prisma.orderItem.create({
+            data: {
+              orderId: order.id,
+              productId: item.productId,
+              productName: product.name,
+              productSku: product.sku,
+              categoryName: product.category?.name || null,
+              quantity: item.quantity,
+              unitPrice: product.price,
+              weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
+              weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
+              discountAmount: lineComped ? itemTotal : 0,
+              taxAmount: 0,
+              total: lineComped ? 0 : itemTotal,
+              isCortesia: lineComped,
+              cortesiaReason: lineComped ? item.cortesiaReason?.trim() || null : null,
+              notes: normalizedNotes,
+              course: item.course ?? null,
+              seat: item.seat ?? null,
+              externalId: normalizedExternalId,
+              // Sin esto las rondas offline (ADD_ITEMS inyecta llaves) nunca quedaban «enviadas a cocina».
+              sentToKitchenAt: roundSentAt,
+              modifiers: {
+                create: itemModifiers.map(modifierId => {
+                  const modifier = modifiers.find(m => m.id === modifierId)!
+                  logger.info(`  📎 [ADD ITEMS] Creating OrderItemModifier: ${modifier.name} ($${modifier.price})`)
+                  return {
+                    modifierId,
+                    name: modifier.name,
+                    quantity: 1,
+                    price: modifier.price,
+                  }
+                }),
               },
             },
-            modifiers: {
-              include: {
-                modifier: true,
+            include: {
+              product: {
+                select: {
+                  id: true,
+                  name: true,
+                },
+              },
+              modifiers: {
+                include: {
+                  modifier: true,
+                },
               },
             },
-          },
-        })
+          }),
+        )
 
         logger.info(`✅ [ADD ITEMS] CREATED OrderItem by externalId: ${product.name} | qty=${createdItem.quantity}`)
         return createdItem
@@ -1999,6 +2037,7 @@ export async function addItemsToOrder(
       total: newTotal,
       remainingBalance: newRemainingBalance,
       version: { increment: 1 },
+      ...(marcarCocina ? { kitchenPendingAt: new Date() } : {}),
     },
   })
   if (casBump.count === 0) {
@@ -2088,6 +2127,11 @@ export async function addItemsToOrder(
       total: Number(updatedOrder.total),
       version: updatedOrder.version,
     })
+  }
+
+  // 🍳 Etapa 3 del KDS: la ronda de mesa arma su comanda de pantalla (después de guardar; nunca tumba la ronda).
+  if (marcarCocina) {
+    await armarComandasTrasCommit(venueId, orderId, 'ROUND')
   }
 
   // Construct table name for display in Android app
