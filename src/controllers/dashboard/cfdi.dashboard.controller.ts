@@ -481,7 +481,7 @@ export async function emitRefundCreditNoteController(req: Request, res: Response
       res.status(404).json({ error: message })
       return
     }
-    if (/en proceso/i.test(message)) {
+    if (err instanceof ConflictError || /en proceso/i.test(message)) {
       logger.warn(aviso)
       res.status(409).json({ error: message })
       return

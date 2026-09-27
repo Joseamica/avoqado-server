@@ -684,7 +684,8 @@ export async function enviarIntentoCapturado(
   cfdi: any,
   documento:
     | { tipo: 'INDIVIDUAL'; params: import('./providers/fiscal-provider.interface').CreateInvoiceParams }
-    | { tipo: 'GLOBAL'; params: import('./providers/fiscal-provider.interface').GlobalInvoiceParams },
+    | { tipo: 'GLOBAL'; params: import('./providers/fiscal-provider.interface').GlobalInvoiceParams }
+    | { tipo: 'EGRESO'; params: Omit<import('./providers/fiscal-provider.interface').CreditNoteParams, 'idempotencyKey'> },
   recovered: StampedInvoice | ProviderInvoiceSummary | null,
   sendingProvider: import('./providers/fiscal-provider.interface').FiscalProvider,
   venueSlug: string,
@@ -711,6 +712,8 @@ export async function enviarIntentoCapturado(
   }
   let stamped = recovered
   if (!stamped) {
+    if (documento.tipo === 'EGRESO' && !sendingProvider.createCreditNote)
+      throw new ConflictError('El proveedor fiscal no soporta notas de crédito (CFDI de egreso).')
     const sent = await transaction(tx =>
       tx.cfdi.updateMany({
         where: { id: cfdi.id, status: 'STAMPING', attempts: version, enviadoAt: null },
@@ -722,7 +725,14 @@ export async function enviarIntentoCapturado(
     try {
       stamped = await (documento.tipo === 'GLOBAL'
         ? sendingProvider.createGlobalInvoice({ ...structuredClone(documento.params), externalId: identity, idempotencyKey: identity })
-        : sendingProvider.createInvoice({ ...structuredClone(documento.params), externalId: identity, idempotencyKey: identity }))
+        : documento.tipo === 'EGRESO'
+          ? sendingProvider.createCreditNote!({
+              ...structuredClone(documento.params),
+              externalId: identity,
+              idempotencyKey: identity,
+              protocoloIva: 1,
+            })
+          : sendingProvider.createInvoice({ ...structuredClone(documento.params), externalId: identity, idempotencyKey: identity }))
     } catch (err) {
       const definitive = esRechazoConfirmado(err, true)
       const where: Prisma.CfdiWhereInput = {

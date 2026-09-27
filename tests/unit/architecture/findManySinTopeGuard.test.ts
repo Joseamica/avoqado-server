@@ -322,7 +322,6 @@ const INVENTARIO: Record<string, number> = {
   'src/services/fiscal/accountsPayable.service.ts': 1,
   'src/services/fiscal/autoPosting.service.ts': 2,
   'src/services/fiscal/cfdi.service.ts': 1,
-  'src/services/fiscal/cfdiGlobal.service.ts': 1,
   'src/services/fiscal/chartOfAccounts.service.ts': 2,
   'src/services/fiscal/cogs.service.ts': 1,
   'src/services/fiscal/diot.service.ts': 1,

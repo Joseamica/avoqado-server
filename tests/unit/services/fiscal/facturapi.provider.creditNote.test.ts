@@ -10,15 +10,7 @@
 // `InvoiceUse.DEVOLUCIONES_DESCUENTOS_BONIFICACIONES='G02'`):
 //   { type:'E', related_documents:[{ relationship:'01', documents:['<uuid>'] }], use:'G02', ... }
 //
-// El SDK va mockeado: un test NUNCA timbra de verdad.
-
-const mockCreate = jest.fn()
-
-jest.mock('facturapi', () => {
-  return jest.fn().mockImplementation(() => ({
-    invoices: { create: mockCreate },
-  }))
-})
+// El transporte HTTP va mockeado: un test NUNCA timbra de verdad.
 
 import { FacturapiProvider } from '@/services/fiscal/providers/facturapi.provider'
 import type { CreditNoteParams } from '@/services/fiscal/providers/fiscal-provider.interface'
@@ -65,37 +57,40 @@ const baseParams: CreditNoteParams = {
 }
 
 describe('FacturapiProvider.createCreditNote — contrato con el PAC', () => {
+  let fetchMock: jest.SpyInstance
+  const payload = () => JSON.parse(fetchMock.mock.calls[0][1].body)
   beforeEach(() => {
-    mockCreate.mockReset()
-    mockCreate.mockResolvedValue(MOCK_INVOICE_RESPONSE)
+    fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(new Response(JSON.stringify(MOCK_INVOICE_RESPONSE), { status: 200 }))
   })
+
+  afterEach(() => fetchMock.mockRestore())
 
   it('🔴 manda type "E" (EGRESO), no "I"', async () => {
     await new FacturapiProvider('sk_test_x').createCreditNote(baseParams)
-    expect(mockCreate.mock.calls[0][0].type).toBe('E')
+    expect(payload().type).toBe('E')
   })
 
   it('🔴 relaciona el CFDI original: related_documents[{ relationship:"01", documents:[uuid] }]', async () => {
     await new FacturapiProvider('sk_test_x').createCreditNote(baseParams)
-    const payload = mockCreate.mock.calls[0][0]
-    expect(payload.related_documents).toEqual([{ relationship: '01', documents: ['UUID-INGRESO-1'] }])
+    const body = payload()
+    expect(body.related_documents).toEqual([{ relationship: '01', documents: ['UUID-INGRESO-1'] }])
     // `documents` DEBE ser arreglo: un string suelto es la forma que el PAC rechaza.
-    expect(Array.isArray(payload.related_documents[0].documents)).toBe(true)
+    expect(Array.isArray(body.related_documents[0].documents)).toBe(true)
   })
 
   it('usa G02 (Devoluciones, descuentos o bonificaciones)', async () => {
     await new FacturapiProvider('sk_test_x').createCreditNote(baseParams)
-    expect(mockCreate.mock.calls[0][0].use).toBe('G02')
+    expect(payload().use).toBe('G02')
   })
 
   it('normaliza el nombre del receptor (el padrón del SAT lo guarda en MAYÚSCULAS)', async () => {
     await new FacturapiProvider('sk_test_x').createCreditNote(baseParams)
-    expect(mockCreate.mock.calls[0][0].customer.legal_name).toBe('ESCUELA KEMPER URGATE SA DE CV')
+    expect(payload().customer.legal_name).toBe('ESCUELA KEMPER URGATE SA DE CV')
   })
 
   it('🔴 los conceptos van en PESOS y con tax_included, para que el total sea lo devuelto al cliente', async () => {
     await new FacturapiProvider('sk_test_x').createCreditNote(baseParams)
-    const item = mockCreate.mock.calls[0][0].items[0]
+    const item = payload().items[0]
     expect(item.product.price).toBe(116) // 11600 centavos → 116 pesos
     expect(item.product.tax_included).toBe(true)
     expect(item.product.taxes).toEqual([{ type: 'IVA', rate: 0.16, factor: 'Tasa', withholding: false }])
@@ -103,9 +98,9 @@ describe('FacturapiProvider.createCreditNote — contrato con el PAC', () => {
 
   it('estampa external_id (rescate determinista) y la serie del emisor', async () => {
     await new FacturapiProvider('sk_test_x').createCreditNote(baseParams)
-    const payload = mockCreate.mock.calls[0][0]
-    expect(payload.external_id).toBe('cfdi-refund-pay1')
-    expect(payload.series).toBe('F')
+    const body = payload()
+    expect(body.external_id).toBe('cfdi-refund-pay1')
+    expect(body.series).toBe('F')
   })
 
   it('devuelve el timbre normalizado (uuid, serie, folio, total en centavos)', async () => {
@@ -118,11 +113,39 @@ describe('FacturapiProvider.createCreditNote — contrato con el PAC', () => {
       ...baseParams,
       items: [{ ...baseParams.items[0], objetoImp: '01', taxes: [] }],
     })
-    expect(mockCreate.mock.calls[0][0].items[0].product.taxes).toEqual([])
+    expect(payload().items[0].product.taxes).toEqual([])
   })
 
+  it('sólo protocolo1 envía idempotency_key y conserva HTTP/code', async () => {
+    await new FacturapiProvider('sk_test_x').createCreditNote({
+      ...baseParams,
+      protocoloIva: 1,
+      idempotencyKey: 'refund#2',
+      externalId: 'refund#2',
+    })
+    expect(payload()).toMatchObject({ external_id: 'refund#2', idempotency_key: 'refund#2' })
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ code: 'invalid_request', message: 'bad' }), { status: 422 }))
+    await expect(new FacturapiProvider('sk_test_x').createCreditNote(baseParams)).rejects.toMatchObject({
+      status: 422,
+      code: 'invalid_request',
+    })
+  })
+  it('legacy conserva payload sin idempotency_key', async () => {
+    await new FacturapiProvider('sk_test_x').createCreditNote(baseParams)
+    expect(payload().idempotency_key).toBeUndefined()
+  })
+  it('202 pending conserva id sin inventar UUID', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ id: 'pending', status: 'pending' }), { status: 202 }))
+    expect(await new FacturapiProvider('sk_test_x').createCreditNote(baseParams)).toMatchObject({
+      providerInvoiceId: 'pending',
+      status: 'pending',
+      uuid: null,
+    })
+  })
   it('el error del PAC se propaga (no se traga)', async () => {
-    mockCreate.mockRejectedValue(new Error('PAC 400: related uuid not found'))
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ code: 'invalid_request', message: 'related uuid not found' }), { status: 400 }),
+    )
     await expect(new FacturapiProvider('sk_test_x').createCreditNote(baseParams)).rejects.toThrow(/related uuid not found/)
   })
 })

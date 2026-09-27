@@ -128,6 +128,8 @@ export interface CreateInvoiceParams {
  * `receptor.usoCfdi` debe ser 'G02' ("Devoluciones, descuentos o bonificaciones").
  */
 export interface CreditNoteParams {
+  /** Identidad versionada únicamente para reservas del protocolo IVA. */
+  protocoloIva?: 1
   receptor: ReceptorInput & { usoCfdi: string; email?: string }
   items: CfdiItemInput[]
   formaPago: string // c_FormaPago — cómo se devolvió el dinero

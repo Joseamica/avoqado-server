@@ -410,6 +410,7 @@ export class FacturapiProvider implements FiscalProvider {
   async createCreditNote(params: CreditNoteParams): Promise<StampedInvoice> {
     const payload: any = {
       type: 'E',
+      ...(params.protocoloIva === 1 ? { idempotency_key: params.idempotencyKey } : {}),
       customer: {
         legal_name: FacturapiProvider.normalizeReceptorName(params.receptor.razonSocial),
         tax_id: params.receptor.rfc,
@@ -444,7 +445,7 @@ export class FacturapiProvider implements FiscalProvider {
       })),
     }
     try {
-      const inv = await this.client.invoices.create(payload)
+      const inv = await this.postInvoice(payload)
       return this.toStamped(inv)
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)

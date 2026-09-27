@@ -124,8 +124,12 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
       venueId: z.string().describe('El local del reembolso (debe estar en tu alcance)'),
       refundPaymentId: z.string().describe('Id del pago de tipo REFUND que se va a amparar'),
       confirm: z.boolean().optional().describe('true para ejecutar; sin él sólo devuelve la vista previa'),
+      lookupOnly: z
+        .boolean()
+        .optional()
+        .describe('Conserva el valor de confirmationArgs: true sólo consulta el intento previo; false confirma una nueva emisión.'),
     },
-    async ({ venueId, refundPaymentId, confirm }) => {
+    async ({ venueId, refundPaymentId, confirm, lookupOnly }) => {
       guard.venueFilter(venueId)
       // Mismo permiso que el botón del dashboard: emitir un CFDI.
       guard.requirePermission('cfdi:issue', venueId)
@@ -154,17 +158,30 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
           message: 'Ese reembolso YA tiene su nota de crédito timbrada. No se emitió otra.',
         })
       }
+      const recoveryOnly = lookupOnly === true || status.recoveryOnly
       // La MISMA regla que apaga el botón del dashboard — el MCP no puede ser más permisivo.
-      if (!status.eligibility.eligible) {
+      if (!recoveryOnly && !status.eligibility.eligible) {
         return text({ ok: false, reason: status.eligibility.reason, error: status.eligibility.message })
       }
 
-      if (!confirm) {
+      if (recoveryOnly && !status.creditNote) return text({ ok: false, error: 'No hay una nota de crédito enviada para consultar.' })
+      if (!confirm && recoveryOnly && status.creditNote) {
+        const cn = status.creditNote!
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          confirmationArgs: { venueId, refundPaymentId, confirm: true, lookupOnly: true },
+          preview: { importeAcreditadoMxn: cn.totalCents / 100, receptor: { rfc: cn.receptorRfc, nombre: cn.receptorNombre } },
+          message: `Se consultará la nota de crédito ya enviada por $${(cn.totalCents / 100).toFixed(2)} para ${cn.receptorNombre}. No se emitirá otra. Para consultar, conserva y usa los confirmationArgs completos, incluido lookupOnly:true.`,
+        })
+      }
+      if (!confirm || (!recoveryOnly && status.creditNote && lookupOnly === undefined)) {
         const p = status.preview!
         const amountMxn = p.amountToCreditCents / 100
         return text({
           ok: false,
           requiresConfirmation: true,
+          confirmationArgs: { venueId, refundPaymentId, confirm: true, lookupOnly: false },
           preview: {
             facturaOriginal: {
               folio: p.facturaOriginal!.folio,
@@ -183,7 +200,7 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
             (p.tipRefundCents > 0
               ? ` La propina devuelta ($${(p.tipRefundCents / 100).toFixed(2)}) NO entra: nunca formó parte del CFDI.`
               : '') +
-            ' Es IRREVERSIBLE (deshacerla exige cancelarla ante el SAT). Vuelve a llamar con confirm:true para ejecutar.',
+            ' Es IRREVERSIBLE (deshacerla exige cancelarla ante el SAT). Para ejecutar, conserva y usa los confirmationArgs completos, incluido lookupOnly:false.',
         })
       }
 
@@ -195,6 +212,7 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
           // corre la validación de entorno (y su `process.exit(1)`) dentro del worker de Jest.
           sandbox: process.env.NODE_ENV !== 'production',
           requestedByStaffId: scope.staffId,
+          lookupOnly: recoveryOnly,
         })
         if (result.status !== 'STAMPED') {
           return text({
