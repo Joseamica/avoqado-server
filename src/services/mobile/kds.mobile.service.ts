@@ -12,7 +12,7 @@ import { contexto, markDeliveryOrderReady } from '@/services/delivery-channels/c
 import type { CourierInfo } from '@/services/delivery-channels/core/types'
 import prisma from '../../utils/prismaClient'
 import { OrderStatus } from '@prisma/client'
-import type { KdsOrderStatus } from '@prisma/client'
+import type { KdsOrderStatus, Prisma } from '@prisma/client'
 import { anexarCapacidades, ventasDeComandas, type EstadoRetiro, type VentaDeComanda } from './kdsCapacidades'
 import { toKdsModifierLabels } from '../kds/kdsModifierLabels'
 import { venueTienePantallaDeCocina } from '../kds/kitchenDisplayStations'
@@ -120,23 +120,38 @@ function statusesDelFiltro(statusFilter?: string): KdsOrderStatus[] {
     .filter(s => VALID_STATUSES.includes(s)) as KdsOrderStatus[]
 }
 
-/** Cuántas comandas coinciden en total: lo que el tope deja fuera no se pierde en silencio. */
-export async function countKdsOrders(venueId: string, statusFilter?: string): Promise<number> {
-  return prisma.kdsOrder.count({ where: { venueId, status: { in: statusesDelFiltro(statusFilter) } } })
+/**
+ * Qué comandas ve un tablero (spec 2026-09-27 §3). Aplica a TODAS las listas y conteos, con o sin estación, para
+ * que las pantallas viejas tampoco vean lo impreso en papel ni lo anterior a prender la pantalla.
+ */
+async function filtroDelTablero(venueId: string, statuses: KdsOrderStatus[], stationId?: string): Promise<Prisma.KdsOrderWhereInput> {
+  const pantallas = await prisma.printStation.findMany({
+    where: { venueId, hasKitchenDisplay: true },
+    select: { id: true, kitchenDisplaySince: true },
+    take: 50,
+  })
+  const desde = stationId
+    ? (pantallas.find(p => p.id === stationId)?.kitchenDisplaySince ?? null)
+    : pantallas.reduce<Date | null>((min, p) => (p.kitchenDisplaySince && (!min || p.kitchenDisplaySince < min) ? p.kitchenDisplaySince : min), null)
+  const condiciones: Prisma.KdsOrderWhereInput[] = [{ fallbackPrintedAt: null }]
+  // Borrón y cuenta nueva: sólo lo creado desde que se prendió la pantalla. Uber queda exento: llega solo.
+  if (desde) condiciones.push({ OR: [{ orderType: 'DELIVERY' }, { createdAt: { gte: desde } }] })
+  if (stationId) condiciones.push({ OR: [{ printStationId: stationId }, { printStationId: null }] })
+  return { venueId, status: { in: statuses }, AND: condiciones }
 }
 
-export async function listKdsOrders(venueId: string, statusFilter?: string): Promise<KdsOrderResponse[]> {
+/** Cuántas comandas coinciden en total: lo que el tope deja fuera no se pierde en silencio. */
+export async function countKdsOrders(venueId: string, statusFilter?: string, stationId?: string): Promise<number> {
+  return prisma.kdsOrder.count({ where: await filtroDelTablero(venueId, statusesDelFiltro(statusFilter), stationId) })
+}
+
+export async function listKdsOrders(venueId: string, statusFilter?: string, stationId?: string): Promise<KdsOrderResponse[]> {
   // Las MÁS RECIENTES primero para aplicar el tope — con un rezago acumulado, la cocina debe
   // seguir viendo lo que acaba de entrar, no lo de hace un mes — y luego se voltean para
   // entregarlas de la más vieja a la más nueva, como siempre. `id` desempata en el mismo instante.
   const recientes = await prisma.kdsOrder.findMany({
-    where: {
-      venueId,
-      status: { in: statusesDelFiltro(statusFilter) },
-    },
-    include: {
-      items: true,
-    },
+    where: await filtroDelTablero(venueId, statusesDelFiltro(statusFilter), stationId),
+    include: { items: true },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take: KDS_LIST_MAX,
   })
@@ -149,6 +164,58 @@ export async function listKdsOrders(venueId: string, statusFilter?: string): Pro
   const ventas = await ventasDeComandas(prisma, venueId, orders)
 
   return orders.map(o => formatKdsOrderConVenta(o, o.orderId ? ventas.get(o.orderId) : undefined))
+}
+
+/** «Recientes»: las últimas terminadas, para deshacer un LISTO por error (spec 2026-09-27 §7). */
+export const KDS_RECENT_MAX = 20
+const RECIENTES_VENTANA_MS = 60 * 60 * 1000
+
+export async function listRecentKdsOrders(venueId: string, stationId?: string): Promise<KdsOrderResponse[]> {
+  const base = await filtroDelTablero(venueId, [KdsStatus.COMPLETED] as KdsOrderStatus[], stationId)
+  const recientes = await prisma.kdsOrder.findMany({
+    // `items: { some: {} }`: una marca LISTO que llegó sin comanda (cabecera vacía) no se muestra.
+    where: { ...base, completedAt: { gte: new Date(Date.now() - RECIENTES_VENTANA_MS) }, items: { some: {} } },
+    include: { items: true },
+    orderBy: [{ completedAt: 'desc' }, { id: 'desc' }],
+    take: KDS_RECENT_MAX,
+  })
+  const ventas = await ventasDeComandas(prisma, venueId, recientes)
+  return recientes.map(o => formatKdsOrderConVenta(o, o.orderId ? ventas.get(o.orderId) : undefined))
+}
+
+/** «Deshacer»: una comanda terminada vuelve a la cocina como nueva. */
+export async function recallKdsOrder(venueId: string, kdsOrderId: string): Promise<KdsOrderResponse> {
+  const r = await prisma.kdsOrder.updateMany({
+    where: { id: kdsOrderId, venueId, status: KdsStatus.COMPLETED },
+    data: { status: KdsStatus.NEW, completedAt: null },
+  })
+  if (r.count === 0) throw new NotFoundError('No hay una comanda terminada con ese id para regresar')
+  const regresada = await prisma.kdsOrder.findUniqueOrThrow({ where: { id: kdsOrderId }, include: { items: true } })
+  logger.info(`KDS order #${regresada.orderNumber} regresada a la cocina (deshacer)`)
+  return comandaConVenta(venueId, regresada)
+}
+
+/** «Marcar todas listas» (acciones en lote, como Square). Tope de 100 por llamada. */
+export const KDS_BUMP_BATCH_MAX = 100
+
+export async function bumpKdsOrdersBatch(venueId: string, ids: string[]): Promise<{ completed: number }> {
+  const unicos = [...new Set(ids)].slice(0, KDS_BUMP_BATCH_MAX)
+  const pendientes = await prisma.kdsOrder.findMany({
+    where: { venueId, id: { in: unicos }, status: { not: KdsStatus.COMPLETED } },
+    select: { id: true, orderId: true, orderNumber: true },
+    take: KDS_BUMP_BATCH_MAX,
+  })
+  if (pendientes.length === 0) return { completed: 0 }
+  const r = await prisma.kdsOrder.updateMany({
+    where: { venueId, id: { in: pendientes.map(p => p.id) }, status: { not: KdsStatus.COMPLETED } },
+    data: { status: KdsStatus.COMPLETED, completedAt: new Date() },
+  })
+  // Igual que el bump de una: un pedido de reparto terminado avisa «listo» al proveedor (no-op para lo demás).
+  for (const p of pendientes) {
+    if (p.orderId) avisarListoAlMarketplace(venueId, p.orderId, p.orderNumber)
+  }
+  logger.info(`KDS: ${r.count} comandas terminadas en lote`, { venueId })
+  return { completed: r.count }
 }
 
 /**

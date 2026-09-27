@@ -3100,6 +3100,42 @@ router.post(
 )
 
 /**
+ * GET /api/v1/mobile/venues/:venueId/kds/orders/recent?stationId=
+ * Últimas comandas terminadas («Recientes», para deshacer un LISTO por error). Etapa 3 del KDS.
+ */
+router.get(
+  '/venues/:venueId/kds/orders/recent',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('orders:read'),
+  kdsMobileController.listRecentKdsOrders,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/kds/orders/bump-batch
+ * «Marcar todas listas». Body: { ids: string[] } (1..100). Etapa 3 del KDS.
+ */
+router.post(
+  '/venues/:venueId/kds/orders/bump-batch',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('orders:update'),
+  kdsMobileController.bumpKdsOrdersBatch,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/kds/orders/:id/recall
+ * «Deshacer»: la comanda terminada vuelve a la cocina. Etapa 3 del KDS.
+ */
+router.post(
+  '/venues/:venueId/kds/orders/:id/recall',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('orders:update'),
+  kdsMobileController.recallKdsOrder,
+)
+
+/**
  * Reclamar / confirmar / soltar la impresión de una comanda que llegó sola.
  *
  * Permiso `orders:update`, el MISMO que ya pide crear y avanzar una comanda: quien puede
