@@ -1537,6 +1537,10 @@ export async function splitOrderItems(venueId: string, orderId: string, itemIds:
   // nace dentro de esta misma transacción: es privado hasta el commit y no necesita candado.
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
   const { source, newOrder, movedCount, sourceTotals, newTotals } = await prisma.$transaction(async tx => {
+    // The child Order INSERT takes the Venue FK lock: take its compatible shared lock first, matching deleteVenue's
+    // Venue -> Order order (otherwise this holds the source Order and waits on a deletion that holds the Venue: 40P01).
+    const venues = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM "Venue" WHERE id = ${venueId} FOR KEY SHARE`
+    if (!venues.length) throw new NotFoundError('Order not found')
     if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
     const source = await tx.order.findFirst({
       where: { id: orderId, venueId },
@@ -1685,6 +1689,10 @@ export async function splitOrderBySeat(venueId: string, orderId: string, staffId
   // DESPUÉS de bloquearlo, y los cheques por asiento —privados hasta el commit— nacen, reciben sus líneas y se
   // recalculan en esta MISMA transacción.
   const created = await prisma.$transaction(async tx => {
+    // The child Order INSERT takes the Venue FK lock: take its compatible shared lock first, matching deleteVenue's
+    // Venue -> Order order (otherwise this holds the source Order and waits on a deletion that holds the Venue: 40P01).
+    const venues = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM "Venue" WHERE id = ${venueId} FOR KEY SHARE`
+    if (!venues.length) throw new NotFoundError('Order not found')
     if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
     const source = await tx.order.findFirst({
       where: { id: orderId, venueId },

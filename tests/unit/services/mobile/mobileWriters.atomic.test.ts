@@ -283,10 +283,14 @@ describe('locked mobile writers', () => {
 
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
     expect(committed).toBe(true)
-    expect(tx.$queryRaw).toHaveBeenCalledTimes(1)
-    // Tagged template: [strings, orderId, venueId] — the ROUTE venue, never one taken from the Order itself.
-    expect(tx.$queryRaw.mock.calls[0].slice(1)).toEqual(['order', 'venue'])
-    expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(Math.min(...txCallOrders()))
+    // Tagged template: [strings, ...values]. The split writers insert a child Order (Venue FK), so they take the Venue
+    // KEY SHARE fence FIRST, like deleteVenue's Venue → Order order; then the Order lock on the ROUTE venue, never one
+    // taken from the Order itself; then everything else.
+    const raw = tx.$queryRaw.mock.calls
+    const fenced = name === 'split' || name === 'splitBySeat'
+    expect(raw.map((call: any[]) => call.slice(1))).toEqual(fenced ? [['venue'], ['order', 'venue']] : [['order', 'venue']])
+    if (fenced) expect(raw[0][0].join('?')).toMatch(/FROM "Venue"\s+WHERE id = \?\s+FOR KEY SHARE/)
+    expect(tx.$queryRaw.mock.invocationCallOrder[raw.length - 1]).toBeLessThan(Math.min(...txCallOrders()))
     expect(tx.order.update).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: 'order' },

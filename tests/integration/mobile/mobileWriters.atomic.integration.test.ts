@@ -476,6 +476,52 @@ describe('locked mobile writers against real fiscal admission', () => {
   })
 })
 
+describe('split writers take the Venue before the source Order (deleteVenue order: Venue, then its Orders)', () => {
+  it.each([
+    ['split', (o: Fixture) => splitOrderItems(venueId, o.id, [o.items[1]], staffId)],
+    ['splitBySeat', (o: Fixture) => splitOrderBySeat(venueId, o.id, staffId)],
+  ] as const)('%s waits for a deletion holding the Venue without holding the source Order, then finishes', async (_name, run) => {
+    const o = await newOrder()
+    const entered = barrier(),
+      finish = barrier()
+    const lock = jest.spyOn(orderLock, 'lockExistingOrderForPayment')
+    const deleting = prisma.$transaction(
+      async tx => {
+        // Same ordering as deleteVenue / liveDemoCleanup: Venue FOR UPDATE, then its Orders.
+        await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR UPDATE`
+        entered.release()
+        await finish.promise
+        await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${o.id} FOR UPDATE NOWAIT`
+      },
+      { timeout: 15_000 },
+    )
+    let writer: ReturnType<typeof resultOf> | undefined
+    try {
+      await entered.promise
+      writer = resultOf(run(o))
+      let waiting = false
+      for (let attempt = 0; attempt < 150 && !waiting; attempt++) {
+        const [{ count }] = await prisma.$queryRaw<Array<{ count: number }>>`
+          SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname = current_database()
+          AND wait_event_type = 'Lock' AND (query ILIKE '%"Venue"%' OR query ILIKE '%"Order"%')`
+        waiting = count > 0
+        if (!waiting) await pause(20)
+      }
+      expect(waiting).toBe(true)
+      // It waits on the Venue and has not taken the source Order: another connection can still lock it without waiting.
+      expect(lock.mock.calls.length).toBe(0)
+      await prisma.$transaction(tx => tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${o.id} FOR UPDATE NOWAIT`)
+    } finally {
+      finish.release()
+      const deletion = await resultOf(deleting)
+      await writer
+      expect(deletion.error).toBeUndefined()
+    }
+    expect((await writer!).error).toBeUndefined()
+    expect((await snapshot(o.id)).items).toHaveLength(1)
+  })
+})
+
 describe('fresh decisions after waiting', () => {
   it('applyDiscount caps a fixed discount against the subtotal and discount read after waiting', async () => {
     const o = await newOrder()
