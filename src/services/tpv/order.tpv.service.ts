@@ -25,6 +25,8 @@ import { assertNoLiveTerminalCharge, lockAndReadOrderForCancel } from '../shared
 import { baseDeCargos, recalcularCargosPorServicio } from '../shared/serviceCharges'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
+import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
+import { armarComandasTrasCommit } from '../kds/kitchenTicketAuthoring.service'
 
 /**
  * Helper function to flatten OrderItemModifier structure for Android compatibility
@@ -1090,6 +1092,8 @@ export async function createOrderWithItems(
     resolvedTerminalId = terminal?.id || null
   }
 
+  // Etapa 3 del KDS: un carrito GRATIS nace pagado en esta transacción ⇒ lleva la marca de cocina. FUERA de la tx.
+  const marcarCocina = totalPesos === 0 ? await debeMarcarCocina(venueId) : false
   const orderNumber = `ORD-${Date.now()}`
   let createdOrder
   try {
@@ -1158,6 +1162,7 @@ export async function createOrderWithItems(
           status: isFreeCart ? 'COMPLETED' : 'PENDING',
           paymentStatus: isFreeCart ? 'PAID' : 'PENDING',
           kitchenStatus: 'PENDING',
+          ...(isFreeCart && marcarCocina ? { kitchenPendingAt: new Date() } : {}),
           type: input.orderType || 'TAKEOUT',
           source: input.source || 'TPV',
           subtotal: decimalFromPesos(grossSubtotalPesos),
@@ -1345,6 +1350,10 @@ export async function createOrderWithItems(
 
   if (totalPesos === 0) {
     await deductTrackedInventoryForFreeCart(fullOrder, input.staffId)
+  }
+
+  if (marcarCocina) {
+    await armarComandasTrasCommit(venueId, createdOrder.id, 'PAID')
   }
 
   const broadcastingService = socketManager.getBroadcastingService()

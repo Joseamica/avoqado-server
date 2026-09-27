@@ -32,6 +32,8 @@ import { countPriorCompletedPayments } from '../shared/priorCompletedPayments'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { generateDigitalReceipt, generateReceiptUrl } from '../tpv/digitalReceipt.tpv.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
+import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
+import { armarComandasTrasCommit } from '../kds/kitchenTicketAuthoring.service'
 import type {
   B4BitConfig,
   B4BitCreateOrderRequest,
@@ -1158,6 +1160,8 @@ async function settleOrderForConfirmedCryptoPayment(
   },
   processorPatch: Prisma.InputJsonObject,
   reconciliationEnabled: boolean,
+  /** Etapa 3 del KDS: el negocio tiene pantalla ⇒ marca durable en la MISMA escritura que salda. */
+  marcarCocina = false,
 ): Promise<CryptoSettlementResult | IgnoredCryptoSettlementResult | null> {
   const MAX_SETTLEMENT_ATTEMPTS = 3
 
@@ -1296,6 +1300,8 @@ async function settleOrderForConfirmedCryptoPayment(
             // `completedAt` se conserva si ya existía: la venta se cerró una vez,
             // no una por cada reentrega del webhook.
             ...(balance.isFullyPaid ? { status: 'COMPLETED' as const, completedAt: fresh.completedAt ?? new Date() } : {}),
+            // Sólo en la TRANSICIÓN real a pagado, igual que el vale de inventario: un CO reentregado no re-marca.
+            ...(balance.isFullyPaid && !wasAlreadyPaid && marcarCocina ? { kitchenPendingAt: new Date() } : {}),
           },
         })
 
@@ -1476,6 +1482,8 @@ async function handlePaymentConfirmed(
   // 🔑 Se recalcula desde los pagos durables, NUNCA con `paidAmount += amount`:
   // un `CO` reentregado por B4Bit relee el mismo conjunto y llega al mismo
   // resultado, en vez de duplicar el abono.
+  // Etapa 3 del KDS: FUERA de la transacción del dinero (nunca tumba el cobro).
+  const marcarCocina = payment.orderId ? await debeMarcarCocina(venueId) : false
   const settlement = await settleOrderForConfirmedCryptoPayment(
     payment,
     {
@@ -1489,6 +1497,7 @@ async function handlePaymentConfirmed(
       ...(validEditedAt(payload) ? { lastEditedAt: validEditedAt(payload) } : {}),
     },
     reconciliationEnabled,
+    marcarCocina,
   )
 
   if (settlement && 'webhookIgnored' in settlement) {
@@ -1572,6 +1581,11 @@ async function handlePaymentConfirmed(
       } catch (err) {
         console.error('[referral hook] onOrderPaid failed for order', payment.orderId, err)
       }
+    }
+
+    // 🍳 Etapa 3 del KDS: una venta saldada con cripto también manda su comanda a la pantalla (nunca lanza).
+    if (settlement.becamePaid && marcarCocina) {
+      await armarComandasTrasCommit(venueId, payment.orderId, 'PAID')
     }
   }
 

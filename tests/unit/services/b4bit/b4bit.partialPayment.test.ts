@@ -83,6 +83,13 @@ jest.mock('@/services/inventory/inventoryPosting.service', () => ({
 const onOrderPaid = jest.fn().mockResolvedValue(undefined)
 jest.mock('@/services/referrals/referralQualification.service', () => ({ onOrderPaid: (...a: any[]) => onOrderPaid(...a) }))
 
+const mockDebeMarcarCocina = jest.fn().mockResolvedValue(false)
+jest.mock('@/services/kds/kitchenDisplayStations', () => ({ debeMarcarCocina: (...a: unknown[]) => mockDebeMarcarCocina(...a) }))
+const mockArmarComandas = jest.fn().mockResolvedValue(undefined)
+jest.mock('@/services/kds/kitchenTicketAuthoring.service', () => ({
+  armarComandasTrasCommit: (...a: unknown[]) => mockArmarComandas(...a),
+}))
+
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
@@ -440,5 +447,37 @@ describe('b4bit — iniciación: la orden tiene que admitir el cobro', () => {
 
     const where = mockPrisma.order.findUnique.mock.calls[0][0].where
     expect(where).toMatchObject({ id: ORDER_ID, venueId: VENUE_ID })
+  })
+})
+
+describe('b4bit — comanda de pantalla al saldar (etapa 3 del KDS)', () => {
+  afterEach(() => mockDebeMarcarCocina.mockResolvedValue(false))
+
+  it('el abono que SALDA marca la cuenta y arma la comanda una vez', async () => {
+    mockDebeMarcarCocina.mockResolvedValue(true)
+    mockPrisma.payment.findUnique.mockResolvedValue(cryptoPayment())
+    mockPrisma.order.findUnique.mockResolvedValue(freshOrder({ paymentStatus: 'PARTIAL' }))
+    mockPrisma.payment.findMany.mockResolvedValue([
+      { amount: d('150.00'), tipAmount: d('0.00') },
+      { amount: d('50.00'), tipAmount: d('0.00') },
+    ])
+
+    await processWebhook(webhookCO())
+
+    expect(orderWrite().kitchenPendingAt).toBeInstanceOf(Date)
+    expect(mockArmarComandas).toHaveBeenCalledTimes(1)
+    expect(mockArmarComandas).toHaveBeenCalledWith(VENUE_ID, ORDER_ID, 'PAID')
+  })
+
+  it('un abono PARCIAL no marca ni arma', async () => {
+    mockDebeMarcarCocina.mockResolvedValue(true)
+    mockPrisma.payment.findUnique.mockResolvedValue(cryptoPayment())
+    mockPrisma.order.findUnique.mockResolvedValue(freshOrder())
+    mockPrisma.payment.findMany.mockResolvedValue([{ amount: d('50.00'), tipAmount: d('0.00') }])
+
+    await processWebhook(webhookCO())
+
+    expect(orderWrite().kitchenPendingAt).toBeUndefined()
+    expect(mockArmarComandas).not.toHaveBeenCalled()
   })
 })

@@ -401,6 +401,8 @@ import {
 import { getAreaTicketLineIdsCoveredByInventoryReservations } from './order.tpv.service'
 import { resolveFastPaymentTarget } from './fastPaymentTarget'
 import { linkCustomerToExistingOrder, normalizeRequestedCustomerId, resolveFastOrderCustomer } from './fastPaymentCustomer'
+import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
+import { armarComandasTrasCommit } from '../kds/kitchenTicketAuthoring.service'
 
 /**
  * Se lanza DENTRO de la transacción para abortarla sin escribir DINERO; el `catch` la convierte
@@ -1336,6 +1338,8 @@ async function settleStandalonePaymentInTx(
   orderId: string,
   payment: { amount: Prisma.Decimal; tipAmount: Prisma.Decimal },
   staffId?: string,
+  /** Etapa 3 del KDS: el negocio tiene pantalla ⇒ marca durable en la MISMA escritura que salda. */
+  marcarCocina = false,
 ): Promise<CommittedStandaloneSettlement> {
   // One specific invoice, not a tenant list: its entire item snapshot is required
   // to preserve the stock obligation without silently truncating a paid invoice.
@@ -1364,6 +1368,7 @@ async function settleStandalonePaymentInTx(
       ...(balance.isFullyPaid && { status: 'COMPLETED', completedAt: order.completedAt ?? new Date() }),
       ...(!order.servedById && staffId && { servedById: staffId, createdById: order.createdById ?? staffId }),
       ...(firstSettlement && { loyaltyEligibleAt: new Date(), loyaltyStaffId: staffId }),
+      ...(firstSettlement && marcarCocina && { kitchenPendingAt: new Date() }),
     },
   })
   const { createSalePostingInTx } = await import('@/services/inventory/inventoryPosting.service')
@@ -1387,7 +1392,13 @@ async function updateOrderTotalsForStandalonePayment(
   tipAmount: number, // ✅ FIX: Pass tip separately to update order.tipAmount
   currentPaymentId?: string,
   staffId?: string,
-  options?: { areaTicketAlreadyFinalized?: boolean; venueId?: string; committedSettlement?: CommittedStandaloneSettlement },
+  options?: {
+    areaTicketAlreadyFinalized?: boolean
+    venueId?: string
+    committedSettlement?: CommittedStandaloneSettlement
+    /** Etapa 3 del KDS: `recordOrderPayment` ya puso la marca al saldar; aquí sólo se arma tras el commit. */
+    marcarCocina?: boolean
+  },
 ): Promise<OrderInventoryWarning | null> {
   // Get current order with payment information
   const order = await prisma.order.findUnique({
@@ -2159,6 +2170,11 @@ async function updateOrderTotalsForStandalonePayment(
         ? { id: order.customer.id, firstName: order.customer.firstName, lastName: order.customer.lastName }
         : null,
     })
+
+    // 🍳 Etapa 3 del KDS: la comanda de pantalla nace al saldar (después del commit; nunca tumba el cobro).
+    if (options?.marcarCocina) {
+      await armarComandasTrasCommit(updatedOrder.venueId, orderId, 'PAID')
+    }
   }
 
   // 🪑 Liberar la mesa si ésta era su última cuenta viva.
@@ -3208,6 +3224,8 @@ export async function recordOrderPayment(
   }
   const shiftAmount = new Prisma.Decimal(totalAmount)
   const shiftTip = new Prisma.Decimal(tipAmount)
+  // Etapa 3 del KDS: FUERA de la transacción del dinero (nunca tumba un cobro).
+  const marcarCocina = await debeMarcarCocina(venueId)
   try {
     payment = await timing.time('financial_commit', () =>
       prisma.$transaction(async tx => {
@@ -3617,7 +3635,14 @@ export async function recordOrderPayment(
           !lockedAreaCheckout &&
           !activeOrder.items.some(item => item.areaTicketLineId != null)
         ) {
-          committedStandaloneSettlement = await settleStandalonePaymentInTx(tx, venueId, activeOrder.id, newPayment, validatedStaffId)
+          committedStandaloneSettlement = await settleStandalonePaymentInTx(
+            tx,
+            venueId,
+            activeOrder.id,
+            newPayment,
+            validatedStaffId,
+            marcarCocina,
+          )
         }
 
         if (newPayment.status === 'COMPLETED') {
@@ -4117,7 +4142,7 @@ export async function recordOrderPayment(
           tipAmount,
           payment.id,
           validatedStaffId,
-          { venueId, committedSettlement: committedStandaloneSettlement },
+          { venueId, committedSettlement: committedStandaloneSettlement, marcarCocina },
         )
       }
 

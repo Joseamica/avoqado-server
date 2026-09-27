@@ -68,6 +68,13 @@ jest.mock('@/services/mobile/areaTicketV7.mobile.service', () => ({
   finalizeAreaTicketPaymentInTransaction: (...args: unknown[]) => finalizeAreaTicketPaymentMock(...args),
 }))
 
+const debeMarcarCocinaMock = jest.fn().mockResolvedValue(false)
+jest.mock('@/services/kds/kitchenDisplayStations', () => ({ debeMarcarCocina: (...a: unknown[]) => debeMarcarCocinaMock(...a) }))
+const armarComandasMock = jest.fn().mockResolvedValue(undefined)
+jest.mock('@/services/kds/kitchenTicketAuthoring.service', () => ({
+  armarComandasTrasCommit: (...a: unknown[]) => armarComandasMock(...a),
+}))
+
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import * as paymentService from '@/services/tpv/payment.tpv.service'
@@ -734,5 +741,34 @@ describe('recordOrderPayment — el inventario no puede desmentir un cobro ya re
       expect(result.inventoryWarning).toBeUndefined()
       expect(productInventoryService.deductInventoryForProduct).not.toHaveBeenCalled()
     })
+  })
+})
+
+describe('recordOrderPayment — la comanda de pantalla nace al saldar (etapa 3 del KDS)', () => {
+  beforeEach(() => {
+    const order = makeOrder()
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+    ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
+    ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
+  })
+  afterEach(() => debeMarcarCocinaMock.mockResolvedValue(false))
+
+  it('con pantalla: la marca va en la escritura que salda y la comanda se arma una vez', async () => {
+    debeMarcarCocinaMock.mockResolvedValue(true)
+
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData, 'user-1')
+
+    const conMarca = (prisma.order.update as jest.Mock).mock.calls.some(([a]) => a?.data?.kitchenPendingAt instanceof Date)
+    expect(conMarca).toBe(true)
+    expect(armarComandasMock).toHaveBeenCalledTimes(1)
+    expect(armarComandasMock).toHaveBeenCalledWith(VENUE_ID, ORDER_ID, 'PAID')
+  })
+
+  it('sin pantalla: ni marca ni comanda', async () => {
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData, 'user-1')
+
+    const conMarca = (prisma.order.update as jest.Mock).mock.calls.some(([a]) => a?.data?.kitchenPendingAt instanceof Date)
+    expect(conMarca).toBe(false)
+    expect(armarComandasMock).not.toHaveBeenCalled()
   })
 })
