@@ -219,6 +219,50 @@ describe('avisosNoGuardados', () => {
       await jest.advanceTimersByTimeAsync(10 * 60_000)
       expect(reintentar).toHaveBeenCalledTimes(1)
     })
+
+    /**
+     * 🔴 Flaky del 27-sep (`noInstrumentSinSolicitud` · «cuando la base vuelve…», 0 filas en vez de 1): una vuelta que el reloj o
+     * la puerta ya arrancaron —con la base todavía caída— seguía EN CURSO cuando la prueba pedía el reingreso manual. `correr` la
+     * veía «corriendo» y no hacía nada; esa vuelta terminaba «no se guardó» y la prueba contaba 0.
+     */
+    it('🔴 _reingresarYaParaPruebas ESPERA la vuelta que el reloj ya arrancó con la base caída, y corre la entrada OTRA vez', async () => {
+      let soltar!: (guardado: boolean) => void
+      const reintentar = jest
+        .fn<Promise<boolean>, []>()
+        .mockImplementationOnce(() => new Promise<boolean>(r => (soltar = r)))
+        .mockResolvedValue(true)
+      reingresarMasTarde('m:e', reintentar, true)
+      await jest.advanceTimersByTimeAsync(ESPERAS_DE_REINGRESO_MS[0]) // el reloj la dispara: queda en curso, sin contestar
+      expect(reintentar).toHaveBeenCalledTimes(1)
+      const reingreso = _reingresarYaParaPruebas() // la base «vuelve» con esa vuelta todavía en curso
+      soltar(false) // y termina «no se guardó»: arrancó con la base caída
+      await reingreso
+      expect(reintentar).toHaveBeenCalledTimes(2) // se corrió otra vez, ya con la base de vuelta
+      await jest.advanceTimersByTimeAsync(10 * 60_000)
+      expect(reintentar).toHaveBeenCalledTimes(2) // y quedó guardada: no queda nada programado
+    })
+
+    it('🔴 _olvidarTodoParaPruebas ESPERA la vuelta en curso: lo que re-registra al volver a fallar no se cuela en la prueba siguiente', async () => {
+      let soltar!: () => void
+      const reintentar = jest.fn<Promise<boolean>, []>(async () => {
+        await new Promise<void>(r => (soltar = r))
+        // Como el controlador cuando el reingreso vuelve a fallar: marca el dinero y el canal, y vuelve a programar SU reingreso.
+        registrarAvisoNoGuardado({ merchantAccountId: 'm', attemptId: 'A', posibleDinero: true })
+        reingresarMasTarde('m:e', reintentar, true)
+        return false
+      })
+      registrarAvisoNoGuardado({ merchantAccountId: 'm', attemptId: 'A', posibleDinero: true })
+      reingresarMasTarde('m:e', reintentar, true)
+      await jest.advanceTimersByTimeAsync(ESPERAS_DE_REINGRESO_MS[0]) // la vuelta arranca y queda en curso
+      const olvido = _olvidarTodoParaPruebas() // el afterEach llega mientras corre (medido el 27-sep en integración)
+      soltar()
+      await olvido
+      await jest.advanceTimersByTimeAsync(0)
+      expect(hayDineroNoGuardado('A')).toBe(false)
+      expect(canalDelComercioFalloHacePoco('m')).toBe(false)
+      await jest.advanceTimersByTimeAsync(10 * 60_000)
+      expect(reintentar).toHaveBeenCalledTimes(1) // ningún reingreso resucitado vuelve a disparar
+    })
   })
 })
 

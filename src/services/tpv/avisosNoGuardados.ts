@@ -145,7 +145,19 @@ function programar(
   r.timer.unref()
 }
 
-async function correr(clave: string): Promise<void> {
+/**
+ * Las vueltas en curso. Producción no las lee: existen para que las pruebas esperen una vuelta que el reloj o la puerta YA
+ * arrancaron (`_reingresarYaParaPruebas`, `_olvidarTodoParaPruebas`). Cada una se quita sola al terminar.
+ */
+const vueltasEnCurso = new Set<Promise<void>>()
+
+function correr(clave: string): Promise<void> {
+  const vuelta: Promise<void> = unaVuelta(clave).finally(() => vueltasEnCurso.delete(vuelta))
+  vueltasEnCurso.add(vuelta)
+  return vuelta
+}
+
+async function unaVuelta(clave: string): Promise<void> {
   const r = buscar(clave)
   if (!r || r.corriendo) return
   r.corriendo = true
@@ -194,19 +206,38 @@ function despertarReingresos(ahora = Date.now()): void {
   for (const [clave, r] of autenticos) if (!r.corriendo) programar(clave, r, 0)
 }
 
-/** Corre YA los reingresos pendientes (pruebas de integración: la base «vuelve» sin esperar el reloj). */
+async function esperarVueltasEnCurso(): Promise<void> {
+  while (vueltasEnCurso.size > 0) await Promise.allSettled([...vueltasEnCurso])
+}
+
+/**
+ * Corre YA los reingresos pendientes (pruebas de integración: la base «vuelve» sin esperar el reloj).
+ * 🔴 Flaky del 27-sep: una vuelta que el reloj o la puerta arrancaron ANTES de esta llamada —con la base todavía caída— puede
+ * seguir en curso, y `correr` no hace nada sobre una entrada «corriendo»: esa vuelta terminaba «no se guardó» y la prueba contaba
+ * 0 filas. Por eso se espera lo que esté en curso y cada entrada se corre OTRA vez (si esa vuelta ya la guardó, no queda nada que
+ * correr). Al volver, ninguna vuelta sigue en curso.
+ */
 export async function _reingresarYaParaPruebas(): Promise<void> {
   for (const [clave, r] of [...autenticos, ...sinVerificar]) {
+    await esperarVueltasEnCurso()
     if (r.timer) clearTimeout(r.timer)
     await correr(clave)
   }
+  await esperarVueltasEnCurso()
 }
 
-export function _olvidarTodoParaPruebas(): void {
+/**
+ * El borrado es inmediato, como siempre. La promesa —que un `afterEach` debe esperar— cubre lo que queda: una vuelta EN CURSO
+ * que vuelve a fallar RE-REGISTRA su marca de dinero, la del canal y su propio reingreso DESPUÉS del borrado (medido el 27-sep:
+ * se colaban en la prueba siguiente y su reingreso corría ahí). Se espera a esas vueltas y se olvida otra vez.
+ */
+export function _olvidarTodoParaPruebas(): Promise<void> {
   intentosConDinero.clear()
   ultimaFallaPorComercio.clear()
   for (const r of [...autenticos.values(), ...sinVerificar.values()]) if (r.timer) clearTimeout(r.timer)
   autenticos.clear()
   sinVerificar.clear()
   ultimoDespertar = 0
+  if (vueltasEnCurso.size === 0) return Promise.resolve()
+  return Promise.allSettled([...vueltasEnCurso]).then(() => _olvidarTodoParaPruebas())
 }

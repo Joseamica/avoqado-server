@@ -1438,7 +1438,9 @@ describe('Ronda 20/21 · la terminal se libera SOLA: «sin rastro del banco tras
       await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS avq_prueba_rompe_ingreso()`)
     })
     afterEach(async () => {
-      _olvidarTodoParaPruebas()
+      // 🔴 Esperado, no suelto: la puerta de las pruebas anteriores despierta el reingreso con la base todavía rota, y esa vuelta,
+      // al volver a fallar, re-registraba sus marcas y su reingreso DESPUÉS del borrado — se colaban en la prueba siguiente (27-sep).
+      await _olvidarTodoParaPruebas()
       await prisma.merchantAccount.update({ where: { id: f.merchantId }, data: { angelpayWebhookSecret: null } })
     })
 
@@ -1487,6 +1489,15 @@ describe('Ronda 20/21 · la terminal se libera SOLA: «sin rastro del banco tras
       await expect(automatica(randomUUID())).rejects.toMatchObject({ code: 'WEBHOOK_NOT_CONFIRMED' })
     })
 
+    /**
+     * Tarda ~5 s y es a propósito: el reingreso que SÍ guarda el aviso sigue con la conciliación completa, y ésta espera hasta
+     * 5 s (`attemptPaymentMatch`, reintentos [0, 2 000, 3 000] ms) a que la terminal registre el Payment de A — aquí nunca llega.
+     * El 503 inicial es rápido (medido: 12-434 ms con la Mac cargada).
+     * 🔴 Flaky del 27-sep (0 filas en vez de 1): mientras esos 5 s corrían para el aviso de una prueba ANTERIOR que se había
+     * colado, el reloj de 5 s arrancaba el reingreso de A por su cuenta; `_reingresarYaParaPruebas()` lo veía «corriendo», volvía
+     * sin esperarlo y el `finally` rompía el INSERT otra vez antes de que esa vuelta lo hiciera. Ahora el afterEach espera el
+     * borrado y el reingreso manual espera toda vuelta en curso (pruebas en `tests/unit/services/tpv/avisosNoGuardados.test.ts`).
+     */
     it('🔴 cuando la base vuelve, el propio servidor REINGRESA el aviso: queda guardado sin que AngelPay reintente', async () => {
       const [m] = await comercios([HACE_UN_MINUTO()])
       await cobroDelComercio(m, new Date(Date.now() - 5 * 60_000))
