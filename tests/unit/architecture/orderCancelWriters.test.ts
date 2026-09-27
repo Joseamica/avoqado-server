@@ -71,7 +71,7 @@ const INVENTARIO: Record<string, Clase> = {
   // Anular: candado + relectura con CAS de versión + G2 (cualquier anulación con cobro vivo).
   'services/tpv/order.tpv.service.ts#voidItems': {
     clase: 'PROTEGIDA',
-    marcadores: ['lockAndReadOrderForCancel', 'assertNoLiveTerminalCharge'],
+    marcadores: ['lockExistingOrderForPayment', 'tx.order.findUnique', 'assertNoLiveTerminalCharge'],
   },
   'services/pos-sync/posSyncOrder.service.ts#processPosOrderDeleteEvent': { clase: 'VERDAD_EXTERNA', marcadores: VERDAD_EXTERNA_VIGILADA },
   'services/delivery-channels/core/cancelDeliveryOrder.service.ts#cancelDeliveryOrder': {

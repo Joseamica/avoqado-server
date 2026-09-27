@@ -21,7 +21,8 @@ import {
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
 import { computeStoredOrderTotal } from '../shared/orderBalance'
-import { assertNoLiveTerminalCharge, lockAndReadOrderForCancel } from '../shared/orderCancelGuard'
+import { assertNoLiveTerminalCharge } from '../shared/orderCancelGuard'
+import { lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
 import { baseDeCargos, recalcularCargosPorServicio } from '../shared/serviceCharges'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
@@ -1412,655 +1413,683 @@ export async function addItemsToOrder(
     )
   }
 
-  // Fetch order with version check
-  const order = await prisma.order.findUnique({
-    where: { id: orderId, venueId },
-    include: {
-      items: {
-        include: {
-          product: true,
-        },
-      },
-    },
-  })
-
-  if (!order) {
-    throw new NotFoundError('Order not found')
-  }
-
-  // Optimistic concurrency check
-  // ✅ P1 FIX: Use 409 Conflict instead of 400 Bad Request for version mismatch
-  // This allows the Android client to detect conflicts and refresh automatically
-  if (order.version !== expectedVersion) {
-    logger.warn(
-      `⚠️ [ORDER SERVICE] Version mismatch! Expected: ${expectedVersion}, Got: ${order.version}. Order was modified by another request.`,
-    )
-    // 🔴 Con code: el reducer offline clasifica VERSION_CONFLICT como
-    // TRANSITORIO (RETRY). Sin code, este mismatch caía al fallback
-    // BUSINESS_RULE y el intent se iba a cuarentena — un conflicto de
-    // concurrencia convertido en pérdida permanente.
-    throw new ConflictError(
-      `Order was modified by another request. Please refresh and try again. (Expected version: ${expectedVersion}, Current: ${order.version})`,
-      'VERSION_CONFLICT',
-    )
-  }
-
-  // Validate order is not paid
-  if (order.paymentStatus === 'PAID') {
-    throw new BadRequestError('Cannot add items to a paid order')
-  }
-
-  // Fetch products and validate
-  // ✅ FIX: Use Set to deduplicate productIds (same product can be added multiple times)
+  // Advisory stock preflight stays outside the transaction: its helper uses the global pool.
+  // Only availability is cached; Order/version and product prices are read again under Order lock.
   const uniqueProductIds = [...new Set(items.map(item => item.productId).filter((id): id is string => !!id))]
-  // Custom-amount lines need a label and a non-negative price.
-  for (const item of items) {
-    if (!item.productId && (!item.customName?.trim() || item.customUnitPriceCents == null || item.customUnitPriceCents < 0)) {
-      throw new BadRequestError('Custom line requires customName and customUnitPriceCents >= 0')
-    }
-  }
-  const products = await prisma.product.findMany({
-    where: {
-      id: { in: uniqueProductIds },
-      venueId,
-    },
-    include: {
-      category: {
-        select: { name: true },
-      },
-    },
-  })
-
-  if (products.length !== uniqueProductIds.length) {
-    const foundIds = products.map(p => p.id)
-    const missingIds = uniqueProductIds.filter(id => !foundIds.includes(id))
-    throw new BadRequestError(`Products not found or do not belong to this venue: ${missingIds.join(', ')}`)
-  }
-
-  // 🔴 Backstop de inventario para RONDAS: los tiles del cliente ya bloquean
-  // agotados, pero una app vieja (o un request directo) puede mandarlos igual.
-  // Solo productos RASTREADOS sin stock/porciones se rechazan — sin seguimiento
-  // nunca se bloquea (el inventario es opcional por producto). Corre ANTES de
-  // crear cualquier fila para no dejar rondas parciales, y falla ABIERTO si el
-  // status no se puede calcular (un error de inventario no debe tirar servicio).
-  if (asNewRound) {
-    for (const product of products) {
+  const unavailableProducts = new Set<string>()
+  if (asNewRound && uniqueProductIds.length > 0) {
+    const stockProducts = await prisma.product
+      .findMany({
+        where: { venueId, id: { in: uniqueProductIds } },
+        select: { id: true },
+        take: uniqueProductIds.length,
+      })
+      .catch(() => [])
+    for (const product of stockProducts) {
       const status = await getProductInventoryStatus(venueId, product.id).catch(() => null)
-      if (status?.inventoryMethod && !status.available) {
-        throw new BadRequestError(`"${product.name}" está agotado`)
-      }
+      if (status?.inventoryMethod && !status.available) unavailableProducts.add(product.id)
     }
   }
 
-  // Fetch all modifiers if any items have modifiers
-  const allModifierIds = normalizedItems.flatMap(item => item.modifierIds || [])
-  logger.info(`🔍 [ADD ITEMS] Modifier IDs requested: ${JSON.stringify(allModifierIds)}`)
-
-  // ✅ P1 FIX: Add venueId filter through group relation to prevent cross-tenant access (security)
-  // Modifier doesn't have direct venueId; it's accessed via ModifierGroup
-  const modifiers =
-    allModifierIds.length > 0
-      ? await prisma.modifier.findMany({
-          where: {
-            id: { in: allModifierIds },
-            group: {
-              venueId, // Security: Only fetch modifiers that belong to this venue's groups
-            },
-          },
-        })
-      : []
-
-  logger.info(`✅ [ADD ITEMS] Modifiers fetched from DB: ${modifiers.length} modifiers`)
-  modifiers.forEach(m => logger.info(`  - ${m.name} (${m.id}): $${m.price}`))
-
-  // ⭐ P0 FIX: UPSERT items - update existing items or create new ones
-  // This fixes the bug where quantity updates created duplicate items
-  // Previously, when TPV synced a quantity change, it called addItemsToOrder
-  // which always created NEW items. Now we check for existing items first.
-  const newOrderItems = await Promise.all(
-    normalizedItems.map(async item => {
-      // Custom-amount line: create directly (no catalog product, no modifiers).
-      if (!item.productId) {
-        const unitPrice = new Prisma.Decimal((item.customUnitPriceCents ?? 0) / 100)
-        const customTotal = unitPrice.mul(item.quantity)
-        const customComped = item.isCortesia === true
-        const customItem = await prisma.orderItem.create({
-          data: {
-            orderId: order.id,
-            productId: null,
-            productName: item.customName!.trim(),
-            quantity: item.quantity,
-            unitPrice,
-            discountAmount: customComped ? customTotal : 0,
-            taxAmount: 0,
-            total: customComped ? 0 : customTotal,
-            isCortesia: customComped,
-            cortesiaReason: customComped ? item.cortesiaReason?.trim() || null : null,
-            notes: normalizeNotes(item.notes),
-            course: item.course ?? null,
-            seat: item.seat ?? null,
-          },
-          include: {
-            product: {
-              select: {
-                id: true,
-                name: true,
-              },
-            },
-            modifiers: {
-              include: {
-                modifier: true,
-              },
-            },
-          },
-        })
-        logger.info(`✅ [ADD ITEMS] CREATED custom line: ${customItem.productName} | $${customTotal}`)
-        return customItem
+  const { updatedOrder, newOrderItems } = await prisma.$transaction(
+    async tx => {
+      if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
+        throw new NotFoundError('Order not found')
       }
-
-      const product = products.find(p => p.id === item.productId)!
-      const normalizedNotes = normalizeNotes(item.notes)
-
-      // Calculate modifier total
-      const itemModifiers = item.modifierIds || []
-      const modifierTotal = itemModifiers.reduce((sum, modifierId) => {
-        const modifier = modifiers.find(m => m.id === modifierId)
-        return sum + (modifier ? Number(modifier.price) : 0)
-      }, 0)
-
-      logger.info(
-        `💰 [ADD ITEMS] Product: ${product.name} | Base: $${product.price} | Modifiers: $${modifierTotal} | Total per unit: $${Number(product.price) + modifierTotal}`,
-      )
-
-      // ─── Venta por peso (soldByWeight) — spec 2026-07-18-venta-por-peso ────
-      // Weighted lines carry weightQuantity (kg) and quantity=1; the SERVER
-      // computes base = round(price/kg × weightKg, 2). Weight on a non-weighted
-      // product, or a weighted product without weight, is an explicit 400.
-      const rawWeightKg = item.weightQuantity != null ? Number(item.weightQuantity) : null
-      if (product.soldByWeight) {
-        if (rawWeightKg == null || !Number.isFinite(rawWeightKg) || rawWeightKg <= 0) {
-          throw new BadRequestError(`El producto "${product.name}" se vende por peso; envía weightQuantity en kilogramos.`)
-        }
-        if (rawWeightKg < 0.001 || rawWeightKg > 99.999) {
-          throw new BadRequestError(`El peso para "${product.name}" está fuera de rango (0.001–99.999 kg).`)
-        }
-        if (item.quantity !== 1) {
-          throw new BadRequestError(`Las líneas por peso llevan cantidad 1 — cada pesada es una línea (producto "${product.name}").`)
-        }
-      } else if (rawWeightKg != null) {
-        throw new BadRequestError(`El producto "${product.name}" no se vende por peso; no envíes weightQuantity.`)
-      }
-      // Quantize to the PERSISTED precision (OrderItem.weightQuantity is Decimal(12,3))
-      // BEFORE any money math, so Order.total is always derivable from the stored
-      // weightQuantity — a reprint or a >3-decimal scale reading can't diverge by a
-      // cent (review 2026-07-19, fix #3). All downstream (total, persist, deduction)
-      // uses this quantized value.
-      const weightKg = rawWeightKg != null ? Math.round(rawWeightKg * 1000) / 1000 : null
-      const weightedBase = weightKg != null ? Math.round(Number(product.price) * weightKg * 100) / 100 : null
-      /** Line total for qty units — weight-aware (weighted lines: qty is 1). */
-      const lineTotalFor = (qty: number) =>
-        new Prisma.Decimal(weightedBase != null ? weightedBase + modifierTotal * qty : (Number(product.price) + modifierTotal) * qty)
-
-      // ⭐ Idempotency: prefer externalId when provided
-      const normalizedExternalId = normalizeExternalId(item.externalId)
-
-      if (normalizedExternalId) {
-        const existingByExternal = await prisma.orderItem.findFirst({
-          where: {
-            orderId: order.id,
-            externalId: normalizedExternalId,
-          },
-          include: {
-            product: {
-              select: {
-                id: true,
-                name: true,
-              },
-            },
-            modifiers: {
-              include: {
-                modifier: true,
-              },
-            },
-          },
-        })
-
-        if (existingByExternal) {
-          const updatedQuantity = item.quantity
-          const updatedTotal = lineTotalFor(updatedQuantity)
-
-          logger.info(
-            `🔄 [ADD ITEMS] UPDATING by externalId: ${product.name} | old qty=${existingByExternal.quantity} → new qty=${updatedQuantity} | externalId=${normalizedExternalId}`,
-          )
-
-          const updatedItem = await prisma.orderItem.update({
-            where: { id: existingByExternal.id },
-            data: {
-              quantity: updatedQuantity,
-              total: updatedTotal,
-              // Persist the re-weighed value: total is weight-aware (lineTotalFor),
-              // so weightQuantity/weightUnit must move with it or the receipt +
-              // inventory deduction go stale (review 2026-07-19, fix #1).
-              weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
-              weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
-              notes: normalizedNotes ?? existingByExternal.notes,
-              externalId: existingByExternal.externalId ?? normalizedExternalId,
-            },
-            include: {
-              product: {
-                select: {
-                  id: true,
-                  name: true,
-                },
-              },
-              modifiers: {
-                include: {
-                  modifier: true,
-                },
-              },
-            },
-          })
-
-          logger.info(`✅ [ADD ITEMS] UPDATED OrderItem by externalId: ${product.name} | qty=${updatedItem.quantity}`)
-          return updatedItem
-        }
-
-        const existingById = await prisma.orderItem.findFirst({
-          where: {
-            id: normalizedExternalId,
-            orderId: order.id,
-          },
-          include: {
-            product: {
-              select: {
-                id: true,
-                name: true,
-              },
-            },
-            modifiers: {
-              include: {
-                modifier: true,
-              },
-            },
-          },
-        })
-
-        if (existingById) {
-          const updatedQuantity = item.quantity
-          const updatedTotal = lineTotalFor(updatedQuantity)
-
-          logger.info(
-            `🔄 [ADD ITEMS] UPDATING by id fallback: ${product.name} | old qty=${existingById.quantity} → new qty=${updatedQuantity} | externalId=${normalizedExternalId}`,
-          )
-
-          const updatedItem = await prisma.orderItem.update({
-            where: { id: existingById.id },
-            data: {
-              quantity: updatedQuantity,
-              total: updatedTotal,
-              weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
-              weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
-              notes: normalizedNotes ?? existingById.notes,
-              externalId: existingById.externalId ?? normalizedExternalId,
-            },
-            include: {
-              product: {
-                select: {
-                  id: true,
-                  name: true,
-                },
-              },
-              modifiers: {
-                include: {
-                  modifier: true,
-                },
-              },
-            },
-          })
-
-          logger.info(`✅ [ADD ITEMS] UPDATED OrderItem by id fallback: ${product.name} | qty=${updatedItem.quantity}`)
-          return updatedItem
-        }
-
-        // If externalId provided and no match, create new line (no merge)
-        const itemTotal = lineTotalFor(item.quantity)
-        const lineComped = item.isCortesia === true
-        const createdItem = await prisma.orderItem.create({
-          data: {
-            orderId: order.id,
-            productId: item.productId,
-            productName: product.name,
-            productSku: product.sku,
-            categoryName: product.category?.name || null,
-            quantity: item.quantity,
-            unitPrice: product.price,
-            weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
-            weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
-            discountAmount: lineComped ? itemTotal : 0,
-            taxAmount: 0,
-            total: lineComped ? 0 : itemTotal,
-            isCortesia: lineComped,
-            cortesiaReason: lineComped ? item.cortesiaReason?.trim() || null : null,
-            notes: normalizedNotes,
-            course: item.course ?? null,
-            seat: item.seat ?? null,
-            externalId: normalizedExternalId,
-            modifiers: {
-              create: itemModifiers.map(modifierId => {
-                const modifier = modifiers.find(m => m.id === modifierId)!
-                logger.info(`  📎 [ADD ITEMS] Creating OrderItemModifier: ${modifier.name} ($${modifier.price})`)
-                return {
-                  modifierId,
-                  name: modifier.name,
-                  quantity: 1,
-                  price: modifier.price,
-                }
-              }),
-            },
-          },
-          include: {
-            product: {
-              select: {
-                id: true,
-                name: true,
-              },
-            },
-            modifiers: {
-              include: {
-                modifier: true,
-              },
-            },
-          },
-        })
-
-        logger.info(`✅ [ADD ITEMS] CREATED OrderItem by externalId: ${product.name} | qty=${createdItem.quantity}`)
-        return createdItem
-      }
-
-      // Sort modifier IDs for consistent comparison
-      const sortedNewModifiers = [...itemModifiers].sort()
-
-      // More precise check: query existing items with their modifiers and match by notes + modifiers
-      const existingItemsWithModifiers = await prisma.orderItem.findMany({
-        where: {
-          orderId: order.id,
-          productId: item.productId,
-        },
+      // Fetch order with version check
+      const order = await tx.order.findUnique({
+        where: { id: orderId, venueId },
         include: {
-          modifiers: true,
+          items: {
+            include: {
+              product: true,
+            },
+          },
         },
       })
 
-      // D9 (venta por peso): weighted lines NEVER merge into an existing line —
-      // every weighing is its own line, so the lookup is skipped entirely.
-      // Cortesía: comped lines never merge either (in EITHER direction) — a
-      // merge would silently swallow the $0 line into a paid one (money bug).
-      const existingItemWithModifiers =
-        asNewRound || weightKg != null || item.isCortesia === true
-          ? undefined
-          : existingItemsWithModifiers.find(existing => {
-              if (existing.isCortesia) return false
-              const existingModifierIds = existing.modifiers.map(m => m.modifierId).sort()
-              const notesMatch = normalizeNotes(existing.notes) === normalizedNotes
-              // TABLE_SERVICE: lines in different courses never merge.
-              const courseMatch = (existing.course ?? null) === (item.course ?? null)
-              // TABLE_SERVICE: lines for different seats never merge either.
-              const seatMatch = (existing.seat ?? null) === (item.seat ?? null)
-              return notesMatch && courseMatch && seatMatch && JSON.stringify(existingModifierIds) === JSON.stringify(sortedNewModifiers)
+      if (!order) {
+        throw new NotFoundError('Order not found')
+      }
+
+      // Optimistic concurrency check
+      // ✅ P1 FIX: Use 409 Conflict instead of 400 Bad Request for version mismatch
+      // This allows the Android client to detect conflicts and refresh automatically
+      if (order.version !== expectedVersion) {
+        logger.warn(
+          `⚠️ [ORDER SERVICE] Version mismatch! Expected: ${expectedVersion}, Got: ${order.version}. Order was modified by another request.`,
+        )
+        // 🔴 Con code: el reducer offline clasifica VERSION_CONFLICT como
+        // TRANSITORIO (RETRY). Sin code, este mismatch caía al fallback
+        // BUSINESS_RULE y el intent se iba a cuarentena — un conflicto de
+        // concurrencia convertido en pérdida permanente.
+        throw new ConflictError(
+          `Order was modified by another request. Please refresh and try again. (Expected version: ${expectedVersion}, Current: ${order.version})`,
+          'VERSION_CONFLICT',
+        )
+      }
+
+      // Validate order is not paid
+      if (order.paymentStatus === 'PAID') {
+        throw new BadRequestError('Cannot add items to a paid order')
+      }
+
+      // Fetch products and validate
+      // ✅ FIX: Use Set to deduplicate productIds (same product can be added multiple times)
+      // Custom-amount lines need a label and a non-negative price.
+      for (const item of items) {
+        if (!item.productId && (!item.customName?.trim() || item.customUnitPriceCents == null || item.customUnitPriceCents < 0)) {
+          throw new BadRequestError('Custom line requires customName and customUnitPriceCents >= 0')
+        }
+      }
+      const products = await tx.product.findMany({
+        where: {
+          id: { in: uniqueProductIds },
+          venueId,
+        },
+        include: {
+          category: {
+            select: { name: true },
+          },
+        },
+      })
+
+      if (products.length !== uniqueProductIds.length) {
+        const foundIds = products.map(p => p.id)
+        const missingIds = uniqueProductIds.filter(id => !foundIds.includes(id))
+        throw new BadRequestError(`Products not found or do not belong to this venue: ${missingIds.join(', ')}`)
+      }
+
+      // 🔴 Backstop de inventario para RONDAS: los tiles del cliente ya bloquean
+      // agotados, pero una app vieja (o un request directo) puede mandarlos igual.
+      // Solo productos RASTREADOS sin stock/porciones se rechazan — sin seguimiento
+      // nunca se bloquea (el inventario es opcional por producto). Corre ANTES de
+      // crear cualquier fila para no dejar rondas parciales, y falla ABIERTO si el
+      // status no se puede calcular (un error de inventario no debe tirar servicio).
+      if (asNewRound) {
+        for (const product of products) {
+          if (unavailableProducts.has(product.id)) {
+            throw new BadRequestError(`"${product.name}" está agotado`)
+          }
+        }
+      }
+
+      // Fetch all modifiers if any items have modifiers
+      const allModifierIds = normalizedItems.flatMap(item => item.modifierIds || [])
+      logger.info(`🔍 [ADD ITEMS] Modifier IDs requested: ${JSON.stringify(allModifierIds)}`)
+
+      // ✅ P1 FIX: Add venueId filter through group relation to prevent cross-tenant access (security)
+      // Modifier doesn't have direct venueId; it's accessed via ModifierGroup
+      const modifiers =
+        allModifierIds.length > 0
+          ? await tx.modifier.findMany({
+              where: {
+                id: { in: allModifierIds },
+                group: {
+                  venueId, // Security: Only fetch modifiers that belong to this venue's groups
+                },
+              },
+            })
+          : []
+
+      logger.info(`✅ [ADD ITEMS] Modifiers fetched from DB: ${modifiers.length} modifiers`)
+      modifiers.forEach(m => logger.info(`  - ${m.name} (${m.id}): $${m.price}`))
+
+      // ⭐ P0 FIX: UPSERT items - update existing items or create new ones
+      // This fixes the bug where quantity updates created duplicate items
+      // Previously, when TPV synced a quantity change, it called addItemsToOrder
+      // which always created NEW items. Now we check for existing items first.
+      const newOrderItems = await Promise.all(
+        normalizedItems.map(async item => {
+          // Custom-amount line: create directly (no catalog product, no modifiers).
+          if (!item.productId) {
+            const unitPrice = new Prisma.Decimal((item.customUnitPriceCents ?? 0) / 100)
+            const customTotal = unitPrice.mul(item.quantity)
+            const customComped = item.isCortesia === true
+            const customItem = await tx.orderItem.create({
+              data: {
+                orderId: order.id,
+                productId: null,
+                productName: item.customName!.trim(),
+                quantity: item.quantity,
+                unitPrice,
+                discountAmount: customComped ? customTotal : 0,
+                taxAmount: 0,
+                total: customComped ? 0 : customTotal,
+                isCortesia: customComped,
+                cortesiaReason: customComped ? item.cortesiaReason?.trim() || null : null,
+                notes: normalizeNotes(item.notes),
+                course: item.course ?? null,
+                seat: item.seat ?? null,
+              },
+              include: {
+                product: {
+                  select: {
+                    id: true,
+                    name: true,
+                  },
+                },
+                modifiers: {
+                  include: {
+                    modifier: true,
+                  },
+                },
+              },
+            })
+            logger.info(`✅ [ADD ITEMS] CREATED custom line: ${customItem.productName} | $${customTotal}`)
+            return customItem
+          }
+
+          const product = products.find(p => p.id === item.productId)!
+          const normalizedNotes = normalizeNotes(item.notes)
+
+          // Calculate modifier total
+          const itemModifiers = item.modifierIds || []
+          const modifierTotal = itemModifiers.reduce((sum, modifierId) => {
+            const modifier = modifiers.find(m => m.id === modifierId)
+            return sum + (modifier ? Number(modifier.price) : 0)
+          }, 0)
+
+          logger.info(
+            `💰 [ADD ITEMS] Product: ${product.name} | Base: $${product.price} | Modifiers: $${modifierTotal} | Total per unit: $${Number(product.price) + modifierTotal}`,
+          )
+
+          // ─── Venta por peso (soldByWeight) — spec 2026-07-18-venta-por-peso ────
+          // Weighted lines carry weightQuantity (kg) and quantity=1; the SERVER
+          // computes base = round(price/kg × weightKg, 2). Weight on a non-weighted
+          // product, or a weighted product without weight, is an explicit 400.
+          const rawWeightKg = item.weightQuantity != null ? Number(item.weightQuantity) : null
+          if (product.soldByWeight) {
+            if (rawWeightKg == null || !Number.isFinite(rawWeightKg) || rawWeightKg <= 0) {
+              throw new BadRequestError(`El producto "${product.name}" se vende por peso; envía weightQuantity en kilogramos.`)
+            }
+            if (rawWeightKg < 0.001 || rawWeightKg > 99.999) {
+              throw new BadRequestError(`El peso para "${product.name}" está fuera de rango (0.001–99.999 kg).`)
+            }
+            if (item.quantity !== 1) {
+              throw new BadRequestError(`Las líneas por peso llevan cantidad 1 — cada pesada es una línea (producto "${product.name}").`)
+            }
+          } else if (rawWeightKg != null) {
+            throw new BadRequestError(`El producto "${product.name}" no se vende por peso; no envíes weightQuantity.`)
+          }
+          // Quantize to the PERSISTED precision (OrderItem.weightQuantity is Decimal(12,3))
+          // BEFORE any money math, so Order.total is always derivable from the stored
+          // weightQuantity — a reprint or a >3-decimal scale reading can't diverge by a
+          // cent (review 2026-07-19, fix #3). All downstream (total, persist, deduction)
+          // uses this quantized value.
+          const weightKg = rawWeightKg != null ? Math.round(rawWeightKg * 1000) / 1000 : null
+          const weightedBase = weightKg != null ? Math.round(Number(product.price) * weightKg * 100) / 100 : null
+          /** Line total for qty units — weight-aware (weighted lines: qty is 1). */
+          const lineTotalFor = (qty: number) =>
+            new Prisma.Decimal(weightedBase != null ? weightedBase + modifierTotal * qty : (Number(product.price) + modifierTotal) * qty)
+
+          // ⭐ Idempotency: prefer externalId when provided
+          const normalizedExternalId = normalizeExternalId(item.externalId)
+
+          if (normalizedExternalId) {
+            const existingByExternal = await tx.orderItem.findFirst({
+              where: {
+                orderId: order.id,
+                externalId: normalizedExternalId,
+              },
+              include: {
+                product: {
+                  select: {
+                    id: true,
+                    name: true,
+                  },
+                },
+                modifiers: {
+                  include: {
+                    modifier: true,
+                  },
+                },
+              },
             })
 
-      if (existingItemWithModifiers) {
-        // ⭐ UPDATE existing item instead of creating new one
-        const updatedQuantity = item._count > 1 ? existingItemWithModifiers.quantity + item.quantity : item.quantity
-        const updatedTotal = lineTotalFor(updatedQuantity)
+            if (existingByExternal) {
+              const updatedQuantity = item.quantity
+              const updatedTotal = lineTotalFor(updatedQuantity)
 
-        logger.info(
-          `🔄 [ADD ITEMS] UPDATING existing item: ${product.name} | old qty=${existingItemWithModifiers.quantity} → new qty=${updatedQuantity} | merged=${item._count > 1}`,
-        )
+              logger.info(
+                `🔄 [ADD ITEMS] UPDATING by externalId: ${product.name} | old qty=${existingByExternal.quantity} → new qty=${updatedQuantity} | externalId=${normalizedExternalId}`,
+              )
 
-        const updatedItem = await prisma.orderItem.update({
-          where: { id: existingItemWithModifiers.id },
-          data: {
-            quantity: updatedQuantity,
-            total: updatedTotal,
-            // Clears a stale weight if a now-normal product merges into a line that
-            // was weighed before soldByWeight was toggled off (review 2026-07-19).
-            weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
-            weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
-            notes: normalizedNotes ?? existingItemWithModifiers.notes,
-          },
-          include: {
-            product: {
-              select: {
-                id: true,
-                name: true,
+              const updatedItem = await tx.orderItem.update({
+                where: { id: existingByExternal.id },
+                data: {
+                  quantity: updatedQuantity,
+                  total: updatedTotal,
+                  // Persist the re-weighed value: total is weight-aware (lineTotalFor),
+                  // so weightQuantity/weightUnit must move with it or the receipt +
+                  // inventory deduction go stale (review 2026-07-19, fix #1).
+                  weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
+                  weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
+                  notes: normalizedNotes ?? existingByExternal.notes,
+                  externalId: existingByExternal.externalId ?? normalizedExternalId,
+                },
+                include: {
+                  product: {
+                    select: {
+                      id: true,
+                      name: true,
+                    },
+                  },
+                  modifiers: {
+                    include: {
+                      modifier: true,
+                    },
+                  },
+                },
+              })
+
+              logger.info(`✅ [ADD ITEMS] UPDATED OrderItem by externalId: ${product.name} | qty=${updatedItem.quantity}`)
+              return updatedItem
+            }
+
+            const existingById = await tx.orderItem.findFirst({
+              where: {
+                id: normalizedExternalId,
+                orderId: order.id,
               },
-            },
-            modifiers: {
               include: {
-                modifier: true,
+                product: {
+                  select: {
+                    id: true,
+                    name: true,
+                  },
+                },
+                modifiers: {
+                  include: {
+                    modifier: true,
+                  },
+                },
+              },
+            })
+
+            if (existingById) {
+              const updatedQuantity = item.quantity
+              const updatedTotal = lineTotalFor(updatedQuantity)
+
+              logger.info(
+                `🔄 [ADD ITEMS] UPDATING by id fallback: ${product.name} | old qty=${existingById.quantity} → new qty=${updatedQuantity} | externalId=${normalizedExternalId}`,
+              )
+
+              const updatedItem = await tx.orderItem.update({
+                where: { id: existingById.id },
+                data: {
+                  quantity: updatedQuantity,
+                  total: updatedTotal,
+                  weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
+                  weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
+                  notes: normalizedNotes ?? existingById.notes,
+                  externalId: existingById.externalId ?? normalizedExternalId,
+                },
+                include: {
+                  product: {
+                    select: {
+                      id: true,
+                      name: true,
+                    },
+                  },
+                  modifiers: {
+                    include: {
+                      modifier: true,
+                    },
+                  },
+                },
+              })
+
+              logger.info(`✅ [ADD ITEMS] UPDATED OrderItem by id fallback: ${product.name} | qty=${updatedItem.quantity}`)
+              return updatedItem
+            }
+
+            // If externalId provided and no match, create new line (no merge)
+            const itemTotal = lineTotalFor(item.quantity)
+            const lineComped = item.isCortesia === true
+            const createdItem = await tx.orderItem.create({
+              data: {
+                orderId: order.id,
+                productId: item.productId,
+                productName: product.name,
+                productSku: product.sku,
+                categoryName: product.category?.name || null,
+                quantity: item.quantity,
+                unitPrice: product.price,
+                weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
+                weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
+                discountAmount: lineComped ? itemTotal : 0,
+                taxAmount: 0,
+                total: lineComped ? 0 : itemTotal,
+                isCortesia: lineComped,
+                cortesiaReason: lineComped ? item.cortesiaReason?.trim() || null : null,
+                notes: normalizedNotes,
+                course: item.course ?? null,
+                seat: item.seat ?? null,
+                externalId: normalizedExternalId,
+                modifiers: {
+                  create: itemModifiers.map(modifierId => {
+                    const modifier = modifiers.find(m => m.id === modifierId)!
+                    logger.info(`  📎 [ADD ITEMS] Creating OrderItemModifier: ${modifier.name} ($${modifier.price})`)
+                    return {
+                      modifierId,
+                      name: modifier.name,
+                      quantity: 1,
+                      price: modifier.price,
+                    }
+                  }),
+                },
+              },
+              include: {
+                product: {
+                  select: {
+                    id: true,
+                    name: true,
+                  },
+                },
+                modifiers: {
+                  include: {
+                    modifier: true,
+                  },
+                },
+              },
+            })
+
+            logger.info(`✅ [ADD ITEMS] CREATED OrderItem by externalId: ${product.name} | qty=${createdItem.quantity}`)
+            return createdItem
+          }
+
+          // Sort modifier IDs for consistent comparison
+          const sortedNewModifiers = [...itemModifiers].sort()
+
+          // More precise check: query existing items with their modifiers and match by notes + modifiers
+          const existingItemsWithModifiers = await tx.orderItem.findMany({
+            where: {
+              orderId: order.id,
+              productId: item.productId,
+            },
+            include: {
+              modifiers: true,
+            },
+          })
+
+          // D9 (venta por peso): weighted lines NEVER merge into an existing line —
+          // every weighing is its own line, so the lookup is skipped entirely.
+          // Cortesía: comped lines never merge either (in EITHER direction) — a
+          // merge would silently swallow the $0 line into a paid one (money bug).
+          const existingItemWithModifiers =
+            asNewRound || weightKg != null || item.isCortesia === true
+              ? undefined
+              : existingItemsWithModifiers.find(existing => {
+                  if (existing.isCortesia) return false
+                  const existingModifierIds = existing.modifiers.map(m => m.modifierId).sort()
+                  const notesMatch = normalizeNotes(existing.notes) === normalizedNotes
+                  // TABLE_SERVICE: lines in different courses never merge.
+                  const courseMatch = (existing.course ?? null) === (item.course ?? null)
+                  // TABLE_SERVICE: lines for different seats never merge either.
+                  const seatMatch = (existing.seat ?? null) === (item.seat ?? null)
+                  return (
+                    notesMatch && courseMatch && seatMatch && JSON.stringify(existingModifierIds) === JSON.stringify(sortedNewModifiers)
+                  )
+                })
+
+          if (existingItemWithModifiers) {
+            // ⭐ UPDATE existing item instead of creating new one
+            const updatedQuantity = item._count > 1 ? existingItemWithModifiers.quantity + item.quantity : item.quantity
+            const updatedTotal = lineTotalFor(updatedQuantity)
+
+            logger.info(
+              `🔄 [ADD ITEMS] UPDATING existing item: ${product.name} | old qty=${existingItemWithModifiers.quantity} → new qty=${updatedQuantity} | merged=${item._count > 1}`,
+            )
+
+            const updatedItem = await tx.orderItem.update({
+              where: { id: existingItemWithModifiers.id },
+              data: {
+                quantity: updatedQuantity,
+                total: updatedTotal,
+                // Clears a stale weight if a now-normal product merges into a line that
+                // was weighed before soldByWeight was toggled off (review 2026-07-19).
+                weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
+                weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
+                notes: normalizedNotes ?? existingItemWithModifiers.notes,
+              },
+              include: {
+                product: {
+                  select: {
+                    id: true,
+                    name: true,
+                  },
+                },
+                modifiers: {
+                  include: {
+                    modifier: true,
+                  },
+                },
+              },
+            })
+
+            logger.info(`✅ [ADD ITEMS] UPDATED OrderItem: ${product.name} | qty=${updatedItem.quantity}`)
+            return updatedItem
+          }
+
+          // Create NEW order item with modifiers (original behavior)
+          // ✅ Toast/Square pattern: Denormalize product data for order history preservation
+          const itemTotal = lineTotalFor(item.quantity)
+          const plainComped = item.isCortesia === true
+          const createdItem = await tx.orderItem.create({
+            data: {
+              orderId: order.id,
+              productId: item.productId,
+              // Denormalized fields - preserved even if product is later deleted
+              productName: product.name,
+              productSku: product.sku,
+              categoryName: product.category?.name || null,
+              quantity: item.quantity,
+              unitPrice: product.price,
+              weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
+              weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
+              discountAmount: plainComped ? itemTotal : 0,
+              taxAmount: 0,
+              total: plainComped ? 0 : itemTotal,
+              isCortesia: plainComped,
+              cortesiaReason: plainComped ? item.cortesiaReason?.trim() || null : null,
+              notes: normalizedNotes,
+              course: item.course ?? null,
+              seat: item.seat ?? null,
+              sentToKitchenAt: roundSentAt,
+              modifiers: {
+                create: itemModifiers.map(modifierId => {
+                  const modifier = modifiers.find(m => m.id === modifierId)!
+                  logger.info(`  📎 [ADD ITEMS] Creating OrderItemModifier: ${modifier.name} ($${modifier.price})`)
+                  return {
+                    modifierId,
+                    // Denormalized modifier name - preserved even if modifier is later deleted
+                    name: modifier.name,
+                    quantity: 1,
+                    price: modifier.price,
+                  }
+                }),
               },
             },
-          },
-        })
+            include: {
+              product: {
+                select: {
+                  id: true,
+                  name: true,
+                },
+              },
+              modifiers: {
+                include: {
+                  modifier: true,
+                },
+              },
+            },
+          })
 
-        logger.info(`✅ [ADD ITEMS] UPDATED OrderItem: ${product.name} | qty=${updatedItem.quantity}`)
-        return updatedItem
+          logger.info(`✅ [ADD ITEMS] Created NEW OrderItem: ${product.name} with ${createdItem.modifiers.length} modifiers`)
+          return createdItem
+        }),
+      )
+
+      // ⭐ P0 FIX: Re-fetch all items from DB to avoid double-counting updated items
+      // Previously we did [...order.items, ...newOrderItems] but this would duplicate
+      // items that were UPDATED (old version + new version)
+      const allItemsFromDb = await tx.orderItem.findMany({
+        where: { orderId: order.id },
+      })
+      const newSubtotal = allItemsFromDb.reduce((sum, item) => sum + Number(item.total), 0)
+      // 🔴 Las líneas de promoción NO entran a la base de los descuentos % de
+      // orden: la promo ya es un precio negociado — incluirla re-descuenta lo ya
+      // descontado ($20 → $39.80 al meter un combo de $99). Mismo criterio que el
+      // discountEngine y recalculateOrderTotals.
+      const discountBase = allItemsFromDb.filter(item => !(item as any).orderPromotionId).reduce((sum, item) => sum + Number(item.total), 0)
+
+      // 🔄 Recalculate percentage-based discounts when items are added
+      // Fetch any applied OrderDiscounts and recalculate PERCENTAGE discounts
+      const orderDiscounts = await tx.orderDiscount.findMany({
+        where: { orderId },
+        include: { discount: true },
+      })
+
+      let newDiscountAmount = 0
+      for (const orderDiscount of orderDiscounts) {
+        // 🔴 MONEY (auditoría 2026-07-18): filas con appliedToItemIds son descuentos
+        // POR ARTÍCULO — su % NO se re-deriva sobre el subtotal completo. Y el valor
+        // es el DENORMALIZADO de la fila, no el del catálogo vivo.
+        const isItemScoped = ((orderDiscount as any).appliedToItemIds?.length ?? 0) > 0
+        const discountType = orderDiscount.type
+        const discountValue = Number(orderDiscount.value || 0)
+
+        if (!isItemScoped && discountType === 'PERCENTAGE' && discountValue > 0) {
+          // Recalculate percentage based on NEW subtotal
+          const recalculatedAmount = (discountBase * discountValue) / 100
+          const roundedAmount = Math.round(recalculatedAmount * 100) / 100
+
+          logger.info(`  🔄 Recalculating PERCENTAGE discount: ${discountValue}% of $${newSubtotal} = $${roundedAmount}`)
+
+          // Update individual OrderDiscount record
+          await tx.orderDiscount.update({
+            where: { id: orderDiscount.id },
+            data: { amount: roundedAmount },
+          })
+
+          newDiscountAmount += roundedAmount
+        } else {
+          // FIXED_AMOUNT or COUPON - keep original amount
+          newDiscountAmount += Number(orderDiscount.amount)
+        }
       }
 
-      // Create NEW order item with modifiers (original behavior)
-      // ✅ Toast/Square pattern: Denormalize product data for order history preservation
-      const itemTotal = lineTotalFor(item.quantity)
-      const plainComped = item.isCortesia === true
-      const createdItem = await prisma.orderItem.create({
+      // If no OrderDiscounts but order has discountAmount, preserve it (from comp/manual discount)
+      if (orderDiscounts.length === 0 && Number(order.discountAmount) > 0) {
+        newDiscountAmount = Number(order.discountAmount)
+      }
+
+      // Cobros por servicio (auditoría 2026-07-18): agregar una ronda NO debe tirar
+      // el cargo del total. Base = subtotal − descuentos; los % se re-calculan.
+      // Una sola definición de la regla (`shared/serviceCharges.ts`): antes vivía escrita a mano
+      // aquí y en `addItemsToOrder`, con aritmética de `Number` que perdía un centavo.
+      const baseForCharges = baseDeCargos(newSubtotal, newDiscountAmount)
+      const newServiceChargeAmount = await recalcularCargosPorServicio(tx, orderId, baseForCharges)
+
+      const newTotal = baseForCharges.plus(newServiceChargeAmount).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP).toNumber()
+
+      // Calculate remaining balance (for partial payment tracking)
+      const currentPaidAmount = Number(order.paidAmount || 0)
+      const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
+
+      logger.info(`  📊 New totals: subtotal=$${newSubtotal}, discount=$${newDiscountAmount}, total=$${newTotal}`)
+
+      // 🛡️ CAS (compare-and-swap): subimos totales + versión SOLO si la versión
+      // sigue siendo la que leímos (order.version). Si una ronda concurrente la
+      // movió entre el read y el write, count=0 → lanzamos VERSION_CONFLICT para
+      // que el llamador (reducer sync → reject transitorio, u online 409) reintente
+      // recomputando sobre el set COMPLETO de items — así el total nunca se
+      // sobrescribe con un cálculo que ignoró la otra ronda. Antes era un
+      // increment ciego (WHERE id) que permitía doble aplicación de totales.
+      const casBump = await tx.order.updateMany({
+        where: { id: orderId, version: order.version },
         data: {
-          orderId: order.id,
-          productId: item.productId,
-          // Denormalized fields - preserved even if product is later deleted
-          productName: product.name,
-          productSku: product.sku,
-          categoryName: product.category?.name || null,
-          quantity: item.quantity,
-          unitPrice: product.price,
-          weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
-          weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
-          discountAmount: plainComped ? itemTotal : 0,
-          taxAmount: 0,
-          total: plainComped ? 0 : itemTotal,
-          isCortesia: plainComped,
-          cortesiaReason: plainComped ? item.cortesiaReason?.trim() || null : null,
-          notes: normalizedNotes,
-          course: item.course ?? null,
-          seat: item.seat ?? null,
-          sentToKitchenAt: roundSentAt,
-          modifiers: {
-            create: itemModifiers.map(modifierId => {
-              const modifier = modifiers.find(m => m.id === modifierId)!
-              logger.info(`  📎 [ADD ITEMS] Creating OrderItemModifier: ${modifier.name} ($${modifier.price})`)
-              return {
-                modifierId,
-                // Denormalized modifier name - preserved even if modifier is later deleted
-                name: modifier.name,
-                quantity: 1,
-                price: modifier.price,
-              }
-            }),
-          },
+          subtotal: newSubtotal,
+          discountAmount: newDiscountAmount,
+          serviceChargeAmount: newServiceChargeAmount,
+          total: newTotal,
+          remainingBalance: newRemainingBalance,
+          version: { increment: 1 },
         },
+      })
+      if (casBump.count === 0) {
+        const err: any = new Error('La orden cambió en otro dispositivo — vuelve a intentar')
+        err.code = 'VERSION_CONFLICT'
+        err.statusCode = 409
+        throw err
+      }
+      const updatedOrder = await tx.order.findUniqueOrThrow({
+        where: { id: orderId },
         include: {
-          product: {
+          items: {
+            include: {
+              product: {
+                select: {
+                  id: true,
+                  name: true,
+                  price: true,
+                },
+              },
+              modifiers: {
+                include: {
+                  modifier: true,
+                },
+              },
+            },
+          },
+          payments: {
+            include: {
+              allocations: true,
+            },
+          },
+          table: {
             select: {
               id: true,
-              name: true,
+              number: true,
             },
           },
-          modifiers: {
-            include: {
-              modifier: true,
-            },
-          },
-        },
-      })
-
-      logger.info(`✅ [ADD ITEMS] Created NEW OrderItem: ${product.name} with ${createdItem.modifiers.length} modifiers`)
-      return createdItem
-    }),
-  )
-
-  // ⭐ P0 FIX: Re-fetch all items from DB to avoid double-counting updated items
-  // Previously we did [...order.items, ...newOrderItems] but this would duplicate
-  // items that were UPDATED (old version + new version)
-  const allItemsFromDb = await prisma.orderItem.findMany({
-    where: { orderId: order.id },
-  })
-  const newSubtotal = allItemsFromDb.reduce((sum, item) => sum + Number(item.total), 0)
-  // 🔴 Las líneas de promoción NO entran a la base de los descuentos % de
-  // orden: la promo ya es un precio negociado — incluirla re-descuenta lo ya
-  // descontado ($20 → $39.80 al meter un combo de $99). Mismo criterio que el
-  // discountEngine y recalculateOrderTotals.
-  const discountBase = allItemsFromDb.filter(item => !(item as any).orderPromotionId).reduce((sum, item) => sum + Number(item.total), 0)
-
-  // 🔄 Recalculate percentage-based discounts when items are added
-  // Fetch any applied OrderDiscounts and recalculate PERCENTAGE discounts
-  const orderDiscounts = await prisma.orderDiscount.findMany({
-    where: { orderId },
-    include: { discount: true },
-  })
-
-  let newDiscountAmount = 0
-  for (const orderDiscount of orderDiscounts) {
-    // 🔴 MONEY (auditoría 2026-07-18): filas con appliedToItemIds son descuentos
-    // POR ARTÍCULO — su % NO se re-deriva sobre el subtotal completo. Y el valor
-    // es el DENORMALIZADO de la fila, no el del catálogo vivo.
-    const isItemScoped = ((orderDiscount as any).appliedToItemIds?.length ?? 0) > 0
-    const discountType = orderDiscount.type
-    const discountValue = Number(orderDiscount.value || 0)
-
-    if (!isItemScoped && discountType === 'PERCENTAGE' && discountValue > 0) {
-      // Recalculate percentage based on NEW subtotal
-      const recalculatedAmount = (discountBase * discountValue) / 100
-      const roundedAmount = Math.round(recalculatedAmount * 100) / 100
-
-      logger.info(`  🔄 Recalculating PERCENTAGE discount: ${discountValue}% of $${newSubtotal} = $${roundedAmount}`)
-
-      // Update individual OrderDiscount record
-      await prisma.orderDiscount.update({
-        where: { id: orderDiscount.id },
-        data: { amount: roundedAmount },
-      })
-
-      newDiscountAmount += roundedAmount
-    } else {
-      // FIXED_AMOUNT or COUPON - keep original amount
-      newDiscountAmount += Number(orderDiscount.amount)
-    }
-  }
-
-  // If no OrderDiscounts but order has discountAmount, preserve it (from comp/manual discount)
-  if (orderDiscounts.length === 0 && Number(order.discountAmount) > 0) {
-    newDiscountAmount = Number(order.discountAmount)
-  }
-
-  // Cobros por servicio (auditoría 2026-07-18): agregar una ronda NO debe tirar
-  // el cargo del total. Base = subtotal − descuentos; los % se re-calculan.
-  // Una sola definición de la regla (`shared/serviceCharges.ts`): antes vivía escrita a mano
-  // aquí y en `addItemsToOrder`, con aritmética de `Number` que perdía un centavo.
-  const baseForCharges = baseDeCargos(newSubtotal, newDiscountAmount)
-  const newServiceChargeAmount = await recalcularCargosPorServicio(prisma, orderId, baseForCharges)
-
-  const newTotal = baseForCharges.plus(newServiceChargeAmount).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP).toNumber()
-
-  // Calculate remaining balance (for partial payment tracking)
-  const currentPaidAmount = Number(order.paidAmount || 0)
-  const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
-
-  logger.info(`  📊 New totals: subtotal=$${newSubtotal}, discount=$${newDiscountAmount}, total=$${newTotal}`)
-
-  // 🛡️ CAS (compare-and-swap): subimos totales + versión SOLO si la versión
-  // sigue siendo la que leímos (order.version). Si una ronda concurrente la
-  // movió entre el read y el write, count=0 → lanzamos VERSION_CONFLICT para
-  // que el llamador (reducer sync → reject transitorio, u online 409) reintente
-  // recomputando sobre el set COMPLETO de items — así el total nunca se
-  // sobrescribe con un cálculo que ignoró la otra ronda. Antes era un
-  // increment ciego (WHERE id) que permitía doble aplicación de totales.
-  const casBump = await prisma.order.updateMany({
-    where: { id: orderId, version: order.version },
-    data: {
-      subtotal: newSubtotal,
-      discountAmount: newDiscountAmount,
-      serviceChargeAmount: newServiceChargeAmount,
-      total: newTotal,
-      remainingBalance: newRemainingBalance,
-      version: { increment: 1 },
-    },
-  })
-  if (casBump.count === 0) {
-    const err: any = new Error('La orden cambió en otro dispositivo — vuelve a intentar')
-    err.code = 'VERSION_CONFLICT'
-    err.statusCode = 409
-    throw err
-  }
-  const updatedOrder = await prisma.order.findUniqueOrThrow({
-    where: { id: orderId },
-    include: {
-      items: {
-        include: {
-          product: {
+          createdBy: {
             select: {
               id: true,
-              name: true,
-              price: true,
+              firstName: true,
+              lastName: true,
             },
           },
-          modifiers: {
-            include: {
-              modifier: true,
+          servedBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
             },
           },
         },
-      },
-      payments: {
-        include: {
-          allocations: true,
-        },
-      },
-      table: {
-        select: {
-          id: true,
-          number: true,
-        },
-      },
-      createdBy: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-        },
-      },
-      servedBy: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-        },
-      },
-    },
-  })
-
-  logger.info(
-    `✅ [ORDER SERVICE] Added ${newOrderItems.length} items to order ${order.orderNumber}. New total: $${newTotal} (version: ${order.version} → ${updatedOrder.version})`,
-  )
-
-  // Log modifier counts in final response
-  updatedOrder.items.forEach(item => {
-    const modifierCount = item.modifiers?.length || 0
-    if (modifierCount > 0) {
-      logger.info(`  📦 [RESPONSE] OrderItem ${item.product?.name || item.productName} has ${modifierCount} modifiers in response`)
-      item.modifiers?.forEach(om => {
-        logger.info(`     - ${om.modifier?.name || om.name}: $${om.price}`)
       })
-    }
-  })
+
+      logger.info(
+        `✅ [ORDER SERVICE] Added ${newOrderItems.length} items to order ${order.orderNumber}. New total: $${newTotal} (version: ${order.version} → ${updatedOrder.version})`,
+      )
+
+      // Log modifier counts in final response
+      updatedOrder.items.forEach(item => {
+        const modifierCount = item.modifiers?.length || 0
+        if (modifierCount > 0) {
+          logger.info(`  📦 [RESPONSE] OrderItem ${item.product?.name || item.productName} has ${modifierCount} modifiers in response`)
+          item.modifiers?.forEach(om => {
+            logger.info(`     - ${om.modifier?.name || om.name}: $${om.price}`)
+          })
+        }
+      })
+
+      return { updatedOrder, newOrderItems }
+    },
+    { timeout: 15_000, maxWait: 5_000 },
+  )
 
   // Emit Socket.IO event for real-time order updates
   const broadcastingService = socketManager.getBroadcastingService()
@@ -2224,183 +2253,193 @@ export async function removeOrderItem(
 ): Promise<Order & { tableName: string | null }> {
   logger.info(`🗑️ [ORDER SERVICE] Removing item ${orderItemId} from order ${orderId} (expected version: ${expectedVersion})`)
 
-  // Fetch order with version check
-  const order = await prisma.order.findUnique({
-    where: { id: orderId, venueId },
-    include: {
-      items: {
+  const { updatedOrder, itemToRemove } = await prisma.$transaction(
+    async tx => {
+      if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
+        throw new NotFoundError('Order not found')
+      }
+      // Fetch order with version check
+      const order = await tx.order.findUnique({
+        where: { id: orderId, venueId },
         include: {
-          product: true,
+          items: {
+            include: {
+              product: true,
+            },
+          },
         },
-      },
-    },
-  })
-
-  if (!order) {
-    throw new NotFoundError('Order not found')
-  }
-
-  // Optimistic concurrency check
-  // ✅ P1 FIX: Use 409 Conflict instead of 400 Bad Request for version mismatch
-  if (order.version !== expectedVersion) {
-    logger.warn(
-      `⚠️ [ORDER SERVICE] Version mismatch! Expected: ${expectedVersion}, Got: ${order.version}. Order was modified by another request.`,
-    )
-    // 🔴 Con code: el reducer offline clasifica VERSION_CONFLICT como
-    // TRANSITORIO (RETRY). Sin code, este mismatch caía al fallback
-    // BUSINESS_RULE y el intent se iba a cuarentena — un conflicto de
-    // concurrencia convertido en pérdida permanente.
-    throw new ConflictError(
-      `Order was modified by another request. Please refresh and try again. (Expected version: ${expectedVersion}, Current: ${order.version})`,
-      'VERSION_CONFLICT',
-    )
-  }
-
-  // Validate order is not paid
-  if (order.paymentStatus === 'PAID') {
-    throw new BadRequestError('Cannot remove items from a paid order')
-  }
-
-  // Verify item exists in order
-  const itemToRemove = order.items.find(item => item.id === orderItemId)
-  if (!itemToRemove) {
-    throw new NotFoundError('Order item not found in this order')
-  }
-
-  // Delete the order item (Prisma will cascade delete modifiers)
-  await prisma.orderItem.delete({
-    where: { id: orderItemId },
-  })
-
-  logger.info(`✅ [ORDER SERVICE] Deleted item: ${itemToRemove.product?.name || itemToRemove.productName} (${itemToRemove.id})`)
-
-  // Calculate new totals
-  const remainingItems = order.items.filter(item => item.id !== orderItemId)
-  const newSubtotal = remainingItems.reduce((sum, item) => sum + Number(item.total), 0)
-  // Misma exclusión de líneas de promo que en addItemsToOrder (ver arriba).
-  const discountBase = remainingItems.filter(item => !(item as any).orderPromotionId).reduce((sum, item) => sum + Number(item.total), 0)
-
-  // 🔄 Recalculate percentage-based discounts when items are removed
-  // Fetch any applied OrderDiscounts and recalculate PERCENTAGE discounts
-  const orderDiscounts = await prisma.orderDiscount.findMany({
-    where: { orderId },
-    include: { discount: true },
-  })
-
-  let newDiscountAmount = 0
-  for (const orderDiscount of orderDiscounts) {
-    // 🔴 MONEY (auditoría 2026-07-18): filas con appliedToItemIds son descuentos
-    // POR ARTÍCULO — su % NO se re-deriva sobre el subtotal completo. Y el valor
-    // es el DENORMALIZADO de la fila, no el del catálogo vivo.
-    const isItemScoped = ((orderDiscount as any).appliedToItemIds?.length ?? 0) > 0
-    const discountType = orderDiscount.type
-    const discountValue = Number(orderDiscount.value || 0)
-
-    if (!isItemScoped && discountType === 'PERCENTAGE' && discountValue > 0) {
-      // Recalculate percentage based on NEW subtotal
-      const recalculatedAmount = (discountBase * discountValue) / 100
-      const roundedAmount = Math.round(recalculatedAmount * 100) / 100
-
-      logger.info(`  🔄 Recalculating PERCENTAGE discount: ${discountValue}% of $${newSubtotal} = $${roundedAmount}`)
-
-      // Update individual OrderDiscount record
-      await prisma.orderDiscount.update({
-        where: { id: orderDiscount.id },
-        data: { amount: roundedAmount },
       })
 
-      newDiscountAmount += roundedAmount
-    } else {
-      // FIXED_AMOUNT or COUPON - keep original amount
-      newDiscountAmount += Number(orderDiscount.amount)
-    }
-  }
+      if (!order) {
+        throw new NotFoundError('Order not found')
+      }
 
-  // If no OrderDiscounts but order has discountAmount, preserve it (from comp/manual discount)
-  if (orderDiscounts.length === 0 && Number(order.discountAmount) > 0) {
-    newDiscountAmount = Number(order.discountAmount)
-  }
+      // Optimistic concurrency check
+      // ✅ P1 FIX: Use 409 Conflict instead of 400 Bad Request for version mismatch
+      if (order.version !== expectedVersion) {
+        logger.warn(
+          `⚠️ [ORDER SERVICE] Version mismatch! Expected: ${expectedVersion}, Got: ${order.version}. Order was modified by another request.`,
+        )
+        // 🔴 Con code: el reducer offline clasifica VERSION_CONFLICT como
+        // TRANSITORIO (RETRY). Sin code, este mismatch caía al fallback
+        // BUSINESS_RULE y el intent se iba a cuarentena — un conflicto de
+        // concurrencia convertido en pérdida permanente.
+        throw new ConflictError(
+          `Order was modified by another request. Please refresh and try again. (Expected version: ${expectedVersion}, Current: ${order.version})`,
+          'VERSION_CONFLICT',
+        )
+      }
 
-  // Cobros por servicio (auditoría 2026-07-18): agregar una ronda NO debe tirar
-  // el cargo del total. Base = subtotal − descuentos; los % se re-calculan.
-  // Una sola definición de la regla (`shared/serviceCharges.ts`): antes vivía escrita a mano
-  // aquí y en `addItemsToOrder`, con aritmética de `Number` que perdía un centavo.
-  const baseForCharges = baseDeCargos(newSubtotal, newDiscountAmount)
-  const newServiceChargeAmount = await recalcularCargosPorServicio(prisma, orderId, baseForCharges)
+      // Validate order is not paid
+      if (order.paymentStatus === 'PAID') {
+        throw new BadRequestError('Cannot remove items from a paid order')
+      }
 
-  const newTotal = baseForCharges.plus(newServiceChargeAmount).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP).toNumber()
+      // Verify item exists in order
+      const itemToRemove = order.items.find(item => item.id === orderItemId)
+      if (!itemToRemove) {
+        throw new NotFoundError('Order item not found in this order')
+      }
 
-  // Calculate remaining balance (for partial payment tracking)
-  const currentPaidAmount = Number(order.paidAmount || 0)
-  const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
+      // Delete the order item (Prisma will cascade delete modifiers)
+      await tx.orderItem.delete({
+        where: { id: orderItemId },
+      })
 
-  logger.info(`  📊 New totals: subtotal=$${newSubtotal}, discount=$${newDiscountAmount}, total=$${newTotal}`)
+      logger.info(`✅ [ORDER SERVICE] Deleted item: ${itemToRemove.product?.name || itemToRemove.productName} (${itemToRemove.id})`)
 
-  // Update order with new totals and increment version
-  const updatedOrder = await prisma.order.update({
-    where: { id: orderId },
-    data: {
-      subtotal: newSubtotal,
-      discountAmount: newDiscountAmount,
-      // 🔴 Faltaba. Recalculaba las FILAS y usaba el resultado en `total`, pero dejaba el
-      // snapshot viejo — y `computeOrderBalance`, que es lo que de verdad se cobra, lee el
-      // snapshot. Quitar un artículo bajaba el total guardado y el cobro seguía usando el
-      // cargo anterior, normalmente más alto. Su hermano `addItemsToOrder` sí lo persistía.
-      serviceChargeAmount: newServiceChargeAmount,
-      total: newTotal,
-      remainingBalance: newRemainingBalance,
-      version: {
-        increment: 1,
-      },
-    },
-    include: {
-      items: {
+      // Calculate new totals
+      const remainingItems = order.items.filter(item => item.id !== orderItemId)
+      const newSubtotal = remainingItems.reduce((sum, item) => sum + Number(item.total), 0)
+      // Misma exclusión de líneas de promo que en addItemsToOrder (ver arriba).
+      const discountBase = remainingItems.filter(item => !(item as any).orderPromotionId).reduce((sum, item) => sum + Number(item.total), 0)
+
+      // 🔄 Recalculate percentage-based discounts when items are removed
+      // Fetch any applied OrderDiscounts and recalculate PERCENTAGE discounts
+      const orderDiscounts = await tx.orderDiscount.findMany({
+        where: { orderId },
+        include: { discount: true },
+      })
+
+      let newDiscountAmount = 0
+      for (const orderDiscount of orderDiscounts) {
+        // 🔴 MONEY (auditoría 2026-07-18): filas con appliedToItemIds son descuentos
+        // POR ARTÍCULO — su % NO se re-deriva sobre el subtotal completo. Y el valor
+        // es el DENORMALIZADO de la fila, no el del catálogo vivo.
+        const isItemScoped = ((orderDiscount as any).appliedToItemIds?.length ?? 0) > 0
+        const discountType = orderDiscount.type
+        const discountValue = Number(orderDiscount.value || 0)
+
+        if (!isItemScoped && discountType === 'PERCENTAGE' && discountValue > 0) {
+          // Recalculate percentage based on NEW subtotal
+          const recalculatedAmount = (discountBase * discountValue) / 100
+          const roundedAmount = Math.round(recalculatedAmount * 100) / 100
+
+          logger.info(`  🔄 Recalculating PERCENTAGE discount: ${discountValue}% of $${newSubtotal} = $${roundedAmount}`)
+
+          // Update individual OrderDiscount record
+          await tx.orderDiscount.update({
+            where: { id: orderDiscount.id },
+            data: { amount: roundedAmount },
+          })
+
+          newDiscountAmount += roundedAmount
+        } else {
+          // FIXED_AMOUNT or COUPON - keep original amount
+          newDiscountAmount += Number(orderDiscount.amount)
+        }
+      }
+
+      // If no OrderDiscounts but order has discountAmount, preserve it (from comp/manual discount)
+      if (orderDiscounts.length === 0 && Number(order.discountAmount) > 0) {
+        newDiscountAmount = Number(order.discountAmount)
+      }
+
+      // Cobros por servicio (auditoría 2026-07-18): agregar una ronda NO debe tirar
+      // el cargo del total. Base = subtotal − descuentos; los % se re-calculan.
+      // Una sola definición de la regla (`shared/serviceCharges.ts`): antes vivía escrita a mano
+      // aquí y en `addItemsToOrder`, con aritmética de `Number` que perdía un centavo.
+      const baseForCharges = baseDeCargos(newSubtotal, newDiscountAmount)
+      const newServiceChargeAmount = await recalcularCargosPorServicio(tx, orderId, baseForCharges)
+
+      const newTotal = baseForCharges.plus(newServiceChargeAmount).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP).toNumber()
+
+      // Calculate remaining balance (for partial payment tracking)
+      const currentPaidAmount = Number(order.paidAmount || 0)
+      const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
+
+      logger.info(`  📊 New totals: subtotal=$${newSubtotal}, discount=$${newDiscountAmount}, total=$${newTotal}`)
+
+      // Update order with new totals and increment version
+      const updatedOrder = await tx.order.update({
+        where: { id: orderId },
+        data: {
+          subtotal: newSubtotal,
+          discountAmount: newDiscountAmount,
+          // 🔴 Faltaba. Recalculaba las FILAS y usaba el resultado en `total`, pero dejaba el
+          // snapshot viejo — y `computeOrderBalance`, que es lo que de verdad se cobra, lee el
+          // snapshot. Quitar un artículo bajaba el total guardado y el cobro seguía usando el
+          // cargo anterior, normalmente más alto. Su hermano `addItemsToOrder` sí lo persistía.
+          serviceChargeAmount: newServiceChargeAmount,
+          total: newTotal,
+          remainingBalance: newRemainingBalance,
+          version: {
+            increment: 1,
+          },
+        },
         include: {
-          product: {
+          items: {
+            include: {
+              product: {
+                select: {
+                  id: true,
+                  name: true,
+                  price: true,
+                },
+              },
+              modifiers: {
+                include: {
+                  modifier: true,
+                },
+              },
+            },
+          },
+          payments: {
+            include: {
+              allocations: true,
+            },
+          },
+          table: {
             select: {
               id: true,
-              name: true,
-              price: true,
+              number: true,
             },
           },
-          modifiers: {
-            include: {
-              modifier: true,
+          createdBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+            },
+          },
+          servedBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
             },
           },
         },
-      },
-      payments: {
-        include: {
-          allocations: true,
-        },
-      },
-      table: {
-        select: {
-          id: true,
-          number: true,
-        },
-      },
-      createdBy: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-        },
-      },
-      servedBy: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-        },
-      },
-    },
-  })
+      })
 
-  logger.info(
-    `✅ [ORDER SERVICE] Removed item from order ${order.orderNumber}. New total: $${newTotal} (version: ${order.version} → ${updatedOrder.version})`,
+      logger.info(
+        `✅ [ORDER SERVICE] Removed item from order ${order.orderNumber}. New total: $${newTotal} (version: ${order.version} → ${updatedOrder.version})`,
+      )
+      return { updatedOrder, itemToRemove }
+    },
+    { timeout: 15_000, maxWait: 5_000 },
   )
+
   void logAction({
     staffId: null,
     venueId,
@@ -2478,185 +2517,191 @@ export function anulacionExigeOrdenSinCobroVivo(_input: { isVoidingAllItems: boo
 export async function compItems(venueId: string, orderId: string, input: CompItemsInput): Promise<Order & { tableName: string | null }> {
   logger.info(`🚫 [ORDER SERVICE] Comping items for order ${orderId} | reason: ${input.reason}`)
 
-  // Fetch order
-  const order = await prisma.order.findUnique({
-    where: { id: orderId, venueId },
-    include: {
-      items: true,
-    },
-  })
-
-  if (!order) {
-    throw new NotFoundError('Order not found')
-  }
-
-  // Validate order is not already paid
-  if (order.paymentStatus === 'PAID') {
-    throw new BadRequestError('Cannot comp items from a paid order')
-  }
-
-  // Validate staff exists
-  const staff = await prisma.staff.findUnique({
-    where: { id: input.staffId },
-  })
-
-  if (!staff) {
-    throw new NotFoundError('Staff member not found')
-  }
-
-  // Determine which items to comp
-  const itemsToComp =
-    input.itemIds.length === 0
-      ? order.items // Comp entire order
-      : order.items.filter(item => input.itemIds.includes(item.id))
-
-  if (itemsToComp.length === 0) {
-    throw new BadRequestError('No items found to comp')
-  }
-
-  // Calculate discount amount (total of comped items)
-  const compAmount = itemsToComp.reduce((sum, item) => sum + Number(item.total), 0)
-
-  logger.info(`  💰 Comping ${itemsToComp.length} items | total discount: $${compAmount}`)
-
-  // Update order: increase discountAmount, decrease total.
-  // 🔴 MONEY: compAmount is the comped items' GROSS total (OrderItem.total never
-  // zeroes — see the transaction below). Adding it on top of a PRE-EXISTING
-  // order.discountAmount (an earlier applyDiscount, or a previous partial comp)
-  // double-counts whatever those items already gave away: a whole-order comp on
-  // an order that already carries a $25.30 discount produced discountAmount
-  // $278.30 > subtotal $253.00 and total -$25.30 (reproduced on hardware,
-  // order cmsetvfft0001c9jxv33p26gl). "Cortesía toda la cuenta" means the guest
-  // owes nothing — clamp so the comp absorbs at most the currently-remaining
-  // balance (subtotal - existing discount), never pushing discountAmount above
-  // subtotal or total below zero, no matter what was discounted before.
-  const newDiscountAmount = Math.min(Number(order.discountAmount) + compAmount, Number(order.subtotal))
-
-  const currentPaidAmount = Number(order.paidAmount || 0)
-  // El total se calcula DENTRO de la transacción, porque el cargo por servicio porcentual
-  // se recalcula sobre la base nueva y sus filas se escriben ahí mismo. Se guarda fuera
-  // sólo para la bitácora del final.
-  let newTotal = 0
-
-  const updatedOrder = await prisma.$transaction(async tx => {
-    // Mark each comped OrderItem in the SAME transaction as the order total
-    // update. Convention (docs/TPV_COBRAR_STRUCTURED_DISCOUNTS.md): OrderItem.total
-    // stays GROSS — never zeroed, that breaks gross sales reporting — the
-    // reduction lives in OrderItem.discountAmount (full item.total, since a
-    // comp is a 100% item-level discount), with isCortesia=true so receipts,
-    // printed tickets, and line-level reports stop showing it as charged.
-    for (const item of itemsToComp) {
-      await tx.orderItem.update({
-        where: { id: item.id },
-        data: {
-          isCortesia: true,
-          cortesiaReason: input.reason,
-          discountAmount: item.total,
-        },
-      })
-    }
-
-    // 🔴 MONEY: la cortesía baja la base, así que un cargo por servicio PORCENTUAL baja con
-    // ella (auditoría 2026-09-03). El snapshot `order.serviceChargeAmount` está congelado:
-    // usarlo dejaba el total alto y el cliente pagaba de más.
-    const newServiceChargeAmount = await recalcularCargosPorServicio(tx, orderId, baseDeCargos(order.subtotal, newDiscountAmount))
-
-    // 🔴 MONEY: el total sale de `computeStoredOrderTotal` —la ÚNICA definición de la regla—
-    // y no de una resta escrita aquí. Escrita aquí OMITÍA `serviceChargeAmount` y `tipAmount`:
-    // una cortesía de cuenta completa dejaba `total = 0`, regalando el cargo por servicio
-    // («INGRESO GRAVABLE del negocio: SUMA al total y entra al corte y al CFDI», dice el
-    // schema) y la propina del mesero. El clamp de la mercancía que ya había aquí lo hace la
-    // función, con el mismo criterio: un descuento excedente se come la mercancía, no los cargos.
-    //
-    // `taxAmount` NO se pasa, a propósito: este camino no lo toca ni lo recalcula, y el cobro
-    // que le sigue (`recordOrderPayment`) tampoco lo suma — pasarlo haría que el total BAJARA al
-    // cobrar. Divergencia declarada con los tres caminos de descuento del dashboard, que sí lo suman.
-    newTotal = computeStoredOrderTotal({
-      subtotal: order.subtotal,
-      discountAmount: newDiscountAmount,
-      serviceChargeAmount: newServiceChargeAmount,
-      tipAmount: order.tipAmount,
-    }).toNumber()
-    const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
-
-    const updated = await tx.order
-      .update({
-        // 🔴 CAS: sólo se escribe si NADIE movió la orden desde que esta función la leyó. Sin la
-        // versión aquí, dos escrituras concurrentes sobre la misma mesa se pisaban en silencio.
-        where: { id: orderId, version: order.version },
-        data: {
-          discountAmount: newDiscountAmount,
-          serviceChargeAmount: newServiceChargeAmount,
-          total: newTotal,
-          remainingBalance: newRemainingBalance,
-          version: {
-            increment: 1,
-          },
-        },
+  const { updatedOrder, compAmount, itemCount, newTotal } = await prisma.$transaction(
+    async tx => {
+      if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
+        throw new NotFoundError('Order not found')
+      }
+      // Fetch order
+      const order = await tx.order.findUnique({
+        where: { id: orderId, venueId },
         include: {
-          items: {
-            include: {
-              product: {
-                select: {
-                  id: true,
-                  name: true,
-                  price: true,
+          items: true,
+        },
+      })
+
+      if (!order) {
+        throw new NotFoundError('Order not found')
+      }
+
+      // Validate order is not already paid
+      if (order.paymentStatus === 'PAID') {
+        throw new BadRequestError('Cannot comp items from a paid order')
+      }
+
+      // Validate staff exists
+      const staff = await tx.staff.findUnique({
+        where: { id: input.staffId },
+      })
+
+      if (!staff) {
+        throw new NotFoundError('Staff member not found')
+      }
+
+      // Determine which items to comp
+      const itemsToComp =
+        input.itemIds.length === 0
+          ? order.items // Comp entire order
+          : order.items.filter(item => input.itemIds.includes(item.id))
+
+      if (itemsToComp.length === 0) {
+        throw new BadRequestError('No items found to comp')
+      }
+
+      // Calculate discount amount (total of comped items)
+      const compAmount = itemsToComp.reduce((sum, item) => sum + Number(item.total), 0)
+
+      logger.info(`  💰 Comping ${itemsToComp.length} items | total discount: $${compAmount}`)
+
+      // Update order: increase discountAmount, decrease total.
+      // 🔴 MONEY: compAmount is the comped items' GROSS total (OrderItem.total never
+      // zeroes — see the transaction below). Adding it on top of a PRE-EXISTING
+      // order.discountAmount (an earlier applyDiscount, or a previous partial comp)
+      // double-counts whatever those items already gave away: a whole-order comp on
+      // an order that already carries a $25.30 discount produced discountAmount
+      // $278.30 > subtotal $253.00 and total -$25.30 (reproduced on hardware,
+      // order cmsetvfft0001c9jxv33p26gl). "Cortesía toda la cuenta" means the guest
+      // owes nothing — clamp so the comp absorbs at most the currently-remaining
+      // balance (subtotal - existing discount), never pushing discountAmount above
+      // subtotal or total below zero, no matter what was discounted before.
+      const newDiscountAmount = Math.min(Number(order.discountAmount) + compAmount, Number(order.subtotal))
+
+      const currentPaidAmount = Number(order.paidAmount || 0)
+      // El total se calcula DENTRO de la transacción, porque el cargo por servicio porcentual
+      // se recalcula sobre la base nueva y sus filas se escriben ahí mismo. Se guarda fuera
+      // sólo para la bitácora del final.
+      let newTotal = 0
+
+      // Mark each comped OrderItem in the SAME transaction as the order total
+      // update. Convention (docs/TPV_COBRAR_STRUCTURED_DISCOUNTS.md): OrderItem.total
+      // stays GROSS — never zeroed, that breaks gross sales reporting — the
+      // reduction lives in OrderItem.discountAmount (full item.total, since a
+      // comp is a 100% item-level discount), with isCortesia=true so receipts,
+      // printed tickets, and line-level reports stop showing it as charged.
+      for (const item of itemsToComp) {
+        await tx.orderItem.update({
+          where: { id: item.id },
+          data: {
+            isCortesia: true,
+            cortesiaReason: input.reason,
+            discountAmount: item.total,
+          },
+        })
+      }
+
+      // 🔴 MONEY: la cortesía baja la base, así que un cargo por servicio PORCENTUAL baja con
+      // ella (auditoría 2026-09-03). El snapshot `order.serviceChargeAmount` está congelado:
+      // usarlo dejaba el total alto y el cliente pagaba de más.
+      const newServiceChargeAmount = await recalcularCargosPorServicio(tx, orderId, baseDeCargos(order.subtotal, newDiscountAmount))
+
+      // 🔴 MONEY: el total sale de `computeStoredOrderTotal` —la ÚNICA definición de la regla—
+      // y no de una resta escrita aquí. Escrita aquí OMITÍA `serviceChargeAmount` y `tipAmount`:
+      // una cortesía de cuenta completa dejaba `total = 0`, regalando el cargo por servicio
+      // («INGRESO GRAVABLE del negocio: SUMA al total y entra al corte y al CFDI», dice el
+      // schema) y la propina del mesero. El clamp de la mercancía que ya había aquí lo hace la
+      // función, con el mismo criterio: un descuento excedente se come la mercancía, no los cargos.
+      //
+      // `taxAmount` NO se pasa, a propósito: este camino no lo toca ni lo recalcula, y el cobro
+      // que le sigue (`recordOrderPayment`) tampoco lo suma — pasarlo haría que el total BAJARA al
+      // cobrar. Divergencia declarada con los tres caminos de descuento del dashboard, que sí lo suman.
+      newTotal = computeStoredOrderTotal({
+        subtotal: order.subtotal,
+        discountAmount: newDiscountAmount,
+        serviceChargeAmount: newServiceChargeAmount,
+        tipAmount: order.tipAmount,
+      }).toNumber()
+      const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
+
+      const updated = await tx.order
+        .update({
+          // 🔴 CAS: sólo se escribe si NADIE movió la orden desde que esta función la leyó. Sin la
+          // versión aquí, dos escrituras concurrentes sobre la misma mesa se pisaban en silencio.
+          where: { id: orderId, version: order.version },
+          data: {
+            discountAmount: newDiscountAmount,
+            serviceChargeAmount: newServiceChargeAmount,
+            total: newTotal,
+            remainingBalance: newRemainingBalance,
+            version: {
+              increment: 1,
+            },
+          },
+          include: {
+            items: {
+              include: {
+                product: {
+                  select: {
+                    id: true,
+                    name: true,
+                    price: true,
+                  },
+                },
+                modifiers: {
+                  include: {
+                    modifier: true,
+                  },
                 },
               },
-              modifiers: {
-                include: {
-                  modifier: true,
-                },
+            },
+            payments: {
+              include: {
+                allocations: true,
+              },
+            },
+            table: {
+              select: {
+                id: true,
+                number: true,
+              },
+            },
+            createdBy: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+              },
+            },
+            servedBy: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
               },
             },
           },
-          payments: {
-            include: {
-              allocations: true,
-            },
-          },
-          table: {
-            select: {
-              id: true,
-              number: true,
-            },
-          },
-          createdBy: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-            },
-          },
-          servedBy: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-            },
+        })
+        .catch(conflictoSiLaMovieron)
+
+      // Create audit trail (siloed OrderAction; dual-written to ActivityLog below)
+      await tx.orderAction.create({
+        data: {
+          orderId: updated.id,
+          actionType: 'COMP',
+          performedById: input.staffId,
+          reason: input.reason,
+          metadata: {
+            itemIds: input.itemIds,
+            compAmount,
+            itemCount: itemsToComp.length,
+            notes: input.notes,
           },
         },
       })
-      .catch(conflictoSiLaMovieron)
 
-    // Create audit trail (siloed OrderAction; dual-written to ActivityLog below)
-    await tx.orderAction.create({
-      data: {
-        orderId: updated.id,
-        actionType: 'COMP',
-        performedById: input.staffId,
-        reason: input.reason,
-        metadata: {
-          itemIds: input.itemIds,
-          compAmount,
-          itemCount: itemsToComp.length,
-          notes: input.notes,
-        },
-      },
-    })
-
-    return updated
-  })
+      return { updatedOrder: updated, compAmount, itemCount: itemsToComp.length, newTotal }
+    },
+    { timeout: 15_000, maxWait: 5_000 },
+  )
 
   void logAction({
     staffId: input.staffId ?? null,
@@ -2667,7 +2712,7 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
     data: { itemIds: input.itemIds, amount: Number(compAmount), reason: input.reason ?? undefined },
   })
 
-  logger.info(`✅ [ORDER SERVICE] Comped ${itemsToComp.length} items | discount: $${compAmount} | new total: $${newTotal}`)
+  logger.info(`✅ [ORDER SERVICE] Comped ${itemCount} items | discount: $${compAmount} | new total: $${newTotal}`)
 
   // Emit Socket.IO event
   const broadcastingService = socketManager.getBroadcastingService()
@@ -2709,121 +2754,105 @@ interface VoidItemsInput {
 export async function voidItems(venueId: string, orderId: string, input: VoidItemsInput): Promise<Order & { tableName: string | null }> {
   logger.info(`❌ [ORDER SERVICE] Voiding ${input.itemIds.length} items from order ${orderId} | reason: ${input.reason}`)
 
-  // Fetch order with version check
-  const order = await prisma.order.findUnique({
-    where: { id: orderId, venueId },
-    include: {
-      items: {
-        include: {
-          product: true,
-        },
-      },
-    },
-  })
-
-  if (!order) {
-    throw new NotFoundError('Order not found')
-  }
-
-  // Optimistic concurrency check
-  // ✅ P1 FIX: Use 409 Conflict instead of 400 Bad Request for version mismatch
-  if (order.version !== input.expectedVersion) {
-    logger.warn(`⚠️ [ORDER SERVICE] Version mismatch! Expected: ${input.expectedVersion}, Got: ${order.version}`)
-    throw new ConflictError(
-      `Order was modified by another request. Please refresh and try again. (Expected version: ${input.expectedVersion}, Current: ${order.version})`,
-    )
-  }
-
-  // Validate order is not paid
-  if (order.paymentStatus === 'PAID') {
-    throw new BadRequestError('Cannot void items from a paid order')
-  }
-
-  // Validate staff exists
-  const staff = await prisma.staff.findUnique({
-    where: { id: input.staffId },
-  })
-
-  if (!staff) {
-    throw new NotFoundError('Staff member not found')
-  }
-
-  // Find items to void
-  const itemsToVoid = order.items.filter(item => input.itemIds.includes(item.id))
-
-  if (itemsToVoid.length === 0) {
-    throw new BadRequestError('No items found to void')
-  }
-
-  if (itemsToVoid.length !== input.itemIds.length) {
-    throw new BadRequestError('Some item IDs were not found in this order')
-  }
-
-  // Check if any items already sent to kitchen (optional warning, but still allow void)
-  const sentToKitchen = itemsToVoid.filter(item => item.sentToKitchenAt !== null)
-  if (sentToKitchen.length > 0) {
-    logger.warn(`⚠️ [ORDER SERVICE] Voiding ${sentToKitchen.length} items already sent to kitchen. Kitchen may need notification.`)
-  }
-
-  // Calculate void amount (for audit trail)
-  const voidAmount = itemsToVoid.reduce((sum, item) => sum + Number(item.total), 0)
-
-  logger.info(`  💰 Voiding ${itemsToVoid.length} items | total voided: $${voidAmount}`)
-
-  // Calculate new totals
-  const remainingItems = order.items.filter(item => !input.itemIds.includes(item.id))
-  const newSubtotal = remainingItems.reduce((sum, item) => sum + Number(item.total), 0)
-
-  // ⭐ FIX: Auto-close order if voiding all items (Toast/Square pattern)
-  // When 0 items remain, order should be cancelled and removed from active list
-  const isVoidingAllItems = remainingItems.length === 0
-
-  // 🔴 MONEY: el subtotal BAJA al anular, pero el descuento acumulado NO. La resta escrita
-  // a mano (`newSubtotal − discountAmount`, sin clamp) escribía un `Order.total` NEGATIVO que
-  // RESTA del corte del día — el mecanismo del caso M13 por una tercera vía— y además tiraba
-  // del total el cargo por servicio («INGRESO GRAVABLE del negocio», dice el schema) y la
-  // propina del mesero. `computeStoredOrderTotal` clampa sólo la MERCANCÍA y conserva ambos.
-  //
-  // Anular TODO cancela la orden: ahí el total va a 0 a propósito. Una orden CANCELLED con un
-  // total > 0 sería dinero que nadie puede cobrar ensuciando los reportes.
-  //
-  // ⚠️ LÍMITE DECLARADO, el que QUEDA: este camino sigue SIN recalcular los DESCUENTOS por
-  // porcentaje sobre el subtotal nuevo — `removeOrderItem` (mismo archivo) sí lo hace. Un 30%
-  // calculado sobre $100 se queda en $30 aunque el subtotal baje a $40. Los CARGOS por
-  // porcentaje sí se recalculan desde el 2026-09-03 (`recalcularCargosPorServicio`); el clamp
-  // sigue impidiendo el daño contable de la desproporción que queda.
-  // Lo cobrado ya NO se toma de esta prelectura: se relee bajo el candado dentro de la transacción (P2-8).
-
-  if (isVoidingAllItems) {
-    logger.info(`🚫 [ORDER SERVICE] Voiding ALL items - auto-closing order ${orderId}`)
-  }
-
-  let newTotal = 0
-
-  // Update order with new totals and increment version
-  // El recálculo del cargo y el `order.update` que lo consume van en la MISMA transacción:
-  // fuera de ella, un fallo entre las dos escrituras deja la fila con el importe nuevo y la
-  // orden con el total viejo — un estado a medias en el dinero.
-  // ⚠️ El `orderItem.deleteMany` de más arriba sigue FUERA: límite PREEXISTENTE, no tocado.
-  const updatedOrder = await prisma.$transaction(
+  const { updatedOrder, isVoidingAllItems, voidAmount, itemsToVoid, newTotal } = await prisma.$transaction(
     async tx => {
-      // 🔴 Diseño §C.6: el candado de la orden AL INICIO, antes de tocar un solo renglón. Serializa esta anulación con la
-      // admisión de un cobro de terminal y con el registro del dinero (los dos toman `Order FOR UPDATE`), y deja el orden
-      // de candados en Order → OrderItem, el mismo del registro de un pago por producto (antes era el inverso). La
-      // relectura va DENTRO del candado porque el registro de un cobro con tarjeta NO sube `Order.version`: el CAS de
-      // abajo no ve un pago que aterrizó entre la prelectura y la escritura, y anular todo cancelaba una orden PAGADA.
-      const fresca = await lockAndReadOrderForCancel(tx, { venueId, orderId })
-      if (fresca.version !== input.expectedVersion) {
+      if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
+        throw new NotFoundError('Order not found')
+      }
+      // Fetch order with version check
+      const order = await tx.order.findUnique({
+        where: { id: orderId, venueId },
+        include: {
+          items: {
+            include: {
+              product: true,
+            },
+          },
+        },
+      })
+
+      if (!order) {
+        throw new NotFoundError('Order not found')
+      }
+
+      // Optimistic concurrency check
+      // ✅ P1 FIX: Use 409 Conflict instead of 400 Bad Request for version mismatch
+      if (order.version !== input.expectedVersion) {
+        logger.warn(`⚠️ [ORDER SERVICE] Version mismatch! Expected: ${input.expectedVersion}, Got: ${order.version}`)
         throw new ConflictError(
-          `Order was modified by another request. Please refresh and try again. (Expected version: ${input.expectedVersion}, Current: ${fresca.version})`,
+          `Order was modified by another request. Please refresh and try again. (Expected version: ${input.expectedVersion}, Current: ${order.version})`,
         )
       }
-      if (fresca.paymentStatus === 'PAID') {
+
+      // Validate order is not paid
+      if (order.paymentStatus === 'PAID') {
         throw new BadRequestError('Cannot void items from a paid order')
       }
+
+      // Validate staff exists
+      const staff = await tx.staff.findUnique({
+        where: { id: input.staffId },
+      })
+
+      if (!staff) {
+        throw new NotFoundError('Staff member not found')
+      }
+
+      // Find items to void
+      const itemsToVoid = order.items.filter(item => input.itemIds.includes(item.id))
+
+      if (itemsToVoid.length === 0) {
+        throw new BadRequestError('No items found to void')
+      }
+
+      if (itemsToVoid.length !== input.itemIds.length) {
+        throw new BadRequestError('Some item IDs were not found in this order')
+      }
+
+      // Check if any items already sent to kitchen (optional warning, but still allow void)
+      const sentToKitchen = itemsToVoid.filter(item => item.sentToKitchenAt !== null)
+      if (sentToKitchen.length > 0) {
+        logger.warn(`⚠️ [ORDER SERVICE] Voiding ${sentToKitchen.length} items already sent to kitchen. Kitchen may need notification.`)
+      }
+
+      // Calculate void amount (for audit trail)
+      const voidAmount = itemsToVoid.reduce((sum, item) => sum + Number(item.total), 0)
+
+      logger.info(`  💰 Voiding ${itemsToVoid.length} items | total voided: $${voidAmount}`)
+
+      // Calculate new totals
+      const remainingItems = order.items.filter(item => !input.itemIds.includes(item.id))
+      const newSubtotal = remainingItems.reduce((sum, item) => sum + Number(item.total), 0)
+
+      // ⭐ FIX: Auto-close order if voiding all items (Toast/Square pattern)
+      // When 0 items remain, order should be cancelled and removed from active list
+      const isVoidingAllItems = remainingItems.length === 0
+
+      // 🔴 MONEY: el subtotal BAJA al anular, pero el descuento acumulado NO. La resta escrita
+      // a mano (`newSubtotal − discountAmount`, sin clamp) escribía un `Order.total` NEGATIVO que
+      // RESTA del corte del día — el mecanismo del caso M13 por una tercera vía— y además tiraba
+      // del total el cargo por servicio («INGRESO GRAVABLE del negocio», dice el schema) y la
+      // propina del mesero. `computeStoredOrderTotal` clampa sólo la MERCANCÍA y conserva ambos.
+      //
+      // Anular TODO cancela la orden: ahí el total va a 0 a propósito. Una orden CANCELLED con un
+      // total > 0 sería dinero que nadie puede cobrar ensuciando los reportes.
+      //
+      // ⚠️ LÍMITE DECLARADO, el que QUEDA: este camino sigue SIN recalcular los DESCUENTOS por
+      // porcentaje sobre el subtotal nuevo — `removeOrderItem` (mismo archivo) sí lo hace. Un 30%
+      // calculado sobre $100 se queda en $30 aunque el subtotal baje a $40. Los CARGOS por
+      // porcentaje sí se recalculan desde el 2026-09-03 (`recalcularCargosPorServicio`); el clamp
+      // sigue impidiendo el daño contable de la desproporción que queda.
+      // Lo cobrado ya NO se toma de esta prelectura: se relee bajo el candado dentro de la transacción (P2-8).
+
+      if (isVoidingAllItems) {
+        logger.info(`🚫 [ORDER SERVICE] Voiding ALL items - auto-closing order ${orderId}`)
+      }
+
+      let newTotal = 0
+
       // Anular TODO cancela la orden: con dinero ya cobrado (PARTIAL) se rechaza, igual que `cancelOrder`. Una anulación
       // parcial sobre una PARTIAL sigue permitida (no cancela nada).
-      if (isVoidingAllItems && fresca.paymentStatus === 'PARTIAL') {
+      if (isVoidingAllItems && order.paymentStatus === 'PARTIAL') {
         throw new BadRequestError('Esta cuenta ya tiene pagos registrados. Reembólsalos antes de anular todos sus artículos.')
       }
       if (anulacionExigeOrdenSinCobroVivo({ isVoidingAllItems })) {
@@ -2842,6 +2871,8 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       // borrados con los totales viejos — un estado a medias en el dinero.
       await tx.orderItem.deleteMany({
         where: {
+          orderId,
+          order: { venueId },
           id: {
             in: input.itemIds,
           },
@@ -2872,7 +2903,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
             serviceChargeAmount: newServiceChargeAmount,
             // La propina de la relectura bajo el candado, no la de la prelectura: el registro de un cobro con propina
             // no sube la versión, así que la prelectura puede traer una propina vieja y el total perdería la ya cobrada.
-            tipAmount: fresca.tipAmount ?? order.tipAmount,
+            tipAmount: order.tipAmount,
           }).toNumber()
 
       // 🔴 DINERO (auditoría Fable 11-sep, P2-8): con dinero YA cobrado, la anulación no puede dejar el total por debajo
@@ -2886,7 +2917,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
         _sum: { amount: true, tipAmount: true },
       })
       const pagadoPorPagos = new Prisma.Decimal(pagosRegistrados?._sum?.amount ?? 0).plus(pagosRegistrados?._sum?.tipAmount ?? 0)
-      const pagado = Prisma.Decimal.max(new Prisma.Decimal(fresca.paidAmount ?? 0), pagadoPorPagos).toDecimalPlaces(2)
+      const pagado = Prisma.Decimal.max(new Prisma.Decimal(order.paidAmount ?? 0), pagadoPorPagos).toDecimalPlaces(2)
       const totalNuevo = new Prisma.Decimal(newTotal).toDecimalPlaces(2)
       if (totalNuevo.lessThan(pagado)) {
         throw new BadRequestError(
@@ -2897,7 +2928,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       }
       const newRemainingBalance = Math.max(0, newTotal - pagado.toNumber())
 
-      return tx.order
+      const updatedOrder = await tx.order
         .update({
           // 🔴 CAS: sólo se escribe si NADIE movió la orden desde que esta función la leyó. Sin la
           // versión aquí, dos escrituras concurrentes sobre la misma mesa se pisaban en silencio.
@@ -2960,6 +2991,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
           },
         })
         .catch(conflictoSiLaMovieron)
+      return { updatedOrder, isVoidingAllItems, voidAmount, itemsToVoid, newTotal }
     },
     { timeout: 15_000, maxWait: 5_000 },
   )
@@ -2968,7 +3000,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
   // No point keeping "cuenta por cobrar" for $0.00 order with 0 items (Toast/Square pattern)
   if (isVoidingAllItems) {
     const deletedCustomers = await prisma.orderCustomer.deleteMany({
-      where: { orderId },
+      where: { orderId, order: { venueId } },
     })
 
     if (deletedCustomers.count > 0) {
@@ -2979,7 +3011,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
   // Create audit trail
   await prisma.orderAction.create({
     data: {
-      orderId: order.id,
+      orderId,
       actionType: 'VOID',
       performedById: input.staffId,
       reason: input.reason,
@@ -2988,7 +3020,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
         voidAmount,
         itemCount: itemsToVoid.length,
         itemNames: itemsToVoid.map(item => item.product?.name || item.productName),
-        sentToKitchen: sentToKitchen.length > 0,
+        sentToKitchen: itemsToVoid.some(item => item.sentToKitchenAt !== null),
         voidedAllItems: isVoidingAllItems, // ⭐ Track if order was auto-closed
       },
     },
@@ -3065,193 +3097,200 @@ export async function applyDiscount(
 ): Promise<Order & { tableName: string | null }> {
   logger.info(`💰 [ORDER SERVICE] Applying ${input.type} discount to order ${orderId} | value: ${input.value}`)
 
-  // Fetch order with version check
-  const order = await prisma.order.findUnique({
-    where: { id: orderId, venueId },
-    include: {
-      items: true,
-    },
-  })
-
-  if (!order) {
-    throw new NotFoundError('Order not found')
-  }
-
-  // Optimistic concurrency check
-  if (order.version !== input.expectedVersion) {
-    logger.warn(`⚠️ [ORDER SERVICE] Version mismatch! Expected: ${input.expectedVersion}, Got: ${order.version}`)
-    throw new BadRequestError(
-      `Order was modified by another request. Please refresh and try again. (Expected version: ${input.expectedVersion}, Current: ${order.version})`,
-    )
-  }
-
-  // Validate order is not paid
-  if (order.paymentStatus === 'PAID') {
-    throw new BadRequestError('Cannot apply discount to a paid order')
-  }
-
-  // Validate staff exists
-  const staff = await prisma.staff.findUnique({
-    where: { id: input.staffId },
-  })
-
-  if (!staff) {
-    throw new NotFoundError('Staff member not found')
-  }
-
-  // Validate discount value
-  if (input.type === 'PERCENTAGE') {
-    if (input.value < 0 || input.value > 100) {
-      throw new BadRequestError('Percentage discount must be between 0 and 100')
-    }
-  } else {
-    if (input.value < 0) {
-      throw new BadRequestError('Fixed discount amount cannot be negative')
-    }
-  }
-
-  // Calculate discount amount
-  let discountAmount: number
-
-  if (input.itemIds && input.itemIds.length > 0) {
-    // Item-level discount
-    const itemsToDiscount = order.items.filter(item => input.itemIds!.includes(item.id))
-    if (itemsToDiscount.length === 0) {
-      throw new BadRequestError('No items found to apply discount')
-    }
-
-    const itemsSubtotal = itemsToDiscount.reduce((sum, item) => sum + Number(item.total), 0)
-
-    if (input.type === 'PERCENTAGE') {
-      discountAmount = (itemsSubtotal * input.value) / 100
-    } else {
-      discountAmount = Math.min(input.value, itemsSubtotal) // Can't discount more than item total
-    }
-  } else {
-    // Order-level discount
-    const orderSubtotal = Number(order.subtotal)
-
-    if (input.type === 'PERCENTAGE') {
-      discountAmount = (orderSubtotal * input.value) / 100
-    } else {
-      discountAmount = Math.min(input.value, orderSubtotal) // Can't discount more than order total
-    }
-  }
-
-  // Round to 2 decimal places
-  discountAmount = Math.round(discountAmount * 100) / 100
-
-  // 🔴 MONEY: sólo se puede descontar lo que TODAVÍA no está descontado.
-  //
-  // Los topes de arriba miran el subtotal COMPLETO, y eso no basta cuando la
-  // cuenta YA traía descuento: los mismos pesos se regalan dos veces. Un
-  // descuento fijo de $253 sobre una cuenta de $253 que ya tenía 10% ($25.30)
-  // dejaba el acumulado en $278.30 —más que la mercancía— y el total en −$25.30.
-  // Reproducido en vivo el 2026-08-09: es el mismo mecanismo que rompió la mesa
-  // M13, sólo que por la vía del descuento manual en vez de la cortesía.
-  //
-  // `discount.tpv.service.ts` y `discountEngine.service.ts` ya recortaban contra
-  // este "disponible" (su `remainingDiscountable`); este camino era el único que
-  // faltaba. El `Math.max` del total es cinturón-y-tirantes: con el recorte ya
-  // no puede dar negativo.
-  const remainingDiscountable = Math.max(0, Number(order.subtotal) - Number(order.discountAmount))
-  discountAmount = Math.min(discountAmount, remainingDiscountable)
-
-  logger.info(`  💰 Calculated discount: $${discountAmount} (disponible: $${remainingDiscountable})`)
-
-  // Update order: add to existing discount
-  const newDiscountAmount = Number(order.discountAmount) + discountAmount
-
-  const currentPaidAmount = Number(order.paidAmount || 0)
-  let newTotal = 0
-
-  // El recálculo del cargo y el `order.update` que lo consume van en la MISMA transacción:
-  // fuera de ella, un fallo entre las dos escrituras deja la fila con el importe nuevo y la
-  // orden con el total viejo — un estado a medias en el dinero.
-  const updatedOrder = await prisma.$transaction(async tx => {
-    // 🔴 MONEY: el descuento baja la base, así que un cargo por servicio PORCENTUAL baja con
-    // ella (auditoría 2026-09-03). El snapshot `order.serviceChargeAmount` está congelado:
-    // usarlo dejaba el total alto y el cliente pagaba de más ($95 donde correspondían $92).
-    const newServiceChargeAmount = await recalcularCargosPorServicio(tx, orderId, baseDeCargos(order.subtotal, newDiscountAmount))
-
-    // 🔴 MONEY: misma regla compartida que la cortesía de arriba y que los caminos de descuento
-    // del dashboard. La resta escrita a mano se dejaba fuera el cargo por servicio y la propina.
-    // `taxAmount` queda fuera por la misma razón declarada en `compItems`.
-    newTotal = computeStoredOrderTotal({
-      subtotal: order.subtotal,
-      discountAmount: newDiscountAmount,
-      serviceChargeAmount: newServiceChargeAmount,
-      tipAmount: order.tipAmount,
-    }).toNumber()
-    const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
-
-    return tx.order
-      .update({
-        // 🔴 CAS: sólo se escribe si NADIE movió la orden desde que esta función la leyó. Sin la
-        // versión aquí, dos escrituras concurrentes sobre la misma mesa se pisaban en silencio.
-        where: { id: orderId, version: order.version },
-        data: {
-          discountAmount: newDiscountAmount,
-          // 🔴 Sin persistir el snapshot el arreglo sería COSMÉTICO: `computeOrderBalance`
-          // —lo que de verdad se cobra— lee `Order.serviceChargeAmount`, no las filas.
-          serviceChargeAmount: newServiceChargeAmount,
-          total: newTotal,
-          remainingBalance: newRemainingBalance,
-          version: {
-            increment: 1,
-          },
-        },
+  const { updatedOrder, discountAmount, newTotal } = await prisma.$transaction(
+    async tx => {
+      if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
+        throw new NotFoundError('Order not found')
+      }
+      // Fetch order with version check
+      const order = await tx.order.findUnique({
+        where: { id: orderId, venueId },
         include: {
-          items: {
-            include: {
-              product: {
-                select: {
-                  id: true,
-                  name: true,
-                  price: true,
-                },
-              },
-              modifiers: {
-                include: {
-                  modifier: true,
-                },
-              },
-            },
-          },
-          payments: {
-            include: {
-              allocations: true,
-            },
-          },
-          table: {
-            select: {
-              id: true,
-              number: true,
-            },
-          },
-          createdBy: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-            },
-          },
-          servedBy: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-            },
-          },
+          items: true,
         },
       })
-      .catch(conflictoSiLaMovieron)
-  })
+
+      if (!order) {
+        throw new NotFoundError('Order not found')
+      }
+
+      // Optimistic concurrency check
+      if (order.version !== input.expectedVersion) {
+        logger.warn(`⚠️ [ORDER SERVICE] Version mismatch! Expected: ${input.expectedVersion}, Got: ${order.version}`)
+        throw new BadRequestError(
+          `Order was modified by another request. Please refresh and try again. (Expected version: ${input.expectedVersion}, Current: ${order.version})`,
+        )
+      }
+
+      // Validate order is not paid
+      if (order.paymentStatus === 'PAID') {
+        throw new BadRequestError('Cannot apply discount to a paid order')
+      }
+
+      // Validate staff exists
+      const staff = await tx.staff.findUnique({
+        where: { id: input.staffId },
+      })
+
+      if (!staff) {
+        throw new NotFoundError('Staff member not found')
+      }
+
+      // Validate discount value
+      if (input.type === 'PERCENTAGE') {
+        if (input.value < 0 || input.value > 100) {
+          throw new BadRequestError('Percentage discount must be between 0 and 100')
+        }
+      } else {
+        if (input.value < 0) {
+          throw new BadRequestError('Fixed discount amount cannot be negative')
+        }
+      }
+
+      // Calculate discount amount
+      let discountAmount: number
+
+      if (input.itemIds && input.itemIds.length > 0) {
+        // Item-level discount
+        const itemsToDiscount = order.items.filter(item => input.itemIds!.includes(item.id))
+        if (itemsToDiscount.length === 0) {
+          throw new BadRequestError('No items found to apply discount')
+        }
+
+        const itemsSubtotal = itemsToDiscount.reduce((sum, item) => sum + Number(item.total), 0)
+
+        if (input.type === 'PERCENTAGE') {
+          discountAmount = (itemsSubtotal * input.value) / 100
+        } else {
+          discountAmount = Math.min(input.value, itemsSubtotal) // Can't discount more than item total
+        }
+      } else {
+        // Order-level discount
+        const orderSubtotal = Number(order.subtotal)
+
+        if (input.type === 'PERCENTAGE') {
+          discountAmount = (orderSubtotal * input.value) / 100
+        } else {
+          discountAmount = Math.min(input.value, orderSubtotal) // Can't discount more than order total
+        }
+      }
+
+      // Round to 2 decimal places
+      discountAmount = Math.round(discountAmount * 100) / 100
+
+      // 🔴 MONEY: sólo se puede descontar lo que TODAVÍA no está descontado.
+      //
+      // Los topes de arriba miran el subtotal COMPLETO, y eso no basta cuando la
+      // cuenta YA traía descuento: los mismos pesos se regalan dos veces. Un
+      // descuento fijo de $253 sobre una cuenta de $253 que ya tenía 10% ($25.30)
+      // dejaba el acumulado en $278.30 —más que la mercancía— y el total en −$25.30.
+      // Reproducido en vivo el 2026-08-09: es el mismo mecanismo que rompió la mesa
+      // M13, sólo que por la vía del descuento manual en vez de la cortesía.
+      //
+      // `discount.tpv.service.ts` y `discountEngine.service.ts` ya recortaban contra
+      // este "disponible" (su `remainingDiscountable`); este camino era el único que
+      // faltaba. El `Math.max` del total es cinturón-y-tirantes: con el recorte ya
+      // no puede dar negativo.
+      const remainingDiscountable = Math.max(0, Number(order.subtotal) - Number(order.discountAmount))
+      discountAmount = Math.min(discountAmount, remainingDiscountable)
+
+      logger.info(`  💰 Calculated discount: $${discountAmount} (disponible: $${remainingDiscountable})`)
+
+      // Update order: add to existing discount
+      const newDiscountAmount = Number(order.discountAmount) + discountAmount
+
+      const currentPaidAmount = Number(order.paidAmount || 0)
+      let newTotal = 0
+
+      // El recálculo del cargo y el `order.update` que lo consume van en la MISMA transacción:
+      // fuera de ella, un fallo entre las dos escrituras deja la fila con el importe nuevo y la
+      // orden con el total viejo — un estado a medias en el dinero.
+      // 🔴 MONEY: el descuento baja la base, así que un cargo por servicio PORCENTUAL baja con
+      // ella (auditoría 2026-09-03). El snapshot `order.serviceChargeAmount` está congelado:
+      // usarlo dejaba el total alto y el cliente pagaba de más ($95 donde correspondían $92).
+      const newServiceChargeAmount = await recalcularCargosPorServicio(tx, orderId, baseDeCargos(order.subtotal, newDiscountAmount))
+
+      // 🔴 MONEY: misma regla compartida que la cortesía de arriba y que los caminos de descuento
+      // del dashboard. La resta escrita a mano se dejaba fuera el cargo por servicio y la propina.
+      // `taxAmount` queda fuera por la misma razón declarada en `compItems`.
+      newTotal = computeStoredOrderTotal({
+        subtotal: order.subtotal,
+        discountAmount: newDiscountAmount,
+        serviceChargeAmount: newServiceChargeAmount,
+        tipAmount: order.tipAmount,
+      }).toNumber()
+      const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
+
+      const updatedOrder = await tx.order
+        .update({
+          // 🔴 CAS: sólo se escribe si NADIE movió la orden desde que esta función la leyó. Sin la
+          // versión aquí, dos escrituras concurrentes sobre la misma mesa se pisaban en silencio.
+          where: { id: orderId, version: order.version },
+          data: {
+            discountAmount: newDiscountAmount,
+            // 🔴 Sin persistir el snapshot el arreglo sería COSMÉTICO: `computeOrderBalance`
+            // —lo que de verdad se cobra— lee `Order.serviceChargeAmount`, no las filas.
+            serviceChargeAmount: newServiceChargeAmount,
+            total: newTotal,
+            remainingBalance: newRemainingBalance,
+            version: {
+              increment: 1,
+            },
+          },
+          include: {
+            items: {
+              include: {
+                product: {
+                  select: {
+                    id: true,
+                    name: true,
+                    price: true,
+                  },
+                },
+                modifiers: {
+                  include: {
+                    modifier: true,
+                  },
+                },
+              },
+            },
+            payments: {
+              include: {
+                allocations: true,
+              },
+            },
+            table: {
+              select: {
+                id: true,
+                number: true,
+              },
+            },
+            createdBy: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+              },
+            },
+            servedBy: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+              },
+            },
+          },
+        })
+        .catch(conflictoSiLaMovieron)
+      return { updatedOrder, discountAmount, newTotal }
+    },
+    { timeout: 15_000, maxWait: 5_000 },
+  )
 
   // Create audit trail
   await prisma.orderAction.create({
     data: {
-      orderId: order.id,
+      orderId,
       actionType: 'DISCOUNT',
       performedById: input.staffId,
       reason: input.reason || 'Discount applied',
@@ -3684,100 +3723,123 @@ export async function addSerializedItemToOrder(
     throw new BadRequestError('Módulo de inventario serializado no habilitado')
   }
 
-  // Get the order with optimistic locking check
-  const order = await prisma.order.findUnique({
-    where: { id: orderId, venueId },
-    select: {
-      id: true,
-      orderNumber: true,
-      version: true,
-      subtotal: true,
-      total: true,
-      discountAmount: true,
-      paymentStatus: true,
-    },
-  })
+  const result = await prisma.$transaction(
+    async tx => {
+      // Registration (venueId) and org-level SOLD (sellingVenueId) take a Venue FK lock.
+      // Take its compatible shared lock first, matching deleteVenue's Venue -> Order order.
+      const venues = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT id FROM "Venue" WHERE id = ${venueId} FOR KEY SHARE
+      `
+      if (!venues.length) throw new NotFoundError('Order not found')
+      if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
+        throw new NotFoundError('Order not found')
+      }
+      // Get the order with optimistic locking check
+      const order = await tx.order.findUnique({
+        where: { id: orderId, venueId },
+        select: {
+          id: true,
+          orderNumber: true,
+          version: true,
+          subtotal: true,
+          total: true,
+          discountAmount: true,
+          paymentStatus: true,
+        },
+      })
 
-  if (!order) {
-    throw new NotFoundError('Order not found')
-  }
-
-  if (order.version !== expectedVersion) {
-    throw new ConflictError('Order was modified by another user. Please refresh and try again.')
-  }
-
-  if (order.paymentStatus === 'PAID') {
-    throw new BadRequestError('Cannot add items to a paid order')
-  }
-
-  // Use transaction to ensure atomicity
-  const result = await prisma.$transaction(async tx => {
-    let serializedItemWithCategory: Awaited<ReturnType<typeof serializedInventoryService.getItemBySerialNumber>>
-
-    if (scanResult.found && scanResult.item) {
-      // Item exists - use it
-      serializedItemWithCategory = scanResult.item
-    } else {
-      // Item doesn't exist - register it
-      if (!input.categoryId) {
-        throw new BadRequestError('categoryId is required for unregistered items')
+      if (!order) {
+        throw new NotFoundError('Order not found')
       }
 
-      serializedItemWithCategory = await serializedInventoryService.register({
-        venueId,
-        categoryId: input.categoryId,
-        serialNumber: input.serialNumber,
-        createdBy: staffId,
-      })
-    }
+      if (order.version !== expectedVersion) {
+        throw new ConflictError('Order was modified by another user. Please refresh and try again.')
+      }
 
-    // Build OrderItem data with proper snapshot fields
-    const orderItemData = serializedInventoryService.buildOrderItemData(serializedItemWithCategory!, input.price)
+      if (order.paymentStatus === 'PAID') {
+        throw new BadRequestError('Cannot add items to a paid order')
+      }
 
-    // Create OrderItem
-    const orderItem = await tx.orderItem.create({
-      data: {
-        orderId,
-        ...orderItemData, // Includes: productName, productSku, unitPrice, quantity, total, taxAmount, productId
-        notes: input.notes,
-      },
-    })
+      let serializedItemWithCategory: Awaited<ReturnType<typeof serializedInventoryService.getItemBySerialNumber>>
 
-    // Mark serialized item as sold (must use tx to reference the OrderItem created in this transaction)
-    // Plan §1.5 — pass staffId so the custody precheck runs (OFF/WARN/ENFORCE per org).
-    await serializedInventoryService.markAsSold(venueId, input.serialNumber, orderItem.id, tx, { staffId })
-
-    // Calculate new totals
-    const newSubtotal = Number(order.subtotal) + input.price
-    const newTotal = newSubtotal - Number(order.discountAmount)
-
-    // Update order totals and increment version
-    const updatedOrder = await tx.order.update({
-      where: { id: orderId },
-      data: {
-        subtotal: newSubtotal,
-        total: newTotal,
-        remainingBalance: newTotal,
-        version: { increment: 1 },
-      },
-      include: {
-        items: {
-          include: {
-            product: { select: { id: true, name: true, price: true } },
-            modifiers: { include: { modifier: true } },
+      if (scanResult.found && scanResult.item) {
+        // The scan is only a preflight: reread membership and status after acquiring Order.
+        const venue = await tx.venue.findUnique({ where: { id: venueId }, select: { organizationId: true } })
+        serializedItemWithCategory = await tx.serializedItem.findFirst({
+          where: {
+            id: scanResult.item.id,
+            OR: [{ venueId }, ...(venue ? [{ venueId: null, organizationId: venue.organizationId }] : [])],
           },
+          include: { category: true },
+        })
+        if (!serializedItemWithCategory) throw new NotFoundError('Serialized item not found')
+        if (serializedItemWithCategory.status === 'SOLD') throw new BadRequestError(`Item ${input.serialNumber} ya fue vendido`)
+      } else {
+        // Item doesn't exist - register it
+        if (!input.categoryId) {
+          throw new BadRequestError('categoryId is required for unregistered items')
+        }
+
+        serializedItemWithCategory = await serializedInventoryService.register(
+          {
+            venueId,
+            categoryId: input.categoryId,
+            serialNumber: input.serialNumber,
+            createdBy: staffId,
+          },
+          tx,
+        )
+      }
+
+      // Build OrderItem data with proper snapshot fields
+      const orderItemData = serializedInventoryService.buildOrderItemData(serializedItemWithCategory!, input.price)
+
+      // Create OrderItem
+      const orderItem = await tx.orderItem.create({
+        data: {
+          orderId,
+          ...orderItemData, // Includes: productName, productSku, unitPrice, quantity, total, taxAmount, productId
+          notes: input.notes,
         },
-        payments: { include: { allocations: true } },
-        table: { select: { id: true, number: true } },
-        createdBy: { select: { id: true, firstName: true, lastName: true } },
-        servedBy: { select: { id: true, firstName: true, lastName: true } },
-      },
-    })
+      })
 
-    return updatedOrder
-  })
+      // Mark serialized item as sold (must use tx to reference the OrderItem created in this transaction)
+      // Plan §1.5 — pass staffId so the custody precheck runs (OFF/WARN/ENFORCE per org).
+      await serializedInventoryService.markAsSold(venueId, input.serialNumber, orderItem.id, tx, { staffId })
 
-  logger.info(`✅ [ORDER SERVICE] Added serialized item ${input.serialNumber} to order ${order.orderNumber}. New total: $${result.total}`)
+      // Calculate new totals
+      const newSubtotal = Number(order.subtotal) + input.price
+      const newTotal = newSubtotal - Number(order.discountAmount)
+
+      // Update order totals and increment version
+      const updatedOrder = await tx.order.update({
+        where: { id: orderId },
+        data: {
+          subtotal: newSubtotal,
+          total: newTotal,
+          remainingBalance: newTotal,
+          version: { increment: 1 },
+        },
+        include: {
+          items: {
+            include: {
+              product: { select: { id: true, name: true, price: true } },
+              modifiers: { include: { modifier: true } },
+            },
+          },
+          payments: { include: { allocations: true } },
+          table: { select: { id: true, number: true } },
+          createdBy: { select: { id: true, firstName: true, lastName: true } },
+          servedBy: { select: { id: true, firstName: true, lastName: true } },
+        },
+      })
+
+      return updatedOrder
+    },
+    { timeout: 15_000, maxWait: 5_000 },
+  )
+
+  logger.info(`✅ [ORDER SERVICE] Added serialized item ${input.serialNumber} to order ${result.orderNumber}. New total: $${result.total}`)
 
   // Emit Socket.IO event for real-time updates
   const broadcastingService = socketManager.getBroadcastingService()
@@ -3865,12 +3927,15 @@ export async function sellSerializedItem(
         throw new ValidationError('Esta SIM no está dada de alta. Debe aprobarse antes de venderse.')
       }
 
-      serializedItemWithCategory = await serializedInventoryService.register({
-        venueId,
-        categoryId: input.categoryId,
-        serialNumber: input.serialNumber,
-        createdBy: staffId,
-      })
+      serializedItemWithCategory = await serializedInventoryService.register(
+        {
+          venueId,
+          categoryId: input.categoryId,
+          serialNumber: input.serialNumber,
+          createdBy: staffId,
+        },
+        tx,
+      )
     }
 
     // Build OrderItem data with proper snapshot fields
