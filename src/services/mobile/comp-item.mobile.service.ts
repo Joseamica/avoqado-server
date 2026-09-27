@@ -17,6 +17,7 @@ import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
+import { lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
 
 /** Square's comp reasons (`39_cortesia.png`). Kept as free text + validated here. */
 export const COMP_REASONS = [
@@ -35,36 +36,41 @@ export async function compOrderItem(params: { venueId: string; orderId: string; 
     throw new BadRequestError('reason es requerido para dar de cortesía')
   }
 
-  const order = await prisma.order.findUnique({
-    where: { id: orderId, venueId },
-    select: { id: true, paymentStatus: true, discountAmount: true, paidAmount: true },
+  const { item, totals } = await prisma.$transaction(async tx => {
+    if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
+    const order = await tx.order.findUnique({
+      where: { id: orderId, venueId },
+      select: { id: true, paymentStatus: true, discountAmount: true, paidAmount: true },
+    })
+    if (!order) throw new NotFoundError('Orden no encontrada')
+
+    // Never mutate the money of an order that was already paid (or partially).
+    if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
+      throw new BadRequestError('No se puede dar cortesía en una orden ya pagada')
+    }
+
+    const item = await tx.orderItem.findFirst({
+      where: { id: itemId, orderId },
+      select: { id: true, productName: true, isCortesia: true, total: true, quantity: true, unitPrice: true },
+    })
+    if (!item) throw new NotFoundError('Artículo no encontrado en la orden')
+    if (item.isCortesia) throw new BadRequestError('El artículo ya está dado de cortesía')
+
+    // The line stays on the check (kitchen + audit) but costs 0.
+    await tx.orderItem.update({
+      where: { id: itemId },
+      data: {
+        isCortesia: true,
+        cortesiaReason: reason.trim(),
+        total: 0,
+        discountAmount: item.total, // what the comp gave away
+      },
+    })
+
+    const totals = await recalculateOrderTotals(orderId, Number(order.discountAmount || 0), Number(order.paidAmount || 0), tx)
+
+    return { item, totals }
   })
-  if (!order) throw new NotFoundError('Orden no encontrada')
-
-  // Never mutate the money of an order that was already paid (or partially).
-  if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
-    throw new BadRequestError('No se puede dar cortesía en una orden ya pagada')
-  }
-
-  const item = await prisma.orderItem.findFirst({
-    where: { id: itemId, orderId },
-    select: { id: true, productName: true, isCortesia: true, total: true, quantity: true, unitPrice: true },
-  })
-  if (!item) throw new NotFoundError('Artículo no encontrado en la orden')
-  if (item.isCortesia) throw new BadRequestError('El artículo ya está dado de cortesía')
-
-  // The line stays on the check (kitchen + audit) but costs 0.
-  await prisma.orderItem.update({
-    where: { id: itemId },
-    data: {
-      isCortesia: true,
-      cortesiaReason: reason.trim(),
-      total: 0,
-      discountAmount: item.total, // what the comp gave away
-    },
-  })
-
-  const totals = await recalculateOrderTotals(orderId, Number(order.discountAmount || 0), Number(order.paidAmount || 0))
 
   void logAction({
     action: 'ORDER_ITEM_COMPED',
@@ -90,32 +96,35 @@ export async function compWholeOrder(params: { venueId: string; orderId: string;
     throw new BadRequestError('reason es requerido para dar de cortesía')
   }
 
-  const order = await prisma.order.findUnique({
-    where: { id: orderId, venueId },
-    select: { id: true, paymentStatus: true, discountAmount: true, paidAmount: true, orderNumber: true },
+  const { order, items, compedAmount, totals } = await prisma.$transaction(async tx => {
+    if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
+    const order = await tx.order.findUnique({
+      where: { id: orderId, venueId },
+      select: { id: true, paymentStatus: true, discountAmount: true, paidAmount: true, orderNumber: true },
+    })
+    if (!order) throw new NotFoundError('Orden no encontrada')
+    if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
+      throw new BadRequestError('No se puede dar cortesía en una orden ya pagada')
+    }
+
+    const items = await tx.orderItem.findMany({
+      where: { orderId, isCortesia: false },
+      select: { id: true, total: true },
+    })
+    if (items.length === 0) throw new BadRequestError('La cuenta no tiene artículos por dar de cortesía')
+
+    const compedAmount = items.reduce((sum, i) => sum + Number(i.total), 0)
+    for (const item of items) {
+      await tx.orderItem.update({
+        where: { id: item.id },
+        data: { isCortesia: true, cortesiaReason: reason.trim(), total: 0, discountAmount: item.total },
+      })
+    }
+
+    const totals = await recalculateOrderTotals(orderId, Number(order.discountAmount || 0), Number(order.paidAmount || 0), tx)
+
+    return { order, items, compedAmount, totals }
   })
-  if (!order) throw new NotFoundError('Orden no encontrada')
-  if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
-    throw new BadRequestError('No se puede dar cortesía en una orden ya pagada')
-  }
-
-  const items = await prisma.orderItem.findMany({
-    where: { orderId, isCortesia: false },
-    select: { id: true, total: true },
-  })
-  if (items.length === 0) throw new BadRequestError('La cuenta no tiene artículos por dar de cortesía')
-
-  const compedAmount = items.reduce((sum, i) => sum + Number(i.total), 0)
-  await prisma.$transaction(
-    items.map(i =>
-      prisma.orderItem.update({
-        where: { id: i.id },
-        data: { isCortesia: true, cortesiaReason: reason.trim(), total: 0, discountAmount: i.total },
-      }),
-    ),
-  )
-
-  const totals = await recalculateOrderTotals(orderId, Number(order.discountAmount || 0), Number(order.paidAmount || 0))
 
   void logAction({
     action: 'ORDER_COMPED',
@@ -138,8 +147,11 @@ export async function recalculateOrderTotals(
   orderId: string,
   fallbackDiscount: number,
   paidAmount: number,
-  // Los mutadores atómicos (split/merge/quitar descuento) pasan su tx para que
-  // la mutación y el recálculo caigan o persistan JUNTOS (auditoría 2026-07-18).
+  // Caller must already hold Order's lock (or have created a private Order),
+  // and supply paidAmount/fallback from the fresh locked read. Zero fallback
+  // deliberately drops inline discounts; comp/promotions preserve theirs.
+  // Transitional global default for pending Plan3b T4 callers: it is NOT atomic
+  // with their earlier writes. T4 removes it after closing all 16 call sites.
   db: Prisma.TransactionClient | typeof prisma = prisma,
 ) {
   const items = await db.orderItem.findMany({ where: { orderId }, select: { total: true, orderPromotionId: true } })

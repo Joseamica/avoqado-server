@@ -1350,75 +1350,84 @@ export interface OrderDetailsInput {
 
 /**
  * TABLE_SERVICE — partial update of the check's details. Only provided keys
- * change; everything is additive metadata (never money).
+ * change; covers also synchronizes automatic service charges atomically.
  */
 export async function updateOrderDetails(venueId: string, orderId: string, input: OrderDetailsInput) {
-  const order = await prisma.order.findFirst({
-    where: { id: orderId, venueId },
-    select: { id: true, status: true, customerName: true },
-  })
-  if (!order) throw new NotFoundError('Order not found')
-  if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(order.status)) {
-    throw new BadRequestError('La cuenta ya está cerrada')
-  }
+  const update = async (db: Prisma.TransactionClient) => {
+    const order = await db.order.findFirst({
+      where: { id: orderId, venueId },
+      select: { id: true, status: true, customerName: true },
+    })
+    if (!order) throw new NotFoundError('Order not found')
+    if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(order.status)) {
+      throw new BadRequestError('La cuenta ya está cerrada')
+    }
 
-  // Partial-update semantics tolerant to clients that serialize defaults
-  // (Android's kotlinx encodeDefaults=true sends null for untouched fields):
-  // null/undefined = no change; EMPTY STRING clears name/notes/customer.
-  const data: Record<string, unknown> = {}
-  if (input.name !== undefined && input.name !== null) data.customerName = input.name.trim() || null
-  if (input.notes !== undefined && input.notes !== null) data.specialRequests = input.notes.trim() || null
-  if (input.covers !== undefined && input.covers !== null) {
-    if (input.covers < 1 || input.covers > 200) throw new BadRequestError('covers inválido')
-    data.covers = input.covers
-  }
-  if (input.orderType !== undefined && input.orderType !== null && input.orderType !== '') {
-    const valid = ['DINE_IN', 'TAKEOUT', 'DELIVERY', 'PICKUP']
-    if (!valid.includes(input.orderType)) throw new BadRequestError('orderType inválido')
-    data.type = input.orderType
-  }
-  if (input.customerId !== undefined && input.customerId !== null) {
-    if (input.customerId) {
-      const customer = await prisma.customer.findFirst({
-        where: { id: input.customerId, venueId },
-        select: { id: true, firstName: true, lastName: true },
-      })
-      if (!customer) throw new BadRequestError('Cliente no encontrado en este venue')
-      data.customerId = customer.id
-      // Follow the customer's name on the check label ONLY when the check has
-      // no explicit name yet (never clobber a name the waiter typed). Checked
-      // against the STORED name because clients that serialize defaults send
-      // name:null on every call.
-      if (!order.customerName && data.customerName === undefined) {
-        data.customerName = `${customer.firstName || ''} ${customer.lastName || ''}`.trim() || null
+    // Partial-update semantics tolerant to clients that serialize defaults
+    // (Android's kotlinx encodeDefaults=true sends null for untouched fields):
+    // null/undefined = no change; EMPTY STRING clears name/notes/customer.
+    const data: Record<string, unknown> = {}
+    if (input.name !== undefined && input.name !== null) data.customerName = input.name.trim() || null
+    if (input.notes !== undefined && input.notes !== null) data.specialRequests = input.notes.trim() || null
+    if (input.covers !== undefined && input.covers !== null) {
+      if (input.covers < 1 || input.covers > 200) throw new BadRequestError('covers inválido')
+      data.covers = input.covers
+    }
+    if (input.orderType !== undefined && input.orderType !== null && input.orderType !== '') {
+      const valid = ['DINE_IN', 'TAKEOUT', 'DELIVERY', 'PICKUP']
+      if (!valid.includes(input.orderType)) throw new BadRequestError('orderType inválido')
+      data.type = input.orderType
+    }
+    if (input.customerId !== undefined && input.customerId !== null) {
+      if (input.customerId) {
+        const customer = await db.customer.findFirst({
+          where: { id: input.customerId, venueId },
+          select: { id: true, firstName: true, lastName: true },
+        })
+        if (!customer) throw new BadRequestError('Cliente no encontrado en este venue')
+        data.customerId = customer.id
+        // Follow the customer's name on the check label ONLY when the check has
+        // no explicit name yet (never clobber a name the waiter typed). Checked
+        // against the STORED name because clients that serialize defaults send
+        // name:null on every call.
+        if (!order.customerName && data.customerName === undefined) {
+          data.customerName = `${customer.firstName || ''} ${customer.lastName || ''}`.trim() || null
+        }
+      } else {
+        // Empty string detaches the customer.
+        data.customerId = null
       }
-    } else {
-      // Empty string detaches the customer.
-      data.customerId = null
+    }
+    if (Object.keys(data).length === 0) throw new BadRequestError('Nada que actualizar')
+
+    const updated = await db.order.update({
+      where: { id: order.id },
+      data,
+      select: { customerName: true, specialRequests: true, covers: true, customerId: true, type: true },
+    })
+
+    // Cambiar el conteo de comensales puede disparar (o retirar) el cargo
+    // automático por grupo — el cargo debe seguir al conteo, no quedarse pegado.
+    if (input.covers != null) {
+      const { syncAutomaticServiceCharges } = await import('./service-charge.mobile.service')
+      await syncAutomaticServiceCharges(venueId, orderId, db)
+    }
+
+    return {
+      name: updated.customerName,
+      notes: updated.specialRequests,
+      covers: updated.covers,
+      customerId: updated.customerId,
+      orderType: updated.type,
     }
   }
-  if (Object.keys(data).length === 0) throw new BadRequestError('Nada que actualizar')
-
-  const updated = await prisma.order.update({
-    where: { id: order.id },
-    data,
-    select: { customerName: true, specialRequests: true, covers: true, customerId: true, type: true },
+  // Only covers changes compose a money mutation; metadata-only edits keep
+  // their existing path. Lock before all reads used by the composed update.
+  if (input.covers == null) return update(prisma)
+  return prisma.$transaction(async tx => {
+    if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+    return update(tx)
   })
-
-  // Cambiar el conteo de comensales puede disparar (o retirar) la propina
-  // automática por grupo — el cargo debe seguir al conteo, no quedarse pegado.
-  if (input.covers != null) {
-    const { syncAutomaticServiceCharges } = await import('./service-charge.mobile.service')
-    await syncAutomaticServiceCharges(venueId, orderId)
-  }
-
-  return {
-    name: updated.customerName,
-    notes: updated.specialRequests,
-    covers: updated.covers,
-    customerId: updated.customerId,
-    orderType: updated.type,
-  }
 }
 
 // MARK: - Table order discounts (check panel "Descuentos")
@@ -1934,7 +1943,7 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
           status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
           paymentStatus: { notIn: ['PAID', 'PARTIAL'] },
         },
-        select: { id: true, specialRequests: true, contratoDePrecio: true },
+        select: { id: true, specialRequests: true, contratoDePrecio: true, paidAmount: true },
       })
       if (!freshSource || !freshTarget) {
         throw new BadRequestError('La cuenta cambió mientras se fusionaba — vuelve a intentar')
@@ -1989,7 +1998,9 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
         },
       })
 
-      return recalculateOrderTotals(target.id, 0, Number(target.paidAmount || 0), tx)
+      const totals = await recalculateOrderTotals(target.id, 0, Number(freshTarget.paidAmount || 0), tx)
+      const { syncAutomaticServiceCharges } = await import('./service-charge.mobile.service')
+      return (await syncAutomaticServiceCharges(venueId, target.id, tx)) ?? totals
     },
     { timeout: 15_000, maxWait: 5_000 },
   )
@@ -2026,9 +2037,6 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
   }
 
   const totals = mergedTotals
-  // El destino puede haber cruzado el mínimo de comensales al crecer.
-  const { syncAutomaticServiceCharges } = await import('./service-charge.mobile.service')
-  const afterAuto = await syncAutomaticServiceCharges(venueId, target.id)
 
   void (await import('../dashboard/activity-log.service')).logAction({
     action: 'ORDERS_MERGED',
@@ -2043,8 +2051,8 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
     target: {
       id: target.id,
       orderNumber: target.orderNumber,
-      total: (afterAuto ?? totals).total,
-      version: (afterAuto ?? totals).version,
+      total: totals.total,
+      version: totals.version,
     },
     merged: { id: source.id, orderNumber: source.orderNumber, items: source.items.length },
     tableFreed: Boolean(boundTable),
