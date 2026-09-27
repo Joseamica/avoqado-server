@@ -157,14 +157,18 @@ describe('mobile money writers own the lock and transaction', () => {
     expect(tx.orderServiceCharge.createMany).toHaveBeenCalled()
     expect(tx.order.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ covers: 9 }) }))
   })
-  it('merge uses fresh paidAmount and synchronizes automatic charges before commit', async () => {
-    const source = { ...order, id: 'source', paidAmount: 0, items: [item], orderDiscounts: [], serviceCharges: [] }
+  it('merge uses fresh paidAmount/item count and synchronizes automatic charges before commit', async () => {
+    const source = { ...order, id: 'source', paidAmount: 0, items: [item], _count: { items: 2 }, orderDiscounts: [], serviceCharges: [] }
     prismaMock.order.findFirst.mockImplementation(async ({ where }: any) => (where.id === 'source' ? source : { ...order, paidAmount: 1 }))
     tx.order.findFirst.mockImplementation(async ({ where }: any) => (where.id === 'source' ? source : order))
     tx.$queryRaw.mockResolvedValue([{ id: 'order' }, { id: 'source' }])
     tx.terminalPaymentRequest.findFirst.mockResolvedValue(null)
     prismaMock.table.findFirst.mockResolvedValue(null)
-    await mergeOrders('venue', 'order', 'source')
+    const result = await mergeOrders('venue', 'order', 'source')
+    expect(result.merged.items).toBe(2)
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'ORDERS_MERGED', data: expect.objectContaining({ items: 2 }) }),
+    )
     expect(tx.order.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ remainingBalance: 93 }) }))
     expect(tx.orderServiceCharge.createMany).toHaveBeenCalled()
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)

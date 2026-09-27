@@ -90,6 +90,7 @@ describe('mergeOrders frees the source table even when the source order came fro
           customerName: null,
           specialRequests: null,
           items: [{ id: 'item-1' }],
+          _count: { items: 1 },
           orderDiscounts: [],
           serviceCharges: [],
         })

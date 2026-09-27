@@ -1903,7 +1903,7 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
   }
 
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
-  const mergedTotals = await prisma.$transaction(
+  const { totals, itemsCount } = await prisma.$transaction(
     async tx => {
       // 🔴 Diseño §C.6: el candado de LAS DOS órdenes, ordenado por id y en UNA sentencia (mismo patrón que
       // areaTicketV7 y commission-calculation), ANTES de releer y de tocar un solo renglón. Es lo que serializa esta
@@ -1932,6 +1932,7 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
           id: true,
           specialRequests: true,
           contratoDePrecio: true,
+          _count: { select: { items: true } },
           orderDiscounts: { select: { id: true } },
           serviceCharges: { select: { id: true, isAutomatic: true } },
         },
@@ -1947,6 +1948,9 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
       })
       if (!freshSource || !freshTarget) {
         throw new BadRequestError('La cuenta cambió mientras se fusionaba — vuelve a intentar')
+      }
+      if (freshSource._count.items === 0) {
+        throw new BadRequestError('La cuenta origen no tiene artículos')
       }
       if (freshSource.orderDiscounts.length > 0 || freshSource.serviceCharges.some(sc => !sc.isAutomatic)) {
         throw new BadRequestError('La cuenta origen recibió descuentos o cobros durante la fusión — vuelve a intentar')
@@ -2000,7 +2004,7 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
 
       const totals = await recalculateOrderTotals(target.id, 0, Number(freshTarget.paidAmount || 0), tx)
       const { syncAutomaticServiceCharges } = await import('./service-charge.mobile.service')
-      return (await syncAutomaticServiceCharges(venueId, target.id, tx)) ?? totals
+      return { totals: (await syncAutomaticServiceCharges(venueId, target.id, tx)) ?? totals, itemsCount: freshSource._count.items }
     },
     { timeout: 15_000, maxWait: 5_000 },
   )
@@ -2036,15 +2040,13 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
     })
   }
 
-  const totals = mergedTotals
-
   void (await import('../dashboard/activity-log.service')).logAction({
     action: 'ORDERS_MERGED',
     entity: 'Order',
     entityId: target.id,
     staffId,
     venueId,
-    data: { sourceOrderId: source.id, sourceOrderNumber: source.orderNumber, items: source.items.length },
+    data: { sourceOrderId: source.id, sourceOrderNumber: source.orderNumber, items: itemsCount },
   })
 
   return {
@@ -2054,7 +2056,7 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
       total: totals.total,
       version: totals.version,
     },
-    merged: { id: source.id, orderNumber: source.orderNumber, items: source.items.length },
+    merged: { id: source.id, orderNumber: source.orderNumber, items: itemsCount },
     tableFreed: Boolean(boundTable),
   }
 }

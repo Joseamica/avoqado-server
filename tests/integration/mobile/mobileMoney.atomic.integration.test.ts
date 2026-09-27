@@ -7,6 +7,7 @@ import { bloquearOrdenParaFacturar } from '@/services/fiscal/admisionIva'
 import { compOrderItem, compWholeOrder } from '@/services/mobile/comp-item.mobile.service'
 import { applyServiceCharge, removeServiceCharge, syncAutomaticServiceCharges } from '@/services/mobile/service-charge.mobile.service'
 import { updateOrderDetails, mergeOrders } from '@/services/mobile/order.mobile.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
 jest.mock('@/services/referrals/referralRefund.service', () => ({ onOrderCancelled: jest.fn() }))
@@ -292,6 +293,46 @@ describe('new atomic mobile money behavior', () => {
     await expect(updateOrderDetails(venueId, o.id, { covers: 9 })).rejects.toThrow('injected total failure after child write')
     observed()
     expect(await snapshot(o.id)).toEqual(before)
+  })
+  it.each(['empty', 'added'] as const)('merge rereads source membership after waiting: %s', async change => {
+    const target = await newOrder({ covers: 1 }),
+      source = await newOrder({ covers: 1 })
+    const originalTarget = await snapshot(target.id)
+    const winner = holdFiscal(source.id, async tx => {
+      if (change === 'empty') {
+        await tx.orderItem.deleteMany({ where: { orderId: source.id } })
+        await tx.order.update({ where: { id: source.id }, data: { subtotal: 0, total: 0, remainingBalance: 0 } })
+      } else {
+        await tx.orderItem.create({
+          data: { orderId: source.id, productName: 'Nuevo', quantity: 1, unitPrice: 50, taxAmount: 0, total: 50 },
+        })
+        await tx.order.update({ where: { id: source.id }, data: { subtotal: 150, total: 150, remainingBalance: 150 } })
+      }
+    })
+    let merging: ReturnType<typeof resultOf<Awaited<ReturnType<typeof mergeOrders>>>> | undefined
+    try {
+      await winner.entered
+      merging = resultOf(mergeOrders(venueId, target.id, source.id))
+      await waitingOnOrder()
+    } finally {
+      winner.release()
+      await winner.done
+      await merging
+    }
+    const result = await merging!
+    if (change === 'empty') {
+      expect(result.error?.message).toBe('La cuenta origen no tiene artículos')
+      expect(await snapshot(target.id)).toEqual(originalTarget)
+      expect(await snapshot(source.id)).toMatchObject({ status: source.status, version: source.version, items: [] })
+      expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'ORDERS_MERGED', entityId: target.id }))
+    } else {
+      expect(result.error).toBeUndefined()
+      expect(result.value).toMatchObject({ merged: { items: 2 }, target: { total: 250 } })
+      expect((await snapshot(target.id)).items).toHaveLength(3)
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'ORDERS_MERGED', entityId: target.id, data: expect.objectContaining({ items: 2 }) }),
+      )
+    }
   })
   it('merge and autocharge roll back together when automatic sync fails', async () => {
     const target = await newOrder(),
