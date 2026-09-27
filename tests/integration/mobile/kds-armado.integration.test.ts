@@ -1,0 +1,207 @@
+/**
+ * Etapa 3 del KDS (spec 2026-09-27 §1-§2): el servidor arma la comanda oficial por estación con pantalla, una
+ * sola vez aunque lo pidan dos a la vez, y respeta lo que las marcas (LISTO sin red, «salió en papel») dijeron.
+ */
+import { Prisma } from '@prisma/client'
+import prisma from '@/utils/prismaClient'
+import { buildPrintConfig, routingConfigFrom } from '@/services/printing/printConfig.service'
+import { estacionesDelNegocio } from '@/services/kds/kitchenDisplayStations'
+import { authorKitchenTickets, markKitchenTicket } from '@/services/kds/kitchenTicketAuthoring.service'
+
+const SUF = `kdsarmado-${Date.now()}`
+const haceUnaHora = new Date(Date.now() - 60 * 60 * 1000)
+let orgId: string
+let venueId: string
+let cocina: string
+let barra: string
+let taco: string
+let limonada: string
+let papas: string
+let folio = 0
+
+beforeAll(async () => {
+  orgId = (
+    await prisma.organization.create({
+      data: { name: `Armado ${SUF}`, email: `${SUF}@example.test`, phone: '0000000000' },
+      select: { id: true },
+    })
+  ).id
+  venueId = (await prisma.venue.create({ data: { organizationId: orgId, name: `V ${SUF}`, slug: `v-${SUF}` } })).id
+  cocina = (
+    await prisma.printStation.create({
+      data: { venueId, name: 'Cocina', isDefault: true, hasKitchenDisplay: true, kitchenDisplaySince: haceUnaHora },
+    })
+  ).id
+  barra = (
+    await prisma.printStation.create({ data: { venueId, name: 'Barra', hasKitchenDisplay: true, kitchenDisplaySince: haceUnaHora } })
+  ).id
+  const soloPapel = (await prisma.printStation.create({ data: { venueId, name: 'Freidora' } })).id
+  const categoria = (await prisma.menuCategory.create({ data: { venueId, name: 'Comida', slug: `comida-${SUF}` } })).id
+  const producto = async (name: string, printStationId: string | null) =>
+    (
+      await prisma.product.create({
+        data: { venueId, sku: `${name}-${SUF}`, name, categoryId: categoria, price: new Prisma.Decimal(50), printStationId },
+      })
+    ).id
+  taco = await producto('Taco', null) // cae en la default (Cocina)
+  limonada = await producto('Limonada', barra)
+  papas = await producto('Papas', soloPapel)
+})
+
+afterAll(async () => {
+  if (!orgId) return
+  await prisma.kdsOrder.deleteMany({ where: { venueId } })
+  await prisma.order.deleteMany({ where: { venueId } })
+  await prisma.table.deleteMany({ where: { venueId } })
+  await prisma.product.deleteMany({ where: { venueId } })
+  await prisma.menuCategory.deleteMany({ where: { venueId } })
+  await prisma.printStation.deleteMany({ where: { venueId } })
+  await prisma.venue.deleteMany({ where: { id: venueId } })
+  await prisma.organization.deleteMany({ where: { id: orgId } })
+})
+
+const renglon = (productId: string, productName: string, quantity: number, extra: Record<string, unknown> = {}) => ({
+  productId,
+  productName,
+  quantity,
+  unitPrice: new Prisma.Decimal(50),
+  taxAmount: new Prisma.Decimal(0),
+  total: new Prisma.Decimal(50 * quantity),
+  ...extra,
+})
+
+/** Una venta de mostrador cobrada: 2 tacos, 1 limonada y papas (éstas sólo van a papel). */
+async function nuevaVenta(extra: Partial<Prisma.OrderUncheckedCreateInput> = {}) {
+  folio += 1
+  return prisma.order.create({
+    data: {
+      venueId,
+      orderNumber: `V-${folio}-${SUF}`,
+      externalId: `ext-${folio}-${SUF}`,
+      subtotal: 200,
+      taxAmount: 0,
+      total: 200,
+      kitchenPendingAt: new Date(),
+      items: { create: [renglon(taco, 'Taco', 2), renglon(limonada, 'Limonada', 1), renglon(papas, 'Papas', 1)] },
+      ...extra,
+    },
+    select: { id: true, externalId: true },
+  })
+}
+
+const comandasDe = (orderId: string) =>
+  prisma.kdsOrder.findMany({ where: { venueId, orderId }, include: { items: true }, orderBy: { sourceKey: 'asc' }, take: 20 })
+
+describe('authorKitchenTickets', () => {
+  it('arma una comanda por estación con pantalla, con los ids para rutear, sella el envío y limpia la marca', async () => {
+    const v = await nuevaVenta()
+    const { ticketIds } = await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })
+    expect(ticketIds).toHaveLength(2)
+
+    const comandas = await comandasDe(v.id)
+    expect(comandas.map(c => [c.sourceKey, c.printStationId, c.items.map(i => i.productName)])).toEqual(
+      expect.arrayContaining([
+        [`sale:${v.externalId}:${cocina}`, cocina, ['Taco']],
+        [`sale:${v.externalId}:${barra}`, barra, ['Limonada']],
+      ]),
+    )
+    const itemTaco = comandas.flatMap(c => c.items).find(i => i.productName === 'Taco')!
+    expect(itemTaco).toEqual(expect.objectContaining({ productId: taco, orderItemId: expect.any(String), quantity: 2 }))
+    const renglones = await prisma.orderItem.findMany({ where: { orderId: v.id }, take: 10 })
+    expect(renglones.filter(r => r.productId !== papas).every(r => r.sentToKitchenAt instanceof Date)).toBe(true)
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: v.id } })).kitchenPendingAt).toBeNull()
+  })
+
+  it('repetir el armado no duplica nada', async () => {
+    const v = await nuevaVenta()
+    await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })
+    const segunda = await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'LEGACY_POST' })
+    expect(segunda.ticketIds).toEqual([])
+    const comandas = await comandasDe(v.id)
+    expect(comandas).toHaveLength(2)
+    expect(comandas.flatMap(c => c.items)).toHaveLength(2)
+  })
+
+  it('🔴 dos armados A LA VEZ (el gancho del cobro y el POST de una app vieja) dan los mismos platillos, sin duplicar', async () => {
+    const v = await nuevaVenta()
+    await Promise.all([
+      authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' }),
+      authorKitchenTickets({ venueId, orderId: v.id, trigger: 'LEGACY_POST' }),
+    ])
+    const comandas = await comandasDe(v.id)
+    expect(comandas).toHaveLength(2)
+    expect(comandas.flatMap(c => c.items)).toHaveLength(2)
+  })
+
+  it('una marca LISTO que llegó ANTES deja la comanda terminada aunque luego se arme (pegajosa)', async () => {
+    const v = await nuevaVenta()
+    const sourceKey = `sale:${v.externalId}:${barra}`
+    await markKitchenTicket({ venueId, sourceKey, stationId: barra, action: 'BUMP', label: '47-001', at: new Date() })
+    await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })
+    const comanda = await prisma.kdsOrder.findUniqueOrThrow({
+      where: { venueId_sourceKey: { venueId, sourceKey } },
+      include: { items: true },
+    })
+    expect(comanda.status).toBe('COMPLETED')
+    expect(comanda.orderId).toBe(v.id)
+    expect(comanda.items.map(i => i.productName)).toEqual(['Limonada'])
+  })
+
+  it('«salió en papel» después del armado la saca del tablero si seguía nueva, y nunca a una ya empezada', async () => {
+    const v = await nuevaVenta()
+    await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })
+    const enCocina = `sale:${v.externalId}:${cocina}`
+    const enBarra = `sale:${v.externalId}:${barra}`
+    await prisma.kdsOrder.update({ where: { venueId_sourceKey: { venueId, sourceKey: enBarra } }, data: { status: 'PREPARING' } })
+    await markKitchenTicket({ venueId, sourceKey: enCocina, stationId: cocina, action: 'FALLBACK_PRINTED', label: null, at: new Date() })
+    await markKitchenTicket({ venueId, sourceKey: enBarra, stationId: barra, action: 'FALLBACK_PRINTED', label: null, at: new Date() })
+    const k = await prisma.kdsOrder.findUniqueOrThrow({ where: { venueId_sourceKey: { venueId, sourceKey: enCocina } } })
+    const b = await prisma.kdsOrder.findUniqueOrThrow({ where: { venueId_sourceKey: { venueId, sourceKey: enBarra } } })
+    expect(k.fallbackPrintedAt).toBeInstanceOf(Date)
+    expect(b.fallbackPrintedAt).toBeNull()
+  })
+
+  it('un pedido de reparto no se arma por aquí (Uber arma el suyo) y la marca se limpia', async () => {
+    const v = await nuevaVenta({ type: 'DELIVERY' })
+    expect((await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })).ticketIds).toEqual([])
+    expect(await comandasDe(v.id)).toHaveLength(0)
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: v.id } })).kitchenPendingAt).toBeNull()
+  })
+
+  it('reparte con la MISMA regla que la print-config de la caja', async () => {
+    const { routing } = await estacionesDelNegocio(venueId)
+    const deLaCaja = routingConfigFrom(await buildPrintConfig(venueId))
+    expect(routing.defaultStationId).toBe(deLaCaja.defaultStationId)
+    expect([...routing.activeStationIds].sort()).toEqual([...deLaCaja.activeStationIds].sort())
+  })
+
+  it('al PAGAR una mesa no se repite lo que ya se mandó en una ronda; la ronda sí lo arma', async () => {
+    const tableId = (await prisma.table.create({ data: { venueId, number: `M-${SUF}`, capacity: 4, qrCode: `qr-${SUF}` } })).id
+    const o = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: `MESA-${SUF}`,
+        tableId,
+        subtotal: 50,
+        taxAmount: 0,
+        total: 50,
+        items: { create: [renglon(taco, 'Taco', 1, { sentToKitchenAt: new Date(), externalId: 'sync:rk-pagada:0' })] },
+      },
+      select: { id: true },
+    })
+    expect((await authorKitchenTickets({ venueId, orderId: o.id, trigger: 'PAID' })).ticketIds).toEqual([])
+    expect((await authorKitchenTickets({ venueId, orderId: o.id, trigger: 'ROUND' })).ticketIds).toHaveLength(1)
+    expect((await comandasDe(o.id))[0].sourceKey).toBe(`round:rk-pagada:${cocina}`)
+  })
+
+  it('los modificadores salen con la MISMA forma que el resto de comandas («2x Extra queso»)', async () => {
+    const v = await nuevaVenta()
+    const renglonTaco = await prisma.orderItem.findFirstOrThrow({ where: { orderId: v.id, productId: taco } })
+    await prisma.orderItemModifier.create({
+      data: { orderItemId: renglonTaco.id, name: 'Extra queso', quantity: 2, price: new Prisma.Decimal(10) },
+    })
+    await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })
+    const item = await prisma.kdsOrderItem.findFirstOrThrow({ where: { orderItemId: renglonTaco.id } })
+    expect(JSON.parse(item.modifiers!)).toEqual(['2x Extra queso'])
+  })
+})

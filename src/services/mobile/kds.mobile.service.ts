@@ -14,6 +14,8 @@ import prisma from '../../utils/prismaClient'
 import { OrderStatus } from '@prisma/client'
 import type { KdsOrderStatus } from '@prisma/client'
 import { anexarCapacidades, ventasDeComandas, type EstadoRetiro, type VentaDeComanda } from './kdsCapacidades'
+import { toKdsModifierLabels } from '../kds/kdsModifierLabels'
+import { venueTienePantallaDeCocina } from '../kds/kitchenDisplayStations'
 
 // Use string constants instead of Prisma enum to avoid runtime import issues with tsx
 const KdsStatus = {
@@ -24,43 +26,9 @@ const KdsStatus = {
 }
 const VALID_STATUSES = ['NEW', 'PREPARING', 'READY', 'COMPLETED']
 
-// MARK: - Modificadores: UNA sola forma para los dos productores
-
-/**
- * 🔴 `KdsOrderItem.modifiers` la escriben DOS productores y hasta el 2026-08-20 cada uno
- * guardaba una forma distinta: el POS `["Sin cebolla"]`, la ingesta de marketplace
- * `[{"name":"Extra queso","quantity":1}]`. El lector sólo hacía `JSON.parse`, así que la
- * diferencia llegaba entera a la cocina — verificado en una Sunmi D3 con un pedido real de
- * Uber: Android pintó el JSON crudo y iOS falló el cast a `[String]` y **perdió el
- * modificador sin dejar rastro**. Un modificador perdido es un platillo mal servido.
- *
- * El esquema no protege la FORMA de un valor serializado; sólo una función compartida lo
- * hace. Por eso los dos productores normalizan con ÉSTA antes de escribir —incluida
- * `deliveryOrderIngestion.service.ts`, que la importa— y el lector la vuelve a aplicar para
- * sanar las filas que ya se escribieron mal.
- */
-export type KdsModifierInput = string | { name?: string | null; quantity?: number | null } | null | undefined
-
-export function toKdsModifierLabels(modifiers: KdsModifierInput[] | null | undefined): string[] {
-  if (!Array.isArray(modifiers)) return []
-
-  return modifiers.reduce<string[]>((etiquetas, modificador) => {
-    if (typeof modificador === 'string') {
-      const texto = modificador.trim()
-      if (texto) etiquetas.push(texto)
-      return etiquetas
-    }
-
-    const nombre = modificador?.name?.trim()
-    // Sin nombre no hay nada que preparar: se descarta en vez de escribir "undefined" en la
-    // comanda, que es ruido que el cocinero tiene que interpretar a media comida.
-    if (!nombre) return etiquetas
-
-    const cantidad = modificador?.quantity ?? 1
-    etiquetas.push(cantidad > 1 ? `${cantidad}x ${nombre}` : nombre)
-    return etiquetas
-  }, [])
-}
+// La forma única de los modificadores vive en `services/kds/kdsModifierLabels` (también la usa el armado de
+// comandas del servidor). Se re-exporta para no romper a quien ya la importa de aquí.
+export { toKdsModifierLabels, type KdsModifierInput } from '../kds/kdsModifierLabels'
 
 /**
  * Lee la columna cruda. Tolera JSON corrupto A PROPÓSITO: `JSON.parse` suelto tiraba TODO el
@@ -211,19 +179,9 @@ async function comandaConVenta(venueId: string, k: { orderId: string | null }): 
 
 // MARK: - Create KDS Order
 
-/**
- * ¿El negocio atiende alguna estación con PANTALLA de cocina? (spec 2026-09-24, etapa 1).
- * Sin ninguna estación ACTIVA con `hasKitchenDisplay`, las ventas de la caja no guardan comanda:
- * nadie la vería y se acumulaban (Testarudo llegó a 3,068). La hoja impresa no depende de esto.
- * `findFirst` con índice por venueId: una consulta acotada por venta.
- */
-export async function venueTienePantallaDeCocina(venueId: string): Promise<boolean> {
-  const estacion = await prisma.printStation.findFirst({
-    where: { venueId, active: true, hasKitchenDisplay: true },
-    select: { id: true },
-  })
-  return estacion !== null
-}
+// La regla vive en `services/kds/kitchenDisplayStations` (también la consultan cobros y rondas). Se re-exporta
+// para no romper a quien ya la importa de este módulo.
+export { venueTienePantallaDeCocina }
 
 /**
  * Create a new KDS order after payment succeeds.
