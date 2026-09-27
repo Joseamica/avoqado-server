@@ -76,6 +76,7 @@ import { shiftCloseWatchdogJob } from './jobs/shift-close-watchdog.job'
 import { cashDrawerAutoCloseJob } from './jobs/cash-drawer-auto-close.job'
 import { inventoryPostingSweeperJob } from './jobs/inventory-posting-sweeper.job'
 import { loyaltyReconciliationJob } from './jobs/loyalty-reconciliation.job'
+import { kitchenTicketsReconciliationJob } from './jobs/kitchen-tickets-reconciliation.job'
 import { paymentEffectsJob } from './jobs/payment-effects.job'
 import { angelpayEventWorkerJob } from './jobs/angelpay-event-worker.job'
 import { cashDrawerReconcilerJob } from './jobs/cash-drawer-reconciler.job'
@@ -171,6 +172,7 @@ const gracefulShutdown = async (signal: string) => {
       cashDrawerAutoCloseJob.stop()
       inventoryPostingSweeperJob.stop()
       loyaltyReconciliationJob.stop()
+      kitchenTicketsReconciliationJob.stop()
       paymentEffectsJob.stop()
       angelpayEventWorkerJob.stop()
       cashDrawerReconcilerJob.stop()
@@ -510,6 +512,8 @@ const startApplication = async (retries = 3) => {
       // PENDING/APPLYING — sin este job el posting durable es solo un registro.
       inventoryPostingSweeperJob.start()
       loyaltyReconciliationJob.start()
+      // Etapa 3 del KDS: arma las comandas de pantalla que un proceso caído dejó con su marca.
+      kitchenTicketsReconciliationJob.start()
       paymentEffectsJob.start()
       // S4: los eventos PENDING de AngelPay (webhook antes que el registro, vínculo tardío, caídas) los retoma un
       // worker propio con claim atómico y lease — nunca el vigía de 30 s.
