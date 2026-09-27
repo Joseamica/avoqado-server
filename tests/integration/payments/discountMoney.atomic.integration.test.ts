@@ -15,6 +15,8 @@ if (
   throw new Error('This suite requires an explicitly selected isolated local test database.')
 }
 const venueId = `discount-money-${randomUUID()}`
+// A second venue of the same organization: a TPV route for it must never reach an Order of `venueId`.
+const otherVenueId = `discount-money-other-${randomUUID()}`
 let staffId: string, staffVenueId: string, productId: string, chargeId: string, discountId: string, couponId: string, customerId: string
 let otherProductId: string, secondDiscountId: string, groupId: string
 const couponCode = `T3-${randomUUID()}`.toUpperCase()
@@ -94,15 +96,16 @@ function holdFiscal(orderId: string, after: (tx: Prisma.TransactionClient) => Pr
 }
 type Fixture = Awaited<ReturnType<typeof newOrder>>
 const writers = [
-  ['predefined', (o: Fixture) => tpv.applyPredefinedDiscount(venueId, o.id, discountId, staffVenueId)],
-  ['manual', (o: Fixture) => tpv.applyManualDiscount(venueId, o.id, 'PERCENTAGE', 10, 'Manual', staffVenueId)],
-  ['auto', (o: Fixture) => tpv.applyAutomaticDiscounts(venueId, o.id, staffVenueId)],
-  ['remove', (o: Fixture) => tpv.removeDiscount(venueId, o.id, o.orderDiscounts[0].id, staffId)],
-  ['coupon', (o: Fixture) => tpv.applyCouponCode(venueId, o.id, couponCode, staffVenueId)],
+  ['predefined', (o: Fixture, venue = venueId) => tpv.applyPredefinedDiscount(venue, o.id, discountId, staffVenueId)],
+  ['manual', (o: Fixture, venue = venueId) => tpv.applyManualDiscount(venue, o.id, 'PERCENTAGE', 10, 'Manual', staffVenueId)],
+  ['auto', (o: Fixture, venue = venueId) => tpv.applyAutomaticDiscounts(venue, o.id, staffVenueId)],
+  ['remove', (o: Fixture, venue = venueId) => tpv.removeDiscount(venue, o.id, o.orderDiscounts[0].id, staffId)],
+  ['coupon', (o: Fixture, venue = venueId) => tpv.applyCouponCode(venue, o.id, couponCode, staffVenueId)],
 ] as const
 beforeAll(async () => {
   await prisma.organization.create({ data: { id: venueId, name: venueId, email: `${venueId}@test.example`, phone: '5500000000' } })
   await prisma.venue.create({ data: { id: venueId, organizationId: venueId, name: venueId, slug: venueId } })
+  await prisma.venue.create({ data: { id: otherVenueId, organizationId: venueId, name: otherVenueId, slug: otherVenueId } })
   staffId = (await prisma.staff.create({ data: { email: `${venueId}@staff.test`, firstName: 'Discount', lastName: 'Atomic' } })).id
   staffVenueId = (await prisma.staffVenue.create({ data: { venueId, staffId, role: 'MANAGER' } })).id
   const category = await prisma.menuCategory.create({ data: { venueId, name: 'Catalog', slug: 'catalog' } })
@@ -173,7 +176,7 @@ afterAll(async () => {
   await prisma.menuCategory.deleteMany({ where: { venueId } })
   await prisma.staffVenue.deleteMany({ where: { venueId } })
   await prisma.staff.deleteMany({ where: { id: staffId } })
-  await prisma.venue.deleteMany({ where: { id: venueId } })
+  await prisma.venue.deleteMany({ where: { id: { in: [venueId, otherVenueId] } } })
   await prisma.organization.deleteMany({ where: { id: venueId } })
 })
 
@@ -196,6 +199,14 @@ describe('new serialized discount behavior', () => {
     if (name === 'coupon') expect((await writer!).value).toMatchObject({ success: false, error: 'Cannot apply coupon to a paid order' })
     else expect((await writer!).error?.message).toContain('paid order')
     expect(await snapshot(o.id)).toEqual(before)
+  })
+  it.each(writers)('%s from another venue gets 404 and writes nothing', async (name, run) => {
+    const o = await newOrder(name === 'remove'),
+      before = await snapshot(o.id)
+    await expect(run(o, otherVenueId)).rejects.toMatchObject({ statusCode: 404, message: 'Order not found' })
+    expect(await snapshot(o.id)).toEqual(before)
+    expect((await prisma.discount.findUniqueOrThrow({ where: { id: discountId } })).currentUses).toBe(0)
+    expect(await prisma.couponRedemption.count({ where: { orderId: o.id } })).toBe(0)
   })
   it.each(writers)('%s holds Order until fiscal reads the entire committed operation', async (name, run) => {
     const o = await newOrder(name === 'remove'),

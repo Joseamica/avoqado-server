@@ -130,6 +130,15 @@ describe('fresh discount mutations', () => {
     await expect(run()).rejects.toThrow(/Order not found/)
     expect(tx.orderDiscount.create).not.toHaveBeenCalled()
   })
+  it.each(writers)('%s scopes the canonical lock to the ROUTE venue, never to the Order own venue', async (_name, run) => {
+    // The Order claims another venue: a writer that derived the tenant from it (legacy path) would lock that one instead.
+    tx.order.findUnique.mockResolvedValue({ ...order(), venueId: 'order-own-venue' })
+    await run()
+    expect(tx.order.findUnique.mock.calls.filter(([args]: any[]) => args?.select?.venueId)).toHaveLength(0)
+    expect(tx.$queryRaw).toHaveBeenCalledTimes(1)
+    // Tagged template: [strings, orderId, venueId] — the bound venue must be the route's.
+    expect(tx.$queryRaw.mock.calls[0].slice(1)).toEqual(['order', 'venue'])
+  })
   it.each(writers.filter(([name]) => name === 'predefined' || name === 'auto'))(
     '%s recalculates amount and tax from the transaction even without a version change',
     async (name, run) => {
