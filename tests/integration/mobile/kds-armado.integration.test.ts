@@ -53,6 +53,11 @@ afterAll(async () => {
   await prisma.kdsOrder.deleteMany({ where: { venueId } })
   await prisma.order.deleteMany({ where: { venueId } })
   await prisma.table.deleteMany({ where: { venueId } })
+  // Cadena del vale de área (V7): AreaTicket restringe contra FulfillmentArea y Terminal, así que se borra
+  // primero (cascada a AreaTicketLine) y luego sus padres.
+  await prisma.areaTicket.deleteMany({ where: { venueId } })
+  await prisma.fulfillmentArea.deleteMany({ where: { venueId } })
+  await prisma.terminal.deleteMany({ where: { venueId } })
   await prisma.product.deleteMany({ where: { venueId } })
   await prisma.menuCategory.deleteMany({ where: { venueId } })
   await prisma.printStation.deleteMany({ where: { venueId } })
@@ -203,5 +208,54 @@ describe('authorKitchenTickets', () => {
     await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })
     const item = await prisma.kdsOrderItem.findFirstOrThrow({ where: { orderItemId: renglonTaco.id } })
     expect(JSON.parse(item.modifiers!)).toEqual(['2x Extra queso'])
+  })
+
+  it('un renglón de vale de área (V7) no se arma por aquí, y la marca se limpia igual', async () => {
+    // Cadena mínima REAL que exige el esquema para `OrderItem.areaTicketLineId` — no se falsea el id.
+    const terminalId = (await prisma.terminal.create({ data: { venueId, name: `Terminal ${SUF}`, type: 'TPV_ANDROID' } })).id
+    const areaId = (await prisma.fulfillmentArea.create({ data: { venueId, name: `Área ${SUF}`, fulfillmentMode: 'IMMEDIATE' } })).id
+    const areaTicket = await prisma.areaTicket.create({
+      data: {
+        venueId,
+        fulfillmentAreaId: areaId,
+        fulfillmentModeSnapshot: 'IMMEDIATE',
+        code: `AT-${SUF}`,
+        idempotencyKey: `idem-${SUF}`,
+        sourceTerminalId: terminalId,
+        subtotal: new Prisma.Decimal(50),
+        taxAmount: new Prisma.Decimal(0),
+        total: new Prisma.Decimal(50),
+        pricingSnapshotHash: 'a'.repeat(64),
+      },
+      select: { id: true },
+    })
+    const linea = await prisma.areaTicketLine.create({
+      data: {
+        areaTicketId: areaTicket.id,
+        clientLineId: `L-${SUF}`,
+        productId: taco,
+        productNameSnapshot: 'Taco',
+        quantity: new Prisma.Decimal(1),
+        unitPrice: new Prisma.Decimal(50),
+        taxAmount: new Prisma.Decimal(0),
+        total: new Prisma.Decimal(50),
+      },
+      select: { id: true },
+    })
+    const v = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: `AT-${SUF}`,
+        subtotal: 50,
+        taxAmount: 0,
+        total: 50,
+        kitchenPendingAt: new Date(),
+        items: { create: [renglon(taco, 'Taco', 1, { areaTicketLineId: linea.id })] },
+      },
+      select: { id: true },
+    })
+    expect((await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })).ticketIds).toEqual([])
+    expect(await comandasDe(v.id)).toHaveLength(0)
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: v.id } })).kitchenPendingAt).toBeNull()
   })
 })

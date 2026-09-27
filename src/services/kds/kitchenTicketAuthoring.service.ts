@@ -31,7 +31,7 @@ export async function authorKitchenTickets(params: {
 
   const { routing, screens } = await estacionesDelNegocio(venueId)
   if (screens.length === 0) {
-    await limpiarMarca(orderId, startedAt)
+    await limpiarMarca(venueId, orderId, startedAt)
     return { ticketIds: [] }
   }
 
@@ -43,7 +43,7 @@ export async function authorKitchenTickets(params: {
   // Uber arma su propia comanda al ingerir; los vales por área y SoftRestaurant tienen su propio flujo.
   const integrada = order.source === 'POS' && Boolean(order.externalId?.trim())
   if (order.type === 'DELIVERY' || order.areaTicketCode || integrada) {
-    await limpiarMarca(orderId, startedAt)
+    await limpiarMarca(venueId, orderId, startedAt)
     return { ticketIds: [] }
   }
 
@@ -73,7 +73,16 @@ export async function authorKitchenTickets(params: {
       if (renglones.length === MAX_RENGLONES) {
         logger.warn('[KDS] orden con demasiados renglones; la comanda se arma con los primeros', { venueId, orderId })
       }
-      if (renglones.some(r => r.areaTicketLineId)) return [] as string[]
+      if (renglones.some(r => r.areaTicketLineId)) {
+        // Vale por área (V7): trae `areaTicketLineId` en sus renglones pero puede no traer
+        // `Order.areaTicketCode` (tareas posteriores lo estampan sólo por venue) — sin este
+        // borrado, la marca se queda pegada y el barrido dispara un 🚨 falso a los 15 min.
+        await tx.order.updateMany({
+          where: { id: orderId, venueId, kitchenPendingAt: { lte: startedAt } },
+          data: { kitchenPendingAt: null },
+        })
+        return [] as string[]
+      }
 
       const cubiertos = await tx.kdsOrderItem.findMany({
         where: { orderItemId: { in: renglones.map(r => r.id) }, kdsOrder: { venueId } },
@@ -138,7 +147,7 @@ export async function authorKitchenTickets(params: {
       }
 
       // Sólo si nadie la volvió a poner mientras se armaba (una ronda que entró en medio).
-      await tx.order.updateMany({ where: { id: orderId, kitchenPendingAt: { lte: startedAt } }, data: { kitchenPendingAt: null } })
+      await tx.order.updateMany({ where: { id: orderId, venueId, kitchenPendingAt: { lte: startedAt } }, data: { kitchenPendingAt: null } })
       return ids
     },
     { timeout: CANDADO_TX_TIMEOUT_MS, maxWait: 5_000 },
@@ -244,6 +253,7 @@ async function cabeceraPorFolio(
   return existente.id
 }
 
-async function limpiarMarca(orderId: string, startedAt: Date): Promise<void> {
-  await prisma.order.updateMany({ where: { id: orderId, kitchenPendingAt: { lte: startedAt } }, data: { kitchenPendingAt: null } })
+async function limpiarMarca(venueId: string, orderId: string, startedAt: Date): Promise<void> {
+  // `orderId` puede venir de un request del cliente (el POST legado, Tarea 8): siempre acotado al venue.
+  await prisma.order.updateMany({ where: { id: orderId, venueId, kitchenPendingAt: { lte: startedAt } }, data: { kitchenPendingAt: null } })
 }
