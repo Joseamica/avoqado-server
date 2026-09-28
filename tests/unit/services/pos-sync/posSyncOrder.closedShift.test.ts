@@ -92,7 +92,13 @@ function transactionWorld() {
   const tx = {
     $queryRaw: jest.fn().mockResolvedValue([{ pg_advisory_xact_lock: null }]),
     shift: m.shift,
-    order: { findUnique: jest.fn((args: any) => m.order.findUnique(args)), upsert: jest.fn(), update: jest.fn() },
+    order: {
+      findUnique: jest.fn((args: any) => m.order.findUnique(args)),
+      // Reread under the Order lock: the stored row is still there.
+      findFirst: jest.fn((args: any) => m.order.findUnique(args)),
+      upsert: jest.fn(),
+      update: jest.fn(),
+    },
     payment: { count: jest.fn().mockResolvedValue(0), create: jest.fn() },
     paymentAllocation: { create: jest.fn().mockResolvedValue({ id: 'allocation' }) },
     venueSettings: { findUnique: jest.fn().mockResolvedValue({ enableShifts: true }) },

@@ -206,11 +206,19 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
     // La clasificación exterior era TOCTOU: un request podía observar null,
     // otro crear la fila, y el primero tomar Shift antes de actualizar esa
     // Order ya existente. Esta relectura bajo advisory es la autoritativa.
-    const existingOrder = await findExistingOrderWithSmartResolution(tx, externalId, venue.id, orderData.orderNumber)
-    isNewOrder = !existingOrder
+    let existingOrder = await findExistingOrderWithSmartResolution(tx, externalId, venue.id, orderData.orderNumber)
     if (existingOrder) {
-      await lockExistingOrderForPayment(tx, { venueId: venue.id, orderId: existingOrder.id })
+      // El advisory sólo serializa eventos POS. Captura fiscal, cobros nativos, reatribución de turno o el borrado del
+      // negocio no lo toman: entre la lectura de arriba y el candado la fila pudo ligarse a un turno, irse de este
+      // negocio o desaparecer. Alias, liga de turno y existencia se deciden con la fila releída BAJO el candado; si ya
+      // no es de este negocio con la llave que la clasificó, se trata como ausente y sigue el upsert por llave natural,
+      // nunca una escritura por el id rancio.
+      const locked = await lockExistingOrderForPayment(tx, { venueId: venue.id, orderId: existingOrder.id })
+      existingOrder = locked
+        ? await tx.order.findFirst({ where: { id: existingOrder.id, venueId: venue.id, externalId: existingOrder.externalId } })
+        : null
     }
+    isNewOrder = !existingOrder
     // El id resuelto arriba es sólo CANDIDATO. Este update condicionado es también el lock de
     // fila que serializa Order + Payments contra OPEN → CLOSING durante toda la transacción.
     // Perderlo NO falla la venta: lo nuevo queda sin turno y una Order existente conserva su liga.
@@ -567,13 +575,16 @@ export async function processPosOrderDeleteEvent(payload: RichPosPayload): Promi
   // si quedaba un cobro de terminal sin desenlace acreditado: si lo había, ese dinero puede aterrizar sobre una orden
   // DELETED y alguien tiene que conciliarlo. No se oculta: 🚨 en el log y rastro en ActivityLog. (Con la orden ya
   // DELETED, la admisión rechaza cualquier cobro NUEVO con `ORDER_CANCELLED_NO_NEW_CHARGE`.)
-  const { updatedOrder, cobroVivo } = await prisma.$transaction(
+  const marked = await prisma.$transaction(
     async tx => {
-      await lockExistingOrderForPayment(tx, { venueId, orderId: order.id })
+      // El id de arriba es sólo candidato: el candado es por negocio. Si la orden se fue de este negocio (o se borró)
+      // mientras tanto, se trata igual que si no hubiera aparecido; nunca se marca por su id rancio.
+      if (!(await lockExistingOrderForPayment(tx, { venueId, orderId: order.id }))) return null
       const cobroVivo = await findLiveTerminalCharge(tx, { venueId, orderId: order.id })
       const updatedOrder = await tx.order.update({
         where: {
           id: order.id,
+          venueId,
         },
         data: {
           status: OrderStatus.DELETED,
@@ -585,6 +596,14 @@ export async function processPosOrderDeleteEvent(payload: RichPosPayload): Promi
     },
     { timeout: 15_000, maxWait: 5_000 },
   )
+
+  if (!marked) {
+    logger.warn(
+      `[🥾 PosSyncOrder] Order ${order.id} (externalId ${externalId}) left Venue ${venueId} before the delete could lock it; nothing marked.`,
+    )
+    return null
+  }
+  const { updatedOrder, cobroVivo } = marked
 
   if (cobroVivo) {
     logger.error(

@@ -23,9 +23,12 @@ jest.mock('@/services/pos-sync/posSyncStaff.service', () => ({ posSyncStaffServi
 jest.mock('@/services/pos-sync/posSyncTable.service', () => ({ getOrCreatePosTable: jest.fn() }))
 jest.mock('@/services/pos-sync/posSyncShift.service', () => ({ getOrCreatePosShift: jest.fn() }))
 jest.mock('@/communication/sockets/managers/socketManager', () => ({ socketManager: { broadcastToVenue: jest.fn() } }))
+jest.mock('@/services/shared/orderCancelGuard', () => ({ findLiveTerminalCharge: jest.fn().mockResolvedValue(null) }))
 
 import prisma from '@/utils/prismaClient'
-import { processPosOrderEvent } from '@/services/pos-sync/posSyncOrder.service'
+import { processPosOrderDeleteEvent, processPosOrderEvent } from '@/services/pos-sync/posSyncOrder.service'
+import { socketManager } from '@/communication/sockets/managers/socketManager'
+import { SocketEventType } from '@/communication/sockets/types'
 import { posSyncStaffService } from '@/services/pos-sync/posSyncStaff.service'
 import { getOrCreatePosTable } from '@/services/pos-sync/posSyncTable.service'
 import { getOrCreatePosShift } from '@/services/pos-sync/posSyncShift.service'
@@ -63,9 +66,20 @@ const payload = {
 
 function txWorld() {
   const tx = {
-    $queryRaw: jest.fn().mockResolvedValue([]),
+    // Real lock contract: the advisory returns nothing useful; the Order lock returns the row while the classified
+    // ORDER is still this venue's.
+    $queryRaw: jest.fn(async (_sql: any, ...values: unknown[]) => (values.includes(ORDER) ? [{ id: ORDER }] : [])),
     shift: { findFirst: jest.fn().mockResolvedValue({ id: SHIFT, status: 'OPEN' }), updateMany: jest.fn() },
-    order: { findUnique: jest.fn((args: any) => m.order.findUnique(args)), upsert: jest.fn(), update: jest.fn() },
+    order: {
+      findUnique: jest.fn((args: any) => m.order.findUnique(args)),
+      // Reread under the lock: the stored row, as long as it keeps this venue and the key it was classified by.
+      findFirst: jest.fn(async ({ where }: any) => {
+        const row = await m.order.findUnique({ where: { venueId_externalId: { venueId: where.venueId, externalId: where.externalId } } })
+        return row && row.id === where.id ? row : null
+      }),
+      upsert: jest.fn(),
+      update: jest.fn(),
+    },
     payment: { count: jest.fn().mockResolvedValue(0), create: jest.fn() },
     paymentAllocation: { create: jest.fn().mockResolvedValue({ id: 'allocation' }) },
     venueSettings: { findUnique: jest.fn().mockResolvedValue({ enableShifts: true }) },
@@ -136,7 +150,11 @@ it('serializa aliases SoftRestaurant :0:/:77: como una sola Order, Payment y asi
     const tx = {
       $queryRaw: jest.fn(async (_sql: any, ...values: unknown[]) => {
         const advisoryKey = values.find(value => typeof value === 'string' && value.startsWith('pos-order:')) as string | undefined
-        if (!advisoryKey) return []
+        if (!advisoryKey) {
+          // Order row lock (`id`, `venueId`): a row while the order is visible for this venue.
+          const [orderId, lockVenueId] = values
+          return visibleOrders().some(order => order.id === orderId && order.venueId === lockVenueId) ? [{ id: orderId }] : []
+        }
         advisoryKeys[transaction] = advisoryKey
         if (transaction === 0) {
           firstAdvisory.resolve()
@@ -161,6 +179,12 @@ it('serializa aliases SoftRestaurant :0:/:77: como una sola Order, Payment y asi
           const key = where.venueId_externalId
           return visibleOrders().find(order => order.venueId === key.venueId && order.externalId === key.externalId) ?? null
         }),
+        findFirst: jest.fn(
+          async ({ where }: any) =>
+            visibleOrders().find(
+              order => order.id === where.id && order.venueId === where.venueId && order.externalId === where.externalId,
+            ) ?? null,
+        ),
         upsert: jest.fn(async ({ where, update, create }: any) => {
           const key = where.venueId_externalId
           const existing = visibleOrders().find(order => order.venueId === key.venueId && order.externalId === key.externalId)
@@ -283,13 +307,14 @@ it('serializa la llave natural y reclasifica dentro de tx si la Order apareció 
   const existing = storedOrder({ shiftId: null })
   const tx = txWorld()
   tx.order.findUnique.mockResolvedValue(existing)
+  tx.order.findFirst.mockResolvedValue(existing)
   tx.shift.updateMany.mockResolvedValue({ count: 1 })
   tx.order.upsert.mockResolvedValue({ ...existing, shiftId: SHIFT })
   tx.payment.create.mockResolvedValue({ id: 'payment-pos', amount: 100 })
   const ops: string[] = []
   tx.$queryRaw.mockImplementation(async (_sql: any, ...values: unknown[]) => {
     ops.push(values.includes(ORDER) ? 'order' : 'natural-key')
-    return []
+    return values.includes(ORDER) ? [{ id: ORDER }] : []
   })
   tx.shift.updateMany.mockImplementation(async () => {
     ops.push('shift')
@@ -363,6 +388,7 @@ it('smart resolution no escribe externalId antes de entrar a la transacción/loc
   const orphan = storedOrder({ externalId: 'INSTANCE:0:123', shiftId: 'shift-historico' })
   m.order.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(orphan)
   const tx = txWorld()
+  tx.order.findFirst.mockResolvedValue(orphan)
   tx.shift.updateMany.mockResolvedValue({ count: 0 })
   const resolved = { ...orphan, externalId: payload.orderData.externalId }
   m.order.update.mockResolvedValue(resolved)
@@ -376,4 +402,97 @@ it('smart resolution no escribe externalId antes de entrar a la transacción/loc
   expect(tx.shift.updateMany.mock.invocationCallOrder[0]).toBeLessThan(tx.order.update.mock.invocationCallOrder[0])
   expect(tx.order.update.mock.calls[0][0].data).not.toHaveProperty('shift')
   expect(tx.payment.create.mock.calls[0][0].data.shift).toBeUndefined()
+})
+
+describe('Plan 3b T6 — the header decides from the Order read under its lock', () => {
+  const at = (fn: jest.Mock, index = 0) => fn.mock.invocationCallOrder[index]
+
+  it('rereads the classified Order under its lock and keeps a shift link another writer set while the event waited', async () => {
+    const stale = storedOrder({ shiftId: null })
+    m.order.findUnique.mockResolvedValue(stale)
+    const tx = txWorld()
+    tx.shift.updateMany.mockResolvedValue({ count: 1 })
+    tx.order.findFirst.mockResolvedValue({ ...stale, shiftId: 'shift-linked-meanwhile' })
+    tx.order.upsert.mockResolvedValue({ ...stale, shiftId: 'shift-linked-meanwhile' })
+    tx.payment.create.mockResolvedValue({ id: 'payment-pos', amount: 100 })
+
+    await processPosOrderEvent(payload)
+
+    expect(tx.order.findFirst).toHaveBeenCalledWith({ where: { id: ORDER, venueId: VENUE, externalId: payload.orderData.externalId } })
+    const orderLock = tx.$queryRaw.mock.calls.findIndex(call => call.includes(ORDER))
+    expect(orderLock).toBeGreaterThanOrEqual(0)
+    expect(at(tx.$queryRaw, orderLock)).toBeLessThan(at(tx.order.findFirst))
+    expect(at(tx.order.findFirst)).toBeLessThan(at(tx.shift.updateMany))
+    // The durable link read under the lock wins over the stale classification: no adoption.
+    expect(tx.order.upsert.mock.calls[0][0].update).not.toHaveProperty('shift')
+  })
+
+  it('an alias Order that left the venue before the lock is never written by its stale id: the event takes the natural-key upsert', async () => {
+    const orphan = storedOrder({ externalId: 'INSTANCE:0:123' })
+    m.order.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(orphan)
+    const tx = txWorld()
+    tx.$queryRaw.mockImplementation(async () => []) // the Order lock finds no row of this venue any more
+    tx.shift.updateMany.mockResolvedValue({ count: 1 })
+    tx.order.update.mockResolvedValue({ ...orphan, externalId: payload.orderData.externalId }) // what a stale-id write would return
+    tx.order.upsert.mockResolvedValue(storedOrder({ id: 'order-fresh', shiftId: SHIFT }))
+    tx.payment.create.mockResolvedValue({ id: 'payment-pos', amount: 100 })
+
+    await expect(processPosOrderEvent(payload)).resolves.toMatchObject({ id: 'order-fresh' })
+
+    expect(tx.order.update).not.toHaveBeenCalled()
+    expect(tx.order.findFirst).not.toHaveBeenCalled()
+    expect(tx.order.upsert.mock.calls[0][0].where).toEqual({ venueId_externalId: { venueId: VENUE, externalId: 'INSTANCE:77:123' } })
+    expect(socketManager.broadcastToVenue).toHaveBeenCalledWith(
+      VENUE,
+      SocketEventType.ORDER_CREATED,
+      expect.objectContaining({ orderId: 'order-fresh', eventType: 'created' }),
+    )
+  })
+
+  it('writes the imported header money exactly as received on the natural-key branch (never recomputed)', async () => {
+    const money = { subtotal: 100.1, taxAmount: 16.02, discountAmount: 3.33, tipAmount: 7.77, total: 120.56 }
+    const existing = storedOrder()
+    m.order.findUnique.mockResolvedValue(existing)
+    const tx = txWorld()
+    tx.shift.updateMany.mockResolvedValue({ count: 1 })
+    tx.order.upsert.mockResolvedValue(existing)
+    tx.payment.count.mockResolvedValue(1)
+
+    await processPosOrderEvent({ ...payload, orderData: { ...payload.orderData, ...money } })
+
+    expect(tx.order.upsert.mock.calls[0][0].update).toMatchObject(money)
+    expect(tx.order.upsert.mock.calls[0][0].create).toMatchObject(money)
+  })
+
+  it('writes the imported header money exactly as received on the alias branch (never recomputed)', async () => {
+    const money = { subtotal: 100.1, taxAmount: 16.02, discountAmount: 3.33, tipAmount: 7.77, total: 120.56 }
+    const orphan = storedOrder({ externalId: 'INSTANCE:0:123' })
+    m.order.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(orphan)
+    const tx = txWorld()
+    tx.order.findFirst.mockResolvedValue(orphan)
+    tx.shift.updateMany.mockResolvedValue({ count: 1 })
+    tx.order.update.mockResolvedValue({ ...orphan, externalId: payload.orderData.externalId })
+    tx.payment.count.mockResolvedValue(1)
+
+    await processPosOrderEvent({ ...payload, orderData: { ...payload.orderData, ...money } })
+
+    expect(tx.order.update.mock.calls[0][0]).toMatchObject({
+      where: { id: ORDER },
+      data: { externalId: payload.orderData.externalId, ...money },
+    })
+  })
+
+  it('a delete whose Order left the venue before the lock marks nothing and announces nothing', async () => {
+    m.order.findUnique.mockResolvedValue(storedOrder())
+    const tx = txWorld()
+    tx.$queryRaw.mockImplementation(async () => [])
+    tx.order.update.mockResolvedValue(storedOrder({ status: 'DELETED' })) // what a stale-id write would return
+
+    await expect(
+      processPosOrderDeleteEvent({ venueId: VENUE, orderData: { externalId: payload.orderData.externalId } } as any),
+    ).resolves.toBeNull()
+
+    expect(tx.order.update).not.toHaveBeenCalled()
+    expect(socketManager.broadcastToVenue).not.toHaveBeenCalled()
+  })
 })
