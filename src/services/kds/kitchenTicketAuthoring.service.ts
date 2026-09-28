@@ -49,17 +49,19 @@ export async function authorKitchenTickets(params: {
       status: true,
       originSystem: true,
       deliveryChannelLinkId: true,
-      areaTicketCode: true,
     },
   })
   if (!order) return { ticketIds: [] }
-  // El reparto de AGREGADOR arma su propia comanda al ingerir (una «Entrega» del propio POS sí se arma aquí); los vales
-  // por área y SoftRestaurant tienen su propio flujo; una venta cancelada no se cocina (el barrido llega hasta 15 min tarde).
+  // El reparto de AGREGADOR arma su propia comanda al ingerir (una «Entrega» del propio POS sí se arma aquí); y
+  // SoftRestaurant tiene su propio flujo; una venta cancelada no se cocina (el barrido llega hasta 15 min tarde).
+  // 🔴 Los vales por área NO saltan la orden entera: una cuenta puede mezclar renglones de vale con productos
+  // sueltos (2 cervezas fuera del vale), y esos sueltos sí deben llegar a la pantalla — se filtran por RENGLÓN
+  // dentro de la transacción (`areaTicketLineId`), no por `order.areaTicketCode` (I1, revisión final fase 3.3).
   const integrada = order.source === 'POS' && Boolean(order.externalId?.trim())
   const deAgregador =
     Boolean(order.deliveryChannelLinkId) || order.originSystem === 'DELIVERY_PLATFORM' || ORIGENES_DE_AGREGADOR.has(order.source)
   const cancelada = order.status === 'CANCELLED' || order.status === 'DELETED'
-  if (deAgregador || cancelada || order.areaTicketCode || integrada) {
+  if (deAgregador || cancelada || integrada) {
     await limpiarMarca(venueId, orderId, startedAt)
     return { ticketIds: [] }
   }
@@ -90,10 +92,12 @@ export async function authorKitchenTickets(params: {
       if (renglones.length === MAX_RENGLONES) {
         logger.warn('[KDS] orden con demasiados renglones; la comanda se arma con los primeros', { venueId, orderId })
       }
-      if (renglones.some(r => r.areaTicketLineId)) {
-        // Vale por área (V7): trae `areaTicketLineId` en sus renglones pero puede no traer
-        // `Order.areaTicketCode` (tareas posteriores lo estampan sólo por venue) — sin este
-        // borrado, la marca se queda pegada y el barrido dispara un 🚨 falso a los 15 min.
+      // Vale por área (V7): sus renglones traen `areaTicketLineId` y tienen su propio flujo de entrega — se
+      // excluyen UNO POR UNO, no toda la orden, porque una cuenta puede mezclar el vale con productos sueltos
+      // (I1, revisión final fase 3.3). Si TODOS los renglones son de vale no queda nada que cocinar aquí: se
+      // limpia la marca igual que antes, o el barrido dispara un 🚨 falso a los 15 min.
+      const normales = renglones.filter(r => !r.areaTicketLineId)
+      if (normales.length === 0) {
         await tx.order.updateMany({
           where: { id: orderId, venueId, kitchenPendingAt: { lte: startedAt } },
           data: { kitchenPendingAt: null },
@@ -102,12 +106,12 @@ export async function authorKitchenTickets(params: {
       }
 
       const cubiertos = await tx.kdsOrderItem.findMany({
-        where: { orderItemId: { in: renglones.map(r => r.id) }, kdsOrder: { venueId } },
+        where: { orderItemId: { in: normales.map(r => r.id) }, kdsOrder: { venueId } },
         select: { orderItemId: true },
         take: MAX_RENGLONES * 4,
       })
 
-      const lines: KitchenLine[] = renglones.map(r => ({
+      const lines: KitchenLine[] = normales.map(r => ({
         id: r.id,
         productId: r.productId,
         categoryId: r.product?.categoryId ?? null,

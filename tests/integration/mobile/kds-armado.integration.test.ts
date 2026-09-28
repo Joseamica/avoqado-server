@@ -275,4 +275,100 @@ describe('authorKitchenTickets', () => {
     expect(await comandasDe(v.id)).toHaveLength(0)
     expect((await prisma.order.findUniqueOrThrow({ where: { id: v.id } })).kitchenPendingAt).toBeNull()
   })
+
+  /** Crea una `AreaTicketLine` real (misma cadena que exige el schema) para marcar un renglón como vale de área. */
+  async function nuevaLineaDeVale(productId: string) {
+    const terminalId = (await prisma.terminal.create({ data: { venueId, name: `Terminal ${SUF}-${folio}`, type: 'TPV_ANDROID' } })).id
+    const areaId = (await prisma.fulfillmentArea.create({ data: { venueId, name: `Área ${SUF}-${folio}`, fulfillmentMode: 'IMMEDIATE' } }))
+      .id
+    const areaTicket = await prisma.areaTicket.create({
+      data: {
+        venueId,
+        fulfillmentAreaId: areaId,
+        fulfillmentModeSnapshot: 'IMMEDIATE',
+        code: `AT-${SUF}-${folio}`,
+        idempotencyKey: `idem-${SUF}-${folio}`,
+        sourceTerminalId: terminalId,
+        subtotal: new Prisma.Decimal(50),
+        taxAmount: new Prisma.Decimal(0),
+        total: new Prisma.Decimal(50),
+        pricingSnapshotHash: 'a'.repeat(64),
+      },
+      select: { id: true },
+    })
+    return (
+      await prisma.areaTicketLine.create({
+        data: {
+          areaTicketId: areaTicket.id,
+          clientLineId: `L-${SUF}-${folio}`,
+          productId,
+          productNameSnapshot: 'Limonada',
+          quantity: new Prisma.Decimal(1),
+          unitPrice: new Prisma.Decimal(50),
+          taxAmount: new Prisma.Decimal(0),
+          total: new Prisma.Decimal(50),
+        },
+        select: { id: true },
+      })
+    ).id
+  }
+
+  it('🔴 I1 · cuenta MIXTA (1 renglón de vale + 2 normales) arma UNA comanda sólo con los 2 normales', async () => {
+    folio += 1
+    const lineaDeVale = await nuevaLineaDeVale(limonada)
+    const v = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: `MIX-${folio}-${SUF}`,
+        externalId: `ext-mix-${folio}-${SUF}`,
+        subtotal: 150,
+        taxAmount: 0,
+        total: 150,
+        kitchenPendingAt: new Date(),
+        items: {
+          create: [renglon(taco, 'Taco', 1), renglon(taco, 'Taco', 1), renglon(limonada, 'Limonada', 1, { areaTicketLineId: lineaDeVale })],
+        },
+      },
+      select: { id: true, externalId: true },
+    })
+
+    const { ticketIds } = await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })
+    expect(ticketIds).toHaveLength(1)
+
+    const comandas = await comandasDe(v.id)
+    expect(comandas).toHaveLength(1)
+    expect(comandas[0].sourceKey).toBe(`sale:${v.externalId}:${cocina}`)
+    expect(comandas[0].items.map(i => i.productName)).toEqual(['Taco', 'Taco'])
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: v.id } })).kitchenPendingAt).toBeNull()
+  })
+
+  it('cuenta con `areaTicketCode` pero SÓLO renglones normales SÍ arma comanda (vale-orden dedicada, sin líneas de vale)', async () => {
+    folio += 1
+    const v = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: `ATC-${folio}-${SUF}`,
+        externalId: `ext-atc-${folio}-${SUF}`,
+        areaTicketCode: `ATC-CODE-${folio}-${SUF}`,
+        subtotal: 100,
+        taxAmount: 0,
+        total: 100,
+        kitchenPendingAt: new Date(),
+        items: { create: [renglon(taco, 'Taco', 2), renglon(limonada, 'Limonada', 1)] },
+      },
+      select: { id: true, externalId: true },
+    })
+
+    const { ticketIds } = await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })
+    expect(ticketIds).toHaveLength(2)
+
+    const comandas = await comandasDe(v.id)
+    expect(comandas.map(c => [c.sourceKey, c.items.map(i => i.productName)])).toEqual(
+      expect.arrayContaining([
+        [`sale:${v.externalId}:${cocina}`, ['Taco']],
+        [`sale:${v.externalId}:${barra}`, ['Limonada']],
+      ]),
+    )
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: v.id } })).kitchenPendingAt).toBeNull()
+  })
 })
