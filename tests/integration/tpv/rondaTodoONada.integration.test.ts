@@ -180,6 +180,58 @@ describe('🔴 un error a media ronda no deja nada escrito', () => {
   })
 })
 
+describe('🔴 el cobro que confirma entre la lectura y el candado (no sube la versión)', () => {
+  it('la orden se cobró completa justo antes del candado ⇒ 400 y ni un renglón nuevo', async () => {
+    const o = await cuenta({ conMesa: true })
+    await addItemsToOrder(venueId, o.id, [{ productId: taco, quantity: 1 }], (await leer(o.id)).version, true)
+    const antes = await leer(o.id)
+    const [tacoAntes] = await renglones(o.id)
+    // El cobro (settleStandalonePaymentInTx) marca PAID y paidAmount SIN tocar la versión.
+    jest.spyOn(kds, 'debeMarcarCocina').mockImplementationOnce(async () => {
+      await prisma.order.update({ where: { id: o.id }, data: { paymentStatus: 'PAID', paidAmount: 50, remainingBalance: 0 } })
+      return false
+    })
+
+    await expect(addItemsToOrder(venueId, o.id, [{ productId: taco, quantity: 2 }], antes.version, true)).rejects.toMatchObject({
+      statusCode: 400,
+      message: 'Cannot add items to a paid order',
+    })
+    expect((await renglones(o.id)).map(f => f.id)).toEqual([tacoAntes.id])
+    expect(await leer(o.id)).toMatchObject({ version: antes.version, subtotal: 50, total: 50, remainingBalance: 0 })
+  })
+
+  it('abono parcial justo antes del candado ⇒ el saldo pendiente descuenta lo YA cobrado', async () => {
+    const o = await cuenta({ conMesa: true })
+    await addItemsToOrder(venueId, o.id, [{ productId: taco, quantity: 1 }], (await leer(o.id)).version, true)
+    const { version: v } = await leer(o.id)
+    jest.spyOn(kds, 'debeMarcarCocina').mockImplementationOnce(async () => {
+      await prisma.order.update({ where: { id: o.id }, data: { paymentStatus: 'PARTIAL', paidAmount: 30 } })
+      return false
+    })
+
+    await addItemsToOrder(venueId, o.id, [{ productId: taco, quantity: 1 }], v, true)
+    expect(await leer(o.id)).toMatchObject({ version: v + 1, subtotal: 100, total: 100, remainingBalance: 70 })
+  })
+})
+
+describe('carrito completo: una línea sin llave no se come a otra creada en el MISMO envío', () => {
+  it('línea con llave nueva + línea igual sin llave ⇒ dos renglones con sus cantidades', async () => {
+    const o = await cuenta()
+    const carrito = [
+      { productId: taco, quantity: 2, externalId: 'carrito:nueva:0' },
+      { productId: taco, quantity: 3 },
+    ]
+    await addItemsToOrder(venueId, o.id, carrito, (await leer(o.id)).version, false)
+
+    const filas = await renglones(o.id)
+    expect(filas.map(f => [f.externalId ?? 'sin llave', f.quantity]).sort()).toEqual([
+      ['carrito:nueva:0', 2],
+      ['sin llave', 3],
+    ])
+    expect(await leer(o.id)).toMatchObject({ subtotal: 250, total: 250 })
+  })
+})
+
 describe('regresión: la ronda que sí se guarda', () => {
   it('recalcula y persiste el % de descuento y el % de cargo junto con la ronda', async () => {
     const o = await cuenta()

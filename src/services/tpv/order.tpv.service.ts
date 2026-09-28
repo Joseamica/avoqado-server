@@ -1575,6 +1575,9 @@ export async function addItemsToOrder(
   // which always created NEW items. Now we check for existing items first.
   // Escribe UN renglón de la ronda con el cliente de la transacción de abajo (nunca con `prisma`: fuera de ella, un
   // renglón escrito sobrevive al rechazo de la ronda).
+  // Renglones CREADOS por esta misma ronda: una línea sin llave nunca se fusiona con ellos (en serie, la búsqueda de
+  // abajo ya los ve; sin esta exclusión reemplazaría la cantidad de otra línea recién creada en el mismo envío).
+  const creadosEnEstaRonda: string[] = []
   const escribirRenglon = async (tx: Prisma.TransactionClient, item: NormalizedAddOrderItemInput) => {
     // Custom-amount line: create directly (no catalog product, no modifiers).
     if (!item.productId) {
@@ -1624,6 +1627,7 @@ export async function addItemsToOrder(
           },
         }),
       )
+      creadosEnEstaRonda.push(customItem.id)
       logger.info(`✅ [ADD ITEMS] CREATED custom line: ${customItem.productName} | $${customTotal}`)
       return customItem
     }
@@ -1831,6 +1835,7 @@ export async function addItemsToOrder(
         }),
       )
 
+      creadosEnEstaRonda.push(createdItem.id)
       logger.info(`✅ [ADD ITEMS] CREATED OrderItem by externalId: ${product.name} | qty=${createdItem.quantity}`)
       return createdItem
     }
@@ -1843,6 +1848,7 @@ export async function addItemsToOrder(
       where: {
         orderId: order.id,
         productId: item.productId,
+        ...(creadosEnEstaRonda.length > 0 ? { id: { notIn: creadosEnEstaRonda } } : {}),
       },
       include: {
         modifiers: true,
@@ -1960,6 +1966,7 @@ export async function addItemsToOrder(
       },
     })
 
+    creadosEnEstaRonda.push(createdItem.id)
     logger.info(`✅ [ADD ITEMS] Created NEW OrderItem: ${product.name} with ${createdItem.modifiers.length} modifiers`)
     return createdItem
   }
@@ -1974,9 +1981,12 @@ export async function addItemsToOrder(
       // Candado de la orden AL INICIO — el mismo orden Order → OrderItem que el cobro y la anulación, así dos escrituras
       // sobre la misma cuenta no se trenzan — y la versión releída bajo él: si otro aparato movió la orden desde la
       // lectura de arriba, se rechaza ANTES de escribir un solo renglón.
-      const [bloqueada] = await tx.$queryRaw<{ version: number }[]>`
-        SELECT "version" FROM "Order" WHERE "id" = ${orderId} AND "venueId" = ${venueId} FOR UPDATE`
+      // 🔴 El cobro marca PAID/paidAmount SIN subir la versión: el estado del pago también se relee bajo el candado. Una
+      // orden cobrada entre la lectura de arriba y aquí no recibe la ronda, y el saldo se calcula con lo YA cobrado.
+      const [bloqueada] = await tx.$queryRaw<{ version: number; paymentStatus: string; paidAmount: Prisma.Decimal | null }[]>`
+        SELECT "version", "paymentStatus", "paidAmount" FROM "Order" WHERE "id" = ${orderId} AND "venueId" = ${venueId} FOR UPDATE`
       if (bloqueada?.version !== order.version) throw conflictoDeVersion()
+      if (bloqueada.paymentStatus === 'PAID') throw new BadRequestError('Cannot add items to a paid order')
 
       // En serie: una transacción es UNA conexión, y en serie el primer error corta la ronda sin dejar consultas en vuelo.
       const newOrderItems: Awaited<ReturnType<typeof escribirRenglon>>[] = []
@@ -2046,7 +2056,7 @@ export async function addItemsToOrder(
       const newTotal = baseForCharges.plus(newServiceChargeAmount).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP).toNumber()
 
       // Calculate remaining balance (for partial payment tracking)
-      const currentPaidAmount = Number(order.paidAmount || 0)
+      const currentPaidAmount = Number(bloqueada.paidAmount ?? 0)
       const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
 
       logger.info(`  📊 New totals: subtotal=$${newSubtotal}, discount=$${newDiscountAmount}, total=$${newTotal}`)
