@@ -2,6 +2,7 @@
  * Codex pasada final (P1-2): las marcas en memoria del aviso firmado que el servidor no pudo guardar.
  */
 import logger from '@/config/logger'
+import { enrichContext, getContext, runWithContext, type ExecutionContext } from '@/observability/executionContext'
 import {
   ESPERAS_DE_REINGRESO_MS,
   TOPE_DE_COMERCIOS,
@@ -309,6 +310,70 @@ describe('avisosNoGuardados', () => {
         expect(logger.warn).not.toHaveBeenCalled()
       })
     })
+  })
+})
+
+/**
+ * 🔴 27-sep («lo otro»): la vuelta corría con el contexto de QUIEN la despertaba. La puerta corre dentro de la petición de una
+ * terminal o de un cajero, así que el ✅/🚨 del reingreso salía con el correlationId de esa terminal, y lo que la vuelta estampara
+ * (el negocio del aviso) se escribía en el contexto de ESA terminal. Relojes reales a propósito: el falso de Jest corre los
+ * temporizadores en el contexto de quien avanza el reloj, que es justo lo que aquí se prueba.
+ */
+describe('la vuelta corre con el contexto del AVISO, no con el de quien la despierta', () => {
+  const contextoDelAviso = (): ExecutionContext => ({
+    correlationId: 'cid-aviso',
+    source: 'http',
+    entrypoint: 'POST /api/v1/webhooks/angelpay/:id',
+    venueId: 'v-aviso',
+    venueName: 'Testarudo Cafe',
+  })
+  const contextoDeLaTerminal = (): ExecutionContext => ({
+    correlationId: 'cid-terminal',
+    source: 'http',
+    entrypoint: 'GET /api/v1/tpv/terminal-payments/:id',
+    venueId: 'v-terminal',
+    venueName: 'Otro negocio',
+  })
+  const unTick = () => new Promise(r => setTimeout(r, 25))
+
+  it('🔴 la puerta, llamada desde la petición de una terminal, no le presta su contexto a la vuelta ni al ✅', async () => {
+    const aviso = contextoDelAviso()
+    const terminal = contextoDeLaTerminal()
+    let enLaVuelta: ExecutionContext | undefined
+    let enElLog: ExecutionContext | undefined
+    ;(logger.info as jest.Mock).mockImplementationOnce(() => (enElLog = { ...getContext()! }))
+    runWithContext(aviso, () =>
+      reingresarMasTarde(
+        'm:ctx',
+        async () => {
+          enLaVuelta = { ...getContext()! }
+          enrichContext({ venueName: 'Estampado por la vuelta' })
+          return true
+        },
+        true,
+      ),
+    )
+    runWithContext(terminal, () => puertaDelDinero('A'))
+    await unTick()
+    expect(enLaVuelta).toMatchObject({ correlationId: 'cid-aviso', venueName: 'Testarudo Cafe' })
+    expect(enElLog).toMatchObject({ correlationId: 'cid-aviso' })
+    expect(terminal.venueName).toBe('Otro negocio') // lo que estampa la vuelta no cae en la petición de la terminal
+    expect(aviso.venueName).toBe('Testarudo Cafe') // ni en el objeto de la petición original: una copia por vuelta
+  })
+
+  it('🔴 un reingreso nacido SIN contexto corre sin contexto: tampoco toma el de la terminal que lo despierta', async () => {
+    let enLaVuelta: ExecutionContext | undefined | 'no corrió' = 'no corrió'
+    reingresarMasTarde(
+      'm:sin',
+      async () => {
+        enLaVuelta = getContext()
+        return true
+      },
+      true,
+    )
+    runWithContext(contextoDeLaTerminal(), () => puertaDelDinero('A'))
+    await unTick()
+    expect(enLaVuelta).toBeUndefined()
   })
 })
 

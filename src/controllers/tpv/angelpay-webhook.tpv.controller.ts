@@ -22,6 +22,8 @@ import crypto from 'crypto'
 import { Request, Response, NextFunction } from 'express'
 
 import logger from '@/config/logger'
+import { enrichContext } from '@/observability/executionContext'
+import { getVenueName } from '@/observability/venueNames'
 import prisma from '@/utils/prismaClient'
 import type { AngelPayWebhookPayload } from '@/services/tpv/angelpay-webhook.service'
 import { processAngelPayWebhook } from '@/services/tpv/angelpay-webhook.service'
@@ -56,7 +58,12 @@ async function procesarAviso(aviso: AvisoCrudo): Promise<Respuesta> {
   // son cuid (34 de 34 en producción, 23-sep); el patrón es más amplio a propósito.
   if (!ID_DE_COMERCIO_POSIBLE.test(merchantAccountId)) return { status: 404, body: { error: 'unknown merchant' } }
 
-  let merchantAccount: { id: string; externalMerchantId: string; angelpayWebhookSecret: string | null } | null
+  let merchantAccount: {
+    id: string
+    externalMerchantId: string
+    angelpayWebhookSecret: string | null
+    angelpayUserAccount: { venueId: string } | null
+  } | null
   try {
     merchantAccount = await prisma.merchantAccount.findFirst({
       where: { id: merchantAccountId, provider: { code: 'ANGELPAY' } },
@@ -64,6 +71,7 @@ async function procesarAviso(aviso: AvisoCrudo): Promise<Respuesta> {
         id: true,
         externalMerchantId: true,
         angelpayWebhookSecret: true,
+        angelpayUserAccount: { select: { venueId: true } },
       },
     })
   } catch (err) {
@@ -81,6 +89,10 @@ async function procesarAviso(aviso: AvisoCrudo): Promise<Respuesta> {
   }
 
   if (!merchantAccount) return { status: 404, body: { error: 'unknown merchant' } }
+  // 🔴 27-sep: el NEGOCIO en toda línea del aviso (🚫, 🚨, las del servicio y las del reingreso, que corre con este contexto).
+  // Un webhook no trae token con el negocio: sale del comercio de la URL, en la misma búsqueda.
+  const venueId = merchantAccount.angelpayUserAccount?.venueId
+  if (venueId) enrichContext({ venueId, venueName: getVenueName(venueId) })
   if (!merchantAccount.angelpayWebhookSecret) return { status: 503, body: { error: 'webhook not provisioned for this merchant' } }
   if (!signature || !eventId) return { status: 401, body: { error: 'missing signature headers' } }
 

@@ -12,6 +12,7 @@ import request from 'supertest'
 import app from '../../../src/app'
 import logger from '@/config/logger'
 import { getContext, type ExecutionContext } from '@/observability/executionContext'
+import { primeVenueNames } from '@/observability/venueNames'
 import * as angelpayService from '@/services/tpv/angelpay-webhook.service'
 import prisma from '@/utils/prismaClient'
 
@@ -58,6 +59,37 @@ describe('🔴 los webhooks llevan contexto de ejecución', () => {
     expect(cierres).toHaveLength(1)
     expect(cierres[0][1]).toMatch(new RegExp(`^Request End: POST /api/v1/webhooks/angelpay/${MERCHANT_ID} - 200 `))
     expect(cierres[0][2]).toMatchObject({ correlationId, statusCode: 200 })
+  })
+
+  it('🔴 el Request End del aviso lleva el NEGOCIO del comercio: logger y controlador comparten el contexto', async () => {
+    const VENUE_ID = 'cvenuectx000000000000001'
+    ;(prisma as unknown as { venue: { findMany: jest.Mock } }).venue.findMany.mockResolvedValue([{ id: VENUE_ID, name: 'FULLTEST Cafe' }])
+    await primeVenueNames()
+    mockedFindFirst.mockResolvedValue({
+      id: MERCHANT_ID,
+      externalMerchantId: '351',
+      angelpayWebhookSecret: SECRETO,
+      angelpayUserAccount: { venueId: VENUE_ID },
+    })
+    mockedProcess.mockResolvedValue({ action: 'MATCHED', eventLogId: 'evt_ctx' })
+    let enElCierre: ExecutionContext | undefined
+    ;(logger.log as jest.Mock).mockImplementation((_nivel: string, mensaje: string) => {
+      if (String(mensaje).startsWith('Request End:')) enElCierre = { ...getContext()! }
+    })
+
+    const res = await request(app)
+      .post(`/api/v1/webhooks/angelpay/${MERCHANT_ID}`)
+      .set('Content-Type', 'application/json')
+      .set('X-Webhook-Event-Id', 'evt_ctx_negocio')
+      .set('X-Webhook-Signature', crypto.createHmac('sha256', SECRETO).update(CUERPO).digest('hex'))
+      .send(CUERPO)
+
+    expect(res.status).toBe(200)
+    expect(enElCierre).toMatchObject({
+      correlationId: res.headers['x-correlation-id'],
+      venueId: VENUE_ID,
+      venueName: 'FULLTEST Cafe',
+    })
   })
 
   it.each([

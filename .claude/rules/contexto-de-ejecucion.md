@@ -108,7 +108,13 @@ query string puede cargar datos personales.
 se quedaron así sin `X-Correlation-ID` ni `Request End` hasta el 27-sep. Monta `requestLoggerMiddleware` explícito, como
 `/api/v1/webhooks` y `/api/v1/public`. Es seguro repetirlo: el logger usa `req.originalUrl` (dentro de un `app.use('/prefijo', …)`
 Express recorta `req.url`) y no hace nada si ya lo abrió otro más arriba (`req.correlationId`). Un secreto nuevo en un query string
-se agrega a `PARAMS_SENSIBLES`. Prueba contra la app real: `tests/unit/observability/webhookContext.test.ts`.
+se agrega a `PARAMS_SENSIBLES`. Prueba contra la app real: `tests/unit/observability/webhookContext.test.ts`. Un webhook no
+trae token con el negocio: se estampa `venueId`/`venueName` en cuanto se conoce el comercio (AngelPay lo hace en la misma búsqueda).
+
+**8. 🔴 El trabajo diferido que CONTINÚA una operación corre con una copia del contexto de ESA operación**, no con el de quien lo
+despierta. Un temporizador hereda el contexto donde se crea: el reingreso de avisos de AngelPay, despertado por la consulta de una
+terminal, logueaba con el correlationId de la terminal y le escribía encima su negocio (27-sep). Captura `getContext()` al programar
+y corre cada vuelta con `runWithContext({ ...capturado }, …)`, o con `runOutsideContext` si no había ninguno (`avisosNoGuardados.ts`).
 
 ## Trampas al escribir tests (costaron dos intentos)
 

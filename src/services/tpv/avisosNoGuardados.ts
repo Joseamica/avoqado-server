@@ -18,6 +18,7 @@
  * AngelPay no reintentó, esa aprobación sólo consta en el panel de AngelPay.
  */
 import logger from '@/config/logger'
+import { getContext, runOutsideContext, runWithContext, type ExecutionContext } from '@/observability/executionContext'
 
 export const VENTANA_SIN_CANAL_MS = 30 * 60_000
 /** Cada llave pesa decenas de bytes; el tope sólo existe para que una caída prolongada no crezca sin límite. */
@@ -96,6 +97,8 @@ type Reingreso = {
   /** Firma verificada: un aviso AUTÉNTICO. Los de la búsqueda caída llegan sin verificar hasta que se reintentan. */
   verificado: boolean
   corriendo: boolean
+  /** El contexto de la primera petición que trajo esta entrega: cada vuelta corre con una copia (ver `correr`). */
+  contexto: ExecutionContext | undefined
 }
 // Dos listas, una por clase: el tope se aplica dentro de cada una y el más viejo de su clase es siempre el primero (O(1)).
 const autenticos = new Map<string, Reingreso>()
@@ -122,7 +125,7 @@ export function reingresarMasTarde(clave: string, reintentar: () => Promise<Dese
     return
   }
   hacerLugar(verificado)
-  const r: Reingreso = { timer: null, reintentar, intento: 0, verificado, corriendo: false }
+  const r: Reingreso = { timer: null, reintentar, intento: 0, verificado, corriendo: false, contexto: getContext() }
   ;(verificado ? autenticos : sinVerificar).set(clave, r)
   programar(clave, r)
 }
@@ -158,8 +161,17 @@ function programar(
  */
 const vueltasEnCurso = new Set<Promise<void>>()
 
+/**
+ * 🔴 27-sep: la vuelta corre con el contexto del AVISO, nunca con el de quien la despierta. La puerta corre dentro de la petición
+ * de una terminal o de un cajero, y un temporizador hereda el contexto donde se creó: el ✅/🚨 del reingreso salía con el
+ * correlationId de esa terminal, y lo que la vuelta estampa (el negocio del aviso) se escribía en SU contexto. Una copia por
+ * vuelta: lo que estampe una no toca el objeto de la petición original. Sin contexto de origen, corre sin ninguno.
+ */
 function correr(clave: string): Promise<void> {
-  const vuelta: Promise<void> = unaVuelta(clave).finally(() => vueltasEnCurso.delete(vuelta))
+  const contexto = buscar(clave)?.contexto
+  const vuelta: Promise<void> = (
+    contexto ? runWithContext({ ...contexto }, () => unaVuelta(clave)) : runOutsideContext(() => unaVuelta(clave))
+  ).finally(() => vueltasEnCurso.delete(vuelta))
   vueltasEnCurso.add(vuelta)
   return vuelta
 }

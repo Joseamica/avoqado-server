@@ -4,6 +4,7 @@ import type { Request, Response } from 'express'
 
 import logger from '@/config/logger'
 import { handleAngelPayWebhook, angelpayWebhookHealthCheck } from '@/controllers/tpv/angelpay-webhook.tpv.controller'
+import { getContext, runWithContext, type ExecutionContext } from '@/observability/executionContext'
 import * as service from '@/services/tpv/angelpay-webhook.service'
 import * as avisos from '@/services/tpv/avisosNoGuardados'
 
@@ -32,6 +33,11 @@ jest.mock('@/utils/prismaClient', () => ({
       findFirst: jest.fn(),
     },
   },
+}))
+
+// El nombre sale de un caché en memoria (`venueNames.ts`); aquí basta con uno fijo por negocio.
+jest.mock('@/observability/venueNames', () => ({
+  getVenueName: (venueId: string) => (venueId === 'v-1' ? 'Testarudo Cafe' : undefined),
 }))
 
 import prisma from '@/utils/prismaClient'
@@ -504,6 +510,85 @@ describe('handleAngelPayWebhook', () => {
       expect(res.__status).toBe(200)
       expect(avisos.hayDineroNoGuardado('ref-guardada')).toBe(false)
       expect(avisos.canalDelComercioFalloHacePoco('ma_1')).toBe(false)
+    })
+
+    /**
+     * 🔴 27-sep («lo otro»): con el logger montado, las líneas del aviso ya traían correlationId pero NO el negocio — un cuid de
+     * comercio no le dice nada a quien lee una alerta de dinero. Los webhooks no traen token con el negocio: sale del comercio
+     * de la URL, en la MISMA búsqueda que ya se hace.
+     */
+    describe('el negocio va en TODA línea del aviso', () => {
+      const conNegocio = { ...merchantRow, angelpayUserAccount: { venueId: 'v-1' } }
+      const contextoDelWebhook = (): ExecutionContext => ({
+        correlationId: 'cid-wh',
+        source: 'http',
+        entrypoint: 'POST /api/v1/webhooks/angelpay/:id',
+      })
+      /** El contexto activo en la PRÓXIMA llamada a ese nivel del logger. */
+      const contextoEnLaProxima = (nivel: jest.Mock) => {
+        let visto: ExecutionContext | undefined
+        nivel.mockImplementationOnce(() => (visto = { ...getContext()! }))
+        return () => visto
+      }
+      const firmaInvalida = () =>
+        handleAngelPayWebhook(
+          mkReq({
+            params: { merchantAccountId: 'ma_1' },
+            bodyBuf: Buffer.from('{}'),
+            headers: { 'x-webhook-event-id': 'evt_ctx', 'x-webhook-signature': 'ff'.repeat(32) },
+          }),
+          mkRes(),
+          jest.fn(),
+        )
+
+      it('el negocio sale de la MISMA búsqueda del comercio (sin consulta extra)', async () => {
+        mockedMerchantAccountFindFirst.mockResolvedValue(conNegocio)
+        await runWithContext(contextoDelWebhook(), firmaInvalida)
+        expect(mockedMerchantAccountFindFirst).toHaveBeenCalledTimes(1)
+        expect(mockedMerchantAccountFindFirst).toHaveBeenCalledWith(
+          expect.objectContaining({ select: expect.objectContaining({ angelpayUserAccount: { select: { venueId: true } } }) }),
+        )
+      })
+
+      it('🔴 firma inválida: el 🚫 sale con el negocio del comercio', async () => {
+        mockedMerchantAccountFindFirst.mockResolvedValue(conNegocio)
+        const leer = contextoEnLaProxima(logger.warn as jest.Mock)
+        await runWithContext(contextoDelWebhook(), firmaInvalida)
+        expect(leer()).toMatchObject({ correlationId: 'cid-wh', venueId: 'v-1', venueName: 'Testarudo Cafe' })
+      })
+
+      it('🔴 el servicio y el 🚨 de «no se pudo guardar» también lo llevan', async () => {
+        mockedMerchantAccountFindFirst.mockResolvedValue(conNegocio)
+        let enElServicio: ExecutionContext | undefined
+        mockedProcess.mockImplementation(async () => {
+          enElServicio = { ...getContext()! }
+          throw new Error('la base se cayó al insertar el evento')
+        })
+        const leer = contextoEnLaProxima(logger.error as jest.Mock)
+        await runWithContext(contextoDelWebhook(), () =>
+          enviar({ amount: '10000', integratorReference: 'ref-negocio', status: 'approved' }),
+        )
+        expect(enElServicio).toMatchObject({ venueId: 'v-1', venueName: 'Testarudo Cafe' })
+        expect(leer()).toMatchObject({ correlationId: 'cid-wh', venueName: 'Testarudo Cafe' })
+      })
+
+      it('🔴 el ✅ del reingreso sale con el correlationId y el negocio del aviso original, lo corra quien lo corra', async () => {
+        mockedMerchantAccountFindFirst.mockResolvedValue(conNegocio)
+        mockedProcess.mockRejectedValueOnce(new Error('la base se cayó')).mockResolvedValue({ action: 'MATCHED', eventLogId: 'evt' })
+        await runWithContext(contextoDelWebhook(), () =>
+          enviar({ amount: '10000', integratorReference: 'ref-reingreso-negocio', status: 'approved' }),
+        )
+        const leer = contextoEnLaProxima(logger.info as jest.Mock)
+        await avisos._reingresarYaParaPruebas() // desde fuera de cualquier contexto
+        expect(leer()).toMatchObject({ correlationId: 'cid-wh', venueId: 'v-1', venueName: 'Testarudo Cafe' })
+      })
+
+      it('un comercio sin cuenta ligada a un negocio no inventa uno', async () => {
+        mockedMerchantAccountFindFirst.mockResolvedValue({ ...merchantRow, angelpayUserAccount: null })
+        const leer = contextoEnLaProxima(logger.warn as jest.Mock)
+        await runWithContext(contextoDelWebhook(), firmaInvalida)
+        expect(leer()).toEqual(contextoDelWebhook())
+      })
     })
   })
 })
