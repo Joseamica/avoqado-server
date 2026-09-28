@@ -36,6 +36,16 @@ export function isDeadlockError(error: unknown): boolean {
   return value.code === 'P2010' && nestedCode(value) === '40P01'
 }
 
+/**
+ * `lock_timeout` vencido (55P03) en una consulta de MODELO. Prisma 6.19 no le da código: llega como
+ * `PrismaClientUnknownRequestError` sin `code` ni `meta`, y el SQLSTATE sólo viaja en el `QueryError(PostgresError { code:
+ * "55P03", … })` del mensaje (medido el 2026-09-28 con el INSERT de JournalLine y el upsert de AccountingPeriodLock). En una
+ * consulta cruda (P2010) o como código directo ya lo reconoce `isRetryableDbError`. Quien lo reintente lo decide él.
+ */
+export function isModelLockTimeoutError(error: unknown): boolean {
+  return error instanceof Prisma.PrismaClientUnknownRequestError && error.message.includes('PostgresError { code: "55P03"')
+}
+
 function validateOptions(timeoutMs: number, maxRetries: number, baseDelayMs: number): void {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new RangeError('timeoutMs must be greater than zero')
   if (!Number.isInteger(maxRetries) || maxRetries < 1) throw new RangeError('maxRetries must be a positive integer')

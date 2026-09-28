@@ -1,5 +1,7 @@
+import { Prisma } from '@prisma/client'
+
 import { ConflictError } from '@/errors/AppError'
-import { isRetryableDbError, withSerializableRetry } from '@/utils/serializableRetry'
+import { isModelLockTimeoutError, isRetryableDbError, withSerializableRetry } from '@/utils/serializableRetry'
 import { prismaMock } from '../../__helpers__/setup'
 
 describe('serializableRetry', () => {
@@ -18,6 +20,33 @@ describe('serializableRetry', () => {
       [null, false],
     ])('classifies %j as %s', (error, expected) => {
       expect(isRetryableDbError(error)).toBe(expected)
+    })
+  })
+
+  // Forma MEDIDA el 28-sep contra Postgres (Prisma 6.19.3): un lock_timeout vencido en una consulta de MODELO llega sin `code`
+  // ni `meta`; el SQLSTATE sólo viaja en el `QueryError(PostgresError { code: "55P03", … })` del mensaje.
+  describe('isModelLockTimeoutError', () => {
+    const conPostgres = (sqlState: string, mensaje: string) =>
+      '\nInvalid `prisma.journalEntry.create()` invocation:\n\n\nError occurred during query execution:\n' +
+      `ConnectorError(ConnectorError { user_facing_error: None, kind: QueryError(PostgresError { code: "${sqlState}", message: "${mensaje}", severity: "ERROR", detail: None, column: None, hint: None }), transient: false })`
+    const desconocido = (mensaje: string) => new Prisma.PrismaClientUnknownRequestError(mensaje, { clientVersion: '6.19.3' })
+
+    it('reconoce el 55P03 de una consulta de modelo (la forma medida)', () => {
+      expect(isModelLockTimeoutError(desconocido(conPostgres('55P03', 'canceling statement due to lock timeout')))).toBe(true)
+    })
+
+    it('no reconoce otro SQLSTATE en la misma forma (57014, statement_timeout)', () => {
+      expect(isModelLockTimeoutError(desconocido(conPostgres('57014', 'canceling statement due to statement timeout')))).toBe(false)
+    })
+
+    it('no reconoce el mismo texto fuera de un error desconocido de Prisma, ni un error vacío', () => {
+      expect(isModelLockTimeoutError(new Error(conPostgres('55P03', 'canceling statement due to lock timeout')))).toBe(false)
+      expect(isModelLockTimeoutError(null)).toBe(false)
+    })
+
+    it('el crudo (P2010) sigue siendo cosa de isRetryableDbError, que no cambia', () => {
+      expect(isRetryableDbError({ code: 'P2010', meta: { code: '55P03' } })).toBe(true)
+      expect(isRetryableDbError(desconocido(conPostgres('55P03', 'canceling statement due to lock timeout')))).toBe(false)
     })
   })
 

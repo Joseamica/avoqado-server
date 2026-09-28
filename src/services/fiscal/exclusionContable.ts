@@ -11,7 +11,7 @@
  */
 import { Prisma } from '@prisma/client'
 import { ConflictError } from '@/errors/AppError'
-import { isDeadlockError, isRetryableDbError } from '@/utils/serializableRetry'
+import { isDeadlockError, isModelLockTimeoutError, isRetryableDbError } from '@/utils/serializableRetry'
 import prisma from '@/utils/prismaClient'
 
 export const CONTABILIDAD_IVA_MIXTO = 'CONTABILIDAD_IVA_MIXTO'
@@ -63,7 +63,7 @@ export async function conReintentoContable<T>(fn: (tx: Prisma.TransactionClient)
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 15_000, maxWait: 5_000 },
       )
     } catch (e) {
-      const choque = isRetryableDbError(e) || isDeadlockError(e)
+      const choque = isRetryableDbError(e) || isDeadlockError(e) || isModelLockTimeoutError(e)
       if (choque && intento < INTENTOS) {
         await new Promise(resolve => setTimeout(resolve, 50 * 2 ** (intento - 1)))
         continue

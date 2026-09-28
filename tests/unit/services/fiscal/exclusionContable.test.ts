@@ -46,6 +46,13 @@ const p2010 = (sqlState: string) =>
     clientVersion: 'test',
     meta: { code: sqlState, message: 'conflicto de prueba' },
   })
+/** Forma MEDIDA (28-sep, Prisma 6.19.3): lock_timeout vencido en una consulta de modelo — sin `code` ni `meta`. */
+const candadoDeModelo = (sqlState = '55P03', mensaje = 'canceling statement due to lock timeout') =>
+  new Prisma.PrismaClientUnknownRequestError(
+    '\nInvalid `prisma.journalEntry.create()` invocation:\n\n\nError occurred during query execution:\n' +
+      `ConnectorError(ConnectorError { user_facing_error: None, kind: QueryError(PostgresError { code: "${sqlState}", message: "${mensaje}", severity: "ERROR", detail: None, column: None, hint: None }), transient: false })`,
+    { clientVersion: '6.19.3' },
+  )
 const p2028 = () =>
   new Prisma.PrismaClientKnownRequestError('Transaction already closed: la transacción venció.', { code: 'P2028', clientVersion: 'test' })
 
@@ -142,6 +149,21 @@ describe('conReintentoContable (Ruling R11)', () => {
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(5)
   })
 
+  it('un 55P03 de consulta de MODELO (sin código de Prisma) hasta agotar ⇒ 409 CONTABILIDAD_OCUPADA', async () => {
+    prismaMock.$transaction.mockRejectedValue(candadoDeModelo())
+
+    await expect(conReintentoContable(async () => 'nunca')).rejects.toMatchObject(OCUPADA)
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(5)
+  })
+
+  it('otro error desconocido de Prisma pasa tal cual, sin reintentar', async () => {
+    const otro = candadoDeModelo('57014', 'canceling statement due to statement timeout')
+    prismaMock.$transaction.mockRejectedValue(otro)
+
+    await expect(conReintentoContable(async () => 'nunca')).rejects.toBe(otro)
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+  })
+
   it('P2028 (transacción vencida) ⇒ 409 CONTABILIDAD_OCUPADA sin reintentar', async () => {
     prismaMock.$transaction.mockRejectedValue(p2028())
 
@@ -178,6 +200,24 @@ describe('postJournalEntry — reintento y agotamiento (Ruling R11)', () => {
     expect(error).toBeInstanceOf(ConflictError)
     expect(error).toMatchObject(OCUPADA)
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(6) // el intento original + 5 reintentos
+  })
+
+  it('un 55P03 de consulta de MODELO (el INSERT de las líneas) hasta agotar ⇒ 409 CONTABILIDAD_OCUPADA, no el error crudo', async () => {
+    prismaMock.$transaction.mockRejectedValue(candadoDeModelo())
+
+    const error = await postJournalEntry('v1', POLIZA, { staffId: 's1' }).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(ConflictError)
+    expect(error).toMatchObject(OCUPADA)
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(6)
+  })
+
+  it('otro error desconocido de Prisma pasa tal cual, sin reintentar', async () => {
+    const otro = candadoDeModelo('57014', 'canceling statement due to statement timeout')
+    prismaMock.$transaction.mockRejectedValue(otro)
+
+    await expect(postJournalEntry('v1', POLIZA, { staffId: 's1' })).rejects.toBe(otro)
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
   })
 
   it('P2028 (transacción vencida) lanza 409 CONTABILIDAD_OCUPADA sin reintentar', async () => {

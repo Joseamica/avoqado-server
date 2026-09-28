@@ -508,3 +508,92 @@ describe('una publicación de catálogo en vuelo retiene Organization: el posteo
     expect(await prisma.accountingPeriodLock.count({ where: { organizationId: f.organizationId, status: 'CLOSED' } })).toBe(1)
   })
 })
+
+// Review Focus 1 / Ruling R11: un candado de más de 5 s también puede vencer en una consulta de MODELO (no cruda) — el INSERT de
+// las líneas que espera la FK de LedgerAccount, o el upsert del cierre que espera el índice único. Igual termina en 409
+// CONTABILIDAD_OCUPADA tras agotar los reintentos, sin escribir nada; nunca un error crudo.
+describe('un candado de más de 5 s en una consulta de modelo termina en 409 CONTABILIDAD_OCUPADA', () => {
+  const OCUPADA = {
+    statusCode: 409,
+    code: 'CONTABILIDAD_OCUPADA',
+    message: 'La contabilidad está ocupada en este momento. Vuelve a intentarlo en unos segundos.',
+  }
+
+  /** Alguien espera un candado (pg_stat_activity) que retiene el bloqueador. */
+  async function hastaQueEspereDetrasDe(pid: number): Promise<void> {
+    const limite = Date.now() + 30_000
+    while (Date.now() < limite) {
+      const [fila] = await prisma.$queryRaw<Array<{ n: number }>>`
+        SELECT count(*)::int AS n FROM pg_stat_activity a
+        WHERE a.datname = current_database() AND a.wait_event_type = 'Lock' AND ${pid}::int = ANY(pg_blocking_pids(a.pid))`
+      if (fila.n > 0) return
+      await new Promise(resolve => setTimeout(resolve, 20))
+    }
+    throw new Error('La operación nunca quedó esperando detrás del bloqueador')
+  }
+
+  /**
+   * Otra transacción retiene lo que la operación REAL necesita después de tomar sus candados; se prueba la espera y se sostiene
+   * hasta que la operación se rinde. Al final el bloqueador se REVIERTE: lo que quede escrito es sólo de la operación.
+   */
+  async function conBloqueador(retener: (tx: Prisma.TransactionClient) => Promise<unknown>, operacion: () => Promise<unknown>) {
+    let listo!: (pid: number) => void
+    let soltar!: () => void
+    const pidDelBloqueador = new Promise<number>(resolve => (listo = resolve))
+    const suelto = new Promise<void>(resolve => (soltar = resolve))
+    const REVERTIR = new Error('revertir el bloqueador')
+    const bloqueo = prisma
+      .$transaction(
+        async tx => {
+          await retener(tx)
+          const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
+          listo(pid)
+          await suelto
+          throw REVERTIR
+        },
+        { timeout: 180_000, maxWait: 20_000 },
+      )
+      .catch((e: unknown) => {
+        if (e !== REVERTIR) throw e
+      })
+    const pid = await pidDelBloqueador
+    const resultado = operacion().then(
+      escrito => ({ escrito }),
+      (error: unknown) => error,
+    )
+    try {
+      await hastaQueEspereDetrasDe(pid)
+      return await resultado
+    } finally {
+      soltar()
+      await bloqueo
+    }
+  }
+
+  it('createManualEntry: el INSERT de sus líneas espera una LedgerAccount retenida ⇒ 409 CONTABILIDAD_OCUPADA y cero pólizas', async () => {
+    const x = await nuevoNegocio()
+    const lines = await lineasDeVenta(x.organizationId, x.rfc)
+
+    const resultado = await conBloqueador(
+      tx => tx.$queryRaw`SELECT id FROM "LedgerAccount" WHERE id = ${lines[0].ledgerAccountId} FOR UPDATE`,
+      () => createManualEntry(x.venueId, { date: '2026-06-15', concept: 'Póliza detrás de una cuenta retenida', lines }, { staffId: null }),
+    )
+
+    expect(resultado).toMatchObject(OCUPADA)
+    expect(resultado).toBeInstanceOf(ConflictError)
+    expect(await polizas(x.organizationId)).toBe(0)
+  })
+
+  it('closePeriod: el upsert espera el mismo periodo insertado sin confirmar ⇒ 409 CONTABILIDAD_OCUPADA y cero candados', async () => {
+    const x = await nuevoNegocio({ contabilidad: false })
+
+    const resultado = await conBloqueador(
+      tx => tx.accountingPeriodLock.create({ data: { organizationId: x.organizationId, rfc: x.rfc, period: '2026-06' } }),
+      () => closePeriod(x.venueId, '2026-06', { staffId: null }, 'cierre detrás de otro cierre'),
+    )
+
+    expect(resultado).toMatchObject(OCUPADA)
+    expect(resultado).toBeInstanceOf(ConflictError)
+    expect(await prisma.accountingPeriodLock.count({ where: { organizationId: x.organizationId } })).toBe(0)
+  })
+})

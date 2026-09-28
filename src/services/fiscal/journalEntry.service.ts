@@ -2,7 +2,7 @@ import { JournalEntrySource, JournalEntryStatus, JournalEntryType, Prisma } from
 
 import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
-import { isDeadlockError, isRetryableDbError } from '../../utils/serializableRetry'
+import { isDeadlockError, isModelLockTimeoutError, isRetryableDbError } from '../../utils/serializableRetry'
 import { logAction } from '../dashboard/activity-log.service'
 import { isPeriodLocked } from './accountingPeriodLock.service'
 import { resolveScopeOrNull, type CatalogScope } from './chartOfAccounts.service'
@@ -297,9 +297,9 @@ export async function postJournalEntry(
           break
         }
       }
-      // Colisión de folio o choque de concurrencia (40001, 55P03, 40P01) → reintentar con espera creciente (re-lee el
-      // max y recalcula).
-      const choque = target?.includes('folio') || isRetryableDbError(e) || isDeadlockError(e)
+      // Colisión de folio o choque de concurrencia (40001, 55P03 —crudo o de consulta de modelo—, 40P01) → reintentar con
+      // espera creciente (re-lee el max y recalcula).
+      const choque = target?.includes('folio') || isRetryableDbError(e) || isDeadlockError(e) || isModelLockTimeoutError(e)
       if (choque && attempt < MAX_RETRIES) {
         await new Promise(resolve => setTimeout(resolve, 50 * 2 ** attempt))
         continue
