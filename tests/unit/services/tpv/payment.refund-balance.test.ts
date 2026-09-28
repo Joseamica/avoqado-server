@@ -159,7 +159,11 @@ describe('recordOrderPayment (TPV) — un reembolso previo no reabre saldo', () 
         payment: { count: jest.fn().mockResolvedValue(0), create: prisma.payment.create, findMany: jest.fn().mockResolvedValue([]) },
         paymentAllocation: { create: prisma.paymentAllocation.create },
         venueTransaction: { create: prisma.venueTransaction.create },
-        order: { update: prisma.order.update },
+        order: {
+          update: prisma.order.update,
+          // The standalone write rereads its inputs under the Order lock (Plan 3b T7-R1): nothing changed, so the latest pre-read row.
+          findFirst: jest.fn(() => (prisma.order.findUnique as jest.Mock).mock.results.slice(-1)[0]?.value),
+        },
         shift: { findFirst: prisma.shift.findFirst, updateMany: prisma.shift.updateMany, update: prisma.shift.update },
         activityLog: { create: prisma.activityLog.create },
         areaTicketCheckoutSession: { findFirst: jest.fn().mockResolvedValue(null) },

@@ -376,7 +376,7 @@ import { logAction } from '../dashboard/activity-log.service'
 import { paymentIsAvoqadoSettled } from '../shared/tenderSemantics'
 // La ÚNICA definición de "qué cuenta como pagado" — la comparten los cuatro
 // caminos de cobro, para que un reembolso no reabra saldo en ninguno.
-import { summarizeRefunds, computeOrderBalance, REFUND_PAYMENT_TYPE } from '../shared/orderBalance'
+import { summarizeRefunds, computeOrderBalance, REFUND_PAYMENT_TYPE, type CompletedPaymentForBalance } from '../shared/orderBalance'
 // El candado del toque repetido en «Efectivo». La regla vive AHÍ, pura y probada aparte.
 import { aplicaCandadoDeEfectivo, cobroEnEfectivoSobreOrdenSaldada } from '../shared/cobroEnEfectivoDuplicado'
 import { resolveTenderForCharge, computeTenderCommission, type ResolvedTenderCharge } from '../dashboard/tenderType.dashboard.service'
@@ -1371,6 +1371,30 @@ async function settleStandalonePaymentInTx(
   return { firstSettlement, postingId: posting?.id ?? null }
 }
 
+/** Everything the stored-totals arithmetic reads from the Order: two reads with the same key produce the same write. */
+function standaloneTotalsInputs(order: {
+  subtotal: Prisma.Decimal
+  discountAmount: Prisma.Decimal | null
+  serviceChargeAmount: Prisma.Decimal | null
+  paymentStatus: string
+  servedById: string | null
+  createdById: string | null
+  payments: CompletedPaymentForBalance[]
+}): string {
+  const paid = summarizeRefunds(order.payments)
+  return JSON.stringify([
+    order.subtotal,
+    order.discountAmount,
+    order.serviceChargeAmount,
+    order.paymentStatus,
+    order.servedById,
+    order.createdById,
+    order.payments.length,
+    paid.netPaidAmount,
+    paid.netTipAmount,
+  ])
+}
+
 /**
  * Update order totals directly in backend for standalone mode
  * @param orderId Order ID to update
@@ -1387,25 +1411,34 @@ async function updateOrderTotalsForStandalonePayment(
   tipAmount: number, // ✅ FIX: Pass tip separately to update order.tipAmount
   currentPaymentId?: string,
   staffId?: string,
-  options?: { areaTicketAlreadyFinalized?: boolean; venueId?: string; committedSettlement?: CommittedStandaloneSettlement },
+  options?: {
+    areaTicketAlreadyFinalized?: boolean
+    venueId?: string
+    committedSettlement?: CommittedStandaloneSettlement
+    /** Internal: this pass already reran once after its inputs moved under the Order lock. */
+    retried?: boolean
+  },
 ): Promise<OrderInventoryWarning | null> {
+  // The payments the arithmetic sums; the write transaction rereads exactly these under the Order lock.
+  const summedPayments = {
+    where: {
+      status: 'COMPLETED',
+      // ✅ FIX: Exclude the current payment to avoid double-counting
+      ...(currentPaymentId && { id: { not: currentPaymentId } }),
+    },
+    // 🔴 `type` NO es decorativo: un reembolso vive como un `Payment` NEGATIVO
+    // `type: REFUND` colgado de la MISMA orden, y sin ese campo restaba de lo
+    // pagado. Se leen TODOS los COMPLETED sin filtrar por `type` en la
+    // consulta —igual que los otros tres canales— porque el resumen
+    // compartido necesita los REFUND para reportar `refundState`.
+    select: { amount: true, tipAmount: true, type: true },
+  } satisfies Prisma.Order$paymentsArgs
+
   // Get current order with payment information
   const order = await prisma.order.findUnique({
     where: { id: orderId, ...(options?.venueId ? { venueId: options.venueId } : {}) },
     include: {
-      payments: {
-        where: {
-          status: 'COMPLETED',
-          // ✅ FIX: Exclude the current payment to avoid double-counting
-          ...(currentPaymentId && { id: { not: currentPaymentId } }),
-        },
-        // 🔴 `type` NO es decorativo: un reembolso vive como un `Payment` NEGATIVO
-        // `type: REFUND` colgado de la MISMA orden, y sin ese campo restaba de lo
-        // pagado. Se leen TODOS los COMPLETED sin filtrar por `type` en la
-        // consulta —igual que los otros tres canales— porque el resumen
-        // compartido necesita los REFUND para reportar `refundState`.
-        select: { amount: true, tipAmount: true, type: true },
-      },
+      payments: summedPayments,
       items: {
         include: {
           product: true,
@@ -1742,6 +1775,25 @@ async function updateOrderTotalsForStandalonePayment(
     options?.areaTicketAlreadyFinalized || options?.committedSettlement
       ? order
       : await prisma.$transaction(async tx => {
+          // Order lock first (Order → Payment → Shift), then the inputs again under it: a writer that committed after
+          // the pre-read above must never be overwritten with totals computed from that stale read.
+          if (!(await lockExistingOrderForPayment(tx, { venueId: order.venueId, orderId }))) {
+            throw new Error(`Order ${orderId} not found for total update`)
+          }
+          const current = await tx.order.findFirst({
+            where: { id: orderId, venueId: order.venueId },
+            select: {
+              subtotal: true,
+              discountAmount: true,
+              serviceChargeAmount: true,
+              paymentStatus: true,
+              servedById: true,
+              createdById: true,
+              payments: summedPayments,
+            },
+          })
+          if (!current || standaloneTotalsInputs(current) !== standaloneTotalsInputs(order)) return null
+
           const updated = await tx.order.update({
             where: { id: orderId, ...(options?.venueId ? { venueId: options.venueId } : {}) },
             data: {
@@ -1802,6 +1854,23 @@ async function updateOrderTotalsForStandalonePayment(
 
           return updated
         })
+
+  if (!updatedOrder) {
+    // The inputs moved under the lock and nothing was written. Rerun ONCE from a fresh read; a second change within
+    // that window is left to the paid-order sweep instead of chasing a busy order.
+    if (!options?.retried) {
+      return updateOrderTotalsForStandalonePayment(orderId, paymentAmount, tipAmount, currentPaymentId, staffId, {
+        ...options,
+        retried: true,
+      })
+    }
+    logger.warn('⚠️ [StandaloneTotals] Order inputs changed again under the lock — totals not written, left for the paid-order sweep', {
+      orderId,
+      venueId: order.venueId,
+      paymentId: currentPaymentId ?? null,
+    })
+    return null
+  }
 
   logger.info('Order totals updated for standalone payment', {
     orderId,

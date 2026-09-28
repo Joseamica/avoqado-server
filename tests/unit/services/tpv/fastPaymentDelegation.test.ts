@@ -456,6 +456,8 @@ describe('recordFastPayment — un cobro con orden NO crea venta sintetica', () 
     // amount en CENTAVOS (totalAmount = amount/100): 3000 = $30, que calza con el
     // subtotal 30 de la 2ª orden y dispara isFullyPaid = true.
     getProductInventoryStatusMock.mockResolvedValueOnce({ inventoryMethod: 'QUANTITY', currentStock: 0 })
+    // The standalone write rereads its inputs under the Order lock (Plan 3b T7-R1): nothing changed meanwhile.
+    prismaMock.order.findFirst.mockResolvedValueOnce(ordenQueRechazaPorInventario)
 
     const result: any = await recordFastPayment(
       'venue-1',

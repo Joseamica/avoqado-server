@@ -319,7 +319,12 @@ beforeEach(() => {
       },
       paymentAllocation: { create: prisma.paymentAllocation.create },
       venueTransaction: { create: prisma.venueTransaction.create },
-      order: { ...(prisma as any).order, update: prisma.order.update },
+      order: {
+        ...(prisma as any).order,
+        update: prisma.order.update,
+        // The standalone write rereads its inputs under the Order lock (Plan 3b T7-R1): nothing changed, so the latest pre-read row.
+        findFirst: jest.fn(() => (prisma.order.findUnique as jest.Mock).mock.results.slice(-1)[0]?.value),
+      },
       shift: { findFirst: prisma.shift.findFirst, updateMany: prisma.shift.updateMany, update: prisma.shift.update },
       activityLog: { create: prisma.activityLog.create },
       // recordOrderPayment llama lockAreaTicketCheckoutForPayment(tx, …) — area
