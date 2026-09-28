@@ -13,7 +13,6 @@ import { JournalEntrySource, Prisma } from '@prisma/client'
 import { formatInTimeZone } from 'date-fns-tz'
 
 import { ConflictError } from '@/errors/AppError'
-import { seedDefaultMappings } from '@/services/fiscal/accountMapping.service'
 import { closePeriod } from '@/services/fiscal/accountingPeriodLock.service'
 import { generatePoliciesForVenue } from '@/services/fiscal/autoPosting.service'
 import { seedBaseChart } from '@/services/fiscal/chartOfAccounts.service'
@@ -32,70 +31,21 @@ import {
   type CatalogPublicationFixture,
   type CatalogPublicationIntegrationHarness,
 } from '../master-catalog/catalogPublicationIntegrationHarness'
+import {
+  debePausarse,
+  limpiarNegocios,
+  lineasDeVenta,
+  marcar,
+  MOTIVO,
+  nuevoNegocio,
+  nuevoRfc,
+  polizas,
+  type Negocio,
+} from './exclusionContable.fixtures'
 
 jest.setTimeout(240_000)
 
-const MOTIVO =
-  'La contabilidad de Avoqado todavía no maneja ventas con IVA distinto de 16 %. Como esta organización ya tuvo productos con otra tasa, las pólizas y el cierre de periodo están pausados. Escríbenos a hola@avoqado.io si lo necesitas.'
-const PAUSA = { statusCode: 409, code: 'CONTABILIDAD_IVA_MIXTO', message: MOTIVO }
-
-const corrida = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`.slice(-6).toUpperCase()
-let consecutivo = 0
-/** RFC único por corrida y por negocio: el folio y la idempotencia de las pólizas son por (organización, RFC). */
-const nuevoRfc = () => `EXC${corrida}${String(++consecutivo).padStart(2, '0')}0`
-
-interface Negocio {
-  organizationId: string
-  venueId: string
-  rfc: string
-}
-const negocios: Negocio[] = []
 const proveedores: string[] = []
-
-async function nuevoNegocio({ contabilidad = true } = {}): Promise<Negocio> {
-  const rfc = nuevoRfc()
-  const etiqueta = rfc.toLowerCase()
-  const org = await prisma.organization.create({
-    data: { name: `Exclusión contable ${etiqueta}`, email: `${etiqueta}@example.test`, phone: '5555555555' },
-  })
-  const venue = await prisma.venue.create({
-    data: { organizationId: org.id, name: `Exclusión ${etiqueta}`, slug: `exclusion-${etiqueta}`, rfc, seatCapExempt: true },
-  })
-  const negocio = { organizationId: org.id, venueId: venue.id, rfc }
-  negocios.push(negocio)
-  if (contabilidad) {
-    await seedBaseChart(venue.id, { staffId: null })
-    await seedDefaultMappings(venue.id, { staffId: null })
-  }
-  return negocio
-}
-
-/** La marca pegajosa: de falso a verdadero siempre se puede; nunca se regresa. */
-const marcar = (x: Negocio) => prisma.$executeRaw`UPDATE "Organization" SET "ivaMixtoAlgunaVez" = true WHERE id = ${x.organizationId}`
-
-const cuenta = async (organizationId: string, rfc: string, code: string) =>
-  (await prisma.ledgerAccount.findFirstOrThrow({ where: { organizationId, rfc, code }, select: { id: true } })).id
-
-/** DEBE caja / HABER ventas por $116. */
-async function lineasDeVenta(organizationId: string, rfc: string) {
-  const [caja, ventas] = await Promise.all([cuenta(organizationId, rfc, '101.01'), cuenta(organizationId, rfc, '401.01')])
-  return [
-    { ledgerAccountId: caja, debitCents: 11_600, creditCents: 0 },
-    { ledgerAccountId: ventas, debitCents: 0, creditCents: 11_600 },
-  ]
-}
-
-const polizas = (organizationId: string) => prisma.journalEntry.count({ where: { organizationId } })
-
-/** La operación debe salir con la pausa. Si NO lanza, el fallo muestra lo que sí escribió. */
-async function debePausarse(operacion: Promise<unknown>): Promise<void> {
-  const resultado = await operacion.then(
-    escrito => ({ escrito }),
-    (error: unknown) => error,
-  )
-  expect(resultado).toMatchObject(PAUSA) // primero: si no lanzó, el diff muestra `escrito`
-  expect(resultado).toBeInstanceOf(ConflictError)
-}
 
 /** Cobro con tarjeta de $116 (sin renglones: la póliza usa el 16 % de siempre). */
 async function cobroConTarjeta(x: Negocio, merchantAccountId?: string) {
@@ -160,23 +110,7 @@ async function dosComercios(x: Negocio) {
 beforeAll(() => assertDisposableCatalogPublicationDatabase())
 
 afterAll(async () => {
-  for (const { organizationId, venueId } of negocios) {
-    await prisma.journalEntry.deleteMany({ where: { organizationId } })
-    await prisma.accountingPeriodLock.deleteMany({ where: { organizationId } })
-    await prisma.fixedAsset.deleteMany({ where: { organizationId } })
-    await prisma.$executeRaw`DELETE FROM "PayrollLine" WHERE "payrollRunId" IN (SELECT id FROM "PayrollRun" WHERE "organizationId" = ${organizationId})`
-    await prisma.payrollRun.deleteMany({ where: { organizationId } })
-    await prisma.employee.deleteMany({ where: { organizationId } })
-    await prisma.expense.deleteMany({ where: { organizationId } })
-    await prisma.accountMapping.deleteMany({ where: { organizationId } })
-    await prisma.ledgerAccount.deleteMany({ where: { organizationId } })
-    await prisma.payment.deleteMany({ where: { venueId } })
-    await prisma.order.deleteMany({ where: { venueId } })
-    await prisma.merchantFiscalConfig.deleteMany({ where: { fiscalEmisor: { venueId } } })
-    await prisma.fiscalEmisor.deleteMany({ where: { venueId } })
-    await prisma.venue.deleteMany({ where: { id: venueId } })
-    await prisma.organization.deleteMany({ where: { id: organizationId } })
-  }
+  await limpiarNegocios()
   await prisma.merchantAccount.deleteMany({ where: { providerId: { in: proveedores } } })
   await prisma.paymentProvider.deleteMany({ where: { id: { in: proveedores } } })
 })

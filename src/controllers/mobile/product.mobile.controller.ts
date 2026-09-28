@@ -20,6 +20,7 @@ import {
   writeLegacyServiceProductCreationAuditForVenue,
 } from '../../services/master-catalog/catalogGovernance.service'
 import { normalizarIvaDeProducto, traducirErrorDeIva } from '../../services/fiscal/normalizarIvaDeProducto'
+import { bloquearParaCambiarIva } from '../../services/fiscal/exclusionContable'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -155,6 +156,8 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
 
     const actor = resolveLegacyCatalogActor(req.authContext!.userId, Boolean(req.authContext?.isImpersonating))
     const product = await prisma.$transaction(async tx => {
+      // Plan 4: con un campo de IVA, la organización se bloquea PRIMERO (orden del catálogo), antes del cerco del negocio.
+      if ([ivaTratamiento, taxRate].some(v => v !== undefined && v !== null)) await bloquearParaCambiarIva(tx, { venueId })
       await assertLegacyCatalogGovernanceForVenue(tx, {
         venueId,
         operation: 'CREATE',
@@ -284,6 +287,10 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
 
     const actor = resolveLegacyCatalogActor(req.authContext!.userId, Boolean(req.authContext?.isImpersonating))
     const product = await prisma.$transaction(async tx => {
+      // Plan 4: con un campo de IVA, la organización se bloquea PRIMERO (orden del catálogo), antes del cerco negocio → producto.
+      if ([req.body?.ivaTratamiento, req.body?.taxRate].some(v => v !== undefined && v !== null)) {
+        await bloquearParaCambiarIva(tx, { venueId })
+      }
       await assertLegacyCatalogProductUpdateGovernance(tx, {
         venueId,
         productId,

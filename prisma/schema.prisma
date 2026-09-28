@@ -16800,6 +16800,7 @@ model JournalEntry {
   @@unique([organizationId, rfc, folio]) // consecutivo ÚNICO por contribuyente (integridad fiscal; bloquea folios duplicados a nivel DB)
   @@index([organizationId, rfc, period])
   @@index([organizationId, rfc, date])
+  @@index([venueId]) // plan 4: la historia contable viaja con el negocio (inversa y traslados)
 }
 
 model JournalLine {

@@ -1,5 +1,5 @@
 // tests/unit/services/fiscal/normalizarIvaDeProducto.test.ts
-import { normalizarIvaDeProducto, traducirErrorDeIva } from '@/services/fiscal/normalizarIvaDeProducto'
+import { codigoDeBarreraIva, normalizarIvaDeProducto, traducirErrorDeIva } from '@/services/fiscal/normalizarIvaDeProducto'
 
 const actual16 = { ivaTratamiento: 'IVA_16' as const, taxRate: 0.16, objetoImp: '02' }
 const actualExento = { ivaTratamiento: 'EXENTO' as const, taxRate: 0, objetoImp: '02' }
@@ -94,5 +94,46 @@ describe('traducirErrorDeIva', () => {
 
   it('cualquier otro error pasa intacto (no lo traga)', () => {
     expect(() => traducirErrorDeIva(new Error('otra cosa'))).not.toThrow()
+  })
+})
+
+// Plan 4 · Tarea 2: la detección se extrae para que el traslado y el catálogo (Tareas 3 y 4) reconozcan la misma barrera.
+describe('codigoDeBarreraIva', () => {
+  const HISTORIA =
+    'Este negocio ya lleva contabilidad en Avoqado (pólizas o periodos cerrados) y la contabilidad todavía no maneja IVA distinto de 16 %. Por eso este producto se queda en IVA 16 %. Escríbenos a hola@avoqado.io si lo necesitas.'
+  // Forma medida de un P0001 en una consulta de MODELO: sin code ni meta, el texto sólo en el mensaje (routes.test.ts, 2026-09-25).
+  const deModelo = (codigo: string) =>
+    new Error(`Invalid \`tx.product.update()\` invocation: PostgresError { code: "P0001", message: "${codigo}", severity: "ERROR" }`)
+
+  it.each([
+    'IVA_POR_PRODUCTO_APAGADO',
+    'IVA_REQUIERE_APP_NUEVA',
+    'IVA_TRATAMIENTO_CONTRADICTORIO',
+    'IVA_CONTABILIDAD_CON_HISTORIA',
+    'IVA_NEGOCIO_CAMBIO_DE_ORGANIZACION',
+  ])('reconoce %s y ninguna otra llave (ninguna es subcadena de otra)', codigo => {
+    expect(codigoDeBarreraIva(deModelo(codigo))?.code).toBe(codigo)
+  })
+
+  it('devuelve el mensaje exacto para el cliente', () => {
+    expect(codigoDeBarreraIva(deModelo('IVA_CONTABILIDAD_CON_HISTORIA'))).toEqual({
+      code: 'IVA_CONTABILIDAD_CON_HISTORIA',
+      message: HISTORIA,
+    })
+    expect(codigoDeBarreraIva(deModelo('IVA_NEGOCIO_CAMBIO_DE_ORGANIZACION'))).toEqual({
+      code: 'IVA_NEGOCIO_CAMBIO_DE_ORGANIZACION',
+      message: 'Este negocio acaba de cambiar de organización. Vuelve a intentarlo.',
+    })
+  })
+
+  it('otro error ⇒ null', () => {
+    expect(codigoDeBarreraIva(new Error('otra cosa'))).toBeNull()
+    expect(codigoDeBarreraIva(undefined)).toBeNull()
+  })
+
+  it('traducirErrorDeIva vuelve la inversa contable un 409 con su código y mensaje', () => {
+    expect(() => traducirErrorDeIva(deModelo('IVA_CONTABILIDAD_CON_HISTORIA'))).toThrow(
+      expect.objectContaining({ statusCode: 409, code: 'IVA_CONTABILIDAD_CON_HISTORIA', message: HISTORIA }),
+    )
   })
 })

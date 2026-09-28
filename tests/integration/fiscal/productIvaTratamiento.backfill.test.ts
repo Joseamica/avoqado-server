@@ -58,25 +58,46 @@ async function volverAlEstadoPreTarea4(client: Client): Promise<void> {
 
 describe('backfill de Product.ivaTratamiento', () => {
   const s = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  let organizationId: string, venueId: string, categoryId: string
+  let venueId: string, categoryId: string
+  const organizaciones: Array<{ organizationId: string; venueId: string }> = []
+
+  // Plan 4: la marca pegajosa ya no se apaga (trigger "Organization_ivaMixto_pegajosa"). Cada caso que necesita una
+  // organización SIN marca usa una NUEVA, que nace así (Ruling PF7).
+  async function nuevaOrganizacion(etiqueta: string) {
+    const organizationId = (
+      await prisma.organization.create({
+        data: { name: `BF ${etiqueta} ${s}`, email: `bf-${etiqueta}-${s}@example.com`, phone: '5555555555' },
+      })
+    ).id
+    const venue = (
+      await prisma.venue.create({ data: { organizationId, name: `BF ${etiqueta} ${s}`, slug: `bf-${etiqueta}-${s}`, seatCapExempt: true } })
+    ).id
+    const categoria = (
+      await prisma.menuCategory.create({ data: { venueId: venue, name: `C ${etiqueta} ${s}`, slug: `c-${etiqueta}-${s}` } as any })
+    ).id
+    organizaciones.push({ organizationId, venueId: venue })
+    return { organizationId, venueId: venue, categoryId: categoria }
+  }
+
+  const marcada = async (organizationId: string) =>
+    (await prisma.organization.findUniqueOrThrow({ where: { id: organizationId }, select: { ivaMixtoAlgunaVez: true } })).ivaMixtoAlgunaVez
 
   beforeAll(async () => {
-    const org = await prisma.organization.create({ data: { name: `BF ${s}`, email: `bf-${s}@example.com`, phone: '5555555555' } })
-    organizationId = org.id
-    venueId = (await prisma.venue.create({ data: { organizationId, name: `BF ${s}`, slug: `bf-${s}`, seatCapExempt: true } })).id
-    categoryId = (await prisma.menuCategory.create({ data: { venueId, name: `C ${s}`, slug: `c-${s}` } as any })).id
+    ;({ venueId, categoryId } = await nuevaOrganizacion('base'))
   })
 
   afterAll(async () => {
-    await prisma.product.deleteMany({ where: { venueId } })
-    await prisma.menuCategory.deleteMany({ where: { venueId } })
-    await prisma.venue.deleteMany({ where: { id: venueId } })
-    await prisma.organization.deleteMany({ where: { id: organizationId } })
+    for (const o of organizaciones) {
+      await prisma.product.deleteMany({ where: { venueId: o.venueId } })
+      await prisma.menuCategory.deleteMany({ where: { venueId: o.venueId } })
+      await prisma.venue.deleteMany({ where: { id: o.venueId } })
+      await prisma.organization.deleteMany({ where: { id: o.organizationId } })
+    }
   })
 
   // La prueba corre DESPUÉS de las dos migraciones (la columna ya es NOT NULL), así que no puede recrear filas en
   // NULL. Comprueba lo que el relleno debe dejar garantizado: el invariante sobre TODA la tabla, y que la marca
-  // pegajosa se reconstruye aunque alguien la haya dejado en false.
+  // pegajosa se reconstruye en una organización que tiene un producto ≠ 16 % y no la tiene.
   it('invariante: ningún producto contradice su tupla (salvo EXENTO, que no se deriva)', async () => {
     const rotos = await prisma.$queryRawUnsafe<{ n: bigint }[]>(`
       SELECT count(*) AS n FROM "Product"
@@ -87,22 +108,39 @@ describe('backfill de Product.ivaTratamiento', () => {
   })
 
   // El valor BLOQUEADO_04 en sí lo asigna el trigger de INSERT (Tarea 2) al crear el producto, no este
-  // archivo de relleno — lo que esta prueba pin-ea es que el relleno RECONSTRUYE la marca pegajosa de la
-  // organización aunque alguien la haya dejado en false.
+  // archivo de relleno — lo que esta prueba pin-ea es que el relleno RECONSTRUYE la marca pegajosa de una
+  // organización que tiene un producto ≠ 16 % sin la marca. Plan 4: como la marca ya no se apaga, ese estado viejo
+  // se siembra en una organización NUEVA con los triggers apagados SÓLO dentro de la transacción de la siembra.
   it('el backfill reconstruye la marca pegajosa de la organización (el BLOQUEADO_04 lo puso el trigger de INSERT)', async () => {
     await prisma.venueIvaPorProducto.create({ data: { venueId } }) // sólo para poder sembrar el 04 en la prueba
     await prisma.product.create({
       data: { venueId, categoryId, sku: `SKU-${s}`, name: 'GRN TURISMO 2 KG', price: 480, objetoImp: '04' } as any,
     })
     await prisma.venueIvaPorProducto.deleteMany({ where: { venueId } })
-    await prisma.$executeRawUnsafe(`UPDATE "Organization" SET "ivaMixtoAlgunaVez" = false WHERE "id" = $1`, organizationId)
+    const cafe = await prisma.product.findFirstOrThrow({ where: { venueId, name: 'GRN TURISMO 2 KG' } })
+    expect(cafe.ivaTratamiento).toBe('BLOQUEADO_04')
+
+    const vieja = await nuevaOrganizacion('vieja')
+    await prisma.$transaction(async tx => {
+      await tx.$executeRaw`SET LOCAL session_replication_role = replica`
+      await tx.product.create({
+        data: {
+          venueId: vieja.venueId,
+          categoryId: vieja.categoryId,
+          sku: `SKU-vieja-${s}`,
+          name: 'GRN TURISMO 2 KG',
+          price: 480,
+          taxRate: 0.16,
+          objetoImp: '04',
+          ivaTratamiento: 'BLOQUEADO_04',
+        },
+      })
+    })
+    expect(await marcada(vieja.organizationId)).toBe(false)
 
     await ejecutarBackfill()
 
-    const org = await prisma.organization.findUniqueOrThrow({ where: { id: organizationId } })
-    expect(org.ivaMixtoAlgunaVez).toBe(true)
-    const cafe = await prisma.product.findFirstOrThrow({ where: { venueId, name: 'GRN TURISMO 2 KG' } })
-    expect(cafe.ivaTratamiento).toBe('BLOQUEADO_04')
+    expect(await marcada(vieja.organizationId)).toBe(true)
   })
 
   it('es idempotente: correrlo otra vez no cambia nada ni falla', async () => {
@@ -132,6 +170,9 @@ describe('backfill de Product.ivaTratamiento', () => {
       { id: ids.bloqueado04, taxRate: 0.16, objetoImp: '04' },
     ]
 
+    // Plan 4: una organización NUEVA nace sin la marca (ya no se apaga); todo lo de abajo se revierte.
+    const legado = await nuevaOrganizacion('legado')
+
     await conTransaccionDesechable(async client => {
       await volverAlEstadoPreTarea4(client)
 
@@ -139,12 +180,12 @@ describe('backfill de Product.ivaTratamiento', () => {
         await client.query(
           `INSERT INTO "Product" (id, "venueId", sku, name, "categoryId", price, "taxRate", "objetoImp", "ivaTratamiento", "updatedAt")
            VALUES ($1, $2, $3, $4, $5, 100, $6, $7, NULL, now())`,
-          [f.id, venueId, `SKU-${f.id}`, `Legacy ${f.id}`, categoryId, f.taxRate, f.objetoImp],
+          [f.id, legado.venueId, `SKU-${f.id}`, `Legacy ${f.id}`, legado.categoryId, f.taxRate, f.objetoImp],
         )
       }
 
       await client.query(`ALTER TABLE "Product" ENABLE TRIGGER USER`)
-      await client.query(`UPDATE "Organization" SET "ivaMixtoAlgunaVez" = false WHERE "id" = $1`, [organizationId])
+      expect(await marcada(legado.organizationId)).toBe(false)
 
       // El archivo REAL, verbatim, tal como está aplicado en la base.
       await client.query(sqlBackfill)
@@ -179,7 +220,7 @@ describe('backfill de Product.ivaTratamiento', () => {
 
       const { rows: orgRows } = await client.query<{ ivaMixtoAlgunaVez: boolean }>(
         `SELECT "ivaMixtoAlgunaVez" FROM "Organization" WHERE id = $1`,
-        [organizationId],
+        [legado.organizationId],
       )
       expect(orgRows[0]?.ivaMixtoAlgunaVez).toBe(true)
     })

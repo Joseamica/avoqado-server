@@ -14,6 +14,8 @@ import {
   writeLegacyServiceProductCreationAuditForVenue,
 } from '../master-catalog/catalogGovernance.service'
 import { normalizarIvaDeProducto, traducirErrorDeIva } from '../fiscal/normalizarIvaDeProducto'
+import { bloquearParaCambiarIva } from '../fiscal/exclusionContable'
+import { isRetryableDbError } from '../../utils/serializableRetry'
 
 export interface CreateProductDto {
   name: string
@@ -593,9 +595,13 @@ export async function createProduct(venueId: string, productData: CreateProductD
     }
   }>
 
+  // Plan 4: con un campo de IVA, la organización se bloquea PRIMERO (orden del catálogo), antes del cerco del negocio.
+  const traeIva = [productFields.ivaTratamiento, productFields.taxRate, productFields.objetoImp].some(v => v !== undefined && v !== null)
+
   const createProductInTransaction = async (): Promise<CreatedProductWithRelations> =>
     prisma.$transaction(
       async tx => {
+        if (traeIva) await bloquearParaCambiarIva(tx, { venueId })
         await assertLegacyCatalogGovernanceForVenue(tx, { venueId, operation: 'CREATE', willBeVendable: true, actor })
         await assertLegacyProductReferencesForVenue(tx, {
           venueId,
@@ -729,7 +735,8 @@ export async function createProduct(venueId: string, productData: CreateProductD
       product = await createProductInTransaction()
       break
     } catch (error) {
-      const isSerializationConflict = error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034'
+      // Un 40001 del candado crudo de la organización llega como P2010 (no P2034): también es un conflicto de concurrencia.
+      const isSerializationConflict = isRetryableDbError(error)
 
       if (isSerializationConflict && attempt < maxRetries) {
         logger.warn('Retrying product creation after serialization conflict', {
@@ -887,7 +894,11 @@ export async function updateProduct(
     }
   }
 
+  // Plan 4: con un campo de IVA, la organización se bloquea PRIMERO (orden del catálogo), antes del cerco negocio → producto.
+  const traeIva = [productFields.ivaTratamiento, productFields.taxRate, productFields.objetoImp].some(v => v !== undefined && v !== null)
+
   const product = await prisma.$transaction(async tx => {
+    if (traeIva) await bloquearParaCambiarIva(tx, { venueId })
     await assertLegacyCatalogProductUpdateGovernance(tx, {
       venueId,
       productId,

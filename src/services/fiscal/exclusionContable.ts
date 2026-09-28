@@ -21,6 +21,8 @@ export const MOTIVO_CONTABILIDAD_IVA_MIXTO =
   'La contabilidad de Avoqado todavía no maneja ventas con IVA distinto de 16 %. Como esta organización ya tuvo productos con otra tasa, las pólizas y el cierre de periodo están pausados. Escríbenos a hola@avoqado.io si lo necesitas.'
 
 export const contabilidadPausadaError = (): ConflictError => new ConflictError(MOTIVO_CONTABILIDAD_IVA_MIXTO, CONTABILIDAD_IVA_MIXTO)
+const negocioCambioDeOrganizacionError = (): ConflictError =>
+  new ConflictError('Este negocio acaba de cambiar de organización. Vuelve a intentarlo.', IVA_NEGOCIO_CAMBIO_DE_ORGANIZACION)
 export const contabilidadOcupadaError = (): ConflictError =>
   new ConflictError('La contabilidad está ocupada en este momento. Vuelve a intentarlo en unos segundos.', CONTABILIDAD_OCUPADA)
 
@@ -43,10 +45,22 @@ export async function exigirContabilidadDisponible(
     SELECT "ivaMixtoAlgunaVez" FROM "Organization" WHERE id = ${p.organizationId} FOR SHARE`
   const [venue] = await tx.$queryRaw<Array<{ organizationId: string }>>`
     SELECT "organizationId" FROM "Venue" WHERE id = ${p.venueId} FOR SHARE`
-  if (!venue || venue.organizationId !== p.organizationId) {
-    throw new ConflictError('Este negocio acaba de cambiar de organización. Vuelve a intentarlo.', IVA_NEGOCIO_CAMBIO_DE_ORGANIZACION)
-  }
+  if (!venue || venue.organizationId !== p.organizationId) throw negocioCambioDeOrganizacionError()
   if (org?.ivaMixtoAlgunaVez) throw contabilidadPausadaError()
+}
+
+/**
+ * Antes de escribir IVA en un producto, en la MISMA transacción y ANTES del cerco de gobierno del catálogo
+ * (`assertLegacyCatalogGovernanceForVenue` en altas, `assertLegacyCatalogProductUpdateGovernance` en ediciones): la
+ * organización va primero (el orden del catálogo); el cerco bloquea después el negocio y el producto.
+ */
+export async function bloquearParaCambiarIva(tx: Prisma.TransactionClient, p: { venueId: string }): Promise<void> {
+  const [antes] = await tx.$queryRaw<Array<{ organizationId: string }>>`SELECT "organizationId" FROM "Venue" WHERE id = ${p.venueId}`
+  if (!antes) return
+  await tx.$queryRaw`SELECT id FROM "Organization" WHERE id = ${antes.organizationId} FOR NO KEY UPDATE`
+  const [venue] = await tx.$queryRaw<Array<{ organizationId: string }>>`
+    SELECT "organizationId" FROM "Venue" WHERE id = ${p.venueId} FOR SHARE`
+  if (venue?.organizationId !== antes.organizationId) throw negocioCambioDeOrganizacionError()
 }
 
 const INTENTOS = 5

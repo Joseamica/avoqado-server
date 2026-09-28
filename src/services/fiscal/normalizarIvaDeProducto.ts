@@ -7,6 +7,9 @@ const MENSAJES = {
   // La pantalla «Productos → IVA» llega en el plan 6; mientras la bandera esté apagada este mensaje es inalcanzable.
   IVA_REQUIERE_APP_NUEVA: 'Para cambiar el IVA de un producto actualiza la app o hazlo desde el dashboard (Productos → IVA).',
   IVA_TRATAMIENTO_CONTRADICTORIO: 'El IVA elegido no es válido. Usa 16 %, tasa 0 % o exento.',
+  IVA_CONTABILIDAD_CON_HISTORIA:
+    'Este negocio ya lleva contabilidad en Avoqado (pólizas o periodos cerrados) y la contabilidad todavía no maneja IVA distinto de 16 %. Por eso este producto se queda en IVA 16 %. Escríbenos a hola@avoqado.io si lo necesitas.',
+  IVA_NEGOCIO_CAMBIO_DE_ORGANIZACION: 'Este negocio acaba de cambiar de organización. Vuelve a intentarlo.',
 } as const
 
 const esOfrecido = (v: unknown): v is IvaTratamiento =>
@@ -68,13 +71,20 @@ export function normalizarIvaDeProducto(
   throw new ConflictError(MENSAJES.IVA_REQUIERE_APP_NUEVA, 'IVA_REQUIERE_APP_NUEVA')
 }
 
-/** El trigger lanza P0001 con el código en el mensaje; aquí se vuelve el mismo error HTTP. Otros errores pasan. */
+/**
+ * El trigger lanza P0001 con el código en el mensaje (un error de modelo lo trae sólo como texto); aquí se reconoce cuál.
+ * `null` si no es una barrera de IVA. Ninguna llave de MENSAJES es subcadena de otra, así que la búsqueda no se confunde.
+ */
+export function codigoDeBarreraIva(e: unknown): { code: keyof typeof MENSAJES; message: string } | null {
+  const texto = `${(e as any)?.meta?.message ?? ''} ${(e as any)?.message ?? ''}`
+  const code = (Object.keys(MENSAJES) as (keyof typeof MENSAJES)[]).find(c => texto.includes(c))
+  return code ? { code, message: MENSAJES[code] } : null
+}
+
+/** La barrera de IVA se vuelve el mismo error HTTP. Otros errores pasan. */
 export function traducirErrorDeIva(error: unknown): void {
-  const texto = `${(error as any)?.meta?.message ?? ''} ${(error as any)?.message ?? ''}`
-  for (const code of Object.keys(MENSAJES) as (keyof typeof MENSAJES)[]) {
-    if (texto.includes(code)) {
-      if (code === 'IVA_TRATAMIENTO_CONTRADICTORIO') throw new BadRequestError(MENSAJES[code], code)
-      throw new ConflictError(MENSAJES[code], code)
-    }
-  }
+  const barrera = codigoDeBarreraIva(error)
+  if (!barrera) return
+  if (barrera.code === 'IVA_TRATAMIENTO_CONTRADICTORIO') throw new BadRequestError(barrera.message, barrera.code)
+  throw new ConflictError(barrera.message, barrera.code)
 }
