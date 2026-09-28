@@ -39,7 +39,7 @@ export function registerSeatTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'get_venue_downgrade_preview',
-    'Preview what a Pro→Free downgrade would require for a venue you can access. Free allows only 2 active users; if the venue has more, the owner must choose who stays and the rest get DEACTIVATED (not deleted) when the paid period ends. Returns whether a choice is required, the cap, the current active-user count, the max you may keep, and the roster to pick from (the OWNER is flagged isOwner and is always kept). Read-only — schedules nothing. To actually downgrade, use downgrade_venue_to_free.',
+    'Preview what a Pro→Free downgrade would require for a venue you can access. Free allows only 2 active users; if the venue has more, the owner must choose who stays and the rest get DEACTIVATED (not deleted) when the paid period ends; anyone who still does not fit then is deactivated automatically (pending invitations first, then the longest-inactive users). Returns whether a choice is required, the cap, the current active-user count, the max you may keep, and the roster to pick from (the OWNER is flagged isOwner and is always kept). Read-only — schedules nothing. To actually downgrade, use downgrade_venue_to_free.',
     {
       venueId: z.string().describe('Venue to preview the downgrade for (must be in your scope)'),
     },
@@ -52,7 +52,7 @@ export function registerSeatTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'downgrade_venue_to_free',
-    'Schedule a Pro→Free downgrade for a venue you can access, choosing which users stay. The paid plan is canceled at PERIOD END (the venue keeps Pro until then); when it drops to Free, every active user NOT in keepStaffVenueIds is DEACTIVATED (not deleted — reactivated if they return to Pro). Free cap is 2 users; the OWNER must be included and is always kept. Reactivating the plan before period end cancels this. This WRITES — requires billing:subscriptions:manage. Call get_venue_downgrade_preview first to get the roster (staffVenueId values) and whether a choice is required. Returns the updated plan state.',
+    'Schedule a Pro→Free downgrade for a venue you can access, choosing which users stay. The paid plan is canceled at PERIOD END (the venue keeps Pro until then); when it drops to Free, every active user NOT in keepStaffVenueIds is DEACTIVATED (not deleted — reactivated if they return to Pro); with an empty list (accepted only when the venue is already at/under the cap) the current team stays, and anyone who no longer fits when it drops is deactivated automatically, pending invitations first and then the longest-inactive users. Free cap is 2 users; the OWNER must be included and is always kept. Reactivating the plan before period end cancels this. This WRITES — requires billing:subscriptions:manage. Call get_venue_downgrade_preview first to get the roster (staffVenueId values) and whether a choice is required. Returns the updated plan state.',
     {
       venueId: z.string().describe('Venue to downgrade (must be in your scope)'),
       keepStaffVenueIds: z
@@ -71,7 +71,10 @@ export function registerSeatTools(server: McpServer, scope: McpScope) {
           ok: false,
           requiresConfirmation: true,
           change: { label: 'Plan', from: 'PRO', to: 'FREE (al fin del periodo)', keepUsers: keepStaffVenueIds.length },
-          message: `Esto AGENDARÁ la baja del plan PRO → FREE al FIN DEL PERIODO. Mantendrá ${keepStaffVenueIds.length} usuario(s) activo(s); el resto se DESACTIVA (reversible si vuelves a PRO). Revisa el roster con get_venue_downgrade_preview, confirma con el operador, y vuelve a llamar con confirm:true.`,
+          message:
+            keepStaffVenueIds.length === 0
+              ? 'Esto AGENDARÁ la baja del plan PRO → FREE al FIN DEL PERIODO. Sin selección (sólo se acepta si el negocio ya está dentro del tope de usuarios de Gratis; si no, te pedirá elegir): si al pasar a Gratis ya no caben todos, los que sobran se desactivan solos — primero las invitaciones pendientes y luego quien lleve más tiempo sin entrar. Nadie se borra: los usuarios desactivados regresan si vuelves a PRO (las invitaciones revocadas hay que reenviarlas). Confirma con el operador y vuelve a llamar con confirm:true.'
+              : `Esto AGENDARÁ la baja del plan PRO → FREE al FIN DEL PERIODO. Mantendrá ${keepStaffVenueIds.length} usuario(s) activo(s); el resto se DESACTIVA (reversible si vuelves a PRO). Revisa el roster con get_venue_downgrade_preview, confirma con el operador, y vuelve a llamar con confirm:true.`,
         })
       }
       try {

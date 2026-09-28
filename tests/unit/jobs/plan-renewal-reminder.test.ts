@@ -48,6 +48,23 @@ const stripeSub = (daysOut: number, overrides: Record<string, unknown> = {}) => 
   }
 }
 
+// The REAL shape the pinned API (2025-09-30.clover) returns: the period lives ONLY on the item.
+const cloverSub = (daysOut: number) => {
+  const nowSec = Math.floor(Date.now() / 1000)
+  return {
+    status: 'active',
+    items: {
+      data: [
+        {
+          current_period_start: nowSec - 27 * 24 * 3600,
+          current_period_end: nowSec + Math.round(daysOut * 24 * 3600),
+          price: { recurring: { interval: 'month' }, unit_amount: 115884 },
+        },
+      ],
+    },
+  }
+}
+
 describe('PlanRenewalReminderJob.runNow', () => {
   let sendSpy: jest.SpyInstance
 
@@ -198,6 +215,45 @@ describe('PlanRenewalReminderJob.runNow', () => {
     })
 
     await expect(new PlanRenewalReminderJob().runNow()).resolves.toBeUndefined()
+
+    expect(sendSpy).not.toHaveBeenCalled()
+    expect(mockPrisma.venueFeature.update).not.toHaveBeenCalled()
+  })
+
+  // 🔴 Real defect (2026-09-27): the job read the period from the subscription, which the clover API no longer
+  // carries → NaN → NaN slipped past BOTH the window and the dedup checks → a daily email saying "Invalid Date".
+  it('🔴 clover shape (period only on the item): sends with the real renewal date', async () => {
+    mockPrisma.venueFeature.findMany.mockResolvedValue([
+      { id: 'vf1', venueId: 'v1', stripeSubscriptionId: 'sub_1', renewalReminderSentAt: null },
+    ])
+    const sub = cloverSub(3)
+    mockRetrieve.mockResolvedValue(sub)
+
+    await new PlanRenewalReminderJob().runNow()
+
+    expect(sendSpy).toHaveBeenCalledTimes(1)
+    expect(sendSpy.mock.calls[0][1].renewalDate.getTime()).toBe(sub.items.data[0].current_period_end * 1000)
+  })
+
+  it('🔴 clover shape renewing in ~10 days → skip (the window still applies)', async () => {
+    mockPrisma.venueFeature.findMany.mockResolvedValue([
+      { id: 'vf1', venueId: 'v1', stripeSubscriptionId: 'sub_1', renewalReminderSentAt: null },
+    ])
+    mockRetrieve.mockResolvedValue(cloverSub(10))
+
+    await new PlanRenewalReminderJob().runNow()
+
+    expect(sendSpy).not.toHaveBeenCalled()
+    expect(mockPrisma.venueFeature.update).not.toHaveBeenCalled()
+  })
+
+  it('🔴 no period anywhere → skip: never an "Invalid Date" email, no stamp', async () => {
+    mockPrisma.venueFeature.findMany.mockResolvedValue([
+      { id: 'vf1', venueId: 'v1', stripeSubscriptionId: 'sub_1', renewalReminderSentAt: null },
+    ])
+    mockRetrieve.mockResolvedValue({ status: 'active', items: { data: [{ price: { recurring: { interval: 'month' } } }] } })
+
+    await new PlanRenewalReminderJob().runNow()
 
     expect(sendSpy).not.toHaveBeenCalled()
     expect(mockPrisma.venueFeature.update).not.toHaveBeenCalled()

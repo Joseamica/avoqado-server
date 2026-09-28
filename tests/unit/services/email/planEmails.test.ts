@@ -75,6 +75,27 @@ describe('Subscription lifecycle plan emails', () => {
     })
   })
 
+  // 🔴 Real defect (2026-09-27): without Stripe's period end the caller passed the win-back deadline as the access
+  // date. Unknown date → the copy says the paid period ends it, never a made-up date.
+  describe('sendPlanCancellationEmail', () => {
+    const base = { venueName: 'Bar', redeemBy: new Date('2026-10-04T12:00:00Z'), winbackPercentOff: 30, reactivateUrl: 'u' }
+
+    it('with the real period end: states that date', async () => {
+      await emailService.sendPlanCancellationEmail('a@x.com', { ...base, locale: 'es', accessUntil: new Date('2026-10-27T12:00:00Z') })
+      expect(spy.mock.calls[0][0].html).toContain('27 de octubre de 2026')
+    })
+
+    it('🔴 unknown period end: no date, says the paid period ends it (es and en)', async () => {
+      await emailService.sendPlanCancellationEmail('a@x.com', { ...base, locale: 'es', accessUntil: null })
+      await emailService.sendPlanCancellationEmail('a@x.com', { ...base, locale: 'en', accessUntil: null })
+      const [es, en] = spy.mock.calls.map(call => call[0])
+      expect(es.html).toContain('hasta el final del periodo que ya pagaste')
+      expect(es.text).toContain('hasta el final del periodo que ya pagaste')
+      expect(en.html).toContain('until the end of the period you already paid for')
+      expect(en.text).toContain('until the end of the period you already paid for')
+    })
+  })
+
   // --- Task 8: sendPlanWinbackEmail ---
   describe('sendPlanWinbackEmail', () => {
     it('winback: en subject, free-month copy + CTA url, no emoji', async () => {

@@ -21,6 +21,7 @@ jest.mock('../../../src/utils/prismaClient', () => ({
   default: {
     $transaction: jest.fn(async (cb: any) => {
       const tx = {
+        $queryRaw: jest.fn().mockResolvedValue([]),
         invitation: {
           findFirst: jest.fn().mockResolvedValue({
             id: 'inv-1',
@@ -35,7 +36,7 @@ jest.mock('../../../src/utils/prismaClient', () => ({
             organization: { id: 'org-1', name: 'Test Org' },
             venue: { id: 'venue-1', name: 'Test Venue' },
           }),
-          update: jest.fn().mockResolvedValue({}),
+          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
         },
         staff: {
           findUnique: jest.fn().mockResolvedValue(null), // New user

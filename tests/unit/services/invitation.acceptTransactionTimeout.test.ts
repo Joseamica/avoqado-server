@@ -40,9 +40,10 @@ jest.mock('../../../src/utils/prismaClient', () => ({
   default: {
     $transaction: jest.fn(async (cb: any) => {
       const tx = {
+        $queryRaw: jest.fn().mockResolvedValue([]),
         invitation: {
           findFirst: jest.fn().mockResolvedValue(INVITATION),
-          update: jest.fn().mockResolvedValue({}),
+          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
         },
         staff: {
           findUnique: jest.fn().mockResolvedValue(null), // brand-new user

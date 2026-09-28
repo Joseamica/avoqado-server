@@ -72,7 +72,7 @@ async function sendCancellationEmail(venueId: string, subscriptionId: string, ac
     await emailService.sendPlanCancellationEmail(target.email, {
       locale: target.locale,
       venueName: target.venueName,
-      accessUntil: accessUntil ?? redeemBy, // fall back to redeemBy if Stripe period end is unknown
+      accessUntil, // unknown stays unknown: the win-back deadline is NOT when access ends
       redeemBy,
       winbackCode,
       winbackPercentOff: CANCELLATION_WINBACK_PERCENT_OFF,

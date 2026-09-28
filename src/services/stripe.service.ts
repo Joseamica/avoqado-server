@@ -14,6 +14,7 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { Feature, Prisma } from '@prisma/client'
 import { retry, shouldRetryStripeError } from '@/utils/retry'
+import { subscriptionPeriod } from '@/utils/stripeSubscriptionPeriod'
 import { addDays } from 'date-fns'
 import emailService from './email.service'
 import { resolvePlanNotificationTarget } from './access/planNotification.service'
@@ -1661,9 +1662,8 @@ export async function createWinbackPromotionCode(
 
 /**
  * Retrieve a subscription and return the typed summary the plan endpoint needs.
- * Stripe SDK v19 omits current_period_end / cancel_at_period_end on the Subscription
- * type even though the API returns them — cast like the rest of the codebase
- * (see stripe.webhook.service.ts:32, plan-renewal-reminder.job.ts:102).
+ * The period end comes from `subscriptionPeriod`: the pinned API (2025-09-30.clover) carries it
+ * only on the item, never on the subscription.
  *
  * @param subscriptionId - Stripe subscription ID
  */
@@ -1698,7 +1698,6 @@ export async function retrievePlanSubscription(subscriptionId: string): Promise<
     shouldRetry: shouldRetryStripeError,
     context: 'stripe.retrievePlanSubscription',
   })
-  const periodEndRaw = (sub as any).current_period_end as number | undefined
   const createdRaw = (sub as any).created as number | undefined
   const rawInterval = sub.items.data[0]?.price.recurring?.interval
   // SDK v19 may surface a single `discount` object and/or a `discounts` array (see subscriptionHasActiveDiscount).
@@ -1707,7 +1706,7 @@ export async function retrievePlanSubscription(subscriptionId: string): Promise<
   return {
     status: sub.status,
     cancelAtPeriodEnd: Boolean((sub as any).cancel_at_period_end),
-    currentPeriodEnd: periodEndRaw ? new Date(periodEndRaw * 1000) : null,
+    currentPeriodEnd: subscriptionPeriod(sub).end,
     createdAt: createdRaw ? new Date(createdRaw * 1000) : null,
     hasActiveDiscount: Boolean(singleDiscount) || (Array.isArray(discountList) && discountList.length > 0),
     pausedUntil: pausaDe(sub),

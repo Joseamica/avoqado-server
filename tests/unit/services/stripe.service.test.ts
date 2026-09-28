@@ -1056,6 +1056,32 @@ describe('Stripe Service - Comprehensive Tests', () => {
       })
 
       /**
+       * 🔴 Defecto real (27-sep): la API que fija el SDK (2025-09-30.clover) ya NO trae el fin del periodo en la
+       * suscripción, sino en su renglón. Se leía de la suscripción y salía siempre `null`.
+       */
+      it('🔴 lee el fin del periodo del renglón cuando la suscripción no lo trae (forma real de la API clover)', async () => {
+        const periodEndSec = 1893456000 // 2030-01-01T00:00:00Z
+        mockStripeInstance.subscriptions.retrieve.mockResolvedValueOnce({
+          id: 'sub_clover',
+          status: 'active',
+          cancel_at_period_end: false,
+          created: 1735689600,
+          items: {
+            data: [
+              {
+                current_period_start: periodEndSec - 31 * 86400,
+                current_period_end: periodEndSec,
+                price: { recurring: { interval: 'month' }, unit_amount: 115884 },
+              },
+            ],
+          },
+        })
+
+        const r = await stripeService.retrievePlanSubscription('sub_clover')
+        expect(r.currentPeriodEnd).toEqual(new Date(periodEndSec * 1000))
+      })
+
+      /**
        * 🔴 Codex N3 (ronda 4, P1): nadie leía `pause_collection`, y por eso el servidor no sabía que la cobranza ya
        * estaba pausada — pedir la pausa otra vez la EXTENDÍA dos meses más, sin límite, conservando el acceso.
        */

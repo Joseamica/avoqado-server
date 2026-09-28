@@ -4,7 +4,8 @@
  *   - handleSubscriptionUpdated('canceled') for a BASE-PLAN feature → executeSeatReconciliation(venue)
  *   - handleSubscriptionUpdated('canceled') for a NON-base-plan add-on → NOT called
  *   - handleSubscriptionDeleted for a base-plan sub → executeSeatReconciliation(venue)
- *   - a reconciliation failure NEVER throws (must not fail the webhook)
+ *   - a reconciliation failure PROPAGATES: the event stays FAILED and the stripe-webhook-reconciliation cron replays
+ *     it (the handler is idempotent). Swallowing it left the venue over the cap with nobody retrying (Codex, 28-sep).
  *
  * Self-contained prisma + dependency mocks (does not touch the existing webhook test's mocks).
  */
@@ -126,12 +127,12 @@ describe('stripe webhook → seat reconciliation hook', () => {
     expect(execMock).toHaveBeenCalledWith('venue_1')
   })
 
-  it('a reconciliation failure never throws (webhook must not fail)', async () => {
+  it('🔴 a reconciliation failure propagates, so the event stays FAILED and the cron replays it', async () => {
     ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue(baseplanFeature())
     execMock.mockRejectedValueOnce(new Error('boom'))
     ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('canceled')
 
-    await expect(handleSubscriptionUpdated({ id: 'sub_4', status: 'canceled' } as Stripe.Subscription)).resolves.toBe(false)
+    await expect(handleSubscriptionUpdated({ id: 'sub_4', status: 'canceled' } as Stripe.Subscription)).rejects.toThrow('boom')
     expect(execMock).toHaveBeenCalledWith('venue_1')
   })
 })

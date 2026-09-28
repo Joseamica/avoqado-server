@@ -23,6 +23,7 @@ import Stripe from 'stripe'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
+import { subscriptionPeriod } from '@/utils/stripeSubscriptionPeriod'
 import emailService from '@/services/email.service'
 import { resolvePlanNotificationTarget } from '@/services/access/planNotification.service'
 import { scheduleJob } from '../observability/jobContext'
@@ -98,10 +99,15 @@ export class PlanRenewalReminderJob {
 
         if (sub.status !== 'active' && sub.status !== 'trialing') continue
 
-        // Stripe's TS types (v19) omit current_period_* on the Subscription type;
-        // the API returns them. Cast like the rest of the codebase.
-        const periodEndMs = (sub as any).current_period_end * 1000
-        const periodStartMs = (sub as any).current_period_start * 1000
+        // The pinned API carries the period on the item, not the subscription. Without a real date we skip:
+        // NaN would slip past both checks below and email "Invalid Date" every day.
+        const period = subscriptionPeriod(sub)
+        if (!period.start || !period.end) {
+          logger.warn(`renewal reminder: subscription ${vf.stripeSubscriptionId} has no billing period; skipping`)
+          continue
+        }
+        const periodEndMs = period.end.getTime()
+        const periodStartMs = period.start.getTime()
         const daysToRenewal = (periodEndMs - now) / 86400000
 
         // ~3-day window (2-4 days out).

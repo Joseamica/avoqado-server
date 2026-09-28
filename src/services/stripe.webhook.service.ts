@@ -6,6 +6,7 @@
 
 import Stripe from 'stripe'
 import prisma from '@/utils/prismaClient'
+import { subscriptionPeriod } from '@/utils/stripeSubscriptionPeriod'
 import logger from '@/config/logger'
 import { FRONTEND_URL } from '@/config/env'
 import emailService from './email.service'
@@ -30,34 +31,35 @@ import { fulfillPurchase as fulfillCreditPackPurchase } from './dashboard/credit
 import { executeSeatReconciliation, reactivateSeatCapDeactivated } from './dashboard/seatReconciliation.service'
 
 /**
- * Run the pending Pro→Free seat reconciliation for a venue AFTER its paid plan has been
- * downgraded (VenueFeature deactivated). If the owner scheduled a downgrade-to-Free with a
- * "who stays" selection, this deactivates the non-selected StaffVenue rows now that the venue
- * has actually dropped to Free. Idempotent and a no-op when nothing is pending. NEVER throws —
- * a reconciliation failure must not fail the webhook (the venue is already on Free); it's
- * logged and can be re-run (the next webhook delivery, or a manual call, is safe).
+ * Enforce the Free seat cap for a venue AFTER its paid base plan has ended (VenueFeature
+ * deactivated): honours the owner's "who stays" selection and deactivates whoever else doesn't
+ * fit (see executeSeatReconciliation). A no-op when the venue is still unlimited or the team
+ * fits, and idempotent. A failure PROPAGATES: the event stays FAILED and the
+ * stripe-webhook-reconciliation cron replays it (the handler is idempotent). Swallowing it left
+ * the venue over the cap with nobody retrying (Codex, 28-sep).
  */
-async function runSeatReconciliationSafely(venueId: string): Promise<void> {
+async function runSeatReconciliation(venueId: string): Promise<void> {
   try {
     const deactivated = await executeSeatReconciliation(venueId)
     if (deactivated > 0) {
-      logger.info('🪑 Webhook: executed pending seat reconciliation on paid→Free transition', {
+      logger.info('🪑 Webhook: enforced the Free seat cap on the paid→Free transition', {
         venueId,
         deactivated,
       })
     }
   } catch (error) {
-    logger.error('🪑 Webhook: failed to execute seat reconciliation (non-fatal)', {
+    logger.error('🪑 Webhook: seat cap enforcement failed; the event stays FAILED for the cron to replay', {
       venueId,
       error: error instanceof Error ? error.message : 'Unknown error',
     })
+    throw error
   }
 }
 
 /**
  * Re-activate the StaffVenue rows the Free-tier seat cap previously deactivated, AFTER a venue
- * RE-UPGRADES to a paid base plan (PLAN_PRO / PLAN_PREMIUM → unlimited seats). Mirrors
- * {@link runSeatReconciliationSafely}: idempotent, a no-op when nothing was cap-deactivated, and
+ * RE-UPGRADES to a paid base plan (PLAN_PRO / PLAN_PREMIUM → unlimited seats). Idempotent, a
+ * no-op when nothing was cap-deactivated, and (unlike {@link runSeatReconciliation}) it
  * NEVER throws — a reactivation failure must not fail the webhook (the plan activation already
  * succeeded); it's logged and the operation is re-runnable on the next delivery or manually.
  * Call ONLY for base-plan (paid tier) activations, never add-ons.
@@ -213,8 +215,7 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
   const subscriptionId = subscription.id
   const status = subscription.status
   const trialEnd = subscription.trial_end ? new Date(subscription.trial_end * 1000) : null
-  // Type assertion: current_period_end exists in Stripe API but not in type definitions
-  const currentPeriodEnd = (subscription as any).current_period_end ? new Date((subscription as any).current_period_end * 1000) : null
+  const currentPeriodEnd = subscriptionPeriod(subscription).end
 
   logger.info('📥 Webhook: Subscription updated', {
     subscriptionId,
@@ -413,10 +414,9 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
       }
 
       // 🪑 Paid→Free transition: the base plan just ended (cancel-at-period-end reached, or
-      // unpaid). If the owner scheduled a downgrade-to-Free with a "who stays" selection,
-      // execute it now (deactivate the non-kept seats). No-op when nothing is pending.
+      // unpaid). Enforce the Free seat cap now (the owner's selection first, then Shopify's order).
       if ((PAID_PLAN_TIER_CODES as readonly string[]).includes(venueFeature.feature.code)) {
-        await runSeatReconciliationSafely(venueFeature.venueId)
+        await runSeatReconciliation(venueFeature.venueId)
       }
       break
 
@@ -473,13 +473,13 @@ export async function handleSubscriptionDeleted(subscription: Stripe.Subscriptio
     affectedRecords: result.count,
   })
 
-  // 🪑 Paid→Free transition: if a deleted base-plan subscription leaves the venue on Free and
-  // a downgrade "who stays" selection is pending, execute it now. No-op when nothing is pending.
+  // 🪑 Paid→Free transition: a deleted base-plan subscription may leave the venue on Free —
+  // enforce the seat cap (a no-op when another paid plan still covers the venue).
   const baseplanVenueIds = new Set(
     affected.filter(a => (PAID_PLAN_TIER_CODES as readonly string[]).includes(a.feature.code)).map(a => a.venueId),
   )
   for (const venueId of baseplanVenueIds) {
-    await runSeatReconciliationSafely(venueId)
+    await runSeatReconciliation(venueId)
   }
 }
 

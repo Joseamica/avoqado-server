@@ -11,6 +11,9 @@
  *     Venue.pendingSeatReconciliation) but EXECUTED at period end: when the subscription
  *     actually ends, every non-selected StaffVenue is DEACTIVATED (active=false, endDate=now),
  *     never deleted — so it stays reactivatable.
+ *   - Whoever still doesn't fit when the plan ends (people added after choosing, a plain cancel
+ *     with no selection, an ownership change) is deactivated automatically — Shopify's model
+ *     (founder, 2026-09-27): pending invitations first, then the users inactive the longest.
  *   - If the owner REACTIVATES the plan before period end, the pending reconciliation is
  *     cleared (nobody gets deactivated).
  *   - SUPERADMIN seats never count toward the cap and are never deactivated.
@@ -21,13 +24,14 @@
  * planState.reactivatePlan.
  */
 
-import { StaffRole } from '@prisma/client'
+import { InvitationStatus, StaffRole, type Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
 import { FREE_TIER_SEAT_CAP, getVenueSeatCap, getActiveSeatCount, getPendingInvitationCount } from '@/services/access/seatCap.service'
 import { GRANDFATHER_SELECT, resolveGrandfathered } from '@/services/access/grandfather'
 import { cancelPlan, type PlanState } from './planState.service'
+import { writeLegacyActivityAuditTx } from '../activityAudit.service'
 import { retrievePlanSubscription } from '../stripe.service'
 
 /** Persisted shape of Venue.pendingSeatReconciliation. */
@@ -82,8 +86,8 @@ async function findOwnerStaffVenue(venueId: string): Promise<{ id: string; staff
 }
 
 /** All ACTIVE, non-SUPERADMIN StaffVenue rows for the venue — the seats that count against the cap. */
-async function getCapCountingStaffVenues(venueId: string) {
-  return prisma.staffVenue.findMany({
+async function getCapCountingStaffVenues(venueId: string, db: Pick<Prisma.TransactionClient, 'staffVenue'> = prisma) {
+  return db.staffVenue.findMany({
     where: { venueId, active: true, role: { not: StaffRole.SUPERADMIN } },
     select: {
       id: true,
@@ -220,58 +224,108 @@ export async function scheduleDowngradeToFree(venueId: string, keepStaffVenueIds
 }
 
 /**
- * Execute the pending seat reconciliation for a venue (called when the paid plan ACTUALLY
- * ends — Stripe canceled/deleted). For every ACTIVE non-SUPERADMIN StaffVenue NOT in
- * keepStaffVenueIds, set active=false + endDate=now; then clear pendingSeatReconciliation.
+ * Enforce the Free seat cap when the paid plan ACTUALLY ends (Stripe canceled/unpaid/deleted), whichever way it ended:
+ * a downgrade with a "who stays" selection, a downgrade with nothing to choose, or a plain cancel.
  *
- * Idempotent: a no-pending venue is a no-op, and once the field is cleared a second call does
- * nothing. SUPERADMIN seats are never touched. Logs how many seats were deactivated.
+ * Rule (founder, 2026-09-27 — Shopify's model): whoever doesn't fit is deactivated automatically, in a fixed order.
+ *   1. The owner's explicit selection goes first: anyone outside it is deactivated.
+ *   2. The OWNER always stays (ownership can move after choosing; a locked-out owner can't even re-upgrade).
+ *      SUPERADMIN never counts.
+ *   3. Pending invitations lose their seat first (most recent first), then the users inactive the longest
+ *      (never logged in first).
+ * Deactivated = active:false + deactivatedBySeatCap, so a re-upgrade brings exactly them back. Nothing is deleted.
+ * A venue that is still unlimited (another paid plan, or grandfathered) is left alone, pending selection included.
+ * All writes and the audit row go in one transaction; a failure propagates (the webhook event stays FAILED and the
+ * cron replays it). Idempotent: a second run finds the team within the cap and changes nothing.
  *
  * @returns the number of seats deactivated.
  */
 export async function executeSeatReconciliation(venueId: string): Promise<number> {
-  const venue = await prisma.venue.findUnique({
-    where: { id: venueId },
-    select: { pendingSeatReconciliation: true },
+  // Still unlimited (another paid plan covers it, or grandfathered): nothing to enforce. The pending selection is left
+  // alone: a late webhook of an OLDER subscription must not wipe the owner's choice for a later downgrade.
+  const cap = await getVenueSeatCap(venueId)
+  if (cap === null) return 0
+
+  // All or nothing, audit row included: separate writes used to leave people deactivated with no audit row, and the
+  // retry then had nothing left to record. A failure propagates, so the webhook event stays FAILED and the cron replays it.
+  const outcome = await prisma.$transaction(async tx => {
+    // Lock the venue's pending invitations FIRST, before reading the team: a concurrent accept either committed before
+    // this point (its new seat shows up in the read below) or waits for this transaction and then finds its invitation
+    // no longer PENDING. Reading the team first let an accept slip in between, uncounted (Codex, 28-sep).
+    await tx.$queryRaw`SELECT "id" FROM "Invitation" WHERE "venueId" = ${venueId} AND "status" = 'PENDING' FOR UPDATE`
+
+    const venue = await tx.venue.findUnique({ where: { id: venueId }, select: { pendingSeatReconciliation: true } })
+    const pending = venue?.pendingSeatReconciliation as PendingSeatReconciliation | null | undefined
+    const rows = await getCapCountingStaffVenues(venueId, tx)
+    const keep = Array.isArray(pending?.keepStaffVenueIds) ? pending.keepStaffVenueIds : []
+    const owners = rows.filter(r => r.role === StaffRole.OWNER)
+    const others = rows.filter(r => r.role !== StaffRole.OWNER)
+    const outsideSelection = keep.length > 0 ? others.filter(r => !keep.includes(r.id)) : []
+    const candidates = keep.length > 0 ? others.filter(r => keep.includes(r.id)) : others
+    // Most recently active first, never-logged-in last; the id breaks ties so the outcome never depends on row order.
+    const lastSeen = (r: (typeof rows)[number]) => r.staff.lastLoginAt?.getTime() ?? -Infinity
+    const ranked = [...candidates].sort((a, b) => lastSeen(b) - lastSeen(a) || a.id.localeCompare(b.id))
+    const room = Math.max(0, cap - owners.length)
+    const toDeactivate = [...outsideSelection, ...ranked.slice(room)].map(r => r.id)
+
+    let deactivated = 0
+    if (toDeactivate.length > 0) {
+      const result = await tx.staffVenue.updateMany({
+        where: { venueId, active: true, id: { in: toDeactivate }, role: { notIn: [StaffRole.SUPERADMIN, StaffRole.OWNER] } },
+        // Mark these rows as "the seat cap turned this off" so a later RE-UPGRADE to Pro/Premium
+        // can auto-reactivate EXACTLY them (reactivateSeatCapDeactivated) — never people who were
+        // fired/quit (those rows keep deactivatedBySeatCap=false).
+        // DELIBERATE: pin is KEPT here (every baja path clears it instead) — these people
+        // didn't leave; on re-upgrade they come back and must keep their TPV PIN. If the
+        // venue reassigns the PIN meanwhile, the grant path frees it from this inactive row.
+        // (Allowlisted in tests/unit/services/staffvenue-baja-libera-pin.test.ts.)
+        data: { active: false, endDate: new Date(), deactivatedBySeatCap: true },
+      })
+      deactivated = result.count
+    }
+
+    // Pending invitations lose their seat first: the oldest keep whatever room the active team left, the rest are revoked.
+    const seatsLeft = room - Math.min(room, ranked.length)
+    const pendingInvites = {
+      venueId,
+      status: InvitationStatus.PENDING,
+      expiresAt: { gt: new Date() },
+      role: { not: StaffRole.SUPERADMIN },
+    }
+    const stillFit =
+      seatsLeft > 0
+        ? await tx.invitation.findMany({
+            where: pendingInvites,
+            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+            take: seatsLeft,
+            select: { id: true },
+          })
+        : []
+    const revoked = await tx.invitation.updateMany({
+      where: stillFit.length > 0 ? { ...pendingInvites, id: { notIn: stillFit.map(i => i.id) } } : pendingInvites,
+      data: { status: InvitationStatus.REVOKED },
+    })
+
+    // Cleared once handled, so a re-delivered webhook (or a manual re-run) is a safe no-op.
+    if (pending) await tx.venue.update({ where: { id: venueId }, data: { pendingSeatReconciliation: null as unknown as object } })
+
+    if (deactivated > 0 || revoked.count > 0) {
+      await writeLegacyActivityAuditTx(tx, {
+        venueId,
+        action: 'SEAT_CAP_ENFORCED',
+        entity: 'Venue',
+        entityId: venueId,
+        data: { cap, deactivatedStaffVenueIds: toDeactivate, revokedInvitations: revoked.count, explicitSelection: keep.length > 0 },
+      })
+    }
+    return { deactivated, revokedInvitations: revoked.count, explicitSelection: keep.length > 0 }
   })
 
-  const pending = venue?.pendingSeatReconciliation as PendingSeatReconciliation | null | undefined
-  if (!pending || !Array.isArray(pending.keepStaffVenueIds)) {
-    // Nothing pending → idempotent no-op (already executed, or never scheduled, or empty skip).
-    return 0
+  if (outcome.deactivated > 0 || outcome.revokedInvitations > 0) {
+    logger.info('🪑 Free seat cap enforced on the paid→Free transition', { venueId, cap, ...outcome })
   }
 
-  const keep = pending.keepStaffVenueIds
-  const result = await prisma.staffVenue.updateMany({
-    where: {
-      venueId,
-      active: true,
-      role: { not: StaffRole.SUPERADMIN }, // never deactivate platform support
-      id: { notIn: keep.length > 0 ? keep : ['__none__'] }, // notIn [] matches everything in Prisma — guard with a sentinel
-    },
-    // Mark these rows as "the seat cap turned this off" so a later RE-UPGRADE to Pro/Premium
-    // can auto-reactivate EXACTLY them (reactivateSeatCapDeactivated) — never people who were
-    // fired/quit (those rows keep deactivatedBySeatCap=false).
-    // DELIBERATE: pin is KEPT here (every baja path clears it instead) — these people
-    // didn't leave; on re-upgrade they come back and must keep their TPV PIN. If the
-    // venue reassigns the PIN meanwhile, the grant path frees it from this inactive row.
-    // (Allowlisted in tests/unit/services/staffvenue-baja-libera-pin.test.ts.)
-    data: { active: false, endDate: new Date(), deactivatedBySeatCap: true },
-  })
-
-  // Clear the field so a re-delivered webhook (or a manual re-run) is a safe no-op.
-  await prisma.venue.update({
-    where: { id: venueId },
-    data: { pendingSeatReconciliation: null as unknown as object },
-  })
-
-  logger.info('🪑 Seat reconciliation executed: deactivated non-kept seats', {
-    venueId,
-    deactivated: result.count,
-    kept: keep.length,
-  })
-
-  return result.count
+  return outcome.deactivated
 }
 
 /**
