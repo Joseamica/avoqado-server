@@ -250,12 +250,13 @@ export async function bumpKdsOrdersBatch(venueId: string, ids: string[]): Promis
 /**
  * La comanda con lo que depende de su VENTA, calculado en UN solo sitio (el tablero y la ruta
  * «no tengo este artículo» devuelven la misma comanda y no pueden contestar distinto).
- * `type === 'DELIVERY'` es lo que separa "llegó solo" de "lo mandó un mesero": sólo lo primero
+ * Un reparto de PROVEEDOR (`conProveedor`) es lo que separa "llegó solo" de "lo mandó un mesero": sólo lo primero
  * necesita que alguien reclame la impresión, y sólo un reparto PENDING necesita que lo acepten.
  * Un reparto trae además sus capacidades (spec «Apps»), opcionales y ausentes fuera de reparto.
  */
 export function formatKdsOrderConVenta(o: any, venta?: VentaDeComanda | null): KdsOrderResponse {
-  const esReparto = venta?.type === 'DELIVERY'
+  // Sólo el reparto de PROVEEDOR llegó solo: una «Entrega» marcada en la caja ya salió en papel al cobrarla.
+  const esReparto = venta?.type === 'DELIVERY' && venta.conProveedor
   const base = formatKdsOrder({ ...o, esDeMarketplace: esReparto }, esReparto && venta?.status === 'PENDING')
   return venta ? anexarCapacidades(base, o, venta) : base
 }
