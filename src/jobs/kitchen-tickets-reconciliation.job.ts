@@ -44,7 +44,15 @@ export class KitchenTicketsReconciliationJob {
       scheduleJob(
         'kitchen-tickets-reconciliation',
         DATABASE_JOB_SCHEDULES.kitchenTicketsReconciliation,
-        () => void this.runNow().catch(error => logger.error('Kitchen tickets reconciliation sweep failed', { error })),
+        // Devuelve su promesa (nueva en cada tick, nunca rechaza) para que el aviso de «hilo retenido» vea este
+        // barrido en `jobsEnVuelo`; descartarla con `void` lo dejaba invisible (jobContextRegistro.test.ts).
+        async () => {
+          try {
+            await this.runNow()
+          } catch (error) {
+            logger.error('Kitchen tickets reconciliation sweep failed', { error })
+          }
+        },
         null,
         false,
         'America/Mexico_City',
