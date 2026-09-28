@@ -318,7 +318,8 @@ describe('money-integrity-watchdog · ventana de alerta de 24 h', () => {
     const { counts, details } = buildWatchdogSql(T)
     for (const sql of [counts, details]) {
       expect(sql).toContain(`TIMESTAMP '2026-09-27 12:17:00.000'`)
-      expect(sql).not.toMatch(/\$\d/)
+      // Ni un bind de fecha junto al corte (los `$0`/`$74.75` de los comentarios son precios).
+      expect(sql).not.toMatch(/>=\s*\$\d/)
     }
   })
 
@@ -330,7 +331,7 @@ describe('money-integrity-watchdog · ventana de alerta de 24 h', () => {
   it('🔴 fail-open: una violación que no se puede fechar cuenta como reciente y grita', () => {
     const { details } = buildWatchdogSql(T)
     expect(details).toMatch(/LEFT JOIN "Order" o ON o\.id = v\.order_id/)
-    expect(details).toMatch(/COALESCE\([\s\S]*, TRUE\) AS reciente/)
+    expect(details).toMatch(/COALESCE\([\s\S]*,\s*TRUE\) AS reciente/)
   })
 
   it('🔴 el detalle sólo trae lo reciente (y el aviso histórico de inventario, que va aparte)', () => {
