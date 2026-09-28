@@ -289,12 +289,6 @@ describe('carreras con las funciones REALES: bloqueador, espera probada en pg_st
         /40001/.test(JSON.stringify({ c: (e as any)?.code, m: (e as any)?.meta, msg: (e as any)?.message })),
     )
   const noEs40P01 = (r: unknown) => expect(JSON.stringify(r ?? null)).not.toMatch(/40P01|deadlock/i)
-  /** Ruling PF9: antes de la Tarea 4 la publicación del orden 2 puede terminar o fallar por serialización, nunca otra cosa. */
-  const terminaOConflictoDeSerializacion = (r: unknown) => {
-    if ((r as { ok?: { state?: string } })?.ok?.state === 'APPLIED') return
-    const e = r as { code?: string; meta?: { code?: string } }
-    expect(e.code === 'P2034' || e.code === '40001' || (e.code === 'P2010' && e.meta?.code === '40001')).toBe(true)
-  }
 
   // Los cuatro caminos que escriben IVA. Una edición espera la fila del producto (cerco negocio → producto); un alta, la del
   // negocio (su `FOR SHARE` tras la organización). En los dos casos ya tiene la organización: el posteo espera detrás.
@@ -541,7 +535,7 @@ describe('carreras con las funciones REALES: bloqueador, espera probada en pg_st
     expect(c).toMatchObject({ ok: { ivaTratamiento: 'IVA_0' } })
   })
 
-  it('(e) orden 2: el cambio retiene Organization y la publicación del MISMO producto espera; el cambio termina, el catálogo nunca 40P01', async () => {
+  it('(e) orden 2: el cambio retiene Organization y la publicación del MISMO producto espera; el cambio termina, el catálogo reintenta su 40001 y termina, nunca 40P01', async () => {
     const { f, confirmar } = await publicacionLista('iva-inversa-e2')
     // La publicación se deja formada JUSTO antes de Organization (su candado de catálogo retenido) para que el cambio, con sus
     // 5 s de transacción, no pague la preparación de la publicación.
@@ -576,6 +570,9 @@ describe('carreras con las funciones REALES: bloqueador, espera probada en pg_st
     noEs40P01(p)
     noEs40P01(c)
     expect(c).toMatchObject({ ok: { ivaTratamiento: 'IVA_0' } })
-    terminaOConflictoDeSerializacion(p)
+    // Ruling T4-R2 (de PF9): el cambio marcó la organización después de la foto de la publicación ⇒ 40001. Con el reintento de
+    // R12 ya no sale: la aplicación se repite, encuentra el producto ya en IVA_0 y su vista previa vieja ⇒ STALE_PREVIEW.
+    expect(p).toMatchObject({ statusCode: 409, code: 'STALE_PREVIEW' })
+    expect(huboUn40001()).toBe(true)
   })
 })

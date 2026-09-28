@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client'
 import { CronJob } from 'cron'
 import logger from '../config/logger'
 import { acquireCatalogPublicationAttemptLockTx } from '../services/master-catalog/catalogPublicationAttempt.service'
+import { failCatalogPublicationAttemptTx } from '../services/master-catalog/catalogPublicationFailure.service'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
@@ -104,6 +105,7 @@ export class CatalogPublicationWatchdogJob {
 
   private async failExpired(candidate: ExpiredAttempt, now: Date): Promise<boolean> {
     if (!candidate.attemptId || !candidate.leaseExpiresAt) return false
+    const attemptId = candidate.attemptId
     const leaseExpiresAt = candidate.leaseExpiresAt
     return this.dependencies.prisma.$transaction(
       async tx => {
@@ -122,39 +124,16 @@ export class CatalogPublicationWatchdogJob {
           select: { id: true },
         })
         if (!live || leaseExpiresAt.getTime() > now.getTime()) return false
-        const terminal = {
-          state: 'FAILED' as const,
-          attemptId: null,
-          leaseExpiresAt: null,
-          heartbeatAt: null,
+        return failCatalogPublicationAttemptTx(tx, {
+          organizationId: candidate.organizationId,
+          batchId: candidate.id,
+          operation: candidate.operation,
+          attemptId,
+          leaseExpiresAt,
           failureCode: FAILURE_CODE,
           failureMessage: 'El intento de publicación expiró.',
-          completedAt: now,
-        }
-        const batch = await tx.catalogPublicationBatch.updateMany({
-          where: {
-            id: candidate.id,
-            organizationId: candidate.organizationId,
-            state: 'APPLYING',
-            attemptId: candidate.attemptId,
-            leaseExpiresAt: candidate.leaseExpiresAt,
-          },
-          data: terminal,
+          now,
         })
-        const record = await tx.catalogIdempotencyRecord.updateMany({
-          where: {
-            organizationId: candidate.organizationId,
-            operation: candidate.operation,
-            resourceType: 'CatalogPublicationBatch',
-            resourceId: candidate.id,
-            state: 'APPLYING',
-            attemptId: candidate.attemptId,
-            leaseExpiresAt: candidate.leaseExpiresAt,
-          },
-          data: terminal,
-        })
-        if (batch.count !== 1 || record.count !== 1) throw new Error('CATALOG_PUBLICATION_WATCHDOG_DUAL_CAS_INVALID')
-        return true
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 90_000 },
     )

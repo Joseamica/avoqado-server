@@ -468,3 +468,113 @@ describe('catalogPublicationConfirmation.service', () => {
     expect(contradictory.dependencies.persistTx).not.toHaveBeenCalled()
   })
 })
+
+describe('R12 · IVA por producto: la aplicación reintenta el choque y la barrera de IVA termina el intento', () => {
+  const lease = new Date(NOW.getTime() + 120_000)
+  const choque = () => Object.assign(new Error('could not serialize access'), { code: 'P2010', meta: { code: '40001' } })
+  const barrera = () =>
+    Object.assign(new Error('Raw query failed'), {
+      code: 'P2010',
+      meta: { code: 'P0001', message: 'ERROR: IVA_POR_PRODUCTO_APAGADO' },
+    })
+  const cierreTx = (count: number) => ({
+    catalogPublicationBatch: { updateMany: jest.fn().mockResolvedValue({ count }) },
+    catalogIdempotencyRecord: { updateMany: jest.fn().mockResolvedValue({ count }) },
+  })
+  /** Reserva, y después cada paso: un error = esa transacción falla; un objeto = el callback corre sobre él. */
+  function secuencia(h: ReturnType<typeof harness>, ...pasos: Array<Error | object>) {
+    h.prisma.$transaction.mockReset().mockImplementationOnce(async (callback: (tx: unknown) => unknown) => callback(h.reserveTx))
+    for (const paso of pasos) {
+      if (paso instanceof Error) h.prisma.$transaction.mockRejectedValueOnce(paso)
+      else h.prisma.$transaction.mockImplementationOnce(async (callback: (tx: unknown) => unknown) => callback(paso))
+    }
+  }
+
+  it('reintenta la aplicación tras un 40001 mientras la reserva sigue vigente', async () => {
+    const h = harness()
+    secuencia(h, choque(), h.applyTx)
+
+    await expect(h.service.confirm(context, confirmInput)).resolves.toMatchObject({ state: 'APPLIED' })
+    expect(h.prisma.$transaction).toHaveBeenCalledTimes(3)
+  })
+
+  it.each([
+    ['un 40P01 (queda al watchdog, R10)', () => [Object.assign(new Error('deadlock'), { code: 'P2010', meta: { code: '40P01' } })], 2],
+    ['tres choques seguidos', () => [choque(), choque(), choque()], 4],
+  ])('no reintenta %s: sale el error de hoy y la reserva queda al watchdog', async (_caso, errores, transacciones) => {
+    const h = harness()
+    const pasos = errores()
+    secuencia(h, ...pasos)
+
+    await expect(h.service.confirm(context, confirmInput)).rejects.toBe(pasos[pasos.length - 1])
+    expect(h.prisma.$transaction).toHaveBeenCalledTimes(transacciones)
+  })
+
+  it('no reintenta un choque si la reserva ya venció', async () => {
+    const h = harness()
+    const primero = choque()
+    secuencia(h, primero)
+    h.dependencies.now
+      .mockReset()
+      .mockReturnValueOnce(NOW)
+      .mockReturnValue(new Date(lease.getTime() + 1))
+
+    await expect(h.service.confirm(context, confirmInput)).rejects.toBe(primero)
+    expect(h.prisma.$transaction).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    ['cambia su fila del lote y del registro', 1],
+    ['el watchdog ya lo terminó (0/0 filas): benigno', 0],
+  ])('la barrera de IVA CONFIRMA APPLYING → FAILED con su código y sólo después responde 409: %s', async (_caso, filas) => {
+    const h = harness()
+    const cierre = cierreTx(filas)
+    let cierreConfirmado = false
+    h.prisma.$transaction.mockReset().mockImplementationOnce(async (callback: (tx: unknown) => unknown) => callback(h.reserveTx))
+    h.prisma.$transaction.mockRejectedValueOnce(barrera())
+    h.prisma.$transaction.mockImplementationOnce(async (callback: (tx: unknown) => unknown, options: unknown) => {
+      const result = await callback(cierre)
+      expect(options).toMatchObject({ isolationLevel: 'Serializable', timeout: 90_000, maxWait: 5_000 })
+      cierreConfirmado = true
+      return result
+    })
+
+    const error = await h.service.confirm(context, confirmInput).then(
+      () => null,
+      (e: unknown) => e,
+    )
+
+    expect(error).toMatchObject({
+      statusCode: 409,
+      code: 'IVA_POR_PRODUCTO_APAGADO',
+      message: expect.stringContaining('El IVA por producto no está activado'),
+    })
+    expect(cierreConfirmado).toBe(true)
+    expect(h.prisma.$transaction).toHaveBeenCalledTimes(3)
+    expect(h.dependencies.acquireAttemptLockTx).toHaveBeenLastCalledWith(cierre, 'org-1', 'batch-1')
+    const vivo = { state: 'APPLYING', attemptId: 'attempt-1', leaseExpiresAt: lease }
+    const terminal = expect.objectContaining({
+      state: 'FAILED',
+      attemptId: null,
+      leaseExpiresAt: null,
+      heartbeatAt: null,
+      failureCode: 'IVA_POR_PRODUCTO_APAGADO',
+      failureMessage: expect.stringContaining('El IVA por producto no está activado'),
+      completedAt: NOW,
+    })
+    expect(cierre.catalogPublicationBatch.updateMany).toHaveBeenCalledWith({
+      where: { id: 'batch-1', organizationId: 'org-1', ...vivo },
+      data: terminal,
+    })
+    expect(cierre.catalogIdempotencyRecord.updateMany).toHaveBeenCalledWith({
+      where: {
+        organizationId: 'org-1',
+        operation: 'CATALOG_FIELDS_PUBLISH',
+        resourceType: 'CatalogPublicationBatch',
+        resourceId: 'batch-1',
+        ...vivo,
+      },
+      data: terminal,
+    })
+  })
+})
