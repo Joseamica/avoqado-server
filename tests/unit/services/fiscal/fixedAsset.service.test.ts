@@ -4,7 +4,7 @@
  */
 import { Prisma } from '@prisma/client'
 
-import { BadRequestError, NotFoundError } from '../../../../src/errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError } from '../../../../src/errors/AppError'
 
 jest.mock('../../../../src/utils/prismaClient', () => ({
   __esModule: true,
@@ -332,6 +332,39 @@ describe('póliza de BAJA al libro', () => {
     expect(r.ledgerPosted).toBe(false)
     expect(r.ledgerReason).toBe('noAcquisitionEntry')
     expect(mPost).not.toHaveBeenCalled()
+  })
+})
+
+// IVA por producto, plan 4: con IVA mixto la póliza del activo se pausa y el MOTIVO viaja al que llamó (no se
+// esconde como `reason: 'error'`, que el MCP leía como «re-siembra el catálogo»).
+describe('pólizas del activo con la contabilidad pausada por IVA mixto', () => {
+  const MOTIVO =
+    'La contabilidad de Avoqado todavía no maneja ventas con IVA distinto de 16 %. Como esta organización ya tuvo productos con otra tasa, las pólizas y el cierre de periodo están pausados. Escríbenos a hola@avoqado.io si lo necesitas.'
+  const pausa = () => new ConflictError(MOTIVO, 'CONTABILIDAD_IVA_MIXTO')
+
+  it('alta: el activo se registra igual y responde ledgerReason ivaMixto con el motivo', async () => {
+    mPost.mockRejectedValue(pausa())
+    const r = await registerFixedAsset('v1', BASE, 'staff1')
+    expect(r).toMatchObject({ id: 'fa1', ledgerPosted: false, ledgerReason: 'ivaMixto', ledgerMessage: MOTIVO })
+    expect(p.fixedAsset.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('baja: el activo se da de baja igual y responde ledgerReason ivaMixto con el motivo', async () => {
+    p.fixedAsset.findFirst.mockResolvedValue(assetRow())
+    p.fixedAssetDepreciation.aggregate.mockResolvedValue({ _sum: { depreciationCents: 12_000_00 } })
+    p.fixedAsset.update.mockImplementation(({ data }: any) => Promise.resolve(assetRow(data)))
+    p.journalEntry.findUnique.mockResolvedValue({ id: 'je-alta' })
+    mPost.mockRejectedValue(pausa())
+    const r = await disposeFixedAsset('v1', 'fa1', { disposalDate: '2026-06-01', proceedsCents: 20_000_00 }, 'staff1')
+    expect(r).toMatchObject({ ledgerPosted: false, ledgerReason: 'ivaMixto', ledgerMessage: MOTIVO })
+    expect(r.asset.status).toBe('DISPOSED')
+  })
+
+  it('cualquier otro fallo del posteo sigue siendo reason error, sin mensaje', async () => {
+    mPost.mockRejectedValue(new Error('base caída'))
+    const r = await registerFixedAsset('v1', BASE, 'staff1')
+    expect(r.ledgerReason).toBe('error')
+    expect(r).not.toHaveProperty('ledgerMessage')
   })
 })
 

@@ -8,7 +8,12 @@
  *    un reembolso MANUAL del dashboard sigue fuera, como hoy;
  *  - venta por artículo: el renglón retirado no cuenta, y la fila REFUND no duplica los que quedan;
  *  - `lineRevenue` (la definición compartida de lo que ganó una línea): una línea retirada vale 0;
- *  - estado de resultados: el IVA de la compensación es el MISMO que posteó la póliza.
+ *  - estado de resultados: el IVA de la compensación es el MISMO que postearía la póliza.
+ *
+ * IVA por producto, plan 4 (Ruling R9): el Pan al 0 % marca la organización y la contabilidad se PAUSA (409, cero
+ * pólizas). El IVA que las pólizas llevarían se calcula en las unitarias de los constructores de líneas
+ * (`tests/unit/services/autoPosting.service.test.ts`, «R9 · reparto por tasa»): 4191 centavos. Aquí el estado de
+ * resultados tiene que dar esa MISMA cifra.
  */
 import prisma from '@/utils/prismaClient'
 import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
@@ -22,7 +27,7 @@ import { lineGrossSql, lineRevenueSql, lineUnitsSql } from '@/services/dashboard
 import { getIncomeStatement } from '@/services/dashboard/accounting.dashboard.service'
 import { generatePoliciesForVenue } from '@/services/fiscal/autoPosting.service'
 import { seedBaseChart } from '@/services/fiscal/chartOfAccounts.service'
-import { getMappings, seedDefaultMappings } from '@/services/fiscal/accountMapping.service'
+import { seedDefaultMappings } from '@/services/fiscal/accountMapping.service'
 import { fiscalByRateCents } from '@/services/fiscal/deliveryFiscalDelta'
 import { getExtendedMetrics } from '@/services/dashboard/generalStats.dashboard.service'
 import { getPMIXReport } from '@/services/dashboard/report.service'
@@ -53,7 +58,6 @@ describe('lectores con un renglón retirado por el proveedor', () => {
   let ordenRetiro: string
   let tenderRetiro: string
   let tenderManual: string
-  let ivaCuenta: string
   let producto: { vivo: string; retirado: string }
 
   beforeAll(async () => {
@@ -74,8 +78,6 @@ describe('lectores con un renglón retirado por el proveedor', () => {
     await prisma.product.update({ where: { id: pan.id }, data: { taxRate: new Prisma.Decimal('0') } })
     await seedBaseChart(venueId, { staffId })
     await seedDefaultMappings(venueId, { staffId })
-    const { mappings } = await getMappings(venueId)
-    ivaCuenta = mappings.find(m => m.movementType === 'IVA_OUTPUT')!.account!.id
 
     // A · pedido de reparto de $200 (Latte $150 al 16 % + Pan de muerto $50 al 0 %) cobrado con un
     // tipo de pago al 30 %. Uber retira el Pan: renglón con removedAt + REFUND compensatorio de $50.
@@ -135,8 +137,6 @@ describe('lectores con un renglón retirado por el proveedor', () => {
     const b = await sembrarCobro({ venueId, staffId, saleCents: 20000, commissionPercent: 30 })
     tenderManual = b.tender!.id
     await issueRefund({ venueId, paymentId: b.pago.id, amount: 5000, reason: 'OTHER', staffId })
-
-    await generatePoliciesForVenue(venueId)
   })
 
   afterAll(async () => {
@@ -182,17 +182,19 @@ describe('lectores con un renglón retirado por el proveedor', () => {
     expect(fila).toEqual({ unidades: 1, bruto: 150, neto: 150 })
   })
 
-  it('estado de resultados: el IVA de la compensacion es el que posteo la poliza', async () => {
-    const lineas = await prisma.journalLine.findMany({
-      where: { ledgerAccountId: ivaCuenta, journalEntry: { organizationId, rfc } },
-      select: { debitCents: true, creditCents: true },
-    })
-    const ivaDelDiario = lineas.reduce((s, l) => s + l.creditCents - l.debitCents, 0)
+  it('la organización marcada (Pan al 0 %) no postea: 409 CONTABILIDAD_IVA_MIXTO y cero pólizas', async () => {
+    await expect(generatePoliciesForVenue(venueId)).rejects.toMatchObject({ statusCode: 409, code: 'CONTABILIDAD_IVA_MIXTO' })
+    expect(await prisma.journalEntry.count({ where: { organizationId } })).toBe(0)
+  })
+
+  it('estado de resultados: el IVA de la compensacion es el que postearia la poliza (4191, de los constructores)', async () => {
+    // Venta A 2122 + venta B 2759 − reembolso B 690; retirar el Pan al 0 % no devuelve IVA.
+    const ivaDeLasPolizas = 4191
     const e = await getIncomeStatement(venueId, { from: ayer, to: manana })
-    expect(e.revenue.ivaCents).toBe(ivaDelDiario)
-    expect(e.fiscalRevenue.ivaCents).toBe(ivaDelDiario)
-    // Todo el IVA es del 16 % (el Pan era 0 % y B no tiene renglones): su única llave es el diario.
-    expect(e.revenue.taxByRate).toEqual({ '0.16': ivaDelDiario })
+    expect(e.revenue.ivaCents).toBe(ivaDeLasPolizas)
+    expect(e.fiscalRevenue.ivaCents).toBe(ivaDeLasPolizas)
+    // Todo el IVA es del 16 % (el Pan era 0 % y B no tiene renglones).
+    expect(e.revenue.taxByRate).toEqual({ '0.16': ivaDeLasPolizas })
   })
 
   // ── Cada familia de consultas por renglón: el retirado no aporta unidades, costo, descuento ni venta ──

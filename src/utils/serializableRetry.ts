@@ -28,6 +28,14 @@ export function isRetryableDbError(error: unknown): boolean {
   return value.code === 'P2010' && RETRY_SQLSTATES.has(nestedCode(value) ?? '')
 }
 
+/** Bloqueo mutuo (40P01), directo o envuelto en P2010. Quien lo reintente lo decide él; aquí no se reintenta. */
+export function isDeadlockError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const value = error as Record<string, unknown>
+  if (value.code === '40P01') return true
+  return value.code === 'P2010' && nestedCode(value) === '40P01'
+}
+
 function validateOptions(timeoutMs: number, maxRetries: number, baseDelayMs: number): void {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new RangeError('timeoutMs must be greater than zero')
   if (!Number.isInteger(maxRetries) || maxRetries < 1) throw new RangeError('maxRetries must be a positive integer')

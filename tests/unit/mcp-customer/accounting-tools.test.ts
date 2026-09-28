@@ -23,6 +23,8 @@ const mockCreateExpense = jest.fn()
 const mockListExpenses = jest.fn()
 const mockGenExpensePolicies = jest.fn()
 const mockGetDiot = jest.fn()
+const mockRegisterFixedAsset = jest.fn()
+const mockDisposeFixedAsset = jest.fn()
 
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({ venueFilter: jest.fn(), requirePermission: (...a: unknown[]) => mockRequirePermission(...(a as [])) }),
@@ -70,6 +72,13 @@ jest.mock('@/services/dashboard/accounting.dashboard.service', () => ({
   getBankAndCashSummary: jest.fn(),
 }))
 jest.mock('@/services/dashboard/bankReconciliation.service', () => ({ listStatements: jest.fn() }))
+jest.mock('@/services/fiscal/fixedAsset.service', () => ({
+  registerFixedAsset: (...a: unknown[]) => mockRegisterFixedAsset(...(a as [])),
+  disposeFixedAsset: (...a: unknown[]) => mockDisposeFixedAsset(...(a as [])),
+  listAssetTypes: jest.fn(() => []),
+  listFixedAssets: jest.fn(),
+  updateFixedAsset: jest.fn(),
+}))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
 const scope = { staffId: 'staff-1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope
@@ -714,5 +723,56 @@ describe('diot (read) — gated CFDI + accounting:read', () => {
     const out = parse(await call('diot', { venueId: 'v1' }))
     expect(out.planRequired).toBe(true)
     expect(mockGetDiot).not.toHaveBeenCalled()
+  })
+})
+
+// IVA por producto, plan 4: con IVA mixto la póliza del activo se pausa. La nota al operador dice ESE motivo; la de
+// «re-siembra el catálogo» sólo aplica cuando de verdad faltan cuentas.
+describe('activos fijos con la contabilidad pausada por IVA mixto', () => {
+  const MOTIVO =
+    'La contabilidad de Avoqado todavía no maneja ventas con IVA distinto de 16 %. Como esta organización ya tuvo productos con otra tasa, las pólizas y el cierre de periodo están pausados. Escríbenos a hola@avoqado.io si lo necesitas.'
+  const activo = (extra: Record<string, unknown>) => ({
+    id: 'fa1',
+    description: 'Laptop Dell',
+    assetTypeLabel: 'Equipo de cómputo',
+    moiCents: 30_000_00,
+    depreciableBaseCents: 30_000_00,
+    annualRate: 0.3,
+    ...extra,
+  })
+  const alta = { venueId: 'v1', descripcion: 'Laptop Dell', tipo: 'EQUIPO_COMPUTO', monto: 30_000, fechaAdquisicion: '2026-06-15' }
+
+  it('register_fixed_asset: la nota dice el motivo, no «re-siembra el catálogo»', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    mockRegisterFixedAsset.mockResolvedValue(activo({ ledgerPosted: false, ledgerReason: 'ivaMixto', ledgerMessage: MOTIVO }))
+    const out = parse(await call('register_fixed_asset', alta))
+    expect(out).toMatchObject({ ok: true, polizaAlta: false })
+    expect(out.nota).toContain(MOTIVO)
+    expect(out.nota).not.toMatch(/siembra/i)
+  })
+
+  it('register_fixed_asset sin cuentas sigue sugiriendo re-sembrar el catálogo (regresión)', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    mockRegisterFixedAsset.mockResolvedValue(activo({ ledgerPosted: false, ledgerReason: 'missingAccounts' }))
+    const out = parse(await call('register_fixed_asset', alta))
+    expect(out.nota).toMatch(/re-siembra el catálogo/)
+  })
+
+  it('dispose_fixed_asset: la nota conserva el resultado contable y dice el motivo de la pausa', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    mockDisposeFixedAsset.mockResolvedValue({
+      asset: activo({ status: 'DISPOSED' }),
+      accumulatedDepreciationCents: 12_000_00,
+      bookValueCents: 18_000_00,
+      proceedsCents: 20_000_00,
+      gainLossCents: 2_000_00,
+      ledgerPosted: false,
+      ledgerReason: 'ivaMixto',
+      ledgerMessage: MOTIVO,
+    })
+    const out = parse(await call('dispose_fixed_asset', { venueId: 'v1', assetId: 'fa1', fechaBaja: '2026-06-30', precioVenta: 20_000 }))
+    expect(out).toMatchObject({ ok: true, polizaBaja: false, gananciaOPerdida: 2_000 })
+    expect(out.nota).toContain('Ganancia contable')
+    expect(out.nota).toContain(MOTIVO)
   })
 })

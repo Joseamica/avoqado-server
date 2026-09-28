@@ -4,6 +4,7 @@ import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
 import { resolveScopeOrNull } from './chartOfAccounts.service'
+import { conReintentoContable, exigirContabilidadDisponible } from './exclusionContable'
 
 /**
  * Candado de periodo contable (Capa B fiscal). Un periodo CERRADO no admite pólizas nuevas ni edición
@@ -52,30 +53,31 @@ export async function closePeriod(
   // Serializable: si una póliza se está posteando concurrentemente en este periodo (su tx también lee
   // el candado bajo Serializable), SSI detecta el conflicto read-write y aborta una de las dos — el
   // posteo reintenta, re-lee CLOSED y se rechaza. Sin esto, una póliza podría colarse al cerrar.
-  await prisma.$transaction(
-    async tx =>
-      tx.accountingPeriodLock.upsert({
-        where: { organizationId_rfc_period: { organizationId: scope.organizationId, rfc: scope.rfc, period } },
-        create: {
-          organizationId: scope.organizationId,
-          rfc: scope.rfc,
-          period,
-          status: AccountingPeriodStatus.CLOSED,
-          closedById: actor.staffId ?? null,
-          reason: reason ?? null,
-        },
-        // Re-cerrar un periodo reabierto: vuelve a CLOSED y limpia los datos de reapertura.
-        update: {
-          status: AccountingPeriodStatus.CLOSED,
-          closedById: actor.staffId ?? null,
-          closedAt: new Date(),
-          reopenedById: null,
-          reopenedAt: null,
-          reason: reason ?? null,
-        },
-      }),
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-  )
+  // Plan 4: con IVA mixto el cierre está pausado (organización y negocio bajo candado DENTRO de la foto), con los
+  // tiempos y el reintento de la contabilidad (Ruling R11).
+  await conReintentoContable(async tx => {
+    await exigirContabilidadDisponible(tx, { venueId, organizationId: scope.organizationId })
+    return tx.accountingPeriodLock.upsert({
+      where: { organizationId_rfc_period: { organizationId: scope.organizationId, rfc: scope.rfc, period } },
+      create: {
+        organizationId: scope.organizationId,
+        rfc: scope.rfc,
+        period,
+        status: AccountingPeriodStatus.CLOSED,
+        closedById: actor.staffId ?? null,
+        reason: reason ?? null,
+      },
+      // Re-cerrar un periodo reabierto: vuelve a CLOSED y limpia los datos de reapertura.
+      update: {
+        status: AccountingPeriodStatus.CLOSED,
+        closedById: actor.staffId ?? null,
+        closedAt: new Date(),
+        reopenedById: null,
+        reopenedAt: null,
+        reason: reason ?? null,
+      },
+    })
+  })
 
   await logAction({
     action: 'ACCOUNTING_PERIOD_CLOSED',

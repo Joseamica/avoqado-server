@@ -1127,7 +1127,9 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         polizaAlta: a.ledgerPosted, // DEBE Activo fijo / HABER Bancos, ya en el libro diario
         nota: a.ledgerPosted
           ? 'Registrado y con póliza de alta en el libro. Corre la depreciación del periodo con generate_depreciation.'
-          : 'Registrado. Corre la depreciación del periodo con generate_depreciation. (La póliza de alta se saltó — re-siembra el catálogo de cuentas para habilitarla.)',
+          : a.ledgerReason === 'ivaMixto'
+            ? `Registrado, sin póliza de alta: ${a.ledgerMessage}`
+            : 'Registrado. Corre la depreciación del periodo con generate_depreciation. (La póliza de alta se saltó — re-siembra el catálogo de cuentas para habilitarla.)',
       })
     },
   )
@@ -1279,10 +1281,11 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         precioVenta: pesos(r.proceedsCents),
         gananciaOPerdida: pesos(r.gainLossCents),
         polizaBaja: r.ledgerPosted, // cancela activo + deprec. acumulada y registra el resultado en el libro
-        nota:
+        nota: `${
           r.gainLossCents >= 0
             ? 'Baja registrada. Ganancia contable (precio de venta ≥ valor en libros).'
-            : 'Baja registrada. Pérdida contable (valor en libros > precio de venta) — deducible; confírmalo con tu contador.',
+            : 'Baja registrada. Pérdida contable (valor en libros > precio de venta) — deducible; confírmalo con tu contador.'
+        }${r.ledgerReason === 'ivaMixto' ? ` Sin póliza de baja: ${r.ledgerMessage}` : ''}`,
       })
     },
   )

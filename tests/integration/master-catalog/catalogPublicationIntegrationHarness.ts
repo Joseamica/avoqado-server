@@ -98,7 +98,12 @@ export async function createCatalogPublicationIntegrationHarness(suite: string):
   }
 }
 
-export async function createCatalogPublicationFixture(client: PrismaClient, suite: string): Promise<CatalogPublicationFixture> {
+export async function createCatalogPublicationFixture(
+  client: PrismaClient,
+  suite: string,
+  // IVA por producto, plan 4: '0.1600' deja la organización SIN la marca de IVA mixto (el 8 % de siempre la enciende).
+  { productTaxRate = '0.0800' }: { productTaxRate?: string } = {},
+): Promise<CatalogPublicationFixture> {
   const key = `${suite}-${process.pid}-${Date.now()}`
   const organizationId = `h1a-pub-org-${key}`
   const staffId = `h1a-pub-staff-${key}`
@@ -183,7 +188,7 @@ export async function createCatalogPublicationFixture(client: PrismaClient, suit
   const category = await client.menuCategory.create({
     data: { venueId: venue.id, name: 'Publication', slug: `publication-${key}`.toLowerCase() },
   })
-  // Ruling R12: el producto local es al 8 %; el venue representa un negocio con IVA por producto encendido.
+  // Ruling R12: el producto local es al 8 % por default; el venue representa un negocio con IVA por producto encendido.
   await encenderIvaPorProducto(venue.id, client)
   const product = await client.product.create({
     data: {
@@ -196,7 +201,7 @@ export async function createCatalogPublicationFixture(client: PrismaClient, suit
       type: 'REGULAR',
       price: '20.00',
       cost: '11.00',
-      taxRate: '0.0800',
+      taxRate: productTaxRate,
       satProductKey: '50192100',
       satUnitKey: 'H87',
       objetoImp: '02',

@@ -3,7 +3,7 @@
  * Lock contable: cada póliza generada CUADRA (Σdebe==Σhaber), las cuentas correctas, idempotencia
  * (no re-postea), enrutado venta vs devolución por signo/type, reglas de exclusión, y falta-de-mapeo.
  */
-import { PaymentMethod, PaymentType, OrderStatus } from '@prisma/client'
+import { PaymentMethod, PaymentType, OrderStatus, Prisma } from '@prisma/client'
 
 jest.mock('../../../src/utils/prismaClient', () => ({
   __esModule: true,
@@ -12,6 +12,8 @@ jest.mock('../../../src/utils/prismaClient', () => ({
     payment: { findMany: jest.fn() },
     fiscalEmisor: { findFirst: jest.fn() },
     journalEntry: { findMany: jest.fn() },
+    // Plan 4: aviso temprano de la pausa por IVA mixto (lectura sin candado de la marca).
+    organization: { findUnique: jest.fn() },
   },
 }))
 jest.mock('../../../src/services/fiscal/chartOfAccounts.service', () => ({ resolveScopeOrNull: jest.fn() }))
@@ -20,16 +22,19 @@ jest.mock('../../../src/services/fiscal/journalEntry.service', () => ({ postJour
 jest.mock('date-fns-tz', () => ({ formatInTimeZone: () => '2026-06-15' }))
 
 import prisma from '../../../src/utils/prismaClient'
+import logger from '../../../src/config/logger'
 import { resolveScopeOrNull } from '../../../src/services/fiscal/chartOfAccounts.service'
 import { getMappings } from '../../../src/services/fiscal/accountMapping.service'
 import { postJournalEntry } from '../../../src/services/fiscal/journalEntry.service'
-import { generatePoliciesForVenue } from '../../../src/services/fiscal/autoPosting.service'
+import { buildRefundLines, buildSaleLines, generatePoliciesForVenue } from '../../../src/services/fiscal/autoPosting.service'
+import { fiscalByRateCents } from '../../../src/services/fiscal/deliveryFiscalDelta'
 
 const p = prisma as unknown as {
   venue: { findUnique: jest.Mock }
   payment: { findMany: jest.Mock }
   fiscalEmisor: { findFirst: jest.Mock }
   journalEntry: { findMany: jest.Mock }
+  organization: { findUnique: jest.Mock }
 }
 const mockScope = resolveScopeOrNull as jest.Mock
 const mockMappings = getMappings as jest.Mock
@@ -65,6 +70,7 @@ beforeEach(() => {
   // sí posteen). El default real es false — su exclusión se cubre en un test dedicado abajo.
   p.fiscalEmisor.findFirst.mockResolvedValue({ includeCashInAccounting: true })
   p.journalEntry.findMany.mockResolvedValue([]) // nada posteado aún
+  p.organization.findUnique.mockResolvedValue({ ivaMixtoAlgunaVez: false })
   mockPost.mockResolvedValue({ id: 'je1' })
 })
 
@@ -195,5 +201,114 @@ describe('alcance fiscal configurable', () => {
     expect(r.posted).toBe(1) // solo 'in'
     expect(r.skipped).toBe(1) // 'out' excluido del libro
     expect(lastEntry().idempotencyKey).toBe('pay:in:v1')
+  })
+})
+
+// IVA por producto, plan 4 (Ruling R9): con un producto ≠ 16 % la organización queda marcada y la contabilidad se
+// pausa, así que las pruebas de integración de reparto por tasa ya no pueden leer la póliza. Su aritmética se movió
+// AQUÍ, con los mismos importes, sobre los constructores puros de líneas:
+//  - autoPostingRetiro.integration.test.ts → las cuatro pruebas del REFUND de reparto;
+//  - lectoresConRetiro.test.ts → «estado de resultados: el IVA de la compensación es el que posteó la póliza».
+describe('R9 · reparto por tasa (aritmética movida de las pruebas de integración de reparto)', () => {
+  type Fila = Parameters<typeof buildSaleLines>[0]
+  const acct = (m: string) => `acc:${m}`
+  const L = (unitPrice: number, taxRate: number) => ({ unitPrice, quantity: 1, discountAmount: 0, taxRate })
+  const renglon = (unitPrice: number, taxRate: number, discountAmount = 0) => ({
+    quantity: 1,
+    unitPrice: new Prisma.Decimal(unitPrice),
+    discountAmount: new Prisma.Decimal(discountAmount),
+    product: { taxRate: new Prisma.Decimal(taxRate) },
+  })
+  const fila = (o: Partial<Fila>): Fila => ({
+    id: 'p1',
+    amount: new Prisma.Decimal(0),
+    tipAmount: new Prisma.Decimal(0),
+    feeAmount: new Prisma.Decimal(0),
+    method: PaymentMethod.OTHER,
+    type: PaymentType.FAST,
+    createdAt: new Date('2026-06-15T18:00:00Z'),
+    merchantAccount: null,
+    ecommerceMerchant: null,
+    order: null,
+    ...o,
+  })
+  const devolucion = (id: string, pesos: number, items: NonNullable<Fila['order']>['items'], propina = 0) =>
+    fila({
+      id,
+      amount: new Prisma.Decimal(-pesos),
+      tipAmount: new Prisma.Decimal(-propina),
+      type: PaymentType.REFUND,
+      order: { status: OrderStatus.COMPLETED, orderNumber: '1', items },
+    })
+  /** Pedido de $200: $100 gravado al 16 % + $100 al 0 % (autoPostingRetiro). */
+  const mitadYMitad = [renglon(100, 0.16), renglon(100, 0)]
+  const linea = (lines: { ledgerAccountId: string; debitCents: number; creditCents: number }[], m: string) =>
+    lines.find(l => l.ledgerAccountId === acct(m))
+  const cuadra = (lines: { debitCents: number; creditCents: number }[]) =>
+    lines.reduce((s, l) => s + l.debitCents, 0) === lines.reduce((s, l) => s + l.creditCents, 0)
+  const ivaNeto = (lines: { ledgerAccountId: string; debitCents: number; creditCents: number }[]) =>
+    (linea(lines, 'IVA_OUTPUT')?.creditCents ?? 0) - (linea(lines, 'IVA_OUTPUT')?.debitCents ?? 0)
+
+  it('REFUND con fiscalByRateCents: la póliza lleva ESE reparto (1379), no la mezcla de la orden (690)', () => {
+    const fiscal = fiscalByRateCents([L(100, 0.16), L(100, 0)], [L(100, 0)], 20000, 10000)
+    expect(fiscal).toEqual({ '0.16': 1379 })
+    const { lines } = buildRefundLines(devolucion('r1', 100, mitadYMitad), acct, {
+      provenance: 'PROVIDER_ADJUSTMENT',
+      fiscalByRateCents: fiscal,
+    })!
+    expect(cuadra(lines)).toBe(true)
+    expect(linea(lines, 'IVA_OUTPUT')!.debitCents).toBe(1379)
+    expect(linea(lines, 'SALES_RETURN')!.debitCents).toBe(8621)
+  })
+
+  it('REFUND sin fiscalByRateCents: como hoy, con la mezcla de la orden (IVA 690)', () => {
+    const { lines } = buildRefundLines(devolucion('r2', 100, mitadYMitad), acct, undefined)!
+    expect(cuadra(lines)).toBe(true)
+    expect(linea(lines, 'IVA_OUTPUT')!.debitCents).toBe(690) // $100 → 50/50 → IVA de $50 al 16 %
+    expect(linea(lines, 'SALES_RETURN')!.debitCents).toBe(9310)
+  })
+
+  it('ajuste del proveedor SIN fiscalByRateCents: como hoy (690) y grita 🚨 con el id', () => {
+    const { lines } = buildRefundLines(devolucion('r3', 100, mitadYMitad), acct, { provenance: 'PROVIDER_ADJUSTMENT' })!
+    expect(linea(lines, 'IVA_OUTPUT')!.debitCents).toBe(690)
+    expect((logger.error as jest.Mock).mock.calls.some(([msg]) => String(msg).includes('🚨') && String(msg).includes('r3'))).toBe(true)
+  })
+
+  it('ajuste con IVA fuera de [0, venta] NUNCA queda sin póliza: 🚨 y mezcla de la orden, propina incluida', () => {
+    // Composición que el reconciliador SÍ puede producir: la diferencia de IVA sale NEGATIVA ({'0.16': -689}).
+    const { lines } = buildRefundLines(devolucion('r4', 100, mitadYMitad, 5), acct, {
+      provenance: 'PROVIDER_ADJUSTMENT',
+      fiscalByRateCents: { '0.16': -689 },
+    })!
+    expect(cuadra(lines)).toBe(true)
+    expect(linea(lines, 'IVA_OUTPUT')!.debitCents).toBe(690) // mezcla de la orden
+    expect(linea(lines, 'SALES_RETURN')!.debitCents).toBe(9310)
+    expect(linea(lines, 'TIPS_PAYABLE')!.debitCents).toBe(500)
+    expect((logger.error as jest.Mock).mock.calls.some(([msg]) => String(msg).includes('🚨') && String(msg).includes('r4'))).toBe(true)
+  })
+
+  it('lectoresConRetiro: el IVA neto de las cuatro pólizas es 4191 (la cifra que el estado de resultados debe igualar)', () => {
+    // A · $200 (Latte $150 al 16 % + Pan $50 al 0 % con $5 de descuento, retirado por Uber) y su compensación de $50.
+    const pedidoA = [renglon(150, 0.16), renglon(50, 0, 5)]
+    const fiscalA = fiscalByRateCents([L(150, 0.16), L(50, 0)], [L(150, 0.16)], 20000, 15000)
+    expect(fiscalA).toEqual({}) // retirar lo del 0 % no devuelve IVA
+    const ventaA = buildSaleLines(
+      fila({ id: 'a', amount: new Prisma.Decimal(200), order: { status: OrderStatus.COMPLETED, orderNumber: 'A', items: pedidoA } }),
+      acct,
+    )!
+    const retiroA = buildRefundLines(devolucion('a-r', 50, pedidoA), acct, {
+      provenance: 'PROVIDER_ADJUSTMENT',
+      fiscalByRateCents: fiscalA,
+    })!
+    // B · $200 sin renglones (16 % de siempre) y un reembolso MANUAL de $50.
+    const ventaB = buildSaleLines(
+      fila({ id: 'b', amount: new Prisma.Decimal(200), order: { status: OrderStatus.COMPLETED, orderNumber: 'B', items: [] } }),
+      acct,
+    )!
+    const manualB = buildRefundLines(devolucion('b-r', 50, []), acct, undefined)!
+
+    expect([ventaA, retiroA, ventaB, manualB].every(p => cuadra(p.lines))).toBe(true)
+    expect([ventaA, retiroA, ventaB, manualB].map(p => ivaNeto(p.lines))).toEqual([2122, 0, 2759, -690])
+    expect([ventaA, retiroA, ventaB, manualB].reduce((s, p) => s + ivaNeto(p.lines), 0)).toBe(4191)
   })
 })

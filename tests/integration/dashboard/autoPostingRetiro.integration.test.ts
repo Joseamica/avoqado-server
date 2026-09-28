@@ -5,21 +5,23 @@
  * Cuando Uber retira un renglón, el REFUND lleva en `processorData.fiscalByRateCents` el IVA por tasa
  * calculado como DIFERENCIA de composiciones. `autoPosting` debe postear ESE reparto: con la mezcla de
  * la orden, retirar el renglón gravado de un pedido 50/50 (16 % + 0 %) contabilizaría $6.90 de IVA en
- * vez de $13.79 — la mitad del IVA devuelto se quedaría declarado como causado. Un REFUND sin el campo
- * se postea como hoy, y la póliza de la venta NO se toca.
+ * vez de $13.79 — la mitad del IVA devuelto se quedaría declarado como causado.
  *
- * Vive junto a `sembrarCobroParaReembolso.ts`, que reutiliza (no hay carpeta `tests/integration/fiscal/`).
+ * IVA por producto, plan 4 (Ruling R9): un pedido con un renglón al 0 % marca la organización, y con IVA mixto
+ * la contabilidad se pausa. La aritmética del reparto vive ahora en las unitarias de los constructores de líneas;
+ * aquí queda la pausa (409, cero pólizas) y el insumo persistido del reparto.
+ *
+ * Vive junto a `sembrarCobroParaReembolso.ts`, que reutiliza.
  */
 import prisma from '@/utils/prismaClient'
 import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
-import logger from '@/config/logger'
 import { Prisma } from '@prisma/client'
 import { setupTestData, teardownTestData } from '@tests/helpers/test-data-setup'
 import { writeRefundInTx, type WriteRefundInput } from '@/services/shared/writeRefundInTx'
 import { generatePoliciesForVenue } from '@/services/fiscal/autoPosting.service'
 import { seedBaseChart } from '@/services/fiscal/chartOfAccounts.service'
-import { getMappings, seedDefaultMappings } from '@/services/fiscal/accountMapping.service'
-import { fiscalByRateCents } from '@/services/fiscal/deliveryFiscalDelta'
+import { seedDefaultMappings } from '@/services/fiscal/accountMapping.service'
+import { fiscalByRateCents, processorDataDeDevoluciones } from '@/services/fiscal/deliveryFiscalDelta'
 import { limpiarVenue, sembrarCobro } from './sembrarCobroParaReembolso'
 
 jest.setTimeout(120000)
@@ -31,7 +33,6 @@ describe('autoPosting — REFUND de reparto con fiscalByRateCents', () => {
   let rfc: string
   let gravado: { id: string; name: string }
   let exento: { id: string; name: string }
-  let cuenta: (movimiento: string) => string
 
   beforeAll(async () => {
     const testData = await setupTestData()
@@ -49,9 +50,6 @@ describe('autoPosting — REFUND de reparto con fiscalByRateCents', () => {
     await prisma.product.update({ where: { id: exento.id }, data: { taxRate: new Prisma.Decimal('0') } })
     await seedBaseChart(venueId, { staffId })
     await seedDefaultMappings(venueId, { staffId })
-    const { mappings } = await getMappings(venueId)
-    const porMovimiento = new Map(mappings.filter(m => m.account).map(m => [m.movementType as string, m.account!.id]))
-    cuenta = m => porMovimiento.get(m)!
   })
 
   afterAll(async () => {
@@ -75,7 +73,7 @@ describe('autoPosting — REFUND de reparto con fiscalByRateCents', () => {
       ],
     })
 
-  // `as`: arma a propósito ajustes del proveedor SIN reparto fiscal para probar el camino defensivo de la póliza.
+  // `as`: los campos del ajuste del proveedor (reparto, procedencia, generación) llegan en `extra`.
   const reembolso = (originalPaymentId: string, extra: Partial<WriteRefundInput>): WriteRefundInput =>
     ({
       originalPaymentId,
@@ -89,25 +87,16 @@ describe('autoPosting — REFUND de reparto con fiscalByRateCents', () => {
       ...extra,
     }) as WriteRefundInput
 
-  const poliza = (idempotencyKey: string) =>
-    prisma.journalEntry.findFirstOrThrow({
-      where: { organizationId, rfc, idempotencyKey },
-      include: { lines: { select: { ledgerAccountId: true, debitCents: true, creditCents: true }, orderBy: { id: 'asc' } } },
-    })
-  const linea = (lines: { ledgerAccountId: string; debitCents: number; creditCents: number }[], movimiento: string) =>
-    lines.find(l => l.ledgerAccountId === cuenta(movimiento))
-  const cuadra = (lines: { debitCents: number; creditCents: number }[]) =>
-    lines.reduce((s, l) => s + l.debitCents, 0) === lines.reduce((s, l) => s + l.creditCents, 0)
-
-  it('un REFUND con fiscalByRateCents postea ESE reparto y deja intacta la poliza del cobro', async () => {
+  // IVA por producto, plan 4 (Ruling R9): el producto al 0 % marca la organización (trigger del plan 1), y con IVA
+  // mixto la contabilidad se PAUSA. La aritmética del reparto por tasa que estas pruebas afirmaban sobre la póliza
+  // (1379 / 8621 con `fiscalByRateCents`, 690 / 9310 con la mezcla de la orden, el 🚨 con el id y la propina) se movió,
+  // con los mismos importes, a las unitarias de los constructores de líneas: `tests/unit/services/autoPosting.service.test.ts`
+  // («R9 · reparto por tasa»). Aquí queda lo que sólo la base prueba: la pausa y el insumo persistido de ese reparto.
+  it('organización marcada (producto al 0 %): la corrida sale 409 CONTABILIDAD_IVA_MIXTO y no escribe ninguna póliza', async () => {
     const { pago, items } = await cobroMixto()
-    await generatePoliciesForVenue(venueId)
-    const ventaAntes = await poliza(`pay:${pago.id}:v1`)
-
     // Uber retiró el renglón gravado: sobrevive sólo el de 0 %.
     const L = (unitPrice: number, taxRate: number) => ({ unitPrice, quantity: 1, discountAmount: 0, taxRate })
     const fiscal = fiscalByRateCents([L(100, 0.16), L(100, 0)], [L(100, 0)], 20000, 10000)
-    expect(fiscal).toEqual({ '0.16': 1379 })
     const { refundPaymentId } = await prisma.$transaction(tx =>
       writeRefundInTx(
         tx,
@@ -119,73 +108,14 @@ describe('autoPosting — REFUND de reparto con fiscalByRateCents', () => {
         }),
       ),
     )
-    await generatePoliciesForVenue(venueId)
+    const organizacion = await prisma.organization.findUniqueOrThrow({ where: { id: organizationId }, select: { ivaMixtoAlgunaVez: true } })
+    expect(organizacion.ivaMixtoAlgunaVez).toBe(true)
 
-    const polizaRefund = await poliza(`refund:${refundPaymentId}:v1`)
-    expect(cuadra(polizaRefund.lines)).toBe(true)
-    expect(linea(polizaRefund.lines, 'IVA_OUTPUT')!.debitCents).toBe(1379) // no 690 (mezcla de la orden)
-    expect(linea(polizaRefund.lines, 'SALES_RETURN')!.debitCents).toBe(8621)
+    await expect(generatePoliciesForVenue(venueId)).rejects.toMatchObject({ statusCode: 409, code: 'CONTABILIDAD_IVA_MIXTO' })
+    expect(await prisma.journalEntry.count({ where: { organizationId } })).toBe(0)
 
-    const ventaDespues = await poliza(`pay:${pago.id}:v1`)
-    expect(ventaDespues).toEqual(ventaAntes) // misma fila, mismas líneas, mismo folio
-  })
-
-  it('un REFUND SIN fiscalByRateCents se postea como hoy (mezcla de la orden)', async () => {
-    const { pago } = await cobroMixto()
-    const { refundPaymentId } = await prisma.$transaction(tx =>
-      writeRefundInTx(tx, reembolso(pago.id, { tenderCommission: 'NONE', staffId })),
-    )
-    await generatePoliciesForVenue(venueId)
-
-    const polizaRefund = await poliza(`refund:${refundPaymentId}:v1`)
-    expect(cuadra(polizaRefund.lines)).toBe(true)
-    expect(linea(polizaRefund.lines, 'IVA_OUTPUT')!.debitCents).toBe(690) // $100 → 50/50 → IVA de $50 al 16 %
-    expect(linea(polizaRefund.lines, 'SALES_RETURN')!.debitCents).toBe(9310)
-  })
-
-  it('un ajuste del proveedor SIN fiscalByRateCents se postea como hoy y grita 🚨 con el id', async () => {
-    const error = jest.spyOn(logger, 'error')
-    const { pago } = await cobroMixto()
-    const { refundPaymentId } = await prisma.$transaction(tx =>
-      writeRefundInTx(tx, reembolso(pago.id, { provenance: 'PROVIDER_ADJUSTMENT', generation: 1 })),
-    )
-    await generatePoliciesForVenue(venueId)
-
-    const polizaRefund = await poliza(`refund:${refundPaymentId}:v1`)
-    expect(linea(polizaRefund.lines, 'IVA_OUTPUT')!.debitCents).toBe(690)
-    expect(error.mock.calls.some(([msg]) => String(msg).includes('🚨') && String(msg).includes(refundPaymentId))).toBe(true)
-    error.mockRestore()
-  })
-
-  it('un ajuste con IVA fuera de [0, venta] NUNCA queda sin póliza: 🚨 y mezcla de la orden, propina incluida', async () => {
-    // Composición que el reconciliador SÍ puede producir: el gravado llevaba $50 de descuento y el
-    // superviviente no ⇒ la diferencia de IVA sale NEGATIVA ({'0.16': -689}).
-    const error = jest.spyOn(logger, 'error')
-    const { pago } = await sembrarCobro({
-      venueId,
-      staffId,
-      saleCents: 20000,
-      tipCents: 1000,
-      commissionPercent: 30,
-      items: [
-        { productId: gravado.id, productName: gravado.name, quantity: 1, totalCents: 10000 },
-        { productId: exento.id, productName: exento.name, quantity: 1, totalCents: 10000 },
-      ],
-    })
-    const { refundPaymentId } = await prisma.$transaction(tx =>
-      writeRefundInTx(
-        tx,
-        reembolso(pago.id, { tipRefundCents: 500, fiscalByRateCents: { '0.16': -689 }, provenance: 'PROVIDER_ADJUSTMENT', generation: 1 }),
-      ),
-    )
-    await generatePoliciesForVenue(venueId)
-
-    const polizaRefund = await poliza(`refund:${refundPaymentId}:v1`)
-    expect(cuadra(polizaRefund.lines)).toBe(true)
-    expect(linea(polizaRefund.lines, 'IVA_OUTPUT')!.debitCents).toBe(690) // mezcla de la orden
-    expect(linea(polizaRefund.lines, 'SALES_RETURN')!.debitCents).toBe(9310)
-    expect(linea(polizaRefund.lines, 'TIPS_PAYABLE')!.debitCents).toBe(500)
-    expect(error.mock.calls.some(([msg]) => String(msg).includes('🚨') && String(msg).includes(refundPaymentId))).toBe(true)
-    error.mockRestore()
+    // El insumo que la póliza leería queda persistido tal cual: el reparto de la unitaria es ESTE.
+    const insumo = await processorDataDeDevoluciones(venueId, [refundPaymentId])
+    expect(insumo.get(refundPaymentId)).toMatchObject({ provenance: 'PROVIDER_ADJUSTMENT', fiscalByRateCents: { '0.16': 1379 } })
   })
 })

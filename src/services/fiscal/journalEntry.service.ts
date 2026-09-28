@@ -2,9 +2,11 @@ import { JournalEntrySource, JournalEntryStatus, JournalEntryType, Prisma } from
 
 import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import { isDeadlockError, isRetryableDbError } from '../../utils/serializableRetry'
 import { logAction } from '../dashboard/activity-log.service'
 import { isPeriodLocked } from './accountingPeriodLock.service'
 import { resolveScopeOrNull, type CatalogScope } from './chartOfAccounts.service'
+import { contabilidadOcupadaError, exigirContabilidadDisponible } from './exclusionContable'
 
 /**
  * Libro diario · Pólizas — motor de doble partida (Capa B).
@@ -81,11 +83,6 @@ function uniqueViolationTarget(e: unknown): string | null {
     return Array.isArray(t) ? t.join(',') : typeof t === 'string' ? t : ''
   }
   return null
-}
-
-/** P2034 = la transacción falló por conflicto de escritura / deadlock (serialización). */
-function isSerializationFailure(e: unknown): boolean {
-  return e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2034'
 }
 
 /**
@@ -206,7 +203,10 @@ export async function postJournalEntry(
 
   // Posteo bajo SERIALIZABLE + reintento. Garantiza:
   //  - folio consecutivo ÚNICO por contribuyente (hay @@unique([org,rfc,folio]) que lo blinda a nivel DB);
-  //  - idempotencia a prueba de carreras: dos posteos con la misma clave CONVERGEN en una sola póliza.
+  //  - idempotencia a prueba de carreras: dos posteos con la misma clave CONVERGEN en una sola póliza;
+  //  - IVA por producto, plan 4: con IVA mixto no se escribe la póliza (la marca se lee bajo candado DENTRO de la foto).
+  // Tiempos (Ruling R11): la transacción dura como máximo 15 s y un candado se espera 5 s. Reintentos agotados, bloqueo
+  // mutuo o transacción vencida salen como 409 CONTABILIDAD_OCUPADA, nunca como el error crudo.
   const MAX_RETRIES = 5
   let entryId: string | null = null
   let isNew = false
@@ -214,6 +214,7 @@ export async function postJournalEntry(
     try {
       const r = await prisma.$transaction(
         async tx => {
+          await tx.$executeRaw`SET LOCAL lock_timeout = '5s'`
           // Re-chequeo de idempotencia DENTRO de la tx (consistente bajo Serializable).
           if (input.idempotencyKey) {
             const ex = await tx.journalEntry.findUnique({
@@ -228,6 +229,8 @@ export async function postJournalEntry(
             })
             if (ex) return { id: ex.id, isNew: false }
           }
+          // Plan 4: con IVA mixto la contabilidad está pausada. Organización y negocio bajo candado DENTRO de la foto.
+          await exigirContabilidadDisponible(tx, { venueId, organizationId: scope.organizationId })
           // Candado de periodo DENTRO de la tx Serializable: una póliza NUEVA no entra a un mes cerrado.
           // (El re-post idempotente ya retornó arriba.) Si el periodo se cierra concurrentemente, el
           // conflicto read-write de SSI aborta esta tx → reintenta → re-lee CLOSED y rechaza (cierra el TOCTOU).
@@ -269,7 +272,7 @@ export async function postJournalEntry(
           })
           return { id: created.id, isNew: true }
         },
-        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 15_000, maxWait: 5_000 },
       )
       entryId = r.id
       isNew = r.isNew
@@ -294,8 +297,15 @@ export async function postJournalEntry(
           break
         }
       }
-      // Colisión de folio o fallo de serialización → reintentar (re-lee el max y recalcula).
-      if ((target?.includes('folio') || isSerializationFailure(e)) && attempt < MAX_RETRIES) continue
+      // Colisión de folio o choque de concurrencia (40001, 55P03, 40P01) → reintentar con espera creciente (re-lee el
+      // max y recalcula).
+      const choque = target?.includes('folio') || isRetryableDbError(e) || isDeadlockError(e)
+      if (choque && attempt < MAX_RETRIES) {
+        await new Promise(resolve => setTimeout(resolve, 50 * 2 ** attempt))
+        continue
+      }
+      // Reintentos agotados o transacción vencida (P2028): un 409 claro, nunca el error crudo.
+      if (choque || (e as { code?: string })?.code === 'P2028') throw contabilidadOcupadaError()
       throw e
     }
   }

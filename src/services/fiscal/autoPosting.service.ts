@@ -10,6 +10,7 @@ import { splitPaymentIvaByOrderRates, grossByRateFromItems } from './ivaMath'
 import { paymentInFiscalScope } from './fiscalScope'
 import { generateCogsPolicyForVenue } from './cogs.service'
 import { ivaDeDevolucion, processorDataDeDevoluciones } from './deliveryFiscalDelta'
+import { contabilidadPausada, contabilidadPausadaError, esExclusionContable } from './exclusionContable'
 import logger from '../../config/logger'
 
 /**
@@ -106,7 +107,7 @@ export function grossByRateForOrder(items: OrderItemRow[] | undefined): { rate: 
 }
 
 /** Construye las líneas BALANCEADAS de una póliza de VENTA. null si es una anomalía no posteable. */
-function buildSaleLines(
+export function buildSaleLines(
   p: PaymentRow,
   acct: (m: string) => string,
 ): { lines: { ledgerAccountId: string; debitCents: number; creditCents: number }[] } | null {
@@ -136,7 +137,7 @@ function buildSaleLines(
  * El IVA sale de `ivaDeDevolucion` — la MISMA regla que el estado de resultados: la mezcla de la orden,
  * salvo el ajuste del proveedor de reparto con su `fiscalByRateCents` (spec KDS Uber [N-13]).
  */
-function buildRefundLines(
+export function buildRefundLines(
   p: PaymentRow,
   acct: (m: string) => string,
   processorData?: unknown,
@@ -190,6 +191,11 @@ export async function generatePoliciesForVenue(
 
   const scope = await resolveScopeOrNull(venueId)
   if (!scope) return { ...base, needsFiscalSetup: true }
+
+  // IVA por producto, plan 4: con IVA mixto la contabilidad está pausada. Aviso temprano (sin candado) antes de cargar
+  // mapeos y pagos; la verdad la decide cada póliza dentro de su transacción. La pausa es por organización: sale aunque
+  // todos los pagos sean de un comercio fuera de la contabilidad (Review Focus 4).
+  if (await contabilidadPausada(scope.organizationId)) throw contabilidadPausadaError()
 
   // Mapeos movimiento→cuenta del contribuyente. Falta alguno requerido → no postear.
   const mapResult = await getMappings(venueId)
@@ -319,6 +325,8 @@ export async function generatePoliciesForVenue(
       if (cogs.cogsCents > 0) base.cogsCents = cogs.cogsCents
       if (cogs.posted) base.posted++
     } catch (err) {
+      // La pausa por IVA mixto no es un tropiezo del COGS: se propaga para que la corrida lo diga.
+      if (esExclusionContable(err)) throw err
       logger.warn(`[autoPosting] COGS falló para venue ${venueId} periodo ${period}: ${err instanceof Error ? err.message : String(err)}`)
     }
   }
