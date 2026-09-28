@@ -2,6 +2,7 @@ import crypto from 'crypto'
 
 import type { Request, Response } from 'express'
 
+import logger from '@/config/logger'
 import { handleAngelPayWebhook, angelpayWebhookHealthCheck } from '@/controllers/tpv/angelpay-webhook.tpv.controller'
 import * as service from '@/services/tpv/angelpay-webhook.service'
 import * as avisos from '@/services/tpv/avisosNoGuardados'
@@ -385,6 +386,114 @@ describe('handleAngelPayWebhook', () => {
         expect(res.__status).toBe(503)
         await jest.advanceTimersByTimeAsync(10 * 60_000)
         expect(mockedMerchantAccountFindFirst).toHaveBeenCalledTimes(1)
+      })
+
+      /**
+       * 🔴 27-sep (medido en vivo con un aviso de 20 KB): 503, CERO reingreso, y el 🚨 prometía «503 y reingreso propio». Quien
+       * lea ese log espera que el servidor lo guarde solo; en realidad sólo queda que AngelPay reintente.
+       */
+      describe('el 🚨 no promete un reingreso que no se programó', () => {
+        const mensajesDeError = (): string[] => (logger.error as jest.Mock).mock.calls.map(([mensaje]) => String(mensaje))
+
+        it('🔴 aviso firmado de más de 16 KB que no se guardó ⇒ el 🚨 dice SIN reingreso propio', async () => {
+          mockedMerchantAccountFindFirst.mockResolvedValue(merchantRow)
+          mockedProcess.mockRejectedValue(new Error('la base se cayó al insertar el evento'))
+          const res = await enviar({
+            amount: '10000',
+            integratorReference: 'ref-gigante',
+            relleno: 'x'.repeat(avisos.TOPE_DE_CUERPO_PARA_REINGRESO),
+          })
+          expect(res.__status).toBe(503)
+          expect(mensajesDeError()).toEqual([expect.stringContaining('SIN reingreso propio')])
+          await jest.advanceTimersByTimeAsync(10 * 60_000)
+          expect(mockedProcess).toHaveBeenCalledTimes(1) // y de verdad no hubo reingreso
+        })
+
+        it('🔴 la búsqueda del comercio falla con un cuerpo de más de 16 KB ⇒ SIN reingreso propio', async () => {
+          mockedMerchantAccountFindFirst.mockRejectedValue(new Error('la base está caída'))
+          await enviar({ amount: '10000', integratorReference: 'ref-gigante', relleno: 'x'.repeat(avisos.TOPE_DE_CUERPO_PARA_REINGRESO) })
+          expect(mensajesDeError()).toEqual([expect.stringContaining('SIN reingreso propio')])
+        })
+
+        it('🔴 la búsqueda del comercio falla y el aviso no trae cabeceras de firma ⇒ SIN reingreso propio', async () => {
+          mockedMerchantAccountFindFirst.mockRejectedValue(new Error('la base está caída'))
+          const res = mkRes()
+          await handleAngelPayWebhook(mkReq({ params: { merchantAccountId: 'ma_1' }, headers: {} }), res, jest.fn())
+          expect(res.__status).toBe(503)
+          expect(mensajesDeError()).toEqual([expect.stringContaining('SIN reingreso propio')])
+        })
+
+        it('control · con reingreso programado el 🚨 lo sigue diciendo (las dos ramas)', async () => {
+          mockedMerchantAccountFindFirst.mockResolvedValue(merchantRow)
+          mockedProcess.mockRejectedValue(new Error('la base se cayó al insertar el evento'))
+          await enviar({ amount: '10000', integratorReference: 'ref-normal', status: 'approved' })
+          mockedMerchantAccountFindFirst.mockRejectedValue(new Error('la base está caída'))
+          await enviar({ amount: '10000', integratorReference: 'ref-busqueda', status: 'approved' })
+          const mensajes = mensajesDeError()
+          expect(mensajes).toHaveLength(2)
+          for (const m of mensajes) {
+            expect(m).toContain('503 y reingreso propio')
+            expect(m).not.toContain('SIN reingreso')
+          }
+        })
+      })
+
+      /**
+       * 🔴 27-sep (medido en vivo): el comercio se borró con el reingreso pendiente y a las 16:33:00 el log dijo «✅ Aviso
+       * reingresado» con 0 filas guardadas. Un 404/401/503-sin-secreto al reintentar NO es guardado: es un descarte. La entrada
+       * se retira igual (no reintenta para siempre), pero el log lo dice con su status.
+       */
+      describe('el reingreso que ya no se puede guardar se reporta como DESCARTADO, nunca como ✅', () => {
+        const exitos = (): unknown[] =>
+          (logger.info as jest.Mock).mock.calls.filter(([mensaje]) => String(mensaje).includes('Aviso reingresado'))
+        const descarteCon = (status: number, motivo: string) =>
+          expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('DESCARTADO'), expect.objectContaining({ status, motivo }))
+
+        it('🔴 comercio BORRADO con el reingreso pendiente ⇒ DESCARTADO 404, sin ✅, y no se reintenta más', async () => {
+          mockedMerchantAccountFindFirst.mockResolvedValueOnce(merchantRow).mockResolvedValue(null)
+          mockedProcess.mockRejectedValueOnce(new Error('la base se cayó al insertar el evento'))
+          expect((await enviar({ amount: '10000', integratorReference: 'ref-borrado', status: 'approved' })).__status).toBe(503)
+          await jest.advanceTimersByTimeAsync(avisos.ESPERAS_DE_REINGRESO_MS[0])
+          expect(exitos()).toHaveLength(0)
+          descarteCon(404, 'unknown merchant')
+          await jest.advanceTimersByTimeAsync(10 * 60_000)
+          expect(mockedMerchantAccountFindFirst).toHaveBeenCalledTimes(2) // se retiró: ninguna vuelta más
+        })
+
+        it('🔴 secreto ROTADO (la firma ya no valida) ⇒ DESCARTADO 401', async () => {
+          mockedMerchantAccountFindFirst
+            .mockResolvedValueOnce(merchantRow)
+            .mockResolvedValue({ ...merchantRow, angelpayWebhookSecret: 'whsec_nuevo' })
+          mockedProcess.mockRejectedValueOnce(new Error('la base se cayó al insertar el evento'))
+          await enviar({ amount: '10000', integratorReference: 'ref-rotado', status: 'approved' })
+          await jest.advanceTimersByTimeAsync(avisos.ESPERAS_DE_REINGRESO_MS[0])
+          expect(exitos()).toHaveLength(0)
+          descarteCon(401, 'invalid signature')
+        })
+
+        it('🔴 secreto QUITADO ⇒ DESCARTADO 503 (no es el 503 de «no se guardó»: no se reintenta para siempre)', async () => {
+          mockedMerchantAccountFindFirst
+            .mockResolvedValueOnce(merchantRow)
+            .mockResolvedValue({ ...merchantRow, angelpayWebhookSecret: null })
+          mockedProcess.mockRejectedValueOnce(new Error('la base se cayó al insertar el evento'))
+          await enviar({ amount: '10000', integratorReference: 'ref-sin-secreto', status: 'approved' })
+          await jest.advanceTimersByTimeAsync(avisos.ESPERAS_DE_REINGRESO_MS[0])
+          expect(exitos()).toHaveLength(0)
+          descarteCon(503, 'webhook not provisioned for this merchant')
+          await jest.advanceTimersByTimeAsync(10 * 60_000)
+          expect(mockedMerchantAccountFindFirst).toHaveBeenCalledTimes(2)
+        })
+
+        it('control · el aviso que SÍ se guarda al reingresar sigue saliendo como ✅, sin descarte', async () => {
+          mockedMerchantAccountFindFirst.mockResolvedValue(merchantRow)
+          mockedProcess
+            .mockRejectedValueOnce(new Error('la base se cayó al insertar el evento'))
+            .mockResolvedValue({ action: 'MATCHED', eventLogId: 'evt_guardado' })
+          await enviar({ amount: '10000', integratorReference: 'ref-guardada-luego', status: 'approved' })
+          await jest.advanceTimersByTimeAsync(avisos.ESPERAS_DE_REINGRESO_MS[0])
+          expect(exitos()).toHaveLength(1)
+          expect(logger.error).not.toHaveBeenCalledWith(expect.stringContaining('DESCARTADO'), expect.anything())
+        })
       })
     })
 

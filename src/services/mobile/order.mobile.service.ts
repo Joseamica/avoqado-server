@@ -768,7 +768,13 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
       // en el PRIMER intento: sin esto lo leería como «no aplicado» y cobraría el precio
       // completo con el premio ya quemado.
       if (input.stampRewardId) {
-        const stampReward = await stampRewardOutcomeForExistingOrder(venueId, existingOrder.id)
+        const stampReward = await ensureStampRewardOnExistingOrder(
+          venueId,
+          existingOrder.id,
+          input.stampRewardId,
+          input.staffId,
+          input.stampRewardExpectedDiscount,
+        )
         return { ...toCreatedOrderResponse(existingOrder), stampReward }
       }
       return toCreatedOrderResponse(existingOrder)
@@ -967,6 +973,18 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
       })
       if (winner) {
         logger.warn(`🛡️ [ORDER.MOBILE] Concurrent duplicate blocked by unique index (externalId=${externalId}) — returning winner`)
+        // 🔴 El perdedor de la carrera también tiene que decir qué pasó con el premio: sin esto la
+        // caja lo leería como «no aplicado» y cobraría completo con el premio ya quemado.
+        if (input.stampRewardId) {
+          const stampReward = await ensureStampRewardOnExistingOrder(
+            venueId,
+            winner.id,
+            input.stampRewardId,
+            input.staffId,
+            input.stampRewardExpectedDiscount,
+          )
+          return { ...toCreatedOrderResponse(winner), stampReward }
+        }
         return toCreatedOrderResponse(winner)
       }
     }
@@ -3401,20 +3419,61 @@ export async function applyStampRewardToNewOrder(
     result = { applied: false, reason }
   }
 
-  // 🔴 La caja ya cobró con un premio descontado y el servidor no lo confirmó igual: la
-  // cuenta queda con una diferencia. Pasa al reconectar una venta cobrada sin red (el premio
-  // se usó en otra caja o venció). Nada se descarta en silencio: queda en la bitácora.
+  await traceStampRewardMismatch(venueId, orderId, stampRewardId, staffId, expectedDiscountCents, result)
+  return result
+}
+
+/**
+ * 🔴 La caja descontó el premio al calcular lo que cobra y el servidor no lo confirmó igual: la
+ * cuenta queda con una diferencia. Nada se descarta en silencio: queda en la bitácora.
+ */
+async function traceStampRewardMismatch(
+  venueId: string,
+  orderId: string,
+  stampRewardId: string,
+  staffId: string | undefined,
+  expectedDiscountCents: number | null | undefined,
+  result: StampRewardOnOrderResult,
+): Promise<void> {
   const confirmedCents = result.applied ? Math.round((result.discountAmount ?? 0) * 100) : 0
-  if (typeof expectedDiscountCents === 'number' && expectedDiscountCents > 0 && confirmedCents !== expectedDiscountCents) {
-    void (await import('../dashboard/activity-log.service')).logAction({
-      action: 'STAMP_REWARD_NOT_AS_CHARGED',
-      entity: 'Order',
-      entityId: orderId,
-      staffId,
-      venueId,
-      data: { stampRewardId, expectedCents: expectedDiscountCents, confirmedCents, reason: result.reason ?? null },
-    })
+  if (typeof expectedDiscountCents !== 'number' || expectedDiscountCents <= 0 || confirmedCents === expectedDiscountCents) return
+  void (await import('../dashboard/activity-log.service')).logAction({
+    action: 'STAMP_REWARD_NOT_AS_CHARGED',
+    entity: 'Order',
+    entityId: orderId,
+    staffId,
+    venueId,
+    data: { stampRewardId, expectedCents: expectedDiscountCents, confirmedCents, reason: result.reason ?? null },
+  })
+}
+
+/**
+ * La caja reintentó la creación (perdió la respuesta, o dos intentos se cruzaron) y la orden ya
+ * existe. Si el premio todavía no quedó en ella —el primer intento se cayó antes de canjearlo— se
+ * canjea AHORA; el canje es condicional, así que sólo un intento lo quema. Se responde lo que de
+ * verdad quedó en la orden, nunca un «no aplicado» por haber llegado segundo.
+ */
+export async function ensureStampRewardOnExistingOrder(
+  venueId: string,
+  orderId: string,
+  stampRewardId: string,
+  staffId?: string,
+  expectedDiscountCents?: number | null,
+): Promise<StampRewardOnOrderResult> {
+  const yaAplicado = await stampRewardOutcomeForExistingOrder(venueId, orderId)
+  let result = yaAplicado
+  if (!yaAplicado.applied) {
+    // Sin rastro aquí: se decide con el resultado FINAL, abajo.
+    const intento = await applyStampRewardToNewOrder(venueId, orderId, stampRewardId, staffId)
+    if (intento.applied) {
+      result = intento
+    } else {
+      // Perdió la carrera: el otro intento lo canjeó en ESTA orden mientras tanto.
+      const despues = await stampRewardOutcomeForExistingOrder(venueId, orderId)
+      result = despues.applied ? despues : intento
+    }
   }
+  await traceStampRewardMismatch(venueId, orderId, stampRewardId, staffId, expectedDiscountCents, result)
   return result
 }
 
@@ -3423,16 +3482,16 @@ export async function applyStampRewardToNewOrder(
  * misma `externalId`). Se lee de la base, no se vuelve a canjear.
  */
 export async function stampRewardOutcomeForExistingOrder(venueId: string, orderId: string): Promise<StampRewardOnOrderResult> {
-  const descuentos = await prisma.orderDiscount.findMany({ where: { orderId }, select: { id: true }, take: 100 })
-  const premio = descuentos.length
-    ? await prisma.stampReward.findFirst({
-        where: { venueId, orderDiscountId: { in: descuentos.map(d => d.id) } },
-        select: { rewardLabel: true, orderDiscountId: true },
-      })
-    : null
-  if (!premio?.orderDiscountId) {
+  // JOIN directo por la orden: listar sus descuentos con tope podía dejar el premio fuera.
+  const filas = await prisma.$queryRaw<{ rewardLabel: string; amount: Prisma.Decimal | number }[]>`
+    SELECT sr."rewardLabel", od."amount"
+    FROM "StampReward" sr
+    JOIN "OrderDiscount" od ON od."id" = sr."orderDiscountId"
+    WHERE od."orderId" = ${orderId} AND sr."venueId" = ${venueId}
+    LIMIT 1`
+  const premio = filas[0]
+  if (!premio) {
     return { applied: false, reason: 'El premio no quedó aplicado a esta venta.' }
   }
-  const descuento = await prisma.orderDiscount.findFirst({ where: { id: premio.orderDiscountId }, select: { amount: true } })
-  return { applied: true, discountAmount: Number(descuento?.amount ?? 0), rewardLabel: premio.rewardLabel }
+  return { applied: true, discountAmount: Number(premio.amount), rewardLabel: premio.rewardLabel }
 }

@@ -14,6 +14,8 @@
 import { createHash } from 'crypto'
 import prisma from '../../utils/prismaClient'
 import type { RoutingConfig } from './printRouting.engine'
+import { venueHasFeatureAccess } from '../access/basePlan.service'
+import { PANTALLA_ABIERTA_A_CLIENTES } from '../kds/kitchenDisplayRelease'
 
 export interface PrintConfigPayload {
   gateway: { terminalId: string; address: string | null; active: boolean } | null
@@ -39,6 +41,11 @@ export interface PrintConfigPayload {
     isDefault: boolean
     /** ¿Aquí se empaca? Recibe el ticket consolidado del pedido completo. */
     isPacking: boolean
+    /**
+     * Etapa 3 del KDS: ¿esta estación se atiende con PANTALLA? EFECTIVO (casilla Y estación activa Y plan vigente).
+     * Con `printerId` null y esto en true, la caja la trata como «sólo pantalla» (no la imprime salvo de respaldo).
+     */
+    hasKitchenDisplay: boolean
     active: boolean
     displayOrder: number
   }>
@@ -49,6 +56,8 @@ export interface PrintConfigPayload {
   categoryRouting: Array<{ categoryId: string; printStationId: string }>
   /** Only products that have an explicit override set. */
   productOverrides: Array<{ productId: string; printStationId: string }>
+  /** ¿La etapa 3 ya se lanzó a clientes? La tablet ofrece «Prender pantalla» sólo entonces. Fuera del hash. */
+  kitchenDisplayOpenToClients: boolean
   version: string
 }
 
@@ -74,6 +83,10 @@ export async function buildPrintConfig(venueId: string): Promise<PrintConfigPayl
   // cambiarle nada a quien no lo pidió.
   const packingStation = stations.find(s => s.isPacking && s.active) ?? null
 
+  // Etapa 3 del KDS: el plan sólo se consulta si alguna estación activa tiene la casilla (la mayoría no).
+  const algunaConPantalla = stations.some(s => s.hasKitchenDisplay && s.active)
+  const planPantalla = algunaConPantalla ? await venueHasFeatureAccess(venueId, 'KITCHEN_DISPLAY') : false
+
   const payload: Omit<PrintConfigPayload, 'version'> = {
     gateway: gateway ? { terminalId: gateway.terminalId, address: gateway.address, active: gateway.active } : null,
     printers: printers.map(p => ({
@@ -96,6 +109,7 @@ export async function buildPrintConfig(venueId: string): Promise<PrintConfigPayl
       copies: s.copies,
       isDefault: s.isDefault,
       isPacking: s.isPacking,
+      hasKitchenDisplay: s.hasKitchenDisplay && s.active && planPantalla,
       active: s.active,
       displayOrder: s.displayOrder,
     })),
@@ -103,6 +117,7 @@ export async function buildPrintConfig(venueId: string): Promise<PrintConfigPayl
     packingStationId: packingStation?.id ?? null,
     categoryRouting: categories.map(c => ({ categoryId: c.id, printStationId: c.printStationId as string })),
     productOverrides: products.map(p => ({ productId: p.id, printStationId: p.printStationId as string })),
+    kitchenDisplayOpenToClients: PANTALLA_ABIERTA_A_CLIENTES,
   }
 
   return { ...payload, version: hashConfig(payload) }

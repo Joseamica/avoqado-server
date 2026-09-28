@@ -70,6 +70,8 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       reservationId,
       externalId,
       stampRewardId,
+      stampRewardAware,
+      stampRewardExpectedDiscount,
     } = req.body
 
     // Validate required fields
@@ -183,6 +185,14 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       })
     }
 
+    if (typeof stampRewardId === 'string' && stampRewardAware !== true) {
+      // Nada se ignora en silencio: si esto aparece, hay una caja vieja ofreciendo premios.
+      logger.warn('Premio de cartilla ignorado: la caja no declara que lo descuenta (versión vieja)', {
+        venueId,
+        stampRewardId,
+      })
+    }
+
     const order = await orderMobileService.createOrderWithItems(venueId, {
       items,
       staffId: effectiveStaffId,
@@ -199,10 +209,17 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       splitType,
       reservationId: typeof reservationId === 'string' ? reservationId : null,
       externalId: typeof externalId === 'string' ? externalId : null,
-      // 🔴 Premio de cartilla a aplicar EN LA CREACIÓN: el punto de venta cobra el
-      // total que sale de esta respuesta, así que el descuento tiene que existir antes
-      // de devolverla. Aditivo — sin él, todo queda igual que antes.
-      stampRewardId: typeof stampRewardId === 'string' ? stampRewardId : null,
+      // 🔴 Premio de cartilla a aplicar EN LA CREACIÓN — pero SÓLO para una caja que
+      // declara `stampRewardAware: true`, o sea, que resta el premio de lo que cobra.
+      // Hasta Android 2.19.1 / iOS 1.12.0 la caja mandaba el premio y cobraba el precio
+      // completo: se quemaba el premio y el cliente pagaba de más. A esas versiones se
+      // les ignora: cobran completo, pero el premio no se gasta.
+      stampRewardId: typeof stampRewardId === 'string' && stampRewardAware === true ? stampRewardId : null,
+      // Cuánto descontó la caja al cobrar (centavos): si el servidor no lo confirma igual, queda rastro.
+      stampRewardExpectedDiscount:
+        typeof stampRewardExpectedDiscount === 'number' && Number.isFinite(stampRewardExpectedDiscount)
+          ? stampRewardExpectedDiscount
+          : null,
     })
 
     res.status(201).json({

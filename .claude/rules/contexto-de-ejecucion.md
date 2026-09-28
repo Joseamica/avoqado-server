@@ -104,6 +104,12 @@ y se sigue.
 **6. Usa `normalizeEntrypoint`, no la URL cruda.** Sin normalizar, cada id crea su propia etiqueta y la agrupación deja de servir; además el
 query string puede cargar datos personales.
 
+**7. 🔴 Una ruta montada ANTES de `configureCoreMiddlewares` no tiene logger** — es donde vive. Los webhooks (raw body de las firmas)
+se quedaron así sin `X-Correlation-ID` ni `Request End` hasta el 27-sep. Monta `requestLoggerMiddleware` explícito, como
+`/api/v1/webhooks` y `/api/v1/public`. Es seguro repetirlo: el logger usa `req.originalUrl` (dentro de un `app.use('/prefijo', …)`
+Express recorta `req.url`) y no hace nada si ya lo abrió otro más arriba (`req.correlationId`). Un secreto nuevo en un query string
+se agrega a `PARAMS_SENSIBLES`. Prueba contra la app real: `tests/unit/observability/webhookContext.test.ts`.
+
 ## Trampas al escribir tests (costaron dos intentos)
 
 - **`@/config/logger` está mockeado globalmente** en `tests/__helpers__/setup.ts`. Cualquier export nombrado que pongas ahí **desaparece**

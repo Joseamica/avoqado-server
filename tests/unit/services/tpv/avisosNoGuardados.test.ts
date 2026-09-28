@@ -1,6 +1,7 @@
 /**
  * Codex pasada final (P1-2): las marcas en memoria del aviso firmado que el servidor no pudo guardar.
  */
+import logger from '@/config/logger'
 import {
   ESPERAS_DE_REINGRESO_MS,
   TOPE_DE_COMERCIOS,
@@ -262,6 +263,51 @@ describe('avisosNoGuardados', () => {
       expect(canalDelComercioFalloHacePoco('m')).toBe(false)
       await jest.advanceTimersByTimeAsync(10 * 60_000)
       expect(reintentar).toHaveBeenCalledTimes(1) // ningún reingreso resucitado vuelve a disparar
+    })
+
+    /**
+     * 🔴 27-sep (medido en vivo): se borró el comercio con el reingreso pendiente y el log dijo «✅ Aviso reingresado» con 0 filas
+     * guardadas. Quien investigue una aprobación perdida lo leería como guardada. Un descarte se retira igual (no se reintenta
+     * para siempre), pero el log dice que NO se guardó, con el status.
+     */
+    describe('el log distingue «guardado» de «descartado»', () => {
+      const exito = (): unknown[] =>
+        (logger.info as jest.Mock).mock.calls.filter(([mensaje]) => String(mensaje).includes('Aviso reingresado'))
+
+      it('🔴 un descarte del aviso AUTÉNTICO se retira sin reintentar y sale como 🚨 error con su status — nunca como ✅', async () => {
+        const reintentar = jest.fn(async () => ({ descartado: { status: 404, motivo: 'unknown merchant' } }))
+        reingresarMasTarde('m:borrado', reintentar, true)
+        await jest.advanceTimersByTimeAsync(ESPERAS_DE_REINGRESO_MS[0])
+        expect(exito()).toHaveLength(0)
+        expect(logger.error).toHaveBeenCalledWith(
+          expect.stringContaining('DESCARTADO'),
+          expect.objectContaining({ clave: 'm:borrado', status: 404, motivo: 'unknown merchant' }),
+        )
+        await jest.advanceTimersByTimeAsync(10 * 60_000)
+        expect(reintentar).toHaveBeenCalledTimes(1) // se retiró: no se reintenta para siempre
+      })
+
+      it('un descarte de una entrada SIN verificar (quizá basura de la búsqueda caída) sale como warn, con su status', async () => {
+        const reintentar = jest.fn(async () => ({ descartado: { status: 401, motivo: 'invalid signature' } }))
+        reingresarMasTarde('m:falso', reintentar, false)
+        await jest.advanceTimersByTimeAsync(ESPERAS_DE_REINGRESO_MS[0])
+        expect(exito()).toHaveLength(0)
+        expect(logger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('descartado'),
+          expect.objectContaining({ clave: 'm:falso', status: 401, motivo: 'invalid signature' }),
+        )
+        expect(logger.error).not.toHaveBeenCalled()
+        await jest.advanceTimersByTimeAsync(10 * 60_000)
+        expect(reintentar).toHaveBeenCalledTimes(1)
+      })
+
+      it('control · lo que sí quedó guardado sigue saliendo como ✅, sin descarte', async () => {
+        reingresarMasTarde('m:ok', async () => true, true)
+        await jest.advanceTimersByTimeAsync(ESPERAS_DE_REINGRESO_MS[0])
+        expect(exito()).toHaveLength(1)
+        expect(logger.error).not.toHaveBeenCalled()
+        expect(logger.warn).not.toHaveBeenCalled()
+      })
     })
   })
 })

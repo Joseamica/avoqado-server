@@ -119,6 +119,11 @@ export function getAppEventLoopHistogram() {
 // ⚠️ IMPORTANT: Webhook routes MUST be mounted BEFORE configureCoreMiddlewares
 // Stripe webhooks require raw body (not JSON parsed) for signature verification.
 //
+// 🔴 Y por eso se quedaban sin el logger, que vive en `configureCoreMiddlewares` (medido el 27-sep con AngelPay): sin
+// `X-Correlation-ID`, sin `Request End`, y con sus 🚨/✅ sin correlationId. Va UNA vez, antes de los cuatro montajes de abajo.
+// No lee el cuerpo — las firmas HMAC siguen viendo los bytes exactos — y `express.raw` conserva el contexto hasta el controlador.
+app.use('/api/v1/webhooks', requestLoggerMiddleware)
+//
 // ⚠️ Google Calendar webhook MUST mount BEFORE the existing /api/v1/webhooks
 // router so Google notifications hit a `*/*` raw parser, not Stripe's strict
 // `application/json` parser (which silently drops Google's non-JSON pings).

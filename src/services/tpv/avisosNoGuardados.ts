@@ -82,9 +82,16 @@ export const TOPE_DE_REINGRESOS_VERIFICADOS = 10_000
 /** Un aviso de AngelPay pesa ~1 KB; lo demás no se guarda en memoria para reingresar. */
 export const TOPE_DE_CUERPO_PARA_REINGRESO = 16 * 1024
 
+/**
+ * Lo que contesta `reintentar`: `false` = no se guardó (se vuelve a programar); `true` = guardado; `{ descartado }` = ya no se
+ * guardará NUNCA (comercio borrado, firma que ya no valida…): se retira igual que el guardado, pero el log dice que NO se guardó.
+ * 🔴 27-sep (medido en vivo): se borró el comercio con el reingreso pendiente y el log dijo «✅ Aviso reingresado» con 0 filas.
+ */
+export type DesenlaceDeReingreso = boolean | { descartado: { status: number; motivo: string } }
+
 type Reingreso = {
   timer: NodeJS.Timeout | null
-  reintentar: () => Promise<boolean>
+  reintentar: () => Promise<DesenlaceDeReingreso>
   intento: number
   /** Firma verificada: un aviso AUTÉNTICO. Los de la búsqueda caída llegan sin verificar hasta que se reintentan. */
   verificado: boolean
@@ -98,7 +105,7 @@ const buscar = (clave: string): Reingreso | undefined => autenticos.get(clave) ?
 export const DESPERTAR_A_LO_MAS_CADA_MS = 5_000
 let ultimoDespertar = 0
 
-export function reingresarMasTarde(clave: string, reintentar: () => Promise<boolean>, verificado: boolean): void {
+export function reingresarMasTarde(clave: string, reintentar: () => Promise<DesenlaceDeReingreso>, verificado: boolean): void {
   const existente = buscar(clave)
   if (existente) {
     // Llegó un aviso AUTÉNTICO (firma verificada, ingreso fallido) con la clave de una entrada sin verificar: desde ahora ningún
@@ -163,9 +170,9 @@ async function unaVuelta(clave: string): Promise<void> {
   r.corriendo = true
   r.timer = null
   const loQueCorre = r.reintentar
-  let guardado = false
+  let desenlace: DesenlaceDeReingreso = false
   try {
-    guardado = await loQueCorre()
+    desenlace = await loQueCorre()
   } catch (err) {
     logger.error('🚨 [AngelPay webhook] El reingreso del aviso volvió a fallar', { err, clave })
   }
@@ -177,13 +184,34 @@ async function unaVuelta(clave: string): Promise<void> {
     programar(clave, r, 0)
     return
   }
-  if (guardado) {
-    ;(r.verificado ? autenticos : sinVerificar).delete(clave)
+  if (!desenlace) {
+    r.intento++
+    programar(clave, r)
+    return
+  }
+  ;(r.verificado ? autenticos : sinVerificar).delete(clave)
+  if (desenlace === true) {
     logger.info('✅ [AngelPay webhook] Aviso reingresado por el propio servidor', { clave, intento: r.intento + 1 })
     return
   }
-  r.intento++
-  programar(clave, r)
+  // Un aviso AUTÉNTICO que ya no se guardará es una aprobación que sólo consta en AngelPay: 🚨. Uno sin verificar (la búsqueda
+  // caída no pudo comprobar su firma) casi siempre es basura: warn.
+  const { status, motivo } = desenlace.descartado
+  if (r.verificado) {
+    logger.error('🚨 [AngelPay webhook] Reingreso DESCARTADO: el aviso firmado NO se guardó y ya no se reintenta', {
+      clave,
+      intento: r.intento + 1,
+      status,
+      motivo,
+    })
+  } else {
+    logger.warn('⚠️ [AngelPay webhook] Reingreso descartado (aviso sin verificar): no se guardó y ya no se reintenta', {
+      clave,
+      intento: r.intento + 1,
+      status,
+      motivo,
+    })
+  }
 }
 
 /**
