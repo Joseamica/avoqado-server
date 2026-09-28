@@ -134,3 +134,72 @@ describe('estación sin pantalla (revisión final I-3)', () => {
     }
   })
 })
+
+describe('F-A: comandas con folio sobreviven apagar/prender o mover de pantalla (full-testing 27-sep)', () => {
+  const item = { create: [{ productName: 'x', quantity: 1 }] }
+
+  it('una comanda CON folio en Cocina sigue en el tablero y en el conteo aunque Cocina se re-selle (apagar→prender)', async () => {
+    const creada = await prisma.kdsOrder.create({
+      data: {
+        venueId,
+        orderNumber: 'conFolioReselleo',
+        orderType: 'DINE_IN',
+        printStationId: cocina,
+        sourceKey: `sale:${SUF}:reselleo`,
+        createdAt: haceDos,
+        items: item,
+      },
+    })
+    // Simula apagar→prender: Cocina se re-sella AHORA, DESPUÉS de que la comanda ya existía.
+    await prisma.printStation.update({ where: { id: cocina }, data: { kitchenDisplaySince: new Date() } })
+    try {
+      expect(nombres(await listKdsOrders(venueId, undefined, cocina))).toContain('conFolioReselleo')
+      expect(await countKdsOrders(venueId, undefined, cocina)).toBeGreaterThanOrEqual(1)
+    } finally {
+      await prisma.kdsOrder.delete({ where: { id: creada.id } })
+      await prisma.printStation.update({ where: { id: cocina }, data: { kitchenDisplaySince: haceUnaHora } })
+    }
+  })
+
+  it('mover la pantalla: la comanda con folio de Cocina (apagada) aparece en el tablero de Barra recién prendida', async () => {
+    const creada = await prisma.kdsOrder.create({
+      data: {
+        venueId,
+        orderNumber: 'conFolioMovida',
+        orderType: 'DINE_IN',
+        printStationId: cocina,
+        sourceKey: `sale:${SUF}:movida`,
+        createdAt: haceDos,
+        items: item,
+      },
+    })
+    await prisma.printStation.update({ where: { id: cocina }, data: { hasKitchenDisplay: false } })
+    await prisma.printStation.update({ where: { id: barra }, data: { kitchenDisplaySince: new Date() } })
+    try {
+      expect(nombres(await listKdsOrders(venueId, undefined, barra))).toContain('conFolioMovida')
+    } finally {
+      await prisma.kdsOrder.delete({ where: { id: creada.id } })
+      await prisma.printStation.update({ where: { id: cocina }, data: { hasKitchenDisplay: true } })
+      await prisma.printStation.update({ where: { id: barra }, data: { kitchenDisplaySince: haceUnaHora } })
+    }
+  })
+
+  it('regresión: una fila SIN folio (sourceKey y printStationId null) creada antes de la fecha sigue OCULTA', async () => {
+    const creada = await prisma.kdsOrder.create({
+      data: {
+        venueId,
+        orderNumber: 'sinFolioVieja',
+        orderType: 'DINE_IN',
+        printStationId: null,
+        sourceKey: null,
+        createdAt: haceDos,
+        items: item,
+      },
+    })
+    try {
+      expect(nombres(await listKdsOrders(venueId, undefined, cocina))).not.toContain('sinFolioVieja')
+    } finally {
+      await prisma.kdsOrder.delete({ where: { id: creada.id } })
+    }
+  })
+})

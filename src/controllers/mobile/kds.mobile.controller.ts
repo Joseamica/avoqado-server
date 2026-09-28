@@ -7,6 +7,7 @@
 
 import { NextFunction, Request, Response } from 'express'
 import logger from '../../config/logger'
+import { logControllerError } from '../../errors/logControllerError'
 import * as kdsMobileService from '../../services/mobile/kds.mobile.service'
 import { reportOutOfStock, retryOutOfStock, type ResultadoRetiro } from '../../services/mobile/kdsOutOfStock.mobile.service'
 import { OPERACION_EN_CURSO } from './deliveryOrder.mobile.controller'
@@ -280,7 +281,7 @@ export const listRecentKdsOrders = async (req: Request, res: Response, next: Nex
     )
     res.status(200).json({ success: true, data })
   } catch (error) {
-    logger.error('Error in listRecentKdsOrders controller:', error)
+    logControllerError('kds listRecentKdsOrders', error)
     next(error)
   }
 }
@@ -294,7 +295,7 @@ export const recallKdsOrder = async (req: Request, res: Response, next: NextFunc
     const data = await kdsMobileService.recallKdsOrder(req.params.venueId, req.params.id)
     res.status(200).json({ success: true, data })
   } catch (error) {
-    logger.error('Error in recallKdsOrder controller:', error)
+    logControllerError('kds recallKdsOrder', error)
     next(error)
   }
 }
@@ -320,7 +321,7 @@ export const bumpKdsOrdersBatch = async (req: Request, res: Response, next: Next
     const data = await kdsMobileService.bumpKdsOrdersBatch(req.params.venueId, ids)
     res.status(200).json({ success: true, data })
   } catch (error) {
-    logger.error('Error in bumpKdsOrdersBatch controller:', error)
+    logControllerError('kds bumpKdsOrdersBatch', error)
     next(error)
   }
 }

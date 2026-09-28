@@ -60,6 +60,27 @@ describe('PUT /print-stations/:stationId/kitchen-display', () => {
     expect(mockSet).not.toHaveBeenCalled()
   })
 
+  it('M-1: los 400 de validación salen en español, nunca en el inglés por default de Zod', async () => {
+    const a = app('OWNER')
+
+    const sinEnabled = await request(a).put('/venues/v1/print-stations/s1/kitchen-display').send({})
+    expect(sinEnabled.status).toBe(400)
+    expect(sinEnabled.body.message).toContain('Indica si la pantalla va prendida')
+    expect(sinEnabled.body.message).not.toContain('Required')
+
+    const tipoInvalido = await request(a).put('/venues/v1/print-stations/s1/kitchen-display').send({ enabled: 'yes' })
+    expect(tipoInvalido.status).toBe(400)
+    expect(tipoInvalido.body.message).toContain('enabled debe ser verdadero o falso')
+    expect(tipoInvalido.body.message).not.toContain('Expected boolean')
+
+    const conExtra = await request(a).put('/venues/v1/print-stations/s1/kitchen-display').send({ enabled: true, name: 'x' })
+    expect(conExtra.status).toBe(400)
+    expect(conExtra.body.message).toContain('Sólo se acepta el campo enabled')
+    expect(conExtra.body.message).not.toContain('Unrecognized key')
+
+    expect(mockSet).not.toHaveBeenCalled()
+  })
+
   it('regresión: nadie cuela hasKitchenDisplay por el PUT normal de la estación', async () => {
     const r = await request(app('OWNER')).put('/venues/v1/print-stations/s1').send({ hasKitchenDisplay: true })
     expect(r.status).toBe(400)

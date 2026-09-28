@@ -151,8 +151,11 @@ async function filtroDelTablero(venueId: string, statuses: KdsOrderStatus[], sta
     )
   }
   const condiciones: Prisma.KdsOrderWhereInput[] = [{ fallbackPrintedAt: null }]
-  // Borrón y cuenta nueva: sólo lo creado desde que se prendió la pantalla. Uber queda exento: llega solo.
-  if (desde) condiciones.push({ OR: [{ orderType: 'DELIVERY' }, { createdAt: { gte: desde } }] })
+  // Borrón y cuenta nueva: la fecha sólo esconde el REZAGO sin folio de antes de la etapa 3.
+  // Full-testing 27-sep: apagar→prender (o mover/borrar la estación) re-sella `kitchenDisplaySince`
+  // y eso NO puede esconder lo que el servidor ya armó — decisión del founder. Uber (sin folio) sigue
+  // exento por tipo; cualquier fila CON folio (`sourceKey`) queda exenta por folio.
+  if (desde) condiciones.push({ OR: [{ orderType: 'DELIVERY' }, { sourceKey: { not: null } }, { createdAt: { gte: desde } }] })
   // Lo suyo, lo «Sin estación» y lo de una estación que ya no tiene pantalla activa (si no, nadie lo vería).
   if (stationId) {
     condiciones.push({
