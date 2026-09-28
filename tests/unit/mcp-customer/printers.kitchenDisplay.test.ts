@@ -4,6 +4,7 @@
  */
 import { registerPrinterTools } from '../../../src/mcp/tools/printers'
 import type { McpScope } from '../../../src/mcp/scope'
+import { ForbiddenError } from '../../../src/errors/AppError'
 
 const mockList = jest.fn()
 const mockSet = jest.fn()
@@ -104,6 +105,24 @@ describe('set_print_station_kitchen_display', () => {
     expect(mockSet).toHaveBeenCalledWith('v1', 's1', false, 's1')
     expect(mockAudit).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: 'PRINT_STATION_KITCHEN_DISPLAY_SET' }))
   })
+
+  it('el ForbiddenError del servicio (plan/otra regla) se explica sin escribir ni auditar', async () => {
+    mockSet.mockRejectedValueOnce(
+      new ForbiddenError('La pantalla de cocina es del plan Pro. Mejora tu plan para prenderla.', 'KITCHEN_DISPLAY_REQUIRES_PRO'),
+    )
+    const r = parse(await avoqado('set_print_station_kitchen_display', { venueId: 'v1', stationId: 's1', enabled: true, confirm: true }))
+    expect(r.ok).toBe(false)
+    expect(r.error).toBe('La pantalla de cocina es del plan Pro. Mejora tu plan para prenderla.')
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+
+  it('un error que NO es ForbiddenError se re-lanza (el catch no se traga fallos reales)', async () => {
+    mockSet.mockRejectedValueOnce(new Error('db'))
+    await expect(
+      avoqado('set_print_station_kitchen_display', { venueId: 'v1', stationId: 's1', enabled: true, confirm: true }),
+    ).rejects.toThrow('db')
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
 })
 
 describe('list_print_stations', () => {
@@ -137,5 +156,13 @@ describe('list_kitchen_tickets (etapa 3)', () => {
 
   it('un venue fuera de alcance se rechaza', async () => {
     await expect(cliente('list_kitchen_tickets', { venueId: 'ajeno' })).rejects.toThrow('ScopeError')
+  })
+
+  it('un status inválido no truena: se pasa tal cual (el servicio descarta lo que no reconoce)', async () => {
+    mockListKds.mockResolvedValue([])
+    mockCountKds.mockResolvedValue(0)
+    const r = parse(await cliente('list_kitchen_tickets', { venueId: 'v1', status: 'BOGUS' }))
+    expect(r.ok).toBe(true)
+    expect(mockListKds).toHaveBeenCalledWith('v1', 'BOGUS', undefined)
   })
 })
