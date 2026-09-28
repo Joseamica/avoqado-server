@@ -948,7 +948,7 @@ async function applyAddItems(
  * PAY_CASH — payload: { orderId | localOrderId, amountCents, tipCents?,
  * method?, externalSource? }
  *
- * El nombre dice CASH por historia: el tipo NO se renombra porque los 14 tipos
+ * El nombre dice CASH por historia: el tipo NO se renombra porque los 15 tipos
  * se espejan por nombre exacto entre server, Android e iOS y cambiarlo rompería
  * los intents ya encolados en dispositivos allá afuera. Desde 2026-07-28
  * transporta CUALQUIER cobro registrado a mano (tarjeta de una terminal ajena,

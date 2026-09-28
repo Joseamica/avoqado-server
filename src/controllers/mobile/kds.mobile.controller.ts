@@ -274,7 +274,10 @@ export const retryKdsItemOutOfStock = async (req: Request, res: Response, next: 
 export const listRecentKdsOrders = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { stationId } = req.query
-    const data = await kdsMobileService.listRecentKdsOrders(req.params.venueId, typeof stationId === 'string' && stationId ? stationId : undefined)
+    const data = await kdsMobileService.listRecentKdsOrders(
+      req.params.venueId,
+      typeof stationId === 'string' && stationId ? stationId : undefined,
+    )
     res.status(200).json({ success: true, data })
   } catch (error) {
     logger.error('Error in listRecentKdsOrders controller:', error)
@@ -310,7 +313,9 @@ export const bumpKdsOrdersBatch = async (req: Request, res: Response, next: Next
       ids.length <= kdsMobileService.KDS_BUMP_BATCH_MAX &&
       ids.every((id: unknown) => typeof id === 'string' && id.length > 0)
     if (!validos) {
-      return res.status(400).json({ success: false, message: `Se requieren entre 1 y ${kdsMobileService.KDS_BUMP_BATCH_MAX} ids de comanda` })
+      return res
+        .status(400)
+        .json({ success: false, message: `Se requieren entre 1 y ${kdsMobileService.KDS_BUMP_BATCH_MAX} ids de comanda` })
     }
     const data = await kdsMobileService.bumpKdsOrdersBatch(req.params.venueId, ids)
     res.status(200).json({ success: true, data })

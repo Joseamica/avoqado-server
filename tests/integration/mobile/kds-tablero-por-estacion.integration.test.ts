@@ -23,11 +23,18 @@ const ids: Record<string, string> = {}
 
 beforeAll(async () => {
   orgId = (
-    await prisma.organization.create({ data: { name: `Tablero ${SUF}`, email: `${SUF}@example.test`, phone: '0000000000' }, select: { id: true } })
+    await prisma.organization.create({
+      data: { name: `Tablero ${SUF}`, email: `${SUF}@example.test`, phone: '0000000000' },
+      select: { id: true },
+    })
   ).id
   venueId = (await prisma.venue.create({ data: { organizationId: orgId, name: `V ${SUF}`, slug: `v-${SUF}` } })).id
-  cocina = (await prisma.printStation.create({ data: { venueId, name: 'Cocina', hasKitchenDisplay: true, kitchenDisplaySince: haceUnaHora } })).id
-  barra = (await prisma.printStation.create({ data: { venueId, name: 'Barra', hasKitchenDisplay: true, kitchenDisplaySince: haceUnaHora } })).id
+  cocina = (
+    await prisma.printStation.create({ data: { venueId, name: 'Cocina', hasKitchenDisplay: true, kitchenDisplaySince: haceUnaHora } })
+  ).id
+  barra = (
+    await prisma.printStation.create({ data: { venueId, name: 'Barra', hasKitchenDisplay: true, kitchenDisplaySince: haceUnaHora } })
+  ).id
   const k = async (nombre: string, data: Record<string, unknown>) => {
     ids[nombre] = (
       await prisma.kdsOrder.create({
@@ -35,7 +42,7 @@ beforeAll(async () => {
       })
     ).id
   }
-  await k('cocina', { printStationId: cocina })
+  await k('cocina', { printStationId: cocina, sourceKey: `sale:${SUF}:${cocina}` })
   await k('barra', { printStationId: barra })
   await k('sinEstacion', {})
   await k('viejo', { printStationId: cocina, createdAt: haceDos })
@@ -55,8 +62,15 @@ const nombres = (xs: Array<{ orderNumber: string }>) => xs.map(x => x.orderNumbe
 
 describe('tablero por estación', () => {
   it('la pantalla de Cocina ve lo suyo, «Sin estación» y Uber; no Barra, ni lo viejo, ni lo impreso', async () => {
-    expect(nombres(await listKdsOrders(venueId, undefined, cocina))).toEqual(['cocina', 'sinEstacion', 'uber'])
+    const tablero = await listKdsOrders(venueId, undefined, cocina)
+    expect(nombres(tablero)).toEqual(['cocina', 'sinEstacion', 'uber'])
     expect(await countKdsOrders(venueId, undefined, cocina)).toBe(3)
+    // El folio y la estación viajan en la respuesta: la pantalla junta por folio lo que le llegó por WiFi (spec §6).
+    expect(tablero.find(o => o.orderNumber === 'cocina')).toMatchObject({
+      sourceKey: `sale:${SUF}:${cocina}`,
+      printStationId: cocina,
+      fallbackPrintedAt: null,
+    })
   })
 
   it('una pantalla vieja (sin estación) ve todo lo vigente, nunca lo viejo ni lo impreso', async () => {
@@ -71,5 +85,52 @@ describe('tablero por estación', () => {
     expect(regresada.status).toBe('NEW')
     expect(regresada.completedAt).toBeNull()
     await expect(recallKdsOrder(venueId, ids.cocina)).rejects.toBeInstanceOf(NotFoundError)
+  })
+})
+
+describe('estación sin pantalla (revisión final I-3)', () => {
+  let apagada: string
+  beforeAll(async () => {
+    // La pantalla se acaba de APAGAR: `kitchenDisplaySince` se conserva.
+    apagada = (
+      await prisma.printStation.create({ data: { venueId, name: 'Postres', hasKitchenDisplay: false, kitchenDisplaySince: haceUnaHora } })
+    ).id
+    const item = { create: [{ productName: 'x', quantity: 1 }] }
+    await prisma.kdsOrder.create({
+      data: { venueId, orderNumber: 'sinEstacionVieja', orderType: 'DINE_IN', createdAt: haceDos, items: item },
+    })
+    await prisma.kdsOrder.create({
+      data: { venueId, orderNumber: 'deApagada', orderType: 'DINE_IN', printStationId: apagada, items: item },
+    })
+  })
+
+  it('pedir con la estación de la pantalla recién apagada no trae lo anterior a su cuenta nueva', async () => {
+    const tablero = nombres(await listKdsOrders(venueId, undefined, apagada))
+    expect(tablero).not.toContain('sinEstacionVieja')
+    expect(tablero).toContain('deApagada')
+  })
+
+  it('la comanda de una estación que se quedó sin pantalla sale en las pantallas de las otras estaciones', async () => {
+    expect(nombres(await listKdsOrders(venueId, undefined, cocina))).toContain('deApagada')
+    expect(nombres(await listKdsOrders(venueId, undefined, barra))).toContain('deApagada')
+  })
+
+  it('una estación que no existe o de otro negocio no ve nada', async () => {
+    const otroVenue = (await prisma.venue.create({ data: { organizationId: orgId, name: `V2 ${SUF}`, slug: `v2-${SUF}` } })).id
+    const ajena = (
+      await prisma.printStation.create({
+        data: { venueId: otroVenue, name: 'Ajena', hasKitchenDisplay: true, kitchenDisplaySince: haceUnaHora },
+      })
+    ).id
+    try {
+      for (const stationId of ['no-existe', ajena]) {
+        expect(await listKdsOrders(venueId, undefined, stationId)).toEqual([])
+        expect(await countKdsOrders(venueId, undefined, stationId)).toBe(0)
+        expect(await listRecentKdsOrders(venueId, stationId)).toEqual([])
+      }
+    } finally {
+      await prisma.printStation.deleteMany({ where: { venueId: otroVenue } })
+      await prisma.venue.deleteMany({ where: { id: otroVenue } })
+    }
   })
 })

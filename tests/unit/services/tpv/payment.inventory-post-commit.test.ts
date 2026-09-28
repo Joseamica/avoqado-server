@@ -771,4 +771,26 @@ describe('recordOrderPayment — la comanda de pantalla nace al saldar (etapa 3 
     expect(conMarca).toBe(false)
     expect(armarComandasMock).not.toHaveBeenCalled()
   })
+
+  // 🔴 El camino legado suma el importe del pago actual sin mirar su estado: un FAILED/PENDING que
+  // «cubre» el saldo no puso la marca (sólo la pone el saldado COMPLETED), así que tampoco arma.
+  it.each(['FAILED', 'PENDING'] as const)('con pantalla: un pago %s que cubre el saldo NO arma la comanda', async status => {
+    debeMarcarCocinaMock.mockResolvedValue(true)
+    ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+      id: 'payment-1',
+      status,
+      feeAmount: 0,
+      netAmount: 100,
+      amount: new Decimal(100),
+      tipAmount: new Decimal(0),
+      venueId: VENUE_ID,
+      orderId: ORDER_ID,
+    })
+
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, status }, 'user-1')
+
+    const conMarca = (prisma.order.update as jest.Mock).mock.calls.some(([a]) => a?.data?.kitchenPendingAt instanceof Date)
+    expect(conMarca).toBe(false)
+    expect(armarComandasMock).not.toHaveBeenCalled()
+  })
 })

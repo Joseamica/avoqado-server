@@ -70,7 +70,10 @@ export async function updateStation(req: Request, res: Response, next: NextFunct
   }
 }
 
-/** Casilla «pantalla de cocina» de una estación — la ruta la restringe a SUPERADMIN (etapa 1). */
+/**
+ * Casilla «pantalla de cocina» de una estación — la ruta pide `printers:manage`; prender pasa además por la puerta de
+ * lanzamiento (`PANTALLA_ABIERTA_A_CLIENTES`) y el plan, en el servicio. Apagar siempre se puede.
+ */
 export async function setKitchenDisplay(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const data = await printStationService.setKitchenDisplay(req.params.venueId, req.params.stationId, req.body.enabled, actor(req))

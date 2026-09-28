@@ -82,6 +82,11 @@ export interface KdsOrderResponse {
   canCancelDelivery?: boolean
   deliveryOpInFlight?: string | null
   hasLineActionInProgress?: boolean
+  /** Etapa 3 (spec §6): el folio y la estación, para juntar por folio lo que llegó por WiFi y marcar LISTO sin red. */
+  sourceKey?: string | null
+  printStationId?: string | null
+  /** Salió en papel de respaldo (ISO). */
+  fallbackPrintedAt?: string | null
   items: Array<{
     id: string
     productName: string
@@ -126,21 +131,38 @@ function statusesDelFiltro(statusFilter?: string): KdsOrderStatus[] {
  * que las pantallas viejas tampoco vean lo impreso en papel ni lo anterior a prender la pantalla.
  */
 async function filtroDelTablero(venueId: string, statuses: KdsOrderStatus[], stationId?: string): Promise<Prisma.KdsOrderWhereInput> {
-  const pantallas = await prisma.printStation.findMany({
-    where: { venueId, hasKitchenDisplay: true },
-    select: { id: true, kitchenDisplaySince: true },
-    take: 50,
-  })
-  const desde = stationId
-    ? (pantallas.find(p => p.id === stationId)?.kitchenDisplaySince ?? null)
-    : pantallas.reduce<Date | null>(
-        (min, p) => (p.kitchenDisplaySince && (!min || p.kitchenDisplaySince < min) ? p.kitchenDisplaySince : min),
-        null,
-      )
+  let desde: Date | null
+  if (stationId) {
+    // SIN filtrar por `hasKitchenDisplay`: al apagar la pantalla su `kitchenDisplaySince` se conserva, y sin él el
+    // tablero perdía el filtro de fecha y se llenaba del rezago viejo «Sin estación».
+    const estacion = await prisma.printStation.findFirst({ where: { id: stationId, venueId }, select: { kitchenDisplaySince: true } })
+    // Estación inexistente o de otro negocio: no ve nada (nunca todo el venue).
+    if (!estacion) return { venueId, id: { in: [] } }
+    desde = estacion.kitchenDisplaySince
+  } else {
+    const pantallas = await prisma.printStation.findMany({
+      where: { venueId, hasKitchenDisplay: true },
+      select: { kitchenDisplaySince: true },
+      take: 50,
+    })
+    desde = pantallas.reduce<Date | null>(
+      (min, p) => (p.kitchenDisplaySince && (!min || p.kitchenDisplaySince < min) ? p.kitchenDisplaySince : min),
+      null,
+    )
+  }
   const condiciones: Prisma.KdsOrderWhereInput[] = [{ fallbackPrintedAt: null }]
   // Borrón y cuenta nueva: sólo lo creado desde que se prendió la pantalla. Uber queda exento: llega solo.
   if (desde) condiciones.push({ OR: [{ orderType: 'DELIVERY' }, { createdAt: { gte: desde } }] })
-  if (stationId) condiciones.push({ OR: [{ printStationId: stationId }, { printStationId: null }] })
+  // Lo suyo, lo «Sin estación» y lo de una estación que ya no tiene pantalla activa (si no, nadie lo vería).
+  if (stationId) {
+    condiciones.push({
+      OR: [
+        { printStationId: stationId },
+        { printStationId: null },
+        { printStation: { OR: [{ hasKitchenDisplay: false }, { active: false }] } },
+      ],
+    })
+  }
   return { venueId, status: { in: statuses }, AND: condiciones }
 }
 
@@ -396,6 +418,9 @@ function formatKdsOrder(order: any, needsAcceptance = false): KdsOrderResponse {
     status: order.status,
     customerName: order.customerName ?? null,
     customerContact: order.customerContact ?? null,
+    sourceKey: order.sourceKey ?? null,
+    printStationId: order.printStationId ?? null,
+    fallbackPrintedAt: order.fallbackPrintedAt?.toISOString() ?? null,
     items: (order.items || []).map((item: any) => ({
       id: item.id,
       productName: item.productName,

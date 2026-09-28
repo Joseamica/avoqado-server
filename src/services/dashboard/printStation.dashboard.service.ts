@@ -261,7 +261,10 @@ export async function updateStation(venueId: string, stationId: string, input: U
   return station
 }
 
-/** Aviso que acompaña a la casilla mientras la etapa 3 no exista (spec 2026-09-24 §4 y §6). */
+/**
+ * Aviso que acompaña a la casilla mientras la puerta de lanzamiento siga cerrada (`PANTALLA_ABIERTA_A_CLIENTES`). La
+ * casilla pide `printers:manage`, pero PRENDER pasa por esa puerta y por el plan; apagar siempre se puede.
+ */
 export const KITCHEN_DISPLAY_NOT_READY_NOTICE =
   'La pantalla de cocina todavía no está lista para clientes. La etapa 3 se construye por fases ' +
   '(docs/superpowers/specs/2026-09-27-kds-etapa-3-design.md); hasta pasar su puerta de calidad sólo Avoqado la prende.'

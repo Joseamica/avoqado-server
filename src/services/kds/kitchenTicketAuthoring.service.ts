@@ -20,6 +20,8 @@ export type KitchenMarkAction = 'BUMP' | 'FALLBACK_PRINTED'
 const MAX_RENGLONES = 500
 /** Mismo presupuesto que el candado de los pedidos de reparto (`deliveryOrderLock.ts`). */
 const CANDADO_TX_TIMEOUT_MS = 15_000
+/** Los `OrderSource` que pone la ingesta de reparto (`deliveryOrderIngestion.service.ts`). */
+const ORIGENES_DE_AGREGADOR = new Set<string>(['UBER_EATS', 'RAPPI', 'DIDI_FOOD', 'DELIVERY_PLATFORM'])
 
 export async function authorKitchenTickets(params: {
   venueId: string
@@ -37,12 +39,27 @@ export async function authorKitchenTickets(params: {
 
   const order = await prisma.order.findFirst({
     where: { id: orderId, venueId },
-    select: { id: true, orderNumber: true, externalId: true, tableId: true, type: true, source: true, areaTicketCode: true },
+    select: {
+      id: true,
+      orderNumber: true,
+      externalId: true,
+      tableId: true,
+      type: true,
+      source: true,
+      status: true,
+      originSystem: true,
+      deliveryChannelLinkId: true,
+      areaTicketCode: true,
+    },
   })
   if (!order) return { ticketIds: [] }
-  // Uber arma su propia comanda al ingerir; los vales por área y SoftRestaurant tienen su propio flujo.
+  // El reparto de AGREGADOR arma su propia comanda al ingerir (una «Entrega» del propio POS sí se arma aquí); los vales
+  // por área y SoftRestaurant tienen su propio flujo; una venta cancelada no se cocina (el barrido llega hasta 15 min tarde).
   const integrada = order.source === 'POS' && Boolean(order.externalId?.trim())
-  if (order.type === 'DELIVERY' || order.areaTicketCode || integrada) {
+  const deAgregador =
+    Boolean(order.deliveryChannelLinkId) || order.originSystem === 'DELIVERY_PLATFORM' || ORIGENES_DE_AGREGADOR.has(order.source)
+  const cancelada = order.status === 'CANCELLED' || order.status === 'DELETED'
+  if (deAgregador || cancelada || order.areaTicketCode || integrada) {
     await limpiarMarca(venueId, orderId, startedAt)
     return { ticketIds: [] }
   }

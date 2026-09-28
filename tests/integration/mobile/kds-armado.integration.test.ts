@@ -166,9 +166,26 @@ describe('authorKitchenTickets', () => {
     expect(b.fallbackPrintedAt).toBeNull()
   })
 
-  it('un pedido de reparto no se arma por aquí (Uber arma el suyo) y la marca se limpia', async () => {
-    const v = await nuevaVenta({ type: 'DELIVERY' })
+  it.each<[string, Partial<Prisma.OrderUncheckedCreateInput>]>([
+    ['con vínculo de canal', { deliveryChannelLinkId: `link-${SUF}` }],
+    ['inyectado por la plataforma', { originSystem: 'DELIVERY_PLATFORM' }],
+    ['con origen de agregador', { source: 'UBER_EATS' }],
+  ])('un pedido de reparto de agregador (%s) no se arma por aquí (Uber arma el suyo) y la marca se limpia', async (_caso, extra) => {
+    const v = await nuevaVenta({ type: 'DELIVERY', ...extra })
     expect((await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })).ticketIds).toEqual([])
+    expect(await comandasDe(v.id)).toHaveLength(0)
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: v.id } })).kitchenPendingAt).toBeNull()
+  })
+
+  it('una venta «Entrega» del propio POS (DELIVERY sin proveedor) SÍ llega a la pantalla', async () => {
+    const v = await nuevaVenta({ type: 'DELIVERY' })
+    expect((await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })).ticketIds).toHaveLength(2)
+    expect((await comandasDe(v.id)).every(c => c.orderType === 'DELIVERY')).toBe(true)
+  })
+
+  it.each(['CANCELLED', 'DELETED'] as const)('una venta %s no se arma (ni por el barrido) y la marca se limpia', async status => {
+    const v = await nuevaVenta({ status })
+    expect((await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'SWEEP' })).ticketIds).toEqual([])
     expect(await comandasDe(v.id)).toHaveLength(0)
     expect((await prisma.order.findUniqueOrThrow({ where: { id: v.id } })).kitchenPendingAt).toBeNull()
   })

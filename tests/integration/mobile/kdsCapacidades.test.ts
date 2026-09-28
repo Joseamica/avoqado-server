@@ -137,7 +137,10 @@ describe('El DTO del KDS decide por las apps (Tarea 16)', () => {
     venueId = (await prisma.venue.create({ data: { organizationId: orgId, name: `V cap ${Date.now()}`, slug: `v-cap-${Date.now()}` } })).id
     // Desde la etapa 1 de la pantalla de cocina (spec 2026-09-24), el POS sólo crea comandas si el negocio
     // tiene una estación activa con pantalla. Esta suite prueba comandas del POS, así que la necesita.
-    await prisma.printStation.create({ data: { venueId, name: 'Cocina', hasKitchenDisplay: true } })
+    // Etapa 3: el servidor arma desde `OrderItem` lo creado después de prender la pantalla.
+    await prisma.printStation.create({
+      data: { venueId, name: 'Cocina', hasKitchenDisplay: true, kitchenDisplaySince: new Date(Date.now() - 60 * 60_000) },
+    })
     link = await prisma.deliveryChannelLink.create({
       data: { venueId, provider: DeliveryProvider.UBER_EATS, externalLocationId: `store-cap-${Date.now()}`, webhookSecret: 'x' },
     })
@@ -282,6 +285,11 @@ describe('El DTO del KDS decide por las apps (Tarea 16)', () => {
 
   it('un pedido «Entrega» del POS (DELIVERY sin proveedor) no trae capacidades ni «Cancelar pedido»', async () => {
     // Como lo hace el POS: la venta nace DELIVERY y CONFIRMED sin `externalId`, y la comanda se crea por la ruta de siempre.
+    // Etapa 3: el servidor la arma desde los renglones reales de la venta (producto con categoría), no desde el cuerpo.
+    const categoryId = (await prisma.menuCategory.create({ data: { venueId, name: 'Comida', slug: `comida-ent-${Date.now()}` } })).id
+    const productId = (
+      await prisma.product.create({ data: { venueId, sku: `torta-${Date.now()}`, name: 'Torta', categoryId, price: 100 } })
+    ).id
     const orden = await prisma.order.create({
       data: {
         venueId,
@@ -291,6 +299,7 @@ describe('El DTO del KDS decide por las apps (Tarea 16)', () => {
         subtotal: 100,
         taxAmount: 0,
         total: 100,
+        items: { create: [{ productId, productName: 'Torta', quantity: 1, unitPrice: 100, taxAmount: 0, total: 100 }] },
       },
     })
     const creada = await request(server)

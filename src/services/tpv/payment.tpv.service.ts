@@ -4142,7 +4142,12 @@ export async function recordOrderPayment(
           tipAmount,
           payment.id,
           validatedStaffId,
-          { venueId, committedSettlement: committedStandaloneSettlement, marcarCocina },
+          // La marca sólo la pone el saldado COMPLETED; sin él, un FAILED/PENDING que «cubre» el saldo no arma.
+          {
+            venueId,
+            committedSettlement: committedStandaloneSettlement,
+            marcarCocina: marcarCocina && Boolean(committedStandaloneSettlement),
+          },
         )
       }
 
