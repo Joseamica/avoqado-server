@@ -74,6 +74,7 @@ import { registerDeviceMiddleware } from '../middlewares/registerDevice.middlewa
 import { validateRequest } from '../middlewares/validation'
 import { recordFastPaymentParamsSchema, recordPaymentBodySchema } from '../schemas/tpv.schema'
 import { gatewayHeartbeatSchema, printConfigParamSchema, syncPrintJobsSchema } from '../schemas/mobile/print.mobile.schema'
+import { setKitchenDisplaySchema } from '../schemas/dashboard/printStation.schema'
 import * as announcementReadController from '../controllers/shared/announcement.read.controller'
 
 const router = Router()
@@ -3243,6 +3244,16 @@ router.get(
   checkPermission('orders:read'),
   validateRequest(printConfigParamSchema),
   printMobileController.getPrintConfig,
+)
+// Etapa 3 del KDS: prender/apagar la pantalla de una estación desde la tablet — el MISMO registro y las mismas
+// reglas que el dashboard (quien configura impresoras; prender pasa por la puerta de lanzamiento y el plan Pro).
+router.put(
+  '/venues/:venueId/print-stations/:stationId/kitchen-display',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('printers:manage'),
+  validateRequest(setKitchenDisplaySchema),
+  printMobileController.setStationKitchenDisplay,
 )
 router.post(
   '/venues/:venueId/print-jobs/sync',

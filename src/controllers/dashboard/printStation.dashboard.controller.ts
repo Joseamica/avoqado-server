@@ -1,5 +1,6 @@
 import { NextFunction, Request, Response } from 'express'
 import * as printStationService from '../../services/dashboard/printStation.dashboard.service'
+import { PANTALLA_ABIERTA_A_CLIENTES } from '../../services/kds/kitchenDisplayRelease'
 
 const actor = (req: Request): string | undefined => (req as any).authContext?.userId
 
@@ -44,7 +45,8 @@ export async function deletePrinter(req: Request, res: Response, next: NextFunct
 export async function listStations(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const data = await printStationService.listStations(req.params.venueId)
-    res.status(200).json({ success: true, data })
+    // `kitchenDisplayOpenToClients`: el dashboard enseña la casilla al dueño sólo cuando la etapa 3 se lanzó.
+    res.status(200).json({ success: true, data, kitchenDisplayOpenToClients: PANTALLA_ABIERTA_A_CLIENTES })
   } catch (error) {
     next(error)
   }
