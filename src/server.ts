@@ -86,6 +86,7 @@ import { cashClosePairReconcilerJob } from './jobs/cash-close-pair-reconciler.jo
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
 // Import Firebase Admin initialization
 import { initializeFirebase } from './config/firebase'
+import { iniciarCajaNegra } from './observability/cajaNegra'
 import { primeVenueNames } from './observability/venueNames'
 import { primeVenuesEstrictos } from './services/terminal-payment-strictness'
 // Import Stripe feature sync startup
@@ -759,6 +760,14 @@ const startApplication = async (retries = 3) => {
       process.exit(1)
     }
   }
+}
+
+// Caja negra: si el proceso muere sin avisar (27 y 28-sep-2026), que quede en el log cómo estaba.
+// Va después de registrar los manejadores de señales: sólo observa las que alguien ya atiende.
+const cajaNegra = iniciarCajaNegra({ latidos: NODE_ENV !== 'development' })
+if (!cajaNegra.prismaParche && NODE_ENV === 'production') {
+  // 🚨 Sin el parche, cada findUnique/create/update vuelve a pagar el mapa O(n²) de campos de Prisma.
+  logger.warn('[parche-prisma] inactivo: el build no aplicó scripts/parchar-prisma-runtime.cjs')
 }
 
 // Start the application
