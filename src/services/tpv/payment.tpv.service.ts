@@ -2966,6 +2966,13 @@ async function resumeCapturedAreaTicketPayment(
   }
 }
 
+/**
+ * Estados de `Payment` que NO son dinero capturado: todo `TransactionStatus` menos COMPLETED. En una fila real
+ * equivale a `status !== 'COMPLETED'` (la columna nunca es nula; su default es PENDING); una prueba fija que la
+ * lista sea exactamente el enum menos COMPLETED, así que un estado nuevo obliga a decidir aquí.
+ */
+export const ESTADOS_DE_PAGO_NO_CAPTURADOS: ReadonlySet<string> = new Set(['PENDING', 'PROCESSING', 'FAILED', 'REFUNDED'])
+
 export async function recordOrderPayment(
   venueId: string,
   orderId: string,
@@ -4132,6 +4139,17 @@ export async function recordOrderPayment(
             })
           }
         }
+      } else if (ESTADOS_DE_PAGO_NO_CAPTURADOS.has(payment.status)) {
+        // 🔴 DINERO: sólo COMPLETED es dinero capturado — la misma regla que el saldado de la transacción
+        // (`settleStandalonePaymentInTx`). El recálculo de abajo suma el importe del pago actual sin mirar su
+        // estado: un FAILED/PENDING/PROCESSING/REFUNDED que «cubría» el saldo dejaba la venta PAID y COMPLETED,
+        // descontaba inventario y abría la lealtad de una venta que nadie cobró. El intento queda registrado; la
+        // cuenta no se toca.
+        logger.warn('⚠️ Pago no capturado: la cuenta no se recalcula', {
+          paymentId: payment.id,
+          orderId: activeOrder.id,
+          paymentStatus: payment.status,
+        })
       } else {
         // ✅ FIX: Pass payment ID to exclude it from previousPayments calculation
         // ⭐ LOYALTY: Pass staffId for loyalty points attribution
@@ -4151,12 +4169,15 @@ export async function recordOrderPayment(
         )
       }
 
-      logger.info('Order totals updated directly in backend (Standalone Mode)', {
-        paymentId: payment.id,
-        orderId: activeOrder.id,
-        paymentAmount: totalAmount + tipAmount,
-        elapsedMs: elapsedMs(),
-      })
+      // Sólo si de verdad se recalculó: con un pago no capturado este log contradiría al aviso de arriba.
+      if (!ESTADOS_DE_PAGO_NO_CAPTURADOS.has(payment.status)) {
+        logger.info('Order totals updated directly in backend (Standalone Mode)', {
+          paymentId: payment.id,
+          orderId: activeOrder.id,
+          paymentAmount: totalAmount + tipAmount,
+          elapsedMs: elapsedMs(),
+        })
+      }
     } catch (updateError: any) {
       // ⚠️ Este re-throw ya NO puede alcanzar al inventario, y es a propósito.
       //

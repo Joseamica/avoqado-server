@@ -794,3 +794,59 @@ describe('recordOrderPayment — la comanda de pantalla nace al saldar (etapa 3 
     expect(armarComandasMock).not.toHaveBeenCalled()
   })
 })
+
+// 🔴 DINERO: sólo COMPLETED es dinero capturado — la misma regla que ya sigue el saldado DENTRO de la transacción
+// (`settleStandalonePaymentInTx` exige COMPLETED). El camino legado de después sumaba el importe del pago actual sin
+// mirar su estado: un FAILED/PENDING/PROCESSING/REFUNDED que «cubría» el saldo dejaba la venta PAID y COMPLETED,
+// descontaba inventario y le abría la lealtad a una venta que nadie cobró. Ningún cliente lo manda hoy (todos mandan
+// COMPLETED), pero el contrato del endpoint lo permite.
+describe('recordOrderPayment — un pago que NO se capturó no salda la cuenta', () => {
+  beforeEach(() => {
+    const order = makeOrder()
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+    ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
+    ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
+  })
+
+  const dejoLaVentaPagada = () =>
+    (prisma.order.update as jest.Mock).mock.calls.some(
+      ([a]) => a?.data?.paymentStatus === 'PAID' || a?.data?.status === 'COMPLETED' || a?.data?.loyaltyEligibleAt instanceof Date,
+    )
+
+  it.each(['FAILED', 'PENDING', 'PROCESSING', 'REFUNDED'] as const)(
+    'un pago %s que cubre el saldo: se registra el intento, pero la venta NO queda pagada ni descuenta inventario',
+    async status => {
+      ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+        id: 'payment-1',
+        status,
+        feeAmount: 0,
+        netAmount: 100,
+        amount: new Decimal(100),
+        tipAmount: new Decimal(0),
+        venueId: VENUE_ID,
+        orderId: ORDER_ID,
+      })
+
+      await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, status }, 'user-1')
+
+      expect(prisma.payment.create).toHaveBeenCalled()
+      expect(dejoLaVentaPagada()).toBe(false)
+      expect(productInventoryService.deductInventoryForProduct).not.toHaveBeenCalled()
+    },
+  )
+
+  it('la lista de estados no capturados es EXACTAMENTE el enum menos COMPLETED (un estado nuevo obliga a decidir)', () => {
+    const { TransactionStatus } = jest.requireActual('@prisma/client')
+    const esperados = Object.values(TransactionStatus as Record<string, string>)
+      .filter(s => s !== 'COMPLETED')
+      .sort()
+    expect([...paymentService.ESTADOS_DE_PAGO_NO_CAPTURADOS].sort()).toEqual(esperados)
+  })
+
+  it('regresión: un pago COMPLETED que cubre el saldo sigue saldando la venta', async () => {
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData, 'user-1')
+
+    expect(dejoLaVentaPagada()).toBe(true)
+    expect(productInventoryService.deductInventoryForProduct).toHaveBeenCalled()
+  })
+})
