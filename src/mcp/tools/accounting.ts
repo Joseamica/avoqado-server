@@ -29,6 +29,7 @@ import { generateDepreciationForVenue } from '@/services/fiscal/fixedAssetDeprec
 import { computePayrollPreview, createEmployee, listEmployees, runPayroll } from '@/services/fiscal/nomina.service'
 import { stampPayrollReceipts } from '@/services/fiscal/nominaCfdi.service'
 import { getFiscalReadiness } from '@/services/fiscal/fiscalReadiness.service'
+import { contabilidadPausada, MOTIVO_CONTABILIDAD_IVA_MIXTO } from '@/services/fiscal/exclusionContable'
 import { listStatements } from '@/services/dashboard/bankReconciliation.service'
 import { closePeriod, listPeriodLocks, reopenPeriod } from '@/services/fiscal/accountingPeriodLock.service'
 import type { McpScope } from '../scope'
@@ -1549,7 +1550,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'fiscal_readiness',
-    'Diagnóstico de PREPARACIÓN FISCAL (onboarding) de un local (Capa B, PREMIUM): "¿qué le falta para empezar a operar la contabilidad fiscal?". Revisa RFC, emisor (régimen + lugar de expedición), CSD (sello digital) activo/por vencer, código postal, catálogo de cuentas sembrado, configuración contable (movimientos con cuenta asignada) y empleados con sus datos para timbrar nómina. Devuelve un checklist con estatus (ok/warn/missing + qué hacer) y las CAPACIDADES desbloqueadas (puede facturar / timbrar nómina / contabilidad electrónica). Sólo lectura. Pasa venueId.',
+    'Diagnóstico de PREPARACIÓN FISCAL (onboarding) de un local (Capa B, PREMIUM): "¿qué le falta para empezar a operar la contabilidad fiscal?". Revisa RFC, emisor (régimen + lugar de expedición), CSD (sello digital) activo/por vencer, código postal, catálogo de cuentas sembrado, configuración contable (movimientos con cuenta asignada) y empleados con sus datos para timbrar nómina. Devuelve un checklist con estatus (ok/warn/missing + qué hacer), las CAPACIDADES desbloqueadas (puede facturar / timbrar nómina / contabilidad electrónica) y si la contabilidad (pólizas y cierre de periodo) está PAUSADA porque la organización ya tuvo productos con IVA distinto de 16 %, con el motivo para el cliente. Sólo lectura. Pasa venueId.',
     {
       venueId: z.string().describe('Local a diagnosticar (debe estar en tu alcance)'),
     },
@@ -1563,6 +1564,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
       if (r.needsFiscalSetup) {
         return text({ ok: true, needsFiscalSetup: true, mensaje: 'Este local aún no tiene RFC/emisor fiscal configurado.' })
       }
+      const pausada = r.organizationId ? await contabilidadPausada(r.organizationId) : false
       return text({
         ok: true,
         rfc: r.rfc,
@@ -1574,6 +1576,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           puedeTimbrarNomina: r.capabilities.puedeTimbrarNomina,
           contabilidadElectronicaLista: r.capabilities.contabilidadElectronicaLista,
         },
+        contabilidad: { pausada, motivo: pausada ? MOTIVO_CONTABILIDAD_IVA_MIXTO : null },
         checklist: r.checks.map(c => ({ punto: c.label, estatus: c.status, detalle: c.detail })),
         nota: 'estatus: ok = listo · warn = revisa · missing = falta. Las capacidades resumen qué puedes hacer ya con la configuración actual.',
       })
