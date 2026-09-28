@@ -10,7 +10,7 @@
     "predev": "npm run kill-port",
     "dev": "NODE_ENV=development tsx watch --include src src/server.ts | pino-pretty",
     "dev:nodemon": "NODE_ENV=development nodemon --watch src --ext ts,json --exec tsx src/server.ts | pino-pretty",
-    "dev:simple-logging": "NODE_ENV=development SIMPLE_LOGGING=true tsx watch src/server.ts",
+    "dev:simple-logging": "NODE_ENV=development SIMPLE_LOGGING=true tsx watch --include src src/server.ts",
     "dev:slow": "NODE_ENV=development nodemon --watch src --ext ts,json --exec ts-node -r tsconfig-paths/register src/server.ts | pino-pretty",
     "kill-port": "bash scripts/kill-port.sh",
     "predeploy:backend": "npx prisma generate && npm run migrate:deploy:bounded",
