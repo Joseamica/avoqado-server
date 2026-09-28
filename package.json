@@ -8,7 +8,7 @@
     "copy:assets": "mkdir -p dist/src/assets && cp -R src/assets/. dist/src/assets/ && node scripts/copy-mcp-internal-docs.js",
     "start": "node -r tsconfig-paths/register dist/src/server.js",
     "predev": "npm run kill-port",
-    "dev": "NODE_ENV=development tsx watch src/server.ts | pino-pretty",
+    "dev": "NODE_ENV=development tsx watch --include src src/server.ts | pino-pretty",
     "dev:nodemon": "NODE_ENV=development nodemon --watch src --ext ts,json --exec tsx src/server.ts | pino-pretty",
     "dev:simple-logging": "NODE_ENV=development SIMPLE_LOGGING=true tsx watch src/server.ts",
     "dev:slow": "NODE_ENV=development nodemon --watch src --ext ts,json --exec ts-node -r tsconfig-paths/register src/server.ts | pino-pretty",
