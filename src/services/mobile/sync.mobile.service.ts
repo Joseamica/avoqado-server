@@ -41,6 +41,7 @@ import * as orderTpvService from '../tpv/order.tpv.service'
 import * as orderMobileService from './order.mobile.service'
 import { applyPromotionToOrder, removeIntentPromotions } from '../promotions/promotion.service'
 import { logAction } from '../dashboard/activity-log.service'
+import { markKitchenTicket } from '../kds/kitchenTicketAuthoring.service'
 
 // ─── Contrato (espejo EXACTO por nombre en iOS/Android) ─────────────────────
 
@@ -59,6 +60,7 @@ export type SyncIntentType =
   | 'SPLIT_ORDER'
   | 'SPLIT_BY_SEAT'
   | 'MERGE_ORDERS'
+  | 'KDS_TICKET_MARK'
 
 export interface SyncIntentInput {
   /** UUID del intent generado en el dispositivo (= idempotencyKey). */
@@ -136,6 +138,7 @@ const KNOWN_TYPES: SyncIntentType[] = [
   'SPLIT_ORDER',
   'SPLIT_BY_SEAT',
   'MERGE_ORDERS',
+  'KDS_TICKET_MARK',
 ]
 
 /**
@@ -207,6 +210,10 @@ export function requiredPermissionForIntent(type: string): string | null {
     // reconectar sin PIN de gerente y sin dejar fila en la bitácora.
     case 'MERGE_ORDERS':
       return 'orders:merge'
+    // Etapa 3 del KDS: marcar LISTO o «salió en papel» es un acto de cocina sobre una comanda — mismo permiso que el
+    // bump y el status en línea (`/kds/orders/:id/bump`, `orders:update`). El rol KITCHEN lo trae.
+    case 'KDS_TICKET_MARK':
+      return 'orders:update'
     default:
       return null
   }
@@ -460,7 +467,8 @@ export async function processIntents(params: {
     // 3. Autorizar + aplicar. El actor persistido evita que una operación
     // encolada por una persona termine atribuida a quien inició sesión después.
     let ack: SyncIntentAck
-    if (intent.staffId && intent.staffId !== staffId) {
+    // KDS_TICKET_MARK queda exento: la tablet de cocina cambia de persona cada turno y la marca no mueve dinero.
+    if (intent.staffId && intent.staffId !== staffId && intent.type !== 'KDS_TICKET_MARK') {
       ack = {
         id: intent.id,
         status: 'REJECTED',
@@ -574,6 +582,8 @@ async function applyIntent(ctx: {
         return await applySplitBySeat(venueId, staffId, intent, localRefMap)
       case 'MERGE_ORDERS':
         return await applyMergeOrders(venueId, staffId, intent, localRefMap)
+      case 'KDS_TICKET_MARK':
+        return await applyKdsTicketMark(venueId, intent)
     }
   } catch (error: any) {
     const errorCode = error?.errorCode ?? error?.code ?? 'BUSINESS_RULE'
@@ -1361,6 +1371,50 @@ async function applyMergeOrders(
 
 function invalid(intent: SyncIntentInput, message: string): SyncIntentAck {
   return { id: intent.id, status: 'REJECTED', errorCode: 'INVALID_PAYLOAD', message }
+}
+
+/**
+ * KDS_TICKET_MARK — payload: { sourceKey, stationId?, action: 'BUMP' | 'FALLBACK_PRINTED', label? }
+ * La pantalla marcó LISTO sin red, o la caja imprimió la comanda en papel de respaldo (spec 2026-09-27 §3). Se junta
+ * con la comanda por su FOLIO, antes o después de que el servidor la arme.
+ *
+ * SIEMPRE ACK, salvo un error transitorio de base (RETRY): una marca de cocina jamás va a cuarentena ni detiene los
+ * cobros encolados detrás de ella. El servidor la conoce ANTES que las apps (orden de despliegue: backend primero);
+ * Android e iOS la agregan en sus fases 3.4 y 3.5.
+ */
+const FOLIO_VALIDO = /^(sale|round|order):\S{1,200}$/
+
+async function applyKdsTicketMark(venueId: string, intent: SyncIntentInput): Promise<SyncIntentAck> {
+  const p = intent.payload ?? {}
+  const sourceKey = typeof p.sourceKey === 'string' ? p.sourceKey.trim() : ''
+  const action = p.action === 'BUMP' || p.action === 'FALLBACK_PRINTED' ? p.action : null
+  if (!FOLIO_VALIDO.test(sourceKey) || !action) {
+    logger.warn(`⚠️ [POS SYNC] KDS_TICKET_MARK ilegible — se reconoce y se ignora (intent ${intent.id})`)
+    return { id: intent.id, status: 'ACKED', result: { ignored: 'INVALID_PAYLOAD' } }
+  }
+  try {
+    await markKitchenTicket({
+      venueId,
+      sourceKey,
+      stationId: typeof p.stationId === 'string' && p.stationId ? p.stationId : null,
+      action,
+      label: typeof p.label === 'string' ? p.label : null,
+      at: horaDeLaMarca(intent),
+    })
+    return { id: intent.id, status: 'ACKED', result: { sourceKey, action } }
+  } catch (error: any) {
+    const errorCode = error?.errorCode ?? error?.code ?? 'KDS_MARK_FAILED'
+    if (RETRYABLE_ERROR_CODES.has(errorCode)) throw error // applyIntent lo convierte en RETRY
+    logger.error(`[POS SYNC] KDS_TICKET_MARK no se aplicó (${errorCode}); se reconoce para no bloquear la cola (intent ${intent.id})`)
+    return { id: intent.id, status: 'ACKED', result: { ignored: errorCode } }
+  }
+}
+
+/** El reloj del aparato es informativo: se usa sólo si es razonable (no futuro, no más de 24 h atrás). */
+function horaDeLaMarca(intent: SyncIntentInput): Date {
+  const ahora = Date.now()
+  const t = typeof intent.createdAtLocal === 'number' ? intent.createdAtLocal : Number.NaN
+  return Number.isFinite(t) && t <= ahora && t >= ahora - 24 * 60 * 60 * 1000 ? new Date(t) : new Date(ahora)
 }
 
 // ─── Estado de sync (dashboard/MCP) ─────────────────────────────────────────
