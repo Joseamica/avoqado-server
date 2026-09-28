@@ -160,7 +160,7 @@ describe('Order.contratoDePrecio (esquema)', () => {
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `TEST_DATABASE_URL=postgresql://postgres:exitosoy777@localhost:5432/av_db_25_iva_test npx jest --selectProjects integration --runTestsByPath tests/integration/fiscal/orderContratoDePrecio.schema.test.ts --ci`
+Run: `TEST_DATABASE_URL=postgresql://postgres:<contraseña>@localhost:5432/av_db_25_iva_test npx jest --selectProjects integration --runTestsByPath tests/integration/fiscal/orderContratoDePrecio.schema.test.ts --ci`
 Expected: FAIL (0 filas / el tipo no existe).
 
 - [ ] **Step 3: Schema + migración**
@@ -195,8 +195,8 @@ ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS "contratoDePrecio" "ContratoDePreci
 Aplicar SÓLO a la base de pruebas (imprimir y leer la URL antes de correr):
 
 ```bash
-echo postgresql://postgres:exitosoy777@localhost:5432/av_db_25_iva_test
-DATABASE_URL=postgresql://postgres:exitosoy777@localhost:5432/av_db_25_iva_test npx prisma migrate deploy
+echo postgresql://postgres:<contraseña>@localhost:5432/av_db_25_iva_test
+DATABASE_URL=postgresql://postgres:<contraseña>@localhost:5432/av_db_25_iva_test npx prisma migrate deploy
 npx prisma generate
 npm run schema:map
 ```
