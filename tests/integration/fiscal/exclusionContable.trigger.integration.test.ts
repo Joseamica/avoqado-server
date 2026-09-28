@@ -28,7 +28,6 @@ import { acquireCatalogMutationLock } from '@/services/master-catalog/catalogMut
 import type { CatalogCommandContext } from '@/types/master-catalog'
 import prisma from '@/utils/prismaClient'
 import * as reintento from '@/utils/serializableRetry'
-import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 import {
   assertDisposableCatalogPublicationDatabase,
   cleanupCatalogPublicationFixture,
@@ -38,13 +37,19 @@ import {
   type CatalogPublicationIntegrationHarness,
 } from '../master-catalog/catalogPublicationIntegrationHarness'
 import {
+  conProducto,
   debePausarse,
+  desenlace,
   hastaQue,
   limpiarNegocios,
   lineasDeVenta,
+  marcada,
   nuevoNegocio,
+  ordenConCfdi,
   polizas,
+  polizaSuelta,
   retener,
+  sinTriggers,
   type Negocio,
 } from './exclusionContable.fixtures'
 
@@ -62,30 +67,6 @@ const marcaInicial = () =>
 let staffId = ''
 const actor = (id = staffId) => ({ type: 'HUMAN' as const, staffId: id, impersonating: false })
 
-/** El desenlace sin lanzar: `{ ok }` o el error tal cual. */
-const desenlace = <T>(p: Promise<T>) =>
-  p.then(
-    ok => ({ ok }),
-    (error: unknown) => error,
-  )
-
-/** Categoría, IVA por producto encendido (sólo este negocio) y un producto IVA_16. */
-async function conProducto(x: Negocio) {
-  const categoryId = (await prisma.menuCategory.create({ data: { venueId: x.venueId, name: 'IVA', slug: `iva-${x.rfc}`.toLowerCase() } }))
-    .id
-  await encenderIvaPorProducto(x.venueId)
-  const productId = (await prisma.product.create({ data: { venueId: x.venueId, categoryId, sku: `P-${x.rfc}`, name: 'Café', price: 100 } }))
-    .id
-  return { categoryId, productId }
-}
-
-/** Estado viejo: escribe con los triggers apagados SÓLO dentro de esta transacción (Ruling PF7). */
-const sinTriggers = <T>(fn: (tx: Prisma.TransactionClient) => Promise<T>) =>
-  prisma.$transaction(async tx => {
-    await tx.$executeRaw`SET LOCAL session_replication_role = replica`
-    return fn(tx)
-  })
-
 /** Producto ≠ 16 % heredado, sembrado sin triggers: la organización NO queda marcada. */
 const productoViejo = (x: Negocio, categoryId: string, sku: string) =>
   sinTriggers(tx =>
@@ -96,25 +77,6 @@ const productoViejo = (x: Negocio, categoryId: string, sku: string) =>
 
 const tratamiento = async (id: string) =>
   (await prisma.product.findUniqueOrThrow({ where: { id }, select: { ivaTratamiento: true } })).ivaTratamiento
-const marcada = async (organizationId: string) =>
-  (await prisma.organization.findUniqueOrThrow({ where: { id: organizationId }, select: { ivaMixtoAlgunaVez: true } })).ivaMixtoAlgunaVez
-
-/** Una póliza escrita directo (sin catálogo de cuentas): basta para que exista historia contable. */
-const polizaSuelta = (organizationId: string, rfc: string, venueId: string | null) =>
-  prisma.journalEntry.create({
-    data: {
-      organizationId,
-      rfc,
-      venueId,
-      date: new Date('2026-06-15T12:00:00Z'),
-      period: '2026-06',
-      folio: 1,
-      concept: 'Historia',
-      totalDebitCents: 100,
-      totalCreditCents: 100,
-    },
-  })
-
 /** El controlador móvil REAL, sin HTTP: devuelve el error que pasó a `next` o el cuerpo de la respuesta. */
 async function movilLlama(
   handler: (req: Request, res: Response, next: (e?: unknown) => void) => Promise<unknown>,
@@ -126,40 +88,6 @@ async function movilLlama(
   const res = { status: () => res, json: (b: unknown) => ((cuerpo = b), res) } as unknown as Response
   await handler({ params, body, authContext: { userId: staffId } } as unknown as Request, res, e => (error = e))
   return error ?? { ok: cuerpo }
-}
-
-/** Una orden con un renglón sin sellar y un CFDI en el que sellarlo. */
-async function ordenConCfdi(x: Negocio, productId: string, etiqueta: string) {
-  const orden = await prisma.order.create({
-    data: { venueId: x.venueId, orderNumber: `T2-${etiqueta}-${x.rfc}`, subtotal: 100, taxAmount: 0, total: 100 },
-  })
-  const item = await prisma.orderItem.create({
-    data: { orderId: orden.id, productId, productName: 'Grano', quantity: 1, unitPrice: 100, taxAmount: 0, total: 100 },
-  })
-  const emisor =
-    (await prisma.fiscalEmisor.findFirst({ where: { venueId: x.venueId }, select: { id: true } })) ??
-    (await prisma.fiscalEmisor.create({
-      data: { venueId: x.venueId, rfc: x.rfc, legalName: 'Negocio de prueba', regimenFiscal: '601', lugarExpedicion: '01000' },
-    }))
-  const cfdi = await prisma.cfdi.create({
-    data: {
-      venueId: x.venueId,
-      fiscalEmisorId: emisor.id,
-      flow: 'STAFF_B',
-      orderId: orden.id,
-      receptorRfc: 'XAXX010101000',
-      receptorNombre: 'PÚBLICO EN GENERAL',
-      receptorRegimen: '616',
-      receptorCp: '01000',
-      usoCfdi: 'S01',
-      formaPago: '01',
-      metodoPago: 'PUE',
-      subtotalCents: 10000,
-      taxCents: 0,
-      totalCents: 10000,
-    } as Prisma.CfdiUncheckedCreateInput,
-  })
-  return { orderItemId: item.id, cfdiId: cfdi.id }
 }
 
 const sellar = (cfdiId: string, orderItemId: string, trat: IvaTratamiento) => (tx: Prisma.TransactionClient) =>

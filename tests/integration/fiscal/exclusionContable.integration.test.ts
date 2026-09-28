@@ -32,6 +32,7 @@ import {
   type CatalogPublicationIntegrationHarness,
 } from '../master-catalog/catalogPublicationIntegrationHarness'
 import {
+  cobroConTarjeta,
   debePausarse,
   limpiarNegocios,
   lineasDeVenta,
@@ -46,45 +47,6 @@ import {
 jest.setTimeout(240_000)
 
 const proveedores: string[] = []
-
-/** Cobro con tarjeta de $116 (sin renglones: la póliza usa el 16 % de siempre). */
-async function cobroConTarjeta(x: Negocio, merchantAccountId?: string) {
-  const monto = new Prisma.Decimal('116.00')
-  const orden = await prisma.order.create({
-    data: {
-      venueId: x.venueId,
-      orderNumber: `EXC-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      type: 'TAKEOUT',
-      source: 'TPV',
-      status: 'COMPLETED',
-      completedAt: new Date(),
-      subtotal: monto,
-      taxAmount: new Prisma.Decimal(0),
-      tipAmount: new Prisma.Decimal(0),
-      total: monto,
-      paidAmount: monto,
-      remainingBalance: new Prisma.Decimal(0),
-      paymentStatus: 'PAID',
-    },
-  })
-  return prisma.payment.create({
-    data: {
-      venueId: x.venueId,
-      orderId: orden.id,
-      amount: monto,
-      tipAmount: new Prisma.Decimal(0),
-      method: 'CREDIT_CARD',
-      status: 'COMPLETED',
-      type: 'FAST',
-      splitType: 'FULLPAYMENT',
-      source: 'TPV',
-      feePercentage: 0,
-      feeAmount: new Prisma.Decimal(0),
-      netAmount: monto,
-      merchantAccountId,
-    },
-  })
-}
 
 /** Un comercio que sí entra a la contabilidad y otro excluido (`includeInAccounting = false`). */
 async function dosComercios(x: Negocio) {

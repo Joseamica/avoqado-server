@@ -2,6 +2,9 @@ import { Request, Response, NextFunction } from 'express'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { generateValidatedSlug } from '../../utils/slugify'
+import { logAction } from '../../services/dashboard/activity-log.service'
+import { negocioCambioDeOrganizacionError } from '../../services/fiscal/exclusionContable'
+import { traducirErrorDeIva } from '../../services/fiscal/normalizarIvaDeProducto'
 import {
   bulkCreateVenues as bulkCreateVenuesService,
   ValidationError as BulkValidationError,
@@ -82,6 +85,10 @@ export async function createVenue(req: Request, res: Response, next: NextFunctio
 /**
  * PATCH /venues/:venueId/transfer
  * Transfer a venue to a different organization.
+ *
+ * IVA por producto, plan 4: el trigger `Venue_trasladoIva_guard` impone la barrera (un negocio con pólizas no se mueve; uno
+ * con IVA mixto no entra a una organización con contabilidad). Aquí se toman los candados en el orden global —las dos
+ * organizaciones por id, luego el negocio—, se relee dentro de la transacción y se responde con lo que ésta devolvió.
  */
 export async function transferVenue(req: Request, res: Response, next: NextFunction) {
   try {
@@ -121,22 +128,32 @@ export async function transferVenue(req: Request, res: Response, next: NextFunct
 
     const sourceOrgName = venue.organization.name
 
-    // Get all staff with StaffVenue in this venue
-    const staffVenues = await prisma.staffVenue.findMany({
-      where: { venueId },
-      select: { staffId: true },
-    })
+    const resultado = await prisma.$transaction(async tx => {
+      // 1. El origen, ya dentro de la transacción: sigue donde se validó, o alguien lo movió.
+      const [antes] = await tx.$queryRaw<Array<{ organizationId: string }>>`
+        SELECT "organizationId" FROM "Venue" WHERE id = ${venueId}`
+      if (antes?.organizationId !== venue.organizationId) throw negocioCambioDeOrganizacionError()
+      const fromOrganizationId = antes.organizationId
 
-    const staffIds = staffVenues.map(sv => sv.staffId)
+      // 2. Las dos organizaciones en orden de id (el orden global: organización → negocio).
+      await tx.$queryRaw`
+        SELECT id FROM "Organization" WHERE id IN (${fromOrganizationId}, ${targetOrganizationId}) ORDER BY id FOR NO KEY UPDATE`
 
-    await prisma.$transaction(async tx => {
-      // Move venue to target org
+      // 3. El negocio bajo candado: si ya no está en el origen, otro traslado ganó.
+      const [relectura] = await tx.$queryRaw<Array<{ organizationId: string }>>`
+        SELECT "organizationId" FROM "Venue" WHERE id = ${venueId} FOR NO KEY UPDATE`
+      if (relectura?.organizationId !== fromOrganizationId) throw negocioCambioDeOrganizacionError()
+
+      // 4. Quién trabaja en el negocio, leído dentro de la transacción.
+      const staffIds = (await tx.staffVenue.findMany({ where: { venueId }, select: { staffId: true } })).map(sv => sv.staffId)
+
+      // 5. Move venue to target org (el trigger `Venue_trasladoIva_guard` impone la barrera de IVA)
       await tx.venue.update({
         where: { id: venueId },
         data: { organizationId: targetOrganizationId },
       })
 
-      // Ensure each staff member has a StaffOrganization in the target org
+      // 6. Ensure each staff member has a StaffOrganization in the target org
       for (const staffId of staffIds) {
         await tx.staffOrganization.upsert({
           where: {
@@ -157,30 +174,63 @@ export async function transferVenue(req: Request, res: Response, next: NextFunct
           },
         })
       }
+
+      // 7. La marca del destino y el negocio tal como quedó DENTRO de la transacción (la respuesta no relee después).
+      const destino = await tx.organization.findUniqueOrThrow({
+        where: { id: targetOrganizationId },
+        select: { ivaMixtoAlgunaVez: true },
+      })
+      const updatedVenue = await tx.venue.findUnique({
+        where: { id: venueId },
+        include: {
+          organization: { select: { id: true, name: true } },
+        },
+      })
+
+      return {
+        fromOrganizationId,
+        toOrganizationId: targetOrganizationId as string,
+        staffMembersUpdated: staffIds.length,
+        ivaMixtoDestino: destino.ivaMixtoAlgunaVez,
+        venue: updatedVenue,
+      }
     })
 
     logger.info(`[VENUES_SUPERADMIN] Transferred venue "${venue.name}" from "${sourceOrgName}" to "${targetOrg.name}"`, {
       venueId,
-      sourceOrganizationId: venue.organizationId,
+      sourceOrganizationId: resultado.fromOrganizationId,
       targetOrganizationId,
-      staffMembersUpdated: staffIds.length,
+      staffMembersUpdated: resultado.staffMembersUpdated,
       transferredBy,
     })
 
-    const updatedVenue = await prisma.venue.findUnique({
-      where: { id: venueId },
-      include: {
-        organization: { select: { id: true, name: true } },
+    void logAction({
+      staffId: authContext?.userId ?? null,
+      venueId,
+      organizationId: resultado.toOrganizationId,
+      action: 'VENUE_TRANSFERRED',
+      entity: 'Venue',
+      entityId: venueId,
+      data: {
+        fromOrganizationId: resultado.fromOrganizationId,
+        toOrganizationId: resultado.toOrganizationId,
+        staffMembersUpdated: resultado.staffMembersUpdated,
+        ivaMixtoDestino: resultado.ivaMixtoDestino,
       },
     })
 
     return res.status(200).json({
       success: true,
       message: `Venue "${venue.name}" transferred from "${sourceOrgName}" to "${targetOrg.name}"`,
-      venue: updatedVenue,
-      staffMembersUpdated: staffIds.length,
+      venue: resultado.venue,
+      staffMembersUpdated: resultado.staffMembersUpdated,
     })
   } catch (error) {
+    try {
+      traducirErrorDeIva(error) // la barrera del trigger (P0001) sale como 409 con su motivo
+    } catch (conflicto) {
+      return next(conflicto)
+    }
     logger.error('[VENUES_SUPERADMIN] Error transferring venue', { error })
     next(error)
   }

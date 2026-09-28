@@ -10,6 +10,10 @@ const MENSAJES = {
   IVA_CONTABILIDAD_CON_HISTORIA:
     'Este negocio ya lleva contabilidad en Avoqado (pólizas o periodos cerrados) y la contabilidad todavía no maneja IVA distinto de 16 %. Por eso este producto se queda en IVA 16 %. Escríbenos a hola@avoqado.io si lo necesitas.',
   IVA_NEGOCIO_CAMBIO_DE_ORGANIZACION: 'Este negocio acaba de cambiar de organización. Vuelve a intentarlo.',
+  IVA_TRASLADO_INCOMPATIBLE:
+    'No se puede mover este negocio: la organización destino lleva contabilidad en Avoqado y el negocio tiene productos o facturas con IVA distinto de 16 %. La contabilidad todavía no maneja esa mezcla.',
+  IVA_TRASLADO_CON_CONTABILIDAD:
+    'No se puede mover este negocio: ya tiene pólizas en la contabilidad de su organización, y moverlo haría que sus ventas se registraran otra vez en la nueva. Pide ayuda a soporte.',
 } as const
 
 const esOfrecido = (v: unknown): v is IvaTratamiento =>

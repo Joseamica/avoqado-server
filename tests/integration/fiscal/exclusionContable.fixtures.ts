@@ -1,16 +1,18 @@
 /**
- * IVA por producto, plan 4 — fixtures compartidas por las suites de exclusión contable (Tareas 1 y 2), contra Postgres REAL.
+ * IVA por producto, plan 4 — fixtures compartidas por las suites de exclusión contable y de traslado (Tareas 1 a 3), contra
+ * Postgres REAL.
  *
  * Cada negocio es una organización NUEVA con su venue y un RFC único por corrida: la marca pegajosa nunca se apaga (Ruling
- * PF7) y el folio y la idempotencia de las pólizas son por (organización, RFC). `limpiarNegocios` borra todo lo que las dos
+ * PF7) y el folio y la idempotencia de las pólizas son por (organización, RFC). `limpiarNegocios` borra todo lo que las
  * suites siembran, acotado a sus organizaciones y venues.
  */
-import type { Prisma, PrismaClient } from '@prisma/client'
+import { Prisma, type PrismaClient } from '@prisma/client'
 
 import { ConflictError } from '@/errors/AppError'
 import { seedDefaultMappings } from '@/services/fiscal/accountMapping.service'
 import { seedBaseChart } from '@/services/fiscal/chartOfAccounts.service'
 import prisma from '@/utils/prismaClient'
+import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 
 export const MOTIVO =
   'La contabilidad de Avoqado todavía no maneja ventas con IVA distinto de 16 %. Como esta organización ya tuvo productos con otra tasa, las pólizas y el cierre de periodo están pausados. Escríbenos a hola@avoqado.io si lo necesitas.'
@@ -63,6 +65,122 @@ export async function lineasDeVenta(organizationId: string, rfc: string) {
 }
 
 export const polizas = (organizationId: string) => prisma.journalEntry.count({ where: { organizationId } })
+
+/** El desenlace sin lanzar: `{ ok }` o el error tal cual. */
+export const desenlace = <T>(p: Promise<T>) =>
+  p.then(
+    ok => ({ ok }),
+    (error: unknown) => error,
+  )
+
+/** Estado viejo: escribe con los triggers apagados SÓLO dentro de esta transacción (Ruling PF7). */
+export const sinTriggers = <T>(fn: (tx: Prisma.TransactionClient) => Promise<T>) =>
+  prisma.$transaction(async tx => {
+    await tx.$executeRaw`SET LOCAL session_replication_role = replica`
+    return fn(tx)
+  })
+
+/** Categoría, IVA por producto encendido (sólo este negocio) y un producto IVA_16. */
+export async function conProducto(x: Negocio) {
+  const categoryId = (await prisma.menuCategory.create({ data: { venueId: x.venueId, name: 'IVA', slug: `iva-${x.rfc}`.toLowerCase() } }))
+    .id
+  await encenderIvaPorProducto(x.venueId)
+  const productId = (await prisma.product.create({ data: { venueId: x.venueId, categoryId, sku: `P-${x.rfc}`, name: 'Café', price: 100 } }))
+    .id
+  return { categoryId, productId }
+}
+
+export const marcada = async (organizationId: string) =>
+  (await prisma.organization.findUniqueOrThrow({ where: { id: organizationId }, select: { ivaMixtoAlgunaVez: true } })).ivaMixtoAlgunaVez
+
+/** Una póliza escrita directo (sin catálogo de cuentas): basta para que exista historia contable. */
+export const polizaSuelta = (organizationId: string, rfc: string, venueId: string | null) =>
+  prisma.journalEntry.create({
+    data: {
+      organizationId,
+      rfc,
+      venueId,
+      date: new Date('2026-06-15T12:00:00Z'),
+      period: '2026-06',
+      folio: 1,
+      concept: 'Historia',
+      totalDebitCents: 100,
+      totalCreditCents: 100,
+    },
+  })
+
+/** Una orden con un renglón sin sellar y un CFDI en el que sellarlo. */
+export async function ordenConCfdi(x: Negocio, productId: string, etiqueta: string) {
+  const orden = await prisma.order.create({
+    data: { venueId: x.venueId, orderNumber: `T2-${etiqueta}-${x.rfc}`, subtotal: 100, taxAmount: 0, total: 100 },
+  })
+  const item = await prisma.orderItem.create({
+    data: { orderId: orden.id, productId, productName: 'Grano', quantity: 1, unitPrice: 100, taxAmount: 0, total: 100 },
+  })
+  const emisor =
+    (await prisma.fiscalEmisor.findFirst({ where: { venueId: x.venueId }, select: { id: true } })) ??
+    (await prisma.fiscalEmisor.create({
+      data: { venueId: x.venueId, rfc: x.rfc, legalName: 'Negocio de prueba', regimenFiscal: '601', lugarExpedicion: '01000' },
+    }))
+  const cfdi = await prisma.cfdi.create({
+    data: {
+      venueId: x.venueId,
+      fiscalEmisorId: emisor.id,
+      flow: 'STAFF_B',
+      orderId: orden.id,
+      receptorRfc: 'XAXX010101000',
+      receptorNombre: 'PÚBLICO EN GENERAL',
+      receptorRegimen: '616',
+      receptorCp: '01000',
+      usoCfdi: 'S01',
+      formaPago: '01',
+      metodoPago: 'PUE',
+      subtotalCents: 10000,
+      taxCents: 0,
+      totalCents: 10000,
+    } as Prisma.CfdiUncheckedCreateInput,
+  })
+  return { orderId: orden.id, orderItemId: item.id, cfdiId: cfdi.id }
+}
+
+/** Cobro con tarjeta de $116 (sin renglones: la póliza usa el 16 % de siempre). */
+export async function cobroConTarjeta(x: Negocio, merchantAccountId?: string) {
+  const monto = new Prisma.Decimal('116.00')
+  const orden = await prisma.order.create({
+    data: {
+      venueId: x.venueId,
+      orderNumber: `EXC-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      type: 'TAKEOUT',
+      source: 'TPV',
+      status: 'COMPLETED',
+      completedAt: new Date(),
+      subtotal: monto,
+      taxAmount: new Prisma.Decimal(0),
+      tipAmount: new Prisma.Decimal(0),
+      total: monto,
+      paidAmount: monto,
+      remainingBalance: new Prisma.Decimal(0),
+      paymentStatus: 'PAID',
+    },
+  })
+  return prisma.payment.create({
+    data: {
+      venueId: x.venueId,
+      orderId: orden.id,
+      amount: monto,
+      tipAmount: new Prisma.Decimal(0),
+      method: 'CREDIT_CARD',
+      status: 'COMPLETED',
+      type: 'FAST',
+      splitType: 'FULLPAYMENT',
+      source: 'TPV',
+      feePercentage: 0,
+      feeAmount: new Prisma.Decimal(0),
+      netAmount: monto,
+      merchantAccountId,
+    },
+  })
+}
 
 /** La operación debe salir con la pausa. Si NO lanza, el fallo muestra lo que sí escribió. */
 export async function debePausarse(operacion: Promise<unknown>): Promise<void> {
@@ -132,6 +250,10 @@ export async function retener(
 }
 
 export async function limpiarNegocios(): Promise<void> {
+  // Un traslado (Tarea 3) deja negocios en organizaciones ajenas: cada uno vuelve a la suya antes de borrar, sin la barrera.
+  await sinTriggers(async tx => {
+    for (const n of negocios) await tx.$executeRaw`UPDATE "Venue" SET "organizationId" = ${n.organizationId} WHERE id = ${n.venueId}`
+  })
   for (const { organizationId, venueId } of negocios) {
     await prisma.journalEntry.deleteMany({ where: { OR: [{ organizationId }, { venueId }] } })
     await prisma.accountingPeriodLock.deleteMany({ where: { organizationId } })

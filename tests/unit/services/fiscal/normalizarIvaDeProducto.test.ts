@@ -111,6 +111,8 @@ describe('codigoDeBarreraIva', () => {
     'IVA_TRATAMIENTO_CONTRADICTORIO',
     'IVA_CONTABILIDAD_CON_HISTORIA',
     'IVA_NEGOCIO_CAMBIO_DE_ORGANIZACION',
+    'IVA_TRASLADO_INCOMPATIBLE',
+    'IVA_TRASLADO_CON_CONTABILIDAD',
   ])('reconoce %s y ninguna otra llave (ninguna es subcadena de otra)', codigo => {
     expect(codigoDeBarreraIva(deModelo(codigo))?.code).toBe(codigo)
   })
@@ -129,6 +131,20 @@ describe('codigoDeBarreraIva', () => {
   it('otro error ⇒ null', () => {
     expect(codigoDeBarreraIva(new Error('otra cosa'))).toBeNull()
     expect(codigoDeBarreraIva(undefined)).toBeNull()
+  })
+
+  // Plan 4 · Tarea 3: las dos barreras del traslado de un negocio (trigger de Venue) salen 409 con el texto para el cliente.
+  it.each([
+    [
+      'IVA_TRASLADO_INCOMPATIBLE',
+      'No se puede mover este negocio: la organización destino lleva contabilidad en Avoqado y el negocio tiene productos o facturas con IVA distinto de 16 %. La contabilidad todavía no maneja esa mezcla.',
+    ],
+    [
+      'IVA_TRASLADO_CON_CONTABILIDAD',
+      'No se puede mover este negocio: ya tiene pólizas en la contabilidad de su organización, y moverlo haría que sus ventas se registraran otra vez en la nueva. Pide ayuda a soporte.',
+    ],
+  ])('traducirErrorDeIva vuelve %s un 409 con su mensaje exacto', (codigo, message) => {
+    expect(() => traducirErrorDeIva(deModelo(codigo))).toThrow(expect.objectContaining({ statusCode: 409, code: codigo, message }))
   })
 
   it('traducirErrorDeIva vuelve la inversa contable un 409 con su código y mensaje', () => {

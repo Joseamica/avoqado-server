@@ -21,7 +21,7 @@ export const MOTIVO_CONTABILIDAD_IVA_MIXTO =
   'La contabilidad de Avoqado todavía no maneja ventas con IVA distinto de 16 %. Como esta organización ya tuvo productos con otra tasa, las pólizas y el cierre de periodo están pausados. Escríbenos a hola@avoqado.io si lo necesitas.'
 
 export const contabilidadPausadaError = (): ConflictError => new ConflictError(MOTIVO_CONTABILIDAD_IVA_MIXTO, CONTABILIDAD_IVA_MIXTO)
-const negocioCambioDeOrganizacionError = (): ConflictError =>
+export const negocioCambioDeOrganizacionError = (): ConflictError =>
   new ConflictError('Este negocio acaba de cambiar de organización. Vuelve a intentarlo.', IVA_NEGOCIO_CAMBIO_DE_ORGANIZACION)
 export const contabilidadOcupadaError = (): ConflictError =>
   new ConflictError('La contabilidad está ocupada en este momento. Vuelve a intentarlo en unos segundos.', CONTABILIDAD_OCUPADA)
