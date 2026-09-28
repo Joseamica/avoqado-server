@@ -223,6 +223,9 @@ describe('vales por área — claim de la caja (§5.4)', () => {
     prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
     prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: VENUE, active: true })
     prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1' })
+    // The venue-scoped Order lock finds the ticket's row in this venue, and the locked read sees the same row as the pre-read.
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 'order-1' }])
+    prismaMock.order.findFirstOrThrow.mockImplementation((...args: any[]) => prismaMock.order.findUnique(...args))
   })
 
   it('🔴 el ÁREA no puede agregar renglones mientras la caja tiene la cuenta reclamada', async () => {
@@ -620,5 +623,156 @@ describe('vales por área — pendientes de entrega (§5.5)', () => {
       fulfillments: { none: { fulfillmentAreaId: AREA } },
     })
     expect(where.status).toEqual({ notIn: ['CANCELLED', 'DELETED'] })
+  })
+})
+
+/**
+ * Plan 3b — adding lines to an EXISTING ticket. The first CAS already takes the Order row lock, but a claim, a partial
+ * payment, a tip, a service charge or a cancellation does not bump `version`: the decision and the totals must come
+ * from a read taken with the row locked. The tx double and the global client are DIFFERENT objects, so any escape to
+ * the global client fails here instead of hiding behind a shared double.
+ */
+describe('area tickets — addAreaTicketItems decides on the locked Order (Plan 3b)', () => {
+  let tx: any
+  let committed: boolean
+  const locked = (overrides: Record<string, any> = {}) => ({
+    status: 'CONFIRMED',
+    paymentStatus: 'PENDING',
+    claimedAt: null,
+    claimedByTerminalId: null,
+    tipAmount: new Decimal(0),
+    serviceChargeAmount: new Decimal(0),
+    paidAmount: new Decimal(0),
+    ...overrides,
+  })
+  const add = (items: any[] = [{ productId: 'p-jamon', quantity: 1 }]) =>
+    addAreaTicketItems(VENUE, CODE, { deviceUid: DEVICE, staffId: 'staff-1', items })
+  const txModelCalls = () =>
+    [...Object.values(tx.order), ...Object.values(tx.orderItem)].flatMap((fn: any) => fn.mock.invocationCallOrder as number[])
+
+  beforeEach(() => {
+    committed = false
+    const model = (...names: string[]) => Object.fromEntries(names.map(name => [name, jest.fn()]))
+    tx = {
+      $queryRaw: jest.fn().mockResolvedValue([{ id: 'order-1' }]),
+      order: model('findFirstOrThrow', 'findUniqueOrThrow', 'updateMany', 'update'),
+      orderItem: model('create', 'findMany'),
+    }
+    // The locked read (the photo that decides) and the response read are different calls.
+    tx.order.findFirstOrThrow.mockResolvedValue(locked())
+    tx.order.findUniqueOrThrow.mockResolvedValue(ticketRow())
+    tx.order.updateMany.mockResolvedValue({ count: 1 })
+    tx.order.update.mockResolvedValue({ id: 'order-1' })
+    tx.orderItem.create.mockResolvedValue({ id: 'oi-new' })
+    tx.orderItem.findMany.mockResolvedValue([
+      { total: new Decimal(100), discountAmount: new Decimal(0) },
+      { total: new Decimal(50), discountAmount: new Decimal(0) },
+    ])
+    prismaMock.$transaction.mockImplementation(async (callback: any) => {
+      const result = await callback(tx)
+      committed = true
+      return result
+    })
+    mockAreaTerminal()
+    // The pre-read (fast rejection and error precedence) stays on the global client.
+    prismaMock.order.findUnique.mockResolvedValue(ticketRow())
+    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: VENUE, active: true })
+    prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1' })
+    prismaMock.product.findMany.mockResolvedValue([
+      { id: 'p-jamon', name: 'Jamón', price: new Decimal(164), sku: null, category: { name: 'Cremería' }, categoryId: 'c-2' },
+    ])
+    prismaMock.modifier.findMany.mockResolvedValue([])
+    prismaMock.discount.findMany.mockResolvedValue([])
+    // Every Order or line access of the operation on the GLOBAL client is an escape from the lock.
+    for (const op of ['findFirstOrThrow', 'findUniqueOrThrow', 'updateMany', 'update']) {
+      prismaMock.order[op].mockRejectedValue(new Error(`GLOBAL order.${op}`))
+    }
+    for (const op of ['create', 'findMany']) prismaMock.orderItem[op].mockRejectedValue(new Error(`GLOBAL orderItem.${op}`))
+  })
+
+  it('locks the route-venue Order before any tx access and totals with the tip, charge and paid read under the lock', async () => {
+    // A partial payment with its tip and a service charge landed after the pre-read, without a version bump.
+    tx.order.findFirstOrThrow.mockResolvedValue(
+      locked({ paymentStatus: 'PARTIAL', tipAmount: new Decimal(10), serviceChargeAmount: new Decimal(20), paidAmount: new Decimal(50) }),
+    )
+
+    await add()
+
+    expect(committed).toBe(true)
+    // Tagged template: [strings, ...values] — the ticket's Order, scoped to the ROUTE venue.
+    expect(tx.$queryRaw.mock.calls.map((call: any[]) => call.slice(1))).toEqual([['order-1', VENUE]])
+    expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(Math.min(...txModelCalls()))
+    expect(tx.order.findFirstOrThrow.mock.calls[0][0].where).toEqual({ id: 'order-1', venueId: VENUE })
+    const { where, data } = tx.order.update.mock.calls[0][0]
+    expect(where).toEqual({ id: 'order-1' })
+    // 150 of lines − 0 of line discounts + 20 of charge + 10 of tip; remaining = 180 − 50 paid. The stale photo gave 150 / 150.
+    expect(Number(data.total)).toBe(180)
+    expect(Number(data.remainingBalance)).toBe(130)
+  })
+
+  it.each([
+    [
+      'a live claim by another terminal',
+      { claimedByTerminalId: 'terminal-caja', claimedAt: new Date() },
+      'AREA_TICKET_CLAIMED_BY_OTHER',
+      'La caja está cobrando esta cuenta. Espera a que termine.',
+    ],
+    ['a cancellation', { status: 'CANCELLED' }, 'AREA_TICKET_CANCELLED', 'Esta cuenta fue cancelada.'],
+  ])('%s seen only by the locked read is rejected and no line or total is written', async (_case, change, code, message) => {
+    tx.order.findFirstOrThrow.mockResolvedValue(locked(change))
+
+    await expect(add()).rejects.toMatchObject({ code, message, statusCode: 409 })
+
+    expect(committed).toBe(false)
+    expect(tx.orderItem.create).not.toHaveBeenCalled()
+    expect(tx.order.update).not.toHaveBeenCalled()
+  })
+
+  it('an Order the lock cannot see (gone, or no longer this venue) is not found and nothing is written', async () => {
+    tx.$queryRaw.mockResolvedValue([])
+
+    await expect(add()).rejects.toMatchObject({
+      statusCode: 404,
+      message: 'Ese código no corresponde a ningún vale de este local. Verifica los 10 dígitos.',
+    })
+
+    expect(committed).toBe(false)
+    expect(tx.order.updateMany).not.toHaveBeenCalled()
+    expect(tx.orderItem.create).not.toHaveBeenCalled()
+    expect(tx.order.update).not.toHaveBeenCalled()
+  })
+
+  it('the CAS still compares the version THIS request saw: a bump while it waited is VERSION_CONFLICT', async () => {
+    tx.order.updateMany.mockResolvedValue({ count: 0 })
+
+    await expect(add()).rejects.toMatchObject({ code: 'VERSION_CONFLICT', statusCode: 409 })
+
+    expect(tx.order.updateMany).toHaveBeenCalledWith({
+      where: { id: 'order-1', venueId: VENUE, version: 1, paymentStatus: { in: ['PENDING', 'PARTIAL'] } },
+      data: { version: { increment: 1 } },
+    })
+    expect(tx.orderItem.create).not.toHaveBeenCalled()
+  })
+
+  it('a PAID without a version bump still answers VERSION_CONFLICT (the CAS runs before the state checks)', async () => {
+    tx.order.findFirstOrThrow.mockResolvedValue(locked({ paymentStatus: 'PAID' }))
+    tx.order.updateMany.mockResolvedValue({ count: 0 })
+
+    await expect(add()).rejects.toMatchObject({ code: 'VERSION_CONFLICT' })
+
+    expect(tx.orderItem.create).not.toHaveBeenCalled()
+  })
+
+  it('still writes each line with its nested modifiers on the tx', async () => {
+    prismaMock.modifier.findMany.mockResolvedValue([{ id: 'mod-1', name: 'Rebanado fino', price: new Decimal(5) }])
+
+    await add([{ productId: 'p-jamon', quantity: 1, modifierIds: ['mod-1'] }])
+
+    expect(tx.orderItem.create).toHaveBeenCalledTimes(1)
+    expect(tx.orderItem.create.mock.calls[0][0].data).toMatchObject({
+      orderId: 'order-1',
+      fulfillmentAreaId: AREA,
+      modifiers: { create: [{ modifierId: 'mod-1', name: 'Rebanado fino', quantity: 1 }] },
+    })
   })
 })

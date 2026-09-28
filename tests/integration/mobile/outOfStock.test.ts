@@ -6,7 +6,7 @@
  * fresca del proveedor ya no trae el renglón. Aquí el proveedor se simula en el adaptador REAL
  * (`resolveFulfillmentIssues`, `fetchOrder`, `normalizeOrder` espiados): nunca se pega a Uber.
  */
-import { DeliveryChannelLink, DeliveryProvider, OrderSource, OrderStatus, OrderType, StaffRole } from '@prisma/client'
+import { DeliveryChannelLink, DeliveryProvider, OrderSource, OrderStatus, OrderType, Prisma, StaffRole } from '@prisma/client'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import app from '@/app'
@@ -14,18 +14,29 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { env } from '@/config/env'
 import * as candado from '@/services/delivery-channels/core/deliveryOrderLock'
+import * as lineRemoval from '@/services/delivery-channels/core/lineRemoval.service'
 import { ingestDeliveryOrder } from '@/services/delivery-channels/core/deliveryOrderIngestion.service'
 import * as reconciliacion from '@/services/delivery-channels/core/deliveryReconciliation.service'
 import type { ActionResult, NormalizedDeliveryOrder, NormalizedDeliveryPayment } from '@/services/delivery-channels/core/types'
 import { DeliveryWriteNotSentError } from '@/services/delivery-channels/core/types'
 import { uberAdapter } from '@/services/delivery-channels/providers/uber-eats/uber.adapter'
 import * as uberToken from '@/services/delivery-channels/providers/uber-eats/uber.token'
+import { bloquearOrdenParaFacturar } from '@/services/fiscal/admisionIva'
 import { listDeliveryLineActions } from '@/services/mobile/kdsOutOfStock.mobile.service'
 
 // El rastro de un resultado tardío se lee en la base: aquí `logAction` es el REAL (el setup lo mockea).
 jest.mock('@/services/dashboard/activity-log.service', () => jest.requireActual('@/services/dashboard/activity-log.service'))
 
 jest.setTimeout(30_000)
+
+// The barrier tests below hold real row locks and delete fixtures: only on an explicitly isolated local database.
+const database = new URL(process.env.TEST_DATABASE_URL ?? '')
+if (
+  !['localhost', '127.0.0.1'].includes(database.hostname) ||
+  !/^\/(codex_testarudo_test_|avoqado_[a-z0-9]+_test_)/.test(database.pathname)
+) {
+  throw new Error('This suite requires an explicitly selected isolated local test database.')
+}
 
 const QUINCE_MIN = 15 * 60_000
 
@@ -769,6 +780,254 @@ describe('«No tengo este artículo» desde el KDS (Tarea 14)', () => {
       blockedOrders: [],
       blockedOrdersTotal: 0,
       blockedOrdersNextCursor: null,
+    })
+  })
+
+  // ── Plan 3b: the answer is applied under delivery advisory → Order, the lock fiscal admission also takes ─────────
+  describe('Plan 3b — applying the provider answer under the delivery advisory → Order lock', () => {
+    const barrera = () => {
+      let soltar!: () => void
+      const promesa = new Promise<void>(res => (soltar = res))
+      return { promesa, soltar }
+    }
+    /** Some connection is waiting on a lock whose query matches `patron` (never a sleep). */
+    const esperarBloqueo = async (patron = '%"Order"%') => {
+      for (let i = 0; i < 150; i++) {
+        const [{ n }] = await prisma.$queryRaw<Array<{ n: number }>>`
+          SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database()
+          AND wait_event_type = 'Lock' AND query ILIKE ${patron}`
+        if (n > 0) return
+        await new Promise(r => setTimeout(r, 20))
+      }
+      throw new Error(`No connection waited on ${patron}`)
+    }
+    /** Real fiscal admission holds the Order; `cambio` runs in its tx right before it commits. */
+    const retenerOrden = (orderId: string, cambio: (tx: Prisma.TransactionClient) => Promise<unknown> = async () => undefined) => {
+      const dentro = barrera(),
+        salir = barrera()
+      const listo = prisma.$transaction(
+        async tx => {
+          await bloquearOrdenParaFacturar(tx, orderId)
+          dentro.soltar()
+          await salir.promesa
+          await cambio(tx)
+        },
+        { timeout: 20_000 },
+      )
+      return { dentro: dentro.promesa, soltar: salir.soltar, listo }
+    }
+    const renglonB = (orderId: string) => prisma.orderItem.findFirstOrThrow({ where: { orderId, externalLineId: 'b' } })
+    const retiros = (orderId: string) => prisma.activityLog.count({ where: { entityId: orderId, action: 'DELIVERY_ITEM_REMOVED' } })
+    /** The 2xx lands while fiscal admission holds the Order (with `cambio` committed by it); returns the route's answer. */
+    async function aplicarMientrasFiscalRetiene(s: Semilla, cambio?: (tx: Prisma.TransactionClient) => Promise<unknown>) {
+      const uber = diferida()
+      resolver.mockReturnValue(uber.promesa)
+      const primero = retirar(s.kds.id, s.itemB.id).then(r => r)
+      await hasta(() => resolver.mock.calls.length === 1)
+      const fiscal = retenerOrden(s.order.id, cambio)
+      try {
+        await fiscal.dentro
+        uber.soltar({ ok: true, status: 200, raw: '{}' })
+        await esperarBloqueo()
+      } finally {
+        fiscal.soltar()
+        await fiscal.listo
+      }
+      return primero
+    }
+
+    it('fiscal admission first: the apply waits on the Order and then marks the line once', async () => {
+      const s = await sembrar()
+
+      const res = await aplicarMientrasFiscalRetiene(s)
+
+      expect(res.status).toBe(200)
+      expect(await accionDe(s.order.id)).toMatchObject({ status: 'CONFIRMED', attempts: 1, providerStatus: 200 })
+      expect((await renglonB(s.order.id)).removedAt).not.toBeNull()
+      expect(await retiros(s.order.id)).toBe(1)
+    })
+
+    it('an order moved to another venue while the apply waited is not touched; our action keeps the provider answer (T5-R2)', async () => {
+      const s = await sembrar()
+      ;(logger.warn as jest.Mock).mockClear()
+
+      const res = await aplicarMientrasFiscalRetiene(s, tx =>
+        tx.order.update({ where: { id: s.order.id }, data: { venueId: venueIdOtro } }),
+      )
+
+      expect(res.status).toBe(200)
+      expect(await accionDe(s.order.id)).toMatchObject({ status: 'CONFIRMED', attempts: 1, providerStatus: 200 })
+      expect((await renglonB(s.order.id)).removedAt).toBeNull()
+      expect(await retiros(s.order.id)).toBe(0)
+      // Our own token is released even though the order is now another venue's.
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: s.order.id } })).deliveryOpToken).toBeNull()
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('ya no es de este negocio'),
+        expect.objectContaining({ orderId: s.order.id, venueId, orderItemId: s.itemB.orderItemId, attempt: 1 }),
+      )
+    })
+
+    it('a cancellation committed while the apply waited does not stop the mark: once, action CONFIRMED (T5-R1)', async () => {
+      const s = await sembrar()
+
+      const res = await aplicarMientrasFiscalRetiene(s, tx =>
+        tx.order.update({ where: { id: s.order.id }, data: { status: OrderStatus.CANCELLED } }),
+      )
+
+      expect(res.status).toBe(200)
+      expect(await accionDe(s.order.id)).toMatchObject({ status: 'CONFIRMED', attempts: 1 })
+      expect((await renglonB(s.order.id)).removedAt).not.toBeNull()
+      expect(await retiros(s.order.id)).toBe(1)
+      // The money side still leaves a cancelled sale alone (pre-existing; Plan 4): no compensation.
+      expect(await prisma.payment.count({ where: { orderId: s.order.id, type: 'REFUND' } })).toBe(0)
+    })
+
+    it('with the reservation already taken by another operation, the apply still waits for fiscal admission', async () => {
+      const s = await sembrar()
+      const uber = diferida()
+      resolver.mockReturnValue(uber.promesa)
+
+      const primero = retirar(s.kds.id, s.itemB.id).then(r => r)
+      await hasta(() => resolver.mock.calls.length === 1)
+      await prisma.order.update({
+        where: { id: s.order.id },
+        data: { deliveryOpInFlight: 'READY', deliveryOpInFlightAt: new Date(), deliveryOpToken: 'de-otra-operacion' },
+      })
+      const fiscal = retenerOrden(s.order.id)
+      try {
+        await fiscal.dentro
+        uber.soltar({ ok: true, status: 200, raw: '{}' })
+        await esperarBloqueo()
+        // While fiscal admission holds the Order nothing of the apply is visible.
+        expect(await accionDe(s.order.id)).toMatchObject({ status: 'PENDING', attempts: 1 })
+      } finally {
+        fiscal.soltar()
+        await fiscal.listo
+      }
+      const res = await primero
+
+      expect(res.status).toBe(200)
+      expect(await accionDe(s.order.id)).toMatchObject({ status: 'CONFIRMED', attempts: 1 })
+      expect((await renglonB(s.order.id)).removedAt).toBeNull()
+      expect(await prisma.activityLog.count({ where: { entityId: s.order.id, action: 'DELIVERY_OP_LATE_RESULT' } })).toBe(1)
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: s.order.id } })).deliveryOpToken).toBe('de-otra-operacion')
+    })
+
+    it('the apply holds the Order until fiscal admission can read the complete removal', async () => {
+      const s = await sembrar()
+      resolver.mockResolvedValue({ ok: true, status: 200, raw: '{}' })
+      const marcado = barrera(),
+        seguir = barrera()
+      const original = lineRemoval.applyLineRemoval
+      jest.spyOn(lineRemoval, 'applyLineRemoval').mockImplementationOnce(async (tx, p) => {
+        await original(tx, p)
+        marcado.soltar()
+        await seguir.promesa
+      })
+      const vista = (db: Prisma.TransactionClient) =>
+        Promise.all([
+          db.orderItem.findFirstOrThrow({ where: { orderId: s.order.id, externalLineId: 'b' }, select: { removedAt: true } }),
+          db.kdsOrderItem.findUniqueOrThrow({ where: { id: s.itemB.id }, select: { removedAt: true, productName: true } }),
+          db.deliveryLineAction.findFirst({ where: { orderId: s.order.id, lineId: 'b' }, select: { status: true, attempts: true } }),
+          db.activityLog.count({ where: { entityId: s.order.id, action: 'DELIVERY_ITEM_REMOVED' } }),
+        ])
+
+      const primero = retirar(s.kds.id, s.itemB.id).then(r => r)
+      let fiscal: ReturnType<typeof vista> | undefined
+      try {
+        await Promise.race([
+          marcado.promesa,
+          primero.then(() => {
+            throw new Error('the apply never marked the line')
+          }),
+        ])
+        fiscal = prisma.$transaction(async tx => {
+          await bloquearOrdenParaFacturar(tx, s.order.id)
+          return vista(tx)
+        })
+        await esperarBloqueo()
+      } finally {
+        seguir.soltar()
+        await primero
+      }
+
+      expect((await primero).status).toBe(200)
+      const final = await vista(prisma)
+      expect(await fiscal!).toEqual(final)
+      expect(final[0].removedAt).not.toBeNull()
+      expect(final[1].productName.startsWith('RETIRADO · ')).toBe(true)
+      expect(final[2]).toMatchObject({ status: 'CONFIRMED', attempts: 1 })
+      expect(final[3]).toBe(1)
+    })
+
+    it('a failure after the line was marked rolls the whole apply back; the reservation is still released', async () => {
+      const s = await sembrar()
+      resolver.mockResolvedValue({ ok: true, status: 200, raw: '{}' })
+      const original = lineRemoval.applyLineRemoval
+      let visto = false
+      jest.spyOn(lineRemoval, 'applyLineRemoval').mockImplementationOnce(async (tx, p) => {
+        await original(tx, p)
+        visto = (await tx.orderItem.findFirstOrThrow({ where: { orderId: s.order.id, externalLineId: 'b' } })).removedAt !== null
+        throw new Error('injected failure after the line was marked')
+      })
+
+      const res = await retirar(s.kds.id, s.itemB.id)
+
+      expect(res.status).toBe(500)
+      expect(visto).toBe(true)
+      expect(await accionDe(s.order.id)).toMatchObject({ status: 'PENDING', attempts: 1 })
+      expect((await renglonB(s.order.id)).removedAt).toBeNull()
+      expect((await prisma.kdsOrderItem.findUniqueOrThrow({ where: { id: s.itemB.id } })).removedAt).toBeNull()
+      expect(await retiros(s.order.id)).toBe(0)
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: s.order.id } })).deliveryOpToken).toBeNull()
+    })
+
+    it('two markers of the same line: the apply queued behind a webhook reconciliation does not mark it twice', async () => {
+      const s = await sembrar()
+      const uber = diferida()
+      resolver.mockReturnValue(uber.promesa)
+      let entregarFoto!: (foto: NormalizedDeliveryOrder) => void
+
+      const primero = retirar(s.kds.id, s.itemB.id).then(r => r)
+      await hasta(() => resolver.mock.calls.length === 1)
+      // A webhook reconciliation takes the delivery advisory and is reading Uber: its photo no longer has line b.
+      leerPedido.mockReturnValue(new Promise(res => (entregarFoto = res)))
+      const webhook = reconciliacion.reconcileDeliveryOrderFromProvider(s.order.id, { trigger: 'WEBHOOK' })
+      await hasta(() => leerPedido.mock.calls.length === 1)
+      uber.soltar({ ok: true, status: 200, raw: '{}' })
+      // The route's apply queues on the same delivery advisory.
+      await esperarBloqueo('%pg_advisory_xact_lock%')
+      entregarFoto(s.foto(['a'], '150.00', { providerAccepted: true }))
+      const r = await webhook
+      const res = await primero
+
+      expect(r.outcome).toBe('REFUNDED')
+      expect(res.status).toBe(200)
+      expect(await retiros(s.order.id)).toBe(1)
+      expect(await prisma.payment.count({ where: { orderId: s.order.id, type: 'REFUND' } })).toBe(1)
+      expect(await accionDe(s.order.id)).toMatchObject({ status: 'CONFIRMED', attempts: 1 })
+    })
+
+    it('an order deleted while Uber answered: soft outcome, no throw, our action keeps the provider answer (T5-R2)', async () => {
+      const s = await sembrar()
+      const uber = diferida()
+      resolver.mockReturnValue(uber.promesa)
+      ;(logger.warn as jest.Mock).mockClear()
+
+      const primero = retirar(s.kds.id, s.itemB.id).then(r => r)
+      await hasta(() => resolver.mock.calls.length === 1)
+      // Venue or demo teardown deletes the sale while Uber answers.
+      await prisma.paymentAllocation.deleteMany({ where: { orderId: s.order.id } })
+      await prisma.order.delete({ where: { id: s.order.id } })
+      uber.soltar({ ok: true, status: 200, raw: '{}' })
+      const res = await primero
+
+      expect(res.status).toBe(200)
+      expect(await accionDe(s.order.id)).toMatchObject({ status: 'CONFIRMED', attempts: 1, providerStatus: 200 })
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('ya no es de este negocio'),
+        expect.objectContaining({ orderId: s.order.id, venueId }),
+      )
     })
   })
 })

@@ -2,6 +2,7 @@
  * Plan3b T4: mobile order-discount, split, split-by-seat, promotion, loyalty and stamp writers serialize with fiscal
  * admission on the real Order row, decide from the locked read (no version bump needed), and roll back as one unit;
  * `createOrderWithItems` writes the promotions and its reaffirmed money inside the transaction that creates the order.
+ * T5: `addAreaTicketItems` decides and totals from the Order read under the same lock.
  */
 import { randomUUID } from 'crypto'
 import { Prisma } from '@prisma/client'
@@ -19,6 +20,8 @@ import { applyPromotionToOrder, removePromotionFromOrder } from '@/services/prom
 import { redeemPointsToOrder } from '@/services/mobile/loyalty.mobile.service'
 import { redeemStampReward } from '@/services/wallet/redeemStampReward.service'
 import { processIntents } from '@/services/mobile/sync.mobile.service'
+import { addAreaTicketItems, openAreaTicket } from '@/services/mobile/areaTicket.mobile.service'
+import { buildAreaTicketCode } from '@/lib/areaTicketCode'
 import * as featureAccess from '@/middlewares/checkFeatureAccess.middleware'
 import * as tableOwnership from '@/middlewares/checkTableOwnership.middleware'
 
@@ -39,6 +42,10 @@ let staffId: string, customerId: string, productA: string, productB: string
 let discountId: string, fixedDiscountId: string, promotionId: string, draftPromotionId: string
 let selections: Array<{ groupId: string; optionId: string }>, draftSelections: Array<{ groupId: string; optionId: string }>
 let cycle = 0
+// Area tickets (T5): the area terminal mints codes on partition 47; the cash register claims.
+const AREA_DEVICE = `area-${randomUUID()}`
+let cashTerminalId: string, modifierId: string
+let ticketCounter = 0
 
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 function barrier() {
@@ -374,11 +381,28 @@ beforeAll(async () => {
   draftPromotionId = draft.id
   selections = published.groups.map(g => ({ groupId: g.id, optionId: g.options[0].id }))
   draftSelections = draft.groups.map(g => ({ groupId: g.id, optionId: g.options[0].id }))
+  const area = await prisma.fulfillmentArea.create({ data: { venueId, name: 'Cremería' } })
+  await prisma.terminal.create({
+    data: { venueId, name: 'Cremería', type: 'POS_ANDROID', deviceUid: AREA_DEVICE, partition: 47, fulfillmentAreaId: area.id },
+  })
+  cashTerminalId = (
+    await prisma.terminal.create({ data: { venueId, name: 'Caja', type: 'POS_ANDROID', deviceUid: `cash-${randomUUID()}`, partition: 48 } })
+  ).id
+  modifierId = (
+    await prisma.modifierGroup.create({
+      data: { venueId, name: 'Corte', modifiers: { create: [{ name: 'Rebanado fino', price: 5 }] } },
+      include: { modifiers: true },
+    })
+  ).modifiers[0].id
 })
 afterEach(() => jest.restoreAllMocks())
 afterAll(async () => {
   await prisma.posSyncIntent.deleteMany({ where: { venueId: { in: [venueId, otherVenueId] } } })
   await prisma.order.deleteMany({ where: { venueId: { in: [venueId, otherVenueId] } } })
+  await prisma.terminal.deleteMany({ where: { venueId } })
+  await prisma.fulfillmentArea.deleteMany({ where: { venueId } })
+  await prisma.modifier.deleteMany({ where: { group: { venueId } } })
+  await prisma.modifierGroup.deleteMany({ where: { venueId } })
   await prisma.stampReward.deleteMany({ where: { venueId } })
   await prisma.stampCard.deleteMany({ where: { venueId } })
   await prisma.loyaltyTransaction.deleteMany({ where: { customerId } })
@@ -933,4 +957,176 @@ describe('the sync reducer classifies the locked writers as before', () => {
     expect(await persisted(id)).toBeNull()
     expect(await state(o)).toEqual(before)
   }, 30_000)
+})
+
+describe('addAreaTicketItems decides and totals from the Order read under the lock (T5)', () => {
+  /** A ticket opened by the area terminal through the real service: one line of 100. */
+  async function openTicket() {
+    const code = buildAreaTicketCode(47, ++ticketCounter)
+    const ticket = await openAreaTicket(venueId, { code, deviceUid: AREA_DEVICE, staffId, items: [{ productId: productA, quantity: 1 }] })
+    return { id: ticket.orderId, code }
+  }
+  const addLine = (code: string, items: any[] = [{ productId: productB, quantity: 1 }]) =>
+    addAreaTicketItems(venueId, code, { deviceUid: AREA_DEVICE, staffId, items })
+  const modifiersOf = (orderId: string, db: Prisma.TransactionClient = prisma) =>
+    db.orderItemModifier.count({ where: { orderItem: { orderId } } })
+
+  it.each([
+    [
+      'a live claim by another terminal',
+      () => ({ claimedByTerminalId: cashTerminalId, claimedAt: new Date() }),
+      'AREA_TICKET_CLAIMED_BY_OTHER',
+    ],
+    ['a cancellation', () => ({ status: 'CANCELLED' as const }), 'AREA_TICKET_CANCELLED'],
+  ])('%s committed while it waited (no version bump) is seen under the lock: 409 and no line', async (_case, change, code) => {
+    const t = await openTicket()
+    const before = await snapshot(t.id)
+
+    const writer = await whileFiscalHolds(
+      t.id,
+      tx => tx.order.update({ where: { id: t.id }, data: change() }),
+      () => addLine(t.code),
+    )
+
+    expect(writer.error).toMatchObject({ code, statusCode: 409 })
+    const after = await snapshot(t.id)
+    expect(after.items).toEqual(before.items)
+    expect(after.version).toBe(before.version)
+  })
+
+  it('a partial payment with its tip (no version bump) committed while it waited: totals use the tip and paid read under the lock', async () => {
+    const t = await openTicket()
+
+    const writer = await whileFiscalHolds(
+      t.id,
+      tx =>
+        tx.order.update({
+          where: { id: t.id },
+          data: { paymentStatus: 'PARTIAL', paidAmount: 60, tipAmount: 10, total: 110, remainingBalance: 50 },
+        }),
+      () => addLine(t.code),
+    )
+
+    expect(writer.error).toBeUndefined()
+    // 100 + 50 of lines + 10 of tip = 160; remaining 160 − 60 = 100. From the stale photo: 150 and 150.
+    expect(await snapshot(t.id)).toMatchObject({ paymentStatus: 'PARTIAL', subtotal: 150, total: 160, paid: 60, remaining: 100 })
+  })
+
+  it('a service charge (no version bump) committed while it waited stays in the new total', async () => {
+    const t = await openTicket()
+
+    const writer = await whileFiscalHolds(
+      t.id,
+      tx => tx.order.update({ where: { id: t.id }, data: { serviceChargeAmount: 20, total: 120, remainingBalance: 120 } }),
+      () => addLine(t.code),
+    )
+
+    expect(writer.error).toBeUndefined()
+    // 150 of lines + 20 of charge. From the stale photo: 150.
+    expect(await snapshot(t.id)).toMatchObject({ subtotal: 150, total: 170, remaining: 170 })
+  })
+
+  it('a line added from another device while it waited (version bump) is still VERSION_CONFLICT', async () => {
+    const t = await openTicket()
+
+    const writer = await whileFiscalHolds(
+      t.id,
+      async tx => {
+        await tx.orderItem.create({
+          data: { orderId: t.id, productId: productA, productName: 'Plato', quantity: 1, unitPrice: 100, taxAmount: 0, total: 100 },
+        })
+        await tx.order.update({
+          where: { id: t.id },
+          data: { subtotal: 200, total: 200, remainingBalance: 200, version: { increment: 1 } },
+        })
+      },
+      () => addLine(t.code),
+    )
+
+    expect(writer.error).toMatchObject({ code: 'VERSION_CONFLICT', statusCode: 409 })
+    expect(await snapshot(t.id)).toMatchObject({ subtotal: 200, total: 200 })
+    expect((await snapshot(t.id)).items).toHaveLength(2)
+  })
+
+  it('a PAID without a version bump while it waited still answers VERSION_CONFLICT (the CAS runs first, as before)', async () => {
+    const t = await openTicket()
+    const before = await snapshot(t.id)
+
+    const writer = await whileFiscalHolds(
+      t.id,
+      tx => tx.order.update({ where: { id: t.id }, data: { paymentStatus: 'PAID', paidAmount: 100, remainingBalance: 0 } }),
+      () => addLine(t.code),
+    )
+
+    expect(writer.error).toMatchObject({ code: 'VERSION_CONFLICT' })
+    expect((await snapshot(t.id)).items).toEqual(before.items)
+  })
+
+  it('writer first: fiscal admission waits, then reads the new line, its modifier and the totals together', async () => {
+    const t = await openTicket()
+    const reached = barrier(),
+      resume = barrier()
+    let paused = false
+    interceptTransactions({
+      create: {
+        model: 'orderItem',
+        run: async (_args, _tx, next) => {
+          const created = await next()
+          if (!paused) {
+            paused = true
+            reached.release()
+            await resume.promise
+          }
+          return created
+        },
+      },
+    })
+    const writer = resultOf(addLine(t.code, [{ productId: productB, quantity: 1, modifierIds: [modifierId] }]))
+    let fiscal: Promise<unknown> | undefined
+    try {
+      await Promise.race([
+        reached.promise,
+        writer.then(() => {
+          throw new Error('the writer never wrote its line')
+        }),
+      ])
+      fiscal = prisma.$transaction(async tx => {
+        await bloquearOrdenParaFacturar(tx, t.id)
+        return { order: await snapshot(t.id, tx), modifiers: await modifiersOf(t.id, tx) }
+      })
+      await waitingOn()
+    } finally {
+      resume.release()
+      await writer
+    }
+
+    expect((await writer).error).toBeUndefined()
+    expect(await fiscal!).toEqual({ order: await snapshot(t.id), modifiers: await modifiersOf(t.id) })
+    // 100 + (50 + 5 of its modifier).
+    expect(await snapshot(t.id)).toMatchObject({ subtotal: 155, total: 155, remaining: 155 })
+    expect(await modifiersOf(t.id)).toBe(1)
+  })
+
+  it('rolls back the line and its modifier when the later totals write fails', async () => {
+    const t = await openTicket()
+    const before = await snapshot(t.id)
+    let observed = false
+    interceptTransactions({
+      orderUpdate: async (args, tx, next) => {
+        if (args?.data?.total === undefined) return next()
+        const inside = await snapshot(t.id, tx)
+        observed =
+          inside.items.length === before.items.length + 1 && inside.version === before.version + 1 && (await modifiersOf(t.id, tx)) === 1
+        throw new Error('injected failure after successful writes')
+      },
+    })
+
+    await expect(addLine(t.code, [{ productId: productB, quantity: 1, modifierIds: [modifierId] }])).rejects.toThrow(
+      'injected failure after successful writes',
+    )
+
+    expect(observed).toBe(true)
+    expect(await snapshot(t.id)).toEqual(before)
+    expect(await modifiersOf(t.id)).toBe(0)
+  })
 })

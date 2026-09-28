@@ -45,6 +45,7 @@ import prisma from '../../utils/prismaClient'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
 import { logAction } from '../dashboard/activity-log.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
+import { lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { buildOrderItemsData, CreateOrderItemInput } from './order.mobile.service'
 import { formatVenueTime } from '@/utils/datetime'
@@ -302,6 +303,24 @@ async function findTicketByCode(venueId: string, code: string) {
     where: { venueId_areaTicketCode: { venueId, areaTicketCode: code } },
     include: areaTicketInclude,
   })
+}
+
+/**
+ * Whether lines may be added (§5.3, §5.4), with the same precedence as `deriveAreaTicketState`. Lines and deliveries
+ * only tell ALREADY_PAID from DELIVERED, which get the same rejection here, so they are not needed.
+ */
+function assertTicketAcceptsItems(
+  order: { status: string; paymentStatus: string; claimedAt: Date | null; claimedByTerminalId: string | null },
+  terminalId: string,
+) {
+  const state = deriveAreaTicketState({ ...order, items: [], fulfillments: [] })
+  if (state === 'CANCELLED') throw new ConflictError('Esta cuenta fue cancelada.', 'AREA_TICKET_CANCELLED')
+  if (state === 'ALREADY_PAID' || state === 'DELIVERED') {
+    throw new ConflictError('Este vale ya está pagado; no se le pueden agregar renglones.', 'AREA_TICKET_ALREADY_PAID')
+  }
+  if (state === 'CHECKOUT_CLAIMED' && order.claimedByTerminalId !== terminalId) {
+    throw new ConflictError('La caja está cobrando esta cuenta. Espera a que termine.', 'AREA_TICKET_CLAIMED_BY_OTHER')
+  }
 }
 
 // MARK: - §6 · POST /mobile/devices/partition
@@ -611,14 +630,8 @@ export async function addAreaTicketItems(venueId: string, rawCode: string, input
     throw new NotFoundError(messageForState('NOT_FOUND', null))
   }
 
-  const state = deriveAreaTicketState(order as any)
-  if (state === 'CANCELLED') throw new ConflictError('Esta cuenta fue cancelada.', 'AREA_TICKET_CANCELLED')
-  if (state === 'ALREADY_PAID' || state === 'DELIVERED') {
-    throw new ConflictError('Este vale ya está pagado; no se le pueden agregar renglones.', 'AREA_TICKET_ALREADY_PAID')
-  }
-  if (state === 'CHECKOUT_CLAIMED' && order.claimedByTerminalId !== terminal.id) {
-    throw new ConflictError('La caja está cobrando esta cuenta. Espera a que termine.', 'AREA_TICKET_CLAIMED_BY_OTHER')
-  }
+  // Fast rejection from the pre-read keeps the usual error order; whether to write is decided again under the lock.
+  assertTicketAcceptsItems(order, terminal.id)
 
   await validateStaffVenue(input.staffId ?? undefined, venueId)
 
@@ -626,6 +639,24 @@ export async function addAreaTicketItems(venueId: string, rawCode: string, input
   const { itemsData } = await buildOrderItemsData(venueId, input.items, terminal.fulfillmentAreaId)
 
   const updated = await prisma.$transaction(async tx => {
+    // Plan 3b: lock the Order (route venue) before reading what decides the write. A claim, a partial payment, a tip,
+    // a service charge or a cancellation does not bump `version`, so they are reread here with the row locked.
+    if (!(await lockExistingOrderForPayment(tx, { venueId, orderId: order.id }))) {
+      throw new NotFoundError(messageForState('NOT_FOUND', null))
+    }
+    const locked = await tx.order.findFirstOrThrow({
+      where: { id: order.id, venueId },
+      select: {
+        status: true,
+        paymentStatus: true,
+        claimedAt: true,
+        claimedByTerminalId: true,
+        tipAmount: true,
+        serviceChargeAmount: true,
+        paidAmount: true,
+      },
+    })
+
     // CAS sobre `version`: si otro dispositivo agregó entre la lectura y este write,
     // count = 0 y el cliente reescanea, en vez de pisar los totales del otro.
     const bumped = await tx.order.updateMany({
@@ -635,6 +666,7 @@ export async function addAreaTicketItems(venueId: string, rawCode: string, input
     if (bumped.count === 0) {
       throw new ConflictError('La cuenta cambió en otro dispositivo. Vuelve a escanear el vale.', 'VERSION_CONFLICT')
     }
+    assertTicketAcceptsItems(locked, terminal.id)
 
     // Uno por uno (no `createMany`): sólo el create anidado escribe los modificadores
     // del renglón, y un renglón sin sus modificadores es un cobro incompleto.
@@ -652,10 +684,10 @@ export async function addAreaTicketItems(venueId: string, rawCode: string, input
     })
     const newSubtotal = allItems.reduce((sum, i) => sum + Number(i.total), 0)
     const newItemDiscount = allItems.reduce((sum, i) => sum + Number(i.discountAmount || 0), 0)
-    const tipAmount = Number(order.tipAmount || 0)
-    const serviceCharge = Number(order.serviceChargeAmount || 0)
+    const tipAmount = Number(locked.tipAmount || 0)
+    const serviceCharge = Number(locked.serviceChargeAmount || 0)
     const newTotal = newSubtotal - newItemDiscount + serviceCharge + tipAmount
-    const paidAmount = Number(order.paidAmount || 0)
+    const paidAmount = Number(locked.paidAmount || 0)
 
     await tx.order.update({
       where: { id: order.id },

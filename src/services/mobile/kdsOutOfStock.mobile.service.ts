@@ -29,6 +29,7 @@ import {
 import { applyLineRemoval } from '@/services/delivery-channels/core/lineRemoval.service'
 import { contexto, recuperarAceptacionDesdeProveedor } from '@/services/delivery-channels/core/respondToDeliveryOrder.service'
 import { DeliveryWriteNotSentError, type ActionResult } from '@/services/delivery-channels/core/types'
+import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import prisma from '@/utils/prismaClient'
 
 import { formatKdsOrderConVenta, type KdsOrderResponse } from './kds.mobile.service'
@@ -357,7 +358,10 @@ async function enviarYAplicar(l: Linea, a: Abierta, staffId: string, propio?: Pr
 
   let soltada = false
   try {
-    const { mia, aplicado } = await withDeliveryOrderLock(l.orderId, async tx => {
+    const { mia, aplicado, propia } = await withDeliveryOrderLock(l.orderId, async tx => {
+      // Plan 3b: delivery advisory → Order. The Order is locked (route venue) BEFORE the reservation CAS, so the answer
+      // lands under the same lock fiscal admission takes, and it only touches an order that is still this venue's.
+      const propia = await lockExistingOrderForPayment(tx, { venueId: l.venueId, orderId: l.orderId })
       const mia = await soltarReserva(l.orderId, a.token, tx)
       // 🔴 CAS sobre `attempts` [N-19]: la respuesta tardía de un intento anterior no toca el vigente
       // ni degrada un CONFIRMED.
@@ -372,12 +376,24 @@ async function enviarYAplicar(l: Linea, a: Abierta, staffId: string, propio?: Pr
       })
       // §3.2(c): con la reserva ya en manos de otra operación, el resultado no se aplica al PEDIDO;
       // la reconciliación marcará el renglón cuando la foto del proveedor lo confirme.
-      if (cas.count === 1 && estado === 'CONFIRMED' && mia) {
+      // Order.status is deliberately not an input: removedAt is operational (reconciliation's cancelled-order handling is Plan 4).
+      if (cas.count === 1 && estado === 'CONFIRMED' && mia && propia) {
         await applyLineRemoval(tx, { orderId: l.orderId, orderItemId: l.orderItemId, origin: 'STAFF', staffId })
       }
-      return { mia, aplicado: cas.count === 1 }
+      return { mia, aplicado: cas.count === 1, propia }
     })
     soltada = true
+    if (!propia) {
+      // The sale is gone or now belongs to another venue: the answer stays on OUR attempt and the line is not marked here.
+      logger.warn('[Delivery] el pedido ya no es de este negocio o ya no existe: el retiro no se marca aquí', {
+        orderId: l.orderId,
+        venueId: l.venueId,
+        orderItemId: l.orderItemId,
+        accionId: a.accionId,
+        attempt: a.attempt,
+        status: r?.status ?? null,
+      })
+    }
     if (mia && !aplicado) {
       // Nada se descarta en silencio: el intento ya no era el vigente (lo movió el barrido, el webhook o un reintento).
       logger.warn('[Delivery] respuesta del proveedor a un intento que ya no es el vigente: no se aplica', {
