@@ -16,6 +16,9 @@ describe('el KDS entrega el contacto del cliente (Tarea 4)', () => {
   let venueId: string, orgId: string, staffId: string
   let link: DeliveryChannelLink
   let token: string
+  // Task 12 (etapa 3 del KDS): la única estación con pantalla del venue — sirve para probar
+  // que `releaseScheduledOrder` también manda la comanda a la estación de reparto.
+  let estacionPantallaId: string
 
   // Mismo contacto que ingestaContacto.test.ts (Tarea 3), para que el valor esperado en las
   // dos pruebas de esta tarea sea el mismo texto que `contactoParaComanda` ya produce ahí.
@@ -62,6 +65,9 @@ describe('el KDS entrega el contacto del cliente (Tarea 4)', () => {
     link = await prisma.deliveryChannelLink.create({
       data: { venueId, provider: DeliveryProvider.UBER_EATS, externalLocationId: `store-${Date.now()}`, webhookSecret: 'x' },
     })
+    estacionPantallaId = (
+      await prisma.printStation.create({ data: { venueId, name: 'Pantalla', isDefault: true, hasKitchenDisplay: true } })
+    ).id
 
     const staff = await prisma.staff.create({
       data: { email: `kds-contacto-staff-${Date.now()}@t.mx`, firstName: 'KDS', lastName: 'Contacto' },
@@ -81,6 +87,7 @@ describe('el KDS entrega el contacto del cliente (Tarea 4)', () => {
       await prisma.order.deleteMany({ where: { venueId } })
       // KdsOrder tiene FK a Venue: si no se borra, el deleteMany de venue de abajo truena.
       await prisma.kdsOrder.deleteMany({ where: { venueId } })
+      await prisma.printStation.deleteMany({ where: { venueId } })
       await prisma.deliveryChannelLink.deleteMany({ where: { venueId } })
       await prisma.venueTenderTypeRevision.deleteMany({ where: { venueId } })
       await prisma.venueTenderType.deleteMany({ where: { venueId } })
@@ -120,5 +127,7 @@ describe('el KDS entrega el contacto del cliente (Tarea 4)', () => {
     expect(kds.customerName).toBe('Avoqado S.')
     expect(kds.customerContact).toContain('PIN')
     expect(kds.customerContact).toBe(CONTACTO_ESPERADO)
+    // Task 12: la liberación de un pedido programado también manda la comanda a la estación de pantalla.
+    expect(kds.printStationId).toBe(estacionPantallaId)
   })
 })
