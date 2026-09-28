@@ -42,9 +42,12 @@ interface GoogleUserInfo {
 }
 
 /**
- * Generate Google OAuth URL for authentication
+ * Generate Google OAuth URL for authentication.
+ *
+ * `state` es el que el controlador guardó en la cookie de ESTE navegador: Google lo devuelve tal cual y
+ * el callback sólo canjea el `code` si coinciden (login CSRF — ver `googleOAuth.controller.ts`).
  */
-export function getGoogleAuthUrl(): string {
+export function getGoogleAuthUrl(state: string): string {
   if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET || !process.env.FRONTEND_URL) {
     throw new AuthenticationError('Google OAuth is not configured on this server')
   }
@@ -55,6 +58,7 @@ export function getGoogleAuthUrl(): string {
     access_type: 'offline',
     scope: scopes,
     include_granted_scopes: true,
+    state,
   })
 
   return authUrl

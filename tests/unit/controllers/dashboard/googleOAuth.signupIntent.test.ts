@@ -4,15 +4,25 @@
  */
 jest.mock('@/services/dashboard/googleOAuth.service', () => ({ loginWithGoogle: jest.fn() }))
 
-import { googleOAuthCallback } from '@/controllers/dashboard/googleOAuth.controller'
+import { googleOAuthCallback, GOOGLE_OAUTH_STATE_COOKIE } from '@/controllers/dashboard/googleOAuth.controller'
 import { loginWithGoogle } from '@/services/dashboard/googleOAuth.service'
 
 const login = loginWithGoogle as jest.Mock
 
-function llamar(body: unknown) {
-  const res = { cookie: jest.fn(), status: jest.fn().mockReturnThis(), json: jest.fn() }
+// Todas estas peticiones vienen de un navegador que SÍ empezó el login (el state coincide con su cookie):
+// lo que se prueba aquí es el sobre del alta. El state tiene su propia prueba (googleOAuth.state.test.ts).
+const STATE = 'state-de-este-navegador'
+
+function llamar(body: Record<string, unknown>) {
+  const res = { cookie: jest.fn(), clearCookie: jest.fn(), status: jest.fn().mockReturnThis(), json: jest.fn() }
   const next = jest.fn()
-  const req = { body, headers: { 'cf-connecting-ip': '201.1.2.3' }, ip: '172.70.0.1', get: () => undefined } as never
+  const req = {
+    body: { state: STATE, ...body },
+    cookies: { [GOOGLE_OAUTH_STATE_COOKIE]: STATE },
+    headers: { 'cf-connecting-ip': '201.1.2.3' },
+    ip: '172.70.0.1',
+    get: () => undefined,
+  } as never
   return googleOAuthCallback(req, res as never, next).then(() => ({ res, next }))
 }
 
