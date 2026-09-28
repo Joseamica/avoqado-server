@@ -6,8 +6,9 @@
  *  - writer first: a capture arriving while a writer holds the Order waits and freezes the writer's complete operation
  *    (exactly a capture of the state AFTER the writer).
  * Goldens pin the Order money and the frozen document for IVA_INCLUIDO and IVA_APARTE, modifiers/extras, comps,
- * discounts, promotions, service charges and PARTIAL. Dependencies: a Product change waits (FOR SHARE); the
- * MenuCategory SAT fallback does not wait but is read once per capture; the receptor is the explicit request parameter.
+ * discounts, promotions, service charges and PARTIAL, plus the paid-but-open repair pass (the F1 lock). Dependencies: a
+ * Product change waits (FOR SHARE); the MenuCategory SAT fallback does not wait but is read once per capture; the
+ * receptor is the explicit request parameter.
  */
 import { randomUUID } from 'crypto'
 import { Prisma } from '@prisma/client'
@@ -22,6 +23,7 @@ import { applyServiceCharge } from '@/services/mobile/service-charge.mobile.serv
 import { cleanupPaymentCache, processPosOrderEvent } from '@/services/pos-sync/posSyncOrder.service'
 import { processPosOrderItemEvent } from '@/services/pos-sync/posSyncOrderItem.service'
 import { moduleService } from '@/services/modules/module.service'
+import { reconcileOrderFromPayments } from '@/services/tpv/payment.tpv.service'
 import type { RichPosPayload } from '@/types/pos.types'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
@@ -199,6 +201,22 @@ async function state(orderId: string) {
     promotions: await prisma.orderPromotion.count({ where: { orderId } }),
   }
 }
+/**
+ * Line order is not document content: the capture reads the lines without ORDER BY, so their order is the physical row
+ * order, and a seal UPDATE (or free space reused by other tests) moves rows. Comparisons between two reads, and against
+ * goldens, therefore order lines and concepts by content; everything else stays byte-for-byte.
+ */
+const byContent = (a: unknown, b: unknown) => huellaDeEntrada(a).localeCompare(huellaDeEntrada(b))
+const sorted = (document: Awaited<ReturnType<typeof frozen>>['document']) => ({
+  ...document,
+  conceptos: [...document.conceptos].sort(byContent),
+})
+const canonical = (entrada: ReturnType<typeof capturarEntrada>) =>
+  huellaDeEntrada({
+    ...entrada,
+    renglones: [...entrada.renglones].sort(byContent),
+    params: { ...entrada.params, items: [...entrada.params.items].sort(byContent) },
+  })
 const sentToPac = (entrada: ReturnType<typeof capturarEntrada>, key: string) => ({
   ...paramsDesdeEntrada(entrada, key),
   idempotencyKey: key,
@@ -233,6 +251,12 @@ async function nativeOrder(paid = 50): Promise<Fixture> {
     include: { items: { orderBy: { total: 'desc' } } },
   })
   return { id: o.id, version: o.version, items: o.items.map(i => i.id) }
+}
+/** Paid but open: the whole $150 is COMPLETED in cash and the transition to PAID never landed (the sweep's input). */
+async function paidButOpen(): Promise<Fixture> {
+  const o = await nativeOrder(150)
+  await prisma.order.update({ where: { id: o.id }, data: { paidAmount: 0, remainingBalance: 150, paymentStatus: 'PENDING' } })
+  return o
 }
 /** Settles the rest of the check in cash (payment lanes are not under test here). */
 async function payRest(orderId: string) {
@@ -358,6 +382,15 @@ const CASES: Array<[string, Case]> = [
       money: { subtotal: 240, discount: 0, charge: 0, tax: 0, total: 240, paid: 50, remaining: 190, paymentStatus: 'PARTIAL' },
       document: { status: 'VALIDATION_FAILED', montos: BASE_MONTOS, paidCents: 5000, renglones: 4, conceptos: [PLATO, REFRESCO] },
       because: 'lleva una promoción',
+    },
+  ],
+  [
+    'reconcileOrderFromPayments (paid-but-open check closed from its payments)',
+    {
+      build: () => paidButOpen(),
+      run: o => reconcileOrderFromPayments(o.id),
+      money: { subtotal: 150, discount: 0, charge: 0, tax: 0, total: 150, paid: 150, remaining: 0, paymentStatus: 'PAID' },
+      document: { status: 'STAMPED', montos: BASE_MONTOS, paidCents: 15000, renglones: 2, conceptos: [PLATO, REFRESCO] },
     },
   ],
   [
@@ -556,12 +589,13 @@ describe('writer first: the capture waits and freezes the complete operation (mo
     }
     expect((await writer).error).toBeUndefined()
     expect((await issuing!).error).toBeUndefined()
-    const { cfdi, document } = await frozen(o.id)
+    const { cfdi, entrada, document } = await frozen(o.id)
     // Frozen = a capture of the state AFTER the writer: its whole operation (the reason proves it for the discount,
     // which the document cannot spread over two concepts and therefore does not carry).
-    expect(cfdi.entradaHuella).toBe(huellaDeEntrada(await captureNow(o.id)))
+    expect(cfdi.entradaHuella).toBe(huellaDeEntrada(entrada))
+    expect(canonical(entrada)).toBe(canonical(await captureNow(o.id)))
     expect(await money(o.id)).toEqual(c.money === 'unchanged' ? moneyBefore : c.money)
-    expect(document).toEqual(c.document)
+    expect(sorted(document)).toEqual(sorted(c.document))
     if (c.because) expect(cfdi.lastError).toContain(c.because)
   })
 
@@ -572,8 +606,9 @@ describe('writer first: the capture waits and freezes the complete operation (mo
     await payRest(o.id)
     expect((await issue(o.id)).status).toBe('STAMPED')
     const { cfdi, entrada, document } = await frozen(o.id)
-    expect(document).toEqual({ ...CASES[0][1].document, status: 'STAMPED', paidCents: 17500 })
-    expect(cfdi.entradaHuella).toBe(huellaDeEntrada(await captureNow(o.id)))
+    expect(sorted(document)).toEqual(sorted({ ...CASES[0][1].document, status: 'STAMPED', paidCents: 17500 }))
+    expect(cfdi.entradaHuella).toBe(huellaDeEntrada(entrada))
+    expect(canonical(entrada)).toBe(canonical(await captureNow(o.id)))
     expect(provider.createInvoice).toHaveBeenCalledWith(sentToPac(entrada, `${cfdi.idempotencyKey}#1`))
   })
 
@@ -593,13 +628,15 @@ describe('writer first: the capture waits and freezes the complete operation (mo
     })
     expect((await issue(o.id)).status).toBe('VALIDATION_FAILED')
     const { cfdi, document } = await frozen(o.id)
-    expect(document).toEqual({
-      status: 'VALIDATION_FAILED',
-      montos: BASE_MONTOS,
-      paidCents: 16500,
-      renglones: 2,
-      conceptos: [PLATO, REFRESCO],
-    })
+    expect(sorted(document)).toEqual(
+      sorted({
+        status: 'VALIDATION_FAILED',
+        montos: BASE_MONTOS,
+        paidCents: 16500,
+        renglones: 2,
+        conceptos: [PLATO, REFRESCO],
+      }),
+    )
     expect(cfdi.lastError).toContain('cargo por servicio')
   })
 })

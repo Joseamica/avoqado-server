@@ -3,8 +3,12 @@
  * direct branch) pre-reads the Order and its payments, so a writer can commit between that read and the write. The
  * write transaction locks the Order first and rereads the inputs under the lock: on a change it reruns once from a
  * fresh read; if the rerun sees another change it writes nothing and warns (the sweep takes the order on its next tick).
+ *  - The first two tests pause BEFORE the write transaction opens: they prove the reread, the rerun and the skip.
+ *  - The third pauses INSIDE it, right after the reread: it proves the Order lock is already held there (a writer is
+ *    blocked on real PostgreSQL). With the lock after the reread, or without it, that writer commits and is overwritten.
  */
 import { randomUUID } from 'crypto'
+import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { reconcileOrderFromPayments } from '@/services/tpv/payment.tpv.service'
@@ -21,12 +25,26 @@ if (
 }
 const venueId = `reconcile-lost-update-${randomUUID()}`
 
-function barrier() {
-  let release!: () => void
-  const promise = new Promise<void>(resolve => {
+function barrier<T = void>() {
+  let release!: (value: T) => void
+  const promise = new Promise<T>(resolve => {
     release = resolve
   })
   return { promise, release }
+}
+async function backendPid(tx: Pick<Prisma.TransactionClient, '$queryRaw'>) {
+  const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
+  return pid
+}
+/** Some connection is blocked by `pid` (row lock). */
+async function blockedBy(pid: number) {
+  for (let attempt = 0; attempt < 250; attempt++) {
+    const [{ count }] = await prisma.$queryRaw<Array<{ count: number }>>`
+      SELECT count(*)::int AS count FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids(pid))`
+    if (count > 0) return
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  throw new Error(`No connection waited on backend ${pid}`)
 }
 
 /**
@@ -59,6 +77,46 @@ function pauseRepairTransactions(times: number) {
         outside = false
       }
     },
+  }
+}
+
+/**
+ * Pauses the repair pass INSIDE its write transaction, right after it rereads the Order (its last read before writing).
+ * Everything else — including other writers' transactions once it paused — passes straight through.
+ */
+function pauseAfterRepairReread() {
+  const entered = barrier<number>()
+  const finish = barrier()
+  const original = prisma.$transaction.bind(prisma)
+  let paused = false
+  const bound = (target: object, key: string | symbol) => {
+    const value = Reflect.get(target, key)
+    return typeof value === 'function' ? value.bind(target) : value
+  }
+  jest.spyOn(prisma, '$transaction').mockImplementation(((body: any, options?: any) => {
+    if (paused || typeof body !== 'function') return (original as any)(body, options)
+    return (original as any)(async (tx: any) => {
+      const order = new Proxy(tx.order, {
+        get: (delegate, key) =>
+          key !== 'findFirst'
+            ? bound(delegate, key)
+            : async (...args: unknown[]) => {
+                const row = await delegate.findFirst(...args)
+                if (!paused) {
+                  paused = true
+                  entered.release(await backendPid(tx))
+                  await finish.promise
+                }
+                return row
+              },
+      })
+      return body(new Proxy(tx, { get: (client, key) => (key === 'order' ? order : bound(client, key)) }))
+    }, options)
+  }) as any)
+  return {
+    entered: (repair: Promise<unknown>) =>
+      Promise.race([entered.promise, repair.then(() => Promise.reject(new Error('repair never reread inside its transaction')))]),
+    release: () => finish.release(),
   }
 }
 
@@ -159,4 +217,34 @@ it('a second change during the rerun leaves the order as that writer committed i
     expect.stringContaining('[StandaloneTotals]'),
     expect.objectContaining({ orderId: order.id, venueId }),
   )
+})
+
+it('a line arriving while the repair pass holds the Order waits for it, then sees the committed PAID and is refused', async () => {
+  const order = await paidButOpenOrder()
+  const hold = pauseAfterRepairReread()
+  const repair = settle(reconcileOrderFromPayments(order.id))
+  let adding: Promise<{ error: unknown }> | undefined
+  try {
+    const pid = await hold.entered(repair)
+    adding = settle(addDessert(order.id))
+    // Real PostgreSQL: the other device's writer is blocked by the repair pass's transaction, after its reread.
+    await blockedBy(pid)
+  } finally {
+    hold.release()
+    await repair
+    await adding
+  }
+
+  expect(await repair).toEqual({ value: { orderId: order.id, warning: null }, error: undefined })
+  // The writer read the committed PAID under the lock and refused: no unpaid line inside a paid check.
+  expect((await adding!).error).toMatchObject({ message: 'Cannot add items to a paid order' })
+  expect(await state(order.id)).toMatchObject({
+    subtotal: 150,
+    total: 150,
+    paid: 150,
+    remaining: 0,
+    paymentStatus: 'PAID',
+    status: 'COMPLETED',
+  })
+  expect(await prisma.orderItem.count({ where: { orderId: order.id } })).toBe(1)
 })

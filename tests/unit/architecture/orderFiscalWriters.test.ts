@@ -160,7 +160,7 @@ type Proof = { file: string; title: string; mentions: string }
 type Writer =
   | { class: 'LOCKED'; lock: string[]; proof: Proof[]; note?: string }
   | { class: 'CALLER_LOCKED'; callers: string[]; proof: Proof[] }
-  | { class: 'PRIVATE_CREATION'; creates: string[]; note: string }
+  | { class: 'PRIVATE_CREATION'; creates: string[]; note: string; residual?: string }
   | { class: 'METADATA'; reason: string }
   | { class: 'EXCLUDED'; reason: string; residual?: string }
 
@@ -213,6 +213,8 @@ const WRITERS: Record<string, Writer> = {
     class: 'PRIVATE_CREATION',
     creates: ['.order.create('],
     note: 'new Order, lines, discounts and FREE_CART payment in one transaction; replays return the committed order',
+    residual:
+      'R3: its discount.updateMany({ id: { in } }) is ONE statement whose row-lock order follows the plan, vs the automatic-discount batch locking ascending ids (T3-R2): theoretical 40P01 only, no partial writes (fix: sorted per-id updates).',
   },
   // ── Discount engine and coupons (T3) ────────────────────────────────────────────────────────
   'src/services/dashboard/discountEngine.service.ts#applyManualDiscount': {
@@ -406,6 +408,14 @@ const WRITERS: Record<string, Writer> = {
     class: 'LOCKED',
     lock: ['lockExistingOrderForPayment(', 'standaloneTotalsInputs('],
     proof: [
+      // The lock, on real PostgreSQL: a writer blocked after the reread; the capture waits for it and it for the capture.
+      ...proof(
+        RECONCILE,
+        'reconcileOrderFromPayments',
+        'a line arriving while the repair pass holds the Order waits for it, then sees the committed PAID and is refused',
+      ),
+      ...proof(CAPTURE, 'reconcileOrderFromPayments', 'freezes the complete operation', 'capture first: a later writer waits'),
+      // The reread, the one rerun and the skip.
       ...proof(
         RECONCILE,
         'reconcileOrderFromPayments',
