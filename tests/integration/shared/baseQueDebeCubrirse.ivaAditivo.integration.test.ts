@@ -34,16 +34,25 @@ interface Siembra {
   taxAmount: number
   cobrado: number
   abierta?: boolean
+  // El IVA separado sólo existe en el histórico importado de SoftRestaurant (`POS`); lo nativo lo trae incluido.
+  source?: 'POS' | 'TPV' | 'AVOQADO_IOS'
 }
 
-async function sembrar({ clave, subtotal, taxAmount, cobrado, abierta = false }: Siembra): Promise<void> {
+async function sembrar({
+  clave,
+  subtotal,
+  taxAmount,
+  cobrado,
+  abierta = false,
+  source = taxAmount > 0 ? 'POS' : 'TPV',
+}: Siembra): Promise<void> {
   const total = subtotal + taxAmount
   const order = await prisma.order.create({
     data: {
       venueId,
       orderNumber: `IVA-${clave}-${Date.now()}`,
       type: 'TAKEOUT',
-      source: 'TPV',
+      source,
       status: abierta ? 'PENDING' : 'COMPLETED',
       paymentStatus: abierta ? 'PARTIAL' : 'PAID',
       subtotal,
@@ -102,6 +111,11 @@ beforeAll(async () => {
   await sembrar({ clave: 'separado-abierta-falta-iva', subtotal: 100, taxAmount: 16, cobrado: 100, abierta: true })
   // Abierta, IVA separado, cobrada completa: SÍ está pagada y sigue abierta.
   await sembrar({ clave: 'separado-abierta-pagada', subtotal: 100, taxAmount: 16, cobrado: 116, abierta: true })
+  // Abierta, precio con el IVA incluido, cobrada completa: la que el barrido SÍ repara.
+  await sembrar({ clave: 'incluido-abierta-pagada', subtotal: 100, taxAmount: 0, cobrado: 100, abierta: true })
+  // Una venta nacida de un presupuesto (iOS): desde el 28-sep nace con el IVA incluido y `taxAmount` 0, así que el
+  // barrido también la alcanza.
+  await sembrar({ clave: 'presupuesto-abierta-pagada', subtotal: 250, taxAmount: 0, cobrado: 250, abierta: true, source: 'AVOQADO_IOS' })
 })
 
 afterAll(async () => {
@@ -150,11 +164,31 @@ describe('barrido pagada-pero-abierta · el MISMO criterio, ejecutado', () => {
     const ids = new Set(candidatas.map(c => c.id))
 
     expect(ids.has(ordenes['separado-abierta-falta-iva'])).toBe(false)
-    expect(ids.has(ordenes['separado-abierta-pagada'])).toBe(true)
+  })
 
-    // Y los números que explican la elección son los que la eligieron: base con IVA, pagado = cobros.
-    const pagada = candidatas.find(c => c.id === ordenes['separado-abierta-pagada'])!
-    expect(Number(pagada.base)).toBe(116)
-    expect(Number(pagada.pagado)).toBe(116)
+  it('🔴 una cuenta con IVA separado YA pagada tampoco se propone para reparar: el reparador le quitaría el IVA al total', async () => {
+    // El reparador escribe `total = subtotal − descuento + cargo + propina`: la convención mexicana, con el IVA DENTRO
+    // del precio. Sobre esta cuenta ($100 + $16 de IVA aparte, cobrados $116) dejaría el total en $100 y el cobro
+    // exacto se leería como sobrepago de $16. Esa forma sólo existe en el histórico de SoftRestaurant.
+    const candidatas = await findPaidButOpenOrders(prisma, { graceMs: 0, limit: 500, now: new Date() })
+    const ids = new Set(candidatas.map(c => c.id))
+
+    expect(ids.has(ordenes['separado-abierta-pagada'])).toBe(false)
+
+    // REGRESIÓN — la cuenta con el IVA incluido, pagada y abierta, se sigue proponiendo, con sus números.
+    const incluida = candidatas.find(c => c.id === ordenes['incluido-abierta-pagada'])
+    expect(incluida).toBeDefined()
+    expect(Number(incluida!.base)).toBe(100)
+    expect(Number(incluida!.pagado)).toBe(100)
+    // …y también la que nació de un presupuesto.
+    expect(ids.has(ordenes['presupuesto-abierta-pagada'])).toBe(true)
+  })
+
+  it('…y el vigilante la SIGUE reportando como pagada pero abierta: nadie la esconde, la decide una persona', async () => {
+    const filas = await prisma.$queryRawUnsafe<Fila[]>(buildWatchdogSql().details)
+    const abiertas = new Set(filas.filter(f => f.check === 'PAGADA PERO ABIERTA').map(f => f.order_id))
+
+    expect(abiertas.has(ordenes['separado-abierta-pagada'])).toBe(true)
+    expect(abiertas.has(ordenes['separado-abierta-falta-iva'])).toBe(false)
   })
 })

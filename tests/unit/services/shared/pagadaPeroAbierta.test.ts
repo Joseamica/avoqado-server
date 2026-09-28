@@ -130,6 +130,18 @@ describe('findPaidButOpenOrders — la consulta que arma', () => {
     expect(q.values).toEqual([new Date('2026-09-02T19:55:00.000Z'), DESDE, 50])
   })
 
+  it('🔴 NO propone reparar una cuenta con el IVA separado (taxAmount > 0), y deja intacto el criterio que lee el vigilante', async () => {
+    const db = dobleDb()
+    await findPaidButOpenOrders(comoDb(db), { graceMs: GRACIA_MS, limit: 50, now: AHORA })
+
+    const q = consultaCapturada(db)
+    // El reparador reescribe el total con el IVA DENTRO del subtotal (convención mexicana): sobre una cuenta que guarda
+    // el IVA aparte (el histórico de SoftRestaurant) le quitaría el IVA al total.
+    expect(q.sql).toContain('COALESCE(o."taxAmount", 0) <= 0')
+    // …pero el filtro vive FUERA del criterio compartido: el vigilante la sigue reportando como pagada pero abierta.
+    expect(criterioPagadaPeroAbiertaSql('o')).not.toContain('<= 0')
+  })
+
   it('sin `since` NO acota por fecha de creación — así el barrido a mano alcanza el rezago viejo', async () => {
     const db = dobleDb()
     await findPaidButOpenOrders(comoDb(db), { graceMs: GRACIA_MS, limit: 50, now: AHORA })

@@ -249,8 +249,11 @@ export function buildWatchdogSql(): { counts: string; details: string } {
         --    🔴 El criterio NO se escribe aquí: sale del MISMO módulo que usa el barrido
         --    paid-order-reconciler.job.ts (cada 10 min). Si divergieran, el barrido cerraría un
         --    conjunto de órdenes y el vigilante vigilaría otro.
-        --    Qué puede aparecer aquí SIN que el barrido haya fallado — son tres clases, y por eso
+        --    Qué puede aparecer aquí SIN que el barrido haya fallado — son cuatro clases, y por eso
         --    esto NO es «lo que el barrido no pudo cerrar» a secas:
+        --      · una cuenta con el IVA SEPARADO (taxAmount > 0, histórico de SoftRestaurant): el
+        --        barrido la excluye a propósito porque su reparador le quitaría el IVA al total
+        --        (findPaidButOpenOrders); se cierra a mano;
         --      · lo que intentó y no pudo cerrar (p. ej. falló el vale de inventario): el motivo
         --        está en el log de ESE job, y una que reaparece pasada tras pasada NO se cierra
         --        a mano;

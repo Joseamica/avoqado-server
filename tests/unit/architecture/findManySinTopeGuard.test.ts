@@ -90,7 +90,6 @@ const INVENTARIO: Record<string, number> = {
   'src/controllers/tpv/terminal.tpv.controller.ts': 2,
   'src/controllers/venuePaymentConfig.controller.ts': 1,
   'src/controllers/webhook/google-calendar.webhook.controller.ts': 1,
-  'src/jobs/abandoned-orders-cleanup.job.ts': 1,
   'src/jobs/areaTicketExternalReconciliation.job.ts': 1,
   'src/jobs/attendance-late-alert.job.ts': 3,
   'src/jobs/auto-clockout.job.ts': 4,
