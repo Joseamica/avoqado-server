@@ -1,13 +1,17 @@
 /**
  * PRINT_STATIONS — MCP read tools (feature gratis/core, sin plan gate).
  *
- * Lectura (list_printers · list_print_stations · print_routing_preview) + UNA escritura: la casilla de
- * pantalla de cocina (set_print_station_kitchen_display), sólo Avoqado y en 2 pasos (invariante MCP #4).
+ * Lectura (list_printers · list_print_stations · print_routing_preview · list_kitchen_tickets) + UNA escritura: la
+ * casilla de pantalla de cocina (set_print_station_kitchen_display), con la MISMA puerta que el dashboard (sólo
+ * Avoqado hasta la fase 3.6; después, dueños con Pro) y en 2 pasos (invariante MCP #4).
  * El resto de la configuración (impresoras/estaciones/ruteo) se hace desde el dashboard.
  * Todo scoped al venue del operador (guard.venueFilter) + requirePermission('printers:read').
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
+import { ForbiddenError } from '@/errors/AppError'
+import { PANTALLA_ABIERTA_A_CLIENTES } from '@/services/kds/kitchenDisplayRelease'
+import { countKdsOrders, listKdsOrders } from '@/services/mobile/kds.mobile.service'
 import {
   getGateway,
   getRouting,
@@ -117,7 +121,7 @@ export function registerPrinterTools(server: McpServer, scope: McpScope): void {
 
   server.tool(
     'set_print_station_kitchen_display',
-    'Turn ON/OFF "Se atiende con pantalla de cocina" (kitchen display) for ONE print station. While NO active station of the venue has it, sales from the POS do NOT create kitchen-display tickets (the printed kitchen ticket is unaffected). Stage 1: ONLY Avoqado staff (superadmin) may change it, because the kitchen display is not finished for customers yet. Two steps: the first call only previews; call again with confirm:true to save.',
+    'Turn ON/OFF "Se atiende con pantalla de cocina" (kitchen display) for ONE print station. While NO active station of the venue has it, sales do NOT create kitchen-display tickets (the printed kitchen ticket is unaffected). Until the kitchen display passes its quality gate only Avoqado staff (superadmin) may turn it ON; after release, owners with the Pro plan and printers:manage can. Turning OFF is always allowed. Two steps: the first call only previews; call again with confirm:true to save.',
     {
       venueId: z.string().describe('Venue (must be in your scope)'),
       stationId: z.string().describe('Print station id (see list_print_stations)'),
@@ -126,12 +130,8 @@ export function registerPrinterTools(server: McpServer, scope: McpScope): void {
     },
     async ({ venueId, stationId, enabled, confirm }) => {
       guard.venueFilter(venueId)
-      if (!scope.isSuperAdmin) {
-        return text({
-          ok: false,
-          error: 'Sólo Avoqado puede cambiar la pantalla de cocina en esta etapa.',
-          aviso: avisoPantalla,
-        })
+      if (enabled && !scope.isSuperAdmin && !PANTALLA_ABIERTA_A_CLIENTES) {
+        return text({ ok: false, error: 'La pantalla de cocina todavía no está disponible para clientes.', aviso: avisoPantalla })
       }
       guard.requirePermission('printers:manage', venueId)
       requireWriteScopeAlways(scope, 'printers:manage', 'decide si las ventas de este negocio crean comandas para la pantalla de cocina')
@@ -150,7 +150,14 @@ export function registerPrinterTools(server: McpServer, scope: McpScope): void {
         })
       }
 
-      const guardada = await setKitchenDisplay(venueId, stationId, enabled, scope.staffId)
+      let guardada
+      try {
+        guardada = await setKitchenDisplay(venueId, stationId, enabled, scope.staffId)
+      } catch (error) {
+        // Plan u otra regla del servicio: se explica, sin escribir ni auditar.
+        if (error instanceof ForbiddenError) return text({ ok: false, error: error.message, aviso: avisoPantalla })
+        throw error
+      }
       await auditMcpWrite(scope, {
         action: 'PRINT_STATION_KITCHEN_DISPLAY_SET',
         entity: 'PrintStation',
@@ -162,6 +169,34 @@ export function registerPrinterTools(server: McpServer, scope: McpScope): void {
         ok: true,
         station: { id: guardada.id, name: guardada.name, hasKitchenDisplay: guardada.hasKitchenDisplay },
         aviso: avisoPantalla,
+      })
+    },
+  )
+
+  server.tool(
+    'list_kitchen_tickets',
+    'List the kitchen-display tickets (comandas de pantalla) of a venue, optionally for ONE station — what that kitchen screen shows right now: its own tickets plus the "Sin estación" ones, never those printed on backup paper nor those older than when its screen was turned on. Bounded to the latest 100, with the total. Read-only — requires orders:read.',
+    {
+      venueId: z.string().describe('Venue to inspect (must be in your scope)'),
+      stationId: z.string().optional().describe('Print station id (see list_print_stations); omit for the whole venue'),
+      status: z.string().optional().describe('Comma-separated statuses: NEW,PREPARING,READY,COMPLETED (default: the active ones)'),
+    },
+    async ({ venueId, stationId, status }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('orders:read', venueId)
+      const [comandas, total] = await Promise.all([listKdsOrders(venueId, status, stationId), countKdsOrders(venueId, status, stationId)])
+      return text({
+        ok: true,
+        total,
+        devueltas: comandas.length,
+        comandas: comandas.map(c => ({
+          id: c.id,
+          folio: c.orderNumber,
+          status: c.status,
+          tipo: c.orderType,
+          renglones: c.items.length,
+          creada: c.createdAt,
+        })),
       })
     },
   )

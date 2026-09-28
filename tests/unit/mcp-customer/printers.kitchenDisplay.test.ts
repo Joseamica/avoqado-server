@@ -9,6 +9,8 @@ const mockList = jest.fn()
 const mockSet = jest.fn()
 const mockAudit = jest.fn()
 const mockWriteScope = jest.fn()
+const mockListKds = jest.fn()
+const mockCountKds = jest.fn()
 const AVISO = 'La pantalla de cocina todavía no está lista para clientes.'
 
 jest.mock('@/mcp/guard', () => ({
@@ -33,6 +35,10 @@ jest.mock('@/services/dashboard/printStation.dashboard.service', () => ({
   listPrinters: jest.fn(),
   getGateway: jest.fn(),
   previewRouting: jest.fn(),
+}))
+jest.mock('@/services/mobile/kds.mobile.service', () => ({
+  listKdsOrders: (...a: unknown[]) => mockListKds(...(a as [])),
+  countKdsOrders: (...a: unknown[]) => mockCountKds(...(a as [])),
 }))
 
 type Handler = (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>
@@ -91,6 +97,13 @@ describe('set_print_station_kitchen_display', () => {
     expect(r.ok).toBe(false)
     expect(mockSet).not.toHaveBeenCalled()
   })
+
+  it('una conexión que no es de Avoqado SÍ puede APAGARLA (con confirm): escribe y audita', async () => {
+    const r = parse(await cliente('set_print_station_kitchen_display', { venueId: 'v1', stationId: 's1', enabled: false, confirm: true }))
+    expect(r.ok).toBe(true)
+    expect(mockSet).toHaveBeenCalledWith('v1', 's1', false, 's1')
+    expect(mockAudit).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: 'PRINT_STATION_KITCHEN_DISPLAY_SET' }))
+  })
 })
 
 describe('list_print_stations', () => {
@@ -106,5 +119,23 @@ describe('list_print_stations', () => {
     const r = parse(await cliente('list_print_stations', { venueId: 'v1' }))
     expect(r.stations[0]).toEqual(expect.objectContaining({ id: 's1', name: 'Cocina', isDefault: true, hasKitchenDisplay: false }))
     expect(r.pantallaDeCocina).toBeUndefined()
+  })
+})
+
+describe('list_kitchen_tickets (etapa 3)', () => {
+  it('lee las comandas de UNA estación, acotadas, con el total', async () => {
+    mockListKds.mockResolvedValue([
+      { id: 'k1', orderNumber: 'A1', status: 'NEW', orderType: 'DINE_IN', items: [{}, {}], createdAt: '2026-09-27T12:00:00.000Z' },
+    ])
+    mockCountKds.mockResolvedValue(7)
+    const r = parse(await cliente('list_kitchen_tickets', { venueId: 'v1', stationId: 'st-1' }))
+    expect(mockListKds).toHaveBeenCalledWith('v1', undefined, 'st-1')
+    expect(r).toEqual(
+      expect.objectContaining({ ok: true, total: 7, devueltas: 1, comandas: [expect.objectContaining({ id: 'k1', renglones: 2 })] }),
+    )
+  })
+
+  it('un venue fuera de alcance se rechaza', async () => {
+    await expect(cliente('list_kitchen_tickets', { venueId: 'ajeno' })).rejects.toThrow('ScopeError')
   })
 })
