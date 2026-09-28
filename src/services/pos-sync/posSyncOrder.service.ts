@@ -10,6 +10,7 @@ import { PaymentMethod } from '@prisma/client'
 import { socketManager } from '../../communication/sockets/managers/socketManager'
 import { SocketEventType } from '../../communication/sockets/types'
 import {
+  ORDER_LOCK_WAIT_BUDGET,
   lockExistingOrderForPayment,
   recordPendingPaymentShiftReconciliation,
   resolvePaymentShiftReconciliationEnabled,
@@ -406,7 +407,7 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
     }
 
     return order
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 
   // Emit socket event for real-time updates to POS devices (AFTER transaction commits)
   try {

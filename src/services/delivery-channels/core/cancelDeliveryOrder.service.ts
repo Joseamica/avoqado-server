@@ -13,7 +13,7 @@ import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { reverseSalePosting } from '@/services/inventory/reverseSalePosting.service'
 import { findLiveTerminalCharge } from '@/services/shared/orderCancelGuard'
-import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
+import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 
 export interface CancelResult {
   outcome: 'CANCELLED' | 'ORDER_NOT_FOUND' | 'ALREADY_CANCELLED'
@@ -67,7 +67,7 @@ export async function cancelDeliveryOrder(externalOrderId: string, provider: Del
     await tx.kdsOrderItem.deleteMany({ where: { kdsOrder: { orderId: order.id } } })
     await tx.kdsOrder.deleteMany({ where: { orderId: order.id } })
     return cobroVivo
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 
   if (cobroVivo) {
     logger.error(

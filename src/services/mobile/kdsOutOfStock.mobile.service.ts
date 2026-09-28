@@ -360,7 +360,9 @@ async function enviarYAplicar(l: Linea, a: Abierta, staffId: string, propio?: Pr
   try {
     const { mia, aplicado, propia } = await withDeliveryOrderLock(l.orderId, async tx => {
       // Plan 3b: delivery advisory → Order. The Order is locked (route venue) BEFORE the reservation CAS, so the answer
-      // lands under the same lock fiscal admission takes, and it only touches an order that is still this venue's.
+      // lands under the same lock fiscal admission takes. Only the line removal needs the order to still be this venue's
+      // (`propia`): `soltarReserva` releases OUR token (the three deliveryOp* fields, matched by id + token) even when
+      // `propia` is false, and the CAS records the provider's answer on our action row (T5-R2).
       const propia = await lockExistingOrderForPayment(tx, { venueId: l.venueId, orderId: l.orderId })
       const mia = await soltarReserva(l.orderId, a.token, tx)
       // 🔴 CAS sobre `attempts` [N-19]: la respuesta tardía de un intento anterior no toca el vigente

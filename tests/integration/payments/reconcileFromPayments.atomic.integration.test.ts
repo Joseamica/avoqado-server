@@ -209,7 +209,8 @@ it('a second change during the rerun leaves the order as that writer committed i
   const committed = await state(order.id)
   tx.gates[1].finish.release()
 
-  expect(await repair).toEqual({ value: { orderId: order.id, warning: null }, error: undefined })
+  // Nothing was written (T8-R3): the paid-order sweep must not audit this pass as reconciled.
+  expect(await repair).toEqual({ value: { orderId: order.id, warning: null, written: false }, error: undefined })
   expect(committed).toMatchObject({ subtotal: 190, total: 190, paymentStatus: 'PENDING', completedAt: null })
   expect(await state(order.id)).toEqual(committed)
   expect(tx.opened()).toBe(2)
@@ -235,7 +236,7 @@ it('a line arriving while the repair pass holds the Order waits for it, then see
     await adding
   }
 
-  expect(await repair).toEqual({ value: { orderId: order.id, warning: null }, error: undefined })
+  expect(await repair).toEqual({ value: { orderId: order.id, warning: null, written: true }, error: undefined })
   // The writer read the committed PAID under the lock and refused: no unpaid line inside a paid check.
   expect((await adding!).error).toMatchObject({ message: 'Cannot add items to a paid order' })
   expect(await state(order.id)).toMatchObject({

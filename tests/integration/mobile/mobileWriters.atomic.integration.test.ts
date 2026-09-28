@@ -71,7 +71,7 @@ async function waitingOn(pattern = '%"Order"%', minimum = 1) {
   }
   throw new Error(`No connection waited on ${pattern}`)
 }
-function holdFiscal(orderId: string, after: (tx: Prisma.TransactionClient) => Promise<unknown> = async () => {}) {
+function holdFiscal(orderId: string, after: (tx: Prisma.TransactionClient) => Promise<unknown> = async () => {}, timeout = 15_000) {
   const entered = barrier(),
     finish = barrier()
   const done = prisma.$transaction(
@@ -81,7 +81,7 @@ function holdFiscal(orderId: string, after: (tx: Prisma.TransactionClient) => Pr
       await finish.promise
       await after(tx)
     },
-    { timeout: 15_000 },
+    { timeout },
   )
   return { entered: entered.promise, release: finish.release, done }
 }
@@ -938,14 +938,16 @@ describe('the sync reducer classifies the locked writers as before', () => {
     const o = await newOrder()
     const before = await state(o)
     const id = randomUUID()
-    const fiscal = holdFiscal(o.id)
+    // The holder outlives the writer: it must hold longer than the writer's own 15 s budget.
+    const fiscal = holdFiscal(o.id, undefined, 40_000)
     let acks: ReturnType<typeof resultOf> | undefined
     try {
       await fiscal.entered
       acks = resultOf(replay({ id, type: 'APPLY_DISCOUNT', payload: { orderId: o.id, discountId } }))
       await waitingOn()
-      // Longer than the writer's interactive-transaction timeout (Prisma's default 5 s): a transient condition.
-      await pause(6_000)
+      // Longer than the writer's interactive-transaction timeout (ORDER_LOCK_WAIT_BUDGET, 15 s — Ruling T8-R2): a
+      // transient condition.
+      await pause(16_000)
     } finally {
       fiscal.release()
       await fiscal.done
@@ -956,7 +958,7 @@ describe('the sync reducer classifies the locked writers as before', () => {
     expect(outcome.value).toEqual([expect.objectContaining({ id, status: 'RETRY' })])
     expect(await persisted(id)).toBeNull()
     expect(await state(o)).toEqual(before)
-  }, 30_000)
+  }, 60_000)
 })
 
 describe('addAreaTicketItems decides and totals from the Order read under the lock (T5)', () => {

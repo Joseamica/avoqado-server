@@ -18,7 +18,7 @@
 import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
-import { lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
 
 /** Resuelve StaffVenue.id: appliedById NO acepta un Staff.id (P2003). */
 async function resolveStaffVenueId(tx: Prisma.TransactionClient, venueId: string, staffId?: string): Promise<string | undefined> {
@@ -115,7 +115,7 @@ export async function applyServiceCharge(venueId: string, orderId: string, servi
       const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
 
       return { charge, amount, totals }
-    })
+    }, ORDER_LOCK_WAIT_BUDGET)
     .catch(err => {
       if ((err as { code?: string }).code === 'P2002') throw new BadRequestError('Ese cobro ya está aplicado a la cuenta')
       throw err
@@ -147,7 +147,7 @@ export async function removeServiceCharge(venueId: string, orderId: string, orde
     const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
 
     return { row, totals }
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 
   void (await import('../dashboard/activity-log.service')).logAction({
     action: 'ORDER_SERVICE_CHARGE_REMOVED',
@@ -175,7 +175,7 @@ export async function syncAutomaticServiceCharges(venueId: string, orderId: stri
   return prisma.$transaction(async db => {
     if (!(await lockExistingOrderForPayment(db, { venueId, orderId }))) return null
     return syncAutomaticServiceChargesInTransaction(db, venueId, orderId)
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 }
 
 async function syncAutomaticServiceChargesInTransaction(tx: Prisma.TransactionClient, venueId: string, orderId: string) {

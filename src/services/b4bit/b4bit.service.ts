@@ -23,6 +23,7 @@ import prisma from '../../utils/prismaClient'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
 import { computeOrderBalance } from '../shared/orderBalance'
 import {
+  ORDER_LOCK_WAIT_BUDGET,
   claimShiftForCapturedPayment,
   lockExistingOrderForPayment,
   recordPendingPaymentShiftReconciliation,
@@ -1349,7 +1350,7 @@ async function settleOrderForConfirmedCryptoPayment(
           remainingBalance: balance.remainingBalance.toFixed(2),
           postingId,
         }
-      })
+      }, ORDER_LOCK_WAIT_BUDGET)
     } catch (error: any) {
       // Se reintentan DOS cosas, y sólo dos: perder la CAS contra otro cobro, y
       // que el vale de inventario no se pudiera escribir (ver
@@ -1402,7 +1403,7 @@ async function settleOrderForConfirmedCryptoPayment(
         },
         reconciliationEnabled,
       )
-    })
+    }, ORDER_LOCK_WAIT_BUDGET)
   } catch (persistError: any) {
     logger.error('🚨 [B4Bit settlement] NO SE PUDO REGISTRAR EL COBRO CRIPTO — dinero cobrado sin Payment COMPLETED', {
       paymentId: payment.id,

@@ -5,7 +5,7 @@ import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { DEFAULT_TIMEZONE, isWithinVenueSchedule } from '@/utils/datetime'
 import { resolvePromotionLines, type PromotionOptionSnapshot } from './resolvePromotionLines'
-import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
+import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 
 export interface ApplyPromotionParams {
   venueId: string
@@ -45,7 +45,7 @@ export async function applyPromotionToOrder(
 
   const { orderId, instanceId } = params
   try {
-    return await prisma.$transaction(own => applyPromotionInTransaction(own, params))
+    return await prisma.$transaction(own => applyPromotionInTransaction(own, params), ORDER_LOCK_WAIT_BUDGET)
   } catch (err) {
     // Carrera del replay: dos intents con el MISMO instanceId pueden pasar
     // ambos el pre-read; el unique [orderId, instanceId] detiene al segundo.
@@ -263,7 +263,7 @@ export async function removePromotionFromOrder(params: { venueId: string; orderI
     // El total de la orden deja de incluir la promoción EN la misma transacción
     // (audit 2026-08-13: quitar el combo de $99 dejaba el total en $199).
     await recalculateOrderTotals(orderId, Number(found.order.discountAmount ?? 0), Number(found.order.paidAmount ?? 0), tx)
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 }
 
 /**

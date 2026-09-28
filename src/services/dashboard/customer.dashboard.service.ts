@@ -16,6 +16,7 @@ import { decideCustomerApproval } from '@/services/public/customerBookingAccess.
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
 import { postCashSaleToDrawer } from '../shared/cashDrawerPosting'
 import {
+  ORDER_LOCK_WAIT_BUDGET,
   claimShiftForCapturedPayment,
   lockExistingOrderForPayment,
   recordPendingPaymentShiftReconciliation,
@@ -939,7 +940,7 @@ export async function settleCustomerBalance(
       })
       if (posting?.id) postingIds.push(posting.id)
     }
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 
   // Fase 2 de la unificación de caja: cada liquidación en efectivo sube el cajón. Después del
   // commit y fail-open, igual que el vale de inventario de abajo.

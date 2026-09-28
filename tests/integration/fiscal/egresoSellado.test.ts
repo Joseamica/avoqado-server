@@ -24,8 +24,12 @@ import { huellaDeEntrada } from '@/services/fiscal/entradaDocumental'
 import { encenderIvaPorProducto } from '../../__helpers__/iva-por-producto'
 
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
-if (!['localhost', '127.0.0.1'].includes(database.hostname) || database.pathname !== '/av_db_25_iva_test') {
-  throw new Error('Esta suite exige la base local av_db_25_iva_test.')
+// La base fiscal de esta Mac o la desechable de CI (ci-cd.yml adopta ese nombre en vez de relajar la guarda): nunca otra.
+if (
+  !['localhost', '127.0.0.1'].includes(database.hostname) ||
+  !['/av_db_25_iva_test', '/avoqado_h1a_test_20260808'].includes(database.pathname)
+) {
+  throw new Error('Esta suite exige la base local av_db_25_iva_test o la desechable de CI avoqado_h1a_test_20260808.')
 }
 
 const receptor = { rfc: 'EKU9003173C9', razonSocial: 'ESCUELA KEMPER URGATE', regimenFiscal: '601', codigoPostal: '64000', usoCfdi: 'G03' }

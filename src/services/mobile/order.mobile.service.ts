@@ -33,6 +33,7 @@ import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { assertNoLiveTerminalCharge, assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared/orderCancelGuard'
 import { combinarContratos } from '../fiscal/contratoDePrecio'
 import {
+  ORDER_LOCK_WAIT_BUDGET,
   claimShiftForCapturedPayment,
   lockExistingOrderForPayment,
   recordPendingPaymentShiftReconciliation,
@@ -1016,7 +1017,7 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
         order: reafirmada,
         promotionTotals: { subtotal: subtotalConPromociones, discount: descuentoFinal, total: totalFinal },
       }
-    })
+    }, ORDER_LOCK_WAIT_BUDGET)
     order = created.order
     promotionTotals = created.promotionTotals
   } catch (error) {
@@ -1380,7 +1381,7 @@ export async function updateOrderDetails(venueId: string, orderId: string, input
   return prisma.$transaction(async tx => {
     if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
     return update(tx)
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 }
 
 // MARK: - Table order discounts (check panel "Descuentos")
@@ -1451,7 +1452,7 @@ export async function applyOrderDiscount(venueId: string, orderId: string, disco
 
     const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
     return { row, totals }
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 
   void (await import('../dashboard/activity-log.service')).logAction({
     action: 'ORDER_DISCOUNT_APPLIED',
@@ -1498,7 +1499,7 @@ export async function removeOrderDiscount(venueId: string, orderId: string, orde
     await tx.orderDiscount.delete({ where: { id: row.id } })
     const t = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
     return { row, refund: refunded, stampRefund: stamp, totals: t }
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 
   void (await import('../dashboard/activity-log.service')).logAction({
     action: 'ORDER_DISCOUNT_REMOVED',
@@ -1653,7 +1654,7 @@ export async function splitOrderItems(venueId: string, orderId: string, itemIds:
     const src = await recalculateOrderTotals(source.id, 0, Number(source.paidAmount || 0), tx)
     const dst = await recalculateOrderTotals(created.id, 0, 0, tx)
     return { source, newOrder: created, movedCount: toMove.length, sourceTotals: src, newTotals: dst }
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 
   void (await import('../dashboard/activity-log.service')).logAction({
     action: 'ORDER_SPLIT',
@@ -1794,7 +1795,7 @@ export async function splitOrderBySeat(venueId: string, orderId: string, staffId
       totalsPerSeat.push({ id: r.id, orderNumber: r.orderNumber, seat: r.seat, total: t.total })
     }
     return { source, seats, seatsToMove, results: totalsPerSeat, sourceTotals: src }
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 
   const createdTotals = created.results
   const sourceTotals = created.sourceTotals
@@ -2741,7 +2742,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
           },
           loyaltyBase: Math.max(0, newTotal - totalTip),
         }
-      })
+      }, ORDER_LOCK_WAIT_BUDGET)
       break // ganamos la transición
     } catch (err: any) {
       // 🛡️ Carrera IDEMPOTENTE: si dos requests con la MISMA idempotencyKey pasan

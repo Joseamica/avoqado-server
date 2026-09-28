@@ -12,6 +12,7 @@ import {
 } from '@prisma/client'
 import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
 import {
+  ORDER_LOCK_WAIT_BUDGET,
   claimShiftForRefund,
   lockExistingOrderForPayment,
   recordRefundAuthorityReconciliation,
@@ -1031,7 +1032,7 @@ export async function recordRefund(
               : null,
         }),
       }
-    })
+    }, ORDER_LOCK_WAIT_BUDGET)
 
   let transactionResult: Awaited<ReturnType<typeof ejecutarTransaccionDelReembolso>>
   try {

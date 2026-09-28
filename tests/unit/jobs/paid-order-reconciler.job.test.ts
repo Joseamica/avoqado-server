@@ -12,6 +12,7 @@
  *   3. una orden que la transacción del cobro no pudo cerrar NO detiene a las demás, y su
  *      fallo no se disfraza de éxito en la bitácora.
  *   4. el barrido no se encima consigo mismo.
+ *   4b. una reparación que no escribió (la orden cambió bajo su candado) no se asienta como reconciliada.
  *   5. 🔴 cierra SIEMPRE por `reconcileOrderFromPayments`, el MISMO camino del cobro que
  *      seleccionó el criterio. Con otro cerrador, un venue con cargos por servicio quedaría
  *      elegido por el criterio y rechazado por el cierre para siempre.
@@ -53,7 +54,7 @@ function job(over: Overrides = {}) {
     now: () => AHORA,
     retryEntry: (fn: () => Promise<unknown>) => fn() as never,
     findCandidates: jest.fn().mockResolvedValue([candidata('a'), candidata('b')]),
-    reconcile: jest.fn().mockResolvedValue({ orderId: 'x', warning: null }),
+    reconcile: jest.fn().mockResolvedValue({ orderId: 'x', warning: null, written: true }),
     ...over,
   })
 }
@@ -62,7 +63,7 @@ describe('paid-order-reconciler', () => {
   beforeEach(() => jest.clearAllMocks())
 
   it('repara cada candidata y deja rastro en ActivityLog con los cobros que la cubren', async () => {
-    const reconcile = jest.fn().mockResolvedValue({ orderId: 'x', warning: null })
+    const reconcile = jest.fn().mockResolvedValue({ orderId: 'x', warning: null, written: true })
     const r = await job({ reconcile }).runNow()
 
     expect(reconcile).toHaveBeenCalledTimes(2)
@@ -106,7 +107,7 @@ describe('paid-order-reconciler', () => {
     const reconcile = jest
       .fn()
       .mockRejectedValueOnce(new Error('vale de inventario roto'))
-      .mockResolvedValueOnce({ orderId: 'b', warning: null })
+      .mockResolvedValueOnce({ orderId: 'b', warning: null, written: true })
     const r = await job({ reconcile }).runNow()
 
     expect(r).toMatchObject({ scanned: 2, reconciled: 1, failed: 1 })
@@ -114,6 +115,21 @@ describe('paid-order-reconciler', () => {
     expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ entityId: 'b' }))
     // El motivo se REPORTA: una orden que no se pudo cerrar no se esconde.
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('paid-order-reconciler'), expect.objectContaining({ orderId: 'a' }))
+  })
+
+  it('🔴 una pasada que NO escribió no se audita como reconciliada: se cuenta aparte (Ruling T8-R3)', async () => {
+    // `written: false`: las entradas de la orden cambiaron dos veces bajo su candado y la reparación no escribió nada.
+    // Asentar ORDER_RECONCILED_PAID ahí mentiría en la bitácora; la orden vuelve a salir en el siguiente tic.
+    const reconcile = jest
+      .fn()
+      .mockResolvedValueOnce({ orderId: 'a', warning: null, written: false })
+      .mockResolvedValueOnce({ orderId: 'b', warning: null, written: true })
+    const r = await job({ reconcile }).runNow()
+
+    expect(reconcile).toHaveBeenCalledTimes(2)
+    expect(r).toMatchObject({ scanned: 2, reconciled: 1, notWritten: 1, failed: 0 })
+    expect(logAction).toHaveBeenCalledTimes(1)
+    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'ORDER_RECONCILED_PAID', entityId: 'b' }))
   })
 
   it('no se encima consigo mismo', async () => {

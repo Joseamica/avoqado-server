@@ -16,7 +16,7 @@ import { DEFAULT_TIMEZONE, isWithinVenueSchedule } from '@/utils/datetime'
 import { DiscountScope, DiscountType, Prisma } from '@prisma/client'
 import { logAction, type LogActionParams } from './activity-log.service'
 import { computeStoredOrderTotal } from '../shared/orderBalance'
-import { lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
 import { baseDeCargos, recalcularCargosPorServicio } from '../shared/serviceCharges'
 
 // ==========================================
@@ -766,7 +766,8 @@ function orderNotFound(venueId?: string): ApplyDiscountResult {
  * @param discount - The catalog discount id (TPV picker), or a previously calculated result (legacy callers)
  * @param appliedById - Staff ID applying the discount
  * @param authorizedById - Staff ID authorizing (for comps)
- * @param venueId - Authoritative tenant. With it, a missing Order or an ineligible pick THROWS (TPV contract)
+ * @param venueId - Authoritative tenant. With it, a missing Order THROWS instead of returning an error result (TPV contract).
+ *   A catalog id (`discount` as a string) that is inactive or ineligible throws on its own, with or without `venueId`.
  */
 export async function applyDiscountToOrder(
   orderId: string,
@@ -799,7 +800,7 @@ export async function applyDiscountToOrder(
     }
 
     return applyEvaluatedDiscount(tx, order, fresh, audits, appliedById, authorizedById)
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
   for (const audit of audits) void logAction(audit)
   return result
 }
@@ -1041,7 +1042,7 @@ export async function removeDiscountFromOrder(
       amount: Number(orderDiscount.amount),
       newOrderTotal: newTotal,
     }
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
   for (const audit of audits) void logAction(audit)
   return result
 }
@@ -1101,7 +1102,7 @@ export async function applyAutomaticDiscounts(
     }
 
     return { applied, total: totalDiscount }
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
   for (const audit of audits) void logAction(audit)
   return result
 }
@@ -1236,7 +1237,7 @@ export async function applyManualDiscount(
       amount,
       newOrderTotal: newTotal,
     }
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 }
 
 // ==========================================

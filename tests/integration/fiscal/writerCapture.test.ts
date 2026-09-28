@@ -38,8 +38,12 @@ jest.mock('@/communication/sockets/terminal-registry', () => ({
 jest.mock('@/services/alerts/opsAlert.service', () => ({ sendOpsAlert: jest.fn() }))
 
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
-if (!['localhost', '127.0.0.1'].includes(database.hostname) || database.pathname !== '/av_db_25_iva_test') {
-  throw new Error('This suite requires the local av_db_25_iva_test database.')
+// The fiscal test DB on this Mac, or CI's disposable one (ci-cd.yml adopts that name instead of relaxing guards): never another.
+if (
+  !['localhost', '127.0.0.1'].includes(database.hostname) ||
+  !['/av_db_25_iva_test', '/avoqado_h1a_test_20260808'].includes(database.pathname)
+) {
+  throw new Error("This suite requires the local av_db_25_iva_test database or CI's disposable avoqado_h1a_test_20260808.")
 }
 
 const fixture = `writer-capture-${randomUUID()}`
@@ -93,9 +97,10 @@ async function backendPid(tx: Pick<Prisma.TransactionClient, '$queryRaw'>) {
   const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
   return pid
 }
-/** Some connection is blocked by `pid` (row lock or FK check alike). */
+/** Some connection is blocked by `pid` (row lock or FK check alike). Polls up to 30 s: the gates run on a loaded machine. */
 async function blockedBy(pid: number) {
-  for (let attempt = 0; attempt < 250; attempt++) {
+  const deadline = Date.now() + 30_000
+  while (Date.now() < deadline) {
     const [{ count }] = await prisma.$queryRaw<Array<{ count: number }>>`
       SELECT count(*)::int AS count FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids(pid))`
     if (count > 0) return

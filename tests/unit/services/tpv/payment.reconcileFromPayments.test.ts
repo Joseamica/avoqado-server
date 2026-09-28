@@ -166,8 +166,8 @@ describe('reconcileOrderFromPayments — la orden cobrada que quedó abierta (OR
 
     const resultado = await reconcileOrderFromPayments('ord-1')
 
-    // El contrato que consume el barrido: la orden que cerró y su aviso de inventario.
-    expect(resultado).toEqual({ orderId: 'ord-1', warning: null })
+    // El contrato que consume el barrido: la orden que cerró, su aviso de inventario y que SÍ escribió (T8-R3).
+    expect(resultado).toEqual({ orderId: 'ord-1', warning: null, written: true })
     expect(p.$transaction).toHaveBeenCalledTimes(1)
     expect(fakeTx.order.update).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -419,7 +419,7 @@ describe('reconcileOrderFromPayments — la orden cobrada que quedó abierta (OR
         .mockImplementationOnce(async (fn: (tx: unknown) => unknown) => fn(stale))
         .mockImplementationOnce(async (fn: (tx: unknown) => unknown) => fn(fresh))
 
-      await expect(reconcileOrderFromPayments('ord-1')).resolves.toEqual({ orderId: 'ord-1', warning: null })
+      await expect(reconcileOrderFromPayments('ord-1')).resolves.toEqual({ orderId: 'ord-1', warning: null, written: true })
 
       expect(stale.order.update).not.toHaveBeenCalled()
       expect(p.order.findUnique).toHaveBeenCalledTimes(2)
@@ -438,12 +438,47 @@ describe('reconcileOrderFromPayments — la orden cobrada que quedó abierta (OR
         .mockImplementationOnce(async (fn: (tx: unknown) => unknown) => fn(first))
         .mockImplementationOnce(async (fn: (tx: unknown) => unknown) => fn(second))
 
-      await expect(reconcileOrderFromPayments('ord-1')).resolves.toEqual({ orderId: 'ord-1', warning: null })
+      // T8-R3: the sweep must be able to tell this skip from a write — it audits ORDER_RECONCILED_PAID only for writes.
+      await expect(reconcileOrderFromPayments('ord-1')).resolves.toEqual({ orderId: 'ord-1', warning: null, written: false })
 
       expect(first.order.update).not.toHaveBeenCalled()
       expect(second.order.update).not.toHaveBeenCalled()
       expect(p.$transaction).toHaveBeenCalledTimes(2)
+      // Its payments already covered the order before this pass (settledBeforeThisPayment): no settlement effect is due,
+      // so it keeps the warn — and the text no longer promises that the sweep runs settlement effects.
       expect(logger.warn).toHaveBeenCalledWith(...skipWarning)
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('never runs settlement effects'), expect.anything())
+      expect(logger.error).not.toHaveBeenCalledWith(expect.stringContaining('F1_EFECTOS_OMITIDOS'), expect.anything())
+    })
+
+    it('a pass that would SETTLE the order, skipped twice, logs F1_EFECTOS_OMITIDOS at error with the effects not applied', async () => {
+      // 100% courtesy with no payment yet: nothing left to pay, so this pass computes isFullyPaid && !settledBeforeThisPayment
+      // — it is the pass that would create the inventory posting and award loyalty. The sweep never replays those (T8-R3).
+      const courtesy = (subtotal: number) => ({ ...paidOpen(subtotal), discountAmount: new Decimal(subtotal), payments: [] })
+      p.order.findUnique.mockResolvedValueOnce(courtesy(150)).mockResolvedValueOnce(courtesy(170))
+      const first = txReading(courtesy(170))
+      const second = txReading(courtesy(190))
+      p.$transaction
+        .mockImplementationOnce(async (fn: (tx: unknown) => unknown) => fn(first))
+        .mockImplementationOnce(async (fn: (tx: unknown) => unknown) => fn(second))
+
+      await expect(reconcileOrderFromPayments('ord-1')).resolves.toEqual({ orderId: 'ord-1', warning: null, written: false })
+
+      expect(second.order.update).not.toHaveBeenCalled()
+      expect(createSalePostingInTxMock).not.toHaveBeenCalled()
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('F1_EFECTOS_OMITIDOS'), {
+        paymentId: null,
+        orderId: 'ord-1',
+        venueId: 'v1',
+        efectosNoAplicados: [
+          'vale de inventario (createSalePostingInTx)',
+          'descuento de inventario (deductInventoryForProduct, markAsSold)',
+          'lealtad (loyaltyEligibleAt, awardLoyaltyForPaidOrder)',
+          'cupones (finalizeCouponsForOrder)',
+          'referido (onOrderPaid)',
+        ],
+      })
+      expect(logger.warn).not.toHaveBeenCalledWith(...skipWarning)
     })
 
     it('a lock that finds no Order keeps the not-found behavior and writes nothing', async () => {

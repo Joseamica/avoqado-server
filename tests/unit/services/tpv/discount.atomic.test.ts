@@ -118,7 +118,9 @@ describe('fresh discount mutations', () => {
     expect(globalDb.order.update).not.toHaveBeenCalled()
     expect(globalDb.orderDiscount.create).not.toHaveBeenCalled()
   })
-  it.each(writers)('%s rejects PAID revealed only after the lock', async (name, run) => {
+  // The global client still says PENDING: the rejection proves the PAID read goes through the transaction. That this
+  // read happens AFTER the lock is proven on real PostgreSQL (discountMoney.atomic.integration.test.ts).
+  it.each(writers)('%s rejects a PAID order read through the transaction, not the global client', async (name, run) => {
     tx.order.findUnique.mockResolvedValue({ ...order(), paymentStatus: 'PAID' })
     if (name === 'coupon') expect(await run()).toMatchObject({ success: false, error: 'Cannot apply coupon to a paid order' })
     else await expect(run()).rejects.toThrow(/paid order/)

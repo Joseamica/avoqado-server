@@ -115,9 +115,12 @@ async function applyPosOrderItemEvent({ venueId, parentOrderExternalId, itemData
         return { orderItem }
       }
 
-      // WHY: lock order is [Venue fence] → Order → Product. deleteVenue holds Venue FOR UPDATE and then deletes Orders, so
-      // the placeholder path takes the fence here, before the Order; the existing-product fast path never takes it. This
-      // unlocked read only chooses the path: the Product actually used is read again under the Order lock.
+      // WHY: lock order is [Venue fence] → Order → Product. deleteVenue holds Venue FOR UPDATE, then deletes the venue's
+      // OrderItems (and their modifiers) and Payments, then its Orders, then its Products; so the placeholder path takes
+      // the fence here, before the Order, and the existing-product fast path never takes it. Kept residual (T8-R4): a
+      // writer already holding an Order can still meet deleteVenue's earlier child deletes in a 40P01 that Postgres ends
+      // by aborting one transaction (only LIVE_DEMO/TRIAL venues are deletable). This unlocked read only chooses the
+      // path: the Product actually used is read again under the Order lock.
       const needsFence =
         !itemData.deleted &&
         !!itemData.productExternalId &&

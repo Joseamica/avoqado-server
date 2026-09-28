@@ -37,6 +37,14 @@ interface ClaimCapturedPaymentShiftInput {
 }
 
 /**
+ * UN solo presupuesto de espera para toda transacción que toma `lockExistingOrderForPayment` (Ruling T8-R2): la espera
+ * de un candado cuenta contra el timeout de la transacción interactiva, y con el default de Prisma (5 s / 2 s) un
+ * escritor moría con P2028 detrás de un titular al que se le permiten 15 s (la captura fiscal, los escritores TPV).
+ * Lo pasa la función que ABRE la transacción; `orderFiscalWriters.test.ts` lo exige en cada una.
+ */
+export const ORDER_LOCK_WAIT_BUDGET = { timeout: 15_000, maxWait: 5_000 } as const
+
+/**
  * Lock order global para dinero ligado a una Order durable:
  *
  *   Order → Payment (si el carril necesita serializar uno) → Shift

@@ -7,7 +7,7 @@
  * intento si el normalizador no lo atajara antes, y ESE camino sí sería un 500 anónimo).
  *
  * Run with:
- *   TEST_DATABASE_URL='postgresql://postgres:exitosoy777@localhost:5432/av_db_25_iva_test' \
+ *   TEST_DATABASE_URL='postgresql://postgres:<contraseña>@localhost:5432/av_db_25_iva_test' \
  *     npx jest --selectProjects integration --runTestsByPath tests/integration/fiscal/productIvaTratamiento.routes.test.ts --ci
  */
 import type { Server } from 'http'

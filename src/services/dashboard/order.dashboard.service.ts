@@ -9,6 +9,7 @@ import { logAction } from './activity-log.service'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
 import { postCashSaleToDrawer } from '../shared/cashDrawerPosting'
 import {
+  ORDER_LOCK_WAIT_BUDGET,
   claimShiftForCapturedPayment,
   lockExistingOrderForPayment,
   recordPendingPaymentShiftReconciliation,
@@ -851,7 +852,7 @@ export async function settleOrder(
     settlementPaymentId = settlementPayment.id
 
     return toSettle
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 
   // Fase 2 de la unificación de caja: la liquidación en efectivo TAMBIÉN sube el cajón.
   // Antes el reporte de ventas subía y el arqueo no ⇒ FALTANTE falso al cerrar. Va DESPUÉS

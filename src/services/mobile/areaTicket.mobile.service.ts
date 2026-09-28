@@ -45,7 +45,7 @@ import prisma from '../../utils/prismaClient'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
 import { logAction } from '../dashboard/activity-log.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
-import { lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { buildOrderItemsData, CreateOrderItemInput } from './order.mobile.service'
 import { formatVenueTime } from '@/utils/datetime'
@@ -700,7 +700,7 @@ export async function addAreaTicketItems(venueId: string, rawCode: string, input
     })
 
     return tx.order.findUniqueOrThrow({ where: { id: order.id }, include: areaTicketInclude })
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 
   logger.info(`🎟️ [AREA TICKETS] ${itemsData.length} renglón(es) agregados al vale ${parsed.code} | area=${terminal.fulfillmentAreaId}`)
   return toAreaTicketView(updated)

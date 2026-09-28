@@ -72,6 +72,8 @@ type CronHandle = Pick<CronJob, 'start' | 'stop'>
 export interface ReconcileResult {
   scanned: number
   reconciled: number
+  /** Candidates whose repair pass wrote nothing (inputs moved under the Order lock twice): never audited as reconciled. */
+  notWritten: number
   failed: number
   skipped: number
   dryRun: boolean
@@ -83,7 +85,7 @@ interface Dependencies {
   now: () => Date
   retryEntry: typeof retry
   findCandidates: (opts: { graceMs: number; limit: number; now: Date; since: Date }) => Promise<CandidataPagadaAbierta[]>
-  reconcile: (orderId: string) => Promise<{ orderId: string; warning: unknown }>
+  reconcile: (orderId: string) => Promise<{ orderId: string; warning: unknown; written: boolean }>
 }
 
 export const defaults: Dependencies = {
@@ -131,7 +133,7 @@ export class PaidOrderReconcilerJob {
    */
   async runNow(opts: { dryRun?: boolean; since?: Date } = {}): Promise<ReconcileResult> {
     const dryRun = opts.dryRun === true
-    const empty: ReconcileResult = { scanned: 0, reconciled: 0, failed: 0, skipped: 0, dryRun, candidates: [] }
+    const empty: ReconcileResult = { scanned: 0, reconciled: 0, notWritten: 0, failed: 0, skipped: 0, dryRun, candidates: [] }
     if (this.running) return { ...empty, skipped: 1 }
     this.running = true
     try {
@@ -148,7 +150,12 @@ export class PaidOrderReconcilerJob {
       if (dryRun) return result
       for (const c of candidates) {
         try {
-          await this.d.reconcile(c.id)
+          const { written } = await this.d.reconcile(c.id)
+          if (!written) {
+            // T8-R3: the order changed under its lock twice and nothing was written; it is a candidate again next tick.
+            result.notWritten += 1
+            continue
+          }
           result.reconciled += 1
           // `logAction` nunca lanza (su contrato), así que esperarla no puede convertir una
           // orden ya cerrada en un `failed`; y esperarla deja el asiento escrito antes de que

@@ -17,7 +17,7 @@ import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
-import { lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
 
 /** Square's comp reasons (`39_cortesia.png`). Kept as free text + validated here. */
 export const COMP_REASONS = [
@@ -70,7 +70,7 @@ export async function compOrderItem(params: { venueId: string; orderId: string; 
     const totals = await recalculateOrderTotals(orderId, Number(order.discountAmount || 0), Number(order.paidAmount || 0), tx)
 
     return { item, totals }
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 
   void logAction({
     action: 'ORDER_ITEM_COMPED',
@@ -124,7 +124,7 @@ export async function compWholeOrder(params: { venueId: string; orderId: string;
     const totals = await recalculateOrderTotals(orderId, Number(order.discountAmount || 0), Number(order.paidAmount || 0), tx)
 
     return { order, items, compedAmount, totals }
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 
   void logAction({
     action: 'ORDER_COMPED',

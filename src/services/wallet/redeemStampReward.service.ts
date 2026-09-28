@@ -4,7 +4,7 @@ import prisma from '../../utils/prismaClient'
 import { recalculateOrderTotals } from '../mobile/comp-item.mobile.service'
 import { logAction } from '../dashboard/activity-log.service'
 import { notifyCustomerPassUpdated } from './notifyPassUpdated.service'
-import { lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
 
 /**
  * Canjear el premio de una cartilla llena.
@@ -157,7 +157,7 @@ export async function redeemStampReward(
     // transacción: quemar sin recalcular (o al revés) nunca puede quedar escrito.
     const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount ?? 0), tx)
     return { reward, discountAmount, totals }
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 
   // Un premio es producto que sale sin cobrarse. Sin registro no hay forma de
   // revisar por qué el inventario no cuadra al cierre. Fire-and-forget: un fallo de

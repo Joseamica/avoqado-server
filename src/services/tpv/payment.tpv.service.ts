@@ -359,6 +359,7 @@ import { parseDateRange } from '@/utils/datetime'
 import { PhaseTimer } from '@/utils/phaseTimer'
 import { awardLoyaltyForPaidOrder } from '../shared/loyaltyOnPaidOrder'
 import {
+  ORDER_LOCK_WAIT_BUDGET,
   claimShiftForCompletedPayment,
   lockExistingOrderForPayment,
   recordCapturedPaymentOrderReconciliation,
@@ -1417,6 +1418,8 @@ async function updateOrderTotalsForStandalonePayment(
     committedSettlement?: CommittedStandaloneSettlement
     /** Internal: this pass already reran once after its inputs moved under the Order lock. */
     retried?: boolean
+    /** Set to `written: true` once this call (or its one rerun) wrote the totals; `reconcileOrderFromPayments` reports it. */
+    outcome?: { written: boolean }
   },
 ): Promise<OrderInventoryWarning | null> {
   // The payments the arithmetic sums; the write transaction rereads exactly these under the Order lock.
@@ -1853,7 +1856,7 @@ async function updateOrderTotalsForStandalonePayment(
           }
 
           return updated
-        })
+        }, ORDER_LOCK_WAIT_BUDGET)
 
   if (!updatedOrder) {
     // The inputs moved under the lock and nothing was written. Rerun ONCE from a fresh read; a second change within
@@ -1864,13 +1867,35 @@ async function updateOrderTotalsForStandalonePayment(
         retried: true,
       })
     }
-    logger.warn('⚠️ [StandaloneTotals] Order inputs changed again under the lock — totals not written, left for the paid-order sweep', {
-      orderId,
-      venueId: order.venueId,
-      paymentId: currentPaymentId ?? null,
-    })
+    if (isFullyPaid && !settledBeforeThisPayment) {
+      // T8-R3: this was the pass that settles the order. Its settlement effects run only after its own write, and the
+      // paid-order sweep never replays them (with a payment on file it computes settledBeforeThisPayment = true), so they
+      // are lost unless a person acts. All five were due: the areaTicketAlreadyFinalized and committedSettlement passes
+      // never reach this write transaction. Structural residual (kept): nothing replays them automatically.
+      logger.error(
+        '🚨 [StandaloneTotals] F1_EFECTOS_OMITIDOS — el cobro que saldaba la cuenta no escribió (sus entradas cambiaron dos veces bajo el candado): sus efectos de liquidación NO se aplicaron y el barrido de pagadas-abiertas nunca los ejecuta',
+        {
+          paymentId: currentPaymentId ?? null,
+          orderId,
+          venueId: order.venueId,
+          efectosNoAplicados: [
+            'vale de inventario (createSalePostingInTx)',
+            'descuento de inventario (deductInventoryForProduct, markAsSold)',
+            'lealtad (loyaltyEligibleAt, awardLoyaltyForPaidOrder)',
+            'cupones (finalizeCouponsForOrder)',
+            'referido (onOrderPaid)',
+          ],
+        },
+      )
+    } else {
+      logger.warn(
+        '⚠️ [StandaloneTotals] Order inputs changed again under the lock — totals not written, left for the paid-order sweep (it rewrites totals once the payments cover the order; it never runs settlement effects)',
+        { orderId, venueId: order.venueId, paymentId: currentPaymentId ?? null },
+      )
+    }
     return null
   }
+  if (options?.outcome) options.outcome.written = true
 
   logger.info('Order totals updated for standalone payment', {
     orderId,
@@ -2289,10 +2314,16 @@ async function updateOrderTotalsForStandalonePayment(
  *      `staffId: null` porque no las hizo una persona. Y si la orden trae reembolsos, sale el
  *      `⚠️ [Reembolso]` con `channel: 'recordOrderPayment'` (~L500-503) — ahí `channel` nombra el
  *      CAMINO que se reejecutó, no a quien llamó.
+ *
+ * `written` dice si esta pasada escribió de verdad (T8-R3): es `false` cuando las entradas de la orden cambiaron dos
+ * veces bajo su candado (T7-R1) y no se escribió nada. El barrido sólo asienta `ORDER_RECONCILED_PAID` con `true`.
  */
-export async function reconcileOrderFromPayments(orderId: string): Promise<{ orderId: string; warning: OrderInventoryWarning | null }> {
-  const warning = await updateOrderTotalsForStandalonePayment(orderId, 0, 0, undefined, undefined)
-  return { orderId, warning }
+export async function reconcileOrderFromPayments(
+  orderId: string,
+): Promise<{ orderId: string; warning: OrderInventoryWarning | null; written: boolean }> {
+  const outcome = { written: false }
+  const warning = await updateOrderTotalsForStandalonePayment(orderId, 0, 0, undefined, undefined, { outcome })
+  return { orderId, warning, written: outcome.written }
 }
 
 interface PaymentFilters {

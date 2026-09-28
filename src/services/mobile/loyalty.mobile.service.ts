@@ -18,7 +18,7 @@ import { LoyaltyTransactionType, Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { getOrCreateLoyaltyConfig } from '../dashboard/loyalty.dashboard.service'
-import { lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
 
 /** Rounds to cents the way every other money path here does. */
 function money(value: number): number {
@@ -187,7 +187,7 @@ export async function redeemPointsToOrder(venueId: string, orderId: string, cust
 
     const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
     return { pointsToBurn, discountAmount, totals }
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 
   void (await import('../dashboard/activity-log.service')).logAction({
     action: 'LOYALTY_POINTS_REDEEMED',

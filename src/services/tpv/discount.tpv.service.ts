@@ -14,7 +14,7 @@ import { DiscountType } from '@prisma/client'
 import * as discountEngine from '@/services/dashboard/discountEngine.service'
 import * as couponService from '@/services/dashboard/coupon.dashboard.service'
 import { computeStoredOrderTotal } from '@/services/shared/orderBalance'
-import { lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
 import { baseDeCargos, recalcularCargosPorServicio } from '../shared/serviceCharges'
 
 // ==========================================
@@ -416,7 +416,7 @@ export async function applyCouponCode(
       amount: discountAmount,
       newOrderTotal: newTotal,
     }
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 
   if (result.success) logger.info(`✅ Coupon applied: ${couponCode} (-$${result.amount})`, { venueId, orderId })
 

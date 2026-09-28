@@ -21,6 +21,7 @@ import { logAction } from './activity-log.service'
 import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
 import { computeTenderCommission } from './tenderType.dashboard.service'
 import {
+  ORDER_LOCK_WAIT_BUDGET,
   claimShiftForRefund,
   lockExistingOrderForPayment,
   recordRefundAuthorityReconciliation,
@@ -969,7 +970,7 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
           tenderCountsAsCash: original.tenderCountsAsCash,
         },
       }
-    })
+    }, ORDER_LOCK_WAIT_BUDGET)
   } catch (error) {
     if (error instanceof ConflictError && error.code === 'REFUND_AUTHORITY_UNAVAILABLE') {
       const reassignmentWasRecorded = await refundAuthorityReassignmentWasRecorded(prisma, {

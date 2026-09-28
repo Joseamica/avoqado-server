@@ -10,8 +10,12 @@ import { sellarRenglones, liberarSellosDe, renglonesSellados } from '@/services/
 
 // Antes de registrar cualquier siembra o limpieza: nunca aceptar la base compartida.
 const testDatabase = new URL(process.env.TEST_DATABASE_URL ?? '')
-if (!['localhost', '127.0.0.1'].includes(testDatabase.hostname) || testDatabase.pathname !== '/av_db_25_iva_test') {
-  throw new Error('Esta suite exige la base local av_db_25_iva_test.')
+// La base fiscal de esta Mac o la desechable de CI (ci-cd.yml adopta ese nombre en vez de relajar la guarda): nunca otra.
+if (
+  !['localhost', '127.0.0.1'].includes(testDatabase.hostname) ||
+  !['/av_db_25_iva_test', '/avoqado_h1a_test_20260808'].includes(testDatabase.pathname)
+) {
+  throw new Error('Esta suite exige la base local av_db_25_iva_test o la desechable de CI avoqado_h1a_test_20260808.')
 }
 
 describe('sellarRenglones / liberarSellosDe / renglonesSellados (integración)', () => {

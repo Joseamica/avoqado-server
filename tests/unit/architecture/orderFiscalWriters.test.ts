@@ -22,7 +22,17 @@ const ROOT = path.join(__dirname, '../../..')
 const SRC = path.join(ROOT, 'src')
 
 const CHILD_MODELS = new Set(['orderItem', 'orderItemModifier', 'orderDiscount', 'orderServiceCharge', 'orderPromotion'])
-const WRITE_METHODS = new Set(['create', 'createMany', 'update', 'updateMany', 'upsert', 'delete', 'deleteMany'])
+const WRITE_METHODS = new Set([
+  'create',
+  'createMany',
+  'createManyAndReturn',
+  'update',
+  'updateMany',
+  'updateManyAndReturn',
+  'upsert',
+  'delete',
+  'deleteMany',
+])
 const MONEY_COLUMNS = [
   'subtotal',
   'taxAmount',
@@ -74,6 +84,10 @@ function property(arg: ts.Expression | undefined, name: string): ts.Expression |
   return undefined
 }
 
+/** The payload of a write argument: its `name` property, or the whole argument when it is not an object literal (opaque). */
+const payloadOf = (arg: ts.Expression | undefined, name: string) =>
+  arg && !ts.isObjectLiteralExpression(unwrap(arg)) ? arg : property(arg, name)
+
 /** A write payload is fiscal if it names a money column or a nested child, or cannot be read statically (opaque). */
 function fiscalPayload(expression: ts.Expression | undefined): boolean {
   if (!expression) return false
@@ -94,6 +108,22 @@ function fiscalPayload(expression: ts.Expression | undefined): boolean {
 }
 
 type Call = { callee: string; owner: string; file: string; args: string[]; argNodes: ts.NodeArray<ts.Expression> }
+/** A `$transaction(callback, options?)` site and the calls its callback makes (a named callback counts as one call). */
+type Transaction = { owner: string; line: number; options: ts.Expression | undefined; callees: Array<{ name: string; argc: number }> }
+
+const calleeName = (n: ts.CallExpression) =>
+  ts.isIdentifier(n.expression) ? n.expression.text : ts.isPropertyAccessExpression(n.expression) ? n.expression.name.text : ''
+
+function calleesOf(node: ts.Node): Transaction['callees'] {
+  if (ts.isIdentifier(node)) return [{ name: node.text, argc: 1 }]
+  const found: Transaction['callees'] = []
+  const walk = (n: ts.Node): void => {
+    if (ts.isCallExpression(n)) found.push({ name: calleeName(n), argc: n.arguments.length })
+    ts.forEachChild(n, walk)
+  }
+  walk(node)
+  return found
+}
 
 let cached: ReturnType<typeof scanSources> | undefined
 const scan = () => (cached ??= scanSources())
@@ -104,6 +134,7 @@ function scanSources() {
   const orderWriters = new Set<string>()
   const code = new Map<string, string>()
   const calls: Call[] = []
+  const transactions: Transaction[] = []
   const globalClients = new Map<string, Set<string>>()
   for (const file of sourceFiles(SRC)) {
     const rel = path.relative(ROOT, file).split(path.sep).join('/')
@@ -126,12 +157,16 @@ function scanSources() {
     globalClients.set(rel, clients)
     const visit = (n: ts.Node): void => {
       if (ts.isCallExpression(n)) {
-        const callee = ts.isIdentifier(n.expression)
-          ? n.expression.text
-          : ts.isPropertyAccessExpression(n.expression)
-            ? n.expression.name.text
-            : ''
+        const callee = calleeName(n)
         if (callee) calls.push({ callee, owner: keyOf(n), file: rel, args: n.arguments.map(a => a.getText(sf)), argNodes: n.arguments })
+        const callback = n.arguments[0]
+        if (callee === '$transaction' && callback && !ts.isArrayLiteralExpression(callback))
+          transactions.push({
+            owner: keyOf(n),
+            line: sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1,
+            options: n.arguments[1],
+            callees: calleesOf(callback),
+          })
         if (ts.isPropertyAccessExpression(n.expression) && ts.isPropertyAccessExpression(n.expression.expression)) {
           const method = n.expression.name.text
           const model = n.expression.expression.name.text
@@ -140,8 +175,9 @@ function scanSources() {
           if (model === 'order' && WRITE_METHODS.has(method)) {
             orderWriters.add(keyOf(n))
             const orderFiscal =
-              ((method === 'update' || method === 'updateMany') && fiscalPayload(property(arg, 'data'))) ||
-              (method === 'upsert' && fiscalPayload(property(arg, 'update'))) ||
+              ((method === 'update' || method === 'updateMany' || method === 'updateManyAndReturn') &&
+                fiscalPayload(payloadOf(arg, 'data'))) ||
+              (method === 'upsert' && fiscalPayload(payloadOf(arg, 'update'))) ||
               method === 'delete' ||
               method === 'deleteMany'
             if (orderFiscal) fiscal.add(keyOf(n))
@@ -153,7 +189,7 @@ function scanSources() {
     }
     visit(sf)
   }
-  return { fiscal, orderWriters, code, calls, globalClients }
+  return { fiscal, orderWriters, code, calls, transactions, globalClients }
 }
 
 type Proof = { file: string; title: string; mentions: string }
@@ -750,5 +786,151 @@ describe('locked-transaction helpers never receive the global client', () => {
       })
       .map(c => `${c.owner}(${c.args[txIndex]})`)
     expect(global).toEqual([])
+  })
+})
+
+/**
+ * Ruling T8-R2 (final review, Important 2): ONE lock-wait budget. A lock wait counts against the interactive-transaction
+ * timeout, so a transaction on Prisma's default (5 s / 2 s) dies with P2028 behind a holder that is allowed 15 s (the
+ * capture, the TPV writers): a 500 online, a RETRY in the sync reducer, a permanent DLQ for a POS header. Every
+ * transaction whose callback takes the canonical Order lock — directly, through a helper that receives the tx, or through
+ * an optional-tx entry point given the tx — opens with { timeout: 15_000, maxWait: 5_000 } (`ORDER_LOCK_WAIT_BUDGET`, or
+ * the same literal values). Only the function that OPENS the transaction takes the options.
+ */
+const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
+  // Plan 3b writers (the final review's list)
+  'src/services/dashboard/discountEngine.service.ts#applyDiscountToOrder': 1,
+  'src/services/dashboard/discountEngine.service.ts#removeDiscountFromOrder': 1,
+  'src/services/dashboard/discountEngine.service.ts#applyAutomaticDiscounts': 1,
+  'src/services/dashboard/discountEngine.service.ts#applyManualDiscount': 1,
+  'src/services/tpv/discount.tpv.service.ts#applyCouponCode': 1,
+  'src/services/mobile/comp-item.mobile.service.ts#compOrderItem': 1,
+  'src/services/mobile/comp-item.mobile.service.ts#compWholeOrder': 1,
+  'src/services/mobile/service-charge.mobile.service.ts#applyServiceCharge': 1,
+  'src/services/mobile/service-charge.mobile.service.ts#removeServiceCharge': 1,
+  'src/services/mobile/service-charge.mobile.service.ts#syncAutomaticServiceCharges': 1,
+  'src/services/mobile/order.mobile.service.ts#createOrderWithItems': 1,
+  'src/services/mobile/order.mobile.service.ts#updateOrderDetails': 1,
+  'src/services/mobile/order.mobile.service.ts#applyOrderDiscount': 1,
+  'src/services/mobile/order.mobile.service.ts#removeOrderDiscount': 1,
+  'src/services/mobile/order.mobile.service.ts#splitOrderItems': 1,
+  'src/services/mobile/order.mobile.service.ts#splitOrderBySeat': 1,
+  'src/services/promotions/promotion.service.ts#applyPromotionToOrder': 1,
+  'src/services/promotions/promotion.service.ts#removePromotionFromOrder': 1,
+  'src/services/mobile/loyalty.mobile.service.ts#redeemPointsToOrder': 1,
+  'src/services/wallet/redeemStampReward.service.ts#redeemStampReward': 1,
+  'src/services/mobile/areaTicket.mobile.service.ts#addAreaTicketItems': 1,
+  'src/services/pos-sync/posSyncOrder.service.ts#processPosOrderEvent': 1,
+  'src/services/tpv/payment.tpv.service.ts#updateOrderTotalsForStandalonePayment': 1,
+  // Already on the budget before the final wave
+  'src/services/tpv/order.tpv.service.ts#addItemsToOrder': 1,
+  'src/services/tpv/order.tpv.service.ts#removeOrderItem': 1,
+  'src/services/tpv/order.tpv.service.ts#compItems': 1,
+  'src/services/tpv/order.tpv.service.ts#voidItems': 1,
+  'src/services/tpv/order.tpv.service.ts#applyDiscount': 1,
+  'src/services/tpv/order.tpv.service.ts#addSerializedItemToOrder': 1,
+  'src/services/mobile/order.mobile.service.ts#mergeOrders': 1,
+  'src/services/mobile/order.mobile.service.ts#cancelOrder': 1,
+  'src/services/dashboard/order.dashboard.service.ts#updateOrder': 1,
+  'src/services/dashboard/order.dashboard.service.ts#deleteOrder': 1,
+  'src/services/mobile/areaTicketV7.mobile.service.ts#cancelAreaTicketCheckout': 1,
+  'src/services/pos-sync/posSyncOrder.service.ts#processPosOrderDeleteEvent': 1,
+  'src/services/pos-sync/posSyncOrderItem.service.ts#applyPosOrderItemEvent': 1,
+  // Payment, refund and delivery lanes that take the same lock (outside the review's list; same rule)
+  'src/services/mobile/order.mobile.service.ts#payCashOrder': 1,
+  'src/services/dashboard/order.dashboard.service.ts#settleOrder': 1,
+  'src/services/dashboard/manualPayment.service.ts#createManualPayment': 1,
+  'src/services/dashboard/customer.dashboard.service.ts#settleCustomerBalance': 1,
+  'src/services/b4bit/b4bit.service.ts#settleOrderForConfirmedCryptoPayment': 2,
+  'src/services/dashboard/refund.dashboard.service.ts#issueRefund': 1,
+  'src/services/tpv/refund.tpv.service.ts#recordRefund': 1,
+  'src/services/delivery-channels/core/cancelDeliveryOrder.service.ts#cancelDeliveryOrder': 1,
+  'src/services/delivery-channels/core/applyDeliveryRefund.service.ts#applyDeliveryRefund': 1,
+}
+
+/** Lock-taking transactions whose wait is governed by their own protocol, pinned verbatim so a change is re-reviewed. */
+const OWN_BUDGET: Record<string, { options: string; reason: string }> = {
+  'src/services/tpv/payment.tpv.service.ts#recordOrderPayment': {
+    options: 'OPCIONES_DE_TRANSACCION_DEL_INTENTO',
+    reason:
+      'attempt-lock protocol (Codex R6-2/R14-1): explicit READ COMMITTED and 10 s, with SET LOCAL lock_timeout (8 s) bounding every lock wait of the transaction, the Order included; owned by the cobro-remoto protocol',
+  },
+}
+
+/** Functions that take the canonical Order lock on the transaction they RECEIVE; one that opens its own is an opener. */
+function orderLockHelpers(code: Map<string, string>, calls: Call[]): Set<string> {
+  const calleesByOwner = new Map<string, Set<string>>()
+  for (const c of calls) calleesByOwner.set(c.owner, (calleesByOwner.get(c.owner) ?? new Set()).add(c.callee))
+  const helpers = new Set(['lockExistingOrderForPayment'])
+  for (let grew = true; grew; ) {
+    grew = false
+    for (const [key, body] of code) {
+      const name = key.split('#')[1]
+      if (helpers.has(name) || /\$transaction\(|withDeliveryOrderLock\(/.test(body)) continue
+      if ([...(calleesByOwner.get(key) ?? [])].some(callee => helpers.has(callee))) {
+        helpers.add(name)
+        grew = true
+      }
+    }
+  }
+  return helpers
+}
+
+const ONE_BUDGET = { timeout: '15000', maxWait: '5000' }
+
+/**
+ * `timeout` / `maxWait` of a `$transaction` options literal: a number's value (`15_000` ⇒ '15000') or the expression text.
+ * The shared `ORDER_LOCK_WAIT_BUDGET` stands for its value, which its own test pins.
+ */
+function budgetOf(options: ts.Expression | undefined): { timeout?: string; maxWait?: string } {
+  if (options?.getText() === 'ORDER_LOCK_WAIT_BUDGET') return ONE_BUDGET
+  const value = (name: string) => {
+    const e = property(options, name)
+    return e && (ts.isNumericLiteral(e) ? e.text : e.getText())
+  }
+  return { timeout: value('timeout'), maxWait: value('maxWait') }
+}
+
+describe('every transaction that takes the canonical Order lock waits on ONE budget (Ruling T8-R2)', () => {
+  const { code, calls, transactions } = scan()
+  const helpers = orderLockHelpers(code, calls)
+  // ponytail: callees are matched by name and a named callback only to a top-level function; callbacks handed to a
+  // wrapper that opens the transaction (withDeliveryOrderLock) are covered by its own pin below. Raw
+  // `SELECT … FROM "Order" … FOR UPDATE` outside the canonical helper is outside this rule (listed in the final-wave report).
+  const locking = transactions.filter(t =>
+    t.callees.some(c => helpers.has(c.name) || OPTIONAL_TX.some(o => o.callee === c.name && c.argc > o.txIndex)),
+  )
+
+  it('finds the lock-taking transactions (a collapse means the scanner broke, not the code)', () => {
+    for (const helper of ['lockDiscountOrder', 'requireOpenOrder', 'applyPromotionInTransaction', 'assertOrderCancellableUnderLock'])
+      expect({ helper, found: helpers.has(helper) }).toEqual({ helper, found: true })
+    expect(locking.length).toBeGreaterThanOrEqual(45)
+  })
+
+  it('every lock-taking transaction is pinned: a new one is classified here before it ships', () => {
+    const found = locking.reduce<Record<string, number>>((acc, t) => ({ ...acc, [t.owner]: (acc[t.owner] ?? 0) + 1 }), {})
+    const pinned = { ...ORDER_LOCK_TRANSACTIONS, ...Object.fromEntries(Object.keys(OWN_BUDGET).map(owner => [owner, 1])) }
+    expect(found).toEqual(pinned)
+  })
+
+  it.each(locking.map(t => [`${t.owner}:${t.line}`, t] as const))('%s opens with the one budget (or its pinned OWN_BUDGET)', (site, t) => {
+    const own = OWN_BUDGET[t.owner]
+    if (own) expect({ site, options: t.options?.getText() }).toEqual({ site, options: own.options })
+    else expect({ site, ...budgetOf(t.options) }).toEqual({ site, ...ONE_BUDGET })
+  })
+
+  it('ORDER_LOCK_WAIT_BUDGET, next to the canonical lock helper, is { timeout: 15_000, maxWait: 5_000 }', () => {
+    // The printer drops numeric separators: `15_000` is printed `15000`.
+    expect(code.get('src/services/shared/paymentShiftClaim.ts#ORDER_LOCK_WAIT_BUDGET')).toMatch(
+      /ORDER_LOCK_WAIT_BUDGET = \{ timeout: 15_?000, maxWait: 5_?000 \} as const/,
+    )
+  })
+
+  it('withDeliveryOrderLock (delivery advisory → Order) opens its transaction on the same budget', () => {
+    const [opener] = transactions.filter(t => t.owner === 'src/services/delivery-channels/core/deliveryOrderLock.ts#withDeliveryOrderLock')
+    expect(budgetOf(opener?.options)).toEqual({ timeout: 'CANDADO_TX_TIMEOUT_MS', maxWait: '5000' })
+    expect(code.get('src/services/delivery-channels/core/deliveryOrderLock.ts#CANDADO_TX_TIMEOUT_MS')).toMatch(
+      /CANDADO_TX_TIMEOUT_MS = 15_?000\b/,
+    )
   })
 })

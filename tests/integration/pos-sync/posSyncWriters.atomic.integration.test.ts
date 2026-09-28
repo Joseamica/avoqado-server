@@ -2,7 +2,8 @@
  * Plan3b T6: imported POS events (pos-sync header and lines) serialize with fiscal capture on the real Order row, decide
  * from the row read under that lock, and never change the imported header money (the POS header is the monetary
  * authority, IVA_APARTE). A line that needs a placeholder Product takes the Venue governance fence BEFORE the Order
- * (deleteVenue order: Venue, then its Orders); the existing-product fast path never takes it.
+ * (deleteVenue holds the Venue first, then deletes the venue's OrderItems and Payments before its Orders — T8-R4
+ * residual, kept); the existing-product fast path never takes it.
  * Last block: characterization of the upstream-completeness limit (§14), which Plan 3b does NOT resolve.
  */
 import { randomUUID } from 'crypto'
@@ -69,14 +70,19 @@ async function backendPid(tx: Pick<Prisma.TransactionClient, '$queryRaw'>) {
   const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
   return pid
 }
-/** Some connection is blocked by `pid` — on a row lock, an FK check or the Venue fence alike. */
-async function blockedBy(pid: number) {
-  for (let attempt = 0; attempt < 250; attempt++) {
+/**
+ * Some connection is blocked by `pid` — on a row lock, an FK check or the Venue fence alike. Postgres decides, not a wall
+ * clock: polls up to 30 s (the gates run on a loaded machine). `until()` ends the poll early with false (nobody waited).
+ */
+async function blockedBy(pid: number, until: () => boolean = () => false): Promise<boolean> {
+  const deadline = Date.now() + 30_000
+  while (Date.now() < deadline && !until()) {
     const [{ count }] = await prisma.$queryRaw<Array<{ count: number }>>`
       SELECT count(*)::int AS count FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids(pid))`
-    if (count > 0) return
+    if (count > 0) return true
     await pause(20)
   }
+  if (until()) return false
   throw new Error(`No connection waited on backend ${pid}`)
 }
 /** Fiscal capture holding the Order (and its Products FOR SHARE); `change` runs right before it commits. */
@@ -307,6 +313,24 @@ describe('header events vs fiscal capture, both directions', () => {
   })
 })
 
+describe('one lock-wait budget (Ruling T8-R2)', () => {
+  // A lock wait counts against the interactive-transaction timeout. On Prisma's default (5 s) the header died with P2028
+  // behind a holder allowed 15 s, and the POS consumer sends that to a permanent DLQ while its lines (15 s) still apply.
+  it('a header event outlasts a holder that keeps the Order ~7 s, then applies its imported money', async () => {
+    const o = await posOrder()
+    const writer = await whileFiscalHolds(
+      o.id,
+      nothing,
+      () => processPosOrderEvent(header(o.externalId, { subtotal: 210, taxAmount: 33.6, total: 243.6 })),
+      async () => {
+        await pause(7_000)
+      },
+    )
+    expect(writer.error).toBeUndefined()
+    expect(await snapshot(o.id)).toMatchObject({ subtotal: '210.00', tax: '33.60', total: '243.60', contrato: 'IVA_APARTE' })
+  })
+})
+
 describe('header identity is revalidated under the Order lock', () => {
   it('an alias order moved to another venue while the header waited is never written; the event creates its own order', async () => {
     const f = folio()
@@ -520,7 +544,9 @@ describe('placeholder Product: Venue fence first, one transaction, bounded retry
     const lock = jest.spyOn(orderLock, 'lockExistingOrderForPayment')
     const deleting = prisma.$transaction(
       async tx => {
-        // Same ordering as deleteVenue: Venue FOR UPDATE, then its Orders.
+        // deleteVenue's Venue → Order part: Venue FOR UPDATE, then this Order. (The real deleteVenue deletes the venue's
+        // OrderItems/modifiers and Payments BEFORE its Orders; against a writer already holding an Order that is a
+        // possible 40P01, the kept T8-R4 residual — not modeled here.)
         await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR UPDATE`
         entered.release(await backendPid(tx))
         await finish.promise
@@ -552,29 +578,34 @@ describe('placeholder Product: Venue fence first, one transaction, bounded retry
 
   it('the existing-product fast path never needs the Venue: it finishes while a deletion holds the Venue', async () => {
     const o = await posOrder()
-    const entered = barrier(),
+    const entered = barrier<number>(),
       finish = barrier()
+    // Only the Venue step of deleteVenue (it then deletes OrderItems and Payments before Orders — T8-R4, not modeled).
     const deleting = prisma.$transaction(
       async tx => {
         await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR UPDATE`
-        entered.release()
+        entered.release(await backendPid(tx))
         await finish.promise
       },
-      { timeout: 20_000 },
+      { timeout: 45_000 },
     )
     let writer: Promise<Outcome<unknown>> | undefined
-    let outcome: Outcome<unknown> | 'blocked' | undefined
+    let waitedOnDeletion: boolean | undefined
     try {
-      await entered.promise
-      writer = resultOf(processPosOrderItemEvent(line(o.externalId, `${o.externalId}:FAST`)))
-      outcome = await Promise.race([writer, pause(5_000).then(() => 'blocked' as const)])
+      const pid = await entered.promise
+      let finished = false
+      writer = resultOf(processPosOrderItemEvent(line(o.externalId, `${o.externalId}:FAST`))).finally(() => {
+        finished = true
+      })
+      // Postgres, not a fixed window, says whether it waited: a slow writer on a loaded machine is not a blocked one.
+      waitedOnDeletion = await blockedBy(pid, () => finished)
     } finally {
       finish.release()
       await deleting
       await writer
     }
-    expect(outcome).not.toBe('blocked')
-    expect((outcome as Outcome<unknown>).error).toBeUndefined()
+    expect(waitedOnDeletion).toBe(false)
+    expect((await writer!).error).toBeUndefined()
     expect((await snapshot(o.id)).items).toHaveLength(1)
   })
 
