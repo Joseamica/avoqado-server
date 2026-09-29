@@ -116,6 +116,42 @@ describe('plan 4b · el mapa que se congela en un ajuste nuevo', () => {
 
   it('sin nada que repartir y con venta devuelta: todo a la base de IVA_16', () => {
     expect(congelarPorTratamiento({}, 3)).toEqual({ v: 2, porTratamiento: { IVA_16: { baseCents: 3, ivaCents: 0 } } })
+    // Sin renglones retirados con importe (ninguno, o todos en cero), el mismo respaldo de siempre.
+    expect(congelarPorTratamiento({}, 3, [])).toEqual({ v: 2, porTratamiento: { IVA_16: { baseCents: 3, ivaCents: 0 } } })
+    expect(congelarPorTratamiento({}, 3, [{ tratamiento: 'EXENTO', tasa: 0, grossCents: 0 }])).toEqual({
+      v: 2,
+      porTratamiento: { IVA_16: { baseCents: 3, ivaCents: 0 } },
+    })
+  })
+
+  // Ruling F-2: tras un reembolso independiente que vació los libros (N-6), el Δ sale en cero y TODA la venta devuelta es
+  // faltante; va a la base del tratamiento de lo retirado, nunca a la gravable por omisión.
+  it('faltante con renglones retirados: a la BASE de sus tratamientos, sin IVA; con todo al 16 %, lo de siempre', () => {
+    const exento3000: MezclaPorTratamiento = [{ tratamiento: 'EXENTO', tasa: 0, grossCents: 3000 }]
+    expect(congelarPorTratamiento({ EXENTO: { baseCents: 0, ivaCents: 0 } }, 3000, exento3000)).toEqual({
+      v: 2,
+      porTratamiento: { EXENTO: { baseCents: 3000, ivaCents: 0 } },
+    })
+    expect(
+      congelarPorTratamiento({ IVA_16: { baseCents: 862, ivaCents: 138 } }, 4000, [
+        { tratamiento: 'IVA_0', tasa: 0, grossCents: 2000 },
+        { tratamiento: 'EXENTO', tasa: 0, grossCents: 1000 },
+        { tratamiento: 'NO_OBJETO', tasa: 0, grossCents: -500 },
+      ]),
+    ).toEqual({
+      v: 2,
+      porTratamiento: {
+        IVA_16: { baseCents: 862, ivaCents: 138 },
+        IVA_0: { baseCents: 2000, ivaCents: 0 },
+        EXENTO: { baseCents: 1000, ivaCents: 0 },
+      },
+    })
+    expect(
+      congelarPorTratamiento({ IVA_16: { baseCents: 2, ivaCents: 0 } }, 1, [{ tratamiento: 'IVA_16', tasa: 0.16, grossCents: 5000 }]),
+    ).toEqual({
+      v: 2,
+      porTratamiento: { IVA_16: { baseCents: 1, ivaCents: 0 } },
+    })
   })
 
   it('enLibrosPorTratamiento: venta − devoluciones, cada una en su forma', () => {

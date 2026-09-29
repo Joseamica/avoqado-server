@@ -19,6 +19,7 @@ import { ivaDeDevolucion } from '@/services/fiscal/deliveryFiscalDelta'
 import { mezclaDesdeTasas, mezclaPorTratamiento, splitPaymentIvaByOrderRates, tasasDe } from '@/services/fiscal/ivaMath'
 import { liberarSellosDe, sellarRenglones } from '@/services/fiscal/sellosIva'
 import { updateProduct } from '@/services/dashboard/product.dashboard.service'
+import { getIncomeStatement } from '@/services/dashboard/accounting.dashboard.service'
 import { writeRefundInTx, type WriteRefundInput } from '@/services/shared/writeRefundInTx'
 import { desenlace, hastaQue, nuevoRfc, retener } from '../fiscal/exclusionContable.fixtures'
 
@@ -1070,6 +1071,76 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
       )
       expect((await accionDe(order.id, 'b')).settlement).toBe('FISCAL_PENDING')
     })
+
+    // Ruling F-2 (Codex P2): tras el chargeback COMPLETO del reporte (N-6) los libros ya no tienen la venta, el Δ sale en cero y
+    // todo el retiro es faltante; iba a la base GRAVABLE (IVA_16) aunque Uber retirara un exento.
+    it('Ruling F-2 · chargeback completo y luego Uber retira un exento: el ajuste congela EXENTO y el estado de resultados baja la base exenta, no la gravable', async () => {
+      const { order, foto } = await sembrar(
+        [
+          { linea: 'a', nombre: 'Libro', precio: '50.00', trat: 'EXENTO' },
+          { linea: 'b', nombre: 'Revista', precio: '50.00', trat: 'EXENTO' },
+        ],
+        pago('100.00', '0.00'),
+      )
+      const chargeback = await applyDeliveryRefund({
+        externalOrderId: order.externalId!.split(':')[1],
+        provider: 'UBER_EATS',
+        montoDevuelto: '100.00',
+        motivo: 'reporte',
+      })
+      expect(chargeback.outcome).toBe('APPLIED')
+      // El venue es de todo el archivo: se compara el reporte antes y después del ajuste.
+      const periodo = { from: '2020-01-01', to: '2099-12-31' }
+      const antes = (await getIncomeStatement(venueId, periodo)).revenue
+
+      proveedorDevuelve(foto(['a'], pago('50.00', '0.00')))
+      expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('REFUNDED')
+
+      const ajuste = (await reembolsos(order.id)).find(f => (f.processorData as any)?.provenance === 'PROVIDER_ADJUSTMENT')!
+      expect(ajuste.amount.toString()).toBe('-50')
+      expect((ajuste.processorData as any).fiscalByRateCents).toEqual({
+        v: 2,
+        porTratamiento: { EXENTO: { baseCents: 5000, ivaCents: 0 } },
+      })
+      // El mapa v2 de vuelta por el lector del estado de resultados (Ruling F-4).
+      const despues = (await getIncomeStatement(venueId, periodo)).revenue
+      expect(despues.exentoBaseCents! - antes.exentoBaseCents!).toBe(-5000)
+      expect(despues.taxableBaseCents - antes.taxableBaseCents).toBe(0)
+      expect(despues.ivaCents - antes.ivaCents).toBe(0)
+    })
+
+    // Ruling F-3: el candado de la base (4b-R7) sólo vigilaba NO_DELTA. Con la venta igual y SÓLO la propina cambiada, el ajuste
+    // congelaba ± base sin dinero de venta (tasa 0 ↔ exento) y el reporte la movía de tratamiento. Con IVA_16 el IVA movido ya lo
+    // frenaba (Q1bis): ese caso queda de control.
+    it.each<[IvaTratamiento]>([['EXENTO'], ['IVA_16']])(
+      'Ruling F-3 · un reembolso independiente se llevó lo de b y Uber retira b pero sólo cambia la propina (b en %s): FISCAL_PENDING, sin REFUND nuevo',
+      async trat => {
+        // $100 al 0 % + $100 de b con $100 de descuento y $20 de propina: se cobran $100, mitad y mitad. El reporte devuelve la
+        // mitad de b ($50). Uber retira b y el descuento —la venta sigue en $100, ahora toda al 0 %— y baja la propina a $10.
+        const { order, foto } = await sembrar(
+          [
+            { linea: 'a', nombre: 'Grano', precio: '100.00', trat: 'IVA_0' },
+            { linea: 'b', nombre: 'Otro', precio: '100.00', trat },
+          ],
+          pago('200.00', '100.00', '20.00'),
+        )
+        const chargeback = await applyDeliveryRefund({
+          externalOrderId: order.externalId!.split(':')[1],
+          provider: 'UBER_EATS',
+          montoDevuelto: '50.00',
+          motivo: 'reporte',
+        })
+        expect(chargeback.outcome).toBe('APPLIED')
+        proveedorDevuelve(foto(['a'], pago('100.00', '0.00', '10.00')))
+
+        expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('FISCAL_PENDING')
+        expect((await reembolsos(order.id)).map(f => f.amount.toString())).toEqual(['-50'])
+        expect((await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).deliveryReconcileBlocked).toBe(
+          'FISCAL_RECLASS_UNSUPPORTED',
+        )
+        expect((await accionDe(order.id, 'b')).settlement).toBe('FISCAL_PENDING')
+      },
+    )
 
     it('Review Focus 3 · la siguiente vuelta lee un ajuste escrito en la forma VIEJA (llaves de tasa)', async () => {
       const { order, foto } = await sembrar(

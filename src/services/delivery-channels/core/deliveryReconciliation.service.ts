@@ -352,18 +352,21 @@ export async function reconcileDeliveryOrderFromProvider(
       return { outcome: 'FISCAL_PENDING' as const }
     }
 
+    // Plan 4b (Ruling 4b-R7, auditoría P1.3): sin dinero de VENTA tampoco se mueve BASE de un tratamiento a otro (tasa 0 ↔ exento ↔
+    // no objeto). Más de 1 centavo, como la deriva del IVA; con un solo tratamiento —todo al 16 %— nada sube en uno y baja en otro.
+    // Vale también cuando sólo cambia la propina (Ruling F-3): congelar con venta 0 dejaría un mapa ± que mueve base sin dinero.
+    const bases = Object.values(delta).map(v => v?.baseCents ?? 0)
+    const sube = bases.reduce((s, b) => s + Math.max(b, 0), 0)
+    const baja = bases.reduce((s, b) => s + Math.max(-b, 0), 0)
+    const baseReclasificada = dVenta === 0 && Math.min(sube, baja) > 1
+    const BASE_RECLASIFICADA = 'retiro sin movimiento de dinero pero con base reclasificada entre tratamientos'
+
     if (dVenta === 0 && dPropina === 0) {
       // Pedido cerrado: una foto sin cambios es DEFINITIVA (Uber ya no retira renglones), no una foto
       // que quizá va detrás del aviso — quien la recibe no tiene que volver a leer (P1-2).
       if (acreditadas.length === 0) return { outcome: foto.providerClosed ? ('PROVIDER_CLOSED' as const) : ('NO_ACTIONS' as const) }
       if (Object.values(fiscal).some(v => v !== 0)) return aFiscalPendiente('retiro sin movimiento de dinero pero con IVA reclasificado')
-      // Plan 4b (Ruling 4b-R7, auditoría P1.3): sin dinero tampoco se mueve BASE de un tratamiento a otro (tasa 0 ↔ exento ↔ no
-      // objeto). Más de 1 centavo, como la deriva del IVA; con un solo tratamiento —todo al 16 %— nada sube en uno y baja en otro.
-      const bases = Object.values(delta).map(v => v?.baseCents ?? 0)
-      const sube = bases.reduce((s, b) => s + Math.max(b, 0), 0)
-      const baja = bases.reduce((s, b) => s + Math.max(-b, 0), 0)
-      if (Math.min(sube, baja) > 1)
-        return aFiscalPendiente('retiro sin movimiento de dinero pero con base reclasificada entre tratamientos')
+      if (baseReclasificada) return aFiscalPendiente(BASE_RECLASIFICADA)
       await tx.deliveryLineAction.updateMany({
         where: { id: { in: acreditadas.map(a => a.id) }, settlement: 'ACCREDITED' },
         data: { settlement: 'NO_DELTA' },
@@ -379,6 +382,7 @@ export async function reconcileDeliveryOrderFromProvider(
       return { outcome: 'NO_DELTA' as const }
     }
 
+    if (baseReclasificada) return aFiscalPendiente(BASE_RECLASIFICADA)
     // Sólo se congela al escribir un reembolso; sin reembolso no hay nada que se desfase.
     if (noCongelable) return aFiscalPendiente(noCongelable)
     // Q1bis: un IVA devuelto negativo por tasa, o fuera de [0, Δventa], no existe como REFUND.
@@ -432,7 +436,8 @@ export async function reconcileDeliveryOrderFromProvider(
         quantity: porId.get(a.orderItemId)!.quantity,
         amountCents: centavos(porId.get(a.orderItemId)!.total),
       })),
-      fiscalByRateCents: congelarPorTratamiento(delta, dVenta),
+      // Ruling F-2: el faltante (un reembolso independiente ya vació los libros) va a la base de lo que ESTE ajuste liquida.
+      fiscalByRateCents: congelarPorTratamiento(delta, dVenta, mezclaPorTratamiento(acreditadas.map(a => porId.get(a.orderItemId)!))),
       generation,
       reason: 'DELIVERY_ITEM_REMOVED',
       staffId: null,

@@ -7,6 +7,7 @@
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import {
+  allocateByWeights,
   desglosePorTratamiento,
   sumarDesglose,
   tasasDe,
@@ -134,18 +135,31 @@ export function enLibrosPorTratamiento(
 /**
  * El reparto que se congela en un ajuste nuevo (Ruling 4b-R2): los tratamientos con algo que devolver, y la base ajustada para
  * que base + IVA sume EXACTAMENTE la venta devuelta (la forma vieja lo daba implícito). El resto —el centavo de deriva que el
- * conciliador quitó del IVA, o lo que ya no está en libros porque un reembolso independiente se lo llevó— va a la base del
- * tratamiento de mayor importe (empate: el primero), como el residual de `allocateByWeights`. Nunca recibe un BLOQUEADO: la
- * conciliación no congela esas órdenes (Ruling 4b-R4).
+ * conciliador quitó del IVA, o lo que ya no está en libros porque un reembolso independiente se lo llevó (N-6)— va a la BASE,
+ * sin IVA (como antes del plan 4b), de los tratamientos de lo `retirado` en proporción a su importe (Ruling F-2: una devolución
+ * exenta no baja la base gravable). Sin renglones retirados con importe, a la base del tratamiento de mayor importe (empate: el
+ * primero) y, si no queda ninguno, a IVA_16. Nunca recibe un BLOQUEADO: la conciliación no congela esas órdenes (Ruling 4b-R4).
  */
-export function congelarPorTratamiento(delta: DesglosePorTratamiento, ventaCents: number): FiscalPorTratamiento {
+export function congelarPorTratamiento(
+  delta: DesglosePorTratamiento,
+  ventaCents: number,
+  retirado: MezclaPorTratamiento = [],
+): FiscalPorTratamiento {
   type Entrada = [IvaTratamiento, { baseCents: number; ivaCents: number }]
   const porTratamiento: DesglosePorTratamiento = {}
   for (const [t, v] of Object.entries(delta) as Entrada[]) if (v.baseCents !== 0 || v.ivaCents !== 0) porTratamiento[t] = { ...v }
   const importe = (v: { baseCents: number; ivaCents: number }) => v.baseCents + v.ivaCents
   const vivos = Object.entries(porTratamiento) as Entrada[]
   const faltante = ventaCents - vivos.reduce((s, [, v]) => s + importe(v), 0)
-  if (faltante !== 0) {
+  const destinos = retirado.filter(m => m.grossCents > 0)
+  if (faltante !== 0 && destinos.length > 0) {
+    allocateByWeights(
+      faltante,
+      destinos.map(m => m.grossCents),
+    ).forEach((parte, i) => {
+      if (parte !== 0) (porTratamiento[destinos[i].tratamiento] ??= { baseCents: 0, ivaCents: 0 }).baseCents += parte
+    })
+  } else if (faltante !== 0) {
     const mayor = vivos.reduce<Entrada | null>((m, e) => (!m || importe(e[1]) > importe(m[1]) ? e : m), null)
     if (mayor) mayor[1].baseCents += faltante
     else porTratamiento.IVA_16 = { baseCents: faltante, ivaCents: 0 }
