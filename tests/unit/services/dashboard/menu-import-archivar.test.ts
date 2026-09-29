@@ -3,6 +3,7 @@
  * en tests/integration/dashboard/reemplazarMenu.integration.test.ts.
  */
 import { prismaMock } from '@tests/__helpers__/setup'
+import AppError from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { importMenu } from '@/services/dashboard/menu.dashboard.service'
 import {
@@ -178,5 +179,88 @@ describe('D2 · «Reemplazar» nunca borra un producto: archiva los que el archi
 
     expect(prismaMock.menuCategory.update).not.toHaveBeenCalled()
     expect(prismaMock.menuCategoryAssignment.upsert).not.toHaveBeenCalled()
+  })
+})
+
+describe('D3 · el SKU de un archivado regresa el MISMO producto', () => {
+  it('lo restaura por el MISMO update de hoy: deletedAt y deletedBy a null y active=true; cuenta en el resumen y en MENU_IMPORTED', async () => {
+    prismaMock.product.findFirst.mockResolvedValue({ id: 'prod-1', sku: 'A', deletedAt: new Date('2026-09-01'), active: false } as never)
+
+    const r = await importMenu(V, archivo('merge', [{ name: 'Bebidas', slug: 'bebidas', skus: ['A'] }]), HUMANO)
+
+    expect(prismaMock.product.create).not.toHaveBeenCalled()
+    expect(prismaMock.product.update).toHaveBeenCalledWith({
+      where: { id: 'prod-1' },
+      data: expect.objectContaining({ name: 'A', price: 10, deletedAt: null, deletedBy: null, active: true }),
+    })
+    expect(r.stats).toMatchObject({ products: 1, productsRestored: 1 })
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'MENU_IMPORTED', data: expect.objectContaining({ productsRestored: 1 }) }),
+    )
+  })
+
+  it('P5-R16 · restaurar vuelve a preguntar al cerco como ACTIVACIÓN, en la misma transacción y ANTES del update', async () => {
+    prismaMock.product.findFirst.mockResolvedValue({ id: 'prod-1', sku: 'A', deletedAt: new Date('2026-09-01'), active: false } as never)
+
+    await importMenu(V, archivo('merge', [{ name: 'Bebidas', slug: 'bebidas', skus: ['A'] }]), HUMANO)
+
+    expect(assertLegacyCatalogGovernanceForVenue).toHaveBeenCalledWith(prismaMock, {
+      venueId: V,
+      operation: 'ACTIVATE',
+      willBeVendable: true,
+      actor: HUMANO,
+    })
+    expect(jest.mocked(assertLegacyCatalogGovernanceForVenue).mock.invocationCallOrder[0]).toBeLessThan(
+      prismaMock.product.update.mock.invocationCallOrder[0],
+    )
+  })
+
+  it('REGRESIÓN (Review Focus 5) · un vigente, aunque esté en «86», se actualiza sin tocar active, deletedAt ni deletedBy', async () => {
+    prismaMock.product.findFirst.mockResolvedValue({ id: 'prod-1', sku: 'A', deletedAt: null, active: false } as never)
+
+    await importMenu(V, archivo('replace', [{ name: 'Bebidas', slug: 'bebidas', skus: ['A'] }]), HUMANO)
+
+    const data = (prismaMock.product.update.mock.calls[0][0] as { data: Record<string, unknown> }).data
+    expect(data).not.toHaveProperty('active')
+    expect(data).not.toHaveProperty('deletedAt')
+    expect(data).not.toHaveProperty('deletedBy')
+    expect(assertLegacyCatalogGovernanceForVenue).not.toHaveBeenCalled() // un vigente no se activa: sin segunda consulta
+  })
+
+  it('gobierno ENFORCED · restaurar cuenta como CREACIÓN: la precuenta ya no ve archivados y el cerco responde 422 antes de escribir', async () => {
+    // «La base»: la fila del SKU existe pero está ARCHIVADA; sólo aparece si la consulta no excluye archivados.
+    prismaMock.product.findMany.mockImplementation((async (args: { where: { deletedAt?: null } }) =>
+      args.where.deletedAt === null ? [] : [{ sku: 'A' }]) as never)
+    jest.mocked(assertLegacyCatalogGovernanceComputedForVenue).mockImplementation(async (_tx, _input, inspect) => {
+      if (await inspect()) {
+        throw new AppError('Este producto debe crearse o activarse desde el Catálogo maestro.', 422, true, 'CATALOG_GOVERNANCE_REQUIRED')
+      }
+    })
+
+    await expect(importMenu(V, archivo('merge', [{ name: 'Bebidas', slug: 'bebidas', skus: ['A'] }]), HUMANO)).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'CATALOG_GOVERNANCE_REQUIRED',
+    })
+    expect(prismaMock.product.update).not.toHaveBeenCalled()
+  })
+
+  it('REGRESIÓN (P5-R3) · «Reemplazar» sigue contando TODO lo que llega como creación, sin consultar', async () => {
+    let decision: boolean | undefined
+    jest.mocked(assertLegacyCatalogGovernanceComputedForVenue).mockImplementation(async (_tx, _input, inspect) => {
+      decision = await inspect()
+    })
+
+    await importMenu(V, archivo('replace', [{ name: 'Bebidas', slug: 'bebidas', skus: ['A'] }]), HUMANO)
+
+    expect(decision).toBe(true)
+    expect(prismaMock.product.findMany).not.toHaveBeenCalled()
+  })
+})
+
+describe('MENU_IMPORTED registra quién importó (revisión de la Tarea 3)', () => {
+  it('lleva el staffId del actor humano', async () => {
+    await importMenu(V, archivo('merge', [{ name: 'Bebidas', slug: 'bebidas', skus: ['A'] }]), HUMANO)
+
+    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'MENU_IMPORTED', staffId: 'staff-1' }))
   })
 })

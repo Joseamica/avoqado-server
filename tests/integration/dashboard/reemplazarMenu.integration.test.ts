@@ -8,6 +8,7 @@ import { Prisma } from '@prisma/client'
 import { getIncomeStatement } from '@/services/dashboard/accounting.dashboard.service'
 import { getMenus, importMenu } from '@/services/dashboard/menu.dashboard.service'
 import { getPaymentLinkByShortCode } from '@/services/dashboard/paymentLink.service'
+import { deleteProduct } from '@/services/dashboard/product.dashboard.service'
 import prisma from '@/utils/prismaClient'
 import { conProducto, limpiarNegocios, nuevoNegocio, type Negocio } from '../fiscal/exclusionContable.fixtures'
 
@@ -289,5 +290,62 @@ describe('D4 · categorías del reemplazo (Review Focus 1 y 2)', () => {
     expect(await prisma.menuCategory.count({ where: { venueId: x.venueId } })).toBe(2)
     expect((await prisma.product.findUniqueOrThrow({ where: { id: agua } })).deletedAt).not.toBeNull()
     expect(await vistos(x.venueId)).toEqual([{ categoria: bebidas.id, productos: [cafe, te].sort() }])
+  })
+})
+
+describe('D3 · el SKU de un archivado que regresa restaura el MISMO producto', () => {
+  it('«Reemplazar»: regresa con su id, su receta, su inventario, su kárdex y su IVA, y vuelve a los menús', async () => {
+    const x = await negocio()
+    const { categoryId } = await conProducto(x)
+    const grano = (
+      await prisma.product.create({
+        data: { venueId: x.venueId, categoryId, sku: `GRANO-${x.rfc}`, name: 'Grano', price: 100, ivaTratamiento: 'IVA_0' },
+      })
+    ).id
+    const receta = await prisma.recipe.create({ data: { productId: grano, totalCost: 10 } })
+    const inventario = await prisma.inventory.create({ data: { productId: grano, venueId: x.venueId, currentStock: 7 } })
+    const movimiento = await prisma.inventoryMovement.create({
+      data: { inventoryId: inventario.id, type: 'ADJUSTMENT', quantity: 7, previousStock: 0, newStock: 7 },
+    })
+    const slug = `iva-${x.rfc}`.toLowerCase()
+    await importMenu(x.venueId, archivo('replace', 'IVA', slug, [['Café', `P-${x.rfc}`, 116]]), SERVICIO) // el grano se archiva
+
+    const r = await importMenu(
+      x.venueId,
+      archivo('replace', 'IVA', slug, [
+        ['Café', `P-${x.rfc}`, 116],
+        ['Grano', `GRANO-${x.rfc}`, 120],
+      ]),
+      SERVICIO,
+    )
+
+    expect(r.stats).toMatchObject({ productsRestored: 1, productsArchived: 0 })
+    expect(await prisma.product.count({ where: { venueId: x.venueId, sku: `GRANO-${x.rfc}` } })).toBe(1)
+    expect(
+      await prisma.product.findUniqueOrThrow({
+        where: { id: grano },
+        select: { deletedAt: true, deletedBy: true, active: true, ivaTratamiento: true },
+      }),
+    ).toEqual({ deletedAt: null, deletedBy: null, active: true, ivaTratamiento: 'IVA_0' })
+    expect(await prisma.recipe.findUnique({ where: { id: receta.id } })).not.toBeNull()
+    expect(Number((await prisma.inventory.findUniqueOrThrow({ where: { id: inventario.id } })).currentStock)).toBe(7)
+    expect(await prisma.inventoryMovement.findUnique({ where: { id: movimiento.id } })).not.toBeNull()
+    expect((await vistos(x.venueId)).flatMap(v => v.productos)).toContain(grano)
+  })
+
+  it('«Combinar» (Review Focus 3): un producto borrado desde el dashboard regresa — antes se actualizaba y seguía invisible', async () => {
+    const x = await negocio()
+    const { productId: cafe } = await conProducto(x)
+    await deleteProduct(x.venueId, cafe, 'staff-plan5')
+
+    const r = await importMenu(x.venueId, archivo('merge', 'IVA', `iva-${x.rfc}`.toLowerCase(), [['Café', `P-${x.rfc}`, 120]]), SERVICIO)
+
+    expect(r.stats).toMatchObject({ productsRestored: 1 })
+    expect(await prisma.product.count({ where: { venueId: x.venueId, sku: `P-${x.rfc}` } })).toBe(1)
+    // Vuelve a las listas (dashboard, TPV, móvil: filtran deletedAt y active). Los menús no se afirman aquí: «Combinar» no
+    // asigna una categoría vigente ya existente, y conProducto no crea menú; la vuelta al menú la prueba el caso de «Reemplazar».
+    const p = await prisma.product.findUniqueOrThrow({ where: { id: cafe } })
+    expect(p).toMatchObject({ deletedAt: null, deletedBy: null, active: true })
+    expect(Number(p.price)).toBe(120)
   })
 })

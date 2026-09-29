@@ -24,6 +24,7 @@ import { archivarProductos } from './product.dashboard.service'
 import type { CatalogActor } from '../../types/master-catalog'
 import {
   assertLegacyCatalogGovernanceComputedForVenue,
+  assertLegacyCatalogGovernanceForVenue,
   writeLegacyServiceProductCreationAuditForVenue,
 } from '../master-catalog/catalogGovernance.service'
 
@@ -1248,6 +1249,7 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
   let modifierGroupsCreated = 0
   let modifiersCreated = 0
   let productsArchived = 0
+  let productsRestored = 0
 
   await prisma.$transaction(
     async tx => {
@@ -1263,7 +1265,8 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
               : new Set(
                   (
                     await tx.product.findMany({
-                      where: { venueId, sku: { in: incomingProducts.map(entry => entry.product.sku) } },
+                      // Plan 5 (D3): an ARCHIVED SKU counts as a creation — restoring puts a product back on sale, like creating it.
+                      where: { venueId, sku: { in: incomingProducts.map(entry => entry.product.sku) }, deletedAt: null },
                       select: { sku: true },
                     })
                   ).map(product => product.sku),
@@ -1388,6 +1391,14 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
 
           let product
           if (existingProduct) {
+            // Plan 5 (D3, founder's option A): an ARCHIVED SKU brings back the SAME product (same id, its history, recipe,
+            // inventory and IVA) through this same update; the fence above already counted it as a creation.
+            const archivado = Boolean(existingProduct.deletedAt)
+            if (archivado) {
+              // P5-R16: the pre-count may have seen this SKU alive and another request archived it since (archiving does not
+              // take the Venue fence). Restoring = activating ⇒ ask the fence again, in this transaction, before writing.
+              await assertLegacyCatalogGovernanceForVenue(tx, { venueId, operation: 'ACTIVATE', willBeVendable: true, actor })
+            }
             // Update existing product
             product = await tx.product.update({
               where: { id: existingProduct.id },
@@ -1404,9 +1415,11 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
                 // Ausente ≠ null: re-importar precios no puede borrar la duración
                 // ya configurada y desconfigurar la agenda del local.
                 ...(productData.duration !== undefined ? { duration: productData.duration } : {}),
+                ...(archivado ? { deletedAt: null, deletedBy: null, active: true } : {}),
               },
             })
             productsUpdated++
+            if (archivado) productsRestored++
           } else {
             // Create new product
             product = await tx.product.create({
@@ -1579,7 +1592,14 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
     venueId,
     action: 'MENU_IMPORTED',
     entity: 'Menu',
-    data: { mode: data.mode, categories: categoriesCreated, products: productsCreated + productsUpdated, productsArchived },
+    staffId: actor.type === 'HUMAN' ? actor.staffId : undefined,
+    data: {
+      mode: data.mode,
+      categories: categoriesCreated,
+      products: productsCreated + productsUpdated,
+      productsArchived,
+      productsRestored,
+    },
   })
 
   return {
@@ -1592,6 +1612,7 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
       modifiers: modifiersCreated,
       // Plan 5: nuevos y aditivos (los clientes de hoy los ignoran)
       productsArchived,
+      productsRestored,
     },
   }
 }
