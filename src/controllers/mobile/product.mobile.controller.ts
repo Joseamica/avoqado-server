@@ -12,7 +12,7 @@ import { computeInventoryAvailability } from '../../services/dashboard/product.d
 import { Unit } from '@prisma/client'
 import logger from '../../config/logger'
 import { toLegacyProductPayload } from '../../utils/legacyProductPayload'
-import { ensureQuantityInventoryRow } from '../../services/dashboard/quantityInventoryRow'
+import { ensureQuantityInventoryRow, inventoryMethodForNewProduct } from '../../services/dashboard/quantityInventoryRow'
 import {
   assertLegacyCatalogGovernanceForVenue,
   assertLegacyProductReferencesForVenue,
@@ -119,6 +119,7 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
       description,
       taxRate,
       trackInventory,
+      inventoryMethod,
       duration,
       durationMinutes,
       maxParticipants,
@@ -174,6 +175,8 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
           price: price ? parseFloat(price) : 0,
           taxRate: taxRate ?? 0.16,
           trackInventory: trackInventory ?? false,
+          // Android e iOS mandan el método al crear; antes se tiraba y el producto nacía sin él.
+          inventoryMethod: inventoryMethodForNewProduct(trackInventory, inventoryMethod),
           duration: duration ?? null,
           durationMinutes: durationMinutes || null,
           maxParticipants: maxParticipants ?? null,
@@ -189,6 +192,11 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
         },
         include: productInclude,
       })
+      await ensureQuantityInventoryRow(tx, created)
+      // El `include` se leyó antes de la fila: la respuesta lleva la que quedó en la base.
+      if (!created.inventory && created.trackInventory && created.inventoryMethod === 'QUANTITY') {
+        created.inventory = await tx.inventory.findUnique({ where: { productId: created.id } })
+      }
       if (actor.type === 'SERVICE') {
         await writeLegacyServiceProductCreationAuditForVenue(tx, { venueId, productId: created.id, actor })
       }

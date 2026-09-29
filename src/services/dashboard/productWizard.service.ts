@@ -254,73 +254,63 @@ export async function setupSimpleStockStep3(venueId: string, productId: string, 
     await switchInventoryMethod(venueId, productId, 'QUANTITY')
   }
 
-  // ✅ WORLD-CLASS: Create or update Inventory record (not RawMaterial!)
-  // QUANTITY tracking uses Inventory table for simple count-based tracking
-  const existingInventory = await prisma.inventory.findUnique({
-    where: {
-      productId,
-    },
-  })
-
   // 🔴 Todo cambio de saldo deja movimiento (audit Codex xhigh 2026-08-14). Antes
   // este paso escribía `currentStock` a secas —incluso PISANDO un inventario que
   // ya tenía saldo— sin `InventoryMovement`: el kardex nacía roto y la
   // reconciliación (`saldo == apertura + Σ deltas`) era imposible de cumplir.
   // Ése era el origen REAL del descuadre medido, no las ventas.
+  //
+  // 🔴 Y saldo, kardex y costo van en UNA transacción, leyendo el saldo BAJO CANDADO de la fila
+  // (auditoría de Codex, 29-sep): leído afuera, una venta en medio dejaba saldo ≠ Σ movimientos, y un
+  // fallo al anotar el movimiento dejaba el saldo cambiado sin kardex. La venta (`deductSimpleStock`)
+  // toma el mismo candado con su UPDATE, así que una espera a la otra.
   const nuevoSaldo = new Decimal(data.initialStock)
-  const saldoPrevio = existingInventory ? new Decimal(existingInventory.currentStock) : new Decimal(0)
-  const delta = nuevoSaldo.minus(saldoPrevio)
-  // El paso 2 ya deja la fila en 0 y sin kardex (`ensureQuantityInventoryRow`): ése sigue siendo
-  // el primer saldo, no un ajuste.
-  const esSaldoInicial =
-    saldoPrevio.isZero() &&
-    (!existingInventory ||
-      !(await prisma.inventoryMovement.findFirst({ where: { inventoryId: existingInventory.id }, select: { id: true } })))
+  await prisma.$transaction(async tx => {
+    // La fila tiene que existir para poder tomar su candado; una existente no se toca.
+    await tx.inventory.createMany({ data: [{ productId, venueId, currentStock: 0, minimumStock: 0 }], skipDuplicates: true })
+    const [fila] = await tx.$queryRaw<Array<{ id: string; currentStock: Prisma.Decimal }>>`
+      SELECT id, "currentStock" FROM "Inventory" WHERE "productId" = ${productId} FOR UPDATE`
+    const saldoPrevio = new Decimal(fila.currentStock)
+    const delta = nuevoSaldo.minus(saldoPrevio)
+    // Una fila en 0 y sin kardex (la deja el paso 2 o nace aquí) recibe el PRIMER saldo, no un ajuste.
+    const esSaldoInicial =
+      saldoPrevio.isZero() && !(await tx.inventoryMovement.findFirst({ where: { inventoryId: fila.id }, select: { id: true } }))
 
-  const inventory = existingInventory
-    ? await prisma.inventory.update({
-        where: { id: existingInventory.id },
-        data: {
-          currentStock: nuevoSaldo,
-          minimumStock: new Decimal(data.reorderPoint),
-        },
-      })
-    : await prisma.inventory.create({
-        data: {
-          productId,
-          venueId,
-          currentStock: nuevoSaldo,
-          minimumStock: new Decimal(data.reorderPoint),
-          reservedStock: new Decimal(0),
-        },
-      })
-
-  // Sin cambio de saldo no se inventa un movimiento de cero (sería ruido en el
-  // kardex); re-correr el asistente con el mismo número no ensucia el historial.
-  if (!delta.isZero()) {
-    await prisma.inventoryMovement.create({
+    await tx.inventory.update({
+      where: { id: fila.id },
       data: {
-        inventoryId: inventory.id,
-        type: 'ADJUSTMENT',
-        quantity: delta,
-        previousStock: saldoPrevio,
-        newStock: nuevoSaldo,
-        reason: esSaldoInicial ? 'Saldo inicial (asistente de producto)' : 'Ajuste de existencias (asistente de producto)',
+        currentStock: nuevoSaldo,
+        minimumStock: new Decimal(data.reorderPoint),
       },
     })
-  }
 
-  // Mark wizard as complete and save cost per unit
-  await prisma.product.update({
-    where: { id: productId },
-    data: {
-      cost: new Decimal(data.costPerUnit), // ✅ Save cost per unit
-      externalData: {
-        ...(product.externalData as any),
-        wizardCompleted: true,
-        inventoryConfigured: true,
+    // Sin cambio de saldo no se inventa un movimiento de cero (sería ruido en el
+    // kardex); re-correr el asistente con el mismo número no ensucia el historial.
+    if (!delta.isZero()) {
+      await tx.inventoryMovement.create({
+        data: {
+          inventoryId: fila.id,
+          type: 'ADJUSTMENT',
+          quantity: delta,
+          previousStock: saldoPrevio,
+          newStock: nuevoSaldo,
+          reason: esSaldoInicial ? 'Saldo inicial (asistente de producto)' : 'Ajuste de existencias (asistente de producto)',
+        },
+      })
+    }
+
+    // Mark wizard as complete and save cost per unit
+    await tx.product.update({
+      where: { id: productId },
+      data: {
+        cost: new Decimal(data.costPerUnit), // ✅ Save cost per unit
+        externalData: {
+          ...(product.externalData as any),
+          wizardCompleted: true,
+          inventoryConfigured: true,
+        },
       },
-    },
+    })
   })
 
   return {
@@ -581,8 +571,9 @@ export async function switchInventoryMethod(venueId: string, productId: string, 
       })
 
       if (existingInventory) {
-        // Delete the quantity tracking inventory record
-        await tx.inventory.delete({
+        // Delete the quantity tracking inventory record. `deleteMany`: si otro cambio simultáneo ya la
+        // borró, no es error (con `delete` tronaba P2025).
+        await tx.inventory.deleteMany({
           where: { id: existingInventory.id },
         })
       }
@@ -594,8 +585,9 @@ export async function switchInventoryMethod(venueId: string, productId: string, 
           where: { recipeId: product.recipe.id },
         })
 
-        // Then delete the recipe
-        await tx.recipe.delete({
+        // Then delete the recipe. `deleteMany`: si otro cambio simultáneo ya la borró (auditoría de
+        // Codex, 29-sep), no es error — con `delete` el segundo cambio tronaba P2025.
+        await tx.recipe.deleteMany({
           where: { id: product.recipe.id },
         })
       }

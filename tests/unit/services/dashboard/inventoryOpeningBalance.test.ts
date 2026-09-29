@@ -32,16 +32,21 @@ describe('productWizard — el saldo inicial deja movimiento', () => {
     prismaMock.inventory.create.mockResolvedValue({ id: 'inv-1', currentStock: 25 } as any)
     prismaMock.inventory.update.mockResolvedValue({ id: 'inv-1', currentStock: 25 } as any)
     prismaMock.inventoryMovement.create.mockResolvedValue({ id: 'mov-1' } as any)
+    // El paso 3 asegura la fila y lee el saldo BAJO CANDADO (`SELECT … FOR UPDATE`) en la misma
+    // transacción: la fila nace en 0 si no existía, y el saldo previo sale de esa lectura.
+    prismaMock.inventory.createMany.mockResolvedValue({ count: 1 } as any)
+    prismaMock.inventoryMovement.findFirst.mockResolvedValue(null as any)
   })
+  const saldoBajoCandado = (currentStock: number) => prismaMock.$queryRaw.mockResolvedValue([{ id: 'inv-1', currentStock }] as any)
 
   const data = { initialStock: 25, reorderPoint: 5, costPerUnit: 10 } as any
 
   it('inventario NUEVO: crea el saldo Y su movimiento de apertura (0 → 25)', async () => {
-    prismaMock.inventory.findUnique.mockResolvedValue(null as any)
+    saldoBajoCandado(0) // la fila acaba de nacer en 0
 
     await setupSimpleStockStep3(VENUE, PRODUCT, data)
 
-    expect(prismaMock.inventory.create).toHaveBeenCalled()
+    expect(prismaMock.inventory.createMany).toHaveBeenCalled()
     expect(prismaMock.inventoryMovement.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -58,7 +63,7 @@ describe('productWizard — el saldo inicial deja movimiento', () => {
   })
 
   it('inventario EXISTENTE con saldo: registra el AJUSTE con su delta real (8 → 25 = +17)', async () => {
-    prismaMock.inventory.findUnique.mockResolvedValue({ id: 'inv-1', currentStock: 8 } as any)
+    saldoBajoCandado(8)
 
     await setupSimpleStockStep3(VENUE, PRODUCT, data)
 
@@ -69,7 +74,7 @@ describe('productWizard — el saldo inicial deja movimiento', () => {
   })
 
   it('si el saldo NO cambia, no inventa un movimiento de cero', async () => {
-    prismaMock.inventory.findUnique.mockResolvedValue({ id: 'inv-1', currentStock: 25 } as any)
+    saldoBajoCandado(25)
 
     await setupSimpleStockStep3(VENUE, PRODUCT, data)
 
