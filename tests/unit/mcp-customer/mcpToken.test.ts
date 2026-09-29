@@ -20,7 +20,6 @@ describe('mcpToken', () => {
 })
 
 describe('emisionDeCadena — la fecha con la que se juzga el corte de sesión', () => {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { emisionDeCadena } = require('../../../src/mcp/mcpToken')
   const fs = require('fs')
   const path = require('path')

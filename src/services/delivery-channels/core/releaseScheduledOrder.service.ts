@@ -9,6 +9,7 @@
  */
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
+import { estacionDePantallaParaReparto } from '@/services/kds/kitchenDisplayStations'
 import { contactoParaComanda } from './deliveryOrderIngestion.service'
 import { withDeliveryOrderLock } from './deliveryOrderLock'
 import { marcarRetirosEnComandas } from './lineRemoval.service'
@@ -33,6 +34,9 @@ export async function releaseScheduledOrder(externalId: string): Promise<{ outco
     return { outcome: 'ORDER_NOT_FOUND' }
   }
 
+  // Etapa 3 del KDS: la estación se elige ANTES de tomar el candado; nunca lanza.
+  const estacionReparto = await estacionDePantallaParaReparto(order.venueId)
+
   // 🔴 Lectura→creación bajo el candado del pedido [N-21]: un retiro concurrente espera a que
   // la comanda exista y la marca, o ya está en los `OrderItem` que se leen aquí y la comanda
   // nace con el renglón RETIRADO.
@@ -52,6 +56,7 @@ export async function releaseScheduledOrder(externalId: string): Promise<{ outco
         orderNumber: order.orderNumber,
         orderType: 'DELIVERY',
         orderId: order.id,
+        printStationId: estacionReparto,
         customerName: order.customerName ?? null,
         customerContact: contactoParaComanda(order.customerPhone, order.customerPhonePin),
         items: {

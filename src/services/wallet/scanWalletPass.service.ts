@@ -1,4 +1,4 @@
-import { StampRewardStatus } from '@prisma/client'
+import { StampRewardStatus, StampRewardType } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { getStampCardStatus } from './stampLedger.service'
 
@@ -27,8 +27,14 @@ export interface ScanWalletPassResult {
   stampsEarned?: number
   stampsRequired?: number
   rewardLabel?: string
-  /** Premios ya ganados y sin cobrar. Es lo que el cajero tiene que ver de inmediato. */
-  rewardsToClaim?: { id: string; rewardLabel: string }[]
+  /**
+   * Premios ya ganados y sin cobrar. Es lo que el cajero tiene que ver de inmediato.
+   *
+   * `rewardType` y `rewardValue` (aditivos) dejan que la caja muestre el descuento en la
+   * cuenta ANTES de cobrar, como Square y Toast. Es un estimado: el monto que manda es el
+   * que confirma el servidor al crear la venta (`stampReward.discountAmount`).
+   */
+  rewardsToClaim?: { id: string; rewardLabel: string; rewardType: StampRewardType; rewardValue: number | null }[]
 }
 
 export async function scanWalletPass(venueId: string, qrToken: string): Promise<ScanWalletPassResult> {
@@ -49,7 +55,7 @@ export async function scanWalletPass(venueId: string, qrToken: string): Promise<
     getStampCardStatus(venueId, pass.customerId),
     prisma.stampReward.findMany({
       where: { venueId, customerId: pass.customerId, status: StampRewardStatus.PENDING },
-      select: { id: true, rewardLabel: true },
+      select: { id: true, rewardLabel: true, rewardType: true, rewardValue: true },
       orderBy: { createdAt: 'asc' },
     }),
   ])
@@ -67,6 +73,12 @@ export async function scanWalletPass(venueId: string, qrToken: string): Promise<
     stampsEarned: estado.stampsEarned,
     stampsRequired: estado.stampsRequired,
     rewardLabel: estado.rewardLabel,
-    rewardsToClaim: premios,
+    // 🔴 Número, no Decimal: en JSON un Decimal sale como texto y la caja lo leería como cero.
+    rewardsToClaim: premios.map(p => ({
+      id: p.id,
+      rewardLabel: p.rewardLabel,
+      rewardType: p.rewardType,
+      rewardValue: p.rewardValue == null ? null : Number(p.rewardValue),
+    })),
   }
 }

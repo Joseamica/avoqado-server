@@ -1,6 +1,8 @@
 /**
  * Codex pasada final (P1-2): las marcas en memoria del aviso firmado que el servidor no pudo guardar.
  */
+import logger from '@/config/logger'
+import { enrichContext, getContext, runWithContext, type ExecutionContext } from '@/observability/executionContext'
 import {
   ESPERAS_DE_REINGRESO_MS,
   TOPE_DE_COMERCIOS,
@@ -219,6 +221,159 @@ describe('avisosNoGuardados', () => {
       await jest.advanceTimersByTimeAsync(10 * 60_000)
       expect(reintentar).toHaveBeenCalledTimes(1)
     })
+
+    /**
+     * 🔴 Flaky del 27-sep (`noInstrumentSinSolicitud` · «cuando la base vuelve…», 0 filas en vez de 1): una vuelta que el reloj o
+     * la puerta ya arrancaron —con la base todavía caída— seguía EN CURSO cuando la prueba pedía el reingreso manual. `correr` la
+     * veía «corriendo» y no hacía nada; esa vuelta terminaba «no se guardó» y la prueba contaba 0.
+     */
+    it('🔴 _reingresarYaParaPruebas ESPERA la vuelta que el reloj ya arrancó con la base caída, y corre la entrada OTRA vez', async () => {
+      let soltar!: (guardado: boolean) => void
+      const reintentar = jest
+        .fn<Promise<boolean>, []>()
+        .mockImplementationOnce(() => new Promise<boolean>(r => (soltar = r)))
+        .mockResolvedValue(true)
+      reingresarMasTarde('m:e', reintentar, true)
+      await jest.advanceTimersByTimeAsync(ESPERAS_DE_REINGRESO_MS[0]) // el reloj la dispara: queda en curso, sin contestar
+      expect(reintentar).toHaveBeenCalledTimes(1)
+      const reingreso = _reingresarYaParaPruebas() // la base «vuelve» con esa vuelta todavía en curso
+      soltar(false) // y termina «no se guardó»: arrancó con la base caída
+      await reingreso
+      expect(reintentar).toHaveBeenCalledTimes(2) // se corrió otra vez, ya con la base de vuelta
+      await jest.advanceTimersByTimeAsync(10 * 60_000)
+      expect(reintentar).toHaveBeenCalledTimes(2) // y quedó guardada: no queda nada programado
+    })
+
+    it('🔴 _olvidarTodoParaPruebas ESPERA la vuelta en curso: lo que re-registra al volver a fallar no se cuela en la prueba siguiente', async () => {
+      let soltar!: () => void
+      const reintentar = jest.fn<Promise<boolean>, []>(async () => {
+        await new Promise<void>(r => (soltar = r))
+        // Como el controlador cuando el reingreso vuelve a fallar: marca el dinero y el canal, y vuelve a programar SU reingreso.
+        registrarAvisoNoGuardado({ merchantAccountId: 'm', attemptId: 'A', posibleDinero: true })
+        reingresarMasTarde('m:e', reintentar, true)
+        return false
+      })
+      registrarAvisoNoGuardado({ merchantAccountId: 'm', attemptId: 'A', posibleDinero: true })
+      reingresarMasTarde('m:e', reintentar, true)
+      await jest.advanceTimersByTimeAsync(ESPERAS_DE_REINGRESO_MS[0]) // la vuelta arranca y queda en curso
+      const olvido = _olvidarTodoParaPruebas() // el afterEach llega mientras corre (medido el 27-sep en integración)
+      soltar()
+      await olvido
+      await jest.advanceTimersByTimeAsync(0)
+      expect(hayDineroNoGuardado('A')).toBe(false)
+      expect(canalDelComercioFalloHacePoco('m')).toBe(false)
+      await jest.advanceTimersByTimeAsync(10 * 60_000)
+      expect(reintentar).toHaveBeenCalledTimes(1) // ningún reingreso resucitado vuelve a disparar
+    })
+
+    /**
+     * 🔴 27-sep (medido en vivo): se borró el comercio con el reingreso pendiente y el log dijo «✅ Aviso reingresado» con 0 filas
+     * guardadas. Quien investigue una aprobación perdida lo leería como guardada. Un descarte se retira igual (no se reintenta
+     * para siempre), pero el log dice que NO se guardó, con el status.
+     */
+    describe('el log distingue «guardado» de «descartado»', () => {
+      const exito = (): unknown[] =>
+        (logger.info as jest.Mock).mock.calls.filter(([mensaje]) => String(mensaje).includes('Aviso reingresado'))
+
+      it('🔴 un descarte del aviso AUTÉNTICO se retira sin reintentar y sale como 🚨 error con su status — nunca como ✅', async () => {
+        const reintentar = jest.fn(async () => ({ descartado: { status: 404, motivo: 'unknown merchant' } }))
+        reingresarMasTarde('m:borrado', reintentar, true)
+        await jest.advanceTimersByTimeAsync(ESPERAS_DE_REINGRESO_MS[0])
+        expect(exito()).toHaveLength(0)
+        expect(logger.error).toHaveBeenCalledWith(
+          expect.stringContaining('DESCARTADO'),
+          expect.objectContaining({ clave: 'm:borrado', status: 404, motivo: 'unknown merchant' }),
+        )
+        await jest.advanceTimersByTimeAsync(10 * 60_000)
+        expect(reintentar).toHaveBeenCalledTimes(1) // se retiró: no se reintenta para siempre
+      })
+
+      it('un descarte de una entrada SIN verificar (quizá basura de la búsqueda caída) sale como warn, con su status', async () => {
+        const reintentar = jest.fn(async () => ({ descartado: { status: 401, motivo: 'invalid signature' } }))
+        reingresarMasTarde('m:falso', reintentar, false)
+        await jest.advanceTimersByTimeAsync(ESPERAS_DE_REINGRESO_MS[0])
+        expect(exito()).toHaveLength(0)
+        expect(logger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('descartado'),
+          expect.objectContaining({ clave: 'm:falso', status: 401, motivo: 'invalid signature' }),
+        )
+        expect(logger.error).not.toHaveBeenCalled()
+        await jest.advanceTimersByTimeAsync(10 * 60_000)
+        expect(reintentar).toHaveBeenCalledTimes(1)
+      })
+
+      it('control · lo que sí quedó guardado sigue saliendo como ✅, sin descarte', async () => {
+        reingresarMasTarde('m:ok', async () => true, true)
+        await jest.advanceTimersByTimeAsync(ESPERAS_DE_REINGRESO_MS[0])
+        expect(exito()).toHaveLength(1)
+        expect(logger.error).not.toHaveBeenCalled()
+        expect(logger.warn).not.toHaveBeenCalled()
+      })
+    })
+  })
+})
+
+/**
+ * 🔴 27-sep («lo otro»): la vuelta corría con el contexto de QUIEN la despertaba. La puerta corre dentro de la petición de una
+ * terminal o de un cajero, así que el ✅/🚨 del reingreso salía con el correlationId de esa terminal, y lo que la vuelta estampara
+ * (el negocio del aviso) se escribía en el contexto de ESA terminal. Relojes reales a propósito: el falso de Jest corre los
+ * temporizadores en el contexto de quien avanza el reloj, que es justo lo que aquí se prueba.
+ */
+describe('la vuelta corre con el contexto del AVISO, no con el de quien la despierta', () => {
+  const contextoDelAviso = (): ExecutionContext => ({
+    correlationId: 'cid-aviso',
+    source: 'http',
+    entrypoint: 'POST /api/v1/webhooks/angelpay/:id',
+    venueId: 'v-aviso',
+    venueName: 'Testarudo Cafe',
+  })
+  const contextoDeLaTerminal = (): ExecutionContext => ({
+    correlationId: 'cid-terminal',
+    source: 'http',
+    entrypoint: 'GET /api/v1/tpv/terminal-payments/:id',
+    venueId: 'v-terminal',
+    venueName: 'Otro negocio',
+  })
+  const unTick = () => new Promise(r => setTimeout(r, 25))
+
+  it('🔴 la puerta, llamada desde la petición de una terminal, no le presta su contexto a la vuelta ni al ✅', async () => {
+    const aviso = contextoDelAviso()
+    const terminal = contextoDeLaTerminal()
+    let enLaVuelta: ExecutionContext | undefined
+    let enElLog: ExecutionContext | undefined
+    ;(logger.info as jest.Mock).mockImplementationOnce(() => (enElLog = { ...getContext()! }))
+    runWithContext(aviso, () =>
+      reingresarMasTarde(
+        'm:ctx',
+        async () => {
+          enLaVuelta = { ...getContext()! }
+          enrichContext({ venueName: 'Estampado por la vuelta' })
+          return true
+        },
+        true,
+      ),
+    )
+    runWithContext(terminal, () => puertaDelDinero('A'))
+    await unTick()
+    expect(enLaVuelta).toMatchObject({ correlationId: 'cid-aviso', venueName: 'Testarudo Cafe' })
+    expect(enElLog).toMatchObject({ correlationId: 'cid-aviso' })
+    expect(terminal.venueName).toBe('Otro negocio') // lo que estampa la vuelta no cae en la petición de la terminal
+    expect(aviso.venueName).toBe('Testarudo Cafe') // ni en el objeto de la petición original: una copia por vuelta
+  })
+
+  it('🔴 un reingreso nacido SIN contexto corre sin contexto: tampoco toma el de la terminal que lo despierta', async () => {
+    let enLaVuelta: ExecutionContext | undefined | 'no corrió' = 'no corrió'
+    reingresarMasTarde(
+      'm:sin',
+      async () => {
+        enLaVuelta = getContext()
+        return true
+      },
+      true,
+    )
+    runWithContext(contextoDeLaTerminal(), () => puertaDelDinero('A'))
+    await unTick()
+    expect(enLaVuelta).toBeUndefined()
   })
 })
 

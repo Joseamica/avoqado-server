@@ -10,6 +10,7 @@ import {
   claimKdsPrint,
   comandaPendienteDeImprimir,
   confirmKdsPrinted,
+  formatKdsOrderConVenta,
   releaseKdsPrint,
   PRINT_CLAIM_TTL_MS,
 } from '../../../../src/services/mobile/kds.mobile.service'
@@ -132,5 +133,26 @@ describe('comandaPendienteDeImprimir — lo que el POS ve como "falta imprimir"'
   it('vencida pero YA impresa → no (el papel no se des-imprime)', () => {
     const vencida = new Date(Date.now() - PRINT_CLAIM_TTL_MS - 1_000)
     expect(comandaPendienteDeImprimir({ printedAt: new Date(), printClaimedAt: vencida })).toBe(false)
+  })
+})
+
+// Una «Entrega» marcada en la caja es type DELIVERY pero NO llegó sola: la caja ya la imprimió al cobrarla.
+// Sólo un pedido de PROVEEDOR (Uber…) pide que una tablet reclame su papel o lo acepte.
+describe('formatKdsOrderConVenta — sólo el reparto de PROVEEDOR pide imprimir o aceptar', () => {
+  const comanda = { id: 'k1', orderId: 'o1', orderNumber: '12', status: 'NEW', items: [], createdAt: new Date(), printedAt: null, printClaimedAt: null }
+  const venta = (conProveedor: boolean, status = 'PENDING') =>
+    ({ id: 'o1', type: 'DELIVERY', status, conProveedor, conLink: conProveedor, conCapacidad: false, accionEnCurso: false,
+       retiros: new Map(), renglones: new Map(), readyReportedAt: null, deliveryOpInFlight: null, deliveryOpInFlightAt: null }) as any
+
+  it('🔴 «Entrega» del propio POS → ni needsPrint ni needsAcceptance (si no, la tablet la imprime otra vez)', () => {
+    const r = formatKdsOrderConVenta(comanda, venta(false))
+    expect(r.needsPrint).toBe(false)
+    expect(r.needsAcceptance).toBe(false)
+  })
+
+  it('pedido de proveedor sin imprimir → needsPrint; PENDING → needsAcceptance', () => {
+    const r = formatKdsOrderConVenta(comanda, venta(true))
+    expect(r.needsPrint).toBe(true)
+    expect(r.needsAcceptance).toBe(true)
   })
 })

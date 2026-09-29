@@ -10,7 +10,7 @@
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import logger from '@/config/logger'
-import { CustomerApprovalStatus, PaymentStatus, Prisma } from '@prisma/client'
+import { CustomerApprovalStatus, OrderStatus, PaymentStatus, Prisma } from '@prisma/client'
 import { logAction } from './activity-log.service'
 import { decideCustomerApproval } from '@/services/public/customerBookingAccess.service'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
@@ -33,6 +33,11 @@ interface ConsentWarning {
   code: 'CONSENT_NOT_CAPTURED'
   reason: string
 }
+
+// Una cuenta cancelada o borrada no se debe. Cancelar NO pone `remainingBalance` en 0, así que todo lo que lee
+// «saldo pendiente del cliente» la excluye por estado — si no, se muestra como deuda y «Liquidar saldo» la
+// marcaría PAGADA con un efectivo que nunca entró a caja (prod 28-sep: Amaena $2,871, Testarudo $418.50).
+const CUENTA_NO_CANCELADA = { status: { notIn: [OrderStatus.CANCELLED, OrderStatus.DELETED] } }
 
 // ==========================================
 // TYPES & INTERFACES
@@ -188,6 +193,7 @@ export async function getCustomers(
             order: {
               paymentStatus: { in: [PaymentStatus.PENDING, PaymentStatus.PARTIAL] },
               remainingBalance: { gt: 0 },
+              ...CUENTA_NO_CANCELADA,
             },
           },
         },
@@ -234,6 +240,7 @@ export async function getCustomers(
             order: {
               paymentStatus: { in: ['PENDING', 'PARTIAL'] },
               remainingBalance: { gt: 0 },
+              ...CUENTA_NO_CANCELADA,
             },
           },
           include: {
@@ -771,6 +778,7 @@ export async function settleCustomerBalance(
           order: {
             paymentStatus: { in: ['PENDING', 'PARTIAL'] },
             remainingBalance: { gt: 0 },
+            ...CUENTA_NO_CANCELADA,
           },
         },
         include: {
@@ -858,6 +866,7 @@ export async function settleCustomerBalance(
           id: orderId,
           venueId,
           paymentStatus: { in: ['PENDING', 'PARTIAL'] },
+          ...CUENTA_NO_CANCELADA, // la candidata pudo cancelarse entre la lectura del cliente y el candado
           version: fresh.version,
           remainingBalance: fresh.remainingBalance as any,
         },

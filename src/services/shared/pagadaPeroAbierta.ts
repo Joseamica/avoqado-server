@@ -122,6 +122,18 @@ type Db = Pick<PrismaClient, '$queryRaw'> | Pick<Prisma.TransactionClient, '$que
  * criterio no tiene índice que sirva (`status NOT IN (...)`, `updatedAt <`), así que sin tope
  * cada pasada recorrería la historia entera de órdenes no terminales. El barrido periódico
  * pasa una ventana corta; el rezago viejo lo alcanza el script a mano, que pide la suya.
+ *
+ * 🔴 Una cuenta con el IVA SEPARADO (`taxAmount > 0`) nunca se propone para reparar, aunque cumpla
+ * el criterio. El reparador (`reconcileOrderFromPayments`) reescribe el total con la convención
+ * mexicana —el IVA viene DENTRO del precio, `total = subtotal − descuento + cargo + propina`—, así
+ * que a una cuenta de $100 + $16 de IVA aparte cobrada en $116 le dejaría el total en $100 y el
+ * cobro exacto se leería como sobrepago de $16. Esa forma sólo existe en el histórico importado
+ * de SoftRestaurant (Testarudo, sin órdenes nuevas desde el 12-ago-2026) y en datos viejos de
+ * prueba: toda venta nativa nace con `taxAmount = 0` (los presupuestos sumaban el 16 % encima
+ * hasta el 28-sep-2026, con 0 en producción; `estimate.mobile.service.ts` ya no). El filtro va
+ * por la FORMA de los importes y no por el origen: lo que decide si el reparador la corrompería
+ * es que guarde el IVA aparte. Vive aquí y NO en el criterio compartido: el vigilante (check #6)
+ * la sigue reportando como pagada pero abierta, y la decide una persona.
  */
 export async function findPaidButOpenOrders(
   db: Db,
@@ -138,6 +150,7 @@ export async function findPaidButOpenOrders(
            ARRAY(SELECT p.id FROM "Payment" p WHERE p."orderId" = o.id AND p.status = 'COMPLETED' ORDER BY p."createdAt") AS "paymentIds"
     FROM "Order" o
     WHERE ${Prisma.raw(criterioPagadaPeroAbiertaSql('o'))}
+      AND COALESCE(o."taxAmount", 0) <= 0
       AND o."updatedAt" < ${utcTs(antesDe)}
       ${opts.since ? Prisma.sql`AND o."createdAt" >= ${utcTs(opts.since)}` : Prisma.empty}
     ORDER BY o."createdAt" ASC

@@ -9,6 +9,7 @@
  * Y una regla de privacidad: devuelve el NOMBRE del cliente y nada más. El cajero
  * necesita saber a quién le está cobrando, no su teléfono ni su correo.
  */
+import { Prisma } from '@prisma/client'
 import { scanWalletPass } from '../../../../src/services/wallet/scanWalletPass.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
@@ -56,11 +57,34 @@ describe('scanWalletPass', () => {
     // Es la razón de ser de esto: sin el aviso, el cajero tendría que acordarse de
     // preguntar "¿tienes premio?" en cada venta — que en la práctica no pasa, y el
     // cliente se va sin cobrar lo que ya se ganó.
-    prismaMock.stampReward.findMany.mockResolvedValue([{ id: 'rw1', rewardLabel: 'Un café gratis' }] as any)
+    prismaMock.stampReward.findMany.mockResolvedValue([
+      { id: 'rw1', rewardLabel: 'Un café gratis', rewardType: 'FREE_PRODUCT', rewardValue: null },
+    ] as any)
 
     const r = await scanWalletPass('v1', 'tok-qr')
 
-    expect(r.rewardsToClaim).toEqual([{ id: 'rw1', rewardLabel: 'Un café gratis' }])
+    expect(r.rewardsToClaim).toEqual([{ id: 'rw1', rewardLabel: 'Un café gratis', rewardType: 'FREE_PRODUCT', rewardValue: null }])
+  })
+
+  it('🔴 el premio viaja con su TIPO y su VALOR, para que la caja lo muestre antes de cobrar', async () => {
+    // Estándar de Square y Toast: el premio aparece como descuento en la cuenta ANTES
+    // de elegir cómo paga el cliente. Con sólo la etiqueta, la caja no puede calcular
+    // cuánto baja la cuenta y el botón de cobrar dice el precio completo.
+    prismaMock.stampReward.findMany.mockResolvedValue([
+      { id: 'rw1', rewardLabel: '$30 de premio', rewardType: 'FIXED_AMOUNT', rewardValue: new Prisma.Decimal(30) },
+      { id: 'rw2', rewardLabel: 'Un café gratis', rewardType: 'FREE_PRODUCT', rewardValue: null },
+    ] as any)
+
+    const r = await scanWalletPass('v1', 'tok-qr')
+
+    // 🔴 Un número, no un Decimal de Prisma: en JSON un Decimal sale como texto ("30")
+    // y la caja lo leería como cero.
+    expect(r.rewardsToClaim).toEqual([
+      { id: 'rw1', rewardLabel: '$30 de premio', rewardType: 'FIXED_AMOUNT', rewardValue: 30 },
+      { id: 'rw2', rewardLabel: 'Un café gratis', rewardType: 'FREE_PRODUCT', rewardValue: null },
+    ])
+    const consulta = prismaMock.stampReward.findMany.mock.calls[0][0] as any
+    expect(consulta.select).toEqual({ id: true, rewardLabel: true, rewardType: true, rewardValue: true })
   })
 
   it('🔴 una tarjeta de OTRO negocio no se resuelve', async () => {

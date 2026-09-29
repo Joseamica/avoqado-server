@@ -20,6 +20,8 @@ const mockPrisma: any = {
   // delivery falta aceptar (`needsAcceptance`). Sin este mock, la llamada revienta antes
   // de llegar a lo que este archivo prueba, que son los MODIFICADORES.
   order: { findMany: jest.fn().mockResolvedValue([]) },
+  // Etapa 3: la lista filtra por la «cuenta nueva» de las pantallas.
+  printStation: { findMany: jest.fn().mockResolvedValue([]) },
 }
 
 jest.mock('../../../../src/utils/prismaClient', () => ({ __esModule: true, default: mockPrisma }))

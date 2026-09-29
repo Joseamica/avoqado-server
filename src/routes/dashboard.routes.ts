@@ -881,6 +881,12 @@ router.get('/auth/google/url', googleOAuthController.getGoogleAuthUrl)
  *               token:
  *                 type: string
  *                 description: Google ID token (alternative to code)
+ *               state:
+ *                 type: string
+ *                 description: >
+ *                   Obligatorio. El `state` que Google devolvió en la URL; tiene que coincidir con la
+ *                   cookie `avq_google_oauth_state` que puso GET /auth/google/url en este navegador
+ *                   (login CSRF). Se gasta en el intento.
  *               signup:
  *                 type: object
  *                 description: >
@@ -915,7 +921,9 @@ router.get('/auth/google/url', googleOAuthController.getGoogleAuthUrl)
  *       400:
  *         description: Invalid request or missing parameters
  *       403:
- *         description: No invitation found for this email
+ *         description: >
+ *           No invitation found for this email, o `code: GOOGLE_OAUTH_STATE_INVALID` si el `state`
+ *           falta, no coincide con la cookie de este navegador o ya se usó.
  *       401:
  *         description: Authentication failed
  */
@@ -1009,7 +1017,9 @@ router.get('/auth/google/check-invitation', googleOAuthController.checkInvitatio
  *       401:
  *         description: Authentication failed
  */
-router.post('/auth/google/one-tap', googleOAuthController.googleOneTapLogin)
+// Sólo JSON: un <form> de otro sitio (urlencoded) podía iniciar sesión a la víctima con el ID token del
+// atacante (login CSRF). JSON obliga a pasar por CORS. Prueba: tests/unit/routes/googleOAuth.oneTap.csrf.routes.test.ts
+router.post('/auth/google/one-tap', requireJsonBodyMiddleware, googleOAuthController.googleOneTapLogin)
 
 // --- Password Reset Routes (PUBLIC - no auth required) ---
 

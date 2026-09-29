@@ -51,4 +51,8 @@ export const DATABASE_JOB_SCHEDULES = {
   // KDS de Uber (spec §4.1): intents de conexión vencidos ⇒ EXPIRED, reclamaciones de tienda
   // huérfanas ⇒ liberadas, purga a los 7 días. Diario a las 04:17:31 (CDMX), fuera de la hora pico.
   deliveryConnectIntentCleanup: '31 17 4 * * *',
+  // Etapa 3 del KDS: arma las comandas de pantalla que el gancho post-commit no alcanzó (marca
+  // `Order.kitchenPendingAt`). Cada minuto en el segundo :22, libre entre el outbox de clientes (:20) y el
+  // sweeper de gcal (:23); lejos del :04 de displayModeRequestExpiry. Máximo 50 órdenes por pasada.
+  kitchenTicketsReconciliation: '22 * * * * *',
 } as const

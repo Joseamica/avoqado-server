@@ -5,6 +5,7 @@
 import prisma from '@/utils/prismaClient'
 import { createKdsOrder, venueTienePantallaDeCocina } from '@/services/mobile/kds.mobile.service'
 import { BadRequestError } from '@/errors/AppError'
+import { Prisma } from '@prisma/client'
 
 const suffix = `kdspantalla-${Date.now()}`
 let orgId: string
@@ -38,6 +39,9 @@ afterAll(async () => {
   if (!orgId) return
   const venues = [venueSin, venueCon, venueApagada].filter(Boolean)
   await prisma.kdsOrder.deleteMany({ where: { venueId: { in: venues } } })
+  await prisma.order.deleteMany({ where: { venueId: { in: venues } } })
+  await prisma.product.deleteMany({ where: { venueId: { in: venues } } })
+  await prisma.menuCategory.deleteMany({ where: { venueId: { in: venues } } })
   await prisma.printStation.deleteMany({ where: { venueId: { in: venues } } })
   await prisma.venue.deleteMany({ where: { id: { in: venues } } })
   await prisma.organization.deleteMany({ where: { id: orgId } })
@@ -49,11 +53,38 @@ describe('createKdsOrder — sólo con pantalla de cocina', () => {
     expect(await prisma.kdsOrder.count({ where: { venueId: venueSin } })).toBe(0)
   })
 
-  it('con estación activa con pantalla: crea la comanda como hoy', async () => {
-    const creada = await createKdsOrder(venueCon, venta)
+  it('con pantalla pero SIN venta identificada: ya no escribe una fila suelta (saldría en todas las pantallas)', async () => {
+    await expect(createKdsOrder(venueCon, venta)).resolves.toBeNull()
+    expect(await prisma.kdsOrder.count({ where: { venueId: venueCon } })).toBe(0)
+  })
+
+  it('con pantalla y la venta de ese negocio: arma la comanda OFICIAL (con folio) y la devuelve; repetir no duplica', async () => {
+    await prisma.printStation.updateMany({
+      where: { venueId: venueCon },
+      data: { isDefault: true, kitchenDisplaySince: new Date(Date.now() - 60_000) },
+    })
+    const categoria = await prisma.menuCategory.create({ data: { venueId: venueCon, name: 'Comida', slug: `comida-${suffix}` } })
+    const producto = await prisma.product.create({
+      data: { venueId: venueCon, sku: `cafe-${suffix}`, name: 'Café', categoryId: categoria.id, price: new Prisma.Decimal(40) },
+    })
+    const orden = await prisma.order.create({
+      data: {
+        venueId: venueCon,
+        orderNumber: `A2-${suffix}`,
+        externalId: `ext-a2-${suffix}`,
+        subtotal: 40,
+        taxAmount: 0,
+        total: 40,
+        items: { create: [{ productId: producto.id, productName: 'Café', quantity: 1, unitPrice: 40, taxAmount: 0, total: 40 }] },
+      },
+    })
+    const creada = await createKdsOrder(venueCon, { ...venta, orderId: orden.id })
     expect(creada).not.toBeNull()
-    expect(creada!.orderNumber).toBe('A1')
-    expect(await prisma.kdsOrder.count({ where: { venueId: venueCon } })).toBe(1)
+    expect(await prisma.kdsOrder.findFirst({ where: { venueId: venueCon, orderId: orden.id } })).toEqual(
+      expect.objectContaining({ sourceKey: expect.stringMatching(/^sale:ext-a2-/) }),
+    )
+    await expect(createKdsOrder(venueCon, { ...venta, orderId: orden.id })).resolves.toBeNull()
+    expect(await prisma.kdsOrder.count({ where: { venueId: venueCon, orderId: orden.id } })).toBe(1)
   })
 
   it('estación con pantalla pero APAGADA: no crea', async () => {

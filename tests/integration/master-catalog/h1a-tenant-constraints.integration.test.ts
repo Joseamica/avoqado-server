@@ -383,7 +383,9 @@ describe('H1A master-catalog tenant and state constraints', () => {
     const bindingBatchId = `h1a-binding-batch-${fixtureKey}`
     const publicationBatchId = `h1a-publication-batch-${fixtureKey}`
     const publicationBindingId = `h1a-publication-binding-${fixtureKey}`
-    const previewExpiresAt = new Date(Date.now() + 60_000)
+    // UTC as text, like every Prisma timestamp: a bare Date goes out in the process's local time and Postgres drops the
+    // offset for a `timestamp without time zone` column, so west of UTC the preview "expired" hours before it was created.
+    const previewExpiresAt = new Date(Date.now() + 60_000).toISOString()
 
     for (const [table, id] of [
       ['CatalogImportBatch', importBatchId],
@@ -583,7 +585,9 @@ describe('H1A master-catalog tenant and state constraints', () => {
 
   it('stores validation-profile previews on the generic idempotency spine using only a token hash', async () => {
     const previewId = `h1a-profile-preview-${fixtureKey}`
-    const previewExpiresAt = new Date(Date.now() + 60_000)
+    // UTC as text, like every Prisma timestamp: a bare Date goes out in the process's local time and Postgres drops the
+    // offset for a `timestamp without time zone` column, so west of UTC the preview "expired" hours before it was created.
+    const previewExpiresAt = new Date(Date.now() + 60_000).toISOString()
     await client.query(
       `INSERT INTO "CatalogIdempotencyRecord"
         ("id", "organizationId", "operation", "idempotencyKey", "requestHash", "requestHashVersion", "state",

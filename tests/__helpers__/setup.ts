@@ -154,6 +154,9 @@ const prismaMock: any = {
   deliveryChannelLink: createMockModel(),
   kdsOrder: createMockModel(),
   kdsOrderItem: createMockModel(),
+  printStation: createMockModel(),
+  printGateway: createMockModel(),
+  printer: createMockModel(),
   deliveryOrderEvent: createMockModel(),
   deliveryActivationRequest: createMockModel(),
   payment: createMockModel(),
@@ -512,6 +515,11 @@ prismaMock.paymentEffect.createMany.mockResolvedValue({ count: 1 })
 // línea (`:359-369`). Sin default también revienta con «originalCalcs is not iterable» dentro de
 // la transacción del reembolso. Una lista vacía es el estado real de un cobro sin comisiones.
 prismaMock.commissionCalculation.findMany.mockResolvedValue([])
+// Etapa 3 del KDS: cobros y rondas preguntan si hay pantalla de cocina; por default, no hay.
+prismaMock.printStation.findFirst.mockResolvedValue(null)
+prismaMock.printStation.findMany.mockResolvedValue([])
+prismaMock.printer.findMany.mockResolvedValue([])
+prismaMock.printGateway.findUnique.mockResolvedValue(null)
 
 function primeReservationStaffMocks() {
   prismaMock.staffSchedule.findUnique.mockResolvedValue(null)

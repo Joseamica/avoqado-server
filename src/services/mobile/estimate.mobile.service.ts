@@ -28,7 +28,7 @@ interface CreateEstimateItem {
   productId?: string
   productName: string
   quantity: number
-  unitPrice: number // cents
+  unitPrice: number // pesos, tal como se tecleó (IVA incluido)
 }
 
 interface CreateEstimateParams {
@@ -180,25 +180,28 @@ export async function createEstimate(params: CreateEstimateParams) {
     unitPrice: item.unitPrice ?? item.price ?? 0,
   }))
 
-  // Calculate totals
-  let subtotal = 0
+  // 🔴 PESOS 1:1, como todo el API: las dos apps mandan el precio tal como se tecleó junto al «$». Antes se dividía
+  // entre 100 («centavos») y la respuesta multiplicaba por 100: la pantalla decía $100 y la base guardaba $1.
+  let subtotal = new Decimal(0)
   const itemsData = normalizedItems.map(item => {
-    const unitPrice = item.unitPrice / 100 // cents to currency
-    const totalPrice = unitPrice * item.quantity
-    subtotal += totalPrice
+    const unitPrice = new Decimal(item.unitPrice).toDecimalPlaces(2)
+    const totalPrice = unitPrice.mul(item.quantity).toDecimalPlaces(2)
+    subtotal = subtotal.add(totalPrice)
 
     return {
       productId: item.productId || null,
       productName: item.productName,
       quantity: item.quantity,
-      unitPrice: new Decimal(unitPrice.toFixed(2)),
-      totalPrice: new Decimal(totalPrice.toFixed(2)),
+      unitPrice,
+      totalPrice,
     }
   })
 
-  const taxRate = 0.16
-  const taxAmount = subtotal * taxRate
-  const total = subtotal + taxAmount
+  // 🔴 El precio YA trae el IVA (convención mexicana, igual que toda venta nativa): el total es la suma de los precios y
+  // `taxAmount` queda en 0 — el desglose lo arma el CFDI con el tratamiento de cada producto. Antes se sumaba el 16 %
+  // ENCIMA (`total = subtotal × 1.16`, el «$100 + tax» de EE.UU.) y la orden convertida le cobraba eso al cliente.
+  const taxAmount = new Decimal(0)
+  const total = subtotal
 
   const estimate = await prisma.estimate.create({
     data: {
@@ -209,9 +212,9 @@ export async function createEstimate(params: CreateEstimateParams) {
       customerEmail: params.customerEmail || null,
       customerPhone: params.customerPhone || null,
       status: 'DRAFT',
-      subtotal: new Decimal(subtotal.toFixed(2)),
-      taxAmount: new Decimal(taxAmount.toFixed(2)),
-      total: new Decimal(total.toFixed(2)),
+      subtotal,
+      taxAmount,
+      total,
       notes: notes || null,
       validUntil: validUntil ? new Date(validUntil) : null,
       createdById: staffId,
@@ -231,7 +234,7 @@ export async function createEstimate(params: CreateEstimateParams) {
     action: 'ESTIMATE_CREATED',
     entity: 'Estimate',
     entityId: estimate.id,
-    data: { estimateNumber, itemCount: items.length, total, source: 'MOBILE' },
+    data: { estimateNumber, itemCount: items.length, total: total.toNumber(), source: 'MOBILE' },
   })
 
   return formatEstimate(estimate)
@@ -345,9 +348,11 @@ export async function convertToOrder(estimateId: string, venueId: string, staffI
       source: 'AVOQADO_IOS',
       subtotal: estimate.subtotal,
       discountAmount: new Prisma.Decimal(0),
-      taxAmount: estimate.taxAmount,
-      total: estimate.total,
-      remainingBalance: estimate.total,
+      // IVA incluido: la orden debe la suma de sus renglones y guarda `taxAmount` 0, como toda venta nativa. Nunca el
+      // `total` guardado del presupuesto, que en los creados antes del 28-sep-2026 traía el 16 % sumado encima.
+      taxAmount: new Prisma.Decimal(0),
+      total: estimate.subtotal,
+      remainingBalance: estimate.subtotal,
       customerName: estimate.customerName || null,
       version: 1,
       items: {
@@ -357,7 +362,7 @@ export async function convertToOrder(estimateId: string, venueId: string, staffI
           quantity: item.quantity,
           unitPrice: item.unitPrice,
           discountAmount: new Prisma.Decimal(0),
-          taxAmount: new Prisma.Decimal(Number(item.totalPrice) * 0.16),
+          taxAmount: new Prisma.Decimal(0),
           total: item.totalPrice,
           sequence: index,
         })),
@@ -402,16 +407,16 @@ export async function convertToOrder(estimateId: string, venueId: string, staffI
       orderNumber: order.orderNumber,
       status: order.status,
       paymentStatus: order.paymentStatus,
-      subtotal: Math.round(Number(order.subtotal) * 100),
-      taxAmount: Math.round(Number(order.taxAmount) * 100),
-      total: Math.round(Number(order.total) * 100),
+      subtotal: Number(order.subtotal),
+      taxAmount: Number(order.taxAmount),
+      total: Number(order.total),
       items: order.items.map(item => ({
         id: item.id,
         productId: item.productId,
         productName: item.productName,
         quantity: item.quantity,
-        unitPrice: Math.round(Number(item.unitPrice) * 100),
-        total: Math.round(Number(item.total) * 100),
+        unitPrice: Number(item.unitPrice),
+        total: Number(item.total),
       })),
       createdAt: order.createdAt.toISOString(),
     },
@@ -427,14 +432,17 @@ function formatEstimate(estimate: any) {
     id: estimate.id,
     venueId: estimate.venueId,
     estimateNumber: estimate.estimateNumber,
+    // Android lee `number` (iOS, `estimateNumber`): los dos nombres, sin quitar ninguno.
+    number: estimate.estimateNumber,
     status: estimate.status,
     customerId: estimate.customerId,
     customerName: estimate.customerName,
     customerEmail: estimate.customerEmail,
     customerPhone: estimate.customerPhone,
-    subtotal: Math.round(Number(estimate.subtotal) * 100),
-    taxAmount: Math.round(Number(estimate.taxAmount) * 100),
-    total: Math.round(Number(estimate.total) * 100),
+    // Pesos 1:1, como todo el API (antes ×100, y las apps lo mostraban como pesos).
+    subtotal: Number(estimate.subtotal),
+    taxAmount: Number(estimate.taxAmount),
+    total: Number(estimate.total),
     notes: estimate.notes,
     validUntil: estimate.validUntil ? estimate.validUntil.toISOString() : null,
     sentAt: estimate.sentAt ? estimate.sentAt.toISOString() : null,
@@ -448,8 +456,10 @@ function formatEstimate(estimate: any) {
           productId: item.productId,
           productName: item.productName,
           quantity: item.quantity,
-          unitPrice: Math.round(Number(item.unitPrice) * 100),
-          totalPrice: Math.round(Number(item.totalPrice) * 100),
+          unitPrice: Number(item.unitPrice),
+          totalPrice: Number(item.totalPrice),
+          // Android lee `total` (iOS, `totalPrice`).
+          total: Number(item.totalPrice),
         }))
       : [],
     createdAt: estimate.createdAt.toISOString(),

@@ -41,6 +41,8 @@ import {
 // pagado y cuánto falta" para los cuatro caminos de cobro. Se extrajo de este
 // mismo archivo; volver a llamarla es lo que impide que se separen otra vez.
 import { computeOrderBalance, summarizeRefunds, type RefundState } from '../shared/orderBalance'
+import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
+import { armarComandasTrasCommit } from '../kds/kitchenTicketAuthoring.service'
 
 // MARK: - Types
 
@@ -105,6 +107,12 @@ export interface CreateOrderInput {
    * Aditivo y opcional: sin él, el cuerpo y la respuesta quedan idénticos.
    */
   stampRewardId?: string | null
+  /**
+   * Cuánto descontó la caja por el premio al COBRAR (centavos). Si el servidor no lo
+   * aplica o lo aplica por otro monto, queda en la bitácora: pasa al reconectar una
+   * venta cobrada sin red, y la cuenta quedaría debiendo la diferencia en silencio.
+   */
+  stampRewardExpectedDiscount?: number | null
 }
 
 export interface CreatedOrderResponse {
@@ -756,6 +764,19 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
     })
     if (existingOrder) {
       logger.warn(`🔄 [ORDER.MOBILE] Duplicate createOrderWithItems detected (externalId=${externalId}) — returning existing order`)
+      // 🔴 La caja que reintenta (perdió la respuesta) tiene que saber qué pasó con el premio
+      // en el PRIMER intento: sin esto lo leería como «no aplicado» y cobraría el precio
+      // completo con el premio ya quemado.
+      if (input.stampRewardId) {
+        const stampReward = await ensureStampRewardOnExistingOrder(
+          venueId,
+          existingOrder.id,
+          input.stampRewardId,
+          input.staffId,
+          input.stampRewardExpectedDiscount,
+        )
+        return { ...toCreatedOrderResponse(existingOrder), stampReward }
+      }
       return toCreatedOrderResponse(existingOrder)
     }
   }
@@ -952,6 +973,18 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
       })
       if (winner) {
         logger.warn(`🛡️ [ORDER.MOBILE] Concurrent duplicate blocked by unique index (externalId=${externalId}) — returning winner`)
+        // 🔴 El perdedor de la carrera también tiene que decir qué pasó con el premio: sin esto la
+        // caja lo leería como «no aplicado» y cobraría completo con el premio ya quemado.
+        if (input.stampRewardId) {
+          const stampReward = await ensureStampRewardOnExistingOrder(
+            venueId,
+            winner.id,
+            input.stampRewardId,
+            input.staffId,
+            input.stampRewardExpectedDiscount,
+          )
+          return { ...toCreatedOrderResponse(winner), stampReward }
+        }
         return toCreatedOrderResponse(winner)
       }
     }
@@ -1117,7 +1150,13 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
 
   // 🔴 El premio se aplica AQUÍ, con la orden ya creada y antes de devolverla: el
   // punto de venta cobra el total que sale de esta respuesta.
-  const stampReward = await applyStampRewardToNewOrder(venueId, order.id, input.stampRewardId, input.staffId)
+  const stampReward = await applyStampRewardToNewOrder(
+    venueId,
+    order.id,
+    input.stampRewardId,
+    input.staffId,
+    input.stampRewardExpectedDiscount,
+  )
 
   // 🔴 Y si se aplicó, hay que RELEER. `order` es el objeto en memoria de antes del
   // descuento; devolverlo tal cual haría que el aparato cobre el total sin descontar
@@ -2368,6 +2407,9 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   // El gate se resuelve una sola vez y FUERA de la transacción monetaria: una
   // caída de settings jamás revierte un Payment real.
   const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
+  // Etapa 3 del KDS: ¿esta venta necesita comanda de pantalla? FUERA de la transacción (nunca tumba un cobro);
+  // la marca viaja en la MISMA escritura que salda la orden.
+  const marcarCocina = await debeMarcarCocina(venueId)
 
   // Convert cents to decimal for database. `amount` es lo SOLICITADO; lo que se
   // registra como pago se decide dentro de la transacción (ver `aplicadoCents`).
@@ -2577,6 +2619,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
             // cripto ya se comportaban así.)
             ...(isFullyPaid ? { status: 'COMPLETED' as const } : {}),
             ...(isFullyPaid ? { loyaltyEligibleAt: new Date(), loyaltyStaffId: effectiveStaffId } : {}),
+            ...(isFullyPaid && marcarCocina ? { kitchenPendingAt: new Date() } : {}),
             paidAmount: new Prisma.Decimal(totalPaidIncludingTip),
             remainingBalance: Math.max(0, remainingAfterPayment),
             tipAmount: totalTip,
@@ -2999,6 +3042,12 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     }
   }
 
+  // 🍳 Etapa 3 del KDS: la comanda de pantalla nace al quedar la venta PAGADA. Después del commit; si falla, la marca
+  // `kitchenPendingAt` queda y el barrido la arma. `armarComandasTrasCommit` nunca lanza.
+  if (orderFullyPaid && marcarCocina) {
+    await armarComandasTrasCommit(venueId, orderId, 'PAID')
+  }
+
   // Emit Socket.IO events for real-time updates
   const broadcastingService = socketManager.getBroadcastingService()
   if (broadcastingService) {
@@ -3353,18 +3402,96 @@ export async function applyStampRewardToNewOrder(
   orderId: string,
   stampRewardId: string | null | undefined,
   staffId?: string,
+  expectedDiscountCents?: number | null,
 ): Promise<StampRewardOnOrderResult> {
   // El caso normal: la inmensa mayoría de las ventas no trae premio, y no puede costar
   // ni una consulta de más.
   if (!stampRewardId) return { applied: false }
 
+  let result: StampRewardOnOrderResult
   try {
     const { redeemStampReward } = await import('../wallet/redeemStampReward.service')
     const r = await redeemStampReward(venueId, orderId, stampRewardId, { staffId })
-    return { applied: true, discountAmount: r.discountAmount, rewardLabel: r.rewardLabel }
+    result = { applied: true, discountAmount: r.discountAmount, rewardLabel: r.rewardLabel }
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
     logger.warn('No se pudo aplicar el premio a una venta nueva', { venueId, orderId, stampRewardId, reason })
-    return { applied: false, reason }
+    result = { applied: false, reason }
   }
+
+  await traceStampRewardMismatch(venueId, orderId, stampRewardId, staffId, expectedDiscountCents, result)
+  return result
+}
+
+/**
+ * 🔴 La caja descontó el premio al calcular lo que cobra y el servidor no lo confirmó igual: la
+ * cuenta queda con una diferencia. Nada se descarta en silencio: queda en la bitácora.
+ */
+async function traceStampRewardMismatch(
+  venueId: string,
+  orderId: string,
+  stampRewardId: string,
+  staffId: string | undefined,
+  expectedDiscountCents: number | null | undefined,
+  result: StampRewardOnOrderResult,
+): Promise<void> {
+  const confirmedCents = result.applied ? Math.round((result.discountAmount ?? 0) * 100) : 0
+  if (typeof expectedDiscountCents !== 'number' || expectedDiscountCents <= 0 || confirmedCents === expectedDiscountCents) return
+  void (await import('../dashboard/activity-log.service')).logAction({
+    action: 'STAMP_REWARD_NOT_AS_CHARGED',
+    entity: 'Order',
+    entityId: orderId,
+    staffId,
+    venueId,
+    data: { stampRewardId, expectedCents: expectedDiscountCents, confirmedCents, reason: result.reason ?? null },
+  })
+}
+
+/**
+ * La caja reintentó la creación (perdió la respuesta, o dos intentos se cruzaron) y la orden ya
+ * existe. Si el premio todavía no quedó en ella —el primer intento se cayó antes de canjearlo— se
+ * canjea AHORA; el canje es condicional, así que sólo un intento lo quema. Se responde lo que de
+ * verdad quedó en la orden, nunca un «no aplicado» por haber llegado segundo.
+ */
+export async function ensureStampRewardOnExistingOrder(
+  venueId: string,
+  orderId: string,
+  stampRewardId: string,
+  staffId?: string,
+  expectedDiscountCents?: number | null,
+): Promise<StampRewardOnOrderResult> {
+  const yaAplicado = await stampRewardOutcomeForExistingOrder(venueId, orderId)
+  let result = yaAplicado
+  if (!yaAplicado.applied) {
+    // Sin rastro aquí: se decide con el resultado FINAL, abajo.
+    const intento = await applyStampRewardToNewOrder(venueId, orderId, stampRewardId, staffId)
+    if (intento.applied) {
+      result = intento
+    } else {
+      // Perdió la carrera: el otro intento lo canjeó en ESTA orden mientras tanto.
+      const despues = await stampRewardOutcomeForExistingOrder(venueId, orderId)
+      result = despues.applied ? despues : intento
+    }
+  }
+  await traceStampRewardMismatch(venueId, orderId, stampRewardId, staffId, expectedDiscountCents, result)
+  return result
+}
+
+/**
+ * Qué pasó con el premio de una orden que YA existía (la caja reintentó la creación con la
+ * misma `externalId`). Se lee de la base, no se vuelve a canjear.
+ */
+export async function stampRewardOutcomeForExistingOrder(venueId: string, orderId: string): Promise<StampRewardOnOrderResult> {
+  // JOIN directo por la orden: listar sus descuentos con tope podía dejar el premio fuera.
+  const filas = await prisma.$queryRaw<{ rewardLabel: string; amount: Prisma.Decimal | number }[]>`
+    SELECT sr."rewardLabel", od."amount"
+    FROM "StampReward" sr
+    JOIN "OrderDiscount" od ON od."id" = sr."orderDiscountId"
+    WHERE od."orderId" = ${orderId} AND sr."venueId" = ${venueId}
+    LIMIT 1`
+  const premio = filas[0]
+  if (!premio) {
+    return { applied: false, reason: 'El premio no quedó aplicado a esta venta.' }
+  }
+  return { applied: true, discountAmount: Number(premio.amount), rewardLabel: premio.rewardLabel }
 }

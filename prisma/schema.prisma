@@ -3802,6 +3802,11 @@ model Order {
   loyaltyProcessedAt  DateTime?
   loyaltyAttempts     Int       @default(0)
   loyaltyLastError    String?   @db.Text
+  /// Etapa 3 del KDS (spec 2026-09-27 §2): «falta armar su comanda de pantalla». La pone la MISMA escritura
+  /// que salda la venta o suma la ronda; la limpia `authorKitchenTickets`; si el gancho post-commit murió,
+  /// `kitchen-tickets-reconciliation` la reintenta. Índice PARCIAL `Order_kitchenPendingAt_pending_idx`
+  /// (CONCURRENTLY, sólo en la migración: Prisma no expresa índices parciales).
+  kitchenPendingAt    DateTime?
   loyaltyStaffId      String?
 
   // Payment split type (set on first payment, enforces UI consistency)
@@ -15376,9 +15381,23 @@ model KdsOrder {
   customerName    String?
   customerContact String?
 
+  /// Etapa 3 del KDS (spec 2026-09-27 §1): de qué estación es la comanda. `null` = «Sin estación»
+  /// (sale en todas las pantallas). SetNull: borrar la estación no borra la comanda.
+  printStationId    String?
+  printStation      PrintStation? @relation(fields: [printStationId], references: [id], onDelete: SetNull)
+  /// El FOLIO: `<origen>:<stationId|none>` — sale:<Order.externalId> · round:<roundKey> · order:<orderId> ·
+  /// round:<orderId>:<ms>. Lo calculan igual la caja (antes de sincronizar) y el servidor (después). Quien
+  /// llegue primero crea la fila: el servidor al armarla, la caja al marcar «salió en papel», la pantalla al
+  /// marcar LISTO sin red. Único por venue; `null` en comandas viejas y de Uber.
+  sourceKey         String?
+  /// Salió en PAPEL DE RESPALDO porque la pantalla no contestó. Pegajoso: nunca vuelve a verse como activa.
+  fallbackPrintedAt DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  /// El folio (spec 2026-09-27 §1). Se construye CONCURRENTLY en su propia migración.
+  @@unique([venueId, sourceKey])
   @@index([venueId, status])
   /// Para "¿qué falta imprimir aquí?" sin recorrer la tabla entera.
   @@index([venueId, printedAt])
@@ -15534,20 +15553,24 @@ model PrintStation {
   /// ticket extra: el default es no cambiarle nada a quien no lo quiera. Y se marca aparte
   /// de `isDefault` a propósito — mandar el consolidado a la estación por default haría que
   /// la cocina reciba DOS papeles del mismo pedido, que es el doble-impreso clásico.
-  isPacking    Boolean @default(false)
+  isPacking Boolean @default(false)
 
   /// ¿Esta estación se atiende con PANTALLA de cocina (KDS)? Si NINGUNA estación activa del venue la
   /// tiene, las ventas de la caja NO crean `KdsOrder` (spec 2026-09-24, etapa 1). La hoja impresa no
   /// depende de esto. En la etapa 1 sólo SUPERADMIN la cambia; la etapa 3 la abre a clientes.
-  hasKitchenDisplay Boolean @default(false)
-  active       Boolean @default(true)
-  displayOrder Int     @default(0)
+  hasKitchenDisplay   Boolean   @default(false)
+  /// Etapa 3 del KDS (spec 2026-09-27 §1): cuándo se PRENDIÓ esta pantalla. Es el «borrón y cuenta nueva»:
+  /// los tableros sólo enseñan comandas creadas después. Se re-sella cada vez que pasa de apagada a prendida.
+  kitchenDisplaySince DateTime?
+  active              Boolean   @default(true)
+  displayOrder        Int       @default(0)
 
   // Routing back-relations (cascade resolves product override ?? category default ?? venue default)
   categories MenuCategory[]
   products   Product[]
   orderItems OrderItem[]
   printJobs  PrintJob[]
+  kdsOrders  KdsOrder[]
 
   /// Áreas de entrega que imprimen su vale en esta estación (AREA_TICKETS).
   fulfillmentAreas FulfillmentArea[]

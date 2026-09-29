@@ -90,6 +90,35 @@ export const VENTANA_DEL_BARRIDO_MIN = 15
 export const VALES_DESDE = '2026-08-14'
 
 /**
+ * Ventana de alerta: sólo GRITA (logger.error con 🚨, lo que dispara Better Stack) lo que pasó en
+ * las últimas 24 h. Lo anterior se sigue contando, sin tope, en UNA línea info.
+ *
+ * Decisión del founder (19-sep, reiterada el 28-sep): «quítalos, cállalos y de hoy en adelante
+ * hazle caso a los recientes». Las mismas 10 órdenes (16-may a 18-sep) gritaban cada 6 h desde
+ * hacía semanas; una alarma que repite lo viejo entrena a ignorarla.
+ *
+ * 🔴 RODANTE de 24 h, NO el día civil: el cron corre a las 00:17, 06:17, 12:17 y 18:17 (CDMX).
+ * Con día civil, un cobro doble a las 19:00 caería en la corrida de las 00:17, ya como «ayer», y
+ * no se alertaría nunca — justo la franja en que cierran las cafeterías. Con 24 h cada problema
+ * se ve en 4 corridas y después calla.
+ *
+ * «Reciente» = la orden O su último cobro caen dentro de la ventana: un cobro NUEVO sobre una
+ * cuenta vieja (el caso Mindform de agosto) sí grita. Y una violación que no se puede fechar
+ * cuenta como reciente: en dinero, la duda alerta.
+ */
+export const VENTANA_DE_ALERTA_HORAS = 24
+
+/**
+ * Inicio de la ventana como literal UTC `YYYY-MM-DD HH:MM:SS.mmm`. Va INLINE como `TIMESTAMP '…'`,
+ * nunca como bind: las columnas son `timestamp without time zone` guardadas en UTC, y un `Date`
+ * de Prisma llega como `timestamptz` que Postgres convertiría con la zona de la SESIÓN (seis horas
+ * de corrimiento en la Mac local). Sale de un `Date`, así que no hay texto externo que escapar.
+ */
+export function corteDeAlerta(now: Date): string {
+  return new Date(now.getTime() - VENTANA_DE_ALERTA_HORAS * 3_600_000).toISOString().replace('T', ' ').replace('Z', '')
+}
+
+/**
  * Filtro de venues reales — los demo/seed usan convenciones propias.
  *
  * 🔴 Excluir por slug NO basta: la org de pruebas del founder ("Grupo Avoqado Prime") tiene 4 venues
@@ -147,6 +176,8 @@ export interface WatchdogRun {
   porTipo: Record<string, number>
   /** Faltan vales históricos, pero hay deducciones: revisión pendiente, agrupada como WARN. */
   historicalInventory?: { total: number; mostrados: number }
+  /** Violaciones de días anteriores (fuera de VENTANA_DE_ALERTA_HORAS): se cuentan, no gritan. */
+  backlog?: { total: number; porTipo: Record<string, number> }
 }
 
 /**
@@ -154,7 +185,8 @@ export interface WatchdogRun {
  * tope) y el detalle (con tope). Exportado puro para poder probar su forma y correrlo a mano
  * contra producción en sólo lectura. Consultas probadas contra prod el 2026-08-03 y el 2026-09-02.
  */
-export function buildWatchdogSql(): { counts: string; details: string } {
+export function buildWatchdogSql(now: Date = new Date()): { counts: string; details: string } {
+  const corte = corteDeAlerta(now)
   const cte = `
     WITH v AS (
         -- 1. Cuentas en NEGATIVO (el bug de descuentos apilados, corregido en 268c5fc6).
@@ -249,8 +281,11 @@ export function buildWatchdogSql(): { counts: string; details: string } {
         --    🔴 El criterio NO se escribe aquí: sale del MISMO módulo que usa el barrido
         --    paid-order-reconciler.job.ts (cada 10 min). Si divergieran, el barrido cerraría un
         --    conjunto de órdenes y el vigilante vigilaría otro.
-        --    Qué puede aparecer aquí SIN que el barrido haya fallado — son tres clases, y por eso
+        --    Qué puede aparecer aquí SIN que el barrido haya fallado — son cuatro clases, y por eso
         --    esto NO es «lo que el barrido no pudo cerrar» a secas:
+        --      · una cuenta con el IVA SEPARADO (taxAmount > 0, histórico de SoftRestaurant): el
+        --        barrido la excluye a propósito porque su reparador le quitaría el IVA al total
+        --        (findPaidButOpenOrders); se cierra a mano;
         --      · lo que intentó y no pudo cerrar (p. ej. falló el vale de inventario): el motivo
         --        está en el log de ESE job, y una que reaparece pasada tras pasada NO se cierra
         --        a mano;
@@ -328,16 +363,30 @@ export function buildWatchdogSql(): { counts: string; details: string } {
           -- puede estar recibiendo su vale, y gritar por eso enseña a ignorar la alarma.
           AND o."updatedAt" < (NOW() AT TIME ZONE 'UTC') - INTERVAL '${VENTANA_DEL_BARRIDO_MIN} minutes'
           AND ${REAL_VENUES}
+    ),
+    -- Ventana de alerta (VENTANA_DE_ALERTA_HORAS). Ninguna invariante sabe de fechas: la
+    -- marca se pone aquí, encima de todas, para que una octava no tenga que acordarse.
+    -- LEFT JOIN + COALESCE(…, TRUE): lo que no se puede fechar cuenta como reciente y grita.
+    w AS (
+      SELECT v.*,
+             COALESCE(
+               GREATEST(o."createdAt", (SELECT MAX(p."createdAt") FROM "Payment" p WHERE p."orderId" = o.id))
+                 >= TIMESTAMP '${corte}',
+               TRUE) AS reciente
+      FROM v LEFT JOIN "Order" o ON o.id = v.order_id
     )`
 
   return {
     counts: `${cte}
-    SELECT "check", COUNT(*)::int AS n FROM v GROUP BY "check"`,
+    SELECT "check", reciente, COUNT(*)::int AS n FROM w GROUP BY "check", reciente`,
     // El tope va POR INVARIANTE (ver DETAIL_LIMIT_POR_CHECK): con un LIMIT global, la que más
     // filas produce entierra a las demás — y ordenando por nombre, no siempre es la más grave.
+    // El filtro de la ventana va ANTES del ROW_NUMBER: lo viejo no le quita cupo a lo de hoy.
+    // El aviso histórico de inventario no es alarma (va como WARN agrupado) y no se ventanea.
     details: `${cte}
     SELECT "check", venue, order_id, detalle FROM (
-      SELECT *, ROW_NUMBER() OVER (PARTITION BY "check" ORDER BY venue, order_id) AS rn FROM v
+      SELECT *, ROW_NUMBER() OVER (PARTITION BY "check" ORDER BY venue, order_id) AS rn FROM w
+      WHERE reciente OR "check" = '${LEGACY_INVENTORY_NOTICE}'
     ) t
     WHERE rn <= ${DETAIL_LIMIT_POR_CHECK}
     ORDER BY "check", venue, order_id`,
@@ -384,7 +433,28 @@ export class MoneyIntegrityWatchdogJob {
     }
 
     try {
-      const { counts, rows } = await this.check()
+      const { counts: todos, rows } = await this.check(now)
+
+      // Lo de días anteriores se cuenta aparte y deja de gritar. `reciente` ausente = reciente
+      // (fail-open: en dinero la duda alerta). El aviso histórico de inventario no se ventanea.
+      const counts: Array<{ check: string; n: number }> = []
+      const backlogPorTipo: Record<string, number> = {}
+      for (const c of todos) {
+        if (c.reciente === false && c.check !== LEGACY_INVENTORY_NOTICE) backlogPorTipo[c.check] = (backlogPorTipo[c.check] ?? 0) + c.n
+        else {
+          const prev = counts.find(x => x.check === c.check)
+          if (prev) prev.n += c.n
+          else counts.push({ check: c.check, n: c.n })
+        }
+      }
+      const backlogTotal = Object.values(backlogPorTipo).reduce((a, b) => a + b, 0)
+      const backlogResult = backlogTotal > 0 ? { backlog: { total: backlogTotal, porTipo: backlogPorTipo } } : {}
+      if (backlogTotal > 0) {
+        logger.info(
+          `💰 [Money watchdog] ${backlogTotal} problema(s) de días anteriores — fuera de la ventana de ${VENTANA_DE_ALERTA_HORAS} h, ya no se repiten como alerta`,
+          { porTipo: backlogPorTipo },
+        )
+      }
 
       const historicalRows = rows.filter(v => v.check === LEGACY_INVENTORY_NOTICE)
       const errorRows = rows.filter(v => v.check !== LEGACY_INVENTORY_NOTICE)
@@ -420,8 +490,8 @@ export class MoneyIntegrityWatchdogJob {
       }
 
       if (total === 0) {
-        if (!historicalResult.historicalInventory) logger.info('💰 [Money watchdog] Todo cuadra ✅')
-        return { ...quiet, ...historicalResult }
+        if (!historicalResult.historicalInventory && backlogTotal === 0) logger.info('💰 [Money watchdog] Todo cuadra ✅')
+        return { ...quiet, ...historicalResult, ...backlogResult }
       }
 
       // BetterStack debe alertar sobre '🚨 [Money watchdog]'.
@@ -435,7 +505,7 @@ export class MoneyIntegrityWatchdogJob {
         mostrados: violations.length,
         topePorCheck: DETAIL_LIMIT_POR_CHECK,
       })
-      return { expired: false, total, mostrados: violations.length, porTipo, ...historicalResult }
+      return { expired: false, total, mostrados: violations.length, porTipo, ...historicalResult, ...backlogResult }
     } catch (err) {
       logger.error('❌ [Money watchdog] La revisión falló', { error: err instanceof Error ? err.message : err })
       return quiet
@@ -443,15 +513,15 @@ export class MoneyIntegrityWatchdogJob {
   }
 
   /** Las 7 invariantes de dinero: totales sin tope + detalle acotado. */
-  private async check(): Promise<{ counts: Array<{ check: string; n: number }>; rows: Violation[] }> {
-    const sql = buildWatchdogSql()
+  private async check(now: Date): Promise<{ counts: Array<{ check: string; n: number; reciente?: boolean }>; rows: Violation[] }> {
+    const sql = buildWatchdogSql(now)
     // Entry read con retry por la regla de cron-jobs.md (lecturas puras, seguras de reintentar).
     return retry(
       async () => {
-        const counts = await prisma.$queryRawUnsafe<Array<{ check: string; n: number }>>(sql.counts)
+        const counts = await prisma.$queryRawUnsafe<Array<{ check: string; n: number; reciente?: boolean }>>(sql.counts)
         const rows = await prisma.$queryRawUnsafe<Array<{ check: string; venue: string; order_id: string; detalle: string }>>(sql.details)
         return {
-          counts: counts.map(c => ({ check: c.check, n: Number(c.n) })),
+          counts: counts.map(c => ({ check: c.check, n: Number(c.n), reciente: c.reciente })),
           rows: rows.map(r => ({ check: r.check, venue: r.venue, orderId: r.order_id, detalle: r.detalle })),
         }
       },

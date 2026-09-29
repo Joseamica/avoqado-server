@@ -113,6 +113,7 @@ const LEGACY_PLAN_CODES = new Set([
   'PRICE_LABELS', // Already PRO on Android/iOS since 2026-09-23; preserve it in exact snapshots.
   'WHITE_LABEL_DASHBOARD',
   'MASTER_CATALOG',
+  'KITCHEN_DISPLAY', // Pro (founder D-A, 27-sep): kitchen display by station, offline included.
   ...PREMIUM_ONLY_CODES,
 ])
 

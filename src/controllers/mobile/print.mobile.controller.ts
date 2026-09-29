@@ -1,5 +1,6 @@
 import { NextFunction, Request, Response } from 'express'
 import * as printMobileService from '../../services/mobile/print.mobile.service'
+import { setKitchenDisplay } from '../../services/dashboard/printStation.dashboard.service'
 
 /** GET /mobile/venues/:venueId/print-config — config que el POS cachea (routing + impresoras + estaciones). */
 export async function getPrintConfig(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -25,6 +26,20 @@ export async function syncPrintJobs(req: Request, res: Response, next: NextFunct
 export async function gatewayHeartbeat(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const data = await printMobileService.gatewayHeartbeat(req.params.venueId, req.body)
+    res.status(200).json({ success: true, data })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * La casilla «pantalla de cocina» desde la TABLET (etapa 3): el MISMO registro y las MISMAS reglas que el
+ * dashboard — prender pasa por la puerta de lanzamiento y el plan; apagar siempre se puede.
+ * @route PUT /api/v1/mobile/venues/:venueId/print-stations/:stationId/kitchen-display
+ */
+export async function setStationKitchenDisplay(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const data = await setKitchenDisplay(req.params.venueId, req.params.stationId, req.body.enabled, (req as any).authContext?.userId)
     res.status(200).json({ success: true, data })
   } catch (error) {
     next(error)

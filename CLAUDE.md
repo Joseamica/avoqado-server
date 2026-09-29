@@ -298,7 +298,7 @@ When given an Asana task URL, you **can** see its screenshots and attachments �
 
 ## 🔴 Offline-first (reducer de intents) — LEE `.claude/rules/offline-first-y-hub-lan.md`
 
-Este repo es la FUENTE DE VERDAD del contrato: `SyncIntentType` en `src/services/mobile/sync.mobile.service.ts` (14 tipos hoy). Agregar o
+Este repo es la FUENTE DE VERDAD del contrato: `SyncIntentType` en `src/services/mobile/sync.mobile.service.ts` (15 tipos hoy). Agregar o
 cambiar uno obliga a tocar Android, iOS y el MCP `pos_sync_status` en el MISMO cambio — un nombre desalineado falla en silencio.
 
 Tres cosas que no se negocian:

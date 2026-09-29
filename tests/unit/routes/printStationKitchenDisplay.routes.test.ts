@@ -1,9 +1,10 @@
 /**
- * La casilla de pantalla de cocina sólo la cambia SUPERADMIN en la etapa 1 (spec 2026-09-24 §4):
- * el candado vive en la RUTA, y el PUT normal de la estación no deja colarla.
+ * Etapa 3 del KDS: la casilla la cambia quien tiene printers:manage. El candado de rol dejó la ruta; lo que decide
+ * si se puede PRENDER (puerta de lanzamiento y plan) vive en el servicio, que la ruta respeta tal cual.
  */
 import express from 'express'
 import request from 'supertest'
+import { ForbiddenError } from '@/errors/AppError'
 
 const mockSet = jest.fn()
 const mockUpdate = jest.fn()
@@ -12,13 +13,6 @@ jest.mock('@/services/dashboard/printStation.dashboard.service', () => ({
   setKitchenDisplay: (...a: unknown[]) => mockSet(...a),
   updateStation: (...a: unknown[]) => mockUpdate(...a),
 }))
-// authorizeRole relee el rol de la BASE en cada petición (`rolVigente`, d0de5f39); aquí la base confirma
-// el rol del token. El caso «token que dice SUPERADMIN sin serlo» lo fija la suite de `rolVigente`.
-jest.mock('@/services/access/rolVigente', () => ({
-  ...jest.requireActual('@/services/access/rolVigente'),
-  rolVigente: jest.fn(async (s: { role?: string }) => s?.role ?? null),
-}))
-// checkPermission deja pasar: esta prueba mide el candado de ROL de la ruta nueva, no los permisos.
 jest.mock('@/middlewares/checkPermission.middleware', () => ({
   checkPermission: () => (_req: unknown, _res: unknown, next: () => void) => next(),
 }))
@@ -43,27 +37,51 @@ beforeEach(() => {
 })
 
 describe('PUT /print-stations/:stationId/kitchen-display', () => {
-  it('SUPERADMIN la cambia', async () => {
-    mockSet.mockResolvedValue({ id: 's1', hasKitchenDisplay: true })
-    const r = await request(app('SUPERADMIN')).put('/venues/v1/print-stations/s1/kitchen-display').send({ enabled: true })
+  it.each(['OWNER', 'ADMIN', 'MANAGER', 'SUPERADMIN'])('%s llega al servicio con su id', async role => {
+    mockSet.mockResolvedValue({ id: 's1', hasKitchenDisplay: false })
+    const r = await request(app(role)).put('/venues/v1/print-stations/s1/kitchen-display').send({ enabled: false })
     expect(r.status).toBe(200)
-    expect(mockSet).toHaveBeenCalledWith('v1', 's1', true, 'staff-1')
+    expect(mockSet).toHaveBeenCalledWith('v1', 's1', false, 'staff-1')
   })
 
-  it.each(['OWNER', 'ADMIN', 'MANAGER'])('%s recibe 403 y no se escribe nada', async role => {
-    const r = await request(app(role)).put('/venues/v1/print-stations/s1/kitchen-display').send({ enabled: true })
+  it('si el servicio niega prender (puerta cerrada o sin Pro), la ruta devuelve 403 con su mensaje', async () => {
+    mockSet.mockRejectedValue(
+      new ForbiddenError('La pantalla de cocina todavía no está disponible para clientes.', 'KITCHEN_DISPLAY_NOT_RELEASED'),
+    )
+    const r = await request(app('OWNER')).put('/venues/v1/print-stations/s1/kitchen-display').send({ enabled: true })
     expect(r.status).toBe(403)
-    expect(mockSet).not.toHaveBeenCalled()
+    expect(r.body.message).toContain('todavía no está disponible')
   })
 
   it('cuerpo inválido (sin enabled o con campos extra) → 400', async () => {
-    const a = app('SUPERADMIN')
+    const a = app('OWNER')
     expect((await request(a).put('/venues/v1/print-stations/s1/kitchen-display').send({})).status).toBe(400)
     expect((await request(a).put('/venues/v1/print-stations/s1/kitchen-display').send({ enabled: true, name: 'x' })).status).toBe(400)
     expect(mockSet).not.toHaveBeenCalled()
   })
 
-  it('regresión: un OWNER no puede colar hasKitchenDisplay por el PUT normal de la estación', async () => {
+  it('M-1: los 400 de validación salen en español, nunca en el inglés por default de Zod', async () => {
+    const a = app('OWNER')
+
+    const sinEnabled = await request(a).put('/venues/v1/print-stations/s1/kitchen-display').send({})
+    expect(sinEnabled.status).toBe(400)
+    expect(sinEnabled.body.message).toContain('Indica si la pantalla va prendida')
+    expect(sinEnabled.body.message).not.toContain('Required')
+
+    const tipoInvalido = await request(a).put('/venues/v1/print-stations/s1/kitchen-display').send({ enabled: 'yes' })
+    expect(tipoInvalido.status).toBe(400)
+    expect(tipoInvalido.body.message).toContain('enabled debe ser verdadero o falso')
+    expect(tipoInvalido.body.message).not.toContain('Expected boolean')
+
+    const conExtra = await request(a).put('/venues/v1/print-stations/s1/kitchen-display').send({ enabled: true, name: 'x' })
+    expect(conExtra.status).toBe(400)
+    expect(conExtra.body.message).toContain('Sólo se acepta el campo enabled')
+    expect(conExtra.body.message).not.toContain('Unrecognized key')
+
+    expect(mockSet).not.toHaveBeenCalled()
+  })
+
+  it('regresión: nadie cuela hasKitchenDisplay por el PUT normal de la estación', async () => {
     const r = await request(app('OWNER')).put('/venues/v1/print-stations/s1').send({ hasKitchenDisplay: true })
     expect(r.status).toBe(400)
     expect(mockUpdate).not.toHaveBeenCalled()
