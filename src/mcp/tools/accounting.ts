@@ -967,7 +967,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'isr_provisional',
-    'Estimación del PAGO PROVISIONAL de ISR del periodo (persona física, Capa B, PREMIUM). regime="RESICO" (default): ingresos cobrados del mes × tasa fija por tramo (1%–2.5%), sin deducciones. regime="GENERAL": (ingresos − deducciones autorizadas) acumulado del ejercicio × tarifa art-96 acumulada − pagos provisionales previos. Responde "¿cuánto ISR debo este mes?". ⚠️ Es ESTIMACIÓN (el ingreso va sin IVA, con la tasa real de cada venta, e incluye lo exento, no resta pérdidas ni retenciones de ventas; tarifa art-96 = 2024/2025 mientras el SAT no publique 2026). Lo valida el contador. Pasa venueId, opcionalmente period (YYYY-MM) y regime.',
+    'Estimación del PAGO PROVISIONAL de ISR del periodo (persona física, Capa B, PREMIUM). regime="RESICO" (default): ingresos cobrados del mes × tasa fija por tramo (1%–2.5%), sin deducciones. regime="GENERAL": (ingresos − deducciones autorizadas) acumulado del ejercicio × tarifa art-96 acumulada − pagos provisionales previos. Responde "¿cuánto ISR debo este mes?". ⚠️ Es ESTIMACIÓN (el ingreso va sin IVA, con la tasa real de cada venta, e incluye lo exento; en GENERAL resta las pérdidas de ejercicios anteriores topadas a la utilidad y, en ambos regímenes, la retención de ISR en ventas que el contador capturó; no resta PTU; tarifa art-96 = 2024/2025 mientras el SAT no publique 2026). Lo valida el contador. Pasa venueId, opcionalmente period (YYYY-MM) y regime.',
     {
       venueId: z.string().describe('Local del contribuyente (debe estar en tu alcance)'),
       period: z
@@ -1006,7 +1006,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         retencionesIsrVentas: pesos(r.retencionesIsrCents), // capturada por el contador (set_sales_retention)
         isrAPagarEstimado: pesos(r.isrAPagarCents),
         sinVentas: r.zeroActivity,
-        nota: 'ESTIMACIÓN — resta la retención de ISR en ventas que hayas capturado del periodo; no resta pérdidas de ejercicios anteriores ni PTU. La tarifa art-96 es la 2024/2025 (vigente en 2026 salvo publicación nueva). Confírmalo con tu contador.',
+        nota: 'ESTIMACIÓN — resta la retención de ISR en ventas que hayas capturado del periodo y, en régimen GENERAL, las pérdidas de ejercicios anteriores topadas a la utilidad; no resta PTU. La tarifa art-96 es la 2024/2025 (vigente en 2026 salvo publicación nueva). Confírmalo con tu contador.',
       })
     },
   )

@@ -16,9 +16,10 @@ import { resolveScopeOrNull } from './chartOfAccounts.service'
  *  - **GENERAL** (actividad empresarial): acumulado del ejercicio (ingresos − deducciones autorizadas)
  *    × tarifa art-96 acumulada, menos los pagos provisionales previos y las retenciones.
  *
- * Es una ESTIMACIÓN preliminar. La base de ingresos ya es SIN IVA por tasa real (LISR art 113-E excluye
- * el IVA) y resta la retención de ISR en ventas que el contador capturó del periodo; no resta pérdidas de
- * ejercicios anteriores ni PTU. El número final lo valida el contador.
+ * Es una ESTIMACIÓN preliminar. La base de ingresos es SIN IVA, con el tratamiento real de cada venta, e
+ * incluye lo exento y lo no objeto (LISR art 113-E excluye el IVA). En los dos regímenes resta la retención
+ * de ISR en ventas que el contador capturó del periodo; en GENERAL, además, las pérdidas de ejercicios
+ * anteriores topadas a la utilidad. No resta PTU. El número final lo valida el contador.
  * Importes en centavos enteros. Gated PREMIUM (CFDI).
  */
 
