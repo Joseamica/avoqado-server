@@ -18,22 +18,18 @@ import { getSalesRetentionCents } from './salesRetention.service'
  *
  * Decisiones fiscales (verificadas por workflow adversario 2026-06-16, ver memoria
  * `iva-flujo-diot-fiscal-spec`):
- *  - **Fuente = Payments** (vía `getIncomeStatement`), NO los CFDIs: `Cfdi.taxBreakdown` está
- *    declarado pero NUNCA se escribe, así que el desglose por tasa no existe; solo
- *    `Cfdi.taxCents` se persiste → se usa como **línea de contraste**, no como base.
- *  - **IVA por tasa REAL** (`getIncomeStatement` desglosa por `Product.taxRate`: 16% central, 8%
- *    frontera, 0% exento, mixto). Se suman `taxableBaseCents`/`ivaCents` de cada local y el desglose
- *    `taxByRate` → `ivaTrasladadoPorTasaCents` (la declaración de IVA reporta 16% y 8% por separado).
- *    Solo las ventas de importe libre (sin items) y productos sin `taxRate` caen al 16% por defecto,
- *    así que `computedAt16Percent` ya es `false` (dejó de ser una estimación plana).
+ *  - **Fuente = Payments** (vía `getIncomeStatement`), NO los CFDIs: `Cfdi.taxBreakdown` se escribe
+ *    desde el XML timbrado pero ningún agregado lo usa; `Cfdi.taxCents` queda como **línea de contraste**.
+ *  - **IVA por el tratamiento de CADA renglón** (sellado > producto > 16 %): `baseGravableCents` =
+ *    16 % + 8 % + 0 %; exento y no objeto aparte.
  *  - **IVA acreditable pagado = DISPONIBLE** (Fase 2 / Buzón de CFDIs): `getAcreditablePagado` suma el
  *    `ivaCents` de los gastos PAGADOS, deducibles y acreditables del periodo (lado proveedores). Ya
  *    resta al IVA a cargo. El IVA que NOSOTROS retuvimos a proveedores (`ivaRetenidoTerceros`) se
  *    reporta APARTE (obligación a enterar, no resta). La **retención AL contribuyente** (lado ventas,
  *    cuando un cliente nos retiene) sigue `null` (no se captura aún) — NUNCA 0 silencioso.
  *  - El número grande es **"IVA trasladado cobrado (causado)"**, NUNCA "IVA a cargo a enterar"; el
- *    `ivaAPagarPreliminar` ya descuenta el acreditable, pero sigue siendo preliminar por el supuesto
- *    de 16% y la retención de ventas aún no capturada.
+ *    `ivaAPagarPreliminar` ya descuenta el acreditable, pero sigue siendo preliminar por la retención
+ *    de ventas que el contador aún no haya capturado.
  *
  * Gated PREMIUM (CFDI). Read-only (sin ActivityLog). Money en centavos enteros.
  */
@@ -50,8 +46,14 @@ export interface IvaCashflowResult {
   period: string
   /** Locales del contribuyente incluidos en la suma. */
   venueIds: string[]
-  // ── Lado VENTAS (computable hoy, al 16% asumido) ──
+  // ── Lado VENTAS, por el tratamiento de cada renglón ──
   baseGravableCents: number
+  /** Plan 4b · base de tasa 0 % del periodo (ya incluida en baseGravableCents). */
+  tasa0BaseCents?: number
+  /** Plan 4b · base exenta del periodo (fuera de baseGravableCents). */
+  exentoBaseCents?: number
+  /** Plan 4b · base no objeto de IVA del periodo (fuera de baseGravableCents). */
+  noObjetoBaseCents?: number
   /** IVA trasladado efectivamente cobrado en el periodo (LIVA art 1-B). */
   ivaTrasladadoCobradoCents: number
   /** IVA trasladado cobrado DESGLOSADO por tasa (clave = tasa string "0.16"/"0.08"); la declaración lo pide separado. */
@@ -148,11 +150,13 @@ export async function getIvaCashflow(venueId: string, period: string): Promise<I
   const fromStr = `${period}-01`
   const toStr = `${period}-${String(lastDay).padStart(2, '0')}`
 
-  // IVA trasladado cobrado = suma del split por tasa REAL de cada local (getIncomeStatement ya desglosa
-  // por Product.taxRate y reconcilia con las pólizas). Base y IVA se suman; el desglose por tasa se mergea.
+  // IVA trasladado cobrado = suma del split de cada local (getIncomeStatement ya desglosa por el tratamiento
+  // de cada renglón y reconcilia con las pólizas). Base y IVA se suman; el desglose por tasa se mergea.
   const incomes = await Promise.all(venues.map(v => getIncomeStatement(v.id, { from: fromStr, to: toStr })))
   const totalSalesCount = incomes.reduce((s, r) => s + r.metrics.salesCount, 0)
   const baseGravableCents = incomes.reduce((s, r) => s + r.fiscalRevenue.taxableBaseCents, 0)
+  const sumaDe = (campo: 'tasa0BaseCents' | 'exentoBaseCents' | 'noObjetoBaseCents') =>
+    incomes.reduce((s, r) => s + (r.fiscalRevenue[campo] ?? 0), 0)
   const ivaTrasladadoCobradoCents = incomes.reduce((s, r) => s + r.fiscalRevenue.ivaCents, 0)
   const ivaTrasladadoPorTasaCents: Record<string, number> = {}
   for (const r of incomes) {
@@ -188,6 +192,9 @@ export async function getIvaCashflow(venueId: string, period: string): Promise<I
     period,
     venueIds,
     baseGravableCents,
+    tasa0BaseCents: sumaDe('tasa0BaseCents'),
+    exentoBaseCents: sumaDe('exentoBaseCents'),
+    noObjetoBaseCents: sumaDe('noObjetoBaseCents'),
     ivaTrasladadoCobradoCents,
     ivaTrasladadoPorTasaCents,
     ivaAmparadoPorCfdiCents: cfdiAgg._sum.taxCents ?? 0,
@@ -198,7 +205,7 @@ export async function getIvaCashflow(venueId: string, period: string): Promise<I
     saldoAFavorAplicadoCents,
     ivaAPagarPreliminarCents: Math.max(0, neto),
     saldoAFavorDelPeriodoCents: neto < 0 ? -neto : 0,
-    computedAt16Percent: false, // IVA por tasa real; solo importe-libre/sin-taxRate cae al 16% por defecto
+    computedAt16Percent: false, // IVA por el tratamiento de cada renglón; sólo el importe libre (sin producto) cae al 16 %
 
     acreditableDisponible: true,
     diotDisponible: true,

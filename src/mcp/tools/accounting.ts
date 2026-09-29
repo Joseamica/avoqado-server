@@ -49,12 +49,26 @@ const pesos = (cents: number): number => Math.round(cents) / 100
 const porTasa = (map: Record<string, number>): Record<string, number> =>
   Object.fromEntries(Object.entries(map).map(([rate, cents]) => [`${Math.round(Number(rate) * 100)}%`, pesos(cents)]))
 
+/** Plan 4b · las bases fuera del 16/8 (en pesos): tasa 0, exenta, no objeto, y todo el ingreso sin IVA. */
+const basesAparte = (r: {
+  tasa0BaseCents?: number
+  exentoBaseCents?: number
+  noObjetoBaseCents?: number
+  ingresosSinIvaCents?: number
+  taxableBaseCents: number
+}) => ({
+  baseTasa0: pesos(r.tasa0BaseCents ?? 0),
+  baseExenta: pesos(r.exentoBaseCents ?? 0),
+  baseNoObjeto: pesos(r.noObjetoBaseCents ?? 0),
+  ingresoSinIva: pesos(r.ingresosSinIvaCents ?? r.taxableBaseCents),
+})
+
 export function registerAccountingTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
 
   server.tool(
     'accounting_income_statement',
-    'Estado de resultados (ingresos) de un local en un periodo — Capa A, gerencial (no fiscal). Devuelve: ventas brutas, devoluciones, ingreso neto cobrado, base gravable e IVA trasladado (precios IVA-incluido), propinas (informativas, NO son ingreso) y conteo de ventas. Responde "¿cuánto gané este mes/periodo?". Pasa venueId y el rango from/to en formato YYYY-MM-DD (zona horaria del local).',
+    'Estado de resultados (ingresos) de un local en un periodo — Capa A, gerencial (no fiscal). Devuelve: ventas brutas, devoluciones, ingreso neto cobrado, base gravable e IVA trasladado (precios IVA-incluido). La base gravable es la de 16 %, 8 % y 0 %; lo exento y lo no objeto de IVA se reportan aparte (baseExenta, baseNoObjeto). También: propinas (informativas, NO son ingreso) y conteo de ventas. Responde "¿cuánto gané este mes/periodo?". Pasa venueId y el rango from/to en formato YYYY-MM-DD (zona horaria del local).',
     {
       venueId: z.string().describe('Local a reportar (debe estar en tu alcance)'),
       from: z
@@ -85,7 +99,8 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           ingresoNeto: pesos(data.revenue.netRevenueCents),
           baseGravable: pesos(data.revenue.taxableBaseCents),
           ivaTrasladado: pesos(data.revenue.ivaCents),
-          ivaPorTasa: porTasa(data.revenue.taxByRate), // IVA real desglosado por tasa (16%/8%/exento)
+          ivaPorTasa: porTasa(data.revenue.taxByRate), // IVA por tasa (16 %/8 %); tasa 0, exento y no objeto no llevan IVA
+          ...basesAparte(data.revenue),
         },
         // Subconjunto que SÍ entra a los libros fiscales (respeta los toggles: efectivo/merchant excluidos).
         // `ingresos` arriba es el TOTAL gerencial; esto es lo que realmente se declara.
@@ -94,6 +109,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           baseGravable: pesos(data.fiscalRevenue.taxableBaseCents),
           ivaTrasladado: pesos(data.fiscalRevenue.ivaCents),
           ivaPorTasa: porTasa(data.fiscalRevenue.taxByRate),
+          ...basesAparte(data.fiscalRevenue),
         },
         propinas: pesos(data.tips.totalCents),
         metricas: {
@@ -135,7 +151,8 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           ingresoNeto: pesos(d.revenue.netRevenueCents),
           baseGravable: pesos(d.revenue.taxableBaseCents),
           ivaTrasladado: pesos(d.revenue.ivaCents),
-          ivaPorTasa: porTasa(d.revenue.taxByRate), // IVA real desglosado por tasa (16%/8%/exento)
+          ivaPorTasa: porTasa(d.revenue.taxByRate), // IVA por tasa (16 %/8 %); tasa 0, exento y no objeto no llevan IVA
+          ...basesAparte(d.revenue),
         },
         facturacion: {
           cfdisTimbrados: d.invoicing.stampedCount,
@@ -564,7 +581,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'accounting_iva_cashflow',
-    'IVA en flujo de efectivo de un contribuyente (Capa B, PREMIUM): el IVA del mes calculado sobre flujo (LIVA art 1-B), sumando TODOS los locales del mismo RFC. Da el IVA TRASLADADO COBRADO (ventas) MENOS el IVA ACREDITABLE PAGADO (gastos del Buzón de CFDIs) = IVA a pagar (o saldo a favor). Responde "¿cuánto IVA debo este mes?". Reporta APARTE el IVA que retuviste a proveedores (obligación a enterar). ⚠️ Sigue siendo preliminar: asume tasa 16% (locales con 0%/8%/exento sobreestimados) y NO incluye retenciones de IVA que clientes te hayan hecho en ventas. Pasa venueId y opcionalmente period (YYYY-MM; default = mes actual).',
+    'IVA en flujo de efectivo de un contribuyente (Capa B, PREMIUM): el IVA del mes calculado sobre flujo (LIVA art 1-B), sumando TODOS los locales del mismo RFC. Da el IVA TRASLADADO COBRADO (ventas) MENOS el IVA ACREDITABLE PAGADO (gastos del Buzón de CFDIs) = IVA a pagar (o saldo a favor). Responde "¿cuánto IVA debo este mes?". Reporta APARTE el IVA que retuviste a proveedores (obligación a enterar). ⚠️ Sigue siendo preliminar: NO incluye retenciones de IVA que clientes te hayan hecho en ventas. El IVA sale de la tasa de cada venta (16 %, 8 %, 0 %); lo exento y lo no objeto no llevan IVA y se reportan aparte. Pasa venueId y opcionalmente period (YYYY-MM; default = mes actual).',
     {
       venueId: z.string().describe('Local del contribuyente (debe estar en tu alcance)'),
       period: z
@@ -589,6 +606,9 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         ivaTrasladadoCobrado: pesos(r.ivaTrasladadoCobradoCents),
         ivaTrasladadoPorTasa: porTasa(r.ivaTrasladadoPorTasaCents), // desglose 16%/8% que pide la declaración
         baseGravable: pesos(r.baseGravableCents),
+        baseTasa0: pesos(r.tasa0BaseCents ?? 0),
+        baseExenta: pesos(r.exentoBaseCents ?? 0),
+        baseNoObjeto: pesos(r.noObjetoBaseCents ?? 0),
         ivaAmparadoPorCfdiContraste: pesos(r.ivaAmparadoPorCfdiCents),
         ivaAcreditablePagado: r.acreditablePagadoCents === null ? null : pesos(r.acreditablePagadoCents),
         ivaRetenidoAProveedores: r.ivaRetenidoTercerosCents === null ? null : pesos(r.ivaRetenidoTercerosCents),
@@ -599,7 +619,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         acreditableDisponible: r.acreditableDisponible,
         sinVentasRecuerdaDeclararEnCeros: r.zeroActivity,
         diotDisponible: r.diotDisponible,
-        nota: 'Ya descuenta tu IVA acreditable de gastos pagados (Buzón de CFDIs). El IVA retenido a proveedores se entera APARTE (no resta aquí). Sigue siendo flujo de efectivo (cobrado/pagado), no facturado; el IVA se calcula por la tasa real de cada producto (16%/8%/exento) y no incluye IVA que clientes te hayan retenido en ventas. No lo uses como pago final sin tu contador.',
+        nota: 'Ya descuenta tu IVA acreditable de gastos pagados (Buzón de CFDIs). El IVA retenido a proveedores se entera APARTE (no resta aquí). Sigue siendo flujo de efectivo (cobrado/pagado), no facturado; el IVA se calcula por la tasa real de cada producto (16 %, 8 % o 0 %; exento y no objeto aparte) y no incluye IVA que clientes te hayan retenido en ventas. No lo uses como pago final sin tu contador.',
       })
     },
   )
@@ -947,7 +967,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'isr_provisional',
-    'Estimación del PAGO PROVISIONAL de ISR del periodo (persona física, Capa B, PREMIUM). regime="RESICO" (default): ingresos cobrados del mes × tasa fija por tramo (1%–2.5%), sin deducciones. regime="GENERAL": (ingresos − deducciones autorizadas) acumulado del ejercicio × tarifa art-96 acumulada − pagos provisionales previos. Responde "¿cuánto ISR debo este mes?". ⚠️ Es ESTIMACIÓN (asume 16% de IVA en el ingreso, no resta pérdidas ni retenciones de ventas; tarifa art-96 = 2024/2025 mientras el SAT no publique 2026). Lo valida el contador. Pasa venueId, opcionalmente period (YYYY-MM) y regime.',
+    'Estimación del PAGO PROVISIONAL de ISR del periodo (persona física, Capa B, PREMIUM). regime="RESICO" (default): ingresos cobrados del mes × tasa fija por tramo (1%–2.5%), sin deducciones. regime="GENERAL": (ingresos − deducciones autorizadas) acumulado del ejercicio × tarifa art-96 acumulada − pagos provisionales previos. Responde "¿cuánto ISR debo este mes?". ⚠️ Es ESTIMACIÓN (el ingreso va sin IVA, con la tasa real de cada venta, e incluye lo exento, no resta pérdidas ni retenciones de ventas; tarifa art-96 = 2024/2025 mientras el SAT no publique 2026). Lo valida el contador. Pasa venueId, opcionalmente period (YYYY-MM) y regime.',
     {
       venueId: z.string().describe('Local del contribuyente (debe estar en tu alcance)'),
       period: z

@@ -197,3 +197,22 @@ it('CFDI contraste: Σ Cfdi.taxCents se reporta como ivaAmparadoPorCfdi (NO como
   // el contraste NO cambia la base derivada de Payments
   expect(r.ivaTrasladadoCobradoCents).toBe(16000)
 })
+
+it('plan 4b · suma por local las bases de tasa 0, exenta y no objeto; la base gravable sigue siendo la suma de taxableBaseCents', async () => {
+  p.venue.findMany.mockResolvedValue([
+    { id: 'v1', organizationId: 'org1', timezone: 'America/Mexico_City' },
+    { id: 'v2', organizationId: 'org1', timezone: 'America/Mexico_City' },
+  ])
+  const conBases = (base: number, tasa0: number, exento: number, noObjeto: number) => {
+    const r = income(11600)
+    const rev = { ...r.fiscalRevenue, taxableBaseCents: base, tasa0BaseCents: tasa0, exentoBaseCents: exento, noObjetoBaseCents: noObjeto }
+    return { ...r, revenue: rev, fiscalRevenue: rev }
+  }
+  mockIncome.mockResolvedValueOnce(conBases(15000, 5000, 3000, 2000)).mockResolvedValueOnce(conBases(10000, 0, 700, 0))
+  expect(await getIvaCashflow('v1', '2026-06')).toMatchObject({
+    baseGravableCents: 25000,
+    tasa0BaseCents: 5000,
+    exentoBaseCents: 3700,
+    noObjetoBaseCents: 2000,
+  })
+})

@@ -216,3 +216,18 @@ describe('getIsrProvisional — RESICO ignora deducciones de GENERAL', () => {
     expect(r.isrCausadoCents).toBe(200_00)
   })
 })
+
+describe('plan 4b · el ingreso del ISR es TODO el ingreso sin IVA (criterio 3)', () => {
+  it('exento y no objeto incluidos: usa ingresosSinIvaCents, no la base gravable', async () => {
+    const base = income(10000)
+    mIncome.mockResolvedValue({ ...base, fiscalRevenue: { ...base.fiscalRevenue, ingresosSinIvaCents: 15000 } })
+    const r = await getIsrProvisional('v1', '2026-06', 'RESICO')
+    expect(r.ingresosMesCents).toBe(15000)
+    expect(r.isrCausadoCents).toBe(150) // 1 %
+  })
+
+  it('sin el campo (Ruling 4b-R9) usa la base gravable, como hoy', async () => {
+    mIncome.mockResolvedValue(income(10000))
+    expect((await getIsrProvisional('v1', '2026-06', 'RESICO')).ingresosMesCents).toBe(10000)
+  })
+})

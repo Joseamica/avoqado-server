@@ -143,19 +143,16 @@ const monthRange = (period: string) => {
 }
 
 /**
- * Σ ingreso cobrado SIN IVA (base gravable ISR) de TODOS los locales del RFC en un rango.
- *
- * La base de ISR EXCLUYE el IVA: RESICO PF (LISR art. 113-E) grava los ingresos "sin incluir el
- * impuesto al valor agregado"; en régimen general el IVA trasladado tampoco es ingreso acumulable
- * (es un impuesto que se cobra y se entera). Por eso usamos `taxableBaseCents` (base sin IVA, por tasa
- * real) — no `netRevenueCents` (IVA-incluido). Además las deducciones se toman del `subtotalCents`
- * (sin IVA) de los gastos, así que ambos lados quedan consistentes (antes: ingresos con IVA − gastos
- * sin IVA inflaba la utilidad y el ISR).
+ * Σ ingreso cobrado SIN IVA de TODOS los locales del RFC en un rango. La base de ISR excluye el IVA (LISR 113-E; en régimen
+ * general el IVA trasladado no es ingreso acumulable) y, desde el plan 4b (criterio 3), incluye TODOS los tratamientos:
+ * gravado, tasa 0, exento y no objeto (`ingresosSinIvaCents`). Sacar lo exento de la base gravable del IVA no lo saca del
+ * ISR. Las deducciones se toman del `subtotalCents` (sin IVA) de los gastos: los dos lados quedan consistentes.
  */
 async function ingresoNetoRfc(venueIds: string[], from: string, to: string): Promise<{ netCents: number; sales: number }> {
   const incomes = await Promise.all(venueIds.map(id => getIncomeStatement(id, { from, to })))
   return {
-    netCents: incomes.reduce((s, r) => s + r.fiscalRevenue.taxableBaseCents, 0),
+    // Sin el campo (Ruling 4b-R9) la base gravable, que con todo al 16 % es la misma cifra.
+    netCents: incomes.reduce((s, r) => s + (r.fiscalRevenue.ingresosSinIvaCents ?? r.fiscalRevenue.taxableBaseCents), 0),
     sales: incomes.reduce((s, r) => s + r.metrics.salesCount, 0),
   }
 }

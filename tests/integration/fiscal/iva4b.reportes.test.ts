@@ -305,10 +305,21 @@ describe('foto de dinero: todo al 16 % y la bandera apagada dan los números de 
     for (const v of [r.revenue, r.fiscalRevenue])
       expect(v).toMatchObject({ tasa0BaseCents: 0, exentoBaseCents: 0, noObjetoBaseCents: 0, ingresosSinIvaCents: v.taxableBaseCents })
   })
+
+  it('plan 4b · con todo al 16 % las bases nuevas salen en cero en el MCP y en el IVA de flujo', async () => {
+    expect((await mcp('accounting_income_statement', JUNIO)).ingresos).toMatchObject({
+      baseTasa0: 0,
+      baseExenta: 0,
+      baseNoObjeto: 0,
+      ingresoSinIva: 486.2,
+    })
+    expect(await getIvaCashflow(x.venueId, '2026-06')).toMatchObject({ tasa0BaseCents: 0, exentoBaseCents: 0, noObjetoBaseCents: 0 })
+  })
 })
 
 describe('reportes por tratamiento: 16 %, 0 %, exento, no objeto y un renglón sellado', () => {
   let x: Negocio
+  let mcp: ReturnType<typeof herramientas>
 
   beforeAll(async () => {
     x = await nuevoNegocio({ contabilidad: false })
@@ -335,6 +346,7 @@ describe('reportes por tratamiento: 16 %, 0 %, exento, no objeto y un renglón s
     await prisma.orderItem.update({ where: { id: oy.items[0] }, data: { ivaTratamiento: 'IVA_16' } })
     await prisma.product.update({ where: { id: galleta }, data: { ivaTratamiento: 'IVA_0' } })
     await pagar(x.venueId, oy.id, '116.00')
+    mcp = herramientas(x.venueId, x.organizationId)
   })
 
   // Venta X: 16 % 10000 + 1600 · 0 % 5000 · exento 3000 · no objeto 2000. Devolución: 16 % 1000 + 160 · 0 % 500 · exento 300 ·
@@ -356,5 +368,44 @@ describe('reportes por tratamiento: 16 %, 0 %, exento, no objeto y un renglón s
       })
       expect(v.taxByRate).toEqual({ '0.16': 3040 })
     }
+  })
+
+  it('IVA de flujo: base gravable 16 + 0 y las bases aparte', async () => {
+    expect(await getIvaCashflow(x.venueId, '2026-06')).toMatchObject({
+      baseGravableCents: 23500,
+      tasa0BaseCents: 4500,
+      exentoBaseCents: 2700,
+      noObjetoBaseCents: 1800,
+      ivaTrasladadoCobradoCents: 3040,
+    })
+  })
+
+  it('Review Focus 2 · el ISR cuenta TODO el ingreso sin IVA, exento y no objeto incluidos', async () => {
+    expect(await getIsrProvisional(x.venueId, '2026-06', 'RESICO')).toMatchObject({ ingresosMesCents: 28000, isrCausadoCents: 280 })
+  })
+
+  it('las herramientas del MCP exponen las bases aparte, en pesos', async () => {
+    const e = await mcp('accounting_income_statement', JUNIO)
+    for (const bloque of [e.ingresos, e.ingresoFiscal])
+      expect(bloque).toMatchObject({
+        baseGravable: 235,
+        baseTasa0: 45,
+        baseExenta: 27,
+        baseNoObjeto: 18,
+        ingresoSinIva: 280,
+        ivaTrasladado: 30.4,
+      })
+    expect((await mcp('accounting_business_summary', JUNIO)).ingresos).toMatchObject({
+      baseGravable: 235,
+      baseExenta: 27,
+      ingresoSinIva: 280,
+    })
+    expect(await mcp('accounting_iva_cashflow', { period: '2026-06' })).toMatchObject({
+      baseGravable: 235,
+      baseTasa0: 45,
+      baseExenta: 27,
+      baseNoObjeto: 18,
+    })
+    expect(await mcp('isr_provisional', { period: '2026-06' })).toMatchObject({ ingresosDelMes: 280, isrCausado: 2.8 })
   })
 })
