@@ -1,8 +1,12 @@
 import { Decimal } from '@prisma/client/runtime/library'
+import { FEATURE_CATALOG } from '@/config/featureCatalog'
 import { BadRequestError } from '@/errors/AppError'
 import { FREE_TIER_CODES } from '@/services/access/basePlan.service'
 import { HybridOfferDefinition } from './hybridOffer.schema'
 import { previewHybridOffer } from './hybridOffer.service'
+
+// Error messages reach the customer: name capabilities as the catalog does, not by internal code.
+const featureName = (code: string) => FEATURE_CATALOG.find(entry => entry.featureCode === code)?.name ?? code
 
 export type QuotePublication = {
   id: string
@@ -54,7 +58,7 @@ export function buildHybridQuote(input: {
     }
     for (const code of featureCodes) {
       if (!(FREE_TIER_CODES as readonly string[]).includes(code) && seen.has(code))
-        throw new BadRequestError(`${code} ya está incluida; no se cobra otra vez.`)
+        throw new BadRequestError(`${featureName(code)} ya está incluida; no se cobra otra vez.`)
       seen.add(code)
     }
     return {
@@ -74,7 +78,7 @@ export function buildHybridQuote(input: {
   const missing = [...oldCodes].filter(code => !seen.has(code) && !dropped.includes(code))
   if (missing.length)
     throw new BadRequestError(
-      `El paquete se reemplaza completo. Conserva estas funciones en otra oferta o confirma que las dejas: ${missing.join(', ')}.`,
+      `El paquete se reemplaza completo. Conserva estas funciones en otra oferta o confirma que las dejas: ${missing.map(featureName).join(', ')}.`,
       'HYBRID_PARTIAL_ABSORPTION',
     )
   return {

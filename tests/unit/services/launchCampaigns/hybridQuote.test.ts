@@ -48,6 +48,11 @@ describe('immutable hybrid quote composition', () => {
       expect(() => buildHybridQuote(input(lines))).toThrow(/incluida|repetida/i)
     }
   })
+  it('names the repeated capability as the customer knows it, never by its internal code', () => {
+    const loyalty = publication('loyalty', { kind: 'FEATURES', featureCodes: ['LOYALTY_PROGRAM'] })
+    const lines = [{ publication: bundle, selectedFeatureCodes: ['CFDI', 'LOYALTY_PROGRAM'] }, { publication: loyalty }]
+    expect(() => buildHybridQuote(input(lines))).toThrow('Programa de lealtad ya está incluida; no se cobra otra vez.')
+  })
   it('does not charge for a capability retained from another paid origin', () => {
     expect(() =>
       buildHybridQuote({
