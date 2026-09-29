@@ -12,6 +12,7 @@ import { Prisma, type IvaTratamiento, type PaymentMethod, type PaymentType } fro
 import type { McpScope } from '@/mcp/scope'
 import { registerAccountingTools } from '@/mcp/tools/accounting'
 import { getBusinessSummary, getIncomeStatement } from '@/services/dashboard/accounting.dashboard.service'
+import { importMenu } from '@/services/dashboard/menu.dashboard.service'
 import { getIsrProvisional } from '@/services/fiscal/isr.service'
 import { getIvaCashflow } from '@/services/fiscal/ivaFlujo.service'
 import prisma from '@/utils/prismaClient'
@@ -407,5 +408,46 @@ describe('reportes por tratamiento: 16 %, 0 %, exento, no objeto y un renglón s
       baseNoObjeto: 18,
     })
     expect(await mcp('isr_provisional', { period: '2026-06' })).toMatchObject({ ingresosDelMes: 280, isrCausado: 2.8 })
+  })
+})
+
+// Plan 5 (P5-R18 a): «Reemplazar menú» que ARCHIVA productos vendidos no mueve ninguna cifra de dinero (bandera apagada, todo al 16 %).
+describe('plan 5 · «Reemplazar menú» que archiva productos vendidos deja la foto de dinero idéntica', () => {
+  it('estado de resultados, resumen, IVA de flujo, ISR y las herramientas del MCP: iguales antes y después', async () => {
+    const x = await nuevoNegocio({ contabilidad: false })
+    const slug = `foto5-${x.rfc}`.toLowerCase()
+    const categoryId = (await prisma.menuCategory.create({ data: { venueId: x.venueId, name: 'Foto 5', slug } })).id
+    const cafe = (await prisma.product.create({ data: { venueId: x.venueId, categoryId, sku: `C5-${x.rfc}`, name: 'Café', price: 116 } }))
+      .id
+    const pan = (await prisma.product.create({ data: { venueId: x.venueId, categoryId, sku: `PAN5-${x.rfc}`, name: 'Pan', price: 58 } })).id
+    const o = await orden(x.venueId, [
+      [cafe, '116.00'],
+      [pan, '58.00'],
+    ])
+    await pagar(x.venueId, o.id, '174.00', { propina: '10.00', comision: '3.00' })
+    const mcp = herramientas(x.venueId, x.organizationId)
+    const foto = async () => ({
+      resultados: await getIncomeStatement(x.venueId, JUNIO),
+      resumen: await getBusinessSummary(x.venueId, JUNIO),
+      flujo: await getIvaCashflow(x.venueId, '2026-06'),
+      resico: await getIsrProvisional(x.venueId, '2026-06', 'RESICO'),
+      general: await getIsrProvisional(x.venueId, '2026-06', 'GENERAL'),
+      mcpResultados: await mcp('accounting_income_statement', JUNIO),
+      mcpResumen: await mcp('accounting_business_summary', JUNIO),
+      mcpFlujo: await mcp('accounting_iva_cashflow', { period: '2026-06' }),
+      mcpIsr: await mcp('isr_provisional', { period: '2026-06' }),
+    })
+    const antes = await foto()
+    expect(antes.resultados.revenue.grossSalesCents).toBeGreaterThan(0) // la foto sólo vale con ventas dentro
+
+    const r = await importMenu(
+      x.venueId,
+      { mode: 'replace', categories: [{ name: 'Foto 5', slug, products: [{ name: 'Café', sku: `C5-${x.rfc}`, price: 116 }] }] },
+      { type: 'SERVICE', servicePrincipalId: 'PLAN5_PRUEBA' },
+    )
+
+    expect(await foto()).toEqual(antes) // primero las cifras: la línea base de antes del cambio ya las compara
+    expect(r.stats).toMatchObject({ productsArchived: 1 })
+    expect((await prisma.product.findUniqueOrThrow({ where: { id: pan } })).deletedAt).not.toBeNull()
   })
 })

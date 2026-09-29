@@ -20,6 +20,7 @@ import { deleteFileFromStorage } from '../storage.service'
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
 import { logAction } from './activity-log.service'
+import { archivarProductos } from './product.dashboard.service'
 import type { CatalogActor } from '../../types/master-catalog'
 import {
   assertLegacyCatalogGovernanceComputedForVenue,
@@ -1246,6 +1247,7 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
   let productsUpdated = 0
   let modifierGroupsCreated = 0
   let modifiersCreated = 0
+  let productsArchived = 0
 
   await prisma.$transaction(
     async tx => {
@@ -1286,44 +1288,40 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
         throw error
       }
       // WHY: Fence, current-SKU inspection and bounded diagnostics all finish
-      // before replace deletes or any menu write, so stale preflight cannot
-      // reject a row created while waiting or leave a partially destroyed menu.
-      // REPLACE MODE: Delete all existing menu data (Toast/Square pattern)
-      // With SET NULL FK constraints, order history preserves denormalized product/modifier names
+      // before replace archives or any menu write, so stale preflight cannot
+      // reject a row created while waiting or leave a partially replaced menu.
+      // REPLACE MODE (plan 5, D2): the old menu goes, but NO product is ever hard-deleted — the ones the file does not bring are
+      // ARCHIVED (their sales, IVA, recipe, inventory, kardex and live payment links stay); the ones it brings are updated
+      // below, and an archived SKU comes back (D3). Assignments and menus are deleted as before; modifiers too, except the ones
+      // something alive still uses (P5-R15).
       if (data.mode === 'replace') {
-        // Delete in correct order due to foreign keys
         // 1. Remove product-modifier links first
         await tx.productModifierGroup.deleteMany({ where: { product: { venueId } } })
 
-        // 2. Delete ALL modifiers - SET NULL FK will preserve order history
-        // OrderItemModifier.modifierId becomes NULL, but denormalized 'name' field remains
-        await tx.modifier.deleteMany({
-          where: { group: { venueId } },
-        })
+        // 2-3. Modifiers and groups (plan 5, P5-R15): a group a live payment link (one of its extras) or a variable recipe still
+        //      uses is KEPT, turned OFF with all its extras — deleting it would cascade the link's paid extra away (the link would
+        //      charge less) and unlink the recipe. The rest are deleted as before (OrderItemModifier keeps its denormalized name).
+        const extrasEnUso: Prisma.ModifierGroupWhereInput = {
+          OR: [{ linkedRecipeLines: { some: {} } }, { modifiers: { some: { paymentLinkItems: { some: {} } } } }],
+        }
+        await tx.modifier.deleteMany({ where: { group: { venueId, NOT: extrasEnUso } } })
+        await tx.modifierGroup.deleteMany({ where: { venueId, NOT: extrasEnUso } })
+        await tx.modifier.updateMany({ where: { group: { venueId } }, data: { active: false } })
+        await tx.modifierGroup.updateMany({ where: { venueId }, data: { active: false } })
 
-        // 3. Delete ALL modifier groups
-        await tx.modifierGroup.deleteMany({
-          where: { venueId },
-        })
+        // 4. Archive (never delete) the products the file does not bring
+        productsArchived = await archivarProductos(
+          tx,
+          { venueId, sku: { notIn: incomingProducts.map(entry => entry.product.sku) } },
+          actor.type === 'HUMAN' ? actor.staffId : null,
+        )
 
-        // 4. Delete ALL products - SET NULL FK will preserve order history
-        // OrderItem.productId becomes NULL, but denormalized productName/productSku/categoryName remain
-        await tx.product.deleteMany({
-          where: { venueId },
-        })
-
-        // 5. Delete menu structure
+        // 5. Menu structure. Categories (D4): the ones with no product at all are deleted; the rest keep archived products
+        //    (`Product.categoryId` is RESTRICT) and are turned OFF — the loop below turns back ON the ones the file brings.
         await tx.menuCategoryAssignment.deleteMany({ where: { menu: { venueId } } })
-
-        // Delete ALL categories
-        await tx.menuCategory.deleteMany({
-          where: { venueId },
-        })
-
-        // Delete ALL menus
-        await tx.menu.deleteMany({
-          where: { venueId },
-        })
+        await tx.menuCategory.deleteMany({ where: { venueId, products: { none: {} } } })
+        await tx.menuCategory.updateMany({ where: { venueId }, data: { active: false } })
+        await tx.menu.deleteMany({ where: { venueId } })
       }
 
       // Get or create default menu for imported items
@@ -1345,10 +1343,10 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
 
       // Process categories and products
       for (const [catIndex, categoryData] of data.categories.entries()) {
-        // Check if category exists by name
-        let category = await tx.menuCategory.findFirst({
-          where: { venueId, name: categoryData.name },
-        })
+        // Plan 5 (D4): by name and, when none, by slug — creating another one with the same slug would hit @@unique([venueId, slug]).
+        let category =
+          (await tx.menuCategory.findFirst({ where: { venueId, name: categoryData.name } })) ??
+          (await tx.menuCategory.findFirst({ where: { venueId, slug: categoryData.slug } }))
 
         if (!category) {
           // Create new category
@@ -1369,6 +1367,15 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
               categoryId: category.id,
               displayOrder: catIndex,
             },
+          })
+        } else if (data.mode === 'replace' || !category.active) {
+          // The category the file brings is sold again: replace turned OFF the ones keeping archived products and deleted every
+          // menu, and one turned off by hand may not be in the main menu. `upsert`: the file may repeat a category.
+          if (!category.active) await tx.menuCategory.update({ where: { id: category.id }, data: { active: true } })
+          await tx.menuCategoryAssignment.upsert({
+            where: { menuId_categoryId: { menuId: defaultMenu.id, categoryId: category.id } },
+            create: { menuId: defaultMenu.id, categoryId: category.id, displayOrder: catIndex },
+            update: {},
           })
         }
 
@@ -1503,6 +1510,22 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
                   },
                 })
                 modifierGroupsCreated++
+              } else if (data.mode === 'replace') {
+                // Plan 5 (P5-R15): in replace the file is the truth. A reused group (replace kept it because a live link or a
+                // recipe uses it) keeps its id and references, and takes the file's selection rules and comes back ON.
+                await tx.modifierGroup.update({
+                  where: { id: modifierGroup.id },
+                  data: {
+                    active: true,
+                    required: groupData.required,
+                    allowMultiple: groupData.allowMultiple,
+                    minSelections: groupData.minSelections,
+                    maxSelections: groupData.maxSelections,
+                  },
+                })
+              } else if (!modifierGroup.active) {
+                // Merge keeps today's behaviour (an existing group is not overwritten); it only turns back ON one that was off.
+                await tx.modifierGroup.update({ where: { id: modifierGroup.id }, data: { active: true } })
               }
 
               // Assign modifier group to product
@@ -1531,6 +1554,13 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
                     },
                   })
                   modifiersCreated++
+                } else if (data.mode === 'replace') {
+                  // Plan 5 (P5-R15): replace applies the file's price to the reused extra (same id: live links and past sales keep
+                  // pointing at it). Without it every POS keeps charging the old price (the server prices from Modifier.price).
+                  await tx.modifier.update({ where: { id: existingModifier.id }, data: { active: true, price: modifierData.price } })
+                } else if (!existingModifier.active) {
+                  // Merge keeps today's behaviour (an existing extra is not overwritten); it only turns back ON one that was off.
+                  await tx.modifier.update({ where: { id: existingModifier.id }, data: { active: true } })
                 }
               }
             }
@@ -1549,7 +1579,7 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
     venueId,
     action: 'MENU_IMPORTED',
     entity: 'Menu',
-    data: { mode: data.mode, categories: categoriesCreated, products: productsCreated + productsUpdated },
+    data: { mode: data.mode, categories: categoriesCreated, products: productsCreated + productsUpdated, productsArchived },
   })
 
   return {
@@ -1560,6 +1590,8 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
       products: productsCreated + productsUpdated,
       modifierGroups: modifierGroupsCreated,
       modifiers: modifiersCreated,
+      // Plan 5: nuevos y aditivos (los clientes de hoy los ignoran)
+      productsArchived,
     },
   }
 }
