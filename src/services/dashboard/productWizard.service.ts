@@ -4,6 +4,7 @@ import { Prisma, Unit } from '@prisma/client'
 import AppError from '../../errors/AppError'
 import { createRecipe } from './recipe.service'
 import { setProductInventoryMethod, InventoryMethod } from './productInventoryIntegration.service'
+import { ensureQuantityInventoryRow } from './quantityInventoryRow'
 import logger from '@/config/logger'
 import { logAction } from './activity-log.service'
 import type { CatalogActor } from '../../types/master-catalog'
@@ -267,6 +268,12 @@ export async function setupSimpleStockStep3(venueId: string, productId: string, 
   const nuevoSaldo = new Decimal(data.initialStock)
   const saldoPrevio = existingInventory ? new Decimal(existingInventory.currentStock) : new Decimal(0)
   const delta = nuevoSaldo.minus(saldoPrevio)
+  // El paso 2 ya deja la fila en 0 y sin kardex (`ensureQuantityInventoryRow`): ése sigue siendo
+  // el primer saldo, no un ajuste.
+  const esSaldoInicial =
+    saldoPrevio.isZero() &&
+    (!existingInventory ||
+      !(await prisma.inventoryMovement.findFirst({ where: { inventoryId: existingInventory.id }, select: { id: true } })))
 
   const inventory = existingInventory
     ? await prisma.inventory.update({
@@ -296,7 +303,7 @@ export async function setupSimpleStockStep3(venueId: string, productId: string, 
         quantity: delta,
         previousStock: saldoPrevio,
         newStock: nuevoSaldo,
-        reason: existingInventory ? 'Ajuste de existencias (asistente de producto)' : 'Saldo inicial (asistente de producto)',
+        reason: esSaldoInicial ? 'Saldo inicial (asistente de producto)' : 'Ajuste de existencias (asistente de producto)',
       },
     })
   }
@@ -593,12 +600,13 @@ export async function switchInventoryMethod(venueId: string, productId: string, 
     }
 
     // ✅ WORLD-CLASS: Update product's inventoryMethod column
-    await tx.product.update({
+    const updated = await tx.product.update({
       where: { id: productId },
       data: {
         inventoryMethod: newMethod,
       },
     })
+    await ensureQuantityInventoryRow(tx, updated)
 
     return {
       success: true,

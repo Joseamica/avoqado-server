@@ -5,6 +5,7 @@ import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { deductStockForModifiers, deductStockForRecipe, OrderModifierForInventory } from './rawMaterial.service'
 import { logAction } from './activity-log.service'
+import { ensureQuantityInventoryRow } from './quantityInventoryRow'
 
 /**
  * Product Inventory Integration Service
@@ -602,12 +603,16 @@ export async function setProductInventoryMethod(productId: string, inventoryMeth
   }
 
   // ✅ Write to dedicated column (world-class pattern)
-  await prisma.product.update({
-    where: { id: productId },
-    data: {
-      trackInventory: true, // Enable tracking
-      inventoryMethod, // Set method (QUANTITY | RECIPE)
-    },
+  await prisma.$transaction(async tx => {
+    const updated = await tx.product.update({
+      where: { id: productId },
+      data: {
+        trackInventory: true, // Enable tracking
+        inventoryMethod, // Set method (QUANTITY | RECIPE)
+      },
+    })
+    // Si el asistente se abandona tras este paso, el producto ya es «por cantidad»: necesita su fila.
+    await ensureQuantityInventoryRow(tx, updated)
   })
 
   logAction({

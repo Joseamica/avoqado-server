@@ -12,6 +12,7 @@ import { computeInventoryAvailability } from '../../services/dashboard/product.d
 import { Unit } from '@prisma/client'
 import logger from '../../config/logger'
 import { toLegacyProductPayload } from '../../utils/legacyProductPayload'
+import { ensureQuantityInventoryRow } from '../../services/dashboard/quantityInventoryRow'
 import {
   assertLegacyCatalogGovernanceForVenue,
   assertLegacyProductReferencesForVenue,
@@ -283,7 +284,13 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
         venueId,
         categoryId: typeof data.categoryId === 'string' ? data.categoryId : undefined,
       })
-      return tx.product.update({ where: { id: productId }, data, include: productInclude })
+      const updated = await tx.product.update({ where: { id: productId }, data, include: productInclude })
+      // Artículos de Android e iOS activan «por cantidad» por aquí, no por el servicio del dashboard.
+      // Si la fila nació ahora, la respuesta la lleva (el `include` se leyó antes de crearla).
+      if (await ensureQuantityInventoryRow(tx, updated)) {
+        updated.inventory = await tx.inventory.findUnique({ where: { productId } })
+      }
+      return updated
     })
 
     return res.json({ success: true, data: withAvailableQuantity(product) })

@@ -1427,6 +1427,9 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
             const existingInventory = await tx.inventory.findFirst({
               where: { productId: product.id },
             })
+            const saldoInicial = productData.currentStock || 0
+            // Fila que recibe el saldo de apertura (y su movimiento), si alguna.
+            let aperturaEn: string | null = null
 
             if (existingInventory) {
               // 🔴 El re-import NUNCA toca `currentStock` de un inventario existente
@@ -1441,35 +1444,46 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
                   minimumStock: productData.minStock || 0,
                 },
               })
+              // Salvo la APERTURA PENDIENTE: la fila en 0 y sin kardex que deja
+              // `ensureQuantityInventoryRow` al activar «por cantidad» antes de importar.
+              // Ahí el saldo del archivo ES el inicial. La condición va en el propio UPDATE:
+              // una venta que llegue entre la lectura y aquí ya dejó historia y no se pisa.
+              if (saldoInicial !== 0) {
+                const { count } = await tx.inventory.updateMany({
+                  where: { id: existingInventory.id, currentStock: 0, movements: { none: {} } },
+                  data: { currentStock: saldoInicial },
+                })
+                if (count > 0) aperturaEn = existingInventory.id
+              }
             } else {
               // Create new inventory entry
               const nuevoInventario = await tx.inventory.create({
                 data: {
                   productId: product.id,
                   venueId,
-                  currentStock: productData.currentStock || 0,
+                  currentStock: saldoInicial,
                   minimumStock: productData.minStock || 0,
                 },
               })
+              if (saldoInicial !== 0) aperturaEn = nuevoInventario.id
+            }
 
-              // 🔴 El saldo de apertura deja movimiento (audit Codex xhigh
-              // 2026-08-14): un inventario que nace con saldo pero sin kardex
-              // hace imposible la reconciliación `saldo == apertura + Σ deltas`
-              // desde el día uno. Sin saldo inicial no se inventa un movimiento
-              // de cero — sería ruido.
-              const saldoInicial = productData.currentStock || 0
-              if (saldoInicial !== 0) {
-                await tx.inventoryMovement.create({
-                  data: {
-                    inventoryId: nuevoInventario.id,
-                    type: 'ADJUSTMENT',
-                    quantity: saldoInicial,
-                    previousStock: 0,
-                    newStock: saldoInicial,
-                    reason: 'Saldo inicial (importación de menú)',
-                  },
-                })
-              }
+            // 🔴 El saldo de apertura deja movimiento (audit Codex xhigh
+            // 2026-08-14): un inventario que nace con saldo pero sin kardex
+            // hace imposible la reconciliación `saldo == apertura + Σ deltas`
+            // desde el día uno. Sin saldo inicial no se inventa un movimiento
+            // de cero — sería ruido.
+            if (aperturaEn) {
+              await tx.inventoryMovement.create({
+                data: {
+                  inventoryId: aperturaEn,
+                  type: 'ADJUSTMENT',
+                  quantity: saldoInicial,
+                  previousStock: 0,
+                  newStock: saldoInicial,
+                  reason: 'Saldo inicial (importación de menú)',
+                },
+              })
             }
           }
 
