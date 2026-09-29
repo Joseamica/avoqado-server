@@ -93,13 +93,17 @@ export type VentaDeComanda = PedidoVivo & {
   retiros: Map<string, Accion>
   /** Renglón de la venta por `OrderItem.id`. */
   renglones: Map<string, { externalLineId: string | null; removedAt: Date | null }>
+  /** La mesa de la cuenta HOY (si el mesero la movió, la cocina ve la nueva). `null` = sin mesa. */
+  tableNumber: string | null
+  /** El tiempo («Aperitivos») de cada renglón, por `OrderItem.id`. Sólo los que tienen. */
+  cursos: Map<string, string>
 }
 
 type ComandaCruda = { orderId: string | null; items?: Array<{ orderItemId?: string | null }> }
 
 /**
  * Las ventas de un lote de comandas con todo lo que el predicado necesita. Consultas FIJAS (hasta
- * cuatro) sea cual sea el número de comandas, cada una acotada por los ids del lote.
+ * cinco) sea cual sea el número de comandas, cada una acotada por los ids del lote.
  */
 export async function ventasDeComandas(db: Prisma.TransactionClient, venueId: string, comandas: ComandaCruda[]) {
   const orderIds = [...new Set(comandas.map(k => k.orderId).filter((id): id is string => Boolean(id)))]
@@ -116,10 +120,21 @@ export async function ventasDeComandas(db: Prisma.TransactionClient, venueId: st
           readyReportedAt: true,
           deliveryOpInFlight: true,
           deliveryOpInFlightAt: true,
+          table: { select: { number: true } },
         },
         take: orderIds.length,
       })
     : []
+  // El tiempo de cada platillo (3.6): la comanda liga cada renglón con el suyo por `orderItemId`.
+  const conVenta = new Set(ventas.map(v => v.id))
+  const cursoIds = [
+    ...new Set(
+      comandas
+        .filter(k => k.orderId && conVenta.has(k.orderId))
+        .flatMap(k => (k.items ?? []).map(i => i.orderItemId))
+        .filter((id): id is string => Boolean(id)),
+    ),
+  ]
   const reparto = ventas.filter(v => v.type === OrderType.DELIVERY)
   const ids = reparto.map(v => v.id)
   const esDeReparto = new Set(ids)
@@ -132,7 +147,7 @@ export async function ventasDeComandas(db: Prisma.TransactionClient, venueId: st
         .filter((id): id is string => Boolean(id)),
     ),
   ]
-  const [links, acciones, renglones] = await Promise.all([
+  const [links, acciones, renglones, cursos] = await Promise.all([
     linkIds.length
       ? db.deliveryChannelLink.findMany({
           where: { id: { in: linkIds }, venueId },
@@ -154,13 +169,21 @@ export async function ventasDeComandas(db: Prisma.TransactionClient, venueId: st
           take: renglonIds.length,
         })
       : [],
+    cursoIds.length
+      ? db.orderItem.findMany({
+          where: { id: { in: cursoIds }, orderId: { in: [...conVenta] }, course: { not: null } },
+          select: { id: true, orderId: true, course: true },
+          take: cursoIds.length,
+        })
+      : [],
   ])
   const linkPorId = new Map(links.map(l => [l.id, l]))
   const accionesDe = agrupar(acciones)
   const renglonesDe = agrupar(renglones)
+  const cursosDe = agrupar(cursos)
 
   const porId = new Map<string, VentaDeComanda>()
-  for (const v of ventas) {
+  for (const { table, ...v } of ventas) {
     const origen = v.type === OrderType.DELIVERY ? proveedorDelPedido(v.externalId) : null
     const link = v.deliveryChannelLinkId ? linkPorId.get(v.deliveryChannelLinkId) : undefined
     const propias = accionesDe.get(v.id) ?? []
@@ -175,9 +198,27 @@ export async function ventasDeComandas(db: Prisma.TransactionClient, venueId: st
       accionEnCurso: propias.some(a => EN_CURSO.has(a.status)),
       retiros: new Map(propias.filter(a => a.action === 'REMOVE_ITEM').map(a => [a.lineId, a])),
       renglones: new Map((renglonesDe.get(v.id) ?? []).map(r => [r.id, r])),
+      tableNumber: table?.number ?? null,
+      cursos: new Map((cursosDe.get(v.id) ?? []).map(r => [r.id, r.course!])),
     })
   }
   return porId
+}
+
+/**
+ * La mesa y el tiempo de cada platillo (3.6): una comanda de mesa decía «En tienda» sin decir cuál. Van en TODA comanda
+ * con venta, `null` cuando no hay; las apps viejas ignoran los campos nuevos.
+ */
+export function anexarMesaYTiempos<B extends { items: Array<{ id: string }> }>(base: B, k: ComandaConRenglones, v: VentaDeComanda) {
+  const renglonDe = new Map((k.items ?? []).map(item => [item.id, item.orderItemId ?? null]))
+  return {
+    ...base,
+    tableNumber: v.tableNumber,
+    items: base.items.map(item => {
+      const renglon = renglonDe.get(item.id)
+      return { ...item, course: (renglon && v.cursos.get(renglon)) ?? null }
+    }),
+  }
 }
 
 function agrupar<T extends { orderId: string }>(filas: T[]): Map<string, T[]> {

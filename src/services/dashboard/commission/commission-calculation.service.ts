@@ -304,7 +304,8 @@ export async function createCommissionForPayment(
         },
         generalConfig,
       )
-      amounts = r
+      // La fila guarda la propina que ENTRÓ a la base (el reverso de un reembolso lo lee así).
+      amounts = { ...r, tipAmount: generalConfig.includeTips ? r.tipAmount : 0 }
     } else if (payment.orderId) {
       const orderLeftover = await calculateLeftoverAmount(
         payment.orderId,
@@ -379,7 +380,16 @@ export async function createRefundCommission(
       originalCalcs.push(data)
   }
 
-  const refundAmount = Math.abs(decimalToNumber(refundPayment.amount)) + Math.abs(decimalToNumber(refundPayment.tipAmount ?? 0))
+  // 🔴 MONEY: la parte devuelta se mide contra el COBRO original, venta y propina por separado — no
+  // contra la base de cada fila. Dividir (venta + propina) entre la base revertía el 110% de una base
+  // sin propina, y el 100% de CADA fila de una comisión dividida por una devolución de la mitad.
+  // El servidor ya topa lo reembolsado a lo cobrado, así que la suma de reversos no pasa del 100%.
+  const fraccion = (devuelto: Prisma.Decimal | null, cobrado: Prisma.Decimal | null) => {
+    const total = Math.abs(decimalToNumber(cobrado))
+    return total > 0 ? Math.min(1, Math.abs(decimalToNumber(devuelto)) / total) : 0
+  }
+  const saleRatio = fraccion(refundPayment.amount, originalPayment.amount)
+  const tipRatio = fraccion(refundPayment.tipAmount, originalPayment.tipAmount)
   const results: CommissionCalculationResult[] = []
 
   for (const originalCalc of originalCalcs) {
@@ -395,7 +405,12 @@ export async function createRefundCommission(
     if (existing) continue
 
     const originalBaseAmount = decimalToNumber(originalCalc.baseAmount)
-    const refundRatio = originalBaseAmount > 0 ? refundAmount / originalBaseAmount : 1
+    // `tipAmount` de la fila = la propina que ENTRÓ a su base (0 si la config la excluye), así que la
+    // propina devuelta sólo pesa en la comisión que la incluyó.
+    const tipInBase = Math.min(Math.max(decimalToNumber(originalCalc.tipAmount), 0), Math.max(originalBaseAmount, 0))
+    const refundRatio =
+      originalBaseAmount > 0 ? ((originalBaseAmount - tipInBase) * saleRatio + tipInBase * tipRatio) / originalBaseAmount : saleRatio
+    if (refundRatio <= 0) continue
 
     const data: Prisma.CommissionCalculationUncheckedCreateInput = {
       venueId: originalCalc.venueId,
@@ -404,8 +419,10 @@ export async function createRefundCommission(
       orderId: originalCalc.orderId,
       shiftId: originalCalc.shiftId,
       configId: originalCalc.configId,
-      baseAmount: -refundAmount,
-      tipAmount: -decimalToNumber(originalCalc.tipAmount) * refundRatio,
+      // La parte de SU base que se devolvió (no el reembolso completo): `alreadyCommissionedItemBase`
+      // suma `baseAmount − tipAmount` de estas filas.
+      baseAmount: -originalBaseAmount * refundRatio,
+      tipAmount: -tipInBase * tipRatio,
       discountAmount: -decimalToNumber(originalCalc.discountAmount) * refundRatio,
       taxAmount: -decimalToNumber(originalCalc.taxAmount) * refundRatio,
       effectiveRate: originalCalc.effectiveRate,
@@ -422,7 +439,7 @@ export async function createRefundCommission(
       calculationId: calculation.id,
       paymentId: refundPaymentId,
       staffId: originalCalc.staffId,
-      baseAmount: -refundAmount,
+      baseAmount: Number(data.baseAmount),
       effectiveRate: decimalToNumber(originalCalc.effectiveRate),
       grossCommission: Number(calculation.grossCommission),
       netCommission: Number(calculation.netCommission),
@@ -1170,7 +1187,8 @@ export async function createSplitCommissionForPayment(paymentId: string, staffId
       config,
     )
     totalBaseAmount = result.baseAmount
-    totalTipAmount = result.tipAmount
+    // La fila guarda la propina que ENTRÓ a la base (el reverso de un reembolso lo lee así).
+    totalTipAmount = config.includeTips ? result.tipAmount : 0
     totalDiscountAmount = result.discountAmount
     totalTaxAmount = result.taxAmount
   }

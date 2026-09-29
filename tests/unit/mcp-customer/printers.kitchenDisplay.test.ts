@@ -154,6 +154,25 @@ describe('list_kitchen_tickets (etapa 3)', () => {
     )
   })
 
+  it('3.6: la comanda de una mesa dice la mesa y sus tiempos, en orden y sin repetir; sin mesa va en null', async () => {
+    mockListKds.mockResolvedValue([
+      {
+        id: 'k1',
+        orderNumber: 'A1',
+        status: 'NEW',
+        orderType: 'DINE_IN',
+        tableNumber: '8',
+        items: [{ course: 'Aperitivos' }, { course: null }, { course: 'Principales' }, { course: 'Aperitivos' }],
+        createdAt: '2026-09-27T12:00:00.000Z',
+      },
+      { id: 'k2', orderNumber: 'A2', status: 'NEW', orderType: 'DINE_IN', items: [{}], createdAt: '2026-09-27T12:01:00.000Z' },
+    ])
+    mockCountKds.mockResolvedValue(2)
+    const r = parse(await cliente('list_kitchen_tickets', { venueId: 'v1' }))
+    expect(r.comandas[0]).toEqual(expect.objectContaining({ mesa: '8', tiempos: ['Aperitivos', 'Principales'] }))
+    expect(r.comandas[1]).toEqual(expect.objectContaining({ mesa: null, tiempos: [] }))
+  })
+
   it('un venue fuera de alcance se rechaza', async () => {
     await expect(cliente('list_kitchen_tickets', { venueId: 'ajeno' })).rejects.toThrow('ScopeError')
   })

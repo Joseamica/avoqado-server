@@ -426,3 +426,48 @@ describe('split commission: order-level base with per-payment trigger', () => {
     expect(results[0].netCommission).toBe(15) // 3% de $500 completo, sin dividir
   })
 })
+
+/**
+ * 🔴 MONEY — la fila guarda como `tipAmount` la propina que ENTRÓ a su base (0 si la config la
+ * excluye), igual que las rutas por categoría y por sobrante. El reverso de un reembolso y
+ * `alreadyCommissionedItemBase` leen eso para separar venta de propina; las rutas de cobro
+ * completo y de comisión dividida guardaban la propina del cobro aunque NO entrara a la base.
+ */
+describe('la propina guardada es la que ENTRÓ a la base', () => {
+  const conPropina = (monto: number, propina: number) => ({ ...payment(monto), tipAmount: new Decimal(propina) })
+  const guardado = () => prismaMock.commissionCalculation.create.mock.calls.map((c: any) => c[0].data)
+
+  it('MONEY: cobro completo con config SIN propinas guarda tipAmount 0', async () => {
+    prismaMock.payment.findUnique.mockResolvedValue(conPropina(145, 14.5))
+    prismaMock.commissionConfig.findMany.mockResolvedValue([GENERAL])
+
+    await createCommissionForPayment('pay-1')
+
+    const [fila] = guardado()
+    expect(Number(fila.baseAmount)).toBe(145)
+    expect(Number(fila.tipAmount)).toBe(0)
+  })
+
+  it('cobro completo con config QUE incluye propinas la guarda dentro de la base', async () => {
+    prismaMock.payment.findUnique.mockResolvedValue(conPropina(145, 14.5))
+    prismaMock.commissionConfig.findMany.mockResolvedValue([{ ...GENERAL, includeTips: true }])
+
+    await createCommissionForPayment('pay-1')
+
+    const [fila] = guardado()
+    expect(Number(fila.baseAmount)).toBe(159.5)
+    expect(Number(fila.tipAmount)).toBe(14.5)
+  })
+
+  it('MONEY: comisión dividida con config SIN propinas guarda tipAmount 0 en cada fila', async () => {
+    prismaMock.payment.findUnique.mockResolvedValue(conPropina(100, 10))
+    prismaMock.commissionConfig.findFirst.mockResolvedValue(GENERAL)
+
+    await createSplitCommissionForPayment('pay-1', ['staff-1', 'staff-2'])
+
+    const filas = guardado()
+    expect(filas).toHaveLength(2)
+    expect(filas.map((f: any) => Number(f.baseAmount))).toEqual([50, 50])
+    expect(filas.map((f: any) => Number(f.tipAmount))).toEqual([0, 0])
+  })
+})

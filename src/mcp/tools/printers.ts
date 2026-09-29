@@ -194,7 +194,9 @@ export function registerPrinterTools(server: McpServer, scope: McpScope): void {
           folio: c.orderNumber,
           status: c.status,
           tipo: c.orderType,
+          mesa: c.tableNumber ?? null,
           renglones: c.items.length,
+          tiempos: [...new Set(c.items.map(i => i.course).filter((t): t is string => Boolean(t)))],
           creada: c.createdAt,
         })),
       })

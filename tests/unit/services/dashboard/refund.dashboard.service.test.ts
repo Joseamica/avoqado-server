@@ -1216,4 +1216,155 @@ describe('refund.dashboard.service', () => {
       expect(logAction).not.toHaveBeenCalled()
     })
   })
+
+  describe('🔴 reembolso por artículos: el cajero elige devolver la propina (Testarudo, 28-sep-2026)', () => {
+    const cobro = (over: Record<string, unknown> = {}) => ({
+      id: 'payment-original',
+      venueId: 'venue-1',
+      status: TransactionStatus.COMPLETED,
+      type: PaymentType.REGULAR,
+      method: 'CASH',
+      source: 'APP',
+      amount: 145,
+      tipAmount: 14.5,
+      orderId: 'order-1',
+      shiftId: null,
+      merchantAccountId: null,
+      processorData: {},
+      fundsFlow: null,
+      tenderTypeId: null,
+      tenderCountsAsCash: null,
+      ...over,
+    })
+    const lineas = [
+      { id: 'oi-1', productId: 'p-1', productName: 'FLAT WHITE', quantity: 1, total: new Decimal(80), orderPromotionId: null },
+      { id: 'oi-2', productId: 'p-2', productName: 'ROLL DE ALMENDRA', quantity: 1, total: new Decimal(65), orderPromotionId: null },
+    ]
+    const conLineas = (seleccionadas: string[]) => {
+      prismaMock.orderItem.findMany
+        .mockResolvedValueOnce(lineas.filter(l => seleccionadas.includes(l.id)))
+        .mockResolvedValueOnce(lineas.map(l => ({ id: l.id, orderPromotionId: null, total: l.total })))
+    }
+    const reembolsar = (ids: string[], over: Record<string, unknown> = {}) =>
+      issueRefund({
+        venueId: 'venue-1',
+        paymentId: 'payment-original',
+        items: ids.map(orderItemId => ({ orderItemId, quantity: 1 })),
+        reason: 'ACCIDENTAL_CHARGE' as any,
+        staffId: 'staff-9',
+        ...over,
+      })
+    const filaReembolso = () => prismaMock.payment.create.mock.calls[0][0].data
+    const propinaPreviaDe = (pesos: number) => ({
+      id: 'refund-tip-previo',
+      amount: 0,
+      tipAmount: -pesos,
+      processorData: {},
+      createdAt: new Date('2026-09-28T10:00:00.000Z'),
+      status: TransactionStatus.COMPLETED,
+    })
+
+    beforeEach(() => {
+      // `clearAllMocks` NO vacía las colas de `mockResolvedValueOnce` (ver el describe de turno ~:757).
+      prismaMock.$queryRaw.mockReset()
+      prismaMock.orderItem.findMany.mockReset()
+      prismaMock.payment.create.mockResolvedValue({ id: 'refund-articulos-1' })
+      prismaMock.shift.updateMany.mockResolvedValue({ count: 1 } as never)
+    })
+
+    it('P1 todos los artículos + la propina: la fila la separa, el total la suma, turno y cajón cuadran', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro()]).mockResolvedValueOnce([])
+      ;(prismaMock as any).cashDrawerSession.findFirst.mockResolvedValue({ id: 'session-1' })
+      prismaMock.shift.findFirst.mockResolvedValue({ id: 'shift-negocio', status: 'OPEN' } as never)
+      conLineas(['oi-1', 'oi-2'])
+
+      const result = await reembolsar(['oi-1', 'oi-2'], { tipRefundCents: 1450 })
+
+      expect(Number(filaReembolso().amount)).toBe(-145)
+      expect(Number(filaReembolso().tipAmount)).toBe(-14.5)
+      expect(result.amount).toBe(159.5)
+      expect(result.remainingRefundable).toBe(0)
+      expect(Number((prismaMock as any).cashDrawerEvent.createMany.mock.calls[0][0].data[0].amount)).toBe(159.5)
+      // El turno baja venta y propina POR SEPARADO (patrón de la prueba ~:790).
+      const upd = prismaMock.shift.updateMany.mock.calls.at(-1)![0]
+      expect(upd.data.totalSales.decrement.toString()).toBe('145')
+      expect(upd.data.totalTips.decrement.toString()).toBe('14.5')
+      // El acumulado del original es venta + propina (mismo aserto que «updates cumulative refunded cents»).
+      expect(prismaMock.payment.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            processorData: expect.objectContaining({ refundedAmount: 159.5, refundedAmountCents: 15950 }),
+          }),
+        }),
+      )
+      // La transacción de dinero lleva el TOTAL devuelto en negativo (venta + propina).
+      const vtx = prismaMock.venueTransaction.create.mock.calls[0][0].data
+      expect(Number(vtx.grossAmount)).toBe(-159.5)
+      expect(Number(vtx.netAmount)).toBe(-159.5)
+    })
+
+    it('sin tipRefundCents el reembolso por artículos sigue siendo 100 % venta', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro()]).mockResolvedValueOnce([])
+      conLineas(['oi-1', 'oi-2'])
+
+      const result = await reembolsar(['oi-1', 'oi-2'])
+
+      // `-0` como Decimal: `toFixed` lo normaliza a '0.00' (Number(-0) haría fallar `toBe(0)` por Object.is).
+      expect(filaReembolso().tipAmount.toFixed(2)).toBe('0.00')
+      expect(result.amount).toBe(145)
+    })
+
+    it('reembolso parcial con la casilla marcada: esos artículos + la propina, con cualquier motivo', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro()]).mockResolvedValueOnce([])
+      conLineas(['oi-2'])
+
+      const result = await reembolsar(['oi-2'], { tipRefundCents: 1450, reason: 'RETURNED_GOODS' })
+
+      expect(Number(filaReembolso().amount)).toBe(-65)
+      expect(Number(filaReembolso().tipAmount)).toBe(-14.5)
+      expect(result.amount).toBe(79.5)
+    })
+
+    it('🔴 más propina de la que queda se RECHAZA sin escribir nada (la pantalla prometió un total)', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro()]).mockResolvedValueOnce([propinaPreviaDe(5)])
+      conLineas(['oi-1', 'oi-2'])
+
+      await expect(reembolsar(['oi-1', 'oi-2'], { tipRefundCents: 1450 })).rejects.toThrow(/propina/i)
+
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
+      expect(prismaMock.shift.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('🔴 parcial que CABE en el total pero no en la propina restante también se rechaza (R2)', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro()]).mockResolvedValueOnce([propinaPreviaDe(5)])
+      conLineas(['oi-2'])
+
+      // $65 + $14.50 = $79.50 cabe en los $154.50 que quedan, pero de propina sólo quedan $9.50.
+      await expect(reembolsar(['oi-2'], { tipRefundCents: 1450 })).rejects.toThrow(/propina/i)
+
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    })
+
+    it('🔴 con históricos SIN clasificar, la propina que consta devuelta no se vuelve a devolver (R1)', async () => {
+      // Acumulado del original $24.50; la fila previa explica $14.50 de propina ⇒ $10 sin clasificar.
+      prismaMock.$queryRaw
+        .mockResolvedValueOnce([cobro({ processorData: { refundedAmountCents: 2450 } })])
+        .mockResolvedValueOnce([propinaPreviaDe(14.5)])
+      conLineas(['oi-2'])
+
+      await expect(reembolsar(['oi-2'], { tipRefundCents: 1450 })).rejects.toThrow(/propina/i)
+
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    })
+
+    it('con $5 de propina ya devueltos, pedir la restante ($9.50) funciona', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro()]).mockResolvedValueOnce([propinaPreviaDe(5)])
+      conLineas(['oi-1', 'oi-2'])
+
+      const result = await reembolsar(['oi-1', 'oi-2'], { tipRefundCents: 950 })
+
+      expect(Number(filaReembolso().tipAmount)).toBe(-9.5)
+      expect(result.amount).toBe(154.5)
+    })
+  })
 })

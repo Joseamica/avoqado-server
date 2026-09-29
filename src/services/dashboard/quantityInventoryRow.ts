@@ -1,6 +1,17 @@
 import type { InventoryMethod, Prisma } from '@prisma/client'
 
 /**
+ * Método de inventario de un producto NUEVO. Las altas (Artículos de Android/iOS, dashboard, alta
+ * rápida del TPV) guardaban `trackInventory` y tiraban el método: el producto nacía «con inventario»
+ * pero sin método, sin merma ni descuento en la venta. Sin inventario ⇒ null; con inventario, el que
+ * se pidió y, si no llegó ninguno (apps viejas, alta rápida por código de barras), «por cantidad».
+ */
+export function inventoryMethodForNewProduct(trackInventory: unknown, inventoryMethod: unknown): InventoryMethod | null {
+  if (trackInventory !== true) return null
+  return inventoryMethod === 'RECIPE' ? 'RECIPE' : 'QUANTITY'
+}
+
+/**
  * 🔴 Invariante: producto «por cantidad» (trackInventory + QUANTITY) ⇒ tiene fila de Inventory.
  *
  * Sin ella el producto no aparece en «Registrar merma» (INNER JOIN de `catalogSql`) y la venta
