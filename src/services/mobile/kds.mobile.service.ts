@@ -13,7 +13,7 @@ import type { CourierInfo } from '@/services/delivery-channels/core/types'
 import prisma from '../../utils/prismaClient'
 import { OrderStatus } from '@prisma/client'
 import type { KdsOrderStatus, Prisma } from '@prisma/client'
-import { anexarCapacidades, ventasDeComandas, type EstadoRetiro, type VentaDeComanda } from './kdsCapacidades'
+import { anexarCapacidades, anexarMesaYTiempos, ventasDeComandas, type EstadoRetiro, type VentaDeComanda } from './kdsCapacidades'
 import { toKdsModifierLabels } from '../kds/kdsModifierLabels'
 import { venueTienePantallaDeCocina } from '../kds/kitchenDisplayStations'
 import { authorKitchenTickets } from '../kds/kitchenTicketAuthoring.service'
@@ -87,6 +87,8 @@ export interface KdsOrderResponse {
   printStationId?: string | null
   /** Salió en papel de respaldo (ISO). */
   fallbackPrintedAt?: string | null
+  /** 3.6: la mesa de la cuenta («8»), para que la cocina lea «Mesa 8» y no «En tienda». `null` = sin mesa. */
+  tableNumber?: string | null
   items: Array<{
     id: string
     productName: string
@@ -98,6 +100,8 @@ export interface KdsOrderResponse {
     lineActionState?: EstadoRetiro | null
     lineActionAttempts?: number | null
     canRetryAt?: string | null
+    /** 3.6: el tiempo del platillo («Aperitivos»). `null` = sin tiempo (se prepara de inmediato). */
+    course?: string | null
   }>
   startedAt: string | null
   completedAt: string | null
@@ -258,7 +262,7 @@ export function formatKdsOrderConVenta(o: any, venta?: VentaDeComanda | null): K
   // Sólo el reparto de PROVEEDOR llegó solo: una «Entrega» marcada en la caja ya salió en papel al cobrarla.
   const esReparto = venta?.type === 'DELIVERY' && venta.conProveedor
   const base = formatKdsOrder({ ...o, esDeMarketplace: esReparto }, esReparto && venta?.status === 'PENDING')
-  return venta ? anexarCapacidades(base, o, venta) : base
+  return venta ? anexarCapacidades(anexarMesaYTiempos(base, o, venta), o, venta) : base
 }
 
 /** La comanda recién escrita, con su venta: `PUT …/status` y `bump` contestan lo mismo que el tablero (una carga por lote). */

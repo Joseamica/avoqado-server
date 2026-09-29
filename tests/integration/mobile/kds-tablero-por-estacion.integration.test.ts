@@ -53,6 +53,9 @@ beforeAll(async () => {
 afterAll(async () => {
   if (!orgId) return
   await prisma.kdsOrder.deleteMany({ where: { venueId } })
+  await prisma.orderItem.deleteMany({ where: { order: { venueId } } })
+  await prisma.order.deleteMany({ where: { venueId } })
+  await prisma.table.deleteMany({ where: { venueId } })
   await prisma.printStation.deleteMany({ where: { venueId } })
   await prisma.venue.deleteMany({ where: { id: venueId } })
   await prisma.organization.deleteMany({ where: { id: orgId } })
@@ -201,5 +204,50 @@ describe('F-A: comandas con folio sobreviven apagar/prender o mover de pantalla 
     } finally {
       await prisma.kdsOrder.delete({ where: { id: creada.id } })
     }
+  })
+})
+
+describe('la comanda de una MESA dice qué mesa es y el tiempo de cada platillo (3.6)', () => {
+  it('trae la mesa de la cuenta y el tiempo de cada renglón; lo que no tiene tiempo va en null', async () => {
+    const mesa = await prisma.table.create({ data: { venueId, number: '8', capacity: 4, qrCode: `qr8-${SUF}` }, select: { id: true } })
+    const orden = await prisma.order.create({
+      data: { venueId, orderNumber: `M8-${SUF}`, tableId: mesa.id, subtotal: 0, taxAmount: 0, total: 0 },
+      select: { id: true },
+    })
+    const renglon = (course: string | null) =>
+      prisma.orderItem.create({
+        data: { orderId: orden.id, productName: 'x', quantity: 1, unitPrice: 0, taxAmount: 0, total: 0, course },
+        select: { id: true },
+      })
+    const [guac, tacos, agua] = [await renglon('Aperitivos'), await renglon('Principales'), await renglon(null)]
+    await prisma.kdsOrder.create({
+      data: {
+        venueId,
+        orderId: orden.id,
+        orderNumber: 'mesa8',
+        orderType: 'DINE_IN',
+        printStationId: cocina,
+        items: {
+          create: [
+            { productName: 'Guacamole', quantity: 2, orderItemId: guac.id },
+            { productName: 'Tacos', quantity: 2, orderItemId: tacos.id },
+            { productName: 'Agua', quantity: 1, orderItemId: agua.id },
+          ],
+        },
+      },
+    })
+
+    const tablero = await listKdsOrders(venueId, undefined, cocina)
+    const comanda = tablero.find(o => o.orderNumber === 'mesa8')!
+    expect(comanda.tableNumber).toBe('8')
+    expect(Object.fromEntries(comanda.items.map(i => [i.productName, i.course]))).toEqual({
+      Guacamole: 'Aperitivos',
+      Tacos: 'Principales',
+      Agua: null,
+    })
+    // Regresión: una comanda sin venta (mostrador viejo, Uber) no inventa mesa ni tiempos.
+    const sinVenta = tablero.find(o => o.orderNumber === 'sinEstacion')!
+    expect(sinVenta.tableNumber ?? null).toBeNull()
+    expect(sinVenta.items.every(i => (i.course ?? null) === null)).toBe(true)
   })
 })
