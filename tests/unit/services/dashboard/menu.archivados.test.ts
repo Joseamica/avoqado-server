@@ -4,6 +4,8 @@
  * vigentes. Las lecturas de historia, reportes y por id NO se tocan. Y borrar una categoría cuyo único contenido son
  * archivados la APAGA: `Product.categoryId` es RESTRICT (Ruling P5-R7).
  */
+import { isDeepStrictEqual } from 'util'
+
 import { prismaMock } from '@tests/__helpers__/setup'
 import * as menuService from '@/services/dashboard/menu.dashboard.service'
 import { deleteFileFromStorage } from '@/services/storage.service'
@@ -73,24 +75,39 @@ describe('plan 5 · borrar una categoría: los archivados no cuentan, pero la ll
     active: true,
     parentId: null,
   }
+  const CUENTA_VIGENTES = { where: { categoryId: 'c1', deletedAt: null } }
+  const CUENTA_TODOS = { where: { categoryId: 'c1' } }
+  /**
+   * `product.count` responde por su `where`, no por el orden de las llamadas: `jest.clearAllMocks()` no vacía las colas de
+   * `mockResolvedValueOnce`, y una cola sobrante arrastraba a las pruebas siguientes. Un `where` distinto de los dos truena.
+   */
+  const contar = (vigentes: number, todos: number) =>
+    prismaMock.product.count.mockImplementation(async (arg: unknown) => {
+      if (isDeepStrictEqual(arg, CUENTA_VIGENTES)) return vigentes
+      if (isDeepStrictEqual(arg, CUENTA_TODOS)) return todos
+      throw new Error(`product.count con un where inesperado: ${JSON.stringify(arg)}`)
+    })
+
   beforeEach(() => {
+    prismaMock.product.count.mockReset()
     prismaMock.menuCategory.findUnique.mockResolvedValue(categoria as never)
   })
 
   it('sólo archivados: se APAGA (no se borra, conserva su imagen) y responde con la categoría', async () => {
-    prismaMock.product.count.mockResolvedValueOnce(0).mockResolvedValueOnce(3)
+    contar(0, 3)
     prismaMock.menuCategory.update.mockResolvedValue({ ...categoria, active: false } as never)
 
     await expect(menuService.deleteMenuCategory(V, 'c1')).resolves.toMatchObject({ id: 'c1', active: false })
 
-    expect(prismaMock.product.count).toHaveBeenNthCalledWith(1, { where: { categoryId: 'c1', deletedAt: null } })
+    expect(prismaMock.product.count).toHaveBeenCalledWith(CUENTA_VIGENTES)
+    expect(prismaMock.product.count).toHaveBeenCalledWith(CUENTA_TODOS)
     expect(prismaMock.menuCategory.update).toHaveBeenCalledWith({ where: { id: 'c1' }, data: { active: false } })
     expect(prismaMock.menuCategory.delete).not.toHaveBeenCalled()
     expect(deleteFileFromStorage).not.toHaveBeenCalled()
   })
 
   it('REGRESIÓN: sin ningún producto se borra de verdad, con su imagen', async () => {
-    prismaMock.product.count.mockResolvedValueOnce(0).mockResolvedValueOnce(0)
+    contar(0, 0)
     prismaMock.menuCategory.delete.mockResolvedValue(categoria as never)
 
     await menuService.deleteMenuCategory(V, 'c1')
@@ -100,7 +117,7 @@ describe('plan 5 · borrar una categoría: los archivados no cuentan, pero la ll
   })
 
   it('REGRESIÓN: con productos vigentes sigue siendo 400', async () => {
-    prismaMock.product.count.mockResolvedValueOnce(2)
+    contar(2, 2)
 
     await expect(menuService.deleteMenuCategory(V, 'c1')).rejects.toMatchObject({ statusCode: 400 })
     expect(prismaMock.menuCategory.delete).not.toHaveBeenCalled()
