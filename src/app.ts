@@ -45,6 +45,12 @@ import { handleGoogleCalendarWebhook } from './controllers/webhook/google-calend
 import { handleMercadoPagoWebhook } from './controllers/webhook/mercadoPago.webhook.controller'
 import { handleFacturapiWebhook } from './controllers/webhook/facturapi.webhook.controller'
 import { activarUberOAuth, startUberOAuth, uberOAuthCallback } from './controllers/delivery-channels/uber.oauth.controller'
+import {
+  activarRappiOAuth,
+  rappiOAuthCallback,
+  resultadoRappiOAuth,
+  startRappiOAuth,
+} from './controllers/delivery-channels/rappi.oauth.controller'
 import publicRoutes from './routes/public.routes'
 import appUpdateRoutes from './routes/superadmin/appUpdate.routes'
 import settlementReportRoutes from './routes/settlement-report.routes'
@@ -182,6 +188,18 @@ app.post(
   express.urlencoded({ extended: false, limit: '16kb' }),
   activarUberOAuth,
 )
+
+// Self-onboarding de Rappi (spec 2026-09-29). PÚBLICAS a propósito, igual que las de Uber: Rappi
+// redirige aquí el navegador del comerciante sin sesión nuestra; la prueba de origen es la firma.
+app.get('/api/v1/delivery/rappi/oauth/start', requestLoggerMiddleware, startRappiOAuth)
+app.get('/api/v1/delivery/rappi/oauth/callback', requestLoggerMiddleware, rappiOAuthCallback)
+app.post(
+  '/api/v1/delivery/rappi/oauth/activate',
+  requestLoggerMiddleware,
+  express.urlencoded({ extended: false, limit: '16kb' }),
+  activarRappiOAuth,
+)
+app.get('/api/v1/delivery/rappi/oauth/result', requestLoggerMiddleware, resultadoRappiOAuth)
 
 // Customer-facing MCP OAuth 2.1 Authorization Server: DCR, /authorize (bcrypt consent), /token,
 // /revoke, and discovery metadata — all at the app root (required by the SDK).

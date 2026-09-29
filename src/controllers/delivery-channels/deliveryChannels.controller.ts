@@ -126,3 +126,26 @@ export const getUberConnectUrl = async (req: Request, res: Response, next: NextF
     return next(e)
   }
 }
+
+/**
+ * El mismo enlace para el self-onboarding de Rappi (spec 2026-09-29): una intención firmada con la
+ * llave de Rappi, nunca el `venueId` suelto. Import perezoso: la cadena de Rappi lee el env al usarse.
+ */
+export const getRappiConnectUrl = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId } = req.params
+    const { userId } = (req as any).authContext
+    const { depsDesdeEnv, crearIntentRappi } = await import('../../services/delivery-channels/providers/rappi/rappi.connect')
+    const { firmado } = await crearIntentRappi(await depsDesdeEnv(), { venueId, staffId: userId })
+    // Sin barra final: `…//api/v1/…` no llega a la ruta (el mismo recorte que `redirectUriRappi`).
+    const base = env.RAPPI_OAUTH_REDIRECT_BASE?.trim().replace(/\/+$/, '') || `${req.protocol}://${req.get('host')}`
+    return res.json({
+      ok: true,
+      url: `${base}/api/v1/delivery/rappi/oauth/start?intent=${encodeURIComponent(firmado)}`,
+      instrucciones:
+        'Abre este enlace con la cuenta del Portal Partners de Rappi del negocio (vence en 10 minutos). Al autorizar, eliges qué tiendas conectar a Avoqado.',
+    })
+  } catch (e) {
+    return next(e)
+  }
+}

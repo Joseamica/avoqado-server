@@ -1,0 +1,412 @@
+// El servicio compartido de intents importa el env al cargarse; el objeto vive DENTRO de la fábrica (TDZ).
+jest.mock('@/config/env', () => ({ env: { RAPPI_CONNECT_SIGNING_KEY: 'k'.repeat(40), RAPPI_OAUTH_REDIRECT_BASE: 'https://api.test//' } }))
+jest.mock('../../../../src/services/delivery-channels/providers/rappi/rappi.client', () => ({
+  canjearCodigoRappi: jest.fn(),
+  tiendasDelComercio: jest.fn(),
+  aprovisionarTiendasRappi: jest.fn(),
+  suscribirTiendaAEventos: jest.fn(),
+  tiendasEscribiblesRappi: () => ['10', '11'],
+  getRappiEnvironment: () => 'SANDBOX',
+  clientIdRappi: () => 'cid',
+  redirectUriRappi: () => 'https://api.test/api/v1/delivery/rappi/oauth/callback',
+}))
+jest.mock('../../../../src/services/delivery-channels/providers/rappi/rappi.connect', () => ({
+  ...jest.requireActual('../../../../src/services/delivery-channels/providers/rappi/rappi.connect'),
+  revalidarRappi: jest.fn(async () => null),
+}))
+
+import prisma from '../../../../src/utils/prismaClient'
+import * as ctrl from '../../../../src/controllers/delivery-channels/rappi.oauth.controller'
+import { getRappiConnectUrl } from '../../../../src/controllers/delivery-channels/deliveryChannels.controller'
+import {
+  cifrarIdToken,
+  descifrarIdToken,
+  firmar,
+  leerFirma,
+} from '../../../../src/services/delivery-channels/providers/rappi/rappi.connect'
+import * as rappiClient from '../../../../src/services/delivery-channels/providers/rappi/rappi.client'
+
+const cliente = rappiClient as unknown as Record<
+  'canjearCodigoRappi' | 'tiendasDelComercio' | 'aprovisionarTiendasRappi' | 'suscribirTiendaAEventos',
+  jest.Mock
+>
+const deps = { llave: 'k'.repeat(40), ambiente: 'SANDBOX' as const, clientId: 'cid' }
+
+/**
+ * Base EN MEMORIA (la misma forma que la prueba de `rappi.provisioning`): el aprovisionamiento y la
+ * confirmación corren DE VERDAD, así «aprovisiona una vez» y «se promueve» se miden en la base, no en
+ * un mock que devuelva lo que la prueba espera (R14).
+ */
+type Fila = Record<string, any>
+const db = { links: new Map<string, Fila>(), intents: new Map<string, Fila>() }
+const p = prisma as any
+const L = p.deliveryChannelLink
+const I = p.deliveryConnectIntent
+const esSql = (v: any): v is { sql: string; values: unknown[] } => !!v && Array.isArray(v.values) && Array.isArray(v.strings)
+const porId = (id: string) => [...db.links.values()].find(f => f.id === id) as Fila
+
+beforeEach(() => {
+  db.links.clear()
+  db.intents.clear()
+  let n = 0
+  p.$queryRaw.mockReset().mockImplementation(async (_s: TemplateStringsArray, storeId: string) => {
+    const f = db.links.get(storeId)
+    return f ? [{ id: f.id, venueId: f.venueId, status: f.status, config: f.config ?? null }] : []
+  })
+  L.createMany.mockReset().mockImplementation(async ({ data }: { data: Fila[] }) => {
+    let count = 0
+    for (const d of data)
+      if (!db.links.has(d.externalLocationId)) {
+        db.links.set(d.externalLocationId, { id: `l${++n}`, config: null, ...d })
+        count++
+      }
+    return { count }
+  })
+  L.update.mockReset().mockImplementation(async ({ where, data }: Fila) => Object.assign(porId(where.id), data))
+  L.delete.mockReset().mockImplementation(async ({ where }: Fila) => {
+    const f = porId(where.id)
+    db.links.delete(f.externalLocationId)
+    return f
+  })
+  I.findUnique
+    .mockReset()
+    .mockImplementation(async ({ where }: Fila) => (db.intents.has(where.id) ? { ...db.intents.get(where.id) } : null))
+  I.updateMany.mockReset().mockImplementation(async ({ where, data }: Fila) => {
+    const i = db.intents.get(where.id)
+    const estados = typeof where.state === 'string' ? [where.state] : where.state.in
+    if (!i || !estados.includes(i.state)) return { count: 0 }
+    Object.assign(i, data)
+    return { count: 1 }
+  })
+  p.$executeRaw.mockReset().mockImplementation(async (_s: TemplateStringsArray, ...v: unknown[]) => {
+    const sqls = v.filter(esSql)
+    const mezcla = sqls.find(x => x.sql.includes('jsonb_build_object'))
+    const intento = db.intents.get(v.find((x): x is string => typeof x === 'string' && db.intents.has(x)) ?? '')
+    if (!mezcla || !intento) return 0
+    const [storeId, , json] = mezcla.values as [string, string, string]
+    const finales = sqls.find(x => x.values.includes('ACTIVATED'))?.values ?? []
+    const previo = intento.resultsJson?.[storeId]
+    if (finales.includes(previo?.outcome)) return 0
+    intento.resultsJson = { ...(intento.resultsJson ?? {}), [storeId]: { ...previo, ...JSON.parse(json) } }
+    return 1
+  })
+  p.venue.findUnique.mockReset().mockResolvedValue({ name: 'Café <b>Luna</b>' })
+  cliente.canjearCodigoRappi.mockReset().mockResolvedValue('idt')
+  cliente.tiendasDelComercio.mockReset().mockResolvedValue([{ storeId: '10', name: 'A', integrated: false }])
+  cliente.aprovisionarTiendasRappi.mockReset().mockImplementation(async (_t: string, ts: Array<{ storeId: string }>) => ({
+    batchId: 'b1',
+    aceptadas: ts.map(t => ({ storeId: t.storeId, integrationId: `int${t.storeId}` })),
+    rechazadas: [],
+    inciertas: [],
+  }))
+  cliente.suscribirTiendaAEventos.mockReset().mockResolvedValue({ ok: true, fallidos: [] })
+})
+
+const IDENT = { id: 'i1', environment: 'SANDBOX', venueId: 'v1', clientId: 'cid' }
+function sembrar(over: Fila = {}) {
+  db.intents.set('i1', {
+    ...IDENT,
+    provider: 'RAPPI',
+    staffId: 's1',
+    state: 'CREATED',
+    orderAcceptanceMode: 'AUTO',
+    expiresAt: new Date(Date.now() + 60_000),
+    merchantTokenEnvelope: null,
+    storesJson: null,
+    selectionJson: null,
+    resultsJson: null,
+    failureReason: null,
+    ...over,
+  })
+  return db.intents.get('i1') as Fila
+}
+/** Lo que deja un callback exitoso: EXCHANGED, con el id_token cifrado y las tiendas que listó Rappi. */
+const canjeado = (over: Fila = {}) =>
+  sembrar({
+    state: 'EXCHANGED',
+    merchantTokenEnvelope: cifrarIdToken(deps, IDENT, 'idt'),
+    storesJson: [
+      { storeId: '10', name: 'A', integrated: false },
+      { storeId: '11', name: 'B', integrated: true },
+    ],
+    ...over,
+  })
+
+const res = () => {
+  const r: Record<string, jest.Mock> = {}
+  for (const k of ['status', 'type', 'send', 'redirect', 'json']) r[k] = jest.fn(() => r)
+  r.getHeader = jest.fn(() => undefined)
+  return r
+}
+const html = (r: Record<string, jest.Mock>) => String(r.send.mock.calls.at(-1)?.[0])
+const intent = () => db.intents.get('i1') as Fila
+
+const callback = async (query: Record<string, string>) => {
+  const r = res()
+  await ctrl.rappiOAuthCallback({ query } as never, r as never)
+  return r
+}
+const activar = async (body: Record<string, unknown>) => {
+  const r = res()
+  await ctrl.activarRappiOAuth({ body: { state2: firmar(deps, 'i1', 'activate'), ...body } } as never, r as never)
+  return r
+}
+const resultado = async (firmado = firmar(deps, 'i1', 'result')) => {
+  const r = res()
+  await ctrl.resultadoRappiOAuth({ query: { intent: firmado } } as never, r as never)
+  return r
+}
+
+describe('start', () => {
+  it('una firma de otro propósito no pasa', async () => {
+    sembrar()
+    const r = res()
+    await ctrl.startRappiOAuth({ query: { intent: firmar(deps, 'i1', 'callback') } } as never, r as never)
+    expect(r.redirect).not.toHaveBeenCalled()
+    expect(r.status).toHaveBeenCalledWith(400)
+  })
+
+  it('CREATED: al login de Rappi con el state firmado para el callback y PKCE', async () => {
+    sembrar()
+    const r = res()
+    await ctrl.startRappiOAuth({ query: { intent: firmar(deps, 'i1', 'start') } } as never, r as never)
+    const [codigo, url] = r.redirect.mock.calls[0]
+    const u = new URL(url)
+    expect(codigo).toBe(302)
+    expect(u.origin).toBe('https://login.partners.dev.rappi.com')
+    expect(leerFirma(deps, u.searchParams.get('state'), 'callback')).toBe('i1')
+    expect(u.searchParams.get('code_challenge_method')).toBe('S256')
+    expect(u.searchParams.get('redirect_uri')).toBe('https://api.test/api/v1/delivery/rappi/oauth/callback')
+  })
+
+  it('un enlace ya usado no vuelve a mandar al login', async () => {
+    sembrar({ state: 'EXCHANGED' })
+    const r = res()
+    await ctrl.startRappiOAuth({ query: { intent: firmar(deps, 'i1', 'start') } } as never, r as never)
+    expect(r.redirect).not.toHaveBeenCalled()
+    expect(r.status).toHaveBeenCalledWith(400)
+  })
+})
+
+describe('callback', () => {
+  it('escapa tiendas y negocio, pide confirmar el negocio, deshabilita la ya integrada y firma state2 para activate', async () => {
+    sembrar()
+    cliente.tiendasDelComercio.mockResolvedValue([
+      { storeId: '10', name: '<script>x</script>', integrated: false },
+      { storeId: '11', name: 'B', integrated: true },
+    ])
+    const r = await callback({ code: 'c', state: firmar(deps, 'i1', 'callback') })
+    const h = html(r)
+    expect(r.status).toHaveBeenCalledWith(200)
+    expect(h).not.toContain('<script')
+    expect(h).toContain('&lt;script&gt;x&lt;/script&gt;')
+    expect(h).toContain('Estas tiendas se conectarán a <strong>Café &lt;b&gt;Luna&lt;/b&gt;</strong>')
+    expect(h).toMatch(/<input type="checkbox" name="confirmo_negocio" value="si" required>/)
+    expect(h).toMatch(/<input type="checkbox" disabled>[^<]*<strong>B<\/strong>.*ya integrada/)
+    expect(h).not.toContain('value="11"')
+    expect(h).toContain(`name="state2" value="${firmar(deps, 'i1', 'activate')}"`)
+    expect(intent()).toMatchObject({ state: 'EXCHANGED', storesJson: [{ storeId: '10' }, { storeId: '11' }] })
+    expect(descifrarIdToken(deps, intent() as never)).toBe('idt')
+  })
+
+  // 🔴 R12
+  it('el código se canjea DESPUÉS de ganar el CAS CREATED → EXCHANGED', async () => {
+    sembrar()
+    let estadoAlCanjear: string | undefined
+    cliente.canjearCodigoRappi.mockImplementation(async () => {
+      estadoAlCanjear = intent().state
+      return 'idt'
+    })
+    await callback({ code: 'c', state: firmar(deps, 'i1', 'callback') })
+    expect(estadoAlCanjear).toBe('EXCHANGED')
+  })
+
+  it('si otro callback ganó el CAS, éste NO canjea el código', async () => {
+    sembrar()
+    I.updateMany.mockImplementationOnce(async () => ({ count: 0 }))
+    const r = await callback({ code: 'c', state: firmar(deps, 'i1', 'callback') })
+    expect(cliente.canjearCodigoRappi).not.toHaveBeenCalled()
+    expect(html(r)).toContain('ya se usó')
+  })
+
+  it('un callback repetido (ya EXCHANGED) no canjea el código', async () => {
+    canjeado()
+    const r = await callback({ code: 'c', state: firmar(deps, 'i1', 'callback') })
+    expect(cliente.canjearCodigoRappi).not.toHaveBeenCalled()
+    expect(r.status).toHaveBeenCalledWith(400)
+  })
+
+  it('una firma de otro propósito no pasa', async () => {
+    sembrar()
+    const r = await callback({ code: 'c', state: firmar(deps, 'i1', 'start') })
+    expect(r.status).toHaveBeenCalledWith(400)
+    expect(cliente.canjearCodigoRappi).not.toHaveBeenCalled()
+  })
+
+  it('Rappi negó el permiso: FAILED RAPPI_DENIED y la descripción escapada, sin canjear', async () => {
+    sembrar()
+    const r = await callback({
+      error: 'access_denied',
+      error_description: '<img src=x onerror=alert(1)>',
+      state: firmar(deps, 'i1', 'callback'),
+    })
+    expect(intent()).toMatchObject({ state: 'FAILED', failureReason: 'RAPPI_DENIED' })
+    expect(html(r)).not.toContain('<img')
+    expect(html(r)).toContain('&lt;img src=x onerror=alert(1)&gt;')
+    expect(cliente.canjearCodigoRappi).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['canjear', 'RAPPI_CANJE_401', 'RAPPI_CANJE_401'],
+    ['canjear', 'RAPPI_ID_TOKEN_INVALIDO', 'RAPPI_ID_TOKEN_INVALIDO'],
+    ['listar', 'RAPPI_INTEGRATION_STATUS_500', 'RAPPI_INTEGRATION_STATUS_500'],
+    ['listar', 'fetch failed', 'RAPPI_ERROR'],
+  ])('si falla %s (%s): FAILED con motivo %s y una página, nunca un 500', async (paso, mensaje, motivo) => {
+    sembrar()
+    ;(paso === 'canjear' ? cliente.canjearCodigoRappi : cliente.tiendasDelComercio).mockRejectedValue(new Error(mensaje))
+    const r = await callback({ code: 'c', state: firmar(deps, 'i1', 'callback') })
+    expect(intent()).toMatchObject({ state: 'FAILED', failureReason: motivo, merchantTokenEnvelope: null })
+    expect(r.status).toHaveBeenCalledWith(502)
+  })
+})
+
+describe('activate', () => {
+  // 🔴 R11
+  it('sin confirmo_negocio: 400 y nada sale a Rappi', async () => {
+    canjeado()
+    const r = await activar({ tiendas: '10' })
+    expect(r.status).toHaveBeenCalledWith(400)
+    expect(cliente.aprovisionarTiendasRappi).not.toHaveBeenCalled()
+    expect(intent().state).toBe('EXCHANGED')
+  })
+
+  it('ignora ids que Rappi no listó (y la ya integrada): sin ninguna válida, 400', async () => {
+    canjeado()
+    const r = await activar({ tiendas: ['999', '11'], confirmo_negocio: 'si' })
+    expect(r.status).toHaveBeenCalledWith(400)
+    expect(cliente.aprovisionarTiendasRappi).not.toHaveBeenCalled()
+    expect(intent().state).toBe('EXCHANGED')
+  })
+
+  it('una firma de otro propósito no pasa', async () => {
+    canjeado()
+    const r = res()
+    await ctrl.activarRappiOAuth(
+      { body: { state2: firmar(deps, 'i1', 'callback'), tiendas: '10', confirmo_negocio: 'si' } } as never,
+      r as never,
+    )
+    expect(r.status).toHaveBeenCalledWith(400)
+    expect(cliente.aprovisionarTiendasRappi).not.toHaveBeenCalled()
+  })
+
+  // 🔴 Review Focus 2 + R14
+  it('el primer envío aprovisiona UNA vez; el segundo (doble clic / atrás) no vuelve a aprovisionar', async () => {
+    canjeado()
+    const r1 = await activar({ tiendas: ['10', '999', '10'], confirmo_negocio: 'si' })
+    expect(cliente.aprovisionarTiendasRappi).toHaveBeenCalledTimes(1)
+    expect(cliente.aprovisionarTiendasRappi).toHaveBeenCalledWith('idt', [{ storeId: '10', name: 'A' }])
+    expect(intent()).toMatchObject({ state: 'ACTIVATING', selectionJson: ['10'], resultsJson: { '10': { outcome: 'PROVISIONING' } } })
+    expect(db.links.get('10')).toMatchObject({
+      venueId: 'v1',
+      status: 'PENDING',
+      config: { rappiProvisioning: { intentId: 'i1', batchId: 'b1', integrationId: 'int10' } },
+    })
+    const [codigo, url] = r1.redirect.mock.calls[0]
+    expect(codigo).toBe(303)
+    expect(leerFirma(deps, new URL(url, 'https://x').searchParams.get('intent'), 'result')).toBe('i1')
+
+    const r2 = await activar({ tiendas: '10', confirmo_negocio: 'si' })
+    expect(cliente.aprovisionarTiendasRappi).toHaveBeenCalledTimes(1)
+    expect(r2.redirect).toHaveBeenCalledWith(303, expect.stringContaining('/api/v1/delivery/rappi/oauth/result?intent='))
+  })
+
+  it.each([
+    ['basura', 'v1:basura'],
+    ['un token vacío', cifrarIdToken(deps, IDENT, '')],
+  ])('un sobre ilegible (%s): FAILED con motivo controlado y sin llamar a Rappi', async (_c, sobre) => {
+    canjeado({ merchantTokenEnvelope: sobre })
+    const r = await activar({ tiendas: '10', confirmo_negocio: 'si' })
+    expect(intent()).toMatchObject({ state: 'FAILED', failureReason: 'RAPPI_TOKEN_ILEGIBLE' })
+    expect(cliente.aprovisionarTiendasRappi).not.toHaveBeenCalled()
+    expect(r.redirect).not.toHaveBeenCalled()
+  })
+})
+
+describe('result', () => {
+  const integrada = (integrationId: string) =>
+    cliente.tiendasDelComercio.mockResolvedValue([{ storeId: '10', name: 'A', integrated: true, integrationId }])
+
+  // 🔴 Review Focus 3 + R14
+  it('el webhook nunca llegó: integration-status dice integrada con NUESTRO integrationId ⇒ se promueve', async () => {
+    canjeado()
+    await activar({ tiendas: '10', confirmo_negocio: 'si' })
+    integrada('int10')
+
+    const r = await resultado()
+    expect(db.links.get('10')?.status).toBe('ACTIVE')
+    expect(intent()).toMatchObject({ state: 'CONSUMED', merchantTokenEnvelope: null, resultsJson: { '10': { outcome: 'ACTIVATED' } } })
+    expect(cliente.suscribirTiendaAEventos).toHaveBeenCalledWith('10')
+    expect(html(r)).toContain('Conectada')
+
+    // Recargar no vuelve a suscribir ni a tocar nada.
+    const r2 = await resultado()
+    expect(cliente.suscribirTiendaAEventos).toHaveBeenCalledTimes(1)
+    expect(html(r2)).toContain('Conectada')
+  })
+
+  // R7
+  it('integrada pero con OTRO integrationId: no se promueve y dice que Rappi la está confirmando', async () => {
+    canjeado()
+    await activar({ tiendas: '10', confirmo_negocio: 'si' })
+    integrada('de-otro')
+
+    await resultado()
+    const r = await resultado()
+    expect(db.links.get('10')?.status).toBe('PENDING')
+    expect(intent().state).toBe('ACTIVATING')
+    expect(cliente.suscribirTiendaAEventos).not.toHaveBeenCalled()
+    expect(html(r)).toContain('Rappi la está confirmando — recarga esta página en un minuto')
+  })
+
+  it('el motivo de rechazo de Rappi y el negocio van escapados; sin re-chequeo fuera de ACTIVATING', async () => {
+    sembrar({
+      state: 'CONSUMED',
+      selectionJson: ['10', '12'],
+      storesJson: [
+        { storeId: '10', name: 'A', integrated: false },
+        { storeId: '12', name: 'C', integrated: false },
+      ],
+      resultsJson: { '10': { outcome: 'REJECTED', detalle: '<script>r</script>' }, '12': { outcome: 'OTHER_VENUE' } },
+    })
+    const r = await resultado()
+    const h = html(r)
+    expect(h).not.toContain('<script')
+    expect(h).toContain('Rappi la rechazó: &lt;script&gt;r&lt;/script&gt;')
+    expect(h).toContain('Esta tienda ya está conectada a otro negocio de Avoqado')
+    expect(h).toContain('Café &lt;b&gt;Luna&lt;/b&gt;')
+    expect(cliente.tiendasDelComercio).not.toHaveBeenCalled()
+  })
+
+  it('una firma de otro propósito no pasa', async () => {
+    sembrar({ state: 'ACTIVATING' })
+    const r = await resultado(firmar(deps, 'i1', 'activate'))
+    expect(r.status).toHaveBeenCalledWith(400)
+    expect(cliente.tiendasDelComercio).not.toHaveBeenCalled()
+  })
+})
+
+describe('connect-url', () => {
+  it('base sin barra final y el enlace firmado para start', async () => {
+    I.create.mockResolvedValue({ id: 'i9' })
+    const r = res()
+    await getRappiConnectUrl(
+      { params: { venueId: 'v1' }, authContext: { userId: 's1' }, protocol: 'http', get: () => 'x' } as never,
+      r as never,
+      jest.fn(),
+    )
+    const { url } = r.json.mock.calls[0][0]
+    expect(url.startsWith('https://api.test/api/v1/delivery/rappi/oauth/start?intent=')).toBe(true)
+    expect(leerFirma(deps, new URL(url).searchParams.get('intent'), 'start')).toBe('i9')
+    expect(I.create.mock.calls[0][0].data).toMatchObject({ provider: 'RAPPI', venueId: 'v1', staffId: 's1' })
+  })
+})
