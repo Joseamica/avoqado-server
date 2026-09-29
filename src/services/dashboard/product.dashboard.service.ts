@@ -1044,6 +1044,24 @@ export async function updateProduct(
 }
 
 /**
+ * IVA por producto, plan 5 (D1): ARCHIVAR = deja de venderse y de verse (`active=false`) y conserva su historia, receta,
+ * inventario, kárdex e IVA (`deletedAt` + `deletedBy`). Es la ÚNICA forma de «borrar» un producto: la usan el borrado del
+ * dashboard (y con él la acción del chatbot), el del móvil y «Reemplazar menú». Nunca toca uno ya archivado. Restaurar =
+ * limpiar `deletedAt`/`deletedBy` (lo hace la importación por SKU).
+ */
+export async function archivarProductos(
+  db: Pick<Prisma.TransactionClient, 'product'>,
+  where: { venueId: string; id?: string; sku?: { notIn: string[] } },
+  deletedBy: string | null,
+): Promise<number> {
+  const { count } = await db.product.updateMany({
+    where: { ...where, deletedAt: null },
+    data: { deletedAt: new Date(), deletedBy, active: false },
+  })
+  return count
+}
+
+/**
  * Delete a product (soft delete)
  * Also deletes the product image from Firebase Storage
  */
@@ -1070,14 +1088,8 @@ export async function deleteProduct(venueId: string, productId: string, userId: 
     })
   }
 
-  // Soft delete: set deletedAt and deletedBy instead of physically removing the record
-  await prisma.product.update({
-    where: { id: productId },
-    data: {
-      deletedAt: new Date(),
-      deletedBy: userId,
-    },
-  })
+  // Plan 5 (D1): archivar = deletedAt + deletedBy + active=false (el widget y la app de clientes filtran sólo `active`)
+  await archivarProductos(prisma, { venueId, id: productId }, userId)
 
   // 🔌 REAL-TIME: Broadcast product deletion via Socket.IO
   const broadcastingService = socketManager.getBroadcastingService()

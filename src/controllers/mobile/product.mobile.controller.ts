@@ -8,7 +8,7 @@
 
 import { NextFunction, Request, Response } from 'express'
 import prisma from '../../utils/prismaClient'
-import { computeInventoryAvailability } from '../../services/dashboard/product.dashboard.service'
+import { archivarProductos, computeInventoryAvailability } from '../../services/dashboard/product.dashboard.service'
 import { Unit } from '@prisma/client'
 import logger from '../../config/logger'
 import { toLegacyProductPayload } from '../../utils/legacyProductPayload'
@@ -356,16 +356,10 @@ export async function deleteProduct(req: Request, res: Response, next: NextFunct
       return res.status(404).json({ success: false, message: 'Producto no encontrado' })
     }
 
-    const product = await prisma.product.update({
-      where: { id: productId },
-      data: {
-        deletedAt: new Date(),
-        active: false,
-        deletedBy: req.authContext?.userId || null,
-      },
-    })
+    // Plan 5 (D1): la misma función de archivado que el dashboard y «Reemplazar menú»
+    await archivarProductos(prisma, { venueId, id: productId }, req.authContext?.userId || null)
 
-    return res.json({ success: true, data: { id: product.id } })
+    return res.json({ success: true, data: { id: productId } })
   } catch (error) {
     logger.error('Error deleting product (mobile)', {
       error: error instanceof Error ? error.message : 'Unknown error',

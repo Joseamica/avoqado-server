@@ -15,13 +15,14 @@ type ProductMutation =
   | 'sqlDelete'
 
 const EXPECTED_WRITES: Record<string, Partial<Record<ProductMutation, number>>> = {
-  'src/controllers/mobile/product.mobile.controller.ts': { create: 1, update: 2 },
+  'src/controllers/mobile/product.mobile.controller.ts': { create: 1, update: 1 },
   'src/routes/tpv.routes.ts': { create: 1 },
   'src/services/cleanup/liveDemoCleanup.service.ts': { deleteMany: 1 },
   'src/services/dashboard/menu.dashboard.service.ts': { create: 1, update: 1, updateMany: 3, deleteMany: 1 },
   'src/services/dashboard/pricing.service.ts': { update: 1 },
   'src/services/dashboard/printStation.dashboard.service.ts': { updateMany: 1 },
-  'src/services/dashboard/product.dashboard.service.ts': { create: 2, update: 2, updateMany: 1 },
+  // WHY (plan 5): deleteProduct archiva por archivarProductos (updateMany con active:false), ya no por un update propio.
+  'src/services/dashboard/product.dashboard.service.ts': { create: 2, update: 1, updateMany: 2 },
   'src/services/dashboard/productInventory.service.ts': { update: 1 },
   'src/services/dashboard/productInventoryIntegration.service.ts': { update: 1 },
   'src/services/dashboard/productWizard.service.ts': { create: 1, update: 5, delete: 1 },
