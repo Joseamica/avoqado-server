@@ -22,6 +22,7 @@ import * as movil from '@/controllers/mobile/product.mobile.controller'
 import { ConflictError } from '@/errors/AppError'
 import { createProduct, updateProduct, type CreateProductDto } from '@/services/dashboard/product.dashboard.service'
 import { closePeriod } from '@/services/fiscal/accountingPeriodLock.service'
+import { generatePoliciesForVenue } from '@/services/fiscal/autoPosting.service'
 import { createManualEntry, postJournalEntry } from '@/services/fiscal/journalEntry.service'
 import { liberarSellosDe, sellarRenglones } from '@/services/fiscal/sellosIva'
 import { acquireCatalogMutationLock } from '@/services/master-catalog/catalogMutationLock.service'
@@ -37,6 +38,7 @@ import {
   type CatalogPublicationIntegrationHarness,
 } from '../master-catalog/catalogPublicationIntegrationHarness'
 import {
+  cobroConTarjeta,
   conProducto,
   debePausarse,
   desenlace,
@@ -288,7 +290,8 @@ describe('carreras con las funciones REALES: bloqueador, espera probada en pg_st
         (e as any)?.code === 'P2034' ||
         /40001/.test(JSON.stringify({ c: (e as any)?.code, m: (e as any)?.meta, msg: (e as any)?.message })),
     )
-  const noEs40P01 = (r: unknown) => expect(JSON.stringify(r ?? null)).not.toMatch(/40P01|deadlock/i)
+  // `message` no es enumerable y Prisma 6.19 pone ahí el SQLSTATE de una consulta de modelo (T1-R1): se revisa aparte.
+  const noEs40P01 = (r: unknown) => expect(JSON.stringify(r ?? null) + String((r as any)?.message ?? '')).not.toMatch(/40P01|deadlock/i)
 
   // Los cuatro caminos que escriben IVA. Una edición espera la fila del producto (cerco negocio → producto); un alta, la del
   // negocio (su `FOR SHARE` tras la organización). En los dos casos ya tiene la organización: el posteo espera detrás.
@@ -362,6 +365,35 @@ describe('carreras con las funciones REALES: bloqueador, espera probada en pg_st
       expect(huboUn40001()).toBe(true)
     },
   )
+
+  // R2: un producto pasa a ≠ 16 % ENTRE la carga y el posteo de la corrida automática ⇒ 409 y cero pólizas.
+  it('(a2) la corrida automática: pasa el aviso temprano, carga sus pagos, su primer posteo espera en Organization y sale 409 sin pólizas', async () => {
+    const x = await nuevoNegocio()
+    const { productId } = await conProducto(x)
+    await cobroConTarjeta(x)
+    const fila = await retener(h().blocker, tx => tx.$queryRaw`SELECT id FROM "Product" WHERE id = ${productId} FOR UPDATE`)
+    let cambio: Promise<unknown> = Promise.resolve()
+    let posteo: Promise<unknown> = Promise.resolve()
+    try {
+      cambio = desenlace(updateProduct(x.venueId, productId, { ivaTratamiento: 'IVA_0' }, actor()))
+      const pidCambio = await esperaDetrasDe(
+        fila.pid,
+        '%FROM "Product" AS product%',
+        'el cambio esperando la fila del producto, con la organización ya tomada',
+      )
+      posteo = generatePoliciesForVenue(x.venueId)
+      posteo.catch(() => undefined)
+      await esperaDetrasDe(pidCambio, '%FROM "Organization"%FOR SHARE%', 'el primer posteo de la corrida esperando la organización')
+    } finally {
+      await fila.soltar()
+    }
+
+    expect(await cambio).toHaveProperty('ok')
+    expect(await tratamiento(productId)).toBe('IVA_0')
+    await debePausarse(posteo)
+    expect(await polizas(x.organizationId)).toBe(0)
+    expect(huboUn40001()).toBe(true)
+  })
 
   // La edición (READ COMMITTED) y el alta del dashboard (Serializable: su foto se fija ANTES de esperar la organización; la
   // póliza que confirma mientras tanto la alcanza SSI, que aborta el alta con 40001 y el reintento de PF3 ve la historia).
