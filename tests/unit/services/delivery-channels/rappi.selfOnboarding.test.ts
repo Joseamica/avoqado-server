@@ -1,5 +1,6 @@
 import {
   aplanarTiendas,
+  cuerpoAprovisionamiento,
   elegirIdToken,
   enLotes,
   hostDeLogin,
@@ -209,5 +210,36 @@ describe('rappi.selfOnboarding', () => {
     })
     expect(leerEstadoAprovisionamiento('x').results).toEqual([])
     expect(leerEstadoAprovisionamiento(null).results).toEqual([])
+  })
+})
+
+describe('cuerpoAprovisionamiento', () => {
+  const cuerpo = cuerpoAprovisionamiento([
+    { storeId: '10', name: 'Sucursal Centro' },
+    { storeId: '11', name: 'Sucursal Norte' },
+  ])
+
+  // R1: `extraerStoreId()` lee `store.external_id` y lo busca en `externalLocationId`, que es el id de RAPPI.
+  // Mandar nuestro id de vínculo dejaría huérfano cada pedido.
+  it('R1: store_integration_id es el storeId de Rappi, no un id nuestro', () => {
+    expect(cuerpo.stores.map(s => [s.store_id, s.store_integration_id])).toEqual([
+      ['10', '10'],
+      ['11', '11'],
+    ])
+  })
+
+  // R2: el default documentado de `cancellation_events` es false: sin esto Rappi no avisa de las cancelaciones.
+  it('R2: cada tienda pide cancellation_events: true', () => {
+    expect(cuerpo.stores.every(s => s.cancellation_events === true)).toBe(true)
+  })
+
+  it('va ACTIVE y con el nombre tal cual', () => {
+    expect(cuerpo.stores[0]).toEqual({
+      store_id: '10',
+      name: 'Sucursal Centro',
+      status: 'ACTIVE',
+      store_integration_id: '10',
+      cancellation_events: true,
+    })
   })
 })

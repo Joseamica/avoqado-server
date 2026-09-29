@@ -97,6 +97,12 @@ export interface RappiPeticion {
   cuerpo?: unknown
   /** Obligatorio en escrituras: es lo que el candado revisa. */
   storeId?: string
+  /** Host alterno: los endpoints del self-onboarding viven en otro dominio que el resto de la API. */
+  host?: string
+  /** El self-onboarding manda DOS tokens: el del integrador (`x-authorization`) y el del comercio. */
+  cabecerasExtra?: Record<string, string>
+  /** Escrituras de varias tiendas (aprovisionar): el candado revisa CADA una. */
+  storeIds?: readonly string[]
 }
 
 /**
@@ -109,10 +115,14 @@ export interface RappiPeticion {
  */
 export async function llamarRappi(deps: RappiHttpDeps, peticion: RappiPeticion): Promise<RappiRespuesta> {
   if (!LECTURAS.has(peticion.metodo.toUpperCase())) {
-    assertTiendaEscribible(peticion.storeId, deps.tiendasEscribibles ?? [])
+    const autorizadas = deps.tiendasEscribibles ?? []
+    const tiendas = peticion.storeIds ?? [peticion.storeId]
+    // Un lote vacío no es un pase libre: sin ninguna tienda que revisar, el candado se niega igual.
+    if (tiendas.length === 0) assertTiendaEscribible(undefined, autorizadas)
+    for (const t of tiendas) assertTiendaEscribible(t, autorizadas)
   }
 
-  const url = `${hostRappi(deps.ambiente, deps.pais)}${peticion.ruta}`
+  const url = `${peticion.host ?? hostRappi(deps.ambiente, deps.pais)}${peticion.ruta}`
 
   const intentar = async (): Promise<RappiRespuesta> => {
     const token = await deps.getToken(peticion.superficie)
@@ -120,6 +130,7 @@ export async function llamarRappi(deps: RappiHttpDeps, peticion: RappiPeticion):
       method: peticion.metodo,
       headers: {
         ...cabeceraRappi(token),
+        ...(peticion.cabecerasExtra ?? {}),
         ...(peticion.cuerpo !== undefined ? { 'content-type': 'application/json' } : {}),
       },
       ...(peticion.cuerpo !== undefined ? { body: JSON.stringify(peticion.cuerpo) } : {}),

@@ -16,9 +16,20 @@
 import { env } from '@/config/env'
 import logger from '@/config/logger'
 
-import { llamarRappi, type AmbienteRappi, type RappiRespuesta } from './rappi.http'
+import { llamarRappi, type AmbienteRappi, type RappiPeticion, type RappiRespuesta } from './rappi.http'
 import { getRappiToken, type SuperficieRappi } from './rappi.token'
 import { aMotivoRappi, type ResultadoRechazo } from './rappi.rejectReason'
+import {
+  aplanarTiendas,
+  cuerpoAprovisionamiento,
+  elegirIdToken,
+  hostDeLogin,
+  leerRespuestaAprovisionamiento,
+  type RespuestaAprovisionamiento,
+  type TiendaRappi,
+} from './rappi.selfOnboarding'
+import { RAPPI_EVENTS } from './rappi.adapter'
+import { RUTA_POR_EVENTO } from './rappi.webhookIngress'
 import type { DenyReason } from '../../core/types'
 
 const API = '/api/v2/restaurants-integrations-public-api'
@@ -73,13 +84,7 @@ async function fetchTokenReal(superficie: SuperficieRappi): Promise<{ access_tok
 }
 
 /** Petición autenticada, con token cacheado y el candado de escrituras ya armados. */
-export async function rappiApi(peticion: {
-  superficie?: SuperficieRappi
-  metodo: string
-  ruta: string
-  cuerpo?: unknown
-  storeId?: string
-}): Promise<RappiRespuesta> {
+export async function rappiApi(peticion: Omit<RappiPeticion, 'superficie'> & { superficie?: SuperficieRappi }): Promise<RappiRespuesta> {
   return llamarRappi(
     {
       ambiente: getRappiEnvironment(),
@@ -197,4 +202,95 @@ export async function habilitarTiendaRappi(
  */
 export async function sondearPedidosRappi(): Promise<RappiRespuesta> {
   return rappiApi({ metodo: 'GET', ruta: `${API}/orders` })
+}
+
+// ────────────────────────────────────────────────────────────────────────────────────
+//  Self-onboarding (spec 2026-09-29) — doc: dev-portal.rappi.com/es/self-onboarding
+// ────────────────────────────────────────────────────────────────────────────────────
+
+export function apiBaseSelfOnboarding(): string {
+  if (env.RAPPI_SELF_ONBOARDING_API_BASE) return env.RAPPI_SELF_ONBOARDING_API_BASE
+  if (getRappiEnvironment() === 'SANDBOX') return 'https://api.dev.rappi.com'
+  throw new Error('Falta RAPPI_SELF_ONBOARDING_API_BASE: Rappi no publica el host de México para el self-onboarding (preguntar al TAM).')
+}
+
+export function redirectUriRappi(): string {
+  if (!env.RAPPI_OAUTH_REDIRECT_BASE) throw new Error('Falta RAPPI_OAUTH_REDIRECT_BASE (debe ser idéntica a la registrada con el TAM).')
+  return `${env.RAPPI_OAUTH_REDIRECT_BASE}/api/v1/delivery/rappi/oauth/callback`
+}
+
+export function clientIdRappi(): string {
+  const { clientId } = credenciales()
+  return clientId
+}
+
+/** Cliente PÚBLICO con PKCE: sin `client_secret` (doc). Devuelve el id_token, nunca el access_token. */
+export async function canjearCodigoRappi(code: string, verifier: string): Promise<string> {
+  const r = await fetch(`${hostDeLogin(getRappiEnvironment())}/oauth/token`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      client_id: clientIdRappi(),
+      code_verifier: verifier,
+      redirect_uri: redirectUriRappi(),
+    }).toString(),
+  })
+  if (!r.ok) {
+    logger.error('🚨 [Rappi] el canje del código falló', { status: r.status })
+    throw new Error(`RAPPI_CANJE_${r.status}`)
+  }
+  return elegirIdToken(await r.json())
+}
+
+const deComercio = (idToken: string) => ({ 'Authorization-Partners': `Bearer ${idToken}` })
+
+export async function tiendasDelComercio(idToken: string): Promise<TiendaRappi[]> {
+  const r = await rappiApi({
+    metodo: 'GET',
+    ruta: `${API}/stores/integration-status`,
+    host: apiBaseSelfOnboarding(),
+    cabecerasExtra: deComercio(idToken),
+  })
+  if (!r.ok) throw new Error(`RAPPI_INTEGRATION_STATUS_${r.status}`)
+  return aplanarTiendas(JSON.parse(r.raw))
+}
+
+export async function aprovisionarTiendasRappi(
+  idToken: string,
+  tiendas: Array<{ storeId: string; name: string }>,
+): Promise<RespuestaAprovisionamiento> {
+  const pedidas = tiendas.map(t => t.storeId)
+  const r = await rappiApi({
+    metodo: 'POST',
+    ruta: `${API}/stores/provisioning`,
+    host: apiBaseSelfOnboarding(),
+    cabecerasExtra: deComercio(idToken),
+    storeIds: pedidas,
+    cuerpo: cuerpoAprovisionamiento(tiendas),
+  })
+  return leerRespuestaAprovisionamiento(r.status, r.raw, pedidas)
+}
+
+/** Eventos cuya URL es POR TIENDA. `STORE_PROVISIONING_STATUS` es por integración: no va aquí. */
+const EVENTOS_POR_TIENDA = Object.entries(RUTA_POR_EVENTO).filter(([, ev]) => ev !== RAPPI_EVENTS.STORE_PROVISIONING_STATUS)
+
+/**
+ * 🔴 El paso que se olvida: una tienda aprovisionada pero sin suscribir a cada webhook queda
+ * "conectada" y no recibe NADA. Se reporta qué eventos fallaron para no promoverla a ACTIVE.
+ */
+export async function suscribirTiendaAEventos(storeId: string): Promise<{ ok: boolean; fallidos: string[] }> {
+  if (!env.RAPPI_WEBHOOK_BASE_URL) throw new Error('Falta RAPPI_WEBHOOK_BASE_URL')
+  const fallidos: string[] = []
+  for (const [segmento, evento] of EVENTOS_POR_TIENDA) {
+    const r = await rappiApi({
+      metodo: 'PUT',
+      ruta: `${API}/webhook/${evento}/add-stores`,
+      storeId,
+      cuerpo: [{ url: `${env.RAPPI_WEBHOOK_BASE_URL}/api/v1/webhooks/delivery/rappi/${segmento}`, stores: [storeId] }],
+    })
+    if (!r.ok) fallidos.push(evento)
+  }
+  return { ok: fallidos.length === 0, fallidos }
 }

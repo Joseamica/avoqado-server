@@ -196,3 +196,64 @@ describe('crearEspaciadorDeSondeo', () => {
     await expect(e.esperarTurno('v1')).resolves.toBeUndefined()
   })
 })
+
+describe('llamarRappi — self-onboarding', () => {
+  const base = { ambiente: 'SANDBOX' as const, getToken: async () => 'tok-integ' }
+
+  it('manda el header del comercio además del del integrador, al host indicado', async () => {
+    const fetchImpl = jest.fn(async () => respuesta(200))
+    await llamarRappi(
+      { ...base, fetchImpl: fetchImpl as never },
+      {
+        superficie: 'integrations',
+        metodo: 'GET',
+        ruta: '/api/v2/restaurants-integrations-public-api/stores/integration-status',
+        host: 'https://api.dev.rappi.com',
+        cabecerasExtra: { 'Authorization-Partners': 'Bearer idt' },
+      },
+    )
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('https://api.dev.rappi.com/api/v2/restaurants-integrations-public-api/stores/integration-status')
+    expect(init.headers).toMatchObject({ 'x-authorization': 'Bearer tok-integ', 'Authorization-Partners': 'Bearer idt' })
+  })
+
+  it('el candado revisa CADA tienda del lote: una fuera de la lista y no sale nada', async () => {
+    const fetchImpl = jest.fn()
+    await expect(
+      llamarRappi(
+        { ...base, fetchImpl: fetchImpl as never, tiendasEscribibles: ['10'] },
+        { superficie: 'integrations', metodo: 'POST', ruta: '/x', storeIds: ['10', '11'], cuerpo: {} },
+      ),
+    ).rejects.toThrow(RappiEscrituraBloqueadaError)
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('un lote donde TODAS están autorizadas sí sale', async () => {
+    const fetchImpl = jest.fn(async () => respuesta(202))
+    await llamarRappi(
+      { ...base, fetchImpl: fetchImpl as never, tiendasEscribibles: ['10', '11'] },
+      { superficie: 'integrations', metodo: 'POST', ruta: '/x', storeIds: ['10', '11'], cuerpo: {} },
+    )
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  // 🔴 Un lote vacío no puede ser un pase libre: `[].every(...)` es true, y por eso se exige al menos una.
+  it('🔴 un lote VACÍO de tiendas no se salta el candado', async () => {
+    const fetchImpl = jest.fn()
+    await expect(
+      llamarRappi(
+        { ...base, fetchImpl: fetchImpl as never, tiendasEscribibles: ['10'] },
+        { superficie: 'integrations', metodo: 'POST', ruta: '/x', storeIds: [], cuerpo: {} },
+      ),
+    ).rejects.toThrow(RappiEscrituraBloqueadaError)
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('sin host ni cabeceras extra todo sigue igual que antes (regresión)', async () => {
+    const fetchImpl = jest.fn(async () => respuesta(200))
+    await llamarRappi({ ...base, fetchImpl: fetchImpl as never }, { superficie: 'integrations', metodo: 'GET', ruta: '/x' })
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('https://microservices.dev.rappi.com/x')
+    expect(Object.keys(init.headers as object)).not.toContain('Authorization-Partners')
+  })
+})

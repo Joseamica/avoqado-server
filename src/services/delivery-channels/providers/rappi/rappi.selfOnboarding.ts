@@ -110,6 +110,26 @@ export function enLotes<T>(xs: readonly T[], n = 20): T[][] {
   return out
 }
 
+/**
+ * El cuerpo de `provisioning`, PURO para poder probarlo (el cliente lee env y no se importa en Jest).
+ *
+ * 🔴 `store_integration_id` es el `storeId` de RAPPI, no un id nuestro (R1): `extraerStoreId()` lee
+ * `store.external_id` primero y lo busca en `externalLocationId`; mandar el id del vínculo dejaría
+ * huérfano cada pedido. Y `cancellation_events: true` (R2) porque su default documentado es `false`:
+ * sin él Rappi no nos avisa de las cancelaciones.
+ */
+export function cuerpoAprovisionamiento(tiendas: ReadonlyArray<{ storeId: string; name: string }>) {
+  return {
+    stores: tiendas.map(t => ({
+      store_id: t.storeId,
+      name: t.name,
+      status: 'ACTIVE' as const,
+      store_integration_id: t.storeId,
+      cancellation_events: true,
+    })),
+  }
+}
+
 export type RespuestaAprovisionamiento = {
   batchId?: string
   aceptadas: Array<{ storeId: string; integrationId?: string }>

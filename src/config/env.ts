@@ -204,6 +204,15 @@ const envSchema = z.object({
   /** Tiendas donde SÍ se puede escribir. Vacía = ninguna (el candado del incidente 2026-08-17). */
   RAPPI_WRITABLE_STORE_IDS_SANDBOX: z.string().optional(),
   RAPPI_WRITABLE_STORE_IDS_PRODUCTION: z.string().optional(),
+  // Self-onboarding (spec 2026-09-29). La llave firma el enlace y cifra el id_token del comercio;
+  // sin ella el flujo se niega a arrancar (igual que Uber con UBER_WEBHOOK_SIGNING_KEY).
+  RAPPI_CONNECT_SIGNING_KEY: z.string().min(32).optional(),
+  RAPPI_OAUTH_REDIRECT_BASE: z.string().url().optional(),
+  // ⚠️ Host de los endpoints de self-onboarding: la doc dice api.dev.rappi.com en desarrollo y NO
+  // publica el de México en producción. Se pregunta al TAM; en PRODUCTION es obligatorio.
+  RAPPI_SELF_ONBOARDING_API_BASE: z.string().url().optional(),
+  // Base pública de NUESTROS webhooks (la URL que se le registra a Rappi en add-stores).
+  RAPPI_WEBHOOK_BASE_URL: z.string().url().optional(),
 
   // Base pública para la URL de retorno del OAuth de Uber (sin barra final). En local
   // es el túnel de ngrok; en prod, https://api.avoqado.io. Debe coincidir EXACTAMENTE
