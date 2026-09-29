@@ -13,7 +13,7 @@ import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
 import { postJournalEntry } from './journalEntry.service'
 import { resolveScopeOrNull } from './chartOfAccounts.service'
-import { esExclusionContable, MOTIVO_CONTABILIDAD_IVA_MIXTO } from './exclusionContable'
+import { contabilidadPausada, esExclusionContable, MOTIVO_CONTABILIDAD_IVA_MIXTO } from './exclusionContable'
 import { ASSET_TYPE_CATALOG, cappedMoiCents, getAssetType, type AssetTypeDef } from './assetTypeCatalog'
 
 export interface RegisterFixedAssetInput {
@@ -195,7 +195,12 @@ async function postDisposalEntry(
       },
       select: { id: true },
     })
-    if (!alta) return { posted: false, reason: 'noAcquisitionEntry' }
+    if (!alta) {
+      // Sin alta porque se registró con la contabilidad ya pausada por IVA mixto: la baja dice por qué (ola 2 · D).
+      if (await contabilidadPausada(scope.organizationId))
+        return { posted: false, reason: 'ivaMixto', message: MOTIVO_CONTABILIDAD_IVA_MIXTO }
+      return { posted: false, reason: 'noAcquisitionEntry' }
+    }
 
     const plug = asset.moiCents - accumulatedCents - proceedsCents // >0 pérdida · <0 ganancia · 0 sin resultado
     const activo = await accountIdByCode(scope, assetLeafCode(asset.assetType))

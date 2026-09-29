@@ -13,6 +13,7 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
     fixedAssetDepreciation: { aggregate: jest.fn() },
     ledgerAccount: { findFirst: jest.fn() },
     journalEntry: { findUnique: jest.fn() },
+    organization: { findUnique: jest.fn() },
   },
 }))
 jest.mock('../../../../src/services/fiscal/journalEntry.service', () => ({ postJournalEntry: jest.fn() }))
@@ -36,6 +37,7 @@ const p = prisma as unknown as {
   fixedAssetDepreciation: { aggregate: jest.Mock }
   ledgerAccount: { findFirst: jest.Mock }
   journalEntry: { findUnique: jest.Mock }
+  organization: { findUnique: jest.Mock }
 }
 const mPost = postJournalEntry as jest.Mock
 const mScope = resolveScopeOrNull as jest.Mock
@@ -58,6 +60,7 @@ beforeEach(() => {
   // Póliza (alta/baja): cuentas del catálogo resueltas por código; sin alta previa; posteo OK.
   p.ledgerAccount.findFirst.mockImplementation(({ where }: any) => Promise.resolve({ id: 'acc-' + where.code }))
   p.journalEntry.findUnique.mockResolvedValue(null)
+  p.organization.findUnique.mockResolvedValue({ ivaMixtoAlgunaVez: false }) // contabilidad sin pausa
   mPost.mockResolvedValue({ id: 'je1' })
 })
 
@@ -331,6 +334,7 @@ describe('póliza de BAJA al libro', () => {
     const r = await disposeFixedAsset('v1', 'fa1', { disposalDate: '2026-06-01' })
     expect(r.ledgerPosted).toBe(false)
     expect(r.ledgerReason).toBe('noAcquisitionEntry')
+    expect(r).not.toHaveProperty('ledgerMessage')
     expect(mPost).not.toHaveBeenCalled()
   })
 })
@@ -358,6 +362,19 @@ describe('pólizas del activo con la contabilidad pausada por IVA mixto', () => 
     const r = await disposeFixedAsset('v1', 'fa1', { disposalDate: '2026-06-01', proceedsCents: 20_000_00 }, 'staff1')
     expect(r).toMatchObject({ ledgerPosted: false, ledgerReason: 'ivaMixto', ledgerMessage: MOTIVO })
     expect(r.asset.status).toBe('DISPOSED')
+  })
+
+  // Ola 2 · D: el alta se registró con la organización YA marcada, así que no hay póliza de alta. La baja lo dice.
+  it('baja sin ALTA porque la contabilidad ya estaba pausada: ledgerReason ivaMixto con el motivo, sin postear', async () => {
+    p.fixedAsset.findFirst.mockResolvedValue(assetRow())
+    p.fixedAssetDepreciation.aggregate.mockResolvedValue({ _sum: { depreciationCents: 12_000_00 } })
+    p.fixedAsset.update.mockImplementation(({ data }: any) => Promise.resolve(assetRow(data)))
+    p.organization.findUnique.mockResolvedValue({ ivaMixtoAlgunaVez: true })
+    const r = await disposeFixedAsset('v1', 'fa1', { disposalDate: '2026-06-01' }, 'staff1')
+    expect(r).toMatchObject({ ledgerPosted: false, ledgerReason: 'ivaMixto', ledgerMessage: MOTIVO })
+    expect(r.asset.status).toBe('DISPOSED')
+    expect(p.organization.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'org1' } }))
+    expect(mPost).not.toHaveBeenCalled()
   })
 
   it('cualquier otro fallo del posteo sigue siendo reason error, sin mensaje', async () => {
