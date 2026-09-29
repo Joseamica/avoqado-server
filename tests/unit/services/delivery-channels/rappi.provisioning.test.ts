@@ -1,0 +1,456 @@
+// El servicio compartido de intents importa el env al cargarse; el objeto vive DENTRO de la fábrica (TDZ).
+jest.mock('@/config/env', () => ({ env: {} }))
+
+import logger from '@/config/logger'
+import prisma from '../../../../src/utils/prismaClient'
+import { RappiEscrituraBloqueadaError } from '../../../../src/services/delivery-channels/providers/rappi/rappi.http'
+import {
+  activarSeleccion,
+  cerrarSiTodoFinal,
+  confirmarTienda,
+  type ProvisioningDeps,
+} from '../../../../src/services/delivery-channels/providers/rappi/rappi.provisioning'
+
+/**
+ * Una base EN MEMORIA con sólo las operaciones que usa el módulo: los vínculos por `storeId` y los
+ * intents por id. El `$executeRaw` de resultados aplica de verdad el merge de `mezclaResultadoSql` y
+ * respeta el candado de «no degradar un final» SÓLO si la sentencia lo trae — así una prueba de
+ * orden no puede pasar por el motivo equivocado (R14).
+ */
+type Fila = Record<string, any>
+const db = { links: new Map<string, Fila>(), intents: new Map<string, Fila>() }
+const p = prisma as any
+const L = p.deliveryChannelLink
+const I = p.deliveryConnectIntent
+let sqlLeidos: string[] = []
+
+const esSql = (v: any): v is { sql: string; values: unknown[] } => !!v && Array.isArray(v.values) && Array.isArray(v.strings)
+const porId = (id: string) => [...db.links.values()].find(f => f.id === id) as Fila
+
+beforeEach(() => {
+  db.links.clear()
+  db.intents.clear()
+  sqlLeidos = []
+  let n = 0
+  p.$queryRaw.mockReset().mockImplementation(async (s: TemplateStringsArray, storeId: string) => {
+    sqlLeidos.push(s.join('?'))
+    const f = db.links.get(storeId)
+    return f ? [{ id: f.id, venueId: f.venueId, status: f.status, config: f.config ?? null }] : []
+  })
+  L.createMany.mockReset().mockImplementation(async ({ data }: { data: Fila[] }) => {
+    let count = 0
+    for (const d of data)
+      if (!db.links.has(d.externalLocationId)) {
+        db.links.set(d.externalLocationId, { id: `l${++n}`, config: null, ...d })
+        count++
+      }
+    return { count }
+  })
+  L.update.mockReset().mockImplementation(async ({ where, data }: Fila) => Object.assign(porId(where.id), data))
+  L.delete.mockReset().mockImplementation(async ({ where }: Fila) => {
+    const f = porId(where.id)
+    db.links.delete(f.externalLocationId)
+    return f
+  })
+  I.findUnique.mockReset().mockImplementation(async ({ where }: Fila) => db.intents.get(where.id) ?? null)
+  I.updateMany.mockReset().mockImplementation(async ({ where, data }: Fila) => {
+    const i = db.intents.get(where.id)
+    const estados = typeof where.state === 'string' ? [where.state] : where.state.in
+    if (!i || !estados.includes(i.state)) return { count: 0 }
+    Object.assign(i, data)
+    return { count: 1 }
+  })
+  p.$executeRaw.mockReset().mockImplementation(async (_s: TemplateStringsArray, ...v: unknown[]) => {
+    const sqls = v.filter(esSql)
+    const mezcla = sqls.find(x => x.sql.includes('jsonb_build_object'))
+    const intento = db.intents.get(v.find((x): x is string => typeof x === 'string' && db.intents.has(x)) ?? '')
+    if (!mezcla || !intento) return 0
+    const [storeId, , json] = mezcla.values as [string, string, string]
+    const finales = sqls.find(x => x.values.includes('ACTIVATED'))?.values ?? []
+    const previo = intento.resultsJson?.[storeId]
+    if (finales.includes(previo?.outcome)) return 0
+    intento.resultsJson = { ...(intento.resultsJson ?? {}), [storeId]: { ...previo, ...JSON.parse(json) } }
+    return 1
+  })
+})
+
+function sembrar(over: Fila = {}): never {
+  const i = {
+    id: 'i1',
+    venueId: 'v1',
+    state: 'ACTIVATING',
+    provider: 'RAPPI',
+    orderAcceptanceMode: 'AUTO',
+    expiresAt: new Date(Date.now() + 60_000),
+    selectionJson: ['10'],
+    resultsJson: null,
+    ...over,
+  }
+  db.intents.set(i.id, i)
+  return { ...i } as never
+}
+const tienda = (storeId: string) => ({ storeId, name: `T${storeId}`, integrated: false })
+const resultado = (s: string, intentId = 'i1') => db.intents.get(intentId)?.resultsJson?.[s]
+const aprov = (s: string) => db.links.get(s)?.config?.rappiProvisioning
+const vinculo = (storeId: string, over: Fila = {}) =>
+  db.links.set(storeId, { id: `x${storeId}`, externalLocationId: storeId, venueId: 'v1', status: 'PENDING', config: null, ...over })
+
+function deps(over: Partial<ProvisioningDeps> = {}) {
+  return {
+    aprovisionar: jest.fn(async (_t: string, ts: Array<{ storeId: string }>) => ({
+      batchId: 'b1',
+      aceptadas: ts.map(t => ({ storeId: t.storeId, integrationId: `int${t.storeId}` })),
+      rechazadas: [],
+      inciertas: [],
+    })),
+    suscribir: jest.fn(async () => ({ ok: true, fallidos: [] as string[] })),
+    tiendasEscribibles: ['10', '11', '12'],
+    ...over,
+  } as ProvisioningDeps & { aprovisionar: jest.Mock; suscribir: jest.Mock }
+}
+
+describe('activarSeleccion', () => {
+  // 🔴 Review Focus 1
+  it('una tienda de OTRO negocio: OTHER_VENUE, sin llamar a Rappi y sin tocar su vínculo', async () => {
+    vinculo('10', { venueId: 'OTRO', status: 'ACTIVE', config: { rappiPendingMenuHash: 'h' } })
+    const d = deps()
+    const r = await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(r['10'].outcome).toBe('OTHER_VENUE')
+    expect(resultado('10').outcome).toBe('OTHER_VENUE')
+    expect(d.aprovisionar).not.toHaveBeenCalled()
+    expect(db.links.get('10')).toMatchObject({ venueId: 'OTRO', status: 'ACTIVE', config: { rappiPendingMenuHash: 'h' } })
+  })
+
+  it('fuera de la lista del piloto: ni vínculo ni HTTP, y nunca viaja en el lote de las demás', async () => {
+    const d = deps()
+    const r = await activarSeleccion(sembrar({ selectionJson: ['10', '99'] }), 'idt', [tienda('10'), tienda('99')], d)
+    expect(r['99'].outcome).toBe('NOT_ENABLED_FOR_PILOT')
+    expect(db.links.has('99')).toBe(false)
+    expect(d.aprovisionar).toHaveBeenCalledTimes(1)
+    expect(d.aprovisionar).toHaveBeenCalledWith('idt', [{ storeId: '10', name: 'T10' }])
+  })
+
+  it('reclama PENDING bajo FOR UPDATE, sin activatingIntentId, y anota PROVISIONING ANTES del HTTP', async () => {
+    const d = deps({
+      aprovisionar: jest.fn(async () => {
+        expect(resultado('10').outcome).toBe('PROVISIONING') // R5: escrito antes de salir a la red
+        return { batchId: 'b1', aceptadas: [{ storeId: '10', integrationId: 'int10' }], rechazadas: [], inciertas: [] }
+      }),
+    })
+    const r = await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    const creada = L.createMany.mock.calls[0][0].data[0]
+    expect(creada).toMatchObject({
+      provider: 'RAPPI',
+      externalLocationId: '10',
+      externalAccountId: 'T10',
+      status: 'PENDING',
+      venueId: 'v1',
+      activatingIntentId: null,
+    })
+    expect(creada.ownerAuthorizedAt).toBeInstanceOf(Date)
+    expect(creada.webhookSecret).toMatch(/^[0-9a-f]{64}$/)
+    expect(sqlLeidos[0]).toContain('FOR UPDATE')
+    expect(d.aprovisionar).toHaveBeenCalledTimes(1)
+    expect(r['10'].outcome).toBe('PROVISIONING')
+    expect(db.links.get('10')!.activatingIntentId).toBeNull()
+    expect(aprov('10')).toMatchObject({ intentId: 'i1', batchId: 'b1', integrationId: 'int10', creado: true })
+    expect(JSON.stringify(p.$executeRaw.mock.calls)).not.toContain('creoVinculo')
+  })
+
+  it('su PRIMERA escritura alarga el intent 24 h (sin eso el re-chequeo lo vería EXPIRED y borraría el token)', async () => {
+    await activarSeleccion(sembrar(), 'idt', [tienda('10')], deps())
+    expect(I.updateMany.mock.invocationCallOrder[0]).toBeLessThan(L.createMany.mock.invocationCallOrder[0])
+    const falta = db.intents.get('i1')!.expiresAt.getTime() - Date.now()
+    expect(falta).toBeGreaterThan(23 * 3_600_000)
+  })
+
+  it('un intent que ya no está ACTIVATING no hace nada', async () => {
+    const d = deps()
+    expect(await activarSeleccion(sembrar({ state: 'FAILED' }), 'idt', [tienda('10')], d)).toEqual({})
+    expect(L.createMany).not.toHaveBeenCalled()
+    expect(d.aprovisionar).not.toHaveBeenCalled()
+  })
+
+  it('reclamada por OTRA intención viva: CLAIMED_BY_OTHER, sin HTTP', async () => {
+    sembrar({ id: 'i0', state: 'ACTIVATING' })
+    vinculo('10', { config: { rappiProvisioning: { intentId: 'i0', since: 'x', batchId: 'b0' } } })
+    const d = deps()
+    const r = await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(r['10'].outcome).toBe('CLAIMED_BY_OTHER')
+    expect(d.aprovisionar).not.toHaveBeenCalled()
+    expect(aprov('10')).toMatchObject({ intentId: 'i0', batchId: 'b0' })
+  })
+
+  it('la de una intención MUERTA se retoma, y el lote viejo no sobrevive a la reclamación nueva', async () => {
+    sembrar({ id: 'i0', state: 'EXPIRED' })
+    vinculo('10', { config: { rappiProvisioning: { intentId: 'i0', since: 'x', batchId: 'viejo', creado: true } } })
+    const d = deps({ aprovisionar: jest.fn(async () => ({ aceptadas: [], rechazadas: [], inciertas: ['10'] })) })
+    await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(d.aprovisionar).toHaveBeenCalledTimes(1)
+    expect(aprov('10').intentId).toBe('i1')
+    expect(aprov('10').batchId).toBeUndefined()
+  })
+
+  it('mismo negocio y ya ACTIVE: ALREADY_CONNECTED, y se cierra el intent (todo final)', async () => {
+    vinculo('10', { status: 'ACTIVE' })
+    const d = deps()
+    const r = await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(r['10'].outcome).toBe('ALREADY_CONNECTED')
+    expect(d.aprovisionar).not.toHaveBeenCalled()
+    expect(db.intents.get('i1')).toMatchObject({ state: 'CONSUMED', merchantTokenEnvelope: null })
+  })
+
+  it('rechazada por Rappi: REJECTED y se borra el vínculo que CREÓ esta reclamación', async () => {
+    const d = deps({
+      aprovisionar: jest.fn(async () => ({ aceptadas: [], rechazadas: [{ storeId: '10', motivo: 'not_owned' }], inciertas: [] })),
+    })
+    const r = await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(r['10']).toEqual({ outcome: 'REJECTED', detalle: 'not_owned' })
+    expect(resultado('10')).toMatchObject({ outcome: 'REJECTED', detalle: 'not_owned' })
+    expect(db.links.has('10')).toBe(false)
+  })
+
+  it('rechazada una tienda que estaba DISABLED: se restaura, no se borra (su historial y su config siguen)', async () => {
+    vinculo('10', { status: 'DISABLED', config: { rappiPendingMenuHash: 'h' } })
+    const d = deps({
+      aprovisionar: jest.fn(async () => ({ aceptadas: [], rechazadas: [{ storeId: '10', motivo: 'not_owned' }], inciertas: [] })),
+    })
+    await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(db.links.get('10')).toMatchObject({ status: 'DISABLED', config: { rappiPendingMenuHash: 'h' } })
+    expect(aprov('10')).toBeUndefined()
+  })
+
+  it('la reclamación MEZCLA config: rappiPendingMenuHash sobrevive', async () => {
+    vinculo('10', { status: 'DISABLED', config: { rappiPendingMenuHash: 'h' } })
+    await activarSeleccion(sembrar(), 'idt', [tienda('10')], deps())
+    expect(db.links.get('10')!.config).toMatchObject({
+      rappiPendingMenuHash: 'h',
+      rappiProvisioning: { intentId: 'i1', statusPrevio: 'DISABLED' },
+    })
+    expect(db.links.get('10')!.status).toBe('PENDING')
+  })
+
+  it('el candado de la capa baja lanza: NOT_ENABLED_FOR_PILOT y se suelta el vínculo (no salió nada)', async () => {
+    const d = deps({
+      aprovisionar: jest.fn(async () => {
+        throw new RappiEscrituraBloqueadaError('10')
+      }),
+    })
+    const r = await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(r['10'].outcome).toBe('NOT_ENABLED_FOR_PILOT')
+    expect(db.links.has('10')).toBe(false)
+  })
+
+  it('un error de red: UNCERTAIN, conserva el vínculo PENDING y su reclamación, y el log no trae el token', async () => {
+    const d = deps({
+      aprovisionar: jest.fn(async () => {
+        throw new Error('socket hang up')
+      }),
+    })
+    const r = await activarSeleccion(sembrar(), 'id-token-secreto', [tienda('10')], d)
+    expect(r['10'].outcome).toBe('UNCERTAIN')
+    expect(db.links.get('10')!.status).toBe('PENDING')
+    expect(aprov('10').intentId).toBe('i1')
+    expect(logger.error).toHaveBeenCalledWith(expect.any(String), { intentId: 'i1', storeIds: ['10'], error: 'socket hang up' })
+    expect(JSON.stringify((logger.error as jest.Mock).mock.calls)).not.toContain('id-token-secreto')
+    expect(db.intents.get('i1')!.state).toBe('ACTIVATING')
+  })
+
+  it('202 sin decir nada de la tienda: UNCERTAIN y guarda el batchId para que el webhook la reconozca', async () => {
+    const d = deps({ aprovisionar: jest.fn(async () => ({ batchId: 'b1', aceptadas: [], rechazadas: [], inciertas: ['10'] })) })
+    const r = await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(r['10'].outcome).toBe('UNCERTAIN')
+    expect(aprov('10')).toMatchObject({ intentId: 'i1', batchId: 'b1' })
+    expect(aprov('10').integrationId).toBeUndefined()
+  })
+
+  it('lotes de 20', async () => {
+    const ids = Array.from({ length: 21 }, (_, k) => String(100 + k))
+    const d = deps({ tiendasEscribibles: ids })
+    await activarSeleccion(sembrar({ selectionJson: ids }), 'idt', ids.map(tienda), d)
+    expect(d.aprovisionar.mock.calls.map(c => c[1].length)).toEqual([20, 1])
+  })
+})
+
+describe('confirmarTienda', () => {
+  const reclamada = (over: Fila = {}) =>
+    vinculo('10', {
+      config: { rappiProvisioning: { intentId: 'i1', since: 'x', batchId: 'b1', integrationId: 'int10', creado: true, ...over } },
+    })
+
+  // 🔴 Review Focus 5
+  it('ACTIVE sin vínculo nuestro: IGNORED, nunca crea uno ni suscribe', async () => {
+    const d = deps()
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, d)).toBe('IGNORED')
+    expect(L.createMany).not.toHaveBeenCalled()
+    expect(L.create).not.toHaveBeenCalled()
+    expect(d.suscribir).not.toHaveBeenCalled()
+    expect(db.links.size).toBe(0)
+    expect(logger.error).toHaveBeenCalled()
+  })
+
+  it('ACTIVE sobre un vínculo PENDING sin reclamación de Rappi (otro camino): IGNORED', async () => {
+    vinculo('10')
+    const d = deps()
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, d)).toBe('IGNORED')
+    expect(db.links.get('10')!.status).toBe('PENDING')
+    expect(d.suscribir).not.toHaveBeenCalled()
+  })
+
+  // R7: lote viejo
+  it('un batchId distinto del guardado: IGNORED y no borra nada', async () => {
+    sembrar()
+    reclamada()
+    expect(await confirmarTienda({ storeId: '10', status: 'FAILED', batchId: 'viejo' }, deps())).toBe('IGNORED')
+    expect(db.links.get('10')!.status).toBe('PENDING')
+  })
+
+  it('undefined === undefined no confirma: ni sin lote de los dos lados, ni con lote vacío', async () => {
+    sembrar()
+    vinculo('10', { config: { rappiProvisioning: { intentId: 'i1', since: 'x' } } })
+    const d = deps()
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE' }, d)).toBe('IGNORED')
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: '' }, d)).toBe('IGNORED')
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE' }, d, { intentId: 'i1' })).toBe('IGNORED')
+    expect(d.suscribir).not.toHaveBeenCalled()
+  })
+
+  it('ACTIVE con el lote nuestro: suscribe ANTES de promover; ACTIVATED; no toca activatingIntentId ni ownerAuthorizedAt; cierra el intent', async () => {
+    sembrar()
+    reclamada()
+    const orden: string[] = []
+    const d = deps({ suscribir: jest.fn(async () => (orden.push('suscribir'), { ok: true, fallidos: [] })) })
+    const update = L.update.getMockImplementation()
+    L.update.mockImplementation(async (a: Fila) => (orden.push('promover'), update(a)))
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, d)).toBe('PROMOTED')
+    expect(orden).toEqual(['suscribir', 'promover'])
+    expect(L.update.mock.calls[0][0].data).not.toHaveProperty('activatingIntentId')
+    expect(L.update.mock.calls[0][0].data).not.toHaveProperty('ownerAuthorizedAt')
+    expect(db.links.get('10')!.status).toBe('ACTIVE')
+    expect(aprov('10').confirmedAt).toEqual(expect.any(String))
+    expect(resultado('10').outcome).toBe('ACTIVATED')
+    expect(db.intents.get('i1')!.state).toBe('CONSUMED')
+  })
+
+  it('ACTIVE con el lote nuestro pero OTRO integrationId: IGNORED', async () => {
+    sembrar()
+    reclamada()
+    const d = deps()
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1', integrationId: 'ajeno' }, d)).toBe('IGNORED')
+    expect(d.suscribir).not.toHaveBeenCalled()
+  })
+
+  it('re-chequeo: misma intención + mismo integrationId promueve; otro integrationId o sin guardado, no', async () => {
+    sembrar()
+    reclamada({ batchId: undefined })
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', integrationId: 'otro' }, deps(), { intentId: 'i1' })).toBe('IGNORED')
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', integrationId: 'int10' }, deps(), { intentId: 'i9' })).toBe('IGNORED')
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', integrationId: 'int10' }, deps(), { intentId: 'i1' })).toBe('PROMOTED')
+  })
+
+  it('si suscribir falla: SUBSCRIBE_FAILED, el vínculo sigue PENDING y el intent no se cierra', async () => {
+    sembrar()
+    reclamada()
+    const d = deps({ suscribir: jest.fn(async () => ({ ok: false, fallidos: ['NEW_ORDER'] })) })
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, d)).toBe('SUBSCRIBE_FAILED')
+    expect(db.links.get('10')!.status).toBe('PENDING')
+    expect(resultado('10')).toMatchObject({ outcome: 'SUBSCRIBE_FAILED', detalle: 'NEW_ORDER' })
+    expect(db.intents.get('i1')!.state).toBe('ACTIVATING')
+  })
+
+  // R5: webhook y re-chequeo al mismo tiempo — el que falla tarde no deshace el que ganó.
+  it('un SUBSCRIBE_FAILED tardío no degrada un ACTIVATED', async () => {
+    sembrar()
+    reclamada()
+    const gana = deps()
+    const pierde = deps({
+      suscribir: jest.fn(async () => {
+        expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', integrationId: 'int10' }, gana, { intentId: 'i1' })).toBe(
+          'PROMOTED',
+        )
+        return { ok: false, fallidos: ['NEW_ORDER'] }
+      }),
+    })
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, pierde)).toBe('SUBSCRIBE_FAILED')
+    expect(resultado('10').outcome).toBe('ACTIVATED')
+    expect(db.links.get('10')!.status).toBe('ACTIVE')
+  })
+
+  it('FAILED con el lote nuestro: borra el vínculo que creamos y anota FAILED', async () => {
+    sembrar()
+    reclamada()
+    expect(await confirmarTienda({ storeId: '10', status: 'FAILED', batchId: 'b1', errorMessage: 'menú inválido' }, deps())).toBe('REMOVED')
+    expect(db.links.has('10')).toBe(false)
+    expect(resultado('10')).toMatchObject({ outcome: 'FAILED', detalle: 'menú inválido' })
+  })
+
+  it('INACTIVE con el lote nuestro: DISABLED y suelta la reclamación', async () => {
+    sembrar()
+    reclamada()
+    expect(await confirmarTienda({ storeId: '10', status: 'INACTIVE', batchId: 'b1' }, deps())).toBe('DISABLED')
+    expect(db.links.get('10')!.status).toBe('DISABLED')
+    expect(aprov('10')).toBeUndefined()
+    expect(resultado('10').outcome).toBe('FAILED')
+  })
+
+  it('la confirmación repetida de una tienda ya activa: IGNORED sin alarma', async () => {
+    sembrar()
+    reclamada()
+    await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, deps())
+    ;(logger.error as jest.Mock).mockClear()
+    const d = deps()
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, d)).toBe('IGNORED')
+    expect(d.suscribir).not.toHaveBeenCalled()
+    expect(logger.error).not.toHaveBeenCalled()
+  })
+})
+
+describe('orden webhook ↔ 202 (R14)', () => {
+  // El webhook llega DESPUÉS de que guardamos el lote y ANTES de que terminemos de procesar el 202.
+  it('webhook ACTIVE primero, luego el resto del 202: el resultado final sigue ACTIVATED', async () => {
+    const d = deps()
+    const update = L.update.getMockImplementation()
+    let disparado = false
+    L.update.mockImplementation(async (a: Fila) => {
+      const r = await update(a)
+      if (!disparado && a.data.config?.rappiProvisioning?.batchId) {
+        disparado = true
+        expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, d)).toBe('PROMOTED')
+      }
+      return r
+    })
+    await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(disparado).toBe(true)
+    expect(resultado('10').outcome).toBe('ACTIVATED')
+    expect(db.links.get('10')!.status).toBe('ACTIVE')
+    expect(db.intents.get('i1')!.state).toBe('CONSUMED')
+  })
+
+  it('webhook ANTES de guardar el lote: se ignora (no hay prueba), y el re-chequeo la rescata por integrationId', async () => {
+    const d = deps({
+      aprovisionar: jest.fn(async () => {
+        expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, d)).toBe('IGNORED')
+        return { batchId: 'b1', aceptadas: [{ storeId: '10', integrationId: 'int10' }], rechazadas: [], inciertas: [] }
+      }),
+    })
+    await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(resultado('10').outcome).toBe('PROVISIONING')
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', integrationId: 'int10' }, d, { intentId: 'i1' })).toBe('PROMOTED')
+    expect(resultado('10').outcome).toBe('ACTIVATED')
+  })
+})
+
+describe('cerrarSiTodoFinal', () => {
+  it('recorre la SELECCIÓN: parcial, vacía o con UNCERTAIN no cierra; todo final sí', async () => {
+    sembrar({ selectionJson: ['10', '11'], resultsJson: { '10': { outcome: 'ACTIVATED' } } })
+    expect(await cerrarSiTodoFinal('i1')).toBe(false)
+    db.intents.get('i1')!.resultsJson = { '10': { outcome: 'ACTIVATED' }, '11': { outcome: 'UNCERTAIN' } }
+    expect(await cerrarSiTodoFinal('i1')).toBe(false)
+    db.intents.get('i1')!.selectionJson = []
+    expect(await cerrarSiTodoFinal('i1')).toBe(false)
+    db.intents.get('i1')!.selectionJson = ['10', '11']
+    db.intents.get('i1')!.resultsJson = { '10': { outcome: 'ACTIVATED' }, '11': { outcome: 'REJECTED' } }
+    expect(await cerrarSiTodoFinal('i1')).toBe(true)
+    expect(db.intents.get('i1')!.state).toBe('CONSUMED')
+  })
+})
