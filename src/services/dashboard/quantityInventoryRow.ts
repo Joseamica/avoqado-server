@@ -11,17 +11,14 @@ import type { InventoryMethod, Prisma } from '@prisma/client'
  * asistente). `skipDuplicates` = `ON CONFLICT DO NOTHING`: una fila existente no se toca, y dos
  * activaciones simultáneas no chocan. Módulo sin `prisma` a propósito: recibe la transacción,
  * así ningún `jest.mock` de un servicio de inventario lo deja `undefined` en su llamador.
- *
- * Devuelve `true` si la fila nació aquí (quien ya leyó el producto con su `inventory` la relee).
  */
 export async function ensureQuantityInventoryRow(
   tx: Pick<Prisma.TransactionClient, 'inventory'>,
   product: { id: string; venueId: string; trackInventory: boolean; inventoryMethod: InventoryMethod | null },
-): Promise<boolean> {
-  if (!product.trackInventory || product.inventoryMethod !== 'QUANTITY') return false
-  const { count } = await tx.inventory.createMany({
+): Promise<void> {
+  if (!product.trackInventory || product.inventoryMethod !== 'QUANTITY') return
+  await tx.inventory.createMany({
     data: [{ productId: product.id, venueId: product.venueId, currentStock: 0, minimumStock: 0 }],
     skipDuplicates: true,
   })
-  return count > 0
 }

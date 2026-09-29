@@ -286,8 +286,10 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
       })
       const updated = await tx.product.update({ where: { id: productId }, data, include: productInclude })
       // Artículos de Android e iOS activan «por cantidad» por aquí, no por el servicio del dashboard.
-      // Si la fila nació ahora, la respuesta la lleva (el `include` se leyó antes de crearla).
-      if (await ensureQuantityInventoryRow(tx, updated)) {
+      await ensureQuantityInventoryRow(tx, updated)
+      // El `include` se leyó ANTES de la fila: la haya creado el helper o, en carrera, el asistente,
+      // la respuesta describe lo que quedó en la base.
+      if (!updated.inventory) {
         updated.inventory = await tx.inventory.findUnique({ where: { productId } })
       }
       return updated
