@@ -31,7 +31,8 @@ const PRODUCT_TYPE_MAP: Record<string, ProductType> = {
 /** Find products in scope by (partial, case-insensitive) name — shared by the menu tools. */
 async function matchProductsByName(venueWhere: { venueId: { in: string[] } }, name: string) {
   return prisma.product.findMany({
-    where: { ...venueWhere, name: { contains: name, mode: 'insensitive' } },
+    // Plan 5 (D6): un producto archivado no se busca ni se «des-86»; regresa importándolo.
+    where: { ...venueWhere, deletedAt: null, name: { contains: name, mode: 'insensitive' } },
     select: { id: true, name: true, active: true, price: true },
     take: 10,
   })
@@ -54,6 +55,7 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
       const products = await prisma.product.findMany({
         where: {
           ...where,
+          deletedAt: null, // Plan 5 (D6): los archivados no son parte del menú
           ...(search ? { name: { contains: search, mode: 'insensitive' as const } } : {}),
           ...(activeOnly ? { active: true } : {}),
         },
@@ -328,7 +330,7 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       const cats = await prisma.menuCategory.findMany({
         where: { ...where, ...(includeInactive ? {} : { active: true }) },
-        select: { name: true, description: true, active: true, _count: { select: { products: true } } },
+        select: { name: true, description: true, active: true, _count: { select: { products: { where: { deletedAt: null } } } } },
         orderBy: { displayOrder: 'asc' },
       })
       return text({

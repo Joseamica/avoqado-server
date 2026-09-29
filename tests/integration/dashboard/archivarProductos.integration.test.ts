@@ -7,6 +7,8 @@ import { readFileSync } from 'fs'
 import path from 'path'
 
 import prisma from '@/utils/prismaClient'
+import { deleteMenuCategory } from '@/services/dashboard/menu.dashboard.service'
+import { deleteProduct } from '@/services/dashboard/product.dashboard.service'
 import { limpiarNegocios, nuevoNegocio, type Negocio } from '../fiscal/exclusionContable.fixtures'
 
 jest.setTimeout(120_000)
@@ -43,5 +45,17 @@ describe('D1 · archivar es deletedAt + deletedBy + active=false', () => {
       await prisma.product.findUniqueOrThrow({ where: { id: viejo }, select: { active: true, deletedAt: true, deletedBy: true } }),
     ).toEqual({ active: false, deletedAt: cuando, deletedBy: 'staff-viejo' })
     expect((await prisma.product.findUniqueOrThrow({ where: { id: vivo } })).active).toBe(true)
+  })
+})
+
+describe('D6 · borrar una categoría cuyo único contenido es un archivado (Review Focus 4)', () => {
+  it('se APAGA en vez del 500 de la llave RESTRICT, y el archivado sigue en ella', async () => {
+    const x = await nuevoNegocio({ contabilidad: false })
+    const pay = await producto(x, 'Pay')
+    const { categoryId } = await prisma.product.findUniqueOrThrow({ where: { id: pay }, select: { categoryId: true } })
+    await deleteProduct(x.venueId, pay, 'staff-plan5')
+
+    await expect(deleteMenuCategory(x.venueId, categoryId)).resolves.toMatchObject({ id: categoryId, active: false })
+    expect(await prisma.product.findUniqueOrThrow({ where: { id: pay }, select: { categoryId: true } })).toEqual({ categoryId })
   })
 })

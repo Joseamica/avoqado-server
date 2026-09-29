@@ -37,7 +37,7 @@ export async function getMenus(venueId: string): Promise<Menu[]> {
         include: {
           category: {
             include: {
-              products: true,
+              products: { where: { deletedAt: null } },
             },
           },
         },
@@ -170,7 +170,7 @@ export async function getMenuCategoryById(venueId: string, categoryId: string): 
   const category = await prisma.menuCategory.findUnique({
     where: { id: categoryId, venueId },
     include: {
-      products: true,
+      products: { where: { deletedAt: null } },
       menus: {
         include: {
           menu: true,
@@ -196,7 +196,7 @@ export async function listMenuCategoriesForVenue(venueId: string): Promise<MenuC
         orderBy: { displayOrder: 'asc' },
         include: { children: true },
       },
-      products: { orderBy: { displayOrder: 'asc' } },
+      products: { where: { deletedAt: null }, orderBy: { displayOrder: 'asc' } },
     },
   })
 }
@@ -381,18 +381,19 @@ export async function deleteMenuCategory(venueId: string, categoryId: string): P
     throw new NotFoundError(`Menu category with ID ${categoryId} not found in venue ${venueId}.`)
   }
 
-  // Basic check: prevent deletion if category has products or children, or implement cascading logic
-  // For now, let Prisma's onDelete Cascade handle it if configured, or throw error
-  const productCount = await prisma.product.count({ where: { categoryId } })
+  // Plan 5 (D6, Ruling P5-R7): los productos ARCHIVADOS no cuentan — el dueño ya no los ve. Pero `Product.categoryId` es
+  // RESTRICT: una categoría que sólo conserva archivados no se puede borrar de verdad; se APAGA, como en «Reemplazar menú».
+  const productCount = await prisma.product.count({ where: { categoryId, deletedAt: null } })
   if (productCount > 0) {
     throw new BadRequestError('Cannot delete category: it still contains products. Please move or delete them first.')
   }
   if (category.children && category.children.length > 0) {
     throw new BadRequestError('Cannot delete category: it still has sub-categories. Please delete them first.')
   }
+  const conArchivados = (await prisma.product.count({ where: { categoryId } })) > 0
 
-  // Delete image from Firebase Storage if it exists
-  if (category.imageUrl) {
+  // Delete image from Firebase Storage if it exists (apagada, la conserva para cuando una importación la traiga de vuelta)
+  if (category.imageUrl && !conArchivados) {
     logger.info(`🗑️  Deleting category image from storage: ${category.imageUrl}`)
     await deleteFileFromStorage(category.imageUrl).catch(error => {
       logger.error(`❌ Failed to delete category image from storage`, error)
@@ -400,7 +401,9 @@ export async function deleteMenuCategory(venueId: string, categoryId: string): P
     })
   }
 
-  const deletedCategory = await prisma.menuCategory.delete({ where: { id: categoryId } })
+  const deletedCategory = conArchivados
+    ? await prisma.menuCategory.update({ where: { id: categoryId }, data: { active: false } })
+    : await prisma.menuCategory.delete({ where: { id: categoryId } })
 
   // 🔌 REAL-TIME: Broadcast category deletion via Socket.IO
   const broadcastingService = socketManager.getBroadcastingService()
@@ -487,7 +490,7 @@ export async function createMenu(venueId: string, data: CreateMenuDto): Promise<
         include: {
           category: {
             include: {
-              products: true,
+              products: { where: { deletedAt: null } },
             },
           },
         },
@@ -510,6 +513,7 @@ export async function getMenuById(venueId: string, menuId: string): Promise<Menu
           category: {
             include: {
               products: {
+                where: { deletedAt: null },
                 orderBy: { displayOrder: 'asc' },
                 include: {
                   modifierGroups: {
@@ -600,7 +604,7 @@ export async function updateMenu(venueId: string, menuId: string, data: UpdateMe
             include: {
               category: {
                 include: {
-                  products: true,
+                  products: { where: { deletedAt: null } },
                 },
               },
             },
@@ -623,7 +627,7 @@ export async function updateMenu(venueId: string, menuId: string, data: UpdateMe
         include: {
           category: {
             include: {
-              products: true,
+              products: { where: { deletedAt: null } },
             },
           },
         },

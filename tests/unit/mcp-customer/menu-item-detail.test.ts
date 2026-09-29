@@ -130,3 +130,24 @@ describe('menu_item_detail', () => {
     expect(out.item.inventoryTracking).toBeNull()
   })
 })
+
+describe('plan 5 (D6) · el MCP no muestra ni «des-86» productos archivados', () => {
+  const tool = (nombre: string) => (args: Record<string, unknown>) => handlers.get(nombre)!(args, {})
+  const pideVigentes = expect.objectContaining({ where: expect.objectContaining({ deletedAt: null }) })
+
+  it('list_menu', async () => {
+    mockProductFindMany.mockResolvedValueOnce([])
+    await tool('list_menu')({ venueId: 'v1' })
+    expect(mockProductFindMany).toHaveBeenLastCalledWith(pideVigentes)
+  })
+
+  it('menu_item_detail y set_menu_item_active buscan el nombre sólo entre vigentes', async () => {
+    mockProductFindMany.mockResolvedValueOnce([])
+    await call({ venueId: 'v1', name: 'Café' })
+    expect(mockProductFindMany).toHaveBeenLastCalledWith(pideVigentes)
+
+    mockProductFindMany.mockResolvedValueOnce([])
+    await tool('set_menu_item_active')({ venueId: 'v1', name: 'Café', active: false })
+    expect(mockProductFindMany).toHaveBeenLastCalledWith(pideVigentes)
+  })
+})

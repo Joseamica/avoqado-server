@@ -60,4 +60,14 @@ describe('menu_categories', () => {
     const where = (mockCatFind.mock.calls[0][0] as { where: Record<string, unknown> }).where
     expect(where.active).toBeUndefined()
   })
+
+  it('plan 5 (D6) · cuenta sólo los productos vigentes, con el mismo campo `products`', async () => {
+    mockCatFind.mockResolvedValueOnce([{ name: 'Bebidas', description: null, active: true, _count: { products: 1 } }])
+    const out = parse(await call({ venueId: 'v1' }))
+
+    expect((mockCatFind.mock.calls[0][0] as { select: { _count: unknown } }).select._count).toEqual({
+      select: { products: { where: { deletedAt: null } } },
+    })
+    expect(out.categories[0]).toEqual({ name: 'Bebidas', description: null, active: true, products: 1 })
+  })
 })

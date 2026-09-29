@@ -43,8 +43,7 @@ export async function buildMenuSnapshot(venueId: string): Promise<MenuSnapshot> 
     orderBy: { displayOrder: 'asc' },
     include: {
       products: {
-        // deletedAt: null — deleteProduct() del dashboard solo marca deletedAt (no toca
-        // active); sin este filtro, productos "borrados" se publicarían al canal.
+        // deletedAt: null — desde el plan 5 archivar también apaga (active=false); el filtro queda de red.
         where: { active: true, deletedAt: null },
         orderBy: { displayOrder: 'asc' },
         include: {
