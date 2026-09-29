@@ -13,6 +13,7 @@ import type { McpScope } from '@/mcp/scope'
 import { prismaMock } from '@tests/__helpers__/setup'
 
 const NOMBRES = [
+  'preview_hybrid_offer',
   'list_launch_campaigns',
   'get_launch_campaign',
   'create_launch_campaign',
@@ -71,6 +72,33 @@ describe('catálogo', () => {
 })
 
 describe('defensa doble en los handlers', () => {
+  it('la vista previa híbrida acepta un token de lectura y mantiene pesos en entrada y salida', async () => {
+    const handlers = handlersPara({ isSuperAdmin: true, scopes: ['mcp:read'] })
+    const result = leer(
+      await handlers.get('preview_hybrid_offer')!({
+        offer: {
+          schemaVersion: 1,
+          kind: 'CHOICE_BUNDLE',
+          eligibleFeatureCodes: ['CFDI'],
+          choiceCount: 1,
+          terms: {
+            currency: 'MXN',
+            interval: 'MONTHLY',
+            price: 149.9,
+            taxIncluded: true,
+            promotionCycles: null,
+            renewal: { kind: 'SAME_PRICE' },
+          },
+        },
+        selectedFeatureCodes: ['CFDI'],
+      } as never),
+    )
+    expect(result).toMatchObject({ mode: 'PREVIEW_ONLY', purchaseAvailable: false, selection: { valid: true }, terms: { price: 149.9 } })
+    expect(JSON.stringify(result)).not.toContain('Cents')
+    expect(prismaMock.launchCampaign.create).not.toHaveBeenCalled()
+    expect(prismaMock.venueFeature.create).not.toHaveBeenCalled()
+  })
+
   it('🔴 un scope que no es superadmin recibe un error, aunque alcance el handler', async () => {
     const handlers = handlersPara({ isSuperAdmin: undefined })
     for (const nombre of NOMBRES) {

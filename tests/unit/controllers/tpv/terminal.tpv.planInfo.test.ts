@@ -105,7 +105,13 @@ describe('GET /tpv/terminals/:serialNumber/config — plan-tier info', () => {
     expect(next).not.toHaveBeenCalled()
     expect(res.__status).toBe(200)
     expect(res.__body.success).toBe(true)
-    expect(res.__body.data.plan).toEqual({ tier: 'PRO', grandfathered: false, exempt: false })
+    expect(res.__body.data.plan).toMatchObject({ tier: 'PRO', grandfathered: false, exempt: false })
+    expect(res.__body.data.plan).toMatchObject({
+      accessSchemaVersion: 1,
+      accessObservedAt: expect.any(String),
+      commercialPlanTier: null,
+      grantedFeatureCodes: expect.arrayContaining(['CHATBOT', 'TABLE_SERVICE', 'PRICE_LABELS']),
+    })
     // Existing contract fields are untouched (additive change only)
     expect(res.__body.data.terminal.serialNumber).toBe(serialNumber)
     expect(res.__body.data.merchantAccounts).toEqual([])
@@ -120,7 +126,7 @@ describe('GET /tpv/terminals/:serialNumber/config — plan-tier info', () => {
     await getTerminalConfig(makeReq(), res, jest.fn() as NextFunction)
 
     expect(res.__status).toBe(200)
-    expect(res.__body.data.plan).toEqual({ tier: 'FREE', grandfathered: true, exempt: true })
+    expect(res.__body.data.plan).toMatchObject({ tier: 'FREE', grandfathered: true, exempt: true })
   })
 
   it('reports exempt:true for demo-status venues (TRIAL) even when not grandfathered', async () => {
@@ -131,7 +137,7 @@ describe('GET /tpv/terminals/:serialNumber/config — plan-tier info', () => {
     await getTerminalConfig(makeReq(), res, jest.fn() as NextFunction)
 
     expect(res.__status).toBe(200)
-    expect(res.__body.data.plan).toEqual({ tier: 'FREE', grandfathered: false, exempt: true })
+    expect(res.__body.data.plan).toMatchObject({ tier: 'FREE', grandfathered: false, exempt: true })
   })
 
   it('still returns the terminal config WITHOUT plan when the plan lookup throws (fail open)', async () => {

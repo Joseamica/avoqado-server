@@ -28,6 +28,7 @@ import logger from '@/config/logger'
 import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 import emailService from '@/services/email.service'
 import { resolvePlanNotificationTarget } from '@/services/access/planNotification.service'
+import { billingPageUrl } from '@/utils/dashboardLinks'
 import { scheduleJob } from '../observability/jobContext'
 
 export class PlanWinbackJob {
@@ -105,12 +106,10 @@ export class PlanWinbackJob {
           continue
         }
 
-        const FRONTEND_URL = process.env.FRONTEND_URL || 'https://dashboard.avoqado.io'
-
         await emailService.sendPlanWinbackEmail(target.email, {
           locale: target.locale,
           venueName: target.venueName,
-          reactivateUrl: `${FRONTEND_URL}/dashboard/venues/${vf.venue.slug}/billing?winback=1`,
+          reactivateUrl: billingPageUrl(vf.venue.slug, '?winback=1'),
         })
 
         await prisma.venueFeature.update({

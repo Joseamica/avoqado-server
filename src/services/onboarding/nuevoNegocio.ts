@@ -15,12 +15,14 @@ import { isAcceptedLegalVersion } from '../../config/legal'
 import { findClaimableByCodeOrSlug } from '../launchCampaigns/launchCampaign.service'
 
 export interface AtribucionDelAlta {
+  hybridOfferSlug?: string
   legalVersion?: string
   launchCampaignCode?: string
   utm?: Record<string, string>
 }
 
 export interface AtribucionResuelta {
+  hybridOfferSlug?: string
   campanaId: string | null
   utm: Record<string, string> | undefined
   /** La versión legal SÓLO si es una que existe; una desconocida se ignora (el asistente la re-pide). */
@@ -34,6 +36,7 @@ export interface AtribucionResuelta {
 export async function resolverAtribucionDelAlta(a: AtribucionDelAlta): Promise<AtribucionResuelta> {
   const campana = a.launchCampaignCode ? await findClaimableByCodeOrSlug(a.launchCampaignCode).catch(() => null) : null
   return {
+    ...(a.hybridOfferSlug && /^[a-z0-9][a-z0-9-]{0,99}$/.test(a.hybridOfferSlug) ? { hybridOfferSlug: a.hybridOfferSlug } : {}),
     campanaId: campana?.id ?? null,
     utm: a.utm && Object.keys(a.utm).length > 0 ? a.utm : undefined,
     legalVersion: isAcceptedLegalVersion(a.legalVersion) ? a.legalVersion : undefined,
@@ -85,11 +88,12 @@ export async function crearNegocioNuevo(tx: Prisma.TransactionClient, d: DatosNe
     data: { staffId: staff.id, organizationId: organization.id, role: OrgRole.OWNER, isPrimary: true, isActive: true },
   })
 
-  const { campanaId, utm, legalVersion } = d.atribucion
+  const { campanaId, utm, legalVersion, hybridOfferSlug } = d.atribucion
   await tx.onboardingProgress.create({
     data: {
       organizationId: organization.id,
       currentStep: 0,
+      ...(hybridOfferSlug ? { v2SetupData: { hybrid: { hybridOfferSlug } } } : {}),
       completedSteps: [],
       ...(d.wizardVersion ? { wizardVersion: d.wizardVersion } : {}),
       // Atribución y consentimiento, en la MISMA transacción que el alta (spec § 3.5).

@@ -1,3 +1,4 @@
+import { handleHybridStripeEvent } from './launchCampaigns/hybridLifecycle.service'
 /**
  * Stripe Webhook Event Handlers
  *
@@ -6,8 +7,9 @@
 
 import Stripe from 'stripe'
 import prisma from '@/utils/prismaClient'
+import { subscriptionPeriod } from '@/utils/stripeSubscriptionPeriod'
 import logger from '@/config/logger'
-import { FRONTEND_URL } from '@/config/env'
+import { billingPageUrl } from '@/utils/dashboardLinks'
 import emailService from './email.service'
 import { resolvePlanNotificationTarget } from './access/planNotification.service'
 import { createNotification } from './dashboard/notification.dashboard.service'
@@ -29,35 +31,58 @@ import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import { fulfillPurchase as fulfillCreditPackPurchase } from './dashboard/creditPack.public.service'
 import { executeSeatReconciliation, reactivateSeatCapDeactivated } from './dashboard/seatReconciliation.service'
 
+// A purchase in one of these will never deliver (nor settle the team). REQUIRES_REVIEW is not one: the sweep keeps retrying
+// it, so it can still deliver and settle with the checkout choice.
+const HYBRID_DELIVERY_STOPPED = ['CANCELLED', 'EXPIRED']
+
 /**
- * Run the pending Pro→Free seat reconciliation for a venue AFTER its paid plan has been
- * downgraded (VenueFeature deactivated). If the owner scheduled a downgrade-to-Free with a
- * "who stays" selection, this deactivates the non-selected StaffVenue rows now that the venue
- * has actually dropped to Free. Idempotent and a no-op when nothing is pending. NEVER throws —
- * a reconciliation failure must not fail the webhook (the venue is already on Free); it's
- * logged and can be re-run (the next webhook delivery, or a manual call, is safe).
+ * Enforce the Free seat cap for a venue AFTER its paid base plan has ended (VenueFeature
+ * deactivated): honours the owner's "who stays" selection and deactivates whoever else doesn't
+ * fit (see executeSeatReconciliation). A no-op when the venue is still unlimited or the team
+ * fits, and idempotent. A failure PROPAGATES: the event stays FAILED and the
+ * stripe-webhook-reconciliation cron replays it (the handler is idempotent). Swallowing it left
+ * the venue over the cap with nobody retrying (Codex, 28-sep).
  */
-async function runSeatReconciliationSafely(venueId: string): Promise<void> {
+async function runSeatReconciliation(venueId: string, subscriptionId: string): Promise<void> {
+  // A hybrid purchase replacing this subscription settles the team after its own delivery commits, with the real outcome
+  // (another paid plan, or Free with the choice made at checkout). Reconciling here could land in the gap before the new
+  // plan is saved, or apply Shopify's order instead of that choice (spec §4.3). A purchase that will not deliver lets the
+  // cap run now; that stays reversible, since a delivery that later lands on a paid plan reactivates those seats.
+  // ponytail: looked up by step without an index on it; the table holds a handful of rows per purchase.
+  const replacement = await prisma.hybridBillingOperation.findFirst({
+    where: { step: `REPLACE:${subscriptionId}`, purchase: { venueId } },
+    orderBy: { createdAt: 'desc' },
+    select: { purchaseId: true, purchase: { select: { status: true } } },
+  })
+  if (replacement) {
+    const context = { venueId, subscriptionId, purchaseId: replacement.purchaseId, purchaseStatus: replacement.purchase.status }
+    if (!HYBRID_DELIVERY_STOPPED.includes(replacement.purchase.status)) {
+      logger.warn('🪑 Webhook: seat cap left to the hybrid delivery replacing this subscription', context)
+      return
+    }
+    logger.warn('🪑 Webhook: the hybrid purchase replacing this subscription will not deliver; enforcing the seat cap now', context)
+  }
   try {
     const deactivated = await executeSeatReconciliation(venueId)
     if (deactivated > 0) {
-      logger.info('🪑 Webhook: executed pending seat reconciliation on paid→Free transition', {
+      logger.info('🪑 Webhook: enforced the Free seat cap on the paid→Free transition', {
         venueId,
         deactivated,
       })
     }
   } catch (error) {
-    logger.error('🪑 Webhook: failed to execute seat reconciliation (non-fatal)', {
+    logger.error('🪑 Webhook: seat cap enforcement failed; the event stays FAILED for the cron to replay', {
       venueId,
       error: error instanceof Error ? error.message : 'Unknown error',
     })
+    throw error
   }
 }
 
 /**
  * Re-activate the StaffVenue rows the Free-tier seat cap previously deactivated, AFTER a venue
- * RE-UPGRADES to a paid base plan (PLAN_PRO / PLAN_PREMIUM → unlimited seats). Mirrors
- * {@link runSeatReconciliationSafely}: idempotent, a no-op when nothing was cap-deactivated, and
+ * RE-UPGRADES to a paid base plan (PLAN_PRO / PLAN_PREMIUM → unlimited seats). Idempotent, a
+ * no-op when nothing was cap-deactivated, and (unlike {@link runSeatReconciliation}) it
  * NEVER throws — a reactivation failure must not fail the webhook (the plan activation already
  * succeeded); it's logged and the operation is re-runnable on the next delivery or manually.
  * Call ONLY for base-plan (paid tier) activations, never add-ons.
@@ -213,8 +238,7 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
   const subscriptionId = subscription.id
   const status = subscription.status
   const trialEnd = subscription.trial_end ? new Date(subscription.trial_end * 1000) : null
-  // Type assertion: current_period_end exists in Stripe API but not in type definitions
-  const currentPeriodEnd = (subscription as any).current_period_end ? new Date((subscription as any).current_period_end * 1000) : null
+  const currentPeriodEnd = subscriptionPeriod(subscription).end
 
   logger.info('📥 Webhook: Subscription updated', {
     subscriptionId,
@@ -413,10 +437,9 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
       }
 
       // 🪑 Paid→Free transition: the base plan just ended (cancel-at-period-end reached, or
-      // unpaid). If the owner scheduled a downgrade-to-Free with a "who stays" selection,
-      // execute it now (deactivate the non-kept seats). No-op when nothing is pending.
+      // unpaid). Enforce the Free seat cap now (the owner's selection first, then Shopify's order).
       if ((PAID_PLAN_TIER_CODES as readonly string[]).includes(venueFeature.feature.code)) {
-        await runSeatReconciliationSafely(venueFeature.venueId)
+        await runSeatReconciliation(venueFeature.venueId, subscriptionId)
       }
       break
 
@@ -473,13 +496,13 @@ export async function handleSubscriptionDeleted(subscription: Stripe.Subscriptio
     affectedRecords: result.count,
   })
 
-  // 🪑 Paid→Free transition: if a deleted base-plan subscription leaves the venue on Free and
-  // a downgrade "who stays" selection is pending, execute it now. No-op when nothing is pending.
+  // 🪑 Paid→Free transition: a deleted base-plan subscription may leave the venue on Free —
+  // enforce the seat cap (a no-op when another paid plan still covers the venue).
   const baseplanVenueIds = new Set(
     affected.filter(a => (PAID_PLAN_TIER_CODES as readonly string[]).includes(a.feature.code)).map(a => a.venueId),
   )
   for (const venueId of baseplanVenueIds) {
-    await runSeatReconciliationSafely(venueId)
+    await runSeatReconciliation(venueId, subscriptionId)
   }
 }
 
@@ -727,9 +750,7 @@ async function sendPaymentFailedNotifications(
     })
 
     // 3. Generate billing portal URL for in-app notification (using venue-slug)
-    const billingPortalUrl = venue?.slug
-      ? `${FRONTEND_URL}/dashboard/venues/${venue.slug}/billing`
-      : `${FRONTEND_URL}/dashboard/venues/${venueId}/billing`
+    const billingPortalUrl = billingPageUrl(venue?.slug)
 
     // 3. Send in-app notifications to each staff member
     for (const staffVenue of staffMembers) {
@@ -950,9 +971,7 @@ async function sendTrialEndingNotifications(venueId: string, venueName: string, 
     })
 
     // 3. Generate Stripe billing portal URL (or fallback to dashboard with venue-slug)
-    const returnUrl = venue?.slug
-      ? `${FRONTEND_URL}/dashboard/venues/${venue.slug}/billing`
-      : `${FRONTEND_URL}/dashboard/venues/${venueId}/billing`
+    const returnUrl = billingPageUrl(venue?.slug)
 
     const billingPortalUrl = venue?.stripeCustomerId ? await generateBillingPortalUrl(venue.stripeCustomerId, returnUrl) : returnUrl
 
@@ -1506,92 +1525,93 @@ export async function handleStripeWebhookEvent(event: Stripe.Event, opts?: { cla
     logger.info('🎯 Processing webhook event', { type: event.type, id: event.id, webhookEventId })
 
     // Process event based on type
-    switch (event.type) {
-      case 'customer.subscription.created':
-        // Handle new subscription created (immediate payment, no trial)
-        await handleSubscriptionUpdated(event.data.object as Stripe.Subscription)
-        break
+    if (!(await handleHybridStripeEvent(event)))
+      switch (event.type) {
+        case 'customer.subscription.created':
+          // Handle new subscription created (immediate payment, no trial)
+          await handleSubscriptionUpdated(event.data.object as Stripe.Subscription)
+          break
 
-      case 'customer.subscription.updated':
-        await handleSubscriptionUpdated(event.data.object as Stripe.Subscription)
-        break
+        case 'customer.subscription.updated':
+          await handleSubscriptionUpdated(event.data.object as Stripe.Subscription)
+          break
 
-      case 'customer.subscription.deleted':
-        await handleSubscriptionDeleted(event.data.object as Stripe.Subscription)
-        break
+        case 'customer.subscription.deleted':
+          await handleSubscriptionDeleted(event.data.object as Stripe.Subscription)
+          break
 
-      case 'invoice.payment_succeeded':
-        await handleInvoicePaymentSucceeded(event.data.object as Stripe.Invoice)
-        break
+        case 'invoice.payment_succeeded':
+          await handleInvoicePaymentSucceeded(event.data.object as Stripe.Invoice)
+          break
 
-      case 'invoice.payment_failed':
-        await handleInvoicePaymentFailed(event.data.object as Stripe.Invoice)
-        break
+        case 'invoice.payment_failed':
+          await handleInvoicePaymentFailed(event.data.object as Stripe.Invoice)
+          break
 
-      case 'customer.subscription.trial_will_end':
-        await handleSubscriptionTrialWillEnd(event.data.object as Stripe.Subscription)
-        break
+        case 'customer.subscription.trial_will_end':
+          await handleSubscriptionTrialWillEnd(event.data.object as Stripe.Subscription)
+          break
 
-      case 'customer.deleted':
-        await handleCustomerDeleted(event.data.object as Stripe.Customer)
-        break
+        case 'customer.deleted':
+          await handleCustomerDeleted(event.data.object as Stripe.Customer)
+          break
 
-      case 'payment_method.attached':
-        await handlePaymentMethodAttached(event.data.object as Stripe.PaymentMethod)
-        break
+        case 'payment_method.attached':
+          await handlePaymentMethodAttached(event.data.object as Stripe.PaymentMethod)
+          break
 
-      case 'payment_intent.succeeded':
-        await handlePaymentIntentSucceeded(event.data.object as Stripe.PaymentIntent)
-        break
+        case 'payment_intent.succeeded':
+          await handlePaymentIntentSucceeded(event.data.object as Stripe.PaymentIntent)
+          break
 
-      case 'payment_intent.payment_failed':
-        await handlePaymentIntentFailed(event.data.object as Stripe.PaymentIntent)
-        break
+        case 'payment_intent.payment_failed':
+          await handlePaymentIntentFailed(event.data.object as Stripe.PaymentIntent)
+          break
 
-      case 'checkout.session.completed': {
-        const session = event.data.object as Stripe.Checkout.Session
-        if (session.metadata?.type === 'credit_pack_purchase') {
-          // LEGACY FALLBACK ONLY. New credit-pack sessions are created on the
-          // venue's connected account and fulfilled by the Stripe CONNECT
-          // webhook (reservation-deposit-webhook.service). This platform-account
-          // branch remains solely to fulfill any in-flight legacy sessions that
-          // were created on the platform account before the routing fix — hence
-          // no connectAccountId (retrieve happens on the platform account).
-          logger.info('📥 Webhook (platform, LEGACY): Credit pack checkout completed', {
-            sessionId: session.id,
-            venueId: session.metadata.venueId,
-            packId: session.metadata.packId,
-          })
-          await fulfillCreditPackPurchase(session.id)
+        case 'checkout.session.completed': {
+          const session = event.data.object as Stripe.Checkout.Session
+          if (session.metadata?.type === 'credit_pack_purchase') {
+            // LEGACY FALLBACK ONLY. New credit-pack sessions are created on the
+            // venue's connected account and fulfilled by the Stripe CONNECT
+            // webhook (reservation-deposit-webhook.service). This platform-account
+            // branch remains solely to fulfill any in-flight legacy sessions that
+            // were created on the platform account before the routing fix — hence
+            // no connectAccountId (retrieve happens on the platform account).
+            logger.info('📥 Webhook (platform, LEGACY): Credit pack checkout completed', {
+              sessionId: session.id,
+              venueId: session.metadata.venueId,
+              packId: session.metadata.packId,
+            })
+            await fulfillCreditPackPurchase(session.id)
+          }
+          // Only our TPV-Shop terminal orders carry this metadata flag
+          if (session.metadata?.terminalOrderId) {
+            const { handleTerminalOrderCheckoutCompleted } = await import('./stripe-webhooks/terminalOrderCheckoutCompleted.handler')
+            await handleTerminalOrderCheckoutCompleted(session)
+          }
+          // Base-plan self-serve checkout (createPlanCheckoutSession), PLAN_PRO or PLAN_PREMIUM.
+          // Stripe creates the subscription, but nothing creates the local VenueFeature tier row —
+          // fulfill it here.
+          if (
+            session.metadata?.tierCode &&
+            (PAID_PLAN_TIER_CODES as readonly string[]).includes(session.metadata.tierCode) &&
+            session.metadata.venueId
+          ) {
+            logger.info('📥 Webhook: base-plan checkout completed', {
+              sessionId: session.id,
+              venueId: session.metadata.venueId,
+              tierCode: session.metadata.tierCode,
+              interval: session.metadata.interval,
+            })
+            // 🪑 + 🔔 Sólo si el plan se concedió de verdad (11ª auditoría): ver `avisarPlanConcedido`.
+            await avisarPlanConcedido(await fulfillPlanCheckout(session))
+          }
+          break
         }
-        // Only our TPV-Shop terminal orders carry this metadata flag
-        if (session.metadata?.terminalOrderId) {
-          const { handleTerminalOrderCheckoutCompleted } = await import('./stripe-webhooks/terminalOrderCheckoutCompleted.handler')
-          await handleTerminalOrderCheckoutCompleted(session)
-        }
-        // Base-plan self-serve checkout (createPlanCheckoutSession), PLAN_PRO or PLAN_PREMIUM.
-        // Stripe creates the subscription, but nothing creates the local VenueFeature tier row —
-        // fulfill it here.
-        if (
-          session.metadata?.tierCode &&
-          (PAID_PLAN_TIER_CODES as readonly string[]).includes(session.metadata.tierCode) &&
-          session.metadata.venueId
-        ) {
-          logger.info('📥 Webhook: base-plan checkout completed', {
-            sessionId: session.id,
-            venueId: session.metadata.venueId,
-            tierCode: session.metadata.tierCode,
-            interval: session.metadata.interval,
-          })
-          // 🪑 + 🔔 Sólo si el plan se concedió de verdad (11ª auditoría): ver `avisarPlanConcedido`.
-          await avisarPlanConcedido(await fulfillPlanCheckout(session))
-        }
-        break
+
+        default:
+          logger.info('ℹ️ Webhook: Unhandled event type', { type: event.type })
       }
-
-      default:
-        logger.info('ℹ️ Webhook: Unhandled event type', { type: event.type })
-    }
 
     // 📊 UPDATE MONITORING LOG: Mark as success with processing time
     const processingTime = Date.now() - startTime

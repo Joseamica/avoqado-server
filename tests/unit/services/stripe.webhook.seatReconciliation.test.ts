@@ -4,7 +4,8 @@
  *   - handleSubscriptionUpdated('canceled') for a BASE-PLAN feature → executeSeatReconciliation(venue)
  *   - handleSubscriptionUpdated('canceled') for a NON-base-plan add-on → NOT called
  *   - handleSubscriptionDeleted for a base-plan sub → executeSeatReconciliation(venue)
- *   - a reconciliation failure NEVER throws (must not fail the webhook)
+ *   - a reconciliation failure PROPAGATES: the event stays FAILED and the stripe-webhook-reconciliation cron replays
+ *     it (the handler is idempotent). Swallowing it left the venue over the cap with nobody retrying (Codex, 28-sep).
  *
  * Self-contained prisma + dependency mocks (does not touch the existing webhook test's mocks).
  */
@@ -56,6 +57,7 @@ jest.mock('@/utils/prismaClient', () => ({
     venueFeature: { findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
     venue: { findUnique: jest.fn(), update: jest.fn() },
     webhookEvent: { create: jest.fn(), update: jest.fn(), findUnique: jest.fn() },
+    hybridBillingOperation: { findFirst: jest.fn().mockResolvedValue(null) },
   },
 }))
 
@@ -126,13 +128,93 @@ describe('stripe webhook → seat reconciliation hook', () => {
     expect(execMock).toHaveBeenCalledWith('venue_1')
   })
 
-  it('a reconciliation failure never throws (webhook must not fail)', async () => {
+  it('🔴 a reconciliation failure propagates, so the event stays FAILED and the cron replays it', async () => {
     ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue(baseplanFeature())
     execMock.mockRejectedValueOnce(new Error('boom'))
     ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('canceled')
 
-    await expect(handleSubscriptionUpdated({ id: 'sub_4', status: 'canceled' } as Stripe.Subscription)).resolves.toBe(false)
+    await expect(handleSubscriptionUpdated({ id: 'sub_4', status: 'canceled' } as Stripe.Subscription)).rejects.toThrow('boom')
     expect(execMock).toHaveBeenCalledWith('venue_1')
+  })
+})
+
+describe('the origin of a hybrid replacement: its delivery settles the team, not this webhook', () => {
+  const logger = jest.requireMock('@/config/logger').default as { warn: jest.Mock }
+  const replacementQuery = {
+    // Tenant-scoped: another venue's purchase replacing a subscription with the same id must never defer this one.
+    where: { step: 'REPLACE:sub_origin', purchase: { venueId: 'venue_1' } },
+    orderBy: { createdAt: 'desc' },
+    select: { purchaseId: true, purchase: { select: { status: true } } },
+  }
+
+  it('defers while the hybrid purchase replacing the deleted subscription is still in flight', async () => {
+    ;(prisma.venueFeature.findMany as jest.Mock).mockResolvedValueOnce([{ venueId: 'venue_1', feature: { code: 'PLAN_PRO' } }])
+    ;((prisma as any).hybridBillingOperation.findFirst as jest.Mock).mockResolvedValueOnce({
+      purchaseId: 'purchase_1',
+      purchase: { status: 'PAYMENT_PENDING' },
+    })
+    await handleSubscriptionDeleted({ id: 'sub_origin' } as Stripe.Subscription)
+    expect((prisma as any).hybridBillingOperation.findFirst).toHaveBeenCalledWith(replacementQuery)
+    expect(execMock).not.toHaveBeenCalled()
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ venueId: 'venue_1', subscriptionId: 'sub_origin', purchaseStatus: 'PAYMENT_PENDING' }),
+    )
+  })
+
+  it('also defers from the canceled status update of that same subscription', async () => {
+    ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue(baseplanFeature())
+    ;(require('@/services/stripe.service').estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('canceled')
+    ;((prisma as any).hybridBillingOperation.findFirst as jest.Mock).mockResolvedValueOnce({
+      purchaseId: 'purchase_1',
+      purchase: { status: 'COMPLETED' },
+    })
+    await handleSubscriptionUpdated({ id: 'sub_origin', status: 'canceled' } as Stripe.Subscription)
+    expect((prisma as any).hybridBillingOperation.findFirst).toHaveBeenCalledWith(replacementQuery)
+    expect(execMock).not.toHaveBeenCalled()
+  })
+
+  it('also defers while that purchase awaits review: the sweep keeps retrying it, so it can still deliver', async () => {
+    ;(prisma.venueFeature.findMany as jest.Mock).mockResolvedValueOnce([{ venueId: 'venue_1', feature: { code: 'PLAN_PRO' } }])
+    ;((prisma as any).hybridBillingOperation.findFirst as jest.Mock).mockResolvedValueOnce({
+      purchaseId: 'purchase_1',
+      purchase: { status: 'REQUIRES_REVIEW' },
+    })
+    await handleSubscriptionDeleted({ id: 'sub_origin' } as Stripe.Subscription)
+    expect(execMock).not.toHaveBeenCalled()
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ venueId: 'venue_1', subscriptionId: 'sub_origin', purchaseStatus: 'REQUIRES_REVIEW' }),
+    )
+  })
+
+  it('enforces the cap now when that purchase will never deliver', async () => {
+    for (const status of ['CANCELLED', 'EXPIRED']) {
+      execMock.mockClear()
+      logger.warn.mockClear()
+      ;(prisma.venueFeature.findMany as jest.Mock).mockResolvedValueOnce([{ venueId: 'venue_1', feature: { code: 'PLAN_PRO' } }])
+      ;((prisma as any).hybridBillingOperation.findFirst as jest.Mock).mockResolvedValueOnce({
+        purchaseId: 'purchase_1',
+        purchase: { status },
+      })
+      await handleSubscriptionDeleted({ id: 'sub_origin' } as Stripe.Subscription)
+      expect(execMock).toHaveBeenCalledWith('venue_1')
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ venueId: 'venue_1', subscriptionId: 'sub_origin', purchaseStatus: status }),
+      )
+    }
+  })
+
+  it('still enforces the cap for a subscription no replacement owns', async () => {
+    ;(prisma.venueFeature.findMany as jest.Mock).mockResolvedValueOnce([{ venueId: 'venue_1', feature: { code: 'PLAN_PRO' } }])
+    await handleSubscriptionDeleted({ id: 'sub_plain' } as Stripe.Subscription)
+    expect((prisma as any).hybridBillingOperation.findFirst).toHaveBeenCalledWith({
+      ...replacementQuery,
+      where: { step: 'REPLACE:sub_plain', purchase: { venueId: 'venue_1' } },
+    })
+    expect(execMock).toHaveBeenCalledWith('venue_1')
+    expect(logger.warn).not.toHaveBeenCalled()
   })
 })
 

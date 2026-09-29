@@ -12,6 +12,7 @@
 jest.mock('../../../../src/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    capabilityGrant: { findFirst: jest.fn().mockResolvedValue(null), groupBy: jest.fn().mockResolvedValue([]) },
     venue: { findUnique: jest.fn() },
     venueFeature: { findFirst: jest.fn(), findMany: jest.fn() },
   },

@@ -1,3 +1,4 @@
+import { registerHybridBillingTools } from './tools/hybridBilling'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import type { Request, Response } from 'express'
@@ -120,6 +121,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerOverviewTools(server, scope)
   registerTableTools(server, scope)
   registerFeatureTools(server, scope)
+  registerHybridBillingTools(server, scope)
   registerDeliveryChannelTools(server, scope)
   registerDeliveryActivationTools(server, scope)
   registerDeliveryCourierTools(server, scope)

@@ -7,7 +7,7 @@
 import { z } from 'zod'
 import { OnboardingType, ProductType } from '@prisma/client'
 import { zTimezone } from '@/utils/sanitizeTimezone'
-import { optionalLaunchCampaignCode, utmSchema } from './acquisition.schema'
+import { optionalLaunchCampaignCode, optionalHybridOfferSlug, utmSchema } from './acquisition.schema'
 
 /**
  * Validates signup request (creates user + organization)
@@ -27,6 +27,7 @@ export const SignupSchema = z.object({
     // desconocida se IGNORA (el asistente la vuelve a pedir) en vez de tumbar el alta.
     legalVersion: z.string().trim().max(40).optional(),
     launchCampaignCode: optionalLaunchCampaignCode,
+    hybridOfferSlug: optionalHybridOfferSlug,
     utm: utmSchema,
   }),
 })

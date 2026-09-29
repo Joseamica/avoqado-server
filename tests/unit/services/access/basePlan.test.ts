@@ -1,6 +1,6 @@
 jest.mock('../../../../src/utils/prismaClient', () => ({
   __esModule: true,
-  default: { venueFeature: { findFirst: jest.fn() } },
+  default: { capabilityGrant: { findFirst: jest.fn().mockResolvedValue(null) }, venueFeature: { findFirst: jest.fn() } },
 }))
 import prisma from '../../../../src/utils/prismaClient'
 import { venueHasActiveBasePlan } from '../../../../src/services/access/basePlan.service'

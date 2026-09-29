@@ -1,3 +1,4 @@
+import { assertHybridOnboardingPurchase } from '@/services/launchCampaigns/hybridPurchase.service'
 /**
  * Onboarding Controller
  *
@@ -39,6 +40,7 @@ import { optionalLaunchCampaignCode, utmSchema } from '../schemas/acquisition.sc
 import logger from '../config/logger'
 import AppError, { BadRequestError, ConflictError, NotFoundError } from '../errors/AppError'
 import prisma from '../utils/prismaClient'
+import { billingPageUrl } from '@/utils/dashboardLinks'
 
 /**
  * POST /api/v1/onboarding/signup
@@ -1230,12 +1232,14 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
 
     // OPTIMISTIC LOCKING: Atomically mark as completing BEFORE creating venue
     // This prevents race condition where double-click creates 2 venues
-    const lockResult = await prisma.onboardingProgress.updateMany({
-      where: candadoSiElCobroNoSeMovio(organizationId, progress),
-      data: {
-        completedAt: new Date(),
-        currentStep: 7,
-      },
+    const lockResult = await prisma.$transaction(async tx => {
+      // Shared with hybrid acceptance; covers every venue checked by the organization guard.
+      await tx.$queryRaw`SELECT id FROM "Organization" WHERE id = ${organizationId} FOR UPDATE`
+      await assertHybridOnboardingPurchase(organizationId, planData?.hybridPurchaseId, tx)
+      return tx.onboardingProgress.updateMany({
+        where: candadoSiElCobroNoSeMovio(organizationId, progress),
+        data: { completedAt: new Date(), currentStep: 7 },
+      })
     })
 
     // Otra petición tiene el candado, terminó el alta o movió el cobro desde nuestra lectura.
@@ -1454,7 +1458,6 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
             const firstChargeDate = planData.payNow
               ? new Date(now.getTime() + (planData.interval === 'annual' ? 365 : 30) * 86400000)
               : new Date(now.getTime() + TRIAL_DAYS * 86400000) // trial end
-            const FRONTEND_URL = process.env.FRONTEND_URL || 'https://dashboard.avoqado.io'
             await emailService.sendPlanConfirmationEmail(target.email, {
               locale: target.locale,
               venueName: target.venueName,
@@ -1468,7 +1471,7 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
               // línea el correo del camino viejo seguiría prometiendo el precio de lista en la
               // renovación, aunque §3.8 arregle el campo en la plantilla.
               nextChargeAmountCents: introPromo ? LEGACY_INTRO_OFFER.introMonthlyCents : grossCents,
-              billingPortalUrl: `${FRONTEND_URL}/dashboard/venues/${result.venue.slug}/billing`,
+              billingPortalUrl: billingPageUrl(result.venue.slug),
             })
           } else {
             logger.warn(`No notification recipient for venue ${result.venue.id}; skipping plan confirmation email`)

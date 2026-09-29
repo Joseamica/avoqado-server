@@ -8,7 +8,7 @@ import { getFeatureMetadataForVenue } from '@/services/access/feature-metadata.s
  * state even without an individual à-la-carte VenueFeature row — so the dashboard
  * UI agrees with what the access gate allows at the API layer.
  *
- * `INVENTORY` here is a generic NON-Premium-only feature, so an active PLAN_PRO tier
+ * `LOYALTY_PROGRAM` here is a generic NON-Premium-only feature, so an active PLAN_PRO tier
  * grants it (today's blanket behavior is preserved for Pro on non-differentiators).
  * The grant is now resolved via getVenueBaseTier, which scans the tier rows with a
  * venueFeature.findMany over the PLAN_* code list — so we mock that findMany by the
@@ -17,7 +17,7 @@ import { getFeatureMetadataForVenue } from '@/services/access/feature-metadata.s
 describe('feature-metadata base-plan blanket grant', () => {
   const PREMIUM_FEATURES = [
     {
-      code: 'INVENTORY',
+      code: 'LOYALTY_PROGRAM',
       name: 'Inventory',
       description: 'Inventory tracking',
       monthlyPrice: { toString: () => '89.00' },
@@ -56,8 +56,8 @@ describe('feature-metadata base-plan blanket grant', () => {
 
     const metadata = await getFeatureMetadataForVenue('venue_with_plan')
 
-    // INVENTORY (non-Premium-only) had no VenueFeature row → would be LOCKED, but the PRO tier grants it.
-    expect(metadata.INVENTORY.state).toBe('ACTIVE')
+    // LOYALTY_PROGRAM (non-Premium-only) had no VenueFeature row → would be LOCKED, but the PRO tier grants it.
+    expect(metadata.LOYALTY_PROGRAM.state).toBe('ACTIVE')
   })
 
   it('does NOT unlock features when the base plan is inactive', async () => {
@@ -67,7 +67,7 @@ describe('feature-metadata base-plan blanket grant', () => {
     const metadata = await getFeatureMetadataForVenue('venue_no_plan')
 
     // No base plan, no à-la-carte row → stays LOCKED.
-    expect(metadata.INVENTORY.state).toBe('LOCKED')
+    expect(metadata.LOYALTY_PROGRAM.state).toBe('LOCKED')
   })
 
   it('never relabels the plan-tier feature itself via the blanket grant', async () => {
@@ -80,6 +80,6 @@ describe('feature-metadata base-plan blanket grant', () => {
 
     expect(metadata.PLAN_PRO.state).toBe('LOCKED')
     // ...while a normal tier-covered feature IS granted in the same call.
-    expect(metadata.INVENTORY.state).toBe('ACTIVE')
+    expect(metadata.LOYALTY_PROGRAM.state).toBe('ACTIVE')
   })
 })

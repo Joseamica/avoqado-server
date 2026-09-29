@@ -21,7 +21,8 @@ jest.mock('@/services/dashboard/planState.service', () => ({
 }))
 jest.mock('@/services/access/seatCap.service', () => {
   const actual = jest.requireActual('@/services/access/seatCap.service')
-  return { __esModule: true, ...actual, getActiveSeatCount: jest.fn() }
+  // getVenueSeatCap stays REAL by default (getVenueSeatStatus tests need it); the execute tests drive it.
+  return { __esModule: true, ...actual, getActiveSeatCount: jest.fn(), getVenueSeatCap: jest.fn(actual.getVenueSeatCap) }
 })
 jest.mock('@/services/stripe.service', () => ({
   __esModule: true,
@@ -29,7 +30,7 @@ jest.mock('@/services/stripe.service', () => ({
 }))
 
 import * as planState from '@/services/dashboard/planState.service'
-import { getActiveSeatCount } from '@/services/access/seatCap.service'
+import { getActiveSeatCount, getVenueSeatCap } from '@/services/access/seatCap.service'
 import {
   getDowngradePreview,
   scheduleDowngradeToFree,
@@ -37,6 +38,7 @@ import {
   reactivateSeatCapDeactivated,
   clearPendingReconciliation,
   getVenueSeatStatus,
+  assertKeepSelection,
 } from '@/services/dashboard/seatReconciliation.service'
 
 const cancelPlanMock = planState.cancelPlan as jest.Mock
@@ -129,7 +131,7 @@ describe('seatReconciliation.service', () => {
       overCapSetup()
       const result = await scheduleDowngradeToFree('venue_1', ['o', 'a'])
 
-      expect(cancelPlanMock).toHaveBeenCalledWith('venue_1')
+      expect(cancelPlanMock).toHaveBeenCalledWith('venue_1', {})
       // Persisted pending selection with the period end + selection.
       const updateArg = prismaMock.venue.update.mock.calls[0][0]
       expect(updateArg.where).toEqual({ id: 'venue_1' })
@@ -171,7 +173,7 @@ describe('seatReconciliation.service', () => {
       activeCountMock.mockResolvedValue(2) // at cap → no selection needed
 
       const result = await scheduleDowngradeToFree('venue_1', [])
-      expect(cancelPlanMock).toHaveBeenCalledWith('venue_1')
+      expect(cancelPlanMock).toHaveBeenCalledWith('venue_1', {})
       expect(prismaMock.venue.update.mock.calls[0][0].data.pendingSeatReconciliation.keepStaffVenueIds).toEqual([])
       expect(result.state).toBe('canceling')
     })
@@ -183,67 +185,331 @@ describe('seatReconciliation.service', () => {
       await expect(scheduleDowngradeToFree('venue_1', ['a', 'b'])).rejects.toThrow('no tiene un propietario')
       expect(cancelPlanMock).not.toHaveBeenCalled()
     })
+
+    it('forwards the owner reason and the actor to cancelPlan', async () => {
+      overCapSetup()
+      await scheduleDowngradeToFree('venue_1', ['o', 'a'], { reason: 'TOO_EXPENSIVE', comment: 'Caro', staffId: 'staff_o' })
+      expect(cancelPlanMock).toHaveBeenCalledWith('venue_1', { reason: 'TOO_EXPENSIVE', comment: 'Caro', staffId: 'staff_o' })
+    })
+  })
+
+  describe('assertKeepSelection: a "who stays" choice carried by the hybrid checkout', () => {
+    beforeEach(() => {
+      prismaMock.staffVenue.findMany.mockResolvedValue([sv('o', StaffRole.OWNER), sv('a', StaffRole.MANAGER), sv('b', StaffRole.WAITER)])
+      prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'o', staffId: 'staff_o' })
+    })
+
+    it('accepts the owner plus one more', async () => {
+      await expect(assertKeepSelection('venue_1', ['o', 'a'])).resolves.toBeUndefined()
+    })
+
+    it.each([
+      [['o', 'a', 'b'], 'Solo puedes conservar 2'],
+      [['o', 'foreign'], 'no pertenece a este venue'],
+      [['a', 'b'], 'propietario debe conservar'],
+    ])('rejects %j', async (keep, message) => {
+      await expect(assertKeepSelection('venue_1', keep)).rejects.toThrow(message)
+    })
+
+    it('rejects when the venue has no owner', async () => {
+      prismaMock.staffVenue.findFirst.mockResolvedValue(null)
+      await expect(assertKeepSelection('venue_1', ['a'])).rejects.toThrow('no tiene un propietario')
+    })
   })
 
   // ── executeSeatReconciliation ────────────────────────────────────────────────────────────
+  // Runs when the paid plan ACTUALLY ends. Rule (founder, 2026-09-27 — Shopify's model): whoever doesn't fit in the
+  // Free cap is deactivated automatically, pending invitations first (most recent first), then the users inactive the
+  // longest (never-logged-in first). The owner's explicit "who stays" choice goes first; the OWNER always stays.
   describe('executeSeatReconciliation', () => {
-    it('deactivates exactly the non-kept active seats, then clears the field', async () => {
-      prismaMock.venue.findUnique.mockResolvedValue({
-        pendingSeatReconciliation: { keepStaffVenueIds: ['o', 'a'], scheduledFor: future.toISOString(), createdAt: '' },
-      })
+    const capMock = getVenueSeatCap as jest.Mock
+    const at = (iso: string | null) => (iso ? new Date(iso) : null)
+    /** A cap-counting StaffVenue row with a last-login date. */
+    const seat = (id: string, role: StaffRole, lastLoginAt: string | null) =>
+      sv(id, role, { staff: { firstName: `F${id}`, lastName: `L${id}`, email: `${id}@x.com`, lastLoginAt: at(lastLoginAt) } })
+    const pendingWith = (keepStaffVenueIds: string[]) => ({
+      pendingSeatReconciliation: { keepStaffVenueIds, scheduledFor: future.toISOString(), createdAt: '' },
+    })
+    const deactivatedIds = () => prismaMock.staffVenue.updateMany.mock.calls[0]?.[0]?.where?.id?.in
+
+    beforeEach(() => {
+      capMock.mockResolvedValue(2) // dropped to Free
+      prismaMock.staffVenue.updateMany.mockResolvedValue({ count: 0 })
+      prismaMock.invitation.findMany.mockResolvedValue([])
+      prismaMock.invitation.updateMany.mockResolvedValue({ count: 0 })
+    })
+    afterEach(() => capMock.mockImplementation(jest.requireActual('@/services/access/seatCap.service').getVenueSeatCap))
+
+    it('explicit selection: deactivates exactly the non-kept seats (flagged for re-upgrade), never an OWNER, then clears the field', async () => {
+      prismaMock.venue.findUnique.mockResolvedValue(pendingWith(['o', 'a']))
+      prismaMock.staffVenue.findMany.mockResolvedValue([
+        seat('o', StaffRole.OWNER, null),
+        seat('a', StaffRole.MANAGER, null),
+        seat('b', StaffRole.WAITER, null),
+      ])
       prismaMock.staffVenue.updateMany.mockResolvedValue({ count: 1 })
 
-      const deactivated = await executeSeatReconciliation('venue_1')
-      expect(deactivated).toBe(1)
+      expect(await executeSeatReconciliation('venue_1')).toBe(1)
 
-      const where = prismaMock.staffVenue.updateMany.mock.calls[0][0].where
-      expect(where.venueId).toBe('venue_1')
-      expect(where.active).toBe(true)
-      expect(where.role).toEqual({ not: StaffRole.SUPERADMIN }) // SUPERADMIN never deactivated
-      expect(where.id).toEqual({ notIn: ['o', 'a'] }) // only the non-kept seats
-      const data = prismaMock.staffVenue.updateMany.mock.calls[0][0].data
+      const { where, data } = prismaMock.staffVenue.updateMany.mock.calls[0][0]
+      expect(where).toMatchObject({ venueId: 'venue_1', active: true, id: { in: ['b'] } })
+      expect(where.role).toEqual({ notIn: [StaffRole.SUPERADMIN, StaffRole.OWNER] })
       expect(data.active).toBe(false)
       expect(data.endDate).toBeInstanceOf(Date)
-      // Marks these rows as cap-deactivated so a later re-upgrade can reactivate exactly them.
-      expect(data.deactivatedBySeatCap).toBe(true)
-
-      // Field cleared after execution.
-      expect(prismaMock.venue.update).toHaveBeenCalledWith({
-        where: { id: 'venue_1' },
-        data: { pendingSeatReconciliation: null },
-      })
+      expect(data.deactivatedBySeatCap).toBe(true) // a later re-upgrade reactivates exactly these rows
+      expect(prismaMock.venue.update).toHaveBeenCalledWith({ where: { id: 'venue_1' }, data: { pendingSeatReconciliation: null } })
     })
 
-    it('is idempotent: no pending field → no-op (no deactivation, no clear)', async () => {
+    it('🔴 no selection was needed and the team still fits → nobody is deactivated, field cleared', async () => {
+      prismaMock.venue.findUnique.mockResolvedValue(pendingWith([]))
+      prismaMock.staffVenue.findMany.mockResolvedValue([seat('o', StaffRole.OWNER, null), seat('a', StaffRole.WAITER, null)])
+
+      expect(await executeSeatReconciliation('venue_1')).toBe(0)
+      expect(prismaMock.staffVenue.updateMany).not.toHaveBeenCalled()
+      expect(prismaMock.venue.update).toHaveBeenCalledWith({ where: { id: 'venue_1' }, data: { pendingSeatReconciliation: null } })
+    })
+
+    it('🔴 the team grew after scheduling (no selection) → keeps the owner + the most recently active; never-logged-in go first', async () => {
+      prismaMock.venue.findUnique.mockResolvedValue(pendingWith([]))
+      prismaMock.staffVenue.findMany.mockResolvedValue([
+        seat('o', StaffRole.OWNER, '2026-09-01T12:00:00Z'),
+        seat('a', StaffRole.MANAGER, '2026-09-01T12:00:00Z'),
+        seat('b', StaffRole.CASHIER, '2026-09-20T12:00:00Z'),
+        seat('c', StaffRole.WAITER, null),
+      ])
+
+      await executeSeatReconciliation('venue_1')
+
+      expect(deactivatedIds()).toEqual(['a', 'c']) // b logged in most recently and keeps the one free seat
+    })
+
+    it('🔴 the team grew after scheduling WITH a selection → whoever is outside the selection is deactivated', async () => {
+      prismaMock.venue.findUnique.mockResolvedValue(pendingWith(['o', 'a']))
+      prismaMock.staffVenue.findMany.mockResolvedValue([
+        seat('o', StaffRole.OWNER, null),
+        seat('a', StaffRole.MANAGER, null),
+        seat('n', StaffRole.WAITER, '2026-09-26T12:00:00Z'),
+      ])
+
+      await executeSeatReconciliation('venue_1')
+
+      expect(deactivatedIds()).toEqual(['n'])
+    })
+
+    it('🔴 ownership moved after scheduling → the new owner stays and the cap still holds (most recent of the selection keeps the seat)', async () => {
+      prismaMock.venue.findUnique.mockResolvedValue(pendingWith(['x', 'a'])) // x was the owner when choosing
+      prismaMock.staffVenue.findMany.mockResolvedValue([
+        seat('y', StaffRole.OWNER, '2026-09-26T12:00:00Z'),
+        seat('x', StaffRole.ADMIN, '2026-09-10T12:00:00Z'),
+        seat('a', StaffRole.MANAGER, '2026-09-25T12:00:00Z'),
+      ])
+
+      await executeSeatReconciliation('venue_1')
+
+      expect(deactivatedIds()).toEqual(['x'])
+    })
+
+    it('🔴 plan ended through a plain cancel (no downgrade record) → the same rule applies', async () => {
       prismaMock.venue.findUnique.mockResolvedValue({ pendingSeatReconciliation: null })
-      const deactivated = await executeSeatReconciliation('venue_1')
-      expect(deactivated).toBe(0)
+      prismaMock.staffVenue.findMany.mockResolvedValue([
+        seat('o', StaffRole.OWNER, null),
+        seat('a', StaffRole.MANAGER, '2026-09-25T12:00:00Z'),
+        seat('b', StaffRole.WAITER, '2026-09-02T12:00:00Z'),
+      ])
+
+      await executeSeatReconciliation('venue_1')
+
+      expect(deactivatedIds()).toEqual(['b'])
+      expect(prismaMock.venue.update).not.toHaveBeenCalled() // nothing pending to clear
+    })
+
+    it('🔴 pending invitations lose their seat first, most recent first (the oldest keeps a free seat)', async () => {
+      prismaMock.venue.findUnique.mockResolvedValue(pendingWith([]))
+      prismaMock.staffVenue.findMany.mockResolvedValue([seat('o', StaffRole.OWNER, null)])
+      prismaMock.invitation.findMany.mockResolvedValue([{ id: 'inv_oldest' }])
+      prismaMock.invitation.updateMany.mockResolvedValue({ count: 2 })
+
+      await executeSeatReconciliation('venue_1')
+
+      const find = prismaMock.invitation.findMany.mock.calls[0][0]
+      expect(find.take).toBe(1) // one seat left after the owner
+      expect(find.orderBy).toEqual([{ createdAt: 'asc' }, { id: 'asc' }])
+      const { where, data } = prismaMock.invitation.updateMany.mock.calls[0][0]
+      expect(where).toMatchObject({ venueId: 'venue_1', status: InvitationStatus.PENDING, id: { notIn: ['inv_oldest'] } })
+      expect(where.role).toEqual({ not: StaffRole.SUPERADMIN })
+      expect(data).toEqual({ status: InvitationStatus.REVOKED })
+      expect(prismaMock.staffVenue.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('🔴 no seat left for invitations → every pending invitation is revoked', async () => {
+      prismaMock.venue.findUnique.mockResolvedValue(pendingWith([]))
+      prismaMock.staffVenue.findMany.mockResolvedValue([seat('o', StaffRole.OWNER, null), seat('a', StaffRole.WAITER, null)])
+
+      await executeSeatReconciliation('venue_1')
+
+      expect(prismaMock.invitation.findMany).not.toHaveBeenCalled()
+      const { where } = prismaMock.invitation.updateMany.mock.calls[0][0]
+      expect(where).toMatchObject({ venueId: 'venue_1', status: InvitationStatus.PENDING })
+      expect(where.id).toBeUndefined()
+    })
+
+    // 🔴 Codex (3rd audit): a late webhook of an OLD subscription must not wipe the selection of a LATER downgrade
+    // while another paid plan is live. Only a real execution (or undoing the downgrade) clears it.
+    it('🔴 still on a paid plan or grandfathered (unlimited) → touches nobody and keeps the pending selection', async () => {
+      capMock.mockResolvedValue(null)
+      prismaMock.venue.findUnique.mockResolvedValue(pendingWith(['o']))
+
+      expect(await executeSeatReconciliation('venue_1')).toBe(0)
+      expect(prismaMock.staffVenue.findMany).not.toHaveBeenCalled()
+      expect(prismaMock.staffVenue.updateMany).not.toHaveBeenCalled()
+      expect(prismaMock.invitation.updateMany).not.toHaveBeenCalled()
+      expect(prismaMock.venue.update).not.toHaveBeenCalled()
+    })
+
+    it('idempotent: nothing pending and the team fits → no writes at all', async () => {
+      prismaMock.venue.findUnique.mockResolvedValue({ pendingSeatReconciliation: null })
+      prismaMock.staffVenue.findMany.mockResolvedValue([seat('o', StaffRole.OWNER, null), seat('a', StaffRole.WAITER, null)])
+
+      expect(await executeSeatReconciliation('venue_1')).toBe(0)
       expect(prismaMock.staffVenue.updateMany).not.toHaveBeenCalled()
       expect(prismaMock.venue.update).not.toHaveBeenCalled()
     })
 
-    it('idempotent on a second call: once cleared, the re-run is a no-op', async () => {
-      // 1st call: pending present.
-      prismaMock.venue.findUnique.mockResolvedValueOnce({
-        pendingSeatReconciliation: { keepStaffVenueIds: ['o'], scheduledFor: '', createdAt: '' },
-      })
-      prismaMock.staffVenue.updateMany.mockResolvedValue({ count: 2 })
-      expect(await executeSeatReconciliation('venue_1')).toBe(2)
+    it('audits what the cap turned off in ActivityLog', async () => {
+      prismaMock.venue.findUnique.mockResolvedValue(pendingWith([]))
+      prismaMock.staffVenue.findMany.mockResolvedValue([
+        seat('o', StaffRole.OWNER, null),
+        seat('a', StaffRole.MANAGER, '2026-09-25T12:00:00Z'),
+        seat('b', StaffRole.WAITER, null),
+      ])
+      prismaMock.staffVenue.updateMany.mockResolvedValue({ count: 1 })
 
-      // 2nd call: field now cleared.
-      prismaMock.venue.findUnique.mockResolvedValueOnce({ pendingSeatReconciliation: null })
-      expect(await executeSeatReconciliation('venue_1')).toBe(0)
-      expect(prismaMock.staffVenue.updateMany).toHaveBeenCalledTimes(1) // not called the 2nd time
+      await executeSeatReconciliation('venue_1')
+
+      expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          venueId: 'venue_1',
+          action: 'SEAT_CAP_ENFORCED',
+          entity: 'Venue',
+          entityId: 'venue_1',
+          data: expect.objectContaining({ cap: 2, deactivatedStaffVenueIds: ['b'] }),
+        }),
+      })
     })
 
-    it('empty keep list deactivates all cap-counting seats (sentinel notIn avoids matching nothing)', async () => {
-      prismaMock.venue.findUnique.mockResolvedValue({
-        pendingSeatReconciliation: { keepStaffVenueIds: [], scheduledFor: '', createdAt: '' },
+    // 🔴 Codex (3rd audit): deactivations, revocations, clearing the field and the audit row were separate writes. If the
+    // second failed, users stayed off with no audit row and the retry had nothing left to record. One transaction.
+    it('🔴 every write happens inside ONE transaction (all or nothing, audit row included)', async () => {
+      prismaMock.venue.findUnique.mockResolvedValue(pendingWith([]))
+      prismaMock.staffVenue.findMany.mockResolvedValue([
+        seat('o', StaffRole.OWNER, null),
+        seat('a', StaffRole.MANAGER, '2026-09-25T12:00:00Z'),
+        seat('b', StaffRole.WAITER, null),
+      ])
+      let inside = false
+      const outside: string[] = []
+      prismaMock.$transaction.mockImplementationOnce(async (cb: (tx: unknown) => unknown) => {
+        inside = true
+        try {
+          return await cb(prismaMock)
+        } finally {
+          inside = false
+        }
       })
-      prismaMock.staffVenue.updateMany.mockResolvedValue({ count: 0 })
+      const track = (name: string, value: unknown) => async () => {
+        if (!inside) outside.push(name)
+        return value
+      }
+      prismaMock.staffVenue.updateMany.mockImplementation(track('staffVenue.updateMany', { count: 1 }))
+      prismaMock.invitation.updateMany.mockImplementation(track('invitation.updateMany', { count: 0 }))
+      prismaMock.venue.update.mockImplementation(track('venue.update', {}))
+      prismaMock.activityLog.create.mockImplementation(track('activityLog.create', {}))
+
       await executeSeatReconciliation('venue_1')
-      // With an empty keep list, the sentinel ['__none__'] ensures notIn doesn't match-everything-then-skip.
-      expect(prismaMock.staffVenue.updateMany.mock.calls[0][0].where.id).toEqual({ notIn: ['__none__'] })
+
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+      expect(outside).toEqual([])
+      expect(prismaMock.activityLog.create).toHaveBeenCalledTimes(1)
+    })
+
+    // 🔴 Codex (4th audit, reproduced): the team was read BEFORE the transaction, so an accept landing in between added a
+    // seat the count never saw (3 active on Free). Now the venue's pending invitations are locked first, inside it.
+    it('🔴 locks the pending invitations inside the transaction BEFORE reading the team', async () => {
+      prismaMock.venue.findUnique.mockResolvedValue(pendingWith([]))
+      const team = [seat('o', StaffRole.OWNER, null), seat('a', StaffRole.WAITER, null)]
+      let inside = false
+      const readOutside: string[] = []
+      prismaMock.$transaction.mockImplementationOnce(async (cb: (tx: unknown) => unknown) => {
+        inside = true
+        try {
+          return await cb(prismaMock)
+        } finally {
+          inside = false
+        }
+      })
+      prismaMock.$queryRaw.mockImplementation(async () => {
+        if (!inside) readOutside.push('lock')
+        return []
+      })
+      prismaMock.staffVenue.findMany.mockImplementation(async () => {
+        if (!inside) readOutside.push('team')
+        return team
+      })
+
+      await executeSeatReconciliation('venue_1')
+
+      expect(readOutside).toEqual([])
+      const sql = (prismaMock.$queryRaw.mock.calls[0][0] as string[]).join('?')
+      expect(sql).toContain('"Invitation"')
+      expect(sql).toContain('FOR UPDATE')
+      expect(prismaMock.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.staffVenue.findMany.mock.invocationCallOrder[0])
+    })
+
+    it('🔴 a failure midway propagates, so the webhook event stays FAILED and the cron replays it', async () => {
+      prismaMock.venue.findUnique.mockResolvedValue(pendingWith([]))
+      prismaMock.staffVenue.findMany.mockResolvedValue([seat('o', StaffRole.OWNER, null), seat('a', StaffRole.WAITER, null)])
+      prismaMock.invitation.updateMany.mockRejectedValueOnce(new Error('db down'))
+
+      await expect(executeSeatReconciliation('venue_1')).rejects.toThrow('db down')
+    })
+
+    it('an explicit selection (the hybrid checkout) wins over a pending one', async () => {
+      prismaMock.venue.findUnique.mockResolvedValue(pendingWith(['o', 'b']))
+      prismaMock.staffVenue.findMany.mockResolvedValue([
+        seat('o', StaffRole.OWNER, null),
+        seat('a', StaffRole.MANAGER, null),
+        seat('b', StaffRole.WAITER, null),
+      ])
+      prismaMock.staffVenue.updateMany.mockResolvedValue({ count: 1 })
+      await executeSeatReconciliation('venue_1', { keepStaffVenueIds: ['o', 'a'] })
+      expect(deactivatedIds()).toEqual(['b'])
+    })
+
+    it('an empty explicit selection falls back to the pending one', async () => {
+      prismaMock.venue.findUnique.mockResolvedValue(pendingWith(['o', 'a']))
+      prismaMock.staffVenue.findMany.mockResolvedValue([
+        seat('o', StaffRole.OWNER, null),
+        seat('a', StaffRole.MANAGER, null),
+        seat('b', StaffRole.WAITER, null),
+      ])
+      prismaMock.staffVenue.updateMany.mockResolvedValue({ count: 1 })
+      await executeSeatReconciliation('venue_1', { keepStaffVenueIds: [] })
+      expect(deactivatedIds()).toEqual(['b'])
+    })
+
+    // The checkout choice is validated only at quote time and stored as sent: by the time the invoice is paid it may name
+    // someone who left, repeat an id, or miss an owner who took over. None of that may fail or cost the owner the business.
+    it('🔴 an explicit selection with a departed member, a repeated id and no owner → never fails, the owner stays', async () => {
+      prismaMock.venue.findUnique.mockResolvedValue({ pendingSeatReconciliation: null })
+      prismaMock.staffVenue.findMany.mockResolvedValue([
+        seat('o', StaffRole.OWNER, null),
+        seat('a', StaffRole.MANAGER, null),
+        seat('b', StaffRole.WAITER, '2026-09-25T12:00:00Z'), // the automatic order would keep b and drop a
+      ])
+      prismaMock.staffVenue.updateMany.mockResolvedValue({ count: 1 })
+      await executeSeatReconciliation('venue_1', { keepStaffVenueIds: ['a', 'a', 'gone'] })
+      expect(deactivatedIds()).toEqual(['b'])
+      expect(prismaMock.staffVenue.updateMany.mock.calls[0][0].where.role).toEqual({ notIn: [StaffRole.SUPERADMIN, StaffRole.OWNER] })
     })
   })
 

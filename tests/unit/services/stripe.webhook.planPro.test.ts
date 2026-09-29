@@ -80,6 +80,8 @@ jest.mock('@/utils/prismaClient', () => ({
       findFirst: jest.fn(),
       update: jest.fn(),
     },
+    // The paid→Free seat cap asks whether a hybrid purchase is replacing this subscription; here none is.
+    hybridBillingOperation: { findFirst: jest.fn().mockResolvedValue(null) },
   },
 }))
 

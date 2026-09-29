@@ -2,7 +2,7 @@ import { NextFunction, Request, Response } from 'express'
 import * as googleOAuthService from '../../services/dashboard/googleOAuth.service'
 import { z } from 'zod'
 import { ValidationError } from '../../errors/AppError'
-import { optionalLaunchCampaignCode, utmSchema } from '../../schemas/acquisition.schema'
+import { optionalLaunchCampaignCode, optionalHybridOfferSlug, utmSchema } from '../../schemas/acquisition.schema'
 import { ipDelCliente } from '../../utils/clientIp'
 
 /**
@@ -14,6 +14,7 @@ const signupIntentSchema = z
   .object({
     legalVersion: z.string().trim().max(40).optional(),
     launchCampaignCode: optionalLaunchCampaignCode,
+    hybridOfferSlug: optionalHybridOfferSlug,
     utm: utmSchema,
   })
   .optional()

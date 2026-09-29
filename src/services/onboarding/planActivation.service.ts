@@ -25,6 +25,7 @@
 import Stripe from 'stripe'
 import type { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
+import { subscriptionPeriod } from '../../utils/stripeSubscriptionPeriod'
 import logger from '../../config/logger'
 import AppError, { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
@@ -55,6 +56,7 @@ import { buildLaunchOfferView, launchOfferAvailability, standardFirstChargeCents
 import { LAUNCH_CAMPAIGN_SELECT, toOfferRow, type LaunchCampaignRow } from '../launchCampaigns/launchCampaign.service'
 import { PLAN_ACTIVATION_STATUS, REDEMPTION_STATUS } from '../launchCampaigns/launchCampaignEnums'
 import { idDelCuponDelDescuento } from './cuponDelDescuento'
+import { billingPageUrl } from '@/utils/dashboardLinks'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 
@@ -132,10 +134,8 @@ export function esErrorDeTarjeta(error: unknown): error is Stripe.errors.StripeE
  * Stripe va a cobrar de verdad, y el cliente la vería en el correo.
  */
 function siguienteCobro(sub: Stripe.Subscription): string {
-  const sec = (sub as unknown as { current_period_end?: number }).current_period_end
-  if (typeof sec === 'number') return new Date(sec * 1000).toISOString()
-  const item = sub.items?.data?.[0] as unknown as { current_period_end?: number } | undefined
-  if (typeof item?.current_period_end === 'number') return new Date(item.current_period_end * 1000).toISOString()
+  const end = subscriptionPeriod(sub).end
+  if (end) return end.toISOString()
   // Sin la fecha de Stripe no se inventa una: se dice que no se sabe.
   throw pendiente('la suscripción no trae current_period_end')
 }
@@ -1102,7 +1102,6 @@ async function enviarConfirmacion(args: {
   const target = await resolvePlanNotificationTarget(args.venueId)
   if (!target.email) return
 
-  const FRONTEND_URL = process.env.FRONTEND_URL || 'https://dashboard.avoqado.io'
   const { campaign, input, now } = args
   const unMes = new Date(now.getTime() + 30 * 86400000)
   const legacyIntro = !campaign && isLegacyIntroEligible(input.tier, input.interval, input.payNow)
@@ -1124,7 +1123,7 @@ async function enviarConfirmacion(args: {
       : legacyIntro
         ? { introAmountCents: LEGACY_INTRO_OFFER.introMonthlyCents, nextChargeAmountCents: LEGACY_INTRO_OFFER.introMonthlyCents }
         : {}),
-    billingPortalUrl: `${FRONTEND_URL}/dashboard/venues/${args.venueSlug}/billing`,
+    billingPortalUrl: billingPageUrl(args.venueSlug),
   })
 }
 

@@ -7,6 +7,7 @@ import logger from '../config/logger'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { STRIPE_WEBHOOK_MAX_RETRIES, replayStripeWebhookEvent } from '../services/stripe.webhook.service'
 import { scheduleJob } from '../observability/jobContext'
+import { reconcileHybridBatch } from '../services/launchCampaigns/hybridLifecycle.service'
 
 /**
  * Stripe PLATFORM webhook reconciliation job
@@ -102,6 +103,7 @@ export class StripeWebhookReconciliationJob {
           elapsedMs: Date.now() - startedAt,
         })
       }
+      await reconcileHybridBatch()
     } catch (err) {
       logger.error('❌ [Stripe recon] Job pass failed', {
         error: err instanceof Error ? err.message : err,

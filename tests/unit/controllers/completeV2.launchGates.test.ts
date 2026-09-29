@@ -67,6 +67,9 @@ jest.mock('../../../src/config/logger', () => ({
 jest.mock('../../../src/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    hybridPurchase: { findFirst: jest.fn().mockResolvedValue(null) },
+    $transaction: jest.fn(),
+    $queryRaw: jest.fn().mockResolvedValue([]),
     onboardingProgress: { updateMany: jest.fn(), update: jest.fn(), findUnique: jest.fn() },
     venue: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
     organization: { update: jest.fn() },
@@ -144,6 +147,7 @@ describe('completeV2Onboarding — candados del lanzamiento (S7) y fugas del leg
 
   beforeEach(() => {
     jest.clearAllMocks()
+    ;(prisma.$transaction as jest.Mock).mockImplementation(async fn => fn(prisma))
     process.env.ENABLE_VENUE_BASE_SUBSCRIPTION = 'true'
     mockAutorizar.mockReset().mockImplementation(async (_v: string, _c: string, _i: unknown, crear: () => Promise<unknown>) => crear())
     ;(stripeService.createPlanSubscription as jest.Mock).mockResolvedValue({ subscriptionId: 'sub_123' })

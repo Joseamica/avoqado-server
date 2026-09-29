@@ -199,8 +199,9 @@ export interface PlanWinbackEmailData {
 export interface PlanCancellationEmailData {
   locale: 'es' | 'en'
   venueName: string
-  /** When the plan actually ends (end of the paid period the venue already paid for). */
-  accessUntil: Date
+  /** When the plan actually ends (end of the paid period the venue already paid for). `null` = Stripe didn't say: the copy
+   * then names the paid period instead of inventing a date. */
+  accessUntil: Date | null
   /** Win-back: deadline to redeem the offer (e.g. now + 7 days). */
   redeemBy: Date
   /** Win-back: promo code to redeem (when a Stripe promotion code was minted); falls back to a generic message. */
@@ -4697,8 +4698,16 @@ Equipo de Avoqado`
    */
   async sendPlanCancellationEmail(email: string, data: PlanCancellationEmailData): Promise<boolean> {
     const dateOpts = { year: 'numeric', month: 'long', day: 'numeric' } as const
-    const accessUntilFormatted = data.accessUntil.toLocaleDateString(data.locale === 'en' ? 'en-US' : 'es-MX', dateOpts)
+    const accessUntilFormatted = data.accessUntil?.toLocaleDateString(data.locale === 'en' ? 'en-US' : 'es-MX', dateOpts)
     const redeemByFormatted = data.redeemBy.toLocaleDateString(data.locale === 'en' ? 'en-US' : 'es-MX', dateOpts)
+    const untilEnHtml = accessUntilFormatted
+      ? `until <strong>${accessUntilFormatted}</strong>`
+      : 'until the end of the period you already paid for'
+    const untilEn = accessUntilFormatted ? `until ${accessUntilFormatted}` : 'until the end of the period you already paid for'
+    const untilEsHtml = accessUntilFormatted
+      ? `hasta el <strong>${accessUntilFormatted}</strong>`
+      : 'hasta el final del periodo que ya pagaste'
+    const untilEs = accessUntilFormatted ? `hasta el ${accessUntilFormatted}` : 'hasta el final del periodo que ya pagaste'
     const pct = `${data.winbackPercentOff}%`
 
     const subject = data.locale === 'en' ? 'Your Avoqado plan cancellation is scheduled' : 'Programamos la cancelación de tu plan Avoqado'
@@ -4718,14 +4727,14 @@ Equipo de Avoqado`
       bodyHtml = `
       <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Hi,</p>
       <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
-        We've scheduled the cancellation of your Avoqado plan for ${data.venueName}. You'll keep full access until <strong>${accessUntilFormatted}</strong> — nothing changes before then.
+        We've scheduled the cancellation of your Avoqado plan for ${data.venueName}. You'll keep full access ${untilEnHtml} — nothing changes before then.
       </p>
       <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin: 24px 0;">
         <p style="font-size: 14px; margin: 0; color: #666;">Changed your mind? ${codeLineEn}</p>
       </div>`
       text = `Hi,
 
-We've scheduled the cancellation of your Avoqado plan for ${data.venueName}. You'll keep full access until ${accessUntilFormatted} — nothing changes before then.
+We've scheduled the cancellation of your Avoqado plan for ${data.venueName}. You'll keep full access ${untilEn} — nothing changes before then.
 
 Changed your mind? ${
         data.winbackCode
@@ -4740,14 +4749,14 @@ Avoqado Team`
       bodyHtml = `
       <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Hola,</p>
       <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
-        Programamos la cancelación de tu plan Avoqado para ${data.venueName}. Conservarás el acceso completo hasta el <strong>${accessUntilFormatted}</strong> — nada cambia antes de esa fecha.
+        Programamos la cancelación de tu plan Avoqado para ${data.venueName}. Conservarás el acceso completo ${untilEsHtml} — nada cambia antes de esa fecha.
       </p>
       <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin: 24px 0;">
         <p style="font-size: 14px; margin: 0; color: #666;">¿Cambiaste de opinión? ${codeLineEs}</p>
       </div>`
       text = `Hola,
 
-Programamos la cancelación de tu plan Avoqado para ${data.venueName}. Conservarás el acceso completo hasta el ${accessUntilFormatted} — nada cambia antes de esa fecha.
+Programamos la cancelación de tu plan Avoqado para ${data.venueName}. Conservarás el acceso completo ${untilEs} — nada cambia antes de esa fecha.
 
 ¿Cambiaste de opinión? ${
         data.winbackCode

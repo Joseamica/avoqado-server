@@ -2,6 +2,8 @@ import { prismaMock } from '../../../__helpers__/setup'
 import * as stripeService from '@/services/stripe.service'
 import { BadRequestError } from '@/errors/AppError'
 import { getPlanState, cancelPlan, reactivatePlan } from '@/services/dashboard/planState.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
+import logger from '@/config/logger'
 
 jest.mock('@/services/stripe.service')
 const mockStripe = stripeService as jest.Mocked<typeof stripeService>
@@ -42,6 +44,36 @@ function planProFeature(overrides: Record<string, unknown> = {}) {
     monthlyPrice: { toNumber: () => 999 }, // Prisma.Decimal-like
     stripeSubscriptionId: 'sub_123',
     feature: { code: 'PLAN_PRO', name: 'Plan Avoqado Pro' },
+    ...overrides,
+  }
+}
+
+function planContract(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'hc_1',
+    venueId: 'venue_1',
+    planTier: 'PRO',
+    stripeSubscriptionId: 'sub_h1',
+    revision: 3,
+    paidThrough: future,
+    cancelAt: null,
+    endedAt: null,
+    publication: {
+      definition: {
+        schemaVersion: 1,
+        kind: 'PLAN',
+        planTier: 'PRO',
+        terms: {
+          currency: 'MXN',
+          interval: 'MONTHLY',
+          price: 1158.84,
+          taxIncluded: true,
+          promotionCycles: 3,
+          renewal: { kind: 'SAME_PRICE' },
+        },
+      },
+    },
+    purchase: { lastIssue: null },
     ...overrides,
   }
 }
@@ -179,6 +211,176 @@ describe('planState.service', () => {
     it('cancelPlan throws BadRequestError when there is no PLAN_PRO plan at all', async () => {
       prismaMock.venueFeature.findMany.mockResolvedValue([])
       await expect(cancelPlan('venue_1')).rejects.toThrow(BadRequestError)
+    })
+  })
+
+  describe('cancelPlan with the owner reason', () => {
+    beforeEach(() => {
+      prismaMock.venueFeature.findMany.mockResolvedValue([planProFeature()])
+      mockStripe.retrievePlanSubscription.mockResolvedValue(subSummary())
+      mockStripe.setSubscriptionCancelAtPeriodEnd.mockResolvedValue({} as any)
+    })
+
+    it('sends Stripe the mapped reason and audits ours, with the actor', async () => {
+      await cancelPlan('venue_1', { reason: 'TEMPORARY', comment: 'Cerramos en agosto', staffId: 'staff_1' })
+      expect(mockStripe.setSubscriptionCancelAtPeriodEnd).toHaveBeenCalledWith('sub_123', true, {
+        feedback: 'unused',
+        comment: '[temporal] Cerramos en agosto',
+      })
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'PLAN_CANCEL_SCHEDULED',
+          staffId: 'staff_1',
+          data: expect.objectContaining({ reason: 'TEMPORARY', comment: 'Cerramos en agosto' }),
+        }),
+      )
+    })
+
+    it('without a reason behaves as before: two arguments to Stripe and no reason in the audit', async () => {
+      await cancelPlan('venue_1')
+      expect(mockStripe.setSubscriptionCancelAtPeriodEnd).toHaveBeenCalledWith('sub_123', true)
+      const data = (logAction as jest.Mock).mock.calls.at(-1)[0].data
+      expect(data).not.toHaveProperty('reason')
+      expect(data).not.toHaveProperty('comment')
+    })
+  })
+
+  describe('origin: the one obligation behind "Tu plan"', () => {
+    it('CLASSIC: the live classic row, with its Stripe price and period', async () => {
+      prismaMock.venueFeature.findMany.mockResolvedValue([planProFeature()])
+      mockStripe.retrievePlanSubscription.mockResolvedValue(subSummary())
+      const { origin } = await getPlanState('venue_1')
+      expect(origin).toEqual({
+        kind: 'CLASSIC',
+        tier: 'PRO',
+        price: { base: 999, gross: 1158.84, currency: 'MXN' },
+        interval: 'month',
+        currentPeriodEnd: future.toISOString(),
+        cancelAt: null,
+        contractId: null,
+        contractRevision: null,
+        subscriptionId: 'sub_123',
+        paymentIssue: null,
+      })
+    })
+
+    it('CLASSIC scheduled to end: cancelAt is the period end', async () => {
+      prismaMock.venueFeature.findMany.mockResolvedValue([planProFeature()])
+      mockStripe.retrievePlanSubscription.mockResolvedValue(subSummary({ cancelAtPeriodEnd: true }))
+      expect((await getPlanState('venue_1')).origin?.cancelAt).toBe(future.toISOString())
+    })
+
+    it('COMP: a plan row without Stripe says until when, with no price', async () => {
+      const until = new Date(Date.now() + 10 * DAY_MS)
+      prismaMock.venueFeature.findMany.mockResolvedValue([planProFeature({ stripeSubscriptionId: null, endDate: until })])
+      prismaMock.hybridContract.findFirst.mockResolvedValue(null)
+      const { origin } = await getPlanState('venue_1')
+      expect(origin).toMatchObject({ kind: 'COMP', tier: 'PRO', price: null, currentPeriodEnd: until.toISOString() })
+    })
+
+    it('R4b: a paid plan contract wins over a courtesy/trial row inside its dates', async () => {
+      const until = new Date(Date.now() + 10 * DAY_MS)
+      prismaMock.venueFeature.findMany.mockResolvedValue([planProFeature({ stripeSubscriptionId: null, endDate: until })])
+      prismaMock.hybridContract.findFirst.mockResolvedValue(planContract())
+      prismaMock.hybridPaymentPeriod.findFirst.mockResolvedValue(null)
+      expect((await getPlanState('venue_1')).origin).toMatchObject({ kind: 'CONTRACT', tier: 'PRO', contractId: 'hc_1' })
+    })
+
+    it('R4a: a contract whose stored offer is invalid degrades to no price, never throws', async () => {
+      prismaMock.venueFeature.findMany.mockResolvedValue([])
+      prismaMock.hybridContract.findFirst.mockResolvedValue(planContract({ publication: { definition: { kind: 'PLAN', garbage: true } } }))
+      prismaMock.hybridPaymentPeriod.findFirst.mockResolvedValue(null)
+      const { origin } = await getPlanState('venue_1')
+      expect(origin).toMatchObject({ kind: 'CONTRACT', tier: 'PRO', price: null, contractId: 'hc_1' })
+      expect(logger.warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ venueId: 'venue_1', contractId: 'hc_1' }))
+    })
+
+    it('CONTRACT: the live plan contract, with what its last paid period charged', async () => {
+      prismaMock.venueFeature.findMany.mockResolvedValue([])
+      prismaMock.hybridContract.findFirst.mockResolvedValue(planContract())
+      prismaMock.hybridPaymentPeriod.findFirst.mockResolvedValue({ composition: [{ contractId: 'hc_1', amount: '22.00' }] })
+      expect((await getPlanState('venue_1')).origin).toEqual({
+        kind: 'CONTRACT',
+        tier: 'PRO',
+        price: { base: 18.97, gross: 22, currency: 'MXN' },
+        interval: 'month',
+        currentPeriodEnd: future.toISOString(),
+        cancelAt: null,
+        contractId: 'hc_1',
+        contractRevision: 3,
+        subscriptionId: 'sub_h1',
+        paymentIssue: null,
+      })
+    })
+
+    it('CONTRACT before any paid period uses the offer price', async () => {
+      prismaMock.venueFeature.findMany.mockResolvedValue([])
+      prismaMock.hybridContract.findFirst.mockResolvedValue(planContract())
+      prismaMock.hybridPaymentPeriod.findFirst.mockResolvedValue(null)
+      expect((await getPlanState('venue_1')).origin?.price).toEqual({ base: 999, gross: 1158.84, currency: 'MXN' })
+    })
+
+    it('a retired classic row never wins over a live plan contract', async () => {
+      prismaMock.venueFeature.findMany.mockResolvedValue([planProFeature({ active: false, endDate: new Date(Date.now() - DAY_MS) })])
+      mockStripe.retrievePlanSubscription.mockResolvedValue(subSummary({ status: 'canceled' }))
+      prismaMock.hybridContract.findFirst.mockResolvedValue(planContract({ planTier: 'PREMIUM' }))
+      prismaMock.hybridPaymentPeriod.findFirst.mockResolvedValue(null)
+      expect((await getPlanState('venue_1')).origin).toMatchObject({ kind: 'CONTRACT', tier: 'PREMIUM' })
+    })
+
+    it('skips contracts that ended or whose cancellation already took effect, Premium first', async () => {
+      prismaMock.venueFeature.findMany.mockResolvedValue([])
+      await getPlanState('venue_1')
+      expect(prismaMock.hybridContract.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            venueId: 'venue_1',
+            endedAt: null,
+            planTier: { in: ['PRO', 'PREMIUM'] },
+            OR: [{ cancelAt: null }, { cancelAt: { gt: expect.any(Date) } }],
+          },
+          orderBy: [{ planTier: 'asc' }, { createdAt: 'desc' }, { id: 'desc' }],
+        }),
+      )
+    })
+
+    it('NONE: Gratis', async () => {
+      prismaMock.venueFeature.findMany.mockResolvedValue([])
+      prismaMock.hybridContract.findFirst.mockResolvedValue(null)
+      expect((await getPlanState('venue_1')).origin?.kind).toBe('NONE')
+    })
+  })
+
+  describe('pauseOfferEligible: the same checks applyRetentionOffer enforces', () => {
+    beforeEach(() => {
+      prismaMock.venueFeature.findMany.mockResolvedValue([planProFeature()])
+      prismaMock.activityLog.findFirst.mockResolvedValue(null)
+    })
+
+    it('true for a live classic plan, even a new one: a pause is not a discount', async () => {
+      mockStripe.retrievePlanSubscription.mockResolvedValue(subSummary({ createdAt: freshCreatedAt }))
+      expect((await getPlanState('venue_1')).pauseOfferEligible).toBe(true)
+    })
+
+    it('false with an active discount', async () => {
+      mockStripe.retrievePlanSubscription.mockResolvedValue(subSummary({ hasActiveDiscount: true }))
+      expect((await getPlanState('venue_1')).pauseOfferEligible).toBe(false)
+    })
+
+    it('false while collection is already paused', async () => {
+      mockStripe.retrievePlanSubscription.mockResolvedValue(subSummary({ pausedUntil: future }))
+      expect((await getPlanState('venue_1')).pauseOfferEligible).toBe(false)
+    })
+
+    it('false after a pause in the last 12 months', async () => {
+      mockStripe.retrievePlanSubscription.mockResolvedValue(subSummary())
+      prismaMock.activityLog.findFirst.mockResolvedValue({ createdAt: new Date() })
+      expect((await getPlanState('venue_1')).pauseOfferEligible).toBe(false)
+    })
+
+    it('false for a comped plan (no Stripe subscription)', async () => {
+      prismaMock.venueFeature.findMany.mockResolvedValue([planProFeature({ stripeSubscriptionId: null })])
+      expect((await getPlanState('venue_1')).pauseOfferEligible).toBe(false)
     })
   })
 })

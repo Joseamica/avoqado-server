@@ -18,6 +18,7 @@ const mockVenueFindUnique = jest.fn()
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    capabilityGrant: { findFirst: jest.fn().mockResolvedValue(null), groupBy: jest.fn().mockResolvedValue([]) },
     venueFeature: {
       findFirst: (...a: unknown[]) => mockVfFindFirst(...a),
       findMany: (...a: unknown[]) => mockVfFindMany(...a),

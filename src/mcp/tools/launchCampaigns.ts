@@ -1,3 +1,4 @@
+import { registerHybridCampaignTools } from './hybridBilling'
 /**
  * S11 — las campañas ligeras de lanzamiento, desde el MCP (spec 2026-09-17 § 3.9).
  *
@@ -31,6 +32,8 @@ import { LAUNCH_CAMPAIGN_SELECT } from '@/services/launchCampaigns/launchCampaig
 import { activateLaunchCampaign, previewLaunchOffer } from '@/services/launchCampaigns/launchCampaignStripe.service'
 import { launchOfferAvailability } from '@/services/launchCampaigns/launchOfferMath'
 import { CAMPAIGN_CHANNEL_VALUES, CAMPAIGN_STATUS_VALUES, CAMPAIGN_VERTICAL_VALUES } from '@/services/launchCampaigns/launchCampaignEnums'
+import { hybridOfferPreviewBody } from '@/services/launchCampaigns/hybridOffer.schema'
+import { previewHybridOffer } from '@/services/launchCampaigns/hybridOffer.service'
 
 const SOLO_AVOQADO = 'Solo Avoqado puede ver o cambiar las ofertas de lanzamiento.'
 
@@ -38,6 +41,17 @@ const SOLO_AVOQADO = 'Solo Avoqado puede ver o cambiar las ofertas de lanzamient
 const pesos = (cents: number) => `$${(cents / 100).toFixed(2)}`
 
 export function registerLaunchCampaignTools(server: McpServer, scope: McpScope): void {
+  registerHybridCampaignTools(server, scope)
+  server.tool(
+    'preview_hybrid_offer',
+    'Simula una oferta de plan, funciones específicas o paquete a elección. Valida cantidad, funciones ya incluidas, dependencias, precio total en pesos MXN y renovación. El escenario es hipotético. No publica, reserva, cobra ni activa funciones. Sólo para Avoqado.',
+    hybridOfferPreviewBody.shape,
+    async input => {
+      if (!scope.isSuperAdmin) return text({ ok: false, error: SOLO_AVOQADO })
+      return text(previewHybridOffer(input))
+    },
+  )
+
   server.tool(
     'list_launch_campaigns',
     'Ofertas de lanzamiento de Avoqado (la ficha que un anuncio promete: precio por mes, cuántos meses y cuántos lugares). ' +

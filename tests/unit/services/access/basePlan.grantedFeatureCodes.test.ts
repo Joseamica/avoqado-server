@@ -12,7 +12,10 @@
 const mockFindMany = jest.fn()
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
-  default: { venueFeature: { findMany: (...a: unknown[]) => mockFindMany(...a) } },
+  default: {
+    capabilityGrant: { findFirst: jest.fn().mockResolvedValue(null), groupBy: jest.fn().mockResolvedValue([]) },
+    venueFeature: { findMany: (...a: unknown[]) => mockFindMany(...a) },
+  },
 }))
 
 import { getVenueGrantedFeatureCodes } from '@/services/access/basePlan.service'
@@ -45,4 +48,9 @@ describe('getVenueGrantedFeatureCodes', () => {
     expect(q.take).toBeGreaterThan(0)
     expect(q.orderBy).toEqual({ id: 'asc' })
   })
+})
+
+it('reports an oversized legacy catalog instead of silently hiding purchased access', async () => {
+  mockFindMany.mockResolvedValue(Array.from({ length: 201 }, (_, i) => ({ feature: { code: `CODE_${i}` } })))
+  await expect(getVenueGrantedFeatureCodes('v1')).rejects.toThrow()
 })

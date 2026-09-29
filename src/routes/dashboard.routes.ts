@@ -1,3 +1,4 @@
+import hybridBillingRoutes from './dashboard/hybridBilling.routes'
 import express, { RequestHandler } from 'express'
 import { z } from 'zod'
 import {
@@ -291,6 +292,7 @@ import {
   updatePaymentMethodSchema,
   createBillingPortalSessionSchema,
   planParamsSchema,
+  cancelPlanSchema,
   createPlanCheckoutSessionSchema,
   applyRetentionOfferSchema,
   downgradeToFreeSchema,
@@ -2199,6 +2201,8 @@ router.get(
   venueController.getVenuePlan,
 )
 
+router.use('/venues/:venueId/hybrid-billing', authenticateTokenMiddleware, hybridBillingRoutes)
+
 // Minimal plan-tier gating signal ({ tier, grandfathered, exempt }) readable by EVERY venue role.
 // The dashboard FeatureGate (useVenueTier) runs this on EVERY page for EVERY role to decide whether
 // to paywall — but GET /plan above is ADMIN/OWNER-only (it returns price + Stripe ids). Guarded by
@@ -2231,7 +2235,7 @@ router.post(
   '/venues/:venueId/plan/cancel',
   authenticateTokenMiddleware,
   checkPermission('billing:subscriptions:manage'),
-  validateRequest(planParamsSchema) as RequestHandler,
+  validateRequest(cancelPlanSchema) as RequestHandler,
   venueController.cancelVenuePlan,
 )
 

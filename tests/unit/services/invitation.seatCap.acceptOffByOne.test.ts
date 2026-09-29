@@ -32,14 +32,19 @@ const INVITATION = {
   venue: { id: 'venue-1', name: 'Test Venue' },
 }
 
+const mockTxInvitationUpdateMany = jest.fn()
+const mockTxQueryRaw = jest.fn()
+const mockTxStaffVenueCreate = jest.fn()
+
 jest.mock('../../../src/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     $transaction: jest.fn(async (cb: any) => {
       const tx = {
+        $queryRaw: mockTxQueryRaw,
         invitation: {
           findFirst: jest.fn().mockResolvedValue(INVITATION),
-          update: jest.fn().mockResolvedValue({}),
+          updateMany: mockTxInvitationUpdateMany,
         },
         staff: {
           findUnique: jest.fn().mockResolvedValue(null), // brand-new user → StaffVenue.create branch
@@ -54,7 +59,7 @@ jest.mock('../../../src/utils/prismaClient', () => ({
           findUnique: jest.fn().mockResolvedValue(null),
           findFirst: jest.fn().mockResolvedValue(null),
           findMany: jest.fn().mockResolvedValue([]), // no existing assignment → new seat (cap checked)
-          create: jest.fn().mockResolvedValue({}),
+          create: mockTxStaffVenueCreate,
         },
         staffOrganization: {
           create: jest.fn().mockResolvedValue({}),
@@ -96,7 +101,37 @@ jest.mock('../../../src/services/access/seatCap.service', () => ({
 import { acceptInvitation } from '../../../src/services/invitation.service'
 
 describe('acceptInvitation — accept-time seat-cap off-by-one guard', () => {
-  beforeEach(() => jest.clearAllMocks())
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockTxInvitationUpdateMany.mockResolvedValue({ count: 1 })
+    mockTxQueryRaw.mockResolvedValue([])
+    mockTxStaffVenueCreate.mockResolvedValue({})
+  })
+
+  // 🔴 Codex (5th audit): the Free seat-cap enforcement locks pending invitations BEFORE touching StaffVenue; accept wrote
+  // StaffVenue first and the invitation last, so the two could deadlock. Accept now locks its invitation first too.
+  it('🔴 locks its invitation BEFORE writing any StaffVenue (same lock order as the seat-cap enforcement)', async () => {
+    await acceptInvitation('accept-token', { firstName: 'New', lastName: 'User', password: 'Password123' })
+
+    const sql = (mockTxQueryRaw.mock.calls[0][0] as string[]).join('?')
+    expect(sql).toContain('"Invitation"')
+    expect(sql).toContain('FOR UPDATE')
+    expect(mockTxQueryRaw.mock.invocationCallOrder[0]).toBeLessThan(mockTxStaffVenueCreate.mock.invocationCallOrder[0])
+  })
+
+  // 🔴 Real race (Codex, 28-sep, reproduced): the invite was read PENDING at the start of the transaction but written
+  // ACCEPTED by id at the end — a revocation in between (the Free seat cap revokes invitations that no longer fit, and
+  // admins revoke by hand) was silently overwritten. The final write must still find it PENDING, or the accept aborts.
+  it('🔴 an invitation revoked while it was being accepted is not overwritten: the accept aborts', async () => {
+    mockTxInvitationUpdateMany.mockResolvedValueOnce({ count: 0 })
+
+    await expect(acceptInvitation('accept-token', { firstName: 'New', lastName: 'User', password: 'Password123' })).rejects.toThrow(
+      'ya no está disponible',
+    )
+    expect(mockTxInvitationUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'inv-accept-1', status: InvitationStatus.PENDING } }),
+    )
+  })
 
   it('passes excludeInvitationId of the invite being accepted, so its own pending row never blocks the accept', async () => {
     const result = await acceptInvitation('accept-token', {

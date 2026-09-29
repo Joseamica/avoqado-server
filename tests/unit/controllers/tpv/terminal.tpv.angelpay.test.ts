@@ -28,6 +28,8 @@ jest.mock('@/utils/prismaClient', () => ({
     // assert on `plan`, but the models must exist so the lookup resolves
     // instead of crashing the worker with an unhandled rejection.
     venueFeature: { findMany: jest.fn() },
+    capabilityGrant: { findFirst: jest.fn().mockResolvedValue(null), groupBy: jest.fn().mockResolvedValue([]) },
+    hybridContract: { findFirst: jest.fn().mockResolvedValue(null) },
     venue: { findUnique: jest.fn() },
   },
 }))

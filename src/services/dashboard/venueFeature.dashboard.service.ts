@@ -14,10 +14,10 @@ import {
   sueltasAbsorbidasPorElPlan,
   type BaseTier,
   PAID_PLAN_TIER_CODES,
-  PREMIUM_ONLY_CODES,
   FREE_TIER_CODES,
 } from '@/services/access/basePlan.service'
 import { GRANDFATHER_SELECT, resolveGrandfathered } from '@/services/access/grandfather'
+import { grantedCapabilityCodes } from '@/services/access/capabilityGrants.service'
 import { cancelSubscription, createTrialSubscriptions, estadoDeLaSuscripcion, stripeAfirmaQueNoExiste } from '../stripe.service'
 import { logAction } from './activity-log.service'
 
@@ -108,9 +108,10 @@ export async function sueltasQueAbsorbeElPlan(venueId: string, tier: BaseTier): 
  * tocar Stripe. Lo usan la compra suelta y el cambio suelta→suelta (Codex, ronda 5, P1-3).
  */
 export async function assertNoIncluidaEnElPlan(venueId: string, featureCodes: string[]): Promise<void> {
-  const tier = await getVenueBaseTier(venueId)
-  const yaIncluidas = featureCodes.filter(code =>
-    tier ? elPlanConcede(tier, code) : (FREE_TIER_CODES as readonly string[]).includes(code),
+  const tier = await getVenueBaseTier(venueId, { legacyOnly: true })
+  const commercialCodes = new Set(await grantedCapabilityCodes(venueId))
+  const yaIncluidas = featureCodes.filter(
+    code => commercialCodes.has(code) || (tier ? elPlanConcede(tier, code) : (FREE_TIER_CODES as readonly string[]).includes(code)),
   )
   if (yaIncluidas.length > 0) {
     throw new ConflictError(`Tu plan ya incluye ${yaIncluidas.join(', ')}: no hace falta contratarlo aparte.`, 'FEATURE_INCLUDED_IN_PLAN', {
@@ -514,24 +515,22 @@ export async function getVenueFeatureStatus(venueId: string) {
   // This is a pure UNION: features the venue already owns (real VenueFeature rows in `venue.features`)
   // keep their richer state untouched; we only promote the ones that would otherwise be in
   // `availableFeatures`. The plan-tier codes themselves are never blanket-granted.
-  const baseTier = await getVenueBaseTier(venueId)
+  const baseTier = await getVenueBaseTier(venueId, { legacyOnly: true })
   // Grandfathered venues (own flag OR the organization's) are exempt from feature paywalls —
   // EVERY available non-tier feature must surface as granted (mirror of venueHasFeatureAccess +
   // the checkFeatureAccess middleware short-circuit), so the dashboard shows no upsell cards.
   const isGrandfathered = resolveGrandfathered(venue)
   const isPlanTierCode = (code: string): boolean => (PAID_PLAN_TIER_CODES as readonly string[]).includes(code)
-  const isPremiumOnlyCode = (code: string): boolean => (PREMIUM_ONLY_CODES as readonly string[]).includes(code)
+  const contractCodes = new Set(await grantedCapabilityCodes(venueId))
   // Tier-aware grant predicate — same rule as the checkFeatureAccess middleware:
   // grantedByPlan = grandfathered || FREE_TIER_CODES || tier === 'PREMIUM' || (tier === 'PRO' && !PREMIUM_ONLY_CODES.includes(code))
   const tierGrants = (code: string): boolean => {
     if (isPlanTierCode(code)) return false // tier codes never self-grant via the blanket
     if (isGrandfathered) return true // grandfathered → every non-tier feature granted, no paywall
     if ((FREE_TIER_CODES as readonly string[]).includes(code)) return true // Free-tier promises: everyone
-    if (baseTier === 'PREMIUM') return true
-    if (baseTier === 'PRO') return !isPremiumOnlyCode(code)
-    return false
+    return baseTier != null && elPlanConcede(baseTier, code)
   }
-  const basePlanGrantedFeatures = availableFeatures.filter(f => tierGrants(f.code))
+  const basePlanGrantedFeatures = availableFeatures.filter(f => tierGrants(f.code) || contractCodes.has(f.code))
   const basePlanGrantedIds = new Set(basePlanGrantedFeatures.map(f => f.id))
   // Features that remain genuinely locked (no base plan, or the plan-tier feature itself).
   const lockedAvailableFeatures = availableFeatures.filter(f => !basePlanGrantedIds.has(f.id))
@@ -610,7 +609,7 @@ export async function getVenueFeatureStatus(venueId: string) {
       // marker the dashboard can use to suppress the per-feature cancel control
       // (you can't cancel a base-plan grant individually).
       ...basePlanGrantedFeatures.map(f => ({
-        id: `baseplan:${f.code}`,
+        id: `${tierGrants(f.code) ? 'baseplan' : 'contract'}:${f.code}`,
         venueId: venue.id,
         featureId: f.id,
         feature: {
@@ -625,7 +624,8 @@ export async function getVenueFeatureStatus(venueId: string) {
         endDate: null,
         stripeSubscriptionId: null,
         stripePriceId: f.stripePriceId,
-        grantedByBasePlan: true,
+        grantedByBasePlan: tierGrants(f.code),
+        grantedByContract: contractCodes.has(f.code),
       })),
     ],
     availableFeatures: lockedAvailableFeatures.map(f => ({

@@ -17,14 +17,7 @@
 import { Request, Response, NextFunction } from 'express'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
-import {
-  PAID_PLAN_TIER_CODES,
-  PREMIUM_ONLY_CODES,
-  FREE_TIER_CODES,
-  getVenueBaseTier,
-  venueHasFeatureAccess,
-  venueIsExemptFromPlanGating,
-} from '@/services/access/basePlan.service'
+import { venueHasFeatureAccess, venueIsExemptFromPlanGating } from '@/services/access/basePlan.service'
 import { resolveRequestVenueId } from './checkPermission.middleware'
 import { esSuperadminReal } from '@/services/access/rolVigente'
 
@@ -106,22 +99,10 @@ export function checkFeatureAccess(featureCode: string) {
 
       // Feature not found or not active
       if (!venueFeature || !venueFeature.active) {
-        // Tier-aware blanket grant: the venue's base plan unlocks features included in its tier
-        // (mirrors venueHasFeatureAccess). FREE_TIER_CODES are promised to everyone (even with
-        // no plan); PREMIUM unlocks all non-tier features; PRO unlocks all except the Premium-only
-        // differentiators (PREMIUM_ONLY_CODES). The plan tiers themselves are never
-        // blanket-granted. An explicit own VenueFeature (checked above) always wins.
-        if (!PAID_PLAN_TIER_CODES.includes(featureCode as any)) {
-          if ((FREE_TIER_CODES as readonly string[]).includes(featureCode)) {
-            ;(req as any).venueFeature = { featureCode, grantedBy: 'FREE_TIER' }
-            return next()
-          }
-          const tier = await getVenueBaseTier(venueId)
-          const grantedByPlan = tier === 'PREMIUM' || (tier === 'PRO' && !(PREMIUM_ONLY_CODES as readonly string[]).includes(featureCode))
-          if (grantedByPlan) {
-            ;(req as any).venueFeature = { featureCode, grantedBy: 'BASE_PLAN' }
-            return next()
-          }
+        // One resolver for legacy grants, commercial origins, free features and plan inclusions.
+        if (await venueHasFeatureAccess(venueId, featureCode)) {
+          ;(req as any).venueFeature = { featureCode, grantedBy: 'EFFECTIVE_ACCESS' }
+          return next()
         }
 
         logger.warn('⚠️ Feature access denied: Feature not active', {
@@ -503,18 +484,8 @@ export async function hasFeatureAccess(
     })
 
     if (!venueFeature || !venueFeature.active) {
-      // Tier-aware blanket grant (mirrors venueHasFeatureAccess): FREE_TIER_CODES are promised to
-      // everyone; PREMIUM unlocks all non-tier features; PRO unlocks all except
-      // PREMIUM_ONLY_CODES. An explicit own VenueFeature wins.
-      if (!PAID_PLAN_TIER_CODES.includes(featureCode as any)) {
-        if ((FREE_TIER_CODES as readonly string[]).includes(featureCode)) {
-          return { hasAccess: true, isTrialing: false, trialEndsAt: null }
-        }
-        const tier = await getVenueBaseTier(venueId)
-        const grantedByPlan = tier === 'PREMIUM' || (tier === 'PRO' && !(PREMIUM_ONLY_CODES as readonly string[]).includes(featureCode))
-        if (grantedByPlan) {
-          return { hasAccess: true, isTrialing: false, trialEndsAt: null }
-        }
+      if (await venueHasFeatureAccess(venueId, featureCode)) {
+        return { hasAccess: true, isTrialing: false, trialEndsAt: null }
       }
       return {
         hasAccess: false,
@@ -525,6 +496,12 @@ export async function hasFeatureAccess(
     }
 
     const now = new Date()
+    if (
+      (venueFeature.suspendedAt || (venueFeature.endDate && venueFeature.endDate < now)) &&
+      (await venueHasFeatureAccess(venueId, featureCode))
+    ) {
+      return { hasAccess: true, isTrialing: false, trialEndsAt: null }
+    }
     if (venueFeature.endDate && venueFeature.endDate < now) {
       return {
         hasAccess: false,

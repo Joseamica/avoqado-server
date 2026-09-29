@@ -17,6 +17,8 @@
 jest.mock('../../../../src/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    hybridContract: { findFirst: jest.fn().mockResolvedValue(null) },
+    capabilityGrant: { findFirst: jest.fn().mockResolvedValue(null), groupBy: jest.fn().mockResolvedValue([]) },
     venue: { findUnique: jest.fn(), findMany: jest.fn() },
     venueFeature: { findFirst: jest.fn(), findMany: jest.fn() },
   },
@@ -128,7 +130,7 @@ describe('Grandfathering inherited from the organization', () => {
     await expect(venueIsExemptFromPlanGating('missing')).resolves.toBe(false)
 
     const info = await getVenuePlanInfo('missing')
-    expect(info).toEqual({ tier: 'FREE', grandfathered: false, exempt: false })
+    expect(info).toMatchObject({ tier: 'FREE', grandfathered: false, exempt: false })
   })
 
   it('tolerates a venue row with no organization attached (defensive: never throws)', async () => {

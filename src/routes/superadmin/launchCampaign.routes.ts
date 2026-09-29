@@ -55,6 +55,21 @@ router.post('/preview', controller.preview)
 
 /**
  * @openapi
+ * /api/v1/superadmin/launch-campaigns/hybrid-preview:
+ *   post:
+ *     tags: [Superadmin, LaunchCampaigns]
+ *     summary: Valida una definición híbrida y una selección simulada. No publica, reserva ni cobra
+ *     description: Sólo SUPERADMIN. Importes en pesos MXN con IVA incluido. El escenario es hipotético, no acceso real de un negocio
+ *     responses:
+ *       200: { description: 'PREVIEW_ONLY, selección validada y catálogo paginado (máximo 100)' }
+ *       400: { description: 'Definición, precio o selección no válidos' }
+ *       403: { description: Requiere SUPERADMIN }
+ *       409: { description: 'HYBRID_OFFER_STALE, la definición cambió desde la vista previa' }
+ */
+router.post('/hybrid-preview', controller.hybridPreview)
+
+/**
+ * @openapi
  * /api/v1/superadmin/launch-campaigns/{id}:
  *   get:
  *     tags: [Superadmin, LaunchCampaigns]

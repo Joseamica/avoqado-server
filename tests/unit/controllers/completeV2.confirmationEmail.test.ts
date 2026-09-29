@@ -71,6 +71,9 @@ jest.mock('../../../src/config/logger', () => ({
 jest.mock('../../../src/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    $transaction: jest.fn(),
+    $queryRaw: jest.fn(),
+    hybridPurchase: { findFirst: jest.fn().mockResolvedValue(null) },
     onboardingProgress: { updateMany: jest.fn(), update: jest.fn() },
     venue: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
     organization: { update: jest.fn() },
@@ -146,7 +149,40 @@ describe('completeV2Onboarding — plan confirmation email + venue.language', ()
 
   beforeEach(() => {
     jest.clearAllMocks()
+    ;(prisma.$transaction as jest.Mock).mockImplementation(async fn => fn(prisma))
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([])
+    ;(prisma.hybridPurchase.findFirst as jest.Mock).mockResolvedValue(null)
     process.env.ENABLE_VENUE_BASE_SUBSCRIPTION = 'true'
+  })
+
+  it('rechecks pending hybrid acceptance after the shared completion lock is acquired', async () => {
+    primeHappyPath({ tier: 'FREE', paymentMethodId: null })
+    let release!: () => void, entered!: () => void
+    const blocked = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const acquired = new Promise<void>(resolve => {
+      entered = resolve
+    })
+    ;(prisma.$queryRaw as jest.Mock).mockImplementation(async () => {
+      entered()
+      await blocked
+      return []
+    })
+    const next = jest.fn()
+    const completion = completeV2Onboarding(buildReq() as Request, buildRes() as Response, next)
+    try {
+      await Promise.race([completion, acquired])
+      expect(prisma.$queryRaw).toHaveBeenCalled()
+      expect(prisma.onboardingProgress.updateMany).not.toHaveBeenCalled()
+      // Acceptance commits while completion is waiting for the same organization row.
+      ;(prisma.hybridPurchase.findFirst as jest.Mock).mockResolvedValue({ id: 'accepted-in-other-tab' })
+    } finally {
+      release()
+    }
+    await completion
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ code: 'HYBRID_ACTIVATION_PENDING' }))
+    expect(prisma.onboardingProgress.updateMany).not.toHaveBeenCalled()
   })
 
   afterAll(() => {
@@ -177,7 +213,7 @@ describe('completeV2Onboarding — plan confirmation email + venue.language', ()
     })
     // trial → no intro amount
     expect(data.introAmountCents).toBeUndefined()
-    expect(data.billingPortalUrl).toContain('/dashboard/venues/bar-test/billing')
+    expect(data.billingPortalUrl).toContain('/venues/bar-test/settings/billing/subscriptions')
     expect(res.status).toHaveBeenCalledWith(201)
     expect(next).not.toHaveBeenCalled()
   })

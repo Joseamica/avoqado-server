@@ -1,6 +1,7 @@
 import { EntityType, VenueOperationalRole, VenueType } from '@prisma/client' // Importa enums directamente de Prisma
 import { z } from 'zod'
 import { zTimezone } from '@/utils/sanitizeTimezone'
+import { cancellationFields } from '@/services/shared/cancellationReason'
 
 // Schema de Zod para la creación de Venues
 export const createVenueSchema = z.object({
@@ -232,6 +233,12 @@ export const planParamsSchema = z.object({
 
 export type PlanParamsDto = z.infer<typeof planParamsSchema.shape.params>
 
+// Schema for POST /venues/:venueId/plan/cancel. The body is optional: dashboards that predate the reason send none.
+export const cancelPlanSchema = z.object({
+  params: planParamsSchema.shape.params,
+  body: z.object(cancellationFields).default({}),
+})
+
 // Schema for creating a Stripe Checkout session for a base plan (Pro o Premium).
 export const createPlanCheckoutSessionSchema = z.object({
   params: z.object({
@@ -274,6 +281,7 @@ export const downgradeToFreeSchema = z.object({
         invalid_type_error: 'La lista de usuarios a conservar debe ser un arreglo.',
       })
       .default([]),
+    ...cancellationFields,
   }),
 })
 

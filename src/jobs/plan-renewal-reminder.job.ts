@@ -23,8 +23,10 @@ import Stripe from 'stripe'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
+import { subscriptionPeriod } from '@/utils/stripeSubscriptionPeriod'
 import emailService from '@/services/email.service'
 import { resolvePlanNotificationTarget } from '@/services/access/planNotification.service'
+import { billingPageUrl } from '@/utils/dashboardLinks'
 import { scheduleJob } from '../observability/jobContext'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
@@ -78,6 +80,7 @@ export class PlanRenewalReminderJob {
             venueId: true,
             stripeSubscriptionId: true,
             renewalReminderSentAt: true,
+            venue: { select: { slug: true } },
           },
         }),
       { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'plan-renewal-reminder.findMany' },
@@ -98,10 +101,15 @@ export class PlanRenewalReminderJob {
 
         if (sub.status !== 'active' && sub.status !== 'trialing') continue
 
-        // Stripe's TS types (v19) omit current_period_* on the Subscription type;
-        // the API returns them. Cast like the rest of the codebase.
-        const periodEndMs = (sub as any).current_period_end * 1000
-        const periodStartMs = (sub as any).current_period_start * 1000
+        // The pinned API carries the period on the item, not the subscription. Without a real date we skip:
+        // NaN would slip past both checks below and email "Invalid Date" every day.
+        const period = subscriptionPeriod(sub)
+        if (!period.start || !period.end) {
+          logger.warn(`renewal reminder: subscription ${vf.stripeSubscriptionId} has no billing period; skipping`)
+          continue
+        }
+        const periodEndMs = period.end.getTime()
+        const periodStartMs = period.start.getTime()
         const daysToRenewal = (periodEndMs - now) / 86400000
 
         // ~3-day window (2-4 days out).
@@ -118,7 +126,6 @@ export class PlanRenewalReminderJob {
 
         const interval = sub.items.data[0]?.price.recurring?.interval === 'year' ? 'annual' : 'monthly'
         const amountCents = sub.items.data[0]?.price.unit_amount ?? 0
-        const FRONTEND_URL = process.env.FRONTEND_URL || 'https://dashboard.avoqado.io'
 
         await emailService.sendPlanRenewalReminderEmail(target.email, {
           locale: target.locale,
@@ -126,7 +133,7 @@ export class PlanRenewalReminderJob {
           interval,
           renewalDate: new Date(periodEndMs),
           amountCents,
-          billingPortalUrl: `${FRONTEND_URL}/dashboard/venues/billing`,
+          billingPortalUrl: billingPageUrl(vf.venue?.slug),
         })
 
         await prisma.venueFeature.update({

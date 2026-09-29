@@ -11,11 +11,12 @@
  *   4. sólo entonces se crea, y lo creado se devuelve DESPUÉS de confirmar (una transacción abortada nunca lo publica).
  */
 import AppError from '@/errors/AppError'
+import type { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { stripe, STRIPE_DENTRO_DEL_CANDADO } from '@/services/stripe.service'
 import { elPlanConcede } from './basePlan.service'
 import { avisarConflictoCreado, registrarConflictoDeObligacion } from './conflictosDeObligacion.service'
-import { inventarioDeObligaciones } from './inventarioDeObligaciones'
+import { inventarioDeObligaciones, type InventarioDeObligaciones } from './inventarioDeObligaciones'
 import { evaluarCompatibilidad, type CodigoDeIncompatibilidad, type Intencion } from './obligacionesDeCobro'
 
 const STRIPE = STRIPE_DENTRO_DEL_CANDADO
@@ -59,7 +60,7 @@ export async function autorizarObligacionNueva<T>(
   venueId: string,
   customerId: string,
   intencion: Intencion,
-  crear: () => Promise<T>,
+  crear: (tx: Prisma.TransactionClient, inventory: InventarioDeObligaciones) => Promise<T>,
   /**
    * `desdeElAlta`: la llama el propio carril del alta, que marca «cobro en curso» ANTES de cobrar; sin esto se bloquearía
    * a sí mismo en el paso 0. Todo lo demás (candado, confirmaciones abiertas, lo vivo en Stripe) aplica igual.
@@ -92,6 +93,29 @@ export async function autorizarObligacionNueva<T>(
           auditar: [],
         }
       }
+
+      // Completion claims and hybrid acceptance must observe each other atomically during onboarding.
+      // Completed organizations keep the existing per-venue concurrency.
+      if (intencion.tipo === 'HYBRID')
+        await tx.$queryRaw`
+          SELECT o.id FROM "Organization" o JOIN "Venue" v ON v."organizationId" = o.id
+          WHERE v.id = ${venueId} AND o."onboardingCompletedAt" IS NULL FOR UPDATE OF o`
+
+      const pendingHybrid = await tx.hybridPurchase.findFirst({
+        where: { venueId, status: { notIn: ['QUOTED', 'COMPLETED', 'EXPIRED', 'CANCELLED'] } },
+        select: { id: true },
+      })
+      if (pendingHybrid)
+        return {
+          rechazo: new AppError(
+            'Ya hay una compra pendiente. Retoma ese intento para confirmar su resultado.',
+            409,
+            true,
+            'HYBRID_PURCHASE_IN_PROGRESS',
+            { purchaseId: pendingHybrid.id },
+          ),
+          auditar: [],
+        }
 
       // 0. El alta económica en curso (su cobro todavía puede aparecer) no convive con otra compra.
       const venue = await tx.venue.findUnique({
@@ -166,7 +190,8 @@ export async function autorizarObligacionNueva<T>(
       }
 
       // 2 y 3. Lo vivo en Stripe y su compatibilidad con lo que se quiere abrir.
-      const { vivas, detalle, conCambiosProgramados } = await inventarioDeObligaciones(venueId, { limite })
+      const inventory = await inventarioDeObligaciones(venueId, { limite })
+      const { vivas, detalle, conCambiosProgramados } = inventory
       if (conCambiosProgramados.length) {
         return {
           rechazo: Object.assign(
@@ -202,9 +227,22 @@ export async function autorizarObligacionNueva<T>(
         }
       }
 
+      // Legacy purchases can also consume balance created by an earlier hybrid replacement.
+      const transferred = await tx.hybridCreditAllocation.findFirst({
+        where: { status: 'CONSUMED', purchase: { stripeCustomerId: customerId } },
+        select: { id: true },
+      })
+      if (transferred) {
+        aTiempo()
+        const customer = await stripe.customers.retrieve(customerId, {}, STRIPE)
+        if (customer.deleted) throw new AppError('El perfil de facturación necesita revisión.', 409, true, 'HYBRID_FUNDING_UNVERIFIED')
+        const { assertHybridBalanceUsable } = await import('@/services/launchCampaigns/hybridFundingGraph')
+        await assertHybridBalanceUsable(venueId, customerId, customer.balance)
+      }
+
       // Se crea sólo si queda presupuesto: la creación (con sus reintentos) cabe en lo que resta de la transacción.
       aTiempo()
-      return { creado: await crear(), auditar }
+      return { creado: await crear(tx, inventory), auditar }
     },
     { maxWait: 10_000, timeout: TIMEOUT_DE_LA_TRANSACCION_MS },
   )

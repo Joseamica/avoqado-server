@@ -98,10 +98,35 @@ describe('downgrade_venue_to_free — confirm-gated (plan/billing)', () => {
     expect(mockAudit).not.toHaveBeenCalled()
   })
 
+  // An empty list (allowed only at/under the cap) keeps today's team; whoever no longer fits when the plan ends is
+  // deactivated automatically in Shopify's order. The preview must say THAT, not "el resto se DESACTIVA".
+  it('empty keep list → the preview explains the automatic order, not a blanket deactivation', async () => {
+    const out = parse(await call('downgrade_venue_to_free', { venueId: 'v1', keepStaffVenueIds: [] }))
+    expect(out.requiresConfirmation).toBe(true)
+    expect(out.message).toMatch(/se desactivan solos/)
+    expect(out.message).toMatch(/invitaciones pendientes/)
+    expect(out.message).not.toMatch(/el resto se DESACTIVA/)
+  })
+
   it('confirm:true → schedules the downgrade and audits', async () => {
     const out = parse(await call('downgrade_venue_to_free', { venueId: 'v1', keepStaffVenueIds: ['sv1'], confirm: true }))
-    expect(mockSchedule).toHaveBeenCalledWith('v1', ['sv1'])
+    expect(mockSchedule).toHaveBeenCalledWith('v1', ['sv1'], { reason: undefined, comment: undefined, staffId: 's1' })
     expect(mockAudit).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: 'PLAN_DOWNGRADE_SCHEDULED' }))
     expect(out.ok).toBe(true)
+  })
+
+  it('confirm:true forwards the owner reason and audits it', async () => {
+    await call('downgrade_venue_to_free', {
+      venueId: 'v1',
+      keepStaffVenueIds: ['sv1'],
+      reason: 'TOO_EXPENSIVE',
+      comment: 'Caro',
+      confirm: true,
+    })
+    expect(mockSchedule).toHaveBeenCalledWith('v1', ['sv1'], { reason: 'TOO_EXPENSIVE', comment: 'Caro', staffId: 's1' })
+    expect(mockAudit).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ data: expect.objectContaining({ reason: 'TOO_EXPENSIVE', comment: 'Caro' }) }),
+    )
   })
 })

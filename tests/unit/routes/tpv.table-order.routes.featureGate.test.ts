@@ -46,6 +46,7 @@ jest.mock('@/middlewares/checkPermission.middleware', () => ({
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    capabilityGrant: { findFirst: jest.fn().mockResolvedValue(null) },
     staffVenue: { findFirst: jest.fn() }, // SUPERADMIN bypass (requestIsSuperAdmin)
     venue: { findUnique: jest.fn() }, // venueIsExemptFromPlanGating (grandfathered/demo)
     venueFeature: { findFirst: jest.fn(), findMany: jest.fn() }, // own grant + getVenueBaseTier
