@@ -1,6 +1,6 @@
 import { Product, Prisma, ProductType } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
-import AppError from '../../errors/AppError'
+import AppError, { ConflictError } from '../../errors/AppError'
 import { deleteFileFromStorage } from '../storage.service'
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
@@ -748,6 +748,13 @@ export async function createProduct(venueId: string, productData: CreateProductD
         continue
       }
 
+      // Reintentos agotados: un 409 claro, nunca el P2010/P2034 crudo (que saldría 500).
+      if (isSerializationConflict) {
+        throw new ConflictError(
+          'El catálogo de este negocio está ocupado en este momento. Vuelve a intentarlo en unos segundos.',
+          'CATALOGO_OCUPADO',
+        )
+      }
       throw error
     }
   }

@@ -16,7 +16,7 @@ import {
   assertLegacyProductReferencesForVenue,
   writeLegacyServiceProductCreationAuditForVenue,
 } from '../../../../src/services/master-catalog/catalogGovernance.service'
-import AppError from '../../../../src/errors/AppError'
+import AppError, { ConflictError } from '../../../../src/errors/AppError'
 
 const humanActor = { type: 'HUMAN' as const, staffId: 'staff-1', impersonating: false }
 const serviceActor = { type: 'SERVICE' as const, servicePrincipalId: 'DEMO_VENUE_SEED' }
@@ -428,5 +428,50 @@ describe('Product soldByWeight (venta por peso)', () => {
       // unit is left as-is (not forced) when turning weight off
       expect(updateCall.data).not.toHaveProperty('unit')
     })
+  })
+})
+
+// IVA por producto, plan 4 (Tarea 2, paso 9): un conflicto de concurrencia en el alta se reintenta o sale como 409, nunca 500.
+describe('createProduct — el catálogo ocupado sale 409 CATALOGO_OCUPADO tras agotar los reintentos', () => {
+  const alta = { name: 'Producto Test', sku: 'SKU001', price: 100, type: 'REGULAR' as any, categoryId: 'cat-001' }
+  const choque40001 = () => Object.assign(new Error('Raw query failed. Code: `40001`'), { code: 'P2010', meta: { code: '40001' } })
+  const choqueP2034 = () => Object.assign(new Error('Transaction failed due to a write conflict or a deadlock'), { code: 'P2034' })
+
+  it.each([
+    ['tres 40001 del candado crudo de la organización (P2010)', choque40001],
+    ['tres P2034', choqueP2034],
+  ])('%s ⇒ ConflictError 409 con su código y su mensaje', async (_caso, choque) => {
+    prismaMock.$transaction.mockRejectedValueOnce(choque()).mockRejectedValueOnce(choque()).mockRejectedValueOnce(choque())
+
+    const error = await productService.createProduct('venue-xyz', alta, humanActor).then(
+      () => null,
+      (e: unknown) => e,
+    )
+
+    expect(error).toBeInstanceOf(ConflictError)
+    expect(error).toMatchObject({
+      statusCode: 409,
+      code: 'CATALOGO_OCUPADO',
+      message: 'El catálogo de este negocio está ocupado en este momento. Vuelve a intentarlo en unos segundos.',
+    })
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(3)
+  })
+
+  it('un error que no se reintenta sale tal cual, sin reintentar', async () => {
+    const otro = new Error('columna inexistente')
+    prismaMock.$transaction.mockRejectedValueOnce(otro)
+
+    await expect(productService.createProduct('venue-xyz', alta, humanActor)).rejects.toBe(otro)
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+  })
+
+  it('un 40001 y después éxito ⇒ el producto se crea', async () => {
+    prismaMock.$transaction.mockRejectedValueOnce(choque40001()).mockImplementationOnce(async (cb: any) => cb(prismaMock))
+    prismaMock.product.findFirst.mockResolvedValue({ displayOrder: 0 })
+    prismaMock.product.create.mockResolvedValue(makeMockProduct())
+
+    await expect(productService.createProduct('venue-xyz', alta, humanActor)).resolves.toMatchObject({ id: 'product-abc' })
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(2)
+    expect(prismaMock.product.create).toHaveBeenCalledTimes(1)
   })
 })
