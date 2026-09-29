@@ -27,6 +27,7 @@ import { DeliveryOrderEventStatus, DeliveryProvider, Prisma } from '@prisma/clie
 
 import prisma from '../../../../utils/prismaClient'
 import { rappiAdapter, RAPPI_EVENTS } from './rappi.adapter'
+import { leerEstadoAprovisionamiento } from './rappi.selfOnboarding'
 import { parseRappiSignatureHeader, verifyRappiSignature } from './rappi.signature'
 
 /** Los eventos que sabemos manejar, y el pedazo de URL con el que los registramos en Rappi. */
@@ -133,8 +134,18 @@ interface CuerpoRappi {
  *  · Sin identidad natural (`MENU_APPROVED`, `STORE_CONNECTIVITY`…): el TIMESTAMP de la
  *    firma. Un menú se aprueba muchas veces a lo largo de meses con el mismo `store_id` —
  *    sin el timestamp, la segunda aprobación jamás se procesaría.
+ *
+ * Y un caso aparte, antes que las tres: `STORE_PROVISIONING_STATUS` no trae tienda ni pedido de
+ * primer nivel. Su identidad es el LOTE (+ la operación, + el timestamp de la firma): con sólo el
+ * timestamp, dos lotes firmados en el mismo segundo colisionaban y el segundo se tiraba.
  */
 export function llaveDeDeduplicacion(evento: string, payload: unknown, signatureHeader: string | undefined): string {
+  if (evento === RAPPI_EVENTS.STORE_PROVISIONING_STATUS) {
+    const { batchId, operation } = leerEstadoAprovisionamiento(payload)
+    const t = parseRappiSignatureHeader(signatureHeader)?.timestamp ?? 'sin-t'
+    return `RAPPI:STORE_PROVISIONING_STATUS:${batchId ?? 'sin-lote'}:${operation ?? 'sin-op'}:t${t}`
+  }
+
   const identidad = rappiAdapter.extractIdentity(payload)
   const base = `RAPPI:${evento}:${identidad.storeId ?? 'sin-tienda'}:${identidad.orderId ?? 'sin-pedido'}`
 

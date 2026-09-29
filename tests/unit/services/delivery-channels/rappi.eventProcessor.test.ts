@@ -8,6 +8,8 @@ import { processRappiEvent } from '../../../../src/services/delivery-channels/pr
 import { cancelDeliveryOrder } from '../../../../src/services/delivery-channels/core/cancelDeliveryOrder.service'
 import { ingestDeliveryOrder } from '../../../../src/services/delivery-channels/core/deliveryOrderIngestion.service'
 import { markEventResult } from '../../../../src/services/delivery-channels/core/deliveryWebhookEvent.service'
+import { confirmarTienda } from '../../../../src/services/delivery-channels/providers/rappi/rappi.provisioning'
+import { suscribirTiendaAEventos } from '../../../../src/services/delivery-channels/providers/rappi/rappi.client'
 
 jest.mock('../../../../src/services/delivery-channels/core/cancelDeliveryOrder.service', () => ({
   cancelDeliveryOrder: jest.fn(),
@@ -17,6 +19,14 @@ jest.mock('../../../../src/services/delivery-channels/core/deliveryOrderIngestio
 }))
 jest.mock('../../../../src/services/delivery-channels/core/deliveryWebhookEvent.service', () => ({
   markEventResult: jest.fn(),
+}))
+// El cableado por defecto de `confirmar` importa perezosamente estos dos: `rappi.client` lee `env`
+// al cargarse (y eso hace `process.exit` dentro de Jest).
+jest.mock('../../../../src/services/delivery-channels/providers/rappi/rappi.provisioning', () => ({
+  confirmarTienda: jest.fn(),
+}))
+jest.mock('../../../../src/services/delivery-channels/providers/rappi/rappi.client', () => ({
+  suscribirTiendaAEventos: jest.fn(),
 }))
 
 const mockCancel = cancelDeliveryOrder as jest.Mock
@@ -262,5 +272,87 @@ describe('processRappiEvent', () => {
     expect(r.outcome).toBe('NOT_AN_ORDER')
     expect(mockIngest).not.toHaveBeenCalled()
     expect(mockCancel).not.toHaveBeenCalled()
+  })
+
+  // ── El aprovisionamiento: el webhook confirma cada tienda del lote ──────────────
+  const loteAprovisionado = () =>
+    fila({
+      eventType: 'STORE_PROVISIONING_STATUS',
+      channelLink: null, // el cuerpo no trae `store_id` de primer nivel: nunca hay vínculo
+      payload: {
+        batchId: 'lote-7',
+        operation: 'PROVISION',
+        results: [
+          { storeId: '10', status: 'ACTIVE', integrationId: 'int-10' },
+          { storeId: '11', status: 'FAILED', errorMessage: 'no' },
+        ],
+      },
+    })
+
+  it('🔴 STORE_PROVISIONING_STATUS confirma CADA tienda CON el batchId del lote (sin él, R7 las ignoraría todas)', async () => {
+    ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(loteAprovisionado())
+    // SUBSCRIBE_FAILED e IGNORED no son fallos del EVENTO: el vínculo sigue PENDING y el re-chequeo reintenta.
+    const confirmar = jest.fn().mockResolvedValueOnce('SUBSCRIBE_FAILED').mockResolvedValueOnce('IGNORED')
+
+    const r = await processRappiEvent('evt1', { aceptar: aceptarOk, confirmar })
+
+    expect(confirmar.mock.calls.map(c => c[0])).toEqual([
+      { storeId: '10', status: 'ACTIVE', integrationId: 'int-10', batchId: 'lote-7' },
+      { storeId: '11', status: 'FAILED', errorMessage: 'no', batchId: 'lote-7' },
+    ])
+    expect(r.outcome).toBe('STORE_STATE')
+    expect(mockMark).toHaveBeenCalledWith('evt1', 'PROCESSED')
+  })
+
+  it('si confirmar LANZA, el evento queda FAILED para reprocesarse (confirmarTienda es idempotente)', async () => {
+    ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(loteAprovisionado())
+    const confirmar = jest.fn().mockRejectedValueOnce(new Error('la base se cayó'))
+
+    const r = await processRappiEvent('evt1', { aceptar: aceptarOk, confirmar })
+
+    expect(r).toMatchObject({ outcome: 'FAILED', error: expect.stringContaining('la base se cayó') })
+    expect(mockMark).toHaveBeenCalledWith('evt1', 'FAILED', undefined, expect.stringContaining('PROVISIONING'))
+    expect(mockMark).not.toHaveBeenCalledWith('evt1', 'PROCESSED')
+  })
+
+  it('el cableado por defecto llama a confirmarTienda con el lote y con la suscripción del cliente', async () => {
+    ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(loteAprovisionado())
+    ;(confirmarTienda as jest.Mock).mockResolvedValue('PROMOTED')
+
+    await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+    expect(confirmarTienda).toHaveBeenCalledTimes(2)
+    expect(confirmarTienda).toHaveBeenCalledWith(expect.objectContaining({ storeId: '10', batchId: 'lote-7' }), {
+      suscribir: suscribirTiendaAEventos,
+    })
+  })
+
+  // ── Un canal DESHABILITADO no toma pedidos nuevos (R10) ─────────────────────────
+  it('🔴 un pedido nuevo a un canal DISABLED no se acepta ni se registra: FAILED CHANNEL_DISABLED', async () => {
+    ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
+      fila({ channelLink: { ...fila().channelLink, status: 'DISABLED' } }),
+    )
+
+    const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+    expect(r).toMatchObject({ outcome: 'FAILED', error: 'CHANNEL_DISABLED' })
+    expect(aceptarOk).not.toHaveBeenCalled()
+    expect(mockIngest).not.toHaveBeenCalled()
+    expect(mockMark).toHaveBeenCalledWith('evt1', 'FAILED', undefined, 'CHANNEL_DISABLED')
+  })
+
+  it('con el canal DISABLED las cancelaciones SÍ siguen: una venta que ya existía se cancela igual', async () => {
+    ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
+      fila({
+        eventType: 'ORDER_EVENT_CANCEL',
+        payload: { event: 'canceled_with_charge', order_id: '392625', store_id: '900105814' },
+        channelLink: { ...fila().channelLink, status: 'DISABLED' },
+      }),
+    )
+
+    const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+    expect(mockCancel).toHaveBeenCalledWith('392625', 'RAPPI', expect.any(String))
+    expect(r.outcome).toBe('CANCELLED')
   })
 })

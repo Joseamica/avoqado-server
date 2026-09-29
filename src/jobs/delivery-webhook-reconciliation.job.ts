@@ -77,8 +77,12 @@ export class DeliveryWebhookReconciliationJob {
    * `PEDIDO_YA_NO_ACTIVO` — [medido 2026-08-20] pasado el plazo de ~11.5 min, Uber responde
    * `400 "The order is no longer active"` y deja el pedido en DENIED. Ese dinero no va a
    * llegar nunca: reintentar no lo resucita, y crear la venta sería inventarla.
+   *
+   * `CHANNEL_DISABLED` — un pedido de Rappi que llegó a un canal deshabilitado: no se aceptó y Rappi
+   * lo cancela al vencer su reloj (4–6 min). Si el canal se reactiva, reintentarlo registraría un
+   * pedido que ya no existe.
    */
-  private static readonly TERMINAL_ERRORS = ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO']
+  private static readonly TERMINAL_ERRORS = ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO', 'CHANNEL_DISABLED']
 
   /**
    * Fix B2 (audit §10.2): without an attempt cap, a handful of permanently-broken
@@ -247,8 +251,12 @@ export class DeliveryWebhookReconciliationJob {
         // conexión en curso podía re-otorgar la tienda.
         const revocacionSinVinculo =
           !channelLink && event.provider === DeliveryProvider.UBER_EATS && event.eventType === 'store.deprovisioned'
+        // Lo mismo con el resultado del aprovisionamiento de Rappi: su cuerpo no trae tienda de primer
+        // nivel, así que NUNCA tiene vínculo; cada tienda la confirma su procesador.
+        const aprovisionamientoRappi =
+          !channelLink && event.provider === DeliveryProvider.RAPPI && event.eventType === 'STORE_PROVISIONING_STATUS'
         try {
-          if (!channelLink && !revocacionSinVinculo) {
+          if (!channelLink && !revocacionSinVinculo && !aprovisionamientoRappi) {
             // Same per-event alert shape/prefix as the 24h sweep below — BetterStack
             // alerts on the '🚨 [Delivery recon] ORPHANED' pattern. Without this, a
             // deleted DeliveryChannelLink (venue turning off its integration) would
@@ -417,7 +425,7 @@ export class DeliveryWebhookReconciliationJob {
       throw new Error(r.error ?? 'Uber: fallo desconocido al reprocesar')
     }
 
-    if (!channelLink) return false // sólo una revocación de Uber llega aquí sin vínculo, y ya salió arriba
+    if (!channelLink) return false // sólo Uber y Rappi llegan aquí sin vínculo, y ya salieron arriba
     const normalized = parseDeliverectOrder(Buffer.from(JSON.stringify(event.payload)), channelLink)
     const { order } = await ingestDeliveryOrder(normalized, channelLink)
     await markEventResult(event.id, DeliveryOrderEventStatus.PROCESSED, order.id)

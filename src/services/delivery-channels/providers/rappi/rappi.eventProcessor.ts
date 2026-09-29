@@ -25,16 +25,17 @@ import { ingestDeliveryOrder } from '../../core/deliveryOrderIngestion.service'
 import { markEventResult } from '../../core/deliveryWebhookEvent.service'
 import { rappiAdapter, RAPPI_EVENTS } from './rappi.adapter'
 import { tiempoDeCoccion, type RappiOrderPayload } from './rappi.mapper'
+import { leerEstadoAprovisionamiento, type ResultadoRappiTienda } from './rappi.selfOnboarding'
 
 export type RappiProcessOutcome =
   | 'PROCESSED' // pedido aceptado en Rappi y convertido en venta
   | 'ALREADY_DONE' // reintento inofensivo
-  | 'NOT_AN_ORDER' // evento informativo (courier, provisioning…)
+  | 'NOT_AN_ORDER' // evento informativo (repartidor, PING…)
   | 'ORPHANED' // llegó de una tienda sin vincular a ningún venue
   | 'CANCELLED' // Rappi canceló: dejó de ser venta y salió de cocina
   | 'SCHEDULED_NOTED' // programado registrado; la venta nace cuando lo liberen
   | 'MENU_VERDICT' // llegó la aprobación (o el rechazo) del menú
-  | 'STORE_STATE' // la tienda cambió de estado del lado de Rappi
+  | 'STORE_STATE' // la tienda cambió de estado del lado de Rappi (o llegó su aprovisionamiento)
   | 'FAILED'
 
 export interface RappiProcessResult {
@@ -47,6 +48,8 @@ export interface RappiProcessResult {
 /** Dependencias inyectables: sin esto no se puede probar sin red. */
 export interface RappiProcessDeps {
   aceptar?: (orderId: string, storeId: string, cookingTime: number) => Promise<{ ok: boolean; status: number; raw: string }>
+  /** `confirmarTienda` de UNA tienda del lote. Lo que devuelve es informativo: sólo un throw falla el evento. */
+  confirmar?: (r: ResultadoRappiTienda & { batchId?: string }) => Promise<string>
 }
 
 export async function processRappiEvent(eventRowId: string, deps: RappiProcessDeps = {}): Promise<RappiProcessResult> {
@@ -56,6 +59,15 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
       // Perezoso: `rappi.client` lee `@/config/env` al cargarse (regla del repo).
       const { aceptarPedidoRappi } = await import('./rappi.client')
       return aceptarPedidoRappi(orderId, storeId, cookingTime)
+    })
+  const confirmar =
+    deps.confirmar ??
+    (async (r: ResultadoRappiTienda & { batchId?: string }) => {
+      const [{ confirmarTienda }, { suscribirTiendaAEventos }] = await Promise.all([
+        import('./rappi.provisioning'),
+        import('./rappi.client'),
+      ])
+      return confirmarTienda(r, { suscribir: suscribirTiendaAEventos })
     })
 
   const evento = await prisma.deliveryOrderEvent.findUnique({
@@ -152,6 +164,25 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
 
   // ── Estado de la tienda del lado de Rappi ───────────────────────────────────────────
   if (tipo === 'STORE_STATE') {
+    // El resultado del aprovisionamiento: su cuerpo no trae `store_id` de primer nivel, así que
+    // nunca hay vínculo — cada tienda la resuelve `confirmarTienda`, que sólo PROMUEVE un vínculo
+    // nuestro y lo prueba con el lote. 🔴 El `batchId` vive arriba, no en cada resultado: sin
+    // pasarlo, toda confirmación sale IGNORED. SUBSCRIBE_FAILED o IGNORED no fallan el evento (el
+    // vínculo sigue PENDING y el re-chequeo de la pantalla reintenta); sólo un throw lo deja
+    // FAILED, y reprocesarlo es seguro porque la confirmación es idempotente.
+    if (evento.eventType === RAPPI_EVENTS.STORE_PROVISIONING_STATUS) {
+      const { batchId, results } = leerEstadoAprovisionamiento(evento.payload)
+      try {
+        for (const r of results) await confirmar({ ...r, ...(batchId ? { batchId } : {}) })
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, undefined, `PROVISIONING: ${msg.slice(0, 400)}`)
+        logger.error('🚨 [Rappi] confirmar el aprovisionamiento lanzó — queda FAILED para reprocesar', { eventRowId, batchId, error: msg })
+        return { outcome: 'FAILED', error: msg }
+      }
+      await markEventResult(eventRowId, DeliveryOrderEventStatus.PROCESSED)
+      return { outcome: 'STORE_STATE' }
+    }
     if (evento.eventType === RAPPI_EVENTS.STORE_CONNECTIVITY && evento.channelLink) {
       const cuerpo = evento.payload as { enabled?: boolean; message?: string }
       if (cuerpo.enabled === false) {
@@ -201,6 +232,19 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
     await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, undefined, 'TIENDA_SIN_VINCULO')
     logger.error('🚨 [Rappi] llegó un pedido de una tienda SIN VINCULAR', { eventRowId, storeId: identidad.storeId })
     return { outcome: 'ORPHANED' }
+  }
+
+  // 🔴 Un canal DESHABILITADO no toma pedidos nuevos: ni se acepta ni se registra (Rappi lo
+  // cancela solo al vencer su reloj). Las cancelaciones sí pasan — van arriba, antes del guard.
+  if (evento.channelLink.status === DeliveryChannelStatus.DISABLED) {
+    await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, undefined, 'CHANNEL_DISABLED')
+    logger.error('🚨 [Rappi] llegó un pedido a un canal DESHABILITADO — no se aceptó ni se registró', {
+      eventRowId,
+      linkId: evento.channelLink.id,
+      venueId: evento.venueId,
+      orderId: identidad.orderId,
+    })
+    return { outcome: 'FAILED', error: 'CHANNEL_DISABLED' }
   }
 
   // Traducir ANTES de aceptar: si el dinero no cuadra (la red contra el error de unidades),

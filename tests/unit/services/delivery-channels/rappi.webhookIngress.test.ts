@@ -130,6 +130,17 @@ describe('llaveDeDeduplicacion', () => {
       llaveDeDeduplicacion('MENU_APPROVED', cuerpo, 't=1,sign=a'),
     )
   })
+
+  it('🔴 dos lotes de APROVISIONAMIENTO con la misma firma NO colisionan — los separa el batchId', () => {
+    // El cuerpo no trae tienda ni pedido: sin el lote, dos resultados firmados en el mismo segundo
+    // compartían llave y el segundo se tiraba como duplicado (sus tiendas nunca se confirmaban).
+    const lote = (batchId: string) => ({ batchId, operation: 'PROVISION', results: [{ storeId: '10', status: 'ACTIVE' }] })
+    const a = llaveDeDeduplicacion('STORE_PROVISIONING_STATUS', lote('b-1'), 't=1000,sign=x')
+    const b = llaveDeDeduplicacion('STORE_PROVISIONING_STATUS', lote('b-2'), 't=1000,sign=x')
+    expect(a).not.toBe(b)
+    // …y el reenvío del MISMO aviso sí deduplica.
+    expect(llaveDeDeduplicacion('STORE_PROVISIONING_STATUS', lote('b-1'), 't=1000,sign=y')).toBe(a)
+  })
 })
 
 describe('persistRappiWebhookEvent', () => {

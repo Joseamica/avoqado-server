@@ -332,7 +332,7 @@ describe('DeliveryWebhookReconciliationJob', () => {
     // own findMany, the 3rd findMany call in the pass: after the two lanes, N-5) — the bulk update is scoped to
     // exactly the fetched batch's ids (see below), not this broader where.
     const orphanFetchWhere = mockedFindMany.mock.calls[2][0].where
-    expect(orphanFetchWhere.OR).toEqual([{ error: null }, { error: { notIn: ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO'] } }])
+    expect(orphanFetchWhere.OR).toEqual([{ error: null }, { error: { notIn: ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO', 'CHANNEL_DISABLED'] } }])
     expect(orphanFetchWhere.receivedAt.lt).toEqual(new Date(NOW - 24 * 3600_000))
     expect(mockedFindMany.mock.calls[2][0].take).toBe(50)
     // The bulk flip is scoped to EXACTLY the fetched (and logged) batch — never the broader
@@ -375,10 +375,11 @@ describe('DeliveryWebhookReconciliationJob', () => {
 
     const scanWhere = mockedFindMany.mock.calls[0][0].where
     const nullSafeErrorGuard = scanWhere.AND.find((c: any) => Array.isArray(c.OR) && 'error' in (c.OR[0] ?? {}))
-    expect(nullSafeErrorGuard.OR).toEqual([{ error: null }, { error: { notIn: ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO'] } }])
+    const terminales = ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO', 'CHANNEL_DISABLED']
+    expect(nullSafeErrorGuard.OR).toEqual([{ error: null }, { error: { notIn: terminales } }])
     // markOrphaned's own lookup query is the third findMany call in the pass (after the two lanes, N-5).
     const orphanLookupWhere = mockedFindMany.mock.calls[2][0].where
-    expect(orphanLookupWhere.OR).toEqual([{ error: null }, { error: { notIn: ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO'] } }])
+    expect(orphanLookupWhere.OR).toEqual([{ error: null }, { error: { notIn: terminales } }])
   })
 
   it('scans oldest-first and caps the batch at 50', async () => {
@@ -733,6 +734,37 @@ describe('DeliveryWebhookReconciliationJob', () => {
       expect(mockedProcessRappi).toHaveBeenCalledWith('evt_rappi')
       expect(mockedParse).not.toHaveBeenCalled()
       expect(result.reprocessed).toBe(1)
+    })
+
+    const rappiSinVinculo = (eventType: string) =>
+      makeEvent({
+        id: 'evt_rappi',
+        provider: 'RAPPI',
+        eventType,
+        channelLinkId: null,
+        channelLink: null,
+        payload: { batchId: 'b-1', results: [] },
+      })
+
+    it('🔴 R9: un STORE_PROVISIONING_STATUS SIN vínculo va al procesador — su cuerpo nunca trae tienda, no es huérfano', async () => {
+      // Si se tirara como ORPHANED, un aviso que falló una vez ya nunca confirmaría sus tiendas.
+      mockedFindMany.mockResolvedValueOnce([rappiSinVinculo('STORE_PROVISIONING_STATUS')]).mockResolvedValueOnce([])
+      mockedProcessRappi.mockResolvedValueOnce({ outcome: 'STORE_STATE' })
+
+      const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+      expect(mockedProcessRappi).toHaveBeenCalledWith('evt_rappi')
+      expect(result).toEqual({ reprocessed: 1, orphaned: 0 })
+      expect(mockedMarkEventResult).not.toHaveBeenCalled()
+    })
+
+    it('cualquier OTRO evento de Rappi sin vínculo sigue siendo ORPHANED de inmediato', async () => {
+      mockedFindMany.mockResolvedValueOnce([rappiSinVinculo('NEW_ORDER')]).mockResolvedValueOnce([])
+
+      const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+      expect(mockedProcessRappi).not.toHaveBeenCalled()
+      expect(result.orphaned).toBe(1)
     })
   })
 })
