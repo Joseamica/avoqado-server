@@ -161,6 +161,10 @@ model Zone {
 }
 
 model Venue {
+  capabilityGrants CapabilityGrant[]
+  hybridPurchases HybridPurchase[]
+  hybridContracts HybridContract[]
+  hybridPaymentPeriods HybridPaymentPeriod[]
   paymentEffects PaymentEffect[]
   id             String          @id @default(cuid())
   organizationId String
@@ -4754,6 +4758,226 @@ model VenueFeature {
 
   @@unique([venueId, featureId])
   @@index([venueId])
+}
+
+/// Independent access origins. Revoking one never deletes the venue's other origins.
+model CapabilityGrant {
+  id          String   @id @default(cuid())
+  venueId     String
+  venue       Venue    @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  featureCode String
+  /// Stable paid-period origin, not a Stripe subscription copied onto N VenueFeature rows.
+  sourceId    String
+  contractId String?
+  contract HybridContract? @relation(fields: [contractId], references: [id], onDelete: Restrict)
+  paymentPeriodId String?
+  paymentPeriod HybridPaymentPeriod? @relation(fields: [paymentPeriodId], references: [id], onDelete: Restrict)
+  startsAt    DateTime
+  endsAt      DateTime
+  revokedAt   DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([venueId, sourceId, featureCode])
+  @@index([venueId, featureCode, revokedAt, endsAt])
+  @@index([sourceId])
+  @@index([contractId])
+  @@index([paymentPeriodId])
+}
+
+/// Configuration shared by all supported hybrid onboarding flows. Publishing freezes a version.
+model HybridCampaign {
+  id             String @id @default(cuid())
+  code           String @unique
+  slug           String @unique
+  name           String
+  draftDefinition Json
+  revision       Int @default(1)
+  status         LaunchCampaignStatus @default(DRAFT)
+  startsAt       DateTime
+  endsAt         DateTime
+  capacity       Int
+  reservedCount  Int @default(0)
+  redeemedCount  Int @default(0)
+  audience       String
+  eligibleOrganizationIds String[] @default([])
+  listed         Boolean @default(false)
+  createdById    String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  publications   HybridOfferPublication[]
+  redemptions    HybridRedemption[]
+
+  @@index([status, listed, startsAt, endsAt])
+  @@index([createdAt, id])
+}
+
+/// Immutable commercial terms; provider references may be attached after publication.
+model HybridOfferPublication {
+  id              String @id @default(cuid())
+  campaignId      String
+  campaign        HybridCampaign @relation(fields: [campaignId], references: [id], onDelete: Restrict)
+  version         Int
+  name            String
+  definition      Json
+  definitionHash  String
+  includedFeatureCodes String[]
+  stripeProductId String? @unique
+  stripePriceId   String? @unique
+  stripeRenewalPriceId String? @unique
+  contracts HybridContract[]
+  createdById     String
+  createdAt       DateTime @default(now())
+
+  @@unique([campaignId, version])
+}
+
+/// A quote becomes the durable purchase intent on acceptance. The quote never changes.
+model HybridPurchase {
+  id String @id @default(cuid())
+  venueId String
+  venue Venue @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  quotedById String
+  quote Json
+  quoteHash String
+  quoteExpiresAt DateTime
+  clientKey String?
+  status String @default("QUOTED")
+  acceptedAt DateTime?
+  paymentExpiresAt DateTime?
+  stripeCustomerId String?
+  stripeSubscriptionId String? @unique
+  initialInvoiceId String? @unique
+  lastIssue String?
+  nextAttemptAt DateTime @default(now())
+  attemptCount Int @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  contracts HybridContract[]
+  operations HybridBillingOperation[]
+  redemptions HybridRedemption[]
+  credits HybridCreditAllocation[]
+
+  @@unique([venueId, clientKey])
+  @@index([venueId, createdAt, id])
+  @@index([status, nextAttemptAt, id])
+  @@index([stripeCustomerId, status])
+  // SQL partial UNIQUE (venueId) permits only one nonterminal accepted intent.
+}
+
+/// One commercial unit (plan, fixed features or chosen bundle); one provider item can grant N capabilities.
+model HybridContract {
+  id String @id @default(cuid())
+  venueId String
+  venue Venue @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  purchaseId String
+  purchase HybridPurchase @relation(fields: [purchaseId], references: [id], onDelete: Restrict)
+  publicationId String
+  publication HybridOfferPublication @relation(fields: [publicationId], references: [id], onDelete: Restrict)
+  stripeSubscriptionId String
+  stripeItemId String @unique
+  featureCodes String[]
+  planTier String?
+  startsAt DateTime
+  paidThrough DateTime?
+  endedAt DateTime?
+  cancelAt DateTime?
+  pendingFeatureCodes Json?
+  pendingEffectiveAt DateTime?
+  revision Int @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  selections HybridContractSelection[]
+
+  @@unique([purchaseId, publicationId])
+  @@index([venueId, endedAt, createdAt, id])
+  @@index([stripeSubscriptionId])
+  grants CapabilityGrant[]
+
+}
+
+/// Persisted BEFORE each provider mutation; immutable request + stable key outlive Stripe's idempotency retention.
+model HybridContractSelection {
+  id String @id @default(cuid())
+  contractId String
+  contract HybridContract @relation(fields: [contractId], references: [id], onDelete: Restrict)
+  effectiveAt DateTime
+  featureCodes String[]
+  createdAt DateTime @default(now())
+
+  @@unique([contractId, effectiveAt])
+}
+
+model HybridBillingOperation {
+  id String @id @default(cuid())
+  purchaseId String
+  purchase HybridPurchase @relation(fields: [purchaseId], references: [id], onDelete: Restrict)
+  step String
+  request Json
+  requestHash String
+  status String @default("PENDING")
+  providerId String?
+  resultHash String?
+  lastIssue String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([purchaseId, step])
+}
+
+/// A place belongs to an organization, even when several venues/tabs try to reserve it.
+model HybridRedemption {
+  id String @id @default(cuid())
+  campaignId String
+  campaign HybridCampaign @relation(fields: [campaignId], references: [id], onDelete: Restrict)
+  organizationId String
+  purchaseId String
+  purchase HybridPurchase @relation(fields: [purchaseId], references: [id], onDelete: Restrict)
+  status String @default("RESERVED")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([campaignId, organizationId])
+  @@index([campaignId, createdAt, id])
+  @@index([purchaseId])
+}
+
+/// Funding actually confirmed by Stripe, including transferred prepaid value; no grants from subscription status alone.
+model HybridPaymentPeriod {
+  id String @id @default(cuid())
+  venueId String
+  venue Venue @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  stripeSubscriptionId String
+  stripeInvoiceId String @unique
+  startsAt DateTime
+  endsAt DateTime
+  fundedAmount Decimal @db.Decimal(12, 2)
+  refundedAmount Decimal @default(0) @db.Decimal(12, 2)
+  disputed Boolean @default(false)
+  composition Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId, stripeSubscriptionId, endsAt])
+  grants CapabilityGrant[]
+
+}
+
+/// A transfer of previously funded unused value, never an invented coupon or a per-capability fraction of a bundle.
+model HybridCreditAllocation {
+  id String @id @default(cuid())
+  purchaseId String
+  purchase HybridPurchase @relation(fields: [purchaseId], references: [id], onDelete: Restrict)
+  sourceInvoiceId String
+  sourceSubscriptionId String
+  amount Decimal @db.Decimal(12, 2)
+  status String @default("RESERVED")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([purchaseId, sourceInvoiceId])
+  @@index([sourceInvoiceId, status])
 }
 
 /// Obligación de cobro que la entrega NO pudo representar sin pisar otra (diseño v5 de la compra, 22-sep-2026):
