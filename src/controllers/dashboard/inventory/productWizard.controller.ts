@@ -53,10 +53,10 @@ export async function createProductStep1(req: Request, res: Response, next: Next
  */
 export async function configureInventoryStep2(req: Request, res: Response, next: NextFunction) {
   try {
-    const { productId } = req.params
+    const { venueId, productId } = req.params
     const data = req.body
 
-    const result = await productWizardService.configureInventoryStep2(productId, data)
+    const result = await productWizardService.configureInventoryStep2(venueId, productId, data)
 
     res.json({
       success: true,
@@ -113,9 +113,9 @@ export async function setupRecipeStep3(req: Request, res: Response, next: NextFu
  */
 export async function getWizardProgress(req: Request, res: Response, next: NextFunction) {
   try {
-    const { productId } = req.params
+    const { venueId, productId } = req.params
 
-    const progress = await productWizardService.getWizardProgress(productId)
+    const progress = await productWizardService.getWizardProgress(venueId, productId)
 
     res.json({
       success: true,
@@ -173,9 +173,9 @@ export async function getProductInventoryStatus(req: Request, res: Response, nex
  */
 export async function getProductInventoryMethod(req: Request, res: Response, next: NextFunction) {
   try {
-    const { productId } = req.params
+    const { venueId, productId } = req.params
 
-    const inventoryMethod = await productInventoryService.getProductInventoryMethod(productId)
+    const inventoryMethod = await productInventoryService.getProductInventoryMethod(productId, venueId)
 
     res.json({
       success: true,
@@ -191,10 +191,10 @@ export async function getProductInventoryMethod(req: Request, res: Response, nex
  */
 export async function setProductInventoryMethod(req: Request, res: Response, next: NextFunction) {
   try {
-    const { productId } = req.params
+    const { venueId, productId } = req.params
     const { inventoryMethod } = req.body
 
-    const result = await productInventoryService.setProductInventoryMethod(productId, inventoryMethod)
+    const result = await productInventoryService.setProductInventoryMethod(venueId, productId, inventoryMethod)
 
     res.json({
       success: true,

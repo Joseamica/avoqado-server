@@ -133,7 +133,7 @@ export const productCrudActions: ActionDefinition[] = [
       if (useInventory && method && productId) {
         try {
           // Configure inventory tracking on the product
-          await productWizard.configureInventoryStep2(productId, {
+          await productWizard.configureInventoryStep2(context.venueId, productId, {
             useInventory: true,
             inventoryMethod: method as 'QUANTITY' | 'RECIPE',
           })

@@ -170,9 +170,10 @@ export async function createProductStep1(venueId: string, data: WizardStep1Data,
  * Step 2: Configure inventory type
  * User decides if and how to track inventory
  */
-export async function configureInventoryStep2(productId: string, data: WizardStep2Data) {
+export async function configureInventoryStep2(venueId: string, productId: string, data: WizardStep2Data) {
+  // 🔴 Por negocio: el permiso se autorizó en `venueId`; un producto de otro negocio no existe.
   const product = await prisma.product.findUnique({
-    where: { id: productId },
+    where: { id: productId, venueId },
   })
 
   if (!product) {
@@ -207,7 +208,7 @@ export async function configureInventoryStep2(productId: string, data: WizardSte
   }
 
   // Set inventory method (✅ WORLD-CLASS: Uses dedicated column)
-  await setProductInventoryMethod(productId, data.inventoryMethod)
+  await setProductInventoryMethod(venueId, productId, data.inventoryMethod)
 
   await prisma.product.update({
     where: { id: productId },
@@ -232,8 +233,9 @@ export async function configureInventoryStep2(productId: string, data: WizardSte
  * Creates/updates the product's raw material record
  */
 export async function setupSimpleStockStep3(venueId: string, productId: string, data: WizardStep3SimpleStockData) {
+  // 🔴 Por negocio: sin esto se creaba un Inventory de ESTE negocio para el producto de otro.
   const product = await prisma.product.findUnique({
-    where: { id: productId },
+    where: { id: productId, venueId },
     include: {
       recipe: {
         select: { id: true },
@@ -434,7 +436,7 @@ export async function createProductWithInventory(
 
   try {
     // Step 2: Configure inventory
-    const step2Result = await configureInventoryStep2(productId, data.inventory)
+    const step2Result = await configureInventoryStep2(venueId, productId, data.inventory)
 
     // Step 3: Setup inventory details
     let step3Result
@@ -472,9 +474,9 @@ export async function createProductWithInventory(
  * Get wizard progress for a product
  * Returns current step and what's completed
  */
-export async function getWizardProgress(productId: string) {
+export async function getWizardProgress(venueId: string, productId: string) {
   const product = await prisma.product.findUnique({
-    where: { id: productId },
+    where: { id: productId, venueId },
     include: {
       recipe: {
         select: {
