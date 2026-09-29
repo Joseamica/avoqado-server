@@ -20,12 +20,17 @@ export async function bloquearOrdenParaFacturar(
   return rows[0]
 }
 
-/** Recibe IDs únicos y ordenados; bloquea todas las órdenes antes de los productos. */
-export async function bloquearOrdenesParaFacturar(tx: Prisma.TransactionClient, ids: string[], venueId: string) {
+/**
+ * Recibe IDs únicos y ordenados; bloquea todas las órdenes antes de los productos. Sin `venueId` (la cancelación) las toma por id:
+ * sus ids salen del manifiesto de UNA factura, y una orden que después se movió de negocio sigue siendo de ella (Ruling 4b-R13).
+ */
+export async function bloquearOrdenesParaFacturar(tx: Prisma.TransactionClient, ids: string[], venueId?: string) {
   const PAGE = 100
   for (let at = 0; at < ids.length; at += PAGE) {
     const page = ids.slice(at, at + PAGE)
-    await tx.$queryRaw`SELECT id FROM "Order" WHERE "venueId" = ${venueId} AND id = ANY(${page}::text[]) ORDER BY id ASC FOR UPDATE`
+    const donde =
+      venueId === undefined ? Prisma.sql`id = ANY(${page}::text[])` : Prisma.sql`"venueId" = ${venueId} AND id = ANY(${page}::text[])`
+    await tx.$queryRaw`SELECT id FROM "Order" WHERE ${donde} ORDER BY id ASC FOR UPDATE`
   }
   // Products only after ALL orders (same relative order as individual admission/cancellation), in ONE ascending pass (plan 4b,
   // Ruling 4b-R13): page by page, page 2 could ask for a lower id than one page 1 already holds and cross the Uber reconciliation.

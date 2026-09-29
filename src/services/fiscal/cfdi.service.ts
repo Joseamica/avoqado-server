@@ -1806,10 +1806,10 @@ export async function aplicarCancelacion(
     `
     // Plan 4b (Ruling 4b-R13): TODAS las órdenes antes del primer producto, en una sola llamada, como la sustitución (`:769`).
     // Orden por orden (O1 → sus productos → O2) se cruzaba con la conciliación de Uber: ella retiene O2 y pide el producto que
-    // esta cancelación ya tomó con O1 ⇒ 40P01. `orders` ya llega sin repetidos y ordenado (UNION + ORDER BY).
-    const emitido = await tx.cfdi.findUnique({ where: { id: cfdiId }, select: { venueId: true } })
+    // esta cancelación ya tomó con O1 ⇒ 40P01. `orders` ya llega sin repetidos y ordenado (UNION + ORDER BY). Sin negocio: por
+    // id, como el bucle de antes — el manifiesto ya está acotado por la factura, y una orden movida de negocio sigue en él.
     const ids = orders.map(o => o.orderId)
-    if (emitido) await bloquearOrdenesParaFacturar(tx, ids, emitido.venueId)
+    await bloquearOrdenesParaFacturar(tx, ids)
     const cancelWhere: Prisma.CfdiWhereInput =
       origen === 'PENDIENTE'
         ? { cancelStatus: 'REQUESTED' }

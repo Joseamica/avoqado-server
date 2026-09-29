@@ -312,10 +312,68 @@ describe('liberar sellos al confirmar cancelación', () => {
       await holder
       await cancelling
     }
-    expect(lock.mock.calls.map(call => [call[1], call[2]])).toEqual([[[o.id, second.id].sort(), venueId]])
+    // Sin negocio: el manifiesto ya está acotado por la factura (Ruling 4b-R13, mismas filas que el bucle por id de antes).
+    expect(lock.mock.calls.map(call => [call[1], call[2]])).toEqual([[[o.id, second.id].sort(), undefined]])
     expect(await seals(c.id)).toBe(0)
     expect((await currentItem(o.items[0].id)).ivaTratamiento).toBeNull()
     expect((await currentItem(second.items[0].id)).ivaTratamiento).toBeNull()
+  })
+  // Plan 4b (Ruling 4b-R13, «mismas filas»): una orden de la global que después se movió a otro negocio de la organización
+  // (playtelecomEventSimReassignment) sigue siendo de ESTA factura: la cancelación la toma igual, por id, antes de liberar sus
+  // sellos. Filtrar por el negocio de la factura la dejaba sin candado.
+  it('global: la orden del manifiesto que se movió a otro negocio de la organización también se bloquea antes de liberar', async () => {
+    const { o, c } = await fixtureFor('directa')
+    const movida = await order()
+    await prisma.cfdi.update({ where: { id: c.id }, data: { isGlobal: true, orderId: null } })
+    await prisma.cfdiGlobalOrden.createMany({ data: [o.id, movida.id].map(orderId => ({ cfdiId: c.id, orderId, huella: 'test' })) })
+    await prisma.$transaction(tx =>
+      sellosIva.sellarRenglones(tx, { cfdiId: c.id, intento: 1, renglones: [{ orderItemId: movida.items[0].id, tratamiento: 'IVA_16' }] }),
+    )
+    const otroNegocio = `${fixture}-b`
+    await prisma.venue.create({ data: { id: otroNegocio, organizationId: fixture, name: otroNegocio, slug: otroNegocio } })
+    await prisma.order.update({ where: { id: movida.id }, data: { venueId: otroNegocio } })
+    let unlock!: () => void
+    let locked!: (pid: number) => void
+    const held = new Promise<number>(resolve => {
+      locked = resolve
+    })
+    const gate = new Promise<void>(resolve => {
+      unlock = resolve
+    })
+    // Lo que retiene otro actor sobre la orden movida (una emisión o una nota de crédito sobre sus renglones).
+    const holder = prisma.$transaction(
+      async tx => {
+        await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${movida.id} FOR UPDATE`
+        const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
+        locked(pid)
+        await gate
+      },
+      { timeout: 15000 },
+    )
+    const holderPid = await held
+    const cancelling = cancel('directa', c)
+    try {
+      let waiting = false
+      for (let tries = 0; tries < 200 && !waiting; tries++) {
+        const waiters = await prisma.$queryRaw<Array<{ n: number }>>`SELECT COUNT(*)::int AS n FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock' AND ${holderPid}::int = ANY(pg_blocking_pids(pid))
+            AND query LIKE '%"Order"%FOR UPDATE%'`
+        waiting = waiters[0].n > 0
+        if (!waiting) await new Promise(resolve => setTimeout(resolve, 10))
+      }
+      expect(waiting).toBe(true) // la cancelación espera la orden movida: la tomó por id
+      expect(await seals(c.id)).toBe(2)
+      expect((await row(o.id)).status).toBe('STAMPED')
+    } finally {
+      unlock()
+      await holder
+      await cancelling
+      await prisma.order.update({ where: { id: movida.id }, data: { venueId } })
+      await prisma.venue.deleteMany({ where: { id: otroNegocio } })
+    }
+    expect(await seals(c.id)).toBe(0)
+    expect((await currentItem(movida.items[0].id)).ivaTratamiento).toBeNull()
+    expect((await row(o.id)).status).toBe('CANCELLED')
   })
   it('pending directo atrasado no degrada una confirmación externa ni libera dos veces', async () => {
     const { o, c } = await fixtureFor('directa')
