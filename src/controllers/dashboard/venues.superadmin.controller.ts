@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
+import AppError from '../../errors/AppError'
 import { generateValidatedSlug } from '../../utils/slugify'
 import { logAction } from '../../services/dashboard/activity-log.service'
 import { negocioCambioDeOrganizacionError } from '../../services/fiscal/exclusionContable'
@@ -231,7 +232,12 @@ export async function transferVenue(req: Request, res: Response, next: NextFunct
     } catch (conflicto) {
       return next(conflicto)
     }
-    logger.error('[VENUES_SUPERADMIN] Error transferring venue', { error })
+    // Un rechazo esperado (p. ej. el 409 de la relectura cuando otro traslado ganó) no es un fallo del servidor: no alerta.
+    if (error instanceof AppError && error.statusCode < 500) {
+      logger.warn('[VENUES_SUPERADMIN] Transfer rejected', { venueId: req.params.venueId, code: error.code, message: error.message })
+    } else {
+      logger.error('[VENUES_SUPERADMIN] Error transferring venue', { error })
+    }
     next(error)
   }
 }
