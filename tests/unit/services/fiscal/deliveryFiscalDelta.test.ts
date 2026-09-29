@@ -1,69 +1,13 @@
 /**
- * 🔴 DINERO FISCAL — el IVA por tasa de un retiro de reparto (spec KDS Uber §3.1 paso 4, [N-13]).
- *
- * El reembolso compensatorio lleva el IVA como DIFERENCIA entre la composición cobrada y la
- * superviviente, calculadas ambas con los MISMOS helpers de la venta (`grossByRateFromItems` +
- * `splitPaymentIvaByOrderRates`) y su desempate (el residual al bucket de MAYOR importe). Así
- * `IVA original − Σ compensaciones = IVA de lo que sobrevive`, también en retiros sucesivos.
+ * 🔴 DINERO FISCAL — la regla única de una devolución (`ivaDeDevolucion`) y, desde el plan 4b, el saldo en libros y el
+ * reparto que se congela, por tratamiento.
  */
 import logger from '@/config/logger'
-import { fiscalByRateCents, ivaDeDevolucion } from '../../../../src/services/fiscal/deliveryFiscalDelta'
-import { grossByRateFromItems, splitPaymentIvaByOrderRates } from '../../../../src/services/fiscal/ivaMath'
-
-const L = (unitPrice: number, taxRate: number | null, discountAmount = 0) => ({ unitPrice, quantity: 1, discountAmount, taxRate })
-const suma = (r: Record<string, number>) => Object.values(r).reduce((a, b) => a + b, 0)
-const ivaDe = (items: ReturnType<typeof L>[], grossCents: number) =>
-  splitPaymentIvaByOrderRates(grossCents, grossByRateFromItems(items)).taxByRate
-
-describe('fiscalByRateCents — IVA del retiro como diferencia de composiciones', () => {
-  it('sin descuento: retirar el gravado devuelve 13.79 de IVA', () => {
-    const cobrada = [L(100, 0.16), L(100, 0)]
-    const viva = [L(100, 0)]
-    const d = fiscalByRateCents(cobrada, viva, 20000, 10000)
-    expect(d['0.16']).toBe(1379)
-    expect(d['0'] ?? 0).toBe(0)
-  })
-
-  it('con descuento 20 que baja a 10: devuelve 12.41 y deja residual 0', () => {
-    const cobrada = [L(100, 0.16, 10), L(100, 0, 10)] // $180 cobrados
-    const viva = [L(100, 0, 10)] // $90 supervivientes
-    const d = fiscalByRateCents(cobrada, viva, 18000, 9000)
-    expect(d['0.16']).toBe(1241)
-    const ivaViva = splitPaymentIvaByOrderRates(9000, grossByRateFromItems(viva)).taxCents
-    const ivaCobrada = splitPaymentIvaByOrderRates(18000, grossByRateFromItems(cobrada)).taxCents
-    expect(ivaCobrada - suma(d)).toBe(ivaViva) // residual EXACTO
-  })
-
-  it('usa el desempate de la venta (bucket de mayor importe), no la tasa mas alta', () => {
-    const cobrada = [L(100.03, 0), L(99.97, 0.16)]
-    const d = fiscalByRateCents(cobrada, [], 10000, 0)
-    expect(suma(d)).toBe(690) // $6.90 como la venta, no $6.89
-  })
-
-  it('dos retiros sucesivos cuadran contra la composicion superviviente', () => {
-    const c0 = [L(100, 0.16), L(50, 0.16), L(100, 0)] // $250
-    const v1 = [L(50, 0.16), L(100, 0)] // se retira el de $100 gravado
-    const v2 = [L(100, 0)] // luego el de $50 gravado
-    const d1 = fiscalByRateCents(c0, v1, 25000, 15000)
-    const d2 = fiscalByRateCents(v1, v2, 15000, 10000)
-    expect(d1['0.16']).toBe(1379)
-    expect(d2['0.16']).toBe(690)
-    // IVA original − Σ compensaciones = IVA superviviente, tasa por tasa
-    const original = ivaDe(c0, 25000)
-    const vivo = ivaDe(v2, 10000)
-    for (const k of new Set([...Object.keys(original), ...Object.keys(vivo), ...Object.keys(d1), ...Object.keys(d2)])) {
-      expect((original[k] ?? 0) - (d1[k] ?? 0) - (d2[k] ?? 0)).toBe(vivo[k] ?? 0)
-    }
-  })
-
-  it('las llaves son las de ivaMath (String(tasa)) y no aparecen tasas sin diferencia', () => {
-    const d = fiscalByRateCents([L(100, 0.08), L(100, 0.16)], [L(100, 0.16)], 20000, 10000)
-    expect(Object.keys(d)).toEqual(['0.08'])
-  })
-})
+import { ivaDeDevolucion } from '../../../../src/services/fiscal/deliveryFiscalDelta'
+import type { MezclaPorTratamiento } from '../../../../src/services/fiscal/ivaMath'
 
 describe('ivaDeDevolucion — el 🚨 sólo lo da la póliza', () => {
-  const mezcla = [{ rate: 0.16, grossCents: 10000 }]
+  const mezcla: MezclaPorTratamiento = [{ tratamiento: 'IVA_16', tasa: 0.16, grossCents: 10000 }]
   const malformado = { provenance: 'PROVIDER_ADJUSTMENT', fiscalByRateCents: 'x' }
   const fueraDeRango = { provenance: 'PROVIDER_ADJUSTMENT', fiscalByRateCents: { '0.16': -1 } }
   beforeEach(() => jest.clearAllMocks())
@@ -81,5 +25,64 @@ describe('ivaDeDevolucion — el 🚨 sólo lo da la póliza', () => {
     expect(ivaDeDevolucion('pay-1', 5000, malformado, mezcla, { avisar: false }).taxCents).toBe(690)
     expect(ivaDeDevolucion('pay-2', 5000, fueraDeRango, mezcla, { avisar: false }).taxCents).toBe(690)
     expect(logger.error).not.toHaveBeenCalled()
+  })
+})
+
+describe('plan 4b · ivaDeDevolucion lee las DOS formas del mapa congelado', () => {
+  const mezcla: MezclaPorTratamiento = [
+    { tratamiento: 'IVA_16', tasa: 0.16, grossCents: 10000 },
+    { tratamiento: 'IVA_0', tasa: 0, grossCents: 10000 },
+  ]
+  beforeEach(() => jest.clearAllMocks())
+
+  it('manual: la mezcla ACTUAL de la orden, por tratamiento', () => {
+    expect(ivaDeDevolucion('m', 10000, { provenance: 'MANUAL' }, mezcla)).toEqual({
+      netCents: 9310,
+      taxCents: 690,
+      taxByRate: { '0.16': 690 },
+      porTratamiento: { IVA_16: { baseCents: 4310, ivaCents: 690 }, IVA_0: { baseCents: 5000, ivaCents: 0 } },
+    })
+  })
+
+  it('forma vieja (llaves de tasa, sólo IVA): la cifra de hoy; toda la base va a IVA_16 (Ruling 4b-R3)', () => {
+    expect(ivaDeDevolucion('v', 10000, { provenance: 'PROVIDER_ADJUSTMENT', fiscalByRateCents: { '0.16': 1379 } }, mezcla)).toEqual({
+      netCents: 8621,
+      taxCents: 1379,
+      taxByRate: { '0.16': 1379 },
+      porTratamiento: { IVA_16: { baseCents: 8621, ivaCents: 1379 } },
+    })
+    expect(ivaDeDevolucion('v0', 5000, { provenance: 'PROVIDER_ADJUSTMENT', fiscalByRateCents: {} }, mezcla).porTratamiento).toEqual({
+      IVA_16: { baseCents: 5000, ivaCents: 0 },
+    })
+    expect(
+      ivaDeDevolucion('v8', 10800, { provenance: 'PROVIDER_ADJUSTMENT', fiscalByRateCents: { '0.08': 800 } }, mezcla).porTratamiento,
+    ).toEqual({
+      IVA_16: { baseCents: 10000, ivaCents: 0 },
+      IVA_8: { baseCents: 0, ivaCents: 800 },
+    })
+    expect(logger.error).not.toHaveBeenCalled()
+  })
+
+  it('forma nueva (v2): ESE reparto, base e IVA por tratamiento', () => {
+    const porTratamiento = { IVA_16: { baseCents: 4310, ivaCents: 690 }, EXENTO: { baseCents: 5000, ivaCents: 0 } }
+    expect(ivaDeDevolucion('n', 10000, { provenance: 'PROVIDER_ADJUSTMENT', fiscalByRateCents: { v: 2, porTratamiento } }, mezcla)).toEqual(
+      {
+        netCents: 9310,
+        taxCents: 690,
+        taxByRate: { '0.16': 690 },
+        porTratamiento,
+      },
+    )
+    expect(logger.error).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['base + IVA no suma la venta devuelta', { v: 2, porTratamiento: { IVA_16: { baseCents: 4310, ivaCents: 690 } } }],
+    ['tratamiento sin tasa de catálogo (BLOQUEADO)', { v: 2, porTratamiento: { BLOQUEADO_03: { baseCents: 9310, ivaCents: 690 } } }],
+    ['montos no enteros', { v: 2, porTratamiento: { IVA_16: { baseCents: 9309.5, ivaCents: 690.5 } } }],
+    ['IVA negativo', { v: 2, porTratamiento: { IVA_16: { baseCents: 10001, ivaCents: -1 } } }],
+  ])('forma nueva inválida (%s): 🚨 con el id y la mezcla de la orden', (_caso, f) => {
+    expect(ivaDeDevolucion('bad', 10000, { provenance: 'PROVIDER_ADJUSTMENT', fiscalByRateCents: f }, mezcla).taxCents).toBe(690)
+    expect((logger.error as jest.Mock).mock.calls.map(([m]) => String(m))).toEqual([expect.stringMatching(/🚨.*bad/)])
   })
 })

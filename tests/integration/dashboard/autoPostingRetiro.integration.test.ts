@@ -21,7 +21,7 @@ import { writeRefundInTx, type WriteRefundInput } from '@/services/shared/writeR
 import { generatePoliciesForVenue } from '@/services/fiscal/autoPosting.service'
 import { seedBaseChart } from '@/services/fiscal/chartOfAccounts.service'
 import { seedDefaultMappings } from '@/services/fiscal/accountMapping.service'
-import { fiscalByRateCents, processorDataDeDevoluciones } from '@/services/fiscal/deliveryFiscalDelta'
+import { processorDataDeDevoluciones } from '@/services/fiscal/deliveryFiscalDelta'
 import { limpiarVenue, sembrarCobro } from './sembrarCobroParaReembolso'
 
 jest.setTimeout(120000)
@@ -95,8 +95,7 @@ describe('autoPosting — REFUND de reparto con fiscalByRateCents', () => {
   it('organización marcada (producto al 0 %): la corrida sale 409 CONTABILIDAD_IVA_MIXTO y no escribe ninguna póliza', async () => {
     const { pago, items } = await cobroMixto()
     // Uber retiró el renglón gravado: sobrevive sólo el de 0 %.
-    const L = (unitPrice: number, taxRate: number) => ({ unitPrice, quantity: 1, discountAmount: 0, taxRate })
-    const fiscal = fiscalByRateCents([L(100, 0.16), L(100, 0)], [L(100, 0)], 20000, 10000)
+    const fiscal = { '0.16': 1379 } // forma vieja
     const { refundPaymentId } = await prisma.$transaction(tx =>
       writeRefundInTx(
         tx,

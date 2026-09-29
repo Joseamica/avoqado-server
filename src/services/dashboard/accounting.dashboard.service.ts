@@ -3,7 +3,14 @@ import { CfdiStatus, OrderStatus, PaymentMethod, PaymentType, TransactionStatus 
 import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { parseDbDateRange } from '../../utils/datetime'
-import { splitPaymentIvaByOrderRates, grossByRateFromItems } from '../fiscal/ivaMath'
+import {
+  desglosePorTratamiento,
+  mezclaPorTratamiento,
+  sumarDesglose,
+  type DesgloseDeCobro,
+  type DesglosePorTratamiento,
+} from '../fiscal/ivaMath'
+import type { IvaTratamiento } from '../fiscal/ivaTratamiento'
 import { ivaDeDevolucion, processorDataDeDevoluciones } from '../fiscal/deliveryFiscalDelta'
 import { paymentInFiscalScope } from '../fiscal/fiscalScope'
 import { computePeriodCogsCents } from '../fiscal/cogs.service'
@@ -24,11 +31,11 @@ import { computePeriodCogsCents } from '../fiscal/cogs.service'
  * Limitación conocida (v1): no hay costo de venta capturado para retail (QUANTITY) ni
  * serializado, por eso este read-model reporta INGRESOS, no utilidad bruta.
  *
- * IVA por tasa REAL: el desglose usa la tasa de cada producto de la orden (16% central, 8% frontera,
- * 0% exento, mixto) vía `splitPaymentIvaByOrderRates` — el mismo split que la póliza de auto-posting,
- * así el estado de resultados RECONCILIA con el libro diario al centavo. `taxByRate` reporta el IVA
- * separado por tasa (la declaración de IVA del SAT reporta 16% y 8% por separado). Ventas de importe
- * libre (sin items) caen al 16% por defecto. `taxRateAssumed` (0.16) queda como nominal informativo.
+ * IVA por el tratamiento de CADA renglón (sellado > producto > 16 %) vía `desglosePorTratamiento` —el mismo reparto de
+ * la póliza, cada parte a su tasa—. La base gravable es la de 16 %, 8 % y 0 % (y la de un BLOQUEADO, como hoy); exento y
+ * no objeto van aparte (plan 4b). `taxByRate` reporta el IVA separado por tasa (la declaración de IVA del SAT reporta 16% y
+ * 8% por separado). Ventas de importe libre (sin items) caen al 16% por defecto. `taxRateAssumed` (0.16) queda como
+ * nominal informativo.
  */
 
 const DEFAULT_IVA_RATE = 0.16
@@ -55,8 +62,16 @@ export interface IncomeStatement {
     refundsCents: number
     /** Ingreso real cobrado = ventas brutas − devoluciones (IVA-incluido). */
     netRevenueCents: number
-    /** Base gravable: ingreso neto sin IVA (suma de las bases por tasa). */
+    /** Base de actos gravados (16 % + 8 % + 0 %), sin IVA. Lo exento y lo no objeto van aparte (plan 4b). */
     taxableBaseCents: number
+    /** Plan 4b · base de tasa 0 % (ya incluida en taxableBaseCents). */
+    tasa0BaseCents?: number
+    /** Plan 4b · base exenta (fuera de taxableBaseCents). */
+    exentoBaseCents?: number
+    /** Plan 4b · base no objeto de IVA (fuera de taxableBaseCents). */
+    noObjetoBaseCents?: number
+    /** Plan 4b · todo el ingreso sin IVA (gravado + exento + no objeto): la base del ISR. */
+    ingresosSinIvaCents?: number
     /** IVA trasladado embebido en el ingreso neto (neto de devoluciones). */
     ivaCents: number
     /** IVA trasladado NETO desglosado por tasa (clave = tasa como string, p.ej. "0.16", "0.08"). */
@@ -72,7 +87,16 @@ export interface IncomeStatement {
     grossSalesCents: number
     refundsCents: number
     netRevenueCents: number
+    /** Base de actos gravados (16 % + 8 % + 0 %), sin IVA. Lo exento y lo no objeto van aparte (plan 4b). */
     taxableBaseCents: number
+    /** Plan 4b · base de tasa 0 % (ya incluida en taxableBaseCents). */
+    tasa0BaseCents?: number
+    /** Plan 4b · base exenta (fuera de taxableBaseCents). */
+    exentoBaseCents?: number
+    /** Plan 4b · base no objeto de IVA (fuera de taxableBaseCents). */
+    noObjetoBaseCents?: number
+    /** Plan 4b · todo el ingreso sin IVA (gravado + exento + no objeto): la base del ISR. */
+    ingresosSinIvaCents?: number
     ivaCents: number
     taxByRate: Record<string, number>
   }
@@ -129,10 +153,18 @@ export async function getIncomeStatement(venueId: string, filters: IncomeStateme
       // Toggle por-merchant: excluir un merchant de los libros fiscales (no del gerencial).
       merchantAccount: { select: { fiscalConfig: { select: { includeInAccounting: true } } } },
       ecommerceMerchant: { select: { fiscalConfig: { select: { includeInAccounting: true } } } },
-      // Items de la orden con la tasa real de cada producto → IVA por tasa (no un 16% plano).
+      // Renglones con su tratamiento: el sellado (factura) manda; si no, el del producto; sin producto, IVA 16 %.
       order: {
         select: {
-          items: { select: { quantity: true, unitPrice: true, discountAmount: true, product: { select: { taxRate: true } } } },
+          items: {
+            select: {
+              quantity: true,
+              unitPrice: true,
+              discountAmount: true,
+              ivaTratamiento: true,
+              product: { select: { taxRate: true, ivaTratamiento: true } },
+            },
+          },
         },
       },
     },
@@ -147,13 +179,28 @@ export async function getIncomeStatement(venueId: string, filters: IncomeStateme
 
   // Acumuladores GERENCIALES (todo) y FISCALES (subconjunto en alcance). Cada pago suma al gerencial
   // siempre, y al fiscal solo si `paymentInFiscalScope` lo permite.
-  const ger = { gross: 0, refunds: 0, base: 0, iva: 0, byRate: {} as Record<string, number> }
-  const fis = { gross: 0, refunds: 0, base: 0, iva: 0, byRate: {} as Record<string, number> }
+  const acumulador = () => ({
+    gross: 0,
+    refunds: 0,
+    base: 0,
+    iva: 0,
+    byRate: {} as Record<string, number>,
+    porTratamiento: {} as DesglosePorTratamiento,
+  })
+  const ger = acumulador()
+  const fis = acumulador()
   let tipsCents = 0
   let salesCount = 0
   let refundCount = 0
   const mergeTax = (dst: Record<string, number>, byRate: Record<string, number>, sign: 1 | -1) => {
     for (const [rate, cents] of Object.entries(byRate)) dst[rate] = (dst[rate] ?? 0) + sign * cents
+  }
+  /** Suma (o resta) el desglose de un cobro: base, IVA, IVA por tasa y base e IVA por tratamiento. */
+  const sumar = (acc: ReturnType<typeof acumulador>, s: DesgloseDeCobro, sign: 1 | -1) => {
+    acc.base += sign * s.netCents
+    acc.iva += sign * s.taxCents
+    mergeTax(acc.byRate, s.taxByRate, sign)
+    sumarDesglose(acc.porTratamiento, s.porTratamiento, sign)
   }
 
   for (const r of rows) {
@@ -161,46 +208,30 @@ export async function getIncomeStatement(venueId: string, filters: IncomeStateme
     if (r.type === PaymentType.TEST) continue
 
     const amountCents = toCents(r.amount) // con signo: las devoluciones ya vienen negativas
-    const grossByRate = grossByRateFromItems(
-      (r.order?.items ?? []).map(it => ({
-        unitPrice: Number(it.unitPrice),
-        quantity: it.quantity,
-        discountAmount: Number(it.discountAmount),
-        taxRate: it.product?.taxRate != null ? Number(it.product.taxRate) : null,
-      })),
-      DEFAULT_IVA_RATE,
-    )
+    const mezcla = mezclaPorTratamiento(r.order?.items ?? [])
     const merchantFlag = r.merchantAccount?.fiscalConfig?.includeInAccounting ?? r.ecommerceMerchant?.fiscalConfig?.includeInAccounting
     const inFiscal = paymentInFiscalScope(r.method, merchantFlag, includeCashInAccounting)
 
     if (r.type === PaymentType.REFUND) {
       const magnitudeCents = Math.abs(amountCents)
-      const s = ivaDeDevolucion(r.id, magnitudeCents, processorDataDeAjustes.get(r.id), grossByRate, { avisar: false })
+      const s = ivaDeDevolucion(r.id, magnitudeCents, processorDataDeAjustes.get(r.id), mezcla, { avisar: false })
       ger.refunds += magnitudeCents
-      ger.base -= s.netCents
-      ger.iva -= s.taxCents
-      mergeTax(ger.byRate, s.taxByRate, -1)
+      sumar(ger, s, -1)
       if (inFiscal) {
         fis.refunds += magnitudeCents
-        fis.base -= s.netCents
-        fis.iva -= s.taxCents
-        mergeTax(fis.byRate, s.taxByRate, -1)
+        sumar(fis, s, -1)
       }
       refundCount += 1
       continue
     }
 
     // REGULAR / FAST / ADJUSTMENT / null (legacy) → venta real
-    const s = splitPaymentIvaByOrderRates(amountCents, grossByRate, DEFAULT_IVA_RATE)
+    const s = desglosePorTratamiento(amountCents, mezcla)
     ger.gross += amountCents
-    ger.base += s.netCents
-    ger.iva += s.taxCents
-    mergeTax(ger.byRate, s.taxByRate, 1)
+    sumar(ger, s, 1)
     if (inFiscal) {
       fis.gross += amountCents
-      fis.base += s.netCents
-      fis.iva += s.taxCents
-      mergeTax(fis.byRate, s.taxByRate, 1)
+      sumar(fis, s, 1)
     }
     tipsCents += toCents(r.tipAmount)
     salesCount += 1
@@ -209,12 +240,27 @@ export async function getIncomeStatement(venueId: string, filters: IncomeStateme
   // Poda claves de tasa en 0 tras netear devoluciones (no aportan a la declaración).
   for (const b of [ger.byRate, fis.byRate]) for (const rate of Object.keys(b)) if (b[rate] === 0) delete b[rate]
 
+  /**
+   * Plan 4b (spec §3): base gravable = actos gravados (16 %, 8 % y 0 %; LIVA 2-A: la tasa 0 surte efectos de acto gravado; un
+   * BLOQUEADO sigue contando como hoy). Exento y no objeto van aparte; `ingresosSinIvaCents` es todo el ingreso sin IVA. Con todo
+   * al 16 %, las dos coinciden.
+   */
+  const bases = (a: ReturnType<typeof acumulador>) => {
+    const base = (t: IvaTratamiento) => a.porTratamiento[t]?.baseCents ?? 0
+    return {
+      taxableBaseCents: a.base - base('EXENTO') - base('NO_OBJETO'),
+      tasa0BaseCents: base('IVA_0'),
+      exentoBaseCents: base('EXENTO'),
+      noObjetoBaseCents: base('NO_OBJETO'),
+      ingresosSinIvaCents: a.base,
+    }
+  }
+
   const grossSalesCents = ger.gross
   const refundsCents = ger.refunds
-  const taxableBaseCents = ger.base
   const ivaCents = ger.iva
   const taxByRate = ger.byRate
-  const netRevenueCents = grossSalesCents - refundsCents // === taxableBaseCents + ivaCents (cada split es exacto)
+  const netRevenueCents = grossSalesCents - refundsCents // === ingresosSinIvaCents + ivaCents (cada split es exacto)
   const averageTicketCents = salesCount > 0 ? Math.round(grossSalesCents / salesCount) : 0
 
   return {
@@ -224,12 +270,12 @@ export async function getIncomeStatement(venueId: string, filters: IncomeStateme
     timezone,
     period: { from: filters.from, to: filters.to },
     taxRateAssumed: DEFAULT_IVA_RATE,
-    revenue: { grossSalesCents, refundsCents, netRevenueCents, taxableBaseCents, ivaCents, taxByRate },
+    revenue: { grossSalesCents, refundsCents, netRevenueCents, ...bases(ger), ivaCents, taxByRate },
     fiscalRevenue: {
       grossSalesCents: fis.gross,
       refundsCents: fis.refunds,
       netRevenueCents: fis.gross - fis.refunds,
-      taxableBaseCents: fis.base,
+      ...bases(fis),
       ivaCents: fis.iva,
       taxByRate: fis.byRate,
     },

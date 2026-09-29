@@ -8,6 +8,9 @@
 // customer actually paid. So before handing a gross price to the PAC we either tell it the
 // price is tax-included (preferred) or split it ourselves for our own stored breakdown.
 
+import { hayBloqueados, resolverTratamiento } from './ivaDeRenglon'
+import { tratamientoDesdeTupla, tuplaDesdeTratamiento, type IvaTratamiento } from './ivaTratamiento'
+
 /**
  * Splits an IVA-included (gross) integer-cent amount into its net base + tax for a given rate.
  *
@@ -117,4 +120,121 @@ export function grossByRateFromItems(
     byRate.set(rate, (byRate.get(rate) ?? 0) + grossCents)
   }
   return [...byRate.entries()].map(([rate, grossCents]) => ({ rate, grossCents }))
+}
+
+// ── Plan 4b: el desglose por TRATAMIENTO (spec 4b §4) ──────────────────────────────────────────────────────────────
+
+/** Base e IVA (centavos) por tratamiento. Un tratamiento ausente vale cero. */
+export type DesglosePorTratamiento = Partial<Record<IvaTratamiento, { baseCents: number; ivaCents: number }>>
+/**
+ * La venta de una orden por tratamiento y tasa (IVA incluido, centavos), en el orden en que aparece cada par. La tasa es la del
+ * tratamiento (0.16 · 0.08 · 0) y, en un BLOQUEADO, la de su producto TAL CUAL (Ruling 4b-R4).
+ */
+export type MezclaPorTratamiento = { tratamiento: IvaTratamiento; tasa: number; grossCents: number }[]
+/** Lo que se reparte de UN cobro: los totales y `taxByRate` de siempre, más la base e IVA por tratamiento. */
+export type DesgloseDeCobro = {
+  netCents: number
+  taxCents: number
+  taxByRate: Record<string, number>
+  porTratamiento: DesglosePorTratamiento
+}
+
+type Numero = number | { toString(): string }
+/** Un renglón tal como sale de Prisma (`OrderItem` con su producto; los Decimal se aceptan tal cual). */
+export type RenglonConIva = {
+  quantity: number
+  unitPrice: Numero
+  discountAmount: Numero
+  ivaTratamiento: IvaTratamiento | null
+  product: { taxRate: Numero | null; ivaTratamiento: IvaTratamiento } | null
+}
+
+type Entrada = [IvaTratamiento, { baseCents: number; ivaCents: number }]
+
+/**
+ * La mezcla de una orden por tratamiento: el ÚNICO mapeo de renglón a IVA que usan el estado de resultados y el conciliador
+ * de reparto. Cada renglón resuelve su tratamiento con `resolverTratamiento` (sellado > producto > IVA_16) y lleva la tasa de
+ * ese tratamiento; un BLOQUEADO, la de su producto sin tocar (hoy la reporta así: Ruling 4b-R4). El importe de cada renglón se
+ * calcula como en `grossByRateFromItems`.
+ */
+export function mezclaPorTratamiento(items: RenglonConIva[]): MezclaPorTratamiento {
+  const por = new Map<string, MezclaPorTratamiento[number]>()
+  for (const it of items) {
+    const tratamiento = resolverTratamiento({
+      selladoIva: it.ivaTratamiento,
+      productoIva: it.product?.ivaTratamiento,
+      tieneProducto: it.product != null,
+    })
+    const tasa = hayBloqueados([tratamiento]) ? Number(it.product?.taxRate ?? 0.16) : tuplaDesdeTratamiento(tratamiento, 0).taxRate
+    const grossCents = Math.round((Number(it.unitPrice) * it.quantity - Number(it.discountAmount)) * 100)
+    if (grossCents === 0) continue
+    const parte = por.get(`${tratamiento}|${tasa}`)
+    if (parte) parte.grossCents += grossCents
+    else por.set(`${tratamiento}|${tasa}`, { tratamiento, tasa, grossCents })
+  }
+  return [...por.values()]
+}
+
+/**
+ * Una mezcla por tasa (la de la póliza, `grossByRateForOrder`) como mezcla por tratamiento, cada parte con SU tasa: 0.16 →
+ * IVA_16, 0.08 → IVA_8, 0 → IVA_0; una tasa fuera de ésas sólo la tiene un producto BLOQUEADO y así se etiqueta (la póliza sólo
+ * lee las cifras, y las cifras salen de la tasa).
+ */
+export function mezclaDesdeTasas(g: { rate: number; grossCents: number }[]): MezclaPorTratamiento {
+  return g.map(({ rate, grossCents }) => ({ tratamiento: tratamientoDesdeTupla(rate, '02') ?? 'BLOQUEADO_03', tasa: rate, grossCents }))
+}
+
+/**
+ * El desglose de UN cobro (IVA incluido) con la mezcla de su orden, por tratamiento: el mismo reparto que
+ * `splitPaymentIvaByOrderRates` (proporcional, el residual a la parte de mayor importe), cada parte cortada con
+ * `splitIvaIncluded` a SU tasa y `taxByRate` con la llave de siempre (`String(tasa)`, sólo con IVA). Sin renglones ⇒ todo al
+ * 16 %, como siempre.
+ */
+export function desglosePorTratamiento(cobroCents: number, mezcla: MezclaPorTratamiento): DesgloseDeCobro {
+  const meaningful = mezcla.filter(m => m.grossCents !== 0)
+  const partes: MezclaPorTratamiento =
+    meaningful.length === 0
+      ? [{ tratamiento: 'IVA_16', tasa: 0.16, grossCents: cobroCents }]
+      : allocateByWeights(
+          cobroCents,
+          meaningful.map(m => m.grossCents),
+        ).map((grossCents, i) => ({ ...meaningful[i], grossCents }))
+  let netCents = 0
+  let taxCents = 0
+  const taxByRate: Record<string, number> = {}
+  const porTratamiento: DesglosePorTratamiento = {}
+  for (const p of partes) {
+    const s = splitIvaIncluded(p.grossCents, p.tasa)
+    netCents += s.netCents
+    taxCents += s.taxCents
+    if (s.taxCents !== 0) taxByRate[String(p.tasa)] = (taxByRate[String(p.tasa)] ?? 0) + s.taxCents
+    const acc = (porTratamiento[p.tratamiento] ??= { baseCents: 0, ivaCents: 0 })
+    acc.baseCents += s.netCents
+    acc.ivaCents += s.taxCents
+  }
+  return { netCents, taxCents, taxByRate, porTratamiento }
+}
+
+/**
+ * El IVA por tasa de un desglose de tratamientos DE CATÁLOGO (16, 8, 0, exento, no objeto), en la forma de `taxByRate` de
+ * siempre: llaves "0.16"/"0.08", sin ceros. Un BLOQUEADO no tiene tasa de catálogo y nunca llega aquí: el mapa v2 no lo admite y
+ * la conciliación no lo congela (Ruling 4b-R4).
+ */
+export function tasasDe(d: DesglosePorTratamiento): Record<string, number> {
+  const r: Record<string, number> = {}
+  for (const [t, v] of Object.entries(d) as Entrada[]) {
+    if (v.ivaCents === 0) continue
+    const llave = String(tuplaDesdeTratamiento(t, 0).taxRate)
+    r[llave] = (r[llave] ?? 0) + v.ivaCents
+  }
+  return r
+}
+
+/** `destino += signo × origen`, tratamiento por tratamiento. */
+export function sumarDesglose(destino: DesglosePorTratamiento, origen: DesglosePorTratamiento, signo: 1 | -1): void {
+  for (const [t, v] of Object.entries(origen) as Entrada[]) {
+    const acc = (destino[t] ??= { baseCents: 0, ivaCents: 0 })
+    acc.baseCents += signo * v.baseCents
+    acc.ivaCents += signo * v.ivaCents
+  }
 }

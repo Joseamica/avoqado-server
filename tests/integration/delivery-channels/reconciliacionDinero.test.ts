@@ -16,7 +16,7 @@ import type { NormalizedDeliveryItem, NormalizedDeliveryOrder, NormalizedDeliver
 import { CANDADO_TX_TIMEOUT_MS } from '@/services/delivery-channels/core/deliveryOrderLock'
 import { grossByRateForOrder } from '@/services/fiscal/autoPosting.service'
 import { ivaDeDevolucion } from '@/services/fiscal/deliveryFiscalDelta'
-import { splitPaymentIvaByOrderRates } from '@/services/fiscal/ivaMath'
+import { mezclaDesdeTasas, splitPaymentIvaByOrderRates } from '@/services/fiscal/ivaMath'
 import { writeRefundInTx, type WriteRefundInput } from '@/services/shared/writeRefundInTx'
 
 type Renglon = { linea: string; nombre: string; precio: string; tasa?: number }
@@ -270,7 +270,8 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
     const ivaOriginal = splitPaymentIvaByOrderRates(20000, mezcla).taxCents
     const ivaSuperviviente = splitPaymentIvaByOrderRates(10000, grossByRateForOrder(renglones.filter(r => !r.removedAt))).taxCents
     const ivaDevuelto = refunds.reduce(
-      (s, f) => s + ivaDeDevolucion(f.id, new Prisma.Decimal(f.amount).times(-100).toNumber(), f.processorData, mezcla).taxCents,
+      (s, f) =>
+        s + ivaDeDevolucion(f.id, new Prisma.Decimal(f.amount).times(-100).toNumber(), f.processorData, mezclaDesdeTasas(mezcla)).taxCents,
       0,
     )
     expect(ivaOriginal - ivaDevuelto).toBe(ivaSuperviviente)
@@ -322,11 +323,12 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
     const mezcla = grossByRateForOrder(renglones)
     const ivaVenta = splitPaymentIvaByOrderRates(30000, mezcla).taxCents
     const ivaDevuelto = refunds.reduce(
-      (s, f) => s + ivaDeDevolucion(f.id, new Prisma.Decimal(f.amount).times(-100).toNumber(), f.processorData, mezcla).taxCents,
+      (s, f) =>
+        s + ivaDeDevolucion(f.id, new Prisma.Decimal(f.amount).times(-100).toNumber(), f.processorData, mezclaDesdeTasas(mezcla)).taxCents,
       0,
     )
     expect(ivaVenta - ivaDevuelto).toBe(0)
-    const ivaManual = ivaDeDevolucion(refunds[1].id, 5000, refunds[1].processorData, mezcla).taxCents
+    const ivaManual = ivaDeDevolucion(refunds[1].id, 5000, refunds[1].processorData, mezclaDesdeTasas(mezcla)).taxCents
     expect((refunds[2].processorData as any).fiscalByRateCents).toEqual({ '0.16': ivaVenta - ivaManual })
   })
 
@@ -358,7 +360,9 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
       })
       const mezcla = grossByRateForOrder(renglones)
       const ivaDevuelto = refunds.reduce(
-        (t, f) => t + ivaDeDevolucion(f.id, new Prisma.Decimal(f.amount).times(-100).toNumber(), f.processorData, mezcla).taxCents,
+        (t, f) =>
+          t +
+          ivaDeDevolucion(f.id, new Prisma.Decimal(f.amount).times(-100).toNumber(), f.processorData, mezclaDesdeTasas(mezcla)).taxCents,
         0,
       )
       expect(splitPaymentIvaByOrderRates(15000, mezcla).taxCents - ivaDevuelto).toBe(0)

@@ -3,11 +3,11 @@
  *
  * FOTO DE DINERO (principio rector v3; Ruling 4b-R14): con TODOS los renglones en IVA_16 y la bandera APAGADA —el estado de
  * producción—, el estado de resultados, el resumen del negocio, el IVA de flujo, el ISR y las cuatro herramientas contables del
- * MCP dan EXACTAMENTE los números de e0d69b49, en CADA campo de dinero (ceros y null incluidos). Se escribió y se puso en verde ANTES de tocar la lógica; las tareas siguientes la
- * corren sin cambiarla. Si una literal no coincidía contra e0d69b49, el error era de la cuenta a mano (se corrigió la
- * literal y se anotó), nunca del código.
+ * MCP dan EXACTAMENTE los números de e0d69b49, en CADA campo de dinero (ceros y null incluidos). Se escribió y se puso
+ * en verde ANTES de tocar la lógica; las tareas siguientes la corren sin cambiarla. Si una literal no coincide contra
+ * e0d69b49, el error es de la cuenta a mano: se corrige la literal, nunca el código.
  */
-import { Prisma, type PaymentMethod, type PaymentType } from '@prisma/client'
+import { Prisma, type IvaTratamiento, type PaymentMethod, type PaymentType } from '@prisma/client'
 
 import type { McpScope } from '@/mcp/scope'
 import { registerAccountingTools } from '@/mcp/tools/accounting'
@@ -15,7 +15,7 @@ import { getBusinessSummary, getIncomeStatement } from '@/services/dashboard/acc
 import { getIsrProvisional } from '@/services/fiscal/isr.service'
 import { getIvaCashflow } from '@/services/fiscal/ivaFlujo.service'
 import prisma from '@/utils/prismaClient'
-import { limpiarNegocios, nuevoNegocio, type Negocio } from './exclusionContable.fixtures'
+import { conProducto, limpiarNegocios, nuevoNegocio, type Negocio } from './exclusionContable.fixtures'
 
 // Las herramientas del MCP se llaman directo: el guardia y el plan no son lo que se prueba aquí (tienen sus suites).
 jest.mock('@/mcp/planGate', () => ({ planGateMessage: jest.fn().mockResolvedValue(null) }))
@@ -298,5 +298,63 @@ describe('foto de dinero: todo al 16 % y la bandera apagada dan los números de 
       isrAPagarEstimado: 5.49,
       sinVentas: false,
     })
+  })
+
+  it('plan 4b · con todo al 16 % los campos nuevos: tasa 0, exento y no objeto en cero; el ingreso sin IVA es la base gravable', async () => {
+    const r = await getIncomeStatement(x.venueId, JUNIO)
+    for (const v of [r.revenue, r.fiscalRevenue])
+      expect(v).toMatchObject({ tasa0BaseCents: 0, exentoBaseCents: 0, noObjetoBaseCents: 0, ingresosSinIvaCents: v.taxableBaseCents })
+  })
+})
+
+describe('reportes por tratamiento: 16 %, 0 %, exento, no objeto y un renglón sellado', () => {
+  let x: Negocio
+
+  beforeAll(async () => {
+    x = await nuevoNegocio({ contabilidad: false })
+    const { categoryId, productId: cafe16 } = await conProducto(x) // bandera ENCENDIDA, 'Café' IVA_16
+    const producto = async (name: string, ivaTratamiento: IvaTratamiento) =>
+      (await prisma.product.create({ data: { venueId: x.venueId, categoryId, sku: `${name}-${x.rfc}`, name, price: 100, ivaTratamiento } }))
+        .id
+    const grano0 = await producto('Grano', 'IVA_0')
+    const libro = await producto('Libro', 'EXENTO')
+    const donativo = await producto('Donativo', 'NO_OBJETO')
+    const galleta = await producto('Galleta', 'IVA_16')
+
+    // X · tarjeta 216 (16 %: 116 · 0 %: 50 · exento: 30 · no objeto: 20) y una devolución MANUAL de 21.60 (10 %, mezcla actual).
+    const ox = await orden(x.venueId, [
+      [cafe16, '116.00'],
+      [grano0, '50.00'],
+      [libro, '30.00'],
+      [donativo, '20.00'],
+    ])
+    const px = await pagar(x.venueId, ox.id, '216.00')
+    await pagar(x.venueId, ox.id, '-21.60', { type: 'REFUND', processorData: { provenance: 'MANUAL', originalPaymentId: px.id } })
+    // Y · tarjeta 116 de una galleta cuyo renglón quedó SELLADO al 16 % por una factura; después el producto pasa a 0 %.
+    const oy = await orden(x.venueId, [[galleta, '116.00']])
+    await prisma.orderItem.update({ where: { id: oy.items[0] }, data: { ivaTratamiento: 'IVA_16' } })
+    await prisma.product.update({ where: { id: galleta }, data: { ivaTratamiento: 'IVA_0' } })
+    await pagar(x.venueId, oy.id, '116.00')
+  })
+
+  // Venta X: 16 % 10000 + 1600 · 0 % 5000 · exento 3000 · no objeto 2000. Devolución: 16 % 1000 + 160 · 0 % 500 · exento 300 ·
+  // no objeto 200. Venta Y (sellada 16 %): 10000 + 1600. Base por tratamiento: 16 % 19000 · 0 % 4500 · exento 2700 ·
+  // no objeto 1800 (sin IVA en total: 28000). Gravable 16 + 0 = 23500. IVA 3040. Hoy: la galleta cuenta al 0 % y todo es gravable.
+  it('Review Focus 1 y 2 · el sellado cuenta al 16 %; la devolución exenta sale de la base exenta; exento y no objeto fuera de la gravable', async () => {
+    const r = await getIncomeStatement(x.venueId, JUNIO)
+    for (const v of [r.revenue, r.fiscalRevenue]) {
+      expect(v).toMatchObject({
+        grossSalesCents: 33200,
+        refundsCents: 2160,
+        netRevenueCents: 31040,
+        ivaCents: 3040,
+        taxableBaseCents: 23500,
+        tasa0BaseCents: 4500,
+        exentoBaseCents: 2700,
+        noObjetoBaseCents: 1800,
+        ingresosSinIvaCents: 28000,
+      })
+      expect(v.taxByRate).toEqual({ '0.16': 3040 })
+    }
   })
 })

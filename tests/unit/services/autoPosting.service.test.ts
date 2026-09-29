@@ -27,7 +27,6 @@ import { resolveScopeOrNull } from '../../../src/services/fiscal/chartOfAccounts
 import { getMappings } from '../../../src/services/fiscal/accountMapping.service'
 import { postJournalEntry } from '../../../src/services/fiscal/journalEntry.service'
 import { buildRefundLines, buildSaleLines, generatePoliciesForVenue } from '../../../src/services/fiscal/autoPosting.service'
-import { fiscalByRateCents } from '../../../src/services/fiscal/deliveryFiscalDelta'
 
 const p = prisma as unknown as {
   venue: { findUnique: jest.Mock }
@@ -212,7 +211,6 @@ describe('alcance fiscal configurable', () => {
 describe('R9 · reparto por tasa (aritmética movida de las pruebas de integración de reparto)', () => {
   type Fila = Parameters<typeof buildSaleLines>[0]
   const acct = (m: string) => `acc:${m}`
-  const L = (unitPrice: number, taxRate: number) => ({ unitPrice, quantity: 1, discountAmount: 0, taxRate })
   const renglon = (unitPrice: number, taxRate: number, discountAmount = 0) => ({
     quantity: 1,
     unitPrice: new Prisma.Decimal(unitPrice),
@@ -250,11 +248,20 @@ describe('R9 · reparto por tasa (aritmética movida de las pruebas de integraci
     (linea(lines, 'IVA_OUTPUT')?.creditCents ?? 0) - (linea(lines, 'IVA_OUTPUT')?.debitCents ?? 0)
 
   it('REFUND con fiscalByRateCents: la póliza lleva ESE reparto (1379), no la mezcla de la orden (690)', () => {
-    const fiscal = fiscalByRateCents([L(100, 0.16), L(100, 0)], [L(100, 0)], 20000, 10000)
-    expect(fiscal).toEqual({ '0.16': 1379 })
+    const fiscal = { '0.16': 1379 } // forma VIEJA, como la escribía el servidor antes del plan 4b
     const { lines } = buildRefundLines(devolucion('r1', 100, mitadYMitad), acct, {
       provenance: 'PROVIDER_ADJUSTMENT',
       fiscalByRateCents: fiscal,
+    })!
+    expect(cuadra(lines)).toBe(true)
+    expect(linea(lines, 'IVA_OUTPUT')!.debitCents).toBe(1379)
+    expect(linea(lines, 'SALES_RETURN')!.debitCents).toBe(8621)
+  })
+
+  it('plan 4b · REFUND con la forma nueva (v2, base e IVA por tratamiento): la póliza lleva ESE IVA (1379)', () => {
+    const { lines } = buildRefundLines(devolucion('r5', 100, mitadYMitad), acct, {
+      provenance: 'PROVIDER_ADJUSTMENT',
+      fiscalByRateCents: { v: 2, porTratamiento: { IVA_16: { baseCents: 8621, ivaCents: 1379 } } },
     })!
     expect(cuadra(lines)).toBe(true)
     expect(linea(lines, 'IVA_OUTPUT')!.debitCents).toBe(1379)
@@ -290,8 +297,7 @@ describe('R9 · reparto por tasa (aritmética movida de las pruebas de integraci
   it('lectoresConRetiro: el IVA neto de las cuatro pólizas es 4191 (la cifra que el estado de resultados debe igualar)', () => {
     // A · $200 (Latte $150 al 16 % + Pan $50 al 0 % con $5 de descuento, retirado por Uber) y su compensación de $50.
     const pedidoA = [renglon(150, 0.16), renglon(50, 0, 5)]
-    const fiscalA = fiscalByRateCents([L(150, 0.16), L(50, 0)], [L(150, 0.16)], 20000, 15000)
-    expect(fiscalA).toEqual({}) // retirar lo del 0 % no devuelve IVA
+    const fiscalA = {} // retirar lo del 0 % no devuelve IVA (forma vieja)
     const ventaA = buildSaleLines(
       fila({ id: 'a', amount: new Prisma.Decimal(200), order: { status: OrderStatus.COMPLETED, orderNumber: 'A', items: pedidoA } }),
       acct,

@@ -28,7 +28,6 @@ import { getIncomeStatement } from '@/services/dashboard/accounting.dashboard.se
 import { generatePoliciesForVenue } from '@/services/fiscal/autoPosting.service'
 import { seedBaseChart } from '@/services/fiscal/chartOfAccounts.service'
 import { seedDefaultMappings } from '@/services/fiscal/accountMapping.service'
-import { fiscalByRateCents } from '@/services/fiscal/deliveryFiscalDelta'
 import { getExtendedMetrics } from '@/services/dashboard/generalStats.dashboard.service'
 import { getPMIXReport } from '@/services/dashboard/report.service'
 import { SharedQueryService } from '@/services/dashboard/shared-query.service'
@@ -112,9 +111,7 @@ describe('lectores con un renglón retirado por el proveedor', () => {
       where: { id: a.items[1].id },
       data: { removedAt: new Date(), orderPromotionId: op.id, discountAmount: new Prisma.Decimal(5) },
     })
-    const L = (unitPrice: number, taxRate: number) => ({ unitPrice, quantity: 1, discountAmount: 0, taxRate })
-    // Retirar lo del 0 % no devuelve IVA ({}); la mezcla de la orden diría 5.17. Distintos a propósito.
-    const fiscal = fiscalByRateCents([L(150, 0.16), L(50, 0)], [L(150, 0.16)], 20000, 15000)
+    const fiscal = {} // forma vieja: retirar lo del 0 % no devuelve IVA ({}); la mezcla de la orden diría 5.17
     await prisma.$transaction(tx =>
       writeRefundInTx(tx, {
         originalPaymentId: a.pago.id,

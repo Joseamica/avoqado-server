@@ -5,7 +5,15 @@ import {
   splitIvaByRate,
   splitPaymentIvaByOrderRates,
   grossByRateFromItems,
+  desglosePorTratamiento,
+  mezclaDesdeTasas,
+  mezclaPorTratamiento,
+  sumarDesglose,
+  tasasDe,
+  type DesglosePorTratamiento,
+  type MezclaPorTratamiento,
 } from '../../../../src/services/fiscal/ivaMath'
+import type { IvaTratamiento } from '../../../../src/services/fiscal/ivaTratamiento'
 
 describe('splitIvaIncluded (IVA-included → base + tax)', () => {
   // ── NEW BEHAVIOUR ──────────────────────────────────────────────────────────
@@ -188,5 +196,121 @@ describe('grossByRateFromItems (group order items → gross by real rate)', () =
     const s = splitPaymentIvaByOrderRates(10800, g)
     expect(s.taxCents).toBe(800)
     expect(s.taxByRate).toEqual({ '0.08': 800 })
+  })
+})
+
+describe('plan 4b · mezclaPorTratamiento + desglosePorTratamiento', () => {
+  const R = (precio: number, sellado: IvaTratamiento | null, producto: { iva: IvaTratamiento; tasa: number } | null, descuento = 0) => ({
+    quantity: 1,
+    unitPrice: precio,
+    discountAmount: descuento,
+    ivaTratamiento: sellado,
+    product: producto && { taxRate: producto.tasa, ivaTratamiento: producto.iva },
+  })
+
+  it('cada renglón resuelve sellado > producto > IVA_16 (sin producto); los iguales se juntan en su primer orden', () => {
+    expect(
+      mezclaPorTratamiento([R(116, 'IVA_16', { iva: 'IVA_0', tasa: 0 }), R(50, null, { iva: 'EXENTO', tasa: 0 }), R(20, null, null)]),
+    ).toEqual([
+      { tratamiento: 'IVA_16', tasa: 0.16, grossCents: 13600 },
+      { tratamiento: 'EXENTO', tasa: 0, grossCents: 5000 },
+    ])
+  })
+
+  it('Ruling 4b-R4 · un BLOQUEADO lleva la tasa de su producto TAL CUAL; cada tasa es su propia parte', () => {
+    expect(
+      mezclaPorTratamiento([
+        R(100, null, { iva: 'BLOQUEADO_03', tasa: 0.08 }),
+        R(100, null, { iva: 'BLOQUEADO_04', tasa: 0 }),
+        R(110, null, { iva: 'BLOQUEADO_03', tasa: 0.1 }),
+      ]),
+    ).toEqual([
+      { tratamiento: 'BLOQUEADO_03', tasa: 0.08, grossCents: 10000 },
+      { tratamiento: 'BLOQUEADO_04', tasa: 0, grossCents: 10000 },
+      { tratamiento: 'BLOQUEADO_03', tasa: 0.1, grossCents: 11000 },
+    ])
+  })
+
+  // Codex P1.4: hoy $110 al 10 % son base $100 e IVA $10; caer al 16 % daría 94.83 + 15.17.
+  it('Review Focus 6 · $110 de un BLOQUEADO al 10 %: base 10000 e IVA 1000, con la llave "0.1" de hoy', () => {
+    expect(desglosePorTratamiento(11000, mezclaPorTratamiento([R(110, null, { iva: 'BLOQUEADO_03', tasa: 0.1 })]))).toEqual({
+      netCents: 10000,
+      taxCents: 1000,
+      taxByRate: { '0.1': 1000 },
+      porTratamiento: { BLOQUEADO_03: { baseCents: 10000, ivaCents: 1000 } },
+    })
+  })
+
+  it('separa 16, 8, 0, exento y no objeto: sólo 16 y 8 llevan IVA', () => {
+    const mezcla: MezclaPorTratamiento = [
+      { tratamiento: 'IVA_16', tasa: 0.16, grossCents: 11600 },
+      { tratamiento: 'IVA_8', tasa: 0.08, grossCents: 10800 },
+      { tratamiento: 'IVA_0', tasa: 0, grossCents: 5000 },
+      { tratamiento: 'EXENTO', tasa: 0, grossCents: 3000 },
+      { tratamiento: 'NO_OBJETO', tasa: 0, grossCents: 2000 },
+    ]
+    expect(desglosePorTratamiento(32400, mezcla)).toEqual({
+      netCents: 30000,
+      taxCents: 2400,
+      taxByRate: { '0.16': 1600, '0.08': 800 },
+      porTratamiento: {
+        IVA_16: { baseCents: 10000, ivaCents: 1600 },
+        IVA_8: { baseCents: 10000, ivaCents: 800 },
+        IVA_0: { baseCents: 5000, ivaCents: 0 },
+        EXENTO: { baseCents: 3000, ivaCents: 0 },
+        NO_OBJETO: { baseCents: 2000, ivaCents: 0 },
+      },
+    })
+  })
+
+  it('sin renglones: todo al 16 %, como la venta de importe libre de siempre', () => {
+    expect(desglosePorTratamiento(9999, [])).toEqual({
+      netCents: 8620,
+      taxCents: 1379,
+      taxByRate: { '0.16': 1379 },
+      porTratamiento: { IVA_16: { baseCents: 8620, ivaCents: 1379 } },
+    })
+  })
+
+  // Principio rector (v3): con CUALQUIER mezcla por tasa da EXACTAMENTE lo mismo que el reparto por tasa de hoy.
+  it.each([
+    [17400, [{ rate: 0.16, grossCents: 17400 }]],
+    [9999, []],
+    [-5800, [{ rate: 0.16, grossCents: 17400 }]],
+    [
+      10000,
+      [
+        { rate: 0, grossCents: 10003 },
+        { rate: 0.16, grossCents: 9997 },
+      ],
+    ],
+    [
+      20000,
+      [
+        { rate: 0.16, grossCents: 15000 },
+        { rate: 0, grossCents: 4500 },
+      ],
+    ],
+    [
+      12345,
+      [
+        { rate: 0.08, grossCents: 5000 },
+        { rate: 0.16, grossCents: 7001 },
+        { rate: 0, grossCents: 1 },
+      ],
+    ],
+    [11000, [{ rate: 0.1, grossCents: 11000 }]],
+  ])('cobro %i con la mezcla %j: mismos netCents, taxCents y taxByRate que splitPaymentIvaByOrderRates', (cobro, g) => {
+    const nuevo = desglosePorTratamiento(cobro, mezclaDesdeTasas(g))
+    expect({ netCents: nuevo.netCents, taxCents: nuevo.taxCents, taxByRate: nuevo.taxByRate }).toEqual(
+      splitPaymentIvaByOrderRates(cobro, g),
+    )
+  })
+
+  it('tasasDe deja la forma de siempre (sin ceros) y sumarDesglose suma con signo', () => {
+    const d: DesglosePorTratamiento = { IVA_16: { baseCents: 100, ivaCents: 16 } }
+    sumarDesglose(d, { IVA_16: { baseCents: 50, ivaCents: 8 }, EXENTO: { baseCents: 30, ivaCents: 0 } }, -1)
+    expect(d).toEqual({ IVA_16: { baseCents: 50, ivaCents: 8 }, EXENTO: { baseCents: -30, ivaCents: 0 } })
+    expect(tasasDe({ IVA_16: { baseCents: 1, ivaCents: 0 }, IVA_8: { baseCents: 1, ivaCents: 3 } })).toEqual({ '0.08': 3 })
   })
 })

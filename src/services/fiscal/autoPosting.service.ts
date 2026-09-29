@@ -6,7 +6,7 @@ import { parseDbDateRange } from '../../utils/datetime'
 import { getMappings } from './accountMapping.service'
 import { resolveScopeOrNull } from './chartOfAccounts.service'
 import { postJournalEntry } from './journalEntry.service'
-import { splitPaymentIvaByOrderRates, grossByRateFromItems } from './ivaMath'
+import { splitPaymentIvaByOrderRates, grossByRateFromItems, mezclaDesdeTasas } from './ivaMath'
 import { paymentInFiscalScope } from './fiscalScope'
 import { generateCogsPolicyForVenue } from './cogs.service'
 import { ivaDeDevolucion, processorDataDeDevoluciones } from './deliveryFiscalDelta'
@@ -145,7 +145,9 @@ export function buildRefundLines(
   const rG = Math.abs(toCents(p.amount))
   const rT = Math.abs(toCents(p.tipAmount))
   const rF = Math.abs(toCents(p.feeAmount)) // normalmente 0: el procesador conserva la comisión
-  const { netCents, taxCents } = ivaDeDevolucion(p.id, rG, processorData, grossByRateForOrder(p.order?.items))
+  // Plan 4b: la mezcla por tasa de la póliza, como tratamientos (cada parte con su tasa: la misma aritmética), para que
+  // `ivaDeDevolucion` lea las dos formas del mapa congelado. La aritmética de la venta no se toca (pausada con IVA mixto, plan 4).
+  const { netCents, taxCents } = ivaDeDevolucion(p.id, rG, processorData, mezclaDesdeTasas(grossByRateForOrder(p.order?.items)))
   const isCash = p.method === PaymentMethod.CASH
   const refundCents = rG + rT - rF
   if (refundCents < 0) return null
