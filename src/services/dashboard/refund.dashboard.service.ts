@@ -18,6 +18,7 @@ import { generateAndStoreReceipt } from './receipt.dashboard.service'
 import { createRefundCommission } from './commission/commission-calculation.service'
 import { asegurarObligacionDeCostoNegativo, costearYProyectarReembolso } from '../payments/deferredTransactionCost.service'
 import { logAction } from './activity-log.service'
+import type { FiscalCongelado } from '../fiscal/deliveryFiscalDelta'
 import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
 import { computeTenderCommission } from './tenderType.dashboard.service'
 import {
@@ -436,7 +437,7 @@ export type WriteRefundInput = WriteRefundBase &
         provenance: 'PROVIDER_ADJUSTMENT'
         /** La generación del ajuste, que estampa el reconciliador. */
         generation: number
-        fiscalByRateCents: Record<string, number>
+        fiscalByRateCents: FiscalCongelado
       }
   )
 

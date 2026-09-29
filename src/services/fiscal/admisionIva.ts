@@ -13,8 +13,10 @@ export async function bloquearOrdenParaFacturar(
     JOIN "Venue" v ON v.id = o."venueId" WHERE o.id = ${orderId} FOR UPDATE OF o
   `
   if (!rows[0]) return null
+  // Plan 4b (Ruling 4b-R13): en orden de id, como la conciliación de Uber, que los toma FOR NO KEY UPDATE: sin orden, dos productos
+  // en común tomados cruzados darían 40P01.
   await tx.$queryRaw`SELECT p.id FROM "Product" p JOIN "OrderItem" oi ON oi."productId" = p.id
-    WHERE oi."orderId" = ${orderId} FOR SHARE OF p`
+    WHERE oi."orderId" = ${orderId} ORDER BY p.id FOR SHARE OF p`
   return rows[0]
 }
 
@@ -25,9 +27,7 @@ export async function bloquearOrdenesParaFacturar(tx: Prisma.TransactionClient, 
     const page = ids.slice(at, at + PAGE)
     await tx.$queryRaw`SELECT id FROM "Order" WHERE "venueId" = ${venueId} AND id = ANY(${page}::text[]) ORDER BY id ASC FOR UPDATE`
   }
-  // Lock products only after ALL orders: same relative order as individual admission/cancellation.
-  for (let at = 0; at < ids.length; at += PAGE) {
-    const page = ids.slice(at, at + PAGE)
-    await tx.$queryRaw`SELECT id FROM "Product" WHERE id IN (SELECT "productId" FROM "OrderItem" WHERE "orderId" = ANY(${page}::text[])) ORDER BY id ASC FOR SHARE`
-  }
+  // Products only after ALL orders (same relative order as individual admission/cancellation), in ONE ascending pass (plan 4b,
+  // Ruling 4b-R13): page by page, page 2 could ask for a lower id than one page 1 already holds and cross the Uber reconciliation.
+  await tx.$queryRaw`SELECT id FROM "Product" WHERE id IN (SELECT "productId" FROM "OrderItem" WHERE "orderId" = ANY(${ids}::text[])) ORDER BY id ASC FOR SHARE`
 }

@@ -7,10 +7,14 @@
  *
  * Cada caso usa una organización NUEVA (Ruling PF7): la marca de IVA mixto nunca se regresa a falso.
  */
-import { Prisma } from '@prisma/client'
+import { DeliveryProvider, OrderSource, Prisma } from '@prisma/client'
 
 import { ConflictError } from '@/errors/AppError'
 import { CatalogPublicationWatchdogJob } from '@/jobs/catalog-publication-watchdog.job'
+import { ingestDeliveryOrder } from '@/services/delivery-channels/core/deliveryOrderIngestion.service'
+import { reconcileDeliveryOrderFromProvider } from '@/services/delivery-channels/core/deliveryReconciliation.service'
+import type { NormalizedDeliveryOrder, NormalizedDeliveryPayment } from '@/services/delivery-channels/core/types'
+import { uberAdapter } from '@/services/delivery-channels/providers/uber-eats/uber.adapter'
 import { seedBaseChart } from '@/services/fiscal/chartOfAccounts.service'
 import { createManualEntry } from '@/services/fiscal/journalEntry.service'
 import { acquireCatalogMutationLock } from '@/services/master-catalog/catalogMutationLock.service'
@@ -213,6 +217,68 @@ const borrarOrden = async (orderId: string) => {
   await h().primary.order.delete({ where: { id: orderId } })
 }
 
+/** Un pedido de Uber REAL (la ingesta de siempre) en el negocio del catálogo; su renglón `a` vende el producto del catálogo.
+ *  `retirar()` hace que el proveedor conteste sin el renglón `b`. */
+async function pedidoDeUber(f: CatalogPublicationFixture) {
+  const link = await prisma.deliveryChannelLink.create({
+    data: { venueId: f.venueId, provider: DeliveryProvider.UBER_EATS, externalLocationId: `store-4b-${f.key}`, webhookSecret: 'x' },
+  })
+  const pago = (venta: string): NormalizedDeliveryPayment => ({
+    currency: 'MXN',
+    saleAmount: venta,
+    merchantFees: '0.00',
+    discountAmount: '0.00',
+    tipAmount: '0.00',
+    externallyPaidSale: venta,
+    externallyPaidTip: '0.00',
+    cashDueSale: '0.00',
+    cashDueTip: '0.00',
+  })
+  const renglon = (linea: string) => ({
+    externalId: `${linea}-${f.key}`,
+    lineId: linea,
+    name: `${linea} ${f.key}`,
+    quantity: 1,
+    unitPrice: '100.00',
+    total: '100.00',
+  })
+  const pedido: NormalizedDeliveryOrder = {
+    externalId: `4b-cat-${f.key}`,
+    displayId: '4B',
+    source: OrderSource.UBER_EATS,
+    items: [renglon('a'), renglon('b')],
+    payment: pago('200.00'),
+    customer: { name: 'Cliente plan 4b' },
+    raw: { fuente: 'test' },
+    placedAt: new Date(),
+  }
+  const { order } = await ingestDeliveryOrder(pedido, link)
+  await prisma.orderItem.updateMany({ where: { orderId: order.id, externalLineId: 'a' }, data: { productId: f.productId } })
+  const retirar = () => {
+    jest.spyOn(uberAdapter, 'fetchOrder').mockResolvedValue({ ...pedido, items: [renglon('a')], payment: pago('100.00') })
+    jest.spyOn(uberAdapter, 'normalizeOrder').mockImplementation(raw => raw as NormalizedDeliveryOrder)
+  }
+  return { orderId: order.id, retirar }
+}
+
+/** Lo que deja un pedido de Uber en el negocio (la limpieza del arnés no lo cubre): la lista de `reconciliacionDinero.test.ts`. */
+async function borrarReparto(venueId: string) {
+  const pagos = (await prisma.payment.findMany({ where: { venueId }, select: { id: true } })).map(p => p.id)
+  await prisma.deliveryLineAction.deleteMany({ where: { venueId } })
+  await prisma.activityLog.deleteMany({ where: { venueId } })
+  await prisma.venueTransaction.deleteMany({ where: { venueId } })
+  await prisma.paymentEffect.deleteMany({ where: { paymentId: { in: pagos } } })
+  await prisma.paymentAllocation.deleteMany({ where: { paymentId: { in: pagos } } })
+  await prisma.payment.deleteMany({ where: { venueId } })
+  await prisma.orderItemModifier.deleteMany({ where: { orderItem: { order: { venueId } } } })
+  await prisma.kdsOrder.deleteMany({ where: { venueId } })
+  await prisma.orderItem.deleteMany({ where: { order: { venueId } } })
+  await prisma.order.deleteMany({ where: { venueId } })
+  await prisma.deliveryChannelLink.deleteMany({ where: { venueId } })
+  await prisma.venueTenderTypeRevision.deleteMany({ where: { venueId } })
+  await prisma.venueTenderType.deleteMany({ where: { venueId } })
+}
+
 describe('una publicación de catálogo rechazada por IVA termina en ese momento, con su motivo (R12)', () => {
   it('plan 4b · regla C: un producto con la marca no cambia de IVA por catálogo; 409 y lote FAILED', async () => {
     const { f, publicar } = await negocioConCatalogo('iva-ajuste-delivery')
@@ -224,6 +290,42 @@ describe('una publicación de catálogo rechazada por IVA termina en ese momento
       expect(await producto(f)).toEqual({ ivaTratamiento: 'IVA_16', name: 'Local name' })
     } finally {
       await borrarOrden(orden)
+    }
+  })
+
+  // Review Focus 5b (Ruling 4b-R6): la aplicación fijó su foto ANTES del primer ajuste, y ese ajuste lo escribe la conciliación
+  // REAL (con su marca). La marca vive en la fila del producto: la foto vieja choca, no la esconde.
+  it('plan 4b · carrera D — la conciliación confirma el primer ajuste después de la foto de la aplicación; ésta choca (40001), reintenta, ve la marca y sale 409', async () => {
+    const { f, publicar } = await negocioConCatalogo('iva-ajuste-foto-vieja')
+    let publicacion: Promise<unknown> = Promise.resolve()
+    try {
+      const pedido = await pedidoDeUber(f)
+      const a0 = await publicar('0.0000', 'ajuste-foto-vieja')
+      // Como en el caso del posteo: la aplicación toma su intento (y con él su foto) y se forma antes de Organization.
+      const antesala = await retener(h().writerTwo, tx => acquireCatalogMutationLock(tx, f.organizationId))
+      try {
+        publicacion = desenlace(a0.confirmar())
+        await esperaDetrasDe(
+          antesala.pid,
+          '%pg_advisory_xact_lock%',
+          'la aplicación, con su foto ya fijada, formada antes de Organization',
+          60_000,
+          h().names.writerOne,
+        )
+        // La conciliación REAL: la aplicación todavía no tiene el producto; aquí se toma, se escribe el ajuste y se marca.
+        pedido.retirar()
+        expect(await reconcileDeliveryOrderFromProvider(pedido.orderId, { trigger: 'ROUTE' })).toMatchObject({ outcome: 'REFUNDED' })
+        expect((await prisma.product.findUniqueOrThrow({ where: { id: f.productId } })).ajusteDeliveryAlgunaVez).toBe(true)
+      } finally {
+        await antesala.soltar()
+      }
+      esElDeIva(await publicacion, 'IVA_PRODUCTO_CON_AJUSTE_DE_DELIVERY')
+      await terminado(f, a0, 'IVA_PRODUCTO_CON_AJUSTE_DE_DELIVERY')
+      expect(await producto(f)).toEqual({ ivaTratamiento: 'IVA_16', name: 'Local name' })
+      expect(huboUn40001()).toBe(true) // la fila del producto cambió después de su foto: chocó y se repitió
+    } finally {
+      await publicacion // ninguna aplicación queda viva detrás de la limpieza, ni con el rojo
+      await borrarReparto(f.venueId)
     }
   })
 

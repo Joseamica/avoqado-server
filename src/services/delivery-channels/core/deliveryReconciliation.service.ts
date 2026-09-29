@@ -6,7 +6,7 @@
  * pedido, ya no trae el renglón. Nunca con el 2xx del retiro, nunca con una foto que traiga
  * el llamador: por eso esta función no recibe foto. Entonces se escribe un REEMBOLSO PARCIAL
  * compensatorio (fila REFUND `PROVIDER_ADJUSTMENT`) con los deltas EXACTOS del bloque `payment`
- * —nunca sumando renglones— y el IVA por tasa como diferencia de composiciones, con los MISMOS
+ * —nunca sumando renglones— y la base y el IVA por tratamiento como diferencia de composiciones, con los MISMOS
  * helpers que la póliza de la venta. Todo en UNA transacción: retiro, reembolso, reprecio.
  *
  * Lo que NO hace, a propósito: cobrar de más cuando el proveedor SUBE venta o propina, ni
@@ -16,9 +16,9 @@
 import { OrderStatus, PaymentSource, Prisma, TransactionStatus } from '@prisma/client'
 
 import logger from '@/config/logger'
-import { grossByRateForOrder } from '@/services/fiscal/autoPosting.service'
-import { ivaEnLibrosPorTasa } from '@/services/fiscal/deliveryFiscalDelta'
-import { splitPaymentIvaByOrderRates } from '@/services/fiscal/ivaMath'
+import { congelarPorTratamiento, enLibrosPorTratamiento } from '@/services/fiscal/deliveryFiscalDelta'
+import { hayBloqueados, resolverTratamiento } from '@/services/fiscal/ivaDeRenglon'
+import { desglosePorTratamiento, mezclaPorTratamiento, sumarDesglose, tasasDe } from '@/services/fiscal/ivaMath'
 import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { bloquearCobroParaReembolso, writeRefundInTx } from '@/services/shared/writeRefundInTx'
 
@@ -130,11 +130,19 @@ export async function reconcileDeliveryOrderFromProvider(
 
     // Serializa con un reembolso del dashboard en vuelo: ése toma `Order FOR UPDATE` sin el candado de
     // reparto. Sin esto, Δ se calcula sin él y el MISMO renglón se compensa dos veces. Orden de
-    // candados: reparto → Order → Payment, el mismo de `writeRefundInTx`.
+    // candados: reparto → Order → Product → Payment.
     if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) return { outcome: 'READ_FAILED' as const }
     // Con la fila bloqueada: una cancelación que entró durante la lectura también frena el dinero.
     const vigente = await tx.order.findUnique({ where: { id: orderId }, select: { status: true } })
     if (vigente?.status === OrderStatus.CANCELLED) return { outcome: 'ORDER_CANCELLED' as const }
+    // Plan 4b (Ruling 4b-R5): los productos de la orden, FOR NO KEY UPDATE y en orden de id, ANTES de leer su IVA. Un cambio de
+    // IVA de uno de ellos espera a que este ajuste confirme —y la marca que se enciende abajo lo rechaza (regla C)— o confirma
+    // antes y aquí se lee el tratamiento nuevo. NKU y no FOR SHARE: este ajuste ESCRIBE la marca al final, y con FOR SHARE dos
+    // conciliaciones con un producto en común se atorarían al subir a escritura. Por id, como la facturación (Ruling 4b-R13).
+    const productos = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT p.id FROM "Product" p
+      WHERE p.id IN (SELECT oi."productId" FROM "OrderItem" oi WHERE oi."orderId" = ${orderId})
+      ORDER BY p.id FOR NO KEY UPDATE`
 
     const filas = await tx.orderItem.findMany({
       where: { orderId },
@@ -145,7 +153,8 @@ export async function reconcileDeliveryOrderFromProvider(
         total: true,
         unitPrice: true,
         discountAmount: true,
-        product: { select: { taxRate: true } },
+        ivaTratamiento: true,
+        product: { select: { taxRate: true, ivaTratamiento: true } },
       },
       take: LIMITE_FILAS + 1,
     })
@@ -284,37 +293,44 @@ export async function reconcileDeliveryOrderFromProvider(
       return { outcome: 'BLOCKED_INCREASE' as const }
     }
 
-    // ── 4. IVA por tasa: lo que HOY está en libros (venta − cada devolución, manual o del proveedor,
-    // como la póliza las postea) − el IVA de la composición superviviente. Restar composiciones
-    // cobradas dejaba IVA residual en cuanto un reembolso manual entraba entre dos retiros (P1-1).
-    // Sobrevive lo que la foto fresca TRAE, con el MISMO mapeo de campos que la póliza de la venta.
+    // ── 4. Base e IVA por TRATAMIENTO (plan 4b): lo que HOY está en libros (venta − cada devolución, manual o del proveedor en
+    // cualquiera de las dos formas de su mapa) − lo de la composición superviviente, cada renglón con su tratamiento resuelto
+    // (sellado > producto > 16 %). Restar composiciones cobradas dejaba IVA residual en cuanto un reembolso manual entraba
+    // entre dos retiros (P1-1). Sobrevive lo que la foto fresca TRAE, con el MISMO mapeo de campos que el estado de resultados.
     const superviviente = filas.filter(f => presentes.has(f.externalLineId!))
-    const enLibros = ivaEnLibrosPorTasa(
+    const delta = enLibrosPorTratamiento(
       cobros.map(c => ({ id: c.id, type: c.type, amountCents: centavos(c.amount), processorData: c.processorData })),
-      grossByRateForOrder(filas),
+      mezclaPorTratamiento(filas),
     )
     // Lo que queda en libros tras compensar: la venta de la foto menos lo que los independientes ya sacaron.
     const quedaEnLibros = Math.max(0, pagadoVenta - dVenta - independienteVenta)
-    const ivaSuperviviente = splitPaymentIvaByOrderRates(quedaEnLibros, grossByRateForOrder(superviviente)).taxByRate
-    const fiscal: Record<string, number> = {}
-    for (const tasa of new Set([...Object.keys(enLibros), ...Object.keys(ivaSuperviviente)])) {
-      const d = (enLibros[tasa] ?? 0) - (ivaSuperviviente[tasa] ?? 0)
-      if (d !== 0) fiscal[tasa] = d
-    }
-    // Deriva de redondeo (re-revisión final, Minor): cada devolución se redondea por separado e
-    // IVA(S) − IVA(R) ≠ IVA(S − R), así que queda hasta 1 centavo por tasa. Se absorbe —con log— sólo
-    // donde bloquearía en falso: con Δventa = 0 cualquier diferencia, con Δventa > 0 un componente
-    // negativo. Más de 1 centavo NO es deriva: sigue a FISCAL_PENDING.
+    sumarDesglose(delta, desglosePorTratamiento(quedaEnLibros, mezclaPorTratamiento(superviviente)).porTratamiento, -1)
+    // Deriva de redondeo (re-revisión final, Minor): cada devolución se redondea por separado e IVA(S) − IVA(R) ≠ IVA(S − R),
+    // así que queda hasta 1 centavo por tasa. Se absorbe —con log— sólo donde bloquearía en falso: con Δventa = 0 cualquier
+    // diferencia, con Δventa > 0 un componente negativo. Más de 1 centavo NO es deriva: sigue a FISCAL_PENDING. El centavo
+    // absorbido lo recoge la base al congelar.
     const deriva: Record<string, number> = {}
-    for (const [tasa, v] of Object.entries(fiscal)) {
-      if (Math.abs(v) === 1 && (dVenta === 0 || v < 0)) {
-        deriva[tasa] = v
-        delete fiscal[tasa]
+    for (const [t, v] of Object.entries(delta) as [string, { baseCents: number; ivaCents: number }][]) {
+      if (Math.abs(v.ivaCents) === 1 && (dVenta === 0 || v.ivaCents < 0)) {
+        deriva[t] = v.ivaCents
+        v.ivaCents = 0
       }
     }
     if (Object.keys(deriva).length > 0)
       logger.warn('[Delivery] deriva de redondeo de 1 centavo absorbida en el IVA del retiro', { orderId, deriva })
+    // El IVA por tasa de siempre: con él se decide y va al rastro del bloqueo, igual que antes del plan 4b (Ruling 4b-R7).
+    const fiscal = tasasDe(delta)
     const ivaDevuelto = Object.values(fiscal).reduce((s, v) => s + v, 0)
+    // Plan 4b (Rulings 4b-R12 y 4b-R4): un ajuste sólo congela un IVA que ya no puede moverse. Un renglón SELLADO con un
+    // tratamiento distinto del que hoy da su producto volvería a seguir al producto al liberarse su factura, y lo congelado
+    // dejaría de cuadrar con la venta; un BLOQUEADO no tiene tasa de catálogo que congelar. Toda la orden: el reparto la mezcla.
+    const delProducto = (f: (typeof filas)[number]) =>
+      resolverTratamiento({ selladoIva: null, productoIva: f.product?.ivaTratamiento, tieneProducto: f.product != null })
+    const noCongelable = filas.some(f => f.ivaTratamiento !== null && f.ivaTratamiento !== delProducto(f))
+      ? 'renglón sellado por una factura con un IVA distinto del de su producto'
+      : hayBloqueados(filas.map(f => f.ivaTratamiento ?? delProducto(f)))
+        ? 'renglón con IVA bloqueado (objeto de impuesto 03/04)'
+        : null
 
     const aFiscalPendiente = async (motivo: string) => {
       await tx.deliveryLineAction.updateMany({
@@ -341,6 +357,13 @@ export async function reconcileDeliveryOrderFromProvider(
       // que quizá va detrás del aviso — quien la recibe no tiene que volver a leer (P1-2).
       if (acreditadas.length === 0) return { outcome: foto.providerClosed ? ('PROVIDER_CLOSED' as const) : ('NO_ACTIONS' as const) }
       if (Object.values(fiscal).some(v => v !== 0)) return aFiscalPendiente('retiro sin movimiento de dinero pero con IVA reclasificado')
+      // Plan 4b (Ruling 4b-R7, auditoría P1.3): sin dinero tampoco se mueve BASE de un tratamiento a otro (tasa 0 ↔ exento ↔ no
+      // objeto). Más de 1 centavo, como la deriva del IVA; con un solo tratamiento —todo al 16 %— nada sube en uno y baja en otro.
+      const bases = Object.values(delta).map(v => v?.baseCents ?? 0)
+      const sube = bases.reduce((s, b) => s + Math.max(b, 0), 0)
+      const baja = bases.reduce((s, b) => s + Math.max(-b, 0), 0)
+      if (Math.min(sube, baja) > 1)
+        return aFiscalPendiente('retiro sin movimiento de dinero pero con base reclasificada entre tratamientos')
       await tx.deliveryLineAction.updateMany({
         where: { id: { in: acreditadas.map(a => a.id) }, settlement: 'ACCREDITED' },
         data: { settlement: 'NO_DELTA' },
@@ -356,6 +379,8 @@ export async function reconcileDeliveryOrderFromProvider(
       return { outcome: 'NO_DELTA' as const }
     }
 
+    // Sólo se congela al escribir un reembolso; sin reembolso no hay nada que se desfase.
+    if (noCongelable) return aFiscalPendiente(noCongelable)
     // Q1bis: un IVA devuelto negativo por tasa, o fuera de [0, Δventa], no existe como REFUND.
     if (Object.values(fiscal).some(v => v < 0) || ivaDevuelto < 0 || ivaDevuelto > dVenta) {
       return aFiscalPendiente('el reparto de IVA del retiro no cabe en un reembolso')
@@ -407,7 +432,7 @@ export async function reconcileDeliveryOrderFromProvider(
         quantity: porId.get(a.orderItemId)!.quantity,
         amountCents: centavos(porId.get(a.orderItemId)!.total),
       })),
-      fiscalByRateCents: fiscal,
+      fiscalByRateCents: congelarPorTratamiento(delta, dVenta),
       generation,
       reason: 'DELIVERY_ITEM_REMOVED',
       staffId: null,
@@ -429,6 +454,9 @@ export async function reconcileDeliveryOrderFromProvider(
       })
       throw new Error(`reconciliación: la llave dlr:${orderId}:${generation} es un replay con Δ nuevo`)
     }
+    // Plan 4b (Ruling 4b-R6): la marca de la regla C, en ESTA transacción. Filas ya tomadas (NKU arriba); no dispara ningún trigger.
+    await tx.$executeRaw`UPDATE "Product" SET "ajusteDeliveryAlgunaVez" = true
+      WHERE id = ANY(${productos.map(p => p.id)}::text[]) AND NOT "ajusteDeliveryAlgunaVez"`
     await tx.deliveryLineAction.updateMany({
       where: { id: { in: acreditadas.map(a => a.id) }, settlement: 'ACCREDITED' },
       data: { settlement: 'REFUNDED', refundPaymentId },

@@ -3,7 +3,7 @@
  * reparto que se congela, por tratamiento.
  */
 import logger from '@/config/logger'
-import { ivaDeDevolucion } from '../../../../src/services/fiscal/deliveryFiscalDelta'
+import { congelarPorTratamiento, enLibrosPorTratamiento, ivaDeDevolucion } from '../../../../src/services/fiscal/deliveryFiscalDelta'
 import type { MezclaPorTratamiento } from '../../../../src/services/fiscal/ivaMath'
 
 describe('ivaDeDevolucion — el 🚨 sólo lo da la póliza', () => {
@@ -81,8 +81,65 @@ describe('plan 4b · ivaDeDevolucion lee las DOS formas del mapa congelado', () 
     ['tratamiento sin tasa de catálogo (BLOQUEADO)', { v: 2, porTratamiento: { BLOQUEADO_03: { baseCents: 9310, ivaCents: 690 } } }],
     ['montos no enteros', { v: 2, porTratamiento: { IVA_16: { baseCents: 9309.5, ivaCents: 690.5 } } }],
     ['IVA negativo', { v: 2, porTratamiento: { IVA_16: { baseCents: 10001, ivaCents: -1 } } }],
+    // Un tratamiento sin tasa no causa IVA: con IVA, `tasasDe` inventaría la llave "0" que el contrato dice que nunca aparece.
+    ['tasa 0 con IVA', { v: 2, porTratamiento: { IVA_0: { baseCents: 9310, ivaCents: 690 } } }],
+    ['exento con IVA', { v: 2, porTratamiento: { EXENTO: { baseCents: 9310, ivaCents: 690 } } }],
+    ['no objeto con IVA', { v: 2, porTratamiento: { NO_OBJETO: { baseCents: 9310, ivaCents: 690 } } }],
+    // Una versión que este servidor no conoce no se lee como un mapa viejo de tasas (su `v` contaría como IVA).
+    ['versión desconocida', { v: 3, '0.16': 690 }],
   ])('forma nueva inválida (%s): 🚨 con el id y la mezcla de la orden', (_caso, f) => {
     expect(ivaDeDevolucion('bad', 10000, { provenance: 'PROVIDER_ADJUSTMENT', fiscalByRateCents: f }, mezcla).taxCents).toBe(690)
     expect((logger.error as jest.Mock).mock.calls.map(([m]) => String(m))).toEqual([expect.stringMatching(/🚨.*bad/)])
+  })
+})
+
+describe('plan 4b · el mapa que se congela en un ajuste nuevo', () => {
+  it('con todo al 16 %, la base es la venta devuelta menos el IVA (lo que la forma vieja daba implícito)', () => {
+    expect(congelarPorTratamiento({ IVA_16: { baseCents: 2, ivaCents: 0 } }, 1)).toEqual({
+      v: 2,
+      porTratamiento: { IVA_16: { baseCents: 1, ivaCents: 0 } },
+    })
+    expect(congelarPorTratamiento({ IVA_16: { baseCents: 8620, ivaCents: 1380 } }, 10000)).toEqual({
+      v: 2,
+      porTratamiento: { IVA_16: { baseCents: 8620, ivaCents: 1380 } },
+    })
+  })
+
+  it('quita lo que no devuelve nada y manda el resto a la base del tratamiento de mayor importe', () => {
+    expect(
+      congelarPorTratamiento(
+        { IVA_16: { baseCents: 0, ivaCents: 0 }, IVA_0: { baseCents: 4999, ivaCents: 0 }, EXENTO: { baseCents: 10, ivaCents: 0 } },
+        5010,
+      ),
+    ).toEqual({ v: 2, porTratamiento: { IVA_0: { baseCents: 5000, ivaCents: 0 }, EXENTO: { baseCents: 10, ivaCents: 0 } } })
+  })
+
+  it('sin nada que repartir y con venta devuelta: todo a la base de IVA_16', () => {
+    expect(congelarPorTratamiento({}, 3)).toEqual({ v: 2, porTratamiento: { IVA_16: { baseCents: 3, ivaCents: 0 } } })
+  })
+
+  it('enLibrosPorTratamiento: venta − devoluciones, cada una en su forma', () => {
+    const mezcla: MezclaPorTratamiento = [
+      { tratamiento: 'IVA_16', tasa: 0.16, grossCents: 10000 },
+      { tratamiento: 'IVA_0', tasa: 0, grossCents: 10000 },
+    ]
+    expect(
+      enLibrosPorTratamiento(
+        [
+          { id: 'v', type: 'REGULAR', amountCents: 20000, processorData: null },
+          {
+            id: 'a',
+            type: 'REFUND',
+            amountCents: -10000,
+            processorData: {
+              provenance: 'PROVIDER_ADJUSTMENT',
+              fiscalByRateCents: { v: 2, porTratamiento: { IVA_0: { baseCents: 10000, ivaCents: 0 } } },
+            },
+          },
+          { id: 'm', type: 'REFUND', amountCents: -2000, processorData: { provenance: 'MANUAL' } },
+        ],
+        mezcla,
+      ),
+    ).toEqual({ IVA_16: { baseCents: 7759, ivaCents: 1241 }, IVA_0: { baseCents: -1000, ivaCents: 0 } })
   })
 })

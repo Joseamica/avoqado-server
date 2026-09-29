@@ -8,8 +8,7 @@ import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import {
   desglosePorTratamiento,
-  mezclaDesdeTasas,
-  splitPaymentIvaByOrderRates,
+  sumarDesglose,
   tasasDe,
   type DesgloseDeCobro,
   type DesglosePorTratamiento,
@@ -31,6 +30,8 @@ export type FiscalCongelado = FiscalByRateCents | FiscalPorTratamiento
 
 /** Los tratamientos que un mapa v2 admite: los de catálogo. Un BLOQUEADO no se congela (Ruling 4b-R4). */
 const TRATAMIENTOS_CONGELABLES: readonly string[] = ['IVA_16', 'IVA_8', 'IVA_0', 'EXENTO', 'NO_OBJETO']
+/** Los que no causan IVA: en un mapa v2 su IVA es cero, o `tasasDe` inventaría la llave "0" que el contrato no tiene. */
+const SIN_IVA: readonly string[] = ['IVA_0', 'EXENTO', 'NO_OBJETO']
 
 /**
  * El reparto congelado de un ajuste del proveedor, leído en cualquiera de sus dos formas; `null` si no es válido.
@@ -52,12 +53,15 @@ function leerCongelado(
     for (const [t, v] of Object.entries(p as Record<string, unknown>)) {
       const e = v as { baseCents?: unknown; ivaCents?: unknown } | null
       if (!TRATAMIENTOS_CONGELABLES.includes(t) || !e || !Number.isInteger(e.baseCents) || !Number.isInteger(e.ivaCents)) return null
+      if (SIN_IVA.includes(t) && e.ivaCents !== 0) return null
       const valor = { baseCents: e.baseCents as number, ivaCents: e.ivaCents as number }
       porTratamiento[t as IvaTratamiento] = valor
       suma += valor.baseCents + valor.ivaCents
     }
     return suma === salesCents ? { porTratamiento, taxByRate: tasasDe(porTratamiento) } : null
   }
+  // Una versión que este servidor no conoce no es un mapa viejo de tasas: su `v` se sumaría como IVA.
+  if ('v' in x) return null
   if (!Object.values(x).every(Number.isInteger)) return null
   const taxByRate = { ...(x as FiscalByRateCents) }
   const iva8 = taxByRate['0.08'] ?? 0
@@ -107,26 +111,46 @@ export function ivaDeDevolucion(
 }
 
 /**
- * IVA por tasa QUE HOY ESTÁ EN LIBROS para los cobros de una orden: el de cada venta (como la póliza,
- * `splitPaymentIvaByOrderRates` con la mezcla de la orden) menos el de cada devolución (`ivaDeDevolucion`,
- * la misma regla de la póliza: mezcla para las manuales, `fiscalByRateCents` para los ajustes del
- * proveedor). Es el saldo del que un retiro nuevo descuenta — NO la composición cobrada, que deja de
- * representar el IVA registrado en cuanto entra una devolución manual (auditoría final de Codex, P1-1).
+ * Base e IVA por tratamiento QUE HOY ESTÁN EN LIBROS para los cobros de una orden: cada venta con la mezcla de la orden (como
+ * el estado de resultados) menos cada devolución (`ivaDeDevolucion`: mezcla para las manuales, su reparto congelado —en
+ * cualquiera de sus dos formas— para los ajustes del proveedor). Es el saldo del que un retiro nuevo descuenta.
  */
-export function ivaEnLibrosPorTasa(
+export function enLibrosPorTratamiento(
   cobros: { id: string; type: string | null; amountCents: number; processorData: unknown }[],
-  grossByRate: { rate: number; grossCents: number }[],
-): FiscalByRateCents {
-  const saldo: FiscalByRateCents = {}
+  mezcla: MezclaPorTratamiento,
+): DesglosePorTratamiento {
+  const saldo: DesglosePorTratamiento = {}
   for (const c of cobros) {
     const g = Math.abs(c.amountCents)
     const devolucion = c.type === 'REFUND'
-    const { taxByRate } = devolucion
-      ? ivaDeDevolucion(c.id, g, c.processorData, mezclaDesdeTasas(grossByRate), { avisar: false })
-      : splitPaymentIvaByOrderRates(g, grossByRate)
-    for (const [tasa, v] of Object.entries(taxByRate)) saldo[tasa] = (saldo[tasa] ?? 0) + (devolucion ? -v : v)
+    const { porTratamiento } = devolucion
+      ? ivaDeDevolucion(c.id, g, c.processorData, mezcla, { avisar: false })
+      : desglosePorTratamiento(g, mezcla)
+    sumarDesglose(saldo, porTratamiento, devolucion ? -1 : 1)
   }
   return saldo
+}
+
+/**
+ * El reparto que se congela en un ajuste nuevo (Ruling 4b-R2): los tratamientos con algo que devolver, y la base ajustada para
+ * que base + IVA sume EXACTAMENTE la venta devuelta (la forma vieja lo daba implícito). El resto —el centavo de deriva que el
+ * conciliador quitó del IVA, o lo que ya no está en libros porque un reembolso independiente se lo llevó— va a la base del
+ * tratamiento de mayor importe (empate: el primero), como el residual de `allocateByWeights`. Nunca recibe un BLOQUEADO: la
+ * conciliación no congela esas órdenes (Ruling 4b-R4).
+ */
+export function congelarPorTratamiento(delta: DesglosePorTratamiento, ventaCents: number): FiscalPorTratamiento {
+  type Entrada = [IvaTratamiento, { baseCents: number; ivaCents: number }]
+  const porTratamiento: DesglosePorTratamiento = {}
+  for (const [t, v] of Object.entries(delta) as Entrada[]) if (v.baseCents !== 0 || v.ivaCents !== 0) porTratamiento[t] = { ...v }
+  const importe = (v: { baseCents: number; ivaCents: number }) => v.baseCents + v.ivaCents
+  const vivos = Object.entries(porTratamiento) as Entrada[]
+  const faltante = ventaCents - vivos.reduce((s, [, v]) => s + importe(v), 0)
+  if (faltante !== 0) {
+    const mayor = vivos.reduce<Entrada | null>((m, e) => (!m || importe(e[1]) > importe(m[1]) ? e : m), null)
+    if (mayor) mayor[1].baseCents += faltante
+    else porTratamiento.IVA_16 = { baseCents: faltante, ivaCents: 0 }
+  }
+  return { v: 2, porTratamiento }
 }
 
 /**

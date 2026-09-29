@@ -1804,7 +1804,12 @@ export async function aplicarCancelacion(
       UNION SELECT "orderId" FROM "CfdiGlobalOrden" WHERE "cfdiId" = ${cfdiId}
       ORDER BY "orderId"
     `
-    for (const order of orders) await bloquearOrdenParaFacturar(tx, order.orderId)
+    // Plan 4b (Ruling 4b-R13): TODAS las órdenes antes del primer producto, en una sola llamada, como la sustitución (`:769`).
+    // Orden por orden (O1 → sus productos → O2) se cruzaba con la conciliación de Uber: ella retiene O2 y pide el producto que
+    // esta cancelación ya tomó con O1 ⇒ 40P01. `orders` ya llega sin repetidos y ordenado (UNION + ORDER BY).
+    const emitido = await tx.cfdi.findUnique({ where: { id: cfdiId }, select: { venueId: true } })
+    const ids = orders.map(o => o.orderId)
+    if (emitido) await bloquearOrdenesParaFacturar(tx, ids, emitido.venueId)
     const cancelWhere: Prisma.CfdiWhereInput =
       origen === 'PENDIENTE'
         ? { cancelStatus: 'REQUESTED' }

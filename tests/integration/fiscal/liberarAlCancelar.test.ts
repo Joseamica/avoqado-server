@@ -263,15 +263,18 @@ describe('liberar sellos al confirmar cancelación', () => {
     expect((await currentItem(o.items[0].id)).ivaTratamiento).toBeNull()
     expect(await row(o.id)).toMatchObject({ status: 'CANCELLED', cancelStatus: 'ACCEPTED' })
   })
-  it('global sin orderId bloquea todas las órdenes del manifiesto en orden antes de liberar', async () => {
+  // Plan 4b (Ruling 4b-R13): TODAS las órdenes antes del primer producto. La conciliación de Uber toma el producto con
+  // FOR NO KEY UPDATE; si la cancelación lo tuviera mientras espera la orden que retiene la conciliación, habría 40P01.
+  it('global sin orderId bloquea todas las órdenes del manifiesto, en orden, antes del producto que comparten y antes de liberar', async () => {
     const { o, c } = await fixtureFor('directa')
-    const second = await order()
+    const second = await order() // el MISMO producto del fixture: las dos órdenes lo comparten
     await prisma.cfdi.update({ where: { id: c.id }, data: { isGlobal: true, orderId: null } })
     await prisma.cfdiGlobalOrden.createMany({ data: [second.id, o.id].map(orderId => ({ cfdiId: c.id, orderId, huella: 'test' })) })
     await prisma.$transaction(tx =>
       sellosIva.sellarRenglones(tx, { cfdiId: c.id, intento: 1, renglones: [{ orderItemId: second.items[0].id, tratamiento: 'IVA_16' }] }),
     )
-    const lock = jest.spyOn(admisionIva, 'bloquearOrdenParaFacturar')
+    const [, mayor] = [o.id, second.id].sort()
+    const lock = jest.spyOn(admisionIva, 'bloquearOrdenesParaFacturar')
     let unlock!: () => void
     let locked!: () => void
     const held = new Promise<void>(resolve => {
@@ -280,9 +283,10 @@ describe('liberar sellos al confirmar cancelación', () => {
     const gate = new Promise<void>(resolve => {
       unlock = resolve
     })
+    // Lo que tiene tomado una conciliación de Uber sobre la otra orden de la global.
     const holder = prisma.$transaction(
       async tx => {
-        await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${o.id} FOR UPDATE`
+        await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${mayor} FOR UPDATE`
         locked()
         await gate
       },
@@ -294,11 +298,13 @@ describe('liberar sellos al confirmar cancelación', () => {
       let waiting = false
       for (let tries = 0; tries < 200 && !waiting; tries++) {
         const waiters = await prisma.$queryRaw<Array<{ n: number }>>`SELECT COUNT(*)::int AS n FROM pg_stat_activity
-          WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FOR UPDATE OF o%'`
+          WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%"Order"%FOR UPDATE%'`
         waiting = waiters[0].n > 0
         if (!waiting) await new Promise(resolve => setTimeout(resolve, 10))
       }
       expect(waiting).toBe(true)
+      // Detenida en la orden mayor, la cancelación no retiene el producto que comparten (con el bucle orden por orden: 55P03 aquí).
+      await prisma.$transaction(tx => tx.$queryRaw`SELECT id FROM "Product" WHERE id = ${productId} FOR NO KEY UPDATE NOWAIT`)
       expect(await seals(c.id)).toBe(2)
       expect((await row(o.id)).status).toBe('STAMPED')
     } finally {
@@ -306,7 +312,7 @@ describe('liberar sellos al confirmar cancelación', () => {
       await holder
       await cancelling
     }
-    expect(lock.mock.calls.map(call => call[1])).toEqual([o.id, second.id].sort())
+    expect(lock.mock.calls.map(call => [call[1], call[2]])).toEqual([[[o.id, second.id].sort(), venueId]])
     expect(await seals(c.id)).toBe(0)
     expect((await currentItem(o.items[0].id)).ivaTratamiento).toBeNull()
     expect((await currentItem(second.items[0].id)).ivaTratamiento).toBeNull()
