@@ -5,6 +5,7 @@ import { deleteFileFromStorage } from '../storage.service'
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
 import { logAction } from './activity-log.service'
+import { ensureQuantityInventoryRow } from './quantityInventoryRow'
 import { areUnitsCompatible, convertUnit } from '../../utils/unitConversion'
 import type { CatalogActor } from '../../types/master-catalog'
 import {
@@ -868,7 +869,7 @@ export async function updateProduct(
       categoryId: productData.categoryId,
       printStationId: productData.printStationId,
     })
-    return tx.product.update({
+    const updated = await tx.product.update({
       where: { id: productId },
       data: updateData,
       include: {
@@ -880,6 +881,8 @@ export async function updateProduct(
         },
       },
     })
+    await ensureQuantityInventoryRow(tx, updated)
+    return updated
   })
 
   // 🔌 REAL-TIME: Broadcast product update via Socket.IO
