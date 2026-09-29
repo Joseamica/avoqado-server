@@ -12,6 +12,7 @@
 jest.unmock('@/services/dashboard/activity-log.service')
 import { JournalEntrySource, Prisma } from '@prisma/client'
 import type { Request, Response } from 'express'
+import { Client } from 'pg'
 
 import { transferVenue } from '@/controllers/dashboard/venues.superadmin.controller'
 import { ConflictError } from '@/errors/AppError'
@@ -20,7 +21,7 @@ import { seedDefaultMappings } from '@/services/fiscal/accountMapping.service'
 import { bloquearOrdenParaFacturar, tomarAdmisionCompartida } from '@/services/fiscal/admisionIva'
 import { generatePoliciesForVenue } from '@/services/fiscal/autoPosting.service'
 import { seedBaseChart } from '@/services/fiscal/chartOfAccounts.service'
-import { postJournalEntry } from '@/services/fiscal/journalEntry.service'
+import { createManualEntry, postJournalEntry } from '@/services/fiscal/journalEntry.service'
 import { sellarRenglones } from '@/services/fiscal/sellosIva'
 import prisma from '@/utils/prismaClient'
 import {
@@ -212,6 +213,38 @@ describe('la barrera del traslado: ni mezcla IVA mixto con contabilidad ni dupli
 
     await expect(directo(x.venueId, limpio.organizationId)).resolves.toBe(1)
     expect(await marcada(limpio.organizationId)).toBe(true)
+  })
+
+  // Ola 2 · B (Codex P1): en REPEATABLE READ la foto es de la primera sentencia y no hay SSI; el posteo sólo BLOQUEA el
+  // negocio y la organización, así que el traslado crudo toma sus candados sin error y su EXISTS (foto vieja) no ve la póliza.
+  it('un traslado crudo en REPEATABLE READ con la foto de ANTES de la primera póliza del negocio sale IVA_REPEATABLE_READ_NO_ADMITIDO; sin cambiar de organización sigue permitido', async () => {
+    const x = await nuevoNegocio()
+    const limpio = await nuevoNegocio({ contabilidad: false })
+    const lines = await lineasDeVenta(x.organizationId, x.rfc)
+    const rr = new Client({ connectionString: process.env.TEST_DATABASE_URL })
+    await rr.connect()
+    let r: unknown = null
+    try {
+      await rr.query('BEGIN ISOLATION LEVEL REPEATABLE READ')
+      await rr.query('SELECT 1 FROM "Organization" LIMIT 1') // la foto
+      await createManualEntry(x.venueId, { date: '2026-06-15', concept: 'Primera póliza del negocio', lines }, { staffId: null })
+      // Lo que no cambia de organización ni siquiera llega a la barrera.
+      await expect(rr.query('UPDATE "Venue" SET "organizationId" = "organizationId" WHERE id = $1', [x.venueId])).resolves.toMatchObject({
+        rowCount: 1,
+      })
+      // Sin la barrera, este UPDATE pasa y el COMMIT deja el negocio con su póliza en la organización limpia.
+      r = await rr.query('UPDATE "Venue" SET "organizationId" = $1 WHERE id = $2', [limpio.organizationId, x.venueId]).then(
+        async ok => (await rr.query('COMMIT'), { confirmado: ok.rowCount }),
+        (e: unknown) => e,
+      )
+    } finally {
+      await rr.query('ROLLBACK').catch(() => undefined)
+      await rr.end()
+    }
+
+    expect(r).toMatchObject({ code: 'P0001', message: 'IVA_REPEATABLE_READ_NO_ADMITIDO' })
+    expect(await organizacionDe(x.venueId)).toBe(x.organizationId)
+    expect(await prisma.journalEntry.count({ where: { venueId: x.venueId } })).toBe(1)
   })
 
   it('la respuesta conserva su forma de hoy con el negocio leído DENTRO de la transacción, y deja su bitácora VENUE_TRANSFERRED', async () => {

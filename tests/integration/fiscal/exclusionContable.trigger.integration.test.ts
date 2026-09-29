@@ -242,6 +242,71 @@ describe('el sello marca, la marca no se apaga y la inicialización la enciende'
   })
 })
 
+// Ola 2 · B (Codex P1): en REPEATABLE READ la foto es de la primera sentencia y no hay SSI. El posteo sólo BLOQUEA la
+// organización y el negocio (FOR SHARE, no los actualiza), así que un UPDATE crudo en RR toma sus candados sin error y sus
+// EXISTS (foto vieja) no ven la póliza recién confirmada. La base no lo admite. READ COMMITTED sigue saliendo
+// IVA_CONTABILIDAD_CON_HISTORIA (las pruebas de arriba) y lo que no cambia a ≠ 16 % sigue permitido en RR.
+describe('SQL directo en REPEATABLE READ: su foto vieja no cuela un producto ≠ 16 % junto a una póliza (ola 2 · B)', () => {
+  const NO_ADMITIDO = { code: 'P0001', message: 'IVA_REPEATABLE_READ_NO_ADMITIDO' }
+  /** Una transacción cruda en REPEATABLE READ con su foto ya fijada por la primera sentencia. */
+  async function fotoRepeatableRead() {
+    const c = new Client({ connectionString: process.env.TEST_DATABASE_URL })
+    await c.connect()
+    await c.query('BEGIN ISOLATION LEVEL REPEATABLE READ')
+    await c.query('SELECT 1 FROM "Organization" LIMIT 1')
+    return c
+  }
+  const cerrar = async (c: Client) => {
+    await c.query('ROLLBACK').catch(() => undefined)
+    await c.end()
+  }
+
+  it('la foto se fija, un posteo real confirma la primera póliza y el cambio crudo a IVA_0 sale IVA_REPEATABLE_READ_NO_ADMITIDO', async () => {
+    const x = await nuevoNegocio()
+    const { productId } = await conProducto(x)
+    const lines = await lineasDeVenta(x.organizationId, x.rfc)
+    const rr = await fotoRepeatableRead()
+    let r: unknown = null
+    try {
+      await createManualEntry(x.venueId, { date: '2026-06-15', concept: 'Primera póliza', lines }, { staffId: null })
+      // Sin la barrera, este UPDATE pasa y el COMMIT confirma producto ≠ 16 % + marca + póliza.
+      r = await rr.query(`UPDATE "Product" SET "ivaTratamiento" = 'IVA_0' WHERE id = $1`, [productId]).then(
+        async ok => (await rr.query('COMMIT'), { confirmado: ok.rowCount }),
+        (e: unknown) => e,
+      )
+    } finally {
+      await cerrar(rr)
+    }
+
+    expect(r).toMatchObject(NO_ADMITIDO)
+    expect(await polizas(x.organizationId)).toBe(1)
+    expect(await tratamiento(productId)).toBe('IVA_16')
+    expect(await marcada(x.organizationId)).toBe(false)
+  })
+
+  it('lo que NO cambia a ≠ 16 % sigue permitido en RR: reenviar la tupla de un heredado ≠ 16 % y regresarlo a IVA_16', async () => {
+    const x = await nuevoNegocio({ contabilidad: false })
+    const { productId } = await conProducto(x)
+    await updateProduct(x.venueId, productId, { ivaTratamiento: 'IVA_0' }, actor()) // sin contabilidad: se permite y marca
+    const rr = await fotoRepeatableRead()
+    try {
+      await rr.query(`UPDATE "Product" SET "taxRate" = "taxRate", "objetoImp" = "objetoImp", name = 'Grano RR' WHERE id = $1`, [productId])
+      expect(await rr.query(`SELECT "ivaTratamiento" FROM "Product" WHERE id = $1`, [productId])).toMatchObject({
+        rows: [{ ivaTratamiento: 'IVA_0' }],
+      })
+      await rr.query(`UPDATE "Product" SET "ivaTratamiento" = 'IVA_16' WHERE id = $1`, [productId])
+      await rr.query('COMMIT')
+    } finally {
+      await cerrar(rr)
+    }
+
+    expect(await prisma.product.findUniqueOrThrow({ where: { id: productId }, select: { name: true, ivaTratamiento: true } })).toEqual({
+      name: 'Grano RR',
+      ivaTratamiento: 'IVA_16',
+    })
+  })
+})
+
 describe('carreras con las funciones REALES: bloqueador, espera probada en pg_stat_activity y soltar', () => {
   let harness: CatalogPublicationIntegrationHarness | null = null
   const fixtures: CatalogPublicationFixture[] = []
