@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { createCatalogPublicationConfirmationService } from '@/services/master-catalog/catalogPublicationConfirmation.service'
 import { hashCanonicalJsonV1 } from '@/services/master-catalog/catalogHash.service'
+import logger from '@/config/logger'
 
 const NOW = new Date('2026-08-09T12:00:00.000Z')
 const context = {
@@ -577,4 +578,23 @@ describe('R12 · IVA por producto: la aplicación reintenta el choque y la barre
       data: terminal,
     })
   })
+
+  it.each([
+    ['un error que no se reintenta', () => [new Error('se cayó la conexión')], 3],
+    ['tres choques seguidos', () => [choque(), choque(), choque()], 5],
+  ])(
+    'si la transacción de cierre falla (%s), sale su error tal cual y lo avisa en el log con el lote, el intento y la barrera',
+    async (_caso, errores, transacciones) => {
+      const h = harness()
+      const pasos = errores()
+      secuencia(h, barrera(), ...pasos)
+
+      await expect(h.service.confirm(context, confirmInput)).rejects.toBe(pasos[pasos.length - 1])
+      expect(h.prisma.$transaction).toHaveBeenCalledTimes(transacciones)
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('IVA'),
+        expect.objectContaining({ batchId: 'batch-1', attemptId: 'attempt-1', barreraCode: 'IVA_POR_PRODUCTO_APAGADO' }),
+      )
+    },
+  )
 })

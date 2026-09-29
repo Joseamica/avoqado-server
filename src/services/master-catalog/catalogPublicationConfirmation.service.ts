@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client'
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import AppError, { ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import logger from '../../config/logger'
 import { isModelLockTimeoutError, isRetryableDbError } from '../../utils/serializableRetry'
 import { codigoDeBarreraIva } from '../fiscal/normalizarIvaDeProducto'
 import type {
@@ -509,23 +510,35 @@ export function createCatalogPublicationConfirmationService(overrides: Partial<C
         // El trigger de Product la rechazó por IVA: el intento termina AQUÍ, con su motivo, y se CONFIRMA antes de responder,
         // para que la reserva no quede APPLYING hasta el watchdog. Si el watchdog ya lo terminó, cambian 0/0 filas: benigno.
         // El reintento cubre el 40001 de ese caso: su FAILED confirmado después de la foto de esta transacción.
-        await conReintentoDeChoque(
-          () =>
-            dependencies.prisma.$transaction(async tx => {
-              await dependencies.acquireAttemptLockTx(tx, context.organizationId, reservation.batch.id)
-              return failCatalogPublicationAttemptTx(tx, {
-                organizationId: context.organizationId,
-                batchId: reservation.batch.id,
-                operation: reservation.batch.operation,
-                attemptId: reservation.attemptId,
-                leaseExpiresAt: reservation.leaseExpiresAt,
-                failureCode: barrera.code,
-                failureMessage: barrera.message,
-                now: dependencies.now(),
-              })
-            }, CATALOG_PUBLICATION_TRANSACTION_OPTIONS),
-          () => true,
-        )
+        try {
+          await conReintentoDeChoque(
+            () =>
+              dependencies.prisma.$transaction(async tx => {
+                await dependencies.acquireAttemptLockTx(tx, context.organizationId, reservation.batch.id)
+                return failCatalogPublicationAttemptTx(tx, {
+                  organizationId: context.organizationId,
+                  batchId: reservation.batch.id,
+                  operation: reservation.batch.operation,
+                  attemptId: reservation.attemptId,
+                  leaseExpiresAt: reservation.leaseExpiresAt,
+                  failureCode: barrera.code,
+                  failureMessage: barrera.message,
+                  now: dependencies.now(),
+                })
+              }, CATALOG_PUBLICATION_TRANSACTION_OPTIONS),
+            () => true,
+          )
+        } catch (cierre) {
+          // Su error sustituye al 409 y el lote queda APPLYING al watchdog: que quede rastro de la barrera que lo causó.
+          logger.warn('[catálogo] La barrera de IVA rechazó la publicación y no se pudo cerrar el intento', {
+            organizationId: context.organizationId,
+            batchId: reservation.batch.id,
+            attemptId: reservation.attemptId,
+            barreraCode: barrera.code,
+            error: cierre instanceof Error ? cierre.message : String(cierre),
+          })
+          throw cierre
+        }
         throw new ConflictError(barrera.message, barrera.code)
       }
     },
