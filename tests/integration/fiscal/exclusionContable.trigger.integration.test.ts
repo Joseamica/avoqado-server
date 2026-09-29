@@ -48,6 +48,7 @@ import {
   marcada,
   nuevoNegocio,
   ordenConCfdi,
+  PAUSA,
   polizas,
   polizaSuelta,
   retener,
@@ -508,6 +509,67 @@ describe('carreras con las funciones REALES: bloqueador, espera probada en pg_st
     expect(await polizas(x.organizationId)).toBe(0)
     expect(await marcada(x.organizationId)).toBe(true)
     expect(huboUn40001()).toBe(true)
+  })
+
+  // Ola 2 · A (Codex P1): un 40P01 de consulta de MODELO (el INSERT de JournalLine) llega como error desconocido de Prisma
+  // con el SQLSTATE sólo en el mensaje (como el 55P03 de T1-R1). Ciclo REAL: X —SQL directo— retiene una cuenta y cambia el
+  // producto (su trigger pide la organización); el posteo real tiene la organización y espera la cuenta. Un bloqueador del
+  // negocio deja al posteo formado con la organización tomada ANTES de la cuenta, para que el ciclo exista cuando corra su
+  // detector: X espera primero con un deadlock_timeout largo, así que la víctima es el posteo.
+  it('(f) bloqueo mutuo REAL con un UPDATE crudo del producto: el posteo es la víctima (40P01), reintenta y sale 409 sin pólizas, nunca 500', async () => {
+    const x = await nuevoNegocio()
+    const { productId } = await conProducto(x)
+    const lines = await lineasDeVenta(x.organizationId, x.rfc)
+    const crudo = new Client({ connectionString: process.env.TEST_DATABASE_URL })
+    await crudo.connect()
+    let posteo: Promise<unknown> = Promise.resolve()
+    let cambio: Promise<unknown> = Promise.resolve()
+    let negocio: Awaited<ReturnType<typeof retener>> | null = null
+    try {
+      const { rows } = await crudo.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')
+      const pidX = rows[0].pid
+      await crudo.query('BEGIN')
+      await crudo.query("SET LOCAL deadlock_timeout = '60s'") // X nunca corre el detector: la víctima la elige el del posteo
+      await crudo.query('SELECT id FROM "LedgerAccount" WHERE id = $1 FOR UPDATE', [lines[0].ledgerAccountId])
+      negocio = await retener(h().blocker, tx => tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${x.venueId} FOR UPDATE`)
+
+      posteo = desenlace(createManualEntry(x.venueId, { date: '2026-06-15', concept: 'Póliza en ciclo', lines }, { staffId: null }))
+      const pidPosteo = await esperaDetrasDe(
+        negocio.pid,
+        '%FROM "Venue"%FOR SHARE%',
+        'el posteo con la organización tomada, esperando el negocio',
+      )
+      cambio = crudo.query(`UPDATE "Product" SET "ivaTratamiento" = 'IVA_0' WHERE id = $1`, [productId]).then(
+        r => ({ ok: r.rowCount }),
+        (e: unknown) => e,
+      )
+      await esperaDetrasDe(pidPosteo, '%UPDATE "Product"%', 'X (SQL directo) esperando la organización del posteo', 4_000, pidX)
+      await negocio.soltar()
+      // El ciclo: el posteo espera la cuenta de X; X espera la organización del posteo.
+      await esperaDetrasDe(pidX, '%INSERT INTO "public"."JournalLine"%', 'el posteo esperando la cuenta que retiene X', 4_000, pidPosteo)
+      // PostgreSQL aborta al posteo (40P01) y X termina su UPDATE; el reintento del posteo espera la organización de X. Si el
+      // 40P01 salió crudo (el rojo), el posteo ya terminó y no hay espera que ver.
+      expect(await cambio).toEqual({ ok: 1 })
+      await Promise.race([
+        posteo,
+        esperaDetrasDe(pidX, '%FROM "Organization"%FOR SHARE%', 'el reintento del posteo esperando la organización de X'),
+      ])
+    } finally {
+      await negocio?.soltar()
+      await crudo.query('COMMIT').catch(() => undefined)
+      await crudo.end()
+    }
+
+    const hubo40P01 = errores.some(
+      e => e instanceof Prisma.PrismaClientUnknownRequestError && e.message.includes('PostgresError { code: "40P01"'),
+    )
+    const r = await posteo // `desenlace`: el error llega como valor
+    expect(r).toMatchObject(PAUSA) // nunca el 40P01 crudo (500)
+    expect(r).toBeInstanceOf(ConflictError)
+    expect(hubo40P01).toBe(true)
+    expect(await polizas(x.organizationId)).toBe(0)
+    expect(await tratamiento(productId)).toBe('IVA_0')
+    expect(await marcada(x.organizationId)).toBe(true)
   })
 
   /** Organización SIN marca (producto al 16 %, IVA por producto encendido) con una publicación del MISMO producto lista. */

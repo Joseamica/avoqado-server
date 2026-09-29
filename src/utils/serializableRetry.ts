@@ -28,12 +28,17 @@ export function isRetryableDbError(error: unknown): boolean {
   return value.code === 'P2010' && RETRY_SQLSTATES.has(nestedCode(value) ?? '')
 }
 
-/** Bloqueo mutuo (40P01), directo o envuelto en P2010. Quien lo reintente lo decide él; aquí no se reintenta. */
+/**
+ * Bloqueo mutuo (40P01): directo, envuelto en P2010 o —en una consulta de MODELO— como `PrismaClientUnknownRequestError` con el
+ * SQLSTATE sólo en el mensaje (Prisma 6.19.3 sólo traduce 40001; la misma forma que el 55P03 de `isModelLockTimeoutError`).
+ * Quien lo reintente lo decide él; aquí no se reintenta. El catálogo NO lo reintenta (R10, T4-R1): no usa esta función.
+ */
 export function isDeadlockError(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false
   const value = error as Record<string, unknown>
   if (value.code === '40P01') return true
-  return value.code === 'P2010' && nestedCode(value) === '40P01'
+  if (value.code === 'P2010' && nestedCode(value) === '40P01') return true
+  return error instanceof Prisma.PrismaClientUnknownRequestError && error.message.includes('PostgresError { code: "40P01"')
 }
 
 /**

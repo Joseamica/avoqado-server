@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client'
 
 import { ConflictError } from '@/errors/AppError'
-import { isModelLockTimeoutError, isRetryableDbError, withSerializableRetry } from '@/utils/serializableRetry'
+import { isDeadlockError, isModelLockTimeoutError, isRetryableDbError, withSerializableRetry } from '@/utils/serializableRetry'
 import { prismaMock } from '../../__helpers__/setup'
 
 describe('serializableRetry', () => {
@@ -47,6 +47,38 @@ describe('serializableRetry', () => {
     it('el crudo (P2010) sigue siendo cosa de isRetryableDbError, que no cambia', () => {
       expect(isRetryableDbError({ code: 'P2010', meta: { code: '55P03' } })).toBe(true)
       expect(isRetryableDbError(desconocido(conPostgres('55P03', 'canceling statement due to lock timeout')))).toBe(false)
+    })
+  })
+
+  // Ola 2 · A (Codex P1): Prisma 6.19.3 tampoco traduce 40P01 en una consulta de MODELO (sólo 40001 → P2034): llega como
+  // `PrismaClientUnknownRequestError` con el SQLSTATE sólo en el `QueryError(PostgresError { code: "40P01", … })` del mensaje
+  // (medido el 28-sep con el INSERT de JournalLine víctima de un bloqueo mutuo real: evidencia ola2-rojo-int).
+  describe('isDeadlockError', () => {
+    const conPostgres = (sqlState: string, mensaje: string) =>
+      '\nInvalid `prisma.journalEntry.create()` invocation:\n\n\nError occurred during query execution:\n' +
+      `ConnectorError(ConnectorError { user_facing_error: None, kind: QueryError(PostgresError { code: "${sqlState}", message: "${mensaje}", severity: "ERROR", detail: Some("Process 21717 waits for ShareLock on transaction 390514; blocked by process 21733.\\nProcess 21733 waits for ShareLock on transaction 390516; blocked by process 21717."), column: None, hint: Some("See server log for query details.") }), transient: false })`
+    const desconocido = (mensaje: string) => new Prisma.PrismaClientUnknownRequestError(mensaje, { clientVersion: '6.19.3' })
+
+    it('reconoce el 40P01 directo y el envuelto en P2010 (como hoy)', () => {
+      expect(isDeadlockError({ code: '40P01' })).toBe(true)
+      expect(isDeadlockError({ code: 'P2010', meta: { code: '40P01' } })).toBe(true)
+    })
+
+    it('reconoce el 40P01 de una consulta de modelo (la forma medida)', () => {
+      expect(isDeadlockError(desconocido(conPostgres('40P01', 'deadlock detected')))).toBe(true)
+    })
+
+    it('no reconoce otro SQLSTATE en la misma forma, el mismo texto fuera de Prisma ni un error vacío', () => {
+      expect(isDeadlockError(desconocido(conPostgres('55P03', 'canceling statement due to lock timeout')))).toBe(false)
+      expect(isDeadlockError(desconocido(conPostgres('57014', 'canceling statement due to statement timeout')))).toBe(false)
+      expect(isDeadlockError(new Error(conPostgres('40P01', 'deadlock detected')))).toBe(false)
+      expect(isDeadlockError(null)).toBe(false)
+    })
+
+    it('el clasificador del catálogo NO lo reintenta (R10, T4-R1): ni isRetryableDbError ni isModelLockTimeoutError lo ven', () => {
+      const bloqueoMutuo = desconocido(conPostgres('40P01', 'deadlock detected'))
+      expect(isRetryableDbError(bloqueoMutuo)).toBe(false)
+      expect(isModelLockTimeoutError(bloqueoMutuo)).toBe(false)
     })
   })
 
