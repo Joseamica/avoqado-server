@@ -176,7 +176,7 @@ test('re-importar NO toca el saldo de un inventario con historia, aunque esté e
 test('🔴 PUT inventory-method (paso 2 del asistente, aunque se abandone ahí) crea la fila en 0', async () => {
   const item = await product()
 
-  await setProductInventoryMethod(item.id, 'QUANTITY')
+  await setProductInventoryMethod(venueId, item.id, 'QUANTITY')
 
   await expectEmptyRow(item.id)
 })
@@ -215,7 +215,7 @@ test('sin inventario o por RECETA no nace fila', async () => {
 test('asistente completo (paso 2 + paso 3): el primer saldo sigue anotándose como «Saldo inicial»', async () => {
   const item = await product()
 
-  await configureInventoryStep2(item.id, { useInventory: true, inventoryMethod: 'QUANTITY' })
+  await configureInventoryStep2(venueId, item.id, { useInventory: true, inventoryMethod: 'QUANTITY' })
   await setupSimpleStockStep3(venueId, item.id, { initialStock: 12, reorderPoint: 2, costPerUnit: 20 })
 
   const row = await prisma.inventory.findUniqueOrThrow({ where: { productId: item.id }, include: { movements: true } })
