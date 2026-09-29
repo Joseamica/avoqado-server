@@ -87,4 +87,81 @@ describe('getTransactionDetail · saldo reembolsable por componente', () => {
     const detalle = await getTransactionDetail('venue_1', 'pay_1')
     expect(detalle).toMatchObject({ remainingRefundable: 0, remainingRefundableSale: 0, remainingRefundableTip: 0 })
   })
+
+  // ── Task 6 (Codex, 29-sep): los topes cuentan EXACTAMENTE como `issueRefund` (`centavosYaDevueltos` +
+  //    `centavosDevueltosPorComponente`): sólo COMPLETED, el MÁXIMO contra el acumulado histórico, en centavos enteros.
+
+  it('B2: un reembolso FAILED de $220 no se resta — no movió dinero, el reintento sigue ofreciendo todo', async () => {
+    listRefunds.mockResolvedValue([{ ...reembolso(200, 20, 'ref_failed'), status: 'FAILED' }])
+    const detalle = await getTransactionDetail('venue_1', 'pay_1')
+    expect(detalle).toMatchObject({ remainingRefundable: 220, remainingRefundableSale: 200, remainingRefundableTip: 20 })
+  })
+
+  it('B2: PENDING y CANCELLED tampoco cuentan; el COMPLETED de la misma lista sí', async () => {
+    listRefunds.mockResolvedValue([
+      { ...reembolso(100, 0, 'ref_pending'), status: 'PENDING' },
+      { ...reembolso(60, 0, 'ref_cancelled'), status: 'CANCELLED' },
+      reembolso(50, 5, 'ref_ok'),
+    ])
+    const detalle = await getTransactionDetail('venue_1', 'pay_1')
+    expect(detalle).toMatchObject({ remainingRefundable: 165, remainingRefundableSale: 150, remainingRefundableTip: 15 })
+  })
+
+  it('B4: acumulado histórico SIN filas ($60 en processorData) — la app ofrece lo que el servidor permite, no más', async () => {
+    prismaMock.payment.findFirst.mockResolvedValue(cobro({ processorData: { refundedAmountCents: 6000 } }))
+    listRefunds.mockResolvedValue([])
+    const detalle = await getTransactionDetail('venue_1', 'pay_1')
+    // total 220 − 60 = 160; la venta (200) se topa con ese total; la propina (20) cabe entera.
+    expect(detalle).toMatchObject({ remainingRefundable: 160, remainingRefundableSale: 160, remainingRefundableTip: 20 })
+  })
+
+  it('B4: acumulado histórico que agota TODO ($210 de $220, sin filas) — la propina también se topa con el total restante', async () => {
+    prismaMock.payment.findFirst.mockResolvedValue(cobro({ processorData: { refundedAmountCents: 21000 } }))
+    listRefunds.mockResolvedValue([])
+    const detalle = await getTransactionDetail('venue_1', 'pay_1')
+    // total 220 − 210 = 10; ni la venta (200) ni la propina (20) pueden ofrecer más que eso.
+    expect(detalle).toMatchObject({ remainingRefundable: 10, remainingRefundableSale: 10, remainingRefundableTip: 10 })
+  })
+
+  it('B4: gana el MÁXIMO entre las filas y el acumulado — el acumulado más corto no afloja nada', async () => {
+    prismaMock.payment.findFirst.mockResolvedValue(cobro({ processorData: { refundedAmountCents: 1000 } }))
+    listRefunds.mockResolvedValue([reembolso(50, 5)])
+    const detalle = await getTransactionDetail('venue_1', 'pay_1')
+    expect(detalle).toMatchObject({ remainingRefundable: 165, remainingRefundableSale: 150, remainingRefundableTip: 15 })
+  })
+
+  it('B4: acumulado en pesos (formato viejo, sin `refundedAmountCents`) también se respeta', async () => {
+    prismaMock.payment.findFirst.mockResolvedValue(cobro({ processorData: { refundedAmount: 60 } }))
+    listRefunds.mockResolvedValue([])
+    const detalle = await getTransactionDetail('venue_1', 'pay_1')
+    expect(detalle.remainingRefundable).toBe(160)
+  })
+
+  it('centavos enteros: $1.00 − $0.67 es exactamente 0.33 (no 0.32999999999999996)', async () => {
+    prismaMock.payment.findFirst.mockResolvedValue(cobro({ amount: 1, tipAmount: 0 }))
+    listRefunds.mockResolvedValue([reembolso(0.67, 0)])
+    const detalle = await getTransactionDetail('venue_1', 'pay_1')
+    expect(detalle.remainingRefundable).toBe(0.33)
+    expect(detalle.remainingRefundableSale).toBe(0.33)
+  })
+
+  it('las CANTIDADES por artículo siguen contando TODOS los estados (el servidor reserva el offset por pieza así)', async () => {
+    prismaMock.payment.findFirst.mockResolvedValue(
+      cobro({
+        order: {
+          orderNumber: 'ORD-1',
+          items: [{ id: 'oi_1', productName: 'Café', quantity: 3, unitPrice: 50, total: 150, product: null, modifiers: [] }],
+        },
+      }),
+    )
+    const fallido = {
+      ...reembolso(50, 0, 'ref_failed_item'),
+      status: 'FAILED',
+      processorData: { originalPaymentId: 'pay_1', refundedItems: [{ orderItemId: 'oi_1', quantity: 1, amountCents: 5000 }] },
+    }
+    listRefunds.mockResolvedValue([fallido])
+    const detalle = await getTransactionDetail('venue_1', 'pay_1')
+    expect(detalle.remainingRefundable).toBe(220) // el dinero: el FAILED no cuenta
+    expect(detalle.items[0]).toMatchObject({ refundedQty: 1, remainingQty: 2 }) // la pieza: el FAILED sí reserva
+  })
 })

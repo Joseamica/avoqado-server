@@ -10,6 +10,7 @@ import { PaymentMethod, TransactionStatus } from '@prisma/client'
 import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { listRefundsForPayment } from '../dashboard/refund.dashboard.service'
+import { centavosDevueltosPorComponente, centavosYaDevueltos } from '../shared/devueltoDeUnCobro'
 
 export interface MobileTransactionFilters {
   search?: string
@@ -133,6 +134,9 @@ export async function getTransactions(venueId: string, page: number, pageSize: n
   }
 }
 
+/** Pesos → centavos enteros (la convención del carril de reembolso). */
+const toCents = (pesos: unknown): number => Math.round(Number(pesos ?? 0) * 100)
+
 /**
  * Get full transaction detail with order items.
  */
@@ -153,6 +157,7 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
       referenceNumber: true,
       authorizationNumber: true,
       createdAt: true,
+      processorData: true,
       processedBy: {
         select: {
           firstName: true,
@@ -195,15 +200,26 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
 
   const refunds = payment.status !== 'PENDING' && payment.status !== 'REFUNDED' ? await listRefundsForPayment(venueId, payment.id) : []
 
-  const refundedTotal = refunds.reduce((sum, refund) => sum + Math.abs(Number(refund.amount) || 0), 0)
-  const remainingRefundable = Math.max(0, Number(payment.amount) + Number(payment.tipAmount) - refundedTotal)
+  // Los topes cuentan EXACTAMENTE como `issueRefund` (Codex, 29-sep): sólo los reembolsos COMPLETED movieron dinero, y lo ya
+  // devuelto es el MÁXIMO entre esas filas y el acumulado histórico `processorData.refundedAmountCents`. Todo en centavos
+  // enteros — sumar pesos con `+` deriva (`1 − 0.67 = 0.32999999999999996`). La suma vive en `shared/devueltoDeUnCobro.ts`:
+  // aquí no se reimplementa.
+  // 🔴 `listRefundsForPayment` devuelve `amount` = TOTAL negativo; a esos helpers se les pasa la VENTA (`saleAmount`) y la
+  // propina por separado, o la propina se contaría dos veces.
+  // Un fallo de FILAS ilegibles (o de un acumulado corrupto) lanza en vez de inventar un saldo: `issueRefund` se negaría igual.
+  const filas = refunds.map(refund => ({ amount: refund.saleAmount, tipAmount: refund.tipAmount, status: refund.status }))
+  const originalSaleCents = toCents(payment.amount)
+  const originalTipCents = toCents(payment.tipAmount)
+  const yaDevueltoCents = centavosYaDevueltos({ processorData: payment.processorData, filas })
+  const { salesCents: ventaDevueltaCents, tipCents: propinaDevueltaCents } = centavosDevueltosPorComponente(filas)
+  const remainingRefundableCents = Math.max(0, originalSaleCents + originalTipCents - yaDevueltoCents)
   // Saldo POR COMPONENTE (aditivo): con «Incluir propina» apagada el POS sólo puede ofrecer la VENTA restante — el tope total
   // dejaba mandar $220 con `tipRefundCents: 0` sobre una venta de $200 y el servidor lo rechazaba (Testarudo, 17-sep-2026).
   // Un reembolso histórico sin reparto viene con todo en `saleAmount`: se descuenta de la venta, la app ofrece de menos.
-  const refundedSale = refunds.reduce((sum, refund) => sum + Math.abs(Number(refund.saleAmount) || 0), 0)
-  const refundedTip = refunds.reduce((sum, refund) => sum + Math.abs(Number(refund.tipAmount) || 0), 0)
-  const remainingRefundableSale = Math.max(0, Math.round((Number(payment.amount) - refundedSale) * 100) / 100)
-  const remainingRefundableTip = Math.max(0, Math.round((Number(payment.tipAmount) - refundedTip) * 100) / 100)
+  // Cada componente se topa además con el total restante: un acumulado histórico sin filas baja el total, no el reparto.
+  const remainingRefundable = remainingRefundableCents / 100
+  const remainingRefundableSale = Math.min(remainingRefundableCents, Math.max(0, originalSaleCents - ventaDevueltaCents)) / 100
+  const remainingRefundableTip = Math.min(remainingRefundableCents, Math.max(0, originalTipCents - propinaDevueltaCents)) / 100
 
   // Aggregate per-orderItemId refund totals across all refunds for this payment.
   // Used by the mobile UI to mark lines as "Reembolsado" / "N de X ya reembolsado"
