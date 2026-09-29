@@ -14,6 +14,8 @@ const MENSAJES = {
     'No se puede mover este negocio: la organización destino lleva contabilidad en Avoqado y el negocio tiene productos o facturas con IVA distinto de 16 %. La contabilidad todavía no maneja esa mezcla.',
   IVA_TRASLADO_CON_CONTABILIDAD:
     'No se puede mover este negocio: ya tiene pólizas en la contabilidad de su organización, y moverlo haría que sus ventas se registraran otra vez en la nueva. Pide ayuda a soporte.',
+  IVA_PRODUCTO_CON_AJUSTE_DE_DELIVERY:
+    'Este producto ya tuvo ajustes de delivery (Uber). Para venderlo con otro IVA, crea un producto nuevo con el IVA correcto.',
 } as const
 
 const esOfrecido = (v: unknown): v is IvaTratamiento =>

@@ -113,6 +113,7 @@ describe('codigoDeBarreraIva', () => {
     'IVA_NEGOCIO_CAMBIO_DE_ORGANIZACION',
     'IVA_TRASLADO_INCOMPATIBLE',
     'IVA_TRASLADO_CON_CONTABILIDAD',
+    'IVA_PRODUCTO_CON_AJUSTE_DE_DELIVERY',
   ])('reconoce %s y ninguna otra llave (ninguna es subcadena de otra)', codigo => {
     expect(codigoDeBarreraIva(deModelo(codigo))?.code).toBe(codigo)
   })
@@ -150,6 +151,17 @@ describe('codigoDeBarreraIva', () => {
   it('traducirErrorDeIva vuelve la inversa contable un 409 con su código y mensaje', () => {
     expect(() => traducirErrorDeIva(deModelo('IVA_CONTABILIDAD_CON_HISTORIA'))).toThrow(
       expect.objectContaining({ statusCode: 409, code: 'IVA_CONTABILIDAD_CON_HISTORIA', message: HISTORIA }),
+    )
+  })
+
+  it('plan 4b · la regla C sale 409 con su mensaje exacto', () => {
+    expect(() => traducirErrorDeIva(deModelo('IVA_PRODUCTO_CON_AJUSTE_DE_DELIVERY'))).toThrow(
+      expect.objectContaining({
+        statusCode: 409,
+        code: 'IVA_PRODUCTO_CON_AJUSTE_DE_DELIVERY',
+        message:
+          'Este producto ya tuvo ajustes de delivery (Uber). Para venderlo con otro IVA, crea un producto nuevo con el IVA correcto.',
+      }),
     )
   })
 })

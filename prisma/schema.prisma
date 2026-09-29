@@ -1794,6 +1794,9 @@ model Product {
   // Lo mantienen coherente los tres triggers "Product_ivaTratamiento_ins" / "_1_explicito" / "_2_tupla".
   // Ver src/services/fiscal/ivaTratamiento.ts.
   ivaTratamiento IvaTratamiento @default(IVA_16)
+  // Plan 4b · regla C: se enciende en la MISMA transacción que escribe un ajuste de delivery (REFUND PROVIDER_ADJUSTMENT) sobre
+  // una orden con este producto, y nunca se apaga. Encendida, el trigger no deja cambiar ivaTratamiento (se crea otro producto).
+  ajusteDeliveryAlgunaVez Boolean @default(false)
 
   // Print routing (PRINT_STATIONS): product-level station override (wins over category default).
   printStationId String?

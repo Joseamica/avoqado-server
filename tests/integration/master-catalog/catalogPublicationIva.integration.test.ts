@@ -36,6 +36,8 @@ const MENSAJE: Record<string, string> = {
   IVA_CONTABILIDAD_CON_HISTORIA:
     'Este negocio ya lleva contabilidad en Avoqado (pólizas o periodos cerrados) y la contabilidad todavía no maneja IVA distinto de 16 %. Por eso este producto se queda en IVA 16 %. Escríbenos a hola@avoqado.io si lo necesitas.',
   CATALOG_PUBLICATION_ATTEMPT_EXPIRED: 'El intento de publicación expiró.',
+  IVA_PRODUCTO_CON_AJUSTE_DE_DELIVERY:
+    'Este producto ya tuvo ajustes de delivery (Uber). Para venderlo con otro IVA, crea un producto nuevo con el IVA correcto.',
 }
 
 let harness: CatalogPublicationIntegrationHarness | null = null
@@ -171,7 +173,60 @@ function esElDeIva(r: unknown, code: string) {
   expect(r).toBeInstanceOf(ConflictError)
 }
 
+/** Un ajuste de delivery sobre el producto, como lo deja la conciliación (Tarea 5): la venta, el REFUND PROVIDER_ADJUSTMENT y la
+ *  marca, en UNA transacción. Devuelve la orden, para borrarla al final. */
+const ajusteDeDelivery = (f: CatalogPublicationFixture) =>
+  h().primary.$transaction(async tx => {
+    const orden = await tx.order.create({
+      data: { venueId: f.venueId, orderNumber: `4B-CAT-${f.key}`, subtotal: 100, taxAmount: 0, total: 100 },
+    })
+    await tx.orderItem.create({
+      data: { orderId: orden.id, productId: f.productId, productName: 'Café', quantity: 1, unitPrice: 100, taxAmount: 0, total: 100 },
+    })
+    await tx.payment.create({
+      data: {
+        venueId: f.venueId,
+        orderId: orden.id,
+        amount: -50,
+        tipAmount: 0,
+        netAmount: -50,
+        method: 'OTHER',
+        status: 'COMPLETED',
+        type: 'REFUND',
+        splitType: 'FULLPAYMENT',
+        source: 'TPV',
+        feePercentage: 0,
+        feeAmount: 0,
+        processorData: {
+          provenance: 'PROVIDER_ADJUSTMENT',
+          generation: 1,
+          fiscalByRateCents: { v: 2, porTratamiento: { IVA_16: { baseCents: 4310, ivaCents: 690 } } },
+        },
+      },
+    })
+    await tx.$executeRaw`UPDATE "Product" SET "ajusteDeliveryAlgunaVez" = true WHERE id = ${f.productId} AND NOT "ajusteDeliveryAlgunaVez"`
+    return orden.id
+  })
+const borrarOrden = async (orderId: string) => {
+  await h().primary.payment.deleteMany({ where: { orderId } })
+  await h().primary.orderItem.deleteMany({ where: { orderId } })
+  await h().primary.order.delete({ where: { id: orderId } })
+}
+
 describe('una publicación de catálogo rechazada por IVA termina en ese momento, con su motivo (R12)', () => {
+  it('plan 4b · regla C: un producto con la marca no cambia de IVA por catálogo; 409 y lote FAILED', async () => {
+    const { f, publicar } = await negocioConCatalogo('iva-ajuste-delivery')
+    const orden = await ajusteDeDelivery(f)
+    try {
+      const a0 = await publicar('0.0000', 'ajuste-delivery')
+      esElDeIva(await desenlace(a0.confirmar()), 'IVA_PRODUCTO_CON_AJUSTE_DE_DELIVERY')
+      await terminado(f, a0, 'IVA_PRODUCTO_CON_AJUSTE_DE_DELIVERY')
+      expect(await producto(f)).toEqual({ ivaTratamiento: 'IVA_16', name: 'Local name' })
+    } finally {
+      await borrarOrden(orden)
+    }
+  })
+
   it.each([
     { caso: 'bandera apagada', bandera: false, historia: false, code: 'IVA_POR_PRODUCTO_APAGADO' },
     { caso: 'bandera encendida y la organización ya tiene pólizas', bandera: true, historia: true, code: 'IVA_CONTABILIDAD_CON_HISTORIA' },
