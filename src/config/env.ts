@@ -205,14 +205,17 @@ const envSchema = z.object({
   RAPPI_WRITABLE_STORE_IDS_SANDBOX: z.string().optional(),
   RAPPI_WRITABLE_STORE_IDS_PRODUCTION: z.string().optional(),
   // Self-onboarding (spec 2026-09-29). La llave firma el enlace y cifra el id_token del comercio;
-  // sin ella el flujo se niega a arrancar (igual que Uber con UBER_WEBHOOK_SIGNING_KEY).
-  RAPPI_CONNECT_SIGNING_KEY: z.string().min(32).optional(),
-  RAPPI_OAUTH_REDIRECT_BASE: z.string().url().optional(),
+  // sin ella el FLUJO se niega a arrancar (igual que Uber con UBER_WEBHOOK_SIGNING_KEY), no el proceso.
+  // 🔴 Las cuatro son `z.string().optional()` a propósito: un fallo de este parseo hace `process.exit` de TODA la
+  // API, y una variable de una función opcional no puede tumbarla. La validación (URL http(s), barra final,
+  // largo de la llave) vive donde se USAN: `rappi.client.ts` y el flujo de conexión.
+  RAPPI_CONNECT_SIGNING_KEY: z.string().optional(),
+  RAPPI_OAUTH_REDIRECT_BASE: z.string().optional(),
   // ⚠️ Host de los endpoints de self-onboarding: la doc dice api.dev.rappi.com en desarrollo y NO
-  // publica el de México en producción. Se pregunta al TAM; en PRODUCTION es obligatorio.
-  RAPPI_SELF_ONBOARDING_API_BASE: z.string().url().optional(),
+  // publica el de México en producción. Se pregunta al TAM; en PRODUCTION es obligatorio (sin él, el flujo se niega).
+  RAPPI_SELF_ONBOARDING_API_BASE: z.string().optional(),
   // Base pública de NUESTROS webhooks (la URL que se le registra a Rappi en add-stores).
-  RAPPI_WEBHOOK_BASE_URL: z.string().url().optional(),
+  RAPPI_WEBHOOK_BASE_URL: z.string().optional(),
 
   // Base pública para la URL de retorno del OAuth de Uber (sin barra final). En local
   // es el túnel de ngrok; en prod, https://api.avoqado.io. Debe coincidir EXACTAMENTE

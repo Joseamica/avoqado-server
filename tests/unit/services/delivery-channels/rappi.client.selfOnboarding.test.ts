@@ -13,6 +13,7 @@ const mockEnv: Record<string, string | undefined> = {
   RAPPI_CLIENT_SECRET_SANDBOX: 'csecret',
   RAPPI_WRITABLE_STORE_IDS_SANDBOX: '10,11',
   RAPPI_WEBHOOK_BASE_URL: 'https://api.ejemplo.test',
+  RAPPI_OAUTH_REDIRECT_BASE: 'https://api.ejemplo.test',
 }
 jest.mock('@/config/env', () => ({ env: mockEnv }))
 jest.mock('@/config/logger', () => ({ __esModule: true, default: { info: jest.fn(), warn: jest.fn(), error: jest.fn() } }))
@@ -20,6 +21,7 @@ jest.mock('@/config/logger', () => ({ __esModule: true, default: { info: jest.fn
 import {
   apiBaseSelfOnboarding,
   aprovisionarTiendasRappi,
+  redirectUriRappi,
   suscribirTiendaAEventos,
 } from '../../../../src/services/delivery-channels/providers/rappi/rappi.client'
 import { RappiEscrituraBloqueadaError } from '../../../../src/services/delivery-channels/providers/rappi/rappi.http'
@@ -59,6 +61,8 @@ describe('rappi.client — self-onboarding', () => {
     mockEnv.RAPPI_ENVIRONMENT = 'SANDBOX'
     mockEnv.RAPPI_SELF_ONBOARDING_API_BASE = undefined
     mockEnv.RAPPI_WRITABLE_STORE_IDS_SANDBOX = '10,11'
+    mockEnv.RAPPI_WEBHOOK_BASE_URL = 'https://api.ejemplo.test'
+    mockEnv.RAPPI_OAUTH_REDIRECT_BASE = 'https://api.ejemplo.test'
   })
 
   it('aprovisionar: host del self-onboarding, dos headers y el cuerpo con cancellation_events (R1, R2)', async () => {
@@ -110,5 +114,79 @@ describe('rappi.client — self-onboarding', () => {
     const llamadas = simularRed()
     await expect(suscribirTiendaAEventos('99')).rejects.toThrow(RappiEscrituraBloqueadaError)
     expect(llamadas).toHaveLength(0)
+  })
+
+  // ── Las variables de una función OPCIONAL no tumban el proceso: se validan al usarse ─────────────────
+  describe('bases configurables (se validan en el punto de uso, con la barra final quitada)', () => {
+    it('redirect_uri: las barras finales NO producen `//` (no coincidiría con la registrada en Rappi)', () => {
+      mockEnv.RAPPI_OAUTH_REDIRECT_BASE = 'https://api.ejemplo.test///'
+      expect(redirectUriRappi()).toBe('https://api.ejemplo.test/api/v1/delivery/rappi/oauth/callback')
+    })
+
+    it.each([['no-es-una-url'], ['ftp://api.ejemplo.test'], ['   '], ['https://']])(
+      'redirect_uri: %j no es una URL http(s) válida ⇒ Error claro, no un `undefined/api/...`',
+      malo => {
+        mockEnv.RAPPI_OAUTH_REDIRECT_BASE = malo
+        expect(() => redirectUriRappi()).toThrow(/RAPPI_OAUTH_REDIRECT_BASE.*http\(s\)/)
+      },
+    )
+
+    it('redirect_uri: sin la variable ⇒ Error claro', () => {
+      mockEnv.RAPPI_OAUTH_REDIRECT_BASE = undefined
+      expect(() => redirectUriRappi()).toThrow(/Falta RAPPI_OAUTH_REDIRECT_BASE/)
+    })
+
+    it('host del self-onboarding: la barra final se quita y el provisioning no sale con `//`', async () => {
+      mockEnv.RAPPI_SELF_ONBOARDING_API_BASE = 'https://host.ejemplo.test/'
+      expect(apiBaseSelfOnboarding()).toBe('https://host.ejemplo.test')
+      const llamadas = simularRed()
+      await aprovisionarTiendasRappi('idt', tiendas)
+      expect(llamadas[0].url).toBe('https://host.ejemplo.test/api/v2/restaurants-integrations-public-api/stores/provisioning')
+    })
+
+    it('host del self-onboarding: uno MAL escrito se niega también en SANDBOX (no cae en silencio al de pruebas)', () => {
+      mockEnv.RAPPI_SELF_ONBOARDING_API_BASE = 'host.ejemplo.test'
+      expect(() => apiBaseSelfOnboarding()).toThrow(/RAPPI_SELF_ONBOARDING_API_BASE.*http\(s\)/)
+    })
+
+    it('suscribir: la barra final de la base pública no produce `//` en la URL que recibe Rappi', async () => {
+      mockEnv.RAPPI_WEBHOOK_BASE_URL = 'https://api.ejemplo.test//'
+      const llamadas = simularRed(() => json(200))
+      await suscribirTiendaAEventos('10')
+      const nueva = llamadas.find(l => l.url.includes('/webhook/NEW_ORDER/add-stores'))
+      expect(JSON.parse(nueva?.init.body as string)[0].url).toBe('https://api.ejemplo.test/api/v1/webhooks/delivery/rappi/new-order')
+    })
+
+    it('suscribir: con la base pública inválida o ausente se niega ANTES de mandar nada', async () => {
+      const llamadas = simularRed(() => json(200))
+      mockEnv.RAPPI_WEBHOOK_BASE_URL = 'api.ejemplo.test'
+      await expect(suscribirTiendaAEventos('10')).rejects.toThrow(/RAPPI_WEBHOOK_BASE_URL.*http\(s\)/)
+      mockEnv.RAPPI_WEBHOOK_BASE_URL = undefined
+      await expect(suscribirTiendaAEventos('10')).rejects.toThrow(/Falta RAPPI_WEBHOOK_BASE_URL/)
+      expect(llamadas).toHaveLength(0)
+    })
+  })
+
+  describe('suscribir: un fallo de red en un evento no corta a los demás', () => {
+    it('un PUT que LANZA cae en `fallidos` y el resto se sigue intentando', async () => {
+      const sano = simularRed(() => json(200))
+      await suscribirTiendaAEventos('10')
+      const total = sano.length // cuántos eventos se intentan cuando todo sale bien
+
+      const llamadas = simularRed(l => {
+        if (l.url.includes('/webhook/NEW_ORDER/')) throw new Error('ECONNRESET')
+        return json(200)
+      })
+      const r = await suscribirTiendaAEventos('10')
+
+      expect(llamadas).toHaveLength(total) // no se cortó en el que lanzó
+      expect(r).toEqual({ ok: false, fallidos: ['NEW_ORDER'] })
+    })
+
+    it('🔴 pero un rechazo del CANDADO no es un fallo por evento: se relanza y no se sigue', async () => {
+      const llamadas = simularRed(() => json(200))
+      await expect(suscribirTiendaAEventos('99')).rejects.toThrow(RappiEscrituraBloqueadaError)
+      expect(llamadas).toHaveLength(0)
+    })
   })
 })

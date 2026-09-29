@@ -16,7 +16,7 @@
 import { env } from '@/config/env'
 import logger from '@/config/logger'
 
-import { llamarRappi, type AmbienteRappi, type RappiPeticion, type RappiRespuesta } from './rappi.http'
+import { llamarRappi, RappiEscrituraBloqueadaError, type AmbienteRappi, type RappiPeticion, type RappiRespuesta } from './rappi.http'
 import { getRappiToken, type SuperficieRappi } from './rappi.token'
 import { aMotivoRappi, type ResultadoRechazo } from './rappi.rejectReason'
 import {
@@ -208,15 +208,35 @@ export async function sondearPedidosRappi(): Promise<RappiRespuesta> {
 //  Self-onboarding (spec 2026-09-29) — doc: dev-portal.rappi.com/es/self-onboarding
 // ────────────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Una base configurable, validada AQUÍ y no en el arranque: estas variables son de una función opcional, y
+ * un valor mal escrito en el env tumbaría TODA la API (`process.exit` del parseo). Lo que se niega es el flujo.
+ * La barra final se quita: `//api/...` ya no coincide con la `redirect_uri` registrada en Rappi, y un webhook
+ * con `//` no recibe nada sin avisar.
+ */
+function baseHttpValida(nombre: string, valor: string): string {
+  const base = valor.trim().replace(/\/+$/, '')
+  let url: URL | undefined
+  try {
+    url = new URL(base)
+  } catch {
+    // cae abajo: el mensaje es el mismo para «no es una URL» y «no es http(s)»
+  }
+  if (!url || (url.protocol !== 'http:' && url.protocol !== 'https:')) {
+    throw new Error(`${nombre} no es una URL http(s) válida (se configuró ${JSON.stringify(valor)}); ej. https://api.avoqado.io`)
+  }
+  return base
+}
+
 export function apiBaseSelfOnboarding(): string {
-  if (env.RAPPI_SELF_ONBOARDING_API_BASE) return env.RAPPI_SELF_ONBOARDING_API_BASE
+  if (env.RAPPI_SELF_ONBOARDING_API_BASE) return baseHttpValida('RAPPI_SELF_ONBOARDING_API_BASE', env.RAPPI_SELF_ONBOARDING_API_BASE)
   if (getRappiEnvironment() === 'SANDBOX') return 'https://api.dev.rappi.com'
   throw new Error('Falta RAPPI_SELF_ONBOARDING_API_BASE: Rappi no publica el host de México para el self-onboarding (preguntar al TAM).')
 }
 
 export function redirectUriRappi(): string {
   if (!env.RAPPI_OAUTH_REDIRECT_BASE) throw new Error('Falta RAPPI_OAUTH_REDIRECT_BASE (debe ser idéntica a la registrada con el TAM).')
-  return `${env.RAPPI_OAUTH_REDIRECT_BASE}/api/v1/delivery/rappi/oauth/callback`
+  return `${baseHttpValida('RAPPI_OAUTH_REDIRECT_BASE', env.RAPPI_OAUTH_REDIRECT_BASE)}/api/v1/delivery/rappi/oauth/callback`
 }
 
 export function clientIdRappi(): string {
@@ -279,18 +299,33 @@ const EVENTOS_POR_TIENDA = Object.entries(RUTA_POR_EVENTO).filter(([, ev]) => ev
 /**
  * 🔴 El paso que se olvida: una tienda aprovisionada pero sin suscribir a cada webhook queda
  * "conectada" y no recibe NADA. Se reporta qué eventos fallaron para no promoverla a ACTIVE.
+ *
+ * Siempre devuelve `{ ok, fallidos }`: un fallo de red en UN evento (la llamada lanza) cuenta como fallido y se
+ * sigue con los demás. La única excepción es el candado: un rechazo de `RappiEscrituraBloqueadaError` no es un
+ * fallo por evento sino una tienda que NO se puede escribir, así que se relanza.
  */
 export async function suscribirTiendaAEventos(storeId: string): Promise<{ ok: boolean; fallidos: string[] }> {
   if (!env.RAPPI_WEBHOOK_BASE_URL) throw new Error('Falta RAPPI_WEBHOOK_BASE_URL')
+  const base = baseHttpValida('RAPPI_WEBHOOK_BASE_URL', env.RAPPI_WEBHOOK_BASE_URL)
   const fallidos: string[] = []
   for (const [segmento, evento] of EVENTOS_POR_TIENDA) {
-    const r = await rappiApi({
-      metodo: 'PUT',
-      ruta: `${API}/webhook/${evento}/add-stores`,
-      storeId,
-      cuerpo: [{ url: `${env.RAPPI_WEBHOOK_BASE_URL}/api/v1/webhooks/delivery/rappi/${segmento}`, stores: [storeId] }],
-    })
-    if (!r.ok) fallidos.push(evento)
+    try {
+      const r = await rappiApi({
+        metodo: 'PUT',
+        ruta: `${API}/webhook/${evento}/add-stores`,
+        storeId,
+        cuerpo: [{ url: `${base}/api/v1/webhooks/delivery/rappi/${segmento}`, stores: [storeId] }],
+      })
+      if (!r.ok) fallidos.push(evento)
+    } catch (error) {
+      if (error instanceof RappiEscrituraBloqueadaError) throw error
+      logger.error('🚨 [Rappi] la suscripción de un evento lanzó', {
+        storeId,
+        evento,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      fallidos.push(evento)
+    }
   }
   return { ok: fallidos.length === 0, fallidos }
 }
