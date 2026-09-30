@@ -315,8 +315,8 @@ describe('processRappiEvent', () => {
     const r = await processRappiEvent('evt1', { aceptar: aceptarOk, confirmar })
 
     expect(confirmar.mock.calls.map(c => c[0])).toEqual([
-      { storeId: '10', status: 'ACTIVE', integrationId: 'int-10', batchId: 'lote-7' },
-      { storeId: '11', status: 'FAILED', errorMessage: 'no', batchId: 'lote-7' },
+      { storeId: '10', status: 'ACTIVE', integrationId: 'int-10', batchId: 'lote-7', operation: 'PROVISION' },
+      { storeId: '11', status: 'FAILED', errorMessage: 'no', batchId: 'lote-7', operation: 'PROVISION' },
     ])
     expect(r.outcome).toBe('STORE_STATE')
     expect(mockMark).toHaveBeenCalledWith('evt1', 'PROCESSED')

@@ -49,7 +49,7 @@ export interface RappiProcessResult {
 export interface RappiProcessDeps {
   aceptar?: (orderId: string, storeId: string, cookingTime: number) => Promise<{ ok: boolean; status: number; raw: string }>
   /** `confirmarTienda` de UNA tienda del lote. Fallan el evento un throw y un `DEFERRED`; lo demás es informativo. */
-  confirmar?: (r: ResultadoRappiTienda & { batchId?: string }) => Promise<string>
+  confirmar?: (r: ResultadoRappiTienda & { batchId?: string; operation?: 'PROVISION' | 'DEPROVISION' }) => Promise<string>
 }
 
 export async function processRappiEvent(eventRowId: string, deps: RappiProcessDeps = {}): Promise<RappiProcessResult> {
@@ -62,7 +62,7 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
     })
   const confirmar =
     deps.confirmar ??
-    (async (r: ResultadoRappiTienda & { batchId?: string }) => {
+    (async (r: ResultadoRappiTienda & { batchId?: string; operation?: 'PROVISION' | 'DEPROVISION' }) => {
       const [{ confirmarTienda }, { suscribirTiendaAEventos }] = await Promise.all([
         import('./rappi.provisioning'),
         import('./rappi.client'),
@@ -176,10 +176,12 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
     // antes de que guardáramos el lote: Rappi no lo reenvía) lo dejan FAILED para que la
     // reconciliación lo reintente — seguro, porque la confirmación es idempotente.
     if (evento.eventType === RAPPI_EVENTS.STORE_PROVISIONING_STATUS) {
-      const { batchId, results } = leerEstadoAprovisionamiento(evento.payload)
+      // La operación también viaja: un DEPROVISION de Rappi da de baja una tienda ya conectada.
+      const { batchId, operation, results } = leerEstadoAprovisionamiento(evento.payload)
       let diferidas = 0
       try {
-        for (const r of results) if ((await confirmar({ ...r, ...(batchId ? { batchId } : {}) })) === 'DEFERRED') diferidas++
+        for (const r of results)
+          if ((await confirmar({ ...r, ...(batchId ? { batchId } : {}), ...(operation ? { operation } : {}) })) === 'DEFERRED') diferidas++
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, undefined, `PROVISIONING: ${msg.slice(0, 400)}`)

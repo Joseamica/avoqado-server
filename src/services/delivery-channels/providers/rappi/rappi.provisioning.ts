@@ -343,17 +343,45 @@ function sinConfirmar(
 }
 
 /**
+ * La baja que pide RAPPI (esta rama nunca da de baja una tienda): `DEPROVISION` + `INACTIVE` de una tienda
+ * conectada (ACTIVE o PAUSED) la deja DISABLED — si no, seguiría figurando conectada sin recibir nada. No hay
+ * lote nuestro que probar: basta la tienda (el webhook viene firmado) y, si el aviso trae `integrationId`, que
+ * sea el que guardamos. `null` = no aplica, y la confirmación sigue su camino de siempre (un PENDING, igual).
+ */
+async function bajaDeRappi(r: ResultadoRappiTienda & { batchId?: string }): Promise<'DISABLED' | null> {
+  const fila = await prisma.$transaction(async tx => {
+    const f = await leerVinculo(tx, r.storeId)
+    if (f?.status !== DeliveryChannelStatus.ACTIVE && f?.status !== DeliveryChannelStatus.PAUSED) return null
+    if (r.integrationId && r.integrationId !== aprov(f.config)?.integrationId) return null
+    await tx.deliveryChannelLink.update({ where: { id: f.id }, data: { status: DeliveryChannelStatus.DISABLED } })
+    return f
+  })
+  if (!fila) return null
+  logger.error('🚨 [Rappi] Rappi dio de BAJA la tienda — canal deshabilitado', {
+    storeId: r.storeId,
+    linkId: fila.id,
+    venueId: fila.venueId,
+    statusPrevio: fila.status,
+    batchId: r.batchId,
+  })
+  return 'DISABLED'
+}
+
+/**
  * Aplica UNA confirmación de Rappi (`ACTIVE` / `FAILED` / `INACTIVE`) a nuestro vínculo PENDING.
  * El webhook pasa su `batchId`; el re-chequeo de /result pasa `integrationId` + `esperado.intentId`.
  * Actúa sólo sobre un PENDING que pruebe ser nuestro; si no, `IGNORED` (nunca crea un vínculo), o `DEFERRED`
- * si todavía no se puede probar (ver `sinConfirmar`).
- * Un DEPROVISION de una tienda ya activa también se ignora: ese flujo no existe todavía.
+ * si todavía no se puede probar (ver `sinConfirmar`). La excepción es la baja de Rappi (`bajaDeRappi`).
  */
 export async function confirmarTienda(
-  r: ResultadoRappiTienda & { batchId?: string },
+  r: ResultadoRappiTienda & { batchId?: string; operation?: 'PROVISION' | 'DEPROVISION' },
   deps: Pick<ProvisioningDeps, 'suscribir'>,
   esperado?: { intentId: string },
 ): Promise<Confirmacion> {
+  if (r.operation === 'DEPROVISION' && r.status === 'INACTIVE') {
+    const baja = await bajaDeRappi(r)
+    if (baja) return baja
+  }
   if (r.status === 'ACTIVE') {
     // 🔴 Suscribir a los eventos ANTES de promover: una tienda ACTIVE sin suscripción no recibe pedidos.
     // Es HTTP, así que va FUERA de la transacción (no se sostiene un candado mientras Rappi contesta).
@@ -389,10 +417,13 @@ export async function confirmarTienda(
     let confirmacion: Confirmacion
     let res: ResultadoRappi
     if (r.status === 'ACTIVE') {
-      // `activatingIntentId` y `ownerAuthorizedAt` no se tocan: la reclamación de Rappi nunca los usó.
+      // `activatingIntentId` y `ownerAuthorizedAt` no se tocan: la reclamación de Rappi nunca los usó. El
+      // `integrationId` del aviso se guarda si el 202 no lo trajo (`coincide` ya exigió que no difiera): con él
+      // se reconoce después una baja de Rappi.
+      const confirmada: Aprov = { ...a, integrationId: a.integrationId ?? r.integrationId, confirmedAt: new Date().toISOString() }
       await tx.deliveryChannelLink.update({
         where: { id: fila.id },
-        data: { status: DeliveryChannelStatus.ACTIVE, config: conAprov(fila.config, { ...a, confirmedAt: new Date().toISOString() }) },
+        data: { status: DeliveryChannelStatus.ACTIVE, config: conAprov(fila.config, confirmada) },
       })
       confirmacion = 'PROMOTED'
       res = { outcome: 'ACTIVATED' }

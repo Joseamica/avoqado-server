@@ -409,6 +409,46 @@ describe('confirmarTienda', () => {
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('intención ajena'), expect.anything())
   })
 
+  it('la promoción guarda el integrationId del webhook si el 202 no lo trajo (la baja de Rappi lo compara)', async () => {
+    sembrar()
+    reclamada({ integrationId: undefined })
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1', integrationId: 'int10' }, deps())).toBe('PROMOTED')
+    expect(aprov('10').integrationId).toBe('int10')
+  })
+
+  // Esta rama nunca da de baja una tienda: un DEPROVISION firmado es de RAPPI, y una tienda muerta no puede
+  // seguir figurando conectada (el canal muerto de «La Ribera»).
+  describe('DEPROVISION de Rappi', () => {
+    const baja = (over: Record<string, unknown> = {}) =>
+      confirmarTienda({ storeId: '10', status: 'INACTIVE', operation: 'DEPROVISION', batchId: 'lote-de-baja', ...over }, deps())
+
+    it.each(['ACTIVE', 'PAUSED'])('INACTIVE de una tienda %s: el vínculo queda DISABLED y se avisa', async status => {
+      vinculo('10', { status, config: { rappiProvisioning: { intentId: 'i1', since: 'x', integrationId: 'int10', confirmedAt: 'y' } } })
+      expect(await baja({ integrationId: 'int10' })).toBe('DISABLED')
+      expect(db.links.get('10')!.status).toBe('DISABLED')
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('dio de BAJA'), expect.objectContaining({ storeId: '10' }))
+    })
+
+    it('sin integrationId en el aviso también aplica (la tienda y el proveedor ya coinciden)', async () => {
+      vinculo('10', { status: 'ACTIVE' })
+      expect(await baja()).toBe('DISABLED')
+      expect(db.links.get('10')!.status).toBe('DISABLED')
+    })
+
+    it('con OTRO integrationId que el guardado no se toca: esa baja no es de nuestra integración', async () => {
+      vinculo('10', { status: 'ACTIVE', config: { rappiProvisioning: { intentId: 'i1', since: 'x', integrationId: 'int10' } } })
+      expect(await baja({ integrationId: 'de-otra' })).toBe('IGNORED')
+      expect(db.links.get('10')!.status).toBe('ACTIVE')
+    })
+
+    it('un PENDING sigue el camino de siempre: sin nuestro lote, IGNORED y no se toca', async () => {
+      sembrar()
+      reclamada()
+      expect(await baja()).toBe('IGNORED')
+      expect(db.links.get('10')!.status).toBe('PENDING')
+    })
+  })
+
   it('la confirmación repetida de una tienda ya activa: IGNORED sin alarma', async () => {
     sembrar()
     reclamada()
