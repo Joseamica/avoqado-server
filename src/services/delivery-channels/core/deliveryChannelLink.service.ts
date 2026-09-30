@@ -231,11 +231,18 @@ function validarPrecios(v: unknown): void {
  *
  * `config: null` sigue limpiando todo — es la forma explícita de borrar, y se distingue de
  * `undefined` (no lo tocaste).
+ *
+ * 🔴 Salvo `rappiProvisioning`: es la reclamación del self-onboarding de Rappi (a qué intención y a
+ * qué lote pertenece el vínculo) y la escriben SÓLO el aprovisionamiento y su confirmación. Desde
+ * aquí nunca se toca — ni con `config: null` —: editable, un administrador de un negocio la apuntaba
+ * a la intención de otro y el webhook escribía en ella; borrable, la tienda ya no se podía confirmar.
  */
-function mezclarConfig(actual: unknown, entrante: Prisma.InputJsonValue): Prisma.InputJsonValue {
+function mezclarConfig(actual: unknown, entrante: Prisma.InputJsonValue | null): Prisma.InputJsonValue | typeof Prisma.JsonNull {
   const base = actual && typeof actual === 'object' && !Array.isArray(actual) ? (actual as Record<string, unknown>) : {}
-  if (typeof entrante !== 'object' || entrante === null || Array.isArray(entrante)) return entrante
-  return { ...base, ...(entrante as Record<string, unknown>) } as Prisma.InputJsonValue
+  const reservada = base.rappiProvisioning !== undefined ? ({ rappiProvisioning: base.rappiProvisioning } as Prisma.InputJsonObject) : null
+  if (typeof entrante !== 'object' || entrante === null || Array.isArray(entrante)) return reservada ?? entrante ?? Prisma.JsonNull
+  const { rappiProvisioning: _ignorada, ...pedido } = entrante as Record<string, unknown>
+  return { ...base, ...pedido, ...reservada } as Prisma.InputJsonValue
 }
 
 /**
@@ -267,16 +274,16 @@ export async function updateChannelLink(
 ): Promise<DeliveryChannelLinkSafe> {
   if (data.config !== undefined && data.config !== null) validarConfig(data.config)
 
-  // Leer-mezclar-escribir dentro de UNA transacción: sin ella, dos admins guardando a la vez
-  // (o la pantalla de horario y la de precios) se pisan y el último gana con datos viejos.
+  // Leer-mezclar-escribir con la fila BLOQUEADA: una transacción sola no basta (en READ COMMITTED
+  // las dos lecturas ven lo mismo y gana el último con datos viejos). Sin el `FOR UPDATE`, dos admins
+  // se pisaban, y un PATCH leído antes de que Rappi guardara su lote lo borraba al escribir.
   const link = await prisma.$transaction(async tx => {
     let config: Prisma.InputJsonValue | typeof Prisma.JsonNull | undefined
-    if (data.config === null) {
-      config = Prisma.JsonNull
-    } else if (data.config !== undefined) {
+    if (data.config !== undefined) {
       // Tenant-scoped igual que la mutación: un link de otro venue no da fila y el
       // `updateMany` de abajo devuelve count 0 → NotFoundError, sin filtrar nada.
-      const actual = await tx.deliveryChannelLink.findFirst({ where: { id: linkId, venueId }, select: { config: true } })
+      const [actual] = await tx.$queryRaw<Array<{ config: Prisma.JsonValue }>>`
+        SELECT "config" FROM "DeliveryChannelLink" WHERE "id" = ${linkId} AND "venueId" = ${venueId} FOR UPDATE`
       config = mezclarConfig(actual?.config, data.config)
     }
 

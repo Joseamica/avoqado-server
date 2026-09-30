@@ -241,9 +241,7 @@ describe('deliveryChannelLink.service', () => {
     // porque Uber se queda ~30%. Nadie se habría enterado: no falla, sólo deja de cobrar
     // de más. Por eso se MEZCLA, y por eso este test existe.
     it('guardar SÓLO deliveryHours NO borra el markup ni las demás llaves de config', async () => {
-      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({
-        config: { note: 'alta manual', precios: { markupPercent: 30 } },
-      })
+      ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { note: 'alta manual', precios: { markupPercent: 30 } } }])
       ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
       ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue(baseLink)
 
@@ -256,14 +254,58 @@ describe('deliveryChannelLink.service', () => {
     })
 
     it('config: null SÍ limpia todo (es la forma explícita de borrar, no un accidente)', async () => {
+      ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { note: 'alta manual', precios: { markupPercent: 30 } } }])
       ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
       ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue(baseLink)
 
       await updateChannelLink('venue1', 'link1', { config: null }, 'staff1')
 
-      expect(prisma.deliveryChannelLink.findFirst).not.toHaveBeenCalled()
       const escrito = (prisma.deliveryChannelLink.updateMany as jest.Mock).mock.calls[0][0].data.config
       expect(escrito).toBe(Prisma.JsonNull)
+    })
+
+    // ── H2: la fila se BLOQUEA antes de leer su config ─────────────────────────────────
+    // Sin el candado, un PATCH que leyó `config` antes de que el aprovisionamiento de Rappi guardara su
+    // lote escribía después su copia vieja: el `batchId` desaparecía y la tienda ya no se podía confirmar.
+    it('lee config con la fila BLOQUEADA (FOR UPDATE) y filtrada por venue, dentro de la transacción', async () => {
+      ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: {} }])
+      ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+      ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue(baseLink)
+
+      await updateChannelLink('venue1', 'link1', { config: { deliveryHours: HORARIO_OK } }, 'staff1')
+
+      const [strings, ...valores] = (prisma.$queryRaw as jest.Mock).mock.calls[0]
+      expect(strings.join('?')).toMatch(/FOR UPDATE/)
+      expect(valores).toEqual(['link1', 'venue1'])
+      expect(prisma.deliveryChannelLink.findFirst).not.toHaveBeenCalled()
+    })
+
+    // ── H1: `rappiProvisioning` es INTERNA — dice a qué intención y lote pertenece el vínculo ──────────
+    // Editable, un administrador de A la apuntaba a la intención de B y el webhook escribía en la de B.
+    describe('🔴 rappiProvisioning no se toca desde un PATCH', () => {
+      const reclamacion = { intentId: 'i1', since: 'x', batchId: 'b1' }
+      beforeEach(() => {
+        ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { note: 'vieja', rappiProvisioning: reclamacion } }])
+        ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+        ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue(baseLink)
+      })
+      const escrito = () => (prisma.deliveryChannelLink.updateMany as jest.Mock).mock.calls[0][0].data.config
+
+      it('mandar otra rappiProvisioning se ignora: queda la de la base, y el resto se mezcla', async () => {
+        await updateChannelLink('venue1', 'link1', { config: { note: 'nueva', rappiProvisioning: { intentId: 'de-otro-negocio' } } })
+        expect(escrito()).toEqual({ note: 'nueva', rappiProvisioning: reclamacion })
+      })
+
+      it('config: null limpia todo MENOS la reclamación', async () => {
+        await updateChannelLink('venue1', 'link1', { config: null })
+        expect(escrito()).toEqual({ rappiProvisioning: reclamacion })
+      })
+
+      it('sin reclamación en la base, un PATCH tampoco puede crear una', async () => {
+        ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { note: 'vieja' } }])
+        await updateChannelLink('venue1', 'link1', { config: { rappiProvisioning: { intentId: 'i-inventada' } } })
+        expect(escrito()).toEqual({ note: 'vieja' })
+      })
     })
 
     // ── Un horario inválido guardado en silencio es PEOR que rechazarlo ────────────────
