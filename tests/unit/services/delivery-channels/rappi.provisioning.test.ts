@@ -342,6 +342,22 @@ describe('confirmarTienda', () => {
     expect(resultado('10').outcome).toBe('FAILED')
   })
 
+  // 🔴 H1: la reclamación vive en `config`; si apunta a la intención de OTRO negocio (o de Uber), nada se escribe.
+  it.each([
+    ['de OTRO negocio', { venueId: 'OTRO' }],
+    ['de Uber', { provider: 'UBER_EATS' }],
+  ])('una reclamación que apunta a una intención %s: IGNORED, sin suscribir ni escribir en esa intención', async (_n, ajena) => {
+    sembrar({ id: 'i9', ...ajena })
+    reclamada({ intentId: 'i9' })
+    const d = deps()
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, d)).toBe('IGNORED')
+    expect(await confirmarTienda({ storeId: '10', status: 'FAILED', batchId: 'b1' }, d)).toBe('IGNORED')
+    expect(d.suscribir).not.toHaveBeenCalled()
+    expect(db.intents.get('i9')!.resultsJson).toBeNull()
+    expect(db.links.get('10')).toMatchObject({ status: 'PENDING', venueId: 'v1' })
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('intención ajena'), expect.anything())
+  })
+
   it('la confirmación repetida de una tienda ya activa: IGNORED sin alarma', async () => {
     sembrar()
     reclamada()

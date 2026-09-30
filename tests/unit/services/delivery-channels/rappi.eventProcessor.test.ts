@@ -191,12 +191,9 @@ describe('processRappiEvent', () => {
   // ── El veredicto del menú ────────────────────────────────────────────────────────
   it('🔴 MENU_APPROVED sella la huella pendiente — AHÍ es cuando el menú está publicado', async () => {
     ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
-      fila({
-        eventType: 'MENU_APPROVED',
-        payload: { store_id: '900105814', message: 'Menu Approved' },
-        channelLink: { ...fila().channelLink, config: { rappiPendingMenuHash: 'abc123' } },
-      }),
+      fila({ eventType: 'MENU_APPROVED', payload: { store_id: '900105814', message: 'Menu Approved' } }),
     )
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { rappiPendingMenuHash: 'abc123' } }])
 
     const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
 
@@ -208,18 +205,39 @@ describe('processRappiEvent', () => {
 
   it('MENU_REJECTED limpia la huella pendiente y NO sella nada — el menú NO está arriba', async () => {
     ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
-      fila({
-        eventType: 'MENU_REJECTED',
-        payload: { store_id: '900105814' },
-        channelLink: { ...fila().channelLink, config: { rappiPendingMenuHash: 'abc123' } },
-      }),
+      fila({ eventType: 'MENU_REJECTED', payload: { store_id: '900105814' } }),
     )
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { rappiPendingMenuHash: 'abc123' } }])
 
     await processRappiEvent('evt1', { aceptar: aceptarOk })
 
     const data = (prisma.deliveryChannelLink.update as jest.Mock).mock.calls[0][0].data
     expect(data.lastMenuHash).toBeUndefined()
     expect(data.config.rappiPendingMenuHash).toBeNull()
+  })
+
+  // H2: la copia de `config` que trajo el evento es VIEJA. Escribirla borraba lo que otro escritor guardó
+  // mientras tanto — la reclamación del aprovisionamiento con su lote, y la tienda ya no se confirmaba.
+  it.each(['MENU_APPROVED', 'MENU_REJECTED'])('%s relee config con la fila BLOQUEADA y no borra rappiProvisioning', async tipo => {
+    const reclamacion = { intentId: 'i1', since: 'x', batchId: 'b1' }
+    ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
+      fila({
+        eventType: tipo,
+        payload: { store_id: '900105814' },
+        channelLink: { ...fila().channelLink, config: { rappiPendingMenuHash: 'abc123' } },
+      }),
+    )
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { rappiPendingMenuHash: 'abc123', rappiProvisioning: reclamacion } }])
+
+    await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+    const [strings, ...valores] = (prisma.$queryRaw as jest.Mock).mock.calls[0]
+    expect(strings.join('?')).toMatch(/FOR UPDATE/)
+    expect(valores).toEqual(['link1'])
+    expect((prisma.deliveryChannelLink.update as jest.Mock).mock.calls[0][0].data.config).toEqual({
+      rappiPendingMenuHash: null,
+      rappiProvisioning: reclamacion,
+    })
   })
 
   // ── El estado de la tienda ───────────────────────────────────────────────────────

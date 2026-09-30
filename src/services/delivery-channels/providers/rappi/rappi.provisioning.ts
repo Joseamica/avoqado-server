@@ -297,6 +297,20 @@ const pendienteNuestro = (fila: Fila | null, r: ResultadoRappiTienda & { batchId
   fila?.status === DeliveryChannelStatus.PENDING && coincide(aprov(fila.config), r, esperado)
 
 /**
+ * 🔴 La reclamación vive en `config`, así que antes de actuar se comprueba contra la BASE: su intención es
+ * de Rappi y del MISMO negocio que el vínculo. Si no, ni HTTP ni escritura en esa intención (H1).
+ */
+async function intentDeLaReclamacion(tx: Tx, fila: Fila, a: Aprov) {
+  const i = await tx.deliveryConnectIntent.findUnique({
+    where: { id: a.intentId },
+    select: { provider: true, venueId: true, staffId: true, environment: true },
+  })
+  if (i?.provider === 'RAPPI' && i.venueId === fila.venueId) return i
+  logger.error('🚨 [Rappi] la reclamación del vínculo apunta a una intención ajena: se ignora', { linkId: fila.id, intentId: a.intentId })
+  return null
+}
+
+/**
  * Por qué una confirmación no se aplica. 🔴 `DEFERRED` ≠ `IGNORED`: un webhook CON lote que llega a una
  * reclamación nuestra que todavía no guarda su `batchId` (el 202 sigue en vuelo, o `correlacionar` aún no
  * escribe) no se puede probar AHORA, pero puede ser justo la confirmación. Rappi no documenta reintentos:
@@ -339,7 +353,9 @@ export async function confirmarTienda(
     // Es HTTP, así que va FUERA de la transacción (no se sostiene un candado mientras Rappi contesta).
     const antes = await prisma.$transaction(tx => leerVinculo(tx, r.storeId))
     if (!pendienteNuestro(antes, r, esperado)) return sinConfirmar(antes, r, esperado)
-    const intentId = (aprov(antes?.config) as Aprov).intentId
+    const reclamo = aprov(antes?.config) as Aprov
+    if (!(await prisma.$transaction(tx => intentDeLaReclamacion(tx, antes as Fila, reclamo)))) return 'IGNORED'
+    const intentId = reclamo.intentId
     let s: { ok: boolean; fallidos: string[] }
     try {
       s = await deps.suscribir(r.storeId)
@@ -358,36 +374,40 @@ export async function confirmarTienda(
   }
 
   // Vínculo Y resultado del intent, en la MISMA transacción (R5), con la fila re-validada bajo candado.
-  const hecho = await prisma.$transaction(async tx => {
-    const fila = await leerVinculo(tx, r.storeId)
-    if (!fila || !pendienteNuestro(fila, r, esperado)) return { fila, confirmacion: null }
-    const a = aprov(fila.config) as Aprov
-    let confirmacion: Confirmacion
-    let res: ResultadoRappi
-    if (r.status === 'ACTIVE') {
-      // `activatingIntentId` y `ownerAuthorizedAt` no se tocan: la reclamación de Rappi nunca los usó.
-      await tx.deliveryChannelLink.update({
-        where: { id: fila.id },
-        data: { status: DeliveryChannelStatus.ACTIVE, config: conAprov(fila.config, { ...a, confirmedAt: new Date().toISOString() }) },
-      })
-      confirmacion = 'PROMOTED'
-      res = { outcome: 'ACTIVATED' }
-    } else if (r.status === 'FAILED') {
-      await soltar(tx, fila, a)
-      confirmacion = 'REMOVED'
-      res = { outcome: 'FAILED', detalle: r.errorMessage ?? 'RAPPI_FAILED' }
-    } else {
-      await tx.deliveryChannelLink.update({
-        where: { id: fila.id },
-        data: { status: DeliveryChannelStatus.DISABLED, config: conAprov(fila.config, null) },
-      })
-      confirmacion = 'DISABLED'
-      res = { outcome: 'FAILED', detalle: 'RAPPI_INACTIVE' }
-    }
-    await anotar(tx, a.intentId, r.storeId, res)
-    return { fila, confirmacion, intentId: a.intentId }
-  })
+  const hecho = await prisma.$transaction(
+    async (tx): Promise<{ fila: Fila | null; confirmacion: Confirmacion | null; intentId?: string }> => {
+      const fila = await leerVinculo(tx, r.storeId)
+      if (!fila || !pendienteNuestro(fila, r, esperado)) return { fila, confirmacion: null }
+      const a = aprov(fila.config) as Aprov
+      if (!(await intentDeLaReclamacion(tx, fila, a))) return { fila, confirmacion: 'IGNORED' }
+      let confirmacion: Confirmacion
+      let res: ResultadoRappi
+      if (r.status === 'ACTIVE') {
+        // `activatingIntentId` y `ownerAuthorizedAt` no se tocan: la reclamación de Rappi nunca los usó.
+        await tx.deliveryChannelLink.update({
+          where: { id: fila.id },
+          data: { status: DeliveryChannelStatus.ACTIVE, config: conAprov(fila.config, { ...a, confirmedAt: new Date().toISOString() }) },
+        })
+        confirmacion = 'PROMOTED'
+        res = { outcome: 'ACTIVATED' }
+      } else if (r.status === 'FAILED') {
+        await soltar(tx, fila, a)
+        confirmacion = 'REMOVED'
+        res = { outcome: 'FAILED', detalle: r.errorMessage ?? 'RAPPI_FAILED' }
+      } else {
+        await tx.deliveryChannelLink.update({
+          where: { id: fila.id },
+          data: { status: DeliveryChannelStatus.DISABLED, config: conAprov(fila.config, null) },
+        })
+        confirmacion = 'DISABLED'
+        res = { outcome: 'FAILED', detalle: 'RAPPI_INACTIVE' }
+      }
+      await anotar(tx, a.intentId, r.storeId, res)
+      return { fila, confirmacion, intentId: a.intentId }
+    },
+  )
   if (!hecho.confirmacion) return sinConfirmar(hecho.fila, r, esperado) // cambió mientras suscribíamos
+  if (hecho.confirmacion === 'IGNORED') return 'IGNORED'
   await cerrarSiTodoFinal(hecho.intentId as string)
   return hecho.confirmacion
 }

@@ -15,7 +15,7 @@
  *     el aviso y nada más; la venta nace cuando Rappi libera el `NEW_ORDER` real. (Uber sí
  *     ingiere sus programados porque SÍ manda los montos — la divergencia es de ellos.)
  */
-import { DeliveryChannelStatus, DeliveryOrderEventStatus, DeliveryProvider } from '@prisma/client'
+import { DeliveryChannelStatus, DeliveryOrderEventStatus, DeliveryProvider, Prisma } from '@prisma/client'
 
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
@@ -125,19 +125,27 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
     }
 
     const aprobado = evento.eventType === RAPPI_EVENTS.MENU_APPROVED
-    const config = (evento.channelLink.config ?? {}) as Record<string, unknown>
-    const huellaPendiente = typeof config.rappiPendingMenuHash === 'string' ? config.rappiPendingMenuHash : null
+    const linkId = evento.channelLink.id
+    // 🔴 `config` se relee con la fila BLOQUEADA, no de la copia que trajo el evento: escribir esa copia
+    // vieja borraba lo que otro escritor guardó mientras tanto (la reclamación del aprovisionamiento).
+    const huellaPendiente = await prisma.$transaction(async tx => {
+      const [fila] = await tx.$queryRaw<Array<{ config: Prisma.JsonValue }>>`
+        SELECT "config" FROM "DeliveryChannelLink" WHERE "id" = ${linkId} FOR UPDATE`
+      const config = (
+        fila?.config && typeof fila.config === 'object' && !Array.isArray(fila.config) ? fila.config : {}
+      ) as Prisma.JsonObject
+      const huella = typeof config.rappiPendingMenuHash === 'string' ? config.rappiPendingMenuHash : null
+      const sinHuella = { config: { ...config, rappiPendingMenuHash: null } }
+      await tx.deliveryChannelLink.update({
+        where: { id: linkId },
+        // La huella se sella AQUÍ — no al publicar. Si no había pendiente (publicación manual, o de antes de
+        // este mecanismo), al menos queda la fecha. El rechazo sólo la limpia.
+        data: aprobado ? { lastMenuSyncAt: new Date(), ...(huella ? { lastMenuHash: huella, ...sinHuella } : {}) } : sinHuella,
+      })
+      return huella
+    })
 
     if (aprobado) {
-      await prisma.deliveryChannelLink.update({
-        where: { id: evento.channelLink.id },
-        data: {
-          lastMenuSyncAt: new Date(),
-          // La huella se sella AQUÍA — no al publicar. Si no había pendiente (publicación
-          // manual, o de antes de este mecanismo), al menos queda la fecha.
-          ...(huellaPendiente ? { lastMenuHash: huellaPendiente, config: { ...config, rappiPendingMenuHash: null } } : {}),
-        },
-      })
       logger.info('📋 [Rappi] menú APROBADO — ahora sí está publicado', {
         eventRowId,
         linkId: evento.channelLink.id,
@@ -145,10 +153,6 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
         selladoConHuella: Boolean(huellaPendiente),
       })
     } else {
-      await prisma.deliveryChannelLink.update({
-        where: { id: evento.channelLink.id },
-        data: { config: { ...config, rappiPendingMenuHash: null } },
-      })
       // Sin huella sellada, `menuSyncStatusOf` seguirá diciendo NUNCA_PUBLICADO/desfasado —
       // que es la verdad, y es lo que hace visible el problema en el dashboard y el MCP.
       logger.error('🚨 [Rappi] menú RECHAZADO — y Rappi NO dice por qué. Revisar contra las reglas de rappi.menuMapper', {
