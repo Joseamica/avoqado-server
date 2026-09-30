@@ -5,14 +5,22 @@
  * Esto prueba lo que sólo la base puede decir:
  *  (a) dos intents que reclaman la MISMA tienda a la vez ⇒ uno PROVISIONING y el otro CLAIMED_BY_OTHER;
  *  (b) el webhook ACTIVE y el re-chequeo de /result sobre el mismo vínculo ⇒ uno PROMOTED y el otro IGNORED;
- *  (c) el que llega tarde con SUBSCRIBE_FAILED no degrada el ACTIVATED (la guarda del `WHERE` de `anotar`).
+ *  (c) el que llega tarde con SUBSCRIBE_FAILED no degrada el ACTIVATED (la guarda del `WHERE` de `anotar`);
+ *  (d) editar el canal (PATCH de config) mientras el aprovisionamiento guarda su lote: el PATCH espera el
+ *      candado y no borra el `batchId` (H2).
  *
  * La red de Rappi va stubbeada (aprovisionar y suscribir); todo lo demás es SQL real por el `prisma` real.
  * Sólo crea filas propias (sufijo único) y las borra en `afterAll`, falle o no.
  */
 import { DeliveryChannelStatus, type DeliveryConnectIntent, type Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { logAction } from '@/services/dashboard/activity-log.service'
+import { updateChannelLink } from '@/services/delivery-channels/core/deliveryChannelLink.service'
 import { activarSeleccion, confirmarTienda, type ProvisioningDeps } from '@/services/delivery-channels/providers/rappi/rappi.provisioning'
+
+// La bitácora no es lo que se prueba aquí, y el staff de estas intenciones no existe: sin esto quedarían filas de
+// ActivityLog sueltas en la base de pruebas. Sí se cuenta cuántas veces se registró la conexión (sólo el ganador).
+jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 
 jest.setTimeout(30_000)
 
@@ -236,6 +244,7 @@ describe('Rappi self-onboarding — candado de fila contra Postgres', () => {
 
     expect(suscribir).toHaveBeenCalledTimes(2)
     expect([webhook, rechequeo].sort()).toEqual(['IGNORED', 'PROMOTED'])
+    expect(logAction).toHaveBeenCalledTimes(1) // la conexión se registra UNA vez: la del ganador
     expect((await vinculo(s)).status).toBe(DeliveryChannelStatus.ACTIVE)
     expect(await resultadoDe(i.id, s)).toBe('ACTIVATED')
     expect((await prisma.deliveryConnectIntent.findUniqueOrThrow({ where: { id: i.id } })).state).toBe('CONSUMED')
@@ -273,5 +282,48 @@ describe('Rappi self-onboarding — candado de fila contra Postgres', () => {
     expect(await Promise.all([webhook, rechequeo])).toEqual(['PROMOTED', 'SUBSCRIBE_FAILED'])
     expect(await resultadoDe(i.id, s)).toBe('ACTIVATED')
     expect((await vinculo(s)).status).toBe(DeliveryChannelStatus.ACTIVE)
+  })
+
+  it('(d) un PATCH de config mientras el aprovisionamiento guarda su lote: espera el candado y no borra el batchId', async () => {
+    const s = tienda('d')
+    const reclamacion = { intentId: `i-d-${sufijo}`, since: new Date().toISOString() }
+    const link = await prisma.deliveryChannelLink.create({
+      data: {
+        venueId,
+        provider: 'RAPPI',
+        externalLocationId: s,
+        webhookSecret: 'x',
+        status: DeliveryChannelStatus.PENDING,
+        config: { rappiProvisioning: reclamacion },
+      },
+    })
+    // Lo que hace `correlacionar`: con la fila bloqueada, guarda el lote. El PATCH llega en medio.
+    let tomar!: (pid: number) => void
+    const pid = new Promise<number>(r => (tomar = r))
+    let seguir!: () => void
+    const puedeSeguir = new Promise<void>(r => (seguir = r))
+    const correlacion = prisma.$transaction(
+      async t => {
+        await t.$queryRaw`SELECT "id" FROM "DeliveryChannelLink" WHERE "id" = ${link.id} FOR UPDATE`
+        tomar((await t.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0].pid)
+        await puedeSeguir
+        await t.deliveryChannelLink.update({
+          where: { id: link.id },
+          data: { config: { rappiProvisioning: { ...reclamacion, batchId: 'b-d' } } },
+        })
+      },
+      { timeout: 20_000 },
+    )
+    const gate = await pid // el candado ya es de la correlación ANTES de que llegue el PATCH
+    const patch = updateChannelLink(venueId, link.id, { config: { note: 'horario nuevo' } })
+    try {
+      await esperarBloqueadas(gate, 1)
+    } finally {
+      seguir()
+    }
+    await Promise.all([correlacion, patch])
+
+    // Sin el `FOR UPDATE` del PATCH, su copia leída ANTES del lote lo borraba al escribir.
+    expect((await vinculo(s)).config).toEqual({ note: 'horario nuevo', rappiProvisioning: { ...reclamacion, batchId: 'b-d' } })
   })
 })
