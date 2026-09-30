@@ -1,0 +1,261 @@
+/**
+ * Integration (Postgres REAL) — el candado de fila del self-onboarding de Rappi (F3 de la revisión final).
+ *
+ * Las pruebas unitarias corren sobre una base en memoria que NO sabe bloquear: ahí `FOR UPDATE` es texto.
+ * Esto prueba lo que sólo la base puede decir:
+ *  (a) dos intents que reclaman la MISMA tienda a la vez ⇒ uno PROVISIONING y el otro CLAIMED_BY_OTHER;
+ *  (b) el webhook ACTIVE y el re-chequeo de /result sobre el mismo vínculo ⇒ uno PROMOTED y el otro IGNORED;
+ *  (c) el que llega tarde con SUBSCRIBE_FAILED no degrada el ACTIVATED (la guarda del `WHERE` de `anotar`).
+ *
+ * La red de Rappi va stubbeada (aprovisionar y suscribir); todo lo demás es SQL real por el `prisma` real.
+ * Sólo crea filas propias (sufijo único) y las borra en `afterAll`, falle o no.
+ */
+import { DeliveryChannelStatus, type DeliveryConnectIntent, type Prisma } from '@prisma/client'
+import prisma from '@/utils/prismaClient'
+import { activarSeleccion, confirmarTienda, type ProvisioningDeps } from '@/services/delivery-channels/providers/rappi/rappi.provisioning'
+
+jest.setTimeout(30_000)
+
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
+
+describe('Rappi self-onboarding — candado de fila contra Postgres', () => {
+  const sufijo = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`
+  const tienda = (n: string) => `rappi-it-${sufijo}-${n}`
+  let orgId: string
+  let venueId: string
+
+  beforeAll(async () => {
+    const db = (await prisma.$queryRaw<Array<{ db: string }>>`SELECT current_database() AS db`)[0].db
+    // 🔴 La base es compartida por ~20 sesiones: fuera de la de pruebas, no se toca nada.
+    if (db !== 'av-db-25-test') throw new Error(`Base inesperada: ${db}`)
+    orgId = (
+      await prisma.organization.create({ data: { name: `Org rappi-it ${sufijo}`, email: `rappi-it-${sufijo}@t.mx`, phone: '5555555555' } })
+    ).id
+    venueId = (await prisma.venue.create({ data: { organizationId: orgId, name: `V rappi-it ${sufijo}`, slug: `v-rappi-it-${sufijo}` } }))
+      .id
+  })
+
+  afterAll(async () => {
+    try {
+      await prisma.deliveryChannelLink.deleteMany({ where: { venueId } })
+      await prisma.deliveryConnectIntent.deleteMany({ where: { venueId } })
+      await prisma.venue.deleteMany({ where: { id: venueId } })
+      await prisma.organization.deleteMany({ where: { id: orgId } })
+    } catch {
+      /* fixtures */
+    }
+  })
+
+  const intentActivando = (storeId: string, resultsJson?: Prisma.InputJsonObject) =>
+    prisma.deliveryConnectIntent.create({
+      data: {
+        venueId,
+        staffId: `rappi-it-staff-${sufijo}`,
+        provider: 'RAPPI',
+        environment: 'SANDBOX',
+        clientId: 'cid',
+        state: 'ACTIVATING',
+        expiresAt: new Date(Date.now() + 10 * 60_000),
+        selectionJson: [storeId],
+        ...(resultsJson ? { resultsJson } : {}),
+      },
+    })
+
+  const depsPara = (storeId: string): ProvisioningDeps & { aprovisionar: jest.Mock } => ({
+    aprovisionar: jest.fn(async (_t: string, ts: Array<{ storeId: string }>) => ({
+      batchId: `b-${sufijo}`,
+      aceptadas: ts.map(t => ({ storeId: t.storeId, integrationId: `int-${t.storeId}` })),
+      rechazadas: [],
+      inciertas: [],
+    })),
+    suscribir: jest.fn(async () => ({ ok: true, fallidos: [] })),
+    tiendasEscribibles: [storeId],
+  })
+
+  const vinculo = (storeId: string) =>
+    prisma.deliveryChannelLink.findUniqueOrThrow({
+      where: { provider_externalLocationId: { provider: 'RAPPI', externalLocationId: storeId } },
+    })
+  const resultadoDe = async (intentId: string, storeId: string) =>
+    (
+      (await prisma.deliveryConnectIntent.findUniqueOrThrow({ where: { id: intentId } })).resultsJson as Record<string, { outcome: string }>
+    )[storeId]?.outcome
+
+  /**
+   * Espera a que `n` sesiones estén BLOQUEADAS detrás de la sesión `pid` (la puerta). Es una fila de espera:
+   * la segunda espera a la primera, no a la puerta — por eso se sigue la cadena entera.
+   */
+  async function esperarBloqueadas(pid: number, n: number) {
+    const hasta = Date.now() + 4_000 // < los 5 s de timeout de una transacción interactiva de Prisma
+    while (Date.now() < hasta) {
+      const [{ c }] = await prisma.$queryRaw<Array<{ c: number }>>`
+        WITH RECURSIVE detras(pid) AS (
+          SELECT pid FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids(pid))
+          UNION
+          SELECT a.pid FROM pg_stat_activity a JOIN detras d ON d.pid = ANY(pg_blocking_pids(a.pid))
+        ) SELECT count(*)::int AS c FROM detras`
+      if (c >= n) return
+      await sleep(25)
+    }
+    throw new Error(`Las ${n} sesiones no quedaron esperando el candado de la fila`)
+  }
+
+  /** Una tercera transacción que sostiene el candado de la fila hasta que alguien la suelte. */
+  function puerta(linkId: string) {
+    let abrir!: () => void
+    const abierta = new Promise<void>(r => (abrir = r))
+    let tomar!: (pid: number) => void
+    const pid = new Promise<number>(r => (tomar = r))
+    const tx = prisma.$transaction(
+      async t => {
+        await t.$queryRaw`SELECT "id" FROM "DeliveryChannelLink" WHERE "id" = ${linkId} FOR UPDATE`
+        tomar((await t.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0].pid)
+        await abierta
+      },
+      { timeout: 20_000 },
+    )
+    return {
+      pid,
+      soltar: () => {
+        abrir()
+        return tx
+      },
+    }
+  }
+  /** La suelta en cuanto `n` sesiones esperan detrás de ella; si no llegan, lanza (y la suelta igual). */
+  async function soltarCuandoEsperen(p: ReturnType<typeof puerta>, n: number) {
+    try {
+      await esperarBloqueadas(await p.pid, n)
+    } finally {
+      await p.soltar()
+    }
+  }
+
+  it('(a) dos intents reclaman la misma tienda a la vez: una PROVISIONING, la otra CLAIMED_BY_OTHER, y sólo una va a Rappi', async () => {
+    const s = tienda('a')
+    // La fila YA existe (DISABLED, libre): el INSERT no serializa nada, sólo el `FOR UPDATE` lo hace.
+    const link = await prisma.deliveryChannelLink.create({
+      data: { venueId, provider: 'RAPPI', externalLocationId: s, webhookSecret: 'x', status: DeliveryChannelStatus.DISABLED },
+    })
+    const [i1, i2] = [await intentActivando(s), await intentActivando(s)]
+    const [d1, d2] = [depsPara(s), depsPara(s)]
+
+    // Una tercera transacción sostiene el candado hasta que las DOS reclamaciones estén esperándolo.
+    const p = puerta(link.id)
+    await p.pid
+    const a = activarSeleccion(i1 as DeliveryConnectIntent, 'idt', [{ storeId: s, name: 'T', integrated: false }], d1)
+    const b = activarSeleccion(i2 as DeliveryConnectIntent, 'idt', [{ storeId: s, name: 'T', integrated: false }], d2)
+    await soltarCuandoEsperen(p, 2)
+    const [ra, rb] = await Promise.all([a, b])
+
+    expect([ra[s].outcome, rb[s].outcome].sort()).toEqual(['CLAIMED_BY_OTHER', 'PROVISIONING'])
+    const [ganador, perdedor] = ra[s].outcome === 'PROVISIONING' ? [i1, i2] : [i2, i1]
+    expect(d1.aprovisionar.mock.calls.length + d2.aprovisionar.mock.calls.length).toBe(1)
+    const fila = await vinculo(s)
+    expect(fila.status).toBe(DeliveryChannelStatus.PENDING)
+    expect((fila.config as { rappiProvisioning: Record<string, unknown> }).rappiProvisioning).toMatchObject({
+      intentId: ganador.id,
+      statusPrevio: 'DISABLED',
+      batchId: `b-${sufijo}`,
+    })
+    expect(await resultadoDe(ganador.id, s)).toBe('PROVISIONING')
+    expect(await resultadoDe(perdedor.id, s)).toBe('CLAIMED_BY_OTHER')
+  })
+
+  it('(a) también sin fila previa: el INSERT … ON CONFLICT deja una sola reclamación', async () => {
+    const s = tienda('a2')
+    const [i1, i2] = [await intentActivando(s), await intentActivando(s)]
+    const [d1, d2] = [depsPara(s), depsPara(s)]
+    const [ra, rb] = await Promise.all([
+      activarSeleccion(i1 as DeliveryConnectIntent, 'idt', [{ storeId: s, name: 'T', integrated: false }], d1),
+      activarSeleccion(i2 as DeliveryConnectIntent, 'idt', [{ storeId: s, name: 'T', integrated: false }], d2),
+    ])
+    expect([ra[s].outcome, rb[s].outcome].sort()).toEqual(['CLAIMED_BY_OTHER', 'PROVISIONING'])
+    expect(d1.aprovisionar.mock.calls.length + d2.aprovisionar.mock.calls.length).toBe(1)
+    expect(await prisma.deliveryChannelLink.count({ where: { provider: 'RAPPI', externalLocationId: s } })).toBe(1)
+  })
+
+  /** Un vínculo PENDING ya reclamado y correlacionado, con su intent esperando a Rappi. */
+  async function reclamadoYCorrelacionado(s: string) {
+    const i = await intentActivando(s, { [s]: { outcome: 'PROVISIONING' } })
+    await prisma.deliveryChannelLink.create({
+      data: {
+        venueId,
+        provider: 'RAPPI',
+        externalLocationId: s,
+        webhookSecret: 'x',
+        status: DeliveryChannelStatus.PENDING,
+        config: {
+          rappiProvisioning: { intentId: i.id, since: new Date().toISOString(), batchId: 'b1', integrationId: 'int1', creado: true },
+        },
+      },
+    })
+    return i
+  }
+
+  it('(b) webhook ACTIVE y re-chequeo de /result a la vez: uno PROMOTED, el otro IGNORED, y el resultado queda ACTIVATED', async () => {
+    const s = tienda('b')
+    const i = await reclamadoYCorrelacionado(s)
+    const link = await vinculo(s)
+    // Los dos pasan la primera lectura (la fila sigue PENDING) y suscriben; ENTONCES se cierra la puerta, y los
+    // dos llegan a la transacción que promueve con la fila bloqueada: sólo el `FOR UPDATE` los pone en fila.
+    let llegaron = 0
+    let p: ReturnType<typeof puerta> | undefined
+    let ambos!: () => void
+    const listos = new Promise<void>(r => (ambos = r))
+    const suscribir = jest.fn(async () => {
+      if (++llegaron === 2) {
+        p = puerta(link.id)
+        await p.pid
+        ambos()
+      }
+      await listos
+      return { ok: true, fallidos: [] }
+    })
+    const w = confirmarTienda({ storeId: s, status: 'ACTIVE', batchId: 'b1' }, { suscribir })
+    const rc = confirmarTienda({ storeId: s, status: 'ACTIVE', integrationId: 'int1' }, { suscribir }, { intentId: i.id })
+    await listos
+    await soltarCuandoEsperen(p!, 2)
+    const [webhook, rechequeo] = await Promise.all([w, rc])
+
+    expect(suscribir).toHaveBeenCalledTimes(2)
+    expect([webhook, rechequeo].sort()).toEqual(['IGNORED', 'PROMOTED'])
+    expect((await vinculo(s)).status).toBe(DeliveryChannelStatus.ACTIVE)
+    expect(await resultadoDe(i.id, s)).toBe('ACTIVATED')
+    expect((await prisma.deliveryConnectIntent.findUniqueOrThrow({ where: { id: i.id } })).state).toBe('CONSUMED')
+  })
+
+  it('(c) el re-chequeo que falla al suscribir DESPUÉS de que el webhook promovió no degrada el ACTIVATED', async () => {
+    const s = tienda('c')
+    const i = await reclamadoYCorrelacionado(s)
+    let entroRechequeo!: () => void
+    const rechequeoEntro = new Promise<void>(r => (entroRechequeo = r))
+    let webhookTermino!: () => void
+    const terminoWebhook = new Promise<void>(r => (webhookTermino = r))
+
+    const webhook = confirmarTienda(
+      { storeId: s, status: 'ACTIVE', batchId: 'b1' },
+      {
+        suscribir: async () => {
+          await rechequeoEntro
+          return { ok: true, fallidos: [] }
+        },
+      },
+    ).finally(() => webhookTermino())
+    const rechequeo = confirmarTienda(
+      { storeId: s, status: 'ACTIVE', integrationId: 'int1' },
+      {
+        suscribir: async () => {
+          entroRechequeo()
+          await terminoWebhook
+          return { ok: false, fallidos: ['NEW_ORDER'] }
+        },
+      },
+      { intentId: i.id },
+    )
+
+    expect(await Promise.all([webhook, rechequeo])).toEqual(['PROMOTED', 'SUBSCRIBE_FAILED'])
+    expect(await resultadoDe(i.id, s)).toBe('ACTIVATED')
+    expect((await vinculo(s)).status).toBe(DeliveryChannelStatus.ACTIVE)
+  })
+})
