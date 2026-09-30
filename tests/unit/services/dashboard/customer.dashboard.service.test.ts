@@ -118,6 +118,20 @@ describe('Customer Dashboard Service', () => {
       expect(prismaMock.$transaction).toHaveBeenCalled()
     })
 
+    // Caso real (prod, 28-sep-2026): Amaena tiene un cliente con 3 cuentas CANCELADAS que conservan su saldo
+    // ($2,871). Cancelar no pone el saldo en 0, así que el filtro «con saldo pendiente» y el saldo mostrado
+    // le cobraban al cliente ventas que ya no existen.
+    it('🔴 el filtro «con saldo pendiente» y el saldo mostrado no cuentan cuentas canceladas', async () => {
+      prismaMock.$transaction.mockResolvedValue([[], 0] as any)
+
+      await getCustomers('venue-123', 1, 10, undefined, undefined, undefined, undefined, 'createdAt', 'desc', true)
+
+      const args = prismaMock.customer.findMany.mock.calls[0][0] as any
+      const noCancelada = { status: { notIn: ['CANCELLED', 'DELETED'] } }
+      expect(args.where.orderAssociations.some.order).toMatchObject(noCancelada)
+      expect(args.select.orderAssociations.where.order).toMatchObject(noCancelada)
+    })
+
     it('should calculate pagination metadata correctly (last page)', async () => {
       prismaMock.$transaction.mockResolvedValue([[], 25] as any)
 
@@ -901,6 +915,31 @@ describe('settleCustomerBalance — CAS por orden + vale de deducción', () => {
     )
     expect(prismaMock.payment.create).not.toHaveBeenCalled()
     expect(createSalePostingMasivoMock).not.toHaveBeenCalled()
+  })
+
+  // Una cuenta cancelada no se debe. Si «Liquidar saldo» la tomara, la marcaría PAGADA y registraría en caja un
+  // efectivo que nunca entró (con los datos de Amaena del 28-sep: $2,871 de faltante inventado).
+  it('🔴 las candidatas a liquidar excluyen cuentas canceladas', async () => {
+    prismaMock.order.updateMany.mockResolvedValue({ count: 0 } as any)
+
+    await settleCustomerBalance('venue-1', CLIENTE)
+
+    const args = prismaMock.customer.findFirst.mock.calls[0][0] as any
+    expect(args.include.orderAssociations.where.order).toMatchObject({ status: { notIn: ['CANCELLED', 'DELETED'] } })
+  })
+
+  it('🔴 una cuenta que se canceló después de leer al cliente no se liquida: ni pago ni PAID', async () => {
+    // El CAS es la decisión atómica: la cuenta del fixture ya está CANCELLED, así que sólo se libra si el
+    // CAS la excluye por estado.
+    const estadoDeLaCuenta = 'CANCELLED'
+    prismaMock.order.updateMany.mockImplementation(
+      async ({ where }: any) => ({ count: where.status?.notIn?.includes(estadoDeLaCuenta) ? 0 : 1 }) as any,
+    )
+
+    const result = await settleCustomerBalance('venue-1', CLIENTE)
+
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(result.settledOrderCount).toBe(0)
   })
 
   it('la orden que SÍ gana el CAS crea su pago y su vale', async () => {

@@ -5,6 +5,7 @@ import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { deductStockForModifiers, deductStockForRecipe, OrderModifierForInventory } from './rawMaterial.service'
 import { logAction } from './activity-log.service'
+import { ensureQuantityInventoryRow } from './quantityInventoryRow'
 
 /**
  * Product Inventory Integration Service
@@ -22,9 +23,11 @@ export type InventoryMethod = 'QUANTITY' | 'RECIPE'
  * Determine inventory method based on product configuration
  * Returns null if product doesn't track inventory
  */
-export async function getProductInventoryMethod(productId: string): Promise<InventoryMethod | null> {
+export async function getProductInventoryMethod(productId: string, venueId?: string): Promise<InventoryMethod | null> {
+  // `venueId` (opcional para los caminos internos que ya validaron la orden): con él, un producto de
+  // otro negocio no existe (404). La ruta del dashboard SIEMPRE lo pasa.
   const product = await prisma.product.findUnique({
-    where: { id: productId },
+    where: { id: productId, ...(venueId ? { venueId } : {}) },
     include: {
       recipe: {
         select: {
@@ -372,7 +375,8 @@ async function deductRecipeBasedInventory(
  * Returns different information based on inventory method
  */
 export async function getProductInventoryStatus(venueId: string, productId: string) {
-  const inventoryMethod = await getProductInventoryMethod(productId)
+  // Con `venueId`, un producto de otro negocio es 404 aquí, antes de leer su receta o existencias.
+  const inventoryMethod = await getProductInventoryMethod(productId, venueId)
 
   const product = await prisma.product.findUnique({
     where: { id: productId },
@@ -592,9 +596,10 @@ export async function shouldProductUseInventory(venueId: string) {
  * Set inventory method for a product
  * ✅ WORLD-CLASS: Updates dedicated column (not JSON!)
  */
-export async function setProductInventoryMethod(productId: string, inventoryMethod: InventoryMethod) {
+export async function setProductInventoryMethod(venueId: string, productId: string, inventoryMethod: InventoryMethod) {
+  // 🔴 Por negocio: el permiso se autorizó en `venueId`; un producto de otro negocio no existe.
   const product = await prisma.product.findUnique({
-    where: { id: productId },
+    where: { id: productId, venueId },
   })
 
   if (!product) {
@@ -602,12 +607,16 @@ export async function setProductInventoryMethod(productId: string, inventoryMeth
   }
 
   // ✅ Write to dedicated column (world-class pattern)
-  await prisma.product.update({
-    where: { id: productId },
-    data: {
-      trackInventory: true, // Enable tracking
-      inventoryMethod, // Set method (QUANTITY | RECIPE)
-    },
+  await prisma.$transaction(async tx => {
+    const updated = await tx.product.update({
+      where: { id: productId },
+      data: {
+        trackInventory: true, // Enable tracking
+        inventoryMethod, // Set method (QUANTITY | RECIPE)
+      },
+    })
+    // Si el asistente se abandona tras este paso, el producto ya es «por cantidad»: necesita su fila.
+    await ensureQuantityInventoryRow(tx, updated)
   })
 
   logAction({

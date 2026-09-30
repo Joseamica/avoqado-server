@@ -16,9 +16,12 @@
  * - El preview delega en el MISMO motor puro que consumirá la app (simulador honesto).
  */
 import { Prisma, PrinterConnectionType } from '@prisma/client'
-import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ForbiddenError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { logAction } from './activity-log.service'
+import { isActiveSuperAdmin } from '../../mcp/scope'
+import { venueHasFeatureAccess } from '../access/basePlan.service'
+import { PANTALLA_ABIERTA_A_CLIENTES } from '../kds/kitchenDisplayRelease'
 import { buildPrintConfig, routingConfigFrom } from '../printing/printConfig.service'
 import { buildTicketPlans, RoutingItemInput } from '../printing/printRouting.engine'
 import {
@@ -258,19 +261,28 @@ export async function updateStation(venueId: string, stationId: string, input: U
   return station
 }
 
-/** Aviso que acompaña a la casilla mientras la etapa 3 no exista (spec 2026-09-24 §4 y §6). */
+/**
+ * Aviso que acompaña a la casilla mientras la puerta de lanzamiento siga cerrada (`PANTALLA_ABIERTA_A_CLIENTES`). La
+ * casilla pide `printers:manage`, pero PRENDER pasa por esa puerta y por el plan; apagar siempre se puede.
+ */
 export const KITCHEN_DISPLAY_NOT_READY_NOTICE =
-  'La pantalla de cocina todavía no está lista para clientes. Antes de prenderla a un cliente, falta la etapa 3 ' +
-  '(docs/superpowers/specs/2026-09-24-pantalla-de-cocina-como-estacion-design.md §6).'
+  'La pantalla de cocina todavía no está lista para clientes. La etapa 3 se construye por fases ' +
+  '(docs/superpowers/specs/2026-09-27-kds-etapa-3-design.md); hasta pasar su puerta de calidad sólo Avoqado la prende.'
 
 /**
- * Prende o apaga «Se atiende con pantalla de cocina» en UNA estación. Endpoint aparte (no el PUT de la
- * estación) para que el candado de rol viva en la ruta: en la etapa 1 sólo SUPERADMIN.
+ * Prende o apaga «Se atiende con pantalla de cocina» en UNA estación (etapa 3: permiso `printers:manage` en la ruta).
+ * PRENDER pasa por la puerta de lanzamiento y por el plan Pro; apagar siempre se puede. Al pasar de apagada a
+ * prendida se sella `kitchenDisplaySince`: la pantalla sólo enseña lo que llegue desde ese momento.
  */
 export async function setKitchenDisplay(venueId: string, stationId: string, enabled: boolean, performedBy?: string) {
   const previous = await prisma.printStation.findFirst({ where: { id: stationId, venueId } })
   if (!previous) throw new NotFoundError('Estación no encontrada')
-  const station = await prisma.printStation.update({ where: { id: stationId }, data: { hasKitchenDisplay: enabled } })
+  const prende = enabled && !previous.hasKitchenDisplay
+  if (prende) await assertPuedePrenderPantalla(venueId, performedBy)
+  const station = await prisma.printStation.update({
+    where: { id: stationId },
+    data: { hasKitchenDisplay: enabled, ...(prende ? { kitchenDisplaySince: new Date() } : {}) },
+  })
   void logAction({
     staffId: performedBy ?? null,
     venueId,
@@ -280,6 +292,20 @@ export async function setKitchenDisplay(venueId: string, stationId: string, enab
     data: { enabled, previous: previous.hasKitchenDisplay } as Prisma.InputJsonValue,
   })
   return station
+}
+
+async function assertPuedePrenderPantalla(venueId: string, performedBy?: string): Promise<void> {
+  // SUPERADMIN (en la base, no en el token) prende antes del lanzamiento: pilotos y QA de Avoqado.
+  if (performedBy && (await isActiveSuperAdmin(performedBy))) return
+  if (!PANTALLA_ABIERTA_A_CLIENTES) {
+    throw new ForbiddenError(
+      'La pantalla de cocina todavía no está disponible para clientes. Pídele a Avoqado que la active.',
+      'KITCHEN_DISPLAY_NOT_RELEASED',
+    )
+  }
+  if (!(await venueHasFeatureAccess(venueId, 'KITCHEN_DISPLAY'))) {
+    throw new ForbiddenError('La pantalla de cocina es del plan Pro. Mejora tu plan para prenderla.', 'KITCHEN_DISPLAY_REQUIRES_PRO')
+  }
 }
 
 export async function deleteStation(venueId: string, stationId: string, performedBy?: string) {

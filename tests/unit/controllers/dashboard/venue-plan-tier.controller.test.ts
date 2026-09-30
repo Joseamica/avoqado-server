@@ -11,15 +11,13 @@
  */
 jest.mock('@/services/access/basePlan.service', () => ({
   getVenuePlanInfo: jest.fn(),
-  getVenueGrantedFeatureCodes: jest.fn(),
 }))
 
 import type { NextFunction, Request, Response } from 'express'
-import { getVenueGrantedFeatureCodes, getVenuePlanInfo } from '@/services/access/basePlan.service'
+import { getVenuePlanInfo } from '@/services/access/basePlan.service'
 import { getVenuePlanTier } from '@/controllers/dashboard/venue.dashboard.controller'
 
 const mockGetVenuePlanInfo = getVenuePlanInfo as jest.Mock
-const mockGranted = getVenueGrantedFeatureCodes as jest.Mock
 
 function makeRes(): Response {
   const res: Record<string, jest.Mock> = {}
@@ -32,12 +30,18 @@ const makeReq = (venueId: string) => ({ params: { venueId } }) as unknown as Req
 
 beforeEach(() => {
   jest.clearAllMocks()
-  mockGranted.mockResolvedValue([])
 })
 
 describe('getVenuePlanTier controller', () => {
   it('returns ONLY the gating signal { tier, grandfathered, exempt } from getVenuePlanInfo', async () => {
-    const plan = { tier: 'PREMIUM', grandfathered: false, exempt: false }
+    const plan = {
+      tier: 'PREMIUM',
+      grandfathered: false,
+      exempt: false,
+      grantedFeatureCodes: [],
+      accessSchemaVersion: 1,
+      accessObservedAt: '2026-09-27T10:00:00Z',
+    }
     mockGetVenuePlanInfo.mockResolvedValue(plan)
     const res = makeRes()
 
@@ -53,7 +57,7 @@ describe('getVenuePlanTier controller', () => {
   })
 
   it('grandfathered venue → exempt:true surfaced (the legacy bypass sub-ADMIN roles can now read)', async () => {
-    mockGetVenuePlanInfo.mockResolvedValue({ tier: 'FREE', grandfathered: true, exempt: true })
+    mockGetVenuePlanInfo.mockResolvedValue({ tier: 'FREE', grandfathered: true, exempt: true, grantedFeatureCodes: [] })
     const res = makeRes()
 
     await getVenuePlanTier(makeReq('mindform'), res, jest.fn() as unknown as NextFunction)
@@ -77,8 +81,12 @@ describe('getVenuePlanTier controller', () => {
   })
 
   it('🔴 lleva los CÓDIGOS de las funciones sueltas pagadas, para que un empleado no vea «contrátala» sobre algo ya pagado', async () => {
-    mockGetVenuePlanInfo.mockResolvedValue({ tier: 'FREE', grandfathered: false, exempt: false })
-    mockGranted.mockResolvedValue(['INVENTORY_TRACKING'])
+    mockGetVenuePlanInfo.mockResolvedValue({
+      tier: 'FREE',
+      grandfathered: false,
+      exempt: false,
+      grantedFeatureCodes: ['INVENTORY_TRACKING'],
+    })
     const res = makeRes()
 
     await getVenuePlanTier(makeReq('venue-1'), res, jest.fn() as unknown as NextFunction)

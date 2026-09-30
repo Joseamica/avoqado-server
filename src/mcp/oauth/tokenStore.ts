@@ -15,6 +15,12 @@ export interface AuthCodeData {
   resource?: string
   /** Sólo al LEER (`createdAt` de la fila): el corte de sesión se compara contra esto. */
   issuedAt?: Date
+  /**
+   * Sólo al CREAR: cuándo se verificó la identidad (contraseña, sesión o selector). Va a `createdAt`,
+   * que es la fecha de concesión de toda la cadena (Codex ronda 9, P1: con la del insert, un cambio
+   * de contraseña entre verificar y crear el código dejaba viva la cadena).
+   */
+  grantedAt?: Date
 }
 
 export async function createAuthCode(d: AuthCodeData): Promise<{ code: string }> {
@@ -30,6 +36,7 @@ export async function createAuthCode(d: AuthCodeData): Promise<{ code: string }>
       scopes: d.scopes,
       resource: d.resource ?? null,
       expiresAt: new Date(Date.now() + AUTH_CODE_TTL_SECONDS * 1000),
+      ...(d.grantedAt ? { createdAt: d.grantedAt } : {}),
     },
   })
   return { code }
@@ -78,6 +85,13 @@ export interface RefreshData {
   scopes: string[]
   /** Sólo al LEER (`createdAt` de la fila): el corte de sesión se compara contra esto. */
   issuedAt?: Date
+  /**
+   * Sólo al CREAR: la fecha de la autorización ORIGINAL de la cadena, que el reemplazo hereda en
+   * `createdAt`. 🔴 Con la fecha de hoy, un cambio de contraseña entre validar y emitir dejaba al
+   * reemplazo «posterior» al corte y la cadena seguía rotando (Codex ronda 8, P1). `createdAt` sólo
+   * se usa como fecha de concesión (la limpieza va por `expiresAt`).
+   */
+  grantedAt?: Date
 }
 
 export async function createRefreshToken(d: RefreshData): Promise<{ token: string }> {
@@ -90,6 +104,7 @@ export async function createRefreshToken(d: RefreshData): Promise<{ token: strin
       activeOrg: d.activeOrg,
       scopes: d.scopes,
       expiresAt: new Date(Date.now() + REFRESH_TTL_SECONDS * 1000),
+      ...(d.grantedAt ? { createdAt: d.grantedAt } : {}),
     },
   })
   return { token }

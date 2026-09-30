@@ -1,3 +1,4 @@
+import { publicOffers as publicHybridOffers, publicOffer as publicHybridOffer } from '../controllers/hybridBilling.controller'
 import express, { Router } from 'express'
 import { z } from 'zod'
 import cors from 'cors'
@@ -86,6 +87,8 @@ import * as passkitController from '../controllers/public/passkit.public.control
 import { getFeaturedLaunchOffer, getLaunchOffer } from '../controllers/public/launchOffer.public.controller'
 import { optionalLaunchCampaignCode, utmSchema } from '../schemas/acquisition.schema'
 import { featuredVerticalParams, LANDING_SLUG_RE } from '../services/launchCampaigns/launchCampaign.schema'
+import { featureCatalogQuery } from '../services/launchCampaigns/featureCatalog.service'
+import { getFeatureCatalog } from '../controllers/public/featureCatalog.public.controller'
 
 const router = Router()
 
@@ -107,6 +110,10 @@ const authLimit = rateLimit({ windowMs: 60_000, max: 10, keyGenerator: porVisita
 // muchísimas visitas comparten pocas IPs de salida. Con `readLimit` (60/min) el destino del
 // CTA pagado se apagaría solo en cuanto el anuncio funcionara — el peor momento posible.
 const offerReadLimit = rateLimit({ windowMs: 60_000, max: 600, standardHeaders: true, legacyHeaders: false })
+
+router.get('/feature-catalog', offerReadLimit, validateRequest(z.object({ query: featureCatalogQuery })), getFeatureCatalog)
+router.get('/hybrid-offers', offerReadLimit, publicHybridOffers)
+router.get('/hybrid-offers/:slug', offerReadLimit, publicHybridOffer)
 
 // CFDI stamping costs money — tight per-IP cap to prevent abuse
 const cfdiLimit = rateLimit({ windowMs: 60_000, max: 5, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })

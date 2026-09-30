@@ -27,6 +27,15 @@ import {
   updateLaunchCampaign,
 } from '../../services/launchCampaigns/launchCampaign.service'
 import { activateLaunchCampaign, previewLaunchOffer } from '../../services/launchCampaigns/launchCampaignStripe.service'
+import { previewHybridOffer } from '../../services/launchCampaigns/hybridOffer.service'
+
+export const hybridPreview = (req: Request, res: Response, next: NextFunction) => {
+  try {
+    res.json({ success: true, data: previewHybridOffer(req.body) })
+  } catch (error) {
+    next(error)
+  }
+}
 
 /**
  * Traduce un `ZodError` a un 400 legible.

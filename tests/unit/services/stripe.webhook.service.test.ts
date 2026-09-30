@@ -76,6 +76,7 @@ import { handleStripeWebhookEvent, handleCustomerDeleted, handleSubscriptionUpda
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    hybridPurchase: { findUnique: jest.fn().mockResolvedValue(null) },
     billingObligationConflict: { findUnique: jest.fn() },
     webhookEvent: {
       findUnique: jest.fn(),

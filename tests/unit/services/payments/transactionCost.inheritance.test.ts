@@ -14,7 +14,7 @@ import {
   findActiveVenuePricingStructure,
   findActiveProviderCostStructure,
 } from '@/services/payments/transactionCost.service'
-import { PaymentMethod, CardBrand, OriginSystem } from '@prisma/client'
+import { PaymentMethod, PaymentFundsFlow, CardBrand, OriginSystem } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 
 // Mock the organization-payment-config service (the inheritance layer)
@@ -110,33 +110,36 @@ describe('TransactionCost Service — Org Inheritance', () => {
   })
 
   describe('createTransactionCost', () => {
-    it('should use org config when venue has no VenuePaymentConfig', async () => {
-      // Setup: Payment exists, org config returned (no venue config)
-      prismaMock.payment.findUnique.mockResolvedValue(createMockPayment())
-      mockGetEffectivePaymentConfig.mockResolvedValue(createMockPaymentConfig('organization'))
-      prismaMock.providerCostStructure.findFirst.mockResolvedValue(createMockProviderCostStructure())
-      mockGetEffectivePricingForSlot.mockResolvedValue(createMockPricingStructure('organization'))
-      prismaMock.transactionCost.create.mockResolvedValue({ id: 'tc-001' })
+    it.each([undefined, PaymentFundsFlow.AVOQADO_PROCESSED])(
+      'should use org config for processed payments (fundsFlow=%s)',
+      async fundsFlow => {
+        // Setup: Payment exists, org config returned (no venue config)
+        prismaMock.payment.findUnique.mockResolvedValue(createMockPayment({ fundsFlow }))
+        mockGetEffectivePaymentConfig.mockResolvedValue(createMockPaymentConfig('organization'))
+        prismaMock.providerCostStructure.findFirst.mockResolvedValue(createMockProviderCostStructure())
+        mockGetEffectivePricingForSlot.mockResolvedValue(createMockPricingStructure('organization'))
+        prismaMock.transactionCost.create.mockResolvedValue({ id: 'tc-001' })
 
-      const result = await createTransactionCost(PAYMENT_ID)
+        const result = await createTransactionCost(PAYMENT_ID)
 
-      // Verify it called getEffectivePaymentConfig (inheritance service)
-      // Codex R7 (g): la configuración se lee por el cliente que recibe la unidad (el global aquí), nunca sin él.
-      expect(mockGetEffectivePaymentConfig).toHaveBeenCalledWith(VENUE_ID, expect.anything())
+        // Verify it called getEffectivePaymentConfig (inheritance service)
+        // Codex R7 (g): la configuración se lee por el cliente que recibe la unidad (el global aquí), nunca sin él.
+        expect(mockGetEffectivePaymentConfig).toHaveBeenCalledWith(VENUE_ID, expect.anything())
 
-      // Verify it used the org merchant account
-      expect(prismaMock.transactionCost.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({
-            merchantAccountId: MERCHANT_ACCOUNT_ID,
-            paymentId: PAYMENT_ID,
+        // Verify it used the org merchant account
+        expect(prismaMock.transactionCost.create).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({
+              merchantAccountId: MERCHANT_ACCOUNT_ID,
+              paymentId: PAYMENT_ID,
+            }),
           }),
-        }),
-      )
+        )
 
-      expect(result).not.toBeNull()
-      expect(result!.transactionCost.id).toBe('tc-001')
-    })
+        expect(result).not.toBeNull()
+        expect(result!.transactionCost.id).toBe('tc-001')
+      },
+    )
 
     it('should use venue config when venue has VenuePaymentConfig', async () => {
       const venueSpecificMerchantId = 'merchant-venue-specific'
@@ -182,6 +185,22 @@ describe('TransactionCost Service — Org Inheritance', () => {
       expect(result).toBeNull()
       expect(mockGetEffectivePaymentConfig).not.toHaveBeenCalled()
     })
+
+    it.each([PaymentMethod.CREDIT_CARD, PaymentMethod.DEBIT_CARD, PaymentMethod.BANK_TRANSFER, PaymentMethod.OTHER])(
+      'should skip externally recorded %s payments without requiring processor configuration',
+      async method => {
+        prismaMock.payment.findUnique.mockResolvedValue(
+          createMockPayment({ method, fundsFlow: PaymentFundsFlow.EXTERNAL_RECORDED, tenderTypeId: 'external-tender' }),
+        )
+        mockGetEffectivePaymentConfig.mockResolvedValue(null)
+
+        await expect(createTransactionCost(PAYMENT_ID)).resolves.toBeNull()
+
+        expect(mockGetEffectivePaymentConfig).not.toHaveBeenCalled()
+        expect(prismaMock.transactionCost.create).not.toHaveBeenCalled()
+        expect(prismaMock.payment.update).not.toHaveBeenCalled()
+      },
+    )
 
     it('should skip non-AVOQADO origin payments', async () => {
       prismaMock.payment.findUnique.mockResolvedValue(createMockPayment({ originSystem: OriginSystem.POS_SOFTRESTAURANT }))

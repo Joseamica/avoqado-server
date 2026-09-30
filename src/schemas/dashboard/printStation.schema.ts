@@ -227,7 +227,14 @@ export const stationParamSchema = z.object({
 
 /** Casilla «Se atiende con pantalla de cocina». Estricto: sólo `enabled`. */
 export const setKitchenDisplaySchema = z.object({
-  body: z.object({ enabled: z.boolean() }).strict(),
+  body: z
+    .object({
+      enabled: z.boolean({
+        required_error: 'Indica si la pantalla va prendida (enabled)',
+        invalid_type_error: 'enabled debe ser verdadero o falso',
+      }),
+    })
+    .strict('Sólo se acepta el campo enabled'),
   params: z
     .object({ venueId: z.string().min(1, 'El venue es requerido'), stationId: z.string().min(1, 'La estación es requerida') })
     .passthrough(),

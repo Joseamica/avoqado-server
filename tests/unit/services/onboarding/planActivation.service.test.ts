@@ -43,10 +43,11 @@ jest.mock('@/services/email.service', () => ({
   default: { sendPlanConfirmationEmail: jest.fn().mockResolvedValue(true) },
 }))
 
-import { activatePlan, liberarLugar, LEASE_MS } from '@/services/onboarding/planActivation.service'
+import { activatePlan, hayCobroDelAltaSinCerrar, liberarLugar, LEASE_MS } from '@/services/onboarding/planActivation.service'
 import { standardPlanQuote } from '@/services/access/planPricing.constants'
 import { standardFirstChargeCents } from '@/services/launchCampaigns/launchOfferMath'
 import { prismaMock } from '@tests/__helpers__/setup'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
 const LISTA = 115884
 const ANUNCIADO = 2200
@@ -431,11 +432,56 @@ describe('recuperación de un intento desconocido', () => {
       },
     })
     // La suscripción recuperada NO lleva el cupón de la campaña.
-    mockSubRetrieve.mockResolvedValue({ ...recuperada, discounts: [] })
+    mockSubRetrieve.mockResolvedValue({
+      ...recuperada,
+      discounts: [],
+      latest_invoice: { amount_paid: 197084 },
+      current_period_end: Math.floor(new Date('2026-10-26T00:00:00Z').getTime() / 1000),
+    })
 
     await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({
       code: 'PLAN_ACTIVE_WITHOUT_OFFER',
+      details: expect.objectContaining({ charged: true }),
     })
+    // Nunca queda APPLIED ni se anuncia la campaña…
+    const aplicada = prismaMock.launchCampaignRedemption.updateMany.mock.calls.find((c: any[]) => c[0]?.data?.status === 'APPLIED')
+    expect(aplicada).toBeUndefined()
+  })
+
+  it('🔴 26-sep: ese cobro recuperado SIN el cupón se ENTREGA (cobrado y sin acceso era un callejón sin salida)', async () => {
+    // «Ver otros planes» → Premium, falla la entrega, vuelve y toca la oferta: el reintento recupera el cobro anterior.
+    // Antes: cerrar el intento + 409 → cobrado, sin plan, y la pantalla diciendo «no te cobramos nada».
+    const recuperada = { id: 'sub_rec', status: 'active', metadata: { planActivationKey: 'plan-activation:org-1:1' } }
+    mockSubList.mockReturnValue({
+      autoPagingEach: async (cb: (s: unknown) => boolean) => {
+        cb(recuperada)
+      },
+    })
+    mockSubRetrieve.mockResolvedValue({
+      ...recuperada,
+      discounts: [],
+      latest_invoice: { amount_paid: 197084 },
+      current_period_end: Math.floor(new Date('2026-10-26T00:00:00Z').getTime() / 1000),
+    })
+    mockEntregar.mockResolvedValue({ ...CONCEDIDO_PRO, featureCode: 'PLAN_PREMIUM', subscriptionId: 'sub_rec' })
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({ code: 'PLAN_ACTIVE_WITHOUT_OFFER' })
+
+    expect(mockSubCreate).not.toHaveBeenCalled() // nunca un segundo cobro
+    expect(mockEntregar).toHaveBeenCalledWith({ venueId: 'venue-1', subscriptionId: 'sub_rec', detectedBy: 'onboarding.activatePlan' })
+    // El alta queda ACTIVE con lo cobrado…
+    const cierre = prismaMock.onboardingProgress.updateMany.mock.calls.find((c: any[]) => c[0]?.data?.planActivationStatus === 'ACTIVE')
+    expect(cierre?.[0].data.v2SetupData.plan).toMatchObject({ tier: 'PREMIUM', offer: { kind: 'STANDARD' } })
+    expect(prismaMock.venue.update).toHaveBeenCalledWith(expect.objectContaining({ data: { planTier: 'PREMIUM' } }))
+    // …el lugar de la oferta se libera, y la bitácora dice lo que pasó (nunca «campaña canjeada»).
+    expect(prismaMock.launchCampaignRedemption.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'RELEASED' }) }),
+    )
+    const acciones = (logAction as jest.Mock).mock.calls.map(c => c[0])
+    expect(acciones).toContainEqual(
+      expect.objectContaining({ action: 'PLAN_ACTIVATED_ONBOARDING', data: expect.objectContaining({ offerNotApplied: true }) }),
+    )
+    expect(acciones.find(a => a.action === 'LAUNCH_CAMPAIGN_REDEEMED')).toBeUndefined()
   })
 
   it('🔴 el id se persiste EN CUANTO la suscripción existe, no al cerrar el éxito', async () => {
@@ -1069,6 +1115,35 @@ describe('la recuperación honra lo que SE COBRÓ, no lo que pide el reintento',
     expect(prismaMock.venue.update).toHaveBeenCalledWith(expect.objectContaining({ data: { planTier: 'PREMIUM' } }))
   })
 
+  it('🔴 26-sep: un reintento «Pagar hoy» (cupón INTRO) sobre un cobro de Premium SIN cupón entrega lo cobrado, no 409', async () => {
+    // Lo vio el founder: pagó Premium ($1,970.84), la entrega falló, recargó, la pantalla volvió con Pro y «Pagar hoy».
+    // El server juzgaba el cobro RECUPERADO contra el cupón del REINTENTO («INTRO_PRO_3M»), no lo encontraba y cerraba
+    // con PLAN_ACTIVE_WITHOUT_OFFER SIN conceder nada: cobrado y sin acceso, con «no te cobramos nada» en pantalla.
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(
+      progreso({
+        launchCampaignId: null,
+        planActivationStatus: 'IN_PROGRESS',
+        planActivationAttempt: 1,
+        planActivationLeaseUntil: new Date(Date.now() - 60_000),
+      }) as never,
+    )
+    listar(recuperada({ metadata: { planActivationKey: 'plan-activation:org-1:1', featureCode: 'PLAN_PREMIUM' } }))
+    mockEntregar.mockResolvedValue({ ...CONCEDIDO_PRO, featureCode: 'PLAN_PREMIUM', subscriptionId: 'sub_buena' })
+    mockSubRetrieve.mockResolvedValue({
+      id: 'sub_buena',
+      status: 'active',
+      current_period_end: Math.floor(new Date('2026-10-17T00:00:00Z').getTime() / 1000),
+      latest_invoice: { amount_paid: 197084 },
+      discounts: [],
+    })
+
+    const r = await activatePlan({ ...BASE, offer: { kind: 'STANDARD', expectedFirstChargeCents: 69484 }, payNow: true })
+
+    expect(mockSubCreate).not.toHaveBeenCalled() // nunca un segundo cobro
+    expect(mockEntregar).toHaveBeenCalledWith({ venueId: 'venue-1', subscriptionId: 'sub_buena', detectedBy: 'onboarding.activatePlan' })
+    expect(r).toMatchObject({ status: 'ACTIVE', tier: 'PREMIUM' })
+  })
+
   it('🔴 Codex C12: lo que se GUARDA y se RESPONDE es lo cobrado (tier e intervalo), no lo que pide el reintento', async () => {
     prismaMock.onboardingProgress.findUnique.mockResolvedValue(
       progreso({
@@ -1538,5 +1613,125 @@ describe('🔴 #14: liberar el lugar exige ser el dueño, y va con el cambio de 
       (c: any[]) => c[0]?.data?.status === 'RELEASED',
     )
     expect(liberado).toBeUndefined()
+  })
+})
+
+describe('🔴 Codex R12: hayCobroDelAltaSinCerrar — lo que consulta `complete` antes de dejar cerrar en Gratis', () => {
+  const base = { organizationId: 'org-1', planActivationStatus: 'IN_PROGRESS', planActivationAttempt: 2, planStripeSubscriptionId: null }
+  const lista = (subs: unknown[]) =>
+    mockSubList.mockReturnValue({
+      autoPagingEach: async (cb: (s: unknown) => boolean) => {
+        for (const s of subs) if (cb(s) === false) break
+      },
+    })
+
+  beforeEach(() => {
+    prismaMock.venue.findMany.mockResolvedValue([{ id: 'venue-1', stripeCustomerId: 'cus_1' }] as never)
+    prismaMock.venueFeature.findMany.mockResolvedValue([])
+    prismaMock.billingObligationConflict.findMany.mockResolvedValue([])
+    prismaMock.feature.findMany.mockResolvedValue([{ code: 'CFDI', stripeProductId: 'prod_cfdi' }] as never)
+  })
+
+  it('sin intento en curso: no hay nada abierto (ni se consulta Stripe)', async () => {
+    expect(await hayCobroDelAltaSinCerrar({ ...base, planActivationStatus: 'NONE' })).toBe(false)
+    expect(mockSubList).not.toHaveBeenCalled()
+  })
+  it('con id guardado: abierto', async () => {
+    expect(await hayCobroDelAltaSinCerrar({ ...base, planStripeSubscriptionId: 'sub_x' })).toBe(true)
+  })
+  it('🔴 sin id pero Stripe tiene la suscripción de ESE intento: abierto', async () => {
+    lista([
+      { id: 'sub_otro', status: 'active', metadata: {} },
+      { id: 'sub_perdida', status: 'active', metadata: { planActivationKey: 'plan-activation:org-1:2' } },
+    ])
+    expect(await hayCobroDelAltaSinCerrar(base)).toBe(true)
+    expect(mockSubList).toHaveBeenCalledWith(expect.objectContaining({ customer: 'cus_1', status: 'all' }))
+  })
+  it('sin id y Stripe confirma que no existe (o murió sin cobrar): se puede cerrar en Gratis', async () => {
+    lista([{ id: 'sub_muerta', status: 'incomplete_expired', metadata: { planActivationKey: 'plan-activation:org-1:2' } }])
+    expect(await hayCobroDelAltaSinCerrar(base)).toBe(false)
+  })
+  it('🔴 Codex R13: una suscripción VIVA sin la llave (la del carril viejo de `complete`) cuenta como abierta', async () => {
+    lista([{ id: 'sub_legacy', status: 'active', metadata: { featureCode: 'PLAN_PRO' } }])
+    expect(await hayCobroDelAltaSinCerrar(base)).toBe(true)
+  })
+  it('🔴 Codex R14: una suscripción viva de OTRA cosa (CFDI) no es un cobro del alta: no bloquea Gratis', async () => {
+    lista([
+      {
+        id: 'sub_cfdi',
+        status: 'active',
+        metadata: { featureCode: 'CFDI' },
+        items: { data: [{ price: { id: 'price_cfdi', product: 'prod_cfdi' } }] },
+      },
+    ])
+    expect(await hayCobroDelAltaSinCerrar(base)).toBe(false)
+  })
+  it.each([
+    [
+      'dos planes',
+      {
+        data: [
+          { price: { id: 'price_pro', product: 'prod_pro', lookup_key: 'plan_pro_monthly' } },
+          { price: { id: 'price_premium', product: 'prod_premium', lookup_key: 'plan_premium_monthly' } },
+        ],
+      },
+    ],
+    ['ítems incompletos', { has_more: true, data: [{ price: { id: 'price_cfdi', product: 'prod_cfdi' } }] }],
+    ['producto desconocido', { data: [{ price: { id: 'price_unknown', product: 'prod_unknown' } }] }],
+  ])('R15: %s no demuestra ausencia de un cobro pendiente', async (_caso, items) => {
+    lista([{ id: 'sub_legacy', status: 'active', metadata: {}, items }])
+    expect(await hayCobroDelAltaSinCerrar(base)).toBe(true)
+  })
+  it('R15: el precio de plan prevalece sobre metadata que dice CFDI', async () => {
+    lista([
+      {
+        id: 'sub_legacy',
+        status: 'active',
+        metadata: { featureCode: 'CFDI' },
+        items: { data: [{ price: { id: 'price_pro', product: 'prod_pro', lookup_key: 'plan_pro_monthly' } }] },
+      },
+    ])
+    expect(await hayCobroDelAltaSinCerrar(base)).toBe(true)
+  })
+  it('una suscripción sin la llave que ya NO cobra (cancelada) no bloquea', async () => {
+    lista([{ id: 'sub_vieja', status: 'canceled', metadata: {} }])
+    expect(await hayCobroDelAltaSinCerrar(base)).toBe(false)
+  })
+  it('🔴 «no pude ver» NUNCA es «no existe»: Stripe caído ⇒ abierto', async () => {
+    mockSubList.mockReturnValue({ autoPagingEach: async () => Promise.reject(new Error('stripe caído')) })
+    expect(await hayCobroDelAltaSinCerrar(base)).toBe(true)
+  })
+  it('sin cliente de Stripe no pudo crearse ninguna suscripción', async () => {
+    prismaMock.venue.findMany.mockResolvedValue([] as never)
+    expect(await hayCobroDelAltaSinCerrar(base)).toBe(false)
+  })
+
+  it.each([true, false])('revisa también la siguiente página de sucursales antes de cerrar (cobro pendiente: %s)', async pending => {
+    const firstPage = Array.from({ length: 100 }, (_, i) => ({ id: `venue-${String(i).padStart(3, '0')}`, stripeCustomerId: 'cus_empty' }))
+    prismaMock.venue.findMany
+      .mockResolvedValueOnce(firstPage as never)
+      .mockResolvedValueOnce([{ id: 'venue-last', stripeCustomerId: 'cus_last' }] as never)
+    mockSubList.mockImplementation(({ customer }: { customer: string }) => ({
+      autoPagingEach: async (cb: (s: unknown) => boolean) => {
+        if (pending && customer === 'cus_last') {
+          cb({ id: 'sub_pending', status: 'active', metadata: { planActivationKey: 'plan-activation:org-1:2' } })
+        }
+      },
+    }))
+
+    expect(await hayCobroDelAltaSinCerrar(base)).toBe(pending)
+    expect(prismaMock.venue.findMany).toHaveBeenCalledTimes(2)
+    expect(prismaMock.venue.findMany).toHaveBeenNthCalledWith(1, {
+      where: { organizationId: 'org-1', stripeCustomerId: { not: null } },
+      select: { id: true, stripeCustomerId: true },
+      orderBy: { id: 'asc' },
+      take: 100,
+    })
+    expect(prismaMock.venue.findMany).toHaveBeenNthCalledWith(2, {
+      where: { organizationId: 'org-1', stripeCustomerId: { not: null }, id: { gt: 'venue-099' } },
+      select: { id: true, stripeCustomerId: true },
+      orderBy: { id: 'asc' },
+      take: 100,
+    })
   })
 })

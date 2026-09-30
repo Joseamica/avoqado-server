@@ -1,8 +1,8 @@
 /**
- * IVA por producto, plan 2, tarea 4: la conversión de un presupuesto a orden es el caso
- * canónico de `IVA_APARTE` — `createEstimate` suma el 16 % ENCIMA del subtotal (ver el propio
- * enum en `services/fiscal/contratoDePrecio.ts`), así que la orden que nace de esa conversión
- * hereda esa naturaleza, no la del mostrador (que es IVA incluido).
+ * IVA por producto, plan 2, tarea 4 — actualizado al fusionar develop f97a82b1 (30-sep): el presupuesto YA NO suma el
+ * 16 % encima y la conversión cobra la suma de los precios (IVA dentro, `taxAmount` 0), aun para presupuestos viejos
+ * guardados con el IVA sumado. La orden que nace de ahí es `IVA_INCLUIDO`, como el mostrador; marcarla `IVA_APARTE`
+ * bloquearía su factura si trae productos al 0 % o exentos.
  */
 jest.mock('@/services/venueSalesGuard', () => ({
   __esModule: true,
@@ -62,9 +62,9 @@ describe('convertToOrder (presupuesto → orden) — contrato de precio', () => 
     } as any)
   })
 
-  it('la orden convertida nace IVA_APARTE (el presupuesto sumó el IVA encima)', async () => {
+  it('la orden convertida nace IVA_INCLUIDO: cobra la suma de los precios, con el IVA dentro', async () => {
     await convertToOrder('est-1', VENUE, 'staff-1')
 
-    expect(datosDeLaOrden().contratoDePrecio).toBe('IVA_APARTE')
+    expect(datosDeLaOrden().contratoDePrecio).toBe('IVA_INCLUIDO')
   })
 })

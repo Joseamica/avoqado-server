@@ -38,6 +38,14 @@ jest.mock('../../../../src/services/inventory/inventoryPosting.service', () => (
   applySalePosting: (...a: any[]) => applySalePostingMock(...a),
 }))
 
+// Task 12 (etapa 3 del KDS): la estación de reparto se resuelve por este servicio — se mockea
+// para controlar a qué estación «nace» la comanda de Uber, sin depender de printStation.findFirst.
+const estacionDePantallaParaRepartoMock = jest.fn()
+jest.mock('../../../../src/services/kds/kitchenDisplayStations', () => ({
+  __esModule: true,
+  estacionDePantallaParaReparto: (...a: any[]) => estacionDePantallaParaRepartoMock(...a),
+}))
+
 const link: any = { id: 'link1', venueId: 'venue1', provider: 'DELIVERECT', orderAcceptanceMode: 'AUTO' }
 
 // Reparto por default: pagado 100% por la plataforma (nada por cobrar en persona) — el
@@ -114,6 +122,9 @@ describe('ingestDeliveryOrder', () => {
     ;(dispatchOrderStatus as jest.Mock).mockResolvedValue(undefined)
     createSalePostingInTxMock.mockResolvedValue({ id: 'posting-del-1', status: 'PENDING' })
     applySalePostingMock.mockResolvedValue({ postingId: 'posting-del-1', applied: true, issues: [] })
+    // Default: sin estación de pantalla (comanda «Sin estación»), igual que printStation.findFirst
+    // globalmente mockeado a null — los tests que no son de Task 12 no la tocan.
+    estacionDePantallaParaRepartoMock.mockResolvedValue(null)
   })
 
   // ============================================================
@@ -841,6 +852,21 @@ describe('ingestDeliveryOrder', () => {
 
     expect(r.hayComanda).toBe(true) // aunque `created` sea false y no se creara ahora
     expect(prisma.kdsOrder.create).not.toHaveBeenCalled()
+  })
+
+  // Task 12 (etapa 3 del KDS): la comanda de Uber nace en la estación con pantalla que
+  // `estacionDePantallaParaReparto` resuelva — la estación se elige ANTES del candado.
+  it('🔴 la comanda nace con el printStationId de la estación de pantalla resuelta', async () => {
+    // El test anterior deja `kdsOrder.count` en 1 (mockResolvedValue persiste entre tests:
+    // clearAllMocks NO borra implementaciones) — sin resetearlo, el chequeo DENTRO del
+    // candado cree que la comanda ya existe y jamás llega a `kdsOrder.create`.
+    ;(prisma.kdsOrder.count as jest.Mock).mockResolvedValue(0)
+    estacionDePantallaParaRepartoMock.mockResolvedValue('st-pantalla')
+
+    await ingestDeliveryOrder(makeNormalized(), link)
+
+    const callArg = (prisma.kdsOrder.create as jest.Mock).mock.calls[0][0]
+    expect(callArg.data.printStationId).toBe('st-pantalla')
   })
 
   // ── Promociones ─────────────────────────────────────────────────────────────────────

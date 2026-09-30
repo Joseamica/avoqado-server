@@ -11,6 +11,7 @@
 jest.mock('../../../../src/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    capabilityGrant: { findFirst: jest.fn().mockResolvedValue(null), groupBy: jest.fn().mockResolvedValue([]) },
     // venue.findUnique is consumed by venueIsGrandfathered (path-0 short-circuit in
     // venueHasFeatureAccess). These tier-logic tests describe NON-grandfathered venues, so it
     // defaults to seatCapExempt: false (see beforeEach) — the short-circuit stays dormant and

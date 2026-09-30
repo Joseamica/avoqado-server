@@ -852,7 +852,10 @@ export const ProductWizardStep1Schema = z.object({
 })
 
 export const ProductWizardStep2Schema = z.object({
+  // `venueId` se conserva: la validación REEMPLAZA req.params y el asistente lo necesita para no
+  // tocar productos de otro negocio.
   params: z.object({
+    venueId: z.string().cuid(),
     productId: cuidLikeId(),
   }),
   body: z
@@ -995,6 +998,7 @@ export const CreateProductWithInventorySchema = z.object({
 
 export const GetWizardProgressSchema = z.object({
   params: z.object({
+    venueId: z.string().cuid(),
     productId: cuidLikeId(),
   }),
 })

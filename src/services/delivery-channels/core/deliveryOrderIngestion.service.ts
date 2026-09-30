@@ -24,6 +24,7 @@ import { assertDeliveryMoneyInvariants } from './money'
 import { computeTenderCommission } from '../../dashboard/tenderType.dashboard.service'
 import { ensureDeliveryTenderType } from './deliveryTenderProvisioning.service'
 import { toKdsModifierLabels } from '../../mobile/kds.mobile.service'
+import { estacionDePantallaParaReparto } from '../../kds/kitchenDisplayStations'
 import { withDeliveryOrderLock } from './deliveryOrderLock'
 import { marcarRetirosEnComandas } from './lineRemoval.service'
 import {
@@ -578,6 +579,9 @@ export async function ingestDeliveryOrder(
 
   if (!comandaYaExiste && !pedidoCancelado && !normalized.scheduledFor) {
     try {
+      // Etapa 3 del KDS: la estación se elige ANTES de tomar el candado (una consulta menos con el pedido bloqueado).
+      // Nunca lanza: sin estación con pantalla, la comanda sale «Sin estación».
+      const estacionReparto = await estacionDePantallaParaReparto(venue.id)
       // 🔴 Bajo el candado del pedido [N-21]: si el proveedor retiró un renglón entre la venta
       // y esta comanda, `marcarRetirosEnComandas` la hace nacer con el renglón RETIRADO.
       await withDeliveryOrderLock(order.id, async tx => {
@@ -592,6 +596,7 @@ export async function ingestDeliveryOrder(
             orderNumber: order.orderNumber,
             orderType: 'DELIVERY',
             orderId: order.id,
+            printStationId: estacionReparto,
             // KDS de Uber: la cocina lee esta pantalla, no el detalle de la orden — sin
             // nombre/contacto aquí no tiene forma de identificar el pedido de un vistazo.
             customerName: normalized.customer?.name ?? null,

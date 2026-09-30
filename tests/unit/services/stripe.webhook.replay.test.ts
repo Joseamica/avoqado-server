@@ -65,6 +65,9 @@ jest.mock('@/services/dashboard/seatReconciliation.service', () => ({
   reactivateSeatCapDeactivated: jest.fn(),
 }))
 
+jest.mock('@/services/launchCampaigns/hybridLifecycle.service', () => ({ handleHybridStripeEvent: jest.fn().mockResolvedValue(false) }))
+import { handleHybridStripeEvent } from '@/services/launchCampaigns/hybridLifecycle.service'
+
 import prisma from '@/utils/prismaClient'
 import { handleStripeWebhookEvent, replayStripeWebhookEvent, STRIPE_WEBHOOK_MAX_RETRIES } from '@/services/stripe.webhook.service'
 
@@ -99,6 +102,7 @@ const row = (over: Partial<Record<string, unknown>> = {}) => ({
 
 beforeEach(() => {
   jest.clearAllMocks()
+  ;(handleHybridStripeEvent as jest.Mock).mockResolvedValue(false)
   ;(prisma.venueFeature.updateMany as jest.Mock)?.mockResolvedValue?.({ count: 1 })
   mockPrisma.webhookEvent.update.mockResolvedValue({})
   mockPrisma.webhookEvent.create.mockResolvedValue({ id: 'whe_new' })
@@ -284,5 +288,23 @@ describe('el tope de reintentos no puede bloquear a una persona', () => {
     const r = await replayStripeWebhookEvent('we1', { forzadoPorPersona: true })
 
     expect(r).toMatchObject({ replayed: false, reason: 'ALREADY_SUCCEEDED' })
+  })
+})
+
+describe('hybrid webhook monitoring', () => {
+  it('retains SUCCESS bookkeeping when a hybrid event bypasses legacy feature handlers', async () => {
+    ;(handleHybridStripeEvent as jest.Mock).mockResolvedValue(true)
+    await handleStripeWebhookEvent(storedEvent() as any)
+    expect(handleHybridStripeEvent).toHaveBeenCalled()
+    expect(mockPrisma.webhookEvent.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'SUCCESS' }) }),
+    )
+  })
+  it('persists hybrid delivery failures for the existing replay job', async () => {
+    ;(handleHybridStripeEvent as jest.Mock).mockRejectedValue(new Error('hybrid delivery failed'))
+    await expect(handleStripeWebhookEvent(storedEvent() as any)).rejects.toThrow('hybrid delivery failed')
+    expect(mockPrisma.webhookEvent.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'FAILED' }) }),
+    )
   })
 })

@@ -234,6 +234,31 @@ describe('getVenueSubscription', () => {
     prismaMock.venue.findFirst.mockResolvedValue(null)
     expect(await getVenueSubscription('nope')).toBeNull()
   })
+
+  // 🔴 Real defect (2026-09-27): the pinned clover API carries the period end only on the item, so this read null
+  // (and so did the MCP subscription_status tool, which reads this same mapping).
+  it('🔴 currentPeriodEnd comes from the item when the subscription lacks it (clover API shape)', async () => {
+    const endSec = Math.floor(future.getTime() / 1000)
+    const Stripe = require('stripe')
+    Stripe.prototype.subscriptions = {
+      retrieve: jest.fn().mockResolvedValue({
+        status: 'active',
+        cancel_at_period_end: false,
+        items: {
+          data: [
+            {
+              current_period_end: endSec,
+              price: { id: 'price_m', unit_amount: 115884, recurring: { interval: 'month', interval_count: 1 } },
+            },
+          ],
+        },
+      }),
+    }
+    prismaMock.venue.findFirst.mockResolvedValue(venueRow())
+
+    const row = await getVenueSubscription('cven1')
+    expect(row?.currentPeriodEnd).toBe(new Date(endSec * 1000).toISOString())
+  })
 })
 
 describe('adjustVenuePlanEndDate', () => {

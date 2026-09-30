@@ -1020,6 +1020,21 @@ describe('Stripe Service - Comprehensive Tests', () => {
 
         await expect(stripeService.setSubscriptionCancelAtPeriodEnd('sub_missing', true)).rejects.toThrow('No such subscription')
       })
+
+      it('sends the owner reason in the SAME update as cancel_at_period_end', async () => {
+        mockStripeInstance.subscriptions.update.mockResolvedValueOnce({ id: 'sub_plan_pro', cancel_at_period_end: true })
+        await stripeService.setSubscriptionCancelAtPeriodEnd('sub_plan_pro', true, { feedback: 'too_expensive', comment: 'Caro' })
+        expect(mockStripeInstance.subscriptions.update).toHaveBeenCalledWith('sub_plan_pro', {
+          cancel_at_period_end: true,
+          cancellation_details: { feedback: 'too_expensive', comment: 'Caro' },
+        })
+      })
+
+      it('never sends a reason when reactivating', async () => {
+        mockStripeInstance.subscriptions.update.mockResolvedValueOnce({ id: 'sub_plan_pro', cancel_at_period_end: false })
+        await stripeService.setSubscriptionCancelAtPeriodEnd('sub_plan_pro', false, { feedback: 'unused' })
+        expect(mockStripeInstance.subscriptions.update).toHaveBeenCalledWith('sub_plan_pro', { cancel_at_period_end: false })
+      })
     })
 
     describe('retrievePlanSubscription()', () => {
@@ -1053,6 +1068,32 @@ describe('Stripe Service - Comprehensive Tests', () => {
           grossAmountCents: 115884,
           pausedUntil: null,
         })
+      })
+
+      /**
+       * 🔴 Defecto real (27-sep): la API que fija el SDK (2025-09-30.clover) ya NO trae el fin del periodo en la
+       * suscripción, sino en su renglón. Se leía de la suscripción y salía siempre `null`.
+       */
+      it('🔴 lee el fin del periodo del renglón cuando la suscripción no lo trae (forma real de la API clover)', async () => {
+        const periodEndSec = 1893456000 // 2030-01-01T00:00:00Z
+        mockStripeInstance.subscriptions.retrieve.mockResolvedValueOnce({
+          id: 'sub_clover',
+          status: 'active',
+          cancel_at_period_end: false,
+          created: 1735689600,
+          items: {
+            data: [
+              {
+                current_period_start: periodEndSec - 31 * 86400,
+                current_period_end: periodEndSec,
+                price: { recurring: { interval: 'month' }, unit_amount: 115884 },
+              },
+            ],
+          },
+        })
+
+        const r = await stripeService.retrievePlanSubscription('sub_clover')
+        expect(r.currentPeriodEnd).toEqual(new Date(periodEndSec * 1000))
       })
 
       /**

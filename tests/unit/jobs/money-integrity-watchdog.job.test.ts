@@ -20,6 +20,8 @@ import {
   DETAIL_LIMIT_POR_CHECK,
   VENTANA_DEL_BARRIDO_MIN,
   VALES_DESDE,
+  VENTANA_DE_ALERTA_HORAS,
+  corteDeAlerta,
   buildWatchdogSql,
 } from '@/jobs/money-integrity-watchdog.job'
 import { baseQueDebeCubrirseSql, COBRO_QUE_CUBRE, criterioPagadaPeroAbiertaSql } from '@/services/shared/pagadaPeroAbierta'
@@ -295,5 +297,72 @@ describe('money-integrity-watchdog · lo que reporta', () => {
 
     await expect(new MoneyIntegrityWatchdogJob().runNow(NOW)).resolves.toEqual({ expired: false, total: 0, mostrados: 0, porTipo: {} })
     expect(error.mock.calls.some(([msg]) => String(msg).includes('La revisión falló'))).toBe(true)
+  })
+})
+
+/**
+ * Ventana de alerta de 24 h — decisión del founder (19-sep, reiterada el 28-sep): «quítalos,
+ * cállalos y de hoy en adelante hazle caso a los recientes». Las mismas 10 órdenes (16-may a
+ * 18-sep) gritaban cada 6 h desde hacía semanas: una alarma que repite lo viejo entrena a
+ * ignorarla. Lo viejo se sigue CONTANDO (una línea info), deja de GRITAR.
+ */
+describe('money-integrity-watchdog · ventana de alerta de 24 h', () => {
+  const T = new Date('2026-09-28T12:17:00Z')
+
+  it('🔴 el corte es RODANTE de 24 h (no el día civil) y en UTC', () => {
+    expect(VENTANA_DE_ALERTA_HORAS).toBe(24)
+    expect(corteDeAlerta(T)).toBe('2026-09-27 12:17:00.000')
+  })
+
+  it('🔴 el corte va INLINE como TIMESTAMP, nunca como bind de fecha', () => {
+    const { counts, details } = buildWatchdogSql(T)
+    for (const sql of [counts, details]) {
+      expect(sql).toContain(`TIMESTAMP '2026-09-27 12:17:00.000'`)
+      // Ni un bind de fecha junto al corte (los `$0`/`$74.75` de los comentarios son precios).
+      expect(sql).not.toMatch(/>=\s*\$\d/)
+    }
+  })
+
+  it('🔴 «reciente» mira la orden Y su último cobro: un cobro NUEVO sobre una cuenta vieja sí grita', () => {
+    const { details } = buildWatchdogSql(T)
+    expect(details).toMatch(/GREATEST\(o\."createdAt",\s*\(SELECT MAX\(p\."createdAt"\) FROM "Payment" p WHERE p\."orderId" = o\.id\)\)/)
+  })
+
+  it('🔴 fail-open: una violación que no se puede fechar cuenta como reciente y grita', () => {
+    const { details } = buildWatchdogSql(T)
+    expect(details).toMatch(/LEFT JOIN "Order" o ON o\.id = v\.order_id/)
+    expect(details).toMatch(/COALESCE\([\s\S]*,\s*TRUE\) AS reciente/)
+  })
+
+  it('🔴 el detalle sólo trae lo reciente (y el aviso histórico de inventario, que va aparte)', () => {
+    const { details, counts } = buildWatchdogSql(T)
+    expect(details).toMatch(/WHERE reciente OR "check" = 'VALE HISTÓRICO AUSENTE CON MOVIMIENTOS'/)
+    expect(counts).toMatch(/GROUP BY "check", reciente/)
+  })
+
+  it('🔴 lo de días anteriores NO grita: se cuenta en UNA línea info', async () => {
+    arm([{ check: 'SOBREPAGO', n: 10, reciente: false } as never], [])
+
+    const r = await new MoneyIntegrityWatchdogJob().runNow(T)
+
+    expect(r).toEqual({ expired: false, total: 0, mostrados: 0, porTipo: {}, backlog: { total: 10, porTipo: { SOBREPAGO: 10 } } })
+    expect(error).not.toHaveBeenCalled()
+    const linea = info.mock.calls.find(([m]) => String(m).includes('días anteriores'))
+    expect(linea?.[0]).toContain('10 problema(s)')
+    expect(linea?.[1]).toMatchObject({ porTipo: { SOBREPAGO: 10 } })
+    expect(info.mock.calls.some(([m]) => String(m).includes('Todo cuadra'))).toBe(false)
+  })
+
+  it('🔴 lo reciente SÍ grita, aunque convivan casos viejos', async () => {
+    arm(
+      [{ check: 'SOBREPAGO', n: 10, reciente: false } as never, { check: 'SOBREPAGO', n: 1, reciente: true } as never],
+      [{ check: 'SOBREPAGO', venue: 'Testarudo Cafe', order_id: 'hoy', detalle: 'cobrado=270 cuenta=135' }],
+    )
+
+    const r = await new MoneyIntegrityWatchdogJob().runNow(T)
+
+    expect(r).toMatchObject({ total: 1, mostrados: 1, porTipo: { SOBREPAGO: 1 }, backlog: { total: 10 } })
+    expect(error).toHaveBeenCalledWith('🚨 [Money watchdog] SOBREPAGO', expect.objectContaining({ orderId: 'hoy' }))
+    expect(error.mock.calls.find(([m]) => String(m).includes('problema(s) de dinero'))?.[0]).toContain('1 problema(s)')
   })
 })

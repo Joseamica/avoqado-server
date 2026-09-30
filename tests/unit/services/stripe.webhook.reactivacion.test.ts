@@ -47,6 +47,8 @@ jest.mock('@/utils/prismaClient', () => ({
     venueFeature: { findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
     staffVenue: { findMany: jest.fn() },
     venue: { findUnique: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
+    // The paid→Free seat cap asks whether a hybrid purchase is replacing this subscription; here none is.
+    hybridBillingOperation: { findFirst: jest.fn().mockResolvedValue(null) },
   },
 }))
 jest.mock('@/communication/sockets', () => ({

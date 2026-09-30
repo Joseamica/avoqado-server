@@ -1,6 +1,8 @@
+import { ConflictError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
 import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import { GRANDFATHER_SELECT, resolveGrandfathered } from './grandfather'
+import { grantedCapabilityCodes, hasCapabilityGrant, venuesWithCapabilityGrant } from './capabilityGrants.service'
 
 // Re-exported so the grandfather resolver is discoverable from the access service everyone
 // already imports. Callers OUTSIDE this module should prefer importing from './grandfather'
@@ -86,6 +88,35 @@ export const FREE_TIER_CODES = ['CHATBOT'] as const // AVAILABLE_BALANCE moved t
 
 export type BaseTier = 'PREMIUM' | 'PRO'
 
+// The legacy plan contract as of 2026-09-27. Adding presentation catalog entries must not
+// silently expand it. New commercial plan publications freeze their own inclusion snapshot.
+const LEGACY_PLAN_CODES = new Set([
+  'CHATBOT',
+  'ADVANCED_REPORTS',
+  'LOYALTY_PROGRAM',
+  'RESERVATIONS',
+  'TABLE_SERVICE',
+  'ONLINE_ORDERING',
+  'UPSELL',
+  'REFERRAL_PROGRAM',
+  'PROMOTIONS',
+  'CUSTOMER_CAMPAIGNS',
+  'GOOGLE_REVIEW_REDIRECT',
+  'CASH_RECONCILIATION',
+  'BANK_RECONCILIATION',
+  'AVAILABLE_BALANCE',
+  'BANKING_HUB',
+  'VENUE_AUDIT_LOG',
+  'AI_ASSISTANT_BUBBLE',
+  'AREA_TICKETS',
+  'VARIABLE_WEIGHT_BARCODE',
+  'PRICE_LABELS', // Already PRO on Android/iOS since 2026-09-23; preserve it in exact snapshots.
+  'WHITE_LABEL_DASHBOARD',
+  'MASTER_CATALOG',
+  'KITCHEN_DISPLAY', // Pro (founder D-A, 27-sep): kitchen display by station, offline included.
+  ...PREMIUM_ONLY_CODES,
+])
+
 /**
  * ¿El plan `tier` concede por sí solo el código `code`? Predicado PURO, sin base de datos.
  *
@@ -98,6 +129,8 @@ export type BaseTier = 'PREMIUM' | 'PRO'
 export function elPlanConcede(tier: BaseTier, code: string): boolean {
   if ((PAID_PLAN_TIER_CODES as readonly string[]).includes(code)) return false // un plan no concede otro plan
   if ((FREE_TIER_CODES as readonly string[]).includes(code)) return true // ya es gratis para todos
+  // Explicit current catalog; a new unknown code cannot inherit a paid tier by omission.
+  if (!LEGACY_PLAN_CODES.has(code)) return false
   if (tier === 'PREMIUM') return true
   return !(PREMIUM_ONLY_CODES as readonly string[]).includes(code)
 }
@@ -145,7 +178,24 @@ const activeWindowWhere = (now: Date) => ({ active: true, suspendedAt: null, OR:
  * suspended, trial (endDate) null or in the future — the same predicate used by
  * {@link venueHasActiveBasePlan}.
  */
-export async function getVenueBaseTier(venueId: string): Promise<BaseTier | null> {
+async function getContractBaseTier(venueId: string): Promise<BaseTier | null> {
+  const now = new Date()
+  const grant = await prisma.capabilityGrant.findFirst({
+    where: {
+      venueId,
+      revokedAt: null,
+      startsAt: { lte: now },
+      endsAt: { gt: now },
+      contract: { venueId, endedAt: null, planTier: { in: ['PRO', 'PREMIUM'] } },
+    },
+    orderBy: [{ contract: { planTier: 'asc' } }, { id: 'asc' }],
+    select: { contract: { select: { planTier: true } } },
+  })
+  const tier = grant?.contract?.planTier
+  return tier === 'PRO' || tier === 'PREMIUM' ? tier : null
+}
+
+export async function getVenueBaseTier(venueId: string, options: { legacyOnly?: boolean } = {}): Promise<BaseTier | null> {
   const rows = await prisma.venueFeature.findMany({
     where: { venueId, feature: { code: { in: [...PAID_PLAN_TIER_CODES] } } },
     select: { active: true, suspendedAt: true, endDate: true, feature: { select: { code: true } } },
@@ -157,7 +207,8 @@ export async function getVenueBaseTier(venueId: string): Promise<BaseTier | null
     if (r.feature.code === 'PLAN_PREMIUM') return 'PREMIUM' // top tier short-circuits
     if (r.feature.code === 'PLAN_PRO') hasPro = true
   }
-  return hasPro ? 'PRO' : null
+  const commercial = options.legacyOnly ? null : await getContractBaseTier(venueId)
+  return commercial === 'PREMIUM' ? 'PREMIUM' : hasPro || commercial === 'PRO' ? 'PRO' : null
 }
 
 /**
@@ -173,8 +224,8 @@ export async function venueHasActiveBasePlan(venueId: string): Promise<boolean> 
     where: { venueId, feature: { code: { in: [...PAID_PLAN_TIER_CODES] } } },
     select: { active: true, suspendedAt: true, endDate: true },
   })
-  if (!vf) return false
-  return isActiveWindow(vf)
+  if (vf && isActiveWindow(vf)) return true
+  return (await getContractBaseTier(venueId)) !== null
 }
 
 /**
@@ -225,14 +276,16 @@ export interface VenuePlanInfo {
   tier: ClientPlanTier
   grandfathered: boolean
   exempt: boolean
+  grantedFeatureCodes?: string[]
+  accessSchemaVersion?: 1
+  accessObservedAt?: string
+  commercialPlanTier?: 'PRO' | 'PREMIUM' | null
 }
 
 /**
  * The venue's plan info as exposed to POS/mobile clients so they can gate UI by plan.
- * Composes the semantics of {@link getVenueBaseTier}, {@link venueIsGrandfathered} and
- * {@link venueIsExemptFromPlanGating} in exactly 2 indexed queries (one VenueFeature scan
- * + ONE Venue PK fetch shared by both flags, instead of the two separate venue lookups the
- * individual helpers would make):
+ * Combines bounded legacy and commercial access observations. Billing ownership stays visible
+ * independently of funded access so a suspended plan is managed through its original contract:
  *   - `tier`: 'PREMIUM' / 'PRO' from the active base plan, 'FREE' when none.
  *   - `grandfathered`: {@link venueIsGrandfathered} semantics (Venue.seatCapExempt === true).
  *   - `exempt`: {@link venueIsExemptFromPlanGating} semantics (grandfathered OR demo status
@@ -253,19 +306,44 @@ export async function getVenueGrantedFeatureCodes(venueId: string): Promise<stri
     where: { venueId, ...activeWindowWhere(new Date()), feature: { code: { notIn: [...PAID_PLAN_TIER_CODES] } } },
     select: { feature: { select: { code: true } } },
     orderBy: { id: 'asc' },
-    take: 200,
+    take: 201,
   })
-  return filas.map(f => f.feature.code)
+  if (filas.length > 200) throw new ConflictError('No pudimos revisar todos los accesos del negocio.', 'HYBRID_ACCESS_UNVERIFIED')
+  const commercial = await grantedCapabilityCodes(venueId)
+  return [...new Set([...filas.map(f => f.feature.code), ...commercial])].sort()
 }
 
 export async function getVenuePlanInfo(venueId: string): Promise<VenuePlanInfo> {
-  const [tier, venue] = await Promise.all([
-    getVenueBaseTier(venueId),
+  const accessObservedAt = new Date().toISOString()
+  const [commercialTier, venue, individualCodes, legacyTier, billingPlan] = await Promise.all([
+    getContractBaseTier(venueId),
     prisma.venue.findUnique({ where: { id: venueId }, select: { ...GRANDFATHER_SELECT, status: true } }),
+    getVenueGrantedFeatureCodes(venueId),
+    getVenueBaseTier(venueId, { legacyOnly: true }),
+    prisma.hybridContract.findFirst({
+      where: {
+        venueId,
+        endedAt: null,
+        planTier: { in: ['PRO', 'PREMIUM'] },
+        // A cancellation that already took effect ends the plan even before anything marks the contract ended.
+        OR: [{ cancelAt: null }, { cancelAt: { gt: new Date() } }],
+      },
+      select: { planTier: true },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    }),
   ])
   const grandfathered = resolveGrandfathered(venue)
   const exempt = grandfathered || (venue != null && (DEMO_VENUE_STATUSES as readonly string[]).includes(venue.status as string))
-  return { tier: tier ?? 'FREE', grandfathered, exempt }
+  const grantedFeatureCodes = [
+    ...new Set([
+      ...individualCodes,
+      ...FREE_TIER_CODES,
+      ...[...LEGACY_PLAN_CODES].filter(code => legacyTier && elPlanConcede(legacyTier, code)),
+    ]),
+  ].sort()
+  const tier = legacyTier === 'PREMIUM' || commercialTier === 'PREMIUM' ? 'PREMIUM' : (legacyTier ?? commercialTier ?? 'FREE')
+  const commercialPlanTier = billingPlan?.planTier === 'PRO' || billingPlan?.planTier === 'PREMIUM' ? billingPlan.planTier : null
+  return { tier, grandfathered, exempt, grantedFeatureCodes, accessSchemaVersion: 1, accessObservedAt, commercialPlanTier }
 }
 
 /**
@@ -293,6 +371,7 @@ export async function venueHasFeatureAccess(venueId: string, featureCode: string
   })
   // 1. Grandfather: the venue's own active grant for this code always wins.
   if (vf && isActiveWindow(vf)) return true
+  if (await hasCapabilityGrant(venueId, featureCode)) return true
 
   // 2. Tier codes are not self-granting via the blanket logic.
   if ((PAID_PLAN_TIER_CODES as readonly string[]).includes(featureCode)) return false
@@ -301,10 +380,8 @@ export async function venueHasFeatureAccess(venueId: string, featureCode: string
   if ((FREE_TIER_CODES as readonly string[]).includes(featureCode)) return true
 
   // 3-5. Otherwise the tier decides.
-  const tier = await getVenueBaseTier(venueId)
-  if (tier === 'PREMIUM') return true
-  if (tier === 'PRO') return !(PREMIUM_ONLY_CODES as readonly string[]).includes(featureCode)
-  return false
+  const tier = await getVenueBaseTier(venueId, { legacyOnly: true })
+  return tier != null && elPlanConcede(tier, featureCode)
 }
 
 /**
@@ -344,6 +421,7 @@ export async function venuesWithFeatureAccess(venueIds: string[], featureCode: s
     select: { venueId: true },
   })
   for (const v of withFeature) entitled.add(v.venueId)
+  for (const id of await venuesWithCapabilityGrant(venueIds, featureCode)) entitled.add(id)
 
   // Tier codes are not blanket-granted: only an own grant (or exemption above) entitles them.
   if ((PAID_PLAN_TIER_CODES as readonly string[]).includes(featureCode)) return entitled
@@ -351,7 +429,7 @@ export async function venuesWithFeatureAccess(venueIds: string[], featureCode: s
   // Free-tier promises entitle every venue (even with no plan).
   if ((FREE_TIER_CODES as readonly string[]).includes(featureCode)) return new Set(venueIds)
 
-  const isPremiumOnly = (PREMIUM_ONLY_CODES as readonly string[]).includes(featureCode)
+  if (!elPlanConcede('PREMIUM', featureCode)) return entitled
 
   // 2. Active PLAN_PREMIUM entitles any non-tier code.
   const withPremium = await prisma.venueFeature.findMany({
@@ -361,7 +439,7 @@ export async function venuesWithFeatureAccess(venueIds: string[], featureCode: s
   for (const v of withPremium) entitled.add(v.venueId)
 
   // 3. Active PLAN_PRO entitles only non-Premium-only codes.
-  if (!isPremiumOnly) {
+  if (elPlanConcede('PRO', featureCode)) {
     const withPro = await prisma.venueFeature.findMany({
       where: { venueId: { in: venueIds }, feature: { code: 'PLAN_PRO' }, ...activeWindow },
       select: { venueId: true },

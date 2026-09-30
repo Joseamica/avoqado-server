@@ -77,7 +77,7 @@ jest.mock('../../../src/utils/prismaClient', () => ({
         staff: { create: txStaffCreate },
         staffOrganization: { create: txStaffOrganizationCreate },
         staffVenue: { createMany: txStaffVenueCreateMany },
-        invitation: { update: txInvitationUpdate },
+        invitation: { updateMany: txInvitationUpdate },
       }
       return cb(tx)
     }),
@@ -177,7 +177,7 @@ beforeEach(() => {
   txStaffCreate.mockResolvedValue({ id: 'new-staff-1' })
   txStaffOrganizationCreate.mockResolvedValue({})
   txStaffVenueCreateMany.mockResolvedValue({ count: 1 })
-  txInvitationUpdate.mockResolvedValue({})
+  txInvitationUpdate.mockResolvedValue({ count: 1 })
 
   state.invitation = buildInvitation()
   state.existingStaff = null
@@ -285,12 +285,21 @@ describe('loginWithGoogle — invitation acceptance parity with the password pat
       await loginWithGoogle('id-token', false)
 
       expect(txInvitationUpdate).toHaveBeenCalledWith({
-        where: { id: 'inv-1' },
+        where: { id: 'inv-1', status: InvitationStatus.PENDING },
         data: expect.objectContaining({
           status: InvitationStatus.ACCEPTED,
           acceptedById: 'new-staff-1',
         }),
       })
+    })
+
+    // 🔴 Same race as the password path (Codex, 28-sep): this path reads the invitation even BEFORE the transaction, so a
+    // revocation in between (Free seat cap, or an admin) was overwritten by the ACCEPTED write. Now the accept aborts.
+    it('🔴 an invitation revoked in the meantime is not overwritten: the accept aborts', async () => {
+      txInvitationUpdate.mockResolvedValueOnce({ count: 0 })
+
+      await expect(loginWithGoogle('id-token', false)).rejects.toThrow('ya no está disponible')
+      expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'INVITATION_ACCEPTED' }))
     })
 
     it('writes an ActivityLog row so the owner audit screen can see the accept', async () => {

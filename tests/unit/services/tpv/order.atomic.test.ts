@@ -81,6 +81,9 @@ function db() {
     payment: { aggregate: jest.fn(async () => ({ _sum: { amount: 0, tipAmount: 0 } })) },
     serializedItem: { findFirst: jest.fn(async () => null), findUnique: jest.fn(async () => null), create: jest.fn() },
     venue: { findUnique: jest.fn(async () => ({ organizationId: 'org' })) },
+    // KDS etapa 3: anular TODOS los renglones retira de la pantalla de cocina las comandas de la cuenta.
+    kdsOrderItem: { deleteMany: jest.fn(async () => ({ count: 0 })) },
+    kdsOrder: { deleteMany: jest.fn(async () => ({ count: 0 })) },
   }
 }
 const serial = { id: 'serial', venueId: 'venue', serialNumber: 'SERIAL', status: 'AVAILABLE', category: { name: 'SIM' } }
@@ -213,6 +216,32 @@ describe('validation and historical amounts', () => {
   it('tracked out-of-stock round rejects before any writes', async () => {
     ;(getProductInventoryStatus as jest.Mock).mockResolvedValue({ inventoryMethod: 'QUANTITY', available: false })
     await expect(addItemsToOrder('venue', 'order', [{ productId: 'product', quantity: 1 }], 1, true)).rejects.toThrow('agotado')
+    expect(tx.orderItem.create).not.toHaveBeenCalled()
+  })
+  // Codex (fusión con develop, 30-sep): la cola reenvía una ronda YA guardada (se perdió la respuesta) y entretanto el
+  // producto se agotó o pasó a venderse por peso. Antes se rechazaba con «agotado» ANTES de ver que sus renglones ya
+  // existían: el reducer la mandaba a cuarentena y le retiraba sus promociones.
+  it('replay of a saved round is returned as-is even if the product ran out afterwards', async () => {
+    ;(getProductInventoryStatus as jest.Mock).mockResolvedValue({ inventoryMethod: 'QUANTITY', available: false })
+    tx.orderItem.findMany.mockResolvedValueOnce([{ externalId: 'sync:r:0' }])
+    tx.orderItem.findFirst.mockResolvedValueOnce({ ...line, externalId: 'sync:r:0' })
+    await addItemsToOrder('venue', 'order', [{ productId: 'product', quantity: 1, externalId: 'sync:r:0' }], 1, true)
+    expect(tx.orderItem.create).not.toHaveBeenCalled()
+    expect(tx.orderItem.update).not.toHaveBeenCalled()
+  })
+  it('replay of a saved round is returned as-is even if the product became sold by weight afterwards', async () => {
+    tx.product.findMany.mockResolvedValue([{ id: 'product', name: 'Product', price: new Prisma.Decimal(100), soldByWeight: true }])
+    tx.orderItem.findMany.mockResolvedValueOnce([{ externalId: 'sync:r:0' }])
+    tx.orderItem.findFirst.mockResolvedValueOnce({ ...line, externalId: 'sync:r:0' })
+    await addItemsToOrder('venue', 'order', [{ productId: 'product', quantity: 1, externalId: 'sync:r:0' }], 1, true)
+    expect(tx.orderItem.create).not.toHaveBeenCalled()
+  })
+  it('a NEW keyed round with an out-of-stock product is still rejected', async () => {
+    ;(getProductInventoryStatus as jest.Mock).mockResolvedValue({ inventoryMethod: 'QUANTITY', available: false })
+    tx.orderItem.findMany.mockResolvedValueOnce([])
+    await expect(
+      addItemsToOrder('venue', 'order', [{ productId: 'product', quantity: 1, externalId: 'sync:nueva:0' }], 1, true),
+    ).rejects.toThrow('agotado')
     expect(tx.orderItem.create).not.toHaveBeenCalled()
   })
   it.each(['plain', 'external', 'custom'])('%s courtesy keeps its existing zero-total snapshot', async branch => {

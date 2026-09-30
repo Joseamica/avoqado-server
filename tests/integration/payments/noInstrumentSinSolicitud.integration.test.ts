@@ -20,6 +20,7 @@ import {
   VENTANA_SIN_CANAL_MS,
 } from '@/services/tpv/avisosNoGuardados'
 import prisma from '@/utils/prismaClient'
+import { Prisma } from '@prisma/client'
 import { recordFastPayment } from '@/services/tpv/payment.tpv.service'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
 import { processAngelPayWebhook } from '@/services/tpv/angelpay-webhook.service'
@@ -49,6 +50,9 @@ afterEach(async () => {
   // FKs (Payment → Order → Venue, VenueRolePermission → Staff) hacen fallar su `destruir()` si se quedan vivos.
   const hermano = `${f.fixture}-hermano`
   await prisma.providerEventLog.deleteMany({ where: { venueId: hermano } })
+  // Los eventos que las pruebas crean con `eventId` propio (`angelpay-tardio-…`, `angelpay-inval-…`) no llevan el prefijo de
+  // la fixture: `limpiar()` no los ve y, al borrar el venue, quedaban huérfanos con `venueId` NULL (2 filas por corrida).
+  await prisma.providerEventLog.deleteMany({ where: { venueId: f.venueId } })
   await prisma.payment.deleteMany({ where: { venueId: hermano } })
   await prisma.order.deleteMany({ where: { venueId: hermano } })
   await prisma.venue.deleteMany({ where: { id: hermano } })
@@ -157,6 +161,37 @@ async function supervisorConPin() {
 
 const consultar = (attemptId: string, serial = f.serial) =>
   terminalPaymentService.consultarIntentoDeTerminal({ attemptId, venueId: f.venueId, terminalSerial: serial })
+
+/**
+ * 🔴 27-sep (P2-10 y P2-10b eran inestables): el plan de una consulta cuando Postgres sólo puede BUSCAR por índice — el
+ * bitmap exige una condición de índice; el seq scan y los index scan quedan apagados. Con sólo el seq scan apagado, la elección
+ * dependía de las estadísticas: con "Payment" VACÍA según autovacuum, el planificador recorría ENTERO
+ * `Payment_venueId_idempotencyKey_key` (la regex como `Filter`, o `"idempotencyKey" IS NOT NULL` como `Index Cond` sobre su
+ * SEGUNDA columna) y las pruebas fallaban de vez en cuando. Lo que se prueba es que el índice sea ELEGIBLE, no qué decide el
+ * planificador con cuatro filas.
+ */
+async function planSoloBusquedas(consulta: Prisma.Sql): Promise<string> {
+  const plan = await prisma.$transaction(async tx => {
+    await tx.$executeRawUnsafe('SET LOCAL enable_seqscan = off')
+    await tx.$executeRawUnsafe('SET LOCAL enable_indexscan = off')
+    await tx.$executeRawUnsafe('SET LOCAL enable_indexonlyscan = off')
+    return tx.$queryRaw<{ 'QUERY PLAN': string }[]>`EXPLAIN (COSTS OFF) ${consulta}`
+  })
+  return plan.map(l => l['QUERY PLAN']).join('\n')
+}
+
+/**
+ * TODA búsqueda sobre "Payment" entra por el índice del recorte, con la regex como condición, y ninguna rama lee filas para
+ * descartarlas. «Contiene Index Cond» no bastaba: la regla de dos ramas pasaba, porque su rama cruda sale como `Index Cond`
+ * sobre la segunda columna de `Payment_venueId_idempotencyKey_key` (un recorrido completo). Medido en 9 estados de la tabla ×
+ * 5 consultas (la regla, la consulta de P2-10 y 3 sabotajes): esta verificación acierta 45/45.
+ */
+function expectSoloPorElIndiceDelRecorte(plan: string) {
+  const indices = [...plan.matchAll(/(?:Index Scan|Index Only Scan|Bitmap Index Scan)(?: using| on) "([^"]+)"/g)].map(m => m[1])
+  expect(new Set(indices)).toEqual(new Set(['Payment_idempotencyKey_trimmed_idx']))
+  expect(plan).toMatch(/Index Cond: \(regexp_replace/)
+  expect(plan).not.toMatch(/Seq Scan|Filter:/)
+}
 
 /**
  * Codex r7 (P1-3): intercepta la SIGUIENTE `prisma.$transaction` (la de la declaración) y, justo DESPUÉS de la consulta cuyo
@@ -501,34 +536,22 @@ describe('Pieza B · declarar «no se presentó tarjeta» SIN solicitud del POS'
     expect(patrones.length).toBeGreaterThan(0)
     for (const p of patrones) expect(p).toBe(PATRON_SQL_TRIM_COMO_JS)
 
-    // Y que de verdad se elija como BÚSQUEDA (`Index Cond`), no como recorrido con filtro encima. `SET LOCAL` sólo
-    // vale DENTRO de una transacción, y sin apagar el seq scan una tabla pequeña nunca elige el índice — lo que se
-    // comprueba aquí es que el índice sea ELEGIBLE para este predicado, no qué decide el planificador con 40 filas.
-    const plan = await prisma.$transaction(async tx => {
-      await tx.$executeRawUnsafe('SET LOCAL enable_seqscan = off')
-      return tx.$queryRawUnsafe<{ 'QUERY PLAN': string }[]>(
-        `EXPLAIN (COSTS OFF) SELECT "id" FROM "Payment" WHERE "idempotencyKey" IS NOT NULL AND regexp_replace("idempotencyKey", $1, '', 'g') = $2`,
-        PATRON_SQL_TRIM_COMO_JS,
-        'llave-que-no-existe',
-      )
-    })
-    const texto = plan.map(l => l['QUERY PLAN']).join('\n')
-    expect(texto).toContain('Payment_idempotencyKey_trimmed_idx')
-    expect(texto).toContain('Index Cond')
+    // Y que de verdad se pueda usar como BÚSQUEDA (`Index Cond`), no como recorrido con filtro encima: lo que se comprueba
+    // es que el índice sea ELEGIBLE para este predicado (ver `planSoloBusquedas`).
+    expectSoloPorElIndiceDelRecorte(
+      await planSoloBusquedas(
+        Prisma.sql`SELECT "id" FROM "Payment" WHERE "idempotencyKey" IS NOT NULL AND regexp_replace("idempotencyKey", ${PATRON_SQL_TRIM_COMO_JS}, '', 'g') = ${'llave-que-no-existe'}`,
+      ),
+    )
   })
 
   it('🔴 r6 P2-10b · la regla de dinero ENTERA es una búsqueda por índice — ninguna rama recorre la tabla', async () => {
     // La prueba de arriba mide una consulta escrita a mano; ésta mide el FRAGMENTO que de verdad usan el POST y el CAS.
     // Medido: con dos ramas (`llave = X` UNION `recorte(llave) = X`) la exacta no tenía índice que la sirviera —el
     // único con la llave empieza por `venueId`— y salía `Filter`: un recorrido de la tabla de pagos cada 5 s del sondeo.
-    const plan = await prisma.$transaction(async tx => {
-      await tx.$executeRawUnsafe('SET LOCAL enable_seqscan = off')
-      return tx.$queryRaw<{ 'QUERY PLAN': string }[]>`EXPLAIN (COSTS OFF) SELECT ${hayDineroConEstaLlaveSql(randomUUID())}`
-    })
-    const texto = plan.map(l => l['QUERY PLAN']).join('\n')
-    expect(texto).toContain('Index Cond')
-    // Ninguna rama puede filtrar la llave sin índice.
-    expect(texto).not.toMatch(/Filter: \(\("idempotencyKey"\)::text = /)
+    // 27-sep: la verificación anterior («contiene Index Cond») fallaba 1 de cada tantas corridas y, además, aprobaba justo esa
+    // regla de dos ramas en 6 de 9 estados de la tabla (ver `expectSoloPorElIndiceDelRecorte`).
+    expectSoloPorElIndiceDelRecorte(await planSoloBusquedas(Prisma.sql`SELECT ${hayDineroConEstaLlaveSql(randomUUID())}`))
   })
 
   it('🔴 r6 P2-10c · y la regla sigue viendo una llave guardada con espacios, y una llave limpia', async () => {
@@ -1438,7 +1461,9 @@ describe('Ronda 20/21 · la terminal se libera SOLA: «sin rastro del banco tras
       await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS avq_prueba_rompe_ingreso()`)
     })
     afterEach(async () => {
-      _olvidarTodoParaPruebas()
+      // 🔴 Esperado, no suelto: la puerta de las pruebas anteriores despierta el reingreso con la base todavía rota, y esa vuelta,
+      // al volver a fallar, re-registraba sus marcas y su reingreso DESPUÉS del borrado — se colaban en la prueba siguiente (27-sep).
+      await _olvidarTodoParaPruebas()
       await prisma.merchantAccount.update({ where: { id: f.merchantId }, data: { angelpayWebhookSecret: null } })
     })
 
@@ -1487,6 +1512,15 @@ describe('Ronda 20/21 · la terminal se libera SOLA: «sin rastro del banco tras
       await expect(automatica(randomUUID())).rejects.toMatchObject({ code: 'WEBHOOK_NOT_CONFIRMED' })
     })
 
+    /**
+     * Tarda ~5 s y es a propósito: el reingreso que SÍ guarda el aviso sigue con la conciliación completa, y ésta espera hasta
+     * 5 s (`attemptPaymentMatch`, reintentos [0, 2 000, 3 000] ms) a que la terminal registre el Payment de A — aquí nunca llega.
+     * El 503 inicial es rápido (medido: 12-434 ms con la Mac cargada).
+     * 🔴 Flaky del 27-sep (0 filas en vez de 1): mientras esos 5 s corrían para el aviso de una prueba ANTERIOR que se había
+     * colado, el reloj de 5 s arrancaba el reingreso de A por su cuenta; `_reingresarYaParaPruebas()` lo veía «corriendo», volvía
+     * sin esperarlo y el `finally` rompía el INSERT otra vez antes de que esa vuelta lo hiciera. Ahora el afterEach espera el
+     * borrado y el reingreso manual espera toda vuelta en curso (pruebas en `tests/unit/services/tpv/avisosNoGuardados.test.ts`).
+     */
     it('🔴 cuando la base vuelve, el propio servidor REINGRESA el aviso: queda guardado sin que AngelPay reintente', async () => {
       const [m] = await comercios([HACE_UN_MINUTO()])
       await cobroDelComercio(m, new Date(Date.now() - 5 * 60_000))

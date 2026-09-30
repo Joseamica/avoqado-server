@@ -25,6 +25,7 @@
 import Stripe from 'stripe'
 import type { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
+import { subscriptionPeriod } from '../../utils/stripeSubscriptionPeriod'
 import logger from '../../config/logger'
 import AppError, { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
@@ -39,6 +40,7 @@ import {
   planLookupKey,
 } from '../stripe.service'
 import { autorizarObligacionNueva } from '../access/autorizarObligacionNueva'
+import { inventarioDeObligaciones } from '../access/inventarioDeObligaciones'
 import { ensureVenueForOnboarding } from './ensureVenue.service'
 import { parseV2Plan } from './onboardingProgress.service'
 import {
@@ -53,6 +55,8 @@ import {
 import { buildLaunchOfferView, launchOfferAvailability, standardFirstChargeCents } from '../launchCampaigns/launchOfferMath'
 import { LAUNCH_CAMPAIGN_SELECT, toOfferRow, type LaunchCampaignRow } from '../launchCampaigns/launchCampaign.service'
 import { PLAN_ACTIVATION_STATUS, REDEMPTION_STATUS } from '../launchCampaigns/launchCampaignEnums'
+import { idDelCuponDelDescuento } from './cuponDelDescuento'
+import { billingPageUrl } from '@/utils/dashboardLinks'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 
@@ -130,10 +134,8 @@ export function esErrorDeTarjeta(error: unknown): error is Stripe.errors.StripeE
  * Stripe va a cobrar de verdad, y el cliente la vería en el correo.
  */
 function siguienteCobro(sub: Stripe.Subscription): string {
-  const sec = (sub as unknown as { current_period_end?: number }).current_period_end
-  if (typeof sec === 'number') return new Date(sec * 1000).toISOString()
-  const item = sub.items?.data?.[0] as unknown as { current_period_end?: number } | undefined
-  if (typeof item?.current_period_end === 'number') return new Date(item.current_period_end * 1000).toISOString()
+  const end = subscriptionPeriod(sub).end
+  if (end) return end.toISOString()
   // Sin la fecha de Stripe no se inventa una: se dice que no se sabe.
   throw pendiente('la suscripción no trae current_period_end')
 }
@@ -297,6 +299,61 @@ async function buscarSuscripcionDelIntento(
     return true
   })
   return { encontrada, cubrioTodo }
+}
+
+/**
+ * ¿Queda un cobro de plan del alta SIN cerrar? Lo pregunta `complete` antes de dejar terminar el alta en Gratis.
+ *
+ * 🔴 Codex R12: exigir sólo `planStripeSubscriptionId` dejaba pasar el caso peor — Stripe cobró pero la respuesta se
+ * perdió ANTES de guardar el id. Aquí se busca igual que la recuperación de `activatePlan` (paso 6): por id si lo hay,
+ * y si no, por la llave del intento entre TODAS las suscripciones del cliente. «No pude ver» nunca es «no existe».
+ */
+export async function hayCobroDelAltaSinCerrar(progress: {
+  organizationId: string
+  planActivationStatus: string | null
+  planActivationAttempt: number
+  planStripeSubscriptionId: string | null
+}): Promise<boolean> {
+  if (progress.planActivationStatus !== PLAN_ACTIVATION_STATUS.IN_PROGRESS) return false
+  if (progress.planStripeSubscriptionId) return true
+  // Sin cliente de Stripe no pudo crearse ninguna suscripción: el cliente se crea ANTES de cobrar (paso 4).
+  const llave = `plan-activation:${progress.organizationId}:${progress.planActivationAttempt}`
+  let afterId: string | undefined
+  while (true) {
+    // Paginar, no truncar: un cobro en otra página también impide terminar el alta.
+    const conCliente = await prisma.venue.findMany({
+      where: { organizationId: progress.organizationId, stripeCustomerId: { not: null }, ...(afterId ? { id: { gt: afterId } } : {}) },
+      select: { id: true, stripeCustomerId: true },
+      orderBy: { id: 'asc' },
+      take: 100,
+    })
+    for (const { id, stripeCustomerId } of conCliente) {
+      try {
+        const { encontrada, cubrioTodo } = await buscarSuscripcionDelIntento(stripeCustomerId as string, llave)
+        if (!cubrioTodo) return true
+        if (encontrada && (encontrada as Stripe.Subscription).status !== 'incomplete_expired') return true
+        // 🔴 Codex R13: el carril viejo de `complete` cobra con otra llave (`onboarding-complete:<org>`) y sin ese metadata,
+        // y su cobro dudoso también deja IN_PROGRESS. Un negocio que aún no termina su alta no tiene por qué tener NINGUNA
+        // suscripción de plan viva: cualquiera que esté cobrando (o a medio cobrar) cuenta como abierta.
+        // El inventario común distingue una función conocida de un plan, de varios planes y de lo desconocido.
+        // No poder determinar UN tier nunca demuestra que no haya cobro; los ítems incompletos también bloquean.
+        const inventario = await inventarioDeObligaciones(id)
+        if (
+          inventario.conCambiosProgramados.length ||
+          inventario.vivas.some(sub => sub.proyecciones.some(p => p.tipo === 'PLAN' || p.tipo === 'DESCONOCIDO'))
+        )
+          return true
+      } catch (error) {
+        logger.warn('complete: no se pudo consultar Stripe por un cobro del alta sin cerrar — se trata como abierto', {
+          organizationId: progress.organizationId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+        return true
+      }
+    }
+    if (conCliente.length < 100) return false
+    afterId = conCliente[conCliente.length - 1].id
+  }
 }
 
 /**
@@ -511,7 +568,9 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
         throw new ConflictError(
           'Tu plan ya está activo sin esta oferta, así que no se puede aplicar encima.',
           'PLAN_ACTIVE_WITHOUT_OFFER',
-          { currentTier: activo?.tier ?? null, currentInterval: activo?.interval ?? null },
+          // `charged`: si ese plan activo se PAGÓ (no es prueba gratis). La pantalla no puede decir «no te cobramos nada»
+          // a quien ya pagó en un intento anterior.
+          { currentTier: activo?.tier ?? null, currentInterval: activo?.interval ?? null, charged: activo?.payNow === true },
         )
       }
     }
@@ -830,11 +889,29 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
   // queda en `false`: el resultado medido por Codex (20-sep) era una campaña `APPLIED` con **$0
   // pagados y renovación anunciada a $22**, mientras en Stripe esa suscripción no tenía descuento.
   const noLaCreamosConElCupon = reused || suscripcionRecuperada != null
-  if (noLaCreamosConElCupon && cuponEsperado) {
+  // 🔴 Qué cupón se le EXIGE a una suscripción que no creamos ahora. El de la CAMPAÑA, siempre: la campaña se reclama
+  // en el alta, no en esta petición, así que es la misma del cobro original. El de la promo legacy SÓLO al reusar:
+  // en una RECUPERACIÓN sin campaña manda lo que SE COBRÓ, no lo que pide el reintento — al recargar, la pantalla vuelve
+  // con Pro y «Pagar hoy» aunque lo cobrado fuera Premium, y exigirle INTRO_PRO_3M cerraba el alta con
+  // PLAN_ACTIVE_WITHOUT_OFFER SIN conceder nada: cobrado y sin acceso (lo vivió el founder, 26-sep).
+  const cuponExigible = campaign ? cuponEsperado : suscripcionRecuperada ? null : cuponEsperado
+  // 🔴 Una suscripción RECUPERADA sin el cupón de la campaña es un cobro de un intento ANTERIOR que nunca se entregó
+  // (p. ej. «Ver otros planes» → Premium, falla la entrega, vuelve y toca la oferta). Cerrar el intento y contestar 409
+  // lo dejaba cobrado y sin acceso, con «no te cobramos nada» en pantalla. Ahora se entrega LO COBRADO, se libera el
+  // lugar de la oferta en el mismo cierre, y sólo entonces se le dice que la oferta no aplicó.
+  let ofertaNoAplicada = false
+  if (noLaCreamosConElCupon && cuponExigible) {
     const sub = await stripe.subscriptions.retrieve(subscriptionId, { expand: ['discounts'] })
-    const descuentos = (sub as unknown as { discounts?: Array<string | { coupon?: { id?: string } }> }).discounts ?? []
-    const lleva = descuentos.some(d => typeof d !== 'string' && d?.coupon?.id === cuponEsperado)
-    if (!lleva) {
+    const descuentos = (sub as unknown as { discounts?: unknown[] }).discounts ?? []
+    // 🔴 El cupón vive en `source.coupon` con la API actual; leer `d.coupon` lo daba por ausente SIEMPRE (26-sep).
+    const lleva = descuentos.some(d => idDelCuponDelDescuento(d) === cuponExigible)
+    if (!lleva && campaign && suscripcionRecuperada && !reused) {
+      logger.error('🚨 activate-plan: se recuperó un cobro anterior SIN el cupón de la oferta — se entrega lo cobrado', {
+        organizationId,
+        subscriptionId,
+      })
+      ofertaNoAplicada = true
+    } else if (!lleva) {
       logger.error('🚨 activate-plan: se reusó una suscripción sin el cupón de la oferta', { organizationId, subscriptionId })
       await cerrarIntentoYLiberarLugar({
         organizationId,
@@ -907,7 +984,8 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
       interval: cobrado.interval,
       payNow: payNowCobrado,
       acceptedAt: now.toISOString(),
-      offer: input.offer,
+      // Lo guardado describe lo COBRADO: si la oferta no aplicó, no queda como alta con oferta.
+      offer: ofertaNoAplicada ? ({ kind: 'STANDARD', expectedFirstChargeCents: primerCobroDe(sub, expected) } as const) : input.offer,
     }
     const v2 = ((progress.v2SetupData as Record<string, unknown> | null) ?? {}) as Record<string, unknown>
     const cerrado = await tx.onboardingProgress.updateMany({
@@ -930,7 +1008,10 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
     // 🔴 Cada cierre tiene que TOCAR su fila (Codex C6): si el intento ya no es de esta petición o el lugar de la oferta
     // ya no estaba apartado, no se da por aplicada el alta — el cargo quedó registrado y el siguiente intento lo recupera.
     if (cerrado.count === 0) throw pendiente('el intento ya no era de esta petición al cerrarlo')
-    if (redemption && campaign) {
+    if (redemption && campaign && ofertaNoAplicada) {
+      // El cierre de arriba acreditó que el intento es nuestro: el lugar se libera en la MISMA transacción (Codex #14).
+      await liberarLugarEn(tx, redemption.id, campaign.id, 'RECOVERED_WITHOUT_COUPON')
+    } else if (redemption && campaign) {
       const aplicada = await tx.launchCampaignRedemption.updateMany({
         where: { id: redemption.id, status: REDEMPTION_STATUS.RESERVED },
         data: { status: REDEMPTION_STATUS.APPLIED, appliedAt: now, stripeSubscriptionId: subscriptionId, cardFingerprint: fingerprint },
@@ -944,6 +1025,23 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
   })
 
   const firstChargeCents = primerCobroDe(sub, expected)
+
+  if (ofertaNoAplicada) {
+    await logAction({
+      staffId,
+      organizationId,
+      action: 'PLAN_ACTIVATED_ONBOARDING',
+      entity: 'OnboardingProgress',
+      entityId: progress.id,
+      data: { tier: cobrado.tier, interval: cobrado.interval, subscriptionId, offerNotApplied: true, reason: 'RECOVERED_WITHOUT_COUPON' },
+    })
+    // Sin correo de la oferta: prometería un precio que no se cobró. El plan quedó activo; la pantalla lo dice.
+    throw new ConflictError(
+      'Ya tienes activo el plan que pagaste en un intento anterior, así que la oferta no se puede aplicar encima. No te cobramos otra vez.',
+      'PLAN_ACTIVE_WITHOUT_OFFER',
+      { currentTier: cobrado.tier, currentInterval: cobrado.interval, charged: yaCobrada },
+    )
+  }
 
   await logAction({
     staffId,
@@ -1004,7 +1102,6 @@ async function enviarConfirmacion(args: {
   const target = await resolvePlanNotificationTarget(args.venueId)
   if (!target.email) return
 
-  const FRONTEND_URL = process.env.FRONTEND_URL || 'https://dashboard.avoqado.io'
   const { campaign, input, now } = args
   const unMes = new Date(now.getTime() + 30 * 86400000)
   const legacyIntro = !campaign && isLegacyIntroEligible(input.tier, input.interval, input.payNow)
@@ -1026,7 +1123,7 @@ async function enviarConfirmacion(args: {
       : legacyIntro
         ? { introAmountCents: LEGACY_INTRO_OFFER.introMonthlyCents, nextChargeAmountCents: LEGACY_INTRO_OFFER.introMonthlyCents }
         : {}),
-    billingPortalUrl: `${FRONTEND_URL}/dashboard/venues/${args.venueSlug}/billing`,
+    billingPortalUrl: billingPageUrl(args.venueSlug),
   })
 }
 

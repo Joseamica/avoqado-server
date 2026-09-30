@@ -12,6 +12,9 @@
  * (producto nuevo), pero NUNCA modifica el `currentStock` de un inventario
  * existente — el saldo solo se mueve por ventas, conteos, recepciones y ajustes,
  * que sí dejan rastro. `minimumStock` sí se actualiza (es configuración, no saldo).
+ * Única excepción (29-sep-2026): la APERTURA PENDIENTE — fila en 0 y sin kardex que deja
+ * `ensureQuantityInventoryRow` al activar «por cantidad» —, con la condición dentro del
+ * propio UPDATE. La base real la prueba `quantity-inventory-row.integration.test.ts`.
  *
  * Verifica:
  *  - re-import con inventario existente NO toca currentStock (ni con valor ni sin él)
@@ -60,6 +63,8 @@ function wirePrisma(opts: { existingProduct: Record<string, any> | null; existin
   prismaMock.product.update.mockResolvedValue({ id: 'prod-1' } as any)
   prismaMock.inventory.findFirst.mockResolvedValue(opts.existingInventory as any)
   prismaMock.inventory.update.mockResolvedValue({} as any)
+  // Como la base real: un inventario con saldo (340) no es apertura pendiente ⇒ 0 filas.
+  prismaMock.inventory.updateMany.mockResolvedValue({ count: 0 } as any)
   prismaMock.inventory.create.mockResolvedValue({} as any)
 }
 
@@ -89,6 +94,11 @@ describe('importMenu — el re-import no pisa stock existente', () => {
     for (const call of prismaMock.inventory.update.mock.calls) {
       expect((call[0] as any).data).not.toHaveProperty('currentStock')
     }
+    // El único UPDATE que puede llevar saldo exige la apertura pendiente: en 0 y SIN movimientos.
+    for (const call of prismaMock.inventory.updateMany.mock.calls) {
+      expect((call[0] as any).where).toMatchObject({ id: 'inv-1', currentStock: 0, movements: { none: {} } })
+    }
+    expect(prismaMock.inventoryMovement.create).not.toHaveBeenCalled()
   })
 
   it('re-import sí actualiza minimumStock (configuración, no saldo)', async () => {

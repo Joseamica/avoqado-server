@@ -1,6 +1,12 @@
 import { parseV2Plan } from '../../../../src/services/onboarding/onboardingProgress.service'
 
 describe('parseV2Plan', () => {
+  it('retains the paid hybrid purchase for server validation without creating a legacy subscription', () => {
+    expect(parseV2Plan({ step10: { plan: { tier: 'FREE', hybridPurchaseId: 'purchase' } } })).toMatchObject({
+      tier: 'FREE',
+      hybridPurchaseId: 'purchase',
+    })
+  })
   it('returns null when no plan saved', () => {
     expect(parseV2Plan(null)).toBeNull()
     expect(parseV2Plan({ step2: {} })).toBeNull()

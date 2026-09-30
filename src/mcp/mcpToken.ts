@@ -15,6 +15,7 @@ export interface McpTokenPayload {
   scp?: string[] // granted OAuth scopes; absent for dev-server/legacy tokens (→ treated as full)
   exp?: number // expiry (epoch seconds) — required by the SDK bearer middleware
   iat?: number // emisión (segundos): el corte de sesión se compara contra esto
+  gat?: number // concesión ORIGINAL de la cadena OAuth (segundos); ausente en tokens viejos/de desarrollo
 }
 
 /**
@@ -23,11 +24,29 @@ export interface McpTokenPayload {
  * connected with only `mcp:read` still carried an all-powerful token. Carrying the real scopes lets
  * verifyAccessToken report — and the guard enforce — what was actually granted.
  */
-export function issueMcpToken(staffId: string, activeOrg: string, ttlSeconds = 3600, clientId?: string, scopes?: string[]): string {
+export function issueMcpToken(
+  staffId: string,
+  activeOrg: string,
+  ttlSeconds = 3600,
+  clientId?: string,
+  scopes?: string[],
+  concedidoEn?: Date,
+): string {
   const payload: Record<string, unknown> = { sub: staffId, org: activeOrg }
   if (clientId) payload.cid = clientId
   if (scopes && scopes.length) payload.scp = scopes
+  // El acceso emitido en una renovación hereda la fecha de la autorización original: si la contraseña
+  // cambió entre validar y emitir, su `iat` sería posterior al corte y viviría su hora completa.
+  if (concedidoEn) payload.gat = Math.floor(concedidoEn.getTime() / 1000)
   return jwt.sign(payload, getSecret(), { audience: MCP_AUDIENCE, expiresIn: ttlSeconds })
+}
+
+/**
+ * La fecha con la que se juzga el corte de sesión: la MÁS VIEJA que trae el token — la de la autorización
+ * original de su cadena (`gat`), si la tiene. Un `gat` posterior nunca rejuvenece al token.
+ */
+export function emisionDeCadena(payload: Pick<McpTokenPayload, 'iat' | 'gat'>): number | undefined {
+  return typeof payload.gat === 'number' && typeof payload.iat === 'number' ? Math.min(payload.iat, payload.gat) : payload.iat
 }
 
 /** Verify an MCP token. Rejects any token NOT minted for the MCP audience. */
@@ -37,6 +56,7 @@ export function verifyMcpToken(token: string): McpTokenPayload {
   if (!decoded.sub || typeof org !== 'string') throw new Error('Invalid MCP token payload')
   const cid = (decoded as Record<string, unknown>).cid
   const scp = (decoded as Record<string, unknown>).scp
+  const gat = (decoded as Record<string, unknown>).gat
   return {
     sub: decoded.sub,
     org,
@@ -44,5 +64,6 @@ export function verifyMcpToken(token: string): McpTokenPayload {
     scp: Array.isArray(scp) ? scp.filter((s): s is string => typeof s === 'string') : undefined,
     exp: decoded.exp,
     iat: decoded.iat,
+    gat: typeof gat === 'number' && Number.isFinite(gat) ? gat : undefined,
   }
 }

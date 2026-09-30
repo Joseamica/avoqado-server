@@ -2,7 +2,7 @@ import { OAuth2Client } from 'google-auth-library'
 import { issueGrant } from '@/services/auth/refreshGrant.service'
 import { refreshGrantExpiry } from '@/services/mobile/auth.mobile.service'
 import crypto from 'crypto'
-import { AuthenticationError, ForbiddenError } from '../../errors/AppError'
+import { AuthenticationError, ConflictError, ForbiddenError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { StaffRole, OrgRole, InvitationStatus, AuthMethod } from '@prisma/client'
 import * as jwtService from '../../jwt.service'
@@ -42,9 +42,12 @@ interface GoogleUserInfo {
 }
 
 /**
- * Generate Google OAuth URL for authentication
+ * Generate Google OAuth URL for authentication.
+ *
+ * `state` es el que el controlador guardó en la cookie de ESTE navegador: Google lo devuelve tal cual y
+ * el callback sólo canjea el `code` si coinciden (login CSRF — ver `googleOAuth.controller.ts`).
  */
-export function getGoogleAuthUrl(): string {
+export function getGoogleAuthUrl(state: string): string {
   if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET || !process.env.FRONTEND_URL) {
     throw new AuthenticationError('Google OAuth is not configured on this server')
   }
@@ -55,6 +58,7 @@ export function getGoogleAuthUrl(): string {
     access_type: 'offline',
     scope: scopes,
     include_granted_scopes: true,
+    state,
   })
 
   return authUrl
@@ -334,14 +338,19 @@ export async function loginWithGoogle(
             })),
           })
 
-          await tx.invitation.update({
-            where: { id: invitation.id },
+          // Only while it is STILL pending: this path read the invitation before the transaction, so a revocation in
+          // between (Free seat cap, or an admin) must win instead of being overwritten (Codex, 28-sep).
+          const marked = await tx.invitation.updateMany({
+            where: { id: invitation.id, status: InvitationStatus.PENDING },
             data: {
               status: InvitationStatus.ACCEPTED,
               acceptedAt: new Date(),
               acceptedById: created.id,
             },
           })
+          if (marked.count === 0) {
+            throw new ConflictError('La invitación ya no está disponible. Pide que te la envíen de nuevo.', 'INVITATION_NOT_PENDING')
+          }
         }
 
         return created.id

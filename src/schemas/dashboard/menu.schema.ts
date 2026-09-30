@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { MenuType, ProductType } from '@prisma/client'
+import { isNonInventoriable, NON_INVENTORIABLE_MESSAGE } from '../../services/dashboard/quantityInventoryRow'
 
 // Common patterns and constants
 const TIME_REGEX = /^([01]\d|2[0-3]):([0-5]\d)$/ // HH:mm format
@@ -247,12 +248,10 @@ const ProductBodyBase = z.object({
   printStationId: z.string().min(1, 'La estación es requerida').nullable().optional(),
 })
 
-const nonInventoriableRefine = <T extends { type?: string; trackInventory?: boolean }>(data: T) => {
-  const nonInventoriableTypes = ['CLASS', 'APPOINTMENTS_SERVICE', 'DIGITAL', 'DONATION']
-  return !(nonInventoriableTypes.includes(data.type ?? '') && data.trackInventory === true)
-}
+const nonInventoriableRefine = <T extends { type?: string; trackInventory?: boolean }>(data: T) =>
+  !isNonInventoriable(data.type, data.trackInventory)
 const nonInventoriableMessage = {
-  message: 'Este tipo de producto no puede tener seguimiento de inventario',
+  message: NON_INVENTORIABLE_MESSAGE,
   path: ['trackInventory'],
 }
 

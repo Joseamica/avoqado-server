@@ -24,7 +24,7 @@
   role drives access. checkOrgAccess additionally requires token.orgId === :orgId.
 */
 
-import request from 'supertest'
+import { api, startApiServer } from '@tests/__helpers__/apiServer'
 import jwt from 'jsonwebtoken'
 import type { Express } from 'express'
 import { prismaMock } from '@tests/__helpers__/setup'
@@ -60,6 +60,8 @@ beforeAll(async () => {
   const mod = await import('@/app')
   app = mod.default
 })
+
+startApiServer(() => app)
 
 /**
  * Generate JWT token matching AvoqadoJwtPayload shape. The token venueId is used
@@ -162,7 +164,7 @@ describe('PATCH /api/v1/dashboard/organizations/:orgId/sale-verifications/:id (e
   it('403 without sale-verifications:edit (MANAGER)', async () => {
     seedFailedSale()
     const token = makeToken('MANAGER')
-    const res = await request(app)
+    const res = await api()
       .patch(`${BASE}/${SALE_ID}`)
       .set('Authorization', `Bearer ${token}`)
       .send({ amount: 100, paymentForm: 'CASH', status: 'COMPLETED', reason: 'corrección de monto' })
@@ -177,7 +179,7 @@ describe('PATCH /api/v1/dashboard/organizations/:orgId/sale-verifications/:id (e
   it('OWNER edits monto + forma de pago + estado and writes an ActivityLog', async () => {
     seedFailedSale()
     const token = makeToken('OWNER')
-    const res = await request(app)
+    const res = await api()
       .patch(`${BASE}/${SALE_ID}`)
       .set('Authorization', `Bearer ${token}`)
       .send({ amount: 100, paymentForm: 'CASH', status: 'COMPLETED', reason: 'era un ESIM $100, no gratis' })
@@ -212,7 +214,7 @@ describe('PATCH /api/v1/dashboard/organizations/:orgId/sale-verifications/:id (e
   it('400 when reason is too short', async () => {
     seedFailedSale()
     const token = makeToken('OWNER')
-    const res = await request(app).patch(`${BASE}/${SALE_ID}`).set('Authorization', `Bearer ${token}`).send({ amount: 50, reason: 'x' })
+    const res = await api().patch(`${BASE}/${SALE_ID}`).set('Authorization', `Bearer ${token}`).send({ amount: 50, reason: 'x' })
 
     expect(res.status).toBe(400)
     // Validation failed before any write happened.
@@ -236,13 +238,15 @@ describe('PATCH /api/v1/dashboard/organizations/:orgId/sale-verifications/:id (e
       venue: { organizationId: 'clotherorgsve01234567890123' }, // different org
     })
     const token = makeToken('OWNER')
-    const res = await request(app)
+    const res = await api()
       .patch(`${BASE}/${SALE_ID}`)
       .set('Authorization', `Bearer ${token}`)
       .send({ amount: 100, paymentForm: 'CASH', status: 'COMPLETED', reason: 'corrección de monto' })
 
-    expect(res.status).not.toBe(200)
-    expect(res.status).toBe(403)
+    expect({ status: res.status, body: res.body }).toMatchObject({
+      status: 403,
+      body: { message: 'La venta no pertenece a esta organización' },
+    })
     // No financial write may happen on a cross-org sale.
     expect(prismaMock.payment.update).not.toHaveBeenCalled()
     expect(prismaMock.saleVerification.update).not.toHaveBeenCalled()
@@ -251,7 +255,7 @@ describe('PATCH /api/v1/dashboard/organizations/:orgId/sale-verifications/:id (e
   describe('Codex R13-3 · un cobro del protocolo de costo no cambia de dinero desde la verificación de venta', () => {
     it('OWNER: PATCH que cambia el importe ⇒ 409 PAYMENT_PROTECTED_BY_COST_PROTOCOL con los campos, y NO escribe (ni Payment, ni verificación, ni bitácora)', async () => {
       seedProtocolSale()
-      const res = await request(app)
+      const res = await api()
         .patch(`${BASE}/${SALE_ID}`)
         .set('Authorization', `Bearer ${makeToken('OWNER')}`)
         .send({ amount: 120, reason: 'corrección de monto' })
@@ -264,7 +268,7 @@ describe('PATCH /api/v1/dashboard/organizations/:orgId/sale-verifications/:id (e
 
     it('OWNER: PATCH que cambia la forma de pago (CARD → CASH) ⇒ 409 con `method` en los campos, y NO escribe', async () => {
       seedProtocolSale()
-      const res = await request(app)
+      const res = await api()
         .patch(`${BASE}/${SALE_ID}`)
         .set('Authorization', `Bearer ${makeToken('OWNER')}`)
         .send({ paymentForm: 'CASH', reason: 'corrección de forma de pago' })
@@ -276,7 +280,7 @@ describe('PATCH /api/v1/dashboard/organizations/:orgId/sale-verifications/:id (e
 
     it('OWNER: revisión sin dinero (estado FAILED con notas) sobre un cobro del protocolo ⇒ 200, escribe la verificación y la bitácora, nunca el Payment', async () => {
       seedProtocolSale()
-      const res = await request(app)
+      const res = await api()
         .patch(`${BASE}/${SALE_ID}`)
         .set('Authorization', `Bearer ${makeToken('OWNER')}`)
         .send({ status: 'FAILED', reviewNotes: 'Falta la foto de la vinculación', reason: 'revisión de documentación' })
@@ -288,7 +292,7 @@ describe('PATCH /api/v1/dashboard/organizations/:orgId/sale-verifications/:id (e
 
     it('OWNER: un NO-OP económico (el mismo importe y la misma forma) sobre un cobro del protocolo ⇒ 200 sin tocar el Payment', async () => {
       seedProtocolSale()
-      const res = await request(app)
+      const res = await api()
         .patch(`${BASE}/${SALE_ID}`)
         .set('Authorization', `Bearer ${makeToken('OWNER')}`)
         .send({ amount: 100, paymentForm: 'CARD', reason: 'sin cambio económico' })

@@ -19,6 +19,7 @@ const PARAMS_SENSIBLES = new Set([
   'api_key',
   'apikey',
   'signature',
+  'hub.verify_token', // 🔴 el secreto del handshake de WhatsApp: Meta lo manda en el query (GET /api/v1/webhooks/whatsapp)
 ])
 
 /**
@@ -61,22 +62,31 @@ export function redactUrlSecrets(url: string): string {
  * un mensaje de advertencia en el logger.
  */
 export const requestLoggerMiddleware = (req: Request, res: Response, next: NextFunction) => {
+  // 🔴 Ya lo abrió un logger montado más arriba (los explícitos de /api/v1/public y de los webhooks, que van antes de
+  // `configureCoreMiddlewares`): una ruta que no casa sigue hasta el logger general, y dos loggers dejaban DOS `Request End`
+  // con dos correlationId distintos para una sola petición. El contexto del primero sigue activo aquí.
+  if (req.correlationId) return next()
+
   // A client-supplied id is reused only when it is safe to (see correlationId.ts): it ends
   // up in log fields, and Express hands back an array when a header arrives twice.
   const correlationId = resolveCorrelationId(req.headers[CORRELATION_HEADER])
   req.correlationId = correlationId
   res.setHeader('X-Correlation-ID', correlationId)
 
+  // 🔴 `originalUrl`, no `url`: dentro de un `app.use('/prefijo', …)` Express le quita el prefijo a `req.url`, y el
+  // montaje explícito de /api/v1/public registraba `GET /receipt/:id` en vez de `GET /api/v1/public/receipt/:id`.
+  const fullUrl = req.originalUrl ?? req.url
+
   // Everything below runs INSIDE the execution context, including the res listeners
   // registered here. Wrapping only next() would leave the request-completion log — the one
   // line people actually search — without a tenant.
-  runWithContext({ correlationId, source: 'http', entrypoint: normalizeEntrypoint(req.method, req.url) }, () => {
+  runWithContext({ correlationId, source: 'http', entrypoint: normalizeEntrypoint(req.method, fullUrl) }, () => {
     const start = process.hrtime()
     const { method, ip } = req
     // 🔴 NUNCA la URL cruda: el query string carga credenciales. El callback de OAuth recibe
     // `?code=…&state=…`, y ese código canjea un token si alguien lo lee del log antes de que
     // expire. Hallado por auditoría externa el 2026-08-20.
-    const url = redactUrlSecrets(req.url)
+    const url = redactUrlSecrets(fullUrl)
 
     // Skip logging health checks and heartbeats to reduce log noise (in all environments)
     const isHealthCheck = url === '/health'

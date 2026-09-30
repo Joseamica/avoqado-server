@@ -20,6 +20,7 @@ import request from 'supertest'
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    capabilityGrant: { findFirst: jest.fn().mockResolvedValue(null), groupBy: jest.fn().mockResolvedValue([]) },
     // staffVenue powers the SUPERADMIN bypass in checkFeatureAccess (requestIsSuperAdmin).
     // Without it, prisma.staffVenue is undefined → the gate throws → catch returns 500.
     staffVenue: { findFirst: jest.fn() },

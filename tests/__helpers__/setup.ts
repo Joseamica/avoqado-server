@@ -154,6 +154,9 @@ const prismaMock: any = {
   deliveryChannelLink: createMockModel(),
   kdsOrder: createMockModel(),
   kdsOrderItem: createMockModel(),
+  printStation: createMockModel(),
+  printGateway: createMockModel(),
+  printer: createMockModel(),
   deliveryOrderEvent: createMockModel(),
   deliveryActivationRequest: createMockModel(),
   payment: createMockModel(),
@@ -190,6 +193,16 @@ const prismaMock: any = {
   // Stripe-related models
   feature: createMockModel(),
   venueFeature: createMockModel(),
+  capabilityGrant: createMockModel(),
+  hybridCampaign: createMockModel(),
+  hybridPurchase: createMockModel(),
+  hybridContract: createMockModel(),
+  hybridBillingOperation: createMockModel(),
+  hybridRedemption: createMockModel(),
+  hybridPaymentPeriod: createMockModel(),
+  hybridCreditAllocation: createMockModel(),
+
+  hybridOfferPublication: createMockModel(),
   billingObligationConflict: createMockModel(),
   webhookEvent: createMockModel(),
   // Platform billing CFDI (Avoqado factura a sus propios clientes)
@@ -477,6 +490,10 @@ prismaMock.product.findFirstOrThrow.mockResolvedValue({ ivaTratamiento: 'IVA_16'
 // a feature gate. Default to [] (= no base-plan rows → FREE tier); tests that
 // exercise tiers override with their own mockResolvedValue per test.
 prismaMock.venueFeature.findMany.mockResolvedValue([])
+prismaMock.capabilityGrant.groupBy.mockResolvedValue([])
+prismaMock.capabilityGrant.findFirst.mockResolvedValue(null)
+prismaMock.hybridPurchase.findFirst.mockResolvedValue(null)
+prismaMock.hybridPurchase.findMany.mockResolvedValue([])
 // Mobile venue-settings promotions block (getVenueTpvSettings, src/controllers/mobile/
 // tpvSettings.mobile.controller.ts) calls prisma.venueSettings.findUnique(...).catch(...).
 // A bare jest.fn() resolves undefined (not a Promise), so `.catch` on it throws
@@ -513,6 +530,11 @@ prismaMock.paymentEffect.createMany.mockResolvedValue({ count: 1 })
 // línea (`:359-369`). Sin default también revienta con «originalCalcs is not iterable» dentro de
 // la transacción del reembolso. Una lista vacía es el estado real de un cobro sin comisiones.
 prismaMock.commissionCalculation.findMany.mockResolvedValue([])
+// Etapa 3 del KDS: cobros y rondas preguntan si hay pantalla de cocina; por default, no hay.
+prismaMock.printStation.findFirst.mockResolvedValue(null)
+prismaMock.printStation.findMany.mockResolvedValue([])
+prismaMock.printer.findMany.mockResolvedValue([])
+prismaMock.printGateway.findUnique.mockResolvedValue(null)
 
 function primeReservationStaffMocks() {
   prismaMock.staffSchedule.findUnique.mockResolvedValue(null)

@@ -53,6 +53,8 @@ jest.mock('../../../src/config/logger', () => ({
 
 // Mock Prisma client
 const mockPrismaClient = {
+  // El candado de la invitación (`SELECT … FOR UPDATE`, 3fad42f3) se toma dentro de la transacción.
+  $queryRaw: jest.fn().mockResolvedValue([]),
   staff: {
     findUnique: jest.fn(),
     findFirst: jest.fn(),
@@ -70,6 +72,8 @@ const mockPrismaClient = {
     findFirst: jest.fn(),
     create: jest.fn(),
     update: jest.fn(),
+    // Aceptar marca la invitación sólo si SIGUE pendiente (`updateMany` + count, Codex 28-sep).
+    updateMany: jest.fn(),
   },
   venue: {
     findUnique: jest.fn(),
@@ -150,6 +154,7 @@ describe('Multi-Venue Invitation Flow', () => {
     // Batched existence lookup: default to "no existing assignment" (create path). The re-invite
     // scenario overrides this to return the existing StaffVenue (update path).
     mockPrismaClient.staffVenue.findMany.mockResolvedValue([])
+    mockPrismaClient.invitation.updateMany.mockResolvedValue({ count: 1 })
   })
 
   describe('Scenario 1: New user invited to a venue', () => {

@@ -9,8 +9,9 @@
 export type Tier = 'PRO' | 'PREMIUM'
 
 export type Proyeccion =
-  | { tipo: 'PLAN'; tier: Tier }
+  | { tipo: 'PLAN'; tier: Tier; featureCodes?: string[] }
   | { tipo: 'FUNCION'; featureCode: string }
+  | { tipo: 'PAQUETE'; featureCodes: string[] }
   | { tipo: 'AJENO'; productId: string }
   /** Nadie lo reconoce. NUNCA equivale a «no hay obligación»: bloquea. */
   | { tipo: 'DESCONOCIDO'; productId: string | null }
@@ -70,6 +71,7 @@ export interface ObligacionViva {
 }
 
 export type Intencion =
+  | { tipo: 'HYBRID'; proyecciones: Proyeccion[]; reemplaza: string[] }
   | { tipo: 'PLAN'; tier: Tier }
   | { tipo: 'FUNCION'; featureCode: string }
   /** Sustituir el precio de UNA suscripción de plan identificada; no es añadir otro plan. */
@@ -99,7 +101,25 @@ export function evaluarCompatibilidad(
   intencion: Intencion,
   incluye: (tier: Tier, featureCode: string) => boolean,
 ): Compatibilidad {
-  const items = vivas.flatMap(v => v.proyecciones.map(p => ({ sub: v.subscriptionId, p })))
+  // Unknown sources never become replaceable merely because the caller names them.
+  const unknown = vivas.filter(v => v.proyecciones.some(p => p.tipo === 'DESCONOCIDO'))
+  if (unknown.length) return { ok: false, codigo: 'OBLIGACION_DESCONOCIDA', suscripciones: unknown.map(v => v.subscriptionId) }
+  if (intencion.tipo === 'HYBRID' && intencion.reemplaza.some(id => !vivas.some(v => v.subscriptionId === id)))
+    return { ok: false, codigo: 'OBLIGACIONES_INCOMPATIBLES', suscripciones: intencion.reemplaza }
+  const resulting =
+    intencion.tipo === 'HYBRID'
+      ? [
+          ...vivas.filter(v => !intencion.reemplaza.includes(v.subscriptionId)),
+          { subscriptionId: 'new-hybrid-purchase', proyecciones: intencion.proyecciones },
+        ]
+      : vivas
+  const items = resulting.flatMap(v =>
+    v.proyecciones.flatMap(p =>
+      p.tipo === 'PAQUETE'
+        ? p.featureCodes.map(code => ({ sub: v.subscriptionId, p: { tipo: 'FUNCION' as const, featureCode: code } }))
+        : [{ sub: v.subscriptionId, p }],
+    ),
+  )
   const subs = (xs: Array<{ sub: string }>) => [...new Set(xs.map(x => x.sub))]
   const no = (codigo: CodigoDeIncompatibilidad, xs: Array<{ sub: string }>): Compatibilidad => ({
     ok: false,
@@ -110,7 +130,7 @@ export function evaluarCompatibilidad(
   const desconocidos = items.filter(x => x.p.tipo === 'DESCONOCIDO')
   if (desconocidos.length) return no('OBLIGACION_DESCONOCIDA', desconocidos)
 
-  const planes = items.flatMap(x => (x.p.tipo === 'PLAN' ? [{ sub: x.sub, tier: x.p.tier }] : []))
+  const planes = items.flatMap(x => (x.p.tipo === 'PLAN' ? [{ sub: x.sub, tier: x.p.tier, featureCodes: x.p.featureCodes }] : []))
   const funciones = items.flatMap(x => (x.p.tipo === 'FUNCION' ? [{ sub: x.sub, code: x.p.featureCode }] : []))
 
   // 1. Lo específico de la intención (el mensaje más útil primero).
@@ -127,7 +147,7 @@ export function evaluarCompatibilidad(
     const otros = planes.filter(x => x.sub !== intencion.subscriptionId)
     if (otros.length) return no('OTRO_PLAN_VIVO', otros)
     tierResultante = intencion.tierDestino
-  } else {
+  } else if (intencion.tipo === 'FUNCION') {
     const iguales = funciones.filter(x => x.code === intencion.featureCode)
     if (iguales.length) return no('FUNCION_YA_CONTRATADA', iguales)
   }
@@ -139,15 +159,18 @@ export function evaluarCompatibilidad(
   for (const x of funciones) porCodigo.set(x.code, [...(porCodigo.get(x.code) ?? []), x])
   for (const grupo of porCodigo.values()) if (grupo.length > 1) return no('OBLIGACIONES_INCOMPATIBLES', grupo)
   const planVivo = planes[0]?.tier
+  const includesCurrent = (code: string) =>
+    planes[0]?.featureCodes ? planes[0].featureCodes.includes(code) : !!planVivo && incluye(planVivo, code)
   // (En un cambio de plan lo que cuenta es el conjunto RESULTANTE, que se valida abajo con el tier destino.)
   if (planVivo && intencion.tipo !== 'CAMBIO_DE_PLAN') {
-    const solapadas = funciones.filter(x => incluye(planVivo, x.code))
+    const solapadas = funciones.filter(x => includesCurrent(x.code))
     if (solapadas.length) return no('OBLIGACIONES_INCOMPATIBLES', solapadas)
   }
 
   // 3. El conjunto RESULTANTE: ninguna función suelta que el plan resultante ya incluya.
+  if (intencion.tipo === 'HYBRID') return { ok: true }
   if (intencion.tipo === 'FUNCION') {
-    if (tierResultante && incluye(tierResultante, intencion.featureCode)) return no('INCLUIDA_EN_EL_PLAN', planes)
+    if (tierResultante && includesCurrent(intencion.featureCode)) return no('INCLUIDA_EN_EL_PLAN', planes)
     return { ok: true }
   }
   const absorbidas = tierResultante ? funciones.filter(x => incluye(tierResultante as Tier, x.code)) : []

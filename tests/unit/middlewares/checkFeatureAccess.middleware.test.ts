@@ -15,6 +15,7 @@ import prisma from '@/utils/prismaClient'
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    capabilityGrant: { findFirst: jest.fn().mockResolvedValue(null), groupBy: jest.fn().mockResolvedValue([]) },
     venueFeature: {
       findFirst: jest.fn(),
       findMany: jest.fn(),

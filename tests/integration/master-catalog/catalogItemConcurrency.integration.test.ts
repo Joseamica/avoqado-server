@@ -1,3 +1,4 @@
+const { isDisposableH1Url } = require('../../../scripts/h1-test-database.cjs')
 /**
  * Real PostgreSQL concurrency proof for the shared Task 5 mutation lock.
  *
@@ -24,8 +25,7 @@ function assertDisposableH1Database(): void {
   // WHY: Both environment aliases must resolve to the exact local disposable
   // database before this concurrency suite opens either transaction.
   for (const candidate of [effective, declaredTestUrl]) {
-    expect(['localhost', '127.0.0.1']).toContain(candidate.hostname)
-    expect(candidate.pathname).toBe('/avoqado_h1a_test_20260808')
+    expect(isDisposableH1Url(candidate)).toBe(true)
   }
   expect(declaredTestUrl.toString()).toBe(effective.toString())
 }

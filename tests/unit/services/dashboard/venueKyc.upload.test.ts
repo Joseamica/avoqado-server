@@ -26,6 +26,7 @@ jest.mock('@/services/resend.service', () => ({
 }))
 
 import { uploadSingleKycDocument } from '@/services/dashboard/venueKyc.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import { sendKycDocumentUploadedNotification } from '@/services/resend.service'
 import prisma from '@/utils/prismaClient'
 
@@ -120,5 +121,16 @@ describe('🔴 aviso a onboarding@avoqado.io', () => {
     expect(prismaMock.venue.update).toHaveBeenCalled()
     expect(notifyMock).toHaveBeenCalled()
     expect(prismaMock.venue.update.mock.invocationCallOrder[0]).toBeLessThan(notifyMock.mock.invocationCallOrder[0])
+  })
+})
+
+describe('🔴 full-testing 26-sep: negar el KYC de un negocio ajeno deja rastro en la bitácora', () => {
+  it('subir sin ser dueño/administrador → 403 en español y PERMISSION_DENIED', async () => {
+    givenVenue({ staff: [] })
+    await expect(upload()).rejects.toMatchObject({ statusCode: 403, message: expect.stringMatching(/dueño|administrador/) })
+    await new Promise(r => setImmediate(r))
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'PERMISSION_DENIED', entity: 'kyc', venueId: 'venue-1', staffId: 'user-1' }),
+    )
   })
 })

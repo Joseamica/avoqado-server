@@ -44,21 +44,41 @@ async function exigeOwner(authContext: AuthContextShape | undefined, organizatio
 /**
  * Un 403 del alta deja rastro, como cualquier otro rechazo de permisos (`checkPermission`): alguien con
  * sesión intentó tocar el alta de un negocio que no es suyo. El 401 no — no hay a quién atribuirlo.
- * Los ids pedidos van en `data` y no en las columnas: un id inventado rompería la llave foránea.
+ *
+ * 🔴 Codex ronda 7, P2: el asiento va con el negocio ATACADO en sus columnas (`organizationId`,
+ * `venueId`); con los ids sólo en `data`, la bitácora de ese negocio —que filtra por columna— no lo
+ * mostraba nunca. Pero sólo si el negocio EXISTE: un id inventado en la columna rompe la llave
+ * foránea y el asiento se pierde. Si no existe, el id se queda en `data`.
  */
 function auditarRechazo(req: Request, error: unknown, pedido: { organizationId?: string; venueId?: string }): void {
   if (!(error instanceof ForbiddenError)) return
   const authContext = (req as unknown as { authContext?: AuthContextShape }).authContext
   if (!authContext?.userId) return
-  void logAction({
-    staffId: authContext.userId,
-    action: 'PERMISSION_DENIED',
-    entity: 'onboarding',
-    entityId: pedido.organizationId ?? pedido.venueId,
-    data: { reason: error.code ?? 'ORG_OWNER_REQUIRED', ...pedido, method: req.method, path: req.originalUrl },
-    ipAddress: req.ip,
-    userAgent: typeof req.get === 'function' ? req.get('user-agent') : undefined,
-  })
+  const staffId = authContext.userId
+  void (async () => {
+    let columnas: { organizationId?: string; venueId?: string } = {}
+    try {
+      if (pedido.venueId) {
+        const venue = await prisma.venue.findUnique({ where: { id: pedido.venueId }, select: { id: true, organizationId: true } })
+        if (venue) columnas = { venueId: pedido.venueId, organizationId: venue.organizationId ?? undefined }
+      } else if (pedido.organizationId) {
+        const org = await prisma.organization.findUnique({ where: { id: pedido.organizationId }, select: { id: true } })
+        if (org) columnas = { organizationId: pedido.organizationId }
+      }
+    } catch {
+      // Sin la consulta el asiento se escribe igual, sólo sin columnas: la bitácora nunca tumba el rechazo.
+    }
+    await logAction({
+      staffId,
+      ...columnas,
+      action: 'PERMISSION_DENIED',
+      entity: 'onboarding',
+      entityId: pedido.organizationId ?? pedido.venueId,
+      data: { reason: error.code ?? 'ORG_OWNER_REQUIRED', ...pedido, method: req.method, path: req.originalUrl },
+      ipAddress: req.ip,
+      userAgent: typeof req.get === 'function' ? req.get('user-agent') : undefined,
+    })
+  })().catch(() => undefined)
 }
 
 export async function requireOnboardingOrgOwner(req: Request, res: Response, next: NextFunction): Promise<void> {

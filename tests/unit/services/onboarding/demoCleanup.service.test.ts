@@ -144,4 +144,45 @@ describe('cleanDemoData (trial→real conversion)', () => {
     expect(prismaMock.orderItem.deleteMany.mock.invocationCallOrder[0]).toBeLessThan(productos)
     expect(prismaMock.order.deleteMany.mock.invocationCallOrder[0]).toBeLessThan(productos)
   })
+
+  // ==========================================
+  // Cross-tenant bug (found 2026-09-29, reproduced with data): demo RecipeLines,
+  // Recipes and Modifiers were deleted with `{ isDemo: true }` alone, so converting
+  // ONE demo venue wiped the demo recipes and extras of EVERY other demo venue.
+  // ==========================================
+
+  it('only deletes demo RecipeLines of this venue', async () => {
+    await cleanDemoData(VENUE_ID)
+
+    expect(prismaMock.recipeLine.deleteMany).toHaveBeenCalledWith({
+      where: { isDemo: true, recipe: { product: { venueId: VENUE_ID } } },
+    })
+  })
+
+  it('only deletes demo Recipes of this venue', async () => {
+    await cleanDemoData(VENUE_ID)
+
+    expect(prismaMock.recipe.deleteMany).toHaveBeenCalledWith({
+      where: { isDemo: true, product: { venueId: VENUE_ID } },
+    })
+  })
+
+  it('only deletes demo Modifiers of this venue', async () => {
+    await cleanDemoData(VENUE_ID)
+
+    expect(prismaMock.modifier.deleteMany).toHaveBeenCalledWith({
+      where: { isDemo: true, group: { venueId: VENUE_ID } },
+    })
+  })
+
+  it('scopes EVERY delete to this venue (no cleanup can reach another tenant)', async () => {
+    await cleanDemoData(VENUE_ID)
+
+    const sinAcotar = TOUCHED_MODELS.flatMap(model =>
+      ((prismaMock as any)[model].deleteMany?.mock.calls ?? [])
+        .filter(([args]: [unknown]) => !JSON.stringify(args).includes(VENUE_ID))
+        .map(([args]: [unknown]) => `${model}: ${JSON.stringify(args)}`),
+    )
+    expect(sinAcotar).toEqual([])
+  })
 })

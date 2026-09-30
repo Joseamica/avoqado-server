@@ -18,6 +18,7 @@
  * AngelPay no reintentó, esa aprobación sólo consta en el panel de AngelPay.
  */
 import logger from '@/config/logger'
+import { getContext, runOutsideContext, runWithContext, type ExecutionContext } from '@/observability/executionContext'
 
 export const VENTANA_SIN_CANAL_MS = 30 * 60_000
 /** Cada llave pesa decenas de bytes; el tope sólo existe para que una caída prolongada no crezca sin límite. */
@@ -82,13 +83,22 @@ export const TOPE_DE_REINGRESOS_VERIFICADOS = 10_000
 /** Un aviso de AngelPay pesa ~1 KB; lo demás no se guarda en memoria para reingresar. */
 export const TOPE_DE_CUERPO_PARA_REINGRESO = 16 * 1024
 
+/**
+ * Lo que contesta `reintentar`: `false` = no se guardó (se vuelve a programar); `true` = guardado; `{ descartado }` = ya no se
+ * guardará NUNCA (comercio borrado, firma que ya no valida…): se retira igual que el guardado, pero el log dice que NO se guardó.
+ * 🔴 27-sep (medido en vivo): se borró el comercio con el reingreso pendiente y el log dijo «✅ Aviso reingresado» con 0 filas.
+ */
+export type DesenlaceDeReingreso = boolean | { descartado: { status: number; motivo: string } }
+
 type Reingreso = {
   timer: NodeJS.Timeout | null
-  reintentar: () => Promise<boolean>
+  reintentar: () => Promise<DesenlaceDeReingreso>
   intento: number
   /** Firma verificada: un aviso AUTÉNTICO. Los de la búsqueda caída llegan sin verificar hasta que se reintentan. */
   verificado: boolean
   corriendo: boolean
+  /** El contexto de la primera petición que trajo esta entrega: cada vuelta corre con una copia (ver `correr`). */
+  contexto: ExecutionContext | undefined
 }
 // Dos listas, una por clase: el tope se aplica dentro de cada una y el más viejo de su clase es siempre el primero (O(1)).
 const autenticos = new Map<string, Reingreso>()
@@ -98,7 +108,7 @@ const buscar = (clave: string): Reingreso | undefined => autenticos.get(clave) ?
 export const DESPERTAR_A_LO_MAS_CADA_MS = 5_000
 let ultimoDespertar = 0
 
-export function reingresarMasTarde(clave: string, reintentar: () => Promise<boolean>, verificado: boolean): void {
+export function reingresarMasTarde(clave: string, reintentar: () => Promise<DesenlaceDeReingreso>, verificado: boolean): void {
   const existente = buscar(clave)
   if (existente) {
     // Llegó un aviso AUTÉNTICO (firma verificada, ingreso fallido) con la clave de una entrada sin verificar: desde ahora ningún
@@ -115,7 +125,7 @@ export function reingresarMasTarde(clave: string, reintentar: () => Promise<bool
     return
   }
   hacerLugar(verificado)
-  const r: Reingreso = { timer: null, reintentar, intento: 0, verificado, corriendo: false }
+  const r: Reingreso = { timer: null, reintentar, intento: 0, verificado, corriendo: false, contexto: getContext() }
   ;(verificado ? autenticos : sinVerificar).set(clave, r)
   programar(clave, r)
 }
@@ -145,15 +155,36 @@ function programar(
   r.timer.unref()
 }
 
-async function correr(clave: string): Promise<void> {
+/**
+ * Las vueltas en curso. Producción no las lee: existen para que las pruebas esperen una vuelta que el reloj o la puerta YA
+ * arrancaron (`_reingresarYaParaPruebas`, `_olvidarTodoParaPruebas`). Cada una se quita sola al terminar.
+ */
+const vueltasEnCurso = new Set<Promise<void>>()
+
+/**
+ * 🔴 27-sep: la vuelta corre con el contexto del AVISO, nunca con el de quien la despierta. La puerta corre dentro de la petición
+ * de una terminal o de un cajero, y un temporizador hereda el contexto donde se creó: el ✅/🚨 del reingreso salía con el
+ * correlationId de esa terminal, y lo que la vuelta estampa (el negocio del aviso) se escribía en SU contexto. Una copia por
+ * vuelta: lo que estampe una no toca el objeto de la petición original. Sin contexto de origen, corre sin ninguno.
+ */
+function correr(clave: string): Promise<void> {
+  const contexto = buscar(clave)?.contexto
+  const vuelta: Promise<void> = (
+    contexto ? runWithContext({ ...contexto }, () => unaVuelta(clave)) : runOutsideContext(() => unaVuelta(clave))
+  ).finally(() => vueltasEnCurso.delete(vuelta))
+  vueltasEnCurso.add(vuelta)
+  return vuelta
+}
+
+async function unaVuelta(clave: string): Promise<void> {
   const r = buscar(clave)
   if (!r || r.corriendo) return
   r.corriendo = true
   r.timer = null
   const loQueCorre = r.reintentar
-  let guardado = false
+  let desenlace: DesenlaceDeReingreso = false
   try {
-    guardado = await loQueCorre()
+    desenlace = await loQueCorre()
   } catch (err) {
     logger.error('🚨 [AngelPay webhook] El reingreso del aviso volvió a fallar', { err, clave })
   }
@@ -165,13 +196,34 @@ async function correr(clave: string): Promise<void> {
     programar(clave, r, 0)
     return
   }
-  if (guardado) {
-    ;(r.verificado ? autenticos : sinVerificar).delete(clave)
+  if (!desenlace) {
+    r.intento++
+    programar(clave, r)
+    return
+  }
+  ;(r.verificado ? autenticos : sinVerificar).delete(clave)
+  if (desenlace === true) {
     logger.info('✅ [AngelPay webhook] Aviso reingresado por el propio servidor', { clave, intento: r.intento + 1 })
     return
   }
-  r.intento++
-  programar(clave, r)
+  // Un aviso AUTÉNTICO que ya no se guardará es una aprobación que sólo consta en AngelPay: 🚨. Uno sin verificar (la búsqueda
+  // caída no pudo comprobar su firma) casi siempre es basura: warn.
+  const { status, motivo } = desenlace.descartado
+  if (r.verificado) {
+    logger.error('🚨 [AngelPay webhook] Reingreso DESCARTADO: el aviso firmado NO se guardó y ya no se reintenta', {
+      clave,
+      intento: r.intento + 1,
+      status,
+      motivo,
+    })
+  } else {
+    logger.warn('⚠️ [AngelPay webhook] Reingreso descartado (aviso sin verificar): no se guardó y ya no se reintenta', {
+      clave,
+      intento: r.intento + 1,
+      status,
+      motivo,
+    })
+  }
 }
 
 /**
@@ -194,19 +246,38 @@ function despertarReingresos(ahora = Date.now()): void {
   for (const [clave, r] of autenticos) if (!r.corriendo) programar(clave, r, 0)
 }
 
-/** Corre YA los reingresos pendientes (pruebas de integración: la base «vuelve» sin esperar el reloj). */
+async function esperarVueltasEnCurso(): Promise<void> {
+  while (vueltasEnCurso.size > 0) await Promise.allSettled([...vueltasEnCurso])
+}
+
+/**
+ * Corre YA los reingresos pendientes (pruebas de integración: la base «vuelve» sin esperar el reloj).
+ * 🔴 Flaky del 27-sep: una vuelta que el reloj o la puerta arrancaron ANTES de esta llamada —con la base todavía caída— puede
+ * seguir en curso, y `correr` no hace nada sobre una entrada «corriendo»: esa vuelta terminaba «no se guardó» y la prueba contaba
+ * 0 filas. Por eso se espera lo que esté en curso y cada entrada se corre OTRA vez (si esa vuelta ya la guardó, no queda nada que
+ * correr). Al volver, ninguna vuelta sigue en curso.
+ */
 export async function _reingresarYaParaPruebas(): Promise<void> {
   for (const [clave, r] of [...autenticos, ...sinVerificar]) {
+    await esperarVueltasEnCurso()
     if (r.timer) clearTimeout(r.timer)
     await correr(clave)
   }
+  await esperarVueltasEnCurso()
 }
 
-export function _olvidarTodoParaPruebas(): void {
+/**
+ * El borrado es inmediato, como siempre. La promesa —que un `afterEach` debe esperar— cubre lo que queda: una vuelta EN CURSO
+ * que vuelve a fallar RE-REGISTRA su marca de dinero, la del canal y su propio reingreso DESPUÉS del borrado (medido el 27-sep:
+ * se colaban en la prueba siguiente y su reingreso corría ahí). Se espera a esas vueltas y se olvida otra vez.
+ */
+export function _olvidarTodoParaPruebas(): Promise<void> {
   intentosConDinero.clear()
   ultimaFallaPorComercio.clear()
   for (const r of [...autenticos.values(), ...sinVerificar.values()]) if (r.timer) clearTimeout(r.timer)
   autenticos.clear()
   sinVerificar.clear()
   ultimoDespertar = 0
+  if (vueltasEnCurso.size === 0) return Promise.resolve()
+  return Promise.allSettled([...vueltasEnCurso]).then(() => _olvidarTodoParaPruebas())
 }

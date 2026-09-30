@@ -85,8 +85,9 @@ export interface IssueRefundInput {
    * the full `amount` is split as: tipRefund = tipRefundCents,
    * salesRefund = amount - tipRefundCents. Must be >= 0 and within the original
    * payment. Under the original-payment lock, the requested/default split is
-   * rebalanced to the remaining sale/tip components. Item-refunds ignore this
-   * override and remain 100% sale.
+   * rebalanced to the remaining sale/tip components. Item-refunds are 100% sale
+   * plus the tip the caller chose (`tipRefundCents`, validated against the
+   * remaining tip): the tip is ADDED on top of the items, never carved out of them.
    *
    * Use cases:
    *   - `tipRefundCents = 0`: refund only the sale portion, leave the staff tip intact.
@@ -782,6 +783,23 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
             productId: orderItem.productId,
           })
         }
+
+        // 🔴 La propina que el cajero eligió devolver («Incluir propina») va ENCIMA de los
+        // artículos: los artículos son venta y la propina va aparte, como en Square y Toast.
+        // Sin el campo, o con 0, el reembolso por artículos sigue siendo 100 % venta.
+        const propinaElegidaCents = input.tipRefundCents ?? 0
+        // Techo: la propina original menos la que YA CONSTA devuelta. Aplica siempre, también con
+        // históricos sin clasificar: ésos quizá fueron propina, pero la que consta seguro lo fue.
+        // La pantalla prometió un total: si ya no alcanza (otro reembolso en medio) se rechaza y se
+        // dice cuánta queda; recortarla en silencio cambiaría lo que el cajero autorizó.
+        const propinaRestanteCents = Math.max(0, toCents(original.tipAmount) - refundedTipsCents)
+        if (propinaElegidaCents > propinaRestanteCents) {
+          throw new BadRequestError(
+            `De este cobro quedan $${(propinaRestanteCents / 100).toFixed(2)} de propina por devolver; ` +
+              `se pidieron $${(propinaElegidaCents / 100).toFixed(2)}. Vuelve a abrir el reembolso.`,
+          )
+        }
+        refundCents += propinaElegidaCents
       } else {
         refundCents = input.amount!
       }
@@ -797,7 +815,8 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
 
       // Split the refund between the original's sale portion (amount) and tip
       // (tipAmount).
-      //   - Item-refunds are always 100% sale (items have no tip component).
+      //   - Item-refunds are 100% sale plus the tip the caller chose (`tipRefundCents`,
+      //     validated against the remaining tip above).
       //   - Amount-refunds with an explicit `tipRefundCents` start from the caller's
       //     split (e.g. caller wants "refund only the sale, keep staff tip") and then
       //     fit it into the components still available under this row lock.
@@ -809,6 +828,8 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
       let salesRefundCents = refundCents
 
       if (hasItems) {
+        tipRefundCents = input.tipRefundCents ?? 0
+        salesRefundCents = refundCents - tipRefundCents
         if (unclassifiedPriorRefundCents === 0) {
           const remainingSalesCents = Math.max(0, originalAmountCents - refundedSalesCents)
           if (salesRefundCents > remainingSalesCents) {

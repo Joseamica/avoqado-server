@@ -21,6 +21,7 @@ import { assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared
 // misma que usan los cuatro canales de cobro, para que la pantalla no pueda
 // contradecir al saldo persistido.
 import { summarizeRefunds } from '../shared/orderBalance'
+import { retirarComandasDeVentaAnulada } from '../kds/kitchenTicketAuthoring.service'
 
 /**
  * Flatten order modifiers from nested structure to flat array
@@ -621,6 +622,8 @@ export async function deleteOrder(venueId: string, orderId: string) {
   // (PENDING con pagos COMPLETED); un `Payment.type` nulo (legacy) cuenta como dinero.
   const cancelledOrder = await prisma.$transaction(
     async tx => {
+      // Primero el candado de comandas (mismo orden que el armado): la cocina deja de ver la cuenta anulada.
+      await retirarComandasDeVentaAnulada(tx, venueId, orderId)
       await assertOrderCancellableUnderLock(
         tx,
         { venueId, orderId },

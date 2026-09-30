@@ -39,6 +39,12 @@ export interface AccessTokenPayload extends jwt.JwtPayload {
   sid?: string
   /** Versión del formato de token. 1 = con sid. Ausente = legacy. */
   v?: number
+  /**
+   * Emisión en MILISEGUNDOS. El `iat` va en segundos redondeados hacia abajo, y una sesión emitida en el mismo segundo
+   * de un cambio de contraseña parecía «anterior» al corte: la conexión de un clic del MCP la rechazaba (26-sep).
+   * `emisionDelToken` la prefiere al `iat`. Ausente en tokens emitidos antes de este cambio.
+   */
+  emitidoMs?: number
 }
 
 /**
@@ -92,6 +98,7 @@ export function generateAccessToken(
     // - Session invalidation on password change
     // - Revoking compromised tokens
     jti: crypto.randomUUID(),
+    emitidoMs: Date.now(),
     ...(opts?.sid ? { sid: opts.sid, v: 1 } : {}),
   }
   // Explicitly type the secret and options

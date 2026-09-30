@@ -8,7 +8,7 @@
  */
 
 import prisma from '@/utils/prismaClient'
-import { OrgRole } from '@prisma/client'
+import { OrgRole, type Prisma } from '@prisma/client'
 
 /**
  * Get the primary organization ID for a staff member.
@@ -176,14 +176,18 @@ export async function hasOrganizationAccess(staffId: string, organizationId: str
  * Create a StaffOrganization membership.
  * Safe to call if membership already exists (upsert behavior).
  */
-export async function createStaffOrganizationMembership(params: {
-  staffId: string
-  organizationId: string
-  role: OrgRole
-  isPrimary: boolean
-  joinedById?: string
-}): Promise<void> {
-  await prisma.staffOrganization.upsert({
+export async function createStaffOrganizationMembership(
+  params: {
+    staffId: string
+    organizationId: string
+    role: OrgRole
+    isPrimary: boolean
+    joinedById?: string
+  },
+  // The accept flow passes its transaction: an aborted accept must not leave the membership behind (Codex, 28-sep).
+  db: Pick<Prisma.TransactionClient, 'staffOrganization'> = prisma,
+): Promise<void> {
+  await db.staffOrganization.upsert({
     where: {
       staffId_organizationId: {
         staffId: params.staffId,

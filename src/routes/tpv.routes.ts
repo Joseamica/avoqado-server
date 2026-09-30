@@ -104,6 +104,7 @@ import {
 } from '../schemas/tpv.schema'
 import * as goalResolutionService from '../services/dashboard/commission/goal-resolution.service'
 import * as productService from '../services/dashboard/product.dashboard.service'
+import { ensureQuantityInventoryRow, inventoryMethodForNewProduct } from '../services/dashboard/quantityInventoryRow'
 import { toLegacyProductPayload } from '../utils/legacyProductPayload'
 import * as rolePermissionService from '../services/dashboard/rolePermission.service'
 import emailService from '../services/email.service'
@@ -6235,6 +6236,8 @@ export async function createTpvQuickAddProductHandler(req: Request, res: Respons
           price: new Decimal(price),
           categoryId, // ✅ Required field
           trackInventory: trackInventory || false,
+          // Con inventario, el alta por código de barras es «por cantidad» (sin método no había merma ni descuento).
+          inventoryMethod: inventoryMethodForNewProduct(trackInventory === true, undefined),
           active: true,
           displayOrder: 0,
         },
@@ -6243,6 +6246,11 @@ export async function createTpvQuickAddProductHandler(req: Request, res: Respons
           inventory: true,
         },
       })
+      await ensureQuantityInventoryRow(tx, created)
+      // El `include` se leyó antes de la fila: la respuesta lleva la que quedó en la base.
+      if (!created.inventory && created.inventoryMethod === 'QUANTITY') {
+        created.inventory = await tx.inventory.findUnique({ where: { productId: created.id } })
+      }
       if (actor.type === 'SERVICE') {
         await writeLegacyServiceProductCreationAuditForVenue(tx, { venueId, productId: created.id, actor })
       }

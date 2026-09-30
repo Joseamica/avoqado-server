@@ -74,6 +74,7 @@ import { registerDeviceMiddleware } from '../middlewares/registerDevice.middlewa
 import { validateRequest } from '../middlewares/validation'
 import { recordFastPaymentParamsSchema, recordPaymentBodySchema } from '../schemas/tpv.schema'
 import { gatewayHeartbeatSchema, printConfigParamSchema, syncPrintJobsSchema } from '../schemas/mobile/print.mobile.schema'
+import { setKitchenDisplaySchema } from '../schemas/dashboard/printStation.schema'
 import * as announcementReadController from '../controllers/shared/announcement.read.controller'
 
 const router = Router()
@@ -3100,6 +3101,42 @@ router.post(
 )
 
 /**
+ * GET /api/v1/mobile/venues/:venueId/kds/orders/recent?stationId=
+ * Últimas comandas terminadas («Recientes», para deshacer un LISTO por error). Etapa 3 del KDS.
+ */
+router.get(
+  '/venues/:venueId/kds/orders/recent',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('orders:read'),
+  kdsMobileController.listRecentKdsOrders,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/kds/orders/bump-batch
+ * «Marcar todas listas». Body: { ids: string[] } (1..100). Etapa 3 del KDS.
+ */
+router.post(
+  '/venues/:venueId/kds/orders/bump-batch',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('orders:update'),
+  kdsMobileController.bumpKdsOrdersBatch,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/kds/orders/:id/recall
+ * «Deshacer»: la comanda terminada vuelve a la cocina. Etapa 3 del KDS.
+ */
+router.post(
+  '/venues/:venueId/kds/orders/:id/recall',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('orders:update'),
+  kdsMobileController.recallKdsOrder,
+)
+
+/**
  * Reclamar / confirmar / soltar la impresión de una comanda que llegó sola.
  *
  * Permiso `orders:update`, el MISMO que ya pide crear y avanzar una comanda: quien puede
@@ -3207,6 +3244,16 @@ router.get(
   checkPermission('orders:read'),
   validateRequest(printConfigParamSchema),
   printMobileController.getPrintConfig,
+)
+// Etapa 3 del KDS: prender/apagar la pantalla de una estación desde la tablet — el MISMO registro y las mismas
+// reglas que el dashboard (quien configura impresoras; prender pasa por la puerta de lanzamiento y el plan Pro).
+router.put(
+  '/venues/:venueId/print-stations/:stationId/kitchen-display',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('printers:manage'),
+  validateRequest(setKitchenDisplaySchema),
+  printMobileController.setStationKitchenDisplay,
 )
 router.post(
   '/venues/:venueId/print-jobs/sync',

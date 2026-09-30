@@ -13,6 +13,13 @@ import { Unit } from '@prisma/client'
 import logger from '../../config/logger'
 import { toLegacyProductPayload } from '../../utils/legacyProductPayload'
 import {
+  ensureQuantityInventoryRow,
+  inventoryMethodForNewProduct,
+  isNonInventoriable,
+  NON_INVENTORIABLE_MESSAGE,
+} from '../../services/dashboard/quantityInventoryRow'
+import AppError from '../../errors/AppError'
+import {
   assertLegacyCatalogGovernanceForVenue,
   assertLegacyProductReferencesForVenue,
   assertLegacyCatalogProductUpdateGovernance,
@@ -121,6 +128,7 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
       taxRate,
       ivaTratamiento,
       trackInventory,
+      inventoryMethod,
       duration,
       durationMinutes,
       maxParticipants,
@@ -131,6 +139,10 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
 
     if (!name || !name.trim()) {
       return res.status(400).json({ success: false, message: 'name es requerido' })
+    }
+    // Misma regla que el dashboard: una clase o una cita no llevan existencias (la venta les descontaba).
+    if (isNonInventoriable(type ?? 'FOOD_AND_BEV', trackInventory)) {
+      return res.status(400).json({ success: false, message: NON_INVENTORIABLE_MESSAGE })
     }
 
     // If no categoryId provided, use first category for this venue
@@ -182,6 +194,8 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
             type: type || 'FOOD_AND_BEV',
             price: price ? parseFloat(price) : 0,
             trackInventory: trackInventory ?? false,
+            // Android e iOS mandan el método al crear; antes se tiraba y el producto nacía sin él.
+            inventoryMethod: inventoryMethodForNewProduct(trackInventory, inventoryMethod),
             duration: duration ?? null,
             durationMinutes: durationMinutes || null,
             maxParticipants: maxParticipants ?? null,
@@ -201,6 +215,11 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
       } catch (e) {
         traducirErrorDeIva(e)
         throw e
+      }
+      await ensureQuantityInventoryRow(tx, created)
+      // El `include` se leyó antes de la fila: la respuesta lleva la que quedó en la base.
+      if (!created.inventory && created.trackInventory && created.inventoryMethod === 'QUANTITY') {
+        created.inventory = await tx.inventory.findUnique({ where: { productId: created.id } })
       }
       if (actor.type === 'SERVICE') {
         await writeLegacyServiceProductCreationAuditForVenue(tx, { venueId, productId: created.id, actor })
@@ -316,12 +335,24 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
           encendido,
         ),
       )
+      let updated
       try {
-        return await tx.product.update({ where: { id: productId }, data, include: productInclude })
+        updated = await tx.product.update({ where: { id: productId }, data, include: productInclude })
       } catch (e) {
         traducirErrorDeIva(e)
         throw e
       }
+      // Con el estado FINAL (el tipo puede no venir en el cuerpo): revierte toda la escritura.
+      if (isNonInventoriable(updated.type, updated.trackInventory)) throw new AppError(NON_INVENTORIABLE_MESSAGE, 400)
+      // Artículos de Android e iOS activan «por cantidad» por aquí, no por el servicio del dashboard.
+      await ensureQuantityInventoryRow(tx, updated)
+      // El `include` se leyó ANTES de la fila: la haya creado el helper o, en carrera, el asistente,
+      // la respuesta de un producto por cantidad describe lo que quedó en la base. Los demás no
+      // pagan la lectura ni cambian su respuesta (contrato H1A congelado).
+      if (!updated.inventory && updated.trackInventory && updated.inventoryMethod === 'QUANTITY') {
+        updated.inventory = await tx.inventory.findUnique({ where: { productId } })
+      }
+      return updated
     })
 
     return res.json({ success: true, data: withAvailableQuantity(product) })

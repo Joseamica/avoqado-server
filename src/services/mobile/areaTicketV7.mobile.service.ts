@@ -3229,6 +3229,8 @@ export async function finalizeAreaTicketPaymentInTransaction(
     fullyPaid: boolean
     staffId?: string
     reconcileCapturedPayment?: boolean
+    /** Etapa 3 del KDS: el cobro por terminal salda AQUÍ ⇒ la marca durable de cocina va en esta misma escritura. */
+    marcarCocina?: boolean
     locked: LockedAreaTicketPayment | null
   },
 ): Promise<{ areaTicketOrder: boolean; sessionId?: string; fullyPaid?: boolean }> {
@@ -3321,6 +3323,7 @@ export async function finalizeAreaTicketPaymentInTransaction(
               completedAt: new Date(),
               loyaltyEligibleAt: new Date(),
               loyaltyStaffId: input.staffId,
+              ...(input.marcarCocina ? { kitchenPendingAt: new Date() } : {}),
             }
           : {}),
         ...(!lockedOrder.servedById && input.staffId

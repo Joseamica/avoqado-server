@@ -620,7 +620,7 @@ export async function createVenueWizard(req: Request, res: Response, next: NextF
         if (planes.length === 1) {
           await prisma.$transaction(async tx => {
             await tx.$executeRaw`SET LOCAL lock_timeout = '15s'`
-            await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`stripe-obligaciones:${venueId}`}))`
+            await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`stripe-obligaciones:${venueId}`}))::text`
             const filasDePlan = await tx.venueFeature.findMany({
               where: { venueId, feature: { code: { in: [...PAID_PLAN_TIER_CODES] } } },
               select: { featureId: true, active: true, stripeSubscriptionId: true },

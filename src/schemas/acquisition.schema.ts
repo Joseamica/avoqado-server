@@ -78,3 +78,10 @@ export type AcquisitionSource =
   | 'dashboard_signup'
   | 'dashboard_signup_google'
   | 'dashboard_attach'
+
+/** A recommendation, never a reservation or a client-controlled price. */
+export const optionalHybridOfferSlug = z
+  .string()
+  .regex(/^[a-z0-9][a-z0-9-]{0,99}$/)
+  .optional()
+  .catch(undefined)

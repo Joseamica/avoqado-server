@@ -264,6 +264,56 @@ describe('areaTicketV7 — la conciliación parcial no retrocede el status', () 
     expect(data.completedAt).toBeInstanceOf(Date)
   })
 
+  // Etapa 3 del KDS (Codex 3.6, S3): el cobro por terminal de una cuenta con vale salda AQUÍ, así que la marca
+  // durable de cocina va en esta misma escritura (el efectivo móvil ya la pone en la suya). Sin ella, los productos
+  // sueltos de la cuenta nunca tenían comanda del servidor.
+  it('con pantalla: al saldar la cuenta la marca de cocina va en la misma escritura', async () => {
+    primeAreaTicket('CONFIRMED', 100)
+
+    await finalizeAreaTicketPaymentInTransaction(prismaMock, {
+      venueId: VENUE_ID,
+      orderId: ORDER_ID,
+      paymentId: 'payment-1',
+      fullyPaid: true,
+      reconcileCapturedPayment: true,
+      marcarCocina: true,
+      locked: { sessionId: 'checkout-session', attemptId: 'attempt' } as any,
+    })
+
+    expect(areaWrite().kitchenPendingAt).toBeInstanceOf(Date)
+  })
+
+  it('con pantalla: un abono PARCIAL no marca la cocina', async () => {
+    primeAreaTicket('CONFIRMED', 40)
+
+    await finalizeAreaTicketPaymentInTransaction(prismaMock, {
+      venueId: VENUE_ID,
+      orderId: ORDER_ID,
+      paymentId: 'payment-1',
+      fullyPaid: false,
+      reconcileCapturedPayment: true,
+      marcarCocina: true,
+      locked: { sessionId: 'checkout-session', attemptId: 'attempt' } as any,
+    })
+
+    expect(areaWrite().kitchenPendingAt).toBeUndefined()
+  })
+
+  it('sin pantalla: saldar no marca la cocina', async () => {
+    primeAreaTicket('CONFIRMED', 100)
+
+    await finalizeAreaTicketPaymentInTransaction(prismaMock, {
+      venueId: VENUE_ID,
+      orderId: ORDER_ID,
+      paymentId: 'payment-1',
+      fullyPaid: true,
+      reconcileCapturedPayment: true,
+      locked: { sessionId: 'checkout-session', attemptId: 'attempt' } as any,
+    })
+
+    expect(areaWrite().kitchenPendingAt).toBeUndefined()
+  })
+
   it('🔴 NUNCA escribe status COMPLETED junto con paymentStatus PARTIAL', async () => {
     primeAreaTicket('CONFIRMED', 40)
 

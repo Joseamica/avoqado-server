@@ -48,7 +48,7 @@ describe('H1A real pre-H1 to H1 migration replay', () => {
 
     expect(evidence.database).toEqual({
       host: expect.stringMatching(/^(localhost|127\.0\.0\.1)$/),
-      pathname: '/avoqado_h1a_test_20260808',
+      pathname: new URL(process.env.DATABASE_URL!).pathname,
     })
     expect(evidence.cutoff).toBe('20260808010000_add_cash_reconciliation_opt_in')
     expect(evidence.after).toEqual(evidence.before)

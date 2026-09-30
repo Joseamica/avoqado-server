@@ -4,11 +4,30 @@ import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
+import { featureCatalogQuery, listFeatureCatalog } from '@/services/launchCampaigns/featureCatalog.service'
+import { getVenuePlanInfo } from '@/services/access/basePlan.service'
 
 const round2 = (n: number): number => Math.round(n * 100) / 100
 
 export function registerFeatureTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
+
+  server.tool(
+    'venue_entitlements',
+    'Plan y códigos de funciones contratadas vigentes del negocio. Incluye compras individuales y paquetes sin cambiar el nivel del plan. No contiene precios; los módulos, ajustes y permisos de cada persona se comprueban por separado.',
+    { venueId: z.string().describe('Negocio dentro de tu acceso') },
+    async ({ venueId }) => {
+      guard.venueFilter(venueId)
+      return text({ venueId, ...(await getVenuePlanInfo(venueId)) })
+    },
+  )
+
+  server.tool(
+    'feature_catalog',
+    'Catálogo público completo de capacidades de Avoqado, con búsqueda, categorías y paginación. Describe planes, funciones base y módulos asistidos. No es una cotización ni confirma acceso o disponibilidad de compra; no contiene precios. Para lo contratado usa venue_features y subscription_status.',
+    featureCatalogQuery.shape,
+    async input => text(listFeatureCatalog(input)),
+  )
 
   server.tool(
     'venue_features',

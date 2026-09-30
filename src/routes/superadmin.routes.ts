@@ -1,3 +1,4 @@
+import hybridCampaignRoutes from './superadmin/hybridCampaign.routes'
 // src/routes/superadmin.routes.ts
 import express from 'express'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
@@ -55,6 +56,7 @@ router.use(authorizeRole([StaffRole.SUPERADMIN]))
 router.use('/announcements', announcementRoutes)
 // Campañas ligeras de lanzamiento (spec 2026-09-17). Hereda el guardia de SUPERADMIN del padre.
 router.use('/launch-campaigns', launchCampaignRoutes)
+router.use('/hybrid-campaigns', hybridCampaignRoutes)
 router.use('/kyc', kycReviewRoutes)
 router.use('/payment-providers', paymentProviderRoutes)
 router.use('/merchant-accounts', merchantAccountRoutes)

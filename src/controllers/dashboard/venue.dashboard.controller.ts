@@ -24,8 +24,9 @@
 import { NextFunction, Request, Response } from 'express'
 import * as venueDashboardService from '../../services/dashboard/venue.dashboard.service'
 import * as planStateService from '../../services/dashboard/planState.service'
-import { getVenueGrantedFeatureCodes, getVenuePlanInfo } from '../../services/access/basePlan.service'
+import { getVenuePlanInfo } from '../../services/access/basePlan.service'
 import * as seatReconciliationService from '../../services/dashboard/seatReconciliation.service'
+import type { CancellationInput } from '@/services/shared/cancellationReason'
 
 import { CreateVenueDto, ListVenuesQueryDto, ConvertDemoVenueDto } from '../../schemas/dashboard/venue.schema'
 import { EnhancedCreateVenueBody } from '../../schemas/dashboard/cost-management.schema'
@@ -532,8 +533,8 @@ export async function getVenuePlanTier(req: Request<{ venueId: string }>, res: R
   try {
     const { venueId } = req.params
     // `grantedFeatureCodes` es ADITIVO: un dashboard viejo lo ignora. Sólo códigos (#10, 21-sep).
-    const [plan, grantedFeatureCodes] = await Promise.all([getVenuePlanInfo(venueId), getVenueGrantedFeatureCodes(venueId)])
-    res.status(200).json({ success: true, data: { ...plan, grantedFeatureCodes } })
+    const plan = await getVenuePlanInfo(venueId)
+    res.status(200).json({ success: true, data: plan })
   } catch (error) {
     logger.error('Error getting venue plan tier', {
       error: error instanceof Error ? error.message : 'Unknown error',
@@ -547,10 +548,15 @@ export async function getVenuePlanTier(req: Request<{ venueId: string }>, res: R
  * Schedule cancellation of the base plan at period end (cancel_at_period_end=true).
  * POST /api/v1/dashboard/venues/:venueId/plan/cancel
  */
-export async function cancelVenuePlan(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+export async function cancelVenuePlan(
+  req: Request<{ venueId: string }, any, CancellationInput>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
   try {
     const { venueId } = req.params
-    const planState = await planStateService.cancelPlan(venueId)
+    const { reason, comment } = req.body ?? {}
+    const planState = await planStateService.cancelPlan(venueId, { reason, comment, staffId: (req as any).authContext?.userId })
     res.status(200).json({ success: true, data: planState })
   } catch (error) {
     logger.error('Error canceling venue plan', {
@@ -631,14 +637,19 @@ export async function getVenueDowngradePreview(req: Request<{ venueId: string }>
  * POST /api/v1/dashboard/venues/:venueId/plan/downgrade
  */
 export async function downgradeVenueToFree(
-  req: Request<{ venueId: string }, any, { keepStaffVenueIds?: string[] }>,
+  req: Request<{ venueId: string }, any, { keepStaffVenueIds?: string[] } & CancellationInput>,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
   try {
     const { venueId } = req.params
     const keepStaffVenueIds = req.body.keepStaffVenueIds ?? []
-    const planState = await seatReconciliationService.scheduleDowngradeToFree(venueId, keepStaffVenueIds)
+    const { reason, comment } = req.body
+    const planState = await seatReconciliationService.scheduleDowngradeToFree(venueId, keepStaffVenueIds, {
+      reason,
+      comment,
+      staffId: (req as any).authContext?.userId,
+    })
     res.status(200).json({ success: true, data: planState })
   } catch (error) {
     logger.error('Error scheduling venue downgrade to Free', {

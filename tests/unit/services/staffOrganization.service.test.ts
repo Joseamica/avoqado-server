@@ -153,6 +153,21 @@ describe('StaffOrganization Service', () => {
       })
     })
 
+    // 🔴 Codex (4th audit): the accept flow calls this inside its transaction; with the global client the membership
+    // (even OWNER) survived an aborted accept. It must write through the client it is given.
+    it('🔴 writes through the client it receives, so it rolls back with the caller transaction', async () => {
+      const tx = { staffOrganization: { upsert: jest.fn().mockResolvedValue({}) } }
+      ;(prisma.staffOrganization.upsert as jest.Mock).mockClear()
+
+      await createStaffOrganizationMembership(
+        { staffId: 'staff-1', organizationId: 'org-1', role: OrgRole.MEMBER, isPrimary: false },
+        tx as never,
+      )
+
+      expect(tx.staffOrganization.upsert).toHaveBeenCalledTimes(1)
+      expect(prisma.staffOrganization.upsert).not.toHaveBeenCalled()
+    })
+
     it('should handle missing joinedById', async () => {
       ;(prisma.staffOrganization.upsert as jest.Mock).mockResolvedValue({})
 

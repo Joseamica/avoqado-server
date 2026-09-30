@@ -61,6 +61,7 @@ function makeDeps(overrides: Partial<autoReorder.AutoReorderDeps> = {}): Partial
   return {
     venueHasFeatureAccess: jest.fn().mockResolvedValue(true),
     getVenueBaseTier: jest.fn().mockResolvedValue('PREMIUM'),
+    hasCapabilityGrant: jest.fn().mockResolvedValue(false),
     getReorderSuggestions: jest.fn().mockResolvedValue({ suggestions: [] }),
     createPurchaseOrdersFromSuggestions: jest.fn().mockResolvedValue({ success: true, ordersCreated: 0, orders: [] }),
     sendPurchaseOrderEmailAsync: jest.fn().mockResolvedValue(true),
@@ -197,6 +198,16 @@ describe('runAutoReorderForVenue', () => {
     const res = await autoReorder.runAutoReorderForVenue(VENUE, ENABLED, deps)
     expect(res.ran).toBe(false)
     expect(res.reason).toBe('no_feature')
+  })
+
+  it('runs a purchased AUTO_REORDER grant without requiring a PREMIUM label', async () => {
+    const deps = makeDeps({
+      getVenueBaseTier: jest.fn().mockResolvedValue(null) as any,
+      hasCapabilityGrant: jest.fn().mockResolvedValue(true) as any,
+    })
+    const res = await autoReorder.runAutoReorderForVenue(VENUE, ENABLED, deps)
+    expect(res.ran).toBe(true)
+    expect(deps.getReorderSuggestions).toHaveBeenCalled()
   })
 
   it('does nothing for a non-PREMIUM (demo/exempt) venue even if feature access is true', async () => {

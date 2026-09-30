@@ -67,7 +67,10 @@ jest.mock('../../../src/config/logger', () => ({
 jest.mock('../../../src/utils/prismaClient', () => ({
   __esModule: true,
   default: {
-    onboardingProgress: { updateMany: jest.fn(), update: jest.fn() },
+    hybridPurchase: { findFirst: jest.fn().mockResolvedValue(null) },
+    $transaction: jest.fn(),
+    $queryRaw: jest.fn().mockResolvedValue([]),
+    onboardingProgress: { updateMany: jest.fn(), update: jest.fn(), findUnique: jest.fn() },
     venue: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
     organization: { update: jest.fn() },
   },
@@ -76,6 +79,7 @@ jest.mock('../../../src/utils/prismaClient', () => ({
 import { completeV2Onboarding } from '../../../src/controllers/onboarding.controller'
 import * as onboardingProgressService from '../../../src/services/onboarding/onboardingProgress.service'
 import * as stripeService from '../../../src/services/stripe.service'
+import * as planActivationService from '../../../src/services/onboarding/planActivation.service'
 import * as venueCreationService from '../../../src/services/onboarding/venueCreation.service'
 import { resolvePlanNotificationTarget } from '../../../src/services/access/planNotification.service'
 import emailService from '../../../src/services/email.service'
@@ -143,6 +147,7 @@ describe('completeV2Onboarding — candados del lanzamiento (S7) y fugas del leg
 
   beforeEach(() => {
     jest.clearAllMocks()
+    ;(prisma.$transaction as jest.Mock).mockImplementation(async fn => fn(prisma))
     process.env.ENABLE_VENUE_BASE_SUBSCRIPTION = 'true'
     mockAutorizar.mockReset().mockImplementation(async (_v: string, _c: string, _i: unknown, crear: () => Promise<unknown>) => crear())
     ;(stripeService.createPlanSubscription as jest.Mock).mockResolvedValue({ subscriptionId: 'sub_123' })
@@ -213,6 +218,101 @@ describe('completeV2Onboarding — candados del lanzamiento (S7) y fugas del leg
       expect(prisma.onboardingProgress.updateMany).toHaveBeenCalled()
     },
   )
+
+  it('🔴 revisión 26-sep: Free NO puede cerrar el alta encima de un cobro sin cerrar que YA tiene suscripción', async () => {
+    // El lease venció y quedó IN_PROGRESS con la suscripción guardada: Free se salta Stripe entero, así que cerrarlo como
+    // Free dejaba una suscripción COBRANDO en un negocio Free (huérfana). Se responde 409 y NO se toma el lock.
+    conProgreso(
+      {
+        planActivationStatus: 'IN_PROGRESS',
+        planActivationLeaseUntil: new Date(Date.now() - 60_000),
+        planStripeSubscriptionId: 'sub_cobrada',
+      },
+      { tier: 'FREE', paymentMethodId: undefined },
+    )
+
+    const next = await correr()
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 409, code: 'PLAN_CHARGE_PENDING' }))
+    expect(prisma.onboardingProgress.updateMany).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['Stripe tiene la suscripción del intento', true, 409],
+    ['Stripe confirma que no existe', false, null],
+  ])('🔴 Codex R12: Free sobre un cobro IN_PROGRESS SIN id guardado — %s', async (_n, abierto, esperado) => {
+    // La respuesta de Stripe se perdió ANTES de guardar el id: el guard viejo sólo miraba el id y dejaba cerrar en Free.
+    const espia = jest.spyOn(planActivationService, 'hayCobroDelAltaSinCerrar').mockResolvedValue(abierto)
+    conProgreso(
+      { planActivationStatus: 'IN_PROGRESS', planActivationLeaseUntil: new Date(Date.now() - 60_000), planStripeSubscriptionId: null },
+      { tier: 'FREE', paymentMethodId: undefined },
+    )
+
+    const next = await correr()
+
+    expect(espia).toHaveBeenCalledWith(expect.objectContaining({ organizationId: expect.any(String), planStripeSubscriptionId: null }))
+    if (esperado) {
+      expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 409, code: 'PLAN_CHARGE_PENDING' }))
+      expect(prisma.onboardingProgress.updateMany).not.toHaveBeenCalled()
+    } else {
+      expect(next).not.toHaveBeenCalledWith(expect.objectContaining({ code: 'PLAN_CHARGE_PENDING' }))
+    }
+    espia.mockRestore()
+  })
+
+  it.each([
+    ['PRO con campaña reclamada (el carril de pago se salta)', { launchCampaignId: 'lc_1' }, {}, true],
+    ['PRO con tarjeta y sin campaña (el carril de pago lo RECUPERA)', {}, {}, false],
+  ])('🔴 Codex R13: cobro abierto + %s', async (_n, extraProgreso, extraPlan, bloquea) => {
+    const espia = jest.spyOn(planActivationService, 'hayCobroDelAltaSinCerrar').mockResolvedValue(true)
+    conProgreso(
+      { planActivationStatus: 'IN_PROGRESS', planActivationLeaseUntil: new Date(Date.now() - 60_000), ...extraProgreso },
+      { tier: 'PRO', payNow: true, ...extraPlan },
+    )
+
+    const next = await correr()
+
+    if (bloquea) {
+      expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 409, code: 'PLAN_CHARGE_PENDING' }))
+      expect(prisma.onboardingProgress.updateMany).not.toHaveBeenCalled()
+    } else {
+      expect(next).not.toHaveBeenCalledWith(expect.objectContaining({ code: 'PLAN_CHARGE_PENDING' }))
+    }
+    espia.mockRestore()
+  })
+
+  it('🔴 Codex R14: si entre leer y tomar el candado activate-plan tomó el lease, NO se cierra encima: 409', async () => {
+    conProgreso(
+      { planActivationStatus: 'NONE', planActivationAttempt: 2, planActivationLeaseUntil: null },
+      { tier: 'FREE', paymentMethodId: undefined },
+    )
+    ;(prisma.onboardingProgress.updateMany as jest.Mock).mockResolvedValueOnce({ count: 0 })
+    ;(prisma.onboardingProgress.findUnique as jest.Mock).mockResolvedValueOnce({ completedAt: null })
+
+    const next = await correr()
+
+    expect(prisma.onboardingProgress.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          completedAt: null,
+          planActivationStatus: 'NONE',
+          planActivationAttempt: 2,
+          planActivationLeaseUntil: null,
+        }),
+      }),
+    )
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 409, code: 'PLAN_ACTIVATION_IN_PROGRESS' }))
+    expect(venueCreationService.createVenueFromOnboarding).not.toHaveBeenCalled()
+  })
+
+  it('Free sin ningún cobro de por medio sigue cerrando el alta (regresión)', async () => {
+    conProgreso({ planActivationStatus: 'NONE' }, { tier: 'FREE', paymentMethodId: undefined })
+
+    const next = await correr()
+
+    expect(next).not.toHaveBeenCalledWith(expect.objectContaining({ code: 'PLAN_CHARGE_PENDING' }))
+    expect(prisma.onboardingProgress.updateMany).toHaveBeenCalled()
+  })
 
   it('🔴 si activate-plan YA cobró: el local se crea pero NO se cobra otra vez ni se manda correo', async () => {
     conProgreso({ planActivationStatus: 'ACTIVE' }, { payNow: true })
@@ -447,6 +547,65 @@ describe('completeV2Onboarding — candados del lanzamiento (S7) y fugas del leg
     await completeV2Onboarding(buildReq() as Request, res as Response, jest.fn() as unknown as NextFunction)
 
     expect(res.status).toHaveBeenCalledWith(201)
+  })
+
+  it.each(['inventario inaccesible', 'tarjeta rechazada'])('R15: %s en un reintento no borra el cobro anterior', async caso => {
+    conProgreso({ planActivationStatus: 'IN_PROGRESS', planActivationLeaseUntil: new Date(0) }, { payNow: true })
+    if (caso === 'inventario inaccesible') {
+      mockAutorizar.mockRejectedValue(new AppError('No se pudo consultar Stripe', 503, true, 'OBLIGATIONS_UNVERIFIED'))
+    } else {
+      ;(stripeService.createPlanSubscription as jest.Mock).mockImplementation(async (a: { antesDeCobrar: () => void }) => {
+        a.antesDeCobrar()
+        throw Object.assign(new Error('declined'), { type: 'StripeCardError', code: 'card_declined' })
+      })
+    }
+    const next = await correr()
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 503, code: 'PLAN_ACTIVATION_PENDING' }))
+    expect(prisma.organization.update).not.toHaveBeenCalled()
+    expect(prisma.onboardingProgress.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ completedAt: null, planActivationStatus: 'IN_PROGRESS' }) }),
+    )
+  })
+
+  it('R15: una suscripción reusada cuya entrega falla queda recuperable, aunque no se mandara un cobro nuevo', async () => {
+    conProgreso({}, { payNow: true })
+    ;(stripeService.createPlanSubscription as jest.Mock).mockResolvedValue({ subscriptionId: 'sub_ya_cobrada' })
+    ;(stripeService.entregarSuscripcionDePlan as jest.Mock).mockRejectedValue(new Error('delivery timeout'))
+    const next = await correr()
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 503, code: 'PLAN_ACTIVATION_PENDING' }))
+    expect(prisma.organization.update).not.toHaveBeenCalled()
+  })
+
+  it.each([null, VENUE])('R15: perder el candado con local %p no libera al ganador ni anuncia éxito', async venue => {
+    conProgreso({})
+    ;(prisma.onboardingProgress.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+    ;(prisma.onboardingProgress.findUnique as jest.Mock).mockResolvedValue({
+      completedAt: new Date(),
+      organization: { onboardingCompletedAt: null },
+    })
+    ;(prisma.venue.findFirst as jest.Mock).mockResolvedValue(venue)
+    const res = buildRes()
+    const next = jest.fn()
+    await completeV2Onboarding(buildReq() as Request, res as Response, next)
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 409 }))
+    expect(prisma.onboardingProgress.update).not.toHaveBeenCalled()
+    expect(res.status).not.toHaveBeenCalled()
+    expect(venueCreationService.createVenueFromOnboarding).not.toHaveBeenCalled()
+  })
+
+  it('R15: un alta realmente terminada sí permite repetir la respuesta', async () => {
+    conProgreso({})
+    ;(prisma.onboardingProgress.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+    ;(prisma.onboardingProgress.findUnique as jest.Mock).mockResolvedValue({
+      completedAt: new Date(),
+      organization: { onboardingCompletedAt: new Date() },
+    })
+    ;(prisma.venue.findFirst as jest.Mock).mockResolvedValue(VENUE)
+    const res = buildRes()
+    const next = jest.fn()
+    await completeV2Onboarding(buildReq() as Request, res as Response, next)
+    expect(next).not.toHaveBeenCalled()
+    expect(res.status).toHaveBeenCalledWith(200)
   })
 
   it('un tropiezo de Stripe cualquiera sigue sin bloquear el alta (el negocio existe)', async () => {

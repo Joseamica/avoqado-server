@@ -374,7 +374,7 @@ import { runAutoReorderForVenue } from '../dashboard/autoReorder.service'
 import { serializedInventoryService } from '../serialized-inventory/serializedInventory.service'
 import { getEffectivePaymentConfig } from '../organization-payment-config.service'
 import { logAction } from '../dashboard/activity-log.service'
-import { paymentIsAvoqadoSettled } from '../shared/tenderSemantics'
+import { paymentIsAvoqadoSettled, type TenderSemanticsPayment } from '../shared/tenderSemantics'
 // La ÚNICA definición de "qué cuenta como pagado" — la comparten los cuatro
 // caminos de cobro, para que un reembolso no reabra saldo en ninguno.
 import { summarizeRefunds, computeOrderBalance, REFUND_PAYMENT_TYPE, type CompletedPaymentForBalance } from '../shared/orderBalance'
@@ -402,6 +402,8 @@ import {
 import { getAreaTicketLineIdsCoveredByInventoryReservations } from './order.tpv.service'
 import { resolveFastPaymentTarget } from './fastPaymentTarget'
 import { linkCustomerToExistingOrder, normalizeRequestedCustomerId, resolveFastOrderCustomer } from './fastPaymentCustomer'
+import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
+import { armarComandasTrasCommit } from '../kds/kitchenTicketAuthoring.service'
 
 /**
  * Se lanza DENTRO de la transacción para abortarla sin escribir DINERO; el `catch` la convierte
@@ -700,16 +702,16 @@ async function arbitrarSinPerderElCobro(
 
 /**
  * S2 + Codex R4-4: la OBLIGACIÓN de costo se encola DENTRO de la transacción financiera (durable aunque el proceso muera)
- * para TODO cobro COMPLETED que no sea efectivo — no sólo el nacido del webhook. Para el REST de la terminal el costo se
+ * para TODO cobro COMPLETED procesado por Avoqado — no sólo el nacido del webhook. Para el REST de la terminal el costo se
  * calcula enseguida y cierra la obligación; si ese cálculo falla (tarifa no acreditable, configuración incompleta, fallo
  * operativo) la obligación sigue PENDIENTE y visible en la cola, en vez de un `log.error` que nadie retoma.
  */
 async function encolarObligacionDeCosto(
   tx: Prisma.TransactionClient,
-  payment: { id: string; venueId: string; orderId: string; status: string; method: string },
+  payment: TenderSemanticsPayment & { id: string; venueId: string; orderId: string; status: string },
   via: 'webhook' | 'terminal',
 ): Promise<void> {
-  if (payment.status !== 'COMPLETED' || payment.method === 'CASH') return
+  if (payment.status !== 'COMPLETED' || !paymentIsAvoqadoSettled(payment)) return
   await enqueuePaymentEffect(tx, {
     venueId: payment.venueId,
     paymentId: payment.id,
@@ -1337,6 +1339,8 @@ async function settleStandalonePaymentInTx(
   orderId: string,
   payment: { amount: Prisma.Decimal; tipAmount: Prisma.Decimal },
   staffId?: string,
+  /** Etapa 3 del KDS: el negocio tiene pantalla ⇒ marca durable en la MISMA escritura que salda. */
+  marcarCocina = false,
 ): Promise<CommittedStandaloneSettlement> {
   // One specific invoice, not a tenant list: its entire item snapshot is required
   // to preserve the stock obligation without silently truncating a paid invoice.
@@ -1365,6 +1369,7 @@ async function settleStandalonePaymentInTx(
       ...(balance.isFullyPaid && { status: 'COMPLETED', completedAt: order.completedAt ?? new Date() }),
       ...(!order.servedById && staffId && { servedById: staffId, createdById: order.createdById ?? staffId }),
       ...(firstSettlement && { loyaltyEligibleAt: new Date(), loyaltyStaffId: staffId }),
+      ...(firstSettlement && marcarCocina && { kitchenPendingAt: new Date() }),
     },
   })
   const { createSalePostingInTx } = await import('@/services/inventory/inventoryPosting.service')
@@ -1420,6 +1425,11 @@ async function updateOrderTotalsForStandalonePayment(
     retried?: boolean
     /** Set to `written: true` once this call (or its one rerun) wrote the totals; `reconcileOrderFromPayments` reports it. */
     outcome?: { written: boolean }
+    /**
+     * Etapa 3 del KDS: arma tras el commit. La marca la pone quien salda: `settleStandalonePaymentInTx`, la
+     * finalización del vale, o —cuenta con vale sin sesión— la escritura de esta misma función.
+     */
+    marcarCocina?: boolean
   },
 ): Promise<OrderInventoryWarning | null> {
   // The payments the arithmetic sums; the write transaction rereads exactly these under the Order lock.
@@ -1818,6 +1828,7 @@ async function updateOrderTotalsForStandalonePayment(
                 completedAt: new Date(),
               }),
               ...(debeRegistrarPosting && { loyaltyEligibleAt: new Date(), loyaltyStaffId: staffId }),
+              ...(debeRegistrarPosting && options?.marcarCocina && { kitchenPendingAt: new Date() }),
             },
             include: {
               items: {
@@ -2253,6 +2264,11 @@ async function updateOrderTotalsForStandalonePayment(
         ? { id: order.customer.id, firstName: order.customer.firstName, lastName: order.customer.lastName }
         : null,
     })
+
+    // 🍳 Etapa 3 del KDS: la comanda de pantalla nace al saldar (después del commit; nunca tumba el cobro).
+    if (options?.marcarCocina) {
+      await armarComandasTrasCommit(updatedOrder.venueId, orderId, 'PAID')
+    }
   }
 
   // 🪑 Liberar la mesa si ésta era su última cuenta viva.
@@ -2977,6 +2993,8 @@ async function finalizeCapturedAreaTicketPayment(input: {
   sessionId: string
   attemptId: string
   staffId?: string | null
+  /** Etapa 3 del KDS: el saldado del vale deja la marca de cocina (el armado sólo toma los productos sueltos). */
+  marcarCocina?: boolean
 }): Promise<'PAID' | 'PARTIALLY_PAID'> {
   const areaTicketPayment = await import('../mobile/areaTicketV7.mobile.service')
   const finalization = await prisma.$transaction(
@@ -2989,6 +3007,7 @@ async function finalizeCapturedAreaTicketPayment(input: {
         fullyPaid: false,
         staffId: input.staffId ?? undefined,
         reconcileCapturedPayment: true,
+        marcarCocina: input.marcarCocina ?? false,
         locked: { sessionId: input.sessionId, attemptId: input.attemptId },
       }),
     { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
@@ -3023,6 +3042,8 @@ async function resumeCapturedAreaTicketPayment(
     if (session.status === 'PARTIALLY_PAID') return 'PARTIALLY_PAID'
   }
 
+  // Aquí no se arma tras el commit: la marca basta, el barrido arma la comanda ≤ 90 s después. `debeMarcarCocina` nunca lanza.
+  const marcarCocina = await debeMarcarCocina(venueId)
   try {
     return await finalizeCapturedAreaTicketPayment({
       venueId,
@@ -3031,6 +3052,7 @@ async function resumeCapturedAreaTicketPayment(
       sessionId: session.id,
       attemptId: attempt.id,
       staffId: payment.processedById,
+      marcarCocina,
     })
   } catch (error) {
     await markAreaTicketPaymentForReconciliation({
@@ -3049,6 +3071,13 @@ async function resumeCapturedAreaTicketPayment(
     return 'RECONCILIATION_REQUIRED'
   }
 }
+
+/**
+ * Estados de `Payment` que NO son dinero capturado: todo `TransactionStatus` menos COMPLETED. En una fila real
+ * equivale a `status !== 'COMPLETED'` (la columna nunca es nula; su default es PENDING); una prueba fija que la
+ * lista sea exactamente el enum menos COMPLETED, así que un estado nuevo obliga a decidir aquí.
+ */
+export const ESTADOS_DE_PAGO_NO_CAPTURADOS: ReadonlySet<string> = new Set(['PENDING', 'PROCESSING', 'FAILED', 'REFUNDED'])
 
 export async function recordOrderPayment(
   venueId: string,
@@ -3308,6 +3337,8 @@ export async function recordOrderPayment(
   }
   const shiftAmount = new Prisma.Decimal(totalAmount)
   const shiftTip = new Prisma.Decimal(tipAmount)
+  // Etapa 3 del KDS: FUERA de la transacción del dinero (nunca tumba un cobro).
+  const marcarCocina = await debeMarcarCocina(venueId)
   try {
     payment = await timing.time('financial_commit', () =>
       prisma.$transaction(async tx => {
@@ -3554,8 +3585,8 @@ export async function recordOrderPayment(
               // S2: nacido del webhook ⇒ método provisional y costo pendiente hasta acreditar la marca (o vencer el plazo).
               ...(paymentData.registradoVia === 'webhook' ? { registradoVia: 'webhook', methodProvisional: true } : {}),
               // Codex R6 (diseño B): `costPending` = «la obligación de costo todavía no ha convergido» — nace con la obligación
-              // (todo cobro COMPLETED que no es efectivo, por REST o por webhook) y sólo la convergencia lo pone en false.
-              ...(paymentStatusSnapshot === 'COMPLETED' && paymentData.method !== 'CASH' ? { costPending: true } : {}),
+              // (cobro COMPLETED procesado por Avoqado, por REST o webhook) y sólo la convergencia lo pone en false.
+              ...(paymentStatusSnapshot === 'COMPLETED' && paymentIsAvoqadoSettled({ method: classicMethod }) ? { costPending: true } : {}),
               ...(afiliacion.merchantAccountIdDelApk !== afiliacion.merchantAccountId
                 ? { merchantAccountIdFromApk: afiliacion.merchantAccountIdDelApk ?? null, merchantResolvedVia: afiliacion.via }
                 : {}),
@@ -3717,7 +3748,14 @@ export async function recordOrderPayment(
           !lockedAreaCheckout &&
           !activeOrder.items.some(item => item.areaTicketLineId != null)
         ) {
-          committedStandaloneSettlement = await settleStandalonePaymentInTx(tx, venueId, activeOrder.id, newPayment, validatedStaffId)
+          committedStandaloneSettlement = await settleStandalonePaymentInTx(
+            tx,
+            venueId,
+            activeOrder.id,
+            newPayment,
+            validatedStaffId,
+            marcarCocina,
+          )
         }
 
         if (newPayment.status === 'COMPLETED') {
@@ -3970,7 +4008,7 @@ export async function recordOrderPayment(
       amountCents: paymentData.amount,
       tipCents: paymentData.tip ?? 0,
     })
-  } else {
+  } else if (paymentIsAvoqadoSettled(payment)) {
     // Codex R4-4 / R5-3: UN solo criterio de cumplimiento para el costo síncrono — el MISMO del worker (costo persistido →
     // proyecciones en Payment y VenueTransaction → liquidación → reembolsos). La obligación se cierra SÓLO al converger; si
     // falta la liquidación o la tarifa no es acreditable, queda PENDIENTE y visible con su motivo. Nunca interrumpe el cobro.
@@ -4171,6 +4209,7 @@ export async function recordOrderPayment(
             sessionId: capturedAreaCheckout.sessionId,
             attemptId: capturedAreaCheckout.attemptId,
             staffId: validatedStaffId,
+            marcarCocina,
           })
         } catch (finalizationError) {
           // El proveedor ya confirmó el dinero. Nunca habilitar otro cobro:
@@ -4197,6 +4236,8 @@ export async function recordOrderPayment(
             await updateOrderTotalsForStandalonePayment(activeOrder.id, totalAmount + tipAmount, tipAmount, payment.id, validatedStaffId, {
               areaTicketAlreadyFinalized: true,
               venueId,
+              // Codex 3.6 (S3): la finalización ya puso la marca al saldar; aquí sólo se arman los sueltos.
+              marcarCocina: marcarCocina && areaTicketCheckoutState === 'PAID',
             })
           } catch (sideEffectError) {
             logger.error('[AREA TICKETS v7] El pago finalizó, pero fallaron efectos secundarios no monetarios', {
@@ -4207,6 +4248,17 @@ export async function recordOrderPayment(
             })
           }
         }
+      } else if (ESTADOS_DE_PAGO_NO_CAPTURADOS.has(payment.status)) {
+        // 🔴 DINERO: sólo COMPLETED es dinero capturado — la misma regla que el saldado de la transacción
+        // (`settleStandalonePaymentInTx`). El recálculo de abajo suma el importe del pago actual sin mirar su
+        // estado: un FAILED/PENDING/PROCESSING/REFUNDED que «cubría» el saldo dejaba la venta PAID y COMPLETED,
+        // descontaba inventario y abría la lealtad de una venta que nadie cobró. El intento queda registrado; la
+        // cuenta no se toca.
+        logger.warn('⚠️ Pago no capturado: la cuenta no se recalcula', {
+          paymentId: payment.id,
+          orderId: activeOrder.id,
+          paymentStatus: payment.status,
+        })
       } else {
         // ✅ FIX: Pass payment ID to exclude it from previousPayments calculation
         // ⭐ LOYALTY: Pass staffId for loyalty points attribution
@@ -4217,16 +4269,26 @@ export async function recordOrderPayment(
           tipAmount,
           payment.id,
           validatedStaffId,
-          { venueId, committedSettlement: committedStandaloneSettlement },
+          // La marca sólo la pone el saldado COMPLETED; sin él, un FAILED/PENDING que «cubre» el saldo no arma.
+          {
+            venueId,
+            committedSettlement: committedStandaloneSettlement,
+            // Codex 3.6 (S3): una cuenta con vale no pasa por ese saldado; aquí el pago ya es COMPLETED, así que la
+            // salda (y la marca) la escritura de `updateOrderTotalsForStandalonePayment`.
+            marcarCocina: marcarCocina && (Boolean(committedStandaloneSettlement) || hasAreaTicketLines),
+          },
         )
       }
 
-      logger.info('Order totals updated directly in backend (Standalone Mode)', {
-        paymentId: payment.id,
-        orderId: activeOrder.id,
-        paymentAmount: totalAmount + tipAmount,
-        elapsedMs: elapsedMs(),
-      })
+      // Sólo si de verdad se recalculó: con un pago no capturado este log contradiría al aviso de arriba.
+      if (!ESTADOS_DE_PAGO_NO_CAPTURADOS.has(payment.status)) {
+        logger.info('Order totals updated directly in backend (Standalone Mode)', {
+          paymentId: payment.id,
+          orderId: activeOrder.id,
+          paymentAmount: totalAmount + tipAmount,
+          elapsedMs: elapsedMs(),
+        })
+      }
     } catch (updateError: any) {
       // ⚠️ Este re-throw ya NO puede alcanzar al inventario, y es a propósito.
       //
@@ -5094,8 +5156,10 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
               // S2: nacido del webhook ⇒ método provisional y costo pendiente hasta acreditar la marca (o vencer el plazo).
               ...(paymentData.registradoVia === 'webhook' ? { registradoVia: 'webhook', methodProvisional: true } : {}),
               // Codex R6 (diseño B): `costPending` = «la obligación de costo todavía no ha convergido» — nace con la obligación
-              // (todo cobro COMPLETED que no es efectivo, por REST o por webhook) y sólo la convergencia lo pone en false.
-              ...(paymentStatusSnapshot === 'COMPLETED' && paymentData.method !== 'CASH' ? { costPending: true } : {}),
+              // (cobro COMPLETED procesado por Avoqado, por REST o webhook) y sólo la convergencia lo pone en false.
+              ...(paymentStatusSnapshot === 'COMPLETED' && paymentIsAvoqadoSettled(resolvedTender ?? { method: effectiveMethod })
+                ? { costPending: true }
+                : {}),
               ...(afiliacion.merchantAccountIdDelApk !== afiliacion.merchantAccountId
                 ? { merchantAccountIdFromApk: afiliacion.merchantAccountIdDelApk ?? null, merchantResolvedVia: afiliacion.via }
                 : {}),
@@ -5378,7 +5442,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       amountCents: paymentData.amount,
       tipCents: paymentData.tip ?? 0,
     })
-  } else {
+  } else if (paymentIsAvoqadoSettled(payment)) {
     // Codex R4-4 / R5-3: UN solo criterio de cumplimiento para el costo síncrono — el MISMO del worker (costo persistido →
     // proyecciones en Payment y VenueTransaction → liquidación → reembolsos). La obligación se cierra SÓLO al converger; si
     // falta la liquidación o la tarifa no es acreditable, queda PENDIENTE y visible con su motivo. Nunca interrumpe el cobro.

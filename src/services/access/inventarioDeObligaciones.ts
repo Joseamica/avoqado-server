@@ -14,7 +14,8 @@ import type Stripe from 'stripe'
 import AppError from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
 import { stripe, stripeAfirmaQueNoExiste } from '@/services/stripe.service'
-import { clasificarEstado, clasificarSuscripcion, type CatalogoDeCobro, type ObligacionViva } from './obligacionesDeCobro'
+import { clasificarEstado, clasificarSuscripcion, type CatalogoDeCobro, type ObligacionViva, type Proyeccion } from './obligacionesDeCobro'
+import { hybridScheduleReceipt } from '../launchCampaigns/hybridSchedule'
 
 /** Topes de lectura. Topar NO es «no hay más»: es «no se pudo verificar», y responde 503. */
 const TOPE_VINCULOS = 200
@@ -59,7 +60,7 @@ export async function inventarioDeObligaciones(
   const aTiempo = () => {
     if (sinTiempo()) throw incompleto('se agotó el tiempo para revisar los cobros')
   }
-  const [venue, vinculos, pendientes, funciones] = await Promise.all([
+  const [venue, vinculos, pendientes, funciones, hybridPurchases] = await Promise.all([
     prisma.venue.findUnique({ where: { id: venueId }, select: { stripeCustomerId: true } }),
     prisma.venueFeature.findMany({
       where: { venueId, stripeSubscriptionId: { not: null } },
@@ -81,10 +82,46 @@ export async function inventarioDeObligaciones(
       orderBy: { id: 'asc' },
       take: TOPE_CATALOGO + 1,
     }),
+    prisma.hybridPurchase.findMany({
+      where: { venueId, stripeSubscriptionId: { not: null } },
+      orderBy: { id: 'asc' },
+      take: TOPE_VINCULOS + 1,
+      select: {
+        id: true,
+        stripeSubscriptionId: true,
+        stripeCustomerId: true,
+        operations: {
+          where: { OR: [{ step: { startsWith: 'SCHEDULE_CONFIGURE' } }, { step: { startsWith: 'SCHEDULE_CANCEL_CREATE:' } }] },
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          take: 1,
+          select: { providerId: true, resultHash: true },
+        },
+        contracts: {
+          take: 9,
+          orderBy: { id: 'asc' },
+          select: {
+            stripeItemId: true,
+            featureCodes: true,
+            planTier: true,
+            pendingEffectiveAt: true,
+            publication: { select: { stripePriceId: true, stripeRenewalPriceId: true } },
+          },
+        },
+      },
+    }),
   ])
+  if (hybridPurchases.length > TOPE_VINCULOS || hybridPurchases.some(p => p.contracts.length > 8))
+    throw incompleto('demasiadas obligaciones híbridas')
+  const hybridBySubscription = new Map(hybridPurchases.map(p => [p.stripeSubscriptionId, p]))
   if (vinculos.length > TOPE_VINCULOS) throw incompleto('demasiados vínculos locales')
   if (pendientes.length > TOPE_VINCULOS) throw incompleto('demasiados conflictos pendientes')
-  const porConsultar = [...new Set([...vinculos.map(v => v.stripeSubscriptionId as string), ...pendientes.map(p => p.subscriptionId)])]
+  const porConsultar = [
+    ...new Set([
+      ...vinculos.map(v => v.stripeSubscriptionId as string),
+      ...pendientes.map(p => p.subscriptionId),
+      ...hybridPurchases.map(p => p.stripeSubscriptionId as string),
+    ]),
+  ]
   if (funciones.length > TOPE_CATALOGO) throw incompleto('catálogo más grande de lo que se lee')
 
   const catalogo: CatalogoDeCobro = {
@@ -149,13 +186,56 @@ export async function inventarioDeObligaciones(
     if (clasificarEstado(s.status) === 'TERMINAL') continue
     // `items` es una lista paginada: si no vinieron todos, no se puede afirmar qué vende.
     if (s.items?.has_more) throw incompleto('una suscripción con más renglones de los que se leyeron')
-    if (s.schedule || s.pending_update) conCambiosProgramados.push(s.id)
+    const hybrid = hybridBySubscription.get(s.id)
+    let verifiedSchedule = false
+    const receipt = hybrid?.operations?.[0]
+    if (
+      s.schedule &&
+      receipt?.providerId &&
+      receipt.providerId === idDe(s.schedule) &&
+      !hybrid?.contracts.some(c => c.pendingEffectiveAt)
+    ) {
+      aTiempo()
+      try {
+        const schedule = await stripe.subscriptionSchedules.retrieve(receipt.providerId, {}, LECTURA)
+        verifiedSchedule =
+          idDe(schedule.customer) === hybrid?.stripeCustomerId &&
+          (idDe(schedule.subscription) ?? idDe(schedule.released_subscription)) === s.id &&
+          hybridScheduleReceipt(schedule) === receipt.resultHash
+      } catch (error) {
+        throw incompleto('no se pudo verificar la renovación programada', error)
+      }
+    }
+    if (
+      s.pending_update ||
+      hybrid?.contracts.some(c => c.pendingEffectiveAt) ||
+      (receipt && !receipt.resultHash) ||
+      (s.schedule && !verifiedSchedule)
+    )
+      conCambiosProgramados.push(s.id)
     const items = (s.items?.data ?? []).map(it => ({
       priceId: it.price?.id ?? '',
       productId: idDe(it.price?.product as never) ?? '',
       lookupKey: it.price?.lookup_key ?? null,
     }))
-    const { proyecciones, variosItems } = clasificarSuscripcion(items, catalogo)
+    const classification = clasificarSuscripcion(items, catalogo)
+    const variosItems = classification.variosItems
+    const proyecciones: Proyeccion[] = hybrid
+      ? (s.items?.data ?? []).map(item => {
+          const contract = hybrid.contracts.find(c => c.stripeItemId === item.id)
+          if (
+            !contract ||
+            idDe(s.customer) !== hybrid.stripeCustomerId ||
+            ![contract.publication.stripePriceId, contract.publication.stripeRenewalPriceId].includes(item.price.id) ||
+            item.quantity !== 1
+          )
+            return { tipo: 'DESCONOCIDO', productId: idDe(item.price.product) }
+          return contract.planTier === 'PRO' || contract.planTier === 'PREMIUM'
+            ? { tipo: 'PLAN', tier: contract.planTier, featureCodes: contract.featureCodes }
+            : { tipo: 'PAQUETE', featureCodes: contract.featureCodes }
+        })
+      : classification.proyecciones
+    if (hybrid && !proyecciones.length) proyecciones.push({ tipo: 'DESCONOCIDO', productId: null })
     vivas.push({ subscriptionId: s.id, proyecciones })
     detalle[s.id] = {
       status: s.status,

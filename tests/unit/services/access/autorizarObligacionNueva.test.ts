@@ -7,11 +7,17 @@
 import { prismaMock } from '../../../__helpers__/setup'
 
 const mockListSessions = jest.fn()
+const mockCustomer = jest.fn()
+const mockBalanceGuard = jest.fn()
+jest.mock('@/services/launchCampaigns/hybridFundingGraph', () => ({
+  assertHybridBalanceUsable: (...args: unknown[]) => mockBalanceGuard(...args),
+}))
 const mockExpire = jest.fn()
 const mockRetrieveSession = jest.fn()
 jest.mock('@/services/stripe.service', () => ({
   ...jest.requireActual('@/services/stripe.service'),
   stripe: {
+    customers: { retrieve: (...args: unknown[]) => mockCustomer(...args) },
     checkout: {
       sessions: {
         list: (...a: unknown[]) => mockListSessions(...a),
@@ -38,6 +44,8 @@ const correr = (intencion: Parameters<typeof autorizarObligacionNueva>[2] = { ti
   autorizarObligacionNueva('cven1', 'cus_1', intencion, crear)
 
 beforeEach(() => {
+  mockCustomer.mockReset().mockResolvedValue({ id: 'cus_1', balance: -1000 })
+  mockBalanceGuard.mockReset().mockResolvedValue(undefined)
   crear.mockReset().mockResolvedValue('https://checkout.stripe.com/c/pay/cs_nueva')
   mockListSessions.mockReset().mockResolvedValue({ data: [], has_more: false })
   mockExpire.mockReset().mockResolvedValue({ status: 'expired' })
@@ -52,6 +60,39 @@ beforeEach(() => {
 })
 
 describe('autorizarObligacionNueva', () => {
+  it('observes onboarding completion committed while hybrid acceptance waits for the organization lock', async () => {
+    let release!: () => void, entered!: () => void
+    const blocked = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const acquired = new Promise<void>(resolve => {
+      entered = resolve
+    })
+    prismaMock.$queryRaw.mockResolvedValueOnce([{ tomado: true }] as never).mockImplementationOnce(async () => {
+      entered()
+      await blocked
+      return []
+    })
+    const attempt = correr({ tipo: 'HYBRID', proyecciones: [{ tipo: 'FUNCION', featureCode: 'CFDI' }], reemplaza: [] })
+    try {
+      await acquired
+      expect(mockListSessions).not.toHaveBeenCalled()
+      prismaMock.venue.findUnique.mockResolvedValue({
+        organization: { onboardingCompletedAt: null, onboardingProgress: { completedAt: new Date(), planActivationStatus: 'NONE' } },
+      } as never)
+    } finally {
+      release()
+    }
+    await expect(attempt).rejects.toMatchObject({ code: 'ONBOARDING_BILLING_IN_PROGRESS' })
+    expect(crear).not.toHaveBeenCalled()
+  })
+  it('blocks legacy checkouts too when a transferred customer balance has been reversed', async () => {
+    prismaMock.hybridCreditAllocation.findFirst.mockResolvedValue({ id: 'credit' } as never)
+    mockBalanceGuard.mockRejectedValue(Object.assign(new Error('Transferred credit reversed'), { code: 'HYBRID_TRANSFER_REVERSED' }))
+    await expect(correr()).rejects.toMatchObject({ code: 'HYBRID_TRANSFER_REVERSED' })
+    expect(mockBalanceGuard).toHaveBeenCalledWith('cven1', 'cus_1', -1000)
+    expect(crear).not.toHaveBeenCalled()
+  })
   it('compatible: crea DESPUÉS de todas las comprobaciones y devuelve lo creado', async () => {
     await expect(correr()).resolves.toBe('https://checkout.stripe.com/c/pay/cs_nueva')
     const orden = [prismaMock.$queryRaw, mockListSessions, mockInventario, crear].map(f => (f as jest.Mock).mock.invocationCallOrder[0])
@@ -289,5 +330,19 @@ describe('🔴 Codex C3: nada bajo el candado puede sobrevivir a su transacción
     await expect(correr()).rejects.toMatchObject({ statusCode: 503, code: 'OBLIGATIONS_UNVERIFIED' })
     expect(crear).not.toHaveBeenCalled()
     reloj.mockRestore()
+  })
+})
+
+describe('hybrid durable admission alongside legacy checkout', () => {
+  it('blocks legacy checkout while a hybrid provider result is unknown, even after its old lease would expire', async () => {
+    prismaMock.hybridPurchase.findFirst.mockResolvedValueOnce({ id: 'hybrid-pending', status: 'REQUIRES_REVIEW' } as never)
+    await expect(correr()).rejects.toMatchObject({ code: 'HYBRID_PURCHASE_IN_PROGRESS' })
+    expect(mockListSessions).not.toHaveBeenCalled()
+    expect(crear).not.toHaveBeenCalled()
+  })
+  it('passes the lock transaction and observed inventory to a new durable acceptance callback', async () => {
+    prismaMock.hybridPurchase.findFirst.mockResolvedValue(null)
+    await correr()
+    expect(crear).toHaveBeenCalledWith(prismaMock, expect.objectContaining({ vivas: [] }))
   })
 })

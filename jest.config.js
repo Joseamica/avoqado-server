@@ -64,6 +64,14 @@ module.exports = {
       transformIgnorePatterns: ['node_modules/(?!(@scure|@noble|otplib|@otplib|satori|satori-html|ultrahtml))'],
       setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/setup.ts'],
       moduleNameMapper: {
+        // Resolve the generated client from THIS checkout. Jest's nested package-import resolution
+        // can otherwise load .prisma/client from the primary checkout in an isolated worktree.
+        // Keep Express's async-error patch on the same module instance in isolated dependency trees.
+        '^express$': '<rootDir>/node_modules/express/index.js',
+        '^express/lib/router/layer(?:\\.js)?$': '<rootDir>/node_modules/express/lib/router/layer.js',
+        '^express/lib/router(?:/index(?:\\.js)?)?$': '<rootDir>/node_modules/express/lib/router/index.js',
+        '^@prisma/client$': '<rootDir>/node_modules/.prisma/client/index.js',
+        '^@prisma/client/runtime/library(?:\\.js)?$': '<rootDir>/node_modules/@prisma/client/runtime/library.js',
         '^@/(.*)$': '<rootDir>/src/$1',
         '^@tests/(.*)$': '<rootDir>/tests/$1',
         '^pdf-to-img$': '<rootDir>/tests/__mocks__/pdf-to-img.ts',
@@ -93,6 +101,14 @@ module.exports = {
       transformIgnorePatterns: ['node_modules/(?!(@scure|@noble|otplib|@otplib|satori|satori-html|ultrahtml))'],
       setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/setup.ts'],
       moduleNameMapper: {
+        // Resolve the generated client from THIS checkout. Jest's nested package-import resolution
+        // can otherwise load .prisma/client from the primary checkout in an isolated worktree.
+        // Keep Express's async-error patch on the same module instance in isolated dependency trees.
+        '^express$': '<rootDir>/node_modules/express/index.js',
+        '^express/lib/router/layer(?:\\.js)?$': '<rootDir>/node_modules/express/lib/router/layer.js',
+        '^express/lib/router(?:/index(?:\\.js)?)?$': '<rootDir>/node_modules/express/lib/router/index.js',
+        '^@prisma/client$': '<rootDir>/node_modules/.prisma/client/index.js',
+        '^@prisma/client/runtime/library(?:\\.js)?$': '<rootDir>/node_modules/@prisma/client/runtime/library.js',
         '^@/(.*)$': '<rootDir>/src/$1',
         '^@tests/(.*)$': '<rootDir>/tests/$1',
         '^pdf-to-img$': '<rootDir>/tests/__mocks__/pdf-to-img.ts',
@@ -122,6 +138,14 @@ module.exports = {
       transformIgnorePatterns: ['node_modules/(?!(@scure|@noble|otplib|@otplib|satori|satori-html|ultrahtml))'],
       setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/setup.ts'],
       moduleNameMapper: {
+        // Resolve the generated client from THIS checkout. Jest's nested package-import resolution
+        // can otherwise load .prisma/client from the primary checkout in an isolated worktree.
+        // Keep Express's async-error patch on the same module instance in isolated dependency trees.
+        '^express$': '<rootDir>/node_modules/express/index.js',
+        '^express/lib/router/layer(?:\\.js)?$': '<rootDir>/node_modules/express/lib/router/layer.js',
+        '^express/lib/router(?:/index(?:\\.js)?)?$': '<rootDir>/node_modules/express/lib/router/index.js',
+        '^@prisma/client$': '<rootDir>/node_modules/.prisma/client/index.js',
+        '^@prisma/client/runtime/library(?:\\.js)?$': '<rootDir>/node_modules/@prisma/client/runtime/library.js',
         '^@/(.*)$': '<rootDir>/src/$1',
         '^@tests/(.*)$': '<rootDir>/tests/$1',
         '^pdf-to-img$': '<rootDir>/tests/__mocks__/pdf-to-img.ts',
@@ -151,6 +175,14 @@ module.exports = {
       transformIgnorePatterns: ['node_modules/(?!(@scure|@noble|otplib|@otplib|satori|satori-html|ultrahtml))'],
       setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/integration-setup.ts'],
       moduleNameMapper: {
+        // Resolve the generated client from THIS checkout. Jest's nested package-import resolution
+        // can otherwise load .prisma/client from the primary checkout in an isolated worktree.
+        // Keep Express's async-error patch on the same module instance in isolated dependency trees.
+        '^express$': '<rootDir>/node_modules/express/index.js',
+        '^express/lib/router/layer(?:\\.js)?$': '<rootDir>/node_modules/express/lib/router/layer.js',
+        '^express/lib/router(?:/index(?:\\.js)?)?$': '<rootDir>/node_modules/express/lib/router/index.js',
+        '^@prisma/client$': '<rootDir>/node_modules/.prisma/client/index.js',
+        '^@prisma/client/runtime/library(?:\\.js)?$': '<rootDir>/node_modules/@prisma/client/runtime/library.js',
         '^@/(.*)$': '<rootDir>/src/$1',
         '^@tests/(.*)$': '<rootDir>/tests/$1',
         '^pdf-to-img$': '<rootDir>/tests/__mocks__/pdf-to-img.ts',

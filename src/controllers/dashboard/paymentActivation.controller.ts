@@ -28,8 +28,8 @@ export const paymentActivationProfileSchema = z.object({
     .optional(),
   identity: z
     .object({
-      legalFirstName: z.string().trim().min(1),
-      legalLastName: z.string().trim().min(1),
+      legalFirstName: z.string().trim().min(1, 'Escribe el nombre del titular'),
+      legalLastName: z.string().trim().min(1, 'Escribe los apellidos del titular'),
       rfc: z.string().trim().nullable().optional(),
       curp: z.string().trim().nullable().optional(),
       birthdate: z.string().nullable().optional(),
@@ -43,17 +43,19 @@ export const paymentActivationProfileSchema = z.object({
     .optional(),
   venueAddress: z
     .object({
-      address: z.string().trim().min(1),
-      city: z.string().trim().min(1),
-      state: z.string().trim().min(1),
-      zipCode: z.string().trim().min(1),
+      // 🔴 full-testing 26-sep: sin tope entraba una dirección de 5,000 caracteres, que luego sale en recibos y facturas.
+      // Mismos topes que Configuración › Información básica (venue.schema.ts).
+      address: z.string().trim().min(1, 'Escribe la dirección del local').max(200, 'La dirección no puede pasar de 200 caracteres'),
+      city: z.string().trim().min(1, 'Escribe la ciudad').max(100, 'La ciudad no puede pasar de 100 caracteres'),
+      state: z.string().trim().min(1, 'Escribe el estado').max(100, 'El estado no puede pasar de 100 caracteres'),
+      zipCode: z.string().trim().min(1, 'Escribe el código postal').max(10, 'El código postal no puede pasar de 10 caracteres'),
       country: z.string().trim().nullable().optional(),
     })
     .optional(),
   bank: z
     .object({
       clabe: z.string().trim(),
-      accountHolder: z.string().trim().min(1),
+      accountHolder: z.string().trim().min(1, 'Escribe el titular de la cuenta'),
       accountType: z.string().trim().nullable().optional(),
       // 🔴 `bankName` NO es adorno: es lo que `kycReview.service.ts:227` manda a la hoja de
       // Blumon. Zod descarta en silencio lo que no declara, así que sin esta línea el banco que

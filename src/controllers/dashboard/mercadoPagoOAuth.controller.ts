@@ -23,7 +23,7 @@ import * as oauthService from '@/services/mercado-pago/oauth.service'
 import * as connectionService from '@/services/mercado-pago/connection.service'
 import { userHasVenueAccess } from '@/services/staffOrganization.service'
 import { puedeAdministrarCobros } from '@/services/access/permisoDeCobros'
-import { motivoDeConcesionInvalidada } from '@/utils/passwordChangeGuard'
+import { emisionDelToken, motivoDeConcesionInvalidada } from '@/utils/passwordChangeGuard'
 import { initiateQuerySchema, callbackQuerySchema, disconnectParamsSchema } from '@/schemas/dashboard/mercadoPagoOAuth.schema'
 import type { MercadoPagoOAuthState } from '@/services/mercado-pago/types'
 
@@ -185,7 +185,7 @@ export async function callback(req: Request, res: Response) {
 
   // 3c. Codex S5: si la persona cambió su contraseña o cerró todas sus sesiones DESPUÉS de iniciar,
   //     el state muere con ellas — quien robó la sesión no termina de ligar una cuenta de cobro.
-  if (await motivoDeConcesionInvalidada(statePayload.staffId, (statePayload as { iat?: number }).iat)) {
+  if (await motivoDeConcesionInvalidada(statePayload.staffId, emisionDelToken(statePayload as { iat?: number; emitidoMs?: number }))) {
     logger.warn('[MP OAuth] callback rechazado: la sesión se cortó tras iniciar', {
       venueId: statePayload.venueId,
       staffId: statePayload.staffId,

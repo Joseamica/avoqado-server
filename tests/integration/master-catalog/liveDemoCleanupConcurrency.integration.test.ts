@@ -1,3 +1,4 @@
+const { isDisposableH1Url } = require('../../../scripts/h1-test-database.cjs')
 /** Prepared only: run through the H1 disposable-database wrapper. */
 import { Client } from 'pg'
 
@@ -15,8 +16,7 @@ function assertDisposableDatabase(): void {
   const effective = new URL(process.env.DATABASE_URL ?? '')
   const declared = new URL(process.env.TEST_DATABASE_URL ?? '')
   for (const candidate of [effective, declared]) {
-    expect(['localhost', '127.0.0.1']).toContain(candidate.hostname)
-    expect(candidate.pathname).toBe('/avoqado_h1a_test_20260808')
+    expect(isDisposableH1Url(candidate)).toBe(true)
   }
   expect(effective.toString()).toBe(declared.toString())
 }

@@ -1,3 +1,4 @@
+const { isDisposableH1Url } = require('../../../scripts/h1-test-database.cjs')
 /** Real PostgreSQL proof for immutable validation-profile preview/confirm. */
 import {
   BusinessType,
@@ -50,8 +51,7 @@ function assertDisposableH1Database(): void {
   // WHY: Profile tests mutate commercial/module state, so both aliases must be
   // the exact disposable H1 database before a Prisma connection is imported.
   for (const candidate of [effective, declaredTestUrl]) {
-    expect(['localhost', '127.0.0.1']).toContain(candidate.hostname)
-    expect(candidate.pathname).toBe('/avoqado_h1a_test_20260808')
+    expect(isDisposableH1Url(candidate)).toBe(true)
   }
   expect(declaredTestUrl.toString()).toBe(effective.toString())
 }

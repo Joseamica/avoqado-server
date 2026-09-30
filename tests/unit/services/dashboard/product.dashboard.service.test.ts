@@ -415,6 +415,21 @@ describe('Product soldByWeight (venta por peso)', () => {
       expect(updateCall.data).not.toHaveProperty('unit')
     })
 
+    // Codex (fusión con develop, 30-sep): el PATCH parcial no trae `type`, así que la validación de entrada no lo veía; el
+    // móvil ya revisa el estado FINAL. Una cita no se inventaría: 400 y sin fila de Inventory.
+    it('rejects enabling QUANTITY inventory on an appointment service through a partial update (final state)', async () => {
+      const existing = makeMockProduct({ type: 'APPOINTMENTS_SERVICE' } as any)
+      const updated = makeMockProduct({ type: 'APPOINTMENTS_SERVICE', trackInventory: true, inventoryMethod: 'QUANTITY' } as any)
+      prismaMock.product.findFirst.mockResolvedValue(existing)
+      prismaMock.product.update.mockResolvedValue(updated)
+
+      await expect(
+        productService.updateProduct('venue-xyz', 'product-abc', { trackInventory: true, inventoryMethod: 'QUANTITY' } as any, humanActor),
+      ).rejects.toMatchObject({ statusCode: 400, message: 'Este tipo de producto no puede tener seguimiento de inventario' })
+      expect(prismaMock.inventory.create).not.toHaveBeenCalled()
+      expect(prismaMock.inventory.upsert).not.toHaveBeenCalled()
+    })
+
     it('does NOT force unit when disabling soldByWeight (no reversion logic)', async () => {
       const existing = makeMockProduct({ soldByWeight: true, unit: 'KILOGRAM' } as any)
       const updated = makeMockProduct({ soldByWeight: false } as any)

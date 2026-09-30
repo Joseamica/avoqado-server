@@ -1,3 +1,4 @@
+const { isDisposableH1Url } = require('../../../scripts/h1-test-database.cjs')
 /**
  * Real PostgreSQL proof that yield and RM unit writers serialize through the
  * same Venue graph lock and persist one post-lock cost snapshot.
@@ -33,8 +34,7 @@ function assertDisposableH1Database(): void {
   // WHY: Setup and teardown may delete rows, so both URLs must independently
   // prove the dedicated local H1 database before Prisma is imported.
   for (const candidate of [effective, declared]) {
-    expect(['localhost', '127.0.0.1']).toContain(candidate.hostname)
-    expect(candidate.pathname).toBe('/avoqado_h1a_test_20260808')
+    expect(isDisposableH1Url(candidate)).toBe(true)
   }
   expect(effective.toString()).toBe(declared.toString())
 }

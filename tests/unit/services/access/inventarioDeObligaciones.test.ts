@@ -1,3 +1,4 @@
+import { hybridScheduleReceipt } from '@/services/launchCampaigns/hybridSchedule'
 /**
  * V5-A paso 3 (diseño v5, Codex v5 punto 1): el inventario de lo que el NEGOCIO tiene vivo en Stripe.
  *
@@ -8,9 +9,13 @@ import { prismaMock } from '../../../__helpers__/setup'
 
 const mockRetrieve = jest.fn()
 const mockList = jest.fn()
+const mockSchedule = jest.fn()
 jest.mock('@/services/stripe.service', () => ({
   ...jest.requireActual('@/services/stripe.service'),
-  stripe: { subscriptions: { retrieve: (...a: unknown[]) => mockRetrieve(...a), list: (...a: unknown[]) => mockList(...a) } },
+  stripe: {
+    subscriptionSchedules: { retrieve: (...a: unknown[]) => mockSchedule(...a) },
+    subscriptions: { retrieve: (...a: unknown[]) => mockRetrieve(...a), list: (...a: unknown[]) => mockList(...a) },
+  },
 }))
 jest.mock('stripe')
 
@@ -35,10 +40,12 @@ const paginado = (subs: unknown[]) => ({
 })
 
 beforeEach(() => {
+  mockSchedule.mockReset()
   mockRetrieve.mockReset()
   mockList.mockReset().mockReturnValue(paginado([]))
   prismaMock.venue.findUnique.mockResolvedValue({ stripeCustomerId: 'cus_1' } as never)
   prismaMock.venueFeature.findMany.mockResolvedValue([] as never)
+  prismaMock.hybridPurchase.findMany.mockResolvedValue([] as never)
   prismaMock.billingObligationConflict.findMany.mockResolvedValue([] as never)
   prismaMock.feature.findMany.mockResolvedValue([
     { code: 'PLAN_PRO', stripeProductId: 'prod_pro' },
@@ -248,4 +255,76 @@ it('🔴 R8: el presupuesto se revisa DENTRO del recorrido de páginas, no sólo
   })
   // Y dejó de pedir páginas en cuanto se pasó: no las recorrió todas.
   expect(pedidas.length).toBeLessThan(3)
+})
+
+describe('hybrid contracts in the shared obligation inventory', () => {
+  const hybridRow = {
+    id: 'purchase',
+    stripeSubscriptionId: 'sub_bundle',
+    stripeCustomerId: 'cus_old',
+    quote: { lines: [{ publicationId: 'pub_bundle', kind: 'CHOICE_BUNDLE', planTier: null, featureCodes: ['CFDI', 'LOYALTY_PROGRAM'] }] },
+    contracts: [
+      {
+        stripeItemId: 'si_bundle',
+        featureCodes: ['CFDI', 'LOYALTY_PROGRAM'],
+        planTier: null,
+        pendingFeatureCodes: [],
+        publication: { stripePriceId: 'price_bundle', stripeRenewalPriceId: 'price_renewal' },
+      },
+    ],
+  }
+  it('blocks a local next-cycle selection even when Stripe has no promotion schedule', async () => {
+    prismaMock.hybridPurchase.findMany.mockResolvedValue([
+      { ...hybridRow, contracts: [{ ...hybridRow.contracts[0], pendingEffectiveAt: new Date() }] },
+    ] as never)
+    mockRetrieve.mockResolvedValue({
+      ...sub('sub_bundle', 'active', 'cus_old', 'prod_bundle'),
+      items: { data: [{ id: 'si_bundle', quantity: 1, price: { id: 'price_bundle', product: 'prod_bundle' } }] },
+    })
+    expect((await inventarioDeObligaciones('cven1')).conCambiosProgramados).toEqual(['sub_bundle'])
+  })
+  it('recognizes N grants on one item under a historical customer', async () => {
+    prismaMock.hybridPurchase.findMany.mockResolvedValue([hybridRow] as never)
+    const row = {
+      ...sub('sub_bundle', 'active', 'cus_old', 'prod_bundle'),
+      items: { data: [{ id: 'si_bundle', quantity: 1, price: { id: 'price_bundle', product: 'prod_bundle' } }] },
+    }
+    mockRetrieve.mockResolvedValue(row)
+    const result = await inventarioDeObligaciones('cven1')
+    expect(result.vivas).toEqual([
+      { subscriptionId: 'sub_bundle', proyecciones: [{ tipo: 'PAQUETE', featureCodes: ['CFDI', 'LOYALTY_PROGRAM'] }] },
+    ])
+    expect(mockList).toHaveBeenCalledWith(expect.objectContaining({ customer: 'cus_old' }), expect.anything())
+  })
+  it('treats an unexpected price or a customer mismatch as unknown instead of trusting metadata', async () => {
+    prismaMock.hybridPurchase.findMany.mockResolvedValue([hybridRow] as never)
+    mockRetrieve.mockResolvedValue(sub('sub_bundle', 'active', 'cus_wrong', 'prod_bundle'))
+    const result = await inventarioDeObligaciones('cven1')
+    expect(result.vivas[0].proyecciones[0]).toMatchObject({ tipo: 'DESCONOCIDO' })
+  })
+  it('does not silently truncate historical hybrid obligations', async () => {
+    prismaMock.hybridPurchase.findMany.mockResolvedValue(Array.from({ length: 201 }, () => hybridRow) as never)
+    await expect(inventarioDeObligaciones('cven1')).rejects.toMatchObject({ code: 'OBLIGATIONS_UNVERIFIED' })
+  })
+  it('accepts a verified owned promotion schedule but blocks a changed future price or duration', async () => {
+    const schedule = {
+      id: 'sched',
+      customer: 'cus_old',
+      subscription: 'sub_bundle',
+      end_behavior: 'release',
+      phases: [{ start_date: 100, end_date: 200, items: [{ price: 'price_bundle', quantity: 1 }] }],
+    }
+    prismaMock.hybridPurchase.findMany.mockResolvedValue([
+      { ...hybridRow, operations: [{ providerId: 'sched', resultHash: hybridScheduleReceipt(schedule as any) }] },
+    ] as never)
+    mockRetrieve.mockResolvedValue({
+      ...sub('sub_bundle', 'active', 'cus_old'),
+      schedule: 'sched',
+      items: { data: [{ id: 'si_bundle', quantity: 1, price: { id: 'price_bundle', product: 'prod_bundle' } }] },
+    })
+    mockSchedule.mockResolvedValue(schedule)
+    expect((await inventarioDeObligaciones('cven1')).conCambiosProgramados).toEqual([])
+    mockSchedule.mockResolvedValue({ ...schedule, phases: [{ ...schedule.phases[0], end_date: 250 }] })
+    expect((await inventarioDeObligaciones('cven1')).conCambiosProgramados).toEqual(['sub_bundle'])
+  })
 })

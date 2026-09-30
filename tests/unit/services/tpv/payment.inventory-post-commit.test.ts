@@ -68,6 +68,13 @@ jest.mock('@/services/mobile/areaTicketV7.mobile.service', () => ({
   finalizeAreaTicketPaymentInTransaction: (...args: unknown[]) => finalizeAreaTicketPaymentMock(...args),
 }))
 
+const debeMarcarCocinaMock = jest.fn().mockResolvedValue(false)
+jest.mock('@/services/kds/kitchenDisplayStations', () => ({ debeMarcarCocina: (...a: unknown[]) => debeMarcarCocinaMock(...a) }))
+const armarComandasMock = jest.fn().mockResolvedValue(undefined)
+jest.mock('@/services/kds/kitchenTicketAuthoring.service', () => ({
+  armarComandasTrasCommit: (...a: unknown[]) => armarComandasMock(...a),
+}))
+
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import * as paymentService from '@/services/tpv/payment.tpv.service'
@@ -87,6 +94,8 @@ jest.mock('@/utils/prismaClient', () => ({
       // Se DELEGA en el `findUnique` que cada test ya monta: la orden que relee la liquidación
       // es la MISMA que el resto del flujo, no una inventada aquí que no cuadre con sus totales.
       findFirstOrThrow: jest.fn().mockImplementation(async (a: any) => (prisma as any).order.findUnique({ where: a?.where })),
+      // IVA plan 3b: los totales del cobro suelto releen sus entradas bajo el candado de la orden (`findFirst`).
+      findFirst: jest.fn().mockImplementation(async (a: any) => (prisma as any).order.findUnique({ where: a?.where })),
       findUniqueOrThrow: jest.fn().mockImplementation(async (a: any) => (prisma as any).order.findUnique({ where: a?.where })),
     },
     payment: {
@@ -734,5 +743,175 @@ describe('recordOrderPayment — el inventario no puede desmentir un cobro ya re
       expect(result.inventoryWarning).toBeUndefined()
       expect(productInventoryService.deductInventoryForProduct).not.toHaveBeenCalled()
     })
+  })
+})
+
+describe('recordOrderPayment — la comanda de pantalla nace al saldar (etapa 3 del KDS)', () => {
+  beforeEach(() => {
+    const order = makeOrder()
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+    ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
+    ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
+  })
+  afterEach(() => debeMarcarCocinaMock.mockResolvedValue(false))
+
+  it('con pantalla: la marca va en la escritura que salda y la comanda se arma una vez', async () => {
+    debeMarcarCocinaMock.mockResolvedValue(true)
+
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData, 'user-1')
+
+    const conMarca = (prisma.order.update as jest.Mock).mock.calls.some(([a]) => a?.data?.kitchenPendingAt instanceof Date)
+    expect(conMarca).toBe(true)
+    expect(armarComandasMock).toHaveBeenCalledTimes(1)
+    expect(armarComandasMock).toHaveBeenCalledWith(VENUE_ID, ORDER_ID, 'PAID')
+  })
+
+  it('sin pantalla: ni marca ni comanda', async () => {
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData, 'user-1')
+
+    const conMarca = (prisma.order.update as jest.Mock).mock.calls.some(([a]) => a?.data?.kitchenPendingAt instanceof Date)
+    expect(conMarca).toBe(false)
+    expect(armarComandasMock).not.toHaveBeenCalled()
+  })
+
+  // 🔴 El camino legado suma el importe del pago actual sin mirar su estado: un FAILED/PENDING que
+  // «cubre» el saldo no puso la marca (sólo la pone el saldado COMPLETED), así que tampoco arma.
+  it.each(['FAILED', 'PENDING'] as const)('con pantalla: un pago %s que cubre el saldo NO arma la comanda', async status => {
+    debeMarcarCocinaMock.mockResolvedValue(true)
+    ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+      id: 'payment-1',
+      status,
+      feeAmount: 0,
+      netAmount: 100,
+      amount: new Decimal(100),
+      tipAmount: new Decimal(0),
+      venueId: VENUE_ID,
+      orderId: ORDER_ID,
+    })
+
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, status }, 'user-1')
+
+    const conMarca = (prisma.order.update as jest.Mock).mock.calls.some(([a]) => a?.data?.kitchenPendingAt instanceof Date)
+    expect(conMarca).toBe(false)
+    expect(armarComandasMock).not.toHaveBeenCalled()
+  })
+})
+
+// Codex 3.6 (S3): una cuenta con un vale por área + productos sueltos cobrada con TERMINAL no pasa por
+// `settleStandalonePaymentInTx` (se lo salta cualquier renglón de vale), así que ni se marcaba ni se armaba la comanda
+// de los sueltos. El efectivo móvil sí lo hace; el armado ya filtra por renglón (el vale no va a la cocina).
+describe('recordOrderPayment — cuenta con vale por área cobrada con terminal (etapa 3 del KDS)', () => {
+  const conVale = () =>
+    makeOrder({
+      items: [
+        { ...makeOrder().items[0], id: 'item-suelto', areaTicketLineId: null },
+        { ...makeOrder().items[0], id: 'item-vale', productId: 'prod-vale', areaTicketLineId: 'line-1' },
+      ],
+    })
+  beforeEach(() => {
+    const order = conVale()
+    ;(prisma.order.findUnique as jest.Mock).mockImplementation(async (args: any) =>
+      args?.select?.paymentStatus ? { paymentStatus: 'PAID' } : order,
+    )
+    ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
+    ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
+    debeMarcarCocinaMock.mockResolvedValue(true)
+  })
+  afterEach(() => debeMarcarCocinaMock.mockResolvedValue(false))
+
+  it('sin sesión de vales: la marca va en la escritura que salda y la comanda se arma una vez', async () => {
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, idempotencyKey: 'vale-1' }, 'user-1')
+
+    const conMarca = (prisma.order.update as jest.Mock).mock.calls.some(([a]) => a?.data?.kitchenPendingAt instanceof Date)
+    expect(conMarca).toBe(true)
+    expect(armarComandasMock).toHaveBeenCalledTimes(1)
+    expect(armarComandasMock).toHaveBeenCalledWith(VENUE_ID, ORDER_ID, 'PAID')
+  })
+
+  it('con sesión de vales: la finalización marca la cocina y la comanda se arma una vez', async () => {
+    lockAreaTicketCheckoutMock.mockResolvedValue({ sessionId: 'session-1', attemptId: 'attempt-1' })
+    finalizeAreaTicketPaymentMock.mockResolvedValue({ areaTicketOrder: true, sessionId: 'session-1', fullyPaid: true })
+
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, idempotencyKey: 'vale-2' }, 'user-1')
+
+    expect(finalizeAreaTicketPaymentMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ marcarCocina: true }))
+    expect(armarComandasMock).toHaveBeenCalledTimes(1)
+    expect(armarComandasMock).toHaveBeenCalledWith(VENUE_ID, ORDER_ID, 'PAID')
+  })
+
+  it('con sesión de vales: un abono parcial no arma la comanda', async () => {
+    lockAreaTicketCheckoutMock.mockResolvedValue({ sessionId: 'session-1', attemptId: 'attempt-1' })
+    finalizeAreaTicketPaymentMock.mockResolvedValue({ areaTicketOrder: true, sessionId: 'session-1', fullyPaid: false })
+
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, idempotencyKey: 'vale-3' }, 'user-1')
+
+    expect(armarComandasMock).not.toHaveBeenCalled()
+  })
+
+  it('sin pantalla: con sesión de vales ni marca ni comanda', async () => {
+    debeMarcarCocinaMock.mockResolvedValue(false)
+    lockAreaTicketCheckoutMock.mockResolvedValue({ sessionId: 'session-1', attemptId: 'attempt-1' })
+    finalizeAreaTicketPaymentMock.mockResolvedValue({ areaTicketOrder: true, sessionId: 'session-1', fullyPaid: true })
+
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, idempotencyKey: 'vale-4' }, 'user-1')
+
+    expect(finalizeAreaTicketPaymentMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ marcarCocina: false }))
+    expect(armarComandasMock).not.toHaveBeenCalled()
+  })
+})
+
+// 🔴 DINERO: sólo COMPLETED es dinero capturado — la misma regla que ya sigue el saldado DENTRO de la transacción
+// (`settleStandalonePaymentInTx` exige COMPLETED). El camino legado de después sumaba el importe del pago actual sin
+// mirar su estado: un FAILED/PENDING/PROCESSING/REFUNDED que «cubría» el saldo dejaba la venta PAID y COMPLETED,
+// descontaba inventario y le abría la lealtad a una venta que nadie cobró. Ningún cliente lo manda hoy (todos mandan
+// COMPLETED), pero el contrato del endpoint lo permite.
+describe('recordOrderPayment — un pago que NO se capturó no salda la cuenta', () => {
+  beforeEach(() => {
+    const order = makeOrder()
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+    ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
+    ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
+  })
+
+  const dejoLaVentaPagada = () =>
+    (prisma.order.update as jest.Mock).mock.calls.some(
+      ([a]) => a?.data?.paymentStatus === 'PAID' || a?.data?.status === 'COMPLETED' || a?.data?.loyaltyEligibleAt instanceof Date,
+    )
+
+  it.each(['FAILED', 'PENDING', 'PROCESSING', 'REFUNDED'] as const)(
+    'un pago %s que cubre el saldo: se registra el intento, pero la venta NO queda pagada ni descuenta inventario',
+    async status => {
+      ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+        id: 'payment-1',
+        status,
+        feeAmount: 0,
+        netAmount: 100,
+        amount: new Decimal(100),
+        tipAmount: new Decimal(0),
+        venueId: VENUE_ID,
+        orderId: ORDER_ID,
+      })
+
+      await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, status }, 'user-1')
+
+      expect(prisma.payment.create).toHaveBeenCalled()
+      expect(dejoLaVentaPagada()).toBe(false)
+      expect(productInventoryService.deductInventoryForProduct).not.toHaveBeenCalled()
+    },
+  )
+
+  it('la lista de estados no capturados es EXACTAMENTE el enum menos COMPLETED (un estado nuevo obliga a decidir)', () => {
+    const { TransactionStatus } = jest.requireActual('@prisma/client')
+    const esperados = Object.values(TransactionStatus as Record<string, string>)
+      .filter(s => s !== 'COMPLETED')
+      .sort()
+    expect([...paymentService.ESTADOS_DE_PAGO_NO_CAPTURADOS].sort()).toEqual(esperados)
+  })
+
+  it('regresión: un pago COMPLETED que cubre el saldo sigue saldando la venta', async () => {
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData, 'user-1')
+
+    expect(dejoLaVentaPagada()).toBe(true)
+    expect(productInventoryService.deductInventoryForProduct).toHaveBeenCalled()
   })
 })

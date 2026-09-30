@@ -1,6 +1,7 @@
 import { elegirFilaDelPlan } from '../access/filaDelPlan'
 import { exigirQueSePuedaConceder } from '../access/concederPlan'
 import prisma from '@/utils/prismaClient'
+import { subscriptionPeriod } from '@/utils/stripeSubscriptionPeriod'
 import logger from '@/config/logger'
 import Stripe from 'stripe'
 import { Prisma } from '@prisma/client'
@@ -100,7 +101,7 @@ async function mapVenueSubscription(v: VenueSubscriptionRow): Promise<Superadmin
     try {
       const sub = (await stripe.subscriptions.retrieve(vf.stripeSubscriptionId)) as any
       stripeSub = { status: sub.status, cancelAtPeriodEnd: !!sub.cancel_at_period_end }
-      currentPeriodEnd = sub.current_period_end ? new Date(sub.current_period_end * 1000).toISOString() : null
+      currentPeriodEnd = subscriptionPeriod(sub).end?.toISOString() ?? null
       const price = sub.items?.data?.[0]?.price ?? null
       mrr = monthlyMrrFromPrice(price)
     } catch (err) {
@@ -240,7 +241,7 @@ async function runAuditedPlanMutation(
     // Sin él, una mutación de superadmin y una entrega leían «no hay fila» a la vez y dejaban dos planes, o reactivaban
     // uno que la entrega acababa de retirar. El CAS no protege una fila AUSENTE.
     await tx.$executeRaw`SET LOCAL lock_timeout = '15s'`
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`stripe-obligaciones:${venueId}`}))`
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`stripe-obligaciones:${venueId}`}))::text`
     const feature = await requirePlanFeatureTx(tx, venueId)
     const { auditData } = await mutate(tx, feature)
 

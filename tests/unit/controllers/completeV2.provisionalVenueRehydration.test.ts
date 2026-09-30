@@ -58,6 +58,9 @@ jest.mock('../../../src/config/logger', () => ({
 jest.mock('../../../src/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    $transaction: jest.fn(),
+    $queryRaw: jest.fn().mockResolvedValue([]),
+    hybridPurchase: { findFirst: jest.fn().mockResolvedValue(null) },
     onboardingProgress: { updateMany: jest.fn(), update: jest.fn() },
     venue: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
     organization: { update: jest.fn() },
@@ -94,6 +97,7 @@ describe('completeV2Onboarding — provisional venue rehydration', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
+    ;(prisma.$transaction as jest.Mock).mockImplementation(async fn => fn(prisma))
     // Plan gate off — this suite is only about the venue data.
     process.env.ENABLE_VENUE_BASE_SUBSCRIPTION = 'false'
     ;(onboardingProgressService.getV2SetupDataForCompletion as jest.Mock).mockResolvedValue({

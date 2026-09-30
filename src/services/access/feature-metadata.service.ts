@@ -1,10 +1,11 @@
+import { grantedCapabilityCodes } from './capabilityGrants.service'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import {
   getVenueBaseTier,
   venueIsExemptFromPlanGating,
   PAID_PLAN_TIER_CODES,
-  PREMIUM_ONLY_CODES,
+  elPlanConcede,
   FREE_TIER_CODES,
 } from '@/services/access/basePlan.service'
 
@@ -75,7 +76,7 @@ function buildFeatureCheckoutUrl(venueId: string): string {
 }
 
 export async function getFeatureMetadataForVenue(venueId: string): Promise<Record<string, FeatureMetadata>> {
-  const [features, venueFeatures, baseTier, isExempt] = await Promise.all([
+  const [features, venueFeatures, baseTier, isExempt, commercialCodes] = await Promise.all([
     prisma.feature.findMany({
       where: { active: true },
       select: {
@@ -104,10 +105,11 @@ export async function getFeatureMetadataForVenue(venueId: string): Promise<Recor
     // unlocks premium features in the payload too, so the dashboard UI matches what
     // the access gate allows at the API layer. PREMIUM unlocks ALL non-tier features;
     // PRO unlocks all non-tier features EXCEPT the Premium-only differentiators.
-    getVenueBaseTier(venueId),
+    getVenueBaseTier(venueId, { legacyOnly: true }),
     // EXEMPT (grandfathered legacy OR demo) → every feature granted, no paywall — mirrors the
     // venueHasFeatureAccess short-circuit so a grandfathered venue never shows features as LOCKED.
     venueIsExemptFromPlanGating(venueId),
+    grantedCapabilityCodes(venueId),
   ])
 
   const now = new Date()
@@ -124,7 +126,6 @@ export async function getFeatureMetadataForVenue(venueId: string): Promise<Recor
   )
 
   const isPlanTierCode = (code: string): boolean => (PAID_PLAN_TIER_CODES as readonly string[]).includes(code)
-  const isPremiumOnlyCode = (code: string): boolean => (PREMIUM_ONLY_CODES as readonly string[]).includes(code)
 
   /**
    * Tier-aware blanket grant for a single non-tier feature code:
@@ -138,9 +139,7 @@ export async function getFeatureMetadataForVenue(venueId: string): Promise<Recor
     if (isPlanTierCode(code)) return false // tier codes never self-grant via the blanket
     if (isExempt) return true // grandfathered/demo → exempt from ALL paywalls (every non-tier feature)
     if ((FREE_TIER_CODES as readonly string[]).includes(code)) return true // Free-tier promises: everyone
-    if (baseTier === 'PREMIUM') return true
-    if (baseTier === 'PRO') return !isPremiumOnlyCode(code)
-    return false
+    return commercialCodes.includes(code) || (baseTier != null && elPlanConcede(baseTier, code))
   }
 
   const featureMetadata = features.reduce<Record<string, FeatureMetadata>>((acc, feature) => {

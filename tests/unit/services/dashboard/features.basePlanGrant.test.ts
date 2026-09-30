@@ -76,6 +76,32 @@ describe('getVenueFeatureStatus tier-aware base-plan blanket grant', () => {
 
   /** Active-window VenueFeature snapshot fields getVenueBaseTier reads. */
   const ACTIVE_TIER_SNAP = { active: true, suspendedAt: null, endDate: null }
+  beforeEach(() => prismaMock.capabilityGrant.groupBy.mockResolvedValue([]))
+
+  it('a package unlocks CFDI without claiming it is part of a base plan', async () => {
+    mockVenueWithTier([])
+    prismaMock.capabilityGrant.groupBy.mockResolvedValue([{ featureCode: 'CFDI' }])
+    const status = await getVenueFeatureStatus(VENUE_ID)
+    const cfdi = status.activeFeatures.find(f => f.feature.code === 'CFDI')
+    expect(cfdi).toMatchObject({ active: true, grantedByContract: true, grantedByBasePlan: false, stripeSubscriptionId: null })
+    expect(status.availableFeatures.some(f => f.code === 'CFDI')).toBe(false)
+  })
+
+  it('does not expand a commercial plan beyond its frozen paid grant codes', async () => {
+    mockVenueWithTier([])
+    prismaMock.capabilityGrant.findFirst.mockResolvedValue({ contract: { planTier: 'PREMIUM' } })
+    prismaMock.capabilityGrant.groupBy.mockResolvedValue([{ featureCode: 'CFDI' }])
+    const status = await getVenueFeatureStatus(VENUE_ID)
+    expect(status.activeFeatures.some(f => f.feature.code === 'CFDI')).toBe(true)
+    expect(status.availableFeatures.some(f => f.code === 'LOYALTY_PROGRAM')).toBe(true)
+  })
+
+  it('a future unknown feature is not silently included in Premium', async () => {
+    mockVenueWithTier(['PLAN_PREMIUM'])
+    prismaMock.feature.findMany.mockResolvedValue([...CATALOG, { ...NORMAL_FEATURE, id: 'future', code: 'FUTURE_NOT_PUBLISHED' }])
+    const status = await getVenueFeatureStatus(VENUE_ID)
+    expect(status.activeFeatures.some(f => f.feature.code === 'FUTURE_NOT_PUBLISHED')).toBe(false)
+  })
 
   /**
    * Wire the prisma mocks for a venue with NO à-la-carte VenueFeature rows.

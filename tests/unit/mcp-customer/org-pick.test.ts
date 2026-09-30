@@ -1,4 +1,10 @@
-import { issueOrgPickToken, verifyOrgPickToken, listActiveOrganizations, tokenParaElSelector } from '../../../src/mcp/oauth/orgPick'
+import {
+  issueOrgPickToken,
+  verifyOrgPickToken,
+  verificarTokenDelSelector,
+  listActiveOrganizations,
+  tokenParaElSelector,
+} from '../../../src/mcp/oauth/orgPick'
 import { renderLoginPage } from '../../../src/mcp/oauth/loginPage'
 import prisma from '@/utils/prismaClient'
 
@@ -8,7 +14,10 @@ jest.mock('@/utils/prismaClient', () => ({
 }))
 // El corte de sesión (cambio de contraseña / cerrar todo) lo decide la regla real; aquí su veredicto.
 let mockCorte: string | null = null
-jest.mock('@/utils/passwordChangeGuard', () => ({ motivoDeConcesionInvalidada: async () => mockCorte }))
+jest.mock('@/utils/passwordChangeGuard', () => ({
+  motivoDeConcesionInvalidada: async () => mockCorte,
+  emisionDelToken: jest.requireActual('@/utils/passwordChangeGuard').emisionDelToken,
+}))
 const m = prisma as unknown as { staffOrganization: { findMany: jest.Mock }; staff: { findUnique: jest.Mock } }
 
 beforeEach(() => {
@@ -91,5 +100,29 @@ describe('renderLoginPage orgPick variant', () => {
     expect(html).toContain('name="orgPickToken" value="pick-token-abc"')
     expect(html).toContain('name="client_id" value="c1"') // OAuth params still travel with the pick
     expect(html).not.toContain('type="password"') // step 2 never asks for credentials again
+  })
+})
+
+// ─── Codex ronda 9, P1: la autorización nacía con la hora del INSERT, no con la de la identidad ──
+// Validar el selector → cambiar la contraseña → crear el código: el código (y toda su cadena) quedaba
+// «posterior» al corte. Ahora el selector lleva la hora en que se VERIFICÓ la identidad, y la entrega.
+describe('Codex ronda 9 — el selector lleva la hora de la verificación, no la de su emisión', () => {
+  it('el token del selector conserva la hora en que se verificó la contraseña o la sesión', async () => {
+    const verificada = new Date(Date.now() - 60_000)
+    const token = issueOrgPickToken('staff-123', verificada)
+    expect(await verificarTokenDelSelector(token)).toEqual({ staffId: 'staff-123', verificadoEn: verificada })
+  })
+
+  it('reusarlo NO cambia esa hora', async () => {
+    const verificada = new Date(Date.now() - 60_000)
+    const previo = issueOrgPickToken('staff-123', verificada)
+    const reusado = tokenParaElSelector(previo, 'staff-123', new Date())
+    expect((await verificarTokenDelSelector(reusado))?.verificadoEn).toEqual(verificada)
+  })
+
+  it('en el paso 1 se emite con la hora de verificación que le pasen', async () => {
+    const verificada = new Date(Date.now() - 30_000)
+    const token = tokenParaElSelector(undefined, 'staff-123', verificada)
+    expect((await verificarTokenDelSelector(token))?.verificadoEn).toEqual(verificada)
   })
 })

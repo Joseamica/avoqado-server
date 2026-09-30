@@ -61,6 +61,8 @@ jest.mock('@/middlewares/checkTableOwnership.middleware', () => ({
   PAYMENT_OWNERSHIP_OVERRIDES: ['tables:manage-all', 'tables:pay-any'],
 }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
+const markKitchenTicketMock = jest.fn()
+jest.mock('@/services/kds/kitchenTicketAuthoring.service', () => ({ markKitchenTicket: (...a: unknown[]) => markKitchenTicketMock(...a) }))
 jest.mock('@/config/logger', () => ({
   __esModule: true,
   default: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
@@ -1077,5 +1079,62 @@ describe('ADD_ITEMS con promoción — clasificación tras el candado de la orde
     expect(prisma.posSyncIntent.delete).toHaveBeenCalled()
     expect(prisma.posSyncIntent.update).not.toHaveBeenCalled()
     expect(orderMobileService.applyOrderDiscount).not.toHaveBeenCalled()
+  })
+})
+
+describe('KDS_TICKET_MARK — marcas de cocina hechas sin red (etapa 3 del KDS)', () => {
+  const marca = (payload: Record<string, unknown>, staffId?: string) =>
+    processIntents(baseParams([{ id: 'k1', type: 'KDS_TICKET_MARK', payload, staffId, createdAtLocal: Date.now() - 5_000 }]))
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(null)
+    ;(prisma.posSyncIntent.findFirst as jest.Mock).mockResolvedValue(null)
+    ;(prisma.posSyncIntent.create as jest.Mock).mockResolvedValue({})
+    ;(prisma.posSyncIntent.update as jest.Mock).mockResolvedValue({})
+    ;(prisma.posSyncIntent.delete as jest.Mock).mockResolvedValue({})
+    markKitchenTicketMock.mockReset().mockResolvedValue(undefined)
+  })
+
+  it('LISTO sin red ⇒ ACKED y la marca llega con su folio, estación y acción', async () => {
+    const [ack] = await marca({ sourceKey: 'round:rk-1:st-1', stationId: 'st-1', action: 'BUMP', label: '47-001' })
+    expect(ack.status).toBe('ACKED')
+    expect(markKitchenTicketMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        venueId: VENUE,
+        sourceKey: 'round:rk-1:st-1',
+        stationId: 'st-1',
+        action: 'BUMP',
+        label: '47-001',
+        at: expect.any(Date),
+      }),
+    )
+  })
+
+  it('una marca ilegible se reconoce y se ignora: nunca cuarentena', async () => {
+    const [ack] = await marca({ sourceKey: 'cualquier cosa', action: 'BORRAR' })
+    expect(ack.status).toBe('ACKED')
+    expect(markKitchenTicketMock).not.toHaveBeenCalled()
+  })
+
+  it('un error de negocio al marcar se reconoce (no bloquea los cobros encolados detrás)', async () => {
+    markKitchenTicketMock.mockRejectedValue(Object.assign(new Error('raro'), { code: 'P2003' }))
+    const [ack] = await marca({ sourceKey: 'sale:e1:none', action: 'FALLBACK_PRINTED' })
+    expect(ack.status).toBe('ACKED')
+  })
+
+  it('un error TRANSITORIO de base se reintenta', async () => {
+    markKitchenTicketMock.mockRejectedValue(Object.assign(new Error('pool'), { code: 'P2024' }))
+    const [ack] = await marca({ sourceKey: 'sale:e1:none', action: 'FALLBACK_PRINTED' })
+    expect(ack.status).toBe('RETRY')
+  })
+
+  it('la tablet de cocina cambia de persona cada turno: la marca de OTRA persona no es ACTOR_MISMATCH', async () => {
+    const [ack] = await marca({ sourceKey: 'sale:e1:none', action: 'BUMP' }, 'staff-otro')
+    expect(ack.status).toBe('ACKED')
+  })
+
+  it('pide orders:update', () => {
+    expect(requiredPermissionForIntent('KDS_TICKET_MARK')).toBe('orders:update')
   })
 })

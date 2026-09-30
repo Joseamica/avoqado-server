@@ -9,7 +9,7 @@
  * only exists in that DB, not in the isolated `av-db-25-test` DB. To run
  * THIS suite against `av-db-25`:
  *
- *   TEST_DATABASE_URL="postgresql://postgres:exitosoy777@localhost:5432/av-db-25" \
+ *   TEST_DATABASE_URL="postgresql://postgres:<contraseña>@localhost:5432/av-db-25" \
  *     npx jest --selectProjects=integration migration-backfill --testTimeout=30000
  *
  * (`npm run test:api` runs `tests/api-tests/**\/*.api.test.ts` — a DIFFERENT

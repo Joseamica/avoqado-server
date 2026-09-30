@@ -31,7 +31,15 @@ const RECIBO = 'cmuhberfc086rma29tu5kw76r'
 const MOTIVO =
   'Reembolso anotado sin pasar por Blumon: el chip de la VISA dijo «aprobado offline» y la app lo dio por hecho ' +
   '(defecto corregido el 25-sep-2026). Blumon no tiene reembolsos offline: el dinero NO se devolvió.'
-const CAMPOS_DEL_REEMBOLSO = ['refunds', 'refundHistory', 'refundedAmount', 'refundedAmountCents', 'isFullyRefunded', 'lastRefundId', 'lastRefundAt']
+const CAMPOS_DEL_REEMBOLSO = [
+  'refunds',
+  'refundHistory',
+  'refundedAmount',
+  'refundedAmountCents',
+  'isFullyRefunded',
+  'lastRefundId',
+  'lastRefundAt',
+]
 
 class Rechazo extends Error {
   constructor(readonly codigo: number) {
@@ -104,7 +112,8 @@ async function main(): Promise<void> {
     if (reembolso.authorizationNumber !== 'OFFLINE') fallar('El reembolso sí trae autorización de Blumon: NO se toca')
     if (pdReembolso.originalPaymentId !== ORIGINAL) fallar('El reembolso no apunta al pago original esperado')
     if (!original || original.status !== 'COMPLETED' || original.venueId !== VENUE) fallar('El pago original no está COMPLETED')
-    if (pdOriginal.lastRefundId !== REEMBOLSO || Number(pdOriginal.refundedAmountCents) !== 25400) fallar('El pago original no refleja ESTE reembolso')
+    if (pdOriginal.lastRefundId !== REEMBOLSO || Number(pdOriginal.refundedAmountCents) !== 25400)
+      fallar('El pago original no refleja ESTE reembolso')
     if (otrosReembolsos !== 1) fallar(`Hay ${otrosReembolsos} reembolsos sobre el pago original (se esperaba 1)`)
     if (!turno || turno.status !== 'OPEN' || reembolso.shiftId !== TURNO) fallar('El turno del reembolso no está abierto')
     if (!transaccion || transaccion.paymentId !== REEMBOLSO) fallar('La transacción del comercio no es la del reembolso')
@@ -132,7 +141,10 @@ async function main(): Promise<void> {
         where: { id: ORIGINAL, venueId: VENUE, status: 'COMPLETED', processorData: { path: ['lastRefundId'], equals: REEMBOLSO } },
         data: { processorData: pdNuevo as Prisma.InputJsonValue },
       })
-      const n3 = await tx.shift.updateMany({ where: { id: TURNO, venueId: VENUE, status: 'OPEN' }, data: { totalSales: { increment: 254 } } })
+      const n3 = await tx.shift.updateMany({
+        where: { id: TURNO, venueId: VENUE, status: 'OPEN' },
+        data: { totalSales: { increment: 254 } },
+      })
       const n4 = await tx.venueTransaction.deleteMany({ where: { id: TRANSACCION, paymentId: REEMBOLSO } })
       const n5 = await tx.digitalReceipt.deleteMany({ where: { id: RECIBO, paymentId: REEMBOLSO } })
       if ([n1, n2, n3, n4, n5].some(r => r.count !== 1)) {

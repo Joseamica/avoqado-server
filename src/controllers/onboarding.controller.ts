@@ -1,3 +1,4 @@
+import { assertHybridOnboardingPurchase } from '@/services/launchCampaigns/hybridPurchase.service'
 /**
  * Onboarding Controller
  *
@@ -39,6 +40,7 @@ import { optionalLaunchCampaignCode, utmSchema } from '../schemas/acquisition.sc
 import logger from '../config/logger'
 import AppError, { BadRequestError, ConflictError, NotFoundError } from '../errors/AppError'
 import prisma from '../utils/prismaClient'
+import { billingPageUrl } from '@/utils/dashboardLinks'
 
 /**
  * POST /api/v1/onboarding/signup
@@ -679,6 +681,35 @@ export async function updateStep8(req: Request, res: Response, next: NextFunctio
 }
 
 /**
+ * 🔴 Codex R14: el candado de finalización exige que el cobro del plan siga EXACTAMENTE como se evaluó (estado, intento y
+ * lease). Con sólo `completedAt: null`, entre leer el progreso y tomar el candado `activate-plan` podía tomar el lease y
+ * cobrar, y esta finalización —decidida sobre la lectura vieja— cerraba el alta encima: cobrado y sin poder recuperarlo.
+ */
+function candadoSiElCobroNoSeMovio(
+  organizationId: string,
+  progress: { planActivationStatus?: unknown; planActivationAttempt?: number | null; planActivationLeaseUntil?: Date | null },
+) {
+  return {
+    organizationId,
+    completedAt: null,
+    planActivationStatus: progress.planActivationStatus as never,
+    planActivationAttempt: progress.planActivationAttempt ?? undefined,
+    planActivationLeaseUntil: progress.planActivationLeaseUntil,
+  }
+}
+
+/** `completedAt` también es el candado temprano; sólo la marca de la organización acredita el cierre final. */
+async function exigirAltaTerminada(organizationId: string): Promise<void> {
+  const actual = await prisma.onboardingProgress.findUnique({
+    where: { organizationId },
+    select: { completedAt: true, organization: { select: { onboardingCompletedAt: true } } },
+  })
+  if (!actual?.completedAt || !actual.organization.onboardingCompletedAt) {
+    throw new ConflictError('Tu registro se está terminando. Vuelve a intentar en unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
+  }
+}
+
+/**
  * POST /api/v1/onboarding/organizations/:organizationId/complete
  *
  * Completes onboarding and creates the venue
@@ -709,20 +740,45 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
       throw new BadRequestError('Step 3 (Business Info) must be completed')
     }
 
+    // 🔴 Codex R14: con el lease VIVO el cobro está en vuelo — Stripe todavía no muestra nada, así que la búsqueda de
+    // abajo no lo vería. Mismo 409 que la finalización V2.
+    if (
+      progress.planActivationStatus === PLAN_ACTIVATION_STATUS.IN_PROGRESS &&
+      progress.planActivationLeaseUntil &&
+      progress.planActivationLeaseUntil > new Date()
+    ) {
+      throw new ConflictError('Tu pago se está confirmando. Vuelve a intentar en unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
+    }
+
+    // 🔴 Codex R13: este carril viejo NO cobra ni recupera nada en Stripe. Si el alta V2 dejó un cobro de plan sin
+    // cerrar, terminar aquí fijaba `completedAt` y `activate-plan` ya no podía recuperarlo: cobrado y sin acceso.
+    if (
+      progress.planActivationStatus === PLAN_ACTIVATION_STATUS.IN_PROGRESS &&
+      (await planActivationService.hayCobroDelAltaSinCerrar({
+        organizationId,
+        planActivationStatus: progress.planActivationStatus,
+        planActivationAttempt: progress.planActivationAttempt,
+        planStripeSubscriptionId: progress.planStripeSubscriptionId,
+      }))
+    ) {
+      throw new ConflictError(
+        'Tienes un pago de plan sin confirmar. Confírmalo antes de terminar tu alta: no se te cobrará dos veces.',
+        'PLAN_CHARGE_PENDING',
+      )
+    }
+
     // OPTIMISTIC LOCKING: Atomically mark as completing BEFORE creating venue
     // This prevents race condition where double-click creates 2 venues
     const lockResult = await prisma.onboardingProgress.updateMany({
-      where: {
-        organizationId,
-        completedAt: null, // Only update if not already completed
-      },
+      where: candadoSiElCobroNoSeMovio(organizationId, progress),
       data: {
         completedAt: new Date(),
       },
     })
 
-    // If no rows updated, another request already completed onboarding
+    // Otra petición tiene el candado, terminó el alta o movió el cobro desde nuestra lectura.
     if (lockResult.count === 0) {
+      await exigirAltaTerminada(organizationId)
       const existingVenue = await prisma.venue.findFirst({
         where: { organizationId },
         select: { id: true, slug: true, name: true, status: true },
@@ -744,15 +800,7 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
         return
       }
 
-      // Rare edge case: completedAt is set but no venue exists
-      // This could happen if previous venue creation failed after setting completedAt
-      // Reset the lock and let them retry
-      logger.warn(`⚠️ Onboarding marked complete but no venue found for organization ${organizationId} - resetting lock`)
-      await prisma.onboardingProgress.update({
-        where: { organizationId },
-        data: { completedAt: null },
-      })
-      throw new BadRequestError('Previous onboarding attempt failed. Please try again.')
+      throw new ConflictError('Tu registro se está terminando. Vuelve a intentar en unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
     }
 
     logger.info(`🔒 Acquired onboarding lock for organization ${organizationId}`)
@@ -794,7 +842,10 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
       throw venueError
     }
 
-    // No need to call completeOnboarding - we already set completedAt above
+    await prisma.organization.update({
+      where: { id: organizationId },
+      data: { onboardingCompletedAt: new Date() },
+    })
 
     logger.info(`✅ Onboarding completed for organization: ${organizationId}, venue: ${result.venue.id}, user: ${authContext.userId}`)
 
@@ -1150,25 +1201,50 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
       throw new ConflictError('Tu pago se está confirmando. Vuelve a intentar en unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
     }
 
+    // 🔴 FREE ENCIMA DE UN COBRO SIN CERRAR (revisión independiente, 26-sep). Con el lease vencido se deja entrar porque el
+    // carril de pago recupera en Stripe lo que ya se cobró — pero FREE se salta Stripe entero: cerrarlo así dejaría una
+    // suscripción COBRANDO en un negocio Free. Si el intento dudoso alcanzó a crear su suscripción, primero se cierra ESE
+    // cobro (el dashboard lo ofrece: «Volver a comprobar» / confirmar con la tarjeta); Free no pasa por encima.
+    // 🔴 Codex R13: no sólo FREE. Cualquier carril que NO sea el de pago que recupera (pago + tarjeta + sin campaña, abajo)
+    // cierra el alta sin mirar Stripe: con una campaña reclamada el carril de pago se salta, y sin tarjeta nunca entra.
+    const vaAlCarrilQueRecupera =
+      planEnabled && !!planData && planData.tier !== 'FREE' && !!planData.paymentMethodId && !progress.launchCampaignId
+    if (
+      !vaAlCarrilQueRecupera &&
+      progress.planActivationStatus === PLAN_ACTIVATION_STATUS.IN_PROGRESS &&
+      // Codex R12: también sin id guardado (la respuesta de Stripe se perdió antes de guardarlo): se busca en Stripe.
+      (await planActivationService.hayCobroDelAltaSinCerrar({
+        organizationId,
+        planActivationStatus: progress.planActivationStatus,
+        planActivationAttempt: progress.planActivationAttempt,
+        planStripeSubscriptionId: progress.planStripeSubscriptionId,
+      }))
+    ) {
+      throw new ConflictError(
+        'Tienes un pago de plan sin confirmar. Confírmalo antes de terminar tu alta: no se te cobrará dos veces.',
+        'PLAN_CHARGE_PENDING',
+      )
+    }
+
     // Si `activate-plan` YA cobró, el bloque de Stripe y el correo de abajo se saltan: ese
     // camino ya cobró, ya escribió el plan del local y ya mandó su propio correo.
     const planYaCobrado = progress.planActivationStatus === PLAN_ACTIVATION_STATUS.ACTIVE
 
     // OPTIMISTIC LOCKING: Atomically mark as completing BEFORE creating venue
     // This prevents race condition where double-click creates 2 venues
-    const lockResult = await prisma.onboardingProgress.updateMany({
-      where: {
-        organizationId,
-        completedAt: null, // Only update if not already completed
-      },
-      data: {
-        completedAt: new Date(),
-        currentStep: 7,
-      },
+    const lockResult = await prisma.$transaction(async tx => {
+      // Shared with hybrid acceptance; covers every venue checked by the organization guard.
+      await tx.$queryRaw`SELECT id FROM "Organization" WHERE id = ${organizationId} FOR UPDATE`
+      await assertHybridOnboardingPurchase(organizationId, planData?.hybridPurchaseId, tx)
+      return tx.onboardingProgress.updateMany({
+        where: candadoSiElCobroNoSeMovio(organizationId, progress),
+        data: { completedAt: new Date(), currentStep: 7 },
+      })
     })
 
-    // If no rows updated, another request already completed onboarding
+    // Otra petición tiene el candado, terminó el alta o movió el cobro desde nuestra lectura.
     if (lockResult.count === 0) {
+      await exigirAltaTerminada(organizationId)
       const existingVenue = await prisma.venue.findFirst({
         where: { organizationId },
         select: { id: true, slug: true, name: true, status: true },
@@ -1186,13 +1262,7 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
         return
       }
 
-      // Rare edge case: completedAt is set but no venue exists — reset lock
-      logger.warn(`⚠️ V2 Onboarding marked complete but no venue found for organization ${organizationId} - resetting lock`)
-      await prisma.onboardingProgress.update({
-        where: { organizationId },
-        data: { completedAt: null },
-      })
-      throw new BadRequestError('Previous setup attempt failed. Please try again.')
+      throw new ConflictError('Tu registro se está terminando. Vuelve a intentar en unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
     }
 
     logger.info(`🔒 Acquired V2 onboarding lock for organization ${organizationId}`)
@@ -1283,8 +1353,7 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
     // per the tier chosen in the wizard). FREE skips this entirely — no base
     // subscription, the venue resolves as Free. The hard gate above already
     // guaranteed a paymentMethodId for paid tiers when the feature is enabled.
-    // Wrapped in try/catch so a Stripe hiccup never blocks onboarding completion
-    // (the venue already exists at this point).
+    // Un fallo sin cobro puede terminar en Gratis; un cobro anterior o incierto debe quedar recuperable.
     // 🔴 Quien trae una CAMPAÑA reclamada NO se cobra por aquí (auditoría de Codex, 18-sep).
     // Este carril aplica la promoción legacy de $694.84 y no sabe nada de la ficha de campaña: si
     // cobrara, el negocio que llegó por el anuncio de $22 pagaría otro precio y su redención
@@ -1300,9 +1369,11 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
       // Its shape lives in planPricing.constants.ts (LEGACY_INTRO_OFFER), the single source that
       // mirrors the Stripe coupon seeded by scripts/seed-plan-pro.ts.
       const introPromo = isLegacyIntroEligible(paidTier, planData.interval, planData.payNow)
-      // 🔴 V5-A paso 6: el cobro pasa por la regla común (candado por negocio + lo VIVO en Stripe) y el acceso lo escribe
-      // la entrega. `intentoCobrar` separa «la regla no dejó cobrar» (nada se cobró) de «el cobro falló» (pudo cobrarse).
+      // La regla común autoriza el cobro y la entrega escribe el acceso. `intentoCobrar` sólo describe esta petición;
+      // un cobro anterior o reusado sigue pendiente hasta que la entrega termine, aunque aquí no se cobre otra vez.
       let intentoCobrar = false
+      let cobroSinEntregar =
+        progress.planActivationStatus === PLAN_ACTIVATION_STATUS.IN_PROGRESS || Boolean(progress.planStripeSubscriptionId)
       try {
         const venueRecord = await prisma.venue.findUnique({
           where: { id: result.venue.id },
@@ -1361,6 +1432,7 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
         )
         // Fuera del candado de la regla (la entrega toma el mismo): ve las dos filas de plan y deriva el tier del precio.
         // Si falla o NO concede, el cargo ya ocurrió: lo trata el `catch` como cobro en curso (Codex C5).
+        cobroSinEntregar = true
         const concedido = await entregarSuscripcionDePlan({
           venueId: venue.id,
           subscriptionId: cobro.subscriptionId,
@@ -1386,7 +1458,6 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
             const firstChargeDate = planData.payNow
               ? new Date(now.getTime() + (planData.interval === 'annual' ? 365 : 30) * 86400000)
               : new Date(now.getTime() + TRIAL_DAYS * 86400000) // trial end
-            const FRONTEND_URL = process.env.FRONTEND_URL || 'https://dashboard.avoqado.io'
             await emailService.sendPlanConfirmationEmail(target.email, {
               locale: target.locale,
               venueName: target.venueName,
@@ -1400,7 +1471,7 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
               // línea el correo del camino viejo seguiría prometiendo el precio de lista en la
               // renovación, aunque §3.8 arregle el campo en la plantilla.
               nextChargeAmountCents: introPromo ? LEGACY_INTRO_OFFER.introMonthlyCents : grossCents,
-              billingPortalUrl: `${FRONTEND_URL}/dashboard/venues/${result.venue.slug}/billing`,
+              billingPortalUrl: billingPageUrl(result.venue.slug),
             })
           } else {
             logger.warn(`No notification recipient for venue ${result.venue.id}; skipping plan confirmation email`)
@@ -1437,10 +1508,10 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
           await marcarPlanCobrado(organizationId, vivas[0])
           await prisma.venue.update({ where: { id: result.venue.id }, data: { planTier: tierDe(recuperado!.featureCode, paidTier) } })
           logger.warn(`⚠️ V2 completion: el negocio ya tenía un plan cobrando (${vivas[0]}); se entregó sin cobrar otra vez`)
-        } else if (!intentoCobrar) {
+        } else if (!intentoCobrar && !cobroSinEntregar) {
           // La regla no dejó cobrar por otra razón (otra compra en curso, algo que no reconoce): no hubo cargo.
           logger.error(`⚠️ ${tierCode}: la regla común no dejó cobrar al terminar el alta de ${result.venue.id}`, planErr)
-        } else if (planActivationService.esErrorDeTarjeta(planErr)) {
+        } else if (!cobroSinEntregar && planActivationService.esErrorDeTarjeta(planErr)) {
           // El banco rechazó: no hubo cobro. El negocio queda en Gratis, como siempre.
           logger.error(`⚠️ ${tierCode} subscription declined for venue ${result.venue.id}`, planErr)
         } else {

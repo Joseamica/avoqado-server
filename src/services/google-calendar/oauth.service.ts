@@ -65,7 +65,8 @@ export function buildAuthUrl(state: string, forceConsent: boolean): string {
 
 export function signState(payload: OAuthState): string {
   const opts: SignOptions = { expiresIn: STATE_TTL_SECONDS, algorithm: 'HS256' }
-  return jwt.sign(payload, requireEnv('OAUTH_STATE_SECRET'), opts)
+  // `emitidoMs`: el callback compara la emisión contra el corte de sesión en milisegundos.
+  return jwt.sign({ ...payload, emitidoMs: Date.now() }, requireEnv('OAUTH_STATE_SECRET'), opts)
 }
 
 export function verifyState(token: string): OAuthState {

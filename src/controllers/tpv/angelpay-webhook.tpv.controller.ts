@@ -22,6 +22,8 @@ import crypto from 'crypto'
 import { Request, Response, NextFunction } from 'express'
 
 import logger from '@/config/logger'
+import { enrichContext } from '@/observability/executionContext'
+import { getVenueName } from '@/observability/venueNames'
 import prisma from '@/utils/prismaClient'
 import type { AngelPayWebhookPayload } from '@/services/tpv/angelpay-webhook.service'
 import { processAngelPayWebhook } from '@/services/tpv/angelpay-webhook.service'
@@ -56,7 +58,12 @@ async function procesarAviso(aviso: AvisoCrudo): Promise<Respuesta> {
   // son cuid (34 de 34 en producción, 23-sep); el patrón es más amplio a propósito.
   if (!ID_DE_COMERCIO_POSIBLE.test(merchantAccountId)) return { status: 404, body: { error: 'unknown merchant' } }
 
-  let merchantAccount: { id: string; externalMerchantId: string; angelpayWebhookSecret: string | null } | null
+  let merchantAccount: {
+    id: string
+    externalMerchantId: string
+    angelpayWebhookSecret: string | null
+    angelpayUserAccount: { venueId: string } | null
+  } | null
   try {
     merchantAccount = await prisma.merchantAccount.findFirst({
       where: { id: merchantAccountId, provider: { code: 'ANGELPAY' } },
@@ -64,6 +71,7 @@ async function procesarAviso(aviso: AvisoCrudo): Promise<Respuesta> {
         id: true,
         externalMerchantId: true,
         angelpayWebhookSecret: true,
+        angelpayUserAccount: { select: { venueId: true } },
       },
     })
   } catch (err) {
@@ -71,15 +79,20 @@ async function procesarAviso(aviso: AvisoCrudo): Promise<Respuesta> {
     // (su silencio deja de probar nada un rato); un cuerpo sin firma verificada nunca crea un veto. El reingreso sí se programa:
     // al reintentar, la firma se verifica como siempre.
     registrarAvisoNoGuardado({ merchantAccountId, attemptId: null, posibleDinero: false })
-    reingresar(aviso, false)
-    logger.error('🚨 [AngelPay webhook] No se pudo buscar el comercio: el aviso NO se guardó — 503 y reingreso propio', {
+    const conReingreso = reingresar(aviso, false)
+    logger.error(`🚨 [AngelPay webhook] No se pudo buscar el comercio: el aviso NO se guardó — ${queQueda(conReingreso)}`, {
       err,
       merchantAccountId,
+      bytes: rawBody.length,
     })
     return NO_GUARDADO
   }
 
   if (!merchantAccount) return { status: 404, body: { error: 'unknown merchant' } }
+  // 🔴 27-sep: el NEGOCIO en toda línea del aviso (🚫, 🚨, las del servicio y las del reingreso, que corre con este contexto).
+  // Un webhook no trae token con el negocio: sale del comercio de la URL, en la misma búsqueda.
+  const venueId = merchantAccount.angelpayUserAccount?.venueId
+  if (venueId) enrichContext({ venueId, venueName: getVenueName(venueId) })
   if (!merchantAccount.angelpayWebhookSecret) return { status: 503, body: { error: 'webhook not provisioned for this merchant' } }
   if (!signature || !eventId) return { status: 401, body: { error: 'missing signature headers' } }
 
@@ -122,23 +135,31 @@ async function procesarAviso(aviso: AvisoCrudo): Promise<Respuesta> {
       attemptId: llaveDeIntento(datos?.integratorReference),
       posibleDinero: clasificarEstadoBancario(datos?.status) !== 'RECHAZADO',
     })
-    reingresar(aviso, true)
-    logger.error('🚨 [AngelPay webhook] El aviso firmado NO se pudo guardar — 503 y reingreso propio', {
+    const conReingreso = reingresar(aviso, true)
+    logger.error(`🚨 [AngelPay webhook] El aviso firmado NO se pudo guardar — ${queQueda(conReingreso)}`, {
       err,
       eventId,
       merchantAccountId: merchantAccount.id,
+      bytes: rawBody.length,
     })
     return NO_GUARDADO
   }
 }
 
+/** 🔴 27-sep (medido con un aviso de 20 KB): el 🚨 prometía «reingreso propio» aunque no se programó ninguno. */
+const queQueda = (conReingreso: boolean): string =>
+  conReingreso
+    ? '503 y reingreso propio'
+    : '503 SIN reingreso propio (cuerpo > 16 KB o sin cabeceras de firma): sólo queda que AngelPay reintente'
+
 /**
  * El reingreso propio (ver `avisosNoGuardados.ts`). Sólo con las cabeceras de firma —sin ellas el aviso acabaría en 401 igual— y
  * con un cuerpo del tamaño de un aviso real: en la búsqueda caída el cuerpo llega SIN verificar y la memoria no se llena de basura.
+ * Devuelve si quedó un reingreso pendiente para esta entrega (el log no puede prometer uno que no existe).
  */
-function reingresar(aviso: AvisoCrudo, verificado: boolean): void {
-  if (!aviso.merchantAccountId || !aviso.eventId || !aviso.signature) return
-  if (aviso.rawBody.length > TOPE_DE_CUERPO_PARA_REINGRESO) return
+function reingresar(aviso: AvisoCrudo, verificado: boolean): boolean {
+  if (!aviso.merchantAccountId || !aviso.eventId || !aviso.signature) return false
+  if (aviso.rawBody.length > TOPE_DE_CUERPO_PARA_REINGRESO) return false
   // 🔴 Hermano del P1 de Codex final-3 (hallado antes de mandárselo): la clave es la de ESTA entrega (firma + cuerpo), no sólo
   // comercio/eventId. Con la búsqueda caída no se puede verificar a nadie, y con la clave compartida el primero en llegar —quizá
   // un falso— le quitaba el lugar al auténtico. Dos entregas idénticas (el reintento de AngelPay firma el mismo cuerpo) siguen
@@ -146,9 +167,17 @@ function reingresar(aviso: AvisoCrudo, verificado: boolean): void {
   const huella = crypto.createHash('sha256').update(aviso.signature).update('\n').update(aviso.rawBody).digest('hex')
   reingresarMasTarde(
     `${aviso.merchantAccountId}:${aviso.eventId}:${huella}`,
-    async () => !(await procesarAviso(aviso)).noGuardado,
+    async () => {
+      const r = await procesarAviso(aviso)
+      if (r.noGuardado) return false
+      if (r.status === 200) return true
+      // 404 (comercio borrado), 401 (la firma ya no valida: secreto rotado), 503 sin secreto, 400: NUNCA se guardará. Se retira
+      // igual que antes —no se reintenta para siempre—, pero el log ya no lo cuenta como «reingresado».
+      return { descartado: { status: r.status, motivo: String((r.body as { error?: unknown } | null)?.error ?? '') } }
+    },
     verificado,
   )
+  return true
 }
 
 export function angelpayWebhookHealthCheck(_req: Request, res: Response): void {

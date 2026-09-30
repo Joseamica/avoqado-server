@@ -46,8 +46,10 @@ jest.mock('@/services/access/planNotification.service', () => ({
 }))
 
 import { prismaMock } from '../../__helpers__/setup'
-import { applyRetentionOffer, RETENTION_DISCOUNT_COUPON } from '@/services/dashboard/planState.service'
+import { applyRetentionOffer, cancelPlan, RETENTION_DISCOUNT_COUPON } from '@/services/dashboard/planState.service'
 import { BadRequestError } from '@/errors/AppError'
+import emailService from '@/services/email.service'
+import { resolvePlanNotificationTarget } from '@/services/access/planNotification.service'
 
 let pausaPrevia: { createdAt: Date } | null = null
 const VENUE_ID = 'venue_1'
@@ -218,5 +220,34 @@ describe('🔴 N3: la pausa tiene tope', () => {
     await applyRetentionOffer(VENUE_ID, 'discount')
 
     expect(mockApplySubscriptionCoupon).toHaveBeenCalled()
+  })
+})
+
+// 🔴 Real defect (2026-09-27): when Stripe's period end was unknown, the cancellation email used the WIN-BACK
+// deadline as "you keep access until…" — a made-up date. Unknown stays unknown: the email gets null.
+describe('cancelPlan — the cancellation email never invents the access date', () => {
+  beforeEach(() => {
+    ;(resolvePlanNotificationTarget as jest.Mock).mockResolvedValue({
+      email: 'owner@x.com',
+      locale: 'es',
+      venueName: 'Bar',
+      ownerName: 'Ana',
+    })
+    mockSetSubscriptionCancelAtPeriodEnd.mockResolvedValue({ id: SUB_ID })
+    mockCreateWinbackPromotionCode.mockResolvedValue({ code: 'WB1', promotionCodeId: 'promo_1' })
+  })
+
+  it('🔴 unknown period end → accessUntil null, never the win-back deadline', async () => {
+    mockRetrievePlanSubscription.mockResolvedValue(subSummary({ currentPeriodEnd: null }))
+
+    await cancelPlan(VENUE_ID)
+
+    expect((emailService.sendPlanCancellationEmail as jest.Mock).mock.calls[0][1].accessUntil).toBeNull()
+  })
+
+  it('known period end → that exact date', async () => {
+    await cancelPlan(VENUE_ID)
+
+    expect((emailService.sendPlanCancellationEmail as jest.Mock).mock.calls[0][1].accessUntil).toEqual(new Date('2026-07-01T00:00:00Z'))
   })
 })

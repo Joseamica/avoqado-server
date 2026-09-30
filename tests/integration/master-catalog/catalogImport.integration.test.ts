@@ -1,3 +1,4 @@
+const { isDisposableH1Url } = require('../../../scripts/h1-test-database.cjs')
 /**
  * Real PostgreSQL proof for Task 7 preview/confirm atomicity.
  *
@@ -43,8 +44,7 @@ function assertDisposableH1Database(): void {
   // WHY: The test independently repeats the wrapper guard before any Prisma
   // import or cleanup, so a poisoned shell cannot target dev or remote data.
   for (const candidate of [effective, declared]) {
-    expect(['localhost', '127.0.0.1']).toContain(candidate.hostname)
-    expect(candidate.pathname).toBe('/avoqado_h1a_test_20260808')
+    expect(isDisposableH1Url(candidate)).toBe(true)
   }
   expect(declared.toString()).toBe(effective.toString())
 }

@@ -514,11 +514,16 @@ const WRITERS: Record<string, Writer> = {
     class: 'EXCLUDED',
     reason: 'synthetic onboarding orders created with their lines; never a live sale',
   },
-  'src/jobs/abandoned-orders-cleanup.job.ts#AbandonedOrdersCleanupJob.cleanupAbandonedOrders': {
+  // develop f97a82b1 (28-sep): the delete moved to runOnce and now rereads the rule under the canonical Order lock.
+  'src/jobs/abandoned-orders-cleanup.job.ts#AbandonedOrdersCleanupJob.runOnce': {
     class: 'EXCLUDED',
-    reason: 'deletes old TAKEOUT orders selected as PENDING with zero lines; nothing invoiceable at selection time',
-    residual:
-      'the deleteMany by ids does not re-check emptiness/paymentStatus in its WHERE: a line or payment landing in between is deleted with the order (Payment cascades). Pre-existing, outside the fiscal lock protocol.',
+    reason:
+      'deletes old TAKEOUT orders that are PENDING with zero lines and no payments, rechecked one by one under lockExistingOrderForPayment; nothing invoiceable is ever deleted',
+  },
+  // KDS stage 3 (develop): stamps OrderItem.sentToKitchenAt and clears Order.kitchenPendingAt; no money, no line content.
+  'src/services/kds/kitchenTicketAuthoring.service.ts#authorKitchenTickets': {
+    class: 'METADATA',
+    reason: 'kitchen ticket authoring: sentToKitchenAt stamp on lines and the kitchenPendingAt marker on the order',
   },
 }
 
@@ -578,12 +583,17 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     why: 'new empty order; detaching zombie orders only clears tableId',
     markers: NEW_ORDER,
   },
+  'src/services/kds/kitchenTicketAuthoring.service.ts#limpiarMarca': { class: 'METADATA', why: 'clears the kitchenPendingAt marker' },
   'src/services/mobile/areaTicket.mobile.service.ts#claimAreaTicket': { class: 'METADATA', why: 'claim fields under a CAS' },
   'src/services/tpv/payment.tpv.service.ts#recordOrderPayment': {
     class: 'METADATA',
     why: 'splitType/loyalty marks; its money write is settleStandalonePaymentInTx under its Order lock',
   },
   'src/services/shared/loyaltyOnPaidOrder.ts#awardLoyaltyForPaidOrder': { class: 'METADATA', why: 'loyalty award marks' },
+  'src/jobs/kitchen-tickets-reconciliation.job.ts#KitchenTicketsReconciliationJob.runNow': {
+    class: 'METADATA',
+    why: 'KDS stage 3 sweep: only the kitchenPendingAt marker',
+  },
   'src/jobs/loyalty-reconciliation.job.ts#LoyaltyReconciliationJob.runNow': { class: 'METADATA', why: 'loyalty claim marks' },
   'src/jobs/playtelecomEventSimReassignment.job.ts#reassignEventSimSalesForRule': {
     class: 'METADATA',
@@ -822,6 +832,10 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/mobile/areaTicket.mobile.service.ts#addAreaTicketItems': 1,
   'src/services/pos-sync/posSyncOrder.service.ts#processPosOrderEvent': 1,
   'src/services/tpv/payment.tpv.service.ts#updateOrderTotalsForStandalonePayment': 1,
+  // KDS stage 3 × plan 3b (Codex, merge 30-sep): the author takes kitchen lock → Order lock → lines, like every writer
+  'src/services/kds/kitchenTicketAuthoring.service.ts#authorKitchenTickets': 1,
+  // develop f97a82b1: the abandoned-order cleanup rereads each order under the lock
+  'src/jobs/abandoned-orders-cleanup.job.ts#AbandonedOrdersCleanupJob.runOnce': 1,
   // Already on the budget before the final wave
   'src/services/tpv/order.tpv.service.ts#addItemsToOrder': 1,
   'src/services/tpv/order.tpv.service.ts#removeOrderItem': 1,

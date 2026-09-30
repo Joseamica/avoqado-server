@@ -7,6 +7,7 @@
 
 import { NextFunction, Request, Response } from 'express'
 import logger from '../../config/logger'
+import { logControllerError } from '../../errors/logControllerError'
 import * as kdsMobileService from '../../services/mobile/kds.mobile.service'
 import { reportOutOfStock, retryOutOfStock, type ResultadoRetiro } from '../../services/mobile/kdsOutOfStock.mobile.service'
 import { OPERACION_EN_CURSO } from './deliveryOrder.mobile.controller'
@@ -21,11 +22,12 @@ import { OPERACION_EN_CURSO } from './deliveryOrder.mobile.controller'
 export const listKdsOrders = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId } = req.params
-    const { status } = req.query
+    const { status, stationId } = req.query
+    const estacion = typeof stationId === 'string' && stationId ? stationId : undefined
 
     const [orders, total] = await Promise.all([
-      kdsMobileService.listKdsOrders(venueId, status as string | undefined),
-      kdsMobileService.countKdsOrders(venueId, status as string | undefined),
+      kdsMobileService.listKdsOrders(venueId, status as string | undefined, estacion),
+      kdsMobileService.countKdsOrders(venueId, status as string | undefined, estacion),
     ])
 
     // El total va en un encabezado y no en el cuerpo: las apps de la calle leen `data` como
@@ -263,5 +265,63 @@ export const retryKdsItemOutOfStock = async (req: Request, res: Response, next: 
     return responderRetiro(res, await retryOutOfStock(venueId, kdsOrderId, itemId, userId, expectedAttempt))
   } catch (e) {
     return next(e)
+  }
+}
+
+/**
+ * Últimas comandas terminadas de una estación («Recientes», para deshacer).
+ * @route GET /api/v1/mobile/venues/:venueId/kds/orders/recent?stationId=
+ */
+export const listRecentKdsOrders = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { stationId } = req.query
+    const data = await kdsMobileService.listRecentKdsOrders(
+      req.params.venueId,
+      typeof stationId === 'string' && stationId ? stationId : undefined,
+    )
+    res.status(200).json({ success: true, data })
+  } catch (error) {
+    logControllerError('kds listRecentKdsOrders', error)
+    next(error)
+  }
+}
+
+/**
+ * Regresa una comanda terminada a la cocina («Deshacer»).
+ * @route POST /api/v1/mobile/venues/:venueId/kds/orders/:id/recall
+ */
+export const recallKdsOrder = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const data = await kdsMobileService.recallKdsOrder(req.params.venueId, req.params.id)
+    res.status(200).json({ success: true, data })
+  } catch (error) {
+    logControllerError('kds recallKdsOrder', error)
+    next(error)
+  }
+}
+
+/**
+ * Termina varias comandas de una vez («Marcar todas listas»).
+ * @route POST /api/v1/mobile/venues/:venueId/kds/orders/bump-batch
+ * @body ids - entre 1 y 100 ids de comanda
+ */
+export const bumpKdsOrdersBatch = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const ids = req.body?.ids
+    const validos =
+      Array.isArray(ids) &&
+      ids.length > 0 &&
+      ids.length <= kdsMobileService.KDS_BUMP_BATCH_MAX &&
+      ids.every((id: unknown) => typeof id === 'string' && id.length > 0)
+    if (!validos) {
+      return res
+        .status(400)
+        .json({ success: false, message: `Se requieren entre 1 y ${kdsMobileService.KDS_BUMP_BATCH_MAX} ids de comanda` })
+    }
+    const data = await kdsMobileService.bumpKdsOrdersBatch(req.params.venueId, ids)
+    res.status(200).json({ success: true, data })
+  } catch (error) {
+    logControllerError('kds bumpKdsOrdersBatch', error)
+    next(error)
   }
 }

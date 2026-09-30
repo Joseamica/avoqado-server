@@ -26,6 +26,8 @@ import { lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
 import { baseDeCargos, recalcularCargosPorServicio } from '../shared/serviceCharges'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
+import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
+import { armarComandasTrasCommit, retirarComandasDeVentaAnulada, tomarCandadoDeComandas } from '../kds/kitchenTicketAuthoring.service'
 
 /**
  * Helper function to flatten OrderItemModifier structure for Android compatibility
@@ -535,6 +537,23 @@ function normalizeExternalId(externalId?: string | null): string | null {
   if (!externalId) return null
   const trimmed = externalId.trim()
   return trimmed.length > 0 ? trimmed : null
+}
+
+/**
+ * Crea un renglón con llave de ronda (`externalId`). Si OTRA petición de la MISMA ronda lo creó un instante antes
+ * (la ronda en línea que expiró y su réplica de la cola se cruzaron), el UNIQUE (orderId, externalId) responde
+ * P2002: es un conflicto TRANSITORIO, no un rechazo de negocio. Como VERSION_CONFLICT la cola lo reintenta (RETRY)
+ * y, al reintentar, encuentra el renglón por su llave: una sola ronda (spec 2026-09-27 §5).
+ */
+export async function conLlaveDeRonda<T>(crear: () => Promise<T>): Promise<T> {
+  try {
+    return await crear()
+  } catch (err: any) {
+    if (err?.code === 'P2002') {
+      throw new ConflictError('La ronda ya se estaba guardando en otro intento — vuelve a intentar', 'VERSION_CONFLICT')
+    }
+    throw err
+  }
 }
 
 function normalizeModifierIds(modifierIds?: string[]): string[] {
@@ -1092,6 +1111,8 @@ export async function createOrderWithItems(
     resolvedTerminalId = terminal?.id || null
   }
 
+  // Etapa 3 del KDS: un carrito GRATIS nace pagado en esta transacción ⇒ lleva la marca de cocina. FUERA de la tx.
+  const marcarCocina = totalPesos === 0 ? await debeMarcarCocina(venueId) : false
   const orderNumber = `ORD-${Date.now()}`
   let createdOrder
   try {
@@ -1160,6 +1181,7 @@ export async function createOrderWithItems(
           status: isFreeCart ? 'COMPLETED' : 'PENDING',
           paymentStatus: isFreeCart ? 'PAID' : 'PENDING',
           kitchenStatus: 'PENDING',
+          ...(isFreeCart && marcarCocina ? { kitchenPendingAt: new Date() } : {}),
           type: input.orderType || 'TAKEOUT',
           source: input.source || 'TPV',
           subtotal: decimalFromPesos(grossSubtotalPesos),
@@ -1350,6 +1372,10 @@ export async function createOrderWithItems(
     await deductTrackedInventoryForFreeCart(fullOrder, input.staffId)
   }
 
+  if (marcarCocina) {
+    await armarComandasTrasCommit(venueId, createdOrder.id, 'PAID')
+  }
+
   const broadcastingService = socketManager.getBroadcastingService()
   if (broadcastingService) {
     broadcastingService.broadcastToVenue(venueId, SocketEventType.ORDER_CREATED, {
@@ -1431,7 +1457,16 @@ export async function addItemsToOrder(
     }
   }
 
-  const { updatedOrder, newOrderItems } = await prisma.$transaction(
+  // ¿El negocio tiene pantalla de cocina? Se pregunta FUERA de la transacción de dinero (nunca lanza): hacerlo con la orden
+  // bloqueada deja esperando a cualquier escritura de la misma orden que llegue en ese momento. Se decide abajo, con la
+  // orden ya releída bajo el candado, si es de mesa.
+  const negocioConPantalla = await debeMarcarCocina(venueId)
+
+  /** El MISMO 409 que las apps ya manejan cuando otra escritura movió la orden (reducer offline ⇒ RETRY). */
+  const conflictoDeVersion = () =>
+    Object.assign(new Error('La orden cambió en otro dispositivo — vuelve a intentar'), { code: 'VERSION_CONFLICT', statusCode: 409 })
+
+  const { updatedOrder, newOrderItems, marcarCocina } = await prisma.$transaction(
     async tx => {
       if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
         throw new NotFoundError('Order not found')
@@ -1474,6 +1509,10 @@ export async function addItemsToOrder(
         throw new BadRequestError('Cannot add items to a paid order')
       }
 
+      // Etapa 3 del KDS: sólo una ronda de MESA manda su comanda a la pantalla (en mostrador nace al pagar). La marca viaja
+      // en el CAS de versión de abajo.
+      const marcarCocina = negocioConPantalla && Boolean(order.tableId)
+
       // Fetch products and validate
       // ✅ FIX: Use Set to deduplicate productIds (same product can be added multiple times)
       // Custom-amount lines need a label and a non-negative price.
@@ -1506,9 +1545,29 @@ export async function addItemsToOrder(
       // nunca se bloquea (el inventario es opcional por producto). Corre ANTES de
       // crear cualquier fila para no dejar rondas parciales, y falla ABIERTO si el
       // status no se puede calcular (un error de inventario no debe tirar servicio).
+      // Réplica de la MISMA ronda (la cola la reenvía tras perder la respuesta): sus renglones con llave ya están guardados y
+      // se devuelven tal cual (abajo). Lo que depende del catálogo de HOY (agotado, venta por peso) sólo se valida en
+      // renglones NUEVOS: una ronda ya guardada no se rechaza porque el producto se agotó o cambió después.
+      const llavesDeRonda = asNewRound
+        ? normalizedItems.map(item => normalizeExternalId(item.externalId)).filter((llave): llave is string => !!llave)
+        : []
+      const llavesGuardadas = new Set(
+        llavesDeRonda.length > 0
+          ? (
+              await tx.orderItem.findMany({
+                where: { orderId: order.id, externalId: { in: llavesDeRonda } },
+                select: { externalId: true },
+                take: llavesDeRonda.length,
+              })
+            ).map(renglon => renglon.externalId)
+          : [],
+      )
+      const esReplica = (item: NormalizedAddOrderItemInput) => llavesGuardadas.has(normalizeExternalId(item.externalId))
+
       if (asNewRound) {
         for (const product of products) {
-          if (unavailableProducts.has(product.id)) {
+          const pedidoNuevo = normalizedItems.some(item => item.productId === product.id && !esReplica(item))
+          if (pedidoNuevo && unavailableProducts.has(product.id)) {
             throw new BadRequestError(`"${product.name}" está agotado`)
           }
         }
@@ -1535,18 +1594,55 @@ export async function addItemsToOrder(
       logger.info(`✅ [ADD ITEMS] Modifiers fetched from DB: ${modifiers.length} modifiers`)
       modifiers.forEach(m => logger.info(`  - ${m.name} (${m.id}): $${m.price}`))
 
+      // ─── Venta por peso (soldByWeight) — spec 2026-07-18-venta-por-peso ────
+      // Weighted lines carry weightQuantity (kg) and quantity=1; the SERVER
+      // computes base = round(price/kg × weightKg, 2). Weight on a non-weighted
+      // product, or a weighted product without weight, is an explicit 400 — validado ANTES de escribir un solo renglón.
+      for (const item of normalizedItems) {
+        const product = item.productId ? products.find(p => p.id === item.productId) : undefined
+        if (!product || esReplica(item)) continue
+        const rawWeightKg = item.weightQuantity != null ? Number(item.weightQuantity) : null
+        if (product.soldByWeight) {
+          if (rawWeightKg == null || !Number.isFinite(rawWeightKg) || rawWeightKg <= 0) {
+            throw new BadRequestError(`El producto "${product.name}" se vende por peso; envía weightQuantity en kilogramos.`)
+          }
+          if (rawWeightKg < 0.001 || rawWeightKg > 99.999) {
+            throw new BadRequestError(`El peso para "${product.name}" está fuera de rango (0.001–99.999 kg).`)
+          }
+          if (item.quantity !== 1) {
+            throw new BadRequestError(`Las líneas por peso llevan cantidad 1 — cada pesada es una línea (producto "${product.name}").`)
+          }
+        } else if (rawWeightKg != null) {
+          throw new BadRequestError(`El producto "${product.name}" no se vende por peso; no envíes weightQuantity.`)
+        }
+      }
+
       // ⭐ P0 FIX: UPSERT items - update existing items or create new ones
       // This fixes the bug where quantity updates created duplicate items
       // Previously, when TPV synced a quantity change, it called addItemsToOrder
       // which always created NEW items. Now we check for existing items first.
-      const newOrderItems = await Promise.all(
-        normalizedItems.map(async item => {
-          // Custom-amount line: create directly (no catalog product, no modifiers).
-          if (!item.productId) {
-            const unitPrice = new Prisma.Decimal((item.customUnitPriceCents ?? 0) / 100)
-            const customTotal = unitPrice.mul(item.quantity)
-            const customComped = item.isCortesia === true
-            const customItem = await tx.orderItem.create({
+      // Escribe UN renglón de la ronda con el cliente de ESTA transacción (nunca con `prisma`: fuera de ella, un
+      // renglón escrito sobrevive al rechazo de la ronda).
+      // Renglones CREADOS por esta misma ronda: una línea sin llave nunca se fusiona con ellos (en serie, la búsqueda de
+      // abajo ya los ve; sin esta exclusión reemplazaría la cantidad de otra línea recién creada en el mismo envío).
+      const creadosEnEstaRonda: string[] = []
+      const escribirRenglon = async (item: NormalizedAddOrderItemInput) => {
+        // Custom-amount line: create directly (no catalog product, no modifiers).
+        if (!item.productId) {
+          // Replay de la MISMA ronda: el importe libre ya se registró con esta llave — no se cobra dos veces.
+          const customExternalId = normalizeExternalId(item.externalId)
+          if (customExternalId) {
+            const yaRegistrado = await tx.orderItem.findFirst({
+              where: { orderId: order.id, externalId: customExternalId },
+              include: { product: { select: { id: true, name: true } }, modifiers: { include: { modifier: true } } },
+            })
+            if (yaRegistrado) return yaRegistrado
+          }
+          const unitPrice = new Prisma.Decimal((item.customUnitPriceCents ?? 0) / 100)
+          const customTotal = unitPrice.mul(item.quantity)
+          const customComped = item.isCortesia === true
+          const customItem = await conLlaveDeRonda(() =>
+            tx.orderItem.create({
               data: {
                 orderId: order.id,
                 productId: null,
@@ -1561,6 +1657,8 @@ export async function addItemsToOrder(
                 notes: normalizeNotes(item.notes),
                 course: item.course ?? null,
                 seat: item.seat ?? null,
+                externalId: customExternalId,
+                sentToKitchenAt: roundSentAt,
               },
               include: {
                 product: {
@@ -1575,62 +1673,145 @@ export async function addItemsToOrder(
                   },
                 },
               },
-            })
-            logger.info(`✅ [ADD ITEMS] CREATED custom line: ${customItem.productName} | $${customTotal}`)
-            return customItem
-          }
-
-          const product = products.find(p => p.id === item.productId)!
-          const normalizedNotes = normalizeNotes(item.notes)
-
-          // Calculate modifier total
-          const itemModifiers = item.modifierIds || []
-          const modifierTotal = itemModifiers.reduce((sum, modifierId) => {
-            const modifier = modifiers.find(m => m.id === modifierId)
-            return sum + (modifier ? Number(modifier.price) : 0)
-          }, 0)
-
-          logger.info(
-            `💰 [ADD ITEMS] Product: ${product.name} | Base: $${product.price} | Modifiers: $${modifierTotal} | Total per unit: $${Number(product.price) + modifierTotal}`,
+            }),
           )
+          creadosEnEstaRonda.push(customItem.id)
+          logger.info(`✅ [ADD ITEMS] CREATED custom line: ${customItem.productName} | $${customTotal}`)
+          return customItem
+        }
 
-          // ─── Venta por peso (soldByWeight) — spec 2026-07-18-venta-por-peso ────
-          // Weighted lines carry weightQuantity (kg) and quantity=1; the SERVER
-          // computes base = round(price/kg × weightKg, 2). Weight on a non-weighted
-          // product, or a weighted product without weight, is an explicit 400.
-          const rawWeightKg = item.weightQuantity != null ? Number(item.weightQuantity) : null
-          if (product.soldByWeight) {
-            if (rawWeightKg == null || !Number.isFinite(rawWeightKg) || rawWeightKg <= 0) {
-              throw new BadRequestError(`El producto "${product.name}" se vende por peso; envía weightQuantity en kilogramos.`)
-            }
-            if (rawWeightKg < 0.001 || rawWeightKg > 99.999) {
-              throw new BadRequestError(`El peso para "${product.name}" está fuera de rango (0.001–99.999 kg).`)
-            }
-            if (item.quantity !== 1) {
-              throw new BadRequestError(`Las líneas por peso llevan cantidad 1 — cada pesada es una línea (producto "${product.name}").`)
-            }
-          } else if (rawWeightKg != null) {
-            throw new BadRequestError(`El producto "${product.name}" no se vende por peso; no envíes weightQuantity.`)
+        const product = products.find(p => p.id === item.productId)!
+        const normalizedNotes = normalizeNotes(item.notes)
+
+        // Calculate modifier total
+        const itemModifiers = item.modifierIds || []
+        const modifierTotal = itemModifiers.reduce((sum, modifierId) => {
+          const modifier = modifiers.find(m => m.id === modifierId)
+          return sum + (modifier ? Number(modifier.price) : 0)
+        }, 0)
+
+        logger.info(
+          `💰 [ADD ITEMS] Product: ${product.name} | Base: $${product.price} | Modifiers: $${modifierTotal} | Total per unit: $${Number(product.price) + modifierTotal}`,
+        )
+
+        // Venta por peso: las reglas del peso ya se validaron antes de la transacción (arriba).
+        const rawWeightKg = item.weightQuantity != null ? Number(item.weightQuantity) : null
+        // Quantize to the PERSISTED precision (OrderItem.weightQuantity is Decimal(12,3))
+        // BEFORE any money math, so Order.total is always derivable from the stored
+        // weightQuantity — a reprint or a >3-decimal scale reading can't diverge by a
+        // cent (review 2026-07-19, fix #3). All downstream (total, persist, deduction)
+        // uses this quantized value.
+        const weightKg = rawWeightKg != null ? Math.round(rawWeightKg * 1000) / 1000 : null
+        const weightedBase = weightKg != null ? Math.round(Number(product.price) * weightKg * 100) / 100 : null
+        /** Line total for qty units — weight-aware (weighted lines: qty is 1). */
+        const lineTotalFor = (qty: number) =>
+          new Prisma.Decimal(weightedBase != null ? weightedBase + modifierTotal * qty : (Number(product.price) + modifierTotal) * qty)
+
+        // ⭐ Idempotency: prefer externalId when provided
+        const normalizedExternalId = normalizeExternalId(item.externalId)
+
+        if (normalizedExternalId) {
+          const existingByExternal = await tx.orderItem.findFirst({
+            where: {
+              orderId: order.id,
+              externalId: normalizedExternalId,
+            },
+            include: {
+              product: {
+                select: {
+                  id: true,
+                  name: true,
+                },
+              },
+              modifiers: {
+                include: {
+                  modifier: true,
+                },
+              },
+            },
+          })
+
+          // Replay de la MISMA ronda (la cola la reenvía tras perder la respuesta): ya está registrado tal cual. Recalcularlo
+          // pisaba el total de una cortesía ($0 → precio de lista). Sólo el carrito completo (asNewRound=false) actualiza.
+          if (existingByExternal && asNewRound) return existingByExternal
+
+          if (existingByExternal) {
+            const updatedQuantity = item.quantity
+            const updatedTotal = lineTotalFor(updatedQuantity)
+
+            logger.info(
+              `🔄 [ADD ITEMS] UPDATING by externalId: ${product.name} | old qty=${existingByExternal.quantity} → new qty=${updatedQuantity} | externalId=${normalizedExternalId}`,
+            )
+
+            const updatedItem = await tx.orderItem.update({
+              where: { id: existingByExternal.id },
+              data: {
+                quantity: updatedQuantity,
+                total: updatedTotal,
+                // Persist the re-weighed value: total is weight-aware (lineTotalFor),
+                // so weightQuantity/weightUnit must move with it or the receipt +
+                // inventory deduction go stale (review 2026-07-19, fix #1).
+                weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
+                weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
+                notes: normalizedNotes ?? existingByExternal.notes,
+                externalId: existingByExternal.externalId ?? normalizedExternalId,
+              },
+              include: {
+                product: {
+                  select: {
+                    id: true,
+                    name: true,
+                  },
+                },
+                modifiers: {
+                  include: {
+                    modifier: true,
+                  },
+                },
+              },
+            })
+
+            logger.info(`✅ [ADD ITEMS] UPDATED OrderItem by externalId: ${product.name} | qty=${updatedItem.quantity}`)
+            return updatedItem
           }
-          // Quantize to the PERSISTED precision (OrderItem.weightQuantity is Decimal(12,3))
-          // BEFORE any money math, so Order.total is always derivable from the stored
-          // weightQuantity — a reprint or a >3-decimal scale reading can't diverge by a
-          // cent (review 2026-07-19, fix #3). All downstream (total, persist, deduction)
-          // uses this quantized value.
-          const weightKg = rawWeightKg != null ? Math.round(rawWeightKg * 1000) / 1000 : null
-          const weightedBase = weightKg != null ? Math.round(Number(product.price) * weightKg * 100) / 100 : null
-          /** Line total for qty units — weight-aware (weighted lines: qty is 1). */
-          const lineTotalFor = (qty: number) =>
-            new Prisma.Decimal(weightedBase != null ? weightedBase + modifierTotal * qty : (Number(product.price) + modifierTotal) * qty)
 
-          // ⭐ Idempotency: prefer externalId when provided
-          const normalizedExternalId = normalizeExternalId(item.externalId)
+          const existingById = await tx.orderItem.findFirst({
+            where: {
+              id: normalizedExternalId,
+              orderId: order.id,
+            },
+            include: {
+              product: {
+                select: {
+                  id: true,
+                  name: true,
+                },
+              },
+              modifiers: {
+                include: {
+                  modifier: true,
+                },
+              },
+            },
+          })
 
-          if (normalizedExternalId) {
-            const existingByExternal = await tx.orderItem.findFirst({
-              where: {
-                orderId: order.id,
-                externalId: normalizedExternalId,
+          if (existingById) {
+            const updatedQuantity = item.quantity
+            const updatedTotal = lineTotalFor(updatedQuantity)
+
+            logger.info(
+              `🔄 [ADD ITEMS] UPDATING by id fallback: ${product.name} | old qty=${existingById.quantity} → new qty=${updatedQuantity} | externalId=${normalizedExternalId}`,
+            )
+
+            const updatedItem = await tx.orderItem.update({
+              where: { id: existingById.id },
+              data: {
+                quantity: updatedQuantity,
+                total: updatedTotal,
+                weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
+                weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
+                notes: normalizedNotes ?? existingById.notes,
+                externalId: existingById.externalId ?? normalizedExternalId,
               },
               include: {
                 product: {
@@ -1647,107 +1828,15 @@ export async function addItemsToOrder(
               },
             })
 
-            if (existingByExternal) {
-              const updatedQuantity = item.quantity
-              const updatedTotal = lineTotalFor(updatedQuantity)
+            logger.info(`✅ [ADD ITEMS] UPDATED OrderItem by id fallback: ${product.name} | qty=${updatedItem.quantity}`)
+            return updatedItem
+          }
 
-              logger.info(
-                `🔄 [ADD ITEMS] UPDATING by externalId: ${product.name} | old qty=${existingByExternal.quantity} → new qty=${updatedQuantity} | externalId=${normalizedExternalId}`,
-              )
-
-              const updatedItem = await tx.orderItem.update({
-                where: { id: existingByExternal.id },
-                data: {
-                  quantity: updatedQuantity,
-                  total: updatedTotal,
-                  // Persist the re-weighed value: total is weight-aware (lineTotalFor),
-                  // so weightQuantity/weightUnit must move with it or the receipt +
-                  // inventory deduction go stale (review 2026-07-19, fix #1).
-                  weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
-                  weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
-                  notes: normalizedNotes ?? existingByExternal.notes,
-                  externalId: existingByExternal.externalId ?? normalizedExternalId,
-                },
-                include: {
-                  product: {
-                    select: {
-                      id: true,
-                      name: true,
-                    },
-                  },
-                  modifiers: {
-                    include: {
-                      modifier: true,
-                    },
-                  },
-                },
-              })
-
-              logger.info(`✅ [ADD ITEMS] UPDATED OrderItem by externalId: ${product.name} | qty=${updatedItem.quantity}`)
-              return updatedItem
-            }
-
-            const existingById = await tx.orderItem.findFirst({
-              where: {
-                id: normalizedExternalId,
-                orderId: order.id,
-              },
-              include: {
-                product: {
-                  select: {
-                    id: true,
-                    name: true,
-                  },
-                },
-                modifiers: {
-                  include: {
-                    modifier: true,
-                  },
-                },
-              },
-            })
-
-            if (existingById) {
-              const updatedQuantity = item.quantity
-              const updatedTotal = lineTotalFor(updatedQuantity)
-
-              logger.info(
-                `🔄 [ADD ITEMS] UPDATING by id fallback: ${product.name} | old qty=${existingById.quantity} → new qty=${updatedQuantity} | externalId=${normalizedExternalId}`,
-              )
-
-              const updatedItem = await tx.orderItem.update({
-                where: { id: existingById.id },
-                data: {
-                  quantity: updatedQuantity,
-                  total: updatedTotal,
-                  weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
-                  weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
-                  notes: normalizedNotes ?? existingById.notes,
-                  externalId: existingById.externalId ?? normalizedExternalId,
-                },
-                include: {
-                  product: {
-                    select: {
-                      id: true,
-                      name: true,
-                    },
-                  },
-                  modifiers: {
-                    include: {
-                      modifier: true,
-                    },
-                  },
-                },
-              })
-
-              logger.info(`✅ [ADD ITEMS] UPDATED OrderItem by id fallback: ${product.name} | qty=${updatedItem.quantity}`)
-              return updatedItem
-            }
-
-            // If externalId provided and no match, create new line (no merge)
-            const itemTotal = lineTotalFor(item.quantity)
-            const lineComped = item.isCortesia === true
-            const createdItem = await tx.orderItem.create({
+          // If externalId provided and no match, create new line (no merge)
+          const itemTotal = lineTotalFor(item.quantity)
+          const lineComped = item.isCortesia === true
+          const createdItem = await conLlaveDeRonda(() =>
+            tx.orderItem.create({
               data: {
                 orderId: order.id,
                 productId: item.productId,
@@ -1767,6 +1856,8 @@ export async function addItemsToOrder(
                 course: item.course ?? null,
                 seat: item.seat ?? null,
                 externalId: normalizedExternalId,
+                // Sin esto las rondas offline (ADD_ITEMS inyecta llaves) nunca quedaban «enviadas a cocina».
+                sentToKitchenAt: roundSentAt,
                 modifiers: {
                   create: itemModifiers.map(modifierId => {
                     const modifier = modifiers.find(m => m.id === modifierId)!
@@ -1793,123 +1884,66 @@ export async function addItemsToOrder(
                   },
                 },
               },
-            })
+            }),
+          )
 
-            logger.info(`✅ [ADD ITEMS] CREATED OrderItem by externalId: ${product.name} | qty=${createdItem.quantity}`)
-            return createdItem
-          }
+          creadosEnEstaRonda.push(createdItem.id)
+          logger.info(`✅ [ADD ITEMS] CREATED OrderItem by externalId: ${product.name} | qty=${createdItem.quantity}`)
+          return createdItem
+        }
 
-          // Sort modifier IDs for consistent comparison
-          const sortedNewModifiers = [...itemModifiers].sort()
+        // Sort modifier IDs for consistent comparison
+        const sortedNewModifiers = [...itemModifiers].sort()
 
-          // More precise check: query existing items with their modifiers and match by notes + modifiers
-          const existingItemsWithModifiers = await tx.orderItem.findMany({
-            where: {
-              orderId: order.id,
-              productId: item.productId,
-            },
-            include: {
-              modifiers: true,
-            },
-          })
+        // More precise check: query existing items with their modifiers and match by notes + modifiers
+        const existingItemsWithModifiers = await tx.orderItem.findMany({
+          where: {
+            orderId: order.id,
+            productId: item.productId,
+            ...(creadosEnEstaRonda.length > 0 ? { id: { notIn: creadosEnEstaRonda } } : {}),
+          },
+          include: {
+            modifiers: true,
+          },
+        })
 
-          // D9 (venta por peso): weighted lines NEVER merge into an existing line —
-          // every weighing is its own line, so the lookup is skipped entirely.
-          // Cortesía: comped lines never merge either (in EITHER direction) — a
-          // merge would silently swallow the $0 line into a paid one (money bug).
-          const existingItemWithModifiers =
-            asNewRound || weightKg != null || item.isCortesia === true
-              ? undefined
-              : existingItemsWithModifiers.find(existing => {
-                  if (existing.isCortesia) return false
-                  const existingModifierIds = existing.modifiers.map(m => m.modifierId).sort()
-                  const notesMatch = normalizeNotes(existing.notes) === normalizedNotes
-                  // TABLE_SERVICE: lines in different courses never merge.
-                  const courseMatch = (existing.course ?? null) === (item.course ?? null)
-                  // TABLE_SERVICE: lines for different seats never merge either.
-                  const seatMatch = (existing.seat ?? null) === (item.seat ?? null)
-                  return (
-                    notesMatch && courseMatch && seatMatch && JSON.stringify(existingModifierIds) === JSON.stringify(sortedNewModifiers)
-                  )
-                })
+        // D9 (venta por peso): weighted lines NEVER merge into an existing line —
+        // every weighing is its own line, so the lookup is skipped entirely.
+        // Cortesía: comped lines never merge either (in EITHER direction) — a
+        // merge would silently swallow the $0 line into a paid one (money bug).
+        const existingItemWithModifiers =
+          asNewRound || weightKg != null || item.isCortesia === true
+            ? undefined
+            : existingItemsWithModifiers.find(existing => {
+                if (existing.isCortesia) return false
+                const existingModifierIds = existing.modifiers.map(m => m.modifierId).sort()
+                const notesMatch = normalizeNotes(existing.notes) === normalizedNotes
+                // TABLE_SERVICE: lines in different courses never merge.
+                const courseMatch = (existing.course ?? null) === (item.course ?? null)
+                // TABLE_SERVICE: lines for different seats never merge either.
+                const seatMatch = (existing.seat ?? null) === (item.seat ?? null)
+                return notesMatch && courseMatch && seatMatch && JSON.stringify(existingModifierIds) === JSON.stringify(sortedNewModifiers)
+              })
 
-          if (existingItemWithModifiers) {
-            // ⭐ UPDATE existing item instead of creating new one
-            const updatedQuantity = item._count > 1 ? existingItemWithModifiers.quantity + item.quantity : item.quantity
-            const updatedTotal = lineTotalFor(updatedQuantity)
+        if (existingItemWithModifiers) {
+          // ⭐ UPDATE existing item instead of creating new one
+          const updatedQuantity = item._count > 1 ? existingItemWithModifiers.quantity + item.quantity : item.quantity
+          const updatedTotal = lineTotalFor(updatedQuantity)
 
-            logger.info(
-              `🔄 [ADD ITEMS] UPDATING existing item: ${product.name} | old qty=${existingItemWithModifiers.quantity} → new qty=${updatedQuantity} | merged=${item._count > 1}`,
-            )
+          logger.info(
+            `🔄 [ADD ITEMS] UPDATING existing item: ${product.name} | old qty=${existingItemWithModifiers.quantity} → new qty=${updatedQuantity} | merged=${item._count > 1}`,
+          )
 
-            const updatedItem = await tx.orderItem.update({
-              where: { id: existingItemWithModifiers.id },
-              data: {
-                quantity: updatedQuantity,
-                total: updatedTotal,
-                // Clears a stale weight if a now-normal product merges into a line that
-                // was weighed before soldByWeight was toggled off (review 2026-07-19).
-                weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
-                weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
-                notes: normalizedNotes ?? existingItemWithModifiers.notes,
-              },
-              include: {
-                product: {
-                  select: {
-                    id: true,
-                    name: true,
-                  },
-                },
-                modifiers: {
-                  include: {
-                    modifier: true,
-                  },
-                },
-              },
-            })
-
-            logger.info(`✅ [ADD ITEMS] UPDATED OrderItem: ${product.name} | qty=${updatedItem.quantity}`)
-            return updatedItem
-          }
-
-          // Create NEW order item with modifiers (original behavior)
-          // ✅ Toast/Square pattern: Denormalize product data for order history preservation
-          const itemTotal = lineTotalFor(item.quantity)
-          const plainComped = item.isCortesia === true
-          const createdItem = await tx.orderItem.create({
+          const updatedItem = await tx.orderItem.update({
+            where: { id: existingItemWithModifiers.id },
             data: {
-              orderId: order.id,
-              productId: item.productId,
-              // Denormalized fields - preserved even if product is later deleted
-              productName: product.name,
-              productSku: product.sku,
-              categoryName: product.category?.name || null,
-              quantity: item.quantity,
-              unitPrice: product.price,
+              quantity: updatedQuantity,
+              total: updatedTotal,
+              // Clears a stale weight if a now-normal product merges into a line that
+              // was weighed before soldByWeight was toggled off (review 2026-07-19).
               weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
               weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
-              discountAmount: plainComped ? itemTotal : 0,
-              taxAmount: 0,
-              total: plainComped ? 0 : itemTotal,
-              isCortesia: plainComped,
-              cortesiaReason: plainComped ? item.cortesiaReason?.trim() || null : null,
-              notes: normalizedNotes,
-              course: item.course ?? null,
-              seat: item.seat ?? null,
-              sentToKitchenAt: roundSentAt,
-              modifiers: {
-                create: itemModifiers.map(modifierId => {
-                  const modifier = modifiers.find(m => m.id === modifierId)!
-                  logger.info(`  📎 [ADD ITEMS] Creating OrderItemModifier: ${modifier.name} ($${modifier.price})`)
-                  return {
-                    modifierId,
-                    // Denormalized modifier name - preserved even if modifier is later deleted
-                    name: modifier.name,
-                    quantity: 1,
-                    price: modifier.price,
-                  }
-                }),
-              },
+              notes: normalizedNotes ?? existingItemWithModifiers.notes,
             },
             include: {
               product: {
@@ -1926,10 +1960,72 @@ export async function addItemsToOrder(
             },
           })
 
-          logger.info(`✅ [ADD ITEMS] Created NEW OrderItem: ${product.name} with ${createdItem.modifiers.length} modifiers`)
-          return createdItem
-        }),
-      )
+          logger.info(`✅ [ADD ITEMS] UPDATED OrderItem: ${product.name} | qty=${updatedItem.quantity}`)
+          return updatedItem
+        }
+
+        // Create NEW order item with modifiers (original behavior)
+        // ✅ Toast/Square pattern: Denormalize product data for order history preservation
+        const itemTotal = lineTotalFor(item.quantity)
+        const plainComped = item.isCortesia === true
+        const createdItem = await tx.orderItem.create({
+          data: {
+            orderId: order.id,
+            productId: item.productId,
+            // Denormalized fields - preserved even if product is later deleted
+            productName: product.name,
+            productSku: product.sku,
+            categoryName: product.category?.name || null,
+            quantity: item.quantity,
+            unitPrice: product.price,
+            weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
+            weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
+            discountAmount: plainComped ? itemTotal : 0,
+            taxAmount: 0,
+            total: plainComped ? 0 : itemTotal,
+            isCortesia: plainComped,
+            cortesiaReason: plainComped ? item.cortesiaReason?.trim() || null : null,
+            notes: normalizedNotes,
+            course: item.course ?? null,
+            seat: item.seat ?? null,
+            sentToKitchenAt: roundSentAt,
+            modifiers: {
+              create: itemModifiers.map(modifierId => {
+                const modifier = modifiers.find(m => m.id === modifierId)!
+                logger.info(`  📎 [ADD ITEMS] Creating OrderItemModifier: ${modifier.name} ($${modifier.price})`)
+                return {
+                  modifierId,
+                  // Denormalized modifier name - preserved even if modifier is later deleted
+                  name: modifier.name,
+                  quantity: 1,
+                  price: modifier.price,
+                }
+              }),
+            },
+          },
+          include: {
+            product: {
+              select: {
+                id: true,
+                name: true,
+              },
+            },
+            modifiers: {
+              include: {
+                modifier: true,
+              },
+            },
+          },
+        })
+
+        creadosEnEstaRonda.push(createdItem.id)
+        logger.info(`✅ [ADD ITEMS] Created NEW OrderItem: ${product.name} with ${createdItem.modifiers.length} modifiers`)
+        return createdItem
+      }
+
+      // En serie: una transacción es UNA conexión, y en serie el primer error corta la ronda sin dejar consultas en vuelo.
+      const newOrderItems: Awaited<ReturnType<typeof escribirRenglon>>[] = []
+      for (const item of normalizedItems) newOrderItems.push(await escribirRenglon(item))
 
       // ⭐ P0 FIX: Re-fetch all items from DB to avoid double-counting updated items
       // Previously we did [...order.items, ...newOrderItems] but this would duplicate
@@ -2016,14 +2112,10 @@ export async function addItemsToOrder(
           total: newTotal,
           remainingBalance: newRemainingBalance,
           version: { increment: 1 },
+          ...(marcarCocina ? { kitchenPendingAt: new Date() } : {}),
         },
       })
-      if (casBump.count === 0) {
-        const err: any = new Error('La orden cambió en otro dispositivo — vuelve a intentar')
-        err.code = 'VERSION_CONFLICT'
-        err.statusCode = 409
-        throw err
-      }
+      if (casBump.count === 0) throw conflictoDeVersion()
       const updatedOrder = await tx.order.findUniqueOrThrow({
         where: { id: orderId },
         include: {
@@ -2086,7 +2178,7 @@ export async function addItemsToOrder(
         }
       })
 
-      return { updatedOrder, newOrderItems }
+      return { updatedOrder, newOrderItems, marcarCocina }
     },
     { timeout: 15_000, maxWait: 5_000 },
   )
@@ -2110,6 +2202,11 @@ export async function addItemsToOrder(
       total: Number(updatedOrder.total),
       version: updatedOrder.version,
     })
+  }
+
+  // 🍳 Etapa 3 del KDS: la ronda de mesa arma su comanda de pantalla (después de guardar; nunca tumba la ronda).
+  if (marcarCocina) {
+    await armarComandasTrasCommit(venueId, orderId, 'ROUND')
   }
 
   // Construct table name for display in Android app
@@ -2756,6 +2853,9 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
 
   const { updatedOrder, isVoidingAllItems, voidAmount, itemsToVoid, newTotal } = await prisma.$transaction(
     async tx => {
+      // El candado de comandas va PRIMERO (mismo orden que el armado: comandas → orden). Si esta anulación deja la cuenta
+      // sin renglones, abajo retira sus comandas de la pantalla de cocina sin cruzarse con un armado en curso.
+      await tomarCandadoDeComandas(tx, orderId)
       if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
         throw new NotFoundError('Order not found')
       }
@@ -2827,6 +2927,8 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       // ⭐ FIX: Auto-close order if voiding all items (Toast/Square pattern)
       // When 0 items remain, order should be cancelled and removed from active list
       const isVoidingAllItems = remainingItems.length === 0
+      // Anular TODO cancela la cuenta: la cocina deja de verla (el candado de comandas ya se tomó al inicio).
+      if (isVoidingAllItems) await retirarComandasDeVentaAnulada(tx, venueId, orderId)
 
       // 🔴 MONEY: el subtotal BAJA al anular, pero el descuento acumulado NO. La resta escrita
       // a mano (`newSubtotal − discountAmount`, sin clamp) escribía un `Order.total` NEGATIVO que

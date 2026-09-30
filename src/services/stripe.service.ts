@@ -14,6 +14,8 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { Feature, Prisma } from '@prisma/client'
 import { retry, shouldRetryStripeError } from '@/utils/retry'
+import { subscriptionPeriod } from '@/utils/stripeSubscriptionPeriod'
+import { billingPageUrl } from '@/utils/dashboardLinks'
 import { addDays } from 'date-fns'
 import emailService from './email.service'
 import { resolvePlanNotificationTarget } from './access/planNotification.service'
@@ -1216,7 +1218,7 @@ export async function entregarSuscripcionDePlan(entrada: {
   const salida: Salida = await prisma.$transaction(
     async tx => {
       await tx.$executeRaw`SET LOCAL lock_timeout = '15s'`
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`stripe-obligaciones:${venueId}`}))`
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`stripe-obligaciones:${venueId}`}))::text`
 
       // 1. Las filas de los DOS tiers, ANTES de Stripe.
       const planes = await tx.feature.findMany({
@@ -1533,8 +1535,17 @@ export async function cancelSubscription(subscriptionId: string): Promise<void> 
  * @param cancel - true to schedule cancel at period end, false to reactivate
  * @returns the updated Stripe subscription
  */
-export async function setSubscriptionCancelAtPeriodEnd(subscriptionId: string, cancel: boolean): Promise<Stripe.Subscription> {
-  const updated = await retry(() => stripe.subscriptions.update(subscriptionId, { cancel_at_period_end: cancel }), {
+export async function setSubscriptionCancelAtPeriodEnd(
+  subscriptionId: string,
+  cancel: boolean,
+  cancellationDetails?: Stripe.SubscriptionUpdateParams.CancellationDetails,
+): Promise<Stripe.Subscription> {
+  // The owner's reason rides in the SAME update that schedules the end (Stripe's documented way); never on a reactivation.
+  const params: Stripe.SubscriptionUpdateParams = {
+    cancel_at_period_end: cancel,
+    ...(cancel && cancellationDetails ? { cancellation_details: cancellationDetails } : {}),
+  }
+  const updated = await retry(() => stripe.subscriptions.update(subscriptionId, params), {
     retries: 3,
     shouldRetry: shouldRetryStripeError,
     context: 'stripe.setSubscriptionCancelAtPeriodEnd',
@@ -1661,9 +1672,8 @@ export async function createWinbackPromotionCode(
 
 /**
  * Retrieve a subscription and return the typed summary the plan endpoint needs.
- * Stripe SDK v19 omits current_period_end / cancel_at_period_end on the Subscription
- * type even though the API returns them — cast like the rest of the codebase
- * (see stripe.webhook.service.ts:32, plan-renewal-reminder.job.ts:102).
+ * The period end comes from `subscriptionPeriod`: the pinned API (2025-09-30.clover) carries it
+ * only on the item, never on the subscription.
  *
  * @param subscriptionId - Stripe subscription ID
  */
@@ -1698,7 +1708,6 @@ export async function retrievePlanSubscription(subscriptionId: string): Promise<
     shouldRetry: shouldRetryStripeError,
     context: 'stripe.retrievePlanSubscription',
   })
-  const periodEndRaw = (sub as any).current_period_end as number | undefined
   const createdRaw = (sub as any).created as number | undefined
   const rawInterval = sub.items.data[0]?.price.recurring?.interval
   // SDK v19 may surface a single `discount` object and/or a `discounts` array (see subscriptionHasActiveDiscount).
@@ -1707,7 +1716,7 @@ export async function retrievePlanSubscription(subscriptionId: string): Promise<
   return {
     status: sub.status,
     cancelAtPeriodEnd: Boolean((sub as any).cancel_at_period_end),
-    currentPeriodEnd: periodEndRaw ? new Date(periodEndRaw * 1000) : null,
+    currentPeriodEnd: subscriptionPeriod(sub).end,
     createdAt: createdRaw ? new Date(createdRaw * 1000) : null,
     hasActiveDiscount: Boolean(singleDiscount) || (Array.isArray(discountList) && discountList.length > 0),
     pausedUntil: pausaDe(sub),
@@ -2184,7 +2193,7 @@ export async function generateBillingPortalUrl(customerId: string, returnUrl?: s
   try {
     const session = await stripe.billingPortal.sessions.create({
       customer: customerId,
-      return_url: returnUrl || `${process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'}/dashboard`,
+      return_url: returnUrl || billingPageUrl(),
       ...configuracionDelPortal(),
     })
     return session.url
@@ -2194,7 +2203,7 @@ export async function generateBillingPortalUrl(customerId: string, returnUrl?: s
       error: error instanceof Error ? error.message : 'Unknown error',
     })
     // Fallback: Return the provided URL or dashboard
-    return returnUrl || `${process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'}/dashboard`
+    return returnUrl || billingPageUrl()
   }
 }
 
@@ -2385,10 +2394,7 @@ export async function handlePaymentFailure(
 
   // Generate billing portal URL for customer to update payment method
   // Build venue-aware return URL
-  const FRONTEND_URL = process.env.FRONTEND_URL || 'https://dashboard.avoqado.io'
-  const returnUrl = venueFeature.venue.slug
-    ? `${FRONTEND_URL}/dashboard/venues/${venueFeature.venue.slug}/billing`
-    : `${FRONTEND_URL}/dashboard/venues/${venueFeature.venue.id}/billing`
+  const returnUrl = billingPageUrl(venueFeature.venue.slug)
 
   const billingPortalUrl = venueFeature.venue.stripeCustomerId
     ? await generateBillingPortalUrl(venueFeature.venue.stripeCustomerId, returnUrl)

@@ -9,8 +9,8 @@ import { renderLoginPage } from './loginPage'
 import { provider } from './provider'
 import { prismaClientsStore } from './clientsStore'
 import { MCP_ISSUER_URL, MCP_RESOURCE_URL, MCP_SCOPES_SUPPORTED } from './config'
-import { staffIdFromDashboardSession } from './session'
-import { verifyOrgPickToken, listActiveOrganizations, tokenParaElSelector } from './orgPick'
+import { staffIdFromDashboardSession, sesionDelDashboard } from './session'
+import { verifyOrgPickToken, verificarTokenDelSelector, listActiveOrganizations, tokenParaElSelector } from './orgPick'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 
@@ -181,24 +181,32 @@ function approveHandler() {
       return isFetch ? res.status(400).json({ error: 'Missing OAuth parameters' }) : res.status(400).send('Missing OAuth parameters')
     }
 
+    // 🔴 Cuándo se VERIFICÓ la identidad. La autorización (y toda su cadena de renovaciones) nace con
+    // esta hora, no con la del insert: si la contraseña cambia entre verificar y crear el código, el
+    // corte la alcanza igual (Codex ronda 9, P1). Por camino: la del selector, la de la sesión del
+    // dashboard, o la de ANTES de comprobar la contraseña.
     let staffId: string
+    let verificadoEn: Date
     if (typeof orgPickToken === 'string' && orgPickToken) {
       // Step-2 (org picker) submit: identity carried by the short-lived signed token, never re-typed credentials.
-      const sid = await verifyOrgPickToken(orgPickToken)
-      if (!sid) {
+      const selector = await verificarTokenDelSelector(orgPickToken)
+      if (!selector) {
         logger.warn('[MCP OAuth] org-pick token invalid/expired', { mcpOAuth: true, clientId: String(client_id) })
         return reRender('La selección de organización expiró. Vuelve a iniciar sesión.')
       }
-      staffId = sid
+      staffId = selector.staffId
+      verificadoEn = selector.verificadoEn
     } else if (sso === '1') {
       // One-click connect: trust ONLY a freshly re-verified session cookie, never the form flag alone.
-      const sid = await staffIdFromDashboardSession(req)
-      if (!sid) {
+      const sesion = await sesionDelDashboard(req)
+      if (!sesion) {
         logger.warn('[MCP OAuth] SSO approve without a valid session cookie', { mcpOAuth: true, clientId: String(client_id) })
         return reRender('Tu sesión expiró. Inicia sesión con tu correo y contraseña.')
       }
-      staffId = sid
+      staffId = sesion.staffId
+      verificadoEn = sesion.verificadoEn
     } else {
+      verificadoEn = new Date()
       try {
         staffId = await authenticateForMcp(String(email ?? ''), String(password ?? ''))
       } catch (e) {
@@ -228,7 +236,7 @@ function approveHandler() {
           new URLSearchParams({
             // 🔴 H4: si ya venía de un token de selección, se REUSA — reemitir uno nuevo en cada
             // paso lo volvía renovable sin volver a autenticarse.
-            token: tokenParaElSelector(orgPickToken, staffId),
+            token: tokenParaElSelector(orgPickToken, staffId, verificadoEn),
             client_id: String(client_id),
             redirect_uri: String(redirect_uri),
             code_challenge: String(code_challenge),
@@ -261,6 +269,7 @@ function approveHandler() {
       redirectUri: redirect_uri,
       scopes,
       resource: resource || undefined,
+      grantedAt: verificadoEn,
     })
 
     // Observability for the mcp:write rollout: record EXACTLY which scopes each client requests, so

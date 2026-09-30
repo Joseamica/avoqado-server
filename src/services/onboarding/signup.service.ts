@@ -18,6 +18,7 @@ import emailService from '@/services/email.service'
 import { getPrimaryOrganizationId } from '@/services/staffOrganization.service'
 
 export interface SignupInput {
+  hybridOfferSlug?: string
   email: string
   password: string
   firstName?: string
@@ -92,7 +93,7 @@ export interface VerifyEmailResult {
  */
 export async function signupUser(input: SignupInput): Promise<SignupResult> {
   const { email, password, firstName = '', lastName = '', organizationName = '', wizardVersion } = input
-  const { legalVersion, launchCampaignCode, utm, ipAddress } = input
+  const { legalVersion, launchCampaignCode, hybridOfferSlug, utm, ipAddress } = input
 
   // 1. Check if email already exists
   const existingStaff = await prisma.staff.findUnique({
@@ -116,7 +117,7 @@ export async function signupUser(input: SignupInput): Promise<SignupResult> {
   // 🔴 Una versión legal DESCONOCIDA se ignora en silencio: el asistente vuelve a pedir la
   // casilla. Guardarla dejaría un consentimiento firmado contra un texto que nadie puede
   // identificar, que es peor que no tenerlo.
-  const atribucion = await resolverAtribucionDelAlta({ legalVersion, launchCampaignCode, utm })
+  const atribucion = await resolverAtribucionDelAlta({ legalVersion, launchCampaignCode, hybridOfferSlug, utm })
 
   // 4. Create organization and staff in a transaction — la MISMA función que el alta con Google.
   const result = await prisma.$transaction(tx =>

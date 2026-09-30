@@ -1,7 +1,6 @@
+const { isDisposableH1Url } = require('../../../scripts/h1-test-database.cjs')
 import type { PrismaClient } from '@prisma/client'
 import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
-
-const DISPOSABLE_DATABASE = '/avoqado_h1a_test_20260808'
 
 export interface CatalogPublicationFixture {
   key: string
@@ -30,12 +29,10 @@ export interface CatalogPublicationIntegrationHarness {
 export function assertDisposableCatalogPublicationDatabase(): void {
   const effective = new URL(process.env.DATABASE_URL ?? '')
   const declared = new URL(process.env.TEST_DATABASE_URL ?? '')
-  const disposable = (candidate: URL): boolean =>
-    ['localhost', '127.0.0.1'].includes(candidate.hostname) && candidate.pathname === DISPOSABLE_DATABASE
 
   // WHY: No runtime Prisma import or destructive cleanup is permitted until
   // both aliases identify the exact disposable H1 database byte-for-byte.
-  if (!disposable(effective) || !disposable(declared) || effective.toString() !== declared.toString()) {
+  if (!isDisposableH1Url(effective) || !isDisposableH1Url(declared) || effective.toString() !== declared.toString()) {
     throw new Error('Task 9 integration requires the exact disposable local H1 database')
   }
 }

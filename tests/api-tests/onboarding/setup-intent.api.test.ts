@@ -56,11 +56,17 @@ jest.mock('../../../src/config/logger', () => ({
   },
 }))
 
-import request from 'supertest'
+import { api, startApiServer } from '@tests/__helpers__/apiServer'
 import jwt from 'jsonwebtoken'
 import * as stripeService from '../../../src/services/stripe.service'
 
 const app = require('../../../src/app').default
+
+startApiServer(() => app)
+
+beforeEach(() => {
+  ;(stripeService.createOnboardingSetupIntent as jest.Mock).mockReset()
+})
 
 const API_PREFIX = '/api/v1/onboarding'
 
@@ -77,27 +83,26 @@ function makeToken(payload: object = {}) {
 describe('POST /api/v1/onboarding/setup-intent', () => {
   const endpoint = `${API_PREFIX}/setup-intent`
 
-  beforeEach(() => {
-    jest.clearAllMocks()
-  })
-
   describe('Authentication (401)', () => {
     it('should return 401 when no Authorization header is provided', async () => {
-      const res = await request(app).post(endpoint)
+      // Auth rejects before Stripe: this unused response must not leak into the next test.
+      ;(stripeService.createOnboardingSetupIntent as jest.Mock).mockResolvedValueOnce('seti_unused_after_401')
+      const res = await api().post(endpoint)
 
       expect(res.status).toBe(401)
       expect(res.body).toHaveProperty('error', 'Unauthorized')
+      expect(stripeService.createOnboardingSetupIntent).not.toHaveBeenCalled()
     })
 
     it('should return 401 when Authorization header has invalid token', async () => {
-      const res = await request(app).post(endpoint).set('Authorization', 'Bearer invalid.token.here')
+      const res = await api().post(endpoint).set('Authorization', 'Bearer invalid.token.here')
 
       expect(res.status).toBe(401)
       expect(res.body).toHaveProperty('error', 'Unauthorized')
     })
 
     it('should return 401 when Authorization header is malformed', async () => {
-      const res = await request(app).post(endpoint).set('Authorization', 'NotBearer sometoken')
+      const res = await api().post(endpoint).set('Authorization', 'NotBearer sometoken')
 
       expect(res.status).toBe(401)
     })
@@ -109,7 +114,7 @@ describe('POST /api/v1/onboarding/setup-intent', () => {
         { expiresIn: '-1h' }, // Already expired
       )
 
-      const res = await request(app).post(endpoint).set('Authorization', `Bearer ${expiredToken}`)
+      const res = await api().post(endpoint).set('Authorization', `Bearer ${expiredToken}`)
 
       expect(res.status).toBe(401)
     })
@@ -121,7 +126,7 @@ describe('POST /api/v1/onboarding/setup-intent', () => {
       ;(stripeService.createOnboardingSetupIntent as jest.Mock).mockResolvedValueOnce(mockClientSecret)
 
       const token = makeToken()
-      const res = await request(app).post(endpoint).set('Authorization', `Bearer ${token}`)
+      const res = await api().post(endpoint).set('Authorization', `Bearer ${token}`)
 
       expect(res.status).toBe(200)
       expect(res.body).toEqual({
@@ -137,7 +142,7 @@ describe('POST /api/v1/onboarding/setup-intent', () => {
       ;(stripeService.createOnboardingSetupIntent as jest.Mock).mockResolvedValueOnce(mockClientSecret)
 
       const token = makeToken()
-      await request(app).post(endpoint).set('Authorization', `Bearer ${token}`)
+      await api().post(endpoint).set('Authorization', `Bearer ${token}`)
 
       expect(stripeService.createOnboardingSetupIntent).toHaveBeenCalledTimes(1)
       // Should NOT pass any arguments (no customer)
@@ -151,7 +156,7 @@ describe('POST /api/v1/onboarding/setup-intent', () => {
         ;(stripeService.createOnboardingSetupIntent as jest.Mock).mockResolvedValueOnce(`seti_${role}_secret`)
 
         const token = makeToken({ role })
-        const res = await request(app).post(endpoint).set('Authorization', `Bearer ${token}`)
+        const res = await api().post(endpoint).set('Authorization', `Bearer ${token}`)
 
         expect(res.status).toBe(200)
         expect(res.body.success).toBe(true)
@@ -165,10 +170,10 @@ describe('POST /api/v1/onboarding/setup-intent', () => {
       ;(stripeService.createOnboardingSetupIntent as jest.Mock).mockRejectedValueOnce(stripeError)
 
       const token = makeToken()
-      const res = await request(app).post(endpoint).set('Authorization', `Bearer ${token}`)
+      const res = await api().post(endpoint).set('Authorization', `Bearer ${token}`)
 
-      // Should return 500 (or whatever error handler returns)
-      expect(res.status).toBeGreaterThanOrEqual(400)
+      expect(res.status).toBe(500)
+      expect(stripeService.createOnboardingSetupIntent).toHaveBeenCalledTimes(1)
     })
 
     it('should not expose internal error details to client', async () => {
@@ -176,8 +181,10 @@ describe('POST /api/v1/onboarding/setup-intent', () => {
       ;(stripeService.createOnboardingSetupIntent as jest.Mock).mockRejectedValueOnce(sensitiveError)
 
       const token = makeToken()
-      const res = await request(app).post(endpoint).set('Authorization', `Bearer ${token}`)
+      const res = await api().post(endpoint).set('Authorization', `Bearer ${token}`)
 
+      expect(res.status).toBe(500)
+      expect(stripeService.createOnboardingSetupIntent).toHaveBeenCalledTimes(1)
       // Should NOT expose the API key in the response
       expect(JSON.stringify(res.body)).not.toContain('sk_live')
     })
@@ -189,7 +196,7 @@ describe('POST /api/v1/onboarding/setup-intent', () => {
       ;(stripeService.createOnboardingSetupIntent as jest.Mock).mockResolvedValueOnce(mockClientSecret)
 
       const token = makeToken()
-      const res = await request(app)
+      const res = await api()
         .post(endpoint)
         .set('Authorization', `Bearer ${token}`)
         .send({ someField: 'should be ignored', venueId: 'fake_venue' })
@@ -205,10 +212,6 @@ describe('POST /api/v1/onboarding/setup-intent', () => {
 describe('Onboarding SetupIntent - E2E Flow Simulation', () => {
   const endpoint = `${API_PREFIX}/setup-intent`
 
-  beforeEach(() => {
-    jest.clearAllMocks()
-  })
-
   it('Full flow: User selects features -> Opens dialog -> Gets SetupIntent -> Validates card', async () => {
     // Step 1: User authenticates during onboarding
     const token = makeToken({
@@ -221,7 +224,7 @@ describe('Onboarding SetupIntent - E2E Flow Simulation', () => {
     const mockClientSecret = 'seti_e2e_flow_secret_123'
     ;(stripeService.createOnboardingSetupIntent as jest.Mock).mockResolvedValueOnce(mockClientSecret)
 
-    const res = await request(app).post(endpoint).set('Authorization', `Bearer ${token}`)
+    const res = await api().post(endpoint).set('Authorization', `Bearer ${token}`)
 
     // Step 3: Verify response is suitable for Stripe.js confirmCardSetup()
     expect(res.status).toBe(200)
@@ -251,16 +254,14 @@ describe('Onboarding SetupIntent - E2E Flow Simulation', () => {
       .mockResolvedValueOnce('seti_user_3')
 
     // Make concurrent requests
-    const responses = await Promise.all(tokens.map(token => request(app).post(endpoint).set('Authorization', `Bearer ${token}`)))
-
-    // All should succeed independently
-    expect(responses[0].body.data.clientSecret).toBe('seti_user_1')
-    expect(responses[1].body.data.clientSecret).toBe('seti_user_2')
-    expect(responses[2].body.data.clientSecret).toBe('seti_user_3')
+    const responses = await Promise.all(tokens.map(token => api().post(endpoint).set('Authorization', `Bearer ${token}`)))
 
     responses.forEach(res => {
       expect(res.status).toBe(200)
       expect(res.body.success).toBe(true)
     })
+    // Arrival order is nondeterministic; every request must get its own distinct secret.
+    expect(responses.map(res => res.body.data.clientSecret).sort()).toEqual(['seti_user_1', 'seti_user_2', 'seti_user_3'])
+    expect(stripeService.createOnboardingSetupIntent).toHaveBeenCalledTimes(3)
   })
 })

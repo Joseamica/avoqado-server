@@ -5,6 +5,7 @@ import AppError from '../../errors/AppError'
 import { getSupplierRecommendations } from './supplier.service'
 import { logAction } from './activity-log.service'
 import { venueHasFeatureAccess, getVenueBaseTier } from '../access/basePlan.service'
+import { hasCapabilityGrant } from '../access/capabilityGrants.service'
 import { sendPurchaseOrderEmailAsync } from './purchaseOrder.service'
 
 /**
@@ -95,6 +96,7 @@ export interface AutoReorderDeps {
   sendPurchaseOrderEmailAsync: typeof sendPurchaseOrderEmailAsync
   venueHasFeatureAccess: typeof venueHasFeatureAccess
   getVenueBaseTier: typeof getVenueBaseTier
+  hasCapabilityGrant: typeof hasCapabilityGrant
 }
 
 /**
@@ -494,6 +496,7 @@ export async function runAutoReorderForVenue(
     sendPurchaseOrderEmailAsync,
     venueHasFeatureAccess,
     getVenueBaseTier,
+    hasCapabilityGrant,
     ...deps,
   }
 
@@ -509,11 +512,9 @@ export async function runAutoReorderForVenue(
   const entitled = await d.venueHasFeatureAccess(venueId, 'AUTO_REORDER')
   if (!entitled) return { ...ZERO_RESULT, reason: 'no_feature' }
 
-  // Side-effect (auto-creating POs + emailing real suppliers) requires a REAL active PREMIUM
-  // base plan — NOT the demo/grandfather bypass that venueHasFeatureAccess honors. This keeps
-  // LIVE_DEMO / seeded venues from auto-emailing real supplier addresses.
+  // Real paid access is required for supplier email; demo/grandfather bypass alone is insufficient.
   const tier = await d.getVenueBaseTier(venueId)
-  if (tier !== 'PREMIUM') return { ...ZERO_RESULT, reason: 'not_premium' }
+  if (tier !== 'PREMIUM' && !(await d.hasCapabilityGrant(venueId, 'AUTO_REORDER'))) return { ...ZERO_RESULT, reason: 'not_premium' }
 
   // 3. Suggestions
   const { suggestions } = await d.getReorderSuggestions(venueId)

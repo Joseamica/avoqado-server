@@ -233,7 +233,7 @@ Run: `npx tsx -r dotenv/config -r tsconfig-paths/register scripts/seed-plan-pro.
 - [ ] **Step 2.3: Verify in DB**
 
 Run:
-`PGPASSWORD=exitosoy777 psql -h localhost -U postgres -d av-db-25 -c "SELECT code, \"monthlyPrice\", \"stripePriceId\" IS NOT NULL AS has_price FROM \"Feature\" WHERE code='PLAN_PRO';"`
+`PGPASSWORD=<contraseña> psql -h localhost -U postgres -d av-db-25 -c "SELECT code, \"monthlyPrice\", \"stripePriceId\" IS NOT NULL AS has_price FROM \"Feature\" WHERE code='PLAN_PRO';"`
 Expected: one row, `monthlyPrice=999.00`, `has_price=t`.
 
 - [ ] **Step 2.4: Leave uncommitted.** This is a one-time ops script; it stays in the tree.
@@ -1440,7 +1440,7 @@ steps → `planSetupIntent` → confirm a test card → `saveStep` `plan` → `c
 payNow}. After each, assert in DB:
 
 ```bash
-PGPASSWORD=exitosoy777 psql -h localhost -U postgres -d av-db-25 -c \
+PGPASSWORD=<contraseña> psql -h localhost -U postgres -d av-db-25 -c \
 "SELECT v.\"planTier\", vf.active, vf.\"endDate\", vf.\"stripeSubscriptionId\" IS NOT NULL AS has_sub \
  FROM \"Venue\" v JOIN \"VenueFeature\" vf ON vf.\"venueId\"=v.id \
  JOIN \"Feature\" f ON f.id=vf.\"featureId\" \

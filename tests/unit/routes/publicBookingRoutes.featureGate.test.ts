@@ -34,6 +34,7 @@ import request from 'supertest'
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    capabilityGrant: { findFirst: jest.fn().mockResolvedValue(null), groupBy: jest.fn().mockResolvedValue([]) },
     venue: { findFirst: jest.fn(), findUnique: jest.fn() },
     venueFeature: { findFirst: jest.fn(), findMany: jest.fn() },
   },

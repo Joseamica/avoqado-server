@@ -1,6 +1,7 @@
 import { EntityType, VenueOperationalRole, VenueType } from '@prisma/client' // Importa enums directamente de Prisma
 import { z } from 'zod'
 import { zTimezone } from '@/utils/sanitizeTimezone'
+import { cancellationFields } from '@/services/shared/cancellationReason'
 
 // Schema de Zod para la creación de Venues
 export const createVenueSchema = z.object({
@@ -31,15 +32,35 @@ export const createVenueSchema = z.object({
     timezone: zTimezone,
     currency: z.string().min(3).max(3).optional().default('MXN'),
 
-    address: z.string().min(5, { message: 'La dirección debe tener al menos 5 caracteres.' }).optional().nullable(),
+    address: z
+      .string()
+      .min(5, { message: 'La dirección debe tener al menos 5 caracteres.' })
+      .max(200, { message: 'La dirección no puede pasar de 200 caracteres.' })
+      .optional()
+      .nullable(),
 
-    city: z.string().min(2, { message: 'La ciudad debe tener al menos 2 caracteres.' }).optional().nullable(),
+    city: z
+      .string()
+      .min(2, { message: 'La ciudad debe tener al menos 2 caracteres.' })
+      .max(100, { message: 'La ciudad no puede pasar de 100 caracteres.' })
+      .optional()
+      .nullable(),
 
-    state: z.string().min(2, { message: 'El estado/provincia debe tener al menos 2 caracteres.' }).optional().nullable(),
+    state: z
+      .string()
+      .min(2, { message: 'El estado/provincia debe tener al menos 2 caracteres.' })
+      .max(100, { message: 'El estado no puede pasar de 100 caracteres.' })
+      .optional()
+      .nullable(),
 
     country: z.string().min(2).max(2).optional().default('MX'),
 
-    zipCode: z.string().min(4, { message: 'El código postal debe tener al menos 4 caracteres.' }).optional().nullable(),
+    zipCode: z
+      .string()
+      .min(4, { message: 'El código postal debe tener al menos 4 caracteres.' })
+      .max(10, { message: 'El código postal no puede pasar de 10 caracteres.' })
+      .optional()
+      .nullable(),
 
     latitude: z.number({ invalid_type_error: 'La latitud debe ser un número.' }).min(-90).max(90).optional().nullable(),
 
@@ -212,6 +233,12 @@ export const planParamsSchema = z.object({
 
 export type PlanParamsDto = z.infer<typeof planParamsSchema.shape.params>
 
+// Schema for POST /venues/:venueId/plan/cancel. The body is optional: dashboards that predate the reason send none.
+export const cancelPlanSchema = z.object({
+  params: planParamsSchema.shape.params,
+  body: z.object(cancellationFields).default({}),
+})
+
 // Schema for creating a Stripe Checkout session for a base plan (Pro o Premium).
 export const createPlanCheckoutSessionSchema = z.object({
   params: z.object({
@@ -254,6 +281,7 @@ export const downgradeToFreeSchema = z.object({
         invalid_type_error: 'La lista de usuarios a conservar debe ser un arreglo.',
       })
       .default([]),
+    ...cancellationFields,
   }),
 })
 

@@ -5,10 +5,8 @@
  * :param paths (Express matches in order).
  */
 import { Router } from 'express'
-import { authorizeRole } from '../../middlewares/authorizeRole.middleware'
 import { checkPermission } from '../../middlewares/checkPermission.middleware'
 import { validateRequest } from '../../middlewares/validation'
-import { StaffRole } from '../../security'
 import * as controller from '../../controllers/dashboard/printStation.dashboard.controller'
 import {
   assignRoutingSchema,
@@ -44,11 +42,11 @@ router.post('/routing/preview', checkPermission('printers:read'), validateReques
 // ---- Stations (declare AFTER static sub-paths above) ----
 router.get('/', checkPermission('printers:read'), validateRequest(venueParamSchema), controller.listStations)
 router.post('/', checkPermission('printers:manage'), validateRequest(createStationSchema), controller.createStation)
-// Casilla «pantalla de cocina» — etapa 1: SÓLO SUPERADMIN (spec 2026-09-24 §4). La etapa 3 la abre a
-// dueño/admin con plan Pro; hasta entonces un cliente no puede prender una pantalla que no está terminada.
+// Casilla «pantalla de cocina» — etapa 3: quien configura impresoras (printers:manage). Si se puede PRENDER lo
+// decide el servicio: puerta de lanzamiento (fase 3.6) y plan Pro. Apagar siempre se puede.
 router.put(
   '/:stationId/kitchen-display',
-  authorizeRole([StaffRole.SUPERADMIN]),
+  checkPermission('printers:manage'),
   validateRequest(setKitchenDisplaySchema),
   controller.setKitchenDisplay,
 )

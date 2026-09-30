@@ -168,6 +168,10 @@ export async function acceptInvitation(
   // (prod incident 2026-06-30).
   const result = await prisma.$transaction(
     async (tx: Prisma.TransactionClient) => {
+      // Lock this invitation FIRST — the same order the Free seat-cap enforcement uses (pending invitations before
+      // StaffVenue). Writing StaffVenue first and the invitation last could deadlock against it (Codex, 28-sep).
+      await tx.$queryRaw`SELECT "id" FROM "Invitation" WHERE "token" = ${token} AND "status" = 'PENDING' FOR UPDATE`
+
       // Get and validate invitation
       const invitation = await tx.invitation.findFirst({
         where: {
@@ -311,13 +315,16 @@ export async function acceptInvitation(
           // sucursales en OTRAS organizaciones: dueña allá + invitada como mesera aquí ⇒ ADMIN aquí,
           // y `requireOrgAdmin` la dejaba administrar esta organización (Codex, 24-sep).
           const orgRoleForCrossOrg: OrgRole = invitation.role === StaffRole.OWNER ? OrgRole.OWNER : OrgRole.MEMBER
-          await createStaffOrganizationMembership({
-            staffId: staff.id,
-            organizationId: invitation.organizationId,
-            role: orgRoleForCrossOrg,
-            isPrimary: false,
-            joinedById: invitation.invitedById ?? undefined,
-          })
+          await createStaffOrganizationMembership(
+            {
+              staffId: staff.id,
+              organizationId: invitation.organizationId,
+              role: orgRoleForCrossOrg,
+              isPrimary: false,
+              joinedById: invitation.invitedById ?? undefined,
+            },
+            tx, // inside the accept transaction: a 409 below rolls it back too
+          )
         }
 
         logger.info('Existing staff member invited to new venue', {
@@ -464,15 +471,20 @@ export async function acceptInvitation(
         }
       }
 
-      // Mark invitation as accepted
-      await tx.invitation.update({
-        where: { id: invitation.id },
+      // Mark invitation as accepted — only while it is STILL pending. A revocation that landed after the read above
+      // (the Free seat cap revokes invitations that no longer fit; admins revoke by hand) must win: abort the whole
+      // accept instead of overwriting REVOKED with ACCEPTED (Codex, 28-sep, reproduced).
+      const marked = await tx.invitation.updateMany({
+        where: { id: invitation.id, status: InvitationStatus.PENDING },
         data: {
           status: InvitationStatus.ACCEPTED,
           acceptedAt: new Date(),
           acceptedById: staff.id,
         },
       })
+      if (marked.count === 0) {
+        throw new AppError('La invitación ya no está disponible. Pide que te la envíen de nuevo.', 409)
+      }
 
       // Generate tokens for immediate login
       // We need a venue ID to generate access token, so we'll use the invitation venue or find user's first venue

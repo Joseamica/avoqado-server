@@ -100,10 +100,13 @@ export function _limpiarCacheDeCambiosDeContrasena(): void {
   cache.clear()
 }
 
-async function ultimoCambio(staffId: string): Promise<Corte | null> {
+async function ultimoCambio(staffId: string, opciones: { fresco?: boolean } = {}): Promise<Corte | null> {
   const ahora = Date.now()
   const enCache = cache.get(staffId)
-  if (enCache && enCache.expira > ahora) return enCache.corte
+  // `fresco`: las concesiones diferidas (canje de código/refresh del MCP, enlaces) NO pueden fiarse de
+  // una caché de 30 s: en esa ventana, tras recuperar la cuenta, un refresh viejo rotaba en uno nuevo
+  // con fecha posterior al corte y sobrevivía para siempre (Codex ronda 7, P1).
+  if (!opciones.fresco && enCache && enCache.expira > ahora) return enCache.corte
 
   const staff = await prisma.staff.findUnique({
     where: { id: staffId },
@@ -158,6 +161,15 @@ export async function motivoDeSesionInvalidada(
  *
  * `emitida` puede ser una fecha (columna `createdAt`, ms) o el `iat` de un JWT en segundos.
  */
+/**
+ * La emisión de una concesión firmada: su `emitidoMs` (milisegundos, lo que firmamos desde el 25-sep)
+ * o, en un enlace anterior, su `iat` en segundos. Con sólo el `iat`, un enlace emitido en el MISMO
+ * segundo que el corte pero DESPUÉS se rechazaba para siempre (Codex ronda 7, P2).
+ */
+export function emisionDelToken(token: { iat?: number; emitidoMs?: unknown }): Date | number | undefined {
+  return typeof token.emitidoMs === 'number' && Number.isFinite(token.emitidoMs) ? new Date(token.emitidoMs) : token.iat
+}
+
 export async function motivoDeConcesionInvalidada(
   staffId: string | undefined,
   emitida: Date | number | undefined,
@@ -166,7 +178,7 @@ export async function motivoDeConcesionInvalidada(
   const emitidaMs = emitida instanceof Date ? emitida.getTime() : typeof emitida === 'number' ? emitida * 1000 : NaN
   if (!Number.isFinite(emitidaMs)) return 'SESSIONS_REVOKED'
   try {
-    const corte = await ultimoCambio(staffId)
+    const corte = await ultimoCambio(staffId, { fresco: true })
     return corte && emitidaMs <= corte.fecha.getTime() ? corte.motivo : null
   } catch {
     return 'SESSIONS_REVOKED'
@@ -232,6 +244,10 @@ export async function revokeAllSessions(staffId: string): Promise<Date> {
  * habria un ciclo de imports (decision de la Task 4).
  */
 export async function cerrarSesionesNuevasPorCambioDeContrasena(staffId: string): Promise<void> {
+  // Los TRES caminos que cambian la contraseña (perfil, recuperación por correo, superadmin) pasan por
+  // aquí: olvidar el corte cacheado AQUÍ hace que las sesiones viejas mueran en la siguiente petición y
+  // no hasta 30 s después, sin depender de que cada llamador se acuerde (Codex ronda 7, P1).
+  olvidarCorteEnCache(staffId)
   return cerrarSesionesDeStaff(staffId, 'password_changed')
 }
 

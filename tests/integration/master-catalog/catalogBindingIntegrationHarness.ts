@@ -1,3 +1,4 @@
+const { isDisposableH1Url } = require('../../../scripts/h1-test-database.cjs')
 import type { PrismaClient } from '@prisma/client'
 
 type AcquireCatalogMutationLock = typeof import('@/services/master-catalog/catalogMutationLock.service').acquireCatalogMutationLock
@@ -12,12 +13,10 @@ export interface CatalogBindingWriterHarness {
 export function assertDisposableH1Database(): void {
   const effective = new URL(process.env.DATABASE_URL ?? '')
   const declared = new URL(process.env.TEST_DATABASE_URL ?? '')
-  const isDisposable = (candidate: URL): boolean =>
-    ['localhost', '127.0.0.1'].includes(candidate.hostname) && candidate.pathname === '/avoqado_h1a_test_20260808'
 
   // WHY: This guard runs before any runtime Prisma import. A poisoned shell
   // therefore cannot make prepared integration cleanup target dev or remote data.
-  if (!isDisposable(effective) || !isDisposable(declared) || declared.toString() !== effective.toString()) {
+  if (!isDisposableH1Url(effective) || !isDisposableH1Url(declared) || declared.toString() !== effective.toString()) {
     throw new Error('Task 8 integration requires the exact disposable local H1 database')
   }
 }

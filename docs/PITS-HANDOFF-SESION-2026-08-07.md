@@ -634,7 +634,7 @@ src/services/mobile/areaTicketV7.mobile.service.ts(2662,7): error TS2367: This c
 
 ### 4.3 Evidencia con `/full-testing` contra base y servidor LOCALES — ✅ VERIFICADO
 
-Base local: `postgresql://postgres:exitosoy777@localhost:5432/av-db-25`. Servidor en `localhost:3000`, dashboard en `localhost:5173`. Venue
+Base local: `postgresql://postgres:<contraseña>@localhost:5432/av-db-25`. Servidor en `localhost:3000`, dashboard en `localhost:5173`. Venue
 de prueba: `cmpe64yq2001f9k92m0lbhmf4` ("Restaurante El Atole", 48 insumos). Cuenta: `owner@owner.com` / `owner`.
 
 | Qué                                     | Resultado                                                                                                                                             |
@@ -911,13 +911,13 @@ npm run audit:permissions
 npx prisma migrate status
 
 # 6. ¿Está el entorno local arriba?
-PGPASSWORD=exitosoy777 psql -h localhost -U postgres -d av-db-25 -tA -c 'SELECT COUNT(*) FROM "Venue";'
+PGPASSWORD=<contraseña> psql -h localhost -U postgres -d av-db-25 -tA -c 'SELECT COUNT(*) FROM "Venue";'
 lsof -nP -iTCP -sTCP:LISTEN | grep -E ":(3000|5173) "
 ```
 
 ### 7.4 Datos útiles para probar
 
-- **Base local:** `postgresql://postgres:exitosoy777@localhost:5432/av-db-25`
+- **Base local:** `postgresql://postgres:<contraseña>@localhost:5432/av-db-25`
 - **Cuenta de prueba:** `owner@owner.com` / `owner`
 - **Venue con inventario:** `cmpe64yq2001f9k92m0lbhmf4` ("Restaurante El Atole", 48 insumos)
 - **Producción, SÓLO LECTURA:** `RENDER_DATABASE_URL` en `avoqado-server/.env`

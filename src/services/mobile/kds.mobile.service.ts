@@ -12,8 +12,11 @@ import { contexto, markDeliveryOrderReady } from '@/services/delivery-channels/c
 import type { CourierInfo } from '@/services/delivery-channels/core/types'
 import prisma from '../../utils/prismaClient'
 import { OrderStatus } from '@prisma/client'
-import type { KdsOrderStatus } from '@prisma/client'
-import { anexarCapacidades, ventasDeComandas, type EstadoRetiro, type VentaDeComanda } from './kdsCapacidades'
+import type { KdsOrderStatus, Prisma } from '@prisma/client'
+import { anexarCapacidades, anexarMesaYTiempos, ventasDeComandas, type EstadoRetiro, type VentaDeComanda } from './kdsCapacidades'
+import { toKdsModifierLabels } from '../kds/kdsModifierLabels'
+import { venueTienePantallaDeCocina } from '../kds/kitchenDisplayStations'
+import { authorKitchenTickets } from '../kds/kitchenTicketAuthoring.service'
 
 // Use string constants instead of Prisma enum to avoid runtime import issues with tsx
 const KdsStatus = {
@@ -24,43 +27,9 @@ const KdsStatus = {
 }
 const VALID_STATUSES = ['NEW', 'PREPARING', 'READY', 'COMPLETED']
 
-// MARK: - Modificadores: UNA sola forma para los dos productores
-
-/**
- * 🔴 `KdsOrderItem.modifiers` la escriben DOS productores y hasta el 2026-08-20 cada uno
- * guardaba una forma distinta: el POS `["Sin cebolla"]`, la ingesta de marketplace
- * `[{"name":"Extra queso","quantity":1}]`. El lector sólo hacía `JSON.parse`, así que la
- * diferencia llegaba entera a la cocina — verificado en una Sunmi D3 con un pedido real de
- * Uber: Android pintó el JSON crudo y iOS falló el cast a `[String]` y **perdió el
- * modificador sin dejar rastro**. Un modificador perdido es un platillo mal servido.
- *
- * El esquema no protege la FORMA de un valor serializado; sólo una función compartida lo
- * hace. Por eso los dos productores normalizan con ÉSTA antes de escribir —incluida
- * `deliveryOrderIngestion.service.ts`, que la importa— y el lector la vuelve a aplicar para
- * sanar las filas que ya se escribieron mal.
- */
-export type KdsModifierInput = string | { name?: string | null; quantity?: number | null } | null | undefined
-
-export function toKdsModifierLabels(modifiers: KdsModifierInput[] | null | undefined): string[] {
-  if (!Array.isArray(modifiers)) return []
-
-  return modifiers.reduce<string[]>((etiquetas, modificador) => {
-    if (typeof modificador === 'string') {
-      const texto = modificador.trim()
-      if (texto) etiquetas.push(texto)
-      return etiquetas
-    }
-
-    const nombre = modificador?.name?.trim()
-    // Sin nombre no hay nada que preparar: se descarta en vez de escribir "undefined" en la
-    // comanda, que es ruido que el cocinero tiene que interpretar a media comida.
-    if (!nombre) return etiquetas
-
-    const cantidad = modificador?.quantity ?? 1
-    etiquetas.push(cantidad > 1 ? `${cantidad}x ${nombre}` : nombre)
-    return etiquetas
-  }, [])
-}
+// La forma única de los modificadores vive en `services/kds/kdsModifierLabels` (también la usa el armado de
+// comandas del servidor). Se re-exporta para no romper a quien ya la importa de aquí.
+export { toKdsModifierLabels, type KdsModifierInput } from '../kds/kdsModifierLabels'
 
 /**
  * Lee la columna cruda. Tolera JSON corrupto A PROPÓSITO: `JSON.parse` suelto tiraba TODO el
@@ -113,6 +82,13 @@ export interface KdsOrderResponse {
   canCancelDelivery?: boolean
   deliveryOpInFlight?: string | null
   hasLineActionInProgress?: boolean
+  /** Etapa 3 (spec §6): el folio y la estación, para juntar por folio lo que llegó por WiFi y marcar LISTO sin red. */
+  sourceKey?: string | null
+  printStationId?: string | null
+  /** Salió en papel de respaldo (ISO). */
+  fallbackPrintedAt?: string | null
+  /** 3.6: la mesa de la cuenta («8»), para que la cocina lea «Mesa 8» y no «En tienda». `null` = sin mesa. */
+  tableNumber?: string | null
   items: Array<{
     id: string
     productName: string
@@ -124,6 +100,8 @@ export interface KdsOrderResponse {
     lineActionState?: EstadoRetiro | null
     lineActionAttempts?: number | null
     canRetryAt?: string | null
+    /** 3.6: el tiempo del platillo («Aperitivos»). `null` = sin tiempo (se prepara de inmediato). */
+    course?: string | null
   }>
   startedAt: string | null
   completedAt: string | null
@@ -152,23 +130,61 @@ function statusesDelFiltro(statusFilter?: string): KdsOrderStatus[] {
     .filter(s => VALID_STATUSES.includes(s)) as KdsOrderStatus[]
 }
 
-/** Cuántas comandas coinciden en total: lo que el tope deja fuera no se pierde en silencio. */
-export async function countKdsOrders(venueId: string, statusFilter?: string): Promise<number> {
-  return prisma.kdsOrder.count({ where: { venueId, status: { in: statusesDelFiltro(statusFilter) } } })
+/**
+ * Qué comandas ve un tablero (spec 2026-09-27 §3). Aplica a TODAS las listas y conteos, con o sin estación, para
+ * que las pantallas viejas tampoco vean lo impreso en papel ni lo anterior a prender la pantalla.
+ */
+async function filtroDelTablero(venueId: string, statuses: KdsOrderStatus[], stationId?: string): Promise<Prisma.KdsOrderWhereInput> {
+  let desde: Date | null
+  if (stationId) {
+    // SIN filtrar por `hasKitchenDisplay`: al apagar la pantalla su `kitchenDisplaySince` se conserva, y sin él el
+    // tablero perdía el filtro de fecha y se llenaba del rezago viejo «Sin estación».
+    const estacion = await prisma.printStation.findFirst({ where: { id: stationId, venueId }, select: { kitchenDisplaySince: true } })
+    // Estación inexistente o de otro negocio: no ve nada (nunca todo el venue).
+    if (!estacion) return { venueId, id: { in: [] } }
+    desde = estacion.kitchenDisplaySince
+  } else {
+    const pantallas = await prisma.printStation.findMany({
+      where: { venueId, hasKitchenDisplay: true },
+      select: { kitchenDisplaySince: true },
+      take: 50,
+    })
+    desde = pantallas.reduce<Date | null>(
+      (min, p) => (p.kitchenDisplaySince && (!min || p.kitchenDisplaySince < min) ? p.kitchenDisplaySince : min),
+      null,
+    )
+  }
+  const condiciones: Prisma.KdsOrderWhereInput[] = [{ fallbackPrintedAt: null }]
+  // Borrón y cuenta nueva: la fecha sólo esconde el REZAGO sin folio de antes de la etapa 3.
+  // Full-testing 27-sep: apagar→prender (o mover/borrar la estación) re-sella `kitchenDisplaySince`
+  // y eso NO puede esconder lo que el servidor ya armó — decisión del founder. Uber (sin folio) sigue
+  // exento por tipo; cualquier fila CON folio (`sourceKey`) queda exenta por folio.
+  if (desde) condiciones.push({ OR: [{ orderType: 'DELIVERY' }, { sourceKey: { not: null } }, { createdAt: { gte: desde } }] })
+  // Lo suyo, lo «Sin estación» y lo de una estación que ya no tiene pantalla activa (si no, nadie lo vería).
+  if (stationId) {
+    condiciones.push({
+      OR: [
+        { printStationId: stationId },
+        { printStationId: null },
+        { printStation: { OR: [{ hasKitchenDisplay: false }, { active: false }] } },
+      ],
+    })
+  }
+  return { venueId, status: { in: statuses }, AND: condiciones }
 }
 
-export async function listKdsOrders(venueId: string, statusFilter?: string): Promise<KdsOrderResponse[]> {
+/** Cuántas comandas coinciden en total: lo que el tope deja fuera no se pierde en silencio. */
+export async function countKdsOrders(venueId: string, statusFilter?: string, stationId?: string): Promise<number> {
+  return prisma.kdsOrder.count({ where: await filtroDelTablero(venueId, statusesDelFiltro(statusFilter), stationId) })
+}
+
+export async function listKdsOrders(venueId: string, statusFilter?: string, stationId?: string): Promise<KdsOrderResponse[]> {
   // Las MÁS RECIENTES primero para aplicar el tope — con un rezago acumulado, la cocina debe
   // seguir viendo lo que acaba de entrar, no lo de hace un mes — y luego se voltean para
   // entregarlas de la más vieja a la más nueva, como siempre. `id` desempata en el mismo instante.
   const recientes = await prisma.kdsOrder.findMany({
-    where: {
-      venueId,
-      status: { in: statusesDelFiltro(statusFilter) },
-    },
-    include: {
-      items: true,
-    },
+    where: await filtroDelTablero(venueId, statusesDelFiltro(statusFilter), stationId),
+    include: { items: true },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take: KDS_LIST_MAX,
   })
@@ -183,17 +199,70 @@ export async function listKdsOrders(venueId: string, statusFilter?: string): Pro
   return orders.map(o => formatKdsOrderConVenta(o, o.orderId ? ventas.get(o.orderId) : undefined))
 }
 
+/** «Recientes»: las últimas terminadas, para deshacer un LISTO por error (spec 2026-09-27 §7). */
+export const KDS_RECENT_MAX = 20
+const RECIENTES_VENTANA_MS = 60 * 60 * 1000
+
+export async function listRecentKdsOrders(venueId: string, stationId?: string): Promise<KdsOrderResponse[]> {
+  const base = await filtroDelTablero(venueId, [KdsStatus.COMPLETED] as KdsOrderStatus[], stationId)
+  const recientes = await prisma.kdsOrder.findMany({
+    // `items: { some: {} }`: una marca LISTO que llegó sin comanda (cabecera vacía) no se muestra.
+    where: { ...base, completedAt: { gte: new Date(Date.now() - RECIENTES_VENTANA_MS) }, items: { some: {} } },
+    include: { items: true },
+    orderBy: [{ completedAt: 'desc' }, { id: 'desc' }],
+    take: KDS_RECENT_MAX,
+  })
+  const ventas = await ventasDeComandas(prisma, venueId, recientes)
+  return recientes.map(o => formatKdsOrderConVenta(o, o.orderId ? ventas.get(o.orderId) : undefined))
+}
+
+/** «Deshacer»: una comanda terminada vuelve a la cocina como nueva. */
+export async function recallKdsOrder(venueId: string, kdsOrderId: string): Promise<KdsOrderResponse> {
+  const r = await prisma.kdsOrder.updateMany({
+    where: { id: kdsOrderId, venueId, status: KdsStatus.COMPLETED },
+    data: { status: KdsStatus.NEW, completedAt: null },
+  })
+  if (r.count === 0) throw new NotFoundError('No hay una comanda terminada con ese id para regresar')
+  const regresada = await prisma.kdsOrder.findUniqueOrThrow({ where: { id: kdsOrderId }, include: { items: true } })
+  logger.info(`KDS order #${regresada.orderNumber} regresada a la cocina (deshacer)`)
+  return comandaConVenta(venueId, regresada)
+}
+
+/** «Marcar todas listas» (acciones en lote, como Square). Tope de 100 por llamada. */
+export const KDS_BUMP_BATCH_MAX = 100
+
+export async function bumpKdsOrdersBatch(venueId: string, ids: string[]): Promise<{ completed: number }> {
+  const unicos = [...new Set(ids)].slice(0, KDS_BUMP_BATCH_MAX)
+  const pendientes = await prisma.kdsOrder.findMany({
+    where: { venueId, id: { in: unicos }, status: { not: KdsStatus.COMPLETED } },
+    select: { id: true, orderId: true, orderNumber: true },
+    take: KDS_BUMP_BATCH_MAX,
+  })
+  if (pendientes.length === 0) return { completed: 0 }
+  const r = await prisma.kdsOrder.updateMany({
+    where: { venueId, id: { in: pendientes.map(p => p.id) }, status: { not: KdsStatus.COMPLETED } },
+    data: { status: KdsStatus.COMPLETED, completedAt: new Date() },
+  })
+  // Igual que el bump de una: un pedido de reparto terminado avisa «listo» al proveedor (no-op para lo demás).
+  for (const p of pendientes) {
+    if (p.orderId) avisarListoAlMarketplace(venueId, p.orderId, p.orderNumber)
+  }
+  logger.info(`KDS: ${r.count} comandas terminadas en lote`, { venueId })
+  return { completed: r.count }
+}
+
 /**
  * La comanda con lo que depende de su VENTA, calculado en UN solo sitio (el tablero y la ruta
  * «no tengo este artículo» devuelven la misma comanda y no pueden contestar distinto).
- * `type === 'DELIVERY'` es lo que separa "llegó solo" de "lo mandó un mesero": sólo lo primero
+ * Un reparto de PROVEEDOR (`conProveedor`) es lo que separa "llegó solo" de "lo mandó un mesero": sólo lo primero
  * necesita que alguien reclame la impresión, y sólo un reparto PENDING necesita que lo acepten.
  * Un reparto trae además sus capacidades (spec «Apps»), opcionales y ausentes fuera de reparto.
  */
 export function formatKdsOrderConVenta(o: any, venta?: VentaDeComanda | null): KdsOrderResponse {
-  const esReparto = venta?.type === 'DELIVERY'
+  // Sólo el reparto de PROVEEDOR llegó solo: una «Entrega» marcada en la caja ya salió en papel al cobrarla.
+  const esReparto = venta?.type === 'DELIVERY' && venta.conProveedor
   const base = formatKdsOrder({ ...o, esDeMarketplace: esReparto }, esReparto && venta?.status === 'PENDING')
-  return venta ? anexarCapacidades(base, o, venta) : base
+  return venta ? anexarCapacidades(anexarMesaYTiempos(base, o, venta), o, venta) : base
 }
 
 /** La comanda recién escrita, con su venta: `PUT …/status` y `bump` contestan lo mismo que el tablero (una carga por lote). */
@@ -211,19 +280,9 @@ async function comandaConVenta(venueId: string, k: { orderId: string | null }): 
 
 // MARK: - Create KDS Order
 
-/**
- * ¿El negocio atiende alguna estación con PANTALLA de cocina? (spec 2026-09-24, etapa 1).
- * Sin ninguna estación ACTIVA con `hasKitchenDisplay`, las ventas de la caja no guardan comanda:
- * nadie la vería y se acumulaban (Testarudo llegó a 3,068). La hoja impresa no depende de esto.
- * `findFirst` con índice por venueId: una consulta acotada por venta.
- */
-export async function venueTienePantallaDeCocina(venueId: string): Promise<boolean> {
-  const estacion = await prisma.printStation.findFirst({
-    where: { venueId, active: true, hasKitchenDisplay: true },
-    select: { id: true },
-  })
-  return estacion !== null
-}
+// La regla vive en `services/kds/kitchenDisplayStations` (también la consultan cobros y rondas). Se re-exporta
+// para no romper a quien ya la importa de este módulo.
+export { venueTienePantallaDeCocina }
 
 /**
  * Create a new KDS order after payment succeeds.
@@ -243,29 +302,17 @@ export async function createKdsOrder(venueId: string, input: CreateKdsOrderInput
     return null
   }
 
-  const order = await prisma.kdsOrder.create({
-    data: {
-      venueId,
-      orderNumber: input.orderNumber,
-      orderType: input.orderType || 'DINE_IN',
-      orderId: input.orderId || null,
-      status: KdsStatus.NEW,
-      items: {
-        create: input.items.map(item => ({
-          productName: item.productName,
-          quantity: item.quantity,
-          modifiers: item.modifiers?.length ? JSON.stringify(toKdsModifierLabels(item.modifiers)) : null,
-          notes: item.notes || null,
-        })),
-      },
-    },
-    include: {
-      items: true,
-    },
-  })
-
-  logger.info(`KDS order created: #${order.orderNumber} for venue ${venueId}`)
-  return formatKdsOrder(order)
+  // Etapa 3 (spec 2026-09-27 §2): el SERVIDOR arma la comanda. Este POST lo siguen llamando apps viejas (Android,
+  // iOS y la caja de Windows) después de cobrar. Con la venta identificada se delega en el armado —idempotente,
+  // bajo candado—; sin venta NO se escribe nada: una fila suelta saldría en todas las pantallas junto a la oficial.
+  if (!input.orderId) return null
+  const venta = await prisma.order.findFirst({ where: { id: input.orderId, venueId }, select: { id: true } })
+  if (!venta) return null
+  const { ticketIds } = await authorKitchenTickets({ venueId, orderId: venta.id, trigger: 'LEGACY_POST' })
+  if (ticketIds.length === 0) return null
+  const primera = await prisma.kdsOrder.findUniqueOrThrow({ where: { id: ticketIds[0] }, include: { items: true } })
+  logger.info(`KDS: comanda oficial #${primera.orderNumber} armada desde el POST de una app vieja`, { venueId })
+  return formatKdsOrder(primera)
 }
 
 // MARK: - Update KDS Order Status
@@ -379,6 +426,9 @@ function formatKdsOrder(order: any, needsAcceptance = false): KdsOrderResponse {
     status: order.status,
     customerName: order.customerName ?? null,
     customerContact: order.customerContact ?? null,
+    sourceKey: order.sourceKey ?? null,
+    printStationId: order.printStationId ?? null,
+    fallbackPrintedAt: order.fallbackPrintedAt?.toISOString() ?? null,
     items: (order.items || []).map((item: any) => ({
       id: item.id,
       productName: item.productName,

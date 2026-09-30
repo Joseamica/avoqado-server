@@ -1,3 +1,4 @@
+const { isDisposableH1Url } = require('../../../scripts/h1-test-database.cjs')
 const { spawn, spawnSync } = require('node:child_process')
 const fs = require('node:fs')
 const os = require('node:os')
@@ -118,7 +119,7 @@ function assertedTestUrl() {
   if (!['localhost', '127.0.0.1'].includes(url.hostname)) {
     throw new Error(`H1 replay refuses non-local host ${url.hostname}`)
   }
-  if (url.pathname !== '/avoqado_h1a_test_20260808') {
+  if (!isDisposableH1Url(url)) {
     throw new Error(`H1 replay refuses database ${url.pathname}`)
   }
   if (process.env.USE_RENDER_DB !== 'false' || process.env.RENDER_DATABASE_URL) {
@@ -356,8 +357,8 @@ async function resetDatabase(url, harnessLock) {
   // the session lock outside reset closes the zero-session copy/deploy window.
   await waitForDatabaseQuiescence(databaseName, harnessLock)
 
-  await harnessLock.query(`DROP DATABASE IF EXISTS "avoqado_h1a_test_20260808"`)
-  await harnessLock.query(`CREATE DATABASE "avoqado_h1a_test_20260808"`)
+  await harnessLock.query(`DROP DATABASE IF EXISTS "${databaseName}"`)
+  await harnessLock.query(`CREATE DATABASE "${databaseName}"`)
 }
 
 async function lockSafetyMain() {

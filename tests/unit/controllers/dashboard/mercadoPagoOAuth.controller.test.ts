@@ -13,7 +13,10 @@ jest.mock('@/services/mercado-pago/oauth.service')
 jest.mock('@/services/mercado-pago/connection.service')
 jest.mock('@/services/staffOrganization.service')
 jest.mock('@/services/access/permisoDeCobros')
-jest.mock('@/utils/passwordChangeGuard', () => ({ motivoDeConcesionInvalidada: jest.fn() }))
+jest.mock('@/utils/passwordChangeGuard', () => ({
+  motivoDeConcesionInvalidada: jest.fn(),
+  emisionDelToken: jest.requireActual('@/utils/passwordChangeGuard').emisionDelToken,
+}))
 import { motivoDeConcesionInvalidada } from '@/utils/passwordChangeGuard'
 
 function buildRes(): Response {

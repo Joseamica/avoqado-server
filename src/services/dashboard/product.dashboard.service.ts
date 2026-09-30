@@ -5,6 +5,12 @@ import { deleteFileFromStorage } from '../storage.service'
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
 import { logAction } from './activity-log.service'
+import {
+  ensureQuantityInventoryRow,
+  inventoryMethodForNewProduct,
+  isNonInventoriable,
+  NON_INVENTORIABLE_MESSAGE,
+} from './quantityInventoryRow'
 import { areUnitsCompatible, convertUnit } from '../../utils/unitConversion'
 import type { CatalogActor } from '../../types/master-catalog'
 import {
@@ -74,6 +80,10 @@ export interface CreateProductDto {
 
   // Estación de impresión (ruteo de comandas)
   printStationId?: string | null
+
+  // Inventario (el esquema de alta ya los acepta; mismos tipos que UpdateProductDto)
+  trackInventory?: boolean
+  inventoryMethod?: 'QUANTITY' | 'RECIPE' | null
 }
 
 export interface UpdateProductDto {
@@ -141,14 +151,6 @@ export interface UpdateProductDto {
 export interface ReorderProductsDto {
   id: string
   displayOrder: number
-}
-
-export interface QuickAddProductDto {
-  barcode: string
-  name: string
-  price: number
-  categoryId?: string
-  trackInventory?: boolean
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -649,6 +651,13 @@ export async function createProduct(venueId: string, productData: CreateProductD
               duration: productFields.duration,
               bufferAfterMin: productFields.bufferAfterMin,
 
+              // Inventario: el esquema lo acepta y antes se tiraba (nacía sin inventario aunque se pidiera).
+              // Sólo viaja si se pidió: sin inventario, el alta queda idéntica (contrato H1A congelado).
+              ...(productFields.trackInventory === true && {
+                trackInventory: true,
+                inventoryMethod: inventoryMethodForNewProduct(true, productFields.inventoryMethod),
+              }),
+
               // Venta por peso: price is the price PER KG; unit pinned to KILOGRAM.
               soldByWeight: productFields.soldByWeight ?? false,
               ...(productFields.soldByWeight ? { unit: 'KILOGRAM' as const } : {}),
@@ -709,6 +718,8 @@ export async function createProduct(venueId: string, productData: CreateProductD
           traducirErrorDeIva(e)
           throw e
         }
+
+        await ensureQuantityInventoryRow(tx, product)
 
         // WHY: SERVICE callers have no Staff FK, so their durable provenance must
         // commit atomically with the Product instead of fabricating a HUMAN actor.
@@ -934,8 +945,9 @@ export async function updateProduct(
       ),
     )
 
+    let updated
     try {
-      return await tx.product.update({
+      updated = await tx.product.update({
         where: { id: productId },
         data: updateData,
         include: {
@@ -951,6 +963,10 @@ export async function updateProduct(
       traducirErrorDeIva(e)
       throw e
     }
+    // Con el estado FINAL (el PATCH parcial puede no traer `type`): una cita o un evento no se inventaría. Revierte todo.
+    if (isNonInventoriable(updated.type, updated.trackInventory)) throw new AppError(NON_INVENTORIABLE_MESSAGE, 400)
+    await ensureQuantityInventoryRow(tx, updated)
+    return updated
   })
 
   // 🔌 REAL-TIME: Broadcast product update via Socket.IO
@@ -1293,117 +1309,6 @@ export async function getProductByBarcode(venueId: string, barcode: string): Pro
     ...product,
     ...computeInventoryAvailability(product), // availableQuantity + limitingIngredient + insufficientIngredients
   }
-}
-
-/**
- * Create product quickly from barcode scan (Square POS pattern)
- *
- * ✅ BARCODE QUICK ADD: When scanning unknown barcode, create product on-the-fly
- * Creates minimal product with barcode as SKU
- */
-export async function createQuickAddProduct(venueId: string, quickAddData: QuickAddProductDto, actor: CatalogActor): Promise<Product> {
-  const { barcode, name, price, categoryId, trackInventory } = quickAddData
-
-  // ✅ CategoryId is required by the database schema
-  if (!categoryId) {
-    throw new AppError('categoryId is required for creating a product', 400)
-  }
-
-  // ✅ Check if product with this barcode already exists (check both SKU and GTIN)
-  const existing = await prisma.product.findFirst({
-    where: {
-      venueId,
-      OR: [{ sku: barcode }, { gtin: barcode }],
-    },
-  })
-
-  if (existing) {
-    throw new AppError(`Product with barcode ${barcode} already exists in venue ${venueId}`, 409)
-  }
-
-  const product = await prisma.$transaction(async tx => {
-    await assertLegacyCatalogGovernanceForVenue(tx, { venueId, operation: 'CREATE', willBeVendable: true, actor })
-    await assertLegacyProductReferencesForVenue(tx, { venueId, categoryId })
-    const maxOrder = await tx.product.findFirst({
-      where: { venueId },
-      orderBy: { displayOrder: 'desc' },
-      select: { displayOrder: true },
-    })
-    const displayOrder = (maxOrder?.displayOrder || 0) + 1
-    return tx.product.create({
-      data: {
-        name,
-        sku: barcode, // ✅ Barcode becomes the SKU
-        price,
-        venueId,
-        createdById: actor.type === 'HUMAN' ? actor.staffId : null,
-        categoryId, // Validated above, always present
-        type: ProductType.OTHER, // Default type for quick-add
-        trackInventory: trackInventory || false,
-        inventoryMethod: trackInventory ? 'QUANTITY' : null,
-        displayOrder,
-        active: true,
-      },
-      include: {
-        category: true,
-        inventory: true,
-        modifierGroups: {
-          include: {
-            group: {
-              include: {
-                modifiers: { where: { active: true } },
-              },
-            },
-          },
-        },
-      },
-    })
-  })
-
-  // 🔌 REAL-TIME: Broadcast product creation via Socket.IO
-  const broadcastingService = socketManager.getBroadcastingService()
-  if (broadcastingService) {
-    const productWithRelations = product as typeof product & {
-      category?: { name: string } | null
-      modifierGroups: Array<{ groupId: string }>
-    }
-    broadcastingService.broadcastMenuItemCreated(venueId, {
-      itemId: product.id,
-      itemName: product.name,
-      sku: product.sku,
-      categoryId: product.categoryId,
-      categoryName: productWithRelations.category?.name || '',
-      price: Number(product.price),
-      available: product.active,
-      imageUrl: product.imageUrl,
-      description: product.description,
-      modifierGroupIds: productWithRelations.modifierGroups.map(mg => mg.groupId),
-    })
-
-    broadcastingService.broadcastMenuUpdated(venueId, {
-      updateType: 'PARTIAL_UPDATE',
-      productIds: [product.id],
-      categoryIds: product.categoryId ? [product.categoryId] : [],
-      reason: 'ITEM_ADDED',
-    })
-
-    logger.info('🔌 Quick-add product created and broadcasted', {
-      venueId,
-      productId: product.id,
-      productName: product.name,
-      barcode,
-    })
-  }
-
-  logAction({
-    venueId,
-    action: 'PRODUCT_CREATED',
-    entity: 'Product',
-    entityId: product.id,
-    data: { name: product.name, source: 'quick-add' },
-  })
-
-  return product
 }
 
 // ═══════════════════════════════════════════════════════════════
