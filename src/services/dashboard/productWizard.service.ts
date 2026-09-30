@@ -4,7 +4,7 @@ import { Prisma, Unit } from '@prisma/client'
 import AppError from '../../errors/AppError'
 import { createRecipe } from './recipe.service'
 import { setProductInventoryMethod, InventoryMethod } from './productInventoryIntegration.service'
-import { ensureQuantityInventoryRow } from './quantityInventoryRow'
+import { ensureQuantityInventoryRow, isNonInventoriable, NON_INVENTORIABLE_MESSAGE } from './quantityInventoryRow'
 import logger from '@/config/logger'
 import { logAction } from './activity-log.service'
 import type { CatalogActor } from '../../types/master-catalog'
@@ -258,23 +258,6 @@ export async function setupSimpleStockStep3(venueId: string, productId: string, 
       await switchInventoryMethod(venueId, productId, 'QUANTITY', tx)
     }
 
-    // El producto PRIMERO (toma su candado de fila, como los demás escritores de la configuración) y
-    // queda «por cantidad» de verdad: antes sólo lo decía la respuesta, y un producto RECETA sin receta, o
-    // sin inventario, recibía un saldo que la venta ignoraba.
-    await tx.product.update({
-      where: { id: productId },
-      data: {
-        trackInventory: true,
-        inventoryMethod: 'QUANTITY',
-        cost: new Decimal(data.costPerUnit), // ✅ Save cost per unit
-        externalData: {
-          ...(product.externalData as any),
-          wizardCompleted: true,
-          inventoryConfigured: true,
-        },
-      },
-    })
-
     // La fila tiene que existir para poder tomar su candado; una existente no se toca.
     await tx.inventory.createMany({ data: [{ productId, venueId, currentStock: 0, minimumStock: 0 }], skipDuplicates: true })
     const [fila] = await tx.$queryRaw<Array<{ id: string; currentStock: Prisma.Decimal }>>`
@@ -307,6 +290,26 @@ export async function setupSimpleStockStep3(venueId: string, productId: string, 
         },
       })
     }
+
+    // El producto AL FINAL, como la entrada de mercancía (inventario → costo): con el orden al revés, una
+    // entrada del mismo producto a la vez se trababa con este paso (Postgres abortaba una de las dos).
+    // Y queda «por cantidad» de verdad: antes sólo lo decía la respuesta, y un producto RECETA sin
+    // receta, o sin inventario, recibía un saldo que la venta ignoraba.
+    const updated = await tx.product.update({
+      where: { id: productId },
+      data: {
+        trackInventory: true,
+        inventoryMethod: 'QUANTITY',
+        cost: new Decimal(data.costPerUnit), // ✅ Save cost per unit
+        externalData: {
+          ...(product.externalData as any),
+          wizardCompleted: true,
+          inventoryConfigured: true,
+        },
+      },
+    })
+    // Una clase o una cita no llevan existencias: se revierte todo el paso (misma regla que Artículos).
+    if (isNonInventoriable(updated.type, updated.trackInventory)) throw new AppError(NON_INVENTORIABLE_MESSAGE, 400)
   })
 
   return {

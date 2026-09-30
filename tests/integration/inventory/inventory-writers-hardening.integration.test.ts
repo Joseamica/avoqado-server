@@ -18,18 +18,24 @@ const humanActor = () => ({ type: 'HUMAN' as const, staffId, impersonating: fals
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
 /**
- * Barrera verificable (no un `sleep`): espera a que OTRA conexión esté BLOQUEADA en un candado
- * ejecutando una consulta que contenga alguno de los `patrones`. Así la prueba sabe que la operación
- * competidora llegó al punto de la carrera, en vez de suponerlo por tiempo.
+ * Barrera verificable (no un `sleep`): espera a que OTRA conexión esté bloqueada precisamente por la
+ * transacción competidora (`pid`). Así la prueba sabe que la operación llegó al punto de la carrera, y
+ * no la confunde con un bloqueo cualquiera de otra suite que corra a la par.
  */
-async function esperarBloqueo(...patrones: string[]): Promise<void> {
+async function esperarBloqueadoPor(pid: number): Promise<void> {
   for (let i = 0; i < 400; i++) {
-    const filas = await prisma.$queryRaw<Array<{ query: string }>>`
-      SELECT query FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`
-    if (filas.some(f => patrones.some(p => f.query.includes(p)))) return
+    const [fila] = await prisma.$queryRaw<Array<{ n: number }>>`
+      SELECT count(*)::int AS n FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids(pid))`
+    if (fila.n > 0) return
     await sleep(25)
   }
-  throw new Error(`ninguna conexión llegó a esperar un candado en: ${patrones.join(' | ')}`)
+  throw new Error(`nadie llegó a esperar a la transacción ${pid}`)
+}
+
+/** El `pid` de la conexión de una transacción: lo que la barrera usa para reconocerla. */
+async function pidDe(tx: Prisma.TransactionClient): Promise<number> {
+  const [fila] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
+  return fila.pid
 }
 
 let organizationId = ''
@@ -155,13 +161,13 @@ describe('paso 3 del asistente: saldo y kardex en UNA transacción', () => {
     const item = await porCantidadConFila(0)
     let liberar!: () => void
     const puerta = new Promise<void>(r => (liberar = r))
-    let avisarCandado!: () => void
-    const conCandado = new Promise<void>(r => (avisarCandado = r))
+    let avisarCandado!: (pid: number) => void
+    const conCandado = new Promise<number>(r => (avisarCandado = r))
     // Una venta que descuenta 1 y sostiene el candado de la fila hasta que la soltemos.
     const venta = prisma.$transaction(
       async tx => {
         await tx.$executeRaw`UPDATE "Inventory" SET "currentStock" = "currentStock" - 1 WHERE "productId" = ${item.id}`
-        avisarCandado()
+        avisarCandado(await pidDe(tx))
         const inv = await tx.inventory.findUniqueOrThrow({ where: { productId: item.id } })
         await tx.inventoryMovement.create({
           data: { inventoryId: inv.id, type: 'SALE', quantity: D(-1), previousStock: D(0), newStock: D(-1), reason: 'venta simultánea' },
@@ -170,11 +176,10 @@ describe('paso 3 del asistente: saldo y kardex en UNA transacción', () => {
       },
       { timeout: 20_000 },
     )
-    await conCandado
+    const competidor = await conCandado
     const paso3 = setupSimpleStockStep3(venueId, item.id, { initialStock: 12, reorderPoint: 2, costPerUnit: 20 })
-    // Espera en el INSERT o en el FOR UPDATE de la fila: cualquiera prueba que ya llegó a la carrera.
     try {
-      await esperarBloqueo('"Inventory"')
+      await esperarBloqueadoPor(competidor)
     } finally {
       liberar()
     }
@@ -280,20 +285,20 @@ describe('cambiar de RECETA a CANTIDAD con otro cambio a la vez', () => {
     let liberar!: () => void
     const puerta = new Promise<void>(r => (liberar = r))
     // Otro cambio que ya borró la receta y sostiene el candado hasta que lo soltemos.
-    let avisarCandado!: () => void
-    const conCandado = new Promise<void>(r => (avisarCandado = r))
+    let avisarCandado!: (pid: number) => void
+    const conCandado = new Promise<number>(r => (avisarCandado = r))
     const otro = prisma.$transaction(
       async tx => {
         await tx.recipe.delete({ where: { id: receta.id } })
-        avisarCandado()
+        avisarCandado(await pidDe(tx))
         await puerta
       },
       { timeout: 20_000 },
     )
-    await conCandado
+    const competidor = await conCandado
     const cambio = switchInventoryMethod(venueId, item.id, 'QUANTITY')
     try {
-      await esperarBloqueo('Recipe')
+      await esperarBloqueadoPor(competidor)
     } finally {
       liberar()
     }
@@ -430,23 +435,23 @@ describe('cambiar a RECETA mientras otro proceso rehace la fila de inventario', 
     const vieja = await prisma.inventory.findUniqueOrThrow({ where: { productId: item.id } })
     let liberar!: () => void
     const puerta = new Promise<void>(r => (liberar = r))
-    let avisarCandado!: () => void
-    const conCandado = new Promise<void>(r => (avisarCandado = r))
+    let avisarCandado!: (pid: number) => void
+    const conCandado = new Promise<number>(r => (avisarCandado = r))
     // Otro cambio (vuelta a «por cantidad») que ya reemplazó la fila y sostiene sus candados.
     const otro = prisma.$transaction(
       async tx => {
         await tx.product.update({ where: { id: item.id }, data: { trackInventory: true, inventoryMethod: 'QUANTITY' } })
         await tx.inventory.delete({ where: { id: vieja.id } })
         await tx.inventory.create({ data: { productId: item.id, venueId, currentStock: D(0) } })
-        avisarCandado()
+        avisarCandado(await pidDe(tx))
         await puerta
       },
       { timeout: 20_000 },
     )
-    await conCandado
+    const competidor = await conCandado
     const cambio = switchInventoryMethod(venueId, item.id, 'RECIPE')
     try {
-      await esperarBloqueo('"Product"', '"Inventory"')
+      await esperarBloqueadoPor(competidor)
     } finally {
       liberar()
     }
@@ -456,5 +461,50 @@ describe('cambiar a RECETA mientras otro proceso rehace la fila de inventario', 
     const p = await prisma.product.findUniqueOrThrow({ where: { id: item.id } })
     expect(p.inventoryMethod).toBe('RECIPE')
     expect(await prisma.inventory.count({ where: { productId: item.id } })).toBe(0)
+  })
+})
+
+describe('paso 3: tipos sin existencias y el orden de los candados', () => {
+  it('🔴 una CLASE no se vuelve «por cantidad» por el paso 3: 400 y nada escrito', async () => {
+    const clase = await prisma.product.create({
+      data: { venueId, categoryId, name: `Yoga ${randomUUID()}`, sku: randomUUID(), price: D(150), type: 'CLASS' },
+    })
+
+    await expect(setupSimpleStockStep3(venueId, clase.id, { initialStock: 5, reorderPoint: 1, costPerUnit: 10 })).rejects.toMatchObject({
+      statusCode: 400,
+    })
+
+    const p = await prisma.product.findUniqueOrThrow({ where: { id: clase.id } })
+    expect(p.trackInventory).toBe(false)
+    expect(p.inventoryMethod).toBeNull()
+    expect(await prisma.inventory.count({ where: { productId: clase.id } })).toBe(0)
+  })
+
+  it('🔴 una entrada de mercancía a la vez (inventario y luego costo) no se traba con el paso 3', async () => {
+    const item = await porCantidadConFila(4)
+    let liberar!: () => void
+    const puerta = new Promise<void>(r => (liberar = r))
+    let avisarCandado!: (pid: number) => void
+    const conCandado = new Promise<number>(r => (avisarCandado = r))
+    // Como `adjustInventoryStockInTx` con PURCHASE: primero la fila de inventario, al final el costo.
+    const entrada = prisma.$transaction(
+      async tx => {
+        await tx.$executeRaw`UPDATE "Inventory" SET "currentStock" = "currentStock" + 2 WHERE "productId" = ${item.id}`
+        avisarCandado(await pidDe(tx))
+        await puerta
+        await tx.product.update({ where: { id: item.id }, data: { cost: D(18) } })
+      },
+      { timeout: 20_000 },
+    )
+    const competidor = await conCandado
+    const paso3 = setupSimpleStockStep3(venueId, item.id, { initialStock: 9, reorderPoint: 1, costPerUnit: 20 })
+    try {
+      await esperarBloqueadoPor(competidor)
+    } finally {
+      liberar()
+    }
+
+    await expect(entrada).resolves.toBeUndefined()
+    await expect(paso3).resolves.toMatchObject({ success: true })
   })
 })
