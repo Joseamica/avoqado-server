@@ -259,22 +259,33 @@ describe('processRappiEvent', () => {
 
   // H6: el filtro va EN el UPDATE (atómico). Un PENDING pausado se saltaba la confirmación del aprovisionamiento,
   // y un DISABLED pausado eludía el guard de pedidos (que sólo rechaza DISABLED).
-  it('enabled:false sobre un canal que NO está ACTIVE (PENDING, DISABLED, PAUSED) no lo toca, y lo dice', async () => {
-    ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
-      fila({
-        eventType: 'STORE_CONNECTIVITY',
-        payload: { external_store_id: '900105814', enabled: false },
-        channelLink: { ...fila().channelLink, status: 'PENDING' },
-      }),
-    )
-    ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+  it.each(['PENDING', 'DISABLED', 'PAUSED'])(
+    'enabled:false sobre un canal %s no lo toca: el filtro ACTIVE va EN el UPDATE',
+    async status => {
+      ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
+        fila({
+          eventType: 'STORE_CONNECTIVITY',
+          payload: { external_store_id: '900105814', enabled: false },
+          channelLink: { ...fila().channelLink, status },
+        }),
+      )
+      // Como la base: sin filtro de estado se escribe cualquier fila; con él, sólo la que coincide.
+      ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockImplementation(async ({ where }: any) => ({
+        count: where.status === undefined || where.status === status ? 1 : 0,
+      }))
 
-    const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
 
-    expect(r.outcome).toBe('STORE_STATE')
-    expect(prisma.deliveryChannelLink.update).not.toHaveBeenCalled()
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('no estaba ACTIVE'), expect.objectContaining({ status: 'PENDING' }))
-  })
+      expect(r.outcome).toBe('STORE_STATE')
+      expect(prisma.deliveryChannelLink.updateMany).toHaveBeenCalledWith({
+        where: { id: 'link1', status: 'ACTIVE' },
+        data: { status: 'PAUSED' },
+      })
+      expect(prisma.deliveryChannelLink.update).not.toHaveBeenCalled()
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('no estaba ACTIVE'), expect.objectContaining({ status }))
+      expect(logger.error).not.toHaveBeenCalled()
+    },
+  )
 
   it('enabled:true NO reactiva solo — podría reabrir la tienda que el dueño pausó a propósito', async () => {
     ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(

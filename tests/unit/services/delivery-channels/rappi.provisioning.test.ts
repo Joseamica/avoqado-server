@@ -328,10 +328,9 @@ describe('confirmarTienda', () => {
   it('la promoción escribe DELIVERY_CHANNEL_CONNECTED una sola vez, con quien inició la conexión', async () => {
     sembrar({ staffId: 's1', environment: 'SANDBOX' })
     reclamada()
-    ;(logAction as jest.Mock).mockImplementationOnce(async () => {
-      expect(db.links.get('10')!.status).toBe('ACTIVE') // ya confirmado: el log no puede adelantarse al commit
-    })
+    const vistas = txAbiertasAlLoguear() // el log no puede ir dentro de la transacción que promueve
     expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, deps())).toBe('PROMOTED')
+    expect(vistas).toEqual([0])
     expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, deps())).toBe('IGNORED')
     expect(logAction).toHaveBeenCalledTimes(1)
     expect(logAction).toHaveBeenCalledWith({

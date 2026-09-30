@@ -12,6 +12,7 @@ import {
   INTERVALO_SONDEO_MS,
   llamarRappi,
   RappiEscrituraBloqueadaError,
+  TIMEOUT_RAPPI_MS,
 } from '../../../../src/services/delivery-channels/providers/rappi/rappi.http'
 import { _resetRappiTokenCacheForTests } from '../../../../src/services/delivery-channels/providers/rappi/rappi.token'
 
@@ -129,15 +130,28 @@ describe('llamarRappi', () => {
   })
 
   // H3: sin techo, una llamada colgada sostenía la pasada de la reconciliación (y detrás de ella, los pedidos).
-  it('🔴 cada petición lleva su timeout, y uno vencido sale como un fallo de red (lanza), no como una respuesta', async () => {
-    const d = deps()
-    await llamarRappi(d, { superficie: 'integrations', metodo: 'GET', ruta: '/orders' })
-    expect((d.fetchImpl as jest.Mock).mock.calls[0][1].signal).toBeInstanceOf(AbortSignal)
-
-    const vencida = jest.fn().mockRejectedValue(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
-    await expect(llamarRappi(deps({ fetchImpl: vencida }), { superficie: 'integrations', metodo: 'GET', ruta: '/orders' })).rejects.toThrow(
-      /timeout/,
-    )
+  it('🔴 cada petición lleva AbortSignal.timeout(10 s), y al vencer sale como un fallo de red (lanza), no como una respuesta', async () => {
+    const real = AbortSignal.timeout.bind(AbortSignal)
+    const espia = jest.spyOn(AbortSignal, 'timeout').mockImplementation(() => real(5)) // vence ya: la prueba no espera 10 s
+    try {
+      // El fetch falla SÓLO si su señal se aborta: con una señal que nunca vence, esta prueba se queda colgada.
+      const fetchImpl = jest.fn(
+        (_url: string, init: RequestInit) =>
+          new Promise<Response>((_ok, rechazar) => init.signal?.addEventListener('abort', () => rechazar(init.signal?.reason))),
+      )
+      await expect(
+        llamarRappi(deps({ fetchImpl: fetchImpl as unknown as typeof fetch }), {
+          superficie: 'integrations',
+          metodo: 'GET',
+          ruta: '/orders',
+        }),
+      ).rejects.toThrow(/timeout/i)
+      expect(espia).toHaveBeenCalledWith(10_000)
+      expect(TIMEOUT_RAPPI_MS).toBe(10_000)
+      expect(fetchImpl.mock.calls[0][1].signal).toBe(espia.mock.results[0].value)
+    } finally {
+      espia.mockRestore()
+    }
   })
 
   it('una escritura AUTORIZADA sí sale, con cuerpo JSON', async () => {
