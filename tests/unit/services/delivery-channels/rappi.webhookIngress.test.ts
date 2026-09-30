@@ -141,6 +141,15 @@ describe('llaveDeDeduplicacion', () => {
     // …y el reenvío del MISMO aviso sí deduplica.
     expect(llaveDeDeduplicacion('STORE_PROVISIONING_STATUS', lote('b-1'), 't=1000,sign=y')).toBe(a)
   })
+
+  // Rappi no garantiza un solo aviso completo por lote: si manda dos fragmentos distintos del MISMO lote y
+  // operación en el mismo segundo, el segundo no puede tirarse como duplicado (sus tiendas no se confirmarían).
+  it('dos cuerpos DISTINTOS del mismo lote, operación y segundo no chocan; el mismo cuerpo sí deduplica', () => {
+    const fragmento = (storeId: string) => ({ batchId: 'b-1', operation: 'PROVISION', results: [{ storeId, status: 'ACTIVE' }] })
+    const a = llaveDeDeduplicacion('STORE_PROVISIONING_STATUS', fragmento('10'), 't=1000,sign=x')
+    expect(llaveDeDeduplicacion('STORE_PROVISIONING_STATUS', fragmento('11'), 't=1000,sign=x')).not.toBe(a)
+    expect(llaveDeDeduplicacion('STORE_PROVISIONING_STATUS', fragmento('10'), 't=1000,sign=z')).toBe(a)
+  })
 })
 
 describe('persistRappiWebhookEvent', () => {

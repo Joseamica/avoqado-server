@@ -23,6 +23,7 @@
  * `DeliveryChannelLink` — meterlos ahí implicaría copiar el mismo secreto en cada venue y
  * tener que rotarlo N veces.
  */
+import crypto from 'crypto'
 import { DeliveryOrderEventStatus, DeliveryProvider, Prisma } from '@prisma/client'
 
 import prisma from '../../../../utils/prismaClient'
@@ -137,13 +138,16 @@ interface CuerpoRappi {
  *
  * Y un caso aparte, antes que las tres: `STORE_PROVISIONING_STATUS` no trae tienda ni pedido de
  * primer nivel. Su identidad es el LOTE (+ la operación, + el timestamp de la firma): con sólo el
- * timestamp, dos lotes firmados en el mismo segundo colisionaban y el segundo se tiraba.
+ * timestamp, dos lotes firmados en el mismo segundo colisionaban y el segundo se tiraba. Más una
+ * huella corta del cuerpo: Rappi no garantiza un solo aviso completo por lote, y dos fragmentos
+ * distintos en el mismo segundo chocaban igual. El reenvío del MISMO cuerpo sigue deduplicando.
  */
 export function llaveDeDeduplicacion(evento: string, payload: unknown, signatureHeader: string | undefined): string {
   if (evento === RAPPI_EVENTS.STORE_PROVISIONING_STATUS) {
     const { batchId, operation } = leerEstadoAprovisionamiento(payload)
     const t = parseRappiSignatureHeader(signatureHeader)?.timestamp ?? 'sin-t'
-    return `RAPPI:STORE_PROVISIONING_STATUS:${batchId ?? 'sin-lote'}:${operation ?? 'sin-op'}:t${t}`
+    const huella = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex').slice(0, 16)
+    return `RAPPI:STORE_PROVISIONING_STATUS:${batchId ?? 'sin-lote'}:${operation ?? 'sin-op'}:t${t}:${huella}`
   }
 
   const identidad = rappiAdapter.extractIdentity(payload)
