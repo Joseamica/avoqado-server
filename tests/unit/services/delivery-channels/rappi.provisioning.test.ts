@@ -20,9 +20,28 @@ const p = prisma as any
 const L = p.deliveryChannelLink
 const I = p.deliveryConnectIntent
 
+const txOriginal = p.$transaction.getMockImplementation()
 beforeEach(() => {
   db = crearDbFalsa()
+  p.$transaction.mockImplementation(txOriginal)
+  ;(logAction as jest.Mock).mockReset()
 })
+
+/** Cuántas transacciones había ABIERTAS cada vez que se llamó a `logAction`: la bitácora va después del commit. */
+function txAbiertasAlLoguear(): number[] {
+  let abiertas = 0
+  const vistas: number[] = []
+  p.$transaction.mockImplementation(async (cb: (tx: unknown) => unknown) => {
+    abiertas++
+    try {
+      return await txOriginal(cb)
+    } finally {
+      abiertas--
+    }
+  })
+  ;(logAction as jest.Mock).mockImplementation(async () => void vistas.push(abiertas))
+  return vistas
+}
 
 function sembrar(over: Fila = {}): never {
   const i = {
@@ -439,6 +458,35 @@ describe('confirmarTienda', () => {
       vinculo('10', { status: 'ACTIVE', config: { rappiProvisioning: { intentId: 'i1', since: 'x', integrationId: 'int10' } } })
       expect(await baja({ integrationId: 'de-otra' })).toBe('IGNORED')
       expect(db.links.get('10')!.status).toBe('ACTIVE')
+      expect(logAction).not.toHaveBeenCalled()
+    })
+
+    // N4: el 202 y su ACTIVE pueden correlacionarse sólo por lote, sin integrationId (o el vínculo es manual). Comparar
+    // contra `undefined` rechazaba la baja y el canal seguía ACTIVE: sólo se rechaza si conocemos LOS DOS ids.
+    it.each([
+      ['sin integrationId guardado', { rappiProvisioning: { intentId: 'i1', since: 'x', confirmedAt: 'y' } }],
+      ['sin reclamación (vínculo manual)', null],
+    ])('aviso CON integrationId y nosotros %s: aplica por proveedor + tienda', async (_n, config) => {
+      vinculo('10', { status: 'ACTIVE', config })
+      expect(await baja({ integrationId: 'int10' })).toBe('DISABLED')
+      expect(db.links.get('10')!.status).toBe('DISABLED')
+    })
+
+    // N5: el dueño ve su canal apagado; la bitácora tiene que decir cuándo y por qué — sólo si de verdad se apagó.
+    it('una baja efectiva queda en ActivityLog, con origen Rappi y DESPUÉS del commit', async () => {
+      const vistas = txAbiertasAlLoguear()
+      vinculo('10', { status: 'PAUSED' })
+      expect(await baja()).toBe('DISABLED')
+      expect(logAction).toHaveBeenCalledTimes(1)
+      expect(logAction).toHaveBeenCalledWith({
+        staffId: null,
+        venueId: 'v1',
+        action: 'DELIVERY_CHANNEL_DISCONNECTED',
+        entity: 'DeliveryChannelLink',
+        entityId: 'x10',
+        data: { provider: 'RAPPI', externalLocationId: '10', origen: 'RAPPI_DEPROVISION', statusPrevio: 'PAUSED', batchId: 'lote-de-baja' },
+      })
+      expect(vistas).toEqual([0])
     })
 
     it('un PENDING sigue el camino de siempre: sin nuestro lote, IGNORED y no se toca', async () => {

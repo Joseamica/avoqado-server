@@ -351,24 +351,30 @@ function sinConfirmar(
 /**
  * La baja que pide RAPPI (esta rama nunca da de baja una tienda): `DEPROVISION` + `INACTIVE` de una tienda
  * conectada (ACTIVE o PAUSED) la deja DISABLED — si no, seguiría figurando conectada sin recibir nada. No hay
- * lote nuestro que probar: basta la tienda (el webhook viene firmado) y, si el aviso trae `integrationId`, que
- * sea el que guardamos. `null` = no aplica, y la confirmación sigue su camino de siempre (un PENDING, igual).
+ * lote nuestro que probar: basta la tienda (el webhook viene firmado). El `integrationId` sólo la descarta si
+ * conocemos LOS DOS y difieren: un vínculo confirmado sólo por lote, o manual, no lo guarda.
+ * `null` = no aplica, y la confirmación sigue su camino de siempre (un PENDING, igual).
  */
 async function bajaDeRappi(r: ResultadoRappiTienda & { batchId?: string }): Promise<'DISABLED' | null> {
   const fila = await prisma.$transaction(async tx => {
     const f = await leerVinculo(tx, r.storeId)
     if (f?.status !== DeliveryChannelStatus.ACTIVE && f?.status !== DeliveryChannelStatus.PAUSED) return null
-    if (r.integrationId && r.integrationId !== aprov(f.config)?.integrationId) return null
+    const nuestro = aprov(f.config)?.integrationId
+    if (r.integrationId && nuestro && r.integrationId !== nuestro) return null
     await tx.deliveryChannelLink.update({ where: { id: f.id }, data: { status: DeliveryChannelStatus.DISABLED } })
     return f
   })
   if (!fila) return null
-  logger.error('🚨 [Rappi] Rappi dio de BAJA la tienda — canal deshabilitado', {
-    storeId: r.storeId,
-    linkId: fila.id,
+  const datos = { storeId: r.storeId, linkId: fila.id, venueId: fila.venueId, statusPrevio: fila.status, batchId: r.batchId }
+  logger.error('🚨 [Rappi] Rappi dio de BAJA la tienda — canal deshabilitado', datos)
+  // Después del commit y sólo si se apagó: el dueño ve su canal DISABLED y la bitácora dice cuándo y por qué.
+  void logAction({
+    staffId: null, // nadie de Avoqado: lo pidió Rappi
     venueId: fila.venueId,
-    statusPrevio: fila.status,
-    batchId: r.batchId,
+    action: 'DELIVERY_CHANNEL_DISCONNECTED',
+    entity: 'DeliveryChannelLink',
+    entityId: fila.id,
+    data: { provider: 'RAPPI', externalLocationId: r.storeId, origen: 'RAPPI_DEPROVISION', statusPrevio: fila.status, batchId: r.batchId },
   })
   return 'DISABLED'
 }
