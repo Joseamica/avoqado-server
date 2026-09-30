@@ -36,7 +36,7 @@ import {
   type TiendaRappi,
 } from './rappi.selfOnboarding'
 import { RAPPI_EVENTS } from './rappi.adapter'
-import { RUTA_POR_EVENTO } from './rappi.webhookIngress'
+import { RUTA_POR_EVENTO, secretosDelEvento } from './rappi.webhookIngress'
 import type { DenyReason } from '../../core/types'
 
 const API = '/api/v2/restaurants-integrations-public-api'
@@ -255,15 +255,26 @@ function baseDeWebhooksRappi(): string {
   return baseHttpValida('RAPPI_WEBHOOK_BASE_URL', env.RAPPI_WEBHOOK_BASE_URL)
 }
 
+/** Eventos cuya URL es POR TIENDA. `STORE_PROVISIONING_STATUS` es por integración: no va aquí. */
+const EVENTOS_POR_TIENDA = Object.entries(RUTA_POR_EVENTO).filter(([, ev]) => ev !== RAPPI_EVENTS.STORE_PROVISIONING_STATUS)
+
 /**
  * 🔴 Todo lo que el self-onboarding va a necesitar, validado ANTES de crear el intent. Sin esto, una base de
  * webhooks faltante se descubría hasta suscribir: Rappi ya había aprovisionado la tienda y ésta se quedaba sin
  * recibir pedidos. Devuelve la base del enlace de inicio — la MISMA de la `redirect_uri` registrada en Rappi.
+ * Incluye el secreto de CADA webhook que la tienda va a recibir (la misma lista que `suscribirTiendaAEventos`,
+ * más el aviso de aprovisionamiento): Rappi acepta la suscripción aunque nos falte, y luego nuestro endpoint le
+ * contesta 401 a cada pedido.
  */
 export function preflightSelfOnboardingRappi(): string {
   const callback = redirectUriRappi()
   apiBaseSelfOnboarding()
   baseDeWebhooksRappi()
+  const eventos = [RAPPI_EVENTS.STORE_PROVISIONING_STATUS, ...EVENTOS_POR_TIENDA.map(([, ev]) => ev)]
+  const sinSecreto = eventos.filter(ev => secretosDelEvento(env.RAPPI_WEBHOOK_SECRETS, ev).length === 0)
+  if (sinSecreto.length) {
+    throw new Error(`Falta en RAPPI_WEBHOOK_SECRETS el secreto de ${sinSecreto.join(', ')} (Rappi lo entrega al registrar cada webhook).`)
+  }
   return callback.slice(0, -RUTA_CALLBACK.length)
 }
 
@@ -321,9 +332,6 @@ export async function aprovisionarTiendasRappi(
   })
   return leerRespuestaAprovisionamiento(r.status, r.raw, pedidas)
 }
-
-/** Eventos cuya URL es POR TIENDA. `STORE_PROVISIONING_STATUS` es por integración: no va aquí. */
-const EVENTOS_POR_TIENDA = Object.entries(RUTA_POR_EVENTO).filter(([, ev]) => ev !== RAPPI_EVENTS.STORE_PROVISIONING_STATUS)
 
 /**
  * 🔴 El paso que se olvida: una tienda aprovisionada pero sin suscribir a cada webhook queda

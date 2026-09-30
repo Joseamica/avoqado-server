@@ -6,6 +6,22 @@
  * pruebas; esto cubre lo único que ellas no ven: que el cliente las use. El cliente importa `@/config/env`
  * (que hace `process.exit` bajo Jest), así que aquí el env se sustituye por un objeto.
  */
+/** Los ONCE webhooks, escritos a mano: cada uno necesita su secreto o nuestro endpoint le contesta 401. */
+const TODOS_LOS_EVENTOS = [
+  'NEW_ORDER',
+  'NEW_ORDER_SCHEDULED',
+  'NEW_ORDER_SCHEDULED_CANCELLED',
+  'ORDER_EVENT_CANCEL',
+  'ORDER_OTHER_EVENT',
+  'MENU_APPROVED',
+  'MENU_REJECTED',
+  'PING',
+  'STORE_CONNECTIVITY',
+  'ORDER_RT_TRACKING',
+  'STORE_PROVISIONING_STATUS',
+]
+const secretos = (sin: string[] = []) =>
+  JSON.stringify(Object.fromEntries(TODOS_LOS_EVENTOS.filter(e => !sin.includes(e)).map(e => [e, `secreto-${e}`])))
 const mockEnv: Record<string, string | undefined> = {
   RAPPI_ENVIRONMENT: 'SANDBOX',
   RAPPI_COUNTRY: 'MX',
@@ -66,6 +82,7 @@ describe('rappi.client — self-onboarding', () => {
     mockEnv.RAPPI_WRITABLE_STORE_IDS_SANDBOX = '10,11'
     mockEnv.RAPPI_WEBHOOK_BASE_URL = 'https://api.ejemplo.test'
     mockEnv.RAPPI_OAUTH_REDIRECT_BASE = 'https://api.ejemplo.test'
+    mockEnv.RAPPI_WEBHOOK_SECRETS = secretos()
   })
 
   it('aprovisionar: host del self-onboarding, dos headers y el cuerpo con cancellation_events (R1, R2)', async () => {
@@ -208,6 +225,17 @@ describe('rappi.client — self-onboarding', () => {
       ['sin RAPPI_OAUTH_REDIRECT_BASE', { RAPPI_OAUTH_REDIRECT_BASE: undefined }, /Falta RAPPI_OAUTH_REDIRECT_BASE/],
       ['host del self-onboarding inválido', { RAPPI_SELF_ONBOARDING_API_BASE: 'host' }, /RAPPI_SELF_ONBOARDING_API_BASE/],
       ['PRODUCTION sin host del self-onboarding', { RAPPI_ENVIRONMENT: 'PRODUCTION' }, /Falta RAPPI_SELF_ONBOARDING_API_BASE/],
+      // H7: Rappi acepta la suscripción aunque nos falte el secreto, y luego nuestro endpoint le contesta 401 a cada
+      // pedido — la tienda queda «conectada» y sorda. Se niega ANTES de crear la intención.
+      ['sin el secreto de NEW_ORDER', { RAPPI_WEBHOOK_SECRETS: secretos(['NEW_ORDER']) }, /RAPPI_WEBHOOK_SECRETS.*NEW_ORDER/],
+      ['sin el secreto de PING', { RAPPI_WEBHOOK_SECRETS: secretos(['PING']) }, /RAPPI_WEBHOOK_SECRETS.*PING/],
+      [
+        'sin el secreto del aviso de aprovisionamiento',
+        { RAPPI_WEBHOOK_SECRETS: secretos(['STORE_PROVISIONING_STATUS']) },
+        /RAPPI_WEBHOOK_SECRETS.*STORE_PROVISIONING_STATUS/,
+      ],
+      ['RAPPI_WEBHOOK_SECRETS ilegible', { RAPPI_WEBHOOK_SECRETS: '{no es json' }, /RAPPI_WEBHOOK_SECRETS/],
+      ['sin RAPPI_WEBHOOK_SECRETS', { RAPPI_WEBHOOK_SECRETS: undefined }, /RAPPI_WEBHOOK_SECRETS/],
     ])('%s ⇒ se niega', (_n, cambio, error) => {
       Object.assign(mockEnv, cambio)
       expect(() => preflightSelfOnboardingRappi()).toThrow(error)
