@@ -1,5 +1,5 @@
 // El servicio compartido de intents importa el env al cargarse; el objeto vive DENTRO de la fábrica (TDZ).
-jest.mock('@/config/env', () => ({ env: { RAPPI_CONNECT_SIGNING_KEY: 'k'.repeat(40), RAPPI_OAUTH_REDIRECT_BASE: 'https://api.test//' } }))
+jest.mock('@/config/env', () => ({ env: { RAPPI_CONNECT_SIGNING_KEY: 'k'.repeat(40) } }))
 jest.mock('../../../../src/services/delivery-channels/providers/rappi/rappi.client', () => ({
   canjearCodigoRappi: jest.fn(),
   tiendasDelComercio: jest.fn(),
@@ -8,7 +8,7 @@ jest.mock('../../../../src/services/delivery-channels/providers/rappi/rappi.clie
   tiendasEscribiblesRappi: () => ['10', '11'],
   getRappiEnvironment: () => 'SANDBOX',
   clientIdRappi: () => 'cid',
-  redirectUriRappi: () => 'https://api.test/api/v1/delivery/rappi/oauth/callback',
+  redirectUriRappi: jest.fn(() => 'https://api.test/api/v1/delivery/rappi/oauth/callback'),
 }))
 jest.mock('../../../../src/services/delivery-channels/providers/rappi/rappi.connect', () => ({
   ...jest.requireActual('../../../../src/services/delivery-channels/providers/rappi/rappi.connect'),
@@ -16,6 +16,7 @@ jest.mock('../../../../src/services/delivery-channels/providers/rappi/rappi.conn
 }))
 
 import prisma from '../../../../src/utils/prismaClient'
+import { crearDbFalsa, type DbFalsa, type Fila } from '../../../__helpers__/rappiDbFake'
 import * as ctrl from '../../../../src/controllers/delivery-channels/rappi.oauth.controller'
 import { getRappiConnectUrl } from '../../../../src/controllers/delivery-channels/deliveryChannels.controller'
 import {
@@ -27,69 +28,26 @@ import {
 import * as rappiClient from '../../../../src/services/delivery-channels/providers/rappi/rappi.client'
 
 const cliente = rappiClient as unknown as Record<
-  'canjearCodigoRappi' | 'tiendasDelComercio' | 'aprovisionarTiendasRappi' | 'suscribirTiendaAEventos',
+  'canjearCodigoRappi' | 'tiendasDelComercio' | 'aprovisionarTiendasRappi' | 'suscribirTiendaAEventos' | 'redirectUriRappi',
   jest.Mock
 >
 const deps = { llave: 'k'.repeat(40), ambiente: 'SANDBOX' as const, clientId: 'cid' }
 
-/**
- * Base EN MEMORIA (la misma forma que la prueba de `rappi.provisioning`): el aprovisionamiento y la
- * confirmación corren DE VERDAD, así «aprovisiona una vez» y «se promueve» se miden en la base, no en
- * un mock que devuelva lo que la prueba espera (R14).
- */
-type Fila = Record<string, any>
-const db = { links: new Map<string, Fila>(), intents: new Map<string, Fila>() }
+// Base en memoria compartida con la prueba de `rappi.provisioning`, que aquí corre DE VERDAD: «aprovisiona
+// una vez» y «se promueve» se miden en la base, no en un mock que devuelva lo que la prueba espera (R14).
+let db: DbFalsa
 const p = prisma as any
-const L = p.deliveryChannelLink
 const I = p.deliveryConnectIntent
-const esSql = (v: any): v is { sql: string; values: unknown[] } => !!v && Array.isArray(v.values) && Array.isArray(v.strings)
-const porId = (id: string) => [...db.links.values()].find(f => f.id === id) as Fila
+
+// El freno del re-chequeo (30 s por intent) vive en memoria del módulo: cada prueba corre un minuto
+// «después» de la anterior, así una no hereda el freno de otra.
+let reloj = Date.now()
+afterAll(() => jest.restoreAllMocks())
 
 beforeEach(() => {
-  db.links.clear()
-  db.intents.clear()
-  let n = 0
-  p.$queryRaw.mockReset().mockImplementation(async (_s: TemplateStringsArray, storeId: string) => {
-    const f = db.links.get(storeId)
-    return f ? [{ id: f.id, venueId: f.venueId, status: f.status, config: f.config ?? null }] : []
-  })
-  L.createMany.mockReset().mockImplementation(async ({ data }: { data: Fila[] }) => {
-    let count = 0
-    for (const d of data)
-      if (!db.links.has(d.externalLocationId)) {
-        db.links.set(d.externalLocationId, { id: `l${++n}`, config: null, ...d })
-        count++
-      }
-    return { count }
-  })
-  L.update.mockReset().mockImplementation(async ({ where, data }: Fila) => Object.assign(porId(where.id), data))
-  L.delete.mockReset().mockImplementation(async ({ where }: Fila) => {
-    const f = porId(where.id)
-    db.links.delete(f.externalLocationId)
-    return f
-  })
-  I.findUnique
-    .mockReset()
-    .mockImplementation(async ({ where }: Fila) => (db.intents.has(where.id) ? { ...db.intents.get(where.id) } : null))
-  I.updateMany.mockReset().mockImplementation(async ({ where, data }: Fila) => {
-    const i = db.intents.get(where.id)
-    const estados = typeof where.state === 'string' ? [where.state] : where.state.in
-    if (!i || !estados.includes(i.state)) return { count: 0 }
-    Object.assign(i, data)
-    return { count: 1 }
-  })
-  p.$executeRaw.mockReset().mockImplementation(async (_s: TemplateStringsArray, ...v: unknown[]) => {
-    const sqls = v.filter(esSql)
-    const mezcla = sqls.find(x => x.sql.includes('jsonb_build_object'))
-    const intento = db.intents.get(v.find((x): x is string => typeof x === 'string' && db.intents.has(x)) ?? '')
-    if (!mezcla || !intento) return 0
-    const [storeId, , json] = mezcla.values as [string, string, string]
-    const finales = sqls.find(x => x.values.includes('ACTIVATED'))?.values ?? []
-    const previo = intento.resultsJson?.[storeId]
-    if (finales.includes(previo?.outcome)) return 0
-    intento.resultsJson = { ...(intento.resultsJson ?? {}), [storeId]: { ...previo, ...JSON.parse(json) } }
-    return 1
-  })
+  db = crearDbFalsa()
+  reloj += 60_000
+  jest.spyOn(Date, 'now').mockImplementation(() => reloj)
   p.venue.findUnique.mockReset().mockResolvedValue({ name: 'Café <b>Luna</b>' })
   cliente.canjearCodigoRappi.mockReset().mockResolvedValue('idt')
   cliente.tiendasDelComercio.mockReset().mockResolvedValue([{ storeId: '10', name: 'A', integrated: false }])
@@ -219,6 +177,15 @@ describe('callback', () => {
     })
     await callback({ code: 'c', state: firmar(deps, 'i1', 'callback') })
     expect(estadoAlCanjear).toBe('EXCHANGED')
+  })
+
+  it('si falla leer el negocio: nada se canjeó y el intent sigue CREATED (el enlace de inicio sirve)', async () => {
+    sembrar()
+    p.venue.findUnique.mockRejectedValue(new Error('db caída'))
+    const r = await callback({ code: 'c', state: firmar(deps, 'i1', 'callback') })
+    expect(r.status).toHaveBeenCalledWith(500)
+    expect(cliente.canjearCodigoRappi).not.toHaveBeenCalled()
+    expect(intent()).toMatchObject({ state: 'CREATED', merchantTokenEnvelope: null })
   })
 
   it('si otro callback ganó el CAS, éste NO canjea el código', async () => {
@@ -368,6 +335,22 @@ describe('result', () => {
     expect(html(r)).toContain('Rappi la está confirmando — recarga esta página en un minuto')
   })
 
+  it('dos cargas en menos de 30 s llaman a Rappi UNA vez; la página sigue enseñando lo que hay', async () => {
+    canjeado()
+    await activar({ tiendas: '10', confirmo_negocio: 'si' })
+    integrada('de-otro')
+
+    await resultado()
+    reloj += 29_000
+    const r = await resultado()
+    expect(cliente.tiendasDelComercio).toHaveBeenCalledTimes(1)
+    expect(html(r)).toContain('Rappi la está confirmando')
+
+    reloj += 1_000 // ya pasaron 30 s
+    await resultado()
+    expect(cliente.tiendasDelComercio).toHaveBeenCalledTimes(2)
+  })
+
   it('el motivo de rechazo de Rappi y el negocio van escapados; sin re-chequeo fuera de ACTIVATING', async () => {
     sembrar({
       state: 'CONSUMED',
@@ -396,7 +379,19 @@ describe('result', () => {
 })
 
 describe('connect-url', () => {
-  it('base sin barra final y el enlace firmado para start', async () => {
+  it('sin base de retorno configurada: AppError de configuración y NO se crea el intent', async () => {
+    cliente.redirectUriRappi.mockImplementationOnce(() => {
+      throw new Error('Falta RAPPI_OAUTH_REDIRECT_BASE')
+    })
+    const r = res()
+    const next = jest.fn()
+    await getRappiConnectUrl({ params: { venueId: 'v1' }, authContext: { userId: 's1' } } as never, r as never, next)
+    expect(next.mock.calls[0][0]).toMatchObject({ statusCode: 500, code: 'RAPPI_CONNECT_NOT_CONFIGURED' })
+    expect(I.create).not.toHaveBeenCalled()
+    expect(r.json).not.toHaveBeenCalled()
+  })
+
+  it('la base es la de la redirect_uri validada, y el enlace va firmado para start', async () => {
     I.create.mockResolvedValue({ id: 'i9' })
     const r = res()
     await getRappiConnectUrl(

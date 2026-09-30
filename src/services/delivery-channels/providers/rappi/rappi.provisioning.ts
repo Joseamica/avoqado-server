@@ -46,7 +46,8 @@ const FINALES = [
 export type OutcomeRappi = 'PROVISIONING' | 'UNCERTAIN' | 'SUBSCRIBE_FAILED' | (typeof FINALES)[number]
 export type ResultadoRappi = { outcome: OutcomeRappi; detalle?: string }
 export type Confirmacion = 'PROMOTED' | 'REMOVED' | 'DISABLED' | 'IGNORED' | 'SUBSCRIBE_FAILED'
-const esFinal = (o: unknown) => (FINALES as readonly unknown[]).includes(o)
+/** ÚNICA definición de «final»: la usan el cierre del intent y la página de resultado. */
+export const esFinal = (o: unknown): boolean => (FINALES as readonly unknown[]).includes(o)
 
 /**
  * La reclamación, dentro de `config`. `creado` = la fila la insertó una reclamación de Rappi (se puede

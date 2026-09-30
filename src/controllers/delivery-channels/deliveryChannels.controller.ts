@@ -4,6 +4,7 @@
  */
 import { NextFunction, Request, Response } from 'express'
 import { env } from '../../config/env'
+import AppError from '../../errors/AppError'
 import * as deliveryChannelLinkService from '../../services/delivery-channels/core/deliveryChannelLink.service'
 import * as activationService from '../../services/delivery-channels/core/deliveryActivation.service'
 import * as deliverySummaryService from '../../services/delivery-channels/core/deliverySummary.service'
@@ -135,10 +136,18 @@ export const getRappiConnectUrl = async (req: Request, res: Response, next: Next
   try {
     const { venueId } = req.params
     const { userId } = (req as any).authContext
+    // Primero la base: sin ella (o mal escrita) el dashboard recibiría un enlace cuyo `/start` truena.
+    const { redirectUriRappi } = await import('../../services/delivery-channels/providers/rappi/rappi.client')
+    let callback: string
+    try {
+      callback = redirectUriRappi()
+    } catch {
+      throw new AppError('La conexión con Rappi no está configurada en el servidor.', 500, true, 'RAPPI_CONNECT_NOT_CONFIGURED')
+    }
     const { depsDesdeEnv, crearIntentRappi } = await import('../../services/delivery-channels/providers/rappi/rappi.connect')
     const { firmado } = await crearIntentRappi(await depsDesdeEnv(), { venueId, staffId: userId })
-    // Sin barra final: `…//api/v1/…` no llega a la ruta (el mismo recorte que `redirectUriRappi`).
-    const base = env.RAPPI_OAUTH_REDIRECT_BASE?.trim().replace(/\/+$/, '') || `${req.protocol}://${req.get('host')}`
+    // La MISMA base (ya validada, sin barra final) que la `redirect_uri` registrada con Rappi.
+    const base = callback.replace(/\/api\/v1\/delivery\/rappi\/oauth\/callback$/, '')
     return res.json({
       ok: true,
       url: `${base}/api/v1/delivery/rappi/oauth/start?intent=${encodeURIComponent(firmado)}`,

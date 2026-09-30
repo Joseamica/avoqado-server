@@ -36,6 +36,7 @@ import {
   activarSeleccion,
   cerrarSiTodoFinal,
   confirmarTienda,
+  esFinal,
   type ResultadoRappi,
 } from '@/services/delivery-channels/providers/rappi/rappi.provisioning'
 import { urlDeAutorizacion, type TiendaRappi } from '@/services/delivery-channels/providers/rappi/rappi.selfOnboarding'
@@ -140,8 +141,6 @@ async function vigente(res: Response, deps: ConnectDeps, intent: DeliveryConnect
 const objeto = (v: unknown): Record<string, unknown> =>
   v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {}
 const ids = (v: unknown): string[] => (Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string') : [])
-/** Lo que todavía espera a Rappi; lo demás ya es final y no se vuelve a tocar. */
-const ESPERANDO = new Set(['PROVISIONING', 'UNCERTAIN', 'SUBSCRIBE_FAILED'])
 
 // ─── Paso 1: start ──────────────────────────────────────────────────────────────────────
 
@@ -220,6 +219,9 @@ export const rappiOAuthCallback = publica('Falló la conexión', async (req, res
     return
   }
   if (!(await vigente(res, deps, intent))) return
+  // Antes de todo CAS: si esta lectura falla, el intent sigue CREATED y el enlace de inicio todavía sirve.
+  // Después del guardado dejaría un EXCHANGED sin página de selección (el dueño sólo vería «ya se usó»).
+  const negocio = await nombreDelNegocio(intent.venueId)
   // CAS ANTES de canjear, sin token todavía: de dos callbacks simultáneos sólo uno pasa de aquí.
   if (!(await casEstado(intent.id, 'CREATED', 'EXCHANGED'))) {
     res.status(400).send(YA_USADO)
@@ -254,7 +256,7 @@ export const rappiOAuthCallback = publica('Falló la conexión', async (req, res
     res.status(400).send(YA_USADO)
     return
   }
-  res.status(200).send(paginaSeleccion(deps, intent.id, tiendas, await nombreDelNegocio(intent.venueId)))
+  res.status(200).send(paginaSeleccion(deps, intent.id, tiendas, negocio))
 })
 
 // ─── Paso 3: activate ───────────────────────────────────────────────────────────────────
@@ -339,8 +341,10 @@ async function reChequear(deps: ConnectDeps, intent: DeliveryConnectIntent): Pro
   const seleccion = new Set(ids(intent.selectionJson))
   const resultados = objeto(intent.resultsJson)
   for (const t of tiendas) {
-    const outcome = objeto(resultados[t.storeId]).outcome as string
-    if (!seleccion.has(t.storeId) || !t.integrated || !t.integrationId || !ESPERANDO.has(outcome)) continue
+    // Sólo lo que espera a Rappi: lo final (de otro negocio, rechazada…) no se vuelve a tocar, y sin
+    // resultado todavía no hay reclamación que confirmar.
+    const outcome = objeto(resultados[t.storeId]).outcome
+    if (!seleccion.has(t.storeId) || !t.integrated || !t.integrationId || outcome === undefined || esFinal(outcome)) continue
     await confirmarTienda(
       { storeId: t.storeId, status: 'ACTIVE', integrationId: t.integrationId },
       { suscribir: c.suscribirTiendaAEventos },
@@ -350,11 +354,25 @@ async function reChequear(deps: ConnectDeps, intent: DeliveryConnectIntent): Pro
   await cerrarSiTodoFinal(intent.id)
 }
 
+/**
+ * A lo más UN re-chequeo por intent cada 30 s: cualquiera con el enlace podría recargar sin parar, y cada
+ * carga es una llamada a Rappi con el token del comerciante (Rappi nos exige un 98 % de llamadas sanas).
+ * ponytail: en memoria de ESTE proceso — hoy una sola instancia en Render. Con varias, cada una frenaría
+ * por su cuenta; entonces moverlo a una columna del intent (`lastRecheckAt`) con un CAS.
+ */
+const RECHEQUEO_MS = 30_000
+const ultimoRechequeo = new Map<string, number>()
+function tocaRechequear(intentId: string): boolean {
+  const ahora = Date.now()
+  for (const [id, t] of ultimoRechequeo) if (ahora - t >= RECHEQUEO_MS) ultimoRechequeo.delete(id) // poda perezosa
+  if (ultimoRechequeo.has(intentId)) return false
+  ultimoRechequeo.set(intentId, ahora)
+  return true
+}
+
 const CONFIRMANDO = 'Rappi la está confirmando — recarga esta página en un minuto.'
+/** Los finales; los que esperan a Rappi los resuelve `textoResultado`. */
 const TEXTO: Record<string, string> = {
-  PROVISIONING: CONFIRMANDO,
-  UNCERTAIN: CONFIRMANDO,
-  SUBSCRIBE_FAILED: CONFIRMANDO,
   ACTIVATED: '<span class="ok">Conectada.</span>',
   ALREADY_CONNECTED: '<span class="ok">Ya estaba conectada a este negocio.</span>',
   NOT_ENABLED_FOR_PILOT: '<span class="bad">Esta tienda todavía no está habilitada para el piloto; escríbenos.</span>',
@@ -366,7 +384,7 @@ const TEXTO: Record<string, string> = {
 function textoResultado(r: ResultadoRappi | undefined, activando: boolean): string {
   if (r?.outcome === 'REJECTED') return `<span class="bad">Rappi la rechazó${r.detalle ? `: ${esc(r.detalle)}` : ''}.</span>`
   // Fuera de ACTIVATING ya nadie re-lee: «recarga» mentiría (el webhook todavía puede confirmarla).
-  if (!r || ESPERANDO.has(r.outcome))
+  if (!r || !esFinal(r.outcome))
     return activando ? CONFIRMANDO : '<span class="bad">Rappi todavía no la confirma; revisa su estado en el dashboard de Avoqado.</span>'
   return TEXTO[r.outcome] ?? esc(r.outcome)
 }
@@ -396,7 +414,8 @@ export const resultadoRappiOAuth = publica('No se pudo mostrar el resultado', as
   const deps = await depsDesdeEnv()
   const intent = await abrir(res, deps, req.query.intent, 'result', ctx)
   if (!intent) return
-  if (intent.state === 'ACTIVATING') await reChequear(deps, intent)
+  // Frenado, se enseña lo que ya hay: el webhook o la carga anterior pudieron haberlo avanzado.
+  if (intent.state === 'ACTIVATING' && tocaRechequear(intent.id)) await reChequear(deps, intent)
   // Se relee: el re-chequeo (o un webhook) pudo haber avanzado los resultados.
   const actual = (await prisma.deliveryConnectIntent.findUnique({ where: { id: intent.id } })) ?? intent
   res.status(200).send(paginaResultado(actual, await nombreDelNegocio(intent.venueId)))

@@ -3,6 +3,7 @@ jest.mock('@/config/env', () => ({ env: {} }))
 
 import logger from '@/config/logger'
 import prisma from '../../../../src/utils/prismaClient'
+import { crearDbFalsa, type DbFalsa, type Fila } from '../../../__helpers__/rappiDbFake'
 import { RappiEscrituraBloqueadaError } from '../../../../src/services/delivery-channels/providers/rappi/rappi.http'
 import {
   activarSeleccion,
@@ -11,67 +12,14 @@ import {
   type ProvisioningDeps,
 } from '../../../../src/services/delivery-channels/providers/rappi/rappi.provisioning'
 
-/**
- * Una base EN MEMORIA con sólo las operaciones que usa el módulo: los vínculos por `storeId` y los
- * intents por id. El `$executeRaw` de resultados aplica de verdad el merge de `mezclaResultadoSql` y
- * respeta el candado de «no degradar un final» SÓLO si la sentencia lo trae — así una prueba de
- * orden no puede pasar por el motivo equivocado (R14).
- */
-type Fila = Record<string, any>
-const db = { links: new Map<string, Fila>(), intents: new Map<string, Fila>() }
+// La base en memoria (CAS real, merge real, «no degradar un final» sólo si el SQL lo trae) es compartida.
+let db: DbFalsa
 const p = prisma as any
 const L = p.deliveryChannelLink
 const I = p.deliveryConnectIntent
-let sqlLeidos: string[] = []
-
-const esSql = (v: any): v is { sql: string; values: unknown[] } => !!v && Array.isArray(v.values) && Array.isArray(v.strings)
-const porId = (id: string) => [...db.links.values()].find(f => f.id === id) as Fila
 
 beforeEach(() => {
-  db.links.clear()
-  db.intents.clear()
-  sqlLeidos = []
-  let n = 0
-  p.$queryRaw.mockReset().mockImplementation(async (s: TemplateStringsArray, storeId: string) => {
-    sqlLeidos.push(s.join('?'))
-    const f = db.links.get(storeId)
-    return f ? [{ id: f.id, venueId: f.venueId, status: f.status, config: f.config ?? null }] : []
-  })
-  L.createMany.mockReset().mockImplementation(async ({ data }: { data: Fila[] }) => {
-    let count = 0
-    for (const d of data)
-      if (!db.links.has(d.externalLocationId)) {
-        db.links.set(d.externalLocationId, { id: `l${++n}`, config: null, ...d })
-        count++
-      }
-    return { count }
-  })
-  L.update.mockReset().mockImplementation(async ({ where, data }: Fila) => Object.assign(porId(where.id), data))
-  L.delete.mockReset().mockImplementation(async ({ where }: Fila) => {
-    const f = porId(where.id)
-    db.links.delete(f.externalLocationId)
-    return f
-  })
-  I.findUnique.mockReset().mockImplementation(async ({ where }: Fila) => db.intents.get(where.id) ?? null)
-  I.updateMany.mockReset().mockImplementation(async ({ where, data }: Fila) => {
-    const i = db.intents.get(where.id)
-    const estados = typeof where.state === 'string' ? [where.state] : where.state.in
-    if (!i || !estados.includes(i.state)) return { count: 0 }
-    Object.assign(i, data)
-    return { count: 1 }
-  })
-  p.$executeRaw.mockReset().mockImplementation(async (_s: TemplateStringsArray, ...v: unknown[]) => {
-    const sqls = v.filter(esSql)
-    const mezcla = sqls.find(x => x.sql.includes('jsonb_build_object'))
-    const intento = db.intents.get(v.find((x): x is string => typeof x === 'string' && db.intents.has(x)) ?? '')
-    if (!mezcla || !intento) return 0
-    const [storeId, , json] = mezcla.values as [string, string, string]
-    const finales = sqls.find(x => x.values.includes('ACTIVATED'))?.values ?? []
-    const previo = intento.resultsJson?.[storeId]
-    if (finales.includes(previo?.outcome)) return 0
-    intento.resultsJson = { ...(intento.resultsJson ?? {}), [storeId]: { ...previo, ...JSON.parse(json) } }
-    return 1
-  })
+  db = crearDbFalsa()
 })
 
 function sembrar(over: Fila = {}): never {
@@ -149,7 +97,7 @@ describe('activarSeleccion', () => {
     })
     expect(creada.ownerAuthorizedAt).toBeInstanceOf(Date)
     expect(creada.webhookSecret).toMatch(/^[0-9a-f]{64}$/)
-    expect(sqlLeidos[0]).toContain('FOR UPDATE')
+    expect(db.sqlLeidos[0]).toContain('FOR UPDATE')
     expect(d.aprovisionar).toHaveBeenCalledTimes(1)
     expect(r['10'].outcome).toBe('PROVISIONING')
     expect(db.links.get('10')!.activatingIntentId).toBeNull()
