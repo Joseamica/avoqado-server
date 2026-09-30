@@ -304,15 +304,21 @@ const pendienteNuestro = (fila: Fila | null, r: ResultadoRappiTienda & { batchId
 
 /**
  * 🔴 La reclamación vive en `config`, así que antes de actuar se comprueba contra la BASE: su intención es
- * de Rappi y del MISMO negocio que el vínculo. Si no, ni HTTP ni escritura en esa intención (H1).
+ * de Rappi, del MISMO negocio que el vínculo, y ELIGIÓ esa tienda. Si no, ni HTTP ni escritura en esa
+ * intención (H1, N3).
  */
-async function intentDeLaReclamacion(tx: Tx, fila: Fila, a: Aprov) {
+async function intentDeLaReclamacion(tx: Tx, fila: Fila, a: Aprov, storeId: string) {
   const i = await tx.deliveryConnectIntent.findUnique({
     where: { id: a.intentId },
-    select: { provider: true, venueId: true, staffId: true, environment: true },
+    select: { provider: true, venueId: true, staffId: true, environment: true, selectionJson: true },
   })
-  if (i?.provider === 'RAPPI' && i.venueId === fila.venueId) return i
-  logger.error('🚨 [Rappi] la reclamación del vínculo apunta a una intención ajena: se ignora', { linkId: fila.id, intentId: a.intentId })
+  const eligio = Array.isArray(i?.selectionJson) && i.selectionJson.includes(storeId)
+  if (i?.provider === 'RAPPI' && i.venueId === fila.venueId && eligio) return i
+  logger.error('🚨 [Rappi] la reclamación del vínculo apunta a una intención ajena (o que no eligió esta tienda): se ignora', {
+    linkId: fila.id,
+    intentId: a.intentId,
+    storeId,
+  })
   return null
 }
 
@@ -388,7 +394,7 @@ export async function confirmarTienda(
     const antes = await prisma.$transaction(tx => leerVinculo(tx, r.storeId))
     if (!pendienteNuestro(antes, r, esperado)) return sinConfirmar(antes, r, esperado)
     const reclamo = aprov(antes?.config) as Aprov
-    if (!(await prisma.$transaction(tx => intentDeLaReclamacion(tx, antes as Fila, reclamo)))) return 'IGNORED'
+    if (!(await prisma.$transaction(tx => intentDeLaReclamacion(tx, antes as Fila, reclamo, r.storeId)))) return 'IGNORED'
     const intentId = reclamo.intentId
     let s: { ok: boolean; fallidos: string[] }
     try {
@@ -412,7 +418,7 @@ export async function confirmarTienda(
     const fila = await leerVinculo(tx, r.storeId)
     if (!fila || !pendienteNuestro(fila, r, esperado)) return { fila, confirmacion: null }
     const a = aprov(fila.config) as Aprov
-    const intent = await intentDeLaReclamacion(tx, fila, a)
+    const intent = await intentDeLaReclamacion(tx, fila, a, r.storeId)
     if (!intent) return { fila, confirmacion: 'IGNORED' }
     let confirmacion: Confirmacion
     let res: ResultadoRappi

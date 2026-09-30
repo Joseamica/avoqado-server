@@ -97,6 +97,21 @@ describe('deliveryChannelLink.service', () => {
   // createChannelLink
   // ============================================================
   describe('createChannelLink', () => {
+    // N3: la reclamación del self-onboarding de Rappi la escriben SÓLO el aprovisionamiento y su confirmación.
+    // Creada por POST (p. ej. con `statusPrevio: ACTIVE` y una intención inventada), una activación posterior la
+    // adoptaba y un rechazo de Rappi restauraba ACTIVE sin suscripciones.
+    it('🔴 un POST no puede sembrar rappiProvisioning: se descarta y el resto de config se guarda', async () => {
+      ;(prisma.deliveryChannelLink.create as jest.Mock).mockResolvedValue({ id: 'newlink1' })
+
+      await createChannelLink('venue1', {
+        provider: DeliveryProvider.RAPPI,
+        externalLocationId: 'loc1',
+        config: { note: 'alta', rappiProvisioning: { intentId: 'inventada', statusPrevio: 'ACTIVE' } },
+      })
+
+      expect((prisma.deliveryChannelLink.create as jest.Mock).mock.calls[0][0].data.config).toEqual({ note: 'alta' })
+    })
+
     it('genera webhookSecret con crypto.randomBytes(32).toString(hex) y status PENDING', async () => {
       ;(prisma.deliveryChannelLink.create as jest.Mock).mockImplementation(async ({ data }: any) => ({
         id: 'newlink1',

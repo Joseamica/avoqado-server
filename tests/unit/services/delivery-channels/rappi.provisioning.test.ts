@@ -449,6 +449,18 @@ describe('confirmarTienda', () => {
     })
   })
 
+  // N3: la intención tiene que haber ELEGIDO esa tienda; si no, la reclamación no es de ella.
+  it('una reclamación cuya intención NO seleccionó esa tienda: IGNORED, sin suscribir ni escribir', async () => {
+    sembrar({ selectionJson: ['11'] })
+    reclamada()
+    const d = deps()
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, d)).toBe('IGNORED')
+    expect(await confirmarTienda({ storeId: '10', status: 'FAILED', batchId: 'b1' }, d)).toBe('IGNORED')
+    expect(d.suscribir).not.toHaveBeenCalled()
+    expect(db.intents.get('i1')!.resultsJson).toBeNull()
+    expect(db.links.get('10')!.status).toBe('PENDING')
+  })
+
   it('la confirmación repetida de una tienda ya activa: IGNORED sin alarma', async () => {
     sembrar()
     reclamada()

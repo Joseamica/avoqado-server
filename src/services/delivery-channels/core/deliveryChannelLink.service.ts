@@ -116,7 +116,8 @@ export async function createChannelLink(
         orderAcceptanceMode: data.orderAcceptanceMode ?? OrderAcceptanceMode.AUTO,
         status: DeliveryChannelStatus.PENDING,
         autoSyncMenu: data.autoSyncMenu ?? true,
-        config: data.config ?? undefined,
+        // Mismo filtro que el PATCH: `rappiProvisioning` no se siembra desde fuera (ver `mezclarConfig`).
+        config: data.config != null ? mezclarConfig({}, data.config) : undefined,
       },
       select: SAFE_SELECT,
     })) as unknown as DeliveryChannelLinkSafe
