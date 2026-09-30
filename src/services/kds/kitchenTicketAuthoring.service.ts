@@ -70,6 +70,9 @@ export async function authorKitchenTickets(params: {
     async tx => {
       // Mismo candado que `withDeliveryOrderLock`, con otro prefijo: Postgres lo suelta al terminar la tx.
       await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`kds-order:${orderId}`}, 0))::text`
+      // Se relee DENTRO del candado: una anulación que ganó la carrera ya retiró sus comandas y no hay que revivirlas.
+      const vigente = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { status: true } })
+      if (!vigente || vigente.status === 'CANCELLED' || vigente.status === 'DELETED') return [] as string[]
 
       const renglones = await tx.orderItem.findMany({
         where: { orderId },
@@ -126,15 +129,20 @@ export async function authorKitchenTickets(params: {
         createdAt: r.createdAt,
       }))
 
-      const plans = planKitchenTickets({
+      const soloSinEnviar = trigger === 'PAID' || trigger === 'LEGACY_POST'
+      const entrada = {
         order: { id: order.id, externalId: order.externalId, tableId: order.tableId },
         lines,
         coveredLineIds: new Set(cubiertos.map(c => c.orderItemId).filter((id): id is string => Boolean(id))),
         routing,
         screens,
         stampedAt: startedAt,
-        soloSinEnviar: trigger === 'PAID' || trigger === 'LEGACY_POST',
-      })
+      }
+      const plans = planKitchenTickets({ ...entrada, soloSinEnviar })
+      // El pago no arma rondas ya enviadas, pero si una se quedó sin comanda (su gancho falló) la marca se queda:
+      // sin ella el barrido ya no la ve nunca (Codex 3.6).
+      const rondaSinComanda =
+        soloSinEnviar && planKitchenTickets({ ...entrada, soloSinEnviar: false }).some(p => p.lines.some(l => l.sentToKitchenAt))
 
       const ids: string[] = []
       for (const plan of plans) {
@@ -168,7 +176,12 @@ export async function authorKitchenTickets(params: {
       }
 
       // Sólo si nadie la volvió a poner mientras se armaba (una ronda que entró en medio).
-      await tx.order.updateMany({ where: { id: orderId, venueId, kitchenPendingAt: { lte: startedAt } }, data: { kitchenPendingAt: null } })
+      if (!rondaSinComanda) {
+        await tx.order.updateMany({
+          where: { id: orderId, venueId, kitchenPendingAt: { lte: startedAt } },
+          data: { kitchenPendingAt: null },
+        })
+      }
       return ids
     },
     { timeout: CANDADO_TX_TIMEOUT_MS, maxWait: 5_000 },
@@ -277,4 +290,17 @@ async function cabeceraPorFolio(
 async function limpiarMarca(venueId: string, orderId: string, startedAt: Date): Promise<void> {
   // `orderId` puede venir de un request del cliente (el POST legado, Tarea 8): siempre acotado al venue.
   await prisma.order.updateMany({ where: { id: orderId, venueId, kitchenPendingAt: { lte: startedAt } }, data: { kitchenPendingAt: null } })
+}
+
+/**
+ * Anular la cuenta retira de la pantalla de cocina sus comandas NO terminadas: antes la cocina seguía viendo como
+ * pendiente una cuenta que ya no existe (Codex 3.6). Toma el candado del armado, así que va AL INICIO de la transacción
+ * de la anulación (mismo orden que el armado: candado de comandas → orden). NO va en la fusión de cuentas: ahí los
+ * renglones se MUEVEN a la otra cuenta y la comida sigue pedida.
+ */
+export async function retirarComandasDeVentaAnulada(tx: Prisma.TransactionClient, venueId: string, orderId: string): Promise<void> {
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`kds-order:${orderId}`}, 0))::text`
+  const pendientes = { venueId, orderId, status: { not: 'COMPLETED' as const } }
+  await tx.kdsOrderItem.deleteMany({ where: { kdsOrder: pendientes } })
+  await tx.kdsOrder.deleteMany({ where: pendientes })
 }

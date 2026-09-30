@@ -42,7 +42,7 @@ import {
 // mismo archivo; volver a llamarla es lo que impide que se separen otra vez.
 import { computeOrderBalance, summarizeRefunds, type RefundState } from '../shared/orderBalance'
 import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
-import { armarComandasTrasCommit } from '../kds/kitchenTicketAuthoring.service'
+import { armarComandasTrasCommit, retirarComandasDeVentaAnulada } from '../kds/kitchenTicketAuthoring.service'
 
 // MARK: - Types
 
@@ -3295,6 +3295,8 @@ export async function cancelOrder(venueId: string, orderId: string, reason?: str
   //    `requestId` que bloquea, para que la app no lo confunda con otro 409 (contrato aditivo).
   await prisma.$transaction(
     async tx => {
+      // Primero el candado de comandas (mismo orden que el armado): la cocina deja de ver la cuenta anulada.
+      await retirarComandasDeVentaAnulada(tx, venueId, orderId)
       await assertOrderCancellableUnderLock(tx, { venueId, orderId })
 
       await tx.order.update({

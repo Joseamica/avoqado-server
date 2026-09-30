@@ -7,6 +7,8 @@ import prisma from '@/utils/prismaClient'
 import { buildPrintConfig, routingConfigFrom } from '@/services/printing/printConfig.service'
 import { estacionesDelNegocio } from '@/services/kds/kitchenDisplayStations'
 import { authorKitchenTickets, markKitchenTicket } from '@/services/kds/kitchenTicketAuthoring.service'
+import { cancelOrder } from '@/services/mobile/order.mobile.service'
+import { deleteOrder } from '@/services/dashboard/order.dashboard.service'
 
 const SUF = `kdsarmado-${Date.now()}`
 const haceUnaHora = new Date(Date.now() - 60 * 60 * 1000)
@@ -214,6 +216,49 @@ describe('authorKitchenTickets', () => {
     expect((await authorKitchenTickets({ venueId, orderId: o.id, trigger: 'PAID' })).ticketIds).toEqual([])
     expect((await authorKitchenTickets({ venueId, orderId: o.id, trigger: 'ROUND' })).ticketIds).toHaveLength(1)
     expect((await comandasDe(o.id))[0].sourceKey).toBe(`round:rk-pagada:${cocina}`)
+  })
+
+  it('al PAGAR, una ronda que se quedó sin comanda (su gancho falló) conserva la marca y el barrido la arma (Codex 3.6)', async () => {
+    const tableId = (await prisma.table.create({ data: { venueId, number: `M2-${SUF}`, capacity: 4, qrCode: `qr2-${SUF}` } })).id
+    const o = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: `MESA2-${SUF}`,
+        tableId,
+        subtotal: 50,
+        taxAmount: 0,
+        total: 50,
+        kitchenPendingAt: new Date(Date.now() - 60_000),
+        items: { create: [renglon(taco, 'Taco', 1, { sentToKitchenAt: new Date(), externalId: 'sync:rk-falla:0' })] },
+      },
+      select: { id: true },
+    })
+    expect((await authorKitchenTickets({ venueId, orderId: o.id, trigger: 'PAID' })).ticketIds).toEqual([])
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: o.id } })).kitchenPendingAt).not.toBeNull()
+
+    expect((await authorKitchenTickets({ venueId, orderId: o.id, trigger: 'SWEEP' })).ticketIds).toHaveLength(1)
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: o.id } })).kitchenPendingAt).toBeNull()
+  })
+
+  it.each([
+    ['anular desde la app', (orderId: string) => cancelOrder(venueId, orderId, 'Mesa equivocada')],
+    ['borrar desde el dashboard', (orderId: string) => deleteOrder(venueId, orderId)],
+  ])('%s retira de la pantalla de cocina sus comandas pendientes (Codex 3.6)', async (_como, anular) => {
+    const o = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: `ANULA-${Math.random().toString(36).slice(2, 8)}-${SUF}`,
+        subtotal: 50,
+        taxAmount: 0,
+        total: 50,
+        items: { create: [renglon(taco, 'Taco', 1, { sentToKitchenAt: new Date(), externalId: `sync:rk-anula-${Math.random()}:0` })] },
+      },
+      select: { id: true },
+    })
+    expect((await authorKitchenTickets({ venueId, orderId: o.id, trigger: 'ROUND' })).ticketIds).toHaveLength(1)
+
+    await anular(o.id)
+    expect(await comandasDe(o.id)).toHaveLength(0)
   })
 
   it('los modificadores salen con la MISMA forma que el resto de comandas («2x Extra queso»)', async () => {

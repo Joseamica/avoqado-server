@@ -26,7 +26,7 @@ import { baseDeCargos, recalcularCargosPorServicio } from '../shared/serviceChar
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
-import { armarComandasTrasCommit } from '../kds/kitchenTicketAuthoring.service'
+import { armarComandasTrasCommit, retirarComandasDeVentaAnulada } from '../kds/kitchenTicketAuthoring.service'
 
 /**
  * Helper function to flatten OrderItemModifier structure for Android compatibility
@@ -2910,6 +2910,8 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       // de candados en Order → OrderItem, el mismo del registro de un pago por producto (antes era el inverso). La
       // relectura va DENTRO del candado porque el registro de un cobro con tarjeta NO sube `Order.version`: el CAS de
       // abajo no ve un pago que aterrizó entre la prelectura y la escritura, y anular todo cancelaba una orden PAGADA.
+      // Anular TODO cancela la cuenta: la cocina deja de verla (el candado de comandas va antes, como en el armado).
+      if (isVoidingAllItems) await retirarComandasDeVentaAnulada(tx, venueId, orderId)
       const fresca = await lockAndReadOrderForCancel(tx, { venueId, orderId })
       if (fresca.version !== input.expectedVersion) {
         throw new ConflictError(
