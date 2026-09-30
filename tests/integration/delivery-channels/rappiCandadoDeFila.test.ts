@@ -18,6 +18,22 @@ jest.setTimeout(30_000)
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
+/**
+ * 🔴 La base es compartida por ~20 sesiones: fuera de una base de PRUEBAS no se toca nada.
+ * Acepta la de esta Mac (`av-db-25-test`) o la desechable de CI (`avoqado_*_test_*`, p. ej. `avoqado_h1a_test_20260808`);
+ * mismo criterio que `payments/paymentEffectsReview.integration.test.ts`. Rechaza `av-db-25` y cualquier otra.
+ */
+const esBaseDePrueba = (nombre: string) => nombre === 'av-db-25-test' || /^(codex_testarudo_test_|avoqado_[a-z0-9]+_test_)/.test(nombre)
+{
+  // A nivel de MÓDULO, no en un hook: corre antes de cualquier `beforeAll`/`afterAll`, así que ningún hook
+  // llega a ejecutarse contra una base ajena. `DATABASE_URL` es a la que se conecta el `prisma` de abajo.
+  const url = new URL(process.env.DATABASE_URL ?? '')
+  const nombre = decodeURIComponent(url.pathname.slice(1))
+  if (!['localhost', '127.0.0.1'].includes(url.hostname) || !esBaseDePrueba(nombre)) {
+    throw new Error(`Base inesperada para esta prueba: ${url.hostname}/${nombre}`)
+  }
+}
+
 describe('Rappi self-onboarding — candado de fila contra Postgres', () => {
   const sufijo = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`
   const tienda = (n: string) => `rappi-it-${sufijo}-${n}`
@@ -25,9 +41,6 @@ describe('Rappi self-onboarding — candado de fila contra Postgres', () => {
   let venueId: string
 
   beforeAll(async () => {
-    const db = (await prisma.$queryRaw<Array<{ db: string }>>`SELECT current_database() AS db`)[0].db
-    // 🔴 La base es compartida por ~20 sesiones: fuera de la de pruebas, no se toca nada.
-    if (db !== 'av-db-25-test') throw new Error(`Base inesperada: ${db}`)
     orgId = (
       await prisma.organization.create({ data: { name: `Org rappi-it ${sufijo}`, email: `rappi-it-${sufijo}@t.mx`, phone: '5555555555' } })
     ).id
@@ -36,13 +49,16 @@ describe('Rappi self-onboarding — candado de fila contra Postgres', () => {
   })
 
   afterAll(async () => {
+    // 🔴 jest-circus corre `afterAll` aunque `beforeAll` haya lanzado. Con los ids sin definir, Prisma IGNORA un
+    // filtro `undefined` y el `deleteMany` borraría la tabla ENTERA: sin ids propios no se borra nada.
+    if (!orgId || !venueId) return
     try {
       await prisma.deliveryChannelLink.deleteMany({ where: { venueId } })
       await prisma.deliveryConnectIntent.deleteMany({ where: { venueId } })
       await prisma.venue.deleteMany({ where: { id: venueId } })
       await prisma.organization.deleteMany({ where: { id: orgId } })
-    } catch {
-      /* fixtures */
+    } catch (e) {
+      console.error(`rappi-it ${sufijo}: la limpieza de fixtures falló (quedaron filas propias)`, e)
     }
   })
 
