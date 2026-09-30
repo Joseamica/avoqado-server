@@ -11,7 +11,9 @@ const tables = {
     status text, "paymentStatus" text, subtotal numeric, "discountAmount" numeric,
     "serviceChargeAmount" numeric, "taxAmount" numeric, "tipAmount" numeric,
     total numeric, "paidAmount" numeric, "createdAt" timestamp, "updatedAt" timestamp, "completedAt" timestamp`,
-  Payment: '"orderId" text, "venueId" text, amount numeric, "tipAmount" numeric, status text, type text, "originSystem" text',
+  // `createdAt`: la ventana de alerta (7bffb295) fecha la orden por su último cobro. NULL = la fecha de la orden.
+  Payment:
+    '"orderId" text, "venueId" text, amount numeric, "tipAmount" numeric, status text, type text, "originSystem" text, "createdAt" timestamp',
   OrderItem: 'id text, "orderId" text, "productId" text',
   Product: 'id text, "venueId" text, "trackInventory" boolean, "inventoryMethod" text',
   Recipe: '"productId" text',
@@ -119,8 +121,15 @@ async function movement(
   }
 }
 
+/**
+ * El «ahora» de estas pruebas es el día de sus datos (18-ago). La ventana de alerta de 24 h (7bffb295) saca del detalle lo
+ * viejo; con el reloj real, todas estas ventas contaban como viejas y el detalle salía vacío. Aquí se prueba la
+ * CLASIFICACIÓN, no la ventana (ésa la cubre `tests/unit/jobs/money-integrity-watchdog.job.test.ts`).
+ */
+const AHORA_DE_LOS_DATOS = new Date('2026-08-19T00:00:00Z')
+
 async function checks() {
-  const { counts, details } = buildWatchdogSql()
+  const { counts, details } = buildWatchdogSql(AHORA_DE_LOS_DATOS)
   const result = await client.query(details)
   const totals = await client.query(counts)
   for (const row of totals.rows) {
