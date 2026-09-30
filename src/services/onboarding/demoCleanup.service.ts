@@ -296,14 +296,14 @@ export async function cleanDemoData(venueId: string): Promise<CleanupResult> {
 
       // 10. Delete demo RecipeLines first (FK to Recipe)
       const deletedRecipeLines = await tx.recipeLine.deleteMany({
-        where: { isDemo: true },
+        where: { isDemo: true, recipe: { product: { venueId } } },
       })
       result.deletedRecipeLines = deletedRecipeLines.count
       logger.info(`  ✓ Deleted ${deletedRecipeLines.count} demo recipe lines`)
 
       // 11. Delete demo Recipes (FK to Product)
       const deletedRecipes = await tx.recipe.deleteMany({
-        where: { isDemo: true },
+        where: { isDemo: true, product: { venueId } },
       })
       result.deletedRecipes = deletedRecipes.count
       logger.info(`  ✓ Deleted ${deletedRecipes.count} demo recipes`)
@@ -341,7 +341,7 @@ export async function cleanDemoData(venueId: string): Promise<CleanupResult> {
 
       // 15. Delete demo Modifiers (FK to ModifierGroup)
       const deletedModifiers = await tx.modifier.deleteMany({
-        where: { isDemo: true },
+        where: { isDemo: true, group: { venueId } },
       })
       result.deletedModifiers = deletedModifiers.count
       logger.info(`  ✓ Deleted ${deletedModifiers.count} demo modifiers`)
