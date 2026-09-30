@@ -4,6 +4,7 @@ import { TransactionStatus, PaymentMethod, CardBrand, CardEntryMode } from '@pri
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { MOTIVO_EXCLUSION_DEL_PROTOCOLO, bloquearConSuOriginal, cobrosDelProtocolo } from '../shared/cobroDelProtocolo'
 import prisma from '../../utils/prismaClient'
+import { STAFF_PUBLIC_SELECT } from '../../utils/staffPublicSelect'
 import { PaginatedPaymentsResponse } from '../../schemas/dashboard/payment.schema'
 import { logAction } from './activity-log.service'
 import {
@@ -80,7 +81,7 @@ export async function getPaymentsData(
     })
 
     const sharedInclude = {
-      processedBy: true,
+      processedBy: { select: STAFF_PUBLIC_SELECT },
       shift: true,
       order: { include: { table: true } },
       merchantAccount: {
@@ -169,7 +170,7 @@ export async function getPaymentsData(
     prisma.payment.findMany({
       where: whereClause,
       include: {
-        processedBy: true, // El staff que procesó el pago
+        processedBy: { select: STAFF_PUBLIC_SELECT }, // El staff que procesó el pago
         shift: true, // Información del turno
         order: {
           include: {
@@ -316,7 +317,7 @@ export async function getPaymentById(venueId: string, paymentId: string) {
       venueId,
     },
     include: {
-      processedBy: true, // Staff que procesó el pago
+      processedBy: { select: STAFF_PUBLIC_SELECT }, // Staff que procesó el pago
       shift: true, // Información del turno
       order: {
         include: {
@@ -444,7 +445,7 @@ const protegidoPorElProtocolo = (paymentId: string, fields: string[], originalPa
   )
 
 const PROYECCION_DEL_PAYMENT = {
-  processedBy: true,
+  processedBy: { select: STAFF_PUBLIC_SELECT },
   shift: true,
   order: { include: { table: true } },
   merchantAccount: { include: { provider: { select: { id: true, code: true, name: true } } } },

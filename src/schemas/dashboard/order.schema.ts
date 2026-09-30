@@ -1,10 +1,12 @@
-import { Order, Staff, Table } from '@prisma/client'
+import { Order, Table } from '@prisma/client'
 import { z } from 'zod'
+import { StaffPublico } from '../../utils/staffPublicSelect'
 
 export type PaginatedOrdersResponse = {
   data: (Order & {
-    createdBy: Staff | null
-    servedBy: Staff | null
+    // Nunca `Staff` entero: la fila lleva el hash de la contraseña (30-sep).
+    createdBy: StaffPublico | null
+    servedBy: StaffPublico | null
     table: Table | null
   })[]
   meta: {

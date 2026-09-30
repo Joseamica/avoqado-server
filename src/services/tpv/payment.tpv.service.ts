@@ -374,7 +374,8 @@ import { runAutoReorderForVenue } from '../dashboard/autoReorder.service'
 import { serializedInventoryService } from '../serialized-inventory/serializedInventory.service'
 import { getEffectivePaymentConfig } from '../organization-payment-config.service'
 import { logAction } from '../dashboard/activity-log.service'
-import { paymentIsAvoqadoSettled, type TenderSemanticsPayment } from '../shared/tenderSemantics'
+import { paymentCountsAsDrawerCash, paymentIsAvoqadoSettled, type TenderSemanticsPayment } from '../shared/tenderSemantics'
+import { STAFF_PUBLIC_SELECT } from '../../utils/staffPublicSelect'
 // La ÚNICA definición de "qué cuenta como pagado" — la comparten los cuatro
 // caminos de cobro, para que un reembolso no reabra saldo en ninguno.
 import { summarizeRefunds, computeOrderBalance, REFUND_PAYMENT_TYPE, type CompletedPaymentForBalance } from '../shared/orderBalance'
@@ -583,9 +584,19 @@ const tarifaComoJson = (t: TarifaCongelada | null | undefined): Prisma.InputJson
 /** Codex R4-6: candidatos de la misma referencia que bajo el candado CONTRADIJERON al entrante (identidad débil). */
 type ColisionDeReferenciaRegistrada = { referenceNumber: string; candidates: { paymentId: string; orderId: string; campos: string[] }[] }
 
-const fuenteDelPago = (source?: string): PaymentSource => {
+/**
+ * El `source` que manda un aparato → `PaymentSource`. Es el ÚNICO normalizador del archivo: había
+ * tres copias y ninguna conocía a las apps, así que todo cobro de Android o iOS caía en `OTHER`.
+ *
+ * Las apps (`AVOQADO_ANDROID` —también el POS de escritorio— y `AVOQADO_IOS`) quedan `APP`, igual
+ * que su efectivo contra una orden (`order.mobile.service.ts`). Lo que la app sólo REGISTRA —una
+ * tarjeta de otra terminal, una transferencia— sigue `OTHER` (`registroExterno`): el dashboard sólo
+ * enseña su etiqueta (`externalSource`) cuando la fuente es `OTHER` (`PaymentSourceBadge.tsx`).
+ */
+const fuenteDelPago = (source?: string, opciones: { registroExterno?: boolean } = {}): PaymentSource => {
   if (!source) return 'OTHER'
   if (source === 'AVOQADO_TPV') return 'TPV'
+  if (source === 'AVOQADO_ANDROID' || source === 'AVOQADO_IOS') return opciones.registroExterno ? 'OTHER' : 'APP'
   return ['TPV', 'DASHBOARD_TEST', 'QR', 'WEB', 'APP', 'PHONE', 'POS', 'OTHER'].includes(source) ? (source as PaymentSource) : 'OTHER'
 }
 
@@ -1257,22 +1268,6 @@ async function validateOrderInventoryAvailability(
     available: issues.length === 0,
     issues: issues.length > 0 ? issues : undefined,
   }
-}
-
-/**
- * Map payment source from Android app format to PaymentSource enum
- * @param source The source string from the app (e.g., "AVOQADO_TPV")
- * @returns Valid PaymentSource enum value
- */
-function mapPaymentSource(source?: string): PaymentSource {
-  if (!source) return 'OTHER'
-
-  // Map "AVOQADO_TPV" from Android app to "TPV" enum value
-  if (source === 'AVOQADO_TPV') return 'TPV'
-
-  // Check if it's a valid PaymentSource enum value
-  const validSources: PaymentSource[] = ['TPV', 'DASHBOARD_TEST', 'QR', 'WEB', 'APP', 'PHONE', 'POS', 'OTHER']
-  return validSources.includes(source as PaymentSource) ? (source as PaymentSource) : 'OTHER'
 }
 
 /** Measurements are monotonic, contain identifiers only, and never affect payment results. */
@@ -3564,7 +3559,7 @@ export async function recordOrderPayment(
             externalSource: classicMethod === 'CASH' ? null : paymentData.externalSource?.trim()?.slice(0, 50) || null,
             status: paymentStatusSnapshot as any, // Direct enum mapping since frontend sends correct values
             splitType: paymentData.splitType as SplitType, // Cast to SplitType enum
-            source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
+            source: fuenteDelPago(paymentData.source, { registroExterno: classicMethod !== 'CASH' }),
             processor: 'TBD',
             // Snapshot de MERCHANT_ROUTING_RULES (por qué la TPV mostró/eligió este merchant)
             routingEvaluation: paymentData.routingEvaluation ?? undefined,
@@ -3631,7 +3626,7 @@ export async function recordOrderPayment(
             posRawData: {
               splitType: paymentData.splitType,
               staffId: validatedStaffId, // identidad efectiva validada (POS en relay; TPV en cobro directo)
-              source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
+              source: fuenteDelPago(paymentData.source, { registroExterno: classicMethod !== 'CASH' }),
               paidProductsId: paymentData.paidProductsId || [],
               ...(paymentData.equalPartsPartySize && { equalPartsPartySize: paymentData.equalPartsPartySize }),
               ...(paymentData.equalPartsPayedFor && { equalPartsPayedFor: paymentData.equalPartsPayedFor }),
@@ -3645,7 +3640,8 @@ export async function recordOrderPayment(
                 venue: true,
               },
             },
-            processedBy: true,
+            // Nunca la fila entera: llevaba el hash de la contraseña a la respuesta (30-sep).
+            processedBy: { select: STAFF_PUBLIC_SELECT },
           },
         })
 
@@ -4859,16 +4855,6 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
 
   t.mark('idempotenciaYChequeosPrevios')
 
-  // Map source from Android app format to PaymentSource enum
-  const mapPaymentSource = (source?: string): PaymentSource => {
-    if (!source) return 'OTHER'
-    // Map "AVOQADO_TPV" from Android app to "TPV" enum value
-    if (source === 'AVOQADO_TPV') return 'TPV'
-    // Check if it's a valid PaymentSource enum value
-    const validSources = ['TPV', 'DASHBOARD_TEST', 'QR', 'WEB', 'APP', 'PHONE', 'POS', 'OTHER']
-    return validSources.includes(source) ? (source as PaymentSource) : 'OTHER'
-  }
-
   // Codex R6-1: la afiliación ya está resuelta (arriba, antes de deduplicar); aquí sólo se lee.
   const merchantAccountId = afiliacion.merchantAccountId
 
@@ -5102,6 +5088,15 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         }
 
         const effectiveMethod = (resolvedTender?.method ?? paymentData.method) as PaymentMethod
+        // Lo que la app sólo registra (dinero que no está en el cajón) conserva `OTHER` y su etiqueta.
+        const fuenteDelCobroRapido = fuenteDelPago(paymentData.source, {
+          registroExterno: !paymentCountsAsDrawerCash({
+            method: effectiveMethod,
+            fundsFlow: resolvedTender?.fundsFlow,
+            tenderTypeId: resolvedTender?.tenderTypeId ?? null,
+            tenderCountsAsCash: resolvedTender?.tenderCountsAsCash ?? null,
+          }),
+        })
 
         // Create the fast payment record
         const newPayment = await tx.payment.create({
@@ -5134,7 +5129,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
             fundsFlow: resolvedTender?.fundsFlow,
             status: paymentStatusSnapshot as any, // Direct enum mapping since frontend sends correct values
             splitType: 'FULLPAYMENT' as SplitType, // Fast payments are always full payments
-            source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
+            source: fuenteDelCobroRapido,
             processor: 'TBD',
             type: 'FAST',
             // Snapshot de MERCHANT_ROUTING_RULES (por qué la TPV mostró/eligió este merchant)
@@ -5204,13 +5199,15 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
             posRawData: {
               splitType: 'FULLPAYMENT',
               staffId: validatedStaffId, // identidad efectiva validada (POS en relay; TPV en cobro directo)
-              source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
+              source: fuenteDelCobroRapido,
               paymentType: 'FAST',
               ...(effectiveReviewRating && { reviewRating: effectiveReviewRating }),
             },
           },
           include: {
-            processedBy: true,
+            // Nunca la fila entera: el cobro rápido le devolvía a cada POS el hash de la
+            // contraseña, el token de restablecimiento y el código del correo (30-sep).
+            processedBy: { select: STAFF_PUBLIC_SELECT },
           },
         })
 

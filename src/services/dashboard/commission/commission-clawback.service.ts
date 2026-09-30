@@ -12,6 +12,7 @@
  */
 
 import prisma from '../../../utils/prismaClient'
+import { STAFF_PUBLIC_SELECT } from '../../../utils/staffPublicSelect'
 import logger from '../../../config/logger'
 import { Prisma, ClawbackReason, CommissionCalcStatus } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
@@ -108,7 +109,7 @@ export async function getClawbackById(clawbackId: string, venueId: string): Prom
     include: {
       calculation: {
         include: {
-          staff: true,
+          staff: { select: STAFF_PUBLIC_SELECT },
           payment: true,
           order: true,
           summary: true,

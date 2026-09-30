@@ -3,6 +3,7 @@
 import { NotFoundError } from '../../errors/AppError'
 import { PaginatedOrdersResponse } from '../../schemas/dashboard/order.schema'
 import prisma from '../../utils/prismaClient'
+import { STAFF_PUBLIC_SELECT } from '../../utils/staffPublicSelect'
 import logger from '../../config/logger'
 import { Order, OrderStatus, PaymentType, Prisma } from '@prisma/client'
 import { logAction } from './activity-log.service'
@@ -76,8 +77,8 @@ export async function getOrders(venueId: string, page: number, pageSize: number,
       where: whereClause,
       // Incluimos relaciones para obtener datos como el nombre del mesero y la mesa
       include: {
-        createdBy: true, // Quien creó la orden (equivale al mesero)
-        servedBy: true, // Quien atendió la orden
+        createdBy: { select: STAFF_PUBLIC_SELECT }, // Quien creó la orden (equivale al mesero)
+        servedBy: { select: STAFF_PUBLIC_SELECT }, // Quien atendió la orden
         table: true, // Para obtener el número de la mesa
         orderCustomers: {
           // Para identificar órdenes pay-later
@@ -296,8 +297,8 @@ export async function getOrderById(venueId: string, orderId: string) {
       venueId,
     },
     include: {
-      createdBy: true,
-      servedBy: true,
+      createdBy: { select: STAFF_PUBLIC_SELECT },
+      servedBy: { select: STAFF_PUBLIC_SELECT },
       table: true,
       terminal: true,
       actions: {
@@ -312,7 +313,7 @@ export async function getOrderById(venueId: string, orderId: string) {
         orderBy: { createdAt: 'asc' },
         // Incluimos los pagos asociados
         include: {
-          processedBy: true, // Y quién procesó cada pago
+          processedBy: { select: STAFF_PUBLIC_SELECT }, // Y quién procesó cada pago
           saleVerification: true, // 📸 PRE-payment verification photos
           receipts: {
             // Drawer only needs metadata, not the full dataSnapshot JSON
