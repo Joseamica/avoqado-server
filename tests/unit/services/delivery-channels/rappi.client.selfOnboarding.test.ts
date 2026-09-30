@@ -138,17 +138,33 @@ describe('rappi.client — self-onboarding', () => {
     expect(apiBaseSelfOnboarding()).toBe('https://host.ejemplo.test')
   })
 
-  it('suscribir: un PUT por evento de tienda (nunca el de aprovisionamiento) y reporta cuáles fallaron', async () => {
+  // H11: la lista esperada va escrita a MANO, no derivada del código: si alguien quita un webhook del filtro de
+  // suscripción, esta prueba tiene que caer (derivándola de la implementación, seguía verde).
+  const SUSCRIPCIONES = [
+    ['NEW_ORDER', 'new-order'],
+    ['NEW_ORDER_SCHEDULED', 'new-order-scheduled'],
+    ['NEW_ORDER_SCHEDULED_CANCELLED', 'new-order-scheduled-cancelled'],
+    ['ORDER_EVENT_CANCEL', 'order-cancel'],
+    ['ORDER_OTHER_EVENT', 'order-other'],
+    ['MENU_APPROVED', 'menu-approved'],
+    ['MENU_REJECTED', 'menu-rejected'],
+    ['PING', 'ping'],
+    ['STORE_CONNECTIVITY', 'store-connectivity'],
+    ['ORDER_RT_TRACKING', 'order-tracking'],
+  ].map(([evento, segmento]) => ({
+    metodo: 'PUT',
+    url: `https://microservices.dev.rappi.com/api/v2/restaurants-integrations-public-api/webhook/${evento}/add-stores`,
+    cuerpo: [{ url: `https://api.ejemplo.test/api/v1/webhooks/delivery/rappi/${segmento}`, stores: ['10'] }],
+  }))
+  const porUrl = <T extends { url: string }>(xs: T[]) => [...xs].sort((a, b) => a.url.localeCompare(b.url))
+
+  it('suscribir: EXACTAMENTE los diez webhooks de tienda (nunca el de aprovisionamiento), y reporta cuáles fallaron', async () => {
     const llamadas = simularRed(l => (l.url.includes('/webhook/NEW_ORDER/') ? json(500) : json(200)))
 
     const r = await suscribirTiendaAEventos('10')
 
-    expect(llamadas.every(l => l.init.method === 'PUT')).toBe(true)
-    expect(llamadas.map(l => l.url).join('\n')).not.toContain('STORE_PROVISIONING_STATUS')
-    const nueva = llamadas.find(l => l.url.includes('/webhook/NEW_ORDER/add-stores'))
-    expect(JSON.parse(nueva?.init.body as string)).toEqual([
-      { url: 'https://api.ejemplo.test/api/v1/webhooks/delivery/rappi/new-order', stores: ['10'] },
-    ])
+    const hechas = llamadas.map(l => ({ metodo: l.init.method, url: l.url, cuerpo: JSON.parse(l.init.body as string) }))
+    expect(porUrl(hechas)).toEqual(porUrl(SUSCRIPCIONES))
     expect(r).toEqual({ ok: false, fallidos: ['NEW_ORDER'] })
   })
 
@@ -244,17 +260,13 @@ describe('rappi.client — self-onboarding', () => {
 
   describe('suscribir: un fallo de red en un evento no corta a los demás', () => {
     it('un PUT que LANZA cae en `fallidos` y el resto se sigue intentando', async () => {
-      const sano = simularRed(() => json(200))
-      await suscribirTiendaAEventos('10')
-      const total = sano.length // cuántos eventos se intentan cuando todo sale bien
-
       const llamadas = simularRed(l => {
         if (l.url.includes('/webhook/NEW_ORDER/')) throw new Error('ECONNRESET')
         return json(200)
       })
       const r = await suscribirTiendaAEventos('10')
 
-      expect(llamadas).toHaveLength(total) // no se cortó en el que lanzó
+      expect(porUrl(llamadas).map(l => l.url)).toEqual(porUrl(SUSCRIPCIONES).map(l => l.url)) // no se cortó en el que lanzó
       expect(r).toEqual({ ok: false, fallidos: ['NEW_ORDER'] })
     })
 
