@@ -272,6 +272,27 @@ describe('authorKitchenTickets', () => {
     expect(JSON.parse(item.modifiers!)).toEqual(['2x Extra queso'])
   })
 
+  // Codex 3.6 (S6): la venta por peso guarda `quantity = 1` y el peso aparte; la cocina leía «Taco ×1» sin saber cuánto.
+  it('un renglón por peso lleva el peso en la comanda («0.750 kg»); los demás salen igual', async () => {
+    const v = await nuevaVenta({
+      items: {
+        create: [
+          renglon(taco, 'Arrachera', 1, { weightQuantity: new Prisma.Decimal('0.75'), weightUnit: 'KILOGRAM' }),
+          renglon(limonada, 'Limonada', 1),
+        ],
+      },
+    })
+    await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })
+
+    const nombres = (await comandasDe(v.id)).flatMap(c => c.items.map(i => [i.productName, i.quantity]))
+    expect(nombres).toEqual(
+      expect.arrayContaining([
+        ['Arrachera (0.750 kg)', 1],
+        ['Limonada', 1],
+      ]),
+    )
+  })
+
   it('un renglón de vale de área (V7) no se arma por aquí, y la marca se limpia igual', async () => {
     // Cadena mínima REAL que exige el esquema para `OrderItem.areaTicketLineId` — no se falsea el id.
     const terminalId = (await prisma.terminal.create({ data: { venueId, name: `Terminal ${SUF}`, type: 'TPV_ANDROID' } })).id

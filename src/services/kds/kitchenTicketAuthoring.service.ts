@@ -11,6 +11,7 @@ import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { toKdsModifierLabels } from './kdsModifierLabels'
 import { estacionesDelNegocio } from './kitchenDisplayStations'
+import { nombreEnCocina } from './nombreEnCocina'
 import { planKitchenTickets, type KitchenLine } from './kitchenTicketPlanning'
 
 export type KitchenTrigger = 'PAID' | 'ROUND' | 'LEGACY_POST' | 'SWEEP'
@@ -86,6 +87,8 @@ export async function authorKitchenTickets(params: {
           sentToKitchenAt: true,
           createdAt: true,
           areaTicketLineId: true,
+          weightQuantity: true,
+          weightUnit: true,
           product: { select: { name: true, categoryId: true, printStationId: true, category: { select: { printStationId: true } } } },
           modifiers: { select: { name: true, quantity: true, modifier: { select: { name: true } } } },
         },
@@ -120,7 +123,8 @@ export async function authorKitchenTickets(params: {
         categoryId: r.product?.categoryId ?? null,
         productStationId: r.product?.printStationId ?? null,
         categoryStationId: r.product?.category?.printStationId ?? null,
-        productName: r.productName ?? r.product?.name ?? 'Producto',
+        // Codex 3.6 (S6): la venta por peso lleva `quantity = 1`; sin el peso la cocina no sabe cuánto servir.
+        productName: nombreEnCocina(r.productName ?? r.product?.name ?? 'Producto', r.weightQuantity, r.weightUnit),
         quantity: r.quantity,
         modifiers: toKdsModifierLabels(r.modifiers.map(m => ({ name: m.name ?? m.modifier?.name ?? null, quantity: m.quantity }))),
         notes: r.notes,
