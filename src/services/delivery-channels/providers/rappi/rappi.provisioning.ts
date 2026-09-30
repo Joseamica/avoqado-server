@@ -20,6 +20,7 @@ import crypto from 'crypto'
 import { DeliveryChannelStatus, DeliveryConnectIntent, Prisma } from '@prisma/client'
 
 import logger from '@/config/logger'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import prisma from '@/utils/prismaClient'
 import { utcTs } from '@/utils/sqlDates'
 
@@ -67,6 +68,8 @@ type Aprov = {
 }
 type Fila = { id: string; venueId: string; status: DeliveryChannelStatus; config: Prisma.JsonValue }
 type Tx = Prisma.TransactionClient
+/** Lo que decidió la transacción de `confirmarTienda` (el `intent` sólo si la reclamación probó ser nuestra). */
+type Hecho = { fila: Fila | null; confirmacion: Confirmacion | null; intentId?: string; intent?: { staffId: string; environment: string } }
 
 const objeto = (v: unknown): Record<string, unknown> =>
   v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {}
@@ -146,8 +149,11 @@ async function reclamar(intent: DeliveryConnectIntent, t: TiendaRappi): Promise<
       r = { outcome: 'CLAIMED_BY_OTHER' }
     else {
       // Libre, de este intent, de uno muerto, o DISABLED. La reclamación NUEVA reemplaza entera a la vieja:
-      // un `batchId` de antes no puede confirmar esta.
-      const creado = creada === 1 || (fila.status === DeliveryChannelStatus.PENDING && previo?.creado === true)
+      // un `batchId` de antes no puede confirmar esta. Pero si la fila está PENDING por esa reclamación
+      // vieja, se hereda A QUÉ volvía (la creó ella, o su `statusPrevio`): guardar PENDING dejaba el canal
+      // pendiente para siempre tras un rechazo.
+      const origen = fila.status === DeliveryChannelStatus.PENDING ? previo : null
+      const creado = creada === 1 || origen?.creado === true
       await tx.deliveryChannelLink.update({
         where: { id: fila.id },
         data: {
@@ -155,7 +161,7 @@ async function reclamar(intent: DeliveryConnectIntent, t: TiendaRappi): Promise<
           config: conAprov(fila.config, {
             intentId: intent.id,
             since: new Date().toISOString(),
-            ...(creado ? { creado: true as const } : { statusPrevio: fila.status }),
+            ...(creado ? { creado: true as const } : { statusPrevio: origen?.statusPrevio ?? fila.status }),
           }),
         },
       })
@@ -374,40 +380,51 @@ export async function confirmarTienda(
   }
 
   // Vínculo Y resultado del intent, en la MISMA transacción (R5), con la fila re-validada bajo candado.
-  const hecho = await prisma.$transaction(
-    async (tx): Promise<{ fila: Fila | null; confirmacion: Confirmacion | null; intentId?: string }> => {
-      const fila = await leerVinculo(tx, r.storeId)
-      if (!fila || !pendienteNuestro(fila, r, esperado)) return { fila, confirmacion: null }
-      const a = aprov(fila.config) as Aprov
-      if (!(await intentDeLaReclamacion(tx, fila, a))) return { fila, confirmacion: 'IGNORED' }
-      let confirmacion: Confirmacion
-      let res: ResultadoRappi
-      if (r.status === 'ACTIVE') {
-        // `activatingIntentId` y `ownerAuthorizedAt` no se tocan: la reclamación de Rappi nunca los usó.
-        await tx.deliveryChannelLink.update({
-          where: { id: fila.id },
-          data: { status: DeliveryChannelStatus.ACTIVE, config: conAprov(fila.config, { ...a, confirmedAt: new Date().toISOString() }) },
-        })
-        confirmacion = 'PROMOTED'
-        res = { outcome: 'ACTIVATED' }
-      } else if (r.status === 'FAILED') {
-        await soltar(tx, fila, a)
-        confirmacion = 'REMOVED'
-        res = { outcome: 'FAILED', detalle: r.errorMessage ?? 'RAPPI_FAILED' }
-      } else {
-        await tx.deliveryChannelLink.update({
-          where: { id: fila.id },
-          data: { status: DeliveryChannelStatus.DISABLED, config: conAprov(fila.config, null) },
-        })
-        confirmacion = 'DISABLED'
-        res = { outcome: 'FAILED', detalle: 'RAPPI_INACTIVE' }
-      }
-      await anotar(tx, a.intentId, r.storeId, res)
-      return { fila, confirmacion, intentId: a.intentId }
-    },
-  )
+  const hecho = await prisma.$transaction(async (tx): Promise<Hecho> => {
+    const fila = await leerVinculo(tx, r.storeId)
+    if (!fila || !pendienteNuestro(fila, r, esperado)) return { fila, confirmacion: null }
+    const a = aprov(fila.config) as Aprov
+    const intent = await intentDeLaReclamacion(tx, fila, a)
+    if (!intent) return { fila, confirmacion: 'IGNORED' }
+    let confirmacion: Confirmacion
+    let res: ResultadoRappi
+    if (r.status === 'ACTIVE') {
+      // `activatingIntentId` y `ownerAuthorizedAt` no se tocan: la reclamación de Rappi nunca los usó.
+      await tx.deliveryChannelLink.update({
+        where: { id: fila.id },
+        data: { status: DeliveryChannelStatus.ACTIVE, config: conAprov(fila.config, { ...a, confirmedAt: new Date().toISOString() }) },
+      })
+      confirmacion = 'PROMOTED'
+      res = { outcome: 'ACTIVATED' }
+    } else if (r.status === 'FAILED') {
+      await soltar(tx, fila, a)
+      confirmacion = 'REMOVED'
+      res = { outcome: 'FAILED', detalle: r.errorMessage ?? 'RAPPI_FAILED' }
+    } else {
+      await tx.deliveryChannelLink.update({
+        where: { id: fila.id },
+        data: { status: DeliveryChannelStatus.DISABLED, config: conAprov(fila.config, null) },
+      })
+      confirmacion = 'DISABLED'
+      res = { outcome: 'FAILED', detalle: 'RAPPI_INACTIVE' }
+    }
+    await anotar(tx, a.intentId, r.storeId, res)
+    return { fila, confirmacion, intentId: a.intentId, intent }
+  })
   if (!hecho.confirmacion) return sinConfirmar(hecho.fila, r, esperado) // cambió mientras suscribíamos
   if (hecho.confirmacion === 'IGNORED') return 'IGNORED'
+  if (hecho.confirmacion === 'PROMOTED' && hecho.fila && hecho.intent) {
+    // Como Uber: sólo el ganador, DESPUÉS del commit, y sin poder deshacerla (logAction nunca lanza).
+    // Es lo que queda de quién conectó la tienda cuando la intención ya se purgó.
+    void logAction({
+      staffId: hecho.intent.staffId,
+      venueId: hecho.fila.venueId,
+      action: 'DELIVERY_CHANNEL_CONNECTED',
+      entity: 'DeliveryChannelLink',
+      entityId: hecho.fila.id,
+      data: { provider: 'RAPPI', externalLocationId: r.storeId, intentId: hecho.intentId as string, environment: hecho.intent.environment },
+    })
+  }
   await cerrarSiTodoFinal(hecho.intentId as string)
   return hecho.confirmacion
 }

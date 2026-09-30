@@ -2,6 +2,7 @@
 jest.mock('@/config/env', () => ({ env: {} }))
 
 import logger from '@/config/logger'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import prisma from '../../../../src/utils/prismaClient'
 import { crearDbFalsa, type DbFalsa, type Fila } from '../../../__helpers__/rappiDbFake'
 import { RappiEscrituraBloqueadaError } from '../../../../src/services/delivery-channels/providers/rappi/rappi.http'
@@ -138,6 +139,29 @@ describe('activarSeleccion', () => {
     expect(d.aprovisionar).toHaveBeenCalledTimes(1)
     expect(aprov('10').intentId).toBe('i1')
     expect(aprov('10').batchId).toBeUndefined()
+  })
+
+  // H9: una fila DISABLED que I0 dejó PENDING y que I0 abandonó al morir. Adoptarla guardaba `statusPrevio: PENDING`,
+  // y si Rappi rechazaba a I1 el canal quedaba PENDING para siempre, sin nadie que lo confirmara.
+  it('adoptar la reclamación muerta de una fila PENDING conserva A QUÉ volvía: un rechazo la deja DISABLED', async () => {
+    sembrar({ id: 'i0', state: 'EXPIRED' })
+    vinculo('10', { config: { rappiProvisioning: { intentId: 'i0', since: 'x', statusPrevio: 'DISABLED' } } })
+    const d = deps({
+      aprovisionar: jest.fn(async () => ({ aceptadas: [], rechazadas: [{ storeId: '10', motivo: 'not_owned' }], inciertas: [] })),
+    })
+    await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(db.links.get('10')!.status).toBe('DISABLED')
+    expect(aprov('10')).toBeUndefined()
+  })
+
+  it('adoptar la reclamación muerta de una fila que ESA reclamación creó: sigue siendo borrable', async () => {
+    sembrar({ id: 'i0', state: 'EXPIRED' })
+    vinculo('10', { config: { rappiProvisioning: { intentId: 'i0', since: 'x', creado: true } } })
+    const d = deps({
+      aprovisionar: jest.fn(async () => ({ aceptadas: [], rechazadas: [{ storeId: '10', motivo: 'not_owned' }], inciertas: [] })),
+    })
+    await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(db.links.has('10')).toBe(false)
   })
 
   it('mismo negocio y ya ACTIVE: ALREADY_CONNECTED, y se cierra el intent (todo final)', async () => {
@@ -279,6 +303,33 @@ describe('confirmarTienda', () => {
     expect(aprov('10').confirmedAt).toEqual(expect.any(String))
     expect(resultado('10').outcome).toBe('ACTIVATED')
     expect(db.intents.get('i1')!.state).toBe('CONSUMED')
+  })
+
+  // H10: la conexión efectiva queda en la bitácora (quién la inició), sólo del ganador y después del commit.
+  it('la promoción escribe DELIVERY_CHANNEL_CONNECTED una sola vez, con quien inició la conexión', async () => {
+    sembrar({ staffId: 's1', environment: 'SANDBOX' })
+    reclamada()
+    ;(logAction as jest.Mock).mockImplementationOnce(async () => {
+      expect(db.links.get('10')!.status).toBe('ACTIVE') // ya confirmado: el log no puede adelantarse al commit
+    })
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, deps())).toBe('PROMOTED')
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, deps())).toBe('IGNORED')
+    expect(logAction).toHaveBeenCalledTimes(1)
+    expect(logAction).toHaveBeenCalledWith({
+      staffId: 's1',
+      venueId: 'v1',
+      action: 'DELIVERY_CHANNEL_CONNECTED',
+      entity: 'DeliveryChannelLink',
+      entityId: 'x10',
+      data: { provider: 'RAPPI', externalLocationId: '10', intentId: 'i1', environment: 'SANDBOX' },
+    })
+  })
+
+  it('FAILED o INACTIVE no son una conexión: no se registran como tal', async () => {
+    sembrar()
+    reclamada()
+    await confirmarTienda({ storeId: '10', status: 'INACTIVE', batchId: 'b1' }, deps())
+    expect(logAction).not.toHaveBeenCalled()
   })
 
   it('ACTIVE con el lote nuestro pero OTRO integrationId: IGNORED', async () => {
