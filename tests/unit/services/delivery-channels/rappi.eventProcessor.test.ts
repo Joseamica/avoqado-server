@@ -3,6 +3,7 @@
  *
  * ⚠️ Sin sandbox: los payloads son los de la documentación, la red va inyectada.
  */
+import logger from '@/config/logger'
 import prisma from '../../../../src/utils/prismaClient'
 import { processRappiEvent } from '../../../../src/services/delivery-channels/providers/rappi/rappi.eventProcessor'
 import { cancelDeliveryOrder } from '../../../../src/services/delivery-channels/core/cancelDeliveryOrder.service'
@@ -241,14 +242,38 @@ describe('processRappiEvent', () => {
   })
 
   // ── El estado de la tienda ───────────────────────────────────────────────────────
-  it('🔴 STORE_CONNECTIVITY enabled:false → el canal queda PAUSED (nada de "La Ribera" otra vez)', async () => {
+  it('🔴 STORE_CONNECTIVITY enabled:false → el canal ACTIVE queda PAUSED (nada de "La Ribera" otra vez)', async () => {
     ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
       fila({ eventType: 'STORE_CONNECTIVITY', payload: { external_store_id: '900105814', enabled: false, message: 'not enabled' } }),
     )
+    ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
 
     await processRappiEvent('evt1', { aceptar: aceptarOk })
 
-    expect(prisma.deliveryChannelLink.update).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'PAUSED' } }))
+    expect(prisma.deliveryChannelLink.updateMany).toHaveBeenCalledWith({
+      where: { id: 'link1', status: 'ACTIVE' },
+      data: { status: 'PAUSED' },
+    })
+    expect(prisma.deliveryChannelLink.update).not.toHaveBeenCalled()
+  })
+
+  // H6: el filtro va EN el UPDATE (atómico). Un PENDING pausado se saltaba la confirmación del aprovisionamiento,
+  // y un DISABLED pausado eludía el guard de pedidos (que sólo rechaza DISABLED).
+  it('enabled:false sobre un canal que NO está ACTIVE (PENDING, DISABLED, PAUSED) no lo toca, y lo dice', async () => {
+    ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
+      fila({
+        eventType: 'STORE_CONNECTIVITY',
+        payload: { external_store_id: '900105814', enabled: false },
+        channelLink: { ...fila().channelLink, status: 'PENDING' },
+      }),
+    )
+    ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+
+    const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+    expect(r.outcome).toBe('STORE_STATE')
+    expect(prisma.deliveryChannelLink.update).not.toHaveBeenCalled()
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('no estaba ACTIVE'), expect.objectContaining({ status: 'PENDING' }))
   })
 
   it('enabled:true NO reactiva solo — podría reabrir la tienda que el dueño pausó a propósito', async () => {
@@ -309,8 +334,8 @@ describe('processRappiEvent', () => {
 
   it('🔴 STORE_PROVISIONING_STATUS confirma CADA tienda CON el batchId del lote (sin él, R7 las ignoraría todas)', async () => {
     ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(loteAprovisionado())
-    // SUBSCRIBE_FAILED e IGNORED no son fallos del EVENTO: el vínculo sigue PENDING y el re-chequeo reintenta.
-    const confirmar = jest.fn().mockResolvedValueOnce('SUBSCRIBE_FAILED').mockResolvedValueOnce('IGNORED')
+    // IGNORED o REMOVED no son fallos del EVENTO: ya no hay nada nuestro que confirmar.
+    const confirmar = jest.fn().mockResolvedValueOnce('PROMOTED').mockResolvedValueOnce('IGNORED')
 
     const r = await processRappiEvent('evt1', { aceptar: aceptarOk, confirmar })
 
@@ -320,6 +345,20 @@ describe('processRappiEvent', () => {
     ])
     expect(r.outcome).toBe('STORE_STATE')
     expect(mockMark).toHaveBeenCalledWith('evt1', 'PROCESSED')
+  })
+
+  // H4: Rappi ya dijo ACTIVE pero una suscripción falló. PROCESSED dejaba el reintento en manos de que el dueño
+  // recargara la página; FAILED lo reintenta la reconciliación con su backoff (confirmar es idempotente).
+  it('🔴 una tienda SUBSCRIBE_FAILED deja el evento FAILED para reintentar, y las demás se confirman igual', async () => {
+    ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(loteAprovisionado())
+    const confirmar = jest.fn().mockResolvedValueOnce('SUBSCRIBE_FAILED').mockResolvedValueOnce('REMOVED')
+
+    const r = await processRappiEvent('evt1', { aceptar: aceptarOk, confirmar })
+
+    expect(confirmar).toHaveBeenCalledTimes(2)
+    expect(r).toEqual({ outcome: 'FAILED', error: 'PROVISIONING_SUBSCRIBE_FAILED' })
+    expect(mockMark).toHaveBeenCalledWith('evt1', 'FAILED', undefined, 'PROVISIONING_SUBSCRIBE_FAILED')
+    expect(mockMark).not.toHaveBeenCalledWith('evt1', 'PROCESSED')
   })
 
   it('si confirmar LANZA, el evento queda FAILED para reprocesarse (confirmarTienda es idempotente)', async () => {

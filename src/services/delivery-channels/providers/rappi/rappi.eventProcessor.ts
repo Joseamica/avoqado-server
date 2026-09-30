@@ -48,7 +48,7 @@ export interface RappiProcessResult {
 /** Dependencias inyectables: sin esto no se puede probar sin red. */
 export interface RappiProcessDeps {
   aceptar?: (orderId: string, storeId: string, cookingTime: number) => Promise<{ ok: boolean; status: number; raw: string }>
-  /** `confirmarTienda` de UNA tienda del lote. Fallan el evento un throw y un `DEFERRED`; lo demás es informativo. */
+  /** `confirmarTienda` de UNA tienda del lote. Fallan el evento un throw, un `DEFERRED` y un `SUBSCRIBE_FAILED`. */
   confirmar?: (r: ResultadoRappiTienda & { batchId?: string; operation?: 'PROVISION' | 'DEPROVISION' }) => Promise<string>
 }
 
@@ -171,31 +171,34 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
     // El resultado del aprovisionamiento: su cuerpo no trae `store_id` de primer nivel, así que
     // nunca hay vínculo — cada tienda la resuelve `confirmarTienda`, que sólo PROMUEVE un vínculo
     // nuestro y lo prueba con el lote. 🔴 El `batchId` vive arriba, no en cada resultado: sin
-    // pasarlo, toda confirmación sale IGNORED. SUBSCRIBE_FAILED o IGNORED no fallan el evento (el
-    // vínculo sigue PENDING y el re-chequeo de la pantalla reintenta). Un throw o un DEFERRED (llegó
-    // antes de que guardáramos el lote: Rappi no lo reenvía) lo dejan FAILED para que la
-    // reconciliación lo reintente — seguro, porque la confirmación es idempotente.
+    // pasarlo, toda confirmación sale IGNORED. IGNORED no falla el evento. Un throw, un DEFERRED
+    // (llegó antes de que guardáramos el lote: Rappi no lo reenvía) o un SUBSCRIBE_FAILED (Rappi ya
+    // dijo ACTIVE y falta nuestra suscripción: no puede depender de que el dueño recargue la página)
+    // lo dejan FAILED para que la reconciliación lo reintente — seguro: la confirmación es idempotente.
     if (evento.eventType === RAPPI_EVENTS.STORE_PROVISIONING_STATUS) {
       // La operación también viaja: un DEPROVISION de Rappi da de baja una tienda ya conectada.
       const { batchId, operation, results } = leerEstadoAprovisionamiento(evento.payload)
-      let diferidas = 0
+      const pendientes: string[] = []
       try {
-        for (const r of results)
-          if ((await confirmar({ ...r, ...(batchId ? { batchId } : {}), ...(operation ? { operation } : {}) })) === 'DEFERRED') diferidas++
+        for (const r of results) {
+          const c = await confirmar({ ...r, ...(batchId ? { batchId } : {}), ...(operation ? { operation } : {}) })
+          if (c === 'DEFERRED' || c === 'SUBSCRIBE_FAILED') pendientes.push(c)
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, undefined, `PROVISIONING: ${msg.slice(0, 400)}`)
         logger.error('🚨 [Rappi] confirmar el aprovisionamiento lanzó — queda FAILED para reprocesar', { eventRowId, batchId, error: msg })
         return { outcome: 'FAILED', error: msg }
       }
-      if (diferidas) {
-        await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, undefined, 'PROVISIONING_DEFERRED')
-        logger.warn('🛵 [Rappi] aprovisionamiento con tiendas aún sin lote guardado — queda FAILED para reintentar', {
+      if (pendientes.length) {
+        const error = pendientes.includes('DEFERRED') ? 'PROVISIONING_DEFERRED' : 'PROVISIONING_SUBSCRIBE_FAILED'
+        await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, undefined, error)
+        logger.warn('🛵 [Rappi] aprovisionamiento con tiendas por reintentar (sin lote guardado o sin suscribir) — queda FAILED', {
           eventRowId,
           batchId,
-          diferidas,
+          pendientes,
         })
-        return { outcome: 'FAILED', error: 'PROVISIONING_DEFERRED' }
+        return { outcome: 'FAILED', error }
       }
       await markEventResult(eventRowId, DeliveryOrderEventStatus.PROCESSED)
       return { outcome: 'STORE_STATE' }
@@ -207,16 +210,16 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
         // "La Ribera" (figuraba ACTIVE con el acceso revocado). El sentido contrario NO se
         // automatiza: si está PAUSED puede ser la pausa del dueño, y reactivarla sola
         // reabriría una tienda que él cerró a propósito.
-        await prisma.deliveryChannelLink.update({
-          where: { id: evento.channelLink.id },
+        // 🔴 SÓLO ACTIVE → PAUSED, con el filtro EN el UPDATE: un PENDING pausado se saltaba la
+        // confirmación del aprovisionamiento, y un DISABLED pausado eludía el guard de pedidos.
+        const { count } = await prisma.deliveryChannelLink.updateMany({
+          where: { id: evento.channelLink.id, status: DeliveryChannelStatus.ACTIVE },
           data: { status: DeliveryChannelStatus.PAUSED },
         })
-        logger.error('🚨 [Rappi] la tienda quedó DESHABILITADA del lado de Rappi', {
-          eventRowId,
-          linkId: evento.channelLink.id,
-          venueId: evento.venueId,
-          mensaje: cuerpo.message,
-        })
+        const datos = { eventRowId, linkId: evento.channelLink.id, venueId: evento.venueId, mensaje: cuerpo.message }
+        if (count) logger.error('🚨 [Rappi] la tienda quedó DESHABILITADA del lado de Rappi', datos)
+        else
+          logger.warn('🏪 [Rappi] Rappi apagó una tienda que no estaba ACTIVE: no se toca', { ...datos, status: evento.channelLink.status })
       } else {
         logger.info('🏪 [Rappi] la tienda cambió de estado del lado del proveedor', {
           eventRowId,
