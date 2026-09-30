@@ -6,6 +6,7 @@
 
 import { NextFunction, Request, Response } from 'express'
 import logger from '../../config/logger'
+import AppError from '../../errors/AppError'
 import * as refundService from '../../services/mobile/refund.mobile.service'
 import * as refundDashboardService from '../../services/dashboard/refund.dashboard.service'
 import { esCantidadNoNegativaEnCentavos, esCantidadPositivaEnCentavos, vieneAusente } from '../../services/shared/devueltoDeUnCobro'
@@ -97,7 +98,9 @@ export const issueAssociatedRefund = async (req: Request, res: Response, next: N
 
     return res.status(201).json({ success: true, data: result })
   } catch (error) {
-    logger.error('Error issuing associated refund (mobile):', error)
+    // Un rechazo de NEGOCIO (4xx) no es una falla del servidor: aviso, no error (mismo criterio que el dashboard).
+    if (error instanceof AppError && error.statusCode < 500) logger.warn(`Refund rejected (mobile): ${error.message}`)
+    else logger.error('Error issuing associated refund (mobile):', error)
     next(error)
   }
 }
