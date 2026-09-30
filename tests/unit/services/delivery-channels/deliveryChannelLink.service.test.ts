@@ -241,9 +241,7 @@ describe('deliveryChannelLink.service', () => {
     // porque Uber se queda ~30%. Nadie se habría enterado: no falla, sólo deja de cobrar
     // de más. Por eso se MEZCLA, y por eso este test existe.
     it('guardar SÓLO deliveryHours NO borra el markup ni las demás llaves de config', async () => {
-      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({
-        config: { note: 'alta manual', precios: { markupPercent: 30 } },
-      })
+      ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { note: 'alta manual', precios: { markupPercent: 30 } } }])
       ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
       ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue(baseLink)
 
@@ -264,6 +262,24 @@ describe('deliveryChannelLink.service', () => {
       expect(prisma.deliveryChannelLink.findFirst).not.toHaveBeenCalled()
       const escrito = (prisma.deliveryChannelLink.updateMany as jest.Mock).mock.calls[0][0].data.config
       expect(escrito).toBe(Prisma.JsonNull)
+    })
+
+    // ── La fila se BLOQUEA antes de leer su config ─────────────────────────────────────
+    // Una transacción sola no basta: en READ COMMITTED el PATCH leía `config`, el job de disponibilidad
+    // guardaba entre medio su lista de agotados, y el PATCH escribía su copia vieja encima. El producto
+    // se quedaba "agotado" en Uber aunque volviera a haber, y ninguna pasada lo revivía (ya no estaba en
+    // la lista). Lo mismo con dos admins guardando horario y precios a la vez.
+    it('lee config con la fila BLOQUEADA (FOR UPDATE) y filtrada por venue, dentro de la transacción', async () => {
+      ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: {} }])
+      ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+      ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue(baseLink)
+
+      await updateChannelLink('venue1', 'link1', { config: { deliveryHours: HORARIO_OK } }, 'staff1')
+
+      const [strings, ...valores] = (prisma.$queryRaw as jest.Mock).mock.calls[0]
+      expect(strings.join('?')).toMatch(/FOR UPDATE/)
+      expect(valores).toEqual(['link1', 'venue1'])
+      expect(prisma.deliveryChannelLink.findFirst).not.toHaveBeenCalled()
     })
 
     // ── Un horario inválido guardado en silencio es PEOR que rechazarlo ────────────────

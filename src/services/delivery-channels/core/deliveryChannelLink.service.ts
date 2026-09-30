@@ -267,8 +267,10 @@ export async function updateChannelLink(
 ): Promise<DeliveryChannelLinkSafe> {
   if (data.config !== undefined && data.config !== null) validarConfig(data.config)
 
-  // Leer-mezclar-escribir dentro de UNA transacción: sin ella, dos admins guardando a la vez
-  // (o la pantalla de horario y la de precios) se pisan y el último gana con datos viejos.
+  // Leer-mezclar-escribir con la fila BLOQUEADA: una transacción sola no basta (en READ COMMITTED las
+  // dos lecturas ven lo mismo y gana el último con datos viejos). Sin el `FOR UPDATE`, dos admins
+  // guardando horario y precios a la vez se pisaban, y un PATCH leído antes de que el job de
+  // disponibilidad guardara sus agotados los borraba al escribir: el producto se quedaba agotado en Uber.
   const link = await prisma.$transaction(async tx => {
     let config: Prisma.InputJsonValue | typeof Prisma.JsonNull | undefined
     if (data.config === null) {
@@ -276,7 +278,8 @@ export async function updateChannelLink(
     } else if (data.config !== undefined) {
       // Tenant-scoped igual que la mutación: un link de otro venue no da fila y el
       // `updateMany` de abajo devuelve count 0 → NotFoundError, sin filtrar nada.
-      const actual = await tx.deliveryChannelLink.findFirst({ where: { id: linkId, venueId }, select: { config: true } })
+      const [actual] = await tx.$queryRaw<Array<{ config: Prisma.JsonValue }>>`
+        SELECT "config" FROM "DeliveryChannelLink" WHERE "id" = ${linkId} AND "venueId" = ${venueId} FOR UPDATE`
       config = mezclarConfig(actual?.config, data.config)
     }
 
