@@ -10,13 +10,15 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { planGateMessage } from '../planGate'
+import { auditMcpWrite } from '../audit'
+import AppError from '@/errors/AppError'
 
 export function registerDeliveryChannelTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
 
   server.tool(
     'delivery_channels',
-    'Estado de los canales de delivery del venue (Uber Eats/Rappi/DiDi vía Deliverect): canales conectados, estado (activo/pausado), modo de aceptación de pedidos, si su integración YA está lista para operar, último sync de menú, HORARIO en que acepta pedidos (y si es el configurado o un estimado), MARGEN de precios sobre el mostrador, pedidos de delivery de hoy por canal, y los últimos intentos de conectar tiendas de Uber Eats con su resultado por tienda. Responde "¿cómo van mis canales de delivery? ¿cuántos pedidos de Uber/Rappi hoy? ¿cuál canal ya funciona de verdad? ¿a qué horas acepto pedidos en Uber? ¿qué margen tengo puesto? ¿por qué no quedó conectada mi tienda de Uber?". Pass venueId.',
+    'Estado de los canales de delivery del venue (Uber Eats/Rappi/DiDi vía Deliverect): canales conectados, estado (activo/pausado), modo de aceptación de pedidos, si su integración YA está lista para operar, último sync de menú, HORARIO en que acepta pedidos (y si es el configurado o un estimado), MARGEN de precios sobre el mostrador, pedidos de delivery de hoy por canal, y los últimos intentos de conectar tiendas de Uber Eats o Rappi con su resultado por tienda. Responde "¿cómo van mis canales de delivery? ¿cuántos pedidos de Uber/Rappi hoy? ¿cuál canal ya funciona de verdad? ¿a qué horas acepto pedidos en Uber? ¿qué margen tengo puesto? ¿por qué no quedó conectada mi tienda de Uber? ¿por qué no quedó conectada mi tienda de Rappi?". Pass venueId.',
     { venueId: z.string().describe('Venue cuyos canales de delivery leer (debe estar en tu scope)') },
     async ({ venueId }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
@@ -128,6 +130,41 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
         // NO que la tasa sea 0. Reportar 0% sin datos dispararía alarma en cada negocio
         // que todavía no vende por ahí, y las alarmas falsas enseñan a ignorarlas.
         inyeccion,
+      })
+    },
+  )
+
+  // El mismo enlace que `GET /venues/:venueId/channels/rappi/connect-url` (mismas guardas: manage + PREMIUM).
+  // Import perezoso: la cadena de Rappi lee el env al usarse, y ese chequeo debe fallar aquí, no al cargar el MCP.
+  server.tool(
+    'rappi_connect_link',
+    'Genera el enlace para que el dueño conecte SU cuenta de Rappi (Portal Partners) con Avoqado: al abrirlo autoriza y elige qué tiendas conectar. Vence en 10 minutos; si venció, se pide otro. Requiere permiso de administrar canales de delivery y plan PREMIUM. Responde "¿cómo conecto mi tienda de Rappi? ¿me pasas el enlace para conectar Rappi?". Luego el estado de cada tienda se ve con delivery_channels (conexionesRecientes). Pass venueId.',
+    { venueId: z.string().describe('Venue cuya tienda de Rappi se va a conectar (debe estar en tu scope)') },
+    async ({ venueId }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('delivery-channels:manage', venueId) // mirror the REST route's delivery-channels:manage gate
+      const gate = await planGateMessage(venueId, 'DELIVERY_CHANNELS', 'Conectar canales de delivery') // PREMIUM tier
+      if (gate) return text({ ok: false, planRequired: true, feature: 'DELIVERY_CHANNELS', error: gate })
+      // Primero la base: sin ella (o mal escrita) el enlace que se entregue tronaría en `/start`.
+      const { redirectUriRappi } = await import('@/services/delivery-channels/providers/rappi/rappi.client')
+      let callback: string
+      try {
+        callback = redirectUriRappi()
+      } catch {
+        throw new AppError('La conexión con Rappi no está configurada en el servidor.', 500, true, 'RAPPI_CONNECT_NOT_CONFIGURED')
+      }
+      const { depsDesdeEnv, crearIntentRappi } = await import('@/services/delivery-channels/providers/rappi/rappi.connect')
+      // `staffId` = quien pide por el MCP; el callback público revalida ESE usuario en cada paso.
+      const { id, firmado } = await crearIntentRappi(await depsDesdeEnv(), { venueId, staffId: scope.staffId })
+      await auditMcpWrite(scope, { action: 'RAPPI_CONNECT_LINK_CREATED', entity: 'DeliveryConnectIntent', entityId: id, venueId })
+      // La MISMA base (ya validada, sin barra final) que la `redirect_uri` registrada con Rappi.
+      const base = callback.replace(/\/api\/v1\/delivery\/rappi\/oauth\/callback$/, '')
+      return text({
+        ok: true,
+        url: `${base}/api/v1/delivery/rappi/oauth/start?intent=${encodeURIComponent(firmado)}`,
+        instrucciones:
+          'Abre este enlace con la cuenta del Portal Partners de Rappi del negocio (vence en 10 minutos). Al autorizar, eliges qué tiendas conectar a Avoqado.',
+        venceEnMinutos: 10,
       })
     },
   )
