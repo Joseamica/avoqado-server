@@ -2430,7 +2430,7 @@ class TerminalPaymentService {
         terminalId: normalizeTerminalId(terminal.terminalId),
         venueId: terminal.venueId,
       },
-      select: { requestId: true },
+      select: { requestId: true, closedVia: true },
     })
     if (!row) {
       logger.warn('🛑 [TerminalPayment] Result rejected: request is not owned by authenticated terminal socket', {
@@ -2445,7 +2445,16 @@ class TerminalPaymentService {
     const pending = this.pendingPayments.get(result.requestId)
     const outcome = await this.closeRow(result.requestId, terminal.venueId, result)
     if (!pending) {
-      logger.warn(`⚠️ [TerminalPayment] Authenticated late result closed row without an HTTP waiter`, { requestId: result.requestId })
+      // Sin espera HTTP hay dos historias. La normal desde S8: el WEBHOOK ya cerró la fila (`closedVia = 'webhook'`) y contestó
+      // al POS antes de que la terminal mandara su propio resultado — no es tardío, es el orden de siempre (30-sep-2026: ~200
+      // líneas/día en Testarudo, dos por cobro). La que sí importa: nadie había cerrado la fila y el POS ya no esperaba
+      // (ventana vencida, servidor reiniciado) — la terminal cerró dinero sin nadie del otro lado, y eso sigue en warn.
+      const aviso = { requestId: result.requestId, status: result.status, closedVia: row.closedVia ?? null }
+      if (row.closedVia === 'webhook') {
+        logger.info('[TerminalPayment] Terminal result arrived after the webhook already closed the row (no HTTP waiter)', aviso)
+      } else {
+        logger.warn(`⚠️ [TerminalPayment] Authenticated late result closed row without an HTTP waiter`, aviso)
+      }
       return false
     }
     // Revisión final (17-sep, A): un `timeout` CON sobre de la terminal es la fila que ENTRÓ a la ventana de confirmación — todavía
@@ -6958,14 +6967,22 @@ class TerminalPaymentService {
     if (noAcreditable) {
       this.marcarEsperaDeSonda(requestId)
       const yaAuditada = !(await this.debeAuditar('TERMINAL_PAYMENT_PROBE_UNACCREDITED', row.id))
-      logger.warn('🔎 [TerminalPayment] Probe NOT_FOUND cannot accredit non-receipt: reservation kept for an operator', {
+      const aviso = {
         requestId,
         terminalId: row.terminalId,
         status: row.status,
         evidence: noAcreditable,
         deliveries: procedencia?.length ?? null,
         audited: !yaAuditada,
-      })
+      }
+      // La terminal vuelve a sondear la MISMA fila en cada reconexión y la respuesta no cambia (30-sep-2026: 82 filas viejas de
+      // Testarudo × ~6 reconexiones = 448 líneas/día, el aviso que más crecía). La primera vez es un aviso para el operador y
+      // queda en ActivityLog; las repeticiones no traen evidencia nueva y salen en info. La fila sigue retenida igual.
+      if (yaAuditada) {
+        logger.info('🔎 [TerminalPayment] Probe NOT_FOUND repeated on a row already kept for an operator (no new evidence)', aviso)
+      } else {
+        logger.warn('🔎 [TerminalPayment] Probe NOT_FOUND cannot accredit non-receipt: reservation kept for an operator', aviso)
+      }
       if (!yaAuditada) {
         void logAction({
           venueId: terminal.venueId,

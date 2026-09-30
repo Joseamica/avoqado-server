@@ -110,7 +110,13 @@ export const requestLoggerMiddleware = (req: Request, res: Response, next: NextF
       const duration = (diff[0] * 1e3 + diff[1] * 1e-6).toFixed(3) // milliseconds
       const { statusCode } = res
 
-      const level = statusCode >= 500 ? 'error' : statusCode >= 400 ? 'warn' : 'info'
+      // Un 404 que NINGÚN router atendió (`req.route` vacío) es un escáner de internet o una URL vieja (`/.env`, `wp-admin`,
+      // `/graphql`: ~920 líneas en 3 días de producción, 30-sep-2026), no un aviso del sistema: info. Un 404 que sí atendió un
+      // handler («el recurso no existe») y cualquier otro 4xx siguen en warn. Límite conocido: un 404 que contestara un
+      // middleware montado con `use()` (sin ruta) también bajaría a info; hoy ninguno lo hace (los que contestan 404 —
+      // resolveVenueBySlug, bindTpv*Target— van dentro de la ruta, y `checkPublicVenueFeature` deja pasar al controlador).
+      const sinRuta = statusCode === 404 && !req.route
+      const level = statusCode >= 500 ? 'error' : statusCode >= 400 && !sinRuta ? 'warn' : 'info'
 
       if (!shouldSkipLogging) {
         // Enrich logs with auth context (available after auth middleware runs)
