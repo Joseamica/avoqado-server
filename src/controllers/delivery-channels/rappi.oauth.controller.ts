@@ -355,19 +355,26 @@ async function reChequear(deps: ConnectDeps, intent: DeliveryConnectIntent): Pro
 }
 
 /**
- * A lo más UN re-chequeo por intent cada 30 s: cualquiera con el enlace podría recargar sin parar, y cada
- * carga es una llamada a Rappi con el token del comerciante (Rappi nos exige un 98 % de llamadas sanas).
+ * A lo más UN re-chequeo por intent a la vez, y el siguiente 30 s después de que TERMINÓ el anterior: cualquiera
+ * con el enlace podría recargar sin parar, y cada carga es una llamada a Rappi con el token del comerciante
+ * (Rappi nos exige un 98 % de llamadas sanas). Contar desde el inicio dejaba que un re-chequeo lento (varias
+ * tiendas que suscribir) tuviera otro encima, duplicando las llamadas.
  * ponytail: en memoria de ESTE proceso — hoy una sola instancia en Render. Con varias, cada una frenaría
- * por su cuenta; entonces moverlo a una columna del intent (`lastRecheckAt`) con un CAS.
+ * por su cuenta; entonces moverlo a una columna del intent (`lastRecheckAt`) con un CAS / lease.
  */
 const RECHEQUEO_MS = 30_000
+/** Cuándo terminó el último re-chequeo de cada intent; `Infinity` = hay uno en vuelo (la poda no lo quita). */
 const ultimoRechequeo = new Map<string, number>()
-function tocaRechequear(intentId: string): boolean {
+async function reChequearFrenado(deps: ConnectDeps, intent: DeliveryConnectIntent): Promise<void> {
   const ahora = Date.now()
   for (const [id, t] of ultimoRechequeo) if (ahora - t >= RECHEQUEO_MS) ultimoRechequeo.delete(id) // poda perezosa
-  if (ultimoRechequeo.has(intentId)) return false
-  ultimoRechequeo.set(intentId, ahora)
-  return true
+  if (ultimoRechequeo.has(intent.id)) return
+  ultimoRechequeo.set(intent.id, Infinity)
+  try {
+    await reChequear(deps, intent)
+  } finally {
+    ultimoRechequeo.set(intent.id, Date.now())
+  }
 }
 
 const CONFIRMANDO = 'Rappi la está confirmando — recarga esta página en un minuto.'
@@ -421,7 +428,7 @@ export const resultadoRappiOAuth = publica('No se pudo mostrar el resultado', as
   const intent = await abrir(res, deps, req.query.intent, 'result', ctx)
   if (!intent) return
   // Frenado, se enseña lo que ya hay: el webhook o la carga anterior pudieron haberlo avanzado.
-  if (intent.state === 'ACTIVATING' && tocaRechequear(intent.id)) await reChequear(deps, intent)
+  if (intent.state === 'ACTIVATING') await reChequearFrenado(deps, intent)
   // Se relee: el re-chequeo (o un webhook) pudo haber avanzado los resultados.
   const actual = (await prisma.deliveryConnectIntent.findUnique({ where: { id: intent.id } })) ?? intent
   res.status(200).send(paginaResultado(actual, await nombreDelNegocio(intent.venueId)))

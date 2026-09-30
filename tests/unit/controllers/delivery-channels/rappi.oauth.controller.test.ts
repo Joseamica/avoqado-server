@@ -376,6 +376,33 @@ describe('result', () => {
     expect(cliente.tiendasDelComercio).toHaveBeenCalledTimes(2)
   })
 
+  // H8: un re-chequeo lento (Rappi despacio, varias tiendas que suscribir) pasaba de los 30 s y otra carga
+  // arrancaba OTRO encima: HTTP y suscripciones duplicadas. Ahora uno a la vez, y los 30 s cuentan desde que termina.
+  it('mientras un re-chequeo sigue en vuelo no arranca otro; los 30 s cuentan desde que TERMINÓ', async () => {
+    canjeado()
+    await activar({ tiendas: '10', confirmo_negocio: 'si' })
+    let soltar!: (v: unknown) => void
+    cliente.tiendasDelComercio.mockImplementationOnce(() => new Promise(r => (soltar = r)))
+
+    const primera = resultado()
+    await new Promise(r => setImmediate(r))
+    expect(cliente.tiendasDelComercio).toHaveBeenCalledTimes(1) // en vuelo
+
+    reloj += 60_000 // más de 30 s desde que EMPEZÓ
+    const r2 = await resultado()
+    expect(cliente.tiendasDelComercio).toHaveBeenCalledTimes(1)
+    expect(html(r2)).toContain('Rappi la está confirmando')
+
+    soltar([{ storeId: '10', name: 'A', integrated: true, integrationId: 'de-otro' }])
+    await primera
+    reloj += 29_000
+    await resultado()
+    expect(cliente.tiendasDelComercio).toHaveBeenCalledTimes(1)
+    reloj += 1_000
+    await resultado()
+    expect(cliente.tiendasDelComercio).toHaveBeenCalledTimes(2)
+  })
+
   it('el motivo de rechazo de Rappi y el negocio van escapados; sin re-chequeo fuera de ACTIVATING', async () => {
     sembrar({
       state: 'CONSUMED',
