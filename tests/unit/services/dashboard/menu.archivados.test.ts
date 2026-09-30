@@ -102,6 +102,8 @@ describe('plan 5 · borrar una categoría: los archivados no cuentan, pero la ll
     expect(prismaMock.product.count).toHaveBeenCalledWith(CUENTA_VIGENTES)
     expect(prismaMock.product.count).toHaveBeenCalledWith(CUENTA_TODOS)
     expect(prismaMock.menuCategory.update).toHaveBeenCalledWith({ where: { id: 'c1' }, data: { active: false } })
+    // F5-1: apagada y FUERA de los menús (getMenus no filtra `active`); las restauraciones la vuelven a asignar con upsert.
+    expect(prismaMock.menuCategoryAssignment.deleteMany).toHaveBeenCalledWith({ where: { categoryId: 'c1' } })
     expect(prismaMock.menuCategory.delete).not.toHaveBeenCalled()
     expect(deleteFileFromStorage).not.toHaveBeenCalled()
   })
@@ -122,5 +124,6 @@ describe('plan 5 · borrar una categoría: los archivados no cuentan, pero la ll
     await expect(menuService.deleteMenuCategory(V, 'c1')).rejects.toMatchObject({ statusCode: 400 })
     expect(prismaMock.menuCategory.delete).not.toHaveBeenCalled()
     expect(prismaMock.menuCategory.update).not.toHaveBeenCalled()
+    expect(prismaMock.menuCategoryAssignment.deleteMany).not.toHaveBeenCalled()
   })
 })

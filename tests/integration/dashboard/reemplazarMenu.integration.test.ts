@@ -3,14 +3,23 @@
  * de un archivado que regresa restaura el MISMO producto (D3, opción A del founder, Tarea 4). Contra Postgres REAL (H1),
  * negocio NUEVO por caso. El actor es SERVICE (sin Staff que crear): `deletedBy` del reemplazo queda en null.
  */
-import { Prisma } from '@prisma/client'
+import { Prisma, PrismaClient } from '@prisma/client'
 
 import { getIncomeStatement } from '@/services/dashboard/accounting.dashboard.service'
 import { getMenus, importMenu } from '@/services/dashboard/menu.dashboard.service'
 import { getPaymentLinkByShortCode } from '@/services/dashboard/paymentLink.service'
 import { deleteProduct } from '@/services/dashboard/product.dashboard.service'
+import { cleanDemoData } from '@/services/onboarding/demoCleanup.service'
 import prisma from '@/utils/prismaClient'
-import { conProducto, limpiarNegocios, nuevoNegocio, type Negocio } from '../fiscal/exclusionContable.fixtures'
+import {
+  conProducto,
+  desenlace,
+  hastaQue,
+  limpiarNegocios,
+  nuevoNegocio,
+  retener,
+  type Negocio,
+} from '../fiscal/exclusionContable.fixtures'
 
 jest.setTimeout(120_000)
 
@@ -19,6 +28,9 @@ const CUANDO = new Date('2026-06-15T18:00:00.000Z') // 12:00 en la Ciudad de Mé
 const JUNIO = { from: '2026-06-01', to: '2026-06-30' }
 const usados: Negocio[] = []
 const personal: string[] = []
+// C5-1: otra transacción (la liga que se guarda) y quien mira pg_stat_activity, cada una con su propia conexión.
+const bloqueador = new PrismaClient()
+const observador = new PrismaClient()
 
 async function negocio() {
   const x = await nuevoNegocio({ contabilidad: false })
@@ -82,8 +94,8 @@ async function vistos(venueId: string) {
   return menus.flatMap(m => m.categories.map(c => ({ categoria: c.category.id, productos: c.category.products.map(p => p.id).sort() })))
 }
 
-/** Una liga de pago VIVA `purpose: 'ITEM'` (el default es PAYMENT) con un renglón del producto y un EXTRA PAGADO. Devuelve su código. */
-async function ligaDePago(x: Negocio, productId: string, modifierId: string): Promise<string> {
+/** Una liga de pago VIVA `purpose: 'ITEM'` (el default es PAYMENT) con un renglón del producto y, si se pide, un EXTRA PAGADO. Devuelve su código. */
+async function ligaDePago(x: Negocio, productId: string, modifierId?: string): Promise<string> {
   const proveedor = await prisma.paymentProvider.upsert({
     where: { code: 'PLAN5_PRUEBA' },
     create: { code: 'PLAN5_PRUEBA', name: 'Plan 5 (prueba)', type: 'PAYMENT_PROCESSOR' },
@@ -113,7 +125,7 @@ async function ligaDePago(x: Negocio, productId: string, modifierId: string): Pr
       title: 'Liga viva',
       amountType: 'FIXED',
       amount: 70,
-      items: { create: [{ productId, modifiers: { create: [{ modifierId, quantity: 1 }] } }] },
+      items: { create: [{ productId, modifiers: modifierId ? { create: [{ modifierId, quantity: 1 }] } : undefined }] },
     },
   })
   return liga.shortCode
@@ -136,6 +148,7 @@ afterAll(async () => {
   await prisma.paymentProvider.deleteMany({ where: { code: 'PLAN5_PRUEBA' } })
   await prisma.creditPack.deleteMany({ where: { venueId: { in: venues } } })
   await limpiarNegocios()
+  await Promise.all([bloqueador.$disconnect(), observador.$disconnect()])
 })
 
 describe('D2 · «Reemplazar» archiva lo que no viene: la historia y su IVA no se mueven', () => {
@@ -348,4 +361,126 @@ describe('D3 · el SKU de un archivado que regresa restaura el MISMO producto', 
     expect(p).toMatchObject({ deletedAt: null, deletedBy: null, active: true })
     expect(Number(p.price)).toBe(120)
   })
+})
+
+describe('C5-1 · una liga que se guarda MIENTRAS «Reemplazar» corre no pierde su extra', () => {
+  it('el reemplazo espera al extra que la liga está insertando; al confirmarse, el extra sigue y la liga cobra lo mismo', async () => {
+    const x = await negocio()
+    const { categoryId } = await conProducto(x)
+    const te = (await prisma.product.create({ data: { venueId: x.venueId, categoryId, sku: `TE-${x.rfc}`, name: 'Té', price: 50 } })).id
+    const grupo = await prisma.modifierGroup.create({
+      data: { venueId: x.venueId, name: 'Extras', modifiers: { create: [{ name: 'Shot', price: 20 }] } },
+    })
+    const shot = await prisma.modifier.findFirstOrThrow({ where: { groupId: grupo.id } })
+    // La liga viva existe SIN extra: nadie usa «Extras» todavía, así que una lectura sin candado lo tomaría por borrable.
+    const corto = await ligaDePago(x, te)
+    const { id: renglon } = await prisma.paymentLinkItem.findFirstOrThrow({ where: { paymentLink: { shortCode: corto } } })
+
+    // Otra petición guarda la liga con el extra de $20 y todavía no confirma.
+    const liga = await retener(
+      bloqueador,
+      tx => tx.paymentLinkItemModifier.create({ data: { paymentLinkItemId: renglon, modifierId: shot.id, quantity: 1 } }),
+      { confirmar: true },
+    )
+    let reemplazo: Promise<unknown> = Promise.resolve()
+    try {
+      reemplazo = desenlace(
+        importMenu(x.venueId, archivo('replace', 'IVA', `iva-${x.rfc}`.toLowerCase(), [['Café', `P-${x.rfc}`, 116]]), SERVICIO),
+      )
+      const pid = await hastaQue(
+        observador,
+        'el reemplazo espera al extra que la liga está guardando',
+        20_000,
+        Prisma.sql`SELECT a.pid FROM pg_stat_activity a
+          WHERE a.datname = current_database() AND a.wait_event_type = 'Lock'
+            AND ${liga.pid}::int = ANY(pg_blocking_pids(a.pid)) AND a.query LIKE '%Modifier%'
+          LIMIT 1`,
+      )
+      const [espera] = await observador.$queryRaw<Array<Record<string, unknown>>>`
+        SELECT pid, wait_event_type, wait_event, state, pg_blocking_pids(pid) AS bloqueado_por, left(query, 200) AS query
+        FROM pg_stat_activity WHERE pid = ${pid}`
+      console.log('[C5-1] pg_stat_activity', JSON.stringify(espera))
+    } finally {
+      await liga.soltar()
+    }
+
+    expect(await reemplazo).toMatchObject({ ok: { stats: { productsArchived: 1 } } })
+    expect(await prisma.paymentLinkItemModifier.count({ where: { paymentLinkItemId: renglon, modifierId: shot.id } })).toBe(1)
+    expect(totalDeLiga(await getPaymentLinkByShortCode(corto))).toBe(70) // $50 del té + $20 del extra
+    expect(await prisma.modifierGroup.findUniqueOrThrow({ where: { id: grupo.id }, select: { active: true } })).toEqual({ active: false })
+  })
+})
+
+describe('C5-2 · lo que la importación adopta en un negocio DEMO deja de ser demo: convertirlo no lo borra', () => {
+  it.each(['replace', 'merge'] as const)(
+    '«%s»: el producto, su categoría, su inventario y su grupo de extras sobreviven a cleanDemoData',
+    async mode => {
+      const x = await negocio()
+      const categoria = await prisma.menuCategory.create({
+        data: { venueId: x.venueId, name: 'Bebidas Calientes', slug: `bebidas-${x.rfc}`.toLowerCase(), isDemo: true },
+      })
+      const demo = await prisma.product.create({
+        data: { venueId: x.venueId, categoryId: categoria.id, sku: `BEB-${x.rfc}`, name: 'Café Americano', price: 35, isDemo: true },
+      })
+      const inventario = await prisma.inventory.create({ data: { productId: demo.id, venueId: x.venueId, currentStock: 4, isDemo: true } })
+      await prisma.modifierGroup.create({
+        data: {
+          venueId: x.venueId,
+          name: 'Tipo de Leche',
+          isDemo: true,
+          modifiers: { create: [{ name: 'Leche Light', price: 0, isDemo: true }] },
+        },
+      })
+
+      await importMenu(
+        x.venueId,
+        {
+          mode,
+          categories: [
+            {
+              name: 'Bebidas Calientes',
+              slug: categoria.slug,
+              products: [
+                {
+                  name: 'Café Americano',
+                  sku: `BEB-${x.rfc}`,
+                  price: 40,
+                  trackInventory: true,
+                  modifierGroups: [
+                    {
+                      name: 'Tipo de Leche',
+                      required: false,
+                      allowMultiple: false,
+                      minSelections: 0,
+                      maxSelections: 1,
+                      modifiers: [{ name: 'Leche Light', price: 5 }],
+                    },
+                  ],
+                },
+                // Un SKU NUEVO en la categoría demo: si la categoría siguiera demo, su borrado chocaría con la llave RESTRICT.
+                { name: 'Nuevo', sku: `NUEVO-${x.rfc}`, price: 10 },
+              ],
+            },
+          ],
+        },
+        SERVICIO,
+      )
+
+      await expect(cleanDemoData(x.venueId)).resolves.toBeDefined()
+
+      expect(await prisma.product.findUnique({ where: { id: demo.id }, select: { isDemo: true, deletedAt: true } })).toEqual({
+        isDemo: false,
+        deletedAt: null,
+      })
+      expect(await prisma.menuCategory.findUnique({ where: { id: categoria.id }, select: { isDemo: true } })).toEqual({ isDemo: false })
+      expect(await prisma.product.count({ where: { venueId: x.venueId, sku: `NUEVO-${x.rfc}`, categoryId: categoria.id } })).toBe(1)
+      expect(await prisma.inventory.findUnique({ where: { id: inventario.id }, select: { isDemo: true } })).toEqual({ isDemo: false })
+      expect(
+        await prisma.productModifierGroup.findMany({
+          where: { productId: demo.id },
+          select: { group: { select: { name: true, isDemo: true, modifiers: { select: { name: true, isDemo: true } } } } },
+        }),
+      ).toEqual([{ group: { name: 'Tipo de Leche', isDemo: false, modifiers: [{ name: 'Leche Light', isDemo: false }] } }])
+    },
+  )
 })

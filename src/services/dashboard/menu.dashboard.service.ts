@@ -403,9 +403,15 @@ export async function deleteMenuCategory(venueId: string, categoryId: string): P
     })
   }
 
-  const deletedCategory = conArchivados
-    ? await prisma.menuCategory.update({ where: { id: categoryId }, data: { active: false } })
-    : await prisma.menuCategory.delete({ where: { id: categoryId } })
+  let deletedCategory: MenuCategory
+  if (conArchivados) {
+    // F5-1: apagada y FUERA de los menús (getMenus no filtra `active`); las dos restauraciones de la importación la vuelven a
+    // asignar con `upsert`.
+    await prisma.menuCategoryAssignment.deleteMany({ where: { categoryId } })
+    deletedCategory = await prisma.menuCategory.update({ where: { id: categoryId }, data: { active: false } })
+  } else {
+    deletedCategory = await prisma.menuCategory.delete({ where: { id: categoryId } })
+  }
 
   // 🔌 REAL-TIME: Broadcast category deletion via Socket.IO
   const broadcastingService = socketManager.getBroadcastingService()
@@ -1304,6 +1310,12 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
         // 2-3. Modifiers and groups (plan 5, P5-R15): a group a live payment link (one of its extras) or a variable recipe still
         //      uses is KEPT, turned OFF with all its extras — deleting it would cascade the link's paid extra away (the link would
         //      charge less) and unlink the recipe. The rest are deleted as before (OrderItemModifier keeps its denormalized name).
+        //      Codex C5-1: lock the venue's groups and extras FIRST (after the Venue fence; nothing new Order → Venue). A link or
+        //      recipe being saved holds its extra/group until it commits, so this waits for it, and the deletes below — SEPARATE
+        //      statements, so in READ COMMITTED they see what committed meanwhile — keep what it uses. One that arrives after the
+        //      lock waits for this transaction and, if its extra was deleted, fails on the foreign key instead of losing it silently.
+        await tx.$executeRaw`SELECT 1 FROM "ModifierGroup" WHERE "venueId" = ${venueId} FOR UPDATE`
+        await tx.$executeRaw`SELECT 1 FROM "Modifier" m JOIN "ModifierGroup" g ON g."id" = m."groupId" WHERE g."venueId" = ${venueId} FOR UPDATE OF m`
         const extrasEnUso: Prisma.ModifierGroupWhereInput = {
           OR: [{ linkedRecipeLines: { some: {} } }, { modifiers: { some: { paymentLinkItems: { some: {} } } } }],
         }
@@ -1371,15 +1383,24 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
               displayOrder: catIndex,
             },
           })
-        } else if (data.mode === 'replace' || !category.active) {
+        } else {
           // The category the file brings is sold again: replace turned OFF the ones keeping archived products and deleted every
           // menu, and one turned off by hand may not be in the main menu. `upsert`: the file may repeat a category.
-          if (!category.active) await tx.menuCategory.update({ where: { id: category.id }, data: { active: true } })
-          await tx.menuCategoryAssignment.upsert({
-            where: { menuId_categoryId: { menuId: defaultMenu.id, categoryId: category.id } },
-            create: { menuId: defaultMenu.id, categoryId: category.id, displayOrder: catIndex },
-            update: {},
-          })
+          // Codex C5-2: the file adopts it (same id), so a demo one stops being demo — otherwise converting the demo venue deletes
+          // it, or fails on the RESTRICT key of a product the file put in it.
+          if (!category.active || category.isDemo) {
+            await tx.menuCategory.update({
+              where: { id: category.id },
+              data: { ...(category.active ? {} : { active: true }), ...(category.isDemo ? { isDemo: false } : {}) },
+            })
+          }
+          if (data.mode === 'replace' || !category.active) {
+            await tx.menuCategoryAssignment.upsert({
+              where: { menuId_categoryId: { menuId: defaultMenu.id, categoryId: category.id } },
+              create: { menuId: defaultMenu.id, categoryId: category.id, displayOrder: catIndex },
+              update: {},
+            })
+          }
         }
 
         // Process products in this category
@@ -1397,6 +1418,8 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
             if (archivado) {
               // P5-R16: the pre-count may have seen this SKU alive and another request archived it since (archiving does not
               // take the Venue fence). Restoring = activating ⇒ ask the fence again, in this transaction, before writing.
+              // F5-2: redundant in replace by construction (its pre-count already counts every file SKU as a creation); it is
+              // here for merge's race.
               await assertLegacyCatalogGovernanceForVenue(tx, { venueId, operation: 'ACTIVATE', willBeVendable: true, actor })
             }
             // Update existing product
@@ -1416,6 +1439,8 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
                 // ya configurada y desconfigurar la agenda del local.
                 ...(productData.duration !== undefined ? { duration: productData.duration } : {}),
                 ...(archivado ? { deletedAt: null, deletedBy: null, active: true } : {}),
+                // Codex C5-2: the file adopts it (same id) ⇒ the owner's, no longer demo: converting the venue must not delete it.
+                isDemo: false,
               },
             })
             productsUpdated++
@@ -1463,6 +1488,7 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
                 where: { id: existingInventory.id },
                 data: {
                   minimumStock: productData.minStock || 0,
+                  ...(existingInventory.isDemo ? { isDemo: false } : {}), // Codex C5-2: adopted with its product
                 },
               })
             } else {
@@ -1534,11 +1560,16 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
                     allowMultiple: groupData.allowMultiple,
                     minSelections: groupData.minSelections,
                     maxSelections: groupData.maxSelections,
+                    ...(modifierGroup.isDemo ? { isDemo: false } : {}), // Codex C5-2: adopted by the file
                   },
                 })
-              } else if (!modifierGroup.active) {
-                // Merge keeps today's behaviour (an existing group is not overwritten); it only turns back ON one that was off.
-                await tx.modifierGroup.update({ where: { id: modifierGroup.id }, data: { active: true } })
+              } else if (!modifierGroup.active || modifierGroup.isDemo) {
+                // Merge keeps today's behaviour (an existing group is not overwritten); it only turns back ON one that was off, and
+                // (Codex C5-2) a demo one the file adopts stops being demo, or converting the venue would delete it with its links.
+                await tx.modifierGroup.update({
+                  where: { id: modifierGroup.id },
+                  data: { active: true, ...(modifierGroup.isDemo ? { isDemo: false } : {}) },
+                })
               }
 
               // Assign modifier group to product
@@ -1570,10 +1601,17 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
                 } else if (data.mode === 'replace') {
                   // Plan 5 (P5-R15): replace applies the file's price to the reused extra (same id: live links and past sales keep
                   // pointing at it). Without it every POS keeps charging the old price (the server prices from Modifier.price).
-                  await tx.modifier.update({ where: { id: existingModifier.id }, data: { active: true, price: modifierData.price } })
-                } else if (!existingModifier.active) {
-                  // Merge keeps today's behaviour (an existing extra is not overwritten); it only turns back ON one that was off.
-                  await tx.modifier.update({ where: { id: existingModifier.id }, data: { active: true } })
+                  await tx.modifier.update({
+                    where: { id: existingModifier.id },
+                    data: { active: true, price: modifierData.price, ...(existingModifier.isDemo ? { isDemo: false } : {}) },
+                  })
+                } else if (!existingModifier.active || existingModifier.isDemo) {
+                  // Merge keeps today's behaviour (an existing extra is not overwritten); it only turns back ON one that was off, and
+                  // (Codex C5-2) a demo one the file adopts stops being demo.
+                  await tx.modifier.update({
+                    where: { id: existingModifier.id },
+                    data: { active: true, ...(existingModifier.isDemo ? { isDemo: false } : {}) },
+                  })
                 }
               }
             }

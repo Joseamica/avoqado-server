@@ -6,7 +6,7 @@ jest.mock('../../../src/config/env', () => ({
   NODE_ENV: 'production',
 }))
 
-import { ConflictError } from '../../../src/errors/AppError'
+import { BadRequestError, ConflictError } from '../../../src/errors/AppError'
 import { globalErrorHandler } from '../../../src/app'
 import { AFILIACION_EN_VARIOS_SLOTS } from '../../../src/services/shared/slotsDeAfiliacion'
 import { MENSAJE_PRODUCTO_CON_VENTAS, PRODUCTO_CON_VENTAS_NO_SE_BORRA } from '../../../src/services/dashboard/product.dashboard.service'
@@ -93,5 +93,29 @@ describe('AppError recoverable details', () => {
 
     expect(r.status).toBe(409)
     expect(r.body).toEqual({ message: MENSAJE_PRODUCTO_CON_VENTAS, code: PRODUCTO_CON_VENTAS_NO_SE_BORRA })
+  })
+
+  // Codex código C5-3: el traductor exige la forma de un error de Postgres (P0001), no sólo el texto. Una categoría que se llama
+  // como el código no puede volverse un 409 que dice que un producto tiene ventas.
+  it('does NOT turn an AppError or a non-Postgres error that merely mentions the trigger code into the 409', async () => {
+    const app = express()
+    app.get('/categoria', () => {
+      throw new BadRequestError(`Ya existe una categoría llamada ${PRODUCTO_CON_VENTAS_NO_SE_BORRA}`, 'CATEGORIA_DUPLICADA')
+    })
+    app.get('/otro', () => {
+      throw new Error(`Unique constraint failed on the fields: (\`name\`) — ${PRODUCTO_CON_VENTAS_NO_SE_BORRA}`)
+    })
+    app.use(globalErrorHandler)
+
+    const categoria = await request(app).get('/categoria')
+    expect(categoria.status).toBe(400)
+    expect(categoria.body).toEqual({
+      message: `Ya existe una categoría llamada ${PRODUCTO_CON_VENTAS_NO_SE_BORRA}`,
+      code: 'CATEGORIA_DUPLICADA',
+    })
+
+    const otro = await request(app).get('/otro')
+    expect(otro.status).toBe(500)
+    expect(otro.body).toEqual({ message: 'Ocurrió un error inesperado en el servidor.' })
   })
 })

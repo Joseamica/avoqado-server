@@ -1066,10 +1066,19 @@ export const PRODUCTO_CON_VENTAS_NO_SE_BORRA = 'PRODUCTO_CON_VENTAS_NO_SE_BORRA'
 export const MENSAJE_PRODUCTO_CON_VENTAS =
   'Este producto ya tiene ventas y no se puede borrar de verdad. Bórralo desde el menú: se archiva, deja de venderse y conserva su historia.'
 
-/** El trigger lanza P0001 con el código en el texto (un error de modelo de Prisma lo trae en el mensaje; uno crudo, en `meta`). */
+/**
+ * El trigger lanza P0001 con el código en el texto. Codex C5-3: sólo con la FORMA de ese error de Postgres — un error de
+ * modelo de Prisma lo trae en el mensaje (`PostgresError { code: "P0001", … }`), uno crudo (`$executeRaw`) como P2010 con el
+ * código de Postgres en `meta`. Un AppError u otro error que sólo MENCIONE el código (una categoría que se llama así) no lo es.
+ */
 export function esProductoConVentas(err: unknown): boolean {
-  const e = err as { message?: unknown; meta?: { message?: unknown } } | null | undefined
-  return `${e?.meta?.message ?? ''} ${e?.message ?? ''}`.includes(PRODUCTO_CON_VENTAS_NO_SE_BORRA)
+  if (!err || err instanceof AppError) return false
+  const e = err as { code?: unknown; message?: unknown; meta?: { code?: unknown; message?: unknown } }
+  if (e.code !== undefined) {
+    return e.code === 'P2010' && e.meta?.code === 'P0001' && String(e.meta?.message ?? '').includes(PRODUCTO_CON_VENTAS_NO_SE_BORRA)
+  }
+  const texto = String(e.message ?? '')
+  return /PostgresError \{ code: "P0001"/.test(texto) && texto.includes(PRODUCTO_CON_VENTAS_NO_SE_BORRA)
 }
 
 /**
