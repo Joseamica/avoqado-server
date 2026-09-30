@@ -12,7 +12,13 @@ import { computeInventoryAvailability } from '../../services/dashboard/product.d
 import { Unit } from '@prisma/client'
 import logger from '../../config/logger'
 import { toLegacyProductPayload } from '../../utils/legacyProductPayload'
-import { ensureQuantityInventoryRow, inventoryMethodForNewProduct } from '../../services/dashboard/quantityInventoryRow'
+import {
+  ensureQuantityInventoryRow,
+  inventoryMethodForNewProduct,
+  isNonInventoriable,
+  NON_INVENTORIABLE_MESSAGE,
+} from '../../services/dashboard/quantityInventoryRow'
+import AppError from '../../errors/AppError'
 import {
   assertLegacyCatalogGovernanceForVenue,
   assertLegacyProductReferencesForVenue,
@@ -130,6 +136,10 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
 
     if (!name || !name.trim()) {
       return res.status(400).json({ success: false, message: 'name es requerido' })
+    }
+    // Misma regla que el dashboard: una clase o una cita no llevan existencias (la venta les descontaba).
+    if (isNonInventoriable(type ?? 'FOOD_AND_BEV', trackInventory)) {
+      return res.status(400).json({ success: false, message: NON_INVENTORIABLE_MESSAGE })
     }
 
     // If no categoryId provided, use first category for this venue
@@ -293,6 +303,8 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
         categoryId: typeof data.categoryId === 'string' ? data.categoryId : undefined,
       })
       const updated = await tx.product.update({ where: { id: productId }, data, include: productInclude })
+      // Con el estado FINAL (el tipo puede no venir en el cuerpo): revierte toda la escritura.
+      if (isNonInventoriable(updated.type, updated.trackInventory)) throw new AppError(NON_INVENTORIABLE_MESSAGE, 400)
       // Artículos de Android e iOS activan «por cantidad» por aquí, no por el servicio del dashboard.
       await ensureQuantityInventoryRow(tx, updated)
       // El `include` se leyó ANTES de la fila: la haya creado el helper o, en carrera, el asistente,

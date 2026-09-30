@@ -3,7 +3,7 @@ import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { createProduct } from '@/services/dashboard/product.dashboard.service'
 import { setupSimpleStockStep3, switchInventoryMethod } from '@/services/dashboard/productWizard.service'
-import { createProduct as createFromPos } from '@/controllers/mobile/product.mobile.controller'
+import { createProduct as createFromPos, updateProduct as updateFromPos } from '@/controllers/mobile/product.mobile.controller'
 import { createTpvQuickAddProductHandler } from '@/routes/tpv.routes'
 
 // Defectos preexistentes de inventario (auditoría de Codex, 29-sep-2026), contra Postgres real:
@@ -16,6 +16,21 @@ const D = (value: Prisma.Decimal.Value) => new Prisma.Decimal(value)
 const fixture = `inv-hard-${randomUUID()}`
 const humanActor = () => ({ type: 'HUMAN' as const, staffId, impersonating: false })
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
+
+/**
+ * Barrera verificable (no un `sleep`): espera a que OTRA conexión esté BLOQUEADA en un candado
+ * ejecutando una consulta que contenga alguno de los `patrones`. Así la prueba sabe que la operación
+ * competidora llegó al punto de la carrera, en vez de suponerlo por tiempo.
+ */
+async function esperarBloqueo(...patrones: string[]): Promise<void> {
+  for (let i = 0; i < 400; i++) {
+    const filas = await prisma.$queryRaw<Array<{ query: string }>>`
+      SELECT query FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`
+    if (filas.some(f => patrones.some(p => f.query.includes(p)))) return
+    await sleep(25)
+  }
+  throw new Error(`ninguna conexión llegó a esperar un candado en: ${patrones.join(' | ')}`)
+}
 
 let organizationId = ''
 let venueId = ''
@@ -140,10 +155,13 @@ describe('paso 3 del asistente: saldo y kardex en UNA transacción', () => {
     const item = await porCantidadConFila(0)
     let liberar!: () => void
     const puerta = new Promise<void>(r => (liberar = r))
+    let avisarCandado!: () => void
+    const conCandado = new Promise<void>(r => (avisarCandado = r))
     // Una venta que descuenta 1 y sostiene el candado de la fila hasta que la soltemos.
     const venta = prisma.$transaction(
       async tx => {
         await tx.$executeRaw`UPDATE "Inventory" SET "currentStock" = "currentStock" - 1 WHERE "productId" = ${item.id}`
+        avisarCandado()
         const inv = await tx.inventory.findUniqueOrThrow({ where: { productId: item.id } })
         await tx.inventoryMovement.create({
           data: { inventoryId: inv.id, type: 'SALE', quantity: D(-1), previousStock: D(0), newStock: D(-1), reason: 'venta simultánea' },
@@ -152,10 +170,14 @@ describe('paso 3 del asistente: saldo y kardex en UNA transacción', () => {
       },
       { timeout: 20_000 },
     )
-    await sleep(300)
+    await conCandado
     const paso3 = setupSimpleStockStep3(venueId, item.id, { initialStock: 12, reorderPoint: 2, costPerUnit: 20 })
-    await sleep(800)
-    liberar()
+    // Espera en el INSERT o en el FOR UPDATE de la fila: cualquiera prueba que ya llegó a la carrera.
+    try {
+      await esperarBloqueo('"Inventory"')
+    } finally {
+      liberar()
+    }
     await venta
     await paso3
 
@@ -231,7 +253,7 @@ describe('las ALTAS guardan el método y la fila de inventario', () => {
     await filaEnCero(p.id)
   })
 
-  it('sin inventario, ninguna alta crea fila ni método', async () => {
+  it('Artículos sin inventario: no crea fila ni método', async () => {
     await call(createFromPos, { venueId }, { name: 'Pan sin inv', price: 45, categoryId })
 
     const p = await prisma.product.findFirstOrThrow({ where: { venueId, name: 'Pan sin inv' } })
@@ -258,17 +280,23 @@ describe('cambiar de RECETA a CANTIDAD con otro cambio a la vez', () => {
     let liberar!: () => void
     const puerta = new Promise<void>(r => (liberar = r))
     // Otro cambio que ya borró la receta y sostiene el candado hasta que lo soltemos.
+    let avisarCandado!: () => void
+    const conCandado = new Promise<void>(r => (avisarCandado = r))
     const otro = prisma.$transaction(
       async tx => {
         await tx.recipe.delete({ where: { id: receta.id } })
+        avisarCandado()
         await puerta
       },
       { timeout: 20_000 },
     )
-    await sleep(300)
+    await conCandado
     const cambio = switchInventoryMethod(venueId, item.id, 'QUANTITY')
-    await sleep(800)
-    liberar()
+    try {
+      await esperarBloqueo('Recipe')
+    } finally {
+      liberar()
+    }
     await otro
 
     await expect(cambio).resolves.toMatchObject({ success: true, newMethod: 'QUANTITY' })
@@ -276,5 +304,157 @@ describe('cambiar de RECETA a CANTIDAD con otro cambio a la vez', () => {
     expect(p.inventoryMethod).toBe('QUANTITY')
     expect(await prisma.recipe.count({ where: { productId: item.id } })).toBe(0)
     await filaEnCero(item.id)
+  })
+})
+
+describe('tipos que no llevan existencias (clase, cita, digital, donativo)', () => {
+  it('🔴 Artículos: alta de una CLASE con inventario ⇒ 400 y no se crea nada', async () => {
+    const out = await call(
+      createFromPos,
+      { venueId },
+      { name: 'Clase de yoga', price: 150, categoryId, type: 'CLASS', trackInventory: true, inventoryMethod: 'QUANTITY' },
+    )
+
+    expect(out.status).toBe(400)
+    expect(out.body?.message).toBe('Este tipo de producto no puede tener seguimiento de inventario')
+    expect(await prisma.product.count({ where: { venueId, name: 'Clase de yoga' } })).toBe(0)
+  })
+
+  it('🔴 Artículos: activar inventario en una CITA existente ⇒ 400, sin cambios ni fila', async () => {
+    const cita = await prisma.product.create({
+      data: { venueId, categoryId, name: `Corte ${randomUUID()}`, sku: randomUUID(), price: D(200), type: 'APPOINTMENTS_SERVICE' },
+    })
+
+    const out = await call(updateFromPos, { venueId, productId: cita.id }, { trackInventory: true, inventoryMethod: 'QUANTITY' })
+
+    expect(out.error?.statusCode).toBe(400)
+    const p = await prisma.product.findUniqueOrThrow({ where: { id: cita.id } })
+    expect(p.trackInventory).toBe(false)
+    expect(p.inventoryMethod).toBeNull()
+    expect(await prisma.inventory.count({ where: { productId: cita.id } })).toBe(0)
+  })
+
+  it('un producto normal sigue activando «por cantidad» desde Artículos', async () => {
+    const pan = await prisma.product.create({ data: { venueId, categoryId, name: `Pan ${randomUUID()}`, sku: randomUUID(), price: D(45) } })
+
+    const out = await call(updateFromPos, { venueId, productId: pan.id }, { trackInventory: true, inventoryMethod: 'QUANTITY' })
+
+    expect(out.error).toBeUndefined()
+    await filaEnCero(pan.id)
+  })
+})
+
+describe('paso 3 del asistente: el cambio de RECETA a CANTIDAD va en la MISMA transacción', () => {
+  async function conRecetaQueFalla(item: { id: string }) {
+    const sufijo = randomUUID().replace(/-/g, '').slice(0, 12)
+    const fn = `inv_hard_falla_${sufijo}`
+    await prisma.$executeRawUnsafe(
+      `CREATE FUNCTION "${fn}"() RETURNS trigger AS $$ BEGIN
+         IF EXISTS (SELECT 1 FROM "Inventory" WHERE id = NEW."inventoryId" AND "productId" = '${item.id}') THEN
+           RAISE EXCEPTION 'movimiento rechazado a propósito';
+         END IF;
+         RETURN NEW;
+       END $$ LANGUAGE plpgsql`,
+    )
+    await prisma.$executeRawUnsafe(`CREATE TRIGGER "${fn}" BEFORE INSERT ON "InventoryMovement" FOR EACH ROW EXECUTE FUNCTION "${fn}"()`)
+    return async () => {
+      await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS "${fn}" ON "InventoryMovement"`)
+      await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS "${fn}"()`)
+    }
+  }
+
+  it('🔴 si el paso 3 falla, la receta y el método RECETA siguen intactos', async () => {
+    const item = await prisma.product.create({
+      data: {
+        venueId,
+        categoryId,
+        name: `Latte ${randomUUID()}`,
+        sku: randomUUID(),
+        price: D(60),
+        trackInventory: true,
+        inventoryMethod: 'RECIPE',
+      },
+    })
+    await prisma.recipe.create({ data: { productId: item.id, totalCost: D(0) } })
+    const quitar = await conRecetaQueFalla(item)
+    try {
+      await expect(setupSimpleStockStep3(venueId, item.id, { initialStock: 8, reorderPoint: 1, costPerUnit: 10 })).rejects.toThrow()
+    } finally {
+      await quitar()
+    }
+
+    const p = await prisma.product.findUniqueOrThrow({ where: { id: item.id } })
+    expect(p.inventoryMethod).toBe('RECIPE')
+    expect(await prisma.recipe.count({ where: { productId: item.id } })).toBe(1)
+    expect(await prisma.inventory.count({ where: { productId: item.id } })).toBe(0)
+  })
+
+  it('🔴 un producto RECETA todavía sin receta queda «por cantidad» (no sólo lo dice la respuesta)', async () => {
+    const item = await prisma.product.create({
+      data: {
+        venueId,
+        categoryId,
+        name: `Latte ${randomUUID()}`,
+        sku: randomUUID(),
+        price: D(60),
+        trackInventory: true,
+        inventoryMethod: 'RECIPE',
+      },
+    })
+
+    const r = await setupSimpleStockStep3(venueId, item.id, { initialStock: 8, reorderPoint: 1, costPerUnit: 10 })
+
+    expect(r.inventoryMethod).toBe('QUANTITY')
+    const p = await prisma.product.findUniqueOrThrow({ where: { id: item.id } })
+    expect(p.trackInventory).toBe(true)
+    expect(p.inventoryMethod).toBe('QUANTITY')
+    expect((await kardex(item.id)).saldo).toBe('8')
+  })
+
+  it('🔴 un producto sin inventario queda con inventario «por cantidad» tras el paso 3', async () => {
+    const item = await prisma.product.create({
+      data: { venueId, categoryId, name: `Pan ${randomUUID()}`, sku: randomUUID(), price: D(45) },
+    })
+
+    await setupSimpleStockStep3(venueId, item.id, { initialStock: 3, reorderPoint: 1, costPerUnit: 10 })
+
+    const p = await prisma.product.findUniqueOrThrow({ where: { id: item.id } })
+    expect(p.trackInventory).toBe(true)
+    expect(p.inventoryMethod).toBe('QUANTITY')
+  })
+})
+
+describe('cambiar a RECETA mientras otro proceso rehace la fila de inventario', () => {
+  it('🔴 no queda una fila de cantidad colgando de un producto por RECETA', async () => {
+    const item = await porCantidadConFila(5)
+    const vieja = await prisma.inventory.findUniqueOrThrow({ where: { productId: item.id } })
+    let liberar!: () => void
+    const puerta = new Promise<void>(r => (liberar = r))
+    let avisarCandado!: () => void
+    const conCandado = new Promise<void>(r => (avisarCandado = r))
+    // Otro cambio (vuelta a «por cantidad») que ya reemplazó la fila y sostiene sus candados.
+    const otro = prisma.$transaction(
+      async tx => {
+        await tx.product.update({ where: { id: item.id }, data: { trackInventory: true, inventoryMethod: 'QUANTITY' } })
+        await tx.inventory.delete({ where: { id: vieja.id } })
+        await tx.inventory.create({ data: { productId: item.id, venueId, currentStock: D(0) } })
+        avisarCandado()
+        await puerta
+      },
+      { timeout: 20_000 },
+    )
+    await conCandado
+    const cambio = switchInventoryMethod(venueId, item.id, 'RECIPE')
+    try {
+      await esperarBloqueo('"Product"', '"Inventory"')
+    } finally {
+      liberar()
+    }
+    await otro
+    await cambio
+
+    const p = await prisma.product.findUniqueOrThrow({ where: { id: item.id } })
+    expect(p.inventoryMethod).toBe('RECIPE')
+    expect(await prisma.inventory.count({ where: { productId: item.id } })).toBe(0)
   })
 })

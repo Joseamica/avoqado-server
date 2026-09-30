@@ -11,6 +11,18 @@ export function inventoryMethodForNewProduct(trackInventory: unknown, inventoryM
   return inventoryMethod === 'RECIPE' ? 'RECIPE' : 'QUANTITY'
 }
 
+/** Tipos que no llevan existencias: una clase, una cita, algo digital o un donativo no se cuentan. */
+const NON_INVENTORIABLE_TYPES = ['CLASS', 'APPOINTMENTS_SERVICE', 'DIGITAL', 'DONATION']
+export const NON_INVENTORIABLE_MESSAGE = 'Este tipo de producto no puede tener seguimiento de inventario'
+
+/**
+ * ¿Pide inventario un tipo que no lo lleva? La regla es UNA para el dashboard (Zod) y para Artículos de
+ * Android/iOS: sin ella, un servicio nacía «por cantidad» y la venta le descontaba existencias.
+ */
+export function isNonInventoriable(type: unknown, trackInventory: unknown): boolean {
+  return trackInventory === true && NON_INVENTORIABLE_TYPES.includes(String(type ?? ''))
+}
+
 /**
  * 🔴 Invariante: producto «por cantidad» (trackInventory + QUANTITY) ⇒ tiene fila de Inventory.
  *

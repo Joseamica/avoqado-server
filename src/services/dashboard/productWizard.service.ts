@@ -233,39 +233,48 @@ export async function configureInventoryStep2(venueId: string, productId: string
  * Creates/updates the product's raw material record
  */
 export async function setupSimpleStockStep3(venueId: string, productId: string, data: WizardStep3SimpleStockData) {
-  // 🔴 Por negocio: sin esto se creaba un Inventory de ESTE negocio para el producto de otro.
-  const product = await prisma.product.findUnique({
-    where: { id: productId, venueId },
-    include: {
-      recipe: {
-        select: { id: true },
-      },
-    },
-  })
-
-  if (!product) {
-    throw new AppError('Product not found', 404)
-  }
-
-  // ✅ WORLD-CLASS: Auto-switch from RECIPE to QUANTITY if needed
-  // Instead of blocking with 409 error, intelligently clean up conflicting config
-  if (product.recipe) {
-    logger.info('🔄 Auto-switching from RECIPE to QUANTITY - cleaning up existing recipe')
-    await switchInventoryMethod(venueId, productId, 'QUANTITY')
-  }
-
   // 🔴 Todo cambio de saldo deja movimiento (audit Codex xhigh 2026-08-14). Antes
   // este paso escribía `currentStock` a secas —incluso PISANDO un inventario que
   // ya tenía saldo— sin `InventoryMovement`: el kardex nacía roto y la
   // reconciliación (`saldo == apertura + Σ deltas`) era imposible de cumplir.
   // Ése era el origen REAL del descuadre medido, no las ventas.
   //
-  // 🔴 Y saldo, kardex y costo van en UNA transacción, leyendo el saldo BAJO CANDADO de la fila
-  // (auditoría de Codex, 29-sep): leído afuera, una venta en medio dejaba saldo ≠ Σ movimientos, y un
-  // fallo al anotar el movimiento dejaba el saldo cambiado sin kardex. La venta (`deductSimpleStock`)
-  // toma el mismo candado con su UPDATE, así que una espera a la otra.
+  // 🔴 Y TODO el paso va en UNA transacción (auditorías de Codex, 29-sep): el cambio de receta a cantidad,
+  // el producto, el saldo leído BAJO CANDADO de la fila, el kardex y el costo. Leído afuera, una venta en
+  // medio dejaba saldo ≠ Σ movimientos; y un fallo al anotar el movimiento dejaba el saldo cambiado sin
+  // kardex, o la receta ya borrada. La venta (`deductSimpleStock`) toma el mismo candado de la fila.
   const nuevoSaldo = new Decimal(data.initialStock)
   await prisma.$transaction(async tx => {
+    // 🔴 Por negocio: sin esto se creaba un Inventory de ESTE negocio para el producto de otro.
+    const product = await tx.product.findUnique({
+      where: { id: productId, venueId },
+      select: { externalData: true, recipe: { select: { id: true } } },
+    })
+    if (!product) throw new AppError('Product not found', 404)
+
+    // ✅ Auto-switch de RECETA a CANTIDAD en vez de un 409.
+    if (product.recipe) {
+      logger.info('🔄 Auto-switching from RECIPE to QUANTITY - cleaning up existing recipe')
+      await switchInventoryMethod(venueId, productId, 'QUANTITY', tx)
+    }
+
+    // El producto PRIMERO (toma su candado de fila, como los demás escritores de la configuración) y
+    // queda «por cantidad» de verdad: antes sólo lo decía la respuesta, y un producto RECETA sin receta, o
+    // sin inventario, recibía un saldo que la venta ignoraba.
+    await tx.product.update({
+      where: { id: productId },
+      data: {
+        trackInventory: true,
+        inventoryMethod: 'QUANTITY',
+        cost: new Decimal(data.costPerUnit), // ✅ Save cost per unit
+        externalData: {
+          ...(product.externalData as any),
+          wizardCompleted: true,
+          inventoryConfigured: true,
+        },
+      },
+    })
+
     // La fila tiene que existir para poder tomar su candado; una existente no se toca.
     await tx.inventory.createMany({ data: [{ productId, venueId, currentStock: 0, minimumStock: 0 }], skipDuplicates: true })
     const [fila] = await tx.$queryRaw<Array<{ id: string; currentStock: Prisma.Decimal }>>`
@@ -298,19 +307,6 @@ export async function setupSimpleStockStep3(venueId: string, productId: string, 
         },
       })
     }
-
-    // Mark wizard as complete and save cost per unit
-    await tx.product.update({
-      where: { id: productId },
-      data: {
-        cost: new Decimal(data.costPerUnit), // ✅ Save cost per unit
-        externalData: {
-          ...(product.externalData as any),
-          wizardCompleted: true,
-          inventoryConfigured: true,
-        },
-      },
-    })
   })
 
   return {
@@ -538,74 +534,48 @@ export async function getWizardProgress(venueId: string, productId: string) {
  * Handles conversion between QUANTITY ↔ RECIPE
  * Automatically removes old configuration and updates inventoryMethod
  */
-export async function switchInventoryMethod(venueId: string, productId: string, newMethod: InventoryMethod) {
-  return await prisma.$transaction(async tx => {
-    // Verify product exists and belongs to venue
-    const product = await tx.product.findUnique({
-      where: { id: productId },
-      include: {
-        recipe: {
-          select: { id: true },
-        },
-      },
-    })
+export async function switchInventoryMethod(
+  venueId: string,
+  productId: string,
+  newMethod: InventoryMethod,
+  db?: Prisma.TransactionClient,
+): Promise<{ success: true; newMethod: InventoryMethod; message: string }> {
+  // Con `db`, dentro de la transacción del llamador (el paso 3 del asistente): si algo falla después,
+  // la receta sigue ahí.
+  if (!db) return prisma.$transaction(tx => switchInventoryMethod(venueId, productId, newMethod, tx))
 
-    if (!product) {
-      throw new AppError('Product not found', 404)
-    }
+  const product = await db.product.findUnique({ where: { id: productId }, select: { venueId: true } })
+  if (!product) {
+    throw new AppError('Product not found', 404)
+  }
+  if (product.venueId !== venueId) {
+    throw new AppError('Product does not belong to this venue', 403)
+  }
 
-    logger.info('🔧 [DEBUG] switchInventoryMethod:', { venueId, productId, productVenueId: product.venueId, newMethod })
-
-    if (product.venueId !== venueId) {
-      logger.error('❌ [DEBUG] Venue mismatch!', { requestVenueId: venueId, productVenueId: product.venueId })
-      throw new AppError('Product does not belong to this venue', 403)
-    }
-
-    // Perform conversion based on newMethod
-    if (newMethod === 'RECIPE') {
-      // Switching TO RECIPE: Remove existing quantity tracking (Inventory table)
-      const existingInventory = await tx.inventory.findUnique({
-        where: {
-          productId,
-        },
-      })
-
-      if (existingInventory) {
-        // Delete the quantity tracking inventory record. `deleteMany`: si otro cambio simultáneo ya la
-        // borró, no es error (con `delete` tronaba P2025).
-        await tx.inventory.deleteMany({
-          where: { id: existingInventory.id },
-        })
-      }
-    } else if (newMethod === 'QUANTITY') {
-      // Switching TO QUANTITY: Remove existing recipe
-      if (product.recipe) {
-        // Delete recipe lines first (foreign key constraint)
-        await tx.recipeLine.deleteMany({
-          where: { recipeId: product.recipe.id },
-        })
-
-        // Then delete the recipe. `deleteMany`: si otro cambio simultáneo ya la borró (auditoría de
-        // Codex, 29-sep), no es error — con `delete` el segundo cambio tronaba P2025.
-        await tx.recipe.deleteMany({
-          where: { id: product.recipe.id },
-        })
-      }
-    }
-
-    // ✅ WORLD-CLASS: Update product's inventoryMethod column
-    const updated = await tx.product.update({
-      where: { id: productId },
-      data: {
-        inventoryMethod: newMethod,
-      },
-    })
-    await ensureQuantityInventoryRow(tx, updated)
-
-    return {
-      success: true,
-      newMethod,
-      message: `Inventory method switched to ${newMethod} successfully`,
-    }
+  // 🔴 El producto PRIMERO (toma su candado de fila) y DESPUÉS se borra la configuración vieja por
+  // `productId` (auditoría de Codex, 29-sep): otro cambio que escribe el mismo producto espera aquí o
+  // ya terminó, y el borrado ve lo que dejó. Borrar el id leído antes dejaba colgando la fila de
+  // inventario que otro cambio creó en medio, bajo un producto que ya la ignora. Y `deleteMany`: lo
+  // que otro ya borró no es error (con `delete` tronaba P2025).
+  const updated = await db.product.update({
+    where: { id: productId },
+    data: {
+      inventoryMethod: newMethod,
+    },
   })
+  if (newMethod === 'RECIPE') {
+    // Switching TO RECIPE: Remove existing quantity tracking (Inventory table)
+    await db.inventory.deleteMany({ where: { productId } })
+  } else if (newMethod === 'QUANTITY') {
+    // Switching TO QUANTITY: Remove existing recipe (lines first: foreign key)
+    await db.recipeLine.deleteMany({ where: { recipe: { productId } } })
+    await db.recipe.deleteMany({ where: { productId } })
+  }
+  await ensureQuantityInventoryRow(db, updated)
+
+  return {
+    success: true,
+    newMethod,
+    message: `Inventory method switched to ${newMethod} successfully`,
+  }
 }
