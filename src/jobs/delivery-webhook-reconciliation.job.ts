@@ -199,7 +199,11 @@ export class DeliveryWebhookReconciliationJob {
     if (this.aprovisionandoEnCurso) return 0
     this.aprovisionandoEnCurso = true
     try {
-      return (await this.reprocessStuckEvents('aprovisionamiento')).reprocessed
+      const { reprocessed } = await this.reprocessStuckEvents('aprovisionamiento')
+      // Su barrido de 24 h va AQUÍ, bajo este mismo candado (R1): el de la pasada de pedidos podía tomar un
+      // aviso que este carril seguía procesando y devolver a FAILED uno que acababa de quedar PROCESSED.
+      await this.markOrphaned('aprovisionamiento')
+      return reprocessed
     } catch (err) {
       logger.error('❌ [Delivery recon] falló la vuelta del carril de aprovisionamiento', {
         error: err instanceof Error ? err.message : err,
@@ -495,7 +499,7 @@ export class DeliveryWebhookReconciliationJob {
    * Sweep FAILED/RECEIVED events older than 24h to `error: 'ORPHANED'`.
    * Bulk `updateMany` is fine — these are not eligible for further retries.
    */
-  private async markOrphaned(): Promise<number> {
+  private async markOrphaned(carril: 'pedidos' | 'aprovisionamiento' = 'pedidos'): Promise<number> {
     const cutoff = new Date(Date.now() - this.ORPHAN_TTL_MS)
     const orphanWhere = {
       // Los MISMOS proveedores que el scan, y eso es lo que hace honesto al barrido: caducar
@@ -507,6 +511,11 @@ export class DeliveryWebhookReconciliationJob {
       // Idempotent — never re-log/re-touch a row already marked ORPHANED. Null-tolerant
       // OR (not a bare `not: 'ORPHANED'`) so error=null rows (first time aging out) still match.
       OR: [{ error: null }, { error: { notIn: DeliveryWebhookReconciliationJob.TERMINAL_ERRORS } }],
+      // R1: cada carril barre lo SUYO — los avisos de aprovisionamiento, sólo su carril, bajo su candado.
+      eventType:
+        carril === 'aprovisionamiento'
+          ? { in: DeliveryWebhookReconciliationJob.EVENTOS_DE_APROVISIONAMIENTO }
+          : { notIn: DeliveryWebhookReconciliationJob.EVENTOS_DE_APROVISIONAMIENTO },
       // N-8: un seguimiento que este job nunca intentó no caduca por edad: su carril lo lee sin piso
       // de 24 h y el procesador lo cierra (con incidencia si pasó su vida).
       NOT: {
@@ -549,8 +558,10 @@ export class DeliveryWebhookReconciliationJob {
     // regardless of the fetch cap, silently marking rows ORPHANED (and excluding them from all
     // future passes) WITHOUT ever emitting their per-event alert. Scoping by id keeps the
     // alert and the state change in lockstep and keeps this pass genuinely bounded.
+    // R1: and the eligibility predicates stay in the UPDATE — a row another path resolved between the SELECT and
+    // here (PROCESSED) is left alone instead of being flipped back to FAILED/ORPHANED. `count` is what really flipped.
     const result = await prisma.deliveryOrderEvent.updateMany({
-      where: { id: { in: toOrphan.map(row => row.id) } },
+      where: { ...orphanWhere, id: { in: toOrphan.map(row => row.id) } },
       data: {
         status: DeliveryOrderEventStatus.FAILED,
         error: DeliveryWebhookReconciliationJob.ORPHANED_MARKER,

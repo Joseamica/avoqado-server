@@ -77,6 +77,26 @@ function makeEvent(overrides: Partial<any> = {}) {
   }
 }
 
+/** Evalúa el `where` REAL del job sobre una tabla en memoria (sólo los operadores que usa). */
+const cumple = (f: any, w: any): boolean =>
+  Object.entries(w ?? {}).every(([k, v]: [string, any]) => {
+    if (k === 'AND') return v.every((x: any) => cumple(f, x))
+    if (k === 'OR') return v.some((x: any) => cumple(f, x))
+    if (k === 'NOT') return !cumple(f, v)
+    const x = f[k]
+    if (v === null) return x == null
+    if (typeof v !== 'object' || v instanceof Date) return x === v
+    return Object.entries(v).every(([op, arg]: [string, any]) => {
+      const n = (d: any) => (d instanceof Date ? d.getTime() : d)
+      if (op === 'in') return arg.includes(x)
+      if (op === 'notIn') return x != null && !arg.includes(x)
+      if (op === 'gte') return x != null && n(x) >= n(arg)
+      if (op === 'lt') return x != null && n(x) < n(arg)
+      if (op === 'lte') return x != null && n(x) <= n(arg)
+      throw new Error(`operador no soportado en la prueba: ${op}`)
+    })
+  })
+
 describe('DeliveryWebhookReconciliationJob', () => {
   beforeEach(() => {
     jest.spyOn(Date, 'now').mockReturnValue(NOW)
@@ -337,8 +357,9 @@ describe('DeliveryWebhookReconciliationJob', () => {
     expect(mockedFindMany.mock.calls[2][0].take).toBe(50)
     // The bulk flip is scoped to EXACTLY the fetched (and logged) batch — never the broader
     // orphanWhere — so a row is never marked ORPHANED without first getting its per-event alert.
+    // R1: and it KEEPS the eligibility predicates, so a row resolved between SELECT and UPDATE isn't flipped back.
     const orphanUpdateWhere = mockedUpdateMany.mock.calls[0][0].where
-    expect(orphanUpdateWhere).toEqual({ id: { in: ['evt_stale'] } })
+    expect(orphanUpdateWhere).toEqual({ ...orphanFetchWhere, id: { in: ['evt_stale'] } })
     expect(mockedUpdateMany.mock.calls[0][0].data).toMatchObject({ status: DeliveryOrderEventStatus.FAILED, error: 'ORPHANED' })
     expect(result.orphaned).toBe(1)
   })
@@ -364,7 +385,9 @@ describe('DeliveryWebhookReconciliationJob', () => {
     // The bulk flip never targets more than what was actually fetched/logged this pass —
     // a backlog bigger than BATCH_SIZE finishes across subsequent 2-minute passes instead
     // of being swept unbounded in one shot.
-    expect(mockedUpdateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: { in: batch.map(row => row.id) } } }))
+    expect(mockedUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { ...mockedFindMany.mock.calls[2][0].where, id: { in: batch.map(row => row.id) } } }),
+    )
     expect(result.orphaned).toBe(50)
   })
 
@@ -634,25 +657,6 @@ describe('DeliveryWebhookReconciliationJob', () => {
     })
 
     describe('N-8: el seguimiento tiene presupuesto garantizado y no caduca sin haber tenido turno', () => {
-      /** Evalúa el `where` REAL del job sobre una tabla en memoria (sólo los operadores que usa). */
-      const cumple = (f: any, w: any): boolean =>
-        Object.entries(w ?? {}).every(([k, v]: [string, any]) => {
-          if (k === 'AND') return v.every((x: any) => cumple(f, x))
-          if (k === 'OR') return v.some((x: any) => cumple(f, x))
-          if (k === 'NOT') return !cumple(f, v)
-          const x = f[k]
-          if (v === null) return x == null
-          if (typeof v !== 'object' || v instanceof Date) return x === v
-          return Object.entries(v).every(([op, arg]: [string, any]) => {
-            const n = (d: any) => (d instanceof Date ? d.getTime() : d)
-            if (op === 'in') return arg.includes(x)
-            if (op === 'notIn') return x != null && !arg.includes(x)
-            if (op === 'gte') return x != null && n(x) >= n(arg)
-            if (op === 'lt') return x != null && n(x) < n(arg)
-            if (op === 'lte') return x != null && n(x) <= n(arg)
-            throw new Error(`operador no soportado en la prueba: ${op}`)
-          })
-        })
       const tabla = (filas: any[]) =>
         mockedFindMany.mockImplementation(async (args: any) =>
           filas
@@ -747,15 +751,67 @@ describe('DeliveryWebhookReconciliationJob', () => {
       })
 
     it('🔴 R9: un STORE_PROVISIONING_STATUS SIN vínculo va al procesador — su cuerpo nunca trae tienda, no es huérfano', async () => {
-      // Si se tirara como ORPHANED, un aviso que falló una vez ya nunca confirmaría sus tiendas.
-      mockedFindMany.mockResolvedValueOnce([rappiSinVinculo('STORE_PROVISIONING_STATUS')]).mockResolvedValueOnce([])
+      // Si se tirara como ORPHANED, un aviso que falló una vez ya nunca confirmaría sus tiendas. Lo toma SU carril
+      // (la pasada de pedidos ya no lo selecciona, ver N1).
+      mockedFindMany.mockResolvedValueOnce([rappiSinVinculo('STORE_PROVISIONING_STATUS')])
       mockedProcessRappi.mockResolvedValueOnce({ outcome: 'STORE_STATE' })
 
-      const result = await new DeliveryWebhookReconciliationJob().runOnce()
+      expect(await new DeliveryWebhookReconciliationJob().reprocesarAprovisionamientos()).toBe(1)
 
+      const carril = mockedFindMany.mock.calls[0][0].where.AND.find((c: any) => c.eventType)
+      expect(carril.eventType).toEqual({ in: ['STORE_PROVISIONING_STATUS'] })
       expect(mockedProcessRappi).toHaveBeenCalledWith('evt_rappi')
-      expect(result).toEqual({ reprocessed: 1, orphaned: 0 })
       expect(mockedMarkEventResult).not.toHaveBeenCalled()
+    })
+
+    // R1: con los carriles separados, el barrido de 24 h de la pasada de pedidos podía tomar un aviso que el carril de
+    // aprovisionamiento seguía procesando, y su UPDATE (sólo por id) devolvía a FAILED/ORPHANED uno ya PROCESSED.
+    describe('R1: el barrido de 24 h de los avisos de aprovisionamiento', () => {
+      const viejo = () => ({
+        ...rappiSinVinculo('STORE_PROVISIONING_STATUS'),
+        id: 'evt_aprov_viejo',
+        status: DeliveryOrderEventStatus.FAILED,
+        error: 'PROVISIONING_SUBSCRIBE_FAILED',
+        attemptCount: 3,
+        receivedAt: new Date(NOW - 25 * 3600_000),
+        nextAttemptAt: new Date(NOW + 30 * 60_000), // en backoff: el carril no lo reprocesa en esta vuelta
+      })
+      /** La base en memoria: las lecturas Y el UPDATE del barrido respetan su `where`. */
+      const tablaViva = (filas: any[], alLeerElBarrido: () => void = () => {}) => {
+        mockedFindMany.mockImplementation(async (args: any) => {
+          const res = filas.filter(f => cumple(f, args.where)).map(f => ({ ...f }))
+          if (args.select) alLeerElBarrido() // el SELECT del barrido ya salió; su UPDATE todavía no
+          return res.slice(0, args.take ?? res.length)
+        })
+        mockedUpdateMany.mockImplementation(async ({ where, data }: any) => {
+          const tocadas = filas.filter(f => cumple(f, where))
+          tocadas.forEach(f => Object.assign(f, data))
+          return { count: tocadas.length }
+        })
+      }
+
+      it('la pasada de pedidos NO lo selecciona; lo barre su propio carril, al terminar su vuelta', async () => {
+        const aviso = viejo()
+        tablaViva([aviso])
+        const job = new DeliveryWebhookReconciliationJob()
+
+        await job.runOnce()
+        expect(aviso).toMatchObject({ status: 'FAILED', error: 'PROVISIONING_SUBSCRIBE_FAILED' })
+        const barridoDePedidos = mockedFindMany.mock.calls.find(c => c[0].select)![0].where
+        expect(barridoDePedidos.eventType).toEqual({ notIn: ['STORE_PROVISIONING_STATUS'] })
+
+        await job.reprocesarAprovisionamientos()
+        expect(aviso).toMatchObject({ status: 'FAILED', error: 'ORPHANED' })
+      })
+
+      it('🔴 si el procesador lo deja PROCESSED entre el SELECT y el UPDATE del barrido, se queda PROCESSED', async () => {
+        const aviso = viejo()
+        tablaViva([aviso], () => Object.assign(aviso, { status: DeliveryOrderEventStatus.PROCESSED, error: null }))
+
+        await new DeliveryWebhookReconciliationJob().reprocesarAprovisionamientos()
+
+        expect(aviso).toMatchObject({ status: 'PROCESSED', error: null })
+      })
     })
 
     // N1: confirmar un lote suscribe cada tienda a sus webhooks (hasta 20 × 10 PUT: minutos). Dentro de la pasada de
