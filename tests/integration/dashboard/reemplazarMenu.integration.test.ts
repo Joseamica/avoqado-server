@@ -4,7 +4,9 @@
  * negocio NUEVO por caso. El actor es SERVICE (sin Staff que crear): `deletedBy` del reemplazo queda en null.
  */
 import { Prisma, PrismaClient } from '@prisma/client'
+import type { Request, Response } from 'express'
 
+import { createPaymentLink, updatePaymentLink } from '@/controllers/dashboard/paymentLink.dashboard.controller'
 import { getIncomeStatement } from '@/services/dashboard/accounting.dashboard.service'
 import { getMenus, importMenu } from '@/services/dashboard/menu.dashboard.service'
 import { getPaymentLinkByShortCode } from '@/services/dashboard/paymentLink.service'
@@ -94,8 +96,8 @@ async function vistos(venueId: string) {
   return menus.flatMap(m => m.categories.map(c => ({ categoria: c.category.id, productos: c.category.products.map(p => p.id).sort() })))
 }
 
-/** Una liga de pago VIVA `purpose: 'ITEM'` (el default es PAYMENT) con un renglón del producto y, si se pide, un EXTRA PAGADO. Devuelve su código. */
-async function ligaDePago(x: Negocio, productId: string, modifierId?: string): Promise<string> {
+/** Quien crea ligas en el negocio y su canal de cobro (una vez por negocio: el correo y la llave pública son únicos). */
+async function comercio(x: Negocio): Promise<{ staffId: string; ecommerceMerchantId: string }> {
   const proveedor = await prisma.paymentProvider.upsert({
     where: { code: 'PLAN5_PRUEBA' },
     create: { code: 'PLAN5_PRUEBA', name: 'Plan 5 (prueba)', type: 'PAYMENT_PROCESSOR' },
@@ -104,7 +106,7 @@ async function ligaDePago(x: Negocio, productId: string, modifierId?: string): P
   const etiqueta = x.rfc.toLowerCase()
   const staff = await prisma.staff.create({ data: { email: `plan5-${etiqueta}@example.test`, firstName: 'Plan', lastName: 'Cinco' } })
   personal.push(staff.id)
-  const comercio = await prisma.ecommerceMerchant.create({
+  const canal = await prisma.ecommerceMerchant.create({
     data: {
       venueId: x.venueId,
       businessName: 'Plan 5',
@@ -115,12 +117,18 @@ async function ligaDePago(x: Negocio, productId: string, modifierId?: string): P
       providerCredentials: {},
     },
   })
+  return { staffId: staff.id, ecommerceMerchantId: canal.id }
+}
+
+/** Una liga de pago VIVA `purpose: 'ITEM'` (el default es PAYMENT) con un renglón del producto y, si se pide, un EXTRA PAGADO. Devuelve su código. */
+async function ligaDePago(x: Negocio, productId: string, modifierId?: string): Promise<string> {
+  const { staffId, ecommerceMerchantId } = await comercio(x)
   const liga = await prisma.paymentLink.create({
     data: {
-      shortCode: etiqueta.slice(-8),
+      shortCode: x.rfc.toLowerCase().slice(-8),
       venueId: x.venueId,
-      ecommerceMerchantId: comercio.id,
-      createdById: staff.id,
+      ecommerceMerchantId,
+      createdById: staffId,
       purpose: 'ITEM',
       title: 'Liga viva',
       amountType: 'FIXED',
@@ -408,6 +416,106 @@ describe('C5-1 · una liga que se guarda MIENTRAS «Reemplazar» corre no pierde
     expect(await prisma.paymentLinkItemModifier.count({ where: { paymentLinkItemId: renglon, modifierId: shot.id } })).toBe(1)
     expect(totalDeLiga(await getPaymentLinkByShortCode(corto))).toBe(70) // $50 del té + $20 del extra
     expect(await prisma.modifierGroup.findUniqueOrThrow({ where: { id: grupo.id }, select: { active: true } })).toEqual({ active: false })
+  })
+})
+
+describe('C5-1 · ola 2: la liga que pierde la carrera contra «Reemplazar» responde 409 en español, no 500 con el texto de Prisma', () => {
+  const MENU_CAMBIO =
+    'El menú cambió mientras guardabas la liga y uno de los productos o extras ya no existe. Vuelve a elegirlos y guarda otra vez.'
+
+  /** Un negocio con el té de $50 ligado al grupo «Extras» con su shot de $20. */
+  async function teConShot() {
+    const x = await negocio()
+    const { categoryId } = await conProducto(x)
+    const te = (await prisma.product.create({ data: { venueId: x.venueId, categoryId, sku: `TE-${x.rfc}`, name: 'Té', price: 50 } })).id
+    const grupo = await prisma.modifierGroup.create({
+      data: { venueId: x.venueId, name: 'Extras', modifiers: { create: [{ name: 'Shot', price: 20 }] } },
+    })
+    await prisma.productModifierGroup.create({ data: { productId: te, groupId: grupo.id } })
+    const shot = (await prisma.modifier.findFirstOrThrow({ where: { groupId: grupo.id } })).id
+    return { x, te, shot }
+  }
+
+  /**
+   * Lo que «Reemplazar» hace al extra que ya no está en uso: otra transacción lo BORRA y no confirma. `guardar` lo valida
+   * (el borrado aún no se ve), su INSERT espera la llave foránea y, al confirmarse el borrado, la llave falla.
+   * Devuelve lo que el controlador le respondió al dueño.
+   */
+  async function guardarMientrasSeBorraElExtra(shot: string, handler: typeof createPaymentLink, req: Record<string, unknown>) {
+    const res = {
+      code: 0,
+      body: undefined as unknown,
+      status(code: number) {
+        this.code = code
+        return this
+      },
+      json(body: unknown) {
+        this.body = body
+        return this
+      },
+    }
+    const borrado = await retener(bloqueador, tx => tx.modifier.delete({ where: { id: shot } }), { confirmar: true })
+    let guardado: Promise<void> = Promise.resolve()
+    try {
+      guardado = handler(req as unknown as Request, res as unknown as Response)
+      await hastaQue(
+        observador,
+        'la liga espera al extra que se está borrando',
+        20_000,
+        Prisma.sql`SELECT a.pid FROM pg_stat_activity a
+          WHERE a.datname = current_database() AND a.wait_event_type = 'Lock'
+            AND ${borrado.pid}::int = ANY(pg_blocking_pids(a.pid)) AND a.query LIKE '%PaymentLinkItemModifier%'
+          LIMIT 1`,
+      )
+    } finally {
+      await borrado.soltar()
+    }
+    await guardado
+    return res
+  }
+
+  const sinTextoDePrisma = (body: unknown) => expect(JSON.stringify(body)).not.toMatch(/prisma|invocation|foreign key|fkey|P2003/i)
+
+  it('crear: 409 con el mensaje en español y ninguna liga a medias', async () => {
+    const { x, te, shot } = await teConShot()
+    const { staffId, ecommerceMerchantId } = await comercio(x)
+
+    const res = await guardarMientrasSeBorraElExtra(shot, createPaymentLink, {
+      params: { venueId: x.venueId },
+      authContext: { userId: staffId },
+      body: {
+        purpose: 'ITEM',
+        ecommerceMerchantId,
+        title: 'Té con shot',
+        amountType: 'FIXED',
+        amount: 70,
+        items: [{ productId: te, quantity: 1, modifiers: [{ modifierId: shot }] }],
+      },
+    })
+
+    expect({ code: res.code, body: res.body }).toEqual({ code: 409, body: { success: false, error: MENU_CAMBIO } })
+    sinTextoDePrisma(res.body)
+    expect(await prisma.paymentLink.count({ where: { venueId: x.venueId } })).toBe(0)
+    expect(await prisma.modifier.count({ where: { id: shot } })).toBe(0) // el borrado sí se confirmó
+  })
+
+  it('editar: 409 con el mensaje en español y la liga conserva sus renglones de antes', async () => {
+    const { x, te, shot } = await teConShot()
+    const corto = await ligaDePago(x, te) // viva, con el té y sin extra
+    const { id: linkId } = await prisma.paymentLink.findUniqueOrThrow({ where: { shortCode: corto }, select: { id: true } })
+
+    const res = await guardarMientrasSeBorraElExtra(shot, updatePaymentLink, {
+      params: { venueId: x.venueId, linkId },
+      body: { items: [{ productId: te, quantity: 1, modifiers: [{ modifierId: shot }] }] },
+    })
+
+    expect({ code: res.code, body: res.body }).toEqual({ code: 409, body: { success: false, error: MENU_CAMBIO } })
+    sinTextoDePrisma(res.body)
+    const renglones = await prisma.paymentLinkItem.findMany({
+      where: { paymentLinkId: linkId },
+      select: { productId: true, modifiers: true },
+    })
+    expect(renglones).toEqual([{ productId: te, modifiers: [] }])
   })
 })
 

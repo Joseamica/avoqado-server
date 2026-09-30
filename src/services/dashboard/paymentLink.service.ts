@@ -9,7 +9,7 @@
 
 import prisma from '@/utils/prismaClient'
 import { Prisma } from '@prisma/client'
-import { BadRequestError, NotFoundError, PaymentOutcomeUnknownError, UnauthorizedError } from '@/errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError, PaymentOutcomeUnknownError, UnauthorizedError } from '@/errors/AppError'
 import logger from '@/config/logger'
 import { nanoid } from 'nanoid'
 import { logAction } from './activity-log.service'
@@ -181,6 +181,24 @@ async function validateBundleItems(
       modifiers: [...entry.modifiers.entries()].map(([modifierId, quantity]) => ({ modifierId, quantity })),
     }
   })
+}
+
+/**
+ * validateBundleItems reads without locks: «Reemplazar menú» (importMenu replace) can delete a product or extra between that
+ * read and the insert. The foreign key then rejects the row (P2003) — the safe outcome (plan 5, C5-1) — and this turns it
+ * into a 409 the owner can act on instead of a 500 carrying Prisma's text. Any other error passes through unchanged.
+ */
+function rethrowMenuChangedWhileSaving(error: unknown): never {
+  if (
+    error instanceof Prisma.PrismaClientKnownRequestError &&
+    error.code === 'P2003' &&
+    /PaymentLinkItem(Modifier)?_(productId|modifierId)_fkey/.test(`${error.message} ${JSON.stringify(error.meta ?? {})}`)
+  ) {
+    throw new ConflictError(
+      'El menú cambió mientras guardabas la liga y uno de los productos o extras ya no existe. Vuelve a elegirlos y guarda otra vez.',
+    )
+  }
+  throw error
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -441,46 +459,48 @@ export async function createPaymentLink(venueId: string, data: CreatePaymentLink
   const shortCode = nanoid(8)
 
   // 5. Create payment link
-  const paymentLink = await prisma.paymentLink.create({
-    data: {
-      shortCode,
-      venueId,
-      ecommerceMerchantId: ecommerceMerchant.id,
-      createdById: staffId,
-      attributions: attributedStaffIds.length > 0 ? { create: attributedStaffIds.map(id => ({ staffId: id })) } : undefined,
-      purpose: data.purpose || 'PAYMENT',
-      items:
-        resolvedItems.length > 0
-          ? {
-              create: resolvedItems.map(it => ({
-                productId: it.productId,
-                quantity: it.quantity,
-                position: it.position,
-                modifiers: it.modifiers.length > 0 ? { create: it.modifiers } : undefined,
-              })),
-            }
-          : undefined,
-      title: data.title,
-      description: data.description,
-      imageUrl: data.imageUrl,
-      amountType: data.amountType,
-      amount: data.amount !== undefined && data.amount !== null ? new Prisma.Decimal(data.amount) : undefined,
-      currency: data.currency || 'MXN',
-      isReusable: data.isReusable ?? false,
-      expiresAt: data.expiresAt ? new Date(data.expiresAt) : undefined,
-      redirectUrl: data.redirectUrl,
-      customFields: data.customFields ? (data.customFields as unknown as Prisma.InputJsonValue) : undefined,
-      tippingConfig: data.tippingConfig ? (data.tippingConfig as unknown as Prisma.InputJsonValue) : undefined,
-    },
-    include: {
-      createdBy: {
-        select: { id: true, firstName: true, lastName: true },
+  const paymentLink = await prisma.paymentLink
+    .create({
+      data: {
+        shortCode,
+        venueId,
+        ecommerceMerchantId: ecommerceMerchant.id,
+        createdById: staffId,
+        attributions: attributedStaffIds.length > 0 ? { create: attributedStaffIds.map(id => ({ staffId: id })) } : undefined,
+        purpose: data.purpose || 'PAYMENT',
+        items:
+          resolvedItems.length > 0
+            ? {
+                create: resolvedItems.map(it => ({
+                  productId: it.productId,
+                  quantity: it.quantity,
+                  position: it.position,
+                  modifiers: it.modifiers.length > 0 ? { create: it.modifiers } : undefined,
+                })),
+              }
+            : undefined,
+        title: data.title,
+        description: data.description,
+        imageUrl: data.imageUrl,
+        amountType: data.amountType,
+        amount: data.amount !== undefined && data.amount !== null ? new Prisma.Decimal(data.amount) : undefined,
+        currency: data.currency || 'MXN',
+        isReusable: data.isReusable ?? false,
+        expiresAt: data.expiresAt ? new Date(data.expiresAt) : undefined,
+        redirectUrl: data.redirectUrl,
+        customFields: data.customFields ? (data.customFields as unknown as Prisma.InputJsonValue) : undefined,
+        tippingConfig: data.tippingConfig ? (data.tippingConfig as unknown as Prisma.InputJsonValue) : undefined,
       },
-      _count: {
-        select: { checkoutSessions: true },
+      include: {
+        createdBy: {
+          select: { id: true, firstName: true, lastName: true },
+        },
+        _count: {
+          select: { checkoutSessions: true },
+        },
       },
-    },
-  })
+    })
+    .catch(rethrowMenuChangedWhileSaving)
 
   logger.info('Payment link created', {
     paymentLinkId: paymentLink.id,
@@ -653,32 +673,34 @@ export async function updatePaymentLink(venueId: string, linkId: string, data: U
   // rows are atomic — partial state would confuse the customer checkout.
   // Nested modifier rows can't be inserted via createMany (Prisma limitation),
   // so we loop and use create() per item which accepts the nested write.
-  const updated = await prisma.$transaction(async tx => {
-    if (itemReplacement !== null) {
-      // Cascade deletes the modifier rows because PaymentLinkItemModifier
-      // has onDelete: Cascade on paymentLinkItemId.
-      await tx.paymentLinkItem.deleteMany({ where: { paymentLinkId: linkId } })
-      for (const it of itemReplacement) {
-        await tx.paymentLinkItem.create({
-          data: {
-            paymentLinkId: linkId,
-            productId: it.productId,
-            quantity: it.quantity,
-            position: it.position,
-            modifiers: it.modifiers.length > 0 ? { create: it.modifiers } : undefined,
-          },
-        })
+  const updated = await prisma
+    .$transaction(async tx => {
+      if (itemReplacement !== null) {
+        // Cascade deletes the modifier rows because PaymentLinkItemModifier
+        // has onDelete: Cascade on paymentLinkItemId.
+        await tx.paymentLinkItem.deleteMany({ where: { paymentLinkId: linkId } })
+        for (const it of itemReplacement) {
+          await tx.paymentLinkItem.create({
+            data: {
+              paymentLinkId: linkId,
+              productId: it.productId,
+              quantity: it.quantity,
+              position: it.position,
+              modifiers: it.modifiers.length > 0 ? { create: it.modifiers } : undefined,
+            },
+          })
+        }
       }
-    }
-    return tx.paymentLink.update({
-      where: { id: linkId },
-      data: updateData,
-      include: {
-        createdBy: { select: { id: true, firstName: true, lastName: true } },
-        _count: { select: { checkoutSessions: true } },
-      },
+      return tx.paymentLink.update({
+        where: { id: linkId },
+        data: updateData,
+        include: {
+          createdBy: { select: { id: true, firstName: true, lastName: true } },
+          _count: { select: { checkoutSessions: true } },
+        },
+      })
     })
-  })
+    .catch(rethrowMenuChangedWhileSaving)
 
   logger.info('Payment link updated', { paymentLinkId: linkId, venueId })
 
