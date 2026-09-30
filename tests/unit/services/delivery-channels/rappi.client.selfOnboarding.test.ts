@@ -21,9 +21,11 @@ jest.mock('@/config/logger', () => ({ __esModule: true, default: { info: jest.fn
 import {
   apiBaseSelfOnboarding,
   aprovisionarTiendasRappi,
+  preflightSelfOnboardingRappi,
   redirectUriRappi,
   suscribirTiendaAEventos,
 } from '../../../../src/services/delivery-channels/providers/rappi/rappi.client'
+import { urlDeInicio } from '../../../../src/services/delivery-channels/providers/rappi/rappi.selfOnboarding'
 import { RappiEscrituraBloqueadaError } from '../../../../src/services/delivery-channels/providers/rappi/rappi.http'
 import { _resetRappiTokenCacheForTests } from '../../../../src/services/delivery-channels/providers/rappi/rappi.token'
 
@@ -164,6 +166,28 @@ describe('rappi.client — self-onboarding', () => {
       mockEnv.RAPPI_WEBHOOK_BASE_URL = undefined
       await expect(suscribirTiendaAEventos('10')).rejects.toThrow(/Falta RAPPI_WEBHOOK_BASE_URL/)
       expect(llamadas).toHaveLength(0)
+    })
+  })
+
+  // F2: la base de webhooks se descubría faltante hasta SUSCRIBIR, con la tienda ya aprovisionada en Rappi.
+  describe('preflight: todo el self-onboarding se valida ANTES de crear el intent', () => {
+    it('devuelve la base del enlace de inicio, y el enlace sale idéntico al de antes', () => {
+      mockEnv.RAPPI_OAUTH_REDIRECT_BASE = 'https://api.ejemplo.test/'
+      expect(preflightSelfOnboardingRappi()).toBe('https://api.ejemplo.test')
+      expect(urlDeInicio(preflightSelfOnboardingRappi(), 'a+b/c=')).toBe(
+        'https://api.ejemplo.test/api/v1/delivery/rappi/oauth/start?intent=a%2Bb%2Fc%3D',
+      )
+    })
+
+    it.each([
+      ['sin RAPPI_WEBHOOK_BASE_URL', { RAPPI_WEBHOOK_BASE_URL: undefined }, /Falta RAPPI_WEBHOOK_BASE_URL/],
+      ['RAPPI_WEBHOOK_BASE_URL inválida', { RAPPI_WEBHOOK_BASE_URL: 'api.ejemplo.test' }, /RAPPI_WEBHOOK_BASE_URL.*http\(s\)/],
+      ['sin RAPPI_OAUTH_REDIRECT_BASE', { RAPPI_OAUTH_REDIRECT_BASE: undefined }, /Falta RAPPI_OAUTH_REDIRECT_BASE/],
+      ['host del self-onboarding inválido', { RAPPI_SELF_ONBOARDING_API_BASE: 'host' }, /RAPPI_SELF_ONBOARDING_API_BASE/],
+      ['PRODUCTION sin host del self-onboarding', { RAPPI_ENVIRONMENT: 'PRODUCTION' }, /Falta RAPPI_SELF_ONBOARDING_API_BASE/],
+    ])('%s ⇒ se niega', (_n, cambio, error) => {
+      Object.assign(mockEnv, cambio)
+      expect(() => preflightSelfOnboardingRappi()).toThrow(error)
     })
   })
 

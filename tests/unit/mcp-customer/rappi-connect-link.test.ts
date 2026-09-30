@@ -23,8 +23,9 @@ jest.mock('@/mcp/guard', () => ({
 }))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => mockAudit(...(a as [])) }))
 jest.mock('@/utils/prismaClient', () => ({ __esModule: true, default: {} }))
+const mockPreflight = jest.fn()
 jest.mock('@/services/delivery-channels/providers/rappi/rappi.client', () => ({
-  redirectUriRappi: () => 'https://api.avoqado.test/api/v1/delivery/rappi/oauth/callback',
+  preflightSelfOnboardingRappi: () => mockPreflight(),
 }))
 jest.mock('@/services/delivery-channels/providers/rappi/rappi.connect', () => ({
   depsDesdeEnv: async () => ({ llave: 'k', ambiente: 'sandbox', clientId: 'c' }),
@@ -43,6 +44,7 @@ beforeEach(() => {
   jest.clearAllMocks()
   mockHasFeatureAccess.mockResolvedValue(true)
   mockCrearIntent.mockResolvedValue({ id: 'intent1', firmado: 'firmado+/=' })
+  mockPreflight.mockReturnValue('https://api.avoqado.test')
 })
 
 describe('rappi_connect_link', () => {
@@ -60,6 +62,16 @@ describe('rappi_connect_link', () => {
     const out = parse(await call({ venueId: 'v1' }))
     expect(out).toMatchObject({ ok: false, planRequired: true, feature: 'DELIVERY_CHANNELS' })
     expect(mockCrearIntent).not.toHaveBeenCalled()
+  })
+
+  // F2: la misma guarda que el REST — sin la base de webhooks, Rappi aprovisionaba una tienda que no recibe pedidos.
+  it('con la configuración de Rappi incompleta se niega y NO crea el intent ni audita', async () => {
+    mockPreflight.mockImplementationOnce(() => {
+      throw new Error('Falta RAPPI_WEBHOOK_BASE_URL')
+    })
+    await expect(call({ venueId: 'v1' })).rejects.toMatchObject({ statusCode: 500, code: 'RAPPI_CONNECT_NOT_CONFIGURED' })
+    expect(mockCrearIntent).not.toHaveBeenCalled()
+    expect(mockAudit).not.toHaveBeenCalled()
   })
 
   it('camino feliz: entrega el enlace firmado a nombre de quien pide y lo audita', async () => {

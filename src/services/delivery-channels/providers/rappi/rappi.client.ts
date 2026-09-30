@@ -234,9 +234,29 @@ export function apiBaseSelfOnboarding(): string {
   throw new Error('Falta RAPPI_SELF_ONBOARDING_API_BASE: Rappi no publica el host de México para el self-onboarding (preguntar al TAM).')
 }
 
+const RUTA_CALLBACK = '/api/v1/delivery/rappi/oauth/callback'
+
 export function redirectUriRappi(): string {
   if (!env.RAPPI_OAUTH_REDIRECT_BASE) throw new Error('Falta RAPPI_OAUTH_REDIRECT_BASE (debe ser idéntica a la registrada con el TAM).')
-  return `${baseHttpValida('RAPPI_OAUTH_REDIRECT_BASE', env.RAPPI_OAUTH_REDIRECT_BASE)}/api/v1/delivery/rappi/oauth/callback`
+  return `${baseHttpValida('RAPPI_OAUTH_REDIRECT_BASE', env.RAPPI_OAUTH_REDIRECT_BASE)}${RUTA_CALLBACK}`
+}
+
+/** La base pública a la que Rappi manda los pedidos de cada tienda. */
+function baseDeWebhooksRappi(): string {
+  if (!env.RAPPI_WEBHOOK_BASE_URL) throw new Error('Falta RAPPI_WEBHOOK_BASE_URL')
+  return baseHttpValida('RAPPI_WEBHOOK_BASE_URL', env.RAPPI_WEBHOOK_BASE_URL)
+}
+
+/**
+ * 🔴 Todo lo que el self-onboarding va a necesitar, validado ANTES de crear el intent. Sin esto, una base de
+ * webhooks faltante se descubría hasta suscribir: Rappi ya había aprovisionado la tienda y ésta se quedaba sin
+ * recibir pedidos. Devuelve la base del enlace de inicio — la MISMA de la `redirect_uri` registrada en Rappi.
+ */
+export function preflightSelfOnboardingRappi(): string {
+  const callback = redirectUriRappi()
+  apiBaseSelfOnboarding()
+  baseDeWebhooksRappi()
+  return callback.slice(0, -RUTA_CALLBACK.length)
 }
 
 export function clientIdRappi(): string {
@@ -305,8 +325,7 @@ const EVENTOS_POR_TIENDA = Object.entries(RUTA_POR_EVENTO).filter(([, ev]) => ev
  * fallo por evento sino una tienda que NO se puede escribir, así que se relanza.
  */
 export async function suscribirTiendaAEventos(storeId: string): Promise<{ ok: boolean; fallidos: string[] }> {
-  if (!env.RAPPI_WEBHOOK_BASE_URL) throw new Error('Falta RAPPI_WEBHOOK_BASE_URL')
-  const base = baseHttpValida('RAPPI_WEBHOOK_BASE_URL', env.RAPPI_WEBHOOK_BASE_URL)
+  const base = baseDeWebhooksRappi()
   const fallidos: string[] = []
   for (const [segmento, evento] of EVENTOS_POR_TIENDA) {
     try {

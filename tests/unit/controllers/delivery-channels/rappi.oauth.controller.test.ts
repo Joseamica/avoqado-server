@@ -9,6 +9,7 @@ jest.mock('../../../../src/services/delivery-channels/providers/rappi/rappi.clie
   getRappiEnvironment: () => 'SANDBOX',
   clientIdRappi: () => 'cid',
   redirectUriRappi: jest.fn(() => 'https://api.test/api/v1/delivery/rappi/oauth/callback'),
+  preflightSelfOnboardingRappi: jest.fn(() => 'https://api.test'),
 }))
 jest.mock('../../../../src/services/delivery-channels/providers/rappi/rappi.connect', () => ({
   ...jest.requireActual('../../../../src/services/delivery-channels/providers/rappi/rappi.connect'),
@@ -28,7 +29,12 @@ import {
 import * as rappiClient from '../../../../src/services/delivery-channels/providers/rappi/rappi.client'
 
 const cliente = rappiClient as unknown as Record<
-  'canjearCodigoRappi' | 'tiendasDelComercio' | 'aprovisionarTiendasRappi' | 'suscribirTiendaAEventos' | 'redirectUriRappi',
+  | 'canjearCodigoRappi'
+  | 'tiendasDelComercio'
+  | 'aprovisionarTiendasRappi'
+  | 'suscribirTiendaAEventos'
+  | 'redirectUriRappi'
+  | 'preflightSelfOnboardingRappi',
   jest.Mock
 >
 const deps = { llave: 'k'.repeat(40), ambiente: 'SANDBOX' as const, clientId: 'cid' }
@@ -335,6 +341,25 @@ describe('result', () => {
     expect(html(r)).toContain('Rappi la está confirmando — recarga esta página en un minuto')
   })
 
+  it('SUBSCRIBE_FAILED: Rappi YA la aceptó, falta lo nuestro — no «Rappi la está confirmando»', async () => {
+    canjeado()
+    await activar({ tiendas: '10', confirmo_negocio: 'si' })
+    integrada('int10')
+    cliente.suscribirTiendaAEventos.mockResolvedValue({ ok: false, fallidos: ['NEW_ORDER'] })
+
+    const r = await resultado()
+    expect(intent().resultsJson['10'].outcome).toBe('SUBSCRIBE_FAILED')
+    expect(html(r)).toContain('Rappi ya la aceptó; estamos activando la recepción de pedidos — recarga en un minuto.')
+    expect(html(r)).not.toContain('Rappi la está confirmando')
+  })
+
+  it('SUBSCRIBE_FAILED fuera de ACTIVATING: dice que Rappi ya la aceptó, sin «recarga» (ya nadie re-lee)', async () => {
+    sembrar({ state: 'FAILED', selectionJson: ['10'], resultsJson: { '10': { outcome: 'SUBSCRIBE_FAILED' } } })
+    const r = await resultado()
+    expect(html(r)).toContain('Rappi ya la aceptó, pero falta activar la recepción de pedidos')
+    expect(html(r)).not.toContain('recarga')
+  })
+
   it('dos cargas en menos de 30 s llaman a Rappi UNA vez; la página sigue enseñando lo que hay', async () => {
     canjeado()
     await activar({ tiendas: '10', confirmo_negocio: 'si' })
@@ -379,17 +404,21 @@ describe('result', () => {
 })
 
 describe('connect-url', () => {
-  it('sin base de retorno configurada: AppError de configuración y NO se crea el intent', async () => {
-    cliente.redirectUriRappi.mockImplementationOnce(() => {
-      throw new Error('Falta RAPPI_OAUTH_REDIRECT_BASE')
-    })
-    const r = res()
-    const next = jest.fn()
-    await getRappiConnectUrl({ params: { venueId: 'v1' }, authContext: { userId: 's1' } } as never, r as never, next)
-    expect(next.mock.calls[0][0]).toMatchObject({ statusCode: 500, code: 'RAPPI_CONNECT_NOT_CONFIGURED' })
-    expect(I.create).not.toHaveBeenCalled()
-    expect(r.json).not.toHaveBeenCalled()
-  })
+  // F2: el preflight cubre retorno, host y webhooks — sin la base de webhooks Rappi aprovisionaba una tienda sorda.
+  it.each([['Falta RAPPI_OAUTH_REDIRECT_BASE'], ['Falta RAPPI_WEBHOOK_BASE_URL']])(
+    '%s: AppError de configuración y NO se crea el intent',
+    async falta => {
+      cliente.preflightSelfOnboardingRappi.mockImplementationOnce(() => {
+        throw new Error(falta)
+      })
+      const r = res()
+      const next = jest.fn()
+      await getRappiConnectUrl({ params: { venueId: 'v1' }, authContext: { userId: 's1' } } as never, r as never, next)
+      expect(next.mock.calls[0][0]).toMatchObject({ statusCode: 500, code: 'RAPPI_CONNECT_NOT_CONFIGURED' })
+      expect(I.create).not.toHaveBeenCalled()
+      expect(r.json).not.toHaveBeenCalled()
+    },
+  )
 
   it('la base es la de la redirect_uri validada, y el enlace va firmado para start', async () => {
     I.create.mockResolvedValue({ id: 'i9' })
@@ -401,6 +430,7 @@ describe('connect-url', () => {
     )
     const { url } = r.json.mock.calls[0][0]
     expect(url.startsWith('https://api.test/api/v1/delivery/rappi/oauth/start?intent=')).toBe(true)
+    expect(cliente.preflightSelfOnboardingRappi).toHaveBeenCalledTimes(1)
     expect(leerFirma(deps, new URL(url).searchParams.get('intent'), 'start')).toBe('i9')
     expect(I.create.mock.calls[0][0].data).toMatchObject({ provider: 'RAPPI', venueId: 'v1', staffId: 's1' })
   })

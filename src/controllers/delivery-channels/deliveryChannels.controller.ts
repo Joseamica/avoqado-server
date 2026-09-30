@@ -136,21 +136,21 @@ export const getRappiConnectUrl = async (req: Request, res: Response, next: Next
   try {
     const { venueId } = req.params
     const { userId } = (req as any).authContext
-    // Primero la base: sin ella (o mal escrita) el dashboard recibiría un enlace cuyo `/start` truena.
-    const { redirectUriRappi } = await import('../../services/delivery-channels/providers/rappi/rappi.client')
-    let callback: string
+    // Primero la configuración ENTERA (retorno, host y webhooks): sin ella el enlace truena en `/start`, o
+    // peor, Rappi aprovisiona la tienda y ésta no recibe pedidos. Nada se crea si falta algo.
+    const { preflightSelfOnboardingRappi } = await import('../../services/delivery-channels/providers/rappi/rappi.client')
+    let base: string
     try {
-      callback = redirectUriRappi()
+      base = preflightSelfOnboardingRappi()
     } catch {
       throw new AppError('La conexión con Rappi no está configurada en el servidor.', 500, true, 'RAPPI_CONNECT_NOT_CONFIGURED')
     }
     const { depsDesdeEnv, crearIntentRappi } = await import('../../services/delivery-channels/providers/rappi/rappi.connect')
+    const { urlDeInicio } = await import('../../services/delivery-channels/providers/rappi/rappi.selfOnboarding')
     const { firmado } = await crearIntentRappi(await depsDesdeEnv(), { venueId, staffId: userId })
-    // La MISMA base (ya validada, sin barra final) que la `redirect_uri` registrada con Rappi.
-    const base = callback.replace(/\/api\/v1\/delivery\/rappi\/oauth\/callback$/, '')
     return res.json({
       ok: true,
-      url: `${base}/api/v1/delivery/rappi/oauth/start?intent=${encodeURIComponent(firmado)}`,
+      url: urlDeInicio(base, firmado),
       instrucciones:
         'Abre este enlace con la cuenta del Portal Partners de Rappi del negocio (vence en 10 minutos). Al autorizar, eliges qué tiendas conectar a Avoqado.',
     })

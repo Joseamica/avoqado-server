@@ -38,6 +38,11 @@ export function urlDeAutorizacion(p: {
   return u.toString()
 }
 
+/** El enlace que abre el dueño: la base de `preflightSelfOnboardingRappi` + la intención firmada para `start`. */
+export function urlDeInicio(base: string, firmado: string): string {
+  return `${base}/api/v1/delivery/rappi/oauth/start?intent=${encodeURIComponent(firmado)}`
+}
+
 function algDe(jwt: string): string | null {
   try {
     return (JSON.parse(Buffer.from(jwt.split('.')[0], 'base64url').toString('utf8')) as { alg?: string }).alg ?? null

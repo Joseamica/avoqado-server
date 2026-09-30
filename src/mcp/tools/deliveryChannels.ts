@@ -145,23 +145,22 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
       guard.requirePermission('delivery-channels:manage', venueId) // mirror the REST route's delivery-channels:manage gate
       const gate = await planGateMessage(venueId, 'DELIVERY_CHANNELS', 'Conectar canales de delivery') // PREMIUM tier
       if (gate) return text({ ok: false, planRequired: true, feature: 'DELIVERY_CHANNELS', error: gate })
-      // Primero la base: sin ella (o mal escrita) el enlace que se entregue tronaría en `/start`.
-      const { redirectUriRappi } = await import('@/services/delivery-channels/providers/rappi/rappi.client')
-      let callback: string
+      // Primero la configuración ENTERA (retorno, host y webhooks), igual que el REST: nada se crea si falta algo.
+      const { preflightSelfOnboardingRappi } = await import('@/services/delivery-channels/providers/rappi/rappi.client')
+      let base: string
       try {
-        callback = redirectUriRappi()
+        base = preflightSelfOnboardingRappi()
       } catch {
         throw new AppError('La conexión con Rappi no está configurada en el servidor.', 500, true, 'RAPPI_CONNECT_NOT_CONFIGURED')
       }
       const { depsDesdeEnv, crearIntentRappi } = await import('@/services/delivery-channels/providers/rappi/rappi.connect')
+      const { urlDeInicio } = await import('@/services/delivery-channels/providers/rappi/rappi.selfOnboarding')
       // `staffId` = quien pide por el MCP; el callback público revalida ESE usuario en cada paso.
       const { id, firmado } = await crearIntentRappi(await depsDesdeEnv(), { venueId, staffId: scope.staffId })
       await auditMcpWrite(scope, { action: 'RAPPI_CONNECT_LINK_CREATED', entity: 'DeliveryConnectIntent', entityId: id, venueId })
-      // La MISMA base (ya validada, sin barra final) que la `redirect_uri` registrada con Rappi.
-      const base = callback.replace(/\/api\/v1\/delivery\/rappi\/oauth\/callback$/, '')
       return text({
         ok: true,
-        url: `${base}/api/v1/delivery/rappi/oauth/start?intent=${encodeURIComponent(firmado)}`,
+        url: urlDeInicio(base, firmado),
         instrucciones:
           'Abre este enlace con la cuenta del Portal Partners de Rappi del negocio (vence en 10 minutos). Al autorizar, eliges qué tiendas conectar a Avoqado.',
         venceEnMinutos: 10,

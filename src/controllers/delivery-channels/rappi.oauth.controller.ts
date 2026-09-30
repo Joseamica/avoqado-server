@@ -371,6 +371,8 @@ function tocaRechequear(intentId: string): boolean {
 }
 
 const CONFIRMANDO = 'Rappi la está confirmando — recarga esta página en un minuto.'
+/** Rappi YA la aceptó; lo que falta es nuestro (suscribir sus webhooks) — «la está confirmando» mentía. */
+const SUSCRIBIENDO = 'Rappi ya la aceptó; estamos activando la recepción de pedidos — recarga en un minuto.'
 /** Los finales; los que esperan a Rappi los resuelve `textoResultado`. */
 const TEXTO: Record<string, string> = {
   ACTIVATED: '<span class="ok">Conectada.</span>',
@@ -384,6 +386,10 @@ const TEXTO: Record<string, string> = {
 function textoResultado(r: ResultadoRappi | undefined, activando: boolean): string {
   if (r?.outcome === 'REJECTED') return `<span class="bad">Rappi la rechazó${r.detalle ? `: ${esc(r.detalle)}` : ''}.</span>`
   // Fuera de ACTIVATING ya nadie re-lee: «recarga» mentiría (el webhook todavía puede confirmarla).
+  if (r?.outcome === 'SUBSCRIBE_FAILED')
+    return activando
+      ? SUSCRIBIENDO
+      : '<span class="bad">Rappi ya la aceptó, pero falta activar la recepción de pedidos; revisa su estado en el dashboard de Avoqado.</span>'
   if (!r || !esFinal(r.outcome))
     return activando ? CONFIRMANDO : '<span class="bad">Rappi todavía no la confirma; revisa su estado en el dashboard de Avoqado.</span>'
   return TEXTO[r.outcome] ?? esc(r.outcome)
