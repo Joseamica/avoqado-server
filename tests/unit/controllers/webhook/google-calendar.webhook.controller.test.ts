@@ -15,6 +15,7 @@
 import { Request, Response } from 'express'
 
 import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
 
 // ---- RabbitMQ mock ----
 const rabbitPublishMock = jest.fn()
@@ -262,6 +263,25 @@ describe('happy path', () => {
     expect(status).toHaveBeenCalledWith(200)
     // Inbox row still written → sweeper will retry.
     expect(prisma.googleCalendarWebhookInbox.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('30-sep · con RabbitMQ deshabilitado por config (DISABLE_RABBITMQ, como arranca producción) no intenta encolar ni avisa: el sweeper toma el pull', async () => {
+    const previo = process.env.DISABLE_RABBITMQ
+    process.env.DISABLE_RABBITMQ = 'true'
+    try {
+      ;(prisma.googleCalendarChannel.findMany as jest.Mock).mockResolvedValue([VALID_CHANNEL])
+      const { res, status } = mockRes()
+
+      await handleGoogleCalendarWebhook(mockReq(VALID_HEADERS), res)
+
+      expect(status).toHaveBeenCalledWith(200)
+      expect(prisma.googleCalendarWebhookInbox.create).toHaveBeenCalledTimes(1)
+      expect(rabbitPublishMock).not.toHaveBeenCalled()
+      expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('failed to enqueue pull'), expect.anything())
+    } finally {
+      if (previo === undefined) delete process.env.DISABLE_RABBITMQ
+      else process.env.DISABLE_RABBITMQ = previo
+    }
   })
 })
 

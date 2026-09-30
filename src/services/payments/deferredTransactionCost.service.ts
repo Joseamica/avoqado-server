@@ -79,6 +79,20 @@ async function anotarEspera(paymentId: string, motivo: string, db: Cliente = pri
   })
 }
 
+/**
+ * 30-sep-2026: el `[S2]` era el warn más repetido de producción (3,132 líneas en 3 días) por 4 pagos del venue demo: el worker
+ * retoma la obligación cada ~5 min y cada corrida volvía a avisar. Se avisa UNA vez por pago y motivo en la vida del proceso;
+ * las repeticiones salen en debug. No se decide por el `lastError` del efecto: la espera del método provisional ya guarda ese
+ * mismo motivo SIN avisar, y entonces el primer aviso real nunca salía (Codex, auditoría del 30-sep).
+ * ponytail: memoria del proceso, así que tras cada reinicio se avisa otra vez una vez por pago pendiente (4 líneas por deploy
+ * contra 12 por hora); si algún día hay varias instancias, cada una avisa una vez.
+ */
+const avisosDeCostoPendiente = new Set<string>()
+function recordarAvisoDeCostoPendiente(clave: string): void {
+  if (avisosDeCostoPendiente.size >= 10_000) avisosDeCostoPendiente.clear()
+  avisosDeCostoPendiente.add(clave)
+}
+
 type Cliente = Prisma.TransactionClient | typeof prisma
 
 /**
@@ -395,11 +409,14 @@ export async function convergerCostoDeTransaccion(
             // congelado) el costo no se calcula con otra tarifa: obligación DURABLE y visible, sin consumir intentos.
             const motivoPendiente = motivoDeCostoPendiente(error)
             if (motivoPendiente) {
-              logger.warn('⚠️ [S2] El costo no se puede calcular con una tarifa acreditable: sigue pendiente y visible', {
-                paymentId,
-                motivo: motivoPendiente,
-                detalle: error instanceof Error ? error.message : String(error),
-              })
+              const aviso = { paymentId, motivo: motivoPendiente, detalle: error instanceof Error ? error.message : String(error) }
+              const claveDelAviso = `${paymentId}:${motivoPendiente}`
+              if (!avisosDeCostoPendiente.has(claveDelAviso)) {
+                logger.warn('⚠️ [S2] El costo no se puede calcular con una tarifa acreditable: sigue pendiente y visible', aviso)
+                recordarAvisoDeCostoPendiente(claveDelAviso) // DESPUÉS del warn: si el logger lanzara, el siguiente intento avisa
+              } else {
+                logger.debug('[S2] El costo sigue pendiente por el mismo motivo ya avisado en este proceso: sin cambios', aviso)
+              }
               await anotarEspera(paymentId, motivoPendiente, tx)
               await marcarCostPending(tx, paymentId, true)
               return 'PENDIENTE' as const

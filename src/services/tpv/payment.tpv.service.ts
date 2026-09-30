@@ -2828,6 +2828,8 @@ async function resolverAfiliacionDelCobro(
     registradoVia?: string
     authorizationNumber?: string
     referenceNumber?: string
+    method?: string
+    amount?: number
   },
 ): Promise<AfiliacionDelCobro> {
   const delApk = paymentData.merchantAccountId || undefined
@@ -2892,8 +2894,21 @@ async function resolverAfiliacionDelCobro(
         }
       }
     }
-    if (merchantAccountId) logger.info(`✅ [${etiqueta}] Payment will be attributed to merchantAccountId: ${merchantAccountId}`)
-    else logger.warn(`⚠️ [${etiqueta}] No merchantAccountId - payment will have null merchant (legacy mode)`)
+    // Sin afiliación: si el APK no mandó merchantAccountId ni serial (`SIN_AFILIACION`) y el cobro es en EFECTIVO o de $0 (las
+    // ventas de PlayTelecom), no pasa por un comercio y no hay nada que resolver: info (30-sep-2026: 327 warns en 3 días, todos
+    // de esa clase). Cualquier otro cobro sin comercio —tarjeta, monedero, transferencia— o una pista que no resolvió
+    // (`SIN_RESOLVER`) queda sin afiliación para su costo y su liquidación → sigue en warn.
+    const sinComercioEsperado = paymentData.method === 'CASH' || paymentData.amount === 0
+    if (merchantAccountId) {
+      logger.info(`✅ [${etiqueta}] Payment will be attributed to merchantAccountId: ${merchantAccountId}`)
+    } else if (via === 'SIN_AFILIACION' && sinComercioEsperado) {
+      logger.info(
+        `ℹ️ [${etiqueta}] Sin afiliación: el APK no mandó merchantAccountId ni serial; el cobro no pasa por un comercio`,
+        contexto,
+      )
+    } else {
+      logger.warn(`⚠️ [${etiqueta}] No merchantAccountId - payment will have null merchant (legacy mode)`, contexto)
+    }
     return { merchantAccountId, merchantAccountIdDelApk: delApk, via }
   } catch (error) {
     logger.error(

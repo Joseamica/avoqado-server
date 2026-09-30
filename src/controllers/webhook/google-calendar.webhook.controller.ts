@@ -111,12 +111,19 @@ export async function handleGoogleCalendarWebhook(req: Request, res: Response): 
 
   // 7. Best-effort enqueue to RabbitMQ. The sweeper job picks up unprocessed inbox rows if
   //    this fails OR if RabbitMQ isn't running (server.ts:229 continues without it).
-  void publishPullCommand(channel.connectionId).catch(err => {
-    logger.warn('gcal webhook: failed to enqueue pull (sweeper will retry)', {
-      err: err?.message,
-      connectionId: channel.connectionId,
+  //    Producción arranca con RabbitMQ deshabilitado a propósito (DISABLE_RABBITMQ, el mismo criterio que server.ts): ahí no hay
+  //    canal, y avisar en warn por cada webhook era ruido (58 líneas en 3 días, 30-sep-2026). La fila ya quedó en el inbox; el
+  //    sweeper del inbox (cada 30 s, filas de más de 60 s) la procesa donde los jobs corren.
+  if (process.env.DEMO_MODE === 'true' || process.env.DISABLE_RABBITMQ === 'true') {
+    logger.debug('gcal webhook: RabbitMQ deshabilitado por config; el pull queda en el inbox', { connectionId: channel.connectionId })
+  } else {
+    void publishPullCommand(channel.connectionId).catch(err => {
+      logger.warn('gcal webhook: failed to enqueue pull (sweeper will retry)', {
+        err: err?.message,
+        connectionId: channel.connectionId,
+      })
     })
-  })
+  }
 
   res.status(200).end()
 }
