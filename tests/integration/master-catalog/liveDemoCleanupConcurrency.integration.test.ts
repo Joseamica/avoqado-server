@@ -7,6 +7,8 @@ const updateFirstVenueId = `h1a-demo-race-update-${fixtureKey}`
 const cleanupFirstVenueId = `h1a-demo-race-cleanup-${fixtureKey}`
 const updateFirstStaffId = `h1a-demo-race-update-staff-${fixtureKey}`
 const cleanupFirstStaffId = `h1a-demo-race-cleanup-staff-${fixtureKey}`
+const soldVenueId = `h1a-demo-race-sold-${fixtureKey}`
+const soldStaffId = `h1a-demo-race-sold-staff-${fixtureKey}`
 let setup: Client
 
 function assertDisposableDatabase(): void {
@@ -81,14 +83,19 @@ beforeAll(async () => {
   )
   await insertFixture(updateFirstVenueId, updateFirstStaffId, 'update-first')
   await insertFixture(cleanupFirstVenueId, cleanupFirstStaffId, 'cleanup-first')
+  await insertFixture(soldVenueId, soldStaffId, 'sold')
 })
 
 afterAll(async () => {
   if (!setup) return
   assertDisposableDatabase()
-  await setup.query(`DELETE FROM "LiveDemoSession" WHERE "venueId" = ANY($1::text[])`, [[updateFirstVenueId, cleanupFirstVenueId]])
-  await setup.query(`DELETE FROM "Venue" WHERE "id" = ANY($1::text[])`, [[updateFirstVenueId, cleanupFirstVenueId]])
-  await setup.query(`DELETE FROM "Staff" WHERE "id" = ANY($1::text[])`, [[updateFirstStaffId, cleanupFirstStaffId]])
+  await setup.query(`DELETE FROM "OrderItem" WHERE "orderId" IN (SELECT id FROM "Order" WHERE "venueId" = $1)`, [soldVenueId])
+  await setup.query(`DELETE FROM "Order" WHERE "venueId" = $1`, [soldVenueId])
+  await setup.query(`DELETE FROM "LiveDemoSession" WHERE "venueId" = ANY($1::text[])`, [
+    [updateFirstVenueId, cleanupFirstVenueId, soldVenueId],
+  ])
+  await setup.query(`DELETE FROM "Venue" WHERE "id" = ANY($1::text[])`, [[updateFirstVenueId, cleanupFirstVenueId, soldVenueId]])
+  await setup.query(`DELETE FROM "Staff" WHERE "id" = ANY($1::text[])`, [[updateFirstStaffId, cleanupFirstStaffId, soldStaffId]])
   await setup.query(`DELETE FROM "Organization" WHERE "id" = $1`, [organizationId])
   await setup.end()
 })
@@ -172,5 +179,33 @@ describe('live-demo cleanup venue-status serialization', () => {
       releaseLock?.()
       await Promise.allSettled([updater.end(), observer.end()])
     }
+  })
+
+  it('plan 5 · the real cron still deletes a demo whose product has a sale line (order items go before products; trigger in place)', async () => {
+    const { default: prisma } = await import('@/utils/prismaClient')
+    const { deleteDisposableDemoSession } = await import('@/services/cleanup/liveDemoCleanup.service')
+    const category = await prisma.menuCategory.create({ data: { venueId: soldVenueId, name: 'Demo', slug: `demo-sold-${fixtureKey}` } })
+    const product = await prisma.product.create({
+      data: {
+        venueId: soldVenueId,
+        categoryId: category.id,
+        sku: `DEMO-SOLD-${fixtureKey}`,
+        name: 'Demo vendido',
+        price: 10,
+        isDemo: true,
+      },
+    })
+    const order = await prisma.order.create({
+      data: { venueId: soldVenueId, orderNumber: `DEMO-SOLD-${fixtureKey}`, subtotal: 10, taxAmount: 0, total: 10 },
+    })
+    await prisma.orderItem.create({
+      data: { orderId: order.id, productId: product.id, productName: 'Demo vendido', quantity: 1, unitPrice: 10, taxAmount: 0, total: 10 },
+    })
+
+    await expect(
+      deleteDisposableDemoSession({ id: `h1a-demo-race-session-sold-${fixtureKey}`, venueId: soldVenueId, staffId: soldStaffId }),
+    ).resolves.toBeGreaterThan(0)
+    expect(await prisma.product.count({ where: { id: product.id } })).toBe(0)
+    expect(await prisma.venue.count({ where: { id: soldVenueId } })).toBe(0)
   })
 })

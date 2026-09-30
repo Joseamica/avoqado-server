@@ -1061,6 +1061,17 @@ export async function archivarProductos(
   return count
 }
 
+/** Plan 5 (D5): el código que lanza el trigger BEFORE DELETE de "Product" y lo que ve el usuario si alguna ruta lo alcanzara. */
+export const PRODUCTO_CON_VENTAS_NO_SE_BORRA = 'PRODUCTO_CON_VENTAS_NO_SE_BORRA'
+export const MENSAJE_PRODUCTO_CON_VENTAS =
+  'Este producto ya tiene ventas y no se puede borrar de verdad. Bórralo desde el menú: se archiva, deja de venderse y conserva su historia.'
+
+/** El trigger lanza P0001 con el código en el texto (un error de modelo de Prisma lo trae en el mensaje; uno crudo, en `meta`). */
+export function esProductoConVentas(err: unknown): boolean {
+  const e = err as { message?: unknown; meta?: { message?: unknown } } | null | undefined
+  return `${e?.meta?.message ?? ''} ${e?.message ?? ''}`.includes(PRODUCTO_CON_VENTAS_NO_SE_BORRA)
+}
+
 /**
  * Delete a product (soft delete)
  * Also deletes the product image from Firebase Storage

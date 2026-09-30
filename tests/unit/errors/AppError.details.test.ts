@@ -9,6 +9,7 @@ jest.mock('../../../src/config/env', () => ({
 import { ConflictError } from '../../../src/errors/AppError'
 import { globalErrorHandler } from '../../../src/app'
 import { AFILIACION_EN_VARIOS_SLOTS } from '../../../src/services/shared/slotsDeAfiliacion'
+import { MENSAJE_PRODUCTO_CON_VENTAS, PRODUCTO_CON_VENTAS_NO_SE_BORRA } from '../../../src/services/dashboard/product.dashboard.service'
 
 describe('AppError recoverable details', () => {
   it('keeps a stable 409 code and structured recovery details', () => {
@@ -75,5 +76,22 @@ describe('AppError recoverable details', () => {
     const otra = await request(app).get('/otro-check')
     expect(otra.status).toBe(500)
     expect(otra.body).toEqual({ message: 'Ocurrió un error inesperado en el servidor.' })
+  })
+
+  // Plan 5 (D5): el trigger de "Product" rechaza borrar de verdad un producto con ventas. Hoy ninguna ruta llega; si una futura
+  // llega, el handler lo traduce UNA vez a 409 con su mensaje, nunca un 500 anónimo.
+  it('translates the product-with-sales delete barrier into a 409 with its Spanish message', async () => {
+    const app = express()
+    app.get('/borrar', () => {
+      throw new Error(
+        'Invalid `prisma.product.delete()` invocation:\n\nError occurred during query execution:\nConnectorError(ConnectorError { user_facing_error: None, kind: QueryError(PostgresError { code: "P0001", message: "PRODUCTO_CON_VENTAS_NO_SE_BORRA", severity: "ERROR", detail: None, column: None, hint: None }), transient: false })',
+      )
+    })
+    app.use(globalErrorHandler)
+
+    const r = await request(app).get('/borrar')
+
+    expect(r.status).toBe(409)
+    expect(r.body).toEqual({ message: MENSAJE_PRODUCTO_CON_VENTAS, code: PRODUCTO_CON_VENTAS_NO_SE_BORRA })
   })
 })

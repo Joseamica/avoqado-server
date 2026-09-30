@@ -134,4 +134,14 @@ describe('cleanDemoData (trial→real conversion)', () => {
     expect(result.deletedMovements).toBe(3)
     expect(result.deletedBatches).toBe(2)
   })
+
+  it('plan 5 · borra renglones y órdenes ANTES que los productos demo (el trigger de Product lo exige)', async () => {
+    prismaMock.order.findMany.mockResolvedValue([{ id: 'o1' }] as never)
+
+    await cleanDemoData(VENUE_ID)
+
+    const productos = prismaMock.product.deleteMany.mock.invocationCallOrder[0]
+    expect(prismaMock.orderItem.deleteMany.mock.invocationCallOrder[0]).toBeLessThan(productos)
+    expect(prismaMock.order.deleteMany.mock.invocationCallOrder[0]).toBeLessThan(productos)
+  })
 })

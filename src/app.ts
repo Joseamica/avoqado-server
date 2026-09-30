@@ -20,12 +20,17 @@ import { NODE_ENV, ACCESS_TOKEN_SECRET } from './config/env'
 import logger from './config/logger'
 import { configureCoreMiddlewares } from './config/middleware'
 import { setupSwaggerUI } from './config/swagger'
-import AppError, { BadRequestError } from './errors/AppError'
+import AppError, { BadRequestError, ConflictError } from './errors/AppError'
 import {
   AFILIACION_EN_VARIOS_SLOTS,
   MENSAJE_AFILIACION_EN_VARIOS_SLOTS,
   esViolacionDeSlotsDistintos,
 } from './services/shared/slotsDeAfiliacion'
+import {
+  MENSAJE_PRODUCTO_CON_VENTAS,
+  PRODUCTO_CON_VENTAS_NO_SE_BORRA,
+  esProductoConVentas,
+} from './services/dashboard/product.dashboard.service'
 import mainApiRouter from './routes' // Esto importa el 'router' exportado por defecto de 'src/routes/index.ts'
 import { getCorsConfig, Environment } from './config/corsOptions'
 import { handleMcpRequest } from './mcp/server'
@@ -405,6 +410,12 @@ export function globalErrorHandler(err: Error, req: ExpressRequest, res: Express
   // devuelven los que validan antes de escribir — nunca un 500 anónimo (CI 16-sep-2026, `angelpay-full-setup`).
   if (esViolacionDeSlotsDistintos(err)) {
     err = new BadRequestError(MENSAJE_AFILIACION_EN_VARIOS_SLOTS, AFILIACION_EN_VARIOS_SLOTS)
+  }
+
+  // Plan 5 (D5): el trigger de "Product" rechaza borrar de verdad un producto con ventas. Hoy ninguna ruta llega (los borrados
+  // duros de demo quitan antes las órdenes); si una futura llega, responde 409 con su mensaje, nunca un 500 anónimo.
+  if (esProductoConVentas(err)) {
+    err = new ConflictError(MENSAJE_PRODUCTO_CON_VENTAS, PRODUCTO_CON_VENTAS_NO_SE_BORRA)
   }
 
   const bodyParseError = err as Error & { status?: number; type?: string; body?: unknown }

@@ -208,6 +208,7 @@ describe('deleteVenueData — nada que apunte a un producto sobrevive a su borra
 
   /** Los modelos que BLOQUEAN `product.deleteMany` si quedan filas. */
   const BLOQUEADORES = [
+    'orderItem', // plan 5 (D5): el trigger de Product rechaza borrar un producto que todavía tiene renglones de venta
     'creditTransaction',
     'creditItemBalance',
     'creditPackPurchase',
