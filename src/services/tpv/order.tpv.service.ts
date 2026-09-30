@@ -1683,6 +1683,10 @@ export async function addItemsToOrder(
         },
       })
 
+      // Replay de la MISMA ronda (la cola la reenvía tras perder la respuesta): ya está registrado tal cual. Recalcularlo
+      // pisaba el total de una cortesía ($0 → precio de lista). Sólo el carrito completo (asNewRound=false) actualiza.
+      if (existingByExternal && asNewRound) return existingByExternal
+
       if (existingByExternal) {
         const updatedQuantity = item.quantity
         const updatedTotal = lineTotalFor(updatedQuantity)
