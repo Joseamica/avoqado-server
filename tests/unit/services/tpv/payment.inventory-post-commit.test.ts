@@ -795,6 +795,69 @@ describe('recordOrderPayment — la comanda de pantalla nace al saldar (etapa 3 
   })
 })
 
+// Codex 3.6 (S3): una cuenta con un vale por área + productos sueltos cobrada con TERMINAL no pasa por
+// `settleStandalonePaymentInTx` (se lo salta cualquier renglón de vale), así que ni se marcaba ni se armaba la comanda
+// de los sueltos. El efectivo móvil sí lo hace; el armado ya filtra por renglón (el vale no va a la cocina).
+describe('recordOrderPayment — cuenta con vale por área cobrada con terminal (etapa 3 del KDS)', () => {
+  const conVale = () =>
+    makeOrder({
+      items: [
+        { ...makeOrder().items[0], id: 'item-suelto', areaTicketLineId: null },
+        { ...makeOrder().items[0], id: 'item-vale', productId: 'prod-vale', areaTicketLineId: 'line-1' },
+      ],
+    })
+  beforeEach(() => {
+    const order = conVale()
+    ;(prisma.order.findUnique as jest.Mock).mockImplementation(async (args: any) =>
+      args?.select?.paymentStatus ? { paymentStatus: 'PAID' } : order,
+    )
+    ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
+    ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
+    debeMarcarCocinaMock.mockResolvedValue(true)
+  })
+  afterEach(() => debeMarcarCocinaMock.mockResolvedValue(false))
+
+  it('sin sesión de vales: la marca va en la escritura que salda y la comanda se arma una vez', async () => {
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, idempotencyKey: 'vale-1' }, 'user-1')
+
+    const conMarca = (prisma.order.update as jest.Mock).mock.calls.some(([a]) => a?.data?.kitchenPendingAt instanceof Date)
+    expect(conMarca).toBe(true)
+    expect(armarComandasMock).toHaveBeenCalledTimes(1)
+    expect(armarComandasMock).toHaveBeenCalledWith(VENUE_ID, ORDER_ID, 'PAID')
+  })
+
+  it('con sesión de vales: la finalización marca la cocina y la comanda se arma una vez', async () => {
+    lockAreaTicketCheckoutMock.mockResolvedValue({ sessionId: 'session-1', attemptId: 'attempt-1' })
+    finalizeAreaTicketPaymentMock.mockResolvedValue({ areaTicketOrder: true, sessionId: 'session-1', fullyPaid: true })
+
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, idempotencyKey: 'vale-2' }, 'user-1')
+
+    expect(finalizeAreaTicketPaymentMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ marcarCocina: true }))
+    expect(armarComandasMock).toHaveBeenCalledTimes(1)
+    expect(armarComandasMock).toHaveBeenCalledWith(VENUE_ID, ORDER_ID, 'PAID')
+  })
+
+  it('con sesión de vales: un abono parcial no arma la comanda', async () => {
+    lockAreaTicketCheckoutMock.mockResolvedValue({ sessionId: 'session-1', attemptId: 'attempt-1' })
+    finalizeAreaTicketPaymentMock.mockResolvedValue({ areaTicketOrder: true, sessionId: 'session-1', fullyPaid: false })
+
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, idempotencyKey: 'vale-3' }, 'user-1')
+
+    expect(armarComandasMock).not.toHaveBeenCalled()
+  })
+
+  it('sin pantalla: con sesión de vales ni marca ni comanda', async () => {
+    debeMarcarCocinaMock.mockResolvedValue(false)
+    lockAreaTicketCheckoutMock.mockResolvedValue({ sessionId: 'session-1', attemptId: 'attempt-1' })
+    finalizeAreaTicketPaymentMock.mockResolvedValue({ areaTicketOrder: true, sessionId: 'session-1', fullyPaid: true })
+
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, idempotencyKey: 'vale-4' }, 'user-1')
+
+    expect(finalizeAreaTicketPaymentMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ marcarCocina: false }))
+    expect(armarComandasMock).not.toHaveBeenCalled()
+  })
+})
+
 // 🔴 DINERO: sólo COMPLETED es dinero capturado — la misma regla que ya sigue el saldado DENTRO de la transacción
 // (`settleStandalonePaymentInTx` exige COMPLETED). El camino legado de después sumaba el importe del pago actual sin
 // mirar su estado: un FAILED/PENDING/PROCESSING/REFUNDED que «cubría» el saldo dejaba la venta PAID y COMPLETED,

@@ -1396,7 +1396,10 @@ async function updateOrderTotalsForStandalonePayment(
     areaTicketAlreadyFinalized?: boolean
     venueId?: string
     committedSettlement?: CommittedStandaloneSettlement
-    /** Etapa 3 del KDS: `recordOrderPayment` ya puso la marca al saldar; aquí sólo se arma tras el commit. */
+    /**
+     * Etapa 3 del KDS: arma tras el commit. La marca la pone quien salda: `settleStandalonePaymentInTx`, la
+     * finalización del vale, o —cuenta con vale sin sesión— la escritura de esta misma función.
+     */
     marcarCocina?: boolean
   },
 ): Promise<OrderInventoryWarning | null> {
@@ -1774,6 +1777,7 @@ async function updateOrderTotalsForStandalonePayment(
                 completedAt: new Date(),
               }),
               ...(debeRegistrarPosting && { loyaltyEligibleAt: new Date(), loyaltyStaffId: staffId }),
+              ...(debeRegistrarPosting && options?.marcarCocina && { kitchenPendingAt: new Date() }),
             },
             include: {
               items: {
@@ -2893,6 +2897,8 @@ async function finalizeCapturedAreaTicketPayment(input: {
   sessionId: string
   attemptId: string
   staffId?: string | null
+  /** Etapa 3 del KDS: el saldado del vale deja la marca de cocina (el armado sólo toma los productos sueltos). */
+  marcarCocina?: boolean
 }): Promise<'PAID' | 'PARTIALLY_PAID'> {
   const areaTicketPayment = await import('../mobile/areaTicketV7.mobile.service')
   const finalization = await prisma.$transaction(
@@ -2905,6 +2911,7 @@ async function finalizeCapturedAreaTicketPayment(input: {
         fullyPaid: false,
         staffId: input.staffId ?? undefined,
         reconcileCapturedPayment: true,
+        marcarCocina: input.marcarCocina ?? false,
         locked: { sessionId: input.sessionId, attemptId: input.attemptId },
       }),
     { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
@@ -2939,6 +2946,8 @@ async function resumeCapturedAreaTicketPayment(
     if (session.status === 'PARTIALLY_PAID') return 'PARTIALLY_PAID'
   }
 
+  // Aquí no se arma tras el commit: la marca basta, el barrido arma la comanda ≤ 90 s después. `debeMarcarCocina` nunca lanza.
+  const marcarCocina = await debeMarcarCocina(venueId)
   try {
     return await finalizeCapturedAreaTicketPayment({
       venueId,
@@ -2947,6 +2956,7 @@ async function resumeCapturedAreaTicketPayment(
       sessionId: session.id,
       attemptId: attempt.id,
       staffId: payment.processedById,
+      marcarCocina,
     })
   } catch (error) {
     await markAreaTicketPaymentForReconciliation({
@@ -4103,6 +4113,7 @@ export async function recordOrderPayment(
             sessionId: capturedAreaCheckout.sessionId,
             attemptId: capturedAreaCheckout.attemptId,
             staffId: validatedStaffId,
+            marcarCocina,
           })
         } catch (finalizationError) {
           // El proveedor ya confirmó el dinero. Nunca habilitar otro cobro:
@@ -4129,6 +4140,8 @@ export async function recordOrderPayment(
             await updateOrderTotalsForStandalonePayment(activeOrder.id, totalAmount + tipAmount, tipAmount, payment.id, validatedStaffId, {
               areaTicketAlreadyFinalized: true,
               venueId,
+              // Codex 3.6 (S3): la finalización ya puso la marca al saldar; aquí sólo se arman los sueltos.
+              marcarCocina: marcarCocina && areaTicketCheckoutState === 'PAID',
             })
           } catch (sideEffectError) {
             logger.error('[AREA TICKETS v7] El pago finalizó, pero fallaron efectos secundarios no monetarios', {
@@ -4164,7 +4177,9 @@ export async function recordOrderPayment(
           {
             venueId,
             committedSettlement: committedStandaloneSettlement,
-            marcarCocina: marcarCocina && Boolean(committedStandaloneSettlement),
+            // Codex 3.6 (S3): una cuenta con vale no pasa por ese saldado; aquí el pago ya es COMPLETED, así que la
+            // salda (y la marca) la escritura de `updateOrderTotalsForStandalonePayment`.
+            marcarCocina: marcarCocina && (Boolean(committedStandaloneSettlement) || hasAreaTicketLines),
           },
         )
       }
