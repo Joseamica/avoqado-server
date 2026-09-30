@@ -101,16 +101,20 @@ export class DeliveryWebhookReconciliationJob {
   private readonly BACKOFF_CAP_MINUTES = 60
 
   /**
-   * N-5: eventos de SEGUIMIENTO — sin plazo de aceptación. Hoy sólo el aviso de cambio de Uber
-   * (`FULFILLMENT_CHANGED`), que se relee hasta 3 h mientras el pedido no cierra. Van en su propio
-   * carril, DESPUÉS de todo lo demás: un pedido nuevo tiene ~11.5 min antes de que Uber lo cancele.
+   * N-5: eventos de SEGUIMIENTO — sin plazo de aceptación. El aviso de cambio de Uber
+   * (`FULFILLMENT_CHANGED`), que se relee hasta 3 h mientras el pedido no cierra, y el resultado del
+   * aprovisionamiento de Rappi (`STORE_PROVISIONING_STATUS`), cuyo reintento suscribe cada tienda a sus
+   * webhooks. Van en su propio carril, DESPUÉS de todo lo demás: un pedido nuevo tiene ~11.5 min en Uber
+   * y 4–6 en Rappi antes de que lo cancelen.
    */
-  private static readonly EVENTOS_DE_SEGUIMIENTO = ['order.fulfillment_issues.resolved']
+  private static readonly EVENTOS_DE_SEGUIMIENTO = ['order.fulfillment_issues.resolved', 'STORE_PROVISIONING_STATUS']
 
   /**
    * Tope de relecturas de seguimiento por pasada. ponytail: con la lectura acotada a 8 s son ≤ 80 s,
    * así la pasada termina antes del siguiente tick (2 min) y un pedido nuevo nunca espera una pasada
    * entera de relecturas; si los avisos abiertos crecen, subirlo o dar al seguimiento su propio job.
+   * Un aviso de Rappi pesa más: hasta 10 llamadas de ≤ 10 s por cada tienda que siga sin suscribir (las
+   * ya confirmadas no llaman). Con el piloto son pocas tiendas; si el volumen crece, ése es su propio job.
    */
   private readonly SEGUIMIENTO_POR_PASADA = 10
 

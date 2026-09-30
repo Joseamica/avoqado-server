@@ -16,7 +16,14 @@
 import { env } from '@/config/env'
 import logger from '@/config/logger'
 
-import { llamarRappi, RappiEscrituraBloqueadaError, type AmbienteRappi, type RappiPeticion, type RappiRespuesta } from './rappi.http'
+import {
+  llamarRappi,
+  RappiEscrituraBloqueadaError,
+  TIMEOUT_RAPPI_MS,
+  type AmbienteRappi,
+  type RappiPeticion,
+  type RappiRespuesta,
+} from './rappi.http'
 import { getRappiToken, type SuperficieRappi } from './rappi.token'
 import { aMotivoRappi, type ResultadoRechazo } from './rappi.rejectReason'
 import {
@@ -74,6 +81,7 @@ async function fetchTokenReal(superficie: SuperficieRappi): Promise<{ access_tok
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ client_id: clientId, client_secret: clientSecret }),
+    signal: AbortSignal.timeout(TIMEOUT_RAPPI_MS),
   })
   if (!r.ok) {
     const cuerpo = await r.text()
@@ -276,6 +284,7 @@ export async function canjearCodigoRappi(code: string, verifier: string): Promis
       code_verifier: verifier,
       redirect_uri: redirectUriRappi(),
     }).toString(),
+    signal: AbortSignal.timeout(TIMEOUT_RAPPI_MS),
   })
   if (!r.ok) {
     logger.error('🚨 [Rappi] el canje del código falló', { status: r.status })

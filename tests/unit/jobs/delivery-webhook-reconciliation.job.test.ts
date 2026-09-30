@@ -758,6 +758,30 @@ describe('DeliveryWebhookReconciliationJob', () => {
       expect(mockedMarkEventResult).not.toHaveBeenCalled()
     })
 
+    // H3: confirmar un lote suscribe cada tienda a sus webhooks (varias llamadas HTTP por tienda). En el carril
+    // urgente, un aviso viejo que se reintenta retrasaba al pedido nuevo que llegó detrás, con su reloj de 4–6 min.
+    it('🔴 el aviso de aprovisionamiento va al carril de SEGUIMIENTO: un pedido nuevo nunca espera detrás de él', async () => {
+      const aviso = { ...rappiSinVinculo('STORE_PROVISIONING_STATUS'), id: 'evt_aprov', receivedAt: new Date(NOW - 60 * 60_000) }
+      const pedido = makeEvent({
+        id: 'evt_pedido',
+        provider: 'RAPPI',
+        eventType: 'NEW_ORDER',
+        channelLink: { ...activeLink, id: 'link_rappi', provider: 'RAPPI' },
+        channelLinkId: 'link_rappi',
+        receivedAt: new Date(NOW - 60_000),
+      })
+      mockedFindMany.mockImplementation(async (args: any) => {
+        if (args.where?.receivedAt?.lt) return [] // barrido de 24 h
+        const carril = (args.where?.AND ?? []).find((c: any) => c.eventType)?.eventType
+        return [aviso, pedido].filter(f => (carril.in ? carril.in.includes(f.eventType) : !carril.notIn.includes(f.eventType)))
+      })
+      mockedProcessRappi.mockResolvedValue({ outcome: 'STORE_STATE' })
+
+      await new DeliveryWebhookReconciliationJob().runOnce()
+
+      expect(mockedProcessRappi.mock.calls.map(c => c[0])).toEqual(['evt_pedido', 'evt_aprov'])
+    })
+
     it('cualquier OTRO evento de Rappi sin vínculo sigue siendo ORPHANED de inmediato', async () => {
       mockedFindMany.mockResolvedValueOnce([rappiSinVinculo('NEW_ORDER')]).mockResolvedValueOnce([])
 

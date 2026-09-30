@@ -128,6 +128,18 @@ describe('llamarRappi', () => {
     expect(r).toMatchObject({ ok: false, status: 400, raw: 'invalid transition' })
   })
 
+  // H3: sin techo, una llamada colgada sostenía la pasada de la reconciliación (y detrás de ella, los pedidos).
+  it('🔴 cada petición lleva su timeout, y uno vencido sale como un fallo de red (lanza), no como una respuesta', async () => {
+    const d = deps()
+    await llamarRappi(d, { superficie: 'integrations', metodo: 'GET', ruta: '/orders' })
+    expect((d.fetchImpl as jest.Mock).mock.calls[0][1].signal).toBeInstanceOf(AbortSignal)
+
+    const vencida = jest.fn().mockRejectedValue(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
+    await expect(llamarRappi(deps({ fetchImpl: vencida }), { superficie: 'integrations', metodo: 'GET', ruta: '/orders' })).rejects.toThrow(
+      /timeout/,
+    )
+  })
+
   it('una escritura AUTORIZADA sí sale, con cuerpo JSON', async () => {
     const d = deps({ tiendasEscribibles: ['900'] })
     await llamarRappi(d, { superficie: 'integrations', metodo: 'PUT', ruta: '/x', storeId: '900', cuerpo: { a: 1 } })

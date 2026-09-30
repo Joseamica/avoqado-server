@@ -84,6 +84,13 @@ export interface RappiHttpDeps {
   tiendasEscribibles?: readonly string[]
 }
 
+/**
+ * Techo de espera de CUALQUIER llamada a Rappi (API, login y canje OAuth). Sin él, una llamada colgada
+ * sostenía la pasada de la reconciliación y detrás de ella esperaban los pedidos. Uno vencido LANZA, igual
+ * que un fallo de red: quien llama lo trata como tal (un aprovisionamiento queda incierto, no rechazado).
+ */
+export const TIMEOUT_RAPPI_MS = 10_000
+
 export interface RappiRespuesta {
   ok: boolean
   status: number
@@ -134,6 +141,7 @@ export async function llamarRappi(deps: RappiHttpDeps, peticion: RappiPeticion):
         ...(peticion.cuerpo !== undefined ? { 'content-type': 'application/json' } : {}),
       },
       ...(peticion.cuerpo !== undefined ? { body: JSON.stringify(peticion.cuerpo) } : {}),
+      signal: AbortSignal.timeout(TIMEOUT_RAPPI_MS),
     })
     return { ok: r.ok, status: r.status, raw: await r.text() }
   }

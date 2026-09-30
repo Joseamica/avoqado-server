@@ -21,6 +21,7 @@ jest.mock('@/config/logger', () => ({ __esModule: true, default: { info: jest.fn
 import {
   apiBaseSelfOnboarding,
   aprovisionarTiendasRappi,
+  canjearCodigoRappi,
   preflightSelfOnboardingRappi,
   redirectUriRappi,
   suscribirTiendaAEventos,
@@ -81,6 +82,28 @@ describe('rappi.client — self-onboarding', () => {
     ])
     // R6: la que Rappi no nombró queda incierta, no rechazada.
     expect(r).toEqual({ batchId: 'b1', aceptadas: [{ storeId: '10', integrationId: 'i10' }], rechazadas: [], inciertas: ['11'] })
+  })
+
+  // H3: el login del integrador, el canje OAuth y la API — ninguna llamada a Rappi espera para siempre.
+  it('🔴 toda llamada a Rappi lleva timeout: login, canje del código y la API', async () => {
+    const idToken = `${Buffer.from(JSON.stringify({ alg: 'RS256' })).toString('base64url')}.e30.firma`
+    const senales: Array<[string, unknown]> = []
+    global.fetch = jest.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      senales.push([String(url), init?.signal])
+      if (String(url).includes('/auth/v1/token/login/')) return json(200, { access_token: 'tok-integ', expires_in: 3600 })
+      if (String(url).endsWith('/oauth/token')) return json(200, { id_token: idToken })
+      return json(202, {})
+    }) as unknown as typeof fetch
+
+    await aprovisionarTiendasRappi('idt', tiendas)
+    expect(await canjearCodigoRappi('code', 'verifier')).toBe(idToken)
+
+    expect(senales.map(([u]) => u)).toEqual([
+      expect.stringContaining('/auth/v1/token/login/'),
+      expect.stringContaining('/stores/provisioning'),
+      expect.stringContaining('/oauth/token'),
+    ])
+    for (const [, senal] of senales) expect(senal).toBeInstanceOf(AbortSignal)
   })
 
   it('🔴 aprovisionar: una tienda fuera de la lista y NO sale ninguna petición al host de Rappi', async () => {
