@@ -45,7 +45,8 @@ const FINALES = [
 ] as const
 export type OutcomeRappi = 'PROVISIONING' | 'UNCERTAIN' | 'SUBSCRIBE_FAILED' | (typeof FINALES)[number]
 export type ResultadoRappi = { outcome: OutcomeRappi; detalle?: string }
-export type Confirmacion = 'PROMOTED' | 'REMOVED' | 'DISABLED' | 'IGNORED' | 'SUBSCRIBE_FAILED'
+/** `DEFERRED`: puede ser nuestra pero aún no hay con qué probarlo — el que llama la reintenta (ver `sinConfirmar`). */
+export type Confirmacion = 'PROMOTED' | 'REMOVED' | 'DISABLED' | 'IGNORED' | 'DEFERRED' | 'SUBSCRIBE_FAILED'
 /** ÚNICA definición de «final»: la usan el cierre del intent y la página de resultado. */
 export const esFinal = (o: unknown): boolean => (FINALES as readonly unknown[]).includes(o)
 
@@ -295,11 +296,28 @@ function coincide(a: Aprov | null, r: ResultadoRappiTienda & { batchId?: string 
 const pendienteNuestro = (fila: Fila | null, r: ResultadoRappiTienda & { batchId?: string }, esperado?: { intentId: string }) =>
   fila?.status === DeliveryChannelStatus.PENDING && coincide(aprov(fila.config), r, esperado)
 
-function ignorar(fila: Fila | null, r: ResultadoRappiTienda & { batchId?: string }, esperado?: { intentId: string }): 'IGNORED' {
+/**
+ * Por qué una confirmación no se aplica. 🔴 `DEFERRED` ≠ `IGNORED`: un webhook CON lote que llega a una
+ * reclamación nuestra que todavía no guarda su `batchId` (el 202 sigue en vuelo, o `correlacionar` aún no
+ * escribe) no se puede probar AHORA, pero puede ser justo la confirmación. Rappi no documenta reintentos:
+ * darlo por procesado la perdería. Diferido, el evento queda FAILED y la reconciliación lo reintenta; uno
+ * ajeno de verdad lo acota su tope de intentos (POISON).
+ */
+function sinConfirmar(
+  fila: Fila | null,
+  r: ResultadoRappiTienda & { batchId?: string },
+  esperado?: { intentId: string },
+): 'IGNORED' | 'DEFERRED' {
   const a = aprov(fila?.config)
   const ctx = { storeId: r.storeId, status: r.status, batchId: r.batchId }
+  if (fila?.status === DeliveryChannelStatus.PENDING && a && !a.batchId && !a.confirmedAt && r.batchId) {
+    logger.warn('🛵 [Rappi] confirmación de una reclamación que aún no guarda su lote: se reintenta', { ...ctx, intentId: a.intentId })
+    return 'DEFERRED'
+  }
   if (fila?.status === DeliveryChannelStatus.ACTIVE && a?.confirmedAt && coincide(a, r, esperado))
     logger.info('🛵 [Rappi] confirmación repetida de una tienda ya activa', ctx)
+  // Nuestra (misma intención) pero sin prueba todavía: el re-chequeo vuelve a pasar, no es una alarma.
+  else if (a && esperado?.intentId === a.intentId) logger.warn('🛵 [Rappi] tienda nuestra sin prueba de correlación todavía', ctx)
   else logger.error('🚨 [Rappi] confirmación de una tienda sin vínculo pendiente nuestro', ctx)
   return 'IGNORED'
 }
@@ -307,7 +325,8 @@ function ignorar(fila: Fila | null, r: ResultadoRappiTienda & { batchId?: string
 /**
  * Aplica UNA confirmación de Rappi (`ACTIVE` / `FAILED` / `INACTIVE`) a nuestro vínculo PENDING.
  * El webhook pasa su `batchId`; el re-chequeo de /result pasa `integrationId` + `esperado.intentId`.
- * Actúa sólo sobre un PENDING que pruebe ser nuestro; si no, `IGNORED` (nunca crea un vínculo).
+ * Actúa sólo sobre un PENDING que pruebe ser nuestro; si no, `IGNORED` (nunca crea un vínculo), o `DEFERRED`
+ * si todavía no se puede probar (ver `sinConfirmar`).
  * Un DEPROVISION de una tienda ya activa también se ignora: ese flujo no existe todavía.
  */
 export async function confirmarTienda(
@@ -319,7 +338,7 @@ export async function confirmarTienda(
     // 🔴 Suscribir a los eventos ANTES de promover: una tienda ACTIVE sin suscripción no recibe pedidos.
     // Es HTTP, así que va FUERA de la transacción (no se sostiene un candado mientras Rappi contesta).
     const antes = await prisma.$transaction(tx => leerVinculo(tx, r.storeId))
-    if (!pendienteNuestro(antes, r, esperado)) return ignorar(antes, r, esperado)
+    if (!pendienteNuestro(antes, r, esperado)) return sinConfirmar(antes, r, esperado)
     const intentId = (aprov(antes?.config) as Aprov).intentId
     let s: { ok: boolean; fallidos: string[] }
     try {
@@ -368,7 +387,7 @@ export async function confirmarTienda(
     await anotar(tx, a.intentId, r.storeId, res)
     return { fila, confirmacion, intentId: a.intentId }
   })
-  if (!hecho.confirmacion) return ignorar(hecho.fila, r, esperado) // cambió mientras suscribíamos
+  if (!hecho.confirmacion) return sinConfirmar(hecho.fila, r, esperado) // cambió mientras suscribíamos
   await cerrarSiTodoFinal(hecho.intentId as string)
   return hecho.confirmacion
 }

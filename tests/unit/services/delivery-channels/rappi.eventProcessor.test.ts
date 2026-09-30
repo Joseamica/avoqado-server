@@ -315,6 +315,18 @@ describe('processRappiEvent', () => {
     expect(mockMark).not.toHaveBeenCalledWith('evt1', 'PROCESSED')
   })
 
+  it('🔴 si una tienda sale DEFERRED el evento queda FAILED (Rappi no lo reenvía), pero las demás se confirman igual', async () => {
+    ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(loteAprovisionado())
+    const confirmar = jest.fn().mockResolvedValueOnce('DEFERRED').mockResolvedValueOnce('REMOVED')
+
+    const r = await processRappiEvent('evt1', { aceptar: aceptarOk, confirmar })
+
+    expect(confirmar).toHaveBeenCalledTimes(2)
+    expect(r).toEqual({ outcome: 'FAILED', error: 'PROVISIONING_DEFERRED' })
+    expect(mockMark).toHaveBeenCalledWith('evt1', 'FAILED', undefined, 'PROVISIONING_DEFERRED')
+    expect(mockMark).not.toHaveBeenCalledWith('evt1', 'PROCESSED')
+  })
+
   it('el cableado por defecto llama a confirmarTienda con el lote y con la suscripción del cliente', async () => {
     ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(loteAprovisionado())
     ;(confirmarTienda as jest.Mock).mockResolvedValue('PROMOTED')

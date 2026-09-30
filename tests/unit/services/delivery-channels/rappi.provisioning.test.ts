@@ -11,6 +11,7 @@ import {
   confirmarTienda,
   type ProvisioningDeps,
 } from '../../../../src/services/delivery-channels/providers/rappi/rappi.provisioning'
+import { processRappiEvent } from '../../../../src/services/delivery-channels/providers/rappi/rappi.eventProcessor'
 
 // La base en memoria (CAS real, merge real, «no degradar un final» sólo si el SQL lo trae) es compartida.
 let db: DbFalsa
@@ -374,17 +375,91 @@ describe('orden webhook ↔ 202 (R14)', () => {
     expect(db.intents.get('i1')!.state).toBe('CONSUMED')
   })
 
-  it('webhook ANTES de guardar el lote: se ignora (no hay prueba), y el re-chequeo la rescata por integrationId', async () => {
+  it('webhook ANTES de guardar el lote: se DIFIERE (no hay prueba todavía), y el re-chequeo la rescata por integrationId', async () => {
     const d = deps({
       aprovisionar: jest.fn(async () => {
-        expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, d)).toBe('IGNORED')
+        expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, d)).toBe('DEFERRED')
         return { batchId: 'b1', aceptadas: [{ storeId: '10', integrationId: 'int10' }], rechazadas: [], inciertas: [] }
       }),
     })
     await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(d.suscribir).not.toHaveBeenCalled() // diferir no suscribe ni toca la fila
     expect(resultado('10').outcome).toBe('PROVISIONING')
     expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', integrationId: 'int10' }, d, { intentId: 'i1' })).toBe('PROMOTED')
     expect(resultado('10').outcome).toBe('ACTIVATED')
+  })
+
+  // F1: Rappi no documenta reintentos del webhook — darlo por PROCESSED en esa ventana perdía la confirmación.
+  describe('el webhook que cae entre el 202 y `correlacionar`', () => {
+    const evento = (batchId: string, storeId = '10') => ({
+      id: 'evt1',
+      status: 'RECEIVED',
+      eventType: 'STORE_PROVISIONING_STATUS',
+      orderId: null,
+      venueId: null,
+      channelLink: null,
+      payload: { batchId, operation: 'PROVISION', results: [{ storeId, status: 'ACTIVE', integrationId: `int${storeId}` }] },
+    })
+    const marcas = () => p.deliveryOrderEvent.update.mock.calls.map((c: Fila[]) => c[0].data.status)
+    const procesar = (d: ProvisioningDeps) => processRappiEvent('evt1', { confirmar: r => confirmarTienda(r, d) })
+
+    beforeEach(() => {
+      p.deliveryOrderEvent.findUnique.mockReset()
+      p.deliveryOrderEvent.update.mockReset().mockResolvedValue({})
+    })
+
+    it('queda FAILED (no PROCESSED), y al reintentarlo tras guardar el lote se promueve', async () => {
+      p.deliveryOrderEvent.findUnique.mockResolvedValue(evento('b1'))
+      const d = deps({
+        aprovisionar: jest.fn(async () => {
+          expect(await procesar(d)).toMatchObject({ outcome: 'FAILED', error: 'PROVISIONING_DEFERRED' })
+          return { batchId: 'b1', aceptadas: [{ storeId: '10', integrationId: 'int10' }], rechazadas: [], inciertas: [] }
+        }),
+      })
+      await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+      expect(marcas()).toEqual(['FAILED'])
+      expect(db.links.get('10')!.status).toBe('PENDING')
+      expect(logger.error).not.toHaveBeenCalledWith(expect.stringContaining('sin vínculo pendiente nuestro'), expect.anything())
+
+      // La reconciliación lo vuelve a tomar (sigue FAILED): ya hay lote guardado, y ahora sí es la nuestra.
+      p.deliveryOrderEvent.findUnique.mockResolvedValue({ ...evento('b1'), status: 'FAILED' })
+      expect(await procesar(d)).toMatchObject({ outcome: 'STORE_STATE' })
+      expect(marcas()).toEqual(['FAILED', 'PROCESSED'])
+      expect(db.links.get('10')!.status).toBe('ACTIVE')
+      expect(resultado('10').outcome).toBe('ACTIVATED')
+    })
+
+    it('uno ajeno de verdad (otro lote, u otra tienda sin vínculo) sigue IGNORED y el evento PROCESSED', async () => {
+      sembrar()
+      vinculo('10', { config: { rappiProvisioning: { intentId: 'i1', since: 'x', batchId: 'b1', integrationId: 'int10' } } })
+      const d = deps()
+      p.deliveryOrderEvent.findUnique.mockResolvedValue(evento('ajeno'))
+      expect(await procesar(d)).toMatchObject({ outcome: 'STORE_STATE' })
+      p.deliveryOrderEvent.findUnique.mockResolvedValue(evento('b1', '77'))
+      expect(await procesar(d)).toMatchObject({ outcome: 'STORE_STATE' })
+      expect(marcas()).toEqual(['PROCESSED', 'PROCESSED'])
+      expect(db.links.get('10')!.status).toBe('PENDING')
+      expect(d.suscribir).not.toHaveBeenCalled()
+    })
+
+    it('sin lote en el webhook, o con la tienda ya confirmada, no se difiere', async () => {
+      sembrar()
+      vinculo('10', { config: { rappiProvisioning: { intentId: 'i1', since: 'x' } } })
+      expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE' }, deps())).toBe('IGNORED')
+      vinculo('10', { status: 'ACTIVE', config: { rappiProvisioning: { intentId: 'i1', since: 'x', confirmedAt: 'y' } } })
+      expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, deps())).toBe('IGNORED')
+    })
+  })
+
+  it('re-chequeo de una tienda NUESTRA aún sin integrationId guardado: IGNORED con aviso, no con alarma', async () => {
+    sembrar()
+    vinculo('10', { config: { rappiProvisioning: { intentId: 'i1', since: 'x', batchId: 'b1' } } })
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', integrationId: 'int10' }, deps(), { intentId: 'i1' })).toBe('IGNORED')
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('sin prueba de correlación'), expect.anything())
+    expect(logger.error).not.toHaveBeenCalled()
+    // La de OTRA intención sí es alarma.
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', integrationId: 'int10' }, deps(), { intentId: 'i9' })).toBe('IGNORED')
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('sin vínculo pendiente nuestro'), expect.anything())
   })
 })
 

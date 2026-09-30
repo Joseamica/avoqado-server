@@ -48,7 +48,7 @@ export interface RappiProcessResult {
 /** Dependencias inyectables: sin esto no se puede probar sin red. */
 export interface RappiProcessDeps {
   aceptar?: (orderId: string, storeId: string, cookingTime: number) => Promise<{ ok: boolean; status: number; raw: string }>
-  /** `confirmarTienda` de UNA tienda del lote. Lo que devuelve es informativo: sólo un throw falla el evento. */
+  /** `confirmarTienda` de UNA tienda del lote. Fallan el evento un throw y un `DEFERRED`; lo demás es informativo. */
   confirmar?: (r: ResultadoRappiTienda & { batchId?: string }) => Promise<string>
 }
 
@@ -168,17 +168,28 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
     // nunca hay vínculo — cada tienda la resuelve `confirmarTienda`, que sólo PROMUEVE un vínculo
     // nuestro y lo prueba con el lote. 🔴 El `batchId` vive arriba, no en cada resultado: sin
     // pasarlo, toda confirmación sale IGNORED. SUBSCRIBE_FAILED o IGNORED no fallan el evento (el
-    // vínculo sigue PENDING y el re-chequeo de la pantalla reintenta); sólo un throw lo deja
-    // FAILED, y reprocesarlo es seguro porque la confirmación es idempotente.
+    // vínculo sigue PENDING y el re-chequeo de la pantalla reintenta). Un throw o un DEFERRED (llegó
+    // antes de que guardáramos el lote: Rappi no lo reenvía) lo dejan FAILED para que la
+    // reconciliación lo reintente — seguro, porque la confirmación es idempotente.
     if (evento.eventType === RAPPI_EVENTS.STORE_PROVISIONING_STATUS) {
       const { batchId, results } = leerEstadoAprovisionamiento(evento.payload)
+      let diferidas = 0
       try {
-        for (const r of results) await confirmar({ ...r, ...(batchId ? { batchId } : {}) })
+        for (const r of results) if ((await confirmar({ ...r, ...(batchId ? { batchId } : {}) })) === 'DEFERRED') diferidas++
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, undefined, `PROVISIONING: ${msg.slice(0, 400)}`)
         logger.error('🚨 [Rappi] confirmar el aprovisionamiento lanzó — queda FAILED para reprocesar', { eventRowId, batchId, error: msg })
         return { outcome: 'FAILED', error: msg }
+      }
+      if (diferidas) {
+        await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, undefined, 'PROVISIONING_DEFERRED')
+        logger.warn('🛵 [Rappi] aprovisionamiento con tiendas aún sin lote guardado — queda FAILED para reintentar', {
+          eventRowId,
+          batchId,
+          diferidas,
+        })
+        return { outcome: 'FAILED', error: 'PROVISIONING_DEFERRED' }
       }
       await markEventResult(eventRowId, DeliveryOrderEventStatus.PROCESSED)
       return { outcome: 'STORE_STATE' }
