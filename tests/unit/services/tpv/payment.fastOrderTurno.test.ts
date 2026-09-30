@@ -431,3 +431,58 @@ describe('recordFastPayment — la orden FAST cae en el turno de caja del NEGOCI
     expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * 🔴 30-sep-2026 (prueba de avoqado-android en Windows): la respuesta del cobro rápido llevaba la fila
+ * ENTERA del empleado (`include: { processedBy: true }`) — hash de contraseña incluido — a cada POS.
+ * Y los cobros de las apps quedaban con `source = OTHER` porque nadie conocía `AVOQADO_ANDROID` ni
+ * `AVOQADO_IOS`. El efectivo contra una orden móvil ya queda `APP` (`order.mobile.service.ts`); el
+ * rápido tiene que decir lo mismo. Lo manual (terminal externa, transferencia) sigue `OTHER` porque el
+ * dashboard sólo enseña su etiqueta (`externalSource`) cuando la fuente es `OTHER`.
+ */
+describe('recordFastPayment — la respuesta no lleva secretos del empleado y el origen es el de la app', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    installFakes()
+    installDistinctTransaction(null)
+  })
+
+  const includeDelCobro = () => prismaMock.payment.create.mock.calls[0]?.[0]?.include
+
+  it('pide a Prisma sólo campos públicos del empleado que cobró', async () => {
+    await recordFastPayment(VENUE, cobroRapido(), 'user-1')
+
+    const empleado = includeDelCobro()?.processedBy
+    expect(empleado).toEqual({ select: expect.objectContaining({ id: true, firstName: true, lastName: true }) })
+    for (const secreto of ['password', 'resetToken', 'emailVerificationCode', 'googleId']) {
+      expect(empleado.select).not.toHaveProperty(secreto)
+    }
+  })
+
+  it.each(['AVOQADO_ANDROID', 'AVOQADO_IOS'])('efectivo rápido de %s queda APP', async source => {
+    await recordFastPayment(VENUE, cobroRapido({ source }), 'user-1')
+
+    expect(datosDelCobro()).toMatchObject({ source: 'APP', externalSource: null })
+  })
+
+  it('lo registrado a mano desde la app (otra terminal) sigue OTHER con su etiqueta', async () => {
+    await recordFastPayment(
+      VENUE,
+      cobroRapido({ source: 'AVOQADO_ANDROID', method: 'CARD', externalSource: 'Tarjeta (terminal externa)' }),
+      'user-1',
+    )
+
+    expect(datosDelCobro()).toMatchObject({ source: 'OTHER', externalSource: 'Tarjeta (terminal externa)' })
+  })
+
+  it('regresión: la TPV sigue siendo TPV y un origen desconocido sigue OTHER', async () => {
+    await recordFastPayment(VENUE, cobroRapido({ source: 'AVOQADO_TPV' }), 'user-1')
+    expect(datosDelCobro().source).toBe('TPV')
+
+    jest.clearAllMocks()
+    installFakes()
+    installDistinctTransaction(null)
+    await recordFastPayment(VENUE, cobroRapido({ source: 'ALGO_RARO' }), 'user-1')
+    expect(datosDelCobro().source).toBe('OTHER')
+  })
+})

@@ -43,6 +43,7 @@ jest.mock('@/services/access/cashReconciliationAccess.service', () => ({ isCashR
 jest.mock('@/services/dashboard/shift.dashboard.service', () => ({ resolveShiftCashDrawer: jest.fn().mockResolvedValue(null) }))
 
 import prisma from '@/utils/prismaClient'
+import { STAFF_PUBLIC_SELECT } from '@/utils/staffPublicSelect'
 import { getCurrentShift, getShifts, TOPE_DE_TURNOS_POR_PAGINA } from '@/services/tpv/shift.tpv.service'
 
 const m = prisma as unknown as {
@@ -120,7 +121,8 @@ describe('getShifts — la FORMA de la consulta: nada sin tope', () => {
     await getShifts(VENUE, 10, 1)
 
     const include = m.shift.findMany.mock.calls[0][0].include
-    expect(include).toEqual({ staff: true })
+    // El empleado viaja sólo con sus campos públicos: la fila entera llevaba el hash de su contraseña (30-sep).
+    expect(include).toEqual({ staff: { select: STAFF_PUBLIC_SELECT } })
     expect(include).not.toHaveProperty('orders')
     expect(include).not.toHaveProperty('payments')
   })

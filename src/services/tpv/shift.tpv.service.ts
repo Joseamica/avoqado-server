@@ -4,6 +4,7 @@ import { Decimal } from '@prisma/client/runtime/library'
 import logger from '../../config/logger'
 import { BadRequestError, ConflictError, InternalServerError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import { STAFF_PUBLIC_SELECT } from '../../utils/staffPublicSelect'
 import { publishCommand } from '../../communication/rabbitmq/publisher'
 import socketManager from '../../communication/sockets'
 import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
@@ -520,7 +521,7 @@ export async function getShifts(
   const [shifts, totalCount] = await prisma.$transaction([
     prisma.shift.findMany({
       where: whereClause,
-      include: { staff: true },
+      include: { staff: { select: STAFF_PUBLIC_SELECT } },
       orderBy: {
         createdAt: 'desc',
       },
