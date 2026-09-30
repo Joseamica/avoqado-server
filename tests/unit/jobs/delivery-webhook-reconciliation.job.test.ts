@@ -758,9 +758,14 @@ describe('DeliveryWebhookReconciliationJob', () => {
       expect(mockedMarkEventResult).not.toHaveBeenCalled()
     })
 
-    // H3: confirmar un lote suscribe cada tienda a sus webhooks (varias llamadas HTTP por tienda). En el carril
-    // urgente, un aviso viejo que se reintenta retrasaba al pedido nuevo que llegó detrás, con su reloj de 4–6 min.
-    it('🔴 el aviso de aprovisionamiento va al carril de SEGUIMIENTO: un pedido nuevo nunca espera detrás de él', async () => {
+    // N1: confirmar un lote suscribe cada tienda a sus webhooks (hasta 20 × 10 PUT: minutos). Dentro de la pasada de
+    // pedidos, su `enCurso` saltaba los ticks siguientes y un pedido que falló DESPUÉS vencía antes de recuperarse.
+    it('🔴 con la suscripción de un aviso colgada, el SIGUIENTE tick procesa el pedido que falló después', async () => {
+      const job = new DeliveryWebhookReconciliationJob()
+      const tick = () => (job as unknown as { tick(): void }).tick()
+      const vaciar = async () => {
+        for (let k = 0; k < 5; k++) await new Promise(r => setImmediate(r))
+      }
       const aviso = { ...rappiSinVinculo('STORE_PROVISIONING_STATUS'), id: 'evt_aprov', receivedAt: new Date(NOW - 60 * 60_000) }
       const pedido = makeEvent({
         id: 'evt_pedido',
@@ -770,16 +775,32 @@ describe('DeliveryWebhookReconciliationJob', () => {
         channelLinkId: 'link_rappi',
         receivedAt: new Date(NOW - 60_000),
       })
+      const tabla: any[] = [aviso]
       mockedFindMany.mockImplementation(async (args: any) => {
         if (args.where?.receivedAt?.lt) return [] // barrido de 24 h
         const carril = (args.where?.AND ?? []).find((c: any) => c.eventType)?.eventType
-        return [aviso, pedido].filter(f => (carril.in ? carril.in.includes(f.eventType) : !carril.notIn.includes(f.eventType)))
+        return tabla.filter(f => (carril.in ? carril.in.includes(f.eventType) : !carril.notIn.includes(f.eventType)))
       })
+      let soltar!: (r: unknown) => void
+      mockedProcessRappi.mockImplementation((id: string) =>
+        id === 'evt_aprov' ? new Promise(r => (soltar = r)) : Promise.resolve({ outcome: 'PROCESSED', orderId: 'ord_r' }),
+      )
+
+      tick()
+      await vaciar()
+      expect(mockedProcessRappi.mock.calls.map(c => c[0])).toEqual(['evt_aprov']) // la suscripción sigue colgada
+
+      tabla.push(pedido) // el pedido falla DESPUÉS de esa pasada
+      tick()
+      await vaciar()
+      // El pedido ya se procesó con el aviso todavía colgado, y el aviso no se volvió a tomar (su propio candado).
+      expect(mockedProcessRappi.mock.calls.map(c => c[0])).toEqual(['evt_aprov', 'evt_pedido'])
+      expect(mockedMarkEventResult).not.toHaveBeenCalled()
+
+      soltar({ outcome: 'STORE_STATE' })
+      await vaciar()
       mockedProcessRappi.mockResolvedValue({ outcome: 'STORE_STATE' })
-
-      await new DeliveryWebhookReconciliationJob().runOnce()
-
-      expect(mockedProcessRappi.mock.calls.map(c => c[0])).toEqual(['evt_pedido', 'evt_aprov'])
+      expect(await job.reprocesarAprovisionamientos()).toBe(1) // suelto el candado, el carril vuelve a correr
     })
 
     it('cualquier OTRO evento de Rappi sin vínculo sigue siendo ORPHANED de inmediato', async () => {

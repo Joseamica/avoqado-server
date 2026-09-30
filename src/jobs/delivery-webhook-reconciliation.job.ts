@@ -101,20 +101,25 @@ export class DeliveryWebhookReconciliationJob {
   private readonly BACKOFF_CAP_MINUTES = 60
 
   /**
-   * N-5: eventos de SEGUIMIENTO — sin plazo de aceptación. El aviso de cambio de Uber
-   * (`FULFILLMENT_CHANGED`), que se relee hasta 3 h mientras el pedido no cierra, y el resultado del
-   * aprovisionamiento de Rappi (`STORE_PROVISIONING_STATUS`), cuyo reintento suscribe cada tienda a sus
-   * webhooks. Van en su propio carril, DESPUÉS de todo lo demás: un pedido nuevo tiene ~11.5 min en Uber
-   * y 4–6 en Rappi antes de que lo cancelen.
+   * N-5: eventos de SEGUIMIENTO — sin plazo de aceptación. Hoy sólo el aviso de cambio de Uber
+   * (`FULFILLMENT_CHANGED`), que se relee hasta 3 h mientras el pedido no cierra. Van en su propio
+   * carril, DESPUÉS de todo lo demás: un pedido nuevo tiene ~11.5 min antes de que Uber lo cancele.
    */
-  private static readonly EVENTOS_DE_SEGUIMIENTO = ['order.fulfillment_issues.resolved', 'STORE_PROVISIONING_STATUS']
+  private static readonly EVENTOS_DE_SEGUIMIENTO = ['order.fulfillment_issues.resolved']
+
+  /**
+   * El resultado del aprovisionamiento de Rappi. Su reintento suscribe cada tienda a sus webhooks (hasta
+   * 20 tiendas × 10 PUT: minutos), así que NO va en la pasada de pedidos: corre aparte
+   * (`reprocesarAprovisionamientos`), con su propio candado. Dentro de la pasada, `enCurso` saltaba los
+   * ticks siguientes y un pedido que falló detrás podía vencer (4–6 min en Rappi, ~11.5 en Uber).
+   */
+  private static readonly EVENTOS_DE_APROVISIONAMIENTO = ['STORE_PROVISIONING_STATUS']
 
   /**
    * Tope de relecturas de seguimiento por pasada. ponytail: con la lectura acotada a 8 s son ≤ 80 s,
    * así la pasada termina antes del siguiente tick (2 min) y un pedido nuevo nunca espera una pasada
    * entera de relecturas; si los avisos abiertos crecen, subirlo o dar al seguimiento su propio job.
-   * Un aviso de Rappi pesa más: hasta 10 llamadas de ≤ 10 s por cada tienda que siga sin suscribir (las
-   * ya confirmadas no llaman). Con el piloto son pocas tiendas; si el volumen crece, ése es su propio job.
+   * El carril de aprovisionamiento usa el mismo tope por vuelta.
    */
   private readonly SEGUIMIENTO_POR_PASADA = 10
 
@@ -124,18 +129,23 @@ export class DeliveryWebhookReconciliationJob {
   /** Candado en memoria: una sola pasada a la vez (ver `runOnce`). */
   private enCurso = false
 
+  /**
+   * El del carril de aprovisionamiento: independiente de `enCurso`, así un aviso lento nunca frena pedidos.
+   * ponytail: en memoria, como `enCurso` — una sola instancia (`.claude/rules/una-sola-instancia.md`, #5).
+   */
+  private aprovisionandoEnCurso = false
+
   start(): void {
     if (this.job) return
-    this.job = scheduleJob(
-      'delivery-webhook-reconciliation',
-      this.CRON_PATTERN,
-      () => void this.runOnce(),
-      null,
-      false,
-      'America/Mexico_City',
-    )
+    this.job = scheduleJob('delivery-webhook-reconciliation', this.CRON_PATTERN, () => this.tick(), null, false, 'America/Mexico_City')
     this.job.start()
     logger.info(`🛵 Delivery webhook reconciliation job started — every 2min, batch ${this.BATCH_SIZE}`)
+  }
+
+  /** Un tick del cron: la pasada de pedidos y, APARTE y sin esperarse, el carril de aprovisionamiento. */
+  private tick(): void {
+    void this.runOnce()
+    void this.reprocesarAprovisionamientos()
   }
 
   stop(): void {
@@ -184,13 +194,31 @@ export class DeliveryWebhookReconciliationJob {
     }
   }
 
+  /** Una vuelta del carril de aprovisionamiento (una a la vez; nunca lanza). Devuelve cuántos quedaron resueltos. */
+  async reprocesarAprovisionamientos(): Promise<number> {
+    if (this.aprovisionandoEnCurso) return 0
+    this.aprovisionandoEnCurso = true
+    try {
+      return (await this.reprocessStuckEvents('aprovisionamiento')).reprocessed
+    } catch (err) {
+      logger.error('❌ [Delivery recon] falló la vuelta del carril de aprovisionamiento', {
+        error: err instanceof Error ? err.message : err,
+      })
+      return 0
+    } finally {
+      this.aprovisionandoEnCurso = false
+    }
+  }
+
   /**
    * Pull FAILED (<24h) + stuck RECEIVED (10min–24h) events and retry each once.
    * `channelLinkId === null` (channel link deleted) is an immediate ORPHANED —
    * there is nothing to re-parse against, so waiting out the 24h TTL would
    * just waste passes.
    */
-  private async reprocessStuckEvents(): Promise<{ reprocessed: number; orphanedImmediate: number }> {
+  private async reprocessStuckEvents(
+    carril: 'pedidos' | 'aprovisionamiento' = 'pedidos',
+  ): Promise<{ reprocessed: number; orphanedImmediate: number }> {
     const now = Date.now()
     const orphanCutoff = new Date(now - this.ORPHAN_TTL_MS)
     const receivedCutoff = new Date(now - this.RECEIVED_MIN_AGE_MS)
@@ -233,21 +261,7 @@ export class DeliveryWebhookReconciliationJob {
     let reprocessed = 0
     let orphanedImmediate = 0
 
-    // N-5: carril URGENTE primero, con el lote completo reservado (pedidos nuevos, programados,
-    // cancelaciones, tiendas…); las relecturas de SEGUIMIENTO sólo usan el sobrante, con tope, y
-    // se leen DESPUÉS de procesar las urgentes. Un solo carril por antigüedad dejaba un pedido nuevo
-    // detrás de 50 avisos viejos hasta el minuto 12 (Codex, 4.ª pasada) y Uber lo cancelaba.
-    const urgentes = await leer(
-      {
-        eventType: { notIn: DeliveryWebhookReconciliationJob.EVENTOS_DE_SEGUIMIENTO },
-        OR: [
-          { status: DeliveryOrderEventStatus.FAILED, receivedAt: { gte: orphanCutoff } },
-          { status: DeliveryOrderEventStatus.RECEIVED, receivedAt: { gte: orphanCutoff, lt: receivedCutoff } },
-        ],
-      },
-      this.BATCH_SIZE,
-    )
-    const procesar = async (events: typeof urgentes) => {
+    const procesar = async (events: Awaited<ReturnType<typeof leer>>) => {
       for (const event of events) {
         const { channelLink } = event
         // P1-3: una revocación de tienda se registra POR TIENDA aunque aún no exista su vínculo
@@ -344,6 +358,42 @@ export class DeliveryWebhookReconciliationJob {
         }
       }
     }
+    // Sin el piso de 24 h, como el seguimiento: un aviso que el job nunca intentó no caduca por edad.
+    if (carril === 'aprovisionamiento') {
+      await procesar(
+        await leer(
+          {
+            eventType: { in: DeliveryWebhookReconciliationJob.EVENTOS_DE_APROVISIONAMIENTO },
+            OR: [
+              { status: DeliveryOrderEventStatus.FAILED },
+              { status: DeliveryOrderEventStatus.RECEIVED, receivedAt: { lt: receivedCutoff } },
+            ],
+          },
+          this.SEGUIMIENTO_POR_PASADA,
+        ),
+      )
+      return { reprocessed, orphanedImmediate }
+    }
+
+    // N-5: carril URGENTE primero, con el lote completo reservado (pedidos nuevos, programados,
+    // cancelaciones, tiendas…); las relecturas de SEGUIMIENTO sólo usan el sobrante, con tope, y
+    // se leen DESPUÉS de procesar las urgentes. Un solo carril por antigüedad dejaba un pedido nuevo
+    // detrás de 50 avisos viejos hasta el minuto 12 (Codex, 4.ª pasada) y Uber lo cancelaba.
+    const urgentes = await leer(
+      {
+        eventType: {
+          notIn: [
+            ...DeliveryWebhookReconciliationJob.EVENTOS_DE_SEGUIMIENTO,
+            ...DeliveryWebhookReconciliationJob.EVENTOS_DE_APROVISIONAMIENTO,
+          ],
+        },
+        OR: [
+          { status: DeliveryOrderEventStatus.FAILED, receivedAt: { gte: orphanCutoff } },
+          { status: DeliveryOrderEventStatus.RECEIVED, receivedAt: { gte: orphanCutoff, lt: receivedCutoff } },
+        ],
+      },
+      this.BATCH_SIZE,
+    )
     await procesar(urgentes)
     // N-8: aunque el carril urgente llene el lote, el seguimiento tiene un mínimo garantizado por
     // pasada (va DESPUÉS de las urgentes); si no, un aviso nunca tenía turno y caducaba sin lectura.
@@ -459,7 +509,15 @@ export class DeliveryWebhookReconciliationJob {
       OR: [{ error: null }, { error: { notIn: DeliveryWebhookReconciliationJob.TERMINAL_ERRORS } }],
       // N-8: un seguimiento que este job nunca intentó no caduca por edad: su carril lo lee sin piso
       // de 24 h y el procesador lo cierra (con incidencia si pasó su vida).
-      NOT: { eventType: { in: DeliveryWebhookReconciliationJob.EVENTOS_DE_SEGUIMIENTO }, attemptCount: 0 },
+      NOT: {
+        eventType: {
+          in: [
+            ...DeliveryWebhookReconciliationJob.EVENTOS_DE_SEGUIMIENTO,
+            ...DeliveryWebhookReconciliationJob.EVENTOS_DE_APROVISIONAMIENTO,
+          ],
+        },
+        attemptCount: 0,
+      },
     } satisfies Prisma.DeliveryOrderEventWhereInput
 
     // Fetch rows BEFORE flipping them so we can emit a per-event alert with enough detail
