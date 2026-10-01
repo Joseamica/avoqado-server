@@ -2870,6 +2870,25 @@ router.post(
 )
 
 /**
+ * «Devolver con: Efectivo de la caja» pide `payments:refund-to-cash` EN LUGAR de `payments:refund` (founder, 1-oct-2026):
+ * el dinero sale del cajón por un cobro que no entró ahí. La dependencia refund-to-cash → refund deja la autorización
+ * equivalente. Sin el permiso no se bloquea: es el 403 de siempre, que el POS convierte en el código del encargado.
+ *
+ * 🔴 UNA sola revisión por petición: el código del encargado es de un solo uso y de UN permiso. Dos revisiones
+ * encadenadas gastaban el código en la primera y la segunda lo rechazaba (mesero escogiendo efectivo: sin salida).
+ */
+const revisarReembolso = checkPermission('payments:refund')
+const revisarDevolverEnEfectivo = checkPermission('payments:refund-to-cash')
+export const permisoDeReembolso = Object.assign(
+  (req: Request, res: Response, next: NextFunction) =>
+    (req.body as { refundMethod?: unknown } | undefined)?.refundMethod === 'CASH'
+      ? revisarDevolverEnEfectivo(req, res, next)
+      : revisarReembolso(req, res, next),
+  // Para la inspección de rutas: el permiso base. El de efectivo lo ven el audit y los fixtures por el literal de arriba.
+  { requiredPermission: 'payments:refund' },
+)
+
+/**
  * POST /api/v1/mobile/venues/:venueId/payments/:paymentId/refund
  * Issue an associated refund (by amount OR by items, with optional restock).
  * Mobile wrapper that delegates to the shared dashboard refund service.
@@ -2877,7 +2896,7 @@ router.post(
 router.post(
   '/venues/:venueId/payments/:paymentId/refund',
   authenticateTokenMiddleware,
-  checkPermission('payments:refund'),
+  permisoDeReembolso,
   refundMobileController.issueAssociatedRefund,
 )
 

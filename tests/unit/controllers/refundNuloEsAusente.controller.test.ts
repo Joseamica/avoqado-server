@@ -162,6 +162,26 @@ describe('móvil · POST /mobile/venues/:venueId/payments/:paymentId/refund', ()
     expect(codigoDeRespuesta(res)).toBe(400)
     expect(issueRefundMock).not.toHaveBeenCalled()
   })
+
+  it('pasa refundMethod al servicio cuando viene', async () => {
+    const res = hacerRes()
+    await mobileController.issueAssociatedRefund(reqMovil({ amount: 5000, reason: 'OTHER', refundMethod: 'CASH' }), res, jest.fn())
+    expect(issueRefundMock).toHaveBeenCalledWith(expect.objectContaining({ refundMethod: 'CASH' }))
+  })
+
+  it('refundMethod null = ausente', async () => {
+    const res = hacerRes()
+    await mobileController.issueAssociatedRefund(reqMovil({ amount: 5000, reason: 'OTHER', refundMethod: null }), res, jest.fn())
+    expect(issueRefundMock).toHaveBeenCalledWith(expect.objectContaining({ refundMethod: undefined }))
+  })
+
+  it('refundMethod inválido ⇒ 400 sin llamar al servicio', async () => {
+    const res = hacerRes()
+    await mobileController.issueAssociatedRefund(reqMovil({ amount: 5000, reason: 'OTHER', refundMethod: 'CREDIT_CARD' }), res, jest.fn())
+    expect(codigoDeRespuesta(res)).toBe(400)
+    expect(mensajeDeRespuesta(res)).toBe('refundMethod debe ser CASH o BANK_TRANSFER')
+    expect(issueRefundMock).not.toHaveBeenCalled()
+  })
 })
 
 // ──────────────────────────────────────────────────────────────────────────────────────

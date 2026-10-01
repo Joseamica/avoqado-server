@@ -884,7 +884,7 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
 
       const payment = await prisma.payment.findFirst({
         where: { id: paymentId, ...base },
-        select: { id: true, venueId: true, status: true, method: true, amount: true, tipAmount: true, processorData: true },
+        select: { id: true, venueId: true, status: true, method: true, source: true, amount: true, tipAmount: true, processorData: true },
       })
       if (!payment) return text({ ok: false, error: 'No encontré ese cobro en tus locales.' })
 
@@ -895,6 +895,7 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
           venueId: payment.venueId,
           status: payment.status,
           method: payment.method,
+          source: payment.source,
           amount: Number(payment.amount),
           tipAmount: Number(payment.tipAmount),
           refundedAmount: Number(processorData.refundedAmount ?? 0),

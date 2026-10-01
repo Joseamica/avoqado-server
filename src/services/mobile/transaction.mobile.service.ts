@@ -11,6 +11,7 @@ import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { listRefundsForPayment } from '../dashboard/refund.dashboard.service'
 import { centavosDevueltosPorComponente, centavosYaDevueltos } from '../shared/devueltoDeUnCobro'
+import { seDevuelveEnTerminal, sePuedeEscogerComoDevolver } from '../tpv/terminalRefundTarget'
 
 export interface MobileTransactionFilters {
   search?: string
@@ -151,6 +152,13 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
       amount: true,
       tipAmount: true,
       method: true,
+      source: true,
+      externalSource: true,
+      tenderSatFormaPago: true,
+      fundsFlow: true,
+      tenderTypeId: true,
+      tenderCountsAsCash: true,
+      tenderLabel: true,
       status: true,
       cardBrand: true,
       maskedPan: true,
@@ -258,6 +266,12 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
     remainingRefundable,
     remainingRefundableSale,
     remainingRefundableTip,
+    // Aditivo (30-sep-2026): ¿la devolución se abre en la terminal? Sólo la tarjeta que cobró NUESTRA terminal;
+    // todo lo demás se reembolsa como el efectivo. Misma regla que acepta `refund-request` (`seDevuelveEnTerminal`).
+    refundOnTerminal: seDevuelveEnTerminal(payment),
+    // Aditivo (30-sep-2026): ¿el cajero puede escoger con qué devolver? Misma regla que valida el reembolso.
+    canChooseRefundMethod: sePuedeEscogerComoDevolver(payment),
+    tenderLabel: payment.tenderLabel ?? null,
     refunds: refunds.map(refund => {
       const processorData = (refund.processorData as Record<string, unknown>) || {}
       return {

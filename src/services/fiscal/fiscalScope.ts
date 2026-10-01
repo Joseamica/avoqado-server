@@ -31,3 +31,13 @@ export function paymentInFiscalScope(
   if (merchantIncludeInAccounting === false) return false
   return true
 }
+
+/**
+ * Método con que se decide el ALCANCE FISCAL de un pago. Una devolución sigue a su VENTA (30-sep-2026): si el
+ * cajero devolvió por otro medio, la fila trae el real en `method` y el de la venta en `processorData.originalMethod`.
+ * El resto de la póliza (caja o banco) sigue usando el método real.
+ */
+export function metodoParaAlcanceFiscal(method: string | null | undefined, processorData: unknown): string | null | undefined {
+  const original = (processorData as { originalMethod?: unknown } | null | undefined)?.originalMethod
+  return typeof original === 'string' ? original : method
+}
