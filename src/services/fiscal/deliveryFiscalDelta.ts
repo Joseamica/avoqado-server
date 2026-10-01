@@ -7,8 +7,8 @@
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import {
-  allocateByWeights,
   desglosePorTratamiento,
+  repartirProporcional,
   sumarDesglose,
   tasasDe,
   type DesgloseDeCobro,
@@ -153,7 +153,7 @@ export function congelarPorTratamiento(
   const faltante = ventaCents - vivos.reduce((s, [, v]) => s + importe(v), 0)
   const destinos = retirado.filter(m => m.grossCents > 0)
   if (faltante !== 0 && destinos.length > 0) {
-    allocateByWeights(
+    repartirProporcional(
       faltante,
       destinos.map(m => m.grossCents),
     ).forEach((parte, i) => {

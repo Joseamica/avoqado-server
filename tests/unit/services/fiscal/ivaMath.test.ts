@@ -1,7 +1,7 @@
 // tests/unit/services/fiscal/ivaMath.test.ts
 import {
   splitIvaIncluded,
-  allocateByWeights,
+  repartirProporcional,
   splitIvaByRate,
   splitPaymentIvaByOrderRates,
   grossByRateFromItems,
@@ -50,35 +50,65 @@ describe('splitIvaIncluded (IVA-included → base + tax)', () => {
   })
 })
 
-describe('allocateByWeights (proportional cent split, no cent lost)', () => {
-  it('sums to the total EXACTLY for any weights', () => {
-    for (const [total, weights] of [
+describe('repartirProporcional (D19: suma exacta, mayor remanente, nunca negativo)', () => {
+  const suma = (xs: number[]) => xs.reduce((a, b) => a + b, 0)
+
+  it('suma el total EXACTO con cualquier peso', () => {
+    for (const [total, pesos] of [
       [10000, [1, 1]],
-      [10001, [1, 1]], // odd cent → remainder absorbed
+      [10001, [1, 1]],
       [10000, [1, 2, 3]],
       [99999, [7, 3]],
       [1, [1, 1, 1]],
       [12345, [500, 300, 200]],
+      [101, [50, 50]], // Codex r2 N4: el repartidor con topes perdía este centavo
     ] as [number, number[]][]) {
-      const parts = allocateByWeights(total, weights)
-      expect(parts.reduce((a, b) => a + b, 0)).toBe(total)
+      expect(suma(repartirProporcional(total, pesos))).toBe(total)
     }
   })
 
-  it('splits proportionally (50/50, 2:1)', () => {
-    expect(allocateByWeights(10000, [1, 1])).toEqual([5000, 5000])
-    expect(allocateByWeights(9000, [2, 1])).toEqual([6000, 3000])
+  it('reparte en proporción (50/50, 2:1)', () => {
+    expect(repartirProporcional(10000, [1, 1])).toEqual([5000, 5000])
+    expect(repartirProporcional(9000, [2, 1])).toEqual([6000, 3000])
   })
 
-  it('the largest bucket absorbs the rounding remainder', () => {
-    // 10001 split 1:1 → 5000 + 5000 = 10000, drift +1 goes to a bucket → sum 10001.
-    const parts = allocateByWeights(10001, [1, 1])
-    expect(parts.reduce((a, b) => a + b, 0)).toBe(10001)
+  it('🔴 H17: 2 centavos entre 4 pesos iguales ⇒ ninguna parte negativa', () => {
+    const partes = repartirProporcional(2, [100, 100, 100, 100])
+    expect(partes.every(p => p >= 0)).toBe(true)
+    expect(suma(partes)).toBe(2)
+    expect(partes).toEqual([1, 1, 0, 0]) // empate: el primero
   })
 
-  it('edge cases: empty → [], all-zero weights → first bucket takes all', () => {
-    expect(allocateByWeights(10000, [])).toEqual([])
-    expect(allocateByWeights(10000, [0, 0])).toEqual([10000, 0])
+  it('con total ≤ Σ pesos ninguna parte rebasa su peso', () => {
+    for (const [total, pesos] of [
+      [3, [5, 2]],
+      [7, [1, 1, 1, 1, 1, 1, 1, 1]],
+      [99, [33, 33, 34]],
+      [1, [1, 1000000]],
+    ] as [number, number[]][]) {
+      repartirProporcional(total, pesos).forEach((p, i) => expect(p).toBeLessThanOrEqual(pesos[i]))
+    }
+  })
+
+  it('total negativo (ajuste de delivery): reparte la magnitud y le devuelve el signo', () => {
+    const partes = repartirProporcional(-7, [1, 2])
+    expect(suma(partes)).toBe(-7)
+    expect(partes.every(p => p <= 0)).toBe(true)
+    expect(partes).toEqual(repartirProporcional(7, [1, 2]).map(p => -p))
+  })
+
+  it('exacto con montos grandes (sin error de punto flotante)', () => {
+    const partes = repartirProporcional(99_999_999_999, [123_456_789_012, 987_654_321_098, 1])
+    expect(suma(partes)).toBe(99_999_999_999)
+  })
+
+  it('pesos negativos cuentan como cero', () => {
+    expect(repartirProporcional(10, [-5, 5])).toEqual([0, 10])
+  })
+
+  it('bordes: sin pesos ⇒ [], todos en cero ⇒ el primero se lleva todo', () => {
+    expect(repartirProporcional(10000, [])).toEqual([])
+    expect(repartirProporcional(10000, [0, 0])).toEqual([10000, 0])
   })
 })
 
