@@ -88,6 +88,22 @@ async function retireCatalog() {
   await prisma.hybridPromotionGroup.updateMany({ where: { createdById: MARK }, data: { status: 'ENDED' } })
 }
 
+/** A new price for the list, not yet pointed at (the caller moves the pointer, with or without a revision bump). */
+async function newListPublication(price: number) {
+  const compiled = compileHybridPublication(cfdiAt(price))
+  return prisma.hybridOfferPublication.create({
+    data: {
+      campaignId: listCampaign,
+      version: 1 + (await prisma.hybridOfferPublication.count({ where: { campaignId: listCampaign } })),
+      name: `Lista CFDI ${stamp}`,
+      definition: compiled.definition,
+      definitionHash: compiled.definitionHash,
+      includedFeatureCodes: compiled.includedFeatureCodes,
+      createdById: MARK,
+    },
+  })
+}
+
 const pauseList = () =>
   prisma.hybridCampaign.update({ where: { id: listCampaign }, data: { status: 'PAUSED', revision: { increment: 1 } } })
 const quoteOf = (venue: number, publicationId: string) => createHybridQuote(venues[venue], staffId, { lines: [{ publicationId }] })
@@ -136,7 +152,7 @@ beforeAll(async () => {
   process.env.HYBRID_BILLING_ENABLED = 'true'
   await retireCatalog()
   staffId = (await prisma.staff.create({ data: { email: `list-${stamp}@example.test`, firstName: 'Hybrid', lastName: 'Test' } })).id
-  for (let i = 0; i < 9; i++) {
+  for (let i = 0; i < 12; i++) {
     const org = await prisma.organization.create({ data: { name: stamp, email: `list-${stamp}-${i}@example.test`, phone: '5550000000' } })
     const venue = await prisma.venue.create({
       data: { organizationId: org.id, name: stamp, slug: `list-${stamp}-${i}`, stripeCustomerId: `cus_list_${stamp}_${i}` },
@@ -241,18 +257,7 @@ describe('buying a LIST: no redemption, no capacity, still serialized', () => {
   it('(d) a new list price published between the in-lock re-read and the conditional write fails the acceptance', async () => {
     const quote = await quoteOf(5, listPub)
     raceAfterInLockRead(async () => {
-      const compiled = compileHybridPublication(cfdiAt(249))
-      const next = await prisma.hybridOfferPublication.create({
-        data: {
-          campaignId: listCampaign,
-          version: 2,
-          name: `Lista CFDI ${stamp}`,
-          definition: compiled.definition,
-          definitionHash: compiled.definitionHash,
-          includedFeatureCodes: compiled.includedFeatureCodes,
-          createdById: MARK,
-        },
-      })
+      const next = await newListPublication(249)
       await prisma.hybridCampaign.update({
         where: { id: listCampaign },
         data: { currentPublicationId: next.id, revision: { increment: 1 } },
@@ -262,13 +267,78 @@ describe('buying a LIST: no redemption, no capacity, still serialized', () => {
     expect(await statusOf(quote.id)).toBe('QUOTED')
     expect(await prisma.hybridPurchase.count({ where: { venueId: venues[5], status: 'ACCEPTED' } })).toBe(0)
   })
+
+  it('(e) the pointer moved WITHOUT a revision bump between the in-lock re-read and the write still fails the acceptance', async () => {
+    const quote = await quoteOf(9, listPub)
+    raceAfterInLockRead(async () => {
+      const next = await newListPublication(259)
+      await prisma.hybridCampaign.update({ where: { id: listCampaign }, data: { currentPublicationId: next.id } })
+    })
+    await expect(accept(9, quote, 'e')).rejects.toMatchObject({ code: 'HYBRID_OFFER_UNAVAILABLE' })
+    expect(await statusOf(quote.id)).toBe('QUOTED')
+  })
+})
+
+describe('the acceptance takes the product lock before writing any campaign row', () => {
+  it.each([
+    ['a LIST line', 10, () => listPub],
+    ['a generated promotion line', 11, () => promoPub],
+  ])('%s waits for precio:FEATURE:CFDI while every campaign row is still free', async (_label, venue, publication) => {
+    const quote = await quoteOf(venue, publication())
+    let release!: () => void
+    let entered!: () => void
+    const held = new Promise<void>(resolve => (release = resolve))
+    const locked = new Promise<void>(resolve => (entered = resolve))
+    let rowsFree = false
+    // A catalog writer holding the product, the way Task 4/5/7 operations will.
+    const holder = prisma.$transaction(
+      async tx => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'precio:FEATURE:CFDI'}))`
+        entered()
+        await held
+        // The acceptance is still parked on the product lock: none of its campaign rows may be locked yet.
+        await tx.$queryRaw`SELECT id FROM "HybridCampaign" WHERE id IN (${listCampaign}, ${promoCampaign}) FOR UPDATE NOWAIT`
+        rowsFree = true
+      },
+      { timeout: 30000 },
+    )
+    await locked
+    const acceptance = accept(venue, quote, `lock-${venue}`).then(
+      value => ({ value, error: null }),
+      error => ({ value: null, error }),
+    )
+    let waiting = false
+    try {
+      const deadline = Date.now() + 10000
+      while (!waiting && Date.now() < deadline) {
+        const rows = await prisma.$queryRaw<{ count: bigint }[]>`
+          SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()
+          AND wait_event_type = 'Lock' AND wait_event = 'advisory' AND query LIKE '%pg_advisory_xact_lock(hashtext(%'`
+        waiting = Number(rows[0].count) > 0
+        if (!waiting) await new Promise(resolve => setTimeout(resolve, 25))
+      }
+    } finally {
+      release()
+    }
+    // Settle both sides before asserting, so a failure here never leaks a live transaction into the next test.
+    const holderError = await holder.then(
+      () => null,
+      error => error,
+    )
+    const accepted = await acceptance
+    expect(waiting).toBe(true)
+    expect(holderError).toBeNull()
+    expect(rowsFree).toBe(true)
+    expect(accepted.value).toMatchObject({ status: 'ACCEPTED' })
+  })
 })
 
 describe('a generated promotion sells only while its parent LIST does', () => {
   it('reserves its place while the list is on sale; once the list is paused, its own link no longer quotes', async () => {
     const quote = await quoteOf(6, promoPub)
+    const before = await campaignRow(promoCampaign)
     await expect(accept(6, quote, 'promo')).resolves.toMatchObject({ status: 'ACCEPTED' })
-    expect(await campaignRow(promoCampaign)).toMatchObject({ reservedCount: 1 })
+    expect((await campaignRow(promoCampaign)).reservedCount).toBe(before.reservedCount + 1)
     await pauseList()
     await expect(quoteOf(7, promoPub)).rejects.toMatchObject({ code: 'HYBRID_OFFER_UNAVAILABLE' })
   })

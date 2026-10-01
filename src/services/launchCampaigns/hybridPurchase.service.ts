@@ -16,7 +16,7 @@ import { hybridHash } from './hybridProvider'
 import { readHybridCreditSource } from './hybridSources'
 import { assertHybridBalanceUsable } from './hybridFundingGraph'
 import { audienceIncludes, hybridOfferBlocker, type HybridOfferBlocker } from './hybridOfferEligibility'
-import { productKeyOf, promotionWindow } from './hybridProduct'
+import { lockProducts, productKeyOf, promotionWindow } from './hybridProduct'
 import { assertKeepSelection } from '@/services/dashboard/seatReconciliation.service'
 
 const errorMap: z.ZodErrorMap = () => ({ message: 'Valor requerido o formato no válido' })
@@ -345,6 +345,15 @@ export async function acceptHybridQuote(venueId: string, staffId: string, quoteI
       })
       if (claimed.count !== 1)
         throw new ConflictError('La cotización cambió o ya fue aceptada. Consulta el mismo intento.', 'HYBRID_QUOTE_STALE')
+      // Invariant: every transaction that writes product-keyed campaign rows takes the sorted precio:<key> locks first, so
+      // mirror carts and catalog operations (list price, promotion group) never wait on each other in opposite orders.
+      await lockProducts(
+        tx,
+        observed.publications.flatMap(p => {
+          if (p.campaign.purpose === 'LIST') return p.campaign.listProductKey ?? []
+          return p.campaign.promotionGroupId ? (productKeyOf(hybridOfferDefinition.parse(p.definition)) ?? []) : []
+        }),
+      )
       for (const offer of [...observed.publications].sort((a, b) => a.campaignId.localeCompare(b.campaignId))) {
         const campaign = await tx.hybridCampaign.findUniqueOrThrow({ where: { id: offer.campaignId } })
         const window = promotionWindow(campaign)
@@ -360,8 +369,6 @@ export async function acceptHybridQuote(venueId: string, staffId: string, quoteI
         assertAudience(campaign, observed.venue.organization)
         if (campaign.promotionGroupId) {
           // Its parent LIST must still be on sale; this write serializes the acceptance against pausing that list.
-          // ponytail: parents lock in cart order, not one global order: crossed carts (promo X + list Y against promo Y +
-          // list X) can deadlock, and Postgres aborts one with nothing committed. Lock every row by id first if it shows up.
           const key = productKeyOf(hybridOfferDefinition.parse(offer.definition))
           const parent = key
             ? await tx.hybridCampaign.updateMany({
@@ -372,10 +379,10 @@ export async function acceptHybridQuote(venueId: string, staffId: string, quoteI
           if (parent.count !== 1) throw offerChanged()
         }
         if (!window) {
-          // A LIST: no redemption and no capacity. Same revision and still ACTIVE is what serializes this acceptance
-          // against a pause or a new price committed after the read above.
+          // A LIST: no redemption and no capacity. Same revision, still ACTIVE and still pointing at the quoted price is
+          // what serializes this acceptance against a pause or a new price committed after the read above.
           const touched = await tx.hybridCampaign.updateMany({
-            where: { id: campaign.id, revision: campaign.revision, status: 'ACTIVE' },
+            where: { id: campaign.id, revision: campaign.revision, status: 'ACTIVE', currentPublicationId: offer.id },
             data: { updatedAt: now },
           })
           if (touched.count !== 1) throw offerChanged()
