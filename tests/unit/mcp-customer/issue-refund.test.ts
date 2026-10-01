@@ -28,7 +28,7 @@ jest.mock('@/utils/prismaClient', () => ({
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
 const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope
-const call = (args: Record<string, unknown>) => handlers.get('issue_refund')!(args, {})
+const call = (args: Record<string, unknown>) => handlers.get('issue_refund')!({ idempotencyKey: 'mcp-test-payment-001', ...args }, {})
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
 const completedPayment = {
   amount: 400,
@@ -146,6 +146,7 @@ describe('issue_refund (critical money write, confirm-gated)', () => {
         amount: 10000,
         reason: 'ACCIDENTAL_CHARGE',
         staffId: 's1',
+        idempotencyKey: 'mcp-test-payment-001',
         note: 'cliente insatisfecho',
       }),
     )
@@ -160,4 +161,20 @@ describe('issue_refund (critical money write, confirm-gated)', () => {
     expect(out.ok).toBe(false)
     expect(out.error).toMatch(/remaining/)
   })
+})
+
+it('no ejecuta dinero sin una llave estable de reintento', async () => {
+  const out = parse(
+    await call({
+      venueId: 'v1',
+      paymentId: 'pay-1',
+      amount: 10,
+      method: 'cash',
+      reason: 'other',
+      confirm: true,
+      idempotencyKey: undefined,
+    }),
+  )
+  expect(out).toMatchObject({ needsInput: true, field: 'idempotencyKey' })
+  expect(mockIssue).not.toHaveBeenCalled()
 })

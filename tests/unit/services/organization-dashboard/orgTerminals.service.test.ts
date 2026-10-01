@@ -67,7 +67,15 @@ function captureListDevicesHandler() {
     },
   }
 
-  registerTerminalTools(server as any, { allowedVenueIds: [venueId], staffId } as any)
+  registerTerminalTools(
+    server as any,
+    {
+      allowedVenueIds: [venueId],
+      staffId,
+      scopes: ['mcp:read'],
+      perVenueAccess: new Map([[venueId, { role: 'OWNER', corePermissions: ['tpv:read'] }]]),
+    } as any,
+  )
 
   if (!handler) throw new Error('list_devices handler was not registered')
   return handler

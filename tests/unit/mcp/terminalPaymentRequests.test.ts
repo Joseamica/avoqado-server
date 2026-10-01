@@ -23,6 +23,7 @@ const ambito = {
   staffId: 'staff-1',
   activeOrg: 'org-1',
   allowedVenueIds: ['venue-1'],
+  scopes: ['mcp:read', 'mcp:write'],
   perVenueAccess: new Map([
     [
       'venue-1',

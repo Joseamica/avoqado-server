@@ -21,7 +21,14 @@ function captureListDevicesHandler() {
     },
   }
 
-  registerTerminalTools(server as any, { allowedVenueIds: ['venue-1'], staffId: 'staff-1' } as any)
+  registerTerminalTools(
+    server as any,
+    {
+      allowedVenueIds: ['venue-1'],
+      staffId: 'staff-1',
+      perVenueAccess: new Map([['venue-1', { role: StaffRole.OWNER, corePermissions: ['tpv:read'] }]]),
+    } as any,
+  )
 
   if (!handler) throw new Error('list_devices handler was not registered')
   return handler
@@ -52,6 +59,7 @@ function captureRefundHandler() {
       staffId: 'staff-1',
       activeOrg: 'org-1',
       allowedVenueIds: ['venue-1'],
+      scopes: ['mcp:read', 'mcp:write'],
       perVenueAccess: new Map([['venue-1', access]]),
     } as any,
   )
@@ -362,7 +370,14 @@ describe('MCP terminal_checkout_screens', () => {
         if (name === 'terminal_checkout_screens') handler = candidate
       },
     }
-    registerTerminalTools(server as any, { allowedVenueIds: ['venue-1'], staffId: 'staff-1' } as any)
+    registerTerminalTools(
+      server as any,
+      {
+        allowedVenueIds: ['venue-1'],
+        staffId: 'staff-1',
+        perVenueAccess: new Map([['venue-1', { role: StaffRole.OWNER, corePermissions: ['tpv:read'] }]]),
+      } as any,
+    )
     if (!handler) throw new Error('terminal_checkout_screens handler was not registered')
     return handler
   }

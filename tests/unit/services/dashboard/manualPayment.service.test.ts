@@ -2333,3 +2333,65 @@ describe('manualPayment.service', () => {
     })
   })
 })
+
+describe('manualPayment — reintentos MCP durables', () => {
+  const input = { amount: '100', tipAmount: '0', method: 'CASH' as const, source: 'POS' as const, idempotencyKey: 'mcp-manual-test-001' }
+  let stored: any
+  let create: jest.Mock
+  beforeEach(() => {
+    jest.clearAllMocks()
+    stored = null
+    ;(prismaMock.payment as any).findUnique = jest.fn(async () => stored)
+    create = jest.fn(async ({ data }) => (stored = { id: 'one-payment', ...data }))
+    ;(prismaMock.$transaction as jest.Mock).mockImplementation(async cb =>
+      cb({
+        payment: { create, findUnique: jest.fn(async () => stored) },
+        order: { create: jest.fn().mockResolvedValue({ id: 'one-order' }) },
+        shift: { findFirst: jest.fn().mockResolvedValue(null), updateMany: jest.fn() },
+        venueTransaction: { create: jest.fn() },
+        paymentAllocation: { create: jest.fn() },
+      }),
+    )
+  })
+
+  it('el mismo intento devuelve el mismo pago sin crear otra orden, turno, comisión o métrica', async () => {
+    const first = await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, input)
+    const retry = await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, { ...input, amount: '100.00' })
+    expect(retry.id).toBe(first.id)
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    expect(first.idempotencyKey).toBe(input.idempotencyKey)
+  })
+
+  it('un perdedor Serializable recupera al ganador con la misma llave sin repetir efectos', async () => {
+    const first = await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, input)
+    ;(prismaMock.payment.findUnique as jest.Mock).mockResolvedValueOnce(null)
+    ;(prismaMock.$transaction as jest.Mock).mockRejectedValueOnce({ code: 'P2034' })
+    expect((await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, input)).id).toBe(first.id)
+    expect(create).toHaveBeenCalledTimes(1)
+  })
+
+  it('si el ganador aún no existe reintenta con límite, sin duplicar el asiento', async () => {
+    ;(prismaMock.$transaction as jest.Mock).mockRejectedValueOnce({ code: 'P2034' })
+    expect((await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, input)).id).toBe('one-payment')
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(2)
+    expect(create).toHaveBeenCalledTimes(1)
+  })
+
+  it('detiene los conflictos persistentes tras tres intentos y pide conservar la misma llave', async () => {
+    ;(prismaMock.$transaction as jest.Mock).mockRejectedValue({ code: 'P2034' })
+    await expect(manualPaymentService.createManualPayment(VENUE_ID, USER_ID, input)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PAYMENT_RETRY_REQUIRED',
+    })
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(3)
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('la misma llave con otro monto o principal se rechaza sin volver a escribir', async () => {
+    await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, input)
+    await expect(manualPaymentService.createManualPayment(VENUE_ID, USER_ID, { ...input, amount: '1' })).rejects.toThrow(/idempotencia/)
+    await expect(manualPaymentService.createManualPayment(VENUE_ID, 'otro-staff', input)).rejects.toThrow(/idempotencia/)
+    expect(create).toHaveBeenCalledTimes(1)
+  })
+})

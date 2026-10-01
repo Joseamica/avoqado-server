@@ -55,7 +55,7 @@ export function sanitizeThrownError(err: unknown, toolName: string, ctx: ToolCal
  */
 export function sanitizeToolResult(result: unknown, toolName: string, ctx: ToolCallContext): { result: unknown; ref: string | null } {
   if (ctx.isSuperAdmin) return { result, ref: null }
-  const r = result as { content?: Array<{ type?: string; text?: string }> } | null
+  const r = result as { content?: Array<{ type?: string; text?: string }>; structuredContent?: Record<string, unknown> } | null
   const idx = r?.content?.findIndex(c => c?.type === 'text' || typeof c?.text === 'string') ?? -1
   if (!r?.content || idx < 0) return { result, ref: null }
   const raw = r.content[idx].text
@@ -69,8 +69,12 @@ export function sanitizeToolResult(result: unknown, toolName: string, ctx: ToolC
   if (parsed?.ok !== false || typeof parsed.error !== 'string' || !looksInternal(parsed.error)) return { result, ref: null }
   const ref = randomBytes(4).toString('hex')
   const content = [...r.content]
-  content[idx] = { ...content[idx], text: JSON.stringify({ ...parsed, error: genericErrorMessage(toolName, ref) }, null, 2) }
-  return { result: { ...r, content }, ref }
+  const safeData = { ...parsed, error: genericErrorMessage(toolName, ref) }
+  content[idx] = { ...content[idx], text: JSON.stringify(safeData, null, 2) }
+  return {
+    result: { ...r, content, ...(r.structuredContent ? { structuredContent: { ...r.structuredContent, data: safeData } } : {}) },
+    ref,
+  }
 }
 
 type ToolFn = (...args: unknown[]) => unknown
@@ -86,7 +90,14 @@ function resultOutcome(result: unknown): { ok: boolean; detail?: string } {
   const firstText = r?.content?.find(c => c?.type === 'text')?.text
   if (typeof firstText === 'string') {
     try {
-      const parsed = JSON.parse(firstText) as { ok?: boolean; error?: string }
+      const parsed = JSON.parse(firstText) as {
+        ok?: boolean
+        error?: string
+        requiresConfirmation?: boolean
+        needsInput?: boolean
+        ambiguous?: boolean
+      }
+      if (parsed?.requiresConfirmation || parsed?.needsInput || parsed?.ambiguous) return { ok: true, detail: 'needs_input' }
       if (parsed && parsed.ok === false) return { ok: false, detail: parsed.error ?? 'ok:false' }
     } catch {
       // non-JSON prose content → treat as success
@@ -217,7 +228,7 @@ function makePatched(original: ToolFn, ctx: ToolCallContext): ToolFn {
         void recordMcpCall({
           ...audit,
           outcome: ok ? 'ok' : 'error',
-          detail: ok ? null : ref ? `[${ref}] ${detail ?? ''}` : (detail ?? null),
+          detail: ref ? `[${ref}] ${detail ?? ''}` : (detail ?? null),
           durationMs: ms,
         })
         return safe

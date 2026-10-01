@@ -1,3 +1,4 @@
+import { operationHash } from '@/utils/operationHash'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { enlaceParaQuienInvita } from '@/services/dashboard/enlaceDeInvitacion'
 import { z } from 'zod'
@@ -43,7 +44,7 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'work_shifts',
-    'Rotating WORK shifts (fase 1 "como Sesame"): the venue\'s shift templates (e.g. Abre 08–16, Cierre 11–19) and the person×day assignments for a date range (max 31 days), with DRAFT/PUBLISHED status. Only PUBLISHED assignments count for attendance and commissions, and only when the venue enabled rotating shifts. Read-only. Pass venueId, from and to (YYYY-MM-DD).',
+    "Rotating WORK shifts: the venue's shift templates (e.g. Abre 08–16, Cierre 11–19) and the person×day assignments for a date range (max 31 days), with DRAFT/PUBLISHED status. Only PUBLISHED assignments count for attendance and commissions, and only when the venue enabled rotating shifts. Read-only. Pass venueId, from and to (YYYY-MM-DD).",
     {
       venueId: z.string().describe('Venue (must be in your scope)'),
       from: z.string().describe('Start date YYYY-MM-DD'),
@@ -67,36 +68,43 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
       search: z.string().optional().describe('Filter by name (partial, case-insensitive)'),
       activeOnly: z.boolean().optional().describe('Only active accounts'),
       limit: z.number().int().positive().max(200).optional().describe('Max members to return (default 200)'),
+      offset: z.number().int().min(0).optional().describe('Offset from the previous page'),
     },
-    async ({ venueId, search, activeOnly, limit }) => {
+    async ({ venueId, search, activeOnly, limit, offset = 0 }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('teams:read', venueId) // read gate — mirror the dashboard's checkPermission
+      const filter = {
+        ...where,
+        ...(activeOnly || search
+          ? {
+              staff: {
+                ...(activeOnly ? { active: true } : {}),
+                ...(search
+                  ? {
+                      OR: [
+                        { firstName: { contains: search, mode: 'insensitive' as const } },
+                        { lastName: { contains: search, mode: 'insensitive' as const } },
+                      ],
+                    }
+                  : {}),
+              },
+            }
+          : {}),
+      }
+      const total = await prisma.staffVenue.count({ where: filter })
       const rows = await prisma.staffVenue.findMany({
-        where: {
-          ...where,
-          ...(activeOnly || search
-            ? {
-                staff: {
-                  ...(activeOnly ? { active: true } : {}),
-                  ...(search
-                    ? {
-                        OR: [
-                          { firstName: { contains: search, mode: 'insensitive' as const } },
-                          { lastName: { contains: search, mode: 'insensitive' as const } },
-                        ],
-                      }
-                    : {}),
-                },
-              }
-            : {}),
-        },
+        where: filter,
         select: { id: true, staffId: true, role: true, staff: { select: { firstName: true, lastName: true, active: true } } },
-        orderBy: [{ role: 'asc' }, { staff: { firstName: 'asc' } }],
+        orderBy: [{ role: 'asc' }, { staff: { firstName: 'asc' } }, { id: 'asc' }],
+        skip: offset,
         take: limit ?? 200,
       })
       return text({
         venueId,
         count: rows.length,
+        total,
+        hasMore: offset + rows.length < total,
+        nextOffset: offset + rows.length < total ? offset + rows.length : null,
         staff: rows.map(r => ({
           staffVenueId: r.id,
           staffId: r.staffId,
@@ -471,9 +479,11 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
         .optional()
         .describe('New role (omit to keep; no superadmin)'),
       active: z.boolean().optional().describe('true = activate, false = deactivate (omit to keep)'),
+      resolvedStaffVenueId: z.string().optional().describe('StaffVenue exacto devuelto por la vista previa'),
+      expectedSourceFingerprint: z.string().optional().describe('Huella exacta devuelta por la vista previa'),
       confirm: z.boolean().optional().describe('Must be true to actually apply; without it you get a preview'),
     },
-    async ({ venueId, name, role, active, confirm }) => {
+    async ({ venueId, name, role, active, confirm, resolvedStaffVenueId, expectedSourceFingerprint }) => {
       const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('teams:update', venueId) // write gate (per-venue role)
       if (role === undefined && active === undefined) return text({ ok: false, error: 'Pasa al menos role o active.' })
@@ -481,14 +491,18 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
       const matches = await prisma.staffVenue.findMany({
         where: {
           ...base,
-          staff: {
-            OR: [
-              { firstName: { contains: name, mode: 'insensitive' as const } },
-              { lastName: { contains: name, mode: 'insensitive' as const } },
-            ],
-          },
+          ...(confirm && resolvedStaffVenueId
+            ? { id: resolvedStaffVenueId }
+            : {
+                staff: {
+                  OR: [
+                    { firstName: { contains: name, mode: 'insensitive' as const } },
+                    { lastName: { contains: name, mode: 'insensitive' as const } },
+                  ],
+                },
+              }),
         },
-        select: { id: true, staffId: true, role: true, staff: { select: { firstName: true, lastName: true, active: true } } },
+        select: { id: true, staffId: true, role: true, active: true, staff: { select: { firstName: true, lastName: true, active: true } } },
         take: 5,
       })
       if (matches.length === 0) return text({ ok: false, error: `No encontré ningún miembro que coincida con "${name}" en este local.` })
@@ -521,9 +535,18 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
         return text({ ok: false, error: `No puedes otorgar el rol ${newRole}: es superior a tu propio rol.` })
       }
 
+      const expectedState = { role: m.role, active: m.active }
+      const fingerprint = operationHash({ id: m.id, staffId: m.staffId, ...expectedState })
+      if (confirm && (!resolvedStaffVenueId || resolvedStaffVenueId !== m.id || expectedSourceFingerprint !== fingerprint)) {
+        return text({
+          ok: false,
+          needsInput: true,
+          question: 'El miembro o sus permisos cambiaron. Solicita y confirma una nueva vista previa.',
+        })
+      }
       const changes = {
         ...(newRole && newRole !== m.role ? { role: { from: m.role, to: newRole } } : {}),
-        ...(active !== undefined && active !== m.staff.active ? { active: { from: m.staff.active, to: active } } : {}),
+        ...(active !== undefined && active !== m.active ? { active: { from: m.active, to: active } } : {}),
       }
       if (Object.keys(changes).length === 0) return text({ ok: false, error: `${fullName} ya está exactamente así — nada que cambiar.` })
 
@@ -531,6 +554,8 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
         return text({
           ok: false,
           requiresConfirmation: true,
+          resolvedStaffVenueId: m.id,
+          expectedSourceFingerprint: fingerprint,
           preview: { member: fullName, changes },
           message: `Esto CAMBIARÁ a ${fullName}: ${JSON.stringify(changes)}. Vuelve a llamar con confirm:true para aplicar.`,
         })
@@ -541,6 +566,8 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
           ...(newRole ? { role: newRole } : {}),
           ...(active !== undefined ? { active } : {}),
           performedBy: scope.staffId,
+          callerRole: scope.perVenueAccess.get(venueId)?.role as StaffRole,
+          expectedState,
         })
         await auditMcpWrite(scope, {
           action: 'STAFF_MEMBER_UPDATED',

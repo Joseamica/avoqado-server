@@ -17,7 +17,7 @@ export interface McpScope {
   isSuperAdmin?: boolean
   /**
    * Granted OAuth scopes for THIS connection (e.g. ['mcp:read','mcp:write']). Undefined for
-   * dev-server/legacy tokens → the guard treats undefined as "full" (no scope enforcement).
+   * legacy tokens → read-only compatibility; writes always require an explicit grant.
    * When present, the guard requires mcp:write for write actions.
    */
   scopes?: string[]
@@ -121,8 +121,14 @@ export async function resolveScope(staffId: string, activeOrg: string): Promise<
           // A cancelled request (deadline passed, client gone — the 2026-09-23 brake) is NOT "no access":
           // swallowing it would hand the tools a silently incomplete scope. Let it propagate.
           if (isRequestCancelledError(err)) throw err
-          // getUserAccess throws when the staff has no access to that venue — skip defensively.
-          return null
+          // Only the resolver's explicit access/not-found denials mean exclusion. A DB/service
+          // failure must fail the request, otherwise an OWNER would receive a false global total.
+          if (
+            err instanceof Error &&
+            [`User ${staffId} has no access to venue ${venueId}`, `Venue ${venueId} not found`].includes(err.message)
+          )
+            return null
+          throw err
         }
       }),
     )

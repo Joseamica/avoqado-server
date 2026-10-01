@@ -524,3 +524,15 @@ describe('recordCancelledToolCall — un intento cortado antes de que la herrami
     })
   })
 })
+
+it('guarda las aclaraciones como needs_input sin confundirlas con fallas', async () => {
+  jest.clearAllMocks()
+  const { server, original } = makeServer()
+  instrumentTools(server, ctx)
+  callTool(server, 'find_order', {}, async () => ({ content: [{ type: 'text', text: JSON.stringify({ ok: false, ambiguous: true }) }] }))
+  await original.mock.calls[0][2]({ venueId: 'v1' }, {})
+  await new Promise(r => setImmediate(r))
+  expect(mockedPrisma.mcpToolCall.create).toHaveBeenCalledWith(
+    expect.objectContaining({ data: expect.objectContaining({ outcome: 'ok', detail: 'needs_input' }) }),
+  )
+})

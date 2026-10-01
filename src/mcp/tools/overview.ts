@@ -6,6 +6,7 @@ import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
+import { planGateMessage } from '../planGate'
 
 const num = (d: { toString(): string } | null): number => (d == null ? 0 : Number(d))
 const round2 = (n: number): number => Math.round(n * 100) / 100
@@ -28,33 +29,58 @@ export function registerOverviewTools(server: McpServer, scope: McpScope) {
       const dayEnd = venueEndOfDay(tz)
       const now = new Date()
 
-      const [sales, tabs, lowStockRows, openShifts, reservationsToday, nextReservation] = await Promise.all([
+      const restrictions: Record<string, { permission?: string; planRequired?: boolean; message: string }> = {}
+      const canRead = async (section: string, permission: string, feature?: string): Promise<boolean> => {
+        if (!guard.tienePermiso(permission, venueId)) {
+          restrictions[section] = { permission, message: `Tu rol no permite consultar esta sección (${permission}).` }
+          return false
+        }
+        const gate = feature ? await planGateMessage(venueId, feature, 'Esta sección') : null
+        if (gate) {
+          restrictions[section] = { planRequired: true, message: gate }
+          return false
+        }
+        return true
+      }
+      const [canOrders, canInventory, canShifts, canReservations] = await Promise.all([
+        canRead('openTabs', 'orders:read'),
+        canRead('lowStockItems', 'inventory:read', 'INVENTORY_TRACKING'),
+        canRead('openShifts', 'shifts:read'),
+        canRead('reservationsToday', 'reservations:read', 'RESERVATIONS'),
+      ])
+
+      const [sales, tabs, lowStockItems, openShifts, reservationsToday, nextReservation] = await Promise.all([
         prisma.payment.aggregate({
           where: { ...base, status: TransactionStatus.COMPLETED, createdAt: { gte: dayStart, lte: dayEnd } },
           _sum: { amount: true, tipAmount: true },
           _count: { _all: true },
         }),
-        prisma.order.aggregate({
-          where: {
-            ...base,
-            paymentStatus: { in: [PaymentStatus.PENDING, PaymentStatus.PARTIAL] },
-            status: { notIn: [OrderStatus.CANCELLED, OrderStatus.DELETED] },
-          },
-          _sum: { remainingBalance: true },
-          _count: { _all: true },
-        }),
-        // low-stock is an in-memory comparison (currentStock <= minimumStock), mirroring low_stock
-        prisma.inventory.findMany({ where: { ...base, minimumStock: { gt: 0 } }, select: { currentStock: true, minimumStock: true } }),
-        prisma.shift.count({ where: { ...base, status: { in: [ShiftStatus.OPEN, ShiftStatus.CLOSING] } } }),
-        prisma.reservation.count({ where: { ...base, startsAt: { gte: dayStart, lte: dayEnd } } }),
-        prisma.reservation.findFirst({
-          where: { ...base, startsAt: { gte: now, lte: dayEnd } },
-          select: { startsAt: true, partySize: true, guestName: true, confirmationCode: true },
-          orderBy: { startsAt: 'asc' },
-        }),
+        canOrders
+          ? prisma.order.aggregate({
+              where: {
+                ...base,
+                paymentStatus: { in: [PaymentStatus.PENDING, PaymentStatus.PARTIAL] },
+                status: { notIn: [OrderStatus.CANCELLED, OrderStatus.DELETED] },
+              },
+              _sum: { remainingBalance: true },
+              _count: { _all: true },
+            })
+          : null,
+        canInventory
+          ? prisma.inventory.count({
+              where: { ...base, minimumStock: { gt: 0 }, currentStock: { lte: prisma.inventory.fields.minimumStock } },
+            })
+          : null,
+        canShifts ? prisma.shift.count({ where: { ...base, status: { in: [ShiftStatus.OPEN, ShiftStatus.CLOSING] } } }) : null,
+        canReservations ? prisma.reservation.count({ where: { ...base, startsAt: { gte: dayStart, lte: dayEnd } } }) : null,
+        canReservations
+          ? prisma.reservation.findFirst({
+              where: { ...base, startsAt: { gte: now, lte: dayEnd } },
+              select: { startsAt: true, partySize: true, guestName: true, confirmationCode: true },
+              orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
+            })
+          : null,
       ])
-
-      const lowStockItems = lowStockRows.filter(i => Number(i.currentStock) <= Number(i.minimumStock)).length
 
       return text({
         venue: venue?.name ?? null,
@@ -62,19 +88,22 @@ export function registerOverviewTools(server: McpServer, scope: McpScope) {
         asOf: now.toISOString(),
         timezone: tz,
         salesToday: { gross: round2(num(sales._sum.amount)), tips: round2(num(sales._sum.tipAmount)), payments: sales._count._all },
-        openTabs: { count: tabs._count._all, owed: round2(num(tabs._sum.remainingBalance)) },
-        reservationsToday: {
-          count: reservationsToday,
-          next: nextReservation
-            ? {
-                at: nextReservation.startsAt.toISOString(),
-                partySize: nextReservation.partySize,
-                guest: nextReservation.guestName,
-                code: nextReservation.confirmationCode,
-              }
-            : null,
-        },
+        openTabs: tabs ? { count: tabs._count._all, owed: round2(num(tabs._sum.remainingBalance)) } : null,
+        reservationsToday: canReservations
+          ? {
+              count: reservationsToday,
+              next: nextReservation
+                ? {
+                    at: nextReservation.startsAt.toISOString(),
+                    partySize: nextReservation.partySize,
+                    guest: nextReservation.guestName,
+                    code: nextReservation.confirmationCode,
+                  }
+                : null,
+            }
+          : null,
         lowStockItems,
+        restrictions,
         openShifts,
       })
     },

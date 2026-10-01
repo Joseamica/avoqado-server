@@ -19,6 +19,7 @@ jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     product: {
+      count: jest.fn().mockResolvedValue(0),
       findMany: (...a: unknown[]) => mockProductFindMany(...(a as [])),
       findFirst: (...a: unknown[]) => mockProductFindFirst(...(a as [])),
     },

@@ -107,16 +107,38 @@ export function auditTerminalConfig(t: TerminalInput): TerminalConfigReport {
 
 export function registerTerminalTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
+  const terminalReadScope = (venueId?: string) => {
+    guard.venueFilter(venueId)
+    const requested = venueId ? [venueId] : scope.allowedVenueIds
+    if (venueId) guard.requirePermission('tpv:read', venueId)
+    const included = requested.filter(id => guard.tienePermiso('tpv:read', id))
+    if (!included.length && requested.length) guard.requirePermission('tpv:read', requested[0])
+    return {
+      where: { venueId: { in: included } },
+      coverage: {
+        requested: requested.length,
+        included: included.length,
+        excluded: requested.length - included.length,
+        complete: requested.length === included.length,
+        note: included.length < requested.length ? 'Resultado parcial: algunas sucursales no permiten consultar terminales.' : null,
+      },
+    }
+  }
+
   server.tool(
     'audit_terminals',
     "Audit the TPV config of your venues' terminals: each terminal's effective showCheckout/showQuickPayment/enableShifts and flags known config gaps (e.g. checkout on while quick-pay off). Pass venueId to focus one venue.",
     {
       venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues'),
+      limit: z.number().int().min(1).max(200).optional().describe('Page size (default 100); counters describe this page'),
+      offset: z.number().int().min(0).optional().describe('Offset from the previous page'),
     },
-    async ({ venueId }) => {
-      const where = guard.venueFilter(venueId) // throws if out of scope
+    async ({ venueId, limit = 100, offset = 0 }) => {
+      const { where, coverage } = terminalReadScope(venueId)
+      const filter = where
+      const total = await prisma.terminal.count({ where: filter })
       const terminals = await prisma.terminal.findMany({
-        where,
+        where: filter,
         select: {
           name: true,
           serialNumber: true,
@@ -126,10 +148,21 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
           customerDisplayInverted: true,
           venue: { select: { name: true } },
         },
-        orderBy: { name: 'asc' },
+        orderBy: [{ name: 'asc' }, { id: 'asc' }],
+        take: limit,
+        skip: offset,
       })
       const reports = terminals.map(t => ({ venue: t.venue?.name, ...auditTerminalConfig(t as unknown as TerminalInput) }))
-      return text({ count: reports.length, flaggedCount: reports.filter(r => r.flags.length > 0).length, terminals: reports })
+      return text({
+        coverage,
+        total,
+        countsScope: 'page',
+        hasMore: offset + reports.length < total,
+        nextOffset: offset + reports.length < total ? offset + reports.length : null,
+        count: reports.length,
+        flaggedCount: reports.filter(r => r.flags.length > 0).length,
+        terminals: reports,
+      })
     },
   )
 
@@ -148,19 +181,23 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         .optional()
         .describe('Only devices that registered themselves by signing in (excludes terminals an admin provisioned)'),
       includeRetired: z.boolean().optional().describe('Include devices that were retired (default false)'),
+      limit: z.number().int().min(1).max(200).optional().describe('Page size (default 100); counters describe this page'),
+      offset: z.number().int().min(0).optional().describe('Offset from the previous page'),
     },
-    async ({ venueId, formFactor, onlyOnline, selfRegisteredOnly, includeRetired }) => {
-      const where = guard.venueFilter(venueId) // throws if out of scope
+    async ({ venueId, formFactor, onlyOnline, selfRegisteredOnly, includeRetired, limit = 100, offset = 0 }) => {
+      const { where, coverage } = terminalReadScope(venueId)
       const onlineSince = new Date(Date.now() - ONLINE_WINDOW_MS)
 
+      const filter = {
+        ...where,
+        ...(formFactor ? { formFactor: formFactor as DeviceFormFactor } : {}),
+        ...(selfRegisteredOnly ? { selfRegistered: true } : {}),
+        ...(includeRetired ? {} : { status: { not: TerminalStatus.RETIRED } }),
+        ...(onlyOnline ? { lastHeartbeat: { gte: onlineSince } } : {}),
+      }
+      const total = await prisma.terminal.count({ where: filter })
       const rows = await prisma.terminal.findMany({
-        where: {
-          ...where,
-          ...(formFactor ? { formFactor: formFactor as DeviceFormFactor } : {}),
-          ...(selfRegisteredOnly ? { selfRegistered: true } : {}),
-          ...(includeRetired ? {} : { status: { not: TerminalStatus.RETIRED } }),
-          ...(onlyOnline ? { lastHeartbeat: { gte: onlineSince } } : {}),
-        },
+        where: filter,
         select: {
           id: true,
           name: true,
@@ -180,14 +217,19 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
           lastStaffId: true,
           venue: { select: { name: true } },
         },
-        orderBy: [{ lastHeartbeat: 'desc' }, { name: 'asc' }],
-        take: 200,
+        orderBy: [{ lastHeartbeat: 'desc' }, { name: 'asc' }, { id: 'asc' }],
+        take: limit,
+        skip: offset,
       })
 
       // El nombre del último usuario se resuelve en un solo query, no uno por renglón.
       const staffIds = [...new Set(rows.map(r => r.lastStaffId).filter((id): id is string => Boolean(id)))]
       const staff = staffIds.length
-        ? await prisma.staff.findMany({ where: { id: { in: staffIds } }, select: { id: true, firstName: true, lastName: true } })
+        ? await prisma.staff.findMany({
+            where: { id: { in: staffIds } },
+            select: { id: true, firstName: true, lastName: true },
+            take: staffIds.length,
+          })
         : []
       const staffById = new Map(staff.map(s => [s.id, [s.firstName, s.lastName].filter(Boolean).join(' ').trim()]))
 
@@ -229,6 +271,11 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
       for (const d of devices) byKind[d.kind] = (byKind[d.kind] ?? 0) + 1
 
       return text({
+        coverage,
+        total,
+        countsScope: 'page',
+        hasMore: offset + devices.length < total,
+        nextOffset: offset + devices.length < total ? offset + devices.length : null,
         count: devices.length,
         onlineCount: devices.filter(d => d.online).length,
         selfRegisteredCount: devices.filter(d => d.selfRegistered).length,
@@ -244,21 +291,26 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
     {
       venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues'),
       terminalId: z.string().optional().describe('Look up one specific device by its id'),
+      limit: z.number().int().min(1).max(200).optional().describe('Page size (default 100); counters describe this page'),
+      offset: z.number().int().min(0).optional().describe('Offset from the previous page'),
     },
-    async ({ venueId, terminalId }) => {
-      const where = guard.venueFilter(venueId) // throws if out of scope
+    async ({ venueId, terminalId, limit = 100, offset = 0 }) => {
+      const { where, coverage } = terminalReadScope(venueId)
 
+      const filter = {
+        ...where,
+        ...(terminalId ? { id: terminalId } : {}),
+        status: { not: TerminalStatus.RETIRED },
+      }
+      const total = await prisma.terminal.count({ where: filter })
       const rows = await prisma.terminal.findMany({
-        where: {
-          ...where,
-          ...(terminalId ? { id: terminalId } : {}),
-          status: { not: TerminalStatus.RETIRED },
-        },
+        where: filter,
         // `config` es un JSON por terminal; el tope de 100 lo mantiene acotado igual que
         // `list_devices` (regla `bounded-queries-and-server-load.md`).
         select: { id: true, name: true, type: true, config: true, venue: { select: { name: true } } },
-        orderBy: [{ name: 'asc' }],
-        take: 100,
+        orderBy: [{ name: 'asc' }, { id: 'asc' }],
+        take: limit,
+        skip: offset,
       })
 
       const devices = rows.map(row => {
@@ -281,6 +333,11 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
       })
 
       return text({
+        coverage,
+        total,
+        countsScope: 'page',
+        hasMore: offset + devices.length < total,
+        nextOffset: offset + devices.length < total ? offset + devices.length : null,
         count: devices.length,
         devices,
       })
@@ -292,6 +349,14 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
     'See POS→terminal charge requests for your venues: which terminals are currently BUSY (an active charge in flight) and recent charges from the last 24h with their outcome (completed/failed/cancelled/timed_out/unknown). Use it to tell whether a terminal is stuck (an UNKNOWN result protects the sale until its outcome is confirmed; a reconnect or elapsed time does not prove no charge) or to check what happened to one charge. Read `outcome` to answer "was the card charged?": CHARGED (a Payment exists), NOT_CHARGED (supported by terminal/server evidence or an explicit cashier declaration that no card was presented — see `outcomeEvidence` and `evidenceClass`; OPERATOR is human testimony, not a bank decline) or UNRESOLVED (nobody proved anything: the charge still reserves the terminal, which is what `busy` means). `status` is the same value the POS sees, so a failed/cancelled charge with no evidence is reported as UNKNOWN on purpose. Each row also carries the customer the POS attached to that charge (customerId, null when the sale was anonymous). A charge the server refused before it ever reached the terminal (terminal offline, busy or from another location; sale cancelled, already paid or missing) is listed as failed with rejectedAtAdmission:true and its reason in failureCode: nothing reached the terminal, so no card was charged. Amounts are in pesos. `releasedAfterWindow` (window, instant, origin) means the 30-s confirmation window released this charge for lack of evidence; a later bank approval reopens it and is flagged. Each attempt carries `operatorResolution` (who declared no card was presented, how it was authorized — the terminal session or a supervisor PIN — and when) or null. The processor webhook can confirm a charge before the terminal reports it: each row also says who confirmed it first (`closedVia`: terminal or webhook, keeping the same winning payment), lists the attempts the terminal opened for it (`attempts`, at most 25 per charge; `attemptsTruncated`/`attemptsTotal` say when there are more) and which one won (`winnerAttemptId`). To page through ALL the attempts of one charge, call again with `attemptsRequestId` (that requestId) and, from the second page on, `attemptsAfter` = the `attemptsNextCursor` returned by the previous page.',
     {
       venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues'),
+      limit: z.number().int().positive().max(100).optional().describe('Charge requests per page (default 100)'),
+      offset: z.number().int().min(0).optional().describe('Use nextOffset to continue through requests'),
+      localResolutionsOffset: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe('Use localResolutionsNextOffset to continue through local declarations'),
       requestId: z.string().optional().describe('Look up one specific charge request by its requestId'),
       attemptsRequestId: z
         .string()
@@ -303,8 +368,8 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         .optional()
         .describe('With attemptsRequestId: the `attemptsNextCursor` of the previous page (an attemptId); omit for the first page'),
     },
-    async ({ venueId, requestId, attemptsRequestId, attemptsAfter }) => {
-      const where = guard.venueFilter(venueId) // throws if out of scope
+    async ({ venueId, requestId, attemptsRequestId, attemptsAfter, limit = 100, offset = 0, localResolutionsOffset = 0 }) => {
+      const { where, coverage } = terminalReadScope(venueId)
       // Codex R4 (P2): CONTINUACIÓN por solicitud — la ventana de 25 por solicitud dice que está recortada; esto es cómo se
       // llega al resto. Keyset sobre (createdAt, attemptId), sin tope global que otra solicitud pueda agotar.
       if (attemptsRequestId) {
@@ -312,7 +377,7 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
           where: { ...where, requestId: attemptsRequestId },
           select: { requestId: true },
         })
-        if (!fila) return text({ ok: false, error: 'No existe ese cobro en tu alcance' })
+        if (!fila) return text({ coverage, ok: false, error: 'No existe ese cobro en tu alcance' })
         const TOPE = 25
         let despues: Prisma.TerminalPaymentAttemptLinkWhereInput = {}
         if (attemptsAfter) {
@@ -321,7 +386,11 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
             select: { requestId: true, attemptId: true, createdAt: true },
           })
           if (!ancla || ancla.requestId !== fila.requestId) {
-            return text({ ok: false, error: 'El cursor de intentos no pertenece a ese cobro. Vuelve a consultar desde el inicio.' })
+            return text({
+              coverage,
+              ok: false,
+              error: 'El cursor de intentos no pertenece a ese cobro. Vuelve a consultar desde el inicio.',
+            })
           }
           despues = { OR: [{ createdAt: { gt: ancla.createdAt } }, { createdAt: ancla.createdAt, attemptId: { gt: ancla.attemptId } }] }
         }
@@ -341,6 +410,7 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
           operatorResolution: proyectarDeclaracionDelCajero(v.operatorResolution),
         }))
         return text({
+          coverage,
           requestId: fila.requestId,
           attempts,
           attemptsTotal,
@@ -348,15 +418,17 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         })
       }
       const since = new Date(Date.now() - 24 * 60 * 60 * 1000) // rolling 24h (duration, not a calendar date)
+      const requestFilter = {
+        ...where,
+        // Include old unresolved charges too: elapsed time never proves the card was not charged.
+        ...(requestId ? { requestId } : { OR: [UNRESOLVED_FINANCIAL_OUTCOME, { createdAt: { gte: since } }] }),
+      }
+      const total = await prisma.terminalPaymentRequest.count({ where: requestFilter })
       const rows = await prisma.terminalPaymentRequest.findMany({
-        where: {
-          ...where,
-          // 🔴 El primer brazo es el PREDICADO DEL SERVICIO, no una lista de estados escrita aquí: una fila vieja que
-          // sigue ocupando la terminal tiene que aparecer aunque tenga más de 24 h — es justo la que hay que ver.
-          ...(requestId ? { requestId } : { OR: [UNRESOLVED_FINANCIAL_OUTCOME, { createdAt: { gte: since } }] }),
-        },
-        orderBy: { createdAt: 'desc' },
-        take: 100,
+        where: requestFilter,
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: limit,
+        skip: offset,
       })
       // S8 (webhook como primer confirmador): los intentos que la terminal abrió por solicitud y cuál ganó. `closedVia`
       // dice QUIÉN confirmó primero (terminal o webhook) y conserva al ganador: el `paymentId` de la fila no cambia.
@@ -434,6 +506,7 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         const llaveGanadora = r.paymentId ? (llaveDelGanador.get(r.paymentId) ?? null) : null
         return {
           requestId: estado.requestId,
+          venueId: r.venueId,
           terminalId: estado.terminalId,
           // Traducido igual que para el POS: un FAILED/CANCELLED sin desenlace acreditado se ve UNKNOWN.
           status: estado.status,
@@ -476,11 +549,14 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
       // 13 de 27 intentos son locales). Se listan las de las últimas 24 h, acotadas al alcance del usuario.
       const desdeAyer = new Date(Date.now() - 24 * 60 * 60 * 1000)
       const venuesDelAlcance = where.venueId
+      const localFilter = { venueId: venuesDelAlcance, createdAt: { gte: desdeAyer } }
+      const localResolutionsTotal = await prisma.terminalAttemptResolution.count({ where: localFilter })
       const localResolutions = (
         await prisma.terminalAttemptResolution.findMany({
-          where: { venueId: venuesDelAlcance, createdAt: { gte: desdeAyer } },
-          orderBy: { createdAt: 'desc' },
+          where: localFilter,
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
           take: 25,
+          skip: localResolutionsOffset,
           select: { attemptId: true, terminalId: true, venueId: true, resolution: true, createdAt: true },
         })
       ).map(r => {
@@ -500,7 +576,15 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
       })
 
       return text({
+        coverage,
         count: requests.length,
+        total,
+        countsScope: 'page',
+        hasMore: offset + limit < total,
+        nextOffset: offset + limit < total ? offset + limit : null,
+        localResolutionsTotal,
+        localResolutionsHasMore: localResolutionsOffset + 25 < localResolutionsTotal,
+        localResolutionsNextOffset: localResolutionsOffset + 25 < localResolutionsTotal ? localResolutionsOffset + 25 : null,
         busyTerminals: [...new Set(requests.filter(r => r.busy).map(r => r.terminalId))],
         // Cuenta lo que el operador VE como UNKNOWN (el status ya traducido), no el valor crudo de la columna.
         unknownCount: requests.filter(r => r.status === TerminalPaymentRequestStatus.UNKNOWN).length,

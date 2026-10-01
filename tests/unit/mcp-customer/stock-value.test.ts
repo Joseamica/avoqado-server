@@ -2,6 +2,7 @@ import { registerInventoryTools } from '../../../src/mcp/tools/inventory'
 import type { McpScope } from '../../../src/mcp/scope'
 
 const mockInventoryFind = jest.fn()
+const mockQuery = jest.fn()
 
 jest.mock('@/mcp/planGate', () => ({ planGateMessage: jest.fn().mockResolvedValue(null) }))
 jest.mock('@/mcp/guard', () => ({
@@ -20,6 +21,7 @@ jest.mock('@/mcp/audit', () => ({ auditMcpWrite: jest.fn() }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    $queryRaw: (...a: unknown[]) => mockQuery(...a),
     inventory: { findMany: (...a: unknown[]) => mockInventoryFind(...(a as [])) },
     product: { findMany: jest.fn() },
     serializedItem: { groupBy: jest.fn() },
@@ -43,10 +45,19 @@ describe('stock_value', () => {
   })
 
   it('sums cost & retail value, counts items without cost, and ranks by cost value', async () => {
-    mockInventoryFind.mockResolvedValueOnce([
-      { currentStock: 10, product: { name: 'Cerveza', sku: 'BEER', cost: 12, price: 35 } }, // cost 120, retail 350
-      { currentStock: 4, product: { name: 'Vino', sku: 'WINE', cost: 100, price: 250 } }, // cost 400, retail 1000
-      { currentStock: 6, product: { name: 'Servilletas', sku: 'NAP', cost: null, price: 5 } }, // no cost, retail 30
+    mockQuery.mockResolvedValueOnce([
+      {
+        productsInStock: 3,
+        itemsWithoutCost: 1,
+        totalCostValue: 520,
+        totalRetailValue: 1380,
+        potentialMargin: 860,
+        topItems: [
+          { product: 'Vino', costValue: 400 },
+          { product: 'Cerveza', costValue: 120 },
+          { product: 'Servilletas', unitCost: null, costValue: null },
+        ],
+      },
     ])
     const out = parse(await call({ venueId: 'v1' }))
 
@@ -60,4 +71,31 @@ describe('stock_value', () => {
     expect(out.topItems[2].unitCost).toBeNull()
     expect(out.topItems[2].costValue).toBeNull()
   })
+})
+
+it('pagina el detalle sin recortar la valoración total y nunca carga todas las existencias', async () => {
+  mockQuery.mockResolvedValueOnce([
+    {
+      productsInStock: 10001,
+      itemsWithoutCost: 2,
+      totalCostValue: 500000,
+      totalRetailValue: 900000,
+      potentialMargin: 400000,
+      topItems: [{ product: 'Último', costValue: 10 }],
+    },
+  ])
+  const out = parse(await call({ venueId: 'v1', limit: 1, offset: 10000 }))
+  expect(out).toMatchObject({ productsInStock: 10001, totalCostValue: 500000, count: 1, hasMore: false, nextOffset: null })
+  expect(mockInventoryFind).not.toHaveBeenCalled()
+  expect(mockQuery).toHaveBeenCalledTimes(1)
+})
+
+it('low_stock pagina en SQL sin ocultar el total ni devolver otros venues', async () => {
+  mockQuery.mockResolvedValueOnce([{ total: 101, lowStock: [{ product: 'Café', shortBy: 20 }] }])
+  const out = parse(await handlers.get('low_stock')!({ venueId: 'v1', limit: 1, offset: 99 }, {}))
+  expect(out).toMatchObject({ total: 101, count: 1, hasMore: true, nextOffset: 100 })
+  expect(mockInventoryFind).not.toHaveBeenCalled()
+  const [sql, ...values] = mockQuery.mock.calls[0]
+  expect(values).toEqual(['v1', 1, 99])
+  expect(sql.join('?')).toContain('i."venueId" = ?')
 })

@@ -80,7 +80,7 @@ describe('resolveScope', () => {
     m.staffOrganization.findUnique.mockResolvedValue({ role: 'OWNER', isActive: true })
     m.venue.findMany.mockResolvedValue([{ id: 'A' }, { id: 'B' }])
     mockGetUserAccess.mockImplementation(async (_s: string, venueId: string) => {
-      if (venueId === 'B') throw new Error('Staff has no access to this venue')
+      if (venueId === 'B') throw new Error('User owner has no access to venue B')
       return { venueId, corePermissions: ['venue:read'] }
     })
     const scope = await resolveScope('owner', 'org-1')
@@ -173,10 +173,19 @@ describe('resolveScope', () => {
     m.staffOrganization.findUnique.mockResolvedValue({ role: 'OWNER', isActive: true })
     m.venue.findMany.mockResolvedValue([{ id: 'A' }, { id: 'B' }, { id: 'C' }])
     mockGetUserAccess.mockImplementation(async (_s: string, venueId: string) => {
-      if (venueId === 'B') throw new Error('no access to this venue')
+      if (venueId === 'B') throw new Error('User owner has no access to venue B')
       return { venueId, corePermissions: ['venue:read'] }
     })
     const scope = await resolveScope('owner', 'org-1')
     expect(scope.allowedVenueIds.sort()).toEqual(['A', 'C']) // B skipped, A + C still resolved
+  })
+  it('un fallo de DB al resolver un venue no entrega un alcance parcial como completo', async () => {
+    m.staffOrganization.findUnique.mockResolvedValue({ role: 'OWNER', isActive: true })
+    m.venue.findMany.mockResolvedValue([{ id: 'A' }, { id: 'B' }])
+    mockGetUserAccess.mockImplementation(async (_s: string, venueId: string) => {
+      if (venueId === 'B') throw new Error('Database unavailable')
+      return { venueId, corePermissions: ['venue:read'] }
+    })
+    await expect(resolveScope('owner', 'org-1')).rejects.toThrow('Database unavailable')
   })
 })

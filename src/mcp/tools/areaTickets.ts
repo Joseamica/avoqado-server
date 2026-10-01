@@ -152,7 +152,7 @@ export function registerAreaTicketTools(server: McpServer, scope: McpScope): voi
     },
     async ({ venueId, limit }) => {
       guard.venueFilter(venueId)
-      guard.requirePermission('area-tickets:deliver', venueId)
+      guard.requirePermission('area-tickets:deliver', venueId, 'read')
       const tickets = await prisma.areaTicket.findMany({
         where: {
           venueId,
@@ -253,7 +253,7 @@ export function registerAreaTicketTools(server: McpServer, scope: McpScope): voi
     },
     async ({ venueId, limit }) => {
       guard.venueFilter(venueId)
-      guard.requirePermission('area-tickets:configure', venueId)
+      guard.requirePermission('area-tickets:configure', venueId, 'read')
       const [sessions, externalIncidents] = await Promise.all([
         prisma.areaTicketCheckoutSession.findMany({
           where: { venueId, status: 'RECONCILIATION_REQUIRED' },
@@ -372,7 +372,7 @@ export function registerAreaTicketTools(server: McpServer, scope: McpScope): voi
     },
     async ({ venueId, limit }) => {
       guard.venueFilter(venueId)
-      guard.requirePermission('area-tickets:configure', venueId)
+      guard.requirePermission('area-tickets:configure', venueId, 'read')
 
       const tickets = await prisma.areaTicket.findMany({
         where: {

@@ -186,7 +186,7 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'move_table_check',
-    'TABLE_SERVICE: move the OPEN check (cuenta) from one table to another in a venue you can access — Square\'s "Mover". The order keeps its items/courses; the source table is released and the target becomes occupied. Fails if the target is occupied/reserved or the order is already paid. This WRITES; requires tables:update. Pass venueId + source table number + target table number.',
+    'TABLE_SERVICE: move the OPEN check (cuenta) from one table to another in a venue you can access. The order keeps its items/courses; the source table is released and the target becomes occupied. Fails if the target is occupied/reserved or the order is already paid. This WRITES; requires tables:update. Pass venueId + source table number + target table number.',
     {
       venueId: z.string().describe('Venue that owns both tables (must be in your scope)'),
       fromNumber: z.string().min(1).describe('Table number the check is on now, e.g. "8"'),
@@ -228,7 +228,7 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'assign_table_check',
-    'TABLE_SERVICE: reassign the OPEN check (cuenta) of a table to another waiter/staff member — Square\'s "Asignar". Sales attribution (tips, corte) follows the new waiter. This WRITES; requires orders:update. Pass venueId + table number + the staff member (id, or a name to search).',
+    'TABLE_SERVICE: reassign the OPEN check (cuenta) of a table to another waiter/staff member. Sales attribution (tips, corte) follows the new waiter. This WRITES; requires orders:update. Pass venueId + table number + the staff member (id, or a name to search).',
     {
       venueId: z.string().describe('Venue that owns the table (must be in your scope)'),
       number: z.string().min(1).describe('Table number whose check to reassign, e.g. "8"'),
@@ -356,7 +356,7 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'split_table_check',
-    "TABLE_SERVICE: split the open check of a table into a SECOND check on the SAME table (Square's separate checks) by moving specific items. Pass venueId + table number + the item ids to move (list them first via tables_status/find_order). At least one item must stay. This WRITES; requires orders:update.",
+    'TABLE_SERVICE: split the open check of a table into a SECOND check on the SAME table by moving specific items. Pass venueId + table number + the item ids to move (list them first via tables_status/find_order). At least one item must stay. This WRITES; requires orders:update.',
     {
       venueId: z.string().describe('Venue that owns the table (must be in your scope)'),
       number: z.string().min(1).describe('Table number whose check to split, e.g. "8"'),
@@ -421,7 +421,7 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'merge_table_check',
-    "TABLE_SERVICE: merge two open checks into one (Square's \"Fusionar\") — every item from the SOURCE table's check moves onto the TARGET table's check, and the source check is cancelled and its table freed. Use when two tables' groups combine. Blocked if either check already has a payment, or if the source check has discounts/manual service charges (their amount was calculated over that check alone — remove them first, then merge). Also blocked (code ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE, details.requestId + details.orderId) while the SOURCE check has a card-terminal charge whose outcome is not yet confirmed — merging would cancel an order a charge can still land on; wait for or cancel that charge first. A live charge on the TARGET does not block. This WRITES; requires orders:merge (its OWN permission since 2026-08 — WAITER/CASHIER do not hold it, so the POS asks a manager for a PIN instead; there is no such prompt here). Pass venueId + the target table (whose check survives) + the source table (whose check disappears into it).",
+    "TABLE_SERVICE: merge two open checks into one — every item from the SOURCE table's check moves onto the TARGET table's check, and the source check is cancelled and its table freed. Use when two tables' groups combine. Blocked if either check already has a payment, or if the source check has discounts/manual service charges (their amount was calculated over that check alone — remove them first, then merge). Also blocked (code ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE, details.requestId + details.orderId) while the SOURCE check has a card-terminal charge whose outcome is not yet confirmed — merging would cancel an order a charge can still land on; wait for or cancel that charge first. A live charge on the TARGET does not block. This WRITES; requires orders:merge (its OWN permission since 2026-08 — WAITER/CASHIER do not hold it, so the POS asks a manager for a PIN instead; there is no such prompt here). Pass venueId + the target table (whose check survives) + the source table (whose check disappears into it).",
     {
       venueId: z.string().describe('Venue that owns both tables (must be in your scope)'),
       targetNumber: z.string().min(1).describe('Table number whose check ABSORBS the other and survives, e.g. "12"'),

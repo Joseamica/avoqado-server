@@ -93,8 +93,9 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'find_order',
-    'Find one order by its human ORDER NUMBER (what the operator sees on receipts/screens, e.g. ORD-5454 or FAST-1781718731451), by its internal id, or by a serial number (SIM/ICCID/barcode) of an item sold on it. Returns the order header, line items, payments, and whether the sale was refunded (refundState NONE/PARTIAL/FULL + refundedAmount in pesos) — but only if the order belongs to one of your venues. NOTE: a refunded sale stays status COMPLETED / paymentStatus PAID and its total is NOT rewritten (Toast/Square model, and the Mexican CFDI de Egreso requires it) — read refundState, never the payment status, to answer "¿se devolvió esta venta?". Pass exactly one of orderNumber, orderId, or serialNumber. Prefer orderNumber — it is the identifier operators actually have.',
+    'Find one order by its human ORDER NUMBER (what the operator sees on receipts/screens, e.g. ORD-5454 or FAST-1781718731451), by its internal id, or by a serial number (SIM/ICCID/barcode) of an item sold on it. Returns the order header, line items, payments, and whether the sale was refunded (refundState NONE/PARTIAL/FULL + refundedAmount in pesos) — but only if the order belongs to one of your venues. NOTE: a refunded sale stays status COMPLETED / paymentStatus PAID and its total is NOT rewritten (the Mexican CFDI de Egreso requires preserving the original sale) — read refundState, never the payment status, to answer "¿se devolvió esta venta?". Pass exactly one of orderNumber, orderId, or serialNumber. Prefer orderNumber. If multiple matches are returned, ask which venue/order; never pick the newest automatically. Pass venueId to narrow the lookup.',
     {
+      venueId: z.string().optional().describe('Sucursal concreta; pídela si hay varias coincidencias'),
       orderNumber: z
         .string()
         .optional()
@@ -102,38 +103,59 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
       orderId: z.string().optional().describe('The internal order id (cuid) — operators rarely have this; prefer orderNumber'),
       serialNumber: z.string().optional().describe('A serial number / barcode / ICCID of an item sold on the order'),
     },
-    async ({ orderNumber, orderId, serialNumber }) => {
-      const where = { venueId: { in: orderReadableVenues() } } // scope + orders:read gate across all your venues (see helper)
-      let id = orderId
-      if (!id && orderNumber) {
-        // Resolve the human order number → id WITHIN scope (so you can't probe another venue's numbers).
-        // Case-insensitive; order numbers can repeat across venues, so take the most recent match.
-        const trimmed = orderNumber.trim()
-        const byNumber = await prisma.order.findFirst({
-          where: { ...where, orderNumber: { equals: trimmed, mode: 'insensitive' as const } },
-          select: { id: true },
-          orderBy: { createdAt: 'desc' },
+    async ({ venueId, orderNumber, orderId, serialNumber }) => {
+      if ([orderNumber, orderId, serialNumber].filter(value => value?.trim()).length !== 1) {
+        return text({
+          found: false,
+          needsInput: true,
+          field: 'orderNumber',
+          reason: 'Pass orderNumber, orderId, or serialNumber',
+          question: '¿Cuál es el número de orden, su identificador o el serial? Indica sólo uno.',
         })
-        id = byNumber?.id ?? undefined
-        if (!id) return text({ found: false, reason: `No order found with number "${orderNumber}" in your venues` })
       }
-      if (!id && serialNumber) {
-        // Serials are stored canonically UPPERCASE, but a handful of legacy items are lower-cased —
-        // match case-insensitively so a scan/paste in either case still resolves the order.
-        const trimmed = serialNumber.trim()
-        const serialVariants = Array.from(new Set([trimmed, trimmed.toUpperCase(), trimmed.toLowerCase()]))
-        const item = await prisma.serializedItem.findFirst({
-          where: { serialNumber: { in: serialVariants } },
-          select: { orderItem: { select: { orderId: true } } },
+      const where = { venueId: { in: orderReadableVenues(venueId) } }
+      let id = orderId?.trim()
+      if (!id) {
+        const serial = serialNumber?.trim()
+        const matches = await prisma.order.findMany({
+          where: {
+            ...where,
+            ...(serial
+              ? {
+                  items: {
+                    some: { serializedItem: { serialNumber: { in: [...new Set([serial, serial.toUpperCase(), serial.toLowerCase()])] } } },
+                  },
+                }
+              : { orderNumber: { equals: orderNumber!.trim(), mode: 'insensitive' as const } }),
+          },
+          select: { id: true, venueId: true, orderNumber: true, createdAt: true, venue: { select: { name: true } } },
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          take: 11,
         })
-        id = item?.orderItem?.orderId ?? undefined
-        if (!id) return text({ found: false, reason: `No order found for serial "${serialNumber}"` })
+        if (!matches.length)
+          return text({
+            found: false,
+            reason: orderNumber
+              ? `No order found with number "${orderNumber}" in your venues`
+              : `No order found for serial "${serialNumber}" in your venues`,
+          })
+        if (matches.length > 1)
+          return text({
+            found: false,
+            needsInput: true,
+            field: venueId ? 'orderId' : 'venueId',
+            question: venueId ? '¿Cuál de estas órdenes buscas?' : '¿De qué sucursal es la orden?',
+            candidates: matches.slice(0, 10),
+            hasMore: matches.length > 10,
+            instruction: 'Pide elegir una coincidencia o acotar la sucursal. No elijas la más reciente automáticamente.',
+          })
+        id = matches[0].id
       }
-      if (!id) return text({ found: false, reason: 'Pass orderNumber, orderId, or serialNumber' })
       const order = await prisma.order.findFirst({
         where: { id, ...where }, // scope: null if the order is not one of your venues'
         select: {
           id: true,
+          venueId: true,
           orderNumber: true,
           type: true,
           status: true,

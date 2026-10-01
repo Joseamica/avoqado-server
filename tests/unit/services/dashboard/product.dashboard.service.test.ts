@@ -245,6 +245,19 @@ describe('Product printStationId (print-station routing)', () => {
   // UPDATE
   // ──────────────────────────────────────────────────────────────
   describe('updateProduct — printStationId', () => {
+    it('rechaza atómicamente un producto que cambió desde la vista previa MCP', async () => {
+      const existing = makeMockProduct()
+      prismaMock.product.findFirst.mockResolvedValue(existing)
+      prismaMock.product.update.mockRejectedValueOnce({ code: 'P2025' })
+      const expected = { name: existing.name, price: existing.price, active: existing.active }
+      await expect(
+        (productService.updateProduct as any)('venue-xyz', existing.id, { price: 45 }, humanActor, expected),
+      ).rejects.toMatchObject({ statusCode: 409 })
+      expect(prismaMock.product.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: existing.id, venueId: 'venue-xyz', deletedAt: null, ...expected } }),
+      )
+    })
+
     it('persists printStationId when updating a product with it', async () => {
       const existing = makeMockProduct()
       const updated = makeMockProduct({ printStationId: 'station-002' })

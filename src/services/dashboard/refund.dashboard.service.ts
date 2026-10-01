@@ -1,3 +1,4 @@
+import { operationHash } from '@/utils/operationHash'
 /**
  * Dashboard Refund Service
  *
@@ -68,6 +69,7 @@ export interface RefundItemInput {
 }
 
 export interface IssueRefundInput {
+  idempotencyKey?: string
   venueId: string
   paymentId: string
   // Either `amount` (amount refund) or `items` (item refund) — if `items` is
@@ -421,6 +423,8 @@ interface WriteRefundBase {
   note?: string | null
   staffId?: string | null
   idempotencyKey?: string
+  idempotencyRequestHash?: string
+  remainingAfterCents?: number
   tenderCommission: 'NONE' | 'REVERSE_PROPORTIONAL'
   shift: 'CLAIM_LIVE' | 'INHERIT_ORIGINAL'
   /** @internal `issueRefund` ya bloqueó y leyó el cobro en ESTE tx: no se repite. */
@@ -578,6 +582,9 @@ export async function writeRefundInTx(
       processor: 'dashboard',
       processorData: {
         originalPaymentId: original.id,
+        ...(input.idempotencyRequestHash
+          ? { idempotencyRequestHash: input.idempotencyRequestHash, remainingAfterCents: input.remainingAfterCents }
+          : {}),
         refundReason: input.reason,
         note: input.note ?? null,
         amountCents: refundCents,
@@ -676,6 +683,37 @@ export async function writeRefundInTx(
 }
 
 export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundResult> {
+  if (input.idempotencyKey !== undefined && !/^[A-Za-z0-9_-]{8,64}$/.test(input.idempotencyKey)) {
+    throw new BadRequestError('La llave de idempotencia debe tener de 8 a 64 caracteres alfanuméricos, guiones o guiones bajos')
+  }
+  const requestHash = input.idempotencyKey ? operationHash({ ...input, idempotencyKey: undefined }) : null
+  const existingAttempt = async (db: Pick<Prisma.TransactionClient, 'payment'>): Promise<IssueRefundResult | null> => {
+    if (!input.idempotencyKey) return null
+    const previous = await db.payment.findUnique({
+      where: { venueId_idempotencyKey: { venueId: input.venueId, idempotencyKey: input.idempotencyKey } },
+      select: { id: true, type: true, amount: true, tipAmount: true, processorData: true },
+    })
+    if (!previous) return null
+    const data = asRecord(previous.processorData)
+    if (
+      previous.type !== PaymentType.REFUND ||
+      data.originalPaymentId !== input.paymentId ||
+      data.idempotencyRequestHash !== requestHash ||
+      !Number.isSafeInteger(data.remainingAfterCents)
+    ) {
+      throw new ConflictError('La llave de idempotencia ya pertenece a otra operación', 'IDEMPOTENCY_KEY_REUSED')
+    }
+    return {
+      refundId: previous.id,
+      originalPaymentId: input.paymentId,
+      amount: centsToNumber(-toCents(previous.amount) - toCents(previous.tipAmount)),
+      remainingRefundable: centsToNumber(data.remainingAfterCents as number),
+      status: 'COMPLETED',
+    }
+  }
+  const previous = await existingAttempt(prisma)
+  if (previous) return previous
+
   if (input.amount !== undefined && !esCantidadPositivaEnCentavos(input.amount)) {
     throw new BadRequestError('amount debe ser un entero seguro positivo expresado en centavos')
   }
@@ -710,7 +748,7 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
   })
   if (!originalOrder) throw new NotFoundError('Payment not found')
 
-  let result: RefundTransactionResult
+  let result: RefundTransactionResult | { replayResult: IssueRefundResult }
   try {
     result = await prisma.$transaction(async tx => {
       const cobro = await bloquearCobroParaReembolso(tx, {
@@ -718,6 +756,9 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         paymentId: input.paymentId,
         expectedOrderId: originalOrder.orderId,
       })
+      // Same original-payment lock as every refund channel: the second caller sees the first commit.
+      const replayResult = await existingAttempt(tx)
+      if (replayResult) return { replayResult }
       const {
         original,
         existingRefunds,
@@ -971,6 +1012,13 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         reason: input.reason,
         note: input.note,
         staffId: input.staffId,
+        ...(input.idempotencyKey
+          ? {
+              idempotencyKey: input.idempotencyKey,
+              idempotencyRequestHash: requestHash!,
+              remainingAfterCents: Math.max(0, remainingBeforeCents - refundCents),
+            }
+          : {}),
         tenderCommission: 'NONE',
         shift: 'CLAIM_LIVE',
         provenance: 'MANUAL',
@@ -994,6 +1042,10 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
       }
     }, ORDER_LOCK_WAIT_BUDGET)
   } catch (error) {
+    if (input.idempotencyKey && (error as { code?: string })?.code === 'P2002') {
+      const winner = await existingAttempt(prisma)
+      if (winner) return winner
+    }
     if (error instanceof ConflictError && error.code === 'REFUND_AUTHORITY_UNAVAILABLE') {
       const reassignmentWasRecorded = await refundAuthorityReassignmentWasRecorded(prisma, {
         venueId: input.venueId,
@@ -1016,6 +1068,8 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
     }
     throw error
   }
+
+  if ('replayResult' in result) return result.replayResult
 
   // 🔴 EL CAJÓN RESTA EL REEMBOLSO (el defecto medido en hardware el 2026-08-16).
   //

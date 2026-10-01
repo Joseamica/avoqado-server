@@ -12,7 +12,7 @@ export interface McpTokenPayload {
   sub: string // Staff.id
   org: string // active organization id
   cid?: string // OAuth client id (Phase 1); absent for dev-server tokens
-  scp?: string[] // granted OAuth scopes; absent for dev-server/legacy tokens (→ treated as full)
+  scp?: string[] // granted OAuth scopes; absent on legacy tokens (read-only compatibility)
   exp?: number // expiry (epoch seconds) — required by the SDK bearer middleware
   iat?: number // emisión (segundos): el corte de sesión se compara contra esto
   gat?: number // concesión ORIGINAL de la cadena OAuth (segundos); ausente en tokens viejos/de desarrollo
@@ -34,7 +34,7 @@ export function issueMcpToken(
 ): string {
   const payload: Record<string, unknown> = { sub: staffId, org: activeOrg }
   if (clientId) payload.cid = clientId
-  if (scopes && scopes.length) payload.scp = scopes
+  payload.scp = scopes ?? ['mcp:read']
   // El acceso emitido en una renovación hereda la fecha de la autorización original: si la contraseña
   // cambió entre validar y emitir, su `iat` sería posterior al corte y viviría su hora completa.
   if (concedidoEn) payload.gat = Math.floor(concedidoEn.getTime() / 1000)

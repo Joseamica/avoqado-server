@@ -103,6 +103,7 @@ interface CommissionCalcRow {
   tier: number | null
   tierName: string | null
   status: string
+  calculationCount?: number
 }
 
 /**
@@ -161,17 +162,17 @@ export function aggregateStaffCommission(rows: CommissionCalcRow[]) {
       }
       byStaff.set(r.staffId, staff)
     }
-    staff.count += 1
+    staff.count += r.calculationCount ?? 1
     staff.totalBase += base
     staff.totalCommission += commission
-    staff.byStatus[r.status] = (staff.byStatus[r.status] ?? 0) + 1
+    staff.byStatus[r.status] = (staff.byStatus[r.status] ?? 0) + (r.calculationCount ?? 1)
 
     let scheme = staff.schemes.get(r.configId)
     if (!scheme) {
       scheme = { config: r.config.name, calcType: r.config.calcType, count: 0, base: 0, commission: 0, rates: new Map() }
       staff.schemes.set(r.configId, scheme)
     }
-    scheme.count += 1
+    scheme.count += r.calculationCount ?? 1
     scheme.base += base
     scheme.commission += commission
 
@@ -181,7 +182,7 @@ export function aggregateStaffCommission(rows: CommissionCalcRow[]) {
       rateBucket = { rate, tier: r.tier, tierName: r.tierName, count: 0, base: 0, commission: 0 }
       scheme.rates.set(rateKey, rateBucket)
     }
-    rateBucket.count += 1
+    rateBucket.count += r.calculationCount ?? 1
     rateBucket.base += base
     rateBucket.commission += commission
   }
@@ -406,27 +407,44 @@ export function registerCommissionTools(server: McpServer, scope: McpScope) {
       const from = fromDate ? venueStartOfDay(tz, new Date(`${fromDate}T12:00:00`)) : month.from
       const to = toDate ? venueEndOfDay(tz, new Date(`${toDate}T12:00:00`)) : month.to
 
-      const rows = (await prisma.commissionCalculation.findMany({
+      const groups = await prisma.commissionCalculation.groupBy({
+        by: ['staffId', 'configId', 'effectiveRate', 'tier', 'tierName', 'status'],
         where: {
           venueId: { in: venueIds },
           ...(staffId ? { staffId } : {}),
-          voidedAt: null, // exclude reversed calcs (e.g. from refunds)
+          voidedAt: null,
           calculatedAt: { gte: from, lte: to },
         },
-        select: {
-          staffId: true,
-          staff: { select: { firstName: true, lastName: true } },
-          configId: true,
-          config: { select: { name: true, calcType: true } },
-          baseAmount: true,
-          grossCommission: true,
-          netCommission: true,
-          effectiveRate: true,
-          tier: true,
-          tierName: true,
-          status: true,
-        },
-      })) as unknown as CommissionCalcRow[]
+        _sum: { baseAmount: true, grossCommission: true, netCommission: true },
+        _count: { _all: true },
+      })
+      const staffIds = [...new Set(groups.map(g => g.staffId))]
+      const configIds = [...new Set(groups.map(g => g.configId))]
+      const [people, configs] = groups.length
+        ? await Promise.all([
+            prisma.staff.findMany({
+              where: { id: { in: staffIds } },
+              select: { id: true, firstName: true, lastName: true },
+              take: staffIds.length,
+            }),
+            prisma.commissionConfig.findMany({
+              where: { id: { in: configIds } },
+              select: { id: true, name: true, calcType: true },
+              take: configIds.length,
+            }),
+          ])
+        : [[], []]
+      const peopleById = new Map(people.map(p => [p.id, p]))
+      const configsById = new Map(configs.map(c => [c.id, c]))
+      const rows: CommissionCalcRow[] = groups.map(g => ({
+        ...g,
+        staff: peopleById.get(g.staffId) ?? { firstName: 'Sin nombre', lastName: null },
+        config: configsById.get(g.configId) ?? { name: 'Sin nombre', calcType: 'UNKNOWN' },
+        baseAmount: g._sum.baseAmount ?? '0',
+        grossCommission: g._sum.grossCommission ?? '0',
+        netCommission: g._sum.netCommission ?? '0',
+        calculationCount: g._count._all,
+      }))
 
       const staff = aggregateStaffCommission(rows)
       return text({

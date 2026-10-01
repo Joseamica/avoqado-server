@@ -54,36 +54,30 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
     {
       venueId: z.string().describe('Venue whose inventory to check (must be in your scope)'),
       limit: z.number().int().positive().max(100).optional().describe('Max items to return (default 50)'),
+      offset: z.number().int().min(0).optional().describe('Offset from the previous page'),
     },
-    async ({ venueId, limit }) => {
-      const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+    async ({ venueId, limit, offset = 0 }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('inventory:read', venueId) // WHY: mirror the dashboard's inventory:read gate — a low role shouldn't read stock/costs the dashboard 403s
       const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario') // PREMIUM tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
-      // Only items with a configured minimum (> 0). Prisma can't compare two columns in `where`,
-      // so fetch the tracked set and filter currentStock <= minimumStock in memory.
-      const tracked = await prisma.inventory.findMany({
-        where: { ...where, minimumStock: { gt: 0 } },
-        select: {
-          currentStock: true,
-          minimumStock: true,
-          lastRestockedAt: true,
-          product: { select: { name: true, sku: true } },
-        },
-      })
-      const lowStock = tracked
-        .filter(i => Number(i.currentStock) <= Number(i.minimumStock))
-        .map(i => ({
-          product: i.product?.name ?? null,
-          sku: i.product?.sku ?? null,
-          currentStock: Number(i.currentStock),
-          minimumStock: Number(i.minimumStock),
-          shortBy: Math.round((Number(i.minimumStock) - Number(i.currentStock)) * 100) / 100,
-          lastRestockedAt: i.lastRestockedAt?.toISOString() ?? null,
-        }))
-        .sort((a, b) => b.shortBy - a.shortBy)
-        .slice(0, limit ?? 50)
-      return text({ venueId, count: lowStock.length, lowStock })
+      // One SQL statement: a consistent total plus a bounded page, even when offset exceeds the total.
+      const [result] = await prisma.$queryRaw<Array<{ total: number; lowStock: unknown[] }>>`
+        WITH low AS (
+          SELECT i.id, p.name AS product, p.sku, i."currentStock", i."minimumStock",
+            ROUND(i."minimumStock" - i."currentStock", 2) AS "shortBy",
+            to_char(i."lastRestockedAt", 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "lastRestockedAt"
+          FROM "Inventory" i JOIN "Product" p ON p.id = i."productId" AND p."venueId" = i."venueId"
+          WHERE i."venueId" = ${venueId} AND i."minimumStock" > 0 AND i."currentStock" <= i."minimumStock"
+        ), page AS (
+          SELECT * FROM low ORDER BY "shortBy" DESC, id LIMIT ${limit ?? 50} OFFSET ${offset}
+        )
+        SELECT (SELECT COUNT(*)::int FROM low) AS total,
+          COALESCE((SELECT jsonb_agg(to_jsonb(page) - 'id' ORDER BY "shortBy" DESC, id) FROM page), '[]'::jsonb) AS "lowStock"
+      `
+      const count = result.lowStock.length
+      const hasMore = offset + count < result.total
+      return text({ venueId, ...result, count, hasMore, nextOffset: hasMore ? offset + count : null })
     },
   )
 
@@ -245,49 +239,43 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
     {
       venueId: z.string().describe('Venue whose inventory value to compute (must be in your scope)'),
       limit: z.number().int().positive().max(100).optional().describe('How many top items (by cost value) to list (default 20)'),
+      offset: z.number().int().min(0).optional().describe('Offset from the previous page; totals always cover all inventory'),
     },
-    async ({ venueId, limit }) => {
-      const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+    async ({ venueId, limit, offset = 0 }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('inventory:read', venueId) // WHY: mirror the dashboard's inventory:read gate — inventory valuation/margin is not free-for-all
       const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario') // PREMIUM tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
-      // currentStock × cost can't be multiplied in a SQL aggregate; fetch in-stock items and compute in memory.
-      const rows = await prisma.inventory.findMany({
-        where: { ...where, currentStock: { gt: 0 } },
-        select: { currentStock: true, product: { select: { name: true, sku: true, cost: true, price: true } } },
-      })
-
-      let costValue = 0
-      let retailValue = 0
-      let itemsWithoutCost = 0
-      const items = rows.map(r => {
-        const stock = Number(r.currentStock)
-        const cost = r.product?.cost == null ? null : Number(r.product.cost)
-        const price = r.product?.price == null ? 0 : Number(r.product.price)
-        const itemCost = cost == null ? null : round2(stock * cost)
-        if (itemCost == null) itemsWithoutCost += 1
-        else costValue += itemCost
-        retailValue += stock * price
-        return {
-          product: r.product?.name ?? null,
-          sku: r.product?.sku ?? null,
-          stock,
-          unitCost: cost, // null if no cost set on the product
-          costValue: itemCost,
-          retailValue: round2(stock * price),
-        }
-      })
-      items.sort((a, b) => (b.costValue ?? 0) - (a.costValue ?? 0))
-
-      return text({
-        venueId,
-        productsInStock: rows.length,
-        itemsWithoutCost,
-        totalCostValue: round2(costValue), // items that have a cost only
-        totalRetailValue: round2(retailValue),
-        potentialMargin: round2(retailValue - costValue),
-        topItems: items.slice(0, limit ?? 20),
-      })
+      const [result] = await prisma.$queryRaw<
+        Array<{
+          productsInStock: number
+          itemsWithoutCost: number
+          totalCostValue: number
+          totalRetailValue: number
+          potentialMargin: number
+          topItems: unknown[]
+        }>
+      >`
+        WITH valued AS (
+          SELECT i.id, p.name AS product, p.sku, i."currentStock" AS stock, p.cost AS "unitCost",
+            ROUND(i."currentStock" * p.cost, 2) AS "costValue",
+            i."currentStock" * p.price AS retail
+          FROM "Inventory" i JOIN "Product" p ON p.id = i."productId" AND p."venueId" = i."venueId"
+          WHERE i."venueId" = ${venueId} AND i."currentStock" > 0
+        ), page AS (
+          SELECT id, product, sku, stock, "unitCost", "costValue", ROUND(retail, 2) AS "retailValue"
+          FROM valued ORDER BY COALESCE("costValue", 0) DESC, id LIMIT ${limit ?? 20} OFFSET ${offset}
+        )
+        SELECT COUNT(*)::int AS "productsInStock", COUNT(*) FILTER (WHERE "unitCost" IS NULL)::int AS "itemsWithoutCost",
+          COALESCE(SUM("costValue"), 0)::float8 AS "totalCostValue",
+          ROUND(COALESCE(SUM(retail), 0), 2)::float8 AS "totalRetailValue",
+          ROUND(COALESCE(SUM(retail), 0) - COALESCE(SUM("costValue"), 0), 2)::float8 AS "potentialMargin",
+          COALESCE((SELECT jsonb_agg(to_jsonb(page) - 'id' ORDER BY COALESCE("costValue", 0) DESC, id) FROM page), '[]'::jsonb) AS "topItems"
+        FROM valued
+      `
+      const count = result.topItems.length
+      const hasMore = offset + count < result.productsInStock
+      return text({ venueId, ...result, count, hasMore, nextOffset: hasMore ? offset + count : null })
     },
   )
 

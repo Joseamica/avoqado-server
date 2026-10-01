@@ -715,7 +715,7 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId }) => {
       guard.venueFilter(venueId)
-      guard.requirePermission('class-sessions:read-assigned', venueId)
+      guard.requirePermission('class-sessions:read-assigned', venueId, 'read')
       const clase = await getMyClassNow({ venueId, staffId: scope.staffId, now: new Date() })
       if (!clase) return text({ ok: true, hasClass: false, message: 'No tienes una clase en curso ahora mismo.' })
       return text({ ok: true, hasClass: true, class: clase })

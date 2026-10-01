@@ -5,9 +5,10 @@ import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js'
 import { emisionDeCadena, issueMcpToken, verifyMcpToken } from '../mcpToken'
 import { prismaClientsStore } from './clientsStore'
 import { consumeAuthCode, peekAuthCodeChallenge, createRefreshToken, consumeRefreshToken, revokeRefreshToken } from './tokenStore'
+import { validateAuthorizationRequest } from './authorizationRequest'
 import { renderLoginPage } from './loginPage'
-import { ACCESS_TTL_SECONDS, MCP_RESOURCE_URL, MCP_SCOPES_SUPPORTED } from './config'
-import { InvalidGrantError, InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
+import { ACCESS_TTL_SECONDS, MCP_RESOURCE_URL } from './config'
+import { InvalidGrantError, InvalidTokenError, InvalidScopeError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 import { motivoDeConcesionInvalidada, motivoDeSesionInvalidada } from '../../utils/passwordChangeGuard'
 
 // Codex S4: cambiar la contraseña o «cerrar sesión en todos mis dispositivos» mata también lo que el
@@ -22,6 +23,14 @@ export const provider: OAuthServerProvider = {
   // Render the bcrypt consent page. The form POSTs to /mcp-oauth/approve (our route),
   // which is where the redirect-with-code actually happens.
   async authorize(client: OAuthClientInformationFull, params: AuthorizationParams, res: Response): Promise<void> {
+    const consent = await validateAuthorizationRequest({
+      client_id: client.client_id,
+      redirect_uri: params.redirectUri,
+      code_challenge: params.codeChallenge,
+      state: params.state,
+      scope: params.scopes?.length ? params.scopes.join(' ') : undefined,
+      resource: params.resource?.href,
+    })
     res.setHeader('Cache-Control', 'no-store')
     res.status(200).send(
       renderLoginPage({
@@ -30,7 +39,7 @@ export const provider: OAuthServerProvider = {
         redirectUri: params.redirectUri,
         codeChallenge: params.codeChallenge,
         state: params.state,
-        scope: (params.scopes ?? []).join(' ') || undefined,
+        scope: consent.scopes.join(' '),
         resource: params.resource?.href,
       }),
     )
@@ -72,7 +81,10 @@ export const provider: OAuthServerProvider = {
     if (data.clientId !== client.client_id) throw new InvalidGrantError('refresh token was issued to a different client')
     if (await motivoDeConcesionInvalidada(data.staffId, data.issuedAt)) throw new InvalidGrantError(SESION_CORTADA)
 
-    const grantedScopes = scopes && scopes.length ? scopes.filter(s => data.scopes.includes(s)) : data.scopes
+    if (scopes?.some(s => !data.scopes.includes(s))) {
+      throw new InvalidScopeError('Requested scope exceeds the original consent; reconnect to authorize additional access')
+    }
+    const grantedScopes = scopes ?? data.scopes
     const access_token = issueMcpToken(data.staffId, data.activeOrg, ACCESS_TTL_SECONDS, client.client_id, grantedScopes, data.issuedAt)
     // Rotate: consumeRefreshToken already atomically revoked the presented token (single-use);
     // just issue the replacement. (No separate revoke call — that would be a redundant no-op now.)
@@ -103,13 +115,11 @@ export const provider: OAuthServerProvider = {
     return {
       token,
       clientId: cid ?? sub, // dev-server tokens have no cid; fall back to the subject
-      // Report the token's REAL granted scopes (was hardcoded to the full supported set — the bug
-      // that made a mcp:read grant behave like read+write). Legacy/dev tokens without `scp` fall
-      // back to full so they keep working until they refresh into a scoped token.
-      scopes: scp && scp.length ? scp : MCP_SCOPES_SUPPORTED,
+      // Legacy tokens retain read access only. An explicit empty grant stays empty.
+      scopes: scp ?? ['mcp:read'],
       expiresAt: exp, // required by the SDK bearer middleware
       resource: MCP_RESOURCE_URL,
-      extra: { staffId: sub, activeOrg: org, scopes: scp && scp.length ? scp : undefined },
+      extra: { staffId: sub, activeOrg: org, scopes: scp ?? ['mcp:read'] },
     }
   },
 

@@ -52,6 +52,9 @@ const toArray = <T>(x: T | T[] | undefined): T[] => (x == null ? [] : Array.isAr
 
 /** Comparte el lector del comprobante; nunca suma impuestos de cada concepto. */
 function comprobanteDesdeXml(xml: string): any {
+  if (Buffer.byteLength(xml ?? '', 'utf8') > 2 * 1024 * 1024) throw new BadRequestError('El XML del CFDI excede 2 MiB.')
+  // CFDI never needs a DTD. Refuse it before even the validator sees untrusted entities.
+  if (/<!DOCTYPE|<!ENTITY/i.test(xml)) throw new BadRequestError('El CFDI no admite DTD ni declaraciones de entidades.')
   if (!xml?.trim()) throw new BadRequestError('El XML del CFDI está vacío.')
   if (XMLValidator.validate(xml) !== true) throw new BadRequestError('El archivo no es un XML válido.')
   const doc = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_', removeNSPrefix: true }).parse(xml)
