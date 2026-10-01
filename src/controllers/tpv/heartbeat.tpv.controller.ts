@@ -1,8 +1,12 @@
 import { NextFunction, Request, Response } from 'express'
 import { HeartbeatData, tpvHealthService } from '../../services/tpv/tpv-health.service'
+import { issueCommandCredential, resolveCommandTerminal } from '../../services/tpv/command-credential.service'
+import { UnauthorizedError, ForbiddenError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { terminalRegistry } from '../../communication/sockets/terminal-registry'
+import { heartbeatSchema } from '../../schemas/tpv.schema'
+import { buildAudienceConditions } from '../../services/appUpdate/audienceTargeting'
 import { AppEnvironment, UpdateMode } from '@prisma/client'
 
 /**
@@ -128,6 +132,7 @@ async function getMerchantConfigVersion(terminalId: string): Promise<string | nu
 async function checkForForcedUpdate(
   currentVersion: string | undefined,
   currentVersionCode: number | undefined,
+  terminal?: { id: string; venueId: string },
 ): Promise<{
   versionName: string
   versionCode: number
@@ -150,6 +155,8 @@ async function checkForForcedUpdate(
     const forceUpdate = await prisma.appUpdate.findFirst({
       where: {
         environment,
+        platform: 'ANDROID_TPV',
+        OR: buildAudienceConditions(terminal?.venueId, terminal?.id),
         isActive: true,
         updateMode: UpdateMode.FORCE,
         versionCode: { gt: versionCode }, // Only if newer than current version
@@ -218,7 +225,13 @@ function resolveClientIp(req: Request<any, any, any>): string | undefined {
  */
 export async function processHeartbeat(req: Request<{}, {}, HeartbeatData>, res: Response, next: NextFunction): Promise<void> {
   try {
-    const heartbeatData = req.body
+    const parsed = heartbeatSchema.safeParse({ body: req.body })
+    if (!parsed.success) {
+      res.status(400).json({ success: false, message: 'Datos de heartbeat inválidos', errors: parsed.error.issues })
+      return
+    }
+    const heartbeatData = parsed.data.body
+    let updateTerminal: { id: string; venueId: string; brand?: string | null } | undefined
     const clientIp = resolveClientIp(req)
 
     logger.debug(`Heartbeat received from terminal ${heartbeatData.terminalId}`, {
@@ -243,9 +256,10 @@ export async function processHeartbeat(req: Request<{}, {}, HeartbeatData>, res:
             { id: heartbeatData.terminalId },
           ],
         },
-        select: { venueId: true, name: true },
+        select: { id: true, venueId: true, name: true, brand: true },
       })
       if (terminal) {
+        updateTerminal = terminal
         terminalRegistry.register(heartbeatData.terminalId, null, terminal.venueId, terminal.name || undefined)
         logger.debug(`📡 [HTTP-Heartbeat] Terminal registered: ${heartbeatData.terminalId} (venue: ${terminal.venueId})`)
       }
@@ -258,7 +272,11 @@ export async function processHeartbeat(req: Request<{}, {}, HeartbeatData>, res:
 
     // Get pending commands for this terminal (Square Terminal API polling pattern)
     // This delivers commands via HTTP instead of requiring socket connection
-    const pendingCommands = await tpvHealthService.getPendingCommands(heartbeatData.terminalId)
+    const commandTerminal = await resolveCommandTerminal(req, heartbeatData.terminalId)
+    const pendingCommands =
+      commandTerminal && (commandTerminal.commandProtocolVersion ?? 0) < 2
+        ? await tpvHealthService.getPendingCommands(commandTerminal.id)
+        : []
 
     // Layer 2 of 3-layer cache invalidation: Include config version in heartbeat response
     // Android compares this with its cached version and refreshes if they don't match
@@ -269,7 +287,10 @@ export async function processHeartbeat(req: Request<{}, {}, HeartbeatData>, res:
     // This is included in EVERY heartbeat response. Terminal must show ForceUpdateDialog
     // until the update is installed. User cannot dismiss or ignore this.
     const versionCode = heartbeatData.systemInfo?.versionCode as number | undefined
-    const forceUpdate = await checkForForcedUpdate(heartbeatData.version, versionCode)
+    const forceUpdate =
+      req.headers['x-tpv-processor'] === 'NEXGO' || updateTerminal?.brand?.toUpperCase().includes('NEXGO')
+        ? null
+        : await checkForForcedUpdate(heartbeatData.version, versionCode, updateTerminal)
 
     logger.debug(`Heartbeat processed, server status: ${terminalHealth.status}`, {
       terminalId: heartbeatData.terminalId,
@@ -354,6 +375,10 @@ export async function acknowledgeCommand(
     })
 
     // Service validates terminal ownership before processing
+    const commandTerminal = await resolveCommandTerminal(req, terminalId)
+    if (!commandTerminal)
+      throw new UnauthorizedError('La terminal debe autenticar la confirmación del comando', 'TPV_COMMAND_AUTH_REQUIRED')
+
     await tpvHealthService.acknowledgeCommand(
       commandId,
       terminalId,
@@ -406,6 +431,75 @@ export async function getTerminalStatus(req: Request<{ serialNumber: string }>, 
     })
   } catch (error) {
     logger.error(`Failed to get terminal status for ${req.params.serialNumber}:`, error)
+    next(error)
+  }
+}
+
+/** Provision existing APKs once after authenticated TPV login; never from serial alone. */
+export async function provisionCommandCredential(req: Request, res: Response, next: NextFunction) {
+  try {
+    const identifier = req.body?.terminalId
+    if (typeof identifier !== 'string' || !identifier.trim()) {
+      res.status(400).json({ message: 'El terminalId es requerido' })
+      return
+    }
+    const terminal = await resolveCommandTerminal(req, identifier, true)
+    if (!terminal) throw new ForbiddenError('La sesión no pertenece a esta terminal')
+    res.json({
+      commandToken: await issueCommandCredential(
+        terminal.id,
+        typeof req.headers['x-tpv-command-token'] === 'string' ? req.headers['x-tpv-command-token'] : undefined,
+      ),
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** A bounded, event-triggered pull. Called on safe foreground/reconnect or a socket hint. */
+export async function commandsReady(req: Request, res: Response, next: NextFunction) {
+  try {
+    const identifier = req.body?.terminalId
+    if (typeof identifier !== 'string' || !identifier.trim()) {
+      res.status(400).json({ message: 'El terminalId es requerido' })
+      return
+    }
+    const terminal = await resolveCommandTerminal(req, identifier)
+    if (!terminal) throw new UnauthorizedError('La terminal debe autenticar la entrega de comandos', 'TPV_COMMAND_AUTH_REQUIRED')
+    const sessionId = req.body?.sessionId
+    if (typeof sessionId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(sessionId)) {
+      res.status(400).json({ message: 'La sesión de la app es requerida' })
+      return
+    }
+    if (terminal.commandProtocolVersion !== 2 || terminal.commandSessionId !== sessionId) {
+      await prisma.terminal.update({ where: { id: terminal.id }, data: { commandProtocolVersion: 2, commandSessionId: sessionId } })
+    }
+    res.json({ pendingCommands: await tpvHealthService.getPendingCommands(terminal.id, true) })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** One permit per execution, never a polling loop. Cancelled/expired work cannot run later. */
+export async function permitCommand(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { terminalId, commandId, sessionId } = req.body ?? {}
+    if (typeof terminalId !== 'string' || !terminalId || typeof commandId !== 'string' || !commandId) {
+      res.status(400).json({ message: 'Terminal y comando requeridos' })
+      return
+    }
+    const terminal = await resolveCommandTerminal(req, terminalId)
+    if (!terminal) throw new UnauthorizedError('Identidad de terminal requerida')
+    const { tpvCommandQueueService } = await import('../../services/tpv/command-queue.service')
+    if (typeof sessionId !== 'string' || sessionId !== terminal.commandSessionId) {
+      res.status(409).json({ permitted: false, message: 'La sesión de la app cambió' })
+      return
+    }
+    const permitted = await tpvCommandQueueService.updateCommandStatus(commandId, 'EXECUTING', undefined, undefined, terminal.id, {
+      executionSessionId: sessionId,
+    })
+    res.status(permitted ? 200 : 409).json({ permitted, message: permitted ? 'Comando autorizado' : 'El comando ya no está pendiente' })
+  } catch (error) {
     next(error)
   }
 }

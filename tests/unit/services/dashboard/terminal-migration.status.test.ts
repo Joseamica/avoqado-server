@@ -29,7 +29,7 @@ describe('migrateStatus', () => {
     })
   })
 
-  it('confirmed=true once device re-bound after wipe AND is online under the new venue', async () => {
+  it('reports recent contact under the new venue without claiming SENT was acknowledged', async () => {
     m.terminal.findUnique.mockResolvedValue({
       id: 'term-1',
       venueId: 'venue-new',
@@ -37,9 +37,33 @@ describe('migrateStatus', () => {
       lastHeartbeat: new Date(), // fresh → online
     })
     const r = await migrateStatus('term-1', 'cmd-1')
-    expect(r.reboundAfterWipe).toBe(true)
+    expect(r.reboundAfterWipe).toBe(false)
     expect(r.onlineUnderNewVenue).toBe(true)
-    expect(r.confirmed).toBe(true)
+    expect(r.confirmed).toBe(false)
+    expect(r.commandDelivered).toBe(false)
+  })
+
+  it.each(['FAILED', 'EXPIRED', 'CANCELLED'])('never confirms a %s migration despite later device contact', async status => {
+    m.tpvCommandQueue.findUnique.mockResolvedValue({
+      id: 'cmd-1',
+      terminalId: 'term-1',
+      venueId: 'venue-new',
+      commandType: 'FACTORY_RESET',
+      status,
+      createdAt: T0,
+      resultMessage: 'Detalle del fallo',
+    })
+    m.terminal.findUnique.mockResolvedValue({
+      id: 'term-1',
+      venueId: 'venue-new',
+      lastActivationStatusCheckAt: new Date(T0.getTime() + 60_000),
+      lastHeartbeat: new Date(),
+    })
+    expect(await migrateStatus('term-1', 'cmd-1')).toMatchObject({
+      confirmed: false,
+      commandDelivered: false,
+      resultMessage: 'Detalle del fallo',
+    })
   })
 
   it('confirmed=false when activation check predates the wipe command', async () => {
@@ -62,7 +86,7 @@ describe('migrateStatus', () => {
       lastHeartbeat: new Date(Date.now() - 10 * 60_000), // 10 min ago → offline
     })
     const r = await migrateStatus('term-1', 'cmd-1')
-    expect(r.reboundAfterWipe).toBe(true)
+    expect(r.reboundAfterWipe).toBe(false)
     expect(r.onlineUnderNewVenue).toBe(false)
     expect(r.confirmed).toBe(false)
   })
@@ -92,4 +116,20 @@ describe('migrateStatus', () => {
     })
     await expect(migrateStatus('term-1', 'cmd-1')).rejects.toThrow('Migration command not found for terminal')
   })
+})
+
+it('only confirms a completed migration after an authenticated new app session', async () => {
+  m.tpvCommandQueue.findUnique.mockResolvedValue({
+    id: 'cmd-1',
+    terminalId: 'term-1',
+    venueId: 'venue-new',
+    commandType: 'FACTORY_RESET',
+    status: 'COMPLETED',
+    createdAt: T0,
+    payload: { _deliveryProtocol: 2, _originCommandSessionId: 'old-boot' },
+  })
+  m.terminal.findUnique.mockResolvedValue({ id: 'term-1', venueId: 'venue-new', commandSessionId: 'old-boot', lastHeartbeat: new Date() })
+  expect((await migrateStatus('term-1', 'cmd-1')).confirmed).toBe(false)
+  m.terminal.findUnique.mockResolvedValue({ id: 'term-1', venueId: 'venue-new', commandSessionId: 'new-boot', lastHeartbeat: new Date() })
+  expect((await migrateStatus('term-1', 'cmd-1')).confirmed).toBe(true)
 })

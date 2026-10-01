@@ -252,16 +252,17 @@ export class TpvCommandExecutionService {
       return
     }
 
-    // Emit to venue room (terminals subscribe to their venue room)
-    // The terminal will filter by its own ID
-    server.to(`venue_${command.terminal.venueId}`).emit(SocketEventType.TPV_COMMAND_SEND, {
-      terminalId: command.terminal.serialNumber || command.terminal.id,
-      ...commandPayload,
-      timestamp: new Date(),
-    })
-
-    // Update command status to SENT
-    await tpvCommandQueueService.updateCommandStatus(commandId, 'SENT')
+    if (!(await tpvCommandQueueService.updateCommandStatus(commandId, 'SENT'))) return
+    socketManager.broadcastToTerminal(
+      command.terminal.venueId,
+      command.terminal.serialNumber || command.terminal.id,
+      SocketEventType.TPV_COMMAND_SEND,
+      {
+        terminalId: command.terminal.serialNumber || command.terminal.id,
+        ...commandPayload,
+        timestamp: new Date(),
+      },
+    )
 
     logger.info(`Command sent to terminal ${command.terminalId}`, {
       commandId,

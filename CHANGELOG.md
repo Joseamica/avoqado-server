@@ -9,6 +9,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- TPV: entrega y confirmación verifican identidad; resultados finales inmutables, cancelación y reversión atómicas e idempotencia de comandos. Las TPVs del protocolo nuevo usan cola sin vencimiento y recuperación por eventos, con permiso de ejecución ligado al arranque. La migración requiere recibo completado y nuevo arranque autenticado. Versiones validan enteros, plataforma, audiencia y canal Nexgo/TMS; comandos no implementados se rechazan.
+
+- TPV protocolo 2: la migración guarda una intención y conserva el venue de origen hasta el permiso de ejecución seguro; revalida pagos, traslada y audita en una transacción. Un bloqueo explícito evita dos intenciones concurrentes incluso cuando Prisma omite una actualización vacía.
+- TPV superadmin: el traslado de venue, los merchants y el comando de restablecimiento ahora se guardan en una transacción; un fallo al encolar ya no devuelve éxito ni deja una migración parcial. Se validan comercio activo/compatible y configuración heredada de la organización antes del traslado.
+- Endpoints canónicos para comandos, historial paginado y ajustes de TPVs. Los comandos devuelven su identificador real; instalar una versión requiere `versionCode` numérico; la exportación de logs no implementada se rechaza. Generar códigos y activar remotamente registran al administrador autenticado.
+- Inventario exclusivo de TPVs con búsqueda/filtros en servidor, totales agregados, límite de 100 por página e índices de paginación. El contrato legacy de dispositivos se conserva. El detalle incluye la migración pendiente y los cambios operativos invalidan la consola por Socket.IO.
+
 - **PlayTelecom vuelve a corregir monto y forma de pago de un cobro en EFECTIVO desde la verificación de venta (21-sep-2026).**
   Desde el deploy del 18-sep todo cobro registrado por la terminal lleva la llave `pricing` (en efectivo sin afiliación vale
   `null`) y `cobrosDelProtocolo` lo clasificaba «del protocolo de costo»: 162 SIMs de $0 quedaron protegidos en dos días y el

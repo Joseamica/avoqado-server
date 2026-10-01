@@ -53,7 +53,7 @@ beforeEach(() => {
   jest.clearAllMocks()
   mockedTerminalFindUnique.mockResolvedValue(TERMINAL)
   mockedQueueFindMany.mockResolvedValue([])
-  mockedQueueUpdateMany.mockResolvedValue({ count: 0 })
+  mockedQueueUpdateMany.mockResolvedValue({ count: 1 })
 })
 
 describe('getPendingCommands — expiring stale in-flight commands', () => {
@@ -116,6 +116,7 @@ describe('getPendingCommands — expiring stale in-flight commands', () => {
     mockedQueueFindMany.mockResolvedValue([
       {
         id: 'cmd-1',
+        status: 'QUEUED',
         correlationId: 'corr-1',
         commandType: 'RESTART',
         payload: null,
@@ -134,12 +135,12 @@ describe('getPendingCommands — expiring stale in-flight commands', () => {
     expect(commands[0]).toMatchObject({ commandId: 'cmd-1', type: 'RESTART' })
 
     expect(mockedQueueFindMany.mock.calls[0][0]).toMatchObject({
-      where: { terminalId: 'term-1', status: { in: ['PENDING', 'QUEUED'] } },
+      where: { terminalId: 'term-1', OR: [{ status: { in: ['PENDING', 'QUEUED'] } }] },
     })
 
     const markSent = mockedQueueUpdateMany.mock.calls.find(([args]) => args?.data?.status === 'SENT')
     expect(markSent).toBeDefined()
-    expect(markSent![0].where.id.in).toEqual(['cmd-1'])
+    expect(markSent![0].where).toEqual({ id: 'cmd-1', status: 'QUEUED' })
   })
 
   it('returns an empty list without throwing when the sweep fails', async () => {
@@ -162,6 +163,7 @@ describe('getPendingCommands — segundos restantes', () => {
 
   const fila = (expiresAt: Date | null) => ({
     id: 'cmd-1',
+    status: 'QUEUED',
     correlationId: 'corr-1',
     commandType: 'FACTORY_RESET',
     payload: null,
@@ -189,4 +191,10 @@ describe('getPendingCommands — segundos restantes', () => {
 
     expect(cmd).toMatchObject({ expiresAt: null, expiresInSeconds: null })
   })
+})
+
+it('does not deliver a command cancelled between selection and claim', async () => {
+  mockedQueueFindMany.mockResolvedValue([{ id: 'racing-cancel' }])
+  mockedQueueUpdateMany.mockResolvedValue({ count: 0 })
+  expect(await tpvHealthService.getPendingCommands('term-1')).toEqual([])
 })

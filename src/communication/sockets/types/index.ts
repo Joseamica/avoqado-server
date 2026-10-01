@@ -80,6 +80,7 @@ export enum SocketEventType {
 
   // Business Events - System
   SYSTEM_ALERT = 'system_alert',
+  SUPERADMIN_TERMINAL_UPDATED = 'superadmin:terminal:status',
   HYBRID_CAMPAIGN_UPDATED = 'superadmin:hybrid-campaign:updated',
   VENUE_UPDATE = 'venue_update',
   TABLE_STATUS_CHANGE = 'table_status_change',
