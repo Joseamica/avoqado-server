@@ -328,7 +328,8 @@ export async function issueCfdiForOrder(
     if (params.expectedVenueId && existing.venueId && existing.venueId !== params.expectedVenueId) {
       throw new Error(`Order ${params.orderId} not found`) // → 404, no cross-venue leak
     }
-    return { status: 'STAMPED', cfdi: existing }
+    // Esta llamada no timbró nada: la factura ya existía (Codex R3-2). Sin la marca, el que llama dice «facturada».
+    return { status: 'STAMPED', cfdi: existing, alreadyIssued: true }
   }
 
   if (!existing || existing.protocoloIva === 1) return emitirConEntrada(params, idempotencyKey, deps)
@@ -374,8 +375,8 @@ export async function issueCfdiForOrder(
       // Slot already taken — inspect the current status to decide the response.
       const existing = await deps.findExistingCfdi(idempotencyKey)
       if (existing?.status === 'STAMPED') {
-        // Another request already succeeded — idempotent success.
-        return { status: 'STAMPED', cfdi: existing }
+        // Another request already succeeded — idempotent success, pero esta llamada no timbró nada.
+        return { status: 'STAMPED', cfdi: existing, alreadyIssued: true }
       }
       if (existing?.status === 'STAMPING') {
         // Another request is in-flight. But a process crash / rolling deploy mid-stamp could
@@ -592,7 +593,8 @@ export async function emitirConEntrada(
   })
   let cfdi = reserved.cfdi
   if (params.expectedVenueId && cfdi.venueId !== params.expectedVenueId) throw new Error(`Order ${params.orderId} not found`)
-  if (cfdi.status === 'STAMPED') return { status: 'STAMPED', cfdi }
+  // Otra petición timbró esta misma llave antes que ésta: no se timbró nada nuevo.
+  if (cfdi.status === 'STAMPED') return { status: 'STAMPED', cfdi, alreadyIssued: true }
   if (!['STAMPING', 'STAMP_FAILED', 'VALIDATION_FAILED'].includes(cfdi.status)) throw new ConflictError(PROCESANDO)
   if (reserved.fresh && reserved.reasons.length) return { status: 'VALIDATION_FAILED', cfdi, reasons: reserved.reasons }
   // A concurrent legacy row is retried through its existing, explicitly legacy route.
@@ -781,7 +783,9 @@ export async function enviarIntentoCapturado(
         : await deps.persistCfdi({ idempotencyKey, ...data }, where)
       const current = updated ?? (await deps.findExistingCfdi(idempotencyKey))
       if (!updated) await reportConflictingVersion(current, null)
-      if (current?.status === 'STAMPED') return { status: 'STAMPED', cfdi: current }
+      // Misma versión: es el timbre de ESTE envío, completado por la conciliación. Otra versión: lo timbró otro envío.
+      if (current?.status === 'STAMPED')
+        return { status: 'STAMPED', cfdi: current, ...(current.attempts !== version ? { alreadyIssued: true } : {}) }
       if (!current || current.attempts !== version || current.status !== 'STAMP_FAILED') throw new ConflictError(PROCESANDO)
       return { status: 'STAMP_FAILED', cfdi: current }
     }

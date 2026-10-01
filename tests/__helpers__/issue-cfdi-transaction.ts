@@ -6,6 +6,8 @@ export function withIssueTransaction<T extends IssueCfdiDeps>(deps: T): T {
   const tx = {
     $queryRaw: jest.fn().mockResolvedValue([{ venueId: 'v1', organizationId: 'org1' }]),
     $executeRaw: jest.fn().mockResolvedValue(1),
+    // La versión en conflicto deja rastro (`CFDI_TIMBRE_DUPLICADO`) en la misma frontera transaccional.
+    activityLog: { create: jest.fn().mockResolvedValue({}) },
     cfdi: {
       findUnique: jest.fn(({ where }) => deps.findExistingCfdi(where.idempotencyKey)),
       findFirst: jest.fn().mockResolvedValue(null),

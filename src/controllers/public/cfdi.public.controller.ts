@@ -25,7 +25,7 @@ import { env } from '../../config/env'
  *  WhatsApp. Prod: api.avoqado.io; dev: set BASE_URL to the tunnel (ngrok) URL. */
 const API_PUBLIC_BASE = process.env.BASE_URL || 'https://api.avoqado.io'
 
-/** Resolve the latest STAMPED CFDI (with PDF+XML) for a receipt accessKey. */
+/** Resolve the latest STAMPED sale invoice (INGRESO, with PDF+XML) for a receipt accessKey — never a credit note (H19). */
 async function resolveStampedCfdi(accessKey: string) {
   const receipt = await prisma.digitalReceipt.findUnique({
     where: { accessKey },
@@ -34,7 +34,7 @@ async function resolveStampedCfdi(accessKey: string) {
   const order = receipt?.payment?.order
   if (!order) return { order: null as null, cfdi: null }
   const cfdi = await prisma.cfdi.findFirst({
-    where: { orderId: order.id, status: 'STAMPED' },
+    where: { orderId: order.id, status: 'STAMPED', type: 'INGRESO' },
     orderBy: { createdAt: 'desc' },
     select: { serie: true, folio: true, uuid: true, pdfUrl: true, xmlUrl: true },
   })
@@ -91,15 +91,8 @@ export async function autofacturaController(req: Request<{ accessKey: string }>,
       return
     }
 
-    // 4. Already stamped guard — prevent double-invoice for same order
-    const existing = await prisma.cfdi.findFirst({
-      where: { orderId: order.id, status: 'STAMPED' },
-    })
-    if (existing) {
-      res.status(409).json({ error: 'Esta cuenta ya fue facturada.' })
-      return
-    }
-
+    // 4. «Ya facturada» lo decide el motor (sólo cuenta una factura de VENTA vigente; una nota de crédito no, H19):
+    //    devuelve `alreadyIssued` ⇒ 409 abajo, y una cancelación en trámite ⇒ 409 en el catch.
     // 5. Delegate to the issuance engine (enforces facturacionEnabled + autofacturaEnabled)
     const result = await issueCfdiForOrder({
       orderId: order.id,
@@ -217,10 +210,10 @@ export async function getAutofacturaStatusController(req: Request<{ accessKey: s
       return
     }
 
-    // Return the most-recent CFDI for this order (any status) so the portal
-    // can show "ya facturada / descargar" without re-issuing.
+    // Return the most-recent sale invoice (INGRESO, any status) so the portal can show "ya facturada /
+    // descargar" without re-issuing. A credit note is never "the" invoice of the ticket (H19).
     const cfdi = await prisma.cfdi.findFirst({
-      where: { orderId: order.id },
+      where: { orderId: order.id, type: 'INGRESO' },
       orderBy: { createdAt: 'desc' },
       select: { uuid: true, status: true, serie: true, folio: true, pdfUrl: true, xmlUrl: true },
     })

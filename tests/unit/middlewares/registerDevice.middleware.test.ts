@@ -1,13 +1,20 @@
 import { DeviceFormFactor } from '@prisma/client'
 
-import { __resetDeviceSeenCache, registerDeviceMiddleware } from '../../../src/middlewares/registerDevice.middleware'
-import { registerDeviceSeen } from '../../../src/services/mobile/deviceRegistry.service'
+import { __resetDeviceSeenCache, capturarVenueDeLaRuta, registerDeviceMiddleware } from '../../../src/middlewares/registerDevice.middleware'
+import { resolveUserRoleForVenue } from '../../../src/middlewares/checkPermission.middleware'
+import { POS_SIN_APARATO_MUESTREO_MS, registerDeviceSeen, registerPosSinAparato } from '../../../src/services/mobile/deviceRegistry.service'
 
 jest.mock('../../../src/services/mobile/deviceRegistry.service', () => ({
   registerDeviceSeen: jest.fn().mockResolvedValue({ terminalId: 't1', created: true, name: 'iPhone 15 Pro' }),
+  registerPosSinAparato: jest.fn().mockResolvedValue(true),
+  // La constante REAL: si producción cambia el muestreo, estas pruebas lo miden (Codex N4).
+  POS_SIN_APARATO_MUESTREO_MS: jest.requireActual('../../../src/services/mobile/deviceRegistry.service').POS_SIN_APARATO_MUESTREO_MS,
 }))
+jest.mock('../../../src/middlewares/checkPermission.middleware', () => ({ resolveUserRoleForVenue: jest.fn() }))
 
 const mockRegister = registerDeviceSeen as jest.Mock
+const mockPosSinAparato = registerPosSinAparato as jest.Mock
+const mockRol = resolveUserRoleForVenue as jest.Mock
 
 const BASE_HEADERS = {
   'x-device-id': 'device-abc',
@@ -19,8 +26,12 @@ const BASE_HEADERS = {
   'x-app-version': '1.4.0',
 }
 
-function makeReq(headers: Record<string, any> = BASE_HEADERS, authContext: any = { venueId: 'venue_1', userId: 'staff_1' }) {
-  return { headers, authContext } as any
+function makeReq(
+  headers: Record<string, any> = BASE_HEADERS,
+  authContext: any = { venueId: 'venue_1', userId: 'staff_1' },
+  params: Record<string, string> = {},
+) {
+  return { headers, authContext, params } as any
 }
 
 /**
@@ -28,17 +39,33 @@ function makeReq(headers: Record<string, any> = BASE_HEADERS, authContext: any =
  * secuencia: corre el middleware y, salvo que se pida lo contrario, dispara el evento
  * como haría Express al terminar de enviar la respuesta.
  */
-function run(req: any, { emitFinish = true }: { emitFinish?: boolean } = {}) {
+function run(
+  req: any,
+  {
+    emitFinish = true,
+    emitClose = false,
+    locals = {},
+    venueDeLaRuta,
+  }: { emitFinish?: boolean; emitClose?: boolean; locals?: Record<string, unknown>; venueDeLaRuta?: string } = {},
+) {
   const next = jest.fn()
-  const finishHandlers: Array<() => void> = []
+  const handlers: Record<string, Array<() => void>> = {}
   const res = {
+    locals,
+    writableFinished: false,
     on: (event: string, handler: () => void) => {
-      if (event === 'finish') finishHandlers.push(handler)
+      ;(handlers[event] ??= []).push(handler)
     },
   } as any
 
   registerDeviceMiddleware(req, res, next)
-  if (emitFinish) finishHandlers.forEach(handler => handler())
+  // Lo que hace `router.param('venueId', …)` al resolver la ruta; después Express puede restaurar `req.params`.
+  if (venueDeLaRuta) capturarVenueDeLaRuta(req, res, () => undefined, venueDeLaRuta)
+  if (emitFinish) {
+    res.writableFinished = true // Node lo marca justo antes de emitir `finish`
+    ;(handlers.finish ?? []).forEach(handler => handler())
+  }
+  if (emitClose) (handlers.close ?? []).forEach(handler => handler())
   return next
 }
 
@@ -46,6 +73,8 @@ beforeEach(() => {
   jest.clearAllMocks()
   __resetDeviceSeenCache()
   mockRegister.mockResolvedValue({ terminalId: 't1', created: true, name: 'iPhone 15 Pro' })
+  mockPosSinAparato.mockResolvedValue(true)
+  mockRol.mockResolvedValue({ role: 'CASHIER', source: 'staffVenue' })
 })
 
 describe('registerDeviceMiddleware', () => {
@@ -230,5 +259,174 @@ describe('registerDeviceMiddleware', () => {
       registerDeviceMiddleware(makeReq(), {} as any, next)
       expect(next).toHaveBeenCalledTimes(1)
     })
+  })
+})
+
+// ── IVA por producto (spec planes 6-7, §5.5): una sesión del POS sin identidad de aparato es una app vieja ──────────
+describe('sesión del POS sin identidad de aparato', () => {
+  const SIN_IDENTIDAD = {}
+  const HORA = POS_SIN_APARATO_MUESTREO_MS
+  const pos = (venueId = 'venue_1') => ({ venueId, userId: 'staff_1', origen: 'POS' })
+  const flush = () => new Promise(resolve => setImmediate(resolve))
+  const anoto = (venueId: string) => expect(mockPosSinAparato).toHaveBeenCalledWith(venueId, expect.any(Date))
+  /** Una escritura que la prueba termina cuando quiere (base lenta). */
+  const escrituraPendiente = () => {
+    let terminar!: (guardado: boolean) => void
+    mockPosSinAparato.mockReturnValueOnce(new Promise<boolean>(resolve => (terminar = resolve)))
+    return (guardado: boolean) => terminar(guardado)
+  }
+  let reloj: jest.SpyInstance
+
+  beforeEach(() => {
+    reloj = jest.spyOn(Date, 'now').mockReturnValue(1_000_000)
+  })
+  afterEach(() => reloj.mockRestore())
+
+  it('anota el negocio del token, con la hora del instante, y no registra aparato', async () => {
+    run(makeReq(SIN_IDENTIDAD, pos()))
+    await flush()
+    expect(mockRol).toHaveBeenCalledWith(expect.objectContaining({ userId: 'staff_1', targetVenueId: 'venue_1' }))
+    expect(mockPosSinAparato).toHaveBeenCalledWith('venue_1', new Date(1_000_000))
+    expect(mockRegister).not.toHaveBeenCalled()
+  })
+
+  it('🔴 R3-1: una persona dada de baja en el negocio de su propio token no anota ni le gasta el turno a un POS vigente', async () => {
+    mockRol.mockResolvedValueOnce({ role: null, source: 'none' })
+    run(makeReq(SIN_IDENTIDAD, pos()))
+    await flush()
+    expect(mockPosSinAparato).not.toHaveBeenCalled()
+
+    run(makeReq(SIN_IDENTIDAD, pos()))
+    await flush()
+    anoto('venue_1')
+  })
+
+  it('una sesión de A operando en B marca B si la persona pertenece a B', async () => {
+    run(makeReq(SIN_IDENTIDAD, pos('venue_A'), { venueId: 'venue_B' }))
+    await flush()
+    expect(mockRol).toHaveBeenCalledWith(expect.objectContaining({ userId: 'staff_1', targetVenueId: 'venue_B' }))
+    anoto('venue_B')
+  })
+
+  it('🔴 N1: una sesión de A en la ruta de B SIN pertenecer a B no anota, ni le aparta el turno a un POS real de B', async () => {
+    mockRol.mockResolvedValueOnce({ role: null, source: 'none' })
+    run(makeReq(SIN_IDENTIDAD, pos('venue_A'), { venueId: 'venue_B' }))
+    await flush()
+    expect(mockPosSinAparato).not.toHaveBeenCalled()
+
+    run(makeReq(SIN_IDENTIDAD, pos('venue_B')))
+    await flush()
+    anoto('venue_B')
+  })
+
+  it('🔴 #3: el negocio que capturó la ruta manda aunque Express ya haya restaurado `req.params`', async () => {
+    run(makeReq(SIN_IDENTIDAD, pos('venue_A'), {}), { venueDeLaRuta: 'venue_B' })
+    await flush()
+    anoto('venue_B')
+    expect(mockPosSinAparato).not.toHaveBeenCalledWith('venue_A', expect.anything())
+  })
+
+  it('un token del dashboard (sin origen) no anota nada', () => {
+    run(makeReq(SIN_IDENTIDAD, { venueId: 'venue_1', userId: 'staff_1' }))
+    expect(mockPosSinAparato).not.toHaveBeenCalled()
+  })
+
+  it('una app nueva con identidad no anota (se registra como siempre)', () => {
+    run(makeReq(BASE_HEADERS, pos()))
+    expect(mockPosSinAparato).not.toHaveBeenCalled()
+    expect(mockRegister).toHaveBeenCalledTimes(1)
+  })
+
+  it('identidad incompleta (sin plataforma) cuenta como sin identidad', async () => {
+    run(makeReq({ 'x-device-id': 'device-abc' }, pos()))
+    await flush()
+    anoto('venue_1')
+  })
+
+  it('sin negocio en la ruta ni en el token no anota', () => {
+    run(makeReq(SIN_IDENTIDAD, { userId: 'staff_1', origen: 'POS' }))
+    expect(mockPosSinAparato).not.toHaveBeenCalled()
+  })
+
+  it('no anota antes de que termine la respuesta', () => {
+    run(makeReq(SIN_IDENTIDAD, pos()), { emitFinish: false })
+    expect(mockPosSinAparato).not.toHaveBeenCalled()
+  })
+
+  it('🔴 #7: una petición abortada (`close` sin `finish`) también cuenta; un aparato con identidad no se registra por eso', async () => {
+    run(makeReq(SIN_IDENTIDAD, pos()), { emitFinish: false, emitClose: true })
+    await flush()
+    anoto('venue_1')
+    run(makeReq(BASE_HEADERS, pos()), { emitFinish: false, emitClose: true })
+    expect(mockRegister).not.toHaveBeenCalled()
+  })
+
+  it('la pantalla de capacidades (registro explícito) no silencia la observación', async () => {
+    run(makeReq(SIN_IDENTIDAD, pos()), { locals: { deviceRegistrationHandled: true } })
+    await flush()
+    anoto('venue_1')
+  })
+
+  it('dentro de la hora no vuelve a anotar; justo al cumplirse, sí; otro negocio no espera', async () => {
+    run(makeReq(SIN_IDENTIDAD, pos()))
+    await flush()
+    reloj.mockReturnValue(1_000_000 + HORA - 1)
+    run(makeReq(SIN_IDENTIDAD, pos()))
+    run(makeReq(SIN_IDENTIDAD, pos('venue_2')))
+    await flush()
+    expect(mockPosSinAparato).toHaveBeenCalledTimes(2)
+    reloj.mockReturnValue(1_000_000 + HORA)
+    run(makeReq(SIN_IDENTIDAD, pos()))
+    await flush()
+    expect(mockPosSinAparato).toHaveBeenCalledTimes(3)
+  })
+
+  it('🔴 N2: la hora cuenta desde el instante GUARDADO, no desde que terminó una escritura lenta', async () => {
+    const terminar = escrituraPendiente()
+    run(makeReq(SIN_IDENTIDAD, pos()))
+    await flush()
+    reloj.mockReturnValue(1_000_000 + 10_000) // la base tardó 10 s
+    terminar(true)
+    await flush()
+    reloj.mockReturnValue(1_000_000 + HORA)
+    run(makeReq(SIN_IDENTIDAD, pos()))
+    await flush()
+    expect(mockPosSinAparato).toHaveBeenCalledTimes(2)
+  })
+
+  it('🔴 N3: si la reserva se expulsó mientras se escribía, al terminar no se reinserta', async () => {
+    const terminar = escrituraPendiente()
+    run(makeReq(SIN_IDENTIDAD, pos()))
+    await flush()
+    __resetDeviceSeenCache() // la poda (o un reinicio del caché) la quitó
+    terminar(true)
+    await flush()
+    run(makeReq(SIN_IDENTIDAD, pos()))
+    await flush()
+    expect(mockPosSinAparato).toHaveBeenCalledTimes(2)
+  })
+
+  it('si la base falla, reintenta al minuto en vez de perder la hora', async () => {
+    mockPosSinAparato.mockResolvedValueOnce(false)
+    run(makeReq(SIN_IDENTIDAD, pos()))
+    await flush()
+    reloj.mockReturnValue(1_000_000 + 60_000 - 1)
+    run(makeReq(SIN_IDENTIDAD, pos()))
+    await flush()
+    expect(mockPosSinAparato).toHaveBeenCalledTimes(1)
+    reloj.mockReturnValue(1_000_000 + 60_000)
+    run(makeReq(SIN_IDENTIDAD, pos()))
+    await flush()
+    expect(mockPosSinAparato).toHaveBeenCalledTimes(2)
+  })
+
+  it('si la anotación o la consulta de pertenencia lanzan, la cadena sigue y no queda promesa sin manejar', async () => {
+    mockPosSinAparato.mockRejectedValueOnce(new Error('boom'))
+    const next = run(makeReq(SIN_IDENTIDAD, pos()))
+    mockRol.mockRejectedValueOnce(new Error('db caída'))
+    run(makeReq(SIN_IDENTIDAD, pos('venue_A'), { venueId: 'venue_B' }))
+    await flush()
+    expect(mockPosSinAparato).toHaveBeenCalledTimes(1)
+    expect(next).toHaveBeenCalledWith()
   })
 })

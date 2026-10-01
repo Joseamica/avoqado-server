@@ -156,25 +156,24 @@ export async function resolveUserRoleForVenue(params: {
   // en las rutas que ya caían al camino largo. La memoria muere con el request: no hay
   // caché entre peticiones, para que dar de baja a alguien surta efecto de inmediato.
   const memoKey = `${userId}:${targetVenueId}`
-  if (req) {
-    const cacheado = req.__avqRoleCache?.get(memoKey)
-    if (cacheado) return cacheado
-  }
-  const recordar = (r: ResolvedUserRole): ResolvedUserRole => {
-    if (req) {
-      req.__avqRoleCache ??= new Map()
-      req.__avqRoleCache.set(memoKey, r)
-    }
-    return r
-  }
+  // Se guarda la consulta EN CURSO, no sólo su resultado: dos llamadas simultáneas de la misma petición (la ruta y el
+  // observador de aparatos cuando el cliente aborta, Codex R4-1) comparten una sola ida a la base.
+  const enMemoria = req?.__avqRoleCache?.get(memoKey)
+  if (enMemoria) return enMemoria
+  const resolucion = resolverRolEnLaBase(userId, targetVenueId)
+  if (req) (req.__avqRoleCache ??= new Map()).set(memoKey, resolucion)
   void tokenVenueId
   void tokenRole
+  return resolucion
+}
 
+/** La consulta real de `resolveUserRoleForVenue`, sin memoria: la persona activa, su fila en la sucursal o dueño de la org. */
+async function resolverRolEnLaBase(userId: string, targetVenueId: string): Promise<ResolvedUserRole> {
   // 🔴 H2 (Codex, 2ª pasada): la PERSONA tiene que seguir activa. Antes sólo se miraba su fila en
   // la sucursal: dar de baja la cuenta (Staff.active=false) no le quitaba el rol, cobros incluidos.
   const persona = await prisma.staff.findUnique({ where: { id: userId }, select: { active: true } })
   if (!persona?.active) {
-    return recordar({ role: null, source: 'none' })
+    return { role: null, source: 'none' }
   }
 
   const staffVenue = await prisma.staffVenue.findUnique({
@@ -193,11 +192,11 @@ export async function resolveUserRoleForVenue(params: {
   })
 
   if (staffVenue?.active) {
-    return recordar({
+    return {
       role: staffVenue.role,
       source: 'staffVenue',
       permissionSet: staffVenue.permissionSetId ? staffVenue.permissionSet : null,
-    })
+    }
   }
 
   const targetVenue = await prisma.venue.findUnique({
@@ -206,10 +205,10 @@ export async function resolveUserRoleForVenue(params: {
   })
 
   if (!targetVenue) {
-    return recordar({
+    return {
       role: null,
       source: 'none',
-    })
+    }
   }
 
   const orgMembership = await prisma.staffOrganization.findUnique({
@@ -226,16 +225,16 @@ export async function resolveUserRoleForVenue(params: {
   })
 
   if (orgMembership?.isActive && orgMembership.role === OrgRole.OWNER) {
-    return recordar({
+    return {
       role: StaffRole.OWNER,
       source: 'orgOwner',
-    })
+    }
   }
 
-  return recordar({
+  return {
     role: null,
     source: 'none',
-  })
+  }
 }
 
 /**

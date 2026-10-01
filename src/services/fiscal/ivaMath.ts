@@ -28,24 +28,32 @@ export function splitIvaIncluded(grossCents: number, rate: number): { netCents: 
 }
 
 /**
- * Distribute an integer-cent `totalCents` across `weightsCents` proportionally, with the
- * LARGEST-weight bucket absorbing the rounding remainder so the parts sum to `totalCents`
- * EXACTLY (no cent lost/created). Empty weights → `[]`; all-zero weights → the whole total
- * lands in the first bucket (there is no proportion to honor).
+ * D19 (spec planes 6-7): reparte `totalCents` entre `pesos` en proporción, al centavo EXACTO. Toma el piso exacto (BigInt) de
+ * total·peso/Σ y los centavos que sobran van a los mayores remanentes (empate: el de mayor peso; luego, el primero). Nunca da
+ * una parte negativa (H17: el viejo redondeaba hacia arriba y le restaba al más grande) ni pierde un centavo, y con total ≤ Σ
+ * ninguna parte rebasa su peso. Total negativo (ajuste de reparto): reparte la magnitud y le devuelve el signo. Pesos negativos
+ * cuentan como cero; sin pesos ⇒ `[]`; todos en cero ⇒ el primero se lleva todo (no hay proporción que respetar).
+ * Precondición: total y pesos en CENTAVOS ENTEROS (así llegan de sus cinco llamadores); un peso con fracción se redondea.
  */
-export function allocateByWeights(totalCents: number, weightsCents: number[]): number[] {
-  const n = weightsCents.length
-  if (n === 0) return []
-  const sum = weightsCents.reduce((a, b) => a + b, 0)
-  if (sum <= 0) return weightsCents.map((_, i) => (i === 0 ? totalCents : 0))
-  const parts = weightsCents.map(w => Math.round((totalCents * w) / sum))
-  const drift = totalCents - parts.reduce((a, b) => a + b, 0)
-  if (drift !== 0) {
-    let maxI = 0
-    for (let i = 1; i < n; i++) if (weightsCents[i] > weightsCents[maxI]) maxI = i
-    parts[maxI] += drift
+export function repartirProporcional(totalCents: number, pesos: number[]): number[] {
+  if (pesos.length === 0) return []
+  const ps = pesos.map(p => (p > 0 ? BigInt(Math.round(p)) : 0n))
+  const suma = ps.reduce((a, b) => a + b, 0n)
+  if (suma === 0n) return pesos.map((_, i) => (i === 0 ? totalCents : 0))
+  const magnitud = BigInt(Math.abs(totalCents))
+  const partes = ps.map(p => (magnitud * p) / suma)
+  const resto = ps.map((p, i) => magnitud * p - partes[i] * suma)
+  let sobran = magnitud - partes.reduce((a, b) => a + b, 0n)
+  const orden = ps
+    .map((_, i) => i)
+    .sort((a, b) => (resto[a] !== resto[b] ? (resto[b] > resto[a] ? 1 : -1) : ps[a] !== ps[b] ? (ps[b] > ps[a] ? 1 : -1) : a - b))
+  for (const i of orden) {
+    if (sobran === 0n) break
+    partes[i] += 1n
+    sobran -= 1n
   }
-  return parts
+  const signo = totalCents < 0 ? -1 : 1
+  return partes.map(p => signo * Number(p) || 0)
 }
 
 /**
@@ -93,7 +101,7 @@ export function splitPaymentIvaByOrderRates(
 ): { netCents: number; taxCents: number; taxByRate: Record<string, number> } {
   const meaningful = grossByRate.filter(r => r.grossCents !== 0)
   if (meaningful.length === 0) return splitIvaByRate([{ grossCents: paymentGrossCents, rate: fallbackRate }])
-  const alloc = allocateByWeights(
+  const alloc = repartirProporcional(
     paymentGrossCents,
     meaningful.map(r => r.grossCents),
   )
@@ -186,7 +194,7 @@ export function mezclaDesdeTasas(g: { rate: number; grossCents: number }[]): Mez
 
 /**
  * El desglose de UN cobro (IVA incluido) con la mezcla de su orden, por tratamiento: el mismo reparto que
- * `splitPaymentIvaByOrderRates` (proporcional, el residual a la parte de mayor importe), cada parte cortada con
+ * `splitPaymentIvaByOrderRates` (proporcional al centavo exacto, `repartirProporcional`), cada parte cortada con
  * `splitIvaIncluded` a SU tasa y `taxByRate` con la llave de siempre (`String(tasa)`, sólo con IVA). Sin renglones ⇒ todo al
  * 16 %, como siempre.
  */
@@ -195,7 +203,7 @@ export function desglosePorTratamiento(cobroCents: number, mezcla: MezclaPorTrat
   const partes: MezclaPorTratamiento =
     meaningful.length === 0
       ? [{ tratamiento: 'IVA_16', tasa: 0.16, grossCents: cobroCents }]
-      : allocateByWeights(
+      : repartirProporcional(
           cobroCents,
           meaningful.map(m => m.grossCents),
         ).map((grossCents, i) => ({ ...meaningful[i], grossCents }))

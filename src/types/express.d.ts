@@ -17,9 +17,10 @@ declare global {
        * a propósito: muere con el request, así que dar de baja a un empleado o cambiarle
        * el PermissionSet surte efecto en la siguiente petición, no cuando expire un TTL.
        * Existe porque la resolución del rol se consulta hasta 3 veces en la misma cadena
-       * (validateVenueAccess → checkPermission → checkTableOwnership).
+       * (validateVenueAccess → checkPermission → checkTableOwnership). Guarda la consulta EN CURSO (la promesa), para que
+       * dos llamadas simultáneas de la misma petición compartan una sola ida a la base.
        */
-      __avqRoleCache?: Map<string, ResolvedUserRole>
+      __avqRoleCache?: Map<string, Promise<ResolvedUserRole>>
       /** Canonical target resolved before venue permission checks on command routes. */
       tpvCommandTarget?: BoundTpvCommandTarget
       /** Terminal de `/tpv/:tpvId/settings|reset-to-defaults|merchants`, amarrada a su venue real. */

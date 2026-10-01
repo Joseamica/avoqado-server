@@ -18,6 +18,8 @@ export interface AvoqadoJwtPayload extends jwt.JwtPayload {
   terminalSerialNumber?: string // Terminal serial (e.g., "AVQD-2841548417") for auto-attribution
   /** `Session.id` — sesiones revocables (Parte A). Ausente en tokens legacy anteriores al rollout. */
   sid?: string
+  /** `'POS'` en los tokens del POS móvil (ver `jwt.service`). */
+  origen?: 'POS'
   /** OAuth 2.0 RFC 8693 `act` claim — present only during impersonation sessions. */
   act?: ImpersonationActClaim
 }
@@ -52,6 +54,8 @@ export interface AuthContext {
    * — lo contrario expulsaría de golpe a todos los aparatos que aún no migran.
    */
   sid?: string
+  /** `'POS'` si la petición viene con sesión del POS móvil (marca firmada en el token). Ausente en el dashboard. */
+  origen?: 'POS'
 
   // Impersonation (optional for back-compat with existing AuthContext construction sites).
   // When absent / false, treat as non-impersonating; `realUserId`/`realRole` fall back to `userId`/`role`.
@@ -337,6 +341,7 @@ export function buildAuthContextFromPayload(jwtPayload: AvoqadoJwtPayload): Auth
     role,
     ...(jwtPayload.terminalSerialNumber && { terminalSerialNumber: jwtPayload.terminalSerialNumber }),
     ...(jwtPayload.sid && { sid: jwtPayload.sid }),
+    ...(jwtPayload.origen === 'POS' && { origen: 'POS' as const }),
     realUserId,
     realRole,
     isImpersonating,
