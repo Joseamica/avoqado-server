@@ -905,6 +905,7 @@ export async function createModifierGroup(venueId: string, data: CreateModifierG
                 name: m.name,
                 price: m.price,
                 active: m.active ?? true,
+                sku: m.sku ?? null,
               })),
             },
           }
@@ -994,6 +995,7 @@ export async function createModifier(venueId: string, modifierGroupId: string, d
       name: data.name,
       price: data.price,
       active: data.active ?? true,
+      sku: data.sku ?? null,
     },
   })
 
@@ -1042,6 +1044,7 @@ export async function updateModifier(
   if (data.name !== undefined) updateData.name = data.name
   if (data.price !== undefined) updateData.price = data.price
   if (data.active !== undefined) updateData.active = data.active
+  if (data.sku !== undefined) updateData.sku = data.sku
 
   // ✅ WORLD-CLASS: Inventory configuration for modifiers (Toast/Square pattern)
   let needsCostRecalculation = false
@@ -1067,10 +1070,12 @@ export async function updateModifier(
   }
   if (data.quantityPerUnit !== undefined) {
     updateData.quantityPerUnit = data.quantityPerUnit
-    needsCostRecalculation = true
+    if (data.quantityPerUnit !== null) needsCostRecalculation = true
+    else updateData.cost = null // sin cantidad no hay costo: no se deja el viejo ni se calcula con la cantidad anterior
   }
   if (data.unit !== undefined) updateData.unit = data.unit
-  if (data.inventoryMode !== undefined) updateData.inventoryMode = data.inventoryMode
+  // null = el extra se quedó sin inventario. El modo es columna obligatoria (default ADDITION): se deja como está.
+  if (data.inventoryMode != null) updateData.inventoryMode = data.inventoryMode
 
   // ✅ AUTO-CALCULATE COST: avgCostPerUnit × quantityPerUnit
   if (needsCostRecalculation) {
@@ -1083,7 +1088,8 @@ export async function updateModifier(
     }
 
     // Calculate cost if we have both raw material and quantity
-    const effectiveQuantity = data.quantityPerUnit ?? existing.quantityPerUnit
+    // null = la cantidad se borró en esta misma petición: NO cae a la guardada.
+    const effectiveQuantity = data.quantityPerUnit === undefined ? existing.quantityPerUnit : data.quantityPerUnit
     if (rawMaterialForCost && effectiveQuantity) {
       updateData.cost = rawMaterialForCost.avgCostPerUnit.mul(effectiveQuantity)
     }
@@ -1099,7 +1105,16 @@ export async function updateModifier(
     },
   })
 
-  logAction({ venueId, action: 'MODIFIER_UPDATED', entity: 'Modifier', entityId: updatedModifier.id, data: { name: updatedModifier.name } })
+  logAction({
+    venueId,
+    action: 'MODIFIER_UPDATED',
+    entity: 'Modifier',
+    entityId: updatedModifier.id,
+    data: {
+      name: updatedModifier.name,
+      ...(data.sku !== undefined && data.sku !== existing.sku ? { sku: { from: existing.sku, to: data.sku } } : {}),
+    },
+  })
 
   return updatedModifier
 }

@@ -6,6 +6,7 @@ import { createGuard } from '../guard'
 import { text } from '../respond'
 import { updateProduct, createProduct, getProduct } from '@/services/dashboard/product.dashboard.service'
 import { createMenuCategory, createModifierGroup } from '@/services/dashboard/menu.dashboard.service'
+import { MODIFIER_SKU_FORMAT_MESSAGE, MODIFIER_SKU_MAX, SKU_REGEX } from '@/schemas/dashboard/menu.schema'
 import { auditMcpWrite } from '../audit'
 import { ProductType } from '@prisma/client'
 
@@ -242,7 +243,7 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
                   allowMultiple: true,
                   minSelections: true,
                   maxSelections: true,
-                  modifiers: { where: { active: true }, select: { name: true, price: true }, orderBy: { name: 'asc' } },
+                  modifiers: { where: { active: true }, select: { name: true, price: true, sku: true }, orderBy: { name: 'asc' } },
                 },
               },
             },
@@ -312,7 +313,7 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
             allowMultiple: mg.group.allowMultiple,
             min: mg.group.minSelections,
             max: mg.group.maxSelections,
-            options: mg.group.modifiers.map(m => ({ name: m.name, extraPrice: Number(m.price) })),
+            options: mg.group.modifiers.map(m => ({ name: m.name, extraPrice: Number(m.price), ...(m.sku ? { sku: m.sku } : {}) })),
           })),
         },
       })
@@ -485,7 +486,22 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
       venueId: z.string().describe('Venue to create the group in (must be in your scope)'),
       name: z.string().min(1).describe('Group name, e.g. "Extras"'),
       options: z
-        .array(z.object({ name: z.string().min(1), extraPrice: z.number().min(0).optional() }))
+        .array(
+          z.object({
+            name: z.string().min(1),
+            extraPrice: z.number().min(0).optional(),
+            sku: z
+              .string()
+              .trim()
+              .min(1)
+              .max(MODIFIER_SKU_MAX)
+              .regex(SKU_REGEX, MODIFIER_SKU_FORMAT_MESSAGE)
+              .optional()
+              .describe(
+                'Optional code of this option in the venue\'s OTHER cashier system (external cashier), e.g. "P000672": letters, digits, - and _ only. Several options may share it.',
+              ),
+          }),
+        )
         .min(1)
         .describe('The options, e.g. [{name:"Queso extra", extraPrice:15}]'),
       required: z.boolean().optional().describe('Must the customer pick one? (default no)'),
@@ -503,7 +519,7 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
           ...(allowMultiple !== undefined ? { allowMultiple } : {}),
           ...(minSelections !== undefined ? { minSelections } : {}),
           ...(maxSelections !== undefined ? { maxSelections } : {}),
-          modifiers: options.map(o => ({ name: o.name, price: o.extraPrice ?? 0 })),
+          modifiers: options.map(o => ({ name: o.name, price: o.extraPrice ?? 0, ...(o.sku ? { sku: o.sku } : {}) })),
         })
         await auditMcpWrite(scope, {
           action: 'MODIFIER_GROUP_CREATED',

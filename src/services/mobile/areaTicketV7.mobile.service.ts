@@ -53,6 +53,7 @@ import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { computeOrderBalance } from '../shared/orderBalance'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared/orderCancelGuard'
+import { externalRouteBlockers } from './areaTicketExternalCodes'
 import { buildOrderItemsData, CreateOrderItemInput } from './order.mobile.service'
 
 const DEFAULT_CLAIM_TTL_SECONDS = 300
@@ -122,6 +123,8 @@ interface SnapshotModifier {
   name: string
   quantity: number
   price: string
+  /** SKU del extra en la caja externa, congelado al emitir. Fuera del hash a propósito: no es precio. */
+  sku?: string | null
 }
 
 interface SnapshotLine {
@@ -215,6 +218,35 @@ function assertDeliveryMethodAllowed(verificationMode: AreaTicketDeliveryVerific
   )
 }
 
+// Caja externa (spec 2026-09-30 D5): no se imprime un vale que la otra caja no pueda cobrar completo.
+function assertExternalRouteIssuable(snapshots: SnapshotLine[]): void {
+  const { missingCodes, weighted, discounted } = externalRouteBlockers(snapshots)
+  if (missingCodes.length > 0) {
+    throw domainError(
+      409,
+      'EXTERNAL_CODE_MAPPING_MISSING',
+      `Falta el SKU de caja externa para: ${missingCodes.join(', ')}. Captúralo en el dashboard, en el SKU del producto o del extra.`,
+      { missing: missingCodes },
+    )
+  }
+  if (weighted.length > 0) {
+    throw domainError(
+      409,
+      'EXTERNAL_WEIGHT_NOT_SUPPORTED',
+      `Los productos por peso todavía no se pueden mandar a la caja externa: ${weighted.join(', ')}.`,
+      { products: weighted },
+    )
+  }
+  if (discounted.length > 0) {
+    throw domainError(
+      409,
+      'EXTERNAL_DISCOUNT_NOT_SUPPORTED',
+      `El descuento se aplica en la caja principal, no en el vale. Quítalo de: ${discounted.join(', ')}.`,
+      { products: discounted },
+    )
+  }
+}
+
 // Exportado por el mismo motivo que `domainError` — ver comentario arriba.
 export function requireIdempotencyKey(value: string | null | undefined): string {
   const key = value?.trim()
@@ -244,7 +276,7 @@ function parsePositiveDecimal(value: string, field: string, scale: number): Pris
   return parsed.toDecimalPlaces(scale, Prisma.Decimal.ROUND_HALF_UP)
 }
 
-function canonicalSnapshotHash(currency: string, lines: SnapshotLine[]): string {
+export function canonicalSnapshotHash(currency: string, lines: SnapshotLine[]): string {
   const canonical = {
     version: 1,
     currency,
@@ -587,13 +619,18 @@ function assertIssueIdempotencyMatch(ticket: any, lines: AreaTicketLineInput[]):
   }
 }
 
-function buildSnapshotLines(inputs: AreaTicketLineInput[], itemsData: any[]): SnapshotLine[] {
+export function buildSnapshotLines(
+  inputs: AreaTicketLineInput[],
+  itemsData: any[],
+  modifierSkus: Record<string, string | null> = {},
+): SnapshotLine[] {
   return itemsData.map((item, index) => {
     const modifiers: SnapshotModifier[] = (item.modifiers?.create ?? []).map((modifier: any) => ({
       modifierId: modifier.modifierId,
       name: modifier.name,
       quantity: modifier.quantity,
       price: money(modifier.price),
+      sku: modifierSkus[modifier.modifierId] ?? null,
     }))
     return {
       clientLineId: inputs[index].clientLineId.trim(),
@@ -781,8 +818,9 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
   const isExternal = fulfillmentArea.settlementRoute === AreaSettlementRoute.EXTERNAL
   const staffId = await validateStaffVenue(input.staffId ?? undefined, venueId)
   const normalizedItems = normalizeIssueLines(input.lines)
-  const { itemsData, subtotal, itemDiscountTotal } = await buildOrderItemsData(venueId, normalizedItems, fulfillmentAreaId)
-  const snapshots = buildSnapshotLines(input.lines, itemsData)
+  const { itemsData, subtotal, itemDiscountTotal, modifierSkus } = await buildOrderItemsData(venueId, normalizedItems, fulfillmentAreaId)
+  const snapshots = buildSnapshotLines(input.lines, itemsData, modifierSkus)
+  if (isExternal) assertExternalRouteIssuable(snapshots)
   const snapshotHash = canonicalSnapshotHash('MXN', snapshots)
   const total = new Prisma.Decimal(subtotal).sub(itemDiscountTotal)
   const reservationSpecs =
