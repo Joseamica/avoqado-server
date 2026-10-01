@@ -53,6 +53,7 @@ export interface TpvCommand {
   payload?: any
   requestedBy: string
   requestedByName?: string
+  idempotencyKey?: string
 }
 
 /**
@@ -272,25 +273,16 @@ export class TpvHealthService {
   /**
    * Send command to a specific TPV terminal
    *
-   * **Square Terminal API Polling Pattern:**
-   * Commands are queued in TpvCommandQueue and delivered via:
-   * 1. Socket.IO broadcast (immediate, if terminal is connected)
-   * 2. Heartbeat polling (reliable, works even on login screen)
-   *
-   * The polling pattern ensures commands are delivered even when:
-   * - Terminal is on login screen (no socket connection)
-   * - Socket connection dropped temporarily
-   * - Network is unstable
+   * Protocol 2 receives a socket hint and recovers on safe lifecycle/connection events.
+   * Released legacy clients retain authenticated heartbeat delivery and their old TTL.
    */
-  async sendCommand(terminal: BoundTpvCommandTarget, command: TpvCommand): Promise<void> {
+  async sendCommand(terminal: BoundTpvCommandTarget, command: TpvCommand) {
     const terminalId = terminal.id
     try {
       // Map command.type string to TpvCommandType enum
       const commandType = command.type as TpvCommandType
 
-      // ✅ SQUARE/TOAST PATTERN: Always queue command for reliable delivery
-      // Commands are delivered via heartbeat polling (works on login screen)
-      // AND via Socket.IO broadcast (for immediate delivery if connected)
+      // Persist before any notification; duplicate requests reuse the original command.
       const queueResult = await tpvCommandQueueService.queueCommand({
         terminalId: terminal.id,
         venueId: terminal.venueId,
@@ -299,6 +291,7 @@ export class TpvHealthService {
         requestedBy: command.requestedBy,
         requestedByName: command.requestedByName,
         source: 'DASHBOARD',
+        idempotencyKey: command.idempotencyKey,
       })
 
       logger.info(`Command queued for terminal ${terminal.id}:`, {
@@ -314,15 +307,16 @@ export class TpvHealthService {
       })
 
       // Also broadcast via Socket.IO for immediate delivery (best-effort)
-      // Terminal may or may not be connected - polling via heartbeat is the reliable path
+      // A retry never repeats the socket delivery to legacy clients.
       const cutoff = new Date(Date.now() - 2 * 60 * 1000)
       const isOnline = terminal.lastHeartbeat && terminal.lastHeartbeat > cutoff
 
-      if (isOnline) {
+      if (isOnline && !queueResult.replayed) {
         const { broadcastTpvCommand } = require('../../communication/sockets')
         // Use serial number for Android device compatibility
         broadcastTpvCommand(terminal.serialNumber || terminal.id, terminal.venueId, {
           ...command,
+          payload: queueResult.deliveryProtocolVersion === 2 ? { ...command.payload, _deliveryProtocol: 2 } : command.payload,
           commandId: queueResult.commandId,
           correlationId: queueResult.correlationId,
           expiresAt: queueResult.expiresAt,
@@ -332,6 +326,7 @@ export class TpvHealthService {
 
       // Note: Terminal state updates are handled by TpvCommandQueueService
       // when command result is received (via acknowledgeCommand)
+      return queueResult
     } catch (error) {
       logger.error(`Failed to send command to terminal ${terminalId}:`, error)
       throw error
@@ -517,7 +512,10 @@ export class TpvHealthService {
    * @param terminalId - Terminal ID or serial number
    * @returns Array of pending commands to execute
    */
-  async getPendingCommands(terminalId: string): Promise<
+  async getPendingCommands(
+    terminalId: string,
+    durable = false,
+  ): Promise<
     Array<{
       commandId: string
       correlationId: string
@@ -606,35 +604,49 @@ export class TpvHealthService {
       const pendingCommands = await prisma.tpvCommandQueue.findMany({
         where: {
           terminalId: terminal.id,
-          status: { in: ['PENDING', 'QUEUED'] },
-          OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+          OR: [
+            { status: { in: ['PENDING', 'QUEUED'] } },
+            ...(durable
+              ? [
+                  {
+                    status: 'SENT' as const,
+                    payload: { path: ['_deliveryProtocol'], equals: 2 },
+                    OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }],
+                  },
+                ]
+              : []),
+          ],
+          AND: [
+            { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+            { OR: [{ scheduledFor: null }, { scheduledFor: { lte: now } }] },
+          ],
         },
-        orderBy: [{ priority: 'desc' }, { createdAt: 'asc' }],
+        orderBy: [{ priority: 'desc' }, { createdAt: 'asc' }, { id: 'asc' }],
         take: 10, // Limit to prevent overwhelming the terminal
       })
 
-      // Mark commands as SENT (in-flight)
-      if (pendingCommands.length > 0) {
-        await prisma.tpvCommandQueue.updateMany({
+      // Claim each row conditionally. A cancellation or another delivery can win
+      // after the read; never return a command whose claim we did not acquire.
+      const delivered: typeof pendingCommands = []
+      for (const command of pendingCommands) {
+        const claimed = await prisma.tpvCommandQueue.updateMany({
           where: {
-            id: { in: pendingCommands.map(c => c.id) },
+            id: command.id,
+            status: command.status,
+            ...(command.status === 'SENT' ? { OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }] } : {}),
           },
           data: {
             status: 'SENT',
             lastAttemptAt: now,
+            nextAttemptAt: durable ? new Date(now.getTime() + 60000) : undefined,
             attempts: { increment: 1 },
           },
         })
-
-        logger.info(`Delivering ${pendingCommands.length} commands to terminal ${terminalId} via heartbeat`, {
-          terminalId,
-          commandIds: pendingCommands.map(c => c.id),
-          commandTypes: pendingCommands.map(c => c.commandType),
-        })
+        if (claimed.count === 1) delivered.push(command)
       }
 
       const ahora = Date.now()
-      return pendingCommands.map(cmd => ({
+      return delivered.map(cmd => ({
         commandId: cmd.id,
         correlationId: cmd.correlationId,
         type: cmd.commandType,
@@ -677,206 +689,220 @@ export class TpvHealthService {
     resultPayload?: any,
   ): Promise<void> {
     try {
-      // Try to find by id first (CUID like cminjwbv5...)
-      let command = await prisma.tpvCommandQueue.findUnique({
-        where: { id: commandId },
-        include: { terminal: { select: { id: true, name: true, venueId: true, serialNumber: true, status: true } } },
-      })
-
-      // Fallback: Try to find by correlationId (UUID like ab5985e5-...)
-      // This handles the case where Socket.IO broadcast sends correlationId as commandId
-      if (!command) {
-        command = await prisma.tpvCommandQueue.findFirst({
-          where: { correlationId: commandId },
+      const notifications: Array<() => void> = []
+      await prisma.$transaction(async tx => {
+        // Try to find by id first (CUID like cminjwbv5...)
+        let command = await tx.tpvCommandQueue.findUnique({
+          where: { id: commandId },
           include: { terminal: { select: { id: true, name: true, venueId: true, serialNumber: true, status: true } } },
         })
 
-        if (command) {
-          logger.info(`Command found by correlationId fallback: ${commandId} → ${command.id}`)
-        }
-      }
-
-      if (!command) {
-        logger.warn(`Command ${commandId} not found for acknowledgment (tried both id and correlationId)`)
-        return
-      }
-
-      // Security: Validate terminal ownership
-      // The terminal sending the ACK must be the one that owns the command. Misma definición
-      // de «misma terminal» que el carril de sockets (`sameTerminalSerial`): con o sin AVQD-,
-      // en cualquier caja, en las DOS direcciones — la comparación a tres vías que vivía aquí
-      // rechazaba un acuse sin prefijo cuando la base guarda el serial con él.
-      if (!sameTerminalSerial(command.terminal.serialNumber, terminalSerialNumber)) {
-        logger.warn(
-          `Security: Terminal ${terminalSerialNumber} attempted to ACK command ${commandId} owned by terminal ${command.terminal.serialNumber}`,
-        )
-        // 🔴 403, no un Error pelón (que salía como 500 con isOperational:false): para la cola
-        // offline de la TPV un 5xx es TRANSITORIO y la invitaba a reintentar para siempre un
-        // acuse que jamás va a aceptarse. Un 403 es definitivo y se descarta.
-        throw new ForbiddenError('La terminal no es dueña de este comando', 'TPV_COMMAND_NOT_OWNED')
-      }
-
-      // Map result status to command status
-      const statusMap: Record<string, 'COMPLETED' | 'FAILED'> = {
-        SUCCESS: 'COMPLETED',
-        FAILED: 'FAILED',
-        REJECTED: 'FAILED',
-        TIMEOUT: 'FAILED',
-      }
-
-      // CRITICAL: Use command.id (CUID) not commandId parameter
-      // When command was found via correlationId fallback, commandId is the UUID but we need the CUID
-      await prisma.tpvCommandQueue.update({
-        where: { id: command.id },
-        data: {
-          status: statusMap[resultStatus] || 'FAILED',
-          resultStatus: resultStatus as any,
-          resultMessage,
-          resultPayload: resultPayload || undefined,
-          executedAt: new Date(),
-        },
-      })
-
-      // Update terminal status if command was successful and affects terminal state
-      if (resultStatus === 'SUCCESS') {
-        const newTerminalStatus = COMMAND_STATUS_UPDATES[command.commandType as TpvCommandType]
-        const updateData: any = { updatedAt: new Date() }
-        let shouldUpdate = false
-
-        // Handle status-changing commands
-        if (newTerminalStatus) {
-          updateData.status = newTerminalStatus
-          shouldUpdate = true
-        }
-
-        // Handle lock-related state changes
-        if (command.commandType === 'LOCK') {
-          updateData.isLocked = true
-          updateData.lockedAt = new Date()
-          shouldUpdate = true
-        } else if (command.commandType === 'UNLOCK') {
-          updateData.isLocked = false
-          updateData.lockReason = null
-          updateData.lockMessage = null
-          updateData.lockedAt = null
-          updateData.lockedBy = null
-          shouldUpdate = true
-        } else if (command.commandType === 'REACTIVATE') {
-          // REACTIVATE also clears lock state
-          updateData.isLocked = false
-          updateData.lockReason = null
-          updateData.lockMessage = null
-          updateData.lockedAt = null
-          updateData.lockedBy = null
-        } else if (command.commandType === 'REMOTE_ACTIVATE') {
-          // REMOTE_ACTIVATE sets the terminal as activated (same as activation code flow)
-          updateData.activatedAt = new Date()
-          updateData.activatedBy = command.requestedBy // SUPERADMIN who sent the command
-          // Clear any existing activation code since we're activating remotely
-          updateData.activationCode = null
-          updateData.activationCodeExpiry = null
-          updateData.activationAttempts = 0
-          shouldUpdate = true
-          logger.info(`Terminal ${command.terminal.id} remotely activated by ${command.requestedBy}`)
-        }
-
-        if (shouldUpdate) {
-          await prisma.terminal.update({
-            where: { id: command.terminal.id },
-            data: updateData,
+        // Fallback: Try to find by correlationId (UUID like ab5985e5-...)
+        // This handles the case where Socket.IO broadcast sends correlationId as commandId
+        if (!command) {
+          command = await tx.tpvCommandQueue.findFirst({
+            where: { correlationId: commandId },
+            include: { terminal: { select: { id: true, name: true, venueId: true, serialNumber: true, status: true } } },
           })
 
-          logger.info(`Terminal ${command.terminal.id} state updated after ${command.commandType}`, {
-            terminalId: command.terminal.id,
-            commandType: command.commandType,
-            newStatus: newTerminalStatus || 'unchanged',
-            isLocked: updateData.isLocked,
-          })
-
-          // Broadcast terminal status update to dashboard
-          broadcastTpvStatusUpdate(command.terminal.id, command.terminal.venueId, {
-            status: newTerminalStatus || (command.terminal.status as any),
-          })
+          if (command) {
+            logger.info(`Command found by correlationId fallback: ${commandId} → ${command.id}`)
+          }
         }
-      }
 
-      // **State Sync on REJECTED (2025-12-01):**
-      // When a command is REJECTED, it means the terminal is already in the opposite state.
-      // This is important for syncing state when dashboard and terminal are out of sync.
-      // Example: Dashboard shows MAINTENANCE but terminal says "I'm not in maintenance" → sync to ACTIVE
-      if (resultStatus === 'REJECTED') {
-        const syncUpdateData: any = { updatedAt: new Date() }
-        let shouldSyncState = false
-        let syncedStatus: TerminalStatus | undefined
-
-        // EXIT_MAINTENANCE REJECTED = Terminal is NOT in maintenance → sync to ACTIVE
-        if (command.commandType === 'EXIT_MAINTENANCE') {
-          syncUpdateData.status = TerminalStatus.ACTIVE
-          syncedStatus = TerminalStatus.ACTIVE
-          shouldSyncState = true
-          logger.info(`State sync: EXIT_MAINTENANCE rejected, terminal ${command.terminal.id} is not in maintenance → syncing to ACTIVE`)
+        if (!command) {
+          logger.warn(`Command ${commandId} not found for acknowledgment (tried both id and correlationId)`)
+          return
         }
-        // MAINTENANCE_MODE REJECTED = Terminal IS in maintenance → sync to MAINTENANCE
-        else if (command.commandType === 'MAINTENANCE_MODE') {
-          syncUpdateData.status = TerminalStatus.MAINTENANCE
-          syncedStatus = TerminalStatus.MAINTENANCE
-          shouldSyncState = true
-          logger.info(
-            `State sync: MAINTENANCE_MODE rejected, terminal ${command.terminal.id} is already in maintenance → syncing to MAINTENANCE`,
+
+        // Security: Validate terminal ownership
+        // The terminal sending the ACK must be the one that owns the command. Misma definición
+        // de «misma terminal» que el carril de sockets (`sameTerminalSerial`): con o sin AVQD-,
+        // en cualquier caja, en las DOS direcciones — la comparación a tres vías que vivía aquí
+        // rechazaba un acuse sin prefijo cuando la base guarda el serial con él.
+        if (!sameTerminalSerial(command.terminal.serialNumber, terminalSerialNumber)) {
+          logger.warn(
+            `Security: Terminal ${terminalSerialNumber} attempted to ACK command ${commandId} owned by terminal ${command.terminal.serialNumber}`,
           )
-        }
-        // LOCK REJECTED = Terminal IS locked → sync isLocked = true
-        else if (command.commandType === 'LOCK') {
-          syncUpdateData.isLocked = true
-          shouldSyncState = true
-          logger.info(`State sync: LOCK rejected, terminal ${command.terminal.id} is already locked → syncing isLocked=true`)
-        }
-        // UNLOCK REJECTED = Terminal is NOT locked → sync isLocked = false
-        else if (command.commandType === 'UNLOCK') {
-          syncUpdateData.isLocked = false
-          syncUpdateData.lockReason = null
-          syncUpdateData.lockMessage = null
-          syncUpdateData.lockedAt = null
-          syncUpdateData.lockedBy = null
-          shouldSyncState = true
-          logger.info(`State sync: UNLOCK rejected, terminal ${command.terminal.id} is not locked → syncing isLocked=false`)
+          // 🔴 403, no un Error pelón (que salía como 500 con isOperational:false): para la cola
+          // offline de la TPV un 5xx es TRANSITORIO y la invitaba a reintentar para siempre un
+          // acuse que jamás va a aceptarse. Un 403 es definitivo y se descarta.
+          throw new ForbiddenError('La terminal no es dueña de este comando', 'TPV_COMMAND_NOT_OWNED')
         }
 
-        if (shouldSyncState) {
-          await prisma.terminal.update({
-            where: { id: command.terminal.id },
-            data: syncUpdateData,
-          })
+        if (['COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED'].includes(command.status)) return
 
-          // Broadcast the corrected state to dashboard
-          broadcastTpvStatusUpdate(command.terminal.id, command.terminal.venueId, {
-            status: syncedStatus || (command.terminal.status as any),
-            isLocked: syncUpdateData.isLocked,
-          })
+        // Map result status to command status
+        const statusMap: Record<string, 'COMPLETED' | 'FAILED'> = {
+          SUCCESS: 'COMPLETED',
+          FAILED: 'FAILED',
+          REJECTED: 'FAILED',
+          TIMEOUT: 'FAILED',
         }
-      }
 
-      // Broadcast result to dashboard via socket
-      broadcastTpvCommandStatusChanged(command.terminal.id, command.terminal.venueId, {
-        terminalId: command.terminal.id,
-        terminalName: command.terminal.name || 'Unknown',
-        commandId,
-        correlationId: command.correlationId,
-        commandType: command.commandType,
-        previousStatus: command.status,
-        newStatus: statusMap[resultStatus] || 'FAILED',
-        message: resultMessage,
-        statusChangedAt: new Date(),
+        // CRITICAL: Use command.id (CUID) not commandId parameter
+        // When command was found via correlationId fallback, commandId is the UUID but we need the CUID
+        const claimed = await tx.tpvCommandQueue.updateMany({
+          where: { id: command.id, status: command.status },
+          data: {
+            status: statusMap[resultStatus] || 'FAILED',
+            resultStatus: resultStatus as any,
+            resultMessage,
+            resultPayload: resultPayload || undefined,
+            executedAt: new Date(),
+          },
+        })
+
+        if (claimed.count !== 1) return
+
+        // Update terminal status if command was successful and affects terminal state
+        if (resultStatus === 'SUCCESS') {
+          const newTerminalStatus = COMMAND_STATUS_UPDATES[command.commandType as TpvCommandType]
+          const updateData: any = { updatedAt: new Date() }
+          let shouldUpdate = false
+
+          // Handle status-changing commands
+          if (newTerminalStatus) {
+            updateData.status = newTerminalStatus
+            shouldUpdate = true
+          }
+
+          // Handle lock-related state changes
+          if (command.commandType === 'LOCK') {
+            updateData.isLocked = true
+            updateData.lockedAt = new Date()
+            shouldUpdate = true
+          } else if (command.commandType === 'UNLOCK') {
+            updateData.isLocked = false
+            updateData.lockReason = null
+            updateData.lockMessage = null
+            updateData.lockedAt = null
+            updateData.lockedBy = null
+            shouldUpdate = true
+          } else if (command.commandType === 'REACTIVATE') {
+            // REACTIVATE also clears lock state
+            updateData.isLocked = false
+            updateData.lockReason = null
+            updateData.lockMessage = null
+            updateData.lockedAt = null
+            updateData.lockedBy = null
+          } else if (command.commandType === 'REMOTE_ACTIVATE') {
+            // REMOTE_ACTIVATE sets the terminal as activated (same as activation code flow)
+            updateData.activatedAt = new Date()
+            updateData.activatedBy = command.requestedBy // SUPERADMIN who sent the command
+            // Clear any existing activation code since we're activating remotely
+            updateData.activationCode = null
+            updateData.activationCodeExpiry = null
+            updateData.activationAttempts = 0
+            shouldUpdate = true
+            logger.info(`Terminal ${command.terminal.id} remotely activated by ${command.requestedBy}`)
+          }
+
+          if (shouldUpdate) {
+            await tx.terminal.update({
+              where: { id: command.terminal.id },
+              data: updateData,
+            })
+
+            logger.info(`Terminal ${command.terminal.id} state updated after ${command.commandType}`, {
+              terminalId: command.terminal.id,
+              commandType: command.commandType,
+              newStatus: newTerminalStatus || 'unchanged',
+              isLocked: updateData.isLocked,
+            })
+
+            // Broadcast terminal status update to dashboard
+            notifications.push(() =>
+              broadcastTpvStatusUpdate(command.terminal.id, command.terminal.venueId, {
+                status: newTerminalStatus || (command.terminal.status as any),
+              }),
+            )
+          }
+        }
+
+        // **State Sync on REJECTED (2025-12-01):**
+        // When a command is REJECTED, it means the terminal is already in the opposite state.
+        // This is important for syncing state when dashboard and terminal are out of sync.
+        // Example: Dashboard shows MAINTENANCE but terminal says "I'm not in maintenance" → sync to ACTIVE
+        if (resultStatus === 'REJECTED') {
+          const syncUpdateData: any = { updatedAt: new Date() }
+          let shouldSyncState = false
+          let syncedStatus: TerminalStatus | undefined
+
+          // EXIT_MAINTENANCE REJECTED = Terminal is NOT in maintenance → sync to ACTIVE
+          if (command.commandType === 'EXIT_MAINTENANCE') {
+            syncUpdateData.status = TerminalStatus.ACTIVE
+            syncedStatus = TerminalStatus.ACTIVE
+            shouldSyncState = true
+            logger.info(`State sync: EXIT_MAINTENANCE rejected, terminal ${command.terminal.id} is not in maintenance → syncing to ACTIVE`)
+          }
+          // MAINTENANCE_MODE REJECTED = Terminal IS in maintenance → sync to MAINTENANCE
+          else if (command.commandType === 'MAINTENANCE_MODE') {
+            syncUpdateData.status = TerminalStatus.MAINTENANCE
+            syncedStatus = TerminalStatus.MAINTENANCE
+            shouldSyncState = true
+            logger.info(
+              `State sync: MAINTENANCE_MODE rejected, terminal ${command.terminal.id} is already in maintenance → syncing to MAINTENANCE`,
+            )
+          }
+          // LOCK REJECTED = Terminal IS locked → sync isLocked = true
+          else if (command.commandType === 'LOCK') {
+            syncUpdateData.isLocked = true
+            shouldSyncState = true
+            logger.info(`State sync: LOCK rejected, terminal ${command.terminal.id} is already locked → syncing isLocked=true`)
+          }
+          // UNLOCK REJECTED = Terminal is NOT locked → sync isLocked = false
+          else if (command.commandType === 'UNLOCK') {
+            syncUpdateData.isLocked = false
+            syncUpdateData.lockReason = null
+            syncUpdateData.lockMessage = null
+            syncUpdateData.lockedAt = null
+            syncUpdateData.lockedBy = null
+            shouldSyncState = true
+            logger.info(`State sync: UNLOCK rejected, terminal ${command.terminal.id} is not locked → syncing isLocked=false`)
+          }
+
+          if (shouldSyncState) {
+            await tx.terminal.update({
+              where: { id: command.terminal.id },
+              data: syncUpdateData,
+            })
+
+            // Broadcast the corrected state to dashboard
+            notifications.push(() =>
+              broadcastTpvStatusUpdate(command.terminal.id, command.terminal.venueId, {
+                status: syncedStatus || (command.terminal.status as any),
+                isLocked: syncUpdateData.isLocked,
+              }),
+            )
+          }
+        }
+
+        // Broadcast result to dashboard via socket
+        notifications.push(() =>
+          broadcastTpvCommandStatusChanged(command.terminal.id, command.terminal.venueId, {
+            terminalId: command.terminal.id,
+            terminalName: command.terminal.name || 'Unknown',
+            commandId,
+            correlationId: command.correlationId,
+            commandType: command.commandType,
+            previousStatus: command.status,
+            newStatus: statusMap[resultStatus] || 'FAILED',
+            message: resultMessage,
+            statusChangedAt: new Date(),
+          }),
+        )
+
+        logger.info(`Command ${commandId} acknowledged: ${resultStatus}`, {
+          commandId,
+          terminalId: command.terminalId,
+          terminalSerialNumber,
+          type: command.commandType,
+          resultStatus,
+          resultMessage,
+        })
       })
-
-      logger.info(`Command ${commandId} acknowledged: ${resultStatus}`, {
-        commandId,
-        terminalId: command.terminalId,
-        terminalSerialNumber,
-        type: command.commandType,
-        resultStatus,
-        resultMessage,
-      })
+      for (const notify of notifications) notify()
     } catch (error) {
       logger.error(`Failed to acknowledge command ${commandId}:`, error)
       throw error

@@ -15,7 +15,10 @@
  * - Audit Trail: Complete history of all command executions
  */
 
+import { createHash } from 'crypto'
+import { sameTerminalSerial } from '../../utils/terminalSerial'
 import {
+  Prisma,
   TpvCommandType,
   TpvCommandPriority,
   TpvCommandStatus,
@@ -26,9 +29,11 @@ import {
 } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { NotFoundError, BadRequestError } from '../../errors/AppError'
+import { NotFoundError, BadRequestError, ConflictError, ForbiddenError } from '../../errors/AppError'
 import { broadcastTpvCommandStatusChanged, broadcastTpvCommandQueued, broadcastTpvStatusUpdate } from '../../communication/sockets'
 import { assertDeviceActionSupported } from '../device-capabilities.service'
+import { isProviderCompatibleWithBrand } from '../../lib/providerDeviceCompatibility'
+import { getEffectivePaymentConfig } from '../organization-payment-config.service'
 
 /**
  * Command configuration per type
@@ -240,6 +245,10 @@ export interface QueueCommandInput {
   requestedByName?: string
   source?: TpvCommandSource
   bulkOperationId?: string
+  expiresAt?: Date
+  idempotencyKey?: string
+  // Server-owned: only the migration service supplies this after its preflight.
+  migrationIntent?: { toVenueId: string; assignedMerchantIds: string[]; organizationId?: string }
 }
 
 export interface CommandQueueResult {
@@ -248,8 +257,10 @@ export interface CommandQueueResult {
   status: TpvCommandStatus
   queued: boolean
   terminalOnline: boolean
+  deliveryProtocolVersion?: number
+  replayed?: boolean
   message: string
-  expiresAt: Date // Caducidad del comando en la cola: el socket debe mandar ésta, no una propia
+  expiresAt: Date | null // Caducidad del comando en la cola: el socket debe mandar ésta, no una propia
 }
 
 /**
@@ -261,7 +272,80 @@ export class TpvCommandQueueService {
    * Queue a command for a terminal
    * If terminal is online, send immediately. If offline, queue for later.
    */
-  async queueCommand(input: QueueCommandInput): Promise<CommandQueueResult> {
+  async queueCommand(input: QueueCommandInput, db: Prisma.TransactionClient = prisma): Promise<CommandQueueResult> {
+    if (
+      input.payload &&
+      (Object.prototype.hasOwnProperty.call(input.payload, '_deliveryProtocol') ||
+        Object.prototype.hasOwnProperty.call(input.payload, '_originCommandSessionId') ||
+        Object.prototype.hasOwnProperty.call(input.payload, '_migrationIntent'))
+    )
+      throw new BadRequestError('El protocolo de entrega lo determina el servidor')
+    if (Buffer.byteLength(JSON.stringify(input.payload ?? {}), 'utf8') > 65536)
+      throw new BadRequestError('El contenido del comando excede 64 KiB')
+    if (input.idempotencyKey && db === prisma) {
+      if (!/^[\x21-\x7e]{1,128}$/.test(input.idempotencyKey)) throw new BadRequestError('Idempotency-Key inválido')
+      const terminal = await prisma.terminal.findUnique({
+        where: { id: input.terminalId },
+        select: { venue: { select: { organizationId: true } } },
+      })
+      if (!terminal) throw new NotFoundError('Terminal no encontrada')
+      const key = {
+        organizationId: terminal.venue.organizationId,
+        actorStaffId: input.requestedBy,
+        endpoint: `tpv-command:${input.terminalId}`,
+        idempotencyKey: input.idempotencyKey,
+      }
+      const requestHash = createHash('sha256')
+        .update(
+          JSON.stringify(
+            [
+              input.venueId,
+              input.commandType,
+              input.payload ?? {},
+              input.priority ?? null,
+              input.scheduledFor?.toISOString() ?? null,
+              input.expiresAt?.toISOString() ?? null,
+            ],
+            (_key, value) =>
+              value && typeof value === 'object' && !Array.isArray(value)
+                ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)))
+                : value,
+          ),
+        )
+        .digest('hex')
+      const replay = async (client: Prisma.TransactionClient) => {
+        const existing = await client.idempotencyRequest.findUnique({ where: { organizationId_actorStaffId_endpoint_idempotencyKey: key } })
+        if (!existing) return null
+        if (existing.requestHash !== requestHash)
+          throw new ConflictError('Esa solicitud ya se usó con otro comando', 'IDEMPOTENCY_KEY_REUSED')
+        const result = existing.responseBody as unknown as CommandQueueResult
+        return { ...result, expiresAt: result.expiresAt ? new Date(result.expiresAt) : null, replayed: true }
+      }
+      try {
+        return await prisma.$transaction(async tx => {
+          const existing = await replay(tx)
+          if (existing) return existing
+          const result = await this.queueCommand({ ...input, idempotencyKey: undefined }, tx)
+          await tx.idempotencyRequest.create({
+            data: {
+              ...key,
+              requestHash,
+              responseStatus: 200,
+              responseBody: JSON.parse(JSON.stringify(result)),
+              expiresAt: new Date(Date.now() + 30 * 86400000),
+            },
+          })
+          return result
+        })
+      } catch (error) {
+        // A concurrent duplicate loses the UNIQUE insert; its command/history roll back.
+        if ((error as { code?: string }).code === 'P2002') {
+          const existing = await replay(prisma)
+          if (existing) return existing
+        }
+        throw error
+      }
+    }
     const {
       terminalId,
       venueId,
@@ -281,14 +365,22 @@ export class TpvCommandQueueService {
       throw new BadRequestError(`Invalid command type: ${commandType}`)
     }
 
+    if (commandType === 'INSTALL_VERSION' && (!Number.isSafeInteger(payload?.versionCode) || payload!.versionCode <= 0)) {
+      throw new BadRequestError('Selecciona una versión publicada válida (versionCode).')
+    }
+    if (commandType === 'EXPORT_LOGS') {
+      throw new BadRequestError('La exportación remota de logs aún no está disponible en la TPV.')
+    }
+
     // Get terminal and check status
-    const terminal = await prisma.terminal.findUnique({
+    const terminal = await db.terminal.findUnique({
       where: { id: terminalId },
       select: {
         id: true,
         name: true,
         serialNumber: true,
         type: true,
+        brand: true,
         status: true,
         lastHeartbeat: true,
         isLocked: true,
@@ -297,6 +389,8 @@ export class TpvCommandQueueService {
         customerDisplayInvertible: true,
         displayModeProtocolVersion: true,
         capabilitiesObservedAt: true,
+        commandProtocolVersion: true,
+        commandSessionId: true,
         venue: {
           select: { name: true },
         },
@@ -317,7 +411,9 @@ export class TpvCommandQueueService {
     await this.validateCommandForTerminal(commandType, terminal)
 
     // Calculate expiration
-    const expiresAt = new Date(Date.now() + config.expirationMinutes * 60 * 1000)
+    const durable = (terminal.commandProtocolVersion ?? 0) >= 2
+    if (input.migrationIntent && (!durable || commandType !== 'FACTORY_RESET')) throw new BadRequestError('Intención de migración inválida')
+    const expiresAt = durable ? null : (input.expiresAt ?? new Date(Date.now() + config.expirationMinutes * 60 * 1000))
 
     // Check if terminal is online (heartbeat within last 2 minutes)
     const cutoff = new Date(Date.now() - 2 * 60 * 1000)
@@ -331,12 +427,19 @@ export class TpvCommandQueueService {
         : 'PENDING' // Terminal offline
 
     // Create command queue entry
-    const command = await prisma.tpvCommandQueue.create({
+    const command = await db.tpvCommandQueue.create({
       data: {
         terminalId,
         venueId,
         commandType,
-        payload: payload || {},
+        payload: durable
+          ? {
+              ...payload,
+              _deliveryProtocol: 2,
+              _originCommandSessionId: terminal.commandSessionId,
+              ...(input.migrationIntent && { _migrationIntent: input.migrationIntent }),
+            }
+          : payload || {},
         priority: priority || config.defaultPriority,
         status: initialStatus,
         maxAttempts: config.maxRetries,
@@ -350,15 +453,20 @@ export class TpvCommandQueueService {
     })
 
     // Create initial history entry
-    await this.createHistoryEntry(command.id, terminal, {
-      status: 'SENT',
-      source,
-      requestedBy,
-      requestedByName,
-    })
+    await this.createHistoryEntry(
+      command.id,
+      terminal,
+      {
+        status: 'SENT',
+        source,
+        requestedBy,
+        requestedByName,
+      },
+      db,
+    )
 
     // Broadcast status update to dashboard
-    if (!isOnline && !scheduledFor) {
+    if (db === prisma && !isOnline && !scheduledFor) {
       await this.broadcastQueuedNotification(command, terminal)
     }
 
@@ -378,6 +486,7 @@ export class TpvCommandQueueService {
       status: initialStatus,
       queued: !isOnline || !!scheduledFor,
       terminalOnline: isOnline,
+      deliveryProtocolVersion: durable ? 2 : undefined,
       message: isOnline
         ? scheduledFor
           ? `Command scheduled for ${scheduledFor.toISOString()}`
@@ -402,12 +511,14 @@ export class TpvCommandQueueService {
           { scheduledFor: null },
           { scheduledFor: { lte: now } }, // Scheduled time has passed
         ],
-        expiresAt: { gt: now }, // Not expired
+        AND: [{ OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] }],
       },
       orderBy: [
         { priority: 'desc' }, // CRITICAL > HIGH > NORMAL > LOW
         { createdAt: 'asc' }, // FIFO within same priority
+        { id: 'asc' },
       ],
+      take: 10,
     })
   }
 
@@ -419,130 +530,143 @@ export class TpvCommandQueueService {
     newStatus: TpvCommandStatus,
     resultStatus?: TpvCommandResultStatus,
     resultMessage?: string,
-  ): Promise<void> {
-    const command = await prisma.tpvCommandQueue.findUnique({
-      where: { id: commandId },
-      include: {
-        terminal: {
-          select: { id: true, name: true, serialNumber: true, venueId: true },
-        },
-      },
-    })
-
-    if (!command) {
-      throw new NotFoundError(`Command ${commandId} not found`)
-    }
-
-    const previousStatus = command.status
-
-    // Update command status
-    await prisma.tpvCommandQueue.update({
-      where: { id: commandId },
-      data: {
-        status: newStatus,
-        resultStatus,
-        resultMessage,
-        executedAt: newStatus === 'COMPLETED' || newStatus === 'FAILED' ? new Date() : undefined,
-        attempts: ['SENT', 'RECEIVED', 'EXECUTING'].includes(newStatus) ? { increment: 1 } : undefined,
-      },
-    })
-
-    // Create history entry
-    const historyStatus = this.mapCommandStatusToHistoryStatus(newStatus, resultStatus)
-    await this.createHistoryEntry(commandId, command.terminal, {
-      status: historyStatus,
-      resultMessage,
-    })
-
-    // Broadcast status change to dashboard
-    await this.broadcastStatusChange(command, previousStatus, newStatus, resultMessage)
-
-    logger.info(`Command status updated`, {
-      commandId,
-      correlationId: command.correlationId,
-      previousStatus,
-      newStatus,
-      resultStatus,
-      terminalId: command.terminalId,
-    })
-  }
-
-  /**
-   * Handle command ACK from terminal
-   */
-  async handleCommandAck(commandId: string, _terminalId: string): Promise<void> {
-    await this.updateCommandStatus(commandId, 'RECEIVED')
-  }
-
-  /**
-   * Handle command execution started
-   */
-  async handleCommandStarted(commandId: string, _terminalId: string): Promise<void> {
-    await this.updateCommandStatus(commandId, 'EXECUTING')
-  }
-
-  /**
-   * Handle command result from terminal
-   */
-  async handleCommandResult(
-    commandId: string,
-    _terminalId: string,
-    resultStatus: TpvCommandResultStatus,
-    message?: string,
-    _resultData?: Record<string, any>,
-  ): Promise<void> {
-    const finalStatus: TpvCommandStatus = resultStatus === 'SUCCESS' || resultStatus === 'PARTIAL_SUCCESS' ? 'COMPLETED' : 'FAILED'
-
-    const command = await prisma.tpvCommandQueue.findUnique({
-      where: { id: commandId },
-    })
-
-    if (!command) {
-      throw new NotFoundError(`Command ${commandId} not found`)
-    }
-
-    // Update command with result
-    await prisma.tpvCommandQueue.update({
-      where: { id: commandId },
-      data: {
-        status: finalStatus,
-        resultStatus,
-        resultMessage: message,
-        executedAt: new Date(),
-      },
-    })
-
-    // Update terminal state based on command result
-    if (resultStatus === 'SUCCESS') {
-      const updatedTerminal = await this.updateTerminalStateForCommand(command.terminalId, command.commandType)
-
-      // Broadcast terminal status update to dashboard (fixes maintenance exit not refreshing)
-      if (updatedTerminal) {
-        try {
-          broadcastTpvStatusUpdate(updatedTerminal.id, updatedTerminal.venueId, {
-            status: updatedTerminal.status,
-            isLocked: updatedTerminal.isLocked,
-            lastHeartbeat: updatedTerminal.lastHeartbeat ?? undefined,
-          })
-          logger.info('Broadcast terminal status update after command completion', {
-            terminalId: updatedTerminal.id,
-            commandType: command.commandType,
-            newStatus: updatedTerminal.status,
-          })
-        } catch (error) {
-          logger.warn('Failed to broadcast terminal status update', { error, terminalId: updatedTerminal.id })
+    terminalId?: string,
+    resultPayload?: Record<string, any>,
+  ): Promise<boolean> {
+    const transition = await prisma.$transaction(async tx => {
+      const command = await tx.tpvCommandQueue.findUnique({
+        where: { id: commandId },
+        include: { terminal: { select: { id: true, name: true, serialNumber: true, venueId: true, commandSessionId: true, brand: true } } },
+      })
+      if (!command) throw new NotFoundError(`Command ${commandId} not found`)
+      if (terminalId && terminalId !== command.terminalId && !sameTerminalSerial(terminalId, command.terminal.serialNumber)) {
+        throw new ForbiddenError('La terminal no es dueña de este comando', 'TPV_COMMAND_NOT_OWNED')
+      }
+      if (['COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED'].includes(command.status)) return null
+      const executionSessionId = resultPayload?.executionSessionId
+      if (newStatus === 'EXECUTING' && executionSessionId) {
+        if (command.terminal.commandSessionId !== executionSessionId) return null
+        if (command.status === 'EXECUTING') {
+          return (command.resultPayload as { executionSessionId?: string } | null)?.executionSessionId === executionSessionId
+            ? { command, terminal: null, replayed: true }
+            : null
         }
       }
-    }
+      if (newStatus === 'EXECUTING' && command.expiresAt && command.expiresAt <= new Date()) return null
+      const order = ['PENDING', 'QUEUED', 'SENT', 'RECEIVED', 'EXECUTING']
+      if (order.includes(newStatus) && order.indexOf(newStatus) <= order.indexOf(command.status)) return null
+      const updated = await tx.tpvCommandQueue.updateMany({
+        where: { id: command.id, status: command.status },
+        data: {
+          status: newStatus,
+          resultStatus,
+          resultMessage,
+          resultPayload,
+          executedAt: ['COMPLETED', 'FAILED'].includes(newStatus) ? new Date() : undefined,
+          attempts: newStatus === 'SENT' ? { increment: 1 } : undefined,
+        },
+      })
+      if (updated.count !== 1) return null
+      const intent = (command.payload as { _migrationIntent?: QueueCommandInput['migrationIntent'] } | null)?._migrationIntent
+      if (newStatus === 'EXECUTING' && intent) {
+        if (!executionSessionId || command.commandType !== 'FACTORY_RESET') throw new BadRequestError('Permiso de migración requerido')
+        const destination = await tx.venue.findUnique({ where: { id: intent.toVenueId }, select: { id: true, organizationId: true } })
+        if (!destination || (intent.organizationId && destination.organizationId !== intent.organizationId))
+          throw new BadRequestError('El destino cambió; cancela y vuelve a validar la migración')
+        if (intent.assignedMerchantIds.length) {
+          const merchants = await tx.merchantAccount.findMany({
+            where: { id: { in: intent.assignedMerchantIds }, active: true },
+            select: { id: true, provider: { select: { code: true } } },
+            take: intent.assignedMerchantIds.length,
+          })
+          if (
+            merchants.length !== intent.assignedMerchantIds.length ||
+            merchants.some(m => !isProviderCompatibleWithBrand(m.provider.code, command.terminal.brand))
+          )
+            throw new BadRequestError('Los merchants cambiaron; cancela y vuelve a validar la migración')
+        }
+        if (!intent.assignedMerchantIds.length) {
+          const effective = await getEffectivePaymentConfig(intent.toVenueId, tx)
+          const primary = effective?.config.primaryAccount
+          if (!primary?.active || !isProviderCompatibleWithBrand(primary.provider.code, command.terminal.brand))
+            throw new BadRequestError('La configuración de cobro cambió; cancela y vuelve a validar la migración')
+        }
+        const moved = await tx.terminal.updateMany({
+          where: {
+            id: command.terminalId,
+            venueId: command.venueId,
+            ...(intent.organizationId && { venue: { organizationId: intent.organizationId } }),
+          },
+          data: { venueId: intent.toVenueId, assignedMerchantIds: intent.assignedMerchantIds },
+        })
+        if (moved.count !== 1) throw new ConflictError('La terminal cambió; cancela y vuelve a validar')
+        await tx.tpvCommandQueue.update({ where: { id: command.id }, data: { venueId: intent.toVenueId } })
+        await tx.activityLog.create({
+          data: {
+            action: 'TERMINAL_MIGRATION_COMMITTED',
+            entity: 'Terminal',
+            entityId: command.terminalId,
+            venueId: intent.toVenueId,
+            staffId: command.requestedBy === 'system' ? null : command.requestedBy,
+            data: { commandId: command.id, fromVenueId: command.venueId, toVenueId: intent.toVenueId },
+          },
+        })
+        command.venueId = intent.toVenueId
+        command.terminal.venueId = intent.toVenueId
+      }
 
-    await this.updateCommandStatus(commandId, finalStatus, resultStatus, message)
+      const terminal =
+        resultStatus === 'SUCCESS' ? await this.updateTerminalStateForCommand(command.terminalId, command.commandType, tx) : null
+      await this.createHistoryEntry(
+        commandId,
+        command.terminal,
+        {
+          status: this.mapCommandStatusToHistoryStatus(newStatus, resultStatus),
+          resultMessage,
+        },
+        tx,
+      )
+      return { command, terminal }
+    })
+    if (!transition) return false
+    if ('replayed' in transition) return true
+    await this.broadcastStatusChange(transition.command, transition.command.status, newStatus, resultMessage)
+    if (transition.terminal)
+      broadcastTpvStatusUpdate(transition.terminal.id, transition.terminal.venueId, {
+        status: transition.terminal.status,
+        isLocked: transition.terminal.isLocked,
+        lastHeartbeat: transition.terminal.lastHeartbeat ?? undefined,
+      })
+    return true
+  }
+
+  async handleCommandAck(commandId: string, terminalId: string): Promise<void> {
+    await this.updateCommandStatus(commandId, 'RECEIVED', undefined, undefined, terminalId)
+  }
+
+  async handleCommandStarted(commandId: string, terminalId: string): Promise<void> {
+    await this.updateCommandStatus(commandId, 'EXECUTING', undefined, undefined, terminalId)
+  }
+
+  async handleCommandResult(
+    commandId: string,
+    terminalId: string,
+    resultStatus: TpvCommandResultStatus,
+    message?: string,
+    resultData?: Record<string, any>,
+  ): Promise<void> {
+    if (!['SUCCESS', 'PARTIAL_SUCCESS', 'FAILED', 'REJECTED', 'TIMEOUT'].includes(resultStatus))
+      throw new BadRequestError('Resultado de comando inválido')
+    const finalStatus = resultStatus === 'SUCCESS' || resultStatus === 'PARTIAL_SUCCESS' ? 'COMPLETED' : 'FAILED'
+    await this.updateCommandStatus(commandId, finalStatus, resultStatus, message, terminalId, resultData)
   }
 
   /**
    * Cancel a pending command
    */
-  async cancelCommand(commandId: string, cancelledBy: string, reason?: string): Promise<void> {
-    const command = await prisma.tpvCommandQueue.findUnique({
+  async cancelCommand(commandId: string, cancelledBy: string, reason?: string, db: Prisma.TransactionClient = prisma): Promise<void> {
+    if (db === prisma) return prisma.$transaction(tx => this.cancelCommand(commandId, cancelledBy, reason, tx))
+    const command = await db.tpvCommandQueue.findUnique({
       where: { id: commandId },
       include: {
         terminal: {
@@ -555,22 +679,33 @@ export class TpvCommandQueueService {
       throw new NotFoundError(`Command ${commandId} not found`)
     }
 
-    if (!['PENDING', 'QUEUED'].includes(command.status)) {
-      throw new BadRequestError(`Cannot cancel command in status ${command.status}. Only PENDING or QUEUED commands can be cancelled.`)
+    const cancellable: TpvCommandStatus[] =
+      (command.payload as { _deliveryProtocol?: number } | null)?._deliveryProtocol === 2
+        ? ['PENDING', 'QUEUED', 'SENT', 'RECEIVED']
+        : ['PENDING', 'QUEUED']
+    if (!cancellable.includes(command.status)) {
+      throw new BadRequestError(`Cannot cancel command in status ${command.status}. The command must not have started execution.`)
     }
 
-    await prisma.tpvCommandQueue.update({
-      where: { id: commandId },
+    const cancelled = await db.tpvCommandQueue.updateMany({
+      where: { id: commandId, status: { in: cancellable } },
       data: {
         status: 'CANCELLED',
         resultMessage: reason || 'Cancelled by user',
       },
     })
 
-    await this.createHistoryEntry(commandId, command.terminal, {
-      status: 'CANCELLED',
-      resultMessage: reason || `Cancelled by ${cancelledBy}`,
-    })
+    if (cancelled.count !== 1) throw new BadRequestError('El comando ya fue recibido o cancelado. Actualiza su estado.')
+
+    await this.createHistoryEntry(
+      commandId,
+      command.terminal,
+      {
+        status: 'CANCELLED',
+        resultMessage: reason || `Cancelled by ${cancelledBy}`,
+      },
+      db,
+    )
 
     logger.info(`Command cancelled`, {
       commandId,
@@ -611,8 +746,8 @@ export class TpvCommandQueueService {
         // `id` is the TIEBREAK — without it a tie group crossing a skip/take page boundary repeats a row
         // on one page and drops another for good (Asana 1217127206664238).
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-        take: options?.limit || 50,
-        skip: options?.offset || 0,
+        take: Math.min(100, Math.max(1, options?.limit || 50)),
+        skip: Math.max(0, options?.offset || 0),
         include: {
           history: {
             orderBy: { createdAt: 'desc' },
@@ -634,38 +769,16 @@ export class TpvCommandQueueService {
     const now = new Date()
 
     const expiredCommands = await prisma.tpvCommandQueue.findMany({
-      where: {
-        status: { in: ['PENDING', 'QUEUED', 'SENT', 'RECEIVED', 'EXECUTING'] },
-        expiresAt: { lt: now },
-      },
-      include: {
-        terminal: {
-          select: { id: true, name: true, serialNumber: true, venueId: true },
-        },
-      },
+      where: { status: { in: ['PENDING', 'QUEUED', 'SENT', 'RECEIVED', 'EXECUTING'] }, expiresAt: { lt: now } },
+      select: { id: true },
+      take: 100,
+      orderBy: [{ expiresAt: 'asc' }, { id: 'asc' }],
     })
-
+    let expired = 0
     for (const command of expiredCommands) {
-      await prisma.tpvCommandQueue.update({
-        where: { id: command.id },
-        data: {
-          status: 'EXPIRED',
-          resultStatus: 'TIMEOUT',
-          resultMessage: 'Command expired before execution',
-        },
-      })
-
-      await this.createHistoryEntry(command.id, command.terminal, {
-        status: 'TIMEOUT',
-        resultMessage: 'Command expired before execution',
-      })
+      if (await this.updateCommandStatus(command.id, 'EXPIRED', 'TIMEOUT', 'Command expired before execution')) expired++
     }
-
-    if (expiredCommands.length > 0) {
-      logger.info(`Processed ${expiredCommands.length} expired commands`)
-    }
-
-    return expiredCommands.length
+    return expired
   }
 
   // ==================== Private Helper Methods ====================
@@ -708,6 +821,7 @@ export class TpvCommandQueueService {
   private async updateTerminalStateForCommand(
     terminalId: string,
     commandType: TpvCommandType,
+    db: Prisma.TransactionClient = prisma,
   ): Promise<{ id: string; name: string; venueId: string; status: TerminalStatus; isLocked: boolean; lastHeartbeat: Date | null } | null> {
     const updates: any = {}
 
@@ -739,7 +853,7 @@ export class TpvCommandQueueService {
     }
 
     if (Object.keys(updates).length > 0) {
-      const terminal = await prisma.terminal.update({
+      const terminal = await db.terminal.update({
         where: { id: terminalId },
         data: {
           ...updates,
@@ -773,8 +887,9 @@ export class TpvCommandQueueService {
       resultMessage?: string
       errorCode?: string
     },
+    db: Prisma.TransactionClient = prisma,
   ): Promise<void> {
-    const command = await prisma.tpvCommandQueue.findUnique({
+    const command = await db.tpvCommandQueue.findUnique({
       where: { id: commandQueueId },
       include: {
         venue: { select: { name: true } },
@@ -783,7 +898,7 @@ export class TpvCommandQueueService {
 
     if (!command) return
 
-    await prisma.tpvCommandHistory.create({
+    await db.tpvCommandHistory.create({
       data: {
         commandQueueId,
         terminalId: terminal.id,

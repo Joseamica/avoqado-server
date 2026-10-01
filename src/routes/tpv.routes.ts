@@ -457,7 +457,16 @@ router.get('/status-sync/:serialNumber', validateRequest(serialNumberParamSchema
  *       404:
  *         description: Terminal not found or not activated
  */
-router.post('/heartbeat', heartbeatController.processHeartbeat)
+// Anonymous health reports remain supported. Command delivery additionally needs a
+// device secret or a fully validated legacy staff token with a signed terminal serial.
+const commandIdentity = (req: Request, res: Response, next: NextFunction) => {
+  if (req.headers['x-tpv-command-token'] || !req.headers.authorization) return next()
+  return authenticateTokenMiddleware(req, res, next)
+}
+router.post('/heartbeat', commandIdentity, heartbeatController.processHeartbeat)
+router.post('/commands/permit', commandIdentity, heartbeatController.permitCommand)
+router.post('/commands/ready', commandIdentity, heartbeatController.commandsReady)
+router.post('/command-credential', authenticateTokenMiddleware, heartbeatController.provisionCommandCredential)
 
 /**
  * @openapi
@@ -505,7 +514,7 @@ router.post('/heartbeat', heartbeatController.processHeartbeat)
  *       404:
  *         description: Command not found
  */
-router.post('/command-ack', heartbeatController.acknowledgeCommand)
+router.post('/command-ack', commandIdentity, heartbeatController.acknowledgeCommand)
 
 /**
  * @openapi

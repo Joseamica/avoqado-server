@@ -8,6 +8,7 @@ import { BadRequestError, ForbiddenError } from '@/errors/AppError'
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    $transaction: jest.fn(),
     tpvCommandQueue: { findFirst: jest.fn() },
     terminal: { update: jest.fn(), findUnique: jest.fn() },
     venue: { findFirst: jest.fn() },
@@ -21,6 +22,7 @@ jest.mock('@/services/tpv/command-queue.service', () => ({
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn().mockResolvedValue(undefined) }))
 
 const m = prisma as unknown as {
+  $transaction: jest.Mock
   tpvCommandQueue: { findFirst: jest.Mock }
   terminal: { update: jest.Mock; findUnique: jest.Mock }
   venue: { findFirst: jest.Mock }
@@ -31,6 +33,7 @@ const mockedCancelCommand = tpvCommandQueueService.cancelCommand as jest.Mock
 describe('migrateCancel', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    m.$transaction.mockImplementation(async callback => callback(m))
     m.terminal.update.mockResolvedValue({ id: 'term-1', venueId: 'venue-old' })
     mockedCancelCommand.mockResolvedValue(undefined)
   })
@@ -53,12 +56,15 @@ describe('migrateCancel', () => {
         where: expect.objectContaining({
           terminalId: 'term-1',
           commandType: 'FACTORY_RESET',
-          status: { in: ['PENDING', 'QUEUED'] },
+          OR: expect.arrayContaining([
+            { status: { in: ['PENDING', 'QUEUED'] } },
+            { status: { in: ['SENT', 'RECEIVED'] }, payload: { path: ['_deliveryProtocol'], equals: 2 } },
+          ]),
         }),
       }),
     )
     // queued wipe cancelled so it never reaches the device
-    expect(mockedCancelCommand).toHaveBeenCalledWith('cmd-1', 'admin-1', expect.stringContaining('cancelada'))
+    expect(mockedCancelCommand).toHaveBeenCalledWith('cmd-1', 'admin-1', expect.stringContaining('cancelada'), m)
     // terminal reverted directly (bypassing updateTerminal → blindar does NOT re-wipe)
     expect(m.terminal.update).toHaveBeenCalledWith({
       where: { id: 'term-1' },
@@ -132,7 +138,7 @@ describe('migrateCancel', () => {
 
     const r = await migrateCancel('term-1', { staffId: 'admin-1' })
 
-    expect(mockedCancelCommand).toHaveBeenCalledWith('cmd-1', 'admin-1', expect.any(String))
+    expect(mockedCancelCommand).toHaveBeenCalledWith('cmd-1', 'admin-1', expect.any(String), m)
     // nothing to revert: the terminal stays exactly where it is
     expect(m.terminal.update).not.toHaveBeenCalled()
     expect(r).toEqual({ cancelled: true, restoredVenueId: 'venue-current' })
@@ -144,6 +150,7 @@ describe('migrateCancel — config de pagos creada por la migración', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
+    m.$transaction.mockImplementation(async callback => callback(m))
     m.terminal.update.mockResolvedValue({ id: 'term-1', venueId: 'venue-old' })
     mockedCancelCommand.mockResolvedValue(undefined)
   })
@@ -184,4 +191,14 @@ describe('migrateCancel — config de pagos creada por la migración', () => {
       data: { venueId: 'venue-old', assignedMerchantIds: ['merch-p'] },
     })
   })
+})
+
+// The wipe cancellation and venue restoration must commit together.
+it('P1 cancelling a migration restores the venue inside the same transaction as the queue change', async () => {
+  m.$transaction.mockImplementation(async callback => callback(m))
+  m.tpvCommandQueue.findFirst.mockResolvedValue({ id: 'cmd-tx', payload: { migration: { fromVenueId: 'old' } } })
+  m.terminal.update.mockRejectedValueOnce(new Error('restore failed'))
+  await expect(migrateCancel('term-1', { staffId: 'admin-1' })).rejects.toThrow('restore failed')
+  expect(m.$transaction).toHaveBeenCalledTimes(1)
+  expect(mockedCancelCommand).toHaveBeenCalledWith('cmd-tx', 'admin-1', expect.any(String), m)
 })

@@ -2,15 +2,8 @@
  * SUPERADMIN terminals list — `migration` badge logic.
  *
  * Covers the pure `computeTerminalMigration` helper that powers the "Migrando…"
- * badge in the dashboard. The badge is computed for each terminal in the list
- * from (a) its latest in-flight migration FACTORY_RESET command and (b) the
- * device's post-wipe rebound timestamp (`Terminal.lastActivationStatusCheckAt`).
- *
- * Key rule: a migration FACTORY_RESET never ACKs (it lingers until it EXPIRES),
- * so we do NOT detect completion via the command status — we detect it via the
- * rebound. `inProgress` is true UNLESS the device already rebound after the wipe
- * (lastActivationStatusCheckAt strictly AFTER the command's createdAt). An offline
- * device (no rebound) stays inProgress=true.
+ * badge in the dashboard. Public activation checks never prove a wipe. The durable
+ * protocol requires both a completed receipt and a different authenticated boot.
  */
 
 import { computeTerminalMigration } from '@/services/dashboard/terminals.superadmin.service'
@@ -46,10 +39,10 @@ describe('computeTerminalMigration — "Migrando…" badge logic', () => {
     expect(result?.inProgress).toBe(true)
   })
 
-  it('inProgress=false once the device rebound AFTER the wipe (lastActivationStatusCheckAt > createdAt)', () => {
+  it('a public activation check alone never proves a wipe', () => {
     const result = computeTerminalMigration(migrationCommand(), new Date(T0.getTime() + 60_000))
     expect(result).toEqual({
-      inProgress: false,
+      inProgress: true,
       commandId: 'cmd-1',
       fromVenueId: 'venue-old',
       toVenueId: 'venue-new',
@@ -90,4 +83,18 @@ describe('computeTerminalMigration — "Migrando…" badge logic', () => {
     const result = computeTerminalMigration(migrationCommand({ createdAt: null }), new Date(T0.getTime() + 60_000))
     expect(result?.inProgress).toBe(true)
   })
+})
+
+it('only a completed receipt and a different authenticated boot confirm the migration', () => {
+  const command = {
+    ...migrationCommand(),
+    status: 'COMPLETED',
+    payload: {
+      migration: { fromVenueId: 'venue-old', toVenueId: 'venue-new' },
+      _deliveryProtocol: 2,
+      _originCommandSessionId: 'boot1',
+    },
+  }
+  expect(computeTerminalMigration(command, null, 'boot1')?.inProgress).toBe(true)
+  expect(computeTerminalMigration(command, null, 'boot2')?.inProgress).toBe(false)
 })

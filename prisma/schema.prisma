@@ -5238,6 +5238,11 @@ model Terminal {
   brand String? // Hardware manufacturer (e.g., "PAX", "Ingenico", "Verifone")
   model String? // Hardware model (e.g., "A910S", "D220", "VX520")
 
+  // Opaque device credential: command delivery/ACK only, independent of staff sessions.
+  commandTokenHash String?
+  commandProtocolVersion Int?
+  commandSessionId String?
+
   // Status
   status        TerminalStatus @default(INACTIVE)
   lastHeartbeat DateTime?
@@ -5439,6 +5444,8 @@ model Terminal {
   @@index([fulfillmentAreaId]) // terminales de un área
   @@index([scaleProfileId])
   @@index([customerDisplayRequestExpiresAt])
+  @@index([type, createdAt, id]) // TPV fleet pagination
+
 }
 
 // ==========================================
@@ -10648,6 +10655,8 @@ model TpvCommandQueue {
   @@index([status, scheduledFor])
   @@index([correlationId])
   @@index([bulkOperationId])
+  @@index([terminalId, venueId, createdAt, id]) // Command history pagination
+
 }
 
 // ==========================================

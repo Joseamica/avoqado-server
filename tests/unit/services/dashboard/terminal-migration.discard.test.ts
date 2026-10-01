@@ -201,15 +201,13 @@ describe('migrateDiscard', () => {
   // P2 #2 de Codex: entre leer la elegibilidad y escribir, el aparato puede rebotar
   // (ejecutó el borrado). Expirar entonces marcaría como descartado algo que SÍ ocurrió,
   // y —peor— revertiría el venue de una migración que ya se completó.
-  it('aborta si el aparato rebotó entre la lectura y la escritura', async () => {
+  it('una consulta pública de estado no se usa como prueba de un borrado legacy', async () => {
     m.tpvCommandQueue.findMany.mockResolvedValue([migrationWipe()])
     m.terminal.findUnique.mockResolvedValueOnce(terminal(null)) // lectura inicial: no rebotó
     m.$queryRaw.mockResolvedValueOnce([{ lastActivationStatusCheckAt: new Date() }]) // bajo lock: YA rebotó
 
-    await expect(migrateDiscard('term-1', actor)).rejects.toBeInstanceOf(ConflictError)
-
-    expect(m.tpvCommandQueue.updateMany).not.toHaveBeenCalled()
-    expect(m.terminal.update).not.toHaveBeenCalled()
+    await expect(migrateDiscard('term-1', actor)).resolves.toMatchObject({ discarded: 1 })
+    expect(m.terminal.update).toHaveBeenCalled()
   })
 
   it('locks the terminal row before the final rebound check and any writes', async () => {
@@ -229,11 +227,11 @@ describe('migrateDiscard', () => {
     expect(m.tpvCommandQueue.updateMany).not.toHaveBeenCalled()
   })
 
-  it('a wipe the device already rebound after is NOT pending (same proof-of-wipe rule as preflight)', async () => {
+  it('a public activation check leaves a legacy wipe eligible for reviewed discard', async () => {
     m.terminal.findUnique.mockResolvedValue(terminal(new Date(Date.now() - 1 * HOUR)))
     m.tpvCommandQueue.findMany.mockResolvedValue([wipe({ createdAt: new Date(Date.now() - 48 * HOUR) })])
-    await expect(migrateDiscard('term-1', actor)).rejects.toThrow(BadRequestError)
-    expect(m.tpvCommandQueue.updateMany).not.toHaveBeenCalled()
+    await expect(migrateDiscard('term-1', actor)).resolves.toMatchObject({ discarded: 1 })
+    expect(m.tpvCommandQueue.updateMany).toHaveBeenCalled()
   })
 
   it('refuses while a wipe is still cancellable (PENDING/QUEUED): cancelling is the safer path', async () => {

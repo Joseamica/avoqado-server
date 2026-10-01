@@ -1,7 +1,9 @@
+import { broadcastSuperadminTerminalUpdate } from '../../communication/sockets'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { BadRequestError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import crypto from 'crypto'
+import { newCommandCredential } from '../tpv/command-credential.service'
 import { type TerminalWriteScope, scopedTerminalWhere, writeScopedTerminal } from '../shared/terminalScopedWrites'
 
 /**
@@ -76,7 +78,7 @@ export async function generateActivationCode(terminalId: string, staffId: string
     'Terminal not found in this venue',
   )
 
-  logger.info(`Activation code generated for terminal ${terminalId}: ${code} (expires: ${expiryDate.toISOString()})`)
+  logger.info(`Activation code generated for terminal ${terminalId} (expires: ${expiryDate.toISOString()})`)
 
   return {
     activationCode: code,
@@ -99,7 +101,7 @@ export async function generateActivationCode(terminalId: string, staffId: string
  * @returns venueId, terminalId, venue info
  */
 export async function activateTerminal(serialNumber: string, activationCode: string) {
-  logger.info(`Terminal activation attempt: serial=${serialNumber}, code=${activationCode}`)
+  logger.info(`Terminal activation attempt: serial=${serialNumber}`)
 
   // Find terminal by serial number (case-insensitive)
   // ✅ CASE-INSENSITIVE: Android may send lowercase, DB stores uppercase
@@ -203,11 +205,22 @@ export async function activateTerminal(serialNumber: string, activationCode: str
     throw new UnauthorizedError(`Invalid activation code. ${remainingAttempts} attempt(s) remaining before lockout.`)
   }
 
-  // ✅ CODE VALID - Activate terminal
-  await prisma.terminal.update({
-    where: { id: terminal.id },
+  const credential = newCommandCredential()
+  // Compare-and-set consumes the proof once; concurrent requests cannot rotate the credential.
+  const activatedAt = new Date()
+  const consumed = await prisma.terminal.updateMany({
+    where: {
+      id: terminal.id,
+      venueId: terminal.venueId,
+      activationCode: terminal.activationCode,
+      activatedAt: null,
+      status: terminal.status,
+      activationAttempts: { lt: 5 },
+      OR: [{ activationCodeExpiry: null }, { activationCodeExpiry: { gt: activatedAt } }],
+    },
     data: {
-      activatedAt: new Date(),
+      commandTokenHash: credential.hash,
+      activatedAt,
       status: 'ACTIVE', // Change from INACTIVE to ACTIVE
       activationCode: null, // Clear code (single-use)
       activationCodeExpiry: null,
@@ -216,6 +229,8 @@ export async function activateTerminal(serialNumber: string, activationCode: str
     },
   })
 
+  if (consumed.count !== 1) throw new ConflictError('Activation changed; retry with the current code.')
+
   logger.info(`Terminal ${serialNumber} activated successfully for venue ${terminal.venue.name}`)
 
   return {
@@ -223,7 +238,8 @@ export async function activateTerminal(serialNumber: string, activationCode: str
     terminalId: terminal.id,
     venueName: terminal.venue.name,
     venueSlug: terminal.venue.slug,
-    activatedAt: new Date().toISOString(),
+    activatedAt: activatedAt.toISOString(),
+    commandToken: credential.token,
   }
 }
 
@@ -283,10 +299,11 @@ export async function checkTerminalActivationStatus(serialNumber: string) {
     throw new NotFoundError('Terminal no registrado. Contacta a tu administrador.')
   }
 
-  // Proof-of-wipe signal for venue migration: a (possibly just-wiped) device
-  // polls this endpoint on boot. Record the timestamp; never block the response on it.
+  // Activation contact after boot/reopen is useful to migration observers, but
+  // does not prove a wipe completed. Stamp it without blocking the response.
   void prisma.terminal
     .update({ where: { id: terminal.id }, data: { lastActivationStatusCheckAt: new Date() } })
+    .then(() => broadcastSuperadminTerminalUpdate(terminal.id))
     .catch(err => logger.warn(`Failed to stamp lastActivationStatusCheckAt for ${terminal.id}: ${err}`))
 
   // Check if activated

@@ -771,7 +771,7 @@ export async function getMerchantAccountsForSelector(req: Request, res: Response
         displayName: true,
         alias: true,
         externalMerchantId: true,
-        provider: { select: { name: true } },
+        provider: { select: { name: true, code: true } },
       },
       orderBy: { createdAt: 'desc' },
     })

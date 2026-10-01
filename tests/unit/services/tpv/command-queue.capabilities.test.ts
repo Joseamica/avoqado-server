@@ -22,16 +22,19 @@ const SUPPORTED_TPV_ANDROID_COMMANDS: TpvCommandType[] = [
   TpvCommandType.FORCE_UPDATE,
   TpvCommandType.REQUEST_UPDATE,
   TpvCommandType.INSTALL_VERSION,
-  TpvCommandType.SYNC_DATA,
   TpvCommandType.FACTORY_RESET,
-  TpvCommandType.EXPORT_LOGS,
-  TpvCommandType.UPDATE_CONFIG,
-  TpvCommandType.REFRESH_MENU,
-  TpvCommandType.UPDATE_MERCHANT,
   TpvCommandType.FETCH_ANGELPAY_MERCHANTS,
 ]
 
 const AUTOMATION_COMMANDS: TpvCommandType[] = [TpvCommandType.SCHEDULE, TpvCommandType.GEOFENCE_TRIGGER, TpvCommandType.TIME_RULE]
+
+const UNIMPLEMENTED_COMMANDS: TpvCommandType[] = [
+  TpvCommandType.SYNC_DATA,
+  TpvCommandType.UPDATE_CONFIG,
+  TpvCommandType.REFRESH_MENU,
+  TpvCommandType.UPDATE_MERCHANT,
+  TpvCommandType.EXPORT_LOGS,
+]
 
 const UNSUPPORTED_DEVICE_TYPES: TerminalType[] = [
   TerminalType.TPV_IOS,
@@ -67,6 +70,7 @@ function input(commandType: TpvCommandType) {
     venueId: 'venue-1',
     commandType,
     requestedBy: 'staff-1',
+    ...(commandType === TpvCommandType.INSTALL_VERSION && { payload: { versionCode: 123 } }),
   }
 }
 
@@ -156,7 +160,23 @@ describe('TpvCommandQueueService canonical device capability guard', () => {
     },
   )
 
+  it.each(UNIMPLEMENTED_COMMANDS)('rechaza el comando %s no implementado sin guardar un éxito ficticio', async commandType => {
+    prismaMock.terminal.findUnique.mockResolvedValue(terminal(TerminalType.TPV_ANDROID, commandType))
+
+    await expect(service.queueCommand(input(commandType))).rejects.toMatchObject(
+      commandType === TpvCommandType.EXPORT_LOGS ? { statusCode: 400 } : { statusCode: 422, code: 'COMMAND_NOT_SUPPORTED' },
+    )
+    expect(prismaMock.tpvCommandQueue.create).not.toHaveBeenCalled()
+  })
+  it.each([undefined, '1.42.0', 0, -1, 1.5])('rechaza INSTALL_VERSION con código inválido %s', async versionCode => {
+    await expect(service.queueCommand({ ...input(TpvCommandType.INSTALL_VERSION), payload: { versionCode } })).rejects.toThrow(
+      /versión publicada/,
+    )
+    expect(prismaMock.tpvCommandQueue.create).not.toHaveBeenCalled()
+  })
   it('keeps the allowlist exact instead of silently accepting a new enum member', () => {
-    expect([...SUPPORTED_TPV_ANDROID_COMMANDS, ...AUTOMATION_COMMANDS].sort()).toEqual(Object.values(TpvCommandType).sort())
+    expect([...SUPPORTED_TPV_ANDROID_COMMANDS, ...AUTOMATION_COMMANDS, ...UNIMPLEMENTED_COMMANDS].sort()).toEqual(
+      Object.values(TpvCommandType).sort(),
+    )
   })
 })
