@@ -24,6 +24,11 @@ jest.mock('../../../../src/services/fiscal/cfdi.service', () => ({
   loadOrderForCfdiFromDb: jest.fn(),
 }))
 
+jest.mock('../../../../src/services/whatsapp.service', () => ({
+  __esModule: true,
+  sendCfdiWhatsApp: jest.fn().mockResolvedValue(undefined),
+}))
+
 jest.mock('../../../../src/services/dashboard/activity-log.service', () => ({
   __esModule: true,
   logAction: jest.fn().mockResolvedValue(undefined),
@@ -45,7 +50,12 @@ jest.mock('../../../../src/config/env', () => ({
 import prisma from '../../../../src/utils/prismaClient'
 import { issueCfdiForOrder, loadOrderForCfdiFromDb } from '../../../../src/services/fiscal/cfdi.service'
 import { logAction } from '../../../../src/services/dashboard/activity-log.service'
-import { autofacturaController, getAutofacturaStatusController } from '../../../../src/controllers/public/cfdi.public.controller'
+import { sendCfdiWhatsApp } from '../../../../src/services/whatsapp.service'
+import {
+  autofacturaController,
+  getAutofacturaStatusController,
+  sendCfdiWhatsAppController,
+} from '../../../../src/controllers/public/cfdi.public.controller'
 
 // ── Typed mock helpers ────────────────────────────────────────────────────────
 
@@ -83,6 +93,42 @@ function makeReceipt(overrides: { paymentStatus?: string; createdAt?: Date } = {
     },
   }
 }
+
+/**
+ * Una tabla `Cfdi` de mentira que SÍ aplica el `where` (igualdad) y el orden por fecha: así la prueba mide QUÉ documento
+ * elige el controlador, no la forma de su consulta.
+ */
+function tablaCfdi(filas: Record<string, any>[]) {
+  mockFindCfdi.mockImplementation(async ({ where = {}, orderBy }: any) => {
+    const cumple = (f: Record<string, any>) => Object.entries(where).every(([k, v]) => f[k] === v)
+    const desc = orderBy?.createdAt === 'desc'
+    return [...filas].filter(cumple).sort((a, b) => (desc ? b.createdAt - a.createdAt : 0))[0] ?? null
+  })
+}
+
+/** La venta con su factura (vieja) y una NOTA de crédito timbrada después por una devolución. */
+const facturaYNota = [
+  {
+    orderId: 'order-1',
+    type: 'INGRESO',
+    status: 'STAMPED',
+    uuid: 'FACTURA',
+    serie: 'F',
+    folio: '1',
+    pdfUrl: 'https://s/f.pdf',
+    createdAt: new Date('2026-10-01T10:00:00Z'),
+  },
+  {
+    orderId: 'order-1',
+    type: 'EGRESO',
+    status: 'STAMPED',
+    uuid: 'NOTA',
+    serie: 'NC',
+    folio: '7',
+    pdfUrl: 'https://s/nc.pdf',
+    createdAt: new Date('2026-10-01T12:00:00Z'),
+  },
+]
 
 /** Builds a successful IssueCfdiResult */
 function makeStampedResult() {
@@ -217,18 +263,16 @@ describe('autofacturaController (POST /receipt/:accessKey/cfdi)', () => {
     jest.useRealTimers()
   })
 
-  it('returns 409 when a STAMPED cfdi already exists for the order', async () => {
+  it('🔴 H19: una NOTA de crédito timbrada no cuenta como «ya facturada»: la venta se factura', async () => {
     mockFindReceipt.mockResolvedValue(makeReceipt())
-    mockFindCfdi.mockResolvedValue({ id: 'existing-cfdi', status: 'STAMPED' })
+    tablaCfdi([{ ...facturaYNota[1] }])
+    mockIssueCfdi.mockResolvedValue(makeStampedResult())
 
-    const req = makeReq({ accessKey: 'key-abc' })
     const res = makeRes()
+    await autofacturaController(makeReq({ accessKey: 'key-abc' }) as any, res as any)
 
-    await autofacturaController(req as any, res as any)
-
-    expect(res.status).toHaveBeenCalledWith(409)
-    expect(res.json).toHaveBeenCalledWith({ error: 'Esta cuenta ya fue facturada.' })
-    expect(mockIssueCfdi).not.toHaveBeenCalled()
+    expect(mockIssueCfdi).toHaveBeenCalledTimes(1)
+    expect(res.status).toHaveBeenCalledWith(200)
   })
 
   it('returns 403 when issueCfdiForOrder throws /no habilitada/ (autofactura disabled)', async () => {
@@ -358,6 +402,18 @@ describe('autofacturaController (POST /receipt/:accessKey/cfdi)', () => {
 // ── GET /receipt/:accessKey/cfdi tests ────────────────────────────────────────
 
 describe('getAutofacturaStatusController (GET /receipt/:accessKey/cfdi)', () => {
+  it('🔴 H19: con una nota de crédito más nueva, el estado muestra la FACTURA de la venta', async () => {
+    mockFindReceipt.mockResolvedValue(makeReceipt())
+    tablaCfdi(facturaYNota)
+    mockLoadOrder.mockResolvedValue(makeBundle())
+
+    const res = makeRes()
+    await getAutofacturaStatusController(makeReq({ accessKey: 'key-abc' }) as any, res as any)
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json.mock.calls[0][0].cfdi.uuid).toBe('FACTURA')
+  })
+
   it('returns 200 with cfdi + autofacturaAvailable:true when a STAMPED cfdi exists and the merchant has it enabled', async () => {
     mockFindReceipt.mockResolvedValue(makeReceipt())
     mockFindCfdi.mockResolvedValue({
@@ -484,4 +540,17 @@ it.each([
   await autofacturaController(makeReq({ accessKey: 'key-abc' }) as any, res as any)
   expect(res.status).toHaveBeenCalledWith(409)
   expect(res.json).toHaveBeenCalledWith({ error: message })
+})
+
+describe('sendCfdiWhatsAppController (POST /receipt/:accessKey/cfdi/whatsapp)', () => {
+  it('🔴 H19: con una nota de crédito más nueva, por WhatsApp va la FACTURA, no la nota', async () => {
+    mockFindReceipt.mockResolvedValue({ payment: { order: { id: 'order-1', venue: { name: 'Testarudo' } } } })
+    tablaCfdi(facturaYNota)
+
+    const res = makeRes()
+    await sendCfdiWhatsAppController({ params: { accessKey: 'key-abc' }, body: { phone: '+525512345678' } } as any, res as any)
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(sendCfdiWhatsApp).toHaveBeenCalledWith('+525512345678', expect.objectContaining({ folio: 'F-1' }))
+  })
 })
