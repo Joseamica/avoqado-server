@@ -1,6 +1,7 @@
 import type { Prisma } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 import { ConflictError } from '@/errors/AppError'
+import { utcTs } from '@/utils/sqlDates'
 import { hybridOfferDefinition, type HybridOfferDefinition } from './hybridOffer.schema'
 import { productKeyOf, productKeySql, type ProductKey } from './hybridProduct'
 
@@ -48,9 +49,13 @@ export async function assertPromotionBelowList(tx: Prisma.TransactionClient, def
     )
 }
 
-/** List side: the ACTIVE single-product promotions a list price would break (for the save dialog). Caller holds the product lock. */
+/**
+ * List side: the ACTIVE single-product promotions a list price would break (for the save dialog). Caller holds the product lock.
+ * Only promotions still in force count («vigentes», spec §4.4): one whose window already ended can never sell again.
+ */
 export async function promotionsBrokenByList(tx: Prisma.TransactionClient, key: ProductKey, listPrice: number): Promise<RuleViolation[]> {
   // Filtered by product in SQL, so the set is one product's active promotions, never a global page (index purpose+status).
+  // endsAt holds UTC: compare against a bound UTC instant, never NOW() (the local session zone is America/Mexico_City).
   const rows = await tx.$queryRaw<
     { id: string; name: string; revision: number; promotionGroupId: string | null; groupRevision: number | null; definition: unknown }[]
   >`
@@ -58,7 +63,7 @@ export async function promotionsBrokenByList(tx: Prisma.TransactionClient, key: 
     FROM "HybridCampaign" c
     JOIN "HybridOfferPublication" p ON p.id = c."currentPublicationId"
     LEFT JOIN "HybridPromotionGroup" g ON g.id = c."promotionGroupId"
-    WHERE c.purpose = 'PROMOTION' AND c.status = 'ACTIVE' AND ${productKeySql('p')} = ${key}
+    WHERE c.purpose = 'PROMOTION' AND c.status = 'ACTIVE' AND c."endsAt" > ${utcTs(new Date())} AND ${productKeySql('p')} = ${key}
     ORDER BY c."createdAt", c.id`
   return rows.flatMap(row => {
     const { terms } = hybridOfferDefinition.parse(row.definition)
@@ -83,7 +88,7 @@ export async function assertPriceRuleForList(tx: Prisma.TransactionClient, key: 
   const broken = await promotionsBrokenByList(tx, key, listPrice)
   if (broken.length)
     throw new ConflictError(
-      'Hay promociones activas que costarían lo mismo o más que este precio de lista. Páusalas antes de guardarlo.',
+      'Hay promociones activas que costarían lo mismo o más que este precio de lista, o que renovarían por encima de él. Páusalas antes de guardarlo.',
       'HYBRID_LIST_BREAKS_PROMOTIONS',
       broken,
     )

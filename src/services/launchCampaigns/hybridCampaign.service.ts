@@ -79,11 +79,11 @@ function draftData(input: z.infer<typeof hybridCampaignBody>) {
   }
 }
 
-async function audit(tx: Prisma.TransactionClient, id: string, staffId: string, action: string, data: Prisma.InputJsonObject) {
+export async function audit(tx: Prisma.TransactionClient, id: string, staffId: string, action: string, data: Prisma.InputJsonObject) {
   await tx.activityLog.create({ data: { staffId, action, entity: 'HybridCampaign', entityId: id, data } })
 }
 
-function changed(): never {
+export function changed(): never {
   throw new ConflictError('La ficha cambió. Actualiza la página y revisa la nueva versión.', 'HYBRID_CAMPAIGN_STALE')
 }
 
