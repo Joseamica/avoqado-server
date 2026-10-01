@@ -207,3 +207,101 @@ describe('what a classic plan brings when it is replaced', () => {
     })
   })
 })
+
+describe('spec §4.2: the quote checks dependencies over the whole purchase, with dates', () => {
+  const listId = 'cm523456789012345678901234'
+  const listCampaign = 'cm623456789012345678901234'
+  const upsellAiList = {
+    ...publication,
+    id: listId,
+    campaignId: listCampaign,
+    name: 'Sugerencias con IA',
+    includedFeatureCodes: ['UPSELL_AI'],
+    definition: { schemaVersion: 1, kind: 'FEATURES', featureCodes: ['UPSELL_AI'], terms: { ...publication.definition.terms, price: 299 } },
+    campaign: { ...publication.campaign, id: listCampaign, purpose: 'LIST', endsAt: null, capacity: null, currentPublicationId: listId },
+  }
+  const classicPro = (terminaEn: string | null) => ({
+    vivas: [{ subscriptionId: 'sub_classic', proyecciones: [{ tipo: 'PLAN', tier: 'PRO' }] }],
+    detalle: { sub_classic: { customerId: 'cus_test', terminaEn } },
+    conCambiosProgramados: [],
+  })
+  const buy = () => createHybridQuote('venue', 'staff', { lines: [{ publicationId: listId }] })
+  beforeEach(() => prismaMock.hybridOfferPublication.findMany.mockResolvedValue([upsellAiList]))
+
+  it('a classic Pro ending in 10 days cannot hold a permanent UPSELL_AI list', async () => {
+    inventory.mockResolvedValue(classicPro(new Date(now + 10 * 86400000).toISOString()))
+    await expect(buy()).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'HYBRID_DEPENDENCY_TERM',
+      message: expect.stringContaining('mientras la conserves'),
+      details: [
+        { featureCode: 'UPSELL_AI', requiredFeatureCode: 'UPSELL', requiredUntil: null, unit: { kind: 'RETAINED', source: 'sub_classic' } },
+      ],
+    })
+    expect(prismaMock.hybridPurchase.create).not.toHaveBeenCalled()
+  })
+
+  it('the same Pro without a scheduled end holds it', async () => {
+    inventory.mockResolvedValue(classicPro(null))
+    await expect(buy()).resolves.toMatchObject({ status: 'QUOTED' })
+  })
+
+  it('without the dependency anywhere the quote names it and offers no unit', async () => {
+    await expect(buy()).rejects.toMatchObject({
+      code: 'HYBRID_DEPENDENCY_TERM',
+      details: [{ featureCode: 'UPSELL_AI', requiredFeatureCode: 'UPSELL', requiredUntil: null, unit: null }],
+    })
+  })
+})
+
+// Spec §4.5 (option A): a function re-quoted out of a replaced contract moves to today's offer, and the quote says so.
+describe('quote.repriced: what a replaced contract charged against today', () => {
+  const listId = 'cm723456789012345678901234'
+  const listCampaign = 'cm823456789012345678901234'
+  const loyaltyAt = (price: number) => ({
+    ...publication,
+    id: listId,
+    campaignId: listCampaign,
+    name: 'Lealtad',
+    includedFeatureCodes: ['LOYALTY_PROGRAM'],
+    definition: {
+      schemaVersion: 1,
+      kind: 'FEATURES',
+      featureCodes: ['LOYALTY_PROGRAM'],
+      terms: { ...publication.definition.terms, price },
+    },
+    campaign: { ...publication.campaign, id: listCampaign, purpose: 'LIST', endsAt: null, capacity: null, currentPublicationId: listId },
+  })
+  const replace = { lines: [{ publicationId: listId }], replaceSubscriptionIds: ['sub_hybrid'] }
+  beforeEach(() => {
+    inventory.mockResolvedValue({
+      vivas: [{ subscriptionId: 'sub_hybrid', proyecciones: [{ tipo: 'PAQUETE', featureCodes: ['LOYALTY_PROGRAM'] }] }],
+      detalle: { sub_hybrid: { customerId: 'cus_test', terminaEn: null } },
+      conCambiosProgramados: [],
+    })
+    creditSource.mockReset().mockResolvedValue({ sourceSubscriptionId: 'sub_hybrid', amount: new Prisma.Decimal('0') })
+    prismaMock.hybridContract.findMany.mockImplementation(async ({ where }: any) =>
+      where.stripeSubscriptionId.in.includes('sub_hybrid') ? [{ id: 'contract_old', stripeSubscriptionId: 'sub_hybrid' }] : [],
+    )
+    prismaMock.hybridPaymentPeriod.findFirst.mockResolvedValue({
+      composition: [
+        { contractId: 'contract_old', itemId: 'si_old', featureCodes: ['LOYALTY_PROGRAM'], priceId: 'price_old', amount: '599.00' },
+      ],
+    })
+  })
+
+  it('replacing a contract at 599 with a line at 699 shows the difference', async () => {
+    prismaMock.hybridOfferPublication.findMany.mockResolvedValue([loyaltyAt(699)])
+    const quote = await createHybridQuote('venue', 'staff', replace)
+    expect((quote.quote as any).repriced).toEqual([{ featureCode: 'LOYALTY_PROGRAM', from: '599.00', to: '699.00' }])
+    expect(prismaMock.hybridPaymentPeriod.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { venueId: 'venue', stripeSubscriptionId: 'sub_hybrid' } }),
+    )
+  })
+
+  it('the same price is not a change: the quote carries no repriced field (and keeps its old hash shape)', async () => {
+    prismaMock.hybridOfferPublication.findMany.mockResolvedValue([loyaltyAt(599)])
+    const quote = await createHybridQuote('venue', 'staff', replace)
+    expect(quote.quote).not.toHaveProperty('repriced')
+  })
+})

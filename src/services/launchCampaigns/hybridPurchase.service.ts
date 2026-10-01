@@ -4,14 +4,15 @@ import prisma from '@/utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import { FEATURE_CATALOG } from '@/config/featureCatalog'
 import { elPlanConcede, PAID_PLAN_TIER_CODES, FREE_TIER_CODES } from '@/services/access/basePlan.service'
-import { inventarioDeObligaciones } from '@/services/access/inventarioDeObligaciones'
+import { inventarioDeObligaciones, type InventarioDeObligaciones } from '@/services/access/inventarioDeObligaciones'
 import { evaluarCompatibilidad, type Proyeccion } from '@/services/access/obligacionesDeCobro'
 import { getOrCreateStripeCustomer, stripe, STRIPE_DENTRO_DEL_CANDADO } from '@/services/stripe.service'
 import { autorizarObligacionNueva } from '@/services/access/autorizarObligacionNueva'
 import { fromStripeAmount } from '@/services/payments/providers/money'
 import { hybridOfferDefinition } from './hybridOffer.schema'
-import { planIncludes } from './hybridOffer.service'
-import { buildHybridQuote } from './hybridQuote'
+import { lineCoverage, projectionCodes, retainedCoverage } from './hybridCoverage'
+import { assertDependencyTerms } from './hybridDependencies'
+import { buildHybridQuote, type QuoteLine } from './hybridQuote'
 import { hybridHash } from './hybridProvider'
 import { readHybridCreditSource } from './hybridSources'
 import { assertHybridBalanceUsable } from './hybridFundingGraph'
@@ -70,15 +71,98 @@ export function hybridProjections(lines: ReturnType<typeof buildHybridQuote>['li
       : { tipo: 'PAQUETE', featureCodes: line.featureCodes },
   )
 }
-const projectionCodes = (projection: Proyeccion): string[] => {
-  if (projection.tipo === 'FUNCION') return [projection.featureCode]
-  if (projection.tipo === 'PAQUETE') return projection.featureCodes
-  if (projection.tipo === 'PLAN')
-    return (
-      projection.featureCodes ??
-      FEATURE_CATALOG.flatMap(entry => (entry.featureCode && planIncludes(projection.tier, entry) ? [entry.featureCode] : []))
-    )
-  return []
+
+const accessUnverified = () => new ConflictError('No pudimos revisar todos los accesos del negocio.', 'HYBRID_ACCESS_UNVERIFIED')
+const isPlanRow = (row: { feature: { code: string } }) => (PAID_PLAN_TIER_CODES as readonly string[]).includes(row.feature.code)
+
+/**
+ * Everything the venue keeps besides what it replaces: read for the quote and AGAIN under the purchase lock, where the
+ * dated dependency check is repeated (spec §4.2 rule 5) — a contract's `cancelAt` is not part of the inventory hash.
+ */
+async function readRetained(
+  db: Prisma.TransactionClient,
+  venueId: string,
+  inventory: InventarioDeObligaciones,
+  replaceSubscriptionIds: string[],
+  now: Date,
+) {
+  const keptIds = inventory.vivas.map(source => source.subscriptionId).filter(id => !replaceSubscriptionIds.includes(id))
+  const [legacy, replacedContracts, contracts] = await Promise.all([
+    db.venueFeature.findMany({
+      where: {
+        venueId,
+        active: true,
+        suspendedAt: null,
+        AND: [
+          { OR: [{ endDate: null }, { endDate: { gte: now } }] },
+          { OR: [{ stripeSubscriptionId: null }, { stripeSubscriptionId: { notIn: replaceSubscriptionIds } }] },
+        ],
+      },
+      select: { stripeSubscriptionId: true, endDate: true, feature: { select: { code: true } } },
+      orderBy: { id: 'asc' },
+      take: 201,
+    }),
+    db.hybridContract.findMany({
+      where: { venueId, stripeSubscriptionId: { in: replaceSubscriptionIds } },
+      select: { id: true, stripeSubscriptionId: true },
+      take: 65,
+      orderBy: { id: 'asc' },
+    }),
+    db.hybridContract.findMany({
+      where: { venueId, endedAt: null, stripeSubscriptionId: { in: keptIds } },
+      select: {
+        stripeSubscriptionId: true,
+        featureCodes: true,
+        startsAt: true,
+        cancelAt: true,
+        publication: { select: { definition: true } },
+      },
+      take: 65,
+      orderBy: { id: 'asc' },
+    }),
+  ])
+  if (legacy.length > 200 || replacedContracts.length > 64 || contracts.length > 64) throw accessUnverified()
+  const grants = await db.capabilityGrant.findMany({
+    where: {
+      venueId,
+      OR: [{ contractId: null }, { contractId: { notIn: replacedContracts.map(c => c.id) } }],
+      revokedAt: null,
+      startsAt: { lte: now },
+      endsAt: { gt: now },
+    },
+    select: { featureCode: true, endsAt: true, contractId: true },
+    take: 1001,
+    orderBy: { id: 'asc' },
+  })
+  if (grants.length > 1000) throw accessUnverified()
+  return { legacy, replacedContracts, contracts, grants }
+}
+
+/**
+ * Spec §4.5 (option A): a function of a new line that the venue paid in a REPLACED contract moves to today's offer. The
+ * quote says so: `from` is what that contract charged in its last paid period, `to` the line's price; equal is no change.
+ */
+async function repricedFunctions(venueId: string, subscriptionIds: string[], lines: QuoteLine[]) {
+  const periods = await Promise.all(
+    subscriptionIds.map(stripeSubscriptionId =>
+      prisma.hybridPaymentPeriod.findFirst({
+        where: { venueId, stripeSubscriptionId },
+        orderBy: [{ endsAt: 'desc' }, { id: 'desc' }],
+        select: { composition: true },
+      }),
+    ),
+  )
+  const paid = new Map<string, Prisma.Decimal>()
+  for (const period of periods)
+    for (const line of Array.isArray(period?.composition) ? (period.composition as Array<{ featureCodes: string[]; amount: string }>) : [])
+      for (const code of line.featureCodes) paid.set(code, new Prisma.Decimal(line.amount))
+  return lines.flatMap(line =>
+    line.featureCodes.flatMap(featureCode => {
+      const from = paid.get(featureCode)
+      const to = new Prisma.Decimal(line.terms.price)
+      return from && !from.eq(to) ? [{ featureCode, from: from.toFixed(2), to: to.toFixed(2) }] : []
+    }),
+  )
 }
 
 function assertAudience(
@@ -153,51 +237,15 @@ export async function observeHybridQuote(venueId: string, body: z.output<typeof 
     throw new BadRequestError('No encontramos una suscripción de origen en este negocio.')
   if (replaced.some(source => source.proyecciones.some(p => p.tipo === 'AJENO' || p.tipo === 'DESCONOCIDO')))
     throw new ConflictError('Una suscripción de origen requiere revisión.', 'OBLIGACION_DESCONOCIDA')
-  const [legacy, contracts] = await Promise.all([
-    prisma.venueFeature.findMany({
-      where: {
-        venueId,
-        active: true,
-        suspendedAt: null,
-        AND: [
-          { OR: [{ endDate: null }, { endDate: { gte: now } }] },
-          { OR: [{ stripeSubscriptionId: null }, { stripeSubscriptionId: { notIn: body.replaceSubscriptionIds } }] },
-        ],
-        feature: { code: { notIn: [...PAID_PLAN_TIER_CODES] } },
-      },
-      select: { feature: { select: { code: true } } },
-      orderBy: { id: 'asc' },
-      take: 201,
-    }),
-    prisma.hybridContract.findMany({
-      where: { venueId, stripeSubscriptionId: { in: body.replaceSubscriptionIds } },
-      select: { id: true },
-      take: 65,
-      orderBy: { id: 'asc' },
-    }),
-  ])
-  if (legacy.length > 200 || contracts.length > 64)
-    throw new ConflictError('No pudimos revisar todos los accesos del negocio.', 'HYBRID_ACCESS_UNVERIFIED')
-  const grants = await prisma.capabilityGrant.findMany({
-    where: {
-      venueId,
-      OR: [{ contractId: null }, { contractId: { notIn: contracts.map(c => c.id) } }],
-      revokedAt: null,
-      startsAt: { lte: now },
-      endsAt: { gt: now },
-    },
-    select: { featureCode: true },
-    take: 1001,
-    orderBy: { id: 'asc' },
-  })
-  if (grants.length > 1000) throw new ConflictError('No pudimos revisar todos los accesos del negocio.', 'HYBRID_ACCESS_UNVERIFIED')
+  const retained = await readRetained(prisma, venueId, inventory, body.replaceSubscriptionIds, now)
   const retainedCodes = [
     ...new Set([
       ...inventory.vivas
         .filter(source => !body.replaceSubscriptionIds.includes(source.subscriptionId))
         .flatMap(source => source.proyecciones.flatMap(projectionCodes)),
-      ...legacy.map(row => row.feature.code),
-      ...grants.map(grant => grant.featureCode),
+      // Plan rows only feed the dated coverage below; what counts as already paid stays as it was.
+      ...retained.legacy.filter(row => !isPlanRow(row)).map(row => row.feature.code),
+      ...retained.grants.map(grant => grant.featureCode),
     ]),
   ]
   const composition = buildHybridQuote({
@@ -215,6 +263,10 @@ export async function observeHybridQuote(venueId: string, body: z.output<typeof 
     })),
     dropFeatureCodes: body.dropFeatureCodes,
   })
+  assertDependencyTerms([
+    ...retainedCoverage({ inventory, replaceSubscriptionIds: body.replaceSubscriptionIds, ...retained }),
+    ...lineCoverage(composition.lines, now),
+  ])
   const compatible = evaluarCompatibilidad(
     inventory.vivas,
     { tipo: 'HYBRID', proyecciones: hybridProjections(composition.lines), reemplaza: composition.replaces },
@@ -235,8 +287,16 @@ export async function observeHybridQuote(venueId: string, body: z.output<typeof 
   if (customer && !customer.deleted) await assertHybridBalanceUsable(venueId, customer.id, balance)
   const credit = sources.reduce((sum, source) => sum.add(source.amount), new Prisma.Decimal(0))
   const net = new Prisma.Decimal(composition.total).sub(credit).add(new Prisma.Decimal(balance).div(100))
+  const repriced = await repricedFunctions(
+    venueId,
+    [...new Set(retained.replacedContracts.map(contract => contract.stripeSubscriptionId))],
+    composition.lines,
+  )
   const quote = {
     ...composition,
+    // Hashed with the rest: acceptance re-derives it from the same rows. Omitted when empty, so a quote without a
+    // repricing keeps the hash shape it had before this field existed.
+    ...(repriced.length ? { repriced } : {}),
     input: body,
     effectiveAt,
     credit: credit.toFixed(2),
@@ -333,6 +393,13 @@ export async function acceptHybridQuote(venueId: string, staffId: string, quoteI
       )
         throw new ConflictError('Cambió una suscripción antes de aceptar. Revisa la cotización.', 'HYBRID_QUOTE_STALE')
       const now = new Date()
+      // Spec §4.2 rule 5: a cancellation scheduled after the re-observation above only shows up here, under the lock.
+      // Reads only: no campaign row is written before lockProducts below.
+      const retained = await readRetained(tx, venueId, inventory, saved.replaces, now)
+      assertDependencyTerms([
+        ...retainedCoverage({ inventory, replaceSubscriptionIds: saved.replaces, ...retained }),
+        ...lineCoverage(saved.lines, now),
+      ])
       const claimed = await tx.hybridPurchase.updateMany({
         where: { id: quoteId, venueId, status: 'QUOTED', quoteExpiresAt: { gt: now } },
         data: {
