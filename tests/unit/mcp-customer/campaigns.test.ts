@@ -51,7 +51,13 @@ jest.mock('@/utils/prismaClient', () => ({
 }))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
-const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope
+const scope = {
+  staffId: 's1',
+  activeOrg: 'o1',
+  scopes: ['mcp:read', 'mcp:write'],
+  allowedVenueIds: ['v1'],
+  perVenueAccess: new Map(),
+} as McpScope
 const call = (tool: string, args: Record<string, unknown>) => handlers.get(tool)!(args, {})
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
 
@@ -221,10 +227,9 @@ describe('set_birthday_automation — scope de escritura del token', () => {
     expect(mockCambiar).toHaveBeenCalled()
   })
 
-  it('un token sin scopes declarados (desarrollo/legacy) conserva acceso, como el resto del catálogo', async () => {
+  it('un token sin scopes declarados no permite escritura', async () => {
     const legacy = registrarCon(undefined)
-    const r = JSON.parse((await legacy('set_birthday_automation', { venueId: 'v1', activa: true, confirm: true })).content[0].text)
-    expect(r.ok).toBe(true)
+    await expect(legacy('set_birthday_automation', { venueId: 'v1', activa: true, confirm: true })).rejects.toThrow(/mcp:write/)
   })
 
   it('LEER no exige el scope de escritura', async () => {

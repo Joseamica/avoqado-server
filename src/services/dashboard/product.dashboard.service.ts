@@ -836,6 +836,7 @@ export async function updateProduct(
   productId: string,
   productData: UpdateProductDto,
   actor: CatalogActor,
+  expectedState?: Pick<Product, 'name' | 'price' | 'active'>,
 ): Promise<Product> {
   // ✅ Validate product data based on type (Square-aligned)
   validateProductByType(productData, true)
@@ -948,7 +949,7 @@ export async function updateProduct(
     let updated
     try {
       updated = await tx.product.update({
-        where: { id: productId },
+        where: { id: productId, ...(expectedState ? { venueId, deletedAt: null, ...expectedState } : {}) },
         data: updateData,
         include: {
           category: true,
@@ -960,6 +961,8 @@ export async function updateProduct(
         },
       })
     } catch (e) {
+      if (expectedState && (e as { code?: string }).code === 'P2025')
+        throw new ConflictError('El producto cambió desde la vista previa. Revisa y confirma de nuevo.')
       traducirErrorDeIva(e)
       throw e
     }

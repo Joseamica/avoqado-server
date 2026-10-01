@@ -78,7 +78,7 @@ export function registerMerchantRoutingTools(server: McpServer, scope: McpScope)
     },
     async ({ venueId }) => {
       guard.venueFilter(venueId)
-      guard.requirePermission('payments:routing-read', venueId)
+      guard.requirePermission('payments:routing-read', venueId, 'read')
       const gate = await planGateMessage(venueId, MERCHANT_ROUTING_FEATURE_CODE, GATE_CAPABILITY)
       if (gate) return text({ ok: false, planRequired: true, error: gate })
 
@@ -108,7 +108,7 @@ export function registerMerchantRoutingTools(server: McpServer, scope: McpScope)
     },
     async ({ venueId, amount, staffId, lat, lng, simulateAt }) => {
       guard.venueFilter(venueId)
-      guard.requirePermission('payments:routing-read', venueId)
+      guard.requirePermission('payments:routing-read', venueId, 'read')
       const gate = await planGateMessage(venueId, MERCHANT_ROUTING_FEATURE_CODE, GATE_CAPABILITY)
       if (gate) return text({ ok: false, planRequired: true, error: gate })
 

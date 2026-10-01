@@ -36,7 +36,7 @@ async function main() {
 
   const scope = await resolveScope(staff.id, org)
   const ttlHours = 12
-  const token = issueMcpToken(staff.id, org, ttlHours * 3600)
+  const token = issueMcpToken(staff.id, org, ttlHours * 3600, undefined, ['mcp:read', 'mcp:write'])
   const port = process.env.MCP_PORT ?? '4100'
 
   const name = `${staff.firstName ?? ''} ${staff.lastName ?? ''}`.trim() || email

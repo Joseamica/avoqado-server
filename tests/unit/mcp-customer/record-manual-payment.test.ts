@@ -34,13 +34,23 @@ jest.mock('@/utils/prismaClient', () => ({
   default: { payment: { findFirst: jest.fn(), findMany: jest.fn(), groupBy: jest.fn() }, venue: { findUnique: jest.fn() } },
 }))
 
+const schemas = new Map<string, Record<string, import('zod').ZodTypeAny>>()
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
 const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope
-const call = (args: Record<string, unknown>) => handlers.get('record_manual_payment')!(args, {})
+const call = (args: Record<string, unknown>) =>
+  handlers.get('record_manual_payment')!({ idempotencyKey: 'mcp-test-payment-001', ...args }, {})
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
 
 beforeAll(() => {
-  registerPaymentTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
+  registerPaymentTools(
+    {
+      tool: (...a: unknown[]) => {
+        schemas.set(a[0] as string, a[2] as never)
+        handlers.set(a[0] as string, a[a.length - 1] as never)
+      },
+    } as never,
+    scope,
+  )
 })
 beforeEach(() => {
   jest.clearAllMocks()
@@ -72,6 +82,7 @@ describe('record_manual_payment — write maps + audits', () => {
     const [venueId, staffId, input] = mockCreate.mock.calls[0]
     expect(venueId).toBe('v1')
     expect(staffId).toBe('s1')
+    expect(input.idempotencyKey).toBe('mcp-test-payment-001')
     expect(input.amount).toBe('123.45') // STRING, exact cents — pesos 1:1, not ×100
     expect(input.tipAmount).toBe('7.50')
     expect(input.method).toBe('CASH') // friendly 'cash' → Prisma enum
@@ -114,3 +125,28 @@ describe('record_manual_payment — validation + gates', () => {
     expect(mockCreate).not.toHaveBeenCalled()
   })
 })
+
+it('no ejecuta dinero sin una llave estable de reintento', async () => {
+  const out = parse(
+    await call({
+      venueId: 'v1',
+      paymentId: 'pay-1',
+      amount: 10,
+      method: 'cash',
+      reason: 'other',
+      confirm: true,
+      idempotencyKey: undefined,
+    }),
+  )
+  expect(out).toMatchObject({ needsInput: true, field: 'idempotencyKey' })
+  expect(mockCreate).not.toHaveBeenCalled()
+})
+
+it.each(['record_manual_payment', 'issue_refund'])(
+  '%s rechaza fracciones de centavo y valores no representables antes de ejecutar',
+  name => {
+    const amount = schemas.get(name)!.amount
+    for (const invalid of [0.004, 12.345, Infinity, Number.MAX_SAFE_INTEGER]) expect(amount.safeParse(invalid).success).toBe(false)
+    for (const valid of [0.01, 45.5, 123.45]) expect(amount.safeParse(valid).success).toBe(true)
+  },
+)

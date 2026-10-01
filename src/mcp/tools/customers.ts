@@ -360,7 +360,7 @@ export function registerCustomerTools(server: McpServer, scope: McpScope) {
       const where = guard.venueFilter(venueId)
       const gate = await planGateMessage(venueId, ...RESERVATIONS_GATE)
       if (gate) return text({ ok: false, planRequired: true, error: gate })
-      guard.requirePermission('customers:approve', venueId)
+      guard.requirePermission('customers:approve', venueId, 'read')
 
       const take = limit ?? 20
       const [customers, total] = await Promise.all([

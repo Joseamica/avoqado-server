@@ -70,7 +70,7 @@ import { marcarPermiso, PERMISO_VER_ESPERADO } from '../middlewares/permissionFl
 import { PAYMENT_OWNERSHIP_OVERRIDES, checkTableOwnership } from '../middlewares/checkTableOwnership.middleware'
 import { validateVenueAccess, requireVenueMembership } from '../middlewares/validateVenueAccess.middleware'
 import { pinLoginRateLimiter, pinOverrideRateLimiter, pinSwitchUserRateLimiter } from '../middlewares/pin-login-rate-limit.middleware'
-import { registerDeviceMiddleware } from '../middlewares/registerDevice.middleware'
+import { capturarVenueDeLaRuta, registerDeviceMiddleware } from '../middlewares/registerDevice.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { recordFastPaymentParamsSchema, recordPaymentBodySchema } from '../schemas/tpv.schema'
 import { gatewayHeartbeatSchema, printConfigParamSchema, syncPrintJobsSchema } from '../schemas/mobile/print.mobile.schema'
@@ -85,8 +85,10 @@ const router = Router()
 // middleware no hace nada en línea, sólo engancha el trabajo a `res.on('finish')`, así
 // que corre cuando la respuesta ya salió y `authContext` ya lo pobló la ruta que
 // autenticó. Un solo punto de montaje en vez de tocar las 126 rutas, y cero latencia
-// añadida al camino del cobro. Un request sin `X-Device-Id` no hace absolutamente nada.
+// añadida al camino del cobro. Un request sin `X-Device-Id` sólo se observa si trae sesión del POS (IVA por
+// producto, §5.5: una app vieja); `router.param` le guarda el negocio de la ruta aunque la ruta termine en error.
 router.use(registerDeviceMiddleware)
+router.param('venueId', capturarVenueDeLaRuta)
 
 // ============================================================================
 // EMAIL/PASSWORD AUTHENTICATION

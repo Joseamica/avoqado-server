@@ -191,12 +191,31 @@ describe('issueCfdiForOrder', () => {
     expect(persisted.totalCents).toBe(11600)
   })
 
-  it('idempotent: returns the existing STAMPED Cfdi without calling the PAC', async () => {
+  it('idempotent: returns the existing STAMPED Cfdi without calling the PAC — y avisa que NO es nueva (Codex R3-2)', async () => {
     const existing = { id: 'c0', status: 'STAMPED', uuid: 'OLD' }
     const deps = makeDeps({ findExistingCfdi: jest.fn().mockResolvedValue(existing) })
     const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
     expect(res.status).toBe('STAMPED')
     expect(res.cfdi.uuid).toBe('OLD')
+    // Sin la marca, el dashboard y la autofactura responden 201/200 «facturada» y escriben un CFDI_ISSUED falso.
+    expect(res.alreadyIssued).toBe(true)
+    expect(deps.resolveProvider).not.toHaveBeenCalled()
+  })
+
+  it('🔴 carrera: otra petición timbró la MISMA llave entre la consulta y la reserva ⇒ también avisa que NO es nueva', async () => {
+    const timbrada = {
+      id: 'c0',
+      status: 'STAMPED',
+      uuid: 'GANO-LA-OTRA',
+      protocoloIva: 1,
+      venueId: 'v1',
+      fiscalEmisor: {},
+      venue: { slug: 's' },
+    }
+    const deps = makeDeps({ findExistingCfdi: jest.fn().mockResolvedValueOnce(null).mockResolvedValue(timbrada) })
+    const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
+    expect(res).toMatchObject({ status: 'STAMPED', alreadyIssued: true })
+    expect(res.cfdi.uuid).toBe('GANO-LA-OTRA')
     expect(deps.resolveProvider).not.toHaveBeenCalled()
   })
 
@@ -278,6 +297,41 @@ describe('issueCfdiForOrder', () => {
       /not found/,
     )
     expect(deps.resolveProvider).not.toHaveBeenCalled()
+  })
+
+  describe('PAC error y la fila ya estaba timbrada al querer marcar la falla (Codex r4)', () => {
+    const conPacCaido = (filaTimbrada: object) => {
+      let pacLlamado = false
+      return makeDeps({
+        resolveProvider: jest.fn().mockReturnValue({
+          name: 'facturapi',
+          createInvoice: jest.fn(async () => {
+            pacLlamado = true
+            throw new Error('SAT down')
+          }),
+          downloadXml: jest.fn(),
+          downloadPdf: jest.fn(),
+        } as any),
+        // La marca de falla pierde su CAS: otro proceso ya dejó la fila timbrada.
+        persistCfdi: jest.fn(async (data: any) => (data.status === 'STAMP_FAILED' ? null : { id: 'cfdi1', ...data })),
+        findExistingCfdi: jest.fn(async () => (pacLlamado ? filaTimbrada : null)),
+      })
+    }
+
+    it('timbrada por OTRO envío (otra versión) ⇒ avisa que NO es nueva (y queda el rastro del timbre duplicado)', async () => {
+      const deps = conPacCaido({ id: 'cfdi1', status: 'STAMPED', uuid: 'OTRO', attempts: 2 })
+      const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
+      expect(res).toMatchObject({ status: 'STAMPED', alreadyIssued: true })
+    })
+
+    it('timbrada por ESTE mismo envío (misma versión, la completó la conciliación) ⇒ éxito propio, sin la marca', async () => {
+      const res = await issueCfdiForOrder(
+        { orderId: 'o1', receptor, sandbox: true },
+        conPacCaido({ id: 'cfdi1', status: 'STAMPED', uuid: 'MIO', attempts: 1 }),
+      )
+      expect(res.status).toBe('STAMPED')
+      expect(res.alreadyIssued).toBeUndefined()
+    })
   })
 
   it('PAC error: persists STAMP_FAILED with the error', async () => {
@@ -390,6 +444,19 @@ describe('issueCfdiForOrder', () => {
     const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
     expect(res.status).toBe('STAMPED')
     expect(res.cfdi.uuid).toBe('ALREADY-UUID')
+    expect(deps.resolveProvider).not.toHaveBeenCalled()
+  })
+
+  it('ruta vieja: P2002 y la MISMA llave ya timbrada por otra petición ⇒ avisa que NO es nueva (Codex r4)', async () => {
+    const deps = makeDeps({
+      reserveCfdi: jest.fn().mockRejectedValue(makeP2002()),
+      findExistingCfdi: jest
+        .fn()
+        .mockResolvedValueOnce({ id: 'c0', status: 'STAMP_FAILED' }) // reserva heredada: va por la ruta vieja
+        .mockResolvedValue({ id: 'c0', status: 'STAMPED', uuid: 'GANO-LA-OTRA' }),
+    })
+    const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
+    expect(res).toMatchObject({ status: 'STAMPED', alreadyIssued: true })
     expect(deps.resolveProvider).not.toHaveBeenCalled()
   })
 

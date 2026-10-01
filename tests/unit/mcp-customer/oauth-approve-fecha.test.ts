@@ -4,6 +4,7 @@
  * «posterior» al corte y seguía viva. Aquí se fija, por la RUTA real, que las tres puertas
  * (contraseña, sesión del dashboard y selector de organización) entregan la hora de la verificación.
  */
+const getClient = jest.fn()
 const createAuthCode = jest.fn()
 const authenticateForMcp = jest.fn()
 const sesionDelDashboard = jest.fn()
@@ -27,7 +28,7 @@ jest.mock('../../../src/mcp/oauth/orgPick', () => ({
   listActiveOrganizations: (...a: unknown[]) => listActiveOrganizations(...a),
   tokenParaElSelector: (...a: unknown[]) => tokenParaElSelector(...a),
 }))
-jest.mock('../../../src/mcp/oauth/clientsStore', () => ({ prismaClientsStore: {} }))
+jest.mock('../../../src/mcp/oauth/clientsStore', () => ({ prismaClientsStore: { getClient: (...a: unknown[]) => getClient(...a) } }))
 
 import express from 'express'
 import request from 'supertest'
@@ -37,8 +38,8 @@ import { mountCustomerMcpAuth } from '../../../src/mcp/oauth/router'
 const app = express()
 mountCustomerMcpAuth(app)
 
-const OAUTH = { client_id: 'c1', redirect_uri: 'http://cb', code_challenge: 'cc' }
-const aprobar = (campos: Record<string, string>) =>
+const OAUTH = { client_id: 'c1', redirect_uri: 'http://cb', code_challenge: 'a'.repeat(43) }
+const aprobar = (campos: Record<string, string | undefined>) =>
   request(app)
     .post('/mcp-oauth/approve')
     .set('Origin', MCP_ISSUER_URL.origin)
@@ -49,6 +50,7 @@ const verificadaAntes = new Date('2026-09-20T10:00:00Z')
 
 beforeEach(() => {
   jest.clearAllMocks()
+  getClient.mockResolvedValue({ client_id: 'c1', redirect_uris: ['http://cb'] })
   createAuthCode.mockResolvedValue({ code: 'codigo' })
   listActiveOrganizations.mockResolvedValue([{ id: 'o1', name: 'Org', role: 'OWNER' }])
 })
@@ -86,6 +88,33 @@ it('cuenta con varias organizaciones: el selector que se emite lleva la hora de 
   ])
   tokenParaElSelector.mockReturnValue('tok')
   await aprobar({ sso: '1' })
-  expect(tokenParaElSelector).toHaveBeenCalledWith(undefined, 's1', verificadaAntes)
+  expect(tokenParaElSelector).toHaveBeenCalledWith(undefined, 's1', verificadaAntes, expect.any(String))
   expect(createAuthCode).not.toHaveBeenCalled()
+})
+
+describe('consentimiento final: frontera de confianza', () => {
+  beforeEach(() => sesionDelDashboard.mockResolvedValue({ staffId: 's1', verificadoEn: verificadaAntes }))
+
+  it.each([
+    { redirect_uri: 'https://attacker.example/cb' },
+    { scope: 'mcp:read mcp:admin' },
+    { resource: 'https://attacker.example/mcp' },
+    { code_challenge: 'cc' },
+  ])('rechaza parámetros inválidos antes de consultar identidad o emitir código: %j', async params => {
+    const response = await aprobar({ sso: '1', ...params })
+    expect(response.status).toBe(400)
+    expect(createAuthCode).not.toHaveBeenCalled()
+    expect(sesionDelDashboard).not.toHaveBeenCalled()
+  })
+
+  it('rechaza cliente inexistente', async () => {
+    getClient.mockResolvedValue(undefined)
+    expect((await aprobar({ sso: '1' })).status).toBe(400)
+    expect(createAuthCode).not.toHaveBeenCalled()
+  })
+
+  it('scope omitido concede sólo lectura, expresamente', async () => {
+    expect((await aprobar({ sso: '1' })).status).toBe(302)
+    expect(createAuthCode).toHaveBeenCalledWith(expect.objectContaining({ scopes: ['mcp:read'] }))
+  })
 })

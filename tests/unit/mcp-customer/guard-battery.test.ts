@@ -79,7 +79,13 @@ function scopeWithRole(role: StaffRole): McpScope {
   const perVenueAccess = new Map<string, UserAccess>()
   perVenueAccess.set(OWN_VENUE, accessFor(OWN_VENUE, role))
   perVenueAccess.set(OTHER_OWN_VENUE, accessFor(OTHER_OWN_VENUE, role))
-  return { staffId: 's1', activeOrg: 'o1', allowedVenueIds: [OWN_VENUE, OTHER_OWN_VENUE], perVenueAccess }
+  return {
+    staffId: 's1',
+    activeOrg: 'o1',
+    scopes: ['mcp:read', 'mcp:write'],
+    allowedVenueIds: [OWN_VENUE, OTHER_OWN_VENUE],
+    perVenueAccess,
+  }
 }
 
 // Deterministic pseudo-random foreign venue ids (no Math.random — reproducible).
@@ -113,7 +119,13 @@ describe('MCP guard battery — tenant isolation (venueFilter)', () => {
   })
 
   it('an empty scope (revoked / no assignments) can touch NOTHING', () => {
-    const empty: McpScope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: [], perVenueAccess: new Map() }
+    const empty: McpScope = {
+      staffId: 's1',
+      activeOrg: 'o1',
+      scopes: ['mcp:read', 'mcp:write'],
+      allowedVenueIds: [],
+      perVenueAccess: new Map(),
+    }
     const guard = createGuard(empty)
     for (let i = 0; i < 50; i++) {
       expect(() => guard.venueFilter(foreignVenueId(i))).toThrow(ScopeError)
@@ -185,7 +197,13 @@ describe('MCP guard battery — RBAC (requirePermission)', () => {
     const perVenueAccess = new Map<string, UserAccess>()
     perVenueAccess.set('vA', accessFor('vA', StaffRole.OWNER))
     perVenueAccess.set('vB', accessFor('vB', StaffRole.WAITER))
-    const scope: McpScope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['vA', 'vB'], perVenueAccess }
+    const scope: McpScope = {
+      staffId: 's1',
+      activeOrg: 'o1',
+      scopes: ['mcp:read', 'mcp:write'],
+      allowedVenueIds: ['vA', 'vB'],
+      perVenueAccess,
+    }
     const guard = createGuard(scope)
     for (let i = 0; i < 40; i++) {
       expect(() => guard.requirePermission('payments:refund', 'vA')).not.toThrow() // OWNER can

@@ -6,8 +6,10 @@ import { authenticateForMcp, McpLoginError } from './credentials'
 import { resolveActiveOrganizationId } from '@/services/staffOrganization.service'
 import { createAuthCode } from './tokenStore'
 import { renderLoginPage } from './loginPage'
+import { mountMcpSecurity } from '../security'
+import { validateAuthorizationRequest } from './authorizationRequest'
+import { OAuthError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 import { provider } from './provider'
-import { prismaClientsStore } from './clientsStore'
 import { MCP_ISSUER_URL, MCP_RESOURCE_URL, MCP_SCOPES_SUPPORTED } from './config'
 import { staffIdFromDashboardSession, sesionDelDashboard } from './session'
 import { verifyOrgPickToken, verificarTokenDelSelector, listActiveOrganizations, tokenParaElSelector } from './orgPick'
@@ -32,13 +34,19 @@ function ssoAuthorizeHandler() {
     const codeChallenge = req.query.code_challenge ? String(req.query.code_challenge) : ''
     if (!clientId || !redirectUri || !codeChallenge) return next() // let the SDK validate/reject
 
-    const client = await prismaClientsStore.getClient(clientId)
-    if (!client || !(client.redirect_uris ?? []).includes(redirectUri)) return next() // unknown client / redirect
+    if (req.query.response_type !== 'code' || req.query.code_challenge_method !== 'S256') return next()
+    let consent
+    try {
+      consent = await validateAuthorizationRequest(req.query)
+    } catch {
+      return next() // the SDK returns the OAuth error, without rendering a consent page
+    }
+    const client = consent.client
 
     const staff = await prisma.staff.findUnique({ where: { id: staffId }, select: { email: true } })
     if (!staff) return next()
 
-    const scope = req.query.scope ? String(req.query.scope) : undefined
+    const scope = consent.scopes.join(' ')
     const state = req.query.state ? String(req.query.state) : undefined
     const resource = req.query.resource ? String(req.query.resource) : undefined
 
@@ -123,10 +131,15 @@ function approveHandler() {
           }).toString(),
       )
 
-    const staffId = token ? await verifyOrgPickToken(token) : null
+    let consent
+    try {
+      consent = await validateAuthorizationRequest(req.query)
+    } catch {
+      return res.status(400).send('Invalid OAuth parameters')
+    }
+    const staffId = token ? await verifyOrgPickToken(token, consent.requestHash) : null
     if (!staffId) return backToLogin() // expired/tampered → re-authenticate
-    const client = await prismaClientsStore.getClient(clientId)
-    if (!client || !(client.redirect_uris ?? []).includes(redirectUri)) return backToLogin()
+    const client = consent.client
     const orgs = await listActiveOrganizations(staffId)
     if (orgs.length < 2) return backToLogin() // nothing to pick — normal flow handles it
 
@@ -139,7 +152,7 @@ function approveHandler() {
           redirectUri,
           codeChallenge: q('code_challenge') ?? '',
           state: q('state'),
-          scope: q('scope'),
+          scope: consent.scopes.join(' '),
           resource: q('resource'),
         },
         { orgPick: { orgs, token: token! } },
@@ -147,7 +160,7 @@ function approveHandler() {
     )
   })
 
-  router.post('/mcp-oauth/approve', async (req: Request, res: Response) => {
+  router.post('/mcp-oauth/approve', async (req: Request, res: Response, next: NextFunction) => {
     const { email, password, client_id, redirect_uri, code_challenge, state, scope, resource, sso, org, orgPickToken } = req.body ?? {}
     // The login page submits via fetch so it works inside sandboxed iframes that block native form
     // posts (no 'allow-forms'). Fetch requests get JSON {redirect}/{error}; native posts get 302/HTML.
@@ -177,8 +190,12 @@ function approveHandler() {
       return isFetch ? res.status(403).json({ error: 'Cross-site request blocked' }) : res.status(403).send('Cross-site request blocked')
     }
 
-    if (!client_id || !redirect_uri || !code_challenge) {
-      return isFetch ? res.status(400).json({ error: 'Missing OAuth parameters' }) : res.status(400).send('Missing OAuth parameters')
+    let consent
+    try {
+      consent = await validateAuthorizationRequest(req.body)
+    } catch (error) {
+      if (!(error instanceof OAuthError)) return next(error)
+      return res.status(400).json(error.toResponseObject())
     }
 
     // 🔴 Cuándo se VERIFICÓ la identidad. La autorización (y toda su cadena de renovaciones) nace con
@@ -189,7 +206,7 @@ function approveHandler() {
     let verificadoEn: Date
     if (typeof orgPickToken === 'string' && orgPickToken) {
       // Step-2 (org picker) submit: identity carried by the short-lived signed token, never re-typed credentials.
-      const selector = await verificarTokenDelSelector(orgPickToken)
+      const selector = await verificarTokenDelSelector(orgPickToken, consent.requestHash)
       if (!selector) {
         logger.warn('[MCP OAuth] org-pick token invalid/expired', { mcpOAuth: true, clientId: String(client_id) })
         return reRender('La selección de organización expiró. Vuelve a iniciar sesión.')
@@ -236,7 +253,7 @@ function approveHandler() {
           new URLSearchParams({
             // 🔴 H4: si ya venía de un token de selección, se REUSA — reemitir uno nuevo en cada
             // paso lo volvía renovable sin volver a autenticarse.
-            token: tokenParaElSelector(orgPickToken, staffId, verificadoEn),
+            token: tokenParaElSelector(orgPickToken, staffId, verificadoEn, consent.requestHash),
             client_id: String(client_id),
             redirect_uri: String(redirect_uri),
             code_challenge: String(code_challenge),
@@ -260,7 +277,7 @@ function approveHandler() {
       }
     }
 
-    const scopes = scope ? String(scope).split(' ').filter(Boolean) : []
+    const scopes = consent.scopes
     const { code } = await createAuthCode({
       clientId: client_id,
       staffId,
@@ -272,10 +289,6 @@ function approveHandler() {
       grantedAt: verificadoEn,
     })
 
-    // Observability for the mcp:write rollout: record EXACTLY which scopes each client requests, so
-    // we can confirm (from prod logs) that Claude/ChatGPT actually ask for mcp:write before turning
-    // guard enforcement on (MCP_ENFORCE_WRITE_SCOPE). hasWriteScope=false on a real connector = do
-    // NOT enforce yet.
     logger.info(`[MCP OAuth] authorized staff ${staffId} for org ${activeOrg}${sso === '1' ? ' (SSO)' : ''}`, {
       mcpOAuth: true,
       staffId,
@@ -353,6 +366,7 @@ function confidentialClientAuthGuard() {
 
 /** Mount the full customer-MCP OAuth surface at the app root. Call ONCE in app.ts. */
 export function mountCustomerMcpAuth(app: Express): void {
+  mountMcpSecurity(app)
   // One-click connect when a dashboard session already exists (MUST run before the SDK's /authorize).
   app.use(ssoAuthorizeHandler())
   // Verify confidential clients' secrets BEFORE the SDK's /token handler (which can't, since we hash).

@@ -9,6 +9,7 @@ import { createMenuCategory, createModifierGroup } from '@/services/dashboard/me
 import { MODIFIER_SKU_FORMAT_MESSAGE, MODIFIER_SKU_MAX, SKU_REGEX } from '@/schemas/dashboard/menu.schema'
 import { auditMcpWrite } from '../audit'
 import { ProductType } from '@prisma/client'
+import { operationHash } from '@/utils/operationHash'
 
 const round2 = (n: number): number => Math.round(n * 100) / 100
 
@@ -30,10 +31,14 @@ const PRODUCT_TYPE_MAP: Record<string, ProductType> = {
 }
 
 /** Find products in scope by (partial, case-insensitive) name — shared by the menu tools. */
-async function matchProductsByName(venueWhere: { venueId: { in: string[] } }, name: string) {
+async function matchProductsByName(venueWhere: { venueId: { in: string[] } }, name: string, resolvedId?: string) {
   return prisma.product.findMany({
     // Plan 5 (D6): un producto archivado no se busca ni se «des-86»; regresa importándolo.
-    where: { ...venueWhere, deletedAt: null, name: { contains: name, mode: 'insensitive' } },
+    where: {
+      ...venueWhere,
+      deletedAt: null,
+      ...(resolvedId ? { id: resolvedId } : { name: { contains: name, mode: 'insensitive' as const } }),
+    },
     select: { id: true, name: true, active: true, price: true },
     take: 10,
   })
@@ -50,23 +55,31 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
       search: z.string().optional().describe('Filter by item name (partial, case-insensitive)'),
       activeOnly: z.boolean().optional().describe('Only available items (exclude "86"/disabled)'),
       limit: z.number().int().positive().max(200).optional().describe('Max items to return (default 100)'),
+      offset: z.number().int().min(0).optional().describe('Offset from the previous page'),
     },
-    async ({ venueId, search, activeOnly, limit }) => {
+    async ({ venueId, search, activeOnly, limit, offset = 0 }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('menu:read', venueId)
+      const filter = {
+        ...where,
+        deletedAt: null, // Plan 5 (D6): los archivados no son parte del menú
+        ...(search ? { name: { contains: search, mode: 'insensitive' as const } } : {}),
+        ...(activeOnly ? { active: true } : {}),
+      }
+      const total = await prisma.product.count({ where: filter })
       const products = await prisma.product.findMany({
-        where: {
-          ...where,
-          deletedAt: null, // Plan 5 (D6): los archivados no son parte del menú
-          ...(search ? { name: { contains: search, mode: 'insensitive' as const } } : {}),
-          ...(activeOnly ? { active: true } : {}),
-        },
+        where: filter,
         select: { name: true, price: true, active: true, type: true, soldByWeight: true, unit: true, category: { select: { name: true } } },
-        orderBy: [{ active: 'desc' }, { name: 'asc' }],
+        orderBy: [{ active: 'desc' }, { name: 'asc' }, { id: 'asc' }],
+        skip: offset,
         take: limit ?? 100,
       })
       return text({
         venueId,
         count: products.length,
+        total,
+        hasMore: offset + products.length < total,
+        nextOffset: offset + products.length < total ? offset + products.length : null,
         items: products.map(p => ({
           name: p.name,
           price: Number(p.price),
@@ -87,12 +100,14 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
       venueId: z.string().describe('Venue that owns the item (must be in your scope)'),
       name: z.string().min(1).describe('Menu item name or part of it, e.g. "Carnitas"'),
       active: z.boolean().describe('true = available; false = "86" (disabled / out of stock)'),
+      resolvedProductId: z.string().optional().describe('ID exacto devuelto por la vista previa'),
+      expectedSourceFingerprint: z.string().optional().describe('Huella exacta devuelta por la vista previa'),
       confirm: z.boolean().optional().describe('Must be true to actually change availability; without it you get a preview'),
     },
-    async ({ venueId, name, active, confirm }) => {
+    async ({ venueId, name, active, confirm, resolvedProductId, expectedSourceFingerprint }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if out of scope
       guard.requirePermission('products:update', venueId) // write gate (per-venue role)
-      const matches = await matchProductsByName(where, name)
+      const matches = await matchProductsByName(where, name, confirm ? resolvedProductId : undefined)
       if (matches.length === 0) return text({ ok: false, error: `No menu item matching "${name}" in that venue.` })
       if (matches.length > 1)
         return text({
@@ -101,11 +116,23 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
           error: `"${name}" matches several items — be more specific.`,
           matches: matches.map(m => m.name),
         })
+      const product = matches[0]
+      const expectedState = { name: product.name, price: product.price, active: product.active }
+      const fingerprint = operationHash({ id: product.id, ...expectedState, price: Number(product.price) })
+      if (confirm && (!resolvedProductId || resolvedProductId !== product.id || expectedSourceFingerprint !== fingerprint)) {
+        return text({
+          ok: false,
+          needsInput: true,
+          question: 'El producto cambió o falta la vista previa. Vuelve a consultar y confirma el cambio actualizado.',
+        })
+      }
       if (!confirm) {
         const wasActive = matches[0].active
         return text({
           ok: false,
           requiresConfirmation: true,
+          resolvedProductId: product.id,
+          expectedSourceFingerprint: fingerprint,
           change: {
             item: matches[0].name,
             label: 'Disponibilidad',
@@ -125,6 +152,7 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
             staffId: scope.staffId,
             impersonating: false,
           },
+          expectedState,
         )
         await auditMcpWrite(scope, {
           action: 'MENU_ITEM_ACTIVE_SET',
@@ -147,12 +175,14 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
       venueId: z.string().describe('Venue that owns the item (must be in your scope)'),
       name: z.string().min(1).describe('Menu item name or part of it, e.g. "Carnitas"'),
       price: z.number().positive().describe('New price in major units (e.g. 120 for $120.00)'),
+      resolvedProductId: z.string().optional().describe('ID exacto devuelto por la vista previa'),
+      expectedSourceFingerprint: z.string().optional().describe('Huella exacta devuelta por la vista previa'),
       confirm: z.boolean().optional().describe('Must be true to actually change the price; without it you get a preview'),
     },
-    async ({ venueId, name, price, confirm }) => {
+    async ({ venueId, name, price, confirm, resolvedProductId, expectedSourceFingerprint }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if out of scope
       guard.requirePermission('products:update', venueId) // write gate (per-venue role)
-      const matches = await matchProductsByName(where, name)
+      const matches = await matchProductsByName(where, name, confirm ? resolvedProductId : undefined)
       if (matches.length === 0) return text({ ok: false, error: `No menu item matching "${name}" in that venue.` })
       if (matches.length > 1)
         return text({
@@ -162,10 +192,22 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
           matches: matches.map(m => m.name),
         })
       const currentPrice = Number(matches[0].price)
+      const product = matches[0]
+      const expectedState = { name: product.name, price: product.price, active: product.active }
+      const fingerprint = operationHash({ id: product.id, ...expectedState, price: Number(product.price) })
+      if (confirm && (!resolvedProductId || resolvedProductId !== product.id || expectedSourceFingerprint !== fingerprint)) {
+        return text({
+          ok: false,
+          needsInput: true,
+          question: 'El producto cambió o falta la vista previa. Vuelve a consultar y confirma el cambio actualizado.',
+        })
+      }
       if (!confirm) {
         return text({
           ok: false,
           requiresConfirmation: true,
+          resolvedProductId: product.id,
+          expectedSourceFingerprint: fingerprint,
           change: { item: matches[0].name, label: 'Precio', from: currentPrice, to: price },
           message: `Esto cambiará el precio de "${matches[0].name}": $${currentPrice} → $${price}. Confirma con el operador; luego vuelve a llamar con confirm:true.`,
         })
@@ -180,6 +222,7 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
             staffId: scope.staffId,
             impersonating: false,
           },
+          expectedState,
         )
         await auditMcpWrite(scope, {
           action: 'MENU_ITEM_PRICE_SET',
@@ -204,6 +247,7 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, name }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if out of scope
+      guard.requirePermission('menu:read', venueId)
       const matches = await matchProductsByName(where, name)
       if (matches.length === 0) return text({ found: false, error: `No menu item matching "${name}" in that venue.` })
       if (matches.length > 1)
@@ -329,6 +373,7 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, includeInactive }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('menu:read', venueId)
       const cats = await prisma.menuCategory.findMany({
         where: { ...where, ...(includeInactive ? {} : { active: true }) },
         select: { name: true, description: true, active: true, _count: { select: { products: { where: { deletedAt: null } } } } },

@@ -1,5 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
+import { Decimal } from '@prisma/client/runtime/library'
 import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
@@ -7,7 +8,8 @@ import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { registerInventoryWasteTools } from './inventoryWaste'
 import { adjustInventoryStock } from '@/services/dashboard/productInventory.service'
-import { createRawMaterial } from '@/services/dashboard/rawMaterial.service'
+import { createRawMaterial, adjustStock as adjustRawMaterialStock } from '@/services/dashboard/rawMaterial.service'
+import { AdjustStockSchema } from '@/schemas/dashboard/inventory.schema'
 import { listPresentations, setPresentations } from '@/services/dashboard/rawMaterialPresentation.service'
 import { getReorderSuggestions, getAutoReorderConfig, setAutoReorderConfig } from '@/services/dashboard/autoReorder.service'
 import { getBatchesForRawMaterial, quarantineBatch, releaseBatchFromQuarantine } from '@/services/dashboard/fifoBatch.service'
@@ -54,36 +56,30 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
     {
       venueId: z.string().describe('Venue whose inventory to check (must be in your scope)'),
       limit: z.number().int().positive().max(100).optional().describe('Max items to return (default 50)'),
+      offset: z.number().int().min(0).optional().describe('Offset from the previous page'),
     },
-    async ({ venueId, limit }) => {
-      const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+    async ({ venueId, limit, offset = 0 }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('inventory:read', venueId) // WHY: mirror the dashboard's inventory:read gate — a low role shouldn't read stock/costs the dashboard 403s
       const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario') // PREMIUM tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
-      // Only items with a configured minimum (> 0). Prisma can't compare two columns in `where`,
-      // so fetch the tracked set and filter currentStock <= minimumStock in memory.
-      const tracked = await prisma.inventory.findMany({
-        where: { ...where, minimumStock: { gt: 0 } },
-        select: {
-          currentStock: true,
-          minimumStock: true,
-          lastRestockedAt: true,
-          product: { select: { name: true, sku: true } },
-        },
-      })
-      const lowStock = tracked
-        .filter(i => Number(i.currentStock) <= Number(i.minimumStock))
-        .map(i => ({
-          product: i.product?.name ?? null,
-          sku: i.product?.sku ?? null,
-          currentStock: Number(i.currentStock),
-          minimumStock: Number(i.minimumStock),
-          shortBy: Math.round((Number(i.minimumStock) - Number(i.currentStock)) * 100) / 100,
-          lastRestockedAt: i.lastRestockedAt?.toISOString() ?? null,
-        }))
-        .sort((a, b) => b.shortBy - a.shortBy)
-        .slice(0, limit ?? 50)
-      return text({ venueId, count: lowStock.length, lowStock })
+      // One SQL statement: a consistent total plus a bounded page, even when offset exceeds the total.
+      const [result] = await prisma.$queryRaw<Array<{ total: number; lowStock: unknown[] }>>`
+        WITH low AS (
+          SELECT i.id, p.name AS product, p.sku, i."currentStock", i."minimumStock",
+            ROUND(i."minimumStock" - i."currentStock", 2) AS "shortBy",
+            to_char(i."lastRestockedAt", 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "lastRestockedAt"
+          FROM "Inventory" i JOIN "Product" p ON p.id = i."productId" AND p."venueId" = i."venueId"
+          WHERE i."venueId" = ${venueId} AND i."minimumStock" > 0 AND i."currentStock" <= i."minimumStock"
+        ), page AS (
+          SELECT * FROM low ORDER BY "shortBy" DESC, id LIMIT ${limit ?? 50} OFFSET ${offset}
+        )
+        SELECT (SELECT COUNT(*)::int FROM low) AS total,
+          COALESCE((SELECT jsonb_agg(to_jsonb(page) - 'id' ORDER BY "shortBy" DESC, id) FROM page), '[]'::jsonb) AS "lowStock"
+      `
+      const count = result.lowStock.length
+      const hasMore = offset + count < result.total
+      return text({ venueId, ...result, count, hasMore, nextOffset: hasMore ? offset + count : null })
     },
   )
 
@@ -240,54 +236,121 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
   )
 
   server.tool(
+    'adjust_raw_material_stock',
+    'Adjust stock of ONE existing raw material / ingredient, not a finished product. First use list_raw_materials in the chosen venue to obtain its exact id, stock and base unit. delta is the CHANGE in that unit, never the new total: +82 adds 82 liters; -2 removes 2. Do not guess units or counts, convert them silently, or use adjust_stock for ingredients. Requires inventory:adjust and PREMIUM (INVENTORY_TRACKING). Preview by default; show the ingredient, venue, unit and change to the operator, then confirm with the returned token. For a NEW ingredient, create_raw_material accepts initial currentStock directly. For waste use log_waste; for transfers use the transfer workflow. Never automatically retry after a timeout: inspect the movements first.',
+    {
+      venueId: z.string().min(1, 'La sucursal es requerida').describe('Exact venue chosen by the operator'),
+      rawMaterialId: z.string().min(1, 'El insumo es requerido').describe('Exact ingredient id from list_raw_materials in this venue'),
+      delta: AdjustStockSchema.shape.body.shape.quantity.describe('Stock CHANGE in the base unit, NOT the new total'),
+      unit: z
+        .nativeEnum(Unit, { errorMap: () => ({ message: 'La unidad del insumo no es válida' }) })
+        .describe('Exact base unit from list_raw_materials'),
+      type: z
+        .enum(['ADJUSTMENT', 'PURCHASE', 'COUNT'])
+        .optional()
+        .describe('Movement reason; default ADJUSTMENT. COUNT still takes a delta, not a total.'),
+      reason: z
+        .string()
+        .trim()
+        .min(1, 'El motivo es requerido')
+        .max(500, 'El motivo es demasiado largo')
+        .describe('Reason supplied by the operator'),
+      confirm: z.boolean().optional().describe('True only after the operator authorizes the preview'),
+    },
+    async ({ venueId, rawMaterialId, delta, unit, type, reason, confirm }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('inventory:adjust', venueId)
+      const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario')
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+      const ingredient = await prisma.rawMaterial.findFirst({
+        where: { id: rawMaterialId, venueId, active: true, deletedAt: null },
+        select: { id: true, name: true, unit: true, currentStock: true },
+      })
+      if (!ingredient)
+        return text({
+          ok: false,
+          needsInput: true,
+          question: 'No encontré ese insumo activo en esta sucursal. Revisa su ID con list_raw_materials; no uses otro como sustituto.',
+        })
+      if (unit !== ingredient.unit)
+        return text({
+          ok: false,
+          needsInput: true,
+          question: `"${ingredient.name}" se guarda en ${ingredient.unit}. Indica el cambio en esa unidad antes de continuar.`,
+        })
+      const quantity = new Decimal(delta)
+      if (!quantity.toDecimalPlaces(3).equals(quantity))
+        return text({ ok: false, error: 'El cambio debe tener como máximo 3 decimales para guardarse sin perder cantidad.' })
+      const current = new Decimal(ingredient.currentStock)
+      const next = current.add(quantity)
+      if (next.lessThan(0) || next.greaterThanOrEqualTo(1_000_000_000))
+        return text({ ok: false, error: 'El ajuste dejaría existencias negativas o excedería el máximo permitido. Revisa la cantidad.' })
+      if (!confirm)
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          venueId,
+          change: { rawMaterialId, ingredient: ingredient.name, unit, from: current.toNumber(), delta, to: next.toNumber() },
+          message: `En esta sucursal, "${ingredient.name}": ${current} ${unit}, cambio ${delta >= 0 ? '+' : ''}${delta} ${unit}, resultado previsto ${next} ${unit}. Confirma este cambio de cantidad con el operador.`,
+        })
+      try {
+        // The shared dashboard service owns FIFO, atomic increments, movements and the actor's audit.
+        const updated = await adjustRawMaterialStock(
+          venueId,
+          rawMaterialId,
+          { quantity: delta, type: RawMaterialMovementType[type ?? 'ADJUSTMENT'], reason },
+          scope.staffId,
+        )
+        return text({ ok: true, venueId, rawMaterialId, ingredient: ingredient.name, unit, delta, newStock: Number(updated.currentStock) })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
     'stock_value',
     'The value of a venue\'s QUANTITY-tracked inventory: total cost value (current stock × unit cost) and total retail value (current stock × price), the potential margin between them, and how many in-stock items are missing a cost. Lists the top items by cost value. Only items WITH a cost set count toward the cost total — never estimated. Answers "¿cuánto vale mi inventario? ¿cuánto tengo invertido en stock?". Pass venueId. (Serialized items — SIMs/barcodes — are not included; use serialized_inventory.)',
     {
       venueId: z.string().describe('Venue whose inventory value to compute (must be in your scope)'),
       limit: z.number().int().positive().max(100).optional().describe('How many top items (by cost value) to list (default 20)'),
+      offset: z.number().int().min(0).optional().describe('Offset from the previous page; totals always cover all inventory'),
     },
-    async ({ venueId, limit }) => {
-      const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+    async ({ venueId, limit, offset = 0 }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('inventory:read', venueId) // WHY: mirror the dashboard's inventory:read gate — inventory valuation/margin is not free-for-all
       const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario') // PREMIUM tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
-      // currentStock × cost can't be multiplied in a SQL aggregate; fetch in-stock items and compute in memory.
-      const rows = await prisma.inventory.findMany({
-        where: { ...where, currentStock: { gt: 0 } },
-        select: { currentStock: true, product: { select: { name: true, sku: true, cost: true, price: true } } },
-      })
-
-      let costValue = 0
-      let retailValue = 0
-      let itemsWithoutCost = 0
-      const items = rows.map(r => {
-        const stock = Number(r.currentStock)
-        const cost = r.product?.cost == null ? null : Number(r.product.cost)
-        const price = r.product?.price == null ? 0 : Number(r.product.price)
-        const itemCost = cost == null ? null : round2(stock * cost)
-        if (itemCost == null) itemsWithoutCost += 1
-        else costValue += itemCost
-        retailValue += stock * price
-        return {
-          product: r.product?.name ?? null,
-          sku: r.product?.sku ?? null,
-          stock,
-          unitCost: cost, // null if no cost set on the product
-          costValue: itemCost,
-          retailValue: round2(stock * price),
-        }
-      })
-      items.sort((a, b) => (b.costValue ?? 0) - (a.costValue ?? 0))
-
-      return text({
-        venueId,
-        productsInStock: rows.length,
-        itemsWithoutCost,
-        totalCostValue: round2(costValue), // items that have a cost only
-        totalRetailValue: round2(retailValue),
-        potentialMargin: round2(retailValue - costValue),
-        topItems: items.slice(0, limit ?? 20),
-      })
+      const [result] = await prisma.$queryRaw<
+        Array<{
+          productsInStock: number
+          itemsWithoutCost: number
+          totalCostValue: number
+          totalRetailValue: number
+          potentialMargin: number
+          topItems: unknown[]
+        }>
+      >`
+        WITH valued AS (
+          SELECT i.id, p.name AS product, p.sku, i."currentStock" AS stock, p.cost AS "unitCost",
+            ROUND(i."currentStock" * p.cost, 2) AS "costValue",
+            i."currentStock" * p.price AS retail
+          FROM "Inventory" i JOIN "Product" p ON p.id = i."productId" AND p."venueId" = i."venueId"
+          WHERE i."venueId" = ${venueId} AND i."currentStock" > 0
+        ), page AS (
+          SELECT id, product, sku, stock, "unitCost", "costValue", ROUND(retail, 2) AS "retailValue"
+          FROM valued ORDER BY COALESCE("costValue", 0) DESC, id LIMIT ${limit ?? 20} OFFSET ${offset}
+        )
+        SELECT COUNT(*)::int AS "productsInStock", COUNT(*) FILTER (WHERE "unitCost" IS NULL)::int AS "itemsWithoutCost",
+          COALESCE(SUM("costValue"), 0)::float8 AS "totalCostValue",
+          ROUND(COALESCE(SUM(retail), 0), 2)::float8 AS "totalRetailValue",
+          ROUND(COALESCE(SUM(retail), 0) - COALESCE(SUM("costValue"), 0), 2)::float8 AS "potentialMargin",
+          COALESCE((SELECT jsonb_agg(to_jsonb(page) - 'id' ORDER BY COALESCE("costValue", 0) DESC, id) FROM page), '[]'::jsonb) AS "topItems"
+        FROM valued
+      `
+      const count = result.topItems.length
+      const hasMore = offset + count < result.productsInStock
+      return text({ venueId, ...result, count, hasMore, nextOffset: hasMore ? offset + count : null })
     },
   )
 

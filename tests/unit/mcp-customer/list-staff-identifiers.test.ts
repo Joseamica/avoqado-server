@@ -11,7 +11,7 @@ jest.mock('@/mcp/guard', () => ({
 }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
-  default: { staffVenue: { findMany: (...args: unknown[]) => mockFindMany(...(args as [])) } },
+  default: { staffVenue: { count: jest.fn().mockResolvedValue(2), findMany: (...args: unknown[]) => mockFindMany(...(args as [])) } },
 }))
 
 const handlers = new Map<string, (args: Record<string, unknown>, extra: unknown) => Promise<{ content: Array<{ text: string }> }>>()

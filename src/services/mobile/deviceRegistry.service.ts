@@ -38,6 +38,7 @@ import logger from '../../config/logger'
 import { resolveDeviceModel } from '../../config/deviceCatalog'
 import { normalizeTerminalBrand } from '../../lib/providerDeviceCompatibility'
 import { logAction } from '../dashboard/activity-log.service'
+import { utcTs } from '../../utils/sqlDates'
 
 /** Plataformas que pueden auto-registrarse. Espeja `X-Device-Platform`. */
 export type DevicePlatformHeader = 'IOS' | 'ANDROID' | 'DESKTOP'
@@ -257,4 +258,38 @@ export async function registerDeviceSeen(params: {
   identity: DeviceIdentity
 }): Promise<RegisterDeviceResult | null> {
   return ensureDeviceTerminal(params)
+}
+
+// ─── IVA por producto (spec planes 6-7, §5.5, D12): sesión del POS sin identidad de aparato ─────────────────────────────
+
+/**
+ * Cada cuánto se anota, por negocio, la sesión del POS sin identidad de aparato. La fecha guardada es MUESTREADA: la última
+ * petición real pudo llegar hasta esta ventana después. El lector (el encendido del 6b) se la suma al vencimiento de 30 días.
+ */
+export const POS_SIN_APARATO_MUESTREO_MS = 60 * 60 * 1000
+
+/**
+ * Desde cuándo el observador cubre TODO el tráfico del POS (UTC). `null` hasta fijarlo tras el despliegue: fin del despliegue
+ * + 10 min (vida del access del POS, para que ya no quede un token sin la marca `origen`), redondeado a la hora siguiente.
+ * Con `null`, el encendido del 6b dice «verificación pendiente» y no enciende.
+ */
+export const OBSERVADOR_POS_DESDE: Date | null = null
+
+/**
+ * Anota que una sesión del POS de este negocio pidió algo SIN identidad de aparato (una app vieja) en el instante `cuando`:
+ * el que llama cuenta su hora de muestreo desde ese mismo instante. Monotónico: dos instancias del servidor que escriben en
+ * desorden nunca hacen retroceder la fecha. Cuelga del camino del cobro: nunca lanza; devuelve `false` si no pudo anotar,
+ * para que el que llama reintente pronto.
+ */
+export async function registerPosSinAparato(venueId: string, cuando: Date): Promise<boolean> {
+  try {
+    await prisma.$executeRaw`
+      INSERT INTO "VenuePosSinAparato" ("venueId", "ultimaVez")
+      VALUES (${venueId}, ${utcTs(cuando)})
+      ON CONFLICT ("venueId") DO UPDATE SET "ultimaVez" = GREATEST("VenuePosSinAparato"."ultimaVez", EXCLUDED."ultimaVez")`
+    return true
+  } catch (error) {
+    logger.warn(`[DEVICE REGISTRY] No se pudo anotar la sesión del POS sin aparato (no bloqueante) | venue=${venueId}`, error)
+    return false
+  }
 }

@@ -289,7 +289,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_refunds',
-    'Refunds ISSUED for a venue you can access, over a date range (default last 7 days). Mirrors the dashboard "Reembolsos" report. Each refund: amount given back (sale + tip, as positive magnitudes), payment method, reason (RETURNED_GOODS/ACCIDENTAL_CHARGE/CANCELLED_ORDER/FRAUDULENT_CHARGE/OTHER), free-text note, the original order number, who processed it, and when. Plus totals (count + total refunded) and a breakdown BY REASON. Use this for "¿cuánto devolvimos esta semana?", "¿por qué se hicieron los reembolsos?", "¿quién procesó los reembolsos?". Each row also carries `refundState` (NONE/PARTIAL/FULL) for the WHOLE original sale — the sale itself is never rewritten (it stays COMPLETED/PAID; Toast/Square model + the Mexican CFDI de Egreso), so refundState is how you tell a fully-returned sale from a partial one. `list_payments` with status=refunded surfaces both modern and legacy refund rows; use this tool when reason/note/original-payment metadata is required. Pass venueId; optionally fromDate/toDate (YYYY-MM-DD).',
+    'Refunds ISSUED for a venue you can access, over a date range (default last 7 days). Mirrors the dashboard "Reembolsos" report. Each refund: amount given back (sale + tip, as positive magnitudes), payment method, reason (RETURNED_GOODS/ACCIDENTAL_CHARGE/CANCELLED_ORDER/FRAUDULENT_CHARGE/OTHER), free-text note, the original order number, who processed it, and when. Plus totals (count + total refunded) and a breakdown BY REASON. Use this for "¿cuánto devolvimos esta semana?", "¿por qué se hicieron los reembolsos?", "¿quién procesó los reembolsos?". Each row also carries `refundState` (NONE/PARTIAL/FULL) for the WHOLE original sale — the sale itself is never rewritten (it stays COMPLETED/PAID; the Mexican CFDI de Egreso requires preserving the original sale), so refundState is how you tell a fully-returned sale from a partial one. `list_payments` with status=refunded surfaces both modern and legacy refund rows; use this tool when reason/note/original-payment metadata is required. Pass venueId; optionally fromDate/toDate (YYYY-MM-DD).',
     {
       venueId: z.string().describe('Venue whose refunds to read (must be in your scope)'),
       fromDate: z.string().optional().describe('Start date YYYY-MM-DD (default: 7 days ago)'),
@@ -392,8 +392,19 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
     '🔴 CRITICAL. Refund a COMPLETED payment of a venue you can access — ONLY for CASH / non-card payments (the cash you hand back is recorded as a refund). CARD payments (credit/debit) are BLOCKED here: a Blumon/terminal card refund must be done PHYSICALLY on the terminal with the card present — it cannot be processed by API. Identify the payment by its id (from list_payments), give the amount in pesos (partial allowed; the service enforces the remaining refundable) and a reason. By DEFAULT this only PREVIEWS; call again with confirm:true to execute. This WRITES MONEY — requires payments:refund (refundMethod CASH also requires payments:refund-to-cash).',
     {
       venueId: z.string().describe('Venue that owns the payment (must be in your scope)'),
+      idempotencyKey: z
+        .string()
+        .regex(/^[A-Za-z0-9_-]{8,64}$/)
+        .optional()
+        .describe('Llave única por operación; genera una vez y reutiliza en preview, confirmación y reintentos'),
       paymentId: z.string().min(1).describe('The payment id (from list_payments)'),
-      amount: z.number().positive().describe('Amount to refund in pesos (major units), e.g. 150.50'),
+      amount: z
+        .number()
+        .positive()
+        .finite()
+        .multipleOf(0.01)
+        .max(9_999_999_999.99)
+        .describe('Amount to refund in pesos (major units), e.g. 150.50'),
       reason: z
         .enum(['returned_goods', 'accidental_charge', 'cancelled_order', 'fraudulent_charge', 'other'])
         .describe('Why the refund is issued'),
@@ -406,12 +417,21 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
         ),
       confirm: z.boolean().optional().describe('Must be true to actually issue the refund; without it you get a preview'),
     },
-    async ({ venueId, paymentId, amount, reason, note, refundMethod: refundMethodRaw, confirm }) => {
+    async ({ venueId, paymentId, amount, reason, note, refundMethod: refundMethodRaw, confirm, idempotencyKey }) => {
       const refundMethod = refundMethodRaw ?? undefined // null = ausente
       const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('payments:refund', venueId) // write gate (per-venue role)
       // Devolver en efectivo un cobro que no fue en efectivo: permiso propio (MANAGER+), igual que la ruta móvil.
       if (refundMethod === 'CASH') guard.requirePermission('payments:refund-to-cash', venueId)
+
+      if (!idempotencyKey)
+        return text({
+          ok: false,
+          needsInput: true,
+          field: 'idempotencyKey',
+          instruction:
+            'Genera una llave única (UUID) para esta devolución y consérvala en la vista previa, confirmación y todos sus reintentos. No hace falta pedirla al usuario.',
+        })
 
       // Resolve the payment WITHIN scope for the preview (the service re-validates everything under a row lock).
       const payment = await prisma.payment.findFirst({
@@ -495,6 +515,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
         const result = await issueRefund({
           venueId,
           paymentId,
+          idempotencyKey,
           amount: Math.round(amount * 100), // service expects cents
           reason: REFUND_REASON_MAP[reason],
           staffId: scope.staffId,
@@ -534,13 +555,24 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
     'Record a payment manually (registrar un pago a mano) in a venue you can access — cash, transfer, card-on-file, or money that came through an external channel (delivery app, etc.). Two modes: pass orderId to attach it to an existing order (cannot exceed the order total), or omit orderId for a bookkeeping entry that never passed through Avoqado (a shadow MANUAL_ENTRY order is created so revenue reports still count it). Amounts in pesos (1 = 1 peso, e.g. 150.50). By DEFAULT this only PREVIEWS what will be recorded; call again with confirm:true to actually write it. This WRITES — requires the payment:create-manual permission.',
     {
       venueId: z.string().describe('Venue to record the payment in (must be in your scope)'),
-      amount: z.number().positive().describe('Payment amount in pesos (major units), e.g. 150.50'),
+      idempotencyKey: z
+        .string()
+        .regex(/^[A-Za-z0-9_-]{8,64}$/)
+        .optional()
+        .describe('Llave única por operación; genera una vez y reutiliza en preview, confirmación y reintentos'),
+      amount: z
+        .number()
+        .positive()
+        .finite()
+        .multipleOf(0.01)
+        .max(9_999_999_999.99)
+        .describe('Payment amount in pesos (major units), e.g. 150.50'),
       method: z.enum(['cash', 'credit_card', 'debit_card', 'bank_transfer', 'digital_wallet', 'other']).describe('How it was paid'),
       source: z
         .enum(['pos', 'phone', 'web', 'app', 'other'])
         .optional()
         .describe("Where the payment originated. Default 'pos'. Use 'other' for an external channel (then set externalSource)."),
-      tipAmount: z.number().min(0).optional().describe('Tip in pesos (default 0)'),
+      tipAmount: z.number().min(0).finite().multipleOf(0.01).max(9_999_999_999.99).optional().describe('Tip in pesos (default 0)'),
       orderId: z.string().optional().describe('Attach to this existing order; omit for a standalone bookkeeping entry'),
       customerId: z.string().optional().describe('Attribute to this customer (triggers loyalty points if enabled)'),
       waiterId: z.string().optional().describe('Attribute tip/commission to this waiter'),
@@ -548,10 +580,31 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
       reason: z.string().max(500).optional().describe('Free-text note for the audit trail'),
       confirm: z.boolean().optional().describe('Must be true to actually record the payment; without it you get a preview'),
     },
-    async ({ venueId, amount, method, source, tipAmount, orderId, customerId, waiterId, externalSource, reason, confirm }) => {
+    async ({
+      venueId,
+      amount,
+      method,
+      source,
+      tipAmount,
+      orderId,
+      customerId,
+      waiterId,
+      externalSource,
+      reason,
+      confirm,
+      idempotencyKey,
+    }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('payment:create-manual', venueId) // write gate — same permission as the dashboard endpoint
 
+      if (!idempotencyKey)
+        return text({
+          ok: false,
+          needsInput: true,
+          field: 'idempotencyKey',
+          instruction:
+            'Genera una llave única (UUID) para este pago y consérvala en la vista previa, confirmación y todos sus reintentos. No hace falta pedirla al usuario.',
+        })
       const src = source ?? 'pos'
       // Mirror the schema's superRefine so the LLM gets a clear message instead of a 500.
       if (src === 'other' && !externalSource) {
@@ -580,6 +633,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
 
       try {
         const payment = await createManualPayment(venueId, scope.staffId, {
+          idempotencyKey,
           amount: money2(amount),
           tipAmount: money2(tipAmount ?? 0),
           method: MANUAL_METHOD_MAP[method],

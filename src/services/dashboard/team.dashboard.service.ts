@@ -70,6 +70,7 @@ interface InviteTeamMemberRequest {
 }
 
 interface UpdateTeamMemberRequest {
+  expectedState?: { role: StaffRole; active: boolean }
   role?: StaffRole
   active?: boolean
   pin?: string
@@ -899,18 +900,24 @@ export async function updateTeamMember(venueId: string, teamMemberId: string, up
   }
 
   // Update staff venue
-  const updatedStaffVenue = await prisma.staffVenue.update({
-    where: { id: teamMemberId },
-    data: {
-      ...(updates.role && { role: updates.role }),
-      ...(updates.active !== undefined && { active: updates.active }),
-      ...(pinToStore !== undefined && { pin: pinToStore }),
-    },
-    include: {
-      staff: true,
-      permissionSet: { select: { id: true, name: true } },
-    },
-  })
+  const updatedStaffVenue = await prisma.staffVenue
+    .update({
+      where: { id: teamMemberId, ...(updates.expectedState ? { venueId, ...updates.expectedState } : {}) },
+      data: {
+        ...(updates.role && { role: updates.role }),
+        ...(updates.active !== undefined && { active: updates.active }),
+        ...(pinToStore !== undefined && { pin: pinToStore }),
+      },
+      include: {
+        staff: true,
+        permissionSet: { select: { id: true, name: true } },
+      },
+    })
+    .catch(error => {
+      if (updates.expectedState && error?.code === 'P2025')
+        throw new ConflictError('El miembro cambió desde la vista previa. Revisa y confirma de nuevo.')
+      throw error
+    })
 
   logger.info('Team member updated', {
     teamMemberId,

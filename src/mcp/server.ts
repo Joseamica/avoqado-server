@@ -9,6 +9,7 @@ import { describeMcpMessage, MCP_HANDSHAKE_METHODS, respondMcpCancelled } from '
 import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import { beginWork, isRequestCancelledError, pendingCancellation } from '@/utils/requestCancellation'
 import { instrumentTools, recordCancelledToolCall } from './instrument'
+import { configureToolCatalog } from './catalog'
 import { registerVenueTools } from './tools/venues'
 import { registerSalesTools } from './tools/sales'
 import { registerOrderTools } from './tools/orders'
@@ -191,15 +192,15 @@ export async function buildHandshakeServer(staffId: string): Promise<McpServer> 
 /** Build a per-request MCP server bound to the caller's resolved scope. */
 async function buildServerForIdentity(staffId: string, activeOrg: string, scopes?: string[]): Promise<McpServer> {
   const scope = await resolveScope(staffId, activeOrg)
-  // Thread the connection's granted OAuth scopes onto the scope so the guard can enforce mcp:write
-  // on writes. Undefined (dev/legacy token) → the guard leaves access unrestricted.
-  if (scopes && scopes.length) scope.scopes = scopes
+  // Never discard an explicit empty grant or give legacy tokens implicit write access.
+  scope.scopes = scopes ?? ['mcp:read']
 
   const isSuperAdmin = scope.isSuperAdmin === true
   const server = createMcpServer(isSuperAdmin)
   // Log every tool call (must run BEFORE registering tools). isSuperAdmin: raw errors for staff,
   // sanitized (generic message + ref) for customers — see sanitizeThrownError.
   instrumentTools(server, { staffId, org: activeOrg, isSuperAdmin })
+  configureToolCatalog(server, scope)
 
   const [serializedEnabled, whiteLabelEnabled, catalogAccess] = await Promise.all([
     moduleService.anyVenueHasModule(scope.allowedVenueIds, MODULE_CODES.SERIALIZED_INVENTORY),
@@ -240,7 +241,7 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
     if (extra && typeof extra.staffId === 'string' && typeof extra.activeOrg === 'string') {
       staffId = extra.staffId
       activeOrg = extra.activeOrg
-      // provider.verifyAccessToken threads the token's real granted scopes here (undefined for legacy).
+      // provider.verifyAccessToken threads the token's real granted scopes here.
       if (Array.isArray(extra.scopes)) scopes = extra.scopes.filter((s): s is string => typeof s === 'string')
     } else {
       const token = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')

@@ -34,7 +34,7 @@ export function registerCampaignTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, limit }) => {
       guard.venueFilter(venueId)
-      guard.requirePermission('marketing:manage', venueId)
+      guard.requirePermission('marketing:manage', venueId, 'read')
 
       const take = limit ?? 20
       const [items, total] = await Promise.all([
@@ -88,7 +88,7 @@ export function registerCampaignTools(server: McpServer, scope: McpScope) {
     { venueId: z.string().describe('Venue to check (must be in your scope)') },
     async ({ venueId }) => {
       guard.venueFilter(venueId)
-      guard.requirePermission('marketing:manage', venueId)
+      guard.requirePermission('marketing:manage', venueId, 'read')
 
       const a = await obtenerAutomatizacion(venueId)
       if (!a) {

@@ -38,6 +38,7 @@ const scope = {
   staffId: 's1',
   activeOrg: 'o1',
   allowedVenueIds: ['v1'],
+  scopes: ['mcp:read', 'mcp:write'],
   perVenueAccess: new Map([['v1', { organizationId: 'o1' }]]),
 } as unknown as McpScope
 const call = (n: string, a: Record<string, unknown>) => handlers.get(n)!(a, {})

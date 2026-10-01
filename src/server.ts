@@ -53,6 +53,7 @@ import { nightlySalesSummaryJob } from './jobs/nightly-sales-summary.job'
 import { nightlyLowStockJob } from './jobs/nightly-low-stock.job'
 import { nightlyUpsellRulesJob } from './jobs/nightly-upsell-rules.job'
 import { mcpConversationAuditJob } from './jobs/mcp-conversation-audit.job'
+import { mcpRetentionJob } from './jobs/mcp-retention.job'
 import { marketingCampaignJob } from './jobs/marketing-campaign.job'
 import { venueCommissionSettlementJob } from './jobs/venue-commission-settlement.job'
 import { gcalInboxSweeperJob } from './jobs/gcal-inbox-sweeper.job'
@@ -261,6 +262,7 @@ const gracefulShutdown = async (signal: string) => {
 
       // Stop MCP bad-experience audit job
       mcpConversationAuditJob.stop()
+      mcpRetentionJob.stop()
 
       // Stop settlement jobs
       venueCommissionSettlementJob.stop()
@@ -637,6 +639,7 @@ const startApplication = async (retries = 3) => {
 
       // MCP bad-experience audit — every 12h; flags MCP tool calls that failed / denied / retried (all envs, log-only)
       mcpConversationAuditJob.start()
+      mcpRetentionJob.start()
 
       // Start nightly email jobs only in production (avoid sending emails from dev/staging)
       if (NODE_ENV === 'production') {

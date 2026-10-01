@@ -109,6 +109,18 @@ describe('updateTeamMember — privilege-escalation guard', () => {
     prismaMock.staffVenue.findFirst.mockResolvedValue(existingManager as any)
   })
 
+  it('rechaza atómicamente un cambio de rol o estado posterior al preview MCP', async () => {
+    prismaMock.venue.findUnique.mockResolvedValue(null)
+    prismaMock.staffVenue.update.mockRejectedValueOnce({ code: 'P2025' })
+    const expectedState = { role: StaffRole.MANAGER, active: true }
+    await expect(updateTeamMember(VENUE_ID, 'sv-mgr', { role: StaffRole.CASHIER, expectedState } as any)).rejects.toMatchObject({
+      statusCode: 409,
+    })
+    expect(prismaMock.staffVenue.update).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'sv-mgr', venueId: VENUE_ID, ...expectedState } }),
+    )
+  })
+
   it('blocks a MANAGER from promoting themselves to OWNER (self-promotion vector)', async () => {
     await expect(updateTeamMember(VENUE_ID, 'sv-mgr', { role: StaffRole.OWNER, callerRole: StaffRole.MANAGER })).rejects.toThrow(
       /No puedes asignar el rol/i,

@@ -159,6 +159,21 @@ describe('el costo: una consulta por request, no una por middleware', () => {
     expect(prisma.staffVenue.findUnique).toHaveBeenCalledTimes(1)
   })
 
+  it('🔴 dos llamadas SIMULTÁNEAS con el mismo req (una ruta y el observador de aparatos al abortar) consultan UNA vez', async () => {
+    let soltar!: (v: unknown) => void
+    ;(prisma.staffVenue.findUnique as jest.Mock).mockReturnValue(new Promise(r => (soltar = r)))
+
+    const req = {} as any
+    const args = { userId: STAFF, targetVenueId: VENUE, tokenVenueId: VENUE, tokenRole: StaffRole.WAITER, req }
+    const a = resolveUserRoleForVenue(args)
+    const b = resolveUserRoleForVenue(args) // llega mientras la primera sigue esperando a la base (Codex R4-1)
+    soltar({ role: StaffRole.WAITER, active: true, permissionSetId: null, permissionSet: null })
+
+    expect((await a).role).toBe(StaffRole.WAITER)
+    expect(await b).toEqual(await a)
+    expect(prisma.staffVenue.findUnique).toHaveBeenCalledTimes(1)
+  })
+
   it('la memoria NO se comparte entre requests distintos', async () => {
     ;(prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue({
       role: StaffRole.WAITER,

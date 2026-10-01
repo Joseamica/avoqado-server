@@ -181,3 +181,13 @@ describe('parseCfdiReceived — conceptos', () => {
 function cfdiConDescuentoWrap(concepto: string) {
   return cfdiConConceptos(concepto)
 }
+
+
+describe('frontera de XML no confiable', () => {
+  it('rechaza DTD/entidades ANTES de procesarlas', () => {
+    expect(() => parseCfdiXml('<!DOCTYPE Comprobante [<!ENTITY dato "contenido">]><Comprobante/>', 'AAA010101AAA')).toThrow(/DTD|entidades/)
+  })
+  it('rechaza documentos excesivos antes de validar XML', () => {
+    expect(() => parseCfdiXml(' '.repeat(2 * 1024 * 1024 + 1), 'AAA010101AAA')).toThrow(/2 MiB/)
+  })
+})

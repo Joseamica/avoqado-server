@@ -11,45 +11,62 @@ export function registerVenueTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_my_venues',
-    'List the venues you can access (id, name, slug, status, city). The connection is bound to ONE active organization — if a venue the user mentions is NOT here, it may belong to another of their organizations: check list_my_organizations and tell them to reconnect choosing that org. NEVER substitute a different venue for one that is missing.',
-    {},
-    async () => {
-      const [venues, orgName, otherOrgs] = await Promise.all([
+    'Lista paginada de sucursales accesibles, con el rol y permisos efectivos en CADA una, moneda y zona horaria. Usa search para resolver un nombre ambiguo; hasMore/nextOffset permiten continuar. No confundas una página con todos los locales. La conexión corresponde a una organización activa; sólo después de buscar comprueba list_my_organizations si falta un local. Nunca sustituyas la sucursal solicitada.',
+    {
+      search: z.string().trim().max(200).optional().describe('Buscar por nombre, slug o ciudad'),
+      limit: z.number().int().min(1).max(100).default(50),
+      offset: z.number().int().min(0).default(0),
+    },
+    async ({ search, limit = 50, offset = 0 }) => {
+      const where = {
+        id: { in: scope.allowedVenueIds },
+        ...(search
+          ? {
+              OR: ['name', 'slug', 'city'].map(field => ({ [field]: { contains: search, mode: 'insensitive' as const } })),
+            }
+          : {}),
+      }
+      const [venues, total, orgName, otherOrgs] = await Promise.all([
         prisma.venue.findMany({
-          where: { id: { in: scope.allowedVenueIds } },
-          select: { id: true, name: true, slug: true, status: true, city: true },
-          orderBy: { name: 'asc' },
+          where,
+          select: { id: true, name: true, slug: true, status: true, city: true, currency: true, timezone: true },
+          orderBy: [{ name: 'asc' }, { id: 'asc' }],
+          take: limit,
+          skip: offset,
         }),
+        prisma.venue.count({ where }),
         prisma.organization.findUnique({ where: { id: scope.activeOrg }, select: { name: true } }).then(o => o?.name ?? null),
         scope.isSuperAdmin
           ? Promise.resolve(0)
-          : prisma.staffOrganization.count({ where: { staffId: scope.staffId, isActive: true, organizationId: { not: scope.activeOrg } } }),
+          : prisma.staffOrganization.count({
+              where: { staffId: scope.staffId, isActive: true, leftAt: null, organizationId: { not: scope.activeOrg } },
+            }),
       ])
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: JSON.stringify(
-              {
-                count: venues.length,
-                ...(scope.isSuperAdmin
-                  ? { note: 'Conexión SUPERADMIN: acceso global a todas las organizaciones.' }
-                  : {
-                      activeOrganization: orgName,
-                      ...(otherOrgs > 0
-                        ? {
-                            note: `El usuario pertenece a ${otherOrgs} organización(es) más que NO están en esta conexión. Si busca un venue que no aparece aquí, probablemente está en otra — sugiérele reconectar el conector eligiendo esa organización. No uses otro venue como sustituto.`,
-                          }
-                        : {}),
-                    }),
-                venues,
-              },
-              null,
-              2,
-            ),
-          },
-        ],
-      }
+      const hasMore = offset + venues.length < total
+      return text({
+        count: venues.length,
+        total,
+        hasMore,
+        nextOffset: hasMore ? offset + venues.length : null,
+        activeOrganization: orgName,
+        organizationId: scope.activeOrg,
+        organizationRole: scope.orgRole ?? null,
+        connectionScopes: scope.scopes ?? ['mcp:read'],
+        permissionNote:
+          'Los permisos son propios de cada sucursal. La conexión, el plan y la activación del módulo también se comprueban en cada operación.',
+        ...(scope.isSuperAdmin
+          ? { note: 'Conexión SUPERADMIN: acceso global a todas las organizaciones.' }
+          : otherOrgs > 0
+            ? {
+                note: `El usuario pertenece a ${otherOrgs} organización(es) más que NO están en esta conexión. Busca por nombre o recorre las páginas antes de concluir que falta un venue. Si está en otra organización, reconecta eligiéndola. No uses otro venue como sustituto.`,
+              }
+            : {}),
+        venues: venues.map(v => ({
+          ...v,
+          role: scope.perVenueAccess.get(v.id)?.role ?? null,
+          permissions: scope.perVenueAccess.get(v.id)?.corePermissions ?? [],
+        })),
+      })
     },
   )
 

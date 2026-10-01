@@ -1,3 +1,4 @@
+import { InvalidScopeError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 jest.mock('../../../src/mcp/oauth/tokenStore', () => ({
   consumeAuthCode: jest.fn(),
   peekAuthCodeChallenge: jest.fn(),
@@ -32,7 +33,7 @@ it('verifyAccessToken returns AuthInfo with staffId/activeOrg in extra', async (
   const token = issueMcpToken('s1', 'o1', 3600, 'c1')
   const info = await provider.verifyAccessToken(token)
   expect(info.clientId).toBe('c1')
-  expect(info.extra).toEqual({ staffId: 's1', activeOrg: 'o1' })
+  expect(info.extra).toEqual({ staffId: 's1', activeOrg: 'o1', scopes: ['mcp:read'] })
   expect(info.scopes).toContain('mcp:read')
 })
 
@@ -184,5 +185,41 @@ describe('Codex ronda 8 — la cadena de renovación hereda la fecha original', 
     await provider.verifyAccessToken(token)
     const iat = accesoSpy.mock.calls[0][1]
     expect(Math.abs(iat - Math.floor(Date.now() / 1000))).toBeLessThanOrEqual(2)
+  })
+})
+
+describe('regresión: un refresh nunca amplía el consentimiento', () => {
+  beforeEach(() => {
+    ;(store.consumeRefreshToken as jest.Mock).mockResolvedValue({
+      clientId: 'c1',
+      staffId: 's1',
+      activeOrg: 'o1',
+      scopes: ['mcp:read'],
+      issuedAt: new Date(),
+    })
+    ;(store.createRefreshToken as jest.Mock).mockResolvedValue({ token: 'r2' })
+  })
+
+  it.each([['mcp:write'], ['mcp:read', 'mcp:write'], ['unknown']])('rechaza scopes fuera del grant: %j', async (...requested) => {
+    await expect(provider.exchangeRefreshToken({ client_id: 'c1' } as never, 'r1', requested)).rejects.toThrow(InvalidScopeError)
+    expect(store.createRefreshToken).not.toHaveBeenCalled()
+  })
+
+  it('conserva un grant explícitamente vacío, sin fallback a acceso completo', async () => {
+    const token = issueMcpToken('s1', 'o1', 3600, 'c1', [])
+    const info = await provider.verifyAccessToken(token)
+    expect(info.scopes).toEqual([])
+    expect(info.extra?.scopes).toEqual([])
+  })
+
+  it('un token legacy sin grant conserva sólo lectura, nunca escritura', async () => {
+    const info = await provider.verifyAccessToken(issueMcpToken('s1', 'o1', 3600, 'c1'))
+    expect(info.scopes).toEqual(['mcp:read'])
+    expect(info.extra?.scopes).toEqual(['mcp:read'])
+  })
+
+  it('un refresh sin scope conserva el grant original', async () => {
+    const result = await provider.exchangeRefreshToken({ client_id: 'c1' } as never, 'r1')
+    expect((await provider.verifyAccessToken(result.access_token)).scopes).toEqual(['mcp:read'])
   })
 })

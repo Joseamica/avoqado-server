@@ -36,7 +36,7 @@ describe('buildMcpInstructions', () => {
       expect(text).toMatch(/SOURCE OF TRUTH/)
       expect(text).toMatch(/UNVERIFIED/)
       expect(text).toMatch(/Fitpass/)
-      expect(text).toMatch(/Mexican pesos in major units/)
+      expect(text).toMatch(/currency returned by the tool in major units/)
     }
   })
 })

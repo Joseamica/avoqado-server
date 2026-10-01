@@ -24,7 +24,7 @@ import { logAction as defaultLogAction } from '../dashboard/activity-log.service
 import { resolveFiscalProvider } from './fiscalProvider.factory'
 import { buildCreditNoteParams, CREDIT_NOTE_USO_CFDI, CreditNoteLine } from './cfdiPayloadBuilder'
 import { validateBeforeStamp } from './cfdiValidation'
-import { allocateByWeights, splitIvaByRate, splitIvaIncluded } from './ivaMath'
+import { repartirProporcional, splitIvaByRate, splitIvaIncluded } from './ivaMath'
 import { mapFormaPago } from './satCatalog'
 import {
   STAMPING_TTL_MS,
@@ -314,8 +314,8 @@ export function checkCreditNoteEligibility(loaded: LoadedRefundForCreditNote): C
  *
  * Por qué proporcional y no "primero lo gravado": una devolución parcial no se refiere a
  * renglones concretos ("devuélveme $50"), así que el único reparto defendible es el que
- * conserva la mezcla fiscal de la venta. Con `allocateByWeights` la suma de las partes es
- * EXACTAMENTE el importe devuelto (el residuo lo absorbe el bucket más grande), así que la
+ * conserva la mezcla fiscal de la venta. Con `repartirProporcional` la suma de las partes es
+ * EXACTAMENTE el importe devuelto (los centavos sueltos van a los mayores remanentes), así que la
  * nota de crédito cuadra al centavo con el dinero que salió de la caja.
  *
  * Sin desglose (venta de importe libre, sin renglones) → una sola partida a `fallbackRate`.
@@ -327,7 +327,7 @@ export function buildCreditNoteLines(
 ): CreditNoteLine[] {
   const meaningful = grossByRate.filter(r => r.grossCents > 0)
   if (meaningful.length === 0) return [{ grossCents: salesRefundCents, rate: fallbackRate }]
-  const alloc = allocateByWeights(
+  const alloc = repartirProporcional(
     salesRefundCents,
     meaningful.map(r => r.grossCents),
   )

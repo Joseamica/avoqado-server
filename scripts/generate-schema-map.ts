@@ -142,6 +142,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   Venue: 'Multi-Tenant Core',
   VenueSettings: 'Multi-Tenant Core',
   VenueIvaPorProducto: 'Multi-Tenant Core',
+  VenuePosSinAparato: 'Multi-Tenant Core',
   OrganizationAttendanceConfig: 'Multi-Tenant Core',
   Area: 'Multi-Tenant Core',
   Zone: 'Multi-Tenant Core',

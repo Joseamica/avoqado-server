@@ -375,6 +375,8 @@ model Venue {
 
   // IVA por producto (plan 1): presente = encendido. Ver model VenueIvaPorProducto.
   ivaPorProducto VenueIvaPorProducto?
+  // IVA por producto (spec planes 6-7, §5.5): última sesión del POS sin identidad de aparato. Ver model VenuePosSinAparato.
+  posSinAparato  VenuePosSinAparato?
 
   // Relations
   posCommands           PosCommand[]
@@ -963,6 +965,16 @@ model VenueIvaPorProducto {
   venue                Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
   habilitadoAt         DateTime @default(now())
   habilitadoPorStaffId String?
+}
+
+/// IVA por producto (spec planes 6-7, §5.5, D12): la última vez que una sesión del POS móvil pidió algo SIN identidad de
+/// aparato (una app vieja) en este negocio. El encendido del 6b exige que no haya pasado en los últimos 30 días. Una fila
+/// por negocio; la escribe el middleware pasivo de aparatos, muestreada (`POS_SIN_APARATO_MUESTREO_MS`) y monotónica.
+/// Nunca se borra: vence sola por fecha.
+model VenuePosSinAparato {
+  venueId   String   @id
+  venue     Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  ultimaVez DateTime
 }
 
 model PosConnectionStatus {

@@ -1533,3 +1533,51 @@ describe('refund.dashboard.service', () => {
     })
   })
 })
+
+describe('issueRefund — replay MCP sin mover dinero de nuevo', () => {
+  const input = {
+    venueId: 'v',
+    paymentId: 'original',
+    amount: 1000,
+    reason: 'OTHER' as const,
+    staffId: 'staff',
+    idempotencyKey: 'mcp-refund-0001',
+  }
+  beforeEach(() => jest.clearAllMocks())
+
+  it('retorna el resultado durable antes de comprobar el saldo restante o iniciar efectos', async () => {
+    const { operationHash } = await import('@/utils/operationHash')
+    prismaMock.payment.findUnique.mockResolvedValue({
+      id: 'refund-existing',
+      type: 'REFUND',
+      amount: -10,
+      tipAmount: 0,
+      processorData: {
+        originalPaymentId: 'original',
+        idempotencyRequestHash: operationHash({ ...input, idempotencyKey: undefined }),
+        remainingAfterCents: 0,
+      },
+    } as any)
+    expect(await issueRefund(input)).toEqual({
+      refundId: 'refund-existing',
+      originalPaymentId: 'original',
+      amount: 10,
+      remainingRefundable: 0,
+      status: 'COMPLETED',
+    })
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+  })
+
+  it('rechaza reutilizar una llave para otro monto, motivo o persona', async () => {
+    prismaMock.payment.findUnique.mockResolvedValue({
+      id: 'refund-existing',
+      type: 'REFUND',
+      amount: -10,
+      tipAmount: 0,
+      processorData: { originalPaymentId: 'original', idempotencyRequestHash: 'different', remainingAfterCents: 0 },
+    } as any)
+    await expect(issueRefund(input)).rejects.toThrow(/idempotencia/)
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+  })
+})
