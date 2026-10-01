@@ -10,8 +10,7 @@ import { registerHybridPricingTools } from './hybridPricing'
  * 🔴 Las escrituras van por `requireWriteScopeAlways`: un token de sólo lectura que puede
  * cambiar una oferta que se cobra con tarjeta es un agujero, no un riesgo de despliegue.
  *
- * 🔴 La bitácora usa `logAction`, NO `auditMcpWrite`: aquél exige `venueId` y estas filas no
- * pertenecen a ningún local.
+ * Bitácora: estas tools de campañas de lanzamiento usan `logAction`; las de precios (`hybridPricing.ts`) usan `auditMcpWrite` con `venueId: null`.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'

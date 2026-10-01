@@ -1,8 +1,11 @@
 /**
  * Seeds the list price of the Pro and Premium plans (spec 2026-09-30 «Precios de lista y promociones» §4.2).
  *
+ *   export DATABASE_URL=<target>      # REQUIRED: dotenv never overrides an exported value; without it the run uses .env
  *   npx ts-node -T -r tsconfig-paths/register scripts/seed-plan-list-prices.ts                                  # dry run
- *   npx ts-node -T -r tsconfig-paths/register scripts/seed-plan-list-prices.ts --apply --confirm-host <host> [--staff <id>]
+ *   npx ts-node -T -r tsconfig-paths/register scripts/seed-plan-list-prices.ts --apply --confirm-host <host> --confirm-db <name> [--staff <id>]
+ *
+ * `-T` (transpile-only) is required: a type-checking ts-node runs out of memory on the Prisma types.
  *
  * Why: a venue that bought loose functions and then wants Pro hits PLAN_ABSORBE_SUELTA in the classic purchase; with a
  * LIST of the plan that upgrade becomes self-service. Phase 1 seeds both plans at the classic monthly price
@@ -11,9 +14,10 @@
  * Idempotent: a plan list that already exists at that price is reported («ya existe»); one at another price is NOT
  * changed («precio distinto: la fase 2 lo decide»); a price left pending by a failed Stripe preparation is finished.
  *
- * 🔴 It prints the host of DATABASE_URL first, and writing requires repeating that exact host in --confirm-host (the
- * `cancelar-ordenes-fantasma.ts` pattern): the only defense against an inherited DATABASE_URL pointing elsewhere. The
- * Prisma client is loaded only after that check, from that same DATABASE_URL.
+ * 🔴 It prints the host and database name of DATABASE_URL first, and writing requires repeating BOTH in --confirm-host and
+ * --confirm-db (the `cancelar-ordenes-fantasma.ts` pattern, plus the name: several databases share `localhost`). It is the
+ * only defense against an inherited DATABASE_URL pointing elsewhere. The Prisma client is loaded only after that check,
+ * from that same DATABASE_URL.
  */
 import { STANDARD_PLAN_GROSS_CENTS } from '../src/services/access/planPricing.constants'
 import type { PlanSeedOutcome } from '../src/services/launchCampaigns/hybridListPrice.service'
@@ -23,6 +27,7 @@ const TIERS = ['PRO', 'PREMIUM'] as const
 export interface SeedOptions {
   apply: boolean
   confirmHost?: string
+  confirmDb?: string
   staffId?: string
 }
 export interface SeedResult {
@@ -65,10 +70,12 @@ export async function seedPlanLists(
 ): Promise<{ host: string; results: SeedResult[] }> {
   const { host, name } = database()
   log(`Base: ${host}  base de datos: ${name}  modo: ${options.apply ? 'APLICAR' : 'SIMULACIÓN'}`)
-  if (options.apply && options.confirmHost !== host)
-    throw new SeedRefusal(`🔴 No se escribió NADA. Para escribir en esta base repite su host exacto:  --confirm-host ${host}`)
+  if (options.apply && (options.confirmHost !== host || options.confirmDb !== name))
+    throw new SeedRefusal(
+      `🔴 No se escribió NADA. Para escribir en esta base repite su host y su nombre exactos:  --confirm-host ${host} --confirm-db ${name}`,
+    )
 
-  // Loaded after the host check: the client reads DATABASE_URL when it loads.
+  // Loaded after the host and name check: the client reads DATABASE_URL when it loads.
   const { default: prisma } = await import('../src/utils/prismaClient')
   const { listPriceBoard, planSeedOutcome, seedPlanList } = await import('../src/services/launchCampaigns/hybridListPrice.service')
 
@@ -107,7 +114,12 @@ function flag(name: string): string | undefined {
 
 async function main() {
   await import('dotenv/config')
-  await seedPlanLists({ apply: process.argv.includes('--apply'), confirmHost: flag('--confirm-host'), staffId: flag('--staff') })
+  await seedPlanLists({
+    apply: process.argv.includes('--apply'),
+    confirmHost: flag('--confirm-host'),
+    confirmDb: flag('--confirm-db'),
+    staffId: flag('--staff'),
+  })
   const { default: prisma } = await import('../src/utils/prismaClient')
   await prisma.$disconnect()
 }

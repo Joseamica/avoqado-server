@@ -17,6 +17,7 @@ import { seedPlanLists } from '../../../scripts/seed-plan-list-prices'
 const stamp = `${Date.now()}${process.pid}`
 const KEYS = ['PLAN:PRO', 'PLAN:PREMIUM']
 const host = new URL(process.env.TEST_DATABASE_URL!).hostname
+const dbName = new URL(process.env.TEST_DATABASE_URL!).pathname.slice(1)
 let staffId: string
 // Plan lists other suites (or an earlier seed) left on the shared disposable DB: parked during the run, restored after.
 let parked: { id: string; listProductKey: string | null; code: string; slug: string }[] = []
@@ -26,7 +27,7 @@ const planLists = () =>
 const priceOf = async (publicationId: string | null) =>
   hybridOfferDefinition.parse((await prisma.hybridOfferPublication.findUniqueOrThrow({ where: { id: publicationId! } })).definition).terms
     .price
-async function run(options: { apply: boolean; confirmHost?: string }) {
+async function run(options: { apply: boolean; confirmHost?: string; confirmDb?: string }) {
   const lines: string[] = []
   const report = await seedPlanLists({ ...options, staffId }, line => lines.push(line))
   return { report, text: lines.join('\n') }
@@ -85,17 +86,25 @@ describe('seeding the plan lists at the classic monthly price (spec §4.2)', () 
 
   it('--apply without the exact host refuses before writing anything', async () => {
     await expect(run({ apply: true })).rejects.toThrow(/--confirm-host/)
-    await expect(run({ apply: true, confirmHost: 'otra-base.example.com' })).rejects.toThrow(/--confirm-host/)
+    await expect(run({ apply: true, confirmHost: 'otra-base.example.com', confirmDb: dbName })).rejects.toThrow(/--confirm-host/)
+    expect(await planLists()).toEqual([])
+  })
+
+  it('--apply with the right host but another database name refuses before writing anything', async () => {
+    // Several databases share one host (localhost): the host alone does not say which one is written.
+    const refused = run({ apply: true, confirmHost: host, confirmDb: 'av-db-25' })
+    await expect(refused).rejects.toThrow(`--confirm-host ${host} --confirm-db ${dbName}`)
+    await expect(run({ apply: true, confirmHost: host })).rejects.toThrow(/--confirm-db/)
     expect(await planLists()).toEqual([])
   })
 
   it('a failed Stripe preparation puts nothing on sale; the next --apply finishes it and creates the rest', async () => {
     jest.mocked(ensureHybridPublicationPrices).mockRejectedValueOnce(new Error('Stripe no contestó'))
-    await expect(run({ apply: true, confirmHost: host })).rejects.toMatchObject({ code: 'HYBRID_LIST_PREPARING' })
+    await expect(run({ apply: true, confirmHost: host, confirmDb: dbName })).rejects.toMatchObject({ code: 'HYBRID_LIST_PREPARING' })
     const [pending] = await planLists()
     expect(pending).toMatchObject({ listProductKey: 'PLAN:PRO', status: 'DRAFT', currentPublicationId: null })
     expect((await run({ apply: false })).report.results.map(r => r.outcome)).toEqual(['PENDING', 'CREATE'])
-    const { report, text } = await run({ apply: true, confirmHost: host })
+    const { report, text } = await run({ apply: true, confirmHost: host, confirmDb: dbName })
     expect(report.results.map(r => r.outcome)).toEqual(['PENDING', 'CREATE'])
     expect(text).toMatch(/PLAN:PRO: precio pendiente terminado a \$1158\.84/)
   })
@@ -123,7 +132,7 @@ describe('seeding the plan lists at the classic monthly price (spec §4.2)', () 
   it('a second run duplicates nothing and says the list already exists', async () => {
     const before = await planLists()
     const publications = await prisma.hybridOfferPublication.count({ where: { campaignId: { in: before.map(list => list.id) } } })
-    const { report, text } = await run({ apply: true, confirmHost: host })
+    const { report, text } = await run({ apply: true, confirmHost: host, confirmDb: dbName })
     expect(report.results.map(r => r.outcome)).toEqual(['EXISTS', 'EXISTS'])
     expect(text).toMatch(/ya existe/)
     expect(await planLists()).toEqual(before)
@@ -158,7 +167,7 @@ describe('seeding the plan lists at the classic monthly price (spec §4.2)', () 
     })
     await prisma.hybridCampaign.update({ where: { id: pro.id }, data: { currentPublicationId: other.id, revision: { increment: 1 } } })
     const changed = await prisma.hybridCampaign.findUniqueOrThrow({ where: { id: pro.id } })
-    const { report, text } = await run({ apply: true, confirmHost: host })
+    const { report, text } = await run({ apply: true, confirmHost: host, confirmDb: dbName })
     expect(report.results.find(r => r.productKey === 'PLAN:PRO')).toMatchObject({ outcome: 'DIFFERENT_PRICE', current: 999 })
     expect(text).toMatch(/precio distinto: la fase 2 lo decide/)
     expect(await prisma.hybridCampaign.findUniqueOrThrow({ where: { id: pro.id } })).toEqual(changed)
