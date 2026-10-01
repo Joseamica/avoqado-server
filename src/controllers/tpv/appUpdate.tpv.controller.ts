@@ -42,15 +42,15 @@ export async function checkForUpdate(req: Request, res: Response) {
       })
     }
 
-    const versionCode = parseInt(currentVersion as string)
-    if (isNaN(versionCode) || versionCode < 1) {
+    const versionCode = typeof currentVersion === 'string' && /^[1-9]\d*$/.test(currentVersion) ? Number(currentVersion) : NaN
+    if (!Number.isSafeInteger(versionCode) || versionCode > 2147483647) {
       return res.status(400).json({
         success: false,
         error: 'Invalid currentVersion: must be a positive integer',
       })
     }
 
-    const env = (environment as string).toUpperCase()
+    const env = typeof environment === 'string' ? environment.toUpperCase() : ''
     if (!['SANDBOX', 'PRODUCTION'].includes(env)) {
       return res.status(400).json({
         success: false,
@@ -60,7 +60,8 @@ export async function checkForUpdate(req: Request, res: Response) {
 
     // Optional platform (new clients only). Old TPV APKs don't send it →
     // default ANDROID_TPV preserves their behavior exactly.
-    const platformParam = ((req.query.platform as string) || 'ANDROID_TPV').toUpperCase()
+    const platformParam =
+      req.query.platform === undefined ? 'ANDROID_TPV' : typeof req.query.platform === 'string' ? req.query.platform.toUpperCase() : ''
     if (!['ANDROID_TPV', 'WINDOWS_DESKTOP'].includes(platformParam)) {
       return res.status(400).json({
         success: false,
@@ -80,14 +81,18 @@ export async function checkForUpdate(req: Request, res: Response) {
     const terminalSerialHeader = (req.headers['x-terminal-serial'] as string | undefined)?.trim() || undefined
 
     let terminalId: string | undefined
+    let terminalBrand: string | null | undefined
     if (terminalSerialHeader) {
       const terminal = await prisma.terminal.findFirst({
         where: { serialNumber: { equals: terminalSerialHeader, mode: 'insensitive' } },
-        select: { id: true },
+        select: { id: true, brand: true },
       })
       terminalId = terminal?.id
+      terminalBrand = terminal?.brand
     }
 
+    if (platformParam === 'ANDROID_TPV' && (req.headers['x-tpv-processor'] === 'NEXGO' || terminalBrand?.toUpperCase().includes('NEXGO')))
+      return res.status(200).json({ success: true, updateAvailable: false, message: 'Nexgo se actualiza mediante TMS' })
     const audienceConditions = buildAudienceConditions(venueIdHeader, terminalId)
 
     // Find the latest active version for this environment + platform that targets this terminal
@@ -188,15 +193,15 @@ export async function getSpecificVersion(req: Request, res: Response) {
       })
     }
 
-    const targetVersionCode = parseInt(versionCode as string)
-    if (isNaN(targetVersionCode) || targetVersionCode < 1) {
+    const targetVersionCode = typeof versionCode === 'string' && /^[1-9]\d*$/.test(versionCode) ? Number(versionCode) : NaN
+    if (!Number.isSafeInteger(targetVersionCode) || targetVersionCode > 2147483647) {
       return res.status(400).json({
         success: false,
         error: 'Invalid versionCode: must be a positive integer',
       })
     }
 
-    const env = (environment as string).toUpperCase()
+    const env = typeof environment === 'string' ? environment.toUpperCase() : ''
     if (!['SANDBOX', 'PRODUCTION'].includes(env)) {
       return res.status(400).json({
         success: false,
@@ -204,13 +209,36 @@ export async function getSpecificVersion(req: Request, res: Response) {
       })
     }
 
-    // Find the specific version
-    const update = await prisma.appUpdate.findUnique({
+    const platform =
+      req.query.platform === undefined ? 'ANDROID_TPV' : typeof req.query.platform === 'string' ? req.query.platform.toUpperCase() : ''
+    if (!['ANDROID_TPV', 'WINDOWS_DESKTOP'].includes(platform))
+      return res.status(400).json({ success: false, error: 'Plataforma inválida' })
+    const serial = req.get?.('X-Terminal-Serial')
+    const terminal = serial
+      ? await prisma.terminal.findFirst({
+          where: {
+            OR: [
+              { serialNumber: { equals: serial, mode: 'insensitive' } },
+              {
+                serialNumber: {
+                  equals: serial.toUpperCase().startsWith('AVQD-') ? serial.slice(5) : `AVQD-${serial}`,
+                  mode: 'insensitive',
+                },
+              },
+            ],
+          },
+          select: { id: true, venueId: true, brand: true },
+        })
+      : null
+    if (platform === 'ANDROID_TPV' && (req.headers['x-tpv-processor'] === 'NEXGO' || terminal?.brand?.toUpperCase().includes('NEXGO')))
+      return res.status(200).json({ success: true, found: false, message: 'Nexgo se actualiza mediante TMS' })
+    // Apply the same platform and rollout audience as check-update.
+    const update = await prisma.appUpdate.findFirst({
       where: {
-        versionCode_environment: {
-          versionCode: targetVersionCode,
-          environment: env as AppEnvironment,
-        },
+        versionCode: targetVersionCode,
+        environment: env as AppEnvironment,
+        platform: platform as AppPlatform,
+        OR: buildAudienceConditions(terminal?.venueId, terminal?.id),
       },
       select: {
         id: true,

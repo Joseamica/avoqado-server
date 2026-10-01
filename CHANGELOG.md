@@ -9,6 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- TPV: los códigos de versión rechazan decimales/sufijos y overflow; get-version aplica plataforma Android y audiencia. Nexgo usa TMS y no recibe APK PAX. Verificado: 10 pruebas de versiones y typecheck del servidor.
+
 - **PlayTelecom vuelve a corregir monto y forma de pago de un cobro en EFECTIVO desde la verificación de venta (21-sep-2026).**
   Desde el deploy del 18-sep todo cobro registrado por la terminal lleva la llave `pricing` (en efectivo sin afiliación vale
   `null`) y `cobrosDelProtocolo` lo clasificaba «del protocolo de costo»: 162 SIMs de $0 quedaron protegidos en dos días y el
