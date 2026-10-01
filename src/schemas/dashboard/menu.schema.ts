@@ -5,7 +5,24 @@ import { isNonInventoriable, NON_INVENTORIABLE_MESSAGE } from '../../services/da
 // Common patterns and constants
 const TIME_REGEX = /^([01]\d|2[0-3]):([0-5]\d)$/ // HH:mm format
 const DAYS_OF_WEEK = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'] as const
-const SKU_REGEX = /^[A-Za-z0-9_-]+$/ // Alphanumeric (both cases), underscores, hyphens
+export const SKU_REGEX = /^[A-Za-z0-9_-]+$/ // Alphanumeric (both cases), underscores, hyphens
+
+/** Máximo del SKU de un extra; el MCP (Task 5) usa el mismo. */
+export const MODIFIER_SKU_MAX = 64
+/** Formato del SKU de un extra: el MCP muestra el mismo texto que la API (el agente no ve un «Invalid» pelón). */
+export const MODIFIER_SKU_FORMAT_MESSAGE = 'El SKU sólo admite letras, números, guion y guion bajo'
+
+// SKU de un extra: el código con el que el OTRO POS (caja externa) lo tiene dado de alta.
+// Mismo formato que el del producto; vacío = sin SKU. Mensajes en español: los ve el usuario.
+const ModifierSkuSchema = z.preprocess(
+  value => (typeof value === 'string' ? value.trim() || null : value),
+  z
+    .string()
+    .max(MODIFIER_SKU_MAX, `El SKU del extra no puede pasar de ${MODIFIER_SKU_MAX} caracteres`)
+    .regex(SKU_REGEX, MODIFIER_SKU_FORMAT_MESSAGE)
+    .nullable()
+    .optional(),
+)
 
 // ==========================================
 // MENU SCHEMAS
@@ -327,6 +344,7 @@ export const CreateModifierGroupSchema = z.object({
             name: z.string().min(1, 'Modifier name is required').max(255),
             price: z.number().min(0).multipleOf(0.01).default(0),
             active: z.boolean().optional(),
+            sku: ModifierSkuSchema,
           }),
         )
         .optional(),
@@ -402,6 +420,7 @@ export const CreateModifierSchema = z.object({
     name: z.string().min(1, 'Name is required').max(255),
     price: z.number().min(0).multipleOf(0.01).default(0),
     active: z.boolean().optional(),
+    sku: ModifierSkuSchema,
   }),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
@@ -414,9 +433,12 @@ export const UpdateModifierSchema = z.object({
   body: CreateModifierSchema.shape.body.partial().extend({
     // ✅ WORLD-CLASS: Inventory configuration for modifiers (Toast/Square pattern)
     rawMaterialId: z.string().cuid('Invalid raw material ID format').nullable().optional(),
-    quantityPerUnit: z.number().positive('Quantity must be positive').optional(),
-    unit: z.enum(['UNIT', 'KILOGRAM', 'GRAM', 'LITER', 'MILLILITER', 'OUNCE', 'POUND', 'CUP', 'TABLESPOON', 'TEASPOON']).optional(),
-    inventoryMode: z.enum(['ADDITION', 'SUBSTITUTION']).optional(),
+    quantityPerUnit: z.number().positive('Quantity must be positive').nullable().optional(),
+    unit: z
+      .enum(['UNIT', 'KILOGRAM', 'GRAM', 'LITER', 'MILLILITER', 'OUNCE', 'POUND', 'CUP', 'TABLESPOON', 'TEASPOON'])
+      .nullable()
+      .optional(),
+    inventoryMode: z.enum(['ADDITION', 'SUBSTITUTION']).nullable().optional(),
   }),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),

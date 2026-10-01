@@ -531,6 +531,7 @@ export async function buildOrderItemsData(
   subtotal: number
   itemDiscountTotal: number
   discounts: Array<{ id: string; [key: string]: any }>
+  modifierSkus: Record<string, string | null>
 }> {
   // Validate items array
   if (!items || items.length === 0) {
@@ -720,7 +721,10 @@ export async function buildOrderItemsData(
   })
 
   const itemsData = [...productItemsData, ...customItemsData]
-  return { itemsData, subtotal, itemDiscountTotal, discounts }
+  // Caja externa: el SKU de cada extra, para que el vale lo congele SIN meterlo en
+  // `modifiers.create` (OrderItemModifier no tiene esa columna y Prisma rechazaría la orden).
+  const modifierSkus: Record<string, string | null> = Object.fromEntries(modifiers.map(modifier => [modifier.id, modifier.sku ?? null]))
+  return { itemsData, subtotal, itemDiscountTotal, discounts, modifierSkus }
 }
 
 /**

@@ -4243,6 +4243,10 @@ model Modifier {
 
   name  String
   price Decimal @default(0) @db.Decimal(10, 2)
+  /// SKU del extra en el OTRO POS que cobra el vale (caja externa): la pistola de esa caja lo
+  /// lee impreso. Opcional y NO único — varios extras comparten código (todos los sabores de
+  /// «Agrega sabor» = P000622). Mismo formato que Product.sku.
+  sku   String?
 
   // Additional minutes this modifier adds to the booked service when selected.
   // Multiplied by the picked quantity in resolveModifierSelections. Null = no
