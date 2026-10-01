@@ -49,6 +49,7 @@ const publication = {
   },
   campaign: {
     id: campaignId,
+    purpose: 'PROMOTION',
     status: 'ACTIVE',
     startsAt: new Date(now - 10000),
     endsAt: new Date(now + 86400000),

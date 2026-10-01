@@ -15,6 +15,7 @@ import {
   listHybridCampaigns,
   setHybridCampaignStatus,
   listPublicHybridOffers,
+  listHybridRedemptions,
 } from '@/services/launchCampaigns/hybridCampaign.service'
 
 const db = prisma as any
@@ -232,6 +233,35 @@ describe('the publication on sale is the explicit pointer, never the highest ver
     expect(page.items.map(item => item.id)).toEqual(['v1'])
     expect(db.hybridOfferPublication.findMany).toHaveBeenCalledTimes(1)
     expect(db.hybridOfferPublication.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: { in: ['v1'] } }, take: 1 }))
+  })
+})
+
+describe('a LIST is priced from «Precios», never from the campaign editor (spec §4.2)', () => {
+  afterEach(() => delete process.env.HYBRID_BILLING_ENABLED)
+  it('the editor and the public detail answer a LIST like an unknown id or slug, without writing', async () => {
+    Object.assign(row, { purpose: 'LIST', listProductKey: 'FEATURE:CFDI', endsAt: null, capacity: null, status: 'ACTIVE' })
+    pubs = [stored('pub')]
+    row.currentPublicationId = 'pub'
+    process.env.HYBRID_BILLING_ENABLED = 'true'
+    const notFound = { statusCode: 404 }
+    await expect(getHybridCampaign('campaign1')).rejects.toMatchObject(notFound)
+    await expect(updateHybridCampaign('campaign1', { ...input, expectedRevision: 1 }, 'staff1')).rejects.toMatchObject(notFound)
+    await expect(publishHybridCampaign('campaign1', 1, 'staff1')).rejects.toMatchObject(notFound)
+    await expect(setHybridCampaignStatus('campaign1', { status: 'PAUSED', expectedRevision: 1 }, 'staff1')).rejects.toMatchObject(notFound)
+    await expect(
+      setHybridCampaignStatus('campaign1', { status: 'ACTIVE', expectedRevision: 1, publicationId: 'pub' }, 'staff1'),
+    ).rejects.toMatchObject(notFound)
+    await expect(listHybridRedemptions('campaign1', {})).rejects.toMatchObject(notFound)
+    await expect(getPublicHybridOffer('herramientas-tienda')).rejects.toMatchObject(notFound)
+    expect(db.hybridCampaign.updateMany).not.toHaveBeenCalled()
+    expect(db.hybridOfferPublication.create).not.toHaveBeenCalled()
+  })
+
+  it('the superadmin list and the public list only page promotions', async () => {
+    await listHybridCampaigns({})
+    await listPublicHybridOffers({})
+    expect(db.hybridCampaign.findMany).toHaveBeenCalledTimes(2)
+    for (const [args] of db.hybridCampaign.findMany.mock.calls) expect(args.where).toMatchObject({ purpose: 'PROMOTION' })
   })
 })
 

@@ -16,6 +16,7 @@ import { hybridHash } from './hybridProvider'
 import { readHybridCreditSource } from './hybridSources'
 import { assertHybridBalanceUsable } from './hybridFundingGraph'
 import { audienceIncludes, hybridOfferBlocker, type HybridOfferBlocker } from './hybridOfferEligibility'
+import { productKeyOf, promotionWindow } from './hybridProduct'
 import { assertKeepSelection } from '@/services/dashboard/seatReconciliation.service'
 
 const errorMap: z.ZodErrorMap = () => ({ message: 'Valor requerido o formato no válido' })
@@ -94,6 +95,7 @@ const OFFER_BLOCKED: Record<HybridOfferBlocker, () => ConflictError> = {
   INELIGIBLE: () => new ConflictError('Esta oferta no está disponible para tu organización.', 'HYBRID_OFFER_INELIGIBLE'),
   PREPARING: () => new ConflictError('La oferta todavía está preparando su cobro.', 'HYBRID_OFFER_UNAVAILABLE'),
 }
+const offerChanged = () => new ConflictError('La oferta cambió; revisa una cotización nueva.', 'HYBRID_OFFER_UNAVAILABLE')
 
 /** Re-read at acceptance with the same effective timestamp; changes require a new human-reviewed quote. */
 export async function observeHybridQuote(venueId: string, body: z.output<typeof hybridQuoteBody>, effectiveAt: number) {
@@ -108,24 +110,36 @@ export async function observeHybridQuote(venueId: string, body: z.output<typeof 
   })
   if (publications.length !== body.lines.length || new Set(publications.map(p => p.campaignId)).size !== publications.length)
     throw new BadRequestError('La selección contiene una oferta desconocida o repetida.')
+  const parentListKeys: string[] = []
   for (const publication of publications) {
     const definition = hybridOfferDefinition.parse(publication.definition)
     const blocker = hybridOfferBlocker(
-      // PROMOTION: CHECK guarantees non-null
-      {
-        ...publication.campaign,
-        endsAt: publication.campaign.endsAt!,
-        capacity: publication.campaign.capacity!,
-        latestPublicationId: publication.campaign.currentPublicationId ?? undefined,
-      },
+      { ...publication.campaign, latestPublicationId: publication.campaign.currentPublicationId ?? undefined },
       { ...publication, renewalKind: definition.terms.renewal.kind },
       venue.organization,
       now,
     )
     if (blocker) throw OFFER_BLOCKED[blocker]()
+    if (publication.campaign.promotionGroupId) {
+      const key = productKeyOf(definition)
+      if (!key) throw OFFER_BLOCKED.UNAVAILABLE()
+      parentListKeys.push(key)
+    }
   }
+  // A generated promotion sells only while the LIST of its product does, also through its own link (spec §4.2).
+  if (
+    parentListKeys.length &&
+    (await prisma.hybridCampaign.count({ where: { purpose: 'LIST', status: 'ACTIVE', listProductKey: { in: parentListKeys } } })) !==
+      new Set(parentListKeys).size
+  )
+    throw OFFER_BLOCKED.UNAVAILABLE()
+  // Single use is a promotion rule: a LIST is bought again freely and never holds a redemption.
   const redeemed = await prisma.hybridRedemption.findMany({
-    where: { organizationId: venue.organizationId, campaignId: { in: publications.map(p => p.campaignId) }, status: { not: 'RELEASED' } },
+    where: {
+      organizationId: venue.organizationId,
+      campaignId: { in: publications.filter(p => p.campaign.purpose !== 'LIST').map(p => p.campaignId) },
+      status: { not: 'RELEASED' },
+    },
     take: 8,
     orderBy: { id: 'asc' },
   })
@@ -245,8 +259,10 @@ export async function createHybridQuote(venueId: string, staffId: string, input:
   if (!parsed.success) throw new BadRequestError(parsed.error.issues.map(issue => issue.message).join('. '))
   if (parsed.data.keepStaffVenueIds?.length) await assertKeepSelection(venueId, parsed.data.keepStaffVenueIds)
   const observed = await observeHybridQuote(venueId, parsed.data, Math.floor(Date.now() / 1000))
-  // PROMOTION: CHECK guarantees non-null
-  const quoteExpiresAt = new Date(Math.min(Date.now() + 5 * 60000, ...observed.publications.map(p => p.campaign.endsAt!.getTime())))
+  // A LIST never ends: only promotion lines can cap the review window below five minutes.
+  const quoteExpiresAt = new Date(
+    Math.min(Date.now() + 5 * 60000, ...observed.publications.flatMap(p => promotionWindow(p.campaign)?.endsAt.getTime() ?? [])),
+  )
   return prisma.hybridPurchase.create({
     data: {
       venueId,
@@ -331,16 +347,40 @@ export async function acceptHybridQuote(venueId: string, staffId: string, quoteI
         throw new ConflictError('La cotización cambió o ya fue aceptada. Consulta el mismo intento.', 'HYBRID_QUOTE_STALE')
       for (const offer of [...observed.publications].sort((a, b) => a.campaignId.localeCompare(b.campaignId))) {
         const campaign = await tx.hybridCampaign.findUniqueOrThrow({ where: { id: offer.campaignId } })
-        // PROMOTION: CHECK guarantees non-null
+        const window = promotionWindow(campaign)
         if (
           campaign.status !== 'ACTIVE' ||
           campaign.startsAt > now ||
-          campaign.endsAt! <= now ||
-          campaign.currentPublicationId !== offer.id ||
-          campaign.reservedCount + campaign.redeemedCount >= campaign.capacity!
+          (campaign.purpose !== 'LIST' && (!window || window.endsAt <= now)) ||
+          campaign.currentPublicationId !== offer.id
         )
+          throw offerChanged()
+        if (window && campaign.reservedCount + campaign.redeemedCount >= window.capacity)
           throw new ConflictError('La oferta ya no tiene lugares disponibles.', 'HYBRID_OFFER_FULL')
         assertAudience(campaign, observed.venue.organization)
+        if (campaign.promotionGroupId) {
+          // Its parent LIST must still be on sale; this write serializes the acceptance against pausing that list.
+          // ponytail: parents lock in cart order, not one global order: crossed carts (promo X + list Y against promo Y +
+          // list X) can deadlock, and Postgres aborts one with nothing committed. Lock every row by id first if it shows up.
+          const key = productKeyOf(hybridOfferDefinition.parse(offer.definition))
+          const parent = key
+            ? await tx.hybridCampaign.updateMany({
+                where: { purpose: 'LIST', listProductKey: key, status: 'ACTIVE' },
+                data: { updatedAt: now },
+              })
+            : { count: 0 }
+          if (parent.count !== 1) throw offerChanged()
+        }
+        if (!window) {
+          // A LIST: no redemption and no capacity. Same revision and still ACTIVE is what serializes this acceptance
+          // against a pause or a new price committed after the read above.
+          const touched = await tx.hybridCampaign.updateMany({
+            where: { id: campaign.id, revision: campaign.revision, status: 'ACTIVE' },
+            data: { updatedAt: now },
+          })
+          if (touched.count !== 1) throw offerChanged()
+          continue
+        }
         const held = await tx.hybridCampaign.updateMany({
           where: {
             id: campaign.id,
@@ -351,8 +391,7 @@ export async function acceptHybridQuote(venueId: string, staffId: string, quoteI
           },
           data: { reservedCount: { increment: 1 } },
         })
-        if (held.count !== 1)
-          throw new ConflictError('El cupo cambió; consulta el mismo intento antes de volver a aceptar.', 'HYBRID_OFFER_FULL')
+        if (held.count !== 1) throw offerChanged()
         const old = await tx.hybridRedemption.findUnique({
           where: { campaignId_organizationId: { campaignId: campaign.id, organizationId: observed.venue.organizationId } },
         })

@@ -22,6 +22,7 @@ const terms = (price: number) => ({
 function campaignRow(id: string, definition: Record<string, unknown>, overrides: Record<string, unknown> = {}) {
   return {
     id,
+    purpose: 'PROMOTION',
     status: 'ACTIVE',
     startsAt: new Date(now - 1000),
     endsAt: new Date(now + 86400000),

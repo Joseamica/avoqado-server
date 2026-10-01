@@ -166,6 +166,7 @@ export async function getHybridFeatureGrid(venueId: string): Promise<FeatureGrid
       },
       select: {
         id: true,
+        purpose: true,
         status: true,
         startsAt: true,
         endsAt: true,
@@ -215,13 +216,7 @@ export async function getHybridFeatureGrid(venueId: string): Promise<FeatureGrid
       }
       const definition = parsed.data
       const blocker = hybridOfferBlocker(
-        // PROMOTION: CHECK guarantees non-null
-        {
-          ...campaign,
-          endsAt: campaign.endsAt!,
-          capacity: campaign.capacity!,
-          latestPublicationId: campaign.currentPublicationId ?? undefined,
-        },
+        { ...campaign, latestPublicationId: campaign.currentPublicationId ?? undefined },
         { ...publication, renewalKind: definition.terms.renewal.kind },
         organization,
         now,

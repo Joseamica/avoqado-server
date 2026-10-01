@@ -114,7 +114,8 @@ export async function updateHybridCampaign(id: string, input: unknown, staffId: 
   return prisma
     .$transaction(async tx => {
       const current = await tx.hybridCampaign.findUnique({ where: { id } })
-      if (!current) throw new NotFoundError('Oferta no encontrada.')
+      // A LIST is priced only from «Precios» (spec §4.2): to this editor it does not exist.
+      if (!current || current.purpose === 'LIST') throw new NotFoundError('Oferta no encontrada.')
       if (current.revision !== expectedRevision) changed()
       if (current.status === 'ENDED') throw new ConflictError('Esta oferta terminó. Duplica la ficha para crear otra.')
       if (current.code !== data.code || current.slug !== data.slug)
@@ -139,7 +140,7 @@ export async function publishHybridCampaign(id: string, expectedRevision: number
   return prisma
     .$transaction(async tx => {
       const campaign = await tx.hybridCampaign.findUnique({ where: { id } })
-      if (!campaign) throw new NotFoundError('Oferta no encontrada.')
+      if (!campaign || campaign.purpose === 'LIST') throw new NotFoundError('Oferta no encontrada.')
       if (campaign.revision !== expectedRevision) changed()
       // PROMOTION: CHECK guarantees non-null
       if (campaign.status === 'ENDED' || campaign.endsAt! <= new Date())
@@ -179,6 +180,7 @@ export async function publishHybridCampaign(id: string, expectedRevision: number
 export async function listHybridCampaigns(input: unknown) {
   const { page, pageSize, q, status } = parse(hybridCampaignListQuery, input)
   const where: Prisma.HybridCampaignWhereInput = {
+    purpose: 'PROMOTION',
     ...(status ? { status } : {}),
     ...(q ? { OR: [{ name: { contains: q, mode: 'insensitive' } }, { code: { contains: q, mode: 'insensitive' } }] } : {}),
   }
@@ -214,8 +216,14 @@ export async function loadCurrentPublication(
 
 export async function getPublicHybridOffer(slug: string) {
   const campaign = await prisma.hybridCampaign.findUnique({ where: { slug } })
-  // PROMOTION: CHECK guarantees non-null
-  if (!campaign || campaign.status !== 'ACTIVE' || campaign.startsAt > new Date() || campaign.endsAt! <= new Date())
+  // A LIST never has a public page; past that check, the CHECK guarantees a PROMOTION's non-null window.
+  if (
+    !campaign ||
+    campaign.purpose === 'LIST' ||
+    campaign.status !== 'ACTIVE' ||
+    campaign.startsAt > new Date() ||
+    campaign.endsAt! <= new Date()
+  )
     throw new NotFoundError('Esta oferta no está disponible.')
   if (campaign.reservedCount + campaign.redeemedCount >= campaign.capacity!)
     throw new ConflictError('Se agotaron los lugares de esta oferta.', 'HYBRID_OFFER_FULL')
@@ -247,7 +255,7 @@ import { ensureHybridPublicationPrices } from './hybridPrices'
 /** `publications` keeps its response shape (superadmin and MCP read `publications[0]`): the pointer's publication, or empty. */
 export async function getHybridCampaign(id: string) {
   const row = await prisma.hybridCampaign.findUnique({ where: { id } })
-  if (!row) throw new NotFoundError('Oferta no encontrada.')
+  if (!row || row.purpose === 'LIST') throw new NotFoundError('Oferta no encontrada.')
   const publication = await loadCurrentPublication(prisma, row)
   return { ...row, publications: publication ? [publication] : [] }
 }
@@ -266,7 +274,7 @@ export const hybridStatusBody = z
 export async function setHybridCampaignStatus(id: string, input: unknown, staffId: string) {
   const body = parse(hybridStatusBody, input)
   const current = await prisma.hybridCampaign.findUnique({ where: { id } })
-  if (!current) throw new NotFoundError('Oferta no encontrada.')
+  if (!current || current.purpose === 'LIST') throw new NotFoundError('Oferta no encontrada.')
   if (current.revision !== body.expectedRevision) changed()
   if (current.status === 'ENDED') throw new ConflictError('Esta campaña terminó. Duplica la ficha para crear otra.')
   if (body.status === 'ACTIVE') {
@@ -308,6 +316,7 @@ export async function listPublicHybridOffers(input: unknown) {
   const { page, pageSize, q } = parse(hybridCampaignListQuery.omit({ status: true }), input)
   const now = new Date()
   const where: Prisma.HybridCampaignWhereInput = {
+    purpose: 'PROMOTION',
     status: 'ACTIVE',
     listed: true,
     startsAt: { lte: now },
@@ -378,8 +387,8 @@ export const hybridRedemptionsQuery = hybridCampaignListQuery
   .strict('Filtro no admitido')
 export async function listHybridRedemptions(campaignId: string, input: unknown) {
   const query = parse(hybridRedemptionsQuery, input)
-  if (!(await prisma.hybridCampaign.findUnique({ where: { id: campaignId }, select: { id: true } })))
-    throw new NotFoundError('Campaña no encontrada.')
+  const campaign = await prisma.hybridCampaign.findUnique({ where: { id: campaignId }, select: { purpose: true } })
+  if (!campaign || campaign.purpose === 'LIST') throw new NotFoundError('Campaña no encontrada.')
   const where: Prisma.HybridRedemptionWhereInput = {
     campaignId,
     ...(query.status ? { status: query.status } : {}),
