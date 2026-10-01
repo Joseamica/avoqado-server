@@ -1,59 +1,42 @@
 import { prismaMock } from '../../../__helpers__/setup'
 import { FEATURE_CATALOG } from '@/config/featureCatalog'
+import type { BestOffers } from '@/services/launchCampaigns/hybridBestOffer'
+import type { FeatureGridOffer } from '@/services/launchCampaigns/hybridFeatureGrid.service'
 const tier = jest.fn()
 const granted = jest.fn()
+const bestOffers = jest.fn()
 jest.mock('@/services/access/basePlan.service', () => ({
   ...jest.requireActual('@/services/access/basePlan.service'),
   getVenueBaseTier: (...args: unknown[]) => tier(...args),
   getVenueGrantedFeatureCodes: (...args: unknown[]) => granted(...args),
 }))
+jest.mock('@/services/launchCampaigns/hybridBestOffer', () => ({
+  ...jest.requireActual('@/services/launchCampaigns/hybridBestOffer'),
+  bestOffersByProduct: (...args: unknown[]) => bestOffers(...args),
+}))
 import { getHybridFeatureGrid } from '@/services/launchCampaigns/hybridFeatureGrid.service'
 import logger from '@/config/logger'
 
 const now = Date.now()
-const terms = (price: number) => ({
-  currency: 'MXN',
-  interval: 'MONTHLY',
+const orgCreatedAt = new Date(now - 86400000)
+const view = (publicationId: string, price: number, overrides: Partial<FeatureGridOffer> = {}): FeatureGridOffer => ({
+  publicationId,
+  campaignId: `c_${publicationId}`,
+  name: `Oferta ${publicationId}`,
+  kind: 'FEATURES',
+  planTier: null,
   price,
-  taxIncluded: true,
+  listPrice: null,
+  renewal: 'SAME_PRICE',
+  renewalPrice: null,
   promotionCycles: null,
-  renewal: { kind: 'SAME_PRICE' },
+  includedFeatureCodes: [],
+  ...overrides,
 })
-function campaignRow(id: string, definition: Record<string, unknown>, overrides: Record<string, unknown> = {}) {
-  return {
-    id,
-    purpose: 'PROMOTION',
-    status: 'ACTIVE',
-    startsAt: new Date(now - 1000),
-    endsAt: new Date(now + 86400000),
-    capacity: 10,
-    reservedCount: 0,
-    redeemedCount: 0,
-    audience: 'ALL',
-    eligibleOrganizationIds: [],
-    publications: [
-      {
-        id: `pub_${id}`,
-        name: `Oferta ${id}`,
-        definition: { schemaVersion: 1, ...definition },
-        includedFeatureCodes: [],
-        stripePriceId: `price_${id}`,
-        stripeProductId: `prod_${id}`,
-        stripeRenewalPriceId: null,
-      },
-    ],
-    ...overrides,
-  }
-}
-/** Each campaign points at its first publication unless overridden; the grid reads pointed publications in a second query. */
-function mockOffers(rows: ReturnType<typeof campaignRow>[]) {
-  prismaMock.hybridCampaign.findMany.mockResolvedValue(
-    rows.map(({ publications, ...campaign }) => ({ currentPublicationId: publications[0]?.id ?? null, ...campaign })),
-  )
-  prismaMock.hybridOfferPublication.findMany.mockImplementation(async ({ where }: any) =>
-    rows.flatMap(row => row.publications).filter(publication => where.id.in.includes(publication.id)),
-  )
-}
+const offers = (best: [string, FeatureGridOffer][], list: [string, FeatureGridOffer][] = []): BestOffers => ({
+  best: new Map(best) as BestOffers['best'],
+  list: new Map(list) as BestOffers['list'],
+})
 const entry = (grid: Awaited<ReturnType<typeof getHybridFeatureGrid>>, code: string) =>
   grid.entries.find(e => e.featureCode === code || e.id === code)!
 
@@ -61,12 +44,12 @@ beforeEach(() => {
   process.env.HYBRID_BILLING_ENABLED = 'true'
   prismaMock.venue.findUnique.mockResolvedValue({
     seatCapExempt: false,
-    organization: { id: 'org', createdAt: new Date(now - 86400000), seatCapExempt: false },
+    organization: { id: 'org', createdAt: orgCreatedAt, seatCapExempt: false },
   })
   prismaMock.capabilityGrant.findMany.mockResolvedValue([])
-  prismaMock.hybridCampaign.findMany.mockResolvedValue([])
   tier.mockReset().mockResolvedValue(null)
   granted.mockReset().mockResolvedValue([])
+  bestOffers.mockReset().mockResolvedValue(offers([]))
 })
 afterEach(() => {
   delete process.env.HYBRID_BILLING_ENABLED
@@ -84,38 +67,25 @@ describe('feature grid', () => {
     const grid = await getHybridFeatureGrid('venue')
     expect(grid.purchasesEnabled).toBe(false)
     expect(grid.plans).toEqual({ PRO: null, PREMIUM: null })
-    expect(grid.entries.every(e => e.offer === null)).toBe(true)
-    expect(prismaMock.hybridCampaign.findMany).not.toHaveBeenCalled()
+    expect(grid.planListOffers).toEqual({ PRO: null, PREMIUM: null })
+    expect(grid.entries.every(e => e.offer === null && e.listOffer === null)).toBe(true)
+    expect(bestOffers).not.toHaveBeenCalled()
   })
 
-  it('asks the database only for listed, live campaigns of this organization that it has not used, bounded', async () => {
+  it('asks for the best offers of this organization once, at one instant', async () => {
     await getHybridFeatureGrid('venue')
-    expect(prismaMock.hybridCampaign.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({
-          status: 'ACTIVE',
-          listed: true,
-          OR: [
-            { audience: 'ALL' },
-            { audience: 'NEW_ORGANIZATIONS', startsAt: { lte: expect.any(Date) } },
-            { audience: 'ORGANIZATIONS', eligibleOrganizationIds: { has: 'org' } },
-          ],
-          redemptions: { none: { organizationId: 'org', status: { not: 'RELEASED' } } },
-        }),
-        take: 100,
-      }),
-    )
+    expect(bestOffers).toHaveBeenCalledTimes(1)
+    expect(bestOffers).toHaveBeenCalledWith(expect.objectContaining({ id: 'org', createdAt: orgCreatedAt }), expect.any(Date))
   })
 
-  it('attaches the cheapest single-function offer to its function and the cheapest plan offer per tier', async () => {
-    mockOffers([
-      campaignRow('a', { kind: 'FEATURES', featureCodes: ['RESERVATIONS'], terms: terms(199) }),
-      campaignRow('b', { kind: 'FEATURES', featureCodes: ['RESERVATIONS'], terms: terms(149) }),
-      campaignRow('c', { kind: 'FEATURES', featureCodes: ['RESERVATIONS', 'LOYALTY_PROGRAM'], terms: terms(99) }),
-      campaignRow('d', { kind: 'CHOICE_BUNDLE', eligibleFeatureCodes: ['CFDI', 'PROMOTIONS'], choiceCount: 1, terms: terms(50) }),
-      campaignRow('e', { kind: 'PLAN', planTier: 'PRO', terms: terms(999) }),
-      campaignRow('f', { kind: 'PLAN', planTier: 'PREMIUM', terms: terms(1999) }),
-    ])
+  it('attaches the best offer of each product to its function and to its plan tier', async () => {
+    bestOffers.mockResolvedValue(
+      offers([
+        ['FEATURE:RESERVATIONS', view('pub_b', 149)],
+        ['PLAN:PRO', view('pub_e', 999, { kind: 'PLAN', planTier: 'PRO' })],
+        ['PLAN:PREMIUM', view('pub_f', 1999, { kind: 'PLAN', planTier: 'PREMIUM' })],
+      ]),
+    )
     const grid = await getHybridFeatureGrid('venue')
     expect(entry(grid, 'RESERVATIONS').offer).toMatchObject({ publicationId: 'pub_b', price: 149, kind: 'FEATURES' })
     expect(entry(grid, 'LOYALTY_PROGRAM').offer).toBeNull()
@@ -124,55 +94,37 @@ describe('feature grid', () => {
     expect(grid.plans.PREMIUM).toMatchObject({ publicationId: 'pub_f', price: 1999 })
   })
 
-  it('offers only the publication each campaign points at, read in one bounded query', async () => {
-    mockOffers([
-      campaignRow('a', { kind: 'FEATURES', featureCodes: ['RESERVATIONS'], terms: terms(199) }),
-      // A cheaper stored publication is not on sale while its campaign points nowhere.
-      campaignRow('b', { kind: 'FEATURES', featureCodes: ['RESERVATIONS'], terms: terms(99) }, { currentPublicationId: null }),
-    ])
-    const grid = await getHybridFeatureGrid('venue')
-    expect(entry(grid, 'RESERVATIONS').offer).toMatchObject({ publicationId: 'pub_a', price: 199 })
-    expect(prismaMock.hybridOfferPublication.findMany).toHaveBeenCalledTimes(1)
-    expect(prismaMock.hybridOfferPublication.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: { in: ['pub_a'] } }, take: 1 }),
-    )
-  })
-
-  it('drops sold-out and not-yet-priced offers', async () => {
-    mockOffers([
-      campaignRow('full', { kind: 'FEATURES', featureCodes: ['RESERVATIONS'], terms: terms(99) }, { capacity: 1, redeemedCount: 1 }),
-      campaignRow(
-        'raw',
-        { kind: 'PLAN', planTier: 'PRO', terms: terms(999) },
-        {
-          publications: [
-            {
-              id: 'pub_raw',
-              name: 'Pro',
-              definition: { schemaVersion: 1, kind: 'PLAN', planTier: 'PRO', terms: terms(999) },
-              includedFeatureCodes: [],
-              stripePriceId: null,
-              stripeProductId: null,
-              stripeRenewalPriceId: null,
-            },
-          ],
-        },
+  it('exposes the list as the alternative of a promotion, its price on the offer, and the plan lists', async () => {
+    const promotion = view('pub_promo', 479.2, { listPrice: 599, renewal: 'REPRICE', renewalPrice: 599, promotionCycles: 3 })
+    const list = view('pub_list', 599, { listPrice: 599 })
+    const proList = view('pub_pro_list', 1158.84, { kind: 'PLAN', planTier: 'PRO', listPrice: 1158.84 })
+    bestOffers.mockResolvedValue(
+      offers(
+        [
+          ['FEATURE:CFDI', promotion],
+          ['PLAN:PRO', proList],
+        ],
+        [
+          ['FEATURE:CFDI', list],
+          ['PLAN:PRO', proList],
+        ],
       ),
-    ])
+    )
     const grid = await getHybridFeatureGrid('venue')
-    expect(entry(grid, 'RESERVATIONS').offer).toBeNull()
-    expect(grid.plans.PRO).toBeNull()
+    expect(entry(grid, 'CFDI').offer).toEqual(promotion)
+    expect(entry(grid, 'CFDI').offer!.listPrice).toBe(599)
+    expect(entry(grid, 'CFDI').listOffer).toEqual(list)
+    expect(grid.planListOffers).toEqual({ PRO: proList, PREMIUM: null })
+    expect(grid.plans.PRO).toEqual(proList)
   })
 
-  it('skips a publication whose stored definition no longer parses, and says which one', async () => {
-    ;(logger.warn as jest.Mock).mockClear()
-    mockOffers([
-      campaignRow('bad', { kind: 'NOT_A_KIND', featureCodes: ['RESERVATIONS'], terms: terms(9) }),
-      campaignRow('good', { kind: 'FEATURES', featureCodes: ['RESERVATIONS'], terms: terms(149) }),
-    ])
+  it('a list that is already the best offer is not repeated as its own alternative', async () => {
+    const list = view('pub_list', 599, { listPrice: 599 })
+    bestOffers.mockResolvedValue(offers([['FEATURE:CFDI', list]], [['FEATURE:CFDI', list]]))
     const grid = await getHybridFeatureGrid('venue')
-    expect(entry(grid, 'RESERVATIONS').offer).toMatchObject({ publicationId: 'pub_good', price: 149 })
-    expect(logger.warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ campaignId: 'bad', publicationId: 'pub_bad' }))
+    expect(entry(grid, 'CFDI').offer).toEqual(list)
+    expect(entry(grid, 'CFDI').listOffer).toBeNull()
+    expect(entry(grid, 'RESERVATIONS').listOffer).toBeNull()
   })
 
   it('says where each function comes from', async () => {
@@ -213,5 +165,48 @@ describe('feature grid', () => {
     })
     const grid = await getHybridFeatureGrid('venue')
     expect(grid.entries.every(e => e.access.source === 'GRANDFATHERED')).toBe(true)
+  })
+})
+
+describe('bestOffersByProduct', () => {
+  const { bestOffersByProduct } = jest.requireActual<typeof import('@/services/launchCampaigns/hybridBestOffer')>(
+    '@/services/launchCampaigns/hybridBestOffer',
+  )
+  const terms = (price: number) => ({
+    currency: 'MXN',
+    interval: 'MONTHLY',
+    price,
+    taxIncluded: true,
+    promotionCycles: null,
+    renewal: { kind: 'SAME_PRICE' },
+  })
+  const row = (publicationId: string, productKey: string, definition: Record<string, unknown>) => ({
+    campaignId: `c_${publicationId}`,
+    publicationId,
+    name: `Oferta ${publicationId}`,
+    definition: { schemaVersion: 1, ...definition },
+    includedFeatureCodes: [],
+    productKey,
+  })
+
+  it('maps each row to its product, prices every offer against the active list, and skips what no longer parses', async () => {
+    ;(logger.warn as jest.Mock).mockClear()
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([
+        row('pub_promo', 'FEATURE:CFDI', { kind: 'FEATURES', featureCodes: ['CFDI'], terms: terms(479.2) }),
+        row('pub_plan', 'PLAN:PRO', { kind: 'PLAN', planTier: 'PRO', terms: terms(999) }),
+        row('pub_bad', 'FEATURE:RESERVATIONS', { kind: 'FEATURES', featureCodes: ['RESERVATIONS'], terms: terms(1) }),
+      ])
+      .mockResolvedValueOnce([row('pub_list', 'FEATURE:CFDI', { kind: 'FEATURES', featureCodes: ['CFDI'], terms: terms(599) })])
+    const { best, list } = await bestOffersByProduct({ id: 'org', createdAt: orgCreatedAt }, new Date(now))
+    expect(best.get('FEATURE:CFDI')).toMatchObject({ publicationId: 'pub_promo', campaignId: 'c_pub_promo', price: 479.2, listPrice: 599 })
+    expect(best.get('PLAN:PRO')).toMatchObject({ kind: 'PLAN', planTier: 'PRO', price: 999, listPrice: null })
+    expect(best.has('FEATURE:RESERVATIONS')).toBe(false)
+    expect(list.get('FEATURE:CFDI')).toMatchObject({ publicationId: 'pub_list', price: 599, listPrice: 599 })
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ campaignId: 'c_pub_bad', publicationId: 'pub_bad' }),
+    )
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(2)
   })
 })
