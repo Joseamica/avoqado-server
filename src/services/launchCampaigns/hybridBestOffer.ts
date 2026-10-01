@@ -15,7 +15,7 @@ export interface BestOffers {
 }
 
 /** Every product the grid can show: the bound of both queries (one row per product at most). */
-const PRODUCT_KEYS: ProductKey[] = [
+export const PRODUCT_KEYS: ProductKey[] = [
   ...FEATURE_CATALOG.flatMap(entry => (entry.featureCode ? [`FEATURE:${entry.featureCode}` as const] : [])),
   'PLAN:PRO',
   'PLAN:PREMIUM',
