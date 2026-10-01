@@ -11,6 +11,7 @@ import {
   updateHybridCampaign,
   publishHybridCampaign,
   getPublicHybridOffer,
+  getHybridCampaign,
   listHybridCampaigns,
   setHybridCampaignStatus,
   listPublicHybridOffers,
@@ -43,6 +44,9 @@ const input = {
   },
 }
 let row: any
+/** Stored publications; a campaign sells only the one its `currentPublicationId` points at. */
+let pubs: any[]
+const stored = (id: string, version = 1) => ({ id, version, name: input.name, ...compileHybridPublication(input.definition) })
 beforeEach(() => {
   row = {
     id: 'campaign1',
@@ -54,18 +58,24 @@ beforeEach(() => {
     status: 'DRAFT',
     reservedCount: 0,
     redeemedCount: 0,
-    publications: [],
+    currentPublicationId: null,
   }
+  pubs = []
   db.hybridCampaign = {
     create: jest.fn(async ({ data }: any) => ({ id: 'campaign1', ...data })),
     findUnique: jest.fn(async () => row),
     findFirst: jest.fn(async () => row),
     findMany: jest.fn(async () => [row]),
     count: jest.fn(async () => 113),
+    update: jest.fn(async () => row),
     updateMany: jest.fn(async () => ({ count: 1 })),
     findUniqueOrThrow: jest.fn(async () => row),
   }
-  db.hybridOfferPublication = { create: jest.fn(async ({ data }: any) => ({ id: 'pub1', ...data })) }
+  db.hybridOfferPublication = {
+    create: jest.fn(async ({ data }: any) => ({ id: 'pub1', ...data })),
+    findUnique: jest.fn(async ({ where }: any) => pubs.find(pub => pub.id === where.id) ?? null),
+    findMany: jest.fn(async ({ where }: any) => pubs.filter(pub => where.id.in.includes(pub.id))),
+  }
   db.activityLog.create.mockResolvedValue({ id: 'audit' })
   db.$transaction.mockImplementation(async (fn: any) => (typeof fn === 'function' ? fn(db) : Promise.all(fn)))
 })
@@ -106,7 +116,8 @@ describe('hybrid campaign publication', () => {
   })
   it('publishes readable labels for every eligible feature without a six-feature limit', async () => {
     row.status = 'ACTIVE'
-    row.publications = [{ id: 'pub', name: row.name, ...compileHybridPublication(input.definition) }]
+    pubs = [stored('pub')]
+    row.currentPublicationId = 'pub'
     const offer = await getPublicHybridOffer('herramientas-tienda')
     expect(offer.features.map(feature => feature.code).sort()).toEqual([...input.definition.eligibleFeatureCodes].sort())
     expect(offer.features.every(feature => feature.names.es.length > 0)).toBe(true)
@@ -138,7 +149,8 @@ describe('explicit publication activation', () => {
   afterEach(() => delete process.env.HYBRID_BILLING_ENABLED)
   it('requires a published current draft, open sales and configured provider prices', async () => {
     process.env.HYBRID_BILLING_ENABLED = 'true'
-    row.publications = [{ id: 'pub', ...compileHybridPublication(input.definition) }]
+    pubs = [stored('pub')]
+    row.currentPublicationId = 'pub'
     row.status = 'PAUSED'
     await setHybridCampaignStatus('campaign1', { status: 'ACTIVE', expectedRevision: 1, publicationId: 'pub' }, 'staff1')
     expect(ensureHybridPublicationPrices).toHaveBeenCalledWith('pub')
@@ -147,7 +159,8 @@ describe('explicit publication activation', () => {
     )
   })
   it('does not activate an unpublished edit or bypass the rollout switch', async () => {
-    row.publications = [{ id: 'pub', ...compileHybridPublication(input.definition) }]
+    pubs = [stored('pub')]
+    row.currentPublicationId = 'pub'
     await expect(
       setHybridCampaignStatus('campaign1', { status: 'ACTIVE', expectedRevision: 1, publicationId: 'pub' }, 'staff1'),
     ).rejects.toThrow()
@@ -166,7 +179,8 @@ describe('explicit publication activation', () => {
     expect(db.hybridRedemption.updateMany).not.toHaveBeenCalled()
   })
   it('lists public offers with server pagination and without private cohort IDs or drafts', async () => {
-    row.publications = [{ id: 'pub', ...compileHybridPublication(input.definition) }]
+    pubs = [stored('pub')]
+    row.currentPublicationId = 'pub'
     const page = await listPublicHybridOffers({ page: 2, pageSize: 12 })
     expect(page).toMatchObject({ total: 113, page: 2, pageSize: 12 })
     expect(db.hybridCampaign.findMany).toHaveBeenCalledWith(
@@ -174,11 +188,50 @@ describe('explicit publication activation', () => {
         take: 12,
         skip: 12,
         where: expect.objectContaining({ status: 'ACTIVE', listed: true, audience: { in: ['ALL', 'NEW_ORGANIZATIONS'] } }),
-        select: expect.objectContaining({ publications: expect.objectContaining({ take: 1 }) }),
+        select: expect.objectContaining({ currentPublicationId: true }),
       }),
     )
+    expect(page.items).toHaveLength(1)
     expect(page.items[0]).not.toHaveProperty('draftDefinition')
     expect(page.items[0]).not.toHaveProperty('eligibleOrganizationIds')
+  })
+})
+
+describe('the publication on sale is the explicit pointer, never the highest version', () => {
+  afterEach(() => delete process.env.HYBRID_BILLING_ENABLED)
+  it('publishing moves the pointer to the publication it just created', async () => {
+    await publishHybridCampaign('campaign1', 1, 'staff1')
+    expect(db.hybridCampaign.update).toHaveBeenCalledWith({ where: { id: 'campaign1' }, data: { currentPublicationId: 'pub1' } })
+    expect(db.hybridOfferPublication.create.mock.invocationCallOrder[0]).toBeLessThan(db.hybridCampaign.update.mock.invocationCallOrder[0])
+  })
+  it('the public offer, the admin detail and activation read the pointer while a higher version exists', async () => {
+    pubs = [stored('v1'), stored('v2', 2)]
+    row.currentPublicationId = 'v1'
+    row.status = 'ACTIVE'
+    expect((await getPublicHybridOffer('herramientas-tienda')).id).toBe('v1')
+    expect((await getHybridCampaign('campaign1')).publications.map(pub => pub.id)).toEqual(['v1'])
+    process.env.HYBRID_BILLING_ENABLED = 'true'
+    row.status = 'PAUSED'
+    await expect(
+      setHybridCampaignStatus('campaign1', { status: 'ACTIVE', expectedRevision: 1, publicationId: 'v2' }, 'staff1'),
+    ).rejects.toMatchObject({ code: 'HYBRID_PUBLICATION_REQUIRED' })
+    await setHybridCampaignStatus('campaign1', { status: 'ACTIVE', expectedRevision: 1, publicationId: 'v1' }, 'staff1')
+    expect(ensureHybridPublicationPrices).toHaveBeenCalledWith('v1')
+  })
+  it('without a pointer nothing is on sale and the admin detail keeps an empty list', async () => {
+    pubs = [stored('v1')]
+    row.status = 'ACTIVE'
+    await expect(getPublicHybridOffer('herramientas-tienda')).rejects.toThrow(/disponible/i)
+    expect((await getHybridCampaign('campaign1')).publications).toEqual([])
+  })
+  it('the public list reads every pointer of the page in one bounded query', async () => {
+    pubs = [stored('v1'), stored('v2', 2)]
+    row.currentPublicationId = 'v1'
+    db.hybridCampaign.findMany.mockResolvedValue([row, { ...row, id: 'campaign2', currentPublicationId: null }])
+    const page = await listPublicHybridOffers({})
+    expect(page.items.map(item => item.id)).toEqual(['v1'])
+    expect(db.hybridOfferPublication.findMany).toHaveBeenCalledTimes(1)
+    expect(db.hybridOfferPublication.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: { in: ['v1'] } }, take: 1 }))
   })
 })
 

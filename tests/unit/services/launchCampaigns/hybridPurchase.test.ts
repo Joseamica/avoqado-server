@@ -57,7 +57,7 @@ const publication = {
     redeemedCount: 0,
     audience: 'ALL',
     eligibleOrganizationIds: [],
-    publications: [{ id: pubId }],
+    currentPublicationId: pubId,
   },
 }
 const input = { lines: [{ publicationId: pubId, selectedFeatureCodes: ['CFDI', 'LOYALTY_PROGRAM'] }] }
@@ -109,6 +109,11 @@ describe('server-owned hybrid quotes', () => {
       { ...publication, campaign: { ...publication.campaign, audience: 'ORGANIZATIONS', eligibleOrganizationIds: ['foreign'] } },
     ])
     await expect(createHybridQuote('venue', 'staff', input)).rejects.toThrow()
+    // Only the publication the campaign points at is on sale, whatever its version.
+    prismaMock.hybridOfferPublication.findMany.mockResolvedValueOnce([
+      { ...publication, campaign: { ...publication.campaign, currentPublicationId: 'cm999999999999999999999999' } },
+    ])
+    await expect(createHybridQuote('venue', 'staff', input)).rejects.toMatchObject({ code: 'HYBRID_OFFER_UNAVAILABLE' })
   })
   it('does not charge an already included capability or consume a used campaign twice', async () => {
     inventory.mockResolvedValueOnce({
@@ -175,7 +180,7 @@ describe('what a classic plan brings when it is replaced', () => {
       name: 'Plan Premium',
       includedFeatureCodes: published('PREMIUM'),
       definition: { schemaVersion: 1, kind: 'PLAN', planTier: 'PREMIUM', terms: planTerms },
-      campaign: { ...publication.campaign, id: premiumCampaign, publications: [{ id: premiumId }] },
+      campaign: { ...publication.campaign, id: premiumCampaign, currentPublicationId: premiumId },
     }
     const toPremium = (dropFeatureCodes: string[]) => ({
       lines: [{ publicationId: premiumId }],

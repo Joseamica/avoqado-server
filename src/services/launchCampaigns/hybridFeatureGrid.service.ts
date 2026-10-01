@@ -174,27 +174,35 @@ export async function getHybridFeatureGrid(venueId: string): Promise<FeatureGrid
         redeemedCount: true,
         audience: true,
         eligibleOrganizationIds: true,
-        publications: {
-          orderBy: { version: 'desc' },
-          take: 1,
-          select: {
-            id: true,
-            name: true,
-            definition: true,
-            includedFeatureCodes: true,
-            stripePriceId: true,
-            stripeProductId: true,
-            stripeRenewalPriceId: true,
-          },
-        },
+        currentPublicationId: true,
       },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: OFFER_CANDIDATES_CAP,
     })
     if (campaigns.length === OFFER_CANDIDATES_CAP)
       logger.warn('feature-grid: offer candidates reached the cap', { venueId, cap: OFFER_CANDIDATES_CAP })
+    // The publication on sale is each campaign's pointer (never the highest version), read in one bounded query.
+    const ids = campaigns.flatMap(campaign => (campaign.currentPublicationId ? [campaign.currentPublicationId] : []))
+    const onSale = new Map(
+      (ids.length
+        ? await prisma.hybridOfferPublication.findMany({
+            where: { id: { in: ids } },
+            take: ids.length,
+            select: {
+              id: true,
+              name: true,
+              definition: true,
+              includedFeatureCodes: true,
+              stripePriceId: true,
+              stripeProductId: true,
+              stripeRenewalPriceId: true,
+            },
+          })
+        : []
+      ).map(publication => [publication.id, publication]),
+    )
     for (const campaign of campaigns) {
-      const publication = campaign.publications[0]
+      const publication = campaign.currentPublicationId ? onSale.get(campaign.currentPublicationId) : undefined
       if (!publication) continue
       const parsed = hybridOfferDefinition.safeParse(publication.definition)
       if (!parsed.success) {
@@ -208,7 +216,12 @@ export async function getHybridFeatureGrid(venueId: string): Promise<FeatureGrid
       const definition = parsed.data
       const blocker = hybridOfferBlocker(
         // PROMOTION: CHECK guarantees non-null
-        { ...campaign, endsAt: campaign.endsAt!, capacity: campaign.capacity!, latestPublicationId: publication.id },
+        {
+          ...campaign,
+          endsAt: campaign.endsAt!,
+          capacity: campaign.capacity!,
+          latestPublicationId: campaign.currentPublicationId ?? undefined,
+        },
         { ...publication, renewalKind: definition.terms.renewal.kind },
         organization,
         now,

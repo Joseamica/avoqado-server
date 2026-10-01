@@ -145,6 +145,7 @@ export async function publishHybridCampaign(id: string, expectedRevision: number
       if (campaign.status === 'ENDED' || campaign.endsAt! <= new Date())
         throw new ConflictError('La oferta terminó; duplica la ficha para publicar otra.')
       const publication = compileHybridPublication(campaign.draftDefinition)
+      // Claim the revision first: a concurrent publish of the same revision then fails as stale, not on the version index.
       const claimed = await tx.hybridCampaign.updateMany({
         where: { id, revision: expectedRevision },
         data: { revision: { increment: 1 }, status: 'PAUSED' },
@@ -160,6 +161,8 @@ export async function publishHybridCampaign(id: string, expectedRevision: number
           createdById: staffId,
         },
       })
+      // The new publication is the one on sale (once activated); the pointer only ever names this campaign's own row.
+      await tx.hybridCampaign.update({ where: { id }, data: { currentPublicationId: row.id } })
       await audit(tx, id, staffId, 'HYBRID_OFFER_PUBLISHED', {
         publicationId: row.id,
         version: row.version,
@@ -201,17 +204,22 @@ function publicHybridFeatures(publication: { definition: unknown; includedFeatur
   }))
 }
 
+/** The publication that is on sale: the explicit pointer, never "the highest version". */
+export async function loadCurrentPublication(
+  tx: Prisma.TransactionClient | typeof prisma,
+  campaign: { currentPublicationId: string | null },
+) {
+  return campaign.currentPublicationId ? tx.hybridOfferPublication.findUnique({ where: { id: campaign.currentPublicationId } }) : null
+}
+
 export async function getPublicHybridOffer(slug: string) {
-  const campaign = await prisma.hybridCampaign.findUnique({
-    where: { slug },
-    include: { publications: { orderBy: { version: 'desc' }, take: 1 } },
-  })
+  const campaign = await prisma.hybridCampaign.findUnique({ where: { slug } })
   // PROMOTION: CHECK guarantees non-null
   if (!campaign || campaign.status !== 'ACTIVE' || campaign.startsAt > new Date() || campaign.endsAt! <= new Date())
     throw new NotFoundError('Esta oferta no está disponible.')
   if (campaign.reservedCount + campaign.redeemedCount >= campaign.capacity!)
     throw new ConflictError('Se agotaron los lugares de esta oferta.', 'HYBRID_OFFER_FULL')
-  const publication = campaign.publications[0]
+  const publication = await loadCurrentPublication(prisma, campaign)
   if (!publication) throw new NotFoundError('Esta oferta no está disponible.')
   return {
     schemaVersion: 1,
@@ -236,13 +244,12 @@ export async function getPublicHybridOffer(slug: string) {
 import { assertHybridSalesOpen } from './hybridPurchase.service'
 import { ensureHybridPublicationPrices } from './hybridPrices'
 
+/** `publications` keeps its response shape (superadmin and MCP read `publications[0]`): the pointer's publication, or empty. */
 export async function getHybridCampaign(id: string) {
-  const row = await prisma.hybridCampaign.findUnique({
-    where: { id },
-    include: { publications: { orderBy: { version: 'desc' }, take: 1 } },
-  })
+  const row = await prisma.hybridCampaign.findUnique({ where: { id } })
   if (!row) throw new NotFoundError('Oferta no encontrada.')
-  return row
+  const publication = await loadCurrentPublication(prisma, row)
+  return { ...row, publications: publication ? [publication] : [] }
 }
 
 export const hybridStatusBody = z
@@ -258,12 +265,13 @@ export const hybridStatusBody = z
 
 export async function setHybridCampaignStatus(id: string, input: unknown, staffId: string) {
   const body = parse(hybridStatusBody, input)
-  const current = await getHybridCampaign(id)
+  const current = await prisma.hybridCampaign.findUnique({ where: { id } })
+  if (!current) throw new NotFoundError('Oferta no encontrada.')
   if (current.revision !== body.expectedRevision) changed()
   if (current.status === 'ENDED') throw new ConflictError('Esta campaña terminó. Duplica la ficha para crear otra.')
   if (body.status === 'ACTIVE') {
     assertHybridSalesOpen()
-    const publication = current.publications[0]
+    const publication = await loadCurrentPublication(prisma, current)
     if (
       !publication ||
       publication.id !== body.publicationId ||
@@ -322,35 +330,45 @@ export async function listPublicHybridOffers(input: unknown) {
         capacity: true,
         reservedCount: true,
         redeemedCount: true,
-        publications: {
-          orderBy: { version: 'desc' },
-          take: 1,
-          select: { id: true, name: true, version: true, definition: true, definitionHash: true, includedFeatureCodes: true },
-        },
+        currentPublicationId: true,
       },
     }),
     prisma.hybridCampaign.count({ where }),
   ])
-  const items = rows.flatMap(row =>
-    row.publications.map(publication => ({
-      schemaVersion: 1,
-      id: publication.id,
-      version: publication.version,
-      code: row.code,
-      slug: row.slug,
-      name: publication.name,
-      definition: publication.definition,
-      definitionHash: publication.definitionHash,
-      includedFeatureCodes: publication.includedFeatureCodes,
-      features: publicHybridFeatures(publication),
-      startsAt: row.startsAt,
-      endsAt: row.endsAt,
-      audience: row.audience,
-      // PROMOTION: CHECK guarantees non-null
-      placesRemaining: row.capacity! - row.reservedCount - row.redeemedCount,
-      purchaseAvailable: process.env.HYBRID_BILLING_ENABLED === 'true' && row.reservedCount + row.redeemedCount < row.capacity!,
-    })),
-  )
+  // One query for the whole page's pointers (bounded by pageSize), joined in memory.
+  const ids = rows.flatMap(row => (row.currentPublicationId ? [row.currentPublicationId] : []))
+  const publications = ids.length
+    ? await prisma.hybridOfferPublication.findMany({
+        where: { id: { in: ids } },
+        take: ids.length,
+        select: { id: true, name: true, version: true, definition: true, definitionHash: true, includedFeatureCodes: true },
+      })
+    : []
+  const onSale = new Map(publications.map(publication => [publication.id, publication]))
+  const items = rows.flatMap(row => {
+    const publication = row.currentPublicationId ? onSale.get(row.currentPublicationId) : undefined
+    if (!publication) return []
+    return [
+      {
+        schemaVersion: 1,
+        id: publication.id,
+        version: publication.version,
+        code: row.code,
+        slug: row.slug,
+        name: publication.name,
+        definition: publication.definition,
+        definitionHash: publication.definitionHash,
+        includedFeatureCodes: publication.includedFeatureCodes,
+        features: publicHybridFeatures(publication),
+        startsAt: row.startsAt,
+        endsAt: row.endsAt,
+        audience: row.audience,
+        // PROMOTION: CHECK guarantees non-null
+        placesRemaining: row.capacity! - row.reservedCount - row.redeemedCount,
+        purchaseAvailable: process.env.HYBRID_BILLING_ENABLED === 'true' && row.reservedCount + row.redeemedCount < row.capacity!,
+      },
+    ]
+  })
   return { items, total, page, pageSize, totalPages: Math.ceil(total / pageSize) }
 }
 

@@ -104,7 +104,7 @@ export async function observeHybridQuote(venueId: string, body: z.output<typeof 
     where: { id: { in: body.lines.map(line => line.publicationId) } },
     take: 8,
     orderBy: { id: 'asc' },
-    include: { campaign: { include: { publications: { select: { id: true }, orderBy: { version: 'desc' }, take: 1 } } } },
+    include: { campaign: true },
   })
   if (publications.length !== body.lines.length || new Set(publications.map(p => p.campaignId)).size !== publications.length)
     throw new BadRequestError('La selección contiene una oferta desconocida o repetida.')
@@ -116,7 +116,7 @@ export async function observeHybridQuote(venueId: string, body: z.output<typeof 
         ...publication.campaign,
         endsAt: publication.campaign.endsAt!,
         capacity: publication.campaign.capacity!,
-        latestPublicationId: publication.campaign.publications[0]?.id,
+        latestPublicationId: publication.campaign.currentPublicationId ?? undefined,
       },
       { ...publication, renewalKind: definition.terms.renewal.kind },
       venue.organization,
@@ -330,16 +330,13 @@ export async function acceptHybridQuote(venueId: string, staffId: string, quoteI
       if (claimed.count !== 1)
         throw new ConflictError('La cotización cambió o ya fue aceptada. Consulta el mismo intento.', 'HYBRID_QUOTE_STALE')
       for (const offer of [...observed.publications].sort((a, b) => a.campaignId.localeCompare(b.campaignId))) {
-        const campaign = await tx.hybridCampaign.findUniqueOrThrow({
-          where: { id: offer.campaignId },
-          include: { publications: { select: { id: true }, orderBy: { version: 'desc' }, take: 1 } },
-        })
+        const campaign = await tx.hybridCampaign.findUniqueOrThrow({ where: { id: offer.campaignId } })
         // PROMOTION: CHECK guarantees non-null
         if (
           campaign.status !== 'ACTIVE' ||
           campaign.startsAt > now ||
           campaign.endsAt! <= now ||
-          campaign.publications[0]?.id !== offer.id ||
+          campaign.currentPublicationId !== offer.id ||
           campaign.reservedCount + campaign.redeemedCount >= campaign.capacity!
         )
           throw new ConflictError('La oferta ya no tiene lugares disponibles.', 'HYBRID_OFFER_FULL')
