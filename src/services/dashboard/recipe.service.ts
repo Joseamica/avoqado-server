@@ -132,6 +132,8 @@ export async function getRecipe(venueId: string, productId: string) {
           name: true,
           price: true,
           venueId: true,
+          trackInventory: true,
+          inventoryMethod: true,
         },
       },
       lines: {
