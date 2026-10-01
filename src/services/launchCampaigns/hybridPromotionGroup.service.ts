@@ -144,17 +144,20 @@ export function targetFeatureCodes(target: PercentPromotion['target']): string[]
 const keyOf = (featureCode: string): ProductKey => `FEATURE:${featureCode}`
 
 /**
- * One row per function, priced from its list as read through `db` (inside the product locks when creating).
+ * One row per function, priced from its list as read through `db` (inside the product locks when creating). Generating
+ * reads only lists on sale (`onSaleOnly`: a paused one is NO_LIST, spec §4.3); recalculating reads the «lista vigente»,
+ * ACTIVE or PAUSED (§4.4), which reactivating checks again.
  * ponytail: one listPriceOf per function (≤ 31, two indexed reads each); batch it if the catalog grows a lot.
  */
 async function previewRows(
   db: Prisma.TransactionClient,
   codes: string[],
   terms: Pick<PercentPromotion, 'percentOff' | 'promotionCycles'>,
+  onSaleOnly: boolean,
 ): Promise<PercentPreviewRow[]> {
   const rows: PercentPreviewRow[] = []
   for (const featureCode of codes) {
-    const listPrice = await listPriceOf(db, keyOf(featureCode))
+    const listPrice = await listPriceOf(db, keyOf(featureCode), onSaleOnly)
     const price = listPrice === null ? null : discounted(listPrice, terms.percentOff)
     rows.push({
       featureCode,
@@ -169,8 +172,8 @@ async function previewRows(
   return rows
 }
 
-/** Functions without a list are omitted; one under $10 blocks the group, never rounded up (spec §4.3, audit P2-15). */
-function creatableRows(rows: PercentPreviewRow[]): PercentPreviewRow[] {
+/** One function under $10 blocks the group, never rounded up (spec §4.3, audit P2-15). */
+function assertAboveMinimum(rows: PercentPreviewRow[]) {
   const below = rows.filter(row => row.status === 'BELOW_MINIMUM')
   if (below.length)
     throw new BadRequestError(
@@ -178,6 +181,11 @@ function creatableRows(rows: PercentPreviewRow[]): PercentPreviewRow[] {
       'HYBRID_PROMOTION_BELOW_MINIMUM',
       below,
     )
+}
+
+/** Functions without a list on sale are omitted (the preview says so); one under $10 blocks the group. */
+function creatableRows(rows: PercentPreviewRow[]): PercentPreviewRow[] {
+  assertAboveMinimum(rows)
   const ok = rows.filter(row => row.status === 'OK')
   if (!ok.length) throw new BadRequestError('Ninguna de estas funciones tiene precio de lista.', 'HYBRID_PROMOTION_EMPTY')
   return ok
@@ -206,7 +214,7 @@ async function auditGroup(tx: Prisma.TransactionClient, id: string, staffId: str
 
 export async function previewPercentPromotion(input: unknown): Promise<{ rows: PercentPreviewRow[]; creatable: boolean }> {
   const body = parse(percentPromotionBody, input)
-  const rows = await prisma.$transaction(tx => previewRows(tx, targetFeatureCodes(body.target), body))
+  const rows = await prisma.$transaction(tx => previewRows(tx, targetFeatureCodes(body.target), body, true))
   return {
     rows,
     creatable: rows.some(row => row.status === 'OK') && rows.every(row => row.status !== 'BELOW_MINIMUM'),
@@ -220,12 +228,16 @@ export async function createPercentPromotion(input: unknown, staffId: string): P
   const endsAt = new Date(body.endsAt)
   if (startsAt >= endsAt) throw new BadRequestError('La vigencia debe terminar después de empezar.', 'HYBRID_PROMOTION_INVALID')
   // The preview outside the lock only decides which functions take part; prices come from the lists read under it.
-  const codes = creatableRows(await prisma.$transaction(tx => previewRows(tx, targetFeatureCodes(body.target), body))).map(
+  const codes = creatableRows(await prisma.$transaction(tx => previewRows(tx, targetFeatureCodes(body.target), body, true))).map(
     row => row.featureCode,
   )
   const created = await prisma.$transaction(async tx => {
     await lockProducts(tx, codes.map(keyOf))
-    const rows = creatableRows(await previewRows(tx, codes, body))
+    const rows = await previewRows(tx, codes, body, true)
+    assertAboveMinimum(rows)
+    // Never a smaller group than the preview promised: a function whose list stopped selling meanwhile fails it all.
+    if (rows.some(row => row.status !== 'OK'))
+      throw new ConflictError('El precio de lista de una función cambió; vuelve a la vista previa.', 'HYBRID_PROMOTION_CHANGED')
     const group = await tx.hybridPromotionGroup.create({
       data: {
         name: body.name,
@@ -367,10 +379,11 @@ export async function recalculatePromotionGroup(groupId: string, expectedRevisio
       tx,
       members.map(member => member.featureCode),
       group,
+      false,
     )
     if (rows.some(r => r.status === 'NO_LIST'))
       throw new ConflictError('Una función de este descuento ya no tiene precio de lista.', 'HYBRID_PROMOTION_NO_LIST')
-    creatableRows(rows)
+    assertAboveMinimum(rows)
     for (const [index, { campaign, featureCode }] of members.entries()) {
       const drafted = await tx.hybridCampaign.updateMany({
         where: { id: campaign.id, revision: campaign.revision },

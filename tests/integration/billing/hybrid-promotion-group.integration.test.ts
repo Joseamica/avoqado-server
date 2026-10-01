@@ -37,7 +37,7 @@ jest.mock('@/services/stripe.service', () => {
 import { stripe } from '@/services/stripe.service'
 import { compileHybridPublication } from '@/services/launchCampaigns/hybridOffer.service'
 import { hybridOfferDefinition } from '@/services/launchCampaigns/hybridOffer.schema'
-import { saveListPrice } from '@/services/launchCampaigns/hybridListPrice.service'
+import { saveListPrice, setListPriceStatus } from '@/services/launchCampaigns/hybridListPrice.service'
 import { acceptHybridQuote, createHybridQuote } from '@/services/launchCampaigns/hybridPurchase.service'
 import {
   createPercentPromotion,
@@ -59,7 +59,9 @@ const FOREVER = 'AI_ASSISTANT_BUBBLE'
 const RACE = 'TABLE_SERVICE'
 const FIRST = 'SCALE_INTEGRATION' // sorts before SECOND: the group locks and writes FIRST, then SECOND
 const SECOND = 'VARIABLE_WEIGHT_BARCODE'
-const OURS = [MAIN, CHEAP, NO_LIST, DEPENDENT, FOREVER, RACE, FIRST, SECOND]
+const PAUSED = 'MERCHANT_ROUTING_RULES' // its list gets paused: off loose sale, so off the generator too
+const VANISH = 'AVAILABLE_BALANCE' // its list is paused while the generator waits for its lock
+const OURS = [MAIN, CHEAP, NO_LIST, DEPENDENT, FOREVER, RACE, FIRST, SECOND, PAUSED, VANISH]
 const LISTS: Record<string, number> = {
   [MAIN]: 599,
   [CHEAP]: 20,
@@ -68,6 +70,8 @@ const LISTS: Record<string, number> = {
   [RACE]: 599,
   [FIRST]: 199,
   [SECOND]: 299,
+  [PAUSED]: 199,
+  [VANISH]: 199,
 }
 const minute = 60000
 let staffId: string
@@ -471,5 +475,48 @@ describe('the price goes on sale as computed under the product lock, not as prev
     expect(result.waited).toBe(true)
     expect(result.error).toMatchObject({ statusCode: 400, code: 'HYBRID_PROMOTION_BELOW_MINIMUM' })
     expect(await prisma.hybridPromotionGroup.count({ where: { name: input.name } })).toBe(0)
+  })
+})
+
+describe('only lists on sale take part (spec §4.3 «LIST activa»)', () => {
+  it('(11) a paused list previews as NO_LIST and is omitted; a group already over it still recalculates', async () => {
+    // Generated while the list sold; then the list is paused (its promotions stop selling, spec §4.2).
+    const existing = await createPercentPromotion(body([PAUSED], 20, 3), staffId)
+    const pausedList = await prisma.hybridCampaign.findFirstOrThrow({ where: { purpose: 'LIST', listProductKey: `FEATURE:${PAUSED}` } })
+    await setListPriceStatus({ productKey: `FEATURE:${PAUSED}`, status: 'PAUSED', expectedRevision: pausedList.revision }, staffId)
+
+    const input = body([DEPENDENT, PAUSED], 20, 3)
+    expect((await previewPercentPromotion(input)).rows).toEqual([
+      expect.objectContaining({ featureCode: PAUSED, listPrice: null, price: null, status: 'NO_LIST' }),
+      expect.objectContaining({ featureCode: DEPENDENT, status: 'OK' }),
+    ])
+    const { campaignIds } = await createPercentPromotion(input, staffId)
+    expect(campaignIds).toHaveLength(1)
+    expect(await termsOf(campaignIds[0])).toMatchObject({ price: 279.2 })
+
+    // Recalculating keeps reading the «lista vigente» (ACTIVE or PAUSED): the pause → change → recalculate walk.
+    await expect(recalculatePromotionGroup(existing.groupId, (await group(existing.groupId)).revision, staffId)).resolves.toMatchObject({
+      status: 'PAUSED',
+    })
+    expect(await termsOf(existing.campaignIds[0])).toMatchObject({ price: 159.2, renewal: { kind: 'REPRICE', price: 199 } })
+  })
+
+  it('(12) a list paused while the generator waits fails the whole group instead of dropping that function', async () => {
+    const input = body([MAIN, VANISH], 10, null)
+    expect((await previewPercentPromotion(input)).creatable).toBe(true)
+    const result = await whileHoldingProduct(
+      VANISH,
+      () => createPercentPromotion(input, staffId),
+      async tx => {
+        await tx.hybridCampaign.updateMany({
+          where: { purpose: 'LIST', listProductKey: `FEATURE:${VANISH}` },
+          data: { status: 'PAUSED', revision: { increment: 1 } },
+        })
+      },
+    )
+    expect(result.waited).toBe(true)
+    expect(result.error).toMatchObject({ statusCode: 409, code: 'HYBRID_PROMOTION_CHANGED' })
+    expect(await prisma.hybridPromotionGroup.count({ where: { name: input.name } })).toBe(0)
+    expect(await prisma.hybridCampaign.count({ where: { name: { startsWith: input.name } } })).toBe(0)
   })
 })

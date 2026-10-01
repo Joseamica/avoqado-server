@@ -22,10 +22,13 @@ export function violatesListRule(terms: { price: number; renewal: { kind: string
   return new Decimal(terms.price).gte(listPrice) || (terms.renewal.kind === 'REPRICE' && new Decimal(terms.renewal.price!).gt(listPrice))
 }
 
-/** List price of a product: its LIST's current publication, ACTIVE or PAUSED (pausing never lifts the rule); null without a LIST. */
-export async function listPriceOf(tx: Prisma.TransactionClient, key: ProductKey): Promise<number | null> {
+/**
+ * List price of a product: its LIST's current publication, ACTIVE or PAUSED (pausing never lifts the rule); null without a LIST.
+ * `onSaleOnly` reads only an ACTIVE list (the «% de descuento» generator discounts what is on sale, spec §4.3).
+ */
+export async function listPriceOf(tx: Prisma.TransactionClient, key: ProductKey, onSaleOnly = false): Promise<number | null> {
   const list = await tx.hybridCampaign.findFirst({
-    where: { purpose: 'LIST', listProductKey: key },
+    where: { purpose: 'LIST', listProductKey: key, ...(onSaleOnly ? { status: 'ACTIVE' as const } : {}) },
     select: { currentPublicationId: true },
   })
   if (!list?.currentPublicationId) return null
