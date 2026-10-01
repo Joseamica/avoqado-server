@@ -37,7 +37,7 @@ jest.mock('@/services/stripe.service', () => {
 import { stripe } from '@/services/stripe.service'
 import { compileHybridPublication } from '@/services/launchCampaigns/hybridOffer.service'
 import { hybridOfferDefinition } from '@/services/launchCampaigns/hybridOffer.schema'
-import { saveListPrice, setListPriceStatus } from '@/services/launchCampaigns/hybridListPrice.service'
+import { listPriceBoard, saveListPrice, setListPriceStatus } from '@/services/launchCampaigns/hybridListPrice.service'
 import { acceptHybridQuote, createHybridQuote } from '@/services/launchCampaigns/hybridPurchase.service'
 import {
   createPercentPromotion,
@@ -109,6 +109,8 @@ const body = (featureCodes: string[], percentOff: number, promotionCycles: numbe
   promotionCycles,
   capacityPerFeature,
 })
+// Spec §6.1: the «Precios» row of a function names the «% de descuento» groups on sale over it.
+const activeGroupsOf = async (code: string) => (await listPriceBoard()).find(row => row.productKey === `FEATURE:${code}`)!.activeGroups
 const setStatus = async (groupId: string, status: 'ACTIVE' | 'PAUSED' | 'ENDED') =>
   setPromotionGroupStatus(groupId, { status, expectedRevision: (await group(groupId)).revision }, staffId)
 
@@ -262,9 +264,12 @@ describe(`a 20 % group over ${MAIN} (list 599, 3 cycles)`, () => {
     // The sales flag closes activating a promotion, as for a single campaign: nothing changes.
     await expect(setStatus(groupId, 'ACTIVE')).rejects.toMatchObject({ code: 'HYBRID_SALES_CLOSED' })
     expect(await group(groupId)).toMatchObject({ status: 'PAUSED', revision: 1 })
+    // A paused group does not cover the list on sale.
+    expect(await activeGroupsOf(MAIN)).toEqual([])
 
     process.env.HYBRID_BILLING_ENABLED = 'true'
     expect(await setStatus(groupId, 'ACTIVE')).toMatchObject({ id: groupId, status: 'ACTIVE', revision: 2 })
+    expect(await activeGroupsOf(MAIN)).toEqual([{ id: groupId, name: (await group(groupId)).name, revision: 2 }])
     expect(await campaign(campaignId)).toMatchObject({ status: 'ACTIVE' })
     const publicationId = (await campaign(campaignId)).currentPublicationId!
     // Stripe gets the same cents the publication promises, initial and renewal.
@@ -301,7 +306,8 @@ describe(`a 20 % group over ${MAIN} (list 599, 3 cycles)`, () => {
       status: 'PAUSED',
     })
     expect(await campaign(campaignId)).toMatchObject({ status: 'PAUSED' })
-    await expect(savePrice(MAIN, 450)).resolves.toMatchObject({ price: 450 })
+    // The saved row says it too: nothing on sale covers it while paused.
+    await expect(savePrice(MAIN, 450)).resolves.toMatchObject({ price: 450, activeGroups: [] })
 
     const before = await campaign(campaignId)
     const paused = await group(groupId)
@@ -323,6 +329,7 @@ describe(`a 20 % group over ${MAIN} (list 599, 3 cycles)`, () => {
     // Reactivating checks the rule again (360 < 450, renews at 450 ≤ 450) and passes.
     expect(await setStatus(groupId, 'ACTIVE')).toMatchObject({ status: 'ACTIVE' })
     expect(await campaign(campaignId)).toMatchObject({ status: 'ACTIVE' })
+    expect(await activeGroupsOf(MAIN)).toEqual([expect.objectContaining({ id: groupId, revision: (await group(groupId)).revision })])
     const logs = await prisma.activityLog.findMany({
       where: { entityId: groupId, action: 'HYBRID_PROMOTION_GROUP_STATUS_CHANGED' },
       take: 10,
@@ -369,6 +376,15 @@ it('(5) two overlapping groups created at once both finish, without a deadlock',
     })
     expect(rows.map(r => (r.draftDefinition as any).featureCodes[0])).toEqual([CHEAP, MAIN])
   }
+  // One group over two functions is named once on each row, after the groups already on sale (creation order).
+  process.env.HYBRID_BILLING_ENABLED = 'true'
+  await setStatus(left.value!.groupId, 'ACTIVE')
+  const main = await activeGroupsOf(MAIN)
+  expect(main.filter(g => g.id === left.value!.groupId)).toHaveLength(1)
+  expect(main[main.length - 1]).toMatchObject({ id: left.value!.groupId })
+  expect(await activeGroupsOf(CHEAP)).toEqual([expect.objectContaining({ id: left.value!.groupId })])
+  await setStatus(left.value!.groupId, 'ENDED')
+  expect((await activeGroupsOf(CHEAP)).map(g => g.id)).not.toContain(left.value!.groupId)
 })
 
 describe('group status changes are atomic, under every product lock', () => {

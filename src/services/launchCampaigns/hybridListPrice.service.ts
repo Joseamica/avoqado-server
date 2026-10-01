@@ -4,12 +4,13 @@ import logger from '@/config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import { FREE_TIER_CODES } from '@/services/access/basePlan.service'
 import prisma from '@/utils/prismaClient'
+import { utcTs } from '@/utils/sqlDates'
 import { audit, changed } from './hybridCampaign.service'
 import { compileHybridPublication } from './hybridOffer.service'
 import { hybridOfferDefinition } from './hybridOffer.schema'
 import { assertPriceRuleForList } from './hybridPriceRule'
 import { ensureHybridPublicationPrices } from './hybridPrices'
-import { lockProducts, type ProductKey } from './hybridProduct'
+import { lockProducts, productKeySql, type ProductKey } from './hybridProduct'
 
 export interface ListPriceRow {
   productKey: string
@@ -25,6 +26,8 @@ export interface ListPriceRow {
   status: 'ACTIVE' | 'PAUSED' | null
   price: number | null
   pendingPrice: number | null
+  /** «% de descuento» groups on sale over this product (spec §6.1): after a list change they need «Recalcular». */
+  activeGroups: { id: string; name: string; revision: number }[]
 }
 type ProductRow = Pick<ListPriceRow, 'productKey' | 'featureCode' | 'planTier' | 'name' | 'category' | 'minimumTier' | 'notEditableReason'>
 
@@ -65,7 +68,27 @@ const LOCK_WAIT = { timeout: 15_000 }
 
 const priceOf = (definition: Prisma.JsonValue) => hybridOfferDefinition.parse(definition).terms.price
 
-/** Rows for these products, reading only their lists and those lists' current/pending publications. */
+/**
+ * The groups with an ACTIVE, still-in-force generated promotion over each product, in creation order: one bounded query for
+ * the whole board, filtered by product in SQL (`productKeySql`, as the list-price rule does).
+ * ponytail: LIMIT 1000 (≈ 31 functions × 32 groups on sale at once); page it per product if that ever gets close.
+ */
+async function activeGroupsByKey(keys: string[]): Promise<Map<string, ListPriceRow['activeGroups']>> {
+  const rows = await prisma.$queryRaw<{ productKey: string; id: string; name: string; revision: number }[]>`
+    SELECT DISTINCT ${productKeySql('p')} AS "productKey", g.id, g.name, g.revision, g."createdAt"
+    FROM "HybridCampaign" c
+    JOIN "HybridOfferPublication" p ON p.id = c."currentPublicationId"
+    JOIN "HybridPromotionGroup" g ON g.id = c."promotionGroupId"
+    WHERE c.purpose = 'PROMOTION' AND c.status = 'ACTIVE' AND c."endsAt" > ${utcTs(new Date())}
+      AND ${productKeySql('p')} IN (${Prisma.join(keys)})
+    ORDER BY g."createdAt", g.id
+    LIMIT 1000`
+  const byKey = new Map<string, ListPriceRow['activeGroups']>()
+  for (const { productKey, id, name, revision } of rows) byKey.set(productKey, [...(byKey.get(productKey) ?? []), { id, name, revision }])
+  return byKey
+}
+
+/** Rows for these products, reading only their lists, those lists' current/pending publications and the groups over them. */
 async function rowsFor(products: readonly ProductRow[]): Promise<ListPriceRow[]> {
   const lists = await prisma.hybridCampaign.findMany({
     where: { purpose: 'LIST', listProductKey: { in: products.map(p => p.productKey) } },
@@ -79,6 +102,7 @@ async function rowsFor(products: readonly ProductRow[]): Promise<ListPriceRow[]>
   const prices = new Map(publications.map(publication => [publication.id, priceOf(publication.definition)]))
   const priceAt = (id: string | null | undefined) => (id ? (prices.get(id) ?? null) : null)
   const byKey = new Map(lists.map(list => [list.listProductKey, list]))
+  const groups = await activeGroupsByKey(products.map(p => p.productKey))
   return products.map(product => {
     const list = byKey.get(product.productKey)
     return {
@@ -89,6 +113,7 @@ async function rowsFor(products: readonly ProductRow[]): Promise<ListPriceRow[]>
       status: list?.status === 'ACTIVE' || list?.status === 'PAUSED' ? list.status : null,
       price: priceAt(list?.currentPublicationId),
       pendingPrice: priceAt(list?.pendingPublicationId),
+      activeGroups: groups.get(product.productKey) ?? [],
     }
   })
 }

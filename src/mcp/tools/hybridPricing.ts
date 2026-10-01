@@ -52,7 +52,7 @@ export function registerHybridPricingTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_prices',
-    'Precio de lista mensual de cada función y de los planes Pro y Premium, en pesos MXN con IVA incluido: si está en venta suelta o pausada, si tiene un precio nuevo pendiente de preparar, y el aviso de negocios que pagan una tarifa anterior (diferencia de tarifas al mes, no efectivo cobrado). Sólo lectura. Sólo para Avoqado.',
+    'Precio de lista mensual de cada función y de los planes Pro y Premium, en pesos MXN con IVA incluido: si está en venta suelta o pausada, si tiene un precio nuevo pendiente de preparar, qué descuentos % activos la abarcan (al cambiar la lista hay que recalcularlos), y el aviso de negocios que pagan una tarifa anterior (diferencia de tarifas al mes, no efectivo cobrado). Sólo lectura. Sólo para Avoqado.',
     {},
     async () => {
       if (!scope.isSuperAdmin) return forbidden()
@@ -73,6 +73,7 @@ export function registerHybridPricingTools(server: McpServer, scope: McpScope) {
             precioLista: row.price,
             precioPendiente: row.pendingPrice,
             revision: row.revision,
+            descuentosActivos: row.activeGroups,
             tarifaAnterior: gap ? gapView(gap) : null,
           }
         }),
@@ -98,8 +99,19 @@ export function registerHybridPricingTools(server: McpServer, scope: McpScope) {
         return text({
           ok: false,
           requiresConfirmation: true,
-          preview: { producto: productKey, nombre: current.name, precioActual: current.price, precioNuevo: price, estado: current.status },
-          mensaje: `Precio de lista de ${current.name}: ${pesos(current.price)} → ${pesos(price)} al mes con IVA. Quien ya la paga conserva su precio. Vuelve a llamar con confirm: true.`,
+          preview: {
+            producto: productKey,
+            nombre: current.name,
+            precioActual: current.price,
+            precioNuevo: price,
+            estado: current.status,
+            descuentosActivos: current.activeGroups,
+          },
+          mensaje: `Precio de lista de ${current.name}: ${pesos(current.price)} → ${pesos(price)} al mes con IVA. Quien ya la paga conserva su precio.${
+            current.activeGroups.length
+              ? ` Descuentos activos que la abarcan: ${current.activeGroups.map(g => `«${g.name}»`).join(', ')}; después de guardar, recalcúlalos para que el % aplique sobre el precio nuevo.`
+              : ''
+          } Vuelve a llamar con confirm: true.`,
         })
       try {
         const row = await saveListPrice({ productKey, price, expectedRevision }, scope.staffId)

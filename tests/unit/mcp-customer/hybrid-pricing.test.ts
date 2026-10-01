@@ -78,6 +78,7 @@ const cfdi = {
   status: 'ACTIVE',
   price: 199,
   pendingPrice: null,
+  activeGroups: [] as { id: string; name: string; revision: number }[],
 }
 const percentBody = {
   name: 'Septiembre 20 %',
@@ -148,8 +149,16 @@ describe('list prices and «% de descuento» from the customer MCP (superadmin o
       preview: { producto: 'FEATURE:CFDI', nombre: 'Facturación electrónica', precioActual: 199, precioNuevo: 249 },
     })
     expect(result.mensaje).toMatch(/\$199\.00 → \$249\.00/)
+    expect(result.mensaje).not.toMatch(/Descuentos activos/)
     expect(save).not.toHaveBeenCalled()
     expect(auditMcpWrite).not.toHaveBeenCalled()
+  })
+
+  it('set_feature_list_price without confirm names the % groups on sale over it, to recalculate after saving', async () => {
+    board.mockResolvedValue([{ ...cfdi, activeGroups: [{ id: 'group-1', name: 'Septiembre 20 %', revision: 4 }] }])
+    const result = read(await call('set_feature_list_price', { productKey: 'FEATURE:CFDI', price: 249, expectedRevision: 3 }))
+    expect(result.preview.descuentosActivos).toEqual([{ id: 'group-1', name: 'Septiembre 20 %', revision: 4 }])
+    expect(result.mensaje).toMatch(/Descuentos activos que la abarcan: «Septiembre 20 %»; después de guardar, recalcúlalos/)
   })
 
   it('set_feature_list_price with confirm saves through the same operation as the screen and audits it', async () => {
@@ -192,6 +201,7 @@ describe('list prices and «% de descuento» from the customer MCP (superadmin o
       producto: 'FEATURE:CFDI',
       precioLista: 199,
       estado: 'ACTIVE',
+      descuentosActivos: [],
       tarifaAnterior: { negocios: 12, diferenciaMensual: 1200.5, negociosPaganMas: 1, negociosEnPaquetes: 2 },
     })
     expect(result.productos[1]).toMatchObject({ producto: 'FEATURE:BASE_POS', editable: false, tarifaAnterior: null })
