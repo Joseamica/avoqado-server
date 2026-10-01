@@ -25,3 +25,23 @@ describe('sid en los tokens', () => {
     expect(verifyRefreshToken(t).sid).toBe('sess1')
   })
 })
+
+/**
+ * IVA por producto (spec planes 6-7, §5.5): el token del POS móvil lleva una marca FIRMADA `origen: 'POS'`. Sin ella, nada
+ * distingue un token del POS de uno del dashboard, y el plan 6b no puede saber si un negocio usa una app vieja.
+ */
+describe('origen en los tokens', () => {
+  it('el POS (pos: true) lleva origen POS', () => {
+    const t = generateAccessToken('staff1', 'org1', 'venue1', StaffRole.CASHIER, undefined, { sid: 'sess1', pos: true })
+    expect(verifyAccessToken(t).origen).toBe('POS')
+  })
+
+  it('el dashboard (sin pos) no lleva origen', () => {
+    const t = generateAccessToken('staff1', 'org1', 'venue1', StaffRole.ADMIN, true, { sid: 'sess1' })
+    expect(verifyAccessToken(t).origen).toBeUndefined()
+  })
+
+  it('un token legacy sin opts no lleva origen', () => {
+    expect(verifyAccessToken(generateAccessToken('staff1', 'org1', 'venue1', StaffRole.CASHIER)).origen).toBeUndefined()
+  })
+})

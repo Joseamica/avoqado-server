@@ -45,6 +45,11 @@ export interface AccessTokenPayload extends jwt.JwtPayload {
    * `emisionDelToken` la prefiere al `iat`. Ausente en tokens emitidos antes de este cambio.
    */
   emitidoMs?: number
+  /**
+   * `'POS'` sólo en los tokens que emite el POS móvil (`opts.pos`). Va firmado: nadie lo pone sin el secreto. Lo lee el
+   * observador de aparatos del IVA por producto (spec planes 6-7, §5.5). Ausente en el dashboard y en tokens viejos.
+   */
+  origen?: 'POS'
 }
 
 /**
@@ -100,6 +105,7 @@ export function generateAccessToken(
     jti: crypto.randomUUID(),
     emitidoMs: Date.now(),
     ...(opts?.sid ? { sid: opts.sid, v: 1 } : {}),
+    ...(opts?.pos ? { origen: 'POS' as const } : {}),
   }
   // Explicitly type the secret and options
   const secret: Secret = ACCESS_TOKEN_SECRET!
