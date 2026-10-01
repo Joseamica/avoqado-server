@@ -70,6 +70,7 @@ function eligibleCardPayment() {
     venueId: 'venue-1',
     status: 'COMPLETED',
     method: 'CREDIT_CARD',
+    source: 'TPV', // la cobró nuestra terminal (seDevuelveEnTerminal)
     amount: 125,
     tipAmount: 10,
     processorData: {},
@@ -261,7 +262,7 @@ describe('MCP refund_card_on_terminal device action capability guard', () => {
     expect(parseBody(response)).toEqual({
       ok: false,
       reason: 'NOT_A_CARD_PAYMENT',
-      error: 'La terminal sólo puede devolver cobros con tarjeta.',
+      error: 'La terminal sólo puede devolver cobros con tarjeta hechos en la terminal.',
     })
     expect(prismaMock.terminal.findFirst).not.toHaveBeenCalled()
     expect(requestRefundOnTerminal).not.toHaveBeenCalled()

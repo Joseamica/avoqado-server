@@ -165,3 +165,70 @@ describe('getTransactionDetail · saldo reembolsable por componente', () => {
     expect(detalle.items[0]).toMatchObject({ refundedQty: 1, remainingQty: 2 }) // la pieza: el FAILED sí reserva
   })
 })
+
+describe('getTransactionDetail · refundOnTerminal (aditivo, 30-sep-2026)', () => {
+  // La app decide con ESTE campo si muestra «Abrir en la terminal» o reembolsa como el efectivo. Sin él caía al
+  // método y una transferencia de Testarudo pedía la terminal; con el método solo, una «Tarjeta de crédito»
+  // registrada a mano también la pediría.
+  beforeEach(() => listRefunds.mockResolvedValue([]))
+
+  it('tarjeta cobrada en la terminal: true', async () => {
+    prismaMock.payment.findFirst.mockResolvedValue(cobro({ method: 'DEBIT_CARD', source: 'TPV' }))
+    expect(await getTransactionDetail('venue_1', 'pay_1')).toMatchObject({ refundOnTerminal: true })
+  })
+
+  it.each([
+    ['BANK_TRANSFER', 'OTHER'],
+    ['OTHER', 'APP'],
+    ['CASH', 'TPV'],
+    ['CREDIT_CARD', 'APP'],
+  ])('%s con source %s: false', async (method, source) => {
+    prismaMock.payment.findFirst.mockResolvedValue(cobro({ method, source }))
+    expect(await getTransactionDetail('venue_1', 'pay_1')).toMatchObject({ refundOnTerminal: false })
+  })
+
+  it('el select pide `source`: sin él el veredicto saldría siempre false', async () => {
+    await getTransactionDetail('venue_1', 'pay_1')
+    expect(prismaMock.payment.findFirst.mock.calls[0][0].select.source).toBe(true)
+  })
+})
+
+describe('getTransactionDetail · canChooseRefundMethod + tenderLabel (aditivo, 30-sep-2026)', () => {
+  beforeEach(() => listRefunds.mockResolvedValue([]))
+
+  it('transferencia registrada a mano: se puede escoger, y trae el nombre del método', async () => {
+    prismaMock.payment.findFirst.mockResolvedValue(
+      cobro({
+        method: 'BANK_TRANSFER',
+        source: 'OTHER',
+        fundsFlow: 'EXTERNAL_RECORDED',
+        tenderTypeId: 't1',
+        tenderLabel: 'Transferencia',
+        tenderSatFormaPago: '03',
+        externalSource: null,
+      }),
+    )
+    expect(await getTransactionDetail('venue_1', 'pay_1')).toMatchObject({ canChooseRefundMethod: true, tenderLabel: 'Transferencia' })
+  })
+
+  it('tarjeta: no', async () => {
+    prismaMock.payment.findFirst.mockResolvedValue(cobro({ method: 'CREDIT_CARD', source: 'TPV', fundsFlow: 'AVOQADO_PROCESSED' }))
+    expect(await getTransactionDetail('venue_1', 'pay_1')).toMatchObject({ canChooseRefundMethod: false, tenderLabel: null })
+  })
+
+  it('el select pide lo que la regla necesita', async () => {
+    await getTransactionDetail('venue_1', 'pay_1')
+    const select = prismaMock.payment.findFirst.mock.calls[0][0].select
+    for (const campo of [
+      'source',
+      'externalSource',
+      'tenderSatFormaPago',
+      'fundsFlow',
+      'tenderTypeId',
+      'tenderCountsAsCash',
+      'tenderLabel',
+    ]) {
+      expect(select[campo]).toBe(true)
+    }
+  })
+})

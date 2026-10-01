@@ -60,12 +60,13 @@ export const createRefund = async (req: Request, res: Response, next: NextFuncti
  * @route POST /api/v1/mobile/venues/:venueId/payments/:paymentId/refund
  *
  * Body: { amount?: number (cents), items?: [{ orderItemId, quantity? }],
- *         restockItemIds?: string[], reason: RefundReason, note?: string }
+ *         restockItemIds?: string[], reason: RefundReason, note?: string,
+ *         tipRefundCents?: number (cents), refundMethod?: 'CASH' | 'BANK_TRANSFER' }
  */
 export const issueAssociatedRefund = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId, paymentId } = req.params
-    const { amount, items, restockItemIds, reason, note, tipRefundCents } = req.body ?? {}
+    const { amount, items, restockItemIds, reason, note, tipRefundCents, refundMethod } = req.body ?? {}
 
     const hasItems = Array.isArray(items) && items.length > 0
     if (!vieneAusente(amount) && !esCantidadPositivaEnCentavos(amount)) {
@@ -83,6 +84,9 @@ export const issueAssociatedRefund = async (req: Request, res: Response, next: N
     if (!reason || typeof reason !== 'string') {
       return res.status(400).json({ success: false, message: 'reason es requerido' })
     }
+    if (!vieneAusente(refundMethod) && refundMethod !== 'CASH' && refundMethod !== 'BANK_TRANSFER') {
+      return res.status(400).json({ success: false, message: 'refundMethod debe ser CASH o BANK_TRANSFER' })
+    }
 
     const result = await refundDashboardService.issueRefund({
       venueId,
@@ -94,6 +98,7 @@ export const issueAssociatedRefund = async (req: Request, res: Response, next: N
       staffId: req.authContext?.userId,
       note: typeof note === 'string' ? note : null,
       tipRefundCents: typeof tipRefundCents === 'number' ? tipRefundCents : undefined,
+      refundMethod: vieneAusente(refundMethod) ? undefined : refundMethod,
     })
 
     return res.status(201).json({ success: true, data: result })

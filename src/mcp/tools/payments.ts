@@ -10,6 +10,7 @@ import { auditMcpWrite } from '../audit'
 import { issueRefund, type RefundReason } from '@/services/dashboard/refund.dashboard.service'
 import { createManualPayment } from '@/services/dashboard/manualPayment.service'
 import { paymentCountsAsDrawerCash, TENDER_SEMANTICS_SELECT } from '@/services/shared/tenderSemantics'
+import { devolverConEfectivo, sePuedeEscogerComoDevolver, seDevuelveEnTerminal } from '@/services/tpv/terminalRefundTarget'
 // El carril del reembolso: la MISMA definición que usan los cuatro canales de
 // cobro, para que el MCP no pueda contradecir al saldo persistido.
 import { summarizeRefunds } from '@/services/shared/orderBalance'
@@ -388,7 +389,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'issue_refund',
-    '🔴 CRITICAL. Refund a COMPLETED payment of a venue you can access — ONLY for CASH / non-card payments (the cash you hand back is recorded as a refund). CARD payments (credit/debit) are BLOCKED here: a Blumon/terminal card refund must be done PHYSICALLY on the terminal with the card present — it cannot be processed by API. Identify the payment by its id (from list_payments), give the amount in pesos (partial allowed; the service enforces the remaining refundable) and a reason. By DEFAULT this only PREVIEWS; call again with confirm:true to execute. This WRITES MONEY — requires payments:refund.',
+    '🔴 CRITICAL. Refund a COMPLETED payment of a venue you can access — ONLY for CASH / non-card payments (the cash you hand back is recorded as a refund). CARD payments (credit/debit) are BLOCKED here: a Blumon/terminal card refund must be done PHYSICALLY on the terminal with the card present — it cannot be processed by API. Identify the payment by its id (from list_payments), give the amount in pesos (partial allowed; the service enforces the remaining refundable) and a reason. By DEFAULT this only PREVIEWS; call again with confirm:true to execute. This WRITES MONEY — requires payments:refund (refundMethod CASH also requires payments:refund-to-cash).',
     {
       venueId: z.string().describe('Venue that owns the payment (must be in your scope)'),
       paymentId: z.string().min(1).describe('The payment id (from list_payments)'),
@@ -397,11 +398,20 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
         .enum(['returned_goods', 'accidental_charge', 'cancelled_order', 'fraudulent_charge', 'other'])
         .describe('Why the refund is issued'),
       note: z.string().optional().describe('Free-text note for the audit trail'),
+      refundMethod: z
+        .enum(['CASH', 'BANK_TRANSFER'])
+        .nullish()
+        .describe(
+          'How the money is handed back when the payment was NOT a card: CASH = from the cash drawer, BANK_TRANSFER = by transfer. Omit to refund through the same method.',
+        ),
       confirm: z.boolean().optional().describe('Must be true to actually issue the refund; without it you get a preview'),
     },
-    async ({ venueId, paymentId, amount, reason, note, confirm }) => {
+    async ({ venueId, paymentId, amount, reason, note, refundMethod: refundMethodRaw, confirm }) => {
+      const refundMethod = refundMethodRaw ?? undefined // null = ausente
       const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('payments:refund', venueId) // write gate (per-venue role)
+      // Devolver en efectivo un cobro que no fue en efectivo: permiso propio (MANAGER+), igual que la ruta móvil.
+      if (refundMethod === 'CASH') guard.requirePermission('payments:refund-to-cash', venueId)
 
       // Resolve the payment WITHIN scope for the preview (the service re-validates everything under a row lock).
       const payment = await prisma.payment.findFirst({
@@ -412,6 +422,9 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
           // `TENDER_SEMANTICS_SELECT`: para saber si el dinero salía del CAJÓN del local
           // (`method` solo no basta — un vale puede contar como efectivo físico).
           ...TENDER_SEMANTICS_SELECT,
+          externalSource: true,
+          tenderSatFormaPago: true,
+          source: true,
           status: true,
           type: true,
           createdAt: true,
@@ -426,7 +439,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
       // terminal; this path only RECORDS a bookkeeping refund (no money moves via API). Block it for the
       // MCP so an AI never records a card "refund" that was never physically processed (the founder's rule:
       // "blumon/tpv no hacemos reembolsos por API, solo poniendo la tarjeta físicamente").
-      if (payment.method === PaymentMethod.CREDIT_CARD || payment.method === PaymentMethod.DEBIT_CARD) {
+      if (seDevuelveEnTerminal(payment)) {
         return text({
           ok: false,
           cardRefundNotSupported: true,
@@ -434,6 +447,10 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
           error: `Este pago es con TARJETA (${payment.method}). Los reembolsos de tarjeta NO se registran por aquí: el dinero se devuelve FÍSICAMENTE en la terminal, con alguien presente. Lo que SÍ puedes hacer es ABRIR esa devolución en la terminal con la herramienta 'refund_card_on_terminal' — deja la pantalla lista y una persona la confirma en el aparato; la TPV registra el reembolso sola cuando el dinero se mueve. Por el MCP solo puedes reembolsar directo pagos en EFECTIVO/transferencia.`,
           useInstead: 'refund_card_on_terminal',
         })
+      }
+      // Escoger con qué se devuelve sólo aplica a lo que no fue tarjeta ni liquida un procesador (misma regla del servicio).
+      if (refundMethod && devolverConEfectivo(payment, refundMethod) !== undefined && !sePuedeEscogerComoDevolver(payment)) {
+        return text({ ok: false, error: 'Este cobro sólo se devuelve por el mismo medio con que se pagó.' })
       }
       const originalTotal = round2(num(payment.amount) + num(payment.tipAmount))
       if (amount > originalTotal) {
@@ -445,7 +462,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
       // que la vista previa tiene que decirlo: está autorizando que alguien saque
       // billetes de un cajón físico, no sólo un apunte contable. La pregunta la
       // contesta `tenderSemantics`, nunca un `method === 'CASH'` local.
-      const saleDeCajonDeEfectivo = paymentCountsAsDrawerCash(payment)
+      const saleDeCajonDeEfectivo = refundMethod ? refundMethod === 'CASH' : paymentCountsAsDrawerCash(payment)
 
       if (!confirm) {
         return text({
@@ -463,11 +480,12 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
             reason: REFUND_REASON_MAP[reason],
             note: note ?? null,
             saleDeCajonDeEfectivo,
+            refundMethod: refundMethod ?? null,
           },
           message:
             `Esto DEVOLVERÁ $${amount} del pago de $${originalTotal} (orden ${payment.order?.orderNumber ?? 's/n'}).` +
             (saleDeCajonDeEfectivo
-              ? ` Ese dinero estaba en EFECTIVO: si el local tiene la caja abierta, se registrará la salida de $${amount} del cajón y alguien tendrá que entregarlo físicamente.`
+              ? ` Saldrá en EFECTIVO: si el local tiene la caja abierta, se registrará la salida de $${amount} del cajón y alguien tendrá que entregarlo físicamente.`
               : '') +
             ' Vuelve a llamar con confirm:true para ejecutar.',
         })
@@ -481,13 +499,20 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
           reason: REFUND_REASON_MAP[reason],
           staffId: scope.staffId,
           ...(note ? { note } : {}),
+          ...(refundMethod ? { refundMethod } : {}),
         })
         await auditMcpWrite(scope, {
           action: 'REFUND_ISSUED',
           entity: 'Payment',
           entityId: result.refundId,
           venueId,
-          data: { originalPaymentId: paymentId, amount: result.amount, reason: REFUND_REASON_MAP[reason], note: note ?? null },
+          data: {
+            originalPaymentId: paymentId,
+            amount: result.amount,
+            reason: REFUND_REASON_MAP[reason],
+            note: note ?? null,
+            refundMethod: refundMethod ?? null,
+          },
         })
         return text({
           ok: true,

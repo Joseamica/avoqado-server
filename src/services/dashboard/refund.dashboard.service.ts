@@ -19,6 +19,7 @@ import { createRefundCommission } from './commission/commission-calculation.serv
 import { asegurarObligacionDeCostoNegativo, costearYProyectarReembolso } from '../payments/deferredTransactionCost.service'
 import { logAction } from './activity-log.service'
 import type { FiscalCongelado } from '../fiscal/deliveryFiscalDelta'
+import { devolverConEfectivo, sePuedeEscogerComoDevolver, type DevolverCon } from '../tpv/terminalRefundTarget'
 import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
 import { computeTenderCommission } from './tenderType.dashboard.service'
 import {
@@ -95,6 +96,11 @@ export interface IssueRefundInput {
    *   - `tipRefundCents = X`: custom split (e.g. partial tip return).
    */
   tipRefundCents?: number
+  /**
+   * Con qué se devolvió el dinero, si NO fue por el mismo medio (30-sep-2026). Ausente = como siempre.
+   * Sólo se acepta donde `sePuedeEscogerComoDevolver` es verdadero; si no, 400.
+   */
+  refundMethod?: DevolverCon
 }
 
 export interface IssueRefundResult {
@@ -119,8 +125,10 @@ interface LockedPaymentRow {
   merchantAccountId: string | null
   processorData: Prisma.JsonValue | null
   // Proyección de `tenderSemantics`: la ÚNICA autoridad sobre "¿este dinero estaba
-  // en el cajón?". Se leen del pago ORIGINAL porque el reembolso hereda su método.
+  // en el cajón?". Se leen del pago ORIGINAL: el reembolso hereda su método salvo que el
+  // cajero escoja con qué devolver (`devolverCon`), y aun entonces deciden si puede escoger.
   fundsFlow: string | null
+  externalSource: string | null
   tenderTypeId: string | null
   tenderCountsAsCash: boolean | null
   // Identidad del tipo del catálogo. El reembolso la HEREDA: el desglose del corte
@@ -174,7 +182,8 @@ interface RefundTransactionResult {
   refundedItems: RefundedItemSnapshot[]
   remainingAfterCents: number
   refundAmountCents: number
-  originalTender: {
+  originalMethod: string
+  refundTender: {
     method: string
     fundsFlow: string | null
     tenderTypeId: string | null
@@ -330,6 +339,7 @@ export async function bloquearCobroParaReembolso(
       "merchantAccountId",
       "processorData",
       "fundsFlow",
+      "externalSource",
       "tenderTypeId",
       "tenderCountsAsCash",
       "tenderRevision",
@@ -425,6 +435,8 @@ interface WriteRefundBase {
   shift: 'CLAIM_LIVE' | 'INHERIT_ORIGINAL'
   /** @internal `issueRefund` ya bloqueó y leyó el cobro en ESTE tx: no se repite. */
   bloqueado?: CobroBloqueado
+  /** Con qué se devolvió, si NO fue por el mismo medio (spec 2026-09-30). Ausente = como siempre. */
+  devolverCon?: DevolverCon
 }
 
 /**
@@ -495,6 +507,11 @@ export async function writeRefundInTx(
     })
   }
   const { original, alreadyRefundedCents, unclassifiedPriorRefundCents, remainingBeforeCents } = cobro
+  // «Por el mismo medio» (ausente, igual al del cobro, o efectivo sobre algo que ya entra al cajón) = como siempre.
+  const devolverCon = devolverConEfectivo(original, input.devolverCon)
+  if (devolverCon && !sePuedeEscogerComoDevolver(original)) {
+    throw new BadRequestError('Este cobro sólo se devuelve por el mismo medio con que se pagó.')
+  }
   if (refundCents > remainingBeforeCents) {
     throw new BadRequestError(
       `Refund (${centsToNumber(refundCents).toFixed(2)}) exceeds remaining refundable (${centsToNumber(remainingBeforeCents).toFixed(2)})`,
@@ -550,7 +567,7 @@ export async function writeRefundInTx(
       feeAmount: new Prisma.Decimal(0),
       feePercentage: 0,
 
-      method: original.method as PaymentMethod,
+      method: (devolverCon ?? original.method) as PaymentMethod,
       // 🔴 El reembolso hereda la IDENTIDAD y la SEMÁNTICA del tipo original, no sólo el
       // `method`. Sin esto, devolver un vale que SÍ entraba al cajón caía al fallback
       // legacy (`method === 'CASH'` = false) y el arqueo seguía exigiendo un efectivo que
@@ -560,17 +577,41 @@ export async function writeRefundInTx(
       // Uber devuelva su 30% cuando el cliente cancela es un acuerdo comercial que no conocemos,
       // e inventarlo daría un costo o un ingreso falso. Sólo el ajuste del proveedor la revierte
       // (`REVERSE_PROPORTIONAL`, abajo): ahí Uber SÍ recalcula su comisión sobre lo que cobró.
-      tenderTypeId: original.tenderTypeId || undefined,
-      tenderRevision: original.tenderTypeId && original.tenderRevision != null ? original.tenderRevision : undefined,
-      tenderLabel: original.tenderTypeId && original.tenderLabel != null ? original.tenderLabel : undefined,
-      tenderCountsAsCash: original.tenderTypeId && original.tenderCountsAsCash != null ? original.tenderCountsAsCash : undefined,
-      tenderCaptureTip: original.tenderTypeId && original.tenderCaptureTip != null ? original.tenderCaptureTip : undefined,
-      tenderSatFormaPago: original.tenderTypeId && original.tenderSatFormaPago != null ? original.tenderSatFormaPago : undefined,
-      tenderCommissionPercent: comisionRevertida ? (original.tenderCommissionPercent ?? undefined) : undefined,
-      tenderCommissionAmount: comisionRevertida ? comisionRevertida.negated() : undefined,
+      // 🔴 Si el cajero escogió con qué devolver, la fila NO hereda el tipo del cobro: el dinero salió por OTRO
+      // medio y el corte, la póliza y la nota de crédito tienen que verlo así (spec 2026-09-30).
+      tenderTypeId: devolverCon ? undefined : original.tenderTypeId || undefined,
+      tenderRevision: devolverCon
+        ? undefined
+        : original.tenderTypeId && original.tenderRevision != null
+          ? original.tenderRevision
+          : undefined,
+      tenderLabel: devolverCon ? undefined : original.tenderTypeId && original.tenderLabel != null ? original.tenderLabel : undefined,
+      tenderCountsAsCash: devolverCon
+        ? undefined
+        : original.tenderTypeId && original.tenderCountsAsCash != null
+          ? original.tenderCountsAsCash
+          : undefined,
+      tenderCaptureTip: devolverCon
+        ? undefined
+        : original.tenderTypeId && original.tenderCaptureTip != null
+          ? original.tenderCaptureTip
+          : undefined,
+      tenderSatFormaPago: devolverCon
+        ? undefined
+        : original.tenderTypeId && original.tenderSatFormaPago != null
+          ? original.tenderSatFormaPago
+          : undefined,
+      tenderCommissionPercent: devolverCon ? undefined : comisionRevertida ? (original.tenderCommissionPercent ?? undefined) : undefined,
+      tenderCommissionAmount: devolverCon ? undefined : comisionRevertida ? comisionRevertida.negated() : undefined,
       // `fundsFlow` va aparte del bloque de arriba: un pago SIN tender también lo tiene
       // (lo estampa su punto de entrada), y es la autoridad de "¿esto estaba en el cajón?".
-      fundsFlow: original.fundsFlow ? (original.fundsFlow as PaymentFundsFlow) : undefined,
+      fundsFlow: devolverCon
+        ? devolverCon === 'CASH'
+          ? PaymentFundsFlow.CASH_DRAWER
+          : PaymentFundsFlow.EXTERNAL_RECORDED
+        : original.fundsFlow
+          ? (original.fundsFlow as PaymentFundsFlow)
+          : undefined,
       source: original.source ? (original.source as PaymentSource) : undefined,
       status: 'COMPLETED',
       type: PaymentType.REFUND,
@@ -578,6 +619,7 @@ export async function writeRefundInTx(
       processor: 'dashboard',
       processorData: {
         originalPaymentId: original.id,
+        originalMethod: original.method,
         refundReason: input.reason,
         note: input.note ?? null,
         amountCents: refundCents,
@@ -681,6 +723,10 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
   }
   if (input.tipRefundCents !== undefined && !esCantidadNoNegativaEnCentavos(input.tipRefundCents)) {
     throw new BadRequestError('tipRefundCents debe ser un entero seguro no negativo expresado en centavos')
+  }
+
+  if (input.refundMethod !== undefined && input.refundMethod !== 'CASH' && input.refundMethod !== 'BANK_TRANSFER') {
+    throw new BadRequestError('refundMethod debe ser CASH o BANK_TRANSFER')
   }
 
   logger.info('[REFUND.DASHBOARD] Issuing refund', {
@@ -975,7 +1021,9 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         shift: 'CLAIM_LIVE',
         provenance: 'MANUAL',
         bloqueado: cobro,
+        devolverCon: devolverConEfectivo(original, input.refundMethod),
       })
+      const devolverCon = devolverConEfectivo(original, input.refundMethod)
 
       return {
         refundPaymentId,
@@ -984,13 +1032,21 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         refundedItems,
         remainingAfterCents: Math.max(0, remainingBeforeCents - refundCents),
         refundAmountCents: refundCents,
-        // Semántica del pago ORIGINAL, para el movimiento de caja de abajo.
-        originalTender: {
-          method: original.method,
-          fundsFlow: original.fundsFlow,
-          tenderTypeId: original.tenderTypeId,
-          tenderCountsAsCash: original.tenderCountsAsCash,
-        },
+        originalMethod: original.method,
+        // Semántica con que SALIÓ el dinero, para el movimiento de caja de abajo.
+        refundTender: devolverCon
+          ? {
+              method: devolverCon,
+              fundsFlow: devolverCon === 'CASH' ? 'CASH_DRAWER' : 'EXTERNAL_RECORDED',
+              tenderTypeId: null,
+              tenderCountsAsCash: null,
+            }
+          : {
+              method: original.method,
+              fundsFlow: original.fundsFlow,
+              tenderTypeId: original.tenderTypeId,
+              tenderCountsAsCash: original.tenderCountsAsCash,
+            },
       }
     }, ORDER_LOCK_WAIT_BUDGET)
   } catch (error) {
@@ -1042,7 +1098,7 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
     await postCashRefundToDrawer({
       venueId: input.venueId,
       refundPaymentId: result.refundPaymentId,
-      ...result.originalTender,
+      ...result.refundTender,
       // El efectivo que sale es el TOTAL devuelto (venta + propina): el split
       // interno es contable, el cajón sólo ve billetes.
       amount: centsToNumber(result.refundAmountCents),
@@ -1151,6 +1207,8 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
       originalPaymentId: result.originalPaymentId,
       note: input.note ?? null,
       refundedItemCount: result.refundedItems.length,
+      refundMethod: input.refundMethod ?? null,
+      originalMethod: result.originalMethod,
       source: 'DASHBOARD',
     },
   })
