@@ -7,7 +7,7 @@ import { getMappings } from './accountMapping.service'
 import { resolveScopeOrNull } from './chartOfAccounts.service'
 import { postJournalEntry } from './journalEntry.service'
 import { splitPaymentIvaByOrderRates, grossByRateFromItems, mezclaDesdeTasas } from './ivaMath'
-import { paymentInFiscalScope } from './fiscalScope'
+import { paymentInFiscalScope, metodoParaAlcanceFiscal } from './fiscalScope'
 import { generateCogsPolicyForVenue } from './cogs.service'
 import { ivaDeDevolucion, processorDataDeDevoluciones } from './deliveryFiscalDelta'
 import { contabilidadPausada, contabilidadPausadaError, esExclusionContable } from './exclusionContable'
@@ -283,13 +283,15 @@ export async function generatePoliciesForVenue(
     // Alcance fiscal configurable: merchant excluido o efectivo sin opt-in → no se postea a los libros
     // (el gerencial lo sigue mostrando). Mismo predicado que el read-model de ingresos.
     const merchantFlag = p.merchantAccount?.fiscalConfig?.includeInAccounting ?? p.ecommerceMerchant?.fiscalConfig?.includeInAccounting
-    if (!paymentInFiscalScope(p.method, merchantFlag, includeCashInAccounting)) {
-      base.skipped++
-      continue
-    }
     // Una devolución es type=REFUND O cualquier pago con monto NEGATIVO (voids/ajustes legacy que el
     // read-model de ingresos también resta). Enrutar por SIGNO evita contar un negativo como venta positiva.
     const isRefund = toCents(p.amount) < 0 || p.type === PaymentType.REFUND
+    // Una devolución sigue el alcance de su VENTA (`originalMethod`), no el medio con que salió el dinero.
+    const metodoAlcance = isRefund ? metodoParaAlcanceFiscal(p.method, processorDataDeAjustes.get(p.id)) : p.method
+    if (!paymentInFiscalScope(metodoAlcance, merchantFlag, includeCashInAccounting)) {
+      base.skipped++
+      continue
+    }
     const key = isRefund ? `refund:${p.id}:v1` : `pay:${p.id}:v1`
     if (existing.has(key)) {
       base.alreadyPosted++

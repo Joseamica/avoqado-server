@@ -148,6 +148,19 @@ describe('getIncomeStatement (Capa A — estado de resultados)', () => {
     expect(r.fiscalRevenue.grossSalesCents).toBe(11600) // fiscal: solo el merchant incluido
   })
 
+  it('🔴 venta en EFECTIVO devuelta por transferencia: con el efectivo fuera de lo fiscal, la devolución tampoco resta', async () => {
+    p.payment.findMany
+      .mockResolvedValueOnce([
+        { id: 'v1', amount: 200, tipAmount: 0, type: 'REGULAR', method: PaymentMethod.CASH },
+        { id: 'r1', amount: -200, tipAmount: 0, type: PaymentType.REFUND, method: PaymentMethod.BANK_TRANSFER },
+      ])
+      .mockResolvedValueOnce([{ id: 'r1', processorData: { originalMethod: 'CASH' } }])
+    const r = await getIncomeStatement(VENUE, FILTERS)
+    expect(r.fiscalRevenue.grossSalesCents).toBe(0)
+    expect(r.fiscalRevenue.refundsCents).toBe(0)
+    expect(r.revenue.refundsCents).toBe(20000) // el gerencial la cuenta siempre
+  })
+
   // ---------- REGRESSION / INVARIANTS ----------
   it('never includes tips in revenue (reported separately)', async () => {
     p.payment.findMany.mockResolvedValue([row(100, 'REGULAR', 20)])

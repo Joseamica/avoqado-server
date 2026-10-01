@@ -165,6 +165,8 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
     'payments:refund',
     'orders:read', // Need to see original order
   ],
+  // Devolver en EFECTIVO un cobro que no fue en efectivo (founder, 1-oct-2026): sin reembolsar no se devuelve nada.
+  'payments:refund-to-cash': ['payments:refund-to-cash', 'payments:refund'],
 
   // Manual payment recording (ADMIN+) — captures payments received outside Avoqado
   // (cash, external terminal, bank transfer, etc.). Singular `payment:` namespace is
@@ -1012,6 +1014,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'payments:read',
     'payments:create',
     'payments:refund',
+    // «Devolver con: Efectivo de la caja» de un cobro que no fue en efectivo: el dinero sale del cajón — gerencia.
+    // ADMIN/OWNER lo cubren con 'payments:*'; de CASHIER para abajo no (el POS pide el código de un encargado).
+    'payments:refund-to-cash',
     'payments:resolve-no-instrument', // Cobro remoto: declarar «no se presentó tarjeta» libera la venta — decisión de gerencia
     'payments:reconcile-uncharged', // el cajero también lo tiene; gerencia lo conserva para poder resolverlo desde el dashboard
     'payment-link:read', // Can view and share existing payment links
@@ -1895,6 +1900,7 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
     'payments:read',
     'payments:create',
     'payments:refund',
+    'payments:refund-to-cash', // Devolver en efectivo un cobro que no fue en efectivo (MANAGER+)
     'payments:routing-read',
     'payments:routing-manage',
     // Cobro remoto: confirmar en la terminal que NO se presentó tarjeta (cierra el intento como OPERATOR_RECONCILED_NO_CHARGE y

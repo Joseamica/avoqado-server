@@ -12,6 +12,21 @@
  * es hacerlo caminar hasta el aparato para nada.
  */
 
+import { paymentCountsAsDrawerCash, paymentIsAvoqadoSettled } from '../shared/tenderSemantics'
+
+/** Lo que la regla necesita del cobro original. */
+export interface CobroParaDevolver {
+  method: string
+  source: string | null
+  externalSource: string | null
+  tenderSatFormaPago: string | null
+  fundsFlow: string | null
+  tenderTypeId: string | null
+  tenderCountsAsCash: boolean | null
+}
+
+export type DevolverCon = 'CASH' | 'BANK_TRANSFER'
+
 /** Lo único que la decisión necesita saber del cobro original. */
 export interface RefundablePaymentSnapshot {
   id: string
@@ -20,6 +35,8 @@ export interface RefundablePaymentSnapshot {
   status: string
   /** PaymentMethod como string. */
   method: string
+  /** PaymentSource como string: `TPV` = lo cobró nuestra terminal. */
+  source: string | null
   /** Monto de la venta, en PESOS (Decimal de Prisma ya convertido a número). */
   amount: number
   /** Propina, en PESOS. Es parte de lo que el cliente pagó. */
@@ -34,8 +51,26 @@ export type TerminalRefundTarget =
 
 export type TerminalRefundRejection = 'NOT_FOUND' | 'WRONG_VENUE' | 'NOT_COMPLETED' | 'NOT_A_CARD_PAYMENT' | 'ALREADY_REFUNDED'
 
-/** Los únicos métodos que una terminal sabe devolver: los que cobró con tarjeta. */
 const CARD_METHODS = new Set(['CREDIT_CARD', 'DEBIT_CARD'])
+
+/** Métodos que sólo existen por un procesador (o no son pesos): nunca se devuelven por otro medio. */
+const METODOS_DE_PROCESADOR = new Set(['DIGITAL_WALLET', 'CRYPTOCURRENCY'])
+
+/** Formas de pago SAT que son tarjeta: 04 crédito, 28 débito. */
+const FORMAS_SAT_DE_TARJETA = new Set(['04', '28'])
+
+/**
+ * ¿Este cobro se devuelve en la terminal? Sólo si fue con tarjeta presente en NUESTRA terminal.
+ *
+ * 🔴 Regla del founder (30-sep-2026): todo lo demás —transferencia, tipos de pago que crea el
+ * negocio, «Tarjeta (terminal externa)», una «Tarjeta de crédito» registrada a mano, historial
+ * importado— se reembolsa como el efectivo: aquí se registra y el dinero se entrega por fuera.
+ * El `method` solo no basta: en prod hay CREDIT_CARD con `source` APP/POS/OTHER que la terminal
+ * nunca cobró. La app lee este mismo veredicto (`refundOnTerminal` del detalle del cobro).
+ */
+export function seDevuelveEnTerminal(payment: { method: string; source: string | null }): boolean {
+  return CARD_METHODS.has(payment.method) && payment.source === 'TPV'
+}
 
 /**
  * Pesos → centavos sin arrastrar el error de punto flotante.
@@ -65,8 +100,12 @@ export function resolveTerminalRefundTarget(payment: RefundablePaymentSnapshot |
     }
   }
 
-  if (!CARD_METHODS.has(payment.method)) {
-    return { eligible: false, reason: 'NOT_A_CARD_PAYMENT', message: 'La terminal sólo puede devolver cobros con tarjeta.' }
+  if (!seDevuelveEnTerminal(payment)) {
+    return {
+      eligible: false,
+      reason: 'NOT_A_CARD_PAYMENT',
+      message: 'La terminal sólo puede devolver cobros con tarjeta hechos en la terminal.',
+    }
   }
 
   // La propina es parte de lo que el cliente pagó: si se devuelve la venta, se
@@ -78,4 +117,40 @@ export function resolveTerminalRefundTarget(payment: RefundablePaymentSnapshot |
   }
 
   return { eligible: true, remainingRefundableCents }
+}
+
+/**
+ * ¿El cajero puede escoger con qué devuelve el dinero (efectivo de la caja o transferencia)?
+ *
+ * 🔴 Regla del founder (30-sep-2026): sí en todo lo que no fue tarjeta. Nunca en una tarjeta —de nuestra
+ * terminal, de otra o registrada a mano—: el mercado entero la devuelve sólo a la tarjeta y Clip lo prohíbe
+ * por contrato. Tampoco en lo que liquida un procesador por nosotros (`paymentIsAvoqadoSettled`): devolverlo en
+ * efectivo registraría una devolución de comisión que el procesador nunca hizo. Ni en un pedido de plataforma
+ * de reparto: ese dinero nunca estuvo en el local.
+ *
+ * Fila SIN `fundsFlow` (anterior al sello, o del cobro rápido, que no lo estampa sin tipo del catálogo): el fallback
+ * de `paymentIsAvoqadoSettled` la cuenta como de Avoqado sólo porque no es efectivo, y eso es falso en el mostrador
+ * (QA en la CPad, 1-oct: la «Transferencia» de fábrica quedaba sin «Devolver con»). Aquí sólo es de procesador lo que
+ * entró EN LÍNEA. No cambia el saldo: el reembolso escribe su `VenueTransaction` y su costo igual con cualquier método.
+ */
+const CANALES_EN_LINEA = new Set(['WEB', 'QR', 'SDK', 'DASHBOARD_TEST'])
+
+export function sePuedeEscogerComoDevolver(payment: CobroParaDevolver): boolean {
+  if (CARD_METHODS.has(payment.method) || METODOS_DE_PROCESADOR.has(payment.method)) return false
+  if (payment.tenderSatFormaPago && FORMAS_SAT_DE_TARJETA.has(payment.tenderSatFormaPago)) return false
+  if (/^tarjeta/i.test(payment.externalSource ?? '')) return false
+  if (payment.source === 'DELIVERY_PLATFORM') return false
+  if (payment.fundsFlow == null) return !CANALES_EN_LINEA.has(payment.source ?? '')
+  return !paymentIsAvoqadoSettled(payment)
+}
+
+/**
+ * Lo escogido, normalizado: `undefined` = «por el mismo medio» (el reembolso hereda todo, como siempre).
+ * Igual al método del cobro, o efectivo sobre algo que YA entra al cajón (un vale), es el mismo medio.
+ * NO valida si se puede escoger: eso lo hace quien llama con `sePuedeEscogerComoDevolver`.
+ */
+export function devolverConEfectivo(original: CobroParaDevolver, refundMethod: DevolverCon | undefined): DevolverCon | undefined {
+  if (!refundMethod || refundMethod === original.method) return undefined
+  if (refundMethod === 'CASH' && paymentCountsAsDrawerCash(original)) return undefined
+  return refundMethod
 }

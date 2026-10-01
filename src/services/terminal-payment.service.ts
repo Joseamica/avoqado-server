@@ -5835,7 +5835,7 @@ class TerminalPaymentService {
 
     const payment = await prisma.payment.findUnique({
       where: { id: paymentId },
-      select: { id: true, venueId: true, status: true, method: true, amount: true, tipAmount: true, processorData: true },
+      select: { id: true, venueId: true, status: true, method: true, source: true, amount: true, tipAmount: true, processorData: true },
     })
 
     const processorData = (payment?.processorData ?? {}) as { refundedAmount?: number | string }
@@ -5846,6 +5846,7 @@ class TerminalPaymentService {
             venueId: payment.venueId,
             status: payment.status,
             method: payment.method,
+            source: payment.source,
             amount: Number(payment.amount),
             tipAmount: Number(payment.tipAmount),
             refundedAmount: Number(processorData.refundedAmount ?? 0),

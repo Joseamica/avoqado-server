@@ -1367,6 +1367,171 @@ describe('refund.dashboard.service', () => {
       expect(result.amount).toBe(154.5)
     })
   })
+
+  describe('🔴 escoger con qué se devuelve (refundMethod, 30-sep-2026)', () => {
+    const cobro = (over: Record<string, unknown> = {}) => ({
+      id: 'payment-original',
+      venueId: 'venue-1',
+      status: TransactionStatus.COMPLETED,
+      type: PaymentType.REGULAR,
+      method: 'BANK_TRANSFER',
+      source: 'OTHER',
+      amount: 200,
+      tipAmount: 0,
+      orderId: 'order-1',
+      shiftId: null,
+      merchantAccountId: null,
+      processorData: {},
+      fundsFlow: 'EXTERNAL_RECORDED',
+      externalSource: null,
+      tenderTypeId: 'tender-transf',
+      tenderRevision: 1,
+      tenderLabel: 'Transferencia',
+      tenderCountsAsCash: false,
+      tenderCaptureTip: true,
+      tenderSatFormaPago: '03',
+      tenderCommissionPercent: null,
+      ...over,
+    })
+    const reembolsar = (over: Record<string, unknown> = {}) =>
+      issueRefund({
+        venueId: 'venue-1',
+        paymentId: 'payment-original',
+        amount: 15000,
+        reason: 'RETURNED_GOODS',
+        staffId: 'staff-9',
+        ...over,
+      })
+    const dataDelReembolso = () => prismaMock.payment.create.mock.calls[0][0].data
+
+    beforeEach(() => {
+      prismaMock.$queryRaw.mockReset()
+      prismaMock.payment.create.mockResolvedValue({ id: 'refund-escogido-1' })
+      ;(prismaMock as any).cashDrawerSession.findFirst.mockResolvedValue({ id: 'session-1' })
+    })
+
+    it('transferencia devuelta en EFECTIVO: la fila dice CASH/CASH_DRAWER, sin tender, y sale de la caja', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro()]).mockResolvedValueOnce([])
+      await reembolsar({ refundMethod: 'CASH' })
+      const data = dataDelReembolso()
+      expect(data).toMatchObject({ method: 'CASH', fundsFlow: 'CASH_DRAWER' })
+      expect(data.tenderTypeId).toBeUndefined()
+      expect(data.tenderLabel).toBeUndefined()
+      expect(data.tenderSatFormaPago).toBeUndefined()
+      expect(data.processorData).toMatchObject({ originalMethod: 'BANK_TRANSFER' })
+      const ev = (prismaMock as any).cashDrawerEvent.createMany.mock.calls[0][0].data[0]
+      expect(ev).toMatchObject({ type: 'PAY_OUT' })
+      expect(Number(ev.amount)).toBe(150)
+    })
+
+    it('efectivo devuelto por TRANSFERENCIA: BANK_TRANSFER/EXTERNAL_RECORDED y NO toca la caja', async () => {
+      prismaMock.$queryRaw
+        .mockResolvedValueOnce([
+          cobro({
+            method: 'CASH',
+            source: 'APP',
+            fundsFlow: 'CASH_DRAWER',
+            tenderTypeId: null,
+            tenderLabel: null,
+            tenderSatFormaPago: null,
+            tenderRevision: null,
+            tenderCountsAsCash: null,
+            tenderCaptureTip: null,
+          }),
+        ])
+        .mockResolvedValueOnce([])
+      await reembolsar({ refundMethod: 'BANK_TRANSFER' })
+      expect(dataDelReembolso()).toMatchObject({ method: 'BANK_TRANSFER', fundsFlow: 'EXTERNAL_RECORDED' })
+      expect((prismaMock as any).cashDrawerEvent.createMany).not.toHaveBeenCalled()
+    })
+
+    it('🔴 un vale que ya entra al cajón + «Efectivo de la caja» = como hoy (hereda el tender)', async () => {
+      prismaMock.$queryRaw
+        .mockResolvedValueOnce([
+          cobro({
+            method: 'OTHER',
+            fundsFlow: 'CASH_DRAWER',
+            tenderTypeId: 'tender-vale',
+            tenderLabel: 'Vale',
+            tenderCountsAsCash: true,
+            tenderSatFormaPago: '08',
+          }),
+        ])
+        .mockResolvedValueOnce([])
+      await reembolsar({ refundMethod: 'CASH' })
+      expect(dataDelReembolso()).toMatchObject({ method: 'OTHER', tenderTypeId: 'tender-vale', fundsFlow: 'CASH_DRAWER' })
+    })
+
+    it('🔴 un vale que cuenta como efectivo + BANK_TRANSFER ⇒ BANK_TRANSFER/EXTERNAL_RECORDED, sin tender y SIN PAY_OUT', async () => {
+      prismaMock.$queryRaw
+        .mockResolvedValueOnce([
+          cobro({
+            method: 'OTHER',
+            fundsFlow: 'CASH_DRAWER',
+            tenderTypeId: 'tender-vale',
+            tenderLabel: 'Vale',
+            tenderCountsAsCash: true,
+            tenderSatFormaPago: '08',
+          }),
+        ])
+        .mockResolvedValueOnce([])
+      await reembolsar({ refundMethod: 'BANK_TRANSFER' })
+      const data = dataDelReembolso()
+      expect(data).toMatchObject({ method: 'BANK_TRANSFER', fundsFlow: 'EXTERNAL_RECORDED' })
+      expect(data.tenderTypeId).toBeUndefined()
+      expect((prismaMock as any).cashDrawerEvent.createMany).not.toHaveBeenCalled()
+    })
+
+    it('refundMethod igual al del cobro = como hoy (hereda tender y fundsFlow)', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro()]).mockResolvedValueOnce([])
+      await reembolsar({ refundMethod: 'BANK_TRANSFER' })
+      expect(dataDelReembolso()).toMatchObject({
+        method: 'BANK_TRANSFER',
+        fundsFlow: 'EXTERNAL_RECORDED',
+        tenderTypeId: 'tender-transf',
+        tenderLabel: 'Transferencia',
+      })
+    })
+
+    it('sin refundMethod = como hoy, y la fila guarda originalMethod igual', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro()]).mockResolvedValueOnce([])
+      await reembolsar()
+      expect(dataDelReembolso()).toMatchObject({ method: 'BANK_TRANSFER', tenderTypeId: 'tender-transf' })
+      expect(dataDelReembolso().processorData).toMatchObject({ originalMethod: 'BANK_TRANSFER' })
+    })
+
+    it.each([
+      ['tarjeta', { method: 'CREDIT_CARD', source: 'TPV', fundsFlow: 'AVOQADO_PROCESSED', tenderTypeId: null, tenderSatFormaPago: null }],
+      [
+        'tarjeta de otra terminal',
+        { method: 'OTHER', externalSource: 'Tarjeta (terminal externa)', tenderTypeId: null, tenderSatFormaPago: null },
+      ],
+    ])('🔴 %s + refundMethod ⇒ 400 y no escribe nada', async (_n, over) => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro(over)]).mockResolvedValueOnce([])
+      await expect(reembolsar({ refundMethod: 'CASH' })).rejects.toThrow('Este cobro sólo se devuelve por el mismo medio con que se pagó.')
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    })
+
+    it('caja cerrada: el reembolso en efectivo se emite igual, sin PAY_OUT', async () => {
+      ;(prismaMock as any).cashDrawerSession.findFirst.mockResolvedValue(null)
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro()]).mockResolvedValueOnce([])
+      const r = await reembolsar({ refundMethod: 'CASH' })
+      expect(r.status).toBe('COMPLETED')
+      expect((prismaMock as any).cashDrawerEvent.createMany).not.toHaveBeenCalled()
+    })
+
+    it('la bitácora dice con qué se devolvió', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([cobro()]).mockResolvedValueOnce([])
+      await reembolsar({ refundMethod: 'CASH' })
+      // Mismo espía que usa 'writes a REFUND_CREATED ActivityLog row…' en este archivo.
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'REFUND_CREATED',
+          data: expect.objectContaining({ refundMethod: 'CASH', originalMethod: 'BANK_TRANSFER' }),
+        }),
+      )
+    })
+  })
 })
 
 describe('issueRefund — replay MCP sin mover dinero de nuevo', () => {

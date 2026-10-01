@@ -186,6 +186,26 @@ describe('alcance fiscal configurable', () => {
     expect(r.posted).toBe(1)
   })
 
+  it('🔴 venta por TRANSFERENCIA devuelta en EFECTIVO (efectivo fuera de los libros): la devolución SÍ se postea', async () => {
+    p.fiscalEmisor.findFirst.mockResolvedValue({ includeCashInAccounting: false })
+    p.payment.findMany
+      .mockResolvedValueOnce([pay({ id: 'r9', amount: -100, type: PaymentType.REFUND, method: PaymentMethod.CASH })])
+      .mockResolvedValueOnce([{ id: 'r9', processorData: { originalMethod: 'BANK_TRANSFER' } }])
+    const r = await generatePoliciesForVenue('v1')
+    expect(r.posted).toBe(1)
+  })
+
+  it('🔴 venta en EFECTIVO devuelta por TRANSFERENCIA (efectivo fuera de los libros): la devolución se salta', async () => {
+    p.fiscalEmisor.findFirst.mockResolvedValue({ includeCashInAccounting: false })
+    p.payment.findMany
+      .mockResolvedValueOnce([pay({ id: 'r8', amount: -100, type: PaymentType.REFUND, method: PaymentMethod.BANK_TRANSFER })])
+      .mockResolvedValueOnce([{ id: 'r8', processorData: { originalMethod: 'CASH' } }])
+    const r = await generatePoliciesForVenue('v1')
+    expect(r.posted).toBe(0)
+    expect(r.skipped).toBe(1)
+    expect(mockPost).not.toHaveBeenCalled()
+  })
+
   it('un MERCHANT con includeInAccounting=false queda fuera de las pólizas', async () => {
     p.payment.findMany.mockResolvedValue([
       pay({ id: 'in', amount: 100, method: PaymentMethod.CREDIT_CARD }),

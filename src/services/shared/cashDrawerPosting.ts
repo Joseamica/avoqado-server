@@ -340,10 +340,8 @@ export type CashRefundDrawerOutcome = CashSaleDrawerOutcome
  * faltante… pero con un movimiento fechado, con nombre y con motivo que lo explica. Un
  * faltante explicado es infinitamente más barato que el sobrante mudo de hoy.
  *
- * ⚠️ LÍMITE CONOCIDO (defecto separado, NO se arregla aquí): el sistema asume que el dinero
- * se devolvió POR DONDE ENTRÓ. La semántica se resuelve sobre el pago ORIGINAL porque es lo
- * único que el servidor recibe —la app no manda cómo se entregó el dinero—. Si se cobró con
- * tarjeta y se devolvió en efectivo (o al revés), el corte descuadra en ambas direcciones.
+ * ℹ️ El cajero puede escoger con qué devuelve (`refundMethod`): la semántica del cajón se resuelve
+ * sobre cómo SALIÓ el dinero (lo escogido), no sobre cómo entró; sin elección, por donde entró.
  */
 export async function postCashRefundToDrawer(posting: CashRefundDrawerPosting): Promise<CashRefundDrawerOutcome> {
   try {

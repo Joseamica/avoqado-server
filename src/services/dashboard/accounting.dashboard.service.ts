@@ -12,7 +12,7 @@ import {
 } from '../fiscal/ivaMath'
 import type { IvaTratamiento } from '../fiscal/ivaTratamiento'
 import { ivaDeDevolucion, processorDataDeDevoluciones } from '../fiscal/deliveryFiscalDelta'
-import { paymentInFiscalScope } from '../fiscal/fiscalScope'
+import { paymentInFiscalScope, metodoParaAlcanceFiscal } from '../fiscal/fiscalScope'
 import { computePeriodCogsCents } from '../fiscal/cogs.service'
 
 /**
@@ -210,7 +210,11 @@ export async function getIncomeStatement(venueId: string, filters: IncomeStateme
     const amountCents = toCents(r.amount) // con signo: las devoluciones ya vienen negativas
     const mezcla = mezclaPorTratamiento(r.order?.items ?? [])
     const merchantFlag = r.merchantAccount?.fiscalConfig?.includeInAccounting ?? r.ecommerceMerchant?.fiscalConfig?.includeInAccounting
-    const inFiscal = paymentInFiscalScope(r.method, merchantFlag, includeCashInAccounting)
+    const inFiscal = paymentInFiscalScope(
+      r.type === PaymentType.REFUND ? metodoParaAlcanceFiscal(r.method, processorDataDeAjustes.get(r.id)) : r.method,
+      merchantFlag,
+      includeCashInAccounting,
+    )
 
     if (r.type === PaymentType.REFUND) {
       const magnitudeCents = Math.abs(amountCents)
