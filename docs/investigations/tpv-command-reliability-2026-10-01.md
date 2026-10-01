@@ -54,3 +54,16 @@ disponible en el entorno de QA). No se otorgaron permisos reales en el wizard ni
 Sin red el comando queda pendiente y el recibo cifrado conserva lo que ya empezó. Una ejecución incierta tras morir el proceso no se repite
 a ciegas. La recuperación recorre páginas de diez mientras hay progreso; fallos o actividad sensible esperan otro evento. Antes de ejecutar
 se revalidan destino y comercios. Estas reglas tienen regresiones automáticas; falta comprobar red/SDK y consumo en PAX/Nexgo físicos.
+
+## Schema de la base local compartida — corrección posterior
+
+Otra sesión detectó que el servidor compartido ya leía los nuevos campos mientras `av-db-25` todavía no tenía las migraciones: el clon de QA
+sí las tenía. Fue una omisión de esta sesión. PSQL confirmó la ausencia de los tres campos y los dos índices.
+
+Se aplicaron sólo las dos migraciones propias en una transacción y se registraron con `migrate resolve --applied`, URLs locales y
+`USE_RENDER_DB=false`. Checksum exacto, columnas nullable, índices válidos y consulta Prisma real aprobados. Se conservaron 30 terminales y
+cero comandos; no se reinició ni vació la base/servidor compartidos. Evidencia: `/tmp/tpv-local-migration-20261001/report.md`.
+
+Las migraciones están en el mismo commit de backend que el código. `render.yaml` ya ejecuta `npm run migrate:deploy:bounded` en
+`preDeployCommand`; no se modificó ni desplegó ese servicio. Antes de publicar, comprobar ese gate y aplicar backend con migraciones antes
+del APK/UI. No basta generar el cliente Prisma.
