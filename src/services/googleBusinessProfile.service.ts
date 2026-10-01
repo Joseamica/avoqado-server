@@ -164,18 +164,23 @@ export interface GoogleReview {
   } | null
 }
 
+// Cada llamada va a la API que la atiende (docs de Google, verificado 2026-10-01): cuentas en Account
+// Management, sucursales en Business Information y reseñas en la v4, que nunca se migró a v1.
+const ACCOUNTS_API = 'https://mybusinessaccountmanagement.googleapis.com/v1'
+const LOCATIONS_API = 'https://mybusinessbusinessinformation.googleapis.com/v1'
+const REVIEWS_API = 'https://mybusiness.googleapis.com/v4'
+
+const STAR_RATING: Record<string, number> = { ONE: 1, TWO: 2, THREE: 3, FOUR: 4, FIVE: 5 }
+
 /**
- * List Google Business Profile locations for the authenticated user
- *
- * TODO: Implement actual Google Business Profile API call
- * The Google My Business API v4 has been deprecated.
- * Use the Google Business Profile API or Google Places API instead.
- * Documentation: https://developers.google.com/my-business/content/overview
+ * List Google Business Profile locations for the authenticated user.
+ * Returns `name` as the full `accounts/{a}/locations/{l}` path the reviews API needs
+ * (Business Information alone returns only `locations/{l}`).
  */
 export async function listLocations(accessToken: string): Promise<GoogleLocation[]> {
   try {
     // Step 1: Get list of accounts
-    const accountsResponse = await fetch('https://mybusinessbusinessinformation.googleapis.com/v1/accounts', {
+    const accountsResponse = await fetch(`${ACCOUNTS_API}/accounts`, {
       headers: {
         Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
@@ -196,33 +201,36 @@ export async function listLocations(accessToken: string): Promise<GoogleLocation
       return []
     }
 
-    // Step 2: Get locations for the first account (most users have only one)
-    const accountName = accounts[0].name // Format: "accounts/{accountId}"
+    // Step 2: Locations of the first account that has any. The personal account usually comes first and
+    // is empty when the business lives in a location group.
+    for (const account of accounts) {
+      const accountName = account.name // Format: "accounts/{accountId}"
 
-    const locationsResponse = await fetch(
-      `https://mybusinessbusinessinformation.googleapis.com/v1/${accountName}/locations?readMask=name,title,metadata`,
-      {
+      const locationsResponse = await fetch(`${LOCATIONS_API}/${accountName}/locations?readMask=name,title,metadata`, {
         headers: {
           Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
         },
-      },
-    )
+      })
 
-    if (!locationsResponse.ok) {
-      const errorData = await locationsResponse.json()
-      logger.error('Error fetching Google locations:', errorData)
-      throw new AppError(`Google API error: ${errorData.error?.message || 'Unknown error'}`, locationsResponse.status)
+      if (!locationsResponse.ok) {
+        const errorData = await locationsResponse.json()
+        logger.error('Error fetching Google locations:', errorData)
+        throw new AppError(`Google API error: ${errorData.error?.message || 'Unknown error'}`, locationsResponse.status)
+      }
+
+      const locationsData: any = await locationsResponse.json()
+      const locations = locationsData.locations || []
+      if (locations.length === 0) continue
+
+      return locations.map((location: any) => ({
+        name: `${accountName}/${location.name}`, // "accounts/123/locations/456"
+        title: location.title || 'Unnamed Location',
+        placeId: location.metadata?.placeId,
+      }))
     }
 
-    const locationsData: any = await locationsResponse.json()
-    const locations = locationsData.locations || []
-
-    return locations.map((location: any) => ({
-      name: location.name, // Resource name (e.g., "accounts/123/locations/456")
-      title: location.title || location.locationName || 'Unnamed Location',
-      placeId: location.metadata?.placeId,
-    }))
+    return []
   } catch (error: any) {
     if (error instanceof AppError) throw error
     logger.error('Error listing locations:', error)
@@ -251,31 +259,39 @@ export async function fetchReviews(venueId: string): Promise<{ reviews: GoogleRe
   }
 
   try {
-    // Fetch reviews using My Business Account Management API
-    // Note: The location name format is "accounts/{accountId}/locations/{locationId}"
-    const reviewsResponse = await fetch(`https://mybusinessaccountmanagement.googleapis.com/v1/${venue.googlePlaceId}/reviews`, {
-      headers: {
-        Authorization: `Bearer ${credentials.access_token}`,
-        'Content-Type': 'application/json',
-      },
-    })
+    // googlePlaceId holds "accounts/{accountId}/locations/{locationId}". Google pages at 50 max.
+    // ponytail: capped at 20 pages (1,000 newest reviews); raise if a venue ever has more.
+    const rawReviews: any[] = []
+    let pageToken: string | undefined
+    for (let page = 0; page < 20; page++) {
+      const query = `pageSize=50${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`
+      const reviewsResponse = await fetch(`${REVIEWS_API}/${venue.googlePlaceId}/reviews?${query}`, {
+        headers: {
+          Authorization: `Bearer ${credentials.access_token}`,
+          'Content-Type': 'application/json',
+        },
+      })
 
-    if (!reviewsResponse.ok) {
-      const errorData = await reviewsResponse.json()
-      logger.error('Error fetching Google reviews:', errorData)
-      throw new AppError(`Google API error: ${errorData.error?.message || 'Unknown error'}`, reviewsResponse.status)
+      if (!reviewsResponse.ok) {
+        const errorData = await reviewsResponse.json()
+        logger.error('Error fetching Google reviews:', errorData)
+        throw new AppError(`Google API error: ${errorData.error?.message || 'Unknown error'}`, reviewsResponse.status)
+      }
+
+      const reviewsData: any = await reviewsResponse.json()
+      rawReviews.push(...(reviewsData.reviews || []))
+      pageToken = reviewsData.nextPageToken
+      if (!pageToken) break
     }
 
-    const reviewsData: any = await reviewsResponse.json()
-
     return {
-      reviews: (reviewsData.reviews || []).map((review: any) => ({
+      reviews: rawReviews.map((review: any) => ({
         reviewId: review.name?.split('/').pop() || review.reviewId,
         reviewer: {
           displayName: review.reviewer?.displayName || 'Anonymous',
           profilePhotoUrl: review.reviewer?.profilePhotoUrl,
         },
-        starRating: review.starRating || 0,
+        starRating: STAR_RATING[review.starRating] ?? 0,
         comment: review.comment || '',
         createTime: review.createTime,
         updateTime: review.updateTime,
@@ -296,8 +312,6 @@ export async function fetchReviews(venueId: string): Promise<{ reviews: GoogleRe
 
 /**
  * Post a review response to Google Business Profile
- *
- * TODO: Implement actual Google Business Profile API call for posting review responses
  * Documentation: https://developers.google.com/my-business/reference/rest/v4/accounts.locations.reviews/updateReply
  */
 export async function postReviewResponse(venueId: string, googleReviewId: string, responseText: string) {
@@ -318,11 +332,10 @@ export async function postReviewResponse(venueId: string, googleReviewId: string
   }
 
   try {
-    // Update review reply using My Business Account Management API
     // The review name format is "accounts/{accountId}/locations/{locationId}/reviews/{reviewId}"
     const reviewName = `${venue.googlePlaceId}/reviews/${googleReviewId}`
 
-    const replyResponse = await fetch(`https://mybusinessaccountmanagement.googleapis.com/v1/${reviewName}/reply`, {
+    const replyResponse = await fetch(`${REVIEWS_API}/${reviewName}/reply`, {
       method: 'PUT',
       headers: {
         Authorization: `Bearer ${credentials.access_token}`,
