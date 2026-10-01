@@ -57,8 +57,21 @@ describe('phonesMatch', () => {
     expect(phonesMatch(undefined, undefined)).toBe(false)
   })
 
-  it('falls back to last-10 match when one side is not valid E.164', () => {
-    // "5512345678xx" is unparseable; last-10 of both is 5512345678
-    expect(phonesMatch('5512345678', '99-5512345678')).toBe(true)
+  // 🔴 Auditoría 2026-10-01: con un lado inválido se comparaban sólo los últimos 10 dígitos, así que un `+1 551…` (válido, del
+  // atacante) se quedaba con la cuenta de un `+521 55…` (formato viejo, de la víctima). Ahora: formatos viejos convertidos y
+  // E.164 idéntico; lo que no se entiende no empata con nada.
+  it('los formatos mexicanos viejos (+521, 044, 045) siguen encontrando a su dueño', () => {
+    expect(phonesMatch('+5215512345678', '+525512345678')).toBe(true)
+    expect(phonesMatch('521 55 1234 5678', '+525512345678')).toBe(true)
+    expect(phonesMatch('044 55 1234 5678', '+525512345678')).toBe(true)
+    expect(phonesMatch('045 (55) 1234-5678', '+525512345678')).toBe(true)
+  })
+
+  it('un número de otro país con los mismos 10 dígitos NO empata con un formato mexicano viejo', () => {
+    expect(phonesMatch('+5215512345678', '+15512345678')).toBe(false)
+  })
+
+  it('un número que no se entiende no empata con nada (falla cerrada)', () => {
+    expect(phonesMatch('5512345678', '99-5512345678')).toBe(false)
   })
 })

@@ -11,6 +11,12 @@ type ProviderProfile = {
   providerSubject: string
   email?: string | null
   emailVerified: boolean
+  /**
+   * 🔴 Toma de cuentas (auditoría 2026-10-01): sólo un correo que el proveedor GARANTIZA puede enlazar una cuenta existente o
+   * quedar como el correo del Consumer. Google sólo es autoridad si está verificado y es `@gmail.com` o trae `hd`; Apple declara
+   * verificado el correo que entrega. Con un correo no confiable se entra sólo por `providerSubject`.
+   */
+  emailTrusted: boolean
   firstName?: string | null
   lastName?: string | null
   avatarUrl?: string | null
@@ -53,11 +59,13 @@ async function verifyGoogleIdToken(idToken: string): Promise<ProviderProfile> {
   if (!payload?.sub) throw new AuthenticationError('Token de Google invalido')
 
   const fromName = splitName(payload.name)
+  const email = payload.email?.toLowerCase() ?? null
   return {
     provider: AuthProvider.GOOGLE,
     providerSubject: payload.sub,
-    email: payload.email?.toLowerCase() ?? null,
+    email,
     emailVerified: payload.email_verified === true,
+    emailTrusted: payload.email_verified === true && !!email && (email.endsWith('@gmail.com') || !!payload.hd),
     firstName: payload.given_name ?? fromName.firstName,
     lastName: payload.family_name ?? fromName.lastName,
     avatarUrl: payload.picture ?? null,
@@ -101,6 +109,7 @@ async function verifyAppleIdToken(idToken: string): Promise<ProviderProfile> {
     providerSubject: payload.sub,
     email: typeof payload.email === 'string' ? payload.email.toLowerCase() : null,
     emailVerified,
+    emailTrusted: emailVerified,
   }
 }
 
@@ -160,7 +169,7 @@ export async function loginWithOAuth(input: { provider: 'GOOGLE' | 'APPLE'; idTo
         where: { id: existingAccount.consumerId },
         data: {
           lastLoginAt: new Date(),
-          ...(profile.email && !existingAccount.consumer.email ? { email: profile.email } : {}),
+          ...(profile.email && profile.emailTrusted && !existingAccount.consumer.email ? { email: profile.email } : {}),
           ...(firstName && !existingAccount.consumer.firstName ? { firstName } : {}),
           ...(lastName && !existingAccount.consumer.lastName ? { lastName } : {}),
           ...(profile.avatarUrl ? { avatarUrl: profile.avatarUrl } : {}),
@@ -168,17 +177,18 @@ export async function loginWithOAuth(input: { provider: 'GOOGLE' | 'APPLE'; idTo
       })
     }
 
-    const consumerByEmail = profile.email
-      ? await tx.consumer.findUnique({
-          where: { email: profile.email },
-        })
-      : null
+    const consumerByEmail =
+      profile.email && profile.emailTrusted
+        ? await tx.consumer.findUnique({
+            where: { email: profile.email },
+          })
+        : null
 
     const target =
       consumerByEmail ??
       (await tx.consumer.create({
         data: {
-          email: profile.email ?? null,
+          email: profile.emailTrusted ? (profile.email ?? null) : null,
           firstName: firstName ?? null,
           lastName: lastName ?? null,
           avatarUrl: profile.avatarUrl ?? null,

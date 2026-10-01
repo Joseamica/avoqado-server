@@ -5,6 +5,8 @@
 import crypto from 'crypto'
 import { generateAPIKeys } from '@/middlewares/sdk-auth.middleware'
 
+const huella = (llave: string) => crypto.createHash('sha256').update(llave).digest('hex')
+
 describe('generateAPIKeys', () => {
   afterEach(() => jest.restoreAllMocks())
 
@@ -19,11 +21,13 @@ describe('generateAPIKeys', () => {
       .mockReturnValueOnce(Buffer.alloc(32, 0xaa) as any)
       .mockReturnValueOnce(Buffer.alloc(32, 0xbb) as any)
 
-    const { publicKey, secretKey } = generateAPIKeys(sandboxMode)
+    const { publicKey, secretKey, secretKeyHash } = generateAPIKeys(sandboxMode)
 
     expect(spy).toHaveBeenCalledTimes(2)
     expect(publicKey).toBe(`pk_${mode}_${'aa'.repeat(32)}`)
     expect(secretKey).toBe(`sk_${mode}_${'bb'.repeat(32)}`)
+    // Lo que se guarda es la huella de ESTA secreta: con la de otra, el comercio no podría autenticarse.
+    expect(secretKeyHash).toBe(huella(secretKey))
   })
 
   it('conserva el formato que usan los comercios', () => {

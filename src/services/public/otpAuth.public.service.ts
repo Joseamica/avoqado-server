@@ -7,6 +7,7 @@ import { sendOtpWhatsApp } from '../whatsapp.service'
 import emailService from '../email.service'
 import { generateCustomerToken } from '../../jwt.service'
 import { phonesMatch, phoneLast10 } from '@/utils/phone'
+import { findCustomerIdByPhone } from '@/services/public/customerPhoneLookup'
 import { activateCustomerAccount } from '@/services/public/customerBookingAccess.service'
 
 const TTL_MS = 10 * 60 * 1000
@@ -74,14 +75,20 @@ export async function verifyOtp(args: { venueId: string; channel: 'whatsapp' | '
     orderBy: { createdAt: 'desc' },
   })
   if (!challenge || challenge.expiresAt.getTime() <= Date.now()) throw new BadRequestError('El código expiró. Pide uno nuevo.')
-  if (challenge.attempts >= challenge.maxAttempts) {
-    await prisma.otpChallenge.update({ where: { id: challenge.id }, data: { consumedAt: new Date() } })
-    throw new BadRequestError('Demasiados intentos. Pide un código nuevo.')
-  }
-  if (challenge.codeHash !== hashOtpCode(args.code)) {
-    await prisma.otpChallenge.update({ where: { id: challenge.id }, data: { attempts: challenge.attempts + 1 } })
-    throw new BadRequestError('Código incorrecto.')
-  }
+  // 🔴 El intento se aparta en la base ANTES de comparar (auditoría 2026-10-01): escribir `attempts + 1` sobre lo leído aquí
+  // dejaba que varias verificaciones simultáneas probaran más de `maxAttempts` códigos.
+  const apartado =
+    challenge.attempts < challenge.maxAttempts &&
+    (
+      await prisma.otpChallenge.updateMany({
+        where: { id: challenge.id, consumedAt: null, attempts: { lt: challenge.maxAttempts } },
+        data: { attempts: { increment: 1 } },
+      })
+    ).count === 1
+  // Sin intento que apartar sólo se rechaza: marcar el reto como usado le quemaría el último intento correcto a quien sí lo apartó
+  // y va a mitad de su verificación. Con `attempts = maxAttempts` el reto ya no admite más pruebas.
+  if (!apartado) throw new BadRequestError('Demasiados intentos. Pide un código nuevo.')
+  if (challenge.codeHash !== hashOtpCode(args.code)) throw new BadRequestError('Código incorrecto.')
 
   // Fase 1: consumir el reto, resolver la identidad (Consumer + Customer + vínculo) y decidir
   // la aprobación viven en UNA transacción. Antes eran escrituras sueltas: si algo tronaba a
@@ -184,40 +191,12 @@ async function resolveIdentity(tx: Prisma.TransactionClient, venueId: string, ke
   let customer = await tx.customer.findUnique({ where: where as any })
   if (!customer) customer = await tx.customer.findFirst({ where: { venueId, consumerId: consumer.id } })
 
-  // 🔴 Tercer intento: por los ULTIMOS 10 DIGITOS del telefono.
-  //
-  // Los dos de arriba comparan el telefono normalizado a E.164 (`+525512345678`),
-  // pero los clientes que ya existen lo tienen guardado como lo escribio quien los dio
-  // de alta: `5512345678`, `55 1234 5678`, `(55) 1234-5678`. Sin este paso no se les
-  // reconoce y se les crea una ficha NUEVA: el cliente pierde sus sellos, sus puntos y
-  // su historial, y el negocio acaba con dos fichas de la misma persona.
-  //
-  // Medido en la base local el 2026-08-27: 681 de 682 clientes con telefono lo tienen
-  // SIN normalizar — o sea, practicamente todos. Salio al probar el cartel del
-  // mostrador, que es lo que va a mandar a TODOS los clientes por este camino.
-  //
-  // Es el MISMO patron que `findGuestNameFromPastReservations` ya usaba aqui abajo
-  // para las reservaciones: filtro barato en SQL por los ultimos 10 digitos, y
-  // `phonesMatch` como verificacion canonica — porque dos paises distintos pueden
-  // compartir esos 10 digitos y no son la misma persona.
+  // 🔴 Tercer intento: el mismo teléfono guardado con otro formato (`findCustomerIdByPhone`: 681 de 682 clientes lo tienen
+  // como lo escribió quien los dio de alta). Salió al probar el cartel del mostrador, que manda a TODOS por este camino.
+  // Se relee por Prisma: el resto de la función espera el modelo completo (`active`, `consumerId`).
   if (!customer && key.phone) {
-    const last10 = phoneLast10(key.phone)
-    if (last10) {
-      const candidatos = await tx.$queryRaw<{ id: string; phone: string | null }[]>`
-        SELECT "id", "phone"
-        FROM "Customer"
-        WHERE "venueId" = ${venueId}
-          AND "phone" IS NOT NULL
-          AND right(regexp_replace("phone", '[^0-9]', '', 'g'), 10) = ${last10}
-        ORDER BY "createdAt" ASC
-        LIMIT 20
-      `
-      const elegido = candidatos.find(c => phonesMatch(c.phone, key.phone))
-      // Se relee por Prisma en vez de usar la fila cruda: el resto de la funcion
-      // espera el modelo completo (`active`, `consumerId`), no las dos columnas
-      // que pidio el filtro.
-      if (elegido) customer = await tx.customer.findUnique({ where: { id: elegido.id } })
-    }
+    const elegido = await findCustomerIdByPhone(tx, venueId, key.phone)
+    if (elegido) customer = await tx.customer.findUnique({ where: { id: elegido } })
   }
 
   if (!customer) {

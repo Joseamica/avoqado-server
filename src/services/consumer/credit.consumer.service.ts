@@ -3,7 +3,6 @@ import { VenueStatus } from '@prisma/client'
 import { BadRequestError, ForbiddenError } from '@/errors/AppError'
 import { createCheckoutSession, fulfillPurchase } from '@/services/dashboard/creditPack.public.service'
 import { ensureVenueCustomerActivated } from '@/services/consumer/reservation.consumer.service'
-import { activateCustomerAccount } from '@/services/public/customerBookingAccess.service'
 
 function buildCreditPackPaymentReturnUrl(path: 'success' | 'cancelled', venueSlug: string) {
   const baseUrl = (process.env.CONSUMER_APP_RETURN_URL || 'avoqado://payment-result').replace(/\/$/, '')
@@ -70,13 +69,13 @@ export async function finalizeCreditCheckout(consumerId: string, sessionId: stri
   const [consumer, hydrated] = await Promise.all([
     prisma.consumer.findUnique({
       where: { id: consumerId },
-      select: { id: true, email: true, phone: true },
+      select: { id: true },
     }),
     prisma.creditPackPurchase.findUnique({
       where: { id: purchase.id },
       include: {
         customer: {
-          select: { id: true, consumerId: true, email: true, phone: true },
+          select: { id: true, consumerId: true },
         },
         creditPack: {
           select: { id: true, name: true },
@@ -89,29 +88,12 @@ export async function finalizeCreditCheckout(consumerId: string, sessionId: stri
     throw new BadRequestError('No se pudo confirmar la compra')
   }
 
-  const linkedConsumer = hydrated.customer.consumerId
-  if (linkedConsumer && linkedConsumer !== consumerId) {
+  // 🔴 Toma de cuentas (auditoría de seguridad 2026-10-01): aquí se le ligaba al Consumer que llama la ficha de CUALQUIER compra
+  // sin cuenta —p. ej. una de invitado hecha con el teléfono o el correo de otra persona— y se le copiaban su correo y teléfono.
+  // La compra legítima desde la app nace con la ficha ya ligada y activada (`createCreditCheckoutForConsumer` →
+  // `ensureVenueCustomerActivated`), así que sólo se confirma lo que ya es de quien llama.
+  if (hydrated.customer.consumerId !== consumerId) {
     throw new ForbiddenError('La compra no corresponde a este usuario')
-  }
-
-  // If this purchase customer is not linked yet, bind it to the authenticated
-  // consumer and enrich missing contact fields for future lookups.
-  if (!linkedConsumer) {
-    // 🔴 Fase 1: este vínculo se hacía FUERA del protocolo de activación, así que creaba
-    // cuentas de app que nunca pedían aprobación (auditoría §4bis). Ahora liga y activa en
-    // la MISMA transacción, con el mismo origen que la reserva. Idempotente: si la cuenta
-    // ya estaba activa, `activateCustomerAccount` no recalcula nada.
-    await prisma.$transaction(async tx => {
-      await tx.customer.update({
-        where: { id: hydrated.customer.id },
-        data: {
-          consumerId,
-          ...(consumer.email && !hydrated.customer.email ? { email: consumer.email } : {}),
-          ...(consumer.phone && !hydrated.customer.phone ? { phone: consumer.phone } : {}),
-        },
-      })
-      await activateCustomerAccount(tx, { customerId: hydrated.customer.id, venueId: hydrated.venueId, origin: 'CONSUMER' })
-    })
   }
 
   return {

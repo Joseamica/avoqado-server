@@ -19,16 +19,18 @@ export function phoneLast10(input: string): string | null {
   return digits.length >= 10 ? digits.slice(-10) : null
 }
 
-// True when a and b are the same phone number. Prefers canonical E.164 equality
-// (via normalizePhoneE164); when one side can't be parsed to a valid E.164
-// number (messy historical/guest-typed data), falls back to comparing the last
-// 10 digits. Returns false if either side is empty.
+// Formatos mexicanos viejos que libphonenumber ya no acepta: `+521`/`521` (celular) y `044`/`045` (marcación a celular),
+// seguidos de los 10 dígitos. Se reescriben a `+52` + 10 dígitos; lo demás se deja como venía.
+function sinPrefijoMexicanoViejo(input: string): string {
+  const digits = input.replace(/\D/g, '')
+  return /^(521|04[45])\d{10}$/.test(digits) ? `+52${digits.slice(3)}` : input
+}
+
+// True when a and b are the same phone number: E.164 idéntico tras convertir los formatos mexicanos viejos. 🔴 Si un lado no
+// se entiende, NO empata (auditoría 2026-10-01): comparar sólo los últimos 10 dígitos le daba a un `+1 551…` la cuenta de un
+// `+521 55…`. `phoneLast10` sigue sirviendo como prefiltro SQL. Returns false if either side is empty.
 export function phonesMatch(a: string | null | undefined, b: string | null | undefined): boolean {
   if (!a || !b) return false
-  const na = normalizePhoneE164(a)
-  const nb = normalizePhoneE164(b)
-  if (na && nb) return na === nb
-  const la = phoneLast10(a)
-  const lb = phoneLast10(b)
-  return !!la && la === lb
+  const na = normalizePhoneE164(sinPrefijoMexicanoViejo(a))
+  return !!na && na === normalizePhoneE164(sinPrefijoMexicanoViejo(b))
 }

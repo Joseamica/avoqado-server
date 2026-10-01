@@ -58,7 +58,6 @@ import {
   publicPacksParamsSchema,
   publicBalanceQuerySchema,
   publicCheckoutSchema,
-  customerRegisterSchema,
   customerLoginSchema,
   customerUpdateProfileSchema,
   otpRequestSchema,
@@ -306,7 +305,8 @@ router.post(
 
 // ---- Customer Portal (authenticated) ----
 
-router.post('/venues/:venueSlug/customer/register', authLimit, validateRequest(customerRegisterSchema), customerPortalController.register)
+// Toda cuenta nueva se crea con código (seguridad, 1-oct): esta ruta sólo responde, igual siempre, para páginas viejas en caché.
+router.post('/venues/:venueSlug/customer/register', authLimit, customerPortalController.register)
 
 router.post('/venues/:venueSlug/customer/login', authLimit, validateRequest(customerLoginSchema), customerPortalController.login)
 

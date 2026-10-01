@@ -163,19 +163,6 @@ export const publicPacksParamsSchema = z.object({
   }),
 })
 
-export const customerRegisterSchema = z.object({
-  params: z.object({
-    venueSlug: z.string().min(1),
-  }),
-  body: z.object({
-    email: z.string().email('Correo inválido'),
-    password: z.string().min(6, 'La contraseña debe tener al menos 6 caracteres'),
-    phone: z.string().optional(),
-    firstName: z.string().optional(),
-    lastName: z.string().optional(),
-  }),
-})
-
 export const customerLoginSchema = z.object({
   params: z.object({
     venueSlug: z.string().min(1),
@@ -194,10 +181,8 @@ export const customerUpdateProfileSchema = z.object({
     .object({
       firstName: z.string().max(50, 'El nombre es muy largo').optional(),
       lastName: z.string().max(50, 'El apellido es muy largo').optional(),
-      phone: z
-        .string()
-        .regex(/^\+?[0-9]{10,15}$/, 'El teléfono debe tener entre 10 y 15 dígitos')
-        .optional(),
+      // El teléfono ya no se cambia desde aquí (seguridad, 1-oct): sólo se acota; el servicio decide si es el mismo y lo ignora.
+      phone: z.string().max(32, 'El teléfono es muy largo').optional(),
     })
     .refine(data => Object.keys(data).length > 0, {
       message: 'Se requiere al menos un campo para actualizar',

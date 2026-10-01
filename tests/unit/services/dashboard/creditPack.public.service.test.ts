@@ -155,6 +155,8 @@ const createMockBalance = (overrides: Record<string, any> = {}) => ({
 describe('CreditPack Public Service', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    // La búsqueda del teléfono guardado con otro formato no encuentra a nadie, salvo que la prueba diga otra cosa.
+    prismaMock.$queryRaw.mockResolvedValue([])
   })
 
   // ==========================================
@@ -425,15 +427,47 @@ describe('CreditPack Public Service', () => {
       expect(prismaMock.customer.findFirst).not.toHaveBeenCalled()
     })
 
-    it('sin customerId (invitado): maxPerCustomer sigue resolviendo por email como hoy', async () => {
+    it('sin customerId (invitado) y sin teléfono: maxPerCustomer resuelve por el correo', async () => {
       prismaMock.creditPack.findFirst.mockResolvedValue(createMockPack({ maxPerCustomer: 1 }))
       prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(merchant())
-      prismaMock.customer.findFirst.mockResolvedValue({ id: 'c_por_email' })
+      prismaMock.customer.findUnique.mockResolvedValue({ id: 'c_por_email' })
       prismaMock.creditPackPurchase.count.mockResolvedValue(1)
 
       await expect(createCheckoutSession(VENUE_ID, PACK_ID, 'maria@x.com', undefined, successUrl, cancelUrl)).rejects.toThrow(/limite/i)
 
-      expect(prismaMock.customer.findFirst).toHaveBeenCalled()
+      expect(prismaMock.customer.findUnique).toHaveBeenCalledWith({ where: { venueId_email: { venueId: VENUE_ID, email: 'maria@x.com' } } })
+    })
+
+    it('invitado con teléfono sin ficha y correo con ficha: maxPerCustomer cuenta las compras de la ficha del correo', async () => {
+      prismaMock.creditPack.findFirst.mockResolvedValue(createMockPack({ maxPerCustomer: 1 }))
+      prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(merchant())
+      prismaMock.customer.findUnique.mockImplementation((async ({ where }: any) =>
+        where.venueId_email ? { id: 'c-correo' } : null) as any)
+      prismaMock.creditPackPurchase.count.mockResolvedValue(1)
+
+      await expect(createCheckoutSession(VENUE_ID, PACK_ID, 'maria@x.com', '+525599999999', successUrl, cancelUrl)).rejects.toThrow(
+        /limite/i,
+      )
+
+      expect(prismaMock.creditPackPurchase.count).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ customerId: 'c-correo' }) }),
+      )
+    })
+
+    // El límite cuenta por la MISMA ficha a la que irá la compra: el teléfono escrito con otro formato que el guardado no lo salta.
+    it('invitado con el teléfono escrito con otro formato: maxPerCustomer cuenta por la ficha que ya existe', async () => {
+      prismaMock.creditPack.findFirst.mockResolvedValue(createMockPack({ maxPerCustomer: 1 }))
+      prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(merchant())
+      prismaMock.customer.findUnique.mockImplementation((async ({ where }: any) =>
+        where.id === 'c-viejo' ? { id: 'c-viejo' } : null) as any)
+      prismaMock.$queryRaw.mockResolvedValue([{ id: 'c-viejo', phone: '5551234567' }])
+      prismaMock.creditPackPurchase.count.mockResolvedValue(1)
+
+      await expect(createCheckoutSession(VENUE_ID, PACK_ID, 'otro@x.com', '55 5123 4567', successUrl, cancelUrl)).rejects.toThrow(/limite/i)
+
+      expect(prismaMock.creditPackPurchase.count).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ customerId: 'c-viejo' }) }),
+      )
     })
   })
 
@@ -534,7 +568,7 @@ describe('CreditPack Public Service', () => {
       const pack = createMockPack({ maxPerCustomer: 2 })
       prismaMock.creditPack.findFirst.mockResolvedValue(pack)
       prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(createMockMerchant())
-      prismaMock.customer.findFirst.mockResolvedValue(createMockCustomer())
+      prismaMock.customer.findUnique.mockResolvedValue(createMockCustomer())
       prismaMock.creditPackPurchase.count.mockResolvedValue(2) // Already at limit
 
       await expect(createCheckoutSession(VENUE_ID, PACK_ID, email, phone, successUrl, cancelUrl)).rejects.toThrow(
@@ -546,7 +580,7 @@ describe('CreditPack Public Service', () => {
       const pack = createMockPack({ maxPerCustomer: 3 })
       prismaMock.creditPack.findFirst.mockResolvedValue(pack)
       prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(createMockMerchant())
-      prismaMock.customer.findFirst.mockResolvedValue(createMockCustomer())
+      prismaMock.customer.findUnique.mockResolvedValue(createMockCustomer())
       prismaMock.creditPackPurchase.count.mockResolvedValue(1) // Under limit
       mockStripeCheckoutCreate.mockResolvedValue({
         id: 'cs_test_session',
@@ -771,7 +805,11 @@ describe('CreditPack Public Service', () => {
       expect(createCall.data.expiresAt).toBeNull()
     })
 
-    it('should find customer by email', async () => {
+    // 🔴 Toma de cuentas (auditoría 2026-10-01): un pago de invitado no prueba que el correo y el teléfono sean de quien paga.
+    // Antes se le rellenaba al cliente el contacto que le faltara: con el teléfono de la víctima y su propio correo, el comprador
+    // le pegaba ese correo y entraba con código a su cuenta. Ahora: teléfono primero; el correo sólo si el teléfono no encuentra
+    // ficha; y nunca se le pega nada a nadie.
+    it('con teléfono y correo, manda el teléfono y no le pega el correo a nadie', async () => {
       const session = createMockStripeSession({
         metadata: {
           type: 'credit_pack_purchase',
@@ -796,10 +834,118 @@ describe('CreditPack Public Service', () => {
 
       await fulfillPurchase(checkoutSessionId)
 
-      // findOrCreateCustomer tries email first via findUnique with venueId_email
       expect(prismaMock.customer.findUnique).toHaveBeenCalledWith({
+        where: { venueId_phone: { venueId: VENUE_ID, phone: '+525551234567' } },
+      })
+      expect(prismaMock.customer.findUnique).not.toHaveBeenCalledWith({
         where: { venueId_email: { venueId: VENUE_ID, email: 'maria@example.com' } },
       })
+      const pegoContacto = prismaMock.customer.update.mock.calls.some(
+        ([arg]: any[]) => 'email' in (arg?.data ?? {}) || 'phone' in (arg?.data ?? {}),
+      )
+      expect(pegoContacto).toBe(false)
+    })
+
+    // Codex ronda 2 (1-oct): un teléfono nuevo o con error y el correo de una ficha que ya existe dejaban la compra pagada en una
+    // ficha nueva que quizá nadie puede abrir. El correo entra sólo si el teléfono no encuentra a nadie, y tampoco se le pega nada.
+    it('teléfono sin ficha y correo con ficha: la compra cae en la ficha del correo, sin pegarle el teléfono', async () => {
+      const session = createMockStripeSession({
+        metadata: {
+          type: 'credit_pack_purchase',
+          venueId: VENUE_ID,
+          packId: PACK_ID,
+          customerPhone: '+525599999999',
+          customerEmail: 'maria@example.com',
+        },
+      })
+      const porCorreo = createMockCustomer({ id: 'c-correo', phone: null })
+      mockStripeCheckoutRetrieve.mockResolvedValue(session)
+      prismaMock.creditPackPurchase.findUnique.mockResolvedValue(null)
+      prismaMock.creditPack.findFirst.mockResolvedValue(createMockPack())
+      prismaMock.customer.findUnique.mockImplementation((async ({ where }: any) => (where.venueId_email ? porCorreo : null)) as any)
+      prismaMock.creditPackPurchase.create.mockResolvedValue(createMockPurchase({ customerId: 'c-correo' }))
+      prismaMock.creditItemBalance.create.mockResolvedValue(createMockBalance())
+      prismaMock.creditTransaction.create.mockResolvedValue({})
+      prismaMock.customer.update.mockResolvedValue(porCorreo)
+
+      await fulfillPurchase(checkoutSessionId)
+
+      expect(prismaMock.customer.create).not.toHaveBeenCalled()
+      expect(prismaMock.creditPackPurchase.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ customerId: 'c-correo' }) }),
+      )
+      const pegoContacto = prismaMock.customer.update.mock.calls.some(
+        ([arg]: any[]) => 'email' in (arg?.data ?? {}) || 'phone' in (arg?.data ?? {}),
+      )
+      expect(pegoContacto).toBe(false)
+    })
+
+    it('sesión vieja SIN teléfono: resuelve SÓLO por correo', async () => {
+      const session = createMockStripeSession({
+        metadata: { type: 'credit_pack_purchase', venueId: VENUE_ID, packId: PACK_ID, customerEmail: 'maria@example.com' },
+      })
+      mockStripeCheckoutRetrieve.mockResolvedValue(session)
+      prismaMock.creditPackPurchase.findUnique.mockResolvedValue(null)
+      prismaMock.creditPack.findFirst.mockResolvedValue(createMockPack())
+      prismaMock.customer.findUnique.mockResolvedValue(null)
+      prismaMock.customer.create.mockResolvedValue(createMockCustomer({ id: 'nuevo' }))
+      prismaMock.creditPackPurchase.create.mockResolvedValue(createMockPurchase({ customerId: 'nuevo' }))
+      prismaMock.creditItemBalance.create.mockResolvedValue(createMockBalance())
+      prismaMock.creditTransaction.create.mockResolvedValue({})
+      prismaMock.customer.update.mockResolvedValue(createMockCustomer({ id: 'nuevo' }))
+
+      await fulfillPurchase(checkoutSessionId)
+
+      expect(prismaMock.customer.create).toHaveBeenCalledWith({ data: { venueId: VENUE_ID, email: 'maria@example.com' } })
+    })
+
+    // 681 de 682 clientes guardan el teléfono como lo escribió quien los dio de alta («5551234567»), y en la compra de invitado
+    // se escribe a mano («55 5123 4567»): con la búsqueda exacta la compra caía en una ficha DUPLICADA y el cliente no veía sus
+    // créditos al entrar. Se busca como en la entrada con código: mismos 10 dígitos y misma lada.
+    it('invitado con el teléfono escrito con otro formato: la compra cae en la ficha que ya existe, sin duplicarla', async () => {
+      const session = createMockStripeSession({
+        metadata: { type: 'credit_pack_purchase', venueId: VENUE_ID, packId: PACK_ID, customerPhone: '55 5123 4567' },
+      })
+      const existente = createMockCustomer({ id: 'c-viejo', phone: '5551234567' })
+      mockStripeCheckoutRetrieve.mockResolvedValue(session)
+      prismaMock.creditPackPurchase.findUnique.mockResolvedValue(null)
+      prismaMock.creditPack.findFirst.mockResolvedValue(createMockPack())
+      prismaMock.customer.findUnique.mockImplementation((async ({ where }: any) => (where.id === 'c-viejo' ? existente : null)) as any)
+      prismaMock.$queryRaw.mockResolvedValue([{ id: 'c-viejo', phone: '5551234567' }])
+      prismaMock.creditPackPurchase.create.mockResolvedValue(createMockPurchase({ customerId: 'c-viejo' }))
+      prismaMock.creditItemBalance.create.mockResolvedValue(createMockBalance())
+      prismaMock.creditTransaction.create.mockResolvedValue({})
+      prismaMock.customer.update.mockResolvedValue(existente)
+
+      await fulfillPurchase(checkoutSessionId)
+
+      expect(prismaMock.customer.create).not.toHaveBeenCalled()
+      expect(prismaMock.creditPackPurchase.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ customerId: 'c-viejo' }) }),
+      )
+    })
+
+    it('invitado cuyo teléfono sólo comparte los 10 dígitos con el de OTRO país: no se toma esa ficha, se crea una', async () => {
+      const session = createMockStripeSession({
+        metadata: { type: 'credit_pack_purchase', venueId: VENUE_ID, packId: PACK_ID, customerPhone: '+525551234567' },
+      })
+      mockStripeCheckoutRetrieve.mockResolvedValue(session)
+      prismaMock.creditPackPurchase.findUnique.mockResolvedValue(null)
+      prismaMock.creditPack.findFirst.mockResolvedValue(createMockPack())
+      prismaMock.customer.findUnique.mockResolvedValue(null)
+      prismaMock.$queryRaw.mockResolvedValue([{ id: 'c-eua', phone: '+1 555 123 4567' }])
+      prismaMock.customer.create.mockResolvedValue(createMockCustomer({ id: 'nuevo' }))
+      prismaMock.creditPackPurchase.create.mockResolvedValue(createMockPurchase({ customerId: 'nuevo' }))
+      prismaMock.creditItemBalance.create.mockResolvedValue(createMockBalance())
+      prismaMock.creditTransaction.create.mockResolvedValue({})
+      prismaMock.customer.update.mockResolvedValue(createMockCustomer({ id: 'nuevo' }))
+
+      await fulfillPurchase(checkoutSessionId)
+
+      expect(prismaMock.customer.create).toHaveBeenCalledWith({ data: { venueId: VENUE_ID, phone: '+525551234567' } })
+      expect(prismaMock.creditPackPurchase.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ customerId: 'nuevo' }) }),
+      )
     })
 
     it('should find customer by phone', async () => {
@@ -858,7 +1004,6 @@ describe('CreditPack Public Service', () => {
       expect(prismaMock.customer.create).toHaveBeenCalledWith({
         data: {
           venueId: VENUE_ID,
-          email: 'maria@example.com',
           phone: '+525551234567',
         },
       })

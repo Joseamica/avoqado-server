@@ -183,7 +183,9 @@ describe('OTP Auth Public Service', () => {
       await expect(verifyOtp({ venueId: VENUE_ID, channel: 'whatsapp', destination: PHONE_RAW, code: '123456' })).rejects.toThrow(/expir/i)
     })
 
-    it('wrong code: increments attempts and throws', async () => {
+    // 🔴 Auditoría 2026-10-01: el intento se aparta en la base ANTES de comparar. Antes se escribía `attempts + 1` sobre un valor
+    // leído fuera de transacción, y varias verificaciones simultáneas probaban más de 5 códigos dejando el contador en 1.
+    it('wrong code: aparta el intento de forma atómica (incremento condicionado) y lanza', async () => {
       prismaMock.otpChallenge.findFirst.mockResolvedValue({
         id: 'otp-1',
         destination: PHONE_NORM,
@@ -194,20 +196,42 @@ describe('OTP Auth Public Service', () => {
         expiresAt: new Date(Date.now() + 60_000),
       })
       prismaMock.otpChallenge.update.mockResolvedValue({})
-      // Fase 1: el consumo del reto es un CAS (`updateMany` con `consumedAt: null`),
-      // no un update ciego — así dos verificaciones simultáneas no emiten dos tokens.
       prismaMock.otpChallenge.updateMany.mockResolvedValue({ count: 1 })
 
       await expect(verifyOtp({ venueId: VENUE_ID, channel: 'whatsapp', destination: PHONE_RAW, code: '000000' })).rejects.toThrow(
         /incorrecto/i,
       )
 
-      expect(prismaMock.otpChallenge.update).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { id: 'otp-1' }, data: { attempts: 1 } }),
-      )
+      expect(prismaMock.otpChallenge.updateMany).toHaveBeenCalledWith({
+        where: { id: 'otp-1', consumedAt: null, attempts: { lt: 5 } },
+        data: { attempts: { increment: 1 } },
+      })
+      expect(prismaMock.otpChallenge.update).not.toHaveBeenCalledWith(expect.objectContaining({ data: { attempts: 1 } }))
     })
 
-    it('attempts >= maxAttempts: invalidates the challenge and throws', async () => {
+    it('🔴 si otra verificación simultánea gastó el último intento, rechaza aunque el código sea correcto', async () => {
+      prismaMock.otpChallenge.findFirst.mockResolvedValue({
+        id: 'otp-1',
+        destination: PHONE_NORM,
+        codeHash: hashOtpCode('123456'),
+        attempts: 4, // lectura vieja: la base ya va en 5
+        maxAttempts: 5,
+        consumedAt: null,
+        expiresAt: new Date(Date.now() + 60_000),
+      })
+      prismaMock.otpChallenge.update.mockResolvedValue({})
+      prismaMock.otpChallenge.updateMany.mockResolvedValueOnce({ count: 0 }) // no se pudo apartar el intento
+
+      await expect(verifyOtp({ venueId: VENUE_ID, channel: 'whatsapp', destination: PHONE_RAW, code: '123456' })).rejects.toThrow(
+        /intentos/i,
+      )
+      expect(prismaMock.$transaction).not.toHaveBeenCalled()
+      // 🔴 No toca el reto: si marcara `consumedAt`, una petición de más le quemaría el quinto intento correcto a quien sí lo
+      // apartó y va a mitad de su verificación (auditoría de Codex, 1-oct).
+      expect(prismaMock.otpChallenge.update).not.toHaveBeenCalled()
+    })
+
+    it('attempts >= maxAttempts: rechaza sin tocar el reto (ya no admite más pruebas)', async () => {
       prismaMock.otpChallenge.findFirst.mockResolvedValue({
         id: 'otp-1',
         destination: PHONE_NORM,
@@ -226,10 +250,9 @@ describe('OTP Auth Public Service', () => {
         /intentos/i,
       )
 
-      // The exhausted challenge is consumed so it can never be reused
-      expect(prismaMock.otpChallenge.update).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { id: 'otp-1' }, data: { consumedAt: expect.any(Date) } }),
-      )
+      // Con `attempts = maxAttempts` el reto ya no se puede usar: no hace falta (ni conviene) escribirle nada.
+      expect(prismaMock.otpChallenge.update).not.toHaveBeenCalled()
+      expect(prismaMock.$transaction).not.toHaveBeenCalled()
     })
 
     it('valid code: consumes the challenge, resolves Consumer+Customer, mints a customer token', async () => {
