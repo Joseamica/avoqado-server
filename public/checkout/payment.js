@@ -178,6 +178,14 @@ name.addEventListener('input', e => {
 // FORM SUBMISSION
 // ═══════════════════════════════════════════════
 
+// 🔴 Si el servidor dice que NO se reintente (pago hecho, en curso o de resultado desconocido), el error lo lleva
+// consigo y el botón no vuelve (auditoría 2026-09-30).
+function apiError(data, fallback) {
+  const error = new Error(data.canRetry === false ? data.message || data.error || fallback : data.error || data.message || fallback)
+  error.canRetry = data.canRetry
+  return error
+}
+
 form.addEventListener('submit', async e => {
   e.preventDefault()
   hideError()
@@ -231,23 +239,25 @@ form.addEventListener('submit', async e => {
     const tokenData = await tokenResponse.json()
 
     if (!tokenResponse.ok || !tokenData.success) {
-      throw new Error(tokenData.error || tokenData.message || 'Error al tokenizar la tarjeta')
+      throw apiError(tokenData, 'Error al tokenizar la tarjeta')
     }
 
     // Step 2: Charge with token
     const chargeResponse = await fetch('/api/v1/sdk/charge', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      // El token que devolvió /tokenize: el servidor sólo cobra la tarjeta de ESTA solicitud (auditoría 2026-09-30).
       body: JSON.stringify({
         sessionId: sid,
         cvv: cv,
+        cardToken: tokenData.token,
       }),
     })
 
     const chargeData = await chargeResponse.json()
 
     if (!chargeResponse.ok || !chargeData.success) {
-      throw new Error(chargeData.error || chargeData.message || 'Error al procesar el pago')
+      throw apiError(chargeData, 'Error al procesar el pago')
     }
 
     // Success state
@@ -262,8 +272,9 @@ form.addEventListener('submit', async e => {
     }, 2000)
   } catch (err) {
     showError(err.message || 'Error al procesar el pago')
-    btn.disabled = false
     btn.classList.remove('loading')
+    // Si el servidor dijo que NO se reintente (pago hecho, en curso o de resultado desconocido), el botón no vuelve.
+    btn.disabled = err.canRetry === false
   }
 })
 

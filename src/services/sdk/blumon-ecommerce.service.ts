@@ -290,8 +290,12 @@ export class BlumonEcommerceService implements IBlumonEcommerceService {
       // respuesta HTTP 4xx del proveedor es un rechazo definitivo; sin
       // respuesta (ECONNRESET/ETIMEDOUT/abort) o con 5xx del gateway, el
       // resultado es DESCONOCIDO y el caller debe quedarse fail-closed.
-      const providerResponded = error.response?.status != null && error.response.status < 500
-      if (!providerResponded) {
+      // 🔴 Ampliada 2026-09-30: sólo un 4xx que no sea 408/409/429 es rechazo definitivo. Un 408 (timeout), 409
+      // (conflicto) o 429 (límite) no dice que el cargo NO pasó, y Blumon no recibe identificador del pedido para
+      // deduplicar: se queda fail-closed.
+      const status = error.response?.status
+      const providerRejected = status != null && status < 500 && ![408, 409, 429].includes(status)
+      if (!providerRejected) {
         throw new PaymentOutcomeUnknownError()
       }
 

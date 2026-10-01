@@ -53,6 +53,8 @@ export async function createCheckout(req: Request, res: Response) {
     res.status(error.statusCode || 500).json({
       success: false,
       error: error.message || 'Error al procesar el pago',
+      // El código sí; el identificador del cobro en vuelo NO (es de otro pagador; va al registro del servidor).
+      ...(error.code === 'PAYMENT_IN_FLIGHT' ? { code: error.code } : {}),
     })
   }
 }
@@ -177,6 +179,10 @@ export async function completeCharge(req: Request, res: Response) {
     res.status(error.statusCode || 500).json({
       success: false,
       error: error.message || 'Error al completar el cobro',
+      // Auditoría 2026-09-30: un resultado desconocido devuelve la sesión que quedó retenida (la que mandó este mismo pagador).
+      ...(error.code === 'PAYMENT_OUTCOME_UNKNOWN' && typeof req.body?.sessionId === 'string'
+        ? { code: error.code, sessionId: req.body.sessionId }
+        : {}),
     })
   }
 }

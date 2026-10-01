@@ -11,6 +11,12 @@ import AppError from '../../errors/AppError'
 import * as timeEntryService from '../../services/mobile/time-entry.mobile.service'
 
 /**
+ * El PIN llega del cuerpo sin esquema y va directo al `where` de Prisma: un objeto como
+ * `{ not: null }` se volvía un filtro que identificaba a cualquiera (auditoría 2026-09-30).
+ */
+const isPinText = (pin: unknown): pin is string => typeof pin === 'string' && pin.length > 0
+
+/**
  * Identify staff by PIN and return their current status
  * @route POST /api/v1/mobile/venues/:venueId/time-clock/identify
  */
@@ -19,7 +25,7 @@ export const identifyByPin = async (req: Request, res: Response, next: NextFunct
     const { venueId } = req.params
     const { pin } = req.body
 
-    if (!pin) {
+    if (!isPinText(pin)) {
       return res.status(400).json({
         success: false,
         message: 'PIN es requerido',
@@ -49,7 +55,7 @@ export const clockIn = async (req: Request, res: Response, next: NextFunction) =
     const { venueId } = req.params
     const { pin, jobRole, checkInPhotoUrl, latitude, longitude, accuracy, note } = req.body
 
-    if (!pin) {
+    if (!isPinText(pin)) {
       return res.status(400).json({
         success: false,
         message: 'PIN es requerido',
@@ -88,7 +94,7 @@ export const clockOut = async (req: Request, res: Response, next: NextFunction) 
     const { venueId } = req.params
     const { pin, checkOutPhotoUrl, latitude, longitude, accuracy, note } = req.body
 
-    if (!pin) {
+    if (!isPinText(pin)) {
       return res.status(400).json({
         success: false,
         message: 'PIN es requerido',
@@ -126,7 +132,7 @@ export const startBreak = async (req: Request, res: Response, next: NextFunction
     const { venueId } = req.params
     const { pin, breakType } = req.body
 
-    if (!pin) {
+    if (!isPinText(pin)) {
       return res.status(400).json({
         success: false,
         message: 'PIN es requerido',
@@ -156,7 +162,7 @@ export const endBreak = async (req: Request, res: Response, next: NextFunction) 
     const { venueId } = req.params
     const { pin } = req.body
 
-    if (!pin) {
+    if (!isPinText(pin)) {
       return res.status(400).json({
         success: false,
         message: 'PIN es requerido',

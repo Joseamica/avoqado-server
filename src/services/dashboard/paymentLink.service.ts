@@ -2183,6 +2183,27 @@ export async function createCheckoutSession(
     throw new BadRequestError('Esta liga de pago ya fue utilizada')
   }
 
+  // 🔴 Auditoría 2026-09-30: con un cobro EN VUELO (S1 en CHARGING, resultado desconocido) una liga de un solo uso no abre otra
+  // sesión: el reintento del cliente cobraría dos veces. Se destraba conciliando ese cobro.
+  if (!paymentLink.isReusable) {
+    const inFlight = await prisma.checkoutSession.findFirst({
+      where: { paymentLinkId: paymentLink.id, status: 'CHARGING' },
+      select: { id: true, sessionId: true },
+    })
+    if (inFlight) {
+      // El `sessionId` es de OTRO pagador (con él se consulta y hasta se podría cobrar su sesión): sólo al registro, para
+      // soporte; nunca en la respuesta pública.
+      logger.warn('[paymentLink] liga de un solo uso con un cobro en vuelo', {
+        paymentLinkId: paymentLink.id,
+        sessionId: inFlight.sessionId,
+      })
+      throw new ConflictError(
+        'Hay un pago en proceso para esta liga. Espera la confirmación antes de intentar de nuevo.',
+        'PAYMENT_IN_FLIGHT',
+      )
+    }
+  }
+
   // 2. Determine amount. Bundle ITEM links sum all line items; legacy single-
   // amount semantics remain for PAYMENT/DONATION links.
   let chargeAmount: number

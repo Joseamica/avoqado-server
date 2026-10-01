@@ -28,7 +28,7 @@
  * enseñar el código pelón y ningún test se enteró.
  */
 import { createHash } from 'crypto'
-import { readFileSync } from 'fs'
+import { existsSync, readFileSync } from 'fs'
 
 // 🔴 Importar `../src/lib/permissions` arrastra el logger del server, que al cargarse escribe su
 // banner («Logger initialized…») en STDOUT — y este script existe para que su stdout sea JSON y
@@ -53,7 +53,12 @@ process.stdout.write = escrituraReal
 const ROUTE_FILES = ['mobile.routes.ts', 'tpv.routes.ts', 'pos-sync.routes.ts'] as const
 
 function permissionsCheckedIn(file: string): string[] {
-  const src = readFileSync(`${__dirname}/../src/routes/${file}`, 'utf8')
+  const routePath = `${__dirname}/../src/routes/${file}`
+  // ponytail: `pos-sync.routes.ts` se borró el 30-sep (ruta de prueba abierta). Su llave se queda con cero
+  // permisos para no mover la huella que Android e iOS verifican; quitarla cuando se regeneren por un
+  // cambio real de permisos. Sólo ESE archivo puede faltar: si falta otro, que truene como antes.
+  if (file === 'pos-sync.routes.ts' && !existsSync(routePath)) return []
+  const src = readFileSync(routePath, 'utf8')
   // `checkPermission(` a veces trae el argumento en la línea siguiente.
   const found = [...src.matchAll(/checkPermission\(\s*'([^']+)'/g)].map(m => m[1])
   return [...new Set(found)].sort()

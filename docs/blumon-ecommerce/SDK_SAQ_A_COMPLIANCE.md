@@ -618,6 +618,7 @@ const response = await fetch('/sdk/charge', {
   body: JSON.stringify({
     sessionId: 'cs_avoqado_xxx',
     cvv: '123', // Customer re-enters CVV (required by Blumon)
+    cardToken: tokenFromTokenize, // El `token` que devolvió /sdk/tokenize (obligatorio desde 2026-09-30)
   }),
 })
 

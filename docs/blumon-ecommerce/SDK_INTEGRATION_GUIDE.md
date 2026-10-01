@@ -471,12 +471,13 @@ X-API-Key: sk_test_abc123xyz
 
 **Endpoint:** `POST /sdk/charge`
 
-**Request:**
+**Request** (`cardToken` = el `token` que devolvió `/sdk/tokenize`; es obligatorio desde la auditoría del 2026-09-30):
 
 ```json
 {
   "sessionId": "cs_avoqado_abc123xyz",
-  "cvv": "123"
+  "cvv": "123",
+  "cardToken": "<el token que devolvió /sdk/tokenize>"
 }
 ```
 

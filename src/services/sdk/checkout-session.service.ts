@@ -278,13 +278,16 @@ export async function cancelCheckoutSession(sessionId: string, ecommerceMerchant
     throw new BadRequestError(`Cannot cancel session with status ${session.status}. Only PENDING or PROCESSING sessions can be cancelled.`)
   }
 
-  const updatedSession = await prisma.checkoutSession.update({
-    where: { sessionId },
-    data: {
-      status: CheckoutStatus.CANCELLED,
-      cancelledAt: new Date(),
-    },
+  // 🔴 Auditoría 2026-09-30: leer el estado y escribir después dejaba pisar un cobro en curso (CHARGING).
+  const cancelled = await prisma.checkoutSession.updateMany({
+    where: { sessionId, status: { in: cancellableStatuses } },
+    data: { status: CheckoutStatus.CANCELLED, cancelledAt: new Date() },
   })
+  if (cancelled.count === 0) {
+    throw new BadRequestError('Cannot cancel session: its status changed. Only PENDING or PROCESSING sessions can be cancelled.')
+  }
+
+  const updatedSession = await prisma.checkoutSession.findUniqueOrThrow({ where: { sessionId } })
 
   logger.info('Checkout session cancelled', {
     sessionId,

@@ -248,10 +248,10 @@ export function generateAPIKeys(sandboxMode: boolean): {
   secretKeyHash: string
 } {
   const mode = sandboxMode ? 'test' : 'live'
-  const randomPart = crypto.randomBytes(32).toString('hex') // 64 chars
 
-  const publicKey = `pk_${mode}_${randomPart}`
-  const secretKey = `sk_${mode}_${randomPart}`
+  // 🔴 Dos aleatorios distintos (auditoría 2026-09-30): con uno solo, la pública revelaba la secreta.
+  const publicKey = `pk_${mode}_${crypto.randomBytes(32).toString('hex')}`
+  const secretKey = `sk_${mode}_${crypto.randomBytes(32).toString('hex')}`
   const secretKeyHash = hashSecretKey(secretKey)
 
   return {

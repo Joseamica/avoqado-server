@@ -293,12 +293,14 @@ info: ✅ Payment authorized successfully  ← THIS IS THE SUCCESS!
 
 ### POST /api/v1/sdk/charge
 
-**Request**:
+**Request** (`cardToken` = el `token` que devolvió `/sdk/tokenize`; sin él responde 400 «Recarga la página e intenta de
+nuevo» — auditoría 2026-09-30):
 
 ```json
 {
   "sessionId": "cs_test_xxx",
-  "cvv": "123"
+  "cvv": "123",
+  "cardToken": "10404959-6063-4f53-95c2-0711fe0e6be3"
 }
 ```
 
