@@ -1,8 +1,15 @@
 import { Prisma, PaymentProcessor } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
+import { assertMerchantsTerminalCompatible } from '@/lib/providerDeviceCompatibility'
+import { assertDeviceActionSupported } from '@/services/device-capabilities.service'
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '@/errors/AppError'
-import { deviceReboundAfter, updateTerminal, type TerminalActor } from '@/services/dashboard/terminals.superadmin.service'
+import {
+  deviceReboundAfter,
+  migrationCommandWhere,
+  updateTerminal,
+  type TerminalActor,
+} from '@/services/dashboard/terminals.superadmin.service'
 import { tpvCommandQueueService } from '@/services/tpv/command-queue.service'
 import type { TerminalWriteScope } from '@/services/shared/terminalScopedWrites'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -96,6 +103,8 @@ export interface MigrationBlocker {
     | 'TERMINAL_RETIRED'
     | 'SAME_VENUE'
     | 'NO_PAYMENT_CONFIG'
+    | 'INVALID_MERCHANT'
+    | 'UNSUPPORTED_DEVICE'
     | 'NO_STAFF_PIN'
     | 'MIGRATION_IN_PROGRESS'
     | 'CROSS_ORG_MERCHANT'
@@ -163,6 +172,12 @@ export const DISCARD_AFTER_MS = 24 * 60 * 60 * 1000
 const IN_FLIGHT_STATUSES = ['PENDING', 'QUEUED', 'SENT', 'RECEIVED', 'EXECUTING'] as const
 /** The device has not received the command: it can still be cancelled server-side. */
 const CANCELLABLE_STATUSES: readonly string[] = ['PENDING', 'QUEUED']
+function canCancelWipe(command: { status: string; payload: unknown }): boolean {
+  return (
+    CANCELLABLE_STATUSES.includes(command.status) ||
+    ((command.payload as { _deliveryProtocol?: number } | null)?._deliveryProtocol === 2 && ['SENT', 'RECEIVED'].includes(command.status))
+  )
+}
 
 interface PendingWipeRow {
   id: string
@@ -172,30 +187,19 @@ interface PendingWipeRow {
   venueId: string
 }
 
-/**
- * FACTORY_RESETs that are STILL pending for this terminal. Two filters, and BOTH are
- * needed (Asana 1218069201250971, 2026-09-01):
- *  1. Expiry-aware: a FACTORY_RESET never ACKs (the device wipes + kills its process before
- *     it can), so it lingers in a non-terminal status until the expiry sweep marks it
- *     EXPIRED. A stale/expired-but-unswept command must NOT falsely block a new migration.
- *  2. Rebind-aware: the sweep only ever touches commands WITH an expiresAt. Hand-inserted
- *     rows with `expiresAt = null` stayed SENT forever and blocked the org wizard for MONTHS
- *     on 3 terminals; and the 7-day migration TTL blocked re-migrating a terminal for a week
- *     after its wipe had already completed. The device's own post-wipe rebind is the proof
- *     the wipe happened — `deviceReboundAfter`, the same rule the terminals-list badge and
- *     `migrateStatus` use, so the three surfaces can never disagree.
- */
-async function findPendingWipes(terminalId: string, lastActivationStatusCheckAt: Date | null | undefined): Promise<PendingWipeRow[]> {
+/** Unexpired pending wipes and completed receipts still awaiting an authenticated new boot. */
+async function findPendingWipes(terminalId: string, commandSessionId: string | null | undefined): Promise<PendingWipeRow[]> {
   const inFlight = await prisma.tpvCommandQueue.findMany({
     where: {
       terminalId,
-      commandType: 'FACTORY_RESET',
-      status: { in: [...IN_FLIGHT_STATUSES] },
-      OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+      ...migrationCommandWhere(),
     },
     select: { id: true, createdAt: true, status: true, payload: true, venueId: true },
+    take: 101,
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
   })
-  return inFlight.filter(c => !deviceReboundAfter(c.createdAt, lastActivationStatusCheckAt))
+  if (inFlight.length > 100) throw new ConflictError('Hay más de 100 borrados pendientes. Requieren revisión antes de migrar.')
+  return inFlight.filter(c => !deviceReboundAfter(c, commandSessionId))
 }
 
 function newestOf(pending: PendingWipeRow[]): PendingWipeRow {
@@ -210,7 +214,7 @@ function describePendingWipe(pending: PendingWipeRow[], now = Date.now()): Pendi
   // "any pending wipe" made the three disagree: a newest SENT with an older QUEUED behind it
   // reported `status: SENT, cancellable: true`, and cancelling then dropped the OLD one,
   // leaving the blocker in place and the operator with no idea why (Codex P2, 2026-09-01).
-  const cancellable = CANCELLABLE_STATUSES.includes(newest.status)
+  const cancellable = canCancelWipe(newest)
   const discardableAt = new Date(newest.createdAt.getTime() + DISCARD_AFTER_MS)
   return {
     commandId: newest.id,
@@ -219,7 +223,8 @@ function describePendingWipe(pending: PendingWipeRow[], now = Date.now()): Pendi
     origin: migration ? 'MIGRATION' : 'MANUAL',
     toVenueId: typeof migration?.toVenueId === 'string' ? migration.toVenueId : null,
     cancellable,
-    discardable: !cancellable && discardableAt.getTime() <= now,
+    discardable:
+      (newest.payload as { _deliveryProtocol?: number } | null)?._deliveryProtocol !== 2 && !cancellable && discardableAt.getTime() <= now,
     discardableAt,
   }
 }
@@ -252,7 +257,12 @@ function migrationPayloadOf(row: PendingWipeRow): WipeMigrationPayload | null {
   return m && typeof m.fromVenueId === 'string' ? m : null
 }
 
-export async function migratePreflight(terminalId: string, toVenueId: string, migrateMerchant = false): Promise<PreflightResult> {
+export async function migratePreflight(
+  terminalId: string,
+  toVenueId: string,
+  migrateMerchant = false,
+  assignedMerchantIds?: string[],
+): Promise<PreflightResult> {
   const terminal = await prisma.terminal.findUnique({ where: { id: terminalId } })
   if (!terminal) throw new NotFoundError('Terminal not found')
 
@@ -271,9 +281,9 @@ export async function migratePreflight(terminalId: string, toVenueId: string, mi
 
   // Config de pagos del destino. Con `migrateMerchant` la TPV trae su propio
   // merchant, así que la ausencia de config deja de ser bloqueante.
-  const paymentConfig = await prisma.venuePaymentConfig.findFirst({
-    where: { venueId: toVenueId },
-  })
+  const paymentConfig =
+    (await prisma.venuePaymentConfig.findFirst({ where: { venueId: toVenueId } })) ??
+    (await prisma.organizationPaymentConfig.findUnique({ where: { organizationId: targetVenue.organizationId } }))
 
   // Snapshot del origen: qué merchant viajaría y si es legal que viaje.
   const originVenue = await prisma.venue.findUnique({ where: { id: terminal.venueId } })
@@ -350,6 +360,40 @@ export async function migratePreflight(terminalId: string, toVenueId: string, mi
     })
   }
 
+  try {
+    assertDeviceActionSupported(terminal, { kind: 'REMOTE_COMMAND', commandType: 'FACTORY_RESET' })
+  } catch {
+    blockers.push({ code: 'UNSUPPORTED_DEVICE', message: 'Este dispositivo no admite la migración remota de TPV.' })
+  }
+  const merchants = assignedMerchantIds?.length
+    ? assignedMerchantIds
+    : migrateMerchant
+      ? origin.merchantIds
+      : paymentConfig?.primaryAccountId
+        ? [paymentConfig.primaryAccountId]
+        : []
+  if (merchants.length) {
+    const active = await prisma.merchantAccount.findMany({
+      where: { id: { in: merchants }, active: true },
+      select: { id: true },
+      take: merchants.length,
+    })
+    if (new Set(merchants).size !== merchants.length || active.length !== merchants.length) {
+      blockers.push({ code: 'INVALID_MERCHANT', message: 'Uno de los comercios seleccionados no existe o está desactivado.' })
+    } else {
+      try {
+        await assertMerchantsTerminalCompatible(terminalId, merchants)
+      } catch {
+        blockers.push({ code: 'INVALID_MERCHANT', message: 'El comercio seleccionado no es compatible con esta terminal.' })
+      }
+    }
+  } else if (!blockers.some(b => b.code === 'NO_PAYMENT_CONFIG' || b.code === 'ORIGIN_HAS_NO_MERCHANT')) {
+    blockers.push({
+      code: 'NO_PAYMENT_CONFIG',
+      message: 'El destino no tiene un comercio de cobro disponible. Configúralo antes de migrar.',
+    })
+  }
+
   // Hard blocker: destination must have at least one active staff PIN, or nobody can log in.
   // This MUST mirror the real TPV login predicate in auth.tpv.service.ts (staffSignIn):
   // StaffVenue.active + non-null pin AND the related Staff must be active too. A StaffVenue
@@ -368,7 +412,7 @@ export async function migratePreflight(terminalId: string, toVenueId: string, mi
   // `findPendingWipes` for what "pending" means and why). The blocker is never a dead end:
   // `pendingWipe` tells the wizard when it was queued, where it came from, and which way
   // out applies (cancel / wait / discard).
-  const pendingWipe = describePendingWipe(await findPendingWipes(terminalId, terminal.lastActivationStatusCheckAt))
+  const pendingWipe = describePendingWipe(await findPendingWipes(terminalId, terminal.commandSessionId))
   if (pendingWipe) {
     blockers.push({
       code: 'MIGRATION_IN_PROGRESS',
@@ -379,7 +423,7 @@ export async function migratePreflight(terminalId: string, toVenueId: string, mi
   // Soft warning (Phase 1): unsynced device data cannot be verified server-side yet.
   warnings.push({
     code: 'UNSYNCED_DATA',
-    message: 'Confirma que la TPV terminó de sincronizar sus ventas antes de continuar (Fase 2 lo verificará automáticamente).',
+    message: 'Confirma en la TPV que no hay cobros, reembolsos ni ventas pendientes de sincronizar antes de migrar.',
   })
 
   return {
@@ -400,29 +444,7 @@ export interface MigrateExecuteResult {
   startedAt: Date
 }
 
-/**
- * Execute a terminal venue migration. The order here is the whole safety story:
- * re-parent the terminal to the destination venue FIRST, then the FACTORY_RESET
- * is queued against that NEW venue. A factory reset auto-restores the device's
- * venue from the server on reboot, so if we wiped before re-parenting the device
- * would simply return to the OLD venue. Re-parent → wipe is forced.
- *
- * The wipe-queueing now lives INSIDE `updateTerminal` ("blindar") so EVERY
- * venue-change path wipes — not just this wizard. This function therefore
- * delegates the re-parent + wipe to `updateTerminal` and must NOT queue the
- * wipe again (that would double-wipe). It recovers the queued command id by
- * re-querying the latest FACTORY_RESET for the terminal.
- *
- * With `migrateMerchant`, the terminal keeps carrying its origin merchant(s) instead
- * of resolving the destination's default, and — only if the destination has no
- * `VenuePaymentConfig` of its own (I1) — one gets created. Normally copied from the
- * origin, but if the operator explicitly picked a merchant (`assignedMerchantIds`
- * non-empty), the created config reflects THAT choice instead — the terminal and the
- * venue's new permanent default must agree on which merchant is "the" merchant
- * (Finding 1, final whole-branch review). That write's id is stamped onto the
- * FACTORY_RESET payload (`migration.createdVenuePaymentConfigId`) so `migrateCancel`
- * (Task 5) can undo it.
- */
+/** Validates the complete destination, then commits the move and wipe together. */
 export async function migrateExecute(
   terminalId: string,
   toVenueId: string,
@@ -436,217 +458,51 @@ export async function migrateExecute(
    */
   scope?: TerminalWriteScope,
 ): Promise<MigrateExecuteResult> {
-  // Re-validate at execute time — state may have changed since preflight.
-  const pre = await migratePreflight(terminalId, toVenueId, migrateMerchant)
-  if (!pre.canProceed) {
-    throw new BadRequestError(`Migration blocked: ${pre.blockers.map(b => b.code).join(', ')}`)
-  }
+  const pre = await migratePreflight(terminalId, toVenueId, migrateMerchant, assignedMerchantIds)
+  if (!pre.canProceed) throw new BadRequestError(pre.blockers.map(b => b.message).join(' '))
 
-  // Finding 1 (final whole-branch review, founder-confirmed 2026-07-15): captured from the
-  // ORIGINAL parameter, BEFORE it gets reassigned into the local `merchantsToAssign` variable
-  // below (Step 2) — that reassignment folds in the auto-carry fallback, which would make this
-  // check meaningless if read afterward. Used only to decide the destination
-  // VenuePaymentConfig's identity (Step 2b) — see the comment there for why this must NOT be
-  // used to derive identity from `merchantsToAssign` in the no-selection case.
-  const hasExplicitSelection = !!(assignedMerchantIds && assignedMerchantIds.length > 0)
+  const terminal = await prisma.terminal.findUnique({ where: { id: terminalId } })
+  if (!terminal || terminal.venueId !== pre.fromVenueId) throw new ConflictError('La terminal cambió. Actualiza y vuelve a validar.')
+  const originVenue = await prisma.venue.findUnique({ where: { id: pre.fromVenueId } })
+  const targetVenue = await prisma.venue.findUnique({ where: { id: toVenueId } })
+  if (!targetVenue) throw new NotFoundError('Venue destino no encontrado')
+  const origin = migrateMerchant ? await resolveOriginPayment(terminal, originVenue?.organizationId ?? null) : null
+  const destination = await resolveOriginPayment({ venueId: toVenueId, assignedMerchantIds: [] }, targetVenue.organizationId)
+  const merchants = assignedMerchantIds?.length
+    ? assignedMerchantIds
+    : origin
+      ? origin.merchantIds
+      : destination.copyable
+        ? [destination.copyable.primaryAccountId]
+        : []
+  if (!merchants.length) throw new BadRequestError('Configura un comercio de cobro antes de migrar.')
 
-  // 0) Snapshot del origen ANTES del re-parent: updateTerminal borra
-  //    assignedMerchantIds y el venue cambia, así que después ya no se puede leer.
-  let origin: OriginPaymentSnapshot | null = null
-  if (migrateMerchant) {
-    const terminalBefore = await prisma.terminal.findUnique({ where: { id: terminalId } })
-    if (!terminalBefore) throw new NotFoundError('Terminal not found')
-    const originVenue = await prisma.venue.findUnique({ where: { id: terminalBefore.venueId } })
-    origin = await resolveOriginPayment(
-      { venueId: terminalBefore.venueId, assignedMerchantIds: terminalBefore.assignedMerchantIds ?? [] },
-      originVenue?.organizationId ?? null,
-    )
-  }
-
-  // 1) Re-parent + auto-queue the wipe in ONE call. updateTerminal validates the
-  //    target venue exists, clears assignedMerchantIds (cross-tenant safety),
-  //    and — because the venue changed — queues the 7-day-TTL FACTORY_RESET with
-  //    the migration payload ({ fromVenueId, previousMerchantIds, toVenueId }).
-  //    We do NOT queue the wipe here ourselves: that would double-wipe.
-  await updateTerminal(terminalId, { venueId: toVenueId }, actor, scope)
-
-  // 2) Set the destination merchant(s) AFTER the re-parent. This is a SECOND
-  //    updateTerminal call with the venue unchanged, so it does NOT re-queue a
-  //    wipe — it only validates brand/merchant compatibility via the existing
-  //    logic and writes assignedMerchantIds. Setting them before the device's
-  //    post-wipe config fetch means the freshly-wiped TPV pulls the correct
-  //    merchant on first reconnect.
-  //
-  //    If the operator did NOT pick specific merchants (the wizard's "Comercio por
-  //    defecto de la sucursal (recomendado)" option sends none), fall back to the
-  //    destination venue's configured default merchant (VenuePaymentConfig
-  //    .primaryAccountId — the same merchant migratePreflight's NO_PAYMENT_CONFIG
-  //    blocker guarantees exists). WITHOUT this fallback the move clears the old
-  //    merchant and assigns nothing, leaving the terminal with an empty
-  //    assignedMerchantIds — online but unable to process payments ("migró pero no
-  //    cobra"). The "recommended default" must therefore resolve to a real merchant.
-  let merchantsToAssign = assignedMerchantIds
-  // Con migrateMerchant, la terminal se lleva lo del origen en vez de resolver el
-  // default del destino (que puede no existir — ése es justo el caso a desbloquear).
-  if ((!merchantsToAssign || merchantsToAssign.length === 0) && migrateMerchant && origin) {
-    merchantsToAssign = origin.merchantIds
-  }
-  if (!merchantsToAssign || merchantsToAssign.length === 0) {
-    const paymentConfig = await prisma.venuePaymentConfig.findFirst({
-      where: { venueId: toVenueId },
-      select: { primaryAccountId: true },
-    })
-    if (paymentConfig?.primaryAccountId) {
-      merchantsToAssign = [paymentConfig.primaryAccountId]
-    }
-  }
-  if (merchantsToAssign && merchantsToAssign.length > 0) {
-    await updateTerminal(terminalId, { assignedMerchantIds: merchantsToAssign }, actor, scope)
-  }
-
-  // 2b) Dejar el venue destino cobrando de forma permanente.
-  //     I1: si ya tiene config propia NO se toca — sobrescribirla repuntaría el
-  //     dinero de un venue que ya cobra.
-  let createdVenuePaymentConfigId: string | null = null
-  if (migrateMerchant && origin?.copyable) {
-    // Finding 1 (final whole-branch review, founder-confirmed 2026-07-15): si el operador
-    // eligió un merchant específico junto con el checkbox, la config creada debe
-    // reflejar ESE merchant — no el del origen. Sin esto, la terminal cobra con el
-    // elegido pero el "default permanente" de la sucursal queda grabado con el
-    // merchant del origen: contamina atribución de costos (transactionCost.service.ts:265
-    // lee paymentConfig.primaryAccount), "el merchant del venue" en onboarding
-    // (onboarding.controller.ts:398), el matcher de webhooks de Blumon, y cualquier
-    // migración FUTURA a este mismo venue sin el checkbox (cuyo fallback en Step 2 lee este
-    // mismo primaryAccountId como default permanente del venue).
-    //
-    // Ojo: esto SÓLO aplica con selección explícita. Sin ella (acarreo automático),
-    // `origin.copyable` se usa VERBATIM — NO derivar de `merchantsToAssign` (un array
-    // compactado sin huecos, ver Step 2 arriba) en ese caso, o se reintroduce el bug de
-    // "hueco compactado, tertiary promovido a secondary" que una revisión anterior ya
-    // corrigió dentro de `resolveOriginPayment`.
-    const copyable = hasExplicitSelection
-      ? {
-          primaryAccountId: assignedMerchantIds![0],
-          secondaryAccountId: assignedMerchantIds![1] ?? null,
-          tertiaryAccountId: assignedMerchantIds![2] ?? null,
-          // La política del venue (no es identidad de merchant) sigue viniendo del origen.
-          preferredProcessor: origin.copyable.preferredProcessor,
-          routingRules: origin.copyable.routingRules,
-        }
-      : origin.copyable
-    const existing = await prisma.venuePaymentConfig.findUnique({ where: { venueId: toVenueId } })
-    if (!existing) {
-      // Money-safety (review finding, not in the original brief): `copyable` comes from
-      // `resolveOriginPayment`'s origin snapshot (or, with an explicit selection above, the
-      // operator's own pick) — neither path is filtered by `MerchantAccount.active` (see
-      // resolveOriginPayment's docstring — it's a lightweight ids-only helper). `pre` above
-      // already confirmed SOME active merchant exists among the
-      // origin's merchants (ORIGIN_HAS_NO_MERCHANT), but not specifically that
-      // `primaryAccountId` — the one non-nullable field this INSERT hinges on — is
-      // the active one (e.g. secondary active, primary deactivated for fraud/
-      // compliance). Writing an inactive primaryAccountId into a brand-new
-      // VenuePaymentConfig would silently leave the destination "migrated but can't
-      // charge" — the exact failure this feature exists to prevent. Scoped
-      // deliberately narrow to primaryAccountId only: no re-ranking/promoting
-      // secondary → primary — that's real complexity for a currently
-      // zero-instance-in-prod edge case (verified in prod: 2026-07-15).
-      const referencedIds = [copyable.primaryAccountId, copyable.secondaryAccountId, copyable.tertiaryAccountId].filter(
-        (id): id is string => !!id,
-      )
-      const activeReferenced = await prisma.merchantAccount.findMany({
-        where: { id: { in: referencedIds }, active: true },
-        select: { id: true },
-      })
-      const primaryIsActive = activeReferenced.some(m => m.id === copyable.primaryAccountId)
-
-      if (!primaryIsActive) {
-        logger.warn(
-          `Terminal migration ${terminalId}: skipping VenuePaymentConfig creation for venue ${toVenueId} — origin's primaryAccountId (${copyable.primaryAccountId}) is not an active MerchantAccount.`,
-        )
-      } else {
-        // Race guard: `existing` above is a check-then-act read, not a lock. VenuePaymentConfig
-        // .venueId is @unique — if two DIFFERENT terminals migrate to the SAME destination venue
-        // with migrateMerchant at nearly the same time, both can see `existing === null` before
-        // either creates, and the second `create()` throws P2002. The unique constraint is what
-        // actually protects I1 here (nobody's config gets silently overwritten); we just must not
-        // let that throw become an uncaught 500 AFTER this terminal's own re-parent (Step 1) and
-        // merchant assignment (Step 2) already committed. Mirrors the isPrismaUniqueViolation
-        // pattern in terminal-payment.service.ts:129-133. This is an expected race outcome, not a
-        // bug — log info (not warn/error) and continue WITHOUT createdVenuePaymentConfigId: this
-        // execution didn't create the config, the OTHER terminal's migration owns it, so this
-        // terminal's cancel flow must not try to delete a config it doesn't own. Any other error
-        // is a real failure and must still propagate.
-        try {
-          // Cast needed: `copyable.routingRules` is typed `Prisma.JsonValue | null` (a read
-          // shape, from resolveOriginPayment's SELECT), but Prisma's generated create input
-          // for a nullable Json column wants its `NullableJsonNullValueInput` sentinel instead
-          // of a bare `null` — a well-known Prisma JSON-null typing quirk. Runtime value is
-          // unaffected (still plain `null`, exactly what a copied "no routing rules" origin
-          // config should write).
-          const created = await prisma.venuePaymentConfig.create({
-            data: { venueId: toVenueId, ...copyable } as Prisma.VenuePaymentConfigUncheckedCreateInput,
-          })
-          createdVenuePaymentConfigId = created.id
-          // I6: es ruteo de dinero → va auditado.
-          await logAction({
-            staffId: actor.staffId ?? null,
-            venueId: toVenueId,
-            action: 'VENUE_PAYMENT_CONFIG_CREATED',
-            entity: 'VenuePaymentConfig',
-            entityId: created.id,
-            data: {
-              copiedFromVenueId: pre.fromVenueId,
-              primaryAccountId: copyable.primaryAccountId,
-              viaTerminalMigration: terminalId,
-            },
-            ipAddress: actor.ipAddress,
-            userAgent: actor.userAgent,
-          })
-        } catch (err) {
-          const isUniqueViolation =
-            (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') ||
-            (typeof err === 'object' && err !== null && (err as { code?: string }).code === 'P2002')
-          if (!isUniqueViolation) throw err
-          logger.info(
-            `Terminal migration ${terminalId}: lost the race to create VenuePaymentConfig for venue ${toVenueId} — another migration already created one.`,
-          )
-        }
+  // Resolve and validate everything before entering the shared atomic move.
+  await assertMerchantsTerminalCompatible(terminalId, merchants)
+  const copyable = origin?.copyable
+  const paymentConfig = copyable
+    ? {
+        ...copyable,
+        ...(assignedMerchantIds?.length && {
+          primaryAccountId: assignedMerchantIds[0],
+          secondaryAccountId: assignedMerchantIds[1] ?? null,
+          tertiaryAccountId: assignedMerchantIds[2] ?? null,
+          routingRules: null,
+        }),
+        routingRules: assignedMerchantIds?.length ? Prisma.JsonNull : (copyable.routingRules ?? Prisma.JsonNull),
       }
-    }
+    : undefined
+  if (migrateMerchant && (!paymentConfig || destination.copyable)) {
+    throw new ConflictError('La configuración de pagos cambió. Actualiza y vuelve a validar la migración.')
   }
-
-  // 3) Recover the queued wipe's commandId. updateTerminal does not return it
-  //    (its return shape is the terminal, which callers depend on), so we
-  //    re-query the latest FACTORY_RESET for this terminal.
-  //
-  //    PARTIAL-FAILURE WINDOW: the re-parent already committed. If the wipe
-  //    failed to queue inside updateTerminal (it logs a warning instead of
-  //    throwing, since the re-parent stands), there is no command to recover.
-  //    Surface that recoverable state to the operator so they re-send the
-  //    factory reset from the TPV command panel — preserving the prior
-  //    recoverable-state semantics.
-  const cmd = await prisma.tpvCommandQueue.findFirst({
-    where: { terminalId, commandType: 'FACTORY_RESET' },
-    orderBy: { createdAt: 'desc' },
+  const moved = await updateTerminal(terminalId, { venueId: toVenueId, assignedMerchantIds: merchants }, actor, scope, {
+    expectedVenueId: pre.fromVenueId,
+    paymentConfig,
   })
-  if (!cmd) {
-    throw new ConflictError(
-      'La terminal se reasignó correctamente al venue destino, pero no se pudo encolar el borrado (factory reset). La terminal NO se ha borrado todavía — reenvía el factory reset desde el panel de comandos de la TPV.',
-    )
+  if (!('migrationCommandId' in moved) || typeof moved.migrationCommandId !== 'string' || !moved.migrationCommandId) {
+    throw new ConflictError('No se confirmó la migración. Actualiza el estado de la terminal.')
   }
-
-  // I5: el cancel necesita saber qué config creamos para poder deshacerla. El
-  //     payload lo escribe updateTerminal ("blindar"), así que lo parchamos aquí.
-  if (createdVenuePaymentConfigId) {
-    const payload = (cmd.payload as Record<string, unknown> | null) ?? {}
-    const migration = (payload.migration as Record<string, unknown> | undefined) ?? {}
-    await prisma.tpvCommandQueue.update({
-      where: { id: cmd.id },
-      data: { payload: { ...payload, migration: { ...migration, createdVenuePaymentConfigId } } },
-    })
-  }
-
-  return { commandId: cmd.id, fromVenueId: pre.fromVenueId, toVenueId, startedAt: new Date() }
+  return { commandId: moved.migrationCommandId, fromVenueId: pre.fromVenueId, toVenueId, startedAt: new Date() }
 }
 
 /**
@@ -668,115 +524,82 @@ export interface MigrateCancelResult {
 }
 
 export async function migrateCancel(terminalId: string, actor: TerminalActor, scopedOrgId?: string): Promise<MigrateCancelResult> {
-  // 1) Find the cancellable in-flight wipe. PENDING/QUEUED + not-expired only —
-  //    SENT and beyond means the device may already have wiped.
-  const command = await prisma.tpvCommandQueue.findFirst({
-    where: {
-      terminalId,
-      commandType: 'FACTORY_RESET',
-      status: { in: ['PENDING', 'QUEUED'] },
-      OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
-    },
-    orderBy: { createdAt: 'desc' },
-  })
-
-  if (!command) {
-    throw new BadRequestError(
-      'No hay una migración cancelable para esta terminal (la TPV ya recibió el borrado o no hay migración en curso).',
-    )
-  }
-
-  // 2) Read the revert target from the command payload. Older commands queued
-  //    before the blindar payload existed can't be auto-reverted.
-  const migration = (
-    command.payload as {
-      migration?: { fromVenueId?: string; previousMerchantIds?: string[]; createdVenuePaymentConfigId?: string }
-    } | null
-  )?.migration
-  if (!migration || !migration.fromVenueId) {
-    // MANUAL wipe (queued from the superadmin, no venue move behind it) — or a legacy
-    // command queued before the blindar payload existed. There is nothing to revert: the
-    // terminal never moved. Cancelling is just dropping the queued command so it never
-    // reaches the device. This path used to throw "cannot revert" and left the operator
-    // with no way out of MIGRATION_IN_PROGRESS (Asana 1218069201250971, 2026-09-01).
-    const terminal = await prisma.terminal.findUnique({ where: { id: terminalId }, select: { venueId: true } })
-    if (!terminal) throw new NotFoundError('Terminal not found')
-
-    await tpvCommandQueueService.cancelCommand(command.id, actor.staffId ?? 'system', 'Borrado pendiente cancelado por el operador')
-    await logAction({
-      staffId: actor.staffId ?? null,
-      venueId: terminal.venueId,
-      action: 'TERMINAL_PENDING_WIPE_CANCELLED',
-      entity: 'Terminal',
-      entityId: terminalId,
-      data: { commandId: command.id, origin: 'MANUAL' },
-      ipAddress: actor.ipAddress,
-      userAgent: actor.userAgent,
+  const { command, migration, restoredVenueId } = await prisma.$transaction(async tx => {
+    const command = await tx.tpvCommandQueue.findFirst({
+      where: {
+        terminalId,
+        commandType: 'FACTORY_RESET',
+        OR: [
+          { status: { in: ['PENDING', 'QUEUED'] } },
+          { status: { in: ['SENT', 'RECEIVED'] }, payload: { path: ['_deliveryProtocol'], equals: 2 } },
+        ],
+        AND: [{ OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }],
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     })
-    logger.info(`Pending manual wipe cancelled for terminal ${terminalId}`, { commandId: command.id })
-    return { cancelled: true, restoredVenueId: terminal.venueId }
-  }
-  const { fromVenueId, previousMerchantIds, createdVenuePaymentConfigId } = migration
-
-  // Superadmin migrations may cross organizations, but an OWNER of the
-  // destination organization must never be able to write the terminal back into
-  // an organization they do not control (or delete that migration's config).
-  if (scopedOrgId) {
-    const origin = await prisma.venue.findFirst({
-      where: { id: fromVenueId, organizationId: scopedOrgId },
-      select: { id: true },
-    })
-    if (!origin) {
-      throw new ForbiddenError('No puedes cancelar una migración cuyo origen pertenece a otra organización.')
+    if (!command)
+      throw new BadRequestError(
+        'No hay una migración cancelable para esta terminal (la TPV ya recibió el borrado o no hay migración en curso).',
+      )
+    const migration = (
+      command.payload as {
+        migration?: { fromVenueId?: string; previousMerchantIds?: string[]; createdVenuePaymentConfigId?: string }
+      } | null
+    )?.migration
+    if (scopedOrgId && migration?.fromVenueId) {
+      const origin = await tx.venue.findFirst({ where: { id: migration.fromVenueId, organizationId: scopedOrgId }, select: { id: true } })
+      if (!origin) throw new ForbiddenError('No puedes cancelar una migración cuyo origen pertenece a otra organización.')
     }
-  }
-
-  // 3) Cancel the queued wipe so it never reaches the device.
-  await tpvCommandQueueService.cancelCommand(command.id, actor.staffId ?? 'system', 'Migración cancelada por el operador')
-
-  // 4) Revert the terminal directly (BYPASS updateTerminal so blindar does NOT
-  //    re-queue a wipe on the revert). Restore both the origin venue and the
-  //    merchant assignments captured at migration time.
-  await prisma.terminal.update({
-    where: { id: terminalId },
-    data: { venueId: fromVenueId, assignedMerchantIds: previousMerchantIds ?? [] },
+    // The compare-and-set in cancelCommand locks the queue row before restoring the venue.
+    // Delivery either wins first (and cancellation fails) or sees CANCELLED after commit.
+    await tpvCommandQueueService.cancelCommand(
+      command.id,
+      actor.staffId ?? 'system',
+      migration?.fromVenueId ? 'Migración cancelada por el operador' : 'Borrado pendiente cancelado por el operador',
+      tx,
+    )
+    if (migration?.fromVenueId) {
+      // Bypass updateTerminal: restoring must not enqueue another wipe.
+      await tx.terminal.update({
+        where: { id: terminalId },
+        data: {
+          venueId: migration.fromVenueId,
+          assignedMerchantIds: migration.previousMerchantIds ?? [],
+        },
+      })
+      if (migration.createdVenuePaymentConfigId) {
+        await tx.venuePaymentConfig.deleteMany({ where: { id: migration.createdVenuePaymentConfigId } })
+      }
+      return { command, migration, restoredVenueId: migration.fromVenueId }
+    }
+    const terminal = await tx.terminal.findUnique({ where: { id: terminalId }, select: { venueId: true } })
+    if (!terminal) throw new NotFoundError('Terminal not found')
+    return { command, migration, restoredVenueId: terminal.venueId }
   })
-
-  // 4b) I5: deshacer la VenuePaymentConfig que ESTA migración creó. Sin esto, una
-  //     migración cancelada dejaría al venue destino cobrando para siempre.
-  //     deleteMany (no delete) para ser idempotente si ya no existe. Sólo tocamos
-  //     la fila cuyo id grabamos nosotros — nunca una preexistente (I1).
-  if (createdVenuePaymentConfigId) {
-    await prisma.venuePaymentConfig.deleteMany({ where: { id: createdVenuePaymentConfigId } })
+  if (migration?.createdVenuePaymentConfigId) {
     await logAction({
       staffId: actor.staffId ?? null,
-      venueId: fromVenueId,
+      venueId: restoredVenueId,
       action: 'VENUE_PAYMENT_CONFIG_DELETED',
       entity: 'VenuePaymentConfig',
-      entityId: createdVenuePaymentConfigId,
+      entityId: migration.createdVenuePaymentConfigId,
       data: { reason: 'Migración de terminal cancelada', commandId: command.id, terminalId },
       ipAddress: actor.ipAddress,
       userAgent: actor.userAgent,
     })
   }
-
-  // 5) Best-effort audit trail (never throws).
   await logAction({
     staffId: actor.staffId ?? null,
-    venueId: fromVenueId,
-    action: 'TERMINAL_MIGRATION_CANCELLED',
+    venueId: restoredVenueId,
+    action: migration?.fromVenueId ? 'TERMINAL_MIGRATION_CANCELLED' : 'TERMINAL_PENDING_WIPE_CANCELLED',
     entity: 'Terminal',
     entityId: terminalId,
-    data: { commandId: command.id, restoredVenueId: fromVenueId, restoredMerchantIds: previousMerchantIds ?? [] },
+    data: { commandId: command.id, restoredVenueId, restoredMerchantIds: migration?.previousMerchantIds ?? [] },
     ipAddress: actor.ipAddress,
     userAgent: actor.userAgent,
   })
-
-  logger.info(`Migration cancelled for terminal ${terminalId} — reverted to venue ${fromVenueId}`, {
-    commandId: command.id,
-  })
-
-  return { cancelled: true, restoredVenueId: fromVenueId }
+  logger.info(`Pending wipe cancelled for terminal ${terminalId}`, { commandId: command.id, restoredVenueId })
+  return { cancelled: true, restoredVenueId }
 }
 
 export interface MigrateDiscardResult {
@@ -814,12 +637,12 @@ export async function migrateDiscard(terminalId: string, actor: TerminalActor, s
   const terminal = await prisma.terminal.findUnique({ where: { id: terminalId } })
   if (!terminal) throw new NotFoundError('Terminal not found')
 
-  const pending = await findPendingWipes(terminalId, terminal.lastActivationStatusCheckAt)
+  const pending = await findPendingWipes(terminalId, terminal.commandSessionId)
   if (pending.length === 0) {
     throw new BadRequestError('No hay un borrado pendiente que descartar: la terminal ya lo ejecutó o nunca hubo uno.')
   }
   const newest = newestOf(pending)
-  if (CANCELLABLE_STATUSES.includes(newest.status)) {
+  if (canCancelWipe(newest)) {
     throw new BadRequestError('Ese borrado todavía no llega a la terminal: cancélalo en vez de descartarlo.')
   }
   const discardableAt = new Date(newest.createdAt.getTime() + DISCARD_AFTER_MS)
@@ -842,17 +665,17 @@ export async function migrateDiscard(terminalId: string, actor: TerminalActor, s
 
   const now = new Date()
   const { discardedIds } = await prisma.$transaction(async tx => {
-    // Serialize against heartbeat/rebind writes. A plain re-read still leaves a race
+    // Serialize against authenticated app-boot registration. A plain re-read still leaves a race
     // between the read and the writes; this row lock keeps the proof stable until commit.
-    const [fresh] = await tx.$queryRaw<Array<{ lastActivationStatusCheckAt: Date | null }>>`
-      SELECT "lastActivationStatusCheckAt"
+    const [fresh] = await tx.$queryRaw<Array<{ commandSessionId: string | null }>>`
+      SELECT "commandSessionId"
       FROM "Terminal"
       WHERE "id" = ${terminalId}
       FOR UPDATE
     `
     if (!fresh) throw new NotFoundError('Terminal not found')
-    if (deviceReboundAfter(newest.createdAt, fresh?.lastActivationStatusCheckAt)) {
-      throw new ConflictError('La terminal acaba de reconectarse: ya ejecutó el borrado. Vuelve a verificar el destino.')
+    if (deviceReboundAfter(newest, fresh.commandSessionId)) {
+      throw new ConflictError('La terminal confirmó el borrado. Vuelve a verificar el destino.')
     }
 
     if (scopedOrgId && revert?.fromVenueId) {
@@ -868,10 +691,15 @@ export async function migrateDiscard(terminalId: string, actor: TerminalActor, s
     // One update per id so the audit trail names the rows that ACTUALLY moved: `updateMany`
     // reports a count, not which rows, and the sweep or the device may have moved one of
     // them to a terminal status in the meantime (Codex P3).
+    if ((newest.payload as { _deliveryProtocol?: number } | null)?._deliveryProtocol === 2 && newest.status === 'EXECUTING') {
+      throw new ConflictError('La TPV ya autorizó la ejecución. Verifica el resultado antes de descartar la migración.')
+    }
     const discardedIds: string[] = []
-    for (const id of pending.map(c => c.id)) {
+    for (const row of pending) {
+      const id = row.id
+      const protocol2 = (row.payload as { _deliveryProtocol?: number } | null)?._deliveryProtocol === 2
       const r = await tx.tpvCommandQueue.updateMany({
-        where: { id, status: { in: [...IN_FLIGHT_STATUSES] } },
+        where: { id, status: { in: protocol2 ? ['SENT', 'RECEIVED'] : [...IN_FLIGHT_STATUSES] } },
         data: { status: 'EXPIRED', expiresAt: now },
       })
       if (r.count !== 1) {
@@ -926,7 +754,9 @@ export async function migrateDiscard(terminalId: string, actor: TerminalActor, s
 const ONLINE_THRESHOLD_MS = 2 * 60 * 1000 // mirror tpv-health/command-execution online cutoff
 
 export interface MigrateStatusResult {
+  cancellable: boolean
   commandStatus: string
+  resultMessage: string | null
   commandDelivered: boolean
   reboundAfterWipe: boolean
   currentlyOnline: boolean
@@ -948,14 +778,17 @@ export async function migrateStatus(terminalId: string, commandId: string): Prom
   const t0 = command.createdAt
   const now = Date.now()
 
-  const commandDelivered = ['SENT', 'RECEIVED', 'EXECUTING', 'COMPLETED'].includes(command.status)
-  const reboundAfterWipe = deviceReboundAfter(t0, terminal.lastActivationStatusCheckAt)
-  const currentlyOnline = !!terminal.lastHeartbeat && now - terminal.lastHeartbeat.getTime() < ONLINE_THRESHOLD_MS
+  const commandDelivered = ['RECEIVED', 'EXECUTING', 'COMPLETED'].includes(command.status)
+  const reboundAfterWipe = deviceReboundAfter(command, terminal.commandSessionId)
+  const currentlyOnline =
+    !!terminal.lastHeartbeat && now >= terminal.lastHeartbeat.getTime() && now - terminal.lastHeartbeat.getTime() < ONLINE_THRESHOLD_MS
   const onlineUnderNewVenue = currentlyOnline && terminal.venueId === command.venueId
-  const confirmed = reboundAfterWipe && onlineUnderNewVenue
+  const confirmed = reboundAfterWipe && onlineUnderNewVenue && command.status === 'COMPLETED'
 
   return {
     commandStatus: command.status,
+    cancellable: canCancelWipe(command),
+    resultMessage: command.resultMessage,
     commandDelivered,
     reboundAfterWipe,
     currentlyOnline,

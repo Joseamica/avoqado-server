@@ -295,8 +295,8 @@ const INVENTARIO: Record<string, number> = {
   'src/services/dashboard/supplier.service.ts': 3,
   'src/services/dashboard/team.dashboard.service.ts': 3,
   'src/services/dashboard/tenderType.dashboard.service.ts': 1,
-  'src/services/dashboard/terminal-migration.service.ts': 3,
-  'src/services/dashboard/terminals.superadmin.service.ts': 6,
+  'src/services/dashboard/terminal-migration.service.ts': 1,
+  'src/services/dashboard/terminals.superadmin.service.ts': 4,
   'src/services/dashboard/text-to-sql-assistant.service.ts': 3,
   'src/services/dashboard/token-budget.service.ts': 1,
   'src/services/dashboard/tpv.dashboard.service.ts': 3,
@@ -389,7 +389,7 @@ const INVENTARIO: Record<string, number> = {
   // reescribieron a SQL (golden al centavo + integración con base real). Los 5 que quedan
   // devuelven FILAS al dashboard o corren un motor por fila (GPS de hoy, personal en línea,
   // checadas del día, calendario, reporte de cierre) y llevan select quirúrgico.
-  'src/services/organization-dashboard/organizationDashboard.service.ts': 40,
+  'src/services/organization-dashboard/organizationDashboard.service.ts': 39,
   'src/services/organization-dashboard/storesAnalysisScope.service.ts': 1,
   'src/services/organization-payment-config.service.ts': 1,
   'src/services/organization/organization.service.ts': 7,
@@ -461,7 +461,6 @@ const INVENTARIO: Record<string, number> = {
   // recorre por páginas con cursor; al llegar a cero sale del inventario.
   'src/services/tpv/blumon-webhook.service.ts': 2,
   'src/services/tpv/command-execution.service.ts': 3,
-  'src/services/tpv/command-queue.service.ts': 2,
   'src/services/tpv/fastPaymentCustomer.ts': 1,
   'src/services/tpv/floor-element.tpv.service.ts': 1,
   'src/services/tpv/merchantRouting.service.ts': 3,

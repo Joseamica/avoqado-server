@@ -32,7 +32,7 @@ import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
 import { countUpdatedTerminals, scopedTerminalWhere } from '../shared/terminalScopedWrites'
-import { computeTerminalMigration, type MigrationCommandLike } from '../dashboard/terminals.superadmin.service'
+import { computeTerminalMigration, migrationCommandWhere } from '../dashboard/terminals.superadmin.service'
 import { enmascararCorreo, enviarEnlaceDeRestablecimiento } from '../dashboard/enlaceDeRestablecimiento'
 
 // Types for organization dashboard
@@ -3857,6 +3857,12 @@ class OrganizationDashboardService {
         where,
         include: {
           venue: { select: { id: true, name: true, slug: true } },
+          commandQueue: {
+            where: { ...migrationCommandWhere(), payload: { path: ['migration', 'toVenueId'], not: Prisma.DbNull } },
+            take: 1,
+            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+            select: { id: true, createdAt: true, payload: true, status: true },
+          },
         },
         orderBy,
         skip,
@@ -3864,37 +3870,6 @@ class OrganizationDashboardService {
       }),
       prisma.terminal.count({ where }),
     ])
-
-    // ---------------------------------------------------------------------------
-    // Migration badge ("Migrando…") — mirrors getAllTerminals (superadmin list).
-    // ---------------------------------------------------------------------------
-    // One batched query (no N+1) for the in-flight migration FACTORY_RESET commands
-    // of the terminals on this page. A migration wipe never ACKs (it lingers until
-    // it EXPIRES), so we filter in-flight statuses + not-expired, keep only the
-    // latest such command per terminal whose payload carries a `migration` object,
-    // and compute `inProgress` from the device's post-wipe rebound timestamp via
-    // the shared computeTerminalMigration helper.
-    const pageTerminalIds = terminals.map(t => t.id)
-    const latestMigrationByTerminal = new Map<string, MigrationCommandLike>()
-
-    if (pageTerminalIds.length > 0) {
-      const migrationCommands = await prisma.tpvCommandQueue.findMany({
-        where: {
-          terminalId: { in: pageTerminalIds },
-          commandType: 'FACTORY_RESET',
-          status: { in: ['PENDING', 'QUEUED', 'SENT', 'RECEIVED', 'EXECUTING'] },
-          OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
-        },
-        select: { id: true, terminalId: true, createdAt: true, payload: true },
-        orderBy: { createdAt: 'desc' },
-      })
-
-      for (const cmd of migrationCommands) {
-        if (latestMigrationByTerminal.has(cmd.terminalId)) continue
-        if (!(cmd.payload as any)?.migration) continue
-        latestMigrationByTerminal.set(cmd.terminalId, cmd)
-      }
-    }
 
     // Summary stats (all terminals in org, unfiltered by search/pagination)
     const allWhere: Prisma.TerminalWhereInput = { venueId: { in: venueIds } }
@@ -3945,7 +3920,7 @@ class OrganizationDashboardService {
         // tablet»: una PAX se identifica por serial, pero una tablet Android sólo por esto.
         deviceUid: (t as any).deviceUid ?? null,
         venue: t.venue,
-        migration: computeTerminalMigration(latestMigrationByTerminal.get(t.id), (t as any).lastActivationStatusCheckAt ?? null),
+        migration: computeTerminalMigration(t.commandQueue?.[0], (t as any).lastActivationStatusCheckAt ?? null, t.commandSessionId),
       })),
       pagination: {
         page,

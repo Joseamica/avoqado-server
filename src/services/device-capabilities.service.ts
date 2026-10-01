@@ -8,6 +8,7 @@ export type CapabilityState = 'SUPPORTED' | 'UNSUPPORTED' | 'UNKNOWN'
 
 export interface DeviceCapabilitySnapshot {
   type: TerminalType
+  brand?: string | null
   customerDisplayPresent: boolean | null
   customerDisplayInvertible: boolean | null
   displayModeProtocolVersion: number | null
@@ -64,12 +65,7 @@ const TPV_ANDROID_COMMANDS: readonly TpvCommandType[] = [
   'FORCE_UPDATE',
   'REQUEST_UPDATE',
   'INSTALL_VERSION',
-  'SYNC_DATA',
   'FACTORY_RESET',
-  'EXPORT_LOGS',
-  'UPDATE_CONFIG',
-  'REFRESH_MENU',
-  'UPDATE_MERCHANT',
   'FETCH_ANGELPAY_MERCHANTS',
 ]
 
@@ -193,7 +189,10 @@ export function resolveEffectiveDeviceCapabilities(
       canManagePaymentConfiguration: true,
       canAcceptTerminalPaymentRequests: true,
       customerDisplay: { ...UNSUPPORTED_DISPLAY },
-      supportedRemoteCommands: [...TPV_ANDROID_COMMANDS],
+      supportedRemoteCommands: TPV_ANDROID_COMMANDS.filter(
+        command =>
+          !terminal.brand?.toUpperCase().includes('NEXGO') || !['FORCE_UPDATE', 'REQUEST_UPDATE', 'INSTALL_VERSION'].includes(command),
+      ),
       configurableSettings: resolveConfigurableSettings(terminal.type),
     }
   }

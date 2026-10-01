@@ -1,3 +1,6 @@
+import { broadcastSuperadminTerminalUpdate } from '../../communication/sockets'
+import { Prisma, TerminalStatus } from '@prisma/client'
+import { assertDeviceActionSupported } from '../device-capabilities.service'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { BadRequestError, ConflictError, IncompatibleDeviceError, NotFoundError, TerminalBrandChangeBlocked } from '../../errors/AppError'
@@ -41,11 +44,8 @@ export const MIGRATION_WIPE_TTL_MS = 7 * 24 * 60 * 60 * 1000
  * Per-terminal migration badge shape attached to each terminal in the SUPERADMIN
  * list response. `null` when the terminal has no in-flight migration FACTORY_RESET.
  *
- * `inProgress` is true while a migration wipe is "live" AND the device has NOT yet
- * rebound after it. A FACTORY_RESET never ACKs (it lingers in a non-terminal status
- * until it EXPIRES), so completion is detected via the device's post-wipe rebound
- * (`Terminal.lastActivationStatusCheckAt` stamped strictly AFTER the command was
- * created), not via the command reaching a terminal status.
+ * Completion requires both a successful device receipt and a different authenticated
+ * app boot. Public activation/status timestamps do not prove a wipe.
  */
 export interface TerminalMigrationInfo {
   inProgress: boolean
@@ -68,42 +68,36 @@ export interface MigrationCommandLike {
   id: string
   createdAt: Date | null
   payload: unknown
+  status?: string
 }
 
-/**
- * Pure helper — compute the `migration` badge for a single terminal.
- *
- * @param command The terminal's latest in-flight migration FACTORY_RESET (or null/undefined).
- * @param lastActivationStatusCheckAt When the device last (re-)bound via activation-status.
- * @returns The `TerminalMigrationInfo` badge, or `null` when there's no migration command
- *          (or the command's payload lacks a `migration` object — i.e. a manual reset).
- *
- * A migration is in progress UNLESS the device already rebound after the wipe, i.e.
- * `lastActivationStatusCheckAt` is strictly after the command's `createdAt`. An offline
- * device (no rebound) stays `inProgress: true`.
- */
-/**
- * Proof of wipe — the ONE rule for "did the device already execute this FACTORY_RESET?".
- *
- * A FACTORY_RESET never ACKs (the device wipes and kills its own process before it can), so
- * the command's status is useless as a completion signal: it lingers in SENT until its expiry
- * sweep. What DOES prove the wipe is the device re-binding through `activation-status` —
- * stamped on `Terminal.lastActivationStatusCheckAt` — strictly AFTER the command was created.
- *
- * Shared by the terminals-list badge, `migrateStatus` and `migratePreflight` so the three can
- * never disagree about whether a migration is still live (Asana 1218069201250971: the list
- * said "not migrating" while the wizard said "migration in progress" for the same terminal).
- */
-export function deviceReboundAfter(
-  commandCreatedAt: Date | null | undefined,
-  lastActivationStatusCheckAt: Date | null | undefined,
-): boolean {
-  return Boolean(lastActivationStatusCheckAt && commandCreatedAt && lastActivationStatusCheckAt > commandCreatedAt)
+/** Completion requires the device receipt and a new authenticated app boot. */
+export function deviceReboundAfter(command: MigrationCommandLike, commandSessionId?: string | null): boolean {
+  const payload = command.payload as { _deliveryProtocol?: number; _originCommandSessionId?: string } | null
+  return (
+    command.status === 'COMPLETED' &&
+    payload?._deliveryProtocol === 2 &&
+    !!payload._originCommandSessionId &&
+    !!commandSessionId &&
+    commandSessionId !== payload._originCommandSessionId
+  )
+}
+
+/** Include receipts until their new app boot is confirmed; public health checks are not proof. */
+export function migrationCommandWhere(): Prisma.TpvCommandQueueWhereInput {
+  return {
+    commandType: 'FACTORY_RESET',
+    OR: [
+      { status: { in: [...MIGRATION_IN_FLIGHT_STATUSES] }, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] },
+      { status: 'COMPLETED', payload: { path: ['_deliveryProtocol'], equals: 2 } },
+    ],
+  }
 }
 
 export function computeTerminalMigration(
   command: MigrationCommandLike | null | undefined,
-  lastActivationStatusCheckAt: Date | null | undefined,
+  _lastActivationStatusCheckAt: Date | null | undefined,
+  commandSessionId?: string | null,
 ): TerminalMigrationInfo | null {
   if (!command) return null
 
@@ -113,7 +107,7 @@ export function computeTerminalMigration(
     return null
   }
 
-  const rebound = deviceReboundAfter(command.createdAt, lastActivationStatusCheckAt)
+  const rebound = deviceReboundAfter(command, commandSessionId)
 
   return {
     inProgress: !rebound,
@@ -156,6 +150,12 @@ export async function getAllTerminals(filters?: { venueId?: string; status?: str
   const terminals = await prisma.terminal.findMany({
     where,
     include: {
+      commandQueue: {
+        where: { ...migrationCommandWhere(), payload: { path: ['migration', 'toVenueId'], not: Prisma.DbNull } },
+        take: 1,
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        select: { id: true, createdAt: true, payload: true, status: true },
+      },
       venue: {
         select: {
           id: true,
@@ -169,43 +169,9 @@ export async function getAllTerminals(filters?: { venueId?: string; status?: str
     },
   })
 
-  // ---------------------------------------------------------------------------
-  // Migration badge ("Migrando…").
-  // ---------------------------------------------------------------------------
-  // One batched query (no N+1) for the in-flight migration FACTORY_RESET commands
-  // of the terminals on this page. We filter in-flight statuses + not-expired here
-  // (a migration wipe never ACKs; it lingers until it EXPIRES), then keep only the
-  // latest such command per terminal and compute `inProgress` from the device's
-  // post-wipe rebound timestamp. Adds the `migration` field WITHOUT changing the
-  // existing list shape.
-  const terminalIds = terminals.map(t => t.id)
-  const latestMigrationByTerminal = new Map<string, MigrationCommandLike>()
-
-  if (terminalIds.length > 0) {
-    const migrationCommands = await prisma.tpvCommandQueue.findMany({
-      where: {
-        terminalId: { in: terminalIds },
-        commandType: 'FACTORY_RESET',
-        status: { in: [...MIGRATION_IN_FLIGHT_STATUSES] },
-        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
-      },
-      select: { id: true, terminalId: true, createdAt: true, payload: true },
-      orderBy: { createdAt: 'desc' },
-    })
-
-    // Keep the latest migration command per terminal. Because rows are ordered by
-    // createdAt desc, the first one we see for a terminal is its latest — and we
-    // only keep commands whose payload actually carries a `migration` object.
-    for (const cmd of migrationCommands) {
-      if (latestMigrationByTerminal.has(cmd.terminalId)) continue
-      if (!(cmd.payload as any)?.migration) continue
-      latestMigrationByTerminal.set(cmd.terminalId, cmd)
-    }
-  }
-
-  const terminalsWithMigration = terminals.map(terminal => ({
+  const terminalsWithMigration = terminals.map(({ commandQueue, commandTokenHash: _credential, ...terminal }) => ({
     ...terminal,
-    migration: computeTerminalMigration(latestMigrationByTerminal.get(terminal.id), terminal.lastActivationStatusCheckAt),
+    migration: computeTerminalMigration(commandQueue?.[0], terminal.lastActivationStatusCheckAt, terminal.commandSessionId),
   }))
 
   logger.info(`Fetched ${terminals.length} terminals`)
@@ -239,7 +205,20 @@ export async function getTerminalById(terminalId: string) {
     throw new NotFoundError('Terminal not found')
   }
 
-  return terminal
+  const command = await prisma.tpvCommandQueue.findFirst({
+    where: {
+      terminalId,
+      ...migrationCommandWhere(),
+      payload: { path: ['migration', 'toVenueId'], not: Prisma.DbNull },
+    },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    select: { id: true, createdAt: true, payload: true, status: true },
+  })
+  const { commandTokenHash: _credential, ...publicTerminal } = terminal
+  return {
+    ...publicTerminal,
+    migration: computeTerminalMigration(command, terminal.lastActivationStatusCheckAt, terminal.commandSessionId),
+  }
 }
 
 /**
@@ -499,6 +478,10 @@ export async function updateTerminal(
    * del spec «pantalla del cliente», 4ª ronda, 2026-09-17). El superadmin no lo pasa y escribe sólo por id.
    */
   scope?: TerminalWriteScope,
+  migrationOptions?: {
+    expectedVenueId: string
+    paymentConfig?: Omit<Prisma.VenuePaymentConfigUncheckedCreateInput, 'venueId'>
+  },
 ) {
   logger.info(`Updating terminal ${terminalId}:`, data)
 
@@ -526,6 +509,10 @@ export async function updateTerminal(
     }
     venueChanged = true
     logger.info(`Moving terminal ${terminalId} from venue ${terminal.venueId} → ${data.venueId} (clearing assignedMerchantIds)`)
+  }
+
+  if (venueChanged && data.brand && data.brand !== terminal.brand) {
+    throw new BadRequestError('Cambia la marca antes de migrar la terminal.')
   }
 
   // ---------------------------------------------------------------------------
@@ -641,6 +628,122 @@ export async function updateTerminal(
     await assertMerchantsTerminalCompatible(terminalId, data.assignedMerchantIds)
   }
 
+  if (venueChanged) {
+    // A venue move, its merchants and the wipe must commit together. Every caller
+    // (wizard, direct PATCH and org dashboard) uses this same boundary.
+    assertDeviceActionSupported(terminal, { kind: 'REMOTE_COMMAND', commandType: 'FACTORY_RESET' })
+    if (data.brand && data.brand !== terminal.brand) {
+      throw new BadRequestError('Cambia la marca antes de migrar la terminal.')
+    }
+    const deferMove = (terminal.commandProtocolVersion ?? 0) >= 2
+    const fromVenueId = migrationOptions?.expectedVenueId ?? terminal.venueId
+    if (fromVenueId !== terminal.venueId) throw new ConflictError('La terminal cambió de venue. Actualiza y vuelve a validar.')
+    const moved = await writeScopedTerminal(
+      () =>
+        prisma.$transaction(async tx => {
+          // A deferred move can have empty update data; Prisma then only reads, so lock explicitly.
+          if (deferMove) await tx.$queryRaw`SELECT id FROM "Terminal" WHERE id = ${terminalId} FOR UPDATE`
+          // Conditional write rejects concurrent moves and retains the caller's tenant scope.
+          const updated = await tx.terminal.update({
+            where: { ...scopedTerminalWhere(terminalId, scope), venueId: fromVenueId },
+            data: {
+              ...(!deferMove && { venueId: data.venueId!, assignedMerchantIds: data.assignedMerchantIds ?? [] }),
+              ...(data.name !== undefined && { name: data.name }),
+              ...(data.model !== undefined && { model: data.model }),
+              ...(data.status && { status: data.status as TerminalStatus }),
+              ...(data.status === 'ACTIVE' && !terminal.activatedAt
+                ? { activatedAt: new Date(), activatedBy: actor?.staffId ?? null }
+                : {}),
+            },
+            include: { venue: { select: { id: true, name: true, slug: true } } },
+          })
+          if (data.assignedMerchantIds?.length) {
+            const active = await tx.merchantAccount.findMany({
+              where: { id: { in: data.assignedMerchantIds }, active: true },
+              take: data.assignedMerchantIds.length,
+              select: { id: true },
+            })
+            if (active.length !== data.assignedMerchantIds.length) throw new BadRequestError('Los merchants deben existir y estar activos.')
+            await assertMerchantsTerminalCompatible(terminalId, data.assignedMerchantIds, tx)
+          }
+          const pending = await tx.tpvCommandQueue.findFirst({
+            where: {
+              terminalId,
+              ...migrationCommandWhere(),
+            },
+          })
+          if (pending && !deviceReboundAfter(pending, terminal.commandSessionId)) {
+            throw new ConflictError('Hay un borrado pendiente. Resuélvelo antes de migrar.')
+          }
+          const createdConfig = migrationOptions?.paymentConfig
+            ? await tx.venuePaymentConfig.create({ data: { ...migrationOptions.paymentConfig, venueId: data.venueId! } })
+            : null
+          const queued = await tpvCommandQueueService.queueCommand(
+            {
+              terminalId,
+              venueId: deferMove ? fromVenueId : data.venueId!,
+              ...(deferMove && {
+                migrationIntent: {
+                  toVenueId: data.venueId!,
+                  assignedMerchantIds: data.assignedMerchantIds ?? [],
+                  ...(scope && 'organizationId' in scope && { organizationId: scope.organizationId }),
+                },
+              }),
+              commandType: 'FACTORY_RESET',
+              priority: 'CRITICAL',
+              requestedBy: actor?.staffId ?? 'system',
+              requestedByName: actor?.staffName,
+              source: 'DASHBOARD',
+              expiresAt: new Date(Date.now() + MIGRATION_WIPE_TTL_MS),
+              payload: {
+                migration: {
+                  fromVenueId,
+                  previousMerchantIds: terminal.assignedMerchantIds ?? [],
+                  toVenueId: data.venueId!,
+                  ...(createdConfig && { createdVenuePaymentConfigId: createdConfig.id }),
+                },
+              },
+            },
+            tx,
+          )
+          return { ...updated, migrationCommandId: queued.commandId, createdPaymentConfigId: createdConfig?.id }
+        }),
+      'La terminal cambió de venue. Actualiza y vuelve a validar.',
+    )
+    await logAction({
+      staffId: actor?.staffId ?? null,
+      venueId: moved.venueId,
+      action: deferMove ? 'TERMINAL_MIGRATION_QUEUED' : 'TERMINAL_UPDATED',
+      entity: 'Terminal',
+      entityId: terminalId,
+      data: {
+        requestedVenueId: data.venueId,
+        updatedFields: [
+          'venueId',
+          'assignedMerchantIds',
+          ...(['name', 'model', 'status'] as const).filter(field => data[field] !== undefined),
+        ],
+        venue: { before: fromVenueId, after: moved.venueId },
+        assignedMerchantIds: { before: terminal.assignedMerchantIds, after: moved.assignedMerchantIds },
+        commandId: moved.migrationCommandId,
+      },
+      ipAddress: actor?.ipAddress,
+      userAgent: actor?.userAgent,
+    })
+    if (moved.createdPaymentConfigId) {
+      await logAction({
+        staffId: actor?.staffId ?? null,
+        venueId: data.venueId!,
+        action: 'VENUE_PAYMENT_CONFIG_CREATED',
+        entity: 'VenuePaymentConfig',
+        entityId: moved.createdPaymentConfigId,
+        data: { source: 'TERMINAL_MIGRATION', terminalId, fromVenueId },
+      })
+    }
+    broadcastSuperadminTerminalUpdate(terminalId)
+    return moved
+  }
+
   // Update terminal (scoped to the organization when the org dashboard calls; see `scope`)
   const updatedTerminal = await writeScopedTerminal(
     () =>
@@ -655,14 +758,7 @@ export async function updateTerminal(
           // Without this the terminal logs "Heartbeat from unactivated terminal"
           // and login/payment endpoints stay blocked even though status=ACTIVE.
           ...(data.status === 'ACTIVE' && !terminal.activatedAt ? { activatedAt: new Date(), activatedBy: actor?.staffId ?? null } : {}),
-          // Task 54: clear assignedMerchantIds on venue change (cross-tenant
-          // assignments are never valid). When venue isn't changing, defer to
-          // explicit `assignedMerchantIds` from the caller.
-          ...(venueChanged
-            ? { venueId: data.venueId!, assignedMerchantIds: [] }
-            : data.assignedMerchantIds !== undefined
-              ? { assignedMerchantIds: data.assignedMerchantIds }
-              : {}),
+          ...(data.assignedMerchantIds !== undefined ? { assignedMerchantIds: data.assignedMerchantIds } : {}),
           ...(data.brand && { brand: data.brand }),
           ...(data.model && { model: data.model }),
         },
@@ -684,9 +780,8 @@ export async function updateTerminal(
     if (data[f] !== undefined) updatedFields.push(f)
   }
   if (data.status === 'ACTIVE' && !terminal.activatedAt) updatedFields.push('activatedAt')
-  const merchantsChanged = venueChanged || data.assignedMerchantIds !== undefined
+  const merchantsChanged = data.assignedMerchantIds !== undefined
   if (merchantsChanged) updatedFields.push('assignedMerchantIds')
-  if (venueChanged) updatedFields.push('venueId')
 
   await logAction({
     staffId: actor?.staffId ?? null,
@@ -699,69 +794,14 @@ export async function updateTerminal(
       ...(merchantsChanged && {
         assignedMerchantIds: { before: terminal.assignedMerchantIds, after: updatedTerminal.assignedMerchantIds },
       }),
-      ...(venueChanged && { venue: { before: terminal.venueId, after: updatedTerminal.venueId } }),
     },
     ipAddress: actor?.ipAddress,
     userAgent: actor?.userAgent,
   })
 
-  // ---------------------------------------------------------------------------
-  // "Blindar": auto-queue the migration wipe on EVERY venue change.
-  // ---------------------------------------------------------------------------
-  // A re-parented-but-not-wiped terminal keeps the OLD venue's Blumon merchant
-  // creds (only the wipe-and-restart re-syncs them) → split-brain money routing.
-  // So ANY path that changes the venue (edit dialog, AttachTerminalDialog,
-  // admin-MCP move_terminal, migration wizard) must queue the FACTORY_RESET —
-  // not just the wizard. This runs AFTER the venue is persisted because
-  // queueCommand asserts terminal.venueId === the new venueId.
-  //
-  // Cancel state (fromVenueId, previousMerchantIds) is captured from the
-  // pre-update `terminal` row BEFORE merchants were cleared, so migrateCancel
-  // can revert the move while the device hasn't wiped yet.
-  //
-  // Resilient by design: the re-parent already committed, so a queue failure
-  // must NOT fail the whole update (the operator can re-send the factory reset
-  // from the command panel). We log a warning instead of throwing.
-  if (venueChanged) {
-    const fromVenueId = terminal.venueId
-    const previousMerchantIds = terminal.assignedMerchantIds ?? []
-    const toVenueId = updatedTerminal.venueId
-    try {
-      const queued = await tpvCommandQueueService.queueCommand({
-        terminalId,
-        venueId: toVenueId,
-        commandType: 'FACTORY_RESET',
-        priority: 'CRITICAL',
-        requestedBy: actor?.staffId ?? 'system',
-        ...(actor?.staffName ? { requestedByName: actor.staffName } : {}),
-        source: 'DASHBOARD',
-        payload: { migration: { fromVenueId, previousMerchantIds, toVenueId } },
-      })
-
-      // Override the default 30-min FACTORY_RESET TTL with a long one so the wipe
-      // survives a multi-day-offline device and completes whenever it reconnects.
-      await prisma.tpvCommandQueue.update({
-        where: { id: queued.commandId },
-        data: { expiresAt: new Date(Date.now() + MIGRATION_WIPE_TTL_MS) },
-      })
-
-      logger.info(`Migration wipe queued for terminal ${terminalId} (blindar)`, {
-        commandId: queued.commandId,
-        fromVenueId,
-        toVenueId,
-      })
-    } catch (err) {
-      logger.warn(`Failed to queue migration wipe for terminal ${terminalId} (blindar) — re-parent stands, operator can re-send`, {
-        terminalId,
-        fromVenueId,
-        toVenueId,
-        error: err instanceof Error ? err.message : String(err),
-      })
-    }
-  }
-
   logger.info(`Terminal ${terminalId} updated successfully`)
 
+  broadcastSuperadminTerminalUpdate(terminalId)
   return updatedTerminal
 }
 

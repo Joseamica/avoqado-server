@@ -30,6 +30,7 @@ const healthy = () => {
     venueId: 'venue-old',
     status: 'ACTIVE',
     brand: 'PAX',
+    type: 'TPV_ANDROID',
     assignedMerchantIds: ['merch-p'],
   })
   // Dos venues distintos, misma org por defecto.
@@ -40,7 +41,7 @@ const healthy = () => {
         : { id: 'venue-new', name: 'New', organizationId: 'org-1' },
     ),
   )
-  m.venuePaymentConfig.findFirst.mockResolvedValue({ id: 'vpc-1' })
+  m.venuePaymentConfig.findFirst.mockResolvedValue({ id: 'vpc-1', primaryAccountId: 'merch-p' })
   m.venuePaymentConfig.findUnique.mockResolvedValue({
     primaryAccountId: 'merch-p',
     secondaryAccountId: null,
@@ -49,7 +50,7 @@ const healthy = () => {
     routingRules: null,
   })
   m.organizationPaymentConfig.findUnique.mockResolvedValue(null)
-  m.merchantAccount.findMany.mockResolvedValue([{ id: 'merch-p', displayName: 'playtelecom-p' }])
+  m.merchantAccount.findMany.mockResolvedValue([{ id: 'merch-p', displayName: 'playtelecom-p', provider: { code: 'BLUMON' } }])
   m.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1' })
   m.tpvCommandQueue.findFirst.mockResolvedValue(null)
   m.tpvCommandQueue.findMany.mockResolvedValue([])
@@ -111,7 +112,7 @@ describe('migratePreflight', () => {
 
   it('blocks when terminal is RETIRED', async () => {
     healthy()
-    m.terminal.findUnique.mockResolvedValue({ id: 'term-1', venueId: 'venue-old', status: 'RETIRED', brand: 'PAX' })
+    m.terminal.findUnique.mockResolvedValue({ id: 'term-1', venueId: 'venue-old', status: 'RETIRED', brand: 'PAX', type: 'TPV_ANDROID' })
     const r = await migratePreflight('term-1', 'venue-new')
     expect(r.blockers).toContainEqual(expect.objectContaining({ code: 'TERMINAL_RETIRED' }))
   })
@@ -135,8 +136,12 @@ describe('migratePreflight', () => {
           terminalId: 'term-1',
           commandType: 'FACTORY_RESET',
           OR: expect.arrayContaining([
-            { expiresAt: null },
-            expect.objectContaining({ expiresAt: expect.objectContaining({ gt: expect.any(Date) }) }),
+            expect.objectContaining({
+              OR: expect.arrayContaining([
+                { expiresAt: null },
+                expect.objectContaining({ expiresAt: expect.objectContaining({ gt: expect.any(Date) }) }),
+              ]),
+            }),
           ]),
         }),
       }),
@@ -155,17 +160,18 @@ describe('migratePreflight', () => {
     venueId: 'venue-old',
     status: 'ACTIVE',
     brand: 'PAX',
+    type: 'TPV_ANDROID',
     assignedMerchantIds: ['merch-p'],
     lastActivationStatusCheckAt: at,
   })
 
-  it('does NOT block when the device already rebound AFTER the pending FACTORY_RESET (proof of wipe)', async () => {
+  it('public activation traffic does not bypass an unconfirmed wipe', async () => {
     healthy()
     m.terminal.findUnique.mockResolvedValue(terminalReboundAt(new Date('2026-09-01T18:05:51Z')))
     m.tpvCommandQueue.findMany.mockResolvedValue([{ id: 'ghost', createdAt: new Date('2026-04-09T16:30:40Z') }])
     const r = await migratePreflight('term-1', 'venue-new')
-    expect(r.blockers.map(b => b.code)).not.toContain('MIGRATION_IN_PROGRESS')
-    expect(r.canProceed).toBe(true)
+    expect(r.blockers.map(b => b.code)).toContain('MIGRATION_IN_PROGRESS')
+    expect(r.canProceed).toBe(false)
   })
 
   it('still blocks when the last rebind is BEFORE the pending FACTORY_RESET (wipe not executed yet)', async () => {
@@ -197,7 +203,7 @@ describe('migratePreflight', () => {
 
   it('blocks when source and destination venue are the same', async () => {
     healthy()
-    m.terminal.findUnique.mockResolvedValue({ id: 'term-1', venueId: 'venue-new', status: 'ACTIVE', brand: 'PAX' })
+    m.terminal.findUnique.mockResolvedValue({ id: 'term-1', venueId: 'venue-new', status: 'ACTIVE', brand: 'PAX', type: 'TPV_ANDROID' })
     const r = await migratePreflight('term-1', 'venue-new')
     expect(r.blockers).toContainEqual(expect.objectContaining({ code: 'SAME_VENUE' }))
   })
@@ -305,20 +311,21 @@ describe('migratePreflight — pendingWipe (the way out of MIGRATION_IN_PROGRESS
     expect(r.pendingWipe?.commandId).toBe('new')
   })
 
-  it('a wipe the device already rebound after is NOT pending → null, no blocker', async () => {
+  it('a public activation check does not clear the pending wipe', async () => {
     healthy()
     m.terminal.findUnique.mockResolvedValue({
       id: 'term-1',
       venueId: 'venue-old',
       status: 'ACTIVE',
       brand: 'PAX',
+      type: 'TPV_ANDROID',
       assignedMerchantIds: ['merch-p'],
       lastActivationStatusCheckAt: new Date(Date.now() - 1 * HOUR),
     })
     m.tpvCommandQueue.findMany.mockResolvedValue([wipe({ status: 'SENT', createdAt: new Date(Date.now() - 48 * HOUR) })])
     const r = await migratePreflight('term-1', 'venue-new')
-    expect(r.pendingWipe).toBeNull()
-    expect(r.blockers.map(b => b.code)).not.toContain('MIGRATION_IN_PROGRESS')
+    expect(r.pendingWipe).not.toBeNull()
+    expect(r.blockers.map(b => b.code)).toContain('MIGRATION_IN_PROGRESS')
   })
 })
 
@@ -367,6 +374,7 @@ describe('migratePreflight — migrateMerchant', () => {
       venueId: 'venue-old',
       status: 'ACTIVE',
       brand: 'PAX',
+      type: 'TPV_ANDROID',
       assignedMerchantIds: [],
     })
     const r = await migratePreflight('term-1', 'venue-new', true)
@@ -379,7 +387,7 @@ describe('migratePreflight — migrateMerchant', () => {
     m.venuePaymentConfig.findFirst.mockResolvedValue(null)
     const r = await migratePreflight('term-1', 'venue-new', true)
     expect(r.merchantMigration.available).toBe(true)
-    expect(r.merchantMigration.merchants).toEqual([{ id: 'merch-p', displayName: 'playtelecom-p' }])
+    expect(r.merchantMigration.merchants).toEqual([{ id: 'merch-p', displayName: 'playtelecom-p', provider: { code: 'BLUMON' } }])
   })
 
   // Bug fix (post-review): MerchantAccount.active is a real enable/disable flag (fraud/
@@ -406,13 +414,14 @@ describe('migratePreflight — migrateMerchant', () => {
       venueId: 'venue-old',
       status: 'ACTIVE',
       brand: 'PAX',
+      type: 'TPV_ANDROID',
       assignedMerchantIds: ['merch-p', 'merch-inactive'],
     })
     // La query real filtraría active:true — el mock simula que sólo merch-p sobrevive ese filtro.
-    m.merchantAccount.findMany.mockResolvedValue([{ id: 'merch-p', displayName: 'playtelecom-p' }])
+    m.merchantAccount.findMany.mockResolvedValue([{ id: 'merch-p', displayName: 'playtelecom-p', provider: { code: 'BLUMON' } }])
     const r = await migratePreflight('term-1', 'venue-new', true)
     expect(r.merchantMigration.available).toBe(true)
-    expect(r.merchantMigration.merchants).toEqual([{ id: 'merch-p', displayName: 'playtelecom-p' }])
+    expect(r.merchantMigration.merchants).toEqual([{ id: 'merch-p', displayName: 'playtelecom-p', provider: { code: 'BLUMON' } }])
     expect(m.merchantAccount.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({ id: { in: ['merch-p', 'merch-inactive'] }, active: true }),
