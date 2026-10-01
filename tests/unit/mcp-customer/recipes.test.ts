@@ -18,6 +18,10 @@
  * every sale, with nobody informed. Here an unresolved or ambiguous name aborts the whole
  * write and hands back the candidates.
  */
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
+import { configureToolCatalog } from '@/mcp/catalog'
 import { registerRecipeTools, pickMatchV1 } from '../../../src/mcp/tools/recipes'
 import type { McpScope } from '../../../src/mcp/scope'
 
@@ -184,6 +188,39 @@ describe('create_recipe', () => {
       }),
       expect.objectContaining({ staffId: 's1', source: 'customer-mcp' }),
     )
+  })
+
+  it('can complete preview and confirmation through the real MCP catalog', async () => {
+    const server = new McpServer({ name: 'recipe-test', version: '1' })
+    const client = new Client({ name: 'test', version: '1' })
+    configureToolCatalog(server, { ...scope, scopes: ['mcp:read', 'mcp:write'] })
+    registerRecipeTools(server, scope)
+    const [a, b] = InMemoryTransport.createLinkedPair()
+    await Promise.all([server.connect(a), client.connect(b)])
+    mockCreateRecipe.mockResolvedValue({ id: 'rec-1', totalCost: 17, lines: [] })
+    try {
+      const intent = args({ confirm: false })
+      const preview = await client.callTool({ name: 'create_recipe', arguments: intent })
+      const output = preview.structuredContent as { status: string; data: Record<string, unknown> }
+      expect(output.status).toBe('needs_input')
+      expect(output.data.requiresConfirmation).toBe(true)
+      expect(output.data.confirmationToken).toEqual(expect.any(String))
+      expect(mockCreateRecipe).not.toHaveBeenCalled()
+
+      const result = await client.callTool({
+        name: 'create_recipe',
+        arguments: {
+          ...(output.data.confirmationArguments as Record<string, unknown>),
+          confirm: true,
+          confirmationToken: output.data.confirmationToken,
+        },
+      })
+      expect(result.structuredContent).toMatchObject({ status: 'success', data: { ok: true, receta: { id: 'rec-1' } } })
+      expect(mockCreateRecipe).toHaveBeenCalledTimes(1)
+    } finally {
+      await client.close()
+      await server.close()
+    }
   })
 
   it('ABORTS the whole write when one ingredient cannot be resolved — never skips it silently', async () => {

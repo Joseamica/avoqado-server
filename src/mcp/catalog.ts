@@ -23,6 +23,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   add_ledger_account: 'write',
   add_to_waitlist: 'write',
   adjust_loyalty_points: 'write',
+  adjust_raw_material_stock: 'write',
   adjust_stock: 'write',
   apply_service_charge: 'write',
   approve_inter_venue_transfer: 'write',

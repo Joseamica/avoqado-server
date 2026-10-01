@@ -384,6 +384,7 @@ export function registerRecipeTools(server: McpServer, scope: McpScope) {
         return text({
           ok: true,
           preview: true,
+          requiresConfirmation: true,
           mensaje: `Así quedaría la receta de "${receta.producto}": ${receta.ingredientes
             .map(i => `${i.cantidad} ${i.unidad} de ${i.insumo}`)
             .join(', ')}. Costo por porción $${receta.costoPorPorcion}. Vuelve a llamar con confirm:true para crearla.`,

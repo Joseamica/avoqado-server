@@ -1,5 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
+import { Decimal } from '@prisma/client/runtime/library'
 import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
@@ -7,7 +8,8 @@ import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { registerInventoryWasteTools } from './inventoryWaste'
 import { adjustInventoryStock } from '@/services/dashboard/productInventory.service'
-import { createRawMaterial } from '@/services/dashboard/rawMaterial.service'
+import { createRawMaterial, adjustStock as adjustRawMaterialStock } from '@/services/dashboard/rawMaterial.service'
+import { AdjustStockSchema } from '@/schemas/dashboard/inventory.schema'
 import { listPresentations, setPresentations } from '@/services/dashboard/rawMaterialPresentation.service'
 import { getReorderSuggestions, getAutoReorderConfig, setAutoReorderConfig } from '@/services/dashboard/autoReorder.service'
 import { getBatchesForRawMaterial, quarantineBatch, releaseBatchFromQuarantine } from '@/services/dashboard/fifoBatch.service'
@@ -227,6 +229,79 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
           data: { name: matches[0].name, delta, type: type ?? 'adjustment', reason, newStock: result.currentStock },
         })
         return text({ ok: true, product: matches[0].name, newStock: result.currentStock, minimumStock: result.minimumStock })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'adjust_raw_material_stock',
+    'Adjust stock of ONE existing raw material / ingredient, not a finished product. First use list_raw_materials in the chosen venue to obtain its exact id, stock and base unit. delta is the CHANGE in that unit, never the new total: +82 adds 82 liters; -2 removes 2. Do not guess units or counts, convert them silently, or use adjust_stock for ingredients. Requires inventory:adjust and PREMIUM (INVENTORY_TRACKING). Preview by default; show the ingredient, venue, unit and change to the operator, then confirm with the returned token. For a NEW ingredient, create_raw_material accepts initial currentStock directly. For waste use log_waste; for transfers use the transfer workflow. Never automatically retry after a timeout: inspect the movements first.',
+    {
+      venueId: z.string().min(1, 'La sucursal es requerida').describe('Exact venue chosen by the operator'),
+      rawMaterialId: z.string().min(1, 'El insumo es requerido').describe('Exact ingredient id from list_raw_materials in this venue'),
+      delta: AdjustStockSchema.shape.body.shape.quantity.describe('Stock CHANGE in the base unit, NOT the new total'),
+      unit: z
+        .nativeEnum(Unit, { errorMap: () => ({ message: 'La unidad del insumo no es válida' }) })
+        .describe('Exact base unit from list_raw_materials'),
+      type: z
+        .enum(['ADJUSTMENT', 'PURCHASE', 'COUNT'])
+        .optional()
+        .describe('Movement reason; default ADJUSTMENT. COUNT still takes a delta, not a total.'),
+      reason: z
+        .string()
+        .trim()
+        .min(1, 'El motivo es requerido')
+        .max(500, 'El motivo es demasiado largo')
+        .describe('Reason supplied by the operator'),
+      confirm: z.boolean().optional().describe('True only after the operator authorizes the preview'),
+    },
+    async ({ venueId, rawMaterialId, delta, unit, type, reason, confirm }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('inventory:adjust', venueId)
+      const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario')
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+      const ingredient = await prisma.rawMaterial.findFirst({
+        where: { id: rawMaterialId, venueId, active: true, deletedAt: null },
+        select: { id: true, name: true, unit: true, currentStock: true },
+      })
+      if (!ingredient)
+        return text({
+          ok: false,
+          needsInput: true,
+          question: 'No encontré ese insumo activo en esta sucursal. Revisa su ID con list_raw_materials; no uses otro como sustituto.',
+        })
+      if (unit !== ingredient.unit)
+        return text({
+          ok: false,
+          needsInput: true,
+          question: `"${ingredient.name}" se guarda en ${ingredient.unit}. Indica el cambio en esa unidad antes de continuar.`,
+        })
+      const quantity = new Decimal(delta)
+      if (!quantity.toDecimalPlaces(3).equals(quantity))
+        return text({ ok: false, error: 'El cambio debe tener como máximo 3 decimales para guardarse sin perder cantidad.' })
+      const current = new Decimal(ingredient.currentStock)
+      const next = current.add(quantity)
+      if (next.lessThan(0) || next.greaterThanOrEqualTo(1_000_000_000))
+        return text({ ok: false, error: 'El ajuste dejaría existencias negativas o excedería el máximo permitido. Revisa la cantidad.' })
+      if (!confirm)
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          venueId,
+          change: { rawMaterialId, ingredient: ingredient.name, unit, from: current.toNumber(), delta, to: next.toNumber() },
+          message: `En esta sucursal, "${ingredient.name}": ${current} ${unit}, cambio ${delta >= 0 ? '+' : ''}${delta} ${unit}, resultado previsto ${next} ${unit}. Confirma este cambio de cantidad con el operador.`,
+        })
+      try {
+        // The shared dashboard service owns FIFO, atomic increments, movements and the actor's audit.
+        const updated = await adjustRawMaterialStock(
+          venueId,
+          rawMaterialId,
+          { quantity: delta, type: RawMaterialMovementType[type ?? 'ADJUSTMENT'], reason },
+          scope.staffId,
+        )
+        return text({ ok: true, venueId, rawMaterialId, ingredient: ingredient.name, unit, delta, newStock: Number(updated.currentStock) })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }
