@@ -14,7 +14,7 @@ type ConBandera = Pick<PrismaClient, 'venueIvaPorProducto'> | Pick<Prisma.Transa
 
 function clientePorDefecto(): ConBandera {
   // Import perezoso: algunas suites verifican su base desechable ANTES de cargar el cliente de Prisma.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
+
   return require('@/utils/prismaClient').default
 }
 
