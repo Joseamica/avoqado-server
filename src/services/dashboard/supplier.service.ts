@@ -42,6 +42,34 @@ export async function countSuppliersForExport(venueId: string, filters?: Supplie
   return prisma.supplier.count({ where: buildSuppliersWhereClause(venueId, filters) })
 }
 
+/** Lightweight MCP pages; the dashboard's detailed listing keeps its released shape. */
+export async function getSuppliersPage(venueId: string, filters: SupplierFilters = {}, page: { limit?: number; offset?: number } = {}) {
+  const limit = Math.min(Math.max(Math.trunc(page.limit ?? 50) || 50, 1), 100)
+  const offset = Math.max(Math.trunc(page.offset ?? 0) || 0, 0)
+  const where = buildSuppliersWhereClause(venueId, filters)
+  const [total, rows] = await Promise.all([
+    prisma.supplier.count({ where }),
+    prisma.supplier.findMany({
+      where,
+      take: limit,
+      skip: offset,
+      orderBy: [{ rating: 'desc' }, { name: 'asc' }, { id: 'asc' }],
+      select: {
+        id: true,
+        name: true,
+        contactName: true,
+        email: true,
+        phone: true,
+        rating: true,
+        leadTimeDays: true,
+        minimumOrder: true,
+        active: true,
+      },
+    }),
+  ])
+  return { total, rows, limit, offset }
+}
+
 /**
  * Get all suppliers for a venue
  */
@@ -118,32 +146,29 @@ export async function getSupplier(venueId: string, supplierId: string): Promise<
 /**
  * Create a new supplier
  */
-export async function createSupplier(venueId: string, data: CreateSupplierDto): Promise<Supplier> {
-  // Check for duplicate name
-  const existing = await prisma.supplier.findFirst({
-    where: {
-      venueId,
-      name: data.name,
-    },
-  })
-
-  if (existing) {
-    throw new AppError(`Supplier with name ${data.name} already exists`, 400)
-  }
-
-  const supplier = await prisma.supplier.create({
-    data: {
-      ...data,
-      venueId,
-    },
+export async function createSupplier(
+  venueId: string,
+  data: CreateSupplierDto,
+  actor?: { staffId?: string; source?: string },
+): Promise<Supplier> {
+  const name = data.name.trim()
+  const supplier = await prisma.$transaction(async tx => {
+    // Serialize equal normalized names, including simultaneous MCP/dashboard requests.
+    await tx.$executeRaw(
+      Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supplier:create:${venueId}:${name.toLowerCase()}`}, 0))`,
+    )
+    const existing = await tx.supplier.findFirst({ where: { venueId, name: { equals: name, mode: 'insensitive' } } })
+    if (existing) throw new AppError(`Ya existe un proveedor llamado "${name}". Consulta list_suppliers antes de volver a crearlo.`, 400)
+    return tx.supplier.create({ data: { ...data, name, venueId } })
   })
 
   logAction({
     venueId,
     action: 'SUPPLIER_CREATED',
+    staffId: actor?.staffId,
     entity: 'Supplier',
     entityId: supplier.id,
-    data: { name: supplier.name },
+    data: { name: supplier.name, ...(actor?.source ? { source: actor.source } : {}) },
   })
 
   return supplier

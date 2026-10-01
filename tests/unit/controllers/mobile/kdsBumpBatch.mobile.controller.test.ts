@@ -17,12 +17,15 @@ const req = (body: unknown) => ({ params: { venueId: 'v1' }, body }) as any
 
 beforeEach(() => mockBatch.mockReset().mockResolvedValue({ completed: 2 }))
 
-it.each([[{}], [{ ids: [] }], [{ ids: Array.from({ length: 101 }, (_, i) => `k${i}`) }], [{ ids: ['ok', 7] }]])('400 con %j', async body => {
-  const r = res()
-  await bumpKdsOrdersBatch(req(body), r, jest.fn())
-  expect(r.status).toHaveBeenCalledWith(400)
-  expect(mockBatch).not.toHaveBeenCalled()
-})
+it.each([[{}], [{ ids: [] }], [{ ids: Array.from({ length: 101 }, (_, i) => `k${i}`) }], [{ ids: ['ok', 7] }]])(
+  '400 con %j',
+  async body => {
+    const r = res()
+    await bumpKdsOrdersBatch(req(body), r, jest.fn())
+    expect(r.status).toHaveBeenCalledWith(400)
+    expect(mockBatch).not.toHaveBeenCalled()
+  },
+)
 
 it('200 con un lote válido', async () => {
   const r = res()

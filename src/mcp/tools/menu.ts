@@ -334,7 +334,11 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
           type: p.type,
           category: p.category?.name ?? null,
           price,
-          cost, // real stored cost, or null if none is set — NEVER estimated
+          cost, // legacy manual product cost, separate from Recipe.totalCost
+          costSource: 'manual_product',
+          recipeStatus: 'not_checked',
+          recipeGuidance:
+            'Un costo manual vacío o el inventario apagado no significan que falte una receta. Usa get_recipe o list_product_recipes para verificar su existencia y costo (según permisos y plan).',
           margin: cost != null && price > 0 ? { amount: round2(price - cost), percent: round2(((price - cost) / price) * 100) } : null,
           active: p.active,
           prepTimeMinutes: p.prepTime,

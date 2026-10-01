@@ -37,13 +37,16 @@ describe('Rondas de mesa mandadas por diferencia (caja de Windows)', () => {
   let n = 0
 
   beforeAll(async () => {
-    orgId = (await prisma.organization.create({ data: { name: `Org rondas ${sello}`, email: `rondas${sello}@t.mx`, phone: '5555555555' } })).id
+    orgId = (await prisma.organization.create({ data: { name: `Org rondas ${sello}`, email: `rondas${sello}@t.mx`, phone: '5555555555' } }))
+      .id
     venueId = (await prisma.venue.create({ data: { organizationId: orgId, name: `V rondas ${sello}`, slug: `v-rondas-${sello}` } })).id
     staffId = (await prisma.staff.create({ data: { email: `rondas-${sello}@t.mx`, firstName: 'Mesero', lastName: 'Rondas' } })).id
     await prisma.staffVenue.create({ data: { staffId, venueId, role: StaffRole.OWNER, active: true } })
     categoryId = (await prisma.menuCategory.create({ data: { venueId, name: 'Bebidas', slug: `bebidas-${sello}` } })).id
     productId = (await prisma.product.create({ data: { venueId, categoryId, sku: `CERV-${sello}`, name: 'Cerveza', price: 50 } })).id
-    token = jwt.sign({ sub: staffId, orgId, venueId, role: StaffRole.OWNER }, process.env.ACCESS_TOKEN_SECRET as string, { expiresIn: '15m' })
+    token = jwt.sign({ sub: staffId, orgId, venueId, role: StaffRole.OWNER }, process.env.ACCESS_TOKEN_SECRET as string, {
+      expiresIn: '15m',
+    })
   })
 
   afterAll(async () => {

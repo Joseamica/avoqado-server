@@ -20,7 +20,7 @@ import { TpvCommandType, TpvCommandResultStatus, BulkOperationStatus } from '@pr
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { NotFoundError, BadRequestError } from '../../errors/AppError'
-import socketManager from '../../communication/sockets'
+import socketManager, { broadcastTpvCommand } from '../../communication/sockets'
 import { SocketEventType } from '../../communication/sockets/types'
 import { tpvCommandQueueService, QueueCommandInput, CommandQueueResult } from './command-queue.service'
 
@@ -79,7 +79,7 @@ export class TpvCommandExecutionService {
     const queueResult = await tpvCommandQueueService.queueCommand(input)
 
     // If terminal is online and command is ready, send immediately
-    if (queueResult.terminalOnline && queueResult.status === 'QUEUED') {
+    if (queueResult.terminalOnline && queueResult.status === 'QUEUED' && queueResult.deliveryProtocolVersion !== 2) {
       await this.sendCommandToTerminal(queueResult.commandId)
     }
 
@@ -218,6 +218,19 @@ export class TpvCommandExecutionService {
 
     if (!command) {
       throw new NotFoundError(`Command ${commandId} not found`)
+    }
+
+    if ((command.payload as { _deliveryProtocol?: number } | null)?._deliveryProtocol === 2) {
+      if (['PENDING', 'QUEUED', 'SENT'].includes(command.status) && (!command.scheduledFor || command.scheduledFor <= new Date())) {
+        broadcastTpvCommand(command.terminal.serialNumber || command.terminal.id, command.venueId, {
+          type: command.commandType,
+          requestedBy: command.requestedBy,
+          commandId: command.id,
+          correlationId: command.correlationId,
+          payload: { _deliveryProtocol: 2 },
+        })
+      }
+      return
     }
 
     // Check if terminal is online

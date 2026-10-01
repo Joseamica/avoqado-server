@@ -76,11 +76,11 @@ export class TpvHealthService {
    *
    * **Edge Cases Handled:**
    * - Terminal not found → 404 error (safe to retry)
-   * - Invalid timestamp → Uses current time (graceful fallback)
+   * - Device clock drift → Contact time always uses the server clock
    * - Concurrent updates → Last write wins (acceptable for heartbeats)
    */
   async processHeartbeat(heartbeatData: HeartbeatData, clientIp?: string): Promise<void> {
-    const { terminalId, timestamp, status, version, systemInfo, authAttempts } = heartbeatData
+    const { terminalId, status, version, systemInfo, authAttempts } = heartbeatData
     try {
       // Try to find terminal by multiple identifiers for compatibility
       // ✅ CASE-INSENSITIVE MATCHING: Android may send lowercase, DB stores uppercase
@@ -192,13 +192,8 @@ export class TpvHealthService {
       }
 
       // Update terminal status and health data
-      const heartbeatDate = timestamp ? new Date(timestamp) : new Date()
-
-      // Validate the date to prevent invalid dates
-      if (isNaN(heartbeatDate.getTime())) {
-        logger.warn(`Invalid timestamp received: ${timestamp}, using current date`)
-        heartbeatDate.setTime(Date.now())
-      }
+      // Device clocks can drift; liveness is when the server receives contact.
+      const heartbeatDate = new Date()
 
       // Determine the status to set based on current terminal status and heartbeat
       // **Design Decision (2025-12-01):**
@@ -311,7 +306,7 @@ export class TpvHealthService {
       const cutoff = new Date(Date.now() - 2 * 60 * 1000)
       const isOnline = terminal.lastHeartbeat && terminal.lastHeartbeat > cutoff
 
-      if (isOnline && !queueResult.replayed) {
+      if (isOnline && !queueResult.replayed && queueResult.deliveryProtocolVersion !== 2) {
         const { broadcastTpvCommand } = require('../../communication/sockets')
         // Use serial number for Android device compatibility
         broadcastTpvCommand(terminal.serialNumber || terminal.id, terminal.venueId, {

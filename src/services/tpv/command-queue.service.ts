@@ -30,7 +30,12 @@ import {
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { NotFoundError, BadRequestError, ConflictError, ForbiddenError } from '../../errors/AppError'
-import { broadcastTpvCommandStatusChanged, broadcastTpvCommandQueued, broadcastTpvStatusUpdate } from '../../communication/sockets'
+import {
+  broadcastTpvCommand,
+  broadcastTpvCommandStatusChanged,
+  broadcastTpvCommandQueued,
+  broadcastTpvStatusUpdate,
+} from '../../communication/sockets'
 import { assertDeviceActionSupported } from '../device-capabilities.service'
 import { isProviderCompatibleWithBrand } from '../../lib/providerDeviceCompatibility'
 import { getEffectivePaymentConfig } from '../organization-payment-config.service'
@@ -286,7 +291,7 @@ export class TpvCommandQueueService {
       if (!/^[\x21-\x7e]{1,128}$/.test(input.idempotencyKey)) throw new BadRequestError('Idempotency-Key inválido')
       const terminal = await prisma.terminal.findUnique({
         where: { id: input.terminalId },
-        select: { venue: { select: { organizationId: true } } },
+        select: { serialNumber: true, venue: { select: { organizationId: true } } },
       })
       if (!terminal) throw new NotFoundError('Terminal no encontrada')
       const key = {
@@ -322,7 +327,7 @@ export class TpvCommandQueueService {
         return { ...result, expiresAt: result.expiresAt ? new Date(result.expiresAt) : null, replayed: true }
       }
       try {
-        return await prisma.$transaction(async tx => {
+        const result = await prisma.$transaction(async tx => {
           const existing = await replay(tx)
           if (existing) return existing
           const result = await this.queueCommand({ ...input, idempotencyKey: undefined }, tx)
@@ -337,6 +342,17 @@ export class TpvCommandQueueService {
           })
           return result
         })
+        // A hint before commit could make the device read an empty queue.
+        if (result.deliveryProtocolVersion === 2 && !result.replayed && !input.scheduledFor) {
+          broadcastTpvCommand(terminal.serialNumber || input.terminalId, input.venueId, {
+            type: input.commandType,
+            requestedBy: input.requestedBy,
+            commandId: result.commandId,
+            correlationId: result.correlationId,
+            payload: { _deliveryProtocol: 2 },
+          })
+        }
+        return result
       } catch (error) {
         // A concurrent duplicate loses the UNIQUE insert; its command/history roll back.
         if ((error as { code?: string }).code === 'P2002') {
@@ -479,6 +495,16 @@ export class TpvCommandQueueService {
       terminalId,
       venueId,
     })
+
+    if (db === prisma && durable && !scheduledFor) {
+      broadcastTpvCommand(terminal.serialNumber || terminalId, venueId, {
+        type: commandType,
+        requestedBy,
+        commandId: command.id,
+        correlationId: command.correlationId,
+        payload: { _deliveryProtocol: 2 },
+      })
+    }
 
     return {
       commandId: command.id,

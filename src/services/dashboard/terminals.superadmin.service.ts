@@ -1,4 +1,4 @@
-import { broadcastSuperadminTerminalUpdate } from '../../communication/sockets'
+import { broadcastSuperadminTerminalUpdate, broadcastTpvCommand } from '../../communication/sockets'
 import { Prisma, TerminalStatus } from '@prisma/client'
 import { assertDeviceActionSupported } from '../device-capabilities.service'
 import prisma from '../../utils/prismaClient'
@@ -738,6 +738,15 @@ export async function updateTerminal(
         entity: 'VenuePaymentConfig',
         entityId: moved.createdPaymentConfigId,
         data: { source: 'TERMINAL_MIGRATION', terminalId, fromVenueId },
+      })
+    }
+    // The transactional queue cannot notify until the venue intent has committed.
+    if (deferMove) {
+      broadcastTpvCommand(terminal.serialNumber || terminalId, fromVenueId, {
+        type: 'FACTORY_RESET',
+        requestedBy: actor?.staffId ?? 'system',
+        commandId: moved.migrationCommandId,
+        payload: { _deliveryProtocol: 2 },
       })
     }
     broadcastSuperadminTerminalUpdate(terminalId)

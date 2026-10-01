@@ -126,6 +126,9 @@ describe('menu_item_detail', () => {
       modifierGroups: [],
     })
     const out = parse(await call({ venueId: 'v1', name: 'agua' }))
+    expect(out.item.costSource).toBe('manual_product')
+    expect(out.item.recipeStatus).toBe('not_checked')
+    expect(out.item.recipeGuidance).toContain('get_recipe')
     expect(out.item.cost).toBeNull()
     expect(out.item.margin).toBeNull()
     expect(out.item.inventoryTracking).toBeNull()

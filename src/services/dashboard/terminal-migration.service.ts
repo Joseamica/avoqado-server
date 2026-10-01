@@ -782,7 +782,9 @@ export async function migrateStatus(terminalId: string, commandId: string): Prom
   const reboundAfterWipe = deviceReboundAfter(command, terminal.commandSessionId)
   const currentlyOnline =
     !!terminal.lastHeartbeat && now >= terminal.lastHeartbeat.getTime() && now - terminal.lastHeartbeat.getTime() < ONLINE_THRESHOLD_MS
-  const onlineUnderNewVenue = currentlyOnline && terminal.venueId === command.venueId
+  const destinationVenueId =
+    (command.payload as { _migrationIntent?: { toVenueId?: string } } | null)?._migrationIntent?.toVenueId ?? command.venueId
+  const onlineUnderNewVenue = currentlyOnline && terminal.venueId === destinationVenueId
   const confirmed = reboundAfterWipe && onlineUnderNewVenue && command.status === 'COMPLETED'
 
   return {
