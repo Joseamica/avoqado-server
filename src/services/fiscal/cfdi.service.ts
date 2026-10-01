@@ -10,7 +10,8 @@ import type { StampedInvoice, ProviderInvoiceSummary } from './providers/fiscal-
 import { CsdStatus, FiscalProviderType, PaymentMethod, VenueType, CfdiStatus, CfdiFlow, Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { venueStartOfDay, venueEndOfDay, DEFAULT_TIMEZONE } from '../../utils/datetime'
+import { fromZonedTime } from 'date-fns-tz'
+import { DEFAULT_TIMEZONE } from '../../utils/datetime'
 import { uploadFileToStorage } from '../storage.service'
 import { resolveFiscalProvider } from './fiscalProvider.factory'
 import { buildCreateInvoiceParams } from './cfdiPayloadBuilder'
@@ -20,6 +21,7 @@ import { splitIvaIncluded } from './ivaMath'
 import { clasificarOrden, hayBloqueados, impuestosSatDe, resolverTratamiento } from './ivaDeRenglon'
 import { IvaTratamiento, tuplaDesdeTratamiento } from './ivaTratamiento'
 import { logAction, LogActionParams } from '../dashboard/activity-log.service'
+import { sendNewCfdiByEmail } from './cfdiEmail.service'
 
 // ─── List CFDIs ───────────────────────────────────────────────────────────────
 
@@ -63,6 +65,8 @@ const CFDI_LIST_SELECT = {
   totalCents: true,
   stampedAt: true,
   createdAt: true,
+  // H23: la fecha de una factura sin timbre es la de su último intento.
+  updatedAt: true,
   cancelStatus: true,
   xmlUrl: true,
   pdfUrl: true,
@@ -86,8 +90,9 @@ const CFDI_LIST_SELECT = {
  * authContext.venueId). This prevents cross-venue data leaks.
  *
  * Date range: `from`/`to` are ISO date strings interpreted as venue-local day
- * boundaries (midnight → 23:59:59.999) and converted to real UTC via
- * `venueStartOfDay`/`venueEndOfDay` before being passed to Prisma.
+ * boundaries (midnight → 23:59:59.999) and converted to real UTC with `fromZonedTime`
+ * (host-tz independent) before being passed to Prisma. They filter by the stamp date
+ * (or, without a stamp, by the last attempt).
  */
 export async function listCfdisForVenue(params: ListCfdisParams): Promise<ListCfdisResult> {
   const { venueId, status, flow, isGlobal, receptorRfc, from, to, page, pageSize } = params
@@ -117,16 +122,13 @@ export async function listCfdisForVenue(params: ListCfdisParams): Promise<ListCf
 
   // Date range: convert venue-local day boundaries → real UTC (critical-warnings rule)
   if (from || to) {
-    where.createdAt = {}
-    // 🔴 Ancla de MEDIODÍA: `T00:00:00` se lee en el huso del SERVIDOR (UTC en producción) y el «24-sep»
-    // se volvía el 23-sep de México — el filtro de Facturas enseñaba el día anterior. El mediodía cae en el
-    // mismo día calendario en cualquier huso (critical-warnings, «bare YYYY-MM-DD»).
-    if (from) {
-      where.createdAt.gte = venueStartOfDay(timezone, new Date(`${from}T12:00:00`))
-    }
-    if (to) {
-      where.createdAt.lte = venueEndOfDay(timezone, new Date(`${to}T12:00:00`))
-    }
+    const range: { gte?: Date; lte?: Date } = {}
+    // El día se lee en el huso del NEGOCIO, nunca en el del servidor (el esquema ya garantiza AAAA-MM-DD real).
+    if (from) range.gte = fromZonedTime(`${from}T00:00:00.000`, timezone)
+    if (to) range.lte = fromZonedTime(`${to}T23:59:59.999`, timezone)
+    // 🔴 H23: la fecha de una factura es la de su TIMBRADO; sin timbre (borrador, en proceso o fallida), la de su último
+    // intento. Antes filtraba por el PRIMER intento: la A-36 de Testarudo (reintento 9, timbrada el 30-sep) salía el 24-sep.
+    where.OR = [{ stampedAt: range }, { stampedAt: null, updatedAt: range }]
   }
 
   const skip = (page - 1) * pageSize
@@ -135,7 +137,9 @@ export async function listCfdisForVenue(params: ListCfdisParams): Promise<ListCf
   const [cfdis, total] = await Promise.all([
     prisma.cfdi.findMany({
       where,
-      orderBy: { createdAt: 'desc' },
+      // 🔴 H23: por fecha de timbrado. Lo no timbrado (en proceso o fallido) va ARRIBA: una factura que acaba de fallar no
+      // se esconde en la última página. `id` desempata para que la paginación sea estable.
+      orderBy: [{ stampedAt: { sort: 'desc', nulls: 'first' } }, { updatedAt: 'desc' }, { id: 'desc' }],
       skip,
       take,
       select: CFDI_LIST_SELECT,
@@ -832,7 +836,7 @@ async function reconciliarIntentoPrevio(
 export async function finalizarEmision(
   reservation: any,
   invoice: StampedInvoice | ProviderInvoiceSummary,
-  provider: Pick<import('./providers/fiscal-provider.interface').FiscalProvider, 'downloadXml' | 'downloadPdf'>,
+  provider: Pick<import('./providers/fiscal-provider.interface').FiscalProvider, 'downloadXml' | 'downloadPdf' | 'sendInvoiceByEmail'>,
   venueSlug: string,
   deps: Pick<IssueCfdiDeps, 'runInTransaction' | 'findExistingCfdi' | 'storeArtifact' | 'persistArtifacts'>,
 ): Promise<IssueCfdiResult> {
@@ -849,6 +853,9 @@ export async function finalizarEmision(
     { runInTransaction: deps.runInTransaction ?? (work => prisma.$transaction(work)) },
   )
   if (result === 'DUPLICADO') throw new ConflictError(PROCESANDO)
+  // 🔴 H24: sólo quien FINALIZA el timbre manda el correo — una vez por factura, venga del dashboard, la autofactura, una
+  // sustitución, una nota de crédito o una recuperación. Una repetición (YA_FINALIZADO) no lo manda otra vez.
+  if (result === 'FINALIZADO') void sendNewCfdiByEmail({ cfdiId: reservation.id, venueId: reservation.venueId, provider })
   let cfdi =
     result === 'YA_FINALIZADO'
       ? await deps.findExistingCfdi(reservation.idempotencyKey)

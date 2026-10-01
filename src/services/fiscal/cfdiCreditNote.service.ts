@@ -38,6 +38,7 @@ import { ConflictError } from '../../errors/AppError'
 import { bloquearOrdenParaFacturar, tomarAdmisionCompartida } from './admisionIva'
 import { huellaDeEntrada, leerEntrada } from './entradaDocumental'
 import { CFDI_VIVO } from './exclusionGlobal'
+import { correoCapturado } from './cfdiEmail.service'
 import type { CreditNoteParams } from './providers/fiscal-provider.interface'
 
 const PROCESANDO = 'La factura de esta venta se está procesando; intenta de nuevo en unos minutos.'
@@ -898,17 +899,10 @@ export async function loadRefundForCreditNoteFromDb(
   ])
   if (!order) return null
 
-  // El email del receptor no vive en `Cfdi` (sólo el snapshot fiscal), así que se busca en el
-  // perfil fiscal del cliente para que el PAC pueda mandarle la nota de crédito.
-  let receptorEmail: string | null = null
-  if (original) {
-    const profile = await tx.customerTaxProfile.findFirst({
-      where: { venueId, rfc: original.receptorRfc },
-      select: { email: true },
-      orderBy: { updatedAt: 'desc' },
-    })
-    receptorEmail = profile?.email ?? null
-  }
+  // 🔴 El correo es el que el receptor dio en la factura ORIGINAL (su entrada congelada). Antes se tomaba el perfil fiscal
+  // más reciente con ese RFC en el negocio: con un RFC repetido (genérico, o una empresa con varios empleados) era el de
+  // otra persona, y la nota ahora se envía sola (Codex, 30-sep). Sin correo capturado, no se adivina: se reenvía a mano.
+  const receptorEmail = correoCapturado(original?.entrada) ?? null
 
   const toCents = (d: Prisma.Decimal | number | null | undefined): number => Math.round(Number(d ?? 0) * 100)
   // Los REFUND se guardan NEGATIVOS (importe y propina): se entregan en positivo y SEPARADOS.

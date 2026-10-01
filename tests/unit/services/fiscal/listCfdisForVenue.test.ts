@@ -161,20 +161,40 @@ describe('filter mapping', () => {
     expect(where.isGlobal).toBeUndefined()
     expect(where.receptorRfc).toBeUndefined()
     expect(where.createdAt).toBeUndefined()
+    expect(where.OR).toBeUndefined()
   })
 })
 
 // ─── Date range timezone conversion ───────────────────────────────────────────
 
+// 🔴 H23 (auditoría 2026-09-30): la fecha de una factura es la de su TIMBRADO; sin timbre (borrador, en proceso o fallida),
+// la de su último intento. Antes filtraba por el PRIMER intento: la A-36 de Testarudo (reintento 9, timbrada el 30-sep)
+// salía el 24-sep.
+const rango = (where: any) => {
+  expect(where.OR).toEqual([{ stampedAt: where.OR[0].stampedAt }, { stampedAt: null, updatedAt: where.OR[0].stampedAt }])
+  return where.OR[0].stampedAt
+}
+
 describe('date range: timezone conversion (Prisma = real UTC)', () => {
+  it('🔴 H23: filtra por el timbrado (y sin timbre, por el último intento), nunca por el primer intento', async () => {
+    await listCfdisForVenue({ venueId: VENUE_ID, from: '2026-09-30', to: '2026-09-30', page: 1, pageSize: 20, venueTimezone: TIMEZONE })
+    const where = findMany.mock.calls[0][0].where
+    const dia = { gte: new Date('2026-09-30T06:00:00.000Z'), lte: new Date('2026-10-01T05:59:59.999Z') }
+    expect(where.createdAt).toBeUndefined()
+    expect(where.OR).toEqual([{ stampedAt: dia }, { stampedAt: null, updatedAt: dia }])
+  })
+
   // 🔴 El día pedido NO puede depender del huso del servidor. Producción corre en UTC: con
   // `new Date('AAAA-MM-DDT00:00:00')` el «24 sep» se volvía el 23-sep 18:00 de México y el filtro de la
   // pantalla de Facturas enseñaba el día ANTERIOR. México es UTC−6 todo el año (sin horario de verano).
+  // Codex (ronda 1 del plan de correo): el ancla de mediodía se leía en el huso del SERVIDOR; con uno de UTC+7 o más (Tokio)
+  // el día de México se corría al anterior. `process.env.TZ` dentro de Jest NO cambia el huso del proceso: esta prueba se
+  // corre además con `TZ=Asia/Tokyo` y `TZ=UTC` delante del comando.
   it('EXACTO: el día 24-sep de México es [24-sep 06:00Z, 25-sep 05:59:59.999Z], sea cual sea el huso del servidor', async () => {
     await listCfdisForVenue({ venueId: VENUE_ID, from: '2026-09-24', to: '2026-09-24', page: 1, pageSize: 20, venueTimezone: TIMEZONE })
     const where = findMany.mock.calls[0][0].where
-    expect(where.createdAt.gte.toISOString()).toBe('2026-09-24T06:00:00.000Z')
-    expect(where.createdAt.lte.toISOString()).toBe('2026-09-25T05:59:59.999Z')
+    expect(rango(where).gte.toISOString()).toBe('2026-09-24T06:00:00.000Z')
+    expect(rango(where).lte.toISOString()).toBe('2026-09-25T05:59:59.999Z')
   })
 
   it('converts from (venue-local midnight) to real UTC for gte', async () => {
@@ -188,8 +208,8 @@ describe('date range: timezone conversion (Prisma = real UTC)', () => {
     })
 
     const where = findMany.mock.calls[0][0].where
-    expect(where.createdAt).toBeDefined()
-    const gte: Date = where.createdAt.gte
+    expect(rango(where)).toBeDefined()
+    const gte: Date = rango(where).gte
     // In summer (CDT) Mexico is UTC-5; June 1 midnight CDT = 05:00 UTC.
     // In winter (CST) it would be 06:00 UTC. Either way, it should NOT be 00:00 UTC.
     expect(gte.toISOString()).not.toBe('2026-06-01T00:00:00.000Z')
@@ -207,8 +227,8 @@ describe('date range: timezone conversion (Prisma = real UTC)', () => {
     })
 
     const where = findMany.mock.calls[0][0].where
-    expect(where.createdAt).toBeDefined()
-    const lte: Date = where.createdAt.lte
+    expect(rango(where)).toBeDefined()
+    const lte: Date = rango(where).lte
     // End of day should NOT be midnight UTC — it should be 05:59 or 06:59 UTC (after adding offset)
     expect(lte.toISOString()).not.toBe('2026-06-01T00:00:00.000Z')
     // lte must be strictly after gte (end of day > start of day)
@@ -226,26 +246,26 @@ describe('date range: timezone conversion (Prisma = real UTC)', () => {
     })
 
     const where = findMany.mock.calls[0][0].where
-    expect(where.createdAt.gte).toBeInstanceOf(Date)
-    expect(where.createdAt.lte).toBeInstanceOf(Date)
+    expect(rango(where).gte).toBeInstanceOf(Date)
+    expect(rango(where).lte).toBeInstanceOf(Date)
     // lte (end of June 30) must be after gte (start of June 1)
-    expect(where.createdAt.lte.getTime()).toBeGreaterThan(where.createdAt.gte.getTime())
+    expect(rango(where).lte.getTime()).toBeGreaterThan(rango(where).gte.getTime())
   })
 
   it('sets only gte when only from is provided', async () => {
     await listCfdisForVenue({ venueId: VENUE_ID, from: '2026-06-01', page: 1, pageSize: 20, venueTimezone: TIMEZONE })
 
     const where = findMany.mock.calls[0][0].where
-    expect(where.createdAt.gte).toBeInstanceOf(Date)
-    expect(where.createdAt.lte).toBeUndefined()
+    expect(rango(where).gte).toBeInstanceOf(Date)
+    expect(rango(where).lte).toBeUndefined()
   })
 
   it('sets only lte when only to is provided', async () => {
     await listCfdisForVenue({ venueId: VENUE_ID, to: '2026-06-30', page: 1, pageSize: 20, venueTimezone: TIMEZONE })
 
     const where = findMany.mock.calls[0][0].where
-    expect(where.createdAt.gte).toBeUndefined()
-    expect(where.createdAt.lte).toBeInstanceOf(Date)
+    expect(rango(where).gte).toBeUndefined()
+    expect(rango(where).lte).toBeInstanceOf(Date)
   })
 })
 
@@ -276,11 +296,14 @@ describe('pagination math', () => {
     expect(args.take).toBe(10)
   })
 
-  it('always orders by createdAt desc', async () => {
+  // 🔴 H23: por fecha de timbrado. Lo que no se timbró (en proceso o fallido) va ARRIBA: una factura que acaba de fallar no
+  // se esconde en la última página. `id` desempata para que la paginación sea estable.
+  it('ordena por timbrado, con lo no timbrado primero y desempate estable', async () => {
     await listCfdisForVenue({ venueId: VENUE_ID, page: 1, pageSize: 20 })
 
     const args = findMany.mock.calls[0][0]
-    expect(args.orderBy).toEqual({ createdAt: 'desc' })
+    expect(args.orderBy).toEqual([{ stampedAt: { sort: 'desc', nulls: 'first' } }, { updatedAt: 'desc' }, { id: 'desc' }])
+    expect(args.select.updatedAt).toBe(true)
   })
 })
 

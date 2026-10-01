@@ -10,6 +10,7 @@ import { auditMcpWrite } from '../audit'
 import { venuesWithFeatureAccess } from '@/services/access/basePlan.service'
 import { hasPermission } from '@/services/access/access.service'
 import { emitRefundCreditNote, getRefundCreditNoteStatus } from '@/services/fiscal/cfdiCreditNote.service'
+import { sendCfdiByEmail } from '@/services/fiscal/cfdiEmail.service'
 import { vistaPreviaContrato, confirmarContratoIvaIncluido } from '@/services/fiscal/confirmarContratoDePrecio.service'
 import { DEFAULT_TIMEZONE } from '@/utils/datetime'
 
@@ -62,6 +63,9 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
       const recent = await prisma.cfdi.findMany({
         where: { ...where, status: 'STAMPED' },
         select: {
+          // id + venueId: lo que send_cfdi_email necesita para reenviarla.
+          id: true,
+          venueId: true,
           serie: true,
           folio: true,
           uuid: true,
@@ -97,6 +101,8 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
         byStatus,
         stamped: { count: stamped._count._all, totalMxn: (stamped._sum.totalCents ?? 0) / 100 },
         recentStamped: recent.map(r => ({
+          id: r.id,
+          venueId: r.venueId,
           folio: `${r.serie ?? ''}${r.folio ?? ''}` || null,
           uuid: r.uuid,
           totalMxn: r.totalCents / 100,
@@ -238,6 +244,71 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
             xmlUrl: result.cfdi.xmlUrl,
           },
         })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  // ─── Reenviar por correo una factura timbrada (H24, auditoría 2026-09-30) ─────────
+  server.tool(
+    'send_cfdi_email',
+    'Envía por correo una factura (CFDI) ya timbrada: el PDF y el XML al correo del receptor que se registró al facturar, o a otro correo que indiques. No cambia la factura. Pide confirmación en dos pasos.',
+    {
+      venueId: z.string().describe('El local de la factura (debe estar en tu alcance)'),
+      cfdiId: z.string().describe('Id de la factura'),
+      email: z
+        .string()
+        .trim()
+        .email('El correo no es válido')
+        .optional()
+        .describe('Correo al que mandarla; sin él, al del receptor registrado'),
+      confirm: z.boolean().optional().describe('true para enviar; sin él sólo devuelve la vista previa'),
+    },
+    async ({ venueId, cfdiId, email, confirm }) => {
+      guard.venueFilter(venueId)
+      // Mismo permiso que el botón «Reenviar por correo» del dashboard.
+      guard.requirePermission('cfdi:issue', venueId)
+      const entitled = await venuesWithFeatureAccess([venueId], 'CFDI')
+      if (!entitled.has(venueId)) {
+        return text({ ok: false, planRequired: true, feature: 'CFDI', error: 'La facturación no está activa en este local.' })
+      }
+      const cfdi = await prisma.cfdi.findFirst({
+        where: { id: cfdiId, venueId },
+        select: { status: true, serie: true, folio: true, uuid: true, receptorNombre: true, receptorRfc: true },
+      })
+      if (!cfdi) return text({ ok: false, error: 'No encontré esa factura en tus locales.' })
+      if (cfdi.status !== 'STAMPED') return text({ ok: false, error: 'Sólo se puede enviar por correo una factura timbrada.' })
+
+      const folio = [cfdi.serie, cfdi.folio].filter(Boolean).join('-') || cfdi.uuid
+      const destino = email ?? 'el correo del receptor registrado al facturar'
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          confirmationArgs: { venueId, cfdiId, ...(email ? { email } : {}), confirm: true },
+          preview: { folio, receptor: { nombre: cfdi.receptorNombre, rfc: cfdi.receptorRfc }, destino },
+          message: `Se enviará la factura ${folio} (${cfdi.receptorNombre}) a ${destino}.`,
+        })
+      }
+      try {
+        const result = await sendCfdiByEmail({
+          cfdiId,
+          venueId,
+          // `process.env` y no `@/config/env`: ver la nota de emit_refund_credit_note.
+          sandbox: process.env.NODE_ENV !== 'production',
+          origin: 'MCP',
+          staffId: scope.staffId,
+          email,
+        })
+        await auditMcpWrite(scope, {
+          action: 'CFDI_EMAIL_SENT_MCP',
+          entity: 'Cfdi',
+          entityId: cfdiId,
+          venueId,
+          data: { folio: result.folio, destination: result.destination },
+        })
+        return text({ ok: true, folio: result.folio, destino: result.destination })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }

@@ -24,7 +24,18 @@ jest.mock('../../../../src/middlewares/checkPermission.middleware', () => ({
   },
 }))
 
-import { SatCatalogUnavailableError, ConflictError } from '../../../../src/errors/AppError'
+const mockSendCfdiByEmail = jest.fn()
+jest.mock('../../../../src/services/fiscal/cfdiEmail.service', () => ({
+  sendCfdiByEmail: (...a: any[]) => mockSendCfdiByEmail(...a),
+}))
+
+import {
+  SatCatalogUnavailableError,
+  ConflictError,
+  BadRequestError,
+  NotFoundError,
+  ProviderUnavailableError,
+} from '../../../../src/errors/AppError'
 
 const mockSearchSatCatalog = jest.fn()
 jest.mock('../../../../src/services/fiscal/satCatalogLookup.service', () => ({
@@ -103,6 +114,7 @@ import {
   searchSatCatalogController,
   syncEmisorLogoController,
   downloadCfdiFileController,
+  sendCfdiEmailController,
 } from '../../../../src/controllers/dashboard/cfdi.dashboard.controller'
 
 // ==========================================
@@ -367,6 +379,64 @@ function cancelReq(overrides: Partial<any> = {}): any {
     ...overrides,
   }
 }
+
+// 🔴 H24 (auditoría 2026-09-30): «Reenviar por correo» desde la lista de facturas.
+describe('sendCfdiEmailController', () => {
+  const emailReq = (overrides: Partial<any> = {}): any => ({
+    params: { cfdiId: 'c1', venueId: 'v1' },
+    body: {},
+    authContext: { venueId: 'v1', userId: 's1' },
+    ...overrides,
+  })
+
+  beforeEach(() => jest.clearAllMocks())
+
+  it('sin otro correo, reenvía al registrado y contesta a dónde fue', async () => {
+    mockSendCfdiByEmail.mockResolvedValue({ folio: 'A-36', destination: 'capturado@cliente.mx' })
+    const res = mockRes()
+
+    await sendCfdiEmailController(emailReq(), res)
+
+    expect(mockSendCfdiByEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ cfdiId: 'c1', venueId: 'v1', origin: 'REENVIO', staffId: 's1', email: undefined }),
+    )
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith({ folio: 'A-36', destination: 'capturado@cliente.mx' })
+  })
+
+  it('con otro correo, lo manda a ése', async () => {
+    mockSendCfdiByEmail.mockResolvedValue({ folio: 'A-36', destination: 'nuevo@correo.mx' })
+    const res = mockRes()
+
+    await sendCfdiEmailController(emailReq({ body: { email: 'nuevo@correo.mx' } }), res)
+
+    expect(mockSendCfdiByEmail).toHaveBeenCalledWith(expect.objectContaining({ email: 'nuevo@correo.mx' }))
+  })
+
+  it.each([
+    ['otra sucursal o inexistente', new NotFoundError('Factura no encontrada'), 404],
+    ['no timbrada', new BadRequestError('Sólo se puede enviar por correo una factura timbrada.'), 400],
+    ['el proveedor falló', new ProviderUnavailableError('No se pudo enviar la factura por correo: timeout'), 502],
+  ])('%s ⇒ su código con el mensaje del servicio', async (_label, err, status) => {
+    mockSendCfdiByEmail.mockRejectedValue(err)
+    const res = mockRes()
+
+    await sendCfdiEmailController(emailReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(status)
+    expect(res.json).toHaveBeenCalledWith({ error: (err as Error).message })
+  })
+
+  it('un error inesperado ⇒ 500 sin detalles internos', async () => {
+    mockSendCfdiByEmail.mockRejectedValue(new Error('conexión a la base perdida'))
+    const res = mockRes()
+
+    await sendCfdiEmailController(emailReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(500)
+    expect(res.json).toHaveBeenCalledWith({ error: 'No se pudo enviar la factura por correo' })
+  })
+})
 
 describe('cancelCfdiController', () => {
   beforeEach(() => {

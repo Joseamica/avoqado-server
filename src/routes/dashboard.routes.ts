@@ -114,6 +114,7 @@ import {
   uploadEmisorCsdController,
   syncEmisorLogoController,
   downloadCfdiFileController,
+  sendCfdiEmailController,
   getEmisorProviderStatusController,
   triggerGlobalCfdiController,
   searchSatCatalogController,
@@ -318,6 +319,7 @@ import {
   issueCfdiSchema,
   listCfdisSchema,
   cancelCfdiSchema,
+  sendCfdiEmailSchema,
   upsertEmisorSchema,
   upsertMerchantConfigSchema,
   uploadCsdSchema,
@@ -3680,6 +3682,15 @@ router.post(
   checkFeatureAccess('CFDI'),
   checkPermission('cfdi:configure'), // destructive → OWNER/ADMIN only
   cancelCfdiController,
+)
+// Reenviar por correo una factura timbrada (H24). Mismo permiso que emitirla: quien puede facturar puede reenviarla.
+router.post(
+  '/venues/:venueId/cfdi/:cfdiId/email',
+  authenticateTokenMiddleware,
+  validateRequest(sendCfdiEmailSchema), // validate body BEFORE feature/perm checks (permissions-policy rule)
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:issue'),
+  sendCfdiEmailController,
 )
 // Sustituir una factura equivocada (TipoRelacion 04 + cancelación motivo 01). No lleva body:
 // el documento corregido se reconstruye de la orden, con las mismas barreras que una emisión nueva.

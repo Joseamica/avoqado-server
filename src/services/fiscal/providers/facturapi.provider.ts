@@ -1,4 +1,5 @@
 import Facturapi from 'facturapi'
+import { fromZonedTime } from 'date-fns-tz'
 import logger from '../../../config/logger'
 import {
   CancelInvoiceParams,
@@ -53,6 +54,14 @@ export function esRechazoConfirmado(error: unknown, primerEnvio: boolean): boole
 }
 
 /** facturapi adapter. Instantiate per-emisor with that org's secret key (or the test key in sandbox). */
+/**
+ * H22 (auditoría 2026-09-30): Facturapi manda `stamp.date` en hora de México SIN zona. `new Date(...)` la leía en el huso del
+ * servidor y en producción (UTC) quedaba 6 h antes. Con zona (`Z` o desfase), tal cual.
+ */
+export function parseStampDate(raw: string): Date {
+  return /(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(raw) ? new Date(raw) : fromZonedTime(raw, 'America/Mexico_City')
+}
+
 export class FacturapiProvider implements FiscalProvider {
   readonly name = 'facturapi'
   private client: Facturapi
@@ -648,7 +657,7 @@ export class FacturapiProvider implements FiscalProvider {
       serie: inv.series ?? null,
       folio: inv.folio_number != null ? String(inv.folio_number) : null,
       totalCents: toCents(Number(inv.total ?? 0)),
-      stampedAt: inv.stamp?.date ? new Date(inv.stamp.date) : new Date(),
+      stampedAt: inv.stamp?.date ? parseStampDate(inv.stamp.date) : new Date(),
       status: inv.status === 'valid' ? 'valid' : inv.status === 'canceled' ? 'canceled' : 'pending',
     }
   }
@@ -663,7 +672,7 @@ export class FacturapiProvider implements FiscalProvider {
       status: inv.status === 'valid' ? 'valid' : inv.status === 'canceled' ? 'canceled' : 'pending',
       customerTaxId: inv.customer?.tax_id ?? null,
       isGlobal: inv.global != null,
-      stampedAt: inv.stamp?.date ? new Date(inv.stamp.date) : null,
+      stampedAt: inv.stamp?.date ? parseStampDate(inv.stamp.date) : null,
     }
   }
 

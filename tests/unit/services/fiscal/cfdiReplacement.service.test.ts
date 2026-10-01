@@ -171,6 +171,16 @@ describe('replaceCfdi — camino feliz', () => {
     expect(reservada.receptorRfc).toBe('EKU9003173C9')
   })
 
+  // 🔴 H24 (Codex, ronda 1 del plan de correo): el receptor se reconstruía SIN correo y la factura corregida nunca le llegaba
+  // al cliente. La sustituta va al mismo correo que la original.
+  it('la sustituta conserva el correo que el receptor dio al facturar la original', async () => {
+    const conCorreo = { ...original, entrada: { params: { receptor: { email: 'finanzas@cliente.mx' } } } }
+    const deps = makeDeps({ loadCfdi: jest.fn().mockResolvedValue(conCorreo) })
+    await replaceCfdi(params, deps)
+
+    expect(providerDe(deps).createInvoice.mock.calls[0][0].receptor.email).toBe('finanzas@cliente.mx')
+  })
+
   it('usa la llave cfdi-order-<id>-r1 y la estampa como external_id', async () => {
     const deps = makeDeps()
     await replaceCfdi(params, deps)

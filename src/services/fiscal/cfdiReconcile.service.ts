@@ -6,6 +6,7 @@ import { resolveFiscalProvider } from './fiscalProvider.factory'
 import { FiscalProvider, ProviderInvoiceSummary, StampedInvoice } from './providers/fiscal-provider.interface'
 
 import { finalizarTimbre, completarArchivos, escalarIntentoIncierto } from './finalizadorCfdi'
+import { sendNewCfdiByEmail } from './cfdiEmail.service'
 
 // ─── Result types ─────────────────────────────────────────────────────────────
 
@@ -230,7 +231,7 @@ async function completeFromPac(
   deps: ReconcileCfdiDeps,
   cfdi: StuckCfdi,
   emisor: ReconcileEmisor,
-  provider: { downloadXml: (id: string) => Promise<Buffer>; downloadPdf: (id: string) => Promise<Buffer> },
+  provider: Pick<FiscalProvider, 'downloadXml' | 'downloadPdf' | 'sendInvoiceByEmail'>,
   invoice: { providerInvoiceId: string; uuid: string | null; serie: string | null; folio: string | null; stampedAt: Date | null },
   now: Date,
 ): Promise<any> {
@@ -248,6 +249,8 @@ async function completeFromPac(
     },
   })
   if (result === 'DUPLICADO') return result
+  // 🔴 H24: el PAC timbró y se perdió la respuesta — la conciliación termina la factura, así que también manda el correo.
+  if (result === 'FINALIZADO') void sendNewCfdiByEmail({ cfdiId: cfdi.id, venueId: cfdi.venueId, provider })
   try {
     const venueSlug = await deps.loadVenueSlug(emisor.venueId)
     await completarArchivos(

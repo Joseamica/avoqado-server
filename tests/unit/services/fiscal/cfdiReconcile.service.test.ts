@@ -3,6 +3,9 @@
 // DI-based unit tests for reconcileStuckCfdi — all deps are mocked.
 // Mirrors cfdiGlobal.service.test.ts patterns.
 
+const mockSendNew = jest.fn()
+jest.mock('../../../../src/services/fiscal/cfdiEmail.service', () => ({ sendNewCfdiByEmail: (...a: unknown[]) => mockSendNew(...a) }))
+
 import { reconcileStuckCfdi, ReconcileCfdiDeps, ReconcileEmisor, StuckCfdi } from '../../../../src/services/fiscal/cfdiReconcile.service'
 import { FiscalProvider, ProviderInvoiceSummary, StampedInvoice } from '../../../../src/services/fiscal/providers/fiscal-provider.interface'
 
@@ -483,5 +486,22 @@ describe('reconcileStuckCfdi', () => {
     const deps = makeDeps(provider, { completeCfdi: jest.fn().mockResolvedValue('DUPLICADO') })
     expect((await reconcileStuckCfdi({ cfdi: STUCK_INDIVIDUAL, now: NOW, sandbox: true }, deps)).outcome).toBe('INCONCLUSIVE')
     expect(provider.downloadXml).not.toHaveBeenCalled()
+  })
+
+  // 🔴 H24: si el PAC timbró y se perdió la respuesta, es la conciliación quien termina la factura: también manda el correo.
+  it('al completar un timbre recuperado solicita el envío del correo una vez, con el proveedor del emisor', async () => {
+    mockSendNew.mockClear()
+    const provider = makeProvider({ findByExternalId: jest.fn().mockResolvedValue(MATCH_INDIVIDUAL) })
+    await reconcileStuckCfdi({ cfdi: STUCK_INDIVIDUAL, now: NOW, sandbox: true }, makeDeps(provider))
+    expect(mockSendNew).toHaveBeenCalledTimes(1)
+    expect(mockSendNew).toHaveBeenCalledWith({ cfdiId: 'c1', venueId: 'v1', provider })
+  })
+
+  it('si otro proceso ya lo había finalizado, no lo manda otra vez', async () => {
+    mockSendNew.mockClear()
+    const provider = makeProvider({ findByExternalId: jest.fn().mockResolvedValue(MATCH_INDIVIDUAL) })
+    const deps = makeDeps(provider, { completeCfdi: jest.fn().mockResolvedValue('YA_FINALIZADO') })
+    await reconcileStuckCfdi({ cfdi: STUCK_INDIVIDUAL, now: NOW, sandbox: true }, deps)
+    expect(mockSendNew).not.toHaveBeenCalled()
   })
 })

@@ -52,6 +52,13 @@ export const cancelCfdiSchema = z.object({
   }),
 })
 
+/** Schema passed to validateRequest() for POST /venues/:venueId/cfdi/:cfdiId/email. Sin correo, va al registrado del receptor. */
+export const sendCfdiEmailSchema = z.object({
+  body: z.object({
+    email: z.string().trim().email('El correo no es válido').optional(),
+  }),
+})
+
 // ==========================================
 // FISCAL CONFIG SCHEMAS
 // ==========================================

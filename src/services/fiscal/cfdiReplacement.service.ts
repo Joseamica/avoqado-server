@@ -26,6 +26,7 @@ import { resolveFiscalProvider } from './fiscalProvider.factory'
 import { buildCreateInvoiceParams } from './cfdiPayloadBuilder'
 import { validateBeforeStamp } from './cfdiValidation'
 import { assembleSaleInput } from './assembleSaleInput'
+import { correoCapturado } from './cfdiEmail.service'
 import {
   cancelCfdi,
   emitirConEntrada,
@@ -147,6 +148,8 @@ export async function replaceCfdi(
       regimenFiscal: original.receptorRegimen,
       codigoPostal: original.receptorCp,
       usoCfdi: original.usoCfdi,
+      // H24: la corregida llega al mismo correo que la original.
+      email: correoCapturado(original.entrada),
     }
     const result = await emitirConEntrada(
       { orderId: original.orderId, receptor, sandbox: params.sandbox, flow: original.flow ?? 'STAFF_B', expectedVenueId: original.venueId },

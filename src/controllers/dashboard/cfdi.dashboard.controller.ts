@@ -1,4 +1,4 @@
-import { ConflictError } from '../../errors/AppError'
+import AppError, { ConflictError } from '../../errors/AppError'
 /**
  * CFDI Dashboard Controller
  *
@@ -24,6 +24,7 @@ import { issueGlobalForEmisor } from '@/services/fiscal/cfdiGlobal.service'
 import { upsertEmisor, upsertMerchantFiscalConfig, getFiscalConfig } from '@/services/fiscal/fiscalConfig.service'
 import { provisionEmisor, uploadEmisorCsd, syncEmisorLogo, getEmisorProviderStatus } from '@/services/fiscal/fiscalOnboarding.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { sendCfdiByEmail } from '@/services/fiscal/cfdiEmail.service'
 import { fetchStorageObject } from '@/services/storage.service'
 import { resolveRequestVenueId } from '@/middlewares/checkPermission.middleware'
 
@@ -264,6 +265,41 @@ export async function listCfdisController(req: Request, res: Response): Promise<
  * Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:configure') (OWNER/ADMIN).
  * Body is validated by validateRequest(cancelCfdiSchema) before this handler runs.
  */
+/**
+ * POST /api/v1/dashboard/venues/:venueId/cfdi/:cfdiId/email
+ *
+ * Reenvía por correo una factura timbrada (H24): sin `email`, al registrado del receptor; con uno, a ése.
+ * La bitácora (CFDI_EMAIL_SENT/FAILED) la escribe el servicio.
+ */
+export async function sendCfdiEmailController(req: Request, res: Response): Promise<void> {
+  const { cfdiId } = req.params
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
+
+  try {
+    const result = await sendCfdiByEmail({
+      cfdiId,
+      venueId,
+      sandbox: env.NODE_ENV !== 'production',
+      origin: 'REENVIO',
+      staffId: authContext.userId ?? null,
+      email: req.body?.email,
+    })
+    res.status(200).json(result)
+  } catch (err: unknown) {
+    if (err instanceof AppError) {
+      res.status(err.statusCode).json({ error: err.message })
+      return
+    }
+    logger.error(`[cfdi.controller] sendCfdiEmail failed for cfdi ${cfdiId}`, { error: err instanceof Error ? err.message : String(err) })
+    res.status(500).json({ error: 'No se pudo enviar la factura por correo' })
+  }
+}
+
 export async function cancelCfdiController(req: Request, res: Response): Promise<void> {
   const { cfdiId } = req.params
   const { motivo, substituteUuid } = req.body
