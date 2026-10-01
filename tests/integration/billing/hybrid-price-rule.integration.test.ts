@@ -169,7 +169,12 @@ async function groupedPromotion(code: string, price: number) {
 
 /** Publications and campaigns are never deleted: lists free their product key and stop selling, promotions end. */
 async function retire() {
-  const lists = await prisma.hybridCampaign.findMany({ where: { createdById: MARK, purpose: 'LIST' }, select: { id: true }, take: 50 })
+  // Already-retired rows are skipped: otherwise 50 of them fill the page and live lists stay behind.
+  const lists = await prisma.hybridCampaign.findMany({
+    where: { createdById: MARK, purpose: 'LIST', listProductKey: { not: { startsWith: 'FEATURE:RETIRED_' } } },
+    select: { id: true },
+    take: 50,
+  })
   for (const { id } of lists)
     await prisma.hybridCampaign.update({ where: { id }, data: { listProductKey: `FEATURE:RETIRED_${id}`, status: 'PAUSED' } })
   await prisma.hybridCampaign.updateMany({
@@ -281,11 +286,23 @@ describe(`a promotion costs less than its list (${AUDIT} listed at 199)`, () => 
 })
 
 it('(2) a plan promotion is held to the plan list: Pro at 2,000 against a list of 1,158.84 is rejected', async () => {
-  await createList('PLAN:PRO', plan('PRO', 1158.84))
-  const above = await promotion(plan('PRO', 2000))
-  await expect(publish(above)).rejects.toMatchObject({ code: 'HYBRID_PRICE_ABOVE_LIST' })
-  const below = await promotion(plan('PRO', 999))
-  await expect(publish(below)).resolves.toMatchObject({ campaignId: below })
+  // The plan list may already exist on the shared DB (the plan-list seed creates it): reuse it at 1,158.84 and put its
+  // pointer back afterwards, instead of colliding with the one-list-per-product index.
+  const existing = await prisma.hybridCampaign.findFirst({ where: { purpose: 'LIST', listProductKey: 'PLAN:PRO' } })
+  if (existing) await pointList(existing.id, plan('PRO', 1158.84))
+  else await createList('PLAN:PRO', plan('PRO', 1158.84))
+  try {
+    const above = await promotion(plan('PRO', 2000))
+    await expect(publish(above)).rejects.toMatchObject({ code: 'HYBRID_PRICE_ABOVE_LIST' })
+    const below = await promotion(plan('PRO', 999))
+    await expect(publish(below)).resolves.toMatchObject({ campaignId: below })
+  } finally {
+    if (existing)
+      await prisma.hybridCampaign.update({
+        where: { id: existing.id },
+        data: { currentPublicationId: existing.currentPublicationId, revision: { increment: 1 } },
+      })
+  }
 })
 
 it('(3) a promotion of a function without a list publishes and activates with no comparison', async () => {

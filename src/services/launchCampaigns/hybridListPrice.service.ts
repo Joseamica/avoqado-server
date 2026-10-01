@@ -245,6 +245,39 @@ export async function retryListPrice(productKey: string, staffId: string): Promi
   return prepareAndFinalize(productKey as ProductKey, list.id, list.pendingPublicationId, list.revision, staffId)
 }
 
+export type PlanSeedOutcome = 'CREATE' | 'EXISTS' | 'DIFFERENT_PRICE' | 'PENDING'
+
+/** What seeding a plan list at `price` does to its row. A plan list that already has a price is never changed here. */
+export function planSeedOutcome(row: Pick<ListPriceRow, 'price' | 'pendingPrice'>, price: number): PlanSeedOutcome {
+  if (row.price !== null) return row.price === price ? 'EXISTS' : 'DIFFERENT_PRICE'
+  return row.pendingPrice !== null ? 'PENDING' : 'CREATE'
+}
+
+/**
+ * Spec §4.2 «listas de los planes»: the LIST of a plan at the classic monthly price, through the same flow as
+ * `saveListPrice` (product lock first, then a pending publication, Stripe, finalize) with a PLAN definition. Internal to
+ * the seed script, never exposed over HTTP. Idempotent: a priced plan list is reported, never changed (phase 2 decides
+ * plan prices); a price left pending by a failed Stripe preparation is finished.
+ */
+export async function seedPlanList(
+  tier: 'PRO' | 'PREMIUM',
+  price: number,
+  staffId: string,
+): Promise<{ outcome: PlanSeedOutcome; row: ListPriceRow }> {
+  const product = PRODUCTS.find(p => p.planTier === tier)!
+  const before = await rowOf(product.productKey)
+  const outcome = planSeedOutcome(before, price)
+  if (outcome === 'EXISTS' || outcome === 'DIFFERENT_PRICE') return { outcome, row: before }
+  if (outcome === 'PENDING') return { outcome, row: await retryListPrice(product.productKey, staffId) }
+  const definition = {
+    schemaVersion: 1,
+    kind: 'PLAN',
+    planTier: tier,
+    terms: { currency: 'MXN', interval: 'MONTHLY', price, taxIncluded: true, promotionCycles: null, renewal: { kind: 'SAME_PRICE' } },
+  }
+  return { outcome, row: await saveList(product, definition, before.revision, staffId) }
+}
+
 /** ACTIVE ↔ PAUSED. Pausing takes the function off loose sale; contracts already accepted keep their price. */
 export async function setListPriceStatus(
   input: { productKey: string; status: 'ACTIVE' | 'PAUSED'; expectedRevision: number },

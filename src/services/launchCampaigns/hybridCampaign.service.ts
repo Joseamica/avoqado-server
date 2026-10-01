@@ -197,11 +197,18 @@ export async function publishHybridCampaign(id: string, expectedRevision: number
     })
 }
 
+// Superadmin's «Campañas» list leaves out the campaigns a «% de descuento» group owns (they show once, as their group).
+// Only this list takes the filter: the public listing and the MCP tool keep the shared query unchanged.
+const hybridCampaignAdminListQuery = hybridCampaignListQuery
+  .extend({ excludeGrouped: z.enum(['true', 'false'], { errorMap }).optional() })
+  .strict('Filtro no admitido')
+
 export async function listHybridCampaigns(input: unknown) {
-  const { page, pageSize, q, status } = parse(hybridCampaignListQuery, input)
+  const { page, pageSize, q, status, excludeGrouped } = parse(hybridCampaignAdminListQuery, input)
   const where: Prisma.HybridCampaignWhereInput = {
     purpose: 'PROMOTION',
     ...(status ? { status } : {}),
+    ...(excludeGrouped === 'true' ? { promotionGroupId: null } : {}),
     ...(q ? { OR: [{ name: { contains: q, mode: 'insensitive' } }, { code: { contains: q, mode: 'insensitive' } }] } : {}),
   }
   const [items, total] = await Promise.all([

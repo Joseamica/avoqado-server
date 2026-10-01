@@ -14,6 +14,8 @@ export interface PriceGapSummaryRow {
   bundleVenues: number
 }
 export interface PriceGapVenueRow {
+  /** Rows are per contract (a venue may hold two): the stable key of a row. */
+  contractId: string
   venueId: string
   venueName: string
   organizationName: string
@@ -27,6 +29,8 @@ export interface PriceGapVenueRow {
 
 const MAX_PAGE_SIZE = 100
 const DEFAULT_PAGE_SIZE = 50
+// A bound for OFFSET: a non-finite or absurd page reads an empty page instead of failing the query.
+const MAX_PAGE = 10_000
 const money = (value: Prisma.Decimal) => value.toFixed(2)
 
 /**
@@ -121,7 +125,7 @@ export async function priceGapVenues(
   pageSize: number,
 ): Promise<{ items: PriceGapVenueRow[]; total: number }> {
   const size = Math.min(MAX_PAGE_SIZE, Math.max(1, Math.trunc(pageSize) || DEFAULT_PAGE_SIZE))
-  const offset = (Math.max(1, Math.trunc(page) || 1) - 1) * size
+  const offset = (Math.min(MAX_PAGE, Math.max(1, Math.trunc(page) || 1)) - 1) * size
   const rows = await prisma.$queryRaw<
     {
       total: bigint
@@ -161,10 +165,11 @@ export async function priceGapVenues(
   return {
     total: Number(rows[0]?.total ?? 0),
     items: rows.flatMap(row =>
-      row.venueId === null
+      row.venueId === null || row.contractId === null
         ? []
         : [
             {
+              contractId: row.contractId,
               venueId: row.venueId,
               venueName: row.venueName,
               organizationName: row.organizationName,

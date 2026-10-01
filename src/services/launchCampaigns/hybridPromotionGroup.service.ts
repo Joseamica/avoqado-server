@@ -101,6 +101,17 @@ const promotionGroupStatusBody = z
   )
   .strict('Campo no admitido')
 
+export const promotionGroupListQuery = z
+  .object(
+    {
+      page: z.coerce.number({ errorMap }).int().min(1).max(10_000).default(1),
+      pageSize: z.coerce.number({ errorMap }).int().min(1).max(100).default(25),
+      status: z.enum(['ACTIVE', 'PAUSED', 'ENDED'], { errorMap }).optional(),
+    },
+    { errorMap },
+  )
+  .strict('Filtro no admitido')
+
 export interface PercentPreviewRow {
   featureCode: string
   name: string
@@ -287,6 +298,46 @@ export async function createPercentPromotion(input: unknown, staffId: string): P
   }, LOCK_WAIT)
   for (const id of created.campaignIds) await notifyCampaign(id)
   return created
+}
+
+/** Superadmin's «Descuentos %»: one row per group, newest first, paginated by the server with the exact total (audit #12). */
+export async function listPromotionGroups(input: unknown) {
+  const { page, pageSize, status } = parse(promotionGroupListQuery, input)
+  const where: Prisma.HybridPromotionGroupWhereInput = status ? { status } : {}
+  const [rows, total] = await Promise.all([
+    prisma.hybridPromotionGroup.findMany({
+      where,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+      include: { _count: { select: { campaigns: true } } },
+    }),
+    prisma.hybridPromotionGroup.count({ where }),
+  ])
+  const items = rows.map(({ _count, ...group }) => ({ ...group, functions: _count.campaigns }))
+  return { items, total, page, pageSize, totalPages: Math.ceil(total / pageSize) }
+}
+
+/** A group with every campaign (ENDED ones too) in ordinal order, each with the publication on sale or null. */
+export async function getPromotionGroup(groupId: string) {
+  const group = await prisma.hybridPromotionGroup.findUnique({ where: { id: groupId } })
+  if (!group) throw new NotFoundError('Descuento no encontrado.', 'HYBRID_PROMOTION_GROUP_NOT_FOUND')
+  // Codes are `G<GROUP>_<NN>`: code order is the ordinal (productKey) order, and codes are unique.
+  const campaigns = await prisma.hybridCampaign.findMany({
+    where: { promotionGroupId: groupId },
+    orderBy: { code: 'asc' },
+    take: MAX_MEMBERS,
+  })
+  const ids = campaigns.flatMap(campaign => (campaign.currentPublicationId ? [campaign.currentPublicationId] : []))
+  const publications = ids.length ? await prisma.hybridOfferPublication.findMany({ where: { id: { in: ids } }, take: ids.length }) : []
+  const byId = new Map(publications.map(publication => [publication.id, publication]))
+  return {
+    ...group,
+    campaigns: campaigns.map(campaign => ({
+      ...campaign,
+      publication: (campaign.currentPublicationId && byId.get(campaign.currentPublicationId)) || null,
+    })),
+  }
 }
 
 /** The group and its campaigns still in play (an ENDED one is terminal and left alone), in productKey order. */

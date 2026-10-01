@@ -410,9 +410,12 @@ describe('price gap notice (spec §6.3)', () => {
     const { items, total } = await priceGapVenues(`FEATURE:${P}`, 1, 100)
     const expected = [...counted].sort((a, b) => b.gap - a.gap || (a.contractId < b.contractId ? -1 : 1))
     expect(total).toBe(7)
-    expect(items.map(item => [item.venueId, item.reason])).toEqual(expected.map(row => [row.venue.id, row.reason]))
+    expect(items.map(item => [item.contractId, item.venueId, item.reason])).toEqual(
+      expected.map(row => [row.contractId, row.venue.id, row.reason]),
+    )
     const byReason = (reason: string, venueId: string) => items.find(item => item.reason === reason && item.venueId === venueId)!
     expect(byReason('OLD_LIST', v.Old.id)).toEqual({
+      contractId: counted.find(row => row.venue === v.Old)!.contractId,
       venueId: v.Old.id,
       venueName: v.Old.name,
       organizationName: v.Old.organizationName,
@@ -447,6 +450,11 @@ describe('price gap notice (spec §6.3)', () => {
     expect(pages.map(page => page.items.length)).toEqual([3, 3, 1, 0])
     expect(pages.flatMap(page => page.items)).toEqual(all)
     expect(await priceGapVenues('FEATURE:UNKNOWN_PRODUCT', 1, 10)).toEqual({ items: [], total: 0 })
+  })
+
+  it('clamps a non-finite or huge page at the source: an empty page with the exact total, never an error', async () => {
+    for (const page of [Infinity, 1e12]) expect(await priceGapVenues(`FEATURE:${P}`, page, 3)).toEqual({ items: [], total: 7 })
+    expect(await priceGapVenues(`FEATURE:${P}`, NaN, 3)).toEqual(await priceGapVenues(`FEATURE:${P}`, 1, 3))
   })
 
   it('clamps a hostile page size to 100 and a page below 1 to the first, keeping the total exact', async () => {
