@@ -118,6 +118,22 @@ describe('migrateStatus', () => {
   })
 })
 
+it('does not claim destination contact while a deferred migration is still at its origin', async () => {
+  m.tpvCommandQueue.findUnique.mockResolvedValue({
+    id: 'cmd-1',
+    terminalId: 'term-1',
+    venueId: 'origin',
+    commandType: 'FACTORY_RESET',
+    status: 'QUEUED',
+    createdAt: T0,
+    payload: { _migrationIntent: { toVenueId: 'destination' } },
+  })
+  m.terminal.findUnique.mockResolvedValue({ id: 'term-1', venueId: 'origin', lastHeartbeat: new Date() })
+  expect((await migrateStatus('term-1', 'cmd-1')).onlineUnderNewVenue).toBe(false)
+  m.terminal.findUnique.mockResolvedValue({ id: 'term-1', venueId: 'destination', lastHeartbeat: new Date() })
+  expect((await migrateStatus('term-1', 'cmd-1')).onlineUnderNewVenue).toBe(true)
+})
+
 it('only confirms a completed migration after an authenticated new app session', async () => {
   m.tpvCommandQueue.findUnique.mockResolvedValue({
     id: 'cmd-1',

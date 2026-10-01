@@ -1,6 +1,9 @@
 import prisma from '@/utils/prismaClient'
 import { updateTerminal } from '@/services/dashboard/terminals.superadmin.service'
 import { tpvCommandQueueService } from '@/services/tpv/command-queue.service'
+import { broadcastTpvCommand } from '@/communication/sockets'
+
+jest.mock('@/communication/sockets', () => ({ broadcastTpvCommand: jest.fn(), broadcastSuperadminTerminalUpdate: jest.fn() }))
 
 jest.mock('@/utils/prismaClient', () => {
   const db = {
@@ -64,6 +67,7 @@ it('mueve y asigna el merchant en la misma transacción que crea el borrado', as
 it('un error al encolar rechaza la transacción: nunca devuelve éxito', async () => {
   queue.mockRejectedValue(new Error('queue unavailable'))
   await expect(updateTerminal('t1', { venueId: 'new' })).rejects.toThrow('queue unavailable')
+  expect(broadcastTpvCommand).not.toHaveBeenCalled()
 })
 
 it('conserva los cambios de estado y activación del contrato al trasladar', async () => {
@@ -99,6 +103,15 @@ it('protocolo 2 conserva el venue y merchants hasta que la app reservó su venta
     commandProtocolVersion: 2,
   })
   await updateTerminal('t1', { venueId: 'new', assignedMerchantIds: ['m-new'] }, { staffId: 'admin' })
+  expect(broadcastTpvCommand).toHaveBeenCalledWith(
+    't1',
+    'old',
+    expect.objectContaining({
+      commandId: 'wipe-new',
+      payload: { _deliveryProtocol: 2 },
+      type: 'FACTORY_RESET',
+    }),
+  )
   const data = db.terminal.update.mock.calls[0][0].data
   expect(db.$queryRaw).toHaveBeenCalled()
   expect(data).not.toHaveProperty('venueId')

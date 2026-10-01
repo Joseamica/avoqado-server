@@ -2,8 +2,19 @@
 
 ## Overview
 
-Remote command system for TPV terminals following Square Terminal API patterns. Commands are queued in database and delivered via heartbeat
-polling for maximum reliability.
+`Terminal.lastHeartbeat` uses the server contact time, never the device clock. A terminal with a clock ahead or behind must still appear
+online and confirm its migration after a successful receipt and a new boot.
+
+Remote command system for TPV terminals. Protocol 2 persists commands without expiry and sends a targeted socket hint. The app recovers
+pending commands on connection and safe lifecycle events, without periodic command polling. Execution waits for an idle Home/Activation
+window with no financial operation pending; destructive commands keep a durable receipt for the next boot.
+
+Every enqueue path emits a device hint after persistence (after commit for idempotent requests and venue migrations). A replay does not emit
+it again. A scheduled command waits for its due time. Deferred migration status checks the intended destination, not the origin stored on
+the queued command.
+
+Released legacy clients keep heartbeat delivery and their existing command TTL. The heartbeat diagram and delivery details below describe
+that legacy path.
 
 ## Flow Diagram
 
@@ -237,28 +248,23 @@ if (terminal.status === TerminalStatus.INACTIVE && status === 'ACTIVE') {
 
 ### 6. The Socket.IO push goes ONLY to the target terminal (2026-09-07)
 
-**Problem Solved:** `broadcastTpvCommand` emitted `tpv_command` to the WHOLE venue and trusted
-each device to filter by `terminalId`. On 2026-09-07 a SUPERADMIN sent `FACTORY_RESET` to
-Testarudo's PAX WHITE (`AVQD-2841653112`) and the NEXGO BLACK (`AVQD-N860W173400`) answered
-"Factory reset completed": the client-side filter (`CommandTarget.kt`) only shipped in
-`nexgo-v2.8.6`, which the fleet does not have. The only server-side check lived in the ACK —
-after the wipe.
+**Problem Solved:** `broadcastTpvCommand` emitted `tpv_command` to the WHOLE venue and trusted each device to filter by `terminalId`. On
+2026-09-07 a SUPERADMIN sent `FACTORY_RESET` to Testarudo's PAX WHITE (`AVQD-2841653112`) and the NEXGO BLACK (`AVQD-N860W173400`) answered
+"Factory reset completed": the client-side filter (`CommandTarget.kt`) only shipped in `nexgo-v2.8.6`, which the fleet does not have. The
+only server-side check lived in the ACK — after the wipe.
 
 **Design:**
 
-- `BroadcastingService.broadcastToTerminal(venueId, serial, event, payload)` emits to the venue
-  sockets whose **JWT** carries that `terminalSerialNumber` (stamped by the TPV login; the socket
-  auth middleware copies it into `authContext`). A socket whose token has no serial only counts
-  if the terminal registry (fed by the client-claimed handshake `terminalId`) maps the target to
-  it — a fallback for legacy tokens, never above the JWT.
-- **No match ⇒ nobody receives the push.** It never falls back to the venue: the heartbeat is
-  the primary channel and is already per-serial (`getPendingCommands`), so the command arrives
-  on the next heartbeat at worst.
+- `BroadcastingService.broadcastToTerminal(venueId, serial, event, payload)` emits to the venue sockets whose **JWT** carries that
+  `terminalSerialNumber` (stamped by the TPV login; the socket auth middleware copies it into `authContext`). A socket whose token has no
+  serial only counts if the terminal registry (fed by the client-claimed handshake `terminalId`) maps the target to it — a fallback for
+  legacy tokens, never above the JWT.
+- **No match ⇒ nobody receives the push.** It never falls back to the venue: the heartbeat is the primary channel and is already per-serial
+  (`getPendingCommands`), so the command arrives on the next heartbeat at worst.
 - `tpv_command_sent` (informational, consumed by the dashboard) still goes to the venue.
-- The ACK ownership guard now throws `ForbiddenError` (403) instead of a bare `Error` (500): a
-  5xx is *transient* for the TPV offline queue and invited endless retries of an ACK that can
-  never be accepted. Serial comparison is `sameTerminalSerial()` (`utils/terminalSerial.ts`) on
-  both paths — with or without `AVQD-`, any case, both directions.
+- The ACK ownership guard now throws `ForbiddenError` (403) instead of a bare `Error` (500): a 5xx is _transient_ for the TPV offline queue
+  and invited endless retries of an ACK that can never be accepted. Serial comparison is `sameTerminalSerial()` (`utils/terminalSerial.ts`)
+  on both paths — with or without `AVQD-`, any case, both directions.
 
 ## Key File Locations
 
