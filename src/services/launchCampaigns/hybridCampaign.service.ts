@@ -6,7 +6,9 @@ import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import { compileHybridPublication } from './hybridOffer.service'
-import { hybridOfferDefinition } from './hybridOffer.schema'
+import { hybridOfferDefinition, type HybridOfferDefinition } from './hybridOffer.schema'
+import { assertPromotionBelowList } from './hybridPriceRule'
+import { lockProducts, productKeyOf } from './hybridProduct'
 
 const errorMap: z.ZodErrorMap = () => ({ message: 'Valor requerido o formato no válido' })
 export const hybridCampaignBody = z
@@ -85,6 +87,17 @@ function changed(): never {
   throw new ConflictError('La ficha cambió. Actualiza la página y revisa la nueva versión.', 'HYBRID_CAMPAIGN_STALE')
 }
 
+/**
+ * A promotion price goes on sale only under its product lock and below its list (spec §4.4). Called before any campaign
+ * row write, so a concurrent list change and this promotion serialize on the product, never pass on a stale read.
+ */
+async function lockAndCheckListRule(tx: Prisma.TransactionClient, definition: HybridOfferDefinition) {
+  const key = productKeyOf(definition)
+  if (!key) return
+  await lockProducts(tx, [key])
+  await assertPromotionBelowList(tx, definition)
+}
+
 async function notifyCampaign(id: string) {
   try {
     const { socketManager } = await import('@/communication/sockets/managers/socketManager')
@@ -146,6 +159,7 @@ export async function publishHybridCampaign(id: string, expectedRevision: number
       if (campaign.status === 'ENDED' || campaign.endsAt! <= new Date())
         throw new ConflictError('La oferta terminó; duplica la ficha para publicar otra.')
       const publication = compileHybridPublication(campaign.draftDefinition)
+      await lockAndCheckListRule(tx, publication.definition)
       // Claim the revision first: a concurrent publish of the same revision then fails as stale, not on the version index.
       const claimed = await tx.hybridCampaign.updateMany({
         where: { id, revision: expectedRevision },
@@ -277,6 +291,7 @@ export async function setHybridCampaignStatus(id: string, input: unknown, staffI
   if (!current || current.purpose === 'LIST') throw new NotFoundError('Oferta no encontrada.')
   if (current.revision !== body.expectedRevision) changed()
   if (current.status === 'ENDED') throw new ConflictError('Esta campaña terminó. Duplica la ficha para crear otra.')
+  let goingOnSale: HybridOfferDefinition | null = null
   if (body.status === 'ACTIVE') {
     assertHybridSalesOpen()
     const publication = await loadCurrentPublication(prisma, current)
@@ -290,9 +305,12 @@ export async function setHybridCampaignStatus(id: string, input: unknown, staffI
     if (current.endsAt! <= new Date() || current.reservedCount + current.redeemedCount >= current.capacity!)
       throw new ConflictError('La campaña terminó o no tiene lugares disponibles.', 'HYBRID_OFFER_UNAVAILABLE')
     await ensureHybridPublicationPrices(publication.id)
+    goingOnSale = hybridOfferDefinition.parse(publication.definition)
   }
   return prisma
     .$transaction(async tx => {
+      // (Re)activating puts the price on sale again: its list may have dropped since it was published.
+      if (goingOnSale) await lockAndCheckListRule(tx, goingOnSale)
       const changedRow = await tx.hybridCampaign.updateMany({
         where: { id, revision: body.expectedRevision, status: current.status },
         data: { status: body.status, revision: { increment: 1 } },

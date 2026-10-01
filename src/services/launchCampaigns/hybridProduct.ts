@@ -1,4 +1,4 @@
-import type { Prisma } from '@prisma/client'
+import { Prisma } from '@prisma/client'
 import type { HybridOfferDefinition } from './hybridOffer.schema'
 
 export type ProductKey = `FEATURE:${string}` | 'PLAN:PRO' | 'PLAN:PREMIUM'
@@ -8,6 +8,16 @@ export function productKeyOf(definition: HybridOfferDefinition): ProductKey | nu
   if (definition.kind === 'PLAN') return `PLAN:${definition.planTier}`
   if (definition.kind === 'FEATURES' && definition.featureCodes.length === 1) return `FEATURE:${definition.featureCodes[0]}`
   return null
+}
+
+/**
+ * SQL twin of `productKeyOf` over `<alias>.definition` (jsonb): NULL for bundles and choices. Both must agree
+ * (integration test `hybrid-price-rule`), since the list-price rule and the best-offer query filter products in SQL.
+ */
+export function productKeySql(alias: string): Prisma.Sql {
+  if (!/^[a-z_]+$/.test(alias)) throw new Error(`Invalid SQL alias: ${alias}`)
+  const d = Prisma.raw(`${alias}.definition`)
+  return Prisma.sql`(CASE WHEN ${d}->>'kind' = 'PLAN' THEN 'PLAN:' || (${d}->>'planTier') WHEN ${d}->>'kind' = 'FEATURES' AND jsonb_array_length(${d}->'featureCodes') = 1 THEN 'FEATURE:' || (${d}->'featureCodes'->>0) END)`
 }
 
 /** Catalog price writes serialize per product; many products are locked deduplicated and sorted (no inverse-order deadlock). */
