@@ -207,7 +207,8 @@ export async function getHybridFeatureGrid(venueId: string): Promise<FeatureGrid
       }
       const definition = parsed.data
       const blocker = hybridOfferBlocker(
-        { ...campaign, latestPublicationId: publication.id },
+        // PROMOTION: CHECK guarantees non-null
+        { ...campaign, endsAt: campaign.endsAt!, capacity: campaign.capacity!, latestPublicationId: publication.id },
         { ...publication, renewalKind: definition.terms.renewal.kind },
         organization,
         now,

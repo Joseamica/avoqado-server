@@ -111,7 +111,13 @@ export async function observeHybridQuote(venueId: string, body: z.output<typeof 
   for (const publication of publications) {
     const definition = hybridOfferDefinition.parse(publication.definition)
     const blocker = hybridOfferBlocker(
-      { ...publication.campaign, latestPublicationId: publication.campaign.publications[0]?.id },
+      // PROMOTION: CHECK guarantees non-null
+      {
+        ...publication.campaign,
+        endsAt: publication.campaign.endsAt!,
+        capacity: publication.campaign.capacity!,
+        latestPublicationId: publication.campaign.publications[0]?.id,
+      },
       { ...publication, renewalKind: definition.terms.renewal.kind },
       venue.organization,
       now,
@@ -239,7 +245,8 @@ export async function createHybridQuote(venueId: string, staffId: string, input:
   if (!parsed.success) throw new BadRequestError(parsed.error.issues.map(issue => issue.message).join('. '))
   if (parsed.data.keepStaffVenueIds?.length) await assertKeepSelection(venueId, parsed.data.keepStaffVenueIds)
   const observed = await observeHybridQuote(venueId, parsed.data, Math.floor(Date.now() / 1000))
-  const quoteExpiresAt = new Date(Math.min(Date.now() + 5 * 60000, ...observed.publications.map(p => p.campaign.endsAt.getTime())))
+  // PROMOTION: CHECK guarantees non-null
+  const quoteExpiresAt = new Date(Math.min(Date.now() + 5 * 60000, ...observed.publications.map(p => p.campaign.endsAt!.getTime())))
   return prisma.hybridPurchase.create({
     data: {
       venueId,
@@ -327,12 +334,13 @@ export async function acceptHybridQuote(venueId: string, staffId: string, quoteI
           where: { id: offer.campaignId },
           include: { publications: { select: { id: true }, orderBy: { version: 'desc' }, take: 1 } },
         })
+        // PROMOTION: CHECK guarantees non-null
         if (
           campaign.status !== 'ACTIVE' ||
           campaign.startsAt > now ||
-          campaign.endsAt <= now ||
+          campaign.endsAt! <= now ||
           campaign.publications[0]?.id !== offer.id ||
-          campaign.reservedCount + campaign.redeemedCount >= campaign.capacity
+          campaign.reservedCount + campaign.redeemedCount >= campaign.capacity!
         )
           throw new ConflictError('La oferta ya no tiene lugares disponibles.', 'HYBRID_OFFER_FULL')
         assertAudience(campaign, observed.venue.organization)

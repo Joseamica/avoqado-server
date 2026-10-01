@@ -157,6 +157,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   VenueFeature: 'Modules, Features & Billing',
   CapabilityGrant: 'Modules, Features & Billing',
   HybridCampaign: 'Modules, Features & Billing',
+  HybridPromotionGroup: 'Modules, Features & Billing',
   HybridPurchase: 'Modules, Features & Billing',
   HybridContract: 'Modules, Features & Billing',
   HybridContractSelection: 'Modules, Features & Billing',

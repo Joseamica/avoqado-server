@@ -141,7 +141,8 @@ export async function publishHybridCampaign(id: string, expectedRevision: number
       const campaign = await tx.hybridCampaign.findUnique({ where: { id } })
       if (!campaign) throw new NotFoundError('Oferta no encontrada.')
       if (campaign.revision !== expectedRevision) changed()
-      if (campaign.status === 'ENDED' || campaign.endsAt <= new Date())
+      // PROMOTION: CHECK guarantees non-null
+      if (campaign.status === 'ENDED' || campaign.endsAt! <= new Date())
         throw new ConflictError('La oferta terminó; duplica la ficha para publicar otra.')
       const publication = compileHybridPublication(campaign.draftDefinition)
       const claimed = await tx.hybridCampaign.updateMany({
@@ -205,9 +206,10 @@ export async function getPublicHybridOffer(slug: string) {
     where: { slug },
     include: { publications: { orderBy: { version: 'desc' }, take: 1 } },
   })
-  if (!campaign || campaign.status !== 'ACTIVE' || campaign.startsAt > new Date() || campaign.endsAt <= new Date())
+  // PROMOTION: CHECK guarantees non-null
+  if (!campaign || campaign.status !== 'ACTIVE' || campaign.startsAt > new Date() || campaign.endsAt! <= new Date())
     throw new NotFoundError('Esta oferta no está disponible.')
-  if (campaign.reservedCount + campaign.redeemedCount >= campaign.capacity)
+  if (campaign.reservedCount + campaign.redeemedCount >= campaign.capacity!)
     throw new ConflictError('Se agotaron los lugares de esta oferta.', 'HYBRID_OFFER_FULL')
   const publication = campaign.publications[0]
   if (!publication) throw new NotFoundError('Esta oferta no está disponible.')
@@ -225,7 +227,8 @@ export async function getPublicHybridOffer(slug: string) {
     startsAt: campaign.startsAt,
     endsAt: campaign.endsAt,
     audience: campaign.audience,
-    placesRemaining: campaign.capacity - campaign.reservedCount - campaign.redeemedCount,
+    // PROMOTION: CHECK guarantees non-null
+    placesRemaining: campaign.capacity! - campaign.reservedCount - campaign.redeemedCount,
     purchaseAvailable: process.env.HYBRID_BILLING_ENABLED === 'true',
   }
 }
@@ -267,7 +270,8 @@ export async function setHybridCampaignStatus(id: string, input: unknown, staffI
       publication.definitionHash !== compileHybridPublication(current.draftDefinition).definitionHash
     )
       throw new ConflictError('Publica y revisa la versión vigente antes de activarla.', 'HYBRID_PUBLICATION_REQUIRED')
-    if (current.endsAt <= new Date() || current.reservedCount + current.redeemedCount >= current.capacity)
+    // PROMOTION: CHECK guarantees non-null
+    if (current.endsAt! <= new Date() || current.reservedCount + current.redeemedCount >= current.capacity!)
       throw new ConflictError('La campaña terminó o no tiene lugares disponibles.', 'HYBRID_OFFER_UNAVAILABLE')
     await ensureHybridPublicationPrices(publication.id)
   }
@@ -342,8 +346,9 @@ export async function listPublicHybridOffers(input: unknown) {
       startsAt: row.startsAt,
       endsAt: row.endsAt,
       audience: row.audience,
-      placesRemaining: row.capacity - row.reservedCount - row.redeemedCount,
-      purchaseAvailable: process.env.HYBRID_BILLING_ENABLED === 'true' && row.reservedCount + row.redeemedCount < row.capacity,
+      // PROMOTION: CHECK guarantees non-null
+      placesRemaining: row.capacity! - row.reservedCount - row.redeemedCount,
+      purchaseAvailable: process.env.HYBRID_BILLING_ENABLED === 'true' && row.reservedCount + row.redeemedCount < row.capacity!,
     })),
   )
   return { items, total, page, pageSize, totalPages: Math.ceil(total / pageSize) }
