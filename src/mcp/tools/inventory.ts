@@ -5,10 +5,11 @@ import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
+import { operationHash } from '@/utils/operationHash'
 import { auditMcpWrite } from '../audit'
 import { registerInventoryWasteTools } from './inventoryWaste'
 import { adjustInventoryStock } from '@/services/dashboard/productInventory.service'
-import { createRawMaterial, adjustStock as adjustRawMaterialStock } from '@/services/dashboard/rawMaterial.service'
+import { createRawMaterial, updateRawMaterial, adjustStock as adjustRawMaterialStock } from '@/services/dashboard/rawMaterial.service'
 import { AdjustStockSchema } from '@/schemas/dashboard/inventory.schema'
 import { listPresentations, setPresentations } from '@/services/dashboard/rawMaterialPresentation.service'
 import { getReorderSuggestions, getAutoReorderConfig, setAutoReorderConfig } from '@/services/dashboard/autoReorder.service'
@@ -43,6 +44,19 @@ const BATCH_STATUS_LABEL = {
   [BatchStatus.EXPIRED]: 'Caducado',
   [BatchStatus.QUARANTINED]: 'Retenido',
 } as const
+
+const rawMaterialQuantityInput = z
+  .number()
+  .finite('La cantidad debe ser finita')
+  .min(0, 'La cantidad no puede ser negativa')
+  .max(999999999.999, 'La cantidad supera el rango permitido')
+  .refine(v => new Decimal(v).decimalPlaces() <= 3, 'La cantidad admite hasta 3 decimales')
+const rawMaterialCostInput = z
+  .number()
+  .finite('El costo debe ser finito')
+  .positive('El costo debe ser positivo')
+  .max(999999.9999, 'El costo supera el rango permitido')
+  .refine(v => new Decimal(v).decimalPlaces() <= 4, 'El costo admite hasta 4 decimales')
 
 export function registerInventoryTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
@@ -355,6 +369,79 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
   )
 
   server.tool(
+    'update_raw_material',
+    'Edit the name, description, cost per BASE UNIT or reorder thresholds of ONE existing ingredient. Obtain its exact id with list_raw_materials. Cost changes recalculate related recipe costs through the shared inventory service. Does NOT change the unit or stock; use adjust_raw_material_stock for stock, and the dashboard for unit changes. Never create a duplicate to rename or change a cost. Show current → new values, then confirm with the returned arguments and token. Requires inventory:update, mcp:write and PREMIUM (INVENTORY_TRACKING). Costs are pesos per base unit, with at most 4 decimals; stock thresholds at most 3 decimals.',
+    {
+      venueId: z.string().min(1),
+      rawMaterialId: z.string().min(1),
+      name: z.string().trim().min(1, 'El nombre es requerido').max(200).optional(),
+      description: z.string().max(2000).optional(),
+      costPerUnit: rawMaterialCostInput.optional(),
+      minimumStock: rawMaterialQuantityInput.optional(),
+      reorderPoint: rawMaterialQuantityInput.optional(),
+      expectedUpdatedAt: z.string().datetime().optional(),
+      confirm: z.boolean().optional(),
+    },
+    async ({ venueId, rawMaterialId, expectedUpdatedAt, confirm, ...fields }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('inventory:update', venueId)
+      const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario')
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+      const changes = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined))
+      if (!Object.keys(changes).length)
+        return text({
+          ok: false,
+          needsInput: true,
+          error:
+            'Indica qué nombre, descripción, costo o umbral deseas cambiar. Las existencias se ajustan con adjust_raw_material_stock y la unidad en el dashboard.',
+        })
+      const existing = await prisma.rawMaterial.findFirst({ where: { id: rawMaterialId, venueId, active: true, deletedAt: null } })
+      if (!existing) return text({ ok: false, needsInput: true, error: 'No encontré ese insumo en esta sucursal. Usa list_raw_materials.' })
+      const minimum = new Decimal(fields.minimumStock ?? existing.minimumStock)
+      const reorder = new Decimal(fields.reorderPoint ?? existing.reorderPoint)
+      if (minimum.gt(reorder) || (existing.maximumStock !== null && reorder.gt(existing.maximumStock)))
+        return text({
+          ok: false,
+          needsInput: true,
+          error: 'El mínimo debe ser menor o igual al punto de reorden; éste no puede superar el máximo configurado.',
+        })
+      if (!confirm)
+        return text({
+          ok: true,
+          requiresConfirmation: true,
+          expectedUpdatedAt: existing.updatedAt.toISOString(),
+          venueId,
+          rawMaterialId,
+          unit: existing.unit,
+          change: {
+            from: Object.fromEntries(
+              Object.keys(changes).map(k => [
+                k,
+                k === 'costPerUnit' || k === 'minimumStock' || k === 'reorderPoint'
+                  ? Number(existing[k as 'costPerUnit'])
+                  : existing[k as 'name'],
+              ]),
+            ),
+            to: changes,
+          },
+          message: `Editar "${existing.name}" en esta sucursal (${existing.unit}). Cambiar costos recalcula las recetas relacionadas; no modifica existencias, unidades ni ventas anteriores. Confirma los valores mostrados.`,
+        })
+      if (!expectedUpdatedAt) return text({ ok: false, needsInput: true, error: 'Solicita una nueva vista previa.' })
+      const updated = await updateRawMaterial(venueId, rawMaterialId, changes, scope.staffId, expectedUpdatedAt)
+      return text({
+        ok: true,
+        venueId,
+        rawMaterialId: updated.id,
+        name: updated.name,
+        unit: updated.unit,
+        costPerUnit: Number(updated.costPerUnit),
+        minimumStock: Number(updated.minimumStock),
+        reorderPoint: Number(updated.reorderPoint),
+      })
+    },
+  )
+
+  server.tool(
     'create_raw_material',
     'Create a NEW raw material / ingredient (for recipe-based inventory) in a venue you can access: name, category, unit of measure, current stock, minimum stock, reorder point and cost per unit. Recipes consume these. This WRITES — requires inventory:create. category ∈ {MEAT, POULTRY, SEAFOOD, DAIRY, CHEESE, EGGS, VEGETABLES, FRUITS, GRAINS, BREAD, PASTA, RICE, BEANS, SPICES, HERBS, OILS, SAUCES, CONDIMENTS, BEVERAGES, ALCOHOL, CLEANING, PACKAGING, OTHER}. unit ∈ {KILOGRAM, GRAM, POUND, OUNCE, LITER, MILLILITER, GALLON, CUP, TABLESPOON, TEASPOON, PIECE, UNIT, DOZEN, BOX, BAG, BOTTLE, CAN, JAR, …}.',
     {
@@ -362,10 +449,10 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
       name: z.string().min(1).describe('Ingredient name, e.g. "Harina"'),
       category: z.string().min(1).describe('Category (see list in the tool description)'),
       unit: z.string().min(1).describe('Unit of measure (see list in the tool description)'),
-      currentStock: z.number().min(0).describe('Current stock on hand (in the chosen unit)'),
-      minimumStock: z.number().min(0).describe('Minimum stock before it is "low" (must be ≤ reorderPoint)'),
-      reorderPoint: z.number().min(0).describe('Stock level at which to reorder'),
-      costPerUnit: z.number().positive().describe('Cost per unit (money)'),
+      currentStock: rawMaterialQuantityInput.describe('Current stock on hand (in the chosen unit)'),
+      minimumStock: rawMaterialQuantityInput.describe('Minimum stock before it is "low" (must be ≤ reorderPoint)'),
+      reorderPoint: rawMaterialQuantityInput.describe('Stock level at which to reorder'),
+      costPerUnit: rawMaterialCostInput.describe('Cost per unit (money)'),
       sku: z.string().optional().describe('Stock code (auto-generated from the name if omitted)'),
       description: z.string().optional().describe('Description'),
       perishable: z.boolean().optional().describe('Whether it is perishable'),
@@ -393,27 +480,36 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
             .toUpperCase()
             .replace(/[^A-Z0-9]/g, '')
             .slice(0, 8) || 'RAW'
-        }-${Date.now().toString(36).slice(-5).toUpperCase()}`
+        }-${operationHash({ venueId, name: name.trim().toLowerCase(), unit: unitU }).slice(0, 10).toUpperCase()}`
+      const existing = await prisma.rawMaterial.findFirst({
+        where: { venueId, OR: [{ sku: finalSku }, { name: { equals: name.trim(), mode: 'insensitive' } }] },
+        select: { id: true, name: true, sku: true, unit: true, currentStock: true, active: true, deletedAt: true },
+      })
+      if (existing)
+        return text({
+          ok: false,
+          needsInput: true,
+          existingRawMaterial: { ...existing, currentStock: Number(existing.currentStock) },
+          error:
+            'Ya existe un insumo con ese nombre o SKU. Verifica el registro antes de reintentar; para editarlo usa update_raw_material y para existencias adjust_raw_material_stock.',
+        })
       try {
-        const rm = await createRawMaterial(venueId, {
-          name,
-          sku: finalSku,
-          category: catU as RawMaterialCategory,
-          unit: unitU as Unit,
-          currentStock,
-          minimumStock,
-          reorderPoint,
-          costPerUnit,
-          perishable: perishable ?? false,
-          ...(description ? { description } : {}),
-        })
-        await auditMcpWrite(scope, {
-          action: 'RAW_MATERIAL_CREATED',
-          entity: 'RawMaterial',
-          entityId: rm.id,
+        const rm = await createRawMaterial(
           venueId,
-          data: { name, category: catU, unit: unitU, currentStock, costPerUnit },
-        })
+          {
+            name: name.trim(),
+            sku: finalSku,
+            category: catU as RawMaterialCategory,
+            unit: unitU as Unit,
+            currentStock,
+            minimumStock,
+            reorderPoint,
+            costPerUnit,
+            perishable: perishable ?? false,
+            ...(description ? { description } : {}),
+          },
+          { staffId: scope.staffId, source: 'customer-mcp' },
+        )
         return text({ ok: true, rawMaterial: { id: rm.id, name: rm.name, sku: rm.sku, category: catU, unit: unitU, currentStock } })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })

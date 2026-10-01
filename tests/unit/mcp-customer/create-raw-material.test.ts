@@ -3,6 +3,7 @@ import type { McpScope } from '../../../src/mcp/scope'
 
 const mockCreate = jest.fn()
 const mockAudit = jest.fn()
+const mockFind = jest.fn()
 
 jest.mock('@/mcp/planGate', () => ({ planGateMessage: jest.fn().mockResolvedValue(null) }))
 jest.mock('@/mcp/guard', () => ({
@@ -22,7 +23,12 @@ jest.mock('@/services/dashboard/rawMaterial.service', () => ({ createRawMaterial
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => mockAudit(...(a as [])) }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
-  default: { inventory: { findMany: jest.fn() }, product: { findMany: jest.fn() }, serializedItem: { groupBy: jest.fn() } },
+  default: {
+    rawMaterial: { findFirst: (...a: unknown[]) => mockFind(...a) },
+    inventory: { findMany: jest.fn() },
+    product: { findMany: jest.fn() },
+    serializedItem: { groupBy: jest.fn() },
+  },
 }))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
@@ -43,7 +49,11 @@ const ok = {
 beforeAll(() => {
   registerInventoryTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
 })
-beforeEach(() => jest.clearAllMocks())
+beforeEach(() => {
+  jest.clearAllMocks()
+  mockFind.mockResolvedValue(null)
+})
+afterEach(() => jest.restoreAllMocks())
 
 describe('create_raw_material (write)', () => {
   it('rejects out-of-scope venue', async () => {
@@ -77,6 +87,28 @@ describe('create_raw_material (write)', () => {
     expect(dto).toMatchObject({ name: 'Harina', category: 'GRAINS', unit: 'KILOGRAM', currentStock: 50, costPerUnit: 20 })
     expect(typeof dto.sku).toBe('string')
     expect(out.ok).toBe(true)
-    expect(mockAudit.mock.calls[0][1]).toMatchObject({ action: 'RAW_MATERIAL_CREATED', entity: 'RawMaterial', entityId: 'rm1' })
+    expect(mockCreate.mock.calls[0][2]).toEqual({ staffId: 's1', source: 'customer-mcp' })
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+  it('un reintento conserva el SKU generado aunque transcurra tiempo', async () => {
+    mockCreate.mockResolvedValue({ id: 'rm1', name: 'Harina', sku: 'HARINA-XX' })
+    const now = jest.spyOn(Date, 'now').mockReturnValue(101000)
+    await call(ok)
+    now.mockReturnValue(201000)
+    await call(ok)
+    expect(mockCreate.mock.calls[0][1].sku).toBe(mockCreate.mock.calls[1][1].sku)
+  })
+  it('identifica un insumo existente con el mismo nombre antes de crear otro', async () => {
+    mockFind.mockResolvedValue({
+      id: 'existing',
+      name: 'Harina',
+      sku: 'LEGACY',
+      unit: 'KILOGRAM',
+      currentStock: 82,
+      active: true,
+      deletedAt: null,
+    })
+    expect(parse(await call(ok))).toMatchObject({ ok: false, existingRawMaterial: { id: 'existing', sku: 'LEGACY', currentStock: 82 } })
+    expect(mockCreate).not.toHaveBeenCalled()
   })
 })

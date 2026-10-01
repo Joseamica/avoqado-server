@@ -15,10 +15,11 @@ import {
   storesAsNonzeroRecipeQuantityV1,
 } from '@/services/dashboard/recipe-cost-calculator'
 import { areUnitsCompatible } from '@/utils/unitConversion'
+import { recipeInventoryFingerprint, setProductInventoryMethod } from '@/services/dashboard/productInventoryIntegration.service'
 
 /** Never return an unbounded pantry to the model — a large venue would blow the context. */
-const RAW_MATERIAL_PAGE_CAP = 200
-const RAW_MATERIAL_PAGE_DEFAULT = 100
+const RAW_MATERIAL_PAGE_CAP = 100
+const RAW_MATERIAL_PAGE_DEFAULT = 50
 
 /** Enough rows to prove a name is ambiguous without reading the whole pantry. */
 const RESOLUTION_POOL_CAP = 200
@@ -86,7 +87,7 @@ export function registerRecipeTools(server: McpServer, scope: McpScope) {
   async function resolveProductV1(venueId: string, query: string) {
     const candidates = await prisma.product.findMany({
       where: { venueId, active: true, deletedAt: null, OR: nameOrIdFilterV1([query]) },
-      select: { id: true, name: true, sku: true, price: true },
+      select: { id: true, name: true, sku: true, price: true, trackInventory: true, inventoryMethod: true },
       take: RESOLUTION_POOL_CAP,
     })
     const match = pickMatchV1(query, candidates)
@@ -112,43 +113,195 @@ export function registerRecipeTools(server: McpServer, scope: McpScope) {
 
   // ---------------------------------------------------------------------------
   server.tool(
+    'list_product_recipes',
+    'Authoritative recipe coverage and costs for products in ONE venue. manualCost is separate from recipeCostPerPortion: a null manual cost NEVER proves a missing recipe. Shows hasRecipe, recipe cost, tracking state and whether recipe deduction is enabled. Use for menu-wide questions instead of calling get_recipe for every product. Search/filter runs before bounded pagination. Requires inventory:read and PREMIUM (INVENTORY_TRACKING).',
+    {
+      venueId: z.string().min(1),
+      search: z.string().optional(),
+      hasRecipe: z.boolean().optional(),
+      includeInactive: z.boolean().optional(),
+      limit: z.number().int().positive().max(100).optional(),
+      offset: z.number().int().min(0).optional(),
+    },
+    async ({ venueId, search, hasRecipe, includeInactive, limit = 50, offset = 0 }) => {
+      const denied = await gateV1(venueId, 'inventory:read')
+      if (denied) return text(denied)
+      const where = {
+        venueId,
+        deletedAt: null,
+        ...(includeInactive ? {} : { active: true }),
+        ...(search ? { name: { contains: search, mode: 'insensitive' as const } } : {}),
+        ...(hasRecipe === undefined ? {} : { recipe: hasRecipe ? { isNot: null } : { is: null } }),
+      }
+      const [total, rows] = await Promise.all([
+        prisma.product.count({ where }),
+        prisma.product.findMany({
+          where,
+          take: limit,
+          skip: offset,
+          orderBy: [{ name: 'asc' }, { id: 'asc' }],
+          select: {
+            id: true,
+            name: true,
+            sku: true,
+            price: true,
+            cost: true,
+            active: true,
+            trackInventory: true,
+            inventoryMethod: true,
+            recipe: { select: { id: true, totalCost: true, portionYield: true, _count: { select: { lines: true } } } },
+          },
+        }),
+      ])
+      const hasMore = offset + rows.length < total
+      return text({
+        ok: true,
+        venueId,
+        total,
+        count: rows.length,
+        limit,
+        offset,
+        hasMore,
+        nextOffset: hasMore ? offset + rows.length : null,
+        products: rows.map(p => ({
+          id: p.id,
+          name: p.name,
+          sku: p.sku,
+          active: p.active,
+          price: num(p.price),
+          manualCost: p.cost == null ? null : num(p.cost),
+          hasRecipe: !!p.recipe,
+          recipeId: p.recipe?.id ?? null,
+          recipeCostPerPortion: p.recipe ? num(p.recipe.totalCost) : null,
+          portionYield: p.recipe?.portionYield ?? null,
+          ingredientCount: p.recipe?._count.lines ?? 0,
+          inventoryTrackingEnabled: p.trackInventory,
+          inventoryMethod: p.inventoryMethod,
+          recipeDeductionEnabled: !!p.recipe && p.trackInventory && (p.inventoryMethod === 'RECIPE' || p.inventoryMethod === null),
+        })),
+      })
+    },
+  )
+
+  server.tool(
+    'enable_recipe_inventory',
+    'Enable automatic ingredient deduction for ONE product with an existing recipe. Creating a recipe alone does NOT activate inventory tracking. Obtain the exact productId using list_product_recipes. Preview shows the current method and the change to RECIPE; explicitly confirm it with the operator. This changes future fully paid sales, never historical sales or current stock. Requires inventory:update, mcp:write and PREMIUM (INVENTORY_TRACKING).',
+    {
+      venueId: z.string().min(1),
+      productId: z.string().min(1),
+      expectedSourceFingerprint: z.string().optional(),
+      confirm: z.boolean().optional(),
+    },
+    async ({ venueId, productId, expectedSourceFingerprint, confirm }) => {
+      const denied = await gateV1(venueId, 'inventory:update')
+      if (denied) return text(denied)
+      const p = await prisma.product.findFirst({
+        where: { id: productId, venueId, active: true, deletedAt: null },
+        select: {
+          id: true,
+          name: true,
+          updatedAt: true,
+          trackInventory: true,
+          inventoryMethod: true,
+          recipe: { select: { id: true, updatedAt: true, _count: { select: { lines: true } } } },
+        },
+      })
+      if (!p?.recipe || !p.recipe._count.lines)
+        return text({
+          ok: false,
+          needsInput: true,
+          error: 'Selecciona un producto de esta sucursal con una receta que tenga ingredientes. Usa list_product_recipes y get_recipe.',
+        })
+      if (p.trackInventory && (p.inventoryMethod === 'RECIPE' || p.inventoryMethod === null))
+        return text({
+          ok: true,
+          venueId,
+          productId,
+          changed: false,
+          recipeDeductionEnabled: true,
+          message: 'El descuento por receta ya está activo.',
+        })
+      if (!confirm)
+        return text({
+          ok: true,
+          requiresConfirmation: true,
+          expectedSourceFingerprint: recipeInventoryFingerprint(p),
+          change: {
+            productId,
+            product: p.name,
+            from: { trackInventory: p.trackInventory, inventoryMethod: p.inventoryMethod },
+            to: { trackInventory: true, inventoryMethod: 'RECIPE' },
+          },
+          message: `En esta sucursal, activar el descuento por receta de "${p.name}" para ventas futuras pagadas. No modifica ventas anteriores ni existencias actuales. Confirma este cambio de método.`,
+        })
+      if (!expectedSourceFingerprint) return text({ ok: false, needsInput: true, error: 'Solicita una nueva vista previa.' })
+      const result = await setProductInventoryMethod(venueId, productId, 'RECIPE', {
+        staffId: scope.staffId,
+        source: 'customer-mcp',
+        expectedSourceFingerprint,
+      })
+      return text({
+        ok: result.success,
+        venueId,
+        productId,
+        inventoryMethod: result.inventoryMethod,
+        recipeDeductionEnabled: true,
+        changed: true,
+      })
+    },
+  )
+
+  server.tool(
     'list_raw_materials',
     'The PANTRY of a venue you can access: every active raw material / ingredient with the UNIT it is stored in, its stock and its cost per unit. Read this BEFORE writing a recipe — create_recipe resolves ingredients by name and refuses anything it cannot match to exactly one row, so this is how you learn the real names and units. Answers "¿qué insumos tengo?", "¿en qué unidad está el aguacate?". Pass venueId; optional `search` filters by name. Requires inventory:read. PREMIUM (INVENTORY_TRACKING).',
     {
       venueId: z.string().describe('Venue whose pantry to list (must be in your scope)'),
       search: z.string().optional().describe('Filter by ingredient name (partial, case-insensitive)'),
+      includeInactive: z.boolean().optional().describe('Include inactive ingredients when checking for existing records'),
       limit: z
         .number()
         .int()
         .positive()
-        .max(RAW_MATERIAL_PAGE_CAP)
+        .max(200) // Accept the previous contract; enforce the smaller page below.
         .optional()
         .describe(`Max ingredients to return (default ${RAW_MATERIAL_PAGE_DEFAULT})`),
+      offset: z.number().int().min(0).optional().describe('Continue with nextOffset from the previous page'),
     },
-    async ({ venueId, search, limit }) => {
+    async ({ venueId, search, includeInactive, limit, offset = 0 }) => {
       const denied = await gateV1(venueId, 'inventory:read')
       if (denied) return text(denied)
 
       const take = Math.min(limit ?? RAW_MATERIAL_PAGE_DEFAULT, RAW_MATERIAL_PAGE_CAP)
-      const rows = await prisma.rawMaterial.findMany({
-        where: {
-          venueId,
-          active: true,
-          deletedAt: null,
-          ...(search ? { name: { contains: search, mode: 'insensitive' as const } } : {}),
-        },
-        select: { id: true, name: true, sku: true, category: true, unit: true, currentStock: true, costPerUnit: true },
-        orderBy: { name: 'asc' },
-        take,
-      })
+      const where = {
+        venueId,
+        ...(includeInactive ? {} : { active: true }),
+        deletedAt: null,
+        ...(search ? { name: { contains: search, mode: 'insensitive' as const } } : {}),
+      }
+      const [total, rows] = await Promise.all([
+        prisma.rawMaterial.count({ where }),
+        prisma.rawMaterial.findMany({
+          where,
+          select: { id: true, name: true, sku: true, category: true, unit: true, currentStock: true, costPerUnit: true, active: true },
+          orderBy: [{ name: 'asc' }, { id: 'asc' }],
+          take,
+          skip: offset,
+        }),
+      ])
+      const hasMore = offset + rows.length < total
 
       return text({
         ok: true,
         venueId,
-        total: rows.length,
+        total,
+        count: rows.length,
+        limit: take,
+        offset,
+        hasMore,
+        nextOffset: hasMore ? offset + rows.length : null,
         // WHY: a page cap that truncates in silence is how an operator concludes an ingredient
         // "doesn't exist" and creates a duplicate. Say it, and say how to narrow the search.
-        ...(rows.length === take ? { aviso: `Se muestran los primeros ${take} insumos. Usa "search" para acotar.` } : {}),
+        ...(hasMore ? { aviso: `Hay más insumos. Continúa con nextOffset o usa "search" para acotar.` } : {}),
         insumos: rows.map(row => ({
           id: row.id,
           nombre: row.name,
@@ -157,6 +310,7 @@ export function registerRecipeTools(server: McpServer, scope: McpScope) {
           unidad: row.unit,
           existencia: num(row.currentStock),
           costoPorUnidad: num(row.costPerUnit),
+          activo: row.active,
         })),
       })
     },
@@ -165,7 +319,7 @@ export function registerRecipeTools(server: McpServer, scope: McpScope) {
   // ---------------------------------------------------------------------------
   server.tool(
     'get_recipe',
-    'The RECIPE of one menu product in a venue you can access: which ingredients it consumes, how much of each, the cost per portion and how many portions it yields. This is what makes a sale deduct stock. Name the product (or pass its id). Answers "¿qué lleva el Avo Toast?", "¿cuánto me cuesta cada porción?". Requires inventory:read. PREMIUM (INVENTORY_TRACKING).',
+    'The RECIPE and tracking state of one product: ingredients, quantities, cost per portion and yield. A recipe alone does NOT enable stock deduction; recipeDeductionEnabled reports whether tracking is active. Name the product or use its id. Use list_product_recipes for menu-wide coverage. Requires inventory:read. PREMIUM (INVENTORY_TRACKING).',
     {
       venueId: z.string().describe('Venue the product belongs to (must be in your scope)'),
       product: z.string().min(1).describe('Product name (or id), e.g. "Avo Toast"'),
@@ -188,6 +342,17 @@ export function registerRecipeTools(server: McpServer, scope: McpScope) {
 
       return text({
         ok: true,
+        venueId,
+        inventoryTrackingEnabled: recipe.product.trackInventory,
+        inventoryMethod: recipe.product.inventoryMethod,
+        recipeDeductionEnabled:
+          recipe.product.trackInventory && (recipe.product.inventoryMethod === 'RECIPE' || recipe.product.inventoryMethod === null),
+        ...(!recipe.product.trackInventory || recipe.product.inventoryMethod === 'QUANTITY'
+          ? {
+              aviso:
+                'La receta existe, pero el descuento por receta no está activo. Usa enable_recipe_inventory con confirmación para activarlo.',
+            }
+          : {}),
         receta: {
           producto: recipe.product.name,
           productoId: recipe.product.id,
@@ -213,7 +378,7 @@ export function registerRecipeTools(server: McpServer, scope: McpScope) {
   // ---------------------------------------------------------------------------
   server.tool(
     'create_recipe',
-    'Create the RECIPE of a menu product in a venue you can access: which ingredients it consumes and how much of each. This is what makes every future sale of that product deduct stock and carry a cost, so read the pantry with list_raw_materials FIRST and use the real ingredient names and units. Ingredients are resolved by name and it is ALL OR NOTHING — if one name matches zero or several ingredients, NOTHING is created and you get the candidates back. By DEFAULT this only PREVIEWS (which ingredient each name resolved to, the unit it is stored in, and the resulting cost per portion); call again with confirm:true to actually create it. Editing or deleting a recipe is done in the dashboard. This WRITES — requires inventory:create. PREMIUM (INVENTORY_TRACKING).',
+    'Create the RECIPE of a menu product in a venue you can access: which ingredients it consumes and how much of each. A recipe defines its cost and ingredients, but automatic deduction ALSO requires product inventory tracking in RECIPE mode; creating this recipe does NOT activate tracking. Read the pantry with list_raw_materials FIRST and use the real ingredient names and units. Ingredients are resolved by name and it is ALL OR NOTHING — if one name matches zero or several ingredients, NOTHING is created and you get the candidates back. By DEFAULT this only PREVIEWS (which ingredient each name resolved to, the unit it is stored in, and the resulting cost per portion); call again with confirm:true to actually create it. Editing or deleting a recipe is done in the dashboard. This WRITES — requires inventory:create. PREMIUM (INVENTORY_TRACKING).',
     {
       venueId: z.string().describe('Venue the product belongs to (must be in your scope)'),
       product: z.string().min(1).describe('Product the recipe is for — its name (or id), e.g. "Avo Toast"'),
@@ -387,7 +552,9 @@ export function registerRecipeTools(server: McpServer, scope: McpScope) {
           requiresConfirmation: true,
           mensaje: `Así quedaría la receta de "${receta.producto}": ${receta.ingredientes
             .map(i => `${i.cantidad} ${i.unidad} de ${i.insumo}`)
-            .join(', ')}. Costo por porción $${receta.costoPorPorcion}. Vuelve a llamar con confirm:true para crearla.`,
+            .join(
+              ', ',
+            )}. Costo por porción $${receta.costoPorPorcion}. Vuelve a llamar con confirm:true para crearla. Crear la receta no activa el inventario; verifica get_recipe y usa enable_recipe_inventory con otra confirmación si hace falta.`,
           receta,
         })
       }
@@ -417,6 +584,9 @@ export function registerRecipeTools(server: McpServer, scope: McpScope) {
           ok: true,
           mensaje: `Receta de "${receta.producto}" creada. Costo por porción $${num(created.totalCost)}.`,
           receta: { ...receta, id: created.id, costoPorPorcion: num(created.totalCost) },
+          inventoryTrackingChanged: false,
+          nextStep:
+            'Verifica el estado con get_recipe. Si el descuento por receta está apagado, usa enable_recipe_inventory con confirmación explícita.',
         })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })

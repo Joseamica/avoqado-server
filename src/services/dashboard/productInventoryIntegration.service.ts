@@ -6,6 +6,8 @@ import prisma from '../../utils/prismaClient'
 import { deductStockForModifiers, deductStockForRecipe, OrderModifierForInventory } from './rawMaterial.service'
 import { logAction } from './activity-log.service'
 import { ensureQuantityInventoryRow } from './quantityInventoryRow'
+import { operationHash } from '@/utils/operationHash'
+import { acquireRecipeCostGraphVenueLockV1, lockRecipeCostProductForUpdateV1 } from './recipe-cost-graph-lock'
 
 /**
  * Product Inventory Integration Service
@@ -596,7 +598,22 @@ export async function shouldProductUseInventory(venueId: string) {
  * Set inventory method for a product
  * ✅ WORLD-CLASS: Updates dedicated column (not JSON!)
  */
-export async function setProductInventoryMethod(venueId: string, productId: string, inventoryMethod: InventoryMethod) {
+/** The confirmation binds both the product settings and the recipe version. */
+export function recipeInventoryFingerprint(product: { id: string; updatedAt: Date; recipe: { id: string; updatedAt: Date } | null }) {
+  return operationHash({
+    productId: product.id,
+    updatedAt: product.updatedAt.toISOString(),
+    recipeId: product.recipe?.id,
+    recipeUpdatedAt: product.recipe?.updatedAt.toISOString(),
+  })
+}
+
+export async function setProductInventoryMethod(
+  venueId: string,
+  productId: string,
+  inventoryMethod: InventoryMethod,
+  actor?: { staffId?: string; source?: string; expectedSourceFingerprint?: string },
+) {
   // 🔴 Por negocio: el permiso se autorizó en `venueId`; un producto de otro negocio no existe.
   const product = await prisma.product.findUnique({
     where: { id: productId, venueId },
@@ -608,8 +625,20 @@ export async function setProductInventoryMethod(venueId: string, productId: stri
 
   // ✅ Write to dedicated column (world-class pattern)
   await prisma.$transaction(async tx => {
+    if (actor?.expectedSourceFingerprint) {
+      await acquireRecipeCostGraphVenueLockV1(tx, venueId)
+      await lockRecipeCostProductForUpdateV1(tx, venueId, productId)
+      const live = await tx.product.findFirst({
+        where: { id: productId, venueId, active: true, deletedAt: null },
+        include: { recipe: { include: { _count: { select: { lines: true } } } } },
+      })
+      if (!live || !live.recipe || !live.recipe._count.lines)
+        throw new AppError('El producto necesita una receta con ingredientes antes de activar el descuento.', 409)
+      if (recipeInventoryFingerprint(live) !== actor.expectedSourceFingerprint)
+        throw new AppError('El producto o la receta cambió. Solicita una nueva vista previa antes de activar el inventario.', 409)
+    }
     const updated = await tx.product.update({
-      where: { id: productId },
+      where: { id: productId, venueId },
       data: {
         trackInventory: true, // Enable tracking
         inventoryMethod, // Set method (QUANTITY | RECIPE)
@@ -621,10 +650,11 @@ export async function setProductInventoryMethod(venueId: string, productId: stri
 
   logAction({
     venueId: product.venueId,
+    staffId: actor?.staffId,
     action: 'PRODUCT_INVENTORY_METHOD_SET',
     entity: 'Product',
     entityId: productId,
-    data: { inventoryMethod },
+    data: { inventoryMethod, ...(actor?.source ? { source: actor.source } : {}) },
   })
 
   return {

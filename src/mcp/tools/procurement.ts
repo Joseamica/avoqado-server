@@ -4,7 +4,9 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { planGateMessage } from '../planGate'
-import { getSuppliers } from '@/services/dashboard/supplier.service'
+import { createSupplier, getSuppliersPage } from '@/services/dashboard/supplier.service'
+import prisma from '@/utils/prismaClient'
+import { CreateSupplierSchema } from '@/schemas/dashboard/inventory.schema'
 import { getPurchaseOrders, getPurchaseOrder } from '@/services/dashboard/purchaseOrder.service'
 import { PurchaseOrderStatus } from '@prisma/client'
 
@@ -40,21 +42,31 @@ export function registerProcurementTools(server: McpServer, scope: McpScope) {
       search: z.string().optional().describe('Filter by name / contact / email (partial, case-insensitive)'),
       includeInactive: z.boolean().optional().describe('Also include inactive suppliers (default: only active)'),
       limit: z.number().int().positive().max(100).optional().describe('Max suppliers to return (default 50)'),
+      offset: z.number().int().min(0).optional().describe('Continue using nextOffset from the previous page'),
     },
-    async ({ venueId, search, includeInactive, limit }) => {
+    async ({ venueId, search, includeInactive, limit = 50, offset = 0 }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('inventory:read', venueId) // WHY: mirror the dashboard's inventory:read gate — supplier PII + PO line prices aren't free-for-all
       const gate = await planGateMessage(venueId, ...INVENTORY_GATE) // PREMIUM tier — mirrors inventory reads
       if (gate) return text({ ok: false, planRequired: true, error: gate })
 
-      const suppliers = await getSuppliers(venueId, {
-        ...(includeInactive ? {} : { active: true }),
-        ...(search ? { search } : {}),
-      })
-      const rows = suppliers.slice(0, limit ?? 50)
+      const { rows, total } = await getSuppliersPage(
+        venueId,
+        {
+          ...(includeInactive ? {} : { active: true }),
+          ...(search ? { search } : {}),
+        },
+        { limit, offset },
+      )
+      const hasMore = offset + rows.length < total
       return text({
         venueId,
         count: rows.length,
+        total,
+        limit,
+        offset,
+        hasMore,
+        nextOffset: hasMore ? offset + rows.length : null,
         suppliers: rows.map(s => ({
           id: s.id,
           name: s.name,
@@ -66,6 +78,55 @@ export function registerProcurementTools(server: McpServer, scope: McpScope) {
           minimumOrder: num(s.minimumOrder), // pesos
           active: s.active,
         })),
+      })
+    },
+  )
+
+  server.tool(
+    'create_supplier',
+    'Create ONE supplier in the selected venue. First search list_suppliers to avoid duplicates. Require its actual name; ask for any contact or delivery details needed instead of inventing them. Preview by default, then use the returned confirmation arguments and token after approval. An existing name (including inactive suppliers) is refused with its id. After a timeout search by name before retrying. Requires inventory:create, mcp:write and PREMIUM (INVENTORY_TRACKING).',
+    {
+      venueId: z.string().min(1),
+      name: z.string().trim().min(1, 'El nombre es requerido').max(200),
+      contactName: z.string().max(200).optional(),
+      email: z.string().email('El correo no es válido').optional(),
+      phone: z.string().max(50).optional(),
+      leadTimeDays: z.number().int().positive().max(365).optional(),
+      notes: z.string().max(2000).optional(),
+      confirm: z.boolean().optional(),
+    },
+    async ({ venueId, confirm, ...fields }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('inventory:create', venueId)
+      const gate = await planGateMessage(venueId, ...INVENTORY_GATE)
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+      const existing = await prisma.supplier.findFirst({
+        where: { venueId, name: { equals: fields.name, mode: 'insensitive' } },
+        select: { id: true, name: true, active: true, deletedAt: true },
+      })
+      if (existing)
+        return text({
+          ok: false,
+          needsInput: true,
+          existingSupplier: { id: existing.id, name: existing.name, active: existing.active, archived: existing.deletedAt !== null },
+          error:
+            'Este proveedor ya existe. Verifica si corresponde a lo solicitado; no lo crees de nuevo ni cambies su nombre para duplicarlo.',
+        })
+      const data = CreateSupplierSchema.shape.body.parse(fields)
+      if (!confirm)
+        return text({
+          ok: true,
+          requiresConfirmation: true,
+          venueId,
+          supplier: data,
+          message: `Crear el proveedor "${data.name}" en esta sucursal. Plazo inicial ${data.leadTimeDays} días (valor predeterminado si no se indicó). Confirma los datos mostrados.`,
+        })
+      const created = await createSupplier(venueId, data, { staffId: scope.staffId, source: 'customer-mcp' })
+      return text({
+        ok: true,
+        venueId,
+        supplier: { id: created.id, name: created.name },
+        message: 'Proveedor creado. Conserva su id para verificarlo antes de reintentar.',
       })
     },
   )

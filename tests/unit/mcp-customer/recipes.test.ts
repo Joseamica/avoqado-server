@@ -51,7 +51,7 @@ jest.mock('@/services/dashboard/recipe.service', () => ({
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
-    rawMaterial: { findMany: (...a: unknown[]) => mockRawMaterialFindMany(...(a as [])) },
+    rawMaterial: { count: jest.fn().mockResolvedValue(2), findMany: (...a: unknown[]) => mockRawMaterialFindMany(...(a as [])) },
     product: { findMany: (...a: unknown[]) => mockProductFindMany(...(a as [])) },
   },
 }))
