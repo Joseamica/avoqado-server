@@ -141,6 +141,8 @@ async function readRetained(
 /**
  * Spec §4.5 (option A): a function of a new line that the venue paid in a REPLACED contract moves to today's offer. The
  * quote says so: `from` is what that contract charged in its last paid period, `to` the line's price; equal is no change.
+ * Only one function against itself: a plan or bundle price is never a function's rate (a function that came inside a
+ * plan never had a standalone one), so both the paid line and the new line must cover exactly that one function.
  */
 async function repricedFunctions(venueId: string, subscriptionIds: string[], lines: QuoteLine[]) {
   const periods = await Promise.all(
@@ -155,14 +157,14 @@ async function repricedFunctions(venueId: string, subscriptionIds: string[], lin
   const paid = new Map<string, Prisma.Decimal>()
   for (const period of periods)
     for (const line of Array.isArray(period?.composition) ? (period.composition as Array<{ featureCodes: string[]; amount: string }>) : [])
-      for (const code of line.featureCodes) paid.set(code, new Prisma.Decimal(line.amount))
-  return lines.flatMap(line =>
-    line.featureCodes.flatMap(featureCode => {
-      const from = paid.get(featureCode)
-      const to = new Prisma.Decimal(line.terms.price)
-      return from && !from.eq(to) ? [{ featureCode, from: from.toFixed(2), to: to.toFixed(2) }] : []
-    }),
-  )
+      if (line.featureCodes.length === 1) paid.set(line.featureCodes[0], new Prisma.Decimal(line.amount))
+  return lines.flatMap(line => {
+    if (line.featureCodes.length !== 1) return []
+    const [featureCode] = line.featureCodes
+    const from = paid.get(featureCode)
+    const to = new Prisma.Decimal(line.terms.price)
+    return from && !from.eq(to) ? [{ featureCode, from: from.toFixed(2), to: to.toFixed(2) }] : []
+  })
 }
 
 function assertAudience(

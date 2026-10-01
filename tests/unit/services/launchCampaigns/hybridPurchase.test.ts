@@ -304,4 +304,62 @@ describe('quote.repriced: what a replaced contract charged against today', () =>
     const quote = await createHybridQuote('venue', 'staff', replace)
     expect(quote.quote).not.toHaveProperty('repriced')
   })
+
+  // A function that came inside a plan never had a standalone rate (spec §4.5): only one function against itself compares.
+  describe('a plan price is never presented as a function rate', () => {
+    const planTerms = publication.definition.terms
+    const plan = (planTier: 'PRO' | 'PREMIUM') => compileHybridPublication({ schemaVersion: 1, kind: 'PLAN', planTier, terms: planTerms })
+    const proCodes = plan('PRO').includedFeatureCodes
+    beforeEach(() => {
+      inventory.mockResolvedValue({
+        vivas: [{ subscriptionId: 'sub_hybrid', proyecciones: [{ tipo: 'PLAN', tier: 'PRO', featureCodes: proCodes }] }],
+        detalle: { sub_hybrid: { customerId: 'cus_test', terminaEn: null } },
+        conCambiosProgramados: [],
+      })
+      prismaMock.hybridPaymentPeriod.findFirst.mockResolvedValue({
+        composition: [{ contractId: 'contract_old', itemId: 'si_old', featureCodes: proCodes, priceId: 'price_pro', amount: '1158.84' }],
+      })
+    })
+
+    it('a single-function contract absorbed by a plan line shows no repriced function either', async () => {
+      prismaMock.hybridPaymentPeriod.findFirst.mockResolvedValue({
+        composition: [{ contractId: 'contract_old', itemId: 'si_old', featureCodes: ['LOYALTY_PROGRAM'], priceId: 'p', amount: '599.00' }],
+      })
+      inventory.mockResolvedValue({
+        vivas: [{ subscriptionId: 'sub_hybrid', proyecciones: [{ tipo: 'PAQUETE', featureCodes: ['LOYALTY_PROGRAM'] }] }],
+        detalle: { sub_hybrid: { customerId: 'cus_test', terminaEn: null } },
+        conCambiosProgramados: [],
+      })
+      const pro = plan('PRO')
+      prismaMock.hybridOfferPublication.findMany.mockResolvedValue([
+        { ...loyaltyAt(1158.84), name: 'Pro', definition: pro.definition, includedFeatureCodes: pro.includedFeatureCodes },
+      ])
+      const quote = await createHybridQuote('venue', 'staff', replace)
+      expect(quote.quote).toMatchObject({ replaces: ['sub_hybrid'] })
+      expect(quote.quote).not.toHaveProperty('repriced')
+    })
+
+    it('a hybrid Pro replaced by a Premium line shows no repriced function', async () => {
+      const premium = plan('PREMIUM')
+      prismaMock.hybridOfferPublication.findMany.mockResolvedValue([
+        {
+          ...loyaltyAt(1970.84),
+          name: 'Premium',
+          definition: premium.definition,
+          includedFeatureCodes: premium.includedFeatureCodes,
+        },
+      ])
+      const quote = await createHybridQuote('venue', 'staff', replace)
+      expect(quote.quote).toMatchObject({ replaces: ['sub_hybrid'], droppedFeatureCodes: [] })
+      expect(quote.quote).not.toHaveProperty('repriced')
+    })
+
+    it('a hybrid Pro dropped to Free keeping one function as a list line shows no repriced function', async () => {
+      prismaMock.hybridOfferPublication.findMany.mockResolvedValue([loyaltyAt(699)])
+      const dropFeatureCodes = proCodes.filter(code => code !== 'LOYALTY_PROGRAM' && code !== 'CHATBOT')
+      const quote = await createHybridQuote('venue', 'staff', { ...replace, dropFeatureCodes })
+      expect(quote.quote).toMatchObject({ featureCodes: ['LOYALTY_PROGRAM'], droppedFeatureCodes: dropFeatureCodes })
+      expect(quote.quote).not.toHaveProperty('repriced')
+    })
+  })
 })
